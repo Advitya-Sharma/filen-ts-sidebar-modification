@@ -1,15 +1,36 @@
-import { cpSync, createReadStream, existsSync, readdirSync, rmSync } from "node:fs"
-import { extname, join, resolve, sep } from "node:path"
+import { cpSync, createReadStream, existsSync, readdirSync, realpathSync, rmSync } from "node:fs"
+import { dirname, extname, join, resolve, sep } from "node:path"
 import { createRequire } from "node:module"
+import { fileURLToPath } from "node:url"
 import type { Plugin, ResolvedConfig } from "vite"
 
 const require = createRequire(import.meta.url)
-// NOTE: `@filen/sdk-rs`'s package.json `exports` map does not list "./package.json",
-// so `require.resolve("@filen/sdk-rs/package.json")` throws (verified against the installed
-// package's exports map). Resolve the package root via its "." export (main entry, "./sdk-rs.js")
-// instead — robust to node_modules layout, no import.meta.dirname guessing, and doesn't depend on
-// an unexported subpath.
-const PKG = join(require.resolve("@filen/sdk-rs"), "..")
+// The package is located through its node_modules LINK, whose target is re-read on every use:
+// require.resolve follows pnpm's symlink to the versioned store directory, which outlives a version bump,
+// so a dev server started before `pnpm install` kept serving the old wasm next to the new glue Vite picked
+// up (a LinkError on boot). The "." export is the fallback because the package's `exports` map does not
+// list "./package.json", so `require.resolve("@filen/sdk-rs/package.json")` throws.
+const PKG_LINK = findPackageLink(join(require.resolve("@filen/sdk-rs"), ".."))
+
+// The same lookup Node does from this file: the closest ancestor node_modules holding the package.
+function findPackageLink(resolved: string): string {
+	for (let dir = dirname(fileURLToPath(import.meta.url)); ; dir = dirname(dir)) {
+		const link = join(dir, "node_modules", "@filen", "sdk-rs")
+
+		if (existsSync(link)) {
+			return link
+		}
+
+		if (dirname(dir) === dir) {
+			return resolved
+		}
+	}
+}
+
+function packageRoot(): string {
+	return realpathSync.native(PKG_LINK)
+}
+
 // Deployment contract: the SDK wasm holds a RELATIVE `./filen-sdk-worker-thread.js` (verified via
 // `strings` over sdk-rs_bg.wasm) which it hands to `new Worker(...)`. So the async-runtime thread
 // worker — and its transitive `sdk-rs.js` / `snippets/**` / `sdk-rs_bg.wasm` loads — resolve against
@@ -48,7 +69,7 @@ function artifactRel(urlPath: string): string | null {
 
 	const snippetIdx = urlPath.indexOf("/snippets/")
 	if (snippetIdx !== -1) {
-		return urlPath.slice(snippetIdx + 1) // "snippets/…" relative to PKG
+		return urlPath.slice(snippetIdx + 1) // "snippets/…" relative to the package root
 	}
 	const base = urlPath.slice(urlPath.lastIndexOf("/") + 1)
 	return SDK_ARTIFACTS.includes(base) ? base : null
@@ -70,9 +91,10 @@ export function sdkArtifacts(): Plugin {
 					return
 				}
 				// Containment: the `/snippets/…` branch carries a request-controlled path — never let it
-				// escape PKG via `..` (dev-only traversal hardening).
-				const file = resolve(PKG, rel)
-				if (file !== PKG && !file.startsWith(PKG + sep)) {
+				// escape the package via `..` (dev-only traversal hardening).
+				const pkg = packageRoot()
+				const file = resolve(pkg, rel)
+				if (file !== pkg && !file.startsWith(pkg + sep)) {
 					next()
 					return
 				}
@@ -101,10 +123,11 @@ export function sdkArtifacts(): Plugin {
 
 			// Prod worker resolves against `<assetsDir>` — copy the artifacts + snippets there.
 			const out = join(config.root, config.build.outDir, config.build.assetsDir)
+			const pkg = packageRoot()
 			for (const a of SDK_ARTIFACTS) {
-				cpSync(join(PKG, a), join(out, a))
+				cpSync(join(pkg, a), join(out, a))
 			}
-			cpSync(join(PKG, "snippets"), join(out, "snippets"), { recursive: true })
+			cpSync(join(pkg, "snippets"), join(out, "snippets"), { recursive: true })
 			// Vite also emits a CONTENT-HASHED wasm copy from the glue's dead default-arg branch
 			// (`new URL("sdk-rs_bg.wasm", import.meta.url)`), which the worker's explicit `init({ module_or_path })`
 			// never takes — a byte-identical ~10 MB duplicate that is never fetched. Drop it so exactly one
