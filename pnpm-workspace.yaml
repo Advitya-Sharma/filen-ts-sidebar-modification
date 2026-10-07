@@ -45,6 +45,8 @@ allowBuilds:
   unrs-resolver: true
   electron: true
   electron-winstaller: true
+  # The postinstall only builds llama.cpp from source when no prebuilt binary matches the host.
+  node-llama-cpp: false
   # Keyed by the exact git resolution; update it together with sdk-rs's uniffi-bindgen-react-native ref.
   "uniffi-bindgen-react-native@https://codeload.github.com/Enduriel/uniffi-bindgen-react-native/tar.gz/e0282ad3eb972eaea74225dcc06247b7a67204dd": true
 patchedDependencies:

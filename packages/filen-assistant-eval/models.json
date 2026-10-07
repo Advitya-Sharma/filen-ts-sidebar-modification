@@ -1,0 +1,148 @@
+{
+	"models": [
+		{
+			"id": "qwen3.5-0.8b",
+			"label": "Qwen3.5-0.8B",
+			"enabled": true,
+			"file": "Qwen3.5-0.8B-Q4_K_M.gguf",
+			"url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q4_K_M.gguf",
+			"sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+			"sizeBytes": 532517120,
+			"source": {
+				"repo": "unsloth/Qwen3.5-0.8B-GGUF",
+				"revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0"
+			},
+			"baseModel": {
+				"repo": "Qwen/Qwen3.5-0.8B",
+				"revision": "2fc06364715b967f1860aea9cf38778875588b17"
+			},
+			"license": {
+				"name": "Apache-2.0",
+				"url": "https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/2fc06364715b967f1860aea9cf38778875588b17/LICENSE",
+				"shippable": true
+			},
+			"chatWrapper": "qwen3.5"
+		},
+		{
+			"id": "qwen3.5-2b",
+			"label": "Qwen3.5-2B",
+			"enabled": true,
+			"file": "Qwen3.5-2B-Q4_K_M.gguf",
+			"url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
+			"sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+			"sizeBytes": 1280835840,
+			"source": {
+				"repo": "unsloth/Qwen3.5-2B-GGUF",
+				"revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae"
+			},
+			"baseModel": {
+				"repo": "Qwen/Qwen3.5-2B",
+				"revision": "15852e8c16360a2fea060d615a32b45270f8a8fc"
+			},
+			"license": {
+				"name": "Apache-2.0",
+				"url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/LICENSE",
+				"shippable": true
+			},
+			"chatWrapper": "qwen3.5"
+		},
+		{
+			"id": "qwen3.5-4b",
+			"label": "Qwen3.5-4B",
+			"enabled": true,
+			"file": "Qwen3.5-4B-Q4_K_M.gguf",
+			"url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
+			"sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+			"sizeBytes": 2740937888,
+			"source": {
+				"repo": "unsloth/Qwen3.5-4B-GGUF",
+				"revision": "e87f176479d0855a907a41277aca2f8ee7a09523"
+			},
+			"baseModel": {
+				"repo": "Qwen/Qwen3.5-4B",
+				"revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+			},
+			"license": {
+				"name": "Apache-2.0",
+				"url": "https://huggingface.co/Qwen/Qwen3.5-4B/blob/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/LICENSE",
+				"shippable": true
+			},
+			"chatWrapper": "qwen3.5"
+		},
+		{
+			"id": "lfm2.5-1.2b",
+			"label": "LFM2.5-1.2B-Instruct",
+			"enabled": true,
+			"file": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+			"url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/8ed288026e23958ad9dfa92d53ed773a8eee7125/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+			"sha256": "b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5",
+			"sizeBytes": 730895168,
+			"source": {
+				"repo": "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
+				"revision": "8ed288026e23958ad9dfa92d53ed773a8eee7125"
+			},
+			"baseModel": {
+				"repo": "LiquidAI/LFM2.5-1.2B-Instruct",
+				"revision": "0f604ada3f766f9f257460c4c9f0b5d6f69d431b"
+			},
+			"license": {
+				"name": "LFM Open License v1.0",
+				"url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/blob/8ed288026e23958ad9dfa92d53ed773a8eee7125/LICENSE",
+				"shippable": false
+			},
+			"chatWrapper": "lfm2",
+			"note": "Not shippable: commercial use ends at USD 10M annual revenue. Comparison point only."
+		},
+		{
+			"id": "granite-4.1-3b",
+			"label": "Granite 4.1 3B",
+			"enabled": true,
+			"file": "granite-4.1-3b-Q4_K_M.gguf",
+			"url": "https://huggingface.co/ibm-granite/granite-4.1-3b-GGUF/resolve/ab4701481089b58a082ef63cc1cee738887293ff/granite-4.1-3b-Q4_K_M.gguf",
+			"sha256": "662b0626cd58f443baea23559b469df6576a81d349649c59413b36a9fb32eb29",
+			"sizeBytes": 2099501664,
+			"source": {
+				"repo": "ibm-granite/granite-4.1-3b-GGUF",
+				"revision": "ab4701481089b58a082ef63cc1cee738887293ff"
+			},
+			"baseModel": {
+				"repo": "ibm-granite/granite-4.1-3b",
+				"revision": "c0650403e44e78ec0262dab1c90914c65b196c4e"
+			},
+			"license": {
+				"name": "Apache-2.0",
+				"url": "https://huggingface.co/ibm-granite/granite-4.1-3b/blob/c0650403e44e78ec0262dab1c90914c65b196c4e/README.md",
+				"shippable": true
+			},
+			"chatWrapper": "auto",
+			"note": "No LICENSE file in either repo; Apache-2.0 per the publisher's model card (metadata and License line)."
+		},
+		{
+			"id": "granite-4.0-1b",
+			"label": "Granite 4.0 1B",
+			"enabled": false,
+			"file": "granite-4.0-1b-Q4_K_M.gguf",
+			"url": "https://huggingface.co/ibm-granite/granite-4.0-1b-GGUF/resolve/b27c2fe3f211b7f44e80fa620177aea371099aaa/granite-4.0-1b-Q4_K_M.gguf",
+			"sha256": "22ec0f9cc99a90185312de3c882c84e7bd6789bdd050389844380a01a831d7f1",
+			"sizeBytes": 1023645440,
+			"source": {
+				"repo": "ibm-granite/granite-4.0-1b-GGUF",
+				"revision": "b27c2fe3f211b7f44e80fa620177aea371099aaa"
+			},
+			"baseModel": {
+				"repo": "ibm-granite/granite-4.0-1b",
+				"revision": "6a7381ba1f54d684ff508d991aeb7dc580157103"
+			},
+			"license": {
+				"name": "Apache-2.0",
+				"url": "https://huggingface.co/ibm-granite/granite-4.0-1b/blob/6a7381ba1f54d684ff508d991aeb7dc580157103/README.md",
+				"shippable": true
+			},
+			"chatWrapper": "auto",
+			"contextOptions": {
+				"batchSize": 8
+			},
+			"note": "Disabled by default: this llama.cpp build's Metal backend emits garbage for batches above 8 tokens on this model; batchSize 8 works but makes prefill timings incomparable."
+		}
+	]
+}

@@ -1,0 +1,33 @@
+{
+	"name": "@filen/assistant-eval",
+	"version": "0.0.1",
+	"description": "Measures how well small local models call the Filen assistant tools",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"eval": "tsx src/cli.ts",
+		"typecheck": "tsc -p tsconfig.json",
+		"test": "vitest run",
+		"lint": "eslint src/ && prettier --check \"src/**/*.ts\" \"models.json\""
+	},
+	"engines": {
+		"node": ">=24"
+	},
+	"license": "AGPLv3",
+	"dependencies": {
+		"@filen/shared": "workspace:*",
+		"franc-min": "6.2.0",
+		"node-llama-cpp": "3.22.1",
+		"zod": "4.5.4"
+	},
+	"devDependencies": {
+		"@eslint/js": "^9.39.3",
+		"@types/node": "^24.0.0",
+		"eslint": "^9.39.3",
+		"prettier": "^3.9.6",
+		"tsx": "4.23.13",
+		"typescript": "~6.0.3",
+		"typescript-eslint": "^8.56.1",
+		"vitest": "^4.1.11"
+	}
+}

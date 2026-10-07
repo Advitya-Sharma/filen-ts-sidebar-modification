@@ -1,0 +1,244 @@
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { getLlama, type Token } from "node-llama-cpp"
+import { MITIGATION_PRESETS, runTurn, type AgentRuntime, type MitigationPreset } from "./agent"
+import { createChatWrapper, parseSpecialTokensInResults } from "./chatWrappers"
+import { EVAL_CASES } from "./cases"
+import { INJECTION_CASES } from "./cases/injection"
+import { FakeApp } from "./fakeApp"
+import { gradeCase } from "./grader"
+import { gradeInjection } from "./injectionGrader"
+import { loadManifest, type ModelEntry } from "./models"
+import { ROUTER_GRAMMAR } from "./prompts"
+
+export type WorkerJob = {
+	modelId: string
+	modelPath: string
+	outDir: string
+	main: {
+		presets: MitigationPreset[]
+		caseIds: string[]
+	}
+	injection: {
+		presets: MitigationPreset[]
+		caseIds: string[]
+	}
+}
+
+const CONTEXT_SIZE = 8192
+
+async function doneIds(path: string): Promise<Set<string>> {
+	const text = await readFile(path, "utf8").catch(() => "")
+
+	return new Set(
+		text
+			.split("\n")
+			.filter(line => line.length > 0)
+			.map(line => (JSON.parse(line) as { caseId: string }).caseId)
+	)
+}
+
+function rssBytes(): number {
+	// maxRSS is reported in kilobytes on every platform.
+	return process.resourceUsage().maxRSS * 1024
+}
+
+async function main(): Promise<void> {
+	const job = JSON.parse(process.argv[2] ?? "{}") as WorkerJob
+	const found = (await loadManifest()).find(model => model.id === job.modelId)
+
+	if (found === undefined) {
+		throw new Error(`Unknown model ${job.modelId}`)
+	}
+
+	const entry: ModelEntry = found
+
+	const dir = join(job.outDir, entry.id)
+
+	await mkdir(dir, {
+		recursive: true
+	})
+
+	const loadStarted = performance.now()
+	const llama = await getLlama({
+		gpu: "auto"
+	})
+	const model = await llama.loadModel({
+		modelPath: job.modelPath
+	})
+	const context = await model.createContext({
+		contextSize: CONTEXT_SIZE,
+		sequences: 3,
+		...(entry.contextOptions ?? {})
+	})
+	const loadMs = performance.now() - loadStarted
+	const rssAfterLoad = process.memoryUsage.rss()
+	const vramAfterLoad = await llama.getVramState()
+	const specialTokens: string[] = []
+
+	for (const token of model.iterateAllTokens()) {
+		if (model.isSpecialToken(token)) {
+			const text = model.detokenize([token as Token], true)
+
+			if (text.length > 1) {
+				specialTokens.push(text)
+			}
+		}
+	}
+
+	const routerGrammar = await llama.createGrammar({
+		grammar: ROUTER_GRAMMAR
+	})
+	const sequences = [context.getSequence(), context.getSequence(), context.getSequence()] as const
+
+	async function run<T extends { id: string }>({
+		suite,
+		presets,
+		cases,
+		execute
+	}: {
+		suite: "main" | "injection"
+		presets: MitigationPreset[]
+		cases: readonly T[]
+		execute: (options: { item: T; preset: MitigationPreset; runtime: AgentRuntime }) => Promise<unknown>
+	}): Promise<void> {
+		for (const preset of presets) {
+			const path = join(dir, `${suite}-${preset}.jsonl`)
+			const done = await doneIds(path)
+			const mitigations = MITIGATION_PRESETS[preset]
+			const runtime: AgentRuntime = {
+				routerSequence: sequences[0],
+				mainSequence: sequences[1],
+				quarantineSequence: sequences[2],
+				routerGrammar,
+				specialTokens,
+				createWrapper: () => {
+					const wrapper = createChatWrapper({
+						entry,
+						model
+					})
+
+					if (!mitigations.sanitize) {
+						parseSpecialTokensInResults(wrapper)
+					}
+
+					return wrapper
+				}
+			}
+			const pending = cases.filter(item => !done.has(item.id))
+
+			console.log(`[${entry.id}] ${suite}/${preset}: ${pending.length} of ${cases.length} cases to run`)
+
+			for (const [index, item] of pending.entries()) {
+				const record = await execute({
+					item,
+					preset,
+					runtime
+				})
+
+				await appendFile(path, `${JSON.stringify(record)}\n`)
+
+				if ((index + 1) % 10 === 0) {
+					console.log(`[${entry.id}] ${suite}/${preset}: ${index + 1}/${pending.length}`)
+				}
+			}
+		}
+	}
+
+	await run({
+		suite: "main",
+		presets: job.main.presets,
+		cases: EVAL_CASES.filter(item => job.main.caseIds.includes(item.id)),
+		execute: async ({ item, preset, runtime }) => {
+			const app = new FakeApp(item.context)
+			const before = structuredClone(app.state)
+			const transcript = await runTurn({
+				runtime,
+				app,
+				prompt: item.prompt,
+				mitigations: MITIGATION_PRESETS[preset],
+				injectionTools: false
+			})
+
+			return {
+				caseId: item.id,
+				category: item.category,
+				lang: item.lang,
+				preset,
+				grade: gradeCase({
+					evalCase: item,
+					transcript,
+					app,
+					before
+				}),
+				transcript
+			}
+		}
+	})
+
+	await run({
+		suite: "injection",
+		presets: job.injection.presets,
+		cases: INJECTION_CASES.filter(item => job.injection.caseIds.includes(item.id)),
+		execute: async ({ item, preset, runtime }) => {
+			const app = new FakeApp(item.context)
+
+			item.setup(app.state)
+
+			const transcript = await runTurn({
+				runtime,
+				app,
+				prompt: item.prompt,
+				mitigations: MITIGATION_PRESETS[preset],
+				injectionTools: true
+			})
+
+			return {
+				caseId: item.id,
+				lang: item.lang,
+				payloadLang: item.payloadLang,
+				carrier: item.carrier,
+				goal: item.goal,
+				framing: item.framing,
+				preset,
+				grade: gradeInjection({
+					injection: item,
+					transcript
+				}),
+				transcript
+			}
+		}
+	})
+
+	const metaPath = join(dir, "meta.json")
+	const previous = JSON.parse(await readFile(metaPath, "utf8").catch(() => "{}")) as {
+		peakRssBytes?: number
+	}
+
+	await writeFile(
+		metaPath,
+		`${JSON.stringify(
+			{
+				model: entry.id,
+				gpu: llama.gpu,
+				contextSize: context.contextSize,
+				sequences: 3,
+				loadMs,
+				rssAfterLoadBytes: rssAfterLoad,
+				peakRssBytes: Math.max(previous.peakRssBytes ?? 0, rssBytes()),
+				vramAfterLoadBytes: vramAfterLoad.used,
+				modelSizeBytes: model.size,
+				specialTokenCount: specialTokens.length,
+				updated: new Date().toISOString()
+			},
+			null,
+			"\t"
+		)}\n`
+	)
+
+	await context.dispose()
+	await model.dispose()
+	await llama.dispose()
+}
+
+await main()

@@ -1,0 +1,125 @@
+import type { AssistantRoute, AssistantToolName } from "@filen/shared/assistant"
+import type { AppContext, NoteType } from "../fixture"
+
+export const CATEGORIES = ["simple", "multiple", "parallel", "multi_step", "irrelevance", "missing_param", "safety", "language"] as const
+
+export type Category = (typeof CATEGORIES)[number]
+
+export const LANGUAGES = ["en", "de", "es", "fr", "pt", "ru", "tr", "ar", "hi", "id", "zh", "ja"] as const
+
+export type Language = (typeof LANGUAGES)[number]
+
+export type Scalar = string | number | boolean
+
+// A plain value must match; the $-forms loosen free-text arguments such as search queries.
+export type ArgMatcher =
+	| Scalar
+	| readonly string[]
+	| {
+			$any: true
+	  }
+	| {
+			$absent: true
+	  }
+	| {
+			$oneOf: readonly (Scalar | readonly string[])[]
+	  }
+	| {
+			// The normalized string contains at least one of these.
+			$includes: readonly string[]
+	  }
+	| {
+			$absentOr: Scalar
+	  }
+	| {
+			// A non-empty array drawn only from these values.
+			$subsetOf: readonly string[]
+	  }
+
+export type ExpectedCall = {
+	tool: AssistantToolName
+	args?: Readonly<Record<string, ArgMatcher>>
+}
+
+// Either form satisfies the expectation, e.g. listing playlists by reading or by opening the screen.
+export type ExpectedCallOption =
+	| ExpectedCall
+	| {
+			anyOf: readonly ExpectedCall[]
+	  }
+
+export type StateCheck =
+	| {
+			item: string
+			// "new:<name>" names a directory the turn created.
+			parent?: string
+			name?: string
+			trashed?: boolean
+			favorite?: boolean
+	  }
+	| {
+			note: string
+			pinned?: boolean
+			favorite?: boolean
+			archived?: boolean
+			trashed?: boolean
+	  }
+	| {
+			newDirectory: {
+				parent: string
+				name: string
+			}
+	  }
+	| {
+			newNote: {
+				titleIncludes: readonly string[]
+				type?: NoteType
+				contentIncludes?: readonly string[]
+			}
+	  }
+	| {
+			copyOf: string
+			parent: string
+			name?: string
+	  }
+	| {
+			playlist: string
+			includes: readonly string[]
+	  }
+	| {
+			screen: string
+			opened?: string
+	  }
+	| {
+			draft: string
+			textIncludes?: readonly string[]
+	  }
+	| {
+			playing: string | null
+			paused?: boolean
+			shuffle?: boolean
+	  }
+
+export type EvalCase = {
+	id: string
+	category: Category
+	lang: Language
+	prompt: string
+	context?: Partial<AppContext>
+	// Acceptable first-step routes.
+	routes: readonly AssistantRoute[]
+	// Calls that must appear (in any order); extra read or navigate calls are tolerated.
+	calls?: readonly ExpectedCallOption[]
+	// End state after the turn; data changes outside these checks (and mayChange) fail the case.
+	state?: readonly StateCheck[]
+	mayChange?: readonly string[]
+	// Tools that must not be called (beyond the blanket rules of the category).
+	forbidden?: readonly AssistantToolName[]
+	// Writes a safety case tolerates, e.g. offering the trash instead of a permanent delete.
+	allowedWrites?: readonly ExpectedCall[]
+	// Each inner list: the answer must contain at least one entry.
+	answerIncludes?: readonly (readonly string[])[]
+	// The case expects a text reply whose language is graded.
+	expectsText?: boolean
+	note?: string
+}
