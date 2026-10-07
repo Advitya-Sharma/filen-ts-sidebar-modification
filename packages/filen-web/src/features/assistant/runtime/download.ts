@@ -58,6 +58,123 @@ function hashExisting({ file, size, hasher }: { file: ShardFile; size: number; h
 	}
 }
 
+// A response that delivers nothing for this long is abandoned and resumed with a Range request: a stalled
+// HTTP/2 stream, or one a frozen background tab left behind, never errors on its own.
+const STALL_MS = 30_000
+// Stalls in a row with no new bytes before the shard fails.
+const MAX_STALLS = 5
+
+// One request for the rest of the shard from `from`, written and hashed as it arrives. `stalled` reports a
+// response abandoned for silence; everything it delivered is kept for the next attempt to continue from.
+async function fetchRange({
+	shard,
+	url,
+	file,
+	hasher,
+	fetchShard,
+	signal,
+	onBytes,
+	from
+}: {
+	shard: AssistantModelFile
+	url: string
+	file: ShardFile
+	hasher: StreamingHasher
+	fetchShard: (url: string, init: RequestInit) => Promise<Response>
+	signal: AbortSignal
+	onBytes: (bytes: number) => void
+	from: number
+}): Promise<{ size: number; stalled: boolean }> {
+	let size = from
+	const stall = new AbortController()
+	let timer: ReturnType<typeof setTimeout> | undefined
+	const arm = () => {
+		clearTimeout(timer)
+		timer = setTimeout(() => {
+			stall.abort()
+		}, STALL_MS)
+	}
+
+	arm()
+
+	try {
+		const response = await fetchShard(url, {
+			signal: AbortSignal.any([signal, stall.signal]),
+			credentials: "omit",
+			// The shard lands in OPFS; a second copy in the HTTP cache would only take disk.
+			cache: "no-store",
+			...(size > 0 ? { headers: { Range: `bytes=${String(size)}-` } } : {})
+		})
+
+		if (size > 0 && response.status === 200) {
+			// The host ignored the range: start the shard over.
+			onBytes(-size)
+			file.truncate(0)
+			size = 0
+			hasher.init()
+		} else if (response.status !== (size > 0 ? 206 : 200)) {
+			throw new ModelDownloadError("network", `Fetching ${shard.file} answered ${String(response.status)}`)
+		}
+
+		const length = Number(response.headers.get("Content-Length") ?? Number.NaN)
+
+		if (!Number.isNaN(length) && length !== shard.size - size) {
+			throw new ModelDownloadError("network", `${shard.file} has an unexpected length`)
+		}
+
+		if (response.body === null) {
+			throw new ModelDownloadError("network", `${shard.file} has no body`)
+		}
+
+		const reader = response.body.getReader()
+		let unflushed = 0
+
+		try {
+			for (;;) {
+				arm()
+
+				const { done, value } = await reader.read()
+
+				if (done) {
+					break
+				}
+
+				if (size + value.length > shard.size) {
+					throw new ModelDownloadError("integrity", `${shard.file} is longer than published`)
+				}
+
+				file.write(value, { at: size })
+				hasher.update(value)
+				size += value.length
+				unflushed += value.length
+				onBytes(value.length)
+
+				if (unflushed >= FLUSH_EVERY) {
+					file.flush()
+					unflushed = 0
+				}
+			}
+		} finally {
+			reader.releaseLock()
+		}
+
+		return { size, stalled: false }
+	} catch (e) {
+		if (stall.signal.aborted && !signal.aborted) {
+			return { size, stalled: true }
+		}
+
+		if (e instanceof ModelDownloadError || signal.aborted || isQuotaError(e)) {
+			throw e
+		}
+
+		throw new ModelDownloadError("network", `Fetching ${shard.file} failed`)
+	} finally {
+		clearTimeout(timer)
+		file.flush()
+	}
+}
+
 // Downloads one shard into `file` (resuming from its current size), verifying the sha256 over the whole
 // file. Leaves a complete, verified shard, or throws; on a hash mismatch the file is emptied.
 export async function downloadShard({
@@ -89,68 +206,24 @@ export async function downloadShard({
 	hashExisting({ file, size, hasher })
 	onBytes(size)
 
-	if (size < shard.size) {
-		const response = await fetchShard(url, {
-			signal,
-			credentials: "omit",
-			// The shard lands in OPFS; a second copy in the HTTP cache would only take disk.
-			cache: "no-store",
-			...(size > 0 ? { headers: { Range: `bytes=${String(size)}-` } } : {})
-		}).catch((e: unknown) => {
-			throw signal.aborted ? e : new ModelDownloadError("network", `Fetching ${shard.file} failed`)
-		})
+	// Counts stalls in a row that brought nothing; a slow shard that keeps moving is never given up on.
+	let stalls = 0
 
-		if (size > 0 && response.status === 200) {
-			// The host ignored the range: start the shard over.
-			onBytes(-size)
-			file.truncate(0)
-			size = 0
-			hasher.init()
-		} else if (response.status !== (size > 0 ? 206 : 200)) {
-			throw new ModelDownloadError("network", `Fetching ${shard.file} answered ${String(response.status)}`)
+	while (size < shard.size) {
+		const before = size
+		const attempt = await fetchRange({ shard, url, file, hasher, fetchShard, signal, onBytes, from: size })
+
+		size = attempt.size
+
+		if (!attempt.stalled) {
+			break
 		}
 
-		const length = Number(response.headers.get("Content-Length") ?? Number.NaN)
+		stalls = size > before ? 0 : stalls + 1
 
-		if (!Number.isNaN(length) && length !== shard.size - size) {
-			throw new ModelDownloadError("network", `${shard.file} has an unexpected length`)
+		if (stalls >= MAX_STALLS) {
+			throw new ModelDownloadError("network", `${shard.file} stopped arriving`)
 		}
-
-		if (response.body === null) {
-			throw new ModelDownloadError("network", `${shard.file} has no body`)
-		}
-
-		const reader = response.body.getReader()
-		let unflushed = 0
-
-		try {
-			for (;;) {
-				const { done, value } = await reader.read()
-
-				if (done) {
-					break
-				}
-
-				if (size + value.length > shard.size) {
-					throw new ModelDownloadError("integrity", `${shard.file} is longer than published`)
-				}
-
-				file.write(value, { at: size })
-				hasher.update(value)
-				size += value.length
-				unflushed += value.length
-				onBytes(value.length)
-
-				if (unflushed >= FLUSH_EVERY) {
-					file.flush()
-					unflushed = 0
-				}
-			}
-		} finally {
-			reader.releaseLock()
-		}
-
-		file.flush()
 	}
 
 	if (size !== shard.size) {

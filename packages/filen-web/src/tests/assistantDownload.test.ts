@@ -1,5 +1,5 @@
 import { createHash, type Hash } from "node:crypto"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	downloadModelShards,
 	downloadShard,
@@ -207,6 +207,101 @@ describe("downloadShard", () => {
 				onBytes: () => undefined
 			})
 		).rejects.toBeInstanceOf(ModelDownloadError)
+	})
+})
+
+// Answers like a real fetch whose stream errors when its signal aborts: `deliver` decides, per request,
+// how many bytes arrive before the response goes silent (null: the whole rest, then the stream closes).
+function silentHost(bytes: Uint8Array, deliver: (request: number) => number | null) {
+	const ranges: (string | null)[] = []
+	const fetchShard = vi.fn((_url: string, init: RequestInit) => {
+		const range = init.headers === undefined ? null : (new Headers(init.headers).get("Range") ?? null)
+		const start = range === null ? 0 : Number(/bytes=(\d+)-/.exec(range)?.[1] ?? 0)
+		const body = bytes.slice(start)
+		const count = deliver(ranges.length)
+
+		ranges.push(range)
+
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				if (count === null) {
+					controller.enqueue(body)
+					controller.close()
+
+					return
+				}
+
+				if (count > 0) {
+					controller.enqueue(body.slice(0, count))
+				}
+
+				init.signal?.addEventListener("abort", () => {
+					controller.error(new DOMException("aborted", "AbortError"))
+				})
+			}
+		})
+
+		return Promise.resolve(new Response(stream, { status: start > 0 ? 206 : 200, headers: { "Content-Length": String(body.length) } }))
+	})
+
+	return { fetchShard, ranges }
+}
+
+describe("downloadShard when a response goes silent", () => {
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("abandons the silent response and resumes from the bytes it delivered", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+
+		const bytes = content(4500)
+		const file = new MemoryFile()
+		const { fetchShard, ranges } = silentHost(bytes, request => (request === 0 ? 2000 : null))
+		let received = 0
+		const run = downloadShard({
+			shard: describeShard("a.gguf", bytes),
+			url: "https://cdn.example/a.gguf",
+			file,
+			hasher: hasher(),
+			fetchShard,
+			signal: new AbortController().signal,
+			onBytes: bytes => (received += bytes)
+		})
+
+		await vi.advanceTimersByTimeAsync(30_000)
+		await run
+
+		expect(ranges).toEqual([null, "bytes=2000-"])
+		expect(file.bytes).toEqual(bytes)
+		expect(received).toBe(4500)
+	})
+
+	it("fails after five silent responses in a row that brought nothing", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+
+		const bytes = content(4500)
+		const { fetchShard, ranges } = silentHost(bytes, () => 0)
+		const run = downloadShard({
+			shard: describeShard("a.gguf", bytes),
+			url: "https://cdn.example/a.gguf",
+			file: new MemoryFile(),
+			hasher: hasher(),
+			fetchShard,
+			signal: new AbortController().signal,
+			onBytes: () => undefined
+		}).then(
+			() => null,
+			(e: unknown) => e
+		)
+
+		await vi.advanceTimersByTimeAsync(5 * 30_000)
+
+		const error = await run
+
+		expect(error).toBeInstanceOf(ModelDownloadError)
+		expect((error as ModelDownloadError).kind).toBe("network")
+		expect(ranges).toHaveLength(5)
 	})
 })
 
