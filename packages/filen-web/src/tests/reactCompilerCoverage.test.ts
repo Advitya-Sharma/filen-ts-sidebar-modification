@@ -379,11 +379,27 @@ describe("React Compiler coverage", () => {
 		["src/features/chats/components/thread/chatsPlaceholder.tsx", "ChatsPlaceholder"],
 		["src/features/chats/components/thread/composerSuggestions.tsx", "ComposerSuggestions"],
 		["src/features/chats/components/thread/composerModeBanner.tsx", "ComposerModeBanner"],
-		["src/features/chats/components/thread/composerModeBanner.tsx", "ReplyTarget"]
+		["src/features/chats/components/thread/composerModeBanner.tsx", "ReplyTarget"],
+		["src/features/assistant/components/assistantPanel.tsx", "AssistantSurface"],
+		["src/features/assistant/components/assistantHeader.tsx", "ModelMenu"],
+		["src/features/assistant/components/assistantConversation.tsx", "Announcer"],
+		["src/features/assistant/components/assistantConfirmationCard.tsx", "AssistantConfirmationCard"],
+		["src/features/assistant/components/assistantComposer.tsx", "AssistantComposer"],
+		["src/features/assistant/components/assistantSetup.tsx", "SetupBody"]
 	])("compiles %s", (file, fnName) => {
 		const events = compile(file)
 
 		expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
 		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(true)
 	})
+})
+
+// The transcript list opts out ("use no memo") for its virtualizer; its rows must still compile, or every
+// token landing in the streaming reply would rebuild every visible row.
+it("compiles TranscriptRowContent, which renders every assistant transcript row", () => {
+	const events = compile("src/features/assistant/components/assistantTranscript.tsx")
+
+	expect(
+		events.some(event => event.kind === "CompileSuccess" && event.fnName === "TranscriptRowContent" && (event.memoSlots ?? 0) > 0)
+	).toBe(true)
 })

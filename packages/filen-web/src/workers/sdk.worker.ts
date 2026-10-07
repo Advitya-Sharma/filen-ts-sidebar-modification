@@ -127,7 +127,7 @@ import { isPhotoItem } from "@/features/photos/lib/predicate"
 import { FLAT_LISTING_KINDS, type FlatListingKind } from "@/features/drive/lib/flatListing"
 import { THUMB_CACHE_CAP, THUMB_MAX_DIM, THUMB_SDK_LOSSY_QUALITY, type ThumbnailCopy } from "@/features/drive/lib/thumbnails.logic"
 import { copyThumbs, removeStaleThumbGenerations, sweepThumbs, writeThumb } from "@/workers/thumbStore"
-import { createSearchEngine, type SearchPush, type SearchSnapshotDTO } from "@/workers/searchEngine"
+import { createSearchEngine, type SearchPush, type SearchQueryResult, type SearchSnapshotDTO } from "@/workers/searchEngine"
 import { createListBatcher } from "@/workers/archiveListPacker"
 import type { PackedEntryBatch } from "@/lib/sdk/archiveListing"
 import {
@@ -2267,6 +2267,13 @@ const api = {
 	},
 	searchClose(): Promise<void> {
 		return searchEngine.close()
+	},
+	// The assistant's one-shot search: never takes the engine from the user's search (searchEngine.ts).
+	searchQuery(
+		params: { rootUuid: string | null; name: string },
+		options: { settleMs: number; capMs: number }
+	): Promise<SearchQueryResult> {
+		return searchEngine.query(requireClient(), params, options)
 	},
 	// Closes the live search BEFORE releasing the client — searchEngine.ts's teardown calls
 	// close()/free() on handles that belong to THIS client; releasing it first would race that.

@@ -1,0 +1,177 @@
+import { toast } from "sonner"
+import type { Playlist } from "@filen/shared"
+import { errorLabel } from "@/lib/i18n/errorLabel"
+import { playlistsQueryRead } from "@/features/audio/queries/playlists"
+import { playlistFileTrack } from "@/features/audio/lib/playlists"
+import { playPlaylistFrom } from "@/features/audio/lib/playlistPlayback"
+import { audioEngine } from "@/features/audio/lib/audioEngine"
+import { deriveAudioHandoff, isAudioItem } from "@/features/audio/lib/handoff"
+import { useAudioStore } from "@/features/audio/store/useAudioStore"
+import { cachedListing } from "@/features/drive/queries/drive"
+import type { DriveItem } from "@/features/drive/lib/item"
+import { assistantRouter } from "@/features/assistant/tools/navigation"
+import {
+	driveName,
+	freshDriveItem,
+	freshPlaylist,
+	requiredString,
+	resolveHandle,
+	rootDirUuid,
+	type ToolAdapter
+} from "@/features/assistant/tools/entities"
+import { AssistantToolError } from "@/features/assistant/tools/format"
+
+const TRACK_LIMIT = 50
+
+export const listPlaylistsTool: ToolAdapter = async (_input, scope) => {
+	const playlists = (await playlistsQueryRead()).flatMap(entry => (entry.status === "ok" ? [entry.playlist] : []))
+
+	return {
+		value: {
+			playlists: playlists.map(playlist => ({
+				handle: scope.show({ kind: "playlist", playlist }, playlist.name),
+				name: playlist.name,
+				tracks: playlist.files.length
+			}))
+		}
+	}
+}
+
+export const openPlaylistTool: ToolAdapter = async (input, scope) => {
+	const entity = await resolveHandle(scope, requiredString(input, "handle"), ["playlist"])
+	const router = assistantRouter()
+
+	if (entity.kind !== "playlist") {
+		throw new AssistantToolError("Not a playlist", { invalid: true })
+	}
+
+	if (router === null) {
+		throw new AssistantToolError("The app cannot navigate right now")
+	}
+
+	const playlist = freshPlaylist(entity.playlist)
+
+	await router.navigate({ to: "/playlists", search: { playlist: playlist.uuid } })
+
+	return {
+		value: {
+			opened: playlist.name,
+			// A track handle plays that track alone; playing the playlist's handle queues the whole list.
+			tracks: playlist.files.slice(0, TRACK_LIMIT).map(file => {
+				const track = playlistFileTrack(file)
+
+				return { handle: scope.show({ kind: "track", track }, track.name), name: track.name }
+			}),
+			...(playlist.files.length > TRACK_LIMIT ? { more: playlist.files.length - TRACK_LIMIT } : {})
+		},
+		uiEffect: { type: "navigated", pathname: "/playlists" }
+	}
+}
+
+// Opening an audio file in a listing queues its audio siblings in listing order; the assistant does the
+// same with the file's directory listing when the drive has it, else the file alone.
+function driveQueue(item: DriveItem): ReturnType<typeof deriveAudioHandoff> {
+	const parent = item.data.parent === rootDirUuid() ? null : item.data.parent
+	const siblings = cachedListing("drive", parent)
+	const listing = siblings?.some(sibling => sibling.data.uuid === item.data.uuid) === true ? siblings : [item]
+
+	return deriveAudioHandoff(listing, item.data.uuid, false)
+}
+
+// The playlist screen's Play: the toast on failure is the one startPlaylist shows.
+async function playPlaylist(playlist: Playlist): Promise<void> {
+	if (playlist.files.length === 0) {
+		throw new AssistantToolError(`Playlist "${playlist.name}" is empty`)
+	}
+
+	try {
+		await playPlaylistFrom(playlist, 0)
+	} catch (e) {
+		toast.error(errorLabel(e))
+
+		throw new AssistantToolError(errorLabel(e))
+	}
+}
+
+export const playTool: ToolAdapter = async (input, scope) => {
+	const entity = await resolveHandle(scope, requiredString(input, "handle"), ["drive", "playlist", "track"])
+
+	switch (entity.kind) {
+		case "playlist": {
+			const playlist = freshPlaylist(entity.playlist)
+
+			await playPlaylist(playlist)
+
+			return { value: { playing: playlist.files[0]?.name ?? "", playlist: playlist.name }, uiEffect: { type: "playback" } }
+		}
+
+		case "track": {
+			await audioEngine.enqueueAndPlay([entity.track], 0)
+
+			return { value: { playing: entity.track.name }, uiEffect: { type: "playback" } }
+		}
+
+		case "drive": {
+			const item = freshDriveItem(entity.item)
+			const handoff = isAudioItem(item) ? driveQueue(item) : null
+
+			if (handoff === null) {
+				throw new AssistantToolError(`"${driveName(item)}" is not an audio file`, { invalid: true })
+			}
+
+			await audioEngine.enqueueAndPlay(handoff.tracks, handoff.startIndex)
+
+			return { value: { playing: driveName(item) }, uiEffect: { type: "playback" } }
+		}
+
+		default:
+			throw new AssistantToolError("Not playable", { invalid: true })
+	}
+}
+
+// The player bar's and queue toggles' own engine calls.
+export const audioControlTool: ToolAdapter = async input => {
+	const action = requiredString(input, "action")
+	const { queue, currentIndex } = useAudioStore.getState()
+	const current = queue[currentIndex]
+
+	if (current === undefined) {
+		throw new AssistantToolError("Nothing is playing")
+	}
+
+	switch (action) {
+		case "pause":
+			audioEngine.pause()
+			break
+		case "resume":
+			audioEngine.resume()
+			break
+		case "next":
+			await audioEngine.skipNext()
+			break
+		case "previous":
+			await audioEngine.skipPrevious()
+			break
+		case "stop":
+			audioEngine.clearQueue()
+			break
+		case "shuffle_on":
+		case "shuffle_off":
+			audioEngine.setShuffleEnabled(action === "shuffle_on")
+			break
+		case "repeat_on":
+		case "repeat_off":
+			audioEngine.setLoopMode(action === "repeat_on" ? "all" : "off")
+			break
+		default:
+			throw new AssistantToolError(`Unknown action "${action}"`, { invalid: true })
+	}
+
+	const state = useAudioStore.getState()
+	const now = state.queue[state.currentIndex]
+
+	return {
+		value: { done: action, ...(now === undefined ? {} : { track: now.name, status: state.status }) },
+		uiEffect: { type: "playback" }
+	}
+}

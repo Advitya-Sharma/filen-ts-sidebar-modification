@@ -12,6 +12,7 @@ import { advanceBootSplash, dismissBootSplash } from "@/lib/bootSplash"
 import { registerAllActions } from "@/lib/keymap/actions"
 import { NotFoundScreen } from "@/features/shell/components/notFoundScreen"
 import { useReminderStore } from "@/features/shell/store/useReminderStore"
+import "@/features/assistant/loop/register" // side-effect: registers the on-device assistant with its UI
 
 // notFoundMode "root" (the default is "fuzzy") keeps every unknown URL on ONE full-page 404 instead of
 // rendering it inside whichever ancestor layout happened to match, and makes the root match the

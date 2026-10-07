@@ -20,6 +20,9 @@ import { ChatsSyncHost } from "@/features/chats/components/syncHost"
 import { SocketHost } from "@/features/shell/components/socketHost"
 import { AudioPlayerBar } from "@/features/audio/components/audioPlayerBar"
 import { useDismissBootSplash } from "@/lib/bootSplash"
+import { AssistantDrawer, AssistantSidePanel } from "@/features/assistant/components/assistantPanel"
+import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
+import { AssistantNavigationBridge } from "@/features/assistant/tools/navigationBridge"
 
 const SIDEBAR_PANEL: Record<SidebarKind, ComponentType> = {
 	chats: ChatsSidebar,
@@ -30,10 +33,10 @@ const SIDEBAR_PANEL: Record<SidebarKind, ComponentType> = {
 	drive: DriveSidebar
 }
 
-// Padded canvas holding the three shell zones: a bare icon rail sitting directly on the canvas, then
-// two floating rounded panels — the contextual module sidebar and the content card. Nothing touches a
-// viewport edge; zones separate through the canvas gaps, each panel outlined by --shell-border. The sidebar
-// is contextual per module (see resolveSidebarKind).
+// Padded canvas holding the shell zones: a bare icon rail sitting directly on the canvas, then floating
+// rounded panels — the contextual module sidebar, the content card and, when open, the assistant panel on
+// the right. Nothing touches a viewport edge; zones separate through the canvas gaps, each panel outlined by
+// --shell-border. The sidebar is contextual per module (see resolveSidebarKind).
 //
 // Below the app's layout breakpoint the row cannot hold the sidebar at all, so the shell RELOCATES it
 // into a left drawer reached from the rail's one trigger — collapsing chrome never means deleting it.
@@ -56,6 +59,8 @@ export function AppShell() {
 	const Panel = SIDEBAR_PANEL[sidebarKind]
 	const narrow = useIsNarrowViewport()
 	const [sidebarOpen, setSidebarOpen] = useState(false)
+	const assistantPanelOpen = useAssistantStore(state => state.panelOpen)
+	const assistantDrawerOpen = useAssistantStore(state => state.drawerOpen)
 
 	useDismissBootSplash()
 
@@ -68,14 +73,18 @@ export function AppShell() {
 		</SidebarPanelVisibilityProvider>
 	)
 
-	// The drawer must survive neither a navigation (it would cover the result it just navigated to) nor a
-	// trip across the layout breakpoint: `open` is gated on `narrow`, but the state behind it is not, so a
-	// stale `true` sits invisible at desktop widths and re-opens the drawer by itself the moment the
-	// window narrows again. Both signals are read as external subscriptions rather than by diffing state
-	// in an effect body.
+	// The drawers must survive neither a navigation (one would cover the result it just navigated to,
+	// including a route the assistant opened) nor a trip across the layout breakpoint: `open` is gated on
+	// `narrow`, but the state behind it is not, so a stale `true` sits invisible at desktop widths and
+	// re-opens the drawer by itself the moment the window narrows again. Both signals are read as external
+	// subscriptions rather than by diffing state in an effect body.
 	useEffect(() => {
 		function close(): void {
 			setSidebarOpen(false)
+
+			if (useAssistantStore.getState().drawerOpen) {
+				useAssistantStore.getState().setDrawerOpen(false)
+			}
 		}
 
 		// The history primitive, not a router event: the router's onBeforeNavigate is never emitted for
@@ -103,6 +112,9 @@ export function AppShell() {
 			{/* Realtime socket bridge — one subscription for the whole authed session; registers the note
 			    domain's handlers (drive/chats reuse the bridge later). Renders nothing. */}
 			<SocketHost />
+			{/* The assistant's navigation tools act through the router from here, whether or not the panel is
+			    open. Renders nothing. */}
+			<AssistantNavigationBridge />
 			<SystemStrip />
 			{/* A sibling of the row, never its wrapper (see sidebarDrawer.tsx); the panel goes to exactly one
 			    of the two slots. */}
@@ -113,6 +125,10 @@ export function AppShell() {
 				panel={sidebar}
 				onOpenChange={setSidebarOpen}
 			/>
+			<AssistantDrawer
+				open={narrow && assistantDrawerOpen}
+				narrow={narrow}
+			/>
 			<div className="flex min-h-0 flex-1 gap-2 overflow-hidden p-2">
 				<IconRail />
 				{/* Positioning context for the sidebar's drag handle, which sits absolutely in the gap-2
@@ -122,6 +138,13 @@ export function AppShell() {
 				<main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-shell-border bg-card shadow-sm">
 					<Outlet />
 				</main>
+				{/* The assistant panel mirrors the sidebar slot on the right: the wrapper positions its
+				    leading-edge drag handle in the gap before it. Below the breakpoint it lives in its drawer. */}
+				{narrow || !assistantPanelOpen ? null : (
+					<div className="relative flex shrink-0">
+						<AssistantSidePanel />
+					</div>
+				)}
 			</div>
 			{/* Persistent audio player — docked at the bottom of the authed shell, below the module row, the
 			    same shell-level docking the transfers rail established. Renders null until a queue exists;

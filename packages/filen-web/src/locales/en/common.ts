@@ -58,6 +58,8 @@ export const common = {
 	toggleTheme: "Toggle theme",
 	/** Icon rail — tooltip suffix on modules and items that are not available yet */
 	comingSoon: "Coming soon",
+	/** Assistant toggle — icon rail button tooltip/accessible label and the keymap action description shown in shortcut UI */
+	toggleAssistant: "Assistant",
 	// Rail modules
 	/** Icon rail — narrow-viewport only: opens the drawer holding the current module's sidebar (hidden at desktop widths) */
 	openNavigation: "Open navigation",

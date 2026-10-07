@@ -46,20 +46,23 @@ export async function resolveContainingDirectoryTarget(deps: RevealDeps, item: D
 
 // The whole "Open containing directory" dispatch, kept out of the menu component so the failure arm
 // (toast, no navigation, NO armed reveal) is exercisable without rendering an open Base UI menu.
-// `navigate` is the caller's own router navigate.
+// `navigate` is the caller's own router navigate. Resolves the target it navigated to, or null after
+// the failure toast.
 export async function runOpenContainingDirectory(
 	deps: RevealDeps,
 	item: DriveItem,
 	navigate: (target: DriveNavigationTarget) => void
-): Promise<void> {
+): Promise<DriveNavigationTarget | null> {
 	const outcome = await resolveContainingDirectoryTarget(deps, item)
 
 	if (outcome.status === "error") {
 		toast.error(errorLabel(outcome.dto))
-		return
+		return null
 	}
 
 	// Armed only on the success arm — the destination listing consumes it once and reveals the row.
 	useDriveStore.getState().requestReveal({ uuid: item.data.uuid, splat: outcome.target.params._splat })
 	navigate(outcome.target)
+
+	return outcome.target
 }

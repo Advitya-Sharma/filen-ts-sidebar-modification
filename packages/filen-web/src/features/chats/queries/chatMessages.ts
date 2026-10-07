@@ -164,6 +164,16 @@ export function useChatMessages(chatUuid: string, options?: { enabled?: boolean 
 	})
 }
 
+// A thread's messages for a caller outside the thread (the assistant), under the thread's own key and
+// freshness rule: the cache while the thread is synced, else the same read a mount would make.
+export function chatMessagesQueryRead(chatUuid: string): Promise<ChatMessage[]> {
+	return queryClient.query({
+		queryKey: chatMessagesQueryKey(chatUuid),
+		queryFn: () => fetchChatMessages(chatUuid),
+		staleTime: query => (query.state.status !== "error" && chatMessagesSynced(chatUuid) ? Infinity : 0)
+	})
+}
+
 // Same rule as chatsQueryUpdate, scoped per chat uuid: a patch over cached data may cancel a thread read
 // (patchQuery), which must then not count as synced. A patch that creates the cache, after the gc or a
 // leave removed it, holds none of the page the thread's marker vouches for, so the thread reads again

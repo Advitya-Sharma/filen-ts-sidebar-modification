@@ -1,6 +1,7 @@
 import { type ReactNode } from "react"
 import Markdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { cn } from "@filen/shared"
 import { markdownUrlTransform } from "@/features/preview/components/markdownViewer.logic"
 
 // Shared rendered-markdown surface — extracted from markdownViewer.tsx so the notes reader's md split
@@ -71,12 +72,13 @@ const MARKDOWN_COMPONENTS: Components = {
 	)
 }
 
-export function MarkdownRenderer({ text, alt }: { text: string; alt: string }) {
+// `className` replaces the full-pane geometry for an inline host (the assistant's reply bubbles).
+export function MarkdownRenderer({ text, alt, className }: { text: string; alt: string; className?: string | undefined }) {
 	return (
 		<div
 			role="document"
 			aria-label={alt}
-			className="size-full overflow-auto px-6 py-4 select-text"
+			className={cn("size-full overflow-auto px-6 py-4 select-text", className)}
 		>
 			<Markdown
 				remarkPlugins={[remarkGfm]}

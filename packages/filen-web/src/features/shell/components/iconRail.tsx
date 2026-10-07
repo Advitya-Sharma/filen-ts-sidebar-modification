@@ -34,6 +34,7 @@ import { useRailReorder } from "@/features/shell/hooks/useRailReorder"
 import { DEFAULT_RAIL_ORDER, railEntryActive, type RailEntryId } from "@/features/shell/lib/railOrder.logic"
 import { saveRailOrder, useRailOrderQuery } from "@/features/shell/queries/railOrder"
 import { SidebarDrawerTrigger } from "@/features/shell/components/sidebarDrawer"
+import { AssistantToggle } from "@/features/assistant/components/assistantToggle"
 import { useTheme } from "@/providers/themeProvider"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -544,6 +545,7 @@ export function IconRail() {
 			{/* Pinned footer — the rail's extensible utility slot list; future entries stack above the
 			    account menu. */}
 			<div className="mt-auto flex w-full flex-col items-center gap-1.5">
+				<AssistantToggle itemClass={railItemClass} />
 				<HelpEntry />
 				<AccountMenu />
 			</div>

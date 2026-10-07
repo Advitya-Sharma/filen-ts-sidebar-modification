@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 import {
 	computeToastClearance,
+	computeToastSideClearance,
 	toastBottomOffset,
+	toastRightOffset,
 	TOAST_EDGE_OFFSET_PX,
 	TOAST_WIDTH_PX,
 	type ObstructionRect
@@ -185,5 +187,44 @@ describe("toastBottomOffset", () => {
 				edge: 24
 			})
 		).toBe("max(94px, calc(24px + env(safe-area-inset-bottom, 0px)))")
+	})
+})
+
+// The open assistant panel, docked inside the shell's p-2 padding on the right.
+const assistantPanel = rect({
+	top: 8,
+	left: 1280 - 8 - 360,
+	width: 360,
+	height: 800 - 16
+})
+
+describe("computeToastSideClearance", () => {
+	it("moves the column clear of a right-docked panel, measured to its left edge", () => {
+		expect(computeToastSideClearance({ obstructions: [assistantPanel], viewport })).toBe(368)
+	})
+
+	it("reads 0 with nothing docked, or a panel with no area", () => {
+		expect(computeToastSideClearance({ obstructions: [], viewport })).toBe(0)
+		expect(computeToastSideClearance({ obstructions: [{ ...assistantPanel, width: 0 }], viewport })).toBe(0)
+	})
+
+	it("never shifts mobile toasts, which span the viewport", () => {
+		expect(computeToastSideClearance({ obstructions: [assistantPanel], viewport: { width: 600, height: 800 } })).toBe(0)
+	})
+
+	it("keeps the usual edge gap from what it clears", () => {
+		expect(toastRightOffset({ sideClearance: 368, edge: TOAST_EDGE_OFFSET_PX })).toBe(368 + TOAST_EDGE_OFFSET_PX)
+		expect(toastRightOffset({ sideClearance: 0, edge: TOAST_EDGE_OFFSET_PX })).toBe(TOAST_EDGE_OFFSET_PX)
+	})
+})
+
+describe("computeToastClearance with a shifted column", () => {
+	// A bar sitting bottom-right of the content card: out of the default column only once the column moves
+	// left past the panel, and the other way round for one under the panel.
+	const nearPanel = rect({ top: 800 - 70, left: 700, width: 180, height: 46 })
+
+	it("tests overlap against where the column actually is", () => {
+		expect(computeToastClearance({ obstructions: [nearPanel], viewport })).toBe(0)
+		expect(computeToastClearance({ obstructions: [nearPanel], viewport, sideClearance: 368 })).toBe(70)
 	})
 })

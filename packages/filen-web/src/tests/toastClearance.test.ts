@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
-import { toastObstructionRef, useToastClearance } from "@/lib/toastClearance"
+import { toastObstructionRef, toastSideObstructionRef, useToastClearance, useToastSideClearance } from "@/lib/toastClearance"
 
 // jsdom has no layout: rects are stubbed per element, and ResizeObserver/rAF are driven by hand so each
 // test decides exactly when the store re-measures. jsdom's default viewport is 1024x768, which puts the
@@ -244,5 +244,88 @@ describe("toastClearance store", () => {
 			configurable: true,
 			value: original
 		})
+	})
+})
+
+describe("toastClearance side obstructions", () => {
+	// jsdom's 1024px viewport, with the assistant panel docked at its right edge inside the shell padding.
+	const panelBox: Box = { top: 8, left: 1024 - 8 - 360, width: 360, height: 768 - 16 }
+
+	function mountPanel(): { box: Box; element: HTMLElement; unregister: () => void } {
+		const element = document.createElement("div")
+		const box = { ...panelBox }
+
+		document.body.append(element)
+		vi.spyOn(element, "getBoundingClientRect").mockImplementation(() => ({
+			top: box.top,
+			left: box.left,
+			right: box.left + box.width,
+			bottom: box.top + box.height,
+			width: box.width,
+			height: box.height,
+			x: box.left,
+			y: box.top,
+			toJSON: () => box
+		}))
+
+		let cleanup: (() => void) | undefined
+
+		act(() => {
+			cleanup = toastSideObstructionRef(element)
+			flushFrames()
+		})
+
+		return {
+			box,
+			element,
+			unregister: () => {
+				act(() => {
+					cleanup?.()
+					flushFrames()
+				})
+				element.remove()
+			}
+		}
+	}
+
+	it("moves the column by the panel's width while it is mounted, without lifting it", () => {
+		const side = renderHook(() => useToastSideClearance())
+		const lift = renderHook(() => useToastClearance())
+		const panel = mountPanel()
+
+		expect(side.result.current).toBe(368)
+		expect(lift.result.current).toBe(0)
+
+		panel.unregister()
+
+		expect(side.result.current).toBe(0)
+	})
+
+	it("follows a resize of the panel (a sidebar drag)", () => {
+		const { result } = renderHook(() => useToastSideClearance())
+		const panel = mountPanel()
+
+		act(() => {
+			panel.box.left = 1024 - 8 - 480
+			panel.box.width = 480
+			fireResize(panel.element)
+		})
+
+		expect(result.current).toBe(488)
+
+		panel.unregister()
+	})
+
+	it("lifts for a bar the shifted column now overlaps", () => {
+		const { result } = renderHook(() => useToastClearance())
+		const panel = mountPanel()
+
+		// In the content card's bottom-right corner: left of the default column [644, 1000], inside the
+		// shifted one [276, 632].
+		surface({ top: 768 - 24 - 46, left: 400, width: 200, height: 46 })
+
+		expect(result.current).toBe(24 + 46)
+
+		panel.unregister()
 	})
 })

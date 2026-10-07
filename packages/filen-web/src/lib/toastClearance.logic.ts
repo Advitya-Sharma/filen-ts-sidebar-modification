@@ -23,16 +23,20 @@ export interface Viewport {
 // How far above the viewport's bottom edge the toast stack must start to clear every obstruction that
 // shares the toasts' column: the distance from the bottom edge up to the highest overlapping top edge.
 // Measuring the top edge (not summing heights) is what makes stacked bars — a selection bar floating
-// above the docked audio player — resolve to the taller combined clearance on their own.
+// above the docked audio player — resolve to the taller combined clearance on their own. `sideClearance`
+// is the column's own shift away from the right edge (computeToastSideClearance), so the overlap test
+// runs against where the column actually is.
 export function computeToastClearance({
 	obstructions,
-	viewport
+	viewport,
+	sideClearance = 0
 }: {
 	obstructions: readonly ObstructionRect[]
 	viewport: Viewport
+	sideClearance?: number
 }): number {
 	const mobile = viewport.width <= TOAST_MOBILE_MAX_WIDTH_PX
-	const columnRight = viewport.width - TOAST_EDGE_OFFSET_PX
+	const columnRight = viewport.width - TOAST_EDGE_OFFSET_PX - (mobile ? 0 : sideClearance)
 	const columnLeft = columnRight - TOAST_WIDTH_PX
 	let clearance = 0
 
@@ -52,6 +56,38 @@ export function computeToastClearance({
 	}
 
 	return Math.max(0, Math.ceil(clearance))
+}
+
+// How far from the viewport's right edge the toast column must move to clear full-height panels docked
+// against that edge (the open assistant panel): the distance to the leftmost one's left edge. Mobile
+// toasts span the viewport and nothing docks beside them there, so they never shift.
+export function computeToastSideClearance({
+	obstructions,
+	viewport
+}: {
+	obstructions: readonly ObstructionRect[]
+	viewport: Viewport
+}): number {
+	if (viewport.width <= TOAST_MOBILE_MAX_WIDTH_PX) {
+		return 0
+	}
+
+	let clearance = 0
+
+	for (const rect of obstructions) {
+		if (rect.width <= 0 || rect.height <= 0) {
+			continue
+		}
+
+		clearance = Math.max(clearance, viewport.width - rect.left)
+	}
+
+	return Math.max(0, Math.ceil(clearance))
+}
+
+// The column keeps its usual edge offset from whatever it clears, as it does from the bare viewport edge.
+export function toastRightOffset({ sideClearance, edge }: { sideClearance: number; edge: number }): number {
+	return sideClearance + edge
 }
 
 // The stack rests one edge offset above whatever it clears, the same breathing room it has above the

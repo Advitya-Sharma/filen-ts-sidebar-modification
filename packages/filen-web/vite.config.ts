@@ -1,19 +1,21 @@
-import { defineConfig, type Plugin } from "vite"
+import { defineConfig, loadEnv, type Plugin } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { tanstackRouter } from "@tanstack/router-plugin/vite"
 import babel from "@rolldown/plugin-babel"
 import { sdkArtifacts, COI_HEADERS, SDK_ARTIFACTS } from "./vite/sdk-artifacts-plugin"
+import { assistantModelDev } from "./vite/assistant-model"
+import { isAllowedModelOrigin } from "./src/features/assistant/runtime/manifest"
 
 // preview.headers only reaches the responses the static handler serves with a body: its 304 Not
 // Modified goes out bare, and WebKit then refuses a worker script revalidated on reload for want of
 // COEP. Every response carries them, as the deployment must (README § Deployment).
-function previewHeaders(): Plugin {
+function previewHeaders(headers: Record<string, string>): Plugin {
 	return {
 		name: "filen:preview-headers",
 		configurePreviewServer(server) {
 			server.middlewares.use((_request, response, next) => {
-				for (const [name, value] of Object.entries(PREVIEW_HEADERS)) {
+				for (const [name, value] of Object.entries(headers)) {
 					response.setHeader(name, value)
 				}
 
@@ -28,7 +30,7 @@ function previewHeaders(): Plugin {
 // the unhashed SDK artifacts can drop the immutable caching /assets/* grants: their names never change,
 // so they must be revalidated on every load or a client pairs new code with an old SDK.
 // FILEN_WEB_NOINDEX keeps the staging deployment out of search indexes.
-function deployHeaders(): Plugin {
+function deployHeaders(headers: Record<string, string>): Plugin {
 	const rule = (path: string, lines: string[]) => [path, ...lines.map(line => `  ${line}`)].join("\n")
 	const revalidate = ["! Cache-Control", "Cache-Control: no-cache"]
 
@@ -36,7 +38,7 @@ function deployHeaders(): Plugin {
 		name: "filen:deploy-headers",
 		apply: "build",
 		generateBundle() {
-			const every = Object.entries(PREVIEW_HEADERS).map(([name, value]) => `${name}: ${value}`)
+			const every = Object.entries(headers).map(([name, value]) => `${name}: ${value}`)
 
 			if (process.env["FILEN_WEB_NOINDEX"] === "1") {
 				every.push("X-Robots-Tag: noindex")
@@ -104,44 +106,68 @@ function filenHostFamily(subdomain: string): string[] {
 	)
 }
 
-const CSP = [
-	"default-src 'none'",
-	"script-src 'self' 'wasm-unsafe-eval'",
-	"worker-src 'self' blob:",
-	"style-src 'self' 'unsafe-inline'",
-	"font-src 'self'",
-	// cdn.filen.io hosts the custom emoji pack (emoji.ts); avatar pictures (account/contacts/chat rows'
-	// avatarURL) come from the API on either the egest or the down family, each with the .net failover set
-	// connect-src already carries — all sanctioned first-party hosts, not attacker-reachable third parties.
-	`img-src 'self' blob: data: https://cdn.filen.io ${[...filenHostFamily("egest"), ...filenHostFamily("down")].join(" ")}`,
-	// <video>/<audio> element sources — 'self' for the SW's inline-preview route (same-origin, never a
-	// cross-origin media host), blob: for the buffered-fallback object URL (dev / SW absent / a failed
-	// stream registration). Was absent from the CSP entirely until the preview feature needed it —
-	// default-src 'none' blocks every <video>/<audio> src fetch outright without this directive; a plain
-	// <img> also joins the SW's inline route now but is governed by img-src above, not this one.
-	"media-src 'self' blob:",
-	// filen-controlled domains only — the .net / .filen-N.net families are the SDK's baked-in
-	// failover hosts (present in the wasm binary); removing them silently breaks failover.
-	"connect-src 'self' https://*.filen.io wss://*.filen.io https://*.filen.net wss://*.filen.net https://*.filen-1.net https://*.filen-2.net https://*.filen-3.net https://*.filen-4.net https://*.filen-5.net https://*.filen-6.net",
-	"manifest-src 'none'",
-	"object-src 'none'",
-	"base-uri 'self'",
-	"form-action 'self'",
-	"frame-ancestors 'none'"
-].join("; ")
+// The assistant's model host (features/assistant/runtime): the default, cdn.filen.io, is already inside
+// https://*.filen.io below; a build pointed elsewhere with VITE_ASSISTANT_MODEL_BASE_URL gets exactly that
+// origin added, and nothing else.
+function assistantModelSources(mode: string): string[] {
+	const configured = loadEnv(mode, process.cwd(), "VITE_ASSISTANT_MODEL_")["VITE_ASSISTANT_MODEL_BASE_URL"]
 
-const PREVIEW_HEADERS = {
+	if (configured === undefined || configured === "") {
+		return []
+	}
+
+	const url = new URL(configured)
+
+	if (!isAllowedModelOrigin(url)) {
+		throw new Error(`VITE_ASSISTANT_MODEL_BASE_URL must be https: ${configured}`)
+	}
+
+	return [url.origin]
+}
+
+const contentSecurityPolicy = (connectExtra: readonly string[]) =>
+	[
+		"default-src 'none'",
+		"script-src 'self' 'wasm-unsafe-eval'",
+		"worker-src 'self' blob:",
+		"style-src 'self' 'unsafe-inline'",
+		"font-src 'self'",
+		// cdn.filen.io hosts the custom emoji pack (emoji.ts); avatar pictures (account/contacts/chat rows'
+		// avatarURL) come from the API on either the egest or the down family, each with the .net failover set
+		// connect-src already carries — all sanctioned first-party hosts, not attacker-reachable third parties.
+		`img-src 'self' blob: data: https://cdn.filen.io ${[...filenHostFamily("egest"), ...filenHostFamily("down")].join(" ")}`,
+		// <video>/<audio> element sources — 'self' for the SW's inline-preview route (same-origin, never a
+		// cross-origin media host), blob: for the buffered-fallback object URL (dev / SW absent / a failed
+		// stream registration). Was absent from the CSP entirely until the preview feature needed it —
+		// default-src 'none' blocks every <video>/<audio> src fetch outright without this directive; a plain
+		// <img> also joins the SW's inline route now but is governed by img-src above, not this one.
+		"media-src 'self' blob:",
+		// filen-controlled domains only — the .net / .filen-N.net families are the SDK's baked-in
+		// failover hosts (present in the wasm binary); removing them silently breaks failover.
+		// cdn.filen.io also serves the assistant's model files (fetched by its worker); see assistantModelSources.
+		[
+			"connect-src 'self' https://*.filen.io wss://*.filen.io https://*.filen.net wss://*.filen.net https://*.filen-1.net https://*.filen-2.net https://*.filen-3.net https://*.filen-4.net https://*.filen-5.net https://*.filen-6.net",
+			...connectExtra
+		].join(" "),
+		"manifest-src 'none'",
+		"object-src 'none'",
+		"base-uri 'self'",
+		"form-action 'self'",
+		"frame-ancestors 'none'"
+	].join("; ")
+
+const previewHeaderSet = (mode: string): Record<string, string> => ({
 	...COI_HEADERS,
-	"Content-Security-Policy": CSP,
+	"Content-Security-Policy": contentSecurityPolicy(assistantModelSources(mode)),
 	"X-Content-Type-Options": "nosniff",
 	"Referrer-Policy": "no-referrer",
 	"Permissions-Policy": "camera=(), microphone=(), geolocation=()"
-}
+})
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
 	plugins: [
-		previewHeaders(),
-		deployHeaders(),
+		previewHeaders(previewHeaderSet(mode)),
+		deployHeaders(previewHeaderSet(mode)),
 		arkTypeJitless(),
 		tanstackRouter({ target: "react", autoCodeSplitting: false }),
 		// @rolldown/plugin-babel's real API (verified against the installed 0.2.3 package:
@@ -160,7 +186,8 @@ export default defineConfig({
 		}),
 		react(),
 		tailwindcss(),
-		sdkArtifacts()
+		sdkArtifacts(),
+		assistantModelDev()
 	],
 	resolve: { alias: { "@": "/src" } },
 	// @sqlite.org/sqlite-wasm's own Vite guidance (README "Usage with vite"): it self-locates
@@ -212,4 +239,4 @@ export default defineConfig({
 	// The preview headers are set by previewHeaders() (plugins above), not preview.headers.
 	// Each worker is one file too, for the same reason as the page's bundle.
 	worker: { format: "es", rolldownOptions: { output: { codeSplitting: false } } }
-})
+}))

@@ -1,30 +1,42 @@
 import { useSyncExternalStore } from "react"
 import { createListenerSet } from "@/lib/listenerSet"
-import { computeToastClearance } from "@/lib/toastClearance.logic"
+import { computeToastClearance, computeToastSideClearance } from "@/lib/toastClearance.logic"
 
 // Single source of truth for how far toasts must lift: surfaces that can sit in the bottom-right toast
 // corner (floating selection bars, the docked audio player, the chat composer) register their root
 // element while mounted, and the Toaster reads the measured clearance. Nothing registered — public-link
-// routes, an idle shell — reads 0, i.e. sonner's normal flush offset.
+// routes, an idle shell — reads 0, i.e. sonner's normal flush offset. Panels docked against the right edge
+// (the assistant) register as SIDE obstructions instead: they push the column left rather than up.
 const obstructions = new Map<Element, ResizeObserver>()
+const sideObstructions = new Map<Element, ResizeObserver>()
 const listeners = createListenerSet("toastClearance")
 let clearance = 0
+let sideClearance = 0
 let frame: number | null = null
 
 function measure(): void {
-	const next = computeToastClearance({
-		obstructions: Array.from(obstructions.keys(), element => element.getBoundingClientRect()),
-		viewport: {
-			width: window.innerWidth,
-			height: window.innerHeight
-		}
+	const viewport = {
+		width: window.innerWidth,
+		height: window.innerHeight
+	}
+
+	const nextSide = computeToastSideClearance({
+		obstructions: Array.from(sideObstructions.keys(), element => element.getBoundingClientRect()),
+		viewport
 	})
 
-	if (next === clearance) {
+	const next = computeToastClearance({
+		obstructions: Array.from(obstructions.keys(), element => element.getBoundingClientRect()),
+		viewport,
+		sideClearance: nextSide
+	})
+
+	if (next === clearance && nextSide === sideClearance) {
 		return
 	}
 
 	clearance = next
+	sideClearance = nextSide
 	listeners.emit()
 }
 
@@ -41,14 +53,11 @@ function scheduleMeasure(): void {
 	})
 }
 
-// React 19 ref callback (returns its own cleanup), so call sites need no hook: `ref={toastObstructionRef}`.
-// The parent is observed too because a centered bar keeps its size while its wrapper resizes around it
-// (sidebar drag, window resize), which moves it into or out of the toast column.
-export function toastObstructionRef(element: HTMLElement | null): (() => void) | undefined {
-	if (element === null) {
-		return undefined
-	}
+function registeredCount(): number {
+	return obstructions.size + sideObstructions.size
+}
 
+function register(registry: Map<Element, ResizeObserver>, element: HTMLElement): () => void {
 	const observer = new ResizeObserver(measure)
 
 	observer.observe(element)
@@ -57,18 +66,18 @@ export function toastObstructionRef(element: HTMLElement | null): (() => void) |
 		observer.observe(element.parentElement)
 	}
 
-	if (obstructions.size === 0) {
+	if (registeredCount() === 0) {
 		window.addEventListener("resize", scheduleMeasure)
 	}
 
-	obstructions.set(element, observer)
+	registry.set(element, observer)
 	scheduleMeasure()
 
 	return () => {
 		observer.disconnect()
-		obstructions.delete(element)
+		registry.delete(element)
 
-		if (obstructions.size === 0) {
+		if (registeredCount() === 0) {
 			window.removeEventListener("resize", scheduleMeasure)
 		}
 
@@ -76,11 +85,41 @@ export function toastObstructionRef(element: HTMLElement | null): (() => void) |
 	}
 }
 
+// React 19 ref callback (returns its own cleanup), so call sites need no hook: `ref={toastObstructionRef}`.
+// The parent is observed too because a centered bar keeps its size while its wrapper resizes around it
+// (sidebar drag, window resize), which moves it into or out of the toast column.
+export function toastObstructionRef(element: HTMLElement | null): (() => void) | undefined {
+	if (element === null) {
+		return undefined
+	}
+
+	return register(obstructions, element)
+}
+
+// Same contract for a panel docked against the right edge; its width (a sidebar drag resizes it) is what
+// moves the column.
+export function toastSideObstructionRef(element: HTMLElement | null): (() => void) | undefined {
+	if (element === null) {
+		return undefined
+	}
+
+	return register(sideObstructions, element)
+}
+
 function getClearance(): number {
 	return clearance
+}
+
+function getSideClearance(): number {
+	return sideClearance
 }
 
 // Pixels between the viewport's bottom edge and the top of the highest obstruction in the toast column.
 export function useToastClearance(): number {
 	return useSyncExternalStore(listeners.subscribe, getClearance, () => 0)
+}
+
+// Pixels between the viewport's right edge and the left edge of the widest right-docked panel.
+export function useToastSideClearance(): number {
+	return useSyncExternalStore(listeners.subscribe, getSideClearance, () => 0)
 }

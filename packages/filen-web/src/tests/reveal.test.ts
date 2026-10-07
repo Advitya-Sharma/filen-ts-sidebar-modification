@@ -134,12 +134,13 @@ describe("runOpenContainingDirectory", () => {
 		const navigate = vi.fn()
 		const item = hitItem()
 
-		await runOpenContainingDirectory(
+		const target = await runOpenContainingDirectory(
 			deps(() => Promise.resolve(pathResult(["a", "b"]))),
 			item,
 			navigate
 		)
 
+		expect(target).toEqual({ to: "/drive/$", params: { _splat: "a/b" } })
 		expect(useDriveStore.getState().pendingReveal).toEqual({ uuid: item.data.uuid, splat: "a/b" })
 		expect(navigate).toHaveBeenCalledExactlyOnceWith({ to: "/drive/$", params: { _splat: "a/b" } })
 		expect(toastError).not.toHaveBeenCalled()
@@ -148,12 +149,13 @@ describe("runOpenContainingDirectory", () => {
 	it("a failed walk toasts, arms NO reveal and never navigates", async () => {
 		const navigate = vi.fn()
 
-		await runOpenContainingDirectory(
+		const target = await runOpenContainingDirectory(
 			deps(() => Promise.reject(new Error("walk failed"))),
 			hitItem(),
 			navigate
 		)
 
+		expect(target).toBeNull()
 		expect(useDriveStore.getState().pendingReveal).toBeNull()
 		expect(navigate).not.toHaveBeenCalled()
 		expect(toastError).toHaveBeenCalledExactlyOnceWith("walk failed")

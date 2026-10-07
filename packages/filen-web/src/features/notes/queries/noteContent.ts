@@ -1,5 +1,6 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query"
 import { sdkApi } from "@/lib/sdk/client"
+import { queryClient } from "@/queries/client"
 import { currentSocketEpoch, socketLiveSince } from "@/lib/sdk/socketSession"
 import { useNoteEditing } from "@/features/notes/store/useNotesInflight"
 import type { Note } from "@filen/sdk-rs"
@@ -85,6 +86,17 @@ function noteContentIsCurrent(uuid: string, cached: string | undefined): boolean
 	const read = contentReads.get(uuid)
 
 	return read !== undefined && socketLiveSince(read.epoch) && cached === read.content
+}
+
+// A note's content for a caller outside the editor (the assistant), under the editor's own key: the
+// cache while it is current, else one tracked read. The caller must never read a note being edited:
+// a read landing then would advance the editor's remount key (see useNoteContentQuery).
+export function noteContentQueryRead(note: Note): Promise<string> {
+	return queryClient.query({
+		queryKey: noteContentQueryKey(note.uuid),
+		queryFn: () => fetchTrackedNoteContent(note),
+		staleTime: query => (query.state.status !== "error" && noteContentIsCurrent(note.uuid, query.state.data) ? Infinity : 0)
+	})
 }
 
 // staleTime: Infinity stops focus/reconnect refetches from clobbering an open editor mid-session. A

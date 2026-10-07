@@ -15,6 +15,7 @@ vi.mock("@/lib/storage/adapter", () => ({
 }))
 
 import {
+	DEFAULT_ASSISTANT_WIDTH,
 	DEFAULT_SIDEBAR_WIDTH,
 	SIDEBAR_WIDTH_MIN,
 	SIDEBAR_WIDTH_MAX,
@@ -22,6 +23,8 @@ import {
 	clampSidebarWidth,
 	widthFromDrag,
 	widthFromKey,
+	widthFromLeadingDrag,
+	widthFromLeadingKey,
 	getSidebarWidth,
 	setSidebarWidth
 } from "@/features/shell/lib/sidebarWidth"
@@ -95,7 +98,45 @@ describe("widthFromKey", () => {
 	})
 })
 
+// The right-hand assistant panel's handle sits on its left edge, so both mappings mirror.
+describe("widthFromLeadingDrag", () => {
+	it("grows the width when the pointer moves left, away from the panel's fixed right edge", () => {
+		expect(widthFromLeadingDrag(300, 500, 440)).toBe(360)
+	})
+
+	it("shrinks it when the pointer moves right", () => {
+		expect(widthFromLeadingDrag(300, 500, 560)).toBe(240)
+	})
+
+	it("clamps to the same bounds as the trailing-edge math", () => {
+		expect(widthFromLeadingDrag(300, 500, 2000)).toBe(SIDEBAR_WIDTH_MIN)
+		expect(widthFromLeadingDrag(300, 500, -2000)).toBe(SIDEBAR_WIDTH_MAX)
+	})
+})
+
+describe("widthFromLeadingKey", () => {
+	it("grows on ArrowLeft and shrinks on ArrowRight, the way the edge moves", () => {
+		expect(widthFromLeadingKey("ArrowLeft", 300)).toBe(300 + SIDEBAR_WIDTH_STEP)
+		expect(widthFromLeadingKey("ArrowRight", 300)).toBe(300 - SIDEBAR_WIDTH_STEP)
+	})
+
+	it("keeps Home/End on the clamps and ignores other keys", () => {
+		expect(widthFromLeadingKey("Home", 400)).toBe(SIDEBAR_WIDTH_MIN)
+		expect(widthFromLeadingKey("End", 400)).toBe(SIDEBAR_WIDTH_MAX)
+		expect(widthFromLeadingKey("ArrowUp", 400)).toBeNull()
+	})
+})
+
 describe("sidebar width: get/set", () => {
+	it("defaults the assistant panel wider than the list sidebars, under its own key", async () => {
+		await expect(getSidebarWidth("assistant")).resolves.toBe(DEFAULT_ASSISTANT_WIDTH)
+
+		await setSidebarWidth("assistant", 420)
+
+		expect(kvStore.get("shell.sidebarWidth.assistant.v1")).toBe(420)
+		await expect(getSidebarWidth("drive")).resolves.toBe(DEFAULT_SIDEBAR_WIDTH)
+	})
+
 	it("returns the default when nothing is persisted", async () => {
 		await expect(getSidebarWidth("drive")).resolves.toBe(DEFAULT_SIDEBAR_WIDTH)
 	})

@@ -35,6 +35,8 @@ export interface SearchSnapshotDTO {
 export type SearchPush =
 	({ type: "snapshot" } & SearchSnapshotDTO) | { type: "resync"; resyncing: boolean } | { type: "heartbeat" } | { type: "rootDeleted" }
 
+export type SearchQueryResult = { status: "busy" } | { status: "done"; snapshot: SearchSnapshotDTO; settled: boolean }
+
 // Raised when a newer open() supersedes this one before it ever produced a snapshot — expected
 // under rapid re-opens (directory navigation, a fast reopen after a dropped connection), never a
 // genuine failure. Named so a future caller can tell it apart from a real SDK error and skip
@@ -142,7 +144,7 @@ export function createSearchEngine() {
 	// (no full reload) would have to reset this explicitly, or the new session silently inherits the
 	// previous account's cache configuration.
 	let configured = false
-	let active: { search: CacheSearch; searchWindow: CacheSearchWindow; token: OpenToken } | null = null
+	let active: { search: CacheSearch; searchWindow: CacheSearchWindow; token: OpenToken; transient: boolean } | null = null
 	let currentToken: OpenToken | null = null
 	let activeRootUuid: string | null = null
 	let activePush: ((p: SearchPush) => void) | null = null
@@ -222,10 +224,14 @@ export function createSearchEngine() {
 		}
 	}
 
-	async function open(
+	// `transient` marks a query()'s handle: setName never refilters it, so the user's next keystroke
+	// reopens and supersedes it instead of retuning a search that is not theirs.
+	async function openWith(
 		client: Client,
 		{ rootUuid, name }: { rootUuid: string | null; name: string },
-		push: (p: SearchPush) => void
+		push: (p: SearchPush) => void,
+		token: OpenToken,
+		transient: boolean
 	): Promise<SearchSnapshotDTO> {
 		// Supersede synchronously, before any await, so a close() or a newer open() racing this call
 		// always observes the flip. The installed window is superseded too: its deliveries are dropped
@@ -238,8 +244,6 @@ export function createSearchEngine() {
 		if (active) {
 			cancelToken(active.token)
 		}
-
-		const token: OpenToken = { cancelled: false }
 
 		currentToken = token
 		activePush = push
@@ -337,7 +341,7 @@ export function createSearchEngine() {
 		// this reopen on.
 		const previous = active
 
-		active = { search, searchWindow, token }
+		active = { search, searchWindow, token, transient }
 
 		if (previous) {
 			void safeClose(previous.search, previous.searchWindow)
@@ -361,10 +365,128 @@ export function createSearchEngine() {
 		})
 	}
 
+	function open(
+		client: Client,
+		params: { rootUuid: string | null; name: string },
+		push: (p: SearchPush) => void
+	): Promise<SearchSnapshotDTO> {
+		return openWith(client, params, push, { cancelled: false }, false)
+	}
+
+	// Closes the handle `token` installed, unless an open or close already replaced it. The routing
+	// fields belong to an open still in flight when there is one.
+	async function closeOwned(token: OpenToken): Promise<void> {
+		const current = active
+
+		if (current?.token !== token) {
+			return
+		}
+
+		active = null
+
+		if (currentToken === null) {
+			activeRootUuid = null
+			activePush = null
+		}
+
+		await safeClose(current.search, current.searchWindow)
+	}
+
+	// A one-shot search for a caller that must never take the engine from the user's own search (the
+	// assistant): it starts only while no search is open or opening, and the user's next open() or
+	// close() supersedes it. It waits until the results have been still for `settleMs` outside a
+	// resync, at most `capMs`, then closes its handle. `settled: false` means the result set may still
+	// have been growing.
+	async function query(
+		client: Client,
+		params: { rootUuid: string | null; name: string },
+		{ settleMs, capMs }: { settleMs: number; capMs: number }
+	): Promise<SearchQueryResult> {
+		if (active !== null || currentToken !== null) {
+			return { status: "busy" }
+		}
+
+		const token: OpenToken = { cancelled: false }
+		let latest: SearchSnapshotDTO = { hits: [], total: 0n, live: true }
+		let resyncing = false
+		let onChange: (() => void) | null = null
+
+		function push(p: SearchPush): void {
+			if (p.type === "snapshot") {
+				latest = { hits: p.hits, total: p.total, live: p.live }
+			} else if (p.type === "resync") {
+				resyncing = p.resyncing
+			}
+
+			onChange?.()
+		}
+
+		try {
+			latest = await openWith(client, params, push, token, true)
+		} catch (e) {
+			if (e instanceof SearchSupersededError) {
+				return { status: "busy" }
+			}
+
+			throw e
+		}
+
+		const settled = await new Promise<boolean>(resolve => {
+			let quiet: ReturnType<typeof setTimeout> | null = null
+
+			function finish(value: boolean): void {
+				if (quiet !== null) {
+					clearTimeout(quiet)
+				}
+
+				clearTimeout(cap)
+				onChange = null
+				delete token.abandon
+				resolve(value)
+			}
+
+			function rearm(): void {
+				if (quiet !== null) {
+					clearTimeout(quiet)
+					quiet = null
+				}
+
+				// Not live is terminal: nothing changes any more.
+				if (!latest.live) {
+					finish(true)
+				} else if (!resyncing) {
+					quiet = setTimeout(() => {
+						finish(true)
+					}, settleMs)
+				}
+			}
+
+			const cap = setTimeout(() => {
+				finish(false)
+			}, capMs)
+
+			onChange = rearm
+			token.abandon = () => {
+				finish(false)
+			}
+
+			if (isCancelled(token)) {
+				finish(false)
+			} else {
+				rearm()
+			}
+		})
+
+		await closeOwned(token)
+
+		return { status: "done", snapshot: latest, settled }
+	}
+
 	// Engine-local refilter (setConfig — no network, no re-registration). `false` means there is no
-	// live search to refilter (closed, or never opened this session) — the caller reopens instead.
+	// live search of the caller's own to refilter (closed, never opened this session, or a query()'s)
+	// — the caller reopens instead.
 	async function setName(name: string): Promise<boolean> {
-		if (active === null) {
+		if (active === null || active.transient) {
 			return false
 		}
 
@@ -400,5 +522,5 @@ export function createSearchEngine() {
 		}
 	}
 
-	return { open, setName, close }
+	return { open, query, setName, close }
 }

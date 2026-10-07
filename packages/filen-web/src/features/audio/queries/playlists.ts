@@ -52,11 +52,24 @@ async function fetchPlaylistsQuery(): Promise<PlaylistEntry[]> {
 	return entries
 }
 
+function playlistsStaleTime(): number {
+	return syncedAtSignal === unsyncSignals && socketLiveSince(syncedEpoch) ? PLAYLISTS_STALE_TIME : 0
+}
+
 export function usePlaylistsQuery(): UseQueryResult<PlaylistEntry[]> {
 	return useQuery({
 		queryKey: PLAYLISTS_QUERY_KEY,
 		queryFn: fetchPlaylistsQuery,
-		staleTime: () => (syncedAtSignal === unsyncSignals && socketLiveSince(syncedEpoch) ? PLAYLISTS_STALE_TIME : 0)
+		staleTime: playlistsStaleTime
+	})
+}
+
+// The list for a caller outside the playlist screens (the assistant), under the same key and freshness.
+export function playlistsQueryRead(): Promise<PlaylistEntry[]> {
+	return queryClient.query({
+		queryKey: PLAYLISTS_QUERY_KEY,
+		queryFn: fetchPlaylistsQuery,
+		staleTime: playlistsStaleTime
 	})
 }
 

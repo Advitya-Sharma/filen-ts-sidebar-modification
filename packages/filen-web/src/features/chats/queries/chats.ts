@@ -152,6 +152,14 @@ export function chatsQueryRemove(uuid: string): void {
 	chatsQueryUpdate(prev => prev.filter(c => c.uuid !== uuid))
 }
 
+// The list for a caller outside the sidebar (the assistant): the cache while it is synced, else the
+// same authoritative read the sidebar's mount would make.
+export async function chatsQueryRead(): Promise<Chat[]> {
+	const cached = chatsQueryGet()
+
+	return cached !== undefined && listSynced() ? cached : chatsQueryFetch()
+}
+
 // Synchronous cache read for a caller that needs the current chat list without subscribing via
 // the hook — mirrors notesQueryGet's own rationale (a menu/action call site resolving a chat's
 // live row, e.g. after a socket event, without mounting a new observer). Also the fallback

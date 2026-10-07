@@ -1,0 +1,154 @@
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
+import { EllipsisIcon, SquarePenIcon, Trash2Icon, XIcon } from "lucide-react"
+import { cn, formatBytes } from "@filen/shared"
+import { Button } from "@/components/ui/button"
+import { TooltipIconButton } from "@/components/ui/tooltipIconButton"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { ConfirmDialog } from "@/components/dialogs/confirmDialog"
+import { Kbd } from "@/lib/keymap/kbd"
+import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
+import { removeAssistantModel, startNewAssistantConversation } from "@/features/assistant/store/assistantSession"
+import { ASSISTANT_TITLE_ID } from "@/features/assistant/components/assistantFocus"
+import { canRemoveModel, downloadPercent } from "@/features/assistant/components/assistant.logic"
+import type { AssistantModelState } from "@/features/assistant/types"
+
+const CHIP_CLASS = "shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] leading-4 font-medium"
+
+function StatusChip({ state }: { state: AssistantModelState }) {
+	const { t } = useTranslation("assistant")
+
+	switch (state.kind) {
+		case "unavailable":
+			return (
+				<span className={cn(CHIP_CLASS, "bg-muted text-muted-foreground")}>
+					{state.reason === "in-use-elsewhere" ? t("assistantStatusInUseElsewhere") : t("assistantStatusUnavailable")}
+				</span>
+			)
+		case "not-downloaded":
+			return <span className={cn(CHIP_CLASS, "bg-muted text-muted-foreground")}>{t("assistantStatusNotDownloaded")}</span>
+		case "downloading":
+			return (
+				<span className={cn(CHIP_CLASS, "bg-primary/10 text-primary tabular-nums")}>
+					{t("assistantStatusDownloading", { percent: downloadPercent(state.receivedBytes, state.model.sizeBytes) })}
+				</span>
+			)
+		case "downloaded":
+		case "loading":
+			return <span className={cn(CHIP_CLASS, "bg-primary/10 text-primary")}>{t("assistantStatusLoading")}</span>
+		case "ready":
+			return <span className={cn(CHIP_CLASS, "bg-primary/10 text-primary")}>{t("assistantStatusReady")}</span>
+		case "error":
+			return <span className={cn(CHIP_CLASS, "bg-destructive/10 text-destructive")}>{t("assistantStatusError")}</span>
+	}
+}
+
+// Only offered while the files are on disk; confirmed first, since getting them back is a multi-gigabyte
+// download.
+function ModelMenu({ state }: { state: AssistantModelState }) {
+	const { t } = useTranslation(["assistant", "common"])
+	const [confirmOpen, setConfirmOpen] = useState(false)
+	const [pending, setPending] = useState(false)
+	const model = state.model
+
+	// No `finally`: the React Compiler cannot lower one yet and would skip this whole component.
+	async function remove(): Promise<void> {
+		setPending(true)
+
+		try {
+			await removeAssistantModel()
+		} catch {
+			toast.error(t("assistant:assistantRemoveModelFailed"))
+		}
+
+		setPending(false)
+		setConfirmOpen(false)
+	}
+
+	return (
+		<>
+			<DropdownMenu>
+				<DropdownMenuTrigger
+					render={
+						<Button
+							variant="ghost"
+							size="icon-sm"
+							aria-label={t("assistant:assistantMoreOptions")}
+							className="app-region-no-drag"
+						>
+							<EllipsisIcon />
+						</Button>
+					}
+				/>
+				<DropdownMenuContent
+					align="end"
+					className="min-w-52"
+				>
+					<DropdownMenuItem
+						variant="destructive"
+						onClick={() => {
+							setConfirmOpen(true)
+						}}
+					>
+						<Trash2Icon />
+						{t("assistant:assistantRemoveModel")}
+					</DropdownMenuItem>
+				</DropdownMenuContent>
+			</DropdownMenu>
+			<ConfirmDialog
+				open={confirmOpen}
+				pending={pending}
+				title={t("assistant:assistantRemoveModelTitle")}
+				body={t("assistant:assistantRemoveModelBody", { size: model === null ? "" : formatBytes(model.sizeBytes) })}
+				confirmLabel={t("assistant:assistantRemoveModelConfirm")}
+				cancelLabel={t("common:cancel")}
+				destructive
+				onOpenChange={setConfirmOpen}
+				onConfirm={() => {
+					void remove()
+				}}
+			/>
+		</>
+	)
+}
+
+// Electron drag region like the left sidebars' headers, but only the header: the conversation below must
+// stay selectable.
+export function AssistantHeader({ onClose }: { onClose: () => void }) {
+	const { t } = useTranslation("assistant")
+	const modelState = useAssistantStore(state => state.modelState)
+	const hasConversation = useAssistantStore(state => state.entries.length > 0)
+
+	return (
+		<div className="flex shrink-0 items-center gap-2 p-3 app-region-drag">
+			<h2
+				id={ASSISTANT_TITLE_ID}
+				className="truncate px-1 text-[15px] font-semibold"
+			>
+				{t("assistantTitle")}
+			</h2>
+			<StatusChip state={modelState} />
+			<div className="ml-auto flex shrink-0 items-center gap-0.5">
+				{hasConversation && modelState.kind === "ready" ? (
+					<TooltipIconButton
+						label={t("assistantNewConversation")}
+						className="app-region-no-drag"
+						onClick={startNewAssistantConversation}
+					>
+						<SquarePenIcon />
+					</TooltipIconButton>
+				) : null}
+				{canRemoveModel(modelState) ? <ModelMenu state={modelState} /> : null}
+				<TooltipIconButton
+					label={t("assistantClose")}
+					className="app-region-no-drag"
+					shortcut={<Kbd action="app.toggleAssistant" />}
+					onClick={onClose}
+				>
+					<XIcon />
+				</TooltipIconButton>
+			</div>
+		</div>
+	)
+}

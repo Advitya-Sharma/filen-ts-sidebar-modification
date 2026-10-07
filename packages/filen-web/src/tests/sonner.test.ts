@@ -8,7 +8,11 @@ import "@/lib/i18n"
 
 // Prop-capturing stub for sonner's own Toaster: the assertions are about what this app's wrapper
 // hands down (the close affordance, its localized label, the offsets), not about sonner's rendering.
-const { capturedProps, clearance } = vi.hoisted(() => ({ capturedProps: [] as ToasterProps[], clearance: { value: 0 } }))
+const { capturedProps, clearance, sideClearance } = vi.hoisted(() => ({
+	capturedProps: [] as ToasterProps[],
+	clearance: { value: 0 },
+	sideClearance: { value: 0 }
+}))
 
 vi.mock("sonner", () => ({
 	Toaster: (props: ToasterProps) => {
@@ -22,7 +26,7 @@ vi.mock("@/providers/themeProvider", () => ({ useTheme: () => ({ theme: "light" 
 
 // The measured clearance is the store's concern (toastClearance.test.ts); here only its mapping onto
 // sonner's offsets matters.
-vi.mock("@/lib/toastClearance", () => ({ useToastClearance: () => clearance.value }))
+vi.mock("@/lib/toastClearance", () => ({ useToastClearance: () => clearance.value, useToastSideClearance: () => sideClearance.value }))
 
 import { Toaster } from "@/components/ui/sonner"
 
@@ -39,6 +43,7 @@ function lastProps(): ToasterProps {
 afterEach(() => {
 	capturedProps.length = 0
 	clearance.value = 0
+	sideClearance.value = 0
 	cleanup()
 })
 
@@ -98,5 +103,19 @@ describe("ui/sonner Toaster", () => {
 			bottom: "max(94px, calc(24px + env(safe-area-inset-bottom, 0px)))"
 		})
 		expect(mobileOffset).toEqual({ bottom: "max(86px, calc(16px + env(safe-area-inset-bottom, 0px)))" })
+	})
+
+	it("moves the column left by a right-docked panel's clearance, keeping the usual edge gap", () => {
+		sideClearance.value = 368
+
+		render(createElement(Toaster))
+
+		const { offset, mobileOffset } = lastProps()
+
+		expect(offset).toEqual({
+			right: 392,
+			bottom: "calc(24px + env(safe-area-inset-bottom, 0px))"
+		})
+		expect(mobileOffset).toEqual({ bottom: "calc(16px + env(safe-area-inset-bottom, 0px))" })
 	})
 })

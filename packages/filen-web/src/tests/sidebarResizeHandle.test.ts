@@ -27,9 +27,14 @@ const { useResizableSidebar } = await import("@/features/shell/hooks/useResizabl
 const { SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_STEP } = await import("@/features/shell/lib/sidebarWidth")
 
 const WIDTH_KV_KEY = "shell.sidebarWidth.drive.v1"
+const ASSISTANT_WIDTH_KV_KEY = "shell.sidebarWidth.assistant.v1"
 
 function Harness() {
 	return createElement(SidebarResizeHandle, { ariaLabel: "Resize", handle: useResizableSidebar("drive") })
+}
+
+function AssistantHarness() {
+	return createElement(SidebarResizeHandle, { ariaLabel: "Resize assistant", handle: useResizableSidebar("assistant") })
 }
 
 beforeEach(() => {
@@ -82,6 +87,46 @@ describe("SidebarResizeHandle", () => {
 
 		await waitFor(() => {
 			expect(kvStore.get(WIDTH_KV_KEY)).toBe(SIDEBAR_WIDTH_MAX)
+		})
+	})
+
+	it("sits after the panel on its trailing edge", () => {
+		expect(separator().className).toContain("left-full")
+		expect(separator().className).not.toContain("right-full")
+	})
+})
+
+// The assistant panel is on the right, so its handle sits before it and every direction mirrors.
+describe("SidebarResizeHandle on a leading edge", () => {
+	function assistantSeparator(): HTMLElement {
+		return screen.getByRole("separator", { name: "Resize assistant" })
+	}
+
+	beforeEach(() => {
+		render(createElement(AssistantHarness))
+	})
+
+	it("sits before the panel", () => {
+		expect(assistantSeparator().className).toContain("right-full")
+		expect(assistantSeparator().className).not.toContain("left-full")
+	})
+
+	it("grows when dragged left and persists under the assistant's key", async () => {
+		fireEvent.pointerDown(assistantSeparator(), { pointerId: 1, clientX: 500 })
+		fireEvent.pointerMove(assistantSeparator(), { pointerId: 1, clientX: 460 })
+		fireEvent.pointerUp(assistantSeparator(), { pointerId: 1, clientX: 460 })
+
+		await waitFor(() => {
+			expect(kvStore.get(ASSISTANT_WIDTH_KV_KEY)).toBe(340)
+		})
+	})
+
+	it("grows on ArrowLeft", async () => {
+		fireEvent.keyDown(assistantSeparator(), { key: "ArrowLeft" })
+		fireEvent.keyUp(assistantSeparator(), { key: "ArrowLeft" })
+
+		await waitFor(() => {
+			expect(kvStore.get(ASSISTANT_WIDTH_KV_KEY)).toBe(300 + SIDEBAR_WIDTH_STEP)
 		})
 	})
 })

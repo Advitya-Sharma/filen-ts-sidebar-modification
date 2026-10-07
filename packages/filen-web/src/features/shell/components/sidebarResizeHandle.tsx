@@ -17,7 +17,8 @@ interface SidebarResizeHandleProps {
 // of adding its own width to it: `w-2` IS that gap, and the visible line is centered in it. Desktop-only
 // affordance: the `md:block` below is what keeps it out of the narrow-viewport drawer, where the panel
 // fills the popup and there is no adjacent content column to resize against. Arrow/Home/End resize it
-// from the keyboard.
+// from the keyboard. A leading-edge handle (the right-hand assistant panel) mirrors all of it onto the
+// panel's left side.
 export function SidebarResizeHandle({ ariaLabel, handle, className }: SidebarResizeHandleProps) {
 	return (
 		<div
@@ -36,7 +37,8 @@ export function SidebarResizeHandle({ ariaLabel, handle, className }: SidebarRes
 			onKeyUp={handle.onKeyUp}
 			onBlur={handle.onBlur}
 			className={cn(
-				"absolute inset-y-0 left-full hidden w-2 cursor-col-resize outline-none md:block",
+				"absolute inset-y-0 hidden w-2 cursor-col-resize outline-none md:block",
+				handle.edge === "leading" ? "right-full" : "left-full",
 				"after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2 after:rounded-full after:transition-colors hover:after:bg-border focus-visible:after:bg-ring/50",
 				className
 			)}

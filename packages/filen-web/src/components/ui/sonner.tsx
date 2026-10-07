@@ -2,8 +2,14 @@ import { Toaster as Sonner, type ToasterProps } from "sonner"
 import { useTranslation } from "react-i18next"
 import { TOAST_ICONS } from "@/components/ui/toastIcons"
 import { useTheme } from "@/providers/themeProvider"
-import { useToastClearance } from "@/lib/toastClearance"
-import { TOAST_EDGE_OFFSET_PX, TOAST_MOBILE_EDGE_OFFSET_PX, TOAST_WIDTH_PX, toastBottomOffset } from "@/lib/toastClearance.logic"
+import { useToastClearance, useToastSideClearance } from "@/lib/toastClearance"
+import {
+	TOAST_EDGE_OFFSET_PX,
+	TOAST_MOBILE_EDGE_OFFSET_PX,
+	TOAST_WIDTH_PX,
+	toastBottomOffset,
+	toastRightOffset
+} from "@/lib/toastClearance.logic"
 
 // Registry default reads the theme from `next-themes`; this app owns its theme provider, so the
 // import is repointed and `next-themes` is not a dependency. `theme` is "dark" | "light" | "system",
@@ -12,8 +18,10 @@ const Toaster = ({ ...props }: ToasterProps) => {
 	const { theme } = useTheme()
 	const { t } = useTranslation("common")
 	// Flush with the bottom edge unless a registered surface (selection bar, audio player, composer) occupies the
-	// toast corner — then lifted by exactly its measured clearance. Top/left stay sonner's defaults.
+	// toast corner — then lifted by exactly its measured clearance; a panel docked on the right (the
+	// assistant) moves the column left by its width the same way. Top/left stay sonner's defaults.
 	const clearance = useToastClearance()
+	const sideClearance = useToastSideClearance()
 
 	return (
 		<Sonner
@@ -30,7 +38,10 @@ const Toaster = ({ ...props }: ToasterProps) => {
 				} as React.CSSProperties
 			}
 			offset={{
-				right: TOAST_EDGE_OFFSET_PX,
+				right: toastRightOffset({
+					sideClearance,
+					edge: TOAST_EDGE_OFFSET_PX
+				}),
 				bottom: toastBottomOffset({
 					clearance,
 					edge: TOAST_EDGE_OFFSET_PX

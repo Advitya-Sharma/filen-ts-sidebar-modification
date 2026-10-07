@@ -6,6 +6,56 @@ import globals from "globals"
 import { defineConfig, globalIgnores } from "eslint/config"
 import eslintConfigPrettier from "eslint-config-prettier/flat"
 
+const ALIAS_ONLY = {
+	group: ["./*", "../*"],
+	message: 'Use the "@/..." alias instead of a relative import.'
+}
+
+const ASSISTANT_FORBIDDEN =
+	"The assistant acts on model output that text other people wrote can steer, so it never reaches irreversible or security-critical operations."
+
+// The assistant's dispatcher runs calls a model produced, and a shared note or chat message can
+// steer that model. What the assistant can import it may one day call, so permanent deletion,
+// unsharing, leaving, contact removal and blocking, account security, logout and stopping a job
+// with trash are kept out of its reach at the import level, whatever the guard decides at runtime.
+const ASSISTANT_RESTRICTED_PATHS = [
+	{
+		name: "@/features/drive/lib/actions",
+		importNames: ["deleteItemsPermanently", "emptyTrash", "deleteVersion", "deleteVersions", "disableLink", "disableLinks"],
+		message: ASSISTANT_FORBIDDEN
+	},
+	{ name: "@/features/drive/lib/share/actions", importNames: ["unshareItems"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/notes/lib/actions", importNames: ["deleteNote", "leaveNote"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/notes/lib/bulk", importNames: ["deleteNotesPermanently", "leaveNotes"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/notes/lib/tags", importNames: ["deleteNoteTag"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/notes/lib/participants", importNames: ["removeNoteParticipant"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/actions", importNames: ["deleteChat", "leaveChat"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/bulk", importNames: ["deleteChatsPermanently", "leaveChats"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/messageActions", importNames: ["deleteMessage"], message: ASSISTANT_FORBIDDEN },
+	{
+		name: "@/features/chats/lib/participants",
+		importNames: ["removeChatParticipant", "removeChatParticipants"],
+		message: ASSISTANT_FORBIDDEN
+	},
+	{ name: "@/features/audio/lib/playlists", importNames: ["deletePlaylistAction"], message: ASSISTANT_FORBIDDEN },
+	{
+		name: "@/features/contacts/lib/actions",
+		importNames: ["denyRequest", "blockContact", "blockContactByEmail", "toggleParticipantBlocked", "removeContact"],
+		message: ASSISTANT_FORBIDDEN
+	},
+	// requestJobCancel's "trash" mode deletes what a job already wrote.
+	{ name: "@/features/transfers/lib/control", importNames: ["requestJobCancel"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/lib/logout", message: ASSISTANT_FORBIDDEN }
+]
+
+const ASSISTANT_RESTRICTED_PATTERNS = [
+	ALIAS_ONLY,
+	{
+		group: ["@/features/settings/components/security/*", "@/features/settings/components/account/*", "@/features/auth/**"],
+		message: ASSISTANT_FORBIDDEN
+	}
+]
+
 export default defineConfig([
 	globalIgnores([
 		"dist",
@@ -69,15 +119,28 @@ export default defineConfig([
 		// scripts/*, and vite/* live outside the alias's mapped root and need relative imports.
 		files: ["src/**/*.{ts,tsx}"],
 		rules: {
+			"no-restricted-imports": ["error", { patterns: [ALIAS_ONLY] }]
+		}
+	},
+	{
+		files: ["src/features/assistant/**/*.{ts,tsx}"],
+		rules: {
+			"no-restricted-imports": ["error", { paths: ASSISTANT_RESTRICTED_PATHS, patterns: ASSISTANT_RESTRICTED_PATTERNS }]
+		}
+	},
+	{
+		// Tools run every call through the feature modules the user's own actions use, never the raw SDK
+		// worker, so the assistant gets the same caches, toasts and confirmations the user does.
+		files: ["src/features/assistant/tools/**/*.{ts,tsx}"],
+		rules: {
 			"no-restricted-imports": [
 				"error",
 				{
-					patterns: [
-						{
-							group: ["./*", "../*"],
-							message: 'Use the "@/..." alias instead of a relative import.'
-						}
-					]
+					paths: [
+						...ASSISTANT_RESTRICTED_PATHS,
+						{ name: "@/lib/sdk/client", message: "Assistant tools go through the feature modules the user's actions use." }
+					],
+					patterns: ASSISTANT_RESTRICTED_PATTERNS
 				}
 			]
 		}
