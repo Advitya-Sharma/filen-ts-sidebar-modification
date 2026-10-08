@@ -20,6 +20,7 @@ import {
 	type ToolScope
 } from "@/features/assistant/tools/entities"
 import { AssistantToolError, clipText, isoDate, matchScore, searchTokens } from "@/features/assistant/tools/format"
+import { dateSelection, datesField, emptyDatesNote, selects } from "@/features/assistant/tools/dates"
 
 const LIST_LIMIT = 40
 export const NOTE_MAX_CHARS = 4_000
@@ -67,17 +68,23 @@ function plainContent(note: Note, content: string): string {
 	}
 }
 
+// A date filter applies before the cut, so a period past the first rows (archived notes sort last) is
+// still found. Small models add a period nobody asked for, so one that alone empties a search by words gives
+// way: the notes matching the words come back, with a note that none is dated in the period.
 export const listNotesTool: ToolAdapter = async (input, scope) => {
 	const tokens = searchTokens(optionalString(input, "query") ?? "")
-	const scored = sortNotes(filterNotesByBlockedOwner(await notesQueryRead(), blockedUsers()))
+	const selection = dateSelection(input, ["edited"], scope.calendar)
+	const matching = sortNotes(filterNotesByBlockedOwner(await notesQueryRead(), blockedUsers()))
 		.filter(note => !note.trash)
 		.map(note => ({
 			note,
 			score: tokens.length === 0 ? 0 : matchScore(`${noteTitle(note)} ${note.tags.map(tagDisplayName).join(" ")}`, tokens)
 		}))
 		.filter(({ score }) => tokens.length === 0 || score > 0)
+	const dated = matching.filter(({ note }) => selects(selection, Number(note.editedTimestamp)))
+	const undated = dated.length === 0 && tokens.length > 0 && matching.length > 0 && selection.range !== null
 	// Notes matching every word first, in the sidebar's order; then the rest by how many words they match.
-	const notes = scored.toSorted((a, b) => b.score - a.score).map(({ note }) => note)
+	const notes = (undated ? matching : dated).toSorted((a, b) => b.score - a.score).map(({ note }) => note)
 
 	return {
 		value: {
@@ -96,7 +103,11 @@ export const listNotesTool: ToolAdapter = async (input, scope) => {
 					...(note.archive ? { archived: true } : {})
 				}
 			}),
-			...(notes.length > LIST_LIMIT ? { more: notes.length - LIST_LIMIT } : {})
+			...(notes.length > LIST_LIMIT ? { more: notes.length - LIST_LIMIT } : {}),
+			...(undated ? {} : datesField(selection)),
+			...(undated && selection.range !== null
+				? { note: `None of these is dated ${selection.range}; they match the words at other dates.` }
+				: emptyDatesNote(selection, notes.length, matching.length))
 		}
 	}
 }

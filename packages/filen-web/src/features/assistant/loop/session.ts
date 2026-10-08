@@ -3,7 +3,6 @@ import {
 	AssistantContextError,
 	AssistantMessageTooLongError,
 	estimateTokens,
-	localeWeekStart,
 	runAssistantTurn,
 	type AssistantConfirmationRequest,
 	type AssistantHistoryTurn,
@@ -13,6 +12,7 @@ import {
 	type AssistantTurnResult
 } from "@filen/shared/assistant"
 import type { ToolExecutor } from "@/features/assistant/runtime/executor"
+import { userCalendar } from "@/features/assistant/tools/dates"
 import {
 	endedStep,
 	type AssistantEvent,
@@ -364,7 +364,9 @@ export function createAssistantSession({
 	}): Promise<void> {
 		const release = runtime.hold()
 		const turnConversation = conversation
-		const turn = turnExecutor({ executor, signal: controller.signal })
+		// One calendar per turn: the prompt's date line and every date filter its tools resolve.
+		const calendar = userCalendar()
+		const turn = turnExecutor({ executor, signal: controller.signal, calendar })
 		let segment = 0
 		let segmentHasText = false
 		const steps = turnSteps({ turnId, emit, now })
@@ -467,7 +469,6 @@ export function createAssistantSession({
 				return
 			}
 
-			const clock = Intl.DateTimeFormat().resolvedOptions()
 			const run = runAssistantTurn({
 				model: runtime.model,
 				executor: turn.shared,
@@ -478,9 +479,9 @@ export function createAssistantSession({
 				confirm,
 				nonce,
 				secrets,
-				now: Date.now(),
-				timeZone: clock.timeZone,
-				weekStart: localeWeekStart(clock.locale)
+				now: calendar.now,
+				timeZone: calendar.timeZone,
+				weekStart: calendar.weekStart
 			})
 
 			// Stop ends the turn at once, even while a tool still waits on something that ignores the signal (a

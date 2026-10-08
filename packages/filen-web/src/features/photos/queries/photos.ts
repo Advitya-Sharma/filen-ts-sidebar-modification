@@ -104,12 +104,20 @@ export async function fetchPhotosListing(rootUuid: string): Promise<PhotosListin
 // may have been missed meanwhile.
 const PHOTOS_LISTING_STALE_TIME = 15 * 60 * 1000
 
+// Key, walk and freshness in one place, so a read outside the grid (the assistant) reuses the grid's listing.
+export function photosListingQueryOptions(rootUuid: string) {
+	return {
+		queryKey: photosListingQueryKey(rootUuid),
+		queryFn: () => fetchPhotosListing(rootUuid),
+		staleTime: (query: { queryKey: ReturnType<typeof photosListingQueryKey> }) =>
+			readThisSession.has(query.queryKey[2]) ? PHOTOS_LISTING_STALE_TIME : 0
+	}
+}
+
 export function usePhotosListingQuery(rootUuid: string | null): UseQueryResult<PhotosListing> {
 	return useQuery({
-		queryKey: photosListingQueryKey(rootUuid ?? ""),
-		queryFn: () => fetchPhotosListing(rootUuid ?? ""),
+		...photosListingQueryOptions(rootUuid ?? ""),
 		enabled: rootUuid !== null,
-		staleTime: query => (readThisSession.has(query.queryKey[2]) ? PHOTOS_LISTING_STALE_TIME : 0),
 		refetchOnReconnect: "always"
 	})
 }

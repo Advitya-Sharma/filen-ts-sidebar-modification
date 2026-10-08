@@ -7,11 +7,15 @@ function photosRootQueryKey() {
 	return ["photos", "root"] as const
 }
 
-export function usePhotosRootQuery(): UseQueryResult<string | null> {
-	return useQuery({
+export function photosRootQueryOptions() {
+	return {
 		queryKey: photosRootQueryKey(),
 		queryFn: getPhotosRoot
-	})
+	}
+}
+
+export function usePhotosRootQuery(): UseQueryResult<string | null> {
+	return useQuery(photosRootQueryOptions())
 }
 
 // Called after every write to the kv key (a fresh choice, or a root-gone reset) so every mounted

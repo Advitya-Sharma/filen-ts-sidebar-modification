@@ -965,6 +965,47 @@ describe("assistant session", () => {
 		expect(systems[0]).toContain(week)
 	})
 
+	it("hands every tool call the calendar the turn's date line was written by", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] })
+		vi.setSystemTime(new Date(2025, 9, 7, 23, 59, 59))
+
+		try {
+			const systems: string[] = []
+			const model = new ScriptedModel({ route: "files read", steps: [call("list_directory", { path: "/" }), "Done."] })
+			const generate = model.generate.bind(model)
+
+			model.generate = (request, options) => {
+				systems.push(request.messages[0]?.content ?? "")
+
+				return generate(request, options)
+			}
+
+			const executor = fakeExecutor({ list_directory: { items: [] } })
+			const calendars: (number | undefined)[] = []
+			const execute = executor.execute.bind(executor)
+
+			executor.execute = call => {
+				calendars.push(call.calendar?.now)
+				// Midnight passes while the turn runs.
+				vi.setSystemTime(new Date(2025, 9, 8, 0, 0, 30))
+
+				return execute(call)
+			}
+
+			const session = createAssistantSession({ runtime: fakeRuntime(model), executor })
+			const events: AssistantEvent[] = []
+
+			session.subscribe(event => events.push(event))
+			session.send("What is in my drive?")
+			await waitFor(events, event => event.type === "turn-end")
+
+			expect(calendars).toEqual([new Date(2025, 9, 7, 23, 59, 59).getTime()])
+			expect(systems.some(system => system.includes("2025-10-07"))).toBe(true)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
 	it("reads back only the newest exchanges that fit the history budget, always the last", () => {
 		const long = "word ".repeat(1500)
 		const exchanges = [

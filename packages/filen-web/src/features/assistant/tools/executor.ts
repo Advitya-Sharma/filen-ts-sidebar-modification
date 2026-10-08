@@ -29,6 +29,8 @@ import { assistantRouter } from "@/features/assistant/tools/navigation"
 import { navigateToRoute, UNAVAILABLE_ROUTES, type AssistantRouteName } from "@/features/assistant/tools/routes"
 import { getItemInfoTool, listDirectoryTool, readTextFileTool, revealItemTool, searchItemsTool } from "@/features/assistant/tools/drive"
 import { listNotesTool, openNoteTool, readNoteTool } from "@/features/assistant/tools/notes"
+import { getStorageTool, listPhotosTool, recentItemsTool } from "@/features/assistant/tools/insights"
+import { userCalendar, type UserCalendar } from "@/features/assistant/tools/dates"
 import {
 	draftChatMessageTool,
 	draftChatProblem,
@@ -157,6 +159,9 @@ const ADAPTERS: Partial<Record<AssistantToolName, ToolAdapter>> = {
 	search_items: searchItemsTool,
 	list_directory: listDirectoryTool,
 	get_item_info: getItemInfoTool,
+	recent_items: recentItemsTool,
+	list_photos: listPhotosTool,
+	get_storage: getStorageTool,
 	read_text_file: readTextFileTool,
 	reveal_item: revealItemTool,
 	list_notes: listNotesTool,
@@ -228,11 +233,13 @@ export function createAssistantToolExecutor(): ToolExecutor {
 	function scopeFor(
 		signal: AssistantSignal | undefined,
 		shown: Map<string, AssistantHandleRef>,
-		progress?: (progress: AssistantToolProgress) => void
+		progress?: (progress: AssistantToolProgress) => void,
+		calendar: UserCalendar = userCalendar()
 	): ToolScope {
 		return {
 			registry,
 			signal,
+			calendar,
 			progress,
 			show: (entity, name) => {
 				const ref = registry.register(entity, name)
@@ -332,9 +339,9 @@ export function createAssistantToolExecutor(): ToolExecutor {
 			}
 		},
 
-		execute: async ({ tool, args, confirmed, signal, onProgress }) => {
+		execute: async ({ tool, args, confirmed, signal, onProgress, calendar }) => {
 			const shown = new Map<string, AssistantHandleRef>()
-			const scope = scopeFor(signal, shown, onProgress)
+			const scope = scopeFor(signal, shown, onProgress, calendar)
 			const adapter = ADAPTERS[tool.name as AssistantToolName]
 
 			if (adapter === undefined) {

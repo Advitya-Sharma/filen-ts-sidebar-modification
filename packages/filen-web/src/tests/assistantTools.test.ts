@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { QueryClient } from "@tanstack/react-query"
 import type { RegisteredRouter } from "@tanstack/react-router"
 import type { Chat, ChatMessage, Dir, File, Note, UserInfo } from "@filen/sdk-rs"
@@ -82,6 +82,9 @@ import { forgetTabEditor, seedTabEditor, tabEditorChanged } from "@/features/not
 import { setAssistantRouter } from "@/features/assistant/tools/navigation"
 import { createAssistantToolExecutor } from "@/features/assistant/tools/executor"
 import { SEARCH_CAP_MS } from "@/features/assistant/tools/drive"
+import { userCalendar } from "@/features/assistant/tools/dates"
+import { photosListingQueryOptions } from "@/features/photos/queries/photos"
+import { photosRootQueryOptions } from "@/features/photos/queries/root"
 import type { AssistantToolExecution, ToolExecutor } from "@/features/assistant/runtime/executor"
 
 const ROOT = testUuid("root")
@@ -781,6 +784,257 @@ describe("open_route", () => {
 
 		expect(result.ok).toBe(false)
 		expect(router.navigate).not.toHaveBeenCalled()
+	})
+})
+
+describe("date filters and insights", () => {
+	// Local noon, so the days below are the same in every runner's zone.
+	const day = (date: number) => BigInt(new Date(2025, 9, date, 12).getTime())
+
+	function dated(raw: File, modified: bigint, uploaded = modified): File {
+		return {
+			...raw,
+			timestamp: uploaded,
+			meta: raw.meta.type === "decoded" ? { ...raw.meta, data: { ...raw.meta.data, modified } } : raw.meta
+		}
+	}
+
+	const report = dated(rawFile(testUuid("report"), "report.pdf", testUuid("docs"), "application/pdf", 5_000_000n), day(1))
+	const photo = dated(
+		rawFile(testUuid("photo"), "photo.jpg", testUuid("docs"), "image/jpeg", 2_000n),
+		BigInt(new Date(2024, 0, 2).getTime()),
+		day(6)
+	)
+	const memo = dated(rawFile(testUuid("memo"), "memo.txt", testUuid("docs"), "text/plain", 300n), day(7))
+
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] })
+		vi.setSystemTime(new Date(2025, 9, 8, 12))
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: docs.data.uuid }), [report, photo, memo].map(narrowItem))
+		sdk.listDirectory.mockImplementation((target: { kind: string }) =>
+			Promise.resolve(
+				target.kind === "root"
+					? { dirs: [docsRaw], files: [readmeRaw] }
+					: { dirs: [], files: target.kind === "recents" ? [memo, photo, report] : [report, photo, memo] }
+			)
+		)
+	})
+
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("filters a listing by a period resolved in code and shows the date it went by", async () => {
+		const result = await call("list_directory", { path: "/Docs", period: "yesterday" })
+
+		expect(json(result)).toEqual({
+			directory: { handle: "d1", path: "/Docs" },
+			items: [{ handle: "f1", name: "memo.txt", kind: "file", modified: "2025-10-07" }],
+			dates: "modified 2025-10-07"
+		})
+
+		const uploaded = await call("list_directory", { path: "/Docs", from: "2025-10", date: "uploaded" })
+
+		expect((json(uploaded)["items"] as { name: string }[]).map(item => item.name)).toEqual(["memo.txt", "photo.jpg", "report.pdf"])
+
+		// Days filled in beside "any" change nothing; a filter that alone empties a listing says so.
+		expect(
+			(json(await call("list_directory", { path: "/Docs", period: "any", from: "2030-01-01", kind: "any" }))["items"] as unknown[])
+				.length
+		).toBe(3)
+		expect(json(await call("list_directory", { path: "/Docs", period: "today" }))).toMatchObject({
+			items: [],
+			note: "Nothing is dated 2025-10-08; 3 items are outside those dates."
+		})
+	})
+
+	it("ranks directories by total size with files, reading uncached sizes once, and refuses a day that does not exist", async () => {
+		await call("list_directory", {})
+		sdk.getDirSize.mockResolvedValue({ size: 9_000_000n, files: 3n, dirs: 0n })
+
+		const largest = await call("list_directory", { path: "/", sort: "largest" })
+
+		expect((json(largest)["items"] as { name: string; size?: string }[]).map(item => [item.name, item.size])).toEqual([
+			["Docs", "8.58 MiB"],
+			["readme.md", "64 B"]
+		])
+		expect(json(largest)["note"]).toBeUndefined()
+
+		// The size landed under the info dialog's key: the next sort reads no size again.
+		await call("list_directory", { path: "/", sort: "smallest" })
+		expect(sdk.getDirSize).toHaveBeenCalledTimes(1)
+
+		const newest = await call("list_directory", { path: "/Docs", sort: "oldest", kind: "file" })
+
+		expect((json(newest)["items"] as { name: string }[]).map(item => item.name)).toEqual(["photo.jpg", "report.pdf", "memo.txt"])
+		expect(await call("list_directory", { path: "/Docs", to: "2025-02-30" })).toMatchObject({ ok: false, invalid: true })
+	})
+
+	it("lists a directory whose size cannot be read last, and says so", async () => {
+		sdk.getDirSize.mockRejectedValue(new Error("offline"))
+
+		const largest = await call("list_directory", { path: "/", sort: "largest" })
+
+		expect((json(largest)["items"] as { name: string; size?: string }[]).map(item => [item.name, item.size])).toEqual([
+			["readme.md", "64 B"],
+			["Docs", undefined]
+		])
+		expect(json(largest)["note"]).toBe("1 directory's size is not loaded; it is listed last. get_item_info gives a directory's size.")
+	})
+
+	it("filters by the created date, the one item info shows", async () => {
+		const created = {
+			...memo,
+			meta: memo.meta.type === "decoded" ? { ...memo.meta, data: { ...memo.meta.data, created: day(2) } } : memo.meta
+		}
+
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: docs.data.uuid }), [report, photo, created].map(narrowItem))
+		sdk.listDirectory.mockResolvedValue({ dirs: [], files: [report, photo, created] })
+
+		const result = await call("list_directory", {
+			path: "/Docs",
+			period: "custom",
+			from: "2025-10-02",
+			to: "2025-10-02",
+			date: "created"
+		})
+
+		expect(json(result)).toMatchObject({ items: [{ name: "memo.txt", created: "2025-10-02" }], dates: "created 2025-10-02" })
+		expect(json(await call("get_item_info", { handle: "f1" }))).toMatchObject({ created: "2025-10-02", modified: "2025-10-07" })
+	})
+
+	it("resolves periods by the turn's calendar, not the clock at the call", async () => {
+		vi.setSystemTime(new Date(2025, 9, 7, 23, 59, 50))
+
+		const calendar = userCalendar()
+		const tool = assistantToolByName("list_directory")
+
+		vi.setSystemTime(new Date(2025, 9, 8, 0, 0, 10))
+
+		if (tool === undefined) {
+			throw new Error("no list_directory")
+		}
+
+		const args = { path: "/Docs", period: "today" }
+		const checked = await executor.check({ callId: "call", tool, args })
+
+		if (!checked.ok) {
+			throw new Error(checked.error)
+		}
+
+		const result = await executor.execute({
+			callId: "call",
+			tool,
+			args: checked.args,
+			confirmed: false,
+			signal: new AbortController().signal,
+			calendar
+		})
+
+		expect(json(result)).toMatchObject({ items: [{ name: "memo.txt" }], dates: "modified 2025-10-07" })
+	})
+
+	it("lists recent uploads through the Recents listing, by upload date, with paths the cache knows", async () => {
+		const result = await call("recent_items", { kind: "image" })
+
+		expect(json(result)).toEqual({
+			items: [{ handle: "f1", name: "photo.jpg", kind: "file", path: "/Docs/photo.jpg", uploaded: "2025-10-06" }]
+		})
+
+		const largest = await call("recent_items", { period: "this_month", sort: "largest" })
+
+		expect((json(largest)["items"] as { name: string }[]).map(item => item.name)).toEqual(["report.pdf", "photo.jpg", "memo.txt"])
+
+		const lastYear = await call("recent_items", { period: "last_year" })
+
+		// Recents' window is not known, so a period reaching past its oldest upload says what the list holds, and
+		// the empty-filter note stays.
+		expect(json(lastYear)).toEqual({
+			items: [],
+			dates: "uploaded 2024-01-01 to 2024-12-31",
+			note: "Nothing is dated 2024-01-01 to 2024-12-31; 3 items are outside those dates. Recents reaches back to uploads of 2025-10-01; a file uploaded earlier would not be listed here."
+		})
+		// A period inside what Recents holds gets no such note.
+		expect(json(await call("recent_items", { period: "this_week" }))["note"]).toBeUndefined()
+		// One read serves the turn's calls.
+		expect(sdk.listDirectory.mock.calls.filter(([target]) => (target as { kind: string }).kind === "recents")).toHaveLength(1)
+	})
+
+	it("lists the Photos timeline the grid holds by the date taken, newest first", async () => {
+		const root = testUuid("photosRoot")
+		const shot = (name: string, mime: string, taken: number) =>
+			narrowItem(dated(rawFile(testUuid(name), name, root, mime, 1_000n), BigInt(new Date(2024, 4, taken, 12).getTime())))
+
+		queryClient.setQueryData(photosRootQueryOptions().queryKey, root)
+		queryClient.setQueryData(photosListingQueryOptions(root).queryKey, {
+			photos: [shot("clip.mp4", "video/mp4", 20), shot("beach.jpg", "image/jpeg", 12), shot("old.jpg", "image/jpeg", 1)],
+			folders: {}
+		})
+
+		expect(json(await call("list_photos", { period: "custom", from: "2024-05-10", to: "2024-05-31" }))).toEqual({
+			photos: [
+				{ handle: "f1", name: "clip.mp4", taken: "2024-05-20" },
+				{ handle: "f2", name: "beach.jpg", taken: "2024-05-12" }
+			],
+			dates: "taken 2024-05-10 to 2024-05-31"
+		})
+		expect(
+			(json(await call("list_photos", { kind: "image", sort: "oldest" }))["photos"] as { name: string }[]).map(p => p.name)
+		).toEqual(["old.jpg", "beach.jpg"])
+		expect(json(await call("list_photos", { period: "today" }))).toMatchObject({
+			photos: [],
+			note: "Nothing is dated 2025-10-08; 3 items are outside those dates."
+		})
+	})
+
+	it("says when Photos has no directory yet", async () => {
+		queryClient.setQueryData(photosRootQueryOptions().queryKey, null)
+
+		expect(await call("list_photos", {})).toMatchObject({ ok: false })
+	})
+
+	it("filters notes by their edited date before the list is cut, archived ones included", async () => {
+		const edited = (uuid: string, title: string, date: Date, extra: Partial<Note> = {}) =>
+			note(uuid, title, { editedTimestamp: BigInt(date.getTime()), ...extra })
+		const recent = Array.from({ length: 45 }, (_, index) =>
+			edited(testUuid(`recent${String(index)}`), `Recent ${String(index)}`, new Date(2025, 9, 7, 12))
+		)
+
+		sdk.listNotes.mockResolvedValue([
+			...recent,
+			edited(testUuid("march"), "March plan", new Date(2025, 2, 10, 12)),
+			edited(testUuid("archived"), "Old idea", new Date(2025, 2, 20, 12), { archive: true })
+		])
+
+		const march = await call("list_notes", { period: "custom", from: "2025-03", to: "2025-03" })
+
+		expect((json(march)["notes"] as { title: string }[]).map(note => note.title).sort()).toEqual(["March plan", "Old idea"])
+		expect(json(march)["dates"]).toBe("edited 2025-03-01 to 2025-03-31")
+		expect(json(await call("list_notes", {}))["more"]).toBe(7)
+
+		// A period that alone empties a search by words gives way to the word matches.
+		expect(json(await call("list_notes", { query: "march", period: "this_week" }))).toMatchObject({
+			notes: [{ title: "March plan" }],
+			note: "None of these is dated 2025-10-06 to 2025-10-12; they match the words at other dates."
+		})
+	})
+
+	it("reads storage from the account the app holds", async () => {
+		queryClient.setQueryData<Partial<UserInfo>>(ACCOUNT_QUERY_KEY, {
+			id: ME,
+			rootDirUuid: ROOT,
+			storageUsed: 3n * 1024n ** 3n,
+			maxStorage: 10n * 1024n ** 3n,
+			versionedStorage: 512n * 1024n ** 2n
+		})
+
+		expect(json(await call("get_storage", {}))).toEqual({
+			used: "3 GiB",
+			total: "10 GiB",
+			free: "7 GiB",
+			usedPercent: 30,
+			versions: "512 MiB"
+		})
 	})
 })
 

@@ -24,12 +24,15 @@ import { playlistsQueryGet } from "@/features/audio/queries/playlists"
 import { AssistantToolError, matchScore, sameName, searchTokens } from "@/features/assistant/tools/format"
 import type { AssistantEntity, AssistantEntityKind, AssistantHandleRegistry } from "@/features/assistant/tools/handles"
 import type { AssistantHandleRef, AssistantUiEffect } from "@/features/assistant/runtime/executor"
+import type { UserCalendar } from "@/features/assistant/tools/dates"
 
 // What an adapter gets for one call. `show` registers an item and records that the result mentions it,
 // which is what the guard learns handles from. `progress` reports how far a long call got, for its step.
 export interface ToolScope {
 	registry: AssistantHandleRegistry
 	signal: AssistantSignal | undefined
+	// The turn's calendar, which date filters resolve by.
+	calendar: UserCalendar
 	show: (entity: AssistantEntity, name: string) => string
 	progress?: ((progress: AssistantToolProgress) => void) | undefined
 }

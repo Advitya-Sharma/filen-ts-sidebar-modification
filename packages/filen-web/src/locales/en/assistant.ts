@@ -209,6 +209,8 @@ export const assistant = {
 	assistantStepRouting: "Reading your request",
 	/** Step — the request was understood as being about files and directories */
 	assistantStepRoutedFiles: "Working with your files",
+	/** Step — the request was understood as asking about recent files, file sizes or storage space */
+	assistantStepRoutedInsights: "Looking into your drive",
 	/** Step — the request was understood as creating, renaming, moving or copying files */
 	assistantStepRoutedOrganize: "Organizing your files",
 	/** Step — the request was understood as being about the trash */
@@ -333,6 +335,12 @@ export const assistant = {
 	assistantToolListDirectory: "Listing a directory",
 	/** Activity — get_item_info */
 	assistantToolGetItemInfo: "Checking item details",
+	/** Activity — recent_items */
+	assistantToolRecentItems: "Checking your recent files",
+	/** Activity — list_photos */
+	assistantToolListPhotos: "Looking through your photos",
+	/** Activity — get_storage */
+	assistantToolGetStorage: "Checking your storage space",
 	/** Activity — read_text_file */
 	assistantToolReadTextFile: "Reading a file",
 	/** Activity — reveal_item */

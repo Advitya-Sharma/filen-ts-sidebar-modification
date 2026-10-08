@@ -6,6 +6,7 @@ import type {
 	AssistantToolOutcome,
 	AssistantToolProgress
 } from "@filen/shared/assistant"
+import type { UserCalendar } from "@/features/assistant/tools/dates"
 
 // The web app's side of the agent loop (@filen/shared/assistant's loop): the loop owns routing, the
 // guard and the model; the executor owns everything that touches the app. The implementation is
@@ -48,6 +49,7 @@ export type AssistantToolPreview =
 	  }
 
 export interface ToolExecutor extends AssistantToolExecutor {
+	// `calendar`: the turn's, which its prompt's date line was written by; the current one when absent.
 	execute(call: {
 		callId: string
 		tool: AssistantTool
@@ -55,6 +57,7 @@ export interface ToolExecutor extends AssistantToolExecutor {
 		confirmed: boolean
 		signal: AssistantSignal
 		onProgress?: (progress: AssistantToolProgress) => void
+		calendar?: UserCalendar
 	}): Promise<AssistantToolExecution>
 	preview(call: { tool: AssistantTool; args: Record<string, unknown> }): Promise<AssistantToolPreview>
 	// A new conversation: forgets every handle. `history` is a resumed conversation's exchanges, whose replies

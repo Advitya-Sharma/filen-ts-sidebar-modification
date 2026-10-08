@@ -69,7 +69,7 @@ const STEP_TIMES = { status: STEP_STATUS, startedAt: "number", endedAt: "number 
 const storedStepSchema = type({ kind: "'loading' | 'thinking' | 'replying'", ...STEP_TIMES })
 	.or({
 		kind: "'routing'",
-		route: "'files' | 'organize' | 'trash' | 'notes' | 'chats' | 'audio' | 'navigation' | 'answer' | null",
+		route: "'files' | 'insights' | 'organize' | 'trash' | 'notes' | 'chats' | 'audio' | 'navigation' | 'answer' | null",
 		...STEP_TIMES
 	})
 	.or({

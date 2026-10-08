@@ -1,8 +1,16 @@
 import { driveItemName, fastLocaleCompare, formatBytes } from "@filen/shared"
 import { MAX_ARRAY_ITEMS, type AssistantSignal } from "@filen/shared/assistant"
+import type { DirSizeResponse } from "@filen/sdk-rs"
 import { log } from "@/lib/log"
 import { queryClient } from "@/queries/client"
-import { cachedListing, directorySizeQueryOptions, fetchItemInfo, itemInfoQueryKey } from "@/features/drive/queries/drive"
+import {
+	cachedListing,
+	directorySizeQueryKey,
+	directorySizeQueryOptions,
+	fetchItemInfo,
+	itemInfoQueryKey,
+	type DirectorySizeItem
+} from "@/features/drive/queries/drive"
 import { asDirectoryOrFile, driveItemMime, isDirectoryItem, lastModifiedOf, narrowItem, type DriveItem } from "@/features/drive/lib/item"
 import { decodeUtf8, extensionOf, looksBinary, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
 import { defaultRevealDeps, resolveContainingDirectoryTarget } from "@/features/drive/lib/reveal"
@@ -41,6 +49,7 @@ import {
 	throwIfStopped
 } from "@/features/assistant/tools/format"
 import { ROOT_HANDLE, type AssistantEntity } from "@/features/assistant/tools/handles"
+import { dateSelection, datesField, emptyDatesNote, selects, type DateSelection } from "@/features/assistant/tools/dates"
 
 const SEARCH_LIMIT = 12
 // How long a turn's searches may wait for the drive's index in all: a first index of a very large drive
@@ -70,8 +79,10 @@ const KIND_CATEGORIES: Record<string, ReadonlySet<PreviewCategory>> = {
 	document: new Set(["pdf", "docx", "spreadsheet", "text", "markdown"])
 }
 
-function matchesKind(item: DriveItem, kind: string | undefined): boolean {
-	if (kind === undefined) {
+export const DRIVE_DATE_FIELDS = ["modified", "uploaded", "created"] as const
+
+export function matchesKind(item: DriveItem, kind: string | undefined): boolean {
+	if (kind === undefined || kind === "any") {
 		return true
 	}
 
@@ -80,6 +91,144 @@ function matchesKind(item: DriveItem, kind: string | undefined): boolean {
 	}
 
 	return !isDirectoryItem(item) && (KIND_CATEGORIES[kind]?.has(previewType(item)) ?? false)
+}
+
+// The file's own creation date where the uploader recorded one, else when it reached the drive: what the info
+// dialog shows as created.
+export function createdOf(item: DriveItem): bigint {
+	return asDirectoryOrFile(item).data.decryptedMeta?.created ?? item.data.timestamp
+}
+
+// "uploaded" is the server's own upload time; "modified" what the drive's Modified column shows.
+export function driveDate(item: DriveItem, field: string): number {
+	return Number(field === "uploaded" ? item.data.timestamp : field === "created" ? createdOf(item) : lastModifiedOf(item))
+}
+
+export function inDriveSelection(item: DriveItem, selection: DateSelection): boolean {
+	return selects(selection, driveDate(item, selection.field))
+}
+
+export type ListingSort = "name" | "largest" | "smallest" | "newest" | "oldest"
+
+const byItemName = (a: DriveItem, b: DriveItem) => fastLocaleCompare(driveItemName(a), driveItemName(b))
+
+function byKey(key: (item: DriveItem) => number, ascending: boolean): (a: DriveItem, b: DriveItem) => number {
+	return (a, b) => (ascending ? key(a) - key(b) : key(b) - key(a)) || byItemName(a, b)
+}
+
+// A size order ranks files and directories together, a directory by its total size (`directorySizes`), and
+// puts directories of unknown size last by name: ranked as empty they would read as the smallest. A date
+// order lists files first, since a directory's dates are when it was made.
+export function sortListing(
+	items: readonly DriveItem[],
+	sort: ListingSort,
+	field: string,
+	directorySizes: ReadonlyMap<string, number> = new Map()
+): DriveItem[] {
+	if (sort === "name") {
+		return items.toSorted((a, b) => Number(isDirectoryItem(b)) - Number(isDirectoryItem(a)) || byItemName(a, b))
+	}
+
+	if (sort === "largest" || sort === "smallest") {
+		const size = (item: DriveItem) => (isDirectoryItem(item) ? directorySizes.get(item.data.uuid) : Number(item.data.size))
+		const unknown = items.filter(item => size(item) === undefined)
+
+		return [
+			...items.filter(item => size(item) !== undefined).sort(byKey(item => size(item) ?? 0, sort === "smallest")),
+			...unknown.sort(byItemName)
+		]
+	}
+
+	const order = byKey(item => driveDate(item, field), sort === "oldest")
+
+	return [...items.filter(item => !isDirectoryItem(item)).sort(order), ...items.filter(item => isDirectoryItem(item)).sort(order)]
+}
+
+// How many directories of a size-sorted listing may have their size read when the cache lacks it: each is a
+// server-side walk of the directory. The info dialog's query, so the drive's size column reuses them.
+export const DIRECTORY_SIZE_READS = 12
+
+// The total sizes of the listing's directories, from the cache or read once; `unknown` counts those left out.
+export async function directorySizes(items: readonly DriveItem[]): Promise<{ sizes: Map<string, number>; unknown: number }> {
+	const sizes = new Map<string, number>()
+	const missing: DirectorySizeItem[] = []
+	let unknown = 0
+
+	for (const item of items) {
+		if (!isDirectoryItem(item)) {
+			continue
+		}
+
+		const cached = queryClient.getQueryData<DirSizeResponse>(directorySizeQueryKey(item.data.uuid))
+
+		if (cached !== undefined) {
+			sizes.set(item.data.uuid, Number(cached.size))
+		} else if (missing.length < DIRECTORY_SIZE_READS) {
+			missing.push(item)
+		} else {
+			unknown++
+		}
+	}
+
+	const read = await Promise.all(
+		missing.map(item =>
+			queryClient.query(directorySizeQueryOptions(item)).then(
+				result => Number(result.size),
+				() => undefined
+			)
+		)
+	)
+
+	missing.forEach((item, index) => {
+		const size = read[index]
+
+		if (size === undefined) {
+			unknown++
+		} else {
+			sizes.set(item.data.uuid, size)
+		}
+	})
+
+	return { sizes, unknown }
+}
+
+export function joinNotes(...notes: { note?: string }[]): { note?: string } {
+	const text = notes.flatMap(({ note }) => (note === undefined ? [] : [note])).join(" ")
+
+	return text.length === 0 ? {} : { note: text }
+}
+
+export function unknownSizesNote(unknown: number): { note?: string } {
+	return unknown === 0
+		? {}
+		: {
+				note:
+					unknown === 1
+						? "1 directory's size is not loaded; it is listed last. get_item_info gives a directory's size."
+						: `${String(unknown)} directories' sizes are not loaded; they are listed last. get_item_info gives a directory's size.`
+			}
+}
+
+// What a filtered or sorted listing adds to each row: the date it went by, the size it sorted by.
+export function listingFields(
+	item: DriveItem,
+	{ date, size, directorySizes: known }: { date: string | null; size: boolean; directorySizes?: ReadonlyMap<string, number> }
+): Record<string, string> {
+	const fields: Record<string, string> = {}
+
+	if (date !== null) {
+		fields[date] = isoDate(driveDate(item, date))
+	}
+
+	if (size) {
+		const bytes = isDirectoryItem(item) ? known?.get(item.data.uuid) : Number(item.data.size)
+
+		if (bytes !== undefined) {
+			fields["size"] = formatBytes(bytes)
+		}
+	}
+
+	return fields
 }
 
 function hitPath(parentPath: string | undefined, name: string): string {
@@ -169,6 +318,7 @@ function searchNote(engine: DriveSearchOnceResult | null): string | null {
 export const searchItemsTool: ToolAdapter = async (input, scope) => {
 	const kind = optionalString(input, "kind")
 	const query = requiredString(input, "query")
+	const selection = dateSelection(input, DRIVE_DATE_FIELDS, scope.calendar)
 	const tokens = searchTokens(query)
 	const words = engineTokens(rawSearchTokens(query), ENGINE_WORDS)
 
@@ -192,10 +342,11 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 	}
 
 	const wanted = normalizeText(query.trim())
-	const scored = [...pool.values()]
+	const matching = [...pool.values()]
 		.filter(({ item }) => !item.data.undecryptable && matchesKind(item, kind))
 		.map(row => ({ ...row, score: matchScore(driveItemName(row.item), tokens) }))
 		.filter(({ score }) => score > 0)
+	const scored = matching.filter(({ item }) => inDriveSelection(item, selection))
 	const all = scored.filter(({ score }) => score === tokens.length)
 	// The exact name first, then the shortest names (the fewest extra words), then the newest.
 	const ranked = (all.length > 0 ? all : scored)
@@ -216,10 +367,12 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 				handle: showDrive(scope, item, path),
 				name: driveName(item),
 				kind: driveKind(item),
-				...(path === undefined ? {} : { path })
+				...(path === undefined ? {} : { path }),
+				...listingFields(item, { date: selection.range === null ? null : selection.field, size: false })
 			})),
 			...(shown > SEARCH_LIMIT ? { more: shown - SEARCH_LIMIT } : {}),
-			...(note === null ? {} : { note })
+			...datesField(selection),
+			...(note === null ? emptyDatesNote(selection, scored.length, matching.length) : { note })
 		}
 	}
 }
@@ -268,6 +421,10 @@ async function directoryEntity(input: Record<string, unknown>, scope: ToolScope)
 }
 
 export const listDirectoryTool: ToolAdapter = async (input, scope) => {
+	const selection = dateSelection(input, DRIVE_DATE_FIELDS, scope.calendar)
+	const kind = optionalString(input, "kind")
+	// The loop validated it against the enum.
+	const sort = (optionalString(input, "sort") ?? "name") as ListingSort
 	const entity = await directoryEntity(input, scope)
 	let uuid: string | null = null
 	let directory: { handle: string; path: string | undefined } = { handle: ROOT_HANDLE, path: "/" }
@@ -296,11 +453,19 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 		scope.show({ kind: "root" }, "/")
 	}
 
-	const items = [...(await readDriveListing(uuid))].sort(
-		(a, b) => Number(isDirectoryItem(b)) - Number(isDirectoryItem(a)) || fastLocaleCompare(driveItemName(a), driveItemName(b))
-	)
+	const listing = await readDriveListing(uuid)
 
 	throwIfStopped(scope)
+
+	const ofKind = listing.filter(item => matchesKind(item, kind))
+	const kept = ofKind.filter(item => inDriveSelection(item, selection))
+	const byDate = selection.range !== null || sort === "newest" || sort === "oldest"
+	const bySize = sort === "largest" || sort === "smallest"
+	const sizes = bySize ? await directorySizes(kept) : { sizes: new Map<string, number>(), unknown: 0 }
+
+	throwIfStopped(scope)
+
+	const items = sortListing(kept, sort, selection.field, sizes.sizes)
 
 	return {
 		value: {
@@ -308,9 +473,12 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 			items: items.slice(0, LIST_LIMIT).map(item => ({
 				handle: showDrive(scope, item, directory.path === undefined ? undefined : joinPath(directory.path, driveItemName(item))),
 				name: driveName(item),
-				kind: driveKind(item)
+				kind: driveKind(item),
+				...listingFields(item, { date: byDate ? selection.field : null, size: bySize, directorySizes: sizes.sizes })
 			})),
-			...(items.length > LIST_LIMIT ? { more: items.length - LIST_LIMIT } : {})
+			...(items.length > LIST_LIMIT ? { more: items.length - LIST_LIMIT } : {}),
+			...datesField(selection),
+			...joinNotes(emptyDatesNote(selection, items.length, ofKind.length), unknownSizesNote(sizes.unknown))
 		}
 	}
 }
@@ -343,6 +511,8 @@ export const getItemInfoTool: ToolAdapter = async (input, scope) => {
 	}
 
 	const mime = driveItemMime(item)
+	const created = isoDate(createdOf(item))
+	const modified = isoDate(lastModifiedOf(item))
 	// Only what the row itself says: an owned item's outgoing shares and links would cost a request each, so
 	// its sharing state is left out rather than reported as "not shared".
 	const sharedWithYou = item.type !== "directory" && item.type !== "file"
@@ -356,8 +526,9 @@ export const getItemInfoTool: ToolAdapter = async (input, scope) => {
 			...(size === undefined ? {} : { size }),
 			// The uploader's own MIME type: untrusted text, under a key the loop sanitizes.
 			...(mime === undefined || mime === "" ? {} : { mime }),
-			created: isoDate(item.data.decryptedMeta?.created ?? item.data.timestamp),
-			modified: isoDate(lastModifiedOf(item)),
+			// One date where both fall on the same day: a second one only invites a small model to compare them.
+			...(created === modified ? {} : { created }),
+			modified,
 			favorite: item.data.favorited,
 			...(sharedWithYou ? { sharedWithYou: true } : {}),
 			...(trashed ? { trashed: true } : {})

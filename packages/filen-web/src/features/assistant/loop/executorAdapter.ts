@@ -1,6 +1,7 @@
 import { isConsequentialTool, type AssistantSignal, type AssistantTool, type AssistantToolExecutor } from "@filen/shared/assistant"
 import type { AssistantToolExecution, AssistantToolPreview, ToolExecutor } from "@/features/assistant/runtime/executor"
 import type { AssistantProposal, AssistantProposalAction } from "@/features/assistant/types"
+import type { UserCalendar } from "@/features/assistant/tools/dates"
 
 // The confirmation card a consequential tool gets. A consequential tool without one cannot run at all.
 export function proposalAction({ tool, args }: { tool: string; args: Record<string, unknown> }): AssistantProposalAction | null {
@@ -66,11 +67,19 @@ export interface TurnExecutor {
 
 // The app's ToolExecutor for one turn: every call gets the turn's signal, a confirmed call can be started
 // before the loop resumes, and a consequential tool the UI has no card for is refused at the check.
-export function turnExecutor({ executor, signal }: { executor: ToolExecutor; signal: AssistantSignal }): TurnExecutor {
+export function turnExecutor({
+	executor,
+	signal,
+	calendar
+}: {
+	executor: ToolExecutor
+	signal: AssistantSignal
+	calendar: UserCalendar
+}): TurnExecutor {
 	const started = new Map<string, Promise<AssistantToolExecution>>()
 
 	const run = (call: { callId: string; tool: AssistantTool; args: Record<string, unknown>; confirmed: boolean }) =>
-		executor.execute({ ...call, signal })
+		executor.execute({ ...call, signal, calendar })
 
 	return {
 		shared: {

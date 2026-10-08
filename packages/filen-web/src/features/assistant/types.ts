@@ -42,7 +42,7 @@ export type AssistantModelState =
 	| { kind: "error"; error: AssistantModelError; model: AssistantModelInfo | null; partialBytes?: number }
 
 // The tool group the turn was routed to ("answer": no tools), as @filen/shared/assistant names them.
-export type AssistantStepRoute = "files" | "organize" | "trash" | "notes" | "chats" | "audio" | "navigation" | "answer"
+export type AssistantStepRoute = "files" | "insights" | "organize" | "trash" | "notes" | "chats" | "audio" | "navigation" | "answer"
 
 // "queued": a call written and waiting for the calls before it. "waiting": on the user (a confirmation
 // card). "stopped": the turn ended while it ran. "discarded": the model abandoned a call it had started to

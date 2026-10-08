@@ -140,6 +140,7 @@ export function visibleProgress(progress: number | null): number | null {
 
 export const ROUTE_KEYS: Record<AssistantStepRoute, AssistantKey> = {
 	files: "assistantStepRoutedFiles",
+	insights: "assistantStepRoutedInsights",
 	organize: "assistantStepRoutedOrganize",
 	trash: "assistantStepRoutedTrash",
 	notes: "assistantStepRoutedNotes",
@@ -222,6 +223,9 @@ const TOOL_ACTIVITY_KEYS = new Map<string, AssistantKey>([
 	["search_items", "assistantToolSearchItems"],
 	["list_directory", "assistantToolListDirectory"],
 	["get_item_info", "assistantToolGetItemInfo"],
+	["recent_items", "assistantToolRecentItems"],
+	["list_photos", "assistantToolListPhotos"],
+	["get_storage", "assistantToolGetStorage"],
 	["read_text_file", "assistantToolReadTextFile"],
 	["reveal_item", "assistantToolRevealItem"],
 	["set_favorite", "assistantToolSetFavorite"],
