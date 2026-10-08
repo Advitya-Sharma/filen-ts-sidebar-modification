@@ -5,6 +5,7 @@ import {
 	canRemoveModel,
 	downloadByteFigures,
 	downloadPercent,
+	modelShowsLoading,
 	proposalTargetKind,
 	spokenText,
 	toolActivityKey,
@@ -43,9 +44,19 @@ describe("downloadByteFigures", () => {
 	})
 })
 
+describe("modelShowsLoading", () => {
+	it("reads a model on disk as loading while a sent message waits for it, before the runtime says so", () => {
+		expect(modelShowsLoading({ kind: "loading", model: MODEL, verifying: false }, false)).toBe(true)
+		expect(modelShowsLoading({ kind: "downloaded", model: MODEL, idleUnloaded: true }, true)).toBe(true)
+		expect(modelShowsLoading({ kind: "downloaded", model: MODEL, idleUnloaded: true }, false)).toBe(false)
+		expect(modelShowsLoading({ kind: "ready", model: MODEL }, true)).toBe(false)
+		expect(modelShowsLoading({ kind: "error", error: "load-failed", model: MODEL }, true)).toBe(false)
+	})
+})
+
 describe("canRemoveModel", () => {
 	it("offers removal only while the files are on disk", () => {
-		expect(canRemoveModel({ kind: "downloaded", model: MODEL })).toBe(true)
+		expect(canRemoveModel({ kind: "downloaded", model: MODEL, idleUnloaded: false })).toBe(true)
 		expect(canRemoveModel({ kind: "ready", model: MODEL })).toBe(true)
 		expect(canRemoveModel({ kind: "error", error: "load-failed", model: MODEL })).toBe(true)
 		expect(canRemoveModel({ kind: "error", error: "out-of-memory", model: MODEL })).toBe(true)

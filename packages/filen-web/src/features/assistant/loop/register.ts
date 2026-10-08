@@ -5,7 +5,7 @@ import { createAssistantToolExecutor } from "@/features/assistant/tools/executor
 
 // Importing this module (main.tsx) plugs the on-device runtime into the assistant UI. Nothing heavy
 // happens here: once the page is idle the runtime checks the browser's features and lists the model's
-// OPFS file sizes. The worker starts only on a download or when the panel opens with a downloaded model.
+// OPFS file sizes. The worker starts only on a download or a load the user asked for, never on its own.
 export const assistantRuntime = new AssistantRuntime()
 
 export const assistantSession = createAssistantSession({ runtime: assistantRuntime, executor: createAssistantToolExecutor() })

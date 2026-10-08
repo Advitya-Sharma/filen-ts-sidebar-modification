@@ -22,6 +22,12 @@ export function downloadByteFigures(receivedBytes: number, sizeBytes: number): {
 	}
 }
 
+// A sent message waiting for the model reads as loading from the start: the runtime reports "loading" only
+// after it has let an unload in flight finish, asked the GPU and taken the lock.
+export function modelShowsLoading(state: AssistantModelState, turnActive: boolean): boolean {
+	return state.kind === "loading" || (state.kind === "downloaded" && turnActive)
+}
+
 // Files on disk: what "Remove downloaded model" can delete. A failed load still left them there; a
 // failed or full download is the runtime's to clean up.
 export function canRemoveModel(state: AssistantModelState): boolean {

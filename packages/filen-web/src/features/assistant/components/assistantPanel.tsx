@@ -8,7 +8,7 @@ import { useResizableSidebar } from "@/features/shell/hooks/useResizableSidebar"
 import { SidebarResizeHandle } from "@/features/shell/components/sidebarResizeHandle"
 import { SidebarPanelVisibilityProvider } from "@/features/shell/lib/sidebarPanelVisibility"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
-import { trackAssistantPanelShown } from "@/features/assistant/store/assistantSession"
+import { modelAcceptsMessages, trackAssistantPanelShown } from "@/features/assistant/store/assistantSession"
 import { AssistantHeader } from "@/features/assistant/components/assistantHeader"
 import { AssistantSetup } from "@/features/assistant/components/assistantSetup"
 import { AssistantConversation } from "@/features/assistant/components/assistantConversation"
@@ -48,7 +48,7 @@ function AssistantSurface({
 			style={style}
 		>
 			<AssistantHeader onClose={onClose} />
-			{modelState.kind === "ready" ? <AssistantConversation /> : <AssistantSetup state={modelState} />}
+			{modelAcceptsMessages(modelState) ? <AssistantConversation /> : <AssistantSetup state={modelState} />}
 		</aside>
 	)
 }

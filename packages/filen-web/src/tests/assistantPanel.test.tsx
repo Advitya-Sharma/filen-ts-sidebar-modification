@@ -128,12 +128,151 @@ describe("AssistantSidePanel", () => {
 		expect(screen.getByRole("progressbar", { name: "Model download" })).toBeDefined()
 		expect(screen.getByRole("button", { name: "Cancel download" })).toBeDefined()
 
-		// The mock loads a downloaded model by itself because the panel is showing.
+		// Downloaded is not loaded: the composer shows, and the model waits for a message or the Load action.
+		const load = vi.spyOn(session, "loadModel")
+
 		act(() => {
 			vi.runAllTimers()
 		})
 
 		expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toBeDefined()
+		expect(screen.getByRole("button", { name: "Load model" })).toBeDefined()
+		expect(useAssistantStore.getState().modelState.kind).toBe("downloaded")
+		expect(load).not.toHaveBeenCalled()
+	})
+
+	it("restored open after a reload with the model on disk, shows the composer and loads nothing", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: false })
+
+		const load = vi.spyOn(session, "loadModel")
+		const send = vi.spyOn(session, "send")
+
+		useAssistantStore.setState({ panelOpen: true })
+		render(<AssistantSidePanel />)
+		act(() => {
+			vi.runAllTimers()
+		})
+
+		expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toBeDefined()
+		expect(screen.getByRole("status").textContent).toBe("The model loads when you send a message.")
+		expect(screen.getByText("Not loaded")).toBeDefined()
+		expect(load).not.toHaveBeenCalled()
+		expect(send).not.toHaveBeenCalled()
+		expect(useAssistantStore.getState().modelState.kind).toBe("downloaded")
+	})
+
+	it("says quietly that an idle model was unloaded, and loads it from the Load action", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: true })
+		render(<AssistantSidePanel />)
+
+		expect(screen.getByRole("status").textContent).toBe("Unloaded while unused to free memory. It loads again when you send a message.")
+
+		fireEvent.click(screen.getByRole("button", { name: "Load model" }))
+
+		expect(screen.getByRole("status").textContent).toBe("Loading model…")
+		expect(screen.getByText("Loading")).toBeDefined()
+		expect(screen.queryByRole("button", { name: "Load model" })).toBeNull()
+
+		act(() => {
+			vi.runAllTimers()
+		})
+
+		expect(screen.queryByRole("status")).toBeNull()
+		expect(screen.getByText("On this device")).toBeDefined()
+	})
+
+	it("keeps focus in the panel when the Load action that had it goes away", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: false })
+		render(<AssistantSidePanel />)
+
+		const load = screen.getByRole("button", { name: "Load model" })
+
+		load.focus()
+		fireEvent.click(load)
+
+		expect(screen.queryByRole("button", { name: "Load model" })).toBeNull()
+		expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Ask the assistant" }))
+	})
+
+	it("reads as loading in the header too while a sent message waits for the runtime to start the load", () => {
+		withSession({ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: false })
+		render(<AssistantSidePanel />)
+
+		const heading = screen.getByRole("heading", { name: "Assistant" })
+
+		expect(heading.nextElementSibling?.textContent).toBe("Not loaded")
+
+		act(() => {
+			useAssistantStore.setState({ activeTurnId: "turn-1" })
+		})
+
+		expect(heading.nextElementSibling?.textContent).toBe("Loading")
+		expect(screen.getByRole("status").textContent).toBe("Loading model…")
+	})
+
+	it("loads the model for a sent message, showing it is loading, then answers", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: true })
+		render(<AssistantSidePanel />)
+
+		const composer = screen.getByRole("textbox", { name: "Ask the assistant" })
+
+		fireEvent.change(composer, { target: { value: "find my taxes" } })
+		fireEvent.keyDown(composer, { key: "Enter" })
+
+		expect(useAssistantStore.getState().entries[0]).toMatchObject({ kind: "user", text: "find my taxes" })
+		expect(screen.getByRole("status").textContent).toBe("Loading model…")
+		expect(screen.getByRole("button", { name: "Stop" })).toBeDefined()
+
+		act(() => {
+			vi.runAllTimers()
+		})
+
+		expect(useAssistantStore.getState().modelState.kind).toBe("ready")
+		expect(useAssistantStore.getState().entries.some(entry => entry.kind === "reply" && entry.final)).toBe(true)
+	})
+
+	it("reports typing in the composer as activity", () => {
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+
+		const noteActivity = vi.spyOn(session, "noteActivity")
+
+		render(<AssistantSidePanel />)
+		fireEvent.change(screen.getByRole("textbox", { name: "Ask the assistant" }), { target: { value: "f" } })
+
+		expect(noteActivity).toHaveBeenCalledTimes(1)
+	})
+
+	it("names every model state in the header chip, the waiting download included", () => {
+		const size = MOCK_ASSISTANT_MODEL.sizeBytes
+		const chips: [AssistantModelState, string][] = [
+			[{ kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL }, "Not set up"],
+			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: false }, "Downloading 50%"],
+			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: true }, "Waiting for connection"],
+			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size, waiting: true }, "Downloading 100%"],
+			[{ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: false }, "Not loaded"],
+			[{ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: true }, "Not loaded"],
+			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: false }, "Loading"],
+			[{ kind: "ready", model: MOCK_ASSISTANT_MODEL }, "On this device"],
+			[{ kind: "error", error: "load-failed", model: MOCK_ASSISTANT_MODEL }, "Error"],
+			[{ kind: "unavailable", reason: "in-use-elsewhere", model: MOCK_ASSISTANT_MODEL }, "In another tab"],
+			[{ kind: "unavailable", reason: "insufficient-memory", model: MOCK_ASSISTANT_MODEL }, "Unavailable"]
+		]
+
+		for (const [state, chip] of chips) {
+			withSession(state)
+			render(<AssistantSidePanel />)
+
+			const heading = screen.getByRole("heading", { name: "Assistant" })
+
+			expect(heading.nextElementSibling?.textContent).toBe(chip)
+
+			unregister()
+			cleanup()
+		}
 	})
 
 	it("words the download and start-up phases instead of leaving a stale figure", () => {
@@ -143,7 +282,7 @@ describe("AssistantSidePanel", () => {
 			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: true }, "Waiting for the connection…"],
 			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size, waiting: false }, "Finishing the download…"],
 			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: true }, "Checking the downloaded model…"],
-			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: false }, "Starting the assistant…"]
+			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: false }, "Loading model…"]
 		]
 
 		for (const [state, text] of phases) {

@@ -7,9 +7,10 @@ import type {
 } from "@/features/assistant/types"
 
 // A scripted AssistantSession for tests and for development builds before a real runtime registers. It
-// walks the whole UI surface: a chunked download, a load that starts when the panel opens, a tool
-// activity, a streamed markdown reply, and a confirmation card when the message asks to draft, move, copy,
-// trash or download something. Timer-driven, so tests step it with fake timers.
+// walks the whole UI surface: a chunked download, a load that starts only on request (the Load action or a
+// sent message, which waits for it), a tool activity, a streamed markdown reply, and a confirmation card
+// when the message asks to draft, move, copy, trash or download something. Timer-driven, so tests step it
+// with fake timers.
 
 export const MOCK_ASSISTANT_MODEL: AssistantModelInfo = {
 	id: "mock-model",
@@ -60,7 +61,6 @@ export function createMockAssistantSession({
 	const listeners = new Set<(event: AssistantEvent) => void>()
 	const timers = new Set<ReturnType<typeof setTimeout>>()
 	let modelState = initialState
-	let panelOpen = false
 	let turnCount = 0
 	let activeTurnId: string | null = null
 
@@ -91,18 +91,33 @@ export function createMockAssistantSession({
 		timers.clear()
 	}
 
-	// Like the runtime: a downloaded model loads only while the panel shows.
-	function loadIfShown(): void {
-		if (modelState.kind !== "downloaded" || !panelOpen) {
-			return
+	const LOAD_STEPS = 2
+	// Apart from the turn's timers: like the runtime's, a load carries on when its turn is stopped.
+	let loadTimer: ReturnType<typeof setTimeout> | undefined
+
+	// Steps until the model is ready: 0 when it is, the rest of a load already under way, or a new load.
+	function loadModel(): number {
+		if (modelState.kind === "ready") {
+			return 0
+		}
+
+		if (modelState.kind === "loading") {
+			return LOAD_STEPS
+		}
+
+		if (modelState.kind !== "downloaded") {
+			return 0
 		}
 
 		const model = modelState.model
 
 		emit({ type: "model", state: { kind: "loading", model, verifying: false } })
-		later(() => {
+		loadTimer = setTimeout(() => {
+			loadTimer = undefined
 			emit({ type: "model", state: { kind: "ready", model } })
-		}, 2)
+		}, stepMs * LOAD_STEPS)
+
+		return LOAD_STEPS
 	}
 
 	function downloadModel(): void {
@@ -129,8 +144,7 @@ export function createMockAssistantSession({
 		}
 
 		later(() => {
-			emit({ type: "model", state: { kind: "downloaded", model } })
-			loadIfShown()
+			emit({ type: "model", state: { kind: "downloaded", model, idleUnloaded: false } })
 		}, downloadSteps + 1)
 	}
 
@@ -145,6 +159,7 @@ export function createMockAssistantSession({
 
 	function deleteModel(): Promise<void> {
 		clearTimers()
+		clearTimeout(loadTimer)
 		activeTurnId = null
 		emit({ type: "model", state: { kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL } })
 
@@ -164,31 +179,49 @@ export function createMockAssistantSession({
 		).split(/(?<= )/)
 
 		activeTurnId = turnId
-		emit({ type: "activity", turnId, activity: { id: activityId, tool: "search_items", status: "running" } })
+
+		// A model on disk loads first, inside the turn.
+		const loadSteps = loadModel()
+		const startActivity = () => {
+			emit({ type: "activity", turnId, activity: { id: activityId, tool: "search_items", status: "running" } })
+		}
+
+		if (loadSteps === 0) {
+			startActivity()
+		} else {
+			later(startActivity, loadSteps)
+		}
+
 		later(() => {
 			emit({ type: "activity", turnId, activity: { id: activityId, tool: "search_items", status: "done" } })
-		}, 2)
+		}, loadSteps + 2)
 
 		words.forEach((_, index) => {
-			later(() => {
-				emit({
-					type: "reply",
-					turnId,
-					replyId: `${turnId}-reply`,
-					text: words.slice(0, index + 1).join(""),
-					final: index === words.length - 1
-				})
-			}, 3 + index)
+			later(
+				() => {
+					emit({
+						type: "reply",
+						turnId,
+						replyId: `${turnId}-reply`,
+						text: words.slice(0, index + 1).join(""),
+						final: index === words.length - 1
+					})
+				},
+				loadSteps + 3 + index
+			)
 		})
 
-		later(() => {
-			if (verb !== undefined) {
-				emit({ type: "proposal", turnId, proposal: mockProposal(`${turnId}-proposal`, verb) })
-			}
+		later(
+			() => {
+				if (verb !== undefined) {
+					emit({ type: "proposal", turnId, proposal: mockProposal(`${turnId}-proposal`, verb) })
+				}
 
-			activeTurnId = null
-			emit({ type: "turn-end", turnId, outcome: "complete" })
-		}, 4 + words.length)
+				activeTurnId = null
+				emit({ type: "turn-end", turnId, outcome: "complete" })
+			},
+			loadSteps + 4 + words.length
+		)
 
 		return turnId
 	}
@@ -220,11 +253,12 @@ export function createMockAssistantSession({
 				listeners.delete(listener)
 			}
 		},
-		setPanelOpen: open => {
-			panelOpen = open
-			loadIfShown()
-		},
+		setPanelOpen: () => undefined,
 		downloadModel,
+		loadModel: () => {
+			loadModel()
+		},
+		noteActivity: () => undefined,
 		cancelDownload,
 		deleteModel,
 		send,

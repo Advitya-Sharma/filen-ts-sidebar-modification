@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { GLASS_SURFACE_CLASS } from "@/components/ui/surface"
 import { enterIntent } from "@/features/chats/lib/composer.logic"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
-import { cancelAssistantTurn, sendAssistantMessage } from "@/features/assistant/store/assistantSession"
+import { cancelAssistantTurn, noteAssistantActivity, sendAssistantMessage } from "@/features/assistant/store/assistantSession"
 
 const MAX_TEXTAREA_HEIGHT = 160
 
@@ -41,6 +41,7 @@ export function AssistantComposer() {
 	}
 
 	function onChange(event: ChangeEvent<HTMLTextAreaElement>): void {
+		noteAssistantActivity()
 		setDraft(event.target.value)
 		fitHeight(event.target)
 	}

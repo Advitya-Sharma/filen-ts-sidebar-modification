@@ -3,14 +3,13 @@ import { SparklesIcon } from "lucide-react"
 import { formatBytes } from "@filen/shared"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
-import { Spinner } from "@/components/ui/spinner"
 import type { AssistantKey } from "@/lib/i18n"
 import { cancelAssistantDownload, downloadAssistantModel } from "@/features/assistant/store/assistantSession"
 import { downloadByteFigures, downloadPercent } from "@/features/assistant/components/assistant.logic"
 import type { AssistantModelError, AssistantModelInfo, AssistantModelState, AssistantUnavailableReason } from "@/features/assistant/types"
 
-// Every model state short of "ready" is this one screen.
-export type AssistantSetupState = Exclude<AssistantModelState, { kind: "ready" }>
+// Every model state a message cannot be sent from is this one screen; a model on disk shows the conversation.
+export type AssistantSetupState = Exclude<AssistantModelState, { kind: "ready" | "loading" | "downloaded" }>
 
 type TerminalReason = Exclude<AssistantUnavailableReason, "in-use-elsewhere">
 
@@ -136,16 +135,6 @@ function SetupBody({ state }: { state: AssistantSetupState }) {
 					</Button>
 				</>
 			)
-		// A downloaded model starts by itself once the panel shows (AssistantSession.setPanelOpen), so there is
-		// no Start button: both states read as starting.
-		case "downloaded":
-		case "loading":
-			return (
-				<p className="flex items-center gap-2 text-sm text-muted-foreground">
-					<Spinner aria-hidden="true" />
-					{state.kind === "loading" && state.verifying ? t("assistantVerifyingTitle") : t("assistantLoadingTitle")}
-				</p>
-			)
 		case "error":
 			return (
 				<>
@@ -162,8 +151,8 @@ function SetupBody({ state }: { state: AssistantSetupState }) {
 	}
 }
 
-// Everything before the model is ready: the first-run opt-in, the download, start-up, failure, and the
-// model being busy in another tab.
+// Everything before the model is on disk: the first-run opt-in, the download, failure, and the model being
+// busy in another tab.
 export function AssistantSetup({ state }: { state: AssistantSetupState }) {
 	return (
 		<div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 overflow-y-auto px-6 py-8 text-center">

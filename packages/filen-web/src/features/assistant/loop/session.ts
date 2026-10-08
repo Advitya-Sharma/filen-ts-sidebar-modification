@@ -21,6 +21,10 @@ export interface AssistantRuntimeLike {
 	subscribe(listener: (state: AssistantModelState) => void): () => void
 	init(): Promise<void>
 	setPanelOpen(open: boolean): void
+	// Settles once the model is ready or has failed to load; the state says which.
+	load(): Promise<void>
+	// Postpones the idle unload.
+	touch(): void
 	retry(): void
 	cancelDownload(): void
 	deleteModel(): Promise<void>
@@ -47,6 +51,27 @@ const FINAL_STATUSES = new Set<AssistantToolCallStatus>(["ok", "error", "invalid
 
 function activityStatus(status: AssistantToolCallStatus): AssistantActivity["status"] {
 	return status === "ok" ? "done" : status === "running" || status === "confirming" ? "running" : "failed"
+}
+
+// Settles with the promise, or rejects as soon as the signal aborts: Stop ends a turn that is still waiting
+// for the model to load (the load itself carries on, the user asked for it).
+function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	return new Promise((resolve, reject) => {
+		const onAbort = () => {
+			reject(new AssistantAbortError())
+		}
+
+		if (signal.aborted) {
+			onAbort()
+
+			return
+		}
+
+		signal.addEventListener("abort", onAbort, { once: true })
+		void promise.then(resolve, reject).finally(() => {
+			signal.removeEventListener("abort", onAbort)
+		})
+	})
 }
 
 function nonce(): string {
@@ -182,6 +207,17 @@ export function createAssistantSession({
 		}
 
 		try {
+			if (runtime.getState().kind !== "ready") {
+				await unlessAborted(runtime.load(), controller.signal)
+			}
+
+			// The load failed or another tab holds the model; the panel shows that state.
+			if (runtime.getState().kind !== "ready") {
+				emit({ type: "turn-end", turnId, outcome: "error", error: "model-unavailable" })
+
+				return
+			}
+
 			const result = await runAssistantTurn({
 				model: runtime.model,
 				executor: turn.shared,
@@ -242,6 +278,14 @@ export function createAssistantSession({
 
 		downloadModel: () => {
 			runtime.retry()
+		},
+
+		loadModel: () => {
+			void runtime.load()
+		},
+
+		noteActivity: () => {
+			runtime.touch()
 		},
 
 		cancelDownload: () => {

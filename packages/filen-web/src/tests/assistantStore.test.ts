@@ -17,6 +17,8 @@ import {
 	cancelAssistantTurn,
 	confirmAssistantProposal,
 	downloadAssistantModel,
+	loadAssistantModel,
+	noteAssistantActivity,
 	registerAssistantSession,
 	rejectAssistantProposal,
 	removeAssistantModel,
@@ -113,17 +115,24 @@ describe("session wiring", () => {
 		expect(calls).toEqual([true, false])
 	})
 
-	it("downloads, then loads a downloaded model only once the panel shows", () => {
+	it("downloads, then leaves the model on disk with the panel showing until it is asked to load", () => {
 		withMock()
+
+		const release = trackAssistantPanelShown()
+
 		downloadAssistantModel()
 
 		expect(state().modelState.kind).toBe("downloading")
 
 		vi.advanceTimersByTime(STEP_MS * 3)
 
+		expect(state().modelState).toMatchObject({ kind: "downloaded", idleUnloaded: false })
+
+		vi.advanceTimersByTime(STEP_MS * 100)
+
 		expect(state().modelState.kind).toBe("downloaded")
 
-		const release = trackAssistantPanelShown()
+		loadAssistantModel()
 
 		expect(state().modelState.kind).toBe("loading")
 
@@ -132,6 +141,34 @@ describe("session wiring", () => {
 		expect(state().modelState.kind).toBe("ready")
 
 		release()
+	})
+
+	it("sends from a model on disk: the turn loads it first, then runs", () => {
+		withMock({ initialState: { kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: true } })
+
+		expect(sendAssistantMessage("find my taxes")).toBe(true)
+		expect(state().modelState.kind).toBe("loading")
+		expect(state().entries).toEqual([expect.objectContaining({ kind: "user", text: "find my taxes" })])
+		expect(state().activeTurnId).not.toBeNull()
+
+		vi.advanceTimersByTime(STEP_MS * 2)
+
+		expect(state().modelState.kind).toBe("ready")
+		expect(state().entries[1]).toMatchObject({ kind: "activity", status: "running" })
+
+		vi.runAllTimers()
+
+		expect(state().activeTurnId).toBeNull()
+		expect(state().entries.some(entry => entry.kind === "reply" && entry.final)).toBe(true)
+	})
+
+	it("hands the user's typing to the session", () => {
+		const mock = ready()
+		const noteActivity = vi.spyOn(mock, "noteActivity")
+
+		noteAssistantActivity()
+
+		expect(noteActivity).toHaveBeenCalledTimes(1)
 	})
 
 	// The mock emits the turn's first activity synchronously inside send(); it must still land after the
@@ -153,8 +190,13 @@ describe("session wiring", () => {
 		expect(state().entries.some(entry => entry.kind === "activity" && entry.status === "done")).toBe(true)
 	})
 
-	it("refuses to send before the model is ready or with nothing typed", () => {
+	it("refuses to send before the model is on disk or with nothing typed", () => {
 		withMock()
+
+		expect(sendAssistantMessage("hello")).toBe(false)
+
+		unregister()
+		withMock({ initialState: { kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: 1, waiting: false } })
 
 		expect(sendAssistantMessage("hello")).toBe(false)
 

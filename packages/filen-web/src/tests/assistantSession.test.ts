@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it, vi, type Mock } from "vitest"
 import {
 	ROUTER_GRAMMAR,
 	type AssistantGenerateRequest,
@@ -50,23 +50,45 @@ class ScriptedModel implements AssistantModel {
 	}
 }
 
-function fakeRuntime(model: AssistantModel): AssistantRuntimeLike & { holds: number } {
-	const state: AssistantModelState = { kind: "ready", model: { id: "m", name: "M", sizeBytes: 1 } }
-	const runtime = {
+const INFO = { id: "m", name: "M", sizeBytes: 1 }
+
+type FakeRuntime = Omit<AssistantRuntimeLike, "load" | "touch" | "setPanelOpen"> & {
+	holds: number
+	state: AssistantModelState
+	load: Mock<() => Promise<void>>
+	touch: Mock<() => void>
+	setPanelOpen: Mock<(open: boolean) => void>
+}
+
+// Ready unless given another state; a load settles in "ready" unless the test replaces it.
+function fakeRuntime(model: AssistantModel, initial: AssistantModelState = { kind: "ready", model: INFO }): FakeRuntime {
+	const runtime: FakeRuntime = {
 		holds: 0,
+		state: initial,
 		model,
-		getState: () => state,
+		getState: () => runtime.state,
 		subscribe: () => () => undefined,
 		init: () => Promise.resolve(),
-		setPanelOpen: vi.fn(),
+		setPanelOpen: vi.fn<(open: boolean) => void>(),
+		load: vi.fn(() => {
+			runtime.state = { kind: "ready", model: INFO }
+
+			return Promise.resolve()
+		}),
+		touch: vi.fn<() => void>(),
 		retry: vi.fn(),
 		cancelDownload: vi.fn(),
 		deleteModel: vi.fn(() => Promise.resolve()),
 		hold: () => {
 			runtime.holds++
 
+			let released = false
+
 			return () => {
-				runtime.holds--
+				if (!released) {
+					released = true
+					runtime.holds--
+				}
 			}
 		}
 	}
@@ -317,5 +339,162 @@ describe("assistant session", () => {
 		session.cancel()
 
 		expect(await waitFor(events, event => event.type === "turn-end")).toEqual({ type: "turn-end", turnId, outcome: "cancelled" })
+	})
+
+	it("loads a model that is not in memory before the turn, keeping it held from the start", async () => {
+		const model = new ScriptedModel({ route: "files read", steps: ["Hi."] })
+		const runtime = fakeRuntime(model, { kind: "downloaded", model: INFO, idleUnloaded: true })
+		let heldDuringLoad = 0
+
+		runtime.load.mockImplementation(() => {
+			heldDuringLoad = runtime.holds
+			runtime.state = { kind: "ready", model: INFO }
+
+			return Promise.resolve()
+		})
+
+		const session = createAssistantSession({ runtime, executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+
+		const turnId = session.send("Hello")
+
+		expect(await waitFor(events, event => event.type === "turn-end")).toEqual({ type: "turn-end", turnId, outcome: "complete" })
+		expect(runtime.load).toHaveBeenCalledTimes(1)
+		expect(heldDuringLoad).toBe(1)
+		expect(runtime.holds).toBe(0)
+	})
+
+	it("does not load a model that is already in memory", async () => {
+		const runtime = fakeRuntime(new ScriptedModel({ route: "files read", steps: ["Hi."] }))
+		const session = createAssistantSession({ runtime, executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Hello")
+		await waitFor(events, event => event.type === "turn-end")
+
+		expect(runtime.load).not.toHaveBeenCalled()
+	})
+
+	it("ends the turn as model-unavailable when the load fails, without asking the model", async () => {
+		const generate = vi.fn()
+		const runtime = fakeRuntime(
+			{ contextTokens: 8192, specialTokens: [], generate },
+			{ kind: "downloaded", model: INFO, idleUnloaded: false }
+		)
+
+		runtime.load.mockImplementation(() => {
+			runtime.state = { kind: "error", error: "out-of-memory", model: INFO }
+
+			return Promise.resolve()
+		})
+
+		const session = createAssistantSession({ runtime, executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+
+		const turnId = session.send("Hello")
+
+		expect(await waitFor(events, event => event.type === "turn-end")).toEqual({
+			type: "turn-end",
+			turnId,
+			outcome: "error",
+			error: "model-unavailable"
+		})
+		expect(generate).not.toHaveBeenCalled()
+		expect(runtime.holds).toBe(0)
+	})
+
+	it("stops a turn that is still waiting for the load", async () => {
+		const runtime = fakeRuntime(new ScriptedModel({ route: "files read", steps: [] }), {
+			kind: "loading",
+			model: INFO,
+			verifying: false
+		})
+
+		runtime.load.mockReturnValue(new Promise(() => undefined))
+
+		const session = createAssistantSession({ runtime, executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+
+		const turnId = session.send("Hello")
+
+		await vi.waitFor(() => {
+			expect(runtime.load).toHaveBeenCalled()
+		})
+		session.cancel()
+
+		expect(await waitFor(events, event => event.type === "turn-end")).toEqual({ type: "turn-end", turnId, outcome: "cancelled" })
+		expect(runtime.holds).toBe(0)
+	})
+
+	it("keeps the model held while a card waits and while the confirmed action runs", async () => {
+		const model = new ScriptedModel({
+			route: "chats change",
+			steps: [call("list_chats", { query: "Maria" }), call("draft_chat_message", { chat: "c1", text: "late" }), "Drafted."]
+		})
+		const executor = fakeExecutor({ list_chats: { chats: [{ handle: "c1", name: "Maria" }] } })
+		let finishDraft: () => void = () => undefined
+
+		executor.execute = ({ tool, args, confirmed }) => {
+			executor.executed.push({ call: { name: tool.name, args }, confirmed })
+
+			if (tool.name !== "draft_chat_message") {
+				return Promise.resolve({ ok: true, result: { chats: [{ handle: "c1", name: "Maria" }] }, untrusted: "names" })
+			}
+
+			return new Promise(resolve => {
+				finishDraft = () => {
+					resolve({ ok: true, result: { done: true }, untrusted: "none" })
+				}
+			})
+		}
+
+		const runtime = fakeRuntime(model)
+		const session = createAssistantSession({ runtime, executor })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Tell Maria late")
+
+		const proposal = await waitFor(events, event => event.type === "proposal")
+
+		expect(runtime.holds).toBe(1)
+
+		if (proposal.type !== "proposal") {
+			throw new Error("no proposal")
+		}
+
+		session.confirm(proposal.proposal.id)
+
+		expect(runtime.holds).toBe(2)
+
+		finishDraft()
+		await waitFor(events, event => event.type === "turn-end")
+		await vi.waitFor(() => {
+			expect(runtime.holds).toBe(0)
+		})
+	})
+
+	it("passes the explicit load and the user's typing to the runtime", () => {
+		const runtime = fakeRuntime(new ScriptedModel({ route: "files read", steps: [] }), {
+			kind: "downloaded",
+			model: INFO,
+			idleUnloaded: false
+		})
+		const session = createAssistantSession({ runtime, executor: fakeExecutor() })
+
+		session.loadModel()
+		session.noteActivity()
+		session.setPanelOpen(true)
+
+		expect(runtime.load).toHaveBeenCalledTimes(1)
+		expect(runtime.touch).toHaveBeenCalledTimes(1)
+		expect(runtime.setPanelOpen).toHaveBeenCalledWith(true)
 	})
 })

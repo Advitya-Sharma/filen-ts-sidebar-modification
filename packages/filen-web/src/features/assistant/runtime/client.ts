@@ -19,14 +19,20 @@ import { log } from "@/lib/log"
 
 // The page side of the on-device model: decides the model state, owns the worker (spawned only to
 // download or to run the model, terminated otherwise, so an idle app holds none of its memory), and holds
-// a Web Lock while it does either, so only one tab ever downloads or loads the model.
+// a Web Lock while it does either, so only one tab ever downloads or loads the model. The model loads only
+// on an explicit request (a sent message or the Load action), never because the panel shows.
 
 export const ASSISTANT_CONTEXT_TOKENS = 8192
 
 const LOCK = "filen-assistant-model"
 
-// The panel closed this long ago: the model leaves memory.
-const IDLE_UNLOAD_MS = 5 * 60_000
+// Unused this long, the model leaves memory, panel open or not. It holds ~4 GB of RAM/VRAM while a reload
+// costs ~4-6 s: 10 min keeps it through a working session's follow-ups, where 5 min would reload between
+// ordinary pauses and 50 min would hold a quarter of a 16 GB machine for most of an hour after one question.
+export const IDLE_UNLOAD_MS = 10 * 60_000
+
+// Long enough for the engine to exit cleanly; terminating the worker frees everything either way.
+const EXIT_GRACE_MS = 1000
 
 type Settled = AssistantModelState["kind"]
 
@@ -42,6 +48,19 @@ function isAborted(signal: AssistantSignal): boolean {
 
 function errorName(e: unknown): string {
 	return e instanceof Error ? e.name : ""
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise(resolve => {
+		setTimeout(resolve, ms)
+	})
+}
+
+// Everything the worker held goes with it: the engine's own worker and its thread pool are nested workers,
+// so their wasm memory and the WebGPU device are released too.
+function stopWorker(handle: WorkerHandle): void {
+	handle.remote[Comlink.releaseProxy]()
+	handle.worker.terminate()
 }
 
 // A dev build without a configured host serves the GGUF named by FILEN_ASSISTANT_DEV_GGUF (vite/assistant-model.ts).
@@ -77,15 +96,22 @@ export class AssistantRuntime implements AssistantModel {
 	private baseUrl = DEFAULT_MODEL_BASE_URL
 	private recommendation: RuntimeRecommendation | null = null
 	private ready: Promise<void> | null = null
+	// The startup check itself failed (not its verdict): Retry runs it again.
+	private checkFailed = false
 	private handle: WorkerHandle | null = null
 	private releaseLock: (() => void) | null = null
 	private watchingLock = false
 	private tokenList: readonly string[] = []
-	private panelOpen = false
 	private idleTimer: ReturnType<typeof setTimeout> | undefined
+	// Wall-clock time of the last activity: it keeps counting while the machine sleeps, so the first check
+	// after waking unloads a model that sat unused across the sleep.
+	private lastActivity = 0
+	private watchingVisibility = false
+	private panelOpen = false
 	private busy = 0
 	private downloading: Promise<void> | null = null
 	private loading: Promise<void> | null = null
+	private unloading: Promise<void> | null = null
 	private redownload = false
 	private nextGeneration = 1
 
@@ -125,14 +151,19 @@ export class AssistantRuntime implements AssistantModel {
 		}
 	}
 
-	private settle(kind: Exclude<Settled, "unavailable" | "error" | "downloading" | "loading">): void {
+	private settle(kind: Exclude<Settled, "unavailable" | "error" | "downloading" | "loading" | "downloaded">): void {
 		this.setState({ kind, model: this.info() })
+	}
+
+	private settleDownloaded(idleUnloaded = false): void {
+		this.setState({ kind: "downloaded", model: this.info(), idleUnloaded })
 	}
 
 	// The cheap startup check: device probe, OPFS sizes and the verified record; no shard content is read.
 	init(): Promise<void> {
 		this.ready ??= this.refresh().catch((e: unknown) => {
 			log.error("assistant", "model check failed", e)
+			this.checkFailed = true
 			this.setState({ kind: "error", error: "load-failed", model: this.info() })
 		})
 
@@ -140,6 +171,8 @@ export class AssistantRuntime implements AssistantModel {
 	}
 
 	private async refresh(): Promise<void> {
+		this.checkFailed = false
+
 		const resolved = await resolveModel()
 
 		this.manifest = resolved.manifest
@@ -166,10 +199,10 @@ export class AssistantRuntime implements AssistantModel {
 
 		const inspection = await inspectModel(this.manifest)
 
-		this.settle(inspection.complete ? "downloaded" : "not-downloaded")
-
-		if (inspection.complete && this.panelOpen) {
-			void this.load()
+		if (inspection.complete) {
+			this.settleDownloaded()
+		} else {
+			this.settle("not-downloaded")
 		}
 	}
 
@@ -241,40 +274,69 @@ export class AssistantRuntime implements AssistantModel {
 		return this.handle
 	}
 
-	// Everything the worker held (engine, wasm memory, GPU buffers) goes with it.
 	private stopWorker(): void {
 		const handle = this.handle
 
 		this.handle = null
 
 		if (handle !== null) {
-			handle.remote[Comlink.releaseProxy]()
-			handle.worker.terminate()
+			stopWorker(handle)
 		}
 	}
 
+	// Opening the panel runs the cheap check early and counts as activity; it never loads the model.
 	setPanelOpen(open: boolean): void {
 		this.panelOpen = open
-		clearTimeout(this.idleTimer)
-		this.idleTimer = undefined
+		this.syncVisibilityWatch()
 
-		if (open) {
-			void this.init().then(() => {
-				if (this.panelOpen && this.state.kind === "downloaded") {
-					void this.load()
-				}
-			})
-
+		if (!open) {
 			return
 		}
 
-		this.scheduleUnload()
+		this.touch()
+
+		// The first check asks the lock itself; a later opening only re-asks whether another tab took the model.
+		if (this.ready === null) {
+			void this.init()
+		} else {
+			void this.ready.then(() => this.checkElsewhere())
+		}
 	}
 
-	// Turns and confirmed actions keep the model; the idle timer starts once the last one ends.
+	// A model on disk reads as loadable only while no other tab runs it: the startup check saw the lock once,
+	// and another tab may have loaded the model since.
+	private async checkElsewhere(): Promise<void> {
+		if (!this.idleOnDisk()) {
+			return
+		}
+
+		if ((await this.lockHeldElsewhere()) && this.idleOnDisk()) {
+			this.inUseElsewhere()
+		}
+	}
+
+	private idleOnDisk(): boolean {
+		return (
+			this.state.kind === "downloaded" &&
+			this.releaseLock === null &&
+			this.loading === null &&
+			this.unloading === null &&
+			this.downloading === null
+		)
+	}
+
+	// The user is doing something with the assistant (typing). Called per keystroke, so it only moves the
+	// deadline; the pending timer reads it when it fires.
+	touch(): void {
+		this.lastActivity = Date.now()
+	}
+
+	// Turns (including one waiting on a confirmation card) and confirmed actions keep the model; the idle
+	// countdown starts once the last one ends.
 	hold(): () => void {
 		this.busy++
 		clearTimeout(this.idleTimer)
+		this.idleTimer = undefined
 
 		let released = false
 
@@ -285,34 +347,75 @@ export class AssistantRuntime implements AssistantModel {
 
 			released = true
 			this.busy--
-			this.scheduleUnload()
+			this.touch()
+			this.armIdle()
 		}
 	}
 
-	private scheduleUnload(): void {
+	// Hidden tabs fire timers late (at most once a minute in Chrome) and a sleeping machine not at all, so the
+	// timer only prompts a check of the wall-clock deadline, and a visibility change (waking, switching back)
+	// checks it too. Coming back to an open panel also re-checks whether another tab took the model meanwhile.
+	private readonly onVisibilityChange = () => {
+		this.armIdle()
+
+		if (this.panelOpen && document.visibilityState === "visible") {
+			void this.checkElsewhere()
+		}
+	}
+
+	private syncVisibilityWatch(): void {
+		this.watchVisibility(this.panelOpen || this.state.kind === "ready")
+	}
+
+	private watchVisibility(on: boolean): void {
+		if (on === this.watchingVisibility || typeof document === "undefined") {
+			return
+		}
+
+		this.watchingVisibility = on
+
+		if (on) {
+			document.addEventListener("visibilitychange", this.onVisibilityChange)
+		} else {
+			document.removeEventListener("visibilitychange", this.onVisibilityChange)
+		}
+	}
+
+	private armIdle(): void {
 		clearTimeout(this.idleTimer)
 		this.idleTimer = undefined
 
-		if (this.panelOpen || this.busy > 0 || (this.state.kind !== "ready" && this.state.kind !== "loading")) {
+		if (this.state.kind !== "ready" || this.busy > 0) {
+			return
+		}
+
+		const now = Date.now()
+
+		// A clock set back must not postpone the unload past one full period.
+		this.lastActivity = Math.min(this.lastActivity, now)
+
+		const remaining = this.lastActivity + IDLE_UNLOAD_MS - now
+
+		if (remaining <= 0) {
+			void this.unloadModel(true)
+
 			return
 		}
 
 		this.idleTimer = setTimeout(() => {
 			this.idleTimer = undefined
-
-			if (!this.panelOpen && this.busy === 0) {
-				void this.unload()
-			}
-		}, IDLE_UNLOAD_MS)
+			this.armIdle()
+		}, remaining)
 	}
 
-	// From a click: the opt-in download, then the load. From "error" it retries whichever step failed.
+	// From a click: the opt-in download. A loaded model is complete on disk, so there is nothing to fetch, and
+	// winding the download down would take the model's worker with it.
 	download(): void {
 		// Asked first, while the click's user activation lasts (Firefox prompts for it). Without it the
 		// browser may evict the 2.7 GB under storage pressure; with or without, the download proceeds.
 		void navigator.storage.persist().catch(() => false)
 
-		if (this.downloading !== null || this.loading !== null) {
+		if (this.downloading !== null || this.loading !== null || this.unloading !== null || this.state.kind === "ready") {
 			return
 		}
 
@@ -365,7 +468,11 @@ export class AssistantRuntime implements AssistantModel {
 						}
 					})
 				)
-				this.settle("downloaded")
+
+				if (this.state.kind === "downloading" && (this.state.receivedBytes < sizeBytes || this.state.waiting)) {
+					this.setState({ kind: "downloading", model: this.info(), receivedBytes: sizeBytes, waiting: false })
+				}
+
 				// An older model version is dead weight once its successor is complete.
 				await deleteModels(this.manifest.id).catch((e: unknown) => {
 					log.warn("assistant", "pruning old models failed", e)
@@ -391,25 +498,33 @@ export class AssistantRuntime implements AssistantModel {
 			return
 		}
 
-		if (this.state.kind !== "downloaded") {
-			this.settle("downloaded")
-		}
-
-		if (this.panelOpen) {
-			await this.load()
-		} else {
-			this.stopWorker()
-			this.unlock()
-		}
+		// Downloading is not a request to run it: the first message (or the Load action) loads it. The worker
+		// and the lock go before "downloaded" shows (pruning reads as the download finishing), so a load can
+		// never start in this worker and be cut off with it.
+		this.stopWorker()
+		this.unlock()
+		this.settleDownloaded()
 	}
 
 	cancelDownload(): void {
 		void this.handle?.remote.cancelDownload()
 	}
 
-	private load(): Promise<void> {
-		this.loading ??= this.runLoad().finally(() => {
+	// From the Load action, or a turn that found the model unloaded. Settles in "ready" or in the state that
+	// says why not.
+	load(): Promise<void> {
+		this.loading ??= (async () => {
+			// An unload in flight finishes first: the old worker must be gone before a new one starts.
+			await this.unloading
+			await this.runLoad()
+		})().finally(() => {
 			this.loading = null
+
+			// A load that never started a worker (refused, or nothing to load) may still hold the lock an unload
+			// kept for it; the lock is only ever held alongside a worker.
+			if (this.handle === null && this.downloading === null) {
+				this.unlock()
+			}
 
 			if (this.redownload) {
 				this.redownload = false
@@ -421,7 +536,8 @@ export class AssistantRuntime implements AssistantModel {
 	}
 
 	private async runLoad(): Promise<void> {
-		if (this.recommendation?.supported !== true || this.state.kind === "ready") {
+		// Only a model on disk, or one whose load failed: nothing to load mid-download or in another tab's hands.
+		if (this.recommendation?.supported !== true || (this.state.kind !== "downloaded" && this.state.kind !== "error")) {
 			return
 		}
 
@@ -459,7 +575,9 @@ export class AssistantRuntime implements AssistantModel {
 
 			this.tokenList = specialTokens
 			this.settle("ready")
-			this.scheduleUnload()
+			this.touch()
+			this.syncVisibilityWatch()
+			this.armIdle()
 		} catch (e) {
 			this.stopWorker()
 			this.unlock()
@@ -470,7 +588,12 @@ export class AssistantRuntime implements AssistantModel {
 			if (name === "ModelLoadError:missing") {
 				const inspection = await inspectModel(this.manifest)
 
-				this.settle(inspection.complete ? "downloaded" : "not-downloaded")
+				if (inspection.complete) {
+					this.settleDownloaded()
+				} else {
+					this.settle("not-downloaded")
+				}
+
 				// Some shards are gone or were damaged, the rest are still verified: the user opted in already, so
 				// only the missing ones are fetched again, right after this load has wound down.
 				this.redownload = !inspection.complete && inspection.verifiedBytes > 0
@@ -484,8 +607,16 @@ export class AssistantRuntime implements AssistantModel {
 		}
 	}
 
-	// Retry from the error state: the step that failed again.
+	// Retry from the error state: the step that failed again. A failed startup check runs again first; one
+	// still running is awaited by the download itself.
 	retry(): void {
+		if (this.checkFailed) {
+			this.ready = null
+			void this.init()
+
+			return
+		}
+
 		if (this.state.kind === "error" && this.state.error !== "download-failed" && this.state.error !== "storage-full") {
 			void this.load()
 
@@ -495,19 +626,50 @@ export class AssistantRuntime implements AssistantModel {
 		this.download()
 	}
 
-	async unload(): Promise<void> {
-		if (this.state.kind !== "ready" && this.state.kind !== "loading") {
+	unload(): Promise<void> {
+		return this.unloadModel(false)
+	}
+
+	// `idle`: the countdown ran out, which the panel mentions.
+	private unloadModel(idle: boolean): Promise<void> {
+		this.unloading ??= this.runUnload(idle).finally(() => {
+			this.unloading = null
+		})
+
+		return this.unloading
+	}
+
+	private async runUnload(idle: boolean): Promise<void> {
+		await this.loading
+
+		if (this.state.kind !== "ready") {
 			return
 		}
 
-		await this.loading
-		await this.handle?.remote.unload().catch((e: unknown) => {
-			log.warn("assistant", "model unload failed", e)
-		})
-		this.stopWorker()
-		this.unlock()
+		const handle = this.handle
+
+		// Detached before anything awaits, so no turn can reach the old engine and nothing here keeps it alive.
+		this.handle = null
 		this.tokenList = []
-		this.settle("downloaded")
+		clearTimeout(this.idleTimer)
+		this.idleTimer = undefined
+		this.settleDownloaded(idle)
+		this.syncVisibilityWatch()
+
+		if (handle !== null) {
+			await Promise.race([
+				handle.remote.unload().catch((e: unknown) => {
+					log.warn("assistant", "model unload failed", e)
+				}),
+				delay(EXIT_GRACE_MS)
+			])
+			stopWorker(handle)
+		}
+
+		// A load requested meanwhile keeps the lock, so no other tab takes the model in between.
+		if (this.loading === null) {
+			this.unlock()
+		}
 	}
 
 	// Cancels a download, unloads, and removes every downloaded model from OPFS.

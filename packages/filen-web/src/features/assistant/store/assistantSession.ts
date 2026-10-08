@@ -1,7 +1,7 @@
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
 import { pendingProposalIds } from "@/features/assistant/store/transcript"
 import { createMockAssistantSession } from "@/features/assistant/store/mockAssistantSession"
-import type { AssistantEvent, AssistantSession } from "@/features/assistant/types"
+import type { AssistantEvent, AssistantModelState, AssistantSession } from "@/features/assistant/types"
 
 // Where the runtime plugs in: it calls registerAssistantSession once at import, and the store follows its
 // events from then on, panel open or not (a download keeps reporting progress with the panel closed).
@@ -52,8 +52,8 @@ if (import.meta.env.DEV) {
 }
 
 // The panel surface mounts exactly while the panel is on screen (inline only when open, the drawer's only
-// while it is open), so its mount is the open signal the runtime loads and unloads the model by. Returns
-// the matching cleanup for a React ref callback.
+// while it is open), so its mount is the open signal: the runtime checks the model early, but never loads
+// it for a panel alone. Returns the matching cleanup for a React ref callback.
 export function trackAssistantPanelShown(): () => void {
 	panelsShown++
 
@@ -78,6 +78,22 @@ export function cancelAssistantDownload(): void {
 	session?.cancelDownload()
 }
 
+export function loadAssistantModel(): void {
+	session?.loadModel()
+}
+
+export function noteAssistantActivity(): void {
+	session?.noteActivity()
+}
+
+export type ConversationModelState = Extract<AssistantModelState, { kind: "ready" | "loading" | "downloaded" }>
+
+// The states a message can be sent from, and so the ones the panel shows the conversation in: a model on
+// disk is loaded by the turn itself.
+export function modelAcceptsMessages(state: AssistantModelState): state is ConversationModelState {
+	return state.kind === "ready" || state.kind === "loading" || state.kind === "downloaded"
+}
+
 // Rejects when the runtime could not delete the files; the caller reports it.
 export async function removeAssistantModel(): Promise<void> {
 	await session?.deleteModel()
@@ -89,7 +105,7 @@ export function sendAssistantMessage(text: string): boolean {
 	const store = useAssistantStore.getState()
 	const message = text.trim()
 
-	if (session === null || message.length === 0 || store.activeTurnId !== null || store.modelState.kind !== "ready") {
+	if (session === null || message.length === 0 || store.activeTurnId !== null || !modelAcceptsMessages(store.modelState)) {
 		return false
 	}
 

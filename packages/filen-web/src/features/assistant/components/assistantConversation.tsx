@@ -8,6 +8,7 @@ import { AssistantTranscript } from "@/features/assistant/components/assistantTr
 import { TURN_END_KEYS, spokenText, transcriptRows } from "@/features/assistant/components/assistant.logic"
 import { useProposalTitle } from "@/features/assistant/components/useProposalTitle"
 import { AssistantComposer } from "@/features/assistant/components/assistantComposer"
+import { AssistantModelStatus } from "@/features/assistant/components/assistantModelStatus"
 
 const EXAMPLE_KEYS: readonly AssistantKey[] = [
 	"assistantExampleFind",
@@ -100,6 +101,7 @@ export function AssistantConversation() {
 		<>
 			{entries.length === 0 ? <EmptyConversation /> : <AssistantTranscript rows={transcriptRows(entries, generating)} />}
 			<Announcer entries={entries} />
+			<AssistantModelStatus />
 			<AssistantComposer />
 		</>
 	)

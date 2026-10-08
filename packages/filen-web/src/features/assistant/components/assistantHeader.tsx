@@ -9,14 +9,14 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { ConfirmDialog } from "@/components/dialogs/confirmDialog"
 import { Kbd } from "@/lib/keymap/kbd"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
-import { removeAssistantModel, startNewAssistantConversation } from "@/features/assistant/store/assistantSession"
+import { modelAcceptsMessages, removeAssistantModel, startNewAssistantConversation } from "@/features/assistant/store/assistantSession"
 import { ASSISTANT_TITLE_ID } from "@/features/assistant/components/assistantFocus"
-import { canRemoveModel, downloadPercent } from "@/features/assistant/components/assistant.logic"
+import { canRemoveModel, downloadPercent, modelShowsLoading } from "@/features/assistant/components/assistant.logic"
 import type { AssistantModelState } from "@/features/assistant/types"
 
 const CHIP_CLASS = "shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] leading-4 font-medium"
 
-function StatusChip({ state }: { state: AssistantModelState }) {
+function StatusChip({ state, turnActive }: { state: AssistantModelState; turnActive: boolean }) {
 	const { t } = useTranslation("assistant")
 
 	switch (state.kind) {
@@ -29,14 +29,21 @@ function StatusChip({ state }: { state: AssistantModelState }) {
 		case "not-downloaded":
 			return <span className={cn(CHIP_CLASS, "bg-muted text-muted-foreground")}>{t("assistantStatusNotDownloaded")}</span>
 		case "downloading":
-			return (
+			// Finishing reads as 100%: the bytes are in, only bookkeeping is left, so it cannot be waiting.
+			return state.waiting && state.receivedBytes < state.model.sizeBytes ? (
+				<span className={cn(CHIP_CLASS, "bg-muted text-muted-foreground")}>{t("assistantStatusDownloadWaiting")}</span>
+			) : (
 				<span className={cn(CHIP_CLASS, "bg-primary/10 text-primary tabular-nums")}>
 					{t("assistantStatusDownloading", { percent: downloadPercent(state.receivedBytes, state.model.sizeBytes) })}
 				</span>
 			)
 		case "downloaded":
 		case "loading":
-			return <span className={cn(CHIP_CLASS, "bg-primary/10 text-primary")}>{t("assistantStatusLoading")}</span>
+			return modelShowsLoading(state, turnActive) ? (
+				<span className={cn(CHIP_CLASS, "bg-primary/10 text-primary")}>{t("assistantStatusLoading")}</span>
+			) : (
+				<span className={cn(CHIP_CLASS, "bg-muted text-muted-foreground")}>{t("assistantStatusNotLoaded")}</span>
+			)
 		case "ready":
 			return <span className={cn(CHIP_CLASS, "bg-primary/10 text-primary")}>{t("assistantStatusReady")}</span>
 		case "error":
@@ -119,6 +126,7 @@ export function AssistantHeader({ onClose }: { onClose: () => void }) {
 	const { t } = useTranslation("assistant")
 	const modelState = useAssistantStore(state => state.modelState)
 	const hasConversation = useAssistantStore(state => state.entries.length > 0)
+	const turnActive = useAssistantStore(state => state.activeTurnId !== null)
 
 	return (
 		<div className="flex shrink-0 items-center gap-2 p-3 app-region-drag">
@@ -128,9 +136,12 @@ export function AssistantHeader({ onClose }: { onClose: () => void }) {
 			>
 				{t("assistantTitle")}
 			</h2>
-			<StatusChip state={modelState} />
+			<StatusChip
+				state={modelState}
+				turnActive={turnActive}
+			/>
 			<div className="ml-auto flex shrink-0 items-center gap-0.5">
-				{hasConversation && modelState.kind === "ready" ? (
+				{hasConversation && modelAcceptsMessages(modelState) ? (
 					<TooltipIconButton
 						label={t("assistantNewConversation")}
 						className="app-region-no-drag"

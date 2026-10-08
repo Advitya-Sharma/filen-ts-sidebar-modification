@@ -34,8 +34,12 @@ export const assistant = {
 	assistantStatusNotDownloaded: "Not set up",
 	/** Status chip — download progress, a whole percentage */
 	assistantStatusDownloading: "Downloading {{percent}}%",
-	/** Status chip — the downloaded model is being started */
-	assistantStatusLoading: "Starting",
+	/** Status chip — the download is paused until the device is back online; it continues on its own */
+	assistantStatusDownloadWaiting: "Waiting for connection",
+	/** Status chip — downloaded, but not in memory; sending a message loads it */
+	assistantStatusNotLoaded: "Not loaded",
+	/** Status chip — the downloaded model is being loaded into memory */
+	assistantStatusLoading: "Loading",
 	/** Status chip — ready, and running on this device */
 	assistantStatusReady: "On this device",
 	/** Status chip — downloading or starting the model failed */
@@ -84,7 +88,7 @@ export const assistant = {
 	/** Download in progress — stops it */
 	assistantCancelDownload: "Cancel download",
 	/** The downloaded model is being loaded into memory */
-	assistantLoadingTitle: "Starting the assistant…",
+	assistantLoadingTitle: "Loading model…",
 	/** Before starting, the downloaded model's files are checked because a record of them was lost or the last start failed */
 	assistantVerifyingTitle: "Checking the downloaded model…",
 	/** Download or start failed — title above the reason */
@@ -99,6 +103,12 @@ export const assistant = {
 	assistantErrorStorageFull: "This device ran out of storage while downloading the model.",
 	/** Failure — retries the download or start */
 	assistantRetry: "Try again",
+	/** Above the composer — the downloaded model isn't in memory yet; nothing is wrong */
+	assistantModelNotLoaded: "The model loads when you send a message.",
+	/** Above the composer — the model was unloaded after a while without use to free memory; nothing is wrong */
+	assistantModelIdleUnloaded: "Unloaded while unused to free memory. It loads again when you send a message.",
+	/** Above the composer — loads the downloaded model now, ahead of the first message */
+	assistantLoadModel: "Load model",
 
 	// ── Conversation ─────────────────────────────────────────────────────────
 	/** Empty conversation — title */
