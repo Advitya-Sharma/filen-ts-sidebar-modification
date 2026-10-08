@@ -4,12 +4,12 @@ import { Wllama, type ChatCompletionTool, type WllamaLogger } from "@wllama/wlla
 // Emitted by Vite as a hashed asset of this build: the engine is self-hosted, never fetched from a CDN.
 import wllamaWasmUrl from "@wllama/wllama/esm/wasm/wllama.wasm?url"
 import type { AssistantGenerateRequest, AssistantGenerateResult } from "@filen/shared/assistant"
-import type { AssistantModelManifest } from "@/features/assistant/runtime/manifest"
+import type { AssistantModelFile, AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import { accumulateChunk, toEngineMessage, type GenerationState } from "@/features/assistant/runtime/engineMessages"
 import type { AssistantBackend } from "@/features/assistant/runtime/deviceCheck"
-import { downloadModelShards, type ShardStore } from "@/features/assistant/runtime/download"
+import { downloadModelShards, globalConnectivity, type ModelDownloadProgress, type ShardStore } from "@/features/assistant/runtime/download"
 import { blobGgufRead, readGgufSpecialTokens } from "@/features/assistant/runtime/gguf"
-import { modelDirectory, readVerified } from "@/features/assistant/runtime/modelStore"
+import { modelDirectory, readVerified, VERIFIED_FILE } from "@/features/assistant/runtime/modelStore"
 import { log } from "@/lib/log"
 import { PROGRESS_THROTTLE_MS, throttle } from "@/lib/throttle"
 
@@ -53,11 +53,24 @@ const quietLogger: WllamaLogger = {
 }
 
 let engine: Wllama | null = null
-let download: AbortController | null = null
+let download: { controller: AbortController; done: Promise<void> } | null = null
 const generations = new Map<number, AbortController>()
 
-// verified.json through a sync access handle (createWritable is missing in some engines); a torn write
-// only means the shards are hashed again on the next load.
+// Read through a call: TypeScript would keep `download` narrowed across the awaits before it.
+function clearDownload(controller: AbortController): void {
+	if (download?.controller === controller) {
+		download = null
+	}
+}
+
+// The hasher state of a partial shard (download.ts), beside it; gone once the shard is verified.
+function checkpointName(shard: AssistantModelFile): string {
+	return `${shard.file}.sha256-state`
+}
+
+// verified.json through a sync access handle (createWritable is missing in some engines). Written over the
+// old record and then cut to length, never emptied first; a torn record reads as empty, which costs one
+// hash of the complete shards at the next load, never a shard wrongly trusted.
 async function writeVerified({
 	directory,
 	verified
@@ -65,18 +78,25 @@ async function writeVerified({
 	directory: FileSystemDirectoryHandle
 	verified: ReadonlyMap<string, string>
 }): Promise<void> {
-	const access = await (await directory.getFileHandle("verified.json", { create: true })).createSyncAccessHandle()
+	const access = await (await directory.getFileHandle(VERIFIED_FILE, { create: true })).createSyncAccessHandle()
 
 	try {
-		access.truncate(0)
-		access.write(new TextEncoder().encode(JSON.stringify(Object.fromEntries(verified))), { at: 0 })
+		const bytes = new TextEncoder().encode(JSON.stringify(Object.fromEntries(verified)))
+
+		access.write(bytes, { at: 0 })
+		access.truncate(bytes.length)
 		access.flush()
 	} finally {
 		access.close()
 	}
 }
 
-async function shardStore(manifest: AssistantModelManifest): Promise<{ store: ShardStore; directory: FileSystemDirectoryHandle }> {
+interface WorkerShardStore extends ShardStore {
+	// Drops a shard that no longer matches: its file and its entry in the record.
+	discard(shard: AssistantModelFile): Promise<void>
+}
+
+async function shardStore(manifest: AssistantModelManifest): Promise<{ store: WorkerShardStore; directory: FileSystemDirectoryHandle }> {
 	const directory = await modelDirectory(manifest.id)
 	const verified = await readVerified(directory)
 	const sizes = new Map<string, number>()
@@ -95,25 +115,56 @@ async function shardStore(manifest: AssistantModelManifest): Promise<{ store: Sh
 	}
 
 	let writing = Promise.resolve()
+	const record = () => {
+		writing = writing.then(() => writeVerified({ directory, verified }))
+
+		return writing
+	}
 
 	return {
 		directory,
 		store: {
 			isVerified: shard => sizes.get(shard.file) === shard.size && verified.get(shard.file) === shard.sha256,
+			sizeOnDisk: shard => sizes.get(shard.file) ?? 0,
 			markVerified: shard => {
 				verified.set(shard.file, shard.sha256)
 				sizes.set(shard.file, shard.size)
-				writing = writing.then(() => writeVerified({ directory, verified }))
 
-				return writing
+				return record()
+			},
+			discard: async shard => {
+				verified.delete(shard.file)
+				sizes.set(shard.file, 0)
+				await record()
+				await directory.removeEntry(shard.file).catch(() => undefined)
 			},
 			withFile: async (shard, run) => {
-				const access = await (await directory.getFileHandle(shard.file, { create: true })).createSyncAccessHandle()
+				const data = await (await directory.getFileHandle(shard.file, { create: true })).createSyncAccessHandle()
+				let checkpoint: FileSystemSyncAccessHandle
 
 				try {
-					return await run(access)
+					checkpoint = await (await directory.getFileHandle(checkpointName(shard), { create: true })).createSyncAccessHandle()
+				} catch (e) {
+					data.close()
+
+					throw e
+				}
+
+				let complete = false
+
+				try {
+					const result = await run(data, checkpoint)
+
+					complete = checkpoint.getSize() === 0
+
+					return result
 				} finally {
-					access.close()
+					data.close()
+					checkpoint.close()
+
+					if (complete) {
+						await directory.removeEntry(checkpointName(shard)).catch(() => undefined)
+					}
 				}
 			}
 		}
@@ -137,10 +188,20 @@ async function hashFile(file: File): Promise<string> {
 	}
 }
 
-// The model's shards as Files, in order. A shard on disk at full size but missing from the verified record
-// (a crash between the last write and the record) is hashed now, once.
-async function openShards(manifest: AssistantModelManifest): Promise<File[]> {
-	const { store, directory } = await shardStore(manifest)
+// The model's shards as Files, in order. A shard is trusted on its size and the verified record, which
+// the download writes only after the shard's hash matched; one at full size but missing from the record
+// (a crash between the last write and the record) is hashed now, once, and dropped if it does not match.
+async function openShards({
+	manifest,
+	store,
+	directory,
+	onVerifying
+}: {
+	manifest: AssistantModelManifest
+	store: WorkerShardStore
+	directory: FileSystemDirectoryHandle
+	onVerifying: () => void
+}): Promise<File[]> {
 	const files: File[] = []
 
 	for (const shard of manifest.shards) {
@@ -154,7 +215,11 @@ async function openShards(manifest: AssistantModelManifest): Promise<File[]> {
 		}
 
 		if (!store.isVerified(shard)) {
+			onVerifying()
+
 			if ((await hashFile(file)) !== shard.sha256) {
+				await store.discard(shard)
+
 				throw loadError("missing", `${shard.file} does not match its published hash`)
 			}
 
@@ -165,6 +230,32 @@ async function openShards(manifest: AssistantModelManifest): Promise<File[]> {
 	}
 
 	return files
+}
+
+// After a load that failed for a reason other than memory: a shard damaged on disk since it was verified
+// is one cause the record cannot show. Hashes every shard once and drops those that no longer match, so the
+// client downloads just them again. Whether any were dropped.
+async function discardDamagedShards({
+	manifest,
+	store,
+	files
+}: {
+	manifest: AssistantModelManifest
+	store: WorkerShardStore
+	files: readonly File[]
+}): Promise<boolean> {
+	let damaged = false
+
+	for (const [index, shard] of manifest.shards.entries()) {
+		const file = files[index]
+
+		if (file !== undefined && (await hashFile(file)) !== shard.sha256) {
+			await store.discard(shard)
+			damaged = true
+		}
+	}
+
+	return damaged
 }
 
 // A callback the page passed with Comlink.proxy holds a MessagePort until released.
@@ -185,16 +276,19 @@ function isOutOfMemory(e: unknown): boolean {
 
 const api = {
 	// Resumable: shards already verified are skipped, a partial shard continues where it stopped.
-	async download(manifest: AssistantModelManifest, baseUrl: string, onProgress: (receivedBytes: number) => void): Promise<void> {
-		download?.abort()
-
+	async download(
+		manifest: AssistantModelManifest,
+		baseUrl: string,
+		onProgress: (progress: ModelDownloadProgress) => void
+	): Promise<void> {
+		const previous = download
 		const controller = new AbortController()
-
-		download = controller
-
 		const progress = throttle(onProgress, PROGRESS_THROTTLE_MS)
+		const run = (async () => {
+			// Its files stay open until it has wound down; a second sync access handle on them would fail.
+			await previous?.done.catch(() => undefined)
+			controller.signal.throwIfAborted()
 
-		try {
 			const { store } = await shardStore(manifest)
 
 			await downloadModelShards({
@@ -203,63 +297,84 @@ const api = {
 				store,
 				createHasher: createSHA256,
 				fetchShard: (url, init) => fetch(url, init),
+				connectivity: globalConnectivity(globalThis),
 				signal: controller.signal,
 				onProgress: progress
 			})
+		})()
+
+		previous?.controller.abort()
+		download = { controller, done: run }
+
+		try {
+			await run
 		} finally {
 			progress.flush()
 			releaseCallback(onProgress)
 
-			if (download === controller) {
-				download = null
-			}
+			clearDownload(controller)
 		}
 	},
 
 	cancelDownload(): void {
-		download?.abort()
-		download = null
+		download?.controller.abort()
 	},
 
-	async load(manifest: AssistantModelManifest, options: AssistantLoadOptions): Promise<AssistantLoadResult> {
-		if (engine !== null) {
-			throw loadError("load-failed", "A model is already loaded")
-		}
-
-		const files = await openShards(manifest)
-		const first = files[0]
-
-		if (first === undefined) {
-			throw loadError("missing", "The model has no shards")
-		}
-
-		const specialTokens = await readGgufSpecialTokens({ read: blobGgufRead(first), size: first.size })
-		const instance = new Wllama({ default: wllamaWasmUrl }, { suppressNativeLog: true, logger: quietLogger })
-
-		// Never the CDN-hosted compat build: a browser that would need it is refused by the device check.
-		instance.setCompat(null)
-
+	// `onVerifying` fires when shards have to be hashed before the model can start.
+	async load(manifest: AssistantModelManifest, options: AssistantLoadOptions, onVerifying?: () => void): Promise<AssistantLoadResult> {
 		try {
-			await instance.loadModel(files, {
-				n_ctx: options.contextTokens,
-				n_threads: options.threads,
-				n_gpu_layers: options.backend === "webgpu" ? 999 : 0,
-				jinja: true,
-				// Non-thinking mode: the small Qwen3.5 models loop when allowed to think.
-				reasoning: false,
-				// Router, main loop and quarantine alternate; a slot each keeps their prompt prefixes cached.
-				n_parallel: 3,
-				kv_unified: true
-			})
-		} catch (e) {
-			await instance.exit().catch(() => undefined)
+			if (engine !== null) {
+				throw loadError("load-failed", "A model is already loaded")
+			}
 
-			throw loadError(isOutOfMemory(e) ? "out-of-memory" : "load-failed", e instanceof Error ? e.message : String(e))
+			const { store, directory } = await shardStore(manifest)
+			const files = await openShards({ manifest, store, directory, onVerifying: () => onVerifying?.() })
+			const first = files[0]
+
+			if (first === undefined) {
+				throw loadError("missing", "The model has no shards")
+			}
+
+			const specialTokens = await readGgufSpecialTokens({ read: blobGgufRead(first), size: first.size })
+			const instance = new Wllama({ default: wllamaWasmUrl }, { suppressNativeLog: true, logger: quietLogger })
+
+			// Never the CDN-hosted compat build: a browser that would need it is refused by the device check.
+			instance.setCompat(null)
+
+			try {
+				await instance.loadModel(files, {
+					n_ctx: options.contextTokens,
+					n_threads: options.threads,
+					n_gpu_layers: options.backend === "webgpu" ? 999 : 0,
+					jinja: true,
+					// Non-thinking mode: the small Qwen3.5 models loop when allowed to think.
+					reasoning: false,
+					// Router, main loop and quarantine alternate; a slot each keeps their prompt prefixes cached.
+					n_parallel: 3,
+					kv_unified: true
+				})
+			} catch (e) {
+				await instance.exit().catch(() => undefined)
+
+				if (isOutOfMemory(e)) {
+					throw loadError("out-of-memory", e instanceof Error ? e.message : String(e))
+				}
+
+				onVerifying?.()
+
+				if (await discardDamagedShards({ manifest, store, files })) {
+					throw loadError("missing", "A downloaded shard was damaged")
+				}
+
+				throw loadError("load-failed", e instanceof Error ? e.message : String(e))
+			}
+
+			engine = instance
+
+			return { specialTokens }
+		} finally {
+			releaseCallback(onVerifying)
 		}
-
-		engine = instance
-
-		return { specialTokens }
 	},
 
 	async generate(id: number, request: AssistantGenerateRequest, onText?: (text: string) => void): Promise<AssistantGenerateResult> {

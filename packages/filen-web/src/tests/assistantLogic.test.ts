@@ -3,6 +3,7 @@ import { ASSISTANT_TOOLS } from "@filen/shared/assistant"
 import { EN_CATALOGS } from "@/lib/i18n/catalog"
 import {
 	canRemoveModel,
+	downloadByteFigures,
 	downloadPercent,
 	proposalTargetKind,
 	spokenText,
@@ -26,6 +27,22 @@ describe("downloadPercent", () => {
 	})
 })
 
+describe("downloadByteFigures", () => {
+	const total = 2_740_938_752
+
+	it("shows both figures at one precision, so the received part never reads above the total", () => {
+		// One decimal against two used to read "2.6 GiB of 2.55 GiB" here.
+		expect(downloadByteFigures(total - 1_000_000, total)).toEqual({ received: "2.6 GiB", total: "2.6 GiB" })
+		expect(downloadByteFigures(total, total)).toEqual({ received: "2.6 GiB", total: "2.6 GiB" })
+		expect(downloadByteFigures(512 * 1024 * 1024, total)).toEqual({ received: "512.0 MiB", total: "2.6 GiB" })
+	})
+
+	it("caps the received part at the total and at zero", () => {
+		expect(downloadByteFigures(total + 100_000_000, total).received).toBe("2.6 GiB")
+		expect(downloadByteFigures(-5, total).received).toBe("0 B")
+	})
+})
+
 describe("canRemoveModel", () => {
 	it("offers removal only while the files are on disk", () => {
 		expect(canRemoveModel({ kind: "downloaded", model: MODEL })).toBe(true)
@@ -34,8 +51,8 @@ describe("canRemoveModel", () => {
 		expect(canRemoveModel({ kind: "error", error: "out-of-memory", model: MODEL })).toBe(true)
 		expect(canRemoveModel({ kind: "error", error: "download-failed", model: MODEL })).toBe(false)
 		expect(canRemoveModel({ kind: "not-downloaded", model: MODEL })).toBe(false)
-		expect(canRemoveModel({ kind: "downloading", model: MODEL, receivedBytes: 1 })).toBe(false)
-		expect(canRemoveModel({ kind: "loading", model: MODEL })).toBe(false)
+		expect(canRemoveModel({ kind: "downloading", model: MODEL, receivedBytes: 1, waiting: false })).toBe(false)
+		expect(canRemoveModel({ kind: "loading", model: MODEL, verifying: false })).toBe(false)
 		expect(canRemoveModel({ kind: "unavailable", reason: "in-use-elsewhere", model: MODEL })).toBe(false)
 	})
 })

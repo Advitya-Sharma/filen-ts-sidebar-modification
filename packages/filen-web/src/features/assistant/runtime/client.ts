@@ -13,6 +13,7 @@ import { DEFAULT_MODEL_BASE_URL, manifestBytes, parseManifest, type AssistantMod
 import { QWEN35_4B } from "@/features/assistant/runtime/models"
 import { probeDevice, recommendRuntime, storageVerdict, type RuntimeRecommendation } from "@/features/assistant/runtime/deviceCheck"
 import { deleteModels, inspectModel } from "@/features/assistant/runtime/modelStore"
+import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 import { log } from "@/lib/log"
 
@@ -85,6 +86,7 @@ export class AssistantRuntime implements AssistantModel {
 	private busy = 0
 	private downloading: Promise<void> | null = null
 	private loading: Promise<void> | null = null
+	private redownload = false
 	private nextGeneration = 1
 
 	constructor() {
@@ -123,7 +125,7 @@ export class AssistantRuntime implements AssistantModel {
 		}
 	}
 
-	private settle(kind: Exclude<Settled, "unavailable" | "error" | "downloading">): void {
+	private settle(kind: Exclude<Settled, "unavailable" | "error" | "downloading" | "loading">): void {
 		this.setState({ kind, model: this.info() })
 	}
 
@@ -346,16 +348,24 @@ export class AssistantRuntime implements AssistantModel {
 					return
 				}
 
-				this.setState({ kind: "downloading", model: this.info(), receivedBytes: before.verifiedBytes })
+				const sizeBytes = manifestBytes(this.manifest)
+
+				this.setState({ kind: "downloading", model: this.info(), receivedBytes: before.presentBytes, waiting: false })
 				await this.worker().remote.download(
 					this.manifest,
 					this.baseUrl,
-					Comlink.proxy((receivedBytes: number) => {
+					Comlink.proxy(({ receivedBytes, waiting }: ModelDownloadProgress) => {
 						if (this.state.kind === "downloading") {
-							this.setState({ kind: "downloading", model: this.info(), receivedBytes })
+							this.setState({
+								kind: "downloading",
+								model: this.info(),
+								receivedBytes: Math.min(sizeBytes, Math.max(0, receivedBytes)),
+								waiting
+							})
 						}
 					})
 				)
+				this.settle("downloaded")
 				// An older model version is dead weight once its successor is complete.
 				await deleteModels(this.manifest.id).catch((e: unknown) => {
 					log.warn("assistant", "pruning old models failed", e)
@@ -381,7 +391,9 @@ export class AssistantRuntime implements AssistantModel {
 			return
 		}
 
-		this.settle("downloaded")
+		if (this.state.kind !== "downloaded") {
+			this.settle("downloaded")
+		}
 
 		if (this.panelOpen) {
 			await this.load()
@@ -398,6 +410,11 @@ export class AssistantRuntime implements AssistantModel {
 	private load(): Promise<void> {
 		this.loading ??= this.runLoad().finally(() => {
 			this.loading = null
+
+			if (this.redownload) {
+				this.redownload = false
+				this.download()
+			}
 		})
 
 		return this.loading
@@ -423,14 +440,22 @@ export class AssistantRuntime implements AssistantModel {
 			return
 		}
 
-		this.settle("loading")
+		this.setState({ kind: "loading", model: this.info(), verifying: false })
 
 		try {
-			const { specialTokens } = await this.worker().remote.load(this.manifest, {
-				backend: recommendation.backend,
-				threads: recommendation.threads,
-				contextTokens: ASSISTANT_CONTEXT_TOKENS
-			})
+			const { specialTokens } = await this.worker().remote.load(
+				this.manifest,
+				{
+					backend: recommendation.backend,
+					threads: recommendation.threads,
+					contextTokens: ASSISTANT_CONTEXT_TOKENS
+				},
+				Comlink.proxy(() => {
+					if (this.state.kind === "loading") {
+						this.setState({ kind: "loading", model: this.info(), verifying: true })
+					}
+				})
+			)
 
 			this.tokenList = specialTokens
 			this.settle("ready")
@@ -446,6 +471,9 @@ export class AssistantRuntime implements AssistantModel {
 				const inspection = await inspectModel(this.manifest)
 
 				this.settle(inspection.complete ? "downloaded" : "not-downloaded")
+				// Some shards are gone or were damaged, the rest are still verified: the user opted in already, so
+				// only the missing ones are fetched again, right after this load has wound down.
+				this.redownload = !inspection.complete && inspection.verifiedBytes > 0
 			} else {
 				this.setState({
 					kind: "error",

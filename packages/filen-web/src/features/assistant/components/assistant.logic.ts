@@ -1,3 +1,4 @@
+import { formatBytesFixed } from "@filen/shared"
 import type { AssistantKey } from "@/lib/i18n"
 import type { TranscriptEntry } from "@/features/assistant/store/transcript"
 import type { AssistantModelState, AssistantTurnError } from "@/features/assistant/types"
@@ -10,6 +11,15 @@ export function downloadPercent(receivedBytes: number, sizeBytes: number): numbe
 	}
 
 	return Math.min(100, Math.max(0, Math.floor((receivedBytes / sizeBytes) * 100)))
+}
+
+// Both figures in one format, the received part capped at the total: two precisions (one decimal against
+// two) read as "2.6 GiB of 2.55 GiB" in the last few megabytes.
+export function downloadByteFigures(receivedBytes: number, sizeBytes: number): { received: string; total: string } {
+	return {
+		received: formatBytesFixed(Math.min(sizeBytes, Math.max(0, receivedBytes))),
+		total: formatBytesFixed(sizeBytes)
+	}
 }
 
 // Files on disk: what "Remove downloaded model" can delete. A failed load still left them there; a

@@ -136,6 +136,27 @@ describe("AssistantSidePanel", () => {
 		expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toBeDefined()
 	})
 
+	it("words the download and start-up phases instead of leaving a stale figure", () => {
+		const size = MOCK_ASSISTANT_MODEL.sizeBytes
+		const phases: [AssistantModelState, string | RegExp][] = [
+			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: false }, / of /],
+			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: true }, "Waiting for the connection…"],
+			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size, waiting: false }, "Finishing the download…"],
+			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: true }, "Checking the downloaded model…"],
+			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: false }, "Starting the assistant…"]
+		]
+
+		for (const [state, text] of phases) {
+			withSession(state)
+			render(<AssistantSidePanel />)
+
+			expect(screen.getByText(text)).toBeDefined()
+
+			unregister()
+			cleanup()
+		}
+	})
+
 	it("disables the download on a device that cannot run the model, saying why", () => {
 		withSession({ kind: "unavailable", reason: "insufficient-memory", model: MOCK_ASSISTANT_MODEL })
 		render(<AssistantSidePanel />)

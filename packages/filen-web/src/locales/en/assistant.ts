@@ -75,12 +75,18 @@ export const assistant = {
 	assistantDownloadingTitle: "Downloading the model",
 	/** Download in progress — bytes received of the total, e.g. "1.2 GiB of 2.6 GiB" */
 	assistantDownloadProgress: "{{received}} of {{total}}",
+	/** Download in progress — offline, or retrying after the connection dropped; it continues on its own */
+	assistantDownloadWaiting: "Waiting for the connection…",
+	/** Download in progress — every byte has arrived, the last checks are running */
+	assistantDownloadFinishing: "Finishing the download…",
 	/** Download in progress — accessible name of the progress bar */
 	assistantDownloadProgressLabel: "Model download",
 	/** Download in progress — stops it */
 	assistantCancelDownload: "Cancel download",
 	/** The downloaded model is being loaded into memory */
 	assistantLoadingTitle: "Starting the assistant…",
+	/** Before starting, the downloaded model's files are checked because a record of them was lost or the last start failed */
+	assistantVerifyingTitle: "Checking the downloaded model…",
 	/** Download or start failed — title above the reason */
 	assistantErrorTitle: "The assistant couldn't start",
 	/** Failure reason — the download broke off */

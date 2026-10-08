@@ -8,7 +8,7 @@ import type { AssistantModelManifest } from "@/features/assistant/runtime/manife
 
 export const MODELS_DIRECTORY = "models"
 
-const VERIFIED_FILE = "verified.json"
+export const VERIFIED_FILE = "verified.json"
 
 export function modelDirectory(manifestId: string): Promise<FileSystemDirectoryHandle> {
 	return opfsDirectory([MODELS_DIRECTORY, manifestId])
@@ -28,20 +28,6 @@ export async function readVerified(directory: FileSystemDirectoryHandle): Promis
 		// Missing or torn: nothing counts as verified, and the shards present are hashed again.
 		return new Map()
 	}
-}
-
-export async function writeVerified({
-	directory,
-	verified
-}: {
-	directory: FileSystemDirectoryHandle
-	verified: ReadonlyMap<string, string>
-}): Promise<void> {
-	const writable = await (await directory.getFileHandle(VERIFIED_FILE, { create: true })).createWritable()
-
-	// createWritable commits on close only, so a crash leaves the previous record whole.
-	await writable.write(JSON.stringify(Object.fromEntries(verified)))
-	await writable.close()
 }
 
 export interface ModelInspection {

@@ -99,7 +99,7 @@ export function createMockAssistantSession({
 
 		const model = modelState.model
 
-		emit({ type: "model", state: { kind: "loading", model } })
+		emit({ type: "model", state: { kind: "loading", model, verifying: false } })
 		later(() => {
 			emit({ type: "model", state: { kind: "ready", model } })
 		}, 2)
@@ -112,13 +112,18 @@ export function createMockAssistantSession({
 
 		const model = modelState.model ?? MOCK_ASSISTANT_MODEL
 
-		emit({ type: "model", state: { kind: "downloading", model, receivedBytes: 0 } })
+		emit({ type: "model", state: { kind: "downloading", model, receivedBytes: 0, waiting: false } })
 
 		for (let step = 1; step <= downloadSteps; step++) {
 			later(() => {
 				emit({
 					type: "model",
-					state: { kind: "downloading", model, receivedBytes: Math.round((model.sizeBytes * step) / downloadSteps) }
+					state: {
+						kind: "downloading",
+						model,
+						receivedBytes: Math.round((model.sizeBytes * step) / downloadSteps),
+						waiting: false
+					}
 				})
 			}, step)
 		}

@@ -1,12 +1,12 @@
 import { useTranslation } from "react-i18next"
 import { SparklesIcon } from "lucide-react"
-import { formatBytes, formatBytesFixed } from "@filen/shared"
+import { formatBytes } from "@filen/shared"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
 import type { AssistantKey } from "@/lib/i18n"
 import { cancelAssistantDownload, downloadAssistantModel } from "@/features/assistant/store/assistantSession"
-import { downloadPercent } from "@/features/assistant/components/assistant.logic"
+import { downloadByteFigures, downloadPercent } from "@/features/assistant/components/assistant.logic"
 import type { AssistantModelError, AssistantModelInfo, AssistantModelState, AssistantUnavailableReason } from "@/features/assistant/types"
 
 // Every model state short of "ready" is this one screen.
@@ -121,10 +121,11 @@ function SetupBody({ state }: { state: AssistantSetupState }) {
 						className="w-full max-w-72"
 					/>
 					<p className="text-xs text-muted-foreground tabular-nums">
-						{t("assistantDownloadProgress", {
-							received: formatBytesFixed(state.receivedBytes),
-							total: formatBytes(state.model.sizeBytes)
-						})}
+						{state.receivedBytes >= state.model.sizeBytes
+							? t("assistantDownloadFinishing")
+							: state.waiting
+								? t("assistantDownloadWaiting")
+								: t("assistantDownloadProgress", downloadByteFigures(state.receivedBytes, state.model.sizeBytes))}
 					</p>
 					<Button
 						variant="outline"
@@ -142,7 +143,7 @@ function SetupBody({ state }: { state: AssistantSetupState }) {
 			return (
 				<p className="flex items-center gap-2 text-sm text-muted-foreground">
 					<Spinner aria-hidden="true" />
-					{t("assistantLoadingTitle")}
+					{state.kind === "loading" && state.verifying ? t("assistantVerifyingTitle") : t("assistantLoadingTitle")}
 				</p>
 			)
 		case "error":

@@ -23,12 +23,17 @@ export type AssistantModelError = "download-failed" | "load-failed" | "out-of-me
 // "downloaded": the files are on disk but not in memory. The runtime loads them on its own once the panel
 // opens (setPanelOpen), passing through "loading", and unloads them a while after it closes. `model` on
 // unavailable/error is what would have been (or was being) installed, when known.
+// "downloading": `receivedBytes` is exact and never above `model.sizeBytes`; at the size, only the last
+// bookkeeping is left. `waiting`: nothing is moving, the device is offline or the download is backing off
+// after network errors, and it continues on its own.
+// "loading": `verifying` while shards are hashed before the start, which happens only when the record of
+// verified shards was lost or a start failed and the files are checked for damage.
 export type AssistantModelState =
 	| { kind: "unavailable"; reason: AssistantUnavailableReason; model: AssistantModelInfo | null }
 	| { kind: "not-downloaded"; model: AssistantModelInfo }
-	| { kind: "downloading"; model: AssistantModelInfo; receivedBytes: number }
+	| { kind: "downloading"; model: AssistantModelInfo; receivedBytes: number; waiting: boolean }
 	| { kind: "downloaded"; model: AssistantModelInfo }
-	| { kind: "loading"; model: AssistantModelInfo }
+	| { kind: "loading"; model: AssistantModelInfo; verifying: boolean }
 	| { kind: "ready"; model: AssistantModelInfo }
 	| { kind: "error"; error: AssistantModelError; model: AssistantModelInfo | null }
 

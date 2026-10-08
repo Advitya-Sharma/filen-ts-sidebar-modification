@@ -115,7 +115,7 @@ describe("applyAssistantEvent", () => {
 	it("tracks the model state", () => {
 		const state = applyAssistantEvent(INITIAL_TRANSCRIPT_STATE, {
 			type: "model",
-			state: { kind: "loading", model: { id: "m", name: "M", sizeBytes: 1 } }
+			state: { kind: "loading", model: { id: "m", name: "M", sizeBytes: 1 }, verifying: false }
 		})
 
 		expect(state.modelState.kind).toBe("loading")
