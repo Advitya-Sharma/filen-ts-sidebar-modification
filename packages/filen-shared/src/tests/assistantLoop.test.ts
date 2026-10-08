@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest"
 import {
 	AssistantAbortError,
 	AssistantContextError,
+	assistantDateLine,
 	capToolResult,
 	estimateTokens,
 	fitMessages,
+	localeWeekStart,
 	parseRoute,
 	ROUTER_GRAMMAR,
 	runAssistantTurn,
@@ -1045,11 +1047,11 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		const system = model.requests[1]?.messages[0]?.content ?? ""
 
 		expect(system).toContain(
-			"Today: Thursday 2026-10-08; time zone Europe/Berlin; this week: 2026-10-05 to 2026-10-11; this month: 2026-10-01 to 2026-10-31."
+			"Today is Thursday 2026-10-08 (Europe/Berlin). Yesterday: Wednesday 2026-10-07. This week: Monday 2026-10-05 to Sunday 2026-10-11. Last week: 2026-09-28 to 2026-10-04. This month: 2026-10. Last month: 2026-09. This year: 2026."
 		)
 		expect(system).toContain("ref canary1")
 		expect(system).toContain("⟦abc123⟧")
-		expect(system.indexOf("Today:")).toBeGreaterThan(system.indexOf("Reply briefly"))
+		expect(system.indexOf("Today is")).toBeGreaterThan(system.indexOf("Reply briefly"))
 	})
 
 	it("withholds a reply that echoes the canary and flags it instead of showing text", async () => {
@@ -1063,6 +1065,56 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 
 		expect(result).toMatchObject({ reply: "", withheld: true })
 		expect(events.filter(event => event.type === "reply" && event.final)).toEqual([{ type: "reply", text: "", final: true, withheld: true }])
+	})
+})
+
+describe("assistantDateLine", () => {
+	it("takes the date in the user's time zone, across month and year boundaries", () => {
+		// 2026-01-01 03:00 UTC is still 2025-12-31 in New York; that Wednesday's week reaches into January.
+		expect(assistantDateLine({ now: Date.UTC(2026, 0, 1, 3), timeZone: "America/New_York" })).toBe(
+			"Today is Wednesday 2025-12-31 (America/New_York). Yesterday: Tuesday 2025-12-30. This week: Monday 2025-12-29 to Sunday 2026-01-04. Last week: 2025-12-22 to 2025-12-28. This month: 2025-12. Last month: 2025-11. This year: 2025."
+		)
+	})
+
+	it("starts the week on Monday by default, so a Sunday ends it, and steps back across a year for last month", () => {
+		expect(assistantDateLine({ now: Date.UTC(2024, 2, 3, 12), timeZone: "UTC" })).toContain(
+			"Today is Sunday 2024-03-03 (UTC). Yesterday: Saturday 2024-03-02. This week: Monday 2024-02-26 to Sunday 2024-03-03. Last week: 2024-02-19 to 2024-02-25."
+		)
+		expect(assistantDateLine({ now: Date.UTC(2026, 0, 5, 12), timeZone: "UTC" })).toContain(
+			"Yesterday: Sunday 2026-01-04. This week: Monday 2026-01-05 to Sunday 2026-01-11. Last week: 2025-12-29 to 2026-01-04. This month: 2026-01. Last month: 2025-12. This year: 2026."
+		)
+	})
+
+	it("starts the week on the locale's first day, across a month boundary", () => {
+		// Sunday 2025-11-02: the first day of a Sunday-start week that began in November, its last week in October.
+		expect(assistantDateLine({ now: Date.UTC(2025, 10, 2, 12), timeZone: "UTC", weekStart: 7 })).toContain(
+			"This week: Sunday 2025-11-02 to Saturday 2025-11-08. Last week: 2025-10-26 to 2025-11-01."
+		)
+		// Saturday 2025-11-01 is the last day of that week in October's calendar.
+		expect(assistantDateLine({ now: Date.UTC(2025, 10, 1, 12), timeZone: "UTC", weekStart: 7 })).toContain(
+			"This week: Sunday 2025-10-26 to Saturday 2025-11-01. Last week: 2025-10-19 to 2025-10-25."
+		)
+		// A Saturday start (weekStart 6) on a Wednesday.
+		expect(assistantDateLine({ now: Date.UTC(2025, 9, 8, 12), timeZone: "UTC", weekStart: 6 })).toContain(
+			"This week: Saturday 2025-10-04 to Friday 2025-10-10."
+		)
+	})
+
+	it("falls back to the runtime's zone, unnamed, for a zone it does not know", () => {
+		const line = assistantDateLine({ now: Date.UTC(2024, 5, 15, 12), timeZone: "Not/AZone" })
+
+		expect(line).toMatch(/^Today is \w+day 2024-06-1[456]\. Yesterday: \w+day 2024-06-1[345]\./)
+		expect(line).not.toContain("Not/AZone")
+	})
+})
+
+describe("localeWeekStart", () => {
+	it("reads the locale's first weekday and falls back to Monday", () => {
+		const supported = typeof (new Intl.Locale("en-US") as { getWeekInfo?: unknown }).getWeekInfo === "function"
+
+		expect(localeWeekStart("de-DE")).toBe(1)
+		expect(localeWeekStart("en-US")).toBe(supported ? 7 : 1)
+		expect(localeWeekStart("not a locale!")).toBe(1)
 	})
 })
 

@@ -3,6 +3,7 @@ import {
 	AssistantContextError,
 	AssistantMessageTooLongError,
 	estimateTokens,
+	localeWeekStart,
 	runAssistantTurn,
 	type AssistantConfirmationRequest,
 	type AssistantHistoryTurn,
@@ -466,6 +467,7 @@ export function createAssistantSession({
 				return
 			}
 
+			const clock = Intl.DateTimeFormat().resolvedOptions()
 			const run = runAssistantTurn({
 				model: runtime.model,
 				executor: turn.shared,
@@ -477,7 +479,8 @@ export function createAssistantSession({
 				nonce,
 				secrets,
 				now: Date.now(),
-				timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+				timeZone: clock.timeZone,
+				weekStart: localeWeekStart(clock.locale)
 			})
 
 			// Stop ends the turn at once, even while a tool still waits on something that ignores the signal (a

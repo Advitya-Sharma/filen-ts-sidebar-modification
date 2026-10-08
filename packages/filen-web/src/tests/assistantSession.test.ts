@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest"
-import { ROUTER_GRAMMAR, type AssistantGenerateRequest, type AssistantGenerateResult, type AssistantModel } from "@filen/shared/assistant"
+import {
+	assistantDateLine,
+	localeWeekStart,
+	ROUTER_GRAMMAR,
+	type AssistantGenerateRequest,
+	type AssistantGenerateResult,
+	type AssistantModel
+} from "@filen/shared/assistant"
 import { CARD_EXPIRY_MS, createAssistantSession, recentHistory, turnSteps } from "@/features/assistant/loop/session"
 import type { AssistantEvent } from "@/features/assistant/types"
 import { call, fakeExecutor, fakeRuntime, INFO, NAMES, ScriptedModel, waitFor, type GenerateOptions } from "@/tests/support/assistantFakes"
@@ -947,6 +954,15 @@ describe("assistant session", () => {
 		expect(canary(systems[2] ?? "")).not.toBe(canary(systems[0] ?? ""))
 		// The spotlight marker is as short as the one the eval measured.
 		expect(systems[0]).toMatch(/⟦[0-9a-f]{6}⟧/)
+
+		// The date line's week starts on the runtime locale's first weekday.
+		const clock = Intl.DateTimeFormat().resolvedOptions()
+		const week = /This week: [^.]+\./.exec(
+			assistantDateLine({ now: Date.now(), timeZone: clock.timeZone, weekStart: localeWeekStart(clock.locale) })
+		)?.[0]
+
+		expect(week).toBeDefined()
+		expect(systems[0]).toContain(week)
 	})
 
 	it("reads back only the newest exchanges that fit the history budget, always the last", () => {

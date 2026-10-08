@@ -2,6 +2,8 @@ import { resultItemCount, toolCallSubject } from "./activity"
 import { capToolResult, estimateTokens, MESSAGE_OVERHEAD_TOKENS } from "./budget"
 import { AssistantTurnGuard } from "./guard"
 import {
+	ASSISTANT_CLOSING_NUDGE,
+	ASSISTANT_MALFORMED_RETRY,
 	assistantDateLine,
 	assistantInstructionLines,
 	assistantSystemPrompt,
@@ -334,11 +336,6 @@ function stripCallSyntax(text: string, toolNames: readonly string[]): string {
 	return stripped.trim()
 }
 
-const MALFORMED_RETRY =
-	"(Your last reply contained tool-call syntax the app could not run. Call the tool properly, or reply in plain text.)"
-
-const CLOSING_NUDGE = "(No more tools are available in this request. Reply to the user now, in plain text.)"
-
 const CONTENT_FIELDS = ["content", "messages"]
 
 const STUB_MARK = "Result dropped to fit the context"
@@ -588,6 +585,7 @@ export async function runAssistantTurn({
 	secrets,
 	now,
 	timeZone,
+	weekStart,
 	spotlight = "delimit"
 }: {
 	model: AssistantModel
@@ -607,9 +605,11 @@ export async function runAssistantTurn({
 		canary: string
 		marker: string
 	}
-	// The user's clock and time zone (IANA), for a "Today" line: tool results carry dates.
+	// The user's clock, time zone (IANA) and first weekday (1 Monday to 7 Sunday), for a "Today" line: tool
+	// results carry dates.
 	now?: number
 	timeZone?: string
+	weekStart?: number
 	spotlight?: SpotlightMode | "off"
 }): Promise<AssistantTurnResult> {
 	checkAborted(signal)
@@ -702,7 +702,7 @@ export async function runAssistantTurn({
 			context: contextLine,
 			spotlight: instructionSpotlight,
 			canary,
-			date: now === undefined ? null : assistantDateLine({ now, timeZone }),
+			date: now === undefined ? null : assistantDateLine({ now, timeZone, weekStart }),
 			unavailable: routedTools.filter(tool => !supports(tool)).map(tool => tool.title)
 		})
 	}
@@ -900,7 +900,7 @@ export async function runAssistantTurn({
 						},
 						{
 							role: "user",
-							content: MALFORMED_RETRY
+							content: ASSISTANT_MALFORMED_RETRY
 						}
 					)
 
@@ -1247,7 +1247,7 @@ export async function runAssistantTurn({
 									...turn,
 									{
 										role: "user",
-										content: CLOSING_NUDGE
+										content: ASSISTANT_CLOSING_NUDGE
 									}
 								]
 							: turn,
