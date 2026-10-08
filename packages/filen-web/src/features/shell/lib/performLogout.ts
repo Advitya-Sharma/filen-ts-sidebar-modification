@@ -21,6 +21,7 @@ import { useDriveClipboardStore } from "@/features/drive/store/useDriveClipboard
 import { clearDirectoryTreeState } from "@/features/drive/store/useDirectoryTreeStore"
 import { discardListingPatches } from "@/features/drive/queries/drive"
 import { resetConversationHistory, withHistoryWritesHeld } from "@/features/assistant/store/conversationHistory"
+import { shutdownAssistant } from "@/features/assistant/store/assistantSession"
 import { confirmDiscardUnsavedPreview, usePreviewUnsavedGuardStore } from "@/features/preview/store/usePreviewUnsavedGuard"
 import { queryClient } from "@/queries/client"
 import { toast } from "sonner"
@@ -89,6 +90,10 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 	// stretch to seconds.
 	writeSignOutPending(true)
 	showSignOutOverlay()
+
+	// The assistant first: a running turn's tools would otherwise keep reading (refilling the caches about to
+	// be cleared) and playing through the teardown below.
+	shutdownAssistant()
 
 	// Notes + chats sync cancel BEFORE the wipe: abort each outbox loop and suppress any further disk
 	// write so a late flush can never resurrect this account's plaintext queue after kv-clear lands.

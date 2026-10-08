@@ -78,6 +78,11 @@ export function turnExecutor({ executor, signal }: { executor: ToolExecutor; sig
 
 			name: handle => executor.name?.(handle),
 
+			// A consequential tool also needs a card the UI can show.
+			supports: tool =>
+				(executor.supports?.(tool) ?? true) &&
+				(!isConsequentialTool(tool) || proposalAction({ tool: tool.name, args: {} }) !== null),
+
 			check: async call => {
 				const checked = await executor.check(call)
 

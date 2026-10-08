@@ -136,6 +136,14 @@ export function registerAssistantSession(next: AssistantSession): () => void {
 			liveProposals.add(event.proposal.id)
 		} else if (event.type === "proposal-settled") {
 			liveProposals.delete(event.proposalId)
+		} else if (event.type === "turn-end") {
+			// The turn that waited on its cards is over (stopped, failed, the model deleted): they expire with it,
+			// and a late Confirm must not reach the session. A confirmed card is no longer live by then.
+			for (const id of liveProposals) {
+				if (id.startsWith(`${event.turnId}:`)) {
+					liveProposals.delete(id)
+				}
+			}
 		}
 
 		if (heldDuringSend !== null) {
@@ -255,6 +263,18 @@ export function sendAssistantMessage(text: string): boolean {
 
 export function cancelAssistantTurn(): void {
 	session?.cancel()
+}
+
+// Signing out: no turn, card or tool call may run past this point, and the model's memory goes now.
+export function shutdownAssistant(): void {
+	openRequest++
+
+	if (session !== null) {
+		leaveConversation(session)
+		session.shutdown()
+	}
+
+	dropPending()
 }
 
 // Must run inside the Confirm button's own click handler: the session starts the write synchronously

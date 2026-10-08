@@ -29,14 +29,16 @@ export type AssistantModelError = "download-failed" | "load-failed" | "out-of-me
 // after network errors, and it continues on its own.
 // "loading": `verifying` while shards are hashed before the start, which happens only when the record of
 // verified shards was lost or a start failed and the files are checked for damage.
+// `partialBytes` on not-downloaded and error: part of the model is on disk (a stopped or failed download,
+// kept so it can resume), which the user can still remove.
 export type AssistantModelState =
 	| { kind: "unavailable"; reason: AssistantUnavailableReason; model: AssistantModelInfo | null }
-	| { kind: "not-downloaded"; model: AssistantModelInfo }
+	| { kind: "not-downloaded"; model: AssistantModelInfo; partialBytes?: number }
 	| { kind: "downloading"; model: AssistantModelInfo; receivedBytes: number; waiting: boolean }
 	| { kind: "downloaded"; model: AssistantModelInfo; idleUnloaded: boolean }
 	| { kind: "loading"; model: AssistantModelInfo; verifying: boolean }
 	| { kind: "ready"; model: AssistantModelInfo }
-	| { kind: "error"; error: AssistantModelError; model: AssistantModelInfo | null }
+	| { kind: "error"; error: AssistantModelError; model: AssistantModelInfo | null; partialBytes?: number }
 
 // The tool group the turn was routed to ("answer": no tools), as @filen/shared/assistant names them.
 export type AssistantStepRoute = "files" | "organize" | "trash" | "notes" | "chats" | "audio" | "navigation" | "answer"
@@ -102,7 +104,9 @@ export interface AssistantProposal {
 	text: Readonly<Record<string, string>>
 }
 
-export type AssistantTurnError = "model-unavailable" | "context-full" | "failed"
+// "message-too-long": the message alone does not fit the model. "no-reply": the turn ended without any
+// reply text to show.
+export type AssistantTurnError = "model-unavailable" | "context-full" | "message-too-long" | "no-reply" | "failed"
 
 // One finished exchange of the conversation, as the model sees it in the next turns.
 export interface AssistantExchange {
@@ -115,8 +119,9 @@ export type AssistantEvent =
 	// The FULL screened text of one reply bubble so far, not a delta: the runtime re-screens the whole reply
 	// on every emission (a link the user never typed must not flash up mid-stream). A turn can hold several
 	// replies (text written before tool calls is a reply of its own); `final` marks a reply that will not
-	// change again.
-	| { type: "reply"; turnId: string; replyId: string; text: string; final: boolean }
+	// change again. `withheld`: the reply repeated the assistant's instructions; its text is empty and the UI
+	// shows its own message in its place. A final reply with no text and not withheld removes its bubble.
+	| { type: "reply"; turnId: string; replyId: string; text: string; final: boolean; withheld?: boolean }
 	// `at`: when it happened (Date.now()), for durations.
 	| { type: "step"; turnId: string; step: AssistantStep; at: number }
 	| { type: "proposal"; turnId: string; proposal: AssistantProposal }
@@ -158,4 +163,7 @@ export interface AssistantSession {
 	reset: (history?: readonly AssistantExchange[]) => void
 	// The exchanges the next turn will see, oldest first.
 	getHistory: () => readonly AssistantExchange[]
+	// Signing out: stops the running turn, declines every waiting card, frees the model and refuses anything
+	// further; nothing may touch the account's data during the wipe.
+	shutdown: () => void
 }

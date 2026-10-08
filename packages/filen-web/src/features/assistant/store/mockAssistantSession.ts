@@ -11,9 +11,10 @@ import type {
 // A scripted AssistantSession for tests and for development builds before a real runtime registers. It
 // walks the whole UI surface: a chunked download, a load that starts only on request (the Load action or a
 // sent message, which waits for it), the turn's steps (loading, routing, a search with its prompt-reading
-// progress and result count), a streamed markdown reply, and a confirmation card
-// when the message asks to draft, move, copy, trash or download something. Timer-driven, so tests step it
-// with fake timers.
+// progress and result count), a streamed markdown reply, and a confirmation card when the message asks to
+// draft, move, copy, trash or download something. Cards behave as the real session's (loop/session.ts): the
+// turn waits on one until it is confirmed, declined or the turn is stopped, and a confirm of anything else
+// settles as failed. Timer-driven, so tests step it with fake timers.
 
 export const MOCK_ASSISTANT_MODEL: AssistantModelInfo = {
 	id: "mock-model",
@@ -22,6 +23,17 @@ export const MOCK_ASSISTANT_MODEL: AssistantModelInfo = {
 }
 
 const PROPOSAL_PATTERN = /\b(draft|move|copy|trash|download)\b/i
+
+const PROPOSAL_TOOLS: Partial<Record<string, string>> = {
+	draft: "draft_chat_message",
+	move: "move_items",
+	copy: "copy_items",
+	trash: "trash_items"
+}
+
+const SEARCH_REPLY = "I found **3 files** matching that in your drive:\n\n- `Taxes 2025.pdf`\n- `Receipts.xlsx`\n- `Notes.md`"
+
+type ToolStep = Extract<AssistantStep, { kind: "tool" }>
 
 const FILE_TARGETS = [
 	{ handle: "f1", name: "Taxes 2025.pdf" },
@@ -64,8 +76,10 @@ export function createMockAssistantSession({
 	const listeners = new Set<(event: AssistantEvent) => void>()
 	const timers = new Set<ReturnType<typeof setTimeout>>()
 	let modelState = initialState
+	// Cards the running turn waits on, by proposal id.
+	const proposals = new Map<string, { turnId: string; call: ToolStep }>()
 	let turnCount = 0
-	let activeTurnId: string | null = null
+	let activeTurn: { id: string; message: string } | null = null
 	let history: readonly AssistantExchange[] = []
 
 	function emit(event: AssistantEvent): void {
@@ -161,10 +175,11 @@ export function createMockAssistantSession({
 		emit({ type: "model", state: { kind: "not-downloaded", model: modelState.model } })
 	}
 
+	// Like the session's: the running turn is stopped first.
 	function deleteModel(): Promise<void> {
+		cancel()
 		clearTimers()
 		clearTimeout(loadTimer)
-		activeTurnId = null
 		emit({ type: "model", state: { kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL } })
 
 		return Promise.resolve()
@@ -177,7 +192,7 @@ export function createMockAssistantSession({
 		const step = (next: AssistantStep) => {
 			emit({ type: "step", turnId, step: next, at: Date.now() })
 		}
-		const search = (patch: Partial<Extract<AssistantStep, { kind: "tool" }>>) => {
+		const search = (patch: Partial<ToolStep>) => {
 			step({
 				id: `${turnId}-search`,
 				kind: "tool",
@@ -192,13 +207,9 @@ export function createMockAssistantSession({
 			})
 		}
 		const verb = PROPOSAL_PATTERN.exec(message)?.[1]?.toLowerCase()
-		const words = (
-			verb === undefined
-				? "I found **3 files** matching that in your drive:\n\n- `Taxes 2025.pdf`\n- `Receipts.xlsx`\n- `Notes.md`"
-				: "Here is what I would do. Nothing changes until you confirm."
-		).split(/(?<= )/)
 
-		activeTurnId = turnId
+		cancel()
+		activeTurn = { id: turnId, message }
 
 		// A model on disk loads first, inside the turn.
 		const loadSteps = loadModel()
@@ -226,55 +237,124 @@ export function createMockAssistantSession({
 		}, loadSteps + 1)
 		later(() => {
 			search({ status: "done", resultCount: 3 })
+
+			if (verb === undefined) {
+				finishTurn(turnId, SEARCH_REPLY)
+
+				return
+			}
+
+			// Like the session's: the id is the turn's and the call's, and the turn waits on the card.
+			const proposal = mockProposal(`${turnId}:call_1_0`, verb)
+			const call: ToolStep = {
+				id: proposal.id,
+				kind: "tool",
+				status: "waiting",
+				progress: null,
+				tool: PROPOSAL_TOOLS[verb] ?? "download_items",
+				subject: proposal.targets.length === 1 ? (proposal.targets[0]?.name ?? null) : null,
+				resultCount: null,
+				resultMore: false,
+				failure: null
+			}
+
+			proposals.set(proposal.id, { turnId, call })
+			step(call)
+			emit({ type: "proposal", turnId, proposal })
 		}, loadSteps + 2)
-
-		words.forEach((_, index) => {
-			later(
-				() => {
-					emit({
-						type: "reply",
-						turnId,
-						replyId: `${turnId}-reply`,
-						text: words.slice(0, index + 1).join(""),
-						final: index === words.length - 1
-					})
-				},
-				loadSteps + 3 + index
-			)
-		})
-
-		later(
-			() => {
-				if (verb !== undefined) {
-					emit({ type: "proposal", turnId, proposal: mockProposal(`${turnId}-proposal`, verb) })
-				}
-
-				activeTurnId = null
-				history = [...history, { user: message, reply: words.join("") }]
-				emit({ type: "turn-end", turnId, at: Date.now(), outcome: "complete" })
-			},
-			loadSteps + 4 + words.length
-		)
 
 		return turnId
 	}
 
+	// Streams the closing reply, then ends the turn complete.
+	function finishTurn(turnId: string, reply: string): void {
+		const words = reply.split(/(?<= )/)
+
+		words.forEach((_, index) => {
+			later(() => {
+				emit({
+					type: "reply",
+					turnId,
+					replyId: `${turnId}-reply`,
+					text: words.slice(0, index + 1).join(""),
+					final: index === words.length - 1
+				})
+			}, index + 1)
+		})
+
+		later(() => {
+			if (activeTurn?.id !== turnId) {
+				return
+			}
+
+			history = [...history, { user: activeTurn.message, reply }]
+			activeTurn = null
+			emit({ type: "turn-end", turnId, at: Date.now(), outcome: "complete" })
+		}, words.length + 1)
+	}
+
+	// Like the session's abort: the turn's cards go without an event of their own, a confirmed action
+	// already running carries on and settles.
 	function cancel(): void {
-		if (activeTurnId === null) {
+		if (activeTurn === null) {
 			return
 		}
 
-		const turnId = activeTurnId
+		const turnId = activeTurn.id
 
-		activeTurnId = null
+		activeTurn = null
 		clearTimers()
+
+		for (const [id, pending] of proposals) {
+			if (pending.turnId === turnId) {
+				proposals.delete(id)
+			}
+		}
+
 		emit({ type: "turn-end", turnId, at: Date.now(), outcome: "cancelled" })
 	}
 
+	// Refuses an id it is not waiting on (unknown, settled, or its turn ended), as the session does.
 	function confirm(proposalId: string): void {
-		later(() => {
+		const pending = proposals.get(proposalId)
+
+		if (pending === undefined) {
+			emit({ type: "proposal-settled", proposalId, outcome: "failed" })
+
+			return
+		}
+
+		const { turnId, call } = pending
+
+		proposals.delete(proposalId)
+		emit({ type: "step", turnId, step: { ...call, status: "active" }, at: Date.now() })
+
+		// Apart from the turn's timers: like the session's, a confirmed action carries on when its turn stops.
+		setTimeout(() => {
 			emit({ type: "proposal-settled", proposalId, outcome: "done" })
-		}, 2)
+
+			if (activeTurn?.id === turnId) {
+				emit({ type: "step", turnId, step: { ...call, status: "done" }, at: Date.now() })
+				finishTurn(turnId, "Done.")
+			}
+		}, stepMs * 2)
+	}
+
+	function reject(proposalId: string): void {
+		const pending = proposals.get(proposalId)
+
+		if (pending === undefined) {
+			return
+		}
+
+		proposals.delete(proposalId)
+		emit({
+			type: "step",
+			turnId: pending.turnId,
+			step: { ...pending.call, status: "failed", failure: "declined" },
+			at: Date.now()
+		})
+		finishTurn(pending.turnId, "Okay, I left everything as it is.")
 	}
 
 	return {
@@ -297,11 +377,14 @@ export function createMockAssistantSession({
 		send,
 		cancel,
 		confirm,
-		reject: () => undefined,
+		reject,
 		reset: (resumed = []) => {
 			cancel()
 			history = resumed
 		},
-		getHistory: () => history
+		getHistory: () => history,
+		shutdown: () => {
+			cancel()
+		}
 	}
 }

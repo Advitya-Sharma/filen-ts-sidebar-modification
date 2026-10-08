@@ -1,13 +1,15 @@
 import {
 	AssistantAbortError,
 	AssistantContextError,
+	AssistantMessageTooLongError,
+	estimateTokens,
 	runAssistantTurn,
 	type AssistantConfirmationRequest,
 	type AssistantHistoryTurn,
 	type AssistantModel,
-	type AssistantToolCallRecord,
 	type AssistantToolCallStatus,
-	type AssistantTurnEvent
+	type AssistantTurnEvent,
+	type AssistantTurnResult
 } from "@filen/shared/assistant"
 import type { ToolExecutor } from "@/features/assistant/runtime/executor"
 import {
@@ -38,24 +40,42 @@ export interface AssistantRuntimeLike {
 	deleteModel(): Promise<void>
 	// Keeps the model loaded until the returned release runs.
 	hold(): () => void
+	// Signing out: the model's worker goes at once and nothing starts again.
+	shutdown(): void
 }
 
-// One executed (or refused) non-read call, newest last: what the assistant did or tried to do this session.
-export interface AssistantActionLogEntry {
-	at: number
-	turnId: string
-	tool: string
-	args: Record<string, unknown>
-	status: AssistantToolCallStatus
-	error?: string
-}
-
-const ACTION_LOG_MAX = 200
-
-// Prior exchanges kept for context; fitMessages drops the oldest of them when the 8K context runs short.
+// Prior exchanges kept for context, at most this many and, newest first, about this many tokens: every turn
+// reads them all again, and an exchange from long ago rarely matters to the next request.
 const HISTORY_MAX = 12
+const HISTORY_MAX_TOKENS = 1800
 
-const FINAL_STATUSES = new Set<AssistantToolCallStatus>(["ok", "error", "invalid", "blocked", "declined", "repeated"])
+// A card left unanswered this long ends its turn (it expires) so the idle unload can free the model: the
+// card is the user's to answer, not a reason to hold ~4 GB indefinitely.
+export const CARD_EXPIRY_MS = 10 * 60_000
+
+// The exchanges a turn reads: the newest that fit the token budget, and always the last one.
+export function recentHistory(history: readonly AssistantHistoryTurn[]): AssistantHistoryTurn[] {
+	const kept: AssistantHistoryTurn[] = []
+	let tokens = 0
+
+	for (let index = history.length - 1; index >= 0 && kept.length < HISTORY_MAX; index--) {
+		const exchange = history[index]
+
+		if (exchange === undefined) {
+			break
+		}
+
+		tokens += estimateTokens(exchange.user) + estimateTokens(exchange.reply)
+
+		if (kept.length > 0 && tokens > HISTORY_MAX_TOKENS) {
+			break
+		}
+
+		kept.unshift(exchange)
+	}
+
+	return kept
+}
 
 const STEP_STATUS: Record<AssistantToolCallStatus, AssistantStepStatus> = {
 	preparing: "active",
@@ -256,10 +276,18 @@ function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> 
 	})
 }
 
-function nonce(): string {
-	const bytes = crypto.getRandomValues(new Uint8Array(6))
+function randomHex(bytes: number): string {
+	return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), byte => byte.toString(16).padStart(2, "0")).join("")
+}
 
-	return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("")
+function nonce(): string {
+	return randomHex(6)
+}
+
+// Drawn once per conversation, so its system prompt reads the same on every turn. The marker is as long as
+// the one the eval measured: it wraps every untrusted string, so each character costs prompt tokens.
+function conversationSecrets(): { canary: string; marker: string } {
+	return { canary: randomHex(6), marker: randomHex(3) }
 }
 
 interface PendingProposal {
@@ -268,9 +296,7 @@ interface PendingProposal {
 	decide: (approved: boolean) => void
 }
 
-export type AssistantRuntimeSession = AssistantSession & {
-	getActionLog: () => readonly AssistantActionLogEntry[]
-}
+export type AssistantRuntimeSession = AssistantSession
 
 // The AssistantSession the UI talks to: the shared agent loop (@filen/shared/assistant runAssistantTurn)
 // over the on-device model and the app's tool executor, one turn at a time.
@@ -286,8 +312,9 @@ export function createAssistantSession({
 }): AssistantRuntimeSession {
 	const listeners = new Set<(event: AssistantEvent) => void>()
 	const proposals = new Map<string, PendingProposal>()
-	const actionLog: AssistantActionLogEntry[] = []
 	let history: AssistantHistoryTurn[] = []
+	let secrets = conversationSecrets()
+	let shutDown = false
 	// Bumped by reset: a turn of the previous conversation that still completes must not add its exchange to
 	// the new one's history.
 	let conversation = 0
@@ -304,25 +331,6 @@ export function createAssistantSession({
 		emit({ type: "model", state })
 	})
 
-	function logCall(turnId: string, call: AssistantToolCallRecord): void {
-		if (call.effect === "read" || !FINAL_STATUSES.has(call.status)) {
-			return
-		}
-
-		actionLog.push({
-			at: Date.now(),
-			turnId,
-			tool: call.tool,
-			args: call.args,
-			status: call.status,
-			...(call.error === undefined ? {} : { error: call.error })
-		})
-
-		if (actionLog.length > ACTION_LOG_MAX) {
-			actionLog.shift()
-		}
-	}
-
 	async function runTurn({
 		turnId,
 		message,
@@ -338,22 +346,30 @@ export function createAssistantSession({
 		let segment = 0
 		let segmentHasText = false
 		const steps = turnSteps({ turnId, emit, now })
+		let winding: Promise<unknown> = Promise.resolve()
 
 		const onEvent = (event: AssistantTurnEvent) => {
 			steps.event(event)
 
 			if (event.type === "reply") {
-				if (event.text.length > 0 || segmentHasText) {
+				const withheld = event.withheld === true
+
+				if (event.text.length > 0 || segmentHasText || withheld) {
 					segmentHasText = true
-					emit({ type: "reply", turnId, replyId: `${turnId}:r${String(segment)}`, text: event.text, final: event.final })
+					emit({
+						type: "reply",
+						turnId,
+						replyId: `${turnId}:r${String(segment)}`,
+						text: event.text,
+						final: event.final,
+						...(withheld ? { withheld } : {})
+					})
 				}
 
 				if (event.final && segmentHasText) {
 					segment++
 					segmentHasText = false
 				}
-			} else if (event.type === "call") {
-				logCall(turnId, event.call)
 			}
 		}
 
@@ -369,18 +385,45 @@ export function createAssistantSession({
 			}
 
 			return new Promise<boolean>(resolve => {
-				const onAbort = () => {
+				// Hidden tabs fire timers late, so a visibility change checks the wall-clock deadline too.
+				const deadline = Date.now() + CARD_EXPIRY_MS
+				let timer: ReturnType<typeof setTimeout> | undefined
+				const settle = () => {
+					clearTimeout(timer)
+					signal.removeEventListener("abort", onAbort)
+
+					if (typeof document !== "undefined") {
+						document.removeEventListener("visibilitychange", check)
+					}
+
 					proposals.delete(id)
+				}
+				const onAbort = () => {
+					settle()
 					resolve(false)
+				}
+				const check = () => {
+					if (Date.now() >= deadline) {
+						// The whole turn ends: its hold goes, and the card expires with it.
+						controller.abort()
+					} else {
+						clearTimeout(timer)
+						timer = setTimeout(check, deadline - Date.now())
+					}
 				}
 
 				signal.addEventListener("abort", onAbort, { once: true })
+
+				if (typeof document !== "undefined") {
+					document.addEventListener("visibilitychange", check)
+				}
+
+				timer = setTimeout(check, CARD_EXPIRY_MS)
 				proposals.set(id, {
 					request,
 					turn,
 					decide: approved => {
-						signal.removeEventListener("abort", onAbort)
-						proposals.delete(id)
+						settle()
 						resolve(approved)
 					}
 				})
@@ -402,23 +445,38 @@ export function createAssistantSession({
 				return
 			}
 
-			const result = await runAssistantTurn({
+			const run = runAssistantTurn({
 				model: runtime.model,
 				executor: turn.shared,
-				history,
+				history: recentHistory(history),
 				message,
 				signal: controller.signal,
 				onEvent,
 				confirm,
-				nonce
+				nonce,
+				secrets,
+				now: Date.now(),
+				timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
 			})
 
-			if (turnConversation === conversation) {
-				history = [...history, { user: message, reply: result.reply }].slice(-HISTORY_MAX)
+			// Stop ends the turn at once, even while a tool still waits on something that ignores the signal (a
+			// paused offline fetch, a navigation a dialog blocked); the loop winds down behind it.
+			winding = run
+
+			const result: AssistantTurnResult = await unlessAborted(run, controller.signal)
+			const replied = result.withheld || result.reply.trim().length > 0
+
+			if (turnConversation === conversation && replied) {
+				// A withheld reply is not shown, so the model does not read it back either.
+				history = [...history, { user: message, reply: result.withheld ? "" : result.reply }].slice(-HISTORY_MAX)
 			}
 
 			steps.close("done")
-			emit({ type: "turn-end", turnId, at: now(), outcome: "complete" })
+			emit(
+				replied
+					? { type: "turn-end", turnId, at: now(), outcome: "complete" }
+					: { type: "turn-end", turnId, at: now(), outcome: "error", error: "no-reply" }
+			)
 		} catch (e) {
 			const cancelled = e instanceof AssistantAbortError || controller.signal.aborted
 
@@ -426,6 +484,8 @@ export function createAssistantSession({
 
 			if (cancelled) {
 				emit({ type: "turn-end", turnId, at: now(), outcome: "cancelled" })
+			} else if (e instanceof AssistantMessageTooLongError) {
+				emit({ type: "turn-end", turnId, at: now(), outcome: "error", error: "message-too-long" })
 			} else if (e instanceof AssistantContextError) {
 				emit({ type: "turn-end", turnId, at: now(), outcome: "error", error: "context-full" })
 			} else {
@@ -450,7 +510,8 @@ export function createAssistantSession({
 				active = null
 			}
 
-			release()
+			// The model stays held until the loop has actually wound down, not just until the turn ended.
+			void winding.catch(() => undefined).finally(release)
 		}
 	}
 
@@ -495,6 +556,11 @@ export function createAssistantSession({
 			const controller = new AbortController()
 
 			active?.abort()
+
+			if (shutDown) {
+				controller.abort()
+			}
+
 			active = controller
 			void runTurn({ turnId, message, controller })
 
@@ -508,7 +574,7 @@ export function createAssistantSession({
 		confirm: proposalId => {
 			const pending = proposals.get(proposalId)
 
-			if (pending === undefined) {
+			if (pending === undefined || shutDown) {
 				emit({ type: "proposal-settled", proposalId, outcome: "failed" })
 
 				return
@@ -541,12 +607,22 @@ export function createAssistantSession({
 		reset: (resumed = []) => {
 			active?.abort()
 			conversation++
+			secrets = conversationSecrets()
 			history = resumed.slice(-HISTORY_MAX).map(({ user, reply }) => ({ user, reply }))
-			executor.reset()
+			executor.reset(history)
 		},
 
 		getHistory: () => history,
 
-		getActionLog: () => actionLog
+		shutdown: () => {
+			shutDown = true
+			active?.abort()
+
+			for (const pending of proposals.values()) {
+				pending.decide(false)
+			}
+
+			runtime.shutdown()
+		}
 	}
 }

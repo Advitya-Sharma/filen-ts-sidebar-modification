@@ -18,6 +18,7 @@ const {
 	disposeAudioEngine,
 	releaseHeicWorker,
 	resetConversationHistory,
+	shutdownAssistant,
 	withHistoryWritesHeld,
 	socketStop,
 	toastWarning,
@@ -43,6 +44,7 @@ const {
 		disposeAudioEngine: vi.fn(record("disposeAudioEngine", () => undefined)),
 		releaseHeicWorker: vi.fn(record("releaseHeicWorker", () => undefined)),
 		resetConversationHistory: vi.fn(record("resetConversationHistory", () => undefined)),
+		shutdownAssistant: vi.fn(record("shutdownAssistant", () => undefined)),
 		withHistoryWritesHeld: vi.fn((task: () => Promise<void>) => {
 			calls.push("withHistoryWritesHeld")
 
@@ -56,6 +58,8 @@ const {
 
 // Every step that must run before the wipe, in the order performLogout runs them.
 const TEARDOWN_STEPS = [
+	// No assistant tool may read, navigate or play while the rest winds down.
+	"shutdownAssistant",
 	"notesSync.cancel",
 	"chatsSync.cancel",
 	"cancelActiveTransfers",
@@ -81,6 +85,7 @@ vi.mock("@/lib/storage/adapter", () => ({ kvClear: vi.fn() }))
 vi.mock("@/features/drive/lib/thumbCache", () => ({ wipeThumbnailStore, readThumbnailBlob: vi.fn(), deleteThumbnail: vi.fn() }))
 vi.mock("@/features/audio/lib/audioEngine", () => ({ disposeAudioEngine }))
 vi.mock("@/features/assistant/store/conversationHistory", () => ({ resetConversationHistory, withHistoryWritesHeld }))
+vi.mock("@/features/assistant/store/assistantSession", () => ({ shutdownAssistant }))
 vi.mock("@/features/preview/lib/heicTransform", () => ({ releaseHeicWorker, transformHeicBytesOwned: vi.fn() }))
 vi.mock("@/queries/client", () => ({ queryClient: { cancelQueries: vi.fn(), clear: vi.fn() } }))
 vi.mock("sonner", () => ({ toast: { warning: toastWarning } }))
@@ -247,6 +252,7 @@ describe("performLogout — pre-wipe teardown", () => {
 		expect(calls).toEqual([...TEARDOWN_STEPS, "runLogout"])
 
 		for (const step of [
+			shutdownAssistant,
 			notesCancel,
 			chatsCancel,
 			cancelActiveTransfers,

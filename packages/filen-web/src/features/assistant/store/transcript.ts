@@ -24,7 +24,7 @@ export type StepsOutcome = "complete" | "cancelled" | "failed"
 
 export type TranscriptEntry =
 	| { kind: "user"; id: string; turnId: string; text: string }
-	| { kind: "reply"; id: string; turnId: string; text: string; final: boolean }
+	| { kind: "reply"; id: string; turnId: string; text: string; final: boolean; withheld?: boolean }
 	// One per turn, right below its message. `lastAt` is the newest step time, then the turn's end, so the
 	// turn's duration counts the rows that came and went and the reply streamed after the last of them. `expanded` is the user's choice; null follows the turn
 	// (open while it runs or after it failed, collapsed to its summary once it completed).
@@ -165,14 +165,25 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
 		}
 
 		case "reply": {
+			const id = replyEntryId(event.replyId)
+			const withheld = event.withheld === true
+
+			// A reply that ended with nothing to show leaves no empty bubble behind.
+			if (event.final && !withheld && event.text.trim().length === 0) {
+				const index = indexOfEntry(state.entries, id)
+
+				return index === -1 ? state : { ...state, entries: state.entries.toSpliced(index, 1) }
+			}
+
 			return {
 				...state,
 				entries: upsert(state.entries, {
 					kind: "reply",
-					id: replyEntryId(event.replyId),
+					id,
 					turnId: event.turnId,
 					text: event.text,
-					final: event.final
+					final: event.final,
+					...(withheld ? { withheld } : {})
 				})
 			}
 		}
@@ -230,6 +241,11 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
 
 				if (entry.kind === "reply" && !entry.final) {
 					return { ...entry, final: true }
+				}
+
+				// The turn that showed the card is over: it can no longer act on a confirmation.
+				if (entry.kind === "proposal" && entry.status === "pending") {
+					return { ...entry, status: "expired" }
 				}
 
 				if (entry.kind === "steps" && entry.outcome === null) {

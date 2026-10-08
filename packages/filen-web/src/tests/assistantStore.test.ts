@@ -40,7 +40,11 @@ import {
 	trackAssistantPanelShown
 } from "@/features/assistant/store/assistantSession"
 import { createMockAssistantSession, MOCK_ASSISTANT_MODEL } from "@/features/assistant/store/mockAssistantSession"
+import { createAssistantSession } from "@/features/assistant/loop/session"
+import type { TranscriptEntry } from "@/features/assistant/store/transcript"
+import type { AssistantToolExecution } from "@/features/assistant/runtime/executor"
 import type { AssistantEvent, AssistantSession, AssistantStep } from "@/features/assistant/types"
+import { call, fakeExecutor, fakeRuntime, ScriptedModel } from "@/tests/support/assistantFakes"
 
 const STEP_MS = 10
 
@@ -260,6 +264,8 @@ describe("session wiring", () => {
 			throw new Error("no card")
 		}
 
+		expect(state().activeTurnId).not.toBeNull()
+
 		confirmAssistantProposal(card.proposal.id)
 
 		expect(confirm).toHaveBeenCalledWith(card.proposal.id)
@@ -268,24 +274,33 @@ describe("session wiring", () => {
 		vi.runAllTimers()
 
 		expect(state().entries.find(entry => entry.id === card.id)).toMatchObject({ status: "done" })
+		expect(state().activeTurnId).toBeNull()
 	})
 
-	it("rejects a declined card, and every unanswered card when a new message goes out", () => {
+	it("keeps the turn open while a card waits, then declines it through the session and lets the turn end", () => {
 		const mock = ready()
 		const reject = vi.spyOn(mock, "reject")
 
 		sendAssistantMessage("trash these")
 		vi.runAllTimers()
-		sendAssistantMessage("copy those")
+
+		expect(state().entries.find(entry => entry.id === "proposal:turn-1:call_1_0")).toMatchObject({ status: "pending" })
+		// The composer shows Stop: nothing else goes out while the card waits.
+		expect(state().activeTurnId).toBe("turn-1")
+		expect(sendAssistantMessage("copy those")).toBe(false)
+
+		rejectAssistantProposal("turn-1:call_1_0")
+
+		expect(reject).toHaveBeenCalledWith("turn-1:call_1_0")
+		expect(state().entries.find(entry => entry.id === "proposal:turn-1:call_1_0")).toMatchObject({ status: "cancelled" })
+
 		vi.runAllTimers()
 
-		expect(reject).toHaveBeenCalledWith("turn-1-proposal")
-		expect(state().entries.find(entry => entry.id === "proposal:turn-1-proposal")).toMatchObject({ status: "expired" })
-
-		rejectAssistantProposal("turn-2-proposal")
-
-		expect(reject).toHaveBeenCalledWith("turn-2-proposal")
-		expect(state().entries.find(entry => entry.id === "proposal:turn-2-proposal")).toMatchObject({ status: "cancelled" })
+		expect(state().activeTurnId).toBeNull()
+		expect(state().entries.find(entry => entry.kind === "steps")).toMatchObject({
+			outcome: "complete",
+			steps: [{ kind: "routing" }, { kind: "tool", tool: "search_items" }, { kind: "tool", tool: "trash_items", failure: "declined" }]
+		})
 	})
 
 	it("starts a new conversation with an empty transcript and a reset session", () => {
@@ -393,5 +408,209 @@ describe("event delivery", () => {
 
 		expect(state().entries).toEqual([])
 		expect(state().activeTurnId).toBeNull()
+	})
+})
+
+// The real session (loop/session.ts) over a scripted model, so the store meets the card flow production
+// runs: the turn waits on a card, and Stop, a model delete or a new conversation can end it under the card.
+describe("with the real session", () => {
+	const MARIA = { list_chats: { chats: [{ handle: "c1", name: "Maria" }] } }
+
+	beforeEach(() => {
+		vi.useRealTimers()
+	})
+
+	function draftSession(executor = fakeExecutor(MARIA)): {
+		session: ReturnType<typeof createAssistantSession>
+		executor: ReturnType<typeof fakeExecutor>
+	} {
+		const model = new ScriptedModel({
+			route: "chats change",
+			steps: [
+				call("list_chats", { query: "Maria" }),
+				call("draft_chat_message", { chat: "c1", text: "I'm running late" }),
+				"Drafted it."
+			]
+		})
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor })
+
+		unregister = registerAssistantSession(session)
+
+		return { session, executor }
+	}
+
+	function waitForCard(): Promise<Extract<TranscriptEntry, { kind: "proposal" }>> {
+		return vi.waitFor(() => {
+			const card = state().entries.find(entry => entry.kind === "proposal")
+
+			if (card?.kind !== "proposal") {
+				throw new Error("no card yet")
+			}
+
+			return card
+		})
+	}
+
+	function cardStatus(id: string): string | undefined {
+		const entry = state().entries.find(candidate => candidate.id === id)
+
+		return entry?.kind === "proposal" ? entry.status : undefined
+	}
+
+	function drafts(executor: ReturnType<typeof fakeExecutor>): number {
+		return executor.executed.filter(entry => entry.call.name === "draft_chat_message").length
+	}
+
+	it("keeps the turn running while a card waits, and runs a confirmed card once before the turn completes", async () => {
+		const { session, executor } = draftSession()
+		const confirm = vi.spyOn(session, "confirm")
+
+		expect(sendAssistantMessage("Tell Maria I'm running late")).toBe(true)
+
+		const card = await waitForCard()
+
+		expect(card.status).toBe("pending")
+		expect(state().activeTurnId).not.toBeNull()
+		expect(sendAssistantMessage("something else")).toBe(false)
+
+		confirmAssistantProposal(card.proposal.id)
+		confirmAssistantProposal(card.proposal.id)
+
+		expect(confirm).toHaveBeenCalledTimes(1)
+		expect(drafts(executor)).toBe(1)
+
+		await vi.waitFor(() => {
+			expect(state().activeTurnId).toBeNull()
+		})
+
+		expect(cardStatus(card.id)).toBe("done")
+		expect(drafts(executor)).toBe(1)
+	})
+
+	for (const [name, end] of [
+		["Stop", cancelAssistantTurn],
+		["deleting the model", () => void removeAssistantModel()]
+	] as const) {
+		it(`expires a waiting card when ${name} ends its turn, so a later Confirm reaches nothing`, async () => {
+			const { session, executor } = draftSession()
+			const confirm = vi.spyOn(session, "confirm")
+
+			sendAssistantMessage("Tell Maria I'm running late")
+
+			const card = await waitForCard()
+
+			end()
+
+			await vi.waitFor(() => {
+				expect(state().activeTurnId).toBeNull()
+			})
+
+			expect(state().entries.at(-1)).toMatchObject({ kind: "turnEnd", outcome: "cancelled" })
+			expect(cardStatus(card.id)).toBe("expired")
+
+			confirmAssistantProposal(card.proposal.id)
+
+			expect(confirm).not.toHaveBeenCalled()
+			expect(cardStatus(card.id)).toBe("expired")
+			expect(drafts(executor)).toBe(0)
+		})
+	}
+
+	it("starts a new conversation clean while a turn is mid-tool: the old turn's late events and exchange stay out", async () => {
+		let finishLookup: () => void = () => undefined
+		const executor = fakeExecutor(MARIA)
+		const execute = executor.execute.bind(executor)
+
+		executor.execute = request => {
+			if (request.tool.name !== "list_chats") {
+				return execute(request)
+			}
+
+			executor.executed.push({ call: { name: request.tool.name, args: request.args }, confirmed: request.confirmed })
+
+			return new Promise<AssistantToolExecution>(resolve => {
+				finishLookup = () => {
+					resolve({ ok: true, result: MARIA.list_chats })
+				}
+			})
+		}
+
+		const model = new ScriptedModel({ route: "chats read", steps: [call("list_chats", { query: "Maria" }), "Yes, Maria.", "Hello."] })
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor })
+
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		unregister = registerAssistantSession(session)
+		sendAssistantMessage("Do I have a chat with Maria?")
+
+		await vi.waitFor(() => {
+			expect(executor.executed).toHaveLength(1)
+		})
+
+		startNewAssistantConversation()
+
+		expect(state().entries).toEqual([])
+		expect(state().activeTurnId).toBeNull()
+		expect(sendAssistantMessage("hi")).toBe(true)
+
+		finishLookup()
+
+		// Both turns ended: the stopped one too, late.
+		await vi.waitFor(() => {
+			expect(events.flatMap(event => (event.type === "turn-end" ? [event.outcome] : []))).toEqual(
+				expect.arrayContaining(["cancelled", "complete"])
+			)
+		})
+
+		expect(state().activeTurnId).toBeNull()
+
+		expect(state().entries.flatMap(entry => (entry.kind === "user" ? [entry.text] : []))).toEqual(["hi"])
+		expect(state().entries.some(entry => entry.kind === "turnEnd")).toBe(false)
+		expect(session.getHistory().map(exchange => exchange.user)).toEqual(["hi"])
+	})
+
+	it("starts a new conversation clean while a confirmed action still runs: its outcome lands nowhere", async () => {
+		let finishDraft: () => void = () => undefined
+		const executor = fakeExecutor(MARIA)
+		const execute = executor.execute.bind(executor)
+
+		executor.execute = request => {
+			if (request.tool.name !== "draft_chat_message") {
+				return execute(request)
+			}
+
+			executor.executed.push({ call: { name: request.tool.name, args: request.args }, confirmed: request.confirmed })
+
+			return new Promise<AssistantToolExecution>(resolve => {
+				finishDraft = () => {
+					resolve({ ok: true, result: { done: true } })
+				}
+			})
+		}
+
+		const { session } = draftSession(executor)
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		sendAssistantMessage("Tell Maria I'm running late")
+
+		const card = await waitForCard()
+
+		confirmAssistantProposal(card.proposal.id)
+
+		expect(cardStatus(card.id)).toBe("running")
+
+		startNewAssistantConversation()
+		finishDraft()
+
+		await vi.waitFor(() => {
+			expect(events.some(event => event.type === "proposal-settled")).toBe(true)
+		})
+
+		expect(state().entries).toEqual([])
+		expect(state().activeTurnId).toBeNull()
+		expect(drafts(executor)).toBe(1)
+		expect(session.getHistory()).toEqual([])
 	})
 })

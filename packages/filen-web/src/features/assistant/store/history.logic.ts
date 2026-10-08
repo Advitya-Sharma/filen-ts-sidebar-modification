@@ -86,7 +86,8 @@ type StoredStep = typeof storedStepSchema.infer
 
 // Entries carry their turn's position instead of ids: restoring mints fresh ids, so a restored turn can
 // never share one with a turn of this page's session.
-const storedEntrySchema = type({ kind: "'user' | 'reply'", turn: "number", text: "string" })
+const storedEntrySchema = type({ kind: "'user'", turn: "number", text: "string" })
+	.or({ kind: "'reply'", turn: "number", text: "string", "withheld?": "boolean" })
 	.or({
 		kind: "'steps'",
 		turn: "number",
@@ -108,7 +109,7 @@ const storedEntrySchema = type({ kind: "'user' | 'reply'", turn: "number", text:
 	.or({
 		kind: "'turnEnd'",
 		turn: "number",
-		outcome: "'cancelled' | 'model-unavailable' | 'context-full' | 'failed'"
+		outcome: "'cancelled' | 'model-unavailable' | 'context-full' | 'message-too-long' | 'no-reply' | 'failed'"
 	})
 
 type StoredEntry = typeof storedEntrySchema.infer
@@ -178,8 +179,9 @@ function storedProposalStatus(status: ProposalStatus): Exclude<ProposalStatus, "
 function storedEntry(entry: TranscriptEntry, turn: number): StoredEntry {
 	switch (entry.kind) {
 		case "user":
-		case "reply":
 			return { kind: entry.kind, turn, text: capText(entry.text) }
+		case "reply":
+			return { kind: entry.kind, turn, text: capText(entry.text), ...(entry.withheld === true ? { withheld: true } : {}) }
 		case "steps":
 			return {
 				kind: "steps",
@@ -305,7 +307,14 @@ export function restoreConversation(
 				entries.push({ kind: "user", id: `user:${turnId}`, turnId, text: entry.text })
 				break
 			case "reply":
-				entries.push({ kind: "reply", id: replyEntryId(`${turnId}:r${String(index)}`), turnId, text: entry.text, final: true })
+				entries.push({
+					kind: "reply",
+					id: replyEntryId(`${turnId}:r${String(index)}`),
+					turnId,
+					text: entry.text,
+					final: true,
+					...(entry.withheld === true ? { withheld: true } : {})
+				})
 				break
 			case "steps":
 				entries.push({

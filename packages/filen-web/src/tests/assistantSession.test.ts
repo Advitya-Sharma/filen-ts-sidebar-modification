@@ -1,71 +1,8 @@
-import { describe, expect, it, vi, type Mock } from "vitest"
-import {
-	ROUTER_GRAMMAR,
-	type AssistantGenerateRequest,
-	type AssistantGenerateResult,
-	type AssistantModel,
-	type AssistantModelToolCall,
-	type AssistantTool
-} from "@filen/shared/assistant"
-import { createAssistantSession, turnSteps, type AssistantRuntimeLike } from "@/features/assistant/loop/session"
-import type { AssistantToolExecution, AssistantToolPreview, ToolExecutor } from "@/features/assistant/runtime/executor"
-import type { AssistantEvent, AssistantModelState } from "@/features/assistant/types"
-
-type Step = string | AssistantModelToolCall[] | ((request: AssistantGenerateRequest) => AssistantModelToolCall[] | string)
-
-function call(name: string, args: Record<string, unknown>): AssistantModelToolCall[] {
-	return [{ id: "x", name, arguments: JSON.stringify(args) }]
-}
-
-type GenerateOptions = Parameters<AssistantModel["generate"]>[1]
-
-// With `reports`, every generation reads its prompt in two progress reports and names its calls first,
-// as wllama does.
-class ScriptedModel implements AssistantModel {
-	readonly contextTokens = 8192
-	readonly specialTokens = ["<|im_end|>"]
-	private readonly steps: Step[]
-	private readonly route: string
-	private readonly reports: boolean
-
-	constructor({ route, steps, reports = false }: { route: string; steps: Step[]; reports?: boolean }) {
-		this.route = route
-		this.steps = steps.slice()
-		this.reports = reports
-	}
-
-	generate(request: AssistantGenerateRequest, options: GenerateOptions): Promise<AssistantGenerateResult> {
-		if (this.reports) {
-			options.onProgress?.({ processed: 0, total: 40 })
-			options.onProgress?.({ processed: 40, total: 40 })
-		}
-
-		if (request.grammar === ROUTER_GRAMMAR) {
-			return Promise.resolve({ content: this.route, toolCalls: [] })
-		}
-
-		if (request.messages[0]?.content.startsWith("Answer the user's request using only the data below")) {
-			return Promise.resolve({ content: "They asked to be messaged.", toolCalls: [] })
-		}
-
-		const next = this.steps.shift() ?? "Done."
-		const step = typeof next === "function" ? next(request) : next
-
-		if (typeof step === "string") {
-			options.onText?.(step)
-
-			return Promise.resolve({ content: step, toolCalls: [] })
-		}
-
-		if (this.reports) {
-			for (const [index, toolCall] of step.entries()) {
-				options.onToolCall?.({ index, name: toolCall.name })
-			}
-		}
-
-		return Promise.resolve({ content: "", toolCalls: step })
-	}
-}
+import { describe, expect, it, vi } from "vitest"
+import { ROUTER_GRAMMAR, type AssistantGenerateRequest, type AssistantGenerateResult, type AssistantModel } from "@filen/shared/assistant"
+import { CARD_EXPIRY_MS, createAssistantSession, recentHistory, turnSteps } from "@/features/assistant/loop/session"
+import type { AssistantEvent } from "@/features/assistant/types"
+import { call, fakeExecutor, fakeRuntime, INFO, NAMES, ScriptedModel, waitFor, type GenerateOptions } from "@/tests/support/assistantFakes"
 
 // Each step event as one line: kind, status, then what it shows.
 function stepTrail(events: readonly AssistantEvent[]): string[] {
@@ -94,115 +31,6 @@ function stepTrail(events: readonly AssistantEvent[]): string[] {
 		}
 
 		return [parts.join(" ")]
-	})
-}
-
-const INFO = { id: "m", name: "M", sizeBytes: 1 }
-
-type FakeRuntime = Omit<AssistantRuntimeLike, "load" | "touch" | "setPanelOpen"> & {
-	holds: number
-	state: AssistantModelState
-	load: Mock<() => Promise<void>>
-	touch: Mock<() => void>
-	setPanelOpen: Mock<(open: boolean) => void>
-}
-
-// Ready unless given another state; a load settles in "ready" unless the test replaces it.
-function fakeRuntime(model: AssistantModel, initial: AssistantModelState = { kind: "ready", model: INFO }): FakeRuntime {
-	const runtime: FakeRuntime = {
-		holds: 0,
-		state: initial,
-		model,
-		getState: () => runtime.state,
-		subscribe: () => () => undefined,
-		init: () => Promise.resolve(),
-		setPanelOpen: vi.fn<(open: boolean) => void>(),
-		load: vi.fn(() => {
-			runtime.state = { kind: "ready", model: INFO }
-
-			return Promise.resolve()
-		}),
-		touch: vi.fn<() => void>(),
-		retry: vi.fn(),
-		cancelDownload: vi.fn(),
-		deleteModel: vi.fn(() => Promise.resolve()),
-		hold: () => {
-			runtime.holds++
-
-			let released = false
-
-			return () => {
-				if (!released) {
-					released = true
-					runtime.holds--
-				}
-			}
-		}
-	}
-
-	return runtime
-}
-
-const NAMES: Record<string, string> = { c1: "Maria", c2: "Attacker", n1: "Plan" }
-
-interface Executed {
-	call: { name: string; args: Record<string, unknown> }
-	confirmed: boolean
-}
-
-// A tool executor over three items; read results come from `results`. set_note_flags has no adapter yet.
-function fakeExecutor(results: Record<string, unknown> = {}): ToolExecutor & { executed: Executed[] } {
-	const executed: Executed[] = []
-
-	return {
-		executed,
-		context: () => Promise.resolve({ description: "screen: chats", handles: ["d0"] }),
-		check: ({ tool, args }: { tool: AssistantTool; args: Record<string, unknown> }) => {
-			if (tool.name === "set_note_flags") {
-				return Promise.resolve({ ok: false as const, invalid: false, error: "not available yet" })
-			}
-
-			return Promise.resolve({ ok: true as const, args })
-		},
-		preview: ({ args }: { tool: AssistantTool; args: Record<string, unknown> }): Promise<AssistantToolPreview> => {
-			const values = Object.values(args).flatMap(value => (Array.isArray(value) ? (value as unknown[]) : [value]))
-			const targets = values
-				.filter((value): value is string => typeof value === "string" && value in NAMES)
-				.map(handle => ({ handle, name: NAMES[handle] ?? handle }))
-			const text = Object.fromEntries(
-				Object.entries(args).filter((entry): entry is [string, string] => typeof entry[1] === "string" && !(entry[1] in NAMES))
-			)
-
-			return Promise.resolve({ ok: true, title: "t", targets, text })
-		},
-		execute: ({
-			tool,
-			args,
-			confirmed
-		}: {
-			tool: AssistantTool
-			args: Record<string, unknown>
-			confirmed: boolean
-		}): Promise<AssistantToolExecution> => {
-			executed.push({ call: { name: tool.name, args }, confirmed })
-
-			const value = results[tool.name] ?? { done: true }
-
-			return Promise.resolve({ ok: true, result: value, untrusted: "names" })
-		},
-		reset: vi.fn()
-	}
-}
-
-function waitFor(events: AssistantEvent[], predicate: (event: AssistantEvent) => boolean): Promise<AssistantEvent> {
-	return vi.waitFor(() => {
-		const found = events.find(predicate)
-
-		if (found === undefined) {
-			throw new Error("not yet")
-		}
-
-		return found
 	})
 }
 
@@ -292,7 +120,11 @@ describe("assistant session", () => {
 
 		expect(events).toContainEqual({ type: "proposal-settled", proposalId: proposal.proposal.id, outcome: "done" })
 		expect(executor.executed.filter(entry => entry.call.name === "draft_chat_message")).toHaveLength(1)
-		expect(session.getActionLog().map(entry => `${entry.tool}:${entry.status}`)).toEqual(["draft_chat_message:ok"])
+		expect(
+			stepTrail(events)
+				.filter(line => line.startsWith("draft_chat_message"))
+				.at(-1)
+		).toMatch(/^draft_chat_message done/)
 	})
 
 	it("runs nothing the user rejected", async () => {
@@ -343,9 +175,9 @@ describe("assistant session", () => {
 
 		expect(events.some(event => event.type === "proposal")).toBe(false)
 		expect(executor.executed.map(entry => entry.call.name)).toEqual(["list_chats", "read_chat"])
-		expect(session.getActionLog().map(entry => `${entry.tool}:${entry.status}`)).toEqual([
-			"draft_chat_message:blocked",
-			"draft_chat_message:blocked"
+		expect(stepTrail(events).filter(line => line.startsWith("draft_chat_message failed"))).toEqual([
+			"draft_chat_message failed blocked",
+			"draft_chat_message failed blocked"
 		])
 	})
 
@@ -502,12 +334,12 @@ describe("assistant session", () => {
 			executor.executed.push({ call: { name: tool.name, args }, confirmed })
 
 			if (tool.name !== "draft_chat_message") {
-				return Promise.resolve({ ok: true, result: { chats: [{ handle: "c1", name: "Maria" }] }, untrusted: "names" })
+				return Promise.resolve({ ok: true, result: { chats: [{ handle: "c1", name: "Maria" }] } })
 			}
 
 			return new Promise(resolve => {
 				finishDraft = () => {
-					resolve({ ok: true, result: { done: true }, untrusted: "none" })
+					resolve({ ok: true, result: { done: true } })
 				}
 			})
 		}
@@ -711,7 +543,6 @@ describe("assistant session", () => {
 		await waitFor(events, event => event.type === "turn-end")
 
 		expect(stepTrail(events)).toContain('list_chats failed "Maria" repeated')
-		expect(session.getActionLog()).toEqual([])
 	})
 
 	it("fails the rows still running when the turn fails, rather than reading as stopped", async () => {
@@ -967,5 +798,166 @@ describe("assistant session", () => {
 		expect(runtime.load).toHaveBeenCalledTimes(1)
 		expect(runtime.touch).toHaveBeenCalledTimes(1)
 		expect(runtime.setPanelOpen).toHaveBeenCalledWith(true)
+	})
+
+	it("expires a card left unanswered so the model can unload, and the turn ends", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true })
+
+		try {
+			const model = new ScriptedModel({
+				route: "chats change",
+				steps: [call("list_chats", { query: "Maria" }), call("draft_chat_message", { chat: "c1", text: "late" }), "Drafted."]
+			})
+			const runtime = fakeRuntime(model)
+			const executor = fakeExecutor({ list_chats: { chats: [{ handle: "c1", name: "Maria" }] } })
+			const session = createAssistantSession({ runtime, executor })
+			const events: AssistantEvent[] = []
+
+			session.subscribe(event => events.push(event))
+			session.send("Tell Maria late")
+			await waitFor(events, event => event.type === "proposal")
+
+			expect(runtime.holds).toBe(1)
+
+			await vi.advanceTimersByTimeAsync(CARD_EXPIRY_MS)
+			await waitFor(events, event => event.type === "turn-end")
+			await vi.waitFor(() => {
+				expect(runtime.holds).toBe(0)
+			})
+
+			expect(events.find(event => event.type === "turn-end")).toMatchObject({ outcome: "cancelled" })
+			expect(executor.executed.map(entry => entry.call.name)).toEqual(["list_chats"])
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("ends the turn at Stop even while a tool waits on something that ignores the signal", async () => {
+		const model = new ScriptedModel({ route: "chats read", steps: [call("list_chats", {}), "Done."] })
+		const runtime = fakeRuntime(model)
+		const executor = fakeExecutor()
+
+		executor.execute = () => new Promise(() => undefined)
+
+		const session = createAssistantSession({ runtime, executor })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("List my chats")
+		await waitFor(events, event => event.type === "step" && event.step.kind === "tool")
+		session.cancel()
+
+		await expect(waitFor(events, event => event.type === "turn-end")).resolves.toMatchObject({ outcome: "cancelled" })
+	})
+
+	it("reports a turn with no reply to show as such, and keeps it out of the model's history", async () => {
+		const model = new ScriptedModel({ route: "answer", steps: ["   ", "  "] })
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Hi")
+
+		await expect(waitFor(events, event => event.type === "turn-end")).resolves.toMatchObject({ outcome: "error", error: "no-reply" })
+		expect(session.getHistory()).toEqual([])
+	})
+
+	it("refuses a message too long for the model before the router reads it", async () => {
+		const generate = vi.fn()
+		const session = createAssistantSession({
+			runtime: fakeRuntime({ contextTokens: 8192, specialTokens: [], generate }),
+			executor: fakeExecutor()
+		})
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("x".repeat(40_000))
+
+		await expect(waitFor(events, event => event.type === "turn-end")).resolves.toMatchObject({
+			outcome: "error",
+			error: "message-too-long"
+		})
+		expect(generate).not.toHaveBeenCalled()
+	})
+
+	it("keeps the conversation's system prompt the same from turn to turn, and gives a new conversation new secrets", async () => {
+		const systems: string[] = []
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: (request: AssistantGenerateRequest): Promise<AssistantGenerateResult> => {
+				if (request.grammar === ROUTER_GRAMMAR) {
+					return Promise.resolve({ content: "answer", toolCalls: [] })
+				}
+
+				systems.push(request.messages[0]?.content ?? "")
+
+				return Promise.resolve({ content: "Ok.", toolCalls: [] })
+			}
+		}
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+		const turn = async (message: string) => {
+			events.length = 0
+			session.send(message)
+			await waitFor(events, event => event.type === "turn-end")
+		}
+
+		session.subscribe(event => events.push(event))
+		await turn("One")
+		await turn("Two")
+		session.reset()
+		await turn("Three")
+
+		const canary = (system: string) => /ref ([0-9a-f]+)\)/.exec(system)?.[1]
+
+		expect(canary(systems[0] ?? "")).toBe(canary(systems[1] ?? ""))
+		expect(canary(systems[2] ?? "")).not.toBe(canary(systems[0] ?? ""))
+		// The spotlight marker is as short as the one the eval measured.
+		expect(systems[0]).toMatch(/⟦[0-9a-f]{6}⟧/)
+	})
+
+	it("reads back only the newest exchanges that fit the history budget, always the last", () => {
+		const long = "word ".repeat(1500)
+		const exchanges = [
+			{ user: "a", reply: "b" },
+			{ user: long, reply: "x" },
+			{ user: "c", reply: "d" }
+		]
+
+		expect(recentHistory(exchanges)).toEqual([{ user: "c", reply: "d" }])
+		expect(recentHistory([{ user: long, reply: long }])).toEqual([{ user: long, reply: long }])
+		expect(recentHistory(exchanges.slice(2))).toEqual([{ user: "c", reply: "d" }])
+	})
+
+	it("shuts down for sign-out: the turn stops, cards are declined and nothing more runs", async () => {
+		const model = new ScriptedModel({
+			route: "chats change",
+			steps: [call("list_chats", { query: "Maria" }), call("draft_chat_message", { chat: "c1", text: "late" }), "Drafted."]
+		})
+		const runtime = fakeRuntime(model)
+		const executor = fakeExecutor({ list_chats: { chats: [{ handle: "c1", name: "Maria" }] } })
+		const session = createAssistantSession({ runtime, executor })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Tell Maria late")
+
+		const proposal = await waitFor(events, event => event.type === "proposal")
+
+		session.shutdown()
+
+		expect(runtime.shutdown).toHaveBeenCalledTimes(1)
+		await waitFor(events, event => event.type === "turn-end")
+
+		if (proposal.type === "proposal") {
+			session.confirm(proposal.proposal.id)
+		}
+
+		events.length = 0
+		session.send("Tell Maria again")
+
+		await expect(waitFor(events, event => event.type === "turn-end")).resolves.toMatchObject({ outcome: "cancelled" })
+		expect(executor.executed.map(entry => entry.call.name)).toEqual(["list_chats"])
 	})
 })
