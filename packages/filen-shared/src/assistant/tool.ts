@@ -19,6 +19,8 @@ export type AssistantGroundedArgs = {
 	readonly handles?: readonly string[]
 	// Free-text arguments that must appear in the user's own message.
 	readonly text?: readonly string[]
+	// Free-text arguments that may say anything, but carry no link or address the user did not type.
+	readonly links?: readonly string[]
 }
 
 export type AssistantTool<Name extends string = string, Input extends z.ZodObject = z.ZodObject> = {

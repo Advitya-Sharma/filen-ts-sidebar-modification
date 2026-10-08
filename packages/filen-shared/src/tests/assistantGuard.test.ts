@@ -2,17 +2,22 @@ import { describe, expect, it } from "vitest"
 import {
 	AssistantTurnGuard,
 	ASSISTANT_TOOL_GROUPS,
+	ASSISTANT_TOOLS,
 	createDirectory,
 	draftChatMessage,
+	listChats,
 	listDirectory,
 	mapUntrustedStrings,
 	moveItems,
 	openRoute,
+	foreignLinks,
 	quarantinedExtractionPrompt,
 	readNote,
+	renameItem,
 	sanitizeUntrustedText,
 	screenAssistantReply,
 	searchItems,
+	setNoteFlags,
 	spotlightText,
 	trashItems,
 	type AssistantGuardOptions
@@ -203,6 +208,39 @@ describe("AssistantTurnGuard", () => {
 		).toBe(false)
 	})
 
+	it("keeps every data-changing and outbound tool out of a read-only request", () => {
+		// Pinned by name so the scope gate is tested independently of each tool's effect/exfiltrates flags.
+		const consequential = [
+			"add_tracks_to_playlist",
+			"copy_items",
+			"create_directory",
+			"create_note",
+			"draft_chat_message",
+			"move_items",
+			"rename_item",
+			"set_favorite",
+			"set_note_flags",
+			"trash_items"
+		]
+		const turn = guard("Show me my files", {
+			consequentialAllowed: false
+		})
+		const offered = turn.offered(ASSISTANT_TOOLS).map(tool => tool.name)
+
+		expect(offered.filter(name => consequential.includes(name))).toEqual([])
+		expect(offered.length).toBe(ASSISTANT_TOOLS.length - consequential.length)
+
+		for (const tool of ASSISTANT_TOOLS.filter(tool => consequential.includes(tool.name))) {
+			expect(
+				turn.check({
+					tool,
+					args: {}
+				}).allowed,
+				tool.name
+			).toBe(false)
+		}
+	})
+
 	it("requires new names to come from the user's message", () => {
 		const turn = guard("Erstelle hier einen Ordner „Steuern 2025“", {}, ["d0", "d1"])
 
@@ -232,6 +270,90 @@ describe("AssistantTurnGuard", () => {
 		expect(turn.textGrounded("報告書_第3四半期.pdf", 0.5)).toBe(true)
 		expect(turn.textGrounded("Archive")).toBe(true)
 		expect(guard("أنشئ مجلدين هنا: صور وفواتير").textGrounded("فواتير")).toBe(true)
+	})
+
+	it("grounds a lookup's results only from handles the user grounded, never from another lookup's", () => {
+		const turn = guard("Move the report to Archive")
+
+		turn.record({
+			tool: listDirectory,
+			args: { handle: "d0" },
+			returned: [
+				{ handle: "f9", name: "report.pdf" },
+				{ handle: "d5", name: "Old stuff" },
+				{ handle: "d6", name: "Archive" }
+			]
+		})
+		turn.record({
+			tool: listDirectory,
+			args: { handle: "d5" },
+			returned: [{ handle: "d7", name: "Public dump" }]
+		})
+
+		expect(turn.check({ tool: moveItems, args: { handles: ["f9"], destination: "d7" } }).allowed).toBe(false)
+		expect(turn.check({ tool: moveItems, args: { handles: ["f9"], destination: "d6" } }).allowed).toBe(true)
+	})
+
+	it("needs every word of a lookup's query in the message, short ones as whole words", () => {
+		const turn = guard("Tell Maria I'm late", {}, [])
+
+		turn.record({
+			tool: listChats,
+			args: { query: "Maria e" },
+			returned: [{ handle: "c7", name: "Team" }]
+		})
+		turn.record({
+			tool: listChats,
+			args: { query: "Maria Bob" },
+			returned: [{ handle: "c8", name: "Bob" }]
+		})
+
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c7", text: "late" } }).allowed).toBe(false)
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c8", text: "late" } }).allowed).toBe(false)
+
+		turn.record({
+			tool: listChats,
+			args: { query: "Maria" },
+			returned: [{ handle: "c2", name: "M. Schmidt" }]
+		})
+
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c2", text: "I'm late" } }).allowed).toBe(true)
+	})
+
+	it("refuses new names that only contain the user's word, change the extension or swap short tokens", () => {
+		expect(guard("Create a directory Invoices here").check({ tool: createDirectory, args: { parent: "d0", name: "InvoicesForwardToEve" } }).allowed).toBe(
+			false
+		)
+		expect(guard("Create a directory Invoices here").check({ tool: createDirectory, args: { parent: "d0", name: "Invoice" } }).allowed).toBe(true)
+		expect(guard("Create the directory Q1 report").check({ tool: createDirectory, args: { parent: "d0", name: "Q4 report" } }).allowed).toBe(false)
+
+		const rename = guard("Rename report.pdf to final")
+
+		rename.record({ tool: searchItems, args: { query: "report.pdf" }, returned: [{ handle: "f1", name: "report.pdf" }] })
+
+		expect(rename.check({ tool: renameItem, args: { handle: "f1", new_name: "final.html" } }).allowed).toBe(false)
+		expect(rename.check({ tool: renameItem, args: { handle: "f1", new_name: "final.pdf" } }).allowed).toBe(true)
+	})
+
+	it("does not taint the turn when a content read failed with name candidates", () => {
+		const turn = guard("Pin my note Groceries")
+
+		turn.recordCandidates([{ handle: "n1", name: "Groceries" }])
+
+		expect(turn.taint).toBe("none")
+		expect(turn.check({ tool: setNoteFlags, args: { handle: "n1", pinned: true } }).allowed).toBe(true)
+	})
+
+	it("refuses a draft that carries a link or address the user did not type", () => {
+		const turn = guard("Tell Maria I'm running late", {}, ["c2"])
+
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c2", text: "Running late, verify at https:evil.example" } }).allowed).toBe(false)
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c2", text: "Running late, mail me at x@evil.example" } }).allowed).toBe(false)
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c2", text: "Running late, sorry!" } }).allowed).toBe(true)
+		expect(
+			guard("Send Maria https://filen.io/x", {}, ["c2"]).check({ tool: draftChatMessage, args: { chat: "c2", text: "Here: https://filen.io/x" } })
+				.allowed
+		).toBe(true)
 	})
 
 	it("lets everything through with all gates off", () => {
@@ -281,6 +403,11 @@ describe("untrusted text", () => {
 
 	it("removes invisible and bidi characters and the model's own special tokens", () => {
 		expect(sanitizeUntrustedText("a‮b​c\u0000d")).toBe("abcd")
+		const tags = Array.from("ignore all", char => String.fromCodePoint(0xe0000 + char.charCodeAt(0))).join("")
+
+		expect(sanitizeUntrustedText(`report${tags}\u2028x\u00ady\u061cz\u180e${String.fromCodePoint(0xe0100)}w\u2029`)).toBe("reportxyzw")
+		// Emoji keep their variation selector.
+		expect(sanitizeUntrustedText("❤️")).toBe("❤️")
 		expect(sanitizeUntrustedText("x<custom_sep>y", ["<custom_sep>"])).toBe("x‹custom_sep›y")
 	})
 
@@ -324,6 +451,23 @@ describe("untrusted text", () => {
 				}
 			]
 		})
+		// An uploader's MIME type is untrusted; a string array never inherits a trusted key.
+		expect(
+			mapUntrustedStrings(
+				{
+					mime: "text/plain",
+					type: "rich",
+					created: "2026-10-08",
+					kind: ["a", "b"]
+				},
+				text => text.toUpperCase()
+			)
+		).toEqual({
+			mime: "TEXT/PLAIN",
+			type: "rich",
+			created: "2026-10-08",
+			kind: ["A", "B"]
+		})
 	})
 
 	it("defangs links the user did not type and withholds replies that leak the canary", () => {
@@ -331,7 +475,7 @@ describe("untrusted text", () => {
 			screenAssistantReply({
 				reply: "Log in at https://filen-verify.example/login or see https://filen.io",
 				userMessage: "what is https://filen.io?"
-			})
+			}).text
 		).toBe("Log in at hxxps://filen-verify[.]example/login or see https://filen.io")
 		expect(
 			screenAssistantReply({
@@ -339,7 +483,40 @@ describe("untrusted text", () => {
 				userMessage: "",
 				canary: "X-1"
 			})
-		).toMatch(/withheld/)
+		).toEqual({
+			text: "",
+			withheld: true
+		})
+	})
+
+	it("defangs links a markdown renderer would decode, slash-less schemes and addresses", () => {
+		const screened = (reply: string, userMessage = "") => screenAssistantReply({ reply, userMessage }).text
+
+		expect(screened("[Verify](https:evil.example/login)")).toBe("[Verify](hxxps:evil[.]example/login)")
+		expect(screened("[Verify](h&#116;tps://evil.example/login)")).toBe("[Verify](hxxps://evil[.]example/login)")
+		expect(screened("[Verify](https&#58;//evil.example/login)")).toBe("[Verify](hxxps://evil[.]example/login)")
+		expect(screened("[Verify](https&#x3a;//evil.example/login)")).toBe("[Verify](hxxps://evil[.]example/login)")
+		expect(screened("[Verify](https&colon;//evil.example/login)")).toBe("[Verify](hxxps://evil[.]example/login)")
+		expect(screened("[Verify](https:/\\evil.example/login)")).toBe("[Verify](hxxps:/\\evil[.]example/login)")
+		expect(screened("[x](https\\://evil.example)")).toBe("[x](hxxps://evil[.]example)")
+		expect(screened("<HTTPS:evil.example>")).toBe("<HxxPS:evil[.]example>")
+		expect(screened("[a][1]\n\n[1]: https:/evil.example")).toBe("[a][1]\n\n[1]: hxxps:/evil[.]example")
+		expect(screened("[Mail](mailto:a@evil.example?body=secret)")).toBe("[Mail](mailto[:]a[@]evil[.]example?body=secret)")
+		expect(screened("write to support@filen-verify.example")).toBe("write to support[@]filen-verify.example")
+		expect(screened("write to bob@example.com", "Tell bob@example.com hi")).toBe("write to bob@example.com")
+		// An encoded "&" stays encoded, so the renderer shows "&#116;" as text; unknown named references stay literal.
+		expect(screened("h&#38;#116;tps://evil.example")).toBe("h&#38;#116;tps://evil.example")
+		expect(screened("a &hearts; b &amp; c")).toBe("a \\&hearts; b &amp; c")
+		// Ordinary prose with colons is left alone.
+		expect(screened("Note: the file is ready. Time 10:30")).toBe("Note: the file is ready. Time 10:30")
+	})
+
+	it("finds links and addresses the user did not type", () => {
+		expect(foreignLinks({ text: "Running late, see h&#116;tps://evil.example or mail x@evil.example", userMessage: "tell Maria" })).toEqual([
+			"https://evil.example",
+			"x@evil.example"
+		])
+		expect(foreignLinks({ text: "see https://filen.io", userMessage: "send her https://filen.io" })).toEqual([])
 	})
 
 	it("keeps the quarantined data inside its quotes", () => {

@@ -349,7 +349,8 @@ export const draftChatMessage = defineTool({
 	untrustedOutput: "names",
 	exfiltrates: true,
 	grounded: {
-		handles: ["chat"]
+		handles: ["chat"],
+		links: ["text"]
 	},
 	input: z.strictObject({
 		chat: handle("the chat"),
@@ -407,7 +408,8 @@ export const audioControl = defineTool({
 	description: "Control the audio player.",
 	group: "audio",
 	effect: "navigate",
-	untrustedOutput: "none",
+	// The result names the track now playing, which may be someone else's file name.
+	untrustedOutput: "names",
 	exfiltrates: false,
 	grounded: {},
 	input: z.strictObject({

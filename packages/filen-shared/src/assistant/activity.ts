@@ -33,7 +33,7 @@ export function labelText({
 	const screened = screenAssistantReply({
 		reply: flat,
 		userMessage
-	})
+	}).text
 	const chars = Array.from(screened)
 
 	return chars.length > SUBJECT_MAX_CHARS

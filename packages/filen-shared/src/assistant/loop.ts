@@ -1,7 +1,14 @@
 import { resultItemCount, toolCallSubject } from "./activity"
 import { capToolResult, estimateTokens, MESSAGE_OVERHEAD_TOKENS } from "./budget"
 import { AssistantTurnGuard } from "./guard"
-import { assistantInstructionLines, assistantSystemPrompt, ROUTER_GRAMMAR, ROUTER_SYSTEM_PROMPT } from "./prompts"
+import {
+	assistantDateLine,
+	assistantInstructionLines,
+	assistantSystemPrompt,
+	ROUTER_GRAMMAR,
+	ROUTER_SYSTEM_PROMPT,
+	routerRequest
+} from "./prompts"
 import {
 	isConsequentialTool,
 	toolInputJsonSchema,
@@ -17,6 +24,7 @@ import {
 	quarantinedExtractionPrompt,
 	sanitizeUntrustedText,
 	screenAssistantReply,
+	type ScreenedReply,
 	spotlightInstruction,
 	spotlightText,
 	type SpotlightMode,
@@ -26,14 +34,15 @@ import {
 // The agent loop the eval (packages/filen-assistant-eval) validated, for any engine that renders the
 // model's own chat template and constrains tool calls to their JSON schema (wllama, llama.rn):
 //
-// 1. The router reads only the user's message and picks one tool group plus read or change, under a
-//    grammar that admits nothing else.
+// 1. The router reads only the user's own words (this message and the one before it, so the answer to a
+//    clarifying question routes like the request it answers) and picks one tool group plus read or change,
+//    under a grammar that admits nothing else.
 // 2. Up to MAX_STEPS steps offer that group's tools, minus what the guard withdraws (guard.ts). Every
 //    call is schema-validated, checked by the app (unknown handles, names where handles belong) and by
 //    the guard; one malformed step is retried with the error, a second ends the loop.
 // 3. Content other people wrote (note bodies, file text, chat messages) is summarized by a tool-less
 //    quarantine call before the main loop sees it, and every untrusted string is sanitized and
-//    spotlighted.
+//    spotlighted. The executor's context line carries other people's names too and is sanitized as well.
 // 4. A consequential call runs only after the user confirmed it. A turn that ends without a text reply
 //    gets one more, tool-less, generation. The reply is screened before the user sees any of it.
 
@@ -85,6 +94,8 @@ export type AssistantGenerateRequest = {
 export type AssistantGenerateResult = {
 	content: string
 	toolCalls: readonly AssistantModelToolCall[]
+	// The generation stopped at maxTokens rather than ending on its own.
+	truncated?: boolean
 }
 
 // How far the engine has read the prompt, in tokens, leaving out a prefix it reused from its cache.
@@ -162,6 +173,8 @@ export interface AssistantToolExecutor {
 	>
 	// The name a handle this executor handed out stands for, to label a call in the UI.
 	name?(handle: string): string | undefined
+	// False for a tool this app cannot run (yet); it is never offered to the model. All tools when absent.
+	supports?(tool: AssistantTool): boolean
 	// `confirmed` is true only for a consequential call the user confirmed.
 	execute(call: {
 		callId: string
@@ -216,10 +229,12 @@ export type AssistantTurnEvent =
 	| {
 			// The screened text of the reply being written; each event replaces the previous text until one
 			// with `final`, after which the next reply text starts a new reply (text written before tool
-			// calls stays as its own reply).
+			// calls stays as its own reply). `withheld`: the reply repeated the assistant's instructions, its
+			// text is empty and the app shows its own message instead.
 			type: "reply"
 			text: string
 			final: boolean
+			withheld?: boolean
 	  }
 	| {
 			type: "call"
@@ -239,6 +254,7 @@ export type AssistantHistoryTurn = {
 
 export type AssistantTurnResult = {
 	reply: string
+	withheld: boolean
 	route: AssistantRoute | null
 	intent: "read" | "change" | null
 	calls: AssistantToolCallRecord[]
@@ -260,13 +276,48 @@ export class AssistantContextError extends Error {
 	}
 }
 
+// The user's message alone is too long for a first step, whatever the conversation holds.
+export class AssistantMessageTooLongError extends AssistantContextError {}
+
 export const MAX_STEPS = 5
 export const STEP_MAX_TOKENS = 384
 export const QUARANTINE_MAX_TOKENS = 200
 const ROUTER_MAX_TOKENS = 8
 
-const MALFORMED_CALL =
-	/<tool_call>|<\|tool_call_start\|>|<function=|\|\|call:|"name"\s*:\s*"[a-z_]+"\s*,\s*"(?:arguments|parameters)"|\b[a-z]+_[a-z_]+\s*\(\s*(?:[a-z_]+\s*=|\{)/
+// Tool-call syntax a model wrote as text instead of as a call: template markup, or a call to one of the
+// tools it was offered. Only those tool names count, so everyday code in a reply ("df.sort_values(by=…)")
+// is not mistaken for a call.
+const CALL_MARKUP = /<tool_call>|<\|tool_call_start\|>|<function=|\|\|call:/
+
+function callPattern(toolNames: readonly string[]): RegExp {
+	if (toolNames.length === 0) {
+		return CALL_MARKUP
+	}
+
+	const names = toolNames.join("|")
+
+	return new RegExp(
+		`${CALL_MARKUP.source}|"name"\\s*:\\s*"(?:${names})"\\s*,\\s*"(?:arguments|parameters)"|(?<![\\w.])(?:${names})\\s*\\(`
+	)
+}
+
+// The call syntax in a closing reply, which may not call tools: removed, the text around it kept.
+function stripCallSyntax(text: string, toolNames: readonly string[]): string {
+	const names = toolNames.join("|")
+	let stripped = text
+		.replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/g, "")
+		.replace(/<function=[\s\S]*?(?:<\/function>|$)/g, "")
+		.replace(/<\|tool_call_start\|>[\s\S]*?(?:<\|tool_call_end\|>|$)/g, "")
+		.replace(/\|\|call:[^\n]*/g, "")
+
+	if (names.length > 0) {
+		stripped = stripped
+			.replace(new RegExp(`\\{[^{}]*"name"\\s*:\\s*"(?:${names})"[^\\n]*`, "g"), "")
+			.replace(new RegExp(`(?<![\\w.])(?:${names})\\s*\\([^\\n]*`, "g"), "")
+	}
+
+	return stripped.trim()
+}
 
 const MALFORMED_RETRY =
 	"(Your last reply contained tool-call syntax the app could not run. Call the tool properly, or reply in plain text.)"
@@ -274,6 +325,17 @@ const MALFORMED_RETRY =
 const CLOSING_NUDGE = "(No more tools are available in this request. Reply to the user now, in plain text.)"
 
 const CONTENT_FIELDS = ["content", "messages"]
+
+const STUB_MARK = "Result dropped to fit the context"
+
+const STUB_TEXT = `${STUB_MARK}; call the tool again if it is still needed.`
+
+const CUT_CALL = "The call was cut off at the length limit; use a shorter text."
+
+// The user's own earlier messages the router and the guard read along with this one, so the answer to a
+// clarifying question ("Schmidt", "yes, the second one") is routed and grounded like the request it answers.
+// Only text the user typed: assistant replies never ground anything.
+const PRIOR_USER_MESSAGES = 2
 
 const SPOTLIGHT_DELIMITER = /⟦\/?[^⟦⟧\s]{1,32}⟧/g
 
@@ -383,7 +445,7 @@ export function screenReply({
 	userMessage: string
 	canary: string
 	instructions: readonly string[]
-}): string {
+}): ScreenedReply {
 	const normalized = normalizeForEcho(reply)
 	const echoes = instructions.some(line => {
 		const fragment = normalizeForEcho(line.replace(/^- /, "")).slice(0, ECHO_FRAGMENT)
@@ -413,7 +475,8 @@ export function fitMessages({
 	turn,
 	tools,
 	maxTokens,
-	contextTokens
+	contextTokens,
+	onStub
 }: {
 	system: AssistantChatMessage
 	history: readonly AssistantChatMessage[]
@@ -421,6 +484,8 @@ export function fitMessages({
 	tools: readonly AssistantModelTool[]
 	maxTokens: number
 	contextTokens: number
+	// Told which tool results were replaced by the stub, so the call may run again.
+	onStub?: (toolCallId: string) => void
 }): AssistantChatMessage[] {
 	const budget = contextTokens - maxTokens - estimateTokens(JSON.stringify(tools)) - messageTokens(system)
 	let kept = history.slice()
@@ -435,11 +500,12 @@ export function fitMessages({
 	for (let index = 0; index < current.length && total() > budget; index++) {
 		const message = current[index]
 
-		if (message?.role === "tool") {
+		if (message?.role === "tool" && !message.content.includes(STUB_MARK)) {
+			onStub?.(message.toolCallId)
 			current[index] = {
 				...message,
 				content: JSON.stringify({
-					omitted: "Result dropped to fit the context; call the tool again if it is still needed."
+					omitted: STUB_TEXT
 				})
 			}
 		}
@@ -458,6 +524,31 @@ function toModelTools(tools: readonly AssistantTool[]): AssistantModelTool[] {
 		description: tool.description,
 		parameters: toolInputJsonSchema(tool)
 	}))
+}
+
+// The tokens every main step needs besides the user's message: the instructions with the longest spotlight
+// line, room for the context and date lines, the largest group's tool schemas and the reply.
+const CONTEXT_RESERVE_TOKENS = 400
+
+const FIXED_STEP_TOKENS =
+	estimateTokens(
+		assistantSystemPrompt({
+			context: "",
+			spotlight: spotlightInstruction({
+				mode: "delimit",
+				marker: "x".repeat(32)
+			}),
+			canary: "x".repeat(32)
+		})
+	) +
+	CONTEXT_RESERVE_TOKENS +
+	Math.max(...Object.values(ASSISTANT_TOOL_GROUPS).map(group => estimateTokens(JSON.stringify(toModelTools(group.tools))))) +
+	STEP_MAX_TOKENS +
+	MESSAGE_OVERHEAD_TOKENS * 2
+
+// A message that cannot fit even a first step is refused before the router reads it.
+export function messageFitsContext(message: string, contextTokens: number): boolean {
+	return estimateTokens(message) + MESSAGE_OVERHEAD_TOKENS <= contextTokens - FIXED_STEP_TOKENS
 }
 
 function parseArguments(raw: string): Record<string, unknown> | null {
@@ -479,21 +570,45 @@ export async function runAssistantTurn({
 	onEvent,
 	confirm,
 	nonce,
+	secrets,
+	now,
+	timeZone,
 	spotlight = "delimit"
 }: {
 	model: AssistantModel
 	executor: AssistantToolExecutor
+	// Earlier exchanges of this conversation; `user` is the user's own text.
 	history: readonly AssistantHistoryTurn[]
 	message: string
 	signal: AssistantSignal
 	onEvent: (event: AssistantTurnEvent) => void
 	// Resolves true only when the user confirmed this exact call.
 	confirm: (request: AssistantConfirmationRequest, signal: AssistantSignal) => Promise<boolean>
-	// Unpredictable to other people's text: per-turn canary and spotlight marker.
+	// Unpredictable to other people's text: the canary and spotlight marker, unless `secrets` are given.
 	nonce: () => string
+	// The conversation's own canary and marker: the same on every turn, so the system prompt does not change
+	// between turns and the engine can reuse what it already read.
+	secrets?: {
+		canary: string
+		marker: string
+	}
+	// The user's clock and time zone (IANA), for a "Today" line: tool results carry dates.
+	now?: number
+	timeZone?: string
 	spotlight?: SpotlightMode | "off"
 }): Promise<AssistantTurnResult> {
 	checkAborted(signal)
+
+	if (!messageFitsContext(message, model.contextTokens)) {
+		throw new AssistantMessageTooLongError()
+	}
+
+	const priorUser = history
+		.slice(-PRIOR_USER_MESSAGES)
+		.map(entry => entry.user)
+		.filter(text => text.trim().length > 0)
+	const userText = [...priorUser, message].join("\n")
+
 	onEvent({
 		type: "phase",
 		phase: "routing"
@@ -515,7 +630,10 @@ export async function runAssistantTurn({
 				},
 				{
 					role: "user",
-					content: message
+					content: routerRequest({
+						message,
+						earlier: priorUser.at(-1)
+					})
 				}
 			],
 			grammar: ROUTER_GRAMMAR,
@@ -536,13 +654,16 @@ export async function runAssistantTurn({
 	checkAborted(signal)
 
 	const context = await executor.context()
-	const canary = nonce()
+	// The context line names items, notes, chats and tracks other people may have named; it sits in the
+	// system message, so it is sanitized like any tool result and kept on one line.
+	const contextLine = sanitizeUntrustedText(context.description, model.specialTokens).replace(/\s+/g, " ").trim()
+	const canary = secrets?.canary ?? nonce()
 	const spotlightOptions: SpotlightOptions | null =
 		spotlight === "off"
 			? null
 			: {
 					mode: spotlight,
-					marker: nonce()
+					marker: secrets?.marker ?? nonce()
 				}
 	const instructionSpotlight = spotlightOptions === null ? null : spotlightInstruction(spotlightOptions)
 	const instructions = assistantInstructionLines(instructionSpotlight)
@@ -552,16 +673,22 @@ export async function runAssistantTurn({
 			grounding: true,
 			taintGate: true
 		},
-		userMessage: message,
+		userMessage: userText,
 		contextHandles: context.handles
 	})
-	const groupTools: readonly AssistantTool[] = route === null || route === "answer" ? [] : ASSISTANT_TOOL_GROUPS[route].tools
+	const routedTools: readonly AssistantTool[] = route === null || route === "answer" ? [] : ASSISTANT_TOOL_GROUPS[route].tools
+	const supports = (tool: AssistantTool) => executor.supports?.(tool) ?? true
+	const groupTools = routedTools.filter(supports)
+	const toolNames = groupTools.map(tool => tool.name)
+	const malformed = callPattern(toolNames)
 	const system: AssistantChatMessage = {
 		role: "system",
 		content: assistantSystemPrompt({
-			context: context.description,
+			context: contextLine,
 			spotlight: instructionSpotlight,
-			canary
+			canary,
+			date: now === undefined ? null : assistantDateLine({ now, timeZone }),
+			unavailable: routedTools.filter(tool => !supports(tool)).map(tool => tool.title)
 		})
 	}
 	const past: AssistantChatMessage[] = history.flatMap(entry => [
@@ -586,22 +713,32 @@ export async function runAssistantTurn({
 		screenReply({
 			// The model copies spotlight delimiters it saw around item names into its reply.
 			reply: reply.replace(SPOTLIGHT_DELIMITER, ""),
-			userMessage: message,
+			userMessage: userText,
 			canary,
 			instructions
 		})
+	const replyEvent = (text: string, final: boolean): AssistantTurnEvent => {
+		const screened = screen(text)
+
+		return {
+			type: "reply",
+			text: screened.text,
+			final,
+			...(screened.withheld
+				? {
+						withheld: true
+					}
+				: {})
+		}
+	}
 	const nameOf = (handle: string) => executor.name?.(handle)
 	const sanitized = (value: unknown) => mapUntrustedStrings(value, text => sanitizeUntrustedText(text, specialTokens))
 	const untrusted = (value: unknown) =>
 		spotlightOptions === null ? sanitized(value) : mapUntrustedStrings(sanitized(value), text => spotlightText(text, spotlightOptions))
 	// Streams the reply as it is written, screened, unless it turns out to be tool-call syntax.
 	const streamReply = (text: string) => {
-		if (!MALFORMED_CALL.test(text)) {
-			onEvent({
-				type: "reply",
-				text: screen(text.trim()),
-				final: false
-			})
+		if (!malformed.test(text)) {
+			onEvent(replyEvent(text.trim(), false))
 		}
 	}
 	const update = (record: AssistantToolCallRecord, patch: Partial<AssistantToolCallRecord>): AssistantToolCallRecord => {
@@ -621,6 +758,15 @@ export async function runAssistantTurn({
 
 	// Calls that ran this turn, by tool and arguments: a small model can loop on one lookup until the step cap.
 	const executedCalls = new Set<string>()
+	// Which call ran with which signature, so a result fitMessages had to drop can be fetched again.
+	const signatures = new Map<string, string>()
+	const forgetStubbed = (toolCallId: string) => {
+		const signature = signatures.get(toolCallId)
+
+		if (signature !== undefined) {
+			executedCalls.delete(signature)
+		}
+	}
 	let answer = ""
 	let retryUsed = false
 	let blockedSteps = 0
@@ -706,7 +852,8 @@ export async function runAssistantTurn({
 					turn,
 					tools,
 					maxTokens: STEP_MAX_TOKENS,
-					contextTokens: model.contextTokens
+					contextTokens: model.contextTokens,
+					onStub: forgetStubbed
 				}),
 				...(tools.length > 0
 					? {
@@ -728,7 +875,7 @@ export async function runAssistantTurn({
 
 			const text = generated.content.trim()
 
-			if (MALFORMED_CALL.test(text)) {
+			if (malformed.test(text)) {
 				if (!retryUsed && step < MAX_STEPS) {
 					retryUsed = true
 					turn.push(
@@ -760,11 +907,7 @@ export async function runAssistantTurn({
 
 		// Text written before the calls ("Let me look that up") stays as a reply of its own.
 		if (generated.content.trim().length > 0) {
-			onEvent({
-				type: "reply",
-				text: screen(generated.content.trim()),
-				final: true
-			})
+			onEvent(replyEvent(generated.content.trim(), true))
 		}
 
 		const stepCalls = generated.toolCalls.map((call, index) => ({
@@ -808,7 +951,9 @@ export async function runAssistantTurn({
 					tool === undefined
 						? `Tool "${call.name}" is not available for this request`
 						: parsed === null || parsed.success
-							? "Arguments are not a JSON object"
+							? generated.truncated === true
+								? CUT_CALL
+								: "Arguments are not a JSON object"
 							: parsed.error.issues.map(issue => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; ")
 
 				record = update(record, {
@@ -832,12 +977,9 @@ export async function runAssistantTurn({
 					})
 					result = failureResult(checked)
 
+					// Only names came back: nothing was read, so the turn is not tainted.
 					if (checked.candidates !== undefined) {
-						guard.record({
-							tool,
-							args: parsed.data as Record<string, unknown>,
-							returned: checked.candidates
-						})
+						guard.recordCandidates(checked.candidates)
 					}
 				} else {
 					const args = checked.args
@@ -888,6 +1030,7 @@ export async function runAssistantTurn({
 						}
 					} else {
 						executedCalls.add(signature)
+						signatures.set(call.id, signature)
 
 						let approved = true
 
@@ -956,6 +1099,7 @@ export async function runAssistantTurn({
 										? await quarantine({
 												model,
 												request: message,
+												contextTokens: model.contextTokens,
 												// Sanitized first: the quarantine prompt is rendered and tokenized like any other.
 												result: sanitized(outcome.result),
 												signal,
@@ -985,11 +1129,7 @@ export async function runAssistantTurn({
 								result = failureResult(outcome)
 
 								if (outcome.candidates !== undefined) {
-									guard.record({
-										tool,
-										args,
-										returned: outcome.candidates
-									})
+									guard.recordCandidates(outcome.candidates)
 								}
 							}
 						}
@@ -1083,7 +1223,8 @@ export async function runAssistantTurn({
 							: turn,
 					tools: [],
 					maxTokens: STEP_MAX_TOKENS,
-					contextTokens: model.contextTokens
+					contextTokens: model.contextTokens,
+					onStub: forgetStubbed
 				}),
 				maxTokens: STEP_MAX_TOKENS
 			},
@@ -1093,20 +1234,19 @@ export async function runAssistantTurn({
 				onProgress
 			}
 		)
+		// This generation may not call tools, so call syntax in it is dropped and the text around it kept.
+		const text = stripCallSyntax(closing.content, routedTools.map(tool => tool.name))
 
-		answer = MALFORMED_CALL.test(closing.content) ? "" : closing.content.trim()
+		answer = closing.truncated === true && text.length > 0 ? `${text}…` : text
 	}
 
-	const reply = screen(answer)
+	const final = replyEvent(answer, true)
 
-	onEvent({
-		type: "reply",
-		text: reply,
-		final: true
-	})
+	onEvent(final)
 
 	return {
-		reply,
+		reply: final.type === "reply" ? final.text : "",
+		withheld: final.type === "reply" && final.withheld === true,
 		route,
 		intent,
 		calls,
@@ -1116,15 +1256,51 @@ export async function runAssistantTurn({
 }
 
 // Runs the extraction over a result's content fields with no tools; only its answer reaches the main loop.
+// The share of the context a quarantine prompt may fill: the main slot keeps its own cells in a shared cache.
+const QUARANTINE_CONTEXT_SHARE = 0.5
+
+// Cuts `data` to `maxTokens`, keeping its start, or its end for chat messages (the newest).
+function clipData(data: string, maxTokens: number, keepEnd: boolean): { data: string; clipped: boolean } {
+	if (estimateTokens(data) <= maxTokens) {
+		return {
+			data,
+			clipped: false
+		}
+	}
+
+	const chars = Array.from(data)
+	let low = 0
+	let high = chars.length
+
+	// The longest part that fits; estimateTokens grows with every character.
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2)
+		const part = keepEnd ? chars.slice(chars.length - middle) : chars.slice(0, middle)
+
+		if (estimateTokens(part.join("")) <= maxTokens) {
+			low = middle
+		} else {
+			high = middle - 1
+		}
+	}
+
+	return {
+		data: (keepEnd ? chars.slice(chars.length - low) : chars.slice(0, low)).join(""),
+		clipped: true
+	}
+}
+
 async function quarantine({
 	model,
 	request,
+	contextTokens,
 	result,
 	signal,
 	onProgress
 }: {
 	model: AssistantModel
 	request: string
+	contextTokens: number
 	result: unknown
 	signal: AssistantSignal
 	onProgress: (progress: AssistantPromptProgress) => void
@@ -1134,14 +1310,26 @@ async function quarantine({
 	}
 
 	const record = result as Record<string, unknown>
-	const data = CONTENT_FIELDS.filter(field => field in record)
+	const raw = CONTENT_FIELDS.filter(field => field in record)
 		.map(field => (typeof record[field] === "string" ? String(record[field]) : JSON.stringify(record[field])))
 		.join("\n")
 
-	if (data.length === 0) {
+	if (raw.length === 0) {
 		return result
 	}
 
+	const frame = quarantinedExtractionPrompt({
+		request,
+		data: ""
+	})
+	const { data, clipped } = clipData(
+		raw,
+		Math.floor(contextTokens * QUARANTINE_CONTEXT_SHARE) -
+			QUARANTINE_MAX_TOKENS -
+			estimateTokens(frame.system + frame.user) -
+			MESSAGE_OVERHEAD_TOKENS * 2,
+		"messages" in record
+	)
 	const { system, user } = quarantinedExtractionPrompt({
 		request,
 		data
@@ -1169,6 +1357,12 @@ async function quarantine({
 
 	return {
 		...Object.fromEntries(Object.entries(record).filter(([key]) => !CONTENT_FIELDS.includes(key))),
-		extract: extracted.content.trim()
+		extract: extracted.content.trim(),
+		// Tells the model the extract covers only part of the content, or stopped at its length limit.
+		...(clipped || extracted.truncated === true
+			? {
+					extract_incomplete: true
+				}
+			: {})
 	}
 }

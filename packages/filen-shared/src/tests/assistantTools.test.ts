@@ -137,12 +137,36 @@ describe("assistant tool registry", () => {
 		for (const tool of ASSISTANT_TOOLS) {
 			expect(tool.name).not.toMatch(/delete|empty|purge|unshare|leave|account/)
 		}
+
+		// The only way to delete is the restorable trash; a new modifying tool has to be added here on purpose.
+		expect(
+			ASSISTANT_TOOLS.filter(tool => tool.effect === "modifying")
+				.map(tool => tool.name)
+				.sort()
+		).toEqual(["move_items", "rename_item", "set_favorite", "set_note_flags", "trash_items"])
+		expect(ASSISTANT_TOOL_GROUPS.trash.tools.filter(isConsequentialTool).map(tool => tool.name)).toEqual(["trash_items"])
 	})
 
-	it("treats data changes and anything reaching other people as consequential", () => {
-		for (const tool of ASSISTANT_TOOLS) {
-			expect(isConsequentialTool(tool), tool.name).toBe(tool.effect === "additive" || tool.effect === "modifying" || tool.exfiltrates)
-		}
+	// Pinned by name: deriving the expectation from effect/exfiltrates would restate isConsequentialTool
+	// and pass for any registry, e.g. one where draft_chat_message lost its exfiltrates flag.
+	it("treats exactly the data-changing and outbound tools as consequential", () => {
+		expect(
+			ASSISTANT_TOOLS.filter(isConsequentialTool)
+				.map(tool => tool.name)
+				.sort()
+		).toEqual([
+			"add_tracks_to_playlist",
+			"copy_items",
+			"create_directory",
+			"create_note",
+			"draft_chat_message",
+			"move_items",
+			"rename_item",
+			"set_favorite",
+			"set_note_flags",
+			"trash_items"
+		])
+		expect(ASSISTANT_TOOLS.filter(tool => tool.exfiltrates).map(tool => tool.name)).toEqual(["draft_chat_message"])
 	})
 
 	it("grounds only declared arguments and every handle of a consequential tool", () => {
@@ -176,7 +200,8 @@ describe("assistant tool registry", () => {
 		expect(content.sort()).toEqual(["read_chat", "read_note", "read_text_file"])
 
 		for (const tool of ASSISTANT_TOOLS) {
-			expect(tool.untrustedOutput === "none", tool.name).toBe(tool.name === "audio_control" || tool.name === "open_route")
+			// audio_control names the track now playing, which may be someone else's file name.
+			expect(tool.untrustedOutput === "none", tool.name).toBe(tool.name === "open_route")
 		}
 	})
 })

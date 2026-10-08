@@ -20,7 +20,8 @@ export function estimateTokens(text: string): number {
 export const MESSAGE_OVERHEAD_TOKENS = 8
 
 const MAX_STRING_CHARS = 2000
-const MAX_ARRAY_ITEMS = 50
+// Also the listing limit of the apps' own tools, so a list is never cut twice.
+export const MAX_ARRAY_ITEMS = 50
 
 // Caps what one tool result can add to the prompt: long strings are cut and long lists shortened, with a
 // note the model can relay, before the result is serialized.

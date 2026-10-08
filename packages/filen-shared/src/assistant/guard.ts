@@ -1,4 +1,5 @@
 import { isConsequentialTool, type AssistantTool, type AssistantUntrustedOutput } from "./tool"
+import { foreignLinks } from "./untrusted"
 
 // Deterministic injection policy, enforced by the dispatcher whatever the model says:
 //
@@ -8,8 +9,11 @@ import { isConsequentialTool, type AssistantTool, type AssistantUntrustedOutput 
 // 1. Grounding. A consequential call runs only if every handle argument traces back to the user:
 //    the visible context (current directory, selection, playing track), a lookup whose own
 //    arguments came from the user's message, an item the user named, or an item a grounded call
-//    created this turn. Free-text arguments (new names, titles, recipients) must appear in the
-//    user's own message. Text that exists only inside tool results never grounds anything.
+//    created this turn. A lookup's handle arguments must trace back to the user directly: what one
+//    lookup returned does not ground the results of the next, so grounding never walks the whole
+//    drive. Free-text arguments (new names, titles, recipients) must appear in the user's own
+//    message, word for word up to inflection, extension included. Text that exists only inside
+//    tool results never grounds anything.
 // 2. Taint. Once a tool returns content other people can write (note bodies, file text, chat
 //    messages), the turn is tainted: consequential tools are withdrawn for the rest of the turn,
 //    navigation needs grounded targets and open_route is withdrawn. Acting on what was read takes
@@ -45,6 +49,10 @@ const CJK_RUN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=
 
 const EXTENSION = /\.[a-z0-9]{1,5}$/i
 
+// Inflection and clitic room for a word that contains another ("invoices" / "invoice", "archiv" /
+// "archive", Arabic "وفواتير" / "فواتير"); longer differences are compounds.
+const INFLECTION_CHARS = 3
+
 function words(value: string): string[] {
 	// CJK writes Latin words without spaces ("報告書をArchiveに"), so script changes split too.
 	return normalize(value.replace(EXTENSION, ""))
@@ -58,8 +66,19 @@ function distinctive(word: string): boolean {
 }
 
 // "archiv" grounds "Archive", "invoices" grounds "Invoice"; containment also covers attached
-// clitics (Arabic "وفواتير" = "and invoices") and compounds. CJK words match as substrings.
-function wordInMessage({ word, message, messageWords }: { word: string; message: string; messageWords: readonly string[] }): boolean {
+// clitics (Arabic "وفواتير" = "and invoices") and, unless `strict`, compounds. CJK words match as
+// substrings.
+function wordInMessage({
+	word,
+	message,
+	messageWords,
+	strict = false
+}: {
+	word: string
+	message: string
+	messageWords: readonly string[]
+	strict?: boolean
+}): boolean {
 	if (CJK.test(word)) {
 		return message.includes(word)
 	}
@@ -69,18 +88,34 @@ function wordInMessage({ word, message, messageWords }: { word: string; message:
 			candidate === word ||
 			(!/^\d+$/.test(word) &&
 				Math.min(candidate.length, word.length) >= 4 &&
+				(!strict || Math.abs(candidate.length - word.length) <= INFLECTION_CHARS) &&
 				(candidate.includes(word) || word.includes(candidate)))
 	)
+}
+
+// camelCase and letter/digit boundaries split too, so "InvoicesForwardToEve" is four words, not one
+// that happens to contain "invoices".
+function strictWords(value: string): string[] {
+	return words(value.replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2").replace(/(\p{L})(\p{N})|(\p{N})(\p{L})/gu, "$1$3 $2$4"))
+}
+
+function extensionOf(value: string): string | undefined {
+	return EXTENSION.exec(value.trim())?.[0].toLowerCase()
 }
 
 export class AssistantTurnGuard {
 	private readonly message: string
 	private readonly messageWords: string[]
+	private readonly messageStrictWords: string[]
+	// Handles that trace back to the user directly: the context and what grounded calls created.
 	private readonly grounded = new Set<string>()
+	// Results of lookups the user asked for: grounded for acting on, never for further lookups.
+	private readonly lookupGrounded = new Set<string>()
 	private readonly names = new Map<string, string>()
 	private taintLevel: AssistantUntrustedOutput = "none"
 
 	private readonly options: AssistantGuardOptions
+	private readonly userMessage: string
 
 	constructor({
 		options,
@@ -92,8 +127,10 @@ export class AssistantTurnGuard {
 		contextHandles: readonly string[]
 	}) {
 		this.options = options
+		this.userMessage = userMessage
 		this.message = normalize(userMessage)
 		this.messageWords = words(userMessage)
+		this.messageStrictWords = strictWords(userMessage)
 
 		for (const handle of contextHandles) {
 			this.grounded.add(handle)
@@ -123,8 +160,38 @@ export class AssistantTurnGuard {
 		return hits >= Math.ceil(candidates.length * share)
 	}
 
-	handleGrounded(handle: string): boolean {
-		if (this.grounded.has(handle)) {
+	// For text the call itself writes (a new name, a title) or a lookup that grounds what it returns:
+	// every word counts, short ones as whole words; containment allows only inflection; and an extension
+	// must be one the user typed or the item's current one.
+	private textGroundedStrictly(text: string, currentName?: string): boolean {
+		const all = strictWords(text)
+
+		if (all.length === 0) {
+			return normalize(text.trim()).length > 0 && this.message.includes(normalize(text.trim()))
+		}
+
+		const everyWord = all.every(word =>
+			distinctive(word)
+				? wordInMessage({
+						word,
+						message: this.message,
+						messageWords: this.messageStrictWords,
+						strict: true
+					})
+				: this.messageStrictWords.includes(word)
+		)
+		const extension = extensionOf(text)
+
+		return (
+			everyWord &&
+			(extension === undefined ||
+				this.message.includes(extension) ||
+				(currentName !== undefined && extensionOf(currentName) === extension))
+		)
+	}
+
+	handleGrounded(handle: string, { lookups = true }: { lookups?: boolean } = {}): boolean {
+		if (this.grounded.has(handle) || (lookups && this.lookupGrounded.has(handle))) {
 			return true
 		}
 
@@ -155,17 +222,20 @@ export class AssistantTurnGuard {
 	private argumentsGrounded({
 		tool,
 		args,
-		share
+		lookup
 	}: {
 		tool: AssistantTool
 		args: Record<string, unknown>
-		share: number
+		// Grounding a lookup's results: its handles must not come from another lookup.
+		lookup: boolean
 	}): AssistantGuardDecision {
-		for (const handle of this.argumentHandles({
+		const handles = this.argumentHandles({
 			tool,
 			args
-		})) {
-			if (!this.handleGrounded(handle)) {
+		})
+
+		for (const handle of handles) {
+			if (!this.handleGrounded(handle, { lookups: !lookup })) {
 				return {
 					allowed: false,
 					reason: `"${handle}" was not part of the user's request`
@@ -173,10 +243,13 @@ export class AssistantTurnGuard {
 			}
 		}
 
+		// A rename keeps its item's extension without the user repeating it.
+		const currentName = handles.length === 1 && handles[0] !== undefined ? this.names.get(handles[0]) : undefined
+
 		for (const key of tool.grounded.text ?? []) {
 			const value = args[key]
 
-			if (typeof value === "string" && !this.textGrounded(value, share)) {
+			if (typeof value === "string" && !this.textGroundedStrictly(value, currentName)) {
 				return {
 					allowed: false,
 					reason: `"${value}" does not come from the user's message`
@@ -217,16 +290,43 @@ export class AssistantTurnGuard {
 			}
 		}
 
+		// A message or note the assistant writes is the user's own words to other people: a link in it that the
+		// user did not type came from somewhere else (a planted name, a summary).
+		for (const key of consequential && this.options.grounding ? (tool.grounded.links ?? []) : []) {
+			const value = args[key]
+			const foreign = typeof value === "string" ? foreignLinks({ text: value, userMessage: this.userMessage }) : []
+
+			if (foreign.length > 0) {
+				return {
+					allowed: false,
+					reason: "The text holds a link or address that does not come from the user's message"
+				}
+			}
+		}
+
 		if ((consequential && this.options.grounding) || (tainted && tool.effect === "navigate")) {
 			return this.argumentsGrounded({
 				tool,
 				args,
-				share: 1
+				lookup: false
 			})
 		}
 
 		return {
 			allowed: true
+		}
+	}
+
+	// Names a failed call offered instead of the handle it was given: no content was read, so nothing taints
+	// and nothing is grounded.
+	recordCandidates(
+		candidates: readonly {
+			handle: string
+			name: string
+		}[]
+	): void {
+		for (const { handle, name } of candidates) {
+			this.names.set(handle, name)
 		}
 	}
 
@@ -268,11 +368,11 @@ export class AssistantTurnGuard {
 			this.argumentsGrounded({
 				tool,
 				args,
-				share: 0.5
+				lookup: true
 			}).allowed
 		) {
 			for (const { handle } of returned) {
-				this.grounded.add(handle)
+				this.lookupGrounded.add(handle)
 			}
 		}
 	}
