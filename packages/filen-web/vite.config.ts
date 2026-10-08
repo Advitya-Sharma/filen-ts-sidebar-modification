@@ -205,7 +205,12 @@ export default defineConfig(({ mode }) => ({
 	// directory, where vite/sdk-artifacts-plugin.ts answers it by basename — which is what that
 	// middleware is for. Only the worker's copy needs its real path, because it is the one whose
 	// basename is shared with a different binary.
+	// The workers and the service worker are scan entries of their own: the scan treats a `?worker` import as
+	// external, so a worker's dependencies would only be found when it first runs, and re-optimizing then
+	// reloads the page under it (the assistant's model download among it). Explicit entries replace the default
+	// html glob, so index.html is listed too.
 	optimizeDeps: {
+		entries: ["index.html", "src/**/*.worker.ts", "src/sw/sw.ts"],
 		exclude: ["@sqlite.org/sqlite-wasm", "@filen/sdk-rs/service-worker/sdk-rs.js"],
 		include: ["react/compiler-runtime"]
 	},

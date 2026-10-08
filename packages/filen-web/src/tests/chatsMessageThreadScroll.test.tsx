@@ -195,6 +195,31 @@ describe("MessageThread — following the tail", () => {
 		expect(screen.getByText("1 new")).toBeTruthy()
 	})
 
+	// A row mounting above the reader measures from its ref callback, inside React's commit, and shifts the
+	// scroll position to keep the reader's rows still: that update must not reach flushSync mid-commit.
+	it("keeps a scrolled-up reader in place without calling flushSync inside React's commit", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => undefined)
+		const a = chat("a")
+		messagesByChat.set(a.uuid, [message("a", "m1", 100n), message("a", "m2", 200n)])
+
+		const { rerender } = render(createElement(MessageThread, { chat: a }))
+		const el = scrollContainer()
+
+		scrollTo(el, -400)
+		// Rows mounting mid-scroll are measured later: the reader has stopped by the time this one arrives.
+		await act(() => new Promise(resolve => setTimeout(resolve, 200)))
+		// Another sender, hours later: a time header and a run's first bubble, both measuring off their estimates.
+		act(() => {
+			arrive(a, message("a", "m3", 100_000_000n, 11), rerender)
+		})
+
+		const warnings = errors.mock.calls.flat().filter(arg => typeof arg === "string" && arg.includes("flushSync"))
+
+		errors.mockRestore()
+		expect(warnings).toEqual([])
+		expect(screen.getByText("1 new")).toBeTruthy()
+	})
+
 	it("does not pull a reader who scrolls back near the bottom onto it", () => {
 		const a = chat("a")
 		messagesByChat.set(a.uuid, [message("a", "m1", 100n), message("a", "m2", 200n)])
