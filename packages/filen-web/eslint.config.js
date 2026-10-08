@@ -14,44 +14,65 @@ const ALIAS_ONLY = {
 const ASSISTANT_FORBIDDEN =
 	"The assistant acts on model output that text other people wrote can steer, so it never reaches irreversible or security-critical operations."
 
+const ASSISTANT_RAW_SDK = "The assistant goes through the feature modules the user's own actions use, never the raw SDK."
+
 // The assistant's dispatcher runs calls a model produced, and a shared note or chat message can
 // steer that model. What the assistant can import it may one day call, so permanent deletion,
-// unsharing, leaving, contact removal and blocking, account security, logout and stopping a job
-// with trash are kept out of its reach at the import level, whatever the guard decides at runtime.
+// sending, sharing, public links, adding participants, every contact action, leaving, unsharing,
+// account security, the session, logout and stopping a job with trash are kept out of its reach at
+// the import level, whatever the guard decides at runtime. Chats are draft-only: nothing that sends.
 const ASSISTANT_RESTRICTED_PATHS = [
 	{
 		name: "@/features/drive/lib/actions",
-		importNames: ["deleteItemsPermanently", "emptyTrash", "deleteVersion", "deleteVersions", "disableLink", "disableLinks"],
+		importNames: [
+			"deleteItemsPermanently",
+			"emptyTrash",
+			"deleteVersion",
+			"deleteVersions",
+			"createLink",
+			"updateLink",
+			"disableLink",
+			"disableLinks"
+		],
 		message: ASSISTANT_FORBIDDEN
 	},
-	{ name: "@/features/drive/lib/share/actions", importNames: ["unshareItems"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/drive/lib/share/actions", message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/notes/lib/actions", importNames: ["deleteNote", "leaveNote"], message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/notes/lib/bulk", importNames: ["deleteNotesPermanently", "leaveNotes"], message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/notes/lib/tags", importNames: ["deleteNoteTag"], message: ASSISTANT_FORBIDDEN },
-	{ name: "@/features/notes/lib/participants", importNames: ["removeNoteParticipant"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/notes/lib/participants", message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/chats/lib/actions", importNames: ["deleteChat", "leaveChat"], message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/chats/lib/bulk", importNames: ["deleteChatsPermanently", "leaveChats"], message: ASSISTANT_FORBIDDEN },
-	{ name: "@/features/chats/lib/messageActions", importNames: ["deleteMessage"], message: ASSISTANT_FORBIDDEN },
-	{
-		name: "@/features/chats/lib/participants",
-		importNames: ["removeChatParticipant", "removeChatParticipants"],
-		message: ASSISTANT_FORBIDDEN
-	},
+	{ name: "@/features/chats/lib/sync", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/messageActions", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/drafts", importNames: ["deleteDraft"], message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/participants", message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/audio/lib/playlists", importNames: ["deletePlaylistAction"], message: ASSISTANT_FORBIDDEN },
-	{
-		name: "@/features/contacts/lib/actions",
-		importNames: ["denyRequest", "blockContact", "blockContactByEmail", "toggleParticipantBlocked", "removeContact"],
-		message: ASSISTANT_FORBIDDEN
-	},
+	{ name: "@/features/contacts/lib/actions", message: ASSISTANT_FORBIDDEN },
 	// requestJobCancel's "trash" mode deletes what a job already wrote.
 	{ name: "@/features/transfers/lib/control", importNames: ["requestJobCancel"], message: ASSISTANT_FORBIDDEN },
-	{ name: "@/lib/logout", message: ASSISTANT_FORBIDDEN }
+	{
+		name: "@/lib/sdk/session",
+		importNames: ["persistSession", "clearSession", "resumeSession", "broadcastAuth"],
+		message: ASSISTANT_FORBIDDEN
+	},
+	{ name: "@/lib/logout", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/shell/lib/performLogout", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/lib/sdk/client", message: ASSISTANT_RAW_SDK },
+	{ name: "@/workers/sdk.worker", allowTypeImports: true, message: ASSISTANT_RAW_SDK },
+	{ name: "@filen/sdk-rs", allowTypeImports: true, message: ASSISTANT_RAW_SDK }
 ]
 
 const ASSISTANT_RESTRICTED_PATTERNS = [
 	ALIAS_ONLY,
 	{
-		group: ["@/features/settings/components/security/*", "@/features/settings/components/account/*", "@/features/auth/**"],
+		group: [
+			"@/features/settings/components/security/*",
+			"@/features/settings/components/account/*",
+			"@/features/auth/**",
+			"@/e2e-hooks",
+			"@/e2e-hooks/**"
+		],
 		message: ASSISTANT_FORBIDDEN
 	}
 ]
@@ -123,25 +144,18 @@ export default defineConfig([
 		}
 	},
 	{
-		files: ["src/features/assistant/**/*.{ts,tsx}"],
+		// The typescript-eslint variant, because types from the SDK are fine and its values are not. An
+		// import() expression is invisible to both import rules, so it is refused outright.
+		files: ["src/features/assistant/**/*.{ts,tsx}", "src/workers/assistant.worker.ts"],
 		rules: {
-			"no-restricted-imports": ["error", { paths: ASSISTANT_RESTRICTED_PATHS, patterns: ASSISTANT_RESTRICTED_PATTERNS }]
-		}
-	},
-	{
-		// Tools run every call through the feature modules the user's own actions use, never the raw SDK
-		// worker, so the assistant gets the same caches, toasts and confirmations the user does.
-		files: ["src/features/assistant/tools/**/*.{ts,tsx}"],
-		rules: {
-			"no-restricted-imports": [
+			"no-restricted-imports": "off",
+			"@typescript-eslint/no-restricted-imports": [
 				"error",
-				{
-					paths: [
-						...ASSISTANT_RESTRICTED_PATHS,
-						{ name: "@/lib/sdk/client", message: "Assistant tools go through the feature modules the user's actions use." }
-					],
-					patterns: ASSISTANT_RESTRICTED_PATTERNS
-				}
+				{ paths: ASSISTANT_RESTRICTED_PATHS, patterns: ASSISTANT_RESTRICTED_PATTERNS }
+			],
+			"no-restricted-syntax": [
+				"error",
+				{ selector: "ImportExpression", message: "A dynamic import would slip past the assistant's import restrictions." }
 			]
 		}
 	},
