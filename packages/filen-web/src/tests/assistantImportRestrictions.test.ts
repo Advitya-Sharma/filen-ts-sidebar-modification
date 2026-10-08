@@ -51,21 +51,27 @@ const FORBIDDEN = [
 	'import { deletePlaylistAction } from "@/features/audio/lib/playlists"',
 	'import { blockContact, sendContactRequest, acceptRequest, messageContact } from "@/features/contacts/lib/actions"',
 	'import { requestJobCancel } from "@/features/transfers/lib/control"',
+	'import { cancelTransfers, setTransfersPaused } from "@/features/transfers/lib/control"',
+	'import { restoreItems, restoreVersion } from "@/features/drive/lib/actions"',
+	'import { restoreNote } from "@/features/notes/lib/actions"',
+	'import { restoreNotes } from "@/features/notes/lib/bulk"',
+	'import { restoreNoteFromHistory } from "@/features/notes/lib/history"',
 	'import { clearSession, persistSession, resumeSession, broadcastAuth } from "@/lib/sdk/session"',
 	'import { runLogout } from "@/lib/logout"',
 	'import { performLogout } from "@/features/shell/lib/performLogout"',
 	'import { ChangePassword } from "@/features/settings/components/security/changePassword"',
+	'import { setTheme } from "@/features/settings/lib/theme"',
 	'import { pendingSdkCalls } from "@/e2e-hooks/sdkCalls"'
 ]
 
 describe("assistant import restrictions", () => {
 	it.each(["src/features/assistant/runtime/loop.ts", "src/features/assistant/tools/drive.ts", "src/workers/assistant.worker.ts"])(
-		"keeps deleting, sending, sharing, the session and logout out of reach in %s",
+		"keeps deleting, restoring, sending, sharing, settings, transfer control, the session and logout out of reach in %s",
 		async file => {
 			const messages = await lintImports(file, FORBIDDEN.join("\n"))
 
 			// One per banned name, or per statement for a module banned whole; trashItems passes.
-			expect(messages).toHaveLength(24)
+			expect(messages).toHaveLength(31)
 			expect(messages.every(message => message.includes("irreversible or security-critical"))).toBe(true)
 
 			for (const line of FORBIDDEN) {

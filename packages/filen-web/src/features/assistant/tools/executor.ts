@@ -19,6 +19,7 @@ import {
 	chatName,
 	driveName,
 	entityName,
+	freshDriveItem,
 	noteTitle,
 	resolveHandle,
 	type ToolAdapter,
@@ -27,7 +28,16 @@ import {
 import { readAssistantContext } from "@/features/assistant/tools/context"
 import { assistantRouter } from "@/features/assistant/tools/navigation"
 import { navigateToRoute, UNAVAILABLE_ROUTES, type AssistantRouteName } from "@/features/assistant/tools/routes"
-import { getItemInfoTool, listDirectoryTool, readTextFileTool, revealItemTool, searchItemsTool } from "@/features/assistant/tools/drive"
+import {
+	getItemInfoTool,
+	isTrashed,
+	listDirectoryTool,
+	readTextFileTool,
+	revealItemTool,
+	searchItemsTool
+} from "@/features/assistant/tools/drive"
+import { getSharingTool, listSectionTool } from "@/features/assistant/tools/sharing"
+import { getTransfersTool } from "@/features/assistant/tools/transfers"
 import { listNotesTool, openNoteTool, readNoteTool } from "@/features/assistant/tools/notes"
 import { getStorageTool, listPhotosTool, recentItemsTool } from "@/features/assistant/tools/insights"
 import { userCalendar, type UserCalendar } from "@/features/assistant/tools/dates"
@@ -35,6 +45,7 @@ import {
 	draftChatMessageTool,
 	draftChatProblem,
 	draftText,
+	findContactsTool,
 	listChatsTool,
 	openChatTool,
 	readChatTool
@@ -45,6 +56,7 @@ import { audioControlTool, listPlaylistsTool, openPlaylistTool, playTool } from 
 const HANDLE_KINDS: Partial<Record<AssistantToolName, Record<string, readonly AssistantEntityKind[]>>> = {
 	list_directory: { handle: ["root", "drive"] },
 	get_item_info: { handle: ["root", "drive"] },
+	get_sharing: { handle: ["root", "drive"] },
 	read_text_file: { handle: ["drive"] },
 	reveal_item: { handle: ["root", "drive"] },
 	set_favorite: { handles: ["drive"] },
@@ -162,6 +174,8 @@ const ADAPTERS: Partial<Record<AssistantToolName, ToolAdapter>> = {
 	recent_items: recentItemsTool,
 	list_photos: listPhotosTool,
 	get_storage: getStorageTool,
+	list_section: listSectionTool,
+	get_sharing: getSharingTool,
 	read_text_file: readTextFileTool,
 	reveal_item: revealItemTool,
 	list_notes: listNotesTool,
@@ -171,10 +185,12 @@ const ADAPTERS: Partial<Record<AssistantToolName, ToolAdapter>> = {
 	read_chat: readChatTool,
 	open_chat: openChatTool,
 	draft_chat_message: draftChatMessageTool,
+	find_contacts: findContactsTool,
 	list_playlists: listPlaylistsTool,
 	open_playlist: openPlaylistTool,
 	play: playTool,
 	audio_control: audioControlTool,
+	get_transfers: getTransfersTool,
 	open_route: openRouteTool
 }
 
@@ -281,6 +297,12 @@ export function createAssistantToolExecutor(): ToolExecutor {
 			for (const handle of Array.isArray(value) ? value.map(String) : [String(value)]) {
 				const entity = await resolveHandle(scope, handle, allowed)
 				const name = entityName(entity)
+
+				// The trash is read-only to the assistant: a move or a favorite there would restore or change what the
+				// user threw away.
+				if (isConsequentialTool(tool) && entity.kind === "drive" && isTrashed(freshDriveItem(entity.item))) {
+					throw new AssistantToolError(`"${name}" is in the trash; only the user can restore or change it, in the app`)
+				}
 				const resolved = scope.show(entity, name)
 
 				handles.push(resolved)

@@ -1,6 +1,7 @@
 import { driveItemName, fastLocaleCompare, formatBytes } from "@filen/shared"
 import { MAX_ARRAY_ITEMS, type AssistantSignal } from "@filen/shared/assistant"
 import type { DirSizeResponse } from "@filen/sdk-rs"
+import type { ItemInfoResult } from "@/workers/sdk.worker"
 import { log } from "@/lib/log"
 import { queryClient } from "@/queries/client"
 import {
@@ -30,9 +31,12 @@ import {
 	joinPath,
 	optionalString,
 	readDriveListing,
+	readSharedInListing,
 	requiredString,
 	resolveDrivePath,
 	resolveHandle,
+	shareDirection,
+	sharedByOf,
 	showDrive,
 	type ToolAdapter,
 	type ToolScope
@@ -383,7 +387,7 @@ const infoReadThisPage = new Set<string>()
 
 // The path the info dialog's Location row reads, from the same item-info query: read again once a page, as
 // the dialog does (its staleTime is 0), then from the cache.
-async function itemPath(item: DriveItem): Promise<string | undefined> {
+async function itemInfo(item: DriveItem): Promise<ItemInfoResult> {
 	const base = asDirectoryOrFile(item)
 	const fresh = infoReadThisPage.has(base.data.uuid)
 	const info = await queryClient.query({
@@ -393,6 +397,12 @@ async function itemPath(item: DriveItem): Promise<string | undefined> {
 	})
 
 	infoReadThisPage.add(base.data.uuid)
+
+	return info
+}
+
+async function itemPath(item: DriveItem): Promise<string | undefined> {
+	const info = await itemInfo(item)
 
 	if (info.path === null) {
 		return undefined
@@ -404,17 +414,35 @@ async function itemPath(item: DriveItem): Promise<string | undefined> {
 	)
 }
 
-function isTrashed(item: DriveItem): boolean {
+// An item's parent directories below the root, nearest first, from the same item-info entry; undefined when
+// it has no location (a trashed item) or the read failed.
+export async function itemAncestors(item: DriveItem): Promise<DriveItem[] | undefined> {
+	const info = await itemInfo(item).catch(() => undefined)
+
+	return info?.path == null ? undefined : info.ancestors.map(ancestor => narrowItem(ancestor)).toReversed()
+}
+
+export function isTrashed(item: DriveItem): boolean {
 	return cachedListing("trash", null)?.some(row => row.data.uuid === item.data.uuid) ?? false
 }
 
 async function directoryEntity(input: Record<string, unknown>, scope: ToolScope): Promise<AssistantEntity> {
 	const handle = optionalString(input, "handle")
-	// Models fill both optional fields or put a path into "handle"; a path wins, being unambiguous.
+	// Models fill both optional fields or put a path into "handle"; a path wins, being unambiguous. One that names
+	// nothing (a guess beside a valid handle, e.g. a shared directory's name as a path) leaves the handle to decide.
 	const path = optionalString(input, "path") ?? (handle?.trim().startsWith("/") === true ? handle : undefined)
+	const byHandle = handle !== undefined && !handle.trim().startsWith("/")
 
 	if (path !== undefined) {
-		return resolveDrivePath(path)
+		return byHandle
+			? resolveDrivePath(path).catch((e: unknown) => {
+					if (!(e instanceof AssistantToolError)) {
+						throw e
+					}
+
+					return resolveHandle(scope, handle, ["root", "drive"])
+				})
+			: resolveDrivePath(path)
 	}
 
 	return handle === undefined ? { kind: "root" } : resolveHandle(scope, handle, ["root", "drive"])
@@ -427,7 +455,9 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 	const sort = (optionalString(input, "sort") ?? "name") as ListingSort
 	const entity = await directoryEntity(input, scope)
 	let uuid: string | null = null
-	let directory: { handle: string; path: string | undefined } = { handle: ROOT_HANDLE, path: "/" }
+	let directory: { handle: string; path: string | undefined; sharedBy?: string } = { handle: ROOT_HANDLE, path: "/" }
+	// The uuid chain of a directory someone else shares, which lists through the Shared with me screen's query.
+	let shared: readonly string[] | null = null
 
 	if (entity.kind === "drive") {
 		const item = freshDriveItem(entity.item)
@@ -436,24 +466,26 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 			throw new AssistantToolError(`"${driveName(item)}" is a file, not a directory`, { invalid: true })
 		}
 
-		// Shared directories list through their own variant and resolution path, not My Drive's.
-		if (item.type !== "directory") {
-			throw new AssistantToolError(`"${driveName(item)}" is a shared directory; open it with reveal_item instead`)
-		}
-
 		if (item.data.undecryptable) {
 			throw new AssistantToolError("This directory cannot be decrypted")
 		}
 
-		const path = entity.path ?? (await itemPath(item).catch(() => undefined))
-
 		uuid = item.data.uuid
-		directory = { handle: showDrive(scope, item, path), path }
+
+		// One the user shares out is their own and lists like any other.
+		if (shareDirection(item) === "in") {
+			shared = entity.shared ?? [item.data.uuid]
+			directory = { handle: scope.show({ kind: "drive", item, shared }, driveName(item)), path: undefined, ...sharedByOf(item) }
+		} else {
+			const path = entity.path ?? (await itemPath(item).catch(() => undefined))
+
+			directory = { handle: showDrive(scope, item, path), path }
+		}
 	} else {
 		scope.show({ kind: "root" }, "/")
 	}
 
-	const listing = await readDriveListing(uuid)
+	const listing = shared === null ? await readDriveListing(uuid) : await readSharedInListing(uuid, shared)
 
 	throwIfStopped(scope)
 
@@ -469,9 +501,12 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 
 	return {
 		value: {
-			directory: { handle: directory.handle, ...(directory.path === undefined ? {} : { path: directory.path }) },
+			directory,
 			items: items.slice(0, LIST_LIMIT).map(item => ({
-				handle: showDrive(scope, item, directory.path === undefined ? undefined : joinPath(directory.path, driveItemName(item))),
+				handle:
+					shared !== null && isDirectoryItem(item)
+						? scope.show({ kind: "drive", item, shared: [...shared, item.data.uuid] }, driveName(item))
+						: showDrive(scope, item, directory.path === undefined ? undefined : joinPath(directory.path, driveItemName(item))),
 				name: driveName(item),
 				kind: driveKind(item),
 				...listingFields(item, { date: byDate ? selection.field : null, size: bySize, directorySizes: sizes.sizes })
@@ -482,6 +517,8 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 		}
 	}
 }
+
+const OWN_SHARING_UNCHECKED = "unknown: this tool does not show shares or links"
 
 export const getItemInfoTool: ToolAdapter = async (input, scope) => {
 	const entity = await resolveHandle(scope, requiredString(input, "handle"), ["root", "drive"])
@@ -514,8 +551,8 @@ export const getItemInfoTool: ToolAdapter = async (input, scope) => {
 	const created = isoDate(createdOf(item))
 	const modified = isoDate(lastModifiedOf(item))
 	// Only what the row itself says: an owned item's outgoing shares and links would cost a request each, so
-	// its sharing state is left out rather than reported as "not shared".
-	const sharedWithYou = item.type !== "directory" && item.type !== "file"
+	// they are marked unchecked (get_sharing reads them); left out, a model reports "not shared".
+	const sharedWithYou = shareDirection(item) === "in"
 
 	return {
 		value: {
@@ -530,7 +567,7 @@ export const getItemInfoTool: ToolAdapter = async (input, scope) => {
 			...(created === modified ? {} : { created }),
 			modified,
 			favorite: item.data.favorited,
-			...(sharedWithYou ? { sharedWithYou: true } : {}),
+			...(sharedWithYou ? { sharedWithYou: true, ...sharedByOf(item) } : { sharing: OWN_SHARING_UNCHECKED }),
 			...(trashed ? { trashed: true } : {})
 		}
 	}

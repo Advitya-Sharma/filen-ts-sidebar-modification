@@ -211,6 +211,8 @@ export const assistant = {
 	assistantStepRoutedFiles: "Working with your files",
 	/** Step — the request was understood as asking about recent files, file sizes or storage space */
 	assistantStepRoutedInsights: "Looking into your drive",
+	/** Step — the request was understood as asking about favorites, shared items or public links */
+	assistantStepRoutedShared: "Checking favorites and shares",
 	/** Step — the request was understood as creating, renaming, moving or copying files */
 	assistantStepRoutedOrganize: "Organizing your files",
 	/** Step — the request was understood as being about the trash */
@@ -235,6 +237,8 @@ export const assistant = {
 	assistantStepListDirectory: 'Listing "{{subject}}"',
 	/** Step — get_item_info; subject is the item's name */
 	assistantStepGetItemInfo: 'Checking "{{subject}}"',
+	/** Step — get_sharing; subject is the item's name */
+	assistantStepGetSharing: 'Checking how "{{subject}}" is shared',
 	/** Step — read_text_file; subject is the file's name */
 	assistantStepReadTextFile: 'Reading "{{subject}}"',
 	/** Step — reveal_item; subject is the item's name */
@@ -269,6 +273,8 @@ export const assistant = {
 	assistantStepOpenChat: 'Opening the chat "{{subject}}"',
 	/** Step — draft_chat_message; subject is the chat's name */
 	assistantStepDraftChatMessage: 'Drafting a message to "{{subject}}"',
+	/** Step — find_contacts; subject is the name or address searched for */
+	assistantStepFindContacts: 'Looking up the contact "{{subject}}"',
 	/** Step — open_playlist; subject is the playlist's name */
 	assistantStepOpenPlaylist: 'Opening the playlist "{{subject}}"',
 	/** Step — play; subject is the track's or playlist's name */
@@ -341,6 +347,10 @@ export const assistant = {
 	assistantToolListPhotos: "Looking through your photos",
 	/** Activity — get_storage */
 	assistantToolGetStorage: "Checking your storage space",
+	/** Activity — list_section: the favorites, the trash, shared items or public links */
+	assistantToolListSection: "Checking a list in your drive",
+	/** Activity — get_sharing */
+	assistantToolGetSharing: "Checking links and shares",
 	/** Activity — read_text_file */
 	assistantToolReadTextFile: "Reading a file",
 	/** Activity — reveal_item */
@@ -375,6 +385,8 @@ export const assistant = {
 	assistantToolOpenChat: "Opening a chat",
 	/** Activity — draft_chat_message */
 	assistantToolDraftChatMessage: "Drafting a message",
+	/** Activity — find_contacts */
+	assistantToolFindContacts: "Looking up a contact",
 	/** Activity — list_playlists */
 	assistantToolListPlaylists: "Listing your playlists",
 	/** Activity — open_playlist */
@@ -385,6 +397,8 @@ export const assistant = {
 	assistantToolAudioControl: "Controlling playback",
 	/** Activity — add_tracks_to_playlist */
 	assistantToolAddTracksToPlaylist: "Adding tracks to a playlist",
+	/** Activity — get_transfers */
+	assistantToolGetTransfers: "Checking your transfers",
 	/** Activity — open_route */
 	assistantToolOpenRoute: "Opening a screen",
 	/** Activity — a tool this version has no wording for */

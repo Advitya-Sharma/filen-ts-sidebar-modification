@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { QueryClient } from "@tanstack/react-query"
 import type { RegisteredRouter } from "@tanstack/react-router"
-import type { Chat, ChatMessage, Dir, File, Note, UserInfo } from "@filen/sdk-rs"
+import type { Chat, ChatMessage, Contact, Dir, File, FilePublicLink, Note, SharedRootDir, UserInfo } from "@filen/sdk-rs"
 import type { Playlist } from "@filen/shared"
 import { assistantToolByName, type AssistantToolFailure } from "@filen/shared/assistant"
 import { testUuid } from "@/tests/support/uuid"
@@ -19,7 +19,14 @@ const sdk = vi.hoisted(() => ({
 	listNotes: vi.fn(),
 	getNoteContent: vi.fn(),
 	listChats: vi.fn(),
-	listMessagesBefore: vi.fn()
+	listMessagesBefore: vi.fn(),
+	listSharedInRoot: vi.fn(),
+	listSharedOutRoot: vi.fn(),
+	listSharedDirectory: vi.fn(),
+	getDirectoryLinkStatus: vi.fn(),
+	getFileLinkStatus: vi.fn(),
+	getContacts: vi.fn(),
+	getBlockedContacts: vi.fn()
 }))
 const audioEngine = vi.hoisted(() => ({
 	enqueueAndPlay: vi.fn(() => Promise.resolve()),
@@ -86,6 +93,7 @@ import { userCalendar } from "@/features/assistant/tools/dates"
 import { photosListingQueryOptions } from "@/features/photos/queries/photos"
 import { photosRootQueryOptions } from "@/features/photos/queries/root"
 import type { AssistantToolExecution, ToolExecutor } from "@/features/assistant/runtime/executor"
+import { useTransfersStore, type Transfer } from "@/features/transfers/store/useTransfersStore"
 
 const ROOT = testUuid("root")
 const ME = 1n
@@ -560,9 +568,10 @@ describe("get_item_info", () => {
 			kind: "file",
 			path: "/Docs/Invoice_2024.pdf",
 			mime: "application/pdf",
-			favorite: true
+			favorite: true,
+			// An owned item's sharing state is not known here: marked unchecked, so it is not read as "not shared".
+			sharing: "unknown: this tool does not show shares or links"
 		})
-		// An owned item's sharing state is not known here, so it is not claimed either way.
 		expect(json(info)).not.toHaveProperty("shared")
 	})
 
@@ -1035,6 +1044,232 @@ describe("date filters and insights", () => {
 			usedPercent: 30,
 			versions: "512 MiB"
 		})
+	})
+})
+
+describe("drive lists, sharing, contacts and transfers", () => {
+	const annaRole = { type: "sharer", email: "anna@example.com", id: 2 } as const
+
+	function sharedRoot(uuid: string, name: string, role: SharedRootDir["sharingRole"]): SharedRootDir {
+		return {
+			inner: { uuid, color: "default", timestamp: 1_700_000_000_000n, meta: { type: "decoded", data: { name } } },
+			sharingRole: role,
+			writeAccess: false
+		} as unknown as SharedRootDir
+	}
+
+	const NO_CONTACT = "No contact matches. Ask the user for the contact's name or exact email address."
+	const NO_CHAT = "A contact without a chat handle has no chat with the user yet; the user can start one from Contacts."
+
+	function contact(userId: bigint, email: string, nickName: string): Contact {
+		return { uuid: testUuid(email), userId, email, nickName, lastActive: 0n, timestamp: 0n } as Contact
+	}
+
+	beforeEach(() => {
+		const contacts = [contact(2n, "anna@example.com", "Anna"), contact(3n, "mallory@example.com", "Mallory")]
+		const blocked = [{ uuid: testUuid("blocked"), userId: 3n, email: "mallory@example.com" }]
+
+		// Whether the cached lists count as fresh depends on a read earlier in the run; either way they hold these.
+		queryClient.setQueryData(CONTACTS_QUERY_KEY, { contacts, blocked })
+		sdk.getContacts.mockResolvedValue(contacts)
+		sdk.getBlockedContacts.mockResolvedValue(blocked)
+	})
+
+	it("lists what others share, without blocked users' items, and browses into a shared directory by its chain", async () => {
+		const taxes = testUuid("taxes")
+
+		sdk.listSharedInRoot.mockResolvedValue({
+			dirs: [
+				sharedRoot(taxes, "Taxes 2025", annaRole),
+				sharedRoot(testUuid("evil"), "Evil", { type: "sharer", email: "mallory@example.com", id: 3 })
+			],
+			files: []
+		})
+		sdk.listSharedDirectory.mockResolvedValue({
+			dirs: [],
+			files: [rawFile(testUuid("slip"), "payslip.pdf", taxes, "application/pdf")],
+			role: annaRole
+		})
+
+		expect(json(await call("list_section", { section: "shared_with_me" }))).toEqual({
+			section: "shared_with_me",
+			items: [{ handle: "d1", name: "Taxes 2025", kind: "directory", sharedBy: "anna@example.com" }]
+		})
+		expect(json(await call("list_directory", { handle: "d1" }))).toMatchObject({
+			directory: { handle: "d1", sharedBy: "anna@example.com" },
+			items: [{ handle: "f1", name: "payslip.pdf", kind: "file" }]
+		})
+		expect(sdk.listSharedDirectory).toHaveBeenCalledWith(taxes, { variant: "sharedIn", path: [taxes] })
+		// A path guessed beside the handle names nothing in My Drive: the handle decides.
+		expect(json(await call("list_directory", { handle: "d1", path: "/Taxes 2025" }))).toMatchObject({
+			directory: { handle: "d1", sharedBy: "anna@example.com" }
+		})
+	})
+
+	it("lists the trash read-only and keeps every change away from what is in it", async () => {
+		sdk.listDirectory.mockImplementation((target: { kind: string }) =>
+			Promise.resolve(
+				target.kind === "trash"
+					? { dirs: [], files: [readmeRaw] }
+					: target.kind === "uuid"
+						? { dirs: [], files: [invoiceRaw, songRaw] }
+						: { dirs: [docsRaw], files: [readmeRaw] }
+			)
+		)
+
+		expect(json(await call("list_section", { section: "trash" }))).toMatchObject({
+			items: [{ handle: "f1", name: "readme.md", kind: "file" }],
+			note: "Only the user can restore or delete these, in the app. Do not offer to."
+		})
+		expect(json(await call("list_section", { section: "trash", query: "readme" }))).toMatchObject({ items: [{ handle: "f1" }] })
+		expect(json(await call("list_section", { section: "trash", query: "invoice" }))).toEqual({ section: "trash", items: [] })
+
+		const tool = assistantToolByName("move_items")
+
+		if (tool === undefined) {
+			throw new Error("no tool")
+		}
+
+		await expect(executor.preview({ tool, args: { handles: ["f1"], destination: "d0" } })).resolves.toEqual({
+			ok: false,
+			error: '"readme.md" is in the trash; only the user can restore or change it, in the app'
+		})
+	})
+
+	it("reports an item's own link from the link panel's read and what it inherits from a shared, linked parent", async () => {
+		const link = {
+			linkUuid: testUuid("link"),
+			password: { type: "none" },
+			expiration: "7d",
+			downloadable: true
+		} as unknown as FilePublicLink
+
+		sdk.getFileLinkStatus.mockImplementation((file: File) => Promise.resolve(file.uuid === readmeRaw.uuid ? link : undefined))
+		sdk.listDirectory.mockImplementation((target: { kind: string }) =>
+			Promise.resolve(target.kind === "uuid" ? { dirs: [], files: [invoiceRaw, songRaw] } : { dirs: [docsRaw], files: [readmeRaw] })
+		)
+		sdk.listSharedOutRoot.mockResolvedValue({
+			dirs: [
+				sharedRoot(docsRaw.uuid, "Docs", { type: "receiver", email: "anna@example.com", id: 2 }),
+				sharedRoot(docsRaw.uuid, "Docs", { type: "receiver", email: "bob@example.com", id: 4 })
+			],
+			files: []
+		})
+
+		await call("list_directory", { path: "/" })
+		await call("list_directory", { path: "/Docs" })
+
+		expect(json(await call("get_sharing", { handle: "f1" }))).toEqual({
+			handle: "f1",
+			name: "readme.md",
+			publicLink: { password: false, downloads: true, expirySetting: "7d after it was set" },
+			sharedWith: []
+		})
+		expect(json(await call("get_sharing", { handle: "f2" }))).toEqual({
+			handle: "f2",
+			name: "Invoice_2024.pdf",
+			publicLink: "none",
+			linkedThrough: "Docs",
+			sharedWith: [],
+			sharedThrough: { directory: "Docs", with: ["anna@example.com", "bob@example.com"] }
+		})
+		// Each list read once for both calls; the root-level item needs no Links listing, and the item the listing
+		// does not hold no status read of its own.
+		expect(sdk.listSharedOutRoot).toHaveBeenCalledTimes(1)
+		expect(sdk.listDirectory.mock.calls.filter(([target]) => (target as { kind: string }).kind === "links")).toHaveLength(1)
+		expect(sdk.getFileLinkStatus).toHaveBeenCalledTimes(1)
+	})
+
+	it("finds a contact with the one-on-one chat to write them in, never a blocked one", async () => {
+		const direct = { ...chat, uuid: testUuid("direct"), name: "", participants: [self, anna] } as unknown as Chat
+
+		sdk.listChats.mockResolvedValue([chat, direct])
+
+		const result = await call("find_contacts", { query: "anna@example.com" })
+
+		expect(json(result)).toEqual({ contacts: [{ name: "Anna", email: "anna@example.com", chat: "c1" }] })
+		expect(result).toMatchObject({ returned: [{ handle: "c1" }] })
+		expect(json(await call("find_contacts", { query: "Mallory" }))).toEqual({ contacts: [], note: NO_CONTACT })
+	})
+
+	it("matches a contact only on an exact address or on every word in the name or the address before its @", async () => {
+		const contacts = [
+			contact(2n, "anna@example.com", "Anna"),
+			contact(4n, "tom@acme.com", "Tom Becker"),
+			contact(5n, "tomas@acme.com", "Tomas")
+		]
+
+		queryClient.setQueryData(CONTACTS_QUERY_KEY, { contacts, blocked: [] })
+		sdk.getContacts.mockResolvedValue(contacts)
+		sdk.getBlockedContacts.mockResolvedValue([])
+
+		const tom = { name: "Tom Becker", email: "tom@acme.com" }
+
+		expect(json(await call("find_contacts", { query: "tom@acme.com" }))).toEqual({ contacts: [tom], note: NO_CHAT })
+		// A near-miss address or a domain lends no one's chat handle to a draft.
+		expect(json(await call("find_contacts", { query: "tim@acme.com" }))).toEqual({ contacts: [], note: NO_CONTACT })
+		expect(json(await call("find_contacts", { query: "acme.com" }))).toEqual({ contacts: [], note: NO_CONTACT })
+		expect(json(await call("find_contacts", { query: "Tom Becker" }))).toEqual({ contacts: [tom], note: NO_CHAT })
+	})
+
+	it("reports the transfers screen's rows and changes none of them", async () => {
+		const running: Transfer = {
+			id: "t1",
+			direction: "upload",
+			name: "video.mp4",
+			size: 1000,
+			bytesTransferred: 250,
+			status: "uploading",
+			paused: false,
+			parentUuid: null,
+			startedAt: 1
+		}
+		const failed: Transfer = { ...running, id: "t2", direction: "download", name: "big.zip", status: "error", startedAt: 2 }
+
+		useTransfersStore.setState({ transfers: [running, failed], speedSamples: [], rowSpeedSamples: {} })
+
+		expect(json(await call("get_transfers", {}))).toEqual({
+			running: 1,
+			overall: "25%",
+			failed: 1,
+			transfers: [
+				{ name: "video.mp4", kind: "upload", status: "running", progress: "25%", size: "1000 B" },
+				{ name: "big.zip", kind: "download", status: "failed" }
+			]
+		})
+		expect(useTransfersStore.getState().transfers).toEqual([running, failed])
+	})
+
+	it("gives no overall progress while no running transfer has a known size, and reports a cancelled one as stopped", async () => {
+		const compressing: Transfer = {
+			id: "t3",
+			direction: "download",
+			name: "Photos.zip",
+			size: 0,
+			bytesTransferred: 0,
+			status: "compressing",
+			paused: false,
+			parentUuid: null,
+			startedAt: 1
+		}
+		const cancelled: Transfer = { ...compressing, id: "t4", name: "old.zip", size: 10, status: "cancelled", startedAt: 2 }
+
+		useTransfersStore.setState({ transfers: [compressing, cancelled], speedSamples: [], rowSpeedSamples: {} })
+
+		expect(json(await call("get_transfers", {}))).toEqual({
+			running: 1,
+			failed: 0,
+			transfers: [
+				{ name: "Photos.zip", kind: "download", status: "running" },
+				{ name: "old.zip", kind: "download", status: "stopped" }
+			]
+		})
+	})
+
+	it("opens a settings section the way the settings sidebar does", async () => {
+		await call("open_route", { route: "settings_keyboard" })
+
+		expect(router.navigate).toHaveBeenCalledWith({ to: "/settings/keyboard" })
 	})
 })
 

@@ -1,12 +1,19 @@
 import { storageSummary } from "@filen/shared"
 import { queryClient } from "@/queries/client"
 import { ACCOUNT_QUERY_KEY, ACCOUNT_STALE_TIME, fetchAccount } from "@/queries/account"
-import { driveListingQueryOptions } from "@/features/drive/queries/drive"
 import { previewType } from "@/features/drive/lib/preview.logic"
 import { photosListingQueryOptions } from "@/features/photos/queries/photos"
 import { photosRootQueryOptions } from "@/features/photos/queries/root"
 import { captureTimestamp } from "@/features/photos/lib/captureSort"
-import { cachedDriveRows, driveKind, driveName, optionalString, showDrive, type ToolAdapter } from "@/features/assistant/tools/entities"
+import {
+	cachedDriveRows,
+	driveKind,
+	driveName,
+	optionalString,
+	readUnsyncedListing,
+	showDrive,
+	type ToolAdapter
+} from "@/features/assistant/tools/entities"
 import { AssistantToolError, isoDate, throwIfStopped } from "@/features/assistant/tools/format"
 import { dateSelection, datesField, emptyDatesNote, selects } from "@/features/assistant/tools/dates"
 import {
@@ -22,9 +29,6 @@ import {
 
 const RECENT_LIMIT = 20
 const PHOTOS_LIMIT = 30
-// No event keeps Recents current, so the screen reads it on every mount; a turn's retries and its follow-ups
-// reuse one read this long instead.
-const RECENTS_REUSE_MS = 60_000
 
 // The Recents screen's own listing and query. Its rows carry no location, so a path comes from the My Drive
 // listings already cached, when they hold the item's ancestors.
@@ -34,9 +38,7 @@ export const recentItemsTool: ToolAdapter = async (input, scope) => {
 	// The loop validated it against the enum.
 	const sort = (optionalString(input, "sort") ?? "newest") as ListingSort
 	const bySize = sort === "largest" || sort === "smallest"
-	const recents = (await queryClient.query({ ...driveListingQueryOptions("recents", null), staleTime: RECENTS_REUSE_MS })).filter(
-		item => !item.data.undecryptable
-	)
+	const recents = (await readUnsyncedListing("recents")).filter(item => !item.data.undecryptable)
 
 	throwIfStopped(scope)
 

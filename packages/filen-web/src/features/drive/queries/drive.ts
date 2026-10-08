@@ -1372,11 +1372,15 @@ export async function fetchDriveItemLinkStatus(item: DriveItem): Promise<DriveIt
 	return status ? { type: "file", status } : null
 }
 
-export function useDriveItemLinkStatusQuery(item: DriveItem): UseQueryResult<DriveItemLinkStatus | null> {
-	return useQuery({
+export function driveItemLinkStatusQueryOptions(item: DriveItem) {
+	return {
 		queryKey: driveItemLinkStatusQueryKey(item.data.uuid),
 		queryFn: () => fetchDriveItemLinkStatus(item)
-	})
+	}
+}
+
+export function useDriveItemLinkStatusQuery(item: DriveItem): UseQueryResult<DriveItemLinkStatus | null> {
+	return useQuery(driveItemLinkStatusQueryOptions(item))
 }
 
 // Confirm-then-patch after create/update/disable (queries/client.ts's zero-useMutation convention) —

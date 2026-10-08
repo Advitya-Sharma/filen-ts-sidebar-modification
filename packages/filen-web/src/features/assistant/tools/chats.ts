@@ -1,5 +1,7 @@
 import type { Chat } from "@filen/sdk-rs"
+import { isBlocked } from "@filen/shared"
 import { sanitizeUntrustedText } from "@filen/shared/assistant"
+import { contactsQueryRead } from "@/features/contacts/queries/contacts"
 import { chatsQueryRead } from "@/features/chats/queries/chats"
 import { chatMessagesQueryRead } from "@/features/chats/queries/chatMessages"
 import { chatsWithoutBlockedOneOnOne, filterChats } from "@/features/chats/components/chatsSidebar.logic"
@@ -84,6 +86,67 @@ export const listChatsTool: ToolAdapter = async (input, scope) => {
 				}
 			}),
 			...(chats.length > LIST_LIMIT ? { more: chats.length - LIST_LIMIT } : {})
+		}
+	}
+}
+
+const CONTACT_LIMIT = 10
+
+function localPart(email: string): string {
+	const at = email.indexOf("@")
+
+	return at === -1 ? email : email.slice(0, at)
+}
+
+const ADDRESS = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/u
+
+// The Contacts screen's own list (blocked users never). An address in the query matches only that address;
+// words must all match the name or the address before its "@", so a shared domain or a near miss lists no one
+// else: a returned chat handle grounds a draft, and the recipient has to be the one the user named. A contact's
+// one-on-one chat comes from the sidebar's own list.
+export const findContactsTool: ToolAdapter = async (input, scope) => {
+	const query = requiredString(input, "query")
+	const address = ADDRESS.exec(query)?.[0].toLowerCase()
+	const tokens = searchTokens(query)
+
+	if (address === undefined && tokens.length === 0) {
+		throw new AssistantToolError("Pass words from the contact's name or email address", { invalid: true })
+	}
+
+	const [{ contacts }, chats] = await Promise.all([contactsQueryRead(), chatsQueryRead()])
+	const userId = currentUserId()
+	const blocked = blockedUsers()
+	const visibleChats = chatsWithoutBlockedOneOnOne(chats, userId, blocked)
+	const matches = contacts.filter(
+		contact =>
+			!isBlocked(contact, blocked) &&
+			(address === undefined
+				? matchScore(`${participantName(contact)} ${localPart(contact.email)}`, tokens) === tokens.length
+				: contact.email.toLowerCase() === address)
+	)
+	const rows = matches.slice(0, CONTACT_LIMIT).map(contact => {
+		const chat = visibleChats.find(candidate => {
+			const others = otherParticipants(candidate, userId)
+
+			return others.length === 1 && others[0]?.userId === contact.userId && !isChatUndecryptable(candidate)
+		})
+
+		return {
+			name: participantName(contact),
+			email: contact.email,
+			...(chat === undefined ? {} : { chat: scope.show({ kind: "chat", chat }, chatName(chat)) })
+		}
+	})
+
+	return {
+		value: {
+			contacts: rows,
+			...(matches.length > CONTACT_LIMIT ? { more: matches.length - CONTACT_LIMIT } : {}),
+			...(rows.length === 0
+				? { note: "No contact matches. Ask the user for the contact's name or exact email address." }
+				: rows.some(row => row.chat === undefined)
+					? { note: "A contact without a chat handle has no chat with the user yet; the user can start one from Contacts." }
+					: {})
 		}
 	}
 }

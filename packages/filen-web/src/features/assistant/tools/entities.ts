@@ -1,10 +1,18 @@
-import { contactDisplayName, deriveBlockedUsers, driveItemName, EMPTY_BLOCKED_USERS, type BlockedUsers, type Playlist } from "@filen/shared"
+import {
+	contactDisplayName,
+	deriveBlockedUsers,
+	driveItemName,
+	EMPTY_BLOCKED_USERS,
+	shareRoleKind,
+	type BlockedUsers,
+	type Playlist
+} from "@filen/shared"
 import type { Chat, Note } from "@filen/sdk-rs"
 import type { AssistantSignal, AssistantToolProgress } from "@filen/shared/assistant"
 import { i18n } from "@/lib/i18n"
 import { queryClient } from "@/queries/client"
 import { accountQueryGet } from "@/queries/account"
-import { contactsQueryGet } from "@/features/contacts/queries/contacts"
+import { contactsQueryGet, contactsQueryRead } from "@/features/contacts/queries/contacts"
 import { cachedQueriesWithPrefix } from "@/queries/patch"
 import {
 	DRIVE_LISTING_KEY_PREFIX,
@@ -13,7 +21,9 @@ import {
 	findOwnedListingItem,
 	type DriveListingParams
 } from "@/features/drive/queries/drive"
-import { isDirectoryItem, type DriveItem } from "@/features/drive/lib/item"
+import { getSharerIdentity, isDirectoryItem, type DriveItem } from "@/features/drive/lib/item"
+import { filterSharedInByBlocked } from "@/features/drive/components/directoryListing.logic"
+import type { DriveVariant } from "@/features/drive/lib/preferences"
 import { notesQueryFind, notesQueryGet } from "@/features/notes/queries/notes"
 import { isNoteUndecryptable } from "@/features/notes/lib/sort"
 import { chatsQueryGet } from "@/features/chats/queries/chats"
@@ -135,6 +145,47 @@ export function rootDirUuid(): string | undefined {
 // A directory listing through the same query, key and freshness rule the drive screen uses.
 export function readDriveListing(uuid: string | null): Promise<DriveItem[]> {
 	return queryClient.query(driveListingQueryOptions("drive", uuid === rootDirUuid() ? null : uuid))
+}
+
+// No event keeps the flat and shared listings current, so their screens read them on every mount; a turn's
+// retries and follow-ups reuse one read this long instead.
+export const UNSYNCED_LISTING_REUSE_MS = 60_000
+
+// Recents, favorites, trash, links or a shared listing, through its screen's own query. `path` is the shared
+// listings' uuid chain (see AssistantEntity).
+export function readUnsyncedListing(
+	variant: Exclude<DriveVariant, "drive">,
+	uuid: string | null = null,
+	path: readonly string[] = []
+): Promise<DriveItem[]> {
+	return queryClient.query({ ...driveListingQueryOptions(variant, uuid, path), staleTime: UNSYNCED_LISTING_REUSE_MS })
+}
+
+// Which way an item is shared: "in" for someone else's item, "out" for one of the user's own that the shared-out
+// listing returned; null for a plain item. A nested shared directory carries no role of its own when it was
+// rebuilt without the spread, and only the shared-in listing returns nested shared rows.
+export function shareDirection(item: DriveItem): "in" | "out" | null {
+	if (item.type === "directory" || item.type === "file") {
+		return null
+	}
+
+	return shareRoleKind(item.data.sharingRole) === "receiver" ? "out" : "in"
+}
+
+// The address of whoever shared an item with the user.
+export function sharedByOf(item: DriveItem): { sharedBy?: string } {
+	const email = shareDirection(item) === "in" ? getSharerIdentity(item)?.email : undefined
+
+	return email === undefined ? {} : { sharedBy: email }
+}
+
+// The Shared with me screen's listing (its root, or a directory in it by its uuid chain), without the items of
+// users the user blocked, as the screen hides them. The blocked set is the contacts query's, read as the screen
+// reads it.
+export async function readSharedInListing(uuid: string | null, chain: readonly string[] = []): Promise<DriveItem[]> {
+	const [items] = await Promise.all([readUnsyncedListing("sharedIn", uuid, chain), contactsQueryRead().catch(() => undefined)])
+
+	return filterSharedInByBlocked(items, blockedUsers())
 }
 
 export function joinPath(parent: string, name: string): string {

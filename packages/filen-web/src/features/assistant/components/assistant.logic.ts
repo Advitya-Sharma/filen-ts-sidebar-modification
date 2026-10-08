@@ -141,6 +141,7 @@ export function visibleProgress(progress: number | null): number | null {
 export const ROUTE_KEYS: Record<AssistantStepRoute, AssistantKey> = {
 	files: "assistantStepRoutedFiles",
 	insights: "assistantStepRoutedInsights",
+	shared: "assistantStepRoutedShared",
 	organize: "assistantStepRoutedOrganize",
 	trash: "assistantStepRoutedTrash",
 	notes: "assistantStepRoutedNotes",
@@ -164,6 +165,7 @@ const TOOL_SUBJECT_KEYS = {
 	search_items: "assistantStepSearchItems",
 	list_directory: "assistantStepListDirectory",
 	get_item_info: "assistantStepGetItemInfo",
+	get_sharing: "assistantStepGetSharing",
 	read_text_file: "assistantStepReadTextFile",
 	reveal_item: "assistantStepRevealItem",
 	set_favorite: "assistantStepSetFavorite",
@@ -181,6 +183,7 @@ const TOOL_SUBJECT_KEYS = {
 	read_chat: "assistantStepReadChat",
 	open_chat: "assistantStepOpenChat",
 	draft_chat_message: "assistantStepDraftChatMessage",
+	find_contacts: "assistantStepFindContacts",
 	open_playlist: "assistantStepOpenPlaylist",
 	play: "assistantStepPlay",
 	add_tracks_to_playlist: "assistantStepAddTracksToPlaylist"
@@ -226,6 +229,8 @@ const TOOL_ACTIVITY_KEYS = new Map<string, AssistantKey>([
 	["recent_items", "assistantToolRecentItems"],
 	["list_photos", "assistantToolListPhotos"],
 	["get_storage", "assistantToolGetStorage"],
+	["list_section", "assistantToolListSection"],
+	["get_sharing", "assistantToolGetSharing"],
 	["read_text_file", "assistantToolReadTextFile"],
 	["reveal_item", "assistantToolRevealItem"],
 	["set_favorite", "assistantToolSetFavorite"],
@@ -243,11 +248,13 @@ const TOOL_ACTIVITY_KEYS = new Map<string, AssistantKey>([
 	["read_chat", "assistantToolReadChat"],
 	["open_chat", "assistantToolOpenChat"],
 	["draft_chat_message", "assistantToolDraftChatMessage"],
+	["find_contacts", "assistantToolFindContacts"],
 	["list_playlists", "assistantToolListPlaylists"],
 	["open_playlist", "assistantToolOpenPlaylist"],
 	["play", "assistantToolPlay"],
 	["audio_control", "assistantToolAudioControl"],
 	["add_tracks_to_playlist", "assistantToolAddTracksToPlaylist"],
+	["get_transfers", "assistantToolGetTransfers"],
 	["open_route", "assistantToolOpenRoute"]
 ])
 

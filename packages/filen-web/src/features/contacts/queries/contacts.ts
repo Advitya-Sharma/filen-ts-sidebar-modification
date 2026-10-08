@@ -42,19 +42,28 @@ export async function fetchContacts(): Promise<ContactsQueryData> {
 	return { contacts, blocked }
 }
 
+// Key, read and freshness in one builder, so the hook and a one-off read (contactsQueryRead) agree.
+function contactsQueryOptions() {
+	return {
+		queryKey: CONTACTS_QUERY_KEY,
+		queryFn: fetchContacts,
+		staleTime: () => (contactsReadThisSession ? CONTACTS_STALE_TIME : 0),
+		refetchOnReconnect: "always"
+	} as const
+}
+
 // `enabled` lets a caller skip the fetch entirely, same convention as queries/drive.ts's
 // useItemInfoQuery — useBlockedUsers.ts uses this to fetch contacts/blocked only for the sharedIn
 // drive listing (the one variant that filters by the blocked set), instead of paying a getContacts +
 // getBlockedContacts worker round trip on the mounts and refocuses of every other variant. Defaults
 // to true so contactsList.tsx's own bare call is unaffected.
 export function useContactsQuery(options?: { enabled?: boolean }): UseQueryResult<ContactsQueryData> {
-	return useQuery({
-		queryKey: CONTACTS_QUERY_KEY,
-		queryFn: fetchContacts,
-		enabled: options?.enabled ?? true,
-		staleTime: () => (contactsReadThisSession ? CONTACTS_STALE_TIME : 0),
-		refetchOnReconnect: "always"
-	})
+	return useQuery({ ...contactsQueryOptions(), enabled: options?.enabled ?? true })
+}
+
+// The cached lists while they would not refetch, else one read through the same query.
+export function contactsQueryRead(): Promise<ContactsQueryData> {
+	return queryClient.query(contactsQueryOptions())
 }
 
 // Confirm-then-patch (queries/client.ts's zero-useMutation convention). A cache miss (nobody has

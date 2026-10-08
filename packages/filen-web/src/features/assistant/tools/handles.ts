@@ -5,10 +5,12 @@ import type { QueueTrack } from "@/features/audio/store/audioQueue"
 import type { AssistantHandleRef } from "@/features/assistant/runtime/executor"
 
 // What a handle stands for. Snapshots as of when the model saw them; adapters re-read the live row
-// from the caches before acting. `path` is the drive item's absolute path when a lookup knew it.
+// from the caches before acting. `path` is the drive item's absolute path when a lookup knew it; `shared`
+// the uuid chain from the shared-with-me root down to a directory someone else shares, which listing it
+// needs (the route splat the Shared with me screen browses by).
 export type AssistantEntity =
 	| { kind: "root" }
-	| { kind: "drive"; item: DriveItem; path?: string }
+	| { kind: "drive"; item: DriveItem; path?: string; shared?: readonly string[] }
 	| { kind: "note"; note: Note }
 	| { kind: "chat"; chat: Chat }
 	| { kind: "playlist"; playlist: Playlist }
@@ -78,10 +80,14 @@ export class AssistantHandleRegistry {
 
 		if (known !== undefined) {
 			const previous = this.byHandle.get(known)?.entity
-			// A later sighting without a path keeps the one an earlier lookup found.
+			// A later sighting without a path or shared chain keeps the one an earlier lookup found.
 			const kept =
-				entity.kind === "drive" && entity.path === undefined && previous?.kind === "drive" && previous.path !== undefined
-					? { ...entity, path: previous.path }
+				entity.kind === "drive" && previous?.kind === "drive"
+					? {
+							...entity,
+							...(entity.path === undefined && previous.path !== undefined ? { path: previous.path } : {}),
+							...(entity.shared === undefined && previous.shared !== undefined ? { shared: previous.shared } : {})
+						}
 					: entity
 			const ref = { handle: known, name }
 
