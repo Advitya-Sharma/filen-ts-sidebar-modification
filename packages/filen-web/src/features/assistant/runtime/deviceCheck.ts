@@ -41,6 +41,8 @@ export type RuntimeRecommendation =
 			supported: false
 			reason: "unsupported-browser" | "insufficient-memory"
 			detail: string
+			// A usable GPU would change the verdict: only the missing threads stood in the way.
+			gpuCouldHelp: boolean
 	  }
 
 const GIB = 1024 * 1024 * 1024
@@ -59,16 +61,26 @@ export function recommendRuntime(probe: DeviceProbe): RuntimeRecommendation {
 	const agent = parseUserAgent(probe.userAgent)
 
 	if (!wasm.simd || !wasm.exceptions || !wasm.memory64 || !probe.opfs) {
-		return { supported: false, reason: "unsupported-browser", detail: "missing WebAssembly SIMD, exceptions, Memory64 or OPFS" }
+		return {
+			supported: false,
+			reason: "unsupported-browser",
+			detail: "missing WebAssembly SIMD, exceptions, Memory64 or OPFS",
+			gpuCouldHelp: false
+		}
 	}
 
 	// Mobile tabs are killed far below what the model needs (iOS caps a tab well under 2 GB).
 	if (agent.os === "iOS" || agent.os === "iPadOS" || agent.os === "Android") {
-		return { supported: false, reason: "insufficient-memory", detail: `${agent.os} tab memory limits` }
+		return { supported: false, reason: "insufficient-memory", detail: `${agent.os} tab memory limits`, gpuCouldHelp: false }
 	}
 
 	if (probe.deviceMemoryGiB !== null && probe.deviceMemoryGiB < MIN_DEVICE_MEMORY_GIB) {
-		return { supported: false, reason: "insufficient-memory", detail: `${String(probe.deviceMemoryGiB)} GiB device memory` }
+		return {
+			supported: false,
+			reason: "insufficient-memory",
+			detail: `${String(probe.deviceMemoryGiB)} GiB device memory`,
+			gpuCouldHelp: false
+		}
 	}
 
 	const threads = probe.crossOriginIsolated ? Math.max(1, Math.min(MAX_THREADS, Math.floor(probe.hardwareConcurrency / 2))) : 1
@@ -88,7 +100,7 @@ export function recommendRuntime(probe: DeviceProbe): RuntimeRecommendation {
 
 	// One thread decodes a 4B model at around a token per second: not usable.
 	if (threads < 2) {
-		return { supported: false, reason: "unsupported-browser", detail: "no WebGPU and no WebAssembly threads" }
+		return { supported: false, reason: "unsupported-browser", detail: "no WebGPU and no WebAssembly threads", gpuCouldHelp: true }
 	}
 
 	return { supported: true, backend: "cpu", threads, estimatedSpeed: threads >= 6 ? "moderate" : "slow" }

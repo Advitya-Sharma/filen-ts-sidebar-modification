@@ -1,11 +1,17 @@
 import * as Comlink from "comlink"
 import { createSHA256 } from "hash-wasm"
-import { Wllama, type ChatCompletionTool, type WllamaLogger } from "@wllama/wllama/esm/index.js"
+import { LogLevel, Wllama, WllamaAbortError, WllamaError, type ChatCompletionTool, type WllamaLogger } from "@wllama/wllama/esm/index.js"
 // Emitted by Vite as a hashed asset of this build: the engine is self-hosted, never fetched from a CDN.
 import wllamaWasmUrl from "@wllama/wllama/esm/wasm/wllama.wasm?url"
 import type { AssistantGenerateRequest, AssistantGenerateResult } from "@filen/shared/assistant"
 import type { AssistantModelFile, AssistantModelManifest } from "@/features/assistant/runtime/manifest"
-import { accumulateChunk, toEngineMessage, type GenerationState, type GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
+import {
+	accumulateChunk,
+	ENGINE_CRASHED,
+	toEngineMessage,
+	type GenerationState,
+	type GenerationUpdate
+} from "@/features/assistant/runtime/engineMessages"
 import type { AssistantBackend } from "@/features/assistant/runtime/deviceCheck"
 import { downloadModelShards, globalConnectivity, type ModelDownloadProgress, type ShardStore } from "@/features/assistant/runtime/download"
 import { blobGgufRead, readGgufSpecialTokens } from "@/features/assistant/runtime/gguf"
@@ -41,20 +47,51 @@ function loadError(kind: AssistantLoadErrorKind, message: string): Error {
 	return error
 }
 
-const quietLogger: WllamaLogger = {
-	debug: () => undefined,
-	log: () => undefined,
-	warn: (...args: unknown[]) => {
-		log.warn("assistant.engine", ...args)
-	},
-	error: (...args: unknown[]) => {
-		log.error("assistant.engine", ...args)
+function crashError(message: string): Error {
+	const error = new Error(message)
+
+	error.name = ENGINE_CRASHED
+
+	return error
+}
+
+// The engine's own warning and error lines, also kept (the newest few) to tell why a load failed: llama.cpp
+// reports a failed load only in its log.
+const ENGINE_LINES_KEPT = 8
+
+function engineLogger(lines: string[]): WllamaLogger {
+	const keep = (args: unknown[]) => {
+		lines.push(args.map(String).join(" "))
+
+		if (lines.length > ENGINE_LINES_KEPT) {
+			lines.shift()
+		}
+	}
+
+	return {
+		debug: () => undefined,
+		log: () => undefined,
+		warn: (...args: unknown[]) => {
+			keep(args)
+			log.warn("assistant.engine", ...args)
+		},
+		error: (...args: unknown[]) => {
+			keep(args)
+			log.error("assistant.engine", ...args)
+		}
 	}
 }
 
 let engine: Wllama | null = null
 let download: { controller: AbortController; done: Promise<void> } | null = null
-const generations = new Map<number, AbortController>()
+// Each generation's controller and its settling, so an unload can let a cancelled one wind down first.
+const generations = new Map<number, { controller: AbortController; done: Promise<unknown> }>()
+// Generations run one at a time: the client rejects a stopped one at once, and the next must not start on
+// the engine while that one is still winding down.
+let generationTail: Promise<unknown> = Promise.resolve()
+
+// How long an unload waits for cancelled generations: wllama checks the signal once per engine step.
+const SETTLE_GRACE_MS = 500
 
 // Read through a call: TypeScript would keep `download` narrowed across the awaits before it.
 function clearDownload(controller: AbortController): void {
@@ -270,8 +307,28 @@ function releaseCallback(callback: unknown): void {
 // Streamed text reaches the page at most this often; the last state always arrives before the result.
 const TEXT_THROTTLE_MS = 50
 
-function isOutOfMemory(e: unknown): boolean {
-	return /out of memory|cannot allocate|allocation failed|oom/i.test(e instanceof Error ? e.message : String(e))
+function isOutOfMemory(text: string): boolean {
+	return /out of memory|cannot allocate|allocation failed|failed to allocate|unable to allocate|reserve memory|\boom\b/i.test(text)
+}
+
+// A generation failure that leaves the engine unusable, as opposed to a stop or a request it refused: wllama
+// rejects everything with a RuntimeError once its wasm aborted, and answers later calls with a bare string.
+function isEngineCrash(e: unknown, aborted: boolean): boolean {
+	if (aborted || e instanceof WllamaAbortError || (e instanceof Error && e.name === "AbortError")) {
+		return false
+	}
+
+	if (e instanceof WllamaError) {
+		return e.type !== "inference_error" && e.type !== "kv_cache_full"
+	}
+
+	return !(e instanceof Error) || e.name === "RuntimeError" || /crashed/i.test(e.message)
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise(resolve => {
+		setTimeout(resolve, ms)
+	})
 }
 
 const api = {
@@ -335,8 +392,10 @@ const api = {
 				throw loadError("missing", "The model has no shards")
 			}
 
-			const specialTokens = await readGgufSpecialTokens({ read: blobGgufRead(first), size: first.size })
-			const instance = new Wllama({ default: wllamaWasmUrl }, { suppressNativeLog: true, logger: quietLogger })
+			const lines: string[] = []
+			const instance = new Wllama({ default: wllamaWasmUrl }, { suppressNativeLog: false, logger: engineLogger(lines) })
+			// Independent of the engine start, so it runs while the engine reads the weights.
+			const specialTokens = readGgufSpecialTokens({ read: blobGgufRead(first), size: first.size })
 
 			// Never the CDN-hosted compat build: a browser that would need it is refused by the device check.
 			instance.setCompat(null)
@@ -353,29 +412,48 @@ const api = {
 					// same as the 2048 default, and a long prompt reports in steps instead of one jump.
 					n_batch: 512,
 					n_ubatch: 512,
-					// Router, main loop and quarantine alternate; a slot each keeps their prompt prefixes cached.
+					// Router, main loop and quarantine alternate; a slot each keeps their prompt prefixes cached. The
+					// server's default would copy every idle slot to a host-memory prompt cache and clear it on each
+					// new request, which grows the heap and re-reads every prompt.
 					n_parallel: 3,
-					kv_unified: true
+					kv_unified: true,
+					cache_idle_slots: false,
+					log_level: LogLevel.ERROR
 				})
+
+				// wllama does not check the engine's own load result: a model that failed to load (memory, a damaged
+				// file) still resolves, with an empty vocabulary and context.
+				const info = instance.getLoadedContextInfo()
+
+				if (!(info.n_vocab > 0 && info.n_ctx > 0)) {
+					throw new Error(lines.join("\n") || "The engine did not load the model")
+				}
 			} catch (e) {
 				await instance.exit().catch(() => undefined)
+				await specialTokens.catch(() => undefined)
 
-				if (isOutOfMemory(e)) {
-					throw loadError("out-of-memory", e instanceof Error ? e.message : String(e))
+				const message = [e instanceof Error ? e.message : String(e), ...lines].join("\n")
+
+				if (isOutOfMemory(message)) {
+					throw loadError("out-of-memory", message)
 				}
 
-				onVerifying?.()
+				// A failure on the GPU is the GPU's: the client tries the CPU path next, and only a failure there
+				// (or on a CPU-only device) reads every shard again for damage.
+				if (options.backend === "cpu") {
+					onVerifying?.()
 
-				if (await discardDamagedShards({ manifest, store, files })) {
-					throw loadError("missing", "A downloaded shard was damaged")
+					if (await discardDamagedShards({ manifest, store, files })) {
+						throw loadError("missing", "A downloaded shard was damaged")
+					}
 				}
 
-				throw loadError("load-failed", e instanceof Error ? e.message : String(e))
+				throw loadError("load-failed", message)
 			}
 
 			engine = instance
 
-			return { specialTokens }
+			return { specialTokens: await specialTokens }
 		} finally {
 			releaseCallback(onVerifying)
 		}
@@ -406,10 +484,24 @@ const api = {
 						onUpdate({ type: "text", text: content })
 					}, TEXT_THROTTLE_MS)
 
-		generations.set(id, controller)
+		const current = engine
+		const previous = generationTail
+		let finish: () => void = () => undefined
+		const done = new Promise<void>(resolve => {
+			finish = resolve
+		})
+
+		generationTail = done
+		generations.set(id, { controller, done })
 
 		try {
-			await engine.createChatCompletion({
+			await previous
+
+			if (controller.signal.aborted) {
+				throw new WllamaAbortError()
+			}
+
+			await current.createChatCompletion({
 				messages: request.messages.map(toEngineMessage),
 				...(tools === undefined || tools.length === 0 ? {} : { tools, tool_choice: "auto" as const }),
 				...(request.grammar === undefined ? {} : { grammar: request.grammar }),
@@ -443,30 +535,50 @@ const api = {
 					}
 				}
 			})
+		} catch (e) {
+			if (isEngineCrash(e, controller.signal.aborted)) {
+				// Released here, so the client finds no engine to reuse; its files stay on disk.
+				if (engine === current) {
+					engine = null
+				}
+
+				await current.exit().catch(() => undefined)
+
+				throw crashError(e instanceof Error ? e.message : String(e))
+			}
+
+			throw e
 		} finally {
 			text?.flush()
 			releaseCallback(onUpdate)
 			generations.delete(id)
+			finish()
 		}
 
 		return {
 			content: state.content,
-			toolCalls: state.calls.filter(call => call.name.length > 0)
+			toolCalls: state.calls.filter(call => call.name.length > 0),
+			...(state.truncated ? { truncated: true } : {})
 		}
 	},
 
 	cancel(id: number): void {
-		generations.get(id)?.abort()
+		generations.get(id)?.controller.abort()
 	},
 
+	// Cancelled generations get a short while to settle first: exiting under one leaves it waiting forever on a
+	// worker that is gone.
 	async unload(): Promise<void> {
-		for (const controller of generations.values()) {
+		const running = [...generations.values()]
+
+		for (const { controller } of running) {
 			controller.abort()
 		}
 
 		const current = engine
 
 		engine = null
+		await Promise.race([Promise.allSettled(running.map(({ done }) => done)), delay(SETTLE_GRACE_MS)])
 		await current?.exit()
 	}
 }

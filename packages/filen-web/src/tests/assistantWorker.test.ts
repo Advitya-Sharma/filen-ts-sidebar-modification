@@ -6,7 +6,7 @@ import type { GenerationUpdate } from "@/features/assistant/runtime/engineMessag
 
 // The worker module exposes its API through Comlink at import; the engine, its wasm URL and OPFS are
 // replaced so the contract between the page and the engine can be checked under node.
-const { exposed, engines, shardFiles, verified, loadFailure } = vi.hoisted(() => ({
+const { exposed, engines, shardFiles, verified, loadFailure, loadOutcome, completion } = vi.hoisted(() => ({
 	exposed: new Map<"api", unknown>(),
 	engines: [] as {
 		loadModel: ReturnType<typeof vi.fn>
@@ -17,7 +17,11 @@ const { exposed, engines, shardFiles, verified, loadFailure } = vi.hoisted(() =>
 	// The model directory: file name to contents.
 	shardFiles: new Map<string, Uint8Array<ArrayBuffer>>(),
 	verified: new Map<string, string>(),
-	loadFailure: { error: null as Error | null }
+	loadFailure: { error: null as Error | null },
+	// What a load that "succeeded" reports, and the engine log line it wrote.
+	loadOutcome: { vocab: 10, log: null as string | null },
+	// Replaces the scripted completion when set.
+	completion: { run: null as ((options: { abortSignal: AbortSignal; onData: (chunk: unknown) => void }) => Promise<void>) | null }
 }))
 
 vi.mock("comlink", () => ({
@@ -30,11 +34,35 @@ vi.mock("comlink", () => ({
 vi.mock("@wllama/wllama/esm/wasm/wllama.wasm?url", () => ({ default: "/assets/wllama-hash.wasm" }))
 
 vi.mock("@wllama/wllama/esm/index.js", () => ({
+	LogLevel: { DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 },
+	WllamaAbortError: class extends Error {
+		override name = "AbortError"
+	},
+	WllamaError: class extends Error {
+		type: string
+
+		constructor(message: string, type = "unknown_error") {
+			super(message)
+			this.type = type
+		}
+	},
 	Wllama: class {
-		readonly loadModel = vi.fn(() => (loadFailure.error === null ? Promise.resolve() : Promise.reject(loadFailure.error)))
+		readonly config: { logger: { error: (...args: unknown[]) => void } }
+		readonly loadModel = vi.fn(() => {
+			if (loadOutcome.log !== null) {
+				this.config.logger.error(loadOutcome.log)
+			}
+
+			return loadFailure.error === null ? Promise.resolve() : Promise.reject(loadFailure.error)
+		})
+		readonly getLoadedContextInfo = vi.fn(() => ({ n_vocab: loadOutcome.vocab, n_ctx: loadOutcome.vocab > 0 ? 8192 : 0 }))
 		readonly setCompat = vi.fn()
 		readonly exit = vi.fn(() => Promise.resolve())
 		readonly createChatCompletion = vi.fn((options: { onData: (chunk: unknown) => void; abortSignal: AbortSignal }): Promise<void> => {
+			if (completion.run !== null) {
+				return completion.run(options)
+			}
+
 			const chunk = (delta: unknown) => ({ choices: [{ index: 0, delta, finish_reason: null, logprobs: null }] })
 
 			options.onData({
@@ -52,7 +80,8 @@ vi.mock("@wllama/wllama/esm/index.js", () => ({
 			return Promise.resolve()
 		})
 
-		constructor() {
+		constructor(_paths: unknown, config: { logger: { error: (...args: unknown[]) => void } }) {
+			this.config = config
 			engines.push(this)
 		}
 	}
@@ -154,6 +183,9 @@ describe("assistant worker API", () => {
 		shardFiles.clear()
 		verified.clear()
 		loadFailure.error = null
+		loadOutcome.vocab = 10
+		loadOutcome.log = null
+		completion.run = null
 
 		MANIFEST.shards.forEach((shard, index) => {
 			shardFiles.set(shard.file, CONTENTS[index] ?? new Uint8Array(0))
@@ -350,6 +382,103 @@ describe("assistant worker API", () => {
 		expect(options["tools"]).toBeUndefined()
 		// Nobody listens: no progress chunks to send.
 		expect(options["return_progress"]).toBe(false)
+	})
+
+	it("treats a load the engine silently failed as failed, and its allocation errors as out of memory", async () => {
+		loadOutcome.vocab = 0
+		await expect(api.load(MANIFEST, OPTIONS)).rejects.toMatchObject({ name: "ModelLoadError:load-failed" })
+		expect(engines[0]?.exit).toHaveBeenCalled()
+
+		loadOutcome.log = "llama_kv_cache: failed to allocate buffer for kv cache"
+		await expect(api.load(MANIFEST, OPTIONS)).rejects.toMatchObject({ name: "ModelLoadError:out-of-memory" })
+
+		// Nothing stays loaded: a later load starts clean.
+		loadOutcome.vocab = 10
+		loadOutcome.log = null
+		await expect(api.load(MANIFEST, OPTIONS)).resolves.toEqual({ specialTokens: ["<|im_start|>", "<tool_call>"] })
+	})
+
+	it("leaves the shards alone when the GPU failed to load them: the CPU path is tried next", async () => {
+		const onVerifying = vi.fn()
+
+		loadFailure.error = new Error("failed to load model")
+		shardFiles.set("m-00001-of-00002.gguf", new Uint8Array([1, 2, 0]))
+
+		await expect(api.load(MANIFEST, { ...OPTIONS, backend: "webgpu" }, onVerifying)).rejects.toMatchObject({
+			name: "ModelLoadError:load-failed"
+		})
+		expect(onVerifying).not.toHaveBeenCalled()
+		expect(shardFiles.has("m-00001-of-00002.gguf")).toBe(true)
+	})
+
+	it("releases an engine that crashed under a generation, and keeps one a stop ended", async () => {
+		await api.load(MANIFEST, OPTIONS)
+
+		const engine = engines[0]
+
+		completion.run = ({ abortSignal }) =>
+			new Promise((_resolve, reject) => {
+				abortSignal.addEventListener("abort", () => {
+					reject(Object.assign(new Error("Operation aborted"), { name: "AbortError" }))
+				})
+			})
+
+		const stopped = api.generate(1, { messages: [], maxTokens: 1 })
+
+		api.cancel(1)
+		await expect(stopped).rejects.toMatchObject({ name: "AbortError" })
+		expect(engine?.exit).not.toHaveBeenCalled()
+
+		// wllama rejects with a RuntimeError once its wasm aborted, then answers every call with a bare string.
+		const answer = "wllama has crashed, please reload the module" as unknown as Error
+
+		for (const crash of [Object.assign(new Error("memory access out of bounds"), { name: "RuntimeError" }), answer]) {
+			await api.unload()
+			await api.load(MANIFEST, OPTIONS)
+			completion.run = () => Promise.reject(crash)
+
+			await expect(api.generate(2, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelRuntimeError:crashed" })
+			expect(engines.at(-1)?.exit).toHaveBeenCalled()
+			await expect(api.generate(3, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelLoadError:missing" })
+		}
+	})
+
+	it("lets a cancelled generation wind down before the engine exits on unload", async () => {
+		await api.load(MANIFEST, OPTIONS)
+
+		const engine = engines[0]
+		const order: string[] = []
+
+		completion.run = ({ abortSignal }) =>
+			new Promise((_resolve, reject) => {
+				abortSignal.addEventListener("abort", () => {
+					setTimeout(() => {
+						order.push(engine?.exit.mock.calls.length === 0 ? "settled" : "settled after exit")
+						reject(Object.assign(new Error("aborted"), { name: "AbortError" }))
+					}, 20)
+				})
+			})
+		const running = api.generate(1, { messages: [], maxTokens: 1 }).catch(() => undefined)
+
+		await vi.waitFor(() => {
+			expect(engine?.createChatCompletion).toHaveBeenCalled()
+		})
+		await api.unload()
+		await running
+
+		expect(order).toEqual(["settled"])
+		expect(engine?.exit).toHaveBeenCalledTimes(1)
+	})
+
+	it("says when a generation stopped at its length limit", async () => {
+		await api.load(MANIFEST, OPTIONS)
+		completion.run = ({ onData }) => {
+			onData({ choices: [{ index: 0, delta: { content: "cut" }, finish_reason: "length", logprobs: null }] })
+
+			return Promise.resolve()
+		}
+
+		await expect(api.generate(1, { messages: [], maxTokens: 1 })).resolves.toEqual({ content: "cut", toolCalls: [], truncated: true })
 	})
 
 	it("unloads the engine", async () => {

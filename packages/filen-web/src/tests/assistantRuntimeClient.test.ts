@@ -6,12 +6,13 @@ import type { AssistantModelState } from "@/features/assistant/types"
 
 // The page side of the runtime against a scripted worker: the states the panel sees across a download, an
 // explicit load, a start that finds a damaged shard, and the idle unload that frees the worker again.
-const { remote, inspections, releaseProxy, workers, locks, prune } = vi.hoisted(() => ({
+const { remote, inspections, releaseProxy, workers, locks, prune, device } = vi.hoisted(() => ({
 	releaseProxy: Symbol("releaseProxy"),
 	remote: {
 		download: vi.fn<(manifest: unknown, baseUrl: string, onProgress: (progress: ModelDownloadProgress) => void) => Promise<void>>(),
 		load: vi.fn<(manifest: unknown, options: unknown, onVerifying: () => void) => Promise<{ specialTokens: string[] }>>(),
 		cancelDownload: vi.fn(),
+		cancel: vi.fn(() => Promise.resolve()),
 		unload: vi.fn<() => Promise<void>>(),
 		generate: vi.fn<
 			(id: number, request: unknown, onUpdate?: (update: GenerationUpdate) => void) => Promise<{ content: string; toolCalls: [] }>
@@ -19,21 +20,32 @@ const { remote, inspections, releaseProxy, workers, locks, prune } = vi.hoisted(
 	},
 	// An Error fails that inspection.
 	inspections: [] as (ModelInspection | Error)[],
-	workers: [] as { terminate: Mock<() => void>; released: Mock<() => void> }[],
+	workers: [] as { terminate: Mock<() => void>; released: Mock<() => void>; fire: (type: string) => void }[],
 	// Model locks currently held by this "tab", how often it was granted one, and whether another tab holds it.
 	locks: { held: 0, granted: 0, elsewhere: false },
 	// The pruning of older model versions, when a test holds it open.
-	prune: { pending: null as Promise<void> | null }
+	prune: { pending: null as Promise<void> | null },
+	// Whether WebGPU is offered, and whether the CPU path is.
+	device: { gpu: true, cpu: true }
 }))
 
 vi.mock("@/workers/assistant.worker.ts?worker", () => ({
 	default: class {
-		readonly addEventListener = vi.fn()
+		private readonly listeners = new Map<string, (() => void)[]>()
+		readonly addEventListener = vi.fn((type: string, listener: () => void) => {
+			this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
+		})
 		readonly terminate = vi.fn<() => void>()
 		readonly released = vi.fn<() => void>()
 
 		constructor() {
 			workers.push(this)
+		}
+
+		fire(type: string): void {
+			for (const listener of this.listeners.get(type) ?? []) {
+				listener()
+			}
 		}
 	}
 }))
@@ -51,8 +63,13 @@ vi.mock("comlink", () => ({
 vi.mock("@/lib/appUpdate", () => ({ recoverIfNewerBuild: () => undefined }))
 
 vi.mock("@/features/assistant/runtime/deviceCheck", () => ({
-	probeDevice: () => Promise.resolve({}),
-	recommendRuntime: () => ({ supported: true, backend: "webgpu", threads: 4, estimatedSpeed: "fast" }),
+	probeDevice: ({ gpu }: { gpu: boolean }) => Promise.resolve({ gpu }),
+	recommendRuntime: ({ gpu }: { gpu: boolean }) =>
+		gpu && device.gpu
+			? { supported: true, backend: "webgpu", threads: 4, estimatedSpeed: "fast" }
+			: device.cpu
+				? { supported: true, backend: "cpu", threads: 4, estimatedSpeed: "moderate" }
+				: { supported: false, reason: "unsupported-browser", detail: "", gpuCouldHelp: true },
 	storageVerdict: () => ({ ok: true })
 }))
 
@@ -62,7 +79,8 @@ vi.mock("@/features/assistant/runtime/modelStore", () => ({
 
 		return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
 	},
-	deleteModels: () => prune.pending ?? Promise.resolve()
+	deleteModels: () => prune.pending ?? Promise.resolve(),
+	otherModelPresent: () => Promise.resolve(false)
 }))
 
 const { AssistantRuntime, IDLE_UNLOAD_MS } = await import("@/features/assistant/runtime/client")
@@ -135,6 +153,8 @@ beforeEach(() => {
 	locks.granted = 0
 	locks.elsewhere = false
 	prune.pending = null
+	device.gpu = true
+	device.cpu = true
 	remote.download.mockReset()
 	remote.load.mockReset()
 	remote.unload.mockReset()
@@ -619,5 +639,134 @@ describe("AssistantRuntime idle unload", () => {
 
 		expect(late).toBeDefined()
 		expect(seen).toEqual([])
+	})
+
+	it("ends a stopped generation at once, and replaces a worker that never winds it down", async () => {
+		const runtime = await loaded()
+
+		remote.generate.mockImplementationOnce(() => new Promise(() => undefined))
+
+		const controller = new AbortController()
+		const running = runtime.generate({ messages: [], maxTokens: 1 }, { signal: controller.signal })
+
+		controller.abort()
+		await expect(running).rejects.toMatchObject({ name: "AbortError" })
+		expect(remote.cancel).toHaveBeenCalled()
+		expect(runtime.getState().kind).toBe("ready")
+
+		await vi.advanceTimersByTimeAsync(10_000)
+
+		expect(runtime.getState().kind).toBe("downloaded")
+		expect(workers[0]?.terminate).toHaveBeenCalled()
+		expect(locks.held).toBe(0)
+	})
+
+	it("rejects a generation in flight when its worker is stopped, so no turn waits forever", async () => {
+		const runtime = await loaded()
+
+		remote.generate.mockImplementationOnce(() => new Promise(() => undefined))
+
+		const running = runtime.generate({ messages: [], maxTokens: 1 }, { signal: new AbortController().signal }).catch((e: unknown) => e)
+		const unloading = runtime.unload()
+
+		await vi.advanceTimersByTimeAsync(2_000)
+		await unloading
+
+		await expect(running).resolves.toMatchObject({ name: "WorkerClosedError" })
+	})
+
+	it("leaves ready after the engine crashed, so the next message loads it again", async () => {
+		const runtime = await loaded()
+
+		remote.generate.mockRejectedValueOnce(Object.assign(new Error("crashed"), { name: "ModelRuntimeError:crashed" }))
+
+		await expect(runtime.generate({ messages: [], maxTokens: 1 }, { signal: new AbortController().signal })).rejects.toMatchObject({
+			name: "ModelRuntimeError:crashed"
+		})
+		expect(runtime.getState().kind).toBe("downloaded")
+		expect(workers[0]?.terminate).toHaveBeenCalled()
+		expect(locks.held).toBe(0)
+	})
+})
+
+describe("AssistantRuntime failures", () => {
+	it("fails a load whose worker never started, releasing the lock", async () => {
+		inspections.push(COMPLETE)
+		remote.load.mockImplementation(() => new Promise(() => undefined))
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+
+		const loading = runtime.load()
+
+		await vi.waitFor(() => {
+			expect(workers).toHaveLength(1)
+		})
+		workers[0]?.fire("error")
+		await loading
+
+		expect(runtime.getState()).toMatchObject({ kind: "error", error: "load-failed" })
+		expect(locks.held).toBe(0)
+	})
+
+	it("falls back to the CPU path once when WebGPU cannot load the model, and stays there", async () => {
+		inspections.push(COMPLETE)
+		remote.load.mockImplementationOnce(() => Promise.reject(Object.assign(new Error("gpu"), { name: "ModelLoadError:load-failed" })))
+		remote.load.mockResolvedValue({ specialTokens: [] })
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		await runtime.load()
+
+		expect(runtime.getState().kind).toBe("ready")
+		expect(remote.load.mock.calls.map(([, options]) => (options as { backend: string }).backend)).toEqual(["webgpu", "cpu"])
+		expect(workers[0]?.terminate).toHaveBeenCalled()
+
+		await runtime.unload()
+		await runtime.load()
+
+		expect((remote.load.mock.lastCall?.[1] as { backend: string }).backend).toBe("cpu")
+	})
+
+	it("says how much a stopped download left on disk, so it can be removed", async () => {
+		const partial: ModelInspection = { presentBytes: 1000, verifiedBytes: 0, complete: false }
+
+		inspections.push(
+			{ presentBytes: 0, verifiedBytes: 0, complete: false },
+			{ presentBytes: 0, verifiedBytes: 0, complete: false },
+			partial
+		)
+		remote.download.mockRejectedValue(Object.assign(new Error("stopped"), { name: "AbortError" }))
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		runtime.download()
+		await vi.waitFor(() => {
+			expect(runtime.getState()).toMatchObject({ kind: "not-downloaded", partialBytes: 1000 })
+		})
+	})
+
+	it("frees the worker and the lock at sign-out, and starts nothing afterwards", async () => {
+		inspections.push(COMPLETE)
+		remote.load.mockResolvedValue({ specialTokens: [] })
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		await runtime.load()
+		runtime.shutdown()
+
+		expect(workers[0]?.terminate).toHaveBeenCalled()
+		await vi.waitFor(() => {
+			expect(locks.held).toBe(0)
+		})
+
+		runtime.download()
+		await runtime.load()
+
+		expect(workers).toHaveLength(1)
 	})
 })

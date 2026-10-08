@@ -82,6 +82,29 @@ export async function inspectModel(manifest: AssistantModelManifest): Promise<Mo
 	}
 }
 
+// Whether a model other than `id` has files on disk (one a newer build downloaded).
+export async function otherModelPresent(id: string): Promise<boolean> {
+	let models: FileSystemDirectoryHandle
+
+	try {
+		models = await (await navigator.storage.getDirectory()).getDirectoryHandle(MODELS_DIRECTORY)
+	} catch (e) {
+		if (isNotFoundError(e)) {
+			return false
+		}
+
+		throw e
+	}
+
+	for await (const name of models.keys()) {
+		if (name !== id) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Removes every downloaded model except `keep` (an older model version after an update, or all of them).
 export async function deleteModels(keep: string | null = null): Promise<void> {
 	let models: FileSystemDirectoryHandle

@@ -1,9 +1,9 @@
 import type {
+	AssistantHistoryTurn,
 	AssistantSignal,
 	AssistantTool,
 	AssistantToolExecutor,
-	AssistantToolOutcome,
-	AssistantUntrustedOutput
+	AssistantToolOutcome
 } from "@filen/shared/assistant"
 
 // The web app's side of the agent loop (@filen/shared/assistant's loop): the loop owns routing, the
@@ -25,12 +25,9 @@ export interface AssistantHandleRef {
 // What a navigating tool did to the screen, for the panel to reflect (e.g. collapse on narrow screens).
 export type AssistantUiEffect = { type: "navigated"; pathname: string } | { type: "playback" } | { type: "drafted"; pathname: string }
 
-// The loop's outcome plus what the panel may use. `untrusted` is the taint the result actually carries:
-// at most the tool's own untrustedOutput (an error holding only names is "names" even for read_note).
-// Strings other people can author are already sanitized against the known template patterns; the loop
-// sanitizes again with the model's own special tokens.
+// The loop's outcome plus what the panel may use. Every string is already sanitized against the known
+// template patterns; the loop sanitizes again with the model's own special tokens.
 export type AssistantToolExecution = AssistantToolOutcome & {
-	untrusted: AssistantUntrustedOutput
 	uiEffect?: AssistantUiEffect
 }
 
@@ -58,6 +55,7 @@ export interface ToolExecutor extends AssistantToolExecutor {
 		signal: AssistantSignal
 	}): Promise<AssistantToolExecution>
 	preview(call: { tool: AssistantTool; args: Record<string, unknown> }): Promise<AssistantToolPreview>
-	// A new conversation: forgets every handle.
-	reset(): void
+	// A new conversation: forgets every handle. `history` is a resumed conversation's exchanges, whose replies
+	// may name handles from an earlier page; those are never handed out again.
+	reset(history?: readonly AssistantHistoryTurn[]): void
 }

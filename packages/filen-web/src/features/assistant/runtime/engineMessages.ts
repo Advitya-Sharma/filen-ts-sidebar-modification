@@ -3,9 +3,15 @@ import type { AssistantChatMessage } from "@filen/shared/assistant"
 
 // Between the loop's engine-neutral messages and wllama's OpenAI-shaped chat API.
 
+// The error name of a generation the engine died under (a wasm abort, a lost GPU device): the worker has
+// released it, and the client starts over from the files on disk.
+export const ENGINE_CRASHED = "ModelRuntimeError:crashed"
+
 export interface GenerationState {
 	content: string
 	calls: { id: string; name: string; arguments: string }[]
+	// The generation stopped at max_tokens.
+	truncated?: boolean
 }
 
 export function toEngineMessage(message: AssistantChatMessage): ChatCompletionMessage {
@@ -57,7 +63,13 @@ export function accumulateChunk({ state, chunk }: { state: GenerationState; chun
 		}
 	}
 
-	const delta = chunk.choices[0]?.delta
+	const choice = chunk.choices[0]
+
+	if (choice?.finish_reason === "length") {
+		state.truncated = true
+	}
+
+	const delta = choice?.delta
 
 	if (delta === undefined) {
 		return changes

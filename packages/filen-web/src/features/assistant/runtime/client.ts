@@ -13,9 +13,9 @@ import type { AssistantModelInfo, AssistantModelState } from "@/features/assista
 import { DEFAULT_MODEL_BASE_URL, manifestBytes, parseManifest, type AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import { QWEN35_4B } from "@/features/assistant/runtime/models"
 import { probeDevice, recommendRuntime, storageVerdict, type RuntimeRecommendation } from "@/features/assistant/runtime/deviceCheck"
-import { deleteModels, inspectModel } from "@/features/assistant/runtime/modelStore"
+import { deleteModels, inspectModel, otherModelPresent } from "@/features/assistant/runtime/modelStore"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
-import type { GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
+import { ENGINE_CRASHED, type GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 import { log } from "@/lib/log"
 
@@ -36,11 +36,48 @@ export const IDLE_UNLOAD_MS = 10 * 60_000
 // Long enough for the engine to exit cleanly; terminating the worker frees everything either way.
 const EXIT_GRACE_MS = 1000
 
+// After Stop, how long a generation may take to wind down before its engine counts as stuck and the worker
+// is replaced: on the CPU path one engine step (a prompt batch) can take seconds.
+const STOP_WATCHDOG_MS = 10_000
+
 type Settled = AssistantModelState["kind"]
 
 interface WorkerHandle {
 	worker: Worker
 	remote: Comlink.Remote<AssistantWorkerApi>
+	// Aborted when the worker is stopped or fails: a call to it can never be answered after that.
+	closed: AbortController
+}
+
+const WORKER_CLOSED = "WorkerClosedError"
+
+function workerClosedError(): Error {
+	const error = new Error("The assistant worker stopped")
+
+	error.name = WORKER_CLOSED
+
+	return error
+}
+
+// A call to the worker, rejected once the worker is gone: Comlink drops a call's listener when its proxy is
+// released, and a worker that failed to start never answers at all.
+function untilClosed<T>(handle: WorkerHandle, call: Promise<T>): Promise<T> {
+	const { signal } = handle.closed
+
+	if (signal.aborted) {
+		return Promise.reject(workerClosedError())
+	}
+
+	return new Promise((resolve, reject) => {
+		const onClosed = () => {
+			reject(workerClosedError())
+		}
+
+		signal.addEventListener("abort", onClosed, { once: true })
+		void call.then(resolve, reject).finally(() => {
+			signal.removeEventListener("abort", onClosed)
+		})
+	})
 }
 
 // Read through a call: TypeScript would keep `aborted` narrowed across the awaits in between.
@@ -61,6 +98,7 @@ function delay(ms: number): Promise<void> {
 // Everything the worker held goes with it: the engine's own worker and its thread pool are nested workers,
 // so their wasm memory and the WebGPU device are released too.
 function stopWorker(handle: WorkerHandle): void {
+	handle.closed.abort()
 	handle.remote[Comlink.releaseProxy]()
 	handle.worker.terminate()
 }
@@ -116,6 +154,10 @@ export class AssistantRuntime implements AssistantModel {
 	private unloading: Promise<void> | null = null
 	private redownload = false
 	private nextGeneration = 1
+	// WebGPU failed to load the model on this page: later loads go straight to the CPU path.
+	private gpuFailed = false
+	// Signed out: nothing starts again on this page.
+	private shutDown = false
 
 	constructor() {
 		this.state = { kind: "not-downloaded", model: this.info() }
@@ -157,6 +199,15 @@ export class AssistantRuntime implements AssistantModel {
 		this.setState({ kind, model: this.info() })
 	}
 
+	// Not on disk, or only part of it: what a stopped or failed download left, which Remove can still free.
+	private settleNotDownloaded(presentBytes = 0): void {
+		this.setState({ kind: "not-downloaded", model: this.info(), ...(presentBytes > 0 ? { partialBytes: presentBytes } : {}) })
+	}
+
+	private async presentBytes(): Promise<number> {
+		return (await inspectModel(this.manifest).catch(() => null))?.presentBytes ?? 0
+	}
+
 	private settleDownloaded(idleUnloaded = false): void {
 		this.setState({ kind: "downloaded", model: this.info(), idleUnloaded })
 	}
@@ -181,10 +232,12 @@ export class AssistantRuntime implements AssistantModel {
 		this.baseUrl = resolved.baseUrl
 		// At startup only whether the model can run at all, which threads alone decide on every engine this
 		// app runs in (it is cross-origin isolated); the GPU is asked only when there are none, or at load.
+		// Only a verdict a GPU could change asks for an adapter; a mobile or low-memory device is refused either way.
 		if (this.recommendation === null) {
 			const withoutGpu = recommendRuntime(await probeDevice({ gpu: false }))
 
-			this.recommendation = withoutGpu.supported ? withoutGpu : recommendRuntime(await probeDevice({ gpu: true }))
+			this.recommendation =
+				withoutGpu.supported || !withoutGpu.gpuCouldHelp ? withoutGpu : recommendRuntime(await probeDevice({ gpu: true }))
 		}
 
 		if (!this.recommendation.supported) {
@@ -204,7 +257,20 @@ export class AssistantRuntime implements AssistantModel {
 		if (inspection.complete) {
 			this.settleDownloaded()
 		} else {
-			this.settle("not-downloaded")
+			this.settleNotDownloaded(inspection.presentBytes)
+
+			if (inspection.presentBytes === 0) {
+				await this.checkOutdated()
+			}
+		}
+	}
+
+	// None of this build's model is on disk but another model is: a newer build in another tab replaced it.
+	// Downloading the old one again would remove that tab's model in turn, so this tab updates instead (a no-op
+	// while this build is still the deployed one).
+	private async checkOutdated(): Promise<void> {
+		if (await otherModelPresent(this.manifest.id).catch(() => false)) {
+			recoverIfNewerBuild()
 		}
 	}
 
@@ -265,15 +331,50 @@ export class AssistantRuntime implements AssistantModel {
 	private worker(): WorkerHandle {
 		if (this.handle === null) {
 			const worker = new AssistantWorker()
-
-			// A deploy that changed this worker removes its old file (appUpdate.ts).
-			worker.addEventListener("error", () => {
+			const handle: WorkerHandle = { worker, remote: Comlink.wrap<AssistantWorkerApi>(worker), closed: new AbortController() }
+			// A worker that failed to start (a deploy removed its old file, appUpdate.ts) or threw at the top level
+			// answers nothing more: whatever it was doing fails now, rather than waiting forever with the lock held.
+			const failed = () => {
 				recoverIfNewerBuild()
-			})
-			this.handle = { worker, remote: Comlink.wrap<AssistantWorkerApi>(worker) }
+				this.workerLost(handle)
+			}
+
+			worker.addEventListener("error", failed)
+			worker.addEventListener("messageerror", failed)
+			this.handle = handle
 		}
 
 		return this.handle
+	}
+
+	// The worker died, crashed its engine or got stuck: a pending call rejects (its own catch settles the state);
+	// a loaded model is gone, and the next request loads it again from disk.
+	private workerLost(handle: WorkerHandle): void {
+		if (this.handle !== handle) {
+			return
+		}
+
+		this.stopWorker()
+
+		if (this.state.kind === "ready") {
+			this.tokenList = []
+			clearTimeout(this.idleTimer)
+			this.idleTimer = undefined
+			this.unlock()
+			this.settleDownloaded()
+			this.syncVisibilityWatch()
+		}
+	}
+
+	// Signing out: the worker and its memory go now, the lock with it, and nothing starts again on this page.
+	shutdown(): void {
+		this.shutDown = true
+		this.stopWorker()
+		this.unlock()
+		clearTimeout(this.idleTimer)
+		this.idleTimer = undefined
+		this.tokenList = []
+		this.watchVisibility(false)
 	}
 
 	private stopWorker(): void {
@@ -417,7 +518,7 @@ export class AssistantRuntime implements AssistantModel {
 		// browser may evict the 2.7 GB under storage pressure; with or without, the download proceeds.
 		void navigator.storage.persist().catch(() => false)
 
-		if (this.downloading !== null || this.loading !== null || this.unloading !== null || this.state.kind === "ready") {
+		if (this.shutDown || this.downloading !== null || this.loading !== null || this.unloading !== null || this.state.kind === "ready") {
 			return
 		}
 
@@ -454,21 +555,25 @@ export class AssistantRuntime implements AssistantModel {
 				}
 
 				const sizeBytes = manifestBytes(this.manifest)
+				const handle = this.worker()
 
 				this.setState({ kind: "downloading", model: this.info(), receivedBytes: before.presentBytes, waiting: false })
-				await this.worker().remote.download(
-					this.manifest,
-					this.baseUrl,
-					Comlink.proxy(({ receivedBytes, waiting }: ModelDownloadProgress) => {
-						if (this.state.kind === "downloading") {
-							this.setState({
-								kind: "downloading",
-								model: this.info(),
-								receivedBytes: Math.min(sizeBytes, Math.max(0, receivedBytes)),
-								waiting
-							})
-						}
-					})
+				await untilClosed(
+					handle,
+					handle.remote.download(
+						this.manifest,
+						this.baseUrl,
+						Comlink.proxy(({ receivedBytes, waiting }: ModelDownloadProgress) => {
+							if (this.state.kind === "downloading") {
+								this.setState({
+									kind: "downloading",
+									model: this.info(),
+									receivedBytes: Math.min(sizeBytes, Math.max(0, receivedBytes)),
+									waiting
+								})
+							}
+						})
+					)
 				)
 
 				if (this.state.kind === "downloading" && (this.state.receivedBytes < sizeBytes || this.state.waiting)) {
@@ -486,14 +591,17 @@ export class AssistantRuntime implements AssistantModel {
 
 			const name = errorName(e)
 
+			const partial = await this.presentBytes()
+
 			if (name === "AbortError") {
-				this.settle("not-downloaded")
+				this.settleNotDownloaded(partial)
 			} else {
 				log.error("assistant", "model download failed", e)
 				this.setState({
 					kind: "error",
 					error: name === "ModelDownloadError:storage-full" || name === "QuotaExceededError" ? "storage-full" : "download-failed",
-					model: this.info()
+					model: this.info(),
+					...(partial > 0 ? { partialBytes: partial } : {})
 				})
 			}
 
@@ -537,14 +645,62 @@ export class AssistantRuntime implements AssistantModel {
 		return this.loading
 	}
 
+	private async loadIn(recommendation: Extract<RuntimeRecommendation, { supported: true }>): Promise<readonly string[]> {
+		const handle = this.worker()
+		const { specialTokens } = await untilClosed(
+			handle,
+			handle.remote.load(
+				this.manifest,
+				{
+					backend: recommendation.backend,
+					threads: recommendation.threads,
+					contextTokens: ASSISTANT_CONTEXT_TOKENS
+				},
+				Comlink.proxy(() => {
+					if (this.state.kind === "loading") {
+						this.setState({ kind: "loading", model: this.info(), verifying: true })
+					}
+				})
+			)
+		)
+
+		return specialTokens
+	}
+
+	// WebGPU first; when the GPU cannot take the model (its memory, its driver), the CPU path in a fresh
+	// worker, once, and from then on for this page.
+	private async loadWithFallback(recommendation: Extract<RuntimeRecommendation, { supported: true }>): Promise<readonly string[]> {
+		try {
+			return await this.loadIn(recommendation)
+		} catch (e) {
+			const name = errorName(e)
+
+			if (recommendation.backend !== "webgpu" || name === "ModelLoadError:missing" || name === WORKER_CLOSED) {
+				throw e
+			}
+
+			const cpu = recommendRuntime(await probeDevice({ gpu: false }))
+
+			if (!cpu.supported) {
+				throw e
+			}
+
+			log.warn("assistant", "WebGPU load failed, trying the CPU path", e)
+			this.gpuFailed = true
+			this.stopWorker()
+
+			return this.loadIn(cpu)
+		}
+	}
+
 	private async runLoad(): Promise<void> {
 		// Only a model on disk, or one whose load failed: nothing to load mid-download or in another tab's hands.
-		if (this.recommendation?.supported !== true || (this.state.kind !== "downloaded" && this.state.kind !== "error")) {
+		if (this.shutDown || this.recommendation?.supported !== true || (this.state.kind !== "downloaded" && this.state.kind !== "error")) {
 			return
 		}
 
-		// The backend: WebGPU when the adapter is up to it.
-		const recommendation = recommendRuntime(await probeDevice({ gpu: true }))
+		// The backend: WebGPU when the adapter is up to it, unless it already failed here.
+		const recommendation = recommendRuntime(await probeDevice({ gpu: !this.gpuFailed }))
 
 		if (!recommendation.supported) {
 			this.setState({ kind: "unavailable", reason: recommendation.reason, model: this.info() })
@@ -561,21 +717,7 @@ export class AssistantRuntime implements AssistantModel {
 		this.setState({ kind: "loading", model: this.info(), verifying: false })
 
 		try {
-			const { specialTokens } = await this.worker().remote.load(
-				this.manifest,
-				{
-					backend: recommendation.backend,
-					threads: recommendation.threads,
-					contextTokens: ASSISTANT_CONTEXT_TOKENS
-				},
-				Comlink.proxy(() => {
-					if (this.state.kind === "loading") {
-						this.setState({ kind: "loading", model: this.info(), verifying: true })
-					}
-				})
-			)
-
-			this.tokenList = specialTokens
+			this.tokenList = await this.loadWithFallback(recommendation)
 			this.settle("ready")
 			this.touch()
 			this.syncVisibilityWatch()
@@ -593,12 +735,16 @@ export class AssistantRuntime implements AssistantModel {
 				if (inspection.complete) {
 					this.settleDownloaded()
 				} else {
-					this.settle("not-downloaded")
+					this.settleNotDownloaded(inspection.presentBytes)
 				}
 
 				// Some shards are gone or were damaged, the rest are still verified: the user opted in already, so
 				// only the missing ones are fetched again, right after this load has wound down.
 				this.redownload = !inspection.complete && inspection.verifiedBytes > 0
+
+				if (inspection.presentBytes === 0) {
+					await this.checkOutdated()
+				}
 			} else {
 				this.setState({
 					kind: "error",
@@ -721,8 +867,14 @@ export class AssistantRuntime implements AssistantModel {
 		}
 
 		const id = this.nextGeneration++
+		let stuck: ReturnType<typeof setTimeout> | undefined
 		const cancel = () => {
-			void handle.remote.cancel(id)
+			void handle.remote.cancel(id).catch(() => undefined)
+			// The worker answers a stop only between engine steps; one that never answers is replaced.
+			stuck = setTimeout(() => {
+				log.warn("assistant", "a stopped generation did not wind down")
+				this.workerLost(handle)
+			}, STOP_WATCHDOG_MS)
 		}
 
 		// One port for every kind of update, opened only when someone listens. Updates travel on that port and
@@ -751,9 +903,36 @@ export class AssistantRuntime implements AssistantModel {
 
 		signal.addEventListener("abort", cancel)
 
+		const call = untilClosed(handle, handle.remote.generate(id, request, onUpdate))
+
+		// Stop ends the turn at once; the worker winds the generation down on its own, and runs the next one only
+		// after it (the worker serializes them).
+		void call.then(
+			() => {
+				clearTimeout(stuck)
+			},
+			() => {
+				clearTimeout(stuck)
+			}
+		)
+
 		try {
-			return await handle.remote.generate(id, request, onUpdate)
+			return await new Promise<AssistantGenerateResult>((resolve, reject) => {
+				const onAbort = () => {
+					reject(new AssistantAbortError())
+				}
+
+				signal.addEventListener("abort", onAbort, { once: true })
+				void call.then(resolve, reject).finally(() => {
+					signal.removeEventListener("abort", onAbort)
+				})
+			})
 		} catch (e) {
+			if (errorName(e) === ENGINE_CRASHED) {
+				log.error("assistant", "the engine crashed", e)
+				this.workerLost(handle)
+			}
+
 			throw errorName(e) === "AbortError" || isAborted(signal) ? new AssistantAbortError() : e
 		} finally {
 			settled = true
