@@ -3,6 +3,7 @@ import type {
 	Client,
 	CacheSearch,
 	CacheSearchConfig,
+	CacheSearchItemType,
 	CacheSearchSnapshot,
 	CacheSearchWindow,
 	CacheStatusMessage,
@@ -97,8 +98,8 @@ function includesRoot(roots: readonly string[], candidate: string): boolean {
 	return roots.includes(candidate)
 }
 
-function buildConfig(name: string): CacheSearchConfig {
-	return { name: trimmedOrUndefined(name), itemType: "all", recursive: true, caseSensitive: false }
+function buildConfig(name: string, itemType: CacheSearchItemType = "all"): CacheSearchConfig {
+	return { name: trimmedOrUndefined(name), itemType, recursive: true, caseSensitive: false }
 }
 
 function toSnapshotDTO(snapshot: CacheSearchSnapshot): SearchSnapshotDTO {
@@ -144,7 +145,10 @@ export function createSearchEngine() {
 	// (no full reload) would have to reset this explicitly, or the new session silently inherits the
 	// previous account's cache configuration.
 	let configured = false
-	let active: { search: CacheSearch; searchWindow: CacheSearchWindow; token: OpenToken; transient: boolean } | null = null
+	// `name`: what the handle searches for now; an empty one is a box the user cleared.
+	let active: { search: CacheSearch; searchWindow: CacheSearchWindow; token: OpenToken; transient: boolean; name: string } | null = null
+	// query()'s tokens by the caller's id, so its caller can stop it.
+	const queryTokens = new Map<number, OpenToken>()
 	let currentToken: OpenToken | null = null
 	let activeRootUuid: string | null = null
 	let activePush: ((p: SearchPush) => void) | null = null
@@ -228,7 +232,7 @@ export function createSearchEngine() {
 	// reopens and supersedes it instead of retuning a search that is not theirs.
 	async function openWith(
 		client: Client,
-		{ rootUuid, name }: { rootUuid: string | null; name: string },
+		{ rootUuid, name, itemType = "all" }: { rootUuid: string | null; name: string; itemType?: CacheSearchItemType },
 		push: (p: SearchPush) => void,
 		token: OpenToken,
 		transient: boolean
@@ -278,7 +282,7 @@ export function createSearchEngine() {
 		let search: CacheSearch
 
 		try {
-			search = await client.createSearch(resolvedRoot, buildConfig(name))
+			search = await client.createSearch(resolvedRoot, buildConfig(name, itemType))
 		} catch (e) {
 			await rollBackFailedOpen(token)
 
@@ -341,7 +345,7 @@ export function createSearchEngine() {
 		// this reopen on.
 		const previous = active
 
-		active = { search, searchWindow, token, transient }
+		active = { search, searchWindow, token, transient, name }
 
 		if (previous) {
 			void safeClose(previous.search, previous.searchWindow)
@@ -397,16 +401,51 @@ export function createSearchEngine() {
 	// close() supersedes it. It waits until the results have been still for `settleMs` outside a
 	// resync, at most `capMs`, then closes its handle. `settled: false` means the result set may still
 	// have been growing.
+	// An open search whose box the user cleared holds the engine for nothing: a query may take it, and the
+	// user's next keystroke reopens (setName refuses a handle that is not theirs).
+	function userSearchIdle(): boolean {
+		return active !== null && !active.transient && currentToken === active.token && active.name.trim() === ""
+	}
+
 	async function query(
 		client: Client,
-		params: { rootUuid: string | null; name: string },
-		{ settleMs, capMs }: { settleMs: number; capMs: number }
+		params: { rootUuid: string | null; name: string; itemType?: CacheSearchItemType },
+		{ settleMs, capMs, id }: { settleMs: number; capMs: number; id?: number }
 	): Promise<SearchQueryResult> {
-		if (active !== null || currentToken !== null) {
+		if ((active !== null || currentToken !== null) && !userSearchIdle()) {
 			return { status: "busy" }
 		}
 
 		const token: OpenToken = { cancelled: false }
+
+		if (id !== undefined) {
+			queryTokens.set(id, token)
+		}
+
+		try {
+			return await runQuery(client, params, { settleMs, capMs }, token)
+		} finally {
+			if (id !== undefined) {
+				queryTokens.delete(id)
+			}
+		}
+	}
+
+	// Stops the query its caller started under `id`: it answers at once with what it has.
+	function cancelQuery(id: number): void {
+		const token = queryTokens.get(id)
+
+		if (token !== undefined) {
+			cancelToken(token)
+		}
+	}
+
+	async function runQuery(
+		client: Client,
+		params: { rootUuid: string | null; name: string; itemType?: CacheSearchItemType },
+		{ settleMs, capMs }: { settleMs: number; capMs: number },
+		token: OpenToken
+	): Promise<SearchQueryResult> {
 		let latest: SearchSnapshotDTO = { hits: [], total: 0n, live: true }
 		let resyncing = false
 		let onChange: (() => void) | null = null
@@ -492,6 +531,7 @@ export function createSearchEngine() {
 
 		try {
 			await active.search.setConfig(buildConfig(name))
+			active.name = name
 
 			return true
 		} catch (e) {
@@ -522,5 +562,5 @@ export function createSearchEngine() {
 		}
 	}
 
-	return { open, query, setName, close }
+	return { open, query, cancelQuery, setName, close }
 }

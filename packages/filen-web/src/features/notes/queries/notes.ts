@@ -1,5 +1,6 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query"
 import { sdkApi } from "@/lib/sdk/client"
+import { currentSocketEpoch, socketLiveSince } from "@/lib/sdk/socketSession"
 import { queryClient } from "@/queries/client"
 import { cachedQuery, patchQuery, replaceOrAppend } from "@/queries/patch"
 import type { Note } from "@filen/sdk-rs"
@@ -14,7 +15,29 @@ export const NOTES_QUERY_KEY = ["notes", "list"] as const
 // wrapper below is a one-line pass-through no node-environment test can render (no DOM — see
 // vitest.config.ts), so this is exported and unit-tested against a mocked sdkApi instead.
 export async function fetchNotes(): Promise<Note[]> {
-	return sdkApi.listNotes()
+	const epoch = currentSocketEpoch()
+	const notes = await sdkApi.listNotes()
+
+	listReadEpoch = epoch !== null && socketLiveSince(epoch) ? epoch : null
+
+	return notes
+}
+
+// The socket session the latest list read ran under. A socket patch can create the cache without a read
+// (notesQueryUpdate's `prev ?? []`), the cache is restored from disk at boot, and events missed while
+// disconnected only reach it with the next read: the cache is the current list only while that session
+// lasts.
+let listReadEpoch: number | null = null
+
+// The list for a reader outside the sidebar (the assistant): the cache while it is current, else one read.
+export async function notesQueryRead(): Promise<Note[]> {
+	const cached = notesQueryGet()
+
+	if (cached !== undefined && listReadEpoch !== null && socketLiveSince(listReadEpoch)) {
+		return cached
+	}
+
+	return queryClient.query({ queryKey: NOTES_QUERY_KEY, queryFn: fetchNotes, staleTime: 0 })
 }
 
 export function useNotes(options?: { refetchOnMount?: boolean }): UseQueryResult<Note[]> {

@@ -18,6 +18,13 @@ export class AssistantToolError extends Error {
 	}
 }
 
+// After an await that preceded a side effect (a navigation, playback): a stopped turn does nothing more.
+export function throwIfStopped(scope: { signal: { readonly aborted: boolean } | undefined }): void {
+	if (scope.signal?.aborted === true) {
+		throw new AssistantToolError("Stopped")
+	}
+}
+
 // Every string in a result, sanitized: values mix the app's own words with names and text other people
 // wrote, and sanitizing the app's own words changes nothing.
 export function sanitizeStrings(value: unknown, specialTokens: readonly string[]): unknown {
@@ -47,20 +54,84 @@ export function clipText(text: string, max: number): { text: string; truncated: 
 	return { text: text.slice(0, end), truncated: true }
 }
 
+// The user's own calendar date, as the "Today" line in the system prompt counts days.
 export function isoDate(timestamp: bigint | number): string {
 	const date = new Date(Number(timestamp))
 
-	return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10)
+	if (Number.isNaN(date.getTime())) {
+		return ""
+	}
+
+	const pad = (value: number) => String(value).padStart(2, "0")
+
+	return `${String(date.getFullYear()).padStart(4, "0")}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
 export function normalizeText(value: string): string {
 	return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()
 }
 
+const UNSPACED =
+	/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u
+
+const KANA_PARTICLE = /^[\p{Script=Hiragana}]$/u
+
+// Created once: a segmenter loads the locale's word data.
+let segmenter: Intl.Segmenter | null = null
+
+// The words of a query, in the case and form the user wrote them: scripts written without spaces
+// ("2024年の請求書", "報告書をArchiveに") are split into words, a change of script splits too, and a lone
+// kana particle is dropped.
+function queryWords(value: string): string[] {
+	const text = value.normalize("NFC").toLowerCase()
+
+	if (!UNSPACED.test(text)) {
+		return text.split(/[^\p{L}\p{M}\p{N}]+/u).filter(word => word.length > 0)
+	}
+
+	segmenter ??= new Intl.Segmenter(undefined, { granularity: "word" })
+
+	return [...segmenter.segment(text)]
+		.filter(segment => segment.isWordLike === true)
+		.flatMap(segment =>
+			segment.segment.split(
+				/(?<=\p{Script=Latin}|\p{N})(?=[^\p{Script=Latin}\p{N}])|(?<=[^\p{Script=Latin}\p{N}])(?=\p{Script=Latin}|\p{N})/u
+			)
+		)
+		.filter(word => word.length > 0 && !KANA_PARTICLE.test(word))
+}
+
+// For the app's own matching, where both sides are folded the same way (accents and marks removed).
 export function searchTokens(value: string): string[] {
-	return normalizeText(value)
-		.split(/[^\p{L}\p{N}]+/u)
+	return queryWords(value)
+		.map(normalizeText)
 		.filter(token => token.length > 0)
+}
+
+// For a matcher that compares names as written (the SDK's search engine: NFC, case-folded, nothing else
+// folded): accents, Devanagari vowel signs and voiced kana stay.
+export function rawSearchTokens(value: string): string[] {
+	return queryWords(value)
+}
+
+// The one word a substring engine is asked for: the one likeliest to narrow the hits, a word over a number,
+// the longest otherwise, as its singular stem so it also finds the other form ("invoices" asks for
+// "invoice").
+export function engineToken(tokens: readonly string[]): string | null {
+	const ranked = tokens
+		.filter(token => token.length > 0)
+		.toSorted((a, b) => Number(/^\p{N}+$/u.test(a)) - Number(/^\p{N}+$/u.test(b)) || b.length - a.length)
+	const token = ranked[0]
+
+	if (token === undefined) {
+		return null
+	}
+
+	if (token.length > 4 && token.endsWith("es")) {
+		return token.slice(0, -2)
+	}
+
+	return token.length > 3 && token.endsWith("s") && !token.endsWith("ss") ? token.slice(0, -1) : token
 }
 
 // "invoices" finds "Invoice_2024.pdf": names are matched word by word with crude plural folding.

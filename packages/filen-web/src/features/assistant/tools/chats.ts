@@ -1,4 +1,5 @@
 import type { Chat } from "@filen/sdk-rs"
+import { sanitizeUntrustedText } from "@filen/shared/assistant"
 import { chatsQueryRead } from "@/features/chats/queries/chats"
 import { chatMessagesQueryRead } from "@/features/chats/queries/chatMessages"
 import { chatsWithoutBlockedOneOnOne, filterChats } from "@/features/chats/components/chatsSidebar.logic"
@@ -8,11 +9,12 @@ import { isOverLimit } from "@/features/chats/lib/composer.logic"
 import { loadDraft } from "@/features/chats/lib/drafts"
 import { useChatComposerStore } from "@/features/chats/store/useChatComposer"
 import { i18n } from "@/lib/i18n"
-import { assistantRouter } from "@/features/assistant/tools/navigation"
+import { assistantRouter, navigateChecked } from "@/features/assistant/tools/navigation"
 import {
 	blockedUsers,
 	chatName,
 	currentUserId,
+	entityVisible,
 	freshChat,
 	optionalString,
 	participantName,
@@ -21,7 +23,7 @@ import {
 	type ToolAdapter,
 	type ToolScope
 } from "@/features/assistant/tools/entities"
-import { AssistantToolError, clipText, isoDate, searchTokens } from "@/features/assistant/tools/format"
+import { AssistantToolError, clipText, isoDate, matchScore, searchTokens } from "@/features/assistant/tools/format"
 
 const LIST_LIMIT = 30
 const DEFAULT_MESSAGES = 20
@@ -38,6 +40,10 @@ async function resolveChat(scope: ToolScope, handle: string): Promise<Chat> {
 
 	const chat = freshChat(entity.chat)
 
+	if (!entityVisible({ kind: "chat", chat })) {
+		throw new AssistantToolError("This chat is not available")
+	}
+
 	if (isChatUndecryptable(chat)) {
 		throw new AssistantToolError("This chat cannot be decrypted")
 	}
@@ -45,17 +51,25 @@ async function resolveChat(scope: ToolScope, handle: string): Promise<Chat> {
 	return chat
 }
 
-// The sidebar's own list and search filter, word by word.
+// The sidebar's own list, in its order; a query matches the chat's name and its participants' names word by
+// word, both sides folded the same way ("joao" finds "João"), the chats matching every word first.
 export const listChatsTool: ToolAdapter = async (input, scope) => {
 	const userId = currentUserId()
 	const blocked = blockedUsers()
 	const visible = chatsWithoutBlockedOneOnOne(await chatsQueryRead(), userId, blocked)
 	const tokens = searchTokens(optionalString(input, "query") ?? "")
-	const soloFallback = i18n.t("chats:chatJustYou")
-	const listed = filterChats(visible, "", userId, soloFallback, blocked)
-	const matched =
-		tokens.length === 0 ? null : new Set(tokens.flatMap(token => filterChats(visible, token, userId, soloFallback, blocked)))
-	const chats = matched === null ? listed : listed.filter(chat => matched.has(chat))
+	const listed = filterChats(visible, "", userId, i18n.t("chats:chatJustYou"), blocked)
+	const chats =
+		tokens.length === 0
+			? listed
+			: listed
+					.map(chat => ({
+						chat,
+						score: matchScore([chatName(chat), ...otherParticipants(chat, userId).map(participantName)].join(" "), tokens)
+					}))
+					.filter(({ score }) => score > 0)
+					.toSorted((a, b) => b.score - a.score)
+					.map(({ chat }) => chat)
 
 	return {
 		value: {
@@ -126,9 +140,45 @@ export const openChatTool: ToolAdapter = async (input, scope) => {
 		throw new AssistantToolError("The app cannot navigate right now")
 	}
 
-	await router.navigate({ to: "/chats/$uuid", params: { uuid: chat.uuid } })
+	await navigateChecked({
+		router,
+		navigate: () => router.navigate({ to: "/chats/$uuid", params: { uuid: chat.uuid } }),
+		landed: pathname => pathname === `/chats/${chat.uuid}`,
+		signal: scope.signal
+	})
 
 	return { value: { opened: chatName(chat) }, uiEffect: { type: "navigated", pathname: `/chats/${chat.uuid}` } }
+}
+
+// The text a draft puts into the composer: what the card shows and what lands, with invisible and bidi
+// characters and template control tokens removed, so the card cannot show one message and send another.
+export function draftText(text: string): string {
+	return sanitizeUntrustedText(text)
+}
+
+// Why a draft cannot land, checked before the card shows (and again after the click, for a race): the
+// user is never asked to confirm a draft that would then fail.
+export async function draftProblem({ chat, text }: { chat: Chat; text: string }): Promise<string | null> {
+	if (text.trim().length === 0) {
+		return "The message is empty"
+	}
+
+	if (isOverLimit(text)) {
+		return "The message is too long"
+	}
+
+	const entry = useChatComposerStore.getState().entries[chat.uuid]
+	const saved = entry === undefined ? await loadDraft(chat.uuid) : ""
+
+	if ((entry !== undefined && (entry.draft.trim().length > 0 || entry.mode.kind !== "new")) || saved.trim().length > 0) {
+		return `The message box of "${chatName(chat)}" already holds unsent text; the user has to clear it first`
+	}
+
+	return null
+}
+
+export async function draftChatProblem(scope: ToolScope, input: Record<string, unknown>): Promise<string | null> {
+	return draftProblem({ chat: await resolveChat(scope, requiredString(input, "chat")), text: draftText(requiredString(input, "text")) })
 }
 
 // Runs only after the user confirmed the draft. The text goes into the composer exactly as the user's
@@ -136,31 +186,35 @@ export const openChatTool: ToolAdapter = async (input, scope) => {
 // Text the user already left in that composer is never overwritten.
 export const draftChatMessageTool: ToolAdapter = async (input, scope) => {
 	const chat = await resolveChat(scope, requiredString(input, "chat"))
-	const text = requiredString(input, "text")
+	const text = draftText(requiredString(input, "text"))
 	const name = chatName(chat)
 	const router = assistantRouter()
-
-	if (text.trim().length === 0) {
-		throw new AssistantToolError("The message is empty", { invalid: true })
-	}
-
-	if (isOverLimit(text)) {
-		throw new AssistantToolError("The message is too long")
-	}
 
 	if (router === null) {
 		throw new AssistantToolError("The app cannot navigate right now")
 	}
 
-	const entry = useChatComposerStore.getState().entries[chat.uuid]
-	const saved = entry === undefined ? await loadDraft(chat.uuid) : ""
+	const problem = await draftProblem({ chat, text })
 
-	if ((entry !== undefined && (entry.draft.trim().length > 0 || entry.mode.kind !== "new")) || saved.trim().length > 0) {
-		throw new AssistantToolError(`The message box of "${name}" already holds unsent text; the user has to clear it first`)
+	if (problem !== null) {
+		throw new AssistantToolError(problem)
+	}
+
+	// The draft is written only once the thread is open: a navigation a dialog refused leaves no draft behind.
+	await navigateChecked({
+		router,
+		navigate: () => router.navigate({ to: "/chats/$uuid", params: { uuid: chat.uuid } }),
+		landed: pathname => pathname === `/chats/${chat.uuid}`,
+		signal: scope.signal
+	})
+
+	const raced = await draftProblem({ chat, text })
+
+	if (raced !== null) {
+		throw new AssistantToolError(raced)
 	}
 
 	useChatComposerStore.getState().setDraft(chat.uuid, text)
-	await router.navigate({ to: "/chats/$uuid", params: { uuid: chat.uuid } })
 
 	return {
 		value: { drafted: true, chat: name, note: "The message is in the input field; the user sends it." },

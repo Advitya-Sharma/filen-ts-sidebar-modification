@@ -56,7 +56,7 @@ describe("AssistantHandleRegistry", () => {
 		expect(registry.get("f1")?.entity).toMatchObject({ kind: "drive", path: "/Docs/a.txt" })
 	})
 
-	it("resolves a handle with stray whitespace and forgets everything on clear", () => {
+	it("resolves a handle with stray whitespace and forgets everything on clear, never reusing a number", () => {
 		const registry = new AssistantHandleRegistry()
 
 		registry.register({ kind: "note", note }, "Plan")
@@ -67,6 +67,18 @@ describe("AssistantHandleRegistry", () => {
 
 		expect(registry.get("n1")).toBeUndefined()
 		expect(registry.get(ROOT_HANDLE)).toBeDefined()
-		expect(registry.register({ kind: "note", note }, "Plan").handle).toBe("n1")
+		// A reply that named n1 must not come to mean another item.
+		expect(registry.register({ kind: "note", note }, "Plan").handle).toBe("n2")
+	})
+
+	it("numbers past the handles a resumed conversation's texts name", () => {
+		const registry = new AssistantHandleRegistry()
+
+		registry.clear(["Open the second one", "Found Invoice.pdf (f3) and Docs (d7); notes n12."])
+
+		expect(registry.get("f3")).toBeUndefined()
+		expect(registry.register({ kind: "drive", item: file }, "a.txt").handle).toBe("f4")
+		expect(registry.register({ kind: "drive", item: directory }, "Docs").handle).toBe("d8")
+		expect(registry.register({ kind: "note", note }, "Plan").handle).toBe("n13")
 	})
 })

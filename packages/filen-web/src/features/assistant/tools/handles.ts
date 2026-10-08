@@ -12,7 +12,8 @@ export type AssistantEntity =
 	| { kind: "note"; note: Note }
 	| { kind: "chat"; chat: Chat }
 	| { kind: "playlist"; playlist: Playlist }
-	| { kind: "track"; track: QueueTrack }
+	// `playlist`: the playlist it was listed from, which a play queues from this track on.
+	| { kind: "track"; track: QueueTrack; playlist?: Playlist }
 
 export type AssistantEntityKind = AssistantEntity["kind"]
 
@@ -64,6 +65,7 @@ function handlePrefix(entity: AssistantEntity): string {
 export class AssistantHandleRegistry {
 	private readonly byHandle = new Map<string, AssistantHandleEntry>()
 	private readonly byKey = new Map<string, string>()
+	// Per prefix, never reset on this page: a handle a reply named once never names another item.
 	private readonly counters = new Map<string, number>()
 
 	constructor() {
@@ -107,10 +109,21 @@ export class AssistantHandleRegistry {
 		return [...this.byHandle.values()]
 	}
 
-	clear(): void {
+	// A new conversation. `texts` are a resumed conversation's messages and replies: the handles they name
+	// were handed out on an earlier page, so numbering continues past them, and such a stale handle reads as
+	// unknown (the model looks the item up again) instead of naming whatever got its number here.
+	clear(texts: readonly string[] = []): void {
 		this.byHandle.clear()
 		this.byKey.clear()
-		this.counters.clear()
+
+		for (const text of texts) {
+			for (const [, prefix, number] of text.matchAll(/\b([dfncpt])(\d{1,9})\b/g)) {
+				if (prefix !== undefined && number !== undefined) {
+					this.counters.set(prefix, Math.max(this.counters.get(prefix) ?? 0, Number(number)))
+				}
+			}
+		}
+
 		// The drive root is always "d0", as the model is told.
 		this.byKey.set("root", ROOT_HANDLE)
 		this.byHandle.set(ROOT_HANDLE, { ref: { handle: ROOT_HANDLE, name: ROOT_NAME }, entity: { kind: "root" } })

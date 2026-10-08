@@ -1,6 +1,5 @@
 import type { Note } from "@filen/sdk-rs"
-import { queryClient } from "@/queries/client"
-import { fetchNotes, NOTES_QUERY_KEY } from "@/features/notes/queries/notes"
+import { notesQueryRead } from "@/features/notes/queries/notes"
 import { noteContentQueryRead } from "@/features/notes/queries/noteContent"
 import { isNoteUndecryptable, sortNotes, tagDisplayName } from "@/features/notes/lib/sort"
 import { filterNotesByBlockedOwner } from "@/features/notes/components/notesSidebar.logic"
@@ -8,9 +7,10 @@ import { selectedNoteUuidFromPath } from "@/features/notes/lib/route"
 import { noteIsEditing, useNotesInflightStore } from "@/features/notes/store/useNotesInflight"
 import { checklistToMarkdown } from "@/features/notes/lib/export.logic"
 import { tabNoteContent } from "@/features/notes/lib/tabEditors"
-import { assistantRouter } from "@/features/assistant/tools/navigation"
+import { assistantRouter, navigateChecked } from "@/features/assistant/tools/navigation"
 import {
 	blockedUsers,
+	entityVisible,
 	freshNote,
 	noteTitle,
 	optionalString,
@@ -19,15 +19,10 @@ import {
 	type ToolAdapter,
 	type ToolScope
 } from "@/features/assistant/tools/entities"
-import { AssistantToolError, clipText, isoDate, normalizeText, searchTokens, tokenMatches } from "@/features/assistant/tools/format"
+import { AssistantToolError, clipText, isoDate, matchScore, searchTokens } from "@/features/assistant/tools/format"
 
 const LIST_LIMIT = 40
 export const NOTE_MAX_CHARS = 4_000
-
-// The list the notes sidebar renders from, cached first: socket events keep it current.
-function readNotes(): Promise<Note[]> {
-	return queryClient.query({ queryKey: NOTES_QUERY_KEY, queryFn: fetchNotes, staleTime: "static" })
-}
 
 async function resolveNote(scope: ToolScope, handle: string): Promise<Note> {
 	const entity = await resolveHandle(scope, handle, ["note"])
@@ -37,6 +32,10 @@ async function resolveNote(scope: ToolScope, handle: string): Promise<Note> {
 	}
 
 	const note = freshNote(entity.note)
+
+	if (!entityVisible({ kind: "note", note })) {
+		throw new AssistantToolError("This note is not available")
+	}
 
 	if (note.trash) {
 		throw new AssistantToolError(`"${noteTitle(note)}" is in the trash`)
@@ -70,19 +69,15 @@ function plainContent(note: Note, content: string): string {
 
 export const listNotesTool: ToolAdapter = async (input, scope) => {
 	const tokens = searchTokens(optionalString(input, "query") ?? "")
-	const notes = sortNotes(filterNotesByBlockedOwner(await readNotes(), blockedUsers())).filter(note => {
-		if (note.trash) {
-			return false
-		}
-
-		if (tokens.length === 0) {
-			return true
-		}
-
-		const haystack = normalizeText(`${noteTitle(note)} ${note.tags.map(tagDisplayName).join(" ")}`)
-
-		return tokens.some(token => tokenMatches(haystack, token))
-	})
+	const scored = sortNotes(filterNotesByBlockedOwner(await notesQueryRead(), blockedUsers()))
+		.filter(note => !note.trash)
+		.map(note => ({
+			note,
+			score: tokens.length === 0 ? 0 : matchScore(`${noteTitle(note)} ${note.tags.map(tagDisplayName).join(" ")}`, tokens)
+		}))
+		.filter(({ score }) => tokens.length === 0 || score > 0)
+	// Notes matching every word first, in the sidebar's order; then the rest by how many words they match.
+	const notes = scored.toSorted((a, b) => b.score - a.score).map(({ note }) => note)
 
 	return {
 		value: {
@@ -145,7 +140,12 @@ export const openNoteTool: ToolAdapter = async (input, scope) => {
 		throw new AssistantToolError("The app cannot navigate right now")
 	}
 
-	await router.navigate({ to: "/notes/$uuid", params: { uuid: note.uuid } })
+	await navigateChecked({
+		router,
+		navigate: () => router.navigate({ to: "/notes/$uuid", params: { uuid: note.uuid } }),
+		landed: pathname => pathname === `/notes/${note.uuid}`,
+		signal: scope.signal
+	})
 
 	return { value: { opened: noteTitle(note) }, uiEffect: { type: "navigated", pathname: `/notes/${note.uuid}` } }
 }

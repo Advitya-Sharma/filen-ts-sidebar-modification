@@ -1,5 +1,6 @@
 import { toast } from "sonner"
 import type { Playlist } from "@filen/shared"
+import { MAX_ARRAY_ITEMS } from "@filen/shared/assistant"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 import { playlistsQueryRead } from "@/features/audio/queries/playlists"
 import { playlistFileTrack } from "@/features/audio/lib/playlists"
@@ -9,7 +10,7 @@ import { deriveAudioHandoff, isAudioItem } from "@/features/audio/lib/handoff"
 import { useAudioStore } from "@/features/audio/store/useAudioStore"
 import { cachedListing } from "@/features/drive/queries/drive"
 import type { DriveItem } from "@/features/drive/lib/item"
-import { assistantRouter } from "@/features/assistant/tools/navigation"
+import { assistantRouter, navigateChecked } from "@/features/assistant/tools/navigation"
 import {
 	driveName,
 	freshDriveItem,
@@ -19,20 +20,21 @@ import {
 	rootDirUuid,
 	type ToolAdapter
 } from "@/features/assistant/tools/entities"
-import { AssistantToolError } from "@/features/assistant/tools/format"
+import { AssistantToolError, throwIfStopped } from "@/features/assistant/tools/format"
 
-const TRACK_LIMIT = 50
+const TRACK_LIMIT = MAX_ARRAY_ITEMS
 
 export const listPlaylistsTool: ToolAdapter = async (_input, scope) => {
 	const playlists = (await playlistsQueryRead()).flatMap(entry => (entry.status === "ok" ? [entry.playlist] : []))
 
 	return {
 		value: {
-			playlists: playlists.map(playlist => ({
+			playlists: playlists.slice(0, MAX_ARRAY_ITEMS).map(playlist => ({
 				handle: scope.show({ kind: "playlist", playlist }, playlist.name),
 				name: playlist.name,
 				tracks: playlist.files.length
-			}))
+			})),
+			...(playlists.length > MAX_ARRAY_ITEMS ? { more: playlists.length - MAX_ARRAY_ITEMS } : {})
 		}
 	}
 }
@@ -51,16 +53,21 @@ export const openPlaylistTool: ToolAdapter = async (input, scope) => {
 
 	const playlist = freshPlaylist(entity.playlist)
 
-	await router.navigate({ to: "/playlists", search: { playlist: playlist.uuid } })
+	await navigateChecked({
+		router,
+		navigate: () => router.navigate({ to: "/playlists", search: { playlist: playlist.uuid } }),
+		landed: pathname => pathname === "/playlists",
+		signal: scope.signal
+	})
 
 	return {
 		value: {
 			opened: playlist.name,
-			// A track handle plays that track alone; playing the playlist's handle queues the whole list.
+			// A track handle plays the playlist from that track on, as clicking its row does.
 			tracks: playlist.files.slice(0, TRACK_LIMIT).map(file => {
 				const track = playlistFileTrack(file)
 
-				return { handle: scope.show({ kind: "track", track }, track.name), name: track.name }
+				return { handle: scope.show({ kind: "track", track, playlist }, track.name), name: track.name }
 			}),
 			...(playlist.files.length > TRACK_LIMIT ? { more: playlist.files.length - TRACK_LIMIT } : {})
 		},
@@ -100,13 +107,23 @@ export const playTool: ToolAdapter = async (input, scope) => {
 		case "playlist": {
 			const playlist = freshPlaylist(entity.playlist)
 
+			throwIfStopped(scope)
 			await playPlaylist(playlist)
 
 			return { value: { playing: playlist.files[0]?.name ?? "", playlist: playlist.name }, uiEffect: { type: "playback" } }
 		}
 
 		case "track": {
-			await audioEngine.enqueueAndPlay([entity.track], 0)
+			const playlist = entity.playlist === undefined ? undefined : freshPlaylist(entity.playlist)
+			const index = playlist?.files.findIndex(file => playlistFileTrack(file).uuid === entity.track.uuid) ?? -1
+
+			throwIfStopped(scope)
+
+			if (playlist !== undefined && index >= 0) {
+				await playPlaylistFrom(playlist, index)
+			} else {
+				await audioEngine.enqueueAndPlay([entity.track], 0)
+			}
 
 			return { value: { playing: entity.track.name }, uiEffect: { type: "playback" } }
 		}
@@ -119,6 +136,7 @@ export const playTool: ToolAdapter = async (input, scope) => {
 				throw new AssistantToolError(`"${driveName(item)}" is not an audio file`, { invalid: true })
 			}
 
+			throwIfStopped(scope)
 			await audioEngine.enqueueAndPlay(handoff.tracks, handoff.startIndex)
 
 			return { value: { playing: driveName(item) }, uiEffect: { type: "playback" } }

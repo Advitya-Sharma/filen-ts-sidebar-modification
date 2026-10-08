@@ -1,7 +1,8 @@
 import type { RegisteredRouter } from "@tanstack/react-router"
-import { openRoute } from "@filen/shared/assistant"
+import { openRoute, type AssistantSignal } from "@filen/shared/assistant"
 import { DEFAULT_CONTACTS_SECTION_FILTER } from "@/features/contacts/components/contactsList.logic"
 import { pathIsUnder } from "@/features/shell/lib/appShell.logic"
+import { navigateChecked } from "@/features/assistant/tools/navigation"
 
 export type AssistantRouteName = (typeof openRoute.input.shape.route.options)[number]
 
@@ -32,9 +33,29 @@ export function screenOfPath(pathname: string): AssistantRouteName | "other" {
 	return ROUTE_PATHS.find(([, root]) => pathIsUnder(pathname, root))?.[0] ?? "other"
 }
 
+// Sections that exist in the shared tool but not in the web app.
+export const UNAVAILABLE_ROUTES: ReadonlySet<AssistantRouteName> = new Set(["settings_camera_upload"])
+
 // The same navigations the icon rail and the settings sidebar make. False when the section does not
 // exist on the web.
-export async function navigateToRoute(router: RegisteredRouter, route: AssistantRouteName): Promise<boolean> {
+export async function navigateToRoute(router: RegisteredRouter, route: AssistantRouteName, signal?: AssistantSignal): Promise<boolean> {
+	const root = ROUTE_PATHS.find(([name]) => name === route)?.[1]
+
+	if (root === undefined) {
+		return false
+	}
+
+	await navigateChecked({
+		router,
+		navigate: () => navigateRaw(router, route),
+		landed: pathname => pathIsUnder(pathname, root),
+		signal
+	})
+
+	return true
+}
+
+async function navigateRaw(router: RegisteredRouter, route: AssistantRouteName): Promise<void> {
 	switch (route) {
 		case "drive":
 			await router.navigate({ to: "/drive/$", params: { _splat: "" } })
@@ -88,8 +109,6 @@ export async function navigateToRoute(router: RegisteredRouter, route: Assistant
 			await router.navigate({ to: "/settings/appearance" })
 			break
 		case "settings_camera_upload":
-			return false
+			break
 	}
-
-	return true
 }

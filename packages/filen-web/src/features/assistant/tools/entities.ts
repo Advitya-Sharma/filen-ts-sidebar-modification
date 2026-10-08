@@ -10,6 +10,7 @@ import {
 	DRIVE_LISTING_KEY_PREFIX,
 	driveListingQueryOptions,
 	findCachedListingItem,
+	findOwnedListingItem,
 	type DriveListingParams
 } from "@/features/drive/queries/drive"
 import { isDirectoryItem, type DriveItem } from "@/features/drive/lib/item"
@@ -17,6 +18,8 @@ import { notesQueryFind, notesQueryGet } from "@/features/notes/queries/notes"
 import { isNoteUndecryptable } from "@/features/notes/lib/sort"
 import { chatsQueryGet } from "@/features/chats/queries/chats"
 import { chatTitle } from "@/features/chats/lib/sort"
+import { chatsWithoutBlockedOneOnOne } from "@/features/chats/components/chatsSidebar.logic"
+import { filterNotesByBlockedOwner } from "@/features/notes/components/notesSidebar.logic"
 import { playlistsQueryGet } from "@/features/audio/queries/playlists"
 import { AssistantToolError, matchScore, sameName, searchTokens } from "@/features/assistant/tools/format"
 import type { AssistantEntity, AssistantEntityKind, AssistantHandleRegistry } from "@/features/assistant/tools/handles"
@@ -101,9 +104,10 @@ export function participantName(participant: { email: string; nickName: string |
 	return contactDisplayName(participant)
 }
 
-// The live rows behind a snapshot: a rename or a socket patch since the model saw the handle wins.
+// The live rows behind a snapshot: a rename or a socket patch since the model saw the handle wins. A
+// current listing's row first (queued edits applied); a shared row lives only in its own listings.
 export function freshDriveItem(item: DriveItem): DriveItem {
-	return findCachedListingItem(item.data.uuid) ?? item
+	return findOwnedListingItem(item.data.uuid)?.item ?? findCachedListingItem(item.data.uuid) ?? item
 }
 
 export function freshNote(note: Note): Note {
@@ -133,19 +137,42 @@ export function joinPath(parent: string, name: string): string {
 	return parent === "/" || parent === "" ? `/${name}` : `${parent}/${name}`
 }
 
-// An absolute path ("/Documents/Invoices") walked through the listings the drive screen would read.
-export async function resolveDrivePath(path: string): Promise<AssistantEntity> {
+// Filen compares names case-insensitively but keeps accents apart: "Résumé" and "Resume" are two items.
+function exactName(a: string, b: string): boolean {
+	return a.trim().normalize("NFC").toLowerCase() === b.trim().normalize("NFC").toLowerCase()
+}
+
+// The one item in `items` named `segment`: written exactly so first, else by the accent-folded name when only
+// one item matches that way.
+function itemNamed(items: readonly DriveItem[], segment: string): DriveItem | undefined {
+	const exact = items.find(item => exactName(driveItemName(item), segment))
+
+	if (exact !== undefined) {
+		return exact
+	}
+
+	const folded = items.filter(item => sameName(driveItemName(item), segment))
+
+	return folded.length === 1 ? folded[0] : undefined
+}
+
+// An absolute path ("/Documents/Invoices") walked through the listings the drive screen would read. With
+// `file`, its last segment may name a file (the paths search_items returns).
+export async function resolveDrivePath(path: string, { file = false }: { file?: boolean } = {}): Promise<AssistantEntity> {
 	const segments = path.split("/").filter(segment => segment.trim().length > 0)
 	let entity: AssistantEntity = { kind: "root" }
 	let uuid: string | null = null
 	let walked = "/"
 
-	for (const segment of segments) {
-		const items = await readDriveListing(uuid)
-		const found = items.find(item => item.type === "directory" && !item.data.undecryptable && sameName(driveItemName(item), segment))
+	for (const [index, segment] of segments.entries()) {
+		const last = index === segments.length - 1
+		const items = (await readDriveListing(uuid)).filter(
+			item => !item.data.undecryptable && (item.type === "directory" || (file && last && item.type === "file"))
+		)
+		const found = itemNamed(items, segment)
 
 		if (found === undefined) {
-			throw new AssistantToolError(`No directory at "${path}"`)
+			throw new AssistantToolError(file ? `No file or directory at "${path}"` : `No directory at "${path}"`)
 		}
 
 		walked = joinPath(walked, driveItemName(found))
@@ -219,8 +246,10 @@ function entityUuid(entity: AssistantEntity): string {
 	}
 }
 
-// Every My Drive row the cached listings hold, with its path where every ancestor is cached too.
-export function cachedDriveRows(): { item: DriveItem; path: string | undefined }[] {
+// The My Drive rows the cached listings hold that `match` keeps, with their paths where every ancestor is
+// cached too. Paths are built only for the rows kept: a large account caches far more rows than any lookup
+// needs, and this runs on the main thread.
+export function* cachedDriveRows(match: (item: DriveItem) => boolean): Generator<{ item: DriveItem; path: string | undefined }> {
 	const rows = new Map<string, DriveItem>()
 
 	for (const query of cachedQueriesWithPrefix(DRIVE_LISTING_KEY_PREFIX)) {
@@ -259,45 +288,67 @@ export function cachedDriveRows(): { item: DriveItem; path: string | undefined }
 		return path
 	}
 
-	return [...rows.values()].map(item => ({ item, path: pathOf(item.data.uuid) }))
+	for (const item of rows.values()) {
+		if (match(item)) {
+			yield { item, path: pathOf(item.data.uuid) }
+		}
+	}
 }
 
-// What a name could mean: the items this conversation has seen, then what the caches already hold.
-function candidatePool(scope: ToolScope, kinds: readonly AssistantEntityKind[]): AssistantEntity[] {
-	const pool: AssistantEntity[] = scope.registry
-		.entries()
-		.map(entry => entry.entity)
-		.filter(entity => kinds.includes(entity.kind))
+// What a name could mean, of the items whose names match `tokens`: the items this conversation has seen,
+// then what the caches already hold. Lazy, so a lookup stops at its first few. Chats and notes the
+// sidebars hide (a blocked user's) are not offered.
+function* candidatePool(scope: ToolScope, kinds: readonly AssistantEntityKind[], tokens: readonly string[]): Generator<AssistantEntity> {
+	const matches = (name: string) => matchScore(name, tokens) >= tokens.length
+
+	for (const { entity } of scope.registry.entries()) {
+		if (kinds.includes(entity.kind) && matches(entityName(entity)) && entityVisible(entity)) {
+			yield entity
+		}
+	}
 
 	if (kinds.includes("drive")) {
-		for (const { item, path } of cachedDriveRows()) {
-			pool.push(path === undefined ? { kind: "drive", item } : { kind: "drive", item, path })
+		for (const { item, path } of cachedDriveRows(item => matches(driveName(item)))) {
+			yield path === undefined ? { kind: "drive", item } : { kind: "drive", item, path }
 		}
 	}
 
 	if (kinds.includes("note")) {
-		for (const note of notesQueryGet() ?? []) {
-			if (!note.trash) {
-				pool.push({ kind: "note", note })
+		for (const note of filterNotesByBlockedOwner(notesQueryGet() ?? [], blockedUsers())) {
+			if (!note.trash && matches(noteTitle(note))) {
+				yield { kind: "note", note }
 			}
 		}
 	}
 
 	if (kinds.includes("chat")) {
-		for (const chat of chatsQueryGet() ?? []) {
-			pool.push({ kind: "chat", chat })
+		for (const chat of chatsWithoutBlockedOneOnOne(chatsQueryGet() ?? [], currentUserId(), blockedUsers())) {
+			if (matches(chatName(chat))) {
+				yield { kind: "chat", chat }
+			}
 		}
 	}
 
 	if (kinds.includes("playlist")) {
 		for (const entry of playlistsQueryGet() ?? []) {
-			if (entry.status === "ok") {
-				pool.push({ kind: "playlist", playlist: entry.playlist })
+			if (entry.status === "ok" && matches(entry.playlist.name)) {
+				yield { kind: "playlist", playlist: entry.playlist }
 			}
 		}
 	}
+}
 
-	return pool
+// A chat or note the sidebars hide because a blocked user owns it (a one-on-one chat with them, a note they
+// shared) is out of the assistant's reach too.
+export function entityVisible(entity: AssistantEntity): boolean {
+	switch (entity.kind) {
+		case "chat":
+			return chatsWithoutBlockedOneOnOne([entity.chat], currentUserId(), blockedUsers()).length > 0
+		case "note":
+			return filterNotesByBlockedOwner([entity.note], blockedUsers()).length > 0
+		default:
+			return true
+	}
 }
 
 const CANDIDATE_LIMIT = 5
@@ -310,7 +361,7 @@ export async function resolveHandle(scope: ToolScope, handle: string, kinds: rea
 	const expected = kinds.map(kind => KIND_LABELS[kind]).join(" or ")
 
 	if (wanted.startsWith("/") && kinds.includes("drive")) {
-		const entity = await resolveDrivePath(wanted)
+		const entity = await resolveDrivePath(wanted, { file: true })
 
 		if (!kinds.includes(entity.kind)) {
 			throw new AssistantToolError(`"${wanted}" is ${KIND_LABELS[entity.kind]}, not ${expected}`, { invalid: true })
@@ -326,6 +377,10 @@ export async function resolveHandle(scope: ToolScope, handle: string, kinds: rea
 			throw new AssistantToolError(`"${wanted}" is ${KIND_LABELS[entry.entity.kind]}, not ${expected}`, { invalid: true })
 		}
 
+		if (!entityVisible(entry.entity)) {
+			throw new AssistantToolError(`"${wanted}" is not available`)
+		}
+
 		return entry.entity
 	}
 
@@ -339,7 +394,7 @@ export async function resolveHandle(scope: ToolScope, handle: string, kinds: rea
 	const seen = new Set<string>()
 	const candidates: { ref: AssistantHandleRef; kind: string }[] = []
 
-	for (const entity of candidatePool(scope, kinds)) {
+	for (const entity of candidatePool(scope, kinds, tokens)) {
 		const uuid = entityUuid(entity)
 		const name = entityName(entity)
 
@@ -347,7 +402,7 @@ export async function resolveHandle(scope: ToolScope, handle: string, kinds: rea
 			break
 		}
 
-		if (seen.has(uuid) || matchScore(name, tokens) < tokens.length) {
+		if (seen.has(uuid)) {
 			continue
 		}
 

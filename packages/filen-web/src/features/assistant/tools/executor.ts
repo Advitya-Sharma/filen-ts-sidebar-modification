@@ -1,10 +1,12 @@
 import {
 	isConsequentialTool,
+	sanitizeUntrustedText,
+	toolInputJsonSchema,
+	type AssistantHistoryTurn,
 	type AssistantSignal,
 	type AssistantTool,
 	type AssistantToolFailure,
-	type AssistantToolName,
-	type AssistantUntrustedOutput
+	type AssistantToolName
 } from "@filen/shared/assistant"
 import { log } from "@/lib/log"
 import { errorLabel } from "@/lib/i18n/errorLabel"
@@ -23,10 +25,17 @@ import {
 } from "@/features/assistant/tools/entities"
 import { readAssistantContext } from "@/features/assistant/tools/context"
 import { assistantRouter } from "@/features/assistant/tools/navigation"
-import { navigateToRoute, type AssistantRouteName } from "@/features/assistant/tools/routes"
+import { navigateToRoute, UNAVAILABLE_ROUTES, type AssistantRouteName } from "@/features/assistant/tools/routes"
 import { getItemInfoTool, listDirectoryTool, readTextFileTool, revealItemTool, searchItemsTool } from "@/features/assistant/tools/drive"
 import { listNotesTool, openNoteTool, readNoteTool } from "@/features/assistant/tools/notes"
-import { draftChatMessageTool, listChatsTool, openChatTool, readChatTool } from "@/features/assistant/tools/chats"
+import {
+	draftChatMessageTool,
+	draftChatProblem,
+	draftText,
+	listChatsTool,
+	openChatTool,
+	readChatTool
+} from "@/features/assistant/tools/chats"
 import { audioControlTool, listPlaylistsTool, openPlaylistTool, playTool } from "@/features/assistant/tools/audio"
 
 // Which items each handle argument may name.
@@ -52,6 +61,18 @@ const HANDLE_KINDS: Partial<Record<AssistantToolName, Record<string, readonly As
 	add_tracks_to_playlist: { playlist: ["playlist"], handles: ["drive", "track"] }
 }
 
+const CONTEXT_NAME_MAX_CHARS = 80
+
+// A name in the context line: other people choose shared items', notes', chats' and tracks' names, and the
+// line sits in the system prompt. Sanitized, on one line, shortened and quoted, so it can neither carry
+// template tokens nor pose as another field of the line. The loop sanitizes the whole line again with the
+// model's own tokens.
+function contextName(name: string): string {
+	const flat = Array.from(sanitizeUntrustedText(name).replace(/\s+/g, " ").trim())
+
+	return JSON.stringify(flat.length > CONTEXT_NAME_MAX_CHARS ? `${flat.slice(0, CONTEXT_NAME_MAX_CHARS - 1).join("")}…` : flat.join(""))
+}
+
 function describeContext(scope: ToolScope): string {
 	const { screen, directory, selection, note, chat, playing } = readAssistantContext()
 	const parts = [`screen: ${screen}`]
@@ -67,7 +88,15 @@ function describeContext(scope: ToolScope): string {
 				driveName(directory.item)
 			)
 
-			parts.push(`current directory: ${directory.path ?? driveName(directory.item)} (handle ${handle})`)
+			parts.push(`current directory: ${contextName(directory.path ?? driveName(directory.item))} (handle ${handle})`)
+		} else {
+			// Opened by a link or a reveal, so its own row is not cached: the model can still list it by path. Without
+			// one it must not assume the root.
+			parts.push(
+				directory.path === undefined
+					? "current directory: a directory whose name is not loaded (not the root)"
+					: `current directory: ${contextName(directory.path)} (no handle; list it by this path)`
+			)
 		}
 	}
 
@@ -75,7 +104,7 @@ function describeContext(scope: ToolScope): string {
 		parts.push(
 			`selected: ${selection
 				.slice(0, 10)
-				.map(item => `${driveName(item)} (handle ${scope.show({ kind: "drive", item }, driveName(item))})`)
+				.map(item => `${contextName(driveName(item))} (handle ${scope.show({ kind: "drive", item }, driveName(item))})`)
 				.join(", ")}${selection.length > 10 ? ` and ${String(selection.length - 10)} more` : ""}`
 		)
 	} else if (directory !== null) {
@@ -83,11 +112,11 @@ function describeContext(scope: ToolScope): string {
 	}
 
 	if (note !== undefined) {
-		parts.push(`open note: ${noteTitle(note)} (handle ${scope.show({ kind: "note", note }, noteTitle(note))})`)
+		parts.push(`open note: ${contextName(noteTitle(note))} (handle ${scope.show({ kind: "note", note }, noteTitle(note))})`)
 	}
 
 	if (chat !== undefined) {
-		parts.push(`open chat: ${chatName(chat)} (handle ${scope.show({ kind: "chat", chat }, chatName(chat))})`)
+		parts.push(`open chat: ${contextName(chatName(chat))} (handle ${scope.show({ kind: "chat", chat }, chatName(chat))})`)
 	}
 
 	if (playing === null) {
@@ -99,13 +128,13 @@ function describeContext(scope: ToolScope): string {
 				? scope.show({ kind: "track", track: playing.track }, playing.track.name)
 				: scope.show({ kind: "drive", item }, driveName(item))
 
-		parts.push(`${playing.status === "paused" ? "paused" : "playing"}: ${playing.track.name} (handle ${handle})`)
+		parts.push(`${playing.status === "paused" ? "paused" : "playing"}: ${contextName(playing.track.name)} (handle ${handle})`)
 	}
 
 	return parts.join("; ")
 }
 
-const openRouteTool: ToolAdapter = async input => {
+const openRouteTool: ToolAdapter = async (input, scope) => {
 	const router = assistantRouter()
 	const route = input["route"] as AssistantRouteName
 
@@ -113,7 +142,7 @@ const openRouteTool: ToolAdapter = async input => {
 		throw new AssistantToolError("The app cannot navigate right now")
 	}
 
-	if (!(await navigateToRoute(router, route))) {
+	if (!(await navigateToRoute(router, route, scope.signal))) {
 		throw new AssistantToolError(`"${route}" is not available in the web app`)
 	}
 
@@ -149,15 +178,43 @@ interface ResolvedArgs {
 	text: Record<string, string>
 }
 
-function failureOf(tool: AssistantTool, error: AssistantToolError): AssistantToolFailure & { untrusted: AssistantUntrustedOutput } {
+function failureOf(error: AssistantToolError): AssistantToolFailure {
 	return {
 		ok: false,
 		invalid: error.invalid,
 		error: error.message,
 		result: sanitizeStrings({ error: error.message, ...(error.candidates.length > 0 ? { candidates: error.candidates } : {}) }, []),
-		...(error.candidates.length > 0 ? { candidates: error.candidates } : {}),
-		untrusted: tool.untrustedOutput === "none" ? "none" : "names"
+		...(error.candidates.length > 0 ? { candidates: error.candidates } : {})
 	}
+}
+
+function isBlank(value: unknown): boolean {
+	return (typeof value === "string" && value.trim().length === 0) || (Array.isArray(value) && value.length === 0)
+}
+
+// Settles with the adapter, or as stopped as soon as the turn is: a read waiting on an offline fetch or a
+// blocked navigation does not hold the turn.
+function unlessStopped<T>(work: Promise<T>, signal: AssistantSignal): Promise<T> {
+	return new Promise((resolve, reject) => {
+		const onAbort = () => {
+			reject(new AssistantToolError("Stopped"))
+		}
+
+		signal.addEventListener("abort", onAbort, { once: true })
+		void work.then(resolve, reject).finally(() => {
+			signal.removeEventListener("abort", onAbort)
+		})
+	})
+}
+
+// Checks a tool needs before its confirmation card shows, so the user never confirms a call that then fails.
+const PRECHECKS: Partial<Record<AssistantToolName, (scope: ToolScope, input: Record<string, unknown>) => Promise<string | null>>> = {
+	draft_chat_message: draftChatProblem
+}
+
+// Free-text arguments the card shows exactly as the call will use them.
+const TEXT_ARGS: Partial<Record<AssistantToolName, Record<string, (value: string) => string>>> = {
+	draft_chat_message: { text: draftText }
 }
 
 function notAvailable(tool: AssistantTool): AssistantToolError {
@@ -185,16 +242,22 @@ export function createAssistantToolExecutor(): ToolExecutor {
 	// loop validated the schema already.
 	async function resolveArgs(tool: AssistantTool, input: Record<string, unknown>, scope: ToolScope): Promise<ResolvedArgs> {
 		const kinds = HANDLE_KINDS[tool.name as AssistantToolName] ?? {}
-		const args: Record<string, unknown> = { ...input }
+		const required = new Set(toolInputJsonSchema(tool).required ?? [])
+		// An optional handle argument the model filled with nothing counts as left out.
+		const args: Record<string, unknown> = Object.fromEntries(
+			Object.entries(input).filter(([key, value]) => kinds[key] === undefined || required.has(key) || !isBlank(value))
+		)
 		const targets: AssistantHandleRef[] = []
 		const text: Record<string, string> = {}
+
+		const shape = TEXT_ARGS[tool.name as AssistantToolName] ?? {}
 
 		for (const [key, value] of Object.entries(args)) {
 			const allowed = kinds[key]
 
 			if (allowed === undefined) {
 				if (typeof value === "string") {
-					text[key] = value
+					text[key] = shape[key]?.(value) ?? value
 				}
 
 				continue
@@ -225,18 +288,28 @@ export function createAssistantToolExecutor(): ToolExecutor {
 			return Promise.resolve({ description, handles: [ROOT_HANDLE, ...shown.keys()] })
 		},
 
+		supports: tool => ADAPTERS[tool.name as AssistantToolName] !== undefined,
+
 		check: async ({ tool, args }) => {
 			const shown = new Map<string, AssistantHandleRef>()
+			const scope = scopeFor(undefined, shown)
 
 			if (ADAPTERS[tool.name as AssistantToolName] === undefined) {
-				return failureOf(tool, notAvailable(tool))
+				return failureOf(notAvailable(tool))
+			}
+
+			if (tool.name === "open_route" && UNAVAILABLE_ROUTES.has(args["route"] as AssistantRouteName)) {
+				return failureOf(new AssistantToolError(`"${String(args["route"])}" is not available in the web app`))
 			}
 
 			try {
-				return { ok: true, args: (await resolveArgs(tool, args, scopeFor(undefined, shown))).args }
+				const resolved = (await resolveArgs(tool, args, scope)).args
+				const problem = await PRECHECKS[tool.name as AssistantToolName]?.(scope, resolved)
+
+				return problem === undefined || problem === null ? { ok: true, args: resolved } : failureOf(new AssistantToolError(problem))
 			} catch (e) {
 				if (e instanceof AssistantToolError) {
-					return failureOf(tool, e)
+					return failureOf(e)
 				}
 
 				throw e
@@ -259,42 +332,45 @@ export function createAssistantToolExecutor(): ToolExecutor {
 			const adapter = ADAPTERS[tool.name as AssistantToolName]
 
 			if (adapter === undefined) {
-				return failureOf(tool, notAvailable(tool))
+				return failureOf(notAvailable(tool))
 			}
 
 			if (isConsequentialTool(tool) && !confirmed) {
-				return failureOf(tool, new AssistantToolError("This needs the user's confirmation first"))
+				return failureOf(new AssistantToolError("This needs the user's confirmation first"))
 			}
 
 			if (signal.aborted) {
-				return failureOf(tool, new AssistantToolError("Stopped"))
+				return failureOf(new AssistantToolError("Stopped"))
 			}
 
 			try {
-				const output = await adapter((await resolveArgs(tool, args, scope)).args, scope)
+				const output = await unlessStopped(
+					resolveArgs(tool, args, scope).then(resolved => adapter(resolved.args, scope)),
+					signal
+				)
 
+				// Every result, whatever its tool declares: a mis-declared one can never pass raw text through.
 				return {
 					ok: true,
-					result: tool.untrustedOutput === "none" ? output.value : sanitizeStrings(output.value, []),
+					result: sanitizeStrings(output.value, []),
 					returned: [...shown.values()],
-					untrusted: tool.untrustedOutput,
 					...(output.uiEffect === undefined ? {} : { uiEffect: output.uiEffect })
 				}
 			} catch (e) {
 				if (e instanceof AssistantToolError) {
-					return failureOf(tool, e)
+					return failureOf(e)
 				}
 
 				log.warn("assistant", `tool ${tool.name} failed`, e)
 
-				return failureOf(tool, new AssistantToolError(errorLabel(e)))
+				return failureOf(new AssistantToolError(errorLabel(e)))
 			}
 		},
 
 		name: handle => registry.get(handle)?.ref.name,
 
-		reset: () => {
-			registry.clear()
+		reset: (history: readonly AssistantHistoryTurn[] = []) => {
+			registry.clear(history.flatMap(({ user, reply }) => [user, reply]))
 		}
 	}
 }

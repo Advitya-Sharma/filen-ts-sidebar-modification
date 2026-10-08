@@ -1,13 +1,16 @@
 import { driveItemName, fastLocaleCompare, formatBytes } from "@filen/shared"
+import { MAX_ARRAY_ITEMS } from "@filen/shared/assistant"
 import { log } from "@/lib/log"
 import { queryClient } from "@/queries/client"
 import { cachedListing, directorySizeQueryOptions, fetchItemInfo, itemInfoQueryKey } from "@/features/drive/queries/drive"
 import { asDirectoryOrFile, driveItemMime, isDirectoryItem, lastModifiedOf, narrowItem, type DriveItem } from "@/features/drive/lib/item"
-import { decodeUtf8, looksBinary, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
-import { defaultRevealDeps, runOpenContainingDirectory } from "@/features/drive/lib/reveal"
-import { searchDriveOnce } from "@/features/drive/lib/searchQuery"
+import { decodeUtf8, extensionOf, looksBinary, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
+import { defaultRevealDeps, resolveContainingDirectoryTarget } from "@/features/drive/lib/reveal"
+import { searchDriveOnce, type DriveSearchOnceResult } from "@/features/drive/lib/searchQuery"
+import { useDriveStore } from "@/features/drive/store/useDriveStore"
+import { spreadsheetFileKind } from "@/features/spreadsheet/lib/fileKind"
 import { loadDriveFileBytes } from "@/features/preview/lib/fileBytes"
-import { assistantRouter } from "@/features/assistant/tools/navigation"
+import { assistantRouter, navigateChecked } from "@/features/assistant/tools/navigation"
 import { navigateToRoute } from "@/features/assistant/tools/routes"
 import {
 	abortSignalOf,
@@ -25,13 +28,24 @@ import {
 	type ToolAdapter,
 	type ToolScope
 } from "@/features/assistant/tools/entities"
-import { AssistantToolError, clipText, isoDate, matchScore, searchTokens } from "@/features/assistant/tools/format"
+import {
+	AssistantToolError,
+	clipText,
+	engineToken,
+	isoDate,
+	matchScore,
+	normalizeText,
+	rawSearchTokens,
+	searchTokens,
+	throwIfStopped
+} from "@/features/assistant/tools/format"
 import { ROOT_HANDLE, type AssistantEntity } from "@/features/assistant/tools/handles"
 
 const SEARCH_LIMIT = 12
-// How long a search may wait for the index to settle before answering with what it has.
-const SEARCH_CAP_MS = 8_000
-const LIST_LIMIT = 60
+// How long a search may wait for the index to settle before answering with what it has; Stop ends it sooner.
+const SEARCH_CAP_MS = 20_000
+// The loop shows the model at most this many items of a list: a longer listing would be cut twice.
+const LIST_LIMIT = MAX_ARRAY_ITEMS
 // read_text_file downloads the whole file, so only small ones; the model sees far less of it.
 export const TEXT_FILE_MAX_BYTES = 1_048_576n
 export const TEXT_FILE_MAX_CHARS = 4_000
@@ -63,31 +77,58 @@ function hitPath(parentPath: string | undefined, name: string): string {
 	return parent === "" ? `/${name}` : `/${parent}/${name}`
 }
 
-function throwIfAborted(scope: ToolScope): void {
-	if (scope.signal?.aborted === true) {
-		throw new AssistantToolError("Stopped")
-	}
+function engineItemType(kind: string | undefined): "all" | "file" | "dir" {
+	return kind === undefined ? "all" : kind === "directory" ? "dir" : "file"
 }
 
-// The search box's own engine and projection when the user isn't searching, else (and while the index
-// still converges) the listings the drive has already loaded. Words are matched one by one, so
-// "invoice 2024" finds "Invoice_2024_03.pdf"; the engine is asked for the longest word only.
-export const searchItemsTool: ToolAdapter = async (input, scope) => {
-	const kind = optionalString(input, "kind")
-	const tokens = searchTokens(requiredString(input, "query"))
-	const longest = tokens.reduce((best, token) => (token.length > best.length ? token : best), "")
-
-	if (longest === "") {
-		throw new AssistantToolError("Pass words from the item name", { invalid: true })
-	}
-
-	const engine = await searchDriveOnce(longest, SEARCH_CAP_MS).catch((e: unknown) => {
-		log.warn("assistant", "drive search failed", e)
+// The engine's hits for one word: null when the user's own search holds the engine (or it failed).
+async function engineSearch(word: string, kind: string | undefined, scope: ToolScope): Promise<DriveSearchOnceResult | null> {
+	const result = await searchDriveOnce(word, SEARCH_CAP_MS, {
+		signal: abortSignalOf(scope.signal),
+		itemType: engineItemType(kind)
+	}).catch((e: unknown) => {
+		if (scope.signal?.aborted !== true) {
+			log.warn("assistant", "drive search failed", e)
+		}
 
 		return null
 	})
 
-	throwIfAborted(scope)
+	throwIfStopped(scope)
+
+	return result
+}
+
+// The engine returns a window of its hits: more than that means some were never seen.
+function truncated(result: DriveSearchOnceResult): boolean {
+	return result.total > BigInt(result.items.length)
+}
+
+// The search box's own engine and projection when the user isn't typing a search, else (and while the index
+// still converges) the listings the drive has already loaded. Words are matched one by one, so
+// "invoice 2024" finds "Invoice_2024_03.pdf"; the engine is asked for the most selective word as written
+// (it folds case only), and for the next one when the first had more hits than its window.
+export const searchItemsTool: ToolAdapter = async (input, scope) => {
+	const kind = optionalString(input, "kind")
+	const query = requiredString(input, "query")
+	const tokens = searchTokens(query)
+	const raw = rawSearchTokens(query)
+	const first = engineToken(raw)
+
+	if (first === null || tokens.length === 0) {
+		throw new AssistantToolError("Pass words from the item name", { invalid: true })
+	}
+
+	let engine = await engineSearch(first, kind, scope)
+
+	if (engine !== null && truncated(engine)) {
+		const second = engineToken(raw.filter(word => engineToken([word]) !== first))
+		const retry = second === null ? null : await engineSearch(second, kind, scope)
+
+		if (retry !== null && retry.total < engine.total) {
+			engine = retry
+		}
+	}
 
 	const pool = new Map<string, { item: DriveItem; path: string | undefined }>()
 
@@ -95,22 +136,41 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 		pool.set(item.data.uuid, { item, path: hitPath(engine?.parentPaths.get(item.data.uuid), driveItemName(item)) })
 	}
 
-	const complete = engine?.settled === true
+	const settled = engine?.settled === true
 
-	if (!complete) {
-		for (const row of cachedDriveRows()) {
+	if (!settled) {
+		for (const row of cachedDriveRows(item => matchScore(driveItemName(item), tokens) > 0)) {
 			if (!pool.has(row.item.data.uuid)) {
 				pool.set(row.item.data.uuid, row)
 			}
 		}
 	}
 
+	const wanted = normalizeText(query.trim())
 	const scored = [...pool.values()]
 		.filter(({ item }) => !item.data.undecryptable && matchesKind(item, kind))
 		.map(row => ({ ...row, score: matchScore(driveItemName(row.item), tokens) }))
 		.filter(({ score }) => score > 0)
 	const all = scored.filter(({ score }) => score === tokens.length)
-	const ranked = (all.length > 0 ? all : scored.sort((a, b) => b.score - a.score)).slice(0, SEARCH_LIMIT)
+	// The exact name first, then the shortest names (the fewest extra words), then the newest.
+	const ranked = (all.length > 0 ? all : scored)
+		.toSorted(
+			(a, b) =>
+				b.score - a.score ||
+				Number(normalizeText(driveItemName(b.item)) === wanted) - Number(normalizeText(driveItemName(a.item)) === wanted) ||
+				driveItemName(a.item).length - driveItemName(b.item).length ||
+				Number(lastModifiedOf(b.item) - lastModifiedOf(a.item))
+		)
+		.slice(0, SEARCH_LIMIT)
+	const shown = all.length > 0 ? all.length : scored.length
+	const note =
+		engine === null
+			? "Only the directories already loaded were searched (the user's own search is open); more matches may exist."
+			: !settled
+				? "The search index is not complete yet; more matches may exist."
+				: truncated(engine)
+					? "Too many names contain these words to search them all; more matches may exist. Add more words from the name."
+					: null
 
 	return {
 		value: {
@@ -120,20 +180,28 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 				kind: driveKind(item),
 				...(path === undefined ? {} : { path })
 			})),
-			...(scored.length > SEARCH_LIMIT ? { more: true } : {}),
-			...(complete ? {} : { note: "The search index is not complete yet; more matches may exist." })
+			...(shown > SEARCH_LIMIT ? { more: shown - SEARCH_LIMIT } : {}),
+			...(note === null ? {} : { note })
 		}
 	}
 }
 
-// The path the info dialog's Location row reads, from the same cached item-info query.
+// Item-info entries read this page, by uuid: the entry is persisted, and a move keeps the uuid it is keyed
+// by, so one restored from disk may name where the item used to be.
+const infoReadThisPage = new Set<string>()
+
+// The path the info dialog's Location row reads, from the same item-info query: read again once a page, as
+// the dialog does (its staleTime is 0), then from the cache.
 async function itemPath(item: DriveItem): Promise<string | undefined> {
 	const base = asDirectoryOrFile(item)
+	const fresh = infoReadThisPage.has(base.data.uuid)
 	const info = await queryClient.query({
 		queryKey: itemInfoQueryKey(base.data.uuid),
 		queryFn: () => fetchItemInfo(base.data),
-		staleTime: "static"
+		staleTime: fresh ? "static" : 0
 	})
+
+	infoReadThisPage.add(base.data.uuid)
 
 	if (info.path === null) {
 		return undefined
@@ -194,7 +262,7 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 		(a, b) => Number(isDirectoryItem(b)) - Number(isDirectoryItem(a)) || fastLocaleCompare(driveItemName(a), driveItemName(b))
 	)
 
-	throwIfAborted(scope)
+	throwIfStopped(scope)
 
 	return {
 		value: {
@@ -237,8 +305,9 @@ export const getItemInfoTool: ToolAdapter = async (input, scope) => {
 	}
 
 	const mime = driveItemMime(item)
-	// Only what the row itself says: an owned item's outgoing shares and links would cost a request each.
-	const sharedArm = item.type !== "directory" && item.type !== "file"
+	// Only what the row itself says: an owned item's outgoing shares and links would cost a request each, so
+	// its sharing state is left out rather than reported as "not shared".
+	const sharedWithYou = item.type !== "directory" && item.type !== "file"
 
 	return {
 		value: {
@@ -247,11 +316,12 @@ export const getItemInfoTool: ToolAdapter = async (input, scope) => {
 			kind: driveKind(item),
 			...(path === undefined ? {} : { path }),
 			...(size === undefined ? {} : { size }),
-			...(mime === undefined || mime === "" ? {} : { type: mime }),
+			// The uploader's own MIME type: untrusted text, under a key the loop sanitizes.
+			...(mime === undefined || mime === "" ? {} : { mime }),
 			created: isoDate(item.data.decryptedMeta?.created ?? item.data.timestamp),
 			modified: isoDate(lastModifiedOf(item)),
 			favorite: item.data.favorited,
-			shared: sharedArm,
+			...(sharedWithYou ? { sharedWithYou: true } : {}),
 			...(trashed ? { trashed: true } : {})
 		}
 	}
@@ -275,7 +345,10 @@ export const readTextFileTool: ToolAdapter = async (input, scope) => {
 		throw new AssistantToolError("This file cannot be decrypted")
 	}
 
-	if (!TEXT_CATEGORIES.has(previewType(item))) {
+	const csv = spreadsheetFileKind(extensionOf(name).toLowerCase())
+
+	// CSV and TSV preview as spreadsheets but are text.
+	if (!TEXT_CATEGORIES.has(previewType(item)) && csv !== "csv" && csv !== "tsv") {
 		throw new AssistantToolError(`"${name}" is not a text file`)
 	}
 
@@ -301,7 +374,8 @@ export const readTextFileTool: ToolAdapter = async (input, scope) => {
 	}
 }
 
-// "Open containing directory": the same resolver, armed reveal and toast the item menu uses.
+// A file: "Open containing directory", with the same resolver and armed reveal the item menu uses. One of the
+// user's own directories opens itself, as a double click does. Nothing happens once the turn was stopped.
 export const revealItemTool: ToolAdapter = async (input, scope) => {
 	const entity = await resolveHandle(scope, requiredString(input, "handle"), ["root", "drive"])
 	const router = assistantRouter()
@@ -311,22 +385,38 @@ export const revealItemTool: ToolAdapter = async (input, scope) => {
 	}
 
 	if (entity.kind !== "drive") {
-		await navigateToRoute(router, "drive")
+		await navigateToRoute(router, "drive", scope.signal)
 
 		return { value: { shown: "/" }, uiEffect: { type: "navigated", pathname: "/drive" } }
 	}
 
 	const item = freshDriveItem(entity.item)
-	const target = await runOpenContainingDirectory(defaultRevealDeps, item, next => {
-		void router.navigate(next)
-	})
+	const outcome = await resolveContainingDirectoryTarget(defaultRevealDeps, item)
 
-	if (target === null) {
+	throwIfStopped(scope)
+
+	if (outcome.status === "error") {
 		throw new AssistantToolError(`Could not open the location of "${driveName(item)}"`)
 	}
 
+	const into = item.type === "directory" && !item.data.undecryptable
+	const splat = into ? [outcome.target.params._splat, item.data.uuid].filter(part => part !== "").join("/") : outcome.target.params._splat
+	const target = { ...outcome.target, params: { _splat: splat } }
+	const pathname = target.to.replace("$", splat)
+
+	if (!into) {
+		useDriveStore.getState().requestReveal({ uuid: item.data.uuid, splat })
+	}
+
+	await navigateChecked({
+		router,
+		navigate: () => router.navigate(target),
+		landed: current => current.replace(/\/+$/, "") === pathname.replace(/\/+$/, ""),
+		signal: scope.signal
+	})
+
 	return {
-		value: { shown: driveName(item), ...(entity.path === undefined ? {} : { path: entity.path }) },
-		uiEffect: { type: "navigated", pathname: target.to.replace("$", target.params._splat) }
+		value: { [into ? "opened" : "shown"]: driveName(item), ...(entity.path === undefined ? {} : { path: entity.path }) },
+		uiEffect: { type: "navigated", pathname }
 	}
 }

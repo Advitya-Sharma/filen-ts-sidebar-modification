@@ -2270,10 +2270,13 @@ const api = {
 	},
 	// The assistant's one-shot search: never takes the engine from the user's search (searchEngine.ts).
 	searchQuery(
-		params: { rootUuid: string | null; name: string },
-		options: { settleMs: number; capMs: number }
+		params: { rootUuid: string | null; name: string; itemType?: "all" | "file" | "dir" },
+		options: { settleMs: number; capMs: number; id?: number }
 	): Promise<SearchQueryResult> {
 		return searchEngine.query(requireClient(), params, options)
+	},
+	searchQueryCancel(id: number): void {
+		searchEngine.cancelQuery(id)
 	},
 	// Closes the live search BEFORE releasing the client — searchEngine.ts's teardown calls
 	// close()/free() on handles that belong to THIS client; releasing it first would race that.

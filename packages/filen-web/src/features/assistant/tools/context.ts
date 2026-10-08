@@ -1,6 +1,7 @@
 import type { Chat, Note } from "@filen/sdk-rs"
 import { splatToUuids } from "@/features/drive/lib/navigate"
-import { findCachedListingItem } from "@/features/drive/queries/drive"
+import { driveNamesQueryKey, findCachedListingItem } from "@/features/drive/queries/drive"
+import { queryClient } from "@/queries/client"
 import { useDriveStore } from "@/features/drive/store/useDriveStore"
 import type { DriveItem } from "@/features/drive/lib/item"
 import { selectedNoteUuidFromPath } from "@/features/notes/lib/route"
@@ -48,10 +49,16 @@ function myDriveDirectory(pathname: string): AssistantAppContext["directory"] {
 	const uuid = uuids.at(-1) ?? null
 	let path: string | undefined = "/"
 
+	// A directory opened by a link or a reveal often has no cached parent listing; the breadcrumb has
+	// already resolved its name.
 	for (const segment of uuids) {
 		const ancestor = findCachedListingItem(segment)
+		const name =
+			ancestor === undefined
+				? (queryClient.getQueryData<string | null>(driveNamesQueryKey("drive", segment)) ?? undefined)
+				: driveName(ancestor)
 
-		path = ancestor === undefined || path === undefined ? undefined : joinPath(path, driveName(ancestor))
+		path = name === undefined || path === undefined ? undefined : joinPath(path, name)
 	}
 
 	return { uuid, item: uuid === null ? undefined : findCachedListingItem(uuid), path }
