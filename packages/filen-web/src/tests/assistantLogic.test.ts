@@ -68,6 +68,9 @@ describe("canRemoveModel", () => {
 		expect(canRemoveModel({ kind: "error", error: "out-of-memory", model: MODEL })).toBe(true)
 		expect(canRemoveModel({ kind: "error", error: "download-failed", model: MODEL })).toBe(false)
 		expect(canRemoveModel({ kind: "not-downloaded", model: MODEL })).toBe(false)
+		// What a stopped or failed download left behind is the user's to free.
+		expect(canRemoveModel({ kind: "not-downloaded", model: MODEL, partialBytes: 1 })).toBe(true)
+		expect(canRemoveModel({ kind: "error", error: "storage-full", model: MODEL, partialBytes: 1 })).toBe(true)
 		expect(canRemoveModel({ kind: "downloading", model: MODEL, receivedBytes: 1, waiting: false })).toBe(false)
 		expect(canRemoveModel({ kind: "loading", model: MODEL, verifying: false })).toBe(false)
 		expect(canRemoveModel({ kind: "unavailable", reason: "in-use-elsewhere", model: MODEL })).toBe(false)

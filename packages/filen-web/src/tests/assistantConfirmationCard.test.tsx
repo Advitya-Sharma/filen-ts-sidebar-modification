@@ -10,10 +10,11 @@ const { trusted } = vi.hoisted(() => ({ trusted: { value: false } }))
 vi.mock("@/features/assistant/components/userActivation", () => ({ isTrustedActivation: () => trusted.value }))
 
 import { AssistantConfirmationCard } from "@/features/assistant/components/assistantConfirmationCard"
-import { registerAssistantSession } from "@/features/assistant/store/assistantSession"
+import { registerAssistantSession, sendAssistantMessage } from "@/features/assistant/store/assistantSession"
 import { createMockAssistantSession, MOCK_ASSISTANT_MODEL } from "@/features/assistant/store/mockAssistantSession"
+import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
 import type { ProposalStatus } from "@/features/assistant/store/transcript"
-import type { AssistantEvent, AssistantProposal, AssistantSession } from "@/features/assistant/types"
+import type { AssistantProposal, AssistantSession } from "@/features/assistant/types"
 
 const MOVE: AssistantProposal = {
 	id: "p1",
@@ -28,32 +29,32 @@ const MOVE: AssistantProposal = {
 
 let session: AssistantSession
 let unregister: () => void
-let deliver: (event: AssistantEvent) => void = () => undefined
 
-// As the live turn would: only a card the session itself proposed can be confirmed.
-function propose(proposal: AssistantProposal): void {
-	deliver({ type: "proposal", turnId: "turn-live", proposal })
+// Only a card the session itself proposed can be confirmed: one a turn is waiting on, as in production.
+function propose(): AssistantProposal {
+	sendAssistantMessage("move my receipts")
+	vi.runAllTimers()
+
+	const card = useAssistantStore.getState().entries.find(entry => entry.kind === "proposal")
+
+	if (card?.kind !== "proposal") {
+		throw new Error("no card")
+	}
+
+	return card.proposal
 }
 
 beforeEach(() => {
+	vi.useFakeTimers()
 	trusted.value = false
-
-	const mock = createMockAssistantSession({ initialState: { kind: "ready", model: MOCK_ASSISTANT_MODEL } })
-
-	session = {
-		...mock,
-		subscribe: listener => {
-			deliver = listener
-
-			return mock.subscribe(listener)
-		}
-	}
+	session = createMockAssistantSession({ initialState: { kind: "ready", model: MOCK_ASSISTANT_MODEL }, stepMs: 10 })
 	unregister = registerAssistantSession(session)
 })
 
 afterEach(() => {
 	unregister()
 	cleanup()
+	vi.useRealTimers()
 })
 
 function renderCard(proposal: AssistantProposal, status: ProposalStatus = "pending"): void {
@@ -95,12 +96,13 @@ describe("AssistantConfirmationCard", () => {
 	it("runs a trusted confirm synchronously, inside the click", () => {
 		const confirm = vi.spyOn(session, "confirm")
 
+		const proposal = propose()
+
 		trusted.value = true
-		propose(MOVE)
-		renderCard(MOVE)
+		renderCard(proposal)
 		fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
 
-		expect(confirm).toHaveBeenCalledWith("p1")
+		expect(confirm).toHaveBeenCalledWith(proposal.id)
 	})
 
 	// A card restored from a saved conversation, or left from another one, never reaches the session.
@@ -117,9 +119,10 @@ describe("AssistantConfirmationCard", () => {
 	it("confirms a proposed card once only", () => {
 		const confirm = vi.spyOn(session, "confirm")
 
+		const proposal = propose()
+
 		trusted.value = true
-		propose(MOVE)
-		renderCard(MOVE)
+		renderCard(proposal)
 		fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
 		fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
 

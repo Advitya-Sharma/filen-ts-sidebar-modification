@@ -2,7 +2,7 @@ import { useCallback, useRef } from "react"
 import { useTranslation } from "react-i18next"
 import { useVirtualizer, type VirtualizerOptions } from "@tanstack/react-virtual"
 import { cn } from "@filen/shared"
-import { MarkdownRenderer } from "@/features/preview/components/markdownRenderer"
+import { AssistantReplyMarkdown } from "@/features/assistant/components/replyMarkdown"
 import { BubbleTail, OTHER_TAIL_CLASS, OWN_TAIL_CLASS } from "@/features/chats/components/thread/messageRow"
 import { useIsSidebarPanelVisible } from "@/features/shell/lib/sidebarPanelVisibility"
 import { observeElementOffsetFromAttach } from "@/lib/virtualScroll"
@@ -59,8 +59,8 @@ function TranscriptRowContent({ row }: { row: TranscriptRow }) {
 						aria-busy={!row.final}
 						className={cn(BUBBLE_CLASS, "max-w-[92%] rounded-bl-[6px] bg-chat-other text-foreground")}
 					>
-						<MarkdownRenderer
-							text={row.text}
+						<AssistantReplyMarkdown
+							text={row.withheld === true ? t("assistantReplyWithheld") : row.text}
 							alt={t("assistantReplyLabel")}
 							className="size-auto overflow-visible p-0 wrap-anywhere [&_p]:mb-2 [&_pre]:bg-background/60 [&>:last-child]:mb-0"
 						/>

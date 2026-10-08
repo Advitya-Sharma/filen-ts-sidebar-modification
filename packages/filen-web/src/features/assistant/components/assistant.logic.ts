@@ -28,15 +28,17 @@ export function modelShowsLoading(state: AssistantModelState, turnActive: boolea
 	return state.kind === "loading" || (state.kind === "downloaded" && turnActive)
 }
 
-// Files on disk: what "Remove downloaded model" can delete. A failed load still left them there; a
-// failed or full download is the runtime's to clean up.
+// Files on disk: what "Remove downloaded model" can delete. A failed load still left them there, and a
+// stopped, failed or full download leaves the part it fetched (kept so it can resume).
 export function canRemoveModel(state: AssistantModelState): boolean {
 	switch (state.kind) {
 		case "downloaded":
 		case "ready":
 			return true
 		case "error":
-			return state.error === "load-failed" || state.error === "out-of-memory"
+			return state.error === "load-failed" || state.error === "out-of-memory" || (state.partialBytes ?? 0) > 0
+		case "not-downloaded":
+			return (state.partialBytes ?? 0) > 0
 		default:
 			return false
 	}
@@ -191,6 +193,8 @@ export const TURN_END_KEYS: Record<"cancelled" | AssistantTurnError, AssistantKe
 	cancelled: "assistantTurnCancelled",
 	"model-unavailable": "assistantTurnErrorModelUnavailable",
 	"context-full": "assistantTurnErrorContextFull",
+	"message-too-long": "assistantTurnErrorMessageTooLong",
+	"no-reply": "assistantTurnErrorNoReply",
 	failed: "assistantTurnErrorFailed"
 }
 

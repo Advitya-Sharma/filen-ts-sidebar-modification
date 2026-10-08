@@ -60,9 +60,11 @@ function FirstRun({ model, unavailable }: { model: AssistantModelInfo | null; un
 					>
 						{t(UNAVAILABLE_KEYS[unavailable])}
 					</p>
+					{/* Free space can change: every click checks the storage again, so only the device's own limits disable it. */}
 					<Button
-						disabled
+						disabled={unavailable !== "insufficient-storage"}
 						aria-describedby={UNAVAILABLE_REASON_ID}
+						onClick={downloadAssistantModel}
 					>
 						{t("assistantDownload")}
 					</Button>

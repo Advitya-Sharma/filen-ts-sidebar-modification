@@ -57,8 +57,7 @@ describe("beginTurn", () => {
 	it("expires cards still waiting from earlier turns, and only those", () => {
 		const withCards = fold(started(), [
 			{ type: "proposal", turnId: "t1", proposal: PROPOSAL },
-			{ type: "proposal", turnId: "t1", proposal: { ...PROPOSAL, id: "p2" } },
-			{ type: "turn-end", turnId: "t1", at: 0, outcome: "complete" }
+			{ type: "proposal", turnId: "t1", proposal: { ...PROPOSAL, id: "p2" } }
 		])
 		const answered = { ...withCards, entries: setProposalStatus(withCards.entries, "p2", "cancelled") }
 
@@ -72,6 +71,30 @@ describe("beginTurn", () => {
 })
 
 describe("applyAssistantEvent", () => {
+	it("expires a card still waiting when its turn ends, stopped or failed, so it can no longer be confirmed", () => {
+		for (const end of [
+			{ type: "turn-end", turnId: "t1", at: 0, outcome: "cancelled" },
+			{ type: "turn-end", turnId: "t1", at: 0, outcome: "error", error: "failed" }
+		] as const) {
+			const state = fold(started(), [{ type: "proposal", turnId: "t1", proposal: PROPOSAL }, end])
+
+			expect(state.entries.flatMap(entry => (entry.kind === "proposal" ? [entry.status] : []))).toEqual(["expired"])
+			expect(pendingProposalIds(state.entries)).toEqual([])
+		}
+	})
+
+	it("drops a reply that ended empty and shows a withheld one in its place", () => {
+		const state = fold(started(), [
+			{ type: "reply", turnId: "t1", replyId: "r1", text: "df.sort_", final: false },
+			{ type: "reply", turnId: "t1", replyId: "r1", text: "", final: true },
+			{ type: "reply", turnId: "t1", replyId: "r2", text: "", final: true, withheld: true }
+		])
+
+		expect(state.entries.filter(entry => entry.kind === "reply")).toEqual([
+			{ kind: "reply", id: "reply:r2", turnId: "t1", text: "", final: true, withheld: true }
+		])
+	})
+
 	it("replaces a reply bubble's text by reply id rather than appending a new bubble per emission", () => {
 		const state = fold(started(), [
 			{ type: "reply", turnId: "t1", replyId: "r1", text: "Hel", final: false },

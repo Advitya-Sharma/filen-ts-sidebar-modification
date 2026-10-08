@@ -15,7 +15,7 @@ const EXAMPLE_KEYS: readonly AssistantKey[] = [
 	"assistantExampleFind",
 	"assistantExampleSummarize",
 	"assistantExampleOpen",
-	"assistantExamplePlay"
+	"assistantExampleNavigate"
 ]
 
 function EmptyConversation() {

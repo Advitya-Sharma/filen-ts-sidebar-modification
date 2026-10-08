@@ -326,6 +326,20 @@ describe("AssistantSidePanel", () => {
 		expect(screen.getByText(/doesn't have enough memory/)).toBeDefined()
 	})
 
+	it("keeps the download clickable when only free space was lacking, so freeing some lets it check again", () => {
+		withSession({ kind: "unavailable", reason: "insufficient-storage", model: MOCK_ASSISTANT_MODEL })
+
+		const download = vi.spyOn(session, "downloadModel")
+
+		render(<AssistantSidePanel />)
+
+		const button = screen.getByRole("button", { name: "Download model" })
+
+		expect(button.hasAttribute("disabled")).toBe(false)
+		fireEvent.click(button)
+		expect(download).toHaveBeenCalledTimes(1)
+	})
+
 	it("offers no action while another tab holds the model", () => {
 		withSession({ kind: "unavailable", reason: "in-use-elsewhere", model: MOCK_ASSISTANT_MODEL })
 		render(<AssistantSidePanel />)
@@ -382,9 +396,9 @@ describe("AssistantSidePanel", () => {
 		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
 		render(<AssistantSidePanel />)
 
-		fireEvent.click(screen.getByRole("button", { name: "Summarize my most recent note" }))
+		fireEvent.click(screen.getByRole("button", { name: "Summarize the note I have open" }))
 
-		expect(useAssistantStore.getState().entries[0]).toMatchObject({ kind: "user", text: "Summarize my most recent note" })
+		expect(useAssistantStore.getState().entries[0]).toMatchObject({ kind: "user", text: "Summarize the note I have open" })
 	})
 
 	it("closes from its header", () => {

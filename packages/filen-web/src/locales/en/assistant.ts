@@ -105,7 +105,7 @@ export const assistant = {
 	assistantUnavailableTitle: "The assistant can't run here",
 	/** Unavailable reason — the browser lacks what the model needs */
 	assistantUnavailableUnsupportedBrowser:
-		"This browser can't run the assistant's model. Try a recent version of Chrome, Edge or Safari on a computer.",
+		"This browser can't run the assistant's model. Try a recent version of Chrome, Edge or Firefox on a computer.",
 	/** Unavailable reason — not enough memory */
 	assistantUnavailableInsufficientMemory: "This device doesn't have enough memory to run the assistant's model.",
 	/** Unavailable reason — not enough free storage for the download */
@@ -160,13 +160,13 @@ export const assistant = {
 	/** Empty conversation — accessible name of the example prompt group */
 	assistantExamplesLabel: "Example questions",
 	/** Example prompt — sent as typed when clicked */
-	assistantExampleFind: "Find the PDFs I uploaded this month",
+	assistantExampleFind: "Find my tax documents",
 	/** Example prompt — sent as typed when clicked */
-	assistantExampleSummarize: "Summarize my most recent note",
+	assistantExampleSummarize: "Summarize the note I have open",
 	/** Example prompt — sent as typed when clicked */
-	assistantExampleOpen: "Open my Documents directory",
+	assistantExampleOpen: "What's in my Documents directory?",
 	/** Example prompt — sent as typed when clicked */
-	assistantExamplePlay: "Play my most recent playlist",
+	assistantExampleNavigate: "Take me to my favorites",
 	/** Conversation scroller — accessible name */
 	assistantConversationLabel: "Conversation",
 	/** Screen-reader prefix on the user's own messages */
@@ -181,6 +181,12 @@ export const assistant = {
 	assistantTurnErrorModelUnavailable: "The model isn't ready.",
 	/** Turn failed — the conversation outgrew the model's context */
 	assistantTurnErrorContextFull: "This conversation is too long. Start a new one to continue.",
+	/** Turn failed — the user's message alone is too long for the model */
+	assistantTurnErrorMessageTooLong: "This message is too long for the assistant. Try a shorter one.",
+	/** Turn ended without any reply text to show */
+	assistantTurnErrorNoReply: "The assistant didn't come up with a reply. Try rephrasing your request.",
+	/** Shown in place of a reply that was hidden because it repeated the assistant's internal instructions */
+	assistantReplyWithheld: "This reply was hidden because it repeated the assistant's internal instructions.",
 	/** Turn failed — anything else */
 	assistantTurnErrorFailed: "Something went wrong while answering.",
 

@@ -1,5 +1,5 @@
 import { type ReactNode } from "react"
-import Markdown, { type Components } from "react-markdown"
+import Markdown, { type Components, type UrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { cn } from "@filen/shared"
 import { markdownUrlTransform } from "@/features/preview/components/markdownViewer.logic"
@@ -73,7 +73,23 @@ const MARKDOWN_COMPONENTS: Components = {
 }
 
 // `className` replaces the full-pane geometry for an inline host (the assistant's reply bubbles).
-export function MarkdownRenderer({ text, alt, className }: { text: string; alt: string; className?: string | undefined }) {
+// `overrides` replace single elements and `urlTransform` the link policy, for a host with a stricter one;
+// pass module-scope values.
+export function MarkdownRenderer({
+	text,
+	alt,
+	className,
+	overrides,
+	urlTransform = markdownUrlTransform
+}: {
+	text: string
+	alt: string
+	className?: string | undefined
+	overrides?: Components | undefined
+	urlTransform?: UrlTransform | undefined
+}) {
+	const components = overrides === undefined ? MARKDOWN_COMPONENTS : { ...MARKDOWN_COMPONENTS, ...overrides }
+
 	return (
 		<div
 			role="document"
@@ -82,8 +98,8 @@ export function MarkdownRenderer({ text, alt, className }: { text: string; alt: 
 		>
 			<Markdown
 				remarkPlugins={[remarkGfm]}
-				urlTransform={markdownUrlTransform}
-				components={MARKDOWN_COMPONENTS}
+				urlTransform={urlTransform}
+				components={components}
 			>
 				{text}
 			</Markdown>
