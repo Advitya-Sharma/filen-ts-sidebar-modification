@@ -288,6 +288,9 @@ export function createAssistantSession({
 	const proposals = new Map<string, PendingProposal>()
 	const actionLog: AssistantActionLogEntry[] = []
 	let history: AssistantHistoryTurn[] = []
+	// Bumped by reset: a turn of the previous conversation that still completes must not add its exchange to
+	// the new one's history.
+	let conversation = 0
 	let turnCount = 0
 	let active: AbortController | null = null
 
@@ -330,6 +333,7 @@ export function createAssistantSession({
 		controller: AbortController
 	}): Promise<void> {
 		const release = runtime.hold()
+		const turnConversation = conversation
 		const turn = turnExecutor({ executor, signal: controller.signal })
 		let segment = 0
 		let segmentHasText = false
@@ -409,7 +413,10 @@ export function createAssistantSession({
 				nonce
 			})
 
-			history = [...history, { user: message, reply: result.reply }].slice(-HISTORY_MAX)
+			if (turnConversation === conversation) {
+				history = [...history, { user: message, reply: result.reply }].slice(-HISTORY_MAX)
+			}
+
 			steps.close("done")
 			emit({ type: "turn-end", turnId, at: now(), outcome: "complete" })
 		} catch (e) {
@@ -531,11 +538,14 @@ export function createAssistantSession({
 			proposals.get(proposalId)?.decide(false)
 		},
 
-		reset: () => {
+		reset: (resumed = []) => {
 			active?.abort()
-			history = []
+			conversation++
+			history = resumed.slice(-HISTORY_MAX).map(({ user, reply }) => ({ user, reply }))
 			executor.reset()
 		},
+
+		getHistory: () => history,
 
 		getActionLog: () => actionLog
 	}

@@ -89,6 +89,12 @@ export async function kvHas(key: string): Promise<boolean> {
 	return (await api.kvGet(key)) !== null
 }
 
+// The keys under a prefix without their values.
+export async function kvKeys(prefix: string): Promise<string[]> {
+	const { api } = await storage()
+	return api.kvKeys(prefix)
+}
+
 // A leader tab still on an older build has no kvDeletePrefix: its db worker rejects the unknown Comlink
 // method with a TypeError, and leader forwarding keeps the error's name. Tabs run different builds only
 // while an update waits for the user to confirm it.
@@ -104,6 +110,23 @@ async function kvDeleteEach(api: StorageHandle["api"]): Promise<void> {
 
 	if (failed !== undefined) {
 		throw failed.reason
+	}
+}
+
+// Every row under a prefix: one statement, or one delete per key from a leader on an older build.
+export async function kvDeletePrefix(prefix: string): Promise<void> {
+	const { api } = await storage()
+
+	try {
+		await api.kvDeletePrefix(prefix)
+	} catch (e) {
+		if (!isMissingStorageMethod(e)) {
+			throw e
+		}
+
+		const keys = await api.kvKeys(prefix)
+
+		await Promise.all(keys.map(key => api.kvDelete(key)))
 	}
 }
 

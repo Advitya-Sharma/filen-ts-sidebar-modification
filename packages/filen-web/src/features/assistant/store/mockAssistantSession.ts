@@ -1,5 +1,6 @@
 import type {
 	AssistantEvent,
+	AssistantExchange,
 	AssistantModelInfo,
 	AssistantModelState,
 	AssistantProposal,
@@ -65,6 +66,7 @@ export function createMockAssistantSession({
 	let modelState = initialState
 	let turnCount = 0
 	let activeTurnId: string | null = null
+	let history: readonly AssistantExchange[] = []
 
 	function emit(event: AssistantEvent): void {
 		if (event.type === "model") {
@@ -248,6 +250,7 @@ export function createMockAssistantSession({
 				}
 
 				activeTurnId = null
+				history = [...history, { user: message, reply: words.join("") }]
 				emit({ type: "turn-end", turnId, at: Date.now(), outcome: "complete" })
 			},
 			loadSteps + 4 + words.length
@@ -295,6 +298,10 @@ export function createMockAssistantSession({
 		cancel,
 		confirm,
 		reject: () => undefined,
-		reset: cancel
+		reset: (resumed = []) => {
+			cancel()
+			history = resumed
+		},
+		getHistory: () => history
 	}
 }

@@ -11,8 +11,9 @@ import {
 // the whole conversation flow is testable without React or a session.
 
 // pending: awaiting the user. running: confirmed, the write is in flight. expired: a newer message was
-// sent before the card was answered, so it can no longer be confirmed out of context.
-export type ProposalStatus = "pending" | "running" | "done" | "failed" | "cancelled" | "expired"
+// sent before the card was answered, so it can no longer be confirmed out of context. interrupted: a saved
+// card that was still running when its conversation was left, so its outcome is unknown.
+export type ProposalStatus = "pending" | "running" | "done" | "failed" | "cancelled" | "expired" | "interrupted"
 
 // A step with its times (the session's Date.now() clock); `endedAt` once it no longer runs. A queued call's
 // time starts when it runs.
@@ -147,8 +148,8 @@ export function proposalEntryId(proposalId: string): string {
 	return `proposal:${proposalId}`
 }
 
-// A turn of this conversation: its message is in the transcript. A turn stopped by "New conversation"
-// still winds down afterwards; its late events must not land in the new one.
+// A turn of this conversation: its message is in the transcript. A turn stopped by starting or opening
+// another conversation still winds down afterwards; its late events must not land in that one.
 function hasTurn(state: TranscriptState, turnId: string): boolean {
 	return indexOfEntry(state.entries, `user:${turnId}`) !== -1
 }

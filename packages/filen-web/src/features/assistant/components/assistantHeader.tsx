@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
-import { EllipsisIcon, SquarePenIcon, Trash2Icon, XIcon } from "lucide-react"
+import { EllipsisIcon, HistoryIcon, SquarePenIcon, Trash2Icon, XIcon } from "lucide-react"
 import { cn, formatBytes } from "@filen/shared"
 import { Button } from "@/components/ui/button"
 import { TooltipIconButton } from "@/components/ui/tooltipIconButton"
@@ -9,7 +9,13 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { ConfirmDialog } from "@/components/dialogs/confirmDialog"
 import { Kbd } from "@/lib/keymap/kbd"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
-import { modelAcceptsMessages, removeAssistantModel, startNewAssistantConversation } from "@/features/assistant/store/assistantSession"
+import {
+	modelAcceptsMessages,
+	removeAssistantModel,
+	setAssistantHistoryOpen,
+	startNewAssistantConversation
+} from "@/features/assistant/store/assistantSession"
+import { useAssistantHistoryStore } from "@/features/assistant/store/conversationHistory"
 import { ASSISTANT_TITLE_ID } from "@/features/assistant/components/assistantFocus"
 import { canRemoveModel, downloadPercent, modelShowsLoading } from "@/features/assistant/components/assistant.logic"
 import type { AssistantModelState } from "@/features/assistant/types"
@@ -127,6 +133,8 @@ export function AssistantHeader({ onClose }: { onClose: () => void }) {
 	const modelState = useAssistantStore(state => state.modelState)
 	const hasConversation = useAssistantStore(state => state.entries.length > 0)
 	const turnActive = useAssistantStore(state => state.activeTurnId !== null)
+	const historyOpen = useAssistantHistoryStore(state => state.open)
+	const conversing = modelAcceptsMessages(modelState)
 
 	return (
 		<div className="flex shrink-0 items-center gap-2 p-3 app-region-drag">
@@ -141,7 +149,18 @@ export function AssistantHeader({ onClose }: { onClose: () => void }) {
 				turnActive={turnActive}
 			/>
 			<div className="ml-auto flex shrink-0 items-center gap-0.5">
-				{hasConversation && modelAcceptsMessages(modelState) ? (
+				{/* In every model state: saved conversations stay deletable without a model. */}
+				<TooltipIconButton
+					label={t("assistantHistory")}
+					pressed={historyOpen}
+					className="app-region-no-drag"
+					onClick={() => {
+						setAssistantHistoryOpen(!historyOpen)
+					}}
+				>
+					<HistoryIcon />
+				</TooltipIconButton>
+				{hasConversation && conversing && !historyOpen ? (
 					<TooltipIconButton
 						label={t("assistantNewConversation")}
 						className="app-region-no-drag"

@@ -842,6 +842,116 @@ describe("assistant session", () => {
 		expect(emitted).toHaveLength(count)
 	})
 
+	it("resumes a saved conversation's exchanges as the model's context, and a reset starts clean", async () => {
+		const seen: string[][] = []
+
+		class RecordingModel extends ScriptedModel {
+			override generate(request: AssistantGenerateRequest, options: GenerateOptions): Promise<AssistantGenerateResult> {
+				seen.push(request.messages.map(message => message.content))
+
+				return super.generate(request, options)
+			}
+		}
+
+		const model = new RecordingModel({ route: "answer read", steps: ["The receipts are in Scans.", "Hello."] })
+
+		const executor = fakeExecutor()
+		const resetHandles = vi.spyOn(executor, "reset")
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.reset([{ user: "Where is my tax file?", reply: "In Documents." }])
+
+		expect(resetHandles).toHaveBeenCalledTimes(1)
+		expect(session.getHistory()).toEqual([{ user: "Where is my tax file?", reply: "In Documents." }])
+
+		const first = session.send("And the receipts?")
+
+		await waitFor(events, event => event.type === "turn-end" && event.turnId === first)
+
+		expect(seen.some(messages => messages.includes("Where is my tax file?") && messages.includes("In Documents."))).toBe(true)
+		expect(session.getHistory()).toEqual([
+			{ user: "Where is my tax file?", reply: "In Documents." },
+			{ user: "And the receipts?", reply: "The receipts are in Scans." }
+		])
+
+		session.reset()
+		seen.length = 0
+
+		const second = session.send("Hi")
+
+		await waitFor(events, event => event.type === "turn-end" && event.turnId === second)
+
+		expect(seen.flat()).not.toContain("Where is my tax file?")
+		expect(session.getHistory()).toEqual([{ user: "Hi", reply: "Hello." }])
+	})
+
+	it("keeps a turn stopped by a reset out of the next conversation's history", async () => {
+		let started = false
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: (_request, { signal }) =>
+				new Promise((_resolve, reject) => {
+					started = true
+					signal.addEventListener("abort", () => {
+						reject(new Error("aborted"))
+					})
+				})
+		}
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+
+		const turnId = session.send("Hello")
+
+		await vi.waitFor(() => {
+			expect(started).toBe(true)
+		})
+		session.reset([{ user: "earlier", reply: "before" }])
+		await waitFor(events, event => event.type === "turn-end" && event.turnId === turnId)
+
+		expect(session.getHistory()).toEqual([{ user: "earlier", reply: "before" }])
+	})
+
+	it("keeps a turn that still completes after a reset out of the next conversation's history", async () => {
+		let finish: (result: AssistantGenerateResult) => void = () => undefined
+		let replying = false
+		// Ignores the abort, as a generation already decoding its last token can.
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: request => {
+				if (request.grammar === ROUTER_GRAMMAR) {
+					return Promise.resolve({ content: "answer read", toolCalls: [] })
+				}
+
+				replying = true
+
+				return new Promise(resolve => {
+					finish = resolve
+				})
+			}
+		}
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+
+		const turnId = session.send("Hello")
+
+		await vi.waitFor(() => {
+			expect(replying).toBe(true)
+		})
+		session.reset([{ user: "earlier", reply: "before" }])
+		finish({ content: "Late reply.", toolCalls: [] })
+		await waitFor(events, event => event.type === "turn-end" && event.turnId === turnId)
+
+		expect(session.getHistory()).toEqual([{ user: "earlier", reply: "before" }])
+	})
+
 	it("passes the explicit load and the user's typing to the runtime", () => {
 		const runtime = fakeRuntime(new ScriptedModel({ route: "files read", steps: [] }), {
 			kind: "downloaded",

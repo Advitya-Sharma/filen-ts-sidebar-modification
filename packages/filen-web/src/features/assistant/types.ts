@@ -104,6 +104,12 @@ export interface AssistantProposal {
 
 export type AssistantTurnError = "model-unavailable" | "context-full" | "failed"
 
+// One finished exchange of the conversation, as the model sees it in the next turns.
+export interface AssistantExchange {
+	user: string
+	reply: string
+}
+
 export type AssistantEvent =
 	| { type: "model"; state: AssistantModelState }
 	// The FULL screened text of one reply bubble so far, not a delta: the runtime re-screens the whole reply
@@ -147,6 +153,9 @@ export interface AssistantSession {
 	confirm: (proposalId: string) => void
 	// The user declined, or the card expired because a new message was sent first.
 	reject: (proposalId: string) => void
-	// Forgets the conversation so the next turn starts from an empty context.
-	reset: () => void
+	// Forgets the conversation (the running turn, pending cards, the tools' handles) so the next turn starts
+	// from an empty context, or from `history` when an earlier conversation is resumed.
+	reset: (history?: readonly AssistantExchange[]) => void
+	// The exchanges the next turn will see, oldest first.
+	getHistory: () => readonly AssistantExchange[]
 }

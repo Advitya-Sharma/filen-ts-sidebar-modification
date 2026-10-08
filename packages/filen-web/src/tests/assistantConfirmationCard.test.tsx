@@ -13,7 +13,7 @@ import { AssistantConfirmationCard } from "@/features/assistant/components/assis
 import { registerAssistantSession } from "@/features/assistant/store/assistantSession"
 import { createMockAssistantSession, MOCK_ASSISTANT_MODEL } from "@/features/assistant/store/mockAssistantSession"
 import type { ProposalStatus } from "@/features/assistant/store/transcript"
-import type { AssistantProposal, AssistantSession } from "@/features/assistant/types"
+import type { AssistantEvent, AssistantProposal, AssistantSession } from "@/features/assistant/types"
 
 const MOVE: AssistantProposal = {
 	id: "p1",
@@ -28,10 +28,26 @@ const MOVE: AssistantProposal = {
 
 let session: AssistantSession
 let unregister: () => void
+let deliver: (event: AssistantEvent) => void = () => undefined
+
+// As the live turn would: only a card the session itself proposed can be confirmed.
+function propose(proposal: AssistantProposal): void {
+	deliver({ type: "proposal", turnId: "turn-live", proposal })
+}
 
 beforeEach(() => {
 	trusted.value = false
-	session = createMockAssistantSession({ initialState: { kind: "ready", model: MOCK_ASSISTANT_MODEL } })
+
+	const mock = createMockAssistantSession({ initialState: { kind: "ready", model: MOCK_ASSISTANT_MODEL } })
+
+	session = {
+		...mock,
+		subscribe: listener => {
+			deliver = listener
+
+			return mock.subscribe(listener)
+		}
+	}
 	unregister = registerAssistantSession(session)
 })
 
@@ -80,10 +96,34 @@ describe("AssistantConfirmationCard", () => {
 		const confirm = vi.spyOn(session, "confirm")
 
 		trusted.value = true
+		propose(MOVE)
 		renderCard(MOVE)
 		fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
 
 		expect(confirm).toHaveBeenCalledWith("p1")
+	})
+
+	// A card restored from a saved conversation, or left from another one, never reaches the session.
+	it("never confirms a card this page's session did not propose", () => {
+		const confirm = vi.spyOn(session, "confirm")
+
+		trusted.value = true
+		renderCard(MOVE)
+		fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
+
+		expect(confirm).not.toHaveBeenCalled()
+	})
+
+	it("confirms a proposed card once only", () => {
+		const confirm = vi.spyOn(session, "confirm")
+
+		trusted.value = true
+		propose(MOVE)
+		renderCard(MOVE)
+		fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
+		fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
+
+		expect(confirm).toHaveBeenCalledTimes(1)
 	})
 
 	it("declines through the session", () => {
@@ -119,5 +159,12 @@ describe("AssistantConfirmationCard", () => {
 
 		expect(screen.queryByRole("button")).toBeNull()
 		expect(screen.getByText("Expired. Ask again to do this.")).toBeDefined()
+	})
+
+	it("shows a saved card that was still running as interrupted, with no buttons", () => {
+		renderCard(MOVE, "interrupted")
+
+		expect(screen.queryByRole("button")).toBeNull()
+		expect(screen.getByText("This may have finished after you left. Check before asking again.")).toBeDefined()
 	})
 })

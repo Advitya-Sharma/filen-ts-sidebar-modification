@@ -1,6 +1,19 @@
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
 import { pendingProposalIds } from "@/features/assistant/store/transcript"
 import { createMockAssistantSession } from "@/features/assistant/store/mockAssistantSession"
+import {
+	adoptConversationSlot,
+	clearConversations,
+	currentConversationId,
+	deleteConversation,
+	readConversation,
+	registerConversationSnapshot,
+	saveConversationNow,
+	scheduleConversationSave,
+	setHistoryOpen,
+	startConversationSlot
+} from "@/features/assistant/store/conversationHistory"
+import { restoreConversation, serializeConversation, type ConversationMeta } from "@/features/assistant/store/history.logic"
 import type { AssistantEvent, AssistantModelState, AssistantSession } from "@/features/assistant/types"
 
 // Where the runtime plugs in: it calls registerAssistantSession once at import, and the store follows its
@@ -20,6 +33,19 @@ let heldDuringSend: AssistantEvent[] | null = null
 // holds; a hidden tab (no frames) catches up at the turn's end.
 let pending: AssistantEvent[] = []
 let cancelFlush: (() => void) | null = null
+// Cards this page's session proposed and has not settled. Only these can be confirmed: a card restored
+// from a saved conversation, or left from another conversation, never reaches the session as a confirm.
+const liveProposals = new Set<string>()
+// Restored turns get ids of their own (see restoreConversation).
+let restoreCount = 0
+// The newest open request: an older one whose read settles later must not switch over it, and neither
+// may one the user moved on from (closed the list, sent a message, picked the conversation on screen).
+let openRequest = 0
+
+// What changes a saved conversation: a turn starting or ending, a card appearing or settling.
+function changesConversation(event: AssistantEvent): boolean {
+	return event.type === "turn-end" || event.type === "proposal" || event.type === "proposal-settled"
+}
 
 function isUrgent(event: AssistantEvent): boolean {
 	return event.type !== "step" && !(event.type === "reply" && !event.final)
@@ -38,6 +64,10 @@ function flushPending(): void {
 
 	pending = []
 	useAssistantStore.getState().applyEvents(events)
+
+	if (events.some(changesConversation)) {
+		scheduleConversationSave()
+	}
 }
 
 function scheduleFlush(): void {
@@ -93,8 +123,21 @@ export function registerAssistantSession(next: AssistantSession): () => void {
 	unsubscribe?.()
 	dropPending()
 	session = next
+	liveProposals.clear()
+	startConversationSlot()
+	registerConversationSnapshot(() => {
+		const { entries, activeTurnId } = useAssistantStore.getState()
+
+		return { entries, activeTurnId, history: next.getHistory() }
+	})
 	useAssistantStore.getState().resetConversation(next.getModelState())
 	unsubscribe = next.subscribe(event => {
+		if (event.type === "proposal") {
+			liveProposals.add(event.proposal.id)
+		} else if (event.type === "proposal-settled") {
+			liveProposals.delete(event.proposalId)
+		}
+
 		if (heldDuringSend !== null) {
 			heldDuringSend.push(event)
 
@@ -185,6 +228,7 @@ export function sendAssistantMessage(text: string): boolean {
 	}
 
 	for (const proposalId of pendingProposalIds(store.entries)) {
+		liveProposals.delete(proposalId)
 		session.reject(proposalId)
 	}
 
@@ -200,9 +244,11 @@ export function sendAssistantMessage(text: string): boolean {
 		heldDuringSend = null
 	}
 
+	openRequest++
 	store.beginTurn(turnId, message)
 
 	store.applyEvents(held)
+	scheduleConversationSave()
 
 	return true
 }
@@ -214,12 +260,13 @@ export function cancelAssistantTurn(): void {
 // Must run inside the Confirm button's own click handler: the session starts the write synchronously
 // (see AssistantSession.confirm).
 export function confirmAssistantProposal(proposalId: string): void {
-	if (session === null) {
+	if (session === null || !liveProposals.delete(proposalId)) {
 		return
 	}
 
 	useAssistantStore.getState().setProposalStatus(proposalId, "running")
 	session.confirm(proposalId)
+	scheduleConversationSave()
 }
 
 export function rejectAssistantProposal(proposalId: string): void {
@@ -227,8 +274,39 @@ export function rejectAssistantProposal(proposalId: string): void {
 		return
 	}
 
+	liveProposals.delete(proposalId)
 	useAssistantStore.getState().setProposalStatus(proposalId, "cancelled")
 	session.reject(proposalId)
+	scheduleConversationSave()
+}
+
+// Ends whatever the conversation on screen has running: its turn, its cards, its undelivered events.
+function leaveConversation(current: AssistantSession): void {
+	const store = useAssistantStore.getState()
+
+	if (store.activeTurnId !== null) {
+		current.cancel()
+	}
+
+	for (const proposalId of pendingProposalIds(store.entries)) {
+		current.reject(proposalId)
+	}
+
+	liveProposals.clear()
+	dropPending()
+}
+
+// An empty conversation and a session with no context. The one on screen was saved or deleted first.
+function showEmptyConversation(): void {
+	openRequest++
+
+	if (session !== null) {
+		leaveConversation(session)
+		session.reset()
+		useAssistantStore.getState().resetConversation(session.getModelState())
+	}
+
+	startConversationSlot()
 }
 
 export function startNewAssistantConversation(): void {
@@ -236,17 +314,70 @@ export function startNewAssistantConversation(): void {
 		return
 	}
 
-	const store = useAssistantStore.getState()
+	saveConversationNow()
+	showEmptyConversation()
+}
 
-	if (store.activeTurnId !== null) {
-		session.cancel()
+// "missing": it could not be read (deleted meanwhile, or storage failed). "superseded": another switch
+// came first while it was read, and that one stands.
+export type OpenConversationResult = "opened" | "missing" | "superseded"
+
+// Saves the conversation on screen, stops what it has running, and shows the saved one with the model's
+// context restored.
+export async function openAssistantConversation(meta: ConversationMeta): Promise<OpenConversationResult> {
+	if (currentConversationId() === meta.id) {
+		openRequest++
+
+		return "opened"
 	}
 
-	for (const proposalId of pendingProposalIds(store.entries)) {
-		session.reject(proposalId)
+	const request = ++openRequest
+	const body = await readConversation(meta.id)
+	const current = session
+
+	if (request !== openRequest) {
+		return "superseded"
 	}
 
-	session.reset()
-	dropPending()
-	store.resetConversation(session.getModelState())
+	if (body === null || current === null) {
+		return "missing"
+	}
+
+	saveConversationNow()
+	leaveConversation(current)
+
+	const restored = restoreConversation(body, `saved${String(++restoreCount)}`)
+
+	current.reset(restored.history)
+	useAssistantStore.getState().loadConversation(restored.entries)
+	adoptConversationSlot(
+		meta,
+		body.rev,
+		serializeConversation({ entries: restored.entries, activeTurnId: null, history: current.getHistory() }, Date.now())
+	)
+
+	return "opened"
+}
+
+// Closing the list drops an open still reading: the user stays with the conversation on screen.
+export function setAssistantHistoryOpen(open: boolean): void {
+	if (!open) {
+		openRequest++
+	}
+
+	setHistoryOpen(open)
+}
+
+export async function deleteAssistantConversation(id: string): Promise<void> {
+	if (currentConversationId() === id) {
+		showEmptyConversation()
+	}
+
+	await deleteConversation(id)
+}
+
+// The conversation on screen goes too, saved or not.
+export async function clearAssistantConversations(): Promise<void> {
+	showEmptyConversation()
+	await clearConversations()
 }

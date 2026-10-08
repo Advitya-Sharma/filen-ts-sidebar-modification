@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 import "@/lib/i18n"
 
 const { kvStore, viewport } = vi.hoisted(() => ({ kvStore: new Map<string, unknown>(), viewport: { wide: true } }))
@@ -12,8 +12,26 @@ vi.mock("@/lib/storage/adapter", () => ({
 		kvStore.set(key, value)
 
 		return Promise.resolve()
+	},
+	kvEntriesJson: (prefix: string) => Promise.resolve([...kvStore].filter(([key]) => key.startsWith(prefix))),
+	kvKeys: (prefix: string) => Promise.resolve([...kvStore.keys()].filter(key => key.startsWith(prefix))),
+	// Signed in: the session row is there.
+	kvHas: (key: string) => Promise.resolve(key === "sdk.session.v1" || kvStore.has(key)),
+	kvDelete: (key: string) => {
+		kvStore.delete(key)
+
+		return Promise.resolve()
+	},
+	kvDeletePrefix: (prefix: string) => {
+		for (const key of [...kvStore.keys()].filter(key => key.startsWith(prefix))) {
+			kvStore.delete(key)
+		}
+
+		return Promise.resolve()
 	}
 }))
+
+vi.mock("@/lib/sdk/session", () => ({ SESSION_KV_KEY: "sdk.session.v1", onAuthBroadcast: () => () => undefined }))
 
 // The width query only feeds the resize handle; no query client needed.
 vi.mock("@/features/shell/queries/sidebarWidth", () => ({
@@ -30,6 +48,7 @@ import { registerAllActions } from "@/lib/keymap/actions"
 import { AssistantSidePanel } from "@/features/assistant/components/assistantPanel"
 import { AssistantToggle } from "@/features/assistant/components/assistantToggle"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
+import { useAssistantHistoryStore } from "@/features/assistant/store/conversationHistory"
 import { registerAssistantSession } from "@/features/assistant/store/assistantSession"
 import { createMockAssistantSession, MOCK_ASSISTANT_MODEL } from "@/features/assistant/store/mockAssistantSession"
 import type { AssistantModelState, AssistantSession } from "@/features/assistant/types"
@@ -376,5 +395,137 @@ describe("AssistantSidePanel", () => {
 		fireEvent.click(screen.getByRole("button", { name: "Close assistant" }))
 
 		expect(useAssistantStore.getState().panelOpen).toBe(false)
+	})
+})
+
+describe("AssistantHistory", () => {
+	// jsdom has no Web Locks; one tab needs none.
+	beforeEach(() => {
+		useAssistantHistoryStore.setState({ open: false, conversations: null })
+		Object.defineProperty(navigator, "locks", {
+			configurable: true,
+			value: { request: (_name: string, task: () => Promise<unknown>) => task() }
+		})
+	})
+
+	// Past the mock's turn and the save's delay; the list's minute clock keeps re-arming, so never "all".
+	async function settle(): Promise<void> {
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(3000)
+		})
+	}
+
+	async function ask(text: string): Promise<void> {
+		const composer = screen.getByRole("textbox", { name: "Ask the assistant" })
+
+		fireEvent.change(composer, { target: { value: text } })
+		fireEvent.keyDown(composer, { key: "Enter" })
+		await settle()
+	}
+
+	async function showHistory(): Promise<void> {
+		fireEvent.click(screen.getByRole("button", { name: "Conversation history" }))
+		await settle()
+	}
+
+	it("lists saved conversations by day, opens one, starts a new one and deletes one after confirming", async () => {
+		vi.useFakeTimers()
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		await ask("find my taxes")
+		await showHistory()
+
+		expect(screen.getByRole("button", { name: "Conversation history" }).getAttribute("aria-pressed")).toBe("true")
+
+		const list = screen.getByRole("navigation", { name: "Saved conversations" })
+
+		expect(within(list).getByRole("heading", { name: "Today" })).toBeDefined()
+		expect(within(list).getByRole("button", { name: "find my taxes" }).getAttribute("aria-current")).toBe("true")
+
+		fireEvent.click(screen.getByRole("button", { name: "New conversation" }))
+		await settle()
+
+		expect(screen.queryByRole("navigation", { name: "Saved conversations" })).toBeNull()
+		expect(useAssistantStore.getState().entries).toEqual([])
+
+		await showHistory()
+		fireEvent.click(screen.getByRole("button", { name: "find my taxes" }))
+		await settle()
+
+		expect(screen.queryByRole("navigation", { name: "Saved conversations" })).toBeNull()
+		expect(useAssistantStore.getState().entries[0]).toMatchObject({ kind: "user", text: "find my taxes" })
+		expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Ask the assistant" }))
+
+		await showHistory()
+		fireEvent.click(screen.getByRole("button", { name: "Delete “find my taxes”" }))
+		fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }))
+		await settle()
+
+		expect(screen.queryByRole("button", { name: "find my taxes" })).toBeNull()
+		expect(screen.getByText("No saved conversations yet")).toBeDefined()
+		expect(useAssistantStore.getState().entries).toEqual([])
+		// Its row, and the button that opened the dialog, are gone.
+		expect(document.activeElement).toBe(screen.getByRole("button", { name: "New conversation" }))
+	})
+
+	it("clears every saved conversation after confirming", async () => {
+		vi.useFakeTimers()
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		await ask("find my taxes")
+		await showHistory()
+		fireEvent.click(screen.getByRole("button", { name: "Clear history" }))
+		fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Clear history" }))
+		await settle()
+
+		expect(screen.getByText("No saved conversations yet")).toBeDefined()
+		expect([...kvStore.keys()].some(key => key.startsWith("assistant.v1.history."))).toBe(false)
+	})
+
+	it("stays reachable without a usable model: conversations can be deleted, opened only once it is ready", async () => {
+		vi.useFakeTimers()
+		kvStore.set("assistant.v1.history.meta.c1", {
+			id: "c1",
+			title: "find my taxes",
+			createdAt: 1,
+			updatedAt: Date.now(),
+			bytes: 10,
+			rev: "r1"
+		})
+		kvStore.set("assistant.v1.history.body.c1", {
+			v: 1,
+			rev: "r1",
+			entries: [{ kind: "user", turn: 0, text: "find my taxes" }],
+			history: []
+		})
+		withSession({ kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		await showHistory()
+
+		const row = screen.getByRole("button", { name: "find my taxes" })
+
+		expect(row.hasAttribute("disabled")).toBe(true)
+		expect(screen.getByRole("button", { name: "New conversation" }).hasAttribute("disabled")).toBe(true)
+		expect(screen.getByText("Conversations open once the assistant is ready.")).toBeDefined()
+
+		fireEvent.click(row)
+		await settle()
+
+		expect(useAssistantStore.getState().entries).toEqual([])
+
+		fireEvent.click(screen.getByRole("button", { name: "Delete “find my taxes”" }))
+		fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }))
+		await settle()
+
+		expect(screen.getByText("No saved conversations yet")).toBeDefined()
+		expect([...kvStore.keys()].some(key => key.startsWith("assistant.v1.history."))).toBe(false)
+
+		// Closing the list shows the setup screen again.
+		await showHistory()
+
+		expect(screen.queryByText("No saved conversations yet")).toBeNull()
 	})
 })

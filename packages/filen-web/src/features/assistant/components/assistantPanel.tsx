@@ -12,6 +12,8 @@ import { modelAcceptsMessages, trackAssistantPanelShown } from "@/features/assis
 import { AssistantHeader } from "@/features/assistant/components/assistantHeader"
 import { AssistantSetup } from "@/features/assistant/components/assistantSetup"
 import { AssistantConversation } from "@/features/assistant/components/assistantConversation"
+import { AssistantHistory } from "@/features/assistant/components/assistantHistory"
+import { useAssistantHistoryStore } from "@/features/assistant/store/conversationHistory"
 import {
 	ASSISTANT_PANEL_ID,
 	ASSISTANT_TITLE_ID,
@@ -37,6 +39,7 @@ function AssistantSurface({
 	onClose: () => void
 }) {
 	const modelState = useAssistantStore(state => state.modelState)
+	const historyOpen = useAssistantHistoryStore(state => state.open)
 
 	return (
 		<aside
@@ -48,7 +51,13 @@ function AssistantSurface({
 			style={style}
 		>
 			<AssistantHeader onClose={onClose} />
-			{modelAcceptsMessages(modelState) ? <AssistantConversation /> : <AssistantSetup state={modelState} />}
+			{historyOpen ? (
+				<AssistantHistory />
+			) : !modelAcceptsMessages(modelState) ? (
+				<AssistantSetup state={modelState} />
+			) : (
+				<AssistantConversation />
+			)}
 		</aside>
 	)
 }

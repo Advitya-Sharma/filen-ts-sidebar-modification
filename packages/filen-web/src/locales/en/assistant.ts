@@ -25,6 +25,48 @@ export const assistant = {
 	/** Drag handle on the panel's left edge — accessible name of the separator */
 	assistantResize: "Resize assistant panel",
 
+	// ── Conversation history ─────────────────────────────────────────────────
+	/** Header toggle — shows the saved conversations in place of the current one */
+	assistantHistory: "Conversation history",
+	/** History list — accessible name of the list of saved conversations */
+	assistantHistoryListLabel: "Saved conversations",
+	/** History group header — last active today */
+	assistantHistoryToday: "Today",
+	/** History group header — last active yesterday */
+	assistantHistoryYesterday: "Yesterday",
+	/** History group header — last active within the 7 days before yesterday */
+	assistantHistoryPrevious7Days: "Previous 7 days",
+	/** History group header — last active earlier */
+	assistantHistoryOlder: "Older",
+	/** History row — a conversation whose first message was empty after trimming */
+	assistantHistoryUntitled: "Untitled conversation",
+	/** History — nothing saved yet */
+	assistantHistoryEmpty: "No saved conversations yet",
+	/** History — where conversations are kept; the privacy promise */
+	assistantHistoryNote: "Conversations are saved on this device only and removed when you sign out.",
+	/** History row — button that deletes one conversation; {{title}} is its title */
+	assistantHistoryDelete: "Delete “{{title}}”",
+	/** Delete-conversation confirmation — title */
+	assistantHistoryDeleteTitle: "Delete this conversation?",
+	/** Delete-conversation confirmation — body; {{title}} is its title */
+	assistantHistoryDeleteBody: "“{{title}}” is removed from this device. This can't be undone.",
+	/** Delete-conversation confirmation — confirm button */
+	assistantHistoryDeleteConfirm: "Delete",
+	/** History — removes every saved conversation */
+	assistantHistoryClear: "Clear history",
+	/** Clear-history confirmation — title */
+	assistantHistoryClearTitle: "Clear the conversation history?",
+	/** Clear-history confirmation — body */
+	assistantHistoryClearBody: "Every saved conversation, including the one open now, is removed from this device. This can't be undone.",
+	/** Clear-history confirmation — confirm button */
+	assistantHistoryClearConfirm: "Clear history",
+	/** Toast — a saved conversation could not be read (deleted in another tab, or storage failed) */
+	assistantHistoryOpenFailed: "Couldn't open this conversation",
+	/** History — shown while the model can't be used yet; deleting still works */
+	assistantHistoryNeedsModel: "Conversations open once the assistant is ready.",
+	/** Toast — deleting or clearing saved conversations failed */
+	assistantHistoryDeleteFailed: "Couldn't delete the saved conversations",
+
 	// ── Status chip in the header ────────────────────────────────────────────
 	/** Status chip — the device can't run the model */
 	assistantStatusUnavailable: "Unavailable",
@@ -387,6 +429,8 @@ export const assistant = {
 	assistantProposalCancelled: "Cancelled",
 	/** Card status — a newer message was sent before it was answered */
 	assistantProposalExpired: "Expired. Ask again to do this.",
+	/** Card status — a saved card that was still running when its conversation was left */
+	assistantProposalInterrupted: "This may have finished after you left. Check before asking again.",
 	/** Announced when a card appears, after the reply */
 	assistantProposalAnnouncement: "Confirmation needed: {{title}}",
 

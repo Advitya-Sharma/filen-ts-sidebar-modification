@@ -9,6 +9,19 @@ vi.mock("@/lib/storage/adapter", () => ({
 		kvStore.set(key, value)
 
 		return Promise.resolve()
+	},
+	kvEntriesJson: (prefix: string) => Promise.resolve([...kvStore].filter(([key]) => key.startsWith(prefix))),
+	kvDelete: (key: string) => {
+		kvStore.delete(key)
+
+		return Promise.resolve()
+	},
+	kvDeletePrefix: (prefix: string) => {
+		for (const key of [...kvStore.keys()].filter(key => key.startsWith(prefix))) {
+			kvStore.delete(key)
+		}
+
+		return Promise.resolve()
 	}
 }))
 

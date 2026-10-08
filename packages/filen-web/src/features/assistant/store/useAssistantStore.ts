@@ -8,13 +8,15 @@ import {
 	setStepsExpanded,
 	INITIAL_TRANSCRIPT_STATE,
 	type ProposalStatus,
+	type TranscriptEntry,
 	type TranscriptState
 } from "@/features/assistant/store/transcript"
 import type { AssistantEvent, AssistantModelState } from "@/features/assistant/types"
 
-// The assistant panel's UI state. The transcript is in-memory only: it holds decrypted names and note
-// or chat excerpts, so it never reaches storage. Only whether the panel is open persists (kv is wiped on
-// logout, so it is per account without a prefix).
+// The assistant panel's UI state. The transcript holds decrypted names and note or chat excerpts, so it
+// reaches storage only as a saved conversation on this device (conversationHistory.ts: kv, which logout
+// wipes, so it is per account without a prefix), never with raw tool output. Whether the panel is open
+// persists the same way.
 const PANEL_OPEN_KV_KEY = "assistant.v1.panelOpen"
 
 interface AssistantStore extends TranscriptState {
@@ -38,6 +40,8 @@ interface AssistantStore extends TranscriptState {
 	setStepsExpanded: (turnId: string, expanded: boolean) => void
 	// A different session took over: its model state, and an empty conversation (the old one's context is gone).
 	resetConversation: (modelState: AssistantModelState) => void
+	// A saved conversation replaces the current one, settled: no turn runs in it.
+	loadConversation: (entries: readonly TranscriptEntry[]) => void
 }
 
 export const useAssistantStore = create<AssistantStore>((set, get) => ({
@@ -85,6 +89,9 @@ export const useAssistantStore = create<AssistantStore>((set, get) => ({
 	},
 	resetConversation: modelState => {
 		set({ ...INITIAL_TRANSCRIPT_STATE, modelState })
+	},
+	loadConversation: entries => {
+		set({ entries, activeTurnId: null, settled: null })
 	}
 }))
 

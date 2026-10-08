@@ -20,6 +20,7 @@ import { releaseHeicWorker } from "@/features/preview/lib/heicTransform"
 import { useDriveClipboardStore } from "@/features/drive/store/useDriveClipboardStore"
 import { clearDirectoryTreeState } from "@/features/drive/store/useDirectoryTreeStore"
 import { discardListingPatches } from "@/features/drive/queries/drive"
+import { resetConversationHistory, withHistoryWritesHeld } from "@/features/assistant/store/conversationHistory"
 import { confirmDiscardUnsavedPreview, usePreviewUnsavedGuardStore } from "@/features/preview/store/usePreviewUnsavedGuard"
 import { queryClient } from "@/queries/client"
 import { toast } from "sonner"
@@ -118,6 +119,8 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 	// The drive clipboard's items and the sidebar tree's expanded directories belong to this account.
 	useDriveClipboardStore.getState().clear()
 	clearDirectoryTreeState()
+	// The assistant's saved conversations: a save still waiting out its delay must not land after the wipe.
+	resetConversationHistory()
 	// Tear the realtime socket down before the client is released — unsubscribeFromSocket needs the live
 	// client. Fire-and-forget: the worker also frees the listener in releaseClient as a backstop.
 	void socketBridge.stop()
@@ -131,7 +134,8 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 		},
 		sdkLogout: () => sdkApi.logout(),
 		clearSession,
-		kvClear,
+		// A conversation write already past its checks, in any tab, lands before the wipe, never after it.
+		kvClear: () => withHistoryWritesHeld(kvClear),
 		wipeThumbnails: wipeThumbnailStore,
 		wipeServiceWorker: wipeSwClient,
 		wipesLanded: () => {

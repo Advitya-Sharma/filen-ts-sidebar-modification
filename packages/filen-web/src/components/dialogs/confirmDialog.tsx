@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react"
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -21,6 +22,8 @@ interface ConfirmDialogProps {
 	destructive?: boolean
 	onOpenChange: (open: boolean) => void
 	onConfirm: () => void
+	// Where focus goes on close when the trigger may be gone by then (the confirmed action removed it).
+	finalFocus?: ComponentProps<typeof AlertDialogContent>["finalFocus"]
 }
 
 // Generic confirm/cancel prompt built on the alert-dialog primitive — the shared base for every "are
@@ -48,7 +51,8 @@ function ConfirmDialog({
 	cancelLabel,
 	destructive: destructiveProp,
 	onOpenChange,
-	onConfirm
+	onConfirm,
+	finalFocus
 }: ConfirmDialogProps) {
 	// Not a destructuring default, which the React Compiler cannot lower.
 	const destructive = destructiveProp ?? false
@@ -60,7 +64,7 @@ function ConfirmDialog({
 			open={open}
 			onOpenChange={handleOpenChange}
 		>
-			<AlertDialogContent>
+			<AlertDialogContent finalFocus={finalFocus}>
 				<AlertDialogHeader>
 					<AlertDialogTitle>{title}</AlertDialogTitle>
 					<AlertDialogDescription>{body}</AlertDialogDescription>

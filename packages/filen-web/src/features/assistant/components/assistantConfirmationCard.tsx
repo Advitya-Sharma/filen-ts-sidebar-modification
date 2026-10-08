@@ -93,6 +93,8 @@ function SettledStatus({ status }: { status: Exclude<ProposalStatus, "pending"> 
 			return <span className="text-muted-foreground">{t("assistantProposalCancelled")}</span>
 		case "expired":
 			return <span className="text-muted-foreground">{t("assistantProposalExpired")}</span>
+		case "interrupted":
+			return <span className="text-muted-foreground">{t("assistantProposalInterrupted")}</span>
 	}
 }
 

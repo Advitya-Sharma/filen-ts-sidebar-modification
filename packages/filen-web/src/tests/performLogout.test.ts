@@ -17,6 +17,8 @@ const {
 	detachUnreadBadges,
 	disposeAudioEngine,
 	releaseHeicWorker,
+	resetConversationHistory,
+	withHistoryWritesHeld,
 	socketStop,
 	toastWarning,
 	wipeThumbnailStore
@@ -40,6 +42,12 @@ const {
 		detachUnreadBadges: vi.fn(record("detachUnreadBadges", () => undefined)),
 		disposeAudioEngine: vi.fn(record("disposeAudioEngine", () => undefined)),
 		releaseHeicWorker: vi.fn(record("releaseHeicWorker", () => undefined)),
+		resetConversationHistory: vi.fn(record("resetConversationHistory", () => undefined)),
+		withHistoryWritesHeld: vi.fn((task: () => Promise<void>) => {
+			calls.push("withHistoryWritesHeld")
+
+			return task()
+		}),
 		socketStop: vi.fn(record("socketBridge.stop", () => Promise.resolve())),
 		toastWarning: vi.fn(),
 		wipeThumbnailStore: vi.fn(() => Promise.resolve())
@@ -55,6 +63,7 @@ const TEARDOWN_STEPS = [
 	"detachUnreadBadges",
 	"disposeAudioEngine",
 	"releaseHeicWorker",
+	"resetConversationHistory",
 	"socketBridge.stop"
 ]
 
@@ -71,10 +80,12 @@ vi.mock("@/lib/sdk/session", () => ({ clearSession: vi.fn(), broadcastAuth: vi.f
 vi.mock("@/lib/storage/adapter", () => ({ kvClear: vi.fn() }))
 vi.mock("@/features/drive/lib/thumbCache", () => ({ wipeThumbnailStore, readThumbnailBlob: vi.fn(), deleteThumbnail: vi.fn() }))
 vi.mock("@/features/audio/lib/audioEngine", () => ({ disposeAudioEngine }))
+vi.mock("@/features/assistant/store/conversationHistory", () => ({ resetConversationHistory, withHistoryWritesHeld }))
 vi.mock("@/features/preview/lib/heicTransform", () => ({ releaseHeicWorker, transformHeicBytesOwned: vi.fn() }))
 vi.mock("@/queries/client", () => ({ queryClient: { cancelQueries: vi.fn(), clear: vi.fn() } }))
 vi.mock("sonner", () => ({ toast: { warning: toastWarning } }))
 
+import { kvClear } from "@/lib/storage/adapter"
 import { usePreviewUnsavedGuardStore } from "@/features/preview/store/usePreviewUnsavedGuard"
 import { performLogout } from "@/features/shell/lib/performLogout"
 import { consumeUnloadAllowance } from "@/lib/unloadGuard"
@@ -113,6 +124,15 @@ describe("performLogout", () => {
 	it("runs the wipe straight away when no preview buffer is dirty", async () => {
 		await expect(performLogout()).resolves.toBe(true)
 		expect(runLogout).toHaveBeenCalledTimes(1)
+	})
+
+	it("wipes kv only while holding the assistant history's write lock", async () => {
+		await performLogout()
+		calls.length = 0
+		await runLogout.mock.calls[0]?.[0].kvClear()
+
+		expect(calls).toEqual(["withHistoryWritesHeld"])
+		expect(kvClear).toHaveBeenCalledTimes(1)
 	})
 
 	it("hands the wipe the OPFS thumbnail-cache wipe", async () => {
