@@ -491,6 +491,8 @@ function trail(events: readonly AssistantTurnEvent[]): string[] {
 				return `route ${String(event.route)}`
 			case "progress":
 				return `progress ${String(event.progress.processed)}/${String(event.progress.total)}`
+			case "callProgress":
+				return `callProgress ${event.callId} ${String(event.progress.share)} ${String(event.progress.found)}`
 			case "reply":
 				return event.final ? "reply final" : "reply"
 			case "call": {
@@ -547,6 +549,31 @@ describe("runAssistantTurn events", () => {
 			"reply",
 			"reply final"
 		])
+	})
+
+	it("passes a running call's own progress through, and nothing it reports once it settled", async () => {
+		let late: (() => void) | undefined
+		const fake = new FakeExecutor({ items: [], results: { search_items: () => ({ results: [] }) } })
+		const executor: AssistantToolExecutor = {
+			context: () => fake.context(),
+			check: call => fake.check(call),
+			execute: call => {
+				call.onProgress?.({ share: 0.5, found: 3 })
+				late = () => call.onProgress?.({ share: 1, found: 9 })
+
+				return fake.execute(call)
+			}
+		}
+
+		const model = new ScriptedModel({ route: "files read", steps: [call("search_items", { query: "invoice" }), "None."] })
+		const { events } = await turn({ model, executor, message: "Find my invoice" })
+
+		late?.()
+
+		const lines = trail(events)
+
+		expect(lines.filter(line => line.startsWith("callProgress"))).toEqual(["callProgress call_1_0 0.5 3"])
+		expect(lines.indexOf("callProgress call_1_0 0.5 3")).toBeLessThan(lines.indexOf("call call_1_0 search_items ok \"invoice\" 0"))
 	})
 
 	it("waits on the confirmation between its phase and the tool's, naming the item", async () => {

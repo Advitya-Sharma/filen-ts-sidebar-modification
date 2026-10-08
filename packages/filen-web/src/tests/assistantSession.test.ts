@@ -644,6 +644,38 @@ describe("assistant session", () => {
 		expect(events.at(-1)).toMatchObject({ type: "turn-end", outcome: "cancelled" })
 	})
 
+	it("shows a running call's own progress on its row, and drops it once the call is done", () => {
+		const emitted: AssistantEvent[] = []
+		const steps = turnSteps({ turnId: "t", emit: event => emitted.push(event), now: () => 0 })
+		const record = {
+			id: "call_1_0",
+			step: 1,
+			tool: "search_items",
+			title: "Search",
+			effect: "read" as const,
+			consequential: false,
+			args: {}
+		}
+
+		// Progress for a row not running yet is ignored.
+		steps.event({ type: "callProgress", callId: "call_1_0", progress: { share: 0.1, found: 1 } })
+		steps.event({ type: "call", call: { ...record, status: "running" } })
+		steps.event({ type: "callProgress", callId: "call_1_0", progress: { share: 0.4, found: 12 } })
+		steps.event({ type: "callProgress", callId: "call_1_0", progress: { share: 0.4, found: 12 } })
+		steps.event({ type: "callProgress", callId: "call_1_0", progress: { share: null, found: null } })
+		steps.event({ type: "call", call: { ...record, status: "ok", resultCount: 3, resultMore: false } })
+
+		const rows = emitted.flatMap(event => (event.type === "step" && event.step.kind === "tool" ? [event.step] : []))
+
+		expect(rows.map(row => [row.status, row.progress, row.found])).toEqual([
+			["active", null, undefined],
+			["active", 0.4, 12],
+			// No count reported: the last one stays.
+			["active", null, 12],
+			["done", null, undefined]
+		])
+	})
+
 	it("drops what reaches a turn's steps after it closed", () => {
 		const emitted: AssistantEvent[] = []
 		const steps = turnSteps({ turnId: "t", emit: event => emitted.push(event), now: () => 0 })

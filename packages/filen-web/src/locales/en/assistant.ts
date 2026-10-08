@@ -291,6 +291,10 @@ export const assistant = {
 	assistantStepCountPlaylists_one: "{{count}} playlist",
 	/** Step result — how many playlists a listing returned */
 	assistantStepCountPlaylists_other: "{{count}} playlists",
+	/** Step progress — a drive search still running; how many names it is still checking against the query, {{figure}} is the formatted count */
+	assistantStepCandidates_one: "{{figure}} candidate",
+	/** Step progress — a drive search still running; how many names it is still checking against the query, {{figure}} is the formatted count */
+	assistantStepCandidates_other: "{{figure}} candidates",
 	/** Step state — the action waits for the user's confirmation on the card below */
 	assistantStepWaiting: "Waiting for your confirmation",
 	/** Step state — the action is ready and runs once the one before it finished */

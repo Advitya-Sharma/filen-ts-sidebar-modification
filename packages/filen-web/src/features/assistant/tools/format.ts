@@ -114,24 +114,24 @@ export function rawSearchTokens(value: string): string[] {
 	return queryWords(value)
 }
 
-// The one word a substring engine is asked for: the one likeliest to narrow the hits, a word over a number,
-// the longest otherwise, as its singular stem so it also finds the other form ("invoices" asks for
-// "invoice").
-export function engineToken(tokens: readonly string[]): string | null {
-	const ranked = tokens
-		.filter(token => token.length > 0)
-		.toSorted((a, b) => Number(/^\p{N}+$/u.test(a)) - Number(/^\p{N}+$/u.test(b)) || b.length - a.length)
-	const token = ranked[0]
-
-	if (token === undefined) {
-		return null
-	}
-
-	if (token.length > 4 && token.endsWith("es")) {
+// A word's singular, for a substring engine: "invoices" asks for "invoice", "boxes" for "box".
+function singularStem(token: string): string {
+	if (token.length > 4 && /(?:s|x|z|ch|sh)es$/u.test(token)) {
 		return token.slice(0, -2)
 	}
 
 	return token.length > 3 && token.endsWith("s") && !token.endsWith("ss") ? token.slice(0, -1) : token
+}
+
+// The words a substring engine may be asked for, the likeliest to narrow the hits first: words before
+// numbers, longer before shorter, each as its singular so it also finds the other form, none twice.
+export function engineTokens(tokens: readonly string[], max: number): string[] {
+	const ranked = tokens
+		.filter(token => token.length > 0)
+		.toSorted((a, b) => Number(/^\p{N}+$/u.test(a)) - Number(/^\p{N}+$/u.test(b)) || b.length - a.length)
+		.map(singularStem)
+
+	return [...new Set(ranked)].slice(0, max)
 }
 
 // "invoices" finds "Invoice_2024.pdf": names are matched word by word with crude plural folding.

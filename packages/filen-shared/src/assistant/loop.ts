@@ -152,6 +152,13 @@ export type AssistantToolFailure = {
 	candidates?: readonly AssistantToolCandidate[]
 }
 
+// A running call's own progress, for a call that can take a while (a search waiting for the drive's index):
+// the `share` (0..1) of its work done and how many results it has `found` so far, each null when unknown.
+export type AssistantToolProgress = {
+	share: number | null
+	found: number | null
+}
+
 // The app side of the loop. Implementations hand out short handles ("f3", "n2") and keep the mapping to
 // real items for the session; the model never sees a UUID.
 export interface AssistantToolExecutor {
@@ -175,13 +182,15 @@ export interface AssistantToolExecutor {
 	name?(handle: string): string | undefined
 	// False for a tool this app cannot run (yet); it is never offered to the model. All tools when absent.
 	supports?(tool: AssistantTool): boolean
-	// `confirmed` is true only for a consequential call the user confirmed.
+	// `confirmed` is true only for a consequential call the user confirmed. `onProgress` may be called while
+	// the call runs; calls after it settled are dropped.
 	execute(call: {
 		callId: string
 		tool: AssistantTool
 		args: Record<string, unknown>
 		confirmed: boolean
 		signal: AssistantSignal
+		onProgress?: (progress: AssistantToolProgress) => void
 	}): Promise<AssistantToolOutcome>
 }
 
@@ -245,6 +254,12 @@ export type AssistantTurnEvent =
 			// reply) being read.
 			type: "progress"
 			progress: AssistantPromptProgress
+	  }
+	| {
+			// The running call's own progress, as its executor reports it.
+			type: "callProgress"
+			callId: string
+			progress: AssistantToolProgress
 	  }
 
 export type AssistantHistoryTurn = {
@@ -1073,13 +1088,28 @@ export async function runAssistantTurn({
 								phase: "tool"
 							})
 
-							const outcome = await executor.execute({
-								callId: record.id,
-								tool,
-								args,
-								confirmed: isConsequentialTool(tool),
-								signal
-							})
+							const callId = record.id
+							let running = true
+							const outcome = await executor
+								.execute({
+									callId,
+									tool,
+									args,
+									confirmed: isConsequentialTool(tool),
+									signal,
+									onProgress: progress => {
+										if (running && !signal.aborted) {
+											onEvent({
+												type: "callProgress",
+												callId,
+												progress
+											})
+										}
+									}
+								})
+								.finally(() => {
+									running = false
+								})
 
 							if (outcome.ok) {
 								guard.record({

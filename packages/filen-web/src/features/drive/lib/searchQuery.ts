@@ -1,21 +1,38 @@
+import * as Comlink from "comlink"
 import { sdkApi } from "@/lib/sdk/client"
 import { buildSearchResults, type SearchResults } from "@/features/drive/hooks/useDriveSearch.logic"
 import { GRACE_MS } from "@/features/drive/lib/searchStatus.logic"
+import type { SearchQueryProgress } from "@/workers/searchEngine"
 
-export type DriveSearchOnceResult = SearchResults & { total: bigint; settled: boolean }
+export type DriveSearchOnceResult = SearchResults & { total: bigint; settled: boolean; name: string }
 
-// A whole-drive name search for a caller that is not the search box (the assistant). It runs on the
-// one shared search engine only while the user's own search is idle, and the user's next keystroke
-// supersedes it (searchEngine.ts's query); null means the engine was the user's. Hits become DriveItems
-// through the same projection the search box uses.
-// `signal` stops the query in the worker; it then answers with what it had.
+export type DriveSearchProgress = SearchQueryProgress
+
+// A whole-drive name search for a caller that is not the search box (the assistant), on an engine handle
+// of its own beside the user's search, kept registered for `keepMs` after the last (searchEngine.ts's query), so neither disturbs the other. `names`
+// are tried in order while one matches more than the engine's window holds; the hits are the fewest
+// any of them had, projected into DriveItems the way the search box does. `signal` stops the query in
+// the worker, which then answers with what it had.
 let nextQueryId = 1
 
 export async function searchDriveOnce(
-	name: string,
-	capMs: number,
-	{ signal, itemType = "all" }: { signal?: AbortSignal | undefined; itemType?: "all" | "file" | "dir" } = {}
-): Promise<DriveSearchOnceResult | null> {
+	names: readonly string[],
+	{
+		capMs,
+		stallMs,
+		keepMs,
+		signal,
+		itemType = "all",
+		onProgress
+	}: {
+		capMs: number
+		stallMs: number
+		keepMs: number
+		signal?: AbortSignal | undefined
+		itemType?: "all" | "file" | "dir"
+		onProgress?: ((progress: DriveSearchProgress) => void) | undefined
+	}
+): Promise<DriveSearchOnceResult> {
 	signal?.throwIfAborted()
 
 	const id = nextQueryId++
@@ -26,13 +43,13 @@ export async function searchDriveOnce(
 	signal?.addEventListener("abort", onAbort, { once: true })
 
 	try {
-		const result = await sdkApi.searchQuery({ rootUuid: null, name, itemType }, { settleMs: GRACE_MS, capMs, id })
+		const result = await sdkApi.searchQuery(
+			{ rootUuid: null, names, itemType },
+			{ settleMs: GRACE_MS, stallMs, capMs, keepMs, id },
+			onProgress === undefined ? undefined : Comlink.proxy(onProgress)
+		)
 
-		if (result.status === "busy") {
-			return null
-		}
-
-		return { ...buildSearchResults(result.snapshot.hits), total: result.snapshot.total, settled: result.settled }
+		return { ...buildSearchResults(result.snapshot.hits), total: result.snapshot.total, settled: result.settled, name: result.name }
 	} finally {
 		signal?.removeEventListener("abort", onAbort)
 	}

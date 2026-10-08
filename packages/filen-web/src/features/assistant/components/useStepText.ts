@@ -13,17 +13,20 @@ export interface StepText {
 	label: string
 	// What came of it, or why it stopped; null when the glyph says it all.
 	detail: string | null
+	// How far a running call got, shown in its row; changes too often for the live region to read.
+	live: string | null
 }
 
-const secondFormats = new Map<string, Intl.NumberFormat>()
+const figureFormats = new Map<string, Intl.NumberFormat>()
 
-function secondFormat(locale: string, fractionDigits: 0 | 1): Intl.NumberFormat {
+// Seconds and counts, grouped and with the decimal mark of the locale.
+function figureFormat(locale: string, fractionDigits: 0 | 1): Intl.NumberFormat {
 	const key = `${locale}|${String(fractionDigits)}`
-	let format = secondFormats.get(key)
+	let format = figureFormats.get(key)
 
 	if (format === undefined) {
 		format = new Intl.NumberFormat(locale, { minimumFractionDigits: fractionDigits, maximumFractionDigits: fractionDigits })
-		secondFormats.set(key, format)
+		figureFormats.set(key, format)
 	}
 
 	return format
@@ -36,14 +39,14 @@ export function useDurationText(): (ms: number, live: boolean) => string {
 	return (ms, live) => {
 		const { seconds, fractionDigits } = durationFigure(ms, live)
 
-		return t("assistantDurationSeconds", { seconds: secondFormat(i18n.language, fractionDigits).format(seconds) })
+		return t("assistantDurationSeconds", { seconds: figureFormat(i18n.language, fractionDigits).format(seconds) })
 	}
 }
 
 // A step's wording, also what the live region reads. A subject is plain text from the runtime (sanitized,
 // shortened) and only ever interpolated into a text node.
 export function useStepText(): (step: TranscriptStep) => StepText {
-	const { t } = useTranslation("assistant")
+	const { t, i18n } = useTranslation("assistant")
 
 	const count = (tool: string, resultCount: number, more: boolean): string => {
 		switch (stepCountNoun(tool)) {
@@ -61,29 +64,30 @@ export function useStepText(): (step: TranscriptStep) => StepText {
 	}
 
 	const ended = (status: TranscriptStep["status"]): string | null => (status === "stopped" ? t("assistantStepStopped") : null)
+	const plain = (label: string, detail: string | null): StepText => ({ label, detail, live: null })
 
 	return step => {
 		switch (step.kind) {
 			case "loading":
-				return {
-					label: t(
+				return plain(
+					t(
 						step.status === "done"
 							? "assistantStepLoaded"
 							: step.status === "failed"
 								? "assistantStepLoadFailed"
 								: "assistantStepLoading"
 					),
-					detail: ended(step.status)
-				}
+					ended(step.status)
+				)
 			case "routing":
-				return {
-					label: step.status === "done" && step.route !== null ? t(ROUTE_KEYS[step.route]) : t("assistantStepRouting"),
-					detail: ended(step.status)
-				}
+				return plain(
+					step.status === "done" && step.route !== null ? t(ROUTE_KEYS[step.route]) : t("assistantStepRouting"),
+					ended(step.status)
+				)
 			case "thinking":
-				return { label: t("assistantStepThinking"), detail: ended(step.status) }
+				return plain(t("assistantStepThinking"), ended(step.status))
 			case "replying":
-				return { label: t("assistantStepReplying"), detail: ended(step.status) }
+				return plain(t("assistantStepReplying"), ended(step.status))
 			case "tool": {
 				const subjectKey = toolSubjectKey(step.tool)
 				const label =
@@ -102,7 +106,15 @@ export function useStepText(): (step: TranscriptStep) => StepText {
 					detail = ended(step.status)
 				}
 
-				return { label, detail }
+				return {
+					label,
+					detail,
+					// The engine's candidates for one word of the query, before the call narrows them to the results.
+					live:
+						step.status === "active" && step.found !== undefined
+							? t("assistantStepCandidates", { count: step.found, figure: figureFormat(i18n.language, 0).format(step.found) })
+							: null
+				}
 			}
 		}
 	}

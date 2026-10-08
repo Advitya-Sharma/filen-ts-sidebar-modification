@@ -1,5 +1,5 @@
 import { driveItemName, fastLocaleCompare, formatBytes } from "@filen/shared"
-import { MAX_ARRAY_ITEMS } from "@filen/shared/assistant"
+import { MAX_ARRAY_ITEMS, type AssistantSignal } from "@filen/shared/assistant"
 import { log } from "@/lib/log"
 import { queryClient } from "@/queries/client"
 import { cachedListing, directorySizeQueryOptions, fetchItemInfo, itemInfoQueryKey } from "@/features/drive/queries/drive"
@@ -7,6 +7,7 @@ import { asDirectoryOrFile, driveItemMime, isDirectoryItem, lastModifiedOf, narr
 import { decodeUtf8, extensionOf, looksBinary, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
 import { defaultRevealDeps, resolveContainingDirectoryTarget } from "@/features/drive/lib/reveal"
 import { searchDriveOnce, type DriveSearchOnceResult } from "@/features/drive/lib/searchQuery"
+import { WATCHDOG_MS } from "@/features/drive/lib/searchStatus.logic"
 import { useDriveStore } from "@/features/drive/store/useDriveStore"
 import { spreadsheetFileKind } from "@/features/spreadsheet/lib/fileKind"
 import { loadDriveFileBytes } from "@/features/preview/lib/fileBytes"
@@ -31,7 +32,7 @@ import {
 import {
 	AssistantToolError,
 	clipText,
-	engineToken,
+	engineTokens,
 	isoDate,
 	matchScore,
 	normalizeText,
@@ -42,8 +43,18 @@ import {
 import { ROOT_HANDLE, type AssistantEntity } from "@/features/assistant/tools/handles"
 
 const SEARCH_LIMIT = 12
-// How long a search may wait for the index to settle before answering with what it has; Stop ends it sooner.
-const SEARCH_CAP_MS = 20_000
+// How long a turn's searches may wait for the drive's index in all: a first index of a very large drive
+// takes minutes, and the step shows the progress meanwhile. Stop ends it at once.
+export const SEARCH_CAP_MS = 300_000
+// A search once the turn's budget is spent still reads what the index already holds.
+const SEARCH_FLOOR_MS = 2_000
+// A resync silent this long ends the wait: as long as the search box's own watchdog, since a long apply
+// reports nothing and the messages are lossy.
+const SEARCH_STALL_MS = WATCHDOG_MS
+// The engine keeps the drive registered this long after a search, so a follow-up costs no new resync.
+const SEARCH_KEEP_MS = 10 * 60_000
+// The words the engine may try in turn while one matches more names than its window holds.
+const ENGINE_WORDS = 3
 // The loop shows the model at most this many items of a list: a longer listing would be cut twice.
 const LIST_LIMIT = MAX_ARRAY_ITEMS
 // read_text_file downloads the whole file, so only small ones; the model sees far less of it.
@@ -81,11 +92,42 @@ function engineItemType(kind: string | undefined): "all" | "file" | "dir" {
 	return kind === undefined ? "all" : kind === "directory" ? "dir" : "file"
 }
 
-// The engine's hits for one word: null when the user's own search holds the engine (or it failed).
-async function engineSearch(word: string, kind: string | undefined, scope: ToolScope): Promise<DriveSearchOnceResult | null> {
-	const result = await searchDriveOnce(word, SEARCH_CAP_MS, {
+// Each turn's deadline: a model retrying other words would otherwise wait out the same index build again
+// on every step, holding the loaded model all along.
+const turnDeadlines = new WeakMap<AssistantSignal, number>()
+
+function searchBudget(signal: AssistantSignal | undefined): number {
+	const now = Date.now()
+
+	if (signal === undefined) {
+		return SEARCH_CAP_MS
+	}
+
+	let deadline = turnDeadlines.get(signal)
+
+	if (deadline === undefined) {
+		deadline = now + SEARCH_CAP_MS
+		turnDeadlines.set(signal, deadline)
+	}
+
+	return Math.max(SEARCH_FLOOR_MS, deadline - now)
+}
+
+// The engine's hits for the most selective of `words`; null when the engine failed.
+async function engineSearch(words: readonly string[], kind: string | undefined, scope: ToolScope): Promise<DriveSearchOnceResult | null> {
+	const { progress } = scope
+	const result = await searchDriveOnce(words, {
+		capMs: searchBudget(scope.signal),
+		stallMs: SEARCH_STALL_MS,
+		keepMs: SEARCH_KEEP_MS,
 		signal: abortSignalOf(scope.signal),
-		itemType: engineItemType(kind)
+		itemType: engineItemType(kind),
+		onProgress:
+			progress === undefined
+				? undefined
+				: ({ indexed, candidates }) => {
+						progress({ share: indexed, found: Number(candidates) })
+					}
 	}).catch((e: unknown) => {
 		if (scope.signal?.aborted !== true) {
 			log.warn("assistant", "drive search failed", e)
@@ -104,41 +146,44 @@ function truncated(result: DriveSearchOnceResult): boolean {
 	return result.total > BigInt(result.items.length)
 }
 
-// The search box's own engine and projection when the user isn't typing a search, else (and while the index
-// still converges) the listings the drive has already loaded. Words are matched one by one, so
-// "invoice 2024" finds "Invoice_2024_03.pdf"; the engine is asked for the most selective word as written
-// (it folds case only), and for the next one when the first had more hits than its window.
+function searchNote(engine: DriveSearchOnceResult | null): string | null {
+	if (engine === null) {
+		return "The drive search failed, so only the directories already loaded were searched; more matches may exist."
+	}
+
+	if (!engine.settled) {
+		return "The drive's search index is still being built, so only part of the drive was searched; more matches may exist. The user can ask again in a few minutes."
+	}
+
+	if (truncated(engine)) {
+		return `Too many names match: ${String(engine.total)} names contain "${engine.name}" and only the first ${String(engine.items.length)} were checked, so matches are likely missing. Ask the user for more specific words from the name.`
+	}
+
+	return null
+}
+
+// One engine handle of its own beside the user's search, so the user's search box is never disturbed;
+// while the index converges, the listings the drive has already loaded too. Words are matched one by one,
+// so "invoice 2024" finds "Invoice_2024_03.pdf": the engine is asked for the most selective word as
+// written (it folds case only), and for the next ones while a word matches more names than it returns.
 export const searchItemsTool: ToolAdapter = async (input, scope) => {
 	const kind = optionalString(input, "kind")
 	const query = requiredString(input, "query")
 	const tokens = searchTokens(query)
-	const raw = rawSearchTokens(query)
-	const first = engineToken(raw)
+	const words = engineTokens(rawSearchTokens(query), ENGINE_WORDS)
 
-	if (first === null || tokens.length === 0) {
+	if (words.length === 0 || tokens.length === 0) {
 		throw new AssistantToolError("Pass words from the item name", { invalid: true })
 	}
 
-	let engine = await engineSearch(first, kind, scope)
-
-	if (engine !== null && truncated(engine)) {
-		const second = engineToken(raw.filter(word => engineToken([word]) !== first))
-		const retry = second === null ? null : await engineSearch(second, kind, scope)
-
-		if (retry !== null && retry.total < engine.total) {
-			engine = retry
-		}
-	}
-
+	const engine = await engineSearch(words, kind, scope)
 	const pool = new Map<string, { item: DriveItem; path: string | undefined }>()
 
 	for (const item of engine?.items ?? []) {
 		pool.set(item.data.uuid, { item, path: hitPath(engine?.parentPaths.get(item.data.uuid), driveItemName(item)) })
 	}
 
-	const settled = engine?.settled === true
-
-	if (!settled) {
+	if (engine?.settled !== true) {
 		for (const row of cachedDriveRows(item => matchScore(driveItemName(item), tokens) > 0)) {
 			if (!pool.has(row.item.data.uuid)) {
 				pool.set(row.item.data.uuid, row)
@@ -163,14 +208,7 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 		)
 		.slice(0, SEARCH_LIMIT)
 	const shown = all.length > 0 ? all.length : scored.length
-	const note =
-		engine === null
-			? "Only the directories already loaded were searched (the user's own search is open); more matches may exist."
-			: !settled
-				? "The search index is not complete yet; more matches may exist."
-				: truncated(engine)
-					? "Too many names contain these words to search them all; more matches may exist. Add more words from the name."
-					: null
+	const note = searchNote(engine)
 
 	return {
 		value: {

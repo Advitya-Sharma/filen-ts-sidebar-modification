@@ -54,7 +54,8 @@ export type AssistantStepStatus = "active" | "queued" | "waiting" | "done" | "fa
 export type AssistantStepFailure = "invalid" | "error" | "blocked" | "declined" | "repeated"
 
 // One row of a turn's progress list, re-emitted with the same id as it changes; the UI upserts by id.
-// `progress` is the share (0..1) of a prompt the model has read so far, while it is reading one.
+// `progress` is the share (0..1) of a prompt the model has read so far, while it is reading one, or of a
+// running call's own work when the call reports it.
 // "thinking" and "replying" rows exist only while active: what they lead to (a call, the reply) shows next.
 export type AssistantStep =
 	| { id: string; kind: "loading" | "thinking" | "replying"; status: AssistantStepStatus; progress: number | null }
@@ -73,6 +74,8 @@ export type AssistantStep =
 			resultCount: number | null
 			resultMore: boolean
 			failure: AssistantStepFailure | null
+			// While a long call runs (a search waiting for the drive's index): how many it has found so far.
+			found?: number
 	  }
 
 // A row its turn ended under: "stopped" when the user stopped the turn, "failed" (with an error) when the

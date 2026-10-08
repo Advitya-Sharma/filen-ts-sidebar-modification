@@ -88,7 +88,7 @@ function LiveElapsed({ since }: { since: number }) {
 function StepRow({ step, animate }: { step: TranscriptStep; animate: boolean }) {
 	const stepText = useStepText()
 	const duration = useDurationText()
-	const { label, detail } = stepText(step)
+	const { label, detail, live } = stepText(step)
 	const ms = stepDurationMs(step)
 	const progress = step.status === "active" ? visibleProgress(step.progress) : null
 	const failed = stepFaulted(step)
@@ -108,6 +108,12 @@ function StepRow({ step, animate }: { step: TranscriptStep; animate: boolean }) 
 				<span className={cn("shrink-0", failed ? "text-destructive" : "")}>
 					<span aria-hidden="true">· </span>
 					{detail}
+				</span>
+			)}
+			{live === null ? null : (
+				<span className="shrink-0 tabular-nums">
+					<span aria-hidden="true">· </span>
+					{live}
 				</span>
 			)}
 			{progress === null ? null : (

@@ -200,6 +200,26 @@ export function turnSteps({ turnId, emit, now }: { turnId: string; emit: (event:
 
 					break
 				}
+				case "callProgress": {
+					const target = steps.get(`${turnId}:${event.callId}`)
+
+					if (target?.kind !== "tool" || target.status !== "active") {
+						break
+					}
+
+					const { share, found } = event.progress
+					const next: AssistantStep = {
+						...target,
+						progress: share === null ? null : Math.min(1, Math.max(0, share)),
+						...(found === null ? {} : { found })
+					}
+
+					if (!sameStep(target, next)) {
+						put(next)
+					}
+
+					break
+				}
 				case "call": {
 					endPhase("done")
 

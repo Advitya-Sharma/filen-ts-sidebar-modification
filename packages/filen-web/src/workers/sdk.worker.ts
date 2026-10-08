@@ -127,7 +127,14 @@ import { isPhotoItem } from "@/features/photos/lib/predicate"
 import { FLAT_LISTING_KINDS, type FlatListingKind } from "@/features/drive/lib/flatListing"
 import { THUMB_CACHE_CAP, THUMB_MAX_DIM, THUMB_SDK_LOSSY_QUALITY, type ThumbnailCopy } from "@/features/drive/lib/thumbnails.logic"
 import { copyThumbs, removeStaleThumbGenerations, sweepThumbs, writeThumb } from "@/workers/thumbStore"
-import { createSearchEngine, type SearchPush, type SearchQueryResult, type SearchSnapshotDTO } from "@/workers/searchEngine"
+import {
+	createSearchEngine,
+	type QueryTiming,
+	type SearchPush,
+	type SearchQueryProgress,
+	type SearchQueryResult,
+	type SearchSnapshotDTO
+} from "@/workers/searchEngine"
 import { createListBatcher } from "@/workers/archiveListPacker"
 import type { PackedEntryBatch } from "@/lib/sdk/archiveListing"
 import {
@@ -2268,20 +2275,22 @@ const api = {
 	searchClose(): Promise<void> {
 		return searchEngine.close()
 	},
-	// The assistant's one-shot search: never takes the engine from the user's search (searchEngine.ts).
+	// The assistant's one-shot search, on a handle beside the user's (searchEngine.ts). `onProgress` is the
+	// caller's Comlink.proxy; the engine throttles it and never hands it to wasm.
 	searchQuery(
-		params: { rootUuid: string | null; name: string; itemType?: "all" | "file" | "dir" },
-		options: { settleMs: number; capMs: number; id?: number }
+		params: { rootUuid: string | null; names: readonly string[]; itemType?: "all" | "file" | "dir" },
+		options: QueryTiming & { id?: number },
+		onProgress?: (progress: SearchQueryProgress) => void
 	): Promise<SearchQueryResult> {
-		return searchEngine.query(requireClient(), params, options)
+		return searchEngine.query(requireClient(), params, options, onProgress)
 	},
 	searchQueryCancel(id: number): void {
 		searchEngine.cancelQuery(id)
 	},
-	// Closes the live search BEFORE releasing the client — searchEngine.ts's teardown calls
+	// Closes every search BEFORE releasing the client — searchEngine.ts's teardown calls
 	// close()/free() on handles that belong to THIS client; releasing it first would race that.
 	async logout(): Promise<void> {
-		await searchEngine.close()
+		await searchEngine.shutdown()
 		releaseClient()
 	},
 	hasClient(): boolean {

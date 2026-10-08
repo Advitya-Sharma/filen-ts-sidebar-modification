@@ -6,7 +6,8 @@ import {
 	type AssistantSignal,
 	type AssistantTool,
 	type AssistantToolFailure,
-	type AssistantToolName
+	type AssistantToolName,
+	type AssistantToolProgress
 } from "@filen/shared/assistant"
 import { log } from "@/lib/log"
 import { errorLabel } from "@/lib/i18n/errorLabel"
@@ -224,10 +225,15 @@ function notAvailable(tool: AssistantTool): AssistantToolError {
 export function createAssistantToolExecutor(): ToolExecutor {
 	const registry = new AssistantHandleRegistry()
 
-	function scopeFor(signal: AssistantSignal | undefined, shown: Map<string, AssistantHandleRef>): ToolScope {
+	function scopeFor(
+		signal: AssistantSignal | undefined,
+		shown: Map<string, AssistantHandleRef>,
+		progress?: (progress: AssistantToolProgress) => void
+	): ToolScope {
 		return {
 			registry,
 			signal,
+			progress,
 			show: (entity, name) => {
 				const ref = registry.register(entity, name)
 
@@ -326,9 +332,9 @@ export function createAssistantToolExecutor(): ToolExecutor {
 			}
 		},
 
-		execute: async ({ tool, args, confirmed, signal }) => {
+		execute: async ({ tool, args, confirmed, signal, onProgress }) => {
 			const shown = new Map<string, AssistantHandleRef>()
-			const scope = scopeFor(signal, shown)
+			const scope = scopeFor(signal, shown, onProgress)
 			const adapter = ADAPTERS[tool.name as AssistantToolName]
 
 			if (adapter === undefined) {

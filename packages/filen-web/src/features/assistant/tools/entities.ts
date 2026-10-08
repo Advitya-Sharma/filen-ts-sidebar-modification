@@ -1,6 +1,6 @@
 import { contactDisplayName, deriveBlockedUsers, driveItemName, EMPTY_BLOCKED_USERS, type BlockedUsers, type Playlist } from "@filen/shared"
 import type { Chat, Note } from "@filen/sdk-rs"
-import type { AssistantSignal } from "@filen/shared/assistant"
+import type { AssistantSignal, AssistantToolProgress } from "@filen/shared/assistant"
 import { i18n } from "@/lib/i18n"
 import { queryClient } from "@/queries/client"
 import { accountQueryGet } from "@/queries/account"
@@ -26,11 +26,12 @@ import type { AssistantEntity, AssistantEntityKind, AssistantHandleRegistry } fr
 import type { AssistantHandleRef, AssistantUiEffect } from "@/features/assistant/runtime/executor"
 
 // What an adapter gets for one call. `show` registers an item and records that the result mentions it,
-// which is what the guard learns handles from.
+// which is what the guard learns handles from. `progress` reports how far a long call got, for its step.
 export interface ToolScope {
 	registry: AssistantHandleRegistry
 	signal: AssistantSignal | undefined
 	show: (entity: AssistantEntity, name: string) => string
+	progress?: ((progress: AssistantToolProgress) => void) | undefined
 }
 
 export interface ToolOutput {

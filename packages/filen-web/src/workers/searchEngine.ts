@@ -8,18 +8,21 @@ import type {
 	CacheSearchWindow,
 	CacheStatusMessage,
 	Dir,
-	File
+	File,
+	ResyncProgressMessage
 } from "@filen/sdk-rs"
 import { log } from "@/lib/log"
+import { throttle } from "@/lib/throttle"
+import { WATCHDOG_MS } from "@/features/drive/lib/searchStatus.logic"
 
 // Worker-side lifecycle for the SDK's cache-backed search. `CacheSearch`/`CacheSearchWindow` are
 // wasm handles and can never cross Comlink, so the open/refilter/close dance lives entirely here;
 // only the plain DTOs below reach the main thread, via the caller's own push callback (a
 // Comlink.proxy from sdk.worker.ts's op — see that file's searchOpen/searchSetName/searchClose).
 //
-// One live handle at a time. A supersede token is armed synchronously (before any await) on every
-// open, mirroring sdk.worker.ts's own single-writer client-swap discipline (adoptClient/
-// releaseClient) — extended here to a resource whose teardown is async and must never block a
+// One live handle at a time for the user's search; queries (the assistant's) share one handle of their own
+// beside it. A supersede token is armed synchronously (before any await) on every open, mirroring
+// sdk.worker.ts's own single-writer client-swap discipline (adoptClient/releaseClient) — extended here to a resource whose teardown is async and must never block a
 // fresher open from proceeding.
 
 export interface SearchHitDTO {
@@ -36,7 +39,28 @@ export interface SearchSnapshotDTO {
 export type SearchPush =
 	({ type: "snapshot" } & SearchSnapshotDTO) | { type: "resync"; resyncing: boolean } | { type: "heartbeat" } | { type: "rootDeleted" }
 
-export type SearchQueryResult = { status: "busy" } | { status: "done"; snapshot: SearchSnapshotDTO; settled: boolean }
+// `keepMs`: how long the queries' handle stays registered after the last one, so the next costs no resync.
+export interface QueryTiming {
+	settleMs: number
+	stallMs: number
+	capMs: number
+	keepMs: number
+}
+
+// A running query: how much of the drive's listing the index has read (0..1) while a resync builds it,
+// null outside one or when its size is unknown; and how many names contain the query's first word so far.
+export interface SearchQueryProgress {
+	indexed: number | null
+	candidates: bigint
+}
+
+// `name`: the word whose hits these are. `settled: false`: the index may still have been growing (the
+// budget ran out, the query was stopped, a resync went silent or did not converge).
+export interface SearchQueryResult {
+	snapshot: SearchSnapshotDTO
+	settled: boolean
+	name: string
+}
 
 // Raised when a newer open() supersedes this one before it ever produced a snapshot — expected
 // under rapid re-opens (directory navigation, a fast reopen after a dropped connection), never a
@@ -60,6 +84,13 @@ export class SearchSupersededError extends Error {
 // Whole-set single window (mobile parity): the SDK window auto-refills this range as matches
 // converge, so one getRange tracks the whole result set with no incremental re-subscribe.
 export const CEILING = 1_000n
+
+// A query's progress crosses to the page at most this often.
+const PROGRESS_MS = 250
+
+// A first registration of a root starts a resync after a remote validation; a query waits this long for
+// its first message before calling the index unconfirmed (the messages are lossy).
+const RESYNC_START_MS = 5_000
 
 // Pre-warms the cache worker once per session; a directory-scoped identifier would suggest a
 // per-search DB, which this is not (see configureCache's own doc comment — one shared DB, keyed by
@@ -102,6 +133,27 @@ function buildConfig(name: string, itemType: CacheSearchItemType = "all"): Cache
 	return { name: trimmedOrUndefined(name), itemType, recursive: true, caseSensitive: false }
 }
 
+// The share of a resync's listing downloaded so far: whole roots before this one plus this one's bytes.
+function listingShare(progress: Extract<ResyncProgressMessage, { type: "listing" }>): number | null {
+	const total = progress.total_bytes
+
+	if (total === undefined || total <= 0n || progress.root_count <= 0n) {
+		return null
+	}
+
+	const root = Math.min(1, Number(progress.bytes_downloaded) / Number(total))
+
+	return Math.min(1, (Number(progress.root_index) + root) / Number(progress.root_count))
+}
+
+function freeWindow(searchWindow: CacheSearchWindow): void {
+	try {
+		searchWindow.free()
+	} catch (e) {
+		log.warn("search-engine", "window free failed", e)
+	}
+}
+
 function toSnapshotDTO(snapshot: CacheSearchSnapshot): SearchSnapshotDTO {
 	return {
 		hits: snapshot.results.map(hit => ({
@@ -119,11 +171,7 @@ function toSnapshotDTO(snapshot: CacheSearchSnapshot): SearchSnapshotDTO {
 // mobile's own per-step-independent teardown.
 async function safeClose(search: CacheSearch, searchWindow: CacheSearchWindow | null): Promise<void> {
 	if (searchWindow !== null) {
-		try {
-			searchWindow.free()
-		} catch (e) {
-			log.warn("search-engine", "window free failed", e)
-		}
+		freeWindow(searchWindow)
 	}
 
 	try {
@@ -145,13 +193,39 @@ export function createSearchEngine() {
 	// (no full reload) would have to reset this explicitly, or the new session silently inherits the
 	// previous account's cache configuration.
 	let configured = false
-	// `name`: what the handle searches for now; an empty one is a box the user cleared.
-	let active: { search: CacheSearch; searchWindow: CacheSearchWindow; token: OpenToken; transient: boolean; name: string } | null = null
-	// query()'s tokens by the caller's id, so its caller can stop it.
-	const queryTokens = new Map<number, OpenToken>()
+	let configuring: Promise<void> | null = null
+	// The user's search: the single handle open/setName/close drive.
+	let active: { search: CacheSearch; searchWindow: CacheSearchWindow; token: OpenToken } | null = null
 	let currentToken: OpenToken | null = null
 	let activeRootUuid: string | null = null
 	let activePush: ((p: SearchPush) => void) | null = null
+	// Queries share one handle beside the user's, kept registered between them: closing it releases the
+	// root's registration, and the next createSearch would validate it remotely and resync the whole
+	// listing again. Each query refilters it (setConfig, engine-local) behind a window of its own.
+	// `releasing`: let go once the resync it may carry for the user's search is over (see release()).
+	let shared: { search: CacheSearch; rootUuid: string; releasing: boolean } | null = null
+	let keepTimer: ReturnType<typeof setTimeout> | undefined
+	// Queries run one at a time, as they refilter the one handle. Their tokens (by the caller's id too, so
+	// it can stop one), so a logout can stop them.
+	let queue: Promise<unknown> = Promise.resolve()
+	const runs = new Set<OpenToken>()
+	const queryTokens = new Map<number, OpenToken>()
+	// Each running query's wake-up on resync news.
+	const queryWakers = new Set<() => void>()
+	// Worker-global, like the resync it tracks (one at a time): when its last message arrived (null once it
+	// finished), how far its listing download got, how many resyncs began (a begin whose start message
+	// dropped counts on its first message), when the last one finished, and whether it converged.
+	let resyncSeenAt: number | null = null
+	let resyncShare: number | null = null
+	let resyncEpoch = 0
+	let resyncEndedAt = 0
+	let converged = true
+	let shutDown = false
+
+	// Read through a call, like isCancelled: shutdown() flips it while a query is paused at an await.
+	function isShutDown(): boolean {
+		return shutDown
+	}
 
 	// Installed once (see the `configured` guard in open()) and never re-created — reads
 	// activeRootUuid/activePush fresh on every message, so one listener correctly serves every
@@ -167,6 +241,8 @@ export function createSearchEngine() {
 			switch (message.type) {
 				case "resyncProgress": {
 					const progress = message.progress
+
+					noteResync(progress)
 
 					if (progress.type === "started") {
 						// Root-scoped: an unrelated root's resync must not flip our caller's UI.
@@ -205,6 +281,96 @@ export function createSearchEngine() {
 		}
 	}
 
+	function noteResync(progress: ResyncProgressMessage): void {
+		if (progress.type === "finished") {
+			resyncSeenAt = null
+			resyncShare = null
+			resyncEndedAt = Date.now()
+			converged = progress.converged
+
+			if (shared?.releasing === true) {
+				closeShared()
+			}
+		} else {
+			if (progress.type === "started" || resyncSeenAt === null) {
+				resyncEpoch++
+				converged = true
+			}
+
+			resyncSeenAt = Date.now()
+
+			if (progress.type === "started") {
+				resyncShare = null
+			} else if (progress.type === "listing") {
+				resyncShare = listingShare(progress)
+			}
+		}
+
+		for (const wake of queryWakers) {
+			wake()
+		}
+	}
+
+	// A resync heard from within `stallMs`.
+	function resyncRunning(stallMs: number): boolean {
+		return resyncSeenAt !== null && Date.now() - resyncSeenAt < stallMs
+	}
+
+	function closeShared(): void {
+		clearTimeout(keepTimer)
+		keepTimer = undefined
+
+		const current = shared
+
+		shared = null
+
+		if (current !== null) {
+			void safeClose(current.search, null)
+		}
+	}
+
+	// Lets the queries' handle go. While a resync runs and the user's search is open, that search may stand
+	// on this registration (it found the root covered and started no resync of its own), so the handle goes
+	// once the resync finishes or the user's search closes instead.
+	function release(): void {
+		if (shared === null) {
+			return
+		}
+
+		if (resyncSeenAt !== null && (active !== null || currentToken !== null)) {
+			shared.releasing = true
+
+			return
+		}
+
+		closeShared()
+	}
+
+	// Idle for `keepMs` after the last query: released, but not while an index build it may carry goes on.
+	function armKeep(keepMs: number, stallMs: number): void {
+		clearTimeout(keepTimer)
+		keepTimer = setTimeout(() => {
+			if (resyncRunning(stallMs)) {
+				armKeep(keepMs, stallMs)
+
+				return
+			}
+
+			release()
+		}, keepMs)
+	}
+
+	// Configured once per worker, shared by the user's open and a query racing it.
+	async function ensureConfigured(client: Client): Promise<void> {
+		configuring ??= client.configureCache(CACHE_PATH, statusListener).finally(() => {
+			configuring = null
+		})
+
+		await configuring
+
+		configured = true
+	}
+
 	// Rolls back a genuinely-failed open(): the routing fields that call set, PLUS whatever search was
 	// still installed from the last successful open. A failed reopen otherwise leaves that stale handle
 	// live — a later setName would succeed against it and refilter into a push nobody routes (the
@@ -228,14 +394,10 @@ export function createSearchEngine() {
 		}
 	}
 
-	// `transient` marks a query()'s handle: setName never refilters it, so the user's next keystroke
-	// reopens and supersedes it instead of retuning a search that is not theirs.
-	async function openWith(
+	async function open(
 		client: Client,
-		{ rootUuid, name, itemType = "all" }: { rootUuid: string | null; name: string; itemType?: CacheSearchItemType },
-		push: (p: SearchPush) => void,
-		token: OpenToken,
-		transient: boolean
+		{ rootUuid, name }: { rootUuid: string | null; name: string },
+		push: (p: SearchPush) => void
 	): Promise<SearchSnapshotDTO> {
 		// Supersede synchronously, before any await, so a close() or a newer open() racing this call
 		// always observes the flip. The installed window is superseded too: its deliveries are dropped
@@ -249,6 +411,8 @@ export function createSearchEngine() {
 			cancelToken(active.token)
 		}
 
+		const token: OpenToken = { cancelled: false }
+
 		currentToken = token
 		activePush = push
 
@@ -261,7 +425,7 @@ export function createSearchEngine() {
 				// A second configureCache call (a re-open after this worker already configured one)
 				// verifiably succeeds silently — no error, no behavior change — so this guard is a
 				// redundant-call optimization, not a correctness requirement.
-				await client.configureCache(CACHE_PATH, statusListener)
+				await ensureConfigured(client)
 			} catch (e) {
 				// resyncProgress:finished is unconditional on activeRootUuid (unlike the other
 				// statusListener branches), so BOTH routing fields must clear — and the shared rollback's
@@ -271,8 +435,6 @@ export function createSearchEngine() {
 
 				throw e
 			}
-
-			configured = true
 		}
 
 		if (isCancelled(token)) {
@@ -282,7 +444,7 @@ export function createSearchEngine() {
 		let search: CacheSearch
 
 		try {
-			search = await client.createSearch(resolvedRoot, buildConfig(name, itemType))
+			search = await client.createSearch(resolvedRoot, buildConfig(name))
 		} catch (e) {
 			await rollBackFailedOpen(token)
 
@@ -345,7 +507,7 @@ export function createSearchEngine() {
 		// this reopen on.
 		const previous = active
 
-		active = { search, searchWindow, token, transient, name }
+		active = { search, searchWindow, token }
 
 		if (previous) {
 			void safeClose(previous.search, previous.searchWindow)
@@ -353,6 +515,12 @@ export function createSearchEngine() {
 
 		if (currentToken === token) {
 			currentToken = null
+		}
+
+		// A resync the queries' handle started covers this root too, but its start message went by before
+		// this search existed; the finish message clears it.
+		if (resyncRunning(WATCHDOG_MS)) {
+			push({ type: "resync", resyncing: true })
 		}
 
 		const eager = searchWindow.initialSnapshot()
@@ -369,62 +537,36 @@ export function createSearchEngine() {
 		})
 	}
 
-	function open(
-		client: Client,
-		params: { rootUuid: string | null; name: string },
-		push: (p: SearchPush) => void
-	): Promise<SearchSnapshotDTO> {
-		return openWith(client, params, push, { cancelled: false }, false)
-	}
-
-	// Closes the handle `token` installed, unless an open or close already replaced it. The routing
-	// fields belong to an open still in flight when there is one.
-	async function closeOwned(token: OpenToken): Promise<void> {
-		const current = active
-
-		if (current?.token !== token) {
-			return
-		}
-
-		active = null
-
-		if (currentToken === null) {
-			activeRootUuid = null
-			activePush = null
-		}
-
-		await safeClose(current.search, current.searchWindow)
-	}
-
-	// A one-shot search for a caller that must never take the engine from the user's own search (the
-	// assistant): it starts only while no search is open or opening, and the user's next open() or
-	// close() supersedes it. It waits until the results have been still for `settleMs` outside a
-	// resync, at most `capMs`, then closes its handle. `settled: false` means the result set may still
-	// have been growing.
-	// An open search whose box the user cleared holds the engine for nothing: a query may take it, and the
-	// user's next keystroke reopens (setName refuses a handle that is not theirs).
-	function userSearchIdle(): boolean {
-		return active !== null && !active.transient && currentToken === active.token && active.name.trim() === ""
-	}
-
+	// A one-shot search for a caller that is not the search box (the assistant), on the queries' handle: the
+	// user's search is never touched, and while the user's covers the drive this one costs no network. It
+	// waits until the hits have been still for `settleMs` outside a resync, at most `capMs`; a resync silent
+	// for `stallMs` ends the wait without having settled (its finish message may have been dropped). When the
+	// first name matches more than the window holds, the others are tried in turn, and the one with the
+	// fewest hits wins.
 	async function query(
 		client: Client,
-		params: { rootUuid: string | null; name: string; itemType?: CacheSearchItemType },
-		{ settleMs, capMs, id }: { settleMs: number; capMs: number; id?: number }
+		params: { rootUuid: string | null; names: readonly string[]; itemType?: CacheSearchItemType },
+		{ id, ...timing }: QueryTiming & { id?: number },
+		onProgress?: (progress: SearchQueryProgress) => void
 	): Promise<SearchQueryResult> {
-		if ((active !== null || currentToken !== null) && !userSearchIdle()) {
-			return { status: "busy" }
-		}
-
 		const token: OpenToken = { cancelled: false }
+		const deadline = Date.now() + timing.capMs
+
+		runs.add(token)
 
 		if (id !== undefined) {
 			queryTokens.set(id, token)
 		}
 
+		const turn = queue.then(() => runQuery(client, params, timing, deadline, token, onProgress))
+
+		queue = turn.catch(() => undefined)
+
 		try {
-			return await runQuery(client, params, { settleMs, capMs }, token)
+			return await turn
 		} finally {
+			runs.delete(token)
+
 			if (id !== undefined) {
 				queryTokens.delete(id)
 			}
@@ -442,96 +584,283 @@ export function createSearchEngine() {
 
 	async function runQuery(
 		client: Client,
-		params: { rootUuid: string | null; name: string; itemType?: CacheSearchItemType },
-		{ settleMs, capMs }: { settleMs: number; capMs: number },
-		token: OpenToken
+		{ rootUuid, names, itemType = "all" }: { rootUuid: string | null; names: readonly string[]; itemType?: CacheSearchItemType },
+		timing: QueryTiming,
+		deadline: number,
+		token: OpenToken,
+		onProgress: ((progress: SearchQueryProgress) => void) | undefined
 	): Promise<SearchQueryResult> {
-		let latest: SearchSnapshotDTO = { hits: [], total: 0n, live: true }
-		let resyncing = false
-		let onChange: (() => void) | null = null
+		const [first = ""] = names
+		const nothing: SearchQueryResult = { snapshot: { hits: [], total: 0n, live: true }, settled: false, name: first }
 
-		function push(p: SearchPush): void {
-			if (p.type === "snapshot") {
-				latest = { hits: p.hits, total: p.total, live: p.live }
-			} else if (p.type === "resync") {
-				resyncing = p.resyncing
-			}
-
-			onChange?.()
+		if (isCancelled(token) || shutDown) {
+			return nothing
 		}
+
+		clearTimeout(keepTimer)
+
+		// Set when this query registered the root itself: a resync is due, and the index is not complete
+		// until one has begun and finished.
+		let cold: { since: number; epoch: number } | null = null
+		let handle: { search: CacheSearch; rootUuid: string; releasing: boolean } | null = null
 
 		try {
-			latest = await openWith(client, params, push, token, true)
-		} catch (e) {
-			if (e instanceof SearchSupersededError) {
-				return { status: "busy" }
+			if (!configured) {
+				await ensureConfigured(client)
 			}
 
-			throw e
+			// A resync whose finish never arrived is over.
+			if (resyncSeenAt !== null && !resyncRunning(timing.stallMs)) {
+				resyncSeenAt = null
+				resyncShare = null
+			}
+
+			const root = rootUuid ?? client.root().uuid
+			let created = false
+
+			if (shared !== null && shared.rootUuid !== root) {
+				closeShared()
+			}
+
+			if (shared === null) {
+				if (isCancelled(token)) {
+					return nothing
+				}
+
+				// Covered only by a user's search on this very root, or maybe by one still opening.
+				const uncovered = currentToken === null && (active === null || activeRootUuid !== root)
+				const epoch = resyncEpoch
+				const search = await client.createSearch(root, buildConfig(first, itemType))
+
+				if (isShutDown()) {
+					void safeClose(search, null)
+
+					return nothing
+				}
+
+				shared = { search, rootUuid: root, releasing: false }
+				created = true
+				cold = uncovered ? { since: Date.now(), epoch } : null
+			}
+
+			const current = shared
+
+			current.releasing = false
+			handle = current
+
+			let best: SearchQueryResult | null = null
+
+			for (const [index, name] of names.entries()) {
+				if (index > 0 && (best === null || !best.settled || best.snapshot.total <= BigInt(best.snapshot.hits.length))) {
+					break
+				}
+
+				if (isCancelled(token)) {
+					break
+				}
+
+				if (!(index === 0 && created)) {
+					const refiltered = await run(() => current.search.setConfig(buildConfig(name, itemType)))
+
+					if (!refiltered.success) {
+						if (index === 0) {
+							closeShared()
+
+							throw refiltered.error
+						}
+
+						break
+					}
+				}
+
+				const seen = await look(
+					current.search,
+					timing,
+					deadline,
+					token,
+					index === 0 ? cold : null,
+					index === 0 ? onProgress : undefined
+				).catch((e: unknown) => {
+					// A handle that cannot open a window is no use to the next query either.
+					closeShared()
+
+					throw e
+				})
+
+				if (seen === null) {
+					break
+				}
+
+				if (best === null || (seen.settled && seen.snapshot.total < best.snapshot.total)) {
+					best = { snapshot: toSnapshotDTO(seen.snapshot), settled: seen.settled, name }
+				}
+			}
+
+			return best ?? nothing
+		} finally {
+			if (handle !== null && shared === handle && !isShutDown()) {
+				// Stopped while the index was still being built: the user's Stop ends that build too, unless the
+				// user's own search may stand on it.
+				const building = resyncSeenAt !== null || (cold !== null && resyncEpoch === cold.epoch)
+
+				if (isCancelled(token) && building) {
+					release()
+				}
+
+				if (shared === handle && !handle.releasing) {
+					armKeep(timing.keepMs, timing.stallMs)
+				}
+			}
+		}
+	}
+
+	// One word's hits through a window of its own, so a late delivery for the previous word can never be
+	// taken for this one's. Null when the window yielded nothing usable for this word.
+	async function look(
+		search: CacheSearch,
+		{ settleMs, stallMs }: QueryTiming,
+		deadline: number,
+		token: OpenToken,
+		cold: { since: number; epoch: number } | null,
+		onProgress: ((progress: SearchQueryProgress) => void) | undefined
+	): Promise<{ snapshot: CacheSearchSnapshot; settled: boolean } | null> {
+		let latest: CacheSearchSnapshot | null = null
+		// The window's listener assigns `latest` from outside this flow.
+		const seen = (): CacheSearchSnapshot | null => latest
+		let changedAt = Date.now()
+		let wake: (() => void) | null = null
+		let open = true
+		const report = throttle((progress: SearchQueryProgress) => {
+			if (open) {
+				onProgress?.(progress)
+			}
+		}, PROGRESS_MS)
+
+		const update = () => {
+			changedAt = Date.now()
+
+			if (onProgress !== undefined && latest !== null) {
+				report({ indexed: resyncSeenAt === null ? null : resyncShare, candidates: latest.total })
+			}
+
+			wake?.()
 		}
 
-		const settled = await new Promise<boolean>(resolve => {
-			let quiet: ReturnType<typeof setTimeout> | null = null
+		// Our own resync has not been heard of yet.
+		const pending = () => cold !== null && resyncEpoch === cold.epoch
 
-			function finish(value: boolean): void {
-				if (quiet !== null) {
-					clearTimeout(quiet)
+		// Resolves true once still, false at the deadline, when stopped, or when the index stays unconfirmed (a
+		// resync went silent, never began, or did not converge).
+		const still = () =>
+			new Promise<boolean>(resolve => {
+				let timer: ReturnType<typeof setTimeout> | undefined
+
+				const finish = (settled: boolean) => {
+					clearTimeout(timer)
+					wake = null
+					queryWakers.delete(update)
+					delete token.abandon
+					resolve(settled)
 				}
 
-				clearTimeout(cap)
-				onChange = null
-				delete token.abandon
-				resolve(value)
-			}
+				const check = () => {
+					clearTimeout(timer)
 
-			function rearm(): void {
-				if (quiet !== null) {
-					clearTimeout(quiet)
-					quiet = null
-				}
+					const now = Date.now()
 
-				// Not live is terminal: nothing changes any more.
-				if (!latest.live) {
-					finish(true)
-				} else if (!resyncing) {
-					quiet = setTimeout(() => {
+					if (isCancelled(token)) {
+						finish(false)
+
+						return
+					}
+
+					// Not live is terminal: nothing changes any more.
+					if (latest !== null && !latest.live) {
 						finish(true)
-					}, settleMs)
+
+						return
+					}
+
+					let until = latest === null ? Infinity : changedAt + settleMs
+
+					if (resyncSeenAt !== null) {
+						until = Math.max(until, resyncSeenAt + stallMs)
+					} else if (cold !== null && pending()) {
+						until = Math.max(until, Math.max(cold.since, resyncEndedAt) + RESYNC_START_MS)
+					}
+
+					if (until <= now) {
+						finish(resyncSeenAt === null && !pending() && converged)
+					} else if (now >= deadline) {
+						finish(false)
+					} else {
+						timer = setTimeout(check, Math.min(until, deadline) - now)
+					}
 				}
+
+				wake = check
+				queryWakers.add(update)
+				token.abandon = check
+				check()
+			})
+
+		const range = await run<CacheSearchWindow>(() =>
+			search.getRange(0n, CEILING, snapshot => {
+				if (open) {
+					latest = snapshot
+					update()
+				}
+			})
+		)
+
+		if (!range.success) {
+			throw range.error
+		}
+
+		const searchWindow = range.data
+
+		try {
+			const eager = searchWindow.initialSnapshot()
+
+			// A delivery that beat the eager snapshot is newer.
+			if (eager !== undefined && seen() === null) {
+				latest = eager
+				update()
 			}
 
-			const cap = setTimeout(() => {
-				finish(false)
-			}, capMs)
+			let settled = await still()
 
-			onChange = rearm
-			token.abandon = () => {
-				finish(false)
+			report.flush()
+
+			// The handle's own total says whether a delivery for this word is still due: one more is waited
+			// for, and a word whose hits still disagree with it is left unconfirmed.
+			const agrees = async () => {
+				const total = await run(() => search.total())
+
+				return total.success && latest !== null && total.data === latest.total
 			}
 
-			if (isCancelled(token)) {
-				finish(false)
-			} else {
-				rearm()
+			if (settled && !(await agrees())) {
+				changedAt = Date.now()
+				settled = (await still()) && (await agrees())
 			}
-		})
 
-		await closeOwned(token)
-
-		return { status: "done", snapshot: latest, settled }
+			return latest === null ? null : { snapshot: latest, settled }
+		} finally {
+			open = false
+			freeWindow(searchWindow)
+		}
 	}
 
 	// Engine-local refilter (setConfig — no network, no re-registration). `false` means there is no
-	// live search of the caller's own to refilter (closed, never opened this session, or a query()'s)
-	// — the caller reopens instead.
+	// live search to refilter (closed, or never opened this session) — the caller reopens instead.
 	async function setName(name: string): Promise<boolean> {
-		if (active === null || active.transient) {
+		if (active === null) {
 			return false
 		}
 
 		try {
 			await active.search.setConfig(buildConfig(name))
-			active.name = name
 
 			return true
 		} catch (e) {
@@ -557,10 +886,32 @@ export function createSearchEngine() {
 		activeRootUuid = null
 		activePush = null
 
+		if (shared?.releasing === true) {
+			closeShared()
+		}
+
 		if (current) {
 			await safeClose(current.search, current.searchWindow)
 		}
 	}
 
-	return { open, query, cancelQuery, setName, close }
+	// Logout: every query stops and every handle closes, the user's too, before the client is released.
+	async function shutdown(): Promise<void> {
+		shutDown = true
+
+		for (const token of runs) {
+			cancelToken(token)
+		}
+
+		clearTimeout(keepTimer)
+		keepTimer = undefined
+
+		const current = shared
+
+		shared = null
+
+		await Promise.all([close(), ...(current === null ? [] : [safeClose(current.search, null)])])
+	}
+
+	return { open, query, cancelQuery, setName, close, shutdown }
 }

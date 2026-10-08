@@ -113,6 +113,27 @@ describe("AssistantSteps", () => {
 		expect(vi.getTimerCount()).toBe(0)
 	})
 
+	it("shows a long search's progress and its candidates so far, grouped, in its row while it runs", () => {
+		render(
+			<AssistantSteps
+				entry={entry([
+					tool({
+						tool: "search_items",
+						subject: "invoice",
+						status: "active",
+						progress: 0.3,
+						found: 1234,
+						resultCount: null,
+						endedAt: null
+					})
+				])}
+			/>
+		)
+
+		expect(screen.getByRole("listitem").textContent).toBe('Searching for "invoice"· 1,234 candidates')
+		expect(document.querySelector('[style*="scaleX(0.3)"]')).not.toBeNull()
+	})
+
 	it("shows the prompt-reading bar only while part of the prompt is left", () => {
 		const { container, rerender } = render(
 			<AssistantSteps

@@ -3,7 +3,8 @@ import type {
 	AssistantSignal,
 	AssistantTool,
 	AssistantToolExecutor,
-	AssistantToolOutcome
+	AssistantToolOutcome,
+	AssistantToolProgress
 } from "@filen/shared/assistant"
 
 // The web app's side of the agent loop (@filen/shared/assistant's loop): the loop owns routing, the
@@ -53,6 +54,7 @@ export interface ToolExecutor extends AssistantToolExecutor {
 		args: Record<string, unknown>
 		confirmed: boolean
 		signal: AssistantSignal
+		onProgress?: (progress: AssistantToolProgress) => void
 	}): Promise<AssistantToolExecution>
 	preview(call: { tool: AssistantTool; args: Record<string, unknown> }): Promise<AssistantToolPreview>
 	// A new conversation: forgets every handle. `history` is a resumed conversation's exchanges, whose replies
