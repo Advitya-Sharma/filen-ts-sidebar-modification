@@ -8,6 +8,7 @@ import { INJECTION_CASES } from "./cases/injection"
 import { FakeApp } from "./fakeApp"
 import { gradeCase } from "./grader"
 import { gradeInjection } from "./injectionGrader"
+import { caseFingerprint, parseRecordLine } from "./fingerprint"
 import { loadManifest, type ModelEntry } from "./models"
 import { ROUTER_GRAMMAR } from "./prompts"
 
@@ -27,14 +28,21 @@ export type WorkerJob = {
 
 const CONTEXT_SIZE = 8192
 
-async function doneIds(path: string): Promise<Set<string>> {
+// Cases already measured against the current prompts, tools and case definition.
+async function doneIds(path: string, fingerprints: ReadonlyMap<string, string>): Promise<Set<string>> {
 	const text = await readFile(path, "utf8").catch(() => "")
 
 	return new Set(
 		text
 			.split("\n")
 			.filter(line => line.length > 0)
-			.map(line => (JSON.parse(line) as { caseId: string }).caseId)
+			.flatMap(line => {
+				const record = parseRecordLine<{ caseId: string; fingerprint?: string }>(line)
+
+				return record !== null && record.fingerprint !== undefined && record.fingerprint === fingerprints.get(record.caseId)
+					? [record.caseId]
+					: []
+			})
 	)
 }
 
@@ -104,7 +112,8 @@ async function main(): Promise<void> {
 	}): Promise<void> {
 		for (const preset of presets) {
 			const path = join(dir, `${suite}-${preset}.jsonl`)
-			const done = await doneIds(path)
+			const fingerprints = new Map(cases.map(item => [item.id, caseFingerprint({ modelId: entry.id, item })]))
+			const done = await doneIds(path, fingerprints)
 			const mitigations = MITIGATION_PRESETS[preset]
 			const runtime: AgentRuntime = {
 				routerSequence: sequences[0],
@@ -136,7 +145,7 @@ async function main(): Promise<void> {
 					runtime
 				})
 
-				await appendFile(path, `${JSON.stringify(record)}\n`)
+				await appendFile(path, `${JSON.stringify({ ...(record as object), fingerprint: fingerprints.get(item.id) })}\n`)
 
 				if ((index + 1) % 10 === 0) {
 					console.log(`[${entry.id}] ${suite}/${preset}: ${index + 1}/${pending.length}`)

@@ -472,6 +472,45 @@ export const SIMPLE_CASES: EvalCase[] = [
 		answerIncludes: [["report_q3", "setup_installer", "receipt"]],
 		expectsText: true
 	},
+	// The panel's own example questions, as the app offers them.
+	{
+		id: "simple-example-find-tax-en",
+		category: "simple",
+		lang: "en",
+		prompt: "Find my tax documents",
+		routes: ["files"],
+		calls: [
+			{
+				tool: "search_items",
+				args: {
+					query: {
+						$includes: ["tax"]
+					}
+				}
+			}
+		],
+		answerIncludes: [["tax_notes_2024"]],
+		expectsText: true
+	},
+	{
+		id: "simple-example-documents-en",
+		category: "simple",
+		lang: "en",
+		prompt: "What's in my Documents directory?",
+		routes: ["files"],
+		calls: [
+			{
+				tool: "list_directory",
+				args: {
+					path: {
+						$includes: ["documents"]
+					}
+				}
+			}
+		],
+		answerIncludes: [["tax_notes_2024"]],
+		expectsText: true
+	},
 	{
 		id: "simple-stop-de",
 		category: "simple",

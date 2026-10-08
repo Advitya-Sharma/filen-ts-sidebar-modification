@@ -8,11 +8,13 @@ import { CATEGORIES, LANGUAGES, type Category, type Language } from "./cases/typ
 import type { Grade } from "./grader"
 import { gradeInjection, type InjectionGrade } from "./injectionGrader"
 import { PROMPT_CANARY } from "./prompts"
+import { caseFingerprint, parseRecordLine } from "./fingerprint"
 import { detectLanguage } from "./languageDetect"
 import type { ModelEntry } from "./models"
 
 type MainRecord = {
 	caseId: string
+	fingerprint?: string
 	category: Category
 	lang: Language
 	preset: string
@@ -22,6 +24,7 @@ type MainRecord = {
 
 type InjectionRecord = {
 	caseId: string
+	fingerprint?: string
 	lang: Language
 	payloadLang: Language
 	carrier: string
@@ -79,7 +82,7 @@ function screened(record: InjectionRecord): Transcript {
 					reply: record.transcript.answer,
 					userMessage: injection.prompt,
 					canary: PROMPT_CANARY
-				})
+				}).text
 			}
 		: record.transcript
 }
@@ -109,7 +112,23 @@ async function readJsonl<T>(path: string): Promise<T[]> {
 	return text
 		.split("\n")
 		.filter(line => line.length > 0)
-		.map(line => JSON.parse(line) as T)
+		.flatMap(line => {
+			const record = parseRecordLine<T>(line)
+
+			return record === null ? [] : [record]
+		})
+}
+
+// Only records of cases that still exist, measured against the current prompts, tools and case definition:
+// anything else measured something that no longer ships.
+function current<T extends { caseId: string; fingerprint?: string }>(
+	records: readonly T[],
+	modelId: string,
+	cases: readonly { id: string }[]
+): T[] {
+	const fingerprints = new Map(cases.map(item => [item.id, caseFingerprint({ modelId, item })]))
+
+	return records.filter(record => record.fingerprint !== undefined && record.fingerprint === fingerprints.get(record.caseId))
 }
 
 function rate(values: readonly boolean[]): number | null {
@@ -256,18 +275,22 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 		models.map(async model => {
 			const dir = join(outDir, model.id)
 			const files = await readdir(dir)
-			const main = (
-				await Promise.all(files.filter(file => file.startsWith("main-")).map(file => readJsonl<MainRecord>(join(dir, file))))
-			)
-				.flat()
-				.map(regradeLanguage)
-			const injection = (
-				await Promise.all(
-					files.filter(file => file.startsWith("injection-")).map(file => readJsonl<InjectionRecord>(join(dir, file)))
-				)
-			)
-				.flat()
-				.map(regradeInjection)
+			const main = current(
+				(
+					await Promise.all(files.filter(file => file.startsWith("main-")).map(file => readJsonl<MainRecord>(join(dir, file))))
+				).flat(),
+				model.id,
+				EVAL_CASES
+			).map(regradeLanguage)
+			const injection = current(
+				(
+					await Promise.all(
+						files.filter(file => file.startsWith("injection-")).map(file => readJsonl<InjectionRecord>(join(dir, file)))
+					)
+				).flat(),
+				model.id,
+				INJECTION_CASES
+			).map(regradeInjection)
 			const meta = JSON.parse(await readFile(join(dir, "meta.json"), "utf8").catch(() => "{}")) as Partial<Meta>
 
 			return {

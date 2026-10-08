@@ -175,6 +175,8 @@ export type Transcript = {
 	routeRaw: string
 	calls: CallRecord[]
 	answer: string
+	// Text written alongside tool calls: the app shows each as a reply of its own. Absent in older records.
+	replies?: string[]
 	invalidOutputs: number
 	unrecovered: boolean
 	steps: number
@@ -406,6 +408,7 @@ export async function runTurn({
 			routeRaw,
 			calls: [],
 			answer: "",
+			replies: [],
 			invalidOutputs: 0,
 			unrecovered: false,
 			steps: 0,
@@ -497,6 +500,17 @@ export async function runTurn({
 				transcript.answer = text
 
 				break
+			}
+
+			const alongside = generated.response.trim()
+
+			// Shown to the user in the app, screened like the answer.
+			if (alongside.length > 0) {
+				transcript.replies?.push(
+					mitigations.sanitize
+						? screenAssistantReply({ reply: alongside, userMessage: prompt, canary: PROMPT_CANARY }).text
+						: alongside
+				)
 			}
 
 			const results: ChatModelFunctionCall[] = []
@@ -699,11 +713,12 @@ export async function runTurn({
 		}
 
 		if (mitigations.sanitize) {
+			// A withheld reply shows the app's own notice instead, which carries none of the reply.
 			transcript.answer = screenAssistantReply({
 				reply: transcript.answer,
 				userMessage: prompt,
 				canary: PROMPT_CANARY
-			})
+			}).text
 		}
 
 		timings.totalMs = performance.now() - started
