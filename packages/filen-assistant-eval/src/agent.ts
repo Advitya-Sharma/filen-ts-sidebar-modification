@@ -28,7 +28,7 @@ import {
 } from "node-llama-cpp"
 import { DECOY_TOOLS } from "./decoys"
 import type { FakeApp } from "./fakeApp"
-import { assistantSystemPrompt, PROMPT_CANARY, ROUTER_SYSTEM_PROMPT } from "./prompts"
+import { ASSISTANT_CLOSING_NUDGE, ASSISTANT_MALFORMED_RETRY, assistantSystemPrompt, PROMPT_CANARY, ROUTER_SYSTEM_PROMPT } from "./prompts"
 
 export type Mitigations = {
 	// Off reproduces engines that parse special tokens inside tool results.
@@ -487,7 +487,7 @@ export async function runTurn({
 							...generated.lastEvaluation.cleanHistory,
 							{
 								type: "user",
-								text: "(Your last reply contained tool-call syntax the app could not run. Call the tool properly, or reply in plain text.)"
+								text: ASSISTANT_MALFORMED_RETRY
 							}
 						]
 
@@ -693,13 +693,14 @@ export async function runTurn({
 			}
 		}
 
-		// The user always gets a reply: after the step cap or a failed retry, one last tool-less turn.
+		// The user always gets a reply: after the step cap or a failed retry, one last tool-less turn, nudged
+		// like the app does.
 		if (transcript.answer.length === 0 && transcript.calls.length > 0) {
 			const closing = await measured({
 				sequence: runtime.mainSequence,
 				timings,
 				run: onFirst =>
-					mainChat.generateResponse(history, {
+					mainChat.generateResponse([...history, { type: "user", text: ASSISTANT_CLOSING_NUDGE }], {
 						temperature: 0,
 						maxTokens: STEP_MAX_TOKENS,
 						budgets: {

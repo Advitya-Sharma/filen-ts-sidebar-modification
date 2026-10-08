@@ -51,6 +51,8 @@ describe("main cases", () => {
 
 	it.each(EVAL_CASES.map(item => [item.id, item] as const))("%s is solvable against the fixture", (_id, item) => {
 		const app = new FakeApp(item.context)
+
+		item.setup?.(app.state)
 		const handles = new Set(
 			[...app.state.drive, ...app.state.notes, ...app.state.chats, ...app.state.playlists].map(entity => entity.handle)
 		)

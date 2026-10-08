@@ -27,6 +27,27 @@ describe("FakeApp", () => {
 		expect(app.exposed.has("f1")).toBe(true)
 	})
 
+	it("counts what a search left out from the pool its results come from, like the app", () => {
+		const search = (query: string) =>
+			ok(
+				new FakeApp().execute({
+					name: "search_items",
+					args: {
+						query
+					}
+				})
+			) as {
+				results: { handle: string }[]
+				more?: number
+			}
+
+		// One name matches both tokens; the partial matches it outranks are not left-out results.
+		expect(search("PDF files").results.map(item => item.handle)).toEqual(["f7"])
+		expect(search("PDF files").more).toBeUndefined()
+		expect(search("pdf").results).toHaveLength(12)
+		expect(search("pdf").more).toBe(2)
+	})
+
 	it("refuses handles the conversation has not seen and offers candidates for names", () => {
 		const app = new FakeApp()
 		const unseen = app.execute({

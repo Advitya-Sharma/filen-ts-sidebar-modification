@@ -160,6 +160,9 @@ async function main(): Promise<void> {
 		cases: EVAL_CASES.filter(item => job.main.caseIds.includes(item.id)),
 		execute: async ({ item, preset, runtime }) => {
 			const app = new FakeApp(item.context)
+
+			item.setup?.(app.state)
+
 			const before = structuredClone(app.state)
 			const transcript = await runTurn({
 				runtime,

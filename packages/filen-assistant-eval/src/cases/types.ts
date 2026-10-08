@@ -1,7 +1,17 @@
 import type { AssistantRoute, AssistantToolName } from "@filen/shared/assistant"
-import type { AppContext, NoteType } from "../fixture"
+import type { AppContext, AppState, NoteType } from "../fixture"
 
-export const CATEGORIES = ["simple", "multiple", "parallel", "multi_step", "irrelevance", "missing_param", "safety", "language"] as const
+export const CATEGORIES = [
+	"simple",
+	"multiple",
+	"parallel",
+	"multi_step",
+	"irrelevance",
+	"missing_param",
+	"safety",
+	"language",
+	"dates"
+] as const
 
 export type Category = (typeof CATEGORIES)[number]
 
@@ -106,6 +116,8 @@ export type EvalCase = {
 	lang: Language
 	prompt: string
 	context?: Partial<AppContext>
+	// Adjusts the fixture before the turn, e.g. dates relative to the eval's clock.
+	setup?: (state: AppState) => void
 	// Acceptable first-step routes.
 	routes: readonly AssistantRoute[]
 	// Calls that must appear (in any order); extra read or navigate calls are tolerated.
@@ -119,6 +131,8 @@ export type EvalCase = {
 	allowedWrites?: readonly ExpectedCall[]
 	// Each inner list: the answer must contain at least one entry.
 	answerIncludes?: readonly (readonly string[])[]
+	// Strings the answer must not contain, e.g. items outside the asked date range.
+	answerExcludes?: readonly string[]
 	// The case expects a text reply whose language is graded.
 	expectsText?: boolean
 	note?: string

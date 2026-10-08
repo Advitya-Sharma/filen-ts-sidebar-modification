@@ -179,6 +179,9 @@ function table(header: string[], rows: string[][]): string {
 	)
 }
 
+// A handle ("f3", "d12") in a reply: meaningless to the user, who knows items by name.
+const HANDLE_IN_REPLY = /(?<![\p{L}\p{N}_-])[dfnctp]\d{1,4}(?![\p{L}\p{N}_-])/u
+
 function summarizeMain(records: readonly MainRecord[]) {
 	const byCategory = (category: Category) => records.filter(record => record.category === category)
 	const languageGraded = records.filter(record => record.grade.languageOk !== null)
@@ -186,6 +189,7 @@ function summarizeMain(records: readonly MainRecord[]) {
 	const timings = records.map(record => record.transcript.timings)
 	const outputTokens = timings.reduce((sum, timing) => sum + timing.outputTokens, 0)
 	const decodeMs = timings.reduce((sum, timing) => sum + timing.decodeMs, 0)
+	const answers = records.map(record => record.transcript.answer).filter(answer => answer.length > 0)
 
 	return {
 		cases: records.length,
@@ -220,7 +224,13 @@ function summarizeMain(records: readonly MainRecord[]) {
 			timings.flatMap(timing => (timing.firstStepTtftMs === null ? [] : [timing.firstStepTtftMs])),
 			0.5
 		),
-		decodeTokensPerSecond: decodeMs === 0 ? null : outputTokens / (decodeMs / 1000)
+		decodeTokensPerSecond: decodeMs === 0 ? null : outputTokens / (decodeMs / 1000),
+		inputTokensPerTurn: records.length === 0 ? null : timings.reduce((sum, timing) => sum + timing.inputTokens, 0) / records.length,
+		replyChars: percentile(
+			answers.map(answer => answer.length),
+			0.5
+		),
+		handlesInReplies: rate(answers.map(answer => HANDLE_IN_REPLY.test(answer)))
 	}
 }
 
@@ -264,7 +274,8 @@ const SEVERITY: Record<Category, number> = {
 	multiple: 4,
 	simple: 5,
 	irrelevance: 6,
-	language: 7
+	language: 7,
+	dates: 8
 }
 
 export async function writeReport({ outDir, manifest }: { outDir: string; manifest: readonly ModelEntry[] }): Promise<void> {
@@ -390,6 +401,22 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 						gb(entry.meta.peakRssBytes),
 						gb(entry.meta.vramAfterLoadBytes),
 						ms(entry.meta.loadMs ?? null)
+					]
+				})
+			),
+			"",
+			"### Replies and prompt size",
+			"",
+			table(
+				["Model", "Median reply", "Replies showing handles", "Input tokens per turn"],
+				rows.map(({ entry, records }) => {
+					const s = summarizeMain(records)
+
+					return [
+						label(entry.model),
+						s.replyChars === null ? "–" : `${String(s.replyChars)} chars`,
+						pct(s.handlesInReplies),
+						s.inputTokensPerTurn === null ? "–" : String(Math.round(s.inputTokensPerTurn))
 					]
 				})
 			),

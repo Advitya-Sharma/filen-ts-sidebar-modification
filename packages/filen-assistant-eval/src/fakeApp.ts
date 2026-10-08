@@ -1,5 +1,6 @@
 import { assistantToolByName } from "@filen/shared/assistant"
 import { createFixtureState, type AppContext, type AppState, type DriveItem, type Note, type NoteType } from "./fixture"
+import { evalLocalDay } from "./prompts"
 
 export type Candidate = {
 	handle: string
@@ -394,6 +395,8 @@ export class FakeApp {
 			handle: item.handle,
 			title: item.title,
 			type: item.type,
+			// Like the app: dates as local days.
+			edited: evalLocalDay(item.edited),
 			...(item.tags.length > 0
 				? {
 						tags: item.tags
@@ -466,13 +469,14 @@ export class FakeApp {
 			.filter(({ score }) => score > 0)
 
 		const all = scored.filter(({ score }) => score === queryTokens.length)
-		const ranked = (all.length > 0 ? all : scored.sort((a, b) => b.score - a.score)).slice(0, SEARCH_LIMIT)
+		// Like the app: full matches when there are any, and "more" counts what that same pool left out.
+		const pool = all.length > 0 ? all : scored.sort((a, b) => b.score - a.score)
 
 		return {
-			results: ranked.map(({ item }) => this.summary(item)),
-			...(scored.length > SEARCH_LIMIT
+			results: pool.slice(0, SEARCH_LIMIT).map(({ item }) => this.summary(item)),
+			...(pool.length > SEARCH_LIMIT
 				? {
-						more: true
+						more: pool.length - SEARCH_LIMIT
 					}
 				: {})
 		}
@@ -538,7 +542,7 @@ export class FakeApp {
 				return {
 					...this.summary(item),
 					size: item.kind === "file" ? item.size : this.children(item.handle).length + " items",
-					modified: item.modified,
+					modified: evalLocalDay(item.modified),
 					favorite: item.favorite,
 					shared: item.shared
 				}
@@ -817,10 +821,17 @@ export class FakeApp {
 					chats: matches.map(item => {
 						this.exposed.add(item.handle)
 
+						const last = item.messages.at(-1)
+
 						return {
 							handle: item.handle,
 							name: item.name,
-							participants: item.participants
+							participants: item.participants,
+							...(last === undefined
+								? {}
+								: {
+										lastActivity: evalLocalDay(last.sent)
+									})
 						}
 					})
 				}
@@ -832,7 +843,10 @@ export class FakeApp {
 
 				return {
 					chat: item.name,
-					messages: item.messages.slice(-limit)
+					messages: item.messages.slice(-limit).map(message => ({
+						...message,
+						sent: evalLocalDay(message.sent)
+					}))
 				}
 			}
 
