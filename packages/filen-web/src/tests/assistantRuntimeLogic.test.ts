@@ -26,6 +26,16 @@ function probe(overrides: Partial<DeviceProbe> = {}): DeviceProbe {
 	}
 }
 
+function chunk(delta: ChatCompletionChunk["choices"][number]["delta"]): ChatCompletionChunk {
+	return {
+		id: "c",
+		object: "chat.completion.chunk",
+		created: 0,
+		model: "m",
+		choices: [{ index: 0, delta, finish_reason: null, logprobs: null }]
+	}
+}
+
 describe("recommendRuntime", () => {
 	it("picks WebGPU on a capable Chromium", () => {
 		expect(recommendRuntime(probe())).toEqual({ supported: true, backend: "webgpu", threads: 5, estimatedSpeed: "fast" })
@@ -222,24 +232,47 @@ describe("engine messages", () => {
 
 	it("folds streamed text and tool-call deltas", () => {
 		const state: GenerationState = { content: "", calls: [] }
-		const chunk = (delta: ChatCompletionChunk["choices"][number]["delta"]): ChatCompletionChunk => ({
-			id: "c",
-			object: "chat.completion.chunk",
-			created: 0,
-			model: "m",
-			choices: [{ index: 0, delta, finish_reason: null, logprobs: null }]
-		})
 
-		expect(accumulateChunk({ state, chunk: chunk({ content: "Let me " }) })).toBe(true)
-		expect(accumulateChunk({ state, chunk: chunk({ content: "look." }) })).toBe(true)
+		expect(accumulateChunk({ state, chunk: chunk({ content: "Let me " }) })).toEqual({ text: true, progress: null, named: [] })
+		expect(accumulateChunk({ state, chunk: chunk({ content: "look." }) }).text).toBe(true)
 		expect(
 			accumulateChunk({
 				state,
 				chunk: chunk({ tool_calls: [{ index: 0, id: "a", function: { name: "search_items", arguments: '{"qu' } }] })
 			})
-		).toBe(false)
-		accumulateChunk({ state, chunk: chunk({ tool_calls: [{ index: 0, function: { arguments: 'ery":"x"}' } }] }) })
+		).toEqual({ text: false, progress: null, named: [{ index: 0, name: "search_items" }] })
+		expect(
+			accumulateChunk({ state, chunk: chunk({ tool_calls: [{ index: 0, function: { arguments: 'ery":"x"}' } }] }) }).named
+		).toEqual([])
 
 		expect(state).toEqual({ content: "Let me look.", calls: [{ id: "a", name: "search_items", arguments: '{"query":"x"}' }] })
+	})
+
+	it("reports prompt progress without the cached prefix", () => {
+		const state: GenerationState = { content: "", calls: [] }
+
+		expect(
+			accumulateChunk({
+				state,
+				chunk: {
+					...chunk({ role: "assistant", content: null }),
+					prompt_progress: { total: 3000, cache: 1000, processed: 1512, time_ms: 9 }
+				}
+			})
+		).toEqual({ text: false, progress: { processed: 512, total: 2000 }, named: [] })
+		expect(state.content).toBe("")
+	})
+
+	it("numbers named calls by their position in the result, skipping an engine index never named", () => {
+		const state: GenerationState = { content: "", calls: [] }
+
+		accumulateChunk({ state, chunk: chunk({ tool_calls: [{ index: 1, id: "b", function: { arguments: "{" } }] }) })
+
+		expect(
+			accumulateChunk({ state, chunk: chunk({ tool_calls: [{ index: 2, id: "c", function: { name: "list_notes" } }] }) }).named
+		).toEqual([{ index: 0, name: "list_notes" }])
+		expect(
+			accumulateChunk({ state, chunk: chunk({ tool_calls: [{ index: 3, id: "d", function: { name: "read_note" } }] }) }).named
+		).toEqual([{ index: 1, name: "read_note" }])
 	})
 })

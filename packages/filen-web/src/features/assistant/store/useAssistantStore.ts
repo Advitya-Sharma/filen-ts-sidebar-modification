@@ -5,6 +5,7 @@ import {
 	applyAssistantEvent,
 	beginTurn,
 	setProposalStatus,
+	setStepsExpanded,
 	INITIAL_TRANSCRIPT_STATE,
 	type ProposalStatus,
 	type TranscriptState
@@ -30,8 +31,11 @@ interface AssistantStore extends TranscriptState {
 	setDraft: (draft: string) => void
 	takeFocusRequest: () => boolean
 	applyEvent: (event: AssistantEvent) => void
+	// Several events as one update: one render for a frame's worth of streamed text and progress.
+	applyEvents: (events: readonly AssistantEvent[]) => void
 	beginTurn: (turnId: string, text: string) => void
 	setProposalStatus: (proposalId: string, status: ProposalStatus) => void
+	setStepsExpanded: (turnId: string, expanded: boolean) => void
 	// A different session took over: its model state, and an empty conversation (the old one's context is gone).
 	resetConversation: (modelState: AssistantModelState) => void
 }
@@ -65,11 +69,19 @@ export const useAssistantStore = create<AssistantStore>((set, get) => ({
 	applyEvent: event => {
 		set(state => applyAssistantEvent(state, event))
 	},
+	applyEvents: events => {
+		if (events.length > 0) {
+			set(state => events.reduce(applyAssistantEvent, state))
+		}
+	},
 	beginTurn: (turnId, text) => {
 		set(state => beginTurn(state, turnId, text))
 	},
 	setProposalStatus: (proposalId, status) => {
 		set(state => ({ entries: setProposalStatus(state.entries, proposalId, status) }))
+	},
+	setStepsExpanded: (turnId, expanded) => {
+		set(state => ({ entries: setStepsExpanded(state.entries, turnId, expanded) }))
 	},
 	resetConversation: modelState => {
 		set({ ...INITIAL_TRANSCRIPT_STATE, modelState })

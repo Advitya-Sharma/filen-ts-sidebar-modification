@@ -1,7 +1,7 @@
 import { formatBytesFixed } from "@filen/shared"
 import type { AssistantKey } from "@/lib/i18n"
-import type { TranscriptEntry } from "@/features/assistant/store/transcript"
-import type { AssistantModelState, AssistantTurnError } from "@/features/assistant/types"
+import type { TranscriptEntry, TranscriptStep } from "@/features/assistant/store/transcript"
+import type { AssistantModelState, AssistantStepFailure, AssistantStepRoute, AssistantTurnError } from "@/features/assistant/types"
 
 export type TranscriptRow = TranscriptEntry | { kind: "thinking"; id: "thinking" }
 
@@ -42,20 +42,149 @@ export function canRemoveModel(state: AssistantModelState): boolean {
 	}
 }
 
-// The waiting bubble shows while a turn has nothing visibly in progress: after the user's message, or
-// between a finished step and the next one. A streaming reply or a running activity is its own signal.
-export function transcriptRows(entries: readonly TranscriptEntry[], generating: boolean): readonly TranscriptRow[] {
-	if (!generating) {
+// The waiting bubble shows only until the turn's step list or reply appears: the list says what is
+// happening from then on.
+export function transcriptRows(entries: readonly TranscriptEntry[], activeTurnId: string | null): readonly TranscriptRow[] {
+	if (activeTurnId === null) {
 		return entries
 	}
 
-	const last = entries.at(-1)
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]
 
-	if ((last?.kind === "reply" && !last.final) || (last?.kind === "activity" && last.status === "running")) {
-		return entries
+		if (entry?.turnId !== activeTurnId) {
+			break
+		}
+
+		if (entry.kind === "steps" || entry.kind === "reply") {
+			return entries
+		}
 	}
 
 	return [...entries, { kind: "thinking", id: "thinking" }]
+}
+
+type StepsEntry = Extract<TranscriptEntry, { kind: "steps" }>
+
+// A step shows its time from here on: quicker ones would only add noise.
+export const SLOW_STEP_MS = 1000
+
+// A call the user declined, or a repeat that was not run again, did not go wrong: no warning for it.
+const NO_FAULT = new Set<AssistantStepFailure>(["declined", "repeated"])
+
+export function stepFaulted(step: TranscriptStep): boolean {
+	return step.status === "failed" && !(step.kind === "tool" && step.failure !== null && NO_FAULT.has(step.failure))
+}
+
+// What a turn is busy with, to announce: a card waiting on the user first, else its newest row running.
+// Queued calls have not started; thinking between steps reads as the generic "responding" instead of a row
+// of its own each time.
+export function currentStep(entry: StepsEntry): TranscriptStep | null {
+	return (
+		entry.steps.find(step => step.status === "waiting") ??
+		entry.steps.findLast(step => step.status === "active" && step.kind !== "thinking") ??
+		null
+	)
+}
+
+export function stepDurationMs(step: TranscriptStep): number | null {
+	return step.endedAt === null ? null : Math.max(0, step.endedAt - step.startedAt)
+}
+
+export function stepsSummary(entry: StepsEntry): { tools: number; durationMs: number; failed: boolean } {
+	let tools = 0
+	let failed = false
+
+	for (const step of entry.steps) {
+		// A repeat ran nothing.
+		if (step.kind === "tool" && step.failure !== "repeated") {
+			tools++
+		}
+
+		failed ||= stepFaulted(step)
+	}
+
+	return { tools, durationMs: Math.max(0, entry.lastAt - entry.startedAt), failed }
+}
+
+// Seconds, with one decimal below ten; a running step counts whole seconds.
+export function durationFigure(ms: number, live: boolean): { seconds: number; fractionDigits: 0 | 1 } {
+	const seconds = Math.max(0, ms) / 1000
+
+	return live || seconds >= 10 ? { seconds: Math.floor(seconds), fractionDigits: 0 } : { seconds, fractionDigits: 1 }
+}
+
+// The prompt-reading bar shows only while some of the prompt is left; at 1 the model is writing.
+export function visibleProgress(progress: number | null): number | null {
+	return progress === null || progress >= 1 ? null : Math.max(0, progress)
+}
+
+export const ROUTE_KEYS: Record<AssistantStepRoute, AssistantKey> = {
+	files: "assistantStepRoutedFiles",
+	organize: "assistantStepRoutedOrganize",
+	trash: "assistantStepRoutedTrash",
+	notes: "assistantStepRoutedNotes",
+	chats: "assistantStepRoutedChats",
+	audio: "assistantStepRoutedAudio",
+	navigation: "assistantStepRoutedNavigation",
+	answer: "assistantStepRoutedAnswer"
+}
+
+export const STEP_FAILURE_KEYS: Record<AssistantStepFailure, AssistantKey> = {
+	invalid: "assistantStepFailedInvalid",
+	error: "assistantStepFailedError",
+	blocked: "assistantStepFailedBlocked",
+	declined: "assistantStepFailedDeclined",
+	repeated: "assistantStepFailedRepeated"
+}
+
+// A call's label with what it acts on, for the tools that act on one thing. Looked up through a Map, like
+// the activity keys below.
+const TOOL_SUBJECT_KEYS = {
+	search_items: "assistantStepSearchItems",
+	list_directory: "assistantStepListDirectory",
+	get_item_info: "assistantStepGetItemInfo",
+	read_text_file: "assistantStepReadTextFile",
+	reveal_item: "assistantStepRevealItem",
+	set_favorite: "assistantStepSetFavorite",
+	create_directory: "assistantStepCreateDirectory",
+	rename_item: "assistantStepRenameItem",
+	move_items: "assistantStepMoveItems",
+	copy_items: "assistantStepCopyItems",
+	trash_items: "assistantStepTrashItems",
+	list_notes: "assistantStepListNotes",
+	read_note: "assistantStepReadNote",
+	open_note: "assistantStepOpenNote",
+	create_note: "assistantStepCreateNote",
+	set_note_flags: "assistantStepSetNoteFlags",
+	list_chats: "assistantStepListChats",
+	read_chat: "assistantStepReadChat",
+	open_chat: "assistantStepOpenChat",
+	draft_chat_message: "assistantStepDraftChatMessage",
+	open_playlist: "assistantStepOpenPlaylist",
+	play: "assistantStepPlay",
+	add_tracks_to_playlist: "assistantStepAddTracksToPlaylist"
+} as const satisfies Record<string, AssistantKey>
+
+export type ToolSubjectKey = (typeof TOOL_SUBJECT_KEYS)[keyof typeof TOOL_SUBJECT_KEYS]
+
+const SUBJECT_KEYS = new Map<string, ToolSubjectKey>(Object.entries(TOOL_SUBJECT_KEYS))
+
+export function toolSubjectKey(tool: string): ToolSubjectKey | null {
+	return SUBJECT_KEYS.get(tool) ?? null
+}
+
+// What a listing's count is of.
+export type StepCountNoun = "items" | "notes" | "chats" | "playlists"
+
+const COUNT_NOUNS = new Map<string, StepCountNoun>([
+	["list_notes", "notes"],
+	["list_chats", "chats"],
+	["list_playlists", "playlists"]
+])
+
+export function stepCountNoun(tool: string): StepCountNoun {
+	return COUNT_NOUNS.get(tool) ?? "items"
 }
 
 export const TURN_END_KEYS: Record<"cancelled" | AssistantTurnError, AssistantKey> = {

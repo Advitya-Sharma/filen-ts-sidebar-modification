@@ -10,7 +10,15 @@ import {
 	type AssistantTurnEvent
 } from "@filen/shared/assistant"
 import type { ToolExecutor } from "@/features/assistant/runtime/executor"
-import type { AssistantActivity, AssistantEvent, AssistantModelState, AssistantSession } from "@/features/assistant/types"
+import {
+	endedStep,
+	type AssistantEvent,
+	type AssistantModelState,
+	type AssistantSession,
+	type AssistantStep,
+	type AssistantStepFailure,
+	type AssistantStepStatus
+} from "@/features/assistant/types"
 import { buildProposal, turnExecutor, type TurnExecutor } from "@/features/assistant/loop/executorAdapter"
 import { log } from "@/lib/log"
 
@@ -47,10 +55,184 @@ const ACTION_LOG_MAX = 200
 // Prior exchanges kept for context; fitMessages drops the oldest of them when the 8K context runs short.
 const HISTORY_MAX = 12
 
-const FINAL_STATUSES = new Set<AssistantToolCallStatus>(["ok", "error", "invalid", "blocked", "declined"])
+const FINAL_STATUSES = new Set<AssistantToolCallStatus>(["ok", "error", "invalid", "blocked", "declined", "repeated"])
 
-function activityStatus(status: AssistantToolCallStatus): AssistantActivity["status"] {
-	return status === "ok" ? "done" : status === "running" || status === "confirming" ? "running" : "failed"
+const STEP_STATUS: Record<AssistantToolCallStatus, AssistantStepStatus> = {
+	preparing: "active",
+	queued: "queued",
+	running: "active",
+	confirming: "waiting",
+	ok: "done",
+	error: "failed",
+	invalid: "failed",
+	blocked: "failed",
+	declined: "failed",
+	discarded: "discarded",
+	repeated: "failed"
+}
+
+const STEP_FAILURES = new Map<AssistantToolCallStatus, AssistantStepFailure>([
+	["error", "error"],
+	["invalid", "invalid"],
+	["blocked", "blocked"],
+	["declined", "declined"],
+	["repeated", "repeated"]
+])
+
+function sameStep(a: AssistantStep, b: AssistantStep): boolean {
+	const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+
+	return [...keys].every(key => (a as Record<string, unknown>)[key] === (b as Record<string, unknown>)[key])
+}
+
+export interface TurnSteps {
+	// Brackets the model load a turn waits for.
+	loading: (status: AssistantStepStatus) => void
+	event: (event: AssistantTurnEvent) => void
+	// The turn ended: rows still running end with it, as stopped by the user or failed with the turn (a turn
+	// that completed leaves none). Whatever arrives afterwards is stale and dropped.
+	close: (outcome: "done" | "stopped" | "failed") => void
+}
+
+// The loop's events as the turn's progress list. Routing, each step's thinking and the closing reply are
+// phase rows, at most one active at a time; a call is a row of its own, re-emitted only when what it
+// shows changed. Prompt-reading progress goes to the active phase, or to the running call while the
+// loop extracts its content.
+export function turnSteps({ turnId, emit, now }: { turnId: string; emit: (event: AssistantEvent) => void; now: () => number }): TurnSteps {
+	const steps = new Map<string, AssistantStep>()
+	let phase: AssistantStep | null = null
+	let inTool = false
+	let runningTool: string | null = null
+	let count = 0
+	let closed = false
+
+	const put = (step: AssistantStep) => {
+		steps.set(step.id, step)
+		emit({ type: "step", turnId, step, at: now() })
+	}
+
+	const endPhase = (status: AssistantStepStatus) => {
+		if (phase !== null) {
+			put({ ...phase, status, progress: null })
+			phase = null
+		}
+	}
+
+	const startPhase = (kind: "routing" | "thinking" | "replying") => {
+		endPhase("done")
+		count++
+		phase =
+			kind === "routing"
+				? { id: `${turnId}:routing`, kind, status: "active", progress: null, route: null }
+				: { id: `${turnId}:${kind}${String(count)}`, kind, status: "active", progress: null }
+		put(phase)
+	}
+
+	const progress = (share: number) => {
+		const target = inTool && runningTool !== null ? steps.get(runningTool) : phase
+
+		if (target?.status !== "active" || target.progress === share) {
+			return
+		}
+
+		const next = { ...target, progress: share }
+
+		if (target === phase) {
+			phase = next
+		}
+
+		put(next)
+	}
+
+	return {
+		loading: status => {
+			if (!closed) {
+				put({ id: `${turnId}:loading`, kind: "loading", status, progress: null })
+			}
+		},
+
+		event: event => {
+			if (closed) {
+				return
+			}
+
+			switch (event.type) {
+				case "phase":
+					inTool = event.phase === "tool" || event.phase === "confirming"
+
+					if (event.phase === "routing" || event.phase === "thinking" || event.phase === "replying") {
+						startPhase(event.phase)
+					}
+
+					break
+				case "route":
+					if (phase?.kind === "routing") {
+						put({ ...phase, status: "done", progress: null, route: event.route })
+						phase = null
+					}
+
+					break
+				case "progress": {
+					const { processed, total } = event.progress
+
+					progress(total > 0 ? Math.min(1, Math.max(0, processed / total)) : 1)
+
+					break
+				}
+				case "call": {
+					endPhase("done")
+
+					const id = `${turnId}:${event.call.id}`
+					const step: AssistantStep = {
+						id,
+						kind: "tool",
+						status: STEP_STATUS[event.call.status],
+						progress: null,
+						tool: event.call.tool,
+						subject: event.call.subject ?? null,
+						resultCount: event.call.resultCount ?? null,
+						resultMore: event.call.resultMore ?? false,
+						failure: STEP_FAILURES.get(event.call.status) ?? null
+					}
+					const previous = steps.get(id)
+
+					runningTool = event.call.status === "running" ? id : runningTool === id ? null : runningTool
+
+					// The loop re-emits a call whenever its record changes; the list hears only what it shows.
+					if (previous === undefined || !sameStep({ ...previous, progress: null }, step)) {
+						put(step)
+					}
+
+					break
+				}
+				case "reply":
+					// The reply itself shows from its first word on.
+					if (event.final || event.text.length > 0) {
+						endPhase("done")
+					}
+
+					break
+			}
+		},
+
+		close: outcome => {
+			if (closed) {
+				return
+			}
+
+			const status = outcome === "failed" ? "failed" : "stopped"
+
+			endPhase(outcome === "done" ? "done" : status)
+
+			for (const step of steps.values()) {
+				if (step.status === "active" || step.status === "queued" || step.status === "waiting") {
+					put(endedStep(step, status))
+				}
+			}
+
+			closed = true
+		}
+	}
 }
 
 // Settles with the promise, or rejects as soon as the signal aborts: Stop ends a turn that is still waiting
@@ -94,10 +276,13 @@ export type AssistantRuntimeSession = AssistantSession & {
 // over the on-device model and the app's tool executor, one turn at a time.
 export function createAssistantSession({
 	runtime,
-	executor
+	executor,
+	now = Date.now
 }: {
 	runtime: AssistantRuntimeLike
 	executor: ToolExecutor
+	// The clock of the steps' `at`, which the UI compares with Date.now() for live durations.
+	now?: () => number
 }): AssistantRuntimeSession {
 	const listeners = new Set<(event: AssistantEvent) => void>()
 	const proposals = new Map<string, PendingProposal>()
@@ -148,9 +333,11 @@ export function createAssistantSession({
 		const turn = turnExecutor({ executor, signal: controller.signal })
 		let segment = 0
 		let segmentHasText = false
-		const activities = new Map<string, AssistantActivity["status"]>()
+		const steps = turnSteps({ turnId, emit, now })
 
 		const onEvent = (event: AssistantTurnEvent) => {
+			steps.event(event)
+
 			if (event.type === "reply") {
 				if (event.text.length > 0 || segmentHasText) {
 					segmentHasText = true
@@ -162,15 +349,6 @@ export function createAssistantSession({
 					segmentHasText = false
 				}
 			} else if (event.type === "call") {
-				const id = `${turnId}:${event.call.id}`
-				const status = activityStatus(event.call.status)
-
-				// The loop re-emits a call on every change; the UI only hears about its status.
-				if (activities.get(id) !== status) {
-					activities.set(id, status)
-					emit({ type: "activity", turnId, activity: { id, tool: event.call.tool, status } })
-				}
-
 				logCall(turnId, event.call)
 			}
 		}
@@ -208,12 +386,14 @@ export function createAssistantSession({
 
 		try {
 			if (runtime.getState().kind !== "ready") {
+				steps.loading("active")
 				await unlessAborted(runtime.load(), controller.signal)
+				steps.loading(runtime.getState().kind === "ready" ? "done" : "failed")
 			}
 
 			// The load failed or another tab holds the model; the panel shows that state.
 			if (runtime.getState().kind !== "ready") {
-				emit({ type: "turn-end", turnId, outcome: "error", error: "model-unavailable" })
+				emit({ type: "turn-end", turnId, at: now(), outcome: "error", error: "model-unavailable" })
 
 				return
 			}
@@ -230,17 +410,23 @@ export function createAssistantSession({
 			})
 
 			history = [...history, { user: message, reply: result.reply }].slice(-HISTORY_MAX)
-			emit({ type: "turn-end", turnId, outcome: "complete" })
+			steps.close("done")
+			emit({ type: "turn-end", turnId, at: now(), outcome: "complete" })
 		} catch (e) {
-			if (e instanceof AssistantAbortError || controller.signal.aborted) {
-				emit({ type: "turn-end", turnId, outcome: "cancelled" })
+			const cancelled = e instanceof AssistantAbortError || controller.signal.aborted
+
+			steps.close(cancelled ? "stopped" : "failed")
+
+			if (cancelled) {
+				emit({ type: "turn-end", turnId, at: now(), outcome: "cancelled" })
 			} else if (e instanceof AssistantContextError) {
-				emit({ type: "turn-end", turnId, outcome: "error", error: "context-full" })
+				emit({ type: "turn-end", turnId, at: now(), outcome: "error", error: "context-full" })
 			} else {
 				log.error("assistant", "turn failed", e)
 				emit({
 					type: "turn-end",
 					turnId,
+					at: now(),
 					outcome: "error",
 					error: runtime.getState().kind === "ready" ? "failed" : "model-unavailable"
 				})

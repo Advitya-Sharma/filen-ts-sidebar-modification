@@ -291,6 +291,8 @@ export function createAssistantToolExecutor(): ToolExecutor {
 			}
 		},
 
+		name: handle => registry.get(handle)?.ref.name,
+
 		reset: () => {
 			registry.clear()
 		}

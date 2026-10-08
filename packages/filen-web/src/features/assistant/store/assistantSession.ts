@@ -12,11 +12,86 @@ let unsubscribe: (() => void) | null = null
 // mounted when the inline panel mounts at a breakpoint crossing.
 let panelsShown = 0
 // Events a session emits synchronously inside send(), held until the user's message is in the transcript
-// so the turn's first activity can never land above the message that started it.
+// so the turn's first step can never land above the message that started it.
 let heldDuringSend: AssistantEvent[] | null = null
+
+// Streamed reply text and step updates reach the store once per frame, as one update: a reply re-renders
+// its markdown on every change. Everything else lands at once, after whatever is pending, so the order
+// holds; a hidden tab (no frames) catches up at the turn's end.
+let pending: AssistantEvent[] = []
+let cancelFlush: (() => void) | null = null
+
+function isUrgent(event: AssistantEvent): boolean {
+	return event.type !== "step" && !(event.type === "reply" && !event.final)
+}
+
+// Only the newest of consecutive texts of one reply matters. Steps all stay: they carry the times.
+function supersedes(next: AssistantEvent, last: AssistantEvent | undefined): boolean {
+	return next.type === "reply" && last?.type === "reply" && next.replyId === last.replyId
+}
+
+function flushPending(): void {
+	cancelFlush?.()
+	cancelFlush = null
+
+	const events = pending
+
+	pending = []
+	useAssistantStore.getState().applyEvents(events)
+}
+
+function scheduleFlush(): void {
+	if (cancelFlush !== null) {
+		return
+	}
+
+	if (typeof requestAnimationFrame === "function") {
+		const id = requestAnimationFrame(() => {
+			cancelFlush = null
+			flushPending()
+		})
+
+		cancelFlush = () => {
+			cancelAnimationFrame(id)
+		}
+	} else {
+		const id = setTimeout(() => {
+			cancelFlush = null
+			flushPending()
+		}, 16)
+
+		cancelFlush = () => {
+			clearTimeout(id)
+		}
+	}
+}
+
+function deliver(event: AssistantEvent): void {
+	if (isUrgent(event)) {
+		pending.push(event)
+		flushPending()
+
+		return
+	}
+
+	if (supersedes(event, pending.at(-1))) {
+		pending[pending.length - 1] = event
+	} else {
+		pending.push(event)
+	}
+
+	scheduleFlush()
+}
+
+function dropPending(): void {
+	cancelFlush?.()
+	cancelFlush = null
+	pending = []
+}
 
 export function registerAssistantSession(next: AssistantSession): () => void {
 	unsubscribe?.()
+	dropPending()
 	session = next
 	useAssistantStore.getState().resetConversation(next.getModelState())
 	unsubscribe = next.subscribe(event => {
@@ -26,7 +101,7 @@ export function registerAssistantSession(next: AssistantSession): () => void {
 			return
 		}
 
-		useAssistantStore.getState().applyEvent(event)
+		deliver(event)
 	})
 	next.setPanelOpen(panelsShown > 0)
 
@@ -116,6 +191,7 @@ export function sendAssistantMessage(text: string): boolean {
 	const held: AssistantEvent[] = []
 	let turnId: string
 
+	flushPending()
 	heldDuringSend = held
 
 	try {
@@ -126,9 +202,7 @@ export function sendAssistantMessage(text: string): boolean {
 
 	store.beginTurn(turnId, message)
 
-	for (const event of held) {
-		store.applyEvent(event)
-	}
+	store.applyEvents(held)
 
 	return true
 }
@@ -173,5 +247,6 @@ export function startNewAssistantConversation(): void {
 	}
 
 	session.reset()
+	dropPending()
 	store.resetConversation(session.getModelState())
 }

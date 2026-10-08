@@ -3,15 +3,21 @@ import { ASSISTANT_TOOLS } from "@filen/shared/assistant"
 import { EN_CATALOGS } from "@/lib/i18n/catalog"
 import {
 	canRemoveModel,
+	currentStep,
 	downloadByteFigures,
+	durationFigure,
 	downloadPercent,
 	modelShowsLoading,
 	proposalTargetKind,
 	spokenText,
+	stepCountNoun,
+	stepsSummary,
 	toolActivityKey,
-	transcriptRows
+	toolSubjectKey,
+	transcriptRows,
+	visibleProgress
 } from "@/features/assistant/components/assistant.logic"
-import type { TranscriptEntry } from "@/features/assistant/store/transcript"
+import type { TranscriptEntry, TranscriptStep } from "@/features/assistant/store/transcript"
 
 const MODEL = { id: "m", name: "M", sizeBytes: 100 }
 
@@ -71,19 +77,28 @@ describe("canRemoveModel", () => {
 describe("transcriptRows", () => {
 	const user: TranscriptEntry = { kind: "user", id: "user:t1", turnId: "t1", text: "hi" }
 
-	it("adds the waiting bubble while a turn shows nothing in progress", () => {
-		expect(transcriptRows([user], true).at(-1)).toEqual({ kind: "thinking", id: "thinking" })
-		expect(transcriptRows([user], false)).toEqual([user])
+	it("adds the waiting bubble while the running turn shows nothing yet", () => {
+		expect(transcriptRows([user], "t1").at(-1)).toEqual({ kind: "thinking", id: "thinking" })
+		expect(transcriptRows([user], null)).toEqual([user])
 	})
 
-	it("leaves it out while a reply streams or an activity runs", () => {
+	it("leaves it out once the turn has steps or a reply, but not for an earlier turn's", () => {
 		const streaming: TranscriptEntry = { kind: "reply", id: "reply:r", turnId: "t1", text: "x", final: false }
-		const running: TranscriptEntry = { kind: "activity", id: "activity:a", turnId: "t1", tool: "read_note", status: "running" }
-		const done: TranscriptEntry = { ...running, status: "done" }
+		const steps: TranscriptEntry = {
+			kind: "steps",
+			id: "steps:t1",
+			turnId: "t1",
+			steps: [],
+			startedAt: 0,
+			lastAt: 0,
+			outcome: null,
+			expanded: null
+		}
+		const next: TranscriptEntry = { kind: "user", id: "user:t2", turnId: "t2", text: "again" }
 
-		expect(transcriptRows([user, streaming], true)).toHaveLength(2)
-		expect(transcriptRows([user, running], true)).toHaveLength(2)
-		expect(transcriptRows([user, done], true)).toHaveLength(3)
+		expect(transcriptRows([user, streaming], "t1")).toHaveLength(2)
+		expect(transcriptRows([user, steps], "t1")).toHaveLength(2)
+		expect(transcriptRows([user, steps, next], "t2")).toHaveLength(4)
 	})
 })
 
@@ -102,6 +117,121 @@ describe("toolActivityKey", () => {
 	it("falls back to a generic line for a name it does not know, including prototype keys", () => {
 		expect(toolActivityKey("made_up")).toBe("assistantToolGeneric")
 		expect(toolActivityKey("constructor")).toBe("assistantToolGeneric")
+	})
+})
+
+describe("step wording", () => {
+	// A subject only ever comes from a tool's grounded arguments; every tool that has one gets a label for it.
+	it("has a label with the subject for every tool with a grounded argument, from keys the catalog ships", () => {
+		for (const tool of ASSISTANT_TOOLS) {
+			const grounded = (tool.grounded.handles?.length ?? 0) + (tool.grounded.text?.length ?? 0) > 0
+			const key = toolSubjectKey(tool.name)
+
+			expect(key !== null, tool.name).toBe(grounded)
+
+			if (key !== null) {
+				expect(EN_CATALOGS.assistant[key], tool.name).toContain("{{subject}}")
+			}
+		}
+
+		expect(toolSubjectKey("constructor")).toBeNull()
+	})
+
+	it("counts what a listing is of", () => {
+		expect(stepCountNoun("list_notes")).toBe("notes")
+		expect(stepCountNoun("list_chats")).toBe("chats")
+		expect(stepCountNoun("list_playlists")).toBe("playlists")
+		expect(stepCountNoun("search_items")).toBe("items")
+	})
+
+	it("shows seconds with one decimal below ten, and whole seconds while running", () => {
+		expect(durationFigure(4230, false)).toEqual({ seconds: 4.23, fractionDigits: 1 })
+		expect(durationFigure(12_900, false)).toEqual({ seconds: 12, fractionDigits: 0 })
+		expect(durationFigure(4900, true)).toEqual({ seconds: 4, fractionDigits: 0 })
+		expect(durationFigure(-5, false)).toEqual({ seconds: 0, fractionDigits: 1 })
+	})
+
+	it("shows the reading bar only while some of the prompt is left", () => {
+		expect(visibleProgress(null)).toBeNull()
+		expect(visibleProgress(1)).toBeNull()
+		expect(visibleProgress(0.25)).toBe(0.25)
+		expect(visibleProgress(-1)).toBe(0)
+	})
+})
+
+describe("steps summary", () => {
+	const step = (patch: Partial<Extract<TranscriptStep, { kind: "tool" }>>): TranscriptStep => ({
+		id: "s",
+		kind: "tool",
+		status: "done",
+		progress: null,
+		tool: "search_items",
+		subject: null,
+		resultCount: null,
+		resultMore: false,
+		failure: null,
+		startedAt: 0,
+		endedAt: 1,
+		...patch
+	})
+	const entry = (steps: TranscriptStep[]): Extract<TranscriptEntry, { kind: "steps" }> => ({
+		kind: "steps",
+		id: "steps:t1",
+		turnId: "t1",
+		steps,
+		startedAt: 1000,
+		lastAt: 5200,
+		outcome: "complete",
+		expanded: null
+	})
+
+	it("counts the calls and the turn's whole time, and flags a failure", () => {
+		const routing: TranscriptStep = {
+			id: "r",
+			kind: "routing",
+			status: "done",
+			progress: null,
+			route: "files",
+			startedAt: 0,
+			endedAt: 1
+		}
+
+		expect(stepsSummary(entry([routing, step({ id: "a" }), step({ id: "b", status: "failed", failure: "error" })]))).toEqual({
+			tools: 2,
+			durationMs: 4200,
+			failed: true
+		})
+		expect(stepsSummary(entry([routing]))).toEqual({ tools: 0, durationMs: 4200, failed: false })
+	})
+
+	it("flags no failure for a declined call or a repeat, and does not count a repeat as a tool used", () => {
+		expect(
+			stepsSummary(
+				entry([
+					step({ id: "a" }),
+					step({ id: "b", status: "failed", failure: "declined" }),
+					step({ id: "c", status: "failed", failure: "repeated" })
+				])
+			)
+		).toEqual({ tools: 2, durationMs: 4200, failed: false })
+	})
+
+	it("announces a card waiting on the user before anything else, then the call that runs, never a queued one", () => {
+		const waiting = step({ id: "a", status: "waiting" })
+		const running = step({ id: "b", status: "active" })
+		const queued = step({ id: "c", status: "queued" })
+
+		expect(currentStep(entry([waiting, queued]))).toBe(waiting)
+		expect(currentStep(entry([running, queued]))).toBe(running)
+		expect(currentStep(entry([step({ id: "d" }), queued]))).toBeNull()
+	})
+
+	it("announces the newest running row, never a thinking one", () => {
+		const waiting = step({ id: "a", status: "waiting" })
+		const thinking: TranscriptStep = { id: "t", kind: "thinking", status: "active", progress: null, startedAt: 0, endedAt: null }
+
+		expect(currentStep(entry([waiting, thinking]))).toBe(waiting)
+		expect(currentStep(entry([step({ id: "a" }), thinking]))).toBeNull()
 	})
 })
 

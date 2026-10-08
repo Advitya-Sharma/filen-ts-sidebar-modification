@@ -5,7 +5,7 @@ import { Wllama, type ChatCompletionTool, type WllamaLogger } from "@wllama/wlla
 import wllamaWasmUrl from "@wllama/wllama/esm/wasm/wllama.wasm?url"
 import type { AssistantGenerateRequest, AssistantGenerateResult } from "@filen/shared/assistant"
 import type { AssistantModelFile, AssistantModelManifest } from "@/features/assistant/runtime/manifest"
-import { accumulateChunk, toEngineMessage, type GenerationState } from "@/features/assistant/runtime/engineMessages"
+import { accumulateChunk, toEngineMessage, type GenerationState, type GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 import type { AssistantBackend } from "@/features/assistant/runtime/deviceCheck"
 import { downloadModelShards, globalConnectivity, type ModelDownloadProgress, type ShardStore } from "@/features/assistant/runtime/download"
 import { blobGgufRead, readGgufSpecialTokens } from "@/features/assistant/runtime/gguf"
@@ -349,6 +349,10 @@ const api = {
 					jinja: true,
 					// Non-thinking mode: the small Qwen3.5 models loop when allowed to think.
 					reasoning: false,
+					// Prompt progress is reported once per decoded batch: at the micro-batch size the compute is the
+					// same as the 2048 default, and a long prompt reports in steps instead of one jump.
+					n_batch: 512,
+					n_ubatch: 512,
 					// Router, main loop and quarantine alternate; a slot each keeps their prompt prefixes cached.
 					n_parallel: 3,
 					kv_unified: true
@@ -377,7 +381,13 @@ const api = {
 		}
 	},
 
-	async generate(id: number, request: AssistantGenerateRequest, onText?: (text: string) => void): Promise<AssistantGenerateResult> {
+	// `onUpdate` gets the streamed text (throttled), the prompt-reading progress and each tool call as soon
+	// as its name is known; the text written before a call always arrives before the call.
+	async generate(
+		id: number,
+		request: AssistantGenerateRequest,
+		onUpdate?: (update: GenerationUpdate) => void
+	): Promise<AssistantGenerateResult> {
 		if (engine === null) {
 			throw loadError("missing", "No model is loaded")
 		}
@@ -389,7 +399,12 @@ const api = {
 			function: { name: tool.name, description: tool.description, parameters: tool.parameters }
 		}))
 
-		const text = onText === undefined ? null : throttle(onText, TEXT_THROTTLE_MS)
+		const text =
+			onUpdate === undefined
+				? null
+				: throttle((content: string) => {
+						onUpdate({ type: "text", text: content })
+					}, TEXT_THROTTLE_MS)
 
 		generations.set(id, controller)
 
@@ -403,15 +418,34 @@ const api = {
 				chat_template_kwargs: { enable_thinking: false },
 				abortSignal: controller.signal,
 				stream: true,
+				return_progress: onUpdate !== undefined,
 				onData: chunk => {
-					if (accumulateChunk({ state, chunk })) {
+					const changes = accumulateChunk({ state, chunk })
+
+					if (onUpdate === undefined) {
+						return
+					}
+
+					if (changes.progress !== null) {
+						onUpdate({ type: "progress", ...changes.progress })
+					}
+
+					if (changes.text) {
 						text?.(state.content)
+					}
+
+					if (changes.named.length > 0) {
+						text?.flush()
+
+						for (const call of changes.named) {
+							onUpdate({ type: "call", ...call })
+						}
 					}
 				}
 			})
 		} finally {
 			text?.flush()
-			releaseCallback(onText)
+			releaseCallback(onUpdate)
 			generations.delete(id)
 		}
 

@@ -2,8 +2,8 @@
 // tools/). The UI never imports the runtime: an implementation hands itself to registerAssistantSession
 // (store/assistantSession.ts), and every state change reaches the UI as an AssistantEvent.
 //
-// Names, paths and free text in here are shown verbatim. Tool activity carries only the tool's name; the
-// UI owns its wording (locales/en/assistant.ts).
+// Names, paths and free text in here are shown verbatim, as plain text. A step carries the tool's name and
+// at most a short sanitized subject; the UI owns its wording (locales/en/assistant.ts).
 
 export interface AssistantModelInfo {
 	// Stable build id (cache directory, logs). Never shown.
@@ -38,13 +38,46 @@ export type AssistantModelState =
 	| { kind: "ready"; model: AssistantModelInfo }
 	| { kind: "error"; error: AssistantModelError; model: AssistantModelInfo | null }
 
-// One tool call inside a turn, by the tool's registry name ("search_items"). Re-emitted with the same id as
-// its status changes; the UI upserts by id and words it itself, with a generic line for a name it does
-// not know.
-export interface AssistantActivity {
-	id: string
-	tool: string
-	status: "running" | "done" | "failed"
+// The tool group the turn was routed to ("answer": no tools), as @filen/shared/assistant names them.
+export type AssistantStepRoute = "files" | "organize" | "trash" | "notes" | "chats" | "audio" | "navigation" | "answer"
+
+// "queued": a call written and waiting for the calls before it. "waiting": on the user (a confirmation
+// card). "stopped": the turn ended while it ran. "discarded": the model abandoned a call it had started to
+// write; the row goes away.
+export type AssistantStepStatus = "active" | "queued" | "waiting" | "done" | "failed" | "stopped" | "discarded"
+
+// Why a call did not complete: malformed, the app refused or failed it, the guard blocked it, the user
+// declined it, or it repeated a call that already ran (so it was not run again). The last two are no fault.
+export type AssistantStepFailure = "invalid" | "error" | "blocked" | "declined" | "repeated"
+
+// One row of a turn's progress list, re-emitted with the same id as it changes; the UI upserts by id.
+// `progress` is the share (0..1) of a prompt the model has read so far, while it is reading one.
+// "thinking" and "replying" rows exist only while active: what they lead to (a call, the reply) shows next.
+export type AssistantStep =
+	| { id: string; kind: "loading" | "thinking" | "replying"; status: AssistantStepStatus; progress: number | null }
+	| { id: string; kind: "routing"; status: AssistantStepStatus; progress: number | null; route: AssistantStepRoute | null }
+	| {
+			id: string
+			kind: "tool"
+			status: AssistantStepStatus
+			progress: number | null
+			// The registry name ("search_items"); the UI words it, with a generic line for a name it does not know.
+			tool: string
+			// What the call acts on (an item's name, a search query), sanitized and shortened; null until the
+			// arguments are checked, or when the call names several items.
+			subject: string | null
+			// How many items a listing or search returned; `resultMore` when the list was cut off.
+			resultCount: number | null
+			resultMore: boolean
+			failure: AssistantStepFailure | null
+	  }
+
+// A row its turn ended under: "stopped" when the user stopped the turn, "failed" (with an error) when the
+// turn failed.
+export function endedStep<T extends AssistantStep>(step: T, status: "stopped" | "failed"): T {
+	return step.kind === "tool" && status === "failed"
+		? { ...step, status, progress: null, failure: "error" }
+		: { ...step, status, progress: null }
 }
 
 export type AssistantProposalAction =
@@ -75,14 +108,17 @@ export type AssistantEvent =
 	| { type: "model"; state: AssistantModelState }
 	// The FULL screened text of one reply bubble so far, not a delta: the runtime re-screens the whole reply
 	// on every emission (a link the user never typed must not flash up mid-stream). A turn can hold several
-	// replies interleaved with activities; `final` marks a reply that will not change again.
+	// replies (text written before tool calls is a reply of its own); `final` marks a reply that will not
+	// change again.
 	| { type: "reply"; turnId: string; replyId: string; text: string; final: boolean }
-	| { type: "activity"; turnId: string; activity: AssistantActivity }
+	// `at`: when it happened (Date.now()), for durations.
+	| { type: "step"; turnId: string; step: AssistantStep; at: number }
 	| { type: "proposal"; turnId: string; proposal: AssistantProposal }
 	// A confirmed proposal finished. Rejected and expired proposals are settled by the UI itself.
 	| { type: "proposal-settled"; proposalId: string; outcome: "done" | "failed" }
-	| { type: "turn-end"; turnId: string; outcome: "complete" | "cancelled" }
-	| { type: "turn-end"; turnId: string; outcome: "error"; error: AssistantTurnError }
+	// `at`: when the turn ended (Date.now()), which closes its duration.
+	| { type: "turn-end"; turnId: string; at: number; outcome: "complete" | "cancelled" }
+	| { type: "turn-end"; turnId: string; at: number; outcome: "error"; error: AssistantTurnError }
 
 export interface AssistantSession {
 	// Current snapshot; changes are announced through a "model" event.

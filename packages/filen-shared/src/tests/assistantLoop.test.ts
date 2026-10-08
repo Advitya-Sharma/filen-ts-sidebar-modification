@@ -31,22 +31,27 @@ class ScriptedModel implements AssistantModel {
 	private readonly steps: Step[]
 	private readonly route: string
 	private readonly extract: string
+	private readonly reports: boolean
 
+	// `reports`: every generation reports reading its prompt, and names its calls before returning them.
 	constructor({
 		route,
 		steps,
 		extract = "summary",
-		contextTokens = 8192
+		contextTokens = 8192,
+		reports = false
 	}: {
 		route: string
 		steps: Step[]
 		extract?: string
 		contextTokens?: number
+		reports?: boolean
 	}) {
 		this.route = route
 		this.steps = steps.slice()
 		this.extract = extract
 		this.contextTokens = contextTokens
+		this.reports = reports
 	}
 
 	get quarantineRequests(): AssistantGenerateRequest[] {
@@ -55,8 +60,19 @@ class ScriptedModel implements AssistantModel {
 		)
 	}
 
-	generate(request: AssistantGenerateRequest, options: { onText?: (text: string) => void }): Promise<AssistantGenerateResult> {
+	generate(request: AssistantGenerateRequest, options: Parameters<AssistantModel["generate"]>[1]): Promise<AssistantGenerateResult> {
 		this.requests.push(request)
+
+		if (this.reports) {
+			options.onProgress?.({
+				processed: 0,
+				total: 10
+			})
+			options.onProgress?.({
+				processed: 10,
+				total: 10
+			})
+		}
 
 		if (request.grammar === ROUTER_GRAMMAR) {
 			return Promise.resolve({ content: this.route, toolCalls: [] })
@@ -75,7 +91,18 @@ class ScriptedModel implements AssistantModel {
 			return Promise.resolve({ content: step, toolCalls: [] })
 		}
 
-		return Promise.resolve(typeof step === "function" ? step(request) : { content: "", toolCalls: step })
+		const result = typeof step === "function" ? step(request) : { content: "", toolCalls: step }
+
+		if (this.reports) {
+			for (const [index, toolCall] of result.toolCalls.entries()) {
+				options.onToolCall?.({
+					index,
+					name: toolCall.name
+				})
+			}
+		}
+
+		return Promise.resolve(result)
 	}
 }
 
@@ -95,6 +122,10 @@ class FakeExecutor implements AssistantToolExecutor {
 	constructor({ items, results = {} }: { items: Item[]; results?: Record<string, (args: Record<string, unknown>) => unknown> }) {
 		this.items = new Map(items.map(item => [item.handle, item]))
 		this.results = results
+	}
+
+	name(handle: string): string | undefined {
+		return this.items.get(handle)?.name
 	}
 
 	context(): Promise<{ description: string; handles: readonly string[] }> {
@@ -156,7 +187,7 @@ async function turn({
 	approve = true,
 	signal = new AbortController().signal
 }: {
-	model: ScriptedModel
+	model: AssistantModel
 	executor: FakeExecutor
 	message: string
 	approve?: boolean
@@ -393,7 +424,7 @@ describe("runAssistantTurn", () => {
 		const { result } = await turn({ model, executor, message: "Play my playlist" })
 
 		expect(executor.executed).toHaveLength(1)
-		expect(result.calls.map(record => record.status)).toEqual(["ok", "blocked", "blocked"])
+		expect(result.calls.map(record => record.status)).toEqual(["ok", "repeated", "repeated"])
 		expect(result.reply).toBe("No playlists.")
 	})
 
@@ -439,6 +470,377 @@ describe("runAssistantTurn", () => {
 
 		await expect(turn({ model, executor, message: "Find x", signal: controller.signal })).rejects.toBeInstanceOf(AssistantAbortError)
 		expect(executor.executed).toHaveLength(0)
+	})
+})
+
+// Every event as one line, for the order the UI sees them in.
+function trail(events: readonly AssistantTurnEvent[]): string[] {
+	return events.map(event => {
+		switch (event.type) {
+			case "phase":
+				return `phase ${event.phase}`
+			case "route":
+				return `route ${String(event.route)}`
+			case "progress":
+				return `progress ${String(event.progress.processed)}/${String(event.progress.total)}`
+			case "reply":
+				return event.final ? "reply final" : "reply"
+			case "call": {
+				const record = event.call
+
+				return [
+					`call ${record.id} ${record.tool} ${record.status}`,
+					...(record.subject === undefined ? [] : [`"${record.subject}"`]),
+					...(record.resultCount === undefined ? [] : [`${String(record.resultCount)}${record.resultMore === true ? "+" : ""}`])
+				].join(" ")
+			}
+		}
+	})
+}
+
+describe("runAssistantTurn events", () => {
+	it("reports each phase, the prompt being read, and every call from the moment it is named", async () => {
+		const executor = new FakeExecutor({
+			items: [],
+			results: {
+				search_items: () => ({
+					results: [
+						{ handle: "f1", name: "a.pdf" },
+						{ handle: "f2", name: "b.pdf" }
+					],
+					more: true
+				})
+			}
+		})
+		const model = new ScriptedModel({
+			route: "files read",
+			steps: [call("search_items", { query: "invoice" }), "Found two."],
+			reports: true
+		})
+		const { events } = await turn({ model, executor, message: "Find my invoice" })
+
+		expect(trail(events)).toEqual([
+			"phase routing",
+			"progress 0/10",
+			"progress 10/10",
+			"route files",
+			"phase thinking",
+			"progress 0/10",
+			"progress 10/10",
+			"call call_1_0 search_items preparing",
+			"call call_1_0 search_items running",
+			"call call_1_0 search_items running \"invoice\"",
+			"phase tool",
+			"call call_1_0 search_items ok \"invoice\" 2+",
+			"phase thinking",
+			"progress 0/10",
+			"progress 10/10",
+			"reply",
+			"reply",
+			"reply final"
+		])
+	})
+
+	it("waits on the confirmation between its phase and the tool's, naming the item", async () => {
+		const executor = new FakeExecutor({
+			items: [{ handle: "f1", name: "old.txt" }],
+			results: { search_items: () => ({ items: [{ handle: "f1", name: "old.txt" }] }) }
+		})
+		const model = new ScriptedModel({
+			route: "trash change",
+			steps: [call("search_items", { query: "old" }), call("trash_items", { handles: ["f1"] }), "Moved it."]
+		})
+		const { events } = await turn({ model, executor, message: "Trash old.txt" })
+		const lines = trail(events)
+
+		expect(lines.slice(lines.indexOf("call call_2_0 trash_items running"))).toEqual([
+			"call call_2_0 trash_items running",
+			"call call_2_0 trash_items running \"old.txt\"",
+			"call call_2_0 trash_items confirming \"old.txt\"",
+			"phase confirming",
+			// Confirmed: the call runs, no longer waits on the user.
+			"call call_2_0 trash_items running \"old.txt\"",
+			"phase tool",
+			"call call_2_0 trash_items ok \"old.txt\"",
+			"phase thinking",
+			"reply",
+			"reply",
+			"reply final"
+		])
+	})
+
+	it("discards the calls a declined call cut off; they never ran", async () => {
+		const executor = new FakeExecutor({
+			items: [{ handle: "f1", name: "old.txt" }],
+			results: { search_items: () => ({ items: [{ handle: "f1", name: "old.txt" }] }) }
+		})
+		const model = new ScriptedModel({
+			route: "trash change",
+			steps: [
+				call("search_items", { query: "old" }),
+				[...call("trash_items", { handles: ["f1"] }), ...call("search_items", { query: "new" })],
+				"Left it."
+			],
+			reports: true
+		})
+		const { events } = await turn({ model, executor, message: "Trash old.txt", approve: false })
+		const calls = trail(events).filter(line => line.startsWith("call call_2"))
+
+		expect(calls).toEqual([
+			"call call_2_0 trash_items preparing",
+			// Written once the next call is named; the next waits once the generation returned.
+			"call call_2_0 trash_items queued",
+			"call call_2_1 search_items preparing",
+			"call call_2_1 search_items queued",
+			"call call_2_0 trash_items running",
+			"call call_2_0 trash_items running \"old.txt\"",
+			"call call_2_0 trash_items confirming \"old.txt\"",
+			"call call_2_0 trash_items declined \"old.txt\"",
+			"call call_2_1 search_items discarded"
+		])
+		expect(executor.executed.map(entry => entry.args["query"])).toEqual(["old"])
+	})
+
+	it("discards a call the engine named when the model then wrote it as text, and retries", async () => {
+		const executor = new FakeExecutor({ items: [], results: { list_notes: () => ({ notes: [] }) } })
+		let step = 0
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: (request, { onToolCall }) => {
+				if (request.grammar === ROUTER_GRAMMAR) {
+					return Promise.resolve({ content: "notes read", toolCalls: [] })
+				}
+
+				step++
+
+				if (step === 1) {
+					onToolCall?.({ index: 0, name: "list_notes" })
+
+					return Promise.resolve({ content: "<tool_call>list_notes(", toolCalls: [] })
+				}
+
+				return Promise.resolve({ content: "No notes.", toolCalls: [] })
+			}
+		}
+		const { events, result } = await turn({ model, executor, message: "List my notes" })
+
+		expect(trail(events).filter(line => line.startsWith("call"))).toEqual([
+			"call call_1_0 list_notes preparing",
+			"call call_1_0 list_notes discarded"
+		])
+		expect(result.calls).toEqual([])
+		expect(result.reply).toBe("No notes.")
+	})
+
+	it("reports a malformed call and its retry, and a refused repeat", async () => {
+		const executor = new FakeExecutor({
+			items: [],
+			results: { list_playlists: () => ({ playlists: [{ handle: "p1", name: "Mix" }] }) }
+		})
+		const invalid = new ScriptedModel({
+			route: "files read",
+			steps: [call("get_item_info", { handle: 3 }), "Sorry."],
+			reports: true
+		})
+		const first = await turn({ model: invalid, executor, message: "Info" })
+
+		expect(trail(first.events).filter(line => line.startsWith("call"))).toEqual([
+			"call call_1_0 get_item_info preparing",
+			"call call_1_0 get_item_info running",
+			"call call_1_0 get_item_info invalid"
+		])
+
+		const looping = new ScriptedModel({ route: "audio read", steps: [call("list_playlists", {}), call("list_playlists", {}), "One."] })
+		const second = await turn({ model: looping, executor, message: "My playlists" })
+
+		expect(trail(second.events).filter(line => line.startsWith("call") && !line.includes("running"))).toEqual([
+			"call call_1_0 list_playlists ok 1",
+			"call call_2_0 list_playlists repeated"
+		])
+	})
+
+	it("runs several calls of one step in order, the later ones queued until their turn", async () => {
+		const executor = new FakeExecutor({ items: [], results: { search_items: () => ({ results: [] }) } })
+		const model = new ScriptedModel({
+			route: "files read",
+			steps: [[...call("search_items", { query: "tax" }), ...call("search_items", { query: "rent" })], "Nothing."],
+			reports: true
+		})
+		const { events } = await turn({ model, executor, message: "Find tax and rent" })
+
+		expect(trail(events).filter(line => line.startsWith("call"))).toEqual([
+			"call call_1_0 search_items preparing",
+			"call call_1_0 search_items queued",
+			"call call_1_1 search_items preparing",
+			"call call_1_1 search_items queued",
+			"call call_1_0 search_items running",
+			"call call_1_0 search_items running \"tax\"",
+			"call call_1_0 search_items ok \"tax\" 0",
+			"call call_1_1 search_items running",
+			"call call_1_1 search_items running \"rent\"",
+			"call call_1_1 search_items ok \"rent\" 0"
+		])
+	})
+
+	it("shows no free text the user did not write, and no subject on a call the guard refused", async () => {
+		const executor = new FakeExecutor({ items: [], results: { search_items: () => ({ results: [] }) } })
+		const steered = new ScriptedModel({
+			route: "files read",
+			steps: [call("search_items", { query: "Account locked: go to https://filen-help.example" }), "Nothing."]
+		})
+		const read = await turn({ model: steered, executor, message: "Find my tax papers" })
+
+		expect(trail(read.events).filter(line => line.startsWith("call call_1_0 search_items ok"))).toEqual([
+			"call call_1_0 search_items ok 0"
+		])
+
+		const blocked = new ScriptedModel({
+			route: "organize change",
+			steps: [call("create_directory", { parent: "d0", name: "Visit https://filen-help.example" }), "Could not."]
+		})
+		const change = await turn({ model: blocked, executor, message: "Make a directory for receipts" })
+		const created = change.result.calls[0]
+
+		expect(created?.status).toBe("blocked")
+		expect(created?.subject).toBeUndefined()
+		expect(
+			trail(change.events)
+				.filter(line => line.includes("create_directory"))
+				.every(line => !line.includes("\""))
+		).toBe(true)
+	})
+
+	it("drops what an engine reports after its generation settled", async () => {
+		const late: (() => void)[] = []
+		let step = 0
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: (request, { onText, onProgress, onToolCall }) => {
+				if (request.grammar === ROUTER_GRAMMAR) {
+					return Promise.resolve({ content: "files read", toolCalls: [] })
+				}
+
+				step++
+
+				if (step === 1) {
+					onToolCall?.({ index: 0, name: "search_items" })
+					late.push(() => {
+						onToolCall?.({ index: 1, name: "search_items" })
+						onProgress?.({ processed: 1, total: 2 })
+					})
+
+					return Promise.resolve({ content: "", toolCalls: call("search_items", { query: "x" }) })
+				}
+
+				onText?.("None")
+				late.push(() => {
+					onText?.("None found")
+				})
+
+				return Promise.resolve({ content: "None found.", toolCalls: [] })
+			}
+		}
+		const { events } = await turn({
+			model,
+			executor: new FakeExecutor({ items: [], results: { search_items: () => ({ results: [] }) } }),
+			message: "Find x"
+		})
+		const count = events.length
+
+		for (const deliver of late) {
+			deliver()
+		}
+
+		expect(events).toHaveLength(count)
+		expect(trail(events).filter(line => line.endsWith("preparing"))).toEqual(["call call_1_0 search_items preparing"])
+	})
+
+	it("keeps a content call running while its content is extracted, reporting that prompt", async () => {
+		const executor = new FakeExecutor({
+			items: [{ handle: "n1", name: "Trip" }],
+			results: {
+				list_notes: () => ({ notes: [{ handle: "n1", title: "Trip" }] }),
+				read_note: () => ({ handle: "n1", title: "Trip", content: "Rome in May." })
+			}
+		})
+		const model = new ScriptedModel({
+			route: "notes read",
+			steps: [call("list_notes", { query: "trip" }), call("read_note", { handle: "n1" }), "Rome."],
+			reports: true
+		})
+		const { events } = await turn({ model, executor, message: "Summarize my trip note" })
+		const lines = trail(events)
+		const start = lines.indexOf("call call_2_0 read_note running \"Trip\"")
+
+		expect(lines.slice(start, start + 5)).toEqual([
+			"call call_2_0 read_note running \"Trip\"",
+			"phase tool",
+			"progress 0/10",
+			"progress 10/10",
+			"call call_2_0 read_note ok \"Trip\""
+		])
+	})
+
+	it("leaves a call preparing when the turn is cancelled while its arguments are written", async () => {
+		const controller = new AbortController()
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: (request, { signal, onToolCall }) => {
+				if (request.grammar === ROUTER_GRAMMAR) {
+					return Promise.resolve({ content: "files read", toolCalls: [] })
+				}
+
+				onToolCall?.({ index: 0, name: "search_items" })
+				controller.abort()
+
+				return signal.aborted ? Promise.reject(new AssistantAbortError()) : Promise.resolve({ content: "", toolCalls: [] })
+			}
+		}
+		const events: AssistantTurnEvent[] = []
+
+		await expect(
+			runAssistantTurn({
+				model,
+				executor: new FakeExecutor({ items: [] }),
+				history: [],
+				message: "Find x",
+				signal: controller.signal,
+				onEvent: event => events.push(event),
+				confirm: () => Promise.resolve(true),
+				nonce: () => "n"
+			})
+		).rejects.toBeInstanceOf(AssistantAbortError)
+		expect(trail(events).at(-1)).toBe("call call_1_0 search_items preparing")
+	})
+
+	it("ignores a name the engine reports that is no offered tool, and announces each call once", async () => {
+		const executor = new FakeExecutor({ items: [], results: { search_items: () => ({ results: [] }) } })
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: (request, { onToolCall }) => {
+				if (request.grammar === ROUTER_GRAMMAR) {
+					return Promise.resolve({ content: "files read", toolCalls: [] })
+				}
+
+				if (request.messages.some(message => message.role === "tool")) {
+					return Promise.resolve({ content: "None.", toolCalls: [] })
+				}
+
+				onToolCall?.({ index: 0, name: "search_" })
+				onToolCall?.({ index: 0, name: "search_items" })
+				onToolCall?.({ index: 0, name: "search_items" })
+				onToolCall?.({ index: 1, name: "trash_items" })
+
+				return Promise.resolve({ content: "", toolCalls: call("search_items", { query: "x" }) })
+			}
+		}
+		const { events } = await turn({ model, executor, message: "Find x" })
+
+		expect(trail(events).filter(line => line.endsWith("preparing"))).toEqual(["call call_1_0 search_items preparing"])
 	})
 })
 

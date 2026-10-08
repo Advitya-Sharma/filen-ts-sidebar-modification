@@ -1,4 +1,11 @@
-import type { AssistantEvent, AssistantModelState, AssistantProposal, AssistantTurnError } from "@/features/assistant/types"
+import {
+	endedStep,
+	type AssistantEvent,
+	type AssistantModelState,
+	type AssistantProposal,
+	type AssistantStep,
+	type AssistantTurnError
+} from "@/features/assistant/types"
 
 // The panel's transcript as a flat, ordered row list, folded from AssistantEvents by one pure reducer so
 // the whole conversation flow is testable without React or a session.
@@ -7,10 +14,29 @@ import type { AssistantEvent, AssistantModelState, AssistantProposal, AssistantT
 // sent before the card was answered, so it can no longer be confirmed out of context.
 export type ProposalStatus = "pending" | "running" | "done" | "failed" | "cancelled" | "expired"
 
+// A step with its times (the session's Date.now() clock); `endedAt` once it no longer runs. A queued call's
+// time starts when it runs.
+export type TranscriptStep = AssistantStep & { startedAt: number; endedAt: number | null }
+
+// How a turn ended, for its steps summary; null while it runs.
+export type StepsOutcome = "complete" | "cancelled" | "failed"
+
 export type TranscriptEntry =
 	| { kind: "user"; id: string; turnId: string; text: string }
 	| { kind: "reply"; id: string; turnId: string; text: string; final: boolean }
-	| { kind: "activity"; id: string; turnId: string; tool: string; status: "running" | "done" | "failed" }
+	// One per turn, right below its message. `lastAt` is the newest step time, then the turn's end, so the
+	// turn's duration counts the rows that came and went and the reply streamed after the last of them. `expanded` is the user's choice; null follows the turn
+	// (open while it runs or after it failed, collapsed to its summary once it completed).
+	| {
+			kind: "steps"
+			id: string
+			turnId: string
+			steps: readonly TranscriptStep[]
+			startedAt: number
+			lastAt: number
+			outcome: StepsOutcome | null
+			expanded: boolean | null
+	  }
 	| { kind: "proposal"; id: string; turnId: string; proposal: AssistantProposal; status: ProposalStatus }
 	| { kind: "turnEnd"; id: string; turnId: string; outcome: "cancelled" | AssistantTurnError }
 
@@ -70,6 +96,49 @@ function mapEntries(entries: readonly TranscriptEntry[], update: (entry: Transcr
 	return next ?? entries
 }
 
+export function stepsEntryId(turnId: string): string {
+	return `steps:${turnId}`
+}
+
+// Rows that only say what is happening now leave once it has happened.
+const TRANSIENT_KINDS = new Set<AssistantStep["kind"]>(["thinking", "replying"])
+
+function isLive(status: AssistantStep["status"]): boolean {
+	return status === "active" || status === "queued" || status === "waiting"
+}
+
+function applyStep(steps: readonly TranscriptStep[], step: AssistantStep, at: number): readonly TranscriptStep[] {
+	const index = steps.findIndex(existing => existing.id === step.id)
+
+	if (step.status === "discarded" || (TRANSIENT_KINDS.has(step.kind) && !isLive(step.status))) {
+		return index === -1 ? steps : steps.toSpliced(index, 1)
+	}
+
+	const previous = steps[index]
+	const startedAt = previous === undefined || (previous.status === "queued" && step.status !== "queued") ? at : previous.startedAt
+	const endedAt = isLive(step.status) ? null : (previous?.endedAt ?? at)
+	const next: TranscriptStep = { ...step, startedAt, endedAt }
+
+	return previous === undefined ? [...steps, next] : steps.with(index, next)
+}
+
+// The turn's steps entry goes right below its message, wherever the replies are.
+function upsertSteps(state: TranscriptState, turnId: string, update: (entry: StepsEntry | null) => StepsEntry): readonly TranscriptEntry[] {
+	const id = stepsEntryId(turnId)
+	const index = indexOfEntry(state.entries, id)
+	const existing = state.entries[index]
+
+	if (existing?.kind === "steps") {
+		return state.entries.with(index, update(existing))
+	}
+
+	const user = indexOfEntry(state.entries, `user:${turnId}`)
+
+	return state.entries.toSpliced(user === -1 ? state.entries.length : user + 1, 0, update(null))
+}
+
+type StepsEntry = Extract<TranscriptEntry, { kind: "steps" }>
+
 export function replyEntryId(replyId: string): string {
 	return `reply:${replyId}`
 }
@@ -78,7 +147,17 @@ export function proposalEntryId(proposalId: string): string {
 	return `proposal:${proposalId}`
 }
 
+// A turn of this conversation: its message is in the transcript. A turn stopped by "New conversation"
+// still winds down afterwards; its late events must not land in the new one.
+function hasTurn(state: TranscriptState, turnId: string): boolean {
+	return indexOfEntry(state.entries, `user:${turnId}`) !== -1
+}
+
 export function applyAssistantEvent(state: TranscriptState, event: AssistantEvent): TranscriptState {
+	if (event.type !== "model" && event.type !== "proposal-settled" && !hasTurn(state, event.turnId)) {
+		return state.activeTurnId === event.turnId && event.type === "turn-end" ? { ...state, activeTurnId: null } : state
+	}
+
 	switch (event.type) {
 		case "model": {
 			return { ...state, modelState: event.state }
@@ -97,16 +176,26 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
 			}
 		}
 
-		case "activity": {
+		case "step": {
+			const existing = state.entries[indexOfEntry(state.entries, stepsEntryId(event.turnId))]
+
+			// The turn already ended: a late row would restart its spinner and clock.
+			if (existing?.kind === "steps" && existing.outcome !== null) {
+				return state
+			}
+
 			return {
 				...state,
-				entries: upsert(state.entries, {
-					kind: "activity",
-					id: `activity:${event.activity.id}`,
+				entries: upsertSteps(state, event.turnId, entry => ({
+					kind: "steps",
+					id: stepsEntryId(event.turnId),
 					turnId: event.turnId,
-					tool: event.activity.tool,
-					status: event.activity.status
-				})
+					steps: applyStep(entry?.steps ?? [], event.step, event.at),
+					startedAt: Math.min(entry?.startedAt ?? event.at, event.at),
+					lastAt: Math.max(entry?.lastAt ?? event.at, event.at),
+					outcome: entry?.outcome ?? null,
+					expanded: entry?.expanded ?? null
+				}))
 			}
 		}
 
@@ -128,11 +217,39 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
 		}
 
 		case "turn-end": {
-			// A cancelled or failed turn leaves its last reply as it stood: nothing more will stream into it.
-			const entries = mapEntries(state.entries, entry =>
-				entry.kind === "reply" && entry.turnId === event.turnId && !entry.final ? { ...entry, final: true } : entry
-			)
 			const outcome = event.outcome === "error" ? event.error : event.outcome
+			const stepsOutcome: StepsOutcome =
+				event.outcome === "complete" ? "complete" : event.outcome === "cancelled" ? "cancelled" : "failed"
+			// A cancelled or failed turn leaves its last reply as it stood: nothing more will stream into it, and
+			// a row the runtime left running stops, or fails with a failed turn.
+			const entries = mapEntries(state.entries, entry => {
+				if (entry.turnId !== event.turnId) {
+					return entry
+				}
+
+				if (entry.kind === "reply" && !entry.final) {
+					return { ...entry, final: true }
+				}
+
+				if (entry.kind === "steps" && entry.outcome === null) {
+					const lastAt = Math.max(entry.lastAt, event.at)
+
+					return {
+						...entry,
+						lastAt,
+						outcome: stepsOutcome,
+						steps: entry.steps.flatMap(step =>
+							!isLive(step.status)
+								? [step]
+								: TRANSIENT_KINDS.has(step.kind)
+									? []
+									: [{ ...endedStep(step, stepsOutcome === "failed" ? "failed" : "stopped"), endedAt: lastAt }]
+						)
+					}
+				}
+
+				return entry
+			})
 
 			return {
 				...state,
@@ -145,6 +262,23 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
 			}
 		}
 	}
+}
+
+export function setStepsExpanded(entries: readonly TranscriptEntry[], turnId: string, expanded: boolean): readonly TranscriptEntry[] {
+	const index = indexOfEntry(entries, stepsEntryId(turnId))
+	const entry = entries[index]
+
+	if (entry?.kind !== "steps" || entry.expanded === expanded) {
+		return entries
+	}
+
+	return entries.with(index, { ...entry, expanded })
+}
+
+// Whether a steps entry shows its rows: the user's choice, else open while the turn runs or after it
+// failed, and collapsed to its summary once it completed.
+export function stepsExpanded(entry: StepsEntry): boolean {
+	return entry.expanded ?? entry.outcome !== "complete"
 }
 
 export function setProposalStatus(

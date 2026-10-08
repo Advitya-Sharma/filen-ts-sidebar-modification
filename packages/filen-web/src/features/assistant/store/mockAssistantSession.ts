@@ -3,12 +3,14 @@ import type {
 	AssistantModelInfo,
 	AssistantModelState,
 	AssistantProposal,
-	AssistantSession
+	AssistantSession,
+	AssistantStep
 } from "@/features/assistant/types"
 
 // A scripted AssistantSession for tests and for development builds before a real runtime registers. It
 // walks the whole UI surface: a chunked download, a load that starts only on request (the Load action or a
-// sent message, which waits for it), a tool activity, a streamed markdown reply, and a confirmation card
+// sent message, which waits for it), the turn's steps (loading, routing, a search with its prompt-reading
+// progress and result count), a streamed markdown reply, and a confirmation card
 // when the message asks to draft, move, copy, trash or download something. Timer-driven, so tests step it
 // with fake timers.
 
@@ -170,7 +172,23 @@ export function createMockAssistantSession({
 		turnCount++
 
 		const turnId = `turn-${String(turnCount)}`
-		const activityId = `${turnId}-search`
+		const step = (next: AssistantStep) => {
+			emit({ type: "step", turnId, step: next, at: Date.now() })
+		}
+		const search = (patch: Partial<Extract<AssistantStep, { kind: "tool" }>>) => {
+			step({
+				id: `${turnId}-search`,
+				kind: "tool",
+				status: "active",
+				progress: null,
+				tool: "search_items",
+				subject: "taxes",
+				resultCount: null,
+				resultMore: false,
+				failure: null,
+				...patch
+			})
+		}
 		const verb = PROPOSAL_PATTERN.exec(message)?.[1]?.toLowerCase()
 		const words = (
 			verb === undefined
@@ -182,18 +200,30 @@ export function createMockAssistantSession({
 
 		// A model on disk loads first, inside the turn.
 		const loadSteps = loadModel()
-		const startActivity = () => {
-			emit({ type: "activity", turnId, activity: { id: activityId, tool: "search_items", status: "running" } })
+		const loading = (status: AssistantStep["status"]) => {
+			step({ id: `${turnId}-loading`, kind: "loading", status, progress: null })
+		}
+		const startSearch = () => {
+			if (loadSteps > 0) {
+				loading("done")
+			}
+
+			step({ id: `${turnId}-routing`, kind: "routing", status: "done", progress: null, route: "files" })
+			search({ progress: 0.4 })
 		}
 
 		if (loadSteps === 0) {
-			startActivity()
+			startSearch()
 		} else {
-			later(startActivity, loadSteps)
+			loading("active")
+			later(startSearch, loadSteps)
 		}
 
 		later(() => {
-			emit({ type: "activity", turnId, activity: { id: activityId, tool: "search_items", status: "done" } })
+			search({ progress: 1 })
+		}, loadSteps + 1)
+		later(() => {
+			search({ status: "done", resultCount: 3 })
 		}, loadSteps + 2)
 
 		words.forEach((_, index) => {
@@ -218,7 +248,7 @@ export function createMockAssistantSession({
 				}
 
 				activeTurnId = null
-				emit({ type: "turn-end", turnId, outcome: "complete" })
+				emit({ type: "turn-end", turnId, at: Date.now(), outcome: "complete" })
 			},
 			loadSteps + 4 + words.length
 		)
@@ -235,7 +265,7 @@ export function createMockAssistantSession({
 
 		activeTurnId = null
 		clearTimers()
-		emit({ type: "turn-end", turnId, outcome: "cancelled" })
+		emit({ type: "turn-end", turnId, at: Date.now(), outcome: "cancelled" })
 	}
 
 	function confirm(proposalId: string): void {

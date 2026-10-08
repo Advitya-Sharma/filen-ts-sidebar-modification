@@ -5,7 +5,8 @@ import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
 import { sendAssistantMessage } from "@/features/assistant/store/assistantSession"
 import type { TranscriptEntry } from "@/features/assistant/store/transcript"
 import { AssistantTranscript } from "@/features/assistant/components/assistantTranscript"
-import { TURN_END_KEYS, spokenText, transcriptRows } from "@/features/assistant/components/assistant.logic"
+import { TURN_END_KEYS, currentStep, spokenText, transcriptRows } from "@/features/assistant/components/assistant.logic"
+import { useStepText } from "@/features/assistant/components/useStepText"
 import { useProposalTitle } from "@/features/assistant/components/useProposalTitle"
 import { AssistantComposer } from "@/features/assistant/components/assistantComposer"
 import { AssistantModelStatus } from "@/features/assistant/components/assistantModelStatus"
@@ -52,17 +53,27 @@ function EmptyConversation() {
 	)
 }
 
-// One polite announcement when a reply starts and one when its turn settles, never per token: the
-// streaming bubble itself is not a live region.
+// Polite announcements of what the turn is doing (each step as it starts, never its progress or time) and
+// of the reply once the turn settles, never per token: the streaming bubble itself is not a live region.
 function Announcer({ entries }: { entries: readonly TranscriptEntry[] }) {
 	const { t } = useTranslation("assistant")
-	const generating = useAssistantStore(state => state.activeTurnId !== null)
+	const activeTurnId = useAssistantStore(state => state.activeTurnId)
 	const settled = useAssistantStore(state => state.settled)
 	const proposalTitle = useProposalTitle()
+	const stepText = useStepText()
 	let text = ""
 
-	if (generating) {
-		text = t("assistantResponding")
+	if (activeTurnId !== null) {
+		const steps = entries.findLast(entry => entry.kind === "steps" && entry.turnId === activeTurnId)
+		const step = steps?.kind === "steps" ? currentStep(steps) : null
+
+		if (step === null) {
+			text = t("assistantResponding")
+		} else {
+			const { label, detail } = stepText(step)
+
+			text = detail === null ? label : `${label}, ${detail}`
+		}
 	} else if (settled !== null) {
 		const parts: string[] = []
 
@@ -95,11 +106,11 @@ function Announcer({ entries }: { entries: readonly TranscriptEntry[] }) {
 
 export function AssistantConversation() {
 	const entries = useAssistantStore(state => state.entries)
-	const generating = useAssistantStore(state => state.activeTurnId !== null)
+	const activeTurnId = useAssistantStore(state => state.activeTurnId)
 
 	return (
 		<>
-			{entries.length === 0 ? <EmptyConversation /> : <AssistantTranscript rows={transcriptRows(entries, generating)} />}
+			{entries.length === 0 ? <EmptyConversation /> : <AssistantTranscript rows={transcriptRows(entries, activeTurnId)} />}
 			<Announcer entries={entries} />
 			<AssistantModelStatus />
 			<AssistantComposer />

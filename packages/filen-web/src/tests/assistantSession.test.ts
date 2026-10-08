@@ -7,7 +7,7 @@ import {
 	type AssistantModelToolCall,
 	type AssistantTool
 } from "@filen/shared/assistant"
-import { createAssistantSession, type AssistantRuntimeLike } from "@/features/assistant/loop/session"
+import { createAssistantSession, turnSteps, type AssistantRuntimeLike } from "@/features/assistant/loop/session"
 import type { AssistantToolExecution, AssistantToolPreview, ToolExecutor } from "@/features/assistant/runtime/executor"
 import type { AssistantEvent, AssistantModelState } from "@/features/assistant/types"
 
@@ -17,18 +17,29 @@ function call(name: string, args: Record<string, unknown>): AssistantModelToolCa
 	return [{ id: "x", name, arguments: JSON.stringify(args) }]
 }
 
+type GenerateOptions = Parameters<AssistantModel["generate"]>[1]
+
+// With `reports`, every generation reads its prompt in two progress reports and names its calls first,
+// as wllama does.
 class ScriptedModel implements AssistantModel {
 	readonly contextTokens = 8192
 	readonly specialTokens = ["<|im_end|>"]
 	private readonly steps: Step[]
 	private readonly route: string
+	private readonly reports: boolean
 
-	constructor({ route, steps }: { route: string; steps: Step[] }) {
+	constructor({ route, steps, reports = false }: { route: string; steps: Step[]; reports?: boolean }) {
 		this.route = route
 		this.steps = steps.slice()
+		this.reports = reports
 	}
 
-	generate(request: AssistantGenerateRequest, options: { onText?: (text: string) => void }): Promise<AssistantGenerateResult> {
+	generate(request: AssistantGenerateRequest, options: GenerateOptions): Promise<AssistantGenerateResult> {
+		if (this.reports) {
+			options.onProgress?.({ processed: 0, total: 40 })
+			options.onProgress?.({ processed: 40, total: 40 })
+		}
+
 		if (request.grammar === ROUTER_GRAMMAR) {
 			return Promise.resolve({ content: this.route, toolCalls: [] })
 		}
@@ -46,8 +57,44 @@ class ScriptedModel implements AssistantModel {
 			return Promise.resolve({ content: step, toolCalls: [] })
 		}
 
+		if (this.reports) {
+			for (const [index, toolCall] of step.entries()) {
+				options.onToolCall?.({ index, name: toolCall.name })
+			}
+		}
+
 		return Promise.resolve({ content: "", toolCalls: step })
 	}
+}
+
+// Each step event as one line: kind, status, then what it shows.
+function stepTrail(events: readonly AssistantEvent[]): string[] {
+	return events.flatMap(event => {
+		if (event.type !== "step") {
+			return []
+		}
+
+		const { step } = event
+		const parts: string[] = [step.kind === "tool" ? step.tool : step.kind, step.status]
+
+		if (step.kind === "routing" && step.route !== null) {
+			parts.push(step.route)
+		}
+
+		if (step.kind === "tool") {
+			parts.push(
+				...(step.subject === null ? [] : [`"${step.subject}"`]),
+				...(step.resultCount === null ? [] : [String(step.resultCount)])
+			)
+			parts.push(...(step.failure === null ? [] : [step.failure]))
+		}
+
+		if (step.progress !== null) {
+			parts.push(`@${String(step.progress)}`)
+		}
+
+		return [parts.join(" ")]
+	})
 }
 
 const INFO = { id: "m", name: "M", sizeBytes: 1 }
@@ -160,7 +207,7 @@ function waitFor(events: AssistantEvent[], predicate: (event: AssistantEvent) =>
 }
 
 describe("assistant session", () => {
-	it("streams replies and activities and ends the turn", async () => {
+	it("streams replies and steps and ends the turn", async () => {
 		const model = new ScriptedModel({
 			route: "chats read",
 			steps: [call("list_chats", { query: "Maria" }), "You have a chat with Maria."]
@@ -178,10 +225,20 @@ describe("assistant session", () => {
 
 		await waitFor(events, event => event.type === "turn-end")
 
-		expect(events.filter(event => event.type === "activity")).toEqual([
-			{ type: "activity", turnId, activity: { id: `${turnId}:call_1_0`, tool: "list_chats", status: "running" } },
-			{ type: "activity", turnId, activity: { id: `${turnId}:call_1_0`, tool: "list_chats", status: "done" } }
+		expect(stepTrail(events)).toEqual([
+			"routing active",
+			"routing done chats",
+			"thinking active",
+			"thinking done",
+			"list_chats active",
+			'list_chats active "Maria"',
+			'list_chats done "Maria" 1',
+			"thinking active",
+			"thinking done"
 		])
+		expect(events.find(event => event.type === "step" && event.step.kind === "tool")).toMatchObject({
+			step: { id: `${turnId}:call_1_0` }
+		})
 		expect(events.filter(event => event.type === "reply").at(-1)).toEqual({
 			type: "reply",
 			turnId,
@@ -189,7 +246,7 @@ describe("assistant session", () => {
 			text: "You have a chat with Maria.",
 			final: true
 		})
-		expect(events.at(-1)).toEqual({ type: "turn-end", turnId, outcome: "complete" })
+		expect(events.at(-1)).toMatchObject({ type: "turn-end", turnId, outcome: "complete" })
 		expect(runtime.holds).toBe(0)
 	})
 
@@ -338,7 +395,7 @@ describe("assistant session", () => {
 		})
 		session.cancel()
 
-		expect(await waitFor(events, event => event.type === "turn-end")).toEqual({ type: "turn-end", turnId, outcome: "cancelled" })
+		expect(await waitFor(events, event => event.type === "turn-end")).toMatchObject({ type: "turn-end", turnId, outcome: "cancelled" })
 	})
 
 	it("loads a model that is not in memory before the turn, keeping it held from the start", async () => {
@@ -360,7 +417,7 @@ describe("assistant session", () => {
 
 		const turnId = session.send("Hello")
 
-		expect(await waitFor(events, event => event.type === "turn-end")).toEqual({ type: "turn-end", turnId, outcome: "complete" })
+		expect(await waitFor(events, event => event.type === "turn-end")).toMatchObject({ type: "turn-end", turnId, outcome: "complete" })
 		expect(runtime.load).toHaveBeenCalledTimes(1)
 		expect(heldDuringLoad).toBe(1)
 		expect(runtime.holds).toBe(0)
@@ -398,7 +455,7 @@ describe("assistant session", () => {
 
 		const turnId = session.send("Hello")
 
-		expect(await waitFor(events, event => event.type === "turn-end")).toEqual({
+		expect(await waitFor(events, event => event.type === "turn-end")).toMatchObject({
 			type: "turn-end",
 			turnId,
 			outcome: "error",
@@ -429,7 +486,7 @@ describe("assistant session", () => {
 		})
 		session.cancel()
 
-		expect(await waitFor(events, event => event.type === "turn-end")).toEqual({ type: "turn-end", turnId, outcome: "cancelled" })
+		expect(await waitFor(events, event => event.type === "turn-end")).toMatchObject({ type: "turn-end", turnId, outcome: "cancelled" })
 		expect(runtime.holds).toBe(0)
 	})
 
@@ -479,6 +536,310 @@ describe("assistant session", () => {
 		await vi.waitFor(() => {
 			expect(runtime.holds).toBe(0)
 		})
+	})
+
+	it("reports prompt progress on the phase reading it, and each call as soon as it is named", async () => {
+		const model = new ScriptedModel({
+			route: "chats read",
+			steps: [call("list_chats", { query: "Maria" }), "Found her."],
+			reports: true
+		})
+		let clock = 1000
+		const session = createAssistantSession({
+			runtime: fakeRuntime(model),
+			executor: fakeExecutor({ list_chats: { chats: [{ handle: "c1", name: "Maria" }], more: 4 } }),
+			now: () => clock++
+		})
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Do I have a chat with Maria?")
+		await waitFor(events, event => event.type === "turn-end")
+
+		expect(stepTrail(events)).toEqual([
+			"routing active",
+			"routing active @0",
+			"routing active @1",
+			"routing done chats",
+			"thinking active",
+			"thinking active @0",
+			"thinking active @1",
+			"thinking done",
+			// Named by the engine before its arguments were decoded, then labelled once they were checked.
+			"list_chats active",
+			'list_chats active "Maria"',
+			'list_chats done "Maria" 5',
+			"thinking active",
+			"thinking active @0",
+			"thinking active @1",
+			"thinking done"
+		])
+
+		const times = events.flatMap(event => (event.type === "step" ? [event.at] : []))
+
+		expect(times).toEqual([...times].sort((a, b) => a - b))
+		expect(times[0]).toBe(1000)
+		// The turn's end is stamped on the same clock, after its last row.
+		expect(events.at(-1)).toMatchObject({ type: "turn-end", at: (times.at(-1) ?? 0) + 1 })
+	})
+
+	it("shows the model load as a step of the turn", async () => {
+		const runtime = fakeRuntime(new ScriptedModel({ route: "answer read", steps: ["Hi."] }), {
+			kind: "downloaded",
+			model: INFO,
+			idleUnloaded: true
+		})
+		const session = createAssistantSession({ runtime, executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Hello")
+		await waitFor(events, event => event.type === "turn-end")
+
+		expect(stepTrail(events).slice(0, 3)).toEqual(["loading active", "loading done", "routing active"])
+	})
+
+	it("marks a failed load as a failed step", async () => {
+		const runtime = fakeRuntime(new ScriptedModel({ route: "answer read", steps: [] }), {
+			kind: "downloaded",
+			model: INFO,
+			idleUnloaded: false
+		})
+
+		runtime.load.mockImplementation(() => {
+			runtime.state = { kind: "error", error: "load-failed", model: INFO }
+
+			return Promise.resolve()
+		})
+
+		const session = createAssistantSession({ runtime, executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Hello")
+		await waitFor(events, event => event.type === "turn-end")
+
+		expect(stepTrail(events)).toEqual(["loading active", "loading failed"])
+	})
+
+	it("shows a call waiting on its card, then done once confirmed, or declined", async () => {
+		for (const approve of [true, false]) {
+			const model = new ScriptedModel({
+				route: "chats change",
+				steps: [call("list_chats", { query: "Maria" }), call("draft_chat_message", { chat: "c1", text: "late" }), "Okay."]
+			})
+			const executor = fakeExecutor({ list_chats: { chats: [{ handle: "c1", name: "Maria" }] } })
+
+			executor.name = handle => NAMES[handle]
+
+			const session = createAssistantSession({ runtime: fakeRuntime(model), executor })
+			const events: AssistantEvent[] = []
+
+			session.subscribe(event => events.push(event))
+			session.send("Tell Maria late")
+
+			const proposal = await waitFor(events, event => event.type === "proposal")
+
+			expect(stepTrail(events).at(-1)).toBe('draft_chat_message waiting "Maria"')
+
+			if (proposal.type === "proposal") {
+				if (approve) {
+					session.confirm(proposal.proposal.id)
+				} else {
+					session.reject(proposal.proposal.id)
+				}
+			}
+
+			await waitFor(events, event => event.type === "turn-end")
+
+			const drafts = stepTrail(events).filter(line => line.startsWith("draft_chat_message"))
+
+			// Once confirmed it runs, no longer waiting on the user.
+			expect(drafts.slice(drafts.indexOf('draft_chat_message waiting "Maria"'))).toEqual(
+				approve
+					? ['draft_chat_message waiting "Maria"', 'draft_chat_message active "Maria"', 'draft_chat_message done "Maria"']
+					: ['draft_chat_message waiting "Maria"', 'draft_chat_message failed "Maria" declined']
+			)
+		}
+	})
+
+	it("queues the later calls of a step, so only the one running is active", async () => {
+		const model = new ScriptedModel({
+			route: "chats read",
+			steps: [[...call("list_chats", { query: "Maria" }), ...call("list_chats", { query: "Tom" })], "Both."],
+			reports: true
+		})
+		const session = createAssistantSession({
+			runtime: fakeRuntime(model),
+			executor: fakeExecutor({ list_chats: { chats: [] } })
+		})
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Chats with Maria and Tom")
+		await waitFor(events, event => event.type === "turn-end")
+
+		const rows = events.flatMap(event => (event.type === "step" && event.step.kind === "tool" ? [event.step] : []))
+
+		expect(rows.map(row => `${row.id.split(":")[1] ?? ""} ${row.status} ${row.subject ?? "-"}`)).toEqual([
+			"call_1_0 active -",
+			"call_1_0 queued -",
+			"call_1_1 active -",
+			"call_1_1 queued -",
+			"call_1_0 active -",
+			"call_1_0 active Maria",
+			"call_1_0 done Maria",
+			"call_1_1 active -",
+			"call_1_1 active Tom",
+			"call_1_1 done Tom"
+		])
+	})
+
+	it("reads a repeated call as already done, not as a failure", async () => {
+		const model = new ScriptedModel({
+			route: "chats read",
+			steps: [call("list_chats", { query: "Maria" }), call("list_chats", { query: "Maria" }), "Found her."]
+		})
+		const session = createAssistantSession({
+			runtime: fakeRuntime(model),
+			executor: fakeExecutor({ list_chats: { chats: [{ handle: "c1", name: "Maria" }] } })
+		})
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Do I have a chat with Maria?")
+		await waitFor(events, event => event.type === "turn-end")
+
+		expect(stepTrail(events)).toContain('list_chats failed "Maria" repeated')
+		expect(session.getActionLog()).toEqual([])
+	})
+
+	it("fails the rows still running when the turn fails, rather than reading as stopped", async () => {
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: (request, { onToolCall }) => {
+				if (request.grammar === ROUTER_GRAMMAR) {
+					return Promise.resolve({ content: "files read", toolCalls: [] })
+				}
+
+				onToolCall?.({ index: 0, name: "search_items" })
+
+				return Promise.reject(new Error("engine crashed"))
+			}
+		}
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Find taxes")
+		await waitFor(events, event => event.type === "turn-end")
+
+		expect(stepTrail(events).slice(-2)).toEqual(["search_items active", "search_items failed error"])
+		expect(events.at(-1)).toMatchObject({ type: "turn-end", outcome: "error", error: "failed" })
+	})
+
+	it("reads a blocked call as failed with the reason", async () => {
+		const model = new ScriptedModel({
+			route: "chats change",
+			steps: [
+				call("list_chats", { query: "Maria" }),
+				call("read_chat", { handle: "c1" }),
+				call("draft_chat_message", { chat: "c2", text: "x" }),
+				"No."
+			]
+		})
+		const session = createAssistantSession({
+			runtime: fakeRuntime(model),
+			executor: fakeExecutor({
+				list_chats: { chats: [{ handle: "c1", name: "Maria" }] },
+				read_chat: { handle: "c1", messages: [{ from: "Maria", text: "hi" }] }
+			})
+		})
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Read my chat with Maria and reply")
+		await waitFor(events, event => event.type === "turn-end")
+
+		expect(stepTrail(events)).toContain("draft_chat_message failed blocked")
+	})
+
+	it("puts the progress of reading a result's content on its call, which finishes after it", async () => {
+		const model = new ScriptedModel({ route: "chats read", steps: [call("read_chat", { handle: "c1" }), "Summary."], reports: true })
+		const session = createAssistantSession({
+			runtime: fakeRuntime(model),
+			executor: fakeExecutor({ read_chat: { handle: "c1", messages: [{ from: "Maria", text: "hi" }] } })
+		})
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Summarize my chat")
+		await waitFor(events, event => event.type === "turn-end")
+
+		const trail = stepTrail(events).filter(line => line.startsWith("read_chat"))
+
+		expect(trail).toEqual(["read_chat active", "read_chat active @0", "read_chat active @1", "read_chat done"])
+	})
+
+	it("stops the rows still running when the turn is cancelled mid-step", async () => {
+		const model: AssistantModel = {
+			contextTokens: 8192,
+			specialTokens: [],
+			generate: (request, { signal, onToolCall }) => {
+				if (request.grammar === ROUTER_GRAMMAR) {
+					return Promise.resolve({ content: "files read", toolCalls: [] })
+				}
+
+				onToolCall?.({ index: 0, name: "search_items" })
+
+				return new Promise((_resolve, reject) => {
+					signal.addEventListener("abort", () => {
+						reject(new Error("aborted"))
+					})
+				})
+			}
+		}
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor: fakeExecutor() })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Find taxes")
+		await waitFor(events, event => event.type === "step" && event.step.kind === "tool")
+		session.cancel()
+		await waitFor(events, event => event.type === "turn-end")
+
+		expect(stepTrail(events).slice(-2)).toEqual(["search_items active", "search_items stopped"])
+		expect(events.at(-1)).toMatchObject({ type: "turn-end", outcome: "cancelled" })
+	})
+
+	it("drops what reaches a turn's steps after it closed", () => {
+		const emitted: AssistantEvent[] = []
+		const steps = turnSteps({ turnId: "t", emit: event => emitted.push(event), now: () => 0 })
+
+		steps.event({ type: "phase", phase: "thinking" })
+		steps.close("done")
+
+		const count = emitted.length
+
+		steps.event({ type: "phase", phase: "replying" })
+		steps.event({
+			type: "call",
+			call: {
+				id: "call_1_0",
+				step: 1,
+				tool: "search_items",
+				title: "Search",
+				effect: "read",
+				consequential: false,
+				args: {},
+				status: "preparing"
+			}
+		})
+		steps.loading("active")
+		steps.close("failed")
+
+		expect(emitted).toHaveLength(count)
 	})
 
 	it("passes the explicit load and the user's typing to the runtime", () => {

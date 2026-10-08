@@ -1,5 +1,5 @@
 // English source catalog — "assistant" namespace: the on-device assistant panel — its setup and download,
-// the conversation, tool activity, confirmation cards and the composer. Same typed-catalog rules as every
+// the conversation, a turn's progress steps, confirmation cards and the composer. Same typed-catalog rules as every
 // other namespace: flat `as const` object, camelCase keys, no literal '.' or ':' (real i18next
 // namespaces, keySeparator/nsSeparator both ON). "directory" never "folder".
 export const assistant = {
@@ -131,10 +131,8 @@ export const assistant = {
 	assistantYouSaid: "You",
 	/** Accessible name of one assistant reply */
 	assistantReplyLabel: "Assistant reply",
-	/** Announced once when a reply starts and shown as the waiting bubble's label */
+	/** Announced while the assistant works without a step to name, e.g. between steps */
 	assistantResponding: "Assistant is responding…",
-	/** Screen-reader suffix on a tool activity that failed */
-	assistantActivityFailed: "Failed",
 	/** Turn ended — the user pressed Stop */
 	assistantTurnCancelled: "Stopped",
 	/** Turn failed — the model isn't loaded */
@@ -144,7 +142,129 @@ export const assistant = {
 	/** Turn failed — anything else */
 	assistantTurnErrorFailed: "Something went wrong while answering.",
 
-	// ── Tool activity (one line per tool call, shown while it runs and after) ─
+	// ── Progress steps (a turn's list above its reply: live while it runs, then one summary line) ─
+	/** Step — the downloaded model is being loaded into memory before the reply */
+	assistantStepLoading: "Loading the model",
+	/** Step — the model finished loading */
+	assistantStepLoaded: "Loaded the model",
+	/** Step — the model couldn't be loaded */
+	assistantStepLoadFailed: "Couldn't load the model",
+	/** Step — the model reads the message to decide what kind of request it is */
+	assistantStepRouting: "Reading your request",
+	/** Step — the request was understood as being about files and directories */
+	assistantStepRoutedFiles: "Working with your files",
+	/** Step — the request was understood as creating, renaming, moving or copying files */
+	assistantStepRoutedOrganize: "Organizing your files",
+	/** Step — the request was understood as being about the trash */
+	assistantStepRoutedTrash: "Working with the trash",
+	/** Step — the request was understood as being about notes */
+	assistantStepRoutedNotes: "Working with your notes",
+	/** Step — the request was understood as being about chats */
+	assistantStepRoutedChats: "Working with your chats",
+	/** Step — the request was understood as being about music playback */
+	assistantStepRoutedAudio: "Working with your music",
+	/** Step — the request was understood as opening a part of the app */
+	assistantStepRoutedNavigation: "Working with the app",
+	/** Step — the request needs no tools; the assistant answers from the conversation */
+	assistantStepRoutedAnswer: "Answering directly",
+	/** Step — the model decides what to do next */
+	assistantStepThinking: "Thinking",
+	/** Step — the model reads everything gathered and starts the reply */
+	assistantStepReplying: "Writing the reply",
+	/** Step — search_items; subject is the search text */
+	assistantStepSearchItems: 'Searching for "{{subject}}"',
+	/** Step — list_directory; subject is the directory's name or path */
+	assistantStepListDirectory: 'Listing "{{subject}}"',
+	/** Step — get_item_info; subject is the item's name */
+	assistantStepGetItemInfo: 'Checking "{{subject}}"',
+	/** Step — read_text_file; subject is the file's name */
+	assistantStepReadTextFile: 'Reading "{{subject}}"',
+	/** Step — reveal_item; subject is the item's name */
+	assistantStepRevealItem: 'Showing "{{subject}}" in your drive',
+	/** Step — set_favorite; subject is the item's name */
+	assistantStepSetFavorite: 'Updating favorites for "{{subject}}"',
+	/** Step — create_directory; subject is the new directory's name */
+	assistantStepCreateDirectory: 'Creating the directory "{{subject}}"',
+	/** Step — rename_item; subject is the item's current name */
+	assistantStepRenameItem: 'Renaming "{{subject}}"',
+	/** Step — move_items; subject is the item's name */
+	assistantStepMoveItems: 'Moving "{{subject}}"',
+	/** Step — copy_items; subject is the item's name */
+	assistantStepCopyItems: 'Copying "{{subject}}"',
+	/** Step — trash_items; subject is the item's name */
+	assistantStepTrashItems: 'Moving "{{subject}}" to the trash',
+	/** Step — list_notes; subject is the search text */
+	assistantStepListNotes: 'Searching notes for "{{subject}}"',
+	/** Step — read_note; subject is the note's title */
+	assistantStepReadNote: 'Reading the note "{{subject}}"',
+	/** Step — open_note; subject is the note's title */
+	assistantStepOpenNote: 'Opening the note "{{subject}}"',
+	/** Step — create_note; subject is the new note's title */
+	assistantStepCreateNote: 'Creating the note "{{subject}}"',
+	/** Step — set_note_flags; subject is the note's title */
+	assistantStepSetNoteFlags: 'Updating the note "{{subject}}"',
+	/** Step — list_chats; subject is the search text */
+	assistantStepListChats: 'Searching chats for "{{subject}}"',
+	/** Step — read_chat; subject is the chat's name */
+	assistantStepReadChat: 'Reading the chat "{{subject}}"',
+	/** Step — open_chat; subject is the chat's name */
+	assistantStepOpenChat: 'Opening the chat "{{subject}}"',
+	/** Step — draft_chat_message; subject is the chat's name */
+	assistantStepDraftChatMessage: 'Drafting a message to "{{subject}}"',
+	/** Step — open_playlist; subject is the playlist's name */
+	assistantStepOpenPlaylist: 'Opening the playlist "{{subject}}"',
+	/** Step — play; subject is the track's or playlist's name */
+	assistantStepPlay: 'Playing "{{subject}}"',
+	/** Step — add_tracks_to_playlist; subject is the playlist's name */
+	assistantStepAddTracksToPlaylist: 'Adding tracks to "{{subject}}"',
+	/** Step result — how many files and directories a listing or search returned */
+	assistantStepCountItems_one: "{{count}} item",
+	/** Step result — how many files and directories a listing or search returned */
+	assistantStepCountItems_other: "{{count}} items",
+	/** Step result — a search returned this many and stopped; more exist */
+	assistantStepCountItemsMore: "More than {{count}} items",
+	/** Step result — how many notes a listing returned */
+	assistantStepCountNotes_one: "{{count}} note",
+	/** Step result — how many notes a listing returned */
+	assistantStepCountNotes_other: "{{count}} notes",
+	/** Step result — how many chats a listing returned */
+	assistantStepCountChats_one: "{{count}} chat",
+	/** Step result — how many chats a listing returned */
+	assistantStepCountChats_other: "{{count}} chats",
+	/** Step result — how many playlists a listing returned */
+	assistantStepCountPlaylists_one: "{{count}} playlist",
+	/** Step result — how many playlists a listing returned */
+	assistantStepCountPlaylists_other: "{{count}} playlists",
+	/** Step state — the action waits for the user's confirmation on the card below */
+	assistantStepWaiting: "Waiting for your confirmation",
+	/** Step state — the action is ready and runs once the one before it finished */
+	assistantStepQueued: "Up next",
+	/** Step result — the model asked for something malformed; it may try again */
+	assistantStepFailedInvalid: "Not understood",
+	/** Step result — the action failed */
+	assistantStepFailedError: "Failed",
+	/** Step result — the assistant isn't allowed to do this for this request */
+	assistantStepFailedBlocked: "Not allowed",
+	/** Step result — the user declined the action */
+	assistantStepFailedDeclined: "Declined",
+	/** Step result — the model asked for the same thing again; the earlier result is used instead */
+	assistantStepFailedRepeated: "Already done",
+	/** Step result — the user stopped the reply while this step ran */
+	assistantStepStopped: "Stopped",
+	/** Collapsed steps — how many actions the assistant took and how long the whole reply took */
+	assistantStepsSummaryTools_one: "Used {{count}} tool · {{duration}}",
+	/** Collapsed steps — how many actions the assistant took and how long the whole reply took */
+	assistantStepsSummaryTools_other: "Used {{count}} tools · {{duration}}",
+	/** Collapsed steps — a reply that needed no actions; how long it took */
+	assistantStepsSummary: "Worked for {{duration}}",
+	/** Collapsed steps — screen-reader text on the warning sign shown when a step failed */
+	assistantStepsSummaryFailed: "A step failed",
+	/** Accessible name of a turn's step list */
+	assistantStepsLabel: "Steps",
+	/** A duration in seconds, e.g. "4.2 s" */
+	assistantDurationSeconds: "{{seconds}} s",
+
+	// ── Tool activity (a step's line when it names no single item) ─────────
 	/** Activity — get_context */
 	assistantToolGetContext: "Looking at your screen",
 	/** Activity — search_items */

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { AssistantWorkerApi } from "@/workers/assistant.worker"
 import type { AssistantModelManifest } from "@/features/assistant/runtime/manifest"
+import type { GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 
 // The worker module exposes its API through Comlink at import; the engine, its wasm URL and OPFS are
 // replaced so the contract between the page and the engine can be checked under node.
@@ -36,6 +37,14 @@ vi.mock("@wllama/wllama/esm/index.js", () => ({
 		readonly createChatCompletion = vi.fn((options: { onData: (chunk: unknown) => void; abortSignal: AbortSignal }): Promise<void> => {
 			const chunk = (delta: unknown) => ({ choices: [{ index: 0, delta, finish_reason: null, logprobs: null }] })
 
+			options.onData({
+				...chunk({ role: "assistant", content: null }),
+				prompt_progress: { total: 40, cache: 8, processed: 8, time_ms: 0 }
+			})
+			options.onData({
+				...chunk({ role: "assistant", content: null }),
+				prompt_progress: { total: 40, cache: 8, processed: 40, time_ms: 5 }
+			})
 			options.onData(chunk({ content: "Hi" }))
 			options.onData(chunk({ tool_calls: [{ index: 0, id: "t", function: { name: "search_items", arguments: '{"query":' } }] }))
 			options.onData(chunk({ tool_calls: [{ index: 0, function: { arguments: '"x"}' } }] }))
@@ -162,7 +171,15 @@ describe("assistant worker API", () => {
 		const [files, params] = (engine?.loadModel.mock.calls[0] ?? []) as [File[]?, Record<string, unknown>?]
 
 		expect(files?.map(file => file.name)).toEqual(["m-00001-of-00002.gguf", "m-00002-of-00002.gguf"])
-		expect(params).toMatchObject({ n_ctx: 8192, n_threads: 4, n_gpu_layers: 0, jinja: true, reasoning: false })
+		expect(params).toMatchObject({
+			n_ctx: 8192,
+			n_threads: 4,
+			n_gpu_layers: 0,
+			jinja: true,
+			reasoning: false,
+			n_batch: 512,
+			n_ubatch: 512
+		})
 	})
 
 	it("offloads to the GPU on the WebGPU backend", async () => {
@@ -278,10 +295,10 @@ describe("assistant worker API", () => {
 		expect(engines).toHaveLength(0)
 	})
 
-	it("generates with the model's own chat template, streaming text and collecting tool calls", async () => {
+	it("generates with the model's own chat template, streaming progress, text and tool calls in order", async () => {
 		await api.load(MANIFEST, OPTIONS)
 
-		const texts: string[] = []
+		const updates: GenerationUpdate[] = []
 		const result = await api.generate(
 			1,
 			{
@@ -298,11 +315,17 @@ describe("assistant worker API", () => {
 				],
 				maxTokens: 384
 			},
-			text => texts.push(text)
+			update => updates.push(update)
 		)
 
 		expect(result).toEqual({ content: "Hi", toolCalls: [{ id: "t", name: "search_items", arguments: '{"query":"x"}' }] })
-		expect(texts.at(-1)).toBe("Hi")
+		// The text before the call is flushed ahead of it, not left to the throttle.
+		expect(updates).toEqual([
+			{ type: "progress", processed: 0, total: 32 },
+			{ type: "progress", processed: 32, total: 32 },
+			{ type: "text", text: "Hi" },
+			{ type: "call", index: 0, name: "search_items" }
+		])
 
 		const options = engines[0]?.createChatCompletion.mock.calls[0]?.[0] as Record<string, unknown>
 
@@ -311,6 +334,7 @@ describe("assistant worker API", () => {
 			temperature: 0,
 			tool_choice: "auto",
 			stream: true,
+			return_progress: true,
 			chat_template_kwargs: { enable_thinking: false }
 		})
 		expect(options["grammar"]).toBeUndefined()
@@ -324,6 +348,8 @@ describe("assistant worker API", () => {
 
 		expect(options["grammar"]).toBe('root ::= "a"')
 		expect(options["tools"]).toBeUndefined()
+		// Nobody listens: no progress chunks to send.
+		expect(options["return_progress"]).toBe(false)
 	})
 
 	it("unloads the engine", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
+import type { GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 import type { ModelInspection } from "@/features/assistant/runtime/modelStore"
 import type { AssistantModelState } from "@/features/assistant/types"
 
@@ -12,7 +13,9 @@ const { remote, inspections, releaseProxy, workers, locks, prune } = vi.hoisted(
 		load: vi.fn<(manifest: unknown, options: unknown, onVerifying: () => void) => Promise<{ specialTokens: string[] }>>(),
 		cancelDownload: vi.fn(),
 		unload: vi.fn<() => Promise<void>>(),
-		generate: vi.fn(() => Promise.resolve({ content: "", toolCalls: [] }))
+		generate: vi.fn<
+			(id: number, request: unknown, onUpdate?: (update: GenerationUpdate) => void) => Promise<{ content: string; toolCalls: [] }>
+		>(() => Promise.resolve({ content: "", toolCalls: [] }))
 	},
 	// An Error fails that inspection.
 	inspections: [] as (ModelInspection | Error)[],
@@ -551,5 +554,70 @@ describe("AssistantRuntime idle unload", () => {
 		await runtime.unload()
 
 		expect(runtime.getState()).toMatchObject({ kind: "downloaded", idleUnloaded: false })
+	})
+	it("hands the worker one update callback that routes text, progress and calls, and none when nobody listens", async () => {
+		const runtime = await loaded()
+		const seen: string[] = []
+
+		remote.generate.mockImplementationOnce((_id, _request, onUpdate) => {
+			onUpdate?.({ type: "progress", processed: 4, total: 8 })
+			onUpdate?.({ type: "text", text: "Hi" })
+			onUpdate?.({ type: "call", index: 0, name: "list_notes" })
+
+			return Promise.resolve({ content: "Hi", toolCalls: [] })
+		})
+
+		await runtime.generate(
+			{ messages: [], maxTokens: 1 },
+			{
+				signal: new AbortController().signal,
+				onText: text => {
+					seen.push(`text ${text}`)
+				},
+				onProgress: ({ processed, total }) => {
+					seen.push(`progress ${String(processed)}/${String(total)}`)
+				},
+				onToolCall: ({ index, name }) => {
+					seen.push(`call ${String(index)} ${name}`)
+				}
+			}
+		)
+
+		expect(seen).toEqual(["progress 4/8", "text Hi", "call 0 list_notes"])
+
+		await runtime.generate({ messages: [], maxTokens: 1 }, { signal: new AbortController().signal })
+
+		expect(remote.generate.mock.lastCall?.[2]).toBeUndefined()
+	})
+
+	it("drops an update that arrives after the generation settled", async () => {
+		const runtime = await loaded()
+		const seen: string[] = []
+		let late: ((update: GenerationUpdate) => void) | undefined
+
+		remote.generate.mockImplementationOnce((_id, _request, onUpdate) => {
+			late = onUpdate
+
+			return Promise.resolve({ content: "Hi", toolCalls: [] })
+		})
+
+		await runtime.generate(
+			{ messages: [], maxTokens: 1 },
+			{
+				signal: new AbortController().signal,
+				onText: text => {
+					seen.push(text)
+				},
+				onToolCall: ({ name }) => {
+					seen.push(name)
+				}
+			}
+		)
+
+		late?.({ type: "text", text: "Hi" })
+		late?.({ type: "call", index: 0, name: "list_notes" })
+
+		expect(late).toBeDefined()
+		expect(seen).toEqual([])
 	})
 })

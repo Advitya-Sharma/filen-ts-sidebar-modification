@@ -349,7 +349,8 @@ describe("AssistantSidePanel", () => {
 
 		const live = document.querySelector('[aria-live="polite"]')
 
-		expect(live?.textContent).toBe("Assistant is responding…")
+		// The live region reads the step under way, not a generic line.
+		expect(live?.textContent).toBe('Searching for "taxes"')
 
 		fireEvent.click(screen.getByRole("button", { name: "Stop" }))
 

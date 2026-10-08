@@ -32,28 +32,73 @@ export function toEngineMessage(message: AssistantChatMessage): ChatCompletionMe
 	}
 }
 
+// What a generation reports to the page while it runs, through one callback.
+export type GenerationUpdate =
+	{ type: "text"; text: string } | { type: "progress"; processed: number; total: number } | { type: "call"; index: number; name: string }
+
+export interface ChunkChanges {
+	text: boolean
+	// The prompt being read, the reused cache prefix left out.
+	progress: { processed: number; total: number } | null
+	// Calls whose name grew in this chunk, by position among the named calls (the order the result lists them).
+	named: { index: number; name: string }[]
+}
+
 // Folds streamed chunks into the reply text and the tool calls the engine parsed out of the model's own
 // tool-call syntax (constrained by the schema-derived grammar llama.cpp applies once a call starts).
-export function accumulateChunk({ state, chunk }: { state: GenerationState; chunk: ChatCompletionChunk }): boolean {
+export function accumulateChunk({ state, chunk }: { state: GenerationState; chunk: ChatCompletionChunk }): ChunkChanges {
+	const changes: ChunkChanges = { text: false, progress: null, named: [] }
+	const prompt = chunk.prompt_progress
+
+	if (prompt !== undefined) {
+		changes.progress = {
+			processed: Math.max(0, prompt.processed - prompt.cache),
+			total: Math.max(0, prompt.total - prompt.cache)
+		}
+	}
+
 	const delta = chunk.choices[0]?.delta
-	let textChanged = false
 
 	if (delta === undefined) {
-		return false
+		return changes
 	}
 
 	if (typeof delta.content === "string" && delta.content.length > 0) {
 		state.content += delta.content
-		textChanged = true
+		changes.text = true
 	}
+
+	const renamed = new Set<number>()
 
 	for (const part of delta.tool_calls ?? []) {
 		const call = (state.calls[part.index] ??= { id: "", name: "", arguments: "" })
+		const name = part.function?.name ?? ""
 
 		call.id = part.id ?? call.id
-		call.name += part.function?.name ?? ""
+		call.name += name
 		call.arguments += part.function?.arguments ?? ""
+
+		if (name.length > 0) {
+			renamed.add(part.index)
+		}
 	}
 
-	return textChanged
+	if (renamed.size > 0) {
+		let position = 0
+
+		// forEach skips the holes a sparse engine index leaves, as the result's filter drops unnamed calls.
+		state.calls.forEach((call, index) => {
+			if (call.name.length === 0) {
+				return
+			}
+
+			if (renamed.has(index)) {
+				changes.named.push({ index: position, name: call.name })
+			}
+
+			position++
+		})
+	}
+
+	return changes
 }

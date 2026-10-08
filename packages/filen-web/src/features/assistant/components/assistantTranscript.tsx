@@ -1,14 +1,15 @@
 import { useCallback, useRef } from "react"
 import { useTranslation } from "react-i18next"
 import { useVirtualizer, type VirtualizerOptions } from "@tanstack/react-virtual"
-import { CheckIcon, CircleAlertIcon, Loader2Icon } from "lucide-react"
 import { cn } from "@filen/shared"
 import { MarkdownRenderer } from "@/features/preview/components/markdownRenderer"
 import { BubbleTail, OTHER_TAIL_CLASS, OWN_TAIL_CLASS } from "@/features/chats/components/thread/messageRow"
 import { useIsSidebarPanelVisible } from "@/features/shell/lib/sidebarPanelVisibility"
 import { observeElementOffsetFromAttach } from "@/lib/virtualScroll"
 import { AssistantConfirmationCard } from "@/features/assistant/components/assistantConfirmationCard"
-import { TURN_END_KEYS, toolActivityKey, type TranscriptRow } from "@/features/assistant/components/assistant.logic"
+import { AssistantSteps } from "@/features/assistant/components/assistantSteps"
+import { TURN_END_KEYS, type TranscriptRow } from "@/features/assistant/components/assistant.logic"
+import { stepsExpanded } from "@/features/assistant/store/transcript"
 
 function estimateRowSize(row: TranscriptRow | undefined): number {
 	switch (row?.kind) {
@@ -16,6 +17,8 @@ function estimateRowSize(row: TranscriptRow | undefined): number {
 			return 96
 		case "proposal":
 			return 200
+		case "steps":
+			return row.outcome === null || stepsExpanded(row) ? 12 + 22 * row.steps.length : 30
 		case "user":
 		case "thinking":
 			return 48
@@ -65,29 +68,8 @@ function TranscriptRowContent({ row }: { row: TranscriptRow }) {
 					</div>
 				</div>
 			)
-		case "activity":
-			return (
-				<div className="flex items-center gap-1.5 px-5 py-0.5 text-xs leading-5 text-muted-foreground">
-					{row.status === "running" ? (
-						<Loader2Icon
-							aria-hidden="true"
-							className="size-3.5 shrink-0 animate-spin"
-						/>
-					) : row.status === "done" ? (
-						<CheckIcon
-							aria-hidden="true"
-							className="size-3.5 shrink-0"
-						/>
-					) : (
-						<CircleAlertIcon
-							aria-hidden="true"
-							className="size-3.5 shrink-0 text-destructive"
-						/>
-					)}
-					<span className="min-w-0 truncate">{t(toolActivityKey(row.tool))}</span>
-					{row.status === "failed" ? <span className="sr-only">({t("assistantActivityFailed")})</span> : null}
-				</div>
-			)
+		case "steps":
+			return <AssistantSteps entry={row} />
 		case "proposal":
 			return (
 				<div className="px-4 py-1.5">

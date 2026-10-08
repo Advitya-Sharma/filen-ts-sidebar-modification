@@ -6,6 +6,7 @@ import {
 	type AssistantGenerateRequest,
 	type AssistantGenerateResult,
 	type AssistantModel,
+	type AssistantPromptProgress,
 	type AssistantSignal
 } from "@filen/shared/assistant"
 import type { AssistantModelInfo, AssistantModelState } from "@/features/assistant/types"
@@ -14,6 +15,7 @@ import { QWEN35_4B } from "@/features/assistant/runtime/models"
 import { probeDevice, recommendRuntime, storageVerdict, type RuntimeRecommendation } from "@/features/assistant/runtime/deviceCheck"
 import { deleteModels, inspectModel } from "@/features/assistant/runtime/modelStore"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
+import type { GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 import { log } from "@/lib/log"
 
@@ -696,7 +698,17 @@ export class AssistantRuntime implements AssistantModel {
 
 	async generate(
 		request: AssistantGenerateRequest,
-		{ signal, onText }: { signal: AssistantSignal; onText?: (text: string) => void }
+		{
+			signal,
+			onText,
+			onProgress,
+			onToolCall
+		}: {
+			signal: AssistantSignal
+			onText?: (text: string) => void
+			onProgress?: (progress: AssistantPromptProgress) => void
+			onToolCall?: (call: { index: number; name: string }) => void
+		}
 	): Promise<AssistantGenerateResult> {
 		const handle = this.handle
 
@@ -713,13 +725,38 @@ export class AssistantRuntime implements AssistantModel {
 			void handle.remote.cancel(id)
 		}
 
+		// One port for every kind of update, opened only when someone listens. Updates travel on that port and
+		// the result on the worker's own, in no guaranteed order: one that lands after the result is stale.
+		let settled = false
+		const onUpdate =
+			onText === undefined && onProgress === undefined && onToolCall === undefined
+				? undefined
+				: Comlink.proxy((update: GenerationUpdate) => {
+						if (settled) {
+							return
+						}
+
+						switch (update.type) {
+							case "text":
+								onText?.(update.text)
+								break
+							case "progress":
+								onProgress?.({ processed: update.processed, total: update.total })
+								break
+							case "call":
+								onToolCall?.({ index: update.index, name: update.name })
+								break
+						}
+					})
+
 		signal.addEventListener("abort", cancel)
 
 		try {
-			return await handle.remote.generate(id, request, onText === undefined ? undefined : Comlink.proxy(onText))
+			return await handle.remote.generate(id, request, onUpdate)
 		} catch (e) {
 			throw errorName(e) === "AbortError" || isAborted(signal) ? new AssistantAbortError() : e
 		} finally {
+			settled = true
 			signal.removeEventListener("abort", cancel)
 		}
 	}

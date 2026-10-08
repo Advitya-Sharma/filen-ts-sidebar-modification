@@ -76,6 +76,8 @@ export function turnExecutor({ executor, signal }: { executor: ToolExecutor; sig
 		shared: {
 			context: () => executor.context(),
 
+			name: handle => executor.name?.(handle),
+
 			check: async call => {
 				const checked = await executor.check(call)
 

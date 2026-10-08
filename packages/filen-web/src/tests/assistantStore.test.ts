@@ -27,7 +27,7 @@ import {
 	trackAssistantPanelShown
 } from "@/features/assistant/store/assistantSession"
 import { createMockAssistantSession, MOCK_ASSISTANT_MODEL } from "@/features/assistant/store/mockAssistantSession"
-import type { AssistantSession } from "@/features/assistant/types"
+import type { AssistantEvent, AssistantSession, AssistantStep } from "@/features/assistant/types"
 
 const STEP_MS = 10
 
@@ -148,13 +148,21 @@ describe("session wiring", () => {
 
 		expect(sendAssistantMessage("find my taxes")).toBe(true)
 		expect(state().modelState.kind).toBe("loading")
-		expect(state().entries).toEqual([expect.objectContaining({ kind: "user", text: "find my taxes" })])
+		expect(state().entries[0]).toMatchObject({ kind: "user", text: "find my taxes" })
+		expect(state().entries[1]).toMatchObject({ kind: "steps", steps: [{ kind: "loading", status: "active" }] })
 		expect(state().activeTurnId).not.toBeNull()
 
-		vi.advanceTimersByTime(STEP_MS * 2)
+		vi.advanceTimersByTime(STEP_MS * 2 + 16)
 
 		expect(state().modelState.kind).toBe("ready")
-		expect(state().entries[1]).toMatchObject({ kind: "activity", status: "running" })
+		expect(state().entries[1]).toMatchObject({
+			kind: "steps",
+			steps: [
+				{ kind: "loading", status: "done" },
+				{ kind: "routing", status: "done", route: "files" },
+				{ kind: "tool", tool: "search_items", status: "active" }
+			]
+		})
 
 		vi.runAllTimers()
 
@@ -171,14 +179,21 @@ describe("session wiring", () => {
 		expect(noteActivity).toHaveBeenCalledTimes(1)
 	})
 
-	// The mock emits the turn's first activity synchronously inside send(); it must still land after the
+	// The mock emits the turn's first steps synchronously inside send(); they must still land after the
 	// user's message.
 	it("streams a turn into the transcript below the message that started it, and frees the composer when it ends", () => {
 		ready()
 
 		expect(sendAssistantMessage("  find my taxes  ")).toBe(true)
 		expect(state().entries[0]).toMatchObject({ kind: "user", text: "find my taxes" })
-		expect(state().entries[1]).toMatchObject({ kind: "activity", tool: "search_items", status: "running" })
+		expect(state().entries[1]).toMatchObject({
+			kind: "steps",
+			outcome: null,
+			steps: [
+				{ kind: "routing", status: "done" },
+				{ kind: "tool", tool: "search_items", subject: "taxes", status: "active" }
+			]
+		})
 		expect(state().activeTurnId).not.toBeNull()
 		// A second message while one is running is refused.
 		expect(sendAssistantMessage("again")).toBe(false)
@@ -187,7 +202,11 @@ describe("session wiring", () => {
 
 		expect(state().activeTurnId).toBeNull()
 		expect(state().entries.some(entry => entry.kind === "reply" && entry.final)).toBe(true)
-		expect(state().entries.some(entry => entry.kind === "activity" && entry.status === "done")).toBe(true)
+		expect(state().entries[1]).toMatchObject({
+			kind: "steps",
+			outcome: "complete",
+			steps: [{ kind: "routing" }, { kind: "tool", status: "done", resultCount: 3 }]
+		})
 	})
 
 	it("refuses to send before the model is on disk or with nothing typed", () => {
@@ -275,5 +294,91 @@ describe("session wiring", () => {
 		await removeAssistantModel()
 
 		expect(state().modelState.kind).toBe("not-downloaded")
+	})
+})
+
+describe("event delivery", () => {
+	// A session whose events the test emits by hand; send() starts turn "t1".
+	function manual(): { emit: (event: AssistantEvent) => void } {
+		const listeners = new Set<(event: AssistantEvent) => void>()
+		const mock = createMockAssistantSession({ initialState: { kind: "ready", model: MOCK_ASSISTANT_MODEL } })
+
+		unregister = registerAssistantSession({
+			...mock,
+			subscribe: listener => {
+				listeners.add(listener)
+
+				return () => {
+					listeners.delete(listener)
+				}
+			},
+			send: () => "t1",
+			cancel: () => undefined
+		})
+
+		return {
+			emit: event => {
+				for (const listener of listeners) {
+					listener(event)
+				}
+			}
+		}
+	}
+
+	const thinking = (progress: number): AssistantStep => ({ id: "t1:think", kind: "thinking", status: "active", progress })
+
+	it("folds streamed text and step updates into one store update per frame, in order", () => {
+		const { emit } = manual()
+
+		sendAssistantMessage("hello")
+
+		const updates = vi.fn()
+		const stop = useAssistantStore.subscribe(updates)
+
+		emit({ type: "step", turnId: "t1", step: thinking(0.2), at: 1 })
+		emit({ type: "step", turnId: "t1", step: thinking(0.7), at: 2 })
+		emit({ type: "reply", turnId: "t1", replyId: "r", text: "Hel", final: false })
+		emit({ type: "reply", turnId: "t1", replyId: "r", text: "Hello", final: false })
+
+		expect(updates).not.toHaveBeenCalled()
+
+		vi.advanceTimersByTime(16)
+
+		expect(updates).toHaveBeenCalledTimes(1)
+		expect(state().entries.map(entry => entry.kind)).toEqual(["user", "steps", "reply"])
+		expect(state().entries[1]).toMatchObject({ steps: [{ id: "t1:think", progress: 0.7, startedAt: 1 }] })
+		expect(state().entries[2]).toMatchObject({ text: "Hello", final: false })
+
+		stop()
+	})
+
+	it("applies anything else at once, after what is pending", () => {
+		const { emit } = manual()
+
+		sendAssistantMessage("hello")
+		emit({ type: "reply", turnId: "t1", replyId: "r", text: "Hel", final: false })
+		emit({ type: "reply", turnId: "t1", replyId: "r", text: "Hello.", final: true })
+
+		expect(state().entries[1]).toMatchObject({ kind: "reply", text: "Hello.", final: true })
+
+		emit({ type: "step", turnId: "t1", step: thinking(0.5), at: 3 })
+		emit({ type: "turn-end", turnId: "t1", at: 0, outcome: "complete" })
+
+		expect(state().activeTurnId).toBeNull()
+		// The pending step landed first, then the turn's end removed the row it no longer needs.
+		expect(state().entries.find(entry => entry.kind === "steps")).toMatchObject({ outcome: "complete", steps: [] })
+	})
+
+	it("drops what a stopped turn still delivers once a new conversation started", () => {
+		const { emit } = manual()
+
+		sendAssistantMessage("hello")
+		emit({ type: "step", turnId: "t1", step: thinking(0.5), at: 3 })
+		startNewAssistantConversation()
+		vi.advanceTimersByTime(16)
+		emit({ type: "turn-end", turnId: "t1", at: 0, outcome: "cancelled" })
+
+		expect(state().entries).toEqual([])
+		expect(state().activeTurnId).toBeNull()
 	})
 })

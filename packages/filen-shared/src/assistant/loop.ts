@@ -1,3 +1,4 @@
+import { resultItemCount, toolCallSubject } from "./activity"
 import { capToolResult, estimateTokens, MESSAGE_OVERHEAD_TOKENS } from "./budget"
 import { AssistantTurnGuard } from "./guard"
 import { assistantInstructionLines, assistantSystemPrompt, ROUTER_GRAMMAR, ROUTER_SYSTEM_PROMPT } from "./prompts"
@@ -86,16 +87,27 @@ export type AssistantGenerateResult = {
 	toolCalls: readonly AssistantModelToolCall[]
 }
 
+// How far the engine has read the prompt, in tokens, leaving out a prefix it reused from its cache.
+export type AssistantPromptProgress = {
+	processed: number
+	total: number
+}
+
 export interface AssistantModel {
 	readonly contextTokens: number
 	// The loaded model's own special-token strings, for sanitizeUntrustedText.
 	readonly specialTokens: readonly string[]
-	// `onText` receives the whole text content generated so far, never a delta.
+	// `onText` receives the whole text content generated so far, never a delta. `onProgress` reports the
+	// prompt being read, before the first token; `onToolCall` reports a tool call as soon as its complete
+	// name is known, by its position among the calls this generation returns, before its arguments are
+	// decoded. Both are optional for an engine that cannot tell.
 	generate(
 		request: AssistantGenerateRequest,
 		options: {
 			signal: AssistantSignal
 			onText?: (text: string) => void
+			onProgress?: (progress: AssistantPromptProgress) => void
+			onToolCall?: (call: { index: number; name: string }) => void
 		}
 	): Promise<AssistantGenerateResult>
 }
@@ -148,6 +160,8 @@ export interface AssistantToolExecutor {
 		  }
 		| AssistantToolFailure
 	>
+	// The name a handle this executor handed out stands for, to label a call in the UI.
+	name?(handle: string): string | undefined
 	// `confirmed` is true only for a consequential call the user confirmed.
 	execute(call: {
 		callId: string
@@ -158,7 +172,11 @@ export interface AssistantToolExecutor {
 	}): Promise<AssistantToolOutcome>
 }
 
-export type AssistantToolCallStatus = "running" | "confirming" | "ok" | "error" | "invalid" | "blocked" | "declined"
+// "preparing": the model is still writing the call's arguments. "queued": written, waiting for the calls
+// before it in the same step. "discarded": a call announced early that never reached the dispatcher; it did
+// not run. "repeated": the same call already ran this request, so it was not run again.
+export type AssistantToolCallStatus =
+	"preparing" | "queued" | "running" | "confirming" | "ok" | "error" | "invalid" | "blocked" | "declined" | "discarded" | "repeated"
 
 export type AssistantToolCallRecord = {
 	id: string
@@ -170,6 +188,11 @@ export type AssistantToolCallRecord = {
 	args: Record<string, unknown>
 	status: AssistantToolCallStatus
 	error?: string
+	// For the UI (activity.ts): what the checked call acts on, sanitized and shortened, when it names one
+	// thing; and how many items a listing returned, `resultMore` when the list was cut off.
+	subject?: string
+	resultCount?: number
+	resultMore?: boolean
 }
 
 export type AssistantConfirmationRequest = {
@@ -201,6 +224,12 @@ export type AssistantTurnEvent =
 	| {
 			type: "call"
 			call: AssistantToolCallRecord
+	  }
+	| {
+			// The prompt of the generation under way (routing, a step, a content extraction or the closing
+			// reply) being read.
+			type: "progress"
+			progress: AssistantPromptProgress
 	  }
 
 export type AssistantHistoryTurn = {
@@ -247,6 +276,37 @@ const CLOSING_NUDGE = "(No more tools are available in this request. Reply to th
 const CONTENT_FIELDS = ["content", "messages"]
 
 const SPOTLIGHT_DELIMITER = /⟦\/?[^⟦⟧\s]{1,32}⟧/g
+
+type GenerateOptions = Parameters<AssistantModel["generate"]>[1]
+
+// An engine may deliver a callback after its generation settled (a worker's updates and its result travel
+// on different ports): by then the result supersedes it, so it is dropped rather than reopening a row or a
+// reply that already ended.
+async function generateSettled(
+	model: AssistantModel,
+	request: AssistantGenerateRequest,
+	{ signal, onText, onProgress, onToolCall }: GenerateOptions
+): Promise<AssistantGenerateResult> {
+	let settled = false
+	const live =
+		<T>(callback: ((value: T) => void) | undefined) =>
+		(value: T) => {
+			if (!settled) {
+				callback?.(value)
+			}
+		}
+
+	try {
+		return await model.generate(request, {
+			signal,
+			...(onText === undefined ? {} : { onText: live(onText) }),
+			...(onProgress === undefined ? {} : { onProgress: live(onProgress) }),
+			...(onToolCall === undefined ? {} : { onToolCall: live(onToolCall) })
+		})
+	} finally {
+		settled = true
+	}
+}
 
 function checkAborted(signal: AssistantSignal): void {
 	if (signal.aborted) {
@@ -439,7 +499,14 @@ export async function runAssistantTurn({
 		phase: "routing"
 	})
 
-	const routed = await model.generate(
+	const onProgress = (progress: AssistantPromptProgress) => {
+		onEvent({
+			type: "progress",
+			progress
+		})
+	}
+	const routed = await generateSettled(
+		model,
 		{
 			messages: [
 				{
@@ -455,7 +522,8 @@ export async function runAssistantTurn({
 			maxTokens: ROUTER_MAX_TOKENS
 		},
 		{
-			signal
+			signal,
+			onProgress
 		}
 	)
 	const { route, intent } = parseRoute(routed.content)
@@ -522,6 +590,7 @@ export async function runAssistantTurn({
 			canary,
 			instructions
 		})
+	const nameOf = (handle: string) => executor.name?.(handle)
 	const sanitized = (value: unknown) => mapUntrustedStrings(value, text => sanitizeUntrustedText(text, specialTokens))
 	const untrusted = (value: unknown) =>
 		spotlightOptions === null ? sanitized(value) : mapUntrustedStrings(sanitized(value), text => spotlightText(text, spotlightOptions))
@@ -568,7 +637,68 @@ export async function runAssistantTurn({
 
 		const offered = guard.offered(groupTools)
 		const tools = toModelTools(offered)
-		const generated = await model.generate(
+		// Calls the engine named while the model was still writing their arguments, by position. Only the
+		// newest is being written; those before it wait to be dispatched.
+		const announced = new Map<number, AssistantToolCallRecord>()
+		const queueAnnounced = (except: string | null) => {
+			for (const [index, record] of announced) {
+				if (record.status === "preparing" && record.id !== except) {
+					const queued: AssistantToolCallRecord = {
+						...record,
+						status: "queued"
+					}
+
+					announced.set(index, queued)
+					onEvent({
+						type: "call",
+						call: queued
+					})
+				}
+			}
+		}
+		const announce = ({ index, name }: { index: number; name: string }) => {
+			const tool = offered.find(candidate => candidate.name === name)
+
+			if (tool === undefined || announced.has(index)) {
+				return
+			}
+
+			queueAnnounced(null)
+
+			const record: AssistantToolCallRecord = {
+				id: `call_${step}_${index}`,
+				step,
+				tool: tool.name,
+				title: tool.title,
+				effect: tool.effect,
+				consequential: isConsequentialTool(tool),
+				args: {},
+				status: "preparing"
+			}
+
+			announced.set(index, record)
+			onEvent({
+				type: "call",
+				call: record
+			})
+		}
+		// An announced call that never reached the dispatcher (malformed, or cut off by a declined call
+		// before it) did not run.
+		const discardUnfinished = (finished: ReadonlySet<string>) => {
+			for (const record of announced.values()) {
+				if (!finished.has(record.id)) {
+					onEvent({
+						type: "call",
+						call: {
+							...record,
+							status: "discarded"
+						}
+					})
+				}
+			}
+		}
+		const generated = await generateSettled(
+			model,
 			{
 				messages: fitMessages({
 					system,
@@ -587,11 +717,15 @@ export async function runAssistantTurn({
 			},
 			{
 				signal,
-				onText: streamReply
+				onText: streamReply,
+				onProgress,
+				onToolCall: announce
 			}
 		)
 
 		if (generated.toolCalls.length === 0) {
+			discardUnfinished(new Set())
+
 			const text = generated.content.trim()
 
 			if (MALFORMED_CALL.test(text)) {
@@ -620,6 +754,9 @@ export async function runAssistantTurn({
 
 			break
 		}
+
+		// The first call is dispatched next; the rest wait their turn.
+		queueAnnounced(`call_${step}_0`)
 
 		// Text written before the calls ("Let me look that up") stays as a reply of its own.
 		if (generated.content.trim().length > 0) {
@@ -709,8 +846,26 @@ export async function runAssistantTurn({
 						args
 					})
 
+					// A refused call shows no subject: what the guard did not let through is not repeated to the user.
+					const subject = decision.allowed
+						? toolCallSubject({
+								tool,
+								args,
+								name: nameOf,
+								grounded: text => guard.textGrounded(text),
+								userMessage: message,
+								canary,
+								specialTokens
+							})
+						: undefined
+
 					record = update(record, {
-						args
+						args,
+						...(subject === undefined
+							? {}
+							: {
+									subject
+								})
 					})
 
 					const signature = `${tool.name}:${JSON.stringify(args)}`
@@ -725,7 +880,7 @@ export async function runAssistantTurn({
 
 						blockedThisStep++
 						record = update(record, {
-							status: "blocked",
+							status: repeated ? "repeated" : "blocked",
 							error: reason
 						})
 						result = {
@@ -764,6 +919,12 @@ export async function runAssistantTurn({
 								error: "The user declined this action."
 							}
 						} else {
+							if (record.status === "confirming") {
+								record = update(record, {
+									status: "running"
+								})
+							}
+
 							onEvent({
 								type: "phase",
 								phase: "tool"
@@ -778,9 +939,6 @@ export async function runAssistantTurn({
 							})
 
 							if (outcome.ok) {
-								record = update(record, {
-									status: "ok"
-								})
 								guard.record({
 									tool,
 									args,
@@ -792,6 +950,7 @@ export async function runAssistantTurn({
 										})),
 									created: outcome.created ?? []
 								})
+								// The call reads as running until its content is extracted, which is a generation of its own.
 								result =
 									tool.untrustedOutput === "content"
 										? await quarantine({
@@ -799,9 +958,25 @@ export async function runAssistantTurn({
 												request: message,
 												// Sanitized first: the quarantine prompt is rendered and tokenized like any other.
 												result: sanitized(outcome.result),
-												signal
+												signal,
+												onProgress
 											})
 										: outcome.result
+
+								const listed = resultItemCount({
+									tool,
+									result: outcome.result
+								})
+
+								record = update(record, {
+									status: "ok",
+									...(listed === undefined
+										? {}
+										: {
+												resultCount: listed.count,
+												resultMore: listed.more
+											})
+								})
 							} else {
 								record = update(record, {
 									status: outcome.invalid ? "invalid" : "error",
@@ -843,6 +1018,7 @@ export async function runAssistantTurn({
 			}
 		}
 
+		discardUnfinished(new Set(processed.map(processedCall => processedCall.id)))
 		turn.push(
 			{
 				role: "assistant",
@@ -888,7 +1064,8 @@ export async function runAssistantTurn({
 			phase: "replying"
 		})
 
-		const closing = await model.generate(
+		const closing = await generateSettled(
+			model,
 			{
 				messages: fitMessages({
 					system,
@@ -912,7 +1089,8 @@ export async function runAssistantTurn({
 			},
 			{
 				signal,
-				onText: streamReply
+				onText: streamReply,
+				onProgress
 			}
 		)
 
@@ -942,12 +1120,14 @@ async function quarantine({
 	model,
 	request,
 	result,
-	signal
+	signal,
+	onProgress
 }: {
 	model: AssistantModel
 	request: string
 	result: unknown
 	signal: AssistantSignal
+	onProgress: (progress: AssistantPromptProgress) => void
 }): Promise<unknown> {
 	if (typeof result !== "object" || result === null) {
 		return result
@@ -966,7 +1146,8 @@ async function quarantine({
 		request,
 		data
 	})
-	const extracted = await model.generate(
+	const extracted = await generateSettled(
+		model,
 		{
 			messages: [
 				{
@@ -981,7 +1162,8 @@ async function quarantine({
 			maxTokens: QUARANTINE_MAX_TOKENS
 		},
 		{
-			signal
+			signal,
+			onProgress
 		}
 	)
 
