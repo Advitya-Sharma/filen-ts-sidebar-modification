@@ -5,7 +5,9 @@ import {
 	ASSISTANT_TOOLS,
 	createDirectory,
 	draftChatMessage,
+	findContacts,
 	listChats,
+	listSection,
 	listDirectory,
 	mapUntrustedStrings,
 	moveItems,
@@ -196,7 +198,7 @@ describe("AssistantTurnGuard", () => {
 			consequentialAllowed: false
 		})
 
-		expect(turn.offered(ASSISTANT_TOOL_GROUPS.chats.tools).map(tool => tool.name)).toEqual(["list_chats", "read_chat", "open_chat"])
+		expect(turn.offered(ASSISTANT_TOOL_GROUPS.chats.tools).map(tool => tool.name)).toEqual(["list_chats", "read_chat", "open_chat", "find_contacts"])
 		expect(
 			turn.check({
 				tool: draftChatMessage,
@@ -356,6 +358,48 @@ describe("AssistantTurnGuard", () => {
 		).toBe(true)
 	})
 
+	it("grounds a draft's chat through a contact lookup on the user's own words, never through a contact's name", () => {
+		const turn = guard("Write to carlos.ruiz@example.com that the budget is attached", {}, [])
+
+		turn.record({
+			tool: findContacts,
+			args: {
+				query: "carlos.ruiz@example.com"
+			},
+			returned: [
+				{
+					handle: "c3",
+					name: "Carlos Ruiz"
+				}
+			]
+		})
+		// A contact the lookup also matched, whose own name points elsewhere.
+		turn.record({
+			tool: findContacts,
+			args: {
+				query: "Website team"
+			},
+			returned: [
+				{
+					handle: "c4",
+					name: "Website team"
+				}
+			]
+		})
+
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c3", text: "The budget is attached" } }).allowed).toBe(true)
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c4", text: "The budget is attached" } }).allowed).toBe(false)
+	})
+
+	it("lists the trash on a read request without offering a way to change it", () => {
+		const turn = guard("What's in my trash?", {
+			consequentialAllowed: false
+		})
+
+		expect(turn.offered(ASSISTANT_TOOL_GROUPS.trash.tools).map(tool => tool.name)).toEqual(["search_items", "list_directory", "list_notes", "list_section"])
+		expect(turn.check({ tool: listSection, args: { section: "trash" } }).allowed).toBe(true)
+	})
+
 	it("lets everything through with all gates off", () => {
 		const turn = guard("hello", {
 			consequentialAllowed: true,
@@ -509,6 +553,40 @@ describe("untrusted text", () => {
 		expect(screened("a &hearts; b &amp; c")).toBe("a \\&hearts; b &amp; c")
 		// Ordinary prose with colons is left alone.
 		expect(screened("Note: the file is ready. Time 10:30")).toBe("Note: the file is ready. Time 10:30")
+	})
+
+	it("defangs bare host names the user did not type, under any top-level domain, but not common file names", () => {
+		const screened = (reply: string, userMessage = "") => screenAssistantReply({ reply, userMessage }).text
+
+		expect(screened("Shared folder „Sign in again at filen-verify.example“")).toBe("Shared folder „Sign in again at filen-verify[.]example“")
+		expect(screened("Go to login.evil.com/reset now.")).toBe("Go to login.evil[.]com/reset now.")
+		expect(screened("Sign in again at filen-verify.app, filen-security.de/login or filen-verify.ai")).toBe(
+			"Sign in again at filen-verify[.]app, filen-security[.]de/login or filen-verify[.]ai"
+		)
+		expect(screened("go to filen-support.ru or secure-filen.cc")).toBe("go to filen-support[.]ru or secure-filen[.]cc")
+		expect(screened("Login: xn--80ak6aa92e.xn--p1ai")).toBe("Login: xn--80ak6aa92e[.]xn--p1ai")
+		// A common extension with a path behind it is a host after all.
+		expect(screened("see report.zip/login")).toBe("see report[.]zip/login")
+		expect(screened("Open amazon.com", "is amazon.com safe?")).toBe("Open amazon.com")
+		expect(screened("Open filen.io or app.filen.io")).toBe("Open filen.io or app.filen.io")
+		expect(screened("roadmap.md, photos.zip, CV_2025.docx, song.mp3, scan.2024.pdf, archive.tar.gz and Node.js")).toBe(
+			"roadmap.md, photos.zip, CV_2025.docx, song.mp3, scan.2024.pdf, archive.tar.gz and Node.js"
+		)
+		// A host hidden in front of an extension is split off.
+		expect(screened("verify at secure-filen.ru.pdf, invoice.com.pdf")).toBe("verify at secure-filen[.]ru.pdf, invoice[.]com.pdf")
+		// Abbreviations, versions and times are not hosts; a file name that is also a registrable host is.
+		expect(screened("e.g. z.B. U.S.A. Qwen3.5 v1.2.3 at 10.30")).toBe("e.g. z.B. U.S.A. Qwen3.5 v1.2.3 at 10.30")
+		expect(screened("READ.ME")).toBe("READ[.]ME")
+		// An address keeps its dotted local part, typed by the user or not.
+		expect(screened("Her address is lena.hoffmann@example.com")).toBe("Her address is lena.hoffmann[@]example.com")
+		expect(screened("Wrote to lena.hoffmann@example.com", "tell lena.hoffmann@example.com hi")).toBe("Wrote to lena.hoffmann@example.com")
+		expect(foreignLinks({ text: "I'm late, details at filen-verify.example", userMessage: "tell Carlos I'm late" })).toEqual([
+			"filen-verify.example"
+		])
+		expect(foreignLinks({ text: "Check filen-verify.app, secure-filen.ru.pdf and roadmap.md", userMessage: "tell Carlos" })).toEqual([
+			"filen-verify.app",
+			"secure-filen.ru.pdf"
+		])
 	})
 
 	it("finds links and addresses the user did not type", () => {

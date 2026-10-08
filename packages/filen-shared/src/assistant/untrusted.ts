@@ -233,6 +233,44 @@ const LINK = /(?<![\p{L}\p{N}])(?:(?:https?|ftps?|mailto|wss?|tel|sms|javascript
 // GFM turns a bare address into a mailto: link.
 const EMAIL = /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/gu
 
+// A bare host name ("filen-verify.de", "evil.com/login"), which no renderer links but a reader can type: a shared
+// item's, a contact's or a transfer's name can carry one as easily as a link. Any dotted name ending in a
+// letters-only label counts (top-level domains keep being added, so no list of them holds), except a file name:
+// one without a path whose last label is a common extension no one can register a domain under, plus md, zip
+// and mov, which are open domains but too common in a drive to mangle. A host can still hide in front of the
+// extension ("secure-filen.ru.pdf"), so a letters-only label there is split off too ("report[.]final.pdf" is
+// the price). A rarer file name ("read.me") is defanged as well: it is a registrable host. Neither part of an
+// address is one: the defanged "@" keeps it from being a link.
+const FILE_EXTENSIONS = new Set(
+	(
+		"txt pdf doc docx xls xlsx ppt pptx odt ods odp rtf csv tsv json xml yaml yml toml ini cfg conf log md markdown rst tex " +
+		"html htm css js mjs cjs ts tsx jsx java kt swift cpp hpp php rb sql db sqlite jpg jpeg png gif webp heic heif bmp " +
+		"tif tiff svg dng nef psd eps indd raw wav flac aac ogg oga opus wma mov mkv avi webm wmv flv zip tar gz tgz xz rar " +
+		"dmg iso exe msi apk ipa deb rpm epub key pages numbers eml ics vcf ttf otf woff srt vtt gpx kml bak tmp lock env plist"
+	).split(" ")
+)
+// The app's own host and its subdomains, which no one else can register.
+const OWN_HOST = /^(?:[\p{L}\p{N}-]+\.)*filen\.io$/iu
+const BARE_HOST = /(?<![\p{L}\p{N}_.@/:-])(?<!\[@\])(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,62}[\p{L}\p{N}])?\.)+(?:\p{L}{2,63}|xn--[\p{L}\p{N}-]{1,59})(?![\p{L}\p{N}_-]|\.[\p{L}\p{N}]|@|\[@\])(?:\/[^\s<>"'`)\]]*)?/giu
+
+function screenHost(token: string): string {
+	if (!token.includes("/") && OWN_HOST.test(token)) {
+		return token
+	}
+
+	const labels = token.split(".")
+	const extension = labels.at(-1)?.toLowerCase() ?? ""
+	const inner = labels.at(-2) ?? ""
+
+	if (token.includes("/") || !FILE_EXTENSIONS.has(extension)) {
+		return defangLink(token)
+	}
+
+	return labels.length > 2 && /^\p{L}{2,63}$/u.test(inner) && !FILE_EXTENSIONS.has(inner.toLowerCase())
+		? `${labels.slice(0, -2).join(".")}[.]${inner}.${labels.at(-1) ?? ""}`
+		: token
+}
+
 function defangLink(link: string): string {
 	const scheme = /^[a-z]+:/i.exec(link)?.[0]
 
@@ -261,7 +299,12 @@ export function foreignLinks({ text, userMessage }: { text: string; userMessage:
 		decoded = next
 	}
 
-	return [...(decoded.match(LINK) ?? []), ...(decoded.match(EMAIL) ?? [])].filter(link => !typed.includes(link.toLowerCase()))
+	// A host inside a link or an address is that link's or address's, not one of its own.
+	const outsideLinks = decoded.replace(LINK, " ").replace(EMAIL, " ")
+
+	const hosts = (outsideLinks.match(BARE_HOST) ?? []).filter(host => screenHost(host) !== host)
+
+	return [...(decoded.match(LINK) ?? []), ...(decoded.match(EMAIL) ?? []), ...hosts].filter(link => !typed.includes(link.toLowerCase()))
 }
 
 export type ScreenedReply = {
@@ -301,7 +344,8 @@ export function screenAssistantReply({ reply, userMessage, canary }: { reply: st
 	return {
 		text: text
 			.replace(LINK, link => (typed.includes(link.toLowerCase()) ? link : defangLink(link)))
-			.replace(EMAIL, address => (typed.includes(address.toLowerCase()) ? address : address.replace("@", "[@]"))),
+			.replace(EMAIL, address => (typed.includes(address.toLowerCase()) ? address : address.replace("@", "[@]")))
+			.replace(BARE_HOST, host => (typed.includes(host.toLowerCase()) ? host : screenHost(host))),
 		withheld: false
 	}
 }

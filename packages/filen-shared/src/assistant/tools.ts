@@ -118,7 +118,7 @@ export const getItemInfo = defineTool({
 	name: "get_item_info",
 	title: "Item info",
 	description:
-		"Get details of a file or directory: size (for a directory its total size and how many files it holds), type, dates, location, favorite and sharing state.",
+		"Get details of a file or directory: size (for a directory its total size and how many files it holds), type, dates, location and whether it is a favorite. Not whether the user shares it or it has a public link.",
 	group: "files",
 	effect: "read",
 	untrustedOutput: "names",
@@ -175,6 +175,44 @@ export const getStorage = defineTool({
 	exfiltrates: false,
 	grounded: {},
 	input: z.strictObject({})
+})
+
+// The drive's own lists, by the names open_route gives their screens. Read-only: nothing here restores from
+// the trash or changes a share or link.
+export const ASSISTANT_DRIVE_SECTIONS = ["favorites", "trash", "shared_with_me", "shared_by_me", "public_links"] as const
+
+export const listSection = defineTool({
+	name: "list_section",
+	title: "Drive list",
+	description:
+		"List one of the drive's own lists: the favorites, the trash, what others shared with the user and who, what the user shared and with whom, or the items with a public link. Read only: nothing here restores, shares or unshares.",
+	group: "shared",
+	effect: "read",
+	// Shared items' names and their owners' addresses are other people's text.
+	untrustedOutput: "names",
+	exfiltrates: false,
+	grounded: {},
+	input: z.strictObject({
+		section: z.enum(ASSISTANT_DRIVE_SECTIONS),
+		query: z.string().optional().describe("Only items with these words in the name or in whom they are shared with or by")
+	})
+})
+
+export const getSharing = defineTool({
+	name: "get_sharing",
+	title: "Sharing status",
+	description:
+		"Tell whether a file or directory has a public link (with its password, download and expiry settings) and whom it is shared with, also through a parent directory. Read only: it cannot share, unshare or change a link.",
+	group: "shared",
+	effect: "read",
+	untrustedOutput: "names",
+	exfiltrates: false,
+	grounded: {
+		handles: ["handle"]
+	},
+	input: z.strictObject({
+		handle: handle("a file or directory")
+	})
 })
 
 export const readTextFile = defineTool({
@@ -467,6 +505,24 @@ export const draftChatMessage = defineTool({
 	})
 })
 
+export const findContacts = defineTool({
+	name: "find_contacts",
+	title: "Find contact",
+	description:
+		"Find the user's contacts by name or email address. Returns their email and, where the user has a chat with them, the chat's handle for a message.",
+	group: "chats",
+	effect: "read",
+	// Contacts choose their own names.
+	untrustedOutput: "names",
+	exfiltrates: false,
+	grounded: {
+		text: ["query"]
+	},
+	input: z.strictObject({
+		query: z.string().describe("Words from the contact's name or email address")
+	})
+})
+
 export const listPlaylists = defineTool({
 	name: "list_playlists",
 	title: "List playlists",
@@ -543,6 +599,20 @@ export const addTracksToPlaylist = defineTool({
 	})
 })
 
+export const getTransfers = defineTool({
+	name: "get_transfers",
+	title: "Transfers",
+	description:
+		"Show the uploads, downloads and copies that are running or finished recently: progress, time left, and which failed.",
+	group: "navigation",
+	effect: "read",
+	// Transfers carry file names, which may be someone else's.
+	untrustedOutput: "names",
+	exfiltrates: false,
+	grounded: {},
+	input: z.strictObject({})
+})
+
 export const openRoute = defineTool({
 	name: "open_route",
 	title: "Open screen",
@@ -571,6 +641,10 @@ export const openRoute = defineTool({
 			"settings_account",
 			"settings_security",
 			"settings_appearance",
+			"settings_keyboard",
+			"settings_events",
+			"settings_billing",
+			"settings_advanced",
 			"settings_camera_upload"
 		])
 	})
@@ -584,6 +658,8 @@ export const ASSISTANT_TOOLS = [
 	recentItems,
 	listPhotos,
 	getStorage,
+	listSection,
+	getSharing,
 	readTextFile,
 	revealItem,
 	setFavorite,
@@ -601,11 +677,13 @@ export const ASSISTANT_TOOLS = [
 	readChat,
 	openChat,
 	draftChatMessage,
+	findContacts,
 	listPlaylists,
 	openPlaylist,
 	play,
 	audioControl,
 	addTracksToPlaylist,
+	getTransfers,
 	openRoute
 ] as const
 
@@ -629,32 +707,48 @@ export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, Assistan
 	},
 	trash: {
 		description: "delete, remove or trash files, directories or notes, including requests to delete permanently",
-		tools: [searchItemsByName, listDirectoryPlain, listNotes, trashItems]
+		tools: [searchItemsByName, listDirectoryPlain, listNotes, trashItems, listSection]
 	},
 	notes: {
 		description: "anything about notes: find, read, summarize, open, create, pin, favorite or archive",
 		tools: [listNotes, readNote, openNote, createNote, setNoteFlags]
 	},
 	chats: {
-		description: "anything about chats and messages: read, summarize, open, or write a message to someone",
-		tools: [listChats, readChat, openChat, draftChatMessage]
+		description: "anything about chats and messages: read, summarize, open, or write a message to someone; look up a contact",
+		tools: [listChats, readChat, openChat, draftChatMessage, findContacts]
 	},
 	audio: {
 		description: "music: play, pause, skip, shuffle, repeat, open playlists or add tracks to them",
 		tools: [searchItemsByName, listPlaylists, openPlaylist, play, audioControl, addTracksToPlaylist]
 	},
 	navigation: {
-		description: "open a section of the app or settings, or tell what is on screen",
-		tools: [getContext, openRoute]
+		description: "open a section of the app or settings, tell what is on screen, or how uploads and downloads are going",
+		tools: [getContext, openRoute, getTransfers]
 	},
 	insights: {
 		description:
 			"files by date (uploaded or changed recently, today, last week, in a month or year), photos by the date taken, the largest files or directories, directory sizes, storage space used and free",
 		tools: [recentItems, listPhotos, getStorage, searchItems, listDirectory, getItemInfo]
+	},
+	shared: {
+		description:
+			"the favorites list, files and directories shared with the user or by the user, public links, and whether an item is shared or has a public link; also requests to share, stop sharing or make something public, which only the user can do",
+		tools: [listSection, getSharing, searchItemsByName, listDirectoryPlain]
 	}
 }
 
-export const ASSISTANT_ROUTES: readonly AssistantRoute[] = ["files", "organize", "trash", "notes", "chats", "audio", "navigation", "insights", "answer"]
+export const ASSISTANT_ROUTES: readonly AssistantRoute[] = [
+	"files",
+	"organize",
+	"trash",
+	"notes",
+	"chats",
+	"audio",
+	"navigation",
+	"insights",
+	"shared",
+	"answer"
+]
 
 export function assistantRouteDescription(route: AssistantRoute): string {
 	return route === "answer"
