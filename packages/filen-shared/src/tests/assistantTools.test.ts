@@ -127,6 +127,36 @@ describe("assistant tool registry", () => {
 		}
 	})
 
+	it("offers a tool under its registry name with the same metadata and at most its arguments", () => {
+		for (const [group, definition] of Object.entries(ASSISTANT_TOOL_GROUPS)) {
+			for (const offered of definition.tools) {
+				const registered = ASSISTANT_TOOLS.find(tool => tool.name === offered.name)
+				const properties = Object.keys(toolInputJsonSchema(offered).properties)
+
+				expect(registered, `${group}: ${offered.name}`).toBeDefined()
+				expect(portableSchemaViolations(toolInputJsonSchema(offered))).toEqual([])
+				expect(Object.keys(toolInputJsonSchema(registered ?? offered).properties)).toEqual(expect.arrayContaining(properties))
+				expect([offered.effect, offered.untrustedOutput, offered.exfiltrates, offered.grounded]).toEqual([
+					registered?.effect,
+					registered?.untrustedOutput,
+					registered?.exfiltrates,
+					registered?.grounded
+				])
+
+				// Small models fill every optional argument, so drive filters come only with the insights route. Notes
+				// carry one date and their list is cut at a fixed length, so list_notes filters before the cut wherever
+				// it is offered.
+				if (group !== "insights" && offered.name !== "list_notes") {
+					expect(properties, `${group}: ${offered.name}`).not.toContain("period")
+				}
+
+				if (group !== "insights" && offered.name === "list_directory") {
+					expect(properties, `${group}: ${offered.name}`).not.toContain("kind")
+				}
+			}
+		}
+	})
+
 	it("describes every route", () => {
 		for (const route of ASSISTANT_ROUTES) {
 			expect(assistantRouteDescription(route).length).toBeGreaterThan(0)
@@ -200,8 +230,9 @@ describe("assistant tool registry", () => {
 		expect(content.sort()).toEqual(["read_chat", "read_note", "read_text_file"])
 
 		for (const tool of ASSISTANT_TOOLS) {
-			// audio_control names the track now playing, which may be someone else's file name.
-			expect(tool.untrustedOutput === "none", tool.name).toBe(tool.name === "open_route")
+			// audio_control names the track now playing, which may be someone else's file name; get_storage reads
+			// only the account's own counters.
+			expect(tool.untrustedOutput === "none", tool.name).toBe(tool.name === "open_route" || tool.name === "get_storage")
 		}
 	})
 })

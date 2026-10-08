@@ -4,6 +4,7 @@ import {
 	freeBytes,
 	quotaVerdict,
 	resolveQuotaVerdict,
+	storageSummary,
 	storageUsageLevel,
 	sumBytes,
 	type StorageCounters
@@ -220,6 +221,29 @@ describe("resolveQuotaVerdict", () => {
 			const h = harness(counters(0n, 100n), () => Promise.reject(new Error("offline")), stale)
 
 			expect(await resolveQuotaVerdict(h.deps, 50n)).toEqual({ status: "unknown" })
+		})
+	})
+})
+
+describe("storageSummary", () => {
+	it("words the meter's figures", () => {
+		expect(storageSummary({ storageUsed: 3n * 1024n ** 3n, maxStorage: 10n * 1024n ** 3n, versionedStorage: 512n * 1024n ** 2n })).toEqual({
+			used: "3 GiB",
+			total: "10 GiB",
+			free: "7 GiB",
+			usedPercent: 30,
+			versions: "512 MiB"
+		})
+	})
+
+	it("floors free space at zero over the quota and says when the quota is unknown", () => {
+		expect(storageSummary({ storageUsed: 12n * 1024n ** 3n, maxStorage: 10n * 1024n ** 3n, versionedStorage: 0n })).toMatchObject({
+			free: "0 B",
+			usedPercent: 120
+		})
+		expect(storageSummary({ storageUsed: 1024n, maxStorage: 0n, versionedStorage: 0n })).toEqual({
+			used: "1 KiB",
+			note: "The storage quota is not known"
 		})
 	})
 })

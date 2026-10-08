@@ -1,3 +1,4 @@
+import { calendarDays, knownTimeZone, periodRange } from "./dates"
 import { ASSISTANT_ROUTES, ASSISTANT_TOOL_GROUPS, assistantRouteDescription } from "./tools"
 
 // The prompts the eval (packages/filen-assistant-eval) measured, word for word: changing them changes
@@ -17,6 +18,9 @@ const ROUTER_EXAMPLES = [
 	["Go to my recent files", "navigation read"],
 	["Find my tax documents", "files read"],
 	["Write down an idea for a podcast", "notes change"],
+	["What did I upload last week?", "insights read"],
+	["Which files did I change yesterday?", "insights read"],
+	["How much storage space do I have left?", "insights read"],
 	["How do I bake bread?", "answer"]
 ]
 
@@ -79,19 +83,6 @@ const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Frida
 
 const DAY_MS = 86_400_000
 
-function isoDay(date: Date): string {
-	return date.toISOString().slice(0, 10)
-}
-
-function localParts(now: number, timeZone: string | undefined): Intl.DateTimeFormatPart[] {
-	return new Intl.DateTimeFormat("en-US", {
-		timeZone,
-		year: "numeric",
-		month: "2-digit",
-		day: "2-digit"
-	}).formatToParts(now)
-}
-
 // The first day of the week (1 Monday to 7 Sunday) in a locale's calendar. getWeekInfo() is the current
 // name, weekInfo the older one; runtimes with neither (or without Intl.Locale) get Monday.
 export function localeWeekStart(locale: string): number {
@@ -124,35 +115,19 @@ export function assistantDateLine({
 	// 1 Monday to 7 Sunday.
 	weekStart?: number | undefined
 }): string {
-	let parts: Intl.DateTimeFormatPart[]
-	let zone = timeZone
-
-	try {
-		parts = localParts(now, timeZone)
-	} catch {
-		zone = undefined
-		parts = localParts(now, undefined)
-	}
-
-	const field = (type: string) => Number(parts.find(part => part.type === type)?.value ?? "0")
-	const year = field("year")
-	const month = field("month") - 1
-	// The local calendar date, handled as a UTC date so day arithmetic ignores the time zone.
-	const today = Date.UTC(year, month, field("day"))
-	const weekday = new Date(today).getUTCDay()
-	// getUTCDay counts Sunday as 0, weekStart as 7.
-	const first = -((weekday - (weekStart % 7) + 7) % 7)
-	const day = (offset: number) => isoDay(new Date(today + offset * DAY_MS))
+	const zone = knownTimeZone(timeZone)
+	const { today, weekday, year, weekFirst } = calendarDays({ now, timeZone: zone, weekStart })
+	const day = (offset: number) => new Date(today + offset * DAY_MS).toISOString().slice(0, 10)
 	// Small models misname the weekday of a date, so the days people name most carry theirs.
 	const named = (offset: number) => `${WEEKDAYS[(weekday + offset + 7) % 7] ?? ""} ${day(offset)}`
-	const yearMonth = (monthIndex: number) => isoDay(new Date(Date.UTC(year, monthIndex, 1))).slice(0, 7)
+	const month = (period: "this_month" | "last_month") => periodRange(period, { now, timeZone: zone, weekStart }).from.slice(0, 7)
 
 	return [
 		`Today is ${named(0)}${zone === undefined ? "" : ` (${zone})`}.`,
 		`Yesterday: ${named(-1)}.`,
-		`This week: ${named(first)} to ${named(first + 6)}.`,
-		`Last week: ${day(first - 7)} to ${day(first - 1)}.`,
-		`This month: ${yearMonth(month)}. Last month: ${yearMonth(month - 1)}. This year: ${String(year)}.`
+		`This week: ${named(weekFirst)} to ${named(weekFirst + 6)}.`,
+		`Last week: ${day(weekFirst - 7)} to ${day(weekFirst - 1)}.`,
+		`This month: ${month("this_month")}. Last month: ${month("last_month")}. This year: ${String(year)}.`
 	].join(" ")
 }
 

@@ -1,3 +1,5 @@
+import { formatBytes } from "./misc"
+
 // Storage-usage warning tier — mirrors mobile's segmented storage bar (green under 75%, yellow
 // 75-90%, red 90%+ of quota used). Consumers (web's storageMeter.tsx sidebar meter and account storage
 // bars; mobile's storageUsageBar.tsx) color themselves by this tier rather than each hardcoding its own
@@ -110,5 +112,27 @@ export async function resolveQuotaVerdict(deps: QuotaCheckDeps, neededBytes: big
 		return quotaVerdict(neededBytes, await deps.fetchFresh())
 	} catch {
 		return { status: "unknown" }
+	}
+}
+
+// The storage figures in words, as the assistant's get_storage reports them: used, total and free as the
+// meter shows them, and what old file versions take.
+export function storageSummary({
+	storageUsed,
+	maxStorage,
+	versionedStorage
+}: StorageCounters & { versionedStorage: bigint }): Record<string, string | number> {
+	if (maxStorage <= 0n) {
+		return { used: formatBytes(Number(storageUsed)), note: "The storage quota is not known" }
+	}
+
+	const breakdown = deriveStorageBreakdown(storageUsed, maxStorage, versionedStorage)
+
+	return {
+		used: formatBytes(Number(storageUsed)),
+		total: formatBytes(Number(maxStorage)),
+		free: formatBytes(Number(breakdown.freeBytes)),
+		usedPercent: Math.round((Number(storageUsed) / Number(maxStorage)) * 100),
+		versions: formatBytes(Number(breakdown.versionedBytes))
 	}
 }

@@ -1,4 +1,5 @@
 import * as z from "zod"
+import { ASSISTANT_PERIOD_FILTERS } from "./dates"
 import { defineTool, type AssistantRoute, type AssistantTool, type AssistantToolGroup } from "./tool"
 
 // Items are addressed by short handles ("f3", "d1", "n2", "c4", "p1") that read tools hand out.
@@ -6,6 +7,32 @@ import { defineTool, type AssistantRoute, type AssistantTool, type AssistantTool
 const handle = (what: string) => z.string().describe(`Handle of ${what}, as returned by an earlier tool result (e.g. "f3")`)
 
 const handles = (what: string) => z.array(z.string()).min(1).describe(`Handles of ${what}, as returned by earlier tool results`)
+
+const DRIVE_KINDS = ["file", "directory", "image", "video", "audio", "document"] as const
+
+// Small models fill every optional argument they are offered, so a new filter's first value changes nothing.
+const anyKind = z
+	.enum(["any", ...DRIVE_KINDS])
+	.optional()
+	.describe("Only this kind; any for all")
+
+// Dates go in as a named period or as plain days and are resolved in code (dates.ts): small models count
+// days wrong. Kept short: these fields repeat in every filtering tool's schema.
+const periodFilter = () => ({
+	period: z.enum(ASSISTANT_PERIOD_FILTERS).optional().describe("Only items dated in this period; custom uses from/to"),
+	from: z.string().optional().describe("First day, YYYY-MM-DD"),
+	to: z.string().optional().describe("Last day, YYYY-MM-DD")
+})
+
+// The dates a drive item carries; "created" is the file's own creation date where the uploader recorded one.
+const DRIVE_DATES = ["modified", "uploaded", "created"] as const
+
+function dateFilter<const Fields extends readonly [string, ...string[]]>(fields: Fields) {
+	return {
+		...periodFilter(),
+		date: z.enum(fields).optional().describe(`Date to filter by, default ${fields[0]}`)
+	}
+}
 
 export const getContext = defineTool({
 	name: "get_context",
@@ -22,8 +49,8 @@ export const getContext = defineTool({
 export const searchItems = defineTool({
 	name: "search_items",
 	title: "Search drive",
-	description: "Search files and directories in the user's drive by name. Returns handles, names and paths.",
-	group: "files",
+	description: "Search files and directories in the user's drive by name, optionally only those dated in a period. Returns handles, names and paths.",
+	group: "insights",
 	effect: "read",
 	untrustedOutput: "names",
 	exfiltrates: false,
@@ -32,15 +59,31 @@ export const searchItems = defineTool({
 	},
 	input: z.strictObject({
 		query: z.string().describe("Words from the item name, e.g. \"invoice 2024\""),
-		kind: z.enum(["file", "directory", "image", "video", "audio", "document"]).optional().describe("Only return this kind of item")
+		kind: z.enum(DRIVE_KINDS).optional().describe("Only return this kind of item"),
+		...dateFilter(DRIVE_DATES)
+	})
+})
+
+// Small models fill every optional argument they are offered, and a filter nobody asked for hides what the
+// user did ask for. So the filters come only with the insights route, where a request is about dates or
+// sizes; the other groups offer the same tool without them (a listing keeps its order, which hides
+// nothing). One name and one adapter: the loop validates a call against the schema its group offered.
+const searchItemsByName = defineTool({
+	...searchItems,
+	description: "Search files and directories in the user's drive by name. Returns handles, names and paths.",
+	group: "files",
+	input: searchItems.input.pick({
+		query: true,
+		kind: true
 	})
 })
 
 export const listDirectory = defineTool({
 	name: "list_directory",
 	title: "List directory",
-	description: "List the contents of a directory, given its handle or its path (\"/\" is the drive root).",
-	group: "files",
+	description:
+		"List a directory's contents, given its handle or its path (\"/\" is the drive root). Can sort by size (directories by total size) or date and filter by kind or date.",
+	group: "insights",
 	effect: "read",
 	untrustedOutput: "names",
 	exfiltrates: false,
@@ -50,14 +93,32 @@ export const listDirectory = defineTool({
 	},
 	input: z.strictObject({
 		handle: handle("a directory").optional(),
-		path: z.string().optional().describe("Absolute path, e.g. \"/Documents/Invoices\"")
+		path: z.string().optional().describe("Absolute path, e.g. \"/Documents/Invoices\""),
+		sort: z
+			.enum(["name", "largest", "smallest", "newest", "oldest"])
+			.optional()
+			.describe("Order, default name"),
+		kind: anyKind,
+		...dateFilter(DRIVE_DATES)
+	})
+})
+
+const listDirectoryPlain = defineTool({
+	...listDirectory,
+	description: "List the contents of a directory, given its handle or its path (\"/\" is the drive root). Can sort by size or date.",
+	group: "files",
+	input: listDirectory.input.pick({
+		handle: true,
+		path: true,
+		sort: true
 	})
 })
 
 export const getItemInfo = defineTool({
 	name: "get_item_info",
 	title: "Item info",
-	description: "Get details of a file or directory: size, type, dates, location, favorite and sharing state.",
+	description:
+		"Get details of a file or directory: size (for a directory its total size and how many files it holds), type, dates, location, favorite and sharing state.",
 	group: "files",
 	effect: "read",
 	untrustedOutput: "names",
@@ -68,6 +129,52 @@ export const getItemInfo = defineTool({
 	input: z.strictObject({
 		handle: handle("a file or directory")
 	})
+})
+
+export const recentItems = defineTool({
+	name: "recent_items",
+	title: "Recent files",
+	description:
+		"List the files the user uploaded or changed recently, newest first (the Recents screen). Can filter by kind or date and sort by size.",
+	group: "insights",
+	effect: "read",
+	untrustedOutput: "names",
+	exfiltrates: false,
+	grounded: {},
+	input: z.strictObject({
+		kind: anyKind,
+		sort: z.enum(["newest", "oldest", "largest", "smallest"]).optional().describe("Order, default newest"),
+		...dateFilter(["uploaded", "modified"])
+	})
+})
+
+export const listPhotos = defineTool({
+	name: "list_photos",
+	title: "Photos",
+	description: "List the photos and videos of the Photos timeline, newest taken first. Can filter by the date taken.",
+	group: "insights",
+	effect: "read",
+	untrustedOutput: "names",
+	exfiltrates: false,
+	grounded: {},
+	input: z.strictObject({
+		kind: z.enum(["any", "image", "video"]).optional().describe("Only photos or only videos; any for both"),
+		sort: z.enum(["newest", "oldest"]).optional().describe("Order, default newest"),
+		...periodFilter()
+	})
+})
+
+export const getStorage = defineTool({
+	name: "get_storage",
+	title: "Storage usage",
+	description:
+		"Get the whole account's storage space: used, total and free, and how much of it old file versions take. A directory's size comes from get_item_info.",
+	group: "insights",
+	effect: "read",
+	untrustedOutput: "none",
+	exfiltrates: false,
+	grounded: {},
+	input: z.strictObject({})
 })
 
 export const readTextFile = defineTool({
@@ -209,7 +316,8 @@ export const trashItems = defineTool({
 export const listNotes = defineTool({
 	name: "list_notes",
 	title: "List notes",
-	description: "List the user's notes, optionally filtered by words in the title or tags. Returns handles and titles.",
+	description:
+		"List the user's notes, optionally filtered by words in the title or tags, or by when they were last edited. Returns handles and titles.",
 	group: "notes",
 	effect: "read",
 	untrustedOutput: "names",
@@ -218,7 +326,8 @@ export const listNotes = defineTool({
 		text: ["query"]
 	},
 	input: z.strictObject({
-		query: z.string().optional().describe("Words from the note title or tags")
+		query: z.string().optional().describe("Words from the note title or tags"),
+		...periodFilter()
 	})
 })
 
@@ -472,6 +581,9 @@ export const ASSISTANT_TOOLS = [
 	searchItems,
 	listDirectory,
 	getItemInfo,
+	recentItems,
+	listPhotos,
+	getStorage,
 	readTextFile,
 	revealItem,
 	setFavorite,
@@ -509,15 +621,15 @@ export type AssistantGroupDefinition = {
 export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, AssistantGroupDefinition>> = {
 	files: {
 		description: "find, list, read, summarize or show files and directories (folders); add or remove favorites",
-		tools: [searchItems, listDirectory, getItemInfo, readTextFile, revealItem, setFavorite]
+		tools: [searchItemsByName, listDirectoryPlain, getItemInfo, readTextFile, revealItem, setFavorite]
 	},
 	organize: {
 		description: "create directories (folders), rename, move or copy files and directories",
-		tools: [searchItems, listDirectory, createDirectory, renameItem, moveItems, copyItems]
+		tools: [searchItemsByName, listDirectoryPlain, createDirectory, renameItem, moveItems, copyItems]
 	},
 	trash: {
 		description: "delete, remove or trash files, directories or notes, including requests to delete permanently",
-		tools: [searchItems, listDirectory, listNotes, trashItems]
+		tools: [searchItemsByName, listDirectoryPlain, listNotes, trashItems]
 	},
 	notes: {
 		description: "anything about notes: find, read, summarize, open, create, pin, favorite or archive",
@@ -529,15 +641,20 @@ export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, Assistan
 	},
 	audio: {
 		description: "music: play, pause, skip, shuffle, repeat, open playlists or add tracks to them",
-		tools: [searchItems, listPlaylists, openPlaylist, play, audioControl, addTracksToPlaylist]
+		tools: [searchItemsByName, listPlaylists, openPlaylist, play, audioControl, addTracksToPlaylist]
 	},
 	navigation: {
 		description: "open a section of the app or settings, or tell what is on screen",
 		tools: [getContext, openRoute]
+	},
+	insights: {
+		description:
+			"files by date (uploaded or changed recently, today, last week, in a month or year), photos by the date taken, the largest files or directories, directory sizes, storage space used and free",
+		tools: [recentItems, listPhotos, getStorage, searchItems, listDirectory, getItemInfo]
 	}
 }
 
-export const ASSISTANT_ROUTES: readonly AssistantRoute[] = ["files", "organize", "trash", "notes", "chats", "audio", "navigation", "answer"]
+export const ASSISTANT_ROUTES: readonly AssistantRoute[] = ["files", "organize", "trash", "notes", "chats", "audio", "navigation", "insights", "answer"]
 
 export function assistantRouteDescription(route: AssistantRoute): string {
 	return route === "answer"
