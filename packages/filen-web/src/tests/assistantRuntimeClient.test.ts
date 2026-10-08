@@ -6,7 +6,7 @@ import type { AssistantModelState } from "@/features/assistant/types"
 
 // The page side of the runtime against a scripted worker: the states the panel sees across a download, an
 // explicit load, a start that finds a damaged shard, and the idle unload that frees the worker again.
-const { remote, inspections, releaseProxy, workers, locks, prune, device } = vi.hoisted(() => ({
+const { remote, inspections, releaseProxy, workers, locks, prune, device, storage } = vi.hoisted(() => ({
 	releaseProxy: Symbol("releaseProxy"),
 	remote: {
 		download: vi.fn<(manifest: unknown, baseUrl: string, onProgress: (progress: ModelDownloadProgress) => void) => Promise<void>>(),
@@ -21,12 +21,15 @@ const { remote, inspections, releaseProxy, workers, locks, prune, device } = vi.
 	// An Error fails that inspection.
 	inspections: [] as (ModelInspection | Error)[],
 	workers: [] as { terminate: Mock<() => void>; released: Mock<() => void>; fire: (type: string) => void }[],
-	// Model locks currently held by this "tab", how often it was granted one, and whether another tab holds it.
-	locks: { held: 0, granted: 0, elsewhere: false },
+	// Model locks currently held by this "tab", how often it was granted one, and whether another tab holds it;
+	// `queued` lets the requests waiting behind that tab through once it lets go.
+	locks: { held: 0, granted: 0, elsewhere: false, queued: [] as (() => void)[] },
 	// The pruning of older model versions, when a test holds it open.
 	prune: { pending: null as Promise<void> | null },
 	// Whether WebGPU is offered, and whether the CPU path is.
-	device: { gpu: true, cpu: true }
+	device: { gpu: true, cpu: true },
+	// Whether the origin's storage is persistent, whether the rest of the model fits, and localStorage.
+	storage: { persisted: true, fits: true, local: new Map<string, string>() }
 }))
 
 vi.mock("@/workers/assistant.worker.ts?worker", () => ({
@@ -62,6 +65,19 @@ vi.mock("comlink", () => ({
 
 vi.mock("@/lib/appUpdate", () => ({ recoverIfNewerBuild: () => undefined }))
 
+// The signed-in account a download's opt-in is recorded for.
+const account = vi.hoisted((): { id: bigint | undefined } => ({ id: 7n }))
+
+vi.mock("@/queries/account", () => ({
+	ACCOUNT_QUERY_KEY: ["account"],
+	accountQueryGet: () => (account.id === undefined ? undefined : { id: account.id }),
+	fetchAccount: () => Promise.reject(new Error("not signed in"))
+}))
+
+vi.mock("@/queries/client", () => ({
+	queryClient: { query: ({ queryFn }: { queryFn: () => Promise<unknown> }) => queryFn() }
+}))
+
 vi.mock("@/features/assistant/runtime/deviceCheck", () => ({
 	probeDevice: ({ gpu }: { gpu: boolean }) => Promise.resolve({ gpu }),
 	recommendRuntime: ({ gpu }: { gpu: boolean }) =>
@@ -70,7 +86,7 @@ vi.mock("@/features/assistant/runtime/deviceCheck", () => ({
 			: device.cpu
 				? { supported: true, backend: "cpu", threads: 4, estimatedSpeed: "moderate" }
 				: { supported: false, reason: "unsupported-browser", detail: "", gpuCouldHelp: true },
-	storageVerdict: () => ({ ok: true })
+	storageVerdict: () => (storage.fits ? { ok: true } : { ok: false, missingBytes: 1 })
 }))
 
 vi.mock("@/features/assistant/runtime/modelStore", () => ({
@@ -86,6 +102,7 @@ vi.mock("@/features/assistant/runtime/modelStore", () => ({
 const { AssistantRuntime, IDLE_UNLOAD_MS } = await import("@/features/assistant/runtime/client")
 const { QWEN35_4B } = await import("@/features/assistant/runtime/models")
 const { manifestBytes } = await import("@/features/assistant/runtime/manifest")
+const { readDownloadIntent, writeDownloadIntent, MAX_FRUITLESS_AUTO_STARTS } = await import("@/features/assistant/runtime/downloadIntent")
 
 type Runtime = InstanceType<typeof AssistantRuntime>
 
@@ -110,8 +127,14 @@ function stubBrowser(): void {
 				}
 
 				if (locks.elsewhere) {
-					// Queued behind the other tab, which never lets go here.
-					return ifAvailable ? Promise.resolve(callback(null)) : new Promise(() => undefined)
+					// Queued behind the other tab until a test lets it go.
+					return ifAvailable
+						? Promise.resolve(callback(null))
+						: new Promise(resolve => {
+								locks.queued.push(() => {
+									resolve(callback({}))
+								})
+							})
 				}
 
 				locks.held++
@@ -125,8 +148,14 @@ function stubBrowser(): void {
 		},
 		storage: {
 			persist: () => Promise.resolve(true),
+			persisted: () => Promise.resolve(storage.persisted),
 			estimate: () => Promise.resolve({ quota: 100 * TOTAL, usage: 0 })
 		}
+	})
+	vi.stubGlobal("localStorage", {
+		getItem: (key: string) => storage.local.get(key) ?? null,
+		setItem: (key: string, value: string) => storage.local.set(key, value),
+		removeItem: (key: string) => storage.local.delete(key)
 	})
 }
 
@@ -152,7 +181,12 @@ beforeEach(() => {
 	locks.held = 0
 	locks.granted = 0
 	locks.elsewhere = false
+	locks.queued.length = 0
 	prune.pending = null
+	storage.persisted = true
+	storage.fits = true
+	storage.local.clear()
+	account.id = 7n
 	device.gpu = true
 	device.cpu = true
 	remote.download.mockReset()
@@ -768,5 +802,356 @@ describe("AssistantRuntime failures", () => {
 		await runtime.load()
 
 		expect(workers).toHaveLength(1)
+	})
+})
+
+// A download the user started and a reload, crash or closed tab cut off continues at the next start, only
+// with its opt-in still recorded, part of it on disk, persistent storage and room for the rest.
+describe("AssistantRuntime interrupted download", () => {
+	const PARTIAL: ModelInspection = { presentBytes: 1000, verifiedBytes: 0, complete: false }
+
+	function downloadingStates(states: readonly AssistantModelState[]) {
+		return states.flatMap(state => (state.kind === "downloading" ? [state] : []))
+	}
+
+	// What a click on this account recorded before the page went away.
+	function optedIn(overrides: Partial<{ modelId: string; account: string; autoStarts: number; presentBytes: number }> = {}): void {
+		writeDownloadIntent({ modelId: QWEN35_4B.id, account: "7", autoStarts: 0, presentBytes: 0, ...overrides })
+	}
+
+	it("records the opt-in, for this account, only while its download runs", async () => {
+		let finish: () => void = () => undefined
+
+		remote.download.mockImplementation(
+			() =>
+				new Promise<void>(resolve => {
+					finish = resolve
+				})
+		)
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+
+		expect(readDownloadIntent()).toBeNull()
+
+		runtime.download()
+		await settled(runtime, "downloading")
+
+		expect(readDownloadIntent()).toEqual({ modelId: QWEN35_4B.id, account: "7", autoStarts: 0, presentBytes: 0 })
+
+		finish()
+		await settled(runtime, "downloaded")
+
+		expect(readDownloadIntent()).toBeNull()
+	})
+
+	it.each([
+		["cancelled", Object.assign(new Error("stopped"), { name: "AbortError" }), "not-downloaded"],
+		["failed", new Error("network"), "error"]
+	] as const)("forgets the opt-in once its download is %s", async (_label, failure, kind) => {
+		inspections.push(PARTIAL, PARTIAL, PARTIAL)
+		remote.download.mockRejectedValue(failure)
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		runtime.download()
+		await settled(runtime, kind)
+
+		expect(readDownloadIntent()).toBeNull()
+	})
+
+	it("continues the download on the next start without a click, says so, and asks the browser nothing", async () => {
+		const states: AssistantModelState[] = []
+		const persist = vi.spyOn(navigator.storage, "persist")
+
+		optedIn()
+		inspections.push(PARTIAL, PARTIAL)
+		remote.download.mockResolvedValue(undefined)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.subscribe(state => states.push(state))
+		runtime.resumeInterruptedDownload()
+		await settled(runtime, "downloaded")
+
+		expect(remote.download).toHaveBeenCalledTimes(1)
+		expect(downloadingStates(states)[0]).toMatchObject({ receivedBytes: 1000, resumed: true })
+		expect(downloadingStates(states).every(state => state.resumed)).toBe(true)
+		expect(persist).not.toHaveBeenCalled()
+		expect(readDownloadIntent()).toBeNull()
+		expect(locks.held).toBe(0)
+	})
+
+	// The click's download runs in best-effort storage too; the room for the rest is what decides.
+	it("continues into storage the browser did not make persistent", async () => {
+		storage.persisted = false
+		optedIn()
+		inspections.push(PARTIAL, PARTIAL)
+		remote.download.mockResolvedValue(undefined)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.resumeInterruptedDownload()
+		await settled(runtime, "downloaded")
+
+		expect(remote.download).toHaveBeenCalledTimes(1)
+	})
+
+	it("marks a download started by a click as not resumed", async () => {
+		const states: AssistantModelState[] = []
+
+		remote.download.mockResolvedValue(undefined)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.subscribe(state => states.push(state))
+		runtime.download()
+		await settled(runtime, "downloaded")
+
+		expect(downloadingStates(states).length).toBeGreaterThan(0)
+		expect(downloadingStates(states).some(state => state.resumed)).toBe(false)
+	})
+
+	it("touches neither the model's lock nor its files when no download was ever asked for", () => {
+		const query = vi.spyOn(navigator.locks, "query")
+		const request = vi.spyOn(navigator.locks, "request")
+
+		inspections.push(PARTIAL)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.resumeInterruptedDownload()
+
+		expect(query).not.toHaveBeenCalled()
+		expect(request).not.toHaveBeenCalled()
+		// The startup check's inspection is still queued: nothing listed the files.
+		expect(inspections).toHaveLength(1)
+	})
+
+	const notAsked: [string, () => void, ModelInspection][] = [
+		["the user never started one", () => undefined, PARTIAL],
+		[
+			"it belongs to another model",
+			() => {
+				optedIn({ modelId: "another-model" })
+			},
+			PARTIAL
+		],
+		[
+			"nothing of it is on disk",
+			() => {
+				optedIn()
+			},
+			{ presentBytes: 0, verifiedBytes: 0, complete: false }
+		],
+		[
+			"another account asked for it",
+			() => {
+				optedIn({ account: "8" })
+			},
+			PARTIAL
+		],
+		[
+			"the signed-in account is unknown",
+			() => {
+				optedIn()
+				account.id = undefined
+			},
+			PARTIAL
+		]
+	]
+
+	it.each(notAsked)("starts nothing when %s", async (_label, arrange, inspection) => {
+		arrange()
+		// The startup check, and what a download would find as it started.
+		inspections.push(inspection, inspection)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.resumeInterruptedDownload()
+		await runtime.init()
+		// Past a download's start, had there been one.
+		await new Promise(resolve => setTimeout(resolve, 20))
+
+		expect(runtime.getState().kind).toBe("not-downloaded")
+		expect(remote.download).not.toHaveBeenCalled()
+		expect(workers).toHaveLength(0)
+		expect(locks.held).toBe(0)
+	})
+
+	it("keeps the opt-in for the next start when the account cannot be read", async () => {
+		optedIn()
+		account.id = undefined
+		inspections.push(PARTIAL, PARTIAL)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.resumeInterruptedDownload()
+		await vi.waitFor(() => {
+			expect(locks.granted).toBe(1)
+			expect(locks.held).toBe(0)
+		})
+
+		expect(remote.download).not.toHaveBeenCalled()
+		expect(readDownloadIntent()).toMatchObject({ modelId: QWEN35_4B.id, account: "7" })
+	})
+
+	it("forgets another account's opt-in instead of keeping it for later", async () => {
+		optedIn({ account: "8" })
+		inspections.push(PARTIAL, PARTIAL)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.resumeInterruptedDownload()
+		await vi.waitFor(() => {
+			expect(locks.granted).toBe(1)
+			expect(locks.held).toBe(0)
+		})
+
+		expect(readDownloadIntent()).toBeNull()
+	})
+
+	it("waits for a click when the rest no longer fits, without reading as unavailable", async () => {
+		optedIn()
+		storage.fits = false
+		inspections.push(PARTIAL, PARTIAL)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.resumeInterruptedDownload()
+		await vi.waitFor(() => {
+			expect(locks.granted).toBe(1)
+			expect(locks.held).toBe(0)
+		})
+
+		expect(runtime.getState()).toMatchObject({ kind: "not-downloaded", partialBytes: 1000 })
+		expect(remote.download).not.toHaveBeenCalled()
+		expect(workers).toHaveLength(0)
+		// Kept: the next start, with room again, still continues it.
+		expect(readDownloadIntent()).toMatchObject({ modelId: QWEN35_4B.id, autoStarts: 0 })
+	})
+
+	// Each start is a new page; the download "takes the page down" by never settling before the next one.
+	async function autoStart(inspection: ModelInspection): Promise<boolean> {
+		const calls = remote.download.mock.calls.length
+
+		inspections.push(inspection, inspection)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.resumeInterruptedDownload()
+		await runtime.init()
+		await new Promise(resolve => setTimeout(resolve, 20))
+		// The page dies with its download: its lock goes, the opt-in stays.
+		locks.held = 0
+
+		return remote.download.mock.calls.length > calls
+	}
+
+	it("stops continuing by itself after starts that found no progress, until a click", async () => {
+		remote.download.mockImplementation(() => new Promise<void>(() => undefined))
+		optedIn({ presentBytes: PARTIAL.presentBytes })
+
+		for (let start = 0; start < MAX_FRUITLESS_AUTO_STARTS; start++) {
+			expect(await autoStart(PARTIAL)).toBe(true)
+		}
+
+		expect(await autoStart(PARTIAL)).toBe(false)
+		expect(readDownloadIntent()).toBeNull()
+	})
+
+	it("keeps continuing while each start finds more on disk", async () => {
+		remote.download.mockImplementation(() => new Promise<void>(() => undefined))
+		optedIn({ presentBytes: 0 })
+
+		for (let start = 1; start <= MAX_FRUITLESS_AUTO_STARTS + 2; start++) {
+			expect(await autoStart({ presentBytes: start * 1000, verifiedBytes: 0, complete: false })).toBe(true)
+		}
+
+		expect(readDownloadIntent()).toMatchObject({ autoStarts: 1, presentBytes: (MAX_FRUITLESS_AUTO_STARTS + 2) * 1000 })
+	})
+
+	// The tab holding the lock with an opt-in recorded is the one downloading: reloading or closing it must not
+	// hand the download to this one, whose start has passed.
+	it("leaves another tab's download there, and does not take it over once that tab lets go", async () => {
+		optedIn()
+		locks.elsewhere = true
+		inspections.push(PARTIAL, PARTIAL)
+		remote.download.mockResolvedValue(undefined)
+
+		const runtime = new AssistantRuntime()
+
+		runtime.resumeInterruptedDownload()
+		await vi.waitFor(() => {
+			expect(runtime.getState()).toMatchObject({ kind: "unavailable", reason: "in-use-elsewhere" })
+		})
+
+		locks.elsewhere = false
+
+		for (const release of locks.queued.splice(0)) {
+			release()
+		}
+
+		await vi.waitFor(() => {
+			expect(runtime.getState()).toMatchObject({ kind: "not-downloaded", partialBytes: 1000 })
+		})
+		await new Promise(resolve => setTimeout(resolve, 20))
+
+		expect(remote.download).not.toHaveBeenCalled()
+		expect(workers).toHaveLength(0)
+		// Asking again on this page changes nothing: the decision was made at its start.
+		runtime.resumeInterruptedDownload()
+		await new Promise(resolve => setTimeout(resolve, 20))
+		expect(remote.download).not.toHaveBeenCalled()
+	})
+
+	it("only shows the other tab's download when that tab won the race to continue it", async () => {
+		optedIn()
+		inspections.push(PARTIAL)
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		// The other restored tab took the lock between this one's check and its start.
+		locks.elsewhere = true
+		runtime.resumeInterruptedDownload()
+		await vi.waitFor(() => {
+			expect(runtime.getState()).toMatchObject({ kind: "unavailable", reason: "in-use-elsewhere" })
+		})
+
+		locks.elsewhere = false
+		inspections.push(PARTIAL)
+
+		for (const release of locks.queued.splice(0)) {
+			release()
+		}
+
+		await vi.waitFor(() => {
+			expect(runtime.getState()).toMatchObject({ kind: "not-downloaded", partialBytes: 1000 })
+		})
+		await new Promise(resolve => setTimeout(resolve, 20))
+
+		expect(remote.download).not.toHaveBeenCalled()
+	})
+
+	it("forgets the opt-in at sign-out and when the model is removed", async () => {
+		const runtime = new AssistantRuntime()
+
+		optedIn()
+		await runtime.deleteModel()
+
+		expect(readDownloadIntent()).toBeNull()
+
+		optedIn()
+		runtime.shutdown()
+
+		expect(readDownloadIntent()).toBeNull()
+
+		runtime.resumeInterruptedDownload()
+		await runtime.init()
+
+		expect(remote.download).not.toHaveBeenCalled()
 	})
 })

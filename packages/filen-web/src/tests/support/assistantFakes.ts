@@ -96,6 +96,7 @@ export function fakeRuntime(model: AssistantModel, initial: AssistantModelState 
 		}),
 		touch: vi.fn<() => void>(),
 		retry: vi.fn(),
+		resumeInterruptedDownload: vi.fn(),
 		cancelDownload: vi.fn(),
 		deleteModel: vi.fn(() => Promise.resolve()),
 		shutdown: vi.fn(),

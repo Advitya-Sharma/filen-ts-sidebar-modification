@@ -200,6 +200,11 @@ export function downloadAssistantModel(): void {
 	session?.downloadModel()
 }
 
+// The signed-in shell, once it shows: the runtime continues a download a reload or crash cut off, if any.
+export function resumeAssistantDownload(): void {
+	session?.resumeInterruptedDownload()
+}
+
 export function cancelAssistantDownload(): void {
 	session?.cancelDownload()
 }

@@ -36,6 +36,7 @@ export interface AssistantRuntimeLike {
 	// Postpones the idle unload.
 	touch(): void
 	retry(): void
+	resumeInterruptedDownload(): void
 	cancelDownload(): void
 	deleteModel(): Promise<void>
 	// Keeps the model loaded until the returned release runs.
@@ -540,6 +541,10 @@ export function createAssistantSession({
 
 		noteActivity: () => {
 			runtime.touch()
+		},
+
+		resumeInterruptedDownload: () => {
+			runtime.resumeInterruptedDownload()
 		},
 
 		cancelDownload: () => {

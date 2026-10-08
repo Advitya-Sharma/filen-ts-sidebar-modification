@@ -14,9 +14,12 @@ import { DEFAULT_MODEL_BASE_URL, manifestBytes, parseManifest, type AssistantMod
 import { QWEN35_4B } from "@/features/assistant/runtime/models"
 import { probeDevice, recommendRuntime, storageVerdict, type RuntimeRecommendation } from "@/features/assistant/runtime/deviceCheck"
 import { deleteModels, inspectModel, otherModelPresent } from "@/features/assistant/runtime/modelStore"
+import { autoStartIntent, readDownloadIntent, writeDownloadIntent } from "@/features/assistant/runtime/downloadIntent"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
 import { ENGINE_CRASHED, type GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
+import { ACCOUNT_QUERY_KEY, accountQueryGet, fetchAccount } from "@/queries/account"
+import { queryClient } from "@/queries/client"
 import { log } from "@/lib/log"
 
 // The page side of the on-device model: decides the model state, owns the worker (spawned only to
@@ -104,6 +107,16 @@ function stopWorker(handle: WorkerHandle): void {
 }
 
 // A dev build without a configured host serves the GGUF named by FILEN_ASSISTANT_DEV_GGUF (vite/assistant-model.ts).
+// The signed-in account the download's opt-in belongs to. The shell reads the account anyway, so this
+// shares its cached or in-flight read.
+async function signedInAccount(): Promise<string | null> {
+	const account =
+		accountQueryGet() ??
+		(await queryClient.query({ queryKey: ACCOUNT_QUERY_KEY, queryFn: fetchAccount, staleTime: "static" }).catch(() => undefined))
+
+	return account === undefined ? null : String(account.id)
+}
+
 async function resolveModel(): Promise<{ manifest: AssistantModelManifest; baseUrl: string }> {
 	const configured = import.meta.env.VITE_ASSISTANT_MODEL_BASE_URL
 
@@ -153,6 +166,8 @@ export class AssistantRuntime implements AssistantModel {
 	private loading: Promise<void> | null = null
 	private unloading: Promise<void> | null = null
 	private redownload = false
+	// Whether an interrupted download continues is decided once, at this page's start.
+	private resumeDecided = false
 	private nextGeneration = 1
 	// WebGPU failed to load the model on this page: later loads go straight to the CPU path.
 	private gpuFailed = false
@@ -255,6 +270,11 @@ export class AssistantRuntime implements AssistantModel {
 		const inspection = await inspectModel(this.manifest)
 
 		if (inspection.complete) {
+			// Cut off after its last byte (pruning older versions): there is nothing left to continue.
+			if (readDownloadIntent()?.modelId === this.manifest.id) {
+				writeDownloadIntent(null)
+			}
+
 			this.settleDownloaded()
 		} else {
 			this.settleNotDownloaded(inspection.presentBytes)
@@ -369,6 +389,7 @@ export class AssistantRuntime implements AssistantModel {
 	// Signing out: the worker and its memory go now, the lock with it, and nothing starts again on this page.
 	shutdown(): void {
 		this.shutDown = true
+		writeDownloadIntent(null)
 		this.stopWorker()
 		this.unlock()
 		clearTimeout(this.idleTimer)
@@ -517,17 +538,55 @@ export class AssistantRuntime implements AssistantModel {
 		// Asked first, while the click's user activation lasts (Firefox prompts for it). Without it the
 		// browser may evict the 2.7 GB under storage pressure; with or without, the download proceeds.
 		void navigator.storage.persist().catch(() => false)
+		this.startDownload(false)
+	}
 
+	// From the signed-in app once it shows, never from the logged-out page: continues a download the user started
+	// that a reload, crash or closed tab cut off. Asks nothing and shows nothing by itself; the state says so.
+	// Without a recorded opt-in (nearly every start) it costs one synchronous read and leaves the startup
+	// check to the idle callback.
+	resumeInterruptedDownload(): void {
+		if (this.resumeDecided || this.shutDown) {
+			return
+		}
+
+		this.resumeDecided = true
+
+		if (readDownloadIntent() === null) {
+			return
+		}
+
+		void this.init().then(() => {
+			this.maybeResume()
+		})
+	}
+
+	// Only the download the user asked for, only while part of it is on disk; the account, the room for the
+	// rest and the count of fruitless starts are checked under the lock as it starts. A lock held elsewhere
+	// with an opt-in recorded is that tab's download: it stays there, and closing that tab never restarts it
+	// here before this page's next start. Persistence is not required: the click's download runs without it
+	// too, and the room check is the same.
+	private maybeResume(): void {
+		if (this.shutDown || this.state.kind !== "not-downloaded" || (this.state.partialBytes ?? 0) === 0) {
+			return
+		}
+
+		if (readDownloadIntent()?.modelId === this.manifest.id) {
+			this.startDownload(true)
+		}
+	}
+
+	private startDownload(resumed: boolean): void {
 		if (this.shutDown || this.downloading !== null || this.loading !== null || this.unloading !== null || this.state.kind === "ready") {
 			return
 		}
 
-		this.downloading = this.runDownload().finally(() => {
+		this.downloading = this.runDownload(resumed).finally(() => {
 			this.downloading = null
 		})
 	}
 
-	private async runDownload(): Promise<void> {
+	private async runDownload(resumed: boolean): Promise<void> {
 		await this.init()
 
 		if (this.recommendation?.supported !== true) {
@@ -547,6 +606,27 @@ export class AssistantRuntime implements AssistantModel {
 				const { quota = 0, usage = 0 } = await navigator.storage.estimate()
 				const verdict = storageVerdict({ quota, usage, neededBytes: manifestBytes(this.manifest) - before.presentBytes })
 
+				const account = await signedInAccount()
+				const intent = resumed
+					? autoStartIntent(readDownloadIntent(), { modelId: this.manifest.id, account, presentBytes: before.presentBytes })
+					: account === null
+						? null
+						: { modelId: this.manifest.id, account, autoStarts: 0, presentBytes: before.presentBytes }
+
+				// Unasked, nothing starts without the room for the rest, once the part on disk is gone, for another
+				// account, or after starts that kept finding no progress (the opt-in goes; a click records it anew).
+				// An account that could not be read (offline) keeps the opt-in for the next start.
+				if (resumed && (intent === null || !verdict.ok || before.presentBytes === 0)) {
+					if ((intent === null && account !== null) || before.presentBytes === 0) {
+						writeDownloadIntent(null)
+					}
+
+					this.unlock()
+					this.settleNotDownloaded(before.presentBytes)
+
+					return
+				}
+
 				if (!verdict.ok) {
 					this.setState({ kind: "unavailable", reason: "insufficient-storage", model: this.info() })
 					this.unlock()
@@ -557,7 +637,8 @@ export class AssistantRuntime implements AssistantModel {
 				const sizeBytes = manifestBytes(this.manifest)
 				const handle = this.worker()
 
-				this.setState({ kind: "downloading", model: this.info(), receivedBytes: before.presentBytes, waiting: false })
+				writeDownloadIntent(intent)
+				this.setState({ kind: "downloading", model: this.info(), receivedBytes: before.presentBytes, waiting: false, resumed })
 				await untilClosed(
 					handle,
 					handle.remote.download(
@@ -569,7 +650,8 @@ export class AssistantRuntime implements AssistantModel {
 									kind: "downloading",
 									model: this.info(),
 									receivedBytes: Math.min(sizeBytes, Math.max(0, receivedBytes)),
-									waiting
+									waiting,
+									resumed
 								})
 							}
 						})
@@ -577,7 +659,7 @@ export class AssistantRuntime implements AssistantModel {
 				)
 
 				if (this.state.kind === "downloading" && (this.state.receivedBytes < sizeBytes || this.state.waiting)) {
-					this.setState({ kind: "downloading", model: this.info(), receivedBytes: sizeBytes, waiting: false })
+					this.setState({ kind: "downloading", model: this.info(), receivedBytes: sizeBytes, waiting: false, resumed })
 				}
 
 				// An older model version is dead weight once its successor is complete.
@@ -586,6 +668,8 @@ export class AssistantRuntime implements AssistantModel {
 				})
 			}
 		} catch (e) {
+			// Stopped or failed, it is over: only a download the page died under continues by itself.
+			writeDownloadIntent(null)
 			this.stopWorker()
 			this.unlock()
 
@@ -611,6 +695,7 @@ export class AssistantRuntime implements AssistantModel {
 		// Downloading is not a request to run it: the first message (or the Load action) loads it. The worker
 		// and the lock go before "downloaded" shows (pruning reads as the download finishing), so a load can
 		// never start in this worker and be cut off with it.
+		writeDownloadIntent(null)
 		this.stopWorker()
 		this.unlock()
 		this.settleDownloaded()
@@ -822,6 +907,7 @@ export class AssistantRuntime implements AssistantModel {
 
 	// Cancels a download, unloads, and removes every downloaded model from OPFS.
 	async deleteModel(): Promise<void> {
+		writeDownloadIntent(null)
 		this.cancelDownload()
 		await this.downloading
 		await this.unload()

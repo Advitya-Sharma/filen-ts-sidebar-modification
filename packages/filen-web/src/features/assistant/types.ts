@@ -26,7 +26,8 @@ export type AssistantModelError = "download-failed" | "load-failed" | "out-of-me
 // have been (or was being) installed, when known.
 // "downloading": `receivedBytes` is exact and never above `model.sizeBytes`; at the size, only the last
 // bookkeeping is left. `waiting`: nothing is moving, the device is offline or the download is backing off
-// after network errors, and it continues on its own.
+// after network errors, and it continues on its own. `resumed`: no click started it; it continues one the
+// user started that a reload, crash or closed tab cut off.
 // "loading": `verifying` while shards are hashed before the start, which happens only when the record of
 // verified shards was lost or a start failed and the files are checked for damage.
 // `partialBytes` on not-downloaded and error: part of the model is on disk (a stopped or failed download,
@@ -34,7 +35,7 @@ export type AssistantModelError = "download-failed" | "load-failed" | "out-of-me
 export type AssistantModelState =
 	| { kind: "unavailable"; reason: AssistantUnavailableReason; model: AssistantModelInfo | null }
 	| { kind: "not-downloaded"; model: AssistantModelInfo; partialBytes?: number }
-	| { kind: "downloading"; model: AssistantModelInfo; receivedBytes: number; waiting: boolean }
+	| { kind: "downloading"; model: AssistantModelInfo; receivedBytes: number; waiting: boolean; resumed: boolean }
 	| { kind: "downloaded"; model: AssistantModelInfo; idleUnloaded: boolean }
 	| { kind: "loading"; model: AssistantModelInfo; verifying: boolean }
 	| { kind: "ready"; model: AssistantModelInfo }
@@ -141,6 +142,9 @@ export interface AssistantSession {
 	setPanelOpen: (open: boolean) => void
 	// Starts (or, from "error", retries) the opt-in download, or the load that failed. Called from a user click.
 	downloadModel: () => void
+	// Called once the signed-in app shows: continues a download the user started that a reload, crash or
+	// closed tab cut off, when the runtime finds one. Never starts a download that was not asked for.
+	resumeInterruptedDownload: () => void
 	// Loads a downloaded model ahead of the first message. Called from a user click.
 	loadModel: () => void
 	// The user is typing: postpones the unload that follows inactivity. Cheap enough for every keystroke.

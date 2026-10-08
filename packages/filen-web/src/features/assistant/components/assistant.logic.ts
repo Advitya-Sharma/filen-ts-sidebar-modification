@@ -5,6 +5,8 @@ import type { AssistantModelState, AssistantStepFailure, AssistantStepRoute, Ass
 
 export type TranscriptRow = TranscriptEntry | { kind: "thinking"; id: "thinking" }
 
+type DownloadingState = Extract<AssistantModelState, { kind: "downloading" }>
+
 export function downloadPercent(receivedBytes: number, sizeBytes: number): number {
 	if (sizeBytes <= 0) {
 		return 0
@@ -20,6 +22,21 @@ export function downloadByteFigures(receivedBytes: number, sizeBytes: number): {
 		received: formatBytesFixed(Math.min(sizeBytes, Math.max(0, receivedBytes))),
 		total: formatBytesFixed(sizeBytes)
 	}
+}
+
+// A download the runtime continued by itself has just started: said once, not on every progress update.
+export function resumedDownloadStarted(previous: AssistantModelState, next: AssistantModelState): next is DownloadingState {
+	return next.kind === "downloading" && next.resumed && previous.kind !== "downloading"
+}
+
+// The download the runtime continued by itself is over, or a click restarted it.
+export function resumedDownloadEnded(previous: AssistantModelState, next: AssistantModelState): boolean {
+	return previous.kind === "downloading" && previous.resumed && !(next.kind === "downloading" && next.resumed)
+}
+
+// The whole percentage of a running download, null otherwise.
+export function downloadingPercent(state: AssistantModelState): number | null {
+	return state.kind === "downloading" ? downloadPercent(state.receivedBytes, state.model.sizeBytes) : null
 }
 
 // A sent message waiting for the model reads as loading from the start: the runtime reports "loading" only

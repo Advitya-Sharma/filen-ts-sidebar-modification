@@ -232,7 +232,7 @@ describe("session wiring", () => {
 		expect(sendAssistantMessage("hello")).toBe(false)
 
 		unregister()
-		withMock({ initialState: { kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: 1, waiting: false } })
+		withMock({ initialState: { kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: 1, waiting: false, resumed: false } })
 
 		expect(sendAssistantMessage("hello")).toBe(false)
 

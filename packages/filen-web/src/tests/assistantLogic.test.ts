@@ -7,7 +7,10 @@ import {
 	downloadByteFigures,
 	durationFigure,
 	downloadPercent,
+	downloadingPercent,
 	modelShowsLoading,
+	resumedDownloadEnded,
+	resumedDownloadStarted,
 	proposalTargetKind,
 	spokenText,
 	stepCountNoun,
@@ -50,6 +53,30 @@ describe("downloadByteFigures", () => {
 	})
 })
 
+describe("resumed downloads", () => {
+	const downloading = (receivedBytes: number, resumed: boolean) =>
+		({ kind: "downloading", model: MODEL, receivedBytes, waiting: false, resumed }) as const
+
+	it("announces a download the runtime continued once, as it starts, and never one a click started", () => {
+		expect(resumedDownloadStarted({ kind: "not-downloaded", model: MODEL, partialBytes: 5 }, downloading(5, true))).toBe(true)
+		expect(resumedDownloadStarted({ kind: "unavailable", reason: "in-use-elsewhere", model: MODEL }, downloading(5, true))).toBe(true)
+		expect(resumedDownloadStarted(downloading(5, true), downloading(6, true))).toBe(false)
+		expect(resumedDownloadStarted({ kind: "not-downloaded", model: MODEL }, downloading(0, false))).toBe(false)
+	})
+
+	it("ends the announcement with the continued download, not with its progress", () => {
+		expect(resumedDownloadEnded(downloading(5, true), downloading(6, true))).toBe(false)
+		expect(resumedDownloadEnded(downloading(5, true), { kind: "downloaded", model: MODEL, idleUnloaded: false })).toBe(true)
+		expect(resumedDownloadEnded(downloading(5, true), { kind: "not-downloaded", model: MODEL, partialBytes: 5 })).toBe(true)
+		expect(resumedDownloadEnded(downloading(5, false), { kind: "downloaded", model: MODEL, idleUnloaded: false })).toBe(false)
+	})
+
+	it("gives a running download's whole percentage, and nothing otherwise", () => {
+		expect(downloadingPercent(downloading(MODEL.sizeBytes / 2, false))).toBe(50)
+		expect(downloadingPercent({ kind: "downloaded", model: MODEL, idleUnloaded: false })).toBeNull()
+	})
+})
+
 describe("modelShowsLoading", () => {
 	it("reads a model on disk as loading while a sent message waits for it, before the runtime says so", () => {
 		expect(modelShowsLoading({ kind: "loading", model: MODEL, verifying: false }, false)).toBe(true)
@@ -71,7 +98,7 @@ describe("canRemoveModel", () => {
 		// What a stopped or failed download left behind is the user's to free.
 		expect(canRemoveModel({ kind: "not-downloaded", model: MODEL, partialBytes: 1 })).toBe(true)
 		expect(canRemoveModel({ kind: "error", error: "storage-full", model: MODEL, partialBytes: 1 })).toBe(true)
-		expect(canRemoveModel({ kind: "downloading", model: MODEL, receivedBytes: 1, waiting: false })).toBe(false)
+		expect(canRemoveModel({ kind: "downloading", model: MODEL, receivedBytes: 1, waiting: false, resumed: false })).toBe(false)
 		expect(canRemoveModel({ kind: "loading", model: MODEL, verifying: false })).toBe(false)
 		expect(canRemoveModel({ kind: "unavailable", reason: "in-use-elsewhere", model: MODEL })).toBe(false)
 	})

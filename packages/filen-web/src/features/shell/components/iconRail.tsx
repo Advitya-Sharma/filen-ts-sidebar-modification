@@ -35,6 +35,7 @@ import { DEFAULT_RAIL_ORDER, railEntryActive, type RailEntryId } from "@/feature
 import { saveRailOrder, useRailOrderQuery } from "@/features/shell/queries/railOrder"
 import { SidebarDrawerTrigger } from "@/features/shell/components/sidebarDrawer"
 import { AssistantToggle } from "@/features/assistant/components/assistantToggle"
+import { RailProgressBar, RailTooltipDetail } from "@/features/shell/components/railProgressBar"
 import { useTheme } from "@/providers/themeProvider"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -316,19 +317,9 @@ function TransfersEntry({ active, reordering }: RailEntryProps) {
 			icon={ArrowDownUpIcon}
 			linkOptions={{ to: "/transfers" }}
 			badgeCount={activeCount}
-			tooltipExtra={showAggregate ? <span className="text-background/60"> · {formatBytesPerSecond(speed)}</span> : null}
+			tooltipExtra={showAggregate ? <RailTooltipDetail>{formatBytesPerSecond(speed)}</RailTooltipDetail> : null}
 		>
-			{showAggregate ? (
-				<span
-					aria-hidden="true"
-					className="absolute inset-x-2 bottom-1 h-[3px] overflow-hidden rounded-full bg-foreground/20"
-				>
-					<span
-						className="block h-full rounded-full bg-primary transition-[width] duration-300 ease-out"
-						style={{ width: `${String(percent)}%` }}
-					/>
-				</span>
-			) : null}
+			{showAggregate ? <RailProgressBar percent={percent} /> : null}
 		</RailLink>
 	)
 }

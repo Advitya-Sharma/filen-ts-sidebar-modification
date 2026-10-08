@@ -145,7 +145,7 @@ export function createMockAssistantSession({
 
 		const model = modelState.model ?? MOCK_ASSISTANT_MODEL
 
-		emit({ type: "model", state: { kind: "downloading", model, receivedBytes: 0, waiting: false } })
+		emit({ type: "model", state: { kind: "downloading", model, receivedBytes: 0, waiting: false, resumed: false } })
 
 		for (let step = 1; step <= downloadSteps; step++) {
 			later(() => {
@@ -155,7 +155,8 @@ export function createMockAssistantSession({
 						kind: "downloading",
 						model,
 						receivedBytes: Math.round((model.sizeBytes * step) / downloadSteps),
-						waiting: false
+						waiting: false,
+						resumed: false
 					}
 				})
 			}, step)
@@ -368,6 +369,8 @@ export function createMockAssistantSession({
 		},
 		setPanelOpen: () => undefined,
 		downloadModel,
+		// Scripted downloads never outlive the page.
+		resumeInterruptedDownload: () => undefined,
 		loadModel: () => {
 			loadModel()
 		},

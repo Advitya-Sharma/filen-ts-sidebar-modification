@@ -128,6 +128,7 @@ function SetupBody({ state }: { state: AssistantSetupState }) {
 								? t("assistantDownloadWaiting")
 								: t("assistantDownloadProgress", downloadByteFigures(state.receivedBytes, state.model.sizeBytes))}
 					</p>
+					{state.resumed ? <p className="text-xs text-muted-foreground">{t("assistantDownloadResumed")}</p> : null}
 					<Button
 						variant="outline"
 						data-assistant-autofocus=""

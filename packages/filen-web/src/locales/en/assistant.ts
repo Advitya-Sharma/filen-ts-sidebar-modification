@@ -129,6 +129,14 @@ export const assistant = {
 	assistantDownloadProgressLabel: "Model download",
 	/** Download in progress — stops it */
 	assistantCancelDownload: "Cancel download",
+	/** Download in progress — it was not started by a click this time: it continues the one the user started before the page was reloaded, closed or crashed */
+	assistantDownloadResumed: "Continued where your last download stopped.",
+	/** Toast — an interrupted model download continues on its own after the app was reopened */
+	assistantDownloadResumedToast: "Continuing the assistant's model download",
+	/** Toast — how much was already on this device, e.g. "1.2 GiB of 2.6 GiB" */
+	assistantDownloadResumedToastBody: "{{received}} of {{total}} is already on this device.",
+	/** Assistant button in the icon rail — accessible name while the model downloads; stays the same throughout, the percentage is in the tooltip */
+	assistantToggleDownloading: "Assistant, downloading the model",
 	/** The downloaded model is being loaded into memory */
 	assistantLoadingTitle: "Loading model…",
 	/** Before starting, the downloaded model's files are checked because a record of them was lost or the last start failed */

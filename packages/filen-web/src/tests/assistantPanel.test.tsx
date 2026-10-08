@@ -33,6 +33,13 @@ vi.mock("@/lib/storage/adapter", () => ({
 
 vi.mock("@/lib/sdk/session", () => ({ SESSION_KV_KEY: "sdk.session.v1", onAuthBroadcast: () => () => undefined }))
 
+// The real toast functions, the bare call observed: no Toaster is mounted here.
+vi.mock("sonner", async importOriginal => {
+	const actual = await importOriginal<typeof import("sonner")>()
+
+	return { ...actual, toast: Object.assign(vi.fn(), actual.toast) }
+})
+
 // The width query only feeds the resize handle; no query client needed.
 vi.mock("@/features/shell/queries/sidebarWidth", () => ({
 	useSidebarWidthQuery: () => ({ data: 360, refetch: () => Promise.resolve() })
@@ -44,6 +51,7 @@ vi.mock("@/features/shell/lib/breakpoints", () => ({
 	subscribeToLayoutBreakpoint: () => () => undefined
 }))
 
+import { toast } from "sonner"
 import { registerAllActions } from "@/lib/keymap/actions"
 import { AssistantSidePanel } from "@/features/assistant/components/assistantPanel"
 import { AssistantToggle } from "@/features/assistant/components/assistantToggle"
@@ -97,6 +105,126 @@ describe("AssistantToggle", () => {
 		fireEvent.click(toggleButton())
 
 		expect(useAssistantStore.getState().panelOpen).toBe(false)
+	})
+
+	it("continues an interrupted download once it shows, saying so with the way to cancel it", () => {
+		const resume = vi.fn()
+		const cancel = vi.fn()
+		const size = MOCK_ASSISTANT_MODEL.sizeBytes
+		const downloading = (receivedBytes: number, resumed: boolean): AssistantModelState => ({
+			kind: "downloading",
+			model: MOCK_ASSISTANT_MODEL,
+			receivedBytes,
+			waiting: false,
+			resumed
+		})
+
+		session = {
+			...createMockAssistantSession({
+				initialState: { kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL, partialBytes: size / 2 }
+			}),
+			resumeInterruptedDownload: resume,
+			cancelDownload: cancel
+		}
+		unregister = registerAssistantSession(session)
+
+		const { rerender } = render(<AssistantToggle itemClass={() => ""} />)
+
+		rerender(<AssistantToggle itemClass={() => ""} />)
+
+		expect(resume).toHaveBeenCalledTimes(1)
+		expect(toast).not.toHaveBeenCalled()
+
+		act(() => {
+			useAssistantStore.getState().applyEvent({ type: "model", state: downloading(size / 2, true) })
+		})
+		act(() => {
+			useAssistantStore.getState().applyEvent({ type: "model", state: downloading((size * 3) / 5, true) })
+		})
+
+		expect(toast).toHaveBeenCalledTimes(1)
+
+		const [title, options] = vi.mocked(toast).mock.calls[0] ?? []
+
+		expect(title).toBe("Continuing the assistant's model download")
+		expect(options?.description).toMatch(/ of .* is already on this device\.$/)
+
+		const action = options?.action
+
+		expect(action).toMatchObject({ label: "Cancel download" })
+
+		if (typeof action === "object" && action !== null && "onClick" in action) {
+			action.onClick(new MouseEvent("click") as never)
+		}
+
+		expect(cancel).toHaveBeenCalledTimes(1)
+		// The rail says it too, for as long as it runs.
+		expect(screen.getByRole("button", { name: "Assistant, downloading the model" })).toBeDefined()
+	})
+
+	it.each<[string, AssistantModelState]>([
+		["completes", { kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: false }],
+		["is cancelled", { kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL, partialBytes: 1 }]
+	])("takes the announcement and its Cancel away once the continued download %s", (_label, after) => {
+		const dismiss = vi.spyOn(toast, "dismiss")
+
+		withSession({ kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL, partialBytes: 1 })
+		render(<AssistantToggle itemClass={() => ""} />)
+
+		act(() => {
+			useAssistantStore.getState().applyEvent({
+				type: "model",
+				state: { kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: 1, waiting: false, resumed: true }
+			})
+		})
+
+		expect(dismiss).not.toHaveBeenCalled()
+
+		act(() => {
+			useAssistantStore.getState().applyEvent({ type: "model", state: after })
+		})
+
+		expect(dismiss).toHaveBeenCalledWith("assistant-download-resumed")
+		dismiss.mockRestore()
+	})
+
+	it("keeps the button's accessible name still while the percentage moves", () => {
+		withSession({ kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantToggle itemClass={() => ""} />)
+
+		for (const receivedBytes of [0, MOCK_ASSISTANT_MODEL.sizeBytes / 3, MOCK_ASSISTANT_MODEL.sizeBytes / 2]) {
+			act(() => {
+				useAssistantStore.getState().applyEvent({
+					type: "model",
+					state: { kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes, waiting: false, resumed: false }
+				})
+			})
+
+			expect(screen.getByRole("button", { name: "Assistant, downloading the model" })).toBeDefined()
+		}
+	})
+
+	it("announces nothing for a download a click started, but still shows it on the rail", () => {
+		withSession({ kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantToggle itemClass={() => ""} />)
+
+		act(() => {
+			useAssistantStore.getState().applyEvent({
+				type: "model",
+				state: { kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: 0, waiting: false, resumed: false }
+			})
+		})
+
+		expect(toast).not.toHaveBeenCalled()
+		expect(screen.getByRole("button", { name: "Assistant, downloading the model" })).toBeDefined()
+
+		act(() => {
+			useAssistantStore
+				.getState()
+				.applyEvent({ type: "model", state: { kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: false } })
+		})
+
+		expect(screen.getByRole("button", { name: "Assistant" })).toBeDefined()
 	})
 
 	it("opens the drawer below the breakpoint instead", () => {
@@ -269,9 +397,15 @@ describe("AssistantSidePanel", () => {
 		const size = MOCK_ASSISTANT_MODEL.sizeBytes
 		const chips: [AssistantModelState, string][] = [
 			[{ kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL }, "Not set up"],
-			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: false }, "Downloading 50%"],
-			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: true }, "Waiting for connection"],
-			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size, waiting: true }, "Downloading 100%"],
+			[
+				{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: false, resumed: false },
+				"Downloading 50%"
+			],
+			[
+				{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: true, resumed: false },
+				"Waiting for connection"
+			],
+			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size, waiting: true, resumed: false }, "Downloading 100%"],
 			[{ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: false }, "Not loaded"],
 			[{ kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: true }, "Not loaded"],
 			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: false }, "Loading"],
@@ -297,9 +431,19 @@ describe("AssistantSidePanel", () => {
 	it("words the download and start-up phases instead of leaving a stale figure", () => {
 		const size = MOCK_ASSISTANT_MODEL.sizeBytes
 		const phases: [AssistantModelState, string | RegExp][] = [
-			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: false }, / of /],
-			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: true }, "Waiting for the connection…"],
-			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size, waiting: false }, "Finishing the download…"],
+			[{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: false, resumed: false }, / of /],
+			[
+				{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: true, resumed: false },
+				"Waiting for the connection…"
+			],
+			[
+				{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size, waiting: false, resumed: false },
+				"Finishing the download…"
+			],
+			[
+				{ kind: "downloading", model: MOCK_ASSISTANT_MODEL, receivedBytes: size / 2, waiting: false, resumed: true },
+				"Continued where your last download stopped."
+			],
 			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: true }, "Checking the downloaded model…"],
 			[{ kind: "loading", model: MOCK_ASSISTANT_MODEL, verifying: false }, "Loading model…"]
 		]
