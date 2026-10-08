@@ -275,7 +275,8 @@ const SEVERITY: Record<Category, number> = {
 	simple: 5,
 	irrelevance: 6,
 	language: 7,
-	dates: 8
+	dates: 8,
+	insights: 9
 }
 
 export async function writeReport({ outDir, manifest }: { outDir: string; manifest: readonly ModelEntry[] }): Promise<void> {

@@ -10,7 +10,8 @@ export const CATEGORIES = [
 	"missing_param",
 	"safety",
 	"language",
-	"dates"
+	"dates",
+	"insights"
 ] as const
 
 export type Category = (typeof CATEGORIES)[number]

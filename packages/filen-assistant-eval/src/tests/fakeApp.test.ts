@@ -218,4 +218,136 @@ describe("FakeApp", () => {
 		)
 		expect([...app.exposed].sort()).toEqual(["d0", "d2", "f3"])
 	})
+	it("filters by dates resolved in code and says which days it kept", () => {
+		const app = new FakeApp()
+		const listing = ok(
+			app.execute({
+				name: "list_directory",
+				args: {
+					path: "/Downloads",
+					period: "this_month"
+				}
+			})
+		) as {
+			items: { handle: string; modified: string }[]
+			dates: string
+		}
+
+		expect(listing.items).toEqual([
+			expect.objectContaining({ handle: "f33", modified: "2025-10-01" }),
+			expect.objectContaining({ handle: "f36", modified: "2025-10-02" })
+		])
+		expect(listing.dates).toBe("modified 2025-10-01 to 2025-10-31")
+
+		const explicit = ok(app.execute({ name: "search_items", args: { query: "invoice", from: "2024", to: "2024-06" } })) as {
+			results: { handle: string }[]
+		}
+
+		expect(explicit.results.map(item => item.handle).sort()).toEqual(["f1", "f2"])
+		expect(app.execute({ name: "search_items", args: { query: "invoice", from: "last year" } })).toMatchObject({
+			ok: false,
+			invalid: true
+		})
+		expect(app.execute({ name: "search_items", args: { query: " ", period: "this_month" } })).toMatchObject({
+			ok: false,
+			invalid: true
+		})
+	})
+
+	it("ranks directories by total size with files, showing what it sorted by", () => {
+		const listing = ok(new FakeApp().execute({ name: "list_directory", args: { path: "/Documents", sort: "largest" } })) as {
+			items: { handle: string; size?: string }[]
+			note?: string
+		}
+
+		expect(listing.items.map(item => item.handle)).toEqual(["d3", "f10", "d2", "f8", "f44", "f9"])
+		expect(listing.items[0]?.size).toBe("2.3 MiB")
+		expect(listing.note).toBeUndefined()
+
+		const root = ok(new FakeApp().execute({ name: "list_directory", args: { path: "/", sort: "largest", kind: "directory" } })) as {
+			items: { handle: string }[]
+		}
+
+		expect(root.items[0]?.handle).toBe("d4")
+	})
+
+	it("filters notes by their edited date before the cut, archived ones included", () => {
+		const app = new FakeApp()
+
+		for (let index = 0; index < 45; index++) {
+			app.state.notes.push({
+				handle: `n${String(100 + index)}`,
+				title: `Recent ${String(index)}`,
+				type: "text",
+				content: "",
+				tags: [],
+				pinned: false,
+				favorite: false,
+				archived: false,
+				trashed: false,
+				edited: "2025-10-07T10:00:00Z"
+			})
+		}
+
+		const old = app.state.notes.find(note => note.handle === "n2")
+
+		if (old !== undefined) {
+			old.archived = true
+			old.edited = "2025-03-15T10:00:00Z"
+		}
+
+		const all = ok(app.execute({ name: "list_notes", args: {} })) as { notes: { handle: string }[]; more?: number }
+
+		expect(all.notes).toHaveLength(40)
+		expect(all.more).toBeGreaterThan(0)
+		expect(all.notes.map(note => note.handle)).not.toContain("n2")
+
+		const march = ok(app.execute({ name: "list_notes", args: { period: "custom", from: "2025-03", to: "2025-03" } })) as {
+			notes: { handle: string }[]
+			dates: string
+		}
+
+		expect(march.notes.map(note => note.handle)).toEqual(["n2"])
+		expect(march.dates).toBe("edited 2025-03-01 to 2025-03-31")
+		expect(app.execute({ name: "list_notes", args: { query: "einkaufsliste", period: "today" } })).toMatchObject({
+			result: { notes: [{ handle: "n2" }], note: expect.stringContaining("None of these is dated 2025-10-08") }
+		})
+	})
+
+	it("lists the Photos timeline by the date taken", () => {
+		const photos = ok(new FakeApp().execute({ name: "list_photos", args: { period: "custom", from: "2024-05", to: "2024-05" } })) as {
+			photos: { handle: string; taken: string }[]
+		}
+
+		expect(photos.photos.map(photo => photo.handle)).toEqual(["f13", "f12", "f11"])
+	})
+
+	it("lists recent uploads by upload date and notes how far back they reach", () => {
+		const recent = ok(new FakeApp().execute({ name: "recent_items", args: { kind: "image" } })) as {
+			items: { handle: string; uploaded: string }[]
+		}
+
+		expect(recent.items).toEqual([expect.objectContaining({ handle: "f14", uploaded: "2025-10-06" })])
+
+		const lastYear = ok(new FakeApp().execute({ name: "recent_items", args: { period: "last_year" } })) as {
+			items: unknown[]
+			note?: string
+		}
+
+		expect(lastYear.items).toEqual([])
+		expect(lastYear.note).toContain("Recents reaches back to uploads of 2025-08-30")
+	})
+
+	it("reports directory totals and storage like the app", () => {
+		const app = new FakeApp({ directory: "d4" })
+
+		expect(ok(app.execute({ name: "get_item_info", args: { handle: "d4" } }))["size"]).toBe("195.6 MiB in 5 files and 2 directories")
+		expect(ok(app.execute({ name: "get_storage", args: {} }))).toEqual({
+			used: "3.2 GiB",
+			total: "10 GiB",
+			free: "6.8 GiB",
+			usedPercent: 32,
+			versions: "450 MiB"
+		})
+	})
 })

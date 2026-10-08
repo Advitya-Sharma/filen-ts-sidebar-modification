@@ -258,17 +258,22 @@ export const DATE_CASES: EvalCase[] = [
 		answerExcludes: ["нет"],
 		expectsText: true
 	},
-	// Drive listings and searches carry no dates, so a list of "files changed then" can only be made up:
-	// the reply says so, or names only items it checked and found in the range.
+	// Recents (this month: f33, f36 and the old photo f14 uploaded 10-06; last week: f27, f28, f33, f36), filtered
+	// by a period the code resolves.
 	{
 		id: "dates-drive-last-week-de",
 		category: "dates",
 		lang: "de",
 		prompt: "Welche Dateien habe ich letzte Woche geändert?",
-		routes: ["files"],
-		// This week's range, which a model without a last-week range names instead. No item names: a correct
-		// reply may name one it checked and found outside the range.
-		answerExcludes: ["2025-10-06", "06.10", "2025-10-12", "12.10"],
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["roadmap"], ["meeting_notes"], ["report_q3"], ["報告書"]],
+		// This week's range, which a model without a last-week range names instead.
+		answerExcludes: ["2025-10-06", "06.10", "2025-10-12", "12.10", "setup_installer", "oma_geburtstag"],
 		expectsText: true
 	},
 	{
@@ -276,7 +281,13 @@ export const DATE_CASES: EvalCase[] = [
 		category: "dates",
 		lang: "en",
 		prompt: "Which files did I upload this month?",
-		routes: ["files"],
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma_geburtstag"], ["report_q3"], ["報告書"]],
 		answerExcludes: ["setup_installer", "tugas_kuliah", "receipt_amazon", "roadmap", "meeting_notes", "logo_final"],
 		expectsText: true
 	},
@@ -285,8 +296,21 @@ export const DATE_CASES: EvalCase[] = [
 		category: "dates",
 		lang: "pt",
 		prompt: "Quais arquivos eu modifiquei ontem?",
-		routes: ["files"],
-		answerExcludes: ["report_Q3", "roadmap", "meeting_notes", "setup_installer", "trabalho_de_historia", "redação_enem"],
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerExcludes: [
+			"report_Q3",
+			"roadmap",
+			"meeting_notes",
+			"setup_installer",
+			"trabalho_de_historia",
+			"redação_enem",
+			"oma_geburtstag"
+		],
 		expectsText: true
 	}
 ]

@@ -1,5 +1,6 @@
 import { IRRELEVANCE_CASES, MISSING_PARAM_CASES, SAFETY_CASES } from "./behaviour"
 import { DATE_CASES } from "./dates"
+import { DATE_FILTER_CASES, INSIGHTS_CASES } from "./insights"
 import { LANGUAGE_CASES } from "./language"
 import { MULTI_STEP_CASES } from "./multiStep"
 import { PROMPTING_CASES } from "./prompting"
@@ -16,5 +17,7 @@ export const EVAL_CASES: readonly EvalCase[] = [
 	...SAFETY_CASES,
 	...LANGUAGE_CASES,
 	...PROMPTING_CASES,
-	...DATE_CASES
+	...DATE_CASES,
+	...DATE_FILTER_CASES,
+	...INSIGHTS_CASES
 ]

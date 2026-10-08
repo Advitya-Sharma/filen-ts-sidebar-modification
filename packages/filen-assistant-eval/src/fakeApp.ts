@@ -1,6 +1,15 @@
-import { assistantToolByName } from "@filen/shared/assistant"
+import { formatBytes, storageSummary } from "@filen/shared"
+import {
+	assistantToolByName,
+	dateFilterNote,
+	dayRangeBounds,
+	describeDayRange,
+	inDayRange,
+	resolveDateFilter,
+	type AssistantPeriodFilter
+} from "@filen/shared/assistant"
 import { createFixtureState, type AppContext, type AppState, type DriveItem, type Note, type NoteType } from "./fixture"
-import { evalLocalDay } from "./prompts"
+import { EVAL_NOW, EVAL_TIME_ZONE, evalLocalDay } from "./prompts"
 
 export type Candidate = {
 	handle: string
@@ -51,6 +60,43 @@ const EXTENSIONS: Record<string, readonly string[]> = {
 const TEXT_EXTENSIONS = ["txt", "md", "csv", "json"]
 
 const SEARCH_LIMIT = 12
+// Like the app's Recents screen, which ages files out by upload time.
+const RECENT_DAYS = 45
+const RECENT_LIMIT = 20
+const PHOTOS_LIMIT = 30
+const NOTES_LIMIT = 40
+// Like the app: how many directory sizes a size-sorted listing reads.
+const DIRECTORY_SIZE_READS = 12
+
+const EVAL_CALENDAR = {
+	now: EVAL_NOW,
+	timeZone: EVAL_TIME_ZONE
+}
+
+// The date filter of a call, as the app resolves it: which date it looks at, and the days it leaves.
+type DateSelection = {
+	field: string
+	bounds: {
+		start: number
+		end: number
+	} | null
+	range: string | null
+}
+
+type ListingSort = "name" | "largest" | "smallest" | "newest" | "oldest"
+
+// The directory the Photos screen shows.
+const PHOTOS_ROOT = "d4"
+
+function joinNotes(...notes: Record<string, string>[]): Record<string, string> {
+	const text = notes.flatMap(({ note }) => (note === undefined ? [] : [note])).join(" ")
+
+	return text.length === 0
+		? {}
+		: {
+				note: text
+			}
+}
 
 export function normalizeText(value: string): string {
 	return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()
@@ -419,6 +465,10 @@ export class FakeApp {
 		return this.state.drive.filter(item => item.parent === parent && !item.trashed)
 	}
 
+	private descendants(parent: string): DriveItem[] {
+		return this.children(parent).flatMap(item => (item.kind === "directory" ? [item, ...this.descendants(item.handle)] : [item]))
+	}
+
 	private assertFreeName({ parent, name, except }: { parent: string; name: string; except?: string }): void {
 		if (name.trim().length === 0 || /[/\\]/.test(name)) {
 			throw new CallError(`"${name}" is not a valid name`, false)
@@ -438,21 +488,167 @@ export class FakeApp {
 		return `${prefix}${highest + 1}`
 	}
 
-	private search({ query, kind }: { query: string; kind: string | undefined }): unknown {
+	private dateSelection(input: Record<string, unknown>, fields: readonly [string, ...string[]]): DateSelection {
+		const text = (key: string) => (typeof input[key] === "string" ? input[key] : undefined)
+		const filter = resolveDateFilter(
+			{
+				period: text("period") as AssistantPeriodFilter | undefined,
+				from: text("from"),
+				to: text("to")
+			},
+			EVAL_CALENDAR
+		)
+
+		if (!filter.ok) {
+			throw new CallError(filter.error, true)
+		}
+
+		return {
+			field: text("date") ?? fields[0],
+			bounds: filter.range === null ? null : dayRangeBounds(filter.range, EVAL_TIME_ZONE),
+			range: filter.range === null ? null : describeDayRange(filter.range)
+		}
+	}
+
+	// The note a date-filtered result carries when the filter alone emptied it.
+	private emptyNote(selection: DateSelection, kept: number, outside: number): Record<string, string> {
+		return selection.range !== null && kept === 0 && outside > 0
+			? {
+					note: dateFilterNote(selection.range, outside)
+				}
+			: {}
+	}
+
+	// Fixture files record no creation date of their own, so "created" is the upload, as in the app.
+	private driveDate(item: DriveItem, field: string): number {
+		return Date.parse(field === "modified" ? item.modified : (item.uploaded ?? item.modified))
+	}
+
+	private matchesKind(item: DriveItem, kind: string | undefined): boolean {
+		if (kind === undefined || kind === "any") {
+			return true
+		}
+
+		if (kind === "directory" || kind === "file") {
+			return item.kind === kind
+		}
+
+		return item.kind === "file" && (EXTENSIONS[kind] ?? []).includes(extension(item.name))
+	}
+
+	private inSelection(item: DriveItem, selection: DateSelection): boolean {
+		return selection.bounds === null || inDayRange(this.driveDate(item, selection.field), selection.bounds)
+	}
+
+	// Like the app: a size-sorted listing reads the sizes of its first directories (by name), the rest stay
+	// unknown.
+	private directorySizes(items: readonly DriveItem[]): { sizes: Map<string, number>; unknown: number } {
+		const directories = items.filter(item => item.kind === "directory").sort((a, b) => a.name.localeCompare(b.name))
+		const sizes = new Map(
+			directories.slice(0, DIRECTORY_SIZE_READS).map(item => [item.handle, this.directoryTotals(item.handle).bytes])
+		)
+
+		return {
+			sizes,
+			unknown: directories.length - sizes.size
+		}
+	}
+
+	// Like the app: a size order ranks files and directories (by total size) together, directories of unknown
+	// size last by name; a date order lists files first; by name, directories first.
+	private sortListing(items: DriveItem[], sort: ListingSort, field: string, sizes: ReadonlyMap<string, number> = new Map()): DriveItem[] {
+		const byName = (a: DriveItem, b: DriveItem) => a.name.localeCompare(b.name)
+
+		if (sort === "name") {
+			return [
+				...items.filter(item => item.kind === "directory").sort(byName),
+				...items.filter(item => item.kind === "file").sort(byName)
+			]
+		}
+
+		const ascending = sort === "smallest" || sort === "oldest"
+		const by = (key: (item: DriveItem) => number) => (a: DriveItem, b: DriveItem) =>
+			(ascending ? key(a) - key(b) : key(b) - key(a)) || byName(a, b)
+
+		if (sort === "largest" || sort === "smallest") {
+			const size = (item: DriveItem) => (item.kind === "file" ? item.size : sizes.get(item.handle))
+
+			return [
+				...items.filter(item => size(item) !== undefined).sort(by(item => size(item) ?? 0)),
+				...items.filter(item => size(item) === undefined).sort(byName)
+			]
+		}
+
+		const order = by(item => this.driveDate(item, field))
+
+		return [...items.filter(item => item.kind === "file").sort(order), ...items.filter(item => item.kind === "directory").sort(order)]
+	}
+
+	private unknownSizesNote(unknown: number): Record<string, string> {
+		return unknown === 0
+			? {}
+			: {
+					note:
+						unknown === 1
+							? "1 directory's size is not loaded; it is listed last. get_item_info gives a directory's size."
+							: `${String(unknown)} directories' sizes are not loaded; they are listed last. get_item_info gives a directory's size.`
+				}
+	}
+
+	// The extra fields a filtered or sorted listing shows: the date it went by, the size it sorted by.
+	private listingFields(
+		item: DriveItem,
+		{ date, size, sizes }: { date: string | null; size: boolean; sizes?: ReadonlyMap<string, number> }
+	): Record<string, unknown> {
+		const bytes = item.kind === "file" ? item.size : sizes?.get(item.handle)
+
+		return {
+			...(date === null
+				? {}
+				: {
+						[date]: evalLocalDay(date === "modified" ? item.modified : (item.uploaded ?? item.modified))
+					}),
+			...(size && bytes !== undefined
+				? {
+						size: formatBytes(bytes)
+					}
+				: {})
+		}
+	}
+
+	private directoryTotals(handle: string): { bytes: number; files: number; directories: number } {
+		const totals = {
+			bytes: 0,
+			files: 0,
+			directories: 0
+		}
+
+		for (const child of this.children(handle)) {
+			if (child.kind === "file") {
+				totals.bytes += child.size
+				totals.files++
+			} else {
+				const inner = this.directoryTotals(child.handle)
+
+				totals.bytes += inner.bytes
+				totals.files += inner.files
+				totals.directories += inner.directories + 1
+			}
+		}
+
+		return totals
+	}
+
+	private search({ query, kind, input }: { query: string; kind: string | undefined; input: Record<string, unknown> }): unknown {
+		const selection = this.dateSelection(input, ["modified", "uploaded", "created"])
 		const queryTokens = tokens(query)
-		const scored = this.state.drive
-			.filter(item => item.parent !== null && !item.trashed)
-			.filter(item => {
-				if (kind === undefined) {
-					return true
-				}
 
-				if (kind === "directory" || kind === "file") {
-					return item.kind === kind
-				}
-
-				return item.kind === "file" && (EXTENSIONS[kind] ?? []).includes(extension(item.name))
-			})
+		// Like the app: a search is by name, so it needs words.
+		if (queryTokens.length === 0) {
+			throw new CallError("Pass words from the item name", true)
+		}
+		const matching = this.state.drive
+			.filter(item => item.parent !== null && !item.trashed && this.matchesKind(item, kind))
 			.map(item => {
 				const haystack = normalizeText(item.name)
 
@@ -467,18 +663,31 @@ export class FakeApp {
 				}
 			})
 			.filter(({ score }) => score > 0)
+		const scored = matching.filter(({ item }) => this.inSelection(item, selection))
 
 		const all = scored.filter(({ score }) => score === queryTokens.length)
 		// Like the app: full matches when there are any, and "more" counts what that same pool left out.
 		const pool = all.length > 0 ? all : scored.sort((a, b) => b.score - a.score)
 
 		return {
-			results: pool.slice(0, SEARCH_LIMIT).map(({ item }) => this.summary(item)),
+			results: pool.slice(0, SEARCH_LIMIT).map(({ item }) => ({
+				...this.summary(item),
+				...this.listingFields(item, {
+					date: selection.range === null ? null : selection.field,
+					size: false
+				})
+			})),
 			...(pool.length > SEARCH_LIMIT
 				? {
 						more: pool.length - SEARCH_LIMIT
 					}
-				: {})
+				: {}),
+			...(selection.range === null
+				? {}
+				: {
+						dates: `${selection.field} ${selection.range}`
+					}),
+			...this.emptyNote(selection, scored.length, matching.length)
 		}
 	}
 
@@ -497,7 +706,8 @@ export class FakeApp {
 			case "search_items": {
 				return this.search({
 					query: str("query"),
-					kind: optionalStr("kind")
+					kind: optionalStr("kind"),
+					input
 				})
 			}
 
@@ -514,12 +724,26 @@ export class FakeApp {
 
 				this.exposed.add(target.handle)
 
+				const selection = this.dateSelection(input, ["modified", "uploaded", "created"])
+				const sort = optionalStr("sort") as ListingSort | undefined
+				const kind = optionalStr("kind")
+				const ofKind = this.children(target.handle).filter(item => this.matchesKind(item, kind))
+				const kept = ofKind.filter(item => this.inSelection(item, selection))
+				const byDate = selection.range !== null || sort === "newest" || sort === "oldest"
+				const bySize = sort === "largest" || sort === "smallest"
+				const sizes = bySize
+					? this.directorySizes(kept)
+					: {
+							sizes: new Map<string, number>(),
+							unknown: 0
+						}
+
 				return {
 					directory: {
 						handle: target.handle,
 						path: this.pathOf(target)
 					},
-					items: this.children(target.handle).map(item => {
+					items: (sort === undefined ? kept : this.sortListing(kept, sort, selection.field, sizes.sizes)).map(item => {
 						this.exposed.add(item.handle)
 
 						return {
@@ -530,18 +754,147 @@ export class FakeApp {
 								? {}
 								: {
 										sharedBy: item.sharedBy
-									})
+									}),
+							...this.listingFields(item, {
+								date: byDate ? selection.field : null,
+								size: bySize,
+								sizes: sizes.sizes
+							})
 						}
-					})
+					}),
+					...(selection.range === null
+						? {}
+						: {
+								dates: `${selection.field} ${selection.range}`
+							}),
+					...joinNotes(this.emptyNote(selection, kept.length, ofKind.length), this.unknownSizesNote(sizes.unknown))
 				}
+			}
+
+			case "recent_items": {
+				const selection = this.dateSelection(input, ["uploaded", "modified"])
+				const sort = (optionalStr("sort") ?? "newest") as ListingSort
+				const kind = optionalStr("kind")
+				const since = EVAL_NOW - RECENT_DAYS * 86_400_000
+				const recents = this.state.drive.filter(
+					item => item.kind === "file" && !item.trashed && this.driveDate(item, "uploaded") >= since
+				)
+				const oldest = Math.min(...recents.map(item => this.driveDate(item, "uploaded")))
+				const ofKind = recents.filter(item => this.matchesKind(item, kind))
+				const kept = this.sortListing(
+					ofKind.filter(item => this.inSelection(item, selection)),
+					sort,
+					selection.field
+				)
+				const reachesBack = recents.length > 0 && selection.bounds !== null && selection.bounds.start < oldest
+
+				return {
+					// Like the app: Recents rows carry no location; a path only where a listing the app holds has the
+					// item's directory (here: one listed earlier in the conversation).
+					items: kept.slice(0, RECENT_LIMIT).map(item => {
+						const listed = item.parent !== null && this.exposed.has(item.parent)
+						const { path, ...summary } = this.summary(item)
+
+						return {
+							...summary,
+							...(listed
+								? {
+										path
+									}
+								: {}),
+							...this.listingFields(item, {
+								date: selection.field,
+								size: sort === "largest" || sort === "smallest"
+							})
+						}
+					}),
+					...(kept.length > RECENT_LIMIT
+						? {
+								more: kept.length - RECENT_LIMIT
+							}
+						: {}),
+					...(selection.range === null
+						? {}
+						: {
+								dates: `${selection.field} ${selection.range}`
+							}),
+					...joinNotes(
+						this.emptyNote(selection, kept.length, ofKind.length),
+						reachesBack
+							? {
+									note: `Recents reaches back to uploads of ${evalLocalDay(new Date(oldest).toISOString())}; a file uploaded earlier would not be listed here.`
+								}
+							: {}
+					)
+				}
+			}
+
+			case "list_photos": {
+				const selection = this.dateSelection(input, ["taken"])
+				const kind = optionalStr("kind") ?? "any"
+				// Like the app: the Photos root's media, newest taken first; a fixture photo was taken when last modified.
+				const photos = this.descendants(PHOTOS_ROOT)
+					.filter(
+						item =>
+							item.kind === "file" &&
+							[...(EXTENSIONS["image"] ?? []), ...(EXTENSIONS["video"] ?? [])].includes(extension(item.name))
+					)
+					.sort((a, b) => Date.parse(b.modified) - Date.parse(a.modified))
+				const ofKind = photos.filter(item => kind === "any" || (EXTENSIONS[kind] ?? []).includes(extension(item.name)))
+				const kept = ofKind.filter(item => this.inSelection(item, { ...selection, field: "modified" }))
+				const ordered = optionalStr("sort") === "oldest" ? kept.toReversed() : kept
+
+				return {
+					photos: ordered.slice(0, PHOTOS_LIMIT).map(item => {
+						this.exposed.add(item.handle)
+
+						return {
+							handle: item.handle,
+							name: item.name,
+							taken: evalLocalDay(item.modified)
+						}
+					}),
+					...(ordered.length > PHOTOS_LIMIT
+						? {
+								more: ordered.length - PHOTOS_LIMIT
+							}
+						: {}),
+					...(selection.range === null
+						? {}
+						: {
+								dates: `${selection.field} ${selection.range}`
+							}),
+					...this.emptyNote(selection, kept.length, ofKind.length)
+				}
+			}
+
+			case "get_storage": {
+				const { storageUsed, maxStorage, versionedStorage } = this.state.account
+
+				return storageSummary({
+					storageUsed: BigInt(storageUsed),
+					maxStorage: BigInt(maxStorage),
+					versionedStorage: BigInt(versionedStorage)
+				})
 			}
 
 			case "get_item_info": {
 				const item = this.driveItem(str("handle"))
 
+				const totals = item.kind === "directory" ? this.directoryTotals(item.handle) : null
+
 				return {
 					...this.summary(item),
-					size: item.kind === "file" ? item.size : this.children(item.handle).length + " items",
+					size:
+						totals === null
+							? formatBytes(item.size)
+							: `${formatBytes(totals.bytes)} in ${String(totals.files)} files and ${String(totals.directories)} directories`,
+					// Like the app: the created day only where it differs from the modified one.
+					...(evalLocalDay(item.uploaded ?? item.modified) === evalLocalDay(item.modified)
+						? {}
+						: {
+								created: evalLocalDay(item.uploaded ?? item.modified)
+							}),
 					modified: evalLocalDay(item.modified),
 					favorite: item.favorite,
 					shared: item.shared
@@ -718,6 +1071,7 @@ export class FakeApp {
 			case "list_notes": {
 				const query = optionalStr("query")
 				const queryTokens = query === undefined ? [] : tokens(query)
+				const selection = this.dateSelection(input, ["edited"])
 				const matches = this.state.notes.filter(item => {
 					if (item.trashed) {
 						return false
@@ -736,8 +1090,31 @@ export class FakeApp {
 					)
 				})
 
+				const dated = matches.filter(item => selection.bounds === null || inDayRange(Date.parse(item.edited), selection.bounds))
+				// Like the app: a period that alone empties a search by words gives way to the word matches.
+				const undated = dated.length === 0 && queryTokens.length > 0 && matches.length > 0 && selection.range !== null
+				const kept = undated ? matches : dated
+				// Like the app's sidebar: pinned first, archived last, newest edit first, at most NOTES_LIMIT.
+				const rank = (item: Note) => (item.pinned ? 0 : item.archived ? 2 : 1)
+				const ordered = kept.toSorted((a, b) => rank(a) - rank(b) || Date.parse(b.edited) - Date.parse(a.edited))
+
 				return {
-					notes: matches.map(item => this.noteSummary(item))
+					notes: ordered.slice(0, NOTES_LIMIT).map(item => this.noteSummary(item)),
+					...(ordered.length > NOTES_LIMIT
+						? {
+								more: ordered.length - NOTES_LIMIT
+							}
+						: {}),
+					...(selection.range === null || undated
+						? {}
+						: {
+								dates: `${selection.field} ${selection.range}`
+							}),
+					...(undated
+						? {
+								note: `None of these is dated ${selection.range ?? ""}; they match the words at other dates.`
+							}
+						: this.emptyNote(selection, kept.length, matches.length))
 				}
 			}
 

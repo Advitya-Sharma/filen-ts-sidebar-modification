@@ -8,6 +8,8 @@ export type DriveItem = {
 	parent: string | null
 	size: number
 	modified: string
+	// When the file reached the drive, if not when it was last modified (an old file uploaded later).
+	uploaded?: string
 	favorite: boolean
 	trashed: boolean
 	shared: boolean
@@ -65,7 +67,14 @@ export type AppContext = {
 	playing: Playback | null
 }
 
+export type Account = {
+	storageUsed: number
+	maxStorage: number
+	versionedStorage: number
+}
+
 export type AppState = {
+	account: Account
 	drive: DriveItem[]
 	notes: Note[]
 	chats: Chat[]
@@ -120,7 +129,9 @@ const DRIVE: DriveItem[] = [
 	file("f4", "Invoice_2025-02_Telekom.pdf", "d2", 0.2 * MB, "2025-02-14T09:10:00Z"),
 	file("f5", "Rechnung_2024-06_Vodafone.pdf", "d2", 0.2 * MB, "2024-06-20T12:00:00Z"),
 	dir("d3", "Verträge", "d1"),
-	file("f6", "Mietvertrag_2023.pdf", "d3", 1.4 * MB, "2023-04-01T10:00:00Z"),
+	file("f6", "Mietvertrag_2023.pdf", "d3", 1.4 * MB, "2023-04-01T10:00:00Z", {
+		uploaded: "2025-09-16T18:00:00Z"
+	}),
 	file("f7", "Arbeitsvertrag_Filen.pdf", "d3", 0.9 * MB, "2024-08-01T10:00:00Z"),
 	file("f8", "CV_2025.docx", "d1", 0.05 * MB, "2025-05-10T20:30:00Z", {
 		favorite: true
@@ -142,7 +153,9 @@ const DRIVE: DriveItem[] = [
 	file("f12", "IMG_2042.jpg", "d5", 3.4 * MB, "2024-05-11T14:05:00Z"),
 	file("f13", "beach_sunset.heic", "d5", 2.8 * MB, "2024-05-12T19:40:00Z"),
 	dir("d6", "Familie", "d4"),
-	file("f14", "Oma_Geburtstag.jpg", "d6", 2.2 * MB, "2024-09-08T16:00:00Z"),
+	file("f14", "Oma_Geburtstag.jpg", "d6", 2.2 * MB, "2024-09-08T16:00:00Z", {
+		uploaded: "2025-10-06T17:00:00Z"
+	}),
 	file("f15", "Weihnachten_2024.mp4", "d6", 184 * MB, "2024-12-24T18:30:00Z"),
 	dir("d7", "Music", "d0"),
 	file("f16", "Bohemian Rhapsody.mp3", "d7", 8.1 * MB, "2023-02-01T10:00:00Z"),
@@ -369,8 +382,15 @@ export const DEFAULT_CONTEXT: AppContext = {
 	playing: null
 }
 
+const GB = 1024 * MB
+
 export function createFixtureState(context: Partial<AppContext> = {}): AppState {
 	return structuredClone({
+		account: {
+			storageUsed: Math.round(3.2 * GB),
+			maxStorage: 10 * GB,
+			versionedStorage: 450 * MB
+		},
 		drive: DRIVE,
 		notes: NOTES,
 		chats: CHATS,
