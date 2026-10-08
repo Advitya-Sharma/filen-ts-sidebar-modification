@@ -5,6 +5,7 @@ import {
 	dayRangeBounds,
 	describeDayRange,
 	inDayRange,
+	MAX_ARRAY_ITEMS,
 	resolveDateFilter,
 	type AssistantPeriodFilter
 } from "@filen/shared/assistant"
@@ -20,6 +21,9 @@ export type ToolOutcome =
 	| {
 			ok: true
 			result: unknown
+			// Every handle the result shows, with its name, where the result names one under another key than
+			// "handle" (as the app reports them to the loop).
+			returned?: Candidate[]
 	  }
 	| {
 			ok: false
@@ -134,6 +138,7 @@ function sameName(a: string, b: string): boolean {
 export class FakeApp {
 	readonly state: AppState
 	readonly exposed = new Set<string>()
+	private returned: Candidate[] | null = null
 
 	constructor(context: Partial<AppContext> = {}) {
 		this.state = createFixtureState(context)
@@ -201,12 +206,20 @@ export class FakeApp {
 		}
 
 		try {
+			const result = this.run({
+				name,
+				input: parsed.data as Record<string, unknown>
+			})
+			const returned = this.takeReturned()
+
 			return {
 				ok: true,
-				result: this.run({
-					name,
-					input: parsed.data as Record<string, unknown>
-				})
+				result,
+				...(returned === null
+					? {}
+					: {
+							returned
+						})
 			}
 		} catch (e) {
 			if (e instanceof CallError) {
@@ -229,7 +242,7 @@ export class FakeApp {
 	private directoryAt(path: string): DriveItem {
 		const wanted = normalizeText(path.trim().replace(/\/+$/, "") || "/")
 		const found = this.state.drive.find(
-			item => item.kind === "directory" && !item.trashed && normalizeText(this.pathOf(item)) === wanted
+			item => item.kind === "directory" && !item.trashed && this.inMyDrive(item) && normalizeText(this.pathOf(item)) === wanted
 		)
 
 		if (found === undefined) {
@@ -237,6 +250,20 @@ export class FakeApp {
 		}
 
 		return found
+	}
+
+	// Like the app: a path wins, being unambiguous, but one that names nothing (a model's guess beside a valid
+	// handle, e.g. a shared directory's name as a path) leaves the handle to decide.
+	private directoryAtOr(path: string, handle: string | undefined): DriveItem {
+		try {
+			return this.directoryAt(path)
+		} catch (e) {
+			if (handle === undefined || !(e instanceof CallError)) {
+				throw e
+			}
+
+			return this.directory(handle)
+		}
 	}
 
 	// Paths are unambiguous, so a path where a handle belongs is resolved instead of rejected.
@@ -247,7 +274,9 @@ export class FakeApp {
 			}
 
 			const wanted = normalizeText(value.trim().replace(/\/+$/, "") || "/")
-			const found = this.state.drive.find(item => !item.trashed && normalizeText(this.pathOf(item)) === wanted)
+			const found = this.state.drive.find(
+				item => !item.trashed && this.inMyDrive(item) && normalizeText(this.pathOf(item)) === wanted
+			)
 
 			if (found === undefined) {
 				return value
@@ -313,6 +342,32 @@ export class FakeApp {
 		return null
 	}
 
+	// What the call that just ran reported as returned, once.
+	private takeReturned(): Candidate[] | null {
+		const returned = this.returned
+
+		this.returned = null
+
+		return returned
+	}
+
+	// Under the drive root, as opposed to shared with the user from someone else's drive.
+	inMyDrive(item: DriveItem): boolean {
+		let current: DriveItem | undefined = item
+
+		for (let depth = 0; current !== undefined && depth < 64; depth++) {
+			if (current.parent === null) {
+				return current.handle === "d0"
+			}
+
+			const parent: string = current.parent
+
+			current = this.state.drive.find(candidate => candidate.handle === parent)
+		}
+
+		return false
+	}
+
 	pathOf(item: DriveItem): string {
 		const names: string[] = []
 		let current: DriveItem | undefined = item
@@ -346,7 +401,7 @@ export class FakeApp {
 		const pool: Candidate[] =
 			kind === "drive"
 				? this.state.drive
-						.filter(item => !item.trashed && item.parent !== null)
+						.filter(item => !item.trashed && item.parent !== null && this.inMyDrive(item))
 						.map(item => ({
 							handle: item.handle,
 							name: item.name
@@ -425,7 +480,11 @@ export class FakeApp {
 			handle: item.handle,
 			name: item.name,
 			kind: item.kind,
-			path: this.pathOf(item),
+			...(this.inMyDrive(item)
+				? {
+						path: this.pathOf(item)
+					}
+				: {}),
 			...(item.sharedBy === undefined
 				? {}
 				: {
@@ -648,7 +707,7 @@ export class FakeApp {
 			throw new CallError("Pass words from the item name", true)
 		}
 		const matching = this.state.drive
-			.filter(item => item.parent !== null && !item.trashed && this.matchesKind(item, kind))
+			.filter(item => item.parent !== null && !item.trashed && this.inMyDrive(item) && this.matchesKind(item, kind))
 			.map(item => {
 				const haystack = normalizeText(item.name)
 
@@ -715,9 +774,10 @@ export class FakeApp {
 				// Models fill both optional fields or put a path into "handle"; take whichever resolves.
 				const handleArg = optionalStr("handle")
 				const path = optionalStr("path") ?? (handleArg?.startsWith("/") === true ? handleArg : undefined)
+				const byHandle = handleArg !== undefined && !handleArg.startsWith("/")
 				const target =
 					path !== undefined
-						? this.directoryAt(path)
+						? this.directoryAtOr(path, byHandle ? handleArg : undefined)
 						: handleArg !== undefined
 							? this.directory(handleArg)
 							: this.directoryAt("/")
@@ -741,7 +801,16 @@ export class FakeApp {
 				return {
 					directory: {
 						handle: target.handle,
-						path: this.pathOf(target)
+						...(this.inMyDrive(target)
+							? {
+									path: this.pathOf(target)
+								}
+							: {}),
+						...(target.sharedBy === undefined
+							? {}
+							: {
+									sharedBy: target.sharedBy
+								})
 					},
 					items: (sort === undefined ? kept : this.sortListing(kept, sort, selection.field, sizes.sizes)).map(item => {
 						this.exposed.add(item.handle)
@@ -777,7 +846,7 @@ export class FakeApp {
 				const kind = optionalStr("kind")
 				const since = EVAL_NOW - RECENT_DAYS * 86_400_000
 				const recents = this.state.drive.filter(
-					item => item.kind === "file" && !item.trashed && this.driveDate(item, "uploaded") >= since
+					item => item.kind === "file" && !item.trashed && this.inMyDrive(item) && this.driveDate(item, "uploaded") >= since
 				)
 				const oldest = Math.min(...recents.map(item => this.driveDate(item, "uploaded")))
 				const ofKind = recents.filter(item => this.matchesKind(item, kind))
@@ -897,7 +966,14 @@ export class FakeApp {
 							}),
 					modified: evalLocalDay(item.modified),
 					favorite: item.favorite,
-					shared: item.shared
+					// Like the app: only what the row says, so an owned item's shares and links are get_sharing's.
+					...(item.sharedBy === undefined
+						? {
+								sharing: "unknown: this tool does not show shares or links"
+							}
+						: {
+								sharedWithYou: true
+							})
 				}
 			}
 
@@ -1375,6 +1451,255 @@ export class FakeApp {
 					added: added.map(track => track.name),
 					alreadyThere: tracks.length - added.length,
 					playlist: item.name
+				}
+			}
+
+			case "list_section": {
+				const section = str("section")
+				const items = this.state.drive.filter(item => {
+					switch (section) {
+						case "favorites":
+							return item.favorite && !item.trashed
+						case "trash":
+							return item.trashed
+						case "shared_with_me":
+							return item.sharedBy !== undefined && item.parent === null
+						case "shared_by_me":
+							return (item.sharedWith?.length ?? 0) > 0 && !item.trashed
+						default:
+							return item.link !== undefined && !item.trashed
+					}
+				})
+				const queryTokens = tokens(optionalStr("query") ?? "")
+				// Like the app: the words narrow by name or by whom an item is shared with or by, and a long list is cut.
+				const kept = this.sortListing(
+					items.filter(item => {
+						const haystack = normalizeText([item.name, item.sharedBy ?? "", ...(item.sharedWith ?? [])].join(" "))
+
+						return queryTokens.every(token =>
+							tokenMatches({
+								haystack,
+								token
+							})
+						)
+					}),
+					"name",
+					"modified"
+				)
+
+				return {
+					section,
+					items: kept.slice(0, MAX_ARRAY_ITEMS).map(item => {
+						this.exposed.add(item.handle)
+
+						return {
+							handle: item.handle,
+							name: item.name,
+							kind: item.kind,
+							...(section === "favorites"
+								? {
+										path: this.pathOf(item)
+									}
+								: {}),
+							...(item.sharedBy === undefined
+								? {}
+								: {
+										sharedBy: item.sharedBy
+									}),
+							...(section === "shared_by_me"
+								? {
+										sharedWith: item.sharedWith
+									}
+								: {})
+						}
+					}),
+					...(kept.length > MAX_ARRAY_ITEMS
+						? {
+								more: kept.length - MAX_ARRAY_ITEMS
+							}
+						: {}),
+					...(section === "trash" && kept.length > 0
+						? {
+								note: "Only the user can restore or delete these, in the app. Do not offer to."
+							}
+						: {})
+				}
+			}
+
+			case "get_sharing": {
+				const item = this.driveItem(str("handle"))
+
+				if (item.parent === null && item.handle === "d0") {
+					throw new CallError("The drive root cannot be shared or linked; ask about an item in it", false)
+				}
+
+				if (item.sharedBy !== undefined) {
+					return {
+						handle: item.handle,
+						name: item.name,
+						sharedWithYou: true,
+						sharedBy: item.sharedBy,
+						note: "Its owner manages its links and shares."
+					}
+				}
+
+				const ancestors: DriveItem[] = []
+
+				for (let parent = item.parent; parent !== null && parent !== "d0";) {
+					const row = this.drive(parent)
+
+					ancestors.push(row)
+					parent = row.parent
+				}
+
+				const linkedThrough = item.link === undefined ? ancestors.find(ancestor => ancestor.link !== undefined) : undefined
+				const sharedThrough = ancestors.find(ancestor => (ancestor.sharedWith?.length ?? 0) > 0)
+
+				return {
+					handle: item.handle,
+					name: item.name,
+					publicLink: item.link ?? "none",
+					...(linkedThrough === undefined
+						? {}
+						: {
+								linkedThrough: linkedThrough.name
+							}),
+					sharedWith: item.sharedWith ?? [],
+					...(sharedThrough === undefined
+						? {}
+						: {
+								sharedThrough: {
+									directory: sharedThrough.name,
+									with: sharedThrough.sharedWith
+								}
+							})
+				}
+			}
+
+			case "find_contacts": {
+				const query = str("query")
+				const address = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/u.exec(query)?.[0].toLowerCase()
+				const queryTokens = tokens(query)
+
+				if (address === undefined && queryTokens.length === 0) {
+					throw new CallError("Pass words from the contact's name or email address", true)
+				}
+
+				// Like the app: an address matches only itself, words must all match the name or the address before
+				// its "@", so a domain or a near miss lends no one's chat handle to a draft.
+				const matches = this.state.contacts.filter(contact => {
+					if (address !== undefined) {
+						return contact.email.toLowerCase() === address
+					}
+
+					const haystack = normalizeText(`${contact.name} ${contact.email.split("@")[0] ?? ""}`)
+
+					return queryTokens.every(token =>
+						tokenMatches({
+							haystack,
+							token
+						})
+					)
+				})
+				const returned: Candidate[] = []
+				const rows = matches.map(contact => {
+					const chat = contact.chat === undefined ? undefined : this.state.chats.find(item => item.handle === contact.chat)
+
+					if (chat !== undefined) {
+						this.exposed.add(chat.handle)
+						returned.push({
+							handle: chat.handle,
+							name: chat.name
+						})
+					}
+
+					return {
+						name: contact.name,
+						email: contact.email,
+						...(chat === undefined
+							? {}
+							: {
+									chat: chat.handle
+								})
+					}
+				})
+
+				this.returned = returned
+
+				return {
+					contacts: rows,
+					...(rows.length === 0
+						? {
+								note: "No contact matches. Ask the user for the contact's name or exact email address."
+							}
+						: rows.some(row => row.chat === undefined)
+							? {
+									note: "A contact without a chat handle has no chat with the user yet; the user can start one from Contacts."
+								}
+							: {})
+				}
+			}
+
+			case "get_transfers": {
+				const transfers = this.state.transfers
+				const running = transfers.filter(transfer => transfer.status === "running" || transfer.status === "paused")
+				const finished = transfers.filter(transfer => transfer.status === "done" || transfer.status === "failed")
+				const sized = running.filter(transfer => transfer.size !== undefined && transfer.progress !== undefined)
+				const total = sized.reduce((sum, transfer) => sum + (transfer.size ?? 0), 0)
+				const done = sized.reduce((sum, transfer) => sum + ((transfer.size ?? 0) * (transfer.progress ?? 0)) / 100, 0)
+
+				return {
+					running: running.length,
+					...(running.length > 0 && total > 0
+						? {
+								overall: `${String(Math.floor((done / total) * 100))}%`
+							}
+						: {}),
+					failed: finished.filter(transfer => transfer.status === "failed").length,
+					transfers: [
+						...running.map(transfer => ({
+							name: transfer.name,
+							kind: transfer.kind,
+							status: transfer.status,
+							...(transfer.progress === undefined || transfer.size === undefined
+								? {}
+								: {
+										progress: `${String(transfer.progress)}%`,
+										size: formatBytes(transfer.size)
+									}),
+							...(transfer.left === undefined
+								? {}
+								: {
+										left: transfer.left
+									})
+						})),
+						...finished.map(transfer => {
+							if (transfer.item !== undefined) {
+								this.exposed.add(transfer.item)
+							}
+
+							return {
+								name: transfer.name,
+								...(transfer.item === undefined
+									? {}
+									: {
+											handle: transfer.item
+										}),
+								kind: transfer.kind,
+								status: transfer.status,
+								...(transfer.error === undefined
+									? {}
+									: {
+											error: transfer.error
+										})
+							}
+						})
+					],
+					...(transfers.length === 0
+						? {
+								note: "No uploads or downloads in this tab since it was opened."
+							}
+						: {})
 				}
 			}
 

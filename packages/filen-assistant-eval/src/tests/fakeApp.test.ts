@@ -350,4 +350,93 @@ describe("FakeApp", () => {
 			versions: "450 MiB"
 		})
 	})
+
+	it("lists the drive's own lists, with shared items outside My Drive", () => {
+		const app = new FakeApp()
+		const section = (name: string) =>
+			(ok(app.execute({ name: "list_section", args: { section: name } })) as { items: { handle: string }[] }).items.map(
+				item => item.handle
+			)
+
+		expect(section("favorites")).toEqual(["d5", "f8"])
+		expect(section("trash")).toEqual(["d49", "f84", "f45"])
+		expect(section("shared_with_me")).toEqual(["d51", "d50", "f83"])
+		expect(section("shared_by_me")).toEqual(["d11", "f10"])
+		expect(section("public_links")).toEqual(["d5", "f33"])
+
+		// Neither search nor a path reaches into someone else's drive.
+		expect(ok(app.execute({ name: "search_items", args: { query: "Lohnsteuerbescheinigung" } }))["results"]).toEqual([])
+		expect(app.execute({ name: "list_directory", args: { path: "/Steuerunterlagen 2025" } }).ok).toBe(false)
+		expect(ok(app.execute({ name: "list_directory", args: { handle: "d50" } }))["directory"]).toEqual({
+			handle: "d50",
+			sharedBy: "anna.schmidt@example.com"
+		})
+	})
+
+	it("reports links and shares, also through a parent directory", () => {
+		const app = new FakeApp({ directory: "d11", selection: ["f27"] })
+
+		expect(ok(app.execute({ name: "get_sharing", args: { handle: "f27" } }))).toEqual({
+			handle: "f27",
+			name: "roadmap.md",
+			publicLink: "none",
+			sharedWith: [],
+			sharedThrough: { directory: "Website relaunch", with: ["lena.hoffmann@example.com", "tom.becker@example.com"] }
+		})
+		expect(ok(app.execute({ name: "get_sharing", args: { handle: "d11" } }))["sharedWith"]).toEqual([
+			"lena.hoffmann@example.com",
+			"tom.becker@example.com"
+		])
+	})
+
+	it("finds contacts with the chat to write them in, and reports it as returned", () => {
+		const app = new FakeApp()
+		const found = app.execute({ name: "find_contacts", args: { query: "carlos.ruiz@example.com" } })
+
+		expect(found).toEqual({
+			ok: true,
+			result: { contacts: [{ name: "Carlos Ruiz", email: "carlos.ruiz@example.com", chat: "c3" }] },
+			returned: [{ handle: "c3", name: "Carlos Ruiz" }]
+		})
+		expect(app.exposed.has("c3")).toBe(true)
+		expect(ok(app.execute({ name: "find_contacts", args: { query: "Lena" } }))["note"]).toContain("no chat")
+	})
+
+	it("matches contacts only on an exact address or every word, so a domain grounds no one's chat", () => {
+		const app = new FakeApp()
+
+		for (const query of ["example.com", "carlos@example.com", "Carlos Becker"]) {
+			expect(app.execute({ name: "find_contacts", args: { query } })).toEqual({
+				ok: true,
+				result: { contacts: [], note: "No contact matches. Ask the user for the contact's name or exact email address." },
+				returned: []
+			})
+		}
+	})
+
+	it("narrows a drive list by name or by whom an item is shared with, and leaves an owned item's sharing unchecked", () => {
+		const app = new FakeApp({ directory: "d11", selection: ["f27"] })
+
+		expect(
+			(ok(app.execute({ name: "list_section", args: { section: "trash", query: "bewerbung" } })) as { items: { handle: string }[] })
+				.items
+		).toMatchObject([{ handle: "f84" }])
+		expect(
+			(
+				ok(app.execute({ name: "list_section", args: { section: "shared_with_me", query: "anna" } })) as {
+					items: { handle: string }[]
+				}
+			).items
+		).toMatchObject([{ handle: "d50" }])
+		expect(ok(app.execute({ name: "get_item_info", args: { handle: "f27" } }))["sharing"]).toBe(
+			"unknown: this tool does not show shares or links"
+		)
+	})
+
+	it("reports transfers with progress, failures and the item an upload became", () => {
+		const transfers = ok(new FakeApp().execute({ name: "get_transfers", args: {} }))
+
+		expect(transfers).toMatchObject({ running: 2, overall: "23%", failed: 1 })
+		expect(transfers["transfers"]).toContainEqual({ name: "report_Q3.pdf", handle: "f33", kind: "upload", status: "done" })
+	})
 })

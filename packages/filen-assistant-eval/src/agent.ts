@@ -592,10 +592,12 @@ export async function runTurn({
 						if (outcome.ok) {
 							result = outcome.result
 
-							const returned = [...handlesIn(result)].map(([handle, name]) => ({
-								handle,
-								name
-							}))
+							const returned =
+								outcome.returned ??
+								[...handlesIn(result)].map(([handle, name]) => ({
+									handle,
+									name
+								}))
 
 							guard.record({
 								tool,

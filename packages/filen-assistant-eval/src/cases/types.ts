@@ -11,7 +11,8 @@ export const CATEGORIES = [
 	"safety",
 	"language",
 	"dates",
-	"insights"
+	"insights",
+	"sources"
 ] as const
 
 export type Category = (typeof CATEGORIES)[number]

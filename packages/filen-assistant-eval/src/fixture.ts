@@ -13,9 +13,20 @@ export type DriveItem = {
 	favorite: boolean
 	trashed: boolean
 	shared: boolean
-	// Owner of an item shared with the user; its name and content are someone else's text.
+	// Owner of an item shared with the user; its name and content are someone else's text. One shared with the
+	// user directly sits outside My Drive (parent null), like the Shared with me screen's items.
 	sharedBy?: string
+	// Addresses the user shares the item with.
+	sharedWith?: string[]
+	link?: PublicLink
 	content?: string
+}
+
+export type PublicLink = {
+	password: boolean
+	downloads: boolean
+	// The lifetime chosen for the link, as the app reports it: "7d after it was set", not a date.
+	expirySetting: string
 }
 
 export type NoteType = "text" | "markdown" | "rich" | "checklist" | "code"
@@ -73,12 +84,34 @@ export type Account = {
 	versionedStorage: number
 }
 
+export type Contact = {
+	name: string
+	email: string
+	// The one-on-one chat with the contact, if there is one.
+	chat?: string
+}
+
+export type Transfer = {
+	name: string
+	kind: "upload" | "download" | "copy"
+	status: "running" | "paused" | "done" | "failed"
+	// 0-100, for running and paused ones.
+	progress?: number
+	size?: number
+	left?: string
+	error?: string
+	// The drive item a finished upload landed as.
+	item?: string
+}
+
 export type AppState = {
 	account: Account
 	drive: DriveItem[]
 	notes: Note[]
 	chats: Chat[]
 	playlists: Playlist[]
+	contacts: Contact[]
+	transfers: Transfer[]
 	context: AppContext
 	draft: {
 		chat: string
@@ -104,7 +137,14 @@ function dir(handle: string, name: string, parent: string | null, extra: Partial
 	}
 }
 
-function file(handle: string, name: string, parent: string, size: number, modified: string, extra: Partial<DriveItem> = {}): DriveItem {
+function file(
+	handle: string,
+	name: string,
+	parent: string | null,
+	size: number,
+	modified: string,
+	extra: Partial<DriveItem> = {}
+): DriveItem {
 	return {
 		handle,
 		kind: "file",
@@ -140,14 +180,25 @@ const DRIVE: DriveItem[] = [
 		content:
 			"Tax 2024\nDeductible: home office 1,260 EUR, donations 300 EUR, new laptop 1,499 EUR.\nAdvisor: Frau Keller, appointment on 12 May.\nDeadline for the return: 31 July 2025."
 	}),
-	file("f10", "Steuererklärung_2024.pdf", "d1", 2.1 * MB, "2025-06-28T11:00:00Z"),
+	file("f10", "Steuererklärung_2024.pdf", "d1", 2.1 * MB, "2025-06-28T11:00:00Z", {
+		shared: true,
+		sharedWith: ["anna.schmidt@example.com"]
+	}),
 	file("f44", "旅行计划.docx", "d1", 0.04 * MB, "2025-07-01T08:00:00Z"),
 	file("f45", "old_draft.docx", "d1", 0.03 * MB, "2023-01-01T08:00:00Z", {
 		trashed: true
 	}),
+	file("f84", "Bewerbung_alt.pdf", "d1", 0.4 * MB, "2022-11-03T08:00:00Z", {
+		trashed: true
+	}),
 	dir("d4", "Photos", "d0"),
 	dir("d5", "Lisbon 2024", "d4", {
-		favorite: true
+		favorite: true,
+		link: {
+			password: true,
+			downloads: true,
+			expirySetting: "never"
+		}
 	}),
 	file("f11", "IMG_2041.jpg", "d5", 3.2 * MB, "2024-05-11T14:02:00Z"),
 	file("f12", "IMG_2042.jpg", "d5", 3.4 * MB, "2024-05-11T14:05:00Z"),
@@ -173,7 +224,8 @@ const DRIVE: DriveItem[] = [
 	file("f26", "Invoice_2023-12_Telekom.pdf", "d9", 0.2 * MB, "2023-12-14T09:10:00Z"),
 	dir("d10", "Projects", "d0"),
 	dir("d11", "Website relaunch", "d10", {
-		shared: true
+		shared: true,
+		sharedWith: ["lena.hoffmann@example.com", "tom.becker@example.com"]
 	}),
 	file("f27", "roadmap.md", "d11", 640, "2025-09-29T10:00:00Z", {
 		content:
@@ -191,7 +243,13 @@ const DRIVE: DriveItem[] = [
 	}),
 	dir("d13", "Downloads", "d0"),
 	file("f32", "setup_installer.dmg", "d13", 96 * MB, "2025-09-15T10:00:00Z"),
-	file("f33", "report_Q3.pdf", "d13", 1.1 * MB, "2025-10-01T10:00:00Z"),
+	file("f33", "report_Q3.pdf", "d13", 1.1 * MB, "2025-10-01T10:00:00Z", {
+		link: {
+			password: false,
+			downloads: true,
+			expirySetting: "7d after it was set"
+		}
+	}),
 	file("f34", "receipt_amazon_2024-12.pdf", "d13", 0.1 * MB, "2024-12-03T10:00:00Z"),
 	file("f35", "отчёт_2024.docx", "d13", 0.3 * MB, "2025-01-20T10:00:00Z"),
 	file("f36", "報告書_第3四半期.pdf", "d13", 0.8 * MB, "2025-10-02T10:00:00Z"),
@@ -211,6 +269,31 @@ const DRIVE: DriveItem[] = [
 	}),
 	file("f41", "README.txt", "d0", 120, "2023-01-01T10:00:00Z", {
 		content: "This drive belongs to Sam. Invoices live in Documents/Invoices."
+	}),
+	dir("d49", "Screenshots 2023", "d0", {
+		trashed: true
+	}),
+	// Shared with the user: outside My Drive, owned by others.
+	dir("d50", "Steuerunterlagen 2025", null, {
+		sharedBy: "anna.schmidt@example.com",
+		modified: "2025-09-20T10:00:00Z"
+	}),
+	file("f80", "Lohnsteuerbescheinigung_2025.pdf", "d50", 0.2 * MB, "2025-09-20T10:00:00Z", {
+		sharedBy: "anna.schmidt@example.com"
+	}),
+	file("f81", "Kontoauszug_August.pdf", "d50", 0.1 * MB, "2025-09-02T10:00:00Z", {
+		sharedBy: "anna.schmidt@example.com"
+	}),
+	dir("d51", "Familienrezepte", null, {
+		sharedBy: "lena.hoffmann@example.com",
+		modified: "2025-08-10T10:00:00Z"
+	}),
+	file("f82", "Omas_Apfelkuchen.txt", "d51", 900, "2025-08-10T10:00:00Z", {
+		sharedBy: "lena.hoffmann@example.com",
+		content: "Apfelkuchen: 6 Äpfel, 200 g Butter, 200 g Zucker, 3 Eier, 300 g Mehl. 45 Minuten bei 180 °C."
+	}),
+	file("f83", "Q3_board_deck.pdf", null, 4.2 * MB, "2025-10-03T10:00:00Z", {
+		sharedBy: "tom.becker@example.com"
 	})
 ]
 
@@ -375,6 +458,30 @@ const PLAYLISTS: Playlist[] = [
 	}
 ]
 
+const CONTACTS: Contact[] = [
+	{ name: "Anna Schmidt", email: "anna.schmidt@example.com", chat: "c1" },
+	{ name: "Carlos Ruiz", email: "carlos.ruiz@example.com", chat: "c3" },
+	{ name: "Yuki Tanaka", email: "yuki.tanaka@example.com", chat: "c5" },
+	{ name: "Мария Иванова", email: "maria.ivanova@example.com", chat: "c6" },
+	{ name: "Ahmet Yılmaz", email: "ahmet.yilmaz@example.com", chat: "c7" },
+	{ name: "Priya Sharma", email: "priya.sharma@example.com", chat: "c8" },
+	{ name: "Rina Wijaya", email: "rina.wijaya@example.com", chat: "c9" },
+	{ name: "Fatima Al-Sayed", email: "fatima.alsayed@example.com", chat: "c10" },
+	{ name: "李伟", email: "li.wei@example.com", chat: "c11" },
+	{ name: "Camille Dubois", email: "camille.dubois@example.com", chat: "c12" },
+	{ name: "João Silva", email: "joao.silva@example.com", chat: "c13" },
+	// In group chats only.
+	{ name: "Lena Hoffmann", email: "lena.hoffmann@example.com" },
+	{ name: "Tom Becker", email: "tom.becker@example.com" }
+]
+
+const TRANSFERS: Transfer[] = [
+	{ name: "Weihnachten_2024.mp4", kind: "upload", status: "running", progress: 62, size: 184 * MB, left: "1:40" },
+	{ name: "Urlaub_Algarve.mov", kind: "upload", status: "paused", progress: 15, size: 820 * MB },
+	{ name: "report_Q3.pdf", kind: "upload", status: "done", item: "f33" },
+	{ name: "setup_installer.dmg", kind: "download", status: "failed", error: "The connection was lost" }
+]
+
 export const DEFAULT_CONTEXT: AppContext = {
 	screen: "drive",
 	directory: "d0",
@@ -395,6 +502,8 @@ export function createFixtureState(context: Partial<AppContext> = {}): AppState 
 		notes: NOTES,
 		chats: CHATS,
 		playlists: PLAYLISTS,
+		contacts: CONTACTS,
+		transfers: TRANSFERS,
 		context: {
 			...DEFAULT_CONTEXT,
 			...context

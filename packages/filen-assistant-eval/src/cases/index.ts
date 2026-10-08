@@ -5,6 +5,7 @@ import { LANGUAGE_CASES } from "./language"
 import { MULTI_STEP_CASES } from "./multiStep"
 import { PROMPTING_CASES } from "./prompting"
 import { MULTIPLE_CASES, PARALLEL_CASES, SIMPLE_CASES } from "./single"
+import { SOURCES_CASES } from "./sources"
 import type { EvalCase } from "./types"
 
 export const EVAL_CASES: readonly EvalCase[] = [
@@ -19,5 +20,6 @@ export const EVAL_CASES: readonly EvalCase[] = [
 	...PROMPTING_CASES,
 	...DATE_CASES,
 	...DATE_FILTER_CASES,
-	...INSIGHTS_CASES
+	...INSIGHTS_CASES,
+	...SOURCES_CASES
 ]
