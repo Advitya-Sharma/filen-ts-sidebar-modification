@@ -9,8 +9,8 @@ import { CODE_FILE_EXTENSIONS, effectiveExtension, extensionStart } from "@filen
 export type PreviewCategory =
 	"image" | "rawImage" | "video" | "audio" | "pdf" | "docx" | "spreadsheet" | "text" | "code" | "markdown" | "archive" | "other"
 
-// Whole-buffer preview memory ceiling (old-web's MAX_PREVIEW_SIZE_WEB precedent): pdf/docx/text/code/
-// markdown download fully into RAM before rendering, so an oversize file is excluded from canPreview
+// Whole-buffer preview memory ceiling (old-web's MAX_PREVIEW_SIZE_WEB precedent): pdf/docx (and text,
+// under its own lower cap below) download fully into RAM before rendering, so an oversize file is excluded from canPreview
 // rather than risking a tab-crashing allocation. video/audio/image stream via the service worker's
 // inline Range route instead and are never bounded by this — image ALSO keeps a whole-buffer fallback
 // (dev / SW absent / stream registration failure) that this cap does not gate either, since the SW's
@@ -24,6 +24,11 @@ export const PREVIEW_MAX_BYTES = 268_435_456n // 256 MiB
 // A grid holds every cell's view in memory, several times the file's own size (an .xlsx is zipped), so
 // spreadsheets stop well below the other whole-buffer previews.
 export const SPREADSHEET_MAX_BYTES = 67_108_864n // 64 MiB
+// Text viewers hold the file as a string (UTF-16, twice its bytes) plus the editor's own document model,
+// and real text files are far smaller, so text, code, markdown and open-as-text stop lower still.
+export const TEXT_MAX_BYTES = 33_554_432n // 32 MiB
+
+const TEXT_CATEGORIES: ReadonlySet<PreviewCategory> = new Set(["text", "code", "markdown"])
 
 // HEIC/HEIF resolve to the "image" category below like every other image extension, but browsers
 // cannot decode them inline — needsImageTransform/canPreview single them out to route through the
@@ -190,7 +195,7 @@ export function canPreview(item: DriveItem): boolean {
 export function canOpenAsText(item: DriveItem): boolean {
 	const base = asDirectoryOrFile(item)
 
-	return base.type === "file" && !base.data.undecryptable && previewType(item) === "other" && base.data.size <= PREVIEW_MAX_BYTES
+	return base.type === "file" && !base.data.undecryptable && previewType(item) === "other" && base.data.size <= TEXT_MAX_BYTES
 }
 
 // The JS-memory ceiling for a category previewed from a whole buffer. null for rawImage: it is not
@@ -202,7 +207,11 @@ export function bufferedSizeCap(category: PreviewCategory): bigint | null {
 		return null
 	}
 
-	return category === "spreadsheet" ? SPREADSHEET_MAX_BYTES : PREVIEW_MAX_BYTES
+	if (category === "spreadsheet") {
+		return SPREADSHEET_MAX_BYTES
+	}
+
+	return TEXT_CATEGORIES.has(category) ? TEXT_MAX_BYTES : PREVIEW_MAX_BYTES
 }
 
 // Decision for a streamed viewer's POST-resolution failure (network drop mid-seek, an SW-side decrypt

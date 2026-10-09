@@ -17,6 +17,7 @@ import {
 	decodeUtf8,
 	bufferedSizeCap,
 	PREVIEW_MAX_BYTES,
+	TEXT_MAX_BYTES,
 	RAW_IMAGE_EXTENSIONS
 } from "@/features/drive/lib/preview.logic"
 import { ARCHIVE_NAME_EXTENSIONS } from "@/features/drive/lib/archiveFormats"
@@ -356,13 +357,13 @@ describe("fileTypeExtension", () => {
 })
 
 describe("canOpenAsText", () => {
-	it("holds for a decryptable file of an unknown type within the preview cap", () => {
+	it("holds for a decryptable file of an unknown type within the text cap", () => {
 		expect(canOpenAsText(fileNamed("data.bin"))).toBe(true)
-		expect(canOpenAsText(fileNamed("data.bin", { size: PREVIEW_MAX_BYTES }))).toBe(true)
+		expect(canOpenAsText(fileNamed("data.bin", { size: TEXT_MAX_BYTES }))).toBe(true)
 	})
 
 	it("never holds over the cap, for a known type, a directory or an undecryptable file", () => {
-		expect(canOpenAsText(fileNamed("data.bin", { size: PREVIEW_MAX_BYTES + 1n }))).toBe(false)
+		expect(canOpenAsText(fileNamed("data.bin", { size: TEXT_MAX_BYTES + 1n }))).toBe(false)
 		expect(canOpenAsText(fileNamed("notes.txt"))).toBe(false)
 		expect(canOpenAsText(fileNamed("LICENSE"))).toBe(false)
 		expect(canOpenAsText(dirItem())).toBe(false)
@@ -419,23 +420,29 @@ describe("canPreview", () => {
 		expect(canPreview(fileNamed("doc.pdf", { size: PREVIEW_MAX_BYTES }))).toBe(true)
 	})
 
-	// text/code/markdown are whole-buffer categories too (never in STREAMED_CATEGORIES) — same cap
-	// applies, no category-specific override. A 256 MiB+1 log file must refuse preview rather than ever
-	// reaching CodeMirror.
+	// text/code/markdown are whole-buffer categories with their own, lower cap: a 32 MiB+1 log file must
+	// refuse preview rather than ever reaching CodeMirror.
 	it.each([
 		["notes.txt", "text"],
 		["script.ts", "code"],
 		["readme.md", "markdown"]
-	])("is false for a %s (%s) over the size cap", name => {
-		expect(canPreview(fileNamed(name, { size: PREVIEW_MAX_BYTES + 1n }))).toBe(false)
+	])("is false for a %s (%s) over the text size cap", name => {
+		expect(canPreview(fileNamed(name, { size: TEXT_MAX_BYTES + 1n }))).toBe(false)
 	})
 
 	it.each([
 		["notes.txt", "text"],
 		["script.ts", "code"],
 		["readme.md", "markdown"]
-	])("is true for a %s (%s) exactly at the size cap", name => {
-		expect(canPreview(fileNamed(name, { size: PREVIEW_MAX_BYTES }))).toBe(true)
+	])("is true for a %s (%s) exactly at the text size cap", name => {
+		expect(canPreview(fileNamed(name, { size: TEXT_MAX_BYTES }))).toBe(true)
+	})
+
+	it("caps text below the other whole-buffer categories", () => {
+		expect(bufferedSizeCap("text")).toBe(TEXT_MAX_BYTES)
+		expect(bufferedSizeCap("code")).toBe(TEXT_MAX_BYTES)
+		expect(bufferedSizeCap("markdown")).toBe(TEXT_MAX_BYTES)
+		expect(bufferedSizeCap("pdf")).toBe(PREVIEW_MAX_BYTES)
 	})
 
 	it("is true for a streamed category (video/audio/image) even past the whole-buffer size cap — uncapped", () => {

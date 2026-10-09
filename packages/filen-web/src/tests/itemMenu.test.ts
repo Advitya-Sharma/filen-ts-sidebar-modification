@@ -26,7 +26,7 @@ import type { Dir, File, SharedDir, UuidStr } from "@filen/sdk-rs"
 import { narrowItem, type DriveItem } from "@/features/drive/lib/item"
 import { type DriveVariant } from "@/features/drive/lib/preferences"
 import type { DriveItemLinkStatus } from "@/features/drive/queries/drive"
-import { PREVIEW_MAX_BYTES } from "@/features/drive/lib/preview.logic"
+import { TEXT_MAX_BYTES } from "@/features/drive/lib/preview.logic"
 import { mockSharedFile, mockSharedRootDir, sharerRole } from "@/tests/fixtures/sdk"
 
 // itemMenu.logic.ts's imports reach the query client — unwanted under node vitest.
@@ -730,10 +730,10 @@ describe("driveItemActions — Open as text (a file nothing recognises)", () => 
 		return driveItemActions(item, variant, { open: true }).map(descriptor => descriptor.id)
 	}
 
-	it("takes Open's place for a file of an unknown type within the preview size cap", () => {
+	it("takes Open's place for a file of an unknown type within the text size cap", () => {
 		expect(openIds(unknownFileItem(), "drive")[0]).toBe("openAsText")
 		expect(openIds(unknownFileItem(), "drive")).not.toContain("open")
-		expect(openIds(unknownFileItem("data.bin", PREVIEW_MAX_BYTES), "recents")[0]).toBe("openAsText")
+		expect(openIds(unknownFileItem("data.bin", TEXT_MAX_BYTES), "recents")[0]).toBe("openAsText")
 		expect(openIds(unknownFileItem(), "trash")[0]).toBe("openAsText")
 	})
 
@@ -746,8 +746,8 @@ describe("driveItemActions — Open as text (a file nothing recognises)", () => 
 		})
 	})
 
-	it("is never offered for a file over the size cap", () => {
-		expect(openIds(unknownFileItem("huge.bin", PREVIEW_MAX_BYTES + 1n), "drive")).not.toContain("openAsText")
+	it("is never offered for a file over the text size cap", () => {
+		expect(openIds(unknownFileItem("huge.bin", TEXT_MAX_BYTES + 1n), "drive")).not.toContain("openAsText")
 	})
 
 	it("is never offered for a directory, a file of a known type or an undecryptable file", () => {
