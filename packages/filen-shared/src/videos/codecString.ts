@@ -38,6 +38,43 @@ class BitReader {
 
 		return value
 	}
+
+	public skip(count: number): boolean {
+		if (count > this.left) {
+			return false
+		}
+
+		this.position += count
+
+		return true
+	}
+
+	// Unsigned Exp-Golomb (ue(v)); null past the end or beyond 32 bits.
+	public ue(): number | null {
+		let zeros = 0
+		let bit = this.read(1)
+
+		while (bit === 0) {
+			zeros++
+
+			if (zeros > 31) {
+				return null
+			}
+
+			bit = this.read(1)
+		}
+
+		const rest = bit === null ? null : this.read(zeros)
+
+		return rest === null ? null : 2 ** zeros - 1 + rest
+	}
+
+	// Signed Exp-Golomb (se(v)).
+	public se(): number | null {
+		const value = this.ue()
+
+		return value === null ? null : value % 2 === 1 ? (value + 1) / 2 : -(value / 2)
+	}
 }
 
 // ── Video ────────────────────────────────────────────────────────────────────
@@ -96,14 +133,14 @@ export function parseAvcC(avcC: Uint8Array): AvcConfig | null {
 }
 
 // `fourcc` is the sample entry type (avc1, avc3); anything else is written as avc1.
+export function avcConfigCodecString(fourcc: string, config: Pick<AvcConfig, "profile" | "compatibility" | "level">): string {
+	return `${fourcc === "avc3" ? "avc3" : "avc1"}.${hex(config.profile, 2)}${hex(config.compatibility, 2)}${hex(config.level, 2)}`
+}
+
 export function avcCodecString({ fourcc, avcC }: { fourcc: string; avcC: Uint8Array }): string | null {
 	const config = parseAvcC(avcC)
 
-	if (config === null) {
-		return null
-	}
-
-	return `${fourcc === "avc3" ? "avc3" : "avc1"}.${hex(config.profile, 2)}${hex(config.compatibility, 2)}${hex(config.level, 2)}`
+	return config === null ? null : avcConfigCodecString(fourcc, config)
 }
 
 export interface HevcConfig {
@@ -154,10 +191,10 @@ function reverseBits32(value: number): number {
 export function hevcCodecString({ fourcc, hvcC }: { fourcc: string; hvcC: Uint8Array }): string | null {
 	const config = parseHvcC(hvcC)
 
-	if (config === null) {
-		return null
-	}
+	return config === null ? null : hevcConfigCodecString(fourcc, config)
+}
 
+export function hevcConfigCodecString(fourcc: string, config: Omit<HevcConfig, "bitDepth">): string {
 	const space = ["", "A", "B", "C"][config.profileSpace] ?? ""
 	const constraints = [...config.constraints]
 
@@ -395,6 +432,542 @@ export function vp9CodecString(config: Vp9Config): string | null {
 		dec(tail.matrix, 2),
 		tail.fullRange ? "01" : "00"
 	].join(".")
+}
+
+// ── Parameter sets ───────────────────────────────────────────────────────────
+
+// What an AVC/HEVC sequence parameter set says about the picture, for streams that carry no
+// configuration record (MPEG-TS, Annex B elementary streams).
+export interface SpsPicture {
+	width: number
+	height: number
+	bitDepth: number
+	// Sample aspect ratio, width over height.
+	par: number
+	// ISO/IEC 23091-2 TransferCharacteristics, null when the VUI does not say.
+	transfer: number | null
+}
+
+export type AvcSps = SpsPicture & Pick<AvcConfig, "profile" | "compatibility" | "level">
+
+export type HevcSps = SpsPicture & Omit<HevcConfig, "bitDepth">
+
+// A NAL unit's payload with the emulation-prevention bytes (00 00 03 → 00 00) removed.
+export function unescapeRbsp(nal: Uint8Array): Uint8Array {
+	const out = new Uint8Array(nal.length)
+	let length = 0
+	let zeros = 0
+
+	for (const byte of nal) {
+		if (zeros >= 2 && byte === 3) {
+			zeros = 0
+
+			continue
+		}
+
+		out[length++] = byte
+		zeros = byte === 0 ? zeros + 1 : 0
+	}
+
+	return out.subarray(0, length)
+}
+
+// Table E-1 sample aspect ratios by aspect_ratio_idc.
+const SAMPLE_ASPECT_RATIOS: readonly (readonly [number, number])[] = [
+	[0, 0],
+	[1, 1],
+	[12, 11],
+	[10, 11],
+	[16, 11],
+	[40, 33],
+	[24, 11],
+	[20, 11],
+	[32, 11],
+	[80, 33],
+	[18, 11],
+	[15, 11],
+	[64, 33],
+	[160, 99],
+	[4, 3],
+	[3, 2],
+	[2, 1]
+]
+
+// The start both VUI syntaxes share: aspect ratio, overscan, then the video signal type's colour description.
+function readVui(bits: BitReader): { par: number; transfer: number | null } {
+	let par = 1
+
+	if (bits.read(1) === 1) {
+		const idc = bits.read(8)
+		let ratio = idc === null ? undefined : SAMPLE_ASPECT_RATIOS[idc]
+
+		if (idc === 255) {
+			const width = bits.read(16)
+			const height = bits.read(16)
+
+			ratio = width === null || height === null ? undefined : [width, height]
+		}
+
+		if (ratio !== undefined && ratio[0] > 0 && ratio[1] > 0) {
+			par = Math.round((ratio[0] / ratio[1]) * 10_000) / 10_000
+		}
+	}
+
+	if (bits.read(1) === 1) {
+		bits.read(1)
+	}
+
+	if (bits.read(1) !== 1) {
+		return { par, transfer: null }
+	}
+
+	bits.read(4)
+
+	if (bits.read(1) !== 1) {
+		return { par, transfer: null }
+	}
+
+	bits.read(8)
+
+	return { par, transfer: bits.read(8) }
+}
+
+// Cropped picture size; null for one no decoder would produce.
+function croppedSize(width: number, height: number, crop: readonly number[], unitX: number, unitY: number): [number, number] | null {
+	const w = width - unitX * ((crop[0] ?? 0) + (crop[1] ?? 0))
+	const h = height - unitY * ((crop[2] ?? 0) + (crop[3] ?? 0))
+
+	return w > 0 && h > 0 && w <= 65_536 && h <= 65_536 ? [w, h] : null
+}
+
+function readCrop(bits: BitReader): number[] | null {
+	const crop: number[] = []
+
+	for (let i = 0; i < 4; i++) {
+		const value = bits.ue()
+
+		if (value === null) {
+			return null
+		}
+
+		crop.push(value)
+	}
+
+	return crop
+}
+
+function skipAvcScalingList(bits: BitReader, size: number): boolean {
+	let last = 8
+	let next = 8
+
+	for (let i = 0; i < size; i++) {
+		if (next !== 0) {
+			const delta = bits.se()
+
+			if (delta === null) {
+				return false
+			}
+
+			next = (last + delta + 256) % 256
+		}
+
+		last = next === 0 ? last : next
+	}
+
+	return true
+}
+
+// seq_parameter_set_rbsp() of an AVC SPS NAL unit (header byte included, emulation prevention not removed).
+export function parseAvcSps(nal: Uint8Array): AvcSps | null {
+	if (((nal[0] ?? 0) & 0x1f) !== 7 || nal.length < 5) {
+		return null
+	}
+
+	const bits = new BitReader(unescapeRbsp(nal.subarray(1)))
+	const profile = bits.read(8)
+	const compatibility = bits.read(8)
+	const level = bits.read(8)
+
+	if (profile === null || compatibility === null || level === null || bits.ue() === null) {
+		return null
+	}
+
+	// ChromaArrayType: chroma_format_idc, or 0 for 4:4:4 coded as three separate colour planes.
+	let chroma = 1
+	let bitDepth = 8
+
+	if (AVC_HIGH_PROFILES.has(profile)) {
+		const chromaFormat = bits.ue() ?? -1
+
+		if (chromaFormat < 0 || chromaFormat > 3) {
+			return null
+		}
+
+		chroma = chromaFormat === 3 && bits.read(1) === 1 ? 0 : chromaFormat
+
+		const luma = bits.ue()
+
+		if (luma === null || luma > 6 || bits.ue() === null) {
+			return null
+		}
+
+		bitDepth = luma + 8
+		bits.read(1)
+
+		// Twelve scaling lists for 4:4:4 (separate colour planes included), eight otherwise.
+		if (bits.read(1) === 1) {
+			for (let i = 0; i < (chromaFormat === 3 ? 12 : 8); i++) {
+				if (bits.read(1) === 1 && !skipAvcScalingList(bits, i < 6 ? 16 : 64)) {
+					return null
+				}
+			}
+		}
+	}
+
+	bits.ue()
+
+	const pocType = bits.ue()
+
+	if (pocType === 0) {
+		bits.ue()
+	} else if (pocType === 1) {
+		bits.read(1)
+		bits.se()
+		bits.se()
+
+		const cycle = bits.ue()
+
+		if (cycle === null || cycle > 255) {
+			return null
+		}
+
+		for (let i = 0; i < cycle; i++) {
+			bits.se()
+		}
+	} else if (pocType !== 2) {
+		return null
+	}
+
+	bits.ue()
+	bits.read(1)
+
+	const widthMbs = bits.ue()
+	const heightUnits = bits.ue()
+	const frameMbsOnly = bits.read(1)
+
+	if (widthMbs === null || heightUnits === null || frameMbsOnly === null) {
+		return null
+	}
+
+	if (frameMbsOnly === 0) {
+		bits.read(1)
+	}
+
+	bits.read(1)
+
+	const crop = bits.read(1) === 1 ? readCrop(bits) : [0, 0, 0, 0]
+
+	if (crop === null) {
+		return null
+	}
+
+	const fieldFactor = 2 - frameMbsOnly
+	const size = croppedSize(
+		(widthMbs + 1) * 16,
+		(heightUnits + 1) * 16 * fieldFactor,
+		crop,
+		chroma === 0 || chroma === 3 ? 1 : 2,
+		(chroma === 1 ? 2 : 1) * fieldFactor
+	)
+
+	if (size === null) {
+		return null
+	}
+
+	const vui = bits.read(1) === 1 ? readVui(bits) : { par: 1, transfer: null }
+
+	return { profile, compatibility, level, width: size[0], height: size[1], bitDepth, ...vui }
+}
+
+function skipHevcScalingListData(bits: BitReader): boolean {
+	for (let sizeId = 0; sizeId < 4; sizeId++) {
+		for (let matrixId = 0; matrixId < 6; matrixId += sizeId === 3 ? 3 : 1) {
+			if (bits.read(1) === 0) {
+				if (bits.ue() === null) {
+					return false
+				}
+
+				continue
+			}
+
+			const coefficients = Math.min(64, 1 << (4 + (sizeId << 1)))
+
+			if (sizeId > 1 && bits.se() === null) {
+				return false
+			}
+
+			for (let i = 0; i < coefficients; i++) {
+				if (bits.se() === null) {
+					return false
+				}
+			}
+		}
+	}
+
+	return true
+}
+
+// st_ref_pic_set() of an SPS. A set predicted from the one before it signals a flag per delta POC of
+// that set, so each set's negative (S0) and positive (S1) deltas are derived as in H.265 (7-61, 7-62).
+function skipShortTermRefPicSets(bits: BitReader, count: number): boolean {
+	let previous: { s0: number[]; s1: number[] } = { s0: [], s1: [] }
+
+	for (let index = 0; index < count; index++) {
+		if (index !== 0 && bits.read(1) === 1) {
+			const sign = bits.read(1)
+			const magnitude = bits.ue()
+
+			if (sign === null || magnitude === null) {
+				return false
+			}
+
+			const deltaRps = (1 - 2 * sign) * (magnitude + 1)
+			const deltas = previous.s0.length + previous.s1.length
+			const use: number[] = []
+
+			for (let j = 0; j <= deltas; j++) {
+				const usedByCurrent = bits.read(1)
+				const useDelta = usedByCurrent === 1 ? 1 : bits.read(1)
+
+				if (usedByCurrent === null || useDelta === null) {
+					return false
+				}
+
+				use.push(useDelta)
+			}
+
+			const s0: number[] = []
+			const s1: number[] = []
+			const negatives = previous.s0.length
+
+			for (let j = previous.s1.length - 1; j >= 0; j--) {
+				const poc = (previous.s1[j] ?? 0) + deltaRps
+
+				if (poc < 0 && use[negatives + j] === 1) {
+					s0.push(poc)
+				}
+			}
+
+			if (deltaRps < 0 && use[deltas] === 1) {
+				s0.push(deltaRps)
+			}
+
+			for (let j = 0; j < negatives; j++) {
+				const poc = (previous.s0[j] ?? 0) + deltaRps
+
+				if (poc < 0 && use[j] === 1) {
+					s0.push(poc)
+				}
+			}
+
+			for (let j = negatives - 1; j >= 0; j--) {
+				const poc = (previous.s0[j] ?? 0) + deltaRps
+
+				if (poc > 0 && use[j] === 1) {
+					s1.push(poc)
+				}
+			}
+
+			if (deltaRps > 0 && use[deltas] === 1) {
+				s1.push(deltaRps)
+			}
+
+			for (let j = 0; j < previous.s1.length; j++) {
+				const poc = (previous.s1[j] ?? 0) + deltaRps
+
+				if (poc > 0 && use[negatives + j] === 1) {
+					s1.push(poc)
+				}
+			}
+
+			previous = { s0, s1 }
+
+			continue
+		}
+
+		const negative = bits.ue()
+		const positive = bits.ue()
+
+		if (negative === null || positive === null || negative > 16 || positive > 16) {
+			return false
+		}
+
+		const s0: number[] = []
+		const s1: number[] = []
+
+		for (let i = 0; i < negative + positive; i++) {
+			const delta = bits.ue()
+
+			if (delta === null || bits.read(1) === null) {
+				return false
+			}
+
+			if (i < negative) {
+				s0.push((s0[i - 1] ?? 0) - (delta + 1))
+			} else {
+				s1.push((s1[i - negative - 1] ?? 0) + delta + 1)
+			}
+		}
+
+		previous = { s0, s1 }
+	}
+
+	return true
+}
+
+// The rest of an HEVC SPS up to its VUI; false when it cannot be walked.
+function skipToHevcVui(bits: BitReader, maxSubLayersMinus1: number): boolean {
+	const pocBits = bits.ue()
+
+	if (pocBits === null || pocBits > 12) {
+		return false
+	}
+
+	for (let i = bits.read(1) === 1 ? 0 : maxSubLayersMinus1; i <= maxSubLayersMinus1; i++) {
+		bits.ue()
+		bits.ue()
+		bits.ue()
+	}
+
+	for (let i = 0; i < 6; i++) {
+		bits.ue()
+	}
+
+	if (bits.read(1) === 1 && bits.read(1) === 1 && !skipHevcScalingListData(bits)) {
+		return false
+	}
+
+	bits.read(2)
+
+	if (bits.read(1) === 1) {
+		bits.read(8)
+		bits.ue()
+		bits.ue()
+		bits.read(1)
+	}
+
+	const sets = bits.ue()
+
+	if (sets === null || sets > 64 || !skipShortTermRefPicSets(bits, sets)) {
+		return false
+	}
+
+	if (bits.read(1) === 1) {
+		const longTerm = bits.ue()
+
+		if (longTerm === null || longTerm > 32) {
+			return false
+		}
+
+		for (let i = 0; i < longTerm; i++) {
+			bits.read(pocBits + 4)
+			bits.read(1)
+		}
+	}
+
+	bits.read(2)
+
+	return bits.read(1) === 1
+}
+
+// seq_parameter_set_rbsp() of an HEVC SPS NAL unit (2-byte header included, emulation prevention not removed).
+export function parseHevcSps(nal: Uint8Array): HevcSps | null {
+	if ((((nal[0] ?? 0) >> 1) & 0x3f) !== 33 || nal.length < 16) {
+		return null
+	}
+
+	const bits = new BitReader(unescapeRbsp(nal.subarray(2)))
+
+	bits.read(4)
+
+	const maxSubLayersMinus1 = bits.read(3) ?? 0
+
+	bits.read(1)
+
+	const first = bits.read(8)
+	const compatibility = bits.read(32)
+	const constraints: number[] = []
+
+	for (let i = 0; i < 6; i++) {
+		constraints.push(bits.read(8) ?? 0)
+	}
+
+	const level = bits.read(8)
+
+	if (first === null || compatibility === null || level === null) {
+		return null
+	}
+
+	const present: [number, number][] = []
+
+	for (let i = 0; i < maxSubLayersMinus1; i++) {
+		present.push([bits.read(1) ?? 0, bits.read(1) ?? 0])
+	}
+
+	if (maxSubLayersMinus1 > 0) {
+		bits.skip(2 * (8 - maxSubLayersMinus1))
+	}
+
+	for (const [profilePresent, levelPresent] of present) {
+		bits.skip(profilePresent * 88 + levelPresent * 8)
+	}
+
+	bits.ue()
+
+	let chroma = bits.ue()
+
+	if (chroma === null || chroma > 3) {
+		return null
+	}
+
+	if (chroma === 3 && bits.read(1) === 1) {
+		chroma = 0
+	}
+
+	const width = bits.ue()
+	const height = bits.ue()
+
+	if (width === null || height === null) {
+		return null
+	}
+
+	const crop = bits.read(1) === 1 ? readCrop(bits) : [0, 0, 0, 0]
+	const luma = bits.ue()
+
+	if (crop === null || luma === null || luma > 8 || bits.ue() === null) {
+		return null
+	}
+
+	const size = croppedSize(width, height, crop, chroma === 1 || chroma === 2 ? 2 : 1, chroma === 1 ? 2 : 1)
+
+	if (size === null) {
+		return null
+	}
+
+	const vui = skipToHevcVui(bits, maxSubLayersMinus1) ? readVui(bits) : { par: 1, transfer: null }
+
+	return {
+		profileSpace: first >> 6,
+		tier: (first >> 5) & 1,
+		profile: first & 0x1f,
+		compatibility,
+		constraints,
+		level,
+		width: size[0],
+		height: size[1],
+		bitDepth: luma + 8,
+		...vui
+	}
 }
 
 // ── Audio ────────────────────────────────────────────────────────────────────

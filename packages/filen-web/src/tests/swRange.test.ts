@@ -9,11 +9,30 @@ describe("parseRange", () => {
 		expect(parseRange("bytes=-100", 1000)).toEqual({ start: 900, end: 999, openEnded: false, suffix: true })
 	})
 
-	it("rejects an unsatisfiable or malformed range", () => {
+	it("rejects a malformed range or one that starts at or past the end", () => {
 		expect(parseRange("bytes=-", 1000)).toBeNull()
 		expect(parseRange("bytes=1000-", 1000)).toBeNull()
 		expect(parseRange("bytes=5-2", 1000)).toBeNull()
 		expect(parseRange("items=0-1", 1000)).toBeNull()
+		expect(parseRange("bytes=0-0", 0)).toBeNull()
+		expect(parseRange("bytes=-5", 0)).toBeNull()
+	})
+
+	it("clamps a last byte past the end to the last byte, as RFC 9110 asks", () => {
+		expect(parseRange("bytes=100-5000", 1000)).toEqual({ start: 100, end: 999, openEnded: false, suffix: false })
+		expect(parseRange(`bytes=0-${"9".repeat(400)}`, 1000)).toEqual({ start: 0, end: 999, openEnded: false, suffix: false })
+	})
+
+	it("answers a suffix longer than the file with the whole file", () => {
+		expect(parseRange("bytes=-5000", 1000)).toEqual({ start: 0, end: 999, openEnded: false, suffix: true })
+	})
+
+	it("serves a one-byte file", () => {
+		expect(parseRange("bytes=0-0", 1)).toEqual({ start: 0, end: 0, openEnded: false, suffix: false })
+		expect(parseRange("bytes=0-1", 1)).toEqual({ start: 0, end: 0, openEnded: false, suffix: false })
+		expect(parseRange("bytes=0-", 1)).toEqual({ start: 0, end: 0, openEnded: true, suffix: false })
+		expect(parseRange("bytes=-1", 1)).toEqual({ start: 0, end: 0, openEnded: false, suffix: true })
+		expect(parseRange("bytes=1-1", 1)).toBeNull()
 	})
 })
 

@@ -10,10 +10,7 @@
 			4151,
 			"FUmpZv0q17GDD0JATYCjbGliZWJtbCB2MS40LjcgKyBsaWJtYXRyb3NrYSB2MS43LjJXQahta3ZtZXJnZSB2MTAyLjAgKCdMaXR0bGUgSG91c2VzJykgNjQtYml0RImERuqqAERhiAtJD+fO5BAAc6SQ236vQud1oDJUMmrl+GQBLhZUrmtAya5Ag9eBAXPFiGzViwBa3dojg4EBnIEAIrWcg3VuZIaPVl9NUEVHNC9JU08vQVZDY6KtAWQAH//hABpnZAAfrNlAUAW7ARAAAAMAEAAAAwMA8YMZYAEABGjvicv9+PgAI+ODhAJ7yGoitZ2DdW5k4JawggUAuoIC0FSwhAAABQBUuoQAAALQrsHXgQJzxYgvuCLcBtv6Q4OBAiK1nIN1bmSGhUFfQUFDY6KFEZBW5QAj44OEAUWFVSK1nYN1bmThibWERzuAAJ+BAuxEVQAAAAAAAAAAAA=="
 		],
-		[
-			5600,
-			"H0O2dSVlrueBAKNK"
-		]
+		[5600, "H0O2dSVlrueBAKNK"]
 	],
 	"tiers": {
 		"card": {
@@ -50,6 +47,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1
@@ -88,6 +86,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1
@@ -126,6 +125,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1

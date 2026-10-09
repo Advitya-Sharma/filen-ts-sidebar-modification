@@ -131,7 +131,7 @@ describe("title page review fixes", () => {
 		const probe = { cover: null } as unknown as VideoProbe
 
 		expect(probeLandscapeCover(probe)).toBeNull()
-		expect(probeLandscapeCover({ ...probe, coverLand: { offset: 10, size: 20, mime: "image/jpeg" } } as VideoProbe)).toEqual({
+		expect(probeLandscapeCover({ ...probe, coverLand: { offset: 10, size: 20, mime: "image/jpeg" } })).toEqual({
 			offset: 10,
 			size: 20,
 			mime: "image/jpeg"

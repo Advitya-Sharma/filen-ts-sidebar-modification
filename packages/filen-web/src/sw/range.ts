@@ -9,7 +9,9 @@ export interface ByteRange {
 	suffix: boolean
 }
 
-// Parse a single-range `bytes=` header against the known total; null = unsatisfiable/absent.
+// Parse a single-range `bytes=` header against the known total; null = unsatisfiable/absent. A last-byte-pos
+// past the end is clamped to the last byte (RFC 9110 §14.1.2), as is a suffix longer than the file: only a
+// first-byte-pos at or past the end is unsatisfiable.
 export function parseRange(header: string, total: number): ByteRange | null {
 	const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
 	if (match === null) {
@@ -31,9 +33,9 @@ export function parseRange(header: string, total: number): ByteRange | null {
 		end = total - 1
 	} else {
 		start = Number(startStr)
-		end = endStr === "" ? total - 1 : Number(endStr)
+		end = endStr === "" ? total - 1 : Math.min(Number(endStr), total - 1)
 	}
-	if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || end >= total) {
+	if (!Number.isFinite(start) || start >= total || end < start) {
 		return null
 	}
 	return { start, end, openEnded: startStr !== "" && endStr === "", suffix: startStr === "" }

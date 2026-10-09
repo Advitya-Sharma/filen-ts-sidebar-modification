@@ -4,6 +4,7 @@ import { ItemThumbnail } from "@/features/drive/components/itemThumbnail"
 import { DriveDropdownMenuContent } from "@/features/drive/components/itemMenu"
 import { DriveCellContextMenuContent } from "@/features/drive/components/bulkMenu"
 import { showVideoBadge } from "@/features/drive/components/driveTile.logic"
+import { useFileKindVerdict } from "@/features/drive/hooks/useFileKindVerdict"
 import { useDriveItemCell, type DriveItemCellProps } from "@/features/drive/hooks/useDriveItemCell"
 import { dropHighlightClass } from "@/features/drive/hooks/useDriveDropTarget"
 import { cn } from "@filen/shared"
@@ -33,6 +34,7 @@ export function DriveTile({
 	registerRef
 }: DriveItemCellProps) {
 	const { t } = useTranslation("drive")
+	const verdict = useFileKindVerdict(item.data.uuid)
 	const { name, open, dragSource, searchHit, destination, drop, shared, bulkMenu, cut, press } = useDriveItemCell({
 		item,
 		index,
@@ -127,7 +129,7 @@ export function DriveTile({
 									<span className="sr-only">{t("driveFavorited")}</span>
 								</div>
 							) : null}
-							{showVideoBadge(item) ? (
+							{showVideoBadge(item, verdict) ? (
 								// Bottom-right, opposite the top corners both other badges (and the menu trigger)
 								// occupy — mobile's own play-triangle badge marks a video tile the same way; a
 								// duration label isn't available, so this deliberately scopes to the glyph only.

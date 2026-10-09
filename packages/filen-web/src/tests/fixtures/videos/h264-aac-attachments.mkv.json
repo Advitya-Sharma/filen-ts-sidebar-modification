@@ -10,26 +10,11 @@
 			4151,
 			"FUmpZv0q17GDD0JATYCjbGliZWJtbCB2MS40LjcgKyBsaWJtYXRyb3NrYSB2MS43LjJXQahta3ZtZXJnZSB2MTAyLjAgKCdMaXR0bGUgSG91c2VzJykgNjQtYml0RImERuqqAERhiAtJD+fO5BAAc6SQiMihvYRpLsTTUIP3dAJ7xxZUrmtAya5Ag9eBAXPFiKbo91lUsSPAg4EBnIEAIrWcg3VuZIaPVl9NUEVHNC9JU08vQVZDY6KtAWQAH//hABpnZAAfrNlAUAW7ARAAAAMAEAAAAwMA8YMZYAEABGjvicv9+PgAI+ODhAJ7yGoitZ2DdW5k4JawggUAuoIC0FSwhAAABQBUuoQAAALQrsHXgQJzxYhMuybj992N74OBAiK1nIN1bmSGhUFfQUFDY6KFEZBW5QAj44OEAUWFVSK1nYN1bmThibWERzuAAJ+BAuxEVQAAAAAAAAAAAA=="
 		],
-		[
-			5600,
-			"GUGkaRHglbdhpxCgAChGbolmb250MS50dGY="
-		],
-		[
-			10491414,
-			"YacQoAAoRm6JZm9udDIudHRm"
-		],
-		[
-			20977220,
-			"YacQoAAoRm6JZm9udDMudHRm"
-		],
-		[
-			31463026,
-			"YacglShGboljb3Zlci5qcGdGYIppbWFnZS9qcGVnRlwglP//2P/gABBK"
-		],
-		[
-			31501215,
-			"H0O2dSVlrueBAKNK"
-		]
+		[5600, "GUGkaRHglbdhpxCgAChGbolmb250MS50dGY="],
+		[10491414, "YacQoAAoRm6JZm9udDIudHRm"],
+		[20977220, "YacQoAAoRm6JZm9udDMudHRm"],
+		[31463026, "YacglShGboljb3Zlci5qcGdGYIppbWFnZS9qcGVnRlwglP//2P/gABBK"],
+		[31501215, "H0O2dSVlrueBAKNK"]
 	],
 	"tiers": {
 		"card": {
@@ -66,6 +51,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1
@@ -108,6 +94,7 @@
 					"size": 38143,
 					"mime": "image/jpeg"
 				},
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 4
@@ -150,6 +137,7 @@
 					"size": 38143,
 					"mime": "image/jpeg"
 				},
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 4

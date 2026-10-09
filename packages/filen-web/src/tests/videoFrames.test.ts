@@ -56,6 +56,7 @@ function probe(overrides: Partial<VideoProbe> = {}): VideoProbe {
 		subs: [],
 		chapters: [],
 		cover: null,
+		coverLand: null,
 		partial: false,
 		...overrides
 	}

@@ -20,10 +20,13 @@ export class PendingRegistry<T> {
 	// the real fetch), so this counts rather than flags.
 	private readonly streams = new Map<string, number>()
 	private inFlight = 0
+	private readonly onDrop: ((entry: T) => void) | undefined
 
 	// `max` is the default bucket's ceiling; `extraBuckets` names the others. An unknown bucket name
-	// registers into the default one.
-	public constructor(max: number, extraBuckets: Readonly<Record<string, number>> = {}) {
+	// registers into the default one. `onDrop` sees every entry that leaves (replaced, evicted, deleted,
+	// cleared), for one that holds a resource of its own.
+	public constructor(max: number, extraBuckets: Readonly<Record<string, number>> = {}, onDrop?: (entry: T) => void) {
+		this.onDrop = onDrop
 		this.limits.set(DEFAULT_BUCKET, max)
 
 		for (const [name, limit] of Object.entries(extraBuckets)) {
@@ -80,11 +83,23 @@ export class PendingRegistry<T> {
 		return entry
 	}
 
+	// Reads an entry without refreshing its recency: asking about an entry is not using it.
+	public peek(id: string): T | undefined {
+		return this.entriesOf(id)?.get(id)
+	}
+
 	// Drops one entry by id. A stream still reading from it keeps its own reference and is counted until it
 	// ends, as before.
 	public delete(id: string): void {
-		this.entriesOf(id)?.delete(id)
+		const entries = this.entriesOf(id)
+		const entry = entries?.get(id)
+
+		entries?.delete(id)
 		this.bucketOf.delete(id)
+
+		if (entry !== undefined) {
+			this.onDrop?.(entry)
+		}
 	}
 
 	public beginStream(id: string): void {
@@ -116,8 +131,14 @@ export class PendingRegistry<T> {
 	}
 
 	public clear(): void {
+		const dropped = this.onDrop === undefined ? [] : [...this.buckets.values()].flatMap(entries => [...entries.values()])
+
 		this.buckets.clear()
 		this.bucketOf.clear()
+
+		for (const entry of dropped) {
+			this.onDrop?.(entry)
+		}
 	}
 
 	private entriesOf(id: string): Map<string, T> | undefined {

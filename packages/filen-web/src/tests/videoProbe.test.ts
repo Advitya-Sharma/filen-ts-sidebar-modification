@@ -184,6 +184,7 @@ describe("probeVideo — MP4", () => {
 				{ t: 95.5, title: "Scène 2" }
 			],
 			cover: { offset: coverAt, size: 7, mime: "image/png" },
+			coverLand: null,
 			partial: false
 		})
 	})
@@ -559,6 +560,33 @@ describe("probeVideo — Matroska", () => {
 
 	it("returns null for an EBML document that is not Matroska", async () => {
 		expect((await probe(concat(ebmlHeader("foo"), segment(INFO)), "card")).record).toBeNull()
+	})
+
+	it("finds the landscape cover beside the cover, in either order, and leaves both to the cover and full tiers", async () => {
+		const png = [0x89, 0x50, 0x4e, 0x47]
+		const jpeg = [0xff, 0xd8, 0xff]
+		const file = mkv(
+			INFO,
+			tracks(VIDEO_TRACK),
+			element(
+				0x1941a469,
+				element(0x61a7, stringElement(0x466e, "Cover_Land.JPG"), element(0x465c, jpeg)),
+				element(0x61a7, stringElement(0x466e, "small_cover.png"), element(0x465c, [1, 2])),
+				element(0x61a7, stringElement(0x466e, "cover.png"), stringElement(0x4660, "image/png"), element(0x465c, png)),
+				element(0x61a7, stringElement(0x466e, "cover_land.png"), element(0x465c, [3, 4]))
+			)
+		)
+		const at = (bytes: number[]) => Buffer.from(file).indexOf(Buffer.from(bytes))
+
+		for (const tier of ["cover", "full"] as const) {
+			expect((await probe(file, tier)).record).toMatchObject({
+				cover: { offset: at(png), size: 4, mime: "image/png" },
+				coverLand: { offset: at(jpeg), size: 3, mime: "image/jpeg" },
+				partial: false
+			})
+		}
+
+		expect((await probe(file, "card")).record).toMatchObject({ cover: null, coverLand: null })
 	})
 
 	it("hops at most a few blocks between attachments looking for the cover", async () => {

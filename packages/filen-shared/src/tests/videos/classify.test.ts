@@ -744,6 +744,15 @@ describe("multiple roots", () => {
 	})
 })
 
+describe("transport-stream verdicts", () => {
+	it("leaves out a .ts or .mts a content read found to be no transport stream", () => {
+		const input = fixtureInput([{ name: "Media", type: "movies", paths: ["Heat (1995).ts", "Alien (1979).mts", "Big (1988).ts"] }])
+		const library = classifyVideoLibrary({ ...input, notTransportStream: new Set(["Media/Big (1988).ts", "Media/Alien (1979).mts"]) })
+
+		expect(library.movies.map(movie => movie.title)).toEqual(["Heat"])
+	})
+})
+
 describe("ignore rules", () => {
 	it("skips junk directories, samples, hidden files and .ignore subtrees", () => {
 		const { summary } = classifyPaths([

@@ -106,6 +106,7 @@ function file(container: ProbeContainer, video: string, ...audio: string[]): Vid
 		subs: [],
 		chapters: [],
 		cover: null,
+		coverLand: null,
 		partial: false
 	}
 }

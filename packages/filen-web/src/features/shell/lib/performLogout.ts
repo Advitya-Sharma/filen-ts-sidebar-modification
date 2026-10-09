@@ -12,6 +12,8 @@ import { clearSession, broadcastAuth } from "@/lib/sdk/session"
 import { kvClear } from "@/lib/storage/adapter"
 import { wipeImageCaches } from "@/features/shell/lib/wipeImageCaches"
 import { resetVideoSession } from "@/features/videos/lib/session"
+import { resetDriveKeyframes } from "@/features/drive/lib/thumbGenerators"
+import { resetFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 import { watchState } from "@/features/videos/lib/watchState"
 import { disposeAudioEngine } from "@/features/audio/lib/audioEngine"
 import { cancelActiveTransfers } from "@/features/transfers/lib/control"
@@ -130,8 +132,11 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 	clearPreviewCache()
 	clearArchiveListings()
 	releaseHeicWorker()
-	// Videos probes, artwork and frames held for this account, and the frame worker's heap.
+	// Videos probes, artwork and frames held for this account, and the frame worker's heap; the drive's own
+	// keyframe thumbnail services and the file-kind verdicts read from content.
 	resetVideoSession()
+	resetDriveKeyframes()
+	resetFileKindVerdicts()
 	// The drive clipboard's items and the sidebar tree's expanded directories belong to this account.
 	useDriveClipboardStore.getState().clear()
 	clearDirectoryTreeState()

@@ -2,7 +2,8 @@ import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
 import { clampListboxIndex } from "@/features/drive/lib/listbox"
 import { ARCHIVE_NAME_EXTENSIONS } from "@/features/drive/lib/archiveFormats"
 import { SPREADSHEET_EXTENSIONS } from "@/features/spreadsheet/lib/fileKind"
-import { CODE_FILE_EXTENSIONS, effectiveExtension, extensionStart } from "@filen/shared"
+import { CODE_FILE_EXTENSIONS, extensionStart, resolveFileKind, type ContentVerdict, type FileKind } from "@filen/shared"
+import { fileKindVerdict } from "@/features/drive/lib/fileKindVerdicts"
 
 // Every previewable file resolves to one of these; "other" is the download-only fallback (no viewer,
 // ever — canPreview excludes it unconditionally).
@@ -12,7 +13,8 @@ export type PreviewCategory =
 // Whole-buffer preview memory ceiling (old-web's MAX_PREVIEW_SIZE_WEB precedent): pdf/docx (and text,
 // under its own lower cap below) download fully into RAM before rendering, so an oversize file is excluded from canPreview
 // rather than risking a tab-crashing allocation. video/audio/image stream via the service worker's
-// inline Range route instead and are never bounded by this — image ALSO keeps a whole-buffer fallback
+// inline Range route instead and are never bounded by this; video and audio fall back to MediaSource fed
+// by the remux worker (never a whole buffer) — image ALSO keeps a whole-buffer fallback
 // (dev / SW absent / stream registration failure) that this cap does not gate either, since the SW's
 // own availability isn't known at gating time; an oversize image on that fallback path is an accepted,
 // deliberate tradeoff of joining the streamed set, not a regression this cap is meant to catch.
@@ -87,15 +89,21 @@ const EXTENSION_CATEGORIES: ReadonlyMap<string, PreviewCategory> = buildExtensio
 	[["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "apng", "avif"], "image"],
 	[HEIC_EXTENSIONS, "image"],
 	[RAW_IMAGE_EXTENSIONS, "rawImage"],
-	[["mp4", "webm", "mkv", "mov", "m4v"], "video"],
-	[["mp3", "m4a", "aac", "wav", "ogg", "flac", "opus"], "audio"],
+	// MKV and transport streams play through the remux worker. A `.ts`/`.mts` reads as one only once a read
+	// of its content said so (resolveFileKind hands such a file over as "m2ts").
+	[["mp4", "webm", "mkv", "mov", "m4v", "m2ts"], "video"],
+	// AIFF and CAF play natively in Safari (through the service worker's route); elsewhere they fail with
+	// their codec named.
+	[["mp3", "m4a", "aac", "wav", "ogg", "oga", "weba", "flac", "opus", "aiff", "aif", "caf"], "audio"],
 	[["pdf"], "pdf"],
 	[["docx"], "docx"],
 	[SPREADSHEET_EXTENSIONS, "spreadsheet"],
 	[["md", "markdown"], "markdown"],
 	[["txt", "log"], "text"],
 	[ARCHIVE_NAME_EXTENSIONS, "archive"],
-	[CODE_FILE_EXTENSIONS, "code"]
+	[CODE_FILE_EXTENSIONS, "code"],
+	// TypeScript ES-module and CommonJS sources.
+	[["mts", "cts"], "code"]
 ])
 
 // Lowercased extension with no leading dot; "" when the name has none (including a dotfile like
@@ -111,37 +119,67 @@ export function previewCategoryForExtension(ext: string): PreviewCategory | null
 	return EXTENSION_CATEGORIES.get(ext) ?? null
 }
 
-function isKnownExtension(ext: string): boolean {
-	return EXTENSION_CATEGORIES.has(ext)
+// The extension a file's type is read from (@filen/shared's resolveFileKind): its own when the table above
+// knows it and it means one thing, else a content verdict for the file (by `uuid`) or a MIME type for an
+// extension that means two, else a specific MIME type, a well-known name (LICENSE, Makefile, .gitignore)
+// or a generic MIME type. Icon, preview category, HEIC routing, thumbnails and the editor language all key
+// on this, so they agree.
+//
+// `verdict`, here and below: the file's verdict as a component holds it (useFileKindVerdict), so what it
+// computes from it follows a change; the store's when absent, which is the same value. Null resolves
+// without one (the SDK worker, which holds no verdicts).
+export function fileTypeExtension(name: string, mime: string | null | undefined, uuid?: string, verdict?: ContentVerdict | null): string {
+	return resolveFileKind(
+		{ name, mime, verdict: verdict === undefined ? (uuid === undefined ? null : fileKindVerdict(uuid)) : verdict },
+		previewCategoryForExtension
+	).extension
 }
 
-// The extension a file's type is read from (@filen/shared's effectiveExtension): its own when the table
-// above knows it, else a well-known name's (LICENSE, Makefile, .gitignore), else its stored mime's. Icon,
-// preview category, HEIC routing, thumbnails and the editor language all key on this, so they agree.
-export function fileTypeExtension(name: string, mime: string | null | undefined): string {
-	return effectiveExtension(name, mime, isKnownExtension)
+// The extension a drive item's type reads from, content verdicts included (itemFileKind); "" for a
+// directory or an undecryptable file.
+export function itemTypeExtension(item: DriveItem, verdict?: ContentVerdict | null): string {
+	return itemFileKind(item, verdict)?.extension ?? ""
 }
 
-// fileTypeExtension for a drive item; "" for a directory or an undecryptable file.
-export function itemTypeExtension(item: DriveItem): string {
+// The file's kind by the shared resolver (resolveFileKind): its extension, a verdict an earlier read of its
+// content left (fileKindVerdicts.ts), its stored MIME type, a well-known name. A directory, or a file
+// without decrypted metadata, has none.
+export function itemFileKind(item: DriveItem, verdict?: ContentVerdict | null): FileKind<PreviewCategory> | null {
 	const base = asDirectoryOrFile(item)
 
 	if (base.type !== "file" || base.data.decryptedMeta === null) {
-		return ""
+		return null
 	}
 
-	return fileTypeExtension(base.data.decryptedMeta.name, base.data.decryptedMeta.mime)
+	return resolveFileKind(
+		{
+			name: base.data.decryptedMeta.name,
+			mime: base.data.decryptedMeta.mime,
+			size: base.data.size,
+			verdict: verdict === undefined ? fileKindVerdict(base.data.uuid) : verdict
+		},
+		previewCategoryForExtension
+	)
+}
+
+// A `.ts`/`.mts` the preview has to read before it knows its viewer: TypeScript until a read says it is
+// a transport stream, and large enough to be one.
+export function unprobedTransportStream(item: DriveItem): boolean {
+	const kind = itemFileKind(item)
+
+	return kind !== null && kind.sniffable && (kind.extension === "ts" || kind.extension === "mts")
 }
 
 // A directory (or a shared-directory arm, which asDirectoryOrFile normalizes to one) always resolves
 // "other" — there is nothing to preview.
-export function previewType(item: DriveItem): PreviewCategory {
-	return previewCategoryForExtension(itemTypeExtension(item)) ?? "other"
+export function previewType(item: DriveItem, verdict?: ContentVerdict | null): PreviewCategory {
+	return itemFileKind(item, verdict)?.kind ?? "other"
 }
 
 // image joins video/audio here: all three prefer the SW's inline Range route
-// (features/preview/lib/previewStream.ts) and fall whole-buffer only as a capability fallback (dev / SW absent / registration
-// failure) — see PREVIEW_MAX_BYTES's own comment on the tradeoff that fallback accepts. HEIC/HEIF are
+// (features/preview/lib/previewStream.ts). Only image falls whole-buffer as a capability fallback (SW absent /
+// registration failure) — see PREVIEW_MAX_BYTES's own comment on the tradeoff that fallback accepts; video
+// and audio stream through MediaSource instead. HEIC/HEIF are
 // the one "image" exception: needsImageTransform below excludes them from ever attempting the
 // streamed route at all — canPreview applies the whole-buffer cap to them instead, same as pdf/docx.
 // rawImage is deliberately NOT a member: no browser decodes a RAW container, so handing one to the
@@ -173,6 +211,11 @@ export function canPreview(item: DriveItem): boolean {
 
 	if (base.type !== "file" || base.data.undecryptable) {
 		return false
+	}
+
+	// Its probe decides the viewer: a transport stream streams at any size.
+	if (unprobedTransportStream(item)) {
+		return true
 	}
 
 	const category = previewType(item)
@@ -214,9 +257,10 @@ export function bufferedSizeCap(category: PreviewCategory): bigint | null {
 	return TEXT_CATEGORIES.has(category) ? TEXT_MAX_BYTES : PREVIEW_MAX_BYTES
 }
 
-// Decision for a streamed viewer's POST-resolution failure (network drop mid-seek, an SW-side decrypt
-// abort, a lifecycle hiccup) — distinct from a registration failure, which always retries buffered
-// (StreamedMedia/StreamedImage's own onFallback effect). That retry re-downloads the WHOLE file into
+// Decision for a streamed image's POST-resolution failure (network drop, an SW-side decrypt abort, a
+// lifecycle hiccup) — distinct from a registration failure, which always retries buffered
+// (StreamedPreview's own onFallback effect). Video and audio never buffer: they move to MediaSource
+// instead (mediaViewer.tsx). That retry re-downloads the WHOLE file into
 // memory (usePreviewBytes), and a streamed category is never capped at the open gate above — safe for
 // the common case, but retrying at arbitrary size is exactly the tab-crashing allocation
 // PREVIEW_MAX_BYTES exists to avoid elsewhere. "error" keeps the item on a labeled error state instead
@@ -281,6 +325,8 @@ const CODE_LANGUAGE_MAP = {
 	jsx: "jsx",
 	tsx: "tsx",
 	ts: "typescript",
+	mts: "typescript",
+	cts: "typescript",
 	json: "json",
 	htm: "html",
 	html: "html",

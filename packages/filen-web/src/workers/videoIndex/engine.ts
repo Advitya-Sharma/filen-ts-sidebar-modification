@@ -239,9 +239,30 @@ export class VideoIndexEngine {
 	// any other correction reuses the last classification.
 	private inputSeq = 0
 	private classified: ClassifiedInput | null = null
+	private notTransportStream: ReadonlySet<string> = new Set()
+	private notTransportStreamSignature = ""
 
 	public constructor(deps: VideoIndexDeps) {
 		this.deps = deps
+	}
+
+	// Sets the `.ts`/`.mts` files a read of their content found to be no transport stream (TypeScript): the
+	// library leaves them out. A changed set classifies again (no network).
+	public setNotTransportStreams(uuids: readonly string[]): void {
+		const signature = [...uuids].sort().join(",")
+
+		if (signature === this.notTransportStreamSignature) {
+			return
+		}
+
+		this.notTransportStream = new Set(uuids)
+		this.notTransportStreamSignature = signature
+
+		if (this.current !== null || this.rebuilding !== null) {
+			this.scheduleRebuild("now")
+		} else {
+			this.inputSeq++
+		}
 	}
 
 	// Sets the manual corrections; a changed set applies them again (no network), classifying again only when the
@@ -1309,7 +1330,8 @@ export class VideoIndexEngine {
 				})),
 				dirs,
 				files,
-				splitMergeKeys: splitMergeKeysOf(overrides)
+				splitMergeKeys: splitMergeKeysOf(overrides),
+				notTransportStream: this.notTransportStream
 			}),
 			this.deps.yieldSlice
 		)

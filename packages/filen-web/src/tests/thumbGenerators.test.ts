@@ -10,6 +10,11 @@ import {
 	THUMB_WARM_SIZE_GATE
 } from "@/features/drive/lib/thumbnails.logic"
 import type { SdkThumbnailResult } from "@/workers/sdk.worker"
+import type { ProbeTier } from "@/lib/media/probe/types"
+import type { ProbeRecord } from "@/features/videos/lib/probeService.logic"
+import type { FrameGeneratorDeps, FrameRequest, GeneratedFrame } from "@/features/videos/lib/frames"
+import type { ProbeServiceDeps } from "@/features/videos/lib/probeService"
+import { FRAME_DWELL_MS, FRAME_RECIPE_VERSION, type FrameHint } from "@/features/videos/lib/frames.logic"
 
 // The signal of a generation some cell still wants.
 function live(): AbortSignal {
@@ -81,6 +86,55 @@ const { getPreviewBytesMock } = vi.hoisted(() => ({
 
 vi.mock("@/features/preview/lib/previewCache", () => ({ getPreviewBytes: getPreviewBytesMock }))
 
+// The keyframe read's services: drive's own probe scheduler and frame generator (each built once, from the
+// Videos classes, over the shared record stores) and the frame hint store. Only the classes are exported, so
+// any use of the Videos singletons would fail here. The frame worker's `?worker` is unresolvable under node.
+const { probeRequestMock, probeResetMock, built, frameGenerateMock, frameResetMock, frameHintGetMock } = vi.hoisted(() => ({
+	probeRequestMock:
+		vi.fn<
+			(
+				target: { uuid: string; file: unknown },
+				tier: ProbeTier,
+				options: { signal?: AbortSignal; rank?: () => number }
+			) => Promise<ProbeRecord | null>
+		>(),
+	probeResetMock: vi.fn(),
+	// Plain arrays, which vi.clearAllMocks leaves alone: each instance is built once per module.
+	built: { probes: [] as ProbeServiceDeps[], frames: [] as FrameGeneratorDeps[] },
+	frameGenerateMock: vi.fn<(request: FrameRequest) => Promise<GeneratedFrame | null>>(),
+	frameResetMock: vi.fn(),
+	frameHintGetMock: vi.fn<(uuid: string) => Promise<FrameHint | null>>()
+}))
+
+vi.mock("@/features/videos/lib/probeService", () => ({
+	ProbeService: class {
+		public readonly request = probeRequestMock
+		public readonly reset = probeResetMock
+		public readonly onReconnect = vi.fn()
+
+		public constructor(deps: ProbeServiceDeps) {
+			built.probes.push(deps)
+		}
+	}
+}))
+vi.mock("@/features/videos/lib/frames", () => ({
+	FrameGenerator: class {
+		public readonly generate = frameGenerateMock
+		public readonly reset = frameResetMock
+
+		public constructor(deps: FrameGeneratorDeps) {
+			built.frames.push(deps)
+		}
+	}
+}))
+vi.mock("@/features/videos/lib/records", () => ({
+	frameHints: {
+		get: (uuid: string) => frameHintGetMock(uuid)
+	},
+	probeRecords: {}
+}))
+vi.mock("@/features/videos/workers/frame.worker.ts?worker", () => ({ default: vi.fn() }))
+
 // A stand-in pdf.js whose documents fail to open, which is all the worker-sharing branch needs: the
 // worker handed to getDocument and each task's teardown are observable without a DOM.
 const { pdfWorkerCtorMock, pdfWorkerDestroyMock, getDocumentMock, taskDestroyMock } = vi.hoisted(() => ({
@@ -110,8 +164,11 @@ import {
 	generatePdfThumb,
 	generateSvgThumb,
 	rasterizeSvgThumb,
+	resetDriveKeyframes,
 	warmUploadThumbnail
 } from "@/features/drive/lib/thumbGenerators"
+import { frameHints, probeRecords } from "@/features/videos/lib/records"
+import { rangeReads } from "@/lib/media/rangeReads"
 import { testUuid } from "@/tests/support/uuid"
 
 // Captured immediately after import: registerThumbGenerator only ever runs once, as a module-scope
@@ -352,6 +409,17 @@ describe("warmUploadThumbnail", () => {
 	// A video is played from the local file by the drive-side arm's own frame grab. That grab needs a DOM
 	// this suite lacks, which is what a decode failure looks like here: settled, since the drive-side
 	// arm would grab the same frame from the same bytes, only after downloading them.
+	it("leaves a local video the element cannot decode unanswered, for the drive-side keyframe read", async () => {
+		allowedMediaContentTypeMock.mockReturnValue("video/x-matroska")
+		stubVideoDom(() => 120, [], { errorCode: 4 })
+
+		warmUploadThumbnail(namedFile("film.mkv", "video/x-matroska"), browserFile("film.mkv"))
+
+		await expect(seededProduction()()).resolves.toEqual({ type: "unanswered" })
+		expect(probeRequestMock).not.toHaveBeenCalled()
+		expect(frameGenerateMock).not.toHaveBeenCalled()
+	})
+
 	it("seeds a video from the local file in a generation slot, never streaming it back", async () => {
 		allowedMediaContentTypeMock.mockReturnValue("video/mp4")
 
@@ -557,33 +625,250 @@ describe("generateSvgThumb", () => {
 	})
 })
 
-describe("generateVideoThumb — early gates (no DOM element ever created)", () => {
-	it("fails without calling previewStreamUrl when no worker will ever control the tab", async () => {
+// A browser that plays MP4 but answers Matroska with nothing, as Chrome and Safari do.
+function canPlayMp4Only(query: string): string {
+	return query === "video/mp4" ? "maybe" : ""
+}
+
+function stubCanPlay(): void {
+	vi.stubGlobal("document", { createElement: () => ({ canPlayType: canPlayMp4Only }) })
+}
+
+function mkvItem(): BaseFileItem {
+	return itemAsBaseFile(narrowItem(namedFile("film.mkv", "video/x-matroska")))
+}
+
+// Typed as the persisted record holds it.
+type RecordedProbe = NonNullable<ProbeRecord["probe"]>
+
+function videoProbe(overrides: Partial<RecordedProbe> = {}): RecordedProbe {
+	return {
+		v: 1,
+		container: "mkv",
+		durationSec: 60,
+		index: "cues",
+		video: {
+			codec: "h264",
+			fourcc: "avc1",
+			codecString: "avc1.64001f",
+			w: 1280,
+			h: 720,
+			par: 1,
+			rotation: 0,
+			bitDepth: 8,
+			transfer: "sdr"
+		},
+		audio: [],
+		subs: [],
+		chapters: [],
+		cover: null,
+		coverLand: null,
+		partial: false,
+		...overrides
+	}
+}
+
+function probeRecord(probe: RecordedProbe | null): ProbeRecord {
+	return { probe, tiers: { card: true, full: probe === null, cover: probe === null }, at: 1 }
+}
+
+const FRAME_BYTES = new Uint8Array([7, 7])
+
+function keyframeReady(): void {
+	probeRequestMock.mockResolvedValue(probeRecord(videoProbe()))
+	frameGenerateMock.mockResolvedValue({ bytes: FRAME_BYTES, width: 384, height: 216, dominant: [1, 2, 3] })
+	frameHintGetMock.mockResolvedValue(null)
+}
+
+describe("generateVideoThumb — routing before any read", () => {
+	beforeEach(() => {
+		stubCanPlay()
+		keyframeReady()
+		waitForMediaStreamMock.mockResolvedValue(true)
+	})
+
+	it("reads only the keyframe of an MKV the browser cannot play: no stream registration, one probe, one frame", async () => {
+		allowedMediaContentTypeMock.mockReturnValue("video/x-matroska")
+
+		const item = mkvItem()
+		const signal = live()
+
+		await expect(generateVideoThumb(item, signal)).resolves.toEqual({ type: "bytes", bytes: FRAME_BYTES })
+		expect(waitForMediaStreamMock).not.toHaveBeenCalled()
+		expect(previewStreamUrlMock).not.toHaveBeenCalled()
+		expect(probeRequestMock).toHaveBeenCalledTimes(1)
+		expect(probeRequestMock.mock.calls[0]?.[0]).toEqual({ uuid: item.data.uuid, file: item.data })
+		expect(probeRequestMock.mock.calls[0]?.[1]).toBe("card")
+		expect(probeRequestMock.mock.calls[0]?.[2].signal).toBe(signal)
+		expect(frameGenerateMock).toHaveBeenCalledTimes(1)
+
+		const request = frameGenerateMock.mock.calls[0]?.[0]
+
+		expect(request?.target).toEqual({ uuid: item.data.uuid, file: item.data, size: 1_024 })
+		expect(request?.box).toEqual({ width: THUMB_MAX_DIM, height: THUMB_MAX_DIM })
+		expect(request?.signal).toBe(signal)
+	})
+
+	it("reads the keyframe when no worker will ever control the tab", async () => {
+		allowedMediaContentTypeMock.mockReturnValue("video/mp4")
 		waitForMediaStreamMock.mockResolvedValue(false)
 
-		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "failed" })
+		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "bytes", bytes: FRAME_BYTES })
 		expect(previewStreamUrlMock).not.toHaveBeenCalled()
+		expect(probeRequestMock).toHaveBeenCalledTimes(1)
+		expect(frameGenerateMock).toHaveBeenCalledTimes(1)
 	})
 
-	it("fails without calling previewStreamUrl when the item's content type isn't inline-allowlisted", async () => {
-		waitForMediaStreamMock.mockResolvedValue(true)
+	it("reads the keyframe when the item's content type isn't inline-allowlisted", async () => {
 		allowedMediaContentTypeMock.mockReturnValue(null)
 
-		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "failed" })
+		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "bytes", bytes: FRAME_BYTES })
+		expect(waitForMediaStreamMock).not.toHaveBeenCalled()
 		expect(previewStreamUrlMock).not.toHaveBeenCalled()
+		expect(frameGenerateMock).toHaveBeenCalledTimes(1)
 	})
 
-	it("fails when previewStreamUrl itself rejects, before any DOM element is created", async () => {
-		waitForMediaStreamMock.mockResolvedValue(true)
+	it("starts nothing for a generation already unwanted", async () => {
+		allowedMediaContentTypeMock.mockReturnValue("video/x-matroska")
+
+		const controller = new AbortController()
+
+		controller.abort()
+
+		await expect(generateVideoThumb(mkvItem(), controller.signal)).resolves.toEqual({ type: "failed" })
+		expect(waitForMediaStreamMock).not.toHaveBeenCalled()
+		expect(previewStreamUrlMock).not.toHaveBeenCalled()
+		expect(probeRequestMock).not.toHaveBeenCalled()
+		expect(frameGenerateMock).not.toHaveBeenCalled()
+	})
+
+	it("fails when previewStreamUrl itself rejects, without reading the keyframe", async () => {
 		allowedMediaContentTypeMock.mockReturnValue("video/mp4")
 		previewStreamUrlMock.mockRejectedValue(new Error("registration failed"))
 
 		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "failed" })
+		expect(probeRequestMock).not.toHaveBeenCalled()
 	})
 })
 
-// A video element whose seeks land at once, and canvases that report the luma of the time drawn.
-function stubVideoDom(lumaAt: (time: number) => number, events: string[]): { seeks: number[] } {
+describe("generateVideoThumb — keyframe result mapping", () => {
+	beforeEach(() => {
+		stubCanPlay()
+		keyframeReady()
+		allowedMediaContentTypeMock.mockReturnValue("video/x-matroska")
+	})
+
+	it("fails when no probe could be had (offline, budgets, a failed read)", async () => {
+		probeRequestMock.mockResolvedValue(null)
+
+		await expect(generateVideoThumb(mkvItem(), live())).resolves.toEqual({ type: "failed" })
+		expect(frameGenerateMock).not.toHaveBeenCalled()
+	})
+
+	it("settles a file that is no container the probe reads", async () => {
+		probeRequestMock.mockResolvedValue(probeRecord(null))
+
+		await expect(generateVideoThumb(mkvItem(), live())).resolves.toEqual({ type: "unavailable", reason: "unsupported" })
+		expect(frameGenerateMock).not.toHaveBeenCalled()
+	})
+
+	it("settles a file whose keyframes cannot be found without scanning, or that has no picture", async () => {
+		probeRequestMock.mockResolvedValueOnce(probeRecord(videoProbe({ index: "none" })))
+		probeRequestMock.mockResolvedValueOnce(probeRecord(videoProbe({ video: null })))
+
+		await expect(generateVideoThumb(mkvItem(), live())).resolves.toEqual({ type: "unavailable", reason: "unsupported" })
+		await expect(generateVideoThumb(mkvItem(), live())).resolves.toEqual({ type: "unavailable", reason: "unsupported" })
+		expect(frameGenerateMock).not.toHaveBeenCalled()
+	})
+
+	it("settles a frame the generator left a settled miss for", async () => {
+		frameGenerateMock.mockResolvedValue(null)
+		frameHintGetMock.mockResolvedValue({ recipe: FRAME_RECIPE_VERSION, key: null, miss: "unsupported", at: 1 })
+
+		await expect(generateVideoThumb(mkvItem(), live())).resolves.toEqual({ type: "unavailable", reason: "unsupported" })
+	})
+
+	it("fails a frame that came back without a verdict (budget spent, a failed read)", async () => {
+		frameGenerateMock.mockResolvedValue(null)
+
+		await expect(generateVideoThumb(mkvItem(), live())).resolves.toEqual({ type: "failed" })
+	})
+
+	it("fails a frame dropped because nobody wants it any more, without looking up its hint", async () => {
+		const controller = new AbortController()
+
+		frameGenerateMock.mockImplementation(() => {
+			controller.abort()
+
+			return Promise.resolve(null)
+		})
+
+		await expect(generateVideoThumb(mkvItem(), controller.signal)).resolves.toEqual({ type: "failed" })
+		expect(frameHintGetMock).not.toHaveBeenCalled()
+	})
+})
+
+describe("generateVideoThumb — drive's own keyframe services", () => {
+	beforeEach(() => {
+		stubCanPlay()
+		keyframeReady()
+		allowedMediaContentTypeMock.mockReturnValue("video/x-matroska")
+	})
+
+	it("builds one probe scheduler and one frame generator for drive, over the shared Videos record stores", async () => {
+		await generateVideoThumb(mkvItem(), live())
+		await generateVideoThumb(mkvItem(), live())
+
+		expect(built.probes).toHaveLength(1)
+		expect(built.frames).toHaveLength(1)
+		expect(built.probes[0]?.records).toBe(probeRecords)
+		expect(built.frames[0]?.hints).toBe(frameHints)
+	})
+
+	it("holds its generation slot through no dwell and no wait for playback to end", async () => {
+		await generateVideoThumb(mkvItem(), live())
+
+		const deps = built.frames[0]
+		let slept = false
+		let idle = false
+		const releasePlayback = rangeReads.holdPlayback()
+
+		try {
+			void deps?.sleep(FRAME_DWELL_MS, live()).then(() => {
+				slept = true
+			})
+			void deps?.reads.whenPlaybackIdle(live()).then(() => {
+				idle = true
+			})
+
+			await Promise.resolve()
+
+			expect(slept).toBe(true)
+			expect(idle).toBe(true)
+		} finally {
+			releasePlayback()
+		}
+	})
+
+	it("resets drive's probes and frames on logout, never the Videos singletons", async () => {
+		await generateVideoThumb(mkvItem(), live())
+
+		resetDriveKeyframes()
+
+		await vi.waitFor(() => {
+			expect(probeResetMock).toHaveBeenCalledTimes(1)
+			expect(frameResetMock).toHaveBeenCalledTimes(1)
+		})
+	})
+})
+
+// A video element whose seeks land at once, and canvases that report the luma of the time drawn. With
+// `errorCode` the element errors on load with that MediaError code instead.
+function stubVideoDom(
+	lumaAt: (time: number) => number,
+	events: string[],
+	options: { errorCode?: number; videoWidth?: number } = {}
+): { seeks: number[] } {
 	const seeks: number[] = []
 
 	class FakeVideo {
@@ -591,17 +876,29 @@ function stubVideoDom(lumaAt: (time: number) => number, events: string[]): { see
 		playsInline = false
 		preload = ""
 		duration = 100
-		videoWidth = 1280
+		videoWidth = options.videoWidth ?? 1280
 		videoHeight = 720
 		readyState = 4
+		error: { code: number } | null = null
 		readonly HAVE_CURRENT_DATA = 2
 		private time = 0
 		private readonly listeners = new Map<string, () => void>()
 
 		set src(_url: string) {
 			setTimeout(() => {
-				this.fire("loadedmetadata")
+				if (options.errorCode === undefined) {
+					this.fire("loadedmetadata")
+
+					return
+				}
+
+				this.error = { code: options.errorCode }
+				this.fire("error")
 			}, 0)
+		}
+
+		canPlayType(query: string): string {
+			return canPlayMp4Only(query)
 		}
 
 		get currentTime(): number {
@@ -711,6 +1008,91 @@ describe("generateVideoThumb — frame choice", () => {
 
 		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "failed" })
 		expect(releasePreviewStreamMock).toHaveBeenCalledTimes(1)
+	})
+
+	it("probes nothing when the element draws the frame", async () => {
+		stubVideoDom(() => 120, [])
+
+		await generateVideoThumb(videoItem(), live())
+		expect(probeRequestMock).not.toHaveBeenCalled()
+		expect(frameGenerateMock).not.toHaveBeenCalled()
+	})
+})
+
+describe("generateVideoThumb — element failures", () => {
+	beforeEach(() => {
+		waitForMediaStreamMock.mockResolvedValue(true)
+		allowedMediaContentTypeMock.mockReturnValue("video/mp4")
+		previewStreamUrlMock.mockImplementation((_file, _name, _type, id) => Promise.resolve(`/sw/download/${id ?? ""}`))
+		keyframeReady()
+	})
+
+	afterEach(() => {
+		vi.unstubAllGlobals()
+	})
+
+	// MEDIA_ERR_DECODE and MEDIA_ERR_SRC_NOT_SUPPORTED.
+	it.each([3, 4])(
+		"reads the keyframe once the element cannot decode the stream (MediaError %i), its stream released first",
+		async code => {
+			const events: string[] = []
+
+			stubVideoDom(() => 120, events, { errorCode: code })
+			releasePreviewStreamMock.mockImplementation(() => {
+				events.push("released")
+			})
+			frameGenerateMock.mockImplementation(() => {
+				events.push("frame")
+
+				return Promise.resolve({ bytes: FRAME_BYTES, width: 384, height: 216, dominant: [1, 2, 3] })
+			})
+
+			await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "bytes", bytes: FRAME_BYTES })
+			expect(previewStreamUrlMock).toHaveBeenCalledTimes(1)
+			expect(probeRequestMock).toHaveBeenCalledTimes(1)
+			expect(frameGenerateMock).toHaveBeenCalledTimes(1)
+			expect(events).toEqual(["emptied", "released", "frame"])
+		}
+	)
+
+	it("reads the keyframe when the metadata holds no picture", async () => {
+		stubVideoDom(() => 120, [], { videoWidth: 0 })
+
+		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "bytes", bytes: FRAME_BYTES })
+		expect(frameGenerateMock).toHaveBeenCalledTimes(1)
+	})
+
+	it("skips the element on a retry of a file it could not decode", async () => {
+		stubVideoDom(() => 120, [], { errorCode: 3 })
+		frameGenerateMock.mockResolvedValue(null)
+
+		const item = videoItem()
+
+		await expect(generateVideoThumb(item, live())).resolves.toEqual({ type: "failed" })
+		await expect(generateVideoThumb(item, live())).resolves.toEqual({ type: "failed" })
+		expect(previewStreamUrlMock).toHaveBeenCalledTimes(1)
+		expect(frameGenerateMock).toHaveBeenCalledTimes(2)
+	})
+
+	// MEDIA_ERR_ABORTED and MEDIA_ERR_NETWORK: the reads failed, not the format.
+	it.each([1, 2])("fails a stream that errored on its reads (MediaError %i) without reading the keyframe", async code => {
+		stubVideoDom(() => 120, [], { errorCode: code })
+
+		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "failed" })
+		expect(probeRequestMock).not.toHaveBeenCalled()
+		expect(frameGenerateMock).not.toHaveBeenCalled()
+	})
+
+	it("reads no keyframe once the generation stopped during the element attempt", async () => {
+		const controller = new AbortController()
+
+		stubVideoDom(() => 120, [], { errorCode: 3 })
+		releasePreviewStreamMock.mockImplementation(() => {
+			controller.abort()
+		})
+
+		await expect(generateVideoThumb(videoItem(), controller.signal)).resolves.toEqual({ type: "failed" })
+		expect(probeRequestMock).not.toHaveBeenCalled()
 	})
 })
 

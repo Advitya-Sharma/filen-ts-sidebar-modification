@@ -124,7 +124,7 @@ import {
 } from "@/features/drive/lib/sharedPath"
 import { lookupDirectoryName } from "@/features/drive/lib/directoryName"
 import { narrowItem } from "@/features/drive/lib/item"
-import { isPhotoItem } from "@/features/photos/lib/predicate"
+import { isPhotoCandidate } from "@/features/photos/lib/predicate"
 import { FLAT_LISTING_KINDS, type FlatListingKind } from "@/features/drive/lib/flatListing"
 import { THUMB_CACHE_CAP, THUMB_MAX_DIM, THUMB_SDK_LOSSY_QUALITY, type ThumbnailCopy } from "@/features/drive/lib/thumbnails.logic"
 import {
@@ -585,6 +585,91 @@ async function readFileRange(
 	return offset === out.length ? out : out.subarray(0, offset)
 }
 
+// One tier of a video's probe through `c`'s range reads. Its progress counts block downloads against the
+// walk's current budget, which the walk raises as it learns the header's size, for
+// cancelPreviewDownloadUnlessFinishing.
+async function probeWith(
+	c: Pick<Client, "downloadFileToWriter">,
+	file: AnyFile,
+	tier: ProbeTier,
+	previewToken: string
+): Promise<VideoProbe | null> {
+	const controller = new AbortController()
+	const source = probeSource(Number(file.size), (start, end) => readFileRange(c, file, start, end, controller.signal), tier)
+	const progress: PreviewProgress = {
+		get received() {
+			return source.blockReads
+		},
+		get total() {
+			return source.blockBudget
+		}
+	}
+	registerPreviewAbort(previewToken, controller)
+	previewProgress.set(previewToken, progress)
+	try {
+		return await probeVideo(source, tier)
+	} finally {
+		// Only its own entry: the caller may have reused the token for a read registered since.
+		if (previewAborts.get(previewToken) === controller) {
+			previewAborts.delete(previewToken)
+		}
+
+		if (previewProgress.get(previewToken) === progress) {
+			previewProgress.delete(previewToken)
+		}
+	}
+}
+
+// Serves `file`'s decrypted ranges through `c` on `port` until the reader closes it or
+// cancelPreviewDownload(previewToken) aborts every read. `release` runs once the port has shut down and
+// every read on `c` has settled: a handle is never freed under a call still running on it.
+function serveRangePort(
+	port: MessagePort,
+	c: Pick<Client, "downloadFileToWriter">,
+	file: AnyFile,
+	previewToken: string,
+	release?: () => void
+): void {
+	const controller = new AbortController()
+	let reading = 0
+	const releaseIfDone = () => {
+		if (release !== undefined && reading === 0 && controller.signal.aborted) {
+			release()
+			release = undefined
+		}
+	}
+
+	// Before registering: a token cancelled ahead of this call aborts the controller at once.
+	controller.signal.addEventListener(
+		"abort",
+		() => {
+			if (previewAborts.get(previewToken) === controller) {
+				previewAborts.delete(previewToken)
+			}
+
+			releaseIfDone()
+		},
+		{ once: true }
+	)
+	registerPreviewAbort(previewToken, controller)
+	exposeRangePort(
+		port,
+		async (start, end, signal) => {
+			// A read arriving after shutdown must not touch a handle that may already be freed.
+			controller.signal.throwIfAborted()
+			reading++
+
+			try {
+				return await readFileRange(c, file, start, end, signal)
+			} finally {
+				reading--
+				releaseIfDone()
+			}
+		},
+		controller
+	)
+}
+
 // The shared frame of both audio-metadata entry points: the abort registry, the cover thumbnail's decode
 // and persist, and the transfer of the thumbnail back.
 async function runAudioMetadata(
@@ -683,6 +768,12 @@ async function withUnauth<T>(fn: (unauth: UnauthClient) => Promise<T>): Promise<
 	return r.data
 }
 
+// The public-link surface's client: the signed-in session's unauthed view when there is one, else a throwaway.
+// Either way a handle of its own, which the caller frees.
+function linkedUnauthClient(): UnauthClient {
+	return client !== null ? client.getUnauthed() : UnauthClient.from_config(clientConfig)
+}
+
 // The anon sibling of withUnauth for the public-link (linked-item) surface: runs an op against an
 // UnauthClient, but PREFERS the live authed session's getUnauthed() when a visitor happens to be
 // signed in — so an already-authed visitor opening someone else's link reuses their own client
@@ -692,7 +783,7 @@ async function withUnauth<T>(fn: (unauth: UnauthClient) => Promise<T>): Promise<
 // does not touch the parent client. Result is unwrapped so the Comlink boundary sees a thrown DTO.
 async function withLinkedUnauth<T>(fn: (unauth: UnauthClient) => Promise<T>): Promise<T> {
 	const r = await run<T>(async defer => {
-		const unauth = client !== null ? client.getUnauthed() : UnauthClient.from_config(clientConfig)
+		const unauth = linkedUnauthClient()
 		defer(() => {
 			unauth.free()
 		})
@@ -746,7 +837,7 @@ function narrowOwnedWalk({ dirs, files }: { dirs: NonRootDirTagged[]; files: Nor
 
 	cacheDirs(normalDirs)
 
-	return { dirs: normalDirs, files: files.filter(file => isPhotoItem(narrowItem(file))) }
+	return { dirs: normalDirs, files: files.filter(file => isPhotoCandidate(narrowItem(file))) }
 }
 
 // Cache-first parent resolve shared by createDirectory/moveDirectory/moveFile: `null` maps to
@@ -1974,11 +2065,10 @@ const api = {
 	getLinkedDirSizeAnon(dir: AnyLinkedDirWithContext): Promise<DirSizeResponse> {
 		return withLinkedUnauth(unauth => unauth.getDirSize(dir))
 	},
-	// Whole-buffer fetch for the unauth preview overlay — the anon mirror of downloadFileBytes above,
-	// same previewAborts registry keyed by the same token so cancelPreviewDownload reaches it
-	// unchanged. The buffered path (not the SW stream) is the unauth ceiling by design: the service
-	// worker's own wasm bundle has no UnauthClient, so range-seek streaming can't serve a logged-out
-	// visitor — this whole-buffer read is the degraded-but-working fallback.
+	// Whole-buffer fetch for the unauth preview overlay's documents and images — the anon mirror of
+	// downloadFileBytes above, same previewAborts registry keyed by the same token so
+	// cancelPreviewDownload reaches it unchanged. Video and audio never come here: they stream through
+	// openLinkedRangePortAnon (the service worker's route or MediaSource).
 	async downloadLinkedFileBytesAnon(file: AnyFile, previewToken: string): Promise<Uint8Array> {
 		return withLinkedUnauth(async unauth => {
 			const controller = new AbortController()
@@ -1989,6 +2079,21 @@ const api = {
 			} finally {
 				previewAborts.delete(previewToken)
 			}
+		})
+	},
+	// The anon mirror of readVideoProbe below: one tier of a linked video's probe, for the public-link
+	// preview's playback ladder.
+	async readLinkedVideoProbeAnon(file: AnyFile, tier: ProbeTier, previewToken: string): Promise<VideoProbe | null> {
+		return withLinkedUnauth(unauth => probeWith(unauth, file, tier, previewToken))
+	},
+	// The anon mirror of openRangePort below: serves a linked file's ranges to the remux worker, so a
+	// logged-out visitor streams media through MediaSource (the service worker's bundle has no
+	// UnauthClient). The client handle lives as long as the port and is freed when it shuts down.
+	openLinkedRangePortAnon(port: MessagePort, file: AnyFile, previewToken: string): void {
+		const unauth = linkedUnauthClient()
+
+		serveRangePort(port, unauth, file, previewToken, () => {
+			unauth.free()
 		})
 	},
 	// The anon mirror of fetchRawPreview above, for a RAW behind a public link.
@@ -2393,34 +2498,8 @@ const api = {
 	// so only the small record crosses back. Null for a file that is no MP4/MOV/Matroska/WebM; a failed
 	// or cancelled download throws. Cancelled through cancelPreviewDownload(previewToken), like the other
 	// preview reads. The uuid keeps the call shape of readAudioMetadata, whose caller keys by it too.
-	// Its progress counts block downloads against the walk's current budget, which the walk raises as it
-	// learns the header's size, for cancelPreviewDownloadUnlessFinishing.
-	async readVideoProbe(file: AnyFile, _uuid: string, tier: ProbeTier, previewToken: string): Promise<VideoProbe | null> {
-		const c = requireClient()
-		const controller = new AbortController()
-		const source = probeSource(Number(file.size), (start, end) => readFileRange(c, file, start, end, controller.signal), tier)
-		const progress: PreviewProgress = {
-			get received() {
-				return source.blockReads
-			},
-			get total() {
-				return source.blockBudget
-			}
-		}
-		registerPreviewAbort(previewToken, controller)
-		previewProgress.set(previewToken, progress)
-		try {
-			return await probeVideo(source, tier)
-		} finally {
-			// Only its own entry: the caller may have reused the token for a read registered since.
-			if (previewAborts.get(previewToken) === controller) {
-				previewAborts.delete(previewToken)
-			}
-
-			if (previewProgress.get(previewToken) === progress) {
-				previewProgress.delete(previewToken)
-			}
-		}
+	readVideoProbe(file: AnyFile, _uuid: string, tier: ProbeTier, previewToken: string): Promise<VideoProbe | null> {
+		return probeWith(requireClient(), file, tier, previewToken)
 	},
 	// An image inside or as a file — an embedded cover's byte range (a probe's `cover`) or a whole sidecar
 	// image — made into a thumbnail-sized one: only the range is downloaded, streamed into the SDK's
@@ -2492,20 +2571,7 @@ const api = {
 	// worker, so playback reads go straight from here to the remuxer. Lives until the reader closes the
 	// port or cancelPreviewDownload(previewToken) aborts every read on it.
 	openRangePort(port: MessagePort, file: AnyFile, previewToken: string): void {
-		const c = requireClient()
-		const controller = new AbortController()
-
-		registerPreviewAbort(previewToken, controller)
-		controller.signal.addEventListener(
-			"abort",
-			() => {
-				if (previewAborts.get(previewToken) === controller) {
-					previewAborts.delete(previewToken)
-				}
-			},
-			{ once: true }
-		)
-		exposeRangePort(port, (start, end, signal) => readFileRange(c, file, start, end, signal), controller)
+		serveRangePort(port, requireClient(), file, previewToken)
 	},
 	// ── Search ───────────────────────────────────────────────────────────────
 	// Thin pass-throughs onto the single searchEngine instance (searchEngine.ts owns the actual
@@ -2528,6 +2594,10 @@ const api = {
 	// Sets the library configuration's manual corrections; a changed set classifies again.
 	videoIndexSetOverrides(overrides: Parameters<VideoIndexEngine["setOverrides"]>[0]): void {
 		videoIndex.setOverrides(overrides)
+	},
+	// The `.ts`/`.mts` files a content read found to be TypeScript; a changed set classifies again.
+	videoIndexSetNotTransportStreams(uuids: string[]): void {
+		videoIndex.setNotTransportStreams(uuids)
 	},
 	// `watermark` is the caller's getLastDriveEventId result when it has one, so the check costs no request.
 	videoIndexCheck(watermark?: bigint): Promise<void> {

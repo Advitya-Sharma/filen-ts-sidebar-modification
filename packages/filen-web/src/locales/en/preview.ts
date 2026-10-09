@@ -314,6 +314,26 @@ export const preview = {
 	previewMediaFullscreen: "Full screen",
 	/** Video player — leaves full screen */
 	previewMediaExitFullscreen: "Exit full screen",
+	/** Preview overlay body — a `.ts` file that turned out to be TypeScript, too large to load as text */
+	previewTextTooLarge: "This file is too large to show as text.",
+	/** Preview overlay body — the browser has no way to stream this video or audio file (no service worker, no MediaSource); the Download button sits below */
+	previewMediaCannotStream: "This browser can't stream this file.",
+	/** Video player — subtitles menu button and its heading */
+	previewMediaSubtitles: "Subtitles",
+	/** Video player — subtitles menu: no subtitles */
+	previewMediaSubtitlesOff: "Off",
+	/** Video player — a subtitle track whose language is not known */
+	previewMediaSubtitleUnknownLanguage: "Unknown language",
+	/** Video player — marks a forced subtitle track (only foreign-language lines) */
+	previewMediaSubtitleForced: "Forced",
+	/** Video player — marks a subtitle track for the deaf and hard of hearing */
+	previewMediaSubtitleSdh: "SDH",
+	/** Video player — marks a subtitle track stored inside the video file, as opposed to a file beside it */
+	previewMediaSubtitleEmbedded: "Embedded",
+	/** Video player — a chosen subtitle track that could not be read; {{name}} is the track's label */
+	previewMediaSubtitleUnreadable: "{{name}} (couldn't be loaded)",
+	/** Video player — announced to screen readers when the chosen subtitle file could not be read */
+	previewMediaSubtitleUnreadableNotice: "The subtitles couldn't be loaded.",
 
 	// ── Archive browser ──────────────────────────────────────────────────────
 	/** Archive browser — accessible label of the entry list; {{name}} is the directory shown (the archive's name at its root) */

@@ -1,5 +1,6 @@
 import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
-import { previewType } from "@/features/drive/lib/preview.logic"
+import type { ContentVerdict } from "@filen/shared"
+import { itemFileKind, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
 
 // Mobile parity (features/photos/utils.ts's own isPhotoGridItem): keep only file-kind items with
 // decrypted metadata whose preview category is image, rawImage or video — directories and
@@ -15,17 +16,36 @@ import { previewType } from "@/features/drive/lib/preview.logic"
 // below) — kept explicit anyway so the invariant this predicate promises (a photos listing can never
 // contain an undecryptable row) reads directly off this function's body, not as a side effect of
 // previewType's fallback.
-export function isPhotoItem(item: DriveItem): boolean {
+//
+// `verdict` as previewType takes it: the store's when absent, none when null.
+export function isPhotoItem(item: DriveItem, verdict?: ContentVerdict | null): boolean {
 	const base = asDirectoryOrFile(item)
 
 	if (base.type !== "file" || base.data.decryptedMeta === null) {
 		return false
 	}
 
-	const category = previewType(item)
+	return isPhotoCategory(previewType(item, verdict))
+}
 
-	// rawImage joins image/video: a camera RAW is a photo by any user's reckoning, and the grid's tile
-	// is thumbnail-driven — the SDK produces those for RAW (usually straight off the embedded preview),
-	// so a RAW row renders exactly like every other photo, and the viewer shows its embedded preview.
+// rawImage joins image/video: a camera RAW is a photo by any user's reckoning, and the grid's tile is
+// thumbnail-driven — the SDK produces those for RAW (usually straight off the embedded preview), so a RAW row
+// renders exactly like every other photo, and the viewer shows its embedded preview.
+export function isPhotoCategory(category: PreviewCategory | null): boolean {
 	return category === "image" || category === "rawImage" || category === "video"
+}
+
+// Whether the item is a photo by its name and MIME type alone, or a `.ts`/`.mts` a probe could still find to be
+// a transport stream: what a photos listing keeps, without verdicts, so it reads the same in the SDK worker,
+// a socket event about any other file never walks the listing again, and a verdict that lands needs no walk.
+// What it shows is decided as it is read (isPhotoItem): an "audio" verdict hides a video that holds no
+// picture. An audio-signalled `.mp4`/`.webm`/`.mkv` and the audio extensions are no candidates.
+export function isPhotoCandidate(item: DriveItem): boolean {
+	if (isPhotoItem(item, null)) {
+		return true
+	}
+
+	const kind = itemFileKind(item, null)
+
+	return kind !== null && kind.sniffable && (kind.extension === "ts" || kind.extension === "mts") && isPhotoItem(item, "transportStream")
 }

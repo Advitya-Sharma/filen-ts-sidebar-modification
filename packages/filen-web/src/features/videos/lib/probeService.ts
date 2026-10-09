@@ -7,6 +7,8 @@ import { rangeReads, type RangeReadBudget } from "@/lib/media/rangeReads"
 import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
 import type { RecordStore } from "@/features/videos/lib/recordStore.logic"
 import { probeRecords } from "@/features/videos/lib/records"
+import { adoptProbeRecords } from "@/features/drive/lib/contentVerdicts"
+import { anyFileTypeFacts } from "@/features/drive/lib/item"
 import {
 	PROBE_CONCURRENCY,
 	PROBE_DROP_GRACE_MS,
@@ -78,7 +80,7 @@ export class ProbeService {
 	private readonly tokens = new Set<string>()
 	private started = 0
 	private epoch = 0
-	private readonly recordListeners = new Set<(uuid: string, record: ProbeRecord) => void>()
+	private readonly recordListeners = new Set<(uuid: string, record: ProbeRecord, file: AnyFile) => void>()
 
 	public constructor(deps: ProbeServiceDeps) {
 		this.deps = deps
@@ -100,7 +102,7 @@ export class ProbeService {
 	public async request(target: ProbeTarget, tier: ProbeTier, options: ProbeRequestOptions = {}): Promise<ProbeRecord | null> {
 		const known = await this.deps.records.get(target.uuid)
 
-		if (known !== null && recordSatisfies(known, tier)) {
+		if (known !== null && recordSatisfies(known, tier, () => anyFileTypeFacts(target.file)?.name ?? null)) {
 			return known
 		}
 
@@ -224,7 +226,7 @@ export class ProbeService {
 			// Another tab may have probed the file while this one queued.
 			const known = await this.deps.records.refresh(target.uuid)
 
-			if (known !== null && recordSatisfies(known, tier)) {
+			if (known !== null && recordSatisfies(known, tier, () => anyFileTypeFacts(target.file)?.name ?? null)) {
 				return known
 			}
 
@@ -266,7 +268,7 @@ export class ProbeService {
 			this.deps.records.put(target.uuid, record)
 
 			for (const listener of this.recordListeners) {
-				listener(target.uuid, record)
+				listener(target.uuid, record, target.file)
 			}
 
 			return record
@@ -284,7 +286,7 @@ export class ProbeService {
 	}
 
 	// Every record a probe of this session writes, as it is written.
-	public onRecord(listener: (uuid: string, record: ProbeRecord) => void): () => void {
+	public onRecord(listener: (uuid: string, record: ProbeRecord, file: AnyFile) => void): () => void {
 		this.recordListeners.add(listener)
 
 		return () => {
@@ -329,6 +331,10 @@ export const probeService = new ProbeService({
 	isOnline: () => onlineManager.isOnline(),
 	now: () => Date.now()
 })
+
+// Every record a probe writes, in every session (Videos browsing included), leaves what it says about the
+// file's kind (an ambiguous .ts, .webm or .ogg) in the file-kind verdicts: no request of its own.
+adoptProbeRecords(probeService)
 
 // Module scope and without React, like the thumbnail service's reconnect hook: it lives as long as the tab.
 onlineManager.subscribe(online => {

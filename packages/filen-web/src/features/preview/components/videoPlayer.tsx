@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FocusEvent, type MouseEvent, type PointerEvent } from "react"
 import { useTranslation } from "react-i18next"
-import { MaximizeIcon, MinimizeIcon, PauseIcon, PictureInPicture2Icon, PlayIcon, XIcon } from "lucide-react"
+import { CaptionsIcon, MaximizeIcon, MinimizeIcon, PauseIcon, PictureInPicture2Icon, PlayIcon, XIcon } from "lucide-react"
 import { cn } from "@filen/shared"
+import { languageName } from "@filen/shared/videos"
 import { MediaElementScrubber } from "@/components/media/mediaScrubber"
 import { MediaCurrentTime, MediaDuration } from "@/components/media/mediaTime"
 import { VolumeControl } from "@/components/media/volumeControl"
@@ -18,12 +19,10 @@ import { Spinner } from "@/components/ui/spinner"
 import { MEDIA_GLASS_SURFACE_CLASS, MEDIA_GLASS_TONE_CLASS } from "@/components/ui/surface"
 import { CONTROLS_IDLE_MS, controlsVisible, IdleTimer } from "@/lib/media/autoHide.logic"
 import { fullscreenSupported, toggleFullscreen, useIsFullscreen } from "@/lib/media/fullscreen"
-import { warmMediaVolume } from "@/lib/media/mediaVolume"
 import { handlePlayerKeyDown } from "@/lib/media/playerKeyboard"
 import {
 	mediaValue,
 	playMedia,
-	seekMedia,
 	setPlaybackRate,
 	toggleMediaPlayback,
 	useMediaPaused,
@@ -33,15 +32,16 @@ import {
 	useMediaWaiting,
 	useSyncedMediaVolume
 } from "@/lib/media/useMediaState"
-import { reportMediaFailure, type MediaFailureKind } from "@/lib/media/mediaFailure"
-import type { BlockSource } from "@/lib/media/blockSource"
+import type { DriveItem } from "@/features/drive/lib/item"
 import { mediaControlsList } from "@/features/preview/lib/accessMode"
-import { getVideoPosition, setVideoPosition } from "@/features/preview/lib/videoContinuity"
+import { setVideoPosition } from "@/features/preview/lib/videoContinuity"
 import { CODECS, type CodecId } from "@/features/preview/lib/containerTracks"
-import { usePlaybackGap } from "@/features/preview/hooks/usePlaybackGap"
-import { useReleaseOnUnmount } from "@/lib/media/useReleaseOnUnmount"
+import { cannotStream, unplayableCodecs } from "@/features/preview/lib/previewPlayback.logic"
+import { usePreviewVideo } from "@/features/preview/hooks/usePreviewVideo"
+import { usePreviewSubtitles, type PreviewSubtitleOption, type PreviewSubtitles } from "@/features/preview/hooks/usePreviewSubtitles"
 import { useHoldReadsWhilePlaying } from "@/lib/media/useHoldReadsWhilePlaying"
-import { MediaFailureState } from "@/features/preview/components/mediaFailureState"
+import { SubtitleOverlay } from "@/components/media/video/subtitleOverlay"
+import { MediaCannotStream, MediaFormatFailure, MediaPlaybackFailure } from "@/features/preview/components/mediaFailureState"
 import { PreviewDownloadButton } from "@/features/preview/components/previewErrorState"
 
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const
@@ -63,9 +63,8 @@ function pictureInPictureSupported(): boolean {
 	return typeof document !== "undefined" && "pictureInPictureEnabled" in document && document.pictureInPictureEnabled
 }
 
-// Restores where this item was left within the overlay session (videoContinuity.ts) and autoplays once
-// metadata is in, after the shared volume is known so playback never starts at the wrong level. A
-// refused play() (an autoplay policy) leaves the element paused behind the big play button.
+// Remembers where this item was left within the overlay session (videoContinuity.ts); playback starts
+// there again (usePreviewVideo).
 function useVideoContinuity(video: HTMLVideoElement | null, positionKey: string): void {
 	useEffect(() => {
 		if (video === null) {
@@ -73,28 +72,6 @@ function useVideoContinuity(video: HTMLVideoElement | null, positionKey: string)
 		}
 
 		const element = video
-		let live = true
-
-		function restoreAndPlay(): void {
-			const saved = getVideoPosition(positionKey)
-
-			if (saved !== undefined) {
-				seekMedia(element, saved)
-			}
-
-			void warmMediaVolume().then(() => {
-				if (live) {
-					playMedia(element)
-				}
-			})
-		}
-
-		// Metadata may already be in (a cached response), and its event will not fire again.
-		if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
-			restoreAndPlay()
-		} else {
-			element.addEventListener("loadedmetadata", restoreAndPlay, { once: true })
-		}
 
 		function handlePause(): void {
 			setVideoPosition(positionKey, element.currentTime)
@@ -103,11 +80,11 @@ function useVideoContinuity(video: HTMLVideoElement | null, positionKey: string)
 		element.addEventListener("pause", handlePause)
 
 		return () => {
-			live = false
-			element.removeEventListener("loadedmetadata", restoreAndPlay)
 			element.removeEventListener("pause", handlePause)
-			// Stepping away mid-playback fires no pause.
-			setVideoPosition(positionKey, element.currentTime)
+			// Stepping away mid-playback fires no pause. Read before the controller empties the element.
+			if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
+				setVideoPosition(positionKey, element.currentTime)
+			}
 		}
 	}, [video, positionKey])
 }
@@ -116,20 +93,15 @@ function useVideoContinuity(video: HTMLVideoElement | null, positionKey: string)
 // playback runs untouched. Loops, like the rest of the full preview experience; a chat's inline embed
 // keeps the browser's controls.
 export function VideoPlayer({
-	url,
+	item,
 	alt,
 	downloadable,
-	onError,
-	positionKey,
-	source
+	positionKey
 }: {
-	url: string
+	item: DriveItem
 	alt: string
 	downloadable: boolean
-	onError?: (() => void) | undefined
 	positionKey: string
-	// The same file's bytes, read to tell a format failure from a broken stream and to name a codec.
-	source: BlockSource
 }) {
 	const { t } = useTranslation(["preview", "audio"])
 	const [container, setContainer] = useState<HTMLDivElement | null>(null)
@@ -138,8 +110,12 @@ export function VideoPlayer({
 	const waiting = useMediaWaiting(video)
 	const hasMetadata = useMediaValue(video, HAS_METADATA, false)
 	const aspectRatio = useMediaValue(video, ASPECT_RATIO, 0) || DEFAULT_ASPECT_RATIO
-	const [failure, setFailure] = useState<MediaFailureKind | null>(null)
-	const gap = usePlaybackGap(video, source)
+	// Before usePreviewVideo, whose cleanup empties the element this cleanup reads the position of.
+	useVideoContinuity(video, positionKey)
+	const { controller, snapshot } = usePreviewVideo(item, video, positionKey)
+	const subtitles = usePreviewSubtitles(item, controller, snapshot)
+	const status = snapshot?.status ?? "active"
+	const failed = status !== "active"
 	const [gapDismissed, setGapDismissed] = useState(false)
 	const [pointerActive, setPointerActive] = useState(false)
 	const [keyboardFocus, setKeyboardFocus] = useState(false)
@@ -149,14 +125,12 @@ export function VideoPlayer({
 	// A tap on the picture while the controls are hidden only brings them back; it does not also pause.
 	const tapRevealsControls = useRef(false)
 	const fullscreen = useIsFullscreen(container)
-	const loading = failure === null && (!hasMetadata || waiting)
+	const loading = !failed && (!hasMetadata || waiting)
 	const visible = controlsVisible({ paused, waiting: loading, pointerActive, keyboardFocus, menuOpen, scrubbing })
+	const silentCodec = snapshot?.silentCodec ?? null
 
 	useSyncedMediaVolume(video)
 	useHoldReadsWhilePlaying(video)
-	useVideoContinuity(video, positionKey)
-	// After useVideoContinuity, whose cleanup reads the position this empties.
-	useReleaseOnUnmount(video)
 
 	// Playback starting shows the controls for one idle period before they fade.
 	useEffect(() => {
@@ -204,18 +178,26 @@ export function VideoPlayer({
 
 	return (
 		<div className="relative size-full p-4">
-			{failure !== null && video !== null ? (
+			{status === "unsupported" ? (
 				<div className="absolute inset-0">
-					<MediaFailureState
-						kind={failure}
-						media={video}
-						source={source}
+					{cannotStream(snapshot?.decision ?? null) ? (
+						<MediaCannotStream />
+					) : (
+						<MediaFormatFailure codecs={unplayableCodecs(snapshot?.probe ?? null, snapshot?.decision ?? null)} />
+					)}
+				</div>
+			) : status === "failed" ? (
+				<div className="absolute inset-0">
+					<MediaPlaybackFailure
+						onRetry={() => {
+							controller?.retry()
+						}}
 					/>
 				</div>
 			) : null}
 			{/* A size container, so the picture box below can fit itself to both of its dimensions. Hidden, not
 			unmounted, once playback failed: a fresh element would only load and fail again. */}
-			<div className={cn("[container-type:size] flex size-full items-center justify-center", failure !== null && "invisible")}>
+			<div className={cn("[container-type:size] flex size-full items-center justify-center", failed && "invisible")}>
 				<div
 					ref={setContainer}
 					// Takes its own clicks and arrow keys, so the preview overlay neither toggles its chrome nor pages.
@@ -246,7 +228,6 @@ export function VideoPlayer({
 				>
 					<video
 						ref={setVideo}
-						src={url}
 						aria-label={alt}
 						// Also drops the native context menu's own download entry.
 						controlsList={mediaControlsList(downloadable)}
@@ -264,27 +245,28 @@ export function VideoPlayer({
 										event.preventDefault()
 									}
 						}
-						// The streamed path recovers from a broken stream through onError; a format failure, and
-						// anything on the buffered path, stays here.
-						onError={event => {
-							reportMediaFailure(event.currentTarget, source, kind => {
-								if (kind === "other" && onError !== undefined) {
-									onError()
-								} else {
-									setFailure(kind)
-								}
-							})
-						}}
 					/>
-					{gap !== null && !gapDismissed ? (
+					<SubtitleOverlay
+						video={video}
+						cues={subtitles.cues}
+						offset={0}
+						raised={visible}
+					/>
+					<p
+						role="status"
+						className="sr-only"
+					>
+						{subtitles.failed ? t("previewMediaSubtitleUnreadableNotice") : null}
+					</p>
+					{silentCodec !== null && !gapDismissed ? (
 						<PlaybackGapNotice
-							codec={gap}
+							codec={silentCodec}
 							onDismiss={() => {
 								setGapDismissed(true)
 							}}
 						/>
 					) : null}
-					{failure !== null ? null : loading ? (
+					{failed ? null : loading ? (
 						<div
 							className={cn(
 								"pointer-events-none absolute flex size-14 items-center justify-center rounded-full",
@@ -349,6 +331,13 @@ export function VideoPlayer({
 							className="min-w-9"
 						/>
 						<VolumeControl sliderClassName="@max-md:hidden" />
+						{subtitles.options.length > 0 ? (
+							<SubtitlesMenu
+								subtitles={subtitles}
+								container={fullscreen ? container : null}
+								onOpenChange={setMenuOpen}
+							/>
+						) : null}
 						<PlaybackSpeedMenu
 							media={video}
 							// Only a fullscreen player needs the menu inside it; elsewhere it portals as usual.
@@ -418,6 +407,88 @@ function PlaybackSpeedMenu({
 							value={String(option)}
 						>
 							{option === 1 ? t("previewMediaNormalSpeed") : t("previewMediaSpeedRate", { rate: option })}
+						</DropdownMenuRadioItem>
+					))}
+				</DropdownMenuRadioGroup>
+			</DropdownMenuContent>
+		</DropdownMenu>
+	)
+}
+
+type SubtitleLabelKey =
+	"previewMediaSubtitleUnknownLanguage" | "previewMediaSubtitleForced" | "previewMediaSubtitleSdh" | "previewMediaSubtitleEmbedded"
+
+// "English · Forced · Embedded": the language, the track's own title, then its flags.
+function subtitleLabel(option: PreviewSubtitleOption, t: (key: SubtitleLabelKey) => string): string {
+	const parts = [languageName(option.lang) ?? t("previewMediaSubtitleUnknownLanguage")]
+
+	if (option.title.length > 0) {
+		parts.push(option.title)
+	}
+
+	if (option.forced) {
+		parts.push(t("previewMediaSubtitleForced"))
+	}
+
+	if (option.sdh) {
+		parts.push(t("previewMediaSubtitleSdh"))
+	}
+
+	if (option.embedded) {
+		parts.push(t("previewMediaSubtitleEmbedded"))
+	}
+
+	return parts.join(" · ")
+}
+
+function SubtitlesMenu({
+	subtitles,
+	container,
+	onOpenChange
+}: {
+	subtitles: PreviewSubtitles
+	container: HTMLElement | null
+	onOpenChange: (open: boolean) => void
+}) {
+	const { t } = useTranslation("preview")
+
+	return (
+		<DropdownMenu onOpenChange={onOpenChange}>
+			<DropdownMenuTrigger
+				render={
+					<Button
+						variant="ghost"
+						size="icon-sm"
+						aria-label={t("previewMediaSubtitles")}
+					>
+						<CaptionsIcon />
+					</Button>
+				}
+			/>
+			<DropdownMenuContent
+				side="top"
+				align="end"
+				container={container ?? undefined}
+				className={cn(MEDIA_GLASS_TONE_CLASS, "w-auto max-w-80 min-w-44 before:backdrop-saturate-100")}
+			>
+				<DropdownMenuRadioGroup
+					value={subtitles.selected}
+					onValueChange={(next: string) => {
+						subtitles.select(next)
+					}}
+				>
+					<DropdownMenuLabel>{t("previewMediaSubtitles")}</DropdownMenuLabel>
+					<DropdownMenuRadioItem value="off">{t("previewMediaSubtitlesOff")}</DropdownMenuRadioItem>
+					{subtitles.options.map(option => (
+						<DropdownMenuRadioItem
+							key={option.id}
+							value={option.id}
+						>
+							<span className="truncate">
+								{subtitles.failed && option.id === subtitles.selected
+									? t("previewMediaSubtitleUnreadable", { name: subtitleLabel(option, key => t(key)) })
+									: subtitleLabel(option, key => t(key))}
+							</span>
 						</DropdownMenuRadioItem>
 					))}
 				</DropdownMenuRadioGroup>

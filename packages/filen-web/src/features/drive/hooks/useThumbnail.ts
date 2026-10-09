@@ -3,6 +3,7 @@ import { type DriveItem } from "@/features/drive/lib/item"
 import { getThumbnailUrl, peekThumbnailUrl } from "@/features/drive/lib/thumbnails"
 import { thumbnailCategory } from "@/features/drive/lib/thumbnails.logic"
 import { ThumbnailRankContext } from "@/features/drive/lib/thumbnailRank"
+import { useFileKindVerdict } from "@/features/drive/hooks/useFileKindVerdict"
 
 // side-effect: registers the sdk/video/pdf generators against the thumbnail service — upload.ts is
 // the only other production importer (for its own warm path), and an unregistered category would
@@ -31,7 +32,8 @@ function initialThumbnail(item: DriveItem): string | null | undefined {
 // virtualized listing, which ranks its generation against the rest while it waits for a slot.
 export function useThumbnail(item: DriveItem, index?: number): string | null | undefined {
 	const uuid = item.data.uuid
-	const wanted = thumbnailCategory(item) !== "none"
+	// A verdict landing later (a `.ts` read as a transport stream) can give the item a thumbnail story.
+	const wanted = thumbnailCategory(item, useFileKindVerdict(uuid)) !== "none"
 	const [state, setState] = useState(() => ({ uuid, wanted, url: initialThumbnail(item) }))
 	let current = state
 

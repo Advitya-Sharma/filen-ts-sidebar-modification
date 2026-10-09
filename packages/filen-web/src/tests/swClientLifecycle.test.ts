@@ -6,7 +6,8 @@ import {
 	SW_MSG_LOGOUT,
 	SW_MSG_REGISTER_DOWNLOAD,
 	SW_MSG_REGISTER_PREVIEW,
-	SW_MSG_RELEASE_PREVIEW
+	SW_MSG_RELEASE_PREVIEW,
+	SW_MSG_PREVIEW_STATUS
 } from "@/lib/sw/protocol"
 
 // sw.ts is a ServiceWorkerGlobalScope module: it registers its listeners on `self` at import and pulls
@@ -58,7 +59,7 @@ async function loadSw(): Promise<void> {
 			listeners.set(type, listener)
 		},
 		skipWaiting: () => Promise.resolve(),
-		clients: { claim: () => Promise.resolve() }
+		clients: { claim: () => Promise.resolve(), matchAll: () => Promise.resolve([]) }
 	})
 	vi.resetModules()
 	await import("@/sw/sw")
@@ -203,5 +204,16 @@ describe("sw.ts preview release", () => {
 
 		expect(status("p1")).toBe(404)
 		expect(status("d1")).not.toBe(404)
+	})
+
+	it("answers a status query for a session preview from its registry", async () => {
+		await message({ type: SW_MSG_INIT_CLIENT, blob: {} })
+		await message({ type: SW_MSG_REGISTER_PREVIEW, id: "p1", file: {}, name: "a.mp4", size: 10, contentType: "video/mp4" })
+
+		expect(await message({ type: SW_MSG_PREVIEW_STATUS, id: "p1" })).toEqual({ status: "present" })
+
+		listeners.get("message")?.({ data: { type: SW_MSG_RELEASE_PREVIEW, id: "p1" }, ports: [] })
+
+		expect(await message({ type: SW_MSG_PREVIEW_STATUS, id: "p1" })).toEqual({ status: "missing" })
 	})
 })

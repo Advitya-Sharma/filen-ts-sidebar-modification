@@ -4,10 +4,11 @@
 
 import { previewType } from "@/features/drive/lib/preview.logic"
 import type { DriveItem } from "@/features/drive/lib/item"
+import type { ContentVerdict } from "@filen/shared"
 
 // The grid tile's video-type badge (mobile parity: a play-glyph badge marks video items) reuses
 // previewType (the SAME category resolution canPreview/the preview overlay itself use), so a
 // tile's badge can never disagree with what actually opens as a video preview.
-export function showVideoBadge(item: DriveItem): boolean {
-	return previewType(item) === "video"
+export function showVideoBadge(item: DriveItem, verdict?: ContentVerdict): boolean {
+	return previewType(item, verdict) === "video"
 }

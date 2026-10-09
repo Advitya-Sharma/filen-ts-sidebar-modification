@@ -184,8 +184,9 @@ test("image/video/audio previews stream over the SW's inline route: range-seekab
 	// browser's own broken-media state on screen. The service worker dropping every registration (its
 	// logout message, what a worker restart amounts to) and reloading the same stream reproduces exactly
 	// that: handleDownload (sw.ts) 404s an id it no longer holds, and the stream the element was given is
-	// the one that fails, as in production. Reuses the `video` locator across the ensuing React remount
-	// (StreamedMedia -> BufferedMedia) rather than a stale element handle. ----
+	// the one that fails, as in production. The player moves to MediaSource fed by the remux worker over
+	// the SDK worker's range port (never a whole-file buffer), so the element's source becomes a
+	// MediaSource object URL. ----
 	await video.evaluate(async (el, logoutType) => {
 		const controller = navigator.serviceWorker.controller
 
@@ -210,8 +211,7 @@ test("image/video/audio previews stream over the SW's inline route: range-seekab
 	}, SW_MSG_LOGOUT)
 
 	// Caught per attempt: expect.poll awaits its callback OUTSIDE the try it retries on, so an element
-	// detached mid-poll throws straight out of the poll instead of being retried — and the remount this
-	// leg is waiting for is exactly that detachment.
+	// detached mid-poll throws straight out of the poll instead of being retried.
 	await expect
 		.poll(() => video.evaluate(el => (el as HTMLVideoElement).currentSrc).catch(() => null), { timeout: 30_000 })
 		.toMatch(/^blob:/)

@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react"
 import { useQuery, type UseQueryResult } from "@tanstack/react-query"
 import { sdkApi } from "@/lib/sdk/client"
 import { currentSocketEpoch, socketLiveSince } from "@/lib/sdk/socketSession"
@@ -11,7 +12,10 @@ import {
 	setQueryDataKeepInvalidated
 } from "@/queries/patch"
 import { narrowItem, type DriveItem } from "@/features/drive/lib/item"
-import { isPhotoItem } from "@/features/photos/lib/predicate"
+import { isPhotoCandidate, isPhotoCategory } from "@/features/photos/lib/predicate"
+import { subscribeFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
+import { itemFileKind } from "@/features/drive/lib/preview.logic"
+import { createListenerSet } from "@/lib/listenerSet"
 import { sortPhotosByCaptureDesc, type PhotoItem } from "@/features/photos/lib/captureSort"
 import { photoFolderPaths } from "@/features/photos/lib/search"
 
@@ -27,6 +31,8 @@ export function photosListingQueryKey(rootUuid: string) {
 }
 
 export interface PhotosListing {
+	// Photos and the files a content verdict could still make one (isPhotoCandidate); what shows is
+	// decided as it is read (usePhotosListingQuery).
 	photos: PhotoItem[]
 	// Path below the root of each directory directly holding a photo, for search (photoFolderPaths).
 	folders: Record<string, string>
@@ -87,7 +93,7 @@ export async function fetchPhotosListing(rootUuid: string): Promise<PhotosListin
 			readThisSession.delete(rootUuid)
 		}
 
-		const photos = files.map(narrowItem).filter(isPhotoItem) as PhotoItem[]
+		const photos = files.map(narrowItem).filter(isPhotoCandidate) as PhotoItem[]
 
 		return {
 			photos: withFavoriteFlips(sortPhotosByCaptureDesc(photos), flips),
@@ -114,11 +120,75 @@ export function photosListingQueryOptions(rootUuid: string) {
 	}
 }
 
+// Listed files whose content verdict can change whether they show: a candidate `.ts`, a video an "audio"
+// verdict would hide. Taken as a listing is read; a verdict for any other file leaves the listing alone.
+let verdictWatched: ReadonlySet<string> = new Set()
+let shownVersion = 0
+let shownBump: ReturnType<typeof setTimeout> | null = null
+const shownChanges = createListenerSet("photos-verdicts")
+
+// One re-read per frame at most, however many verdicts land.
+subscribeFileKindVerdicts(uuids => {
+	if (shownBump !== null || verdictWatched.size === 0 || (uuids !== null && !uuids.some(uuid => verdictWatched.has(uuid)))) {
+		return
+	}
+
+	shownBump = setTimeout(() => {
+		shownBump = null
+		shownVersion++
+		shownChanges.emit()
+	}, 16)
+})
+
+function subscribeShownPhotos(listener: () => void): () => void {
+	return shownChanges.subscribe(listener)
+}
+
+function shownPhotosVersion(): number {
+	return shownVersion
+}
+
+// The photos a listing shows under the verdicts known now, in one pass that also notes which of them a
+// verdict could still change; the same listing when it shows all it holds.
+function shownPhotos(listing: PhotosListing): PhotosListing {
+	const watched = new Set<string>()
+	const photos = listing.photos.filter(photo => {
+		const kind = itemFileKind(photo)
+
+		if (kind === null) {
+			return false
+		}
+
+		if (kind.ambiguous) {
+			watched.add(photo.data.uuid)
+		}
+
+		return isPhotoCategory(kind.kind)
+	})
+
+	verdictWatched = watched
+
+	return photos.length === listing.photos.length ? listing : { ...listing, photos }
+}
+
+// One select per version: the listing is filtered again only when its data or a verdict about one of its
+// watched files changes.
+let shownPhotosSelect: { version: number; select: (listing: PhotosListing) => PhotosListing } | null = null
+
+function shownPhotosFor(version: number): (listing: PhotosListing) => PhotosListing {
+	if (shownPhotosSelect?.version !== version) {
+		shownPhotosSelect = { version, select: listing => shownPhotos(listing) }
+	}
+
+	return shownPhotosSelect.select
+}
+
 export function usePhotosListingQuery(rootUuid: string | null): UseQueryResult<PhotosListing> {
 	return useQuery({
 		...photosListingQueryOptions(rootUuid ?? ""),
 		enabled: rootUuid !== null,
-		refetchOnReconnect: "always"
+		refetchOnReconnect: "always",
+		select: shownPhotosFor(useSyncExternalStore(subscribeShownPhotos, shownPhotosVersion))
 	})
 }
 
@@ -159,8 +229,8 @@ export function photosListingQueryUpdate(rootUuid: string, updater: (prev: Photo
 // invalidating events. A listing without the photo, or with the flag already set, is left alone. A walk
 // under way gets the flip too (flipsDuringWalks), whether or not the rows it will replace hold the photo.
 export function patchPhotosFavorite(item: DriveItem): void {
-	// A listing holds photos only, so no other favorite can concern one.
-	if (item.type !== "file" || !isPhotoItem(item)) {
+	// A listing holds photos and candidates only, so no other favorite can concern one.
+	if (item.type !== "file" || !isPhotoCandidate(item)) {
 		return
 	}
 

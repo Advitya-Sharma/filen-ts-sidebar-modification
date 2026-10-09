@@ -113,15 +113,70 @@ describe("range port", () => {
 		expect(lifetime.signal.aborted).toBe(true)
 	})
 
-	it("gives up on a read nobody answers", async () => {
+	it("gives up on a read nobody answers, and cancels it on the serving side", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
 
-		const { reader } = setUp((_start, _end, signal) => never(signal))
+		const cancelled = Promise.withResolvers<undefined>()
+		const { reader } = setUp((_start, _end, signal) =>
+			never(signal, () => {
+				cancelled.resolve(undefined)
+			})
+		)
 		const read = reader.readRange(0, 10, new AbortController().signal)
 
 		vi.advanceTimersByTime(RANGE_READ_TIMEOUT_MS)
 
 		await expect(read).rejects.toThrow("timed out")
+		await cancelled.promise
+	})
+
+	it("measures the timeout from the last read that came back, so slow reads in flight together all finish", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+
+		const answers: (() => void)[] = []
+		const { reader } = setUp(
+			(start, end) =>
+				new Promise(resolve => {
+					answers.push(() => {
+						resolve(new Uint8Array(end - start))
+					})
+				})
+		)
+		const signal = new AbortController().signal
+		const first = reader.readRange(0, 1, signal)
+		const second = reader.readRange(1, 3, signal)
+
+		await vi.waitFor(() => {
+			expect(answers).toHaveLength(2)
+		})
+		vi.advanceTimersByTime(RANGE_READ_TIMEOUT_MS - 1_000)
+		answers[0]?.()
+		await expect(first).resolves.toHaveLength(1)
+		// The second read has now been pending for longer than the timeout, but the port made progress.
+		vi.advanceTimersByTime(RANGE_READ_TIMEOUT_MS - 1_000)
+		answers[1]?.()
+		await expect(second).resolves.toHaveLength(2)
+	})
+
+	it("releases its reader lock once the serving side goes away", async () => {
+		const readerLocks = async () =>
+			new Set(
+				((await navigator.locks.query()).held ?? []).flatMap(lock =>
+					lock.name?.startsWith("filen-range-reader-") ? [lock.name] : []
+				)
+			)
+		const before = await readerLocks()
+		const { lifetime } = setUp(() => Promise.resolve(new Uint8Array(1)))
+		let added: string[] = []
+
+		await vi.waitFor(async () => {
+			added = [...(await readerLocks())].filter(name => !before.has(name))
+			expect(added).toHaveLength(1)
+		})
+		lifetime.abort()
+		await vi.waitFor(async () => {
+			expect((await readerLocks()).has(added[0] ?? "")).toBe(false)
+		})
 	})
 
 	it("learns at once that the serving worker died, though its port posts nothing", async () => {

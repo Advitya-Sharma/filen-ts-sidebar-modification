@@ -131,6 +131,7 @@ export function DirectoryBrowser({ info, link }: { info: DirPublicInfo; link: Di
 				}}
 				saveItem={saveable ? selected.file : undefined}
 				archiveFile={selected.file}
+				siblings={sorted.map(entry => entry.item)}
 			/>
 		)
 	}

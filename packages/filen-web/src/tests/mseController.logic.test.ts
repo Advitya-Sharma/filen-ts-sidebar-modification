@@ -9,6 +9,11 @@ import {
 	unionRanges,
 	recentEvictions,
 	browserEngine,
+	forwardBuffered,
+	initialAudio,
+	isAudioOnlySession,
+	playableRanges,
+	sessionAhead,
 	bufferedAhead,
 	bufferLimits,
 	intersectRanges,
@@ -16,7 +21,8 @@ import {
 	quotaAction,
 	rangesOutside,
 	seekPlan,
-	stallAction
+	stallAction,
+	supportedCopyCodec
 } from "@/lib/media/mseController.logic"
 
 const MiB = 1_048_576
@@ -379,5 +385,99 @@ describe("TimelineOps", () => {
 describe("recentEvictions", () => {
 	it("keeps only refetches within the last minute", () => {
 		expect(recentEvictions([0, 30_000, 59_000], 90_000)).toEqual([59_000])
+	})
+})
+
+describe("audio alone", () => {
+	const limits = { video: 150 * MiB, audio: 12 * MiB }
+
+	it("plays audio alone on an element without a picture, or for a file without a video track", () => {
+		expect(isAudioOnlySession({ elementShowsVideo: false, hasVideoTrack: true })).toBe(true)
+		expect(isAudioOnlySession({ elementShowsVideo: true, hasVideoTrack: false })).toBe(true)
+		// An unplayable video track on a <video> element fails rather than playing as sound.
+		expect(isAudioOnlySession({ elementShowsVideo: true, hasVideoTrack: true })).toBe(false)
+	})
+
+	it("plans seeks from the audio buffer alone", () => {
+		expect(seekPlan({ time: 10, video: null, audio: [[0, 30]] })).toBe("inBuffer")
+		expect(seekPlan({ time: 10, video: null, audio: [[0, 10.2]] })).toBe("restart")
+		expect(seekPlan({ time: 40, video: null, audio: [[0, 30]] })).toBe("restart")
+	})
+
+	it("counts only the tracks played as playable and as forward buffer", () => {
+		const audio: [number, number][] = [
+			[0, 20],
+			[25, 40]
+		]
+
+		expect(playableRanges(null, audio)).toEqual(audio)
+		expect(playableRanges([[5, 30]], null)).toEqual([[5, 30]])
+		expect(playableRanges([[5, 30]], audio)).toEqual([
+			[5, 20],
+			[25, 30]
+		])
+		expect(playableRanges(null, null)).toEqual([])
+		expect(forwardBuffered(10, null, audio)).toBe(10)
+		expect(forwardBuffered(10, [[0, 15]], audio)).toBe(5)
+		expect(forwardBuffered(10, null, null)).toBe(0)
+	})
+
+	it("sizes the window by the audio buffer's limit and the track's bitrate", () => {
+		// 0.6 * 12 MiB * 8 / 1411.2 kb/s (CD-quality PCM) ≈ 42.8 s.
+		expect(sessionAhead({ audioOnly: true, limits, fileBitrate: 40_000_000, audioBitrate: 1_411_200, scale: 1 })).toBeCloseTo(42.8, 1)
+		expect(sessionAhead({ audioOnly: true, limits, fileBitrate: 40_000_000, audioBitrate: 128_000, scale: 1 })).toBe(60)
+		// A 1 MiB audio buffer (low-memory Android) still keeps the 10 s floor.
+		expect(
+			sessionAhead({ audioOnly: true, limits: { video: 15 * MiB, audio: MiB }, fileBitrate: 0, audioBitrate: 1_411_200, scale: 1 })
+		).toBe(10)
+		// With video, the file's bitrate against the video buffer, as before.
+		expect(sessionAhead({ audioOnly: false, limits, fileBitrate: 40_000_000, audioBitrate: 128_000, scale: 1 })).toBeCloseTo(18.87, 1)
+	})
+
+	it("starts the chosen track, or the default one with its mode left to the page", () => {
+		const tracks = [
+			{ id: 1, isDefault: false },
+			{ id: 2, isDefault: true }
+		]
+
+		expect(initialAudio({ tracks, chosen: { trackId: 1, mode: "transcode" }, audioOnly: false })).toEqual({
+			trackId: 1,
+			mode: "transcode"
+		})
+		expect(initialAudio({ tracks, chosen: undefined, audioOnly: false })).toEqual({ trackId: 2, mode: null })
+		expect(initialAudio({ tracks, chosen: { trackId: 9, mode: "copy" }, audioOnly: false })).toEqual({ trackId: 2, mode: null })
+		expect(initialAudio({ tracks: [{ id: 4, isDefault: false }], chosen: undefined, audioOnly: true })).toEqual({
+			trackId: 4,
+			mode: null
+		})
+		expect(initialAudio({ tracks: [], chosen: undefined, audioOnly: true })).toBeNull()
+	})
+
+	it("plays video alone when asked, but never nothing when audio is all there is", () => {
+		const tracks = [{ id: 3, isDefault: true }]
+
+		expect(initialAudio({ tracks, chosen: { trackId: -1, mode: "none" }, audioOnly: false })).toBeNull()
+		expect(initialAudio({ tracks, chosen: { trackId: -1, mode: "none" }, audioOnly: true })).toEqual({ trackId: 3, mode: null })
+	})
+})
+
+describe("supportedCopyCodec", () => {
+	const takes =
+		(...codecs: string[]) =>
+		(mime: string) =>
+			codecs.some(codec => mime === `audio/mp4; codecs="${codec}"`)
+
+	it("finds the spelling of MP3 each engine takes, so the copy path is not given up for a re-encode", () => {
+		expect(supportedCopyCodec("mp3", takes("mp4a.6B", "mp4a.69"))).toBe("mp4a.6B")
+		expect(supportedCopyCodec("mp3", takes("mp4a.69"))).toBe("mp4a.69")
+		expect(supportedCopyCodec("mp3", takes("mp3"))).toBe("mp3")
+		expect(supportedCopyCodec("mp3", takes("opus"))).toBeNull()
+	})
+
+	it("keeps the track's own spelling when it is taken, and tries no others for a codec that has none", () => {
+		expect(supportedCopyCodec("flac", takes("flac", "fLaC"))).toBe("flac")
+		expect(supportedCopyCodec("flac", takes("fLaC"))).toBe("fLaC")
+		expect(supportedCopyCodec("mp4a.40.2", takes("mp4a.40.2"))).toBe("mp4a.40.2")
+		expect(supportedCopyCodec("mp4a.40.2", takes("mp4a.40.5"))).toBeNull()
 	})
 })

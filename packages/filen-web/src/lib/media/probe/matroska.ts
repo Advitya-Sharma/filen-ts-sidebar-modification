@@ -85,7 +85,7 @@ const MAX_TRACKS_BYTES = 1_048_576
 const MAX_CHAPTERS_BYTES = 1_048_576
 const MAX_INFLATED_BYTES = 1_048_576
 const MAX_CHAPTER_ATOMS = 4096
-// Attachment headers visited in blocks not already fetched while looking for the cover; fonts commonly
+// Attachment headers visited in blocks not already fetched while looking for the covers; fonts commonly
 // come first, each one its own block away.
 const MAX_COVER_HOPS = 4
 
@@ -866,7 +866,7 @@ function parseChaptersPayload(bytes: Uint8Array, context: EbmlContext): ProbeCha
 	return chapters.sort((a, b) => a.t - b.t).slice(0, MAX_CHAPTERS)
 }
 
-// ── Attachments (cover) ─────────────────────────────────────────────────────
+// ── Attachments (covers) ────────────────────────────────────────────────────
 
 const COVER_MIMES: Readonly<Record<string, string>> = {
 	jpg: "image/jpeg",
@@ -920,13 +920,22 @@ async function coverHeader(
 	return { ...element, end }
 }
 
-// The first AttachedFile named "cover.*": its FileData's position, never its bytes.
+// Which cover an attachment's file name makes it: "cover.*", or the landscape "cover_land.*".
+function coverSlot(name: string): "cover" | "coverLand" | null {
+	const lower = name.toLowerCase()
+
+	return lower.startsWith("cover.") ? "cover" : lower.startsWith("cover_land.") ? "coverLand" : null
+}
+
+// The first AttachedFile named "cover.*" and the first named "cover_land.*": their FileData's position,
+// never their bytes.
 async function findCover(walk: Walk, attachments: EbmlElement): Promise<void> {
 	const end = Math.min(attachments.end ?? walk.segmentEnd, walk.segmentEnd)
 	const hops = { count: 0 }
+	const { result } = walk
 	let at = attachments.dataStart
 
-	for (let i = 0; at < end && i < MAX_EBML_CHILDREN; i++) {
+	for (let i = 0; at < end && i < MAX_EBML_CHILDREN && (result.cover === null || result.coverLand === null); i++) {
 		const file = await coverHeader(walk, at, end, hops)
 
 		if (file === null) {
@@ -935,6 +944,7 @@ async function findCover(walk: Walk, attachments: EbmlElement): Promise<void> {
 
 		if (file.id === ATTACHED_FILE_ID) {
 			let name: string | null = null
+			let slot: "cover" | "coverLand" | null = null
 			let mime: string | null = null
 			let data: { offset: number; size: number } | null = null
 			let field = file.dataStart
@@ -958,12 +968,13 @@ async function findCover(walk: Walk, attachments: EbmlElement): Promise<void> {
 
 					if (element.id === FILE_NAME_ID) {
 						name = value
+						slot = value === null ? null : coverSlot(value)
 					} else {
 						mime = value
 					}
 
-					// Only the name decides, so a font's other fields are not worth a hop.
-					if (name !== null && !name.toLowerCase().startsWith("cover.")) {
+					// Only the name decides, so a font's (or a second cover's) other fields are not worth a hop.
+					if (name !== null && (slot === null || result[slot] !== null)) {
 						break
 					}
 				} else if (element.id === FILE_DATA_ID) {
@@ -973,12 +984,10 @@ async function findCover(walk: Walk, attachments: EbmlElement): Promise<void> {
 				field = element.end
 			}
 
-			if (name?.toLowerCase().startsWith("cover.") === true && data !== null) {
+			if (name !== null && slot !== null && result[slot] === null && data !== null) {
 				const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase()
 
-				walk.result.cover = { ...data, mime: mime ?? COVER_MIMES[extension] ?? "image/*" }
-
-				return
+				result[slot] = { ...data, mime: mime ?? COVER_MIMES[extension] ?? "image/*" }
 			}
 		}
 

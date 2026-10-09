@@ -1,11 +1,18 @@
+import * as Comlink from "comlink"
 import type { AnyFile } from "@filen/sdk-rs"
-import { holdWorkerAlive, registerWithSw } from "@/features/drive/lib/saveDownload"
+import { holdWorkerAlive, registerWithSw, sendToSw } from "@/features/drive/lib/saveDownload"
+import { sdkApi } from "@/lib/sdk/client"
+import { controllerIsCurrent } from "@/lib/sw/register"
 import {
 	SW_DOWNLOAD_PREFIX,
+	SW_MSG_PREVIEW_STATUS,
+	SW_MSG_REGISTER_PORT_PREVIEW,
 	SW_MSG_REGISTER_PREVIEW,
 	SW_MSG_RELEASE_PREVIEW,
+	SW_MSG_STREAM_GONE,
 	SW_PREVIEW_BUCKET_PLAYER,
-	SW_PREVIEW_BUCKET_TRANSIENT
+	SW_PREVIEW_BUCKET_TRANSIENT,
+	type PreviewStreamStatus
 } from "@/lib/sw/protocol"
 
 // Registers `file` against the SW's inline-preview route (no attachment disposition, an allowlisted
@@ -18,23 +25,129 @@ import {
 // so a revisit gets back the same URL rather than a new one. A video or audio element's registration goes
 // in the worker's player bucket, which downloads cannot crowd out; `transient` marks a short-lived use (a
 // thumbnail's one frame), kept apart so it can never evict a player's either.
+//
+// `access: "anon"` is a public link's file, which only the SDK worker's unauthenticated client can read: that
+// worker serves its ranges on a port (openLinkedRangePortAnon) and the port goes to the service worker,
+// which answers the same route by reading through it. The file handle and its key stay in the SDK worker.
+// It rejects at once, before any SDK work, when the controlling worker is older than this page's protocol
+// (or nothing controls the page), so the caller falls back to MediaSource without waiting on it. A
+// registration that a newer one of the same id overtakes resolves with that one; one released while still
+// on its way rejects with an AbortError.
 export async function previewStreamUrl(
 	file: AnyFile,
 	name: string,
 	contentType: string,
 	id: string = crypto.randomUUID(),
-	options: { transient?: boolean } = {}
+	options: { transient?: boolean; access?: PreviewAccess } = {}
 ): Promise<string> {
-	await registerWithSw(SW_MSG_REGISTER_PREVIEW, {
-		id,
-		file,
-		name,
-		size: Number(file.size),
-		contentType,
-		...previewBucket(contentType, options.transient === true)
-	})
+	const bucket = previewBucket(contentType, options.transient === true)
+
+	if (options.access === "anon") {
+		await registerPortPreview(file, id, { name, size: Number(file.size), contentType, ...bucket })
+	} else {
+		await registerWithSw(SW_MSG_REGISTER_PREVIEW, {
+			id,
+			file,
+			name,
+			size: Number(file.size),
+			contentType,
+			...bucket
+		})
+	}
 
 	return `${SW_DOWNLOAD_PREFIX}${id}`
+}
+
+// Which SDK client reads the file: the session's, or the unauthenticated one for a public link's.
+export type PreviewAccess = "authed" | "anon"
+
+// The page's side of each port-backed registration: the SDK worker's preview token (cancelled on release or
+// when the id registers again), its generation, the worker it went to, and its outcome.
+interface PortRegistration {
+	token: string
+	generation: number
+	target: ServiceWorker
+	done: Promise<undefined>
+}
+
+const portRegistrations = new Map<string, PortRegistration>()
+// Ids are this page's own, so a page-wide counter orders every registration of one id.
+let lastGeneration = 0
+
+function cancelPortToken(id: string): PortRegistration | undefined {
+	const registration = portRegistrations.get(id)
+
+	if (registration !== undefined) {
+		portRegistrations.delete(id)
+		void sdkApi.cancelPreviewDownload(registration.token)
+	}
+
+	return registration
+}
+
+async function registerPortPreview(
+	file: AnyFile,
+	id: string,
+	meta: { name: string; size: number; contentType: string; bucket?: string }
+): Promise<void> {
+	const current = await controllerIsCurrent()
+	// The worker the URL is fetched through.
+	const target = "serviceWorker" in navigator ? navigator.serviceWorker.controller : null
+
+	if (!current || target === null) {
+		throw new Error("the service worker cannot serve this preview")
+	}
+
+	const token = crypto.randomUUID()
+	const outcome = Promise.withResolvers<undefined>()
+	const registration: PortRegistration = { token, generation: ++lastGeneration, target, done: outcome.promise }
+	const { port1, port2 } = new MessageChannel()
+
+	// Only ever awaited through a registration that this one overtook.
+	outcome.promise.catch(() => undefined)
+	cancelPortToken(id)
+	portRegistrations.set(id, registration)
+
+	let failure: Error | null = null
+
+	try {
+		await sdkApi.openLinkedRangePortAnon(Comlink.transfer(port1, [port1]), file, token)
+
+		// Released or overtaken meanwhile, which cancelled the token: the worker would only refuse it.
+		if (portRegistrations.get(id) === registration) {
+			await sendToSw(target, SW_MSG_REGISTER_PORT_PREVIEW, { id, ...meta, generation: registration.generation, port: port2 }, [port2])
+		} else {
+			port2.close()
+		}
+	} catch (e) {
+		failure = e instanceof Error ? e : new Error(String(e))
+		void sdkApi.cancelPreviewDownload(token)
+		port2.close()
+	}
+
+	const latest = portRegistrations.get(id)
+
+	// Overtaken by a newer registration of the id: the URL is that one's now.
+	if (latest !== undefined && latest !== registration) {
+		outcome.resolve(latest.done)
+		await latest.done
+
+		return
+	}
+
+	if (latest === undefined) {
+		failure = new DOMException("the preview was released while it registered", "AbortError")
+	} else if (failure !== null) {
+		portRegistrations.delete(id)
+	}
+
+	if (failure !== null) {
+		outcome.reject(failure)
+
+		throw failure
+	}
+
+	outcome.resolve(undefined)
 }
 
 function previewBucket(contentType: string, transient: boolean): { bucket?: string } {
@@ -53,10 +166,105 @@ export function holdPreviewStreamAlive(): () => void {
 }
 
 // Hands a registration back once its element is done with the URL (emptied, so no further Range request
-// comes), so the worker drops the entry and its key material at once. Fire-and-forget: a worker that has
-// restarted since holds nothing to drop, and an older one ignores the message.
+// comes), so the worker drops the entry and its key material at once. Fire-and-forget and idempotent: a
+// worker that has restarted since holds nothing to drop, an older one ignores the message, and a second call
+// finds nothing left. A port-backed registration is released whole: the worker's entry (which closes its
+// port once no response reads from it), and the SDK worker's side through its token, which shuts the port
+// down from there and frees its UnauthClient even if the message never lands; both sides' Web Locks go with
+// the port. A registration still on its way is refused when it lands.
 export function releasePreviewStream(id: string): void {
-	navigator.serviceWorker.controller?.postMessage({ type: SW_MSG_RELEASE_PREVIEW, id })
+	const controller = "serviceWorker" in navigator ? navigator.serviceWorker.controller : null
+	const registration = cancelPortToken(id)
+	const message =
+		registration === undefined
+			? { type: SW_MSG_RELEASE_PREVIEW, id }
+			: { type: SW_MSG_RELEASE_PREVIEW, id, generation: registration.generation }
+
+	controller?.postMessage(message)
+
+	// The worker it registered with, should it no longer be the controller.
+	if (registration !== undefined && registration.target !== controller) {
+		registration.target.postMessage(message)
+	}
+}
+
+// Holders per registration id: one id is shared by every viewer of a file in a scope (previewCache.ts), so
+// two cards of the same file play from one registration.
+const holders = new Map<string, number>()
+const pendingReleases = new Map<string, ReturnType<typeof setTimeout>>()
+
+// A viewer starts using `id` (before registering it): its registration stays until the last holder lets go.
+export function holdPreviewStream(id: string): void {
+	clearTimeout(pendingReleases.get(id))
+	pendingReleases.delete(id)
+	holders.set(id, (holders.get(id) ?? 0) + 1)
+}
+
+// A holder lets go of `id`. The last one releases it (releasePreviewStream) once the current task is done,
+// unless `id` is held again first: a strict-mode re-run or a remount that reuses the id keeps the stream its
+// element is reading. An id nobody held is released the same way.
+export function releasePreviewStreamSoon(id: string): void {
+	const remaining = (holders.get(id) ?? 1) - 1
+
+	if (remaining > 0) {
+		holders.set(id, remaining)
+
+		return
+	}
+
+	holders.delete(id)
+	clearTimeout(pendingReleases.get(id))
+	pendingReleases.set(
+		id,
+		setTimeout(() => {
+			pendingReleases.delete(id)
+			releasePreviewStream(id)
+		}, 0)
+	)
+}
+
+// The registration id of a preview stream URL.
+export function previewStreamIdOf(url: string): string {
+	return url.slice(url.lastIndexOf("/") + 1)
+}
+
+// How long an answer to a status query may take; a worker that does not know the message never answers.
+const STATUS_TIMEOUT_MS = 3_000
+
+// Whether the controlling worker can still serve preview `id`, from its registry alone: no range request, no
+// SDK read, no network (SW_MSG_PREVIEW_STATUS). "present": it can; "lost": it holds the registration but its
+// read path is gone; "missing": it holds none, or nothing controls the page; "unknown": the controller is
+// older than this page's protocol (after a deploy, until the update is applied) and cannot be asked, which
+// says nothing against a stream it keeps serving.
+export async function previewStreamStatus(id: string): Promise<PreviewStreamStatus> {
+	const controller = "serviceWorker" in navigator ? navigator.serviceWorker.controller : null
+
+	if (controller === null) {
+		return "missing"
+	}
+
+	if (!(await controllerIsCurrent())) {
+		return "unknown"
+	}
+
+	return await new Promise<PreviewStreamStatus>(resolve => {
+		const channel = new MessageChannel()
+		const settle = (status: PreviewStreamStatus) => {
+			clearTimeout(timeout)
+			channel.port1.close()
+			resolve(status)
+		}
+		const timeout = setTimeout(() => {
+			settle("missing")
+		}, STATUS_TIMEOUT_MS)
+
+		channel.port1.onmessage = (event: MessageEvent<{ status?: unknown } | null>) => {
+			const status = event.data?.status
+
+			settle(status === "present" || status === "lost" ? status : "missing")
+		}
+		controller.postMessage({ type: SW_MSG_PREVIEW_STATUS, id }, [channel.port2])
+	})
 }
 
 // Capability gate: true once a service worker is actually controlling this tab — registered in every
@@ -115,4 +323,35 @@ export async function waitForMediaStream(timeoutMs: number = SW_CONTROL_TIMEOUT_
 		// return above and this subscription, and controllerchange does not replay.
 		onControllerChange()
 	})
+}
+
+// Calls `listener` whenever the controlling service worker answers a range request for preview `id` with
+// 404 (SW_MSG_STREAM_GONE): the element's stream is gone, whether or not the browser says so. Returns the
+// unsubscribe; a no-op where there are no service workers.
+export function onPreviewStreamGone(id: string, listener: () => void): () => void {
+	if (!("serviceWorker" in navigator)) {
+		return () => undefined
+	}
+
+	const container = navigator.serviceWorker
+	const handle = (event: MessageEvent): void => {
+		const data: unknown = event.data
+
+		if (
+			typeof data === "object" &&
+			data !== null &&
+			"type" in data &&
+			data.type === SW_MSG_STREAM_GONE &&
+			"id" in data &&
+			data.id === id
+		) {
+			listener()
+		}
+	}
+
+	container.addEventListener("message", handle)
+
+	return () => {
+		container.removeEventListener("message", handle)
+	}
 }

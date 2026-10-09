@@ -1,7 +1,13 @@
 import * as Comlink from "comlink"
 import type { AnyFile } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
-import { holdPreviewStreamAlive, previewStreamUrl, releasePreviewStream } from "@/features/preview/lib/previewStream"
+import {
+	holdPreviewStreamAlive,
+	onPreviewStreamGone,
+	previewStreamStatus,
+	previewStreamUrl,
+	releasePreviewStream
+} from "@/features/preview/lib/previewStream"
 import type { DirectSource } from "@/lib/media/playback/directSession"
 import type { RemuxSource } from "@/lib/media/playback/remuxSession"
 import { warmRemuxFile, type RemuxWarmth } from "@/lib/media/mseController"
@@ -10,33 +16,38 @@ import type { VideoProbe } from "@/lib/media/probe/types"
 // The app's byte sources for playback sessions: the service worker's range route and the SDK worker's
 // range ports.
 
-export function directSource(params: { file: AnyFile; name: string; contentType: string }): DirectSource {
-	const { file, name, contentType } = params
-	const presetId = takeWarmDirect(file.uuid)
+// `access: "anon"` (a public link's file) streams through the SDK worker's unauthenticated client; never
+// prewarmed.
+export function directSource(params: { file: AnyFile; name: string; contentType: string; access?: RangeAccess }): DirectSource {
+	const { file, name, contentType, access = "authed" } = params
+	const presetId = access === "anon" ? null : takeWarmDirect(file.uuid)
 
 	return {
-		register: id => previewStreamUrl(file, name, contentType, id),
+		register: id =>
+			access === "anon" ? previewStreamUrl(file, name, contentType, id, { access }) : previewStreamUrl(file, name, contentType, id),
 		release: releasePreviewStream,
 		holdAlive: holdPreviewStreamAlive,
-		reachable: async url => {
-			const response = await fetch(url, { headers: { Range: "bytes=0-1" } })
-
-			await response.body?.cancel()
-
-			return response.status === 206
-		},
+		onGone: onPreviewStreamGone,
+		status: previewStreamStatus,
 		...(presetId === null ? {} : { presetId })
 	}
 }
 
-function createRemuxSource(file: AnyFile, warmKey?: string): RemuxSource {
+// Which SDK client serves the bytes: the session's, or an unauthenticated one for a public link's file.
+type RangeAccess = "authed" | "anon"
+
+function createRemuxSource(file: AnyFile, options: { warmKey?: string; access?: RangeAccess } = {}): RemuxSource {
+	const { warmKey, access = "authed" } = options
 	const token = crypto.randomUUID()
 
 	return {
 		openPort: async () => {
 			const { port1, port2 } = new MessageChannel()
+			const transferred = Comlink.transfer(port1, [port1])
 
-			await sdkApi.openRangePort(Comlink.transfer(port1, [port1]), file, token)
+			await (access === "anon"
+				? sdkApi.openLinkedRangePortAnon(transferred, file, token)
+				: sdkApi.openRangePort(transferred, file, token))
 
 			return port2
 		},
@@ -51,10 +62,16 @@ export function remuxSource(file: AnyFile): RemuxSource {
 	return takeWarmRemux(file.uuid) ?? createRemuxSource(file)
 }
 
+// A public link's file, read without a session; never prewarmed.
+export function linkedRemuxSource(file: AnyFile): RemuxSource {
+	return createRemuxSource(file, { access: "anon" })
+}
+
 // ── Prewarm ─────────────────────────────────────────────────────────────────
-// The next item, readied while the current one ends (Up Next shows): a Matroska file is opened in the remux
-// worker (its head, index and first keyframe interval read into the cache the session then takes over); a
-// file played as it is gets its service worker registration up front. One at a time, once per file.
+// The next item, readied while the current one ends (Up Next shows): a Matroska file or transport stream is
+// opened in the remux worker (its head, index and first keyframe interval read into the cache the session
+// then takes over); a file played as it is gets its service worker registration up front. One at a time,
+// once per file.
 
 type Warm =
 	| { kind: "remux"; fileUuid: string; source: RemuxSource; warmth: Promise<RemuxWarmth> }
@@ -73,9 +90,9 @@ export function prewarmPlayback(params: { file: AnyFile; name: string; probe: Vi
 
 	cancelPrewarm()
 
-	if (probe.container === "mkv") {
+	if (probe.container === "mkv" || probe.container === "ts") {
 		const key = crypto.randomUUID()
-		const source = createRemuxSource(file, key)
+		const source = createRemuxSource(file, { warmKey: key })
 
 		warm = {
 			kind: "remux",

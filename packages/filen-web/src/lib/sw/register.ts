@@ -1,4 +1,4 @@
-import { SW_MSG_BUILD, SW_SKIP_WAITING_MESSAGE } from "@/lib/sw/protocol"
+import { SW_MSG_BUILD, SW_PROTOCOL_VERSION, SW_SKIP_WAITING_MESSAGE } from "@/lib/sw/protocol"
 import { log } from "@/lib/log"
 
 let started = false
@@ -160,4 +160,53 @@ export function applyUpdate(): void {
 
 	updateRequested = true
 	waiting.postMessage({ type: SW_SKIP_WAITING_MESSAGE })
+}
+
+// The protocol version of the worker controlling this page, which answers `/__sw/version` itself (no
+// network), asked once per controller. Null when nothing controls the page or the answer is unreadable.
+let versionQuery: { controller: ServiceWorker; version: Promise<number | null> } | null = null
+
+export function controllerProtocolVersion(): Promise<number | null> {
+	const controller = "serviceWorker" in navigator ? navigator.serviceWorker.controller : null
+
+	if (controller === null) {
+		return Promise.resolve(null)
+	}
+
+	if (versionQuery?.controller !== controller) {
+		const query = { controller, version: fetchProtocolVersion() }
+
+		versionQuery = query
+		// Only an answer is kept: a failed ask is asked again next time.
+		void query.version.then(version => {
+			if (version === null && versionQuery === query) {
+				versionQuery = null
+			}
+		})
+	}
+
+	return versionQuery.version
+}
+
+// Whether the controlling worker speaks this page's protocol (it may be older: an update waits for the user).
+export async function controllerIsCurrent(): Promise<boolean> {
+	const version = await controllerProtocolVersion()
+
+	return version !== null && version >= SW_PROTOCOL_VERSION
+}
+
+async function fetchProtocolVersion(): Promise<number | null> {
+	try {
+		const response = await fetch("/__sw/version", { cache: "no-store" })
+
+		if (!response.ok) {
+			return null
+		}
+
+		const body: unknown = await response.json()
+
+		return typeof body === "object" && body !== null && "v" in body && typeof body.v === "number" ? body.v : null
+	} catch {
+		return null
+	}
 }

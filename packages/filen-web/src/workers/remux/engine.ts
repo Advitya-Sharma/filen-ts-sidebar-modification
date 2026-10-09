@@ -1,15 +1,21 @@
 import {
+	ADTS,
 	CustomSource,
 	EncodedPacketSink,
+	FLAC,
 	Input,
 	MATROSKA,
+	MP3,
 	MP4,
 	MPEG_TS,
+	OGG,
 	QTFF,
+	WAVE,
 	WEBM,
 	type AudioCodec,
 	type EncodedPacket,
 	type InputAudioTrack,
+	type InputFormat,
 	type InputVideoTrack,
 	type Rotation,
 	type VideoCodec
@@ -45,25 +51,30 @@ import {
 	type EncoderTarget
 } from "@/workers/remux/audioMix.logic"
 import { sampleReader, TranscodeWriter } from "@/workers/remux/audioTranscode"
+import { estimateFrameStreamDuration, ID3V2_HEADER_BYTES, id3v2Bytes } from "@/workers/remux/audioDuration.logic"
 import { ac3Layout, dtsLayout, layoutFor, type Speaker } from "@/workers/remux/channelLayout.logic"
-import { outputVideoCodecString } from "@/workers/remux/codecs.logic"
+import { copyCodecString, isCopyableAudio, isTranscodableAudio, outputVideoCodecString } from "@/workers/remux/codecs.logic"
 import { hevcKeyIsIdr, hevcLengthSize, IDR_REACH_KEYS, idrReachSeconds } from "@/workers/remux/hevc.logic"
 import { KeyIndex, seekReach } from "@/workers/remux/keyIndex"
 import { FragmentedTrackOutput, FragmentTooLargeError } from "@/workers/remux/output"
 import { PumpGate, runPump, type PumpReader, type PumpResult, type PumpWriter } from "@/workers/remux/pump"
 import { TextTap, isTapTextCodec, type TextTapTrack } from "@/workers/remux/textTap"
 
-// Containers a remux may read. Not every format the demuxer knows: each one parsed is attack surface.
-const FORMATS = [MATROSKA, WEBM, MP4, QTFF, MPEG_TS]
+// Containers a remux may read. Not every format the demuxer knows: each one parsed is attack surface. The
+// audio-only ones come last, so a file any of the others recognises is read exactly as it would be without them.
+const FORMATS = [MATROSKA, WEBM, MP4, QTFF, MPEG_TS, WAVE, OGG, FLAC, MP3, ADTS]
+
+// Formats whose demuxer has no index: it finds a far position (the file's end too, for its duration) only by
+// reading every cluster or frame before it.
+const SCANNING_FORMATS = new Set<InputFormat>([MATROSKA, WEBM, FLAC, MP3, ADTS])
+
+// The head of a raw audio stream whose frames give its duration when no header does.
+const DURATION_ESTIMATE_BYTES = 262_144
+// ID3v2 tags skipped before an audio stream's first frame.
+const MAX_ID3_TAGS = 4
 
 // Reads longer than this reach the demuxer as a stream of blocks rather than one assembled buffer.
 const STREAM_READ_BYTES = 2 * BLOCK_BYTES
-
-// Copy-path audio codecs and the codec string their fragmented-MP4 sample entry carries.
-const COPYABLE_AUDIO = new Set(["aac", "opus", "mp3", "flac", "ac3", "eac3"])
-
-// Codecs only reachable by decoding (a WebCodecs decoder or a registered one) and re-encoding.
-const TRANSCODABLE_AUDIO = new Set(["ac3", "eac3", "dts", "flac", "mp3", "vorbis", "opus", "aac"])
 
 // How far audio may read past the video pump's position. Both read the same interleaved clusters; an
 // audio pump that ran ahead or fell behind by more than the block cache holds would download them twice.
@@ -221,10 +232,13 @@ export class RemuxEngine {
 		const [video, audio] = await Promise.all([this.input.getPrimaryVideoTrack(), this.input.getAudioTracks()])
 		const format = await this.input.getFormat()
 		const matroska = format === MATROSKA || format === WEBM
+		const scanning = SCANNING_FORMATS.has(format)
 		const index = params.index ?? (await this.probeIndex(params.size))
-		// Computing a Matroska file's duration without the header's own walks every cluster; 0 leaves the
-		// MediaSource duration open instead.
-		const duration = (await this.input.getDurationFromMetadata()) ?? (matroska ? 0 : await this.input.computeDuration())
+		// Computing the duration of a file without an index, absent the header's own, reads all of it: a raw
+		// audio stream's is estimated from its first frames instead, and 0 leaves the MediaSource duration open.
+		const duration =
+			(await this.input.getDurationFromMetadata()) ??
+			(scanning ? await this.estimatedDuration(format) : await this.input.computeDuration())
 
 		this.seekScansFile = matroska && index === "none"
 		this.duration = duration
@@ -237,7 +251,10 @@ export class RemuxEngine {
 			duration,
 			bitrate: duration > 0 ? (params.size * 8) / duration : 0,
 			index,
-			seekScansFile: this.seekScansFile,
+			// Audio-only formats without an index start far positions by scanning too, unclamped: their frames are
+			// small and read in order.
+			seekScansFile: this.seekScansFile || (scanning && !matroska),
+			hasVideoTrack: video !== null,
 			video: video === null ? null : await this.openVideo(video),
 			audio: await Promise.all(audio.map(track => this.openAudio(track)))
 		}
@@ -283,7 +300,7 @@ export class RemuxEngine {
 		return {
 			id: track.id,
 			codec,
-			copyMime: codec !== null && COPYABLE_AUDIO.has(codec) && config !== null ? `audio/mp4; codecs="${config.codec}"` : null,
+			copyCodec: isCopyableAudio(codec) && config !== null ? config.codec : null,
 			channels,
 			sampleRate,
 			language,
@@ -292,7 +309,8 @@ export class RemuxEngine {
 		}
 	}
 
-	// Restarts both tracks from the key packet at or before `time`; audio starts where video does.
+	// Restarts both tracks from the key packet at or before `time`; audio starts where video does. Audio alone
+	// starts at the packet covering `time`.
 	public async seek(params: RemuxSeekParams): Promise<RemuxSeekResult> {
 		const closing = [this.detach("video"), this.detach("audio")]
 
@@ -300,6 +318,22 @@ export class RemuxEngine {
 		this.cache.abort()
 
 		try {
+			if (!params.video) {
+				if (params.audio === null) {
+					throw new Error("nothing to play: no video and no audio track")
+				}
+
+				return {
+					video: null,
+					audio: await this.startAudio({
+						generation: params.generation,
+						time: params.time,
+						horizon: params.horizon,
+						...params.audio
+					})
+				}
+			}
+
 			const video = await this.startVideo(params)
 			const audio =
 				params.audio === null
@@ -308,8 +342,7 @@ export class RemuxEngine {
 							generation: params.generation,
 							time: video.keyTime,
 							horizon: params.horizon,
-							trackId: params.audio.trackId,
-							mode: params.audio.mode
+							...params.audio
 						})
 
 			return { video, audio }
@@ -402,6 +435,40 @@ export class RemuxEngine {
 			})
 		} catch {
 			// No subtitles from the file; playback goes on.
+		}
+	}
+
+	// MP3 and ADTS: the stream's size over the byte rate of its first frames (behind any ID3v2 tags); 0 when
+	// they tell nothing. The demuxer has just read the head, so these reads are served from the block cache.
+	private async estimatedDuration(format: InputFormat): Promise<number> {
+		const stream = format === MP3 ? "mp3" : format === ADTS ? "adts" : null
+
+		if (stream === null) {
+			return 0
+		}
+
+		try {
+			let start = 0
+
+			for (let i = 0; i < MAX_ID3_TAGS && start + ID3V2_HEADER_BYTES <= this.size; i++) {
+				const tag = id3v2Bytes(await this.cache.read(start, start + ID3V2_HEADER_BYTES))
+
+				if (tag === 0) {
+					break
+				}
+
+				start += tag
+			}
+
+			if (start >= this.size) {
+				return 0
+			}
+
+			const bytes = await this.cache.read(start, Math.min(this.size, start + DURATION_ESTIMATE_BYTES))
+
+			return estimateFrameStreamDuration({ stream, bytes, size: this.size - start }) ?? 0
+		} catch {
+			return 0
 		}
 	}
 
@@ -637,7 +704,7 @@ export class RemuxEngine {
 
 			current()
 
-			if (config === null || codec === null || !COPYABLE_AUDIO.has(codec)) {
+			if (config === null || !isCopyableAudio(codec)) {
 				throw new Error("audio track cannot be copied")
 			}
 
@@ -649,7 +716,7 @@ export class RemuxEngine {
 				onSegment
 			})
 
-			mime = `audio/mp4; codecs="${config.codec}"`
+			mime = `audio/mp4; codecs="${copyCodecString(config.codec, params.copyCodec)}"`
 			close = () => output.cancel()
 			done = runPump(
 				{
@@ -662,7 +729,7 @@ export class RemuxEngine {
 				{ floor: 0, onStart }
 			)
 		} else {
-			if (codec === null || !TRANSCODABLE_AUDIO.has(codec)) {
+			if (!isTranscodableAudio(codec)) {
 				throw new Error("audio track cannot be decoded")
 			}
 

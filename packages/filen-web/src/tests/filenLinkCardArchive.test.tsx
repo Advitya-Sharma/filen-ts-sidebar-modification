@@ -23,8 +23,6 @@ vi.mock("@/features/preview/components/previewOverlay", () => ({
 
 import { FilenLinkCard } from "@/features/chats/components/thread/embeds/filenLinkCard"
 import type { ChatLinkResolution } from "@/features/chats/queries/chatMessageLinks"
-import { linkedFileIntoDriveItem } from "@/features/drive/lib/item"
-import { previewType } from "@/features/drive/lib/preview.logic"
 import { mockLinkedFile } from "@/tests/fixtures/sdk"
 
 const URL = "https://app.filen.io/f/f1000000-0000-0000-0000-000000000000#key"
@@ -37,7 +35,7 @@ function renderCard(name: string, downloadable = true): void {
 		kind: "filenLink",
 		link: LINK,
 		success: true,
-		data: { type: "file", name, size: 1024n, previewCategory: previewType(linkedFileIntoDriveItem(linkedFile)), linkedFile }
+		data: { type: "file", name, size: 1024n, linkedFile }
 	}
 
 	render(createElement(FilenLinkCard, { url: URL, link: LINK, resolution }))
@@ -92,5 +90,24 @@ describe("FilenLinkCard for an archive", () => {
 
 		expect(screen.queryByRole("link")).toBeNull()
 		expect(screen.getByRole("button")).toBeTruthy()
+	})
+})
+
+describe("FilenLinkCard for a video", () => {
+	it("never inlines a <video> for a container a plain src cannot play: the card opens the overlay instead", () => {
+		for (const name of ["movie.mkv", "recording.m2ts"]) {
+			renderCard(name)
+
+			expect(document.querySelector("video")).toBeNull()
+			expect(screen.getByRole("button", { name: `Open preview of ${name}` })).toBeTruthy()
+			cleanup()
+		}
+	})
+
+	it("keeps a .ts link a code card until a probe says otherwise", () => {
+		renderCard("clip.ts")
+
+		expect(document.querySelector("video")).toBeNull()
+		expect(screen.getByRole("button", { name: "Open preview of clip.ts" })).toBeTruthy()
 	})
 })

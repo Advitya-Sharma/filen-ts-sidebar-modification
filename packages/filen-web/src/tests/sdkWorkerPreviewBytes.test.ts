@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Remote } from "comlink"
 import type { AnyFile, StringifiedClient } from "@filen/sdk-rs"
 import type { SdkWorkerApi } from "@/workers/sdk.worker"
+import type { RangePortApi } from "@/lib/media/rangePort"
 import { FTYP, audioEntry, box, concat, esds, hdlr, mdhd, mvhd, text, tkhd, trak, u32, zeros } from "@/tests/support/containerBytes"
 
 // Whole-buffer preview reads stream through downloadFileToWriter into a JS buffer (never the SDK's
@@ -276,5 +277,95 @@ describe("sdk worker artwork from a byte range", () => {
 		expect(
 			await api.makeArtFromRange(fileOf(1000), { offset: 0, size: 26 }, { maxWidth: 342, maxHeight: 513, lossyQuality: 80 }, "art2")
 		).toEqual({ type: "notImage" })
+	})
+})
+
+// Comlink.expose (mocked above) records whatever it last exposed: after opening a range port, that is the
+// port's own API.
+function exposedRangePort(): RangePortApi {
+	return exposed.get("api") as RangePortApi
+}
+
+function settle(): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, 0))
+}
+
+describe("sdk worker public-link streaming", () => {
+	it("serves a linked file's ranges through the unauthenticated client and frees it once the port shuts", async () => {
+		const { port1 } = new MessageChannel()
+
+		fakeUnauth.downloadFileToWriter.mockImplementation(params => writeFrames(params, [[1, 2, 3]]))
+		await api.openLinkedRangePortAnon(port1, fileOf(10), "anon-port")
+
+		const range = exposedRangePort()
+		const bytes = await range.read(2, 5, 1)
+
+		expect(Array.from(bytes)).toEqual([1, 2, 3])
+		expect(fakeUnauth.downloadFileToWriter.mock.calls[0]?.[0]).toMatchObject({ start: 2n, end: 5n })
+		expect(fakeClient.downloadFileToWriter).not.toHaveBeenCalled()
+		expect(fakeUnauth.downloadFile).not.toHaveBeenCalled()
+		expect(fakeUnauth.free).not.toHaveBeenCalled()
+
+		range.close()
+		await settle()
+		await settle()
+
+		expect(fakeUnauth.free).toHaveBeenCalledTimes(1)
+
+		// A read that reaches the port after its shutdown never touches the freed client.
+		await expect(range.read(0, 2, 2)).rejects.toThrow()
+		expect(fakeUnauth.downloadFileToWriter).toHaveBeenCalledTimes(1)
+		expect(fakeUnauth.free).toHaveBeenCalledTimes(1)
+	})
+
+	it("frees the client only after a read cancelled with the token has settled", async () => {
+		const { port1 } = new MessageChannel()
+		const signals: AbortSignal[] = []
+		const release = Promise.withResolvers<undefined>()
+
+		fakeUnauth.downloadFileToWriter.mockImplementation(async params => {
+			signals.push(params.managedFuture.abortSignal)
+			await release.promise
+			throw new Error("Cancelled")
+		})
+		await api.openLinkedRangePortAnon(port1, fileOf(10), "anon-cancel")
+
+		const pending = exposedRangePort().read(0, 4, 1)
+
+		await vi.waitFor(() => {
+			expect(signals).toHaveLength(1)
+		})
+		await api.cancelPreviewDownload("anon-cancel")
+
+		expect(signals[0]?.aborted).toBe(true)
+		expect(fakeUnauth.free).not.toHaveBeenCalled()
+
+		release.resolve(undefined)
+		await expect(pending).rejects.toThrow("Cancelled")
+		await settle()
+
+		expect(fakeUnauth.free).toHaveBeenCalledTimes(1)
+	})
+
+	it("probes a linked video through the unauthenticated client", async () => {
+		const mp4 = concat(
+			FTYP,
+			box(
+				"moov",
+				mvhd({ duration: 2000 }),
+				trak(tkhd({ id: 1 }), [mdhd({}), hdlr("soun")], audioEntry("mp4a", {}, esds(0x40, [0x11, 0x90])))
+			),
+			box("mdat", zeros(64))
+		)
+
+		fakeUnauth.downloadFileToWriter.mockImplementation(params =>
+			writeFrames(params, [Array.from(mp4.subarray(Number(params.start), Number(params.end)))])
+		)
+
+		const probe = await api.readLinkedVideoProbeAnon(fileOf(mp4.length), "full", "anon-probe")
+
+		expect(probe).toMatchObject({ container: "mp4", durationSec: 2 })
+		expect(fakeClient.downloadFileToWriter).not.toHaveBeenCalled()
+		expect(fakeUnauth.free).toHaveBeenCalledTimes(1)
 	})
 })

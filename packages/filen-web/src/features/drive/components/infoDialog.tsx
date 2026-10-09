@@ -10,6 +10,7 @@ import { formatCreatedDate, formatItemSize, formatModifiedDate, formatUploadedDa
 import { previewType } from "@/features/drive/lib/preview.logic"
 import { parentNavigationTarget } from "@/features/drive/lib/navigate"
 import { previewKindLabelKey } from "@/features/drive/components/infoDialog.logic"
+import { useFileKindVerdict } from "@/features/drive/hooks/useFileKindVerdict"
 import { useDirectorySizeQuery, useItemInfoQuery, type DirectorySizeItem } from "@/features/drive/queries/drive"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 import { CannotDecryptState } from "@/components/cannotDecryptState"
@@ -89,7 +90,8 @@ export function InfoDialog({ item, variant, remoteInfoEnabled, onClose }: InfoDi
 	const isDirectory = base.type === "directory"
 
 	const mime = driveItemMime(item)
-	const kindKey = base.type === "file" ? previewKindLabelKey(previewType(item)) : null
+	const verdict = useFileKindVerdict(base.type === "file" ? base.data.uuid : undefined)
+	const kindKey = base.type === "file" ? previewKindLabelKey(previewType(item, verdict)) : null
 	// The sharing counterparty is item metadata that belongs here at every width — and it is the only
 	// place it survives once the listing row sheds its own label on a narrow card (see driveRow.tsx).
 	// Non-null for exactly the rows that carry that label: the two shared variants' root arms.

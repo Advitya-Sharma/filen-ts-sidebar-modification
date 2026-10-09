@@ -51,6 +51,9 @@ const MIME_TYPES: ReadonlyMap<string, string> = new Map([
 	["video/quicktime", "mov"],
 	["video/x-matroska", "mkv"],
 	["video/x-m4v", "m4v"],
+	// Not `.ts`, which TypeScript shares: a transport stream's MIME type is unambiguous.
+	["video/mp2t", "m2ts"],
+	["video/vnd.dlna.mpeg-tts", "m2ts"],
 	["video/3gpp", "3gp"],
 	["video/3gpp2", "3g2"],
 	["audio/mpeg", "mp3"],
@@ -134,7 +137,8 @@ export function extensionForMime(mime: string | null | undefined): string | null
 
 // The extension a file is classified by: its own when `isKnownExtension` (the app's own tables) says so,
 // else its well-known name's, else its MIME type's — only when the app knows that one too — else its own
-// unrecognised extension ("" when it has none), which classifies as unknown just as before.
+// unrecognised extension ("" when it has none), which classifies as unknown just as before. Without content
+// verdicts; resolveFileKind (fileKind.ts) is the resolver that takes them.
 export function effectiveExtension(name: string, mime: string | null | undefined, isKnownExtension: (extension: string) => boolean): string {
 	const base = baseName(name)
 	const dot = extensionStart(base)

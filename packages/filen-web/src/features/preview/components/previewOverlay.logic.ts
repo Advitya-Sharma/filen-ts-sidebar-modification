@@ -80,3 +80,18 @@ export function unsavedPromptOpen(
 ): boolean {
 	return pendingIntent !== null || navigationBlocked || logoutRequested
 }
+
+// Which item a slot's pin is taken from now, or null to keep the one it holds: a new document takes it from the
+// item on screen; a pin taken while a probe still had to tell TypeScript from a transport stream (no viewer
+// mounted) takes it again once the verdict lands, from the item as it was pinned, so a rename meanwhile
+// changes nothing. Any other verdict leaves a mounted viewer be.
+export function slotPinSource<T>(
+	pinned: { documentKey: string; item: T; verdict: string | undefined; awaitingVerdict: boolean } | null,
+	current: { documentKey: string; item: T | undefined; verdict: string | undefined }
+): T | null {
+	if (pinned?.documentKey !== current.documentKey) {
+		return current.item ?? null
+	}
+
+	return pinned.awaitingVerdict && pinned.verdict !== current.verdict ? pinned.item : null
+}

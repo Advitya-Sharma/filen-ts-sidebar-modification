@@ -1,12 +1,13 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, type ReactNode } from "react"
+import type { DriveItem } from "@/features/drive/lib/item"
 
 // Which worker surface the preview viewers are allowed to reach for bytes. The authenticated app
 // leaves this at its default ("authed"), so every existing caller keeps hitting the authed
 // downloadFileBytes / range-stream path with no change. The UNAUTHENTICATED public-link routes wrap
-// their file preview in the provider below with mode="anon", which reroutes the whole-buffer read to
-// the anon linked-file worker method and forces the buffered path (the service worker's own wasm
-// bundle has no UnauthClient, so range-seek streaming cannot serve a logged-out visitor).
+// their file preview in the provider below with mode="anon", which reroutes every read to the anon
+// linked-file worker methods: whole buffers for documents and images (the service worker's own wasm
+// bundle has no UnauthClient), and ranges served to the remux worker for video and audio.
 //
 // ★ SECURITY: this is the single seam that keeps an authed worker method off the public surface. A
 // viewer rendered under mode="anon" must resolve its bytes ONLY through the anon method; nothing here
@@ -101,4 +102,16 @@ export function PreviewByteSourceProvider({ source, children }: { source: Previe
 
 export function usePreviewByteSource(): PreviewByteSource | null {
 	return useContext(PreviewByteSourceContext)
+}
+
+// The files beside the previewed one, where the host has its directory's listing at hand and the drive's
+// listing cache would not (a public link's directory). Null: the drive's cached listings are asked.
+const PreviewSiblingsContext = createContext<readonly DriveItem[] | null>(null)
+
+export function PreviewSiblingsProvider({ siblings, children }: { siblings: readonly DriveItem[]; children: ReactNode }) {
+	return <PreviewSiblingsContext value={siblings}>{children}</PreviewSiblingsContext>
+}
+
+export function usePreviewSiblings(): readonly DriveItem[] | null {
+	return useContext(PreviewSiblingsContext)
 }

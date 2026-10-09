@@ -219,3 +219,29 @@ describe("corrections in the library index", () => {
 		expect(titles.get(id)?.title).toBe("Show")
 	})
 })
+
+describe("transport-stream verdicts in the library index", () => {
+	it("leaves out a .ts a content read found to be TypeScript, classifying again without a walk", async () => {
+		const root = drive.addDir(hexUuid(), "Movies")
+
+		drive.addFile(root, "Heat (1995).ts", { size: 40 * 1024 * 1024 })
+
+		const code = drive.addFile(root, "Big (1988).ts", { size: 40 * 1024 * 1024 })
+		const engine = engineFor()
+
+		await engine.configure([{ uuid: root, type: "movies", enabled: true }])
+		await engine.check(50n)
+		await settle()
+
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Big", "Heat"])
+
+		const walk = vi.spyOn(drive, "walk")
+
+		engine.setNotTransportStreams([code.uuid])
+		engine.setNotTransportStreams([code.uuid])
+		await settle()
+
+		expect([...titles.values()].map(title => title.title)).toEqual(["Heat"])
+		expect(walk).not.toHaveBeenCalled()
+	})
+})

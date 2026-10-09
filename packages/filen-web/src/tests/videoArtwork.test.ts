@@ -191,6 +191,7 @@ function probe(cover: VideoProbe["cover"]): VideoProbe {
 		subs: [],
 		chapters: [],
 		cover,
+		coverLand: null,
 		partial: false
 	}
 }

@@ -1,8 +1,6 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query"
 import type { LinkedFile } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
-import { linkedFileIntoDriveItem } from "@/features/drive/lib/item"
-import { previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
 import type { FilenPublicLink } from "@filen/shared"
 import { embedCandidatesForLinks } from "@/features/chats/lib/embeds.logic"
 
@@ -26,12 +24,9 @@ export type ChatLinkResolution =
 						type: "file"
 						name: string | null
 						size: bigint
-						// The resolved LinkedFile itself, plus the FULL previewType category it maps to via
-						// linkedFileIntoDriveItem (item.ts) — the renderer feeds the SAME fabricated item into
-						// PreviewOverlay to actually preview it, so this resolves the category from
-						// that identical adapter output (extension-first, mime-fallback) rather than a second,
-						// possibly-diverging classification.
-						previewCategory: PreviewCategory
+						// The resolved LinkedFile itself. Its category is read as the card renders, through the
+						// same fabricated item PreviewOverlay previews (linkedFileIntoDriveItem), so a content
+						// verdict that lands later reaches it.
 						linkedFile: LinkedFile
 				  }
 				| { type: "directory"; name: string | null; timestamp: bigint }
@@ -55,7 +50,6 @@ async function resolveFilenLinkData(link: FilenPublicLink): Promise<ResolvedFile
 				type: "file",
 				name: decryptedName(file.name),
 				size: file.size,
-				previewCategory: previewType(linkedFileIntoDriveItem(file)),
 				linkedFile: file
 			}
 		}

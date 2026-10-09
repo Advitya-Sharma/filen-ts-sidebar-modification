@@ -35,6 +35,11 @@ describe("extensionForMime", () => {
 		expect(extensionForMime("application/vnd.ms-excel.sheet.macroEnabled.12")).toBe("xlsm")
 	})
 
+	it("reads a transport stream's type as m2ts, never TypeScript's .ts", () => {
+		expect(extensionForMime("video/mp2t")).toBe("m2ts")
+		expect(extensionForMime("video/vnd.dlna.mpeg-tts")).toBe("m2ts")
+	})
+
 	it("reads any other text type as plain text", () => {
 		expect(extensionForMime("text/x-unknown-thing")).toBe("txt")
 	})

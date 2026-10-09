@@ -12,6 +12,22 @@ const { listPhotosRecursive, isOutsidePhotosRoot } = vi.hoisted(() => ({
 
 vi.mock("@/lib/sdk/client", () => ({ sdkApi: { listPhotosRecursive, isOutsidePhotosRoot } }))
 
+// Counted: each listed file the shown-photos pass reads calls it once.
+const shownReads = vi.hoisted(() => ({ count: 0 }))
+
+vi.mock("@/features/photos/lib/predicate", async importOriginal => {
+	const actual = await importOriginal<typeof import("@/features/photos/lib/predicate")>()
+
+	return {
+		...actual,
+		isPhotoCategory: (category: Parameters<typeof actual.isPhotoCategory>[0]) => {
+			shownReads.count++
+
+			return actual.isPhotoCategory(category)
+		}
+	}
+})
+
 vi.mock("@/queries/client", async () => ({ queryClient: (await import("@/tests/testQueryClient")).createTestQueryClient() }))
 
 import { queryClient } from "@/queries/client"
@@ -29,6 +45,7 @@ import { handleDriveEvent } from "@/features/drive/lib/socketHandlers"
 import { socketAuthenticated, socketDropped } from "@/lib/sdk/socketSession"
 import { testUuid } from "@/tests/support/uuid"
 import { noteDotFilenFile } from "@/lib/dotFilen"
+import { recordFileKindVerdict, resetFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 
 function mockDir(uuid: UuidStr, parent: UuidStr): Dir {
 	return {
@@ -41,12 +58,12 @@ function mockDir(uuid: UuidStr, parent: UuidStr): Dir {
 	}
 }
 
-function mockFile(uuid: UuidStr, parent: UuidStr, name = "photo.jpg"): File {
+function mockFile(uuid: UuidStr, parent: UuidStr, name = "photo.jpg", size = 1_024n): File {
 	return {
 		uuid,
 		stableUUID: undefined,
 		parent,
-		size: 1_024n,
+		size,
 		favorited: false,
 		region: "de-1",
 		bucket: "filen-1",
@@ -707,5 +724,53 @@ describe("photos listing socket scoping", () => {
 		await fire({ type: "fileArchived", uuid: testUuid("someone-elses"), stableUUID: testUuid("s"), newUUID: testUuid("t") })
 
 		expect(isInvalidated()).toBe(true)
+	})
+})
+
+describe("photos listing and content verdicts", () => {
+	it("shows a transport stream once a verdict says so, and hides an audio-only video, with no walk", async () => {
+		const STREAM = testUuid("stream")
+		const VOICE = testUuid("voice")
+
+		listPhotosRecursive.mockImplementation(() =>
+			Promise.resolve({
+				dirs: [],
+				files: [mockFile(PHOTO, B), mockFile(STREAM, B, "clip.ts", 40n * 1024n * 1024n), mockFile(VOICE, B, "voice.webm")]
+			})
+		)
+
+		const view = await mountRead()
+		const shown = (): string[] => (view.result.current.data?.photos ?? []).map(photo => photo.data.uuid)
+
+		shownReads.count = 0
+
+		expect(shown()).toEqual(expect.arrayContaining([PHOTO, VOICE]))
+		expect(shown()).not.toContain(STREAM)
+
+		act(() => {
+			recordFileKindVerdict(STREAM, "transportStream")
+			recordFileKindVerdict(VOICE, "audio")
+		})
+
+		await waitFor(() => {
+			expect(shown()).toContain(STREAM)
+		})
+		expect(shown()).not.toContain(VOICE)
+		expect(walks()).toBe(1)
+		// Both verdicts, one pass over the three listed files.
+		expect(shownReads.count).toBe(3)
+
+		// A verdict about a file the listing does not watch reads nothing again.
+		shownReads.count = 0
+		act(() => {
+			recordFileKindVerdict(testUuid("elsewhere"), "audio")
+			recordFileKindVerdict(PHOTO, "video")
+		})
+		await drain()
+		expect(shownReads.count).toBe(0)
+
+		act(() => {
+			resetFileKindVerdicts()
+		})
 	})
 })

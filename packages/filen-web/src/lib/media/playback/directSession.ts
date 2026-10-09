@@ -1,5 +1,16 @@
-import { directErrorAction, KEEPALIVE_IDLE_PAUSE_MS, RECOVERY_TIMEOUT_MS } from "@/lib/media/playback/directSession.logic"
+import {
+	directErrorAction,
+	ERROR_PAUSE_GRACE_MS,
+	KEEPALIVE_IDLE_PAUSE_MS,
+	mayRecover,
+	RECOVERY_TIMEOUT_MS,
+	STREAM_STALL_MS,
+	STREAM_STALL_POLL_MS,
+	stallAction,
+	expectsProgress
+} from "@/lib/media/playback/directSession.logic"
 import type { PlaybackSession, SessionAudio, SessionCallbacks } from "@/lib/media/playback/types"
+import type { PreviewStreamStatus } from "@/lib/sw/protocol"
 
 // A natively playable file streamed by the service worker's range route straight into the element.
 
@@ -11,11 +22,14 @@ export interface DirectSource {
 	release(id: string): void
 	// Keeps the worker alive until the returned release is called.
 	holdAlive(): () => void
-	// Whether `url` answers a range request (a two-byte read): the stream is there, so an error the element
-	// reported is the file's.
-	reachable(url: string): Promise<boolean>
+	// Whether the worker still serves `id`, from its registry alone (no request through the stream): one it
+	// serves makes an error the element reported the file's.
+	status(id: string): Promise<PreviewStreamStatus>
 	// A registration made ahead of playback (prewarm), taken over instead of a new one.
 	presetId?: string
+	// Calls `listener` when the worker answers a request for `id` with 404 (it lost the registration);
+	// returns the unsubscribe. WebKit reports such a stream to the element by retrying it for ever.
+	onGone?: (id: string, listener: () => void) => () => void
 }
 
 interface AudioTrackLike {
@@ -46,6 +60,8 @@ export function openDirectSession(params: {
 	audioIndex: number
 	callbacks: SessionCallbacks
 	now?: () => number
+	// Whether the page is hidden, where timers are throttled and a still playhead says nothing.
+	hidden?: () => boolean
 }): PlaybackSession {
 	return new DirectSession(params)
 }
@@ -55,6 +71,7 @@ class DirectSession implements PlaybackSession {
 	private readonly source: DirectSource
 	private readonly callbacks: SessionCallbacks
 	private readonly now: () => number
+	private readonly hidden: () => boolean
 	private readonly listeners: [string, () => void][] = []
 	private video: HTMLVideoElement | null = null
 	private id: string | null = null
@@ -69,7 +86,16 @@ class DirectSession implements PlaybackSession {
 	private wantsPlay = false
 	// The pause a reload of a playing element fires on its own, not the user's.
 	private reloadPause = false
-	private url: string | null = null
+	// The last pause and the intent before it: a pause that came with a broken stream is not the user's.
+	private lastPause: { at: number; wantedPlay: boolean } | null = null
+	// The stall watchdog: when the playhead last moved (or the element last had what it needs), and where.
+	private stallTimer: ReturnType<typeof setInterval> | undefined
+	private progressAt = 0
+	private progressTime = -1
+	private stallChecking = false
+	private stopGone: (() => void) | null = null
+	// A recovery under way has reloaded the element: an error from before that is the break it recovers from.
+	private recoveryLoaded = false
 	private releaseAlive: (() => void) | null = null
 	private idleTimer: ReturnType<typeof setTimeout> | undefined
 	private recoveryTimer: ReturnType<typeof setTimeout> | undefined
@@ -81,10 +107,12 @@ class DirectSession implements PlaybackSession {
 		audioIndex: number
 		callbacks: SessionCallbacks
 		now?: () => number
+		hidden?: () => boolean
 	}) {
 		this.source = params.source
 		this.callbacks = params.callbacks
 		this.now = params.now ?? (() => performance.now())
+		this.hidden = params.hidden ?? (() => typeof document !== "undefined" && document.hidden)
 		this.audioIndex = params.audioIndex
 		this.pendingSeek = params.startTime > 0 ? params.startTime : null
 	}
@@ -110,7 +138,6 @@ class DirectSession implements PlaybackSession {
 		}
 
 		this.id = id
-		this.url = url
 		this.video = video
 		// A remote player could reach neither the service worker's URL nor its decryption.
 		video.disableRemotePlayback = true
@@ -118,6 +145,16 @@ class DirectSession implements PlaybackSession {
 			this.onMetadata()
 		})
 		this.listen("canplay", () => {
+			// After a recovery's reload and seek: playing again once it can, if that is what the user wants
+			// (a pause during the reconnect included).
+			if (this.resumeAfterLoad && this.pendingSeek === null) {
+				this.resumeAfterLoad = false
+
+				if (this.wantsPlay && video.paused) {
+					void video.play().catch(() => undefined)
+				}
+			}
+
 			if (this.reconnecting) {
 				this.reconnecting = false
 				clearTimeout(this.recoveryTimer)
@@ -143,10 +180,22 @@ class DirectSession implements PlaybackSession {
 				return
 			}
 
+			// Chrome pauses an element as its stream breaks, the pause queued just after the error: the
+			// browser's, not the user's.
+			if (video.error !== null) {
+				return
+			}
+
+			this.lastPause = { at: this.now(), wantedPlay: this.wantsPlay }
 			this.wantsPlay = false
 			this.armIdleRelease()
 		})
 		this.holdAlive()
+		this.watchStalls(video)
+		this.stopGone =
+			this.source.onGone?.(id, () => {
+				this.onGone(video)
+			}) ?? null
 
 		if (video.paused) {
 			this.armIdleRelease()
@@ -180,6 +229,9 @@ class DirectSession implements PlaybackSession {
 		this.disposed = true
 		clearTimeout(this.idleTimer)
 		clearTimeout(this.recoveryTimer)
+		clearInterval(this.stallTimer)
+		this.stopGone?.()
+		this.stopGone = null
 		this.releaseAlive?.()
 		this.releaseAlive = null
 
@@ -234,15 +286,78 @@ class DirectSession implements PlaybackSession {
 			video.currentTime = this.pendingSeek
 			this.pendingSeek = null
 		}
+	}
 
-		// The play state asked for last, a pause during the reconnect included.
-		if (this.resumeAfterLoad) {
-			this.resumeAfterLoad = false
+	// Polls the playhead while the element waits on the stream; a stall that outlasts STREAM_STALL_MS asks the
+	// worker whether it still serves the stream. A hidden page's throttled timers and still playhead say nothing, so its
+	// stall clock starts over once it is visible again.
+	private watchStalls(video: HTMLVideoElement): void {
+		this.progressAt = this.now()
+		this.stallTimer = setInterval(() => {
+			const now = this.now()
 
-			if (this.wantsPlay) {
-				void video.play().catch(() => undefined)
+			if (this.hidden() || !expectsProgress(video) || video.currentTime !== this.progressTime || this.reconnecting) {
+				this.progressAt = now
+				this.progressTime = video.currentTime
+
+				return
 			}
+
+			if (now - this.progressAt >= STREAM_STALL_MS && !this.stallChecking) {
+				void this.checkStall(video)
+			}
+		}, STREAM_STALL_POLL_MS)
+	}
+
+	// The worker said it no longer has the stream: the same verdict a lost stream gives a stall.
+	private onGone(video: HTMLVideoElement): void {
+		if (this.disposed || this.reconnecting) {
+			return
 		}
+
+		this.act(video, stallAction({ status: "missing", now: this.now(), lastRecoveryAt: this.lastRecoveryAt }))
+	}
+
+	private act(video: HTMLVideoElement, action: ReturnType<typeof stallAction>): void {
+		if (action === "recover") {
+			void this.recover(video)
+		} else if (action === "demote") {
+			// The service worker's route is gone, not the browser's ability to play the file.
+			this.callbacks.onFailure({ trigger: "stream-unavailable", detail: "the stream stalled", learnable: false })
+		}
+	}
+
+	private async checkStall(video: HTMLVideoElement): Promise<void> {
+		const id = this.id
+
+		if (id === null) {
+			return
+		}
+
+		const recoveryAt = this.lastRecoveryAt
+
+		this.stallChecking = true
+
+		const status = await this.askStatus(id)
+
+		this.stallChecking = false
+		this.progressAt = this.now()
+
+		if (this.raced(recoveryAt)) {
+			return
+		}
+
+		this.act(video, stallAction({ status, now: this.now(), lastRecoveryAt: this.lastRecoveryAt }))
+	}
+
+	private askStatus(id: string): Promise<PreviewStreamStatus> {
+		return this.source.status(id).catch((): PreviewStreamStatus => "missing")
+	}
+
+	// An answer asked for before a recovery that has since started (or started and finished) speaks of the
+	// stream that recovery replaced.
+	private raced(recoveryAt: number | null): boolean {
+		return this.disposed || this.reconnecting || this.lastRecoveryAt !== recoveryAt
 	}
 
 	private applyAudioTrack(): void {
@@ -269,6 +384,11 @@ class DirectSession implements PlaybackSession {
 			return
 		}
 
+		// The old stream's own error, landing after the worker already reported it gone: being recovered.
+		if (this.reconnecting && !this.recoveryLoaded) {
+			return
+		}
+
 		const action = directErrorAction({
 			code: error.code,
 			hadMetadata: this.hadMetadata,
@@ -290,18 +410,26 @@ class DirectSession implements PlaybackSession {
 		}
 	}
 
-	// A source refused before any metadata: the file when the stream answers, the stream otherwise.
+	// A source refused before any metadata: the file when the worker still serves the stream, the stream
+	// otherwise. An answer that a recovery overtook is dropped: never a format verdict on a stream it replaced.
 	private async verify(video: HTMLVideoElement, detail: string): Promise<void> {
-		const url = this.url
-		const reachable = url !== null && (await this.source.reachable(url).catch(() => false))
+		const id = this.id
 
-		if (this.disposed) {
+		if (id === null) {
 			return
 		}
 
-		if (reachable) {
+		const recoveryAt = this.lastRecoveryAt
+		const status = await this.askStatus(id)
+
+		if (this.raced(recoveryAt)) {
+			return
+		}
+
+		// A worker that could not be asked says nothing against the stream: the file is what failed.
+		if (status === "present" || status === "unknown") {
 			this.callbacks.onFailure({ trigger: "media-error", detail })
-		} else if (this.lastRecoveryAt === null) {
+		} else if (mayRecover(this.now(), this.lastRecoveryAt)) {
 			void this.recover(video)
 		} else {
 			this.callbacks.onFailure({ trigger: "network", detail })
@@ -317,16 +445,27 @@ class DirectSession implements PlaybackSession {
 			return
 		}
 
-		this.lastRecoveryAt = this.now()
+		const startedAt = this.now()
+
+		this.lastRecoveryAt = startedAt
 		this.reconnecting = true
+		this.recoveryLoaded = false
 		this.callbacks.onReconnecting(true)
+		// Not the bytes themselves: the service worker's route did not come back, which the next rung (reading
+		// through the SDK worker) does not need.
 		this.recoveryTimer = setTimeout(() => {
 			if (this.reconnecting && !this.disposed) {
-				this.callbacks.onFailure({ trigger: "network", detail: "the stream did not come back" })
+				this.callbacks.onFailure({ trigger: "stream-unavailable", detail: "the stream did not come back", learnable: false })
 			}
 		}, RECOVERY_TIMEOUT_MS)
 
 		const time = video.currentTime
+		const pause = this.lastPause
+
+		// A pause that came with the break was the browser's: the intent before it stands.
+		if (!this.wantsPlay && pause !== null && startedAt - pause.at <= ERROR_PAUSE_GRACE_MS) {
+			this.wantsPlay = pause.wantedPlay
+		}
 
 		try {
 			await this.source.register(id)
@@ -348,6 +487,7 @@ class DirectSession implements PlaybackSession {
 		this.pendingSeek = time > 0 ? time : this.pendingSeek
 		this.resumeAfterLoad = true
 		this.reloadPause = !video.paused
+		this.recoveryLoaded = true
 		video.load()
 	}
 }

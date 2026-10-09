@@ -12,6 +12,7 @@ import { advanceBootSplash, dismissBootSplash } from "@/lib/bootSplash"
 import { registerAllActions } from "@/lib/keymap/actions"
 import { NotFoundScreen } from "@/features/shell/components/notFoundScreen"
 import { useReminderStore } from "@/features/shell/store/useReminderStore"
+import { connectFileKindVerdictStorage } from "@/features/drive/lib/fileKindVerdictStorage"
 import "@/features/assistant/loop/register" // side-effect: registers the on-device assistant with its UI
 
 // notFoundMode "root" (the default is "fuzzy") keeps every unknown URL on ONE full-page 404 instead of
@@ -36,6 +37,8 @@ void bootSdk()
 // is a render away and the margin is generous.
 void whenBootReady().then(() => {
 	setTimeout(dismissBootSplash, 10_000)
+	// File-kind verdicts the listings' first paint reads (an icon, a tile's video badge).
+	connectFileKindVerdictStorage()
 })
 
 // Every keyboard action, registered before the first render — the defs are static data, so `comboFor`

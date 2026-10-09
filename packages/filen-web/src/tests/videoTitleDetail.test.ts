@@ -97,6 +97,7 @@ function probe(patch: Partial<VideoProbe> = {}): VideoProbe {
 		subs: [{ id: 2, codecId: "S_TEXT/UTF8", lang: "eng", name: null, def: false, forced: false, hi: false }],
 		chapters: [],
 		cover: null,
+		coverLand: null,
 		partial: false,
 		...patch
 	}

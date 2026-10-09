@@ -34,6 +34,7 @@ function record(durationSec: number, h: number): ProbeRecord {
 			subs: [],
 			chapters: [],
 			cover: null,
+			coverLand: null,
 			partial: false
 		},
 		tiers: { card: true, full: false, cover: false },

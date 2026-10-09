@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { Dir, File } from "@filen/sdk-rs"
 import { narrowItem, type DriveItem } from "@/features/drive/lib/item"
-import { isPhotoItem } from "@/features/photos/lib/predicate"
+import { isPhotoCandidate, isPhotoItem } from "@/features/photos/lib/predicate"
 import { testUuid } from "@/tests/support/uuid"
 
 function mockDir(overrides: Partial<Dir> = {}): Dir {
@@ -107,5 +107,44 @@ describe("isPhotoItem", () => {
 		for (const item of [undecryptableFile, undecryptableDir]) {
 			expect(isPhotoItem(item)).toBe(false)
 		}
+	})
+})
+
+describe("isPhotoCandidate", () => {
+	const big = { size: 40n * 1024n * 1024n }
+
+	it("keeps photos and what a content verdict could still make one, without reading any verdict", () => {
+		expect(isPhotoCandidate(fileNamed("beach.jpg"))).toBe(true)
+		expect(isPhotoCandidate(fileNamed("clip.ts", big))).toBe(true)
+		expect(isPhotoCandidate(fileNamed("index.ts"))).toBe(false)
+		expect(isPhotoCandidate(fileNamed("lib.d.ts", big))).toBe(false)
+		expect(isPhotoCandidate(fileNamed("notes.txt", big))).toBe(false)
+		expect(isPhotoCandidate(fileNamed("camera.mts", big))).toBe(true)
+	})
+
+	it("keeps no audio: the audio extensions, and a container whose MIME type says audio", () => {
+		const withMime = (name: string, mime: string) =>
+			fileNamed(name, {
+				meta: { type: "decoded", data: { name, mime, modified: 1_700_000_000_000n, size: 1n, key: "k", version: 2 } }
+			})
+
+		for (const name of ["song.m4a", "album.mka", "talk.weba", "voice.oga", "track.mp3"]) {
+			expect(isPhotoCandidate(fileNamed(name))).toBe(false)
+		}
+
+		expect(isPhotoCandidate(withMime("voice.mp4", "audio/mp4"))).toBe(false)
+		expect(isPhotoCandidate(withMime("talk.webm", "audio/webm"))).toBe(false)
+		// This app's table has no .mka: an audio-signalled .mkv reads as the video it is named (as in Drive).
+		expect(isPhotoCandidate(withMime("concert.mkv", "audio/x-matroska"))).toBe(
+			isPhotoItem(withMime("concert.mkv", "audio/x-matroska"), null)
+		)
+		expect(isPhotoCandidate(withMime("clip.mp4", "video/mp4"))).toBe(true)
+	})
+
+	it("shows a candidate by its verdict", () => {
+		expect(isPhotoItem(fileNamed("clip.ts", big), "transportStream")).toBe(true)
+		expect(isPhotoItem(fileNamed("clip.ts", big), "notTransportStream")).toBe(false)
+		expect(isPhotoItem(fileNamed("talk.webm"), "audio")).toBe(false)
+		expect(isPhotoItem(fileNamed("talk.webm"), null)).toBe(true)
 	})
 })

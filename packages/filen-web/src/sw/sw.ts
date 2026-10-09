@@ -11,6 +11,8 @@ import initSdk, {
 } from "@filen/sdk-rs/service-worker/sdk-rs.js"
 import {
 	SW_PROTOCOL_VERSION,
+	SW_MSG_STREAM_GONE,
+	SW_STREAM_GONE_INTERVAL_MS,
 	SW_SKIP_WAITING_MESSAGE,
 	SW_MSG_BUILD,
 	SW_DOWNLOAD_PREFIX,
@@ -19,23 +21,30 @@ import {
 	SW_MSG_REGISTER_ZIP_DOWNLOAD,
 	SW_MSG_REGISTER_STREAM_DOWNLOAD,
 	SW_MSG_REGISTER_PREVIEW,
+	SW_MSG_REGISTER_PORT_PREVIEW,
 	SW_MSG_RELEASE_PREVIEW,
+	SW_MSG_PREVIEW_STATUS,
 	SW_ERROR_NO_CLIENT,
+	SW_ERROR_SUPERSEDED,
 	SW_MSG_LOGOUT,
 	SW_MSG_WATCH_DOWNLOAD,
 	SW_MSG_CANCEL_DOWNLOAD,
 	SW_MSG_KEEPALIVE,
 	SW_PREVIEW_BUCKET_PLAYER,
 	SW_PREVIEW_BUCKET_TRANSIENT,
-	isAllowedInlineContentType
+	isAllowedInlineContentType,
+	type PreviewStreamStatus
 } from "@/lib/sw/protocol"
 import { PendingRegistry } from "@/lib/sw/pendingRegistry"
+import { GenerationGate } from "@/lib/sw/generationGate"
 import { DownloadReporter, type ReportedStream } from "@/lib/sw/downloadReporter"
 import { heldBackBody } from "@/lib/sw/heldBackBody"
 import { plainErrorDTO, toErrorDTO } from "@/lib/sdk/errors"
 import { contentDispositionAttachment } from "@/lib/filename"
 import { log } from "@/lib/log"
-import { parseRange, previewServedEnd } from "@/sw/range"
+import { BLOCK_BYTES } from "@/lib/media/blockSource"
+import { rangePortReader, type RangePortReader } from "@/lib/media/rangePort"
+import { parseRange, previewServedEnd, type ByteRange } from "@/sw/range"
 
 // ── SW-hosted trimmed SDK (single-threaded — no COI, no rayon pool) ─────────────────────────────
 // Lazy: only fetch+compile the 2 MB wasm and reconstruct the Client when a session is handed over, so
@@ -75,7 +84,22 @@ interface PendingStreamDownload {
 	size: number
 	taken: boolean
 }
-type PendingDownload = PendingFileDownload | PendingZipDownload | PendingPreviewDownload | PendingStreamDownload
+// A preview the page's SDK worker reads (SW_MSG_REGISTER_PORT_PREVIEW): no file handle and no Client here,
+// only the reading end of its range port. `lost` once the serving side went away; `streams` counts the
+// responses reading through the port, which a dropped entry closes it after. `generation` orders it against
+// other registrations of its id (null from a page that sends none).
+interface PendingPortPreview {
+	kind: "portPreview"
+	reader: RangePortReader
+	generation: number | null
+	name: string
+	size: number
+	contentType: string
+	lost: boolean
+	streams: number
+	dropped: boolean
+}
+type PendingDownload = PendingFileDownload | PendingZipDownload | PendingPreviewDownload | PendingStreamDownload | PendingPortPreview
 
 // A generous concurrent-download ceiling — bounded retention is the only guard against unbounded growth
 // of decrypted key material across the SW's lifetime (no page-side signal ever says a download
@@ -87,10 +111,28 @@ const MAX_PENDING_DOWNLOADS = 32
 // neither a burst of thumbnails nor of downloads can evict a player's entry, paused or not.
 const MAX_PLAYER_PREVIEWS = 16
 const MAX_TRANSIENT_PREVIEWS = 8
-const downloads = new PendingRegistry<PendingDownload>(MAX_PENDING_DOWNLOADS, {
-	[SW_PREVIEW_BUCKET_PLAYER]: MAX_PLAYER_PREVIEWS,
-	[SW_PREVIEW_BUCKET_TRANSIENT]: MAX_TRANSIENT_PREVIEWS
-})
+const downloads = new PendingRegistry<PendingDownload>(
+	MAX_PENDING_DOWNLOADS,
+	{
+		[SW_PREVIEW_BUCKET_PLAYER]: MAX_PLAYER_PREVIEWS,
+		[SW_PREVIEW_BUCKET_TRANSIENT]: MAX_TRANSIENT_PREVIEWS
+	},
+	entry => {
+		if (entry.kind === "portPreview") {
+			entry.dropped = true
+			closePortIfDone(entry)
+		}
+	}
+)
+
+// The newest generation seen per port-registration id (SW_MSG_REGISTER_PORT_PREVIEW).
+const portGenerations = new GenerationGate(256)
+
+function closePortIfDone(entry: PendingPortPreview): void {
+	if (entry.dropped && entry.streams === 0) {
+		entry.reader.close()
+	}
+}
 // How each attachment download ended, for the page that started it (downloadReporter.ts).
 const reporter = new DownloadReporter(MAX_PENDING_DOWNLOADS)
 
@@ -328,43 +370,20 @@ function streamFileRange(
 	pieced = false
 ): Response {
 	const total = pending.size
-	const rangeHeader = event.request.headers.get("Range")
-	const range = rangeHeader !== null ? parseRange(rangeHeader, total) : null
-	if (rangeHeader !== null && range === null) {
-		return new Response("range not satisfiable", { status: 416, headers: { "Content-Range": `bytes */${String(total)}` } })
+	const served = servedRange(event.request, total, pieced)
+	if (served === null) {
+		return unsatisfiable(total)
 	}
 
-	const start = range?.start ?? 0
-	const end = range === null ? total - 1 : pieced ? previewServedEnd(range, total) : range.end
-	const length = end - start + 1
+	const { range, start, end } = served
 
 	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
 	// Only the whole file is the download; a ranged request is a probe or a seek.
 	const watched = reported && start === 0 && end === total - 1 ? watchedBody(readable) : null
 	const body = watched?.body ?? readable
 
-	const responseHeaders: Record<string, string> = {
-		"Content-Type": headers.contentType,
-		"X-Content-Type-Options": "nosniff"
-	}
-	if (headers.disposition !== null) {
-		responseHeaders["Content-Disposition"] = headers.disposition
-	}
-	if (headers.sandbox === true) {
-		responseHeaders["Content-Security-Policy"] = "sandbox"
-	}
-
 	// Built BEFORE pumpToResponse counts the stream (see there).
-	let response: Response
-	if (range !== null) {
-		responseHeaders["Content-Range"] = `bytes ${String(start)}-${String(end)}/${String(total)}`
-		responseHeaders["Content-Length"] = String(length)
-		response = new Response(body, { status: 206, headers: responseHeaders })
-	} else {
-		responseHeaders["Content-Length"] = String(total)
-		responseHeaders["Accept-Ranges"] = "bytes"
-		response = new Response(body, { status: 200, headers: responseHeaders })
-	}
+	const response = rangeResponse(body, served, total, headers)
 
 	// Stream the decrypted bytes straight into the Response body's writable end. `end` is EXCLUSIVE on
 	// the SDK's `{start,end}` (Rust range convention) — an HTTP inclusive `bytes=0-99` maps to
@@ -406,6 +425,199 @@ function streamFileRange(
 	return response
 }
 
+// The range a request is answered with: the whole file without a Range header, null for an unsatisfiable
+// one. `end` is inclusive; `pieced` answers a long range with one piece (previewServedEnd).
+function servedRange(request: Request, total: number, pieced: boolean): { range: ByteRange | null; start: number; end: number } | null {
+	const rangeHeader = request.headers.get("Range")
+	const range = rangeHeader !== null ? parseRange(rangeHeader, total) : null
+	if (rangeHeader !== null && range === null) {
+		return null
+	}
+
+	return { range, start: range?.start ?? 0, end: range === null ? total - 1 : pieced ? previewServedEnd(range, total) : range.end }
+}
+
+function unsatisfiable(total: number): Response {
+	return new Response("range not satisfiable", { status: 416, headers: { "Content-Range": `bytes */${String(total)}` } })
+}
+
+// A 206 for a ranged request, a 200 with Accept-Ranges for the whole file (see streamFileRange for the
+// header contract).
+function rangeResponse(
+	body: ReadableStream<Uint8Array>,
+	served: { range: ByteRange | null; start: number; end: number },
+	total: number,
+	headers: { contentType: string; disposition: string | null; sandbox?: boolean }
+): Response {
+	const responseHeaders: Record<string, string> = {
+		"Content-Type": headers.contentType,
+		"X-Content-Type-Options": "nosniff"
+	}
+	if (headers.disposition !== null) {
+		responseHeaders["Content-Disposition"] = headers.disposition
+	}
+	if (headers.sandbox === true) {
+		responseHeaders["Content-Security-Policy"] = "sandbox"
+	}
+
+	if (served.range !== null) {
+		responseHeaders["Content-Range"] = `bytes ${String(served.start)}-${String(served.end)}/${String(total)}`
+		responseHeaders["Content-Length"] = String(served.end - served.start + 1)
+
+		return new Response(body, { status: 206, headers: responseHeaders })
+	}
+
+	responseHeaders["Content-Length"] = String(total)
+	responseHeaders["Accept-Ranges"] = "bytes"
+
+	return new Response(body, { status: 200, headers: responseHeaders })
+}
+
+// Bytes `start`..`end` (inclusive) read through a range port as the consumer pulls them, one SDK chunk at a
+// time: each window ends on the next chunk boundary and is enqueued as soon as it arrives, so the first bytes
+// leave after one chunk, a slow link shows progress chunk by chunk, and nothing is read past what the
+// consumer has asked for (one window in flight, none queued). A cancel aborts the read in flight.
+function portBody(reader: RangePortReader, start: number, end: number, finish: () => void): ReadableStream<Uint8Array> {
+	const reads = new AbortController()
+	let position = start
+	let finished = false
+	const settle = () => {
+		if (!finished) {
+			finished = true
+			finish()
+		}
+	}
+
+	return new ReadableStream<Uint8Array>(
+		{
+			start(controller) {
+				if (position > end) {
+					controller.close()
+					settle()
+				}
+			},
+			async pull(controller) {
+				const windowEnd = Math.min(end + 1, (Math.floor(position / BLOCK_BYTES) + 1) * BLOCK_BYTES)
+
+				try {
+					const bytes = await reader.readRange(position, windowEnd, reads.signal)
+
+					if (bytes.length === 0) {
+						throw new Error("range port read returned nothing")
+					}
+
+					position += bytes.length
+					controller.enqueue(bytes)
+
+					if (position > end) {
+						controller.close()
+						settle()
+					}
+				} catch (e) {
+					controller.error(e)
+					settle()
+				}
+			},
+			cancel(reason) {
+				reads.abort(reason)
+				settle()
+			}
+		},
+		{ highWaterMark: 0 }
+	)
+}
+
+// The "portPreview" kind: the preview route's Range/206 contract (inline under a re-validated Content-Type,
+// pieced, sandboxed) with the bytes read through the entry's range port. A port whose serving side went
+// away answers 404, the status a lost registration has, so the page registers again.
+function handlePortPreview(event: FetchEvent, id: string, pending: PendingPortPreview): Response {
+	if (pending.lost) {
+		downloads.delete(id)
+		reportStreamGone(event, id)
+
+		return notFound(event)
+	}
+
+	const inline = isAllowedInlineContentType(pending.contentType)
+	const total = pending.size
+	const served = servedRange(event.request, total, inline)
+	if (served === null) {
+		return unsatisfiable(total)
+	}
+
+	const done = Promise.withResolvers<undefined>()
+	const body = portBody(pending.reader, served.start, served.end, () => {
+		done.resolve(undefined)
+	})
+	// Built BEFORE the stream is counted (see pumpToResponse).
+	const response = rangeResponse(
+		body,
+		served,
+		total,
+		inline ? { contentType: pending.contentType, disposition: null, sandbox: true } : attachmentHeaders(pending.name)
+	)
+
+	pending.streams++
+	downloads.beginStream(id)
+	// Keeps the worker alive while the browser reads, as pumpToResponse does.
+	event.waitUntil(
+		done.promise.finally(() => {
+			downloads.endStream(id)
+			pending.streams--
+			closePortIfDone(pending)
+		})
+	)
+
+	return response
+}
+
+// The download trigger is a top-level NAVIGATION, so answering it with a body would commit that body as the
+// new document and destroy the running app. 204 abandons the navigation instead, leaving the page untouched
+// (the registration itself self-heals page-side, see SW_ERROR_NO_CLIENT). Anything else — a media
+// element's range fetch — gets the plain 404 its error handling expects.
+function notFound(event: FetchEvent): Response {
+	return event.request.mode === "navigate" ? new Response(null, { status: 204 }) : new Response("download not found", { status: 404 })
+}
+
+const streamGoneAt = new Map<string, number>()
+
+// A media element's range request for `id` found nothing: its page hears so (SW_MSG_STREAM_GONE), at most
+// once per id per interval however fast the element retries.
+function reportStreamGone(event: FetchEvent, id: string): void {
+	if (event.request.mode === "navigate") {
+		return
+	}
+
+	const now = Date.now()
+	const last = streamGoneAt.get(id)
+
+	if (last !== undefined && now - last < SW_STREAM_GONE_INTERVAL_MS) {
+		return
+	}
+
+	streamGoneAt.set(id, now)
+
+	// Bounded: a long session's ids drop out once the map holds more than a few hundred.
+	if (streamGoneAt.size > 256) {
+		const oldest = streamGoneAt.keys().next().value
+
+		if (oldest !== undefined) {
+			streamGoneAt.delete(oldest)
+		}
+	}
+
+	event.waitUntil(
+		self.clients
+			.matchAll({ type: "window" })
+			.then(clients => {
+				for (const client of clients) {
+					client.postMessage({ type: SW_MSG_STREAM_GONE, id })
+				}
+			})
+			.catch(() => undefined)
+	)
+}
+
 // The "stream" kind: the page's own stream, which only one response can read. Range is ignored and a whole
 // 200 answered, never Accept-Ranges, so nothing has reason to probe and come back for more; a later GET of
 // a taken stream finds it gone. Content-Length is the entry's size, and heldBackBody ends a failed stream
@@ -413,7 +625,7 @@ function streamFileRange(
 // call: the page's SDK writes the bytes, and its stop or a failure reaches here as the stream's error.
 function handleStreamDownload(event: FetchEvent, id: string, pending: PendingStreamDownload): Response {
 	if (pending.taken) {
-		return event.request.mode === "navigate" ? new Response(null, { status: 204 }) : new Response("download not found", { status: 404 })
+		return notFound(event)
 	}
 
 	pending.taken = true
@@ -466,13 +678,16 @@ function handleDownload(event: FetchEvent, url: URL): Response {
 		return handleStreamDownload(event, id, pending)
 	}
 
+	// Needs no Client: the page's SDK worker reads the bytes.
+	if (pending?.kind === "portPreview") {
+		return handlePortPreview(event, id, pending)
+	}
+
 	const client = swClient
 	if (pending === undefined || client === null) {
-		// The download trigger is a top-level NAVIGATION, so answering it with a body would commit that
-		// body as the new document and destroy the running app. 204 abandons the navigation instead,
-		// leaving the page untouched (the registration itself self-heals page-side, see SW_ERROR_NO_CLIENT).
-		// Anything else — a media element's range fetch — gets the plain 404 its error handling expects.
-		return event.request.mode === "navigate" ? new Response(null, { status: 204 }) : new Response("download not found", { status: 404 })
+		reportStreamGone(event, id)
+
+		return notFound(event)
 	}
 
 	if (pending.kind === "zip") {
@@ -491,6 +706,33 @@ function handleDownload(event: FetchEvent, url: URL): Response {
 	}
 
 	return streamFileRange(event, id, pending, client, { contentType: pending.contentType, disposition: null, sandbox: true }, false, true)
+}
+
+function isGeneration(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+}
+
+// Whether a range request for `id` would be served (SW_MSG_PREVIEW_STATUS).
+function previewStatus(id: string): PreviewStreamStatus {
+	const entry = downloads.peek(id)
+
+	if (entry === undefined) {
+		return "missing"
+	}
+
+	if (entry.kind === "portPreview") {
+		return entry.lost ? "lost" : "present"
+	}
+
+	if (entry.kind === "stream") {
+		return entry.taken ? "lost" : "present"
+	}
+
+	return swClient !== null ? "present" : "lost"
+}
+
+function previewBucket(bucket: unknown): string | undefined {
+	return bucket === SW_PREVIEW_BUCKET_TRANSIENT || bucket === SW_PREVIEW_BUCKET_PLAYER ? bucket : undefined
 }
 
 // A registration is only worth anything with a session Client to stream it: an idle-terminated worker
@@ -610,19 +852,102 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 				size: msg.size,
 				contentType: msg.contentType
 			},
-			msg.bucket === SW_PREVIEW_BUCKET_TRANSIENT || msg.bucket === SW_PREVIEW_BUCKET_PLAYER ? msg.bucket : undefined
+			previewBucket(msg.bucket)
 		)
 		port?.postMessage({ ok: true })
 		return
 	}
 
-	// Only a preview's entry: a download's id never reaches this message.
-	if (type === SW_MSG_RELEASE_PREVIEW) {
-		const id = (event.data as { id?: unknown }).id
+	// Needs no Client: the bytes come through the transferred range port.
+	if (type === SW_MSG_REGISTER_PORT_PREVIEW) {
+		const msg = event.data as {
+			id?: unknown
+			name?: unknown
+			size?: unknown
+			contentType?: unknown
+			bucket?: unknown
+			port?: unknown
+			generation?: unknown
+		}
 
-		if (typeof id === "string" && downloads.get(id)?.kind === "preview") {
+		if (!(msg.port instanceof MessagePort)) {
+			port?.postMessage({ ok: false, error: "no port" })
+			return
+		}
+
+		if (
+			typeof msg.id !== "string" ||
+			typeof msg.name !== "string" ||
+			typeof msg.contentType !== "string" ||
+			typeof msg.size !== "number" ||
+			!Number.isSafeInteger(msg.size) ||
+			msg.size < 0 ||
+			(msg.generation !== undefined && !isGeneration(msg.generation))
+		) {
+			msg.port.close()
+			port?.postMessage({ ok: false, error: "invalid registration" })
+			return
+		}
+
+		const generation = isGeneration(msg.generation) ? msg.generation : null
+
+		// Behind a newer registration of the id, or a release that covered it: its port is already dead.
+		if (generation !== null && !portGenerations.admit(msg.id, generation)) {
+			msg.port.close()
+			port?.postMessage({ ok: false, error: SW_ERROR_SUPERSEDED })
+			return
+		}
+
+		const entry: PendingPortPreview = {
+			kind: "portPreview",
+			reader: rangePortReader(msg.port),
+			generation,
+			name: msg.name,
+			size: msg.size,
+			contentType: msg.contentType,
+			lost: false,
+			streams: 0,
+			dropped: false
+		}
+
+		entry.reader.onLost(() => {
+			entry.lost = true
+		})
+		downloads.set(msg.id, entry, previewBucket(msg.bucket))
+		port?.postMessage({ ok: true })
+		return
+	}
+
+	// Only a preview's entry: a download's id never reaches this message. A generation also refuses any port
+	// registration of the id up to it still on its way, and spares one newer than it.
+	if (type === SW_MSG_RELEASE_PREVIEW) {
+		const { id, generation } = event.data as { id?: unknown; generation?: unknown }
+
+		if (typeof id !== "string") {
+			return
+		}
+
+		const released = isGeneration(generation) ? generation : null
+		const entry = downloads.peek(id)
+
+		if (released !== null) {
+			portGenerations.retire(id, released)
+		}
+
+		if (
+			entry?.kind === "preview" ||
+			(entry?.kind === "portPreview" && (released === null || entry.generation === null || entry.generation <= released))
+		) {
 			downloads.delete(id)
 		}
+		return
+	}
+
+	// Answered from the registry alone: no port read, no SDK call.
+	if (type === SW_MSG_PREVIEW_STATUS) {
+		const id = (event.data as { id?: unknown }).id
+
+		port?.postMessage({ status: typeof id === "string" ? previewStatus(id) : "missing" })
 		return
 	}
 

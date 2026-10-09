@@ -30,10 +30,12 @@ vi.mock("@tanstack/react-router", () => ({
 }))
 vi.mock("@/lib/keymap/useAction", () => ({ useAction: vi.fn(), IN_EDITORS: {}, IN_EDITORS_AND_FIELDS: {} }))
 vi.mock("@/lib/useIsOnline", () => ({ useIsOnline: () => true }))
+// The player's engine is not under test here, only the element it renders.
+vi.mock("@/features/preview/hooks/usePreviewVideo", () => ({ usePreviewVideo: () => ({ controller: null, snapshot: null }) }))
 
 import { queryClient } from "@/queries/client"
 import { FileLinkView } from "@/features/publicLinks/components/fileLinkView"
-import { MediaElement } from "@/features/preview/components/mediaViewer"
+import { MediaViewer, PreviewAudioElement } from "@/features/preview/components/mediaViewer"
 import { PreviewOverlay } from "@/features/preview/components/previewOverlay"
 import { mediaControlsList, PreviewDownloadableProvider } from "@/features/preview/lib/accessMode"
 import { linkedFileItem, mockLinkedFile } from "@/tests/fixtures/sdk"
@@ -127,13 +129,22 @@ describe("media controls", () => {
 		const { container, rerender } = render(
 			createElement(PreviewDownloadableProvider, {
 				downloadable: false,
-				children: createElement(MediaElement, { category: "audio", url: "blob:audio", alt: "a", positionKey: "a", size: 0 })
+				children: createElement(PreviewAudioElement, { alt: "a" })
 			})
 		)
 
 		expect(container.querySelector("audio")?.getAttribute("controlslist")).toBe("nodownload")
 
-		rerender(createElement(MediaElement, { category: "video", url: "blob:video", alt: "v", positionKey: "v", size: 0 }))
+		rerender(
+			createElement(PreviewDownloadableProvider, {
+				downloadable: false,
+				children: createElement(MediaViewer, { item: linkedFileItem("clip.mp4"), category: "video", alt: "v" })
+			})
+		)
+
+		expect(container.querySelector("video")?.getAttribute("controlslist")).toBe("nodownload")
+
+		rerender(createElement(MediaViewer, { item: linkedFileItem("clip.mp4"), category: "video", alt: "v" }))
 
 		expect(container.querySelector("video")?.hasAttribute("controlslist")).toBe(false)
 	})

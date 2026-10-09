@@ -4,7 +4,7 @@ import type { ErrorDTO } from "@/lib/sdk/errors"
 // `/__sw/version` (bump on any change to sw.ts's runtime behavior, never on app/feature versioning)
 // and the message types + route prefixes it understands. Imported by both sw.ts and register.ts;
 // that import is the only edge between them.
-export const SW_PROTOCOL_VERSION = 15
+export const SW_PROTOCOL_VERSION = 18
 
 // Shared so the page side (register.ts's applyUpdate) can't drift from sw.ts's message listener with
 // a typo'd literal.
@@ -40,6 +40,26 @@ export const SW_MSG_REGISTER_STREAM_DOWNLOAD = "FILEN_SW_REGISTER_STREAM_DOWNLOA
 // it independently at serve time (isAllowedInlineContentType below) rather than trusting the message,
 // so a compromised/buggy sender can never force an arbitrary inline Content-Type through.
 export const SW_MSG_REGISTER_PREVIEW = "FILEN_SW_REGISTER_PREVIEW"
+// The same inline route for a file only the page's SDK worker can read (a public link's, read without a
+// session): `port` (transferred in the message) is the reading end of a range port that worker serves
+// (lib/media/rangePort.ts), and the message holds only the file's name, size and contentType. No key, no
+// link secret and no Client cross: the worker answers each Range request by reading through the port, and
+// a port whose serving side went away answers 404, so the page registers again.
+//
+// Each port registration carries a `generation`, larger than any the page sent for that id before: two
+// registrations of one id can arrive out of order (each waits on the SDK worker first), and the worker never
+// lets an older one replace a newer, nor one a release has already covered. It acks such a registration
+// with SW_ERROR_SUPERSEDED and closes its port.
+export const SW_MSG_REGISTER_PORT_PREVIEW = "FILEN_SW_REGISTER_PORT_PREVIEW"
+export const SW_ERROR_SUPERSEDED = "superseded"
+// page → SW, `{ type, id }`, answered on `event.ports[0]` with `{ status }`: whether the worker can still
+// serve preview `id`, read from its registry alone (no port read, no SDK call, no network). "present": it
+// can; "missing": it holds no such registration (never made, released, evicted, or lost to a restart);
+// "lost": it holds it but its read path is gone (a port whose serving side went away, or a session preview
+// with no session Client). The page reads "unknown" where it could not ask: a controller older than this
+// protocol, which serves the stream as before and has no answer to give.
+export const SW_MSG_PREVIEW_STATUS = "FILEN_SW_PREVIEW_STATUS"
+export type PreviewStreamStatus = "present" | "missing" | "lost" | "unknown"
 // A preview registration's optional `bucket`, each with its own ceiling so one kind never crowds out
 // another: "player" for inline playback (a video or audio element, paused for any length of time),
 // "transient" for a short-lived use (a thumbnail's frame). Without one, the entry shares the downloads'.
@@ -47,8 +67,16 @@ export const SW_PREVIEW_BUCKET_PLAYER = "player"
 export const SW_PREVIEW_BUCKET_TRANSIENT = "transient"
 // page → SW, no ack: the page is done with a preview registration (a thumbnail's one frame), so its entry
 // (decrypted key material) leaves the registry now rather than waiting to be crowded out. A stream already
-// running from it keeps its own handles and ends on its own.
+// running from it keeps its own handles and ends on its own (a port-backed entry closes its port after it).
+// A port registration's release may carry the latest `generation` the page made for the id: one of those
+// still on its way is refused when it lands.
 export const SW_MSG_RELEASE_PREVIEW = "FILEN_SW_RELEASE_PREVIEW"
+// SW → every window client, `{ type, id }`: a range request for preview `id` was answered 404 (the worker
+// lost the registration, or its port's server went away). WebKit retries such a request for ever without a
+// MediaError, so the page hears it here and recovers at once. Sent at most once per id per
+// SW_STREAM_GONE_INTERVAL_MS; the id is the URL's own path segment, nothing secret.
+export const SW_MSG_STREAM_GONE = "FILEN_SW_STREAM_GONE"
+export const SW_STREAM_GONE_INTERVAL_MS = 2_000
 // Ack error a registration answers with when the worker holds no session Client. An idle worker is
 // terminated and restarts with empty module globals, so the handed-over Client is gone while the page's
 // handoff memo still believes otherwise — the page heals on this by re-handing the session over and

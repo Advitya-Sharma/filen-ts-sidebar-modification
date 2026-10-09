@@ -151,8 +151,11 @@ export class RangePortClosedError extends Error {
 
 const CLOSE_REPLY_TIMEOUT_MS = 1000
 
-// A read with no reply for this long has lost its server (a port closed without notice, which only some
-// engines report); the SDK retries transient failures well within it.
+// A port whose pending reads have all gone unanswered for this long has lost its server (a port closed
+// without notice, which only some engines report). Measured from the last read that came back rather than
+// from each read's start, so it is a lack of progress, not a slow read: reads in flight together share the
+// bandwidth, and a long read is no more suspect than a short one. The SDK retries transient failures well
+// within it.
 export const RANGE_READ_TIMEOUT_MS = 60_000
 
 export interface RangePortReader {
@@ -167,20 +170,53 @@ function isClosedNotice(data: unknown): boolean {
 }
 
 // The reading end of a port served by exposeRangePort. Every read settles: with the bytes, when its
-// signal aborts, when the server closes, or after RANGE_READ_TIMEOUT_MS.
+// signal aborts, when the server closes, or once the port has made no progress for RANGE_READ_TIMEOUT_MS.
+// A server that goes away tears this end down too (its port, proxy and reader lock), as close() does.
 export function rangePortReader(port: MessagePort): RangePortReader {
 	const remote = Comlink.wrap<RangePortApi>(port)
-	const pending = new Set<(error: Error) => void>()
+	// Each pending read's failure, by its id.
+	const pending = new Map<number, (error: Error) => void>()
 	const lostCallbacks: (() => void)[] = []
 	let nextId = 0
 	let gone = false
 	let closing = false
+	let tornDown = false
+	let stall: ReturnType<typeof setTimeout> | undefined
+	// This side's own lock, held until the reader is done, tells the server the reader is still there.
+	const readerDone = Promise.withResolvers<undefined>()
+	// Re-armed by every read that comes back; with nothing pending there is nothing to wait on.
+	const armStall = () => {
+		clearTimeout(stall)
+		stall =
+			pending.size === 0
+				? undefined
+				: setTimeout(() => {
+						stall = undefined
+
+						for (const [id, fail] of [...pending]) {
+							void remote.cancel(id).catch(() => undefined)
+							fail(new Error("range read timed out"))
+						}
+					}, RANGE_READ_TIMEOUT_MS)
+	}
+	const teardown = () => {
+		if (tornDown) {
+			return
+		}
+
+		tornDown = true
+		readerDone.resolve(undefined)
+		remote[Comlink.releaseProxy]()
+		port.close()
+	}
 	const lose = () => {
 		if (gone) {
 			return
 		}
 
 		gone = true
+		clearTimeout(stall)
+		stall = undefined
 
 		if (!closing) {
 			for (const callback of lostCallbacks.splice(0)) {
@@ -188,11 +224,12 @@ export function rangePortReader(port: MessagePort): RangePortReader {
 			}
 		}
 
-		for (const fail of pending) {
+		for (const fail of [...pending.values()]) {
 			fail(new RangePortClosedError())
 		}
 
 		pending.clear()
+		teardown()
 	}
 
 	port.addEventListener("message", event => {
@@ -206,9 +243,6 @@ export function rangePortReader(port: MessagePort): RangePortReader {
 	// No engine reports a port whose serving worker died (crashed, terminated); the server's life lock is
 	// released then, and this request for it is granted. Also granted after an orderly shutdown, which
 	// has already been noticed by then.
-	// This side's own lock, held until close(), tells the server the reader is still there.
-	const readerDone = Promise.withResolvers<undefined>()
-
 	if (locksAvailable()) {
 		const lifeLock = `filen-range-port-${crypto.randomUUID()}`
 		const readerLock = `filen-range-reader-${crypto.randomUUID()}`
@@ -224,7 +258,7 @@ export function rangePortReader(port: MessagePort): RangePortReader {
 				readerHeld.resolve(undefined)
 			})
 		void readerHeld.promise
-			.then(() => remote.holdLife(lifeLock, readerLock))
+			.then(() => (gone ? false : remote.holdLife(lifeLock, readerLock)))
 			.then(held =>
 				held
 					? navigator.locks.request(lifeLock, () => {
@@ -246,21 +280,25 @@ export function rangePortReader(port: MessagePort): RangePortReader {
 			const id = nextId++
 
 			return new Promise<Uint8Array>((resolve, reject) => {
-				const timeout = setTimeout(() => {
-					settle(new Error("range read timed out"))
-				}, RANGE_READ_TIMEOUT_MS)
 				const onAbort = () => {
 					void remote.cancel(id).catch(() => undefined)
 					settle(signal.reason instanceof Error ? signal.reason : new DOMException("aborted", "AbortError"))
 				}
 				const settle = (error: Error | null, bytes?: Uint8Array) => {
-					clearTimeout(timeout)
+					if (!pending.delete(id)) {
+						return
+					}
+
 					signal.removeEventListener("abort", onAbort)
-					pending.delete(fail)
 
 					if (error === null && bytes !== undefined) {
+						armStall()
 						resolve(bytes)
 					} else {
+						if (pending.size === 0) {
+							armStall()
+						}
+
 						reject(error ?? new Error("range read failed"))
 					}
 				}
@@ -268,7 +306,12 @@ export function rangePortReader(port: MessagePort): RangePortReader {
 					settle(error)
 				}
 
-				pending.add(fail)
+				pending.set(id, fail)
+
+				if (stall === undefined) {
+					armStall()
+				}
+
 				signal.addEventListener("abort", onAbort, { once: true })
 				remote.read(start, end, id).then(
 					bytes => {
@@ -284,16 +327,22 @@ export function rangePortReader(port: MessagePort): RangePortReader {
 			lostCallbacks.push(callback)
 		},
 		close: () => {
+			if (closing) {
+				return
+			}
+
 			closing = true
+
+			if (gone) {
+				teardown()
+
+				return
+			}
+
 			// A server already shut down from its side never answers.
 			void Promise.race([remote.close(), new Promise(resolve => setTimeout(resolve, CLOSE_REPLY_TIMEOUT_MS))])
 				.catch(() => undefined)
-				.finally(() => {
-					lose()
-					readerDone.resolve(undefined)
-					remote[Comlink.releaseProxy]()
-					port.close()
-				})
+				.finally(lose)
 		}
 	}
 }

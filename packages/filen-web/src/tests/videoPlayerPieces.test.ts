@@ -22,7 +22,9 @@ vi.mock("@/lib/storage/adapter", () => ({ kvGetJson: () => Promise.resolve(null)
 vi.mock("@/features/preview/lib/previewStream", () => ({
 	previewStreamUrl: mocks.register,
 	releasePreviewStream: mocks.release,
-	holdPreviewStreamAlive: () => () => undefined
+	holdPreviewStreamAlive: () => () => undefined,
+	onPreviewStreamGone: () => () => undefined,
+	previewStreamStatus: () => Promise.resolve("present")
 }))
 vi.mock("@/lib/media/mseController", () => ({
 	warmRemuxFile: () => Promise.resolve({ cancel: mocks.warmCancel, handOver: mocks.warmHandOver })
@@ -208,7 +210,19 @@ describe("SidecarReader", () => {
 const FILE = { uuid: "next-u", size: 1000n } as const
 
 function probeOf(container: VideoProbe["container"]): VideoProbe {
-	return { v: 1, container, durationSec: 60, index: "cues", video: null, audio: [], subs: [], chapters: [], cover: null, partial: false }
+	return {
+		v: 1,
+		container,
+		durationSec: 60,
+		index: "cues",
+		video: null,
+		audio: [],
+		subs: [],
+		chapters: [],
+		cover: null,
+		coverLand: null,
+		partial: false
+	}
 }
 
 describe("prewarm", () => {
@@ -256,5 +270,16 @@ describe("prewarm", () => {
 		expect(source.presetId).toBe(id)
 		cancelPrewarm()
 		expect(mocks.release).not.toHaveBeenCalled()
+	})
+
+	it("streams a public link's file through the anon registration, never taking a prewarmed one", async () => {
+		prewarmPlayback({ file: FILE as never, name: "next.mp4", probe: probeOf("mp4"), idrOnlyStart: false })
+
+		const source = directSource({ file: FILE as never, name: "next.mp4", contentType: "video/mp4", access: "anon" })
+
+		expect(source.presetId).toBeUndefined()
+		await source.register("anon-id")
+		expect(mocks.register).toHaveBeenLastCalledWith(FILE, "next.mp4", "video/mp4", "anon-id", { access: "anon" })
+		cancelPrewarm()
 	})
 })

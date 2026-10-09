@@ -5,6 +5,8 @@
 // JS `\b` only knows ASCII word characters even under /u, so token edges are lookarounds on \p{L}\p{N}. Underscores
 // count as separators: file names use them in place of spaces.
 
+import { MIN_TRANSPORT_STREAM_BYTES } from "./transportStream"
+
 export type VideoFileKind = "video" | "unsupportedVideo" | "subtitle" | "image" | "nfo" | "edl"
 
 const FILE_KINDS = new Map<string, VideoFileKind>([
@@ -44,20 +46,23 @@ const FILE_KINDS = new Map<string, VideoFileKind>([
 	["edl", "edl"]
 ])
 
-// `.ts` is also TypeScript source: a transport stream that small, or a declaration file (`lib.dom.d.ts`), is not a
-// watchable video.
-const MIN_TRANSPORT_STREAM_BYTES = 1024 * 1024
+// `.ts` and `.mts` are also TypeScript source: a transport stream that small, a declaration file (`lib.dom.d.ts`),
+// or a file a read of its content found to be no transport stream (`notTransportStream`) is not a watchable video.
+const TRANSPORT_STREAM_EXTENSIONS: ReadonlySet<string> = new Set(["ts", "mts"])
 
 // Kind of a file by its lowercase extension, or null for anything the library ignores (disc images, playlists,
 // `.strm`, unrelated files). `lowerStem` is the lowercase name without extension.
-export function videoFileKind(extension: string, size: number, lowerStem: string): VideoFileKind | null {
+export function videoFileKind(extension: string, size: number, lowerStem: string, notTransportStream = false): VideoFileKind | null {
 	const kind = FILE_KINDS.get(extension)
 
 	if (kind === undefined) {
 		return null
 	}
 
-	if (extension === "ts" && (size < MIN_TRANSPORT_STREAM_BYTES || lowerStem.endsWith(".d"))) {
+	if (
+		TRANSPORT_STREAM_EXTENSIONS.has(extension) &&
+		(size < MIN_TRANSPORT_STREAM_BYTES || lowerStem.endsWith(".d") || notTransportStream)
+	) {
 		return null
 	}
 
@@ -68,7 +73,7 @@ export function videoFileKind(extension: string, size: number, lowerStem: string
 // change of this that what it kept may no longer be what it would keep.
 export const VIDEO_FILE_KINDS_SIGNATURE = [
 	...[...FILE_KINDS].map(([extension, kind]) => `${extension}=${kind}`),
-	`ts>=${String(MIN_TRANSPORT_STREAM_BYTES)}`
+	`ts,mts>=${String(MIN_TRANSPORT_STREAM_BYTES)}`
 ].join(",")
 
 // Index of the extension dot, or -1. A leading dot is a hidden name, not an extension.

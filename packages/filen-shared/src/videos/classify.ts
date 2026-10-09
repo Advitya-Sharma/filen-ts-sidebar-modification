@@ -81,6 +81,8 @@ export interface LibraryScanInput {
 	files: readonly LibraryScanFile[]
 	// Merge keys a manual correction keeps apart: same-titled series in different roots stay separate series.
 	splitMergeKeys?: ReadonlySet<string> | undefined
+	// Uuids of `.ts`/`.mts` files a read of their content found to be no transport stream.
+	notTransportStream?: ReadonlySet<string> | undefined
 }
 
 export interface LibraryArt {
@@ -561,7 +563,12 @@ class LibraryClassifier {
 
 			const stem = file.name.slice(0, dot)
 			const lowerStem = stem.toLowerCase()
-			const kind = videoFileKind(file.name.slice(dot + 1).toLowerCase(), file.size, lowerStem)
+			const kind = videoFileKind(
+				file.name.slice(dot + 1).toLowerCase(),
+				file.size,
+				lowerStem,
+				input.notTransportStream?.has(file.uuid) === true
+			)
 
 			if (kind === null) {
 				continue

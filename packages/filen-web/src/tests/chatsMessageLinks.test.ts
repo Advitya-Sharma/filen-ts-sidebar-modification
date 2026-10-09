@@ -11,7 +11,14 @@ const { getLinkedFileAnon, getDirPublicLinkInfoAnon } = vi.hoisted(() => ({
 
 vi.mock("@/lib/sdk/client", () => ({ sdkApi: { getLinkedFileAnon, getDirPublicLinkInfoAnon } }))
 
-import { fetchChatMessageLinks } from "@/features/chats/queries/chatMessageLinks"
+import { fetchChatMessageLinks, type ChatLinkResolution } from "@/features/chats/queries/chatMessageLinks"
+import { linkedFileIntoDriveItem } from "@/features/drive/lib/item"
+import { previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
+
+// The category the card reads as it renders, from the resolved file.
+function categoryOf(result: ChatLinkResolution | undefined): PreviewCategory | null {
+	return result?.success === true && result.data.type === "file" ? previewType(linkedFileIntoDriveItem(result.data.linkedFile)) : null
+}
 
 // Version 4 (third group starts "4"), variant 8 (fourth "8") — parseFilenPublicLink validates both
 // nibbles via the 'uuid' package, unlike a plain 8-4-4-4-12 hex-shape regex.
@@ -75,7 +82,7 @@ afterEach(() => {
 })
 
 describe("fetchChatMessageLinks — Filen file links", () => {
-	it("resolves a file link's decrypted name + size + previewCategory + the raw LinkedFile on success", async () => {
+	it("resolves a file link's decrypted name + size + the raw LinkedFile on success", async () => {
 		const linkedFile = mockLinkedFile({ name: { Decrypted: "vacation.jpg" }, mime: { Decrypted: "image/jpeg" }, size: 2048n })
 		getLinkedFileAnon.mockResolvedValueOnce(linkedFile)
 
@@ -88,19 +95,20 @@ describe("fetchChatMessageLinks — Filen file links", () => {
 				kind: "filenLink",
 				link: { type: "file", uuid: UUID, key: KEY_PLAINTEXT },
 				success: true,
-				data: { type: "file", name: "vacation.jpg", size: 2048n, previewCategory: "image", linkedFile }
+				data: { type: "file", name: "vacation.jpg", size: 2048n, linkedFile }
 			}
 		])
+		expect(categoryOf(results[0])).toBe("image")
 	})
 
-	it("resolves previewCategory from the extension, not just the mime — a .pdf-named file classifies as pdf", async () => {
+	it("classifies the resolved file from the extension, not just the mime — a .pdf-named file classifies as pdf", async () => {
 		getLinkedFileAnon.mockResolvedValueOnce(
 			mockLinkedFile({ name: { Decrypted: "invoice.pdf" }, mime: { Decrypted: "application/pdf" } })
 		)
 
 		const results = await fetchChatMessageLinks([FILE_LINK_URL])
 
-		expect(results[0]).toMatchObject({ success: true, data: { previewCategory: "pdf" } })
+		expect(categoryOf(results[0])).toBe("pdf")
 	})
 
 	it("degrades to success:false (never throws) when getLinkedFileAnon rejects — e.g. a password-protected link", async () => {
@@ -121,20 +129,20 @@ describe("fetchChatMessageLinks — Filen file links", () => {
 		expect(results[0]).toMatchObject({ success: true, data: { type: "file", name: null } })
 	})
 
-	it("still resolves previewCategory from the decrypted MIME when the name alone is undecryptable (extension-first, mime-fallback)", async () => {
+	it("still classifies the resolved file from the decrypted MIME when the name alone is undecryptable (extension-first, mime-fallback)", async () => {
 		getLinkedFileAnon.mockResolvedValueOnce(mockLinkedFile({ name: { Encrypted: "cipher" }, mime: { Decrypted: "application/pdf" } }))
 
 		const results = await fetchChatMessageLinks([FILE_LINK_URL])
 
-		expect(results[0]).toMatchObject({ success: true, data: { previewCategory: "pdf" } })
+		expect(categoryOf(results[0])).toBe("pdf")
 	})
 
-	it("previewCategory falls back to 'other' when BOTH name and mime arrive still-Encrypted — no classification signal at all", async () => {
+	it("classifies it 'other' when BOTH name and mime arrive still-Encrypted — no classification signal at all", async () => {
 		getLinkedFileAnon.mockResolvedValueOnce(mockLinkedFile({ name: { Encrypted: "cipher-name" }, mime: { Encrypted: "cipher-mime" } }))
 
 		const results = await fetchChatMessageLinks([FILE_LINK_URL])
 
-		expect(results[0]).toMatchObject({ success: true, data: { previewCategory: "other" } })
+		expect(categoryOf(results[0])).toBe("other")
 	})
 })
 

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next"
 import { CheckIcon, PlayIcon, StarIcon } from "lucide-react"
 import { type ItemActionDialogKind } from "@/features/drive/components/itemMenu.logic"
 import { showVideoBadge } from "@/features/drive/components/driveTile.logic"
+import { useFileKindVerdict } from "@/features/drive/hooks/useFileKindVerdict"
 import { ItemThumbnail } from "@/features/drive/components/itemThumbnail"
 import { DriveContextMenuContent, DriveDropdownMenuContent } from "@/features/drive/components/itemMenu"
 import { patchPhoto } from "@/features/photos/lib/actions"
@@ -55,6 +56,7 @@ export function PhotoTile({
 	onItemAction
 }: PhotoTileProps) {
 	const { t } = useTranslation(["drive", "photos", "common"])
+	const verdict = useFileKindVerdict(item.data.uuid)
 	const name = driveItemName(item)
 	const compressParentNaming = photosParentNaming(rootUuid, t("common:modulePhotos"))
 	const press = useTouchLongPress<HTMLDivElement>({
@@ -103,7 +105,7 @@ export function PhotoTile({
 									<span className="sr-only">{t("driveFavorited")}</span>
 								</div>
 							) : null}
-							{showVideoBadge(item) ? (
+							{showVideoBadge(item, verdict) ? (
 								<div className="absolute right-1 bottom-1 flex size-6 items-center justify-center rounded-full bg-background/80 shadow-sm">
 									<PlayIcon
 										aria-hidden="true"

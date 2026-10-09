@@ -202,6 +202,20 @@ function narrowDir(raw: NarrowableDirInput): DriveItem {
 	}
 }
 
+// What a file's type is read from, where its metadata is decrypted; null otherwise (and for a file record
+// missing the fields).
+export function anyFileTypeFacts(file: AnyFile): { name: string; mime: string; size: bigint } | null {
+	if ("meta" in file) {
+		return file.meta.type === "decoded" ? { name: file.meta.data.name, mime: file.meta.data.mime, size: file.size } : null
+	}
+
+	if (!("name" in file) || !("Decrypted" in file.name)) {
+		return null
+	}
+
+	return { name: file.name.Decrypted, mime: "mime" in file && "Decrypted" in file.mime ? file.mime.Decrypted : "", size: file.size }
+}
+
 // Wraps a resolved Filen file-link (a `LinkedFile` — not a tree member, no real parent directory) into
 // a synthetic, self-parented DriveItem, so a chat/note file-link embed can feed the SAME preview
 // machinery (previewType, PreviewOverlay, download) every owned file already uses — no second viewer

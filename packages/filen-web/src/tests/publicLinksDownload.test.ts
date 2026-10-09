@@ -35,8 +35,14 @@ describe("anonPreviewability", () => {
 		expect(anonPreviewability(linkedFileItem("photo.jpg", { size: 1024n }))).toBe("previewable")
 	})
 
-	it("caps a large media file — anon has no streaming, so it must buffer under the cap", () => {
-		expect(anonPreviewability(linkedFileItem("movie.mp4", { size: PREVIEW_MAX_BYTES + 1n }))).toBe("too-large")
+	it("never caps video or audio — both stream through MediaSource", () => {
+		expect(anonPreviewability(linkedFileItem("movie.mp4", { size: PREVIEW_MAX_BYTES + 1n }))).toBe("previewable")
+		expect(anonPreviewability(linkedFileItem("movie.mkv", { size: PREVIEW_MAX_BYTES + 1n }))).toBe("previewable")
+		expect(anonPreviewability(linkedFileItem("track.flac", { size: PREVIEW_MAX_BYTES + 1n }))).toBe("previewable")
+	})
+
+	it("caps a large image — anon images are buffered", () => {
+		expect(anonPreviewability(linkedFileItem("photo.png", { size: PREVIEW_MAX_BYTES + 1n }))).toBe("too-large")
 	})
 
 	it("never caps a camera RAW — its preview is the SDK-extracted embedded JPEG, not the file's bytes", () => {

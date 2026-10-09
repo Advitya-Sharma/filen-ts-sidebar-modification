@@ -474,6 +474,13 @@ describe("videoFileKind", () => {
 	])("ts named %s (%i bytes) → %s", (stem, size, kind) => {
 		expect(videoFileKind("ts", size, stem)).toBe(kind)
 	})
+
+	it.each(["ts", "mts"])("%s: the same gates for both transport-stream extensions", extension => {
+		expect(videoFileKind(extension, 4_000, "module")).toBeNull()
+		expect(videoFileKind(extension, big, "module.d")).toBeNull()
+		expect(videoFileKind(extension, big, "module", true)).toBeNull()
+		expect(videoFileKind(extension, big, "camera")).toBe("video")
+	})
 })
 
 describe("resolution and dynamic range", () => {

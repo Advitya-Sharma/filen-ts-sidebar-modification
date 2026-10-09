@@ -50,6 +50,7 @@ function videoProbe(container: VideoProbe["container"], audio: [string, string][
 		subs: [],
 		chapters: [],
 		cover: null,
+		coverLand: null,
 		partial: false
 	}
 }
@@ -100,7 +101,7 @@ function setUp(setUpOptions: SetUpOptions = {}) {
 		},
 		release: vi.fn(),
 		holdAlive: () => () => undefined,
-		reachable: () => Promise.resolve(true)
+		status: () => Promise.resolve("present")
 	}
 	const remux: RemuxSource = { openPort: () => Promise.resolve(new MessageChannel().port2), close: remuxClose }
 

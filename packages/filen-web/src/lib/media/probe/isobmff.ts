@@ -434,8 +434,9 @@ function videoTrack(entry: Uint8Array, header: TrackHeader, tables: SampleTables
 	}
 }
 
-const AC3_CHANNELS = [2, 1, 2, 3, 3, 4, 4, 5]
-const AC3_RATES = [48000, 44100, 32000]
+// Channels by AC-3/E-AC-3 acmod (without the LFE), and sample rates by fscod.
+export const AC3_CHANNELS = [2, 1, 2, 3, 3, 4, 4, 5]
+export const AC3_RATES = [48000, 44100, 32000]
 
 // dac3: fscod(2) bsid(5) bsmod(3) acmod(3) lfeon(1).
 function ac3Format(dac3: Uint8Array): { ch: number; rate: number | null } | null {

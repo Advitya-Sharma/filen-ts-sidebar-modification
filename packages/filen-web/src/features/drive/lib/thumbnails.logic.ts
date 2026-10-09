@@ -1,5 +1,6 @@
 import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
-import { itemTypeExtension, previewCategoryForExtension } from "@/features/drive/lib/preview.logic"
+import type { ContentVerdict } from "@filen/shared"
+import { itemTypeExtension, previewType } from "@/features/drive/lib/preview.logic"
 
 // Every category this app can produce a cached thumbnail for. "sdk" is every STILL raster image —
 // plain raster, HEIC and camera RAW alike — decoded by the Rust SDK, which is the only decoder any of
@@ -120,20 +121,22 @@ export const THUMB_EXT = ".thumb"
 // allowlist mirroring it here. The flag comes off the file the SDK itself decrypted, so it already
 // accounts for formats this app has never heard of, and duplicating it as a JS list would only create
 // a second answer that can drift.
-export function thumbnailCategory(item: DriveItem): ThumbnailCategory {
+// `verdict` as previewType takes it.
+export function thumbnailCategory(item: DriveItem, verdict?: ContentVerdict): ThumbnailCategory {
 	const base = asDirectoryOrFile(item)
 
 	if (base.type !== "file" || base.data.undecryptable) {
 		return "none"
 	}
 
-	const ext = itemTypeExtension(item)
+	const ext = itemTypeExtension(item, verdict)
 
 	if (ext === "svg") {
 		return base.data.size <= THUMB_SVG_SIZE_GATE ? "svg" : "none"
 	}
 
-	if (previewCategoryForExtension(ext) === "video") {
+	// previewType, not the extension alone: a `.ts` is a video only when it is a transport stream.
+	if (previewType(item, verdict) === "video") {
 		return "video"
 	}
 

@@ -10,10 +10,7 @@
 			209,
 			"FUmpZqAq17GDD0JATYCETGF2ZldBhExhdmZEiYhAw4wAAAAAABZUrmtAyq4BAAAAAAAAUNeBAXPFiAAAAAAAAAABnIEAIrWcg3VuZIiBAIaFVl9WUDmDgQEj44OEAnvIauCSsIIFALqCAtCagQJVsIRVuYEBVe6BAOwBAAAAAAAAAgAArgEAAAAAAABo14ECc8WIAAAAAAAAAAKcgQAitZyDdW5kiIEAhoZBX09QVVNWqoNjLqBWu4QExLQAg4ECI+ODhAExLQDhkZ+BAbWIQOdwAAAAAABiZIEQVe6BAGOik09wdXNIZWFkAQE4AYC7AAAAAAASVMNnQKVzc9FjwIs="
 		],
-		[
-			625,
-			"H0O2dSpwFOeBAKNB"
-		]
+		[625, "H0O2dSpwFOeBAKNB"]
 	],
 	"tiers": {
 		"card": {
@@ -50,6 +47,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1
@@ -88,6 +86,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1
@@ -126,6 +125,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1

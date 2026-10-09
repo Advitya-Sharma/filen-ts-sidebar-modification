@@ -28,7 +28,10 @@ export const MEDIA_CODECS = [
 
 export type MediaCodec = (typeof MEDIA_CODECS)[number]
 
-export type ProbeContainer = "mp4" | "mov" | "mkv" | "webm"
+export const PROBE_CONTAINERS = ["mp4", "mov", "mkv", "webm", "ts"] as const
+
+// "ts" is an MPEG transport stream: 188-byte packets, or 192-byte BDAV (.m2ts/.mts).
+export type ProbeContainer = (typeof PROBE_CONTAINERS)[number]
 
 // Where a player finds keyframes: the MP4 sample tables, Matroska Cues, a fragmented MP4's mfra, or nowhere.
 export type ProbeIndex = "moov" | "cues" | "mfra" | "none"
@@ -100,6 +103,8 @@ export interface VideoProbe {
 	subs: ProbeSubtitle[]
 	chapters: ProbeChapter[]
 	cover: ProbeCover | null
+	// A landscape cover (Matroska's "cover_land.*" attachment). Absent from a probe stored before it was read.
+	coverLand?: ProbeCover | null
 	// The tier's read budget ran out or a structure was malformed before everything was found.
 	partial: boolean
 }
@@ -164,6 +169,7 @@ export interface ParsedContainer {
 	tracksFound: boolean
 	chapters: ProbeChapter[]
 	cover: ProbeCover | null
+	coverLand: ProbeCover | null
 	partial: boolean
 	cues?: CuesLocation
 	// Matroska: nanoseconds per tick of the Segment's timestamps.

@@ -28,7 +28,13 @@ vi.mock("@/queries/client", async () => {
 	const { QueryClient: Client } = await import("@tanstack/react-query")
 	return { queryClient: new Client({ defaultOptions: { queries: { retry: false } } }) }
 })
-vi.mock("@/lib/storage/adapter", () => ({ kvGetJson, kvSetJson: vi.fn(() => Promise.resolve()) }))
+vi.mock("@/lib/storage/adapter", () => ({
+	kvGetJson,
+	kvSetJson: vi.fn(() => Promise.resolve()),
+	kvKeys: () => Promise.resolve([]),
+	kvEntriesJson: () => Promise.resolve([]),
+	kvDelete: () => Promise.resolve()
+}))
 vi.mock("sonner", () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), dismiss: vi.fn() }) }))
 vi.mock("@/features/transfers/lib/archiveToast", () => ({ startCompressWithCard }))
 vi.mock("@/features/drive/lib/dnd", () => ({ performMove: vi.fn() }))

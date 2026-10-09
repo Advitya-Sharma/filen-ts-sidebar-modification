@@ -2,6 +2,7 @@ import { BlockSource, OutOfFileReadError, ReadBudgetError, type ReadRange } from
 import { MalformedError, UnsupportedContainerError, ascii, readBytes, uint32 } from "@/lib/media/probe/bytes"
 import { LEADING_BOXES, walkIsobmff } from "@/lib/media/probe/isobmff"
 import { EBML_ID, walkMatroska } from "@/lib/media/probe/matroska"
+import { TS_SNIFF_BYTES, sniffTransportStream, walkMpegTs, type TsLayout } from "@/lib/media/probe/mpegts"
 import type { ParsedContainer, ParsedTrack, ProbeTier, ProbeVideo, VideoProbe } from "@/lib/media/probe/types"
 
 // The container probe: which tier reads how much, and the record each tier yields.
@@ -30,9 +31,18 @@ export interface WalkOptions {
 	keyframes?: boolean
 }
 
-// The container's raw walk, or null when the file is no container this reads. The first 16 bytes decide,
-// so anything else costs one block. A walk that runs out of budget or into a malformed structure
-// returns what it found, flagged partial; failed downloads throw.
+// The packet layout of an MPEG-TS file, read only when its first bytes could start one.
+async function transportStream(source: BlockSource, head: Uint8Array): Promise<TsLayout | null> {
+	if (head[0] !== 0x47 && head[4] !== 0x47) {
+		return null
+	}
+
+	return sniffTransportStream(await readBytes(source, 0, Math.min(TS_SNIFF_BYTES, source.size)), source.size)
+}
+
+// The container's raw walk, or null when the file is no container this reads. The first bytes decide
+// (a transport stream's first packets), so anything else costs one block. A walk that runs out of
+// budget or into a malformed structure returns what it found, flagged partial; failed downloads throw.
 export async function walkContainer(source: BlockSource, tier: ProbeTier, options: WalkOptions = {}): Promise<ParsedContainer | null> {
 	if (source.size < 8) {
 		return null
@@ -40,26 +50,33 @@ export async function walkContainer(source: BlockSource, tier: ProbeTier, option
 
 	const head = await readBytes(source, 0, Math.min(16, source.size))
 	const matroska = uint32(head, 0) === EBML_ID
+	const isobmff = !matroska && LEADING_BOXES.has(ascii(head, 4, 8))
+	const transport = matroska || isobmff ? null : await transportStream(source, head)
 
-	if (!matroska && !LEADING_BOXES.has(ascii(head, 4, 8))) {
+	if (!matroska && !isobmff && transport === null) {
 		return null
 	}
 
 	const result: ParsedContainer = {
-		container: matroska ? "mkv" : "mp4",
+		container: matroska ? "mkv" : transport === null ? "mp4" : "ts",
 		durationSec: null,
 		index: null,
 		tracks: [],
 		tracksFound: false,
 		chapters: [],
 		cover: null,
+		coverLand: null,
 		partial: false
 	}
 
 	try {
 		const keyframes = options.keyframes === true
 
-		await (matroska ? walkMatroska(source, tier, result, keyframes) : walkIsobmff(source, tier, result, keyframes))
+		if (transport !== null) {
+			await walkMpegTs(source, tier, result, transport)
+		} else {
+			await (matroska ? walkMatroska(source, tier, result, keyframes) : walkIsobmff(source, tier, result, keyframes))
+		}
 	} catch (error) {
 		if (error instanceof UnsupportedContainerError) {
 			return null
@@ -113,12 +130,13 @@ function toRecord(parsed: ParsedContainer, tier: ProbeTier): VideoProbe {
 		subs,
 		chapters: tier === "full" ? parsed.chapters : [],
 		cover: tier === "card" ? null : parsed.cover,
+		coverLand: tier === "card" ? null : parsed.coverLand,
 		partial: parsed.partial || !parsed.tracksFound
 	}
 }
 
 // Reads one tier of a file's probe record through `source` (from probeSource). Null for a file that is
-// no MP4/MOV/Matroska/WebM; throws BlockReadError when a download fails.
+// no MP4/MOV/Matroska/WebM/MPEG-TS; throws BlockReadError when a download fails.
 export async function probeVideo(source: BlockSource, tier: ProbeTier): Promise<VideoProbe | null> {
 	const parsed = await walkContainer(source, tier)
 

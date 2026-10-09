@@ -119,7 +119,7 @@ describe("remux playback session", () => {
 	it("gives up on a byte source that never answers (its worker is gone) as a lost source", async () => {
 		vi.useFakeTimers()
 
-		const { session, failures, opened } = setUp(undefined, () => new Promise<MessagePort>(() => undefined))
+		const { session, failures, opened, close } = setUp(undefined, () => new Promise<MessagePort>(() => undefined))
 		const attached = session.attach(new FakeVideo().asElement())
 
 		await vi.advanceTimersByTimeAsync(OPEN_PORT_TIMEOUT_MS)
@@ -127,5 +127,7 @@ describe("remux playback session", () => {
 
 		expect(failures[0]?.trigger).toBe("network")
 		expect(opened).toHaveLength(0)
+		// The source is let go, so a port that opens late frees its client at once.
+		expect(close).toHaveBeenCalledOnce()
 	})
 })

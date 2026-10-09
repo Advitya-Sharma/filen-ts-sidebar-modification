@@ -95,7 +95,14 @@ vi.mock("@/lib/sdk/socket", () => ({ socketBridge: { stop: socketStop } }))
 vi.mock("@/lib/sdk/client", () => ({ sdkApi: { logout: vi.fn() } }))
 vi.mock("@/features/drive/lib/saveDownload", () => ({ wipeSwClient: vi.fn() }))
 vi.mock("@/lib/sdk/session", () => ({ clearSession: vi.fn(), broadcastAuth: vi.fn() }))
-vi.mock("@/lib/storage/adapter", () => ({ kvClear: vi.fn() }))
+vi.mock("@/lib/storage/adapter", () => ({
+	kvClear: vi.fn(),
+	kvGetJson: () => Promise.resolve(null),
+	kvSetJson: () => Promise.resolve(),
+	kvKeys: () => Promise.resolve([]),
+	kvEntriesJson: () => Promise.resolve([]),
+	kvDelete: () => Promise.resolve()
+}))
 vi.mock("@/features/drive/lib/thumbCache", () => ({ wipeThumbnailStore, readThumbnailBlob: vi.fn(), deleteThumbnail: vi.fn() }))
 vi.mock("@/features/videos/lib/artStore", () => ({ wipeArtStore }))
 vi.mock("@/features/videos/lib/indexStore", () => ({ wipeVideoIndexStore }))

@@ -41,7 +41,8 @@ export function FileHero({
 	linkScope,
 	onBack,
 	saveItem,
-	archiveFile
+	archiveFile,
+	siblings
 }: {
 	item: DriveItem
 	downloadEnabled: boolean
@@ -52,6 +53,8 @@ export function FileHero({
 	// The file as the SDK resolved it (the LinkedFile, or the directory listing's File), which an archive's
 	// browser and extract read through.
 	archiveFile?: AnyFile | undefined
+	// The other files of its directory (a video's subtitles are among them).
+	siblings?: readonly DriveItem[] | undefined
 }) {
 	const { t } = useTranslation("publicLinks")
 	const base = asDirectoryOrFile(item)
@@ -177,6 +180,7 @@ export function FileHero({
 							item={item}
 							linkScope={linkScope}
 							downloadable={downloadEnabled}
+							siblings={siblings}
 						/>
 					)}
 				</div>

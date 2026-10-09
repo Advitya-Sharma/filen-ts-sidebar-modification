@@ -1,6 +1,7 @@
 import type { DirColor } from "@filen/sdk-rs"
 import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
 import { fileIconKey, type FileIconKey } from "@/features/drive/lib/icon.logic"
+import { useFileKindVerdict } from "@/features/drive/hooks/useFileKindVerdict"
 import { cn, directoryFolderTint } from "@filen/shared"
 import imageUrl from "@/assets/file-icons/image.svg"
 import videoUrl from "@/assets/file-icons/video.svg"
@@ -97,6 +98,7 @@ export function FileTypeIcon({ iconKey, className }: { iconKey: FileIconKey; cla
 // file has no name to route on and falls to the generic "other" glyph.
 export function ItemIcon({ item, className }: { item: DriveItem; className?: string | undefined }) {
 	const base = asDirectoryOrFile(item)
+	const verdict = useFileKindVerdict(base.type === "file" ? base.data.uuid : undefined)
 
 	if (base.type === "directory") {
 		return (
@@ -109,7 +111,7 @@ export function ItemIcon({ item, className }: { item: DriveItem; className?: str
 
 	return (
 		<FileTypeIcon
-			iconKey={fileIconKey(base.data.decryptedMeta?.name ?? "", base.data.decryptedMeta?.mime)}
+			iconKey={fileIconKey(base.data.decryptedMeta?.name ?? "", base.data.decryptedMeta?.mime, base.data.uuid, verdict)}
 			className={className}
 		/>
 	)

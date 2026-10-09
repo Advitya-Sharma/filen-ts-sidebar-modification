@@ -33,13 +33,9 @@ function useUnplayableCodecs(media: HTMLMediaElement, source: BlockSource): Code
 	return codecs
 }
 
-function FormatFailure({ media, source }: { media: HTMLMediaElement; source: BlockSource }) {
+// A format failure: names the codecs it can and offers the host's Download, since no retry plays it.
+export function MediaFormatFailure({ codecs }: { codecs: readonly CodecId[] }) {
 	const { t } = useTranslation("preview")
-	const codecs = useUnplayableCodecs(media, source)
-
-	if (codecs === null) {
-		return <PreviewLoading />
-	}
 
 	return (
 		<PreviewErrorState
@@ -53,10 +49,52 @@ function FormatFailure({ media, source }: { media: HTMLMediaElement; source: Blo
 	)
 }
 
-// What a preview's video/audio shows once its element gave up: a format failure names the codecs it can
-// and offers the host's Download, since no retry plays it; any other failure that reaches here has no
-// fallback left (the buffered path) and says so.
-export function MediaFailureState({ kind, media, source }: { kind: MediaFailureKind; media: HTMLMediaElement; source: BlockSource }) {
+function FormatFailure({ media, source }: { media: HTMLMediaElement; source: BlockSource }) {
+	const codecs = useUnplayableCodecs(media, source)
+
+	if (codecs === null) {
+		return <PreviewLoading />
+	}
+
+	return <MediaFormatFailure codecs={codecs} />
+}
+
+// Nothing in this browser can stream the file (no service worker route and no MediaSource): says so, and
+// offers the host's Download, whatever the file holds.
+export function MediaCannotStream() {
+	const { t } = useTranslation("preview")
+
+	return (
+		<PreviewErrorState
+			message={t("previewMediaCannotStream")}
+			action={<PreviewDownloadButton />}
+		/>
+	)
+}
+
+// A stream that could not be read, with nothing further to fall back to; Retry plays it again.
+export function MediaPlaybackFailure({ onRetry }: { onRetry?: (() => void) | undefined }) {
+	return (
+		<PreviewErrorState
+			message={errorLabel(mediaFailureDTO("other"))}
+			{...(onRetry === undefined ? {} : { onRetry })}
+		/>
+	)
+}
+
+// What a preview's audio shows once its element gave up: a format failure names the codecs the file's
+// header declares that the element cannot decode; any other failure offers Retry where there is one.
+export function MediaFailureState({
+	kind,
+	media,
+	source,
+	onRetry
+}: {
+	kind: MediaFailureKind
+	media: HTMLMediaElement
+	source: BlockSource
+	onRetry?: (() => void) | undefined
+}) {
 	if (kind === "format") {
 		return (
 			<FormatFailure
@@ -66,5 +104,5 @@ export function MediaFailureState({ kind, media, source }: { kind: MediaFailureK
 		)
 	}
 
-	return <PreviewErrorState message={errorLabel(mediaFailureDTO("other"))} />
+	return <MediaPlaybackFailure onRetry={onRetry} />
 }

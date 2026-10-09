@@ -107,6 +107,9 @@ class RemuxPlaybackSession implements PlaybackSession {
 				source.openPort(),
 				new Promise<never>((_resolve, reject) => {
 					timer = setTimeout(() => {
+						// A port that opens after all would otherwise keep its client and file entry until its own
+						// idle timeout; a cancel ahead of the registration is honoured when it lands.
+						source.close()
 						reject(new SourceReadError(new Error("the file's byte source did not answer")))
 					}, OPEN_PORT_TIMEOUT_MS)
 				})

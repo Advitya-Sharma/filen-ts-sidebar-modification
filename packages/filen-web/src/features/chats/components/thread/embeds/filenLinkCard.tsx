@@ -5,7 +5,9 @@ import { formatBytes, type FilenPublicLink } from "@filen/shared"
 import type { ChatLinkResolution } from "@/features/chats/queries/chatMessageLinks"
 import { asDirectoryOrFile, linkedFileIntoDriveItem, type DriveItem } from "@/features/drive/lib/item"
 import { DirectoryGlyph, ItemIcon } from "@/features/drive/components/itemIcon"
-import { isStreamedCategory, type StreamedCategory } from "@/features/drive/lib/preview.logic"
+import { isStreamedCategory, itemTypeExtension, previewType, type StreamedCategory } from "@/features/drive/lib/preview.logic"
+import { useFileKindVerdict } from "@/features/drive/hooks/useFileKindVerdict"
+import { playsFromPlainSrc } from "@/features/preview/lib/previewPlayback.logic"
 import { allowedMediaContentType } from "@/features/preview/lib/mediaType"
 import { isMediaStreamAvailable } from "@/features/preview/lib/previewStream"
 import { usePreviewStreamUrl } from "@/features/preview/hooks/usePreviewStreamUrl"
@@ -356,6 +358,9 @@ export function FilenLinkCard({
 	resolution: ChatLinkResolution | undefined
 }) {
 	const { t } = useTranslation("chats")
+	const verdict = useFileKindVerdict(
+		resolution?.success === true && resolution.data.type === "file" ? resolution.data.linkedFile.uuid : undefined
+	)
 
 	if (!resolution?.success) {
 		const Icon = link.type === "directory" ? FolderIcon : FileIcon
@@ -401,6 +406,7 @@ export function FilenLinkCard({
 	const item = linkedFileIntoDriveItem(data.linkedFile)
 	const sizeLabel = formatBytes(Number(data.size))
 	const { downloadable } = data.linkedFile
+	const previewCategory = previewType(item, verdict)
 	const icon = (
 		<ItemIcon
 			item={item}
@@ -408,12 +414,14 @@ export function FilenLinkCard({
 		/>
 	)
 
-	if (isStreamedCategory(data.previewCategory)) {
+	// A video the browser cannot play from a plain src (Matroska, a transport stream) gets the card: its
+	// overlay plays it through the playback ladder.
+	if (isStreamedCategory(previewCategory) && (previewCategory !== "video" || playsFromPlainSrc(itemTypeExtension(item, verdict)))) {
 		return (
 			<FilenInlineMedia
 				item={item}
 				name={name}
-				category={data.previewCategory}
+				category={previewCategory}
 				downloadable={downloadable}
 				fallback={
 					<FilenPreviewCard
@@ -428,7 +436,7 @@ export function FilenLinkCard({
 		)
 	}
 
-	if (data.previewCategory === "other") {
+	if (previewCategory === "other") {
 		return (
 			<LinkCardShell
 				icon={icon}

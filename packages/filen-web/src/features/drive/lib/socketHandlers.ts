@@ -29,7 +29,7 @@ import {
 	patchPhotosFavorite,
 	type PhotosEventScope
 } from "@/features/photos/queries/photos"
-import { isPhotoItem } from "@/features/photos/lib/predicate"
+import { isPhotoCandidate } from "@/features/photos/lib/predicate"
 import { isDotFilenSystemFile } from "@/lib/dotFilen"
 import { markAccountStale } from "@/queries/account"
 import { useDriveStore } from "@/features/drive/store/useDriveStore"
@@ -233,7 +233,7 @@ function cannotChangePhotos(inner: DriveSocketEvent["inner"]): boolean {
 		case "fileNew":
 		case "fileRestore":
 		case "fileMove":
-			return !isPhotoItem(narrowItem(inner.file))
+			return !isPhotoCandidate(narrowItem(inner.file))
 
 		case "fileArchived":
 		case "fileTrash":

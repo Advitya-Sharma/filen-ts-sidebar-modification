@@ -29,7 +29,13 @@ vi.mock("@/lib/sdk/client", () => ({
 vi.mock("@/queries/client", () => ({
 	queryClient: new QueryClient({ defaultOptions: { queries: { gcTime: Infinity, retry: false } } })
 }))
-vi.mock("@/lib/storage/adapter", () => ({ kvGetJson: () => Promise.resolve(null), kvSetJson: () => Promise.resolve() }))
+vi.mock("@/lib/storage/adapter", () => ({
+	kvGetJson: () => Promise.resolve(null),
+	kvSetJson: () => Promise.resolve(),
+	kvKeys: () => Promise.resolve([]),
+	kvEntriesJson: () => Promise.resolve([]),
+	kvDelete: () => Promise.resolve()
+}))
 // The clipboard entries' shortcut badge, reduced to its action id (the registry's combos aren't the point).
 vi.mock("@/lib/keymap/kbd", async () => {
 	const { createElement: element } = await import("react")

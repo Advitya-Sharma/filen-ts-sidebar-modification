@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest"
-import { driveVideoThumbSeeks, fitWithin, selectWebpOrFallback, encodeCanvasThumb } from "@/features/drive/lib/thumbGenerators.logic"
+import {
+	canPlayQuery,
+	driveVideoElementType,
+	driveVideoThumbSeeks,
+	fitWithin,
+	isFormatMediaError,
+	selectWebpOrFallback,
+	encodeCanvasThumb
+} from "@/features/drive/lib/thumbGenerators.logic"
 
 describe("fitWithin", () => {
 	it("returns the source size unchanged when already at or under maxDim (no upscale)", () => {
@@ -163,5 +171,61 @@ describe("driveVideoThumbSeeks", () => {
 		expect(driveVideoThumbSeeks(7200)).toEqual({ first: 1, retry: 5 })
 		expect(driveVideoThumbSeeks(4)).toEqual({ first: 1, retry: 2 })
 		expect(driveVideoThumbSeeks(1)).toEqual({ first: 0.5, retry: null })
+	})
+})
+
+describe("driveVideoElementType", () => {
+	// Chrome's answers: MP4 and WebM yes, QuickTime and Matroska nothing.
+	const chrome = (query: string): boolean => query === "video/mp4" || query === "video/webm"
+
+	it("tries the element for a type the browser can play", () => {
+		expect(driveVideoElementType("video/mp4", chrome, false)).toBe("video/mp4")
+		expect(driveVideoElementType("video/webm", chrome, false)).toBe("video/webm")
+	})
+
+	it("never tries the element for a container the browser answers with nothing", () => {
+		expect(driveVideoElementType("video/x-matroska", chrome, false)).toBeNull()
+	})
+
+	it("asks about QuickTime and M4V as MP4 but serves them as their own type", () => {
+		const asked: string[] = []
+		const canPlay = (query: string): boolean => {
+			asked.push(query)
+
+			return chrome(query)
+		}
+
+		expect(driveVideoElementType("video/quicktime", canPlay, false)).toBe("video/quicktime")
+		expect(driveVideoElementType("video/x-m4v", canPlay, false)).toBe("video/x-m4v")
+		expect(asked).toEqual(["video/mp4", "video/mp4"])
+	})
+
+	it("skips the element without asking for a type that is not inline-allowed or a file it could not decode", () => {
+		const canPlay = (): boolean => {
+			throw new Error("must not be asked")
+		}
+
+		expect(driveVideoElementType(null, canPlay, false)).toBeNull()
+		expect(driveVideoElementType("video/mp4", canPlay, true)).toBeNull()
+	})
+})
+
+describe("canPlayQuery", () => {
+	it("leaves every other type as it is", () => {
+		expect(canPlayQuery("video/x-matroska")).toBe("video/x-matroska")
+		expect(canPlayQuery("video/mp4")).toBe("video/mp4")
+	})
+})
+
+describe("isFormatMediaError", () => {
+	it("treats decode and unsupported-source errors as verdicts about the bytes", () => {
+		expect(isFormatMediaError(3)).toBe(true)
+		expect(isFormatMediaError(4)).toBe(true)
+	})
+
+	it("treats an aborted or failed fetch, or no error at all, as no verdict", () => {
+		expect(isFormatMediaError(1)).toBe(false)
+		expect(isFormatMediaError(2)).toBe(false)
+		expect(isFormatMediaError(undefined)).toBe(false)
 	})
 })

@@ -2,26 +2,30 @@ import * as Comlink from "comlink"
 import { holdRemuxWorker, type RemuxWorkerHold } from "@/lib/media/remuxClient"
 import { splitForAppend } from "@/lib/media/fmp4Split"
 import {
-	aheadSeconds,
+	audioMp4Mime,
 	BACK_BUFFER_SECONDS,
 	backBufferEviction,
 	browserEngine,
-	bufferedAhead,
 	bufferLimits,
 	estimatedBytes,
 	evictedAhead,
-	intersectRanges,
+	forwardBuffered,
+	initialAudio,
+	isAudioOnlySession,
 	MAX_BUFFER_HOLE,
 	MAX_EVICTION_REFETCHES,
 	needsMore,
+	playableRanges,
 	QUOTA_SHRINK,
 	quotaAction,
 	rangesOutside,
 	recentEvictions,
 	seekPlan,
+	sessionAhead,
 	shouldEndStream,
 	STALL_DETECTION_MS,
 	stallAction,
+	supportedCopyCodec,
 	TimelineOps,
 	trackBitrate,
 	unionRanges,
@@ -50,7 +54,8 @@ import {
 
 // Playback of a file the remux worker turns into fragmented MP4, through MediaSource on this thread
 // (Firefox exposes MediaSource to windows only). One SourceBuffer per track so an audio switch never
-// touches buffered video.
+// touches buffered video. On an <audio> element, or for a file without a video track, audio plays alone
+// through a single SourceBuffer.
 
 // "source": the file's bytes could not be read. "openGopStart": video must start at an IDR picture and
 // none lies within reach of the position.
@@ -61,8 +66,8 @@ export interface RemuxSessionOptions {
 	size: number
 	index?: ProbeIndex
 	startTime?: number
-	// The audio track and how it plays from the start ("none": video alone); otherwise the default track,
-	// copied where the MediaSource takes it.
+	// The audio track and how it plays from the start ("none": video alone, ignored when audio plays alone);
+	// otherwise the default track, copied where the MediaSource takes it.
 	audio?: { trackId: number; mode: AudioMode }
 	// Video starts only at IDR pictures (Firefox with HEVC).
 	idrOnlyStart?: boolean
@@ -91,7 +96,7 @@ export interface RemuxSessionDiagnostics {
 export interface RemuxSession {
 	readonly info: RemuxMediaInfo
 	readonly audioTracks: readonly RemuxAudioInfo[]
-	attach(video: HTMLVideoElement): Promise<void>
+	attach(element: HTMLMediaElement): Promise<void>
 	play(): Promise<void>
 	seek(time: number): void
 	// `mode` overrides the choice between copying and re-encoding the track.
@@ -556,8 +561,15 @@ function deviceBufferLimits(): BufferLimits {
 	})
 }
 
+// The spelling of a copied track's codec string this MediaSource takes; null when it takes none.
+function copyCodecFor(track: RemuxAudioInfo, MediaSourceType: MediaSourceClass): string | null {
+	return track.copyCodec === null ? null : supportedCopyCodec(track.copyCodec, mime => MediaSourceType.isTypeSupported(mime))
+}
+
 async function audioModeFor(track: RemuxAudioInfo, MediaSourceType: MediaSourceClass, canTranscode: boolean): Promise<AudioMode> {
-	if (track.copyMime !== null && MediaSourceType.isTypeSupported(track.copyMime)) {
+	const copyCodec = copyCodecFor(track, MediaSourceType)
+
+	if (copyCodec !== null) {
 		// A static codec table answers isTypeSupported for Dolby audio in some engines; decodingInfo asks
 		// the platform decoder.
 		if (track.codec !== "ac3" && track.codec !== "eac3") {
@@ -567,7 +579,7 @@ async function audioModeFor(track: RemuxAudioInfo, MediaSourceType: MediaSourceC
 		try {
 			const result = await navigator.mediaCapabilities.decodingInfo({
 				type: "media-source",
-				audio: { contentType: track.copyMime, channels: String(track.channels), samplerate: track.sampleRate }
+				audio: { contentType: audioMp4Mime(copyCodec), channels: String(track.channels), samplerate: track.sampleRate }
 			})
 
 			if (result.supported) {
@@ -616,7 +628,9 @@ class MseRemuxSession implements RemuxSession {
 		}
 	})
 	private readonly disposedSignal = Promise.withResolvers<never>()
-	private element: HTMLVideoElement | null = null
+	private element: HTMLMediaElement | null = null
+	// No video SourceBuffer and no video pump: an <audio> element, or a file without a video track.
+	private audioOnly = false
 	private mediaSource: MediaSource | null = null
 	private objectUrl: string | null = null
 	private nextGeneration = 1
@@ -681,11 +695,19 @@ class MseRemuxSession implements RemuxSession {
 	}
 
 	private get ahead(): number {
-		return aheadSeconds({ limitBytes: this.limits.video, bitrate: this.info.bitrate, scale: this.aheadScale })
+		return sessionAhead({
+			audioOnly: this.audioOnly,
+			limits: this.limits,
+			fileBitrate: this.info.bitrate,
+			audioBitrate: this.audio.bitrate(this.audioBitrateGuess()),
+			scale: this.aheadScale
+		})
 	}
 
-	public async attach(element: HTMLVideoElement): Promise<void> {
-		if (this.info.video === null) {
+	public async attach(element: HTMLMediaElement): Promise<void> {
+		this.audioOnly = isAudioOnlySession({ elementShowsVideo: element.localName === "video", hasVideoTrack: this.info.hasVideoTrack })
+
+		if (!this.audioOnly && this.info.video === null) {
 			throw new Error("no playable video track")
 		}
 
@@ -695,22 +717,22 @@ class MseRemuxSession implements RemuxSession {
 			this.releaseReads ??= rangeReads.holdPlayback()
 		}
 		// Required before attaching a ManagedMediaSource (its sourceopen waits on it otherwise), and on
-		// every path: a remote player could reach neither this page's MediaSource nor its decryption.
-		element.disableRemotePlayback = true
+		// every path: a remote player could reach neither this page's MediaSource nor its decryption. Not
+		// every engine has it.
+		if ("disableRemotePlayback" in element) {
+			element.disableRemotePlayback = true
+		}
 
-		const chosen = this.options.audio
-		const chosenTrack = chosen === undefined ? undefined : this.info.audio.find(track => track.id === chosen.trackId)
-		const defaultTrack = this.info.audio.find(track => track.isDefault) ?? this.info.audio[0]
+		const start = initialAudio({ tracks: this.info.audio, chosen: this.options.audio, audioOnly: this.audioOnly })
+		const startTrack = start === null ? undefined : this.info.audio.find(track => track.id === start.trackId)
 
-		if (chosen?.mode === "none") {
-			this.audioTrackId = null
-			this.audioMode = "none"
-		} else if (chosen !== undefined && chosenTrack !== undefined) {
-			this.audioTrackId = chosenTrack.id
-			this.audioMode = chosen.mode
-		} else if (defaultTrack !== undefined) {
-			this.audioTrackId = defaultTrack.id
-			this.audioMode = await audioModeFor(defaultTrack, this.MediaSourceType, this.canTranscode())
+		if (start !== null && startTrack !== undefined) {
+			this.audioTrackId = startTrack.id
+			this.audioMode = start.mode ?? (await audioModeFor(startTrack, this.MediaSourceType, this.canTranscode()))
+		}
+
+		if (this.audioOnly && (this.audioTrackId === null || this.audioMode === "none")) {
+			throw new DOMException("no playable audio track", "NotSupportedError")
 		}
 
 		await this.ops.run(() => this.setUp(this.options.startTime ?? 0, false))
@@ -754,12 +776,18 @@ class MseRemuxSession implements RemuxSession {
 			}
 
 			const mode = forcedMode ?? (await audioModeFor(track, this.MediaSourceType, this.canTranscode()))
+
+			// Audio alone has nothing to fall back to: the track that plays stays.
+			if (this.audioOnly && mode === "none") {
+				throw new DOMException("audio track cannot be played", "NotSupportedError")
+			}
+
 			const time = element.currentTime
 			const hadAudio = this.audio.buffer !== null
 			const rebuild = mode === "none" ? hadAudio : !hadAudio
 
 			// A rebuild restarts video too; where it cannot start here, the track stays as it is.
-			if (rebuild && this.options.idrOnlyStart === true && !(await this.call(() => this.hold.remote.canStartAt(this.id, time)))) {
+			if (rebuild && this.idrOnlyStart() && !(await this.call(() => this.hold.remote.canStartAt(this.id, time)))) {
 				throw new IdrUnreachableError(time)
 			}
 
@@ -853,6 +881,29 @@ class MseRemuxSession implements RemuxSession {
 		return Promise.race([Promise.resolve().then(invoke), this.hold.dead, this.disposedSignal.promise])
 	}
 
+	// The spelling a copy start's MIME carries, so the SourceBuffer is created with one this MediaSource takes.
+	private copyCodec(trackId: number): string | null {
+		const track = this.info.audio.find(candidate => candidate.id === trackId)
+
+		return track === undefined ? null : copyCodecFor(track, this.MediaSourceType)
+	}
+
+	// IDR-only starts concern video; audio alone starts anywhere.
+	private idrOnlyStart(): boolean {
+		return this.options.idrOnlyStart === true && !this.audioOnly
+	}
+
+	// Until the audio SourceBuffer has taken enough to measure: a file holding nothing but audio is as dense
+	// as the track.
+	private audioBitrateGuess(): number {
+		return !this.info.hasVideoTrack && this.info.bitrate > 0 ? this.info.bitrate : AUDIO_BITRATE_GUESS
+	}
+
+	// The tracks this session plays.
+	private tracks(): TrackBuffer[] {
+		return this.audioOnly ? [this.audio] : [this.video, this.audio]
+	}
+
 	private canTranscode(): boolean {
 		return (Object.keys(AUDIO_TARGET_CODECS) as AudioTarget[]).some(target =>
 			this.MediaSourceType.isTypeSupported(`audio/mp4; codecs="${AUDIO_TARGET_CODECS[target]}"`)
@@ -936,18 +987,21 @@ class MseRemuxSession implements RemuxSession {
 				return
 			}
 
-			const videoInfo = this.info.video
+			if (!this.audioOnly) {
+				const videoInfo = this.info.video
 
-			if (videoInfo === null) {
-				throw new Error("no playable video track")
+				if (videoInfo === null) {
+					throw new Error("no playable video track")
+				}
+
+				this.video.attachBuffer(this.addSourceBuffer(mediaSource, videoInfo.mime))
 			}
 
-			this.video.attachBuffer(this.addSourceBuffer(mediaSource, videoInfo.mime))
 			this.audio.attachBuffer(result.audio === null ? null : this.addSourceBuffer(mediaSource, result.audio.mime))
 			this.audioMime = result.audio?.mime ?? null
 
 			// Exactly where asked (a resume position), or the key packet a cues-less file was clamped to.
-			const target = result.video.clamped ? result.video.keyTime : time
+			const target = result.video?.clamped === true ? result.video.keyTime : time
 
 			if (target > 0) {
 				this.seekOnceLoaded(target, mediaSource)
@@ -993,14 +1047,18 @@ class MseRemuxSession implements RemuxSession {
 		this.audio.reset(generation, mediaSource)
 		this.horizon = time + this.ahead
 
-		const audio = this.audioTrackId !== null && this.audioMode !== "none" ? { trackId: this.audioTrackId, mode: this.audioMode } : null
-		const result = await this.call(() => this.hold.remote.seek(this.id, { generation, time, horizon: this.horizon, audio }))
+		const audio =
+			this.audioTrackId !== null && this.audioMode !== "none"
+				? { trackId: this.audioTrackId, mode: this.audioMode, copyCodec: this.copyCodec(this.audioTrackId) }
+				: null
+		const video = !this.audioOnly
+		const result = await this.call(() => this.hold.remote.seek(this.id, { generation, time, horizon: this.horizon, video, audio }))
 
 		if (this.video.generation !== generation) {
 			return null
 		}
 
-		this.keyTime = result.video.keyTime
+		this.keyTime = result.video?.keyTime ?? result.audio?.startTime ?? time
 		this.audioStartTime = result.audio?.startTime ?? null
 
 		if (result.audio === null) {
@@ -1024,7 +1082,7 @@ class MseRemuxSession implements RemuxSession {
 		this.userSeek = false
 
 		// Asked before anything is torn down, so a start nothing can reach leaves the current pumps playing.
-		if (this.options.idrOnlyStart === true && !(await this.call(() => this.hold.remote.canStartAt(this.id, time)))) {
+		if (this.idrOnlyStart() && !(await this.call(() => this.hold.remote.canStartAt(this.id, time)))) {
 			if (user) {
 				this.fail("openGopStart", new IdrUnreachableError(time))
 			} else {
@@ -1038,7 +1096,7 @@ class MseRemuxSession implements RemuxSession {
 
 		// Everything from the target on is fetched again from its key packet, so nothing buffered there is
 		// kept: a range left ahead of the playhead would read as a hole the browser had cut.
-		for (const track of [this.video, this.audio]) {
+		for (const track of this.tracks()) {
 			for (const [start, end] of rangesOutside(track.ranges, time - BACK_BUFFER_SECONDS, time)) {
 				void track
 					.run(buffer => {
@@ -1065,7 +1123,7 @@ class MseRemuxSession implements RemuxSession {
 
 			// Decoding starts at the key packet; the element still shows exactly `time` unless a file without
 			// an index could not be seeked that far.
-			if (result.video.clamped) {
+			if (result.video?.clamped === true) {
 				this.internalSeek(result.video.keyTime)
 			}
 		} finally {
@@ -1098,7 +1156,7 @@ class MseRemuxSession implements RemuxSession {
 		return true
 	}
 
-	private async switchAudio(trackId: number, mode: AudioMode, element: HTMLVideoElement): Promise<void> {
+	private async switchAudio(trackId: number, mode: AudioMode, element: HTMLMediaElement): Promise<void> {
 		const generation = this.nextGeneration++
 
 		this.audio.reset(generation, this.mediaSource)
@@ -1115,6 +1173,7 @@ class MseRemuxSession implements RemuxSession {
 					generation,
 					trackId,
 					mode,
+					copyCodec: this.copyCodec(trackId),
 					time: Math.max(0, element.currentTime - 0.1),
 					horizon: element.currentTime + this.ahead
 				})
@@ -1152,10 +1211,7 @@ class MseRemuxSession implements RemuxSession {
 		this.nudges = 0
 		this.pendingStart = null
 
-		if (
-			!this.ops.busy &&
-			seekPlan({ time, video: this.video.ranges, audio: this.audio.buffer === null ? null : this.audio.ranges }) === "inBuffer"
-		) {
+		if (!this.ops.busy && seekPlan({ time, video: this.videoRanges(), audio: this.audioRanges() }) === "inBuffer") {
 			this.maintain()
 
 			return
@@ -1199,8 +1255,17 @@ class MseRemuxSession implements RemuxSession {
 		}
 	}
 
+	// A track's ranges, or null for one this session does not play.
+	private videoRanges(): TimeRange[] | null {
+		return this.audioOnly ? null : this.video.ranges
+	}
+
+	private audioRanges(): TimeRange[] | null {
+		return this.audio.buffer === null ? null : this.audio.ranges
+	}
+
 	private playable(): TimeRange[] {
-		return this.audio.buffer === null ? this.video.ranges : intersectRanges(this.video.ranges, this.audio.ranges)
+		return playableRanges(this.videoRanges(), this.audioRanges())
 	}
 
 	// Raises the horizon when the forward buffer has drained, refetches what the browser evicted ahead,
@@ -1214,7 +1279,7 @@ class MseRemuxSession implements RemuxSession {
 
 		const now = element.currentTime
 		const ahead = this.ahead
-		const seen = this.audio.buffer === null ? this.video.seen : intersectRanges(this.video.seen, this.audio.seen)
+		const seen = playableRanges(this.audioOnly ? null : this.video.seen, this.audio.buffer === null ? null : this.audio.seen)
 
 		if (this.quotaWait === null && !this.openGopBlocked && evictedAhead({ currentTime: now, ranges: this.playable(), seen })) {
 			const at = performance.now()
@@ -1235,15 +1300,12 @@ class MseRemuxSession implements RemuxSession {
 			return
 		}
 
-		const forward = Math.min(
-			bufferedAhead(this.video.ranges, now),
-			this.audio.buffer === null ? Number.POSITIVE_INFINITY : bufferedAhead(this.audio.ranges, now)
-		)
+		const forward = forwardBuffered(now, this.videoRanges(), this.audioRanges())
 
 		if (needsMore({ bufferedAhead: forward, ahead }) && now + ahead > this.horizon + 1) {
 			this.horizon = now + ahead
 
-			for (const track of [this.video, this.audio]) {
+			for (const track of this.tracks()) {
 				void this.call(() => this.hold.remote.setHorizon(this.id, track.kind, track.generation, this.horizon)).catch(
 					() => undefined
 				)
@@ -1252,7 +1314,7 @@ class MseRemuxSession implements RemuxSession {
 
 		const at = performance.now()
 
-		for (const track of [this.video, this.audio]) {
+		for (const track of this.tracks()) {
 			const ranges = track.ranges
 			const first = ranges[0]
 
@@ -1262,7 +1324,7 @@ class MseRemuxSession implements RemuxSession {
 
 			const video = track.kind === "video"
 			const limit = video ? this.limits.video : this.limits.audio
-			const bitrate = track.bitrate(video ? this.info.bitrate : AUDIO_BITRATE_GUESS)
+			const bitrate = track.bitrate(video ? this.info.bitrate : this.audioBitrateGuess())
 			const eviction = backBufferEviction({
 				currentTime: now,
 				bufferedStart: first[0],
@@ -1351,15 +1413,12 @@ class MseRemuxSession implements RemuxSession {
 	private maybeEndOfStream(): void {
 		const mediaSource = this.mediaSource
 		const state = (track: TrackBuffer) => ({ ended: track.ended, idle: track.idle, updating: track.updating })
+		// Audio alone ends only once its SourceBuffer exists: the MediaSource would otherwise end with none.
+		const tracks = this.audioOnly
+			? [{ ...state(this.audio), ended: this.audio.ended && this.audio.buffer !== null }]
+			: [state(this.video), this.audio.buffer === null ? null : state(this.audio)]
 
-		if (
-			mediaSource !== null &&
-			!this.disposed &&
-			shouldEndStream({
-				open: mediaSource.readyState === "open",
-				tracks: [state(this.video), this.audio.buffer === null ? null : state(this.audio)]
-			})
-		) {
+		if (mediaSource !== null && !this.disposed && shouldEndStream({ open: mediaSource.readyState === "open", tracks })) {
 			mediaSource.endOfStream()
 			this.endedStream = true
 		}

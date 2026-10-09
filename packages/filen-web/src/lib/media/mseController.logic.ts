@@ -1,3 +1,6 @@
+import { codecStringAlternatives } from "@filen/shared/videos"
+import type { AudioMode } from "@/lib/media/remuxTypes"
+
 // The decisions behind the remux player's MediaSource buffering, as pure functions of plain numbers.
 
 export type TimeRange = readonly [start: number, end: number]
@@ -203,10 +206,82 @@ export const SEEK_IN_BUFFER_SECONDS = 0.5
 
 export type SeekPlan = "inBuffer" | "restart"
 
-export function seekPlan(params: { time: number; video: readonly TimeRange[]; audio: readonly TimeRange[] | null }): SeekPlan {
-	const covered = (ranges: readonly TimeRange[]) => bufferedAhead(ranges, params.time, 0) >= SEEK_IN_BUFFER_SECONDS
+// A null track is one the session does not play.
+export function seekPlan(params: { time: number; video: readonly TimeRange[] | null; audio: readonly TimeRange[] | null }): SeekPlan {
+	const covered = (ranges: readonly TimeRange[] | null) =>
+		ranges === null || bufferedAhead(ranges, params.time, 0) >= SEEK_IN_BUFFER_SECONDS
 
-	return covered(params.video) && (params.audio === null || covered(params.audio)) ? "inBuffer" : "restart"
+	return covered(params.video) && covered(params.audio) ? "inBuffer" : "restart"
+}
+
+// Where playback can go on: buffered on every track the session plays (a null one it does not).
+export function playableRanges(video: readonly TimeRange[] | null, audio: readonly TimeRange[] | null): TimeRange[] {
+	if (video === null) {
+		return audio === null ? [] : [...audio]
+	}
+
+	return audio === null ? [...video] : intersectRanges(video, audio)
+}
+
+// The forward buffer playback can count on: the shortest over the tracks the session plays.
+export function forwardBuffered(time: number, video: readonly TimeRange[] | null, audio: readonly TimeRange[] | null): number {
+	const tracks = [video, audio].filter(ranges => ranges !== null)
+
+	return tracks.length === 0 ? 0 : Math.min(...tracks.map(ranges => bufferedAhead(ranges, time)))
+}
+
+// A session plays audio alone on an element that cannot show video, or for a file that has none. A file
+// whose video track cannot be remuxed still fails on a <video> element rather than playing as sound.
+export function isAudioOnlySession(params: { elementShowsVideo: boolean; hasVideoTrack: boolean }): boolean {
+	return !params.elementShowsVideo || !params.hasVideoTrack
+}
+
+// The forward window: sized by the video SourceBuffer's limit and the file's bitrate, or for audio alone by
+// the audio SourceBuffer's limit and the audio track's bitrate.
+export function sessionAhead(params: {
+	audioOnly: boolean
+	limits: BufferLimits
+	fileBitrate: number
+	audioBitrate: number
+	scale: number
+}): number {
+	const { audioOnly, limits, scale } = params
+
+	return audioOnly
+		? aheadSeconds({ limitBytes: limits.audio, bitrate: params.audioBitrate, scale })
+		: aheadSeconds({ limitBytes: limits.video, bitrate: params.fileBitrate, scale })
+}
+
+// The audio track a session starts with. `mode` null: copy or re-encode, whichever the page takes. Audio
+// alone ignores a choice of no audio: there would be nothing to play.
+export function initialAudio(params: {
+	tracks: readonly { id: number; isDefault: boolean }[]
+	chosen: { trackId: number; mode: AudioMode } | undefined
+	audioOnly: boolean
+}): { trackId: number; mode: AudioMode | null } | null {
+	const { tracks, chosen, audioOnly } = params
+	const chosenTrack = chosen === undefined || chosen.mode === "none" ? undefined : tracks.find(track => track.id === chosen.trackId)
+	const defaultTrack = tracks.find(track => track.isDefault) ?? tracks[0]
+
+	if (chosen?.mode === "none" && !audioOnly) {
+		return null
+	}
+
+	if (chosen !== undefined && chosenTrack !== undefined) {
+		return { trackId: chosenTrack.id, mode: chosen.mode }
+	}
+
+	return defaultTrack === undefined ? null : { trackId: defaultTrack.id, mode: null }
+}
+
+export function audioMp4Mime(codec: string): string {
+	return `audio/mp4; codecs="${codec}"`
+}
+
+// The first spelling of a copied track's codec string the MediaSource takes, or null for none: engines
+// spell some codecs differently (MP3 in MP4 is mp4a.6B or mp4a.69 to Chrome, mp3 to Firefox).
+export function supportedCopyCodec(codec: string, isTypeSupported: (mime: string) => boolean): string | null {
+	return codecStringAlternatives(codec).find(spelling => isTypeSupported(audioMp4Mime(spelling))) ?? null
 }
 
 // Buffered ranges outside [keepStart, keepEnd), to remove when playback restarts elsewhere.

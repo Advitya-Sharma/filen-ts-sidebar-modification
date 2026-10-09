@@ -1,4 +1,4 @@
-// Pure sizing/encoding helpers shared by the client-side thumbnail generators (video, pdf, svg) — the
+// Pure sizing, encoding and routing helpers for the client-side thumbnail generators (video, pdf, svg) — the
 // categories the Rust SDK cannot decode and this app therefore still draws to a canvas itself. Zero
 // dependencies of its own, so it can be imported from anywhere without risking a cycle.
 
@@ -22,6 +22,39 @@ export function driveVideoThumbSeeks(duration: number): { first: number; retry: 
 	const retry = Math.min(duration / 2, 5)
 
 	return { first, retry: retry > first ? retry : null }
+}
+
+// What canPlayType is asked for a content type. QuickTime and M4V are MP4 underneath: Chrome and Firefox
+// play them by sniffing but answer their own types with nothing.
+const CAN_PLAY_QUERY: ReadonlyMap<string, string> = new Map([
+	["video/quicktime", "video/mp4"],
+	["video/x-m4v", "video/mp4"]
+])
+
+export function canPlayQuery(contentType: string): string {
+	return CAN_PLAY_QUERY.get(contentType) ?? contentType
+}
+
+// The content type a drive video thumbnail's hidden <video> is served with, or null when that path is
+// not worth a read: no inline-allowed type, a container the browser says it cannot play (MKV on Chrome
+// and Safari), or a file whose element already failed to decode. Those go straight to the keyframe read.
+// Decided before any read, so a file the element cannot play costs none on it.
+export function driveVideoElementType(
+	contentType: string | null,
+	canPlay: (query: string) => boolean,
+	undecodable: boolean
+): string | null {
+	if (contentType === null || undecodable || !canPlay(canPlayQuery(contentType))) {
+		return null
+	}
+
+	return contentType
+}
+
+// HTMLMediaElement error codes that are verdicts about the bytes (MEDIA_ERR_DECODE,
+// MEDIA_ERR_SRC_NOT_SUPPORTED), unlike an aborted or failed fetch.
+export function isFormatMediaError(code: number | undefined): boolean {
+	return code === 3 || code === 4
 }
 
 // A canvas silently downgrades an unsupported requested encode type to image/png instead of throwing

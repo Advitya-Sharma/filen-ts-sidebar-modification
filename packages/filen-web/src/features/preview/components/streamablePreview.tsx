@@ -11,16 +11,16 @@ import { usePreviewAccessMode, usePreviewByteSource } from "@/features/preview/l
 import { useObjectUrl } from "@/lib/useObjectUrl"
 import { PreviewErrorState, PreviewGate, PreviewLoading } from "@/features/preview/components/previewErrorState"
 
-// Renders the element for a resolved URL. `onError` is set only on the streamed path — the buffered
-// blob path has nowhere further to fall back to, so it keeps the browser's own native error state.
-// `bytes` is the buffered path's whole file, the blob's own contents.
-export type RenderPreviewUrl = (url: string, onError: (() => void) | undefined, bytes: Uint8Array | undefined) => ReactNode
+// Renders the image for a resolved URL. `onError` is set only on the streamed path — the buffered blob
+// path has nowhere further to fall back to, so it keeps the browser's own native error state. Video and
+// audio never come here: they always stream (mediaViewer.tsx).
+export type RenderPreviewUrl = (url: string, onError: (() => void) | undefined) => ReactNode
 
 // Streamed mode: registers against the SW's inline route and renders once a URL resolves. A
 // registration failure hands control back to the parent (onFallback) for the buffered fallback ONLY
 // when the file is under the whole-buffer cap (streamFailureAction, the SAME decision the mid-
 // consumption onError handler below applies) — an oversize file gets the labeled error state instead,
-// never an unbounded buffered retry (a multi-GB video on a prod SW hiccup would otherwise whole-buffer
+// never an unbounded buffered retry (a huge image on a prod SW hiccup would otherwise whole-buffer
 // straight into a tab-crashing allocation, since a streamed category is never capped at the open gate,
 // preview.logic.ts).
 function StreamedPreview({
@@ -74,22 +74,16 @@ function StreamedPreview({
 		return <PreviewLoading />
 	}
 
-	return render(
-		result.url,
-		() => {
-			// A mid-consumption failure (network drop mid-load/seek, an SW-side decrypt abort, a lifecycle
-			// hiccup) — unlike the registration-failure effect above, retrying buffered here would
-			// re-download the whole file, so an oversize item gets the labeled error instead. A media
-			// element never reports a format failure here (lib/media/mediaFailure.ts): the buffered copy
-			// would fail the same way.
-			if (streamFailureAction(item) === "buffer") {
-				onFallback()
-			} else {
-				setCapExceeded(true)
-			}
-		},
-		undefined
-	)
+	return render(result.url, () => {
+		// A mid-consumption failure (network drop mid-load/seek, an SW-side decrypt abort, a lifecycle
+		// hiccup) — unlike the registration-failure effect above, retrying buffered here would
+		// re-download the whole file, so an oversize item gets the labeled error instead.
+		if (streamFailureAction(item) === "buffer") {
+			onFallback()
+		} else {
+			setCapExceeded(true)
+		}
+	})
 }
 
 function BufferedPreviewBytes({ bytes, mime, render }: { bytes: Uint8Array; mime: string | undefined; render: RenderPreviewUrl }) {
@@ -99,12 +93,12 @@ function BufferedPreviewBytes({ bytes, mime, render }: { bytes: Uint8Array; mime
 		return null
 	}
 
-	return render(url, undefined, bytes)
+	return render(url, undefined)
 }
 
 // Buffered mode: a whole-file download played back from a blob URL, minted/revoked by useObjectUrl so
-// the blob never outlives it. Unlike the streamed path this is NEVER size-capped for video/audio
-// (STREAMED_CATEGORIES, preview.logic.ts) — an accepted tradeoff of the dev/SW-absent fallback.
+// the blob never outlives it. Unlike the streamed path this is not size-capped at the open gate
+// (STREAMED_CATEGORIES, preview.logic.ts) — an accepted tradeoff of the SW-absent fallback for images.
 function BufferedPreview({ item, render }: { item: DriveItem; render: RenderPreviewUrl }) {
 	return (
 		<PreviewGate result={usePreviewBytes(item)}>
@@ -126,8 +120,8 @@ function BufferedPreview({ item, render }: { item: DriveItem; render: RenderPrev
 // also where an item the allowlist rejects outright (e.g. an unrecognized mime) always lands.
 export function StreamablePreview({ item, render }: { item: DriveItem; render: RenderPreviewUrl }) {
 	const contentType = allowedMediaContentType(item)
-	// An "anon" ambient mode (a public link) can never stream: the service worker's wasm bundle has no
-	// UnauthClient, so the buffered path is the only one that serves a logged-out visitor. Nor can bytes of
+	// An "anon" ambient mode (a public link) never streams an image: the service worker's wasm bundle has no
+	// UnauthClient, so the buffered path is the one that serves a logged-out visitor. Nor can bytes of
 	// a byte source (an archive's entry), which is no file the worker could read.
 	const accessMode = usePreviewAccessMode()
 	const byteSource = usePreviewByteSource()

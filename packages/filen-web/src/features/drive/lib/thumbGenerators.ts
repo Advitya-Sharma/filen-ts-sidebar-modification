@@ -1,4 +1,6 @@
 import { runTimeout, driveItemName, Semaphore, type DeferFn, type Result } from "@filen/shared"
+import * as Comlink from "comlink"
+import { onlineManager } from "@tanstack/react-query"
 import type { File as SdkFile } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
 import { runOp } from "@/lib/actions/outcome"
@@ -19,18 +21,33 @@ import {
 	THUMB_WARM_SIZE_GATE,
 	thumbnailCategory
 } from "@/features/drive/lib/thumbnails.logic"
-import { driveVideoThumbSeeks, fitWithin, encodeCanvasThumb } from "@/features/drive/lib/thumbGenerators.logic"
+import {
+	driveVideoElementType,
+	driveVideoThumbSeeks,
+	fitWithin,
+	encodeCanvasThumb,
+	isFormatMediaError
+} from "@/features/drive/lib/thumbGenerators.logic"
 import { prepareSvgThumb } from "@/features/drive/lib/svgThumb.logic"
 import { previewStreamUrl, releasePreviewStream, waitForMediaStream } from "@/features/preview/lib/previewStream"
 import { SAMPLE_HEIGHT, SAMPLE_WIDTH, isDark, meanLuma } from "@/lib/media/framePick.logic"
 import { allowedMediaContentType } from "@/features/preview/lib/mediaType"
-import { narrowItem, type BaseFileItem, type DriveItem } from "@/features/drive/lib/item"
+import { driveItemMime, narrowItem, type BaseFileItem, type DriveItem } from "@/features/drive/lib/item"
 import type { SdkThumbnailResult } from "@/workers/sdk.worker"
 import { getDocument, GlobalWorkerOptions, PDFWorker } from "pdfjs-dist"
 import { idleResource, type IdleResource } from "@/lib/idleResource"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 import { getPreviewBytes } from "@/features/preview/lib/previewCache"
 import { previewCacheScope } from "@/features/preview/lib/accessMode"
+import { PROBE_RANK } from "@/features/videos/lib/probeService.logic"
+import { frameEligible, isSettledMiss } from "@/features/videos/lib/frames.logic"
+import { ProbeService } from "@/features/videos/lib/probeService"
+import { FrameGenerator } from "@/features/videos/lib/frames"
+import { frameHints, probeRecords } from "@/features/videos/lib/records"
+import FrameWorker from "@/features/videos/workers/frame.worker.ts?worker"
+import type { FrameCaptureParams, FrameCaptureResult, FrameWorkerApi } from "@/features/videos/workers/frame.worker"
+import { rangeReads } from "@/lib/media/rangeReads"
+import { recordProbeVerdict } from "@/features/drive/lib/contentVerdicts"
 
 // Past this share of its bytes, a download whose thumbnail nobody wants any more finishes anyway: the
 // rest costs less than starting over the next time the cell scrolls into view.
@@ -141,8 +158,9 @@ export function warmUploadThumbnail(uploaded: SdkFile, file: File): void {
 		const contentType = allowedMediaContentType(item)
 
 		if (contentType !== null) {
-			seedLocalThumb(item, "video", () =>
-				videoThumb(uploaded.uuid, defer => {
+			// A file the element cannot decode is left unanswered: the drive-side arm still has its keyframe read.
+			seedLocalThumb(item, "video", async () => {
+				const result = await videoThumb(uploaded.uuid, defer => {
 					const url = URL.createObjectURL(file.slice(0, file.size, contentType))
 
 					defer(() => {
@@ -151,7 +169,9 @@ export function warmUploadThumbnail(uploaded: SdkFile, file: File): void {
 
 					return url
 				})
-			)
+
+				return result.type === "undecodable" ? null : result
+			})
 		}
 
 		return
@@ -212,8 +232,8 @@ export function warmUploadThumbnail(uploaded: SdkFile, file: File): void {
 
 // A local video or pdf production: a browser decode, so it takes a generation slot like the drive-side
 // one it replaces (see withGenerationSlot). Its failure is settled as "none": the drive-side arm would
-// run this same code over these same bytes, only after downloading them. Null is a local file that
-// could not be read, which says nothing about the file.
+// run this same code over these same bytes, only after downloading them. Null says nothing about the
+// file: a local file that could not be read, or a video the drive-side arm reads another way.
 function seedLocalThumb(item: DriveItem, category: "video" | "pdf", produce: () => Promise<ThumbGenerationResult | null>): void {
 	seedThumbnail(item, () =>
 		withGenerationSlot(category, async (): Promise<ThumbSeedResult> => {
@@ -226,6 +246,15 @@ function seedLocalThumb(item: DriveItem, category: "video" | "pdf", produce: () 
 			return result.type === "bytes" ? result : { type: "none" }
 		})
 	)
+}
+
+// The element answered that it cannot decode these bytes, as opposed to a read that failed or stopped.
+class VideoUndecodableError extends Error {
+	public constructor(message: string) {
+		super(message)
+
+		this.name = "VideoUndecodableError"
+	}
 }
 
 // Resolves once `event` fires, or rejects if the element errors first — a corrupt/unplayable stream
@@ -243,7 +272,9 @@ function waitForVideoEvent(video: HTMLVideoElement, event: "loadedmetadata" | "l
 		}
 		const onError = () => {
 			cleanup()
-			reject(new Error(`video element errored before ${event}`))
+			const message = `video element errored before ${event}`
+
+			reject(isFormatMediaError(video.error?.code) ? new VideoUndecodableError(message) : new Error(message))
 		}
 		const onAbort = () => {
 			cleanup()
@@ -288,11 +319,14 @@ function currentFrameLuma(video: HTMLVideoElement): number {
 // its deferred cleanup empties the element, ending the stream; runTimeout alone could only stop waiting
 // for it. `signal` stops the generation only until the frame has loaded: past that, all that is left is
 // one draw.
+//
+// "undecodable" is the element's verdict that it cannot decode the bytes (an error naming the format, or
+// metadata without a picture); a failed or stopped read stays "failed".
 async function videoThumb(
 	uuid: string,
 	openSource: (defer: DeferFn) => Promise<string> | string,
 	signal?: AbortSignal
-): Promise<ThumbGenerationResult> {
+): Promise<ThumbGenerationResult | { type: "undecodable" }> {
 	const deadline = AbortSignal.timeout(VIDEO_GENERATE_TIMEOUT_MS)
 	const beforeFirstFrame = signal === undefined ? deadline : AbortSignal.any([signal, deadline])
 
@@ -316,6 +350,10 @@ async function videoThumb(
 		})
 
 		await waitForVideoEvent(video, "loadedmetadata", beforeFirstFrame)
+
+		if (video.videoWidth === 0) {
+			throw new VideoUndecodableError("no picture in the metadata")
+		}
 
 		// `seeked` fires once the frame at the new position is decoded. An indeterminate duration (NaN —
 		// e.g. a stream with no known Content-Length) falls back to frame 0, where seeking to the position
@@ -357,6 +395,10 @@ async function videoThumb(
 	}, VIDEO_GENERATE_TIMEOUT_MS)
 
 	if (!result.success) {
+		if (result.error instanceof VideoUndecodableError) {
+			return { type: "undecodable" }
+		}
+
 		if (signal?.aborted !== true) {
 			log.warn("thumb-generators", "videoThumb failed", uuid, result.error)
 		}
@@ -367,42 +409,251 @@ async function videoThumb(
 	return { type: "bytes", bytes: result.data }
 }
 
-// isMediaStreamAvailable/allowedMediaContentType are cheap synchronous gates checked BEFORE the
-// runTimeout in videoThumb, so an environment that can never stream (SW not yet controlling the tab,
-// or an item whose own mime never clears the inline allowlist) fails instantly instead of occupying a
-// semaphore slot for the full 15s ceiling for no reason.
-export const generateVideoThumb: ThumbGenerator = async (item, signal) => {
-	// Awaited rather than sampled: this frame comes off the SW's Range stream, and a page is
-	// uncontrolled for a moment after every worker install or update — the ordinary state of a first
-	// load. Sampling it there returned "failed", which counts toward the blacklist, so scrolling a
-	// directory of videos in that window could spend all three strikes and leave them blank for the
-	// rest of the session even once the worker took control. Where no worker is registered at all it
-	// still returns immediately, so nothing ever waits for a stream that is not coming.
-	if (!(await waitForMediaStream())) {
-		return { type: "failed" }
+// canPlayType per content type, asked once: the answer is the browser's and does not change.
+const canPlayAnswers = new Map<string, boolean>()
+
+function elementCanPlay(query: string): boolean {
+	let answer = canPlayAnswers.get(query)
+
+	if (answer === undefined) {
+		answer = document.createElement("video").canPlayType(query) !== ""
+		canPlayAnswers.set(query, answer)
 	}
 
-	const contentType = allowedMediaContentType(item)
+	return answer
+}
 
-	if (contentType === null) {
-		return { type: "failed" }
-	}
+// Files whose element already failed to decode this session, so a retry reads only the keyframe.
+const elementUndecodable = new Set<string>()
 
-	// Released once the element is emptied (the deferred cleanups run last-registered first), so the
-	// worker's registry does not keep this one-frame registration until newer ones crowd it out.
-	return await videoThumb(
-		item.data.uuid,
-		defer => {
-			const id = crypto.randomUUID()
+// Queued like a visible card's probe: it counts toward drive's probe soft cap, which an explicit rank
+// would skip.
+function keyframeRank(): number {
+	return PROBE_RANK.visible
+}
 
-			defer(() => {
-				releasePreviewStream(id)
+const KEYFRAME_BOX = { width: THUMB_MAX_DIM, height: THUMB_MAX_DIM }
+
+const KEYFRAME_WORKER_IDLE_MS = 30_000
+
+// A capture that has not answered by now has a stuck decoder or a dead worker; the worker is replaced.
+const KEYFRAME_CAPTURE_TIMEOUT_MS = 20_000
+
+interface KeyframeWorker {
+	worker: Worker
+	remote: Comlink.Remote<FrameWorkerApi>
+}
+
+// Drive's own probe scheduler, frame generator and frame worker. The Videos probe records and frame hints
+// are shared, so a file either feature has looked at costs the other no read; the session caps, gates and
+// failure counts are drive's, so a scrolled directory neither spends Videos' budgets nor queues behind them.
+interface KeyframeServices {
+	probes: ProbeService
+	frames: FrameGenerator
+	worker: IdleResource<KeyframeWorker>
+}
+
+let keyframeServices: KeyframeServices | null = null
+
+function keyframeWorker(FrameWorker: new () => Worker): IdleResource<KeyframeWorker> {
+	const resource = idleResource<KeyframeWorker>(
+		() => {
+			const worker = new FrameWorker()
+			const held: KeyframeWorker = { worker, remote: Comlink.wrap<FrameWorkerApi>(worker) }
+
+			worker.addEventListener("error", () => {
+				// A deploy that changed this worker removes its old file (appUpdate.ts).
+				recoverIfNewerBuild()
+				resource.invalidate(held)
 			})
 
-			return previewStreamUrl(narrowToAnyFile(item), driveItemName(item), contentType, id, { transient: true })
+			return held
 		},
-		signal
+		({ worker, remote }) => {
+			remote[Comlink.releaseProxy]()
+			worker.terminate()
+		},
+		KEYFRAME_WORKER_IDLE_MS
 	)
+
+	return resource
+}
+
+function captureKeyframe(resource: IdleResource<KeyframeWorker>, params: FrameCaptureParams): Promise<FrameCaptureResult> {
+	return resource.use(async held => {
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const deadline = new Promise<never>((_resolve, reject) => {
+			timer = setTimeout(() => {
+				resource.invalidate(held)
+				reject(new Error("keyframe capture timed out"))
+			}, KEYFRAME_CAPTURE_TIMEOUT_MS)
+		})
+
+		try {
+			return await Promise.race([held.remote.capture(Comlink.transfer(params, [params.port])), deadline])
+		} finally {
+			clearTimeout(timer)
+		}
+	})
+}
+
+// Made on first use; the frame worker starts only once a capture needs it.
+function keyframeServicesNow(): KeyframeServices {
+	keyframeServices ??= createKeyframeServices()
+
+	return keyframeServices
+}
+
+function createKeyframeServices(): KeyframeServices {
+	const worker = keyframeWorker(FrameWorker)
+	const probes = new ProbeService({
+		readProbe: (file, uuid, tier, token) => sdkApi.readVideoProbe(file, uuid, tier, token),
+		cancel: (token, finishWithin) => {
+			void (finishWithin === undefined
+				? sdkApi.cancelPreviewDownload(token)
+				: sdkApi.cancelPreviewDownloadUnlessFinishing(token, finishWithin))
+		},
+		records: probeRecords,
+		reads: rangeReads,
+		isOnline: () => onlineManager.isOnline(),
+		now: () => Date.now()
+	})
+	// No dwell and no wait for playback to end: the thumbnail service has already decided the cell is
+	// wanted, and both waits would hold its generation slot. Playback still narrows the range-read
+	// budget each read takes a permit from, and the element arm never waited for it either.
+	const frames = new FrameGenerator({
+		openPort: async (file, token) => {
+			const { port1, port2 } = new MessageChannel()
+
+			await sdkApi.openRangePort(Comlink.transfer(port1, [port1]), file, token)
+
+			return port2
+		},
+		cancel: token => {
+			void sdkApi.cancelPreviewDownload(token)
+		},
+		capture: params => captureKeyframe(worker, params),
+		hints: frameHints,
+		reads: {
+			acquire: rank => rangeReads.acquire(rank),
+			release: () => {
+				rangeReads.release()
+			},
+			whenPlaybackIdle: () => Promise.resolve()
+		},
+		sleep: () => Promise.resolve(),
+		now: () => Date.now()
+	})
+
+	onlineManager.subscribe(online => {
+		if (online) {
+			probes.onReconnect()
+		}
+	})
+
+	return { probes, frames, worker }
+}
+
+// Logout: drive's probes and frames abort, their session spending and verdicts go, and the frame worker's
+// heap goes once idle. Makes nothing never used.
+export function resetDriveKeyframes(): void {
+	if (keyframeServices !== null) {
+		keyframeServices.probes.reset()
+		keyframeServices.frames.reset()
+		keyframeServices.worker.disposeIfIdle()
+	}
+}
+
+// The frame generator's keyframe read, for a video the element cannot decode or stream: the card probe
+// (kv-cached per uuid) locates the keyframe index, then only the keyframe's bytes are read through the
+// SDK worker's range port and decoded with VideoDecoder, within drive's own session budget. A file with
+// no frame to find (no video track, no keyframe index, a codec without a decoder) is a settled verdict;
+// everything else (offline, budgets spent, a failed read) is a failure.
+async function keyframeThumb(item: BaseFileItem, signal: AbortSignal): Promise<ThumbGenerationResult> {
+	// A function, so each check reads the signal anew across the awaits.
+	const stopped = (): boolean => signal.aborted
+	const { probes, frames } = keyframeServicesNow()
+	const uuid = item.data.uuid
+	const file = narrowToAnyFile(item)
+	const record = await probes.request({ uuid, file }, "card", { signal, rank: keyframeRank })
+
+	if (record === null || stopped()) {
+		return { type: "failed" }
+	}
+
+	const probe = record.probe
+
+	// A read that ran anyway: what it says about the file's kind is kept (an audio-only .webm loses its
+	// video glyph and its thumbnail attempts).
+	recordProbeVerdict({ uuid, name: driveItemName(item), mime: driveItemMime(item), size: item.data.size }, probe)
+
+	if (probe === null || !frameEligible(probe)) {
+		return { type: "unavailable", reason: "unsupported" }
+	}
+
+	const frame = await frames.generate({
+		target: { uuid, file, size: Number(item.data.size) },
+		probe,
+		box: KEYFRAME_BOX,
+		signal,
+		rank: keyframeRank
+	})
+
+	if (frame !== null) {
+		return { type: "bytes", bytes: frame.bytes }
+	}
+
+	if (stopped()) {
+		return { type: "failed" }
+	}
+
+	return isSettledMiss(await frameHints.get(uuid)) ? { type: "unavailable", reason: "unsupported" } : { type: "failed" }
+}
+
+// The hidden <video> on the SW's Range stream first, where it can play the file; the keyframe read
+// where it cannot, or once it has failed to decode it. A failed or timed-out stream is not retried
+// through the keyframe read, which would only double the reads.
+export const generateVideoThumb: ThumbGenerator = async (item, signal) => {
+	const stopped = (): boolean => signal.aborted
+
+	if (stopped()) {
+		return { type: "failed" }
+	}
+
+	const uuid = item.data.uuid
+	const contentType = driveVideoElementType(allowedMediaContentType(item), elementCanPlay, elementUndecodable.has(uuid))
+
+	// Awaited rather than sampled: a page is uncontrolled for a moment after every worker install or
+	// update, the ordinary state of a first load. Where no worker is registered at all it returns at once.
+	if (contentType !== null && (await waitForMediaStream())) {
+		// Released once the element is emptied (the deferred cleanups run last-registered first), so the
+		// worker's registry does not keep this one-frame registration until newer ones crowd it out.
+		const result = await videoThumb(
+			uuid,
+			defer => {
+				const id = crypto.randomUUID()
+
+				defer(() => {
+					releasePreviewStream(id)
+				})
+
+				return previewStreamUrl(narrowToAnyFile(item), driveItemName(item), contentType, id, { transient: true })
+			},
+			signal
+		)
+
+		if (result.type !== "undecodable") {
+			return result
+		}
+
+		elementUndecodable.add(uuid)
+
+		if (stopped()) {
+			return { type: "failed" }
+		}
+	}
+
+	return await keyframeThumb(item, signal)
 }
 
 const SVG_RENDER_TIMEOUT_MS = 10_000

@@ -10,10 +10,7 @@
 			213,
 			"FUmpZqa/hFM5Q2Uq17GDD0JATYCETGF2ZldBhExhdmZEiYhA3U1AAAAAABZUrmtA67+E3qTgF64BAAAAAAAAi9eBAXPFiAAAAAAAAAABnIEAIrWcg3VuZIaPVl9NUEVHNC9JU08vQVZDg4EBI+ODhAJ7yGrglrCCBQC6ggLQmoECVbCIVbeBAVW4gQJV7oEA7AEAAAAAAAACAABjoq0BZAAf/+EAGmdkAB+s2UBQBbsBEAAAAwAQAAADAwDxgxlgAQAEaO+Jy/34+ACuAQAAAAAAAEjXgQJzxYgAAAAAAAAAApyBACK1nIN1bmSGhkFfRUFDM1aqg1FhVYOBAiPjg4QB6EgA4ZGfgQa1iEDncAAAAAAAYmSBIFXugQASVMNnQIm/hCXlciw="
 		],
-		[
-			640,
-			"H0O2dSZQR7+EXwFp"
-		]
+		[640, "H0O2dSZQR7+EXwFp"]
 	],
 	"tiers": {
 		"card": {
@@ -50,6 +47,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1
@@ -88,6 +86,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1
@@ -126,6 +125,7 @@
 				"subs": [],
 				"chapters": [],
 				"cover": null,
+				"coverLand": null,
 				"partial": false
 			},
 			"blockReads": 1

@@ -1,5 +1,5 @@
 import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
-import { bufferedSizeCap, previewType } from "@/features/drive/lib/preview.logic"
+import { bufferedSizeCap, previewType, unprobedTransportStream } from "@/features/drive/lib/preview.logic"
 
 // Pure decisions behind the public-link download + preview surface — no worker, no DOM, no React, so
 // every cap and branch is directly unit-testable. The service worker cannot serve an anonymous
@@ -31,17 +31,23 @@ export function chooseDownloadStrategy(input: { fsaAvailable: boolean; size: big
 
 export type AnonPreviewability = "previewable" | "too-large" | "archive" | "unpreviewable"
 
-// Whether the file-view auto-loads an inline preview. UNLIKE the authed drive gate (canPreview), a
-// streamed category is NOT exempt from the size cap here: anon preview is ALWAYS buffered (no SW
-// stream), so an oversized video/audio/image is capped the same as a pdf/text — the view then offers
-// download instead. A non-file / undecryptable / unknown-category item is simply not previewable. An
-// archive is never previewed inline: a signed-in visitor may browse it on request, through the authed
-// client, at any size (its listing is not a buffered read).
+// Whether the file-view auto-loads an inline preview. Video and audio stream at any size (the service
+// worker's range route fed by an unauthenticated range port, or MediaSource). UNLIKE the authed drive gate
+// (canPreview), an image is NOT exempt from the size cap here: an anon image is always buffered (only
+// video and audio take the port-fed route), so an oversized one is capped the same as a pdf/text — the view then
+// offers download instead. A non-file / undecryptable / unknown-category item is simply not
+// previewable. An archive is never previewed inline: a signed-in visitor may browse it on request,
+// through the authed client, at any size (its listing is not a buffered read).
 export function anonPreviewability(item: DriveItem): AnonPreviewability {
 	const base = asDirectoryOrFile(item)
 
 	if (base.type !== "file" || base.data.undecryptable) {
 		return "unpreviewable"
+	}
+
+	// A `.ts` its probe still has to tell apart from TypeScript: a transport stream streams at any size.
+	if (unprobedTransportStream(item)) {
+		return "previewable"
 	}
 
 	const category = previewType(item)
@@ -52,6 +58,10 @@ export function anonPreviewability(item: DriveItem): AnonPreviewability {
 
 	if (category === "archive") {
 		return "archive"
+	}
+
+	if (category === "video" || category === "audio") {
+		return "previewable"
 	}
 
 	const cap = bufferedSizeCap(category)

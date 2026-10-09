@@ -1,5 +1,6 @@
 import { type } from "arktype"
-import { MEDIA_CODECS, type ProbeTier, type VideoProbe } from "@/lib/media/probe/types"
+import { extensionStart } from "@filen/shared"
+import { MEDIA_CODECS, PROBE_CONTAINERS, type ProbeTier, type VideoProbe } from "@/lib/media/probe/types"
 
 // The probe scheduler's rules and the persisted probe record. Plain and DOM-free.
 
@@ -46,9 +47,11 @@ const probeVideoSchema = type({
 	"dv?": { profile: "number", compat: "number" }
 })
 
+const coverSchema = type({ offset: "number", size: "number", mime: "string" })
+
 const videoProbeSchema = type({
 	v: "1",
-	container: "'mp4' | 'mov' | 'mkv' | 'webm'",
+	container: type.enumerated(...PROBE_CONTAINERS),
 	durationSec: "number | null",
 	index: "'moov' | 'cues' | 'mfra' | 'none' | null",
 	video: probeVideoSchema.or("null"),
@@ -74,7 +77,9 @@ const videoProbeSchema = type({
 		hi: "boolean"
 	}).array(),
 	chapters: type({ t: "number", "end?": "number", title: "string | null", "skipType?": "number" }).array(),
-	cover: type({ offset: "number", size: "number", mime: "string" }).or("null"),
+	cover: coverSchema.or("null"),
+	// Absent from a record written before landscape covers were read.
+	"coverLand?": coverSchema.or("null"),
 	partial: "boolean"
 })
 
@@ -84,34 +89,80 @@ const videoProbeSchema = type({
 export const probeRecordSchema = type({
 	probe: videoProbeSchema.or("null"),
 	tiers: { card: "boolean", full: "boolean", cover: "boolean" },
-	at: "number"
+	at: "number",
+	// PROBE_REVISION of the probe that wrote it; absent from the records before it.
+	"rev?": "number"
 })
 
 export type ProbeRecord = typeof probeRecordSchema.infer
 
-// Whether `record` already answers a request for `tier`: the full tier holds the card's fields and the cover.
-export function recordSatisfies(record: ProbeRecord, tier: ProbeTier): boolean {
+// The probe as it reads now: transport streams, and Matroska's landscape cover. A record from before keeps
+// answering unless it is one this probe would read differently (outdatedRecord).
+export const PROBE_REVISION = 2
+
+const TRANSPORT_STREAM_EXTENSIONS: ReadonlySet<string> = new Set(["ts", "mts", "m2ts", "m2t"])
+
+// A record from before PROBE_REVISION that a probe now would answer otherwise: no container for a
+// transport stream's name, or a Matroska cover read that never looked for the landscape one.
+function outdatedRecord(record: ProbeRecord, tier: ProbeTier, nameOf: () => string | null): boolean {
+	if (record.rev !== undefined) {
+		return false
+	}
+
+	if (record.probe === null) {
+		const name = nameOf()
+		const dot = name === null ? -1 : extensionStart(name)
+
+		return name !== null && dot !== -1 && TRANSPORT_STREAM_EXTENSIONS.has(name.slice(dot + 1).toLowerCase())
+	}
+
+	return tier !== "card" && outdatedCover(record)
+}
+
+function outdatedCover(record: ProbeRecord): boolean {
+	const probe = record.probe
+
+	return record.rev === undefined && probe !== null && probe.container === "mkv" && probe.cover !== null && probe.coverLand === undefined
+}
+
+// Whether `record` already answers a request for `tier` of the file `nameOf` names (null where unknown; asked
+// only of an old record without a probe): the full tier holds the card's fields and the cover.
+export function recordSatisfies(record: ProbeRecord, tier: ProbeTier, nameOf: () => string | null = () => null): boolean {
+	if (outdatedRecord(record, tier, nameOf)) {
+		return false
+	}
+
 	return record.probe === null || record.tiers[tier] || record.tiers.full
 }
 
 // `existing` with one tier's result folded in. A full read replaces everything; a cover read holds the
-// card's fields too, so it answers both; a card keeps a cover already found.
+// card's fields too, so it answers both; a card keeps the covers already found. A record without a probe
+// read nothing a new one could keep.
 export function mergeProbe(existing: ProbeRecord | null, tier: ProbeTier, probe: VideoProbe | null, at: number): ProbeRecord {
-	const tiers = { card: false, full: false, cover: false, ...existing?.tiers }
+	const kept = existing?.probe === null ? null : existing
+	const tiers = { card: false, full: false, cover: false, ...kept?.tiers }
 
 	if (probe === null) {
-		return { probe: null, tiers: { card: true, full: true, cover: true }, at }
+		return { probe: null, tiers: { card: true, full: true, cover: true }, at, rev: PROBE_REVISION }
 	}
 
 	if (tier === "full") {
-		return { probe, tiers: { card: true, full: true, cover: true }, at }
+		return { probe, tiers: { card: true, full: true, cover: true }, at, rev: PROBE_REVISION }
 	}
 
 	if (tier === "cover") {
-		return { probe, tiers: { ...tiers, card: true, cover: true }, at }
+		return { probe, tiers: { ...tiers, card: true, cover: true }, at, rev: PROBE_REVISION }
 	}
 
-	return { probe: { ...probe, cover: existing?.probe?.cover ?? null }, tiers: { ...tiers, card: true }, at }
+	// Covers read before the landscape one was looked for are read again by the next cover request.
+	const coversCurrent = kept === null || !outdatedCover(kept)
+
+	return {
+		probe: { ...probe, cover: kept?.probe?.cover ?? null, coverLand: kept?.probe?.coverLand ?? null },
+		tiers: { ...tiers, card: true, cover: tiers.cover && coversCurrent, full: tiers.full && coversCurrent },
+		at,
+		rev: PROBE_REVISION
+	}
 }
 
 // Whether a request at `rank` may start a probe, with `started` probes already started this session.

@@ -117,6 +117,19 @@ describe("PendingRegistry", () => {
 		expect(registry.activeStreams).toBe(0)
 	})
 
+	it("peeks at an entry without refreshing its recency", () => {
+		const registry = new PendingRegistry<string>(2)
+
+		registry.set("a", "A")
+		registry.set("b", "B")
+		expect(registry.peek("a")).toBe("A")
+		expect(registry.peek("missing")).toBeUndefined()
+		registry.set("c", "C")
+
+		expect(registry.peek("a")).toBeUndefined()
+		expect(registry.peek("b")).toBe("B")
+	})
+
 	it("drops one entry by id, leaving the others and a running stream's count alone", () => {
 		const registry = new PendingRegistry<string>(4)
 
@@ -198,5 +211,22 @@ describe("PendingRegistry", () => {
 			expect(registry.size).toBe(0)
 			expect(registry.get("a")).toBeUndefined()
 		})
+	})
+
+	it("hands every entry that leaves to onDrop: replaced, evicted, deleted and cleared", () => {
+		const dropped: string[] = []
+		const registry = new PendingRegistry<string>(2, {}, entry => {
+			dropped.push(entry)
+		})
+
+		registry.set("a", "A")
+		registry.set("a", "A2")
+		registry.set("b", "B")
+		registry.set("c", "C")
+		registry.delete("b")
+		registry.delete("missing")
+		registry.clear()
+
+		expect(dropped).toEqual(["A", "A2", "B", "C"])
 	})
 })

@@ -47,6 +47,7 @@ const PROBE: VideoProbe = {
 	subs: [],
 	chapters: [],
 	cover: null,
+	coverLand: null,
 	partial: false
 }
 

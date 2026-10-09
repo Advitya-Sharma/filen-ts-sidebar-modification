@@ -196,6 +196,7 @@ const PROBE: VideoProbe = {
 	],
 	chapters: [],
 	cover: null,
+	coverLand: null,
 	partial: false
 }
 

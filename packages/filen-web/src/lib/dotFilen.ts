@@ -3,7 +3,7 @@ import { sdkApi } from "@/lib/sdk/client"
 import { runOp } from "@/lib/actions/outcome"
 import { registerSocketHandler } from "@/lib/sdk/socket"
 import { narrowItem } from "@/features/drive/lib/item"
-import { isPhotoItem } from "@/features/photos/lib/predicate"
+import { isPhotoCandidate } from "@/features/photos/lib/predicate"
 import { DOT_FILEN_DIR_NAME } from "@/lib/dotFilen.logic"
 
 // The app's own directories under `.filen` at the drive root (Playlists, Chat Uploads, Videos), resolved once
@@ -339,7 +339,7 @@ export function handleDotFilenDriveEvent(event: Extract<SocketEvent, { type: "dr
 		case "fileRestore":
 		case "fileMove":
 		case "fileArchiveRestored":
-			if (isDotFilenSystemDir(inner.file.parent) && !isPhotoItem(narrowItem(inner.file))) {
+			if (isDotFilenSystemDir(inner.file.parent) && !isPhotoCandidate(narrowItem(inner.file))) {
 				noteDotFilenFile(inner.file.uuid)
 			} else {
 				systemFiles.delete(inner.file.uuid)

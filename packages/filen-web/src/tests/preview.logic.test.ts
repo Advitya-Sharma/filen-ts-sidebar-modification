@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import type { Dir, File, UuidStr } from "@filen/sdk-rs"
 import { narrowItem, type DriveItem } from "@/features/drive/lib/item"
 import {
+	unprobedTransportStream,
 	previewType,
 	canPreview,
 	needsImageTransform,
@@ -21,6 +22,8 @@ import {
 	RAW_IMAGE_EXTENSIONS
 } from "@/features/drive/lib/preview.logic"
 import { ARCHIVE_NAME_EXTENSIONS } from "@/features/drive/lib/archiveFormats"
+import { recordFileKindVerdict } from "@/features/drive/lib/fileKindVerdicts"
+import { isEditable } from "@/features/drive/lib/previewSave.logic"
 import { CODE_FILE_EXTENSIONS } from "@filen/shared"
 import { testUuid } from "@/tests/support/uuid"
 
@@ -115,8 +118,53 @@ describe("previewType — extension category map", () => {
 		expect(previewType(fileNamed(`photo.${ext}`))).toBe("image")
 	})
 
-	it.each(["mp4", "webm", "mkv", "mov", "m4v"])("%s -> video", ext => {
+	it.each(["mp4", "webm", "mkv", "mov", "m4v", "m2ts"])("%s -> video", ext => {
 		expect(previewType(fileNamed(`clip.${ext}`))).toBe("video")
+	})
+
+	// `.ts`/`.mts` are TypeScript until a probe reads one as a transport stream.
+	it("keeps a .ts code, editable, until a probe says it is a transport stream", () => {
+		const clip = fileNamed("clip.ts", { size: 4_000_000n })
+
+		expect(previewType(clip)).toBe("code")
+		expect(isEditable(clip, "drive")).toBe(true)
+		expect(unprobedTransportStream(clip)).toBe(true)
+
+		recordFileKindVerdict(clip.data.uuid, "transportStream")
+
+		expect(previewType(clip)).toBe("video")
+		expect(isEditable(clip, "drive")).toBe(false)
+		expect(unprobedTransportStream(clip)).toBe(false)
+	})
+
+	it("keeps a .ts the probe found to be TypeScript code, under the text cap", () => {
+		const big = fileNamed("bundle.ts", { size: TEXT_MAX_BYTES + 1n })
+
+		expect(canPreview(big)).toBe(true)
+
+		recordFileKindVerdict(big.data.uuid, "notTransportStream")
+
+		expect(previewType(big)).toBe("code")
+		expect(canPreview(big)).toBe(false)
+	})
+
+	it("keeps TypeScript uploaded as video/mp2t editable code, and an audio-only .webm audio", () => {
+		const source = fileNamed("server.ts", { mime: "video/mp2t", size: 40_000n })
+
+		expect(previewType(source)).toBe("code")
+		expect(isEditable(source, "drive")).toBe(true)
+		expect(previewType(fileNamed("talk.webm", { mime: "audio/webm" }))).toBe("audio")
+		expect(previewType(fileNamed("talk.webm", { mime: "video/webm" }))).toBe("video")
+	})
+
+	it("never asks about a small .ts or a declaration file", () => {
+		expect(unprobedTransportStream(fileNamed("index.ts", { size: 4_000n }))).toBe(false)
+		expect(unprobedTransportStream(fileNamed("lib.d.ts", { size: 4_000_000n }))).toBe(false)
+		expect(unprobedTransportStream(fileNamed("clip.mts", { size: 4_000_000n }))).toBe(true)
+	})
+
+	it("reads a transport stream's mime as video for a file without an extension", () => {
+		expect(previewType(fileNamed("recording", { mime: "video/mp2t", size: 4_000n }))).toBe("video")
 	})
 
 	it.each(["mp3", "m4a", "aac", "wav", "ogg", "flac", "opus"])("%s -> audio", ext => {
@@ -424,7 +472,7 @@ describe("canPreview", () => {
 	// refuse preview rather than ever reaching CodeMirror.
 	it.each([
 		["notes.txt", "text"],
-		["script.ts", "code"],
+		["script.py", "code"],
 		["readme.md", "markdown"]
 	])("is false for a %s (%s) over the text size cap", name => {
 		expect(canPreview(fileNamed(name, { size: TEXT_MAX_BYTES + 1n }))).toBe(false)

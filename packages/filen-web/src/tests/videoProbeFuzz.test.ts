@@ -27,6 +27,20 @@ import {
 	unknownSize,
 	zeros
 } from "@/tests/support/containerBytes"
+import {
+	AC3_51,
+	ADTS_LC_48K_STEREO,
+	AVC_SPS,
+	HEVC_SPS,
+	annexB,
+	bdav,
+	language,
+	nulls,
+	pat,
+	pes,
+	pmt,
+	registration
+} from "@/tests/support/mpegtsBytes"
 import { RecordingBlockSource, TIERS, loadSlices, type VideoSlice } from "@/tests/support/videoProbe"
 
 // Seeded mutations of the recorded slices: whatever the bytes, a probe resolves (a record or null) or
@@ -243,7 +257,32 @@ function syntheticCorpus(): Sparse[] {
 	)
 	const bomb = concat(ebmlHeader(), segment(element(0x1654ae6b, bombTrack)))
 
-	return [mkv, mp4, resync, bomb].map(bytes => ({ size: bytes.length, ranges: [[0, bytes]] }))
+	// Every stream type and frame header the TS walker reads, in 188-byte packets and 192-byte BDAV units.
+	const ts = concat(
+		pat(0x1000),
+		pmt(
+			0x1000,
+			[
+				{ type: 0x1b, pid: 0x100 },
+				{ type: 0x24, pid: 0x101 },
+				{ type: 0x0f, pid: 0x102, descriptors: language("eng") },
+				{ type: 0x06, pid: 0x103, descriptors: [0x6a, 1, 0] },
+				{ type: 0x03, pid: 0x104 },
+				{ type: 0x86, pid: 0x105 }
+			],
+			registration("HDMV")
+		),
+		pes(0x100, 0xe0, 90_000, annexB(AVC_SPS)),
+		pes(0x101, 0xe1, 90_000, annexB(HEVC_SPS)),
+		pes(0x102, 0xc0, 90_000, ADTS_LC_48K_STEREO),
+		pes(0x103, 0xbd, 90_000, AC3_51),
+		pes(0x104, 0xc1, 90_000, [0xff, 0xfb, 0x90, 0xc4]),
+		pes(0x105, 0xbd, 90_000, [0x7f, 0xfe, 0x80, 0x01, 0xfc, 0x3c, 0x7f, 0x1f, 0xf0, 0x5d, 0x04]),
+		nulls(8),
+		pes(0x100, 0xe0, 180_000, annexB([0x41]))
+	)
+
+	return [mkv, mp4, resync, bomb, ts, Uint8Array.from(bdav([...ts]))].map(bytes => ({ size: bytes.length, ranges: [[0, bytes]] }))
 }
 
 describe("video probe fuzz", { timeout: FUZZ_TEST_TIMEOUT_MS }, () => {

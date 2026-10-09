@@ -27,6 +27,7 @@ import type {
 import type { ArtFile } from "@/features/videos/lib/artwork"
 import type { ArtCandidate } from "@/features/videos/lib/artwork.logic"
 import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
+import { filesWithVerdict, subscribeFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 
 // The main thread's side of the library index: the titles and root statuses the SDK worker pushes, held as one
 // immutable snapshot per change for useSyncExternalStore. Nothing here holds key material; a playable file is
@@ -98,6 +99,8 @@ class VideoLibraryClient {
 	private homeRetryArmed = false
 	// The manual corrections last handed to the worker, serialized.
 	private sentOverrides = "{}"
+	// The notTransportStream verdicts last handed to the index, as a signature.
+	private sentNotTransportStream = ""
 
 	public readonly subscribe = (listener: () => void): (() => void) => this.changes.subscribe(listener)
 
@@ -354,7 +357,22 @@ class VideoLibraryClient {
 		// A screen may want the video list from before the subscription (re)started.
 		this.syncHome()
 
+		// A `.ts` a content read found to be TypeScript leaves the library (the index keeps it otherwise).
+		const sendVerdicts = (): void => {
+			const uuids = filesWithVerdict("notTransportStream")
+			const signature = uuids.join(",")
+
+			if (signature !== this.sentNotTransportStream) {
+				this.sentNotTransportStream = signature
+				void sdkApi.videoIndexSetNotTransportStreams(uuids)
+			}
+		}
+		const unwatchVerdicts = subscribeFileKindVerdicts(sendVerdicts)
+
+		sendVerdicts()
+
 		this.detach = () => {
+			unwatchVerdicts()
 			unwatchSignOut()
 			unwatchAuth()
 			document.removeEventListener("visibilitychange", onVisibility)
@@ -544,6 +562,7 @@ class VideoLibraryClient {
 		this.homeEnabled = false
 		this.homeWanted = this.homeConsumers > 0
 		this.sentOverrides = "{}"
+		this.sentNotTransportStream = ""
 
 		if (this.homeTimer !== null) {
 			clearTimeout(this.homeTimer)

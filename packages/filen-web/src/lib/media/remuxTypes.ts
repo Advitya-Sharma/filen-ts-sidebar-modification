@@ -45,8 +45,9 @@ export interface RemuxVideoInfo {
 export interface RemuxAudioInfo {
 	id: number
 	codec: string | null
-	// The copied track's MIME; null when the codec cannot go into fragmented MP4 as is.
-	copyMime: string | null
+	// The copied track's fragmented-MP4 codec string, in the demuxer's spelling; null when the codec cannot
+	// go into fragmented MP4 as is.
+	copyCodec: string | null
 	channels: number
 	sampleRate: number
 	language: string
@@ -59,8 +60,11 @@ export interface RemuxMediaInfo {
 	// Bits per second over the whole file, for sizing the buffer window.
 	bitrate: number
 	index: ProbeIndex | null
-	// No index to seek with: the demuxer finds a far position only by scanning every cluster before it.
+	// No index to seek with: the demuxer finds a far position only by scanning every cluster (or audio frame)
+	// before it.
 	seekScansFile: boolean
+	// The file has a video track at all; `video` is null both without one and for one that cannot be remuxed.
+	hasVideoTrack: boolean
 	video: RemuxVideoInfo | null
 	audio: RemuxAudioInfo[]
 }
@@ -72,13 +76,20 @@ export interface RemuxStartParams {
 	horizon: number
 }
 
-export interface RemuxAudioStartParams extends RemuxStartParams {
+// `copyCodec`: the spelling of the copied track's codec string the page's MediaSource takes (MP3 is mp3,
+// mp4a.6B or mp4a.69 by engine), which the start's MIME then carries; null for the demuxer's own.
+export interface RemuxAudioPlay {
 	trackId: number
 	mode: AudioMode
+	copyCodec: string | null
 }
 
+export interface RemuxAudioStartParams extends RemuxStartParams, RemuxAudioPlay {}
+
 export interface RemuxSeekParams extends RemuxStartParams {
-	audio: { trackId: number; mode: AudioMode } | null
+	// False: audio alone, started exactly at `time`.
+	video: boolean
+	audio: RemuxAudioPlay | null
 }
 
 export interface RemuxVideoStart {
@@ -94,8 +105,9 @@ export interface RemuxAudioStart {
 	mime: string
 }
 
+// `video` is null exactly when the seek asked for audio alone.
 export interface RemuxSeekResult {
-	video: RemuxVideoStart
+	video: RemuxVideoStart | null
 	audio: RemuxAudioStart | null
 }
 

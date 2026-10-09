@@ -286,6 +286,40 @@ describe("streamed preview revisits", () => {
 		expect(new Set(registeredIds()).size).toBe(1)
 	})
 
+	it("keeps a registration two viewers share until the last one goes", async () => {
+		const postMessage = vi.fn<(message: { id?: unknown }) => void>()
+
+		Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: { postMessage } } })
+
+		try {
+			const first = renderHook(() => usePreviewStreamUrl(A, "a.mp4", "video/mp4"))
+
+			await waitFor(() => {
+				expect(first.result.current.status).toBe("success")
+			})
+
+			const second = renderHook(() => usePreviewStreamUrl(A, "a.mp4", "video/mp4"))
+
+			await waitFor(() => {
+				expect(second.result.current.status).toBe("success")
+			})
+
+			const id = registeredIds()[0]
+			const released = (): unknown[] => postMessage.mock.calls.filter(([message]) => message.id === id)
+
+			first.unmount()
+			await new Promise(resolve => setTimeout(resolve, 10))
+			expect(released()).toEqual([])
+
+			second.unmount()
+			await waitFor(() => {
+				expect(released()).toHaveLength(1)
+			})
+		} finally {
+			Reflect.deleteProperty(navigator, "serviceWorker")
+		}
+	})
+
 	it("a retry registers a fresh id", async () => {
 		const { result } = renderHook(() => usePreviewStreamUrl(A, "a.mp4", "video/mp4"))
 

@@ -18,6 +18,7 @@ import {
 	previewMenuHiddenActionIds,
 	previewNavigationUnmountsOverlay,
 	resolveUnsavedConfirm,
+	slotPinSource,
 	unsavedPromptOpen
 } from "@/features/preview/components/previewOverlay.logic"
 import { PHOTOS_HIDDEN_ACTION_IDS } from "@/features/photos/lib/itemActions"
@@ -225,5 +226,25 @@ describe("resolveUnsavedConfirm", () => {
 
 	it("returns all-false/null when nothing is live", () => {
 		expect(resolveUnsavedConfirm(null, false, false)).toEqual({ proceedNavigation: false, proceedLogout: false, intent: null })
+	})
+})
+
+describe("slotPinSource", () => {
+	const pinned = (awaitingVerdict: boolean, verdict?: string) => ({ documentKey: "doc", item: "as pinned", verdict, awaitingVerdict })
+
+	it("takes a new document's pin from the item on screen", () => {
+		expect(slotPinSource(null, { documentKey: "doc", item: "on screen", verdict: undefined })).toBe("on screen")
+		expect(slotPinSource(pinned(false), { documentKey: "other", item: "on screen", verdict: undefined })).toBe("on screen")
+		expect(slotPinSource(pinned(false), { documentKey: "other", item: undefined, verdict: undefined })).toBeNull()
+	})
+
+	it("keeps a mounted viewer's pin whatever verdict lands", () => {
+		expect(slotPinSource(pinned(false), { documentKey: "doc", item: "renamed", verdict: "audio" })).toBeNull()
+		expect(slotPinSource(pinned(false, "video"), { documentKey: "doc", item: "on screen", verdict: "audio" })).toBeNull()
+	})
+
+	it("takes a probe-waiting pin again once its verdict lands, by the item as pinned", () => {
+		expect(slotPinSource(pinned(true), { documentKey: "doc", item: "renamed", verdict: undefined })).toBeNull()
+		expect(slotPinSource(pinned(true), { documentKey: "doc", item: "renamed", verdict: "transportStream" })).toBe("as pinned")
 	})
 })

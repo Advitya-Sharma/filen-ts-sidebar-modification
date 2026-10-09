@@ -3,6 +3,7 @@ import {
 	useEffect,
 	useRef,
 	useState,
+	useSyncExternalStore,
 	Component,
 	type FocusEvent as ReactFocusEvent,
 	type KeyboardEvent,
@@ -15,9 +16,10 @@ import { useBlocker, type ShouldBlockFn } from "@tanstack/react-router"
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
 import { XIcon, ChevronLeftIcon, ChevronRightIcon, DownloadIcon, SaveIcon, MoreHorizontalIcon } from "lucide-react"
 import { toast } from "sonner"
-import { asDirectoryOrFile, isLinkedEmbedItem, type DriveItem } from "@/features/drive/lib/item"
+import { asDirectoryOrFile, driveItemMime, isLinkedEmbedItem, type DriveItem } from "@/features/drive/lib/item"
 import { type DriveVariant } from "@/features/drive/lib/preferences"
-import { extensionOf, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
+import { extensionOf, previewType, unprobedTransportStream, type PreviewCategory } from "@/features/drive/lib/preview.logic"
+import { recordContentVerdict } from "@/features/drive/lib/contentVerdicts"
 import { startDownloads } from "@/features/drive/lib/download"
 import {
 	canSaveCopyBeside,
@@ -42,7 +44,10 @@ import { holdUnload } from "@/lib/unloadGuard"
 import { previewTitleSplitIndex } from "@/features/preview/lib/previewTitle"
 import { driveItemName } from "@filen/shared"
 import { ImageViewer, RawImageViewer } from "@/features/preview/components/imageViewer"
+import type { ContentVerdict } from "@filen/shared"
 import { MediaViewer } from "@/features/preview/components/mediaViewer"
+import { TransportStreamGate } from "@/features/preview/components/transportStreamGate"
+import { fileKindVerdict, subscribeFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 import { DocxViewer } from "@/features/preview/components/docxViewer"
 import { MarkdownViewer } from "@/features/preview/components/markdownViewer"
 import { PdfViewer } from "@/features/preview/components/pdfViewer"
@@ -59,6 +64,7 @@ import {
 	previewNavigationUnmountsOverlay,
 	previewMenuHiddenActionIds,
 	resolveUnsavedConfirm,
+	slotPinSource,
 	unsavedPromptOpen,
 	type PreviewDismissIntent
 } from "@/features/preview/components/previewOverlay.logic"
@@ -233,7 +239,7 @@ export function PreviewOverlay({
 	const documentKeysRef = useRef(documentKeys)
 	const documentGeneration = useRef(0)
 	// The slot on screen's pinned renderer and save format (slotPin), and the document it was taken for.
-	const [pinned, setPinned] = useState<{ documentKey: string; pin: SlotPin } | null>(null)
+	const [pinned, setPinned] = useState<PinnedSlot | null>(null)
 	// Single-slot (unlike `saved` above): keyed to the CURRENT pager slot only, so navigating away and
 	// back can forget an earlier slot's lock (accepted — the guarded failure re-asserts on the next
 	// failed save). Mirrors mobile parity's "a failed save locks the file read-only" rule; cleared by a
@@ -272,11 +278,24 @@ export function PreviewOverlay({
 	// The drive slot's renderer and save format, as it mounted: a rename never swaps the viewer (and with it
 	// the unsaved edits) out from under the user. Taken again whenever the slot mounts anew, which is only
 	// ever clean (stepping to it, or a new document, see documentKeys): its name as it stands then decides.
-	const derivedPin = driveItem === undefined ? null : slotPin(driveItem, variant, asText)
-	const pin = derivedPin === null ? null : pinned?.documentKey === currentDocumentKey ? pinned.pin : derivedPin
+	// A `.ts` waiting on its probe (TransportStreamGate) has no viewer yet: the verdict that ends the wait
+	// takes it once more, by the name it was pinned under. A verdict landing after a viewer mounted (an
+	// audio-only `.webm` found out mid-playback) leaves it be until the slot is opened again.
+	const streamVerdict = useSyncExternalStore(subscribeFileKindVerdicts, () =>
+		driveItem === undefined ? undefined : fileKindVerdict(driveItem.data.uuid)
+	)
+	const pinFrom = slotPinSource(pinned, { documentKey: currentDocumentKey, item: driveItem, verdict: streamVerdict })
+	const derivedPin = pinFrom === null ? null : slotPin(pinFrom, variant, asText)
+	const pin = driveItem === undefined ? null : (derivedPin ?? pinned?.pin ?? null)
 
-	if (derivedPin !== null && pinned?.documentKey !== currentDocumentKey) {
-		setPinned({ documentKey: currentDocumentKey, pin: derivedPin })
+	if (pinFrom !== null && derivedPin !== null) {
+		setPinned({
+			documentKey: currentDocumentKey,
+			item: pinFrom,
+			verdict: streamVerdict,
+			awaitingVerdict: !asText && unprobedTransportStream(pinFrom),
+			pin: derivedPin
+		})
 	}
 
 	// Compared against the FROZEN pre-save uuid (rawDriveItem), never the possibly-rotated override's uuid — see
@@ -296,6 +315,14 @@ export function PreviewOverlay({
 	// `ownSave`: `item` is what this overlay's own save of the slot made.
 	function commitSaved(frozenUuid: string, item: DriveItem, ownSave?: boolean): void {
 		const shownUuid = savedRef.current.get(frozenUuid)?.data.uuid ?? frozenUuid
+
+		// Saved from a text editor, the new version (a new uuid) is text: no probe needs to ask again.
+		if (ownSave === true && pin !== null && isTextCategory(pin.category)) {
+			recordContentVerdict(
+				{ uuid: item.data.uuid, name: driveItemName(item), mime: driveItemMime(item), size: item.data.size },
+				"notTransportStream"
+			)
+		}
 
 		if (ownSave !== true && item.data.uuid !== shownUuid) {
 			documentGeneration.current++
@@ -1053,25 +1080,30 @@ export function PreviewOverlay({
 										downloadable={downloadable}
 										onDownload={download}
 									>
-										<PreviewBody
+										<TransportStreamGate
 											item={driveItem}
-											variant={variant}
-											category={pin?.category}
-											documentKey={currentDocumentKey}
-											editable={editable}
-											renamedReadOnly={renamedReadOnly}
-											neverEditable={variant !== "drive"}
-											asText={asText}
-											locked={saving}
-											onDirtyChange={setPreviewDirty}
-											contentRef={contentRef}
-											spreadsheetRef={spreadsheetRef}
-											canSaveCopy={canSaveCopyBeside(driveItem, variant)}
-											onOpenFile={opened => {
-												if (rawDriveItem !== undefined) {
-													commitSaved(rawDriveItem.data.uuid, opened)
-												}
-											}}
+											render={() => (
+												<PreviewBody
+													item={driveItem}
+													variant={variant}
+													category={pin?.category}
+													documentKey={currentDocumentKey}
+													editable={editable}
+													renamedReadOnly={renamedReadOnly}
+													neverEditable={variant !== "drive"}
+													asText={asText}
+													locked={saving}
+													onDirtyChange={setPreviewDirty}
+													contentRef={contentRef}
+													spreadsheetRef={spreadsheetRef}
+													canSaveCopy={canSaveCopyBeside(driveItem, variant)}
+													onOpenFile={opened => {
+														if (rawDriveItem !== undefined) {
+															commitSaved(rawDriveItem.data.uuid, opened)
+														}
+													}}
+												/>
+											)}
 										/>
 									</PreviewDownloadableProvider>
 								</PreviewErrorBoundary>
@@ -1175,6 +1207,16 @@ interface SlotPin {
 	format: string
 	// Whether the slot was editable as it mounted.
 	editable: boolean
+}
+
+// A slot's pin and what it was taken for: the document, the item as it stood then, and the verdict.
+interface PinnedSlot {
+	documentKey: string
+	item: DriveItem
+	verdict: ContentVerdict | undefined
+	// Taken while a probe still had to tell TypeScript from a transport stream: no viewer mounted yet.
+	awaitingVerdict: boolean
+	pin: SlotPin
 }
 
 // The format edits are written in: text for every text category, the file kind for a spreadsheet (its
