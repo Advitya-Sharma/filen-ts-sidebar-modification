@@ -19,7 +19,10 @@ import { SCRIM_CLASS } from "@/components/ui/surface"
 //
 // The root wraps nothing but its own portal; the rail's trigger reaches it through a detached handle.
 // Base UI treats any Dialog/AlertDialog/Drawer root rendered inside another as nested, so a root wrapping
-// the shell would make every dialog the app opens a child of the drawer.
+// the shell would make every dialog the app opens a child of the drawer. The root exists only below the
+// breakpoint: widening closes the drawer in the render that drops its portal, and a root outliving it
+// waits forever for that exit animation, so the closed drawer would come back stuck on screen once the
+// window narrows again. The handle re-attaches on remount, so the trigger needs nothing.
 const sidebarDrawerHandle = DrawerPrimitive.createHandle()
 
 export function SidebarDrawer({
@@ -35,6 +38,10 @@ export function SidebarDrawer({
 	panel: ReactNode
 	onOpenChange: (open: boolean) => void
 }) {
+	if (!narrow) {
+		return null
+	}
+
 	return (
 		<DrawerPrimitive.Root
 			open={open}
@@ -42,21 +49,19 @@ export function SidebarDrawer({
 			swipeDirection="left"
 			onOpenChange={onOpenChange}
 		>
-			{narrow ? (
-				<DrawerPrimitive.Portal keepMounted={true}>
-					<DrawerPrimitive.Backdrop className={SCRIM_CLASS} />
-					<DrawerPrimitive.Viewport className="fixed inset-0 z-50 flex">
-						{/* aria-label rather than a Drawer.Title: each panel already renders its own <h2>, and the
-						    popup merges consumer props last so this wins as the accessible name. */}
-						<DrawerPrimitive.Popup
-							aria-label={label}
-							className="m-2 flex max-w-[85vw] duration-100 outline-none data-open:animate-in data-open:slide-in-from-left data-closed:animate-out data-closed:slide-out-to-left"
-						>
-							{panel}
-						</DrawerPrimitive.Popup>
-					</DrawerPrimitive.Viewport>
-				</DrawerPrimitive.Portal>
-			) : null}
+			<DrawerPrimitive.Portal keepMounted={true}>
+				<DrawerPrimitive.Backdrop className={SCRIM_CLASS} />
+				<DrawerPrimitive.Viewport className="fixed inset-0 z-50 flex">
+					{/* aria-label rather than a Drawer.Title: each panel already renders its own <h2>, and the
+					    popup merges consumer props last so this wins as the accessible name. */}
+					<DrawerPrimitive.Popup
+						aria-label={label}
+						className="m-2 flex max-w-[85vw] duration-100 outline-none data-open:animate-in data-open:slide-in-from-left data-closed:animate-out data-closed:slide-out-to-left"
+					>
+						{panel}
+					</DrawerPrimitive.Popup>
+				</DrawerPrimitive.Viewport>
+			</DrawerPrimitive.Portal>
 		</DrawerPrimitive.Root>
 	)
 }
