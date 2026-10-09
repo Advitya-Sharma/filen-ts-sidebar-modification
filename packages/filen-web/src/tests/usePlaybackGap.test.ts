@@ -24,7 +24,7 @@ function video({
 	videoWidth = 640,
 	frames = 30,
 	audioBytes = 4096,
-	canPlay = query => query.includes("mp4a")
+	canPlay = query => query.includes("mp4a.40")
 }: Decoding): HTMLVideoElement {
 	const element = document.createElement("video")
 	let currentTime = 0

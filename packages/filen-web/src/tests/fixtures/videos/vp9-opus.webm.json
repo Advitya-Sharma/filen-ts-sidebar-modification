@@ -1,0 +1,111 @@
+{
+	"name": "vp9-opus.webm",
+	"size": 1385057,
+	"ranges": [
+		[
+			0,
+			"GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQRChYECGFOAZwEAAAAAFSIxEU2bdLtNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHGTbuMU6uEElTDZ1OsggGWTbuNU6uEHFO7a1OsgxUiBuwBAAAAAAAAWAAAAA=="
+		],
+		[
+			209,
+			"FUmpZqAq17GDD0JATYCETGF2ZldBhExhdmZEiYhAw4wAAAAAABZUrmtAyq4BAAAAAAAAUNeBAXPFiAAAAAAAAAABnIEAIrWcg3VuZIiBAIaFVl9WUDmDgQEj44OEAnvIauCSsIIFALqCAtCagQJVsIRVuYEBVe6BAOwBAAAAAAAAAgAArgEAAAAAAABo14ECc8WIAAAAAAAAAAKcgQAitZyDdW5kiIEAhoZBX09QVVNWqoNjLqBWu4QExLQAg4ECI+ODhAExLQDhkZ+BAbWIQOdwAAAAAABiZIEQVe6BAGOik09wdXNIZWFkAQE4AYC7AAAAAAASVMNnQKVzc9FjwIs="
+		],
+		[
+			625,
+			"H0O2dSpwFOeBAKNB"
+		]
+	],
+	"tiers": {
+		"card": {
+			"record": {
+				"v": 1,
+				"container": "webm",
+				"durationSec": 10.008,
+				"index": "cues",
+				"video": {
+					"codec": "vp9",
+					"fourcc": "vp09",
+					"codecString": "vp09.00.31.08",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": null,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "opus",
+						"codecString": "opus",
+						"ch": 1,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": false,
+						"forced": false,
+						"commentary": false
+					}
+				],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		},
+		"full": {
+			"record": {
+				"v": 1,
+				"container": "webm",
+				"durationSec": 10.008,
+				"index": "cues",
+				"video": {
+					"codec": "vp9",
+					"fourcc": "vp09",
+					"codecString": "vp09.00.31.08",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": null,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "opus",
+						"codecString": "opus",
+						"ch": 1,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": false,
+						"forced": false,
+						"commentary": false
+					}
+				],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		},
+		"cover": {
+			"record": {
+				"v": 1,
+				"container": "webm",
+				"durationSec": null,
+				"index": null,
+				"video": null,
+				"audio": [],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		}
+	}
+}

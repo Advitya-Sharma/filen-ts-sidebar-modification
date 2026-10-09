@@ -144,6 +144,8 @@ import {
 	type AudioMetadataResult
 } from "@/workers/audioMetadata"
 import { createMemorySink, toRawPreviewResult, type RawPreviewResult } from "@/features/preview/lib/rawPreview.logic"
+import { probeSource, probeVideo } from "@/lib/media/probe/probe"
+import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
 import {
 	archivePassword,
 	COMPRESS_EVENT_CAPS,
@@ -2238,6 +2240,23 @@ const api = {
 		const c = requireClient()
 
 		return runAudioMetadata(c, uuid, previewToken, deps => parseAudioMetadataFromBlob(blob, deps))
+	},
+	// ── Video probe ──────────────────────────────────────────────────────────
+	// One tier of a video's container probe (lib/media/probe), its range reads going straight to the SDK
+	// so only the small record crosses back. Null for a file that is no MP4/MOV/Matroska/WebM; a failed
+	// or cancelled download throws. Cancelled through cancelPreviewDownload(previewToken), like the other
+	// preview reads. The uuid keeps the call shape of readAudioMetadata, whose caller keys by it too.
+	async readVideoProbe(file: AnyFile, _uuid: string, tier: ProbeTier, previewToken: string): Promise<VideoProbe | null> {
+		const c = requireClient()
+		const controller = new AbortController()
+		previewAborts.set(previewToken, controller)
+		try {
+			const source = probeSource(Number(file.size), (start, end) => readFileRange(c, file, start, end, controller.signal), tier)
+
+			return await probeVideo(source, tier)
+		} finally {
+			previewAborts.delete(previewToken)
+		}
 	},
 	// ── Search ───────────────────────────────────────────────────────────────
 	// Thin pass-throughs onto the single searchEngine instance (searchEngine.ts owns the actual

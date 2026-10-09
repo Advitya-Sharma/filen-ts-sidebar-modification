@@ -1,0 +1,111 @@
+{
+	"name": "h264-flac.mkv",
+	"size": 1955807,
+	"ranges": [
+		[
+			0,
+			"GkXfo6NChoEBQveBAULygQRC84EIQoKIbWF0cm9za2FCh4EEQoWBAhhTgGcBAAAAAB3XqxFNm3TBv4Qz8wocTbuLU6uEFUmpZlOsgaFNu4tTq4QWVK5rU6yBzE27jFOrhBJUw2dTrIIB5k27jVOrhBxTu2tTrIMd1z/sAQAAAAAAAFIAAAA="
+		],
+		[
+			213,
+			"FUmpZqa/hI4JdEsq17GDD0JATYCETGF2ZldBhExhdmZEiYhAw4gAAAAAABZUrmtBFL+E+5bGpa4BAAAAAAAAiteBAXPFiAAAAAAAAAABnIEAIrWcg3VuZIiBAIaPVl9NUEVHNC9JU08vQVZDg4EBI+ODhAJ7yGrgkrCCBQC6ggLQmoECVbCEVbmBAVXugQDsAQAAAAAAAAIAAGOirQFkAB//4QAaZ2QAH6zZQFAFuwEQAAADABAAAAMDAPGDGWABAARo74nL/fj4AK4BAAAAAAAActeBAnPFiAAAAAAAAAACnIEAIrWcg3VuZIiBAIaGQV9GTEFDg4ECI+ODhAFFhVXhkZ+BAbWIQOdwAAAAAABiZIEQVe6BAGOiqmZMYUOAAAAiBAAEAAABCAABjAu4APAAB1MAAqV5gGNAWiP+JRLObw30ihJUw2dApb+ECRv4Fg=="
+		],
+		[
+			709,
+			"H0O2dSVm4r+EtW0M"
+		]
+	],
+	"tiers": {
+		"card": {
+			"record": {
+				"v": 1,
+				"container": "mkv",
+				"durationSec": 10,
+				"index": "cues",
+				"video": {
+					"codec": "h264",
+					"fourcc": "avc1",
+					"codecString": "avc1.64001f",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 8,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "flac",
+						"codecString": "flac",
+						"ch": 1,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": false,
+						"forced": false,
+						"commentary": false
+					}
+				],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		},
+		"full": {
+			"record": {
+				"v": 1,
+				"container": "mkv",
+				"durationSec": 10,
+				"index": "cues",
+				"video": {
+					"codec": "h264",
+					"fourcc": "avc1",
+					"codecString": "avc1.64001f",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 8,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "flac",
+						"codecString": "flac",
+						"ch": 1,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": false,
+						"forced": false,
+						"commentary": false
+					}
+				],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		},
+		"cover": {
+			"record": {
+				"v": 1,
+				"container": "mkv",
+				"durationSec": null,
+				"index": null,
+				"video": null,
+				"audio": [],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		}
+	}
+}

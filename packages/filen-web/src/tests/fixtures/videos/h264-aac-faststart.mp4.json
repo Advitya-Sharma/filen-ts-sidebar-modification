@@ -1,0 +1,143 @@
+{
+	"name": "h264-aac-faststart.mp4",
+	"size": 5879243,
+	"ranges": [
+		[
+			0,
+			"AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAFZKbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAABdwAAK/IAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAALvh0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAK/IAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAABQAAAALQAAAAAAAkZWR0cwAAABxlbHN0"
+		],
+		[
+			284,
+			"AAAucG1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAMAAABaAAVcQAAAAAAC1oZGxyAAAAAAAAAAB2aWRl"
+		],
+		[
+			369,
+			"AAAuG21pbmYAAAAUdm1oZAAAAAEAAAAA"
+		],
+		[
+			397,
+			"AAAAJGRpbmYAAAAcZHJlZg=="
+		],
+		[
+			433,
+			"AAAt23N0YmwAAAC/c3RzZAAAAAAAAAABAAAAr2F2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAFAALQAEgAAABIAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY//8AAAA1YXZjQwFkAB//4QAaZ2QAH6zZQFAFuwEQAAADABAAAAMDAPGDGWABAARo74nL/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAFeC0ABXgtA=="
+		],
+		[
+			12172,
+			"AAAmoXRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAIAAAAAAr8gAAAAAAAAAAAAAAAAAQEAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAACRlZHRzAAAAHGVsc3Q="
+		],
+		[
+			12308,
+			"AAAmGW1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAu4AAFf0AVcQAAAAAAC1oZGxyAAAAAAAAAABzb3Vu"
+		],
+		[
+			12393,
+			"AAAlxG1pbmYAAAAQc21oZAAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZg=="
+		],
+		[
+			12453,
+			"AAAliHN0YmwAAAB+c3RzZAAAAAAAAAABAAAAbm1wNGEAAAAAAAAAAQAAAAAAAAAAAAIAEAAAAAC7gAAAAAAANmVzZHMAAAAAA4CAgCUAAgAEgICAF0AVAAAAAAH0FwAB9BcFgICABRGQVuUABoCAgAECAAAAFGJ0cnQAAAAAAAH0FwAB9Bc="
+		],
+		[
+			22061,
+			"AAAAPXVkdGEAAAA1bWV0YQAAAAAAAAAhaGRscgAAAAAAAAAA"
+		],
+		[
+			22114,
+			"AAAACGlsc3Q="
+		]
+	],
+	"tiers": {
+		"card": {
+			"record": {
+				"v": 1,
+				"container": "mp4",
+				"durationSec": 30,
+				"index": "moov",
+				"video": {
+					"codec": "h264",
+					"fourcc": "avc1",
+					"codecString": "avc1.64001f",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 8,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "aac",
+						"codecString": "mp4a.40.2",
+						"ch": 2,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": true,
+						"forced": false,
+						"commentary": false
+					}
+				],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		},
+		"full": {
+			"record": {
+				"v": 1,
+				"container": "mp4",
+				"durationSec": 30,
+				"index": "moov",
+				"video": {
+					"codec": "h264",
+					"fourcc": "avc1",
+					"codecString": "avc1.64001f",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 8,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "aac",
+						"codecString": "mp4a.40.2",
+						"ch": 2,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": true,
+						"forced": false,
+						"commentary": false
+					}
+				],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		},
+		"cover": {
+			"record": {
+				"v": 1,
+				"container": "mp4",
+				"durationSec": null,
+				"index": null,
+				"video": null,
+				"audio": [],
+				"subs": [],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		}
+	}
+}

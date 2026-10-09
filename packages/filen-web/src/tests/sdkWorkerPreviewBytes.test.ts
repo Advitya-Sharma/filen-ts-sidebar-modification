@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Remote } from "comlink"
 import type { AnyFile, StringifiedClient } from "@filen/sdk-rs"
 import type { SdkWorkerApi } from "@/workers/sdk.worker"
+import { FTYP, audioEntry, box, concat, esds, hdlr, mdhd, mvhd, text, tkhd, trak, u32, zeros } from "@/tests/support/containerBytes"
 
 // Whole-buffer preview reads stream through downloadFileToWriter into a JS buffer (never the SDK's
 // downloadFile, whose whole-file Vec grows the shared wasm heap for good).
@@ -123,5 +124,59 @@ describe("sdk worker whole-buffer preview reads", () => {
 		expect(fakeUnauth.downloadFileToWriter.mock.calls[0]?.[0]).toMatchObject({ start: 0n, end: 3n })
 		expect(fakeUnauth.downloadFile).not.toHaveBeenCalled()
 		expect(fakeUnauth.free).toHaveBeenCalledTimes(1)
+	})
+})
+
+describe("sdk worker video probe", () => {
+	const mp4 = concat(
+		FTYP,
+		box(
+			"moov",
+			mvhd({ duration: 2000 }),
+			trak(tkhd({ id: 1 }), [mdhd({}), hdlr("soun")], audioEntry("mp4a", {}, esds(0x40, [0x11, 0x90])))
+		),
+		box("mdat", zeros(64))
+	)
+
+	it("reads the probe by range through the SDK and hands back only the record", async () => {
+		fakeClient.downloadFileToWriter.mockImplementation(params =>
+			writeFrames(params, [Array.from(mp4.subarray(Number(params.start), Number(params.end)))])
+		)
+
+		const probe = await api.readVideoProbe(fileOf(mp4.length), "uuid", "card", "v1")
+
+		expect(probe).toMatchObject({ container: "mp4", durationSec: 2, audio: [{ codecString: "mp4a.40.2", ch: 2, rate: 48000 }] })
+		expect(fakeClient.downloadFileToWriter.mock.calls[0]?.[0]).toMatchObject({ start: 0n, end: BigInt(mp4.length) })
+	})
+
+	it("resolves null for a container it does not read", async () => {
+		const avi = concat(text("RIFF"), u32(100), text("AVI "), zeros(100))
+
+		fakeClient.downloadFileToWriter.mockImplementation(params =>
+			writeFrames(params, [Array.from(avi.subarray(Number(params.start), Number(params.end)))])
+		)
+
+		expect(await api.readVideoProbe(fileOf(avi.length), "uuid", "full", "v2")).toBeNull()
+	})
+
+	it("aborts its range reads through its preview token", async () => {
+		let signal: AbortSignal | undefined
+
+		fakeClient.downloadFileToWriter.mockImplementation(params => {
+			signal = params.managedFuture.abortSignal
+
+			return new Promise<void>((_resolve, reject) => {
+				params.managedFuture.abortSignal.addEventListener("abort", () => {
+					reject(new Error("Cancelled"))
+				})
+			})
+		})
+
+		const pending = api.readVideoProbe(fileOf(mp4.length), "uuid", "full", "v3")
+
+		await api.cancelPreviewDownload("v3")
+
+		await expect(pending).rejects.toThrow("block read failed")
+		expect(signal?.aborted).toBe(true)
 	})
 })

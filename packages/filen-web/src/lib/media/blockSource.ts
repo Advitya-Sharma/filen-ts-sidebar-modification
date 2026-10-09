@@ -28,8 +28,21 @@ export class ReadBudgetError extends Error {
 	}
 }
 
+// A read asked for bytes outside the file: the parser followed a size or offset the file cannot hold.
+export class OutOfFileReadError extends Error {
+	public constructor(position: number, length: number, size: number) {
+		super(`read of ${String(length)} bytes at ${String(position)} is outside a ${String(size)}-byte file`)
+		this.name = "OutOfFileReadError"
+	}
+}
+
 // `end` is exclusive.
 export type ReadRange = (start: number, end: number) => Promise<Uint8Array>
+
+export interface BlockSourceOptions {
+	maxBlockReads?: number
+	cachedBlocks?: number
+}
 
 // The block cache and budget one file's parse shares, possibly across more than one tokenizer (a
 // content sniff that falls back to a mime hint re-reads the same blocks for free). `readError` keeps the
@@ -39,11 +52,39 @@ export class BlockSource {
 	public readError: BlockReadError | null = null
 	private readonly readRange: ReadRange
 	private readonly blocks = new Map<number, Promise<Uint8Array>>()
-	private blockReads = 0
+	private readonly cachedBlocks: number
+	private maxBlockReads: number
+	private reads = 0
 
-	public constructor(size: number, readRange: ReadRange) {
+	public constructor(size: number, readRange: ReadRange, options: BlockSourceOptions = {}) {
 		this.size = size
 		this.readRange = readRange
+		this.maxBlockReads = options.maxBlockReads ?? MAX_BLOCK_READS
+		this.cachedBlocks = options.cachedBlocks ?? CACHED_BLOCKS
+	}
+
+	// Block downloads made so far.
+	public get blockReads(): number {
+		return this.reads
+	}
+
+	// Raises the budget to `total` downloads once a parser knows how much of the file it has to walk
+	// (an MP4 `moov`'s size); never lowers it.
+	public allowBlockReads(total: number): void {
+		this.maxBlockReads = Math.max(this.maxBlockReads, total)
+	}
+
+	// Whether reading at `position` costs no download.
+	public isCached(position: number): boolean {
+		return this.blocks.has(Math.floor(position / BLOCK_BYTES))
+	}
+
+	// The resident block holding `position`, shared rather than copied, and never downloaded: null when
+	// it is not resident. For scans over bytes already paid for; the caller must not write to it.
+	public async residentBlock(position: number): Promise<Uint8Array | null> {
+		const block = this.blocks.get(Math.floor(position / BLOCK_BYTES))
+
+		return block === undefined ? null : await block
 	}
 
 	private block(index: number): Promise<Uint8Array> {
@@ -57,11 +98,11 @@ export class BlockSource {
 			return cached
 		}
 
-		if (this.blockReads >= MAX_BLOCK_READS) {
+		if (this.reads >= this.maxBlockReads) {
 			return Promise.reject(new ReadBudgetError())
 		}
 
-		this.blockReads++
+		this.reads++
 
 		const start = index * BLOCK_BYTES
 		const end = Math.min(this.size, start + BLOCK_BYTES)
@@ -85,7 +126,7 @@ export class BlockSource {
 
 		this.blocks.set(index, guarded)
 
-		while (this.blocks.size > CACHED_BLOCKS) {
+		while (this.blocks.size > this.cachedBlocks) {
 			const oldest = this.blocks.keys().next()
 
 			if (oldest.done === true) {
@@ -98,8 +139,19 @@ export class BlockSource {
 		return guarded
 	}
 
-	// Fills `target[0, length)` from the file at `position`; the range must lie inside the file.
+	// Fills `target[0, length)` from the file at `position`; a range outside the file rejects with
+	// OutOfFileReadError rather than reading a block past the end, which would never fill the target.
 	public async read(target: Uint8Array, position: number, length: number): Promise<void> {
+		if (
+			!Number.isSafeInteger(position) ||
+			!Number.isSafeInteger(length) ||
+			position < 0 ||
+			length < 0 ||
+			position + length > this.size
+		) {
+			throw new OutOfFileReadError(position, length, this.size)
+		}
+
 		let written = 0
 
 		while (written < length) {

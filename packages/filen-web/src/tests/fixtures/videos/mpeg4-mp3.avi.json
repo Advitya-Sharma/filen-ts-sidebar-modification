@@ -1,0 +1,24 @@
+{
+	"name": "mpeg4-mp3.avi",
+	"size": 1096108,
+	"ranges": [
+		[
+			0,
+			"UklGRqS5EABBVkkgTElTVA=="
+		]
+	],
+	"tiers": {
+		"card": {
+			"record": null,
+			"blockReads": 1
+		},
+		"full": {
+			"record": null,
+			"blockReads": 1
+		},
+		"cover": {
+			"record": null,
+			"blockReads": 1
+		}
+	}
+}

@@ -1,0 +1,202 @@
+{
+	"name": "h264-multitrack.mkv",
+	"size": 7354038,
+	"ranges": [
+		[
+			0,
+			"GkXfo6NChoEBQveBAULygQRC84EIQoKIbWF0cm9za2FCh4EEQoWBAhhTgGcBAAAAAHA2ghFNm3TcTbuMU6uEFUmpZlOsghADTbuMU6uEFlSua1OsghCYTbuNU6uEHFO7a1Osg3Aui027jVOrhBJUw2dTrINwMChNu4xTq4QQQ6dwU6yCrf1Nu4xTq4QZQaRpU6yCGMnsT58AAAAAAAAAAAA="
+		],
+		[
+			4151,
+			"FUmpZkCPKtexgw9CQE2Ao2xpYmVibWwgdjEuNC43ICsgbGlibWF0cm9za2EgdjEuNy4yV0GobWt2bWVyZ2UgdjEwMi4wICgnTGl0dGxlIEhvdXNlcycpIDY0LWJpdESJhEbqqgBEYYgLSQ/nzuQQAHupj011bHRpdHJhY2sgVGVzdHOkkLtxW3DjljKj7zCaJrRmsc4WVK5rQ3+uQIPXgQFzxYhTGPv1loQDs4OBAZyBACK1nIN1bmSGj1ZfTVBFRzQvSVNPL0FWQ2OirQFkAB//4QAaZ2QAH6zZQFAFuwEQAAADABAAAAMDAPGDGWABAARo74nL/fj4ACPjg4QCe8hqIrWdg3VuZOCWsIIFALqCAtBUsIQAAAUAVLqEAAAC0K7C14ECc8WIf7OmhSRBShuDgQKGhUFfQUFDY6KFEZBW5QAj44OEAUWFVSK1nYJlblNuhlN0ZXJlb+GJtYRHO4AAn4ECrsrXgQNzxYhtcn26Uo2Yf4OBAoiBACK1nINnZXKGhUFfQUMzI+ODhAHoSAAitZ2CZGVTboxTdXJyb3VuZCA1LjHhibWERzuAAJ+BBq6n14EEc8WIhZVBiWyO7FCDgRGcgQCGi1NfVEVYVC9VVEY4IrWdgmVurkI914EFc8WI4236okr6jF+DgRGcgQAitZyDanBuhopTX1RFWFQvQVNTY6JCDFtTY3JpcHQgSW5mb10NClNjcmlwdFR5cGU6IHY0LjAwKw0KUGxheVJlc1g6IDEyODANClBsYXlSZXNZOiA3MjANCg0KW1Y0KyBTdHlsZXNdDQpGb3JtYXQ6IE5hbWUsIEZvbnRuYW1lLCBGb250c2l6ZSwgUHJpbWFyeUNvbG91ciwgU2Vjb25kYXJ5Q29sb3VyLCBPdXRsaW5lQ29sb3VyLCBCYWNrQ29sb3VyLCBCb2xkLCBJdGFsaWMsIFVuZGVybGluZSwgU3RyaWtlT3V0LCBTY2FsZVgsIFNjYWxlWSwgU3BhY2luZywgQW5nbGUsIEJvcmRlclN0eWxlLCBPdXRsaW5lLCBTaGFkb3csIEFsaWdubWVudCwgTWFyZ2luTCwgTWFyZ2luUiwgTWFyZ2luViwgRW5jb2RpbmcNClN0eWxlOiBEZWZhdWx0LEFyaWFsLDQ4LCZIMDBGRkZGRkYsJkgwMDAwMDBGRiwmSDAwMDAwMDAwLCZINjQwMDAwMDAsMCwwLDAsMCwxMDAsMTAwLDAsMCwxLDIsMSwyLDIwLDIwLDQwLDENCg0KW0V2ZW50c10NCkZvcm1hdDogTGF5ZXIsIFN0YXJ0LCBFbmQsIFN0eWxlLCBOYW1lLCBNYXJnaW5MLCBNYXJnaW5SLCBNYXJnaW5WLCBFZmZlY3QsIFRleHQNCg0KIrWdgmph7ESpAAAAAAAAAAAA"
+		],
+		[
+			6397,
+			"GUGkaSCVLWGnIJUoRm6JY292ZXIuanBnRmCKaW1hZ2UvanBlZ0ZcIJT//9j/4AAQSg=="
+		],
+		[
+			44593,
+			"EEOncECjRblAn0W8iPRa0rHh+xiitq2RgQCShQEqBfIARYiBAXPEiCLr5XDou5bvgJKFhUludHJvQ3yDZW5nQ32CZW62qpGFASoF8gBzxIhmfAoY5SZkUYCWhYlDaGFwdGVyIDFDfINlbmdDfYJlbra3kYUFloLwAJKFBvwjrABFiIECc8SI3vWYbWAOotyAmIWLRW5kIENyZWRpdHNDfINlbmdDfYJlbg=="
+		]
+	],
+	"tiers": {
+		"card": {
+			"record": {
+				"v": 1,
+				"container": "mkv",
+				"durationSec": 30.037,
+				"index": "cues",
+				"video": {
+					"codec": "h264",
+					"fourcc": "avc1",
+					"codecString": "avc1.64001f",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 8,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "aac",
+						"codecString": "mp4a.40.2",
+						"ch": 2,
+						"rate": 48000,
+						"lang": "en",
+						"name": "Stereo",
+						"def": true,
+						"forced": false,
+						"commentary": false
+					},
+					{
+						"id": 3,
+						"codec": "ac3",
+						"codecString": "ac-3",
+						"ch": 6,
+						"rate": 48000,
+						"lang": "de",
+						"name": "Surround 5.1",
+						"def": false,
+						"forced": false,
+						"commentary": false
+					}
+				],
+				"subs": [
+					{
+						"id": 4,
+						"codecId": "S_TEXT/UTF8",
+						"lang": "en",
+						"name": null,
+						"def": true,
+						"forced": false,
+						"hi": false
+					},
+					{
+						"id": 5,
+						"codecId": "S_TEXT/ASS",
+						"lang": "ja",
+						"name": null,
+						"def": true,
+						"forced": false,
+						"hi": false
+					}
+				],
+				"chapters": [],
+				"cover": null,
+				"partial": false
+			},
+			"blockReads": 1
+		},
+		"full": {
+			"record": {
+				"v": 1,
+				"container": "mkv",
+				"durationSec": 30.037,
+				"index": "cues",
+				"video": {
+					"codec": "h264",
+					"fourcc": "avc1",
+					"codecString": "avc1.64001f",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 8,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "aac",
+						"codecString": "mp4a.40.2",
+						"ch": 2,
+						"rate": 48000,
+						"lang": "en",
+						"name": "Stereo",
+						"def": true,
+						"forced": false,
+						"commentary": false
+					},
+					{
+						"id": 3,
+						"codec": "ac3",
+						"codecString": "ac-3",
+						"ch": 6,
+						"rate": 48000,
+						"lang": "de",
+						"name": "Surround 5.1",
+						"def": false,
+						"forced": false,
+						"commentary": false
+					}
+				],
+				"subs": [
+					{
+						"id": 4,
+						"codecId": "S_TEXT/UTF8",
+						"lang": "en",
+						"name": null,
+						"def": true,
+						"forced": false,
+						"hi": false
+					},
+					{
+						"id": 5,
+						"codecId": "S_TEXT/ASS",
+						"lang": "ja",
+						"name": null,
+						"def": true,
+						"forced": false,
+						"hi": false
+					}
+				],
+				"chapters": [
+					{
+						"t": 0,
+						"end": 5,
+						"title": "Intro",
+						"skipType": 1
+					},
+					{
+						"t": 5,
+						"title": "Chapter 1"
+					},
+					{
+						"t": 24,
+						"end": 30,
+						"title": "End Credits",
+						"skipType": 2
+					}
+				],
+				"cover": {
+					"offset": 6439,
+					"size": 38143,
+					"mime": "image/jpeg"
+				},
+				"partial": false
+			},
+			"blockReads": 1
+		},
+		"cover": {
+			"record": {
+				"v": 1,
+				"container": "mkv",
+				"durationSec": null,
+				"index": null,
+				"video": null,
+				"audio": [],
+				"subs": [],
+				"chapters": [],
+				"cover": {
+					"offset": 6439,
+					"size": 38143,
+					"mime": "image/jpeg"
+				},
+				"partial": false
+			},
+			"blockReads": 1
+		}
+	}
+}
