@@ -68,6 +68,9 @@ const api = {
 	switchAudio(id: number, params: RemuxAudioStartParams): Promise<RemuxAudioStart> {
 		return session(id).switchAudio(params)
 	},
+	canStartAt(id: number, time: number): Promise<boolean> {
+		return session(id).canStartAt(time)
+	},
 	stopAudio(id: number): Promise<void> {
 		return session(id).stopAudio()
 	},

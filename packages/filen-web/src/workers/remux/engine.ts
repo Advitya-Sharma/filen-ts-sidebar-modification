@@ -20,6 +20,8 @@ import { isInitSegment } from "@/lib/media/fmp4Split"
 import { probeVideo } from "@/lib/media/probe/probe"
 import { rangePortReader, type RangePortReader } from "@/lib/media/rangePort"
 import {
+	IdrUnreachableError,
+	SourceReadError,
 	SupersededError,
 	type RemuxAudioInfo,
 	type RemuxAudioStart,
@@ -45,6 +47,7 @@ import {
 import { ensureDecoder, sampleReader, TranscodeWriter } from "@/workers/remux/audioTranscode"
 import { ac3Layout, dtsLayout, layoutFor, type Speaker } from "@/workers/remux/channelLayout.logic"
 import { outputVideoCodecString } from "@/workers/remux/codecs.logic"
+import { hevcKeyIsIdr, hevcLengthSize, IDR_REACH_KEYS, idrReachSeconds } from "@/workers/remux/hevc.logic"
 import { KeyIndex, seekReach } from "@/workers/remux/keyIndex"
 import { FragmentedTrackOutput, FragmentTooLargeError } from "@/workers/remux/output"
 import { PumpGate, runPump, type PumpReader, type PumpResult, type PumpWriter } from "@/workers/remux/pump"
@@ -64,6 +67,10 @@ const TRANSCODABLE_AUDIO = new Set(["ac3", "eac3", "dts", "flac", "mp3", "vorbis
 // How far audio may read past the video pump's position. Both read the same interleaved clusters; an
 // audio pump that ran ahead or fell behind by more than the block cache holds would download them twice.
 const AUDIO_LEAD_SECONDS = 0.5
+
+// Less than any frame's duration: asking for the key packet at or before a key packet's timestamp minus this
+// finds the one before it.
+const KEY_STEP_SECONDS = 0.001
 
 // How long close() waits for the pumps' own teardown (a decoder, the muxer) before letting go anyway.
 const CLOSE_TIMEOUT_MS = 2_000
@@ -96,6 +103,16 @@ interface VideoSource {
 	codec: VideoCodec
 	config: VideoDecoderConfig
 	rotation: Rotation
+	// Set when a start must be an IDR picture: the NAL length field size of its packets (null: Annex B).
+	idrOnly: { lengthSize: number | null } | null
+}
+
+function bytesOf(source: AllowSharedBufferSource | undefined): Uint8Array | null {
+	if (source === undefined) {
+		return null
+	}
+
+	return ArrayBuffer.isView(source) ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength) : new Uint8Array(source)
 }
 
 interface AudioSource {
@@ -128,6 +145,7 @@ export class RemuxEngine {
 	private readonly input: Input
 	private readonly emit: Emit
 	private readonly transcodeTargets: RemuxOpenParams["transcodeTargets"]
+	private readonly idrOnlyStart: boolean
 	private video: VideoSource | null = null
 	private readonly audio = new Map<number, AudioSource>()
 	private seekScansFile = false
@@ -148,7 +166,14 @@ export class RemuxEngine {
 
 	public constructor(params: RemuxOpenParams, emit: Emit) {
 		this.reader = rangePortReader(params.port)
-		this.cache = new BlockCache(params.size, this.reader.readRange)
+
+		const reader = this.reader
+
+		this.cache = new BlockCache(params.size, (start, end, signal) =>
+			reader.readRange(start, end, signal).catch((error: unknown) => {
+				throw signal.aborted ? error : new SourceReadError(error)
+			})
+		)
 		this.emit = emit
 		// The file's server went away: say so now, not at the next read a paused player may never make.
 		this.reader.onLost(() => {
@@ -158,11 +183,13 @@ export class RemuxEngine {
 					kind,
 					generation: run.generation,
 					message: "the file's byte source closed",
-					fragmentTooLarge: false
+					fragmentTooLarge: false,
+					sourceLost: true
 				})
 			}
 		})
 		this.transcodeTargets = params.transcodeTargets
+		this.idrOnlyStart = params.idrOnlyStart === true
 		this.maxFragmentBytes = params.maxFragmentBytes
 		this.size = params.size
 
@@ -215,7 +242,13 @@ export class RemuxEngine {
 			return null
 		}
 
-		this.video = { track, codec, config, rotation }
+		this.video = {
+			track,
+			codec,
+			config,
+			rotation,
+			idrOnly: this.idrOnlyStart && codec === "hevc" ? { lengthSize: hevcLengthSize(bytesOf(config.description)) } : null
+		}
 
 		return { id: track.id, codec, mime: `video/mp4; codecs="${outputVideoCodecString(codec, config)}"`, width, height }
 	}
@@ -396,14 +429,7 @@ export class RemuxEngine {
 		const reader: PumpReader<EncodedPacket> = {
 			// Verified: a container's key flag can be wrong, and a pump started on a delta packet decodes garbage.
 			first: async at => {
-				// Without an index, look up a key packet already seen rather than search for one.
-				const known = this.seekScansFile ? this.keys.atOrBefore(at) : null
-				const key = await surviveAbort(
-					async () =>
-						(await sink.getKeyPacket(known ?? at, { verifyKeyPackets: true })) ??
-						(await sink.getFirstKeyPacket({ verifyKeyPackets: true })),
-					gate
-				)
+				const key = await this.startKey(sink, at, video, gate)
 
 				if (key !== null) {
 					this.keys.add(key.timestamp)
@@ -459,6 +485,72 @@ export class RemuxEngine {
 		await started.promise
 
 		return { keyTime, clamped }
+	}
+
+	// The key packet playback of `video` from `at` starts with: the one at or before it (for a file without
+	// an index, one already seen), moved back to an IDR picture where only those can start.
+	private async startKey(sink: EncodedPacketSink, at: number, video: VideoSource, gate: PumpGate): Promise<EncodedPacket | null> {
+		const known = this.seekScansFile ? this.keys.atOrBefore(at) : null
+		const found = await surviveAbort(
+			async () =>
+				(await sink.getKeyPacket(known ?? at, { verifyKeyPackets: true })) ??
+				(await sink.getFirstKeyPacket({ verifyKeyPackets: true })),
+			gate
+		)
+
+		return found === null || video.idrOnly === null ? found : await this.idrAtOrBefore(sink, found, at, video.idrOnly, gate)
+	}
+
+	// Whether video can start at `time` without disturbing what plays now: false only where starts must be
+	// IDR pictures and none lies within reach. Reads only key packets, through the block cache.
+	public async canStartAt(time: number): Promise<boolean> {
+		const video = this.video
+
+		if (video === null || !this.idrOnlyStart) {
+			return true
+		}
+
+		try {
+			await this.startKey(new EncodedPacketSink(video.track), time, video, new PumpGate(0))
+
+			return true
+		} catch (error) {
+			if (error instanceof IdrUnreachableError) {
+				return false
+			}
+
+			throw error
+		}
+	}
+
+	// The IDR picture playback from `at` can start with: `key` itself, or one of the key packets before it
+	// within reach (idrReachSeconds, IDR_REACH_KEYS); each looked at costs one read where it sits.
+	private async idrAtOrBefore(
+		sink: EncodedPacketSink,
+		key: EncodedPacket,
+		at: number,
+		idrOnly: { lengthSize: number | null },
+		gate: PumpGate
+	): Promise<EncodedPacket> {
+		const reach = idrReachSeconds(this.duration > 0 ? (this.size * 8) / this.duration : 0)
+		let candidate = key
+
+		for (let looked = 1; !hevcKeyIsIdr(candidate.data, idrOnly.lengthSize); looked++) {
+			if (looked >= IDR_REACH_KEYS || at - candidate.timestamp > reach) {
+				throw new IdrUnreachableError(at)
+			}
+
+			const before = candidate.timestamp
+			const previous = await surviveAbort(() => sink.getKeyPacket(before - KEY_STEP_SECONDS, { verifyKeyPackets: true }), gate)
+
+			if (previous === null || previous.timestamp >= before || at - previous.timestamp > reach) {
+				throw new IdrUnreachableError(at)
+			}
+
+			candidate = previous
+		}
+
+		return candidate
 	}
 
 	private async startAudio(params: RemuxAudioStartParams): Promise<RemuxAudioStart> {
@@ -662,12 +754,20 @@ export class RemuxEngine {
 			return
 		}
 
+		// The start that needed it rejects with it, which is where the page learns of it.
+		if (error instanceof IdrUnreachableError) {
+			void this.cancel(kind)
+
+			return
+		}
+
 		this.emit({
 			type: "error",
 			kind,
 			generation,
 			message: errorMessage(error),
-			fragmentTooLarge: error instanceof FragmentTooLargeError
+			fragmentTooLarge: error instanceof FragmentTooLargeError,
+			sourceLost: error instanceof SourceReadError
 		})
 		// Whatever the muxer still holds (up to a whole oversized fragment) is freed now, not at close.
 		void this.cancel(kind)

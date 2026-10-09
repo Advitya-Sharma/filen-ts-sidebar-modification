@@ -5,6 +5,8 @@ export interface ByteRange {
 	end: number
 	// `bytes=N-`: the client asked for everything from N on, so a shorter answer is still a valid one.
 	openEnded: boolean
+	// `bytes=-N`: the last N bytes, which the client wants whole (a trailing index).
+	suffix: boolean
 }
 
 // Parse a single-range `bytes=` header against the known total; null = unsatisfiable/absent.
@@ -34,7 +36,7 @@ export function parseRange(header: string, total: number): ByteRange | null {
 	if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || end >= total) {
 		return null
 	}
-	return { start, end, openEnded: startStr !== "" && endStr === "" }
+	return { start, end, openEnded: startStr !== "" && endStr === "", suffix: startStr === "" }
 }
 
 // How much of an open-ended range a media preview gets per request. A media element reading `bytes=N-`
@@ -47,4 +49,17 @@ export const PREVIEW_PIECE_BYTES = 4 * BLOCK_BYTES
 // next one starts on one and never downloads a chunk the previous piece already decrypted.
 export function previewPieceEnd(start: number, end: number): number {
 	return Math.min(end, Math.floor(start / BLOCK_BYTES) * BLOCK_BYTES + PREVIEW_PIECE_BYTES - 1)
+}
+
+// Closed ranges longer than this are pieced too.
+export const LARGE_CLOSED_RANGE_BYTES = 2 * PREVIEW_PIECE_BYTES
+
+// The inclusive last byte a media preview answers `range` with. Pieced: an open-ended range, a closed one
+// that runs to the last byte (WebKit asks `bytes=N-(size-1)` and abandons the stream a few MB in, so every
+// abandoned stream would otherwise download and decrypt on to the end), and any other large closed range.
+// Small closed reads (a probe, an index) and suffix ranges (the file's tail) are answered exactly.
+export function previewServedEnd(range: ByteRange, total: number): number {
+	const pieced = !range.suffix && (range.openEnded || range.end === total - 1 || range.end - range.start + 1 > LARGE_CLOSED_RANGE_BYTES)
+
+	return pieced ? previewPieceEnd(range.start, range.end) : range.end
 }

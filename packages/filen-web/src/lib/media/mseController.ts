@@ -33,6 +33,9 @@ import { rangePortReader } from "@/lib/media/rangePort"
 import { rangeReads } from "@/lib/media/rangeReads"
 import {
 	AUDIO_TARGET_CODECS,
+	IdrUnreachableError,
+	isIdrUnreachable,
+	isSourceReadError,
 	isSuperseded,
 	type AudioMode,
 	type AudioTarget,
@@ -48,23 +51,20 @@ import {
 // (Firefox exposes MediaSource to windows only). One SourceBuffer per track so an audio switch never
 // touches buffered video.
 
-// The surface a player drives; a direct (non-remux) session will implement the same.
-export interface PlaybackSession {
-	readonly audioTracks: readonly RemuxAudioInfo[]
-	attach(video: HTMLVideoElement): Promise<void>
-	play(): Promise<void>
-	seek(time: number): void
-	selectAudio(trackId: number): Promise<void>
-	dispose(): void
-}
-
-export type MseFailure = "keyframeIntervalTooLarge" | "stalled" | "remux" | "media"
+// "source": the file's bytes could not be read. "openGopStart": video must start at an IDR picture and
+// none lies within reach of the position.
+export type MseFailure = "keyframeIntervalTooLarge" | "stalled" | "remux" | "media" | "source" | "openGopStart"
 
 export interface RemuxSessionOptions {
 	port: MessagePort
 	size: number
 	index?: ProbeIndex
 	startTime?: number
+	// The audio track and how it plays from the start ("none": video alone); otherwise the default track,
+	// copied where the MediaSource takes it.
+	audio?: { trackId: number; mode: AudioMode }
+	// Video starts only at IDR pictures (Firefox with HEVC).
+	idrOnlyStart?: boolean
 	onFailure(reason: MseFailure, detail: string): void
 }
 
@@ -83,9 +83,16 @@ export interface RemuxSessionDiagnostics {
 	stats: RemuxStats | null
 }
 
-export interface RemuxSession extends PlaybackSession {
+export interface RemuxSession {
 	readonly info: RemuxMediaInfo
+	readonly audioTracks: readonly RemuxAudioInfo[]
+	attach(video: HTMLVideoElement): Promise<void>
+	play(): Promise<void>
+	seek(time: number): void
+	// `mode` overrides the choice between copying and re-encoding the track.
+	selectAudio(trackId: number, mode?: AudioMode): Promise<void>
 	diagnostics(): Promise<RemuxSessionDiagnostics>
+	dispose(): void
 }
 
 type MediaSourceClass = typeof MediaSource
@@ -434,7 +441,8 @@ export async function openRemuxSession(options: RemuxSessionOptions): Promise<Re
 							size: options.size,
 							transcodeTargets,
 							maxFragmentBytes: limits,
-							...(options.index === undefined ? {} : { index: options.index })
+							...(options.index === undefined ? {} : { index: options.index }),
+							...(options.idrOnlyStart === true ? { idrOnlyStart: true } : {})
 						},
 						[options.port]
 					),
@@ -554,6 +562,11 @@ class MseRemuxSession implements RemuxSession {
 	// When the playhead last moved, seeking or not; a quota hold that outlasts it is a dead end.
 	private lastAdvanceAt = 0
 	private nudges = 0
+	// The latest restart asked for is the user's seek, not one of this controller's own (an eviction refetch).
+	private userSeek = false
+	// Video starts only at IDR pictures and an internal restart found none within reach: what is buffered
+	// plays out, and nothing is refetched until the user seeks somewhere reachable.
+	private openGopBlocked = false
 	private mediaSources = 0
 	private restarts = 0
 	private endedStream = false
@@ -604,9 +617,17 @@ class MseRemuxSession implements RemuxSession {
 		// every path: a remote player could reach neither this page's MediaSource nor its decryption.
 		element.disableRemotePlayback = true
 
+		const chosen = this.options.audio
+		const chosenTrack = chosen === undefined ? undefined : this.info.audio.find(track => track.id === chosen.trackId)
 		const defaultTrack = this.info.audio.find(track => track.isDefault) ?? this.info.audio[0]
 
-		if (defaultTrack !== undefined) {
+		if (chosen?.mode === "none") {
+			this.audioTrackId = null
+			this.audioMode = "none"
+		} else if (chosen !== undefined && chosenTrack !== undefined) {
+			this.audioTrackId = chosenTrack.id
+			this.audioMode = chosen.mode
+		} else if (defaultTrack !== undefined) {
 			this.audioTrackId = defaultTrack.id
 			this.audioMode = await audioModeFor(defaultTrack, this.MediaSourceType, this.canTranscode())
 		}
@@ -637,7 +658,7 @@ class MseRemuxSession implements RemuxSession {
 		}
 	}
 
-	public async selectAudio(trackId: number): Promise<void> {
+	public async selectAudio(trackId: number, forcedMode?: AudioMode): Promise<void> {
 		const track = this.info.audio.find(candidate => candidate.id === trackId)
 
 		if (track === undefined || this.element === null) {
@@ -651,9 +672,15 @@ class MseRemuxSession implements RemuxSession {
 				return
 			}
 
-			const mode = await audioModeFor(track, this.MediaSourceType, this.canTranscode())
+			const mode = forcedMode ?? (await audioModeFor(track, this.MediaSourceType, this.canTranscode()))
 			const time = element.currentTime
 			const hadAudio = this.audio.buffer !== null
+			const rebuild = mode === "none" ? hadAudio : !hadAudio
+
+			// A rebuild restarts video too; where it cannot start here, the track stays as it is.
+			if (rebuild && this.options.idrOnlyStart === true && !(await this.call(() => this.hold.remote.canStartAt(this.id, time)))) {
+				throw new IdrUnreachableError(time)
+			}
 
 			this.audioTrackId = trackId
 			this.audioMode = mode
@@ -769,7 +796,7 @@ class MseRemuxSession implements RemuxSession {
 			track.ended = true
 			this.maybeEndOfStream()
 		} else {
-			this.fail(event.fragmentTooLarge ? "keyframeIntervalTooLarge" : "remux", event.message)
+			this.fail(event.fragmentTooLarge ? "keyframeIntervalTooLarge" : event.sourceLost ? "source" : "remux", event.message)
 		}
 	}
 
@@ -778,7 +805,7 @@ class MseRemuxSession implements RemuxSession {
 			return
 		}
 
-		this.fail("remux", error)
+		this.fail(isIdrUnreachable(error) ? "openGopStart" : isSourceReadError(error) ? "source" : "remux", error)
 	}
 
 	// A new MediaSource on the element (first attach, or audio the SourceBuffers cannot follow), with
@@ -902,6 +929,23 @@ class MseRemuxSession implements RemuxSession {
 		if (element === null || this.disposed) {
 			return
 		}
+
+		const user = this.userSeek
+
+		this.userSeek = false
+
+		// Asked before anything is torn down, so a start nothing can reach leaves the current pumps playing.
+		if (this.options.idrOnlyStart === true && !(await this.call(() => this.hold.remote.canStartAt(this.id, time)))) {
+			if (user) {
+				this.fail("openGopStart", new IdrUnreachableError(time))
+			} else {
+				this.openGopBlocked = true
+			}
+
+			return
+		}
+
+		this.openGopBlocked = false
 
 		// Everything from the target on is fetched again from its key packet, so nothing buffered there is
 		// kept: a range left ahead of the playhead would read as a hole the browser had cut.
@@ -1028,6 +1072,7 @@ class MseRemuxSession implements RemuxSession {
 			return
 		}
 
+		this.userSeek = true
 		this.ops.restart(time)
 	}
 
@@ -1082,7 +1127,7 @@ class MseRemuxSession implements RemuxSession {
 		const ahead = this.ahead
 		const seen = this.audio.buffer === null ? this.video.seen : intersectRanges(this.video.seen, this.audio.seen)
 
-		if (this.quotaWait === null && evictedAhead({ currentTime: now, ranges: this.playable(), seen })) {
+		if (this.quotaWait === null && !this.openGopBlocked && evictedAhead({ currentTime: now, ranges: this.playable(), seen })) {
 			const at = performance.now()
 
 			this.evictions = recentEvictions(this.evictions, at)
@@ -1277,7 +1322,11 @@ class MseRemuxSession implements RemuxSession {
 			this.lastProgressAt = now
 			this.internalSeek(action.to)
 		} else if (action.type === "fatal") {
-			this.fail("stalled", `no progress at ${String(element.currentTime)}`)
+			if (this.openGopBlocked) {
+				this.fail("openGopStart", new IdrUnreachableError(element.currentTime))
+			} else {
+				this.fail("stalled", `no progress at ${String(element.currentTime)}`)
+			}
 		}
 	}
 

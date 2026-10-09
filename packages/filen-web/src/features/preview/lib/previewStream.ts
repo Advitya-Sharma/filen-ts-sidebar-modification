@@ -1,6 +1,12 @@
 import type { AnyFile } from "@filen/sdk-rs"
-import { registerWithSw } from "@/features/drive/lib/saveDownload"
-import { SW_DOWNLOAD_PREFIX, SW_MSG_REGISTER_PREVIEW, SW_MSG_RELEASE_PREVIEW } from "@/lib/sw/protocol"
+import { holdWorkerAlive, registerWithSw } from "@/features/drive/lib/saveDownload"
+import {
+	SW_DOWNLOAD_PREFIX,
+	SW_MSG_REGISTER_PREVIEW,
+	SW_MSG_RELEASE_PREVIEW,
+	SW_PREVIEW_BUCKET_PLAYER,
+	SW_PREVIEW_BUCKET_TRANSIENT
+} from "@/lib/sw/protocol"
 
 // Registers `file` against the SW's inline-preview route (no attachment disposition, an allowlisted
 // Content-Type, Range/206-capable) and returns its fetchable, same-origin URL — the src a
@@ -9,16 +15,41 @@ import { SW_DOWNLOAD_PREFIX, SW_MSG_REGISTER_PREVIEW, SW_MSG_RELEASE_PREVIEW } f
 // trigger: an inline media element just needs a stable URL, it never "saves" anything.
 //
 // Passing an earlier `id` re-registers it (the worker may have been restarted or evicted it since),
-// so a revisit gets back the same URL rather than a new one.
+// so a revisit gets back the same URL rather than a new one. A video or audio element's registration goes
+// in the worker's player bucket, which downloads cannot crowd out; `transient` marks a short-lived use (a
+// thumbnail's one frame), kept apart so it can never evict a player's either.
 export async function previewStreamUrl(
 	file: AnyFile,
 	name: string,
 	contentType: string,
-	id: string = crypto.randomUUID()
+	id: string = crypto.randomUUID(),
+	options: { transient?: boolean } = {}
 ): Promise<string> {
-	await registerWithSw(SW_MSG_REGISTER_PREVIEW, { id, file, name, size: Number(file.size), contentType })
+	await registerWithSw(SW_MSG_REGISTER_PREVIEW, {
+		id,
+		file,
+		name,
+		size: Number(file.size),
+		contentType,
+		...previewBucket(contentType, options.transient === true)
+	})
 
 	return `${SW_DOWNLOAD_PREFIX}${id}`
+}
+
+function previewBucket(contentType: string, transient: boolean): { bucket?: string } {
+	if (transient) {
+		return { bucket: SW_PREVIEW_BUCKET_TRANSIENT }
+	}
+
+	return /^(video|audio)\//i.test(contentType) ? { bucket: SW_PREVIEW_BUCKET_PLAYER } : {}
+}
+
+// Keeps the controlling worker from being terminated while a player is mounted, paused included: an idle
+// worker loses its registrations, and a paused element's next range request would then fail. Returns the
+// idempotent release; a no-op where there are no service workers.
+export function holdPreviewStreamAlive(): () => void {
+	return "serviceWorker" in navigator ? holdWorkerAlive(navigator.serviceWorker.controller) : () => undefined
 }
 
 // Hands a registration back once its element is done with the URL (emptied, so no further Range request

@@ -9,6 +9,12 @@ export interface RangePortApi {
 	cancel(id: number): void
 	// The reader is done with the file: in-flight reads are aborted and the port closed.
 	close(): void
+	// Takes the Web Lock `name` and holds it until the port shuts down; true once it is held, false when
+	// it cannot be (already shut down, no Web Locks). A port whose serving worker dies posts nothing, but
+	// the lock goes with the worker, so a reader waiting for it learns at once. The other way round,
+	// `readerLock` is one the reader holds for as long as it reads: the port then lives exactly as long as
+	// its reader (however long a player stays paused), and shuts down when the reader's worker dies.
+	holdLife(name: string, readerLock?: string): Promise<boolean>
 }
 
 // Posted by the server as it shuts down (a cancel from its own side, the idle timeout), so the reader
@@ -16,7 +22,8 @@ export interface RangePortApi {
 const CLOSED_NOTICE = "filen.rangePort.closed"
 
 // A served port nobody has read from for this long is shut down: a reader that went away without
-// closing (a crashed worker) must not keep the file's entry alive for the rest of the session.
+// closing (a crashed worker) must not keep the file's entry alive for the rest of the session. Only for a
+// reader that holds no lock of its own (holdLife's readerLock), whose death cannot be seen otherwise.
 export const RANGE_PORT_IDLE_MS = 30 * 60_000
 
 // Serves `read` on `port` until `lifetime` aborts, which the reader's close() and the idle timeout do too.
@@ -24,10 +31,11 @@ export function exposeRangePort(port: MessagePort, read: AbortableReadRange, lif
 	const closed = lifetime.signal
 	const reads = new Map<number, AbortController>()
 	let idle: ReturnType<typeof setTimeout> | undefined
+	let readerWatched = false
 	const armIdle = () => {
 		clearTimeout(idle)
 
-		if (reads.size === 0) {
+		if (reads.size === 0 && !readerWatched) {
 			idle = setTimeout(() => {
 				lifetime.abort()
 			}, RANGE_PORT_IDLE_MS)
@@ -58,6 +66,16 @@ export function exposeRangePort(port: MessagePort, read: AbortableReadRange, lif
 	closed.addEventListener("abort", shutdown, { once: true })
 	armIdle()
 
+	const shutDown = new Promise<void>(resolve => {
+		closed.addEventListener(
+			"abort",
+			() => {
+				resolve()
+			},
+			{ once: true }
+		)
+	})
+
 	const api: RangePortApi = {
 		async read(start, end, id) {
 			const controller = new AbortController()
@@ -82,10 +100,46 @@ export function exposeRangePort(port: MessagePort, read: AbortableReadRange, lif
 			setTimeout(() => {
 				lifetime.abort()
 			}, 0)
+		},
+		async holdLife(name, readerLock) {
+			if (closed.aborted || !locksAvailable()) {
+				return false
+			}
+
+			const held = Promise.withResolvers<boolean>()
+
+			void navigator.locks
+				.request(name, () => {
+					held.resolve(true)
+
+					return shutDown
+				})
+				.catch(() => {
+					held.resolve(false)
+				})
+
+			const holding = await held.promise
+
+			if (holding && readerLock !== undefined) {
+				readerWatched = true
+				clearTimeout(idle)
+				// Granted once the reader lets go: it closed, or its worker died.
+				void navigator.locks
+					.request(readerLock, () => {
+						lifetime.abort()
+					})
+					.catch(() => undefined)
+			}
+
+			return holding
 		}
 	}
 
 	Comlink.expose(api, port)
+}
+
+function locksAvailable(): boolean {
+	return "locks" in navigator
 }
 
 export class RangePortClosedError extends Error {
@@ -149,6 +203,38 @@ export function rangePortReader(port: MessagePort): RangePortReader {
 	// Where the engine reports a port closed on the other side.
 	port.addEventListener("close", lose)
 
+	// No engine reports a port whose serving worker died (crashed, terminated); the server's life lock is
+	// released then, and this request for it is granted. Also granted after an orderly shutdown, which
+	// has already been noticed by then.
+	// This side's own lock, held until close(), tells the server the reader is still there.
+	const readerDone = Promise.withResolvers<undefined>()
+
+	if (locksAvailable()) {
+		const lifeLock = `filen-range-port-${crypto.randomUUID()}`
+		const readerLock = `filen-range-reader-${crypto.randomUUID()}`
+		const readerHeld = Promise.withResolvers<undefined>()
+
+		void navigator.locks
+			.request(readerLock, () => {
+				readerHeld.resolve(undefined)
+
+				return readerDone.promise
+			})
+			.catch(() => {
+				readerHeld.resolve(undefined)
+			})
+		void readerHeld.promise
+			.then(() => remote.holdLife(lifeLock, readerLock))
+			.then(held =>
+				held
+					? navigator.locks.request(lifeLock, () => {
+							lose()
+						})
+					: undefined
+			)
+			.catch(() => undefined)
+	}
+
 	return {
 		readRange: (start, end, signal) => {
 			if (gone) {
@@ -204,6 +290,7 @@ export function rangePortReader(port: MessagePort): RangePortReader {
 				.catch(() => undefined)
 				.finally(() => {
 					lose()
+					readerDone.resolve(undefined)
 					remote[Comlink.releaseProxy]()
 					port.close()
 				})

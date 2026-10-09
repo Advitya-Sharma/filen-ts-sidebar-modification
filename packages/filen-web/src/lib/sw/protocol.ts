@@ -4,7 +4,7 @@ import type { ErrorDTO } from "@/lib/sdk/errors"
 // `/__sw/version` (bump on any change to sw.ts's runtime behavior, never on app/feature versioning)
 // and the message types + route prefixes it understands. Imported by both sw.ts and register.ts;
 // that import is the only edge between them.
-export const SW_PROTOCOL_VERSION = 14
+export const SW_PROTOCOL_VERSION = 15
 
 // Shared so the page side (register.ts's applyUpdate) can't drift from sw.ts's message listener with
 // a typo'd literal.
@@ -40,6 +40,11 @@ export const SW_MSG_REGISTER_STREAM_DOWNLOAD = "FILEN_SW_REGISTER_STREAM_DOWNLOA
 // it independently at serve time (isAllowedInlineContentType below) rather than trusting the message,
 // so a compromised/buggy sender can never force an arbitrary inline Content-Type through.
 export const SW_MSG_REGISTER_PREVIEW = "FILEN_SW_REGISTER_PREVIEW"
+// A preview registration's optional `bucket`, each with its own ceiling so one kind never crowds out
+// another: "player" for inline playback (a video or audio element, paused for any length of time),
+// "transient" for a short-lived use (a thumbnail's frame). Without one, the entry shares the downloads'.
+export const SW_PREVIEW_BUCKET_PLAYER = "player"
+export const SW_PREVIEW_BUCKET_TRANSIENT = "transient"
 // page → SW, no ack: the page is done with a preview registration (a thumbnail's one frame), so its entry
 // (decrypted key material) leaves the registry now rather than waiting to be crowded out. A stream already
 // running from it keeps its own handles and ends on its own.

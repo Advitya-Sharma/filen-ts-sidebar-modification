@@ -135,4 +135,68 @@ describe("PendingRegistry", () => {
 
 		expect(registry.activeStreams).toBe(0)
 	})
+
+	describe("buckets", () => {
+		it("never lets a burst in one bucket evict an entry of another, paused or not", () => {
+			const registry = new PendingRegistry<string>(2, { transient: 2 })
+
+			registry.set("player", "P")
+
+			for (let index = 0; index < 10; index++) {
+				registry.set(`thumb-${String(index)}`, "T", "transient")
+			}
+
+			expect(registry.get("player")).toBe("P")
+			expect(registry.size).toBe(3)
+			expect(registry.get("thumb-7")).toBeUndefined()
+			expect(registry.get("thumb-8")).toBe("T")
+			expect(registry.get("thumb-9")).toBe("T")
+		})
+
+		it("evicts within the bucket by recency, sparing a streaming entry", () => {
+			const registry = new PendingRegistry<string>(4, { transient: 2 })
+
+			registry.set("a", "A", "transient")
+			registry.beginStream("a")
+			registry.set("b", "B", "transient")
+			registry.set("c", "C", "transient")
+
+			expect(registry.get("a")).toBe("A")
+			expect(registry.get("b")).toBeUndefined()
+			expect(registry.get("c")).toBe("C")
+		})
+
+		it("moves a re-registered id to its new bucket, and files an unknown bucket under the default one", () => {
+			const registry = new PendingRegistry<string>(1, { transient: 1 })
+
+			registry.set("a", "A", "transient")
+			registry.set("a", "A2")
+			registry.set("t", "T", "transient")
+
+			expect(registry.get("a")).toBe("A2")
+			expect(registry.get("t")).toBe("T")
+
+			registry.set("x", "X", "nonsense")
+
+			expect(registry.get("a")).toBeUndefined()
+			expect(registry.get("x")).toBe("X")
+			expect(registry.get("t")).toBe("T")
+		})
+
+		it("deletes and clears across buckets", () => {
+			const registry = new PendingRegistry<string>(4, { transient: 4 })
+
+			registry.set("a", "A")
+			registry.set("b", "B", "transient")
+			registry.delete("b")
+
+			expect(registry.get("b")).toBeUndefined()
+			expect(registry.size).toBe(1)
+
+			registry.clear()
+
+			expect(registry.size).toBe(0)
+			expect(registry.get("a")).toBeUndefined()
+		})
+	})
 })

@@ -20,6 +20,9 @@ export const AUDIO_TARGET_CODECS: Record<AudioTarget, string> = {
 export interface RemuxOpenParams {
 	// The reading end of a range port (lib/media/rangePort) serving the file.
 	port: MessagePort
+	// Video may start only at an IDR picture (Firefox's MediaSource starts HEVC nowhere else): a start at
+	// another key packet begins at the IDR before it, or fails with IdrUnreachableError past its reach.
+	idrOnlyStart?: boolean
 	size: number
 	// From the file's probe, when the caller has it; otherwise the worker probes the head it reads anyway.
 	index?: ProbeIndex
@@ -100,8 +103,10 @@ export type RemuxEvent =
 	// `init`: the bytes begin with an initialization segment.
 	| { type: "segment"; kind: TrackKind; generation: number; bytes: Uint8Array<ArrayBuffer>; init: boolean }
 	| { type: "ended"; kind: TrackKind; generation: number }
-	// `fragmentTooLarge`: a single key-packet interval holds more than a SourceBuffer can.
-	| { type: "error"; kind: TrackKind; generation: number; message: string; fragmentTooLarge: boolean }
+	// `fragmentTooLarge`: a single key-packet interval holds more than a SourceBuffer can. `sourceLost`: the
+	// file's bytes could not be read (the range port's server went away, a download failed), which says
+	// nothing about whether this browser can play the file.
+	| { type: "error"; kind: TrackKind; generation: number; message: string; fragmentTooLarge: boolean; sourceLost: boolean }
 
 export interface RemuxStats {
 	blockReads: number
@@ -128,4 +133,34 @@ export class SupersededError extends Error {
 
 export function isSuperseded(error: unknown): boolean {
 	return error instanceof Error && error.name === SUPERSEDED_ERROR
+}
+
+// No IDR picture lies within reach of a start that needs one (open-GOP HEVC on Firefox). Crosses Comlink
+// by name.
+export const IDR_UNREACHABLE_ERROR = "IdrUnreachableError"
+
+export class IdrUnreachableError extends Error {
+	public constructor(time: number) {
+		super(`no IDR picture within reach of ${String(time)} s`)
+		this.name = IDR_UNREACHABLE_ERROR
+	}
+}
+
+export function isIdrUnreachable(error: unknown): boolean {
+	return error instanceof Error && error.name === IDR_UNREACHABLE_ERROR
+}
+
+// A read of the file's bytes failed (not aborted): the source, not the media, is the problem. Crosses
+// Comlink by name.
+export const SOURCE_READ_ERROR = "SourceReadError"
+
+export class SourceReadError extends Error {
+	public constructor(cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause), { cause })
+		this.name = SOURCE_READ_ERROR
+	}
+}
+
+export function isSourceReadError(error: unknown): boolean {
+	return error instanceof Error && error.name === SOURCE_READ_ERROR
 }

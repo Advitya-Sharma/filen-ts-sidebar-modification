@@ -60,7 +60,8 @@ vi.mock("@/features/drive/lib/download", () => ({ narrowToAnyFile: narrowToAnyFi
 
 const { waitForMediaStreamMock, previewStreamUrlMock, releasePreviewStreamMock } = vi.hoisted(() => ({
 	waitForMediaStreamMock: vi.fn<() => Promise<boolean>>(),
-	previewStreamUrlMock: vi.fn<(file: unknown, name: string, contentType: string, id?: string) => Promise<string>>(),
+	previewStreamUrlMock:
+		vi.fn<(file: unknown, name: string, contentType: string, id?: string, options?: { transient?: boolean }) => Promise<string>>(),
 	releasePreviewStreamMock: vi.fn<(id: string) => void>()
 }))
 
@@ -688,6 +689,8 @@ describe("generateVideoThumb — frame choice", () => {
 		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "bytes", bytes: new Uint8Array([1]) })
 		expect(seeks).toEqual([1])
 		expect(releasePreviewStreamMock).toHaveBeenCalledWith(previewStreamUrlMock.mock.calls[0]?.[3])
+		// A one-frame registration goes in the worker's transient bucket, so it can never evict a player's.
+		expect(previewStreamUrlMock.mock.calls[0]?.[4]).toEqual({ transient: true })
 		expect(events).toEqual(["emptied", "released"])
 	})
 

@@ -25,6 +25,8 @@ import {
 	SW_MSG_WATCH_DOWNLOAD,
 	SW_MSG_CANCEL_DOWNLOAD,
 	SW_MSG_KEEPALIVE,
+	SW_PREVIEW_BUCKET_PLAYER,
+	SW_PREVIEW_BUCKET_TRANSIENT,
 	isAllowedInlineContentType
 } from "@/lib/sw/protocol"
 import { PendingRegistry } from "@/lib/sw/pendingRegistry"
@@ -33,7 +35,7 @@ import { heldBackBody } from "@/lib/sw/heldBackBody"
 import { plainErrorDTO, toErrorDTO } from "@/lib/sdk/errors"
 import { contentDispositionAttachment } from "@/lib/filename"
 import { log } from "@/lib/log"
-import { parseRange, previewPieceEnd } from "@/sw/range"
+import { parseRange, previewServedEnd } from "@/sw/range"
 
 // ── SW-hosted trimmed SDK (single-threaded — no COI, no rayon pool) ─────────────────────────────
 // Lazy: only fetch+compile the 2 MB wasm and reconstruct the Client when a session is handed over, so
@@ -81,7 +83,14 @@ type PendingDownload = PendingFileDownload | PendingZipDownload | PendingPreview
 // entries that are still being read; its in-flight count also guards SKIP_WAITING, since activating an
 // update through a running save would truncate that download.
 const MAX_PENDING_DOWNLOADS = 32
-const downloads = new PendingRegistry<PendingDownload>(MAX_PENDING_DOWNLOADS)
+// Players and short-lived preview registrations (a thumbnail's one frame) get buckets of their own, so
+// neither a burst of thumbnails nor of downloads can evict a player's entry, paused or not.
+const MAX_PLAYER_PREVIEWS = 16
+const MAX_TRANSIENT_PREVIEWS = 8
+const downloads = new PendingRegistry<PendingDownload>(MAX_PENDING_DOWNLOADS, {
+	[SW_PREVIEW_BUCKET_PLAYER]: MAX_PLAYER_PREVIEWS,
+	[SW_PREVIEW_BUCKET_TRANSIENT]: MAX_TRANSIENT_PREVIEWS
+})
 // How each attachment download ended, for the page that started it (downloadReporter.ts).
 const reporter = new DownloadReporter(MAX_PENDING_DOWNLOADS)
 
@@ -306,8 +315,9 @@ function handleZipDownload(event: FetchEvent, id: string, pending: PendingZipDow
 // response loaded as its own browsing context/document, never a media/image fetch), but it closes off
 // a direct-navigation edge case: an allowlisted image/svg+xml response, if a URL is copied out of the
 // app and navigated to directly rather than embedded, could otherwise execute an embedded <script> as
-// a full document with no CSP of its own to stop it. `pieced` answers an open-ended range with one
-// PREVIEW_PIECE_BYTES piece: for inline media only, since a saved file must stay one whole stream.
+// a full document with no CSP of its own to stop it. `pieced` answers a long range with one
+// PREVIEW_PIECE_BYTES piece (previewServedEnd): for inline media only, since a saved file must stay one
+// whole stream.
 function streamFileRange(
 	event: FetchEvent,
 	id: string,
@@ -325,7 +335,7 @@ function streamFileRange(
 	}
 
 	const start = range?.start ?? 0
-	const end = range === null ? total - 1 : pieced && range.openEnded ? previewPieceEnd(range.start, range.end) : range.end
+	const end = range === null ? total - 1 : pieced ? previewServedEnd(range, total) : range.end
 	const length = end - start + 1
 
 	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
@@ -590,14 +600,18 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 		if (!hasClient(port)) {
 			return
 		}
-		const msg = event.data as { id: string; file: SwAnyFile; name: string; size: number; contentType: string }
-		downloads.set(msg.id, {
-			kind: "preview",
-			file: msg.file,
-			name: msg.name,
-			size: msg.size,
-			contentType: msg.contentType
-		})
+		const msg = event.data as { id: string; file: SwAnyFile; name: string; size: number; contentType: string; bucket?: unknown }
+		downloads.set(
+			msg.id,
+			{
+				kind: "preview",
+				file: msg.file,
+				name: msg.name,
+				size: msg.size,
+				contentType: msg.contentType
+			},
+			msg.bucket === SW_PREVIEW_BUCKET_TRANSIENT || msg.bucket === SW_PREVIEW_BUCKET_PLAYER ? msg.bucket : undefined
+		)
 		port?.postMessage({ ok: true })
 		return
 	}

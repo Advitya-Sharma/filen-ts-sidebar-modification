@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import { SW_DOWNLOAD_PREFIX, SW_MSG_REGISTER_PREVIEW, SW_MSG_RELEASE_PREVIEW } from "@/lib/sw/protocol"
+import {
+	SW_DOWNLOAD_PREFIX,
+	SW_MSG_REGISTER_PREVIEW,
+	SW_MSG_RELEASE_PREVIEW,
+	SW_PREVIEW_BUCKET_PLAYER,
+	SW_PREVIEW_BUCKET_TRANSIENT
+} from "@/lib/sw/protocol"
 
 // previewStreamUrl is the request half of the inline-preview seam (usePreviewStreamUrl.ts's own
 // abort surface is just a `live` flag guarding a late setState — no cancellation message exists,
@@ -9,9 +15,9 @@ import { SW_DOWNLOAD_PREFIX, SW_MSG_REGISTER_PREVIEW, SW_MSG_RELEASE_PREVIEW } f
 // plumbing), already pinned by saveDownload.test.ts; only the registration payload/URL shape unique to
 // the preview route is re-verified here.
 
-const { registerWithSw } = vi.hoisted(() => ({ registerWithSw: vi.fn() }))
+const { registerWithSw, holdWorkerAlive } = vi.hoisted(() => ({ registerWithSw: vi.fn(), holdWorkerAlive: vi.fn() }))
 
-vi.mock("@/features/drive/lib/saveDownload", () => ({ registerWithSw }))
+vi.mock("@/features/drive/lib/saveDownload", () => ({ registerWithSw, holdWorkerAlive }))
 
 function testFile(overrides: Partial<AnyFile> = {}): AnyFile {
 	return {
@@ -71,6 +77,24 @@ describe("previewStreamUrl", () => {
 
 		expect(url).toBe(`${SW_DOWNLOAD_PREFIX}known-id`)
 		expect((registerWithSw.mock.calls[0] as [string, Record<string, unknown>])[1]["id"]).toBe("known-id")
+	})
+
+	it("files a transient registration (a thumbnail's frame) and a player's in buckets of their own", async () => {
+		registerWithSw.mockResolvedValue(undefined)
+
+		const { previewStreamUrl } = await import("@/features/preview/lib/previewStream")
+
+		await previewStreamUrl(testFile(), "a.mp4", "video/mp4", "thumb-id", { transient: true })
+		await previewStreamUrl(testFile(), "b.mp4", "video/mp4", "player-id")
+
+		const payload = (index: number) => (registerWithSw.mock.calls[index] as [string, Record<string, unknown>])[1]
+
+		expect(payload(0)["bucket"]).toBe(SW_PREVIEW_BUCKET_TRANSIENT)
+		expect(payload(1)["bucket"]).toBe(SW_PREVIEW_BUCKET_PLAYER)
+
+		// An image preview is no player: it shares the downloads' bucket.
+		await previewStreamUrl(testFile(), "c.png", "image/png", "image-id")
+		expect(payload(2)).not.toHaveProperty("bucket")
 	})
 
 	it("propagates a registration failure — caller (usePreviewStreamUrl) maps it to a fallback state, not a toast", async () => {
@@ -210,5 +234,27 @@ describe("releasePreviewStream", () => {
 		expect(() => {
 			releasePreviewStream("other")
 		}).not.toThrow()
+	})
+})
+
+describe("holdPreviewStreamAlive", () => {
+	it("holds the controlling worker alive until released, and is a no-op without service workers", async () => {
+		const controller = { postMessage: vi.fn() }
+		const release = vi.fn()
+
+		holdWorkerAlive.mockReturnValue(release)
+		vi.stubGlobal("navigator", { serviceWorker: { controller } })
+
+		const { holdPreviewStreamAlive } = await import("@/features/preview/lib/previewStream")
+
+		holdPreviewStreamAlive()()
+		expect(holdWorkerAlive).toHaveBeenCalledWith(controller)
+		expect(release).toHaveBeenCalledTimes(1)
+
+		vi.stubGlobal("navigator", {})
+		expect(() => {
+			holdPreviewStreamAlive()()
+		}).not.toThrow()
+		expect(holdWorkerAlive).toHaveBeenCalledTimes(1)
 	})
 })

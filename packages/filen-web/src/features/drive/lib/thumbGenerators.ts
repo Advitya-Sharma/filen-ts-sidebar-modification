@@ -399,7 +399,7 @@ export const generateVideoThumb: ThumbGenerator = async (item, signal) => {
 				releasePreviewStream(id)
 			})
 
-			return previewStreamUrl(narrowToAnyFile(item), driveItemName(item), contentType, id)
+			return previewStreamUrl(narrowToAnyFile(item), driveItemName(item), contentType, id, { transient: true })
 		},
 		signal
 	)

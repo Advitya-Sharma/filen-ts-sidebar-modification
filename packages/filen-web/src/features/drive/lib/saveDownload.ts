@@ -306,16 +306,20 @@ export function cancelSwDownload(transferId: string): boolean {
 	return cancel !== undefined
 }
 
-// One timer for every streaming download, however many: each holds a reference until it settles.
+// One timer for every streaming download and mounted player, however many: each holds a reference until
+// it lets go. Each tick goes to the worker controlling the page then: an update activated since the hold
+// began retired the one it started with. `fallback` is for a page no worker controls.
 let keepAliveHolds = 0
 let keepAliveTimer: ReturnType<typeof setInterval> | undefined
 
-function holdWorkerAlive(worker: ServiceWorker): () => void {
+export function holdWorkerAlive(fallback: ServiceWorker | null): () => void {
 	keepAliveHolds++
 
 	if (keepAliveHolds === 1) {
 		keepAliveTimer = setInterval(() => {
-			worker.postMessage({ type: SW_MSG_KEEPALIVE })
+			const target = navigator.serviceWorker.controller ?? fallback
+
+			target?.postMessage({ type: SW_MSG_KEEPALIVE })
 		}, SW_KEEPALIVE_MS)
 	}
 

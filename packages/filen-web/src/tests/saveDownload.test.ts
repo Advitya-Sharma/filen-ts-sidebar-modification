@@ -482,6 +482,32 @@ describe("a watched service-worker download", () => {
 		expect(cancelSwDownload("transfer-1")).toBe(false)
 	})
 
+	it("sends each keepalive to the worker controlling the page then, not a retired one", async () => {
+		vi.useFakeTimers()
+
+		try {
+			const old = { postMessage: vi.fn() }
+			const updated = { postMessage: vi.fn() }
+			const serviceWorker: { controller: { postMessage: ReturnType<typeof vi.fn> } | null } = { controller: old }
+
+			vi.stubGlobal("navigator", { serviceWorker })
+
+			const { holdWorkerAlive } = await freshModule()
+			const release = holdWorkerAlive(old as unknown as ServiceWorker)
+
+			await vi.advanceTimersByTimeAsync(SW_KEEPALIVE_MS)
+			serviceWorker.controller = updated
+			await vi.advanceTimersByTimeAsync(SW_KEEPALIVE_MS)
+			release()
+			await vi.advanceTimersByTimeAsync(SW_KEEPALIVE_MS)
+
+			expect(old.postMessage).toHaveBeenCalledTimes(1)
+			expect(updated.postMessage).toHaveBeenCalledTimes(1)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
 	it("keeps the worker alive with its own messages while the download streams, and stops after", async () => {
 		vi.useFakeTimers()
 

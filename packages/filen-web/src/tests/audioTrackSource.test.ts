@@ -1,15 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
 
-const { downloadFileBytes } = vi.hoisted(() => ({ downloadFileBytes: vi.fn() }))
+const { downloadFileBytes, releasePreviewStream, streaming } = vi.hoisted(() => ({
+	downloadFileBytes: vi.fn(),
+	releasePreviewStream: vi.fn<(id: string) => void>(),
+	streaming: { value: false }
+}))
 
 vi.mock("@/features/preview/lib/previewStream", () => ({
-	isMediaStreamAvailable: () => false,
-	previewStreamUrl: vi.fn()
+	isMediaStreamAvailable: () => streaming.value,
+	previewStreamUrl: (_file: unknown, _name: string, _type: string, id: string) => Promise.resolve(`/sw/download/${id}`),
+	releasePreviewStream
 }))
 vi.mock("@/lib/sdk/client", () => ({ sdkApi: { downloadFileBytes, cancelPreviewDownload: vi.fn() } }))
 
-import { resolveTrackSource } from "@/features/audio/lib/bytes"
+import { holdStreamRegistration, resolveTrackSource } from "@/features/audio/lib/bytes"
 import type { QueueTrack } from "@/features/audio/store/audioQueue"
 
 const track: QueueTrack = { uuid: "a", name: "a.mp3", mime: "audio/mpeg", contentType: null, file: {} as AnyFile }
@@ -41,5 +46,28 @@ describe("resolveTrackSource", () => {
 		expect(source.blob.type).toBe("audio/mpeg")
 		expect(new Uint8Array(await source.blob.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]))
 		expect(fetchSpy).not.toHaveBeenCalled()
+	})
+
+	it("hands back stream registrations older than the playing and the warmed track", async () => {
+		streaming.value = true
+
+		try {
+			const streamed = { ...track, contentType: "audio/mpeg" }
+			const ids: string[] = []
+
+			for (let index = 0; index < 4; index++) {
+				const source = await resolveTrackSource(streamed, new AbortController().signal)
+
+				ids.push(source.url.slice("/sw/download/".length))
+			}
+
+			expect(releasePreviewStream.mock.calls.map(([id]) => id)).toEqual([ids[0], ids[1]])
+
+			// The bookkeeping alone: only ever the last two are kept.
+			holdStreamRegistration("x")
+			expect(releasePreviewStream).toHaveBeenLastCalledWith(ids[2])
+		} finally {
+			streaming.value = false
+		}
 	})
 })

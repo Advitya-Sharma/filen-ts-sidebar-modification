@@ -1,4 +1,4 @@
-import { isMediaStreamAvailable, previewStreamUrl } from "@/features/preview/lib/previewStream"
+import { isMediaStreamAvailable, previewStreamUrl, releasePreviewStream } from "@/features/preview/lib/previewStream"
 import { sdkApi } from "@/lib/sdk/client"
 import { runOp } from "@/lib/actions/outcome"
 import { ErrorWithDTO, type ErrorDTO } from "@/lib/sdk/errors"
@@ -22,7 +22,10 @@ import type { ElementSample } from "@/features/audio/store/audioQueue"
 // before it is copied into a Blob.
 export async function resolveTrackSource(track: QueueTrack, signal: AbortSignal): Promise<TrackSource> {
 	if (isMediaStreamAvailable() && track.contentType !== null) {
-		const url = await previewStreamUrl(track.file, track.name, track.contentType)
+		const id = crypto.randomUUID()
+		const url = await previewStreamUrl(track.file, track.name, track.contentType, id)
+
+		holdStreamRegistration(id)
 
 		return { kind: "stream", url }
 	}
@@ -46,6 +49,20 @@ export async function resolveTrackSource(track: QueueTrack, signal: AbortSignal)
 		return { kind: "blob", url: URL.createObjectURL(blob), blob }
 	} finally {
 		signal.removeEventListener("abort", cancel)
+	}
+}
+
+// The engine holds at most two tracks' sources (the one playing and the one warmed next), and every new
+// source replaces the older of them; registrations older than the last two are handed back to the
+// service worker so a long listening session does not keep every past track's entry.
+const STREAM_REGISTRATIONS_HELD = 2
+const heldStreamIds: string[] = []
+
+export function holdStreamRegistration(id: string): void {
+	heldStreamIds.push(id)
+
+	for (const released of heldStreamIds.splice(0, Math.max(0, heldStreamIds.length - STREAM_REGISTRATIONS_HELD))) {
+		releasePreviewStream(released)
 	}
 }
 
