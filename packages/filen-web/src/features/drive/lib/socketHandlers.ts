@@ -30,6 +30,7 @@ import {
 	type PhotosEventScope
 } from "@/features/photos/queries/photos"
 import { isPhotoItem } from "@/features/photos/lib/predicate"
+import { isDotFilenSystemFile } from "@/lib/dotFilen"
 import { markAccountStale } from "@/queries/account"
 import { useDriveStore } from "@/features/drive/store/useDriveStore"
 import { markClipboardEventsMissed } from "@/features/drive/store/useDriveClipboardStore"
@@ -225,12 +226,19 @@ function photosEventScope(inner: DriveSocketEvent["inner"]): PhotosEventScope | 
 // A file that isn't a photo can't join a photos listing by arriving, returning or moving, and can't be in
 // one already; a listed photo superseded by a non-photo version leaves through its own fileArchived. Saves
 // of non-photo files (a playlist or other `.filen` JSON) would otherwise re-walk a root that contains them.
+// A uuid-only event naming a known `.filen` file (the version a save retired) can't concern photos either,
+// and would otherwise mark an unmounted photos listing for a walk on its next mount.
 function cannotChangePhotos(inner: DriveSocketEvent["inner"]): boolean {
 	switch (inner.type) {
 		case "fileNew":
 		case "fileRestore":
 		case "fileMove":
 			return !isPhotoItem(narrowItem(inner.file))
+
+		case "fileArchived":
+		case "fileTrash":
+		case "fileDeletedPermanent":
+			return isDotFilenSystemFile(inner.uuid)
 
 		default:
 			return false

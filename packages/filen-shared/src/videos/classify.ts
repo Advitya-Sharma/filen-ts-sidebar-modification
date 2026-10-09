@@ -317,7 +317,12 @@ interface DirSidecars {
 	seasonArt: Map<number, ArtBuild> | null
 	// Sidecars named after no video in the directory; a title may claim them by its shared name.
 	unmatched: number[]
+	// Positions in `unmatched` by every name a title could claim them under, built on first use.
+	unmatchedByKey: Map<string, number[]> | null
 }
+
+// Titles a slice of loose titles in one directory covers before the walk yields.
+const LOOSE_TITLES_PER_STEP = 256
 
 interface VersionGroup {
 	files: number[]
@@ -647,7 +652,8 @@ class LibraryClassifier {
 		}
 	}
 
-	public run(): VideoLibrary {
+	// Yields after each directory, so a caller can spread one run over several tasks.
+	public *steps(): Generator<void, VideoLibrary> {
 		for (let root = 0; root < this.rootCount; root++) {
 			const scanRoot = this.input.roots[root]
 
@@ -656,8 +662,10 @@ class LibraryClassifier {
 			}
 
 			this.pendingExtras = []
-			this.walkFree(root, root, 0, scanRoot.type)
+			yield* this.walkFree(root, root, 0, scanRoot.type)
 			this.resolvePendingExtras()
+
+			yield
 		}
 
 		return this.finish()
@@ -809,7 +817,8 @@ class LibraryClassifier {
 			seasonNfo: NO_FILE,
 			art: new ArtBuild(),
 			seasonArt: null,
-			unmatched: []
+			unmatched: [],
+			unmatchedByKey: null
 		}
 		const byStem = new Map<string, number>()
 
@@ -1013,22 +1022,73 @@ class LibraryClassifier {
 		}
 	}
 
+	// The unmatched sidecars any of `keys` could claim, in their original order: those whose lowercase stem is a key
+	// or continues one with ".", and images whose stem-art owner is a key. Indexed once per directory, so a directory
+	// of thousands of titles doesn't test every sidecar against every title.
+	private claimable(sidecars: DirSidecars, keys: readonly string[]): number[] {
+		let index = sidecars.unmatchedByKey
+
+		if (index === null) {
+			index = new Map()
+
+			const add = (key: string, position: number): void => {
+				const list = index?.get(key)
+
+				if (list === undefined) {
+					index?.set(key, [position])
+				} else if (list[list.length - 1] !== position) {
+					list.push(position)
+				}
+			}
+
+			for (let position = 0; position < sidecars.unmatched.length; position++) {
+				const lower = this.lowerStem(sidecars.unmatched[position] ?? 0)
+
+				add(lower, position)
+
+				for (let dot = lower.indexOf("."); dot > 0; dot = lower.indexOf(".", dot + 1)) {
+					add(lower.slice(0, dot), position)
+				}
+
+				const owned = stemArtName(lower)
+
+				if (owned !== null) {
+					add(owned.owner, position)
+				}
+			}
+
+			sidecars.unmatchedByKey = index
+		}
+
+		const positions = new Set<number>()
+
+		for (const key of keys) {
+			for (const position of index.get(key) ?? []) {
+				positions.add(position)
+			}
+		}
+
+		return [...positions].sort((a, b) => a - b).map(position => sidecars.unmatched[position] ?? NO_FILE)
+	}
+
 	// Sidecars named after a title rather than one file ("Up (2009).en.srt", "Up (2009)-poster.jpg" beside
 	// "Up (2009) - 1080p.mkv" and "Up (2009) - 4K.mkv") apply to every version. `keys` are lowercase names.
 	private attachSharedSidecars(
-		unmatched: readonly number[],
+		sidecars: DirSidecars,
 		keys: readonly string[],
 		versions: readonly LibraryVersion[]
 	): { art: ArtBuild; nfo: number } {
 		const art = new ArtBuild()
 		let nfo = NO_FILE
 
-		if (unmatched.length === 0 || keys.length === 0) {
+		if (sidecars.unmatched.length === 0 || keys.length === 0) {
 			return {
 				art,
 				nfo
 			}
 		}
+
+		const unmatched = this.claimable(sidecars, keys)
 
 		const targets: LibraryVideo[] = []
 
@@ -1109,7 +1169,7 @@ class LibraryClassifier {
 
 	// ── Free directories (not inside a series) ──
 
-	private walkFree(node: number, root: number, depth: number, rootType: LibraryRootType): void {
+	private *walkFree(node: number, root: number, depth: number, rootType: LibraryRootType): Generator<void, void> {
 		const listing = this.listing(node)
 		let evidence = NOT_SERIES
 
@@ -1131,7 +1191,14 @@ class LibraryClassifier {
 			}
 		}
 
+		// A directory of thousands of titles is spread over several steps.
+		const large = listing.videos.length + listing.subtitles.length + listing.images.length > LOOSE_TITLES_PER_STEP
 		const sidecars = this.attachSidecars(listing)
+
+		if (large) {
+			yield
+		}
+
 		let videos = listing.videos
 		let seriesOwner = OWNER_NONE
 
@@ -1153,7 +1220,7 @@ class LibraryClassifier {
 			}
 
 			this.ownerOf[node] = videos.length > 0 ? OWNER_MIXED : OWNER_NONE
-			this.walkChildren(node, listing, root, depth, rootType, false)
+			yield* this.walkChildren(node, listing, root, depth, rootType, false)
 
 			return
 		}
@@ -1197,7 +1264,16 @@ class LibraryClassifier {
 			}
 		}
 
+		if (large) {
+			yield
+		}
+
 		const groups = groupStacks(mains.map(file => this.stem(file)))
+
+		if (large) {
+			yield
+		}
+
 		const movieAllowed = rootType !== "shows"
 		let folderMovie: MovieBuild | null = null
 
@@ -1221,21 +1297,21 @@ class LibraryClassifier {
 
 			this.ownerOf[node] = (this.movies.length - 1) * 2
 		} else {
-			this.addLooseTitles(root, rootType, mains, groups, extras, sidecars)
+			yield* this.addLooseTitles(root, rootType, mains, groups, extras, sidecars)
 			this.ownerOf[node] = mains.length > 0 ? OWNER_MIXED : seriesOwner
 		}
 
-		this.walkChildren(node, listing, root, depth, rootType, !isRoot)
+		yield* this.walkChildren(node, listing, root, depth, rootType, !isRoot)
 	}
 
-	private walkChildren(
+	private *walkChildren(
 		node: number,
 		listing: DirListing,
 		root: number,
 		depth: number,
 		rootType: LibraryRootType,
 		extrasDirs: boolean
-	): void {
+	): Generator<void, void> {
 		for (const child of listing.dirs) {
 			const name = this.nodeName[child] ?? ""
 
@@ -1255,7 +1331,9 @@ class LibraryClassifier {
 				continue
 			}
 
-			this.walkFree(child, root, depth + 1, rootType)
+			yield* this.walkFree(child, root, depth + 1, rootType)
+
+			yield
 		}
 	}
 
@@ -1366,7 +1444,7 @@ class LibraryClassifier {
 			}
 		}
 
-		const shared = this.attachSharedSidecars(options.sidecars.unmatched, [...keys], versions)
+		const shared = this.attachSharedSidecars(options.sidecars, [...keys], versions)
 		const art = emptyArt()
 
 		fillArt(art, shared.art)
@@ -1487,17 +1565,29 @@ class LibraryClassifier {
 	// Titles of a directory that is no single movie. Files or stacks sharing a title and year ("Alien (1979)",
 	// "Alien (1979) - Director's Cut") are versions of one movie; any other stands alone, as a movie when something
 	// marks it as one (year, own .nfo, poster, multiple parts, a movies root), else as another video.
-	private addLooseTitles(
+	private *addLooseTitles(
 		root: number,
 		rootType: LibraryRootType,
 		mains: readonly number[],
 		groups: readonly { members: number[]; prefix: string | null }[],
 		extras: readonly { file: number; type: ExtraType; owner: string }[],
 		sidecars: DirSidecars
-	): void {
+	): Generator<void, void> {
 		const movieByStem = new Map<string, MovieBuild>()
-		const entries = groups.map(group => this.versionGroup(mains, group))
-		const titleKeys = entries.map(entry => (rootType === "shows" ? "" : mergeKey(entry.stem)))
+		const entries: VersionGroup[] = []
+		const titleKeys: string[] = []
+
+		for (const group of groups) {
+			if (entries.length > 0 && entries.length % LOOSE_TITLES_PER_STEP === 0) {
+				yield
+			}
+
+			const entry = this.versionGroup(mains, group)
+
+			entries.push(entry)
+			titleKeys.push(rootType === "shows" ? "" : mergeKey(entry.stem))
+		}
+
 		const byTitle = new Map<string, number[]>()
 
 		for (let g = 0; g < titleKeys.length; g++) {
@@ -1515,6 +1605,10 @@ class LibraryClassifier {
 		}
 
 		for (let g = 0; g < entries.length; g++) {
+			if (g > 0 && g % LOOSE_TITLES_PER_STEP === 0) {
+				yield
+			}
+
 			const entry = entries[g]
 			const sameTitle = byTitle.get(titleKeys[g] ?? "")
 
@@ -2183,5 +2277,23 @@ function prefixSums(counts: Int32Array): Int32Array {
 // Classifies every root of a library. Pure and synchronous; O(files + directories) with a handful of pattern runs
 // per video file.
 export function classifyVideoLibrary(input: LibraryScanInput): VideoLibrary {
-	return new LibraryClassifier(input).run()
+	const steps = classifyVideoLibrarySteps(input)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) {
+			return step.value
+		}
+	}
+}
+
+// classifyVideoLibrary in steps: each `next()` runs at most one directory's worth of work (indexing the
+// input, and assembling the result, run as one step each), so a caller can yield between slices.
+export function* classifyVideoLibrarySteps(input: LibraryScanInput): Generator<void, VideoLibrary> {
+	const classifier = new LibraryClassifier(input)
+
+	yield
+
+	return yield* classifier.steps()
 }

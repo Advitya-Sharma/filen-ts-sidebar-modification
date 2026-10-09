@@ -188,6 +188,10 @@ function checkOutcome(outcome: Outcome, tier: ProbeTier): void {
 
 const ITERATIONS = 40
 
+// Thousands of probes per test: the time a loaded machine takes for them is no finding (each probe has its own
+// 2 s bound above, which is), so the tests' own limit only catches a run gone far off.
+const FUZZ_TEST_TIMEOUT_MS = 60_000
+
 // Paths the recorded slices do not reach: compressed CodecPrivate, chapters, attachments, chpl and covr.
 function syntheticCorpus(): Sparse[] {
 	const compressed = element(
@@ -242,7 +246,7 @@ function syntheticCorpus(): Sparse[] {
 	return [mkv, mp4, resync, bomb].map(bytes => ({ size: bytes.length, ranges: [[0, bytes]] }))
 }
 
-describe("video probe fuzz", () => {
+describe("video probe fuzz", { timeout: FUZZ_TEST_TIMEOUT_MS }, () => {
 	for (const slice of loadSlices()) {
 		it(`survives mutations of ${slice.name}`, async () => {
 			const original = decode(slice)

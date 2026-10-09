@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { CLASSIFIER_VERSION, NO_FILE, classifyVideoLibrary } from "@filen/shared/videos"
+import { CLASSIFIER_VERSION, NO_FILE, classifyVideoLibrary, classifyVideoLibrarySteps } from "@filen/shared/videos"
 import { classifyPaths, fixtureInput } from "./libraryFixture"
 
 describe("movies", () => {
@@ -1052,5 +1052,36 @@ describe("output shape", () => {
 
 		expect(library.movies.map(movie => movie.id)).toEqual(["stable-loose"])
 		expect(library.others.map(other => other.id)).toEqual(["stable-clip"])
+	})
+})
+
+describe("classifyVideoLibrarySteps", () => {
+	it("yields between directories and ends with what classifyVideoLibrary returns", () => {
+		const input = {
+			roots: [{ uuid: "root", name: "Library", type: "auto" as const }],
+			dirs: Array.from({ length: 20 }, (_, index) => ({
+				uuid: `d${String(index)}`,
+				parent: "root",
+				name: `Movie ${String(index)} (2001)`
+			})),
+			files: Array.from({ length: 20 }, (_, index) => ({
+				uuid: `f${String(index)}`,
+				parent: `d${String(index)}`,
+				name: `Movie ${String(index)} (2001).mkv`,
+				size: 1_000_000_000,
+				timestamp: index
+			}))
+		}
+		const steps = classifyVideoLibrarySteps(input)
+		let yields = 0
+		let step = steps.next()
+
+		while (step.done !== true) {
+			yields++
+			step = steps.next()
+		}
+
+		expect(yields).toBeGreaterThan(20)
+		expect(step.value).toEqual(classifyVideoLibrary(input))
 	})
 })

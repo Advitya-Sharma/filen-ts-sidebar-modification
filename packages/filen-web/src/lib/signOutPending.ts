@@ -23,3 +23,18 @@ export function writeSignOutPending(pending: boolean): void {
 		// Storage blocked: the sign-out itself still runs; only the resume of a torn one is lost.
 	}
 }
+
+// Another tab starting a sign-out (the flag set there). Returns the unsubscribe fn.
+export function onSignOutPending(listener: () => void): () => void {
+	const onStorage = (event: StorageEvent): void => {
+		if (event.key === SIGN_OUT_PENDING_KEY && event.newValue === "1") {
+			listener()
+		}
+	}
+
+	window.addEventListener("storage", onStorage)
+
+	return () => {
+		window.removeEventListener("storage", onStorage)
+	}
+}

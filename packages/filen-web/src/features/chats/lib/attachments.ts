@@ -17,6 +17,7 @@ import { useTransfersStore } from "@/features/transfers/store/useTransfersStore"
 import { settleTransferFailure } from "@/features/transfers/lib/settle"
 import { throttle, PROGRESS_THROTTLE_MS } from "@/lib/throttle"
 import { noop } from "@/lib/utils"
+import { getDotFilenSubdir } from "@/lib/dotFilen"
 import { markAccountStale } from "@/queries/account"
 import { addAccountStorageUsed, ensureUploadQuota } from "@/features/drive/lib/quota"
 
@@ -37,46 +38,10 @@ import { addAccountStorageUsed, ensureUploadQuota } from "@/features/drive/lib/q
 export type AttachmentOutcome = { status: "success"; url: string } | { status: "error"; dto: ErrorDTO }
 
 // Mirrors filen-mobile's chats.ts#getChatUploadsDirectory naming EXACTLY (".filen" then "Chat Uploads",
-// nested) — the SAME dedicated directory convention, so a file attached from web and one attached from
-// mobile land in the one place. `createDirectory` is idempotent by name under a parent (verified —
-// features/drive/lib/createDirectory.ts's own comment: a name clash against an existing DIRECTORY
-// returns THAT directory, never errors), so this needs no separate list-then-find step the way mobile's
-// uniffi surface does — create IS the find-or-create here. Memoized for the tab's lifetime as the
-// PROMISE, so a multi-file pick's concurrent uploads share one lookup instead of each creating the pair.
-let uploadsDirPromise: Promise<string> | null = null
-
-// The memo above is keyed on nothing but the tab, so it MUST be dropped when the account behind it
-// changes: a uuid minted under the signed-out account names a directory the next one cannot write to,
-// and every attachment would upload into a directory that is not theirs until the tab reloaded.
-// performLogout calls this alongside its other per-session teardowns. A lookup still in flight keeps
-// resolving for its own callers only; it can no longer re-seed the memo.
-export function resetChatUploadsDirCache(): void {
-	uploadsDirPromise = null
-}
-
-function chatUploadsDirUuid(): Promise<string> {
-	if (uploadsDirPromise !== null) {
-		return uploadsDirPromise
-	}
-
-	const promise = (async () => {
-		const dotFilen = await sdkApi.createDirectory(null, ".filen")
-		const uploads = await sdkApi.createDirectory(dotFilen.uuid, "Chat Uploads")
-
-		return uploads.uuid
-	})()
-
-	uploadsDirPromise = promise
-
-	// A failure is not memoized: the next attachment tries again.
-	promise.catch(() => {
-		if (uploadsDirPromise === promise) {
-			uploadsDirPromise = null
-		}
-	})
-
-	return promise
-}
+// nested), so a file attached from web and one attached from mobile land in the one place. Resolved once
+// per session through the shared `.filen` resolver, so a multi-file pick's concurrent uploads share one
+// lookup; logout drops it (resetDotFilen), since its uuid names a directory the next account cannot write to.
+const CHAT_UPLOADS_DIR_NAME = "Chat Uploads"
 
 let lastAttachmentStamp = 0
 
@@ -154,7 +119,7 @@ export function preflightAttachments(files: readonly File[]): Promise<boolean> {
 // that shared, separately-tested helper), then a straight link create: the upload is a fresh file under
 // a unique name, so it cannot already carry a link and the status read would be a wasted round trip.
 export async function uploadAttachment(file: File, onProgress: (bytesTransferred: number) => void): Promise<AttachmentOutcome> {
-	const parent = await attemptOp(chatUploadsDirUuid())
+	const parent = await attemptOp(getDotFilenSubdir(CHAT_UPLOADS_DIR_NAME))
 
 	if (parent.status === "error") {
 		return parent

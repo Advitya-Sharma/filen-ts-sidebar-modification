@@ -11,11 +11,12 @@ import {
 	renamePlaylist as renamePlaylistPure,
 	reorderPlaylistFile as reorderPure
 } from "@filen/shared"
-import type { DirMeta, DriveEvent, File as SdkFile, FileEncryptionVersion, UuidStr } from "@filen/sdk-rs"
+import type { DriveEvent, File as SdkFile, FileEncryptionVersion, UuidStr } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
 import { runOp } from "@/lib/actions/outcome"
 import { asErrorDTO, DIRECTORY_NOT_FOUND_PREFIX, PARENT_NOT_FOUND_PREFIX, type ErrorDTO } from "@/lib/sdk/errors"
 import { log } from "@/lib/log"
+import { dotFilenSubdirUuid, forgetDotFilenSubdir, getDotFilenSubdir, noteDotFilenFile, onDotFilenSubdirForgotten } from "@/lib/dotFilen"
 import { narrowItem, asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
 import { buildQueueTrack } from "@/features/audio/lib/handoff"
 import type { QueueTrack } from "@/features/audio/store/audioQueue"
@@ -34,18 +35,7 @@ import {
 // playlists — they call into this module, which owns the write-lock, the freshest-copy recompose and
 // the query-cache patch.
 
-const DOT_FILEN_DIR_NAME = ".filen"
 const PLAYLISTS_DIR_NAME = "Playlists"
-
-let playlistsDirUuidPromise: Promise<string> | null = null
-// Both resolved uuids, for the synchronous socket-event matches below.
-let playlistsDirUuid: string | null = null
-let dotFilenDirUuid: string | null = null
-// A lookup in flight can't match a directory event by uuid yet, so any that could be ours counts while
-// one is pending; forgetPlaylistsDirectory bumps the generation, and a lookup that started under an
-// older one still answers its caller but isn't remembered.
-let pendingLookups = 0
-let directoryGeneration = 0
 
 // Drive uuids of the files this tab knows the Playlists directory holds: the last listing plus its own
 // uploads since. What lets a uuid-only socket event be tied to a playlist.
@@ -55,59 +45,21 @@ const knownPlaylistFileUuids = new Set<string>()
 // content change, so the bytes behind one never change and its parse can be reused.
 let parsedByFileUuid = new Map<string, Playlist>()
 
-async function resolvePlaylistsDirectoryUuid(): Promise<string> {
-	const generation = directoryGeneration
-
-	pendingLookups++
-
-	try {
-		const dotFilen = await runOp(sdkApi.createDirectory(null, DOT_FILEN_DIR_NAME))
-		const playlists = await runOp(sdkApi.createDirectory(dotFilen.uuid, PLAYLISTS_DIR_NAME))
-
-		if (generation === directoryGeneration) {
-			dotFilenDirUuid = dotFilen.uuid
-			playlistsDirUuid = playlists.uuid
-		}
-
-		return playlists.uuid
-	} finally {
-		pendingLookups--
-	}
-}
-
-// Lazily create/find `.filen/Playlists` at the drive root, memoized until forgetPlaylistsDirectory —
-// createDirectory is idempotent + case-insensitive server-side (an existing directory with this name
-// returns ITS uuid rather than erroring), so no listing pre-check is needed at either level. A
-// rejected resolve clears the memo before it propagates, so the NEXT caller gets a fresh attempt
-// instead of every future playlist operation failing for the rest of the session on one transient
-// network hiccup.
+// `.filen/Playlists` at the drive root, shared with the other `.filen` consumers (lib/dotFilen.ts).
 export function getPlaylistsDirectoryUuid(): Promise<string> {
-	if (playlistsDirUuidPromise === null) {
-		const promise = resolvePlaylistsDirectoryUuid().catch((error: unknown) => {
-			// Only its own memo — a lookup forgotten mid-flight may already have a successor.
-			if (playlistsDirUuidPromise === promise) {
-				playlistsDirUuidPromise = null
-			}
-
-			throw error
-		})
-
-		playlistsDirUuidPromise = promise
-	}
-
-	return playlistsDirUuidPromise
+	return getDotFilenSubdir(PLAYLISTS_DIR_NAME)
 }
 
 // `.filen` or `Playlists` itself was trashed, deleted, moved or renamed: the memo now names the wrong
 // directory (or none), so the next use re-resolves it and the cache re-reads from there.
-export function forgetPlaylistsDirectory(): void {
-	directoryGeneration++
-	playlistsDirUuidPromise = null
-	playlistsDirUuid = null
-	dotFilenDirUuid = null
+onDotFilenSubdirForgotten(PLAYLISTS_DIR_NAME, () => {
 	knownPlaylistFileUuids.clear()
 	parsedByFileUuid = new Map()
 	markPlaylistsUnsynced()
+})
+
+export function forgetPlaylistsDirectory(): void {
+	forgetDotFilenSubdir(PLAYLISTS_DIR_NAME)
 }
 
 // A plain worker throw when the uuid no longer resolves, or the SDK's own kind for a gone folder.
@@ -129,43 +81,6 @@ async function runPlaylistsDirectoryOp<T>(op: Promise<T>): Promise<T> {
 		}
 
 		throw error
-	}
-}
-
-function keepsName(meta: DirMeta, name: string): boolean {
-	return meta.type === "decoded" && meta.data.name.toLowerCase() === name.toLowerCase()
-}
-
-function mayBePlaylistsDirectory(uuid: string): boolean {
-	return pendingLookups > 0 || uuid === playlistsDirUuid || uuid === dotFilenDirUuid
-}
-
-// Whether a drive event trashed, deleted, moved or renamed `.filen` or `Playlists` (names are
-// case-insensitive, so a case-only rename still resolves to the same directory).
-export function isPlaylistsDirectoryEvent(inner: DriveEvent): boolean {
-	switch (inner.type) {
-		case "folderTrash":
-		case "folderDeletedPermanent":
-			return mayBePlaylistsDirectory(inner.uuid)
-
-		case "folderMove":
-			return mayBePlaylistsDirectory(inner.dir.uuid)
-
-		case "folderMetadataChanged":
-			if (pendingLookups > 0) {
-				return !keepsName(inner.meta, PLAYLISTS_DIR_NAME) && !keepsName(inner.meta, DOT_FILEN_DIR_NAME)
-			}
-
-			return (
-				(inner.uuid === playlistsDirUuid && !keepsName(inner.meta, PLAYLISTS_DIR_NAME)) ||
-				(inner.uuid === dotFilenDirUuid && !keepsName(inner.meta, DOT_FILEN_DIR_NAME))
-			)
-
-		case "deleteAll":
-			return pendingLookups > 0 || playlistsDirUuid !== null
-
-		default:
-			return false
 	}
 }
 
@@ -282,6 +197,7 @@ export async function fetchPlaylistEntries(): Promise<PlaylistEntry[]> {
 
 	for (const file of files) {
 		knownPlaylistFileUuids.add(file.uuid)
+		noteDotFilenFile(file.uuid)
 	}
 
 	const existence: TrackExistence = new Map()
@@ -299,6 +215,8 @@ export async function fetchPlaylistEntries(): Promise<PlaylistEntry[]> {
 // still counts, costing a refetch, never a missed change). Every other event counts when it lands a file
 // in the directory or names a known one — version-only deletes and edit-retirements excepted.
 export function isPlaylistsDriveEvent(inner: DriveEvent): boolean {
+	const playlistsDirUuid = dotFilenSubdirUuid(PLAYLISTS_DIR_NAME)
+
 	if (playlistsDirUuid === null) {
 		return false
 	}
@@ -334,6 +252,7 @@ async function savePlaylist(playlist: Playlist, patchCache: boolean): Promise<vo
 	const file = await runPlaylistsDirectoryOp(sdkApi.uploadFileBytes(dirUuid, bytes, `${playlist.uuid}.json`, "application/json"))
 
 	knownPlaylistFileUuids.add(file.uuid)
+	noteDotFilenFile(file.uuid)
 
 	if (patchCache) {
 		playlistsQueryUpsert(playlist)

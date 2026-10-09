@@ -39,6 +39,7 @@ import init, {
 	type Dir,
 	type File,
 	type NormalDirsAndFiles,
+	type DirsAndFiles,
 	type AnyNormalDir,
 	type AnyDirWithContext,
 	type FileVersion,
@@ -134,7 +135,7 @@ import {
 	writeStoreEntry,
 	writeThumb
 } from "@/workers/thumbStore"
-import { ART_CACHE_CAP, ART_STORE } from "@/features/videos/lib/artStore.logic"
+import { ART_CACHE_CAP, ART_STORE, type ArtSlotCode } from "@/features/videos/lib/artStore.logic"
 import {
 	createSearchEngine,
 	type QueryTiming,
@@ -157,6 +158,11 @@ import { EarlyCancels } from "@/workers/earlyCancels"
 import { imageSniffStream } from "@/lib/media/probe/imageSniff"
 import { exposeRangePort } from "@/lib/media/rangePort"
 import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
+import { WalkCoordinator } from "@/workers/walkCoordinator"
+import { VideoIndexEngine, type IndexRootConfig } from "@/workers/videoIndex/engine"
+import { opfsSnapshotStore } from "@/workers/videoIndex/snapshotStore"
+import { dirName } from "@/workers/videoIndex/rootIndex.logic"
+import type { TitleArtCandidates, VideoIndexUpdate, VideoRootStatus, VideoTitleDetail } from "@/workers/videoIndex/view.logic"
 import {
 	archivePassword,
 	COMPRESS_EVENT_CAPS,
@@ -651,6 +657,9 @@ function releaseClient(): void {
 	client = null
 	freeSocketListener() // the socket listener belongs to this client — free it before the client goes
 	clearDirectoryCache() // wipe cached names/dirs so a signed-out worker never holds decrypted data
+	walkCoordinator.invalidate()
+	videoIndex.reset()
+	videoIndexUnsubscribe = null
 	if (prev !== null) {
 		setTimeout(() => {
 			prev.free()
@@ -877,6 +886,119 @@ function asThumbnailResult(result: MakeThumbnailInMemoryResult): SdkThumbnailRes
 	return Comlink.transfer({ type: "thumbnail", bytes: webpData, width, height, fromEmbeddedPreview }, [webpData.buffer])
 }
 
+// Recursive listings, one per directory at a time, shared by Photos and the Videos index. A trashed or
+// unresolvable directory is not found, as for any other walk.
+const walkCoordinator = new WalkCoordinator<DirsAndFiles>(async dirUuid => {
+	const c = requireClient()
+	const driveRoot = c.root()
+
+	// The whole drive: the root is no Dir, so it is walked as the client's own Root, never looked up.
+	if (dirUuid === driveRoot.uuid) {
+		return c.listDirRecursive(driveRoot, () => undefined)
+	}
+
+	const dir = await resolveOwnedDir(c, dirUuid)
+
+	// A cached dir survives its own trashing — trashDirectory re-caches the SDK's returned Dir
+	// rather than evicting it (cache.ts's own cacheDirs doc comment) — so a root this same session
+	// just trashed (or already had cached from browsing it in the chooser) resolves here as a
+	// stale-but-truthy Dir whose `parent` the trash move rewrote to the sentinel "trash" ParentUuid.
+	// Treat that exactly like a genuinely unresolvable uuid: a trashed root is just as unreachable
+	// to a recursive walk as a deleted one, and letting it fall through to listDirRecursive instead
+	// throws the SDK's own "folder is inside the trash" species:"sdk" error, which root.ts's
+	// isRootGoneError (a plain-Error message-prefix check) has no way to recognize.
+	if (dir === undefined || dir.parent === "trash") {
+		throw new Error(`${DIRECTORY_NOT_FOUND_PREFIX}${dirUuid}`)
+	}
+
+	return c.listDirRecursive(dir, () => undefined)
+})
+
+// Not found, or (the SDK's refusal to list a directory inside the trash) trashed.
+function isGoneWalkError(e: unknown): boolean {
+	const dto = asErrorDTO(e)
+
+	if (dto.kind === "FolderNotFound" || (dto.species === "plain" && dto.message.startsWith(DIRECTORY_NOT_FOUND_PREFIX))) {
+		return true
+	}
+
+	return dto.species === "sdk" && /\btrash\b/i.test(`${dto.message} ${dto.serverMessage ?? ""} ${dto.innerMessage ?? ""}`)
+}
+
+// A directory's ancestors as far as the directory cache knows them, nearest first. No request.
+function cachedAncestors(dir: Dir): string[] {
+	const out: string[] = []
+
+	for (let parent = getCachedDir(dir.parent); parent !== undefined && !out.includes(parent.uuid); parent = getCachedDir(parent.parent)) {
+		out.push(parent.uuid)
+	}
+
+	if (isUuid(dir.parent) && !out.includes(dir.parent)) {
+		out.unshift(dir.parent)
+	}
+
+	return out
+}
+
+// Hands the thread back between classification slices without the clamping nested timers get.
+const sliceChannel = new MessageChannel()
+const sliceWaiters: (() => void)[] = []
+
+sliceChannel.port1.onmessage = () => {
+	sliceWaiters.shift()?.()
+}
+
+const videoIndex = new VideoIndexEngine({
+	async walkRoot(rootUuid, startedAfter) {
+		const c = requireClient()
+		const driveRoot = c.root()
+		const dir = rootUuid === driveRoot.uuid ? null : await resolveOwnedDir(c, rootUuid)
+
+		if (dir === undefined || dir?.parent === "trash") {
+			return { type: "gone" }
+		}
+
+		try {
+			const raw = await walkCoordinator.walk(rootUuid, startedAfter)
+
+			return { type: "ok", name: dir === null ? "" : dirName(dir.meta), raw, ancestors: dir === null ? [] : cachedAncestors(dir) }
+		} catch (e) {
+			if (isGoneWalkError(e)) {
+				return { type: "gone" }
+			}
+
+			throw e
+		}
+	},
+	walkMark: () => walkCoordinator.mark(),
+	async walkDir(dirUuid) {
+		try {
+			return await walkCoordinator.walk(dirUuid)
+		} catch (e) {
+			if (isGoneWalkError(e)) {
+				return null
+			}
+
+			throw e
+		}
+	},
+	async lastDriveEventId() {
+		return (await requireClient().getLastEventIds()).drive
+	},
+	getFile(uuid) {
+		return isUuid(uuid) ? requireClient().getFileOptional(uuid) : Promise.resolve(undefined)
+	},
+	store: opfsSnapshotStore,
+	now: () => Date.now(),
+	yieldSlice: () =>
+		new Promise(resolve => {
+			sliceWaiters.push(resolve)
+			sliceChannel.port2.postMessage(null)
+		})
+})
+
+let videoIndexUnsubscribe: (() => void) | null = null
+
 const api = {
 	async boot({ threads }: { threads: number }): Promise<BootResult> {
 		// The wasm download overlaps the preflight; the preflight verdict still wins over an init failure.
@@ -1087,37 +1209,14 @@ const api = {
 	},
 	// Photos' recursive listing op — there is no flat-listing equivalent on the wasm surface for OWN
 	// drive (only the unauth listLinkedDirRecursive, anon-links-only), so this wraps listDirRecursive
-	// directly. SIGNATURE CAVEAT: unlike listDirectory's uuid case above, this takes no AbortSignal at
-	// all — the wasm arm's only params are the dir and a progress callback — so a stale walk from a
-	// fast root change is discarded purely by react-query's own key-change semantics (same rationale
-	// as listDirectory's own no-signal note), never a worker-side cancel. `dir` is passed as the plain
-	// resolved `Dir` (AnyDirWithContext's owned-arm member, AnyNormalDir, is `Dir | Root` — a bare
-	// union, not a tagged wrapper — so no context wrapper is built here, unlike a shared/linked walk).
-	// Returns every dir of the root but only its photo files (narrowOwnedWalk).
+	// through the walk coordinator, which a Videos walk of the same root shares. SIGNATURE CAVEAT:
+	// unlike listDirectory's uuid case above, this takes no AbortSignal at all — the wasm arm's only
+	// params are the dir and a progress callback — so a stale walk from a fast root change is discarded
+	// purely by react-query's own key-change semantics (same rationale as listDirectory's own no-signal
+	// note), never a worker-side cancel. Returns every dir of the root but only its photo files
+	// (narrowOwnedWalk).
 	async listPhotosRecursive(rootUuid: string): Promise<NormalDirsAndFiles> {
-		const c = requireClient()
-		const driveRoot = c.root()
-
-		// The whole drive: the root is no Dir, so it is walked as the client's own Root, never looked up.
-		if (rootUuid === driveRoot.uuid) {
-			return narrowOwnedWalk(await c.listDirRecursive(driveRoot, () => undefined))
-		}
-
-		const dir = await resolveOwnedDir(c, rootUuid)
-
-		// A cached dir survives its own trashing — trashDirectory re-caches the SDK's returned Dir
-		// rather than evicting it (cache.ts's own cacheDirs doc comment) — so a root this same session
-		// just trashed (or already had cached from browsing it in the chooser) resolves here as a
-		// stale-but-truthy Dir whose `parent` the trash move rewrote to the sentinel "trash" ParentUuid.
-		// Treat that exactly like a genuinely unresolvable uuid: a trashed root is just as unreachable
-		// to a recursive walk as a deleted one, and letting it fall through to listDirRecursive instead
-		// throws the SDK's own "folder is inside the trash" species:"sdk" error, which root.ts's
-		// isRootGoneError (a plain-Error message-prefix check) has no way to recognize.
-		if (dir === undefined || dir.parent === "trash") {
-			throw new Error(`${DIRECTORY_NOT_FOUND_PREFIX}${rootUuid}`)
-		}
-
-		return narrowOwnedWalk(await c.listDirRecursive(dir, () => undefined))
+		return narrowOwnedWalk(await walkCoordinator.walk(rootUuid))
 	},
 	// Photos' socket scoping: whether every dir provably sits outside `rootUuid`, judged from the dir cache
 	// alone. Deciding to skip a refetch must never cost a round trip of its own.
@@ -2382,6 +2481,80 @@ const api = {
 	searchOpen(params: { rootUuid: string | null; name: string }, onPush: (p: SearchPush) => void): Promise<SearchSnapshotDTO> {
 		return searchEngine.open(requireClient(), params, onPush)
 	},
+	// ── Videos library index ─────────────────────────────────────────────────
+	// The drive's latest event id: one small request, compared against stored watermarks.
+	async getLastDriveEventId(): Promise<bigint> {
+		return (await requireClient().getLastEventIds()).drive
+	},
+	// Sets the library roots; resolves whether a check against the drive is needed (videoIndexCheck).
+	videoIndexConfigure(roots: IndexRootConfig[]): Promise<boolean> {
+		return videoIndex.configure(roots)
+	},
+	// `watermark` is the caller's getLastDriveEventId result when it has one, so the check costs no request.
+	videoIndexCheck(watermark?: bigint): Promise<void> {
+		return videoIndex.check(watermark)
+	},
+	// A root's index: brought current when unchecked, or walked again whatever the floor with `rescan`.
+	async listVideoRoot(rootUuid: string, options: { rescan: boolean }): Promise<VideoRootStatus | null> {
+		await (options.rescan ? videoIndex.rescan(rootUuid) : videoIndex.check())
+
+		return videoIndex.rootStatuses().find(status => status.uuid === rootUuid) ?? null
+	},
+	// One subscriber per worker (the main thread's library client); a new one replaces it. `onUpdate` is the
+	// caller's Comlink.proxy, wrapped in a plain fn like every other callback here.
+	videoIndexSubscribe(onUpdate: (update: VideoIndexUpdate) => void): void {
+		videoIndexUnsubscribe?.()
+		videoIndexUnsubscribe = videoIndex.subscribe(update => {
+			onUpdate(update)
+		})
+	},
+	// The signed-in account, by its drive root (no request): what the library's cached state is scoped to.
+	videoIndexAccount(): string {
+		return requireClient().root().uuid
+	},
+	videoIndexSetWriter(writer: boolean): void {
+		videoIndex.setWriter(writer)
+	},
+	videoIndexFlush(): Promise<void> {
+		return videoIndex.flush()
+	},
+	// A slot's art candidates for a title, naming files by keyless ref (resolved with playableVideoFiles).
+	videoTitleArt(id: string, slot: ArtSlotCode): TitleArtCandidates | null {
+		return videoIndex.titleArt(id, slot)
+	},
+	videoTitleDetail(id: string): VideoTitleDetail | null {
+		return videoIndex.titleDetail(id)
+	},
+	// Playable drive files for indexed videos and sidecars, rebuilt from the index on request.
+	playableVideoFiles(stableUuids: string[]): File[] {
+		return videoIndex.playableFiles(stableUuids)
+	},
+	// A directory's chain from the drive root down to itself (both included), for root validation; null when it
+	// doesn't resolve or sits in the trash. Cached ancestors cost no request.
+	async videoRootChain(uuid: string): Promise<{ uuid: string; name: string }[] | null> {
+		const c = requireClient()
+		const driveRoot = c.root()
+
+		if (uuid === driveRoot.uuid) {
+			return [{ uuid, name: "" }]
+		}
+
+		const dir = await resolveOwnedDir(c, uuid)
+
+		if (dir === undefined || dir.parent === "trash") {
+			return null
+		}
+
+		const { ancestors } = await cachedItemPath(c, dir)
+
+		return [
+			{ uuid: driveRoot.uuid, name: "" },
+			...ancestors
+				.filter(ancestor => ancestor.uuid !== driveRoot.uuid)
+				.map(ancestor => ({ uuid: ancestor.uuid, name: dirName(ancestor.meta) })),
+			{ uuid: dir.uuid, name: dirName(dir.meta) }
+		]
+	},
 	// ── Realtime socket ────────────────────────────────────────────────────────
 	// The first-ever socket wiring: one subscription for the whole app. `onEvent` arrives as the
 	// caller's Comlink.proxy — wrapped in a plain worker-side fn (`event => onEvent(event)`), never
@@ -2396,6 +2569,18 @@ const api = {
 		freeSocketListener()
 
 		socketListener = await c.addEventListener(event => {
+			// The worker's own consumers first: a walk begun before a drive event can't be shared after it, and
+			// the Videos index patches itself before the main thread hears of the event.
+			if (
+				event.type === "drive" ||
+				event.type === "driveMalformed" ||
+				event.type === "reconnecting" ||
+				event.type === "authSuccess"
+			) {
+				walkCoordinator.invalidate()
+			}
+
+			videoIndex.onSocketEvent(event)
 			onEvent(event)
 		}, null)
 	},

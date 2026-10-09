@@ -64,6 +64,13 @@ export function videoFileKind(extension: string, size: number, lowerStem: string
 	return kind
 }
 
+// Every rule videoFileKind applies, as one string: a store that keeps only the files it recognises can tell from a
+// change of this that what it kept may no longer be what it would keep.
+export const VIDEO_FILE_KINDS_SIGNATURE = [
+	...[...FILE_KINDS].map(([extension, kind]) => `${extension}=${kind}`),
+	`ts>=${String(MIN_TRANSPORT_STREAM_BYTES)}`
+].join(",")
+
 // Index of the extension dot, or -1. A leading dot is a hidden name, not an extension.
 export function extensionDot(name: string): number {
 	const dot = name.lastIndexOf(".")

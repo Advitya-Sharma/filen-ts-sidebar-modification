@@ -47,8 +47,9 @@ export interface ArtLoadRequest {
 	slot: ArtSlotCode
 	// For the typographic card, and the colour of the synthetic fallbacks.
 	title: string
-	// The file behind a candidate's index; null when the listing no longer has it.
-	resolveFile: (file: number) => ArtFile | null
+	// The file behind a candidate's index; null when the listing no longer has it. May resolve asynchronously (the
+	// library index rebuilds playable files in its worker on request).
+	resolveFile: (file: number) => ArtFile | null | Promise<ArtFile | null>
 	signal?: AbortSignal
 	rank?: () => number
 }
@@ -131,7 +132,11 @@ export class ArtLoader {
 				return { type: "gradient", colour: titleColour(request.title) }
 			}
 
-			const file = request.resolveFile(candidate.file)
+			const file = await request.resolveFile(candidate.file)
+
+			if (aborted()) {
+				return null
+			}
 
 			if (file === null) {
 				continue

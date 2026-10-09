@@ -28,6 +28,7 @@ import {
 import { handleDriveEvent } from "@/features/drive/lib/socketHandlers"
 import { socketAuthenticated, socketDropped } from "@/lib/sdk/socketSession"
 import { testUuid } from "@/tests/support/uuid"
+import { noteDotFilenFile } from "@/lib/dotFilen"
 
 function mockDir(uuid: UuidStr, parent: UuidStr): Dir {
 	return {
@@ -691,5 +692,20 @@ describe("photos listing socket scoping", () => {
 		await drain()
 
 		expect(walks()).toBe(2)
+	})
+
+	it("a known `.filen` file retired by a save elsewhere doesn't mark an unmounted listing for a walk", async () => {
+		const view = await mountRead()
+		const state = testUuid("watch-state")
+
+		view.unmount()
+		noteDotFilenFile(state)
+		await fire({ type: "fileArchived", uuid: state, stableUUID: state, newUUID: testUuid("watch-state-2") })
+
+		expect(isInvalidated()).toBe(false)
+
+		await fire({ type: "fileArchived", uuid: testUuid("someone-elses"), stableUUID: testUuid("s"), newUUID: testUuid("t") })
+
+		expect(isInvalidated()).toBe(true)
 	})
 })

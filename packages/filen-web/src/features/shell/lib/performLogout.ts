@@ -3,7 +3,7 @@ import { sync as notesSync } from "@/features/notes/lib/sync"
 import { sync as chatsSync } from "@/features/chats/lib/sync"
 import { clearAllTyping } from "@/features/chats/lib/typing"
 import { detachUnreadBadges } from "@/features/chats/lib/messagesVersion"
-import { resetChatUploadsDirCache } from "@/features/chats/lib/attachments"
+import { resetDotFilen } from "@/lib/dotFilen"
 import { resetSocketReconnectState } from "@/features/chats/lib/socketHandlers"
 import { socketBridge } from "@/lib/sdk/socket"
 import { sdkApi } from "@/lib/sdk/client"
@@ -105,10 +105,9 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 	// Uploads, downloads and copies abort before the worker drops its client; the confirm that leads
 	// here warned about them (useHasActiveTransfers).
 	cancelActiveTransfers()
-	// Drop the chat module's two session-scoped caches: the memoized `.filen/Chat Uploads` uuid (which
-	// names a directory the next account cannot write to) and the reconnect latch (which would make the
-	// next account's first authSuccess read as a recovery).
-	resetChatUploadsDirCache()
+	// The memoized `.filen` directories name directories the next account cannot write to, and the chat
+	// reconnect latch would make the next account's first authSuccess read as a recovery.
+	resetDotFilen()
 	resetSocketReconnectState()
 	// Stop every typing watchdog + wipe the typing store so no timer fires into the cleared session.
 	clearAllTyping()

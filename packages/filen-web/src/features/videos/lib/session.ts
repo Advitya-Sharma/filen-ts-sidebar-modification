@@ -1,10 +1,15 @@
 import { probeService } from "@/features/videos/lib/probeService"
 import { artLoader } from "@/features/videos/lib/artwork"
 import { frameGenerator, releaseFrameWorker } from "@/features/videos/lib/frames"
+import { videoLibrary } from "@/features/videos/lib/index"
+import { resetLibraryConfig } from "@/features/videos/lib/library"
 
-// Logout: nothing of the account's probes, artwork or frames stays in memory, and the frame worker goes
-// once idle.
+// Logout: nothing of the account's library, probes, artwork or frames stays in memory, and the frame worker
+// goes once idle. The worker's index goes with its client.
 export function resetVideoSession(): void {
+	videoLibrary.reset()
+	resetLibraryConfig()
+	videoLibrary.hold()
 	probeService.reset()
 	artLoader.reset()
 	frameGenerator.reset()

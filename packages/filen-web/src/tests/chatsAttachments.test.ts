@@ -26,7 +26,8 @@ const { toastError } = vi.hoisted(() => ({ toastError: vi.fn() }))
 
 vi.mock("sonner", () => ({ toast: { error: toastError } }))
 
-import { uploadAttachment, attachExistingDriveItem, preflightAttachments, resetChatUploadsDirCache } from "@/features/chats/lib/attachments"
+import { uploadAttachment, attachExistingDriveItem, preflightAttachments } from "@/features/chats/lib/attachments"
+import { resetDotFilen } from "@/lib/dotFilen"
 import { narrowItem } from "@/features/drive/lib/item"
 import { useTransfersStore } from "@/features/transfers/store/useTransfersStore"
 import { noop } from "@/lib/utils"
@@ -105,10 +106,10 @@ function mockDirPublicLinkRW(overrides: Partial<DirPublicLinkRW> = {}): DirPubli
 beforeEach(() => {
 	vi.clearAllMocks()
 	useTransfersStore.setState({ transfers: [] })
-	// attachments.ts memoizes the uploads-directory uuid for the tab's lifetime, so without this the
+	// The `.filen` resolver memoizes the uploads-directory uuid for the tab's lifetime, so without this the
 	// directory-creation tests can only ever pass in the one order where they run before the memo is
 	// warm — which is why two of them failed under shuffle.
-	resetChatUploadsDirCache()
+	resetDotFilen()
 	// Room to spare: the quota pre-flight passes from the cache without a read.
 	queryClient.setQueryData(ACCOUNT_QUERY_KEY, { storageUsed: 0n, maxStorage: 1n << 40n })
 })
@@ -267,7 +268,7 @@ describe("uploadAttachment", () => {
 
 		const stale = uploadAttachment(mockBrowserFile(), noop)
 
-		resetChatUploadsDirCache()
+		resetDotFilen()
 		resolveDotFilen(mockDir("old-dot-filen"))
 		await stale
 

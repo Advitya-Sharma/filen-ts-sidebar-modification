@@ -1,10 +1,13 @@
 import { wipeThumbnailStore } from "@/features/drive/lib/thumbCache"
 import { wipeArtStore } from "@/features/videos/lib/artStore"
+import { wipeVideoIndexStore } from "@/features/videos/lib/indexStore"
 
-// Every OPFS cache of images derived from the account's files: drive thumbnails and Videos artwork. Both
-// run to the end; the first failure is reported.
+// Every OPFS cache derived from the account's files: drive thumbnails, Videos artwork and the Videos library
+// index. All run to the end; the first failure is reported.
 export async function wipeImageCaches(): Promise<void> {
-	const failed = (await Promise.allSettled([wipeThumbnailStore(), wipeArtStore()])).find(outcome => outcome.status === "rejected")
+	const failed = (await Promise.allSettled([wipeThumbnailStore(), wipeArtStore(), wipeVideoIndexStore()])).find(
+		outcome => outcome.status === "rejected"
+	)
 
 	if (failed !== undefined) {
 		throw failed.reason

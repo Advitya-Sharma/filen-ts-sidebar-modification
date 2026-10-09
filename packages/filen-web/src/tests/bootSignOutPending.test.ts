@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 // A sign-out cut short leaves its flag set; the next boot redoes every wipe before any session resume,
 // and keeps the flag for another try while a wipe still fails.
-const { calls, kvClear, wipeThumbnailStore, wipeArtStore, wipeSwClient } = vi.hoisted(() => {
+const { calls, kvClear, wipeThumbnailStore, wipeArtStore, wipeVideoIndexStore, wipeSwClient } = vi.hoisted(() => {
 	const calls: string[] = []
 
 	return {
@@ -19,6 +19,11 @@ const { calls, kvClear, wipeThumbnailStore, wipeArtStore, wipeSwClient } = vi.ho
 		}),
 		wipeArtStore: vi.fn(() => {
 			calls.push("wipeArt")
+
+			return Promise.resolve()
+		}),
+		wipeVideoIndexStore: vi.fn(() => {
+			calls.push("wipeVideoIndex")
 
 			return Promise.resolve()
 		}),
@@ -48,6 +53,7 @@ vi.mock("@/queries/client", () => ({ queryClient: {} }))
 vi.mock("@/queries/persist", () => ({ restorePersistedQueries: vi.fn(), purgePersistedQueries: () => Promise.resolve() }))
 vi.mock("@/features/drive/lib/thumbCache", () => ({ wipeThumbnailStore }))
 vi.mock("@/features/videos/lib/artStore", () => ({ wipeArtStore }))
+vi.mock("@/features/videos/lib/indexStore", () => ({ wipeVideoIndexStore }))
 vi.mock("@/features/drive/lib/saveDownload", () => ({ wipeSwClient }))
 
 import { bootSdk } from "@/lib/sdk/boot"
@@ -73,8 +79,8 @@ describe("bootSdk after a sign-out cut short", () => {
 
 		await bootSdk()
 
-		expect(calls.slice(0, 4).sort()).toEqual(["kvClear", "wipeArt", "wipeServiceWorker", "wipeThumbnails"])
-		expect(calls[4]).toBe("resumeSession")
+		expect(calls.slice(0, 5).sort()).toEqual(["kvClear", "wipeArt", "wipeServiceWorker", "wipeThumbnails", "wipeVideoIndex"])
+		expect(calls[5]).toBe("resumeSession")
 		expect(readSignOutPending()).toBe(false)
 		expect(useBootStore.getState().phase).toBe("ready")
 	})
@@ -92,6 +98,15 @@ describe("bootSdk after a sign-out cut short", () => {
 	it("keeps the flag while the Videos artwork wipe still fails", async () => {
 		writeSignOutPending(true)
 		wipeArtStore.mockRejectedValueOnce(new Error("entry locked"))
+
+		await bootSdk()
+
+		expect(readSignOutPending()).toBe(true)
+	})
+
+	it("keeps the flag while the Videos index wipe still fails", async () => {
+		writeSignOutPending(true)
+		wipeVideoIndexStore.mockRejectedValueOnce(new Error("entry locked"))
 
 		await bootSdk()
 

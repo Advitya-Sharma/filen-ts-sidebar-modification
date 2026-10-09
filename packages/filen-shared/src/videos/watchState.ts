@@ -120,10 +120,14 @@ export interface WatchStateDoc {
 	[key: string]: unknown
 }
 
-interface WatchRecord {
+// A record of last-writer-wins registers (stamped objects) with an optional tombstone. The watch state's items and
+// series are such records; other synced documents built from them merge through the same functions below.
+export interface RegisterRecord {
 	x?: Tombstone
 	[key: string]: unknown
 }
+
+type WatchRecord = RegisterRecord
 
 export function itemKey(stableUuid: string): string {
 	return `s:${stableUuid}`
@@ -599,6 +603,144 @@ function pickField(a: unknown, b: unknown, flags: MergeFlags): unknown {
 	return order < 0 ? b : a
 }
 
+// Fields of a document this version doesn't know: kept from both sides, one picked deterministically where both
+// have one.
+function mergeFields(
+	local: Record<string, unknown>,
+	remote: Record<string, unknown>,
+	known: ReadonlySet<string>,
+	into: Record<string, unknown>,
+	flags: MergeFlags
+): void {
+	for (const key in local) {
+		if (known.has(key)) {
+			continue
+		}
+
+		if (!Object.hasOwn(remote, key)) {
+			into[key] = local[key]
+			flags.a = true
+
+			continue
+		}
+
+		into[key] = pickField(local[key], remote[key], flags)
+	}
+
+	for (const key in remote) {
+		if (!known.has(key) && !Object.hasOwn(local, key)) {
+			into[key] = remote[key]
+			flags.b = true
+		}
+	}
+}
+
+const WATCH_STATE_FIELDS: ReadonlySet<string> = new Set(["v", "gc", "items", "series"])
+
+export interface RegisterDocMerge<T> {
+	value: T
+	// local holds something remote lacks
+	localContributed: boolean
+	// remote holds something local lacks
+	remoteContributed: boolean
+}
+
+// Register-wise merge of two maps of register records (associative, commutative, idempotent).
+export function mergeRecordMaps<T extends RegisterRecord>({
+	local,
+	remote
+}: {
+	local: Record<string, T>
+	remote: Record<string, T>
+}): RegisterDocMerge<Record<string, T>> {
+	const flags: MergeFlags = {
+		a: false,
+		b: false
+	}
+	const value = mergeMaps(local, remote, flags)
+
+	return {
+		value,
+		localContributed: flags.a,
+		remoteContributed: flags.b
+	}
+}
+
+// The document fields outside `known`, merged like the watch state's own unknown fields.
+export function mergeUnknownFields({
+	local,
+	remote,
+	known
+}: {
+	local: Record<string, unknown>
+	remote: Record<string, unknown>
+	known: ReadonlySet<string>
+}): RegisterDocMerge<Record<string, unknown>> {
+	const flags: MergeFlags = {
+		a: false,
+		b: false
+	}
+	const value: Record<string, unknown> = {}
+
+	mergeFields(local, remote, known, value, flags)
+
+	return {
+		value,
+		localContributed: flags.a,
+		remoteContributed: flags.b
+	}
+}
+
+// Sets one register of a record; registers a newer tombstone covers fall away.
+export function setRegister<T extends RegisterRecord>({ rec, key, register }: { rec: T | undefined; key: string; register: Stamp }): T {
+	return normalizeRecord({
+		...rec,
+		[key]: {
+			...register,
+			...checkedStamp(register)
+		}
+	} as T)
+}
+
+// Deletes a record as of `stamp`: every register stamped at or before it goes, later writes survive. `at` is the
+// deciding device's wall clock.
+export function tombstoneRecord<T extends RegisterRecord>({ rec, stamp, at }: { rec: T | undefined; stamp: Stamp; at: number }): T {
+	return tombstoneAt((rec ?? {}) as T, checkedStamp(stamp), at)
+}
+
+// Whether any register of the record outlives its tombstone.
+export function hasLiveRegister(rec: RegisterRecord): boolean {
+	for (const key in rec) {
+		if (key !== "x") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// A record as parsed from an untrusted document: an object whose stamped registers are kept as they are (unknown
+// ones included, so a newer writer's fields survive) and whose malformed stamps are dropped. null for a non-object.
+export function parseRegisterRecord(value: unknown): RegisterRecord | null {
+	if (!isRecord(value)) {
+		return null
+	}
+
+	const out: RegisterRecord = {}
+
+	for (const key in value) {
+		const field = value[key]
+
+		if (key === UNSAFE_KEY || !hasValidStamp(field) || (key === "x" && !isNonNegative(field["e"]))) {
+			continue
+		}
+
+		out[key] = field
+	}
+
+	return normalizeRecord(out)
+}
+
 export interface WatchStateMerge {
 	doc: WatchStateDoc
 	// local holds something remote lacks
@@ -629,27 +771,7 @@ export function mergeWatchState({ local, remote }: { local: WatchStateDoc; remot
 		flags.b ||= remote.gc === gc && local.gc !== gc
 	}
 
-	for (const key in local) {
-		if (key === "v" || key === "gc" || key === "items" || key === "series") {
-			continue
-		}
-
-		if (!Object.hasOwn(remote, key)) {
-			doc[key] = local[key]
-			flags.a = true
-
-			continue
-		}
-
-		doc[key] = pickField(local[key], remote[key], flags)
-	}
-
-	for (const key in remote) {
-		if (key !== "v" && key !== "gc" && key !== "items" && key !== "series" && !Object.hasOwn(local, key)) {
-			doc[key] = remote[key]
-			flags.b = true
-		}
-	}
+	mergeFields(local, remote, WATCH_STATE_FIELDS, doc, flags)
 
 	return {
 		doc: !flags.b ? local : !flags.a ? remote : doc,

@@ -33,14 +33,25 @@ vi.mock("@/queries/client", () => ({ queryClient: new QueryClient() }))
 async function freshPlaylists() {
 	vi.resetModules()
 
-	const [playlistsLib, playlistsQueries, socketHandlers, clientModule] = await Promise.all([
+	const [playlistsLib, playlistsQueries, socketHandlers, dotFilen, clientModule] = await Promise.all([
 		import("@/features/audio/lib/playlists"),
 		import("@/features/audio/queries/playlists"),
 		import("@/features/audio/lib/socketHandlers"),
+		import("@/lib/dotFilen"),
 		import("@/queries/client")
 	])
 
-	return { ...playlistsLib, ...playlistsQueries, ...socketHandlers, queryClient: clientModule.queryClient }
+	return {
+		...playlistsLib,
+		...playlistsQueries,
+		// Both drive handlers, in the order the socket host registers them: a `.filen` directory event is the
+		// shared resolver's, which tells playlists.
+		handlePlaylistsDriveEvent: (event: Parameters<typeof socketHandlers.handlePlaylistsDriveEvent>[0]) => {
+			socketHandlers.handlePlaylistsDriveEvent(event)
+			dotFilen.handleDotFilenDriveEvent(event)
+		},
+		queryClient: clientModule.queryClient
+	}
 }
 
 function fakeDir(uuid: UuidStr): Dir {

@@ -272,6 +272,19 @@ describe("ArtLoader", () => {
 		expect(deps.makeArt).toHaveBeenCalledTimes(1)
 	})
 
+	it("takes a file resolved asynchronously, as the library index hands them out", async () => {
+		const { loader: art, deps } = loader()
+		const result = await art.load({
+			candidates: [{ source: "sidecar", file: 0 }, { source: "typographic" }],
+			slot: "p",
+			title: "Up",
+			resolveFile: file => Promise.resolve(files(POSTER)(file))
+		})
+
+		expect(result).toMatchObject({ type: "image", source: "sidecar" })
+		expect(deps.makeArt).toHaveBeenCalledWith(POSTER.file, { offset: 0, size: POSTER.size }, ART_BOXES.p, expect.any(String))
+	})
+
 	it("skips a sidecar past the size gate without reading it", async () => {
 		const { loader: art, deps } = loader()
 		const result = await art.load({
