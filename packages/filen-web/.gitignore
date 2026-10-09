@@ -26,6 +26,9 @@ dist-ssr
 
 docs/
 
+# Generated media fixtures (scripts/videos/makeFixtures.ts)
+fixtures/
+
 # e2e: injected session blob (secret-equivalent) + the per-run fixture-tree manifest + Playwright outputs
 e2e/.auth/
 e2e/.fixtures/
