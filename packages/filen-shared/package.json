@@ -16,7 +16,8 @@
 		"./emojis": "./src/emojis/index.ts",
 		"./tooling": "./src/tooling/licenseNotices.ts",
 		"./tooling/i18n": "./src/tooling/i18nPipeline.ts",
-		"./assistant": "./src/assistant/index.ts"
+		"./assistant": "./src/assistant/index.ts",
+		"./videos": "./src/videos/index.ts"
 	},
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && tsc -p tsconfig.dom.json && tsc -p tsconfig.tooling.json",
