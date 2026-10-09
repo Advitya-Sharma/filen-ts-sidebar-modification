@@ -77,11 +77,13 @@ export const listChatsTool: ToolAdapter = async (input, scope) => {
 		value: {
 			chats: chats.slice(0, LIST_LIMIT).map(chat => {
 				const name = chatName(chat)
+				const participants = otherParticipants(chat, userId).map(participantName)
 
 				return {
 					handle: scope.show({ kind: "chat", chat }, name),
 					name,
-					participants: otherParticipants(chat, userId).map(participantName),
+					// A one-on-one chat is named after the other person, so the list would only repeat the name.
+					...(participants.length === 1 && participants[0] === name ? {} : { participants }),
 					...(chat.lastMessage === undefined ? {} : { lastActivity: isoDate(chat.lastMessage.sentTimestamp) })
 				}
 			}),

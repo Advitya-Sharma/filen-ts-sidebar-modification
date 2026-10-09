@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { QueryClient } from "@tanstack/react-query"
 import type { RegisteredRouter } from "@tanstack/react-router"
 import type { Chat, ChatMessage, Contact, Dir, File, FilePublicLink, Note, SharedRootDir, UserInfo } from "@filen/sdk-rs"
-import type { Playlist } from "@filen/shared"
-import { assistantToolByName, DIRECTORIES_BY_SIZE_NOTE, type AssistantToolFailure } from "@filen/shared/assistant"
+import { driveItemName, type Playlist } from "@filen/shared"
+import { assistantToolByName, DIRECTORIES_BY_SIZE_NOTE, LISTING_PAGE_ITEMS, type AssistantToolFailure } from "@filen/shared/assistant"
 import { testUuid } from "@/tests/support/uuid"
 
 const sdk = vi.hoisted(() => ({
@@ -88,7 +88,7 @@ import { useNotesInflightStore } from "@/features/notes/store/useNotesInflight"
 import { forgetTabEditor, seedTabEditor, tabEditorChanged } from "@/features/notes/lib/tabEditors"
 import { setAssistantRouter } from "@/features/assistant/tools/navigation"
 import { createAssistantToolExecutor } from "@/features/assistant/tools/executor"
-import { SEARCH_CAP_MS } from "@/features/assistant/tools/drive"
+import { DIRECTORY_SIZE_READS, SEARCH_CAP_MS } from "@/features/assistant/tools/drive"
 import { userCalendar } from "@/features/assistant/tools/dates"
 import { photosListingQueryOptions } from "@/features/photos/queries/photos"
 import { photosRootQueryOptions } from "@/features/photos/queries/root"
@@ -547,6 +547,53 @@ describe("list_directory", () => {
 		})
 	})
 
+	it("lists a long directory a page at a time", async () => {
+		const scans = Array.from({ length: LISTING_PAGE_ITEMS + 5 }, (_, index) =>
+			rawFile(testUuid(`scan${String(index)}`), `Scan_${String(index).padStart(3, "0")}.pdf`, ROOT, "application/pdf")
+		)
+
+		sdk.listDirectory.mockResolvedValue({ dirs: [docsRaw], files: [readmeRaw, ...scans] })
+
+		const first = json(await call("list_directory", { path: "/" }))
+		const second = json(await call("list_directory", { path: "/", offset: LISTING_PAGE_ITEMS }))
+
+		expect(first["items"]).toHaveLength(LISTING_PAGE_ITEMS)
+		expect(first).toMatchObject({ more: 7, next: LISTING_PAGE_ITEMS })
+		expect(second).toMatchObject({ offset: LISTING_PAGE_ITEMS, items: expect.any(Array) as unknown })
+		// The directory and readme.md sort first.
+		expect((second["items"] as { name: string }[]).map(item => item.name)).toEqual(
+			scans.slice(LISTING_PAGE_ITEMS - 2).map(item => driveItemName(narrowItem(item)))
+		)
+		expect(second["more"]).toBeUndefined()
+		expect(json(await call("list_directory", { path: "/", offset: 100 }))).toMatchObject({
+			items: [],
+			note: "The directory holds only 37 items."
+		})
+		// A filtered listing's count is not the directory's.
+		expect(json(await call("list_directory", { path: "/", offset: 100, kind: "directory" }))).toMatchObject({
+			items: [],
+			note: "Only 1 item matches the filters."
+		})
+	})
+
+	it("pages a size-sorted listing on the sizes its first page read, so pages neither overlap nor skip", async () => {
+		const dirs = Array.from({ length: LISTING_PAGE_ITEMS + 10 }, (_, index) =>
+			rawDir(testUuid(`box${String(index)}`), `Box_${String(index).padStart(3, "0")}`, ROOT)
+		)
+		let read = 0
+
+		sdk.listDirectory.mockResolvedValue({ dirs, files: [readmeRaw] })
+		sdk.getDirSize.mockImplementation(() => Promise.resolve({ size: BigInt(++read * 1000), files: 1n, dirs: 0n }))
+
+		const names = (outcome: CallOutcome) => (json(outcome)["items"] as { name: string }[]).map(item => item.name)
+		const first = names(await call("list_directory", { path: "/", sort: "largest" }))
+		const second = names(await call("list_directory", { path: "/", sort: "largest", offset: LISTING_PAGE_ITEMS }))
+
+		expect(sdk.getDirSize).toHaveBeenCalledTimes(DIRECTORY_SIZE_READS)
+		expect(first.filter(name => second.includes(name))).toEqual([])
+		expect(new Set([...first, ...second]).size).toBe(dirs.length + 1)
+	})
+
 	it("refuses a file handle as an invalid call", async () => {
 		await call("list_directory", {})
 
@@ -699,6 +746,12 @@ describe("chats", () => {
 		const result = await call("list_chats", { query: "anna" })
 
 		expect(json(result)).toEqual({ chats: [{ handle: "c1", name: "Team", participants: ["Anna", "Mallory"] }] })
+	})
+
+	it("names a one-on-one chat once", async () => {
+		sdk.listChats.mockResolvedValue([{ ...chat, uuid: testUuid("direct"), name: "", participants: [self, anna] }])
+
+		expect(json(await call("list_chats", {}))).toEqual({ chats: [{ handle: "c1", name: "Anna" }] })
 	})
 
 	it("reads the newest messages from the thread's own query and hides blocked senders", async () => {

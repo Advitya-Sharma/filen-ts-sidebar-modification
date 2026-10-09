@@ -1,5 +1,5 @@
 import { driveItemName, fastLocaleCompare, formatBytes } from "@filen/shared"
-import { DIRECTORIES_BY_SIZE_NOTE, MAX_ARRAY_ITEMS, type AssistantSignal } from "@filen/shared/assistant"
+import { DIRECTORIES_BY_SIZE_NOTE, listingOffset, listingPage, type AssistantSignal } from "@filen/shared/assistant"
 import type { DirSizeResponse } from "@filen/sdk-rs"
 import type { ItemInfoResult } from "@/workers/sdk.worker"
 import { log } from "@/lib/log"
@@ -68,8 +68,6 @@ const SEARCH_STALL_MS = WATCHDOG_MS
 const SEARCH_KEEP_MS = 10 * 60_000
 // The words the engine may try in turn while one matches more names than its window holds.
 const ENGINE_WORDS = 3
-// The loop shows the model at most this many items of a list: a longer listing would be cut twice.
-const LIST_LIMIT = MAX_ARRAY_ITEMS
 // read_text_file downloads the whole file, so only small ones; the model sees far less of it.
 export const TEXT_FILE_MAX_BYTES = 1_048_576n
 export const TEXT_FILE_MAX_CHARS = 4_000
@@ -152,8 +150,12 @@ export function sortListing(
 // server-side walk of the directory. The info dialog's query, so the drive's size column reuses them.
 export const DIRECTORY_SIZE_READS = 12
 
-// The total sizes of the listing's directories, from the cache or read once; `unknown` counts those left out.
-export async function directorySizes(items: readonly DriveItem[]): Promise<{ sizes: Map<string, number>; unknown: number }> {
+// The total sizes of the listing's directories, from the cache or read once (with `read`); `unknown` counts
+// those left out.
+export async function directorySizes(
+	items: readonly DriveItem[],
+	{ read: reads }: { read: boolean } = { read: true }
+): Promise<{ sizes: Map<string, number>; unknown: number }> {
 	const sizes = new Map<string, number>()
 	const missing: DirectorySizeItem[] = []
 	let unknown = 0
@@ -167,7 +169,7 @@ export async function directorySizes(items: readonly DriveItem[]): Promise<{ siz
 
 		if (cached !== undefined) {
 			sizes.set(item.data.uuid, Number(cached.size))
-		} else if (missing.length < DIRECTORY_SIZE_READS) {
+		} else if (reads && missing.length < DIRECTORY_SIZE_READS) {
 			missing.push(item)
 		} else {
 			unknown++
@@ -495,16 +497,21 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 	const kept = ofKind.filter(item => inDriveSelection(item, selection))
 	const byDate = selection.range !== null || sort === "newest" || sort === "oldest"
 	const bySize = sort === "largest" || sort === "smallest"
-	const sizes = bySize ? await directorySizes(kept) : { sizes: new Map<string, number>(), unknown: 0 }
+	// A later page reads no new sizes: the first one cached its reads, so every page sorts on the same sizes.
+	const sizes = bySize
+		? await directorySizes(kept, { read: listingOffset(input["offset"]) === 0 })
+		: { sizes: new Map<string, number>(), unknown: 0 }
 
 	throwIfStopped(scope)
 
 	const items = sortListing(kept, sort, selection.field, sizes.sizes)
+	const page = listingPage(items, input["offset"], { filtered: kept.length < listing.length })
 
 	return {
 		value: {
 			directory,
-			items: items.slice(0, LIST_LIMIT).map(item => ({
+			...(page.offset > 0 ? { offset: page.offset } : {}),
+			items: page.rows.map(item => ({
 				handle:
 					shared !== null && isDirectoryItem(item)
 						? scope.show({ kind: "drive", item, shared: [...shared, item.data.uuid] }, driveName(item))
@@ -513,10 +520,11 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 				kind: driveKind(item),
 				...listingFields(item, { date: byDate ? selection.field : null, size: bySize, directorySizes: sizes.sizes })
 			})),
-			...(items.length > LIST_LIMIT ? { more: items.length - LIST_LIMIT } : {}),
+			...(page.more > 0 ? { more: page.more, next: page.next } : {}),
 			...datesField(selection),
 			...joinNotes(
 				emptyDatesNote(selection, items.length, ofKind.length),
+				page.note === undefined ? {} : { note: page.note },
 				unknownSizesNote(sizes.unknown),
 				bySize && items.some(isDirectoryItem) ? { note: DIRECTORIES_BY_SIZE_NOTE } : {}
 			)
