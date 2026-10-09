@@ -8,6 +8,9 @@
 
 const DAY_MS = 86_400_000
 
+// The document's file in the Videos system directory.
+export const WATCH_STATE_FILE_NAME = "watch-state.v1.json"
+
 // ── Clock ────────────────────────────────────────────────────────────────────
 
 export type Hlc = number

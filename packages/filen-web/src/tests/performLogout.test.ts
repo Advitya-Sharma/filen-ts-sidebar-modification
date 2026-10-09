@@ -12,6 +12,8 @@ const {
 	runLogout,
 	notesCancel,
 	chatsCancel,
+	watchStateCancel,
+	watchStateExecuteNow,
 	cancelActiveTransfers,
 	clearAllTyping,
 	detachUnreadBadges,
@@ -41,6 +43,8 @@ const {
 		runLogout: vi.fn<(deps: LogoutDeps) => Promise<void>>(record("runLogout", () => Promise.resolve())),
 		notesCancel: vi.fn(record("notesSync.cancel", () => undefined)),
 		chatsCancel: vi.fn(record("chatsSync.cancel", () => undefined)),
+		watchStateCancel: vi.fn(record("watchState.cancel", () => undefined)),
+		watchStateExecuteNow: vi.fn(record("watchState.executeNow", () => Promise.resolve())),
 		cancelActiveTransfers: vi.fn(record("cancelActiveTransfers", () => undefined)),
 		clearAllTyping: vi.fn(record("clearAllTyping", () => undefined)),
 		detachUnreadBadges: vi.fn(record("detachUnreadBadges", () => undefined)),
@@ -64,10 +68,13 @@ const {
 
 // Every step that must run before the wipe, in the order performLogout runs them.
 const TEARDOWN_STEPS = [
+	// Journaled watch progress gets its last upload while writes are still allowed.
+	"watchState.executeNow",
 	// No assistant tool may read, navigate or play while the rest winds down.
 	"shutdownAssistant",
 	"notesSync.cancel",
 	"chatsSync.cancel",
+	"watchState.cancel",
 	"cancelActiveTransfers",
 	"clearAllTyping",
 	"detachUnreadBadges",
@@ -93,6 +100,7 @@ vi.mock("@/features/drive/lib/thumbCache", () => ({ wipeThumbnailStore, readThum
 vi.mock("@/features/videos/lib/artStore", () => ({ wipeArtStore }))
 vi.mock("@/features/videos/lib/indexStore", () => ({ wipeVideoIndexStore }))
 vi.mock("@/features/videos/lib/session", () => ({ resetVideoSession }))
+vi.mock("@/features/videos/lib/watchState", () => ({ watchState: { cancel: watchStateCancel, executeNow: watchStateExecuteNow } }))
 vi.mock("@/features/audio/lib/audioEngine", () => ({ disposeAudioEngine }))
 vi.mock("@/features/assistant/store/conversationHistory", () => ({ resetConversationHistory, withHistoryWritesHeld }))
 vi.mock("@/features/assistant/store/assistantSession", () => ({ shutdownAssistant }))

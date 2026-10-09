@@ -1294,10 +1294,39 @@ const api = {
 	// Comlink.expose proxy below, surfaced to the caller as a read-only outcome — mobile parity).
 	// Files are never cached in features/drive/lib/cache.ts (directories only — see deleteFilePermanently
 	// above), so there is nothing to evict on the old, now-stale uuid the backend rotates in.
-	async uploadFileBytes(parentUuid: string | null, data: Uint8Array, name: string, mime: string): Promise<File> {
+	// `control` bounds a background save: `deadlineMs` aborts it once that long has passed (the SDK's own lock
+	// wait is otherwise days), and `abortToken` registers it so cancelPreviewDownload(token) aborts it.
+	async uploadFileBytes(
+		parentUuid: string | null,
+		data: Uint8Array,
+		name: string,
+		mime: string,
+		control?: { deadlineMs?: number; abortToken?: string }
+	): Promise<File> {
 		const c = requireClient()
 		const parent = await resolveNormalDirParent(c, parentUuid)
-		return c.uploadFile(data, { parent, name, ...(mime ? { mime } : {}) })
+		const params = { parent, name, ...(mime ? { mime } : {}) }
+
+		if (control === undefined) {
+			return c.uploadFile(data, params)
+		}
+
+		const controller = new AbortController()
+		const signals =
+			control.deadlineMs === undefined ? [controller.signal] : [controller.signal, AbortSignal.timeout(control.deadlineMs)]
+		const token = control.abortToken
+
+		if (token !== undefined) {
+			registerPreviewAbort(token, controller)
+		}
+
+		try {
+			return await c.uploadFile(data, { ...params, managedFuture: { abortSignal: AbortSignal.any(signals) } })
+		} finally {
+			if (token !== undefined) {
+				previewAborts.delete(token)
+			}
+		}
 	},
 	// Whether `name` is taken in the directory. uploadFileBytes onto a taken file name makes a new
 	// version of THAT file, so a caller writing a fresh file checks here first.

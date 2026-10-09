@@ -16,7 +16,7 @@ import {
 	type Stamp
 } from "@filen/shared/videos"
 import { settleHeldRevisions } from "@filen/shared"
-import type { File as SdkFile, FileVersion, SocketEvent } from "@filen/sdk-rs"
+import type { File as SdkFile, SocketEvent } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
 import { runOp } from "@/lib/actions/outcome"
 import { log } from "@/lib/log"
@@ -25,6 +25,7 @@ import { readSignOutPending } from "@/lib/signOutPending"
 import { DOT_FILEN_DIR_NAME, dotFilenSubdirUuid, getDotFilenSubdir, noteDotFilenFile, onDotFilenSubdirForgotten } from "@/lib/dotFilen"
 import { queryClient } from "@/queries/client"
 import { persister } from "@/queries/persist"
+import { versionAsFile } from "@/features/videos/lib/library.logic"
 
 // The synced library configuration, `.filen/Videos/library.v1.json`: read once per session (none at all when the
 // drive hasn't changed since the cached copy was read), written only when an edit changes it. Each upload is a
@@ -138,20 +139,6 @@ function parseBytes(bytes: Uint8Array): LibraryConfigDoc | null {
 
 async function readFileDoc(file: SdkFile): Promise<LibraryConfigDoc | null> {
 	return parseBytes(await runOp(sdkApi.downloadFileBytes(file, crypto.randomUUID())))
-}
-
-// An archived version as a downloadable file: the version carries everything but the lineage's placement.
-function versionAsFile(head: SdkFile, version: FileVersion): SdkFile {
-	return {
-		...head,
-		uuid: version.uuid,
-		size: version.size,
-		chunks: version.chunks,
-		region: version.region,
-		bucket: version.bucket,
-		timestamp: version.timestamp,
-		meta: version.metadata
-	}
 }
 
 // A head that doesn't parse (a torn foreign write) is never taken for an empty document: the newest version that

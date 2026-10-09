@@ -12,6 +12,7 @@ import { clearSession, broadcastAuth } from "@/lib/sdk/session"
 import { kvClear } from "@/lib/storage/adapter"
 import { wipeImageCaches } from "@/features/shell/lib/wipeImageCaches"
 import { resetVideoSession } from "@/features/videos/lib/session"
+import { watchState } from "@/features/videos/lib/watchState"
 import { disposeAudioEngine } from "@/features/audio/lib/audioEngine"
 import { cancelActiveTransfers } from "@/features/transfers/lib/control"
 import { allowNextUnload } from "@/lib/unloadGuard"
@@ -54,6 +55,7 @@ function awaitPreviewBufferReleased(): Promise<void> {
 export function flushOutboxes(): void {
 	notesSync.executeNow()
 	chatsSync.executeNow()
+	void watchState.executeNow()
 }
 
 export interface PerformLogoutOptions {
@@ -86,6 +88,10 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 		await awaitPreviewBufferReleased()
 	}
 
+	// Watch progress journaled locally gets its last upload (the one the confirm started, joined here; at most 30 s)
+	// before the sign-out flag stops every write.
+	await watchState.executeNow()
+
 	// Nothing below can be cancelled any more. The flag lets the next boot finish a wipe this tab does not
 	// live to complete (see signOutPending.ts); the overlay covers the wait, which the thumbnail wipe can
 	// stretch to seconds.
@@ -102,6 +108,9 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 	// (useUnsyncedWork) instead of promising it syncs back on the next sign-in.
 	notesSync.cancel()
 	chatsSync.cancel()
+	// Videos watch state likewise: its upload aborts, and the progress it kept in localStorage (which the kv wipe
+	// doesn't reach) goes now.
+	watchState.cancel()
 	// Uploads, downloads and copies abort before the worker drops its client; the confirm that leads
 	// here warned about them (useHasActiveTransfers).
 	cancelActiveTransfers()

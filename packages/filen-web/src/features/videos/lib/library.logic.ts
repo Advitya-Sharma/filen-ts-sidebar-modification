@@ -1,3 +1,4 @@
+import type { File as SdkFile, FileVersion } from "@filen/sdk-rs"
 import type { VideoRootSize } from "@/workers/videoIndex/view.logic"
 
 // A root's walk is one request whose whole body the SDK buffers and parses in wasm memory, which never shrinks
@@ -10,4 +11,18 @@ export const ROOT_ENTRIES_HUGE = 50_000
 
 export function rootSize(walkedEntries: number): VideoRootSize {
 	return walkedEntries >= ROOT_ENTRIES_HUGE ? "huge" : walkedEntries >= ROOT_ENTRIES_LARGE ? "large" : "normal"
+}
+
+// An archived version as a downloadable file: the version carries everything but the lineage's placement.
+export function versionAsFile(head: SdkFile, version: FileVersion): SdkFile {
+	return {
+		...head,
+		uuid: version.uuid,
+		size: version.size,
+		chunks: version.chunks,
+		region: version.region,
+		bucket: version.bucket,
+		timestamp: version.timestamp,
+		meta: version.metadata
+	}
 }

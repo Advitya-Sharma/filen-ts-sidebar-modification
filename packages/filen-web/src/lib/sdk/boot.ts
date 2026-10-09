@@ -7,6 +7,7 @@ import { takeSeededSession } from "@/e2e-hooks/sessionSeed"
 import { kvClear, storage } from "@/lib/storage/adapter"
 import { readSignOutPending, writeSignOutPending } from "@/lib/signOutPending"
 import { wipeImageCaches } from "@/features/shell/lib/wipeImageCaches"
+import { wipePendingWatch } from "@/features/videos/lib/watchState.logic"
 import { wipeSwClient } from "@/features/drive/lib/saveDownload"
 import { isOpfsApiAvailable } from "@/lib/storage/capability"
 import { isOpfsUnavailableError } from "@/lib/storage/errors"
@@ -44,6 +45,8 @@ export function whenBootReady(): Promise<void> {
 // finds next to nothing to do. The flag clears only once all three succeeded, so a failure retries on the
 // next boot rather than being forgotten.
 async function finishPendingSignOut(): Promise<void> {
+	wipePendingWatch(() => localStorage)
+
 	const outcomes = await Promise.allSettled([kvClear(), wipeImageCaches(), wipeSwClient()])
 	const failed = outcomes.find(outcome => outcome.status === "rejected")
 
