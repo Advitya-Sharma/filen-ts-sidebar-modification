@@ -129,6 +129,58 @@ describe("resolveFileKind on a table without the audio and video siblings", () =
 	})
 })
 
+describe("resolveFileKind when none of an extension's meanings is in the table", () => {
+	it.each([
+		// Web-shaped: no .ogv or .mka.
+		[kindOf, "film.ogv", "video/ogg", null, null, "ogv", "default"],
+		[kindOf, "album.mka", "audio/mpeg", null, "audio", "mp3", "mime"],
+		[kindOf, "album.mka", "audio/x-matroska", null, null, "mka", "default"],
+		// Its usual meaning known: never falls through.
+		[kindOf, "film.ogv", "audio/ogg", null, "audio", "oga", "mime"],
+		[kindOf, "talk.webm", "text/plain", null, "video", "webm", "default"],
+		// Mobile-shaped: no .mts, .oga, .ogv, .weba or .mka.
+		[mobileKindOf, "camera.mts", "video/mp2t", null, null, "mts", "default"],
+		[mobileKindOf, "camera.mts", "video/mp4", null, null, "mts", "default"],
+		[mobileKindOf, "camera.mts", "video/mp2t", "transportStream", null, "mts", "default"],
+		[mobileKindOf, "module.mts", "application/typescript", null, "code", "ts", "mime"],
+		[mobileKindOf, "notes.mts", "text/plain", null, null, "mts", "default"],
+		[mobileKindOf, "voice.oga", "audio/mpeg", null, "audio", "mp3", "mime"],
+		[mobileKindOf, "voice.weba", "audio/wav", "audio", "audio", "wav", "mime"],
+		[mobileKindOf, "voice.weba", "video/webm", null, "video", "webm", "mime"],
+		[mobileKindOf, "voice.weba", "application/octet-stream", null, null, "weba", "default"]
+	] as const)("%#: %s (%s, verdict %s) is %s by .%s from %s", (table, name, mime, verdict, kind, extension, source) => {
+		expect(resolveFileKind({ name, mime, size: MIB, verdict }, table)).toMatchObject({ kind, extension, source, ambiguous: true })
+	})
+
+	it("reads a well-known name first, as for an unknown extension", () => {
+		expect(resolveFileKind({ name: ".env.mts", mime: "video/mp2t" }, mobileKindOf)).toMatchObject({
+			kind: null,
+			extension: "ini",
+			source: "name",
+			ambiguous: true
+		})
+	})
+
+	it("keeps sniffable as the ambiguity decides it", () => {
+		expect(resolveFileKind({ name: "notes.mts", mime: "text/plain", size: 40 * MIB }, mobileKindOf).sniffable).toBe(true)
+		expect(resolveFileKind({ name: "notes.mts", mime: "text/plain", size: 4_000 }, mobileKindOf).sniffable).toBe(false)
+		expect(resolveFileKind({ name: "voice.oga", mime: "audio/mpeg" }, mobileKindOf).sniffable).toBe(true)
+		expect(resolveFileKind({ name: "voice.oga", mime: "audio/mpeg", verdict: "audio" }, mobileKindOf).sniffable).toBe(false)
+	})
+
+	it("never makes a .ts a video by its type: its usual meaning is in both apps' tables", () => {
+		for (const table of [kindOf, mobileKindOf]) {
+			for (const mime of ["video/mp2t", "video/mp4", "audio/mpeg", "application/octet-stream", null]) {
+				expect(resolveFileKind({ name: "clip.ts", mime, size: 40 * MIB }, table)).toMatchObject({
+					kind: "code",
+					extension: "ts",
+					source: "default"
+				})
+			}
+		}
+	})
+})
+
 describe("verdictChangesKind", () => {
 	it("keeps only a verdict that moves an ambiguous file to another kind or settles a .ts", () => {
 		expect(verdictChangesKind({ name: "clip.ts", size: 40 * MIB }, "transportStream", kindOf)).toBe(true)

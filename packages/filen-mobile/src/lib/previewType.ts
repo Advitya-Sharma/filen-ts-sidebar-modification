@@ -3,7 +3,7 @@ import * as FileSystem from "expo-file-system"
 // built-in. Both are ports of the same algorithm expo-file-system vendors, so extname is identical.
 import pathModule from "path"
 import { EXPO_IMAGE_SUPPORTED_EXTENSIONS, EXPO_AUDIO_SUPPORTED_EXTENSIONS, EXPO_VIDEO_SUPPORTED_EXTENSIONS } from "@/constants"
-import { CODE_FILE_EXTENSIONS, effectiveExtension } from "@filen/shared"
+import { CODE_FILE_EXTENSIONS, resolveFileKind, type FileKind, type FileKindInput } from "@filen/shared"
 import type { DriveItemFileExtracted } from "@/types"
 
 export type PreviewType = "image" | "svg" | "rawImage" | "video" | "unknown" | "pdf" | "text" | "code" | "audio" | "docx"
@@ -74,21 +74,46 @@ const PREVIEW_TYPES: ReadonlyMap<string, PreviewType> = (() => {
 	return types
 })()
 
-function isPreviewableExtension(extension: string): boolean {
-	return PREVIEW_TYPES.has(extension)
+function previewTypeOf(extension: string): PreviewType | null {
+	return PREVIEW_TYPES.get(extension) ?? null
 }
 
-// The lowercase, dot-less extension a file's type is read from (@filen/shared's effectiveExtension): its
-// own when this app can preview it, else a well-known name's (LICENSE, Makefile, .bashrc), else its stored
-// mime's. Preview type, icon, editor language, thumbnails and the file-cache suffix all key on this, so
-// they agree. Pure string work: a file name is not a URL, so this never reaches Paths.extname (extnameOf).
+// The file's type by @filen/shared's resolveFileKind over this app's table: its own extension when the
+// table knows it and it means one thing; for one that means two (.mp4/.m4a, .ogg, .webm, .mkv, .ts) an
+// audio or video mime, else its usual meaning; else a well-known name (LICENSE, Makefile, .bashrc), else
+// its stored mime. No content verdicts: nothing here reads a file to classify it. Pure string work: a file
+// name is not a URL, so this never reaches Paths.extname (extnameOf).
+// One input reused across calls (this runs per list row): resolveFileKind is synchronous and keeps nothing.
+const kindInput: FileKindInput = { name: "", mime: null }
+
+function fileKind(name: string, mime: string | null | undefined): FileKind<PreviewType> {
+	kindInput.name = name
+	kindInput.mime = mime
+
+	return resolveFileKind(kindInput, previewTypeOf)
+}
+
+// The lowercase, dot-less extension a file's type is read from (fileKind). Preview type, icon, editor
+// language, audio tags, thumbnails and the file-cache suffix all key on this, so they agree. A mime that
+// picks a sibling this table reads as the same type (Android: .ogg with audio/ogg is .oga) keeps the name's
+// own extension: only a change of type is worth moving the cache suffix, icon and audio-tag gate.
 export function fileTypeExtension(name: string, mime?: string | null): string {
-	return effectiveExtension(name, mime, isPreviewableExtension)
+	const resolved = fileKind(name, mime)
+
+	if (!resolved.ambiguous || resolved.source !== "mime") {
+		return resolved.extension
+	}
+
+	// An ambiguous extension always follows the name's last dot.
+	const trimmed = name.trim()
+	const own = trimmed.slice(trimmed.lastIndexOf(".") + 1).toLowerCase()
+
+	return own !== resolved.extension && previewTypeOf(own) === resolved.kind ? own : resolved.extension
 }
 
 // `mime` is the file's stored metadata mime, where the caller has one; without it the name alone decides.
 export function getPreviewType(name: string, mime?: string | null): PreviewType {
-	return PREVIEW_TYPES.get(fileTypeExtension(name, mime)) ?? "unknown"
+	return fileKind(name, mime).kind ?? "unknown"
 }
 
 // An undecryptable file has neither name nor mime, and classifies "unknown".

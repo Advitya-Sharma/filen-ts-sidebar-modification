@@ -367,4 +367,10 @@ describe("resolveFileIconKey", () => {
 		expect(resolveFileIconKey("photo.jpg", "video/mp4")).toBe("image")
 		expect(resolveFileIconKey("main.rs", "text/plain")).toBe("code")
 	})
+
+	it("icons an extension that means two things by what its mime settles", () => {
+		expect(resolveFileIconKey("voice.mp4", "audio/mp4")).toBe("audio")
+		expect(resolveFileIconKey("clip.m4a", "video/mp4")).toBe("video")
+		expect(resolveFileIconKey("main.ts", "video/mp2t")).toBe("code")
+	})
 })

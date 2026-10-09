@@ -17,7 +17,9 @@ export { MIN_TRANSPORT_STREAM_BYTES }
 // 3. No or an unknown extension: a well-known name (a Makefile is code whatever its type says), else its MIME
 //    type, else unknown.
 // Whatever a verdict or a MIME type points at, an extension the caller's table does not know is passed over
-// for the next candidate: an app that has no audio Matroska keeps showing an `.mkv` as video.
+// for the next candidate: an app that has no audio Matroska keeps showing an `.mkv` as video. An extension
+// none of whose meanings the table knows is read as in 3 (an `.ogg` typed audio/opus on a table without
+// Ogg is Opus), but a `.ts` or `.mts` is still never made a media file by its type.
 
 // What a read of the file's content found.
 export type ContentVerdict = "transportStream" | "notTransportStream" | "video" | "audio"
@@ -93,14 +95,19 @@ function verdictExtension(ambiguity: Ambiguity, verdict: ContentVerdict): string
 	}
 }
 
+const AUDIO_TYPE = /^\s*audio\//i
+const VIDEO_TYPE = /^\s*video\//i
+
+function isMediaType(mime: string | null | undefined): boolean {
+	return mime !== null && mime !== undefined && (AUDIO_TYPE.test(mime) || VIDEO_TYPE.test(mime))
+}
+
 function mimeExtension(ambiguity: Ambiguity, mime: string | null | undefined): string | undefined {
 	if (!ambiguity.mimeHint || mime === null || mime === undefined) {
 		return undefined
 	}
 
-	const type = mime.trim().toLowerCase()
-
-	return type.startsWith("audio/") ? ambiguity.audio : type.startsWith("video/") ? ambiguity.video : undefined
+	return AUDIO_TYPE.test(mime) ? ambiguity.audio : VIDEO_TYPE.test(mime) ? ambiguity.video : undefined
 }
 
 // Whether a content read could still turn the file into another kind.
@@ -114,53 +121,75 @@ function sniffable(ambiguity: Ambiguity, base: string, extension: string, size: 
 	return size !== undefined && Number(size) >= MIN_TRANSPORT_STREAM_BYTES && !stem.endsWith(".d")
 }
 
+function fileKind<K>(kind: K | null, extension: string, source: FileKindSource, ambiguous: boolean, canSniff: boolean): FileKind<K> {
+	return { kind, extension, source, ambiguous, sniffable: canSniff }
+}
+
 export function resolveFileKind<K>(input: FileKindInput, kindOf: (extension: string) => K | null): FileKind<K> {
 	const base = lowerName(input.name)
 	const dot = extensionStart(base)
 	const own = dot === -1 ? "" : base.slice(dot + 1)
 	const ambiguity = AMBIGUOUS.get(own)
+	let canSniff = false
 
 	if (ambiguity !== undefined) {
 		const verdict = input.verdict ?? null
 		const byVerdict = verdict === null ? undefined : verdictExtension(ambiguity, verdict)
-		const byMime = mimeExtension(ambiguity, input.mime)
-		const known = (extension: string | undefined): extension is string => extension !== undefined && kindOf(extension) !== null
-		const extension = known(byVerdict) ? byVerdict : known(byMime) ? byMime : ambiguity.fallback
 
-		return {
-			kind: kindOf(extension),
-			extension,
-			source: known(byVerdict) ? "sniff" : known(byMime) ? "mime" : "default",
-			ambiguous: true,
-			sniffable: byVerdict === undefined && sniffable(ambiguity, base, own, input.size)
+		canSniff = byVerdict === undefined && sniffable(ambiguity, base, own, input.size)
+
+		if (byVerdict !== undefined) {
+			const kind = kindOf(byVerdict)
+
+			if (kind !== null) {
+				return fileKind(kind, byVerdict, "sniff", true, canSniff)
+			}
+		}
+
+		const byMime = mimeExtension(ambiguity, input.mime)
+
+		if (byMime !== undefined) {
+			const kind = kindOf(byMime)
+
+			if (kind !== null) {
+				return fileKind(kind, byMime, "mime", true, canSniff)
+			}
+		}
+
+		const fallbackKind = kindOf(ambiguity.fallback)
+
+		if (fallbackKind !== null) {
+			return fileKind(fallbackKind, ambiguity.fallback, "default", true, canSniff)
+		}
+
+		// None of its meanings is in the table: read it like an unknown extension below.
+	} else if (own !== "") {
+		const kind = kindOf(own)
+
+		if (kind !== null) {
+			return fileKind(kind, own, "extension", false, false)
 		}
 	}
 
-	const settled = (extension: string, source: FileKindSource): FileKind<K> => ({
-		kind: kindOf(extension),
-		extension,
-		source,
-		ambiguous: false,
-		sniffable: false
-	})
-
-	if (own !== "" && kindOf(own) !== null) {
-		return settled(own, "extension")
-	}
-
+	const ambiguous = ambiguity !== undefined
 	const byName = extensionForFileName(base)
 
 	if (byName !== null) {
-		return settled(byName, "name")
+		return fileKind(kindOf(byName), byName, "name", ambiguous, canSniff)
 	}
 
-	const byMime = extensionForMime(input.mime)
+	// An audio or video type does not make a `.ts` or `.mts` a media file here either.
+	const byMime = extensionForMime(ambiguity !== undefined && !ambiguity.mimeHint && isMediaType(input.mime) ? null : input.mime)
 
-	if (byMime !== null && kindOf(byMime) !== null) {
-		return settled(byMime, "mime")
+	if (byMime !== null) {
+		const kind = kindOf(byMime)
+
+		if (kind !== null) {
+			return fileKind(kind, byMime, "mime", ambiguous, canSniff)
+		}
 	}
 
-	return settled(own, "default")
+	return fileKind<K>(null, own, "default", ambiguous, canSniff)
 }
 
 // Whether `verdict` would change what the file resolves to, or settle a `.ts` a content read would otherwise

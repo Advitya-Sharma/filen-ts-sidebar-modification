@@ -3,7 +3,7 @@ import { vi, describe, it, expect } from "vitest"
 vi.mock("@/constants", () => {
 	const EXPO_IMAGE_SUPPORTED_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".svg"])
 	const EXPO_VIDEO_SUPPORTED_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".3gp", ".webm", ".mkv"])
-	const EXPO_AUDIO_SUPPORTED_EXTENSIONS = new Set([".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac", ".mpga"])
+	const EXPO_AUDIO_SUPPORTED_EXTENSIONS = new Set([".mp3", ".m4a", ".aac", ".wav", ".ogg", ".oga", ".flac", ".mpga"])
 
 	return {
 		EXPO_IMAGE_SUPPORTED_EXTENSIONS,
@@ -263,7 +263,7 @@ describe("isProbablyBinaryText", () => {
 //
 // getPreviewType used to route every call through FileSystem.Paths.extname, which runs
 // `new URL(name)` inside a try/catch — and on RN the global URL is Expo's pure-JS parser, so a
-// bare filename ALWAYS threw. It now reads @filen/shared's effectiveExtension, a plain string parse:
+// bare filename ALWAYS threw. It now reads @filen/shared's resolveFileKind, a plain string parse:
 // a file name is not a URL, colon or not (on device Paths.extname would drop everything after a '#').
 // ---------------------------------------------------------------------------
 
@@ -406,6 +406,40 @@ describe("fileTypeExtension", () => {
 		expect(fileTypeExtension("clip", "video/mp4")).toBe("mp4")
 		expect(fileTypeExtension("archive.zip", "application/zip")).toBe("zip")
 		expect(fileTypeExtension("noextension")).toBe("")
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Extensions that mean two things: an audio/video mime settles them, never a sibling the table lacks
+// ---------------------------------------------------------------------------
+
+describe("getPreviewType — ambiguous extensions", () => {
+	it.each([
+		["voice.mp4", "audio/mp4", "audio", "m4a"],
+		["voice.MP4", "audio/mpeg", "audio", "m4a"],
+		["clip.mp4", "video/mp4", "video", "mp4"],
+		["clip.m4a", "video/mp4", "video", "mp4"],
+		["song.m4a", "audio/mp4", "audio", "m4a"],
+		// No .weba, .mka or .ogv in the table: the usual meaning stands.
+		["talk.webm", "audio/webm", "video", "webm"],
+		["concert.mkv", "audio/x-matroska", "video", "mkv"],
+		["film.ogg", "video/ogg", "audio", "ogg"],
+		// A sibling of the same type keeps the name's own extension.
+		["Song.OGG", "audio/ogg", "audio", "ogg"],
+		["song.oga", "audio/ogg", "audio", "oga"],
+		// A mime never makes a .ts a video, and the table has no transport-stream type.
+		["main.ts", "video/mp2t", "code", "ts"],
+		["camera.mts", "video/mp2t", "unknown", "mts"],
+		["recording", "video/mp2t", "unknown", ""]
+	])("%s (%s) is %s by .%s", (name, mime, type, extension) => {
+		expect(getPreviewType(name, mime)).toBe(type)
+		expect(fileTypeExtension(name, mime)).toBe(extension)
+	})
+
+	it("reads an ambiguous extension by its usual meaning without a mime", () => {
+		expect(getPreviewType("clip.mp4")).toBe("video")
+		expect(getPreviewType("song.ogg", null)).toBe("audio")
+		expect(fileTypeExtension("song.m4a")).toBe("m4a")
 	})
 })
 

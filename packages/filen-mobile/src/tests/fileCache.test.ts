@@ -142,6 +142,20 @@ describe("FileCache", () => {
 			expect(cache.getFiles(wrapDrive(driveFileItem("file", "bare", "blob"))).file.uri).toBe(`${BASE_DIR}/bare/bare`)
 		})
 
+		it("moves the suffix of an extension that means two things only when its mime changes the type", async () => {
+			const cache = await createFileCache()
+
+			expect(cache.getFiles(wrapDrive(driveFileItem("file", "voice", "voice.mp4", "audio/mp4"))).file.uri).toBe(
+				`${BASE_DIR}/voice/voice.m4a`
+			)
+			expect(cache.getFiles(wrapDrive(driveFileItem("file", "film", "film.mp4", "video/mp4"))).file.uri).toBe(
+				`${BASE_DIR}/film/film.mp4`
+			)
+			expect(cache.getFiles(wrapDrive(driveFileItem("file", "song", "song.ogg", "audio/ogg"))).file.uri).toBe(
+				`${BASE_DIR}/song/song.ogg`
+			)
+		})
+
 		it("throws when item has no decryptedMeta", async () => {
 			const cache = await createFileCache()
 			const item: CacheItem = {
