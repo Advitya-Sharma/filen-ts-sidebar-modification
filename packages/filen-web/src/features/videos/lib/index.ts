@@ -1,5 +1,5 @@
 import * as Comlink from "comlink"
-import { activeLibraryRoots, type LibraryConfigDoc } from "@filen/shared/videos"
+import { activeLibraryOverrides, activeLibraryRoots, type LibraryConfigDoc } from "@filen/shared/videos"
 import type { File as SdkFile } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
 import { log } from "@/lib/log"
@@ -35,7 +35,11 @@ import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
 export const VIDEO_TITLE_DETAIL_KEY_PREFIX = ["videos", "title"] as const
 
 export interface VideoLibrarySnapshot {
+	// What the library shows: hidden titles left out.
 	titles: readonly VideoTitleView[]
+	// Titles a manual correction hides.
+	hidden: readonly VideoTitleView[]
+	// Every title, hidden ones included.
 	byId: ReadonlyMap<string, VideoTitleView>
 	roots: readonly VideoRootStatus[]
 	// Whether the worker has classified anything yet this session.
@@ -44,6 +48,7 @@ export interface VideoLibrarySnapshot {
 
 const EMPTY: VideoLibrarySnapshot = {
 	titles: [],
+	hidden: [],
 	byId: new Map(),
 	roots: [],
 	loaded: false
@@ -91,6 +96,8 @@ class VideoLibraryClient {
 	private homeAttempts = 0
 	private homeTimer: ReturnType<typeof setTimeout> | null = null
 	private homeRetryArmed = false
+	// The manual corrections last handed to the worker, serialized.
+	private sentOverrides = "{}"
 
 	public readonly subscribe = (listener: () => void): (() => void) => this.changes.subscribe(listener)
 
@@ -261,18 +268,33 @@ class VideoLibraryClient {
 			titles.delete(id)
 		}
 
+		const shown: VideoTitleView[] = []
+		const hidden: VideoTitleView[] = []
+
+		for (const title of titles.values()) {
+			if (title.hidden === true) {
+				hidden.push(title)
+			} else {
+				shown.push(title)
+			}
+		}
+
 		this.titles = titles
 		this.snapshot = {
 			...this.snapshot,
-			titles: [...titles.values()],
+			titles: shown,
+			hidden,
 			byId: titles,
 			loaded: true
 		}
 
-		// A title's details follow its row: one pass over the cached detail queries.
+		// A title's details follow its row: one pass over the cached detail queries (all of them on a reset, which may
+		// bring a title a detail page asked for before it was known).
 		const changed = new Set(update.reset ? [] : [...update.upserts.map(title => title.id), ...update.removed])
 
-		if (changed.size > 0) {
+		if (update.reset) {
+			void queryClient.invalidateQueries({ queryKey: VIDEO_TITLE_DETAIL_KEY_PREFIX })
+		} else if (changed.size > 0) {
 			void queryClient.invalidateQueries({
 				queryKey: VIDEO_TITLE_DETAIL_KEY_PREFIX,
 				predicate: query => typeof query.queryKey[2] === "string" && changed.has(query.queryKey[2])
@@ -361,7 +383,7 @@ class VideoLibraryClient {
 		setLibraryAccount(await sdkApi.videoIndexAccount())
 
 		const cachedConfig = cachedLibraryConfig()
-		const indexNeedsCheck = cachedConfig === undefined ? true : await sdkApi.videoIndexConfigure(indexRootsOf(cachedConfig.doc))
+		const indexNeedsCheck = cachedConfig === undefined ? true : await this.applyConfig(cachedConfig.doc)
 
 		if (!indexNeedsCheck && !libraryConfigNeedsRead()) {
 			return
@@ -370,8 +392,22 @@ class VideoLibraryClient {
 		const watermark = await sdkApi.getLastDriveEventId()
 		const config = await ensureLibraryConfig(watermark)
 
-		await sdkApi.videoIndexConfigure(indexRootsOf(config.doc))
+		await this.applyConfig(config.doc)
 		await sdkApi.videoIndexCheck(watermark)
+	}
+
+	// Hands the configuration's roots, and its corrections when they changed, to the index; resolves whether a check
+	// against the drive is needed.
+	private async applyConfig(doc: LibraryConfigDoc): Promise<boolean> {
+		const overrides = activeLibraryOverrides(doc)
+		const signature = JSON.stringify(overrides)
+
+		if (signature !== this.sentOverrides) {
+			await sdkApi.videoIndexSetOverrides(overrides)
+			this.sentOverrides = signature
+		}
+
+		return sdkApi.videoIndexConfigure(indexRootsOf(doc))
 	}
 
 	// Applies a changed root list (an edit of the configuration) to the index. Resolves once the index holds the
@@ -380,7 +416,7 @@ class VideoLibraryClient {
 		this.attach()
 
 		return {
-			scanned: (await sdkApi.videoIndexConfigure(indexRootsOf(doc))) ? sdkApi.videoIndexCheck() : Promise.resolve()
+			scanned: (await this.applyConfig(doc)) ? sdkApi.videoIndexCheck() : Promise.resolve()
 		}
 	}
 
@@ -507,6 +543,7 @@ class VideoLibraryClient {
 		this.homeItems = null
 		this.homeEnabled = false
 		this.homeWanted = this.homeConsumers > 0
+		this.sentOverrides = "{}"
 
 		if (this.homeTimer !== null) {
 			clearTimeout(this.homeTimer)

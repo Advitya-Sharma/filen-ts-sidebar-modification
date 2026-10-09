@@ -97,10 +97,11 @@ export function resolveSubtitleChoice(params: {
 		return null
 	}
 
-	if (choice.kind === "track") {
-		const track = tracks.find(entry => entry.id === choice.id)
+	// A track the item doesn't have (a stale link) is no choice at all: Smart decides, with the series' memory.
+	const picked = choice.kind === "track" ? tracks.find(entry => entry.id === choice.id) : undefined
 
-		return track?.unavailable === null ? track : null
+	if (picked !== undefined) {
+		return picked.unavailable === null ? picked : null
 	}
 
 	const index = selectSubtitleTrack(tracks.map(selectionInfo), {

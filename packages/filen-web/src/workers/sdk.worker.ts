@@ -2525,6 +2525,10 @@ const api = {
 	videoIndexConfigure(roots: IndexRootConfig[]): Promise<boolean> {
 		return videoIndex.configure(roots)
 	},
+	// Sets the library configuration's manual corrections; a changed set classifies again.
+	videoIndexSetOverrides(overrides: Parameters<VideoIndexEngine["setOverrides"]>[0]): void {
+		videoIndex.setOverrides(overrides)
+	},
 	// `watermark` is the caller's getLastDriveEventId result when it has one, so the check costs no request.
 	videoIndexCheck(watermark?: bigint): Promise<void> {
 		return videoIndex.check(watermark)

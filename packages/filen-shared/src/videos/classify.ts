@@ -79,6 +79,8 @@ export interface LibraryScanInput {
 	// Every directory below the roots, in any order. Directories whose parent is missing are skipped.
 	dirs: readonly LibraryScanDir[]
 	files: readonly LibraryScanFile[]
+	// Merge keys a manual correction keeps apart: same-titled series in different roots stay separate series.
+	splitMergeKeys?: ReadonlySet<string> | undefined
 }
 
 export interface LibraryArt {
@@ -2193,7 +2195,7 @@ class LibraryClassifier {
 			const into = series.mergeKey.length > 0 ? byKey.get(series.mergeKey) : undefined
 			const root = series.roots[0] ?? -1
 
-			if (into === undefined || into.roots.includes(root)) {
+			if (into === undefined || into.roots.includes(root) || this.input.splitMergeKeys?.has(series.mergeKey) === true) {
 				out.push(series)
 
 				if (series.mergeKey.length > 0 && into === undefined) {
@@ -2255,7 +2257,7 @@ function subtitleEntry(file: number, format: SidecarSubtitleFormat, info: Subtit
 }
 
 // Numbered and dated episodes first, by date then number; unnumbered ones last, by title.
-function compareEpisodes(a: LibraryEpisode, b: LibraryEpisode): number {
+export function compareEpisodes(a: LibraryEpisode, b: LibraryEpisode): number {
 	const aNumbered = a.date > 0 || a.episode > 0
 	const bNumbered = b.date > 0 || b.episode > 0
 

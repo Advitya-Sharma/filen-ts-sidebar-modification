@@ -21,6 +21,8 @@ import {
 } from "@/features/videos/lib/libraryView.logic"
 import { closeVideosDialogs, openVideosChooser, setVideosLibrariesOpen } from "@/features/videos/store/useVideosDialogStore"
 import { videosFocusFallback } from "@/features/videos/lib/focusTargets"
+import { unhideEdit } from "@/features/videos/lib/corrections.logic"
+import type { VideoTitleView } from "@/workers/videoIndex/view.logic"
 import { SettingsGroup, SettingsRow } from "@/features/settings/components/settingsLayout"
 import { ConfirmDialog } from "@/components/dialogs/confirmDialog"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -242,6 +244,44 @@ function RootCard({
 }
 
 // The Libraries dialog: every library directory with its include switch, type, scan state, Rescan and Remove.
+// Titles a correction hides, each with Show again (its correction keeps everything else).
+function HiddenTitles({
+	titles,
+	pending,
+	onEdit
+}: {
+	titles: readonly VideoTitleView[]
+	pending: ReadonlySet<string>
+	onEdit: (uuid: string, change: ConfigEdit) => Promise<boolean>
+}) {
+	const { t } = useTranslation("videos")
+
+	return (
+		<div className="mt-6">
+			<SettingsGroup title={t("detailHiddenTitles")}>
+				{titles.map(title => (
+					<SettingsRow
+						key={title.id}
+						label={title.title}
+						description={title.year > 0 ? String(title.year) : undefined}
+					>
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={pending.has(title.id)}
+							onClick={() => {
+								void onEdit(title.id, unhideEdit(title.id))
+							}}
+						>
+							{t("detailUnhide")}
+						</Button>
+					</SettingsRow>
+				))}
+			</SettingsGroup>
+		</div>
+	)
+}
+
 // Mounted only while open; reads the configuration and the index already held, so opening it costs no request
 // beyond resolving the directories' paths (usually cached).
 export function LibrariesDialog() {
@@ -323,6 +363,13 @@ export function LibrariesDialog() {
 									/>
 								))}
 							</SettingsGroup>
+						)}
+						{snapshot.hidden.length === 0 ? null : (
+							<HiddenTitles
+								titles={snapshot.hidden}
+								pending={pending}
+								onEdit={edit}
+							/>
 						)}
 					</div>
 					<DialogFooter className="sm:justify-between">

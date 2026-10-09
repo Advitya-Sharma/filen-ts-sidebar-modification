@@ -82,6 +82,9 @@ export interface WatchSearch {
 	file?: string
 	// "start": from the beginning instead of the resume point.
 	from?: "start"
+	// The audio track index and subtitle choice ("off" or a track id) picked on the detail page, for `file`.
+	audio?: number
+	sub?: string
 }
 
 type Panel = "episodes" | "style" | "delay" | "cast" | null
@@ -145,6 +148,15 @@ function titleLine(t: TFunction<"videos">, target: WatchItemTarget, versions: nu
 		: target.titleName
 }
 
+// The detail page's subtitle pick holds for the item it was made for.
+function initialSubtitleChoice(search: WatchSearch): ItemSubtitleChoice {
+	if (search.sub === undefined || search.file === undefined) {
+		return { key: null, choice: { kind: "auto" } }
+	}
+
+	return { key: search.file, choice: search.sub === "off" ? { kind: "off" } : { kind: "track", id: search.sub } }
+}
+
 function versionCount(detail: VideoTitleDetail | null): number {
 	return detail?.kind === "movie" ? detail.versions.length : 1
 }
@@ -174,7 +186,7 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 	const [counter] = useState(() => new StillWatchingCounter())
 	// The subtitle choice holds for the item it was made on; the next one starts from Smart again, so the series'
 	// remembered language applies.
-	const [choiceState, setChoiceState] = useState<ItemSubtitleChoice>({ key: null, choice: { kind: "auto" } })
+	const [choiceState, setChoiceState] = useState<ItemSubtitleChoice>(() => initialSubtitleChoice(search))
 	const [encodings, setEncodings] = useState<ReadonlyMap<string, string | null>>(new Map())
 	const [loadedCues, setLoadedCues] = useState<LoadedCues | null>(null)
 	const [subtitleNotice, setSubtitleNotice] = useState<string | null>(null)
@@ -430,8 +442,13 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 		advanceRef.current = null
 		prewarmed.current = null
 		autoplayFired.current = null
-		void controller.open({ target: current, start: search.from === "start" ? "start" : "resume", autoplay: advance?.how !== "ask" })
-	}, [controller, video, targetKey, search.from])
+		void controller.open({
+			target: current,
+			start: search.from === "start" ? "start" : "resume",
+			autoplay: advance?.how !== "ask",
+			...(search.audio !== undefined && search.file === current.key ? { audioIndex: search.audio } : {})
+		})
+	}, [controller, video, targetKey, search.from, search.audio, search.file])
 
 	// An embedded text track needs the remux rung (the controller restarts a direct stream on it).
 	const subtitleKind = embeddedTrack !== null ? "embedded-text" : subtitleUuid !== null ? "sidecar" : "none"

@@ -42,15 +42,29 @@ export interface LibraryPrefRecord extends RegisterRecord {
 }
 
 // A manual correction, keyed `d:<directory uuid>` (a title with its own directory, a series) or
-// `s:<stable uuid>` (a single file); one register, edited as a whole.
+// `s:<stable uuid>` (a single file, an episode by its first file); one register, edited as a whole.
 export interface LibraryOverride {
 	title?: string
 	year?: number
-	kind?: "movie" | "series" | "other"
+	// What the item is shown as. "episode" needs `season` and `episode`; "series" is reserved.
+	kind?: "movie" | "series" | "other" | "episode"
+	season?: number
+	episode?: number
+	// Last episode a multi-episode file holds (`episode` when absent).
+	episodeEnd?: number
 	hidden?: boolean
-	// Key of the title this one is shown as part of.
+	// Key of the title this one is shown as part of: the series a series is merged into, or an episode belongs to.
 	mergeInto?: string
+	// Stored under `m:<merge key>`: same-titled series in different roots are kept apart instead of merged.
+	split?: boolean
 }
+
+const OVERRIDE_KINDS: ReadonlySet<unknown> = new Set(["movie", "series", "other", "episode"])
+
+function isOverrideKind(value: unknown): value is NonNullable<LibraryOverride["kind"]> {
+	return OVERRIDE_KINDS.has(value)
+}
+const MAX_OVERRIDE_TITLE = 256
 
 export interface LibraryOverrideRecord extends RegisterRecord {
 	o?: Stamp & LibraryOverride & Record<string, unknown>
@@ -233,6 +247,83 @@ export function libraryOverride(doc: LibraryConfigDoc, key: string): LibraryOver
 	return doc.overrides[key]?.o ?? null
 }
 
+function isCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100_000
+}
+
+// The fields of a stored correction this version understands, each checked (the file is written by any device).
+function cleanOverride(register: Record<string, unknown>): LibraryOverride {
+	const out: LibraryOverride = {}
+	const { title, year, kind, season, episode, episodeEnd, hidden, mergeInto, split } = register
+
+	if (typeof title === "string" && title.trim().length > 0) {
+		out.title = title.trim().slice(0, MAX_OVERRIDE_TITLE)
+	}
+
+	if (typeof year === "number" && Number.isInteger(year) && year >= 1800 && year <= 2200) {
+		out.year = year
+	}
+
+	if (isOverrideKind(kind)) {
+		out.kind = kind
+	}
+
+	if (isCount(season)) {
+		out.season = season
+	}
+
+	if (isCount(episode)) {
+		out.episode = episode
+	}
+
+	if (isCount(episodeEnd)) {
+		out.episodeEnd = episodeEnd
+	}
+
+	if (hidden === true) {
+		out.hidden = true
+	}
+
+	if (typeof mergeInto === "string" && mergeInto.length > 0) {
+		out.mergeInto = mergeInto
+	}
+
+	if (split === true) {
+		out.split = true
+	}
+
+	return out
+}
+
+// The stored correction under `key` as written, unknown fields included (what an edit must carry through); null
+// when there is none.
+export function rawLibraryOverride(doc: LibraryConfigDoc, key: string): Record<string, unknown> | null {
+	const register = doc.overrides[key]?.o
+
+	if (register === undefined) {
+		return null
+	}
+
+	const { t: _t, d: _d, ...fields } = register
+
+	return fields
+}
+
+// Every live correction, by key, with only the fields this version understands.
+export function activeLibraryOverrides(doc: LibraryConfigDoc): Record<string, LibraryOverride> {
+	const out: Record<string, LibraryOverride> = {}
+
+	for (const key in doc.overrides) {
+		const register = doc.overrides[key]?.o
+
+		if (register !== undefined) {
+			out[key] = cleanOverride(register)
+		}
+	}
+
+	return out
+}
+
 // ── Edits ────────────────────────────────────────────────────────────────────
 
 function withRecord<K extends "roots" | "prefs" | "overrides">(
@@ -351,7 +442,8 @@ export function withLibraryOverride({
 }: {
 	doc: LibraryConfigDoc
 	key: string
-	override: LibraryOverride | null
+	// Unknown fields (a newer version's) are written as given.
+	override: LibraryOverride | Readonly<Record<string, unknown>> | null
 	stamp: Stamp
 	at: number
 }): LibraryConfigDoc {

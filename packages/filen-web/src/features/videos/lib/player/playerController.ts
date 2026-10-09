@@ -1,5 +1,5 @@
 import type { File as SdkFile } from "@filen/sdk-rs"
-import { CueBuilder, itemKey, selectAudioTrack, seriesKey, type CueStore, type ItemRec, type LadderSubtitle } from "@filen/shared/videos"
+import { CueBuilder, itemKey, seriesKey, type CueStore, type ItemRec, type LadderSubtitle } from "@filen/shared/videos"
 import type { RemuxTextCue } from "@/lib/media/remuxTypes"
 import { openPlayback, type Playback, type PlaybackSnapshot } from "@/lib/media/playback/openPlayback"
 import type { VideoProbe } from "@/lib/media/probe/types"
@@ -13,6 +13,7 @@ import { captureFrameFromVideo } from "@/features/videos/lib/frames"
 import { storeCapturedFrame } from "@/features/videos/lib/artwork"
 import { planStart, type StartRequest } from "@/features/videos/lib/player/resume.logic"
 import { stackProgress, type WatchItemTarget } from "@/features/videos/lib/player/watchTarget.logic"
+import { defaultAudioIndex } from "@/features/videos/lib/player/audioChoice.logic"
 
 // Plays watch targets on the stage's one <video> element: finds the files, probes them (cached), opens the
 // playback ladder at the resume point, follows stacked parts, and reports progress to the watch state.
@@ -54,8 +55,6 @@ const IDLE: PlayerSnapshot = {
 }
 
 // Audio codecs every browser decodes without transcoding: what a default track choice prefers.
-const NATIVE_AUDIO: ReadonlySet<string> = new Set(["aac", "mp3", "opus", "vorbis", "flac"])
-
 // The player waits this long at most for the watch state's first read (another device's newer resume point)
 // before it starts from what it has; a flush in another tab can hold the lock much longer.
 export const WATCH_STATE_WAIT_MS = 1500
@@ -73,6 +72,8 @@ export interface OpenRequest {
 	start: StartRequest
 	// Started by the user (a click) rather than by autoplay: play() is expected to be allowed.
 	autoplay: boolean
+	// An audio track picked before opening (the detail page); the automatic choice when absent or out of range.
+	audioIndex?: number
 }
 
 export class PlayerController {
@@ -98,6 +99,8 @@ export class PlayerController {
 	private embeddedKeys = new Set<string>()
 	// What the ladder is told about subtitles: an embedded text track needs the remux rung.
 	private subtitleKind: LadderSubtitle = "none"
+	// The audio track picked before opening, for the next part opened only.
+	private pickedAudio: number | null = null
 
 	public readonly subscribe = (listener: () => void): (() => void) => this.changes.subscribe(listener)
 
@@ -158,6 +161,8 @@ export class PlayerController {
 
 		const { target } = request
 		const keepTarget = this.snapshot.target?.key === target.key
+
+		this.pickedAudio = request.audioIndex ?? null
 
 		this.embedded = new Map()
 		this.embeddedStores = new Map()
@@ -450,18 +455,14 @@ export class PlayerController {
 		}
 
 		const series = target.seriesDirUuid === null ? undefined : watchState.getSnapshot().doc.series[seriesKey(target.seriesDirUuid)]
-		const audioIndex = selectAudioTrack(
-			probe.audio.map(track => ({ lang: track.lang, default: track.def })),
-			{
-				userLanguages: userLanguages(),
-				rememberedLang: series?.al?.v ?? null,
-				playable: (_track, index) => {
-					const codec = probe.audio[index]?.codec ?? null
+		const picked = this.pickedAudio
 
-					return codec !== null && NATIVE_AUDIO.has(codec)
-				}
-			}
-		)
+		this.pickedAudio = null
+
+		const audioIndex =
+			picked !== null && picked < probe.audio.length
+				? picked
+				: defaultAudioIndex({ probe, rememberedLang: series?.al?.v ?? null, userLanguages: userLanguages() })
 
 		this.update({ probe, part, audioIndex, resumedAt, partDurations, autoplayBlocked: false })
 

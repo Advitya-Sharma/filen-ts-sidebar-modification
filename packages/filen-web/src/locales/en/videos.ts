@@ -613,5 +613,173 @@ export const videos = {
 	/** Post-play — plays the same item again */
 	upNextPlayAgain: "Play again",
 	/** Post-play — plays the next unwatched item; {{title}} */
-	upNextNextTitle: "Next: {{title}}"
+	upNextNextTitle: "Next: {{title}}",
+
+	// ── Title pages (movie, other video, series) ───────────────────────────────
+	/** Browser tab title of a title's page */
+	detailPageTitle: "Details",
+	/** Title page — back to where it was opened from */
+	detailBack: "Back",
+	/** Home hero — opens the title's page */
+	detailMoreInfo: "More info",
+	/** Title page — eyebrow above a movie's title */
+	detailEyebrowMovie: "Movie",
+	/** Title page — eyebrow above another video's title */
+	detailEyebrowOther: "Video",
+	/** Title page — eyebrow above a series' title */
+	detailEyebrowSeries: "Series",
+	/** Title page — accessible label of the More menu trigger; {{title}} */
+	detailMenu: "More options for {{title}}",
+	/** More menu — submenu choosing the version to play */
+	detailVersions: "Versions",
+	/** More menu — opens the file's directory in Cloud Drive */
+	detailRevealInDrive: "Show in Cloud Drive",
+	/** More menu — downloads the file */
+	detailDownload: "Download",
+	/** More menu — opens the corrections dialog */
+	detailEdit: "Edit details…",
+	/** More menu — hides the title from Videos */
+	detailHide: "Hide from Videos",
+	/** More menu — shows a hidden title again */
+	detailUnhide: "Show in Videos again",
+	/** Toast — the file is no longer in the library */
+	detailFileGone: "This file is no longer in the library.",
+	/** Title page — what is left of the resume point; {{time}} = e.g. 1h 31m */
+	detailTimeLeft: "{{time}} left",
+	/** Title page — label of the version select */
+	detailVersion: "Version",
+	/** Version select — a version without a name; {{number}} */
+	detailVersionNumber: "Version {{number}}",
+	/** Version badge — plays as the file is */
+	detailBadgeDirect: "Direct",
+	/** Version badge — repackaged for this browser while it plays */
+	detailBadgeRemux: "Remux",
+	/** Version badge — this browser can't play it */
+	detailBadgeUnsupported: "Not playable",
+	/** Synopsis — expands the clamped text */
+	detailMore: "More",
+	/** Synopsis — collapses it again */
+	detailLess: "Less",
+	/** Title page — cast names from the .nfo; {{names}} */
+	detailCast: "Cast: {{names}}",
+	/** Title page — heading of the extras shelf */
+	detailExtras: "Extras",
+	/** Extra type */
+	detailExtraTrailer: "Trailer",
+	/** Extra type */
+	detailExtraFeaturette: "Featurette",
+	/** Extra type */
+	detailExtraBehindTheScenes: "Behind the scenes",
+	/** Extra type */
+	detailExtraDeletedScene: "Deleted scene",
+	/** Extra type */
+	detailExtraInterview: "Interview",
+	/** Extra type */
+	detailExtraScene: "Scene",
+	/** Extra type */
+	detailExtraShort: "Short",
+	/** Extra type */
+	detailExtraClip: "Clip",
+	/** Extra type */
+	detailExtraUnknown: "Extra",
+	/** Extras shelf — accessible name of a card; {{type}}, {{title}} */
+	detailExtraLabel: "{{type}}: {{title}}",
+	/** Series page — the smart button resuming an episode; {{code}} = S2E5, {{left}} = e.g. 21 min left */
+	detailResumeEpisode: "Resume {{code}} · {{left}}",
+	/** Series page — the smart button playing the next episode; {{code}} = S2E6 */
+	detailPlayEpisode: "Play {{code}}",
+	/** Series page metadata — number of seasons (singular) */
+	detailSeasonCount_one: "{{count, number}} season",
+	/** Series page metadata — number of seasons (plural) */
+	detailSeasonCount_other: "{{count, number}} seasons",
+	/** Series page metadata — number of episodes (singular) */
+	detailEpisodeCount_one: "{{count, number}} episode",
+	/** Series page metadata — number of episodes (plural) */
+	detailEpisodeCount_other: "{{count, number}} episodes",
+	/** Series page metadata — unwatched episodes */
+	detailUnwatchedCount_one: "{{count, number}} unwatched",
+	/** Series page metadata — unwatched episodes */
+	detailUnwatchedCount_other: "{{count, number}} unwatched",
+	/** Series page — accessible name of the season tabs or select */
+	detailSeasons: "Seasons",
+	/** Season select — a season whose episodes are all watched; {{number}} */
+	detailSeasonWatched: "Season {{number}} · watched",
+	/** Season select — unwatched episodes in a season (singular) */
+	detailSeasonUnwatched_one: "Season {{number}} · {{count, number}} unwatched",
+	/** Season select — unwatched episodes in a season (plural) */
+	detailSeasonUnwatched_other: "Season {{number}} · {{count, number}} unwatched",
+	/** Series page — accessible label of the season menu; {{number}} */
+	detailSeasonMenu: "More options for season {{number}}",
+	/** Season menu */
+	detailMarkSeasonWatched: "Mark season watched",
+	/** Season menu */
+	detailMarkSeasonUnwatched: "Mark season unwatched",
+	/** Series page — marks every episode watched */
+	detailMarkSeriesWatched: "Mark series watched",
+	/** Series page — marks every episode unwatched */
+	detailMarkSeriesUnwatched: "Mark series unwatched",
+	/** Series page — collapsed specials (season 0) (singular) */
+	detailSpecials_one: "Specials ({{count, number}})",
+	/** Series page — collapsed specials (season 0) (plural) */
+	detailSpecials_other: "Specials ({{count, number}})",
+	/** Episode row — accessible label of its menu; {{title}} */
+	detailEpisodeMenu: "More options for {{title}}",
+	/** Episode menu — opens the corrections dialog for the episode */
+	detailEditEpisode: "Edit episode…",
+	/** Title page — the title isn't in the library */
+	detailNotFound: "Not in your library",
+	/** Title page — why it may be missing */
+	detailNotFoundDescription: "It may have been moved, deleted or hidden, or its library directory removed.",
+
+	// ── Corrections dialog ─────────────────────────────────────────────────────
+	/** Corrections dialog — title for a movie, video or series */
+	detailEditTitle: "Edit details",
+	/** Corrections dialog — title for an episode */
+	detailEditEpisodeTitle: "Edit episode",
+	/** Corrections dialog — description */
+	detailEditDescription: "Corrections are saved with your library and win over what the file names say.",
+	/** Corrections field */
+	detailFieldTitle: "Title",
+	/** Corrections field */
+	detailFieldYear: "Year",
+	/** Corrections field — error */
+	detailFieldYearInvalid: "Enter a year between 1800 and 2200, or leave it empty.",
+	/** Corrections field — what the item is shown as */
+	detailFieldKind: "Show as",
+	/** Show as option */
+	detailKindMovie: "Movie",
+	/** Show as option */
+	detailKindEpisode: "Episode",
+	/** Show as option */
+	detailKindOther: "Other video",
+	/** Corrections field — the series an episode belongs to */
+	detailFieldSeries: "Series",
+	/** Series option — a new series named after the item; {{title}} */
+	detailNewSeries: "New series: {{title}}",
+	/** Corrections field */
+	detailFieldSeason: "Season",
+	/** Corrections field */
+	detailFieldEpisode: "Episode",
+	/** Corrections field — error */
+	detailFieldEpisodeRequired: "An episode needs its season and episode number.",
+	/** Corrections field — hides the title from home, grids and search */
+	detailFieldHidden: "Hide from Videos",
+	/** Corrections — merge a series into another */
+	detailMergeInto: "Merge into another series",
+	/** Merge select — nothing chosen yet */
+	detailMergeChoose: "Choose a series",
+	/** Corrections — merges */
+	detailMerge: "Merge",
+	/** Corrections — what Split does */
+	detailSplitDescription: "Shows the series merged into this one, or found in other library directories, on their own again.",
+	/** Corrections — splits */
+	detailSplit: "Split",
+	/** Corrections — removes every correction of the item */
+	detailReset: "Reset corrections",
+	/** Corrections — saves */
+	detailSave: "Save",
+	/** Libraries dialog — hidden titles, with a way to show them again */
+	detailHiddenTitles: "Hidden titles",
+	/** Corrections field — last episode a multi-episode file holds; optional */
+	detailFieldEpisodeEnd: "Last episode (optional, for a multi-episode file)"
 } as const

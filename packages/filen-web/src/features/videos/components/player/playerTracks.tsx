@@ -7,6 +7,7 @@ import { playbackCapabilities } from "@/lib/media/playback/capabilities"
 import { streamFacts, toLadderProbe } from "@/lib/media/playback/capabilities.logic"
 import type { ProbeAudio, VideoProbe } from "@/lib/media/probe/types"
 import type { PlayerSubtitleTrack, SubtitleChoice } from "@/features/videos/lib/player/subtitles.logic"
+import { channelLabel } from "@/features/videos/lib/player/trackLabels.logic"
 import type { VideoFileRef } from "@/workers/videoIndex/view.logic"
 
 // The Videos player's audio and subtitle choices in the 7T1 popover: labels from the probe and the sidecar
@@ -23,23 +24,6 @@ const CODEC_NAMES: Readonly<Record<string, string>> = {
 	vorbis: "Vorbis",
 	flac: "FLAC",
 	alac: "ALAC"
-}
-
-function channelLabel(channels: number | null, t: (key: "playerChannelsMono" | "playerChannelsStereo") => string): string | null {
-	switch (channels) {
-		case null:
-			return null
-		case 1:
-			return t("playerChannelsMono")
-		case 2:
-			return t("playerChannelsStereo")
-		case 6:
-			return "5.1"
-		case 8:
-			return "7.1"
-		default:
-			return `${String(channels)} ch`
-	}
 }
 
 // Which audio tracks this browser plays only re-encoded, asked when the menu opens (decoder answers are kept

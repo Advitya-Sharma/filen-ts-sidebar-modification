@@ -474,6 +474,21 @@ describe("watch-state flush requests", () => {
 		expect(server.headDoc().items[itemKey(item.stableUuid)]?.w?.pl).toBe(false)
 	})
 
+	it("marks a whole season watched as one edit: one debounced flush, one upload", async () => {
+		const { engine } = openTab()
+		const episodes = Array.from({ length: 12 }, () => movie({ itemClass: "episode" }))
+
+		await engine.markWatched({ stableUuids: episodes.map(episode => episode.stableUuid) })
+		await advance(1_000, engine)
+
+		expect(server.counts.upload).toBe(0)
+
+		await advance(2_000, engine)
+
+		expect(server.counts).toEqual({ getFile: 0, list: 1, download: 0, upload: 1, versions: 0, deletes: 0 })
+		expect(episodes.every(episode => server.headDoc().items[itemKey(episode.stableUuid)]?.w?.pl === true)).toBe(true)
+	})
+
 	it("never uploads unchanged state", async () => {
 		const tab = openTab()
 		const { engine } = tab

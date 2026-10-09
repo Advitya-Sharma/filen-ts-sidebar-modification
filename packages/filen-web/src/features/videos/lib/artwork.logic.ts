@@ -10,6 +10,7 @@ import {
 } from "@filen/shared/videos"
 import type { Rgb, Size } from "@/lib/media/framePick.logic"
 import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
+import type { ProbeCover, VideoProbe } from "@/lib/media/probe/types"
 
 // Which image fills a title's poster, backdrop or still: an ordered list of candidate sources per slot,
 // decided from the library listing alone (zero bytes read); a loader then tries them in order and the
@@ -179,8 +180,15 @@ export function artCandidates(library: VideoLibrary, subject: ArtSubject, slot: 
 			}
 
 			if (slot === "b") {
-				return list.file("sidecar", nfo?.backdrop).file("sidecar", movie.art.backdrop).file("frame", video).synthetic("gradient")
-					.items
+				// A Matroska file may carry a landscape cover (`cover_land.*`), read once its probe locates it.
+				const landscape = primaryVideo(library, movie.versions)?.container === "mkv" ? video : NO_FILE
+
+				return list
+					.file("sidecar", nfo?.backdrop)
+					.file("sidecar", movie.art.backdrop)
+					.file("embedded", landscape)
+					.file("frame", video)
+					.synthetic("gradient").items
 			}
 
 			const own = primaryVideo(library, movie.versions)
@@ -264,4 +272,24 @@ export function titleColour(title: string): Rgb {
 	}
 
 	return [channel(1 / 3), channel(0), channel(-1 / 3)]
+}
+
+function isCoverSpan(value: unknown): value is ProbeCover {
+	if (typeof value !== "object" || value === null) {
+		return false
+	}
+
+	const span: Partial<Record<keyof ProbeCover, unknown>> = value
+
+	return typeof span.offset === "number" && typeof span.size === "number" && typeof span.mime === "string" && span.size > 0
+}
+
+// Where a file's landscape cover (Matroska `cover_land.*`, by name) sits, as its probe recorded it: the backdrop an
+// embedded source yields. Null until the probe records one (`coverLand`).
+export function probeLandscapeCover(probe: VideoProbe | null | undefined): ProbeCover | null {
+	if (probe === null || probe === undefined || !("coverLand" in probe)) {
+		return null
+	}
+
+	return isCoverSpan(probe.coverLand) ? probe.coverLand : null
 }

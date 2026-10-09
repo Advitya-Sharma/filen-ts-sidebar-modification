@@ -17,6 +17,8 @@ export interface NfoData {
 	genres: string[]
 	tags: string[]
 	studios: string[]
+	// Actor names (`<actor><name>`), in file order.
+	cast: string[]
 	season?: number
 	episode?: number
 	episodeEnd?: number
@@ -154,8 +156,9 @@ function endOfLastRoot(text: string): number {
 	return best === -1 ? text.length : best
 }
 
-// Worker-safe tokenizer for Kodi/Jellyfin `.nfo` files (no DOMParser). Only direct children of the root are read; for
-// repeated scalar tags the last one wins. Several `<episodedetails>` roots widen `episodeEnd`. null when there is no known root.
+// Worker-safe tokenizer for Kodi/Jellyfin `.nfo` files (no DOMParser). Only direct children of the root, and actors'
+// names, are read; for repeated scalar tags the last one wins. Several `<episodedetails>` roots widen `episodeEnd`.
+// null when there is no known root.
 export function parseNfo(input: string): NfoData | null {
 	const source = input.length > MAX_NFO_CHARS ? input.slice(0, MAX_NFO_CHARS) : input
 	const text = source.charCodeAt(0) === 0xfeff ? source.slice(1) : source
@@ -165,13 +168,16 @@ export function parseNfo(input: string): NfoData | null {
 		kind: "movie",
 		genres: [],
 		tags: [],
-		studios: []
+		studios: [],
+		cast: []
 	}
 	const dates: { premiered?: string; aired?: string; releasedate?: string } = {}
 	let rootCount = 0
 	let rootActive = false
 	let secondaryRoot = false
 	let captureName: string | null = null
+	// Stack depth the captured element sits at: 1 for a field, 2 for an actor's name.
+	let captureDepth = 1
 	let captureText = ""
 	let gt = -1
 	let i = 0
@@ -262,6 +268,10 @@ export function parseNfo(input: string): NfoData | null {
 				break
 			case "studio":
 				pushUnique(data.studios, value)
+
+				break
+			case "actor":
+				pushUnique(data.cast, value)
 
 				break
 			case "season":
@@ -420,7 +430,7 @@ export function parseNfo(input: string): NfoData | null {
 			const at = stack.lastIndexOf(name)
 
 			if (at !== -1) {
-				const wasCapturing = captureName !== null && at <= 1
+				const wasCapturing = captureName !== null && at <= captureDepth
 
 				stack.length = at
 
@@ -453,11 +463,16 @@ export function parseNfo(input: string): NfoData | null {
 			}
 		} else if (stack.length === 1 && rootActive && FIELDS.has(name) && captureName === null) {
 			captureName = name
+			captureDepth = 1
+			captureText = ""
+		} else if (stack.length === 2 && rootActive && !secondaryRoot && name === "name" && stack[1] === "actor" && captureName === null) {
+			captureName = "actor"
+			captureDepth = 2
 			captureText = ""
 		}
 
 		if (selfClosing) {
-			if (captureName === name && stack.length === 1) {
+			if ((captureName === name || (captureDepth === 2 && name === "name")) && stack.length === captureDepth) {
 				captureName = null
 				captureText = ""
 			}

@@ -1,5 +1,8 @@
 import {
 	NO_FILE,
+	episodeOverrideKey,
+	seriesOverrideKey,
+	titleOverrideKey,
 	type ExtraType,
 	type LibraryArt,
 	type LibraryEpisode,
@@ -9,7 +12,8 @@ import {
 	type LibrarySubtitle,
 	type LibraryVersion,
 	type SidecarSubtitleFormat,
-	type VideoLibrary
+	type VideoLibrary,
+	type CorrectionOriginal
 } from "@filen/shared/videos"
 import type { IndexFile } from "@/workers/videoIndex/rootIndex.logic"
 import { artCandidates, type ArtCandidate, type ArtSubject } from "@/features/videos/lib/artwork.logic"
@@ -53,6 +57,11 @@ export interface VideoTitleView {
 	extraCount: number
 	seasonCount: number
 	episodeCount: number
+	// A manual correction hides it: left out of home rows, grids and search, still reachable to unhide.
+	hidden?: true
+	// Changes with the title's versions, extras, seasons and episodes (by stable uuid: a new version of a file isn't a
+	// change), so a change only they see still refreshes its detail (set by buildTitles).
+	detailHash?: number
 }
 
 export interface VideoSubtitleView {
@@ -95,6 +104,17 @@ export interface VideoEpisodeView {
 	title: string
 	dateAdded: number
 	versions: VideoVersionView[]
+	// Where its manual correction is stored when that isn't its own key (`s:` + its first file's stable uuid).
+	overrideKey?: string
+	// What the classifier made of it, when a correction applies.
+	original?: CorrectionOriginal
+}
+
+// A title detail's correction context: where its correction is stored (always set by buildTitleDetail) and, when one
+// applies, what the classifier made of the title.
+export interface DetailCorrection {
+	overrideKey?: string
+	original?: CorrectionOriginal
 }
 
 export interface VideoSeasonView {
@@ -107,9 +127,23 @@ export interface VideoSeasonView {
 }
 
 export type VideoTitleDetail =
-	| { kind: "movie"; title: VideoTitleView; versions: VideoVersionView[]; extras: VideoExtraView[]; nfo: VideoFileRef | null }
-	| { kind: "series"; title: VideoTitleView; seasons: VideoSeasonView[]; extras: VideoExtraView[]; nfo: VideoFileRef | null }
-	| { kind: "other"; title: VideoTitleView; part: VideoPartView | null }
+	| ({
+			kind: "movie"
+			title: VideoTitleView
+			versions: VideoVersionView[]
+			extras: VideoExtraView[]
+			nfo: VideoFileRef | null
+	  } & DetailCorrection)
+	| ({
+			kind: "series"
+			title: VideoTitleView
+			seasons: VideoSeasonView[]
+			extras: VideoExtraView[]
+			nfo: VideoFileRef | null
+			// Roots the classifier itself merged this series from (same title and year); 1 when it didn't.
+			autoMergedRoots?: number
+	  } & DetailCorrection)
+	| ({ kind: "other"; title: VideoTitleView; part: VideoPartView | null } & DetailCorrection)
 
 export type VideoRootSize = "normal" | "large" | "huge"
 
@@ -167,21 +201,42 @@ export type VideoIndexUpdate =
 // The classifier's file indices resolved against the files it was given.
 export class LibraryFiles {
 	public readonly library: VideoLibrary
+	// Titles a manual correction hides, and episodes whose correction lives under another key (applyLibraryOverrides).
+	public readonly hidden: ReadonlySet<string>
+	public readonly titleKeys: ReadonlyMap<string, string>
+	public readonly episodeKeys: ReadonlyMap<string, string>
+	public readonly originals: ReadonlyMap<string, CorrectionOriginal>
+	public readonly autoMerged: ReadonlyMap<string, number>
 	private readonly files: readonly IndexFile[]
 	private readonly rootUuids: readonly string[]
 
 	public constructor({
 		library,
 		files,
-		rootUuids
+		rootUuids,
+		hidden = new Set(),
+		titleKeys = new Map(),
+		episodeKeys = new Map(),
+		originals = new Map(),
+		autoMerged = new Map()
 	}: {
 		library: VideoLibrary
 		files: readonly IndexFile[]
 		rootUuids: readonly string[]
+		hidden?: ReadonlySet<string>
+		titleKeys?: ReadonlyMap<string, string>
+		episodeKeys?: ReadonlyMap<string, string>
+		originals?: ReadonlyMap<string, CorrectionOriginal>
+		autoMerged?: ReadonlyMap<string, number>
 	}) {
 		this.library = library
 		this.files = files
 		this.rootUuids = rootUuids
+		this.hidden = hidden
+		this.titleKeys = titleKeys
+		this.episodeKeys = episodeKeys
+		this.originals = originals
+		this.autoMerged = autoMerged
 	}
 
 	public file(index: number): IndexFile | undefined {
@@ -320,6 +375,66 @@ function playable(files: LibraryFiles, versions: readonly LibraryVersion[]): Pic
 // Every title of the library, in classifier order.
 export function buildTitles(files: LibraryFiles): VideoTitleView[] {
 	const library = files.library
+	const hashes = new Map<string, number>()
+
+	for (const movie of library.movies) {
+		hashes.set(movie.id, versionsHash(files, movie.versions, movie.extras, 0x811c9dc5))
+	}
+
+	for (const series of library.series) {
+		let hash = versionsHash(files, [], series.extras, 0x811c9dc5)
+
+		for (const season of series.seasons) {
+			for (const episode of season.episodes) {
+				hash = fnv(
+					`${String(episode.season)}.${String(episode.episode)}.${String(episode.episodeEnd)}.${String(episode.date)}.${episode.title}`,
+					versionsHash(files, episode.versions, [], hash)
+				)
+			}
+		}
+
+		hashes.set(series.id, hash)
+	}
+
+	return buildVisibleTitles(files).map(title => {
+		const detailHash = hashes.get(title.id)
+		const withHash = detailHash === undefined ? title : { ...title, detailHash }
+
+		return files.hidden.has(title.id) ? { ...withHash, hidden: true } : withHash
+	})
+}
+
+// 32-bit FNV-1a over `text`, continuing from `hash`.
+function fnv(text: string, hash: number): number {
+	let out = hash
+
+	for (let i = 0; i < text.length; i++) {
+		out = Math.imul(out ^ text.charCodeAt(i), 16_777_619) >>> 0
+	}
+
+	return out
+}
+
+function versionsHash(files: LibraryFiles, versions: readonly LibraryVersion[], extras: readonly LibraryExtra[], seed: number): number {
+	let hash = seed
+
+	for (const version of versions) {
+		hash = fnv(version.label, hash)
+
+		for (const video of version.parts) {
+			hash = fnv(files.file(files.library.videos[video]?.file ?? NO_FILE)?.stableUuid ?? "", hash)
+		}
+	}
+
+	for (const extra of extras) {
+		hash = fnv(`${extra.type}${extra.title}${files.file(files.library.videos[extra.video]?.file ?? NO_FILE)?.stableUuid ?? ""}`, hash)
+	}
+
+	return hash
+}
+
+function buildVisibleTitles(files: LibraryFiles): VideoTitleView[] {
+	const library = files.library
 	const out: VideoTitleView[] = []
 
 	for (const movie of library.movies) {
@@ -401,6 +516,40 @@ export function buildTitles(files: LibraryFiles): VideoTitleView[] {
 	return out
 }
 
+function episodeView(files: LibraryFiles, episode: LibraryEpisode): VideoEpisodeView {
+	const versions = files.versions(episode.versions)
+	const first = versions[0]?.parts[0]?.file.stableUuid
+	const overrideKey = first === undefined ? undefined : files.episodeKeys.get(first)
+	const original = first === undefined ? undefined : files.originals.get(overrideKey ?? episodeOverrideKey(first))
+
+	return {
+		season: episode.season,
+		episode: episode.episode,
+		episodeEnd: episode.episodeEnd,
+		date: episode.date,
+		title: episode.title,
+		dateAdded: episode.dateAdded,
+		versions,
+		...(overrideKey === undefined ? {} : { overrideKey }),
+		...(original === undefined ? {} : { original })
+	}
+}
+
+// Where a title's correction is stored, and what the classifier made of it when one applies.
+function detailCorrection(files: LibraryFiles, title: VideoTitleView, stableUuids: readonly string[]): DetailCorrection {
+	const overrideKey =
+		title.kind === "series"
+			? seriesOverrideKey(title.id)
+			: (files.titleKeys.get(title.id) ?? titleOverrideKey({ id: title.id, stableUuids }))
+	const original = files.originals.get(overrideKey)
+
+	return original === undefined ? { overrideKey } : { overrideKey, original }
+}
+
+function partStableUuids(versions: readonly VideoVersionView[]): string[] {
+	return versions.flatMap(version => version.parts.map(part => part.file.stableUuid))
+}
+
 export function buildTitleDetail(files: LibraryFiles, title: VideoTitleView): VideoTitleDetail | null {
 	const library = files.library
 
@@ -408,15 +557,20 @@ export function buildTitleDetail(files: LibraryFiles, title: VideoTitleView): Vi
 		case "movie": {
 			const movie = library.movies.find(item => item.id === title.id)
 
-			return movie === undefined
-				? null
-				: {
-						kind: "movie",
-						title,
-						versions: files.versions(movie.versions),
-						extras: files.extras(movie.extras),
-						nfo: files.ref(movie.nfo)
-					}
+			if (movie === undefined) {
+				return null
+			}
+
+			const versions = files.versions(movie.versions)
+
+			return {
+				kind: "movie",
+				title,
+				versions,
+				extras: files.extras(movie.extras),
+				nfo: files.ref(movie.nfo),
+				...detailCorrection(files, title, partStableUuids(versions))
+			}
 		}
 
 		case "series": {
@@ -433,31 +587,30 @@ export function buildTitleDetail(files: LibraryFiles, title: VideoTitleView): Vi
 							poster: files.ref(season.art.poster),
 							backdrop: files.ref(season.art.backdrop),
 							nfo: files.ref(season.nfo),
-							episodes: season.episodes.map(episode => ({
-								season: episode.season,
-								episode: episode.episode,
-								episodeEnd: episode.episodeEnd,
-								date: episode.date,
-								title: episode.title,
-								dateAdded: episode.dateAdded,
-								versions: files.versions(episode.versions)
-							}))
+							episodes: season.episodes.map(episode => episodeView(files, episode))
 						})),
 						extras: files.extras(series.extras),
-						nfo: files.ref(series.nfo)
+						nfo: files.ref(series.nfo),
+						autoMergedRoots: files.autoMerged.get(series.id) ?? 1,
+						...detailCorrection(files, title, [])
 					}
 		}
 
 		case "other": {
 			const other = library.others.find(item => item.id === title.id)
 
-			return other === undefined
-				? null
-				: {
-						kind: "other",
-						title,
-						part: files.part(other.video)
-					}
+			if (other === undefined) {
+				return null
+			}
+
+			const part = files.part(other.video)
+
+			return {
+				kind: "other",
+				title,
+				part,
+				...detailCorrection(files, title, part === null ? [] : [part.file.stableUuid])
+			}
 		}
 	}
 }
@@ -495,12 +648,16 @@ function pushHomeItems({
 	}
 }
 
-// Every playable video of the library, in classifier order; `folder` names a directory by uuid.
+// Every playable video of the library, in classifier order, hidden titles left out; `folder` names a directory by uuid.
 export function buildHomeItems(files: LibraryFiles, folder: (parent: string) => string): VideoHomeItem[] {
 	const library = files.library
 	const out: VideoHomeItem[] = []
 
 	for (const movie of library.movies) {
+		if (files.hidden.has(movie.id)) {
+			continue
+		}
+
 		pushHomeItems({
 			out,
 			files,
@@ -520,6 +677,10 @@ export function buildHomeItems(files: LibraryFiles, folder: (parent: string) => 
 	}
 
 	for (const series of library.series) {
+		if (files.hidden.has(series.id)) {
+			continue
+		}
+
 		series.seasons.forEach((season, seasonIndex) => {
 			season.episodes.forEach((episode, episodeIndex) => {
 				pushHomeItems({
@@ -543,6 +704,10 @@ export function buildHomeItems(files: LibraryFiles, folder: (parent: string) => 
 	}
 
 	for (const other of library.others) {
+		if (files.hidden.has(other.id)) {
+			continue
+		}
+
 		pushHomeItems({
 			out,
 			files,
@@ -667,13 +832,45 @@ function hasVideoFile(files: LibraryFiles, versions: readonly LibraryVersion[], 
 	)
 }
 
-// The art of one video of a title: an episode's own still for a series, the title's art otherwise.
+// A still of an extra itself (it has no art of its own).
+function extraSubject(files: LibraryFiles, extras: readonly LibraryExtra[], stableUuid: string): ArtSubject | null {
+	const extra = extras.find(item => hasVideoFile(files, [{ label: "", parts: [item.video] }], stableUuid))
+
+	return extra === undefined
+		? null
+		: {
+				kind: "episode",
+				episode: {
+					season: 0,
+					episode: 0,
+					episodeEnd: 0,
+					date: 0,
+					title: extra.title,
+					versions: [{ label: "", parts: [extra.video] }],
+					dateAdded: 0
+				}
+			}
+}
+
+// The art of one video of a title: an episode's or an extra's own still, the title's art otherwise.
 export function itemArtCandidates(
 	files: LibraryFiles,
 	title: VideoTitleView,
 	stableUuid: string,
 	slot: ArtSlotCode
 ): TitleArtCandidates | null {
+	const extras =
+		title.kind === "movie"
+			? files.library.movies.find(item => item.id === title.id)?.extras
+			: title.kind === "series"
+				? files.library.series.find(item => item.id === title.id)?.extras
+				: undefined
+	const extra = extras === undefined ? null : extraSubject(files, extras, stableUuid)
+
+	if (extra !== null) {
+		return subjectArtCandidates(files, extra, slot)
+	}
+
 	if (title.kind !== "series") {
 		return titleArtCandidates(files, title, slot)
 	}

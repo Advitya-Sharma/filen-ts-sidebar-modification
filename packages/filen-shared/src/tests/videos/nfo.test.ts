@@ -46,8 +46,23 @@ describe("parseNfo", () => {
 			genres: ["Family", "Comedy"],
 			tags: ["cartoon"],
 			studios: ["Warner"],
+			cast: ["Someone"],
 			lockData: true
 		})
+	})
+
+	it("reads actors' names as the cast, in order, and nothing else nested", () => {
+		const nfo = parseNfo(
+			"<movie><actor><name>Ann</name><role>Lead</role></actor><actor><name/></actor><actor><name>Bo &amp; Co</name></actor><set><name>Box</name></set><actor><name>Ann</name></actor></movie>"
+		)
+
+		expect(nfo?.cast).toEqual(["Ann", "Bo & Co"])
+		expect(nfo?.title).toBeUndefined()
+		expect(
+			parseNfo(
+				"<episodedetails><actor><name>One</name></actor></episodedetails><episodedetails><actor><name>Two</name></actor></episodedetails>"
+			)?.cast
+		).toEqual(["One"])
 	})
 
 	it("decodes numeric entities in titles", () => {
@@ -103,7 +118,8 @@ describe("parseNfo", () => {
 			kind: "movie",
 			genres: [],
 			tags: [],
-			studios: []
+			studios: [],
+			cast: []
 		})
 	})
 
@@ -206,7 +222,8 @@ describe("parseNfo edge cases", () => {
 			kind: "episodedetails",
 			genres: [],
 			tags: [],
-			studios: []
+			studios: [],
+			cast: []
 		})
 		expect(parseNfo("<movie><runtime>0</runtime></movie>")?.runtimeMinutes).toBeUndefined()
 		expect(parseNfo("<episodedetails><season>0</season><episode>1</episode></episodedetails>")).toMatchObject({ season: 0, episode: 1 })

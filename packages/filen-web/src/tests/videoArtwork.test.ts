@@ -112,6 +112,8 @@ describe("artCandidates", () => {
 	it("orders a movie backdrop and still", () => {
 		expect(artCandidates(lib, { kind: "movie", movie: up }, "b")).toEqual<ArtCandidate[]>([
 			{ source: "sidecar", file: index("fanart.jpg", "d1") },
+			// A Matroska file's landscape cover, once its probe locates one.
+			{ source: "embedded", file: upVideo },
 			{ source: "frame", file: upVideo },
 			{ source: "gradient" }
 		])

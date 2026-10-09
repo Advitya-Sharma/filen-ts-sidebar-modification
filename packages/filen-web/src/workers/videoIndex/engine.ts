@@ -1,4 +1,12 @@
-import { classifyVideoLibrarySteps, type LibraryRootType, type LibraryScanDir } from "@filen/shared/videos"
+import {
+	applyLibraryOverrides,
+	classifyVideoLibrarySteps,
+	splitMergeKeysOf,
+	type LibraryOverride,
+	type LibraryRootType,
+	type LibraryScanDir,
+	type VideoLibrary
+} from "@filen/shared/videos"
 import type { DirsAndFiles, DriveEvent, File, SocketEvent, UuidStr } from "@filen/sdk-rs"
 import { log } from "@/lib/log"
 import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
@@ -157,6 +165,18 @@ interface RootRuntime {
 	watermarkDirty: boolean
 }
 
+// One classification and what it was made from: reused while neither the roots' contents nor the split corrections
+// change (`seq`, `split`).
+interface ClassifiedInput {
+	seq: number
+	split: string
+	library: VideoLibrary
+	files: IndexFile[]
+	loaded: RootRuntime[]
+	seqs: number[]
+	ends: number[]
+}
+
 interface CurrentLibrary {
 	files: LibraryFiles
 	titles: Map<string, VideoTitleView>
@@ -212,9 +232,36 @@ export class VideoIndexEngine {
 	private asyncPatches = 0
 	private patchLog: { seq: number; root: string; inner: DriveEvent }[] = []
 	private readonly lookups = new Map<string, Promise<void>>()
+	// The library configuration's manual corrections, by key, and their serialized form (to skip an unchanged set).
+	private overrides: Readonly<Record<string, LibraryOverride>> = {}
+	private overridesSignature = "{}"
+	// Bumped whenever what the classifier reads changes (roots, their files, the split corrections); a rebuild for
+	// any other correction reuses the last classification.
+	private inputSeq = 0
+	private classified: ClassifiedInput | null = null
 
 	public constructor(deps: VideoIndexDeps) {
 		this.deps = deps
+	}
+
+	// Sets the manual corrections; a changed set applies them again (no network), classifying again only when the
+	// split corrections changed.
+	public setOverrides(overrides: Readonly<Record<string, LibraryOverride>>): void {
+		const signature = JSON.stringify(overrides)
+
+		if (signature === this.overridesSignature) {
+			return
+		}
+
+		const splitChanged = splitSignature(overrides) !== splitSignature(this.overrides)
+
+		this.overrides = overrides
+		this.overridesSignature = signature
+
+		// A classification under way read the previous set: it runs again once done.
+		if (this.current !== null || this.rebuilding !== null) {
+			this.scheduleRebuild("now", splitChanged)
+		}
 	}
 
 	// ── Configuration ──
@@ -1123,8 +1170,12 @@ export class VideoIndexEngine {
 
 	// ── Classification ──
 
-	private scheduleRebuild(kind: "now" | "patch"): void {
+	private scheduleRebuild(kind: "now" | "patch", inputChanged = true): void {
 		const now = this.deps.now()
+
+		if (inputChanged) {
+			this.inputSeq++
+		}
 
 		if (this.patchTimer !== null) {
 			clearTimeout(this.patchTimer)
@@ -1184,6 +1235,51 @@ export class VideoIndexEngine {
 
 	private async runRebuild(): Promise<void> {
 		const token = this.token
+		const overrides = this.overrides
+		const split = splitSignature(overrides)
+		const cached = this.classified
+		const input =
+			cached !== null && cached.seq === this.inputSeq && cached.split === split
+				? cached
+				: await this.classify(this.inputSeq, overrides, split)
+
+		if (input === null || token !== this.token) {
+			return
+		}
+
+		this.classified = input
+
+		const { library, files, loaded } = input
+		const corrected = applyLibraryOverrides({
+			library,
+			overrides,
+			stableUuidOf: file => files[file]?.stableUuid
+		})
+		const libraryFiles = new LibraryFiles({
+			library: corrected.library,
+			files,
+			rootUuids: loaded.map(rt => rt.config.uuid),
+			hidden: corrected.hidden,
+			titleKeys: corrected.titleKeys,
+			episodeKeys: corrected.episodeKeys,
+			originals: corrected.originals,
+			autoMerged: corrected.autoMerged
+		})
+
+		if (input !== cached) {
+			this.countVideos(input)
+		}
+
+		this.publish(libraryFiles)
+	}
+
+	// The classifier's view of every loaded root, in slices; null when a reset came in meanwhile.
+	private async classify(
+		seq: number,
+		overrides: Readonly<Record<string, LibraryOverride>>,
+		split: string
+	): Promise<ClassifiedInput | null> {
+		const token = this.token
 		const loaded = [...this.roots.values()].filter(rt => rt.state !== null)
 		const seqs = loaded.map(rt => rt.walkSeq)
 		const dirs: LibraryScanDir[] = []
@@ -1212,20 +1308,16 @@ export class VideoIndexEngine {
 					type: rt.config.type
 				})),
 				dirs,
-				files
+				files,
+				splitMergeKeys: splitMergeKeysOf(overrides)
 			}),
 			this.deps.yieldSlice
 		)
 
-		if (token !== this.token) {
-			return
-		}
+		return token === this.token ? { seq, split, library, files, loaded, seqs, ends } : null
+	}
 
-		const libraryFiles = new LibraryFiles({
-			library,
-			files,
-			rootUuids: loaded.map(rt => rt.config.uuid)
-		})
+	private countVideos({ library, loaded, seqs, ends }: ClassifiedInput): void {
 		const counts = new Array<number>(loaded.length).fill(0)
 
 		for (const video of library.videos) {
@@ -1238,7 +1330,9 @@ export class VideoIndexEngine {
 			rt.videoCount = counts[index] ?? 0
 			rt.countedSeq = seqs[index] ?? rt.countedSeq
 		})
+	}
 
+	private publish(libraryFiles: LibraryFiles): void {
 		const titles = buildTitles(libraryFiles)
 		const reset = this.current === null
 		const { upserts, removed } = diffTitles(this.signatures, titles)
@@ -1596,7 +1690,15 @@ export class VideoIndexEngine {
 		this.sawReconnecting = false
 		this.rebuildAgain = false
 		this.firstPatchAt = 0
+		this.overrides = {}
+		this.overridesSignature = "{}"
+		this.classified = null
 	}
+}
+
+// The split corrections alone: the only ones the classifier itself reads.
+function splitSignature(overrides: Readonly<Record<string, LibraryOverride>>): string {
+	return [...splitMergeKeysOf(overrides)].sort().join("\n")
 }
 
 function toSdkFile(file: IndexFile): File | null {

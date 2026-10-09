@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { useNavigate } from "@tanstack/react-router"
-import { PlayIcon } from "lucide-react"
+import { Link, useNavigate } from "@tanstack/react-router"
+import { InfoIcon, PlayIcon } from "lucide-react"
 import { formatSecondsToMediaClock } from "@filen/shared"
 import { useVideoArt } from "@/features/videos/hooks/useVideoArt"
 import { probeRecords } from "@/features/videos/lib/records"
@@ -10,7 +10,7 @@ import type { HeroModel } from "@/features/videos/lib/homeRows.logic"
 import { neutralTone } from "@/features/videos/lib/videoCard.logic"
 import { ArtImage } from "@/features/videos/components/videoCard"
 import { qualityLabel } from "@/features/videos/lib/videoGrid.logic"
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 
 // What the file's stored probe says (a local read; nothing is probed for the hero).
 function useStoredProbe(uuid: string | null): ProbeRecord | null {
@@ -41,7 +41,7 @@ function useStoredProbe(uuid: string | null): ProbeRecord | null {
 }
 
 // The home's static hero: one title per session on a dark rounded card under the header, its backdrop behind a
-// scrim, the title, what is known of it and Play or Resume. No rotation, no trailer.
+// scrim, the title, what is known of it, Play or Resume, and More info (the title's page). No rotation, no trailer.
 export function HomeHero({ hero, now, onShown }: { hero: HeroModel; now: number; onShown: (titleId: string) => void }) {
 	const { t, i18n } = useTranslation("videos")
 	const navigate = useNavigate()
@@ -134,8 +134,8 @@ export function HomeHero({ hero, now, onShown }: { hero: HeroModel; now: number;
 					{title.title}
 				</h2>
 				{meta.length > 0 ? <p className="text-sm text-white/80 tabular-nums">{meta.join(" · ")}</p> : null}
-				{playUuid === null ? null : (
-					<div className="mt-2 flex gap-2">
+				<div className="mt-2 flex gap-2">
+					{playUuid === null ? null : (
 						<Button
 							size="lg"
 							onClick={() => {
@@ -148,8 +148,16 @@ export function HomeHero({ hero, now, onShown }: { hero: HeroModel; now: number;
 							/>
 							{resumeSec > 0 ? t("videosHomeResume", { time: formatSecondsToMediaClock(resumeSec) }) : t("videosHomePlay")}
 						</Button>
-					</div>
-				)}
+					)}
+					<Link
+						to="/videos/title/$uuid"
+						params={{ uuid: title.id }}
+						className={buttonVariants({ variant: "secondary", size: "lg" })}
+					>
+						<InfoIcon data-icon="inline-start" />
+						{t("detailMoreInfo")}
+					</Link>
+				</div>
 			</div>
 		</section>
 	)

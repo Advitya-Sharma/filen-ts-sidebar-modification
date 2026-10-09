@@ -142,7 +142,8 @@ function CardArt({ card, art }: { card: VideoCardModel; art: VideoArt }) {
 }
 
 // A poster (2:3) or landscape (16:9) card: art with its badges and progress, the caption below. The card itself is
-// the link (its name says title, year, progress and badges); Play and the menu are separate controls.
+// the link to the title's page (its name says title, year, progress and badges); Play, which opens the player
+// straight away, and the menu are separate controls.
 export function VideoCard({ card, width, nearObserver, active, registerRef, onFocusCard, onAction, posInSet, setSize }: VideoCardProps) {
 	const { t } = useTranslation("videos")
 	const [element, setElement] = useState<HTMLDivElement | null>(null)
@@ -251,35 +252,19 @@ export function VideoCard({ card, width, nearObserver, active, registerRef, onFo
 			style={width === undefined ? undefined : { width }}
 			{...press.handlers}
 		>
-			{card.play === null ? (
-				<a
-					ref={registerRef}
-					data-video-card=""
-					role="link"
-					aria-disabled="true"
-					aria-label={label}
-					tabIndex={active ? 0 : -1}
-					className={LINK_CLASS}
-					onFocus={onFocusCard}
-				>
-					{face}
-				</a>
-			) : (
-				<Link
-					ref={registerRef}
-					to="/videos/watch/$uuid"
-					params={{ uuid: card.title.id }}
-					search={{ file: card.play }}
-					data-video-card=""
-					aria-label={label}
-					tabIndex={active ? 0 : -1}
-					draggable={false}
-					className={LINK_CLASS}
-					onFocus={onFocusCard}
-				>
-					{face}
-				</Link>
-			)}
+			<Link
+				ref={registerRef}
+				to="/videos/title/$uuid"
+				params={{ uuid: card.title.id }}
+				data-video-card=""
+				aria-label={label}
+				tabIndex={active ? 0 : -1}
+				draggable={false}
+				className={LINK_CLASS}
+				onFocus={onFocusCard}
+			>
+				{face}
+			</Link>
 			{card.play === null ? null : (
 				<button
 					type="button"

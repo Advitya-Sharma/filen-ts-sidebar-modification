@@ -20,6 +20,7 @@ import {
 	ART_LOSSY_QUALITY,
 	ART_SOURCE_MAX_BYTES,
 	artBox,
+	probeLandscapeCover,
 	titleColour,
 	type ArtCandidate,
 	type ArtRecord,
@@ -293,7 +294,8 @@ export class ArtLoader {
 
 		if (source === "embedded") {
 			const record = await this.deps.probes.request({ uuid: file.uuid, file: file.file }, "cover", probeOptions)
-			const cover = record?.probe?.cover ?? null
+			// A backdrop comes from the landscape cover, a poster or still from the front one.
+			const cover = slot === "b" ? probeLandscapeCover(record?.probe) : (record?.probe?.cover ?? null)
 
 			return cover === null || cover.size > ART_SOURCE_MAX_BYTES ? null : this.makeArt(source, file, cover, slot, box, context)
 		}
