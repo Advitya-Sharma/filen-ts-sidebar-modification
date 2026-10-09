@@ -7,6 +7,8 @@ import {
 	assistantDateLine,
 	assistantInstructionLines,
 	assistantSystemPrompt,
+	assistantUserPrompt,
+	messageEdges,
 	ROUTER_GRAMMAR,
 	ROUTER_SYSTEM_PROMPT,
 	routerRequest
@@ -20,7 +22,7 @@ import {
 	type AssistantToolGroup,
 	type PortableObjectSchema
 } from "./tool"
-import { ASSISTANT_TOOL_GROUPS } from "./tools"
+import { ASSISTANT_TOOL_GROUPS, assistantToolByName } from "./tools"
 import {
 	mapUntrustedStrings,
 	quarantinedExtractionPrompt,
@@ -46,7 +48,7 @@ import {
 //    quarantine call before the main loop sees it, and every untrusted string is sanitized and
 //    spotlighted. The executor's context line carries other people's names too and is sanitized as well.
 // 4. A consequential call runs only after the user confirmed it. A turn that ends without a text reply
-//    gets one more, tool-less, generation. The reply is screened before the user sees any of it.
+//    gets one more generation, which may call no tool. The reply is screened before the user sees any of it.
 
 // The part of AbortSignal the loop needs; the shared package compiles without DOM types, and a DOM or
 // React Native AbortSignal satisfies it as is.
@@ -90,6 +92,12 @@ export type AssistantGenerateRequest = {
 	tools?: readonly AssistantModelTool[]
 	// GBNF; never combined with tools.
 	grammar?: string
+	// "none": the tools are rendered into the prompt as on the steps before, so the engine reuses what it read
+	// of them, but no call is parsed or constrained.
+	toolChoice?: "none"
+	// Which kind of request this is, for an engine that keeps one cached prompt per kind: each kind continues
+	// its own, so none of them pushes another's out.
+	slot: "router" | "main" | "extraction"
 	maxTokens: number
 }
 
@@ -267,10 +275,15 @@ export type AssistantTurnEvent =
 export type AssistantHistoryTurn = {
 	user: string
 	reply: string
+	// The user's turn as the model read it (assistantUserPrompt): given back unchanged, the conversation reads
+	// the same on the next turn and the engine reuses it.
+	prompt?: string
 }
 
 export type AssistantTurnResult = {
 	reply: string
+	// The user's turn as the model read it, for AssistantHistoryTurn.prompt.
+	prompt: string
 	withheld: boolean
 	route: AssistantRoute | null
 	intent: "read" | "change" | null
@@ -300,6 +313,12 @@ export const MAX_STEPS = 5
 export const STEP_MAX_TOKENS = 384
 export const QUARANTINE_MAX_TOKENS = 200
 const ROUTER_MAX_TOKENS = 8
+
+// What the router and the content extraction may fill of an engine's context besides the main loop's
+// `contextTokens`. An engine that keeps the three in one cache sizes it to the sum: when they overflow it,
+// the engine clears idle slots, and the router's cached system prompt goes first.
+export const ROUTER_CONTEXT_TOKENS = 2048
+export const QUARANTINE_CONTEXT_TOKENS = 2048
 
 // Tool-call syntax a model wrote as text instead of as a call: template markup, or a call to one of the
 // tools it was offered. Only those tool names count, so everyday code in a reply ("df.sort_values(by=…)")
@@ -349,7 +368,12 @@ const CUT_CALL = "The call was cut off at the length limit; use a shorter text."
 // Only text the user typed: assistant replies never ground anything.
 const PRIOR_USER_MESSAGES = 2
 
-const SPOTLIGHT_DELIMITER = /⟦\/?[^⟦⟧\s]{1,32}⟧/g
+const SPOTLIGHT_DELIMITER = /[⟦⟧]/g
+
+// A reply that stopped at the length limit reads as cut off rather than as finished mid-word.
+function markCut(text: string): string {
+	return `${text.trimEnd()}…`
+}
 
 type GenerateOptions = Parameters<AssistantModel["generate"]>[1]
 
@@ -543,15 +567,16 @@ function toModelTools(tools: readonly AssistantTool[]): AssistantModelTool[] {
 const CONTEXT_RESERVE_TOKENS = 400
 
 const FIXED_STEP_TOKENS =
-	estimateTokens(
-		assistantSystemPrompt({
-			context: "",
-			spotlight: spotlightInstruction({
-				mode: "delimit",
-				marker: "x".repeat(32)
-			}),
-			canary: "x".repeat(32)
-		})
+	Math.max(
+		...[true, false].map(canTrash =>
+			estimateTokens(
+				assistantSystemPrompt({
+					spotlight: spotlightInstruction({ mode: "delimit" }),
+					canary: "x".repeat(32),
+					canTrash
+				})
+			)
+		)
 	) +
 	CONTEXT_RESERVE_TOKENS +
 	Math.max(...Object.values(ASSISTANT_TOOL_GROUPS).map(group => estimateTokens(JSON.stringify(toModelTools(group.tools))))) +
@@ -597,13 +622,12 @@ export async function runAssistantTurn({
 	onEvent: (event: AssistantTurnEvent) => void
 	// Resolves true only when the user confirmed this exact call.
 	confirm: (request: AssistantConfirmationRequest, signal: AssistantSignal) => Promise<boolean>
-	// Unpredictable to other people's text: the canary and spotlight marker, unless `secrets` are given.
+	// Unpredictable to other people's text: the canary, unless `secrets` are given.
 	nonce: () => string
-	// The conversation's own canary and marker: the same on every turn, so the system prompt does not change
-	// between turns and the engine can reuse what it already read.
+	// The conversation's own canary: the same on every turn, so the system prompt does not change between
+	// turns and the engine can reuse what it already read.
 	secrets?: {
 		canary: string
-		marker: string
 	}
 	// The user's clock, time zone (IANA) and first weekday (1 Monday to 7 Sunday), for a "Today" line: tool
 	// results carry dates.
@@ -652,6 +676,7 @@ export async function runAssistantTurn({
 				}
 			],
 			grammar: ROUTER_GRAMMAR,
+			slot: "router",
 			maxTokens: ROUTER_MAX_TOKENS
 		},
 		{
@@ -669,19 +694,16 @@ export async function runAssistantTurn({
 	checkAborted(signal)
 
 	const context = await executor.context()
-	// The context line names items, notes, chats and tracks other people may have named; it sits in the
-	// system message, so it is sanitized like any tool result and kept on one line.
+	// The context line names items, notes, chats and tracks other people may have named; it is sanitized like
+	// any tool result and kept on one line.
 	const contextLine = sanitizeUntrustedText(context.description, model.specialTokens).replace(/\s+/g, " ").trim()
 	const canary = secrets?.canary ?? nonce()
-	const spotlightOptions: SpotlightOptions | null =
-		spotlight === "off"
-			? null
-			: {
-					mode: spotlight,
-					marker: secrets?.marker ?? nonce()
-				}
+	const spotlightOptions: SpotlightOptions | null = spotlight === "off" ? null : { mode: spotlight }
 	const instructionSpotlight = spotlightOptions === null ? null : spotlightInstruction(spotlightOptions)
-	const instructions = assistantInstructionLines(instructionSpotlight)
+	const supports = (tool: AssistantTool) => executor.supports?.(tool) ?? true
+	const trashTool = assistantToolByName("trash_items")
+	const canTrash = trashTool !== undefined && supports(trashTool)
+	const instructions = assistantInstructionLines(instructionSpotlight, { canTrash })
 	const guard = new AssistantTurnGuard({
 		options: {
 			consequentialAllowed: intent === "change",
@@ -692,24 +714,28 @@ export async function runAssistantTurn({
 		contextHandles: context.handles
 	})
 	const routedTools: readonly AssistantTool[] = route === null || route === "answer" ? [] : ASSISTANT_TOOL_GROUPS[route].tools
-	const supports = (tool: AssistantTool) => executor.supports?.(tool) ?? true
 	const groupTools = routedTools.filter(supports)
 	const toolNames = groupTools.map(tool => tool.name)
 	const malformed = callPattern(toolNames)
 	const system: AssistantChatMessage = {
 		role: "system",
 		content: assistantSystemPrompt({
-			context: contextLine,
 			spotlight: instructionSpotlight,
 			canary,
-			date: now === undefined ? null : assistantDateLine({ now, timeZone, weekStart }),
-			unavailable: routedTools.filter(tool => !supports(tool)).map(tool => tool.title)
+			unavailable: routedTools.filter(tool => !supports(tool)).map(tool => tool.title),
+			canTrash
 		})
 	}
+	const prompt = assistantUserPrompt({
+		message,
+		context: contextLine,
+		date: now === undefined ? null : assistantDateLine({ now, timeZone, weekStart }),
+		earlier: history.flatMap(entry => (entry.prompt === undefined ? [] : [entry.prompt]))
+	})
 	const past: AssistantChatMessage[] = history.flatMap(entry => [
 		{
 			role: "user" as const,
-			content: entry.user
+			content: entry.prompt ?? entry.user
 		},
 		{
 			role: "assistant" as const,
@@ -719,7 +745,7 @@ export async function runAssistantTurn({
 	const turn: AssistantChatMessage[] = [
 		{
 			role: "user",
-			content: message
+			content: prompt
 		}
 	]
 	const calls: AssistantToolCallRecord[] = []
@@ -782,6 +808,8 @@ export async function runAssistantTurn({
 			executedCalls.delete(signature)
 		}
 	}
+	// The tools the last step offered: the closing reply renders them too, so its prompt continues that step's.
+	let lastTools: AssistantModelTool[] = []
 	let answer = ""
 	let retryUsed = false
 	let blockedSteps = 0
@@ -798,6 +826,8 @@ export async function runAssistantTurn({
 
 		const offered = guard.offered(groupTools)
 		const tools = toModelTools(offered)
+
+		lastTools = tools
 		// Calls the engine named while the model was still writing their arguments, by position. Only the
 		// newest is being written; those before it wait to be dispatched.
 		const announced = new Map<number, AssistantToolCallRecord>()
@@ -875,6 +905,7 @@ export async function runAssistantTurn({
 							tools
 						}
 					: {}),
+				slot: "main",
 				maxTokens: STEP_MAX_TOKENS
 			},
 			{
@@ -912,7 +943,7 @@ export async function runAssistantTurn({
 				break
 			}
 
-			answer = text
+			answer = generated.truncated === true && text.length > 0 ? markCut(text) : text
 
 			break
 		}
@@ -1129,7 +1160,6 @@ export async function runAssistantTurn({
 										? await quarantine({
 												model,
 												request: message,
-												contextTokens: model.contextTokens,
 												// Sanitized first: the quarantine prompt is rendered and tokenized like any other.
 												result: sanitized(outcome.result),
 												signal,
@@ -1251,11 +1281,19 @@ export async function runAssistantTurn({
 									}
 								]
 							: turn,
-					tools: [],
+					tools: lastTools,
 					maxTokens: STEP_MAX_TOKENS,
 					contextTokens: model.contextTokens,
 					onStub: forgetStubbed
 				}),
+				// Rendered, never called: the prompt then continues the last step's, which the engine has read.
+				...(lastTools.length > 0
+					? {
+							tools: lastTools,
+							toolChoice: "none" as const
+						}
+					: {}),
+				slot: "main",
 				maxTokens: STEP_MAX_TOKENS
 			},
 			{
@@ -1265,9 +1303,12 @@ export async function runAssistantTurn({
 			}
 		)
 		// This generation may not call tools, so call syntax in it is dropped and the text around it kept.
-		const text = stripCallSyntax(closing.content, routedTools.map(tool => tool.name))
+		const text = stripCallSyntax(
+			closing.content,
+			routedTools.map(tool => tool.name)
+		)
 
-		answer = closing.truncated === true && text.length > 0 ? `${text}…` : text
+		answer = closing.truncated === true && text.length > 0 ? markCut(text) : text
 	}
 
 	const final = replyEvent(answer, true)
@@ -1276,6 +1317,7 @@ export async function runAssistantTurn({
 
 	return {
 		reply: final.type === "reply" ? final.text : "",
+		prompt,
 		withheld: final.type === "reply" && final.withheld === true,
 		route,
 		intent,
@@ -1286,8 +1328,6 @@ export async function runAssistantTurn({
 }
 
 // Runs the extraction over a result's content fields with no tools; only its answer reaches the main loop.
-// The share of the context a quarantine prompt may fill: the main slot keeps its own cells in a shared cache.
-const QUARANTINE_CONTEXT_SHARE = 0.5
 
 // Cuts `data` to `maxTokens`, keeping its start, or its end for chat messages (the newest).
 function clipData(data: string, maxTokens: number, keepEnd: boolean): { data: string; clipped: boolean } {
@@ -1323,14 +1363,12 @@ function clipData(data: string, maxTokens: number, keepEnd: boolean): { data: st
 async function quarantine({
 	model,
 	request,
-	contextTokens,
 	result,
 	signal,
 	onProgress
 }: {
 	model: AssistantModel
 	request: string
-	contextTokens: number
 	result: unknown
 	signal: AssistantSignal
 	onProgress: (progress: AssistantPromptProgress) => void
@@ -1348,20 +1386,19 @@ async function quarantine({
 		return result
 	}
 
+	// A pasted text as the request would crowd out the content; its start and end carry the ask.
+	const asked = messageEdges(request)
 	const frame = quarantinedExtractionPrompt({
-		request,
+		request: asked,
 		data: ""
 	})
 	const { data, clipped } = clipData(
 		raw,
-		Math.floor(contextTokens * QUARANTINE_CONTEXT_SHARE) -
-			QUARANTINE_MAX_TOKENS -
-			estimateTokens(frame.system + frame.user) -
-			MESSAGE_OVERHEAD_TOKENS * 2,
+		QUARANTINE_CONTEXT_TOKENS - QUARANTINE_MAX_TOKENS - estimateTokens(frame.system + frame.user) - MESSAGE_OVERHEAD_TOKENS * 2,
 		"messages" in record
 	)
 	const { system, user } = quarantinedExtractionPrompt({
-		request,
+		request: asked,
 		data
 	})
 	const extracted = await generateSettled(
@@ -1377,6 +1414,7 @@ async function quarantine({
 					content: user
 				}
 			],
+			slot: "extraction",
 			maxTokens: QUARANTINE_MAX_TOKENS
 		},
 		{

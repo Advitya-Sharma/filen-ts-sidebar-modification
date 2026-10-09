@@ -759,3 +759,40 @@ export function assistantRouteDescription(route: AssistantRoute): string {
 export function assistantToolByName(name: string): AssistantTool | undefined {
 	return ASSISTANT_TOOLS.find(tool => tool.name === name)
 }
+
+// The tools the web app runs: reads, navigation and chat drafts. Its writes come with confirmation cards
+// later; until then they are not offered, and the prompt says they are not available. Kept here so the
+// eval measures what the web app ships.
+export const ASSISTANT_WEB_TOOLS = [
+	"get_context",
+	"search_items",
+	"list_directory",
+	"get_item_info",
+	"recent_items",
+	"list_photos",
+	"get_storage",
+	"list_section",
+	"get_sharing",
+	"read_text_file",
+	"reveal_item",
+	"list_notes",
+	"read_note",
+	"open_note",
+	"list_chats",
+	"read_chat",
+	"open_chat",
+	"draft_chat_message",
+	"find_contacts",
+	"list_playlists",
+	"open_playlist",
+	"play",
+	"audio_control",
+	"get_transfers",
+	"open_route"
+] as const satisfies readonly AssistantToolName[]
+
+export type AssistantWebToolName = (typeof ASSISTANT_WEB_TOOLS)[number]
+
+export function isAssistantWebTool(name: string): name is AssistantWebToolName {
+	return (ASSISTANT_WEB_TOOLS as readonly string[]).includes(name)
+}

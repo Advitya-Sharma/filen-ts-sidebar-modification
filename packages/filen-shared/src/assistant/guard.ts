@@ -8,10 +8,10 @@ import { foreignLinks } from "./untrusted"
 //    consequential tools, so injected text cannot add capabilities the user did not ask for.
 // 1. Grounding. A consequential call runs only if every handle argument traces back to the user:
 //    the visible context (current directory, selection, playing track), a lookup whose own
-//    arguments came from the user's message, an item the user named, or an item a grounded call
-//    created this turn. A lookup's handle arguments must trace back to the user directly: what one
-//    lookup returned does not ground the results of the next, so grounding never walks the whole
-//    drive. Free-text arguments (new names, titles, recipients) must appear in the user's own
+//    arguments came from the user's message, an item the user named (most of its longer words), or
+//    an item a grounded call created this turn. A lookup's handle arguments must trace back to the
+//    user directly, by context or by a name written out in full: what one lookup returned does not
+//    ground the results of the next, so grounding never walks the whole drive. Free-text arguments (new names, titles, recipients) must appear in the user's own
 //    message, word for word up to inflection, extension included. Text that exists only inside
 //    tool results never grounds anything.
 // 2. Taint. Once a tool returns content other people can write (note bodies, file text, chat
@@ -63,6 +63,12 @@ function words(value: string): string[] {
 
 function distinctive(word: string): boolean {
 	return CJK.test(word) || /^\d+$/.test(word) ? word.length >= 2 : word.length >= 3
+}
+
+// A word of an item's name that can point at the item by itself: articles, pronouns and the like ("the",
+// "you", "and") are in nearly every message, so only longer words count.
+function nameWord(word: string): boolean {
+	return CJK.test(word) || /^\d+$/.test(word) ? word.length >= 2 : word.length >= 4
 }
 
 // "archiv" grounds "Archive", "invoices" grounds "Invoice"; containment also covers attached
@@ -190,6 +196,8 @@ export class AssistantTurnGuard {
 		)
 	}
 
+	// `lookups: false` grounds a lookup's own arguments: only a name the user wrote out in full counts there,
+	// so a lookup never chains from an item that merely shares a word with the request.
 	handleGrounded(handle: string, { lookups = true }: { lookups?: boolean } = {}): boolean {
 		if (this.grounded.has(handle) || (lookups && this.lookupGrounded.has(handle))) {
 			return true
@@ -197,18 +205,40 @@ export class AssistantTurnGuard {
 
 		const name = this.names.get(handle)
 
-		return (
-			name !== undefined &&
-			words(name)
-				.filter(distinctive)
-				.some(word =>
-					wordInMessage({
-						word,
-						message: this.message,
-						messageWords: this.messageWords
-					})
-				)
-		)
+		if (name === undefined) {
+			return false
+		}
+
+		if (!lookups) {
+			return this.textGroundedStrictly(name, name)
+		}
+
+		return this.nameGrounded(name)
+	}
+
+	// At least half of the name's longer words, each up to inflection; a name of short words only ("Tom",
+	// "Ann Lee") by those words, whole.
+	private nameGrounded(name: string): boolean {
+		const all = words(name)
+		const named = all.filter(nameWord)
+
+		if (named.length === 0) {
+			const short = all.filter(distinctive)
+			const hits = short.filter(word => this.messageWords.includes(word)).length
+
+			return short.length > 0 && hits >= Math.ceil(short.length / 2)
+		}
+
+		const hits = named.filter(word =>
+			wordInMessage({
+				word,
+				message: this.message,
+				messageWords: this.messageWords,
+				strict: true
+			})
+		).length
+
+		return hits >= Math.ceil(named.length / 2)
 	}
 
 	private argumentHandles({ tool, args }: { tool: AssistantTool; args: Record<string, unknown> }): string[] {

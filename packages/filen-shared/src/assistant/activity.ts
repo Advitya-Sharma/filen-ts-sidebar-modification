@@ -116,11 +116,26 @@ export function toolCallSubject({
 	return undefined
 }
 
+// The tools whose result is a list of items: another tool's only list (a sharing status's recipients, a
+// storage breakdown) is not what the user asked to count.
+const LISTING_TOOLS: ReadonlySet<string> = new Set([
+	"search_items",
+	"list_directory",
+	"recent_items",
+	"list_photos",
+	"list_section",
+	"list_notes",
+	"list_chats",
+	"find_contacts",
+	"list_playlists",
+	"open_playlist",
+	"get_transfers"
+])
+
 // How many items a listing or search returned: its result's only list of records, plus a `more` count it
-// reports beyond them; `more: true` marks a list cut off at an unknown length. Only for read tools whose
-// output is names, not content: anything else has no item count to show.
+// reports beyond them; `more: true` marks a list cut off at an unknown length.
 export function resultItemCount({ tool, result }: { tool: AssistantTool; result: unknown }): { count: number; more: boolean } | undefined {
-	if (tool.effect !== "read" || tool.untrustedOutput === "content" || !isRecord(result)) {
+	if (!LISTING_TOOLS.has(tool.name) || !isRecord(result)) {
 		return undefined
 	}
 

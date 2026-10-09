@@ -128,4 +128,10 @@ describe("resultItemCount", () => {
 		expect(count("search_items", { tags: ["x"] })).toBeUndefined()
 		expect(count("search_items", "text")).toBeUndefined()
 	})
+
+	it("counts nothing for a read tool that is not a listing, an empty list included", () => {
+		expect(count("get_sharing", { handle: "f1", name: "CV.pdf", sharedWith: [] })).toBeUndefined()
+		expect(count("get_sharing", { handle: "f1", name: "CV.pdf", sharedWith: ["a@b.c"] })).toBeUndefined()
+		expect(count("get_storage", { parts: [{ name: "Drive" }] })).toBeUndefined()
+	})
 })
