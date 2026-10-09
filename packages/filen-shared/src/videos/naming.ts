@@ -163,17 +163,6 @@ function trimSeparators(text: string): string {
 	return trimTrailingSeparators(trimStart(text))
 }
 
-// Index of the first character that is not a trailing separator, or the text length.
-function firstContentIndex(text: string): number {
-	let index = 0
-
-	while (index < text.length && TRAILING_SEPARATORS.includes(text.charAt(index))) {
-		index++
-	}
-
-	return index
-}
-
 const BRACKET_PAIRS = new Map([
 	["[", "]"],
 	["(", ")"],
@@ -213,7 +202,8 @@ function forEachBracketGroup(text: string, visit: (open: number, close: number, 
 	}
 }
 
-const YEAR_CANDIDATE = /([([（［【]?)(?<![\p{L}\p{N}])((?:18|19|20)\d\d)(?![\p{L}\p{N}])([)\]）］】]?)/gu
+// A four-digit year standing on its own, not part of a longer word or number ("映画2016", "x2010").
+const YEAR = /(?<![\p{L}\p{N}])(?:18|19|20)\d\d(?![\p{L}\p{N}])/gu
 
 export interface TitleYear {
 	// Raw text before the year (or the whole input when there is none), separators trimmed off its end.
@@ -221,38 +211,38 @@ export interface TitleYear {
 	year: number
 }
 
-// Splits a release-style name into title and year. A bracketed year wins over a bare one; among equals the last
-// wins; a year needs some title before it ("1917" alone is a title, "1917 (2019)" is 1917 from 2019).
+// Splits a release-style name into title and year. A year counts only within the plausible range and with some title
+// text in front of it, so "1917" alone stays a title. A year wrapped in a matching bracket pair ("(2010)", "[2010]",
+// "（2010）") beats a bare one; between candidates of the same kind the last one counts ("Movie 2010 2011" → 2011).
 export function splitTitleYear(text: string): TitleYear {
-	const firstContent = firstContentIndex(text)
-	let bracketedAt = -1
-	let bracketedYear = 0
-	let bareAt = -1
-	let bareYear = 0
+	let titleStart = 0
 
-	YEAR_CANDIDATE.lastIndex = 0
+	while (titleStart < text.length && TRAILING_SEPARATORS.includes(text.charAt(titleStart))) {
+		titleStart++
+	}
 
-	for (let match = YEAR_CANDIDATE.exec(text); match !== null; match = YEAR_CANDIDATE.exec(text)) {
-		const year = Number(match[2])
+	let bracketed = -1
+	let bare = -1
 
-		if (year < MIN_YEAR || year > MAX_YEAR || firstContent >= match.index) {
+	for (const match of text.matchAll(YEAR)) {
+		const year = Number(match[0])
+
+		if (match.index <= titleStart || year < MIN_YEAR || year > MAX_YEAR) {
 			continue
 		}
 
-		const opener = match[1] ?? ""
+		const closer = BRACKET_PAIRS.get(text.charAt(match.index - 1))
 
-		if (opener.length > 0 && BRACKET_PAIRS.get(opener) === match[3]) {
-			bracketedAt = match.index
-			bracketedYear = year
+		if (closer !== undefined && text.charAt(match.index + match[0].length) === closer) {
+			bracketed = match.index
 		} else {
-			bareAt = match.index + opener.length
-			bareYear = year
+			bare = match.index
 		}
 	}
 
-	const at = bracketedAt >= 0 ? bracketedAt : bareAt
+	const start = bracketed >= 0 ? bracketed : bare
 
-	if (at < 0) {
+	if (start < 0) {
 		return {
 			title: trimTrailingSeparators(text),
 			year: 0
@@ -260,8 +250,8 @@ export function splitTitleYear(text: string): TitleYear {
 	}
 
 	return {
-		title: trimTrailingSeparators(text.slice(0, at)),
-		year: bracketedAt >= 0 ? bracketedYear : bareYear
+		title: trimTrailingSeparators(text.slice(0, start)),
+		year: Number(text.slice(start, start + 4))
 	}
 }
 
@@ -350,67 +340,105 @@ export function mergeKey(name: string): string {
 	return year === 0 ? "" : `${identityKey(title)}|${year}`
 }
 
-function isWordSeparator(char: string): boolean {
-	return char === "" || WORD_SEPARATORS.includes(char)
+const WORD_RUN = /[\p{L}\p{M}\p{N}]+/gu
+const SINGLE_LETTER = /^\p{L}\p{M}*$/u
+const SPACE_RUN = / {2,}/gu
+const DOTS_AND_UNDERSCORES = /^[._]+$/u
+// What may stand right before the first letter of a dotted acronym; an apostrophe ("Don't.A.Movie") may not.
+const ACRONYM_LEAD = /[\s._\-([{（［【]/u
+
+function underscoresToSpaces(gap: string): string {
+	return gap.includes("_") ? gap.replaceAll("_", " ").replace(SPACE_RUN, " ") : gap
 }
 
-// Dots and underscores used as word separators become spaces. A dot between single characters is an acronym
-// ("S.H.I.E.L.D.") and keeps its dot, also the closing one ("S.W.A.T.2003" → "S.W.A.T. 2003"); a dot next to a
-// space is punctuation ("Mr. Robot") and stays.
+function leadingDigits(word: string): number {
+	let count = 0
+
+	while (count < word.length && word.charCodeAt(count) >= 48 && word.charCodeAt(count) <= 57) {
+		count++
+	}
+
+	return count
+}
+
+function trailingDigits(word: string): number {
+	let count = 0
+
+	while (count < word.length && word.charCodeAt(word.length - 1 - count) >= 48 && word.charCodeAt(word.length - 1 - count) <= 57) {
+		count++
+	}
+
+	return count
+}
+
+// A short decimal such as "5.1" or "AAC2.0", which reads wrong with a space.
+function isDecimal(left: string, right: string): boolean {
+	const before = trailingDigits(left)
+	const after = leadingDigits(right)
+
+	return before >= 1 && before <= 2 && after >= 1 && after <= 2
+}
+
+// Release-style separators to spaces for display: "The.Office_US" → "The Office US". A dot directly between words
+// becomes a space, a run of dots or underscores one space. Dotted acronyms (two or more single letters joined by single
+// dots) keep their dots, plus a space where a word follows ("A.I.Artificial" → "A.I. Artificial"); short decimals stay.
+// Dots next to a space ("Mr. Robot") or at either end are left alone.
 export function normalizeSeparators(text: string): string {
 	if (!text.includes(".") && !text.includes("_")) {
 		return text
 	}
 
-	let out = ""
+	const words: string[] = []
+	const gaps: string[] = []
+	let at = 0
 
-	for (let i = 0; i < text.length;) {
-		const char = text.charAt(i)
+	for (const match of text.matchAll(WORD_RUN)) {
+		gaps.push(text.slice(at, match.index))
+		words.push(match[0])
+		at = match.index + match[0].length
+	}
 
-		if (char === "_") {
-			out += " "
-			i++
+	gaps.push(text.slice(at))
 
-			continue
+	if (words.length === 0) {
+		return underscoresToSpaces(text)
+	}
+
+	// gaps[k] precedes words[k]; the last gap trails the last word.
+	const acronymLetter = words.map((word, k) => {
+		if (!SINGLE_LETTER.test(word)) {
+			return false
 		}
 
-		if (char !== ".") {
-			out += char
-			i++
+		const before = gaps[k] ?? ""
 
-			continue
-		}
+		return before.length === 0 || ACRONYM_LEAD.test(before.charAt(before.length - 1))
+	})
+	const joined = (k: number): boolean => acronymLetter[k] === true && acronymLetter[k + 1] === true && gaps[k + 1] === "."
+	let out = underscoresToSpaces(gaps[0] ?? "")
 
-		let end = i
+	for (let k = 0; k < words.length; k++) {
+		const word = words[k] ?? ""
+		const gap = gaps[k + 1] ?? ""
 
-		while (text.charAt(end) === ".") {
-			end++
-		}
+		out += word
 
-		const before = text.charAt(i - 1)
-		const after = text.charAt(end)
-		const singleBefore = !isWordSeparator(before) && isWordSeparator(text.charAt(i - 2))
-
-		if (before === "" || after === "" || before === " " || after === " ") {
-			out += text.slice(i, end)
-		} else if (end - i === 1 && singleBefore && !isWordSeparator(after) && isWordSeparator(text.charAt(end + 1))) {
+		if (k === words.length - 1) {
+			out += underscoresToSpaces(gap)
+		} else if (!DOTS_AND_UNDERSCORES.test(gap)) {
+			out += underscoresToSpaces(gap)
+		} else if (joined(k)) {
 			out += "."
-		} else if (
-			end - i === 1 &&
-			singleBefore &&
-			text.charAt(i - 2) === "." &&
-			!isWordSeparator(text.charAt(i - 3)) &&
-			isWordSeparator(text.charAt(i - 4))
-		) {
+		} else if (k > 0 && joined(k - 1) && gap.startsWith(".")) {
 			out += ". "
+		} else if (gap === "." && isDecimal(word, words[k + 1] ?? "")) {
+			out += "."
 		} else {
 			out += " "
 		}
-
-		i = end
 	}
 
-	return out.replace(WHITESPACE_RUN, " ").trim()
+	return out
 }
 
 // Technical tokens that end the human part of a year-less release name. Only unambiguous ones: a bare "web" or
@@ -778,9 +806,11 @@ export function parseEpisode(stem: string, inSeries: boolean): EpisodeMatch | nu
 
 // Grouping key for the series name in front of an episode marker: case, punctuation and a trailing year ignored.
 export function episodeSeriesKey(stem: string, match: EpisodeMatch): string {
-	const prefix = stem.slice(0, match.start)
+	const name = stripNameTags(stem.slice(0, match.start))
+	const { title, year } = splitTitleYear(name)
+	const key = identityKey(name)
 
-	return identityKey(splitTitleYear(prefix).title)
+	return year > 0 && key.endsWith(` ${year}`) ? identityKey(title) : key
 }
 
 const SEASON_WORD =

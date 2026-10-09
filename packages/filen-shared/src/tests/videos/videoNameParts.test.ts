@@ -43,7 +43,11 @@ describe("parseStackPart", () => {
 		["Movie cd1 1080p", "Movie", 1],
 		["Film (2010) - Part 2", "Film (2010)", 2],
 		["Kärlek cd1", "Kärlek", 1],
-		["Harry Potter Part 1 (2010)", "Harry Potter", 1]
+		["Harry Potter Part 1 (2010)", "Harry Potter", 1],
+		["Movie (2010)cd1", "Movie (2010)", 1],
+		["Movie Part.A", "Movie", 1],
+		["Movie_c", "Movie", 3],
+		["Movie.b", "Movie", 2]
 	])("%s → %s part %i", (stem, prefix, part) => {
 		expect(parseStackPart(stem)).toMatchObject({
 			prefix,
@@ -51,12 +55,22 @@ describe("parseStackPart", () => {
 		})
 	})
 
-	it.each(["cd1", "Part 1", "Movie", "Movie part", "Movie part 100", "Partners", "Abcd1", "Movie-e", "Movie a"])(
-		"%s → not a part",
-		stem => {
-			expect(parseStackPart(stem)).toBeNull()
-		}
-	)
+	it.each([
+		"cd1",
+		"Part 1",
+		"Movie",
+		"Movie part",
+		"Movie part 100",
+		"Partners",
+		"Abcd1",
+		"Movie-e",
+		"Movie a",
+		"Movie Discard",
+		"Movie Disco",
+		"-cd1"
+	])("%s → not a part", stem => {
+		expect(parseStackPart(stem)).toBeNull()
+	})
 })
 
 describe("groupStacks", () => {
@@ -99,6 +113,19 @@ describe("groupStacks", () => {
 		[
 			["Movie cd1 [1080p]", "Movie cd2 [720p]"],
 			[[0], [1]]
+		],
+		[["Movie pt1", "Movie Part 2"], [[0, 1]]],
+		[
+			["Movie cd1", "Movie cd2", "Movie cd1"],
+			[[0], [1], [2]]
+		],
+		[
+			["Movie-a", "Movie cdb"],
+			[[0], [1]]
+		],
+		[
+			["Other", "Movie-b", "Movie-a"],
+			[[0], [2, 1]]
 		]
 	])("%j → %j", (stems, groups) => {
 		expect(members(stems)).toEqual(groups)

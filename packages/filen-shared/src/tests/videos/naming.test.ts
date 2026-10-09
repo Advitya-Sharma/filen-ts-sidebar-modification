@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
 	displayTitle,
 	dynamicRangeLabel,
+	episodeSeriesKey,
 	episodeTitleText,
 	isCameraStem,
 	isIgnoredDirName,
@@ -110,6 +111,37 @@ describe("splitTitleYear", () => {
 			year: 0
 		})
 	})
+
+	it.each<[string, string, number]>([
+		["(2010)", "(2010)", 0],
+		["Movie (2010) 2011", "Movie", 2010],
+		["Movie [2010] (2011)", "Movie [2010]", 2011],
+		["Movie (2010]", "Movie", 2010],
+		[`Movie ${new Date().getUTCFullYear() + 3}`, `Movie ${new Date().getUTCFullYear() + 3}`, 0]
+	])("%s → %s (%i)", (text, title, year) => {
+		expect(splitTitleYear(text)).toEqual({
+			title,
+			year
+		})
+	})
+})
+
+describe("episodeSeriesKey", () => {
+	it.each([
+		["[Group] Show (2019) S01E01", "show"],
+		["Show.2019.S01E02", "show"],
+		["Show 2019 Revival S01E01", "show 2019 revival"],
+		["Show.Name.S01E01", "show name"],
+		["S01E01", ""]
+	])("%s → %s", (stem, key) => {
+		const match = parseEpisode(stem, false)
+
+		expect(match).not.toBeNull()
+
+		if (match !== null) {
+			expect(episodeSeriesKey(stem, match)).toBe(key)
+		}
+	})
 })
 
 describe("mergeKey", () => {
@@ -140,7 +172,13 @@ describe("normalizeSeparators", () => {
 		["No dots", "No dots"],
 		["file.name_with.mix", "file name with mix"],
 		["R.I.P.D.", "R.I.P.D."],
-		["Ölfeld.Über.Straße", "Ölfeld Über Straße"]
+		["Ölfeld.Über.Straße", "Ölfeld Über Straße"],
+		["U.S.Marshals", "U.S. Marshals"],
+		["The.A.Team", "The A Team"],
+		["Don't.A.Movie", "Don't A Movie"],
+		["Movie.DTS.5.1", "Movie DTS 5.1"],
+		["Movie_ _Title", "Movie Title"],
+		["Le\u0301on.A.B", "Le\u0301on A.B"]
 	])("%s → %s", (input, output) => {
 		expect(normalizeSeparators(input)).toBe(output)
 	})
