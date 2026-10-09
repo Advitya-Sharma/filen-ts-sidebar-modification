@@ -6,6 +6,7 @@ import {
 	describeDayRange,
 	DIRECTORIES_BY_SIZE_NOTE,
 	inDayRange,
+	listingPage,
 	MAX_ARRAY_ITEMS,
 	resolveDateFilter,
 	type AssistantPeriodFilter
@@ -788,7 +789,8 @@ export class FakeApp {
 				const selection = this.dateSelection(input, ["modified", "uploaded", "created"])
 				const sort = optionalStr("sort") as ListingSort | undefined
 				const kind = optionalStr("kind")
-				const ofKind = this.children(target.handle).filter(item => this.matchesKind(item, kind))
+				const children = this.children(target.handle)
+				const ofKind = children.filter(item => this.matchesKind(item, kind))
 				const kept = ofKind.filter(item => this.inSelection(item, selection))
 				const byDate = selection.range !== null || sort === "newest" || sort === "oldest"
 				const bySize = sort === "largest" || sort === "smallest"
@@ -798,6 +800,14 @@ export class FakeApp {
 							sizes: new Map<string, number>(),
 							unknown: 0
 						}
+
+				const page = listingPage(
+					sort === undefined ? kept : this.sortListing(kept, sort, selection.field, sizes.sizes),
+					input["offset"],
+					{
+						filtered: kept.length < children.length
+					}
+				)
 
 				return {
 					directory: {
@@ -813,7 +823,12 @@ export class FakeApp {
 									sharedBy: target.sharedBy
 								})
 					},
-					items: (sort === undefined ? kept : this.sortListing(kept, sort, selection.field, sizes.sizes)).map(item => {
+					...(page.offset > 0
+						? {
+								offset: page.offset
+							}
+						: {}),
+					items: page.rows.map(item => {
 						this.exposed.add(item.handle)
 
 						return {
@@ -832,6 +847,12 @@ export class FakeApp {
 							})
 						}
 					}),
+					...(page.more > 0
+						? {
+								more: page.more,
+								next: page.next
+							}
+						: {}),
 					...(selection.range === null
 						? {}
 						: {
@@ -839,6 +860,11 @@ export class FakeApp {
 							}),
 					...joinNotes(
 						this.emptyNote(selection, kept.length, ofKind.length),
+						page.note === undefined
+							? {}
+							: {
+									note: page.note
+								},
 						this.unknownSizesNote(sizes.unknown),
 						bySize && kept.some(item => item.kind === "directory")
 							? {
@@ -1288,7 +1314,12 @@ export class FakeApp {
 						return {
 							handle: item.handle,
 							name: item.name,
-							participants: item.participants,
+							// Like the app: a one-on-one chat's only participant is its name.
+							...(item.participants.length === 1 && item.participants[0] === item.name
+								? {}
+								: {
+										participants: item.participants
+									}),
 							...(last === undefined
 								? {}
 								: {

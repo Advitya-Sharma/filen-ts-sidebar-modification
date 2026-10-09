@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { DIRECTORIES_BY_SIZE_NOTE } from "@filen/shared/assistant"
+import { DIRECTORIES_BY_SIZE_NOTE, LISTING_PAGE_ITEMS } from "@filen/shared/assistant"
 import { FakeApp } from "../fakeApp"
 
 function ok(result: ReturnType<FakeApp["execute"]>): Record<string, unknown> {
@@ -271,6 +271,48 @@ describe("FakeApp", () => {
 		}
 
 		expect(root.items[0]?.handle).toBe("d4")
+	})
+
+	it("lists a long directory a page at a time, like the app", () => {
+		const app = new FakeApp()
+
+		for (let index = 0; index < LISTING_PAGE_ITEMS + 5; index++) {
+			app.state.drive.push({
+				handle: `f${String(200 + index)}`,
+				kind: "file",
+				name: `Scan_${String(index)}.pdf`,
+				parent: "d13",
+				size: 1000,
+				modified: "2024-01-01T10:00:00Z",
+				favorite: false,
+				trashed: false,
+				shared: false
+			})
+		}
+
+		const first = ok(app.execute({ name: "list_directory", args: { path: "/Downloads" } })) as { items: unknown[]; more?: number }
+		const total = first.items.length + (first.more ?? 0)
+		const second = ok(app.execute({ name: "list_directory", args: { path: "/Downloads", offset: LISTING_PAGE_ITEMS } })) as {
+			items: unknown[]
+			offset?: number
+			more?: number
+		}
+
+		expect(first.items).toHaveLength(LISTING_PAGE_ITEMS)
+		expect(first).toMatchObject({ next: LISTING_PAGE_ITEMS })
+		expect(second).toMatchObject({ offset: LISTING_PAGE_ITEMS })
+		expect(second.items).toHaveLength(total - LISTING_PAGE_ITEMS)
+		expect(second.more).toBeUndefined()
+		expect(ok(app.execute({ name: "list_directory", args: { path: "/Downloads", offset: 500 } }))["note"]).toBe(
+			`The directory holds only ${String(total)} items.`
+		)
+	})
+
+	it("names a one-on-one chat once, a group's participants all", () => {
+		const chats = ok(new FakeApp().execute({ name: "list_chats", args: {} }))["chats"] as Record<string, unknown>[]
+
+		expect(chats.find(chat => chat["handle"] === "c7")).not.toHaveProperty("participants")
+		expect(chats.some(chat => Array.isArray(chat["participants"]))).toBe(true)
 	})
 
 	it("filters notes by their edited date before the cut, archived ones included", () => {
