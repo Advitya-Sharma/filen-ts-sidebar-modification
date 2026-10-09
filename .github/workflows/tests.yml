@@ -22,6 +22,7 @@ on:
       - 'packages/filen-shared/**'
       - 'packages/filen-mobile/**'
       - 'packages/filen-web/**'
+      - 'packages/filen-assistant-eval/**'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'patches/**'
@@ -32,6 +33,7 @@ on:
       - 'packages/filen-shared/**'
       - 'packages/filen-mobile/**'
       - 'packages/filen-web/**'
+      - 'packages/filen-assistant-eval/**'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'patches/**'
@@ -46,6 +48,7 @@ jobs:
       filen-shared: ${{ steps.filter.outputs.filen-shared }}
       filen-mobile: ${{ steps.filter.outputs.filen-mobile }}
       filen-web: ${{ steps.filter.outputs.filen-web }}
+      filen-assistant-eval: ${{ steps.filter.outputs.filen-assistant-eval }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -67,6 +70,13 @@ jobs:
               - 'package.json'
             filen-web:
               - 'packages/filen-web/**'
+              - 'packages/filen-shared/**'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'patches/**'
+              - 'package.json'
+            filen-assistant-eval:
+              - 'packages/filen-assistant-eval/**'
               - 'packages/filen-shared/**'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
@@ -124,6 +134,40 @@ jobs:
         run: pnpm install --frozen-lockfile --filter @filen/mobile...
       - name: Test
         working-directory: packages/filen-mobile
+        run: pnpm test
+  # The eval imports the shipped assistant loop, prompts and tool schemas from @filen/shared; its
+  # typecheck, lint and unit suite need no model. arm64 because node-llama-cpp's prebuilt binaries are
+  # optional dependencies a frozen install cannot skip: ~7 MB there against ~355 MB of x64 CPU, CUDA
+  # and Vulkan builds. The arch is also in setup-node's cache key, so this store never displaces the
+  # x64 jobs' one.
+  eval-checks:
+    needs: changes
+    if: needs.changes.outputs.filen-assistant-eval == 'true' || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: filen-assistant-eval-checks-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        working-directory: packages/filen-assistant-eval
+        run: pnpm install --frozen-lockfile --filter @filen/assistant-eval...
+      - name: Typecheck
+        working-directory: packages/filen-assistant-eval
+        run: pnpm run typecheck
+      - name: Lint
+        working-directory: packages/filen-assistant-eval
+        run: pnpm run lint
+      - name: Test
+        working-directory: packages/filen-assistant-eval
         run: pnpm test
   # Everything for filen-web that needs NO live account and NO secrets. Deliberately outside the
   # `filen-web-e2e` concurrency group below: these used to sit in that group, so a six-second unit
