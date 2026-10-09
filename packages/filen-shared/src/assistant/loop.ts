@@ -1,5 +1,5 @@
 import { resultItemCount, toolCallSubject } from "./activity"
-import { capToolResult, estimateTokens, MESSAGE_OVERHEAD_TOKENS } from "./budget"
+import { clipData, estimateTokens, MESSAGE_OVERHEAD_TOKENS, messageLines, serializeToolResult } from "./budget"
 import { AssistantTurnGuard } from "./guard"
 import {
 	ASSISTANT_CLOSING_NUDGE,
@@ -1210,7 +1210,7 @@ export async function runAssistantTurn({
 			results.push({
 				role: "tool",
 				toolCallId: call.id,
-				content: JSON.stringify(capToolResult(result))
+				content: serializeToolResult(result)
 			})
 
 			if (declined) {
@@ -1328,38 +1328,6 @@ export async function runAssistantTurn({
 }
 
 // Runs the extraction over a result's content fields with no tools; only its answer reaches the main loop.
-
-// Cuts `data` to `maxTokens`, keeping its start, or its end for chat messages (the newest).
-function clipData(data: string, maxTokens: number, keepEnd: boolean): { data: string; clipped: boolean } {
-	if (estimateTokens(data) <= maxTokens) {
-		return {
-			data,
-			clipped: false
-		}
-	}
-
-	const chars = Array.from(data)
-	let low = 0
-	let high = chars.length
-
-	// The longest part that fits; estimateTokens grows with every character.
-	while (low < high) {
-		const middle = Math.ceil((low + high) / 2)
-		const part = keepEnd ? chars.slice(chars.length - middle) : chars.slice(0, middle)
-
-		if (estimateTokens(part.join("")) <= maxTokens) {
-			low = middle
-		} else {
-			high = middle - 1
-		}
-	}
-
-	return {
-		data: (keepEnd ? chars.slice(chars.length - low) : chars.slice(0, low)).join(""),
-		clipped: true
-	}
-}
-
 async function quarantine({
 	model,
 	request,
@@ -1378,25 +1346,29 @@ async function quarantine({
 	}
 
 	const record = result as Record<string, unknown>
-	const raw = CONTENT_FIELDS.filter(field => field in record)
-		.map(field => (typeof record[field] === "string" ? String(record[field]) : JSON.stringify(record[field])))
-		.join("\n")
-
-	if (raw.length === 0) {
-		return result
-	}
-
 	// A pasted text as the request would crowd out the content; its start and end carry the ask.
 	const asked = messageEdges(request)
 	const frame = quarantinedExtractionPrompt({
 		request: asked,
 		data: ""
 	})
-	const { data, clipped } = clipData(
-		raw,
-		QUARANTINE_CONTEXT_TOKENS - QUARANTINE_MAX_TOKENS - estimateTokens(frame.system + frame.user) - MESSAGE_OVERHEAD_TOKENS * 2,
-		"messages" in record
-	)
+	const budget =
+		QUARANTINE_CONTEXT_TOKENS - QUARANTINE_MAX_TOKENS - estimateTokens(frame.system + frame.user) - MESSAGE_OVERHEAD_TOKENS * 2
+	// A clipped chat keeps its newest messages, other content its start.
+	const { data, clipped } =
+		("content" in record ? undefined : messageLines(record["messages"], budget)) ??
+		clipData(
+			CONTENT_FIELDS.filter(field => field in record)
+				.map(field => (typeof record[field] === "string" ? String(record[field]) : JSON.stringify(record[field])))
+				.join("\n"),
+			budget,
+			"messages" in record
+		)
+
+	if (data.length === 0 && !clipped) {
+		return result
+	}
+
 	const { system, user } = quarantinedExtractionPrompt({
 		request: asked,
 		data

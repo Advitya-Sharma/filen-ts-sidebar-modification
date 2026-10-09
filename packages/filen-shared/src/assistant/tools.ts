@@ -99,7 +99,8 @@ export const listDirectory = defineTool({
 			.optional()
 			.describe("Order, default name"),
 		kind: anyKind,
-		...dateFilter(DRIVE_DATES)
+		...dateFilter(DRIVE_DATES),
+		offset: z.int().optional().describe("Where to start: the result's next, to list the rest of a long directory")
 	})
 })
 
@@ -115,7 +116,8 @@ const listDirectoryPlain = defineTool({
 	input: listDirectory.input.pick({
 		handle: true,
 		path: true,
-		sort: true
+		sort: true,
+		offset: true
 	})
 })
 

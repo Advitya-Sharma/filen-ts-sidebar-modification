@@ -132,8 +132,9 @@ const LISTING_TOOLS: ReadonlySet<string> = new Set([
 	"get_transfers"
 ])
 
-// How many items a listing or search returned: its result's only list of records, plus a `more` count it
-// reports beyond them; `more: true` marks a list cut off at an unknown length.
+// How many items a listing or search returned: its result's only list of records, plus the `offset` a later
+// page starts at and a `more` count it reports beyond them; `more: true` marks a list cut off at an unknown
+// length.
 export function resultItemCount({ tool, result }: { tool: AssistantTool; result: unknown }): { count: number; more: boolean } | undefined {
 	if (!LISTING_TOOLS.has(tool.name) || !isRecord(result)) {
 		return undefined
@@ -142,13 +143,16 @@ export function resultItemCount({ tool, result }: { tool: AssistantTool; result:
 	const lists = Object.values(result).filter((value): value is unknown[] => Array.isArray(value) && value.every(isRecord))
 	const [list] = lists
 	const more = result["more"]
+	const offset = result["offset"]
+	const counted = (value: unknown) => (typeof value === "number" && Number.isInteger(value) && value > 0 ? value : 0)
 
 	if (lists.length !== 1 || list === undefined) {
 		return undefined
 	}
 
 	return {
-		count: list.length + (typeof more === "number" && Number.isInteger(more) && more > 0 ? more : 0),
+		// A page past the end counts as the empty list it is, not as the rows before it.
+		count: (list.length > 0 ? counted(offset) : 0) + list.length + counted(more),
 		more: more === true
 	}
 }

@@ -1,3 +1,5 @@
+import { isAppResultKey, isSpotlightSpan, spotlightText } from "./untrusted"
+
 // The engines expose no tokenizer, so prompt size is estimated from characters, on the high side: ASCII
 // runs at about four characters per token on Qwen-family vocabularies, everything else (CJK, Cyrillic,
 // Arabic, emoji) at one to two. Overestimating only drops history a little early.
@@ -41,4 +43,238 @@ export function capToolResult(value: unknown): unknown {
 	}
 
 	return value
+}
+
+// How many rows a long directory listing shows at a time; the model pages on with an offset.
+export const LISTING_PAGE_ITEMS = 30
+
+// The row an `offset` argument starts a listing page at.
+export function listingOffset(offset: unknown): number {
+	return typeof offset === "number" && offset > 0 ? Math.floor(offset) : 0
+}
+
+// The page of a listing an `offset` argument asks for: how many rows follow it and the offset of the next
+// page (the model would otherwise pass the count of rows left as one), and, for an offset past the end, a
+// note saying so (an empty page reads as an empty directory). A filtered listing's count is no directory's.
+export function listingPage<T>(
+	items: readonly T[],
+	offset: unknown,
+	{ filtered }: { filtered: boolean }
+): { rows: T[]; offset: number; more: number; next: number; note?: string } {
+	const start = listingOffset(offset)
+	const end = start + LISTING_PAGE_ITEMS
+	const count = items.length === 1 ? "1 item" : `${String(items.length)} items`
+
+	return {
+		rows: items.slice(start, end),
+		offset: start,
+		more: Math.max(0, items.length - end),
+		next: end,
+		...(start > 0 && start >= items.length
+			? {
+					note: filtered
+						? `Only ${count} ${items.length === 1 ? "matches" : "match"} the filters.`
+						: `The directory holds only ${count}.`
+				}
+			: {})
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+// A string stands bare where the app wrote it or spotlighting delimited it; anything else stays a quoted
+// JSON string, so text another person wrote can never pass for a field of its own.
+function rowValue(value: unknown, key?: string): string {
+	if (typeof value === "string") {
+		return (key !== undefined && isAppResultKey(key)) || isSpotlightSpan(value) ? value : JSON.stringify(value)
+	}
+
+	if (Array.isArray(value)) {
+		return `[${value.map(entry => rowValue(entry)).join(", ")}]`
+	}
+
+	return isRecord(value) ? `(${rowText(value)})` : String(value)
+}
+
+// "⟦/Documents⟧" for the path "⟦/Documents/CV.pdf⟧" of "⟦CV.pdf⟧": the name is in the row already.
+function parentOf(path: string, name: string): string | null {
+	const delimited = isSpotlightSpan(path)
+
+	if (delimited !== isSpotlightSpan(name)) {
+		return null
+	}
+
+	const full = delimited ? path.slice(1, -1) : path
+	const own = delimited ? name.slice(1, -1) : name
+
+	if (own.length === 0 || !full.endsWith(`/${own}`)) {
+		return null
+	}
+
+	const parent = full.slice(0, -own.length - 1) || "/"
+
+	return delimited ? spotlightText(parent, { mode: "delimit" }) : JSON.stringify(parent)
+}
+
+const LEAD_KEYS: ReadonlySet<string> = new Set(["handle", "name", "title"])
+
+// One listing row as a line, "f3 ⟦CV.pdf⟧ in=⟦/Documents⟧ size=1.2 MB favorite": keys and quotes are most of
+// what a row of objects costs. Handle and name lead, a kind other than "file" stands alone (the handle's
+// letter already says file), a true flag is its key.
+function rowText(record: Record<string, unknown>): string {
+	const name = record["name"] ?? record["title"]
+	const parts: string[] = []
+
+	for (const key of LEAD_KEYS) {
+		const value = record[key]
+
+		if (typeof value === "string") {
+			parts.push(rowValue(value, key))
+		}
+	}
+
+	for (const [key, value] of Object.entries(record)) {
+		if (value === undefined || (LEAD_KEYS.has(key) && typeof value === "string")) {
+			continue
+		}
+
+		if (key === "kind" && typeof value === "string") {
+			if (value !== "file") {
+				parts.push(rowValue(value, key))
+			}
+
+			continue
+		}
+
+		const parent = key === "path" && typeof value === "string" && typeof name === "string" ? parentOf(value, name) : null
+
+		parts.push(parent !== null ? `in=${parent}` : value === true ? key : `${key}=${rowValue(value, key)}`)
+	}
+
+	return parts.join(" ")
+}
+
+// Only lists of items (records with a handle) become lines; others, such as contacts, read more reliably as
+// objects. Transfers stay objects too: a row gains its handle only once its item exists, so the same list
+// would switch format between calls. The cap's "(n more not shown)" is the one string among the records.
+function compactRows(value: unknown, key?: string): unknown {
+	if (Array.isArray(value)) {
+		return key !== "transfers" &&
+			value.some(isRecord) &&
+			value.every(entry => (isRecord(entry) && typeof entry["handle"] === "string") || typeof entry === "string")
+			? value.map(entry => (isRecord(entry) ? rowText(entry) : entry))
+			: value.map(entry => compactRows(entry))
+	}
+
+	return isRecord(value) ? Object.fromEntries(Object.entries(value).map(([name, entry]) => [name, compactRows(entry, name)])) : value
+}
+
+// A tool result as the model reads it: capped, every list of items as one line per item. The browser
+// engine reads about a hundred prompt tokens a second, so a listing's tokens are most of a step's wait.
+export function serializeToolResult(value: unknown): string {
+	return JSON.stringify(compactRows(capToolResult(value)))
+}
+
+// The largest n up to `max` whose text fits `maxTokens`; the text's estimate must grow with n.
+function longestFitting(max: number, maxTokens: number, text: (n: number) => string): number {
+	let low = 0
+	let high = max
+
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2)
+
+		if (estimateTokens(text(middle)) <= maxTokens) {
+			low = middle
+		} else {
+			high = middle - 1
+		}
+	}
+
+	return low
+}
+
+// Cuts `data` to `maxTokens`, keeping its start, or its end.
+export function clipData(data: string, maxTokens: number, keepEnd: boolean): { data: string; clipped: boolean } {
+	if (estimateTokens(data) <= maxTokens) {
+		return {
+			data,
+			clipped: false
+		}
+	}
+
+	const chars = Array.from(data)
+	const part = (n: number) => (keepEnd ? chars.slice(chars.length - n) : chars.slice(0, n)).join("")
+
+	return {
+		data: part(longestFitting(chars.length, maxTokens, part)),
+		clipped: true
+	}
+}
+
+type MessageRow = { from: string; text: string; sent?: unknown }
+
+function isMessageRow(value: unknown): value is MessageRow {
+	return isRecord(value) && typeof value["from"] === "string" && typeof value["text"] === "string"
+}
+
+// Chat messages for the content extraction, within `maxTokens`: a day line whenever the day changes, then one
+// line per message with sender and text as quoted JSON strings, so a text cannot start a message of its own.
+// Past the budget the oldest messages go whole and the kept ones still start with their day line; a newest
+// message too long alone keeps the end of its text. Undefined for rows of another shape.
+export function messageLines(messages: unknown, maxTokens: number): { data: string; clipped: boolean } | undefined {
+	if (!Array.isArray(messages) || !messages.every(isMessageRow)) {
+		return undefined
+	}
+
+	const rows: readonly MessageRow[] = messages
+	const render = (start: number, newestText?: string): string => {
+		const lines: string[] = []
+		let day: unknown = undefined
+
+		for (let index = start; index < rows.length; index++) {
+			const message = rows[index]
+
+			if (message === undefined) {
+				continue
+			}
+
+			if (typeof message.sent === "string" && message.sent !== day) {
+				day = message.sent
+				lines.push(message.sent)
+			}
+
+			const text = index === rows.length - 1 && newestText !== undefined ? newestText : message.text
+
+			lines.push(`${JSON.stringify(message.from)}: ${JSON.stringify(text)}`)
+		}
+
+		return lines.join("\n")
+	}
+	const all = render(0)
+
+	if (estimateTokens(all) <= maxTokens) {
+		return {
+			data: all,
+			clipped: false
+		}
+	}
+
+	const kept = longestFitting(rows.length, maxTokens, n => render(rows.length - n))
+
+	if (kept > 0) {
+		return {
+			data: render(rows.length - kept),
+			clipped: true
+		}
+	}
+
+	const chars = Array.from(rows.at(-1)?.text ?? "")
+	const end = (n: number) => render(rows.length - 1, chars.slice(chars.length - n).join(""))
+
+	return {
+		data: end(longestFitting(chars.length, maxTokens, end)),
+		clipped: true
+	}
 }

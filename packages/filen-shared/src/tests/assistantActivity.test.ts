@@ -120,6 +120,11 @@ describe("resultItemCount", () => {
 		expect(count("list_chats", { chats: [] })).toEqual({ count: 0, more: false })
 	})
 
+	it("counts the rows before a later page, but not before a page past the end", () => {
+		expect(count("list_directory", { offset: 30, items: [{ handle: "f1" }], more: 4 })).toEqual({ count: 35, more: false })
+		expect(count("list_directory", { offset: 90, items: [] })).toEqual({ count: 0, more: false })
+	})
+
 	it("counts nothing for content, writes or results that are not one list of records", () => {
 		expect(count("read_chat", { messages: [{ text: "hi" }] })).toBeUndefined()
 		expect(count("move_items", { moved: [{ handle: "f1" }] })).toBeUndefined()
