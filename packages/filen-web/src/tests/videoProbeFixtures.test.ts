@@ -184,7 +184,7 @@ describe.skipIf(manifest.length === 0)("video probe against the generated fixtur
 			await file.close()
 		}
 
-		// Logged for docs/videos/spikes.md.
+		// The read-cost table, to compare against after a parser change.
 		console.log(["file | tier | block reads | MiB downloaded | bytes parsed | video | audio", ...rows].join("\n"))
 	})
 })
