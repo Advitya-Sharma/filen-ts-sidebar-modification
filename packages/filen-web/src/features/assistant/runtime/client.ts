@@ -7,7 +7,8 @@ import {
 	type AssistantGenerateResult,
 	type AssistantModel,
 	type AssistantPromptProgress,
-	type AssistantSignal
+	type AssistantSignal,
+	ROUTER_SYSTEM_PROMPT
 } from "@filen/shared/assistant"
 import type { AssistantModelInfo, AssistantModelState } from "@/features/assistant/types"
 import { DEFAULT_MODEL_BASE_URL, manifestBytes, parseManifest, type AssistantModelManifest } from "@/features/assistant/runtime/manifest"
@@ -739,7 +740,8 @@ export class AssistantRuntime implements AssistantModel {
 				{
 					backend: recommendation.backend,
 					threads: recommendation.threads,
-					contextTokens: ASSISTANT_CONTEXT_TOKENS
+					contextTokens: ASSISTANT_CONTEXT_TOKENS,
+					primeSystem: ROUTER_SYSTEM_PROMPT
 				},
 				Comlink.proxy(() => {
 					if (this.state.kind === "loading") {

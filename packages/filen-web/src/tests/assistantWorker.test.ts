@@ -1,16 +1,18 @@
 import { createHash } from "node:crypto"
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { ROUTER_SYSTEM_PROMPT } from "@filen/shared/assistant"
 import type { AssistantWorkerApi } from "@/workers/assistant.worker"
 import type { AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import type { GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 
 // The worker module exposes its API through Comlink at import; the engine, its wasm URL and OPFS are
 // replaced so the contract between the page and the engine can be checked under node.
-const { exposed, engines, shardFiles, verified, loadFailure, loadOutcome, completion } = vi.hoisted(() => ({
+const { exposed, engines, shardFiles, verified, loadFailure, loadOutcome, completion, raw } = vi.hoisted(() => ({
 	exposed: new Map<"api", unknown>(),
 	engines: [] as {
 		loadModel: ReturnType<typeof vi.fn>
 		createChatCompletion: ReturnType<typeof vi.fn>
+		createCompletion: ReturnType<typeof vi.fn>
 		setCompat: ReturnType<typeof vi.fn>
 		exit: ReturnType<typeof vi.fn>
 	}[],
@@ -21,7 +23,12 @@ const { exposed, engines, shardFiles, verified, loadFailure, loadOutcome, comple
 	// What a load that "succeeded" reports, and the engine log line it wrote.
 	loadOutcome: { vocab: 10, log: null as string | null },
 	// Replaces the scripted completion when set.
-	completion: { run: null as ((options: { abortSignal: AbortSignal; onData: (chunk: unknown) => void }) => Promise<void>) | null }
+	completion: { run: null as ((options: { abortSignal: AbortSignal; onData: (chunk: unknown) => void }) => Promise<void>) | null },
+	// The loaded model's chat template, and what a raw completion (the prompt priming) does.
+	raw: {
+		template: "{{- '<|im_start|>' + message.role }}",
+		run: null as ((options: { prompt: string }) => Promise<unknown>) | null
+	}
 }))
 
 vi.mock("comlink", () => ({
@@ -57,6 +64,10 @@ vi.mock("@wllama/wllama/esm/index.js", () => ({
 		})
 		readonly getLoadedContextInfo = vi.fn(() => ({ n_vocab: loadOutcome.vocab, n_ctx: loadOutcome.vocab > 0 ? 8192 : 0 }))
 		readonly setCompat = vi.fn()
+		readonly getChatTemplate = vi.fn(() => raw.template)
+		readonly createCompletion = vi.fn((options: { prompt: string }) =>
+			raw.run === null ? Promise.resolve({ choices: [] }) : raw.run(options)
+		)
 		readonly exit = vi.fn(() => Promise.resolve())
 		readonly createChatCompletion = vi.fn((options: { onData: (chunk: unknown) => void; abortSignal: AbortSignal }): Promise<void> => {
 			if (completion.run !== null) {
@@ -154,6 +165,8 @@ vi.mock("@/features/assistant/runtime/gguf", () => ({
 
 await import("@/workers/assistant.worker")
 
+const { WllamaError } = await import("@wllama/wllama/esm/index.js")
+
 const api = exposed.get("api") as AssistantWorkerApi
 
 const CONTENTS = [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5])]
@@ -186,6 +199,8 @@ describe("assistant worker API", () => {
 		loadOutcome.vocab = 10
 		loadOutcome.log = null
 		completion.run = null
+		raw.template = "{{- '<|im_start|>' + message.role }}"
+		raw.run = null
 
 		MANIFEST.shards.forEach((shard, index) => {
 			shardFiles.set(shard.file, CONTENTS[index] ?? new Uint8Array(0))
@@ -439,8 +454,115 @@ describe("assistant worker API", () => {
 
 			await expect(api.generate(2, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelRuntimeError:crashed" })
 			expect(engines.at(-1)?.exit).toHaveBeenCalled()
-			await expect(api.generate(3, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelLoadError:missing" })
+			await expect(api.generate(3, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelRuntimeError:crashed" })
 		}
+
+		await api.unload()
+		await expect(api.generate(4, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelLoadError:missing" })
+	})
+
+	it("reads the router's system turn as the last step of the load, as the router request's ChatML prefix", async () => {
+		let primed: () => void = () => undefined
+		let loaded = false
+
+		raw.run = () =>
+			new Promise(resolve => {
+				primed = () => {
+					resolve({ choices: [] })
+				}
+			})
+
+		const load = api.load(MANIFEST, { ...OPTIONS, primeSystem: ROUTER_SYSTEM_PROMPT }).then(() => {
+			loaded = true
+		})
+
+		await vi.waitFor(() => {
+			expect(engines[0]?.createCompletion).toHaveBeenCalled()
+		})
+		expect(loaded).toBe(false)
+		primed()
+		await load
+
+		const options = engines[0]?.createCompletion.mock.calls[0]?.[0] as { prompt: string } | undefined
+		const prompt = options?.prompt ?? ""
+		// The no-tools branch of the Qwen3.5 template, for the router's request (shared loop: system + user, no tools).
+		const routerPrompt = [
+			{ role: "system", content: ROUTER_SYSTEM_PROMPT },
+			{ role: "user", content: "What's in my Downloads directory?" }
+		]
+			.map(message => `<|im_start|>${message.role}\n${message.content.trim()}<|im_end|>\n`)
+			.join("")
+
+		expect(options).toEqual({ prompt, max_tokens: 1, temperature: 0 })
+		expect(prompt.endsWith("<|im_start|>user\nHi")).toBe(true)
+		expect(routerPrompt.startsWith(prompt.slice(0, -"Hi".length))).toBe(true)
+	})
+
+	it("settles a generation stopped while it waits, and runs the next one only after the one in front", async () => {
+		const order: string[] = []
+		let release: () => void = () => undefined
+		let calls = 0
+
+		completion.run = () => {
+			calls += 1
+
+			if (calls === 1) {
+				return new Promise(resolve => {
+					release = () => {
+						order.push("first")
+						resolve()
+					}
+				})
+			}
+
+			order.push("next")
+
+			return Promise.resolve()
+		}
+
+		await api.load(MANIFEST, OPTIONS)
+
+		const first = api.generate(1, { messages: [], maxTokens: 1 })
+		const stopped = api.generate(2, { messages: [], maxTokens: 1 })
+
+		api.cancel(2)
+		await expect(stopped).rejects.toMatchObject({ name: "AbortError" })
+
+		const next = api.generate(3, { messages: [], maxTokens: 1 })
+
+		await new Promise(resolve => setTimeout(resolve, 10))
+		expect(order).toEqual([])
+		release()
+		await Promise.all([first, next])
+		expect(order).toEqual(["first", "next"])
+		expect(engines[0]?.createChatCompletion).toHaveBeenCalledTimes(2)
+	})
+
+	it("does not prime a model whose template is not ChatML, nor when no system turn is given", async () => {
+		raw.template = "{{ bos_token }}[INST]"
+		await api.load(MANIFEST, { ...OPTIONS, primeSystem: "Route requests." })
+		await api.unload()
+		raw.template = "{{- '<|im_start|>' }}"
+		await api.load(MANIFEST, OPTIONS)
+		await api.generate(1, { messages: [], maxTokens: 1 })
+
+		expect(engines.map(engine => engine.createCompletion.mock.calls.length)).toEqual([0, 0])
+	})
+
+	it("fails the load when the priming crashes the engine, and keeps a model whose priming only failed", async () => {
+		raw.run = () => Promise.reject(Object.assign(new Error("device lost"), { name: "RuntimeError" }))
+
+		await expect(api.load(MANIFEST, { ...OPTIONS, backend: "webgpu", primeSystem: "Route requests." })).rejects.toMatchObject({
+			name: "ModelLoadError:load-failed"
+		})
+		expect(engines[0]?.exit).toHaveBeenCalled()
+		await expect(api.generate(1, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelLoadError:missing" })
+
+		raw.run = () => Promise.reject(new WllamaError("no free slot", "inference_error"))
+
+		await api.load(MANIFEST, { ...OPTIONS, backend: "webgpu", primeSystem: "Route requests." })
+		await expect(api.generate(2, { messages: [], maxTokens: 1 })).resolves.toMatchObject({ content: "Hi" })
+		expect(engines[1]?.exit).not.toHaveBeenCalled()
 	})
 
 	it("lets a cancelled generation wind down before the engine exits on unload", async () => {

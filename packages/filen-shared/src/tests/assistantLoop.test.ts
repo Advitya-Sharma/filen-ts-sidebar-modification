@@ -9,6 +9,7 @@ import {
 	localeWeekStart,
 	parseRoute,
 	ROUTER_GRAMMAR,
+	ROUTER_SYSTEM_PROMPT,
 	runAssistantTurn,
 	screenReply,
 	type AssistantChatMessage,
@@ -910,6 +911,27 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		await turn({ model, executor: new FakeExecutor({ items: [] }), message: "Hello" })
 
 		expect(model.requests[0]?.messages[1]?.content).toBe("Hello")
+	})
+
+	// The web worker reads this system turn once per load, so every router request reads only its user turn;
+	// tools or per-turn system text would render a different prefix and silently undo that.
+	it("opens every router request with the same system turn, followed only by the user turn", async () => {
+		const model = new ScriptedModel({ route: "answer", steps: ["Hi.", "Hi again."] })
+		const executor = new FakeExecutor({ items: [] })
+
+		await turn({ model, executor, message: "Hello" })
+		await turn({ model, executor, message: "And now?", history: [{ user: "Hello", reply: "Hi." }] })
+
+		const routed = model.requests.filter(request => request.grammar === ROUTER_GRAMMAR)
+
+		expect(routed).toHaveLength(2)
+
+		for (const request of routed) {
+			expect(request.tools).toBeUndefined()
+			expect(request.messages).toHaveLength(2)
+			expect(request.messages[0]).toEqual({ role: "system", content: ROUTER_SYSTEM_PROMPT })
+			expect(request.messages[1]?.role).toBe("user")
+		}
 	})
 
 	it("sanitizes the context line before it enters the system prompt", async () => {

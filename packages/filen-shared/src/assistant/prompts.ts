@@ -31,6 +31,8 @@ const ROUTER_EXAMPLES = [
 	["How do I bake bread?", "answer"]
 ]
 
+// Fixed text: the web worker reads it once per load ahead of every router request, so anything per turn
+// belongs in the user turn.
 export const ROUTER_SYSTEM_PROMPT = [
 	"You route requests for the assistant of Filen, an encrypted cloud drive app with the user's files, notes, chats and music.",
 	"Groups:",

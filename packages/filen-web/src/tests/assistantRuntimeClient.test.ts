@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest"
+import { ROUTER_SYSTEM_PROMPT } from "@filen/shared/assistant"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
 import type { GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 import type { ModelInspection } from "@/features/assistant/runtime/modelStore"
@@ -380,6 +381,8 @@ describe("AssistantRuntime explicit load", () => {
 		expect(runtime.getState().kind).toBe("ready")
 		expect(runtime.specialTokens).toEqual(["<|im_end|>"])
 		expect(remote.load).toHaveBeenCalledTimes(1)
+		// The worker reads the router's fixed system turn ahead, so each router request reads only its user turn.
+		expect(remote.load.mock.calls[0]?.[1]).toMatchObject({ primeSystem: ROUTER_SYSTEM_PROMPT })
 		expect(workers).toHaveLength(1)
 		expect(locks.held).toBe(1)
 	})

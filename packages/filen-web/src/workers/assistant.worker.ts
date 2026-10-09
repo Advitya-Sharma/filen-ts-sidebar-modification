@@ -29,6 +29,8 @@ export interface AssistantLoadOptions {
 	backend: AssistantBackend
 	threads: number
 	contextTokens: number
+	// A system prompt that opens every request of one kind (the router's), read once as the last step of the load.
+	primeSystem?: string
 }
 
 export interface AssistantLoadResult {
@@ -92,6 +94,9 @@ let generationTail: Promise<unknown> = Promise.resolve()
 
 // How long an unload waits for cancelled generations: wllama checks the signal once per engine step.
 const SETTLE_GRACE_MS = 500
+
+// Why the engine was released mid-session, for the next request to report the crash instead of a missing model.
+let crashed: string | null = null
 
 // Read through a call: TypeScript would keep `download` narrowed across the awaits before it.
 function clearDownload(controller: AbortController): void {
@@ -331,6 +336,116 @@ function delay(ms: number): Promise<void> {
 	})
 }
 
+function untilAborted(signal: AbortSignal): Promise<void> {
+	return new Promise(resolve => {
+		signal.addEventListener(
+			"abort",
+			() => {
+				resolve()
+			},
+			{ once: true }
+		)
+	})
+}
+
+// Runs one engine request after every earlier one settled. A crash releases the engine, so the client finds
+// none to reuse; its files stay on disk.
+async function serialized<T>({
+	id,
+	controller,
+	run
+}: {
+	id: number
+	controller: AbortController
+	run: (engine: Wllama) => Promise<T>
+}): Promise<T> {
+	const current = engine
+	const released = () => (crashed === null ? loadError("missing", "No model is loaded") : crashError(crashed))
+
+	if (current === null) {
+		throw released()
+	}
+
+	const previous = generationTail
+	let finish: () => void = () => undefined
+	const done = new Promise<void>(resolve => {
+		finish = resolve
+	})
+
+	// The next request waits for this one and for everything before it: a request stopped while it waits
+	// settles at once, but the engine is still busy with what it waited for. Valueless, so the chain of
+	// settled tails is not kept alive.
+	generationTail = previous.then(() => done)
+	generations.set(id, { controller, done })
+
+	try {
+		await Promise.race([previous, untilAborted(controller.signal)])
+
+		if (controller.signal.aborted) {
+			throw new WllamaAbortError()
+		}
+
+		// The request before this one crashed the engine, or an unload released it.
+		if (engine !== current) {
+			throw released()
+		}
+
+		return await run(current)
+	} catch (e) {
+		if (isEngineCrash(e, controller.signal.aborted)) {
+			const message = e instanceof Error ? e.message : String(e)
+
+			if (engine === current) {
+				engine = null
+				crashed = message
+			}
+
+			await current.exit().catch(() => undefined)
+
+			throw crashError(message)
+		}
+
+		throw e
+	} finally {
+		generations.delete(id)
+		finish()
+	}
+}
+
+const PRIME_USER = "Hi"
+
+// The ChatML rendering (the model's own template) of `system` followed by a one-token user message. Qwen3.5
+// is a hybrid model: the engine resumes a cached prompt only from a stored copy of its recurrent state, and
+// it stores one 4 tokens before the end of every prompt it reads. Read once, this prompt leaves one 3 tokens
+// before the user turn, where every request opening with `system` starts to differ, so each of them reads
+// only its own user message (the router: ~20 tokens instead of ~700), and stores the same copy again for
+// the next. Null for another template, whose prefix this would not match.
+function primePrompt(current: Wllama, system: string): string | null {
+	return current.getChatTemplate()?.includes("<|im_start|>") === true
+		? `<|im_start|>system\n${system.trim()}<|im_end|>\n<|im_start|>user\n${PRIME_USER}`
+		: null
+}
+
+// Part of the load, so its time shows as loading and a crash here fails the load (on the GPU: the CPU path
+// is tried next). Any other failure only costs the reuse.
+async function prime(current: Wllama, system: string): Promise<void> {
+	const prompt = primePrompt(current, system)
+
+	if (prompt === null) {
+		return
+	}
+
+	try {
+		await current.createCompletion({ prompt, max_tokens: 1, temperature: 0 })
+	} catch (e) {
+		if (isEngineCrash(e, false)) {
+			throw e
+		}
+
+		log.warn("assistant.engine", "priming the prompt cache failed", e)
+	}
+}
+
 const api = {
 	// Resumable: shards already verified are skipped, a partial shard continues where it stopped.
 	async download(
@@ -428,6 +543,10 @@ const api = {
 				if (!(info.n_vocab > 0 && info.n_ctx > 0)) {
 					throw new Error(lines.join("\n") || "The engine did not load the model")
 				}
+
+				if (options.primeSystem !== undefined) {
+					await prime(instance, options.primeSystem)
+				}
 			} catch (e) {
 				await instance.exit().catch(() => undefined)
 				await specialTokens.catch(() => undefined)
@@ -452,6 +571,7 @@ const api = {
 			}
 
 			engine = instance
+			crashed = null
 
 			return { specialTokens: await specialTokens }
 		} finally {
@@ -466,10 +586,6 @@ const api = {
 		request: AssistantGenerateRequest,
 		onUpdate?: (update: GenerationUpdate) => void
 	): Promise<AssistantGenerateResult> {
-		if (engine === null) {
-			throw loadError("missing", "No model is loaded")
-		}
-
 		const controller = new AbortController()
 		const state: GenerationState = { content: "", calls: [] }
 		const tools: ChatCompletionTool[] | undefined = request.tools?.map(tool => ({
@@ -484,75 +600,49 @@ const api = {
 						onUpdate({ type: "text", text: content })
 					}, TEXT_THROTTLE_MS)
 
-		const current = engine
-		const previous = generationTail
-		let finish: () => void = () => undefined
-		const done = new Promise<void>(resolve => {
-			finish = resolve
-		})
-
-		generationTail = done
-		generations.set(id, { controller, done })
-
 		try {
-			await previous
+			await serialized({
+				id,
+				controller,
+				run: current =>
+					current.createChatCompletion({
+						messages: request.messages.map(toEngineMessage),
+						...(tools === undefined || tools.length === 0 ? {} : { tools, tool_choice: "auto" as const }),
+						...(request.grammar === undefined ? {} : { grammar: request.grammar }),
+						max_tokens: request.maxTokens,
+						temperature: 0,
+						chat_template_kwargs: { enable_thinking: false },
+						abortSignal: controller.signal,
+						stream: true,
+						return_progress: onUpdate !== undefined,
+						onData: chunk => {
+							const changes = accumulateChunk({ state, chunk })
 
-			if (controller.signal.aborted) {
-				throw new WllamaAbortError()
-			}
+							if (onUpdate === undefined) {
+								return
+							}
 
-			await current.createChatCompletion({
-				messages: request.messages.map(toEngineMessage),
-				...(tools === undefined || tools.length === 0 ? {} : { tools, tool_choice: "auto" as const }),
-				...(request.grammar === undefined ? {} : { grammar: request.grammar }),
-				max_tokens: request.maxTokens,
-				temperature: 0,
-				chat_template_kwargs: { enable_thinking: false },
-				abortSignal: controller.signal,
-				stream: true,
-				return_progress: onUpdate !== undefined,
-				onData: chunk => {
-					const changes = accumulateChunk({ state, chunk })
+							if (changes.progress !== null) {
+								onUpdate({ type: "progress", ...changes.progress })
+							}
 
-					if (onUpdate === undefined) {
-						return
-					}
+							if (changes.text) {
+								text?.(state.content)
+							}
 
-					if (changes.progress !== null) {
-						onUpdate({ type: "progress", ...changes.progress })
-					}
+							if (changes.named.length > 0) {
+								text?.flush()
 
-					if (changes.text) {
-						text?.(state.content)
-					}
-
-					if (changes.named.length > 0) {
-						text?.flush()
-
-						for (const call of changes.named) {
-							onUpdate({ type: "call", ...call })
+								for (const call of changes.named) {
+									onUpdate({ type: "call", ...call })
+								}
+							}
 						}
-					}
-				}
+					})
 			})
-		} catch (e) {
-			if (isEngineCrash(e, controller.signal.aborted)) {
-				// Released here, so the client finds no engine to reuse; its files stay on disk.
-				if (engine === current) {
-					engine = null
-				}
-
-				await current.exit().catch(() => undefined)
-
-				throw crashError(e instanceof Error ? e.message : String(e))
-			}
-
-			throw e
 		} finally {
 			text?.flush()
 			releaseCallback(onUpdate)
-			generations.delete(id)
-			finish()
 		}
 
 		return {
@@ -578,6 +668,7 @@ const api = {
 		const current = engine
 
 		engine = null
+		crashed = null
 		await Promise.race([Promise.allSettled(running.map(({ done }) => done)), delay(SETTLE_GRACE_MS)])
 		await current?.exit()
 	}
