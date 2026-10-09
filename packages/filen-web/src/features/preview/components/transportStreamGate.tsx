@@ -25,6 +25,9 @@ export function TransportStreamGate({ item, render }: { item: DriveItem; render:
 	const [failedAttempt, setFailedAttempt] = useState<number | null>(null)
 	const [attempt, setAttempt] = useState(0)
 	const [file] = useState(() => (asDirectoryOrFile(item).type === "file" ? narrowToAnyFile(item) : null))
+	const name = driveItemName(item)
+	const mime = driveItemMime(item)
+	const size = item.data.size
 
 	useEffect(() => {
 		if (!waiting || file === null) {
@@ -41,17 +44,14 @@ export function TransportStreamGate({ item, render }: { item: DriveItem; render:
 			if (isStream === null) {
 				setFailedAttempt(attempt)
 			} else {
-				recordContentVerdict(
-					{ uuid, name: driveItemName(item), mime: driveItemMime(item), size: item.data.size },
-					isStream ? "transportStream" : "notTransportStream"
-				)
+				recordContentVerdict({ uuid, name, mime, size }, isStream ? "transportStream" : "notTransportStream")
 			}
 		})
 
 		return () => {
 			abort.abort()
 		}
-	}, [waiting, file, uuid, access, attempt])
+	}, [waiting, file, uuid, name, mime, size, access, attempt])
 
 	if (!waiting) {
 		return verdict === "notTransportStream" && asDirectoryOrFile(item).data.size > TEXT_MAX_BYTES ? (
