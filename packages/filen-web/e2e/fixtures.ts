@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 import { test as base, expect, type BrowserContext, type BrowserType, type Page, type Request, type TestInfo } from "@playwright/test"
 import { SESSION_BINDING } from "@/e2e-hooks/sessionSeed"
 import { common } from "@/locales/en/common"
+import { silenceMediaElements } from "./helpers/muteMedia"
 
 // The session blob is secret-equivalent and lives ONLY here (gitignored, mode 0600) and in the page
 // binding that serves it (seedSession) — it is never typed into a page, passed as a call argument or
@@ -737,6 +738,8 @@ export const test = base.extend<{
 			acceptDownloads,
 			...(videoMode === "off" ? {} : { recordVideo: { dir: videoDir } })
 		})
+
+		await persistent.addInitScript(silenceMediaElements)
 
 		// Collected as pages open: one a test closes itself is gone from pages() by the end.
 		const videos: NonNullable<ReturnType<Page["video"]>>[] = []

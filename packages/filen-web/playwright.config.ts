@@ -73,9 +73,11 @@ function selectedBrowsers(): readonly Browser[] {
 	return [browser]
 }
 
+// Media specs play real audio; muted at the output, which pages cannot observe. WebKit has no such
+// switch, see e2e/helpers/muteMedia.ts.
 const BROWSER_USE = {
-	chromium: { ...devices["Desktop Chrome"] },
-	firefox: { ...devices["Desktop Firefox"] },
+	chromium: { ...devices["Desktop Chrome"], launchOptions: { args: ["--mute-audio"] } },
+	firefox: { ...devices["Desktop Firefox"], launchOptions: { firefoxUserPrefs: { "media.volume_scale": "0.0" } } },
 	// At 1x like the other two: the helpers stretch the page to 1280x8000 (virtualization), and Linux WebKit
 	// paints in software, so Desktop Safari's 2x (a 2560x16000 surface) runs at a few frames a second, too
 	// slow for actions that wait on a stable element.
