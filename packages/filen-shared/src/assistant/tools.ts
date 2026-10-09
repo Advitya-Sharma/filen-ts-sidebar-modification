@@ -82,7 +82,7 @@ export const listDirectory = defineTool({
 	name: "list_directory",
 	title: "List directory",
 	description:
-		"List a directory's contents, given its handle or its path (\"/\" is the drive root). Can sort by size (directories by total size) or date and filter by kind or date.",
+		"List one directory's contents, given its handle or its path (\"/\" is the drive root). Can sort by size (directories by total size) or date and filter by kind or date.",
 	group: "insights",
 	effect: "read",
 	untrustedOutput: "names",
@@ -102,6 +102,11 @@ export const listDirectory = defineTool({
 		...dateFilter(DRIVE_DATES)
 	})
 })
+
+// Carried by a size-sorted listing that holds directories: no tool ranks the whole drive's files, and without
+// it small models present the top directories of the root as the user's largest files.
+export const DIRECTORIES_BY_SIZE_NOTE =
+	"Directories are ranked by the total size of everything inside them; they are not files. Listing a directory by size shows the largest files inside it."
 
 const listDirectoryPlain = defineTool({
 	...listDirectory,
@@ -135,7 +140,7 @@ export const recentItems = defineTool({
 	name: "recent_items",
 	title: "Recent files",
 	description:
-		"List the files the user uploaded or changed recently, newest first (the Recents screen). Can filter by kind or date and sort by size.",
+		"List the files the user uploaded or changed recently, newest first (the Recents screen, not the whole drive). Can filter by kind or date and sort by size.",
 	group: "insights",
 	effect: "read",
 	untrustedOutput: "names",
@@ -249,9 +254,9 @@ export const revealItem = defineTool({
 
 export const setFavorite = defineTool({
 	name: "set_favorite",
-	title: "Favorite",
+	title: "Add or remove favorites",
 	description: "Add files or directories to the favorites, or remove them.",
-	group: "files",
+	group: "shared",
 	effect: "modifying",
 	untrustedOutput: "names",
 	exfiltrates: false,
@@ -698,8 +703,8 @@ export type AssistantGroupDefinition = {
 // only that group's tools are offered. Lookup tools appear in every group that needs their handles.
 export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, AssistantGroupDefinition>> = {
 	files: {
-		description: "find, list, read, summarize or show files and directories (folders); add or remove favorites",
-		tools: [searchItemsByName, listDirectoryPlain, getItemInfo, readTextFile, revealItem, setFavorite]
+		description: "find files and directories (folders) by name or location, list, read, summarize or show them",
+		tools: [searchItemsByName, listDirectoryPlain, getItemInfo, readTextFile, revealItem]
 	},
 	organize: {
 		description: "create directories (folders), rename, move or copy files and directories",
@@ -727,13 +732,13 @@ export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, Assistan
 	},
 	insights: {
 		description:
-			"files by date (uploaded or changed recently, today, last week, in a month or year), photos by the date taken, the largest files or directories, directory sizes, storage space used and free",
+			"lists of files by date or size: what the user uploaded, changed or worked on recently (today, last week, in a month or year), the largest files or directories; directory sizes, storage space used and free; photos by the date taken",
 		tools: [recentItems, listPhotos, getStorage, searchItems, listDirectory, getItemInfo]
 	},
 	shared: {
 		description:
-			"the favorites list, files and directories shared with the user or by the user, public links, and whether an item is shared or has a public link; also requests to share, stop sharing or make something public, which only the user can do",
-		tools: [listSection, getSharing, searchItemsByName, listDirectoryPlain]
+			"sharing: whether an item is shared or has a public link, items shared with or by the user, public links; favorites (list, add or remove); also requests to share, stop sharing or make something public, which only the user can do",
+		tools: [listSection, getSharing, searchItemsByName, listDirectoryPlain, setFavorite]
 	}
 }
 

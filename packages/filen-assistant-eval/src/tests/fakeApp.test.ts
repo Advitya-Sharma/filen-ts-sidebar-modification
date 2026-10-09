@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { DIRECTORIES_BY_SIZE_NOTE } from "@filen/shared/assistant"
 import { FakeApp } from "../fakeApp"
 
 function ok(result: ReturnType<FakeApp["execute"]>): Record<string, unknown> {
@@ -254,7 +255,7 @@ describe("FakeApp", () => {
 		})
 	})
 
-	it("ranks directories by total size with files, showing what it sorted by", () => {
+	it("ranks directories by total size with files, showing what it sorted by and that they are not files", () => {
 		const listing = ok(new FakeApp().execute({ name: "list_directory", args: { path: "/Documents", sort: "largest" } })) as {
 			items: { handle: string; size?: string }[]
 			note?: string
@@ -262,7 +263,8 @@ describe("FakeApp", () => {
 
 		expect(listing.items.map(item => item.handle)).toEqual(["d3", "f10", "d2", "f8", "f44", "f9"])
 		expect(listing.items[0]?.size).toBe("2.3 MiB")
-		expect(listing.note).toBeUndefined()
+		expect(listing.note).toBe(DIRECTORIES_BY_SIZE_NOTE)
+		expect(ok(new FakeApp().execute({ name: "list_directory", args: { path: "/Music", sort: "largest" } }))["note"]).toBeUndefined()
 
 		const root = ok(new FakeApp().execute({ name: "list_directory", args: { path: "/", sort: "largest", kind: "directory" } })) as {
 			items: { handle: string }[]

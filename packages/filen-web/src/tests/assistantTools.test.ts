@@ -4,7 +4,7 @@ import { QueryClient } from "@tanstack/react-query"
 import type { RegisteredRouter } from "@tanstack/react-router"
 import type { Chat, ChatMessage, Contact, Dir, File, FilePublicLink, Note, SharedRootDir, UserInfo } from "@filen/sdk-rs"
 import type { Playlist } from "@filen/shared"
-import { assistantToolByName, type AssistantToolFailure } from "@filen/shared/assistant"
+import { assistantToolByName, DIRECTORIES_BY_SIZE_NOTE, type AssistantToolFailure } from "@filen/shared/assistant"
 import { testUuid } from "@/tests/support/uuid"
 
 const sdk = vi.hoisted(() => ({
@@ -859,7 +859,7 @@ describe("date filters and insights", () => {
 		})
 	})
 
-	it("ranks directories by total size with files, reading uncached sizes once, and refuses a day that does not exist", async () => {
+	it("ranks directories by total size with files, says they are not files, reads uncached sizes once and refuses a day that does not exist", async () => {
 		await call("list_directory", {})
 		sdk.getDirSize.mockResolvedValue({ size: 9_000_000n, files: 3n, dirs: 0n })
 
@@ -869,7 +869,8 @@ describe("date filters and insights", () => {
 			["Docs", "8.58 MiB"],
 			["readme.md", "64 B"]
 		])
-		expect(json(largest)["note"]).toBeUndefined()
+		expect(json(largest)["note"]).toBe(DIRECTORIES_BY_SIZE_NOTE)
+		expect(json(await call("list_directory", { path: "/Docs", sort: "largest" }))["note"]).toBeUndefined()
 
 		// The size landed under the info dialog's key: the next sort reads no size again.
 		await call("list_directory", { path: "/", sort: "smallest" })
@@ -890,7 +891,9 @@ describe("date filters and insights", () => {
 			["readme.md", "64 B"],
 			["Docs", undefined]
 		])
-		expect(json(largest)["note"]).toBe("1 directory's size is not loaded; it is listed last. get_item_info gives a directory's size.")
+		expect(json(largest)["note"]).toBe(
+			`1 directory's size is not loaded; it is listed last. get_item_info gives a directory's size. ${DIRECTORIES_BY_SIZE_NOTE}`
+		)
 	})
 
 	it("filters by the created date, the one item info shows", async () => {
@@ -1370,7 +1373,7 @@ describe("writes without an adapter", () => {
 			signal: new AbortController().signal
 		})
 
-		expect(result).toMatchObject({ ok: false, error: '"Favorite" is not available yet; the user can do it in the app' })
+		expect(result).toMatchObject({ ok: false, error: '"Add or remove favorites" is not available yet; the user can do it in the app' })
 	})
 })
 

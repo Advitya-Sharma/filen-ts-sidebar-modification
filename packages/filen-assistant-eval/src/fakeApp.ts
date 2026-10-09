@@ -4,6 +4,7 @@ import {
 	dateFilterNote,
 	dayRangeBounds,
 	describeDayRange,
+	DIRECTORIES_BY_SIZE_NOTE,
 	inDayRange,
 	MAX_ARRAY_ITEMS,
 	resolveDateFilter,
@@ -836,7 +837,15 @@ export class FakeApp {
 						: {
 								dates: `${selection.field} ${selection.range}`
 							}),
-					...joinNotes(this.emptyNote(selection, kept.length, ofKind.length), this.unknownSizesNote(sizes.unknown))
+					...joinNotes(
+						this.emptyNote(selection, kept.length, ofKind.length),
+						this.unknownSizesNote(sizes.unknown),
+						bySize && kept.some(item => item.kind === "directory")
+							? {
+									note: DIRECTORIES_BY_SIZE_NOTE
+								}
+							: {}
+					)
 				}
 			}
 

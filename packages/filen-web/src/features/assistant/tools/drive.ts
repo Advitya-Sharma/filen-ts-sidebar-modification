@@ -1,5 +1,5 @@
 import { driveItemName, fastLocaleCompare, formatBytes } from "@filen/shared"
-import { MAX_ARRAY_ITEMS, type AssistantSignal } from "@filen/shared/assistant"
+import { DIRECTORIES_BY_SIZE_NOTE, MAX_ARRAY_ITEMS, type AssistantSignal } from "@filen/shared/assistant"
 import type { DirSizeResponse } from "@filen/sdk-rs"
 import type { ItemInfoResult } from "@/workers/sdk.worker"
 import { log } from "@/lib/log"
@@ -515,7 +515,11 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 			})),
 			...(items.length > LIST_LIMIT ? { more: items.length - LIST_LIMIT } : {}),
 			...datesField(selection),
-			...joinNotes(emptyDatesNote(selection, items.length, ofKind.length), unknownSizesNote(sizes.unknown))
+			...joinNotes(
+				emptyDatesNote(selection, items.length, ofKind.length),
+				unknownSizesNote(sizes.unknown),
+				bySize && items.some(isDirectoryItem) ? { note: DIRECTORIES_BY_SIZE_NOTE } : {}
+			)
 		}
 	}
 }
