@@ -10,12 +10,13 @@ const SUBDIRS: Record<string, UuidStr> = {
 	"Chat Uploads": testUuid("chatuploads")
 }
 
-const { createDirectory, subscribeToSocket } = vi.hoisted(() => ({
+const { createDirectory, directoryExists, subscribeToSocket } = vi.hoisted(() => ({
 	createDirectory: vi.fn<(parent: string | null, name: string) => Promise<Dir>>(),
+	directoryExists: vi.fn<(parent: string | null, name: string) => Promise<boolean>>(),
 	subscribeToSocket: vi.fn<(onEvent: (event: SocketEvent) => void) => Promise<void>>()
 }))
 
-vi.mock("@/lib/sdk/client", () => ({ sdkApi: { createDirectory, subscribeToSocket } }))
+vi.mock("@/lib/sdk/client", () => ({ sdkApi: { createDirectory, directoryExists, subscribeToSocket } }))
 vi.mock("@/queries/client", async () => ({ queryClient: (await import("@/tests/testQueryClient")).createTestQueryClient() }))
 vi.mock("@/queries/persist", () => ({ persister: { persistQuery: () => Promise.resolve() } }))
 
@@ -34,6 +35,8 @@ function driveEvent(inner: Extract<SocketEvent, { type: "drive" }>["inner"]): Ex
 }
 
 beforeEach(() => {
+	vi.clearAllMocks()
+	directoryExists.mockImplementation(() => Promise.resolve(true))
 	createDirectory.mockImplementation((parent, name) => {
 		if (parent === null) {
 			return Promise.resolve(dir(DOT_FILEN))
@@ -264,5 +267,67 @@ describe(".filen subdirectories", () => {
 		handleDotFilenDriveEvent(driveEvent({ type: "fileMove", file: { ...json, parent: testUuid("elsewhere") } }))
 
 		expect(isDotFilenSystemFile(json.uuid)).toBe(false)
+	})
+
+	it("a find creates nothing where nothing exists, and remembers no absence", async () => {
+		const { findDotFilenSubdir, dotFilenSubdirUuid } = await fresh()
+
+		directoryExists.mockImplementation(() => Promise.resolve(false))
+
+		await expect(findDotFilenSubdir("Videos")).resolves.toBeNull()
+		await expect(findDotFilenSubdir("Videos")).resolves.toBeNull()
+
+		expect(createDirectory).not.toHaveBeenCalled()
+		expect(directoryExists).toHaveBeenCalledTimes(2)
+		expect(dotFilenSubdirUuid("Videos")).toBeNull()
+	})
+
+	it("a find stops at the first missing level", async () => {
+		const { findDotFilenSubdir } = await fresh()
+
+		directoryExists.mockImplementation(parent => Promise.resolve(parent === null))
+
+		await expect(findDotFilenSubdir("Videos")).resolves.toBeNull()
+
+		// `.filen` exists: its find-or-create returns it (creating nothing) for the second check.
+		expect(createDirectory).toHaveBeenCalledTimes(1)
+		expect(createDirectory).toHaveBeenCalledWith(null, ".filen")
+		expect(directoryExists).toHaveBeenCalledTimes(2)
+	})
+
+	it("a found directory is remembered like a created one", async () => {
+		const { findDotFilenSubdir, getDotFilenSubdir, dotFilenSubdirUuid } = await fresh()
+
+		await expect(findDotFilenSubdir("Videos")).resolves.toBe(SUBDIRS["Videos"])
+		expect(dotFilenSubdirUuid("Videos")).toBe(SUBDIRS["Videos"])
+
+		const calls = createDirectory.mock.calls.length + directoryExists.mock.calls.length
+
+		await expect(getDotFilenSubdir("Videos")).resolves.toBe(SUBDIRS["Videos"])
+		await expect(findDotFilenSubdir("Videos")).resolves.toBe(SUBDIRS["Videos"])
+		expect(createDirectory.mock.calls.length + directoryExists.mock.calls.length).toBe(calls)
+	})
+
+	it("a create joining a find that comes back empty creates", async () => {
+		const { findDotFilenSubdir, getDotFilenSubdir } = await fresh()
+
+		directoryExists.mockImplementation(() => Promise.resolve(false))
+
+		const finding = findDotFilenSubdir("Videos")
+		const creating = getDotFilenSubdir("Videos")
+
+		await expect(finding).resolves.toBeNull()
+		await expect(creating).resolves.toBe(SUBDIRS["Videos"])
+		expect(createDirectory).toHaveBeenCalledTimes(2)
+	})
+
+	it("a find under way when the directories are forgotten isn't remembered", async () => {
+		const { findDotFilenSubdir, dotFilenSubdirUuid, forgetDotFilenSubdir } = await fresh()
+		const finding = findDotFilenSubdir("Videos")
+
+		forgetDotFilenSubdir("Videos")
+
+		await expect(finding).resolves.toBe(SUBDIRS["Videos"])
+		expect(dotFilenSubdirUuid("Videos")).toBeNull()
 	})
 })

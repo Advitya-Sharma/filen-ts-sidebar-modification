@@ -129,6 +129,9 @@ export interface VideoRootStatus {
 	videos: number
 	// The directory was moved since the roots were last validated.
 	moved: boolean
+	// The index doesn't reflect a complete walk (the latest failed, came back partial or was stopped); what it
+	// shows is the last complete one, or nothing before the first.
+	incomplete: boolean
 }
 
 export type VideoIndexUpdate =

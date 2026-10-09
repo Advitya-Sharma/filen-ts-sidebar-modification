@@ -13,6 +13,7 @@ const counts = vi.hoisted(() => ({
 	walks: 0,
 	lastEventIds: 0,
 	getFile: 0,
+	directoryExists: 0,
 	createDirectory: 0,
 	listDirectory: 0,
 	downloads: 0,
@@ -54,12 +55,15 @@ let coordinator: WalkCoordinator<DirsAndFiles>
 let rootA: string
 let rootB: string
 let configFile: File | null
+// What exists of `.filen/Videos` on the server: neither, `.filen` alone, or both.
+let existing: "none" | "dotFilen" | "both"
 
 function requests(): number {
 	return (
 		counts.walks +
 		counts.lastEventIds +
 		counts.getFile +
+		counts.directoryExists +
 		counts.createDirectory +
 		counts.listDirectory +
 		counts.downloads +
@@ -112,6 +116,7 @@ function startWorker(): void {
 
 			return Promise.resolve(latest)
 		},
+		driveRoot: () => null,
 		getFile: uuid => {
 			counts.getFile++
 
@@ -146,8 +151,15 @@ function startWorker(): void {
 
 			return Promise.resolve(null)
 		},
+		directoryExists: (parent: string | null) => {
+			counts.directoryExists++
+
+			return Promise.resolve(parent === null ? existing !== "none" : existing === "both")
+		},
 		createDirectory: (parent: string | null, name: string) => {
 			counts.createDirectory++
+
+			existing = parent === null ? (existing === "none" ? "dotFilen" : existing) : "both"
 
 			return Promise.resolve({ uuid: parent === null ? DOT_FILEN : VIDEOS_DIR, meta: { type: "decoded", data: { name } } } as Dir)
 		},
@@ -225,6 +237,7 @@ beforeEach(() => {
 	clock = 1_800_000_000_000
 	snapshots = new Map()
 	configFile = null
+	existing = "both"
 	rootA = drive.addDir(hexUuid(), "Movies")
 	rootB = drive.addDir(hexUuid(), "Shows")
 
@@ -475,5 +488,69 @@ describe("walk sharing", () => {
 		await coordinator.walk(rootA)
 
 		expect(counts.walks).toBe(2)
+	})
+
+	it("a fresh account's first open is the event id and one existence check, and creates nothing", async () => {
+		existing = "none"
+		configFile = null
+		queryClient.clear()
+		reload()
+
+		await open()
+
+		expect(counts).toMatchObject({ lastEventIds: 1, directoryExists: 1, createDirectory: 0, listDirectory: 0, walks: 0 })
+		expect(existing).toBe("none")
+	})
+
+	it("an account with `.filen` but no Videos directory checks both levels and still creates nothing", async () => {
+		existing = "dotFilen"
+		configFile = null
+		queryClient.clear()
+		reload()
+
+		await open()
+
+		// The find-or-create of `.filen` returns the existing directory, which the second check needs.
+		expect(counts).toMatchObject({ lastEventIds: 1, directoryExists: 2, createDirectory: 1, listDirectory: 0 })
+		expect(existing).toBe("dotFilen")
+	})
+
+	it("the first save creates the directory", async () => {
+		existing = "none"
+		configFile = null
+		queryClient.clear()
+		reload()
+		await open()
+		resetCounts()
+
+		await saveLibraryConfig((doc, stamp) => withLibraryRoot({ doc, dirUuid: rootA, type: "movies", enabled: true, stamp, now: clock }))
+
+		expect(counts).toMatchObject({ createDirectory: 2, uploads: 1 })
+		expect(existing).toBe("both")
+	})
+
+	it("a configuration first saved elsewhere while the directory was unknown is read on the next open", async () => {
+		existing = "none"
+		configFile = null
+		queryClient.clear()
+		reload()
+		await open()
+
+		existing = "both"
+		configFile = driveFile(VIDEOS_DIR, LIBRARY_CONFIG_FILE_NAME)
+		deliver(driveEvent(++latest, { type: "fileNew", file: configFile }))
+		await pageHide()
+		reload()
+		resetCounts()
+		await open()
+
+		expect(counts.listDirectory).toBe(1)
+		expect(counts.downloads).toBe(1)
+		expect(
+			videoLibrary
+				.getSnapshot()
+				.roots.map(root => root.uuid)
+				.sort()
+		).toEqual([rootA, rootB].sort())
 	})
 })

@@ -7,3 +7,6 @@ export const SIDEBAR_NAV_ITEM_CLASS = cn(
 	"text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
 	"data-[status=active]:bg-sidebar-accent data-[status=active]:font-medium data-[status=active]:text-sidebar-accent-foreground"
 )
+
+// Muted header over a group of sidebar rows.
+export const GROUP_HEADER_CLASS = "px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80"

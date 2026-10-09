@@ -12,7 +12,7 @@ import { dropHighlightClass, useDriveDropTarget } from "@/features/drive/hooks/u
 import { TREE_EXPAND_SPRING } from "@/features/drive/lib/springLoad"
 import { StorageMeter } from "@/features/shell/components/storageMeter"
 import { ResizableSidebarPanel } from "@/features/shell/components/sidebarPanel"
-import { SIDEBAR_NAV_ITEM_CLASS } from "@/features/shell/lib/sidebarNavItem"
+import { GROUP_HEADER_CLASS, SIDEBAR_NAV_ITEM_CLASS } from "@/features/shell/lib/sidebarNavItem"
 import { pathIsUnder } from "@/features/shell/lib/appShell.logic"
 import { Separator } from "@/components/ui/separator"
 
@@ -29,9 +29,6 @@ type DriveSidebarRoute = "/recents" | "/favorites" | "/trash" | "/links"
 type DriveSidebarItem =
 	| { id: string; label: string; icon: IconType; to: DriveSidebarRoute }
 	| { id: string; label: string; icon: IconType; splatTo: DriveRouteId }
-
-// Muted group header over each virtual-root cluster ("Other", "Shared").
-const GROUP_HEADER_CLASS = "px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80"
 
 // TanStack Router stamps `data-status="active"` and `aria-current="page"` on the `<Link>` automatically
 // whenever the current location matches.

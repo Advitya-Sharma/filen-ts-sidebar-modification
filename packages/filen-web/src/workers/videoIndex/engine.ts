@@ -77,6 +77,8 @@ export interface VideoIndexDeps {
 	// A directory's recursive listing, for one that came into a root.
 	walkDir: (dirUuid: string) => Promise<DirsAndFiles | null>
 	lastDriveEventId: () => Promise<bigint>
+	// The signed-in account's drive root: a root that is the drive root leaves Filen's own directory out.
+	driveRoot: () => string | null
 	getFile: (uuid: string) => Promise<File | undefined>
 	store: SnapshotStore
 	now: () => number
@@ -120,6 +122,12 @@ interface RootRuntime {
 	buffer: BufferedEvent[] | null
 	bufferOverflow: boolean
 	walking: Promise<void> | null
+	// The user stopped the walk under way: its result is dropped when it lands.
+	stopped: boolean
+	// The user stopped the root's scan: nothing walks it again until a rescan is asked for.
+	userStopped: boolean
+	// The index doesn't reflect a complete walk: the latest one failed, came back partial or was stopped.
+	incomplete: boolean
 	walkAgain: WalkReason | null
 	lastWalkAt: number
 	deferredWalk: ReturnType<typeof setTimeout> | null
@@ -132,6 +140,10 @@ interface RootRuntime {
 	outdated: boolean
 	// Video files the latest classification found in this root.
 	videoCount: number
+	// Bumped when a walk's result is applied, and copied when a classification that includes it is done: a scan
+	// reads as under way until its count is known.
+	walkSeq: number
+	countedSeq: number
 	version: number
 	writtenVersion: number
 	writeTimer: ReturnType<typeof setTimeout> | null
@@ -264,6 +276,9 @@ export class VideoIndexEngine {
 			buffer: [],
 			bufferOverflow: false,
 			walking: null,
+			stopped: false,
+			userStopped: false,
+			incomplete: false,
 			walkAgain: null,
 			lastWalkAt: 0,
 			deferredWalk: null,
@@ -273,6 +288,8 @@ export class VideoIndexEngine {
 			ancestors: new Set(),
 			outdated: false,
 			videoCount: 0,
+			walkSeq: 0,
+			countedSeq: 0,
 			version: 0,
 			writtenVersion: 0,
 			writeTimer: null,
@@ -296,6 +313,8 @@ export class VideoIndexEngine {
 				rt.state = fromRecords(decoded)
 				rt.status = "ready"
 				rt.outdated = !snapshotIsCurrent(decoded)
+				// Only partial walks were ever stored.
+				rt.incomplete = rt.state.completeAt === 0
 			}
 		} catch (e) {
 			log.warn("videos.index", "snapshot unreadable; the root is walked instead", rt.config.uuid, e)
@@ -333,10 +352,16 @@ export class VideoIndexEngine {
 		rt.writeTimer = null
 	}
 
+	// Not walking, and unchecked against the drive's event stream or never walked; a root whose scan the user
+	// stopped waits for a rescan.
+	private unchecked(rt: RootRuntime): boolean {
+		return rt.walking === null && !rt.userStopped && (rt.state === null || rt.mode === "pending")
+	}
+
 	// Some loaded root hasn't been checked against the drive's event stream, or hasn't been walked at all.
 	public needsCheck(): boolean {
 		for (const rt of this.roots.values()) {
-			if (rt.walking === null && (rt.state === null || rt.mode === "pending")) {
+			if (this.unchecked(rt)) {
 				return true
 			}
 		}
@@ -347,7 +372,7 @@ export class VideoIndexEngine {
 	// Compares each unchecked root's watermark with the drive's latest event id (`watermark`, one request the
 	// caller made): equal means nothing changed anywhere in the drive, so no walk. Unwalked roots are walked.
 	public async check(watermark?: bigint): Promise<void> {
-		const pending = [...this.roots.values()].filter(rt => rt.walking === null && (rt.state === null || rt.mode === "pending"))
+		const pending = [...this.roots.values()].filter(rt => this.unchecked(rt))
 
 		if (pending.length === 0) {
 			return
@@ -356,17 +381,28 @@ export class VideoIndexEngine {
 		// Taken before the watermark is read (the caller read one before calling): a listing begun earlier may not
 		// reflect what that watermark covers.
 		const mark = this.deps.walkMark()
-		const latest = watermark ?? (await this.deps.lastDriveEventId())
+		let latest = watermark ?? (this.socketLive ? this.lastEventId : null)
+
+		if (latest === null) {
+			try {
+				latest = await this.deps.lastDriveEventId()
+			} catch (e) {
+				// Never-walked roots are walked anyway (a walk reads its own and reports its failure); the others stay
+				// unchecked until the next check.
+				log.warn("videos.index", "latest drive event id unavailable", e)
+			}
+		}
+
 		const walks: Promise<void>[] = []
 
 		for (const rt of pending) {
 			if (rt.state === null) {
-				walks.push(this.walk(rt, "manual", { watermark: latest, mark }))
+				walks.push(this.walk(rt, "manual", latest === null ? undefined : { watermark: latest, mark }))
 
 				continue
 			}
 
-			if (rt.mode !== "pending" || rt.walking !== null) {
+			if (latest === null || rt.mode !== "pending" || rt.walking !== null) {
 				continue
 			}
 
@@ -392,7 +428,38 @@ export class VideoIndexEngine {
 	public rescan(rootUuid: string): Promise<void> {
 		const rt = this.roots.get(rootUuid)
 
-		return rt === undefined ? Promise.resolve() : this.walk(rt, "manual")
+		if (rt === undefined) {
+			return Promise.resolve()
+		}
+
+		rt.userStopped = false
+
+		return this.walk(rt, "manual")
+	}
+
+	// The user stopped a root's scan. A walk can't be aborted, so it finishes unseen and its result is dropped:
+	// the index keeps what it had, flagged incomplete at once, and nothing walks it again until a rescan.
+	public stopWalk(rootUuid: string): void {
+		const rt = this.roots.get(rootUuid)
+
+		if (rt === undefined) {
+			return
+		}
+
+		if (rt.walking === null || rt.stopped) {
+			return
+		}
+
+		rt.stopped = true
+		rt.userStopped = true
+		rt.incomplete = true
+		rt.walkAgain = null
+
+		if (rt.state === null) {
+			rt.status = "error"
+		}
+
+		this.pushRoots()
 	}
 
 	// Applies the events held since `watermark`, which the state is current to, when they run without a gap through
@@ -481,6 +548,14 @@ export class VideoIndexEngine {
 
 	// Single flight per root: a walk asked for while one runs follows it (the strongest reason wins).
 	private walk(rt: RootRuntime, reason: WalkReason, known?: { watermark: bigint; mark: number }): Promise<void> {
+		// Asked for again after a stop: the walk under way counts again rather than starting another.
+		if (rt.walking !== null && rt.stopped && reason === "manual") {
+			rt.stopped = false
+			this.pushRoots()
+
+			return rt.walking
+		}
+
 		if (rt.walking !== null) {
 			rt.walkAgain = rt.walkAgain === null || WALK_REASON_RANK[reason] > WALK_REASON_RANK[rt.walkAgain] ? reason : rt.walkAgain
 
@@ -528,6 +603,24 @@ export class VideoIndexEngine {
 		return walking
 	}
 
+	// A stopped walk landed: a root that was current stays current when the events held meanwhile run without a
+	// gap through the latest one delivered; otherwise it is stale until the next walk.
+	private keepAfterStop(rt: RootRuntime): void {
+		const watermark = rt.state?.watermark ?? null
+
+		if (
+			rt.mode === "live" &&
+			watermark !== null &&
+			this.socketLive &&
+			this.lastEventId !== null &&
+			this.settle(rt, watermark, this.lastEventId)
+		) {
+			return
+		}
+
+		this.toStale(rt)
+	}
+
 	private deferWalk(rt: RootRuntime): void {
 		if (rt.deferredWalk !== null) {
 			return
@@ -558,13 +651,21 @@ export class VideoIndexEngine {
 			}
 
 			if (outcome.type === "gone") {
+				rt.stopped = false
 				rt.status = "missing"
 				this.toStale(rt)
 
 				return
 			}
 
-			const projection = projectWalk(uuid, outcome.raw)
+			if (rt.stopped) {
+				rt.stopped = false
+				this.keepAfterStop(rt)
+
+				return
+			}
+
+			const projection = projectWalk(uuid, outcome.raw, uuid === this.deps.driveRoot())
 			const state = rt.state ?? emptyRootState(uuid, outcome.name)
 
 			state.name = outcome.name
@@ -577,6 +678,7 @@ export class VideoIndexEngine {
 			})
 			rt.state = state
 			rt.status = "ready"
+			rt.walkSeq++
 
 			const buffer = rt.buffer ?? []
 			const overflow = rt.bufferOverflow
@@ -605,6 +707,8 @@ export class VideoIndexEngine {
 			this.setWatermark(rt, contiguous ? expected - 1n : null)
 			this.scheduleRebuild("now")
 
+			rt.incomplete = !projection.complete
+
 			if (projection.complete) {
 				rt.outdated = false
 			}
@@ -623,6 +727,8 @@ export class VideoIndexEngine {
 
 			log.warn("videos.index", "root walk failed; the index keeps what it had", uuid, e)
 
+			rt.stopped = false
+			rt.incomplete = true
 			rt.status = rt.state === null ? "error" : "ready"
 			this.toStale(rt)
 			this.deferWalk(rt)
@@ -752,7 +858,8 @@ export class VideoIndexEngine {
 		const result = applyDriveEvent({
 			state,
 			inner,
-			now: this.deps.now()
+			now: this.deps.now(),
+			driveRoot: rt.config.uuid === this.deps.driveRoot()
 		})
 
 		if (this.asyncPatches > 0) {
@@ -881,7 +988,8 @@ export class VideoIndexEngine {
 						: applyDriveEvent({
 								state: rt.state,
 								inner: entry.inner,
-								now: this.deps.now()
+								now: this.deps.now(),
+								driveRoot: rt.config.uuid === this.deps.driveRoot()
 							}),
 					walked
 				)
@@ -1047,6 +1155,13 @@ export class VideoIndexEngine {
 		this.rebuilding = this.runRebuild()
 			.catch((e: unknown) => {
 				log.error("videos.index", "classification failed", e)
+
+				// No count is coming: the scans end with what is known.
+				for (const rt of this.roots.values()) {
+					rt.countedSeq = rt.walkSeq
+				}
+
+				this.pushRoots()
 			})
 			.finally(() => {
 				this.rebuilding = null
@@ -1063,6 +1178,7 @@ export class VideoIndexEngine {
 	private async runRebuild(): Promise<void> {
 		const token = this.token
 		const loaded = [...this.roots.values()].filter(rt => rt.state !== null)
+		const seqs = loaded.map(rt => rt.walkSeq)
 		const dirs: LibraryScanDir[] = []
 		const files: IndexFile[] = []
 
@@ -1113,6 +1229,7 @@ export class VideoIndexEngine {
 
 		loaded.forEach((rt, index) => {
 			rt.videoCount = counts[index] ?? 0
+			rt.countedSeq = seqs[index] ?? rt.countedSeq
 		})
 
 		const titles = buildTitles(libraryFiles)
@@ -1183,13 +1300,15 @@ export class VideoIndexEngine {
 				name: state?.name ?? "",
 				type: rt.config.type,
 				state: rt.status,
-				walking: rt.walking !== null,
+				// Until the walk's result is classified too, so the count read when it ends is the new one.
+				walking: (rt.walking !== null && !rt.stopped) || rt.countedSeq !== rt.walkSeq,
 				current: rt.mode === "live",
 				completeAt: state?.completeAt ?? 0,
 				walkedEntries: state?.walkedEntries ?? 0,
 				size: rootSize(state?.walkedEntries ?? 0),
 				videos: rt.videoCount,
-				moved: rt.moved
+				moved: rt.moved,
+				incomplete: rt.incomplete
 			}
 		})
 	}

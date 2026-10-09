@@ -985,6 +985,7 @@ const videoIndex = new VideoIndexEngine({
 	async lastDriveEventId() {
 		return (await requireClient().getLastEventIds()).drive
 	},
+	driveRoot: () => client?.root().uuid ?? null,
 	getFile(uuid) {
 		return isUuid(uuid) ? requireClient().getFileOptional(uuid) : Promise.resolve(undefined)
 	},
@@ -1225,15 +1226,20 @@ const api = {
 	},
 	// Backend directory create is idempotent and case-insensitive: an existing directory with this
 	// name under this parent returns ITS uuid rather than erroring (a name clash with a FILE still
-	// rejects) — so no pre-check call. `dirExists` always resolved void regardless of outcome and
-	// could never actually signal "already exists"; the pre-check bought nothing but a wasted round
-	// trip.
+	// rejects) — so no pre-check call before a create.
 	async createDirectory(parentUuid: string | null, name: string): Promise<Dir> {
 		const c = requireClient()
 		const parent = await resolveNormalDirParent(c, parentUuid)
 		const created = await c.createDir(parent, name)
 		cacheDirs([created])
 		return created
+	},
+	// Whether a directory named `name` sits under `parentUuid` (null: the drive root): one request by name hash, for
+	// a read that must not create what it looks for.
+	async directoryExists(parentUuid: string | null, name: string): Promise<boolean> {
+		const c = requireClient()
+
+		return c.dirExists(await resolveNormalDirParent(c, parentUuid), name)
 	},
 	// Thin getDirOptional pass-through; a malformed uuid is not found (see resolveOwnedDir).
 	async getDirectory(uuid: string): Promise<Dir | undefined> {
@@ -2537,6 +2543,10 @@ const api = {
 			onUpdate(update)
 		})
 	},
+	// Drops the result of a root's walk under way (the walk itself can't be aborted).
+	stopVideoRootWalk(rootUuid: string): void {
+		videoIndex.stopWalk(rootUuid)
+	},
 	// The signed-in account, by its drive root (no request): what the library's cached state is scoped to.
 	videoIndexAccount(): string {
 		return requireClient().root().uuid
@@ -2558,8 +2568,9 @@ const api = {
 	playableVideoFiles(stableUuids: string[]): File[] {
 		return videoIndex.playableFiles(stableUuids)
 	},
-	// A directory's chain from the drive root down to itself (both included), for root validation; null when it
-	// doesn't resolve or sits in the trash. Cached ancestors cost no request.
+	// A directory's chain from the drive root down to itself (both included), for root validation and paths; null
+	// when it doesn't resolve or sits in the trash. Costs one request per ancestor (getItemPath reads each), so the
+	// caller keeps the result.
 	async videoRootChain(uuid: string): Promise<{ uuid: string; name: string }[] | null> {
 		const c = requireClient()
 		const driveRoot = c.root()

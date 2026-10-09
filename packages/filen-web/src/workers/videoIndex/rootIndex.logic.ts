@@ -1,5 +1,6 @@
 import { extensionDot, videoFileKind, type VideoFileKind } from "@filen/shared/videos"
 import type { DirMeta, DirsAndFiles, DriveEvent, File, FileEncryptionVersion, FileMeta } from "@filen/sdk-rs"
+import { DOT_FILEN_DIR_NAME } from "@/lib/dotFilen.logic"
 
 // One library root's slim index: every directory below it and every video-related file (videos, sidecars,
 // `.ignore` markers), keyed by stable uuid. Holds what classification needs and what rebuilding a playable
@@ -144,14 +145,65 @@ export interface WalkProjection {
 	complete: boolean
 }
 
-// Keeps every directory (socket events need them to place a file) and only the video-related files. Raw files,
-// which hold key material, never leave the walk's caller.
-export function projectWalk(rootUuid: string, raw: DirsAndFiles): WalkProjection {
-	const dirs: IndexDir[] = []
-	const known = new Set<string>([rootUuid])
+// Filen's own directory directly below the drive root, when the root is the drive root: never part of a library.
+export function isSystemDir({
+	parent,
+	meta,
+	rootUuid,
+	driveRoot
+}: {
+	parent: string
+	meta: DirMeta
+	rootUuid: string
+	driveRoot: boolean
+}): boolean {
+	return driveRoot && parent === rootUuid && meta.type === "decoded" && meta.data.name.toLowerCase() === DOT_FILEN_DIR_NAME
+}
+
+// The system directory's subtree in a walk of the drive root, to leave out.
+function systemSubtree(rootUuid: string, raw: DirsAndFiles): Set<string> {
+	const excluded = new Set<string>()
+	const children = new Map<string, string[]>()
 
 	for (const dir of raw.dirs) {
 		if (dir.type !== "normal") {
+			continue
+		}
+
+		if (isSystemDir({ parent: dir.parent, meta: dir.meta, rootUuid, driveRoot: true })) {
+			excluded.add(dir.uuid)
+		}
+
+		const list = children.get(dir.parent)
+
+		if (list === undefined) {
+			children.set(dir.parent, [dir.uuid])
+		} else {
+			list.push(dir.uuid)
+		}
+	}
+
+	const stack = [...excluded]
+
+	for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+		for (const child of children.get(next) ?? []) {
+			excluded.add(child)
+			stack.push(child)
+		}
+	}
+
+	return excluded
+}
+
+// Keeps every directory (socket events need them to place a file) and only the video-related files. Raw files,
+// which hold key material, never leave the walk's caller. A walk of the drive root leaves Filen's own directory out.
+export function projectWalk(rootUuid: string, raw: DirsAndFiles, driveRoot = false): WalkProjection {
+	const dirs: IndexDir[] = []
+	const known = new Set<string>([rootUuid])
+	const excluded = driveRoot ? systemSubtree(rootUuid, raw) : null
+
+	for (const dir of raw.dirs) {
+		if (dir.type !== "normal" || excluded?.has(dir.uuid) === true) {
 			continue
 		}
 
@@ -176,7 +228,7 @@ export function projectWalk(rootUuid: string, raw: DirsAndFiles): WalkProjection
 	for (const file of raw.files) {
 		const slim = slimFile(file, file.meta)
 
-		if (slim === null) {
+		if (slim === null || excluded?.has(slim.parent) === true) {
 			continue
 		}
 
@@ -425,8 +477,18 @@ function upsertFromEvent(state: RootState, file: File, now: number): PatchResult
 }
 
 // One drive event against one root. Ids and ordering are the engine's business; this only maps an event's
-// payload onto the index.
-export function applyDriveEvent({ state, inner, now }: { state: RootState; inner: DriveEvent; now: number }): PatchResult {
+// payload onto the index. `driveRoot`: the root is the drive root, whose system directory stays out.
+export function applyDriveEvent({
+	state,
+	inner,
+	now,
+	driveRoot = false
+}: {
+	state: RootState
+	inner: DriveEvent
+	now: number
+	driveRoot?: boolean
+}): PatchResult {
 	switch (inner.type) {
 		// A version restore (fileArchiveRestored) makes an older uuid the head again; the stable uuid, and so
 		// dateAdded, stays.
@@ -512,7 +574,10 @@ export function applyDriveEvent({ state, inner, now }: { state: RootState; inner
 		}
 
 		case "folderSubCreated":
-			if (!inRoot(state, inner.dir.parent)) {
+			if (
+				!inRoot(state, inner.dir.parent) ||
+				isSystemDir({ parent: inner.dir.parent, meta: inner.dir.meta, rootUuid: state.uuid, driveRoot })
+			) {
 				return NONE
 			}
 
@@ -534,8 +599,9 @@ export function applyDriveEvent({ state, inner, now }: { state: RootState; inner
 			}
 
 			const known = state.dirs.get(dir.uuid)
+			const system = isSystemDir({ parent: dir.parent, meta: dir.meta, rootUuid: state.uuid, driveRoot })
 
-			if (inRoot(state, dir.parent) && dir.parent !== dir.uuid) {
+			if (inRoot(state, dir.parent) && dir.parent !== dir.uuid && !system) {
 				if (known !== undefined) {
 					known.parent = dir.parent
 					known.name = dirName(dir.meta)
@@ -582,7 +648,7 @@ export function applyDriveEvent({ state, inner, now }: { state: RootState; inner
 				})
 			}
 
-			if (!inRoot(state, dir.parent)) {
+			if (!inRoot(state, dir.parent) || isSystemDir({ parent: dir.parent, meta: dir.meta, rootUuid: state.uuid, driveRoot })) {
 				return NONE
 			}
 
@@ -612,6 +678,11 @@ export function applyDriveEvent({ state, inner, now }: { state: RootState; inner
 
 			if (known === undefined) {
 				return NONE
+			}
+
+			// Renamed into Filen's own directory name: it is that directory now.
+			if (isSystemDir({ parent: known.parent, meta: inner.meta, rootUuid: state.uuid, driveRoot })) {
+				return dropSubtree(state, known.uuid, now)
 			}
 
 			known.name = dirName(inner.meta)

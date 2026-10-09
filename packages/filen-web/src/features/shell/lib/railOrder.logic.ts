@@ -1,7 +1,7 @@
 import { pathIsUnder } from "@/features/shell/lib/appShell.logic"
 
 // The icon rail's reorderable links. The logo above them and the help/account footer below stay put.
-export const RAIL_ENTRY_IDS = ["drive", "photos", "transfers", "notes", "chats", "playlists", "contacts", "settings"] as const
+export const RAIL_ENTRY_IDS = ["drive", "photos", "videos", "transfers", "notes", "chats", "playlists", "contacts", "settings"] as const
 
 export type RailEntryId = (typeof RAIL_ENTRY_IDS)[number]
 
@@ -14,7 +14,9 @@ function isRailEntryId(id: string): id is RailEntryId {
 }
 
 // A stored order kept to what this build renders: unknown and repeated ids are dropped, and an entry
-// the stored order lacks (one added since it was saved) is appended, so no link can go missing.
+// the stored order lacks (one added since it was saved) goes right after the entry that precedes it in
+// the default order, or first when none does, so no link can go missing and a new one lands where it
+// belongs rather than at the end.
 export function normalizeRailOrder(stored: readonly string[] | null): RailEntryId[] {
 	if (stored === null) {
 		return [...DEFAULT_RAIL_ORDER]
@@ -28,10 +30,25 @@ export function normalizeRailOrder(stored: readonly string[] | null): RailEntryI
 		}
 	}
 
-	for (const id of DEFAULT_RAIL_ORDER) {
-		if (!order.includes(id)) {
-			order.push(id)
+	for (const [index, id] of DEFAULT_RAIL_ORDER.entries()) {
+		if (order.includes(id)) {
+			continue
 		}
+
+		let at = 0
+
+		for (let before = index - 1; before >= 0; before--) {
+			const predecessor = DEFAULT_RAIL_ORDER[before]
+			const placed = predecessor === undefined ? -1 : order.indexOf(predecessor)
+
+			if (placed !== -1) {
+				at = placed + 1
+
+				break
+			}
+		}
+
+		order.splice(at, 0, id)
 	}
 
 	return order
@@ -75,7 +92,7 @@ export function railShift(index: number, from: number, to: number, pitch: number
 	return 0
 }
 
-// Whether `pathname` is inside the section an entry links to. Drive, Notes, Chats and Settings nest
+// Whether `pathname` is inside the section an entry links to. Drive, Videos, Notes, Chats and Settings nest
 // deeper routes under their root; the others are single pages.
 export function railEntryActive(id: RailEntryId, pathname: string): boolean {
 	switch (id) {
@@ -89,6 +106,8 @@ export function railEntryActive(id: RailEntryId, pathname: string): boolean {
 			return pathIsUnder(pathname, "/settings")
 		case "photos":
 			return pathname === "/photos"
+		case "videos":
+			return pathIsUnder(pathname, "/videos")
 		case "transfers":
 			return pathname === "/transfers"
 		case "playlists":

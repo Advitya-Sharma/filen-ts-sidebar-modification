@@ -10,26 +10,68 @@ import {
 
 describe("normalizeRailOrder", () => {
 	it("defaults when nothing is stored", () => {
-		expect(normalizeRailOrder(null)).toEqual(["drive", "photos", "transfers", "notes", "chats", "playlists", "contacts", "settings"])
-	})
-
-	it("keeps a stored order", () => {
-		const stored = ["settings", "chats", "drive", "photos", "transfers", "notes", "playlists", "contacts"]
-
-		expect(normalizeRailOrder(stored)).toEqual(stored)
-	})
-
-	it("drops unknown and repeated ids and appends entries the stored order lacks", () => {
-		expect(normalizeRailOrder(["chats", "gone", "chats", "drive"])).toEqual([
-			"chats",
+		expect(normalizeRailOrder(null)).toEqual([
 			"drive",
 			"photos",
+			"videos",
 			"transfers",
 			"notes",
+			"chats",
 			"playlists",
 			"contacts",
 			"settings"
 		])
+	})
+
+	it("keeps a stored order", () => {
+		const stored = ["settings", "chats", "drive", "photos", "videos", "transfers", "notes", "playlists", "contacts"]
+
+		expect(normalizeRailOrder(stored)).toEqual(stored)
+	})
+
+	it("drops unknown and repeated ids and puts each entry the stored order lacks after its default predecessor", () => {
+		expect(normalizeRailOrder(["chats", "gone", "chats", "drive"])).toEqual([
+			"chats",
+			"playlists",
+			"contacts",
+			"settings",
+			"drive",
+			"photos",
+			"videos",
+			"transfers",
+			"notes"
+		])
+	})
+
+	it("inserts an entry added since the order was saved after its default predecessor, wherever that was moved", () => {
+		expect(normalizeRailOrder(["drive", "photos", "transfers", "notes", "chats", "playlists", "contacts", "settings"])).toEqual([
+			"drive",
+			"photos",
+			"videos",
+			"transfers",
+			"notes",
+			"chats",
+			"playlists",
+			"contacts",
+			"settings"
+		])
+		expect(normalizeRailOrder(["settings", "photos", "drive", "transfers", "notes", "chats", "playlists", "contacts"])).toEqual([
+			"settings",
+			"photos",
+			"videos",
+			"drive",
+			"transfers",
+			"notes",
+			"chats",
+			"playlists",
+			"contacts"
+		])
+	})
+
+	it("puts a missing first entry first", () => {
+		expect(normalizeRailOrder(["photos", "videos", "transfers", "notes", "chats", "playlists", "contacts", "settings"])).toEqual(
+			normalizeRailOrder(null)
+		)
 	})
 })
 
@@ -78,6 +120,9 @@ describe("railEntryActive", () => {
 		expect(railEntryActive("notes", "/notes/uuid")).toBe(true)
 		expect(railEntryActive("chats", "/chats")).toBe(true)
 		expect(railEntryActive("settings", "/settings/appearance")).toBe(true)
+		expect(railEntryActive("videos", "/videos")).toBe(true)
+		expect(railEntryActive("videos", "/videos/library/abc")).toBe(true)
+		expect(railEntryActive("videos", "/videosx")).toBe(false)
 	})
 
 	it("matches the single-page sections exactly", () => {

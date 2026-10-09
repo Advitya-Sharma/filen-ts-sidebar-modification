@@ -4,18 +4,23 @@ import { runOp } from "@/lib/actions/outcome"
 import { registerSocketHandler } from "@/lib/sdk/socket"
 import { narrowItem } from "@/features/drive/lib/item"
 import { isPhotoItem } from "@/features/photos/lib/predicate"
+import { DOT_FILEN_DIR_NAME } from "@/lib/dotFilen.logic"
 
 // The app's own directories under `.filen` at the drive root (Playlists, Chat Uploads, Videos), resolved once
 // per session and shared by every feature. createDirectory is find-or-create, idempotent and case-insensitive
-// server-side, so a lookup is one call per level and needs no listing.
+// server-side, so a lookup is one call per level and needs no listing. A read that must not create anything finds
+// instead: one existence check per level, then the same find-or-create, which returns the existing directory.
 
-export const DOT_FILEN_DIR_NAME = ".filen"
+export { DOT_FILEN_DIR_NAME } from "@/lib/dotFilen.logic"
 
 // A lookup in flight can't match a directory event by uuid yet, so any event that could concern it counts while
 // it is pending. Forgetting bumps the generation: a lookup started under an older one still answers its caller
 // but isn't remembered.
 interface Memo {
+	// Resolved or being resolved, found or created.
 	promise: Promise<string> | null
+	// A find in flight; a find that comes back empty leaves nothing behind, so the next find or create asks again.
+	finding: Promise<string | null> | null
 	uuid: string | null
 	pending: number
 	generation: number
@@ -24,6 +29,7 @@ interface Memo {
 function emptyMemo(): Memo {
 	return {
 		promise: null,
+		finding: null,
 		uuid: null,
 		pending: 0,
 		generation: 0
@@ -83,16 +89,78 @@ function memoize(memo: Memo, resolve: () => Promise<string>): Promise<string> {
 	return promise
 }
 
+// A found directory is remembered like a created one; absence never is.
+function memoizeFind(memo: Memo, find: () => Promise<string | null>): Promise<string | null> {
+	if (memo.promise !== null) {
+		return memo.promise
+	}
+
+	if (memo.finding !== null) {
+		return memo.finding
+	}
+
+	const generation = memo.generation
+
+	memo.pending++
+
+	const finding = find()
+		.then(uuid => {
+			if (uuid !== null && generation === memo.generation && memo.promise === null) {
+				memo.uuid = uuid
+				memo.promise = Promise.resolve(uuid)
+			}
+
+			return uuid
+		})
+		.finally(() => {
+			memo.pending--
+
+			if (memo.finding === finding) {
+				memo.finding = null
+			}
+		})
+
+	memo.finding = finding
+
+	return finding
+}
+
+// Creates when no find is out; after one that came back empty, creates.
+function memoizeCreate(memo: Memo, create: () => Promise<string>): Promise<string> {
+	const finding = memo.promise === null ? memo.finding : null
+
+	return finding === null ? memoize(memo, create) : finding.then(found => found ?? memoize(memo, create))
+}
+
+// `name` under `parent` (null: the drive root) when it exists, creating nothing.
+async function findLevel(parent: string | null, name: string): Promise<string | null> {
+	if (!(await runOp(sdkApi.directoryExists(parent, name)))) {
+		return null
+	}
+
+	return (await runOp(sdkApi.createDirectory(parent, name))).uuid
+}
+
 function dotFilenUuid(): Promise<string> {
-	return memoize(dotFilen, async () => (await runOp(sdkApi.createDirectory(null, DOT_FILEN_DIR_NAME))).uuid)
+	return memoizeCreate(dotFilen, async () => (await runOp(sdkApi.createDirectory(null, DOT_FILEN_DIR_NAME))).uuid)
 }
 
 // `.filen/<name>`, created when missing, memoized until forgotten.
 export function getDotFilenSubdir(name: string): Promise<string> {
-	return memoize(subdirMemo(name), async () => {
+	return memoizeCreate(subdirMemo(name), async () => {
 		const parent = await dotFilenUuid()
 
 		return (await runOp(sdkApi.createDirectory(parent, name))).uuid
+	})
+}
+
+// `.filen/<name>` when it exists, else null; never creates either level. For reads: a feature's directory is
+// created by its first write.
+export function findDotFilenSubdir(name: string): Promise<string | null> {
+	return memoizeFind(subdirMemo(name), async () => {
+		const parent = await memoizeFind(dotFilen, () => findLevel(null, DOT_FILEN_DIR_NAME))
+
+		return parent === null ? null : findLevel(parent, name)
 	})
 }
 
@@ -119,6 +187,7 @@ export function isDotFilenSystemDir(uuid: string): boolean {
 function clearMemo(memo: Memo): void {
 	memo.generation++
 	memo.promise = null
+	memo.finding = null
 	memo.uuid = null
 }
 

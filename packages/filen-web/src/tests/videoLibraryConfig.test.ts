@@ -16,6 +16,7 @@ const VIDEOS_DIR = hexUuid()
 const { sdkApi } = vi.hoisted(() => ({
 	sdkApi: {
 		createDirectory: vi.fn<(parent: string | null, name: string) => Promise<Dir>>(),
+		directoryExists: vi.fn<(parent: string | null, name: string) => Promise<boolean>>(),
 		listDirectory: vi.fn<() => Promise<{ dirs: Dir[]; files: File[] }>>(),
 		downloadFileBytes: vi.fn<(file: File) => Promise<Uint8Array>>(),
 		uploadFileBytes: vi.fn<(parent: string, bytes: Uint8Array) => Promise<File>>(),
@@ -28,7 +29,7 @@ vi.mock("@/lib/sdk/client", () => ({ sdkApi }))
 vi.mock("@/queries/client", async () => ({ queryClient: (await import("@/tests/testQueryClient")).createTestQueryClient() }))
 const { persistQuery } = vi.hoisted(() => ({ persistQuery: vi.fn(() => Promise.resolve()) }))
 
-vi.mock("@/queries/persist", () => ({ persister: { persistQuery } }))
+vi.mock("@/queries/persist", () => ({ persister: { persistQuery }, noDiskPersister: undefined }))
 
 import {
 	LIBRARY_CONFIG_QUERY_KEY,
@@ -89,6 +90,7 @@ beforeEach(() => {
 	sdkApi.createDirectory.mockImplementation((parent, name) =>
 		Promise.resolve({ uuid: parent === null ? DOT_FILEN : VIDEOS_DIR, meta: { type: "decoded", data: { name } } } as Dir)
 	)
+	sdkApi.directoryExists.mockImplementation(() => Promise.resolve(true))
 	sdkApi.listDirectory.mockImplementation(() => {
 		const file = head()
 
@@ -220,6 +222,38 @@ describe("library config", () => {
 		await expect(checkLibraryRoot({ uuid: "state", ownDrive: true })).resolves.toEqual({ ok: false, reason: "systemDirectory" })
 		await expect(checkLibraryRoot({ uuid: "gone", ownDrive: true })).resolves.toEqual({ ok: false, reason: "notFound" })
 		await expect(checkLibraryRoot({ uuid: "media", ownDrive: false })).resolves.toEqual({ ok: false, reason: "notOwnDrive" })
+	})
+
+	it("resolves each directory's chain once, and again only after a directory event touching it", async () => {
+		const chains: Record<string, { uuid: string; name: string }[]> = {
+			media: [
+				{ uuid: "drive", name: "" },
+				{ uuid: "media", name: "Media" }
+			],
+			movies: [
+				{ uuid: "drive", name: "" },
+				{ uuid: "media", name: "Media" },
+				{ uuid: "movies", name: "Movies" }
+			]
+		}
+
+		sdkApi.videoRootChain.mockClear()
+		sdkApi.videoRootChain.mockImplementation(uuid => Promise.resolve(chains[uuid] ?? null))
+		await ensureLibraryConfig(eventId)
+		await updateLibraryConfig((doc, stamp) => rooted(doc, "movies", stamp.t, stamp.d))
+
+		await checkLibraryRoot({ uuid: "media", ownDrive: true })
+		await checkLibraryRoot({ uuid: "media", ownDrive: true })
+
+		expect(sdkApi.videoRootChain).toHaveBeenCalledTimes(2)
+
+		// Media trashed: every chain through it is read again.
+		handleLibraryConfigDriveEvent(
+			driveEvent(++eventId, { type: "folderTrash", parent: hexUuid(), uuid: "media" as `${string}-${string}-${string}-${string}` })
+		)
+		await checkLibraryRoot({ uuid: "media", ownDrive: true })
+
+		expect(sdkApi.videoRootChain).toHaveBeenCalledTimes(4)
 	})
 
 	it("a save that went over another session's save folds it in and saves again", async () => {

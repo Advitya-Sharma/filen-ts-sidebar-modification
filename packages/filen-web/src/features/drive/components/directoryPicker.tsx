@@ -113,11 +113,13 @@ export function PickerListShell({ listingQuery, isEmpty, noResults, children }: 
 export interface PickerDirectoryRowProps {
 	directory: Extract<DriveItem, { type: "directory" }>
 	disabled: boolean
+	// Why the row can't be picked, after its name.
+	hint?: string | undefined
 	onDescend: (uuid: string) => void
 }
 
 // Single click only focuses; double-click or Enter descends, leaving the current directory as the pick.
-export function PickerDirectoryRow({ directory, disabled, onDescend }: PickerDirectoryRowProps) {
+export function PickerDirectoryRow({ directory, disabled, hint, onDescend }: PickerDirectoryRowProps) {
 	return (
 		<li>
 			<button
@@ -141,6 +143,7 @@ export function PickerDirectoryRow({ directory, disabled, onDescend }: PickerDir
 					className="size-4 shrink-0"
 				/>
 				<span className="min-w-0 flex-1 truncate">{driveItemName(directory)}</span>
+				{hint === undefined ? null : <span className="shrink-0 text-xs text-muted-foreground">{hint}</span>}
 			</button>
 		</li>
 	)

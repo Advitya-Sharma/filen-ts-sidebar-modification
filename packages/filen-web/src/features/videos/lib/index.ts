@@ -195,12 +195,13 @@ class VideoLibraryClient {
 		await sdkApi.videoIndexCheck(watermark)
 	}
 
-	// Applies a changed root list (an edit of the configuration) to the index.
-	public async configure(doc: LibraryConfigDoc): Promise<void> {
+	// Applies a changed root list (an edit of the configuration) to the index. Resolves once the index holds the
+	// new roots; `scanned` settles when the scans that started for them do.
+	public async configure(doc: LibraryConfigDoc): Promise<{ scanned: Promise<void> }> {
 		this.attach()
 
-		if (await sdkApi.videoIndexConfigure(indexRootsOf(doc))) {
-			await sdkApi.videoIndexCheck()
+		return {
+			scanned: (await sdkApi.videoIndexConfigure(indexRootsOf(doc))) ? sdkApi.videoIndexCheck() : Promise.resolve()
 		}
 	}
 
@@ -210,6 +211,25 @@ class VideoLibraryClient {
 		return sdkApi.listVideoRoot(rootUuid, {
 			rescan: true
 		})
+	}
+
+	// Roots whose scan never started (applying the configuration or the first check failed): the configuration is
+	// applied again and they are walked now.
+	public async retry(rootUuids: readonly string[]): Promise<void> {
+		const config = cachedLibraryConfig()
+
+		if (config !== undefined) {
+			await (
+				await this.configure(config.doc)
+			).scanned
+		}
+
+		await Promise.all(rootUuids.map(uuid => this.rescan(uuid)))
+	}
+
+	// Stops showing a root's scan; the index keeps what it had.
+	public async stopScan(rootUuid: string): Promise<void> {
+		await sdkApi.stopVideoRootWalk(rootUuid)
 	}
 
 	// Drive files to play or probe, for titles the index holds.

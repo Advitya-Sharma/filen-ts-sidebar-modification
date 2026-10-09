@@ -22,9 +22,16 @@ import { runOp } from "@/lib/actions/outcome"
 import { log } from "@/lib/log"
 import { registerSocketHandler } from "@/lib/sdk/socket"
 import { readSignOutPending } from "@/lib/signOutPending"
-import { DOT_FILEN_DIR_NAME, dotFilenSubdirUuid, getDotFilenSubdir, noteDotFilenFile, onDotFilenSubdirForgotten } from "@/lib/dotFilen"
+import {
+	DOT_FILEN_DIR_NAME,
+	dotFilenSubdirUuid,
+	findDotFilenSubdir,
+	getDotFilenSubdir,
+	noteDotFilenFile,
+	onDotFilenSubdirForgotten
+} from "@/lib/dotFilen"
 import { queryClient } from "@/queries/client"
-import { persister } from "@/queries/persist"
+import { noDiskPersister, persister } from "@/queries/persist"
 import { versionAsFile } from "@/features/videos/lib/library.logic"
 
 // The synced library configuration, `.filen/Videos/library.v1.json`: read once per session (none at all when the
@@ -167,8 +174,18 @@ async function readHead(head: SdkFile): Promise<LibraryConfigDoc> {
 	return emptyLibraryConfig()
 }
 
-async function readRemote(): Promise<{ doc: LibraryConfigDoc; head: SdkFile | null; dirUuid: string }> {
-	const dirUuid = await getDotFilenSubdir(VIDEOS_DIR_NAME)
+// Reads only: a missing `.filen/Videos` is an empty configuration, created by the first save.
+async function readRemote(): Promise<{ doc: LibraryConfigDoc; head: SdkFile | null; dirUuid: string | null }> {
+	const dirUuid = await findDotFilenSubdir(VIDEOS_DIR_NAME)
+
+	if (dirUuid === null) {
+		return {
+			doc: emptyLibraryConfig(),
+			head: null,
+			dirUuid
+		}
+	}
+
 	const { files } = await runOp(sdkApi.listDirectory({ kind: "uuid", uuid: dirUuid }))
 	const head = files.find(file => file.meta.type === "decoded" && isConfigName(file.meta.data.name)) ?? null
 
@@ -411,6 +428,38 @@ export function updateLibraryConfig(edit: (doc: LibraryConfigDoc, stamp: Stamp) 
 
 // ── Root validation ──
 
+export const VIDEO_ROOT_CHAIN_KEY_PREFIX = ["videos", "rootChain"] as const
+
+export type VideoRootChain = { uuid: string; name: string }[] | null
+
+// A directory's chain from the drive root down to itself (names for a path, uuids to open it in the drive); null
+// when it can't be resolved. Resolving costs a request per ancestor, so it is kept until a directory event
+// touches the chain (forgetRootChains).
+export function videoRootChainQueryOptions(uuid: string) {
+	return {
+		queryKey: [...VIDEO_ROOT_CHAIN_KEY_PREFIX, uuid] as const,
+		queryFn: () => runOp<VideoRootChain>(sdkApi.videoRootChain(uuid)),
+		staleTime: Infinity,
+		persister: noDiskPersister
+	}
+}
+
+function rootChain(uuid: string): Promise<VideoRootChain> {
+	return queryClient.query(videoRootChainQueryOptions(uuid))
+}
+
+// A directory moved, was renamed, trashed, restored or deleted: every kept chain through it is read again.
+function forgetRootChains(dirUuid: string): void {
+	void queryClient.invalidateQueries({
+		queryKey: VIDEO_ROOT_CHAIN_KEY_PREFIX,
+		predicate: query => {
+			const chain = query.state.data as VideoRootChain | undefined
+
+			return query.queryKey[2] === dirUuid || (chain?.some(link => link.uuid === dirUuid) ?? false)
+		}
+	})
+}
+
 // Whether `uuid` can become a library root, given the current roots: an own-drive directory outside `.filen`
 // that neither holds nor sits inside another root (the overlapped ones are offered for replacement). `ownDrive` is
 // false for a shared-in or public-link directory. Ancestors usually come from the directory cache, no request.
@@ -428,7 +477,7 @@ export async function checkLibraryRoot({
 		}
 	}
 
-	const chain = await runOp(sdkApi.videoRootChain(uuid))
+	const chain = await rootChain(uuid)
 
 	if (chain === null) {
 		return {
@@ -439,13 +488,13 @@ export async function checkLibraryRoot({
 
 	const roots = await Promise.all(
 		activeLibraryRoots(cached()?.doc ?? emptyLibraryConfig()).map(async root => {
-			const rootChain = await runOp(sdkApi.videoRootChain(root.dirUuid))
+			const chainOfRoot = await rootChain(root.dirUuid)
 
-			return rootChain === null
+			return chainOfRoot === null
 				? null
 				: {
 						uuid: root.dirUuid,
-						ancestors: rootChain.slice(0, -1).map(entry => entry.uuid)
+						ancestors: chainOfRoot.slice(0, -1).map(entry => entry.uuid)
 					}
 		})
 	)
@@ -473,9 +522,40 @@ export function handleLibraryConfigDriveEvent(event: DriveSocketEvent): void {
 	const dirUuid = dotFilenSubdirUuid(VIDEOS_DIR_NAME) ?? cached()?.dirUuid ?? null
 	const inner = event.inner
 
+	switch (inner.type) {
+		case "folderMove":
+		case "folderRestore":
+			forgetRootChains(inner.dir.uuid)
+			break
+		case "folderTrash":
+		case "folderDeletedPermanent":
+		case "folderMetadataChanged":
+			forgetRootChains(inner.uuid)
+			break
+		default:
+			break
+	}
+
 	currentTo = currentTo !== null && event.driveMessageId === currentTo + 1n ? event.driveMessageId : null
 
+	// The directory isn't known (none existed at the last read): a configuration saved elsewhere since can only be
+	// recognized by its name. Another file of that name costs one read.
 	if (dirUuid === null) {
+		if (
+			(inner.type === "fileNew" ||
+				inner.type === "fileRestore" ||
+				inner.type === "fileMove" ||
+				inner.type === "fileArchiveRestored") &&
+			inner.file.meta.type === "decoded" &&
+			isConfigName(inner.file.meta.data.name)
+		) {
+			if (held !== null) {
+				held.push(inner.file)
+			} else if (!ownUuids.has(inner.file.uuid)) {
+				unsynced = true
+			}
+		}
+
 		return
 	}
 

@@ -9,6 +9,7 @@ import {
 	ArrowDownUpIcon,
 	ListMusicIcon,
 	ImagesIcon,
+	ClapperboardIcon,
 	SunIcon,
 	MoonIcon,
 	SettingsIcon,
@@ -357,6 +358,20 @@ function PhotosEntry({ active, reordering }: RailEntryProps) {
 	)
 }
 
+function VideosEntry({ active, reordering }: RailEntryProps) {
+	const { t } = useTranslation("common")
+
+	return (
+		<RailLink
+			active={active}
+			reordering={reordering}
+			label={t("moduleVideos")}
+			icon={ClapperboardIcon}
+			linkOptions={{ to: "/videos" }}
+		/>
+	)
+}
+
 function DriveEntry({ active, reordering }: RailEntryProps) {
 	const { t } = useTranslation()
 
@@ -442,6 +457,7 @@ function SettingsEntry({ active, reordering }: RailEntryProps) {
 const RAIL_ENTRIES: Record<RailEntryId, (props: RailEntryProps) => ReactElement> = {
 	drive: DriveEntry,
 	photos: PhotosEntry,
+	videos: VideosEntry,
 	transfers: TransfersEntry,
 	notes: NotesEntry,
 	chats: ChatsEntry,
@@ -455,7 +471,7 @@ const RAIL_ENTRIES: Record<RailEntryId, (props: RailEntryProps) => ReactElement>
 // with no further code change. Guarded on isAnyDialogOpen() (dialogGuard.ts, the same shared Base UI
 // signal themeProvider.tsx uses — this rail is mounted outside the drive feature's own isDialogOpen
 // chain too) so a rebound combo can't navigate away out from under an open dialog/preview.
-function useNavigateAction(id: string, to: "/settings/account" | "/transfers" | "/playlists" | "/photos"): void {
+function useNavigateAction(id: string, to: "/settings/account" | "/transfers" | "/playlists" | "/photos" | "/videos"): void {
 	const navigate = useNavigate()
 
 	useAction(
@@ -482,6 +498,7 @@ export function IconRail() {
 	useNavigateAction("app.openTransfers", "/transfers")
 	useNavigateAction("app.openPlaylists", "/playlists")
 	useNavigateAction("app.openPhotos", "/photos")
+	useNavigateAction("app.openVideos", "/videos")
 
 	return (
 		<nav

@@ -10,7 +10,9 @@ import {
 	cachedLibraryConfig,
 	fetchLibraryConfig,
 	updateLibraryConfig,
-	type LibraryConfigState
+	videoRootChainQueryOptions,
+	type LibraryConfigState,
+	type VideoRootChain
 } from "@/features/videos/lib/library"
 import { VIDEO_TITLE_DETAIL_KEY_PREFIX, videoLibrary, type VideoLibrarySnapshot } from "@/features/videos/lib/index"
 import type { VideoTitleDetail } from "@/workers/videoIndex/view.logic"
@@ -29,13 +31,33 @@ export function useLibraryConfigQuery(): UseQueryResult<LibraryConfigState> {
 	})
 }
 
-// Saves an edit of the configuration and applies its roots to the index.
-export async function saveLibraryConfig(edit: (doc: LibraryConfigDoc, stamp: Stamp) => LibraryConfigDoc): Promise<LibraryConfigState> {
+// Saves an edit of the configuration. Resolves once saved; `scanned` settles once its roots are applied to the index
+// and the scans they started are done (a failure there leaves the saved roots to a retry, not to another save).
+export async function editLibraryConfig(
+	edit: (doc: LibraryConfigDoc, stamp: Stamp) => LibraryConfigDoc
+): Promise<{ saved: LibraryConfigState; scanned: Promise<void> }> {
 	const saved = await updateLibraryConfig(edit)
 
-	await videoLibrary.configure(saved.doc)
+	return {
+		saved,
+		scanned: videoLibrary.configure(saved.doc).then(configured => configured.scanned)
+	}
+}
+
+// As editLibraryConfig, resolving once the scans it started settled too.
+export async function saveLibraryConfig(edit: (doc: LibraryConfigDoc, stamp: Stamp) => LibraryConfigDoc): Promise<LibraryConfigState> {
+	const { saved, scanned } = await editLibraryConfig(edit)
+
+	await scanned
 
 	return saved
+}
+
+export function useVideoRootChainQuery(uuid: string, enabled: boolean): UseQueryResult<VideoRootChain> {
+	return useQuery({
+		...videoRootChainQueryOptions(uuid),
+		enabled
+	})
 }
 
 // The library's titles and roots, kept current by the index; opens the library on mount.

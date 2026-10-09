@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { pathIsUnder, resolveSidebarKind, SIDEBAR_LABEL_KEY, type SidebarKind } from "@/features/shell/lib/appShell.logic"
 
-const ALL_KINDS: SidebarKind[] = ["chats", "notes", "settings", "contacts", "playlists", "drive"]
+const ALL_KINDS: SidebarKind[] = ["chats", "notes", "settings", "contacts", "playlists", "videos", "drive"]
 
 describe("pathIsUnder", () => {
 	it("matches the root and nested routes", () => {
@@ -46,6 +46,12 @@ describe("resolveSidebarKind", () => {
 
 	it("matches /playlists", () => {
 		expect(resolveSidebarKind("/playlists")).toBe("playlists")
+	})
+
+	it("matches /videos and every route under it", () => {
+		expect(resolveSidebarKind("/videos")).toBe("videos")
+		expect(resolveSidebarKind("/videos/library/1a2b3c4d-0000-0000-0000-000000000000")).toBe("videos")
+		expect(resolveSidebarKind("/videosx")).toBe("drive")
 	})
 
 	it("matches the drive root and a nested directory", () => {

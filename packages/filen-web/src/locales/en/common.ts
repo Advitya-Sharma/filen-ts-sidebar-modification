@@ -85,6 +85,8 @@ export const common = {
 	modulePlaylists: "Playlists",
 	/** Photos module — icon rail tooltip/accessible label, and the /photos screen's own heading once a root is chosen */
 	modulePhotos: "Photos",
+	/** Videos module — icon rail tooltip/accessible label, the Videos sidebar title and its screens' heading */
+	moduleVideos: "Videos",
 	// Account menu
 	/** Account menu — trigger's accessible label and the dropdown's heading */
 	account: "Account",

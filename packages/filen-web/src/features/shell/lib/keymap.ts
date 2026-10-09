@@ -22,5 +22,6 @@ export const APP_ACTIONS: readonly ActionDef[] = [
 	{ id: "app.openTransfers", defaultCombo: "", scope: "global", descriptionKey: "common:moduleTransfers" },
 	{ id: "app.openPlaylists", defaultCombo: "", scope: "global", descriptionKey: "common:modulePlaylists" },
 	{ id: "app.openPhotos", defaultCombo: "", scope: "global", descriptionKey: "common:modulePhotos" },
+	{ id: "app.openVideos", defaultCombo: "", scope: "global", descriptionKey: "common:moduleVideos" },
 	{ id: "app.toggleAssistant", defaultCombo: "", scope: "global", descriptionKey: "common:toggleAssistant" }
 ]

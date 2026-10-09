@@ -32,6 +32,8 @@ export type AudioKey = NamespaceKey<"audio">
 
 export type PhotosKey = NamespaceKey<"photos">
 
+export type VideosKey = NamespaceKey<"videos">
+
 export type ArchiveKey = NamespaceKey<"archive">
 
 export type EventsKey = NamespaceKey<"events">

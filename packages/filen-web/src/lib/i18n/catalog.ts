@@ -11,6 +11,7 @@ import { settings } from "@/locales/en/settings"
 import { publicLinks } from "@/locales/en/publicLinks"
 import { audio } from "@/locales/en/audio"
 import { photos } from "@/locales/en/photos"
+import { videos } from "@/locales/en/videos"
 import { archive } from "@/locales/en/archive"
 import { events } from "@/locales/en/events"
 import { assistant } from "@/locales/en/assistant"
@@ -37,6 +38,7 @@ export const EN_CATALOGS = {
 	publicLinks,
 	audio,
 	photos,
+	videos,
 	archive,
 	events,
 	assistant

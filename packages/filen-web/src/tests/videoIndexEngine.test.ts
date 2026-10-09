@@ -16,6 +16,9 @@ let titles: Map<string, VideoTitleView>
 let walkFails: number
 let walkResult: (raw: DirsAndFiles) => DirsAndFiles
 let writeFailures: number
+let driveRootUuid: string | null
+let lastIdFails: number
+let goneRoots: Set<string>
 
 function ancestorsOf(uuid: string): string[] {
 	const out: string[] = []
@@ -68,6 +71,10 @@ function engineFor(): VideoIndexEngine {
 
 			await walkGate
 
+			if (goneRoots.has(uuid)) {
+				return { type: "gone" }
+			}
+
 			if (walkFails > 0) {
 				walkFails--
 
@@ -81,8 +88,15 @@ function engineFor(): VideoIndexEngine {
 		lastDriveEventId: () => {
 			calls.lastEventIds++
 
+			if (lastIdFails > 0) {
+				lastIdFails--
+
+				return Promise.reject(new Error("offline"))
+			}
+
 			return Promise.resolve(latest)
 		},
+		driveRoot: () => driveRootUuid,
 		getFile: uuid => {
 			calls.getFile++
 
@@ -134,6 +148,9 @@ beforeEach(() => {
 	walkFails = 0
 	walkResult = raw => raw
 	writeFailures = 0
+	driveRootUuid = null
+	lastIdFails = 0
+	goneRoots = new Set()
 })
 
 afterEach(() => {
@@ -576,5 +593,284 @@ describe("library index recovery", () => {
 
 		expect(calls.walks).toBe(1)
 		expect(engine.rootStatuses()[0]?.current).toBe(true)
+	})
+})
+
+describe("library index scan stop", () => {
+	function gateWalks(): () => void {
+		let release = (): void => undefined
+
+		walkGate = new Promise(resolve => {
+			release = resolve
+		})
+
+		return () => {
+			release()
+		}
+	}
+
+	async function firstScanStopped(engine: VideoIndexEngine): Promise<{ root: string; release: () => void; checking: Promise<void> }> {
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+
+		const release = gateWalks()
+
+		await engine.configure(roots([root, "auto"]))
+
+		const checking = engine.check(latest)
+
+		await vi.advanceTimersByTimeAsync(0)
+		expect(engine.rootStatuses()[0]?.walking).toBe(true)
+		engine.stopWalk(root)
+
+		return { root, release, checking }
+	}
+
+	it("flags a stopped first scan incomplete at once, then drops its result when it lands", async () => {
+		const engine = engineFor()
+		const { release, checking } = await firstScanStopped(engine)
+
+		expect(engine.rootStatuses()[0]).toMatchObject({ walking: false, incomplete: true, state: "error" })
+
+		release()
+		await checking
+		await settle()
+
+		expect(titles.size).toBe(0)
+		expect(engine.rootStatuses()[0]).toMatchObject({ walking: false, incomplete: true, state: "error", videos: 0 })
+	})
+
+	it("walks a stopped root again only when a rescan asks, not on the next check or configuration", async () => {
+		const engine = engineFor()
+		const { root, release, checking } = await firstScanStopped(engine)
+
+		release()
+		await checking
+		await settle()
+
+		expect(engine.needsCheck()).toBe(false)
+		await engine.configure(roots([root, "movies"]))
+		await engine.check(latest)
+		await vi.advanceTimersByTimeAsync(WALK_FLOOR_MS + 1_000)
+		expect(calls.walks).toBe(1)
+
+		await engine.rescan(root)
+		await settle()
+
+		expect(calls.walks).toBe(2)
+		expect(engine.rootStatuses()[0]).toMatchObject({ state: "ready", incomplete: false })
+	})
+
+	it("keeps the previous index when a rescan is stopped", async () => {
+		const engine = engineFor()
+		const root = await indexedRoot(engine)
+
+		drive.addFile(drive.addDir(root, "Alien (1979)"), "Alien (1979).mkv")
+
+		const release = gateWalks()
+		const rescanning = engine.rescan(root)
+
+		engine.stopWalk(root)
+
+		expect(engine.rootStatuses()[0]).toMatchObject({ walking: false, state: "ready", incomplete: true })
+
+		release()
+		await rescanning
+		await settle()
+
+		expect([...titles.values()].map(title => title.title)).toEqual(["Heat"])
+		expect(engine.rootStatuses()[0]).toMatchObject({ state: "ready", incomplete: true })
+	})
+
+	it("a root that was current stays current after a stopped rescan, with the events delivered meanwhile", async () => {
+		const engine = engineFor()
+		const root = await indexedRoot(engine)
+
+		expect(engine.rootStatuses()[0]?.current).toBe(true)
+
+		const release = gateWalks()
+		const rescanning = engine.rescan(root)
+
+		engine.stopWalk(root)
+
+		const alien = drive.addFile(drive.addDir(root, "Alien (1979)"), "Alien (1979).mkv")
+
+		engine.onSocketEvent(driveEvent(++latest, { type: "folderSubCreated", dir: drive.dirs.get(alien.parent) ?? driveDir(root, "x") }))
+		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: alien }))
+		release()
+		await rescanning
+		await settle()
+
+		expect(engine.rootStatuses()[0]?.current).toBe(true)
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Alien", "Heat"])
+	})
+
+	it("shows a root trashed while its stopped walk was out as missing", async () => {
+		const engine = engineFor()
+		const root = await indexedRoot(engine)
+		let release = (): void => undefined
+
+		walkGate = new Promise(resolve => {
+			release = resolve
+		})
+		goneRoots.add(root)
+
+		const rescanning = engine.rescan(root)
+
+		engine.stopWalk(root)
+		release()
+		await rescanning
+
+		expect(engine.rootStatuses()[0]?.state).toBe("missing")
+	})
+
+	it("takes a stopped walk back when a rescan is asked for while it is still out", async () => {
+		const engine = engineFor()
+		const root = await indexedRoot(engine)
+
+		drive.addFile(drive.addDir(root, "Alien (1979)"), "Alien (1979).mkv")
+
+		const release = gateWalks()
+		const rescanning = engine.rescan(root)
+
+		engine.stopWalk(root)
+
+		const again = engine.rescan(root)
+
+		expect(engine.rootStatuses()[0]?.walking).toBe(true)
+
+		release()
+		await Promise.all([rescanning, again])
+		await settle()
+
+		expect(calls.walks).toBe(1)
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Alien", "Heat"])
+		expect(engine.rootStatuses()[0]?.incomplete).toBe(false)
+	})
+
+	it("reads a scan as under way until its result is classified, so it ends with the new count", async () => {
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+		drive.addFile(drive.addDir(root, "Alien (1979)"), "Alien (1979).mkv")
+
+		const engine = engineFor()
+		const ended: number[] = []
+		let walking = false
+
+		engine.subscribe(update => {
+			const status = update.type === "roots" ? update.roots[0] : undefined
+
+			if (status === undefined) {
+				return
+			}
+
+			if (walking && !status.walking) {
+				ended.push(status.videos)
+			}
+
+			walking = status.walking
+		})
+
+		await engine.configure(roots([root, "auto"]))
+		await engine.check(latest)
+		await settle()
+
+		expect(ended).toEqual([2])
+	})
+
+	it("flags a failed walk incomplete until a complete one lands", async () => {
+		const engine = engineFor()
+		const root = await indexedRoot(engine)
+
+		walkFails = 1
+		await engine.rescan(root)
+
+		expect(engine.rootStatuses()[0]).toMatchObject({ state: "ready", incomplete: true })
+
+		await engine.rescan(root)
+
+		expect(engine.rootStatuses()[0]?.incomplete).toBe(false)
+	})
+})
+
+describe("library index checks", () => {
+	it("walks a new root even when the latest event id can't be read, and reports a walk that fails too", async () => {
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+
+		const engine = engineFor()
+
+		engine.onSocketEvent({ type: "reconnecting" })
+		lastIdFails = 1
+		await engine.configure(roots([root, "auto"]))
+		await engine.check()
+		await settle()
+
+		expect(engine.rootStatuses()[0]).toMatchObject({ state: "ready", incomplete: false })
+		expect([...titles.values()].map(title => title.title)).toEqual(["Heat"])
+
+		const other = drive.addDir(hexUuid(), "More")
+
+		lastIdFails = 2
+		await engine.configure(roots([root, "auto"], [other, "auto"]))
+		await engine.check()
+		await settle()
+
+		expect(engine.rootStatuses().find(status => status.uuid === other)).toMatchObject({
+			state: "error",
+			incomplete: true,
+			walking: false
+		})
+	})
+
+	it("reads a root whose only stored walk was partial as incomplete after a reload", async () => {
+		const first = engineFor()
+
+		first.setWriter(true)
+		walkResult = raw => ({ ...raw, files: [...raw.files, driveFile(hexUuid(), "Orphan.mkv")] })
+
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+		await first.configure(roots([root, "auto"]))
+		await first.check(latest)
+		await settle()
+		await first.flush()
+
+		expect(first.rootStatuses()[0]?.incomplete).toBe(true)
+
+		const second = engineFor()
+
+		await second.configure(roots([root, "auto"]))
+
+		expect(second.rootStatuses()[0]).toMatchObject({ state: "ready", incomplete: true })
+	})
+
+	it("leaves Filen's own directory out of a drive-root library, walked or created later", async () => {
+		const driveRoot = hexUuid()
+		const dotFilen = drive.addDir(driveRoot, ".filen")
+
+		driveRootUuid = driveRoot
+		drive.addFile(drive.addDir(dotFilen, "Chat Uploads"), "clip.mp4")
+		drive.addFile(drive.addDir(driveRoot, "Heat (1995)"), "Heat (1995).mkv")
+
+		const engine = engineFor()
+
+		await engine.configure(roots([driveRoot, "auto"]))
+		await engine.check(latest)
+		await settle()
+
+		expect([...titles.values()].map(title => title.title)).toEqual(["Heat"])
+
+		const again = driveDir(driveRoot, ".Filen")
+
+		engine.onSocketEvent(driveEvent(++latest, { type: "folderSubCreated", dir: again }))
+		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: driveFile(again.uuid, "clip 2.mp4") }))
+		await settle()
+
+		expect([...titles.values()].map(title => title.title)).toEqual(["Heat"])
 	})
 })

@@ -160,6 +160,7 @@ class Server {
 		return {
 			account: () => Promise.resolve(account),
 			videosDir: () => Promise.resolve(VIDEOS_DIR),
+			findVideosDir: () => Promise.resolve(VIDEOS_DIR),
 			knownVideosDir: () => VIDEOS_DIR,
 			noteSystemFile: () => undefined,
 			getFileByStableUuid: stable => {

@@ -38,7 +38,7 @@ import { createListenerSet } from "@/lib/listenerSet"
 import { registerSocketHandler } from "@/lib/sdk/socket"
 import { onSignOutPending, readSignOutPending } from "@/lib/signOutPending"
 import { onAuthBroadcast } from "@/lib/sdk/session"
-import { dotFilenSubdirUuid, getDotFilenSubdir, noteDotFilenFile, onDotFilenSubdirForgotten } from "@/lib/dotFilen"
+import { dotFilenSubdirUuid, findDotFilenSubdir, getDotFilenSubdir, noteDotFilenFile, onDotFilenSubdirForgotten } from "@/lib/dotFilen"
 import { kvDelete, kvDeletePrefix, kvEntriesJson, kvGetJson, kvKeys, kvSetJson } from "@/lib/storage/adapter"
 import { accountQueryGet } from "@/queries/account"
 import type { RecordStoreKv } from "@/features/videos/lib/recordStore.logic"
@@ -139,8 +139,10 @@ export interface WatchStateKv extends RecordStoreKv {
 
 export interface WatchStateSdk {
 	account: () => Promise<string>
-	// `.filen/Videos`, resolved (memoized) or as already known.
+	// `.filen/Videos`, resolved (memoized) or as already known; created when missing.
 	videosDir: () => Promise<string>
+	// `.filen/Videos` when it exists, null otherwise; creates nothing.
+	findVideosDir: () => Promise<string | null>
 	knownVideosDir: () => string | null
 	noteSystemFile: (uuid: string) => void
 	getFileByStableUuid: (stableUuid: string) => Promise<SdkFile | undefined>
@@ -198,7 +200,8 @@ interface HeadRef {
 interface Remote {
 	ref: HeadRef | null
 	doc: WatchStateDoc
-	parent: string
+	// null: `.filen/Videos` doesn't exist yet; an upload creates it.
+	parent: string | null
 	// The head didn't parse and a previous version stood in: it is replaced whatever the merge says.
 	repair: boolean
 }
@@ -1542,7 +1545,7 @@ export class WatchStateEngine {
 			}
 
 			if (upload) {
-				const saved = await this.upload(doc, remote.parent, remote.ref)
+				const saved = await this.upload(doc, remote.parent ?? (await this.sdk.videosDir()), remote.ref)
 
 				ref = refOf(saved)
 				patch.up = [...recentUploads(meta.up, Date.now()), Date.now()]
@@ -1675,9 +1678,9 @@ export class WatchStateEngine {
 		}
 
 		if (file === null) {
-			const videosDir = await this.sdk.videosDir()
+			const videosDir = await this.sdk.findVideosDir()
 
-			file = (await this.sdk.listDirectory(videosDir)).find(isStateFileName) ?? null
+			file = videosDir === null ? null : ((await this.sdk.listDirectory(videosDir)).find(isStateFileName) ?? null)
 
 			if (file === null) {
 				this.dropRemoteSavesThrough(seq)
@@ -2127,6 +2130,7 @@ export const watchState = new WatchStateEngine({
 	sdk: {
 		account: () => sdkApi.videoIndexAccount(),
 		videosDir: () => getDotFilenSubdir(VIDEOS_DIR_NAME),
+		findVideosDir: () => findDotFilenSubdir(VIDEOS_DIR_NAME),
 		knownVideosDir: () => dotFilenSubdirUuid(VIDEOS_DIR_NAME),
 		noteSystemFile: noteDotFilenFile,
 		getFileByStableUuid: stableUuid => runOp(sdkApi.getFileByStableUuid(stableUuid)),
