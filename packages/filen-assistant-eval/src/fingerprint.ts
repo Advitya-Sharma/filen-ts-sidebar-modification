@@ -22,6 +22,11 @@ const PROMPTS_AND_TOOLS = JSON.stringify({
 	date: EVAL_DATE_LINE,
 	nudges: [ASSISTANT_MALFORMED_RETRY, ASSISTANT_CLOSING_NUDGE],
 	fakeApp: ["./fakeApp.ts", "./fixture.ts"].map(file => readFileSync(new URL(file, import.meta.url), "utf8")),
+	// What the shipping loop presets measure, besides the prompts above.
+	loop: [
+		"./loopHarness.ts",
+		...["loop", "guard", "untrusted", "prompts", "budget", "activity"].map(file => `../../filen-shared/src/assistant/${file}.ts`)
+	].map(file => readFileSync(new URL(file, import.meta.url), "utf8")),
 	tools: Object.entries(ASSISTANT_TOOL_GROUPS).map(([group, definition]) => [
 		group,
 		definition.tools.map(tool => ({ name: tool.name, description: tool.description, parameters: toolInputJsonSchema(tool) }))

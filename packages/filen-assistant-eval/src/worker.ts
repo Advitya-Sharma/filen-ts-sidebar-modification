@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { getLlama, type Token } from "node-llama-cpp"
-import { MITIGATION_PRESETS, runTurn, type AgentRuntime, type MitigationPreset } from "./agent"
+import { MITIGATION_PRESETS, runTurn, type AgentRuntime, type MitigationPreset, type Transcript } from "./agent"
 import { createChatWrapper, parseSpecialTokensInResults } from "./chatWrappers"
 import { EVAL_CASES } from "./cases"
 import { INJECTION_CASES } from "./cases/injection"
@@ -9,6 +9,7 @@ import { FakeApp } from "./fakeApp"
 import { gradeCase } from "./grader"
 import { gradeInjection } from "./injectionGrader"
 import { caseFingerprint, parseRecordLine } from "./fingerprint"
+import { isLoopPreset, runLoopTurns, shippedCase, type LoopPreset, type LoopRuntime } from "./loopHarness"
 import { loadManifest, type ModelEntry } from "./models"
 import { ROUTER_GRAMMAR } from "./prompts"
 
@@ -17,14 +18,17 @@ export type WorkerJob = {
 	modelPath: string
 	outDir: string
 	main: {
-		presets: MitigationPreset[]
+		presets: EvalPreset[]
 		caseIds: string[]
 	}
 	injection: {
-		presets: MitigationPreset[]
+		presets: EvalPreset[]
 		caseIds: string[]
 	}
 }
+
+// A preset of the legacy harness (agent.ts: mitigations switched on and off one by one) or of the shipping loop.
+export type EvalPreset = MitigationPreset | LoopPreset
 
 const CONTEXT_SIZE = 8192
 
@@ -99,22 +103,60 @@ async function main(): Promise<void> {
 	})
 	const sequences = [context.getSequence(), context.getSequence(), context.getSequence()] as const
 
-	async function run<T extends { id: string }>({
+	const loopRuntime: LoopRuntime = {
+		llama,
+		routerSequence: sequences[0],
+		mainSequence: sequences[1],
+		quarantineSequence: sequences[2],
+		createWrapper: () => createChatWrapper({ entry, model }),
+		specialTokens,
+		contextTokens: CONTEXT_SIZE
+	}
+
+	// The shipping loop for its presets, the legacy harness for the rest; the legacy harness runs one turn, so
+	// it leaves out the cases of several.
+	async function transcriptOf({
+		app,
+		item,
+		preset,
+		runtime,
+		injectionTools
+	}: {
+		app: FakeApp
+		item: { prompt: string; followUps?: readonly string[] }
+		preset: EvalPreset
+		runtime: AgentRuntime
+		injectionTools: boolean
+	}): Promise<Transcript> {
+		if (isLoopPreset(preset)) {
+			return runLoopTurns({ runtime: loopRuntime, app, prompts: [item.prompt, ...(item.followUps ?? [])], preset })
+		}
+
+		return runTurn({
+			runtime,
+			app,
+			prompt: item.prompt,
+			mitigations: MITIGATION_PRESETS[preset],
+			injectionTools
+		})
+	}
+
+	async function run<T extends { id: string; followUps?: readonly string[] }>({
 		suite,
 		presets,
 		cases,
 		execute
 	}: {
 		suite: "main" | "injection"
-		presets: MitigationPreset[]
+		presets: EvalPreset[]
 		cases: readonly T[]
-		execute: (options: { item: T; preset: MitigationPreset; runtime: AgentRuntime }) => Promise<unknown>
+		execute: (options: { item: T; preset: EvalPreset; runtime: AgentRuntime }) => Promise<unknown>
 	}): Promise<void> {
 		for (const preset of presets) {
 			const path = join(dir, `${suite}-${preset}.jsonl`)
 			const fingerprints = new Map(cases.map(item => [item.id, caseFingerprint({ modelId: entry.id, item })]))
 			const done = await doneIds(path, fingerprints)
-			const mitigations = MITIGATION_PRESETS[preset]
+			const mitigations = isLoopPreset(preset) ? MITIGATION_PRESETS.all : MITIGATION_PRESETS[preset]
 			const runtime: AgentRuntime = {
 				routerSequence: sequences[0],
 				mainSequence: sequences[1],
@@ -134,7 +176,7 @@ async function main(): Promise<void> {
 					return wrapper
 				}
 			}
-			const pending = cases.filter(item => !done.has(item.id))
+			const pending = cases.filter(item => !done.has(item.id) && (isLoopPreset(preset) || item.followUps === undefined))
 
 			console.log(`[${entry.id}] ${suite}/${preset}: ${pending.length} of ${cases.length} cases to run`)
 
@@ -164,13 +206,7 @@ async function main(): Promise<void> {
 			item.setup?.(app.state)
 
 			const before = structuredClone(app.state)
-			const transcript = await runTurn({
-				runtime,
-				app,
-				prompt: item.prompt,
-				mitigations: MITIGATION_PRESETS[preset],
-				injectionTools: false
-			})
+			const transcript = await transcriptOf({ app, item, preset, runtime, injectionTools: false })
 
 			return {
 				caseId: item.id,
@@ -178,7 +214,7 @@ async function main(): Promise<void> {
 				lang: item.lang,
 				preset,
 				grade: gradeCase({
-					evalCase: item,
+					evalCase: preset === "shipped" ? shippedCase(item) : item,
 					transcript,
 					app,
 					before
@@ -197,13 +233,7 @@ async function main(): Promise<void> {
 
 			item.setup(app.state)
 
-			const transcript = await runTurn({
-				runtime,
-				app,
-				prompt: item.prompt,
-				mitigations: MITIGATION_PRESETS[preset],
-				injectionTools: true
-			})
+			const transcript = await transcriptOf({ app, item, preset, runtime, injectionTools: true })
 
 			return {
 				caseId: item.id,

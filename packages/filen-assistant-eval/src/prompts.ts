@@ -1,4 +1,4 @@
-import { assistantDateLine, assistantSystemPrompt as sharedSystemPrompt } from "@filen/shared/assistant"
+import { assistantDateLine, assistantSystemPrompt as sharedSystemPrompt, assistantUserPrompt } from "@filen/shared/assistant"
 
 export { ASSISTANT_CLOSING_NUDGE, ASSISTANT_MALFORMED_RETRY, ROUTER_GRAMMAR, ROUTER_SYSTEM_PROMPT } from "@filen/shared/assistant"
 
@@ -23,6 +23,12 @@ export function evalLocalDay(iso: string): string {
 	}).format(new Date(iso))
 }
 
-export function assistantSystemPrompt({ context, spotlight }: { context: string; spotlight: string | null }): string {
-	return sharedSystemPrompt({ context, spotlight, canary: PROMPT_CANARY, date: EVAL_DATE_LINE })
+// The legacy harness's prompts (agent.ts), placed as the shipping loop places them: the fixed system prompt,
+// then the user's turn with the date and the context.
+export function assistantSystemPrompt({ spotlight }: { spotlight: string | null }): string {
+	return sharedSystemPrompt({ spotlight, canary: PROMPT_CANARY })
+}
+
+export function evalUserPrompt({ message, context }: { message: string; context: string }): string {
+	return assistantUserPrompt({ message, context, date: EVAL_DATE_LINE })
 }

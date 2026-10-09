@@ -117,6 +117,9 @@ export type EvalCase = {
 	category: Category
 	lang: Language
 	prompt: string
+	// Messages the user sends next, each a turn of its own in the same conversation; the case is graded on all
+	// of them together, its answer being the last turn's.
+	followUps?: readonly string[]
 	context?: Partial<AppContext>
 	// Adjusts the fixture before the turn, e.g. dates relative to the eval's clock.
 	setup?: (state: AppState) => void

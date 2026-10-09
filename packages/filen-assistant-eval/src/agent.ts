@@ -16,7 +16,6 @@ import {
 	type AssistantToolGroup,
 	type SpotlightOptions
 } from "@filen/shared/assistant"
-import { randomBytes } from "node:crypto"
 import {
 	LlamaChat,
 	type ChatHistoryItem,
@@ -28,7 +27,14 @@ import {
 } from "node-llama-cpp"
 import { DECOY_TOOLS } from "./decoys"
 import type { FakeApp } from "./fakeApp"
-import { ASSISTANT_CLOSING_NUDGE, ASSISTANT_MALFORMED_RETRY, assistantSystemPrompt, PROMPT_CANARY, ROUTER_SYSTEM_PROMPT } from "./prompts"
+import {
+	ASSISTANT_CLOSING_NUDGE,
+	ASSISTANT_MALFORMED_RETRY,
+	assistantSystemPrompt,
+	evalUserPrompt,
+	PROMPT_CANARY,
+	ROUTER_SYSTEM_PROMPT
+} from "./prompts"
 
 export type Mitigations = {
 	// Off reproduces engines that parse special tokens inside tool results.
@@ -386,13 +392,7 @@ export async function runTurn({
 		timings.routerMs = routed.durationMs
 		timings.routerTtftMs = routed.ttftMs ?? routed.durationMs
 
-		const spotlight: SpotlightOptions | null =
-			mitigations.spotlight === "off"
-				? null
-				: {
-						mode: mitigations.spotlight,
-						marker: randomBytes(3).toString("hex")
-					}
+		const spotlight: SpotlightOptions | null = mitigations.spotlight === "off" ? null : { mode: mitigations.spotlight }
 		const guard = new AssistantTurnGuard({
 			options: {
 				consequentialAllowed: !mitigations.scope || intent === "change",
@@ -426,13 +426,12 @@ export async function runTurn({
 			{
 				type: "system",
 				text: assistantSystemPrompt({
-					context: app.describeContext(),
 					spotlight: spotlight === null ? null : spotlightInstruction(spotlight)
 				})
 			},
 			{
 				type: "user",
-				text: prompt
+				text: evalUserPrompt({ message: prompt, context: app.describeContext() })
 			}
 		]
 		let retryUsed = false

@@ -2,13 +2,14 @@ import { fork } from "node:child_process"
 import { rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
-import { MITIGATION_PRESETS, type MitigationPreset } from "./agent"
+import { MITIGATION_PRESETS } from "./agent"
+import { LOOP_PRESETS } from "./loopHarness"
 import { EVAL_CASES } from "./cases"
 import { INJECTION_CASES } from "./cases/injection"
 import { CATEGORIES, LANGUAGES } from "./cases/types"
 import { ensureModel, loadManifest, PACKAGE_ROOT } from "./models"
 import { writeReport } from "./report"
-import type { WorkerJob } from "./worker"
+import type { EvalPreset, WorkerJob } from "./worker"
 
 const USAGE = `Usage: pnpm eval <command> [options]
 
@@ -21,8 +22,11 @@ Commands:
 Options:
   --models <ids>       Comma-separated model ids (default: every enabled model)
   --suite <name>       main | injection | all (default: all)
-  --presets <names>    Mitigation presets for the injection suite (default: all of them)
-  --main-presets <n>   Mitigation presets for the main suite (default: all)
+  --presets <names>    Presets for the injection suite (default: every one)
+  --main-presets <n>   Presets for the main suite (default: shipped)
+
+Presets: shipped (the shipping loop with the tools the web app runs), loop (the shipping loop with every
+tool), and the legacy harness's mitigation presets (${Object.keys(MITIGATION_PRESETS).join(", ")}).
   --categories <list>  Main-suite categories to run
   --languages <list>   Languages to run (both suites)
   --cases <ids>        Exact case ids to run
@@ -40,16 +44,18 @@ function list(value: string | undefined): string[] | undefined {
 				.filter(item => item.length > 0)
 }
 
-function presets(value: string | undefined, fallback: MitigationPreset[]): MitigationPreset[] {
+const ALL_PRESETS = [...Object.keys(LOOP_PRESETS), ...Object.keys(MITIGATION_PRESETS)] as EvalPreset[]
+
+function presets(value: string | undefined, fallback: EvalPreset[]): EvalPreset[] {
 	const names = list(value) ?? fallback
 
 	for (const name of names) {
-		if (!(name in MITIGATION_PRESETS)) {
-			throw new Error(`Unknown preset "${name}"; known: ${Object.keys(MITIGATION_PRESETS).join(", ")}`)
+		if (!(ALL_PRESETS as string[]).includes(name)) {
+			throw new Error(`Unknown preset "${name}"; known: ${ALL_PRESETS.join(", ")}`)
 		}
 	}
 
-	return names as MitigationPreset[]
+	return names as EvalPreset[]
 }
 
 function runWorker(job: WorkerJob): Promise<void> {
@@ -194,11 +200,11 @@ async function main(): Promise<void> {
 			modelPath,
 			outDir,
 			main: {
-				presets: presets(values["main-presets"], ["all"]),
+				presets: presets(values["main-presets"], ["shipped"]),
 				caseIds: mainCases.map(item => item.id)
 			},
 			injection: {
-				presets: presets(values.presets, Object.keys(MITIGATION_PRESETS) as MitigationPreset[]),
+				presets: presets(values.presets, ALL_PRESETS),
 				caseIds: injectionCases.map(item => item.id)
 			}
 		})
