@@ -155,6 +155,33 @@ export default defineConfig([
 		}
 	},
 	{
+		// Everything ships in one bundle (codeSplitting: false), so a dynamic import only adds an async
+		// hop and hides import cycles. The env-gated e2e hooks are dead-code-eliminated from normal builds.
+		files: ["src/**/*.{ts,tsx}"],
+		ignores: ["src/tests/**"],
+		rules: {
+			"no-restricted-syntax": [
+				"error",
+				{
+					selector: "ImportExpression:not([source.value='@/e2e-hooks'])",
+					message: "No dynamic imports in app code; import statically."
+				},
+				{
+					selector: "CallExpression[callee.name='lazy'], CallExpression[callee.property.name='lazy']",
+					message: "No lazy-loaded components; import statically."
+				},
+				{
+					selector: "ImportSpecifier[imported.name=/^(lazyRouteComponent|createLazyRoute|createLazyFileRoute)$/]",
+					message: "No lazy routes; define the route component statically."
+				},
+				{
+					selector: "MemberExpression[object.meta.name='import'][property.name='glob']",
+					message: "import.meta.glob defaults to lazy imports; import statically."
+				}
+			]
+		}
+	},
+	{
 		// The typescript-eslint variant, because types from the SDK are fine and its values are not. An
 		// import() expression is invisible to both import rules, so it is refused outright.
 		files: ["src/features/assistant/**/*.{ts,tsx}", "src/workers/assistant.worker.ts"],
