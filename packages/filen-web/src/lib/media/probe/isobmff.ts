@@ -36,7 +36,8 @@ import {
 	type ParsedContainer,
 	type ParsedTrack,
 	type ProbeChapter,
-	type ProbeTier
+	type ProbeTier,
+	type SampleTables
 } from "@/lib/media/probe/types"
 
 // MP4/MOV/M4V (ISO BMFF) walked box header by box header: payloads are read only for the few small boxes
@@ -84,6 +85,8 @@ interface Walk {
 	// The moov walk stopped early: at the tier's read budget (an incomplete track list) or at a broken
 	// box (every track before it stands, if there were any).
 	cut: "budget" | "malformed" | null
+	// Locate the picture track's sample tables too (walkContainer's `keyframes`).
+	keyframes: boolean
 }
 
 // The box header at `at` inside [at, limit). A size of 0 ("to the end") is only legal at the top level.
@@ -337,7 +340,10 @@ interface TrackHeader {
 	rotation: number
 }
 
-function videoTrack(entry: Uint8Array, header: TrackHeader): ParsedTrack {
+// The sample entry child a decoder is configured with, for the codecs that have one.
+const DESCRIPTION_BOXES: Partial<Record<MediaCodec, string>> = { h264: "avcC", hevc: "hvcC", av1: "av1C" }
+
+function videoTrack(entry: Uint8Array, header: TrackHeader, tables: SampleTables | null): ParsedTrack {
 	const box = entryBox(entry)
 	const children = box.dataStart + 78
 	const fourcc = originalFormat(entry, children, box.end, box.type)
@@ -398,9 +404,21 @@ function videoTrack(entry: Uint8Array, header: TrackHeader): ParsedTrack {
 		codecString = dolbyVisionCodecString({ fourcc, profile: dv.profile, level: dv.level }) ?? codecString
 	}
 
+	const descriptionBox = codec === null ? undefined : DESCRIPTION_BOXES[codec]
+
 	return {
 		kind: "video",
 		enabled: header.enabled,
+		...(tables === null
+			? {}
+			: {
+					decode: {
+						track: header.id,
+						description: descriptionBox === undefined ? null : child(descriptionBox),
+						encodedFrames: false,
+						tables
+					}
+				}),
 		video: {
 			codec,
 			fourcc,
@@ -572,6 +590,11 @@ function parseTkhd(bytes: Uint8Array): TrackHeader {
 	}
 }
 
+// mdhd's ticks per second.
+function mdhdTimescale(bytes: Uint8Array): number {
+	return uint32(bytes, (bytes[0] ?? 0) === 1 ? 20 : 12)
+}
+
 // mdhd's packed ISO 639-2/T code (three 5-bit letters); QuickTime's Macintosh codes below 0x400 are not mapped.
 function mdhdLanguage(bytes: Uint8Array): string | null {
 	const at = (bytes[0] ?? 0) === 1 ? 32 : 20
@@ -603,6 +626,7 @@ interface TrakState {
 	lang: string | null
 	bcp47: string | null
 	name: string | null
+	timescale: number
 	entry: SampleEntry | null
 }
 
@@ -613,6 +637,7 @@ async function walkTrak(walk: Walk, trak: Box): Promise<ParsedTrack | null> {
 		lang: null,
 		bcp47: null,
 		name: null,
+		timescale: 0,
 		entry: null
 	}
 
@@ -636,18 +661,22 @@ async function walkTrak(walk: Walk, trak: Box): Promise<ParsedTrack | null> {
 		} else if (box.type === "mdia") {
 			await forEachChild(walk, box, 3, async child => {
 				if (child.type === "mdhd") {
-					state.lang = mdhdLanguage(await payload(walk, child, 36))
+					const mdhd = await payload(walk, child, 36)
+
+					state.lang = mdhdLanguage(mdhd)
+					state.timescale = mdhdTimescale(mdhd)
 				} else if (child.type === "elng") {
 					state.bcp47 = utf8(await payload(walk, child, MAX_STRING_BYTES), 4, child.end - child.dataStart)
 				} else if (child.type === "hdlr") {
 					state.handler = ascii(await payload(walk, child, 12), 8, 12)
 				} else if (child.type === "minf") {
-					state.entry = await firstSampleEntry(walk, child)
+					// hdlr precedes minf, so only a picture track pays for locating its tables.
+					state.entry = await firstSampleEntry(walk, child, walk.keyframes && state.handler === "vide")
 				}
 			})
 
 			// The card needs nothing after the media box; the user data with the name comes later.
-			return walk.tier !== "card"
+			return walk.tier === "full"
 		}
 	})
 
@@ -659,7 +688,7 @@ async function walkTrak(walk: Walk, trak: Box): Promise<ParsedTrack | null> {
 	}
 
 	if (handler === "vide") {
-		return videoTrack(entry.bytes, header)
+		return videoTrack(entry.bytes, header, entry.tables === null ? null : { ...entry.tables, timescale: state.timescale })
 	}
 
 	if (handler === "soun") {
@@ -689,11 +718,26 @@ async function walkTrak(walk: Walk, trak: Box): Promise<ParsedTrack | null> {
 interface SampleEntry {
 	bytes: Uint8Array
 	stsdVersion: number
+	// Located only when asked for; the timescale is filled in by the trak.
+	tables: Omit<SampleTables, "timescale"> | null
 }
 
-// minf → stbl → stsd's first entry, read whole; the sample tables after it are never touched.
-async function firstSampleEntry(walk: Walk, minf: Box): Promise<SampleEntry | null> {
+function range(box: Box): { start: number; end: number } {
+	return { start: box.dataStart, end: box.end }
+}
+
+// minf → stbl → stsd's first entry, read whole; the sample tables after it are skipped by size, or with
+// `locateTables` located by their headers (never read).
+async function firstSampleEntry(walk: Walk, minf: Box, locateTables: boolean): Promise<SampleEntry | null> {
 	const found: { entry: SampleEntry | null } = { entry: null }
+	const tables: Omit<SampleTables, "timescale"> = {
+		stts: null,
+		stss: null,
+		stsc: null,
+		stsz: null,
+		chunkOffsets: null,
+		wideOffsets: false
+	}
 
 	await forEachChild(walk, minf, 4, async box => {
 		if (box.type !== "stbl") {
@@ -701,6 +745,15 @@ async function firstSampleEntry(walk: Walk, minf: Box): Promise<SampleEntry | nu
 		}
 
 		await forEachChild(walk, box, 5, async child => {
+			if (locateTables) {
+				if (child.type === "stts" || child.type === "stss" || child.type === "stsc" || child.type === "stsz") {
+					tables[child.type] = range(child)
+				} else if (child.type === "stco" || child.type === "co64") {
+					tables.chunkOffsets = range(child)
+					tables.wideOffsets = child.type === "co64"
+				}
+			}
+
 			if (child.type !== "stsd") {
 				return
 			}
@@ -716,10 +769,11 @@ async function firstSampleEntry(walk: Walk, minf: Box): Promise<SampleEntry | nu
 
 			found.entry = {
 				bytes: await readBytes(walk.source, first.start, Math.min(size, MAX_SAMPLE_ENTRY_BYTES)),
-				stsdVersion: version[0] ?? 0
+				stsdVersion: version[0] ?? 0,
+				tables: locateTables ? tables : null
 			}
 
-			return false
+			return locateTables
 		})
 
 		return false
@@ -812,7 +866,7 @@ async function walkMoov(walk: Walk, moov: Box): Promise<void> {
 	walk.moovComplete = true
 
 	await forEachChild(walk, moov, 1, async box => {
-		if (box.type === "mvhd" && walk.tier !== "cover") {
+		if (box.type === "mvhd") {
 			const bytes = await payload(walk, box, 112)
 			const version = bytes[0] ?? 0
 
@@ -825,7 +879,7 @@ async function walkMoov(walk: Walk, moov: Box): Promise<void> {
 			if (duration !== null && duration !== 0 && duration !== 0xffffffff && walk.timescale > 0) {
 				result.durationSec = seconds(duration / walk.timescale)
 			}
-		} else if (box.type === "trak" && walk.tier !== "cover") {
+		} else if (box.type === "trak") {
 			try {
 				const track = await walkTrak(walk, box)
 
@@ -853,15 +907,13 @@ async function walkMoov(walk: Walk, moov: Box): Promise<void> {
 		} else if (box.type === "mvex") {
 			walk.fragmented = true
 
-			if (walk.tier !== "cover") {
-				await forEachChild(walk, box, 2, async child => {
-					if (child.type === "mehd") {
-						const bytes = await payload(walk, child, 12)
+			await forEachChild(walk, box, 2, async child => {
+				if (child.type === "mehd") {
+					const bytes = await payload(walk, child, 12)
 
-						walk.fragmentDuration = (bytes[0] ?? 0) === 1 ? uint64(bytes, 4) : uint32(bytes, 4)
-					}
-				})
-			}
+					walk.fragmentDuration = (bytes[0] ?? 0) === 1 ? uint64(bytes, 4) : uint32(bytes, 4)
+				}
+			})
 		} else if ((box.type === "udta" || box.type === "meta") && walk.tier !== "card") {
 			try {
 				if (box.type === "udta") {
@@ -906,7 +958,7 @@ async function hasMfra(walk: Walk): Promise<boolean> {
 // Top-level box headers to `moov`, wherever it is: a file written for streaming has it up front, one
 // written straight from a camera after the whole `mdat`. Throws ReadBudgetError and MalformedError
 // with whatever was found already in `result`.
-export async function walkIsobmff(source: BlockSource, tier: ProbeTier, result: ParsedContainer): Promise<void> {
+export async function walkIsobmff(source: BlockSource, tier: ProbeTier, result: ParsedContainer, keyframes = false): Promise<void> {
 	const walk: Walk = {
 		source,
 		tier,
@@ -919,7 +971,8 @@ export async function walkIsobmff(source: BlockSource, tier: ProbeTier, result: 
 		moovComplete: false,
 		chapterTracks: new Set(),
 		quickTime: true,
-		cut: null
+		cut: null,
+		keyframes
 	}
 	let at = 0
 	let sawFtyp = false
@@ -977,18 +1030,16 @@ export async function walkIsobmff(source: BlockSource, tier: ProbeTier, result: 
 
 			result.tracks = result.tracks.filter(track => track.kind !== "subtitle" || !walk.chapterTracks.has(track.sub.id))
 
-			if (tier !== "cover") {
-				result.tracksFound = walk.cut === null || (walk.cut === "malformed" && result.tracks.length > 0)
+			result.tracksFound = walk.cut === null || (walk.cut === "malformed" && result.tracks.length > 0)
 
-				if (result.durationSec === null && walk.fragmentDuration !== null && walk.timescale > 0) {
-					result.durationSec = seconds(walk.fragmentDuration / walk.timescale)
-				}
+			if (result.durationSec === null && walk.fragmentDuration !== null && walk.timescale > 0) {
+				result.durationSec = seconds(walk.fragmentDuration / walk.timescale)
+			}
 
-				if (walk.fragmented) {
-					result.index = tier === "full" ? ((await hasMfra(walk)) ? "mfra" : "none") : null
-				} else if (walk.moovComplete) {
-					result.index = "moov"
-				}
+			if (walk.fragmented) {
+				result.index = tier === "full" ? ((await hasMfra(walk)) ? "mfra" : "none") : null
+			} else if (walk.moovComplete) {
+				result.index = "moov"
 			}
 
 			return

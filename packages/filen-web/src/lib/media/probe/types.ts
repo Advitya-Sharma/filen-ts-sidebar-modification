@@ -2,27 +2,31 @@
 // JSON-serialisable and small (a few hundred bytes) so it can be cached per file uuid.
 
 // card: badges (codecs, size, duration, audio list) in at most CARD_BLOCK_READS downloads.
-// full: everything, for a detail page or playback. cover: only where an embedded cover sits.
+// full: everything, for a detail page or playback. cover: the card's fields plus where an embedded
+// cover sits, the track headers being on its way.
 export type ProbeTier = "card" | "full" | "cover"
 
-export type MediaCodec =
-	| "aac"
-	| "mp3"
-	| "ac3"
-	| "eac3"
-	| "dts"
-	| "truehd"
-	| "opus"
-	| "vorbis"
-	| "flac"
-	| "alac"
-	| "h264"
-	| "hevc"
-	| "av1"
-	| "vp9"
-	| "vp8"
-	| "theora"
-	| "mpeg4"
+export const MEDIA_CODECS = [
+	"aac",
+	"mp3",
+	"ac3",
+	"eac3",
+	"dts",
+	"truehd",
+	"opus",
+	"vorbis",
+	"flac",
+	"alac",
+	"h264",
+	"hevc",
+	"av1",
+	"vp9",
+	"vp8",
+	"theora",
+	"mpeg4"
+] as const
+
+export type MediaCodec = (typeof MEDIA_CODECS)[number]
 
 export type ProbeContainer = "mp4" | "mov" | "mkv" | "webm"
 
@@ -100,8 +104,47 @@ export interface VideoProbe {
 	partial: boolean
 }
 
+// A box's or element's payload in the file, `end` exclusive.
+export interface ByteRange {
+	start: number
+	end: number
+}
+
+// The sample tables of an MP4 picture track, located but not read.
+export interface SampleTables {
+	// mdhd's ticks per second, which the tables count in.
+	timescale: number
+	stts: ByteRange | null
+	// Null when every sample is a keyframe.
+	stss: ByteRange | null
+	stsc: ByteRange | null
+	stsz: ByteRange | null
+	chunkOffsets: ByteRange | null
+	// co64 rather than stco.
+	wideOffsets: boolean
+}
+
+// What a decoder needs to find and decode a picture track's keyframes; only a walk asked for keyframes fills it.
+export interface VideoDecodeInfo {
+	// MP4 track_ID or Matroska TrackNumber.
+	track: number
+	// The configuration record a decoder is configured with (avcC, hvcC, av1C), for codecs that have one.
+	description: Uint8Array | null
+	// Matroska frames stored through a ContentEncoding (header stripping, compression): not decodable as read.
+	encodedFrames: boolean
+	tables: SampleTables | null
+}
+
+// Where a Matroska Segment keeps its Cues; only a walk asked for keyframes fills it.
+export interface CuesLocation {
+	segmentStart: number
+	// Nanoseconds per Matroska tick.
+	timestampScale: number
+	at: number | null
+}
+
 export type ParsedTrack =
-	| { kind: "video"; enabled: boolean; video: ProbeVideo }
+	| { kind: "video"; enabled: boolean; video: ProbeVideo; decode?: VideoDecodeInfo }
 	| { kind: "audio"; enabled: boolean; audio: ProbeAudio }
 	| { kind: "subtitle"; enabled: boolean; sub: ProbeSubtitle }
 
@@ -116,6 +159,7 @@ export interface ParsedContainer {
 	chapters: ProbeChapter[]
 	cover: ProbeCover | null
 	partial: boolean
+	cues?: CuesLocation
 }
 
 export const MAX_CHAPTERS = 64

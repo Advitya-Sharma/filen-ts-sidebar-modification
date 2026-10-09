@@ -1,6 +1,13 @@
 /// <reference lib="webworker" />
 import { log } from "@/lib/log"
-import { cachedOpfsDirectory, forgetOpfsDirectory, isLockConflictError, isNotFoundError, opfsDirectory } from "@/lib/storage/opfs"
+import {
+	cachedOpfsDirectory,
+	forgetOpfsDirectory,
+	isLockConflictError,
+	isNotFoundError,
+	opfsDirectory,
+	type OpfsBlobStore
+} from "@/lib/storage/opfs"
 import { planSizeCapEviction, Semaphore } from "@filen/shared"
 import {
 	THUMB_DIR,
@@ -11,32 +18,36 @@ import {
 	type ThumbnailCopy
 } from "@/features/drive/lib/thumbnails.logic"
 
-// Worker-only OPFS blob store for cached thumbnails — no wasm import anywhere in this module, so it
-// stays trivially importable from sdk.worker.ts without dragging the SDK's own init/thread-pool
-// concerns along. createSyncAccessHandle is dedicated-worker-only by spec; this module is never
-// imported main-thread (see thumbCache.ts for the async main-thread read side over the same tree).
+// Worker-only OPFS blob stores for cached images: drive thumbnails, and any other store of small
+// derived images that passes its own directory, extension and cap — no wasm import anywhere in this
+// module, so it stays trivially importable from sdk.worker.ts without dragging the SDK's own
+// init/thread-pool concerns along. createSyncAccessHandle is dedicated-worker-only by spec; this module
+// is never imported main-thread (see lib/storage/opfsBlobStore.ts for the async read side).
 
-// Persists one thumbnail's bytes, keyed by the item's own uuid — uuid rotates on any content change,
-// so this is a plain overwrite-or-create with no versioning concern of its own. A second tab (or a
-// second in-worker caller) already holding this exact file's sync access handle makes
-// createSyncAccessHandle throw NoModificationAllowedError (proven live, cross-context) — caught here
-// and skipped: the caller's own bytes still render, there is simply nothing new to persist this turn.
-// Anything else that fails after the handle is acquired (write/flush/quota) propagates, so the
-// caller's own defensive wrapping (see sdk.worker.ts's makeThumbnail/storeThumbnail) logs it once.
-export async function writeThumb(uuid: string, bytes: Uint8Array): Promise<void> {
-	const name = `${uuid}${THUMB_EXT}`
+export const DRIVE_THUMB_STORE: OpfsBlobStore = { dir: THUMB_DIR, ext: THUMB_EXT }
+
+// Persists one entry's bytes, keyed by the uuid of the file it derives from (plus whatever the store
+// adds) — uuid rotates on any content change, so this is a plain overwrite-or-create with no versioning
+// concern of its own. A second tab (or a second in-worker caller) already holding this exact file's sync
+// access handle makes createSyncAccessHandle throw NoModificationAllowedError (proven live,
+// cross-context) — caught here and skipped: the caller's own bytes still render, there is simply
+// nothing new to persist this turn. Anything else that fails after the handle is acquired
+// (write/flush/quota) propagates, so the caller's own defensive wrapping (see sdk.worker.ts's
+// makeThumbnail/storeThumbnail) logs it once.
+export async function writeStoreEntry(store: OpfsBlobStore, key: string, bytes: Uint8Array): Promise<void> {
+	const name = `${key}${store.ext}`
 	let fileHandle: FileSystemFileHandle
 
 	try {
-		fileHandle = await (await cachedOpfsDirectory(THUMB_DIR)).getFileHandle(name, { create: true })
+		fileHandle = await (await cachedOpfsDirectory(store.dir)).getFileHandle(name, { create: true })
 	} catch (e) {
 		if (!isNotFoundError(e)) {
 			throw e
 		}
 
 		// The memoized directory was removed since (logout wipe, cleared site data): walk again, re-creating it.
-		forgetOpfsDirectory(THUMB_DIR)
-		fileHandle = await (await cachedOpfsDirectory(THUMB_DIR)).getFileHandle(name, { create: true })
+		forgetOpfsDirectory(store.dir)
+		fileHandle = await (await cachedOpfsDirectory(store.dir)).getFileHandle(name, { create: true })
 	}
 
 	let handle: FileSystemSyncAccessHandle
@@ -49,9 +60,9 @@ export async function writeThumb(uuid: string, bytes: Uint8Array): Promise<void>
 		// else (quota, permissions) is unexpected and logged louder, but still skip-not-throw: the
 		// caller's in-hand bytes render either way and persistence stays best-effort.
 		if (isLockConflictError(e)) {
-			log.info("thumb-store", "writeThumb: concurrent writer holds the handle, skipping persist", uuid)
+			log.info("thumb-store", "writeStoreEntry: concurrent writer holds the handle, skipping persist", key)
 		} else {
-			log.warn("thumb-store", "writeThumb: sync access handle unavailable, skipping persist", uuid, e)
+			log.warn("thumb-store", "writeStoreEntry: sync access handle unavailable, skipping persist", key, e)
 		}
 		return
 	}
@@ -63,6 +74,10 @@ export async function writeThumb(uuid: string, bytes: Uint8Array): Promise<void>
 	} finally {
 		handle.close()
 	}
+}
+
+export function writeThumb(uuid: string, bytes: Uint8Array): Promise<void> {
+	return writeStoreEntry(DRIVE_THUMB_STORE, uuid, bytes)
 }
 
 // How many thumbnail copies run at once in this worker: a copy job hands its files over in batches,
@@ -111,11 +126,11 @@ export async function copyThumbs(copies: readonly ThumbnailCopy[]): Promise<void
 	)
 }
 
-// Enumerates every cached thumbnail with its on-disk size and last-write time — sweepThumbs' own
+// Enumerates every entry of a store with its on-disk size and last-write time — sweepStore's own
 // input. getFile() per entry (not getSize() via a sync access handle) so this stays a plain async
 // read, safely callable even while another entry in the same directory is mid-write elsewhere.
-export async function listThumbs(): Promise<ThumbCacheEntry[]> {
-	const dir = await opfsDirectory(THUMB_DIR)
+export async function listStoreEntries(store: OpfsBlobStore): Promise<ThumbCacheEntry[]> {
+	const dir = await opfsDirectory(store.dir)
 	const entries: ThumbCacheEntry[] = []
 
 	for await (const handle of dir.values()) {
@@ -128,6 +143,10 @@ export async function listThumbs(): Promise<ThumbCacheEntry[]> {
 	}
 
 	return entries
+}
+
+export function listThumbs(): Promise<ThumbCacheEntry[]> {
+	return listStoreEntries(DRIVE_THUMB_STORE)
 }
 
 // Evicts every generation directory under THUMB_DIR_ROOT other than the live THUMB_GENERATION — a
@@ -152,12 +171,12 @@ export async function removeStaleThumbGenerations(): Promise<void> {
 	}
 }
 
-// Oldest-first cap enforcement — called once per worker session (see sdk.worker.ts's own once-flag)
-// so a long-lived tab's cache never grows unbounded. Per-entry eviction failures are logged and
-// skipped rather than aborting the whole sweep: one locked file (another tab mid-write) must not
-// leave every OTHER oversize entry stranded.
-export async function sweepThumbs(capBytes: number): Promise<void> {
-	const entries = await listThumbs()
+// Oldest-first cap enforcement — called once per worker session and again every so many writes (see
+// storeCapSweeper) so a long-lived tab's cache never grows unbounded. Per-entry eviction failures are
+// logged and skipped rather than aborting the whole sweep: one locked file (another tab mid-write) must
+// not leave every OTHER oversize entry stranded.
+export async function sweepStore(store: OpfsBlobStore, capBytes: number): Promise<void> {
+	const entries = await listStoreEntries(store)
 	const evict = planSizeCapEviction(
 		entries.map(entry => ({ id: entry.name, size: entry.size, timestamp: entry.lastModified })),
 		capBytes,
@@ -168,15 +187,72 @@ export async function sweepThumbs(capBytes: number): Promise<void> {
 		return
 	}
 
-	const dir = await opfsDirectory(THUMB_DIR)
+	const dir = await opfsDirectory(store.dir)
 
 	await Promise.all(
 		evict.map(async name => {
 			try {
 				await dir.removeEntry(name)
 			} catch (e) {
-				log.warn("thumb-store", "sweepThumbs: evict failed", name, e)
+				log.warn("thumb-store", "sweepStore: evict failed", name, e)
 			}
 		})
 	)
+}
+
+export function sweepThumbs(capBytes: number): Promise<void> {
+	return sweepStore(DRIVE_THUMB_STORE, capBytes)
+}
+
+export interface StoreCapSweeper {
+	// Called on every write path, and on paths that settle without writing: the first call of a worker
+	// session sweeps (and runs `onFirstArm`).
+	arm(): void
+	// Counts writes; every `writesPerSweep` of them sweep again.
+	noteWrites(count: number): void
+}
+
+// Keeps a store under its cap for the worker's lifetime: once at the first use of a session, then again
+// every `writesPerSweep` writes, never two sweeps at once. Fire-and-forget: eviction is housekeeping,
+// never something a write should wait on.
+export function storeCapSweeper(store: OpfsBlobStore, capBytes: number, writesPerSweep: number, onFirstArm?: () => void): StoreCapSweeper {
+	let armed = false
+	let writesSinceSweep = 0
+	let running = false
+
+	const sweep = (): void => {
+		if (running) {
+			return
+		}
+
+		running = true
+		writesSinceSweep = 0
+
+		void sweepStore(store, capBytes)
+			.catch((e: unknown) => {
+				log.warn("thumb-store", "sweepStore failed", store.dir.join("/"), e)
+			})
+			.finally(() => {
+				running = false
+			})
+	}
+
+	return {
+		arm: () => {
+			if (armed) {
+				return
+			}
+
+			armed = true
+			onFirstArm?.()
+			sweep()
+		},
+		noteWrites: count => {
+			writesSinceSweep += count
+
+			if (writesSinceSweep >= writesPerSweep) {
+				sweep()
+			}
+		}
+	}
 }

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 // A sign-out cut short leaves its flag set; the next boot redoes every wipe before any session resume,
 // and keeps the flag for another try while a wipe still fails.
-const { calls, kvClear, wipeThumbnailStore, wipeSwClient } = vi.hoisted(() => {
+const { calls, kvClear, wipeThumbnailStore, wipeArtStore, wipeSwClient } = vi.hoisted(() => {
 	const calls: string[] = []
 
 	return {
@@ -14,6 +14,11 @@ const { calls, kvClear, wipeThumbnailStore, wipeSwClient } = vi.hoisted(() => {
 		}),
 		wipeThumbnailStore: vi.fn(() => {
 			calls.push("wipeThumbnails")
+
+			return Promise.resolve()
+		}),
+		wipeArtStore: vi.fn(() => {
+			calls.push("wipeArt")
 
 			return Promise.resolve()
 		}),
@@ -42,6 +47,7 @@ vi.mock("@/lib/sdk/session", () => ({
 vi.mock("@/queries/client", () => ({ queryClient: {} }))
 vi.mock("@/queries/persist", () => ({ restorePersistedQueries: vi.fn(), purgePersistedQueries: () => Promise.resolve() }))
 vi.mock("@/features/drive/lib/thumbCache", () => ({ wipeThumbnailStore }))
+vi.mock("@/features/videos/lib/artStore", () => ({ wipeArtStore }))
 vi.mock("@/features/drive/lib/saveDownload", () => ({ wipeSwClient }))
 
 import { bootSdk } from "@/lib/sdk/boot"
@@ -67,8 +73,8 @@ describe("bootSdk after a sign-out cut short", () => {
 
 		await bootSdk()
 
-		expect(calls.slice(0, 3).sort()).toEqual(["kvClear", "wipeServiceWorker", "wipeThumbnails"])
-		expect(calls[3]).toBe("resumeSession")
+		expect(calls.slice(0, 4).sort()).toEqual(["kvClear", "wipeArt", "wipeServiceWorker", "wipeThumbnails"])
+		expect(calls[4]).toBe("resumeSession")
 		expect(readSignOutPending()).toBe(false)
 		expect(useBootStore.getState().phase).toBe("ready")
 	})
@@ -81,6 +87,15 @@ describe("bootSdk after a sign-out cut short", () => {
 
 		expect(readSignOutPending()).toBe(true)
 		expect(useBootStore.getState().phase).toBe("ready")
+	})
+
+	it("keeps the flag while the Videos artwork wipe still fails", async () => {
+		writeSignOutPending(true)
+		wipeArtStore.mockRejectedValueOnce(new Error("entry locked"))
+
+		await bootSdk()
+
+		expect(readSignOutPending()).toBe(true)
 	})
 
 	it("wipes nothing when no sign-out is pending", async () => {

@@ -68,6 +68,11 @@ export class BlockSource {
 		return this.reads
 	}
 
+	// Block downloads allowed so far, raised by allowBlockReads.
+	public get blockBudget(): number {
+		return this.maxBlockReads
+	}
+
 	// Raises the budget to `total` downloads once a parser knows how much of the file it has to walk
 	// (an MP4 `moov`'s size); never lowers it.
 	public allowBlockReads(total: number): void {

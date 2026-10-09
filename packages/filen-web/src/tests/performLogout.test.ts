@@ -22,7 +22,9 @@ const {
 	withHistoryWritesHeld,
 	socketStop,
 	toastWarning,
-	wipeThumbnailStore
+	wipeThumbnailStore,
+	wipeArtStore,
+	resetVideoSession
 } = vi.hoisted(() => {
 	const calls: string[] = []
 	const record =
@@ -52,7 +54,9 @@ const {
 		}),
 		socketStop: vi.fn(record("socketBridge.stop", () => Promise.resolve())),
 		toastWarning: vi.fn(),
-		wipeThumbnailStore: vi.fn(() => Promise.resolve())
+		wipeThumbnailStore: vi.fn(() => Promise.resolve()),
+		wipeArtStore: vi.fn(() => Promise.resolve()),
+		resetVideoSession: vi.fn(record("resetVideoSession", () => undefined))
 	}
 })
 
@@ -67,6 +71,7 @@ const TEARDOWN_STEPS = [
 	"detachUnreadBadges",
 	"disposeAudioEngine",
 	"releaseHeicWorker",
+	"resetVideoSession",
 	"resetConversationHistory",
 	"socketBridge.stop"
 ]
@@ -83,6 +88,8 @@ vi.mock("@/features/drive/lib/saveDownload", () => ({ wipeSwClient: vi.fn() }))
 vi.mock("@/lib/sdk/session", () => ({ clearSession: vi.fn(), broadcastAuth: vi.fn() }))
 vi.mock("@/lib/storage/adapter", () => ({ kvClear: vi.fn() }))
 vi.mock("@/features/drive/lib/thumbCache", () => ({ wipeThumbnailStore, readThumbnailBlob: vi.fn(), deleteThumbnail: vi.fn() }))
+vi.mock("@/features/videos/lib/artStore", () => ({ wipeArtStore }))
+vi.mock("@/features/videos/lib/session", () => ({ resetVideoSession }))
 vi.mock("@/features/audio/lib/audioEngine", () => ({ disposeAudioEngine }))
 vi.mock("@/features/assistant/store/conversationHistory", () => ({ resetConversationHistory, withHistoryWritesHeld }))
 vi.mock("@/features/assistant/store/assistantSession", () => ({ shutdownAssistant }))
@@ -140,10 +147,20 @@ describe("performLogout", () => {
 		expect(kvClear).toHaveBeenCalledTimes(1)
 	})
 
-	it("hands the wipe the OPFS thumbnail-cache wipe", async () => {
+	it("hands the wipe both OPFS image caches: drive thumbnails and Videos artwork", async () => {
+		await performLogout()
+		await runLogout.mock.calls[0]?.[0].wipeThumbnails()
+
+		expect(wipeThumbnailStore).toHaveBeenCalledTimes(1)
+		expect(wipeArtStore).toHaveBeenCalledTimes(1)
+	})
+
+	it("still wipes the drive thumbnails and reports the failure when the artwork wipe fails", async () => {
+		wipeArtStore.mockRejectedValueOnce(new Error("entry locked"))
 		await performLogout()
 
-		expect(runLogout.mock.calls[0]?.[0].wipeThumbnails).toBe(wipeThumbnailStore)
+		await expect(runLogout.mock.calls[0]?.[0].wipeThumbnails()).rejects.toThrow("entry locked")
+		expect(wipeThumbnailStore).toHaveBeenCalledTimes(1)
 	})
 
 	it("a user-initiated sign-out is genuinely cancelled at the unsaved-changes prompt", async () => {

@@ -96,10 +96,33 @@
 			"record": {
 				"v": 1,
 				"container": "webm",
-				"durationSec": null,
-				"index": null,
-				"video": null,
-				"audio": [],
+				"durationSec": 10.008,
+				"index": "cues",
+				"video": {
+					"codec": "av1",
+					"fourcc": "av01",
+					"codecString": "av01.0.05M.08",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 8,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "opus",
+						"codecString": "opus",
+						"ch": 1,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": false,
+						"forced": false,
+						"commentary": false
+					}
+				],
 				"subs": [],
 				"chapters": [],
 				"cover": null,

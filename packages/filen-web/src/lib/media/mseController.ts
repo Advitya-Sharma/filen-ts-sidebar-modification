@@ -30,6 +30,7 @@ import {
 } from "@/lib/media/mseController.logic"
 import type { ProbeIndex } from "@/lib/media/probe/types"
 import { rangePortReader } from "@/lib/media/rangePort"
+import { rangeReads } from "@/lib/media/rangeReads"
 import {
 	AUDIO_TARGET_CODECS,
 	isSuperseded,
@@ -557,6 +558,7 @@ class MseRemuxSession implements RemuxSession {
 	private restarts = 0
 	private endedStream = false
 	private disposed = false
+	private releaseReads: (() => void) | null = null
 	private readonly elementListeners: [string, () => void][] = []
 
 	public constructor(params: {
@@ -594,6 +596,10 @@ class MseRemuxSession implements RemuxSession {
 		}
 
 		this.element = element
+		// The session reads ahead even while paused, so it keeps playback's claim on range reads until disposed.
+		if (!this.disposed) {
+			this.releaseReads ??= rangeReads.holdPlayback()
+		}
 		// Required before attaching a ManagedMediaSource (its sourceopen waits on it otherwise), and on
 		// every path: a remote player could reach neither this page's MediaSource nor its decryption.
 		element.disableRemotePlayback = true
@@ -696,6 +702,8 @@ class MseRemuxSession implements RemuxSession {
 
 		this.disposed = true
 		this.disposedSignal.reject(new DisposedError())
+		this.releaseReads?.()
+		this.releaseReads = null
 		clearInterval(this.stallTimer)
 		this.quotaWait?.cancel()
 		this.quotaWait = null

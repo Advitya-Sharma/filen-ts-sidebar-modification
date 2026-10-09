@@ -126,7 +126,15 @@ import { narrowItem } from "@/features/drive/lib/item"
 import { isPhotoItem } from "@/features/photos/lib/predicate"
 import { FLAT_LISTING_KINDS, type FlatListingKind } from "@/features/drive/lib/flatListing"
 import { THUMB_CACHE_CAP, THUMB_MAX_DIM, THUMB_SDK_LOSSY_QUALITY, type ThumbnailCopy } from "@/features/drive/lib/thumbnails.logic"
-import { copyThumbs, removeStaleThumbGenerations, sweepThumbs, writeThumb } from "@/workers/thumbStore"
+import {
+	DRIVE_THUMB_STORE,
+	copyThumbs,
+	removeStaleThumbGenerations,
+	storeCapSweeper,
+	writeStoreEntry,
+	writeThumb
+} from "@/workers/thumbStore"
+import { ART_CACHE_CAP, ART_STORE } from "@/features/videos/lib/artStore.logic"
 import {
 	createSearchEngine,
 	type QueryTiming,
@@ -145,6 +153,8 @@ import {
 } from "@/workers/audioMetadata"
 import { createMemorySink, toRawPreviewResult, type RawPreviewResult } from "@/features/preview/lib/rawPreview.logic"
 import { probeSource, probeVideo } from "@/lib/media/probe/probe"
+import { EarlyCancels } from "@/workers/earlyCancels"
+import { imageSniffStream } from "@/lib/media/probe/imageSniff"
 import { exposeRangePort } from "@/lib/media/rangePort"
 import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
 import {
@@ -464,6 +474,27 @@ interface PreviewProgress {
 // The whole-buffer reads' progress under the same token, for cancelPreviewDownloadIfEarly.
 const previewProgress = new Map<string, PreviewProgress>()
 
+const earlyCancels = new EarlyCancels()
+
+// Every preview-token read registers through here, so one cancelled before it got this far starts aborted.
+function registerPreviewAbort(previewToken: string, controller: AbortController): void {
+	previewAborts.set(previewToken, controller)
+
+	if (earlyCancels.take(previewToken)) {
+		controller.abort()
+	}
+}
+
+function abortPreview(previewToken: string): void {
+	const controller = previewAborts.get(previewToken)
+
+	if (controller === undefined) {
+		earlyCancels.add(previewToken)
+	} else {
+		controller.abort()
+	}
+}
+
 // A RAW's embedded preview, collected in this worker and handed back as one Blob — structured-cloning
 // a Blob hands over a handle, not a byte copy. Registered under the caller's preview token like the
 // whole-buffer reads, so cancelPreviewDownload aborts it through the SDK's own ManagedFuture.
@@ -472,7 +503,7 @@ async function writeRawPreview(
 	write: (params: { writer: WritableStream<Uint8Array>; managedFuture: ManagedFuture }) => Promise<EmbeddedPreviewResult>
 ): Promise<RawPreviewResult> {
 	const controller = new AbortController()
-	previewAborts.set(previewToken, controller)
+	registerPreviewAbort(previewToken, controller)
 	const { writer, chunks } = createMemorySink()
 	try {
 		return toRawPreviewResult(await write({ writer, managedFuture: { abortSignal: controller.signal } }), chunks)
@@ -481,64 +512,34 @@ async function writeRawPreview(
 	}
 }
 
-// Latched by armThumbSweep below, never reset.
-let thumbsSweptThisSession = false
-// Thumbnails written since the last cap sweep, and whether one is running.
-let thumbWritesSinceSweep = 0
-let thumbSweepRunning = false
-
 // A session that keeps scrolling new thumbnails in (Photos) would otherwise grow the cache past its cap
 // until the next session; sign-out then deletes every file one by one inside the browser, so the cap is
 // also what bounds how long signing out takes. About a thousand writes is ~1/10 of what the cap holds.
 const THUMB_WRITES_PER_SWEEP = 1024
 
-function sweepThumbCap(): void {
-	if (thumbSweepRunning) {
-		return
-	}
-
-	thumbSweepRunning = true
-	thumbWritesSinceSweep = 0
-
-	void sweepThumbs(THUMB_CACHE_CAP)
-		.catch((e: unknown) => {
-			log.warn("sdk.worker", "sweepThumbs failed", e)
-		})
-		.finally(() => {
-			thumbSweepRunning = false
-		})
-}
-
-function noteThumbWrites(count: number): void {
-	thumbWritesSinceSweep += count
-
-	if (thumbWritesSinceSweep >= THUMB_WRITES_PER_SWEEP) {
-		sweepThumbCap()
-	}
-}
-
-// Fires sweepThumbs and removeStaleThumbGenerations once per worker lifetime (the cap sweep again every
-// THUMB_WRITES_PER_SWEEP writes, see noteThumbWrites) — a long-lived
-// tab's OPFS thumbnail cache still gets cap-enforced and stale generations still get reclaimed without
-// every generation paying for a listing pass. Called from storeThumbnail (every persist) AND from both
-// SDK thumbnail ops, because those two can settle WITHOUT producing bytes: an "unsupported" /
-// "overBudget" / "corrupt" verdict persists nothing, so a session whose only thumbnail work is
-// settled-verdict misses would never reach storeThumbnail and would leave the cap unenforced and the
-// stale generations unreclaimed for the tab's whole lifetime. Fire-and-forget, both passes: eviction
-// and stale-generation cleanup are housekeeping, never something a thumbnail request should wait on.
-function armThumbSweep(): void {
-	if (thumbsSweptThisSession) {
-		return
-	}
-
-	thumbsSweptThisSession = true
-
+// Sweeps the thumbnail cache and removes stale generations once per worker lifetime (the cap sweep again
+// every THUMB_WRITES_PER_SWEEP writes) — a long-lived tab's OPFS thumbnail cache still gets cap-enforced
+// and stale generations still get reclaimed without every generation paying for a listing pass. Armed
+// from storeThumbnail (every persist) AND from both SDK thumbnail ops, because those two can settle
+// WITHOUT producing bytes: an "unsupported" / "overBudget" / "corrupt" verdict persists nothing, so a
+// session whose only thumbnail work is settled-verdict misses would never reach storeThumbnail and would
+// leave the cap unenforced and the stale generations unreclaimed for the tab's whole lifetime.
+const thumbSweeper = storeCapSweeper(DRIVE_THUMB_STORE, THUMB_CACHE_CAP, THUMB_WRITES_PER_SWEEP, () => {
 	void removeStaleThumbGenerations().catch((e: unknown) => {
 		log.warn("sdk.worker", "removeStaleThumbGenerations failed", e)
 	})
+})
 
-	sweepThumbCap()
+function armThumbSweep(): void {
+	thumbSweeper.arm()
 }
+
+function noteThumbWrites(count: number): void {
+	thumbSweeper.noteWrites(count)
+}
+
+// The Videos artwork store: its own directory and cap, never drive's thumbnail tree.
+const artSweeper = storeCapSweeper(ART_STORE, ART_CACHE_CAP, THUMB_WRITES_PER_SWEEP)
 
 // One range of a file's decrypted bytes, written straight into a buffer of the known size. `progress`
 // tracks how much has landed, for a caller that decides on it whether a cancel is still worth it.
@@ -587,7 +588,7 @@ async function runAudioMetadata(
 	run: (deps: AudioMetadataDeps) => Promise<AudioMetadataResult>
 ): Promise<AudioMetadataResult> {
 	const controller = new AbortController()
-	previewAborts.set(previewToken, controller)
+	registerPreviewAbort(previewToken, controller)
 	try {
 		const result = await run({
 			signal: controller.signal,
@@ -1571,7 +1572,7 @@ const api = {
 		const c = requireClient()
 		const controller = new AbortController()
 		const progress: PreviewProgress = { received: 0, total: Number(file.size) }
-		previewAborts.set(previewToken, controller)
+		registerPreviewAbort(previewToken, controller)
 		previewProgress.set(previewToken, progress)
 		try {
 			const bytes = await readFileRange(c, file, 0, progress.total, controller.signal, progress)
@@ -1581,10 +1582,10 @@ const api = {
 			previewProgress.delete(previewToken)
 		}
 	},
-	// Aborts an in-flight preview download by its token; a no-op once the download has settled (the
-	// controller is already evicted). Mirrors cancelTransfer.
+	// Aborts an in-flight preview download by its token, or the one about to register under it; a no-op
+	// once the download has settled. Mirrors cancelTransfer.
 	cancelPreviewDownload(previewToken: string): void {
-		previewAborts.get(previewToken)?.abort()
+		abortPreview(previewToken)
 	},
 	// cancelPreviewDownload for a caller that would rather finish a download already past `maxFraction`
 	// of its bytes than throw them away (a thumbnail whose cell scrolled off: its result is cached for
@@ -1596,7 +1597,18 @@ const api = {
 			return
 		}
 
-		previewAborts.get(previewToken)?.abort()
+		abortPreview(previewToken)
+	},
+	// cancelPreviewDownload for a read that is within `blocksLeft` of the end of its current budget,
+	// which finishes instead (a probe whose record is a block away).
+	cancelPreviewDownloadUnlessFinishing(previewToken: string, blocksLeft: number): void {
+		const progress = previewProgress.get(previewToken)
+
+		if (progress !== undefined && progress.total - progress.received <= blocksLeft) {
+			return
+		}
+
+		abortPreview(previewToken)
 	},
 	// An archive entry's whole buffer for the preview (entryBuffer), transferred back like downloadFileBytes.
 	// Cancelled by its token; only a change of phase crosses, for the waiting state.
@@ -1612,7 +1624,7 @@ const api = {
 		const { writer, take } = entryBuffer(size)
 		let phase: EntryDownloadPhase | null = null
 
-		previewAborts.set(previewToken, controller)
+		registerPreviewAbort(previewToken, controller)
 		try {
 			const checked = settleEntryReport(
 				await c.downloadArchiveEntry(
@@ -1836,7 +1848,7 @@ const api = {
 	async downloadLinkedFileBytesAnon(file: AnyFile, previewToken: string): Promise<Uint8Array> {
 		return withLinkedUnauth(async unauth => {
 			const controller = new AbortController()
-			previewAborts.set(previewToken, controller)
+			registerPreviewAbort(previewToken, controller)
 			try {
 				const bytes = await readFileRange(unauth, file, 0, Number(file.size), controller.signal)
 				return Comlink.transfer(bytes, [bytes.buffer])
@@ -2247,20 +2259,99 @@ const api = {
 	// so only the small record crosses back. Null for a file that is no MP4/MOV/Matroska/WebM; a failed
 	// or cancelled download throws. Cancelled through cancelPreviewDownload(previewToken), like the other
 	// preview reads. The uuid keeps the call shape of readAudioMetadata, whose caller keys by it too.
+	// Its progress counts block downloads against the walk's current budget, which the walk raises as it
+	// learns the header's size, for cancelPreviewDownloadUnlessFinishing.
 	async readVideoProbe(file: AnyFile, _uuid: string, tier: ProbeTier, previewToken: string): Promise<VideoProbe | null> {
 		const c = requireClient()
 		const controller = new AbortController()
-		previewAborts.set(previewToken, controller)
+		const source = probeSource(Number(file.size), (start, end) => readFileRange(c, file, start, end, controller.signal), tier)
+		const progress: PreviewProgress = {
+			get received() {
+				return source.blockReads
+			},
+			get total() {
+				return source.blockBudget
+			}
+		}
+		registerPreviewAbort(previewToken, controller)
+		previewProgress.set(previewToken, progress)
 		try {
-			const source = probeSource(Number(file.size), (start, end) => readFileRange(c, file, start, end, controller.signal), tier)
-
 			return await probeVideo(source, tier)
 		} finally {
 			// Only its own entry: the caller may have reused the token for a read registered since.
 			if (previewAborts.get(previewToken) === controller) {
 				previewAborts.delete(previewToken)
 			}
+
+			if (previewProgress.get(previewToken) === progress) {
+				previewProgress.delete(previewToken)
+			}
 		}
+	},
+	// An image inside or as a file — an embedded cover's byte range (a probe's `cover`) or a whole sidecar
+	// image — made into a thumbnail-sized one: only the range is downloaded, streamed into the SDK's
+	// decoder through a sniff of its first bytes, so the full-size image never reaches JS. "notImage" when
+	// those bytes are no image. Cancelled through cancelPreviewDownload(previewToken), even before it starts.
+	async makeArtFromRange(
+		file: AnyFile,
+		range: { offset: number; size: number },
+		size: { maxWidth: number; maxHeight: number; lossyQuality: number },
+		previewToken: string
+	): Promise<SdkThumbnailResult | { type: "notImage" }> {
+		const c = requireClient()
+		const controller = new AbortController()
+		const sniff = imageSniffStream()
+		const managedFuture = { abortSignal: controller.signal }
+		const failure: { download: unknown } = { download: null }
+
+		registerPreviewAbort(previewToken, controller)
+
+		// A failed download stops the decoder, which would otherwise wait on bytes that never come.
+		const download = c
+			.downloadFileToWriter({
+				file,
+				writer: sniff.stream.writable,
+				start: BigInt(range.offset),
+				end: BigInt(range.offset + range.size),
+				managedFuture
+			})
+			.catch((error: unknown) => {
+				failure.download = error
+				controller.abort()
+			})
+
+		try {
+			return asThumbnailResult(
+				await c.makeThumbnailFromStream({
+					reader: sniff.stream.readable,
+					maxWidth: size.maxWidth,
+					maxHeight: size.maxHeight,
+					knownSize: range.size,
+					lossyQuality: size.lossyQuality,
+					managedFuture
+				})
+			)
+		} catch (error) {
+			if (sniff.notImage()) {
+				return { type: "notImage" }
+			}
+
+			throw failure.download ?? error
+		} finally {
+			// A decoder that stopped reading early must not leave the download blocked on its writes.
+			controller.abort()
+			await download
+
+			if (previewAborts.get(previewToken) === controller) {
+				previewAborts.delete(previewToken)
+			}
+		}
+	},
+	// Persists an artwork image (features/videos/lib/artwork.ts) in the Videos art store, under its own cap.
+	async storeArt(key: string, bytes: Uint8Array): Promise<void> {
+		artSweeper.arm()
+		artSweeper.noteWrites(1)
+		await writeStoreEntry(ART_STORE, key, bytes)
 	},
 	// ── Range port ───────────────────────────────────────────────────────────
 	// Serves `file`'s decrypted byte ranges on `port` (lib/media/rangePort) for a reader in another
@@ -2270,7 +2361,7 @@ const api = {
 		const c = requireClient()
 		const controller = new AbortController()
 
-		previewAborts.set(previewToken, controller)
+		registerPreviewAbort(previewToken, controller)
 		controller.signal.addEventListener(
 			"abort",
 			() => {

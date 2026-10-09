@@ -49,3 +49,9 @@ export function isNotFoundError(e: unknown): boolean {
 export function isLockConflictError(e: unknown): boolean {
 	return e instanceof DOMException && e.name === "NoModificationAllowedError"
 }
+
+// A flat OPFS directory of small files named `<key><ext>`, with the directory segments it lives under.
+export interface OpfsBlobStore {
+	dir: readonly string[]
+	ext: string
+}

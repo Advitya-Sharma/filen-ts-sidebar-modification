@@ -2,7 +2,7 @@ import { BlockSource, OutOfFileReadError, ReadBudgetError, type ReadRange } from
 import { MalformedError, UnsupportedContainerError, ascii, readBytes, uint32 } from "@/lib/media/probe/bytes"
 import { LEADING_BOXES, walkIsobmff } from "@/lib/media/probe/isobmff"
 import { EBML_ID, walkMatroska } from "@/lib/media/probe/matroska"
-import type { ParsedContainer, ProbeTier, ProbeVideo, VideoProbe } from "@/lib/media/probe/types"
+import type { ParsedContainer, ParsedTrack, ProbeTier, ProbeVideo, VideoProbe } from "@/lib/media/probe/types"
 
 // The container probe: which tier reads how much, and the record each tier yields.
 
@@ -24,10 +24,16 @@ export function probeSource(size: number, readRange: ReadRange, tier: ProbeTier)
 	return new BlockSource(size, readRange, { maxBlockReads: initialBlockReads(tier) })
 }
 
+export interface WalkOptions {
+	// Also locate what finding the picture track's keyframes takes (an MP4's sample tables, the Matroska
+	// Cues), at the cost of the headers that takes; nothing in the probe record changes.
+	keyframes?: boolean
+}
+
 // The container's raw walk, or null when the file is no container this reads. The first 16 bytes decide,
 // so anything else costs one block. A walk that runs out of budget or into a malformed structure
 // returns what it found, flagged partial; failed downloads throw.
-export async function walkContainer(source: BlockSource, tier: ProbeTier): Promise<ParsedContainer | null> {
+export async function walkContainer(source: BlockSource, tier: ProbeTier, options: WalkOptions = {}): Promise<ParsedContainer | null> {
 	if (source.size < 8) {
 		return null
 	}
@@ -51,7 +57,9 @@ export async function walkContainer(source: BlockSource, tier: ProbeTier): Promi
 	}
 
 	try {
-		await (matroska ? walkMatroska(source, tier, result) : walkIsobmff(source, tier, result))
+		const keyframes = options.keyframes === true
+
+		await (matroska ? walkMatroska(source, tier, result, keyframes) : walkIsobmff(source, tier, result, keyframes))
 	} catch (error) {
 		if (error instanceof UnsupportedContainerError) {
 			return null
@@ -68,39 +76,30 @@ export async function walkContainer(source: BlockSource, tier: ProbeTier): Promi
 	return result
 }
 
-// The probe record for one tier. A cover probe fills only `container` and `cover`.
+// The picture: the first enabled video track; a disabled one only stands in when nothing else does.
+export function pictureTrack(parsed: ParsedContainer): Extract<ParsedTrack, { kind: "video" }> | null {
+	let picture: Extract<ParsedTrack, { kind: "video" }> | null = null
+
+	for (const track of parsed.tracks) {
+		if (track.kind === "video" && (picture === null || (track.enabled && !picture.enabled))) {
+			picture = track
+		}
+	}
+
+	return picture
+}
+
+// The probe record for one tier. A cover probe holds the card's fields too: it walks the same headers.
 function toRecord(parsed: ParsedContainer, tier: ProbeTier): VideoProbe {
-	// The first enabled video track is the picture; a disabled one only stands in when nothing else does.
-	let video: ProbeVideo | null = null
-	let videoEnabled = false
+	const video: ProbeVideo | null = pictureTrack(parsed)?.video ?? null
 	const audio: VideoProbe["audio"] = []
 	const subs: VideoProbe["subs"] = []
 
 	for (const track of parsed.tracks) {
-		if (track.kind === "video") {
-			if (video === null || (track.enabled && !videoEnabled)) {
-				video = track.video
-				videoEnabled = track.enabled
-			}
-		} else if (track.kind === "audio" && audio.length < MAX_TRACKS_PER_KIND) {
+		if (track.kind === "audio" && audio.length < MAX_TRACKS_PER_KIND) {
 			audio.push(track.audio)
 		} else if (track.kind === "subtitle" && subs.length < MAX_TRACKS_PER_KIND) {
 			subs.push(track.sub)
-		}
-	}
-
-	if (tier === "cover") {
-		return {
-			v: 1,
-			container: parsed.container,
-			durationSec: null,
-			index: null,
-			video: null,
-			audio: [],
-			subs: [],
-			chapters: [],
-			cover: parsed.cover,
-			partial: parsed.partial
 		}
 	}
 
@@ -113,7 +112,7 @@ function toRecord(parsed: ParsedContainer, tier: ProbeTier): VideoProbe {
 		audio,
 		subs,
 		chapters: tier === "full" ? parsed.chapters : [],
-		cover: tier === "full" ? parsed.cover : null,
+		cover: tier === "card" ? null : parsed.cover,
 		partial: parsed.partial || !parsed.tracksFound
 	}
 }

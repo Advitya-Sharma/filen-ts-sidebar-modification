@@ -64,8 +64,8 @@ export async function runLogout(deps: LogoutDeps): Promise<void> {
 
 			return session && rows
 		})(),
-		// The OPFS thumbnail cache (drive thumbnails, audio cover thumbnails) holds decrypted derivatives of
-		// this account's files, which the kv wipe does not reach.
+		// The OPFS image caches (drive and audio cover thumbnails, Videos artwork) hold decrypted derivatives
+		// of this account's files, which the kv wipe does not reach.
 		phase("wipe-thumbnails", deps.wipeThumbnails),
 		// The service worker keeps its own reconstructed Client (decrypted key material) that no store
 		// wipe reaches — signal it to drop that + any pending downloads before the reload, so no secret

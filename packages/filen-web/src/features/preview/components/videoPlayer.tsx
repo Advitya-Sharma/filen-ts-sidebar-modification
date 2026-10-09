@@ -40,6 +40,7 @@ import { getVideoPosition, setVideoPosition } from "@/features/preview/lib/video
 import { CODECS, type CodecId } from "@/features/preview/lib/containerTracks"
 import { usePlaybackGap } from "@/features/preview/hooks/usePlaybackGap"
 import { useReleaseOnUnmount } from "@/lib/media/useReleaseOnUnmount"
+import { useHoldReadsWhilePlaying } from "@/lib/media/useHoldReadsWhilePlaying"
 import { MediaFailureState } from "@/features/preview/components/mediaFailureState"
 import { PreviewDownloadButton } from "@/features/preview/components/previewErrorState"
 
@@ -152,6 +153,7 @@ export function VideoPlayer({
 	const visible = controlsVisible({ paused, waiting: loading, pointerActive, keyboardFocus, menuOpen, scrubbing })
 
 	useSyncedMediaVolume(video)
+	useHoldReadsWhilePlaying(video)
 	useVideoContinuity(video, positionKey)
 	// After useVideoContinuity, whose cleanup reads the position this empties.
 	useReleaseOnUnmount(video)

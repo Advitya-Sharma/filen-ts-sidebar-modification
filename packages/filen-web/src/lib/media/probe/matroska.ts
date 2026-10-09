@@ -102,6 +102,10 @@ interface Walk {
 	visitedSeekHeads: Set<number>
 	resyncedBlocks: Set<number>
 	elements: number
+	// Capture what finding keyframes takes (walkContainer's `keyframes`).
+	keyframes: boolean
+	timestampScale: number
+	cuesAt: number | null
 }
 
 // The elements each tier reads; Info and Tracks are never skipped on the SeekHead's say-so.
@@ -112,7 +116,7 @@ function needs(tier: ProbeTier): number[] {
 		case "full":
 			return [INFO_ID, TRACKS_ID, CHAPTERS_ID, ATTACHMENTS_ID]
 		case "cover":
-			return [ATTACHMENTS_ID]
+			return [INFO_ID, TRACKS_ID, ATTACHMENTS_ID]
 	}
 }
 
@@ -188,6 +192,8 @@ function parseInfo(walk: Walk, bytes: Uint8Array): void {
 		}
 	}
 
+	walk.timestampScale = scale
+
 	if (duration !== null && duration > 0 && scale > 0) {
 		walk.result.durationSec = seconds((duration * scale) / 1e9)
 	}
@@ -210,6 +216,8 @@ interface RawTrack {
 	codecPrivate: Uint8Array | null
 	// Set when CodecPrivate is compressed by a ContentEncoding this reader cannot undo.
 	privateUnreadable: boolean
+	// A ContentEncoding applies to the frames themselves.
+	encodedFrames: boolean
 	compression: { algorithm: number; settings: Uint8Array } | null
 	pixelWidth: number
 	pixelHeight: number
@@ -321,6 +329,10 @@ function parseEncodings(bytes: Uint8Array, encodings: EbmlElement, raw: RawTrack
 			}
 		}
 
+		if ((scope & 1) !== 0) {
+			raw.encodedFrames = true
+		}
+
 		if ((scope & 2) === 0) {
 			continue
 		}
@@ -348,6 +360,7 @@ function parseTrackEntry(bytes: Uint8Array, entry: EbmlElement, context: EbmlCon
 		codecId: "",
 		codecPrivate: null,
 		privateUnreadable: false,
+		encodedFrames: false,
 		compression: null,
 		pixelWidth: 0,
 		pixelHeight: 0,
@@ -661,8 +674,12 @@ export function matroskaTrackCodecs(bytes: Uint8Array): { kind: "audio" | "video
 	return tracks
 }
 
+// The CodecPrivate a decoder is configured with, for the codecs that have one (VP8/VP9 have none).
+const DESCRIBED_CODECS = new Set<MediaCodec>(["h264", "hevc", "av1"])
+
 // The tracks of a Tracks element's payload, in file order. TrackType 1 is video, 2 audio, 17 subtitles.
-async function parseTracksPayload(bytes: Uint8Array, context: EbmlContext): Promise<ParsedTrack[]> {
+// `keyframes` adds what decoding a picture track's keyframes takes.
+async function parseTracksPayload(bytes: Uint8Array, context: EbmlContext, keyframes: boolean): Promise<ParsedTrack[]> {
 	const tracks: ParsedTrack[] = []
 	const budget: InflateBudget = { remaining: MAX_INFLATED_PER_WALK }
 
@@ -679,7 +696,20 @@ async function parseTracksPayload(bytes: Uint8Array, context: EbmlContext): Prom
 		}
 
 		if (raw.type === 1) {
-			tracks.push(videoTrack(raw, await codecPrivateOf(raw, budget)))
+			const codecPrivate = await codecPrivateOf(raw, budget)
+			const track = videoTrack(raw, codecPrivate)
+			const codec = matroskaCodec(raw.codecId)
+
+			if (keyframes && track.kind === "video") {
+				track.decode = {
+					track: raw.number,
+					description: codec !== null && DESCRIBED_CODECS.has(codec) ? codecPrivate : null,
+					encodedFrames: raw.encodedFrames,
+					tables: null
+				}
+			}
+
+			tracks.push(track)
 		} else if (raw.type === 2) {
 			tracks.push(audioTrack(raw, await codecPrivateOf(raw, budget)))
 		} else if (raw.type === 17) {
@@ -971,6 +1001,7 @@ async function visit(walk: Walk, element: EbmlElement): Promise<void> {
 		}
 		case CUES_ID:
 			walk.result.index = "cues"
+			walk.cuesAt ??= element.start
 
 			return
 		case INFO_ID:
@@ -992,7 +1023,7 @@ async function visit(walk: Walk, element: EbmlElement): Promise<void> {
 			if (element.id === INFO_ID) {
 				parseInfo(walk, bytes)
 			} else if (element.id === TRACKS_ID) {
-				walk.result.tracks = await parseTracksPayload(bytes, walk.context)
+				walk.result.tracks = await parseTracksPayload(bytes, walk.context, walk.keyframes)
 				walk.result.tracksFound = true
 			} else {
 				walk.result.chapters = parseChaptersPayload(bytes, walk.context)
@@ -1133,7 +1164,7 @@ async function jump(walk: Walk, at: number, expected: number): Promise<void> {
 
 // EBML header (DocType matroska or webm), then the Segment. Throws ReadBudgetError and MalformedError
 // with whatever was found already in `result`.
-export async function walkMatroska(source: BlockSource, tier: ProbeTier, result: ParsedContainer): Promise<void> {
+export async function walkMatroska(source: BlockSource, tier: ProbeTier, result: ParsedContainer, keyframes = false): Promise<void> {
 	const context: EbmlContext = { malformed: false }
 	const head = await readBytes(source, 0, Math.min(12, source.size))
 	const ebml = parseElementHeader(head, 0)
@@ -1184,7 +1215,10 @@ export async function walkMatroska(source: BlockSource, tier: ProbeTier, result:
 		visited: new Set(),
 		visitedSeekHeads: new Set(),
 		resyncedBlocks: new Set(),
-		elements: 0
+		elements: 0,
+		keyframes,
+		timestampScale: 1_000_000,
+		cuesAt: null
 	}
 
 	try {
@@ -1194,10 +1228,14 @@ export async function walkMatroska(source: BlockSource, tier: ProbeTier, result:
 		// No Cues entry in a SeekHead that does not defer to another one means the file has none.
 		const deferred = (walk.seeks.get(SEEK_HEAD_ID) ?? []).some(at => !walk.visitedSeekHeads.has(at))
 
-		if (result.index === null && walk.hasSeekHead && tier !== "cover") {
+		if (result.index === null && walk.hasSeekHead) {
 			result.index = walk.seeks.has(CUES_ID) ? "cues" : deferred ? null : "none"
 		}
 
 		result.partial ||= context.malformed
+
+		if (keyframes) {
+			result.cues = { segmentStart, timestampScale: walk.timestampScale, at: walk.cuesAt ?? walk.seeks.get(CUES_ID)?.[0] ?? null }
+		}
 	}
 }

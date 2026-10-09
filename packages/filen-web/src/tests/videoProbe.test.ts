@@ -188,7 +188,7 @@ describe("probeVideo — MP4", () => {
 		})
 	})
 
-	it("leaves names, chapters and the cover to the full tier, and only the cover to the cover tier", async () => {
+	it("leaves names and chapters to the full tier, and gives the cover tier the card's fields plus the cover", async () => {
 		const file = concat(
 			FTYP,
 			box(
@@ -204,7 +204,7 @@ describe("probeVideo — MP4", () => {
 		expect(card?.chapters).toEqual([])
 		expect(card?.cover).toBeNull()
 		expect(card?.video?.codecString).toBe("avc1.64001f")
-		expect(cover).toMatchObject({ video: null, audio: [], durationSec: null, cover: { mime: "image/jpeg", size: 2 } })
+		expect(cover).toMatchObject({ video: card?.video, durationSec: 5, chapters: [], cover: { mime: "image/jpeg", size: 2 } })
 	})
 
 	it("drops a QuickTime chapter text track from the subtitles", async () => {

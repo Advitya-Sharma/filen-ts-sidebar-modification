@@ -1,6 +1,7 @@
 import { onlineManager } from "@tanstack/react-query"
 import { InFlight } from "@filen/shared"
 import { sdkApi } from "@/lib/sdk/client"
+import { rangeReads } from "@/lib/media/rangeReads"
 import { log } from "@/lib/log"
 import { defaultObjectUrlFns, type ObjectUrlFns } from "@/lib/objectUrl"
 import { readThumbnailBlob } from "@/features/drive/lib/thumbCache"
@@ -346,8 +347,14 @@ export class TrackMetadataService {
 	}
 }
 
+function firstInLine(): number {
+	return 0
+}
+
 export const trackMetadata = new TrackMetadataService({
-	readRemote: (track, token) => sdkApi.readAudioMetadata(track.file, track.uuid, track.mime, token),
+	// Downloads share the media features' range-read cap; a local parse reads nothing and skips it.
+	readRemote: (track, token) =>
+		rangeReads.run<AudioMetadataResult>(firstInLine, () => sdkApi.readAudioMetadata(track.file, track.uuid, track.mime, token)),
 	readLocal: (blob, uuid, token) => sdkApi.readAudioMetadataFromBlob(blob, uuid, token),
 	cancelRead: token => {
 		void sdkApi.cancelPreviewDownload(token)

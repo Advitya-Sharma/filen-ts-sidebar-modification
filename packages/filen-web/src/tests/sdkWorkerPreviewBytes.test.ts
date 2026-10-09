@@ -28,6 +28,7 @@ const { exposed, fakeClient, fakeUnauth } = vi.hoisted(() => {
 			getUnauthed: () => fakeUnauth,
 			downloadFileToWriter: vi.fn<(params: WriterParams) => Promise<void>>(),
 			downloadFile: vi.fn(),
+			makeThumbnailFromStream: vi.fn<(params: { reader: ReadableStream<Uint8Array>; knownSize: number }) => Promise<unknown>>(),
 			free: vi.fn()
 		}
 	}
@@ -178,5 +179,102 @@ describe("sdk worker video probe", () => {
 
 		await expect(pending).rejects.toThrow("block read failed")
 		expect(signal?.aborted).toBe(true)
+	})
+})
+
+// A download that hangs until its managed future aborts.
+function hangingDownload(signals: AbortSignal[]): (params: WriterParams) => Promise<void> {
+	return params => {
+		signals.push(params.managedFuture.abortSignal)
+
+		return new Promise<void>((_resolve, reject) => {
+			if (params.managedFuture.abortSignal.aborted) {
+				reject(new Error("Cancelled"))
+
+				return
+			}
+
+			params.managedFuture.abortSignal.addEventListener("abort", () => {
+				reject(new Error("Cancelled"))
+			})
+		})
+	}
+}
+
+describe("sdk worker preview cancels", () => {
+	it("starts a read aborted when its token was cancelled before the read registered", async () => {
+		const signals: AbortSignal[] = []
+
+		fakeClient.downloadFileToWriter.mockImplementation(hangingDownload(signals))
+
+		await api.cancelPreviewDownload("early")
+
+		await expect(api.downloadFileBytes(fileOf(3), "early")).rejects.toThrow("Cancelled")
+		expect(signals[0]?.aborted).toBe(true)
+	})
+
+	it("cancels a probe unless it is within the given blocks of its current budget", async () => {
+		const signals: AbortSignal[] = []
+
+		fakeClient.downloadFileToWriter.mockImplementation(hangingDownload(signals))
+
+		// Nothing read yet out of a card's four blocks.
+		const kept = api.readVideoProbe(fileOf(10_000_000), "uuid", "card", "keep")
+
+		await vi.waitFor(() => {
+			expect(signals).toHaveLength(1)
+		})
+		await api.cancelPreviewDownloadUnlessFinishing("keep", 4)
+		expect(signals[0]?.aborted).toBe(false)
+
+		await api.cancelPreviewDownloadUnlessFinishing("keep", 1)
+		expect(signals[0]?.aborted).toBe(true)
+		await expect(kept).rejects.toThrow()
+	})
+})
+
+describe("sdk worker artwork from a byte range", () => {
+	it("streams only the range into the decoder", async () => {
+		const jpeg = [0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 1]
+		const received: number[] = []
+
+		fakeClient.downloadFileToWriter.mockImplementation(params => writeFrames(params, [jpeg.slice(0, 5), jpeg.slice(5)]))
+		fakeClient.makeThumbnailFromStream.mockImplementation(async params => {
+			const reader = params.reader.getReader()
+
+			for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+				received.push(...chunk.value)
+			}
+
+			return { type: "thumbnail", thumbnail: { webpData: new Uint8Array([7]), width: 2, height: 3, fromEmbeddedPreview: false } }
+		})
+
+		const made = await api.makeArtFromRange(
+			fileOf(1000),
+			{ offset: 100, size: jpeg.length },
+			{ maxWidth: 342, maxHeight: 513, lossyQuality: 80 },
+			"art1"
+		)
+
+		expect(made).toMatchObject({ type: "thumbnail", width: 2, height: 3 })
+		expect(received).toEqual(jpeg)
+		expect(fakeClient.downloadFileToWriter.mock.calls[0]?.[0]).toMatchObject({ start: 100n, end: BigInt(100 + jpeg.length) })
+	})
+
+	it("answers notImage for bytes that are no image", async () => {
+		fakeClient.downloadFileToWriter.mockImplementation(params => writeFrames(params, [Array.from(text("<html>not a picture</html>"))]))
+		fakeClient.makeThumbnailFromStream.mockImplementation(async params => {
+			const reader = params.reader.getReader()
+
+			for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+				// Drains until the sniff errors the stream.
+			}
+
+			return { type: "unsupported" }
+		})
+
+		expect(
+			await api.makeArtFromRange(fileOf(1000), { offset: 0, size: 26 }, { maxWidth: 342, maxHeight: 513, lossyQuality: 80 }, "art2")
+		).toEqual({ type: "notImage" })
 	})
 })

@@ -9,7 +9,7 @@ interface Waiter {
 // first waits holdMs, so the tiles mounting in the same pass get to claim the free permits before it.
 // Ranks are read only on a free permit, never per frame, and the queue is bounded by the mounted cells.
 export class RankedGate {
-	private readonly limit: number
+	private limit: number
 	private readonly holdMs: number
 	private running = 0
 	private waiting: Waiter[] = []
@@ -37,6 +37,12 @@ export class RankedGate {
 				}, this.holdMs)
 			}
 		})
+	}
+
+	// Permits held past a lowered limit are kept until released; a raised one is handed out at once.
+	public setLimit(limit: number): void {
+		this.limit = limit
+		this.drain()
 	}
 
 	public release(): void {

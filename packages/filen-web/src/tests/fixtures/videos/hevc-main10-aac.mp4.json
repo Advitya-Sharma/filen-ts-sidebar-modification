@@ -128,10 +128,33 @@
 			"record": {
 				"v": 1,
 				"container": "mp4",
-				"durationSec": null,
-				"index": null,
-				"video": null,
-				"audio": [],
+				"durationSec": 10,
+				"index": "moov",
+				"video": {
+					"codec": "hevc",
+					"fourcc": "hvc1",
+					"codecString": "hvc1.2.4.L93.90",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 10,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "aac",
+						"codecString": "mp4a.40.2",
+						"ch": 2,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": true,
+						"forced": false,
+						"commentary": false
+					}
+				],
 				"subs": [],
 				"chapters": [],
 				"cover": null,

@@ -96,10 +96,33 @@
 			"record": {
 				"v": 1,
 				"container": "mkv",
-				"durationSec": null,
-				"index": null,
-				"video": null,
-				"audio": [],
+				"durationSec": 30.016,
+				"index": "cues",
+				"video": {
+					"codec": "h264",
+					"fourcc": "avc1",
+					"codecString": "avc1.64001f",
+					"w": 1280,
+					"h": 720,
+					"par": 1,
+					"rotation": 0,
+					"bitDepth": 8,
+					"transfer": "sdr"
+				},
+				"audio": [
+					{
+						"id": 2,
+						"codec": "ac3",
+						"codecString": "ac-3",
+						"ch": 6,
+						"rate": 48000,
+						"lang": null,
+						"name": null,
+						"def": true,
+						"forced": false,
+						"commentary": false
+					}
+				],
 				"subs": [],
 				"chapters": [],
 				"cover": null,
