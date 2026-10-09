@@ -566,5 +566,123 @@ export const INSIGHTS_CASES: EvalCase[] = [
 		],
 		answerIncludes: [["oma"]],
 		expectsText: true
+	},
+	{
+		id: "insights-largest-files-en",
+		category: "insights",
+		lang: "en",
+		prompt: "What are my largest files?",
+		routes: ["insights"],
+		// Graded on the answer alone: the largest file sits two directories deep, so neither Recents
+		// (setup_installer.dmg) nor the root listing (its directories, README.txt) names it.
+		answerIncludes: [["weihnachten"]],
+		answerExcludes: ["readme"],
+		expectsText: true
+	},
+	{
+		id: "insights-largest-files-de",
+		category: "insights",
+		lang: "de",
+		prompt: "Was sind meine größten Dateien?",
+		routes: ["insights"],
+		// Graded on the answer alone: the largest file sits two directories deep, so neither Recents
+		// (setup_installer.dmg) nor the root listing (its directories, README.txt) names it.
+		answerIncludes: [["weihnachten"]],
+		answerExcludes: ["readme"],
+		expectsText: true
+	},
+	{
+		id: "insights-largest-files-zh",
+		category: "insights",
+		lang: "zh",
+		prompt: "我最大的文件是哪些？",
+		routes: ["insights"],
+		// Graded on the answer alone: the largest file sits two directories deep, so neither Recents
+		// (setup_installer.dmg) nor the root listing (its directories, README.txt) names it.
+		answerIncludes: [["weihnachten"]],
+		answerExcludes: ["readme"],
+		expectsText: true
+	},
+	{
+		id: "insights-largest-files-ar",
+		category: "insights",
+		lang: "ar",
+		prompt: "ما هي أكبر ملفاتي؟",
+		routes: ["insights"],
+		// Graded on the answer alone: the largest file sits two directories deep, so neither Recents
+		// (setup_installer.dmg) nor the root listing (its directories, README.txt) names it.
+		answerIncludes: [["weihnachten"]],
+		answerExcludes: ["readme"],
+		expectsText: true
+	},
+	{
+		id: "insights-worked-recently-en",
+		category: "insights",
+		lang: "en",
+		prompt: "What did I work on recently?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma", "report_q3", "報告書", "roadmap", "meeting_notes"]],
+		expectsText: true
+	},
+	{
+		id: "insights-worked-recently-es",
+		category: "insights",
+		lang: "es",
+		prompt: "¿En qué he trabajado últimamente?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma", "report_q3", "報告書", "roadmap", "meeting_notes"]],
+		expectsText: true
+	},
+	{
+		id: "insights-worked-recently-fr",
+		category: "insights",
+		lang: "fr",
+		prompt: "Sur quoi ai-je travaillé récemment ?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma", "report_q3", "報告書", "roadmap", "meeting_notes"]],
+		expectsText: true
+	},
+	{
+		id: "insights-worked-recently-ru",
+		category: "insights",
+		lang: "ru",
+		prompt: "Над чем я недавно работал?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma", "report_q3", "報告書", "roadmap", "meeting_notes"]],
+		expectsText: true
+	},
+	{
+		id: "insights-worked-recently-tr",
+		category: "insights",
+		lang: "tr",
+		prompt: "Son zamanlarda hangi dosyalar üzerinde çalıştım?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma", "report_q3", "報告書", "roadmap", "meeting_notes"]],
+		expectsText: true
 	}
 ]

@@ -289,7 +289,7 @@ export const SIMPLE_CASES: EvalCase[] = [
 			directory: "d13",
 			items: ["f33"]
 		}),
-		routes: ["files"],
+		routes: ["shared"],
 		calls: [
 			{
 				tool: "set_favorite",
@@ -436,7 +436,7 @@ export const SIMPLE_CASES: EvalCase[] = [
 			directory: "d1",
 			items: ["f8"]
 		}),
-		routes: ["files"],
+		routes: ["shared"],
 		calls: [
 			{
 				tool: "set_favorite",
@@ -1393,7 +1393,7 @@ export const PARALLEL_CASES: EvalCase[] = [
 		category: "parallel",
 		lang: "es",
 		prompt: "Pon IMG_2041.jpg e IMG_2042.jpg en favoritos",
-		routes: ["files"],
+		routes: ["shared"],
 		calls: [
 			{
 				tool: "set_favorite",

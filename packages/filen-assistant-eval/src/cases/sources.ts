@@ -312,6 +312,109 @@ export const SOURCES_CASES: EvalCase[] = [
 		expectsText: true
 	},
 	{
+		id: "sources-is-shared-de",
+		category: "sources",
+		lang: "de",
+		prompt: "Ist Steuererklärung_2024.pdf mit jemandem geteilt?",
+		routes: ["shared"],
+		calls: [
+			{
+				tool: "get_sharing",
+				args: {
+					handle: "f10"
+				}
+			}
+		],
+		answerIncludes: [["anna"]],
+		expectsText: true
+	},
+	{
+		id: "sources-is-shared-pt",
+		category: "sources",
+		lang: "pt",
+		prompt: "O arquivo meeting_notes_2025-09-30.txt está compartilhado?",
+		routes: ["shared"],
+		calls: [
+			{
+				tool: "get_sharing",
+				args: {
+					handle: "f28"
+				}
+			}
+		],
+		answerIncludes: [["lena"]],
+		expectsText: true
+	},
+	{
+		id: "sources-is-shared-tr",
+		category: "sources",
+		lang: "tr",
+		prompt: "logo_final.svg dosyası paylaşılıyor mu?",
+		routes: ["shared"],
+		calls: [
+			{
+				tool: "get_sharing",
+				args: {
+					handle: "f29"
+				}
+			}
+		],
+		answerIncludes: [["lena", "tom"]],
+		expectsText: true
+	},
+	{
+		id: "sources-is-shared-hi",
+		category: "sources",
+		lang: "hi",
+		prompt: "क्या roadmap.md किसी के साथ शेयर है?",
+		routes: ["shared"],
+		calls: [
+			{
+				tool: "get_sharing",
+				args: {
+					handle: "f27"
+				}
+			}
+		],
+		answerIncludes: [["lena"]],
+		expectsText: true
+	},
+	{
+		id: "sources-is-shared-ja",
+		category: "sources",
+		lang: "ja",
+		prompt: "roadmap.md は誰かと共有されていますか？",
+		routes: ["shared"],
+		calls: [
+			{
+				tool: "get_sharing",
+				args: {
+					handle: "f27"
+				}
+			}
+		],
+		answerIncludes: [["lena"]],
+		expectsText: true
+	},
+	{
+		id: "sources-is-public-id",
+		category: "sources",
+		lang: "id",
+		prompt: "Apakah folder Lisbon 2024 punya link publik?",
+		routes: ["shared"],
+		calls: [
+			{
+				tool: "get_sharing",
+				args: {
+					handle: "d5"
+				}
+			}
+		],
+		// A detail only the result gives (the link has a password), so a guessed reply cannot pass.
+		answerIncludes: [["password", "sandi"]],
+		expectsText: true
+	},
+	{
 		id: "sources-shared-dir-list-en",
 		category: "sources",
 		lang: "en",

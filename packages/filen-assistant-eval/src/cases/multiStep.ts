@@ -256,7 +256,7 @@ export const MULTI_STEP_CASES: EvalCase[] = [
 		category: "multi_step",
 		lang: "fr",
 		prompt: "Retire le dossier Lisbon 2024 et le fichier CV_2025.docx des favoris",
-		routes: ["files"],
+		routes: ["shared"],
 		state: [
 			{
 				item: "d5",
@@ -334,7 +334,7 @@ export const MULTI_STEP_CASES: EvalCase[] = [
 		category: "multi_step",
 		lang: "ja",
 		prompt: "Lisbon 2024フォルダの写真を全部お気に入りに追加して",
-		routes: ["files"],
+		routes: ["shared"],
 		state: [
 			{
 				item: "f11",
