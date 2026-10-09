@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { fitWithin, selectWebpOrFallback, encodeCanvasThumb } from "@/features/drive/lib/thumbGenerators.logic"
+import { driveVideoThumbSeeks, fitWithin, selectWebpOrFallback, encodeCanvasThumb } from "@/features/drive/lib/thumbGenerators.logic"
 
 describe("fitWithin", () => {
 	it("returns the source size unchanged when already at or under maxDim (no upscale)", () => {
@@ -155,5 +155,13 @@ describe("encodeCanvasThumb — HTMLCanvasElement (toBlob) path", () => {
 		}
 
 		await expect(encodeCanvasThumb(fake as unknown as HTMLCanvasElement)).rejects.toThrow("canvas toBlob produced no result")
+	})
+})
+
+describe("driveVideoThumbSeeks", () => {
+	it("starts a second in and retries a few seconds in, staying near the start of the file", () => {
+		expect(driveVideoThumbSeeks(7200)).toEqual({ first: 1, retry: 5 })
+		expect(driveVideoThumbSeeks(4)).toEqual({ first: 1, retry: 2 })
+		expect(driveVideoThumbSeeks(1)).toEqual({ first: 0.5, retry: null })
 	})
 })

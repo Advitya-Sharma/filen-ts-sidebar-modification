@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { File as SdkFile, UuidStr } from "@filen/sdk-rs"
 import { narrowItem, type BaseFileItem, type DriveItem } from "@/features/drive/lib/item"
 import { type ThumbGeneratorCategory, type ThumbGenerator, type ThumbSeedResult } from "@/features/drive/lib/thumbnails"
@@ -58,14 +58,16 @@ const { narrowToAnyFileMock } = vi.hoisted(() => ({ narrowToAnyFileMock: vi.fn((
 
 vi.mock("@/features/drive/lib/download", () => ({ narrowToAnyFile: narrowToAnyFileMock }))
 
-const { waitForMediaStreamMock, previewStreamUrlMock } = vi.hoisted(() => ({
+const { waitForMediaStreamMock, previewStreamUrlMock, releasePreviewStreamMock } = vi.hoisted(() => ({
 	waitForMediaStreamMock: vi.fn<() => Promise<boolean>>(),
-	previewStreamUrlMock: vi.fn<(file: unknown, name: string, contentType: string) => Promise<string>>()
+	previewStreamUrlMock: vi.fn<(file: unknown, name: string, contentType: string, id?: string) => Promise<string>>(),
+	releasePreviewStreamMock: vi.fn<(id: string) => void>()
 }))
 
 vi.mock("@/features/preview/lib/previewStream", () => ({
 	waitForMediaStream: waitForMediaStreamMock,
-	previewStreamUrl: previewStreamUrlMock
+	previewStreamUrl: previewStreamUrlMock,
+	releasePreviewStream: releasePreviewStreamMock
 }))
 
 const { allowedMediaContentTypeMock } = vi.hoisted(() => ({ allowedMediaContentTypeMock: vi.fn<(item: DriveItem) => string | null>() }))
@@ -576,6 +578,136 @@ describe("generateVideoThumb — early gates (no DOM element ever created)", () 
 		previewStreamUrlMock.mockRejectedValue(new Error("registration failed"))
 
 		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "failed" })
+	})
+})
+
+// A video element whose seeks land at once, and canvases that report the luma of the time drawn.
+function stubVideoDom(lumaAt: (time: number) => number, events: string[]): { seeks: number[] } {
+	const seeks: number[] = []
+
+	class FakeVideo {
+		muted = false
+		playsInline = false
+		preload = ""
+		duration = 100
+		videoWidth = 1280
+		videoHeight = 720
+		readyState = 4
+		readonly HAVE_CURRENT_DATA = 2
+		private time = 0
+		private readonly listeners = new Map<string, () => void>()
+
+		set src(_url: string) {
+			setTimeout(() => {
+				this.fire("loadedmetadata")
+			}, 0)
+		}
+
+		get currentTime(): number {
+			return this.time
+		}
+
+		set currentTime(time: number) {
+			this.time = time
+			seeks.push(time)
+			setTimeout(() => {
+				this.fire("seeked")
+			}, 0)
+		}
+
+		addEventListener(type: string, listener: () => void): void {
+			this.listeners.set(type, listener)
+		}
+
+		removeEventListener(type: string): void {
+			this.listeners.delete(type)
+		}
+
+		removeAttribute(): void {
+			events.push("emptied")
+		}
+
+		load(): void {
+			return undefined
+		}
+
+		private fire(type: string): void {
+			this.listeners.get(type)?.()
+		}
+	}
+
+	class FakeCanvas {
+		private drawnAt = 0
+		readonly width: number
+		readonly height: number
+
+		constructor(width: number, height: number) {
+			this.width = width
+			this.height = height
+		}
+
+		getContext() {
+			return {
+				drawImage: (video: FakeVideo) => {
+					this.drawnAt = video.currentTime
+				},
+				getImageData: () => ({ data: new Uint8ClampedArray(this.width * this.height * 4).fill(lumaAt(this.drawnAt)) })
+			}
+		}
+
+		convertToBlob(): Promise<Blob> {
+			return Promise.resolve(new Blob([new Uint8Array([1])], { type: "image/webp" }))
+		}
+	}
+
+	vi.stubGlobal("document", { createElement: () => new FakeVideo() })
+	vi.stubGlobal("OffscreenCanvas", FakeCanvas)
+
+	return { seeks }
+}
+
+describe("generateVideoThumb — frame choice", () => {
+	beforeEach(() => {
+		waitForMediaStreamMock.mockResolvedValue(true)
+		allowedMediaContentTypeMock.mockReturnValue("video/mp4")
+		previewStreamUrlMock.mockImplementation((_file, _name, _type, id) => Promise.resolve(`/sw/download/${id ?? ""}`))
+	})
+
+	afterEach(() => {
+		vi.unstubAllGlobals()
+	})
+
+	it("takes the frame one second in, and releases its stream registration once the element is emptied", async () => {
+		const events: string[] = []
+		const { seeks } = stubVideoDom(() => 120, events)
+
+		releasePreviewStreamMock.mockImplementation(() => {
+			events.push("released")
+		})
+
+		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "bytes", bytes: new Uint8Array([1]) })
+		expect(seeks).toEqual([1])
+		expect(releasePreviewStreamMock).toHaveBeenCalledWith(previewStreamUrlMock.mock.calls[0]?.[3])
+		expect(events).toEqual(["emptied", "released"])
+	})
+
+	it("looks once more, a few seconds in, only when the first frame is black, and never far into the file", async () => {
+		const dark = stubVideoDom(time => (time === 5 ? 90 : 4), [])
+
+		await generateVideoThumb(videoItem(), live())
+		expect(dark.seeks).toEqual([1, 5])
+
+		const allDark = stubVideoDom(() => 2, [])
+
+		await generateVideoThumb(videoItem(), live())
+		expect(allDark.seeks).toEqual([1, 5])
+	})
+
+	it("releases the registration when the stream fails too", async () => {
+		previewStreamUrlMock.mockRejectedValue(new Error("registration failed"))
+
+		await expect(generateVideoThumb(videoItem(), live())).resolves.toEqual({ type: "failed" })
+		expect(releasePreviewStreamMock).toHaveBeenCalledTimes(1)
 	})
 })
 

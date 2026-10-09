@@ -1,6 +1,6 @@
 import type { AnyFile } from "@filen/sdk-rs"
 import { registerWithSw } from "@/features/drive/lib/saveDownload"
-import { SW_DOWNLOAD_PREFIX, SW_MSG_REGISTER_PREVIEW } from "@/lib/sw/protocol"
+import { SW_DOWNLOAD_PREFIX, SW_MSG_REGISTER_PREVIEW, SW_MSG_RELEASE_PREVIEW } from "@/lib/sw/protocol"
 
 // Registers `file` against the SW's inline-preview route (no attachment disposition, an allowlisted
 // Content-Type, Range/206-capable) and returns its fetchable, same-origin URL — the src a
@@ -19,6 +19,13 @@ export async function previewStreamUrl(
 	await registerWithSw(SW_MSG_REGISTER_PREVIEW, { id, file, name, size: Number(file.size), contentType })
 
 	return `${SW_DOWNLOAD_PREFIX}${id}`
+}
+
+// Hands a registration back once its element is done with the URL (emptied, so no further Range request
+// comes), so the worker drops the entry and its key material at once. Fire-and-forget: a worker that has
+// restarted since holds nothing to drop, and an older one ignores the message.
+export function releasePreviewStream(id: string): void {
+	navigator.serviceWorker.controller?.postMessage({ type: SW_MSG_RELEASE_PREVIEW, id })
 }
 
 // Capability gate: true once a service worker is actually controlling this tab — registered in every

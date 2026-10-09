@@ -3,10 +3,10 @@
 // node. Deliberately generic: the entry type (decrypted SDK handles) never crosses this boundary.
 //
 // Retention is bounded rather than explicit: entries hold decrypted key material, no page-side signal
-// ever says a download finished, and an entry must survive repeated GETs (Safari probes a Range, then
+// says a download finished, and an entry must survive repeated GETs (Safari probes a Range, then
 // re-fetches) — so neither a completion signal nor a GET can drive eviction. Past the ceiling the LEAST
 // RECENTLY READ entry goes, except one whose stream is still in flight: dropping that 404s its next
-// range request mid-playback.
+// range request mid-playback. A preview whose element is done hands its entry back (delete).
 export class PendingRegistry<T> {
 	private readonly entries = new Map<string, T>()
 	// Per-id in-flight stream count: one id can be read twice at once (Safari's range probe overlapping
@@ -55,6 +55,12 @@ export class PendingRegistry<T> {
 		this.entries.set(id, entry)
 
 		return entry
+	}
+
+	// Drops one entry by id. A stream still reading from it keeps its own reference and is counted until it
+	// ends, as before.
+	public delete(id: string): void {
+		this.entries.delete(id)
 	}
 
 	public beginStream(id: string): void {

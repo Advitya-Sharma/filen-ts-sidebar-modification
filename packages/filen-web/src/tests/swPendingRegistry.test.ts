@@ -116,4 +116,23 @@ describe("PendingRegistry", () => {
 
 		expect(registry.activeStreams).toBe(0)
 	})
+
+	it("drops one entry by id, leaving the others and a running stream's count alone", () => {
+		const registry = new PendingRegistry<string>(4)
+
+		registry.set("a", "A")
+		registry.set("b", "B")
+		registry.beginStream("a")
+		registry.delete("a")
+		registry.delete("missing")
+
+		expect(registry.get("a")).toBeUndefined()
+		expect(registry.get("b")).toBe("B")
+		expect(registry.size).toBe(1)
+		expect(registry.activeStreams).toBe(1)
+
+		registry.endStream("a")
+
+		expect(registry.activeStreams).toBe(0)
+	})
 })

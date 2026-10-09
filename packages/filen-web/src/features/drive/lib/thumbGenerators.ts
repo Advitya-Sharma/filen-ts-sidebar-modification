@@ -19,9 +19,10 @@ import {
 	THUMB_WARM_SIZE_GATE,
 	thumbnailCategory
 } from "@/features/drive/lib/thumbnails.logic"
-import { fitWithin, encodeCanvasThumb } from "@/features/drive/lib/thumbGenerators.logic"
+import { driveVideoThumbSeeks, fitWithin, encodeCanvasThumb } from "@/features/drive/lib/thumbGenerators.logic"
 import { prepareSvgThumb } from "@/features/drive/lib/svgThumb.logic"
-import { previewStreamUrl, waitForMediaStream } from "@/features/preview/lib/previewStream"
+import { previewStreamUrl, releasePreviewStream, waitForMediaStream } from "@/features/preview/lib/previewStream"
+import { SAMPLE_HEIGHT, SAMPLE_WIDTH, isDark, meanLuma } from "@/lib/media/framePick.logic"
 import { allowedMediaContentType } from "@/features/preview/lib/mediaType"
 import { narrowItem, type BaseFileItem, type DriveItem } from "@/features/drive/lib/item"
 import type { SdkThumbnailResult } from "@/workers/sdk.worker"
@@ -263,11 +264,26 @@ function waitForVideoEvent(video: HTMLVideoElement, event: "loadedmetadata" | "l
 
 const VIDEO_GENERATE_TIMEOUT_MS = 15_000
 
+// Mean luma of the element's current frame, from a tiny draw of it; a missing context counts as bright,
+// which keeps the first frame.
+function currentFrameLuma(video: HTMLVideoElement): number {
+	const ctx = new OffscreenCanvas(SAMPLE_WIDTH, SAMPLE_HEIGHT).getContext("2d", { willReadFrequently: true })
+
+	if (ctx === null) {
+		return Number.POSITIVE_INFINITY
+	}
+
+	ctx.drawImage(video, 0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT)
+
+	return meanLuma(ctx.getImageData(0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT).data)
+}
+
 // One frame of the video `openSource` resolves to, drawn into a thumbnail. Both arms share it: the
 // drive-side one plays the SW's Range stream, the upload warm the local file.
 //
-// Only the metadata is preloaded, and the seek then fetches just the data for the frame drawn: buffering
-// ahead ("auto") downloaded and decrypted megabytes that the teardown below then cancelled. The waits end
+// Only the metadata is preloaded, and each seek then fetches just the data for the frame it lands on:
+// buffering ahead ("auto") downloaded and decrypted megabytes that the teardown below then cancelled. A
+// black first frame (an opening fade) gets one more, bounded seek (driveVideoThumbSeeks). The waits end
 // at the deadline themselves, so a stream that never fires its event or error settles this callback and
 // its deferred cleanup empties the element, ending the stream; runTimeout alone could only stop waiting
 // for it. `signal` stops the generation only until the frame has loaded: past that, all that is left is
@@ -305,12 +321,20 @@ async function videoThumb(
 		// e.g. a stream with no known Content-Length) falls back to frame 0, where seeking to the position
 		// the video is already at would never fire `seeked`: that one loads the first frame instead, which
 		// a metadata-only preload need not do on its own.
-		const seekTo = Number.isFinite(video.duration) ? Math.min(1, video.duration / 2) : 0
+		const duration = video.duration
 
-		if (seekTo > 0) {
-			video.currentTime = seekTo
+		if (Number.isFinite(duration) && duration > 0) {
+			const { first, retry } = driveVideoThumbSeeks(duration)
+
+			video.currentTime = first
 
 			await waitForVideoEvent(video, "seeked", beforeFirstFrame)
+
+			if (retry !== null && isDark(currentFrameLuma(video))) {
+				video.currentTime = retry
+
+				await waitForVideoEvent(video, "seeked", beforeFirstFrame)
+			}
 		} else if (video.readyState < video.HAVE_CURRENT_DATA) {
 			video.preload = "auto"
 
@@ -364,7 +388,21 @@ export const generateVideoThumb: ThumbGenerator = async (item, signal) => {
 		return { type: "failed" }
 	}
 
-	return await videoThumb(item.data.uuid, () => previewStreamUrl(narrowToAnyFile(item), driveItemName(item), contentType), signal)
+	// Released once the element is emptied (the deferred cleanups run last-registered first), so the
+	// worker's registry does not keep this one-frame registration until newer ones crowd it out.
+	return await videoThumb(
+		item.data.uuid,
+		defer => {
+			const id = crypto.randomUUID()
+
+			defer(() => {
+				releasePreviewStream(id)
+			})
+
+			return previewStreamUrl(narrowToAnyFile(item), driveItemName(item), contentType, id)
+		},
+		signal
+	)
 }
 
 const SVG_RENDER_TIMEOUT_MS = 10_000

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import { SW_DOWNLOAD_PREFIX, SW_MSG_REGISTER_PREVIEW } from "@/lib/sw/protocol"
+import { SW_DOWNLOAD_PREFIX, SW_MSG_REGISTER_PREVIEW, SW_MSG_RELEASE_PREVIEW } from "@/lib/sw/protocol"
 
 // previewStreamUrl is the request half of the inline-preview seam (usePreviewStreamUrl.ts's own
 // abort surface is just a `live` flag guarding a late setState — no cancellation message exists,
@@ -192,5 +192,23 @@ describe("waitForMediaStream", () => {
 		const { waitForMediaStream } = await import("@/features/preview/lib/previewStream")
 
 		await expect(waitForMediaStream(20)).resolves.toBe(true)
+	})
+})
+
+describe("releasePreviewStream", () => {
+	it("tells the controlling worker to drop the registration, and does nothing without one", async () => {
+		const postMessage = vi.fn()
+
+		vi.stubGlobal("navigator", { serviceWorker: { controller: { postMessage } } })
+
+		const { releasePreviewStream } = await import("@/features/preview/lib/previewStream")
+
+		releasePreviewStream("known-id")
+		expect(postMessage).toHaveBeenCalledWith({ type: SW_MSG_RELEASE_PREVIEW, id: "known-id" })
+
+		vi.stubGlobal("navigator", { serviceWorker: { controller: null } })
+		expect(() => {
+			releasePreviewStream("other")
+		}).not.toThrow()
 	})
 })

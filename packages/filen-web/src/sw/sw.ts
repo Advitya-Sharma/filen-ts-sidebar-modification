@@ -19,6 +19,7 @@ import {
 	SW_MSG_REGISTER_ZIP_DOWNLOAD,
 	SW_MSG_REGISTER_STREAM_DOWNLOAD,
 	SW_MSG_REGISTER_PREVIEW,
+	SW_MSG_RELEASE_PREVIEW,
 	SW_ERROR_NO_CLIENT,
 	SW_MSG_LOGOUT,
 	SW_MSG_WATCH_DOWNLOAD,
@@ -598,6 +599,16 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 			contentType: msg.contentType
 		})
 		port?.postMessage({ ok: true })
+		return
+	}
+
+	// Only a preview's entry: a download's id never reaches this message.
+	if (type === SW_MSG_RELEASE_PREVIEW) {
+		const id = (event.data as { id?: unknown }).id
+
+		if (typeof id === "string" && downloads.get(id)?.kind === "preview") {
+			downloads.delete(id)
+		}
 		return
 	}
 

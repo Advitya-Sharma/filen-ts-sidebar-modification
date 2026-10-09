@@ -13,6 +13,17 @@ export function fitWithin(width: number, height: number, maxDim: number): { widt
 	}
 }
 
+// Where a drive video thumbnail looks for its frame: one second in (half the video when it is shorter),
+// and once more a few seconds in only when that frame is black. Kept near the start on purpose: a
+// container without an index (Matroska without Cues, a fragmented MP4) can only reach a later position
+// by reading every byte before it.
+export function driveVideoThumbSeeks(duration: number): { first: number; retry: number | null } {
+	const first = Math.min(1, duration / 2)
+	const retry = Math.min(duration / 2, 5)
+
+	return { first, retry: retry > first ? retry : null }
+}
+
 // A canvas silently downgrades an unsupported requested encode type to image/png instead of throwing
 // (WHATWG canvas spec) — the produced blob's own .type is the only reliable signal a webp attempt
 // actually produced webp, so this keeps it when honored and otherwise awaits the caller's jpeg

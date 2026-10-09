@@ -4,7 +4,7 @@ import type { ErrorDTO } from "@/lib/sdk/errors"
 // `/__sw/version` (bump on any change to sw.ts's runtime behavior, never on app/feature versioning)
 // and the message types + route prefixes it understands. Imported by both sw.ts and register.ts;
 // that import is the only edge between them.
-export const SW_PROTOCOL_VERSION = 13
+export const SW_PROTOCOL_VERSION = 14
 
 // Shared so the page side (register.ts's applyUpdate) can't drift from sw.ts's message listener with
 // a typo'd literal.
@@ -40,6 +40,10 @@ export const SW_MSG_REGISTER_STREAM_DOWNLOAD = "FILEN_SW_REGISTER_STREAM_DOWNLOA
 // it independently at serve time (isAllowedInlineContentType below) rather than trusting the message,
 // so a compromised/buggy sender can never force an arbitrary inline Content-Type through.
 export const SW_MSG_REGISTER_PREVIEW = "FILEN_SW_REGISTER_PREVIEW"
+// page → SW, no ack: the page is done with a preview registration (a thumbnail's one frame), so its entry
+// (decrypted key material) leaves the registry now rather than waiting to be crowded out. A stream already
+// running from it keeps its own handles and ends on its own.
+export const SW_MSG_RELEASE_PREVIEW = "FILEN_SW_RELEASE_PREVIEW"
 // Ack error a registration answers with when the worker holds no session Client. An idle worker is
 // terminated and restarts with empty module globals, so the handed-over Client is gone while the page's
 // handoff memo still believes otherwise — the page heals on this by re-handing the session over and

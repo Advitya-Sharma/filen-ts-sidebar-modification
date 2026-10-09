@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { SW_DOWNLOAD_PREFIX, SW_ERROR_NO_CLIENT, SW_MSG_INIT_CLIENT, SW_MSG_LOGOUT, SW_MSG_REGISTER_DOWNLOAD } from "@/lib/sw/protocol"
+import {
+	SW_DOWNLOAD_PREFIX,
+	SW_ERROR_NO_CLIENT,
+	SW_MSG_INIT_CLIENT,
+	SW_MSG_LOGOUT,
+	SW_MSG_REGISTER_DOWNLOAD,
+	SW_MSG_REGISTER_PREVIEW,
+	SW_MSG_RELEASE_PREVIEW
+} from "@/lib/sw/protocol"
 
 // sw.ts is a ServiceWorkerGlobalScope module: it registers its listeners on `self` at import and pulls
 // the SW-hosted wasm SDK. Both are faked here — `self` captures the listeners, the SDK hands out fake
@@ -166,5 +174,34 @@ describe("sw.ts Client lifecycle", () => {
 		expect(await adopted).toMatchObject({ ok: false })
 		expect(sdk.clients).toHaveLength(0)
 		expect(await registerDownload("d1")).toEqual({ ok: false, error: SW_ERROR_NO_CLIENT })
+	})
+})
+
+// The status a GET of a registered id answers with, without streaming its body.
+function status(id: string): number | null {
+	let response: Response | null = null
+
+	listeners.get("fetch")?.({
+		request: { url: `https://app.test${SW_DOWNLOAD_PREFIX}${id}`, method: "GET", mode: "no-cors", headers: new Headers() },
+		respondWith: (value: Response) => {
+			response = value
+		},
+		waitUntil: () => undefined
+	})
+
+	return (response as Response | null)?.status ?? null
+}
+
+describe("sw.ts preview release", () => {
+	it("drops a released preview registration, and nothing a download registered", async () => {
+		await message({ type: SW_MSG_INIT_CLIENT, blob: {} })
+		await message({ type: SW_MSG_REGISTER_PREVIEW, id: "p1", file: {}, name: "a.mp4", size: 10, contentType: "video/mp4" })
+		await registerDownload("d1")
+
+		listeners.get("message")?.({ data: { type: SW_MSG_RELEASE_PREVIEW, id: "p1" }, ports: [] })
+		listeners.get("message")?.({ data: { type: SW_MSG_RELEASE_PREVIEW, id: "d1" }, ports: [] })
+
+		expect(status("p1")).toBe(404)
+		expect(status("d1")).not.toBe(404)
 	})
 })
