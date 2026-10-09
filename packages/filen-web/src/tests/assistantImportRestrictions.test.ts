@@ -130,6 +130,6 @@ describe("assistant import restrictions", () => {
 				"src/features/drive/lib/actions.ts",
 				'import { emptyTrash } from "@/features/drive/lib/actions"\nimport { sdkApi } from "@/lib/sdk/client"\nvoid import("@/lib/sdk/client")'
 			)
-		).resolves.toEqual([])
+		).resolves.toEqual(["No dynamic imports in app code; import statically."])
 	})
 })
