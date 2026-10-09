@@ -216,6 +216,7 @@ export const TURN_END_KEYS: Record<"cancelled" | AssistantTurnError, AssistantKe
 	"context-full": "assistantTurnErrorContextFull",
 	"message-too-long": "assistantTurnErrorMessageTooLong",
 	"no-reply": "assistantTurnErrorNoReply",
+	expired: "assistantTurnErrorExpired",
 	failed: "assistantTurnErrorFailed"
 }
 

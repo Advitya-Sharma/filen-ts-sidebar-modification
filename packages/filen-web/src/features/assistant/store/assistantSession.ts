@@ -1,5 +1,5 @@
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
-import { pendingProposalIds } from "@/features/assistant/store/transcript"
+import { awaitingConfirmation, pendingProposalIds } from "@/features/assistant/store/transcript"
 import { createMockAssistantSession } from "@/features/assistant/store/mockAssistantSession"
 import {
 	adoptConversationSlot,
@@ -231,12 +231,18 @@ export async function removeAssistantModel(): Promise<void> {
 }
 
 // Returns whether a turn started. Earlier unanswered cards are rejected first (beginTurn expires them in
-// the transcript), so the runtime never holds a proposal the UI can no longer confirm.
+// the transcript), so the runtime never holds a proposal the UI can no longer confirm. A turn that only waits
+// for its card is replaced: the session stops it, and it winds down without writing a closing reply.
 export function sendAssistantMessage(text: string): boolean {
 	const store = useAssistantStore.getState()
 	const message = text.trim()
 
-	if (session === null || message.length === 0 || store.activeTurnId !== null || !modelAcceptsMessages(store.modelState)) {
+	if (
+		session === null ||
+		message.length === 0 ||
+		(store.activeTurnId !== null && !awaitingConfirmation(store)) ||
+		!modelAcceptsMessages(store.modelState)
+	) {
 		return false
 	}
 

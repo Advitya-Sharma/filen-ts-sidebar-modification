@@ -88,6 +88,8 @@ export const assistant = {
 	assistantStatusError: "Error",
 
 	// ── Setup (first run) ────────────────────────────────────────────────────
+	/** Setup screen — accessible name of the spinner while the app checks the device and the downloaded model */
+	assistantChecking: "Checking the assistant",
 	/** Setup screen — title */
 	assistantSetupTitle: "A private assistant on this device",
 	/** Setup screen — what it is and the privacy promise: the model runs locally, nothing is sent anywhere */
@@ -177,8 +179,8 @@ export const assistant = {
 	assistantExampleNavigate: "Take me to my favorites",
 	/** Conversation scroller — accessible name */
 	assistantConversationLabel: "Conversation",
-	/** Screen-reader prefix on the user's own messages */
-	assistantYouSaid: "You",
+	/** Screen-reader prefix on the user's own messages, read right before the message text */
+	assistantYouSaid: "You: ",
 	/** Accessible name of one assistant reply */
 	assistantReplyLabel: "Assistant reply",
 	/** Announced while the assistant works without a step to name, e.g. between steps */
@@ -193,6 +195,8 @@ export const assistant = {
 	assistantTurnErrorMessageTooLong: "This message is too long for the assistant. Try a shorter one.",
 	/** Turn ended without any reply text to show */
 	assistantTurnErrorNoReply: "The assistant didn't come up with a reply. Try rephrasing your request.",
+	/** Turn end — a confirmation card was left unanswered for a while, so the assistant stopped waiting for it */
+	assistantTurnErrorExpired: "The confirmation timed out.",
 	/** Shown in place of a reply that was hidden because it repeated the assistant's internal instructions */
 	assistantReplyWithheld: "This reply was hidden because it repeated the assistant's internal instructions.",
 	/** Turn failed — anything else */
@@ -411,6 +415,10 @@ export const assistant = {
 	assistantProposalDraftNote: "You still send it yourself.",
 	/** Draft card — accessible name of the drafted message text */
 	assistantProposalDraftText: "Draft",
+	/** Draft card — the email addresses of the people the drafted message would reach */
+	assistantProposalDraftTo: "To: {{recipients}}",
+	/** Draft card — the first email addresses of a group chat's members, and how many more there are */
+	assistantProposalDraftToMore: "To: {{recipients}} and {{count}} more",
 	/** Draft card — confirm button */
 	assistantConfirmDraft: "Add draft",
 	/** Card title — move */
@@ -425,10 +433,6 @@ export const assistant = {
 	assistantProposalTrash_one: "Move {{count}} item to the trash",
 	/** Card title — trash */
 	assistantProposalTrash_other: "Move {{count}} items to the trash",
-	/** Card title — download */
-	assistantProposalDownload_one: "Download {{count}} item",
-	/** Card title — download */
-	assistantProposalDownload_other: "Download {{count}} items",
 	/** Card title — rename */
 	assistantProposalRename_one: "Rename {{count}} item",
 	/** Card title — rename */
@@ -471,8 +475,10 @@ export const assistant = {
 	assistantProposalExpired: "Expired. Ask again to do this.",
 	/** Card status — a saved card that was still running when its conversation was left */
 	assistantProposalInterrupted: "This may have finished after you left. Check before asking again.",
-	/** Announced when a card appears, after the reply */
+	/** Announced when a card appears and waits for the user */
 	assistantProposalAnnouncement: "Confirmation needed: {{title}}",
+	/** Announced for a step — what it does, then what came of it (e.g. "Searching for “tax”, 4 items") */
+	assistantStepAnnouncement: "{{label}}, {{detail}}",
 
 	// ── Composer ─────────────────────────────────────────────────────────────
 	/** Composer — placeholder and accessible name */

@@ -21,7 +21,7 @@ const ASSISTANT_RAW_SDK = "The assistant goes through the feature modules the us
 // restoring from the trash or a version, sending, sharing, public links, adding participants, every
 // contact action, leaving, unsharing, account security, the session, logout and stopping or pausing
 // transfers are kept out of its reach at the import level, whatever the guard decides at runtime.
-// Chats are draft-only: nothing that sends. The trash, transfers and settings it only reads or opens.
+// Chats are draft-only: nothing that sends, queues or drops a message. The trash, transfers and settings it only reads or opens.
 const ASSISTANT_RESTRICTED_PATHS = [
 	{
 		name: "@/features/drive/lib/actions",
@@ -56,6 +56,13 @@ const ASSISTANT_RESTRICTED_PATHS = [
 	{ name: "@/features/chats/lib/messageActions", message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/chats/lib/drafts", importNames: ["deleteDraft"], message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/chats/lib/participants", message: ASSISTANT_FORBIDDEN },
+	// The outbox sends what is queued (a retry, an enqueued message), purging drops unsent messages for good,
+	// and a trusted domain silences the link warning in every chat.
+	{ name: "@/features/chats/lib/inflight", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/outboxCoordinator", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/trustedDomains", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/lib/attachments", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/features/chats/store/useChatsInflight", allowTypeImports: true, message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/audio/lib/playlists", importNames: ["deletePlaylistAction"], message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/contacts/lib/actions", message: ASSISTANT_FORBIDDEN },
 	// requestJobCancel's "trash" mode deletes what a job already wrote; a stopped transfer loses its progress.

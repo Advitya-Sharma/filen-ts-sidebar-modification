@@ -32,7 +32,9 @@ export type AssistantModelError = "download-failed" | "load-failed" | "out-of-me
 // verified shards was lost or a start failed and the files are checked for damage.
 // `partialBytes` on not-downloaded and error: part of the model is on disk (a stopped or failed download,
 // kept so it can resume), which the user can still remove.
+// "checking": before the startup check (device, other tabs, what is on disk) has answered; nothing to offer yet.
 export type AssistantModelState =
+	| { kind: "checking"; model: AssistantModelInfo | null }
 	| { kind: "unavailable"; reason: AssistantUnavailableReason; model: AssistantModelInfo | null }
 	| { kind: "not-downloaded"; model: AssistantModelInfo; partialBytes?: number }
 	| { kind: "downloading"; model: AssistantModelInfo; receivedBytes: number; waiting: boolean; resumed: boolean }
@@ -88,13 +90,16 @@ export function endedStep<T extends AssistantStep>(step: T, status: "stopped" | 
 }
 
 export type AssistantProposalAction =
-	"draft-message" | "move" | "copy" | "trash" | "download" | "rename" | "favorite" | "unfavorite" | "create-directory" | "create-note"
+	"draft-message" | "move" | "copy" | "trash" | "rename" | "favorite" | "unfavorite" | "create-directory" | "create-note"
 
 // An item the call acts on, as the tool preview resolved it. The handle's leading letter picks the icon
 // (f file, d directory, n note, c chat, p playlist, t track); the handle itself is never shown.
 export interface AssistantProposalTarget {
 	handle: string
 	name: string
+	// A chat's: the addresses of the people a draft to it reaches. Its name is whatever a contact or a group's
+	// owner chose, so it alone cannot tell two chats apart.
+	recipients?: readonly string[]
 }
 
 // A consequential call waiting for the user. Nothing happens until its card is confirmed. `targets` are
@@ -110,8 +115,8 @@ export interface AssistantProposal {
 }
 
 // "message-too-long": the message alone does not fit the model. "no-reply": the turn ended without any
-// reply text to show.
-export type AssistantTurnError = "model-unavailable" | "context-full" | "message-too-long" | "no-reply" | "failed"
+// reply text to show. "expired": a confirmation card went unanswered until the turn gave up on it.
+export type AssistantTurnError = "model-unavailable" | "context-full" | "message-too-long" | "no-reply" | "expired" | "failed"
 
 // One finished exchange of the conversation, as the model sees it in the next turns.
 export interface AssistantExchange {

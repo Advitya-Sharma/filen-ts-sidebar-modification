@@ -3,9 +3,11 @@ import { SparklesIcon } from "lucide-react"
 import { formatBytes } from "@filen/shared"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
+import { Spinner } from "@/components/ui/spinner"
 import type { AssistantKey } from "@/lib/i18n"
 import { cancelAssistantDownload, downloadAssistantModel } from "@/features/assistant/store/assistantSession"
 import { downloadByteFigures, downloadPercent } from "@/features/assistant/components/assistant.logic"
+import { ASSISTANT_PANEL_ID, assistantInitialFocusTarget } from "@/features/assistant/components/assistantFocus"
 import type { AssistantModelError, AssistantModelInfo, AssistantModelState, AssistantUnavailableReason } from "@/features/assistant/types"
 
 // Every model state a message cannot be sent from is this one screen; a model on disk shows the conversation.
@@ -84,10 +86,36 @@ function FirstRun({ model, unavailable }: { model: AssistantModelInfo | null; un
 	)
 }
 
+// Leaving the check: the panel held focus for want of a control, so the screen that replaces this one hands
+// it to its own (the composer, the download button). After the commit, once that screen is in the DOM.
+function checkingSpinner(element: Element | null): (() => void) | undefined {
+	if (element === null) {
+		return undefined
+	}
+
+	return () => {
+		queueMicrotask(() => {
+			const panel = document.getElementById(ASSISTANT_PANEL_ID)
+
+			if (panel !== null && document.activeElement === panel) {
+				assistantInitialFocusTarget(panel)?.focus()
+			}
+		})
+	}
+}
+
 function SetupBody({ state }: { state: AssistantSetupState }) {
 	const { t } = useTranslation("assistant")
 
 	switch (state.kind) {
+		case "checking":
+			return (
+				<Spinner
+					ref={checkingSpinner}
+					aria-label={t("assistantChecking")}
+					className="size-5 text-muted-foreground"
+				/>
+			)
 		case "unavailable":
 			// Another tab holds the model: nothing to do here, the runtime re-emits the real state once it frees.
 			if (state.reason === "in-use-elsewhere") {

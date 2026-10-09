@@ -41,7 +41,7 @@ import {
 } from "@/features/assistant/store/assistantSession"
 import { createMockAssistantSession, MOCK_ASSISTANT_MODEL } from "@/features/assistant/store/mockAssistantSession"
 import { createAssistantSession } from "@/features/assistant/loop/session"
-import type { TranscriptEntry } from "@/features/assistant/store/transcript"
+import { awaitingConfirmation, type TranscriptEntry } from "@/features/assistant/store/transcript"
 import type { AssistantToolExecution } from "@/features/assistant/runtime/executor"
 import type { AssistantEvent, AssistantSession, AssistantStep } from "@/features/assistant/types"
 import { call, fakeExecutor, fakeRuntime, ScriptedModel } from "@/tests/support/assistantFakes"
@@ -285,9 +285,8 @@ describe("session wiring", () => {
 		vi.runAllTimers()
 
 		expect(state().entries.find(entry => entry.id === "proposal:turn-1:call_1_0")).toMatchObject({ status: "pending" })
-		// The composer shows Stop: nothing else goes out while the card waits.
 		expect(state().activeTurnId).toBe("turn-1")
-		expect(sendAssistantMessage("copy those")).toBe(false)
+		expect(awaitingConfirmation(state())).toBe(true)
 
 		rejectAssistantProposal("turn-1:call_1_0")
 
@@ -471,7 +470,6 @@ describe("with the real session", () => {
 
 		expect(card.status).toBe("pending")
 		expect(state().activeTurnId).not.toBeNull()
-		expect(sendAssistantMessage("something else")).toBe(false)
 
 		confirmAssistantProposal(card.proposal.id)
 		confirmAssistantProposal(card.proposal.id)
@@ -485,6 +483,28 @@ describe("with the real session", () => {
 
 		expect(cardStatus(card.id)).toBe("done")
 		expect(drafts(executor)).toBe(1)
+	})
+
+	it("sends a message typed while a card waits: the card expires and the old turn goes without a Stopped row", async () => {
+		const { executor } = draftSession()
+
+		sendAssistantMessage("Tell Maria I'm running late")
+
+		const card = await waitForCard()
+		const first = card.turnId
+
+		// While only the card waits, sending is open again; before that a turn refuses a second message.
+		expect(sendAssistantMessage("No, tell her I'm on time")).toBe(true)
+		expect(state().activeTurnId).not.toBe(first)
+		expect(cardStatus(card.id)).toBe("expired")
+		expect(sendAssistantMessage("And one more")).toBe(false)
+
+		await vi.waitFor(() => {
+			expect(state().activeTurnId).toBeNull()
+		})
+
+		expect(state().entries.some(entry => entry.kind === "turnEnd" && entry.turnId === first)).toBe(false)
+		expect(drafts(executor)).toBe(0)
 	})
 
 	for (const [name, end] of [

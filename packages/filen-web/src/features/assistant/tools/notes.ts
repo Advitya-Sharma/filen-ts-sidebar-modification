@@ -158,5 +158,5 @@ export const openNoteTool: ToolAdapter = async (input, scope) => {
 		signal: scope.signal
 	})
 
-	return { value: { opened: noteTitle(note) }, uiEffect: { type: "navigated", pathname: `/notes/${note.uuid}` } }
+	return { value: { opened: noteTitle(note) } }
 }

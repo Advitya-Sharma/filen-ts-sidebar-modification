@@ -1,4 +1,5 @@
 import {
+	isAssistantWebTool,
 	isConsequentialTool,
 	sanitizeUntrustedText,
 	toolInputJsonSchema,
@@ -7,16 +8,18 @@ import {
 	type AssistantTool,
 	type AssistantToolFailure,
 	type AssistantToolName,
-	type AssistantToolProgress
+	type AssistantToolProgress,
+	type AssistantWebToolName
 } from "@filen/shared/assistant"
 import { log } from "@/lib/log"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 import { findCachedListingItem } from "@/features/drive/queries/drive"
-import type { AssistantHandleRef, ToolExecutor } from "@/features/assistant/runtime/executor"
+import type { AssistantHandleRef, AssistantPreviewTarget, ToolExecutor } from "@/features/assistant/runtime/executor"
 import { AssistantHandleRegistry, ROOT_HANDLE, type AssistantEntityKind } from "@/features/assistant/tools/handles"
-import { AssistantToolError, sanitizeStrings } from "@/features/assistant/tools/format"
+import { AssistantToolError, sanitizeStrings, unlessStopped } from "@/features/assistant/tools/format"
 import {
 	chatName,
+	chatRecipients,
 	driveName,
 	entityName,
 	freshDriveItem,
@@ -161,12 +164,12 @@ const openRouteTool: ToolAdapter = async (input, scope) => {
 		throw new AssistantToolError(`"${route}" is not available in the web app`)
 	}
 
-	return { value: { opened: route }, uiEffect: { type: "navigated", pathname: router.state.location.pathname } }
+	return { value: { opened: route } }
 }
 
-// Phase-2 writes (favorite, create, rename, move, copy, trash, note flags, playlist adds) have no adapter
-// yet: each will run the user's own action module after a confirmed card.
-const ADAPTERS: Partial<Record<AssistantToolName, ToolAdapter>> = {
+// Exactly the tools @filen/shared lists as the web app's (ASSISTANT_WEB_TOOLS, which the eval measures). Any
+// other is not offered: the loop tells the model it is not available in this app.
+const ADAPTERS: Record<AssistantWebToolName, ToolAdapter> = {
 	get_context: (_input, scope) => Promise.resolve({ value: { context: describeContext(scope) } }),
 	search_items: searchItemsTool,
 	list_directory: listDirectoryTool,
@@ -196,7 +199,7 @@ const ADAPTERS: Partial<Record<AssistantToolName, ToolAdapter>> = {
 
 interface ResolvedArgs {
 	args: Record<string, unknown>
-	targets: AssistantHandleRef[]
+	targets: AssistantPreviewTarget[]
 	text: Record<string, string>
 }
 
@@ -212,21 +215,6 @@ function failureOf(error: AssistantToolError): AssistantToolFailure {
 
 function isBlank(value: unknown): boolean {
 	return (typeof value === "string" && value.trim().length === 0) || (Array.isArray(value) && value.length === 0)
-}
-
-// Settles with the adapter, or as stopped as soon as the turn is: a read waiting on an offline fetch or a
-// blocked navigation does not hold the turn.
-function unlessStopped<T>(work: Promise<T>, signal: AssistantSignal): Promise<T> {
-	return new Promise((resolve, reject) => {
-		const onAbort = () => {
-			reject(new AssistantToolError("Stopped"))
-		}
-
-		signal.addEventListener("abort", onAbort, { once: true })
-		void work.then(resolve, reject).finally(() => {
-			signal.removeEventListener("abort", onAbort)
-		})
-	})
 }
 
 // Checks a tool needs before its confirmation card shows, so the user never confirms a call that then fails.
@@ -276,7 +264,7 @@ export function createAssistantToolExecutor(): ToolExecutor {
 		const args: Record<string, unknown> = Object.fromEntries(
 			Object.entries(input).filter(([key, value]) => kinds[key] === undefined || required.has(key) || !isBlank(value))
 		)
-		const targets: AssistantHandleRef[] = []
+		const targets: AssistantPreviewTarget[] = []
 		const text: Record<string, string> = {}
 
 		const shape = TEXT_ARGS[tool.name as AssistantToolName] ?? {}
@@ -286,7 +274,11 @@ export function createAssistantToolExecutor(): ToolExecutor {
 
 			if (allowed === undefined) {
 				if (typeof value === "string") {
-					text[key] = shape[key]?.(value) ?? value
+					const shaped = shape[key]?.(value) ?? value
+
+					// The guard, the card and the adapter all read this one string.
+					args[key] = shaped
+					text[key] = shaped
 				}
 
 				continue
@@ -306,7 +298,7 @@ export function createAssistantToolExecutor(): ToolExecutor {
 				const resolved = scope.show(entity, name)
 
 				handles.push(resolved)
-				targets.push({ handle: resolved, name })
+				targets.push({ handle: resolved, name, ...(entity.kind === "chat" ? { recipients: chatRecipients(entity.chat) } : {}) })
 			}
 
 			args[key] = Array.isArray(value) ? handles : handles[0]
@@ -323,13 +315,13 @@ export function createAssistantToolExecutor(): ToolExecutor {
 			return Promise.resolve({ description, handles: [ROOT_HANDLE, ...shown.keys()] })
 		},
 
-		supports: tool => ADAPTERS[tool.name as AssistantToolName] !== undefined,
+		supports: tool => isAssistantWebTool(tool.name),
 
 		check: async ({ tool, args }) => {
 			const shown = new Map<string, AssistantHandleRef>()
 			const scope = scopeFor(undefined, shown)
 
-			if (ADAPTERS[tool.name as AssistantToolName] === undefined) {
+			if (!isAssistantWebTool(tool.name)) {
 				return failureOf(notAvailable(tool))
 			}
 
@@ -364,11 +356,11 @@ export function createAssistantToolExecutor(): ToolExecutor {
 		execute: async ({ tool, args, confirmed, signal, onProgress, calendar }) => {
 			const shown = new Map<string, AssistantHandleRef>()
 			const scope = scopeFor(signal, shown, onProgress, calendar)
-			const adapter = ADAPTERS[tool.name as AssistantToolName]
-
-			if (adapter === undefined) {
+			if (!isAssistantWebTool(tool.name)) {
 				return failureOf(notAvailable(tool))
 			}
+
+			const adapter = ADAPTERS[tool.name]
 
 			if (isConsequentialTool(tool) && !confirmed) {
 				return failureOf(new AssistantToolError("This needs the user's confirmation first"))
@@ -388,8 +380,7 @@ export function createAssistantToolExecutor(): ToolExecutor {
 				return {
 					ok: true,
 					result: sanitizeStrings(output.value, []),
-					returned: [...shown.values()],
-					...(output.uiEffect === undefined ? {} : { uiEffect: output.uiEffect })
+					returned: [...shown.values()]
 				}
 			} catch (e) {
 				if (e instanceof AssistantToolError) {

@@ -53,8 +53,10 @@ function EmptyConversation() {
 	)
 }
 
-// Polite announcements of what the turn is doing (each step as it starts, never its progress or time) and
-// of the reply once the turn settles, never per token: the streaming bubble itself is not a live region.
+// Polite announcements of what the turn is doing (each step as it starts, never its progress or time), of a
+// card as it starts waiting (its title, who a draft reaches and the draft itself, which is what the user
+// confirms), and of the reply once the turn settles, never per token: the streaming bubble itself is not a
+// live region.
 function Announcer({ entries }: { entries: readonly TranscriptEntry[] }) {
 	const { t } = useTranslation("assistant")
 	const activeTurnId = useAssistantStore(state => state.activeTurnId)
@@ -66,13 +68,27 @@ function Announcer({ entries }: { entries: readonly TranscriptEntry[] }) {
 	if (activeTurnId !== null) {
 		const steps = entries.findLast(entry => entry.kind === "steps" && entry.turnId === activeTurnId)
 		const step = steps?.kind === "steps" ? currentStep(steps) : null
+		const card = entries.findLast(entry => entry.kind === "proposal" && entry.turnId === activeTurnId && entry.status === "pending")
 
-		if (step === null) {
+		if (step?.status === "waiting" && card?.kind === "proposal") {
+			const { proposal } = card
+			const recipients = proposal.targets[0]?.recipients ?? []
+
+			text = [
+				t("assistantProposalAnnouncement", { title: proposalTitle(proposal) }),
+				...(proposal.action === "draft-message"
+					? [
+							...(recipients.length > 0 ? [t("assistantProposalDraftTo", { recipients: recipients.join(", ") })] : []),
+							proposal.text["text"] ?? ""
+						]
+					: [])
+			].join("\n")
+		} else if (step === null) {
 			text = t("assistantResponding")
 		} else {
 			const { label, detail } = stepText(step)
 
-			text = detail === null ? label : `${label}, ${detail}`
+			text = detail === null ? label : t("assistantStepAnnouncement", { label, detail })
 		}
 	} else if (settled !== null) {
 		const parts: string[] = []
@@ -84,8 +100,6 @@ function Announcer({ entries }: { entries: readonly TranscriptEntry[] }) {
 
 			if (entry.kind === "reply") {
 				parts.push(spokenText(entry.text))
-			} else if (entry.kind === "proposal" && entry.status === "pending") {
-				parts.push(t("assistantProposalAnnouncement", { title: proposalTitle(entry.proposal) }))
 			} else if (entry.kind === "turnEnd") {
 				parts.push(t(TURN_END_KEYS[entry.outcome]))
 			}

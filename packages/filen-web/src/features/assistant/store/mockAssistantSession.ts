@@ -22,7 +22,7 @@ export const MOCK_ASSISTANT_MODEL: AssistantModelInfo = {
 	sizeBytes: 2_740_000_000
 }
 
-const PROPOSAL_PATTERN = /\b(draft|move|copy|trash|download)\b/i
+const PROPOSAL_PATTERN = /\b(draft|move|copy|trash)\b/i
 
 const PROPOSAL_TOOLS: Partial<Record<string, string>> = {
 	draft: "draft_chat_message",
@@ -47,17 +47,15 @@ function mockProposal(id: string, verb: string): AssistantProposal {
 			return {
 				id,
 				action: "draft-message",
-				targets: [{ handle: "c1", name: "Family" }],
+				targets: [{ handle: "c1", name: "Family", recipients: ["anna@example.com", "tom@example.com"] }],
 				destination: null,
 				text: { text: "Running late, see you at 8!" }
 			}
 		case "move":
 		case "copy":
 			return { id, action: verb, targets: FILE_TARGETS, destination: "Documents/Archive", text: {} }
-		case "trash":
-			return { id, action: "trash", targets: FILE_TARGETS, destination: null, text: {} }
 		default:
-			return { id, action: "download", targets: FILE_TARGETS, destination: null, text: {} }
+			return { id, action: "trash", targets: FILE_TARGETS, destination: null, text: {} }
 	}
 }
 
@@ -252,7 +250,7 @@ export function createMockAssistantSession({
 				kind: "tool",
 				status: "waiting",
 				progress: null,
-				tool: PROPOSAL_TOOLS[verb] ?? "download_items",
+				tool: PROPOSAL_TOOLS[verb] ?? "trash_items",
 				subject: proposal.targets.length === 1 ? (proposal.targets[0]?.name ?? null) : null,
 				resultCount: null,
 				resultMore: false,

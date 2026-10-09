@@ -3,6 +3,7 @@ import {
 	AssistantContextError,
 	AssistantMessageTooLongError,
 	estimateTokens,
+	messageFitsContext,
 	runAssistantTurn,
 	type AssistantConfirmationRequest,
 	type AssistantHistoryTurn,
@@ -46,8 +47,8 @@ export interface AssistantRuntimeLike {
 	shutdown(): void
 }
 
-// Prior exchanges kept for context, at most this many and, newest first, about this many tokens: every turn
-// reads them all again, and an exchange from long ago rarely matters to the next request.
+// Prior exchanges kept for context, at most this many and about this many tokens: an exchange from long ago
+// rarely matters to the next request.
 const HISTORY_MAX = 12
 const HISTORY_MAX_TOKENS = 1800
 
@@ -55,21 +56,35 @@ const HISTORY_MAX_TOKENS = 1800
 // card is the user's to answer, not a reason to hold ~4 GB indefinitely.
 export const CARD_EXPIRY_MS = 10 * 60_000
 
-// The exchanges a turn reads: the newest that fit the token budget, and always the last one.
-export function recentHistory(history: readonly AssistantHistoryTurn[]): AssistantHistoryTurn[] {
+function exchangeTokens(exchange: AssistantHistoryTurn): number {
+	return estimateTokens(exchange.prompt ?? exchange.user) + estimateTokens(exchange.reply)
+}
+
+// The exchanges the next turns read, after one was added. Within the budget they only ever grow, so each
+// turn's prompt continues the last one and the engine reads just the new exchange: it reuses a cached prompt
+// only up to the first difference, and dropping the oldest exchange would put that difference at the start.
+// Over the budget they are cut at once to the newest that fit half of it (always the last), so a full
+// re-read comes every few turns instead of on each.
+export function windowHistory(history: readonly AssistantHistoryTurn[]): AssistantHistoryTurn[] {
+	const total = history.reduce((sum, exchange) => sum + exchangeTokens(exchange), 0)
+
+	if (history.length <= HISTORY_MAX && total <= HISTORY_MAX_TOKENS) {
+		return history.slice()
+	}
+
 	const kept: AssistantHistoryTurn[] = []
 	let tokens = 0
 
-	for (let index = history.length - 1; index >= 0 && kept.length < HISTORY_MAX; index--) {
+	for (let index = history.length - 1; index >= 0 && kept.length < HISTORY_MAX / 2; index--) {
 		const exchange = history[index]
 
 		if (exchange === undefined) {
 			break
 		}
 
-		tokens += estimateTokens(exchange.user) + estimateTokens(exchange.reply)
+		tokens += exchangeTokens(exchange)
 
-		if (kept.length > 0 && tokens > HISTORY_MAX_TOKENS) {
+		if (kept.length > 0 && tokens > HISTORY_MAX_TOKENS / 2) {
 			break
 		}
 
@@ -306,10 +321,9 @@ function nonce(): string {
 	return randomHex(6)
 }
 
-// Drawn once per conversation, so its system prompt reads the same on every turn. The marker is as long as
-// the one the eval measured: it wraps every untrusted string, so each character costs prompt tokens.
-function conversationSecrets(): { canary: string; marker: string } {
-	return { canary: randomHex(6), marker: randomHex(3) }
+// Drawn once per conversation, so its system prompt reads the same on every turn.
+function conversationSecrets(): { canary: string } {
+	return { canary: randomHex(6) }
 }
 
 interface PendingProposal {
@@ -362,6 +376,17 @@ export function createAssistantSession({
 		message: string
 		controller: AbortController
 	}): Promise<void> {
+		// Refused before anything loads: a message too long for even a first step would load ~4 GB for nothing.
+		if (!messageFitsContext(message, runtime.model.contextTokens)) {
+			if (active === controller) {
+				active = null
+			}
+
+			emit({ type: "turn-end", turnId, at: now(), outcome: "error", error: "message-too-long" })
+
+			return
+		}
+
 		const release = runtime.hold()
 		const turnConversation = conversation
 		// One calendar per turn: the prompt's date line and every date filter its tools resolve.
@@ -371,6 +396,8 @@ export function createAssistantSession({
 		let segmentHasText = false
 		const steps = turnSteps({ turnId, emit, now })
 		let winding: Promise<unknown> = Promise.resolve()
+		// A card left unanswered ended the turn, which says so instead of reading as stopped by the user.
+		const card = { expired: false }
 
 		const onEvent = (event: AssistantTurnEvent) => {
 			steps.event(event)
@@ -429,6 +456,7 @@ export function createAssistantSession({
 				const check = () => {
 					if (Date.now() >= deadline) {
 						// The whole turn ends: its hold goes, and the card expires with it.
+						card.expired = true
 						controller.abort()
 					} else {
 						clearTimeout(timer)
@@ -472,7 +500,7 @@ export function createAssistantSession({
 			const run = runAssistantTurn({
 				model: runtime.model,
 				executor: turn.shared,
-				history: recentHistory(history),
+				history,
 				message,
 				signal: controller.signal,
 				onEvent,
@@ -493,7 +521,7 @@ export function createAssistantSession({
 
 			if (turnConversation === conversation && replied) {
 				// A withheld reply is not shown, so the model does not read it back either.
-				history = [...history, { user: message, reply: result.withheld ? "" : result.reply }].slice(-HISTORY_MAX)
+				history = windowHistory([...history, { user: message, reply: result.withheld ? "" : result.reply, prompt: result.prompt }])
 			}
 
 			steps.close("done")
@@ -507,7 +535,9 @@ export function createAssistantSession({
 
 			steps.close(cancelled ? "stopped" : "failed")
 
-			if (cancelled) {
+			if (cancelled && card.expired) {
+				emit({ type: "turn-end", turnId, at: now(), outcome: "error", error: "expired" })
+			} else if (cancelled) {
 				emit({ type: "turn-end", turnId, at: now(), outcome: "cancelled" })
 			} else if (e instanceof AssistantMessageTooLongError) {
 				emit({ type: "turn-end", turnId, at: now(), outcome: "error", error: "message-too-long" })
@@ -637,7 +667,7 @@ export function createAssistantSession({
 			active?.abort()
 			conversation++
 			secrets = conversationSecrets()
-			history = resumed.slice(-HISTORY_MAX).map(({ user, reply }) => ({ user, reply }))
+			history = windowHistory(resumed.map(({ user, reply }) => ({ user, reply })))
 			executor.reset(history)
 		},
 

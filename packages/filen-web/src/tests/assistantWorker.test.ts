@@ -224,8 +224,10 @@ describe("assistant worker API", () => {
 			n_gpu_layers: 0,
 			jinja: true,
 			reasoning: false,
-			n_batch: 512,
-			n_ubatch: 512
+			n_batch: 128,
+			n_ubatch: 128,
+			// Enough for the next turn to resume from the first step of a turn that used every step.
+			n_ctx_checkpoints: 7
 		})
 	})
 
@@ -360,6 +362,7 @@ describe("assistant worker API", () => {
 						parameters: { type: "object", properties: { query: { type: "string" } }, additionalProperties: false }
 					}
 				],
+				slot: "main",
 				maxTokens: 384
 			},
 			update => updates.push(update)
@@ -389,7 +392,7 @@ describe("assistant worker API", () => {
 
 	it("passes a grammar instead of tools for constrained decoding", async () => {
 		await api.load(MANIFEST, OPTIONS)
-		await api.generate(2, { messages: [{ role: "user", content: "x" }], grammar: 'root ::= "a"', maxTokens: 8 })
+		await api.generate(2, { messages: [{ role: "user", content: "x" }], grammar: 'root ::= "a"', slot: "router", maxTokens: 8 })
 
 		const options = engines[0]?.createChatCompletion.mock.calls[0]?.[0] as Record<string, unknown>
 
@@ -438,7 +441,7 @@ describe("assistant worker API", () => {
 				})
 			})
 
-		const stopped = api.generate(1, { messages: [], maxTokens: 1 })
+		const stopped = api.generate(1, { messages: [], slot: "main", maxTokens: 1 })
 
 		api.cancel(1)
 		await expect(stopped).rejects.toMatchObject({ name: "AbortError" })
@@ -452,13 +455,19 @@ describe("assistant worker API", () => {
 			await api.load(MANIFEST, OPTIONS)
 			completion.run = () => Promise.reject(crash)
 
-			await expect(api.generate(2, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelRuntimeError:crashed" })
+			await expect(api.generate(2, { messages: [], slot: "main", maxTokens: 1 })).rejects.toMatchObject({
+				name: "ModelRuntimeError:crashed"
+			})
 			expect(engines.at(-1)?.exit).toHaveBeenCalled()
-			await expect(api.generate(3, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelRuntimeError:crashed" })
+			await expect(api.generate(3, { messages: [], slot: "main", maxTokens: 1 })).rejects.toMatchObject({
+				name: "ModelRuntimeError:crashed"
+			})
 		}
 
 		await api.unload()
-		await expect(api.generate(4, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelLoadError:missing" })
+		await expect(api.generate(4, { messages: [], slot: "main", maxTokens: 1 })).rejects.toMatchObject({
+			name: "ModelLoadError:missing"
+		})
 	})
 
 	it("reads the router's system turn as the last step of the load, as the router request's ChatML prefix", async () => {
@@ -522,13 +531,13 @@ describe("assistant worker API", () => {
 
 		await api.load(MANIFEST, OPTIONS)
 
-		const first = api.generate(1, { messages: [], maxTokens: 1 })
-		const stopped = api.generate(2, { messages: [], maxTokens: 1 })
+		const first = api.generate(1, { messages: [], slot: "main", maxTokens: 1 })
+		const stopped = api.generate(2, { messages: [], slot: "main", maxTokens: 1 })
 
 		api.cancel(2)
 		await expect(stopped).rejects.toMatchObject({ name: "AbortError" })
 
-		const next = api.generate(3, { messages: [], maxTokens: 1 })
+		const next = api.generate(3, { messages: [], slot: "main", maxTokens: 1 })
 
 		await new Promise(resolve => setTimeout(resolve, 10))
 		expect(order).toEqual([])
@@ -538,13 +547,87 @@ describe("assistant worker API", () => {
 		expect(engines[0]?.createChatCompletion).toHaveBeenCalledTimes(2)
 	})
 
+	it("primes the router's prompt again after a turn whose routing found it gone, and only then", async () => {
+		const routerRequest = {
+			messages: [
+				{ role: "system" as const, content: "Route." },
+				{ role: "user" as const, content: "x" }
+			],
+			grammar: "g",
+			slot: "router" as const,
+			maxTokens: 8
+		}
+		let reused = 600
+
+		completion.run = ({ onData }) => {
+			onData({
+				choices: [{ index: 0, delta: { content: "files read" }, finish_reason: null, logprobs: null }],
+				prompt_progress: { total: 620, cache: reused, processed: 620, time_ms: 0 }
+			})
+
+			return Promise.resolve()
+		}
+
+		await api.load(MANIFEST, { ...OPTIONS, primeSystem: "Route." })
+
+		const engine = engines[0]
+
+		await api.generate(1, routerRequest)
+		await api.reprime()
+		expect(engine?.createCompletion).toHaveBeenCalledTimes(1)
+
+		reused = 0
+		await api.generate(2, routerRequest)
+		await api.reprime()
+		expect(engine?.createCompletion).toHaveBeenCalledTimes(2)
+		expect(engine?.createCompletion.mock.calls[1]?.[0]).toMatchObject({ max_tokens: 1 })
+
+		// Once is enough until a router request finds it gone again.
+		await api.reprime()
+		expect(engine?.createCompletion).toHaveBeenCalledTimes(2)
+
+		// A second extraction of one turn may have taken the router's slot.
+		reused = 600
+		await api.generate(3, routerRequest)
+		await api.generate(4, { messages: [], slot: "extraction", maxTokens: 8 })
+		await api.reprime()
+		expect(engine?.createCompletion).toHaveBeenCalledTimes(2)
+		await api.generate(5, { messages: [], slot: "extraction", maxTokens: 8 })
+		await api.reprime()
+		expect(engine?.createCompletion).toHaveBeenCalledTimes(3)
+	})
+
+	it("reads prompts in smaller batches on the CPU path, so a stop lands sooner", async () => {
+		await api.load(MANIFEST, OPTIONS)
+		await api.unload()
+		await api.load(MANIFEST, { ...OPTIONS, backend: "webgpu" })
+
+		expect(engines[0]?.loadModel.mock.calls[0]?.[1]).toMatchObject({ n_batch: 128, n_ubatch: 128 })
+		expect(engines[1]?.loadModel.mock.calls[0]?.[1]).toMatchObject({ n_batch: 512, n_ubatch: 512 })
+	})
+
+	it("renders the tools of a closing request without letting it call one", async () => {
+		await api.load(MANIFEST, OPTIONS)
+		await api.generate(1, {
+			messages: [{ role: "user", content: "x" }],
+			tools: [
+				{ name: "search_items", description: "Search", parameters: { type: "object", properties: {}, additionalProperties: false } }
+			],
+			toolChoice: "none",
+			slot: "main",
+			maxTokens: 8
+		})
+
+		expect(engines[0]?.createChatCompletion.mock.calls[0]?.[0]).toMatchObject({ tool_choice: "none" })
+	})
+
 	it("does not prime a model whose template is not ChatML, nor when no system turn is given", async () => {
 		raw.template = "{{ bos_token }}[INST]"
 		await api.load(MANIFEST, { ...OPTIONS, primeSystem: "Route requests." })
 		await api.unload()
 		raw.template = "{{- '<|im_start|>' }}"
 		await api.load(MANIFEST, OPTIONS)
-		await api.generate(1, { messages: [], maxTokens: 1 })
+		await api.generate(1, { messages: [], slot: "main", maxTokens: 1 })
 
 		expect(engines.map(engine => engine.createCompletion.mock.calls.length)).toEqual([0, 0])
 	})
@@ -556,12 +639,14 @@ describe("assistant worker API", () => {
 			name: "ModelLoadError:load-failed"
 		})
 		expect(engines[0]?.exit).toHaveBeenCalled()
-		await expect(api.generate(1, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelLoadError:missing" })
+		await expect(api.generate(1, { messages: [], slot: "main", maxTokens: 1 })).rejects.toMatchObject({
+			name: "ModelLoadError:missing"
+		})
 
 		raw.run = () => Promise.reject(new WllamaError("no free slot", "inference_error"))
 
 		await api.load(MANIFEST, { ...OPTIONS, backend: "webgpu", primeSystem: "Route requests." })
-		await expect(api.generate(2, { messages: [], maxTokens: 1 })).resolves.toMatchObject({ content: "Hi" })
+		await expect(api.generate(2, { messages: [], slot: "main", maxTokens: 1 })).resolves.toMatchObject({ content: "Hi" })
 		expect(engines[1]?.exit).not.toHaveBeenCalled()
 	})
 
@@ -580,7 +665,7 @@ describe("assistant worker API", () => {
 					}, 20)
 				})
 			})
-		const running = api.generate(1, { messages: [], maxTokens: 1 }).catch(() => undefined)
+		const running = api.generate(1, { messages: [], slot: "main", maxTokens: 1 }).catch(() => undefined)
 
 		await vi.waitFor(() => {
 			expect(engine?.createChatCompletion).toHaveBeenCalled()
@@ -600,7 +685,11 @@ describe("assistant worker API", () => {
 			return Promise.resolve()
 		}
 
-		await expect(api.generate(1, { messages: [], maxTokens: 1 })).resolves.toEqual({ content: "cut", toolCalls: [], truncated: true })
+		await expect(api.generate(1, { messages: [], slot: "main", maxTokens: 1 })).resolves.toEqual({
+			content: "cut",
+			toolCalls: [],
+			truncated: true
+		})
 	})
 
 	it("unloads the engine", async () => {
@@ -611,6 +700,8 @@ describe("assistant worker API", () => {
 		await api.unload()
 
 		expect(engine?.exit).toHaveBeenCalled()
-		await expect(api.generate(3, { messages: [], maxTokens: 1 })).rejects.toMatchObject({ name: "ModelLoadError:missing" })
+		await expect(api.generate(3, { messages: [], slot: "main", maxTokens: 1 })).rejects.toMatchObject({
+			name: "ModelLoadError:missing"
+		})
 	})
 })

@@ -8,12 +8,20 @@ import {
 	type AssistantModel,
 	type AssistantPromptProgress,
 	type AssistantSignal,
+	QUARANTINE_CONTEXT_TOKENS,
+	ROUTER_CONTEXT_TOKENS,
 	ROUTER_SYSTEM_PROMPT
 } from "@filen/shared/assistant"
 import type { AssistantModelInfo, AssistantModelState } from "@/features/assistant/types"
 import { DEFAULT_MODEL_BASE_URL, manifestBytes, parseManifest, type AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import { QWEN35_4B } from "@/features/assistant/runtime/models"
-import { probeDevice, recommendRuntime, storageVerdict, type RuntimeRecommendation } from "@/features/assistant/runtime/deviceCheck"
+import {
+	probeDevice,
+	recommendRuntime,
+	storageVerdict,
+	type AssistantBackend,
+	type RuntimeRecommendation
+} from "@/features/assistant/runtime/deviceCheck"
 import { deleteModels, inspectModel, otherModelPresent } from "@/features/assistant/runtime/modelStore"
 import { autoStartIntent, readDownloadIntent, writeDownloadIntent } from "@/features/assistant/runtime/downloadIntent"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
@@ -30,6 +38,10 @@ import { log } from "@/lib/log"
 
 export const ASSISTANT_CONTEXT_TOKENS = 8192
 
+// The engine's cache holds the router's and the content extraction's prompts beside the main loop's, so it
+// is sized to all three: one that overflows clears idle slots and loses what they cached (~32 KiB a token).
+export const ENGINE_CONTEXT_TOKENS = ASSISTANT_CONTEXT_TOKENS + ROUTER_CONTEXT_TOKENS + QUARANTINE_CONTEXT_TOKENS
+
 const LOCK = "filen-assistant-model"
 
 // Unused this long, the model leaves memory, panel open or not. It holds ~4 GB of RAM/VRAM while a reload
@@ -41,8 +53,10 @@ export const IDLE_UNLOAD_MS = 10 * 60_000
 const EXIT_GRACE_MS = 1000
 
 // After Stop, how long a generation may take to wind down before its engine counts as stuck and the worker
-// is replaced: on the CPU path one engine step (a prompt batch) can take seconds.
-const STOP_WATCHDOG_MS = 10_000
+// is replaced: a stop lands between prompt batches, a fraction of a second on the GPU and up to several
+// seconds on the CPU path even at its smaller batch (two threads), where replacing a worker that would have
+// settled costs a full reload.
+const STOP_WATCHDOG_MS: Readonly<Record<AssistantBackend, number>> = { webgpu: 10_000, cpu: 60_000 }
 
 type Settled = AssistantModelState["kind"]
 
@@ -107,7 +121,6 @@ function stopWorker(handle: WorkerHandle): void {
 	handle.worker.terminate()
 }
 
-// A dev build without a configured host serves the GGUF named by FILEN_ASSISTANT_DEV_GGUF (vite/assistant-model.ts).
 // The signed-in account the download's opt-in belongs to. The shell reads the account anyway, so this
 // shares its cached or in-flight read.
 async function signedInAccount(): Promise<string | null> {
@@ -118,6 +131,7 @@ async function signedInAccount(): Promise<string | null> {
 	return account === undefined ? null : String(account.id)
 }
 
+// A dev build without a configured host serves the GGUF named by FILEN_ASSISTANT_DEV_GGUF (vite/assistant-model.ts).
 async function resolveModel(): Promise<{ manifest: AssistantModelManifest; baseUrl: string }> {
 	const configured = import.meta.env.VITE_ASSISTANT_MODEL_BASE_URL
 
@@ -156,6 +170,8 @@ export class AssistantRuntime implements AssistantModel {
 	private releaseLock: (() => void) | null = null
 	private watchingLock = false
 	private tokenList: readonly string[] = []
+	// What the loaded model runs on.
+	private backend: AssistantBackend = "webgpu"
 	private idleTimer: ReturnType<typeof setTimeout> | undefined
 	// Wall-clock time of the last activity: it keeps counting while the machine sleeps, so the first check
 	// after waking unloads a model that sat unused across the sleep.
@@ -175,8 +191,9 @@ export class AssistantRuntime implements AssistantModel {
 	// Signed out: nothing starts again on this page.
 	private shutDown = false
 
+	// Nothing is known until the startup check ran: the panel shows neither the opt-in nor the conversation.
 	constructor() {
-		this.state = { kind: "not-downloaded", model: this.info() }
+		this.state = { kind: "checking", model: this.info() }
 	}
 
 	get specialTokens(): readonly string[] {
@@ -473,6 +490,12 @@ export class AssistantRuntime implements AssistantModel {
 			released = true
 			this.busy--
 			this.touch()
+
+			// Between turns: the router's cached prompt is read again if a request found it gone.
+			if (this.busy === 0 && this.state.kind === "ready") {
+				void this.handle?.remote.reprime().catch(() => undefined)
+			}
+
 			this.armIdle()
 		}
 	}
@@ -740,7 +763,7 @@ export class AssistantRuntime implements AssistantModel {
 				{
 					backend: recommendation.backend,
 					threads: recommendation.threads,
-					contextTokens: ASSISTANT_CONTEXT_TOKENS,
+					contextTokens: ENGINE_CONTEXT_TOKENS,
 					primeSystem: ROUTER_SYSTEM_PROMPT
 				},
 				Comlink.proxy(() => {
@@ -750,6 +773,8 @@ export class AssistantRuntime implements AssistantModel {
 				})
 			)
 		)
+
+		this.backend = recommendation.backend
 
 		return specialTokens
 	}
@@ -962,7 +987,7 @@ export class AssistantRuntime implements AssistantModel {
 			stuck = setTimeout(() => {
 				log.warn("assistant", "a stopped generation did not wind down")
 				this.workerLost(handle)
-			}, STOP_WATCHDOG_MS)
+			}, STOP_WATCHDOG_MS[this.backend])
 		}
 
 		// One port for every kind of update, opened only when someone listens. Updates travel on that port and

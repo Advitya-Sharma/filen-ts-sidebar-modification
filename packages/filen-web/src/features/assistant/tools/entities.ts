@@ -27,13 +27,13 @@ import type { DriveVariant } from "@/features/drive/lib/preferences"
 import { notesQueryFind, notesQueryGet } from "@/features/notes/queries/notes"
 import { isNoteUndecryptable } from "@/features/notes/lib/sort"
 import { chatsQueryGet } from "@/features/chats/queries/chats"
-import { chatTitle } from "@/features/chats/lib/sort"
+import { chatTitle, otherParticipants } from "@/features/chats/lib/sort"
 import { chatsWithoutBlockedOneOnOne } from "@/features/chats/components/chatsSidebar.logic"
 import { filterNotesByBlockedOwner } from "@/features/notes/components/notesSidebar.logic"
 import { playlistsQueryGet } from "@/features/audio/queries/playlists"
 import { AssistantToolError, matchScore, sameName, searchTokens } from "@/features/assistant/tools/format"
 import type { AssistantEntity, AssistantEntityKind, AssistantHandleRegistry } from "@/features/assistant/tools/handles"
-import type { AssistantHandleRef, AssistantUiEffect } from "@/features/assistant/runtime/executor"
+import type { AssistantHandleRef } from "@/features/assistant/runtime/executor"
 import type { UserCalendar } from "@/features/assistant/tools/dates"
 
 // What an adapter gets for one call. `show` registers an item and records that the result mentions it,
@@ -49,7 +49,6 @@ export interface ToolScope {
 
 export interface ToolOutput {
 	value: Record<string, unknown>
-	uiEffect?: AssistantUiEffect
 }
 
 export type ToolAdapter = (input: Record<string, unknown>, scope: ToolScope) => Promise<ToolOutput>
@@ -112,6 +111,12 @@ export function noteTitle(note: Note): string {
 
 export function chatName(chat: Chat): string {
 	return chatTitle(chat, currentUserId(), i18n.t("common:cannotDecryptTitle"), i18n.t("chats:chatJustYou"))
+}
+
+// Who a draft to `chat` reaches, by address: a contact chooses their own display name and a group's owner
+// its name, but an account's address is its own.
+export function chatRecipients(chat: Chat): string[] {
+	return otherParticipants(chat, currentUserId()).map(participant => participant.email)
 }
 
 export function participantName(participant: { email: string; nickName: string | undefined }): string {

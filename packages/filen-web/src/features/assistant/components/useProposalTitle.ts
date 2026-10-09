@@ -17,8 +17,6 @@ export function useProposalTitle(): (proposal: AssistantProposal) => string {
 				return t("assistantProposalCopy", { count })
 			case "trash":
 				return t("assistantProposalTrash", { count })
-			case "download":
-				return t("assistantProposalDownload", { count })
 			case "rename":
 				return t("assistantProposalRename", { count })
 			case "favorite":

@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from "vitest"
 import {
 	assistantDateLine,
+	assistantToolByName,
 	localeWeekStart,
 	ROUTER_GRAMMAR,
 	type AssistantGenerateRequest,
 	type AssistantGenerateResult,
 	type AssistantModel
 } from "@filen/shared/assistant"
-import { CARD_EXPIRY_MS, createAssistantSession, recentHistory, turnSteps } from "@/features/assistant/loop/session"
+import { CARD_EXPIRY_MS, createAssistantSession, turnSteps, windowHistory } from "@/features/assistant/loop/session"
+import { buildProposal } from "@/features/assistant/loop/executorAdapter"
 import type { AssistantEvent } from "@/features/assistant/types"
 import { call, fakeExecutor, fakeRuntime, INFO, NAMES, ScriptedModel, waitFor, type GenerateOptions } from "@/tests/support/assistantFakes"
 
@@ -741,9 +743,14 @@ describe("assistant session", () => {
 		await waitFor(events, event => event.type === "turn-end" && event.turnId === first)
 
 		expect(seen.some(messages => messages.includes("Where is my tax file?") && messages.includes("In Documents."))).toBe(true)
+		// The new exchange keeps the user's turn as the model read it, so the next turn reads it unchanged.
 		expect(session.getHistory()).toEqual([
 			{ user: "Where is my tax file?", reply: "In Documents." },
-			{ user: "And the receipts?", reply: "The receipts are in Scans." }
+			{
+				user: "And the receipts?",
+				reply: "The receipts are in Scans.",
+				prompt: expect.stringMatching(/\n\nAnd the receipts\?$/) as unknown
+			}
 		])
 
 		session.reset()
@@ -754,7 +761,7 @@ describe("assistant session", () => {
 		await waitFor(events, event => event.type === "turn-end" && event.turnId === second)
 
 		expect(seen.flat()).not.toContain("Where is my tax file?")
-		expect(session.getHistory()).toEqual([{ user: "Hi", reply: "Hello." }])
+		expect(session.getHistory()).toEqual([{ user: "Hi", reply: "Hello.", prompt: expect.stringMatching(/\n\nHi$/) as unknown }])
 	})
 
 	it("keeps a turn stopped by a reset out of the next conversation's history", async () => {
@@ -864,7 +871,8 @@ describe("assistant session", () => {
 				expect(runtime.holds).toBe(0)
 			})
 
-			expect(events.find(event => event.type === "turn-end")).toMatchObject({ outcome: "cancelled" })
+			// Not the user's Stop: the turn says the confirmation timed out.
+			expect(events.find(event => event.type === "turn-end")).toMatchObject({ outcome: "error", error: "expired" })
 			expect(executor.executed.map(entry => entry.call.name)).toEqual(["list_chats"])
 		} finally {
 			vi.useRealTimers()
@@ -889,6 +897,72 @@ describe("assistant session", () => {
 		await expect(waitFor(events, event => event.type === "turn-end")).resolves.toMatchObject({ outcome: "cancelled" })
 	})
 
+	it("lets go of the model at Stop while a call's check waits on a listing that never arrives (offline)", async () => {
+		const model = new ScriptedModel({ route: "files read", steps: [call("list_directory", { handle: "/Documents/Taxes" }), "Done."] })
+		const runtime = fakeRuntime(model)
+		const executor = fakeExecutor()
+
+		executor.check = () => new Promise(() => undefined)
+
+		const session = createAssistantSession({ runtime, executor })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("What's in /Documents/Taxes?")
+		await waitFor(events, event => event.type === "step" && event.step.kind === "tool")
+
+		expect(runtime.holds).toBe(1)
+
+		session.cancel()
+
+		await expect(waitFor(events, event => event.type === "turn-end")).resolves.toMatchObject({ outcome: "cancelled" })
+		await vi.waitFor(() => {
+			expect(runtime.holds).toBe(0)
+		})
+	})
+
+	it("replaces a turn that only waits for its card with the next message, without a closing reply", async () => {
+		const requests: AssistantGenerateRequest[] = []
+		const model = new ScriptedModel({
+			route: "chats change",
+			steps: [call("list_chats", { query: "Maria" }), call("draft_chat_message", { chat: "c1", text: "late" }), "Not drafted.", "Hi."]
+		})
+		const generate = model.generate.bind(model)
+
+		model.generate = (request, options) => {
+			requests.push(request)
+
+			return generate(request, options)
+		}
+
+		const session = createAssistantSession({
+			runtime: fakeRuntime(model),
+			executor: fakeExecutor({ list_chats: { chats: [{ handle: "c1", name: "Maria" }] } })
+		})
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+
+		const first = session.send("Tell Maria late")
+		const proposal = await waitFor(events, event => event.type === "proposal")
+
+		if (proposal.type === "proposal") {
+			session.reject(proposal.proposal.id)
+		}
+
+		const second = session.send("No, tell Anna instead")
+
+		await waitFor(events, event => event.type === "turn-end" && event.turnId === second)
+
+		expect(events.find(event => event.type === "turn-end" && event.turnId === first)).toMatchObject({ outcome: "cancelled" })
+		// The replaced turn wrote nothing more after its card: its next generation would have been a closing reply.
+		expect(
+			requests.filter(request =>
+				request.messages.some(message => message.content.includes("Tell Maria late") && !message.content.includes("Anna"))
+			)
+		).toHaveLength(3)
+	})
+
 	it("reports a turn with no reply to show as such, and keeps it out of the model's history", async () => {
 		const model = new ScriptedModel({ route: "answer", steps: ["   ", "  "] })
 		const session = createAssistantSession({ runtime: fakeRuntime(model), executor: fakeExecutor() })
@@ -901,12 +975,13 @@ describe("assistant session", () => {
 		expect(session.getHistory()).toEqual([])
 	})
 
-	it("refuses a message too long for the model before the router reads it", async () => {
+	it("refuses a message too long for the model before anything loads or reads it", async () => {
 		const generate = vi.fn()
-		const session = createAssistantSession({
-			runtime: fakeRuntime({ contextTokens: 8192, specialTokens: [], generate }),
-			executor: fakeExecutor()
-		})
+		const runtime = fakeRuntime(
+			{ contextTokens: 8192, specialTokens: [], generate },
+			{ kind: "downloaded", model: INFO, idleUnloaded: false }
+		)
+		const session = createAssistantSession({ runtime, executor: fakeExecutor() })
 		const events: AssistantEvent[] = []
 
 		session.subscribe(event => events.push(event))
@@ -917,10 +992,14 @@ describe("assistant session", () => {
 			error: "message-too-long"
 		})
 		expect(generate).not.toHaveBeenCalled()
+		expect(runtime.load).not.toHaveBeenCalled()
+		expect(runtime.holds).toBe(0)
+		expect(events.some(event => event.type === "step")).toBe(false)
 	})
 
 	it("keeps the conversation's system prompt the same from turn to turn, and gives a new conversation new secrets", async () => {
 		const systems: string[] = []
+		const users: string[] = []
 		const model: AssistantModel = {
 			contextTokens: 8192,
 			specialTokens: [],
@@ -930,6 +1009,7 @@ describe("assistant session", () => {
 				}
 
 				systems.push(request.messages[0]?.content ?? "")
+				users.push(request.messages.at(-1)?.content ?? "")
 
 				return Promise.resolve({ content: "Ok.", toolCalls: [] })
 			}
@@ -952,8 +1032,8 @@ describe("assistant session", () => {
 
 		expect(canary(systems[0] ?? "")).toBe(canary(systems[1] ?? ""))
 		expect(canary(systems[2] ?? "")).not.toBe(canary(systems[0] ?? ""))
-		// The spotlight marker is as short as the one the eval measured.
-		expect(systems[0]).toMatch(/⟦[0-9a-f]{6}⟧/)
+		expect(systems[1]).toBe(systems[0])
+		expect(systems[0]).toContain("wrapped in ⟦ ⟧")
 
 		// The date line's week starts on the runtime locale's first weekday.
 		const clock = Intl.DateTimeFormat().resolvedOptions()
@@ -961,8 +1041,11 @@ describe("assistant session", () => {
 			assistantDateLine({ now: Date.now(), timeZone: clock.timeZone, weekStart: localeWeekStart(clock.locale) })
 		)?.[0]
 
+		// In the first user turn, and not again while the conversation already holds that day's line.
 		expect(week).toBeDefined()
-		expect(systems[0]).toContain(week)
+		expect(users[0]).toContain(week)
+		expect(users[1]).not.toContain(week)
+		expect(users[2]).toContain(week)
 	})
 
 	it("hands every tool call the calendar the turn's date line was written by", async () => {
@@ -975,7 +1058,7 @@ describe("assistant session", () => {
 			const generate = model.generate.bind(model)
 
 			model.generate = (request, options) => {
-				systems.push(request.messages[0]?.content ?? "")
+				systems.push(request.messages.map(message => message.content).join("\n"))
 
 				return generate(request, options)
 			}
@@ -1006,17 +1089,60 @@ describe("assistant session", () => {
 		}
 	})
 
-	it("reads back only the newest exchanges that fit the history budget, always the last", () => {
-		const long = "word ".repeat(1500)
-		const exchanges = [
-			{ user: "a", reply: "b" },
-			{ user: long, reply: "x" },
-			{ user: "c", reply: "d" }
-		]
+	it("shows the card's names without characters that make one read as another, and a chat's recipients", () => {
+		const tool = assistantToolByName("draft_chat_message")
 
-		expect(recentHistory(exchanges)).toEqual([{ user: "c", reply: "d" }])
-		expect(recentHistory([{ user: long, reply: long }])).toEqual([{ user: long, reply: long }])
-		expect(recentHistory(exchanges.slice(2))).toEqual([{ user: "c", reply: "d" }])
+		if (tool === undefined) {
+			throw new Error("no tool")
+		}
+
+		const proposal = buildProposal({
+			id: "p",
+			tool,
+			args: { chat: "c1", text: "Hi\nthere" },
+			preview: {
+				ok: true,
+				title: "Draft message",
+				targets: [{ handle: "c1", name: "\u202Eaira\u202CM\n  Team", recipients: ["maria@example.com"] }],
+				text: { text: "Hi\nthere" }
+			}
+		})
+
+		expect(proposal).toEqual({
+			id: "p",
+			action: "draft-message",
+			targets: [{ handle: "c1", name: "airaM Team", recipients: ["maria@example.com"] }],
+			destination: null,
+			// What lands in the composer, line breaks and all.
+			text: { text: "Hi\nthere" }
+		})
+	})
+
+	it("only adds to the exchanges the model reads until they outgrow the budget, then keeps the newest half", () => {
+		const exchange = (index: number) => ({ user: `question ${String(index)} ${"word ".repeat(30)}`, reply: "answer" })
+		let window: ReturnType<typeof windowHistory> = []
+		const firsts: string[] = []
+
+		for (let index = 0; index < 30; index++) {
+			window = windowHistory([...window, exchange(index)])
+			firsts.push(window[0]?.user ?? "")
+		}
+
+		// Most turns keep the same first exchange, so their prompt continues the last one.
+		expect(new Set(firsts).size).toBeLessThan(8)
+		expect(window.at(-1)).toEqual(exchange(29))
+		expect(window.length).toBeLessThanOrEqual(12)
+
+		const long = "word ".repeat(1500)
+
+		expect(windowHistory([{ user: long, reply: long }])).toEqual([{ user: long, reply: long }])
+		expect(
+			windowHistory([
+				{ user: "a", reply: "b" },
+				{ user: long, reply: "x" },
+				{ user: "c", reply: "d" }
+			])
+		).toEqual([{ user: "c", reply: "d" }])
 	})
 
 	it("shuts down for sign-out: the turn stops, cards are declined and nothing more runs", async () => {

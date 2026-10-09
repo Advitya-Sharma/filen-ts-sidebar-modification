@@ -70,8 +70,7 @@ export const openPlaylistTool: ToolAdapter = async (input, scope) => {
 				return { handle: scope.show({ kind: "track", track, playlist }, track.name), name: track.name }
 			}),
 			...(playlist.files.length > TRACK_LIMIT ? { more: playlist.files.length - TRACK_LIMIT } : {})
-		},
-		uiEffect: { type: "navigated", pathname: "/playlists" }
+		}
 	}
 }
 
@@ -110,7 +109,7 @@ export const playTool: ToolAdapter = async (input, scope) => {
 			throwIfStopped(scope)
 			await playPlaylist(playlist)
 
-			return { value: { playing: playlist.files[0]?.name ?? "", playlist: playlist.name }, uiEffect: { type: "playback" } }
+			return { value: { playing: playlist.files[0]?.name ?? "", playlist: playlist.name } }
 		}
 
 		case "track": {
@@ -125,7 +124,7 @@ export const playTool: ToolAdapter = async (input, scope) => {
 				await audioEngine.enqueueAndPlay([entity.track], 0)
 			}
 
-			return { value: { playing: entity.track.name }, uiEffect: { type: "playback" } }
+			return { value: { playing: entity.track.name } }
 		}
 
 		case "drive": {
@@ -139,7 +138,7 @@ export const playTool: ToolAdapter = async (input, scope) => {
 			throwIfStopped(scope)
 			await audioEngine.enqueueAndPlay(handoff.tracks, handoff.startIndex)
 
-			return { value: { playing: driveName(item) }, uiEffect: { type: "playback" } }
+			return { value: { playing: driveName(item) } }
 		}
 
 		default:
@@ -189,7 +188,6 @@ export const audioControlTool: ToolAdapter = async input => {
 	const now = state.queue[state.currentIndex]
 
 	return {
-		value: { done: action, ...(now === undefined ? {} : { track: now.name, status: state.status }) },
-		uiEffect: { type: "playback" }
+		value: { done: action, ...(now === undefined ? {} : { track: now.name, status: state.status }) }
 	}
 }

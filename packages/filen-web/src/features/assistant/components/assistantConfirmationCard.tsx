@@ -5,7 +5,6 @@ import {
 	CheckIcon,
 	CircleAlertIcon,
 	CopyIcon,
-	DownloadIcon,
 	FileIcon,
 	FolderClosedIcon,
 	FolderPlusIcon,
@@ -28,6 +27,7 @@ import type { ProposalStatus } from "@/features/assistant/store/transcript"
 import { confirmAssistantProposal, rejectAssistantProposal } from "@/features/assistant/store/assistantSession"
 import { isTrustedActivation } from "@/features/assistant/components/userActivation"
 import { useProposalTitle } from "@/features/assistant/components/useProposalTitle"
+import { assistantInitialFocusTarget } from "@/features/assistant/components/assistantFocus"
 import { proposalTargetKind, type ProposalTargetKind } from "@/features/assistant/components/assistant.logic"
 import type { AssistantProposal, AssistantProposalAction } from "@/features/assistant/types"
 
@@ -36,7 +36,6 @@ const ACTION_ICONS: Record<AssistantProposalAction, LucideIcon> = {
 	move: ArrowRightLeftIcon,
 	copy: CopyIcon,
 	trash: Trash2Icon,
-	download: DownloadIcon,
 	rename: PencilIcon,
 	favorite: StarIcon,
 	unfavorite: StarOffIcon,
@@ -98,12 +97,32 @@ function SettledStatus({ status }: { status: Exclude<ProposalStatus, "pending"> 
 	}
 }
 
+// A group chat lists this many addresses, then how many more.
+const RECIPIENTS_SHOWN = 5
+
+// Who the draft reaches, by address: two contacts can share a display name, never an address.
+function DraftRecipients({ recipients }: { recipients: readonly string[] }) {
+	const { t } = useTranslation("assistant")
+	const shown = recipients.slice(0, RECIPIENTS_SHOWN).join(", ")
+	const more = recipients.length - RECIPIENTS_SHOWN
+
+	return (
+		<p className="text-xs leading-5 wrap-anywhere text-muted-foreground">
+			{more > 0
+				? t("assistantProposalDraftToMore", { recipients: shown, count: more })
+				: t("assistantProposalDraftTo", { recipients: shown })}
+		</p>
+	)
+}
+
 // The drafted message, verbatim and in full: it is exactly what lands in the chat's input field.
 function DraftBody({ proposal }: { proposal: AssistantProposal }) {
 	const { t } = useTranslation("assistant")
+	const recipients = proposal.targets[0]?.recipients ?? []
 
 	return (
 		<>
+			{recipients.length > 0 ? <DraftRecipients recipients={recipients} /> : null}
 			<p
 				aria-label={t("assistantProposalDraftText")}
 				className="max-h-48 overflow-y-auto rounded-xl bg-muted/60 px-2.5 py-2 text-xs leading-5 wrap-anywhere whitespace-pre-wrap select-text"
@@ -194,7 +213,14 @@ export function AssistantConfirmationCard({ proposal, status }: { proposal: Assi
 			return
 		}
 
+		// Both buttons leave with the pending state, which would drop focus to the page: the composer takes it.
+		assistantInitialFocusTarget()?.focus()
 		confirmAssistantProposal(proposal.id)
+	}
+
+	function onDecline(): void {
+		assistantInitialFocusTarget()?.focus()
+		rejectAssistantProposal(proposal.id)
 	}
 
 	return (
@@ -222,9 +248,7 @@ export function AssistantConfirmationCard({ proposal, status }: { proposal: Assi
 						<Button
 							variant="outline"
 							size="sm"
-							onClick={() => {
-								rejectAssistantProposal(proposal.id)
-							}}
+							onClick={onDecline}
 						>
 							{t("assistantDecline")}
 						</Button>

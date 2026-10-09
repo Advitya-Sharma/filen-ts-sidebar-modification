@@ -26,6 +26,8 @@ function StatusChip({ state, turnActive }: { state: AssistantModelState; turnAct
 	const { t } = useTranslation("assistant")
 
 	switch (state.kind) {
+		case "checking":
+			return null
 		case "unavailable":
 			return (
 				<span className={cn(CHIP_CLASS, "bg-muted text-muted-foreground")}>

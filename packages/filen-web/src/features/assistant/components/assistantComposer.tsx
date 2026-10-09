@@ -6,7 +6,9 @@ import { Button } from "@/components/ui/button"
 import { GLASS_SURFACE_CLASS } from "@/components/ui/surface"
 import { enterIntent } from "@/features/chats/lib/composer.logic"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
+import { awaitingConfirmation } from "@/features/assistant/store/transcript"
 import { cancelAssistantTurn, noteAssistantActivity, sendAssistantMessage } from "@/features/assistant/store/assistantSession"
+import { assistantInitialFocusTarget } from "@/features/assistant/components/assistantFocus"
 
 const MAX_TEXTAREA_HEIGHT = 160
 
@@ -19,14 +21,15 @@ function fitHeight(element: HTMLTextAreaElement): void {
 
 // The chat composer's pill, minus attachments. Enter sends, Shift+Enter breaks the line, and an IME
 // composition's own Enter (confirming a candidate) is left to the IME. While a reply streams, Stop replaces
-// Send; the draft stays editable so the next question can be typed meanwhile.
+// Send; the draft stays editable so the next question can be typed meanwhile. While the turn only waits for
+// its card, Send is back: a new message answers the card with no.
 export function AssistantComposer() {
 	const { t } = useTranslation("assistant")
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 	const draft = useAssistantStore(state => state.draft)
 	const setDraft = useAssistantStore(state => state.setDraft)
-	const generating = useAssistantStore(state => state.activeTurnId !== null)
-	const canSend = !generating && draft.trim().length > 0
+	const busy = useAssistantStore(state => state.activeTurnId !== null && !awaitingConfirmation(state))
+	const canSend = !busy && draft.trim().length > 0
 
 	function submit(): void {
 		if (!canSend || !sendAssistantMessage(draft)) {
@@ -74,13 +77,17 @@ export function AssistantComposer() {
 					placeholder={t("assistantComposerPlaceholder")}
 					className="max-h-40 min-h-7 flex-1 resize-none bg-transparent py-1 text-sm leading-5 outline-none placeholder:text-muted-foreground"
 				/>
-				{generating ? (
+				{busy ? (
 					<Button
 						size="icon-sm"
 						variant="secondary"
 						className="rounded-full"
 						aria-label={t("assistantStop")}
-						onClick={cancelAssistantTurn}
+						onClick={() => {
+							// The button turns into a disabled Send once the turn ends, which would drop focus to the page.
+							assistantInitialFocusTarget()?.focus()
+							cancelAssistantTurn()
+						}}
 					>
 						<SquareIcon className="size-3.5 fill-current" />
 					</Button>

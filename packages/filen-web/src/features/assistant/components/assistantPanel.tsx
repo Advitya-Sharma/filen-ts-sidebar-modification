@@ -134,9 +134,15 @@ function drawerInitialFocus(): HTMLElement | true {
 // Unlike that drawer it mounts only while open: the conversation lives in the store, and a hidden
 // virtualizer would measure every row at zero. The modal drawer IS a dialog, so shortcuts stand down while
 // it covers the page, as they do for the module drawer. The root wraps nothing but its own portal, for the
-// same nesting reason as sidebarDrawer.tsx.
+// same nesting reason as sidebarDrawer.tsx, and exists only below the breakpoint: widening closes the
+// drawer in the render that drops its portal, and a root outliving it waits forever for that exit animation,
+// so the closed drawer would come back stuck on screen once the window narrows again.
 export function AssistantDrawer({ open, narrow }: { open: boolean; narrow: boolean }) {
 	const { t } = useTranslation("assistant")
+
+	if (!narrow) {
+		return null
+	}
 
 	return (
 		<DrawerPrimitive.Root
@@ -144,26 +150,24 @@ export function AssistantDrawer({ open, narrow }: { open: boolean; narrow: boole
 			swipeDirection="right"
 			onOpenChange={setDrawerOpen}
 		>
-			{narrow ? (
-				<DrawerPrimitive.Portal>
-					<DrawerPrimitive.Backdrop className={SCRIM_CLASS} />
-					<DrawerPrimitive.Viewport className="fixed inset-0 z-50 flex justify-end">
-						<DrawerPrimitive.Popup
-							aria-label={t("assistantTitle")}
-							initialFocus={drawerInitialFocus}
-							className="m-2 flex w-[26rem] max-w-[calc(100vw-1rem)] duration-100 outline-none data-open:animate-in data-open:slide-in-from-right data-closed:animate-out data-closed:slide-out-to-right"
-						>
-							<SidebarPanelVisibilityProvider visible={open}>
-								<AssistantSurface
-									ref={attachDrawerPanel}
-									className="w-full flex-1"
-									onClose={closeDrawer}
-								/>
-							</SidebarPanelVisibilityProvider>
-						</DrawerPrimitive.Popup>
-					</DrawerPrimitive.Viewport>
-				</DrawerPrimitive.Portal>
-			) : null}
+			<DrawerPrimitive.Portal>
+				<DrawerPrimitive.Backdrop className={SCRIM_CLASS} />
+				<DrawerPrimitive.Viewport className="fixed inset-0 z-50 flex justify-end">
+					<DrawerPrimitive.Popup
+						aria-label={t("assistantTitle")}
+						initialFocus={drawerInitialFocus}
+						className="m-2 flex w-[26rem] max-w-[calc(100vw-1rem)] duration-100 outline-none data-open:animate-in data-open:slide-in-from-right data-closed:animate-out data-closed:slide-out-to-right"
+					>
+						<SidebarPanelVisibilityProvider visible={open}>
+							<AssistantSurface
+								ref={attachDrawerPanel}
+								className="w-full flex-1"
+								onClose={closeDrawer}
+							/>
+						</SidebarPanelVisibilityProvider>
+					</DrawerPrimitive.Popup>
+				</DrawerPrimitive.Viewport>
+			</DrawerPrimitive.Portal>
 		</DrawerPrimitive.Root>
 	)
 }

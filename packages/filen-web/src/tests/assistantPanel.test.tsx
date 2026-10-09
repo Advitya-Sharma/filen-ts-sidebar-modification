@@ -53,7 +53,7 @@ vi.mock("@/features/shell/lib/breakpoints", () => ({
 
 import { toast } from "sonner"
 import { registerAllActions } from "@/lib/keymap/actions"
-import { AssistantSidePanel } from "@/features/assistant/components/assistantPanel"
+import { AssistantDrawer, AssistantSidePanel } from "@/features/assistant/components/assistantPanel"
 import { AssistantToggle } from "@/features/assistant/components/assistantToggle"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
 import { useAssistantHistoryStore } from "@/features/assistant/store/conversationHistory"
@@ -260,6 +260,26 @@ describe("AssistantSidePanel", () => {
 		unmount()
 
 		expect(shown).toEqual([true, false])
+	})
+
+	it("shows neither the opt-in nor a status before its check answered, then hands focus to what it found", () => {
+		withSession({ kind: "checking", model: null })
+		useAssistantStore.setState({ focusRequested: true })
+		render(<AssistantSidePanel />)
+
+		const panel = screen.getByRole("complementary")
+
+		expect(screen.getByRole("status", { name: "Checking the assistant" })).toBeDefined()
+		expect(screen.queryByRole("button", { name: "Download model" })).toBeNull()
+		expect(document.activeElement).toBe(panel)
+
+		act(() => {
+			useAssistantStore.setState({ modelState: { kind: "downloaded", model: MOCK_ASSISTANT_MODEL, idleUnloaded: false } })
+		})
+
+		return vi.waitFor(() => {
+			expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Ask the assistant" }))
+		})
 	})
 
 	it("explains the opt-in with the model and its size, then downloads on click", () => {
@@ -536,6 +556,51 @@ describe("AssistantSidePanel", () => {
 		expect(live?.textContent).toContain("Stopped")
 	})
 
+	it("keeps focus in the composer when Stop turns back into a disabled Send", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		const composer = screen.getByRole("textbox", { name: "Ask the assistant" })
+
+		fireEvent.change(composer, { target: { value: "find my taxes" } })
+		fireEvent.keyDown(composer, { key: "Enter" })
+
+		const stop = screen.getByRole("button", { name: "Stop" })
+
+		stop.focus()
+		fireEvent.click(stop)
+
+		expect(document.activeElement).toBe(composer)
+	})
+
+	it("announces a waiting card with who a draft reaches and the draft, and lets the next message replace it", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		const composer = screen.getByRole("textbox", { name: "Ask the assistant" })
+
+		fireEvent.change(composer, { target: { value: "draft a note to the family" } })
+		fireEvent.keyDown(composer, { key: "Enter" })
+		act(() => {
+			vi.runAllTimers()
+		})
+
+		const live = document.querySelector('[aria-live="polite"]')
+
+		expect(live?.textContent).toBe(
+			"Confirmation needed: Put this draft into Family?\nTo: anna@example.com, tom@example.com\nRunning late, see you at 8!"
+		)
+
+		// Only the card waits: Send is back, and Enter sends.
+		fireEvent.change(composer, { target: { value: "no, don't" } })
+		fireEvent.keyDown(composer, { key: "Enter" })
+
+		expect(useAssistantStore.getState().entries.filter(entry => entry.kind === "user")).toHaveLength(2)
+		expect(useAssistantStore.getState().entries.find(entry => entry.kind === "proposal")).toMatchObject({ status: "expired" })
+	})
+
 	it("offers example questions in an empty conversation and sends one on click", () => {
 		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
 		render(<AssistantSidePanel />)
@@ -553,6 +618,38 @@ describe("AssistantSidePanel", () => {
 		fireEvent.click(screen.getByRole("button", { name: "Close assistant" }))
 
 		expect(useAssistantStore.getState().panelOpen).toBe(false)
+	})
+})
+
+describe("AssistantDrawer", () => {
+	it("leaves nothing behind when the window widens with the drawer open and narrows again", async () => {
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+
+		const { rerender } = render(
+			<AssistantDrawer
+				open={true}
+				narrow={true}
+			/>
+		)
+
+		expect(await screen.findByRole("dialog", { name: "Assistant" })).toBeTruthy()
+
+		// The shell closes the drawer on the crossing, in the same render that drops its narrow layout.
+		rerender(
+			<AssistantDrawer
+				open={false}
+				narrow={false}
+			/>
+		)
+		rerender(
+			<AssistantDrawer
+				open={false}
+				narrow={true}
+			/>
+		)
+		await act(() => new Promise(resolve => setTimeout(resolve, 50)))
+
+		expect(screen.queryByRole("dialog", { name: "Assistant" })).toBeNull()
 	})
 })
 

@@ -3,7 +3,7 @@ import { createSHA256 } from "hash-wasm"
 import { LogLevel, Wllama, WllamaAbortError, WllamaError, type ChatCompletionTool, type WllamaLogger } from "@wllama/wllama/esm/index.js"
 // Emitted by Vite as a hashed asset of this build: the engine is self-hosted, never fetched from a CDN.
 import wllamaWasmUrl from "@wllama/wllama/esm/wasm/wllama.wasm?url"
-import type { AssistantGenerateRequest, AssistantGenerateResult } from "@filen/shared/assistant"
+import { MAX_STEPS, type AssistantGenerateRequest, type AssistantGenerateResult } from "@filen/shared/assistant"
 import type { AssistantModelFile, AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import {
 	accumulateChunk,
@@ -28,6 +28,7 @@ import { PROGRESS_THROTTLE_MS, throttle } from "@/lib/throttle"
 export interface AssistantLoadOptions {
 	backend: AssistantBackend
 	threads: number
+	// The engine's whole cache, which the router, the main loop and the extraction share.
 	contextTokens: number
 	// A system prompt that opens every request of one kind (the router's), read once as the last step of the load.
 	primeSystem?: string
@@ -97,6 +98,28 @@ const SETTLE_GRACE_MS = 500
 
 // Why the engine was released mid-session, for the next request to report the crash instead of a missing model.
 let crashed: string | null = null
+
+// The loaded engine's router system prompt, and whether its cached copy is gone (or may be), so the prompt
+// is primed again once the turn is over (reprime). The engine gives each request the slot whose cached
+// prompt it shares the most with, or else the least recently used one, which in a turn is the router's: a
+// second content extraction of one turn, whose long prompt resembles the first one's too little, takes it.
+// A router request that found its copy gone tells for certain; wllama cannot name a slot for a request.
+let primeSystem: string | null = null
+let primeLost = false
+let extractionsSinceRouting = 0
+
+// A router request that reused fewer tokens than this read its system prompt from the start.
+const PRIME_REUSED_MIN = 64
+
+// Tokens per decoded batch. wllama checks a stop only between batches, so on the CPU path, where a batch
+// of a 4B model takes seconds, a smaller one keeps Stop prompt at little cost to throughput; on the GPU a
+// batch is a fraction of a second either way, and the progress steps stay readable.
+const BATCH_TOKENS: Readonly<Record<AssistantBackend, number>> = { webgpu: 512, cpu: 128 }
+
+// Copies of the recurrent state kept per slot, ~50 MiB each in host memory, which is where a hybrid model
+// can resume a cached prompt. The engine drops the oldest first, and the next turn resumes from the one its
+// first step stored: kept through every step of the turn and its closing reply, plus the one before it.
+const CONTEXT_CHECKPOINTS = MAX_STEPS + 2
 
 // Read through a call: TypeScript would keep `download` narrowed across the awaits before it.
 function clearDownload(controller: AbortController): void {
@@ -428,7 +451,7 @@ function primePrompt(current: Wllama, system: string): string | null {
 
 // Part of the load, so its time shows as loading and a crash here fails the load (on the GPU: the CPU path
 // is tried next). Any other failure only costs the reuse.
-async function prime(current: Wllama, system: string): Promise<void> {
+async function prime(current: Wllama, system: string, signal?: AbortSignal): Promise<void> {
 	const prompt = primePrompt(current, system)
 
 	if (prompt === null) {
@@ -436,7 +459,7 @@ async function prime(current: Wllama, system: string): Promise<void> {
 	}
 
 	try {
-		await current.createCompletion({ prompt, max_tokens: 1, temperature: 0 })
+		await current.createCompletion({ prompt, max_tokens: 1, temperature: 0, ...(signal === undefined ? {} : { abortSignal: signal }) })
 	} catch (e) {
 		if (isEngineCrash(e, false)) {
 			throw e
@@ -525,14 +548,15 @@ const api = {
 					reasoning: false,
 					// Prompt progress is reported once per decoded batch: at the micro-batch size the compute is the
 					// same as the 2048 default, and a long prompt reports in steps instead of one jump.
-					n_batch: 512,
-					n_ubatch: 512,
+					n_batch: BATCH_TOKENS[options.backend],
+					n_ubatch: BATCH_TOKENS[options.backend],
 					// Router, main loop and quarantine alternate; a slot each keeps their prompt prefixes cached. The
 					// server's default would copy every idle slot to a host-memory prompt cache and clear it on each
 					// new request, which grows the heap and re-reads every prompt.
 					n_parallel: 3,
 					kv_unified: true,
 					cache_idle_slots: false,
+					n_ctx_checkpoints: CONTEXT_CHECKPOINTS,
 					log_level: LogLevel.ERROR
 				})
 
@@ -572,6 +596,9 @@ const api = {
 
 			engine = instance
 			crashed = null
+			primeSystem = options.primeSystem ?? null
+			primeLost = false
+			extractionsSinceRouting = 0
 
 			return { specialTokens: await specialTokens }
 		} finally {
@@ -593,6 +620,15 @@ const api = {
 			function: { name: tool.name, description: tool.description, parameters: tool.parameters }
 		}))
 
+		// A router request is watched for having had to read the router's whole system prompt again.
+		const routing = primeSystem !== null && request.slot === "router" && request.messages[0]?.content === primeSystem
+
+		if (request.slot === "router") {
+			extractionsSinceRouting = 0
+		} else if (request.slot === "extraction" && ++extractionsSinceRouting > 1) {
+			primeLost = true
+		}
+
 		const text =
 			onUpdate === undefined
 				? null
@@ -607,16 +643,22 @@ const api = {
 				run: current =>
 					current.createChatCompletion({
 						messages: request.messages.map(toEngineMessage),
-						...(tools === undefined || tools.length === 0 ? {} : { tools, tool_choice: "auto" as const }),
+						...(tools === undefined || tools.length === 0
+							? {}
+							: { tools, tool_choice: request.toolChoice ?? ("auto" as const) }),
 						...(request.grammar === undefined ? {} : { grammar: request.grammar }),
 						max_tokens: request.maxTokens,
 						temperature: 0,
 						chat_template_kwargs: { enable_thinking: false },
 						abortSignal: controller.signal,
 						stream: true,
-						return_progress: onUpdate !== undefined,
+						return_progress: onUpdate !== undefined || routing,
 						onData: chunk => {
 							const changes = accumulateChunk({ state, chunk })
+
+							if (routing && chunk.prompt_progress !== undefined && chunk.prompt_progress.cache < PRIME_REUSED_MIN) {
+								primeLost = true
+							}
 
 							if (onUpdate === undefined) {
 								return
@@ -656,6 +698,27 @@ const api = {
 		generations.get(id)?.controller.abort()
 	},
 
+	// After a turn: reads the router's system prompt into its slot again if a request found it gone, so the
+	// next turn's routing reads only its own message. Behind any generation still winding down, and stopped
+	// by an unload like one.
+	async reprime(): Promise<void> {
+		if (!primeLost || primeSystem === null) {
+			return
+		}
+
+		const system = primeSystem
+
+		primeLost = false
+
+		const controller = new AbortController()
+
+		try {
+			await serialized({ id: -1, controller, run: current => prime(current, system, controller.signal) })
+		} catch (e) {
+			log.warn("assistant.engine", "priming the prompt cache again failed", e)
+		}
+	},
+
 	// Cancelled generations get a short while to settle first: exiting under one leaves it waiting forever on a
 	// worker that is gone.
 	async unload(): Promise<void> {
@@ -669,6 +732,9 @@ const api = {
 
 		engine = null
 		crashed = null
+		primeSystem = null
+		primeLost = false
+		extractionsSinceRouting = 0
 		await Promise.race([Promise.allSettled(running.map(({ done }) => done)), delay(SETTLE_GRACE_MS)])
 		await current?.exit()
 	}

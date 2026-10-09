@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest"
-import { ROUTER_SYSTEM_PROMPT } from "@filen/shared/assistant"
+import { QUARANTINE_CONTEXT_TOKENS, ROUTER_CONTEXT_TOKENS, ROUTER_SYSTEM_PROMPT } from "@filen/shared/assistant"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
 import type { GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
 import type { ModelInspection } from "@/features/assistant/runtime/modelStore"
@@ -15,6 +15,7 @@ const { remote, inspections, releaseProxy, workers, locks, prune, device, storag
 		cancelDownload: vi.fn(),
 		cancel: vi.fn(() => Promise.resolve()),
 		unload: vi.fn<() => Promise<void>>(),
+		reprime: vi.fn(() => Promise.resolve()),
 		generate: vi.fn<
 			(id: number, request: unknown, onUpdate?: (update: GenerationUpdate) => void) => Promise<{ content: string; toolCalls: [] }>
 		>(() => Promise.resolve({ content: "", toolCalls: [] }))
@@ -100,7 +101,7 @@ vi.mock("@/features/assistant/runtime/modelStore", () => ({
 	otherModelPresent: () => Promise.resolve(false)
 }))
 
-const { AssistantRuntime, IDLE_UNLOAD_MS } = await import("@/features/assistant/runtime/client")
+const { ASSISTANT_CONTEXT_TOKENS, AssistantRuntime, IDLE_UNLOAD_MS } = await import("@/features/assistant/runtime/client")
 const { QWEN35_4B } = await import("@/features/assistant/runtime/models")
 const { manifestBytes } = await import("@/features/assistant/runtime/manifest")
 const { readDownloadIntent, writeDownloadIntent, MAX_FRUITLESS_AUTO_STARTS } = await import("@/features/assistant/runtime/downloadIntent")
@@ -382,7 +383,11 @@ describe("AssistantRuntime explicit load", () => {
 		expect(runtime.specialTokens).toEqual(["<|im_end|>"])
 		expect(remote.load).toHaveBeenCalledTimes(1)
 		// The worker reads the router's fixed system turn ahead, so each router request reads only its user turn.
-		expect(remote.load.mock.calls[0]?.[1]).toMatchObject({ primeSystem: ROUTER_SYSTEM_PROMPT })
+		// The engine's cache holds the router's and the extraction's prompts beside the main loop's.
+		expect(remote.load.mock.calls[0]?.[1]).toMatchObject({
+			primeSystem: ROUTER_SYSTEM_PROMPT,
+			contextTokens: ASSISTANT_CONTEXT_TOKENS + ROUTER_CONTEXT_TOKENS + QUARANTINE_CONTEXT_TOKENS
+		})
 		expect(workers).toHaveLength(1)
 		expect(locks.held).toBe(1)
 	})
@@ -438,8 +443,10 @@ describe("AssistantRuntime explicit load", () => {
 		expect(runtime.getState()).toMatchObject({ reason: "in-use-elsewhere" })
 	})
 
-	it("loads nothing before the model is on disk", async () => {
+	it("loads nothing before the model is on disk, and claims nothing before its check answered", async () => {
 		const runtime = new AssistantRuntime()
+
+		expect(runtime.getState().kind).toBe("checking")
 
 		await runtime.init()
 		await runtime.load()
@@ -483,9 +490,9 @@ describe("AssistantRuntime idle unload", () => {
 		expect(worker?.released).toHaveBeenCalled()
 		expect(worker?.terminate).toHaveBeenCalled()
 		expect(runtime.specialTokens).toEqual([])
-		await expect(runtime.generate({ messages: [], maxTokens: 1 }, { signal: new AbortController().signal })).rejects.toThrow(
-			"not loaded"
-		)
+		await expect(
+			runtime.generate({ messages: [], slot: "main", maxTokens: 1 }, { signal: new AbortController().signal })
+		).rejects.toThrow("not loaded")
 	})
 
 	it("terminates the worker even when the engine never answers the unload", async () => {
@@ -625,7 +632,7 @@ describe("AssistantRuntime idle unload", () => {
 		})
 
 		await runtime.generate(
-			{ messages: [], maxTokens: 1 },
+			{ messages: [], slot: "main", maxTokens: 1 },
 			{
 				signal: new AbortController().signal,
 				onText: text => {
@@ -642,7 +649,7 @@ describe("AssistantRuntime idle unload", () => {
 
 		expect(seen).toEqual(["progress 4/8", "text Hi", "call 0 list_notes"])
 
-		await runtime.generate({ messages: [], maxTokens: 1 }, { signal: new AbortController().signal })
+		await runtime.generate({ messages: [], slot: "main", maxTokens: 1 }, { signal: new AbortController().signal })
 
 		expect(remote.generate.mock.lastCall?.[2]).toBeUndefined()
 	})
@@ -659,7 +666,7 @@ describe("AssistantRuntime idle unload", () => {
 		})
 
 		await runtime.generate(
-			{ messages: [], maxTokens: 1 },
+			{ messages: [], slot: "main", maxTokens: 1 },
 			{
 				signal: new AbortController().signal,
 				onText: text => {
@@ -684,7 +691,7 @@ describe("AssistantRuntime idle unload", () => {
 		remote.generate.mockImplementationOnce(() => new Promise(() => undefined))
 
 		const controller = new AbortController()
-		const running = runtime.generate({ messages: [], maxTokens: 1 }, { signal: controller.signal })
+		const running = runtime.generate({ messages: [], slot: "main", maxTokens: 1 }, { signal: controller.signal })
 
 		controller.abort()
 		await expect(running).rejects.toMatchObject({ name: "AbortError" })
@@ -698,12 +705,50 @@ describe("AssistantRuntime idle unload", () => {
 		expect(locks.held).toBe(0)
 	})
 
+	it("gives a stopped generation on the CPU path, whose prompt batches take seconds, longer to wind down", async () => {
+		device.gpu = false
+
+		const runtime = await loaded()
+
+		remote.generate.mockImplementationOnce(() => new Promise(() => undefined))
+
+		const controller = new AbortController()
+		const running = runtime.generate({ messages: [], slot: "main", maxTokens: 1 }, { signal: controller.signal })
+
+		controller.abort()
+		await expect(running).rejects.toMatchObject({ name: "AbortError" })
+		await vi.advanceTimersByTimeAsync(30_000)
+
+		expect(runtime.getState().kind).toBe("ready")
+
+		await vi.advanceTimersByTimeAsync(30_000)
+
+		expect(runtime.getState().kind).toBe("downloaded")
+	})
+
+	it("asks the worker to prime the router again once the last turn let go, and not while one runs", async () => {
+		const runtime = await loaded()
+		const first = runtime.hold()
+		const second = runtime.hold()
+
+		remote.reprime.mockClear()
+		first()
+
+		expect(remote.reprime).not.toHaveBeenCalled()
+
+		second()
+
+		expect(remote.reprime).toHaveBeenCalledTimes(1)
+	})
+
 	it("rejects a generation in flight when its worker is stopped, so no turn waits forever", async () => {
 		const runtime = await loaded()
 
 		remote.generate.mockImplementationOnce(() => new Promise(() => undefined))
 
-		const running = runtime.generate({ messages: [], maxTokens: 1 }, { signal: new AbortController().signal }).catch((e: unknown) => e)
+		const running = runtime
+			.generate({ messages: [], slot: "main", maxTokens: 1 }, { signal: new AbortController().signal })
+			.catch((e: unknown) => e)
 		const unloading = runtime.unload()
 
 		await vi.advanceTimersByTimeAsync(2_000)
@@ -717,7 +762,9 @@ describe("AssistantRuntime idle unload", () => {
 
 		remote.generate.mockRejectedValueOnce(Object.assign(new Error("crashed"), { name: "ModelRuntimeError:crashed" }))
 
-		await expect(runtime.generate({ messages: [], maxTokens: 1 }, { signal: new AbortController().signal })).rejects.toMatchObject({
+		await expect(
+			runtime.generate({ messages: [], slot: "main", maxTokens: 1 }, { signal: new AbortController().signal })
+		).rejects.toMatchObject({
 			name: "ModelRuntimeError:crashed"
 		})
 		expect(runtime.getState().kind).toBe("downloaded")

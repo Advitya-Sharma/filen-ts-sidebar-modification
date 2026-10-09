@@ -51,7 +51,7 @@ export interface TranscriptState {
 	settled: { turnId: string; seq: number } | null
 }
 
-export const INITIAL_MODEL_STATE: AssistantModelState = { kind: "unavailable", reason: "unsupported-browser", model: null }
+export const INITIAL_MODEL_STATE: AssistantModelState = { kind: "checking", model: null }
 
 export const INITIAL_TRANSCRIPT_STATE: TranscriptState = {
 	modelState: INITIAL_MODEL_STATE,
@@ -268,10 +268,14 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
 				return entry
 			})
 
+			// A turn cancelled after a newer one began was superseded by the user's next message (sent while its
+			// card waited): no "Stopped" row, the user stopped nothing.
+			const superseded = outcome === "cancelled" && state.activeTurnId !== null && state.activeTurnId !== event.turnId
+
 			return {
 				...state,
 				entries:
-					outcome === "complete"
+					outcome === "complete" || superseded
 						? entries
 						: [...entries, { kind: "turnEnd", id: `turnEnd:${event.turnId}`, turnId: event.turnId, outcome }],
 				activeTurnId: state.activeTurnId === event.turnId ? null : state.activeTurnId,
@@ -325,6 +329,30 @@ export function beginTurn(state: TranscriptState, turnId: string, text: string):
 		entries: [...entries, { kind: "user", id: `user:${turnId}`, turnId, text }],
 		activeTurnId: turnId
 	}
+}
+
+// The running turn waits only for the user to answer its card: a new message may be sent, which answers
+// the card with no and replaces the turn.
+export function awaitingConfirmation(state: Pick<TranscriptState, "entries" | "activeTurnId">): boolean {
+	const { activeTurnId, entries } = state
+
+	if (activeTurnId === null) {
+		return false
+	}
+
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]
+
+		if (entry?.turnId !== activeTurnId) {
+			return false
+		}
+
+		if (entry.kind === "proposal" && entry.status === "pending") {
+			return true
+		}
+	}
+
+	return false
 }
 
 export function pendingProposalIds(entries: readonly TranscriptEntry[]): string[] {

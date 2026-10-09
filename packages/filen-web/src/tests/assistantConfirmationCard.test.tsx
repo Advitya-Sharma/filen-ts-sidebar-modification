@@ -157,6 +157,44 @@ describe("AssistantConfirmationCard", () => {
 		expect(within(card).getByRole("button", { name: "Add draft" })).toBeDefined()
 	})
 
+	it("names who a draft reaches by address, two contacts with one display name apart", () => {
+		const draft = (recipients: string[]): AssistantProposal => ({
+			id: "p3",
+			action: "draft-message",
+			targets: [{ handle: "c1", name: "Maria Schmidt", recipients }],
+			destination: null,
+			text: { text: "Hi" }
+		})
+
+		renderCard(draft(["maria@example.com"]))
+
+		expect(screen.getByRole("group", { name: "Put this draft into Maria Schmidt?" }).textContent).toContain("To: maria@example.com")
+
+		cleanup()
+		renderCard(draft(["a@x.io", "b@x.io", "c@x.io", "d@x.io", "e@x.io", "f@x.io", "g@x.io"]))
+
+		expect(screen.getByText("To: a@x.io, b@x.io, c@x.io, d@x.io, e@x.io and 2 more")).toBeDefined()
+	})
+
+	it("hands focus to the composer when its buttons leave, rather than dropping it to the page", () => {
+		const composer = document.createElement("textarea")
+		const panel = document.createElement("aside")
+
+		panel.id = "assistant-panel"
+		composer.setAttribute("data-assistant-autofocus", "")
+		panel.append(composer)
+		document.body.append(panel)
+
+		try {
+			renderCard(MOVE)
+			fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+
+			expect(document.activeElement).toBe(composer)
+		} finally {
+			panel.remove()
+		}
+	})
+
 	it("replaces the buttons with the outcome once answered", () => {
 		renderCard(MOVE, "expired")
 

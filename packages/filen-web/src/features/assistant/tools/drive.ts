@@ -374,7 +374,9 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 				...(path === undefined ? {} : { path }),
 				...listingFields(item, { date: selection.range === null ? null : selection.field, size: false })
 			})),
-			...(shown > SEARCH_LIMIT ? { more: shown - SEARCH_LIMIT } : {}),
+			// Incomplete (a failed search, an index still building, too many names to check): cut off at an
+			// unknown length, which is what `more: true` says.
+			...(note !== null ? { more: true } : shown > SEARCH_LIMIT ? { more: shown - SEARCH_LIMIT } : {}),
 			...datesField(selection),
 			...(note === null ? emptyDatesNote(selection, scored.length, matching.length) : { note })
 		}
@@ -633,7 +635,7 @@ export const revealItemTool: ToolAdapter = async (input, scope) => {
 	if (entity.kind !== "drive") {
 		await navigateToRoute(router, "drive", scope.signal)
 
-		return { value: { shown: "/" }, uiEffect: { type: "navigated", pathname: "/drive" } }
+		return { value: { shown: "/" } }
 	}
 
 	const item = freshDriveItem(entity.item)
@@ -662,7 +664,6 @@ export const revealItemTool: ToolAdapter = async (input, scope) => {
 	})
 
 	return {
-		value: { [into ? "opened" : "shown"]: driveName(item), ...(entity.path === undefined ? {} : { path: entity.path }) },
-		uiEffect: { type: "navigated", pathname }
+		value: { [into ? "opened" : "shown"]: driveName(item), ...(entity.path === undefined ? {} : { path: entity.path }) }
 	}
 }

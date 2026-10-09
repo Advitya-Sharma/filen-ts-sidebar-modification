@@ -1,4 +1,4 @@
-import { sanitizeUntrustedText } from "@filen/shared/assistant"
+import { sanitizeUntrustedText, type AssistantSignal } from "@filen/shared/assistant"
 import type { AssistantHandleRef } from "@/features/assistant/runtime/executor"
 
 // Model-facing text is English, like the system prompt; names keep the app's own labels.
@@ -16,6 +16,26 @@ export class AssistantToolError extends Error {
 		this.invalid = options.invalid ?? false
 		this.candidates = options.candidates ?? []
 	}
+}
+
+// Settles with `work`, or as stopped as soon as the turn is: a call waiting on an offline fetch (a listing
+// query stays paused while the browser is offline) or a blocked navigation does not hold the turn, and with
+// it the model.
+export function unlessStopped<T>(work: Promise<T>, signal: AssistantSignal): Promise<T> {
+	if (signal.aborted) {
+		return Promise.reject(new AssistantToolError("Stopped"))
+	}
+
+	return new Promise((resolve, reject) => {
+		const onAbort = () => {
+			reject(new AssistantToolError("Stopped"))
+		}
+
+		signal.addEventListener("abort", onAbort, { once: true })
+		void work.then(resolve, reject).finally(() => {
+			signal.removeEventListener("abort", onAbort)
+		})
+	})
 }
 
 // After an await that preceded a side effect (a navigation, playback): a stopped turn does nothing more.

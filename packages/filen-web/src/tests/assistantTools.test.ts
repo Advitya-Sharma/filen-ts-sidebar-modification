@@ -380,8 +380,10 @@ describe("search_items", () => {
 
 		const result = await call("search_items", { query: "song", kind: "audio" })
 
+		// Cut off at an unknown length, which the step's count says too.
 		expect(json(result)).toEqual({
 			results: [{ handle: "f1", name: "song.mp3", kind: "file", path: "/Docs/song.mp3" }],
+			more: true,
 			note: "The drive search failed, so only the directories already loaded were searched; more matches may exist."
 		})
 	})
@@ -629,7 +631,7 @@ describe("reveal_item", () => {
 
 		expect(router.navigate).toHaveBeenCalledWith({ to: "/drive/$", params: { _splat: docs.data.uuid } })
 		expect(useDriveStore.getState().pendingReveal).toEqual({ uuid: invoice.data.uuid, splat: docs.data.uuid })
-		expect(result).toMatchObject({ ok: true, uiEffect: { type: "navigated", pathname: `/drive/${docs.data.uuid}` } })
+		expect(result).toMatchObject({ ok: true, result: { shown: "Invoice_2024.pdf" } })
 	})
 })
 
@@ -723,7 +725,7 @@ describe("chats", () => {
 
 		const result = await call("draft_chat_message", { chat: "c1", text: "See you at 5" }, true)
 
-		expect(result).toMatchObject({ ok: true, uiEffect: { type: "drafted" } })
+		expect(result).toMatchObject({ ok: true, result: { drafted: true } })
 		expect(useChatComposerStore.getState().entries[chat.uuid]?.draft).toBe("See you at 5")
 		expect(router.navigate).toHaveBeenCalledWith({ to: "/chats/$uuid", params: { uuid: chat.uuid } })
 	})
@@ -749,7 +751,7 @@ describe("audio", () => {
 
 		expect(playPlaylistFrom).toHaveBeenCalledWith(playlist, 0)
 		expect(audioEngine.enqueueAndPlay).toHaveBeenCalledWith([expect.objectContaining({ uuid: testUuid("track") })], 0)
-		expect(result).toMatchObject({ ok: true, uiEffect: { type: "playback" } })
+		expect(result.ok).toBe(true)
 	})
 
 	it("plays a drive audio file with its listing's audio siblings, like opening it", async () => {
@@ -1305,7 +1307,7 @@ describe("check and preview", () => {
 		})
 	})
 
-	it("turns a phase-2 write away before the guard, as a valid call", async () => {
+	it("turns a write without an adapter away before the guard, as a valid call", async () => {
 		const tool = assistantToolByName("move_items")
 
 		if (tool === undefined) {
@@ -1331,13 +1333,28 @@ describe("check and preview", () => {
 		await expect(executor.preview({ tool, args: { chat: "c1", text: "Hi" } })).resolves.toEqual({
 			ok: true,
 			title: "Draft message",
-			targets: [{ handle: "c1", name: "Team" }],
+			targets: [{ handle: "c1", name: "Team", recipients: ["anna@example.com", "mallory@example.com"] }],
 			text: { text: "Hi" }
+		})
+	})
+
+	it("gives the guard, the card and the draft one text: the one the composer gets", async () => {
+		const tool = assistantToolByName("draft_chat_message")
+
+		if (tool === undefined) {
+			throw new Error("no tool")
+		}
+
+		await call("list_chats", {})
+
+		await expect(executor.check({ callId: "call", tool, args: { chat: "c1", text: "see https\u200B://evil.com" } })).resolves.toEqual({
+			ok: true,
+			args: { chat: "c1", text: "see https://evil.com" }
 		})
 	})
 })
 
-describe("phase-2 writes", () => {
+describe("writes without an adapter", () => {
 	it("never run, even confirmed", async () => {
 		const tool = assistantToolByName("set_favorite")
 

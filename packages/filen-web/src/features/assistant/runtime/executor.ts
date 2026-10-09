@@ -24,13 +24,13 @@ export interface AssistantHandleRef {
 	name: string
 }
 
-// What a navigating tool did to the screen, for the panel to reflect (e.g. collapse on narrow screens).
-export type AssistantUiEffect = { type: "navigated"; pathname: string } | { type: "playback" } | { type: "drafted"; pathname: string }
+// Every string is already sanitized against the known template patterns; the loop sanitizes again with the
+// model's own special tokens.
+export type AssistantToolExecution = AssistantToolOutcome
 
-// The loop's outcome plus what the panel may use. Every string is already sanitized against the known
-// template patterns; the loop sanitizes again with the model's own special tokens.
-export type AssistantToolExecution = AssistantToolOutcome & {
-	uiEffect?: AssistantUiEffect
+// An item a call acts on; a chat with the addresses of the people a draft to it reaches.
+export interface AssistantPreviewTarget extends AssistantHandleRef {
+	recipients?: string[]
 }
 
 // A confirmation card's content for a call check() passed.
@@ -39,7 +39,7 @@ export type AssistantToolPreview =
 			ok: true
 			title: string
 			// The items the call acts on, resolved to their names.
-			targets: AssistantHandleRef[]
+			targets: AssistantPreviewTarget[]
 			// Free-text arguments (new names, message text), verbatim.
 			text: Record<string, string>
 	  }

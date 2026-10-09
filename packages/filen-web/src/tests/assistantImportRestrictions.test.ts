@@ -48,6 +48,11 @@ const FORBIDDEN = [
 	'import { deleteMessage, editMessage, disableMessageEmbed } from "@/features/chats/lib/messageActions"',
 	'import { deleteDraft } from "@/features/chats/lib/drafts"',
 	'import { addChatParticipants } from "@/features/chats/lib/participants"',
+	'import { retryInflightMessage, purgeChatInflightState } from "@/features/chats/lib/inflight"',
+	'import { startChatOutbox } from "@/features/chats/lib/outboxCoordinator"',
+	'import { trustDomain } from "@/features/chats/lib/trustedDomains"',
+	'import { uploadAttachment } from "@/features/chats/lib/attachments"',
+	'import { enqueueInflightMessage, useChatsInflightStore } from "@/features/chats/store/useChatsInflight"',
 	'import { deletePlaylistAction } from "@/features/audio/lib/playlists"',
 	'import { blockContact, sendContactRequest, acceptRequest, messageContact } from "@/features/contacts/lib/actions"',
 	'import { requestJobCancel } from "@/features/transfers/lib/control"',
@@ -66,12 +71,12 @@ const FORBIDDEN = [
 
 describe("assistant import restrictions", () => {
 	it.each(["src/features/assistant/runtime/loop.ts", "src/features/assistant/tools/drive.ts", "src/workers/assistant.worker.ts"])(
-		"keeps deleting, restoring, sending, sharing, settings, transfer control, the session and logout out of reach in %s",
+		"keeps deleting, restoring, sending, queueing, sharing, settings, transfer control, the session and logout out of reach in %s",
 		async file => {
 			const messages = await lintImports(file, FORBIDDEN.join("\n"))
 
 			// One per banned name, or per statement for a module banned whole; trashItems passes.
-			expect(messages).toHaveLength(31)
+			expect(messages).toHaveLength(36)
 			expect(messages.every(message => message.includes("irreversible or security-critical"))).toBe(true)
 
 			for (const line of FORBIDDEN) {

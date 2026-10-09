@@ -210,7 +210,7 @@ export const openChatTool: ToolAdapter = async (input, scope) => {
 		signal: scope.signal
 	})
 
-	return { value: { opened: chatName(chat) }, uiEffect: { type: "navigated", pathname: `/chats/${chat.uuid}` } }
+	return { value: { opened: chatName(chat) } }
 }
 
 // The text a draft puts into the composer: what the card shows and what lands, with invisible and bidi
@@ -280,7 +280,6 @@ export const draftChatMessageTool: ToolAdapter = async (input, scope) => {
 	useChatComposerStore.getState().setDraft(chat.uuid, text)
 
 	return {
-		value: { drafted: true, chat: name, note: "The message is in the input field; the user sends it." },
-		uiEffect: { type: "drafted", pathname: `/chats/${chat.uuid}` }
+		value: { drafted: true, chat: name, note: "The message is in the input field; the user sends it." }
 	}
 }

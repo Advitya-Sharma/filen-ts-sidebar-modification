@@ -46,7 +46,7 @@ function TranscriptRowContent({ row }: { row: TranscriptRow }) {
 							"max-w-[85%] rounded-br-[6px] bg-chat-own wrap-anywhere whitespace-pre-wrap text-chat-own-foreground select-text"
 						)}
 					>
-						<span className="sr-only">{t("assistantYouSaid")}: </span>
+						<span className="sr-only">{t("assistantYouSaid")}</span>
 						{row.text}
 						<BubbleTail className={cn(OWN_TAIL_CLASS, "text-chat-own")} />
 					</div>

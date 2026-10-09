@@ -1,7 +1,14 @@
-import { isConsequentialTool, type AssistantSignal, type AssistantTool, type AssistantToolExecutor } from "@filen/shared/assistant"
+import {
+	isConsequentialTool,
+	sanitizeUntrustedText,
+	type AssistantSignal,
+	type AssistantTool,
+	type AssistantToolExecutor
+} from "@filen/shared/assistant"
 import type { AssistantToolExecution, AssistantToolPreview, ToolExecutor } from "@/features/assistant/runtime/executor"
 import type { AssistantProposal, AssistantProposalAction } from "@/features/assistant/types"
 import type { UserCalendar } from "@/features/assistant/tools/dates"
+import { AssistantToolError, unlessStopped } from "@/features/assistant/tools/format"
 
 // The confirmation card a consequential tool gets. A consequential tool without one cannot run at all.
 export function proposalAction({ tool, args }: { tool: string; args: Record<string, unknown> }): AssistantProposalAction | null {
@@ -30,6 +37,12 @@ export function proposalAction({ tool, args }: { tool: string; args: Record<stri
 // The arguments naming the directory a move, copy or create lands in.
 const DESTINATION_ARGS = ["destination", "parent"]
 
+// A name on the card: other people choose items', chats' and contacts' names, so it is shown without the
+// invisible and direction-changing characters that would make one read as another, and on one line.
+function cardName(name: string): string {
+	return sanitizeUntrustedText(name).replace(/\s+/g, " ").trim()
+}
+
 export function buildProposal({
 	id,
 	tool,
@@ -53,8 +66,14 @@ export function buildProposal({
 	return {
 		id,
 		action,
-		targets: preview.targets.filter(target => !destinationHandles.has(target.handle)),
-		destination: destination?.name ?? null,
+		targets: preview.targets
+			.filter(target => !destinationHandles.has(target.handle))
+			.map(({ handle, name, recipients }) => ({
+				handle,
+				name: cardName(name),
+				...(recipients === undefined ? {} : { recipients: recipients.map(cardName) })
+			})),
+		destination: destination === undefined ? null : cardName(destination.name),
 		text: preview.text
 	}
 }
@@ -65,7 +84,7 @@ export interface TurnExecutor {
 	start(call: { callId: string; tool: AssistantTool; args: Record<string, unknown> }): Promise<AssistantToolExecution>
 }
 
-// The app's ToolExecutor for one turn: every call gets the turn's signal, a confirmed call can be started
+// The app's ToolExecutor for one turn: every check and call gets the turn's signal, a confirmed call can be started
 // before the loop resumes, and a consequential tool the UI has no card for is refused at the check.
 export function turnExecutor({
 	executor,
@@ -92,8 +111,20 @@ export function turnExecutor({
 				(executor.supports?.(tool) ?? true) &&
 				(!isConsequentialTool(tool) || proposalAction({ tool: tool.name, args: {} }) !== null),
 
+			// Raced against the turn like execute: resolving a path reads listings, which wait while offline, and
+			// a check that never settles would keep the turn's hold on the model after Stop.
 			check: async call => {
-				const checked = await executor.check(call)
+				let checked: Awaited<ReturnType<ToolExecutor["check"]>>
+
+				try {
+					checked = await unlessStopped(executor.check(call), signal)
+				} catch (e) {
+					if (e instanceof AssistantToolError) {
+						return { ok: false, invalid: false, error: e.message, result: { error: e.message } }
+					}
+
+					throw e
+				}
 
 				if (checked.ok && isConsequentialTool(call.tool) && proposalAction({ tool: call.tool.name, args: checked.args }) === null) {
 					const error = `"${call.tool.title}" is not available yet; the user can do it in the app`
