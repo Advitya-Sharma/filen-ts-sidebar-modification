@@ -501,3 +501,84 @@ describe("ArtLoader", () => {
 		).toBeNull()
 	})
 })
+
+describe("ArtLoader.loadLocal", () => {
+	const uuids =
+		(...entries: ArtFile[]) =>
+		(file: number) =>
+			entries[file]?.uuid ?? null
+	const POSTER_CANDIDATES = [
+		{ source: "sidecar", file: 0 },
+		{ source: "embedded", file: 1 },
+		{ source: "driveThumb", file: 1 },
+		{ source: "typographic" },
+		{ source: "frame", file: 1 }
+	] satisfies ArtCandidate[]
+
+	it("asks for a download at the first candidate that needs one, before any lower-precedence local image", async () => {
+		const { loader: art, deps } = loader({
+			readDriveThumb: vi.fn(() => Promise.resolve(new Blob([new Uint8Array([1])])))
+		})
+		const resolveFile = vi.fn(files(POSTER, VIDEO))
+
+		expect(
+			await art.loadLocal({ candidates: POSTER_CANDIDATES, slot: "p", title: "Up", resolveFile, fileUuid: uuids(POSTER, VIDEO) })
+		).toBe("network")
+		expect(deps.readDriveThumb).not.toHaveBeenCalled()
+		expect(resolveFile).not.toHaveBeenCalled()
+		expect(deps.makeArt).not.toHaveBeenCalled()
+	})
+
+	it("serves a stored sidecar ahead of the drive thumbnail, and passes over settled misses to the local thumbnail", async () => {
+		const { loader: art, deps } = loader({
+			readDriveThumb: vi.fn(() => Promise.resolve(new Blob([new Uint8Array([1])])))
+		})
+		const resolveFile = files(POSTER, VIDEO)
+
+		await art.load({ candidates: POSTER_CANDIDATES, slot: "p", title: "Up", resolveFile })
+
+		expect(
+			await art.loadLocal({ candidates: POSTER_CANDIDATES, slot: "p", title: "Up", resolveFile, fileUuid: uuids(POSTER, VIDEO) })
+		).toMatchObject({
+			type: "image",
+			source: "sidecar"
+		})
+
+		const missing = loader({
+			readDriveThumb: vi.fn(() => Promise.resolve(new Blob([new Uint8Array([1])]))),
+			makeArt: vi.fn(() => Promise.resolve({ type: "notImage" as const }))
+		})
+
+		await missing.loader.load({
+			candidates: [{ source: "sidecar", file: 0 }, { source: "typographic" }],
+			slot: "p",
+			title: "Up",
+			resolveFile
+		})
+
+		expect(
+			await missing.loader.loadLocal({
+				candidates: [{ source: "sidecar", file: 0 }, { source: "driveThumb", file: 1 }, { source: "typographic" }],
+				slot: "p",
+				title: "Up",
+				resolveFile,
+				fileUuid: uuids(POSTER, VIDEO)
+			})
+		).toMatchObject({ type: "image", source: "driveThumb" })
+		expect(deps.makeArt).toHaveBeenCalledTimes(1)
+	})
+
+	it("ends at a synthetic card when nothing ahead of it needs a download", async () => {
+		const { loader: art } = loader()
+
+		expect(
+			await art.loadLocal({
+				candidates: [{ source: "driveThumb", file: 0 }, { source: "typographic" }, { source: "frame", file: 0 }],
+				slot: "p",
+				title: "Up",
+				resolveFile: files(VIDEO),
+				fileUuid: uuids(VIDEO)
+			})
+		).toMatchObject({ type: "typographic" })
+	})
+})

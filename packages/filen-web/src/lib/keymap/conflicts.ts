@@ -4,7 +4,7 @@ import type { ActionScope, ResolvedAction } from "@/lib/keymap/registry"
 // Which scopes can have handlers mounted at the same time, as CROSS-scope pairs (a scope always
 // co-mounts with itself — see scopesCanCollide). `global` (themeProvider, above the auth gate) and
 // `audio` (the player bar runs its useAction calls before its early return) are always mounted.
-// drive/notes/chats/photos/contacts are mutually exclusive by route. `editor` co-mounts with drive,
+// drive/notes/chats/photos/contacts/videos are mutually exclusive by route. `editor` co-mounts with drive,
 // photos and chats because the preview overlay is hosted by the drive and photos dialog hosts and
 // by the chat embeds — it opens ON TOP of those surfaces rather than replacing them — and with notes,
 // whose editors bind the editor.* actions.
@@ -16,12 +16,14 @@ export const CO_MOUNTABLE: readonly (readonly [ActionScope, ActionScope])[] = [
 	["global", "audio"],
 	["global", "photos"],
 	["global", "contacts"],
+	["global", "videos"],
 	["audio", "drive"],
 	["audio", "editor"],
 	["audio", "notes"],
 	["audio", "chats"],
 	["audio", "photos"],
 	["audio", "contacts"],
+	["audio", "videos"],
 	["editor", "drive"],
 	["editor", "photos"],
 	["editor", "chats"],

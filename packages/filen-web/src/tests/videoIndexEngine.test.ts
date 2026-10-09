@@ -247,6 +247,106 @@ describe("library index art", () => {
 	})
 })
 
+describe("library index videos", () => {
+	it("lists every version and episode for the home rows and search, keyless and without requests", async () => {
+		const root = drive.addDir(hexUuid(), "Library")
+		const movie = drive.addDir(root, "Heat (1995)")
+		const season = drive.addDir(drive.addDir(root, "Lost"), "Season 1")
+
+		drive.addFile(movie, "Heat (1995) - 1080p.mkv")
+		drive.addFile(movie, "Heat (1995) - 2160p.mkv")
+
+		const pilot = drive.addFile(season, "Lost S01E01 - Pilot.mkv")
+
+		drive.addFile(season, "Lost S01E02.mkv")
+		drive.addFile(drive.addDir(root, "Holiday Lisbon"), "VID_0001.mp4")
+
+		const engine = engineFor()
+
+		await engine.configure(roots([root, "auto"]))
+		await engine.check(latest)
+		await settle()
+
+		const before = { ...calls }
+		const items = engine.homeItems()
+		const heat = [...titles.values()].find(title => title.kind === "movie")
+		const lost = [...titles.values()].find(title => title.kind === "series")
+
+		expect(items.filter(item => item.itemClass === "movie").map(item => [item.titleId, item.group, item.folder])).toEqual([
+			[heat?.id, heat?.id, "Heat (1995)"],
+			[heat?.id, heat?.id, "Heat (1995)"]
+		])
+		expect(
+			items.filter(item => item.itemClass === "episode").map(item => [item.titleId, item.season, item.episode, item.episodeTitle])
+		).toEqual([
+			[lost?.id, 1, 1, "Pilot"],
+			[lost?.id, 1, 2, ""]
+		])
+		expect(items.find(item => item.itemClass === "other")?.folder).toBe("Holiday Lisbon")
+		expect(engine.homeItems()).toEqual(items)
+		expect(JSON.stringify(items)).not.toContain('"key"')
+
+		const still = engine.itemArt(lost?.id ?? "", pilot.uuid, "s")
+
+		expect(still?.files.map(file => file.uuid)).toEqual([pilot.uuid])
+		expect(calls).toEqual(before)
+	})
+})
+
+describe("library index video list", () => {
+	it("sends the videos only while asked, then each classification's changes, including ones no title shows", async () => {
+		const root = drive.addDir(hexUuid(), "Shows")
+		const season = drive.addDir(drive.addDir(root, "Lost"), "Season 1")
+
+		drive.addFile(season, "Lost S01E01.mkv")
+
+		const second = drive.addFile(season, "Lost S01E02.mkv")
+		const engine = engineFor()
+		const home: Extract<VideoIndexUpdate, { type: "home" }>[] = []
+		let titleUpdates = 0
+
+		engine.subscribe(update => {
+			if (update.type === "home") {
+				home.push(update)
+			} else if (update.type === "titles") {
+				titleUpdates++
+			}
+		})
+
+		await engine.configure(roots([root, "auto"]))
+		await engine.check(latest)
+		await settle()
+
+		expect(home).toEqual([])
+
+		engine.setHomeEnabled(true)
+
+		expect(home).toHaveLength(1)
+		expect(home[0]).toMatchObject({ reset: true, removed: [] })
+		expect(home[0]?.upserts).toHaveLength(2)
+
+		// A new version of the second episode: its file rotates, the series' title view stays the same.
+		const version = driveFile(season, "Lost S01E02.mkv", { stableUuid: second.uuid, size: 5 })
+		const titlesBefore = titleUpdates
+
+		engine.onSocketEvent(
+			driveEvent(++latest, { type: "fileArchived", uuid: second.uuid, stableUUID: second.uuid, newUUID: version.uuid })
+		)
+		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: version }))
+		await settle()
+
+		expect(titleUpdates).toBe(titlesBefore)
+		expect(home).toHaveLength(2)
+		expect(home[1]).toMatchObject({ reset: false, removed: [], upserts: [{ stableUuid: second.uuid, uuid: version.uuid, size: 5 }] })
+
+		engine.setHomeEnabled(false)
+		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: driveFile(season, "Lost S01E03.mkv") }))
+		await settle()
+
+		expect(home).toHaveLength(2)
+	})
+})
+
 describe("library index lifecycle", () => {
 	it("applies events that land during a walk over its result", async () => {
 		const root = drive.addDir(hexUuid(), "Films")

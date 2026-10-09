@@ -56,3 +56,29 @@ export function imageSniffStream(): ImageSniffStream {
 
 	return { stream, notImage: () => rejected }
 }
+
+// The SDK's decoder reads with a BYOB reader, which only a byte stream offers; a TransformStream's readable is not one.
+export function asByteStream(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+	const reader = source.getReader()
+
+	return new ReadableStream({
+		type: "bytes",
+		async pull(controller) {
+			const { done, value } = await reader.read()
+
+			if (done) {
+				controller.close()
+				// A BYOB read waiting on the end only settles once its request is answered with nothing.
+				controller.byobRequest?.respond(0)
+
+				return
+			}
+
+			// A copy: the byte stream takes ownership of what it is given, and a chunk may be a view of a larger buffer.
+			controller.enqueue(new Uint8Array(value))
+		},
+		cancel(reason) {
+			return reader.cancel(reason)
+		}
+	})
+}

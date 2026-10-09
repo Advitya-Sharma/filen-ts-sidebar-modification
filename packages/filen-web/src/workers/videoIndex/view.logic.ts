@@ -134,8 +134,35 @@ export interface VideoRootStatus {
 	incomplete: boolean
 }
 
+// One playable video of the library, as the home rows, watch filters and search need it: what the watch state is
+// keyed by (the stable uuid), the title it belongs to and, for an episode, its place in the series. One per version
+// (its first part); extras are left out.
+export interface VideoHomeItem {
+	titleId: string
+	stableUuid: string
+	uuid: string
+	size: number
+	itemClass: "movie" | "episode" | "other"
+	// Episodes: 0 is specials (season) or unnumbered (episode).
+	season: number
+	episode: number
+	episodeEnd: number
+	// The episode's title from its name; empty for movies, other videos and names without one.
+	episodeTitle: string
+	// Versions of one movie or episode share it.
+	group: string
+	label: string
+	dateAdded: number
+	unsupported: boolean
+	// The directory the file sits in.
+	folder: string
+}
+
 export type VideoIndexUpdate =
-	{ type: "titles"; reset: boolean; upserts: VideoTitleView[]; removed: string[] } | { type: "roots"; roots: VideoRootStatus[] }
+	| { type: "titles"; reset: boolean; upserts: VideoTitleView[]; removed: string[] }
+	| { type: "roots"; roots: VideoRootStatus[] }
+	// The library's videos, keyed by stable uuid: all of them on `reset`, else what changed since the last update.
+	| { type: "home"; reset: boolean; upserts: VideoHomeItem[]; removed: string[] }
 
 // The classifier's file indices resolved against the files it was given.
 export class LibraryFiles {
@@ -435,6 +462,108 @@ export function buildTitleDetail(files: LibraryFiles, title: VideoTitleView): Vi
 	}
 }
 
+function pushHomeItems({
+	out,
+	files,
+	versions,
+	base,
+	folder
+}: {
+	out: VideoHomeItem[]
+	files: LibraryFiles
+	versions: readonly LibraryVersion[]
+	base: Omit<VideoHomeItem, "stableUuid" | "uuid" | "size" | "label" | "unsupported" | "folder">
+	folder: (parent: string) => string
+}): void {
+	for (const version of versions) {
+		const video = version.parts[0] === undefined ? undefined : files.library.videos[version.parts[0]]
+		const file = video === undefined ? undefined : files.file(video.file)
+
+		if (video === undefined || file === undefined) {
+			continue
+		}
+
+		out.push({
+			...base,
+			stableUuid: file.stableUuid,
+			uuid: file.uuid,
+			size: file.size,
+			label: version.label,
+			unsupported: video.unsupported,
+			folder: folder(file.parent)
+		})
+	}
+}
+
+// Every playable video of the library, in classifier order; `folder` names a directory by uuid.
+export function buildHomeItems(files: LibraryFiles, folder: (parent: string) => string): VideoHomeItem[] {
+	const library = files.library
+	const out: VideoHomeItem[] = []
+
+	for (const movie of library.movies) {
+		pushHomeItems({
+			out,
+			files,
+			versions: movie.versions,
+			base: {
+				titleId: movie.id,
+				itemClass: "movie",
+				season: 0,
+				episode: 0,
+				episodeEnd: 0,
+				episodeTitle: "",
+				group: movie.id,
+				dateAdded: movie.dateAdded
+			},
+			folder
+		})
+	}
+
+	for (const series of library.series) {
+		series.seasons.forEach((season, seasonIndex) => {
+			season.episodes.forEach((episode, episodeIndex) => {
+				pushHomeItems({
+					out,
+					files,
+					versions: episode.versions,
+					base: {
+						titleId: series.id,
+						itemClass: "episode",
+						season: episode.season,
+						episode: episode.episode,
+						episodeEnd: episode.episodeEnd,
+						episodeTitle: episode.title,
+						group: `${series.id}/${String(seasonIndex)}/${String(episodeIndex)}`,
+						dateAdded: episode.dateAdded
+					},
+					folder
+				})
+			})
+		})
+	}
+
+	for (const other of library.others) {
+		pushHomeItems({
+			out,
+			files,
+			versions: [{ label: "", parts: [other.video] }],
+			base: {
+				titleId: other.id,
+				itemClass: "other",
+				season: 0,
+				episode: 0,
+				episodeEnd: 0,
+				episodeTitle: "",
+				group: other.id,
+				dateAdded: other.dateAdded
+			},
+			folder
+		})
+	}
+
+	return out
+}
+
 // A slot's art candidates for a title, with the files they name as keyless refs: candidate `file` indexes `files`.
 export interface TitleArtCandidates {
 	candidates: ArtCandidate[]
@@ -487,10 +616,10 @@ function artSubject(files: LibraryFiles, title: VideoTitleView): ArtSubject | nu
 export function titleArtCandidates(files: LibraryFiles, title: VideoTitleView, slot: ArtSlotCode): TitleArtCandidates | null {
 	const subject = artSubject(files, title)
 
-	if (subject === null) {
-		return null
-	}
+	return subject === null ? null : subjectArtCandidates(files, subject, slot)
+}
 
+function subjectArtCandidates(files: LibraryFiles, subject: ArtSubject, slot: ArtSlotCode): TitleArtCandidates {
 	const refs: VideoFileRef[] = []
 	const local = new Map<number, number>()
 	const candidates: ArtCandidate[] = []
@@ -528,22 +657,58 @@ export function titleArtCandidates(files: LibraryFiles, title: VideoTitleView, s
 	}
 }
 
-// Titles that changed since `previous` (id -> serialized title), and ids that are gone. Updates `previous`.
-export function diffTitles(
+function hasVideoFile(files: LibraryFiles, versions: readonly LibraryVersion[], stableUuid: string): boolean {
+	return versions.some(version =>
+		version.parts.some(video => {
+			const entry = files.library.videos[video]
+
+			return entry !== undefined && files.file(entry.file)?.stableUuid === stableUuid
+		})
+	)
+}
+
+// The art of one video of a title: an episode's own still for a series, the title's art otherwise.
+export function itemArtCandidates(
+	files: LibraryFiles,
+	title: VideoTitleView,
+	stableUuid: string,
+	slot: ArtSlotCode
+): TitleArtCandidates | null {
+	if (title.kind !== "series") {
+		return titleArtCandidates(files, title, slot)
+	}
+
+	const series = files.library.series.find(item => item.id === title.id)
+
+	for (const season of series?.seasons ?? []) {
+		const episode = season.episodes.find(item => hasVideoFile(files, item.versions, stableUuid))
+
+		if (episode !== undefined) {
+			return subjectArtCandidates(files, { kind: "episode", episode }, slot)
+		}
+	}
+
+	return titleArtCandidates(files, title, slot)
+}
+
+// Records that changed since `previous` (id -> serialized record), and ids that are gone. Updates `previous`.
+export function diffRecords<T>(
 	previous: Map<string, string>,
-	next: readonly VideoTitleView[]
-): { upserts: VideoTitleView[]; removed: string[] } {
-	const upserts: VideoTitleView[] = []
+	next: readonly T[],
+	idOf: (record: T) => string
+): { upserts: T[]; removed: string[] } {
+	const upserts: T[] = []
 	const seen = new Set<string>()
 
-	for (const title of next) {
-		const signature = JSON.stringify(title)
+	for (const record of next) {
+		const id = idOf(record)
+		const signature = JSON.stringify(record)
 
-		seen.add(title.id)
+		seen.add(id)
 
-		if (previous.get(title.id) !== signature) {
-			previous.set(title.id, signature)
-			upserts.push(title)
+		if (previous.get(id) !== signature) {
+			previous.set(id, signature)
+			upserts.push(record)
 		}
 	}
 
@@ -563,4 +728,12 @@ export function diffTitles(
 		upserts,
 		removed
 	}
+}
+
+// Titles that changed since `previous` (id -> serialized title), and ids that are gone. Updates `previous`.
+export function diffTitles(
+	previous: Map<string, string>,
+	next: readonly VideoTitleView[]
+): { upserts: VideoTitleView[]; removed: string[] } {
+	return diffRecords(previous, next, title => title.id)
 }

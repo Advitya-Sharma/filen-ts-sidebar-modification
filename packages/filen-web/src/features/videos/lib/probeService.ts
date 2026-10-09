@@ -78,6 +78,7 @@ export class ProbeService {
 	private readonly tokens = new Set<string>()
 	private started = 0
 	private epoch = 0
+	private readonly recordListeners = new Set<(uuid: string, record: ProbeRecord) => void>()
 
 	public constructor(deps: ProbeServiceDeps) {
 		this.deps = deps
@@ -264,6 +265,10 @@ export class ProbeService {
 
 			this.deps.records.put(target.uuid, record)
 
+			for (const listener of this.recordListeners) {
+				listener(target.uuid, record)
+			}
+
 			return record
 		} catch (error) {
 			if (epoch === this.epoch && !claim.controller.signal.aborted) {
@@ -275,6 +280,15 @@ export class ProbeService {
 		} finally {
 			claim.controller.signal.removeEventListener("abort", stop)
 			this.tokens.delete(token)
+		}
+	}
+
+	// Every record a probe of this session writes, as it is written.
+	public onRecord(listener: (uuid: string, record: ProbeRecord) => void): () => void {
+		this.recordListeners.add(listener)
+
+		return () => {
+			this.recordListeners.delete(listener)
 		}
 	}
 

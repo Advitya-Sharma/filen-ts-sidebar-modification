@@ -14,7 +14,7 @@ import type { SHORTCUT_NAMESPACES } from "@/lib/keymap/shortcutsCatalog"
 // the `?` dialog and Settings → Keyboard), a user-remappable combo (`setUserCombo` /
 // `clearUserCombo`), and a live indicator (`<Kbd action>`) that always reflects the combo actually
 // in effect. This file stays feature-agnostic: it holds no concrete action, only the mechanism.
-export type ActionScope = "global" | "drive" | "editor" | "notes" | "chats" | "audio" | "photos" | "contacts"
+export type ActionScope = "global" | "drive" | "editor" | "notes" | "chats" | "audio" | "photos" | "contacts" | "videos"
 
 type ShortcutNamespace = (typeof SHORTCUT_NAMESPACES)[number]
 

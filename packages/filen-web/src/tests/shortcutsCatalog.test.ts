@@ -8,7 +8,7 @@ function action(id: string, scope: ActionScope, combo: string): ResolvedAction {
 
 // Every ActionScope the union admits, so widening it without extending the order/label data fails
 // here rather than silently dropping a whole group out of both shortcut surfaces.
-const ALL_SCOPES: readonly ActionScope[] = ["global", "drive", "editor", "notes", "chats", "audio", "photos", "contacts"]
+const ALL_SCOPES: readonly ActionScope[] = ["global", "drive", "editor", "notes", "chats", "audio", "photos", "contacts", "videos"]
 
 describe("groupShortcuts", () => {
 	it("emits groups in SHORTCUT_SCOPE_ORDER regardless of input order", () => {

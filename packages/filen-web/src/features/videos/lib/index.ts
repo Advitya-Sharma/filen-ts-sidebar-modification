@@ -16,7 +16,14 @@ import {
 } from "@/features/videos/lib/library"
 import { queryClient } from "@/queries/client"
 import type { IndexRootConfig } from "@/workers/videoIndex/engine"
-import type { VideoFileRef, VideoIndexUpdate, VideoRootStatus, VideoTitleView } from "@/workers/videoIndex/view.logic"
+import type {
+	TitleArtCandidates,
+	VideoFileRef,
+	VideoHomeItem,
+	VideoIndexUpdate,
+	VideoRootStatus,
+	VideoTitleView
+} from "@/workers/videoIndex/view.logic"
 import type { ArtFile } from "@/features/videos/lib/artwork"
 import type { ArtCandidate } from "@/features/videos/lib/artwork.logic"
 import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
@@ -50,6 +57,20 @@ export function indexRootsOf(doc: LibraryConfigDoc): IndexRootConfig[] {
 	}))
 }
 
+export interface VideoArtCandidates {
+	candidates: ArtCandidate[]
+	// The keyless uuid of a candidate's file: all a stored-art or drive-thumbnail lookup needs.
+	fileUuid: (file: number) => string | null
+	// The keyed file, rebuilt in the worker, only for a read that is about to happen.
+	resolveFile: (file: number) => Promise<ArtFile | null>
+}
+
+// Home rows, grids and search unmounted this long stop the worker's video list (a screen switch remounts them).
+const HOME_RELEASE_MS = 30_000
+// Retries of a failed subscription to the worker's video list, doubling from the first delay.
+const HOME_RETRY_LIMIT = 5
+const HOME_RETRY_MS = 1_000
+
 class VideoLibraryClient {
 	private snapshot = EMPTY
 	private titles = new Map<string, VideoTitleView>()
@@ -57,14 +78,169 @@ class VideoLibraryClient {
 	private attached = false
 	private detach: (() => void) | null = null
 	private opening: Promise<void> | null = null
+	// Keyed files asked for and not resolved yet; nothing keyed is kept once handed over.
 	private readonly artFiles = new Map<string, Promise<ArtFile | null>>()
 	private readonly artBatch = new Map<string, { ref: VideoFileRef; resolve: (file: ArtFile | null) => void }>()
+	// The library's videos (home rows, watch filters, search) by stable uuid, kept current by the worker's diffs
+	// while a screen that reads them is mounted.
+	private home = new Map<string, VideoHomeItem>()
+	private homeItems: readonly VideoHomeItem[] | null = null
+	private homeConsumers = 0
+	private homeWanted = false
+	private homeEnabled = false
+	private homeAttempts = 0
+	private homeTimer: ReturnType<typeof setTimeout> | null = null
+	private homeRetryArmed = false
 
 	public readonly subscribe = (listener: () => void): (() => void) => this.changes.subscribe(listener)
 
 	public readonly getSnapshot = (): VideoLibrarySnapshot => this.snapshot
 
+	public readonly getHomeItems = (): readonly VideoHomeItem[] | null => this.homeItems
+
+	// A screen that reads the library's videos mounted; the returned release unmounts it. While any is mounted the
+	// worker sends the list once and then only what changed with each classification; a while after the last one
+	// went, it stops and both sides drop the list.
+	public retainHome(): () => void {
+		this.homeConsumers++
+
+		if (this.homeTimer !== null) {
+			clearTimeout(this.homeTimer)
+			this.homeTimer = null
+		}
+
+		this.setHomeWanted(true)
+
+		let released = false
+
+		return () => {
+			if (released) {
+				return
+			}
+
+			released = true
+			this.homeConsumers--
+
+			if (this.homeConsumers === 0) {
+				this.homeTimer = setTimeout(() => {
+					this.homeTimer = null
+					this.setHomeWanted(false)
+				}, HOME_RELEASE_MS)
+			}
+		}
+	}
+
+	private setHomeWanted(wanted: boolean): void {
+		if (this.homeWanted === wanted) {
+			return
+		}
+
+		this.homeWanted = wanted
+		this.homeAttempts = 0
+
+		if (!wanted) {
+			this.home = new Map()
+			this.homeItems = null
+			this.changes.emit()
+		}
+
+		this.syncHome()
+	}
+
+	// Brings the worker's subscription in line with what the screens want; a failure is retried with backoff (a few
+	// times), and again when the page comes back online or into focus.
+	private syncHome(): void {
+		const wanted = this.homeWanted
+
+		// Nothing to stop in a worker this session never subscribed to (or one a sign-out reset).
+		if (!wanted && !this.attached) {
+			this.homeEnabled = false
+
+			return
+		}
+
+		// Attaching subscribes the index first, and syncs on its own.
+		this.attach()
+
+		if (wanted === this.homeEnabled) {
+			return
+		}
+
+		this.homeEnabled = wanted
+
+		sdkApi.videoHomeSubscribe(wanted).catch((e: unknown) => {
+			log.warn("videos.library", "subscribing to the library's videos failed", e)
+
+			if (this.homeEnabled !== wanted) {
+				return
+			}
+
+			this.homeEnabled = !wanted
+			this.retryHome()
+		})
+	}
+
+	private retryHome(): void {
+		if (this.homeAttempts >= HOME_RETRY_LIMIT) {
+			this.armHomeRetry()
+
+			return
+		}
+
+		const delay = HOME_RETRY_MS * 2 ** this.homeAttempts
+
+		this.homeAttempts++
+		setTimeout(() => {
+			this.syncHome()
+		}, delay)
+	}
+
+	private armHomeRetry(): void {
+		if (this.homeRetryArmed) {
+			return
+		}
+
+		this.homeRetryArmed = true
+
+		const retry = (): void => {
+			window.removeEventListener("online", retry)
+			window.removeEventListener("focus", retry)
+			this.homeRetryArmed = false
+			this.homeAttempts = 0
+			this.syncHome()
+		}
+
+		window.addEventListener("online", retry)
+		window.addEventListener("focus", retry)
+	}
+
+	private applyHome(update: Extract<VideoIndexUpdate, { type: "home" }>): void {
+		if (!this.homeWanted) {
+			return
+		}
+
+		const home = update.reset ? new Map<string, VideoHomeItem>() : new Map(this.home)
+
+		for (const item of update.upserts) {
+			home.set(item.stableUuid, item)
+		}
+
+		for (const stableUuid of update.removed) {
+			home.delete(stableUuid)
+		}
+
+		this.home = home
+		this.homeItems = [...home.values()]
+		this.changes.emit()
+	}
+
 	private apply(update: VideoIndexUpdate): void {
+		if (update.type === "home") {
+			this.applyHome(update)
+
+			return
+		}
+
 		if (update.type === "roots") {
 			this.snapshot = {
 				...this.snapshot,
@@ -152,6 +328,9 @@ class VideoLibraryClient {
 
 		document.addEventListener("visibilitychange", onVisibility)
 		window.addEventListener("pagehide", flush)
+
+		// A screen may want the video list from before the subscription (re)started.
+		this.syncHome()
 
 		this.detach = () => {
 			unwatchSignOut()
@@ -243,8 +422,8 @@ class VideoLibraryClient {
 		}
 	}
 
-	// The file behind a keyless ref, as the art loader takes it. Refs asked for in the same task go to the worker
-	// as one call (rebuilt from the index there, no request), and each version is resolved once per session.
+	// The file behind a keyless ref, as the art loader takes it right before a read. Refs asked for in the same task
+	// go to the worker as one call (rebuilt from the index there, no request); nothing keyed stays here afterwards.
 	public resolveArtFile(ref: VideoFileRef): Promise<ArtFile | null> {
 		const key = `${ref.stableUuid}:${ref.uuid}`
 		let resolved = this.artFiles.get(key)
@@ -255,6 +434,8 @@ class VideoLibraryClient {
 
 		resolved = new Promise<ArtFile | null>(resolve => {
 			this.artBatch.set(ref.stableUuid, { ref, resolve })
+		}).finally(() => {
+			this.artFiles.delete(key)
 		})
 		this.artFiles.set(key, resolved)
 
@@ -276,12 +457,8 @@ class VideoLibraryClient {
 		const byUuid = new Map<string, SdkFile>(files.map(file => [file.uuid, file]))
 
 		for (const { ref, resolve } of batch) {
+			// Gone, or a newer version since the ref was handed out: null.
 			const file = byUuid.get(ref.uuid)
-
-			// Gone, or a newer version since the ref was handed out: asked again with the next ref.
-			if (file === undefined) {
-				this.artFiles.delete(`${ref.stableUuid}:${ref.uuid}`)
-			}
 
 			resolve(
 				file === undefined
@@ -296,16 +473,21 @@ class VideoLibraryClient {
 	}
 
 	// A slot's art candidates for a title, with a resolver for the files they name.
-	public async titleArt(
-		id: string,
-		slot: ArtSlotCode
-	): Promise<{ candidates: ArtCandidate[]; resolveFile: (file: number) => Promise<ArtFile | null> } | null> {
-		const art = await sdkApi.videoTitleArt(id, slot)
+	public async titleArt(id: string, slot: ArtSlotCode): Promise<VideoArtCandidates | null> {
+		return this.artCandidates(await sdkApi.videoTitleArt(id, slot))
+	}
 
+	// One video's art: an episode's own still, else its title's.
+	public async itemArt(titleId: string, stableUuid: string, slot: ArtSlotCode): Promise<VideoArtCandidates | null> {
+		return this.artCandidates(await sdkApi.videoItemArt(titleId, stableUuid, slot))
+	}
+
+	private artCandidates(art: TitleArtCandidates | null): VideoArtCandidates | null {
 		return art === null
 			? null
 			: {
 					candidates: art.candidates,
+					fileUuid: file => art.files[file]?.uuid ?? null,
 					resolveFile: file => {
 						const ref = art.files[file]
 
@@ -321,6 +503,16 @@ class VideoLibraryClient {
 		this.attached = false
 		this.opening = null
 		this.titles = new Map()
+		this.home = new Map()
+		this.homeItems = null
+		this.homeEnabled = false
+		this.homeWanted = this.homeConsumers > 0
+
+		if (this.homeTimer !== null) {
+			clearTimeout(this.homeTimer)
+			this.homeTimer = null
+		}
+
 		this.artFiles.clear()
 		this.snapshot = EMPTY
 		this.changes.emit()

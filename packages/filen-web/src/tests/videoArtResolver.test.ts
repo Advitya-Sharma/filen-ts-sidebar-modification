@@ -28,16 +28,16 @@ beforeEach(() => {
 })
 
 describe("art file resolution", () => {
-	it("asks the worker once for every file asked for in the same task, and once per version", async () => {
-		const resolved = await Promise.all(files.map(file => videoLibrary.resolveArtFile(ref(file))))
+	it("asks the worker once for every file asked for in the same task, and keeps nothing keyed afterwards", async () => {
+		const resolved = await Promise.all([...files, ...files].map(file => videoLibrary.resolveArtFile(ref(file))))
 
 		expect(playableVideoFiles).toHaveBeenCalledTimes(1)
-		expect(resolved.map(entry => entry?.uuid)).toEqual(files.map(file => file.uuid))
+		expect(resolved.map(entry => entry?.uuid)).toEqual([...files, ...files].map(file => file.uuid))
 		expect(resolved[0]?.file).toBe(files[0])
 
 		await videoLibrary.resolveArtFile(ref(files[1] ?? driveFile(PARENT, "x.jpg")))
 
-		expect(playableVideoFiles).toHaveBeenCalledTimes(1)
+		expect(playableVideoFiles).toHaveBeenCalledTimes(2)
 	})
 
 	it("resolves a ref the index no longer holds in that version to nothing, and asks again next time", async () => {
@@ -58,6 +58,9 @@ describe("art file resolution", () => {
 		const art = await videoLibrary.titleArt("title", "p")
 
 		expect(art?.candidates).toHaveLength(2)
+		expect(art?.fileUuid(0)).toBe(files[0]?.uuid)
+		expect(art?.fileUuid(5)).toBeNull()
+		expect(playableVideoFiles).not.toHaveBeenCalled()
 		await expect(art?.resolveFile(0)).resolves.toMatchObject({ uuid: files[0]?.uuid })
 		await expect(art?.resolveFile(5)).resolves.toBeNull()
 	})

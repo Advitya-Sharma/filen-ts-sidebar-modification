@@ -32,6 +32,8 @@ export class BlockAbortError extends Error {
 export interface BlockCacheOptions {
 	capacity?: number
 	readAhead?: number
+	// Sees every block as it lands (a subtitle tap scanning what playback already read). Never reads.
+	onBlock?: (index: number, bytes: Uint8Array) => void
 }
 
 export interface BlockCacheStats {
@@ -55,6 +57,7 @@ export class BlockCache {
 	private readonly readRange: AbortableReadRange
 	private readonly capacity: number
 	private readonly readAhead: number
+	private readonly onBlock: ((index: number, bytes: Uint8Array) => void) | undefined
 	// Map order is the LRU order, oldest first.
 	private readonly resident = new Map<number, Uint8Array>()
 	private readonly inFlight = new Map<number, Promise<Uint8Array>>()
@@ -69,10 +72,22 @@ export class BlockCache {
 		this.readRange = readRange
 		this.capacity = Math.max(2, options.capacity ?? DEFAULT_CAPACITY)
 		this.readAhead = Math.max(0, options.readAhead ?? DEFAULT_READ_AHEAD)
+		this.onBlock = options.onBlock
 	}
 
 	public get blockCount(): number {
 		return Math.ceil(this.size / BLOCK_BYTES)
+	}
+
+	// Every resident block, in file order (a tap set up after the first reads catches up with them).
+	public forEachResident(visit: (index: number, bytes: Uint8Array) => void): void {
+		for (const index of [...this.resident.keys()].sort((x, y) => x - y)) {
+			const bytes = this.resident.get(index)
+
+			if (bytes !== undefined) {
+				visit(index, bytes)
+			}
+		}
 	}
 
 	public isResident(position: number): boolean {
@@ -314,8 +329,14 @@ export class BlockCache {
 	}
 
 	private store(index: number, bytes: Uint8Array): void {
+		const fresh = !this.resident.has(index)
+
 		this.resident.delete(index)
 		this.resident.set(index, bytes)
+
+		if (fresh) {
+			this.onBlock?.(index, bytes)
+		}
 
 		while (this.resident.size > this.capacity) {
 			const oldest = this.resident.keys().next()

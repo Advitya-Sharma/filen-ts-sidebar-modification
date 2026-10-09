@@ -7,6 +7,7 @@ import { CONTACTS_ACTIONS } from "@/features/contacts/lib/keymap"
 import { PHOTOS_ACTIONS } from "@/features/photos/lib/keymap"
 import { PREVIEW_ACTIONS } from "@/features/preview/lib/keymap"
 import { AUDIO_ACTIONS } from "@/features/audio/lib/keymap"
+import { VIDEOS_ACTIONS } from "@/features/videos/lib/keymap"
 
 // The app's complete action set, assembled eagerly from each feature's data-only keymap module, so the
 // shortcuts catalog never depends on which feature components have mounted. The defs are plain objects
@@ -18,6 +19,7 @@ export const ALL_ACTIONS: readonly ActionDef[] = [
 	...CHATS_ACTIONS,
 	...CONTACTS_ACTIONS,
 	...PHOTOS_ACTIONS,
+	...VIDEOS_ACTIONS,
 	...PREVIEW_ACTIONS,
 	...AUDIO_ACTIONS
 ]

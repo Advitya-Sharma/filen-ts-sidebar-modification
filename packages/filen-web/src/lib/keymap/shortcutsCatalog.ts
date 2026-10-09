@@ -12,12 +12,23 @@ export const SHORTCUT_NAMESPACES = [
 	"photos",
 	"audio",
 	"preview",
-	"contacts"
+	"contacts",
+	"videos"
 ] as const satisfies readonly EnNamespace[]
 
 // Display order of the scope groups. A plain array, so a scope missing from it makes its whole group
 // vanish from BOTH surfaces silently — covered by an exhaustiveness assertion in the tests.
-export const SHORTCUT_SCOPE_ORDER: readonly ActionScope[] = ["global", "drive", "photos", "notes", "chats", "contacts", "editor", "audio"]
+export const SHORTCUT_SCOPE_ORDER: readonly ActionScope[] = [
+	"global",
+	"drive",
+	"photos",
+	"videos",
+	"notes",
+	"chats",
+	"contacts",
+	"editor",
+	"audio"
+]
 
 // Reuses the existing module labels rather than minting duplicates; only the three scopes with no
 // module of their own get a dedicated key.
@@ -25,6 +36,7 @@ export const SHORTCUT_SCOPE_LABEL_KEYS: Record<ActionScope, CommonKey> = {
 	global: "shortcutsScopeGlobal",
 	drive: "moduleDrive",
 	photos: "modulePhotos",
+	videos: "moduleVideos",
 	notes: "moduleNotes",
 	chats: "moduleChats",
 	contacts: "moduleContacts",

@@ -74,6 +74,7 @@ import {
 	journalRowSchema,
 	mergeFlushTime,
 	moreUrgent,
+	jitteredBackoffMs,
 	nextBackoffMs,
 	playbackFlushReason,
 	pruneTargets,
@@ -162,6 +163,8 @@ export interface WatchStateHost {
 	// Page hidden or going away; a sign-out started elsewhere. Returns the detach.
 	attach: (handlers: { hidden: () => void; signOut: () => void }) => () => void
 	channel: () => BroadcastChannel | null
+	// 0 <= x < 1; Math.random when absent (tests pin it).
+	random?: () => number
 }
 
 type DriveSocketEvent = Extract<SocketEvent, { type: "drive" }>
@@ -248,6 +251,7 @@ export class WatchStateEngine {
 	private clock: Hlc = 0
 	private opening: Promise<void> | null = null
 	private openedOnce = false
+	private firstOpen: Promise<void> | null = null
 	private closed = false
 
 	private head: WatchHead | null = null
@@ -458,6 +462,14 @@ export class WatchStateEngine {
 		return this.endPlayback(playback, false)
 	}
 
+	// The player let go of an item it never reported a position for (it failed or was closed while loading): the
+	// item stops being the one playing, and nothing is journaled for it.
+	public dropPlayback({ stableUuid }: { stableUuid: string }): void {
+		if (this.playback?.item.stableUuid === stableUuid) {
+			this.playback = null
+		}
+	}
+
 	public markWatched({ stableUuids }: { stableUuids: readonly string[] }): Promise<void> {
 		return this.edit(
 			stableUuids.map(stableUuid => {
@@ -566,7 +578,27 @@ export class WatchStateEngine {
 
 	// The Videos screen or the player opened: reads the newest save made elsewhere since (one download), and on the
 	// session's first open cleans up old versions.
-	public async open(): Promise<void> {
+	// A caller arriving while the session's first open is still reading the file (the player, right after the
+	// Videos layout) waits for that read, so what it decides from (a resume point) includes other devices' saves.
+	public open(): Promise<void> {
+		if (this.firstOpen !== null) {
+			return this.firstOpen
+		}
+
+		const opening = this.runOpen()
+
+		if (!this.openedOnce) {
+			this.firstOpen = opening.finally(() => {
+				this.firstOpen = null
+			})
+
+			return this.firstOpen
+		}
+
+		return opening
+	}
+
+	private async runOpen(): Promise<void> {
 		await this.ready()
 
 		const first = !this.openedOnce
@@ -585,16 +617,68 @@ export class WatchStateEngine {
 
 				this.abandonPeerFlush()
 				await this.reload()
-				await this.readLatestSave()
 
-				if (first) {
-					await this.maintain({
-						prune: true,
-						gc: true
-					})
+				// A page that hasn't confirmed the head yet can't know about a save made elsewhere while it was
+				// closed (the socket only tells a live page): one lookup says whether the head moved.
+				if (first && this.currentUuid === null && this.remoteSave === null) {
+					await this.checkHead()
 				}
+
+				await this.readLatestSave()
 			})
 		)
+
+		// Version cleanup runs after: the caller (a player deciding where to start) never waits for it.
+		if (first) {
+			void this.track(
+				navigator.locks.request(FLUSH_LOCK, async () => {
+					if (this.writable()) {
+						await this.maintain({
+							prune: true,
+							gc: true
+						})
+					}
+				})
+			)
+		}
+	}
+
+	// Looks the head up once: unchanged, it is confirmed for this page; moved (another device saved since), the new
+	// file becomes the save from elsewhere that readLatestSave reads. With no head cached yet (a new browser), the
+	// state file is found by listing `.filen/Videos` when that directory exists.
+	private async checkHead(): Promise<void> {
+		const epoch = this.epoch
+		const seq = this.saveSeq
+		const head = this.head
+		let file: SdkFile | null
+
+		if (head?.s !== undefined && head.u !== undefined && !this.headGone) {
+			file = await this.liveHead(head.s)
+
+			if (file !== null && file.uuid === head.u) {
+				if (this.epoch === epoch && this.remoteSave === null) {
+					this.currentUuid = file.uuid
+				}
+
+				return
+			}
+		} else {
+			const videosDir = await this.sdk.findVideosDir()
+
+			file = videosDir === null ? null : ((await this.sdk.listDirectory(videosDir)).find(isStateFileName) ?? null)
+		}
+
+		// Gone or unlisted: the next flush's own lookup sorts it out.
+		if (file === null || this.epoch !== epoch || this.saveSeq !== seq) {
+			return
+		}
+
+		this.sdk.noteSystemFile(file.uuid)
+		this.remoteSave = {
+			file,
+			epoch,
+			seq: ++this.saveSeq
+		}
 	}
 
 	// Resolves once every write and flush started so far has settled.
@@ -1590,12 +1674,14 @@ export class WatchStateEngine {
 			}
 
 			const bo = nextBackoffMs(meta.bo)
+			// Two writers colliding on the drive's lock would otherwise retry in lockstep.
+			const wait = jitteredBackoffMs(bo, this.host.random?.() ?? Math.random())
 
 			await this.saveMeta({
 				bo,
-				bu: Date.now() + bo
+				bu: Date.now() + wait
 			}).catch(() => undefined)
-			this.schedule(reason, Date.now() + bo)
+			this.schedule(reason, Date.now() + wait)
 
 			return false
 		}

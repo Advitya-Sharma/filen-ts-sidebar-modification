@@ -8,6 +8,7 @@ import { useVideoRootNames } from "@/features/videos/hooks/useVideoLibraryView"
 import { busyRoots, scanTransition, type VideoLibraryRootView, type VideosSection } from "@/features/videos/lib/libraryView.logic"
 import { VIDEOS_HEADING_ID } from "@/features/videos/lib/focusTargets"
 import { setVideosLibrariesOpen } from "@/features/videos/store/useVideosDialogStore"
+import { VideosDensityControls } from "@/features/videos/components/videosDensityControls"
 import { Button, buttonVariants } from "@/components/ui/button"
 
 const SECTION_KEY = {
@@ -126,6 +127,7 @@ export function VideosHeader({ section, roots }: { section: VideosSection; roots
 				</h1>
 				{roots.length === 0 ? null : (
 					<div className="flex shrink-0 items-center gap-1">
+						{section.kind === "home" || section.kind === "search" ? null : <VideosDensityControls />}
 						{/* Phones reach search from the tabs. */}
 						<Link
 							to="/videos/search"

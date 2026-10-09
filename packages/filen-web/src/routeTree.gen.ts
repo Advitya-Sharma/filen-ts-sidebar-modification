@@ -51,6 +51,7 @@ import { Route as AppVideosOtherRouteImport } from './routes/_app/videos.other'
 import { Route as AppVideosSearchRouteImport } from './routes/_app/videos.search'
 import { Route as AppVideosShowsRouteImport } from './routes/_app/videos.shows'
 import { Route as AppVideosLibraryUuidRouteImport } from './routes/_app/videos.library.$uuid'
+import { Route as AppVideosWatchUuidRouteImport } from './routes/_app/videos.watch.$uuid'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -261,6 +262,11 @@ const AppVideosLibraryUuidRoute = AppVideosLibraryUuidRouteImport.update({
   path: '/library/$uuid',
   getParentRoute: () => AppVideosRoute,
 } as any)
+const AppVideosWatchUuidRoute = AppVideosWatchUuidRouteImport.update({
+  id: '/watch/$uuid',
+  path: '/watch/$uuid',
+  getParentRoute: () => AppVideosRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -304,6 +310,7 @@ export interface FileRoutesByFullPath {
   '/settings/': typeof AppSettingsIndexRoute
   '/videos/': typeof AppVideosIndexRoute
   '/videos/library/$uuid': typeof AppVideosLibraryUuidRoute
+  '/videos/watch/$uuid': typeof AppVideosWatchUuidRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -343,6 +350,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AppSettingsIndexRoute
   '/videos': typeof AppVideosIndexRoute
   '/videos/library/$uuid': typeof AppVideosLibraryUuidRoute
+  '/videos/watch/$uuid': typeof AppVideosWatchUuidRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -388,6 +396,7 @@ export interface FileRoutesById {
   '/_app/settings/': typeof AppSettingsIndexRoute
   '/_app/videos/': typeof AppVideosIndexRoute
   '/_app/videos/library/$uuid': typeof AppVideosLibraryUuidRoute
+  '/_app/videos/watch/$uuid': typeof AppVideosWatchUuidRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -433,6 +442,7 @@ export interface FileRouteTypes {
     | '/settings/'
     | '/videos/'
     | '/videos/library/$uuid'
+    | '/videos/watch/$uuid'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -472,6 +482,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/videos'
     | '/videos/library/$uuid'
+    | '/videos/watch/$uuid'
   id:
     | '__root__'
     | '/'
@@ -516,6 +527,7 @@ export interface FileRouteTypes {
     | '/_app/settings/'
     | '/_app/videos/'
     | '/_app/videos/library/$uuid'
+    | '/_app/videos/watch/$uuid'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -826,6 +838,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppVideosLibraryUuidRouteImport
       parentRoute: typeof AppVideosRoute
     }
+    '/_app/videos/watch/$uuid': {
+      id: '/_app/videos/watch/$uuid'
+      path: '/watch/$uuid'
+      fullPath: '/videos/watch/$uuid'
+      preLoaderRoute: typeof AppVideosWatchUuidRouteImport
+      parentRoute: typeof AppVideosRoute
+    }
   }
 }
 
@@ -889,6 +908,7 @@ interface AppVideosRouteChildren {
   AppVideosShowsRoute: typeof AppVideosShowsRoute
   AppVideosIndexRoute: typeof AppVideosIndexRoute
   AppVideosLibraryUuidRoute: typeof AppVideosLibraryUuidRoute
+  AppVideosWatchUuidRoute: typeof AppVideosWatchUuidRoute
 }
 
 const AppVideosRouteChildren: AppVideosRouteChildren = {
@@ -898,6 +918,7 @@ const AppVideosRouteChildren: AppVideosRouteChildren = {
   AppVideosShowsRoute: AppVideosShowsRoute,
   AppVideosIndexRoute: AppVideosIndexRoute,
   AppVideosLibraryUuidRoute: AppVideosLibraryUuidRoute,
+  AppVideosWatchUuidRoute: AppVideosWatchUuidRoute,
 }
 
 const AppVideosRouteWithChildren = AppVideosRoute._addFileChildren(

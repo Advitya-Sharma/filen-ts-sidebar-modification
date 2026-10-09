@@ -403,3 +403,55 @@ it("compiles TranscriptRowContent, which renders every assistant transcript row"
 		events.some(event => event.kind === "CompileSuccess" && event.fnName === "TranscriptRowContent" && (event.memoSlots ?? 0) > 0)
 	).toBe(true)
 })
+
+// Videos browsing: every card, row and grid host compiles, so a cursor move or a watch-state change re-renders only
+// what changed; the grid leaves only its rows to the virtualizer.
+describe("Videos browsing compiles", () => {
+	it.each([
+		["src/features/videos/components/videoCard.tsx", "VideoCard"],
+		["src/features/videos/components/videoCard.tsx", "TitleSet"],
+		["src/features/videos/components/homeRows.tsx", "HomeRow"],
+		["src/features/videos/components/homeRows.tsx", "VideosHomeRows"],
+		["src/features/videos/components/homeRows.tsx", "useHomeRows"],
+		["src/features/videos/components/homeRows.tsx", "RowCard"],
+		["src/features/videos/components/homeHero.tsx", "HomeHero"],
+		["src/features/videos/screens/videosSearch.tsx", "VideosSearchScreen"],
+		["src/features/videos/screens/videosSearch.tsx", "ResultGroup"],
+		["src/features/videos/hooks/useVideoHomeData.ts", "useVideoHomeData"]
+	])("compiles %s %s", (file, fnName) => {
+		const events = compile(file)
+
+		expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
+		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(true)
+	})
+
+	it("compiles VideoGrid and its cards, leaving only VideoGridRows to the virtualizer", () => {
+		const events = compile("src/features/videos/components/videoGrid.tsx")
+
+		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === "GridCard" && (event.memoSlots ?? 0) > 0)).toBe(
+			true
+		)
+
+		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === "VideoGrid" && (event.memoSlots ?? 0) > 0)).toBe(
+			true
+		)
+		expect(events.filter(event => event.kind !== "CompileSuccess")).toHaveLength(1)
+	})
+
+	it("memoizes the home rows and the grid view, so a cursor move skips rebuilding them", () => {
+		expect(
+			unguardedCalls(compileWithCode("src/features/videos/components/homeRows.tsx").code, "useHomeRows", ["buildHomeRows("])
+		).toEqual([])
+		expect(
+			unguardedCalls(compileWithCode("src/features/videos/components/videoGrid.tsx").code, "useGridModel", [
+				"gridView(",
+				"sourceTitles("
+			])
+		).toEqual([])
+		expect(
+			unguardedCalls(compileWithCode("src/features/videos/hooks/useVideoHomeData.ts").code, "useVideoHomeData", [
+				"buildVideoHomeIndex("
+			])
+		).toEqual([])
+	})
+})

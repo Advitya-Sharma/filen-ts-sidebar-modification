@@ -164,6 +164,65 @@ export class ArtLoader {
 		return aborted() ? null : { type: "gradient", colour: titleColour(request.title) }
 	}
 
+	// What costs no download: an image stored earlier, or the drive's cached thumbnail, in candidate order. "network" as
+	// soon as a candidate would need reads before anything local of higher precedence was found (load() then tries
+	// it); null only when `signal` aborted first. Files are named by `fileUuid` alone: nothing keyed is resolved here.
+	public async loadLocal(request: ArtLoadRequest & { fileUuid: (file: number) => string | null }): Promise<ArtResult | "network" | null> {
+		const aborted = (): boolean => request.signal?.aborted === true
+
+		for (const candidate of request.candidates) {
+			if (aborted()) {
+				return null
+			}
+
+			if (candidate.source === "typographic") {
+				return { type: "typographic", title: request.title, colour: titleColour(request.title) }
+			}
+
+			if (candidate.source === "gradient") {
+				return { type: "gradient", colour: titleColour(request.title) }
+			}
+
+			const uuid = request.fileUuid(candidate.file)
+
+			if (uuid === null || this.skipped(candidate.source, uuid)) {
+				continue
+			}
+
+			try {
+				if (candidate.source === "driveThumb") {
+					const image = await this.fromDriveThumb(uuid, request.slot)
+
+					if (image !== null) {
+						return aborted() ? null : image
+					}
+
+					continue
+				}
+
+				const stored = await this.stored(candidate.source, uuid, request.slot)
+
+				if (aborted()) {
+					return null
+				}
+
+				if (stored === null) {
+					return "network"
+				}
+
+				if (stored !== "miss") {
+					return stored
+				}
+			} catch (error) {
+				log.warn("videos", "local artwork read failed", candidate.source, uuid, error)
+
+				return "network"
+			}
+		}
+
+		return aborted() ? null : { type: "gradient", colour: titleColour(request.title) }
+	}
+
 	private sourceKey(source: ArtSource, uuid: string): string {
 		return `${source}:${uuid}`
 	}
@@ -214,7 +273,7 @@ export class ArtLoader {
 		context: SourceContext
 	): Promise<ImageResult | null> {
 		if (source === "driveThumb") {
-			return this.fromDriveThumb(file, slot)
+			return this.fromDriveThumb(file.uuid, slot)
 		}
 
 		// A function, so each check reads the signal anew across the awaits.
@@ -353,18 +412,18 @@ export class ArtLoader {
 
 	// The drive's thumbnail for the video, as it is: a local read, no download. Skipped when black (an
 	// older thumbnail of the opening second).
-	private async fromDriveThumb(file: ArtFile, slot: ArtSlotCode): Promise<ImageResult | null> {
-		const blob = await this.deps.readDriveThumb(file.uuid)
+	private async fromDriveThumb(uuid: string, slot: ArtSlotCode): Promise<ImageResult | null> {
+		const blob = await this.deps.readDriveThumb(uuid)
 
 		if (blob === null || blob.size === 0) {
 			return null
 		}
 
-		let measured = this.driveThumbs.get(file.uuid)
+		let measured = this.driveThumbs.get(uuid)
 
 		if (measured === undefined) {
 			measured = await this.deps.measureImage(blob)
-			this.driveThumbs.set(file.uuid, measured)
+			this.driveThumbs.set(uuid, measured)
 		}
 
 		if (measured === null || isDark(measured.sample.luma)) {

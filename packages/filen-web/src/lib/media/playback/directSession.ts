@@ -14,6 +14,8 @@ export interface DirectSource {
 	// Whether `url` answers a range request (a two-byte read): the stream is there, so an error the element
 	// reported is the file's.
 	reachable(url: string): Promise<boolean>
+	// A registration made ahead of playback (prewarm), taken over instead of a new one.
+	presetId?: string
 }
 
 interface AudioTrackLike {
@@ -88,7 +90,7 @@ class DirectSession implements PlaybackSession {
 	}
 
 	public async attach(video: HTMLVideoElement): Promise<void> {
-		const id = crypto.randomUUID()
+		const id = this.source.presetId ?? crypto.randomUUID()
 		let url: string
 
 		try {

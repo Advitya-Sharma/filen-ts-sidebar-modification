@@ -265,6 +265,15 @@ export function nextBackoffMs(previous: number): number {
 	return previous <= 0 ? BACKOFF_MIN_MS : Math.min(previous * 2, BACKOFF_MAX_MS)
 }
 
+// Up to a quarter more than the backoff, from `random` in [0, 1).
+export const BACKOFF_JITTER = 0.25
+
+export function jitteredBackoffMs(backoffMs: number, random: number): number {
+	const unit = Number.isFinite(random) ? Math.min(Math.max(random, 0), 1) : 0
+
+	return Math.round(backoffMs * (1 + BACKOFF_JITTER * unit))
+}
+
 // ── Version cleanup ──
 
 // Own uploads remembered for cleanup; older ones are left to the periodic cleanup.

@@ -64,3 +64,57 @@ export function useIsFullscreen(element: Element | null): boolean {
 		() => false
 	)
 }
+
+interface WebKitVideoElement {
+	webkitEnterFullscreen?: () => void
+	webkitExitFullscreen?: () => void
+	webkitDisplayingFullscreen?: boolean
+}
+
+interface LockableOrientation {
+	lock?: ((orientation: "landscape") => Promise<void>) | undefined
+}
+
+// The video player's fullscreen: its container where element fullscreen exists, else (iPhone) the <video>
+// alone in the system player, where the page's own controls and overlays are not shown. On a touch
+// screen the picture is turned to landscape when the browser allows it.
+export function videoFullscreenSupported(video: HTMLVideoElement | null): boolean {
+	return (
+		fullscreenSupported() ||
+		(video !== null && typeof (video as HTMLVideoElement & WebKitVideoElement).webkitEnterFullscreen === "function")
+	)
+}
+
+export function isVideoNativeFullscreen(video: HTMLVideoElement): boolean {
+	return (video as HTMLVideoElement & WebKitVideoElement).webkitDisplayingFullscreen === true
+}
+
+export async function toggleVideoFullscreen(container: HTMLElement, video: HTMLVideoElement): Promise<void> {
+	if (fullscreenSupported()) {
+		const entering = fullscreenElement() !== container
+
+		await toggleFullscreen(container)
+
+		if (entering && window.matchMedia("(pointer: coarse)").matches) {
+			try {
+				const orientation: LockableOrientation = screen.orientation
+
+				if (typeof orientation.lock === "function") {
+					await orientation.lock("landscape")
+				}
+			} catch {
+				// Not allowed here (desktop, or a browser without orientation lock).
+			}
+		}
+
+		return
+	}
+
+	const webkitVideo = video as HTMLVideoElement & WebKitVideoElement
+
+	if (webkitVideo.webkitDisplayingFullscreen === true) {
+		webkitVideo.webkitExitFullscreen?.()
+	} else {
+		webkitVideo.webkitEnterFullscreen?.()
+	}
+}

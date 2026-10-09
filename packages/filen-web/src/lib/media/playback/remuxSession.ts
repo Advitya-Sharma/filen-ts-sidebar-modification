@@ -1,5 +1,5 @@
 import { openRemuxSession, type MseFailure, type RemuxSession, type RemuxSessionOptions } from "@/lib/media/mseController"
-import { isIdrUnreachable, isSourceReadError, SourceReadError } from "@/lib/media/remuxTypes"
+import { isIdrUnreachable, isSourceReadError, SourceReadError, type RemuxTextCue } from "@/lib/media/remuxTypes"
 import type { ProbeIndex } from "@/lib/media/probe/types"
 import type {
 	PlaybackFailure,
@@ -20,6 +20,8 @@ export interface RemuxSource {
 	openPort(): Promise<MessagePort>
 	// Stops serving the file: every read in flight aborts.
 	close(): void
+	// The file was opened in the remux worker ahead of playback under this key (prewarm).
+	warmKey?: string
 }
 
 // The SDK worker answers a port request at once; one that has not by then is gone (a dead worker never
@@ -71,6 +73,8 @@ export interface RemuxSessionParams {
 	// Video starts only at IDR pictures (Firefox with HEVC).
 	idrOnlyStart: boolean
 	callbacks: SessionCallbacks
+	// Embedded text subtitle cues as the remux reads them.
+	onTextCues?: ((cues: RemuxTextCue[]) => void) | undefined
 	open?: (options: RemuxSessionOptions) => Promise<RemuxSession>
 }
 
@@ -128,7 +132,9 @@ class RemuxPlaybackSession implements PlaybackSession {
 				audio: this.audio === null ? { trackId: -1, mode: "none" } : { trackId: this.audio.trackId, mode: this.audio.mode },
 				onFailure: (reason, detail) => {
 					this.fail({ trigger: FAILURE_TRIGGERS[reason], detail })
-				}
+				},
+				...(this.params.onTextCues === undefined ? {} : { onTextCues: this.params.onTextCues }),
+				...(source.warmKey === undefined ? {} : { warmKey: source.warmKey })
 			})
 
 			if (this.isDisposed()) {

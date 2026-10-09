@@ -1,6 +1,9 @@
 import { useEffect } from "react"
-import { Outlet, useRouterState } from "@tanstack/react-router"
+import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router"
 import { log } from "@/lib/log"
+import { useAction } from "@/lib/keymap/useAction"
+import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"
+import { pathIsUnder } from "@/features/shell/lib/appShell.logic"
 import { useVideoLibrary } from "@/features/videos/queries/library"
 import { watchState } from "@/features/videos/lib/watchState"
 import { useVideoLibraryView } from "@/features/videos/hooks/useVideoLibraryView"
@@ -16,8 +19,28 @@ export function VideosLayout() {
 	const pathname = useRouterState({ select: state => state.location.pathname })
 	const { configQuery, roots } = useVideoLibraryView()
 	const section = videosSection(pathname)
+	const navigate = useNavigate()
 
 	useVideoLibrary()
+
+	// `/` opens search; typing it into a field stays the field's (the hotkey skips form fields). Not over the player,
+	// whose keys are its own.
+	const hasLibrary = roots.length > 0
+	const overPlayer = pathIsUnder(pathname, "/videos/watch")
+
+	useAction(
+		"videos.openSearch",
+		event => {
+			if (isAnyDialogOpen() || !hasLibrary || overPlayer) {
+				return
+			}
+
+			event.preventDefault()
+			void navigate({ to: "/videos/search" })
+		},
+		undefined,
+		[hasLibrary, overPlayer, navigate]
+	)
 
 	useEffect(() => {
 		watchState.open().catch((e: unknown) => {

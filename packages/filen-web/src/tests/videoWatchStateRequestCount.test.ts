@@ -325,6 +325,7 @@ let versioning: boolean | undefined
 let channels: BroadcastChannel[]
 let tabs: Tab[]
 let channelName: string
+let jitter: number
 
 interface Tab {
 	engine: WatchStateEngine
@@ -340,6 +341,7 @@ function openTab({ account = ACCOUNT, kv = store.kv }: { account?: string; kv?: 
 		host: {
 			versioningEnabled: () => versioning,
 			storage: () => storage,
+			random: () => jitter,
 			signOutPending: () => false,
 			attach: next => {
 				handlers = next
@@ -434,6 +436,7 @@ beforeEach(() => {
 	channels = []
 	tabs = []
 	channelName = `watch-state-test-${hexUuid()}`
+	jitter = 0
 })
 
 afterEach(async () => {
@@ -788,10 +791,11 @@ describe("watch-state version cleanup", () => {
 			throw new Error("no version")
 		}
 
-		// A restore elsewhere makes the oldest version the head again right after the listing.
+		// A restore elsewhere makes the oldest version the head again right after the listing. The new page's own head
+		// check comes first.
 		let lookups = 0
 
-		server.headLookup = () => (++lookups >= 2 ? restored : undefined)
+		server.headLookup = () => (++lookups >= 3 ? restored : undefined)
 		server.reset()
 
 		const next = openTab()
@@ -799,7 +803,7 @@ describe("watch-state version cleanup", () => {
 		await next.engine.open()
 		await settle(next.engine)
 
-		expect(server.counts).toMatchObject({ getFile: 2, versions: 1 })
+		expect(server.counts).toMatchObject({ getFile: 3, versions: 1 })
 		expect(server.deleted).not.toContain(restored.uuid)
 		expect(server.headDeleted).toBe(false)
 		// Six archived versions: the newest two kept, the restored head spared, three deleted in one batch.
@@ -1315,5 +1319,108 @@ describe("watch-state unsynced work", () => {
 		expect(engine.executeNow()).toBe(first)
 		await first
 		expect(server.counts.upload).toBe(1)
+	})
+})
+
+describe("watch-state on a new page", () => {
+	// Another browser of the account: its own kv (journal, cached head), the same server.
+	function otherDevice(): Tab {
+		return openTab({ kv: sharedKv().kv })
+	}
+
+	it("confirms an unchanged head with one lookup and reads nothing", async () => {
+		const { engine } = openTab()
+
+		await engine.markWatched({ stableUuids: [movie().stableUuid] })
+		await advance(2_000, engine)
+		engine.hold()
+		server.reset()
+
+		// Version cleanup ran recently, so the new page's open does nothing else.
+		store.rows.set(META_KV_KEY, { ...(store.rows.get(META_KV_KEY) as object), gc: T0 })
+
+		const next = openTab()
+
+		await next.engine.open()
+		await settle(next.engine)
+
+		expect(server.counts).toEqual({ getFile: 1, list: 0, download: 0, upload: 0, versions: 0, deletes: 0 })
+	})
+
+	it("reads a save made elsewhere while the page was closed (one lookup, one download) and keeps its newer position", async () => {
+		const item = movie()
+		const here = openTab()
+
+		await here.engine.open()
+		here.engine.reportProgress({ item, pos: 100, dur: 7_200, playing: true })
+		here.engine.reportProgress({ item, pos: 101, dur: 7_200, playing: false })
+		await here.engine.executeNow()
+		await settle(here.engine)
+		here.engine.hold()
+
+		// Later, another browser plays on to 4000 s and saves; this browser's pages are all closed (no socket event).
+		vi.setSystemTime(T0 + 60_000)
+
+		const there = otherDevice()
+
+		await there.engine.open()
+		there.engine.reportProgress({ item, pos: 3_999, dur: 7_200, playing: true })
+		there.engine.reportProgress({ item, pos: 4_000, dur: 7_200, playing: false })
+		await there.engine.executeNow()
+		await settle(there.engine)
+		there.engine.hold()
+		server.reset()
+		store.rows.set(META_KV_KEY, { ...(store.rows.get(META_KV_KEY) as object), gc: T0 + 60_000 })
+
+		const next = openTab()
+
+		await next.engine.open()
+
+		expect(server.counts).toMatchObject({ getFile: 1, download: 1, upload: 0 })
+		expect(next.engine.getSnapshot().doc.items[itemKey(item.stableUuid)]?.p?.pos).toBe(4_000)
+
+		// This page's next save goes over the newer position, never back to 101.
+		await next.engine.markWatched({ stableUuids: [movie().stableUuid] })
+		await advance(10_000, next.engine)
+
+		expect(server.headDoc().items[itemKey(item.stableUuid)]?.p?.pos).toBe(4_000)
+	})
+
+	it("finds the state file by listing when this browser never cached a head", async () => {
+		const item = movie()
+		const there = otherDevice()
+
+		await there.engine.open()
+		there.engine.reportProgress({ item, pos: 3_999, dur: 7_200, playing: true })
+		there.engine.reportProgress({ item, pos: 4_000, dur: 7_200, playing: false })
+		await there.engine.executeNow()
+		await settle(there.engine)
+		there.engine.hold()
+		server.reset()
+		// No version cleanup in the count.
+		versioning = false
+
+		const fresh = otherDevice()
+
+		await fresh.engine.open()
+
+		expect(server.counts).toMatchObject({ getFile: 0, list: 1, download: 1, upload: 0 })
+		expect(fresh.engine.getSnapshot().doc.items[itemKey(item.stableUuid)]?.p?.pos).toBe(4_000)
+	})
+
+	it("adds up to a quarter of jitter to the upload backoff", async () => {
+		jitter = 0.999
+		server.failUploads = 1
+
+		const { engine } = openTab()
+
+		await engine.markWatched({ stableUuids: [movie().stableUuid] })
+		await advance(2_000, engine)
+		expect(server.counts.upload).toBe(1)
+
+		await advance(36_000, engine)
+		expect(server.counts.upload).toBe(1)
+		await advance(2_000, engine)
+		expect(server.counts.upload).toBe(2)
 	})
 })

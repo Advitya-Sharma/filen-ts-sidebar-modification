@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { ClapperboardIcon, TriangleAlertIcon } from "lucide-react"
 import { log } from "@/lib/log"
@@ -8,6 +9,7 @@ import { useVideoLibraryView, useVideoRootName } from "@/features/videos/hooks/u
 import { videosHomeView, type VideoLibraryRootView, type VideoRootNotice } from "@/features/videos/lib/libraryView.logic"
 import { openVideosChooser, setVideosLibrariesOpen } from "@/features/videos/store/useVideosDialogStore"
 import { VIDEOS_FIRST_RUN_ACTION_ID } from "@/features/videos/lib/focusTargets"
+import { VideosHomeRows } from "@/features/videos/components/homeRows"
 import { EmptyState } from "@/features/drive/components/emptyState"
 import { LoadingState } from "@/components/loadingState"
 import { Button } from "@/components/ui/button"
@@ -178,10 +180,10 @@ function EmptyLibrary({ uuids, roots }: { uuids: string[]; roots: readonly Video
 	)
 }
 
-// The library's home: first run, the per-directory notices and, once titles exist, the rows (rendered by the
-// home rows; this holds their place).
+// The library's home: first run, the per-directory notices and, once titles exist, the hero and the rows.
 export function VideosHomeScreen() {
 	const { configQuery, snapshot, roots } = useVideoLibraryView()
+	const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null)
 
 	if (configQuery.status === "pending") {
 		return <LoadingState size="lg" />
@@ -210,7 +212,10 @@ export function VideosHomeScreen() {
 	}
 
 	return (
-		<div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+		<div
+			ref={setScrollElement}
+			className="flex min-h-0 flex-1 flex-col overflow-y-auto"
+		>
 			{view.notices.length > 0 ? (
 				<ul className="flex shrink-0 flex-col gap-2 px-4 pt-1 pb-3">
 					{view.notices.map(notice => (
@@ -228,9 +233,9 @@ export function VideosHomeScreen() {
 					roots={roots}
 				/>
 			) : (
-				<div
-					data-slot="videos-home-rows"
-					className="flex flex-col gap-8 px-4 pb-6"
+				<VideosHomeRows
+					roots={roots}
+					scrollElement={scrollElement}
 				/>
 			)}
 		</div>

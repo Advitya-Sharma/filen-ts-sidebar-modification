@@ -31,7 +31,7 @@ describe("scopesCanCollide", () => {
 	})
 
 	it("co-mounts global and audio with everything, in either argument order", () => {
-		for (const scope of ["drive", "editor", "notes", "chats", "photos", "contacts"] as const) {
+		for (const scope of ["drive", "editor", "notes", "chats", "photos", "contacts", "videos"] as const) {
 			expect(scopesCanCollide("global", scope)).toBe(true)
 			expect(scopesCanCollide(scope, "global")).toBe(true)
 			expect(scopesCanCollide("audio", scope)).toBe(true)

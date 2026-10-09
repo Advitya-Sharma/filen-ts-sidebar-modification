@@ -1,4 +1,5 @@
 import { probeService } from "@/features/videos/lib/probeService"
+import { probeFacts } from "@/features/videos/lib/probeFacts"
 import { artLoader } from "@/features/videos/lib/artwork"
 import { frameGenerator, releaseFrameWorker } from "@/features/videos/lib/frames"
 import { videoLibrary } from "@/features/videos/lib/index"
@@ -11,6 +12,7 @@ export function resetVideoSession(): void {
 	resetLibraryConfig()
 	videoLibrary.hold()
 	probeService.reset()
+	probeFacts.reset()
 	artLoader.reset()
 	frameGenerator.reset()
 	releaseFrameWorker()

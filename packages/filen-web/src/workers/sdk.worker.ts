@@ -155,7 +155,7 @@ import {
 import { createMemorySink, toRawPreviewResult, type RawPreviewResult } from "@/features/preview/lib/rawPreview.logic"
 import { probeSource, probeVideo } from "@/lib/media/probe/probe"
 import { EarlyCancels } from "@/workers/earlyCancels"
-import { imageSniffStream } from "@/lib/media/probe/imageSniff"
+import { asByteStream, imageSniffStream } from "@/lib/media/probe/imageSniff"
 import { exposeRangePort } from "@/lib/media/rangePort"
 import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
 import { WalkCoordinator } from "@/workers/walkCoordinator"
@@ -2457,7 +2457,7 @@ const api = {
 		try {
 			return asThumbnailResult(
 				await c.makeThumbnailFromStream({
-					reader: sniff.stream.readable,
+					reader: asByteStream(sniff.stream.readable),
 					maxWidth: size.maxWidth,
 					maxHeight: size.maxHeight,
 					knownSize: range.size,
@@ -2563,6 +2563,15 @@ const api = {
 	},
 	videoTitleDetail(id: string): VideoTitleDetail | null {
 		return videoIndex.titleDetail(id)
+	},
+	// One video's art candidates: an episode's own still, else its title's.
+	videoItemArt(titleId: string, stableUuid: string, slot: ArtSlotCode): TitleArtCandidates | null {
+		return videoIndex.itemArt(titleId, stableUuid, slot)
+	},
+	// Sends the library's videos (keyless) to the index subscriber while on: all of them, then each classification's
+	// changes. The home rows', grids' and search's input.
+	videoHomeSubscribe(enabled: boolean): void {
+		videoIndex.setHomeEnabled(enabled)
 	},
 	// Playable drive files for indexed videos and sidecars, rebuilt from the index on request.
 	playableVideoFiles(stableUuids: string[]): File[] {

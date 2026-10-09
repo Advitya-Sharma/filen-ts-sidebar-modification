@@ -1,0 +1,166 @@
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { createElement, type ReactNode } from "react"
+import "@/lib/i18n"
+
+const narrow = vi.hoisted(() => ({ value: false }))
+
+vi.mock("@/features/shell/hooks/useIsNarrowViewport", () => ({ useIsNarrowViewport: () => narrow.value }))
+
+import { VideoStage, type VideoStageProps } from "@/components/media/video/videoStage"
+import { StageCenterCard } from "@/components/media/video/stageCards"
+import type { VideoKeyAction } from "@/lib/media/videoKeys.logic"
+
+let video: HTMLVideoElement | null = null
+
+function props(overrides: Partial<VideoStageProps> = {}): VideoStageProps {
+	return {
+		title: "Movie",
+		backLabel: "Back",
+		onBack: () => undefined,
+		videoLabel: "Movie",
+		onVideo: element => {
+			video = element
+		},
+		chapters: [],
+		cues: null,
+		cueOffset: 0,
+		loading: false,
+		hasNext: false,
+		hasPrevious: false,
+		trailing: () => null,
+		holdControls: false,
+		onAction: () => false,
+		...overrides
+	}
+}
+
+// jsdom's media element doesn't play: the stage reads these.
+function playing(element: HTMLVideoElement): void {
+	Object.defineProperty(element, "paused", { configurable: true, get: () => false })
+	Object.defineProperty(element, "readyState", { configurable: true, get: () => 4 })
+	Object.defineProperty(element, "duration", { configurable: true, get: () => 600 })
+	fireEvent(element, new Event("play"))
+}
+
+function stageRoot(): HTMLElement {
+	return screen.getByRole("dialog", { name: "Movie" })
+}
+
+beforeEach(() => {
+	vi.useFakeTimers()
+	narrow.value = false
+	video = null
+})
+
+afterEach(() => {
+	cleanup()
+	vi.useRealTimers()
+})
+
+describe("VideoStage", () => {
+	it("phone: the centre buttons take no pointer while the controls are hidden", () => {
+		narrow.value = true
+		render(createElement(VideoStage, props()))
+
+		const element = video
+
+		if (element === null) {
+			throw new Error("no video")
+		}
+
+		act(() => {
+			playing(element)
+		})
+
+		expect(screen.getAllByRole("button", { name: "Back 10 seconds" })[0]?.className).toContain("pointer-events-auto")
+
+		act(() => {
+			vi.advanceTimersByTime(3100)
+		})
+
+		expect(screen.getAllByRole("button", { name: "Back 10 seconds" })[0]?.className).toContain("pointer-events-none")
+	})
+
+	it("leaves Escape inside a popup to the popup, and takes it on the stage", () => {
+		const onAction = vi.fn((_action: VideoKeyAction) => false)
+
+		render(
+			createElement(
+				VideoStage,
+				props({
+					onAction,
+					trailing: (): ReactNode =>
+						createElement("div", { "data-stage-popup": "" }, createElement("button", { type: "button" }, "inside"))
+				})
+			)
+		)
+
+		fireEvent.keyDown(screen.getByRole("button", { name: "inside" }), { key: "Escape" })
+		expect(onAction).not.toHaveBeenCalled()
+
+		fireEvent.keyDown(stageRoot(), { key: "Escape" })
+		expect(onAction).toHaveBeenCalledWith({ type: "dismiss" })
+	})
+
+	it("drops a pending coalesced seek when the element is emptied (the next item)", () => {
+		render(createElement(VideoStage, props()))
+
+		const element = video
+
+		if (element === null) {
+			throw new Error("no video")
+		}
+
+		act(() => {
+			playing(element)
+		})
+		element.currentTime = 100
+
+		fireEvent.keyDown(stageRoot(), { key: "l" })
+		fireEvent.keyDown(stageRoot(), { key: "l" })
+
+		const afterFirst = element.currentTime
+
+		fireEvent(element, new Event("emptied"))
+		element.currentTime = 0
+
+		act(() => {
+			vi.advanceTimersByTime(500)
+		})
+
+		expect(afterFirst).toBe(110)
+		expect(element.currentTime).toBe(0)
+	})
+
+	it("gives the keyboard back to the stage when a card closes", () => {
+		const { rerender } = render(
+			createElement(
+				VideoStage,
+				props({
+					centerCard: createElement(StageCenterCard, {
+						title: "Still watching?",
+						onEscape: () => undefined,
+						actions: createElement("button", { type: "button", "data-primary": "" }, "Continue")
+					})
+				})
+			)
+		)
+
+		act(() => {
+			vi.advanceTimersByTime(20)
+		})
+
+		expect(document.activeElement?.textContent).toBe("Continue")
+
+		rerender(createElement(VideoStage, props({ centerCard: null })))
+
+		act(() => {
+			vi.advanceTimersByTime(50)
+		})
+
+		expect(document.activeElement).toBe(stageRoot())
+	})
+})

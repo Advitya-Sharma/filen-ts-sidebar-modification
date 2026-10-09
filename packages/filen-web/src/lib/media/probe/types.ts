@@ -146,7 +146,13 @@ export interface CuesLocation {
 export type ParsedTrack =
 	| { kind: "video"; enabled: boolean; video: ProbeVideo; decode?: VideoDecodeInfo }
 	| { kind: "audio"; enabled: boolean; audio: ProbeAudio }
-	| { kind: "subtitle"; enabled: boolean; sub: ProbeSubtitle }
+	// `frames`: how a Matroska track's frames are compressed (zlib = algorithm 0, header stripping = 3).
+	| {
+			kind: "subtitle"
+			enabled: boolean
+			sub: ProbeSubtitle
+			frames?: { algorithm: number; settings: Uint8Array } | "unsupported" | null
+	  }
 
 // A container walker's result, before a tier's record is cut from it.
 export interface ParsedContainer {
@@ -160,6 +166,8 @@ export interface ParsedContainer {
 	cover: ProbeCover | null
 	partial: boolean
 	cues?: CuesLocation
+	// Matroska: nanoseconds per tick of the Segment's timestamps.
+	timestampScale?: number
 }
 
 export const MAX_CHAPTERS = 64

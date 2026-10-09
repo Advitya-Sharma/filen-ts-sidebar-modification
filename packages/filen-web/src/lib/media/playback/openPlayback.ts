@@ -26,6 +26,7 @@ import { captureFramePoster } from "@/lib/media/playback/poster"
 import { openRemuxPlaybackSession, type RemuxSource } from "@/lib/media/playback/remuxSession"
 import { directSource, remuxSource } from "@/lib/media/playback/sources"
 import type { PlaybackFailure, PlaybackSession, PlaybackTrigger, SessionAudio } from "@/lib/media/playback/types"
+import type { RemuxTextCue } from "@/lib/media/remuxTypes"
 import { isMediaStreamAvailable } from "@/features/preview/lib/previewStream"
 import { fnv1a } from "@/lib/fnv1a"
 import { log } from "@/lib/log"
@@ -76,6 +77,8 @@ export interface OpenPlaybackOptions {
 	// Where playback starts (a resume position), seconds.
 	startTime?: number
 	autoplay?: boolean
+	// Embedded text subtitle cues (Matroska) as a remux reads them; a direct stream yields none.
+	onTextCues?: (cues: RemuxTextCue[]) => void
 	deps?: Partial<PlaybackDeps>
 }
 
@@ -123,6 +126,7 @@ class LadderPlayback implements Playback {
 	private readonly probe: VideoProbe
 	private readonly ladderProbe: LadderProbe
 	private readonly name: string
+	private readonly onTextCues: ((cues: RemuxTextCue[]) => void) | undefined
 	private readonly deps: PlaybackDeps
 	private readonly fileKey: string
 	private readonly listeners = new Set<() => void>()
@@ -164,6 +168,7 @@ class LadderPlayback implements Playback {
 		this.probe = params.probe
 		this.ladderProbe = toLadderProbe(params.probe)
 		this.name = params.options.name
+		this.onTextCues = params.options.onTextCues
 		this.deps = params.deps
 		this.fileKey = fnv1a(params.file.uuid).toString(36)
 		this.selection = params.selection
@@ -356,7 +361,8 @@ class LadderPlayback implements Playback {
 						startTime: time,
 						audio: plan.audio,
 						idrOnlyStart: plan.idrOnlyStart,
-						callbacks
+						callbacks,
+						onTextCues: this.onTextCues
 					})
 		this.session = session
 		this.watch = watchForDemotion(

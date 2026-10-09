@@ -17,7 +17,7 @@ import {
 import { BLOCK_BYTES, BlockSource } from "@/lib/media/blockSource"
 import { BlockAbortError, BlockCache } from "@/lib/media/blockCache"
 import { isInitSegment } from "@/lib/media/fmp4Split"
-import { probeVideo } from "@/lib/media/probe/probe"
+import { probeVideo, walkContainer } from "@/lib/media/probe/probe"
 import { rangePortReader, type RangePortReader } from "@/lib/media/rangePort"
 import {
 	IdrUnreachableError,
@@ -51,6 +51,7 @@ import { hevcKeyIsIdr, hevcLengthSize, IDR_REACH_KEYS, idrReachSeconds } from "@
 import { KeyIndex, seekReach } from "@/workers/remux/keyIndex"
 import { FragmentedTrackOutput, FragmentTooLargeError } from "@/workers/remux/output"
 import { PumpGate, runPump, type PumpReader, type PumpResult, type PumpWriter } from "@/workers/remux/pump"
+import { TextTap, isTapTextCodec, type TextTapTrack } from "@/workers/remux/textTap"
 
 // Containers a remux may read. Not every format the demuxer knows: each one parsed is attack surface.
 const FORMATS = [MATROSKA, WEBM, MP4, QTFF, MPEG_TS]
@@ -163,16 +164,25 @@ export class RemuxEngine {
 	// Bumped by every audio start and stop: a start that awaited past a newer one gives up.
 	private audioEpoch = 0
 	private readonly layouts = new Map<number, Promise<Speaker[] | null>>()
+	// Embedded text subtitles, taken from the blocks playback reads (Matroska only).
+	private tap: TextTap | null = null
 
 	public constructor(params: RemuxOpenParams, emit: Emit) {
 		this.reader = rangePortReader(params.port)
 
 		const reader = this.reader
 
-		this.cache = new BlockCache(params.size, (start, end, signal) =>
-			reader.readRange(start, end, signal).catch((error: unknown) => {
-				throw signal.aborted ? error : new SourceReadError(error)
-			})
+		this.cache = new BlockCache(
+			params.size,
+			(start, end, signal) =>
+				reader.readRange(start, end, signal).catch((error: unknown) => {
+					throw signal.aborted ? error : new SourceReadError(error)
+				}),
+			{
+				onBlock: (index, bytes) => {
+					this.tap?.addBlock(index, bytes)
+				}
+			}
 		)
 		this.emit = emit
 		// The file's server went away: say so now, not at the next read a paused player may never make.
@@ -218,6 +228,10 @@ export class RemuxEngine {
 
 		this.seekScansFile = matroska && index === "none"
 		this.duration = duration
+
+		if (matroska) {
+			await this.openTextTap(params.size)
+		}
 
 		return {
 			duration,
@@ -350,9 +364,45 @@ export class RemuxEngine {
 
 		this.audioEpoch++
 		await Promise.race([Promise.all(closing), new Promise(resolve => setTimeout(resolve, CLOSE_TIMEOUT_MS))])
+		this.tap?.close()
+		this.tap = null
 		this.input.dispose()
 		this.cache.dispose()
 		this.reader.close()
+	}
+
+	// The text tracks and the timestamp scale, from the head the demuxer has just read (served by the block cache).
+	private async openTextTap(size: number): Promise<void> {
+		try {
+			const source = new BlockSource(size, (start, end) => Promise.resolve(this.cache.read(start, end)), { maxBlockReads: 4 })
+			const parsed = await walkContainer(source, "card")
+			const tracks: TextTapTrack[] = []
+
+			for (const track of parsed?.tracks ?? []) {
+				if (track.kind === "subtitle" && track.enabled && isTapTextCodec(track.sub.codecId)) {
+					tracks.push({ number: track.sub.id, codecId: track.sub.codecId, compression: track.frames ?? null })
+				}
+			}
+
+			if (parsed === null || tracks.length === 0) {
+				return
+			}
+
+			const tap = new TextTap({
+				tracks,
+				timestampScale: parsed.timestampScale ?? 1_000_000,
+				emit: cues => {
+					this.emit({ type: "textCues", cues })
+				}
+			})
+
+			this.tap = tap
+			this.cache.forEachResident((index, bytes) => {
+				tap.addBlock(index, bytes)
+			})
+		} catch {
+			// No subtitles from the file; playback goes on.
+		}
 	}
 
 	private async probeIndex(size: number): Promise<RemuxMediaInfo["index"]> {

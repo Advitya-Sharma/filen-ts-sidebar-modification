@@ -41,6 +41,7 @@ import {
 	type AudioTarget,
 	type RemuxAudioInfo,
 	type RemuxEvent,
+	type RemuxTextCue,
 	type RemuxMediaInfo,
 	type RemuxSeekResult,
 	type RemuxStats,
@@ -66,6 +67,10 @@ export interface RemuxSessionOptions {
 	// Video starts only at IDR pictures (Firefox with HEVC).
 	idrOnlyStart?: boolean
 	onFailure(reason: MseFailure, detail: string): void
+	// Embedded text subtitle cues as the remux reads them (Matroska).
+	onTextCues?: (cues: RemuxTextCue[]) => void
+	// The file was warmed under this key (warmRemuxFile): the worker takes it over, `port` closes unused.
+	warmKey?: string
 }
 
 export interface RemuxSessionDiagnostics {
@@ -407,6 +412,83 @@ class TrackBuffer {
 	}
 }
 
+function transcodeTargetsOf(source: { type: MediaSourceClass }): AudioTarget[] {
+	return (Object.keys(AUDIO_TARGET_CODECS) as AudioTarget[]).filter(target =>
+		source.type.isTypeSupported(`audio/mp4; codecs="${AUDIO_TARGET_CODECS[target]}"`)
+	)
+}
+
+export interface RemuxWarmth {
+	// Nobody will take it: the worker closes the file.
+	cancel(): void
+	// A session is about to take it over (its open names the key): the worker is no longer held for it.
+	handOver(): void
+}
+
+// The worker is held this long after a hand-over, so it can't idle out between the hand-over and the
+// session's own hold.
+const HAND_OVER_HOLD_MS = 30_000
+
+// Opens a file in the remux worker ahead of playback (the head, the index and the first keyframe interval go
+// into its cache) under `key`, for an openRemuxSession with the same warmKey to take over.
+export async function warmRemuxFile(options: {
+	port: MessagePort
+	size: number
+	index?: ProbeIndex
+	idrOnlyStart?: boolean
+	key: string
+}): Promise<RemuxWarmth> {
+	const source = mediaSourceClass()
+
+	if (source === null) {
+		options.port.close()
+
+		return { cancel: () => undefined, handOver: () => undefined }
+	}
+
+	const hold = await holdRemuxWorker()
+	let released = false
+	const release = (): void => {
+		if (!released) {
+			released = true
+			void hold.remote.unwarm(options.key).catch(() => undefined)
+			hold.release()
+		}
+	}
+	const handOver = (): void => {
+		if (!released) {
+			released = true
+			setTimeout(() => {
+				hold.release()
+			}, HAND_OVER_HOLD_MS)
+		}
+	}
+
+	try {
+		await Promise.race([
+			hold.remote.warm(
+				Comlink.transfer(
+					{
+						port: options.port,
+						size: options.size,
+						transcodeTargets: transcodeTargetsOf(source),
+						maxFragmentBytes: deviceBufferLimits(),
+						...(options.index === undefined ? {} : { index: options.index }),
+						...(options.idrOnlyStart === true ? { idrOnlyStart: true } : {})
+					},
+					[options.port]
+				),
+				options.key
+			),
+			hold.dead
+		])
+	} catch {
+		release()
+	}
+
+	return { cancel: release, handOver }
+}
+
 export async function openRemuxSession(options: RemuxSessionOptions): Promise<RemuxSession> {
 	const source = mediaSourceClass()
 	const port = { transferred: false }
@@ -416,9 +498,7 @@ export async function openRemuxSession(options: RemuxSessionOptions): Promise<Re
 			throw new Error("MediaSource is not available")
 		}
 
-		const transcodeTargets = (Object.keys(AUDIO_TARGET_CODECS) as AudioTarget[]).filter(target =>
-			source.type.isTypeSupported(`audio/mp4; codecs="${AUDIO_TARGET_CODECS[target]}"`)
-		)
+		const transcodeTargets = transcodeTargetsOf(source)
 		const limits = deviceBufferLimits()
 		const hold: RemuxWorkerHold = await holdRemuxWorker()
 		const events: ((event: RemuxEvent) => void)[] = []
@@ -442,7 +522,8 @@ export async function openRemuxSession(options: RemuxSessionOptions): Promise<Re
 							transcodeTargets,
 							maxFragmentBytes: limits,
 							...(options.index === undefined ? {} : { index: options.index }),
-							...(options.idrOnlyStart === true ? { idrOnlyStart: true } : {})
+							...(options.idrOnlyStart === true ? { idrOnlyStart: true } : {}),
+							...(options.warmKey === undefined ? {} : { warmKey: options.warmKey })
 						},
 						[options.port]
 					),
@@ -784,6 +865,14 @@ class MseRemuxSession implements RemuxSession {
 	}
 
 	private onEvent(event: RemuxEvent): void {
+		if (event.type === "textCues") {
+			if (!this.disposed) {
+				this.options.onTextCues?.(event.cues)
+			}
+
+			return
+		}
+
 		const track = event.kind === "video" ? this.video : this.audio
 
 		if (this.disposed || event.generation !== track.generation) {

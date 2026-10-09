@@ -219,6 +219,8 @@ interface RawTrack {
 	// A ContentEncoding applies to the frames themselves.
 	encodedFrames: boolean
 	compression: { algorithm: number; settings: Uint8Array } | null
+	// How the frames are compressed (zlib or header stripping); "unsupported" for anything else.
+	frameCompression: { algorithm: number; settings: Uint8Array } | "unsupported" | null
 	pixelWidth: number
 	pixelHeight: number
 	displayWidth: number | null
@@ -331,6 +333,10 @@ function parseEncodings(bytes: Uint8Array, encodings: EbmlElement, raw: RawTrack
 
 		if ((scope & 1) !== 0) {
 			raw.encodedFrames = true
+			raw.frameCompression =
+				type === 0 && raw.frameCompression === null && (algorithm === 0 || algorithm === 3)
+					? { algorithm, settings }
+					: "unsupported"
 		}
 
 		if ((scope & 2) === 0) {
@@ -362,6 +368,7 @@ function parseTrackEntry(bytes: Uint8Array, entry: EbmlElement, context: EbmlCon
 		privateUnreadable: false,
 		encodedFrames: false,
 		compression: null,
+		frameCompression: null,
 		pixelWidth: 0,
 		pixelHeight: 0,
 		displayWidth: null,
@@ -716,6 +723,7 @@ async function parseTracksPayload(bytes: Uint8Array, context: EbmlContext, keyfr
 			tracks.push({
 				kind: "subtitle",
 				enabled: raw.enabled,
+				frames: raw.frameCompression,
 				sub: {
 					id: raw.number,
 					codecId: raw.codecId,
@@ -1233,6 +1241,8 @@ export async function walkMatroska(source: BlockSource, tier: ProbeTier, result:
 		}
 
 		result.partial ||= context.malformed
+
+		result.timestampScale = walk.timestampScale
 
 		if (keyframes) {
 			result.cues = { segmentStart, timestampScale: walk.timestampScale, at: walk.cuesAt ?? walk.seeks.get(CUES_ID)?.[0] ?? null }

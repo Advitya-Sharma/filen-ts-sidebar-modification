@@ -99,6 +99,16 @@ export interface RemuxSeekResult {
 	audio: RemuxAudioStart | null
 }
 
+export interface RemuxTextCue {
+	track: number
+	start: number
+	end: number
+	// Cue payload text (escaped; <i>, <b>, <u> only).
+	text: string
+	// Numpad alignment, 0 for none.
+	hint: number
+}
+
 export type RemuxEvent =
 	// `init`: the bytes begin with an initialization segment.
 	| { type: "segment"; kind: TrackKind; generation: number; bytes: Uint8Array<ArrayBuffer>; init: boolean }
@@ -107,6 +117,8 @@ export type RemuxEvent =
 	// file's bytes could not be read (the range port's server went away, a download failed), which says
 	// nothing about whether this browser can play the file.
 	| { type: "error"; kind: TrackKind; generation: number; message: string; fragmentTooLarge: boolean; sourceLost: boolean }
+	// Embedded text subtitle cues found in what was read (Matroska), by track number; times on the file's timeline.
+	| { type: "textCues"; cues: RemuxTextCue[] }
 
 export interface RemuxStats {
 	blockReads: number

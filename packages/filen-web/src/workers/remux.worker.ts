@@ -22,6 +22,34 @@ type EventSink = ((event: RemuxEvent) => unknown) & Partial<Comlink.ProxyMethods
 const sessions = new Map<number, { engine: RemuxEngine; onEvent: EventSink }>()
 let nextSession = 0
 
+// A file opened ahead of playback (the next episode, once Up Next shows): its head and first keyframe interval
+// are in its block cache when the player's own open adopts it. One at a time; one nobody took closes itself.
+interface Warmed {
+	key: string
+	engine: RemuxEngine
+	info: Promise<RemuxMediaInfo>
+	adopt: (sink: EventSink) => void
+	expiry: ReturnType<typeof setTimeout>
+}
+
+const WARM_EXPIRY_MS = 5 * 60_000
+// Subtitle cues found while warming wait for the session that adopts the file.
+const MAX_WARM_EVENTS = 256
+let warmed: Warmed | null = null
+
+function dropWarmed(key?: string): Promise<void> {
+	const entry = warmed
+
+	if (entry === null || (key !== undefined && entry.key !== key)) {
+		return Promise.resolve()
+	}
+
+	warmed = null
+	clearTimeout(entry.expiry)
+
+	return entry.engine.close().catch(() => undefined)
+}
+
 function session(id: number): RemuxEngine {
 	const entry = sessions.get(id)
 
@@ -45,8 +73,72 @@ async function closeSession(id: number): Promise<void> {
 }
 
 const api = {
-	// `onEvent` is the page's Comlink proxy; segments cross transferred.
-	async open(params: RemuxOpenParams, onEvent: EventSink): Promise<{ id: number; info: RemuxMediaInfo }> {
+	// Opens `params` under `key` ahead of playback: the head, the index and the first keyframe interval are read
+	// into its cache. The port belongs to the warmed file from now on.
+	async warm(params: RemuxOpenParams, key: string): Promise<void> {
+		await dropWarmed()
+
+		let sink: EventSink | null = null
+		const held: RemuxEvent[] = []
+		const engine = new RemuxEngine(params, event => {
+			if (sink !== null) {
+				void sink(event.type === "segment" ? Comlink.transfer(event, [event.bytes.buffer]) : event)
+			} else if (event.type === "textCues" && held.length < MAX_WARM_EVENTS) {
+				held.push(event)
+			}
+		})
+		const entry: Warmed = {
+			key,
+			engine,
+			info: engine.open(params),
+			adopt: next => {
+				sink = next
+
+				for (const event of held.splice(0)) {
+					void next(event)
+				}
+			},
+			expiry: setTimeout(() => {
+				void dropWarmed(key)
+			}, WARM_EXPIRY_MS)
+		}
+
+		warmed = entry
+
+		try {
+			await entry.info
+			await engine.canStartAt(0)
+		} catch {
+			await dropWarmed(key)
+		}
+	},
+	unwarm(key: string): Promise<void> {
+		return dropWarmed(key)
+	},
+	// `onEvent` is the page's Comlink proxy; segments cross transferred. With `warmKey` naming the file warmed
+	// last, that file is taken over and the port passed along closes unused.
+	async open(params: RemuxOpenParams & { warmKey?: string }, onEvent: EventSink): Promise<{ id: number; info: RemuxMediaInfo }> {
+		const ready = warmed
+
+		if (params.warmKey !== undefined && ready?.key === params.warmKey) {
+			warmed = null
+			clearTimeout(ready.expiry)
+			params.port.close()
+
+			const id = nextSession++
+
+			ready.adopt(onEvent)
+			sessions.set(id, { engine: ready.engine, onEvent })
+
+			try {
+				return { id, info: await ready.info }
+			} catch (error) {
+				await closeSession(id)
+
+				throw error
+			}
+		}
+
 		const id = nextSession++
 		const engine = new RemuxEngine(params, event => {
 			void onEvent(event.type === "segment" ? Comlink.transfer(event, [event.bytes.buffer]) : event)

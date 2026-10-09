@@ -5,6 +5,17 @@ import { trackMetadata } from "@/features/audio/lib/trackMetadata"
 import { notifyFormatFailure } from "@/features/audio/lib/formatFailureNotice"
 import { hydrateAudioPrefs, useAudioStore } from "@/features/audio/store/useAudioStore"
 import { warmMediaVolume } from "@/lib/media/mediaVolume"
+import { mediaSessionOwners } from "@/lib/media/mediaSessionOwner"
+
+// The audio engine's share of the page's Media Session: the bottom of the owner stack. A video player taking
+// the session over pauses the engine; when it lets go the engine's metadata and handlers come back.
+const audioMediaSession = mediaSessionOwners.create("audio", {
+	onPreempt: () => {
+		audioEngine.pause()
+	}
+})
+
+audioMediaSession.acquire()
 
 // The app-lifetime audio engine singleton, wired with the real DOM element adapter + SW/blob source
 // resolver + OS Media Session bridge + one-track-ahead prefetch + the track-metadata service's covers. One instance
@@ -16,7 +27,7 @@ export const audioEngine = new AudioEngine({
 	createElement: createDomAudioAdapter,
 	createPrefetchElement: createDomPrefetchAdapter,
 	resolveSource: resolveTrackSource,
-	mediaSession: createMediaSessionPublisher(),
+	mediaSession: createMediaSessionPublisher(audioMediaSession),
 	resolveCover: (track, source) => trackMetadata.playbackCover(track, source.kind === "blob" ? source.blob : undefined),
 	onFormatFailure: notifyFormatFailure
 })
@@ -48,7 +59,8 @@ bindMediaSessionActions(
 			audioEngine.seek(seconds)
 		}
 	},
-	() => useAudioStore.getState().positionMs / 1000
+	() => useAudioStore.getState().positionMs / 1000,
+	audioMediaSession
 )
 
 // Logout teardown (wired into performLogout): stop playback, revoke the live blob URL, tear down the

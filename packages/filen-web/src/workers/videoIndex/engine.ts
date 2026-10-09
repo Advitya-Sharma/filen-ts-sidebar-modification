@@ -21,9 +21,13 @@ import {
 	LibraryFiles,
 	buildTitleDetail,
 	buildTitles,
+	buildHomeItems,
+	diffRecords,
 	diffTitles,
+	itemArtCandidates,
 	titleArtCandidates,
 	type TitleArtCandidates,
+	type VideoHomeItem,
 	type VideoIndexUpdate,
 	type VideoRootStatus,
 	type VideoTitleDetail,
@@ -185,6 +189,9 @@ export class VideoIndexEngine {
 	private readonly roots = new Map<string, RootRuntime>()
 	private readonly listeners = new Set<(update: VideoIndexUpdate) => void>()
 	private readonly signatures = new Map<string, string>()
+	// The video list's last sent state (stable uuid -> serialized item) while the main thread wants it.
+	private homeSignatures: Map<string, string> | null = null
+	private homeSent = false
 	private current: CurrentLibrary | null = null
 	// Bumped by reset: async work started before it drops its result.
 	private token = 0
@@ -1250,10 +1257,42 @@ export class VideoIndexEngine {
 			})
 		}
 
+		this.pushHome()
 		this.pushRoots()
 	}
 
 	// ── Subscriptions and reads ──
+
+	// The main thread's video list (home rows, grids, search): sent while a screen that reads it is mounted, all of
+	// it first and then only what each classification changed. Off, nothing of it is held here.
+	public setHomeEnabled(enabled: boolean): void {
+		this.homeSignatures = enabled ? new Map() : null
+		this.homeSent = false
+		this.pushHome()
+	}
+
+	private pushHome(): void {
+		const signatures = this.homeSignatures
+
+		if (signatures === null || this.current === null) {
+			return
+		}
+
+		const items = this.homeItems()
+		const reset = !this.homeSent
+		const { upserts, removed } = diffRecords(signatures, items, item => item.stableUuid)
+
+		this.homeSent = true
+
+		if (reset || upserts.length > 0 || removed.length > 0) {
+			this.emit({
+				type: "home",
+				reset,
+				upserts: reset ? items : upserts,
+				removed: reset ? [] : removed
+			})
+		}
+	}
 
 	// The listener gets everything known now, then every change.
 	public subscribe(listener: (update: VideoIndexUpdate) => void): () => void {
@@ -1264,6 +1303,15 @@ export class VideoIndexEngine {
 				type: "titles",
 				reset: true,
 				upserts: [...this.current.titles.values()],
+				removed: []
+			})
+		}
+
+		if (this.homeSignatures !== null && this.current !== null && this.homeSent) {
+			listener({
+				type: "home",
+				reset: true,
+				upserts: this.homeItems(),
 				removed: []
 			})
 		}
@@ -1318,6 +1366,43 @@ export class VideoIndexEngine {
 		const title = current?.titles.get(id)
 
 		return current === null || title === undefined ? null : titleArtCandidates(current.files, title, slot)
+	}
+
+	// One video's art: an episode's own still, else its title's.
+	public itemArt(titleId: string, stableUuid: string, slot: ArtSlotCode): TitleArtCandidates | null {
+		const current = this.current
+		const title = current?.titles.get(titleId)
+
+		return current === null || title === undefined ? null : itemArtCandidates(current.files, title, stableUuid, slot)
+	}
+
+	// Every playable video of the classification.
+	public homeItems(): VideoHomeItem[] {
+		const current = this.current
+
+		return current === null ? [] : buildHomeItems(current.files, parent => this.dirName(parent))
+	}
+
+	private dirName(uuid: string): string {
+		for (const rt of this.roots.values()) {
+			const state = rt.state
+
+			if (state === null) {
+				continue
+			}
+
+			if (rt.config.uuid === uuid) {
+				return state.name
+			}
+
+			const dir = state.dirs.get(uuid)
+
+			if (dir !== undefined) {
+				return dir.name
+			}
+		}
+
+		return ""
 	}
 
 	public titleDetail(id: string): VideoTitleDetail | null {
@@ -1498,6 +1583,8 @@ export class VideoIndexEngine {
 		this.roots.clear()
 		this.listeners.clear()
 		this.signatures.clear()
+		this.homeSignatures = null
+		this.homeSent = false
 		this.lookups.clear()
 		this.patchLog = []
 		this.asyncPatches = 0
