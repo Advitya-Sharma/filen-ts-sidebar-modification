@@ -376,6 +376,53 @@ export function describeCargoCrate(name: string, version: string, dir: string | 
 	})
 }
 
+/**
+ * Licensing a package's own files leave out: a component it bundles under another license (a statically
+ * linked library, say). The texts and copyright lines are appended to what the package ships, never
+ * replacing it; `license` is the SPDX expression covering both.
+ */
+export type LicenseAddition = {
+	name: string
+	version: string
+	license: string
+	copyright: string[]
+	terms: string[]
+}
+
+/**
+ * Applies `additions` to the matching collected entries. An addition that matches nothing throws: after a
+ * version bump the override must be re-checked against the new release rather than silently dropped.
+ */
+export function applyLicenseAdditions<E extends string>(
+	collected: CollectedNotice<E>[],
+	additions: readonly LicenseAddition[]
+): CollectedNotice<E>[] {
+	const unmatched = new Set(additions)
+	const out = collected.map(entry => {
+		const addition = additions.find(candidate => candidate.name === entry.name && candidate.version === entry.version)
+
+		if (addition === undefined) {
+			return entry
+		}
+
+		unmatched.delete(addition)
+
+		return {
+			...entry,
+			license: addition.license,
+			copyright: [...new Set([...entry.copyright, ...addition.copyright])],
+			terms: [...entry.terms, ...addition.terms]
+		}
+	})
+	const [first] = unmatched
+
+	if (first !== undefined) {
+		throw new Error(`license addition for ${first.name}@${first.version} matches no installed package — re-check it`)
+	}
+
+	return out
+}
+
 /** Pools every entry's terms, then emits the payload entries without them, ordered by name then version. */
 export function finalizeNotices<E extends string>(collected: CollectedNotice<E>[]): { texts: string[]; notices: NoticeEntry<E>[] } {
 	const texts = poolLicenseTexts(collected)

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+	applyLicenseAdditions,
 	describeCargoCrate,
 	describedNotice,
 	describeLicensing,
@@ -170,5 +171,40 @@ describe("manifest fields", () => {
 		expect(spdxOf(undefined)).toBe("UNKNOWN")
 		expect(repositoryOf({ url: "git+https://github.com/a/b.git" })).toBe("https://github.com/a/b")
 		expect(repositoryOf(undefined)).toBeNull()
+	})
+})
+
+describe("applyLicenseAdditions", () => {
+	const entry = (name: string, version: string) => ({
+		name,
+		version,
+		license: "MPL-2.0",
+		ecosystem: "npm" as const,
+		copyright: ["Copyright (c) the package authors"],
+		repository: null,
+		texts: [],
+		terms: ["MPL terms"]
+	})
+	const addition = {
+		name: "codec",
+		version: "1.0.0",
+		license: "MPL-2.0 AND LGPL-2.1-or-later",
+		copyright: ["Copyright (c) the library developers"],
+		terms: ["LGPL terms"]
+	}
+
+	it("appends the bundled component's terms and copyright to the package's own", () => {
+		const [codec, other] = applyLicenseAdditions([entry("codec", "1.0.0"), entry("other", "1.0.0")], [addition])
+
+		expect(codec).toMatchObject({
+			license: "MPL-2.0 AND LGPL-2.1-or-later",
+			copyright: ["Copyright (c) the package authors", "Copyright (c) the library developers"],
+			terms: ["MPL terms", "LGPL terms"]
+		})
+		expect(other).toEqual(entry("other", "1.0.0"))
+	})
+
+	it("throws when the addition matches no installed version, so a bump re-checks it", () => {
+		expect(() => applyLicenseAdditions([entry("codec", "2.0.0")], [addition])).toThrow("codec@1.0.0")
 	})
 })
