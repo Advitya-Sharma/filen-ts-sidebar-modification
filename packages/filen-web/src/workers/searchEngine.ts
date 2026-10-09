@@ -188,12 +188,11 @@ async function safeClose(search: CacheSearch, searchWindow: CacheSearchWindow | 
 }
 
 export function createSearchEngine() {
-	// Never reset once flipped true: logout always location.reload()s the whole worker away, so
-	// nothing in this worker's lifetime currently needs to clear it. A future in-SPA account switch
-	// (no full reload) would have to reset this explicitly, or the new session silently inherits the
-	// previous account's cache configuration.
-	let configured = false
-	let configuring: Promise<void> | null = null
+	// The client whose cache is configured. Per client, not per worker: a logout that does not reload the
+	// page (a login cancelled while it landed) leaves this worker running for the next sign-in, whose new
+	// client needs its own configuration.
+	let configuredFor: Client | null = null
+	let configuring: { client: Client; done: Promise<void> } | null = null
 	// The user's search: the single handle open/setName/close drive.
 	let active: { search: CacheSearch; searchWindow: CacheSearchWindow; token: OpenToken } | null = null
 	let currentToken: OpenToken | null = null
@@ -220,11 +219,13 @@ export function createSearchEngine() {
 	let resyncEpoch = 0
 	let resyncEndedAt = 0
 	let converged = true
-	let shutDown = false
+	// Clients a logout shut the engine down for: nothing runs on one again. A new sign-in's client does.
+	const retired = new WeakSet<Client>()
+	let lastClient: Client | null = null
 
-	// Read through a call, like isCancelled: shutdown() flips it while a query is paused at an await.
-	function isShutDown(): boolean {
-		return shutDown
+	// Read through a call, like isCancelled: shutdown() retires the client while a query is paused at an await.
+	function isShutDown(client: Client): boolean {
+		return retired.has(client)
 	}
 
 	// Installed once (see the `configured` guard in open()) and never re-created — reads
@@ -360,15 +361,24 @@ export function createSearchEngine() {
 		}, keepMs)
 	}
 
-	// Configured once per worker, shared by the user's open and a query racing it.
+	// Configured once per client, shared by the user's open and a query racing it.
 	async function ensureConfigured(client: Client): Promise<void> {
-		configuring ??= client.configureCache(CACHE_PATH, statusListener).finally(() => {
-			configuring = null
-		})
+		if (configuring?.client !== client) {
+			const current = {
+				client,
+				done: client.configureCache(CACHE_PATH, statusListener).finally(() => {
+					if (configuring === current) {
+						configuring = null
+					}
+				})
+			}
 
-		await configuring
+			configuring = current
+		}
 
-		configured = true
+		await configuring.done
+
+		configuredFor = client
 	}
 
 	// Rolls back a genuinely-failed open(): the routing fields that call set, PLUS whatever search was
@@ -415,12 +425,13 @@ export function createSearchEngine() {
 
 		currentToken = token
 		activePush = push
+		lastClient = client
 
 		const resolvedRoot = rootUuid ?? client.root().uuid
 
 		activeRootUuid = resolvedRoot
 
-		if (!configured) {
+		if (configuredFor !== client) {
 			try {
 				// A second configureCache call (a re-open after this worker already configured one)
 				// verifiably succeeds silently — no error, no behavior change — so this guard is a
@@ -593,9 +604,11 @@ export function createSearchEngine() {
 		const [first = ""] = names
 		const nothing: SearchQueryResult = { snapshot: { hits: [], total: 0n, live: true }, settled: false, name: first }
 
-		if (isCancelled(token) || shutDown) {
+		if (isCancelled(token) || isShutDown(client)) {
 			return nothing
 		}
+
+		lastClient = client
 
 		clearTimeout(keepTimer)
 
@@ -605,7 +618,7 @@ export function createSearchEngine() {
 		let handle: { search: CacheSearch; rootUuid: string; releasing: boolean } | null = null
 
 		try {
-			if (!configured) {
+			if (configuredFor !== client) {
 				await ensureConfigured(client)
 			}
 
@@ -632,7 +645,7 @@ export function createSearchEngine() {
 				const epoch = resyncEpoch
 				const search = await client.createSearch(root, buildConfig(first, itemType))
 
-				if (isShutDown()) {
+				if (isShutDown(client)) {
 					void safeClose(search, null)
 
 					return nothing
@@ -698,7 +711,7 @@ export function createSearchEngine() {
 
 			return best ?? nothing
 		} finally {
-			if (handle !== null && shared === handle && !isShutDown()) {
+			if (handle !== null && shared === handle && !isShutDown(client)) {
 				// Stopped while the index was still being built: the user's Stop ends that build too, unless the
 				// user's own search may stand on it.
 				const building = resyncSeenAt !== null || (cold !== null && resyncEpoch === cold.epoch)
@@ -897,7 +910,18 @@ export function createSearchEngine() {
 
 	// Logout: every query stops and every handle closes, the user's too, before the client is released.
 	async function shutdown(): Promise<void> {
-		shutDown = true
+		if (lastClient !== null) {
+			retired.add(lastClient)
+		}
+
+		lastClient = null
+		configuredFor = null
+		configuring = null
+		// The index state was the old session's; the next client starts with its own.
+		resyncSeenAt = null
+		resyncShare = null
+		resyncEndedAt = 0
+		converged = true
 
 		for (const token of runs) {
 			cancelToken(token)

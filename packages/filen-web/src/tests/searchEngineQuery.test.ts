@@ -73,18 +73,20 @@ function fakeClient(handles: FakeHandle[]) {
 
 		return Promise.resolve(next.search)
 	})
-	const client = {
-		configureCache: vi.fn((_path: string, listener: (messages: CacheStatusMessage[]) => void) => {
-			status = listener
+	const configureCache = vi.fn((_path: string, listener: (messages: CacheStatusMessage[]) => void) => {
+		status = listener
 
-			return Promise.resolve(undefined)
-		}),
+		return Promise.resolve(undefined)
+	})
+	const client = {
+		configureCache,
 		createSearch,
 		root: vi.fn(() => ({ uuid: "root" }))
 	} as unknown as Client
 
 	return {
 		client,
+		configureCache,
 		createSearch,
 		resync: (progress: ResyncProgressMessage) => status?.([{ type: "resyncProgress", progress }])
 	}
@@ -543,5 +545,28 @@ describe("createSearchEngine — query", () => {
 		expect(user.search.close).toHaveBeenCalledTimes(1)
 		expect(own.search.close).toHaveBeenCalledTimes(1)
 		await expect(engine.query(client, { rootUuid: null, names: ["c"] }, OPTIONS)).resolves.toMatchObject({ settled: false })
+	})
+
+	it("serves the next sign-in's client after a logout that kept the worker, configuring its cache anew", async () => {
+		const old = fakeClient([fakeHandle()])
+		const engine = createSearchEngine()
+
+		void engine.query(old.client, { rootUuid: null, names: ["a"] }, OPTIONS)
+		await vi.advanceTimersByTimeAsync(0)
+		await engine.shutdown()
+
+		const next = fakeClient([fakeHandle(one)])
+		const result = engine.query(next.client, { rootUuid: null, names: ["x"] }, OPTIONS)
+
+		// A fresh client's handle registers the root: its resync has to run before the index counts.
+		await vi.advanceTimersByTimeAsync(0)
+		next.resync({ type: "started", roots: [ROOT] })
+		next.resync({ type: "finished", converged: true })
+		await vi.advanceTimersByTimeAsync(200)
+
+		await expect(result).resolves.toMatchObject({ name: "x", snapshot: { total: 1n } })
+		expect(next.configureCache).toHaveBeenCalledTimes(1)
+		// The old session's client stays shut out.
+		await expect(engine.query(old.client, { rootUuid: null, names: ["c"] }, OPTIONS)).resolves.toMatchObject({ settled: false })
 	})
 })
