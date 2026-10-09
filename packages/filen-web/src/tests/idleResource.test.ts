@@ -105,4 +105,38 @@ describe("idleResource", () => {
 
 		expect(h.create).toHaveBeenCalledTimes(2)
 	})
+
+	it("invalidate disposes a broken resource at once, even in use, and the next use gets a fresh one", async () => {
+		const h = harness()
+		const inUse = Promise.withResolvers<undefined>()
+		const seen: { id: number }[] = []
+		const using = h.resource.use(resource => {
+			seen.push(resource)
+
+			return inUse.promise
+		})
+
+		await Promise.resolve()
+
+		const [first] = seen
+
+		if (first === undefined) {
+			throw new Error("not in use")
+		}
+
+		h.resource.invalidate(first)
+
+		expect(h.dispose).toHaveBeenCalledWith({ id: 1 })
+
+		await h.resource.use(resource => {
+			expect(resource).toEqual({ id: 2 })
+
+			return Promise.resolve()
+		})
+
+		inUse.resolve(undefined)
+		await using
+		// The invalidated one is not disposed twice.
+		expect(h.dispose).toHaveBeenCalledTimes(1)
+	})
 })

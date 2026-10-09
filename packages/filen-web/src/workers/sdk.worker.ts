@@ -145,6 +145,7 @@ import {
 } from "@/workers/audioMetadata"
 import { createMemorySink, toRawPreviewResult, type RawPreviewResult } from "@/features/preview/lib/rawPreview.logic"
 import { probeSource, probeVideo } from "@/lib/media/probe/probe"
+import { exposeRangePort } from "@/lib/media/rangePort"
 import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
 import {
 	archivePassword,
@@ -2255,8 +2256,31 @@ const api = {
 
 			return await probeVideo(source, tier)
 		} finally {
-			previewAborts.delete(previewToken)
+			// Only its own entry: the caller may have reused the token for a read registered since.
+			if (previewAborts.get(previewToken) === controller) {
+				previewAborts.delete(previewToken)
+			}
 		}
+	},
+	// ── Range port ───────────────────────────────────────────────────────────
+	// Serves `file`'s decrypted byte ranges on `port` (lib/media/rangePort) for a reader in another
+	// worker, so playback reads go straight from here to the remuxer. Lives until the reader closes the
+	// port or cancelPreviewDownload(previewToken) aborts every read on it.
+	openRangePort(port: MessagePort, file: AnyFile, previewToken: string): void {
+		const c = requireClient()
+		const controller = new AbortController()
+
+		previewAborts.set(previewToken, controller)
+		controller.signal.addEventListener(
+			"abort",
+			() => {
+				if (previewAborts.get(previewToken) === controller) {
+					previewAborts.delete(previewToken)
+				}
+			},
+			{ once: true }
+		)
+		exposeRangePort(port, (start, end, signal) => readFileRange(c, file, start, end, signal), controller)
 	},
 	// ── Search ───────────────────────────────────────────────────────────────
 	// Thin pass-throughs onto the single searchEngine instance (searchEngine.ts owns the actual

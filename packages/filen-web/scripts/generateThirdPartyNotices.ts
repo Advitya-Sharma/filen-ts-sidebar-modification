@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import {
+	applyLicenseAdditions,
 	describeCargoCrate,
 	describedNotice,
 	finalizeNotices,
@@ -11,6 +12,7 @@ import {
 	repositoryOf,
 	spdxOf,
 	type CollectedNotice,
+	type LicenseAddition,
 	type InstalledNpmPackage
 } from "@filen/shared/tooling"
 
@@ -277,7 +279,52 @@ if (installedSdk !== expectedSdk) {
 	throw new Error(`pnpm says @filen/sdk-rs ${expectedSdk}, node_modules says ${String(installedSdk)} — run pnpm install`)
 }
 
-const npm = collectNpm(installed)
+/**
+ * Bundled components a package's own license files do not cover.
+ *
+ * @mediabunny/ac3 and @mediabunny/dts are MPL-2.0 glue around a WebAssembly build of FFmpeg's libavcodec
+ * and libavutil (AC-3/E-AC-3 and DCA decoders and encoders), statically linked into the shipped module.
+ * FFmpeg without --enable-gpl is LGPL-2.1-or-later (https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md);
+ * the configure lines, which enable no GPL part, are in each package's README:
+ *   https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/ac3/README.md
+ *   https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/dts/README.md
+ * The license text is FFmpeg's own COPYING.LGPLv2.1, kept verbatim beside this script.
+ */
+const LGPL_2_1 = readFileSync("scripts/licenses/ffmpeg-COPYING.LGPLv2.1", "utf8")
+
+function ffmpegAddition(params: { name: string; version: string; components: string; readme: string; bridge: string; build: string }) {
+	return {
+		name: params.name,
+		version: params.version,
+		license: "MPL-2.0 AND LGPL-2.1-or-later",
+		copyright: ["Copyright (c) the FFmpeg developers"],
+		terms: [
+			`This package contains ${params.components}, built to WebAssembly from FFmpeg (libavcodec, libavutil) and licensed under the GNU Lesser General Public License, version 2.1 or later. FFmpeg source code: https://git.ffmpeg.org/ffmpeg.git. Build configuration: ${params.readme}. Interface source: ${params.bridge}. The WebAssembly module as distributed: ${params.build}.`,
+			LGPL_2_1
+		]
+	} satisfies LicenseAddition
+}
+
+const LICENSE_ADDITIONS: LicenseAddition[] = [
+	ffmpegAddition({
+		name: "@mediabunny/ac3",
+		version: "1.61.3",
+		components: "FFmpeg's AC-3 and E-AC-3 decoders and encoders",
+		readme: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/ac3/README.md",
+		bridge: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/ac3/src/bridge.c",
+		build: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/ac3/build/ac3.js"
+	}),
+	ffmpegAddition({
+		name: "@mediabunny/dts",
+		version: "1.61.3",
+		components: "FFmpeg's DTS (DCA) decoder and encoder",
+		readme: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/dts/README.md",
+		bridge: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/dts/src/bridge.c",
+		build: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/dts/build/dts.js"
+	})
+]
+
+const npm = applyLicenseAdditions(collectNpm(installed), LICENSE_ADDITIONS)
 const rust = collectRust(expectedSdk)
 const collected = [...npm, ...rust.entries]
 

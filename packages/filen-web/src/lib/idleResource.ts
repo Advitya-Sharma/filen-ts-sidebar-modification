@@ -6,6 +6,9 @@ export interface IdleResource<T> {
 	use<R>(run: (resource: T) => Promise<R>): Promise<R>
 	// Disposes now when idle; a resource still in use is disposed by its own idle timer instead.
 	disposeIfIdle(): void
+	// Disposes `resource` now even while in use, because it broke (a worker that died): its users' calls
+	// fail on their own, and the next use creates a fresh one. A no-op for a resource already replaced.
+	invalidate(resource: T): void
 }
 
 export function idleResource<T>(create: () => T, dispose: (resource: T) => void, idleMs: number): IdleResource<T> {
@@ -45,5 +48,16 @@ export function idleResource<T>(create: () => T, dispose: (resource: T) => void,
 		}
 	}
 
-	return { use, disposeIfIdle }
+	function invalidate(resource: T): void {
+		if (held?.value !== resource) {
+			return
+		}
+
+		clearTimeout(timer)
+		timer = undefined
+		held = null
+		dispose(resource)
+	}
+
+	return { use, disposeIfIdle, invalidate }
 }

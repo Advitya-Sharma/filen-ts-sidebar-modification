@@ -1,0 +1,1283 @@
+import * as Comlink from "comlink"
+import { holdRemuxWorker, type RemuxWorkerHold } from "@/lib/media/remuxClient"
+import { splitForAppend } from "@/lib/media/fmp4Split"
+import {
+	aheadSeconds,
+	BACK_BUFFER_SECONDS,
+	backBufferEviction,
+	browserEngine,
+	bufferedAhead,
+	bufferLimits,
+	estimatedBytes,
+	evictedAhead,
+	intersectRanges,
+	MAX_BUFFER_HOLE,
+	MAX_EVICTION_REFETCHES,
+	needsMore,
+	QUOTA_SHRINK,
+	quotaAction,
+	rangesOutside,
+	recentEvictions,
+	seekPlan,
+	shouldEndStream,
+	STALL_DETECTION_MS,
+	stallAction,
+	TimelineOps,
+	trackBitrate,
+	unionRanges,
+	type BufferLimits,
+	type TimeRange
+} from "@/lib/media/mseController.logic"
+import type { ProbeIndex } from "@/lib/media/probe/types"
+import { rangePortReader } from "@/lib/media/rangePort"
+import {
+	AUDIO_TARGET_CODECS,
+	isSuperseded,
+	type AudioMode,
+	type AudioTarget,
+	type RemuxAudioInfo,
+	type RemuxEvent,
+	type RemuxMediaInfo,
+	type RemuxSeekResult,
+	type RemuxStats,
+	type TrackKind
+} from "@/lib/media/remuxTypes"
+
+// Playback of a file the remux worker turns into fragmented MP4, through MediaSource on this thread
+// (Firefox exposes MediaSource to windows only). One SourceBuffer per track so an audio switch never
+// touches buffered video.
+
+// The surface a player drives; a direct (non-remux) session will implement the same.
+export interface PlaybackSession {
+	readonly audioTracks: readonly RemuxAudioInfo[]
+	attach(video: HTMLVideoElement): Promise<void>
+	play(): Promise<void>
+	seek(time: number): void
+	selectAudio(trackId: number): Promise<void>
+	dispose(): void
+}
+
+export type MseFailure = "keyframeIntervalTooLarge" | "stalled" | "remux" | "media"
+
+export interface RemuxSessionOptions {
+	port: MessagePort
+	size: number
+	index?: ProbeIndex
+	startTime?: number
+	onFailure(reason: MseFailure, detail: string): void
+}
+
+export interface RemuxSessionDiagnostics {
+	video: TimeRange[]
+	audio: TimeRange[]
+	keyTime: number
+	audioStartTime: number | null
+	ahead: number
+	// Appends the browser refused for lack of room.
+	quotaErrors: number
+	// MediaSources set up (1 + rebuilds for an audio change the SourceBuffers could not follow).
+	mediaSources: number
+	restarts: number
+	endOfStream: boolean
+	stats: RemuxStats | null
+}
+
+export interface RemuxSession extends PlaybackSession {
+	readonly info: RemuxMediaInfo
+	diagnostics(): Promise<RemuxSessionDiagnostics>
+}
+
+type MediaSourceClass = typeof MediaSource
+
+interface ManagedMediaSourceWindow {
+	ManagedMediaSource?: MediaSourceClass
+}
+
+// MediaSource wherever it exists; ManagedMediaSource only where it does not (iPhone).
+function mediaSourceClass(): { type: MediaSourceClass; managed: boolean } | null {
+	if (typeof MediaSource !== "undefined") {
+		return { type: MediaSource, managed: false }
+	}
+
+	const managed = (globalThis as ManagedMediaSourceWindow).ManagedMediaSource
+
+	return managed === undefined ? null : { type: managed, managed: true }
+}
+
+function toRanges(ranges: TimeRanges): TimeRange[] {
+	const out: TimeRange[] = []
+
+	for (let index = 0; index < ranges.length; index++) {
+		out.push([ranges.start(index), ranges.end(index)])
+	}
+
+	return out
+}
+
+function totalSeconds(ranges: readonly TimeRange[]): number {
+	let seconds = 0
+
+	for (const [start, end] of ranges) {
+		seconds += end - start
+	}
+
+	return seconds
+}
+
+// A function, not a property read: the flag changes under the caller between two reads.
+function isUpdating(buffer: SourceBuffer): boolean {
+	return buffer.updating
+}
+
+function isQuotaError(error: unknown): boolean {
+	return error instanceof DOMException && error.name === "QuotaExceededError"
+}
+
+function once(target: EventTarget, type: string): Promise<void> {
+	return new Promise(resolve => {
+		target.addEventListener(
+			type,
+			() => {
+				resolve()
+			},
+			{ once: true }
+		)
+	})
+}
+
+class DisposedError extends Error {
+	public constructor() {
+		super("playback session disposed")
+		this.name = "DisposedError"
+	}
+}
+
+const STALL_POLL_MS = 250
+// Playback seeks the session makes itself (a clamp, a gap skip) land within this of the target.
+const INTERNAL_SEEK_TOLERANCE = 0.01
+// Older iPhone WebKit has no SourceBuffer.changeType; an audio codec change then takes a new MediaSource.
+const CHANGE_TYPE_SUPPORTED =
+	typeof SourceBuffer !== "undefined" && typeof (SourceBuffer.prototype as Partial<SourceBuffer>).changeType === "function"
+
+// Before a track has had enough appended to measure, an audio track is assumed at this bitrate.
+const AUDIO_BITRATE_GUESS = 192_000
+
+interface Piece {
+	generation: number
+	bytes: Uint8Array<ArrayBuffer>
+	// Total bytes of the segment this piece belongs to, for the quota decision.
+	segmentBytes: number
+}
+
+type HoldReason = "setup" | "switch" | "quota"
+
+interface TrackHooks {
+	// Returns whether to retry the append right away; the hook may instead hold the track.
+	onQuota(track: TrackBuffer, piece: Piece): Promise<boolean>
+	onAppended(): void
+	// After every SourceBuffer operation and whenever the append queue runs dry.
+	onSettled(): void
+	onError(error: unknown): void
+}
+
+// Serialises every operation on one SourceBuffer: appends, removals, abort and changeType all need the
+// previous one finished. Appends are queued per generation; anything of an older one is dropped.
+class TrackBuffer {
+	public readonly kind: TrackKind
+	public generation = 0
+	public ended = false
+	public buffer: SourceBuffer | null = null
+	// Every range observed buffered after this generation's appends, for telling eviction from a gap.
+	public seen: TimeRange[] = []
+	public lastEvictionAt = 0
+	private readonly holds = new Set<HoldReason>()
+	private pieces: Piece[] = []
+	private running = false
+	private appending = false
+	// The generation whose segments the SourceBuffer's parser is in.
+	private appendedGeneration = -1
+	private queue: Promise<void> = Promise.resolve()
+	private appendedBytes = 0
+	private appendedSeconds = 0
+	private readonly hooks: TrackHooks
+
+	public constructor(kind: TrackKind, hooks: TrackHooks) {
+		this.kind = kind
+		this.hooks = hooks
+	}
+
+	public get ranges(): TimeRange[] {
+		if (this.buffer === null) {
+			return []
+		}
+
+		try {
+			return toRanges(this.buffer.buffered)
+		} catch {
+			// A SourceBuffer its MediaSource dropped (the element failed) throws instead of reporting nothing.
+			return []
+		}
+	}
+
+	public get idle(): boolean {
+		return this.pieces.length === 0 && !this.running
+	}
+
+	public get updating(): boolean {
+		return this.buffer?.updating === true
+	}
+
+	public bitrate(fallback: number): number {
+		return trackBitrate({ bytes: this.appendedBytes, seconds: this.appendedSeconds, fallback })
+	}
+
+	public hold(reason: HoldReason): void {
+		this.holds.add(reason)
+	}
+
+	public release(reason: HoldReason): void {
+		this.holds.delete(reason)
+		this.resume()
+	}
+
+	public isHeld(reason: HoldReason): boolean {
+		return this.holds.has(reason)
+	}
+
+	public push(generation: number, bytes: Uint8Array<ArrayBuffer>): void {
+		for (const piece of splitForAppend(bytes)) {
+			this.pieces.push({ generation, bytes: piece, segmentBytes: bytes.length })
+		}
+
+		this.resume()
+	}
+
+	public resume(): void {
+		this.drain().catch((error: unknown) => {
+			this.hooks.onError(error)
+		})
+	}
+
+	// Starts a new generation: queued pieces and a quota hold go, an append in flight is cut short, and
+	// the next append starts with the new generation's init segment.
+	public reset(generation: number, mediaSource: MediaSource | null): void {
+		this.generation = generation
+		this.ended = false
+		this.pieces = []
+		this.seen = []
+		this.holds.delete("quota")
+
+		// Only an append can be aborted; a remove in progress is left to finish.
+		if (this.appending && this.buffer?.updating === true && mediaSource?.readyState === "open") {
+			this.buffer.abort()
+		}
+	}
+
+	// Replaces the SourceBuffer (a new MediaSource); everything queued belonged to the old one.
+	public attachBuffer(buffer: SourceBuffer | null): void {
+		this.buffer = buffer
+		this.appendedGeneration = -1
+		this.queue = Promise.resolve()
+	}
+
+	public dispose(): void {
+		this.pieces = []
+		this.holds.clear()
+		this.buffer = null
+	}
+
+	// Queued behind every operation already asked for: two callers both seeing `updating` false and
+	// both starting one would make the second throw. The operation may decide not to start one.
+	public run(operation: (buffer: SourceBuffer) => void): Promise<void> {
+		const next = this.queue.then(() => this.execute(operation))
+
+		this.queue = next.catch(() => undefined)
+
+		return next
+	}
+
+	private async execute(operation: (buffer: SourceBuffer) => void): Promise<void> {
+		const buffer = this.buffer
+
+		if (buffer === null) {
+			return
+		}
+
+		while (buffer.updating) {
+			await once(buffer, "updateend")
+		}
+
+		if (this.buffer !== buffer) {
+			return
+		}
+
+		operation(buffer)
+
+		// appendBuffer and remove update asynchronously; abort and changeType do not.
+		if (isUpdating(buffer)) {
+			await once(buffer, "updateend")
+		}
+
+		this.hooks.onSettled()
+	}
+
+	private paused(): boolean {
+		return this.holds.size > 0 || this.buffer === null
+	}
+
+	private async drain(): Promise<void> {
+		if (this.running || this.paused()) {
+			return
+		}
+
+		this.running = true
+
+		try {
+			for (let piece = this.pieces[0]; piece !== undefined && !this.paused(); piece = this.pieces[0]) {
+				if (piece.generation !== this.generation) {
+					this.pieces.shift()
+
+					continue
+				}
+
+				const current = piece
+				const before = totalSeconds(this.ranges)
+				const outcome = { appended: false }
+
+				try {
+					await this.run(buffer => {
+						// Superseded while it waited its turn.
+						if (current.generation !== this.generation) {
+							return
+						}
+
+						// A new generation starts with an init segment, while the parser may still be inside the
+						// old generation's last media segment (cut off between two pieces): reset it first.
+						if (current.generation !== this.appendedGeneration) {
+							buffer.abort()
+						}
+
+						this.appending = true
+						buffer.appendBuffer(current.bytes)
+						outcome.appended = true
+					})
+				} catch (error) {
+					if (!isQuotaError(error)) {
+						throw error
+					}
+
+					if (!(await this.hooks.onQuota(this, current))) {
+						return
+					}
+
+					continue
+				} finally {
+					this.appending = false
+				}
+
+				// Only this piece: a reset meanwhile replaced the queue with the next generation's.
+				const index = this.pieces.indexOf(current)
+
+				if (index !== -1) {
+					this.pieces.splice(index, 1)
+				}
+
+				if (outcome.appended && current.generation === this.generation) {
+					const ranges = this.ranges
+
+					this.appendedGeneration = current.generation
+					this.appendedBytes += current.bytes.length
+					this.appendedSeconds += Math.max(0, totalSeconds(ranges) - before)
+					this.seen = unionRanges(this.seen, ranges)
+					this.hooks.onAppended()
+				}
+			}
+		} finally {
+			this.running = false
+			this.hooks.onSettled()
+		}
+	}
+}
+
+export async function openRemuxSession(options: RemuxSessionOptions): Promise<RemuxSession> {
+	const source = mediaSourceClass()
+	const port = { transferred: false }
+
+	try {
+		if (source === null) {
+			throw new Error("MediaSource is not available")
+		}
+
+		const transcodeTargets = (Object.keys(AUDIO_TARGET_CODECS) as AudioTarget[]).filter(target =>
+			source.type.isTypeSupported(`audio/mp4; codecs="${AUDIO_TARGET_CODECS[target]}"`)
+		)
+		const limits = deviceBufferLimits()
+		const hold: RemuxWorkerHold = await holdRemuxWorker()
+		const events: ((event: RemuxEvent) => void)[] = []
+		const onEvent = Comlink.proxy((event: RemuxEvent) => {
+			for (const listener of events) {
+				listener(event)
+			}
+
+			return Promise.resolve()
+		})
+
+		try {
+			port.transferred = true
+
+			const { id, info } = await Promise.race([
+				hold.remote.open(
+					Comlink.transfer(
+						{
+							port: options.port,
+							size: options.size,
+							transcodeTargets,
+							maxFragmentBytes: limits,
+							...(options.index === undefined ? {} : { index: options.index })
+						},
+						[options.port]
+					),
+					onEvent
+				),
+				hold.dead
+			])
+
+			return new MseRemuxSession({ hold, id, info, source, options, events, limits })
+		} catch (error) {
+			hold.release()
+
+			throw error
+		}
+	} catch (error) {
+		// The serving side would otherwise keep the file's port open until its idle timeout.
+		if (!port.transferred) {
+			rangePortReader(options.port).close()
+		}
+
+		throw error
+	}
+}
+
+function deviceBufferLimits(): BufferLimits {
+	return bufferLimits({
+		engine: browserEngine(navigator.userAgent),
+		mobile: /Android|iPhone|iPad|Mobile/.test(navigator.userAgent),
+		deviceMemoryGiB: "deviceMemory" in navigator && typeof navigator.deviceMemory === "number" ? navigator.deviceMemory : null
+	})
+}
+
+async function audioModeFor(track: RemuxAudioInfo, MediaSourceType: MediaSourceClass, canTranscode: boolean): Promise<AudioMode> {
+	if (track.copyMime !== null && MediaSourceType.isTypeSupported(track.copyMime)) {
+		// A static codec table answers isTypeSupported for Dolby audio in some engines; decodingInfo asks
+		// the platform decoder.
+		if (track.codec !== "ac3" && track.codec !== "eac3") {
+			return "copy"
+		}
+
+		try {
+			const result = await navigator.mediaCapabilities.decodingInfo({
+				type: "media-source",
+				audio: { contentType: track.copyMime, channels: String(track.channels), samplerate: track.sampleRate }
+			})
+
+			if (result.supported) {
+				return "copy"
+			}
+		} catch {
+			// Unanswerable: transcode.
+		}
+	}
+
+	return canTranscode ? "transcode" : "none"
+}
+
+class MseRemuxSession implements RemuxSession {
+	public readonly info: RemuxMediaInfo
+	public readonly audioTracks: readonly RemuxAudioInfo[]
+	private readonly hold: RemuxWorkerHold
+	private readonly id: number
+	private readonly MediaSourceType: MediaSourceClass
+	private readonly managed: boolean
+	private readonly options: RemuxSessionOptions
+	private readonly limits: BufferLimits
+	private readonly events: ((event: RemuxEvent) => void)[]
+	private readonly listener = (event: RemuxEvent) => {
+		this.onEvent(event)
+	}
+	private readonly hooks: TrackHooks = {
+		onQuota: (track, piece) => this.handleQuota(track, piece),
+		onAppended: () => {
+			this.quotaAttempts = 0
+			this.maintain()
+		},
+		onSettled: () => {
+			this.maybeEndOfStream()
+		},
+		onError: error => {
+			this.fail("media", error)
+		}
+	}
+	private readonly video = new TrackBuffer("video", this.hooks)
+	private readonly audio = new TrackBuffer("audio", this.hooks)
+	private readonly ops = new TimelineOps({
+		restart: time => this.restart(time),
+		onRestartError: (error, superseded) => {
+			this.opFailed(error, superseded)
+		}
+	})
+	private readonly disposedSignal = Promise.withResolvers<never>()
+	private element: HTMLVideoElement | null = null
+	private mediaSource: MediaSource | null = null
+	private objectUrl: string | null = null
+	private nextGeneration = 1
+	private keyTime = 0
+	private audioStartTime: number | null = null
+	private audioTrackId: number | null = null
+	private audioMode: AudioMode = "none"
+	// What the audio SourceBuffer was created with or last changed to.
+	private audioMime: string | null = null
+	private aheadScale = 1
+	private horizon = 0
+	private quotaAttempts = 0
+	private quotaErrors = 0
+	// The quota hold in force, and how to undo its wait; cleared by any restart.
+	private quotaWait: { track: TrackBuffer; cancel: () => void } | null = null
+	// When refetches after browser eviction happened, recent ones only.
+	private evictions: number[] = []
+	private internalSeekTo: number | null = null
+	// A start position waiting for the element's metadata; until then the playhead is not where it will be.
+	private pendingStart: number | null = null
+	private stallTimer: ReturnType<typeof setInterval> | undefined
+	private lastProgressTime = -1
+	private lastProgressAt = 0
+	// When the playhead last moved, seeking or not; a quota hold that outlasts it is a dead end.
+	private lastAdvanceAt = 0
+	private nudges = 0
+	private mediaSources = 0
+	private restarts = 0
+	private endedStream = false
+	private disposed = false
+	private readonly elementListeners: [string, () => void][] = []
+
+	public constructor(params: {
+		hold: RemuxWorkerHold
+		id: number
+		info: RemuxMediaInfo
+		source: { type: MediaSourceClass; managed: boolean }
+		options: RemuxSessionOptions
+		events: ((event: RemuxEvent) => void)[]
+		limits: BufferLimits
+	}) {
+		this.hold = params.hold
+		this.id = params.id
+		this.info = params.info
+		this.audioTracks = params.info.audio
+		this.MediaSourceType = params.source.type
+		this.managed = params.source.managed
+		this.options = params.options
+		this.limits = params.limits
+		this.events = params.events
+		this.events.push(this.listener)
+		this.disposedSignal.promise.catch(() => undefined)
+		this.hold.dead.catch((error: unknown) => {
+			this.fail("remux", error)
+		})
+	}
+
+	private get ahead(): number {
+		return aheadSeconds({ limitBytes: this.limits.video, bitrate: this.info.bitrate, scale: this.aheadScale })
+	}
+
+	public async attach(element: HTMLVideoElement): Promise<void> {
+		if (this.info.video === null) {
+			throw new Error("no playable video track")
+		}
+
+		this.element = element
+		// Required before attaching a ManagedMediaSource (its sourceopen waits on it otherwise), and on
+		// every path: a remote player could reach neither this page's MediaSource nor its decryption.
+		element.disableRemotePlayback = true
+
+		const defaultTrack = this.info.audio.find(track => track.isDefault) ?? this.info.audio[0]
+
+		if (defaultTrack !== undefined) {
+			this.audioTrackId = defaultTrack.id
+			this.audioMode = await audioModeFor(defaultTrack, this.MediaSourceType, this.canTranscode())
+		}
+
+		await this.ops.run(() => this.setUp(this.options.startTime ?? 0, false))
+
+		this.listen("seeking", () => {
+			this.onSeeking()
+		})
+		this.listen("timeupdate", () => {
+			this.maintain()
+		})
+		this.listen("error", () => {
+			this.fail("media", element.error?.message ?? "media error")
+		})
+		this.stallTimer = setInterval(() => {
+			this.watchStall()
+		}, STALL_POLL_MS)
+	}
+
+	public async play(): Promise<void> {
+		await this.element?.play()
+	}
+
+	public seek(time: number): void {
+		if (this.element !== null) {
+			this.element.currentTime = time
+		}
+	}
+
+	public async selectAudio(trackId: number): Promise<void> {
+		const track = this.info.audio.find(candidate => candidate.id === trackId)
+
+		if (track === undefined || this.element === null) {
+			return
+		}
+
+		await this.ops.run(async () => {
+			const element = this.element
+
+			if (element === null || this.disposed) {
+				return
+			}
+
+			const mode = await audioModeFor(track, this.MediaSourceType, this.canTranscode())
+			const time = element.currentTime
+			const hadAudio = this.audio.buffer !== null
+
+			this.audioTrackId = trackId
+			this.audioMode = mode
+
+			if (mode === "none") {
+				await this.call(() => this.hold.remote.stopAudio(this.id))
+
+				// The audio SourceBuffer would hold playback at its end: video plays on without one.
+				if (hadAudio) {
+					await this.setUp(time, !element.paused)
+				}
+
+				return
+			}
+
+			// Audio appears where there was none: SourceBuffers can only be added before the first append.
+			if (!hadAudio) {
+				await this.setUp(time, !element.paused)
+
+				return
+			}
+
+			await this.switchAudio(trackId, mode, element)
+		})
+	}
+
+	public async diagnostics(): Promise<RemuxSessionDiagnostics> {
+		return {
+			video: this.video.ranges,
+			audio: this.audio.ranges,
+			keyTime: this.keyTime,
+			audioStartTime: this.audioStartTime,
+			ahead: this.ahead,
+			quotaErrors: this.quotaErrors,
+			mediaSources: this.mediaSources,
+			restarts: this.restarts,
+			endOfStream: this.endedStream,
+			stats: this.disposed ? null : await this.call(() => this.hold.remote.stats(this.id)).catch(() => null)
+		}
+	}
+
+	public dispose(): void {
+		if (this.disposed) {
+			return
+		}
+
+		this.disposed = true
+		this.disposedSignal.reject(new DisposedError())
+		clearInterval(this.stallTimer)
+		this.quotaWait?.cancel()
+		this.quotaWait = null
+
+		for (const [type, listener] of this.elementListeners) {
+			this.element?.removeEventListener(type, listener)
+		}
+
+		const index = this.events.indexOf(this.listener)
+
+		if (index !== -1) {
+			this.events.splice(index, 1)
+		}
+
+		this.video.dispose()
+		this.audio.dispose()
+
+		// The worker also releases its proxy of this session's event callback.
+		void Promise.race([Promise.resolve().then(() => this.hold.remote.close(this.id)), this.hold.dead])
+			.catch(() => undefined)
+			.finally(() => {
+				this.hold.release()
+			})
+
+		if (this.objectUrl !== null) {
+			URL.revokeObjectURL(this.objectUrl)
+			this.objectUrl = null
+		}
+
+		if (this.element !== null) {
+			this.element.removeAttribute("src")
+			this.element.load()
+		}
+	}
+
+	// A worker call that rejects when the worker dies or the session is disposed, rather than hanging; a
+	// proxy already released with a dead worker throws, which becomes the rejection too.
+	private call<T>(invoke: () => Promise<T>): Promise<T> {
+		return Promise.race([Promise.resolve().then(invoke), this.hold.dead, this.disposedSignal.promise])
+	}
+
+	private canTranscode(): boolean {
+		return (Object.keys(AUDIO_TARGET_CODECS) as AudioTarget[]).some(target =>
+			this.MediaSourceType.isTypeSupported(`audio/mp4; codecs="${AUDIO_TARGET_CODECS[target]}"`)
+		)
+	}
+
+	private listen(type: string, listener: () => void): void {
+		this.element?.addEventListener(type, listener)
+		this.elementListeners.push([type, listener])
+	}
+
+	private onEvent(event: RemuxEvent): void {
+		const track = event.kind === "video" ? this.video : this.audio
+
+		if (this.disposed || event.generation !== track.generation) {
+			return
+		}
+
+		if (event.type === "segment") {
+			track.push(event.generation, event.bytes)
+		} else if (event.type === "ended") {
+			track.ended = true
+			this.maybeEndOfStream()
+		} else {
+			this.fail(event.fragmentTooLarge ? "keyframeIntervalTooLarge" : "remux", event.message)
+		}
+	}
+
+	private opFailed(error: unknown, superseded: boolean): void {
+		if (superseded || isSuperseded(error) || error instanceof DisposedError) {
+			return
+		}
+
+		this.fail("remux", error)
+	}
+
+	// A new MediaSource on the element (first attach, or audio the SourceBuffers cannot follow), with
+	// both pumps started at `time` and the element seeked there.
+	private async setUp(time: number, resumePlaying: boolean): Promise<void> {
+		const element = this.element
+
+		if (element === null) {
+			return
+		}
+
+		const MediaSourceType = this.MediaSourceType
+		const mediaSource = new MediaSourceType()
+		const url = URL.createObjectURL(mediaSource)
+		const opened = once(mediaSource, "sourceopen")
+
+		this.mediaSources++
+		this.endedStream = false
+		this.mediaSource = mediaSource
+		this.objectUrl = url
+		this.video.attachBuffer(null)
+		this.audio.attachBuffer(null)
+		// Both SourceBuffers exist before the first append: engines refuse a new one once the first has
+		// been initialised. The audio MIME is only known once the worker picked its output.
+		this.video.hold("setup")
+		this.audio.hold("setup")
+
+		try {
+			element.src = url
+			await Promise.race([opened, this.disposedSignal.promise])
+			URL.revokeObjectURL(url)
+			this.objectUrl = null
+			// Unknown (a Matroska file without a duration): open-ended until endOfStream sets it.
+			mediaSource.duration = this.info.duration > 0 ? this.info.duration : Number.POSITIVE_INFINITY
+
+			const result = await this.startPumps(time)
+
+			if (result === null || this.mediaSource !== mediaSource) {
+				return
+			}
+
+			const videoInfo = this.info.video
+
+			if (videoInfo === null) {
+				throw new Error("no playable video track")
+			}
+
+			this.video.attachBuffer(this.addSourceBuffer(mediaSource, videoInfo.mime))
+			this.audio.attachBuffer(result.audio === null ? null : this.addSourceBuffer(mediaSource, result.audio.mime))
+			this.audioMime = result.audio?.mime ?? null
+
+			// Exactly where asked (a resume position), or the key packet a cues-less file was clamped to.
+			const target = result.video.clamped ? result.video.keyTime : time
+
+			if (target > 0) {
+				this.seekOnceLoaded(target, mediaSource)
+			}
+		} finally {
+			this.video.release("setup")
+			this.audio.release("setup")
+		}
+
+		if (resumePlaying) {
+			await element.play().catch(() => undefined)
+		}
+	}
+
+	private addSourceBuffer(mediaSource: MediaSource, mime: string): SourceBuffer {
+		const buffer = mediaSource.addSourceBuffer(mime)
+
+		// A ManagedMediaSource drops buffered media on its own and says which; media ahead of the playhead
+		// is fetched again.
+		if (this.managed) {
+			buffer.addEventListener("bufferedchange", event => {
+				const removed = "removedRanges" in event && event.removedRanges instanceof TimeRanges ? toRanges(event.removedRanges) : []
+				const now = this.element?.currentTime ?? 0
+
+				if (removed.some(([, end]) => end > now + MAX_BUFFER_HOLE)) {
+					this.ops.restart(now)
+				}
+			})
+		}
+
+		return buffer
+	}
+
+	// Bumps the generation for both tracks and restarts the worker's pumps at the key packet at or
+	// before `time`. Null when a newer restart replaced this one.
+	private async startPumps(time: number): Promise<RemuxSeekResult | null> {
+		const generation = this.nextGeneration++
+		const mediaSource = this.mediaSource
+
+		this.restarts++
+		this.clearQuotaWait()
+		this.video.reset(generation, mediaSource)
+		this.audio.reset(generation, mediaSource)
+		this.horizon = time + this.ahead
+
+		const audio = this.audioTrackId !== null && this.audioMode !== "none" ? { trackId: this.audioTrackId, mode: this.audioMode } : null
+		const result = await this.call(() => this.hold.remote.seek(this.id, { generation, time, horizon: this.horizon, audio }))
+
+		if (this.video.generation !== generation) {
+			return null
+		}
+
+		this.keyTime = result.video.keyTime
+		this.audioStartTime = result.audio?.startTime ?? null
+
+		if (result.audio === null) {
+			this.audio.ended = true
+		}
+
+		return result
+	}
+
+	// Restarts both pumps at `time` on the current MediaSource; only when its audio SourceBuffer cannot
+	// take the new output does it fall back to a new MediaSource.
+	private async restart(time: number): Promise<void> {
+		const element = this.element
+
+		if (element === null || this.disposed) {
+			return
+		}
+
+		// Everything from the target on is fetched again from its key packet, so nothing buffered there is
+		// kept: a range left ahead of the playhead would read as a hole the browser had cut.
+		for (const track of [this.video, this.audio]) {
+			for (const [start, end] of rangesOutside(track.ranges, time - BACK_BUFFER_SECONDS, time)) {
+				void track
+					.run(buffer => {
+						buffer.remove(start, end)
+					})
+					.catch(() => undefined)
+			}
+		}
+
+		this.audio.hold("switch")
+
+		try {
+			const result = await this.startPumps(time)
+
+			if (result === null) {
+				return
+			}
+
+			if (!(await this.followAudioMime(result.audio?.mime ?? null))) {
+				await this.setUp(time, !element.paused)
+
+				return
+			}
+
+			// Decoding starts at the key packet; the element still shows exactly `time` unless a file without
+			// an index could not be seeked that far.
+			if (result.video.clamped) {
+				this.internalSeek(result.video.keyTime)
+			}
+		} finally {
+			this.audio.release("switch")
+		}
+	}
+
+	// Makes the audio SourceBuffer take `mime`. False when it cannot (no changeType, or audio has to
+	// appear or go), which only a new MediaSource fixes.
+	private async followAudioMime(mime: string | null): Promise<boolean> {
+		const buffer = this.audio.buffer
+
+		if (mime === null || buffer === null) {
+			return (mime === null) === (buffer === null)
+		}
+
+		if (mime === this.audioMime) {
+			return true
+		}
+
+		if (!CHANGE_TYPE_SUPPORTED) {
+			return false
+		}
+
+		await this.audio.run(target => {
+			target.changeType(mime)
+		})
+		this.audioMime = mime
+
+		return true
+	}
+
+	private async switchAudio(trackId: number, mode: AudioMode, element: HTMLVideoElement): Promise<void> {
+		const generation = this.nextGeneration++
+
+		this.audio.reset(generation, this.mediaSource)
+		this.audio.hold("switch")
+
+		try {
+			await this.audio.run(buffer => {
+				buffer.remove(0, Number.POSITIVE_INFINITY)
+			})
+
+			// A little before the playhead, so audio is there when the switch lands.
+			const result = await this.call(() =>
+				this.hold.remote.switchAudio(this.id, {
+					generation,
+					trackId,
+					mode,
+					time: Math.max(0, element.currentTime - 0.1),
+					horizon: element.currentTime + this.ahead
+				})
+			)
+
+			if (this.audio.generation !== generation) {
+				return
+			}
+
+			this.audioStartTime = result.startTime
+
+			if (!(await this.followAudioMime(result.mime))) {
+				await this.setUp(element.currentTime, !element.paused)
+			}
+		} finally {
+			this.audio.release("switch")
+		}
+	}
+
+	private onSeeking(): void {
+		const element = this.element
+
+		if (element === null) {
+			return
+		}
+
+		const time = element.currentTime
+
+		if (this.internalSeekTo !== null && Math.abs(this.internalSeekTo - time) < INTERNAL_SEEK_TOLERANCE) {
+			this.internalSeekTo = null
+
+			return
+		}
+
+		this.nudges = 0
+		this.pendingStart = null
+
+		if (
+			!this.ops.busy &&
+			seekPlan({ time, video: this.video.ranges, audio: this.audio.buffer === null ? null : this.audio.ranges }) === "inBuffer"
+		) {
+			this.maintain()
+
+			return
+		}
+
+		this.ops.restart(time)
+	}
+
+	// Some engines (WebKit) drop a position set before the element has metadata; it is set once it has.
+	private seekOnceLoaded(time: number, mediaSource: MediaSource): void {
+		const element = this.element
+
+		if (element === null) {
+			return
+		}
+
+		if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
+			this.internalSeek(time)
+
+			return
+		}
+
+		this.pendingStart = time
+		element.addEventListener(
+			"loadedmetadata",
+			() => {
+				if (this.mediaSource === mediaSource && this.pendingStart === time && !this.disposed) {
+					this.pendingStart = null
+					this.internalSeek(time)
+				}
+			},
+			{ once: true }
+		)
+	}
+
+	private internalSeek(time: number): void {
+		if (this.element !== null) {
+			this.internalSeekTo = time
+			this.element.currentTime = time
+		}
+	}
+
+	private playable(): TimeRange[] {
+		return this.audio.buffer === null ? this.video.ranges : intersectRanges(this.video.ranges, this.audio.ranges)
+	}
+
+	// Raises the horizon when the forward buffer has drained, refetches what the browser evicted ahead,
+	// and trims the back buffer.
+	private maintain(): void {
+		const element = this.element
+
+		if (element === null || this.disposed || this.ops.busy || this.pendingStart !== null) {
+			return
+		}
+
+		const now = element.currentTime
+		const ahead = this.ahead
+		const seen = this.audio.buffer === null ? this.video.seen : intersectRanges(this.video.seen, this.audio.seen)
+
+		if (this.quotaWait === null && evictedAhead({ currentTime: now, ranges: this.playable(), seen })) {
+			const at = performance.now()
+
+			this.evictions = recentEvictions(this.evictions, at)
+
+			// Each refetch shrinks the window; one that keeps being cut means the GOPs do not fit at all.
+			if (this.evictions.length >= MAX_EVICTION_REFETCHES) {
+				this.fail("keyframeIntervalTooLarge", "the browser keeps evicting buffered media ahead of the playhead")
+
+				return
+			}
+
+			this.evictions.push(at)
+			this.aheadScale *= QUOTA_SHRINK
+			this.ops.restart(now)
+
+			return
+		}
+
+		const forward = Math.min(
+			bufferedAhead(this.video.ranges, now),
+			this.audio.buffer === null ? Number.POSITIVE_INFINITY : bufferedAhead(this.audio.ranges, now)
+		)
+
+		if (needsMore({ bufferedAhead: forward, ahead }) && now + ahead > this.horizon + 1) {
+			this.horizon = now + ahead
+
+			for (const track of [this.video, this.audio]) {
+				void this.call(() => this.hold.remote.setHorizon(this.id, track.kind, track.generation, this.horizon)).catch(
+					() => undefined
+				)
+			}
+		}
+
+		const at = performance.now()
+
+		for (const track of [this.video, this.audio]) {
+			const ranges = track.ranges
+			const first = ranges[0]
+
+			if (first === undefined) {
+				continue
+			}
+
+			const video = track.kind === "video"
+			const limit = video ? this.limits.video : this.limits.audio
+			const bitrate = track.bitrate(video ? this.info.bitrate : AUDIO_BITRATE_GUESS)
+			const eviction = backBufferEviction({
+				currentTime: now,
+				bufferedStart: first[0],
+				now: at,
+				lastEvictionAt: track.lastEvictionAt,
+				fillShare: estimatedBytes(ranges, bitrate) / limit
+			})
+
+			if (eviction !== null) {
+				track.lastEvictionAt = at
+
+				void track
+					.run(buffer => {
+						buffer.remove(eviction[0], eviction[1])
+					})
+					.catch(() => undefined)
+			}
+		}
+	}
+
+	private clearQuotaWait(): void {
+		this.quotaWait?.cancel()
+		this.quotaWait = null
+		this.quotaAttempts = 0
+	}
+
+	// Returns whether the append should be retried now; false holds the track until playback drains.
+	private async handleQuota(track: TrackBuffer, piece: Piece): Promise<boolean> {
+		const element = this.element
+
+		if (element === null) {
+			return false
+		}
+
+		this.quotaErrors++
+
+		const action = quotaAction({
+			attempt: this.quotaAttempts++,
+			currentTime: element.currentTime,
+			ranges: track.ranges,
+			scale: this.aheadScale
+		})
+
+		if (action.type === "fatal") {
+			this.fail("keyframeIntervalTooLarge", `a ${String(piece.segmentBytes)}-byte segment does not fit the buffer`)
+
+			return false
+		}
+
+		if (action.type === "evict") {
+			await track.run(buffer => {
+				buffer.remove(action.range[0], action.range[1])
+			})
+
+			return true
+		}
+
+		this.aheadScale = action.scale
+		this.clearQuotaWait()
+		track.hold("quota")
+
+		// Retried once the playhead has moved on enough to free some of what is buffered; a restart
+		// (seek) clears the hold instead.
+		const resumeAt = element.currentTime + 2
+		const resume = () => {
+			if (element.currentTime < resumeAt) {
+				return
+			}
+
+			this.clearQuotaWait()
+			track.release("quota")
+		}
+
+		element.addEventListener("timeupdate", resume)
+		this.quotaWait = {
+			track,
+			cancel: () => {
+				element.removeEventListener("timeupdate", resume)
+				track.release("quota")
+			}
+		}
+
+		return true
+	}
+
+	private maybeEndOfStream(): void {
+		const mediaSource = this.mediaSource
+		const state = (track: TrackBuffer) => ({ ended: track.ended, idle: track.idle, updating: track.updating })
+
+		if (
+			mediaSource !== null &&
+			!this.disposed &&
+			shouldEndStream({
+				open: mediaSource.readyState === "open",
+				tracks: [state(this.video), this.audio.buffer === null ? null : state(this.audio)]
+			})
+		) {
+			mediaSource.endOfStream()
+			this.endedStream = true
+		}
+	}
+
+	private watchStall(): void {
+		const element = this.element
+
+		if (element === null) {
+			return
+		}
+
+		const now = performance.now()
+
+		if (element.currentTime !== this.lastProgressTime) {
+			this.lastProgressTime = element.currentTime
+			this.lastProgressAt = now
+			this.lastAdvanceAt = now
+			this.nudges = 0
+
+			return
+		}
+
+		// Held for room the playhead never frees, seeking or not.
+		if (this.quotaWait !== null && !element.paused && now - this.lastAdvanceAt >= STALL_DETECTION_MS) {
+			this.fail("keyframeIntervalTooLarge", "playback stalled with the buffer full")
+
+			return
+		}
+
+		if (element.paused || element.seeking || element.ended || this.ops.busy || this.pendingStart !== null) {
+			this.lastProgressAt = now
+
+			return
+		}
+
+		const action = stallAction({
+			currentTime: element.currentTime,
+			ranges: this.playable(),
+			stalledMs: now - this.lastProgressAt,
+			nudges: this.nudges
+		})
+
+		if (action.type === "skip" || action.type === "nudge") {
+			if (action.type === "nudge") {
+				this.nudges++
+			}
+
+			this.lastProgressAt = now
+			this.internalSeek(action.to)
+		} else if (action.type === "fatal") {
+			this.fail("stalled", `no progress at ${String(element.currentTime)}`)
+		}
+	}
+
+	private fail(reason: MseFailure, error: unknown): void {
+		if (this.disposed) {
+			return
+		}
+
+		this.options.onFailure(reason, error instanceof Error ? error.message : String(error))
+	}
+}

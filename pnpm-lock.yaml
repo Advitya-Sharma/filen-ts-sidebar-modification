@@ -186,6 +186,7 @@ patchedDependencies:
   expo-sharing@57.0.18: 7f36d9a0aaa805bc1d3661d3d031e44475253d0de750cfdd554662f634d7549d
   expo-video@57.0.3: a965f0ed856f445e2658e0d75a99cffeb166b282a011d14edc97484b32cc27b9
   hucre@1.1.0: 3837d25cf9ca682d321b27b5693992ac5c1044fd988c4954e8301a9359ebf7ab
+  mediabunny@1.61.3: 50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854
   react-native-ios-utilities@5.2.0: 50810ccfaab08edcc9b10d2d9954a68946befef7a2ff41af4d01f4e330c8eb37
   react-native-notify-kit@10.7.0: e50f154dc03e063750242f005b8b3e69fb3f5b7d3205aff30fc4b7d5acd5f7cf
   react-native-reorderable-list@0.18.1: 0a36670b2fd8f244d408305cb14b7e428b496c9c0b3c5b81e41585f01af2416d
@@ -826,6 +827,12 @@ importers:
       '@fontsource-variable/inter':
         specifier: ^5.3.0
         version: 5.3.0
+      '@mediabunny/ac3':
+        specifier: 1.61.3
+        version: 1.61.3(mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854))
+      '@mediabunny/dts':
+        specifier: 1.61.3
+        version: 1.61.3(mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854))
       '@sqlite.org/sqlite-wasm':
         specifier: ^3.53.4-build1
         version: 3.53.4-build1
@@ -889,6 +896,9 @@ importers:
       lucide-react:
         specifier: ^1.43.0
         version: 1.46.0(react@19.3.0)
+      mediabunny:
+        specifier: 1.61.3
+        version: 1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854)
       music-metadata:
         specifier: 11.15.0
         version: 11.15.0(supports-color@8.1.1)
@@ -2828,6 +2838,16 @@ packages:
   '@marijn/find-cluster-break@1.0.4':
     resolution: {integrity: sha512-Wy0V7+SGUjnF9/TkiM1hKVDPj7jKXduPNboMVtHTA8dySMURWqfg/JZ9E2Sq8JgSJmkl7k7Qe9FLeMSrSraWmQ==}
 
+  '@mediabunny/ac3@1.61.3':
+    resolution: {integrity: sha512-kEupOERqZ6zCQBzx0Ea5R9LgP2pQJUFx/Yo+UL0jL71QIZmoAfdZXXZJKpMfKVWToEacvc9+1XQagfHV6jZNpQ==}
+    peerDependencies:
+      mediabunny: ^1.0.0
+
+  '@mediabunny/dts@1.61.3':
+    resolution: {integrity: sha512-WqpDuQDTgBd3ohQxlAVpnb8B4rb8FHYk/+kNKi1Yp37EdJVahwNj1QULClN87XaneE8s0rDC6ArdXHqOuTYYGA==}
+    peerDependencies:
+      mediabunny: ^1.0.0
+
   '@modelcontextprotocol/sdk@1.30.0':
     resolution: {integrity: sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==}
     engines: {node: '>=18'}
@@ -4050,6 +4070,12 @@ packages:
 
   '@types/deep-eql@4.0.2':
     resolution: {integrity: sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw==}
+
+  '@types/dom-mediacapture-transform@0.1.12':
+    resolution: {integrity: sha512-d7/QsLRwF864A5mgIM/YrfiglHoYn7zgCcAoJgW404r+2DwnNr7EBbLnCWpmOMgH8y0te73L1AV6H1bmauaWFw==}
+
+  '@types/dom-webcodecs@0.1.13':
+    resolution: {integrity: sha512-O5hkiFIcjjszPIYyUSyvScyvrBoV3NOEEZx/pMlsu44TKzWNkLVBBxnxJz42in5n3QIolYOcBYFCPZZ0h8SkwQ==}
 
   '@types/esrecurse@4.3.1':
     resolution: {integrity: sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw==}
@@ -7460,6 +7486,9 @@ packages:
   media-typer@2.0.0:
     resolution: {integrity: sha512-kOy3OxT2HH39N70UnKgu4NWDZjLOz8W/mfyvniHjRH/DrL3f2pOfvWQ4p60offbbtDAnXWp0v9LfMIqMec269Q==}
     engines: {node: '>=18'}
+
+  mediabunny@1.61.3:
+    resolution: {integrity: sha512-kUqLKVXQVwHR62GkOJxYosAmXERJbqnXBgJDTtRlxHEYviVkMg/Evhl9XN6kedqS5LP1tV4kFKyzY/V4a4ofow==}
 
   memoize-one@5.2.1:
     resolution: {integrity: sha512-zYiwtZUcYyXKo/np96AGZAckk+FWWsUdJ3cHGGmld7+AhvcWmQyGCYUh1hc4Q/pkOhb65dQR/pqCyK0cOaHz4Q==}
@@ -12782,6 +12811,14 @@ snapshots:
 
   '@marijn/find-cluster-break@1.0.4': {}
 
+  '@mediabunny/ac3@1.61.3(mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854))':
+    dependencies:
+      mediabunny: 1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854)
+
+  '@mediabunny/dts@1.61.3(mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854))':
+    dependencies:
+      mediabunny: 1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854)
+
   '@modelcontextprotocol/sdk@1.30.0(supports-color@8.1.1)(zod@3.25.76)':
     dependencies:
       '@hono/node-server': 2.1.1(hono@4.13.8)
@@ -13935,6 +13972,12 @@ snapshots:
       '@types/ms': 2.1.0
 
   '@types/deep-eql@4.0.2': {}
+
+  '@types/dom-mediacapture-transform@0.1.12':
+    dependencies:
+      '@types/dom-webcodecs': 0.1.13
+
+  '@types/dom-webcodecs@0.1.13': {}
 
   '@types/esrecurse@4.3.1': {}
 
@@ -18210,6 +18253,11 @@ snapshots:
   media-typer@1.1.1: {}
 
   media-typer@2.0.0: {}
+
+  mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854):
+    dependencies:
+      '@types/dom-mediacapture-transform': 0.1.12
+      '@types/dom-webcodecs': 0.1.13
 
   memoize-one@5.2.1: {}
 

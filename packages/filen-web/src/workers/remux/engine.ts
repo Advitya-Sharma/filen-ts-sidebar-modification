@@ -1,0 +1,675 @@
+import {
+	CustomSource,
+	EncodedPacketSink,
+	Input,
+	MATROSKA,
+	MP4,
+	MPEG_TS,
+	QTFF,
+	WEBM,
+	type AudioCodec,
+	type EncodedPacket,
+	type InputAudioTrack,
+	type InputVideoTrack,
+	type Rotation,
+	type VideoCodec
+} from "mediabunny"
+import { BLOCK_BYTES, BlockSource } from "@/lib/media/blockSource"
+import { BlockAbortError, BlockCache } from "@/lib/media/blockCache"
+import { isInitSegment } from "@/lib/media/fmp4Split"
+import { probeVideo } from "@/lib/media/probe/probe"
+import { rangePortReader, type RangePortReader } from "@/lib/media/rangePort"
+import {
+	SupersededError,
+	type RemuxAudioInfo,
+	type RemuxAudioStart,
+	type RemuxAudioStartParams,
+	type RemuxEvent,
+	type RemuxMediaInfo,
+	type RemuxOpenParams,
+	type RemuxSeekParams,
+	type RemuxSeekResult,
+	type RemuxStartParams,
+	type RemuxStats,
+	type RemuxVideoInfo,
+	type RemuxVideoStart,
+	type TrackKind
+} from "@/lib/media/remuxTypes"
+import {
+	pickEncoderTarget,
+	TRANSCODE_BITRATE,
+	TRANSCODE_CHANNELS,
+	TRANSCODE_SAMPLE_RATE,
+	type EncoderTarget
+} from "@/workers/remux/audioMix.logic"
+import { ensureDecoder, sampleReader, TranscodeWriter } from "@/workers/remux/audioTranscode"
+import { ac3Layout, dtsLayout, layoutFor, type Speaker } from "@/workers/remux/channelLayout.logic"
+import { outputVideoCodecString } from "@/workers/remux/codecs.logic"
+import { KeyIndex, seekReach } from "@/workers/remux/keyIndex"
+import { FragmentedTrackOutput, FragmentTooLargeError } from "@/workers/remux/output"
+import { PumpGate, runPump, type PumpReader, type PumpResult, type PumpWriter } from "@/workers/remux/pump"
+
+// Containers a remux may read. Not every format the demuxer knows: each one parsed is attack surface.
+const FORMATS = [MATROSKA, WEBM, MP4, QTFF, MPEG_TS]
+
+// Reads longer than this reach the demuxer as a stream of blocks rather than one assembled buffer.
+const STREAM_READ_BYTES = 2 * BLOCK_BYTES
+
+// Copy-path audio codecs and the codec string their fragmented-MP4 sample entry carries.
+const COPYABLE_AUDIO = new Set(["aac", "opus", "mp3", "flac", "ac3", "eac3"])
+
+// Codecs only reachable by decoding (a WebCodecs decoder or a registered one) and re-encoding.
+const TRANSCODABLE_AUDIO = new Set(["ac3", "eac3", "dts", "flac", "mp3", "vorbis", "opus", "aac"])
+
+// How far audio may read past the video pump's position. Both read the same interleaved clusters; an
+// audio pump that ran ahead or fell behind by more than the block cache holds would download them twice.
+const AUDIO_LEAD_SECONDS = 0.5
+
+// How long close() waits for the pumps' own teardown (a decoder, the muxer) before letting go anyway.
+const CLOSE_TIMEOUT_MS = 2_000
+
+type Emit = (event: RemuxEvent) => void
+
+// Retries a read once when it failed only because a seek aborted the download it was riding on: the
+// demuxer can merge a new read into an older one that the seek called off.
+async function surviveAbort<T>(read: () => Promise<T>, gate: PumpGate): Promise<T> {
+	try {
+		return await read()
+	} catch (error) {
+		if (!(error instanceof BlockAbortError) || gate.isCancelled()) {
+			throw error
+		}
+
+		return await read()
+	}
+}
+
+interface Run {
+	generation: number
+	gate: PumpGate
+	done: Promise<void>
+	close: () => Promise<void>
+}
+
+interface VideoSource {
+	track: InputVideoTrack
+	codec: VideoCodec
+	config: VideoDecoderConfig
+	rotation: Rotation
+}
+
+interface AudioSource {
+	track: InputAudioTrack
+	codec: AudioCodec | null
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error)
+}
+
+// One open file: the shared block cache, the demuxer over it and at most one pump per track kind. A
+// seek or track switch cancels the kind's pump and starts a new one under a new generation; every
+// segment carries its generation so the page drops anything a superseded pump still emits.
+export class RemuxEngine {
+	public readonly stats: RemuxStats = {
+		blockReads: 0,
+		bytesRead: 0,
+		rangeReads: 0,
+		readAheadBlocks: 0,
+		segmentsOut: 0,
+		bytesOut: 0,
+		transcodeSeconds: 0,
+		decodeWaitSeconds: 0,
+		transcodedMediaSeconds: 0
+	}
+
+	private readonly reader: RangePortReader
+	private readonly cache: BlockCache
+	private readonly input: Input
+	private readonly emit: Emit
+	private readonly transcodeTargets: RemuxOpenParams["transcodeTargets"]
+	private video: VideoSource | null = null
+	private readonly audio = new Map<number, AudioSource>()
+	private seekScansFile = false
+	// The furthest presentation time any pump has read, which a file without an index can seek within
+	// without scanning further.
+	private scannedUntil = 0
+	private readonly keys = new KeyIndex()
+	private readonly size: number
+	private duration = 0
+	private readonly runs = new Map<TrackKind, Run>()
+	// The presentation time the video pump has read up to; audio follows it.
+	private videoReadUntil = Number.NEGATIVE_INFINITY
+	private readonly maxFragmentBytes: RemuxOpenParams["maxFragmentBytes"]
+	private encoderTarget: Promise<EncoderTarget | null> | null = null
+	// Bumped by every audio start and stop: a start that awaited past a newer one gives up.
+	private audioEpoch = 0
+	private readonly layouts = new Map<number, Promise<Speaker[] | null>>()
+
+	public constructor(params: RemuxOpenParams, emit: Emit) {
+		this.reader = rangePortReader(params.port)
+		this.cache = new BlockCache(params.size, this.reader.readRange)
+		this.emit = emit
+		// The file's server went away: say so now, not at the next read a paused player may never make.
+		this.reader.onLost(() => {
+			for (const [kind, run] of this.runs) {
+				this.emit({
+					type: "error",
+					kind,
+					generation: run.generation,
+					message: "the file's byte source closed",
+					fragmentTooLarge: false
+				})
+			}
+		})
+		this.transcodeTargets = params.transcodeTargets
+		this.maxFragmentBytes = params.maxFragmentBytes
+		this.size = params.size
+
+		const cache = this.cache
+
+		this.input = new Input({
+			formats: FORMATS,
+			source: new CustomSource({
+				getSize: () => params.size,
+				read: (start, end) => (end - start > STREAM_READ_BYTES ? cache.stream(start, end) : cache.read(start, end)),
+				// The block cache is the only cache; the demuxer's own would hold a second copy.
+				prefetchProfile: "none",
+				maxCacheSize: 0
+			})
+		})
+	}
+
+	public async open(params: RemuxOpenParams): Promise<RemuxMediaInfo> {
+		const [video, audio] = await Promise.all([this.input.getPrimaryVideoTrack(), this.input.getAudioTracks()])
+		const format = await this.input.getFormat()
+		const matroska = format === MATROSKA || format === WEBM
+		const index = params.index ?? (await this.probeIndex(params.size))
+		// Computing a Matroska file's duration without the header's own walks every cluster; 0 leaves the
+		// MediaSource duration open instead.
+		const duration = (await this.input.getDurationFromMetadata()) ?? (matroska ? 0 : await this.input.computeDuration())
+
+		this.seekScansFile = matroska && index === "none"
+		this.duration = duration
+
+		return {
+			duration,
+			bitrate: duration > 0 ? (params.size * 8) / duration : 0,
+			index,
+			seekScansFile: this.seekScansFile,
+			video: video === null ? null : await this.openVideo(video),
+			audio: await Promise.all(audio.map(track => this.openAudio(track)))
+		}
+	}
+
+	private async openVideo(track: InputVideoTrack): Promise<RemuxVideoInfo | null> {
+		const [codec, config, rotation, width, height] = await Promise.all([
+			track.getCodec(),
+			track.getDecoderConfig(),
+			track.getRotation(),
+			track.getDisplayWidth(),
+			track.getDisplayHeight()
+		])
+
+		if (codec === null || config === null) {
+			return null
+		}
+
+		this.video = { track, codec, config, rotation }
+
+		return { id: track.id, codec, mime: `video/mp4; codecs="${outputVideoCodecString(codec, config)}"`, width, height }
+	}
+
+	private async openAudio(track: InputAudioTrack): Promise<RemuxAudioInfo> {
+		const [codec, config, channels, sampleRate, language, name, disposition] = await Promise.all([
+			track.getCodec(),
+			track.getDecoderConfig(),
+			track.getNumberOfChannels(),
+			track.getSampleRate(),
+			track.getLanguageCode(),
+			track.getName(),
+			track.getDisposition()
+		])
+
+		this.audio.set(track.id, { track, codec })
+
+		return {
+			id: track.id,
+			codec,
+			copyMime: codec !== null && COPYABLE_AUDIO.has(codec) && config !== null ? `audio/mp4; codecs="${config.codec}"` : null,
+			channels,
+			sampleRate,
+			language,
+			name,
+			isDefault: disposition.default
+		}
+	}
+
+	// Restarts both tracks from the key packet at or before `time`; audio starts where video does.
+	public async seek(params: RemuxSeekParams): Promise<RemuxSeekResult> {
+		const closing = [this.detach("video"), this.detach("audio")]
+
+		// Downloads for positions the old pumps were heading to are no longer wanted.
+		this.cache.abort()
+
+		try {
+			const video = await this.startVideo(params)
+			const audio =
+				params.audio === null
+					? null
+					: await this.startAudio({
+							generation: params.generation,
+							time: video.keyTime,
+							horizon: params.horizon,
+							trackId: params.audio.trackId,
+							mode: params.audio.mode
+						})
+
+			return { video, audio }
+		} finally {
+			await Promise.all(closing.map(close => (close === null ? Promise.resolve() : close())))
+		}
+	}
+
+	// Restarts audio alone (a track switch); video keeps playing from what it has.
+	public async switchAudio(params: RemuxAudioStartParams): Promise<RemuxAudioStart> {
+		const closing = this.detach("audio")
+
+		try {
+			return await this.startAudio(params)
+		} finally {
+			await closing?.()
+		}
+	}
+
+	public setHorizon(kind: TrackKind, generation: number, horizon: number): void {
+		const run = this.runs.get(kind)
+
+		// With video playing, audio's horizon is the video pump's position (followVideo).
+		if (run?.generation === generation && (kind === "video" || !this.runs.has("video"))) {
+			run.gate.setHorizon(horizon)
+		}
+	}
+
+	public snapshotStats(): RemuxStats {
+		const cache = this.cache.stats
+
+		return {
+			...this.stats,
+			blockReads: cache.blockReads,
+			bytesRead: cache.bytesRead,
+			rangeReads: cache.rangeReads,
+			readAheadBlocks: cache.readAheadBlocks
+		}
+	}
+
+	// Stops the audio pump; video plays on without it.
+	public async stopAudio(): Promise<void> {
+		this.audioEpoch++
+		await this.cancel("audio")
+	}
+
+	public async close(): Promise<void> {
+		// Downloads first: a pump waiting on a read from a dead range port would otherwise hold the close.
+		this.cache.abort()
+
+		const closing = [this.detach("video"), this.detach("audio")].map(close => (close === null ? Promise.resolve() : close()))
+
+		this.audioEpoch++
+		await Promise.race([Promise.all(closing), new Promise(resolve => setTimeout(resolve, CLOSE_TIMEOUT_MS))])
+		this.input.dispose()
+		this.cache.dispose()
+		this.reader.close()
+	}
+
+	private async probeIndex(size: number): Promise<RemuxMediaInfo["index"]> {
+		// The demuxer has just read the head; these reads are served from the block cache.
+		const source = new BlockSource(size, (start, end) => Promise.resolve(this.cache.read(start, end)))
+
+		try {
+			return (await probeVideo(source, "card"))?.index ?? null
+		} catch {
+			return null
+		}
+	}
+
+	private followVideo(timestamp: number): void {
+		this.videoReadUntil = Math.max(this.videoReadUntil, timestamp)
+		this.runs.get("audio")?.gate.setHorizon(this.videoReadUntil + AUDIO_LEAD_SECONDS)
+	}
+
+	private audioHorizon(requested: number): number {
+		return this.runs.has("video") ? this.videoReadUntil + AUDIO_LEAD_SECONDS : requested
+	}
+
+	private async cancel(kind: TrackKind): Promise<void> {
+		await this.detach(kind)?.()
+	}
+
+	// Stops a kind's pump at once and hands back its teardown. A restart runs that only once the new pump
+	// has started, so a decoder shared through a refcounted codec worker is never torn down in between.
+	private detach(kind: TrackKind): (() => Promise<void>) | null {
+		const run = this.runs.get(kind)
+
+		if (run === undefined) {
+			return null
+		}
+
+		if (kind === "video") {
+			this.videoReadUntil = Number.NEGATIVE_INFINITY
+		} else {
+			this.audioEpoch++
+		}
+
+		this.runs.delete(kind)
+		run.gate.cancel()
+
+		return async () => {
+			await run.close()
+			await run.done.catch(() => undefined)
+		}
+	}
+
+	private async startVideo(params: RemuxStartParams): Promise<RemuxVideoStart> {
+		const video = this.video
+
+		if (video === null) {
+			throw new Error("no playable video track")
+		}
+
+		const { time, clamped } = this.seekScansFile
+			? seekReach({ time: params.time, scannedUntil: this.scannedUntil, size: this.size, duration: this.duration })
+			: { time: params.time, clamped: false }
+		const sink = new EncodedPacketSink(video.track)
+		// The window the caller asked for, moved along with a clamped start.
+		const gate = new PumpGate(params.horizon - params.time + time)
+		const output = new FragmentedTrackOutput({
+			track: { kind: "video", codec: video.codec, decoderConfig: video.config, rotation: video.rotation },
+			gate,
+			maxFragmentBytes: this.maxFragmentBytes.video,
+			onSegment: bytes => {
+				this.segment("video", params.generation, bytes)
+			}
+		})
+		let keyTime = time
+		const started = Promise.withResolvers<number>()
+		const reader: PumpReader<EncodedPacket> = {
+			// Verified: a container's key flag can be wrong, and a pump started on a delta packet decodes garbage.
+			first: async at => {
+				// Without an index, look up a key packet already seen rather than search for one.
+				const known = this.seekScansFile ? this.keys.atOrBefore(at) : null
+				const key = await surviveAbort(
+					async () =>
+						(await sink.getKeyPacket(known ?? at, { verifyKeyPackets: true })) ??
+						(await sink.getFirstKeyPacket({ verifyKeyPackets: true })),
+					gate
+				)
+
+				if (key !== null) {
+					this.keys.add(key.timestamp)
+				}
+
+				this.followVideo(key?.timestamp ?? Number.POSITIVE_INFINITY)
+
+				return key
+			},
+			next: async packet => {
+				const next = await surviveAbort(() => sink.getNextPacket(packet), gate)
+
+				if (next !== null) {
+					this.scannedUntil = Math.max(this.scannedUntil, next.timestamp)
+
+					if (next.type === "key") {
+						this.keys.add(next.timestamp)
+					}
+				}
+
+				this.followVideo(next?.timestamp ?? Number.POSITIVE_INFINITY)
+
+				return next
+			}
+		}
+		const writer: PumpWriter<EncodedPacket> = {
+			write: packet => output.write(packet),
+			end: () => output.end()
+		}
+		const done = runPump(reader, writer, gate, time, {
+			floor: Number.NEGATIVE_INFINITY,
+			onStart: startTimestamp => {
+				keyTime = startTimestamp
+				started.resolve(startTimestamp)
+			}
+		})
+			.then(result => {
+				if (result.type === "ended") {
+					started.resolve(keyTime)
+					this.ended("video", params.generation)
+				} else {
+					// Cancelled before it started: whoever awaits the start learns it was replaced.
+					started.reject(new SupersededError())
+				}
+			})
+			.catch((error: unknown) => {
+				started.reject(gate.isCancelled() ? new SupersededError() : error)
+				this.failed("video", params.generation, gate, error)
+			})
+
+		started.promise.catch(() => undefined)
+		this.runs.set("video", { generation: params.generation, gate, done, close: () => output.cancel() })
+		await started.promise
+
+		return { keyTime, clamped }
+	}
+
+	private async startAudio(params: RemuxAudioStartParams): Promise<RemuxAudioStart> {
+		const source = this.audio.get(params.trackId)
+
+		if (source === undefined || params.mode === "none") {
+			throw new Error("no such audio track")
+		}
+
+		const epoch = ++this.audioEpoch
+		// Every await below can let a newer start or a stop in; this one then leaves without a trace.
+		const current = () => {
+			if (epoch !== this.audioEpoch) {
+				throw new SupersededError()
+			}
+		}
+		const { track, codec } = source
+		const gate = new PumpGate(this.audioHorizon(params.horizon))
+		const onSegment = (bytes: Uint8Array<ArrayBuffer>) => {
+			this.segment("audio", params.generation, bytes)
+		}
+		const started = Promise.withResolvers<number>()
+		let startTime = params.time
+		const onStart = (startTimestamp: number) => {
+			startTime = startTimestamp
+			started.resolve(startTimestamp)
+		}
+		let mime: string
+		let done: Promise<PumpResult>
+		let close: () => Promise<void>
+
+		if (params.mode === "copy") {
+			const config = await track.getDecoderConfig()
+
+			current()
+
+			if (config === null || codec === null || !COPYABLE_AUDIO.has(codec)) {
+				throw new Error("audio track cannot be copied")
+			}
+
+			const sink = new EncodedPacketSink(track)
+			const output = new FragmentedTrackOutput({
+				track: { kind: "audio", codec, decoderConfig: config },
+				gate,
+				maxFragmentBytes: this.maxFragmentBytes.audio,
+				onSegment
+			})
+
+			mime = `audio/mp4; codecs="${config.codec}"`
+			close = () => output.cancel()
+			done = runPump(
+				{
+					first: at => surviveAbort(async () => (await sink.getPacket(at)) ?? (await sink.getFirstPacket()), gate),
+					next: packet => surviveAbort(() => sink.getNextPacket(packet), gate)
+				},
+				{ write: packet => output.write(packet), end: () => output.end() },
+				gate,
+				params.time,
+				{ floor: 0, onStart }
+			)
+		} else {
+			if (codec === null || !TRANSCODABLE_AUDIO.has(codec)) {
+				throw new Error("audio track cannot be decoded")
+			}
+
+			const target = await this.pickTarget()
+
+			current()
+
+			if (target === null) {
+				throw new Error("no audio encoder for this browser")
+			}
+
+			await ensureDecoder(codec)
+
+			const header = await this.headerLayout(track, codec, params.time)
+
+			current()
+
+			const output = new FragmentedTrackOutput({
+				track: { kind: "audio", codec: target.target, decoderConfig: null },
+				gate,
+				maxFragmentBytes: this.maxFragmentBytes.audio,
+				onSegment
+			})
+			const writer = new TranscodeWriter({ target, output, stats: this.stats, layout: channels => layoutFor(header, channels) })
+			const reader = sampleReader(track, this.stats, () => gate.isCancelled())
+
+			mime = `audio/mp4; codecs="${target.codec}"`
+			close = async () => {
+				writer.close()
+				await reader.close()
+				await output.cancel()
+			}
+			done = runPump(reader, writer, gate, params.time, {
+				floor: 0,
+				onStart,
+				discard: item => {
+					item.sample.close()
+				}
+			}).finally(() => {
+				writer.close()
+			})
+		}
+
+		const run: Run = {
+			generation: params.generation,
+			gate,
+			close,
+			done: done
+				.then(result => {
+					if (result.type === "ended") {
+						started.resolve(startTime)
+						this.ended("audio", params.generation)
+					} else {
+						started.reject(new SupersededError())
+					}
+				})
+				.catch((error: unknown) => {
+					started.reject(gate.isCancelled() ? new SupersededError() : error)
+					this.failed("audio", params.generation, gate, error)
+				})
+		}
+
+		started.promise.catch(() => undefined)
+		// No await since the epoch check: nothing newer can have registered a run meanwhile, but an older
+		// one left behind is torn down rather than overwritten.
+		void this.detach("audio")?.()
+		this.audioEpoch = epoch
+		this.runs.set("audio", run)
+		// The video pump moved on while the decoder and encoder were being set up.
+		gate.setHorizon(this.audioHorizon(params.horizon))
+		await started.promise
+
+		return { startTime, mime }
+	}
+
+	// The speakers an AC-3/E-AC-3/DTS track's frames declare, read from the packet playback starts at
+	// (already in the block cache for the decode that follows); null for other codecs.
+	private headerLayout(track: InputAudioTrack, codec: AudioCodec, time: number): Promise<Speaker[] | null> {
+		const parse = codec === "ac3" || codec === "eac3" ? ac3Layout : codec === "dts" ? dtsLayout : null
+
+		if (parse === null) {
+			return Promise.resolve(null)
+		}
+
+		let layout = this.layouts.get(track.id)
+
+		if (layout === undefined) {
+			const sink = new EncodedPacketSink(track)
+
+			layout = (async () => {
+				const packet = (await sink.getPacket(time)) ?? (await sink.getFirstPacket())
+
+				return packet === null ? null : parse(packet.data)
+			})()
+			// A failed read is not remembered: the next start reads again.
+			layout.catch(() => {
+				this.layouts.delete(track.id)
+			})
+			this.layouts.set(track.id, layout)
+		}
+
+		return layout.catch(() => null)
+	}
+
+	private pickTarget(): Promise<EncoderTarget | null> {
+		this.encoderTarget ??= pickEncoderTarget(this.transcodeTargets, async codec => {
+			const { supported } = await AudioEncoder.isConfigSupported({
+				codec,
+				sampleRate: TRANSCODE_SAMPLE_RATE,
+				numberOfChannels: TRANSCODE_CHANNELS,
+				bitrate: TRANSCODE_BITRATE
+			})
+
+			return supported === true
+		})
+
+		return this.encoderTarget
+	}
+
+	private segment(kind: TrackKind, generation: number, bytes: Uint8Array<ArrayBuffer>): void {
+		if (this.runs.get(kind)?.generation !== generation) {
+			return
+		}
+
+		this.stats.segmentsOut++
+		this.stats.bytesOut += bytes.length
+		this.emit({ type: "segment", kind, generation, bytes, init: isInitSegment(bytes) })
+	}
+
+	private ended(kind: TrackKind, generation: number): void {
+		if (this.runs.get(kind)?.generation === generation) {
+			this.emit({ type: "ended", kind, generation })
+		}
+	}
+
+	private failed(kind: TrackKind, generation: number, gate: PumpGate, error: unknown): void {
+		// A cancelled pump's reads were aborted on purpose.
+		if (gate.isCancelled() || this.runs.get(kind)?.generation !== generation) {
+			return
+		}
+
+		this.emit({
+			type: "error",
+			kind,
+			generation,
+			message: errorMessage(error),
+			fragmentTooLarge: error instanceof FragmentTooLargeError
+		})
+		// Whatever the muxer still holds (up to a whole oversized fragment) is freed now, not at close.
+		void this.cancel(kind)
+	}
+}
