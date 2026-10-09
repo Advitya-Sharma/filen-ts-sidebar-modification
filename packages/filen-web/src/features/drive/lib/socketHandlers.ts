@@ -29,6 +29,7 @@ import {
 	patchPhotosFavorite,
 	type PhotosEventScope
 } from "@/features/photos/queries/photos"
+import { isPhotoItem } from "@/features/photos/lib/predicate"
 import { markAccountStale } from "@/queries/account"
 import { useDriveStore } from "@/features/drive/store/useDriveStore"
 import { markClipboardEventsMissed } from "@/features/drive/store/useDriveClipboardStore"
@@ -221,6 +222,21 @@ function photosEventScope(inner: DriveSocketEvent["inner"]): PhotosEventScope | 
 	}
 }
 
+// A file that isn't a photo can't join a photos listing by arriving, returning or moving, and can't be in
+// one already; a listed photo superseded by a non-photo version leaves through its own fileArchived. Saves
+// of non-photo files (a playlist or other `.filen` JSON) would otherwise re-walk a root that contains them.
+function cannotChangePhotos(inner: DriveSocketEvent["inner"]): boolean {
+	switch (inner.type) {
+		case "fileNew":
+		case "fileRestore":
+		case "fileMove":
+			return !isPhotoItem(narrowItem(inner.file))
+
+		default:
+			return false
+	}
+}
+
 // Drive events that move the account's storage used or versioned storage. Trashing and restoring don't:
 // trashed items keep counting until deleted. A new version arrives as fileNew, its predecessor as
 // fileArchived.
@@ -288,7 +304,7 @@ export function handleDriveEvent(event: DriveSocketEvent): void {
 		flushListingCreatesOutsideBatch()
 	}
 
-	if (PHOTOS_INVALIDATING_EVENT_TYPES.has(inner.type)) {
+	if (PHOTOS_INVALIDATING_EVENT_TYPES.has(inner.type) && !cannotChangePhotos(inner)) {
 		invalidatePhotosListing(photosEventScope(inner))
 	}
 

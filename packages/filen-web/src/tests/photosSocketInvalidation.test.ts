@@ -38,6 +38,16 @@ function mockFile(overrides: Partial<File> = {}): File {
 	}
 }
 
+function mockPhoto(overrides: Partial<File> = {}): File {
+	return mockFile({
+		meta: {
+			type: "decoded",
+			data: { name: "IMG_0001.jpg", mime: "image/jpeg", modified: 1_700_000_000_000n, size: 1_024n, key: "k", version: 2 }
+		},
+		...overrides
+	})
+}
+
 function mockDir(overrides: Partial<Dir> = {}): Dir {
 	return {
 		uuid: testUuid("dir"),
@@ -70,12 +80,12 @@ beforeEach(() => {
 
 describe("handleDriveEvent — coarse photos invalidation", () => {
 	it.each([
-		["fileNew", () => driveEvt({ type: "fileNew", file: mockFile() })],
-		["fileMove", () => driveEvt({ type: "fileMove", file: mockFile() })],
+		["fileNew", () => driveEvt({ type: "fileNew", file: mockPhoto() })],
+		["fileMove", () => driveEvt({ type: "fileMove", file: mockPhoto() })],
 		["folderMove", () => driveEvt({ type: "folderMove", dir: mockDir() })],
 		["fileTrash", () => driveEvt({ type: "fileTrash", uuid: testUuid("file"), stableUUID: STABLE_FILE, newUUID: undefined })],
 		["folderTrash", () => driveEvt({ type: "folderTrash", parent: testUuid("parent"), uuid: testUuid("dir") })],
-		["fileRestore", () => driveEvt({ type: "fileRestore", file: mockFile() })],
+		["fileRestore", () => driveEvt({ type: "fileRestore", file: mockPhoto() })],
 		["folderRestore", () => driveEvt({ type: "folderRestore", dir: mockDir() })],
 		["fileArchived", () => driveEvt({ type: "fileArchived", uuid: testUuid("file"), stableUUID: STABLE_FILE, newUUID: NEW_FILE })],
 		["fileArchiveRestored", () => driveEvt({ type: "fileArchiveRestored", currentUuid: testUuid("old"), file: mockFile() })],
@@ -117,6 +127,22 @@ describe("handleDriveEvent — coarse photos invalidation", () => {
 		expect(isPhotosQueryInvalidated()).toBe(false)
 	})
 
+	it.each([
+		["fileNew", () => driveEvt({ type: "fileNew", file: mockFile() })],
+		["fileMove", () => driveEvt({ type: "fileMove", file: mockFile() })],
+		["fileRestore", () => driveEvt({ type: "fileRestore", file: mockFile() })]
+	])("does NOT invalidate on a %s of a non-photo file (a playlist save into .filen, say)", (_label, buildEvent) => {
+		handleDriveEvent(buildEvent())
+
+		expect(isPhotosQueryInvalidated()).toBe(false)
+	})
+
+	it("does NOT invalidate on a fileNew of an undecryptable file", () => {
+		handleDriveEvent(driveEvt({ type: "fileNew", file: mockFile({ meta: { type: "encrypted", data: "x" } }) }))
+
+		expect(isPhotosQueryInvalidated()).toBe(false)
+	})
+
 	it("does NOT invalidate on trashEmpty", () => {
 		handleDriveEvent(driveEvt({ type: "trashEmpty" }))
 
@@ -126,7 +152,7 @@ describe("handleDriveEvent — coarse photos invalidation", () => {
 	it("is a no-op when no photos query is mounted (never conjures a phantom cache entry)", () => {
 		testQueryClient.clear()
 
-		handleDriveEvent(driveEvt({ type: "fileNew", file: mockFile() }))
+		handleDriveEvent(driveEvt({ type: "fileNew", file: mockPhoto() }))
 
 		expect(testQueryClient.getQueryCache().find({ queryKey: photosListingQueryKey(ROOT_UUID) })).toBeUndefined()
 	})
