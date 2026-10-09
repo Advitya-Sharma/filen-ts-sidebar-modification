@@ -44,7 +44,7 @@ import {
 	TRANSCODE_SAMPLE_RATE,
 	type EncoderTarget
 } from "@/workers/remux/audioMix.logic"
-import { ensureDecoder, sampleReader, TranscodeWriter } from "@/workers/remux/audioTranscode"
+import { sampleReader, TranscodeWriter } from "@/workers/remux/audioTranscode"
 import { ac3Layout, dtsLayout, layoutFor, type Speaker } from "@/workers/remux/channelLayout.logic"
 import { outputVideoCodecString } from "@/workers/remux/codecs.logic"
 import { hevcKeyIsIdr, hevcLengthSize, IDR_REACH_KEYS, idrReachSeconds } from "@/workers/remux/hevc.logic"
@@ -624,8 +624,6 @@ export class RemuxEngine {
 				throw new Error("no audio encoder for this browser")
 			}
 
-			await ensureDecoder(codec)
-
 			const header = await this.headerLayout(track, codec, params.time)
 
 			current()
@@ -636,7 +634,12 @@ export class RemuxEngine {
 				maxFragmentBytes: this.maxFragmentBytes.audio,
 				onSegment
 			})
-			const writer = new TranscodeWriter({ target, output, stats: this.stats, layout: channels => layoutFor(header, channels) })
+			const writer = new TranscodeWriter({
+				target,
+				output,
+				stats: this.stats,
+				layout: (channels, mask) => layoutFor(header, channels, mask)
+			})
 			const reader = sampleReader(track, this.stats, () => gate.isCancelled())
 
 			mime = `audio/mp4; codecs="${target.codec}"`

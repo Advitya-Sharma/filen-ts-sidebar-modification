@@ -1,4 +1,4 @@
-import { AudioSampleSink, EncodedPacket, type AudioCodec, type AudioSample, type InputAudioTrack } from "mediabunny"
+import { AudioSampleSink, EncodedPacket, registerDecoder, type AudioSample, type InputAudioTrack } from "mediabunny"
 import { BlockAbortError } from "@/lib/media/blockCache"
 import type { RemuxStats } from "@/lib/media/remuxTypes"
 import {
@@ -12,6 +12,7 @@ import {
 	type EncoderTarget
 } from "@/workers/remux/audioMix.logic"
 import { downmixToStereo, type Speaker } from "@/workers/remux/channelLayout.logic"
+import { decodedChannelMask, FfmpegAudioDecoder } from "@/workers/remux/ffmpegDecoder"
 import type { FragmentedTrackOutput } from "@/workers/remux/output"
 import type { PumpItem, PumpReader, PumpWriter } from "@/workers/remux/pump"
 
@@ -36,30 +37,8 @@ const MAX_ENCODE_QUEUE = 32
 // The wait is also cut short by time, never resting on a dequeue event alone.
 const ENCODE_WAIT_MS = 50
 
-// The FFmpeg-based decoders are large (about 1-1.6 MB each, the codec running in a nested worker of
-// their own), so each is loaded the first time a track needs it and registered with the demuxer once.
-let ac3Decoder: Promise<void> | null = null
-let dtsDecoder: Promise<void> | null = null
-
-export async function ensureDecoder(codec: AudioCodec | null): Promise<void> {
-	if (codec === "ac3" || codec === "eac3") {
-		ac3Decoder ??= import("@mediabunny/ac3").then(module => {
-			module.registerAc3Decoder()
-		})
-		ac3Decoder.catch(() => {
-			ac3Decoder = null
-		})
-		await ac3Decoder
-	} else if (codec === "dts") {
-		dtsDecoder ??= import("@mediabunny/dts").then(module => {
-			module.registerDtsDecoder()
-		})
-		dtsDecoder.catch(() => {
-			dtsDecoder = null
-		})
-		await dtsDecoder
-	}
-}
+// Mediabunny picks a registered decoder over the browser's own for the codecs it supports.
+registerDecoder(FfmpegAudioDecoder)
 
 export interface SampleItem extends PumpItem {
 	sample: AudioSample
@@ -138,15 +117,15 @@ export class TranscodeWriter implements PumpWriter<SampleItem> {
 	private nextTimestampUs: number | null = null
 	private pending: Promise<void> = Promise.resolve()
 	private failure: unknown = null
-	private readonly layout: (channels: number) => Speaker[]
+	private readonly layout: (channels: number, mask: number | null) => Speaker[]
 	private readonly firstConfig = new FirstChunkConfig<AudioDecoderConfig>()
 
-	// `layout` names the decoded planes' speakers for a given channel count.
+	// `layout` names the decoded planes' speakers for a channel count and the decoder's channel mask, if any.
 	public constructor(params: {
 		target: EncoderTarget
 		output: FragmentedTrackOutput
 		stats: RemuxStats
-		layout: (channels: number) => Speaker[]
+		layout: (channels: number, mask: number | null) => Speaker[]
 	}) {
 		const { target, output, stats } = params
 
@@ -212,7 +191,7 @@ export class TranscodeWriter implements PumpWriter<SampleItem> {
 				this.resampler = null
 			}
 
-			const stereo = downmixToStereo(planes, this.layout(planes.length))
+			const stereo = downmixToStereo(planes, this.layout(planes.length, decodedChannelMask(sample)))
 			const [left, right] = sample.sampleRate === TRANSCODE_SAMPLE_RATE ? stereo : this.resample(sample.sampleRate, stereo)
 			const count = left.length
 

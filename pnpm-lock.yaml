@@ -828,12 +828,6 @@ importers:
       '@fontsource-variable/inter':
         specifier: ^5.3.0
         version: 5.3.0
-      '@mediabunny/ac3':
-        specifier: 1.61.3
-        version: 1.61.3(mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854))
-      '@mediabunny/dts':
-        specifier: 1.61.3
-        version: 1.61.3(mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854))
       '@sqlite.org/sqlite-wasm':
         specifier: ^3.53.4-build1
         version: 3.53.4-build1
@@ -2838,16 +2832,6 @@ packages:
 
   '@marijn/find-cluster-break@1.0.4':
     resolution: {integrity: sha512-Wy0V7+SGUjnF9/TkiM1hKVDPj7jKXduPNboMVtHTA8dySMURWqfg/JZ9E2Sq8JgSJmkl7k7Qe9FLeMSrSraWmQ==}
-
-  '@mediabunny/ac3@1.61.3':
-    resolution: {integrity: sha512-kEupOERqZ6zCQBzx0Ea5R9LgP2pQJUFx/Yo+UL0jL71QIZmoAfdZXXZJKpMfKVWToEacvc9+1XQagfHV6jZNpQ==}
-    peerDependencies:
-      mediabunny: ^1.0.0
-
-  '@mediabunny/dts@1.61.3':
-    resolution: {integrity: sha512-WqpDuQDTgBd3ohQxlAVpnb8B4rb8FHYk/+kNKi1Yp37EdJVahwNj1QULClN87XaneE8s0rDC6ArdXHqOuTYYGA==}
-    peerDependencies:
-      mediabunny: ^1.0.0
 
   '@modelcontextprotocol/sdk@1.30.0':
     resolution: {integrity: sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==}
@@ -12811,14 +12795,6 @@ snapshots:
       - supports-color
 
   '@marijn/find-cluster-break@1.0.4': {}
-
-  '@mediabunny/ac3@1.61.3(mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854))':
-    dependencies:
-      mediabunny: 1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854)
-
-  '@mediabunny/dts@1.61.3(mediabunny@1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854))':
-    dependencies:
-      mediabunny: 1.61.3(patch_hash=50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854)
 
   '@modelcontextprotocol/sdk@1.30.0(supports-color@8.1.1)(zod@3.25.76)':
     dependencies:

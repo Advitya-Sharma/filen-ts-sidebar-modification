@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { ac3Layout, downmixToStereo, dtsLayout, layoutFor, type Speaker } from "@/workers/remux/channelLayout.logic"
+import { ac3Layout, downmixToStereo, dtsLayout, layoutFor, speakersFromMask, type Speaker } from "@/workers/remux/channelLayout.logic"
 
 // An AC-3 syncframe head: sync, CRC, fscod/frmsizecod, bsid 8, then acmod and what follows it.
 function ac3Frame(modeByte: number): Uint8Array {
@@ -80,7 +80,79 @@ describe("dtsLayout", () => {
 	})
 })
 
+// AV_CH_* bits (libavutil/channel_layout.h).
+const CH = {
+	FL: 2 ** 0,
+	FR: 2 ** 1,
+	FC: 2 ** 2,
+	LFE: 2 ** 3,
+	BL: 2 ** 4,
+	BR: 2 ** 5,
+	SL: 2 ** 9,
+	SR: 2 ** 10,
+	TFL: 2 ** 12,
+	TFR: 2 ** 14,
+	TBL: 2 ** 15,
+	TBR: 2 ** 17,
+	WL: 2 ** 31,
+	WR: 2 ** 32,
+	LFE2: 2 ** 35
+}
+const MASK_5_1 = CH.FL + CH.FR + CH.FC + CH.LFE + CH.SL + CH.SR
+const MASK_7_1 = MASK_5_1 + CH.BL + CH.BR
+
+describe("speakersFromMask", () => {
+	it("names the planes of FFmpeg's layouts in plane order", () => {
+		expect(speakersFromMask(MASK_5_1)).toEqual(["FL", "FR", "FC", "LFE", "SL", "SR"])
+		// DTS-HD MA and E-AC-3 with a dependent substream: 7.1.
+		expect(speakersFromMask(MASK_7_1)).toEqual(["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"])
+		// 7.1.4 heights, and wide fronts above bit 31, where bitwise operators would truncate.
+		expect(speakersFromMask(MASK_7_1 + CH.TFL + CH.TFR + CH.TBL + CH.TBR)).toEqual([
+			"FL",
+			"FR",
+			"FC",
+			"LFE",
+			"BL",
+			"BR",
+			"SL",
+			"SR",
+			"TFL",
+			"TFR",
+			"TBL",
+			"TBR"
+		])
+		expect(speakersFromMask(MASK_5_1 + CH.WL + CH.WR + CH.LFE2)).toEqual(["FL", "FR", "FC", "LFE", "SL", "SR", "WL", "WR", "LFE2"])
+	})
+
+	it("names nothing for a mask with a position it does not know, or no mask at all", () => {
+		expect(speakersFromMask(MASK_5_1 + 2 ** 20)).toBeNull()
+		expect(speakersFromMask(2 ** 61 + 2 ** 62)).toBeNull()
+		expect(speakersFromMask(0)).toBeNull()
+		expect(speakersFromMask(-1)).toBeNull()
+	})
+})
+
 describe("layoutFor", () => {
+	it("prefers the decoder's channel mask over the header's guess", () => {
+		// E-AC-3 7.1 whose header names only the 5.1 independent substream.
+		expect(layoutFor(["FL", "FR", "FC", "LFE", "SL", "SR"], 8, MASK_7_1)).toEqual(["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"])
+		// 7.0, which the count alone would take for 6.1.
+		expect(layoutFor(null, 7, CH.FL + CH.FR + CH.FC + CH.BL + CH.BR + CH.SL + CH.SR)).toEqual([
+			"FL",
+			"FR",
+			"FC",
+			"BL",
+			"BR",
+			"SL",
+			"SR"
+		])
+	})
+
+	it("falls back to the header when the mask does not fit the planes", () => {
+		expect(layoutFor(["FL", "FR", "FC", "BC"], 4, MASK_5_1)).toEqual(["FL", "FR", "FC", "BC"])
+		expect(layoutFor(["FL", "FR", "FC", "BC"], 4, null)).toEqual(["FL", "FR", "FC", "BC"])
+	})
+
 	it("uses the header when it names as many channels as were decoded", () => {
 		expect(layoutFor(["FL", "FR", "FC", "BC"], 4)).toEqual(["FL", "FR", "FC", "BC"])
 	})
@@ -97,6 +169,26 @@ describe("layoutFor", () => {
 
 describe("downmixToStereo", () => {
 	const at = (planes: [Float32Array, Float32Array]) => [planes[0][0] ?? Number.NaN, planes[1][0] ?? Number.NaN]
+
+	it("places 7.1 back speakers and 7.1.4 heights on their side, LFE2 dropped", () => {
+		const layout = layoutFor(null, 13, MASK_7_1 + CH.TFL + CH.TFR + CH.TBL + CH.TBR + CH.LFE2)
+		const only = (speaker: Speaker) =>
+			at(
+				downmixToStereo(
+					constant(layout.length, channel => (layout[channel] === speaker ? 0.5 : 0)),
+					layout
+				)
+			)
+
+		expect(layout).toHaveLength(13)
+		expect(only("BL")[0]).toBeCloseTo(0.5 * Math.SQRT1_2, 5)
+		expect(only("BL")[1]).toBe(0)
+		expect(only("BR")[1]).toBeCloseTo(0.5 * Math.SQRT1_2, 5)
+		expect(only("TFL")[0]).toBeCloseTo(0.5 * Math.SQRT1_2, 5)
+		expect(only("TFR")).toEqual([0, expect.closeTo(0.5 * Math.SQRT1_2, 5) as number])
+		expect(only("TBL")).toEqual([0.25, 0])
+		expect(only("LFE2")).toEqual([0, 0])
+	})
 
 	it("keeps 5.1 dialogue in the centre at -3 dB on both sides, not attenuated by the channel count", () => {
 		const layout: Speaker[] = ["FL", "FR", "FC", "LFE", "SL", "SR"]

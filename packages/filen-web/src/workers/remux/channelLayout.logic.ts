@@ -1,15 +1,103 @@
 // Channel layouts of decoded surround audio and their stereo downmix. The FFmpeg-based decoders hand out
-// planes in FFmpeg's native order for the stream's layout (by speaker position: FL FR FC LFE BL BR FLC
-// FRC BC SL SR), which the channel count alone does not pin down: 3/1 and 2/2 are both four channels,
-// 2/1 and 3/0 both three. The layout is read from the bitstream's own header.
+// planes in FFmpeg's native order (by AV_CH_* bit: FL FR FC LFE BL BR FLC FRC BC SL SR, then the top,
+// wide and other positions) and name the layout with a channel mask. When they cannot, the layout is
+// guessed from the bitstream's own header, since the count alone does not pin it down: 3/1 and 2/2 are
+// both four channels, 2/1 and 3/0 both three.
 
-export type Speaker = "FL" | "FR" | "FC" | "LFE" | "BL" | "BR" | "FLC" | "FRC" | "BC" | "SL" | "SR"
+export type Speaker =
+	| "FL"
+	| "FR"
+	| "FC"
+	| "LFE"
+	| "BL"
+	| "BR"
+	| "FLC"
+	| "FRC"
+	| "BC"
+	| "SL"
+	| "SR"
+	| "TC"
+	| "TFL"
+	| "TFC"
+	| "TFR"
+	| "TBL"
+	| "TBC"
+	| "TBR"
+	| "DL"
+	| "DR"
+	| "WL"
+	| "WR"
+	| "SDL"
+	| "SDR"
+	| "LFE2"
+	| "TSL"
+	| "TSR"
+	| "BFC"
+	| "BFL"
+	| "BFR"
+	| "SSL"
+	| "SSR"
+	| "TTL"
+	| "TTR"
+
+// FFmpeg's AV_CH_* bit of each speaker (libavutil/channel_layout.h, enum AVChannel); ascending, which is
+// the order of the decoded planes.
+const CHANNEL_BITS: readonly (readonly [Speaker, number])[] = [
+	["FL", 0],
+	["FR", 1],
+	["FC", 2],
+	["LFE", 3],
+	["BL", 4],
+	["BR", 5],
+	["FLC", 6],
+	["FRC", 7],
+	["BC", 8],
+	["SL", 9],
+	["SR", 10],
+	["TC", 11],
+	["TFL", 12],
+	["TFC", 13],
+	["TFR", 14],
+	["TBL", 15],
+	["TBC", 16],
+	["TBR", 17],
+	["DL", 29],
+	["DR", 30],
+	["WL", 31],
+	["WR", 32],
+	["SDL", 33],
+	["SDR", 34],
+	["LFE2", 35],
+	["TSL", 36],
+	["TSR", 37],
+	["BFC", 38],
+	["BFL", 39],
+	["BFR", 40],
+	["SSL", 41],
+	["SSR", 42],
+	["TTL", 43],
+	["TTR", 44]
+]
 
 // FFmpeg's channel bit order, which is the order of the decoded planes.
-const NATIVE_ORDER: readonly Speaker[] = ["FL", "FR", "FC", "LFE", "BL", "BR", "FLC", "FRC", "BC", "SL", "SR"]
+const NATIVE_ORDER: readonly Speaker[] = CHANNEL_BITS.map(([speaker]) => speaker)
 
 function native(speakers: readonly Speaker[]): Speaker[] {
 	return NATIVE_ORDER.filter(speaker => speakers.includes(speaker))
+}
+
+// The speakers of an AV_CH_* mask in plane order. Null when the mask holds a bit no speaker here stands
+// for (the planes could not all be placed). The mask arrives as a number: above bit 31 it is read by
+// division, as bitwise operators truncate to 32 bits.
+export function speakersFromMask(mask: number): Speaker[] | null {
+	if (!Number.isSafeInteger(mask) || mask <= 0) {
+		return null
+	}
+
+	const speakers = CHANNEL_BITS.filter(([, bit]) => Math.floor(mask / 2 ** bit) % 2 === 1).map(([speaker]) => speaker)
+	const named = CHANNEL_BITS.filter(([speaker]) => speakers.includes(speaker)).reduce((sum, [, bit]) => sum + 2 ** bit, 0)
+
+	return named === mask ? speakers : null
 }
 
 // AC-3 / E-AC-3 audio coding mode (acmod) → speakers, before LFE. 0 is dual mono, played as stereo.
@@ -168,8 +256,15 @@ const DEFAULT_LAYOUTS: Record<number, readonly Speaker[]> = {
 // E-AC-3 dependent substream carrying the back pair of a 7.1 mix).
 const EXTRA_SPEAKERS: readonly Speaker[] = ["BL", "BR", "BC", "FLC", "FRC"]
 
-// The layout of `channels` decoded planes, from the header's layout when it fits.
-export function layoutFor(header: readonly Speaker[] | null, channels: number): Speaker[] {
+// The layout of `channels` decoded planes: the decoder's own channel mask when it gave one that fits,
+// else the header's layout when it fits, else FFmpeg's default for the count.
+export function layoutFor(header: readonly Speaker[] | null, channels: number, mask: number | null = null): Speaker[] {
+	const decoded = mask === null ? null : speakersFromMask(mask)
+
+	if (decoded?.length === channels) {
+		return decoded
+	}
+
 	if (header !== null && header.length === channels) {
 		return [...header]
 	}
@@ -192,7 +287,9 @@ const MINUS_3_DB = Math.SQRT1_2
 const MINUS_6_DB = 0.5
 
 // Each speaker's gain into the left and right output (ITU-R BS.775 / ATSC A/52 Lo/Ro with centre and
-// surround levels at -3 dB). LFE is not part of the downmix.
+// surround levels at -3 dB). LFE is not part of the downmix. A height or bottom speaker folds into the
+// position below or above it at a further -3 dB; wide, surround-direct and side-surround speakers count
+// as the front or side pair they extend; a stereo downmix pair stands for left and right.
 const GAINS: Record<Speaker, readonly [number, number]> = {
 	FL: [1, 0],
 	FR: [0, 1],
@@ -204,7 +301,30 @@ const GAINS: Record<Speaker, readonly [number, number]> = {
 	FRC: [0, 1],
 	BC: [MINUS_6_DB, MINUS_6_DB],
 	SL: [MINUS_3_DB, 0],
-	SR: [0, MINUS_3_DB]
+	SR: [0, MINUS_3_DB],
+	TC: [MINUS_6_DB, MINUS_6_DB],
+	TFL: [MINUS_3_DB, 0],
+	TFC: [MINUS_6_DB, MINUS_6_DB],
+	TFR: [0, MINUS_3_DB],
+	TBL: [MINUS_6_DB, 0],
+	TBC: [MINUS_6_DB * MINUS_3_DB, MINUS_6_DB * MINUS_3_DB],
+	TBR: [0, MINUS_6_DB],
+	DL: [1, 0],
+	DR: [0, 1],
+	WL: [1, 0],
+	WR: [0, 1],
+	SDL: [MINUS_3_DB, 0],
+	SDR: [0, MINUS_3_DB],
+	LFE2: [0, 0],
+	TSL: [MINUS_6_DB, 0],
+	TSR: [0, MINUS_6_DB],
+	BFC: [MINUS_6_DB, MINUS_6_DB],
+	BFL: [MINUS_3_DB, 0],
+	BFR: [0, MINUS_3_DB],
+	SSL: [MINUS_3_DB, 0],
+	SSR: [0, MINUS_3_DB],
+	TTL: [MINUS_6_DB, 0],
+	TTR: [0, MINUS_6_DB]
 }
 
 // Above this, samples are compressed smoothly towards full scale instead of clipping: the -3 dB mix

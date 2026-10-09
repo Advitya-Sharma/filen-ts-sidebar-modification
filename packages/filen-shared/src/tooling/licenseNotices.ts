@@ -377,50 +377,46 @@ export function describeCargoCrate(name: string, version: string, dir: string | 
 }
 
 /**
- * Licensing a package's own files leave out: a component it bundles under another license (a statically
- * linked library, say). The texts and copyright lines are appended to what the package ships, never
- * replacing it; `license` is the SPDX expression covering both.
+ * A component committed to the repository as built output (a library compiled from a pinned release, say)
+ * rather than installed, so no package manager reports it. Whoever vendors it states its licensing: the
+ * copyright lines, and as terms the verbatim license texts plus anything the license asks to accompany the
+ * build, such as where its source is.
  */
-export type LicenseAddition = {
+export type VendoredComponent = {
 	name: string
 	version: string
 	license: string
 	copyright: string[]
+	repository: string | null
 	terms: string[]
 }
 
-/**
- * Applies `additions` to the matching collected entries. An addition that matches nothing throws: after a
- * version bump the override must be re-checked against the new release rather than silently dropped.
- */
-export function applyLicenseAdditions<E extends string>(
-	collected: CollectedNotice<E>[],
-	additions: readonly LicenseAddition[]
-): CollectedNotice<E>[] {
-	const unmatched = new Set(additions)
-	const out = collected.map(entry => {
-		const addition = additions.find(candidate => candidate.name === entry.name && candidate.version === entry.version)
+/** The collected entry for a vendored component. Throws when it would ship without a license text or holder. */
+export function vendoredNotice<E extends string>(component: VendoredComponent, ecosystem: E): CollectedNotice<E> {
+	const label = `${component.name}@${component.version}`
 
-		if (addition === undefined) {
-			return entry
-		}
-
-		unmatched.delete(addition)
-
-		return {
-			...entry,
-			license: addition.license,
-			copyright: [...new Set([...entry.copyright, ...addition.copyright])],
-			terms: [...entry.terms, ...addition.terms]
-		}
-	})
-	const [first] = unmatched
-
-	if (first !== undefined) {
-		throw new Error(`license addition for ${first.name}@${first.version} matches no installed package — re-check it`)
+	if (component.name.length === 0 || component.version.length === 0) {
+		throw new Error(`vendored component ${label} needs a name and a version`)
 	}
 
-	return out
+	if (component.terms.length === 0 || component.terms.some(term => term.trim().length === 0)) {
+		throw new Error(`vendored component ${label} has an empty or missing license text`)
+	}
+
+	if (component.copyright.length === 0) {
+		throw new Error(`vendored component ${label} names no copyright holder`)
+	}
+
+	return {
+		name: component.name,
+		version: component.version,
+		license: component.license,
+		ecosystem,
+		copyright: [...new Set(component.copyright)],
+		repository: component.repository,
+		texts: [],
+		terms: [...component.terms]
+	}
 }
 
 /** Pools every entry's terms, then emits the payload entries without them, ordered by name then version. */

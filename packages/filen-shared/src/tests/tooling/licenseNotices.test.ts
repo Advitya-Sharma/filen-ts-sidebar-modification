@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-	applyLicenseAdditions,
 	describeCargoCrate,
 	describedNotice,
 	describeLicensing,
@@ -11,6 +10,7 @@ import {
 	poolLicenseTexts,
 	repositoryOf,
 	spdxOf,
+	vendoredNotice,
 	type PoolableNotice
 } from "@filen/shared/tooling"
 
@@ -174,37 +174,37 @@ describe("manifest fields", () => {
 	})
 })
 
-describe("applyLicenseAdditions", () => {
-	const entry = (name: string, version: string) => ({
-		name,
-		version,
-		license: "MPL-2.0",
-		ecosystem: "npm" as const,
-		copyright: ["Copyright (c) the package authors"],
-		repository: null,
-		texts: [],
-		terms: ["MPL terms"]
-	})
-	const addition = {
+describe("vendoredNotice", () => {
+	const component = {
 		name: "codec",
 		version: "1.0.0",
-		license: "MPL-2.0 AND LGPL-2.1-or-later",
-		copyright: ["Copyright (c) the library developers"],
-		terms: ["LGPL terms"]
+		license: "LGPL-2.1-or-later",
+		copyright: ["Copyright (c) the library developers", "Copyright (c) the library developers"],
+		repository: "https://example.com/codec.git",
+		terms: ["Built from codec 1.0.0 with --enable-decoder=x.", "LGPL terms"]
 	}
 
-	it("appends the bundled component's terms and copyright to the package's own", () => {
-		const [codec, other] = applyLicenseAdditions([entry("codec", "1.0.0"), entry("other", "1.0.0")], [addition])
+	it("shapes the entry in the payload's field order, terms kept verbatim and holders deduplicated", () => {
+		const entry = vendoredNotice(component, "vendored")
 
-		expect(codec).toMatchObject({
-			license: "MPL-2.0 AND LGPL-2.1-or-later",
-			copyright: ["Copyright (c) the package authors", "Copyright (c) the library developers"],
-			terms: ["MPL terms", "LGPL terms"]
-		})
-		expect(other).toEqual(entry("other", "1.0.0"))
+		expect(JSON.stringify(entry)).toBe(
+			JSON.stringify({
+				name: "codec",
+				version: "1.0.0",
+				license: "LGPL-2.1-or-later",
+				ecosystem: "vendored",
+				copyright: ["Copyright (c) the library developers"],
+				repository: "https://example.com/codec.git",
+				texts: [],
+				terms: ["Built from codec 1.0.0 with --enable-decoder=x.", "LGPL terms"]
+			})
+		)
 	})
 
-	it("throws when the addition matches no installed version, so a bump re-checks it", () => {
-		expect(() => applyLicenseAdditions([entry("codec", "2.0.0")], [addition])).toThrow("codec@1.0.0")
+	it("refuses a component that would ship without a license text or a holder", () => {
+		expect(() => vendoredNotice({ ...component, terms: [] }, "vendored")).toThrow("codec@1.0.0")
+		expect(() => vendoredNotice({ ...component, terms: [" "] }, "vendored")).toThrow("license text")
+		expect(() => vendoredNotice({ ...component, copyright: [] }, "vendored")).toThrow("copyright")
+		expect(() => vendoredNotice({ ...component, version: "" }, "vendored")).toThrow("version")
 	})
 })

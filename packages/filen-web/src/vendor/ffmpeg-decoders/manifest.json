@@ -1,0 +1,30 @@
+{
+	"description": "FFmpeg AC-3, E-AC-3 and DTS decoders built to WebAssembly by scripts/codecs/build-ffmpeg-decoders.sh; the module is LGPL-2.1-or-later.",
+	"ffmpeg": {
+		"tag": "n9.0.2",
+		"tarball": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+		"sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+		"configure": ["--target-os=none", "--arch=x86_32", "--enable-cross-compile", "--disable-asm", "--disable-inline-asm", "--disable-x86asm", "--disable-programs", "--disable-doc", "--disable-debug", "--disable-network", "--disable-autodetect", "--disable-pthreads", "--disable-runtime-cpudetect", "--disable-all", "--disable-everything", "--enable-small", "--enable-avcodec", "--enable-decoder=ac3,eac3,dca"],
+		"cflags": ["-Oz", "-flto", "-msimd128", "-DNDEBUG", "-ffile-prefix-map=<ffmpeg source>=ffmpeg"]
+	},
+	"emcc": "6.0.12-git",
+	"emscripten": {
+		"musl": "1.2.6",
+		"licenses": {
+			"emscripten-LICENSE": "620a78084fc7ca97c0b5dea9abf891f3ffcadfdbf305276f099c9c4e12fc1d86",
+			"musl-COPYRIGHT": "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b"
+		}
+	},
+	"link": ["-Oz", "-flto", "-msimd128", "-DNDEBUG", "-ffile-prefix-map=<ffmpeg source>=ffmpeg", "-ffile-prefix-map=<scripts/codecs>=codecs", "-sMODULARIZE=1", "-sEXPORT_NAME=createFfmpegDecoders", "-sENVIRONMENT=worker", "-sSINGLE_FILE=1", "-sSINGLE_FILE_BINARY_ENCODE=0", "-sDYNAMIC_EXECUTION=0", "-sALLOW_MEMORY_GROWTH=1", "-sFILESYSTEM=0", "-sMALLOC=emmalloc", "-sSUPPORT_LONGJMP=0", "-sINCOMING_MODULE_JS_API=[]", "-sEXPORTED_RUNTIME_METHODS=HEAPU8", "-sEXPORTED_FUNCTIONS=_decoder_log_level,_decoder_open,_decoder_packet,_decoder_send,_decoder_drain,_decoder_receive,_decoder_reset,_decoder_format,_decoder_channels,_decoder_channel_mask,_decoder_sample_rate,_decoder_frames,_decoder_plane,_decoder_timestamp,_decoder_close"],
+	"sources": {
+		"build-ffmpeg-decoders.sh": "0ed57dce01f3339ce3f9c1c67cf7957d56b6ab397217c81962a0f078db30301d",
+		"bridge.c": "d31f2c39a8a5cde4fb7915a1219689d44841f5966fc8cc4eacd42c489a12c1dd",
+		"decoder-worker.js": "abb140640b562716c487cb5fd20275409c6d279a2f303900c1cee370ccaffdc8"
+	},
+	"output": {
+		"decoders.worker.js": {
+			"bytes": 763223,
+			"sha256": "523b9b4b5a445b05bdd796234ecfe702cc83e48c77deba0f123a460cc9967bdf"
+		}
+	}
+}

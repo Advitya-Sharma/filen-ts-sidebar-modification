@@ -3,7 +3,6 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import {
-	applyLicenseAdditions,
 	describeCargoCrate,
 	describedNotice,
 	finalizeNotices,
@@ -11,8 +10,8 @@ import {
 	readJson,
 	repositoryOf,
 	spdxOf,
+	vendoredNotice,
 	type CollectedNotice,
-	type LicenseAddition,
 	type InstalledNpmPackage
 } from "@filen/shared/tooling"
 
@@ -32,9 +31,10 @@ import {
  * text. Substituting another package's text of the same license would attribute the wrong copyright
  * holder, which is worse than an honest gap.
  *
- * Two ecosystems reach the browser: the npm tree (minus dev/optional entries, which are build tooling)
- * and the Rust crates the SDK wasm is compiled from. @filen/sdk-rs is a registry package and is
- * described here; @filen/shared is a workspace member, so pnpm does not report it and it is correctly
+ * Three sources reach the browser: the npm tree (minus dev/optional entries, which are build tooling),
+ * the Rust crates the SDK wasm is compiled from, and components vendored into this package as built
+ * output, described from the manifest their build script writes. @filen/sdk-rs is a registry package and
+ * is described here; @filen/shared is a workspace member, so pnpm does not report it and it is correctly
  * absent — first-party code needs no attribution.
  *
  * The licensing core is shared with filen-mobile's generator through @filen/shared/tooling. Unlike
@@ -53,7 +53,7 @@ import {
 
 const OUTPUT = "src/features/settings/thirdPartyNotices.gen.ts"
 
-type Ecosystem = "npm" | "rust"
+type Ecosystem = "npm" | "rust" | "vendored"
 
 type Collected = CollectedNotice<Ecosystem>
 
@@ -279,54 +279,119 @@ if (installedSdk !== expectedSdk) {
 	throw new Error(`pnpm says @filen/sdk-rs ${expectedSdk}, node_modules says ${String(installedSdk)} — run pnpm install`)
 }
 
-/**
- * Bundled components a package's own license files do not cover.
- *
- * @mediabunny/ac3 and @mediabunny/dts are MPL-2.0 glue around a WebAssembly build of FFmpeg's libavcodec
- * and libavutil (AC-3/E-AC-3 and DCA decoders and encoders), statically linked into the shipped module.
- * FFmpeg without --enable-gpl is LGPL-2.1-or-later (https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md);
- * the configure lines, which enable no GPL part, are in each package's README:
- *   https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/ac3/README.md
- *   https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/dts/README.md
- * The license text is FFmpeg's own COPYING.LGPLv2.1, kept verbatim beside this script.
- */
-const LGPL_2_1 = readFileSync("scripts/licenses/ffmpeg-COPYING.LGPLv2.1", "utf8")
+function stringField(record: Record<string, unknown>, key: string, path: string): string {
+	const value = record[key]
 
-function ffmpegAddition(params: { name: string; version: string; components: string; readme: string; bridge: string; build: string }) {
-	return {
-		name: params.name,
-		version: params.version,
-		license: "MPL-2.0 AND LGPL-2.1-or-later",
-		copyright: ["Copyright (c) the FFmpeg developers"],
-		terms: [
-			`This package contains ${params.components}, built to WebAssembly from FFmpeg (libavcodec, libavutil) and licensed under the GNU Lesser General Public License, version 2.1 or later. FFmpeg source code: https://git.ffmpeg.org/ffmpeg.git. Build configuration: ${params.readme}. Interface source: ${params.bridge}. The WebAssembly module as distributed: ${params.build}.`,
-			LGPL_2_1
-		]
-	} satisfies LicenseAddition
+	if (typeof value !== "string" || value.length === 0) {
+		throw new Error(`${path}: "${key}" is missing`)
+	}
+
+	return value
 }
 
-const LICENSE_ADDITIONS: LicenseAddition[] = [
-	ffmpegAddition({
-		name: "@mediabunny/ac3",
-		version: "1.61.3",
-		components: "FFmpeg's AC-3 and E-AC-3 decoders and encoders",
-		readme: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/ac3/README.md",
-		bridge: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/ac3/src/bridge.c",
-		build: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/ac3/build/ac3.js"
-	}),
-	ffmpegAddition({
-		name: "@mediabunny/dts",
-		version: "1.61.3",
-		components: "FFmpeg's DTS (DCA) decoder and encoder",
-		readme: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/dts/README.md",
-		bridge: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/dts/src/bridge.c",
-		build: "https://github.com/Vanilagy/mediabunny/blob/v1.61.3/packages/dts/build/dts.js"
-	})
-]
+function stringsField(record: Record<string, unknown>, key: string, path: string): string[] {
+	const value = record[key]
 
-const npm = applyLicenseAdditions(collectNpm(installed), LICENSE_ADDITIONS)
+	if (!Array.isArray(value) || value.length === 0 || !value.every(item => typeof item === "string")) {
+		throw new Error(`${path}: "${key}" is missing`)
+	}
+
+	return value
+}
+
+function objectField(record: Record<string, unknown>, key: string, path: string): Record<string, unknown> {
+	const value = record[key]
+
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error(`${path}: "${key}" is missing`)
+	}
+
+	return Object.fromEntries(Object.entries(value))
+}
+
+/**
+ * The FFmpeg decoders module, built to WebAssembly by scripts/codecs/build-ffmpeg-decoders.sh. What it
+ * contains is read from the manifest the build writes, so the notices cannot drift from what is shipped:
+ *
+ * - FFmpeg configured without --enable-gpl or --enable-nonfree, LGPL-2.1-or-later
+ *   (https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md). The text is FFmpeg's own COPYING.LGPLv2.1,
+ *   kept verbatim beside this script. The corresponding source is named by path and SHA-256: the commit
+ *   that ships a build is not known when the build is made.
+ * - Emscripten's runtime and emmalloc (MIT OR NCSA) and musl (MIT), statically linked in; their license
+ *   files are copied next to the module by the build. compiler-rt's builtins are linked too, but under
+ *   LLVM's exception to Apache-2.0 an object form embedding them owes no attribution.
+ */
+const FFMPEG_DIR = "src/vendor/ffmpeg-decoders"
+const FFMPEG_MANIFEST = `${FFMPEG_DIR}/manifest.json`
+const CODECS_SOURCE = "packages/filen-web/scripts/codecs"
+
+function ffmpegModuleNotices(): Collected[] {
+	const manifest = requireJson(FFMPEG_MANIFEST)
+	const ffmpeg = objectField(manifest, "ffmpeg", FFMPEG_MANIFEST)
+	const emscripten = objectField(manifest, "emscripten", FFMPEG_MANIFEST)
+	const sources = objectField(manifest, "sources", FFMPEG_MANIFEST)
+	const tag = stringField(ffmpeg, "tag", FFMPEG_MANIFEST)
+	const emcc = stringField(manifest, "emcc", FFMPEG_MANIFEST)
+	const linkedInto = `Statically linked into the FFmpeg decoders module (${FFMPEG_DIR}/decoders.worker.js), built with Emscripten ${emcc}.`
+	const sourceList = ["build-ffmpeg-decoders.sh", "bridge.c", "decoder-worker.js"]
+		.map(name => `${CODECS_SOURCE}/${name} (SHA-256 ${stringField(sources, name, FFMPEG_MANIFEST)})`)
+		.join(", ")
+
+	return [
+		vendoredNotice(
+			{
+				name: "FFmpeg",
+				version: tag.replace(/^n/, ""),
+				license: "LGPL-2.1-or-later",
+				copyright: ["Copyright (c) the FFmpeg developers"],
+				repository: "https://git.ffmpeg.org/ffmpeg.git",
+				terms: [
+					[
+						`FFmpeg's AC-3, E-AC-3 and DTS decoders (libavcodec, libavutil), built to WebAssembly from the FFmpeg ${tag} release and licensed under the GNU Lesser General Public License, version 2.1 or later.`,
+						`Source: ${stringField(ffmpeg, "tarball", FFMPEG_MANIFEST)} (SHA-256 ${stringField(ffmpeg, "sha256", FFMPEG_MANIFEST)}).`,
+						`Configured with: ${stringsField(ffmpeg, "configure", FFMPEG_MANIFEST).join(" ")}.`,
+						`Built with Emscripten ${emcc}. The complete corresponding source of the module, in the filen-ts repository (https://github.com/FilenCloudDienste/filen-ts): ${sourceList}.`
+					].join(" "),
+					readFileSync("scripts/licenses/ffmpeg-COPYING.LGPLv2.1", "utf8")
+				]
+			},
+			"vendored"
+		),
+		vendoredNotice(
+			{
+				name: "Emscripten",
+				version: emcc,
+				license: "MIT OR NCSA",
+				copyright: ["Copyright (c) 2010-2014 Emscripten authors"],
+				repository: "https://github.com/emscripten-core/emscripten",
+				terms: [
+					`The Emscripten runtime and emmalloc. ${linkedInto}`,
+					readFileSync(`${FFMPEG_DIR}/licenses/emscripten-LICENSE`, "utf8")
+				]
+			},
+			"vendored"
+		),
+		vendoredNotice(
+			{
+				name: "musl",
+				version: stringField(emscripten, "musl", FFMPEG_MANIFEST),
+				license: "MIT",
+				copyright: ["Copyright © 2005-2020 Rich Felker, et al."],
+				repository: "https://git.musl-libc.org/cgit/musl",
+				terms: [
+					`The musl C library, as bundled with Emscripten. ${linkedInto}`,
+					readFileSync(`${FFMPEG_DIR}/licenses/musl-COPYRIGHT`, "utf8")
+				]
+			},
+			"vendored"
+		)
+	]
+}
+
+const npm = collectNpm(installed)
 const rust = collectRust(expectedSdk)
-const collected = [...npm, ...rust.entries]
+const vendored = ffmpegModuleNotices()
+const collected = [...npm, ...rust.entries, ...vendored]
 
 const { texts, notices } = finalizeNotices(collected)
 
@@ -335,15 +400,16 @@ const { texts, notices } = finalizeNotices(collected)
 // read at, and which candidate resolved carry the whole diagnostic value.
 const output = `// AUTO-GENERATED by scripts/generateThirdPartyNotices.ts — do not edit.
 //
-// Attribution for everything bundled into the app: the npm tree minus dev/optional entries, plus the
-// Rust crates the SDK wasm is built from. License terms are deduplicated across packages and the
-// copyright lines kept per package, so a rendered notice is that package's copyright followed by the
-// verbatim terms. An empty \`texts\` means no license file shipped with the package; its SPDX id and
-// repository are given instead rather than borrowing another package's copyright. More than one entry
-// means the declared license is a conjunction — every text applies.
+// Attribution for everything bundled into the app: the npm tree minus dev/optional entries, the Rust
+// crates the SDK wasm is built from, and the components vendored as built output. License terms are
+// deduplicated across packages and the copyright lines kept per package, so a rendered notice is that
+// package's copyright followed by the verbatim terms. An empty \`texts\` means no license file shipped
+// with the package; its SPDX id and repository are given instead rather than borrowing another package's
+// copyright. More than one entry means the declared license is a conjunction — every text applies.
 //
 // npm:  pnpm licenses list --json --prod --no-optional --filter @filen/web... (${String(npm.length)} name@version packages)
 // rust: filen-rs @ ${rust.ref} (${String(rust.crates)} crates)  [resolved via: ${rust.source}]
+// vendored: ${vendored.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${FFMPEG_MANIFEST})
 //
 // Cannot run in CI: needs a filen-rs checkout and the local cargo caches. Re-run after any SDK bump.
 
@@ -351,7 +417,7 @@ export type ThirdPartyNotice = {
 	name: string
 	version: string
 	license: string
-	ecosystem: "npm" | "rust"
+	ecosystem: "npm" | "rust" | "vendored"
 	copyright: string[]
 	repository: string | null
 	texts: number[]
@@ -373,6 +439,7 @@ console.log(
 		`third-party notices -> ${OUTPUT}`,
 		`  npm:            ${String(npm.length).padStart(4)}`,
 		`  rust:           ${String(rust.entries.length).padStart(4)}  (${rust.ref}, via ${rust.source})`,
+		`  vendored:       ${String(vendored.length).padStart(4)}`,
 		`  total:          ${String(notices.length)}`,
 		`  license texts:  ${String(texts.length)} unique (deduplicated)`,
 		`  with text:      ${String(withText)}`,

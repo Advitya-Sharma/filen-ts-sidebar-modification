@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { beforeAll, describe, expect, it } from "vitest"
 import { listInstalledNpm, type InstalledNpmPackage } from "@filen/shared/tooling"
 import {
@@ -9,6 +10,7 @@ import {
 	THIRD_PARTY_NOTICES_SDK_VERSION
 } from "@/features/settings/lib/thirdPartyNotices"
 import { noticeRepositoryHref } from "@/features/settings/components/advanced/thirdPartyNoticesDialog.logic"
+import ffmpegManifest from "@/vendor/ffmpeg-decoders/manifest.json"
 
 const { notices: THIRD_PARTY_NOTICES, texts: LICENSE_TEXTS } = thirdPartyNoticesPayload()
 
@@ -161,8 +163,51 @@ describe("third-party notices payload integrity", () => {
 		expect(new Set(keys).size).toBe(keys.length)
 	})
 
-	it("describes both ecosystems that ship", () => {
-		expect([...new Set(THIRD_PARTY_NOTICES.map(notice => notice.ecosystem))].sort()).toEqual(["npm", "rust"])
+	it("describes every source that ships", () => {
+		expect([...new Set(THIRD_PARTY_NOTICES.map(notice => notice.ecosystem))].sort()).toEqual(["npm", "rust", "vendored"])
+	})
+
+	it("describes the vendored FFmpeg build as its manifest records it", () => {
+		// The manifest is rewritten by every decoder build; a rebuild with another release or other flags
+		// that skips the generator fails here.
+		const ffmpeg = THIRD_PARTY_NOTICES.filter(notice => notice.ecosystem === "vendored" && notice.name === "FFmpeg")
+
+		expect(ffmpeg.map(notice => notice.version)).toEqual([ffmpegManifest.ffmpeg.tag.replace(/^n/, "")])
+
+		const [notice] = ffmpeg
+		const terms = notice === undefined ? [] : thirdPartyLicenseTexts(notice)
+		const build = terms.find(text => text.includes(ffmpegManifest.ffmpeg.sha256)) ?? ""
+
+		expect(notice?.license).toBe("LGPL-2.1-or-later")
+		expect(build).toContain(ffmpegManifest.ffmpeg.tag)
+		expect(build).toContain(`Configured with: ${ffmpegManifest.ffmpeg.configure.join(" ")}.`)
+		expect(build).toContain(`Emscripten ${ffmpegManifest.emcc}`)
+		expect(build).not.toMatch(/--enable-(gpl|nonfree)/)
+		expect(terms.some(text => text.includes("GNU LESSER GENERAL PUBLIC LICENSE") && text.includes("Version 2.1, February 1999"))).toBe(
+			true
+		)
+
+		// The corresponding source is pinned by content, never by a branch that moves on.
+		for (const [name, hash] of Object.entries(ffmpegManifest.sources)) {
+			expect(build).toContain(`packages/filen-web/scripts/codecs/${name} (SHA-256 ${hash})`)
+		}
+
+		expect(build).not.toContain("/tree/")
+	})
+
+	it("describes what Emscripten links into the decoders module, with the license files the build copied", () => {
+		const vendored = (name: string) => THIRD_PARTY_NOTICES.find(notice => notice.ecosystem === "vendored" && notice.name === name)
+		const emscripten = vendored("Emscripten")
+		const musl = vendored("musl")
+
+		expect(emscripten).toMatchObject({ version: ffmpegManifest.emcc, license: "MIT OR NCSA" })
+		expect(musl).toMatchObject({ version: ffmpegManifest.emscripten.musl, license: "MIT" })
+		expect(emscripten === undefined ? [] : thirdPartyLicenseTexts(emscripten)).toContain(
+			readFileSync(new URL("../vendor/ffmpeg-decoders/licenses/emscripten-LICENSE", import.meta.url), "utf8")
+		)
+		expect(musl === undefined ? [] : thirdPartyLicenseTexts(musl)).toContain(
+			readFileSync(new URL("../vendor/ffmpeg-decoders/licenses/musl-COPYRIGHT", import.meta.url), "utf8")
+		)
 	})
 
 	it("records a release tag as the crate source", () => {
