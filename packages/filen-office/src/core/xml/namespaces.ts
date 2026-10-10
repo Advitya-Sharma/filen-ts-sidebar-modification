@@ -36,6 +36,22 @@ function declaringElements(document: XmlDocument): number[] {
 	return found
 }
 
+function declarations(document: XmlDocument, node: number): Map<string, string> | null {
+	const spans = document.attributeSpans(node)
+	let bindings: Map<string, string> | null = null
+
+	for (let k = 0; k < spans.length; k += 4) {
+		const name = decodeUtf8(document.bytes, spans[k] ?? 0, spans[k + 1] ?? 0)
+
+		if (name !== "xmlns" && !name.startsWith("xmlns:")) continue
+
+		bindings ??= new Map()
+		bindings.set(name === "xmlns" ? "" : name.slice(6), decodeCharacterData(document.bytes, spans[k + 2] ?? 0, spans[k + 3] ?? 0, true))
+	}
+
+	return bindings
+}
+
 // Prefix resolution by in-scope xmlns declarations: generators pick their own prefixes ("ns0:"), and Strict
 // OOXML binds the usual ones to different URIs, so names are only ever compared as (URI, local name).
 // Each declaring element gets its complete in-scope map once. When declarations sit only on the root (the
@@ -52,26 +68,26 @@ export class Namespaces {
 	private readonly rootScope: ReadonlyMap<string, string>
 	private readonly uriByNameId: (string | null | undefined)[] = []
 
-	constructor(document: XmlDocument) {
+	// Declaring elements whose start tag could not be read (lenient mode only); their declarations are ignored.
+	readonly malformed: number[] = []
+
+	// `lenient`: a declaring element with a malformed start tag (duplicate or unquoted attributes, a bad
+	// reference) is recorded in `malformed` instead of throwing, for readers that degrade such content.
+	constructor(document: XmlDocument, options: { readonly lenient?: boolean } = {}) {
 		this.document = document
 
 		const root = document.documentElement()
 		let flat = true
 
 		for (const node of declaringElements(document)) {
-			const spans = document.attributeSpans(node)
 			let bindings: Map<string, string> | null = null
 
-			for (let k = 0; k < spans.length; k += 4) {
-				const name = decodeUtf8(document.bytes, spans[k] ?? 0, spans[k + 1] ?? 0)
+			try {
+				bindings = declarations(document, node)
+			} catch (error) {
+				if (options.lenient !== true) throw error
 
-				if (name !== "xmlns" && !name.startsWith("xmlns:")) continue
-
-				bindings ??= new Map()
-				bindings.set(
-					name === "xmlns" ? "" : name.slice(6),
-					decodeCharacterData(document.bytes, spans[k + 2] ?? 0, spans[k + 3] ?? 0, true)
-				)
+				this.malformed.push(node)
 			}
 
 			if (bindings === null) continue
