@@ -123,6 +123,20 @@ describe("assistant import restrictions", () => {
 		])
 	})
 
+	// The assistant's own no-restricted-syntax replaces the app-wide one, so it must carry the lazy-loading bans
+	// too: an eager glob would bundle a forbidden module with no import declaration for the import rules to see.
+	it("refuses import.meta.glob and lazy loading, which the import rules cannot see either", async () => {
+		await expect(
+			lintImports(
+				"src/features/assistant/tools/x.ts",
+				'const actions = import.meta.glob("@/features/drive/lib/actions.ts", { eager: true })\nconst Panel = lazy(() => Promise.resolve({ default: () => null }))'
+			)
+		).resolves.toEqual([
+			"import.meta.glob defaults to lazy imports; import statically.",
+			"No lazy-loaded components; import statically."
+		])
+	})
+
 	it("keeps relative imports out everywhere and leaves the rest of the app alone", async () => {
 		await expect(lintImports("src/features/assistant/tools/drive.ts", 'import "./x"')).resolves.toHaveLength(1)
 		await expect(
