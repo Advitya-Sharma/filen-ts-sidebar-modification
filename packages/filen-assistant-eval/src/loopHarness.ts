@@ -230,12 +230,19 @@ export class LlamaAssistantModel implements AssistantModel {
 			this.extractions++
 		}
 
-		// A request that may call nothing (toolChoice "none") keeps only its text, as an engine that parses no
-		// calls would hand back; the loop drops call syntax from it.
-		const calls = request.toolChoice === "none" ? [] : (response.functionCalls ?? [])
+		// A request that may call nothing (toolChoice "none") gets its calls back as text, as an engine that
+		// parses no calls hands them back; the loop drops call syntax from it.
+		const parsed = response.functionCalls ?? []
+		const none = request.toolChoice === "none"
+		const calls = none ? [] : parsed
+		const written = none
+			? parsed
+					.map(call => `<tool_call>\n${JSON.stringify({ name: call.functionName, arguments: call.params ?? {} })}\n</tool_call>`)
+					.join("\n")
+			: ""
 
 		return {
-			content: response.response,
+			content: written.length === 0 ? response.response : `${response.response}\n${written}`.trim(),
 			toolCalls: calls.map((call, index) => ({
 				id: `nl_${String(this.timings.generations)}_${String(index)}`,
 				name: call.functionName,

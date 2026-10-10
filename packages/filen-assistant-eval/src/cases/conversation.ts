@@ -42,7 +42,8 @@ const TWO_PAGES = LISTING_PAGE_ITEMS + 5
 const THREE_PAGES = LISTING_PAGE_ITEMS * 2 + 5
 
 // Several turns of one conversation: the answer to a clarifying question, a follow-up that only makes sense
-// with the turn before, and a request that names the item a previous turn listed.
+// with the turn before, a request that names the item a previous turn listed, and turns that move to another
+// tool group, to one whose tools the prompt shows for another family, or to no tools at all.
 export const CONVERSATION_CASES: readonly EvalCase[] = [
 	{
 		id: "conversation-draft-clarified-en",
@@ -92,6 +93,48 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		routes: ["files"],
 		calls: [{ tool: "list_directory", args: { offset: LISTING_PAGE_ITEMS } }],
 		answerIncludes: [lastScans(TWO_PAGES)],
+		expectsText: true
+	})),
+	{
+		id: "conversation-same-family-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: "What's in my Documents folder?",
+		followUps: ["Is Steuererklärung_2024.pdf in there shared with anyone?"],
+		routes: ["shared"],
+		calls: [{ tool: "get_sharing", args: { handle: "f10" } }],
+		answerIncludes: [["Anna", "anna.schmidt"]],
+		expectsText: true
+	},
+	...(
+		[
+			["en", "What's in my Documents folder?", "What did Anna write to me?"],
+			["ja", "Documentsフォルダには何が入っていますか？", "Annaは何と書いてきましたか？"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-cross-family-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["chats"],
+		calls: [{ tool: "read_chat", args: { handle: "c1" } }],
+		answerIncludes: [["Hetzner", "10"]],
+		expectsText: true
+	})),
+	...(
+		[
+			["en", "What's in my Documents folder?", "Thanks! How do you say thank you in Spanish?"],
+			["de", "Was liegt in meinem Ordner Documents?", "Danke! Was heißt danke auf Spanisch?"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-answer-after-tools-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["answer"],
+		answerIncludes: [["gracias"]],
 		expectsText: true
 	})),
 	{
