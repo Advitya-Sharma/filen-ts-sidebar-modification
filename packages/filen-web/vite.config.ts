@@ -1,4 +1,5 @@
-import { defineConfig, loadEnv, type Plugin } from "vite"
+import type { OutgoingHttpHeaders } from "node:http"
+import { defineConfig, loadEnv, type Connect, type Plugin } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { tanstackRouter } from "@tanstack/router-plugin/vite"
@@ -7,20 +8,30 @@ import { sdkArtifacts, COI_HEADERS, SDK_ARTIFACTS } from "./vite/sdk-artifacts-p
 import { assistantModelDev } from "./vite/assistant-model"
 import { isAllowedModelOrigin } from "./src/features/assistant/runtime/manifest"
 
-// preview.headers only reaches the responses the static handler serves with a body: its 304 Not
-// Modified goes out bare, and WebKit then refuses a worker script revalidated on reload for want of
-// COEP. Every response carries them, as the deployment must (README § Deployment).
-function previewHeaders(headers: Record<string, string>): Plugin {
-	return {
-		name: "filen:preview-headers",
-		configurePreviewServer(server) {
-			server.middlewares.use((_request, response, next) => {
-				for (const [name, value] of Object.entries(headers)) {
+// Vite's header options only reach the responses it serves with a body: the 304 Not Modified that
+// answers a revalidation goes out bare, from the preview's static handler and the dev server's module
+// transform alike, and WebKit then refuses a worker script revalidated on reload for want of COEP.
+// Every response carries them, as the deployment must (README § Deployment). Dev sends server.headers.
+function responseHeaders(preview: OutgoingHttpHeaders): Plugin {
+	const setAll =
+		(headers: OutgoingHttpHeaders): Connect.NextHandleFunction =>
+		(_request, response, next) => {
+			for (const [name, value] of Object.entries(headers)) {
+				if (value !== undefined) {
 					response.setHeader(name, value)
 				}
+			}
 
-				next()
-			})
+			next()
+		}
+
+	return {
+		name: "filen:response-headers",
+		configureServer(server) {
+			server.middlewares.use(setAll(server.config.server.headers))
+		},
+		configurePreviewServer(server) {
+			server.middlewares.use(setAll(preview))
 		}
 	}
 }
@@ -166,7 +177,7 @@ const previewHeaderSet = (mode: string): Record<string, string> => ({
 
 export default defineConfig(({ mode }) => ({
 	plugins: [
-		previewHeaders(previewHeaderSet(mode)),
+		responseHeaders(previewHeaderSet(mode)),
 		deployHeaders(previewHeaderSet(mode)),
 		arkTypeJitless(),
 		tanstackRouter({ target: "react", autoCodeSplitting: false }),
@@ -241,7 +252,7 @@ export default defineConfig(({ mode }) => ({
 			"Service-Worker-Allowed": "/"
 		}
 	},
-	// The preview headers are set by previewHeaders() (plugins above), not preview.headers.
+	// The preview headers are set by responseHeaders() (plugins above), not preview.headers.
 	// Each worker is one file too, for the same reason as the page's bundle.
 	worker: { format: "es", rolldownOptions: { output: { codeSplitting: false } } }
 }))
