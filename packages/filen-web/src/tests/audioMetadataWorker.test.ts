@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { readAudioMetadata, readAudioMetadataFromBlob, type AudioMetadataDeps } from "@/workers/audioMetadata"
+import { readAudioMetadata, type AudioMetadataDeps } from "@/workers/audioMetadata"
 import { BLOCK_BYTES } from "@/lib/media/blockSource"
 
 // Real music-metadata over small synthetic files, with the SDK's range read and thumbnailer faked.
@@ -172,24 +172,5 @@ describe("readAudioMetadata (ranged)", () => {
 
 		await expect(readAudioMetadata(BLOCK_BYTES, "audio/mpeg", reader, deps)).rejects.toBeDefined()
 		expect(deps.storeThumbnail).not.toHaveBeenCalled()
-	})
-})
-
-describe("readAudioMetadataFromBlob", () => {
-	it("parses bytes already in memory, typed or not", async () => {
-		const deps = makeDeps()
-
-		expect(await readAudioMetadataFromBlob(new Blob([flac() as Uint8Array<ArrayBuffer>], { type: "audio/flac" }), deps)).toMatchObject({
-			type: "parsed",
-			tags: { title: "Lake" }
-		})
-		expect(await readAudioMetadataFromBlob(new Blob([mp3(8192) as Uint8Array<ArrayBuffer>]), deps)).toMatchObject({
-			type: "parsed",
-			tags: { title: "Night Drive" }
-		})
-	})
-
-	it("settles unparseable for a blob no parser recognizes", async () => {
-		expect(await readAudioMetadataFromBlob(new Blob(["plain text, not audio"]), makeDeps())).toEqual({ type: "unparseable" })
 	})
 })

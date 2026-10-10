@@ -45,15 +45,12 @@ export interface TrackMetadataRequest {
 export interface TrackMetadataRequestOptions {
 	// The player's track: goes to the front of the queue.
 	priority?: boolean
-	// The file's bytes, when the page already holds them: parsed locally, with no download.
-	local?: Blob
 	// Parse again although a record exists: its cover thumbnail left the cache.
 	refresh?: boolean
 }
 
 export interface TrackMetadataDeps extends ObjectUrlFns {
 	readRemote: (track: QueueTrack, token: string) => Promise<AudioMetadataResult>
-	readLocal: (blob: Blob, uuid: string, token: string) => Promise<AudioMetadataResult>
 	cancelRead: (token: string) => void
 	readThumbnail: (uuid: string) => Promise<Blob | null>
 	isOnline: () => boolean
@@ -111,7 +108,7 @@ export class TrackMetadataService {
 
 		if (
 			(this.failures.get(track.uuid) ?? 0) >= FAILURE_LIMIT ||
-			(options.local === undefined && !this.deps.isOnline()) ||
+			!this.deps.isOnline() ||
 			(options.refresh === true && this.refreshed.has(track.uuid))
 		) {
 			return { promise: Promise.resolve(UNAVAILABLE), cancel: () => undefined }
@@ -191,10 +188,7 @@ export class TrackMetadataService {
 		this.readTokens.add(token)
 
 		try {
-			result =
-				options.local !== undefined
-					? await this.deps.readLocal(options.local, track.uuid, token)
-					: await this.deps.readRemote(track, token)
+			result = await this.deps.readRemote(track, token)
 		} catch (error) {
 			if (epoch === this.epoch) {
 				log.warn("audio", "track metadata read failed", error)
@@ -294,10 +288,9 @@ export class TrackMetadataService {
 	}
 
 	// The thumbnail the player hands to its own cover cache: from the thumbnail cache when the track has
-	// been read before (no network), otherwise from a priority read of the track itself. `local` is the
-	// file's bytes when the player already holds them, read in place of a download. null when the track
+	// been read before (no network), otherwise from a priority read of the track itself. null when the track
 	// could not be read this time.
-	public async playbackCover(track: QueueTrack, local?: Blob): Promise<{ cover: Blob | null } | null> {
+	public async playbackCover(track: QueueTrack): Promise<{ cover: Blob | null } | null> {
 		await hydrateTrackTags()
 
 		const known = getTrackTags(track.uuid)
@@ -316,8 +309,7 @@ export class TrackMetadataService {
 
 		const outcome = await this.request(track, {
 			priority: true,
-			refresh: known !== undefined,
-			...(local !== undefined ? { local } : {})
+			refresh: known !== undefined
 		}).promise
 
 		return outcome.type === "ready" ? { cover: outcome.thumbnail } : null
@@ -352,10 +344,9 @@ function firstInLine(): number {
 }
 
 export const trackMetadata = new TrackMetadataService({
-	// Downloads share the media features' range-read cap; a local parse reads nothing and skips it.
+	// Downloads share the media features' range-read cap.
 	readRemote: (track, token) =>
 		rangeReads.run<AudioMetadataResult>(firstInLine, () => sdkApi.readAudioMetadata(track.file, track.uuid, track.mime, token)),
-	readLocal: (blob, uuid, token) => sdkApi.readAudioMetadataFromBlob(blob, uuid, token),
 	cancelRead: token => {
 		void sdkApi.cancelPreviewDownload(token)
 	},

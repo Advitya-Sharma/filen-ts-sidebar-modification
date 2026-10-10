@@ -17,7 +17,7 @@ const audioMediaSession = mediaSessionOwners.create("audio", {
 
 audioMediaSession.acquire()
 
-// The app-lifetime audio engine singleton, wired with the real DOM element adapter + SW/blob source
+// The app-lifetime audio engine singleton, wired with the real DOM element adapter + streaming source
 // resolver + OS Media Session bridge + one-track-ahead prefetch + the track-metadata service's covers. One instance
 // owns playback for the whole session — same pattern as sdkApi. Import this from UI/handoff code; import
 // the class directly from engine.ts only in tests (with injected fakes). The publisher (engine → OS
@@ -28,7 +28,7 @@ export const audioEngine = new AudioEngine({
 	createPrefetchElement: createDomPrefetchAdapter,
 	resolveSource: resolveTrackSource,
 	mediaSession: createMediaSessionPublisher(audioMediaSession),
-	resolveCover: (track, source) => trackMetadata.playbackCover(track, source.kind === "blob" ? source.blob : undefined),
+	resolveCover: track => trackMetadata.playbackCover(track),
 	onFormatFailure: notifyFormatFailure
 })
 
@@ -63,7 +63,7 @@ bindMediaSessionActions(
 	audioMediaSession
 )
 
-// Logout teardown (wired into performLogout): stop playback, revoke the live blob URL, tear down the
+// Logout teardown (wired into performLogout): stop playback, release the live source, tear down the
 // element, clear the queue, and abort every track-metadata read with its cover URLs and tags in memory.
 // Nothing leaks across sessions.
 export function disposeAudioEngine(): void {

@@ -559,6 +559,8 @@ function audioTrack(entry: Uint8Array, { header, lang, name, quickTimeLayout }: 
 	return {
 		kind: "audio",
 		enabled: header.enabled,
+		// ALAC's magic cookie: the `alac` box inside the entry of the same name (version, flags, the config).
+		...(codec === "alac" ? { config: child("alac") } : {}),
 		audio: {
 			id: header.id,
 			codec,

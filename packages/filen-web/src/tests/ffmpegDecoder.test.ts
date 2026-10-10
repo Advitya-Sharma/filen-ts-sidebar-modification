@@ -7,8 +7,8 @@ import WORKER_SOURCE from "@/vendor/ffmpeg-decoders/decoders.worker.js?raw"
 import {
 	DecoderWorker,
 	decodedChannelMask,
-	FfmpegAudioDecoder,
 	ffmpegAudioDecoder,
+	ffmpegDecodedCodecs,
 	type DecodedFrame,
 	type DecoderRequest
 } from "@/workers/remux/ffmpegDecoder"
@@ -65,7 +65,7 @@ function harness() {
 
 		return worker as unknown as Worker
 	})
-	const Decoder = ffmpegAudioDecoder(client)
+	const Decoder = ffmpegAudioDecoder(client, ffmpegDecodedCodecs("webkit"))
 	const samples: AudioSample[] = []
 	const errors: Error[] = []
 	// Mediabunny's own wiring: it constructs the registered class and assigns these before init().
@@ -118,17 +118,18 @@ function frame(overrides: Partial<DecodedFrame> = {}): DecodedFrame {
 }
 
 describe("FfmpegAudioDecoder", () => {
-	it("takes AC-3, E-AC-3 and DTS, and leaves every other codec to the browser", () => {
-		expect(
-			["ac3", "eac3", "dts"].every(codec =>
-				FfmpegAudioDecoder.supports(codec as "ac3", { codec, sampleRate: 48_000, numberOfChannels: 2 })
+	it("takes AC-3, E-AC-3 and DTS everywhere, FLAC only in WebKit, and leaves every other codec to the browser", () => {
+		const supported = (engine: "chromium" | "firefox" | "webkit") =>
+			["ac3", "eac3", "dts", "flac", "aac", "opus", "mp3", "vorbis"].filter(codec =>
+				ffmpegAudioDecoder(new DecoderWorker(() => new FakeWorker() as unknown as Worker), ffmpegDecodedCodecs(engine)).supports(
+					codec as "aac",
+					{ codec, sampleRate: 48_000, numberOfChannels: 2 }
+				)
 			)
-		).toBe(true)
-		expect(
-			["aac", "opus", "flac", "mp3", "vorbis"].some(codec =>
-				FfmpegAudioDecoder.supports(codec as "aac", { codec, sampleRate: 48_000, numberOfChannels: 2 })
-			)
-		).toBe(false)
+
+		expect(supported("chromium")).toEqual(["ac3", "eac3", "dts"])
+		expect(supported("firefox")).toEqual(["ac3", "eac3", "dts"])
+		expect(supported("webkit")).toEqual(["ac3", "eac3", "dts", "flac"])
 	})
 
 	it("opens a decoder for the track's codec in one shared worker", async () => {
@@ -138,6 +139,39 @@ describe("FfmpegAudioDecoder", () => {
 
 		expect(h.workers).toHaveLength(1)
 		expect(h.worker().last()).toMatchObject({ type: "open", codec: "ac3" })
+	})
+
+	it("hands the decoder the track's configuration, FLAC's STREAMINFO among it", async () => {
+		const h = harness()
+		const description = Uint8Array.from([0x66, 0x4c, 0x61, 0x43, 0, 0, 0, 34])
+		const decoder = Object.assign(h.makeDecoder("flac"), {
+			config: { codec: "flac", sampleRate: 44_100, numberOfChannels: 2, description }
+		})
+
+		await opened(h, 7, decoder)
+
+		const { message, transfer } = h.worker().posted.at(-1) ?? { message: null, transfer: [] }
+
+		expect(message).toMatchObject({ type: "open", codec: "flac" })
+		expect(message?.type === "open" && message.extradata !== undefined ? new Uint8Array(message.extradata) : null).toEqual(description)
+		expect(transfer).toHaveLength(1)
+		// The demuxer keeps its own copy.
+		expect(description.byteLength).toBe(8)
+	})
+
+	it("opens with no configuration for an empty one", async () => {
+		const h = harness()
+		const decoder = Object.assign(h.makeDecoder("ac3"), {
+			config: { codec: "ac3", sampleRate: 48_000, numberOfChannels: 6, description: new Uint8Array(0) }
+		})
+
+		await opened(h, 7, decoder)
+
+		const { message, transfer } = h.worker().posted.at(-1) ?? { message: null, transfer: [] }
+
+		expect(message).toMatchObject({ type: "open", codec: "ac3" })
+		expect(message).not.toHaveProperty("extradata")
+		expect(transfer).toHaveLength(0)
 	})
 
 	it("sends a transferred copy of each packet with its microsecond timestamp, and emits what comes back", async () => {
@@ -391,6 +425,6 @@ describe("vendored FFmpeg decoders module", () => {
 	it("is built from a licence-compatible FFmpeg configuration", () => {
 		expect(manifest.ffmpeg.configure).not.toContain("--enable-gpl")
 		expect(manifest.ffmpeg.configure).not.toContain("--enable-nonfree")
-		expect(manifest.ffmpeg.configure).toContain("--enable-decoder=ac3,eac3,dca")
+		expect(manifest.ffmpeg.configure).toContain("--enable-decoder=ac3,eac3,dca,truehd,mlp,alac,flac")
 	})
 })

@@ -2,23 +2,18 @@ import { useEffect, useRef, useState } from "react"
 import { cn, driveItemName } from "@filen/shared"
 import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
 import { narrowToAnyFile } from "@/features/drive/lib/download"
+import { itemTypeExtension } from "@/features/drive/lib/preview.logic"
 import { BlockSource, urlReadRange } from "@/lib/media/blockSource"
 import { reportMediaFailure, type MediaFailureKind } from "@/lib/media/mediaFailure"
-import { openRemuxSession, type RemuxSession } from "@/lib/media/mseController"
-import { linkedRemuxSource, remuxSource } from "@/lib/media/playback/sources"
-import type { RemuxSource } from "@/lib/media/playback/remuxSession"
+import { audioDemotions, audioRoute } from "@/lib/media/audioRoute.logic"
+import { audioMediaSource, openDecodedAudioStream } from "@/lib/media/playback/audioStream"
+import { isAudioUnsupported } from "@/lib/media/remuxTypes"
 import { mediaControlsList, usePreviewAccessMode, usePreviewByteSource, usePreviewDownloadable } from "@/features/preview/lib/accessMode"
 import { allowedMediaContentType } from "@/features/preview/lib/mediaType"
-import { isMediaStreamAvailable } from "@/features/preview/lib/previewStream"
+import { holdPreviewStreamAlive, isMediaStreamAvailable } from "@/features/preview/lib/previewStream"
 import { usePreviewStreamUrl } from "@/features/preview/hooks/usePreviewStreamUrl"
 import { VideoPlayer } from "@/features/preview/components/videoPlayer"
-import {
-	MediaCannotStream,
-	MediaFailureState,
-	MediaFormatFailure,
-	MediaPlaybackFailure
-} from "@/features/preview/components/mediaFailureState"
-import { mseFailureKind, mseOpenFailureKind } from "@/features/preview/lib/previewPlayback.logic"
+import { MediaCannotStream, MediaFormatFailure, MediaPlaybackFailure } from "@/features/preview/components/mediaFailureState"
 import { PreviewLoading } from "@/features/preview/components/previewErrorState"
 import { useReleaseOnUnmount } from "@/lib/media/useReleaseOnUnmount"
 
@@ -82,27 +77,29 @@ interface AudioResume {
 
 const FROM_START: AudioResume = { time: 0, play: false }
 
-// Streamed through the service worker's range route, as a signed-in page with a worker plays it. A
-// stream that cannot be registered or breaks hands over to MediaSource (onStreamFailed); a format the
-// browser cannot decode names its codecs.
+// The file as it is, through the service worker's range route, as a signed-in page with a worker plays it. A
+// stream that cannot be registered or breaks hands over to MediaSource (onStreamFailed); a format the browser
+// cannot decode hands over to the decoded stream (onFormatFailed).
 function StreamedAudio({
 	item,
 	alt,
 	contentType,
-	onStreamFailed
+	onStreamFailed,
+	onFormatFailed
 }: {
 	item: DriveItem
 	alt: string
 	contentType: string
-	// Where the stream stood, so MediaSource goes on from there.
+	// Where the stream stood, so the next route goes on from there.
 	onStreamFailed: (resume: AudioResume) => void
+	onFormatFailed: (resume: AudioResume) => void
 }) {
 	const result = usePreviewStreamUrl(item, driveItemName(item), contentType)
 	const [audio, setAudio] = useState<HTMLAudioElement | null>(null)
-	const [formatFailed, setFormatFailed] = useState(false)
-	const [source, setSource] = useState<BlockSource | null>(null)
 
 	useReleaseOnUnmount(audio)
+	// An idle worker loses the registration, and a paused element's next range request with it.
+	useEffect(() => holdPreviewStreamAlive(), [])
 
 	useEffect(() => {
 		if (result.status === "error") {
@@ -119,31 +116,113 @@ function StreamedAudio({
 			<PreviewAudioElement
 				alt={alt}
 				src={result.url}
-				hidden={formatFailed}
 				onElement={setAudio}
 				onError={element => {
 					// Reads the file's first block to tell a format failure from a broken stream.
 					const blocks = new BlockSource(Number(asDirectoryOrFile(item).data.size), urlReadRange(result.url))
+					const resume = { time: element.currentTime, play: !element.paused }
 
 					reportMediaFailure(element, blocks, kind => {
 						if (kind === "other") {
-							onStreamFailed({ time: element.currentTime, play: !element.paused })
+							onStreamFailed(resume)
 						} else {
-							setSource(blocks)
-							setFormatFailed(true)
+							onFormatFailed(resume)
 						}
 					})
 				}}
 			/>
-			{formatFailed && audio !== null && source !== null ? (
-				<div className="absolute inset-0">
-					<MediaFailureState
-						kind="format"
-						media={audio}
-						source={source}
-					/>
-				</div>
-			) : null}
+		</div>
+	)
+}
+
+// The file's audio decoded in the remux worker into a WAV stream the service worker serves, for what the
+// browser cannot play as it is. A stream the service worker cannot take, or that breaks, hands over to
+// MediaSource; a file nothing decodes shows the format failure.
+function DecodedAudio({
+	item,
+	alt,
+	resume,
+	onStreamFailed
+}: {
+	item: DriveItem
+	alt: string
+	resume: AudioResume
+	onStreamFailed: (resume: AudioResume) => void
+}) {
+	const access = usePreviewAccessMode()
+	const [file] = useState(() => narrowToAnyFile(item))
+	const [state, setState] = useState<{ status: "pending" } | { status: "ready"; url: string } | { status: "unsupported" }>({
+		status: "pending"
+	})
+	const [audio, setAudio] = useState<HTMLAudioElement | null>(null)
+	const resumed = useRef(false)
+
+	useReleaseOnUnmount(audio)
+	useEffect(() => holdPreviewStreamAlive(), [])
+
+	useEffect(() => {
+		let live = true
+		let release: (() => void) | null = null
+
+		void openDecodedAudioStream({ file, access }).then(
+			stream => {
+				if (live) {
+					release = () => {
+						stream.release()
+					}
+					setState({ status: "ready", url: stream.url })
+				} else {
+					stream.release()
+				}
+			},
+			(error: unknown) => {
+				if (!live) {
+					return
+				}
+
+				if (isAudioUnsupported(error)) {
+					setState({ status: "unsupported" })
+				} else {
+					onStreamFailed(resume)
+				}
+			}
+		)
+
+		return () => {
+			live = false
+			release?.()
+		}
+	}, [file, access, resume, onStreamFailed])
+
+	if (state.status === "unsupported") {
+		return <MediaFormatFailure codecs={[]} />
+	}
+
+	if (state.status === "pending") {
+		return <PreviewLoading />
+	}
+
+	return (
+		<div className="relative flex size-full items-center justify-center px-6">
+			<PreviewAudioElement
+				alt={alt}
+				src={state.url}
+				onElement={element => {
+					setAudio(element)
+
+					if (element !== null && !resumed.current && (resume.time > 0 || resume.play)) {
+						resumed.current = true
+						element.currentTime = resume.time
+
+						if (resume.play) {
+							void element.play().catch(() => undefined)
+						}
+					}
+				}}
+				onError={element => {
+					onStreamFailed({ time: element.currentTime, play: !element.paused })
+				}}
+			/>
 		</div>
 	)
 }
@@ -158,7 +237,6 @@ function MediaSourceAudio({ item, alt, resume: initialResume }: { item: DriveIte
 	// Where a retry goes on from: the start, then wherever the element last really was.
 	const [resume, setResume] = useState(initialResume)
 	const lastPosition = useRef<AudioResume>(initialResume)
-	const uuid = item.data.uuid
 	const [file] = useState(() => narrowToAnyFile(item))
 
 	useEffect(() => {
@@ -166,70 +244,27 @@ function MediaSourceAudio({ item, alt, resume: initialResume }: { item: DriveIte
 			return
 		}
 
-		const lifetime = new AbortController()
-		// A function rather than a read: it changes across the awaits below.
-		const disposed = (): boolean => lifetime.signal.aborted
-		let session: RemuxSession | null = null
-		let source: RemuxSource | null = null
-		let portOpen = false
-		const fail = (kind: MediaFailureKind): void => {
-			if (!disposed()) {
-				setFailure(kind)
-			}
-		}
+		const media = audioMediaSource({ file, access })
+		let failed = false
 
-		void (async () => {
-			try {
-				const opening = access === "anon" ? linkedRemuxSource(file) : remuxSource(file)
-
-				source = opening
-
-				const port = await opening.openPort()
-
-				portOpen = true
-
-				if (disposed()) {
-					port.close()
-					opening.close()
-
-					return
+		void media
+			.attach(audio, {
+				startTime: resume.time,
+				onFailure: kind => {
+					failed = true
+					setFailure(kind)
 				}
-
-				const opened = await openRemuxSession({
-					port,
-					size: Number(file.size),
-					startTime: resume.time,
-					onFailure: reason => {
-						fail(mseFailureKind(reason))
-					}
-				})
-
-				if (disposed()) {
-					opened.dispose()
-
-					return
+			})
+			.then(() => {
+				if (resume.play && !failed) {
+					void audio.play().catch(() => undefined)
 				}
-
-				session = opened
-				await opened.attach(audio)
-
-				if (resume.play && !disposed()) {
-					await audio.play().catch(() => undefined)
-				}
-			} catch (error) {
-				fail(mseOpenFailureKind(error))
-			}
-		})()
+			})
 
 		return () => {
-			lifetime.abort()
-			session?.dispose()
-
-			if (portOpen) {
-				source?.close()
-			}
+			media.dispose()
 		}
-	}, [audio, file, uuid, access, resume])
+	}, [audio, file, access, resume])
 
 	return (
 		<div className="relative flex size-full items-center justify-center px-6">
@@ -265,22 +300,51 @@ function hasMediaSource(): boolean {
 	return typeof MediaSource !== "undefined" || "ManagedMediaSource" in globalThis
 }
 
-// The service worker's route first, for any file it can serve (a public link's too), so what the browser
-// plays natively (AIFF, CAF, ALAC in Safari; any audio where there is no MediaSource) plays as it is; a
-// broken or missing route moves to MediaSource where there is one, else says the browser cannot stream it.
+// Which of the three an audio preview plays through, and from where.
+type AudioStage = { kind: "stream" } | { kind: "decoded"; resume: AudioResume } | { kind: "mediaSource"; resume: AudioResume }
+
+// With a service worker: what the browser plays natively (AIFF, CAF, ALAC in Safari) plays as it is through
+// its route, anything else (or anything that turns out not to play) as a decoded WAV stream through the same
+// route. A broken or missing route moves to MediaSource where there is one, else says the browser cannot
+// stream it.
 function PreviewAudio({ item, alt }: { item: DriveItem; alt: string }) {
 	const contentType = allowedMediaContentType(item)
-	const [resume, setResume] = useState<AudioResume | null>(() => (contentType !== null && isMediaStreamAvailable() ? null : FROM_START))
+	const uuid = item.data.uuid
+	const [stage, setStage] = useState<AudioStage>(() => {
+		if (!isMediaStreamAvailable()) {
+			return { kind: "mediaSource", resume: FROM_START }
+		}
 
-	if (resume === null && contentType !== null) {
+		return audioRoute({ extension: itemTypeExtension(item), contentType, demoted: audioDemotions.has(uuid) }) === "direct"
+			? { kind: "stream" }
+			: { kind: "decoded", resume: FROM_START }
+	})
+	const toMediaSource = (resume: AudioResume): void => {
+		setStage(previous => (previous.kind === "mediaSource" ? previous : { kind: "mediaSource", resume }))
+	}
+
+	if (stage.kind === "stream" && contentType !== null) {
 		return (
 			<StreamedAudio
 				item={item}
 				alt={alt}
 				contentType={contentType}
-				onStreamFailed={next => {
-					setResume(previous => previous ?? next)
+				onStreamFailed={toMediaSource}
+				onFormatFailed={resume => {
+					audioDemotions.add(uuid)
+					setStage({ kind: "decoded", resume })
 				}}
+			/>
+		)
+	}
+
+	if (stage.kind === "decoded") {
+		return (
+			<DecodedAudio
+				item={item}
+				alt={alt}
+				resume={stage.resume}
+				onStreamFailed={toMediaSource}
 			/>
 		)
 	}
@@ -293,7 +357,7 @@ function PreviewAudio({ item, alt }: { item: DriveItem; alt: string }) {
 		<MediaSourceAudio
 			item={item}
 			alt={alt}
-			resume={resume ?? FROM_START}
+			resume={stage.kind === "mediaSource" ? stage.resume : FROM_START}
 		/>
 	)
 }

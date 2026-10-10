@@ -167,8 +167,14 @@ describe("previewType — extension category map", () => {
 		expect(previewType(fileNamed("recording", { mime: "video/mp2t", size: 4_000n }))).toBe("video")
 	})
 
-	it.each(["mp3", "m4a", "aac", "wav", "ogg", "flac", "opus"])("%s -> audio", ext => {
+	it.each(["mp3", "m4a", "m4b", "aac", "wav", "ogg", "flac", "opus", "mka", "ac3", "eac3", "ec3", "dts"])("%s -> audio", ext => {
 		expect(previewType(fileNamed(`track.${ext}`))).toBe("audio")
+	})
+
+	it("reads an audiobook's type and a Matroska file of audio as audio", () => {
+		expect(previewType(fileNamed("book", { mime: "audio/x-m4b" }))).toBe("audio")
+		expect(previewType(fileNamed("concert.mkv", { mime: "audio/x-matroska" }))).toBe("audio")
+		expect(previewType(fileNamed("concert.mkv", { mime: "video/x-matroska" }))).toBe("video")
 	})
 
 	it("pdf -> pdf", () => {

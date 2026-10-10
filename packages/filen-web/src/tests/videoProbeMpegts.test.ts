@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest"
 import { BlockSource, bytesReadRange, type ReadRange } from "@/lib/media/blockSource"
-import { readContainerTracks } from "@/features/preview/lib/containerTracks"
 import { CARD_BLOCK_READS, initialBlockReads, probeVideo, walkContainer } from "@/lib/media/probe/probe"
 import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
 import {
@@ -313,9 +312,16 @@ describe("MPEG-TS probe", () => {
 		expect((await probe(shifted)).record).toBeNull()
 	})
 
-	it("names the tracks for the preview's codec check", async () => {
+	it("names the tracks within the card's read budget", async () => {
 		const data = Uint8Array.from(h264Aac())
-		const tracks = await readContainerTracks(new BlockSource(data.length, bytesReadRange(data), { maxBlockReads: CARD_BLOCK_READS }))
+		const parsed = await walkContainer(new BlockSource(data.length, bytesReadRange(data), { maxBlockReads: CARD_BLOCK_READS }), "card")
+		const tracks = parsed?.tracks.map(track =>
+			track.kind === "video"
+				? { kind: "video", codec: track.video.codec }
+				: track.kind === "audio"
+					? { kind: "audio", codec: track.audio.codec }
+					: { kind: track.kind }
+		)
 
 		expect(tracks).toEqual([
 			{ kind: "video", codec: "h264" },

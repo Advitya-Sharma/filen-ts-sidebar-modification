@@ -43,7 +43,20 @@ export async function previewStreamUrl(
 	const bucket = previewBucket(contentType, options.transient === true)
 
 	if (options.access === "anon") {
-		await registerPortPreview(file, id, { name, size: Number(file.size), contentType, ...bucket })
+		const token = crypto.randomUUID()
+		const meta = { name, size: Number(file.size), contentType, ...bucket }
+
+		await registerPortPreview(
+			id,
+			async port => {
+				await sdkApi.openLinkedRangePortAnon(Comlink.transfer(port, [port]), file, token)
+
+				return meta
+			},
+			() => {
+				void sdkApi.cancelPreviewDownload(token)
+			}
+		)
 	} else {
 		await registerWithSw(SW_MSG_REGISTER_PREVIEW, {
 			id,
@@ -58,13 +71,42 @@ export async function previewStreamUrl(
 	return `${SW_DOWNLOAD_PREFIX}${id}`
 }
 
+// What a port-backed registration is served as.
+export interface PortStreamMeta {
+	name: string
+	size: number
+	contentType: string
+}
+
+// Registers a stream whose bytes come from a range port the page has served (lib/media/rangePort.ts) under
+// `id` and returns its URL: `open` serves the port it is handed and says what it serves, `cancel` stops
+// serving it (on release, or when the id registers again). Same contract as a public link's previewStreamUrl,
+// which is one of these.
+export async function registerPortStream(
+	id: string,
+	open: (port: MessagePort) => Promise<PortStreamMeta>,
+	cancel: () => void
+): Promise<string> {
+	await registerPortPreview(
+		id,
+		async port => {
+			const meta = await open(port)
+
+			return { ...meta, ...previewBucket(meta.contentType, false) }
+		},
+		cancel
+	)
+
+	return `${SW_DOWNLOAD_PREFIX}${id}`
+}
+
 // Which SDK client reads the file: the session's, or the unauthenticated one for a public link's.
 export type PreviewAccess = "authed" | "anon"
 
-// The page's side of each port-backed registration: the SDK worker's preview token (cancelled on release or
-// when the id registers again), its generation, the worker it went to, and its outcome.
+// The page's side of each port-backed registration: how to stop serving its port (on release, or when the id
+// registers again), its generation, the worker it went to, and its outcome.
 interface PortRegistration {
-	token: string
+	cancel: () => void
 	generation: number
 	target: ServiceWorker
 	done: Promise<undefined>
@@ -74,21 +116,21 @@ const portRegistrations = new Map<string, PortRegistration>()
 // Ids are this page's own, so a page-wide counter orders every registration of one id.
 let lastGeneration = 0
 
-function cancelPortToken(id: string): PortRegistration | undefined {
+function cancelPortRegistration(id: string): PortRegistration | undefined {
 	const registration = portRegistrations.get(id)
 
 	if (registration !== undefined) {
 		portRegistrations.delete(id)
-		void sdkApi.cancelPreviewDownload(registration.token)
+		registration.cancel()
 	}
 
 	return registration
 }
 
 async function registerPortPreview(
-	file: AnyFile,
 	id: string,
-	meta: { name: string; size: number; contentType: string; bucket?: string }
+	open: (port: MessagePort) => Promise<PortStreamMeta & { bucket?: string }>,
+	cancel: () => void
 ): Promise<void> {
 	const current = await controllerIsCurrent()
 	// The worker the URL is fetched through.
@@ -98,22 +140,21 @@ async function registerPortPreview(
 		throw new Error("the service worker cannot serve this preview")
 	}
 
-	const token = crypto.randomUUID()
 	const outcome = Promise.withResolvers<undefined>()
-	const registration: PortRegistration = { token, generation: ++lastGeneration, target, done: outcome.promise }
+	const registration: PortRegistration = { cancel, generation: ++lastGeneration, target, done: outcome.promise }
 	const { port1, port2 } = new MessageChannel()
 
 	// Only ever awaited through a registration that this one overtook.
 	outcome.promise.catch(() => undefined)
-	cancelPortToken(id)
+	cancelPortRegistration(id)
 	portRegistrations.set(id, registration)
 
 	let failure: Error | null = null
 
 	try {
-		await sdkApi.openLinkedRangePortAnon(Comlink.transfer(port1, [port1]), file, token)
+		const meta = await open(port1)
 
-		// Released or overtaken meanwhile, which cancelled the token: the worker would only refuse it.
+		// Released or overtaken meanwhile, which cancelled it: the worker would only refuse it.
 		if (portRegistrations.get(id) === registration) {
 			await sendToSw(target, SW_MSG_REGISTER_PORT_PREVIEW, { id, ...meta, generation: registration.generation, port: port2 }, [port2])
 		} else {
@@ -121,7 +162,7 @@ async function registerPortPreview(
 		}
 	} catch (e) {
 		failure = e instanceof Error ? e : new Error(String(e))
-		void sdkApi.cancelPreviewDownload(token)
+		cancel()
 		port2.close()
 	}
 
@@ -169,12 +210,12 @@ export function holdPreviewStreamAlive(): () => void {
 // comes), so the worker drops the entry and its key material at once. Fire-and-forget and idempotent: a
 // worker that has restarted since holds nothing to drop, an older one ignores the message, and a second call
 // finds nothing left. A port-backed registration is released whole: the worker's entry (which closes its
-// port once no response reads from it), and the SDK worker's side through its token, which shuts the port
-// down from there and frees its UnauthClient even if the message never lands; both sides' Web Locks go with
-// the port. A registration still on its way is refused when it lands.
+// port once no response reads from it), and the serving side through its cancel (a public link's SDK worker
+// token, which shuts the port down from there and frees its UnauthClient even if the message never lands);
+// both sides' Web Locks go with the port. A registration still on its way is refused when it lands.
 export function releasePreviewStream(id: string): void {
 	const controller = "serviceWorker" in navigator ? navigator.serviceWorker.controller : null
-	const registration = cancelPortToken(id)
+	const registration = cancelPortRegistration(id)
 	const message =
 		registration === undefined
 			? { type: SW_MSG_RELEASE_PREVIEW, id }

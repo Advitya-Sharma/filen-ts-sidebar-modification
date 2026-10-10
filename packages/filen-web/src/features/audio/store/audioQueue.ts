@@ -13,15 +13,15 @@ export const LOOP_MODES = ["off", "all", "one"] as const
 
 export type LoopMode = (typeof LOOP_MODES)[number]
 
-// Four playback phases the store surfaces to the UI. "loading" spans source resolution (SW-stream
-// registration or the whole-buffer blob download) up to the element actually starting; a settled
+// Four playback phases the store surfaces to the UI. "loading" spans source resolution (a stream's
+// registration, or a decode's start) up to the element actually starting; a settled
 // end-of-queue with no loop lands on "paused" (or "idle" when the queue is empty).
 export type AudioPlaybackStatus = "idle" | "loading" | "playing" | "paused"
 
 // Everything needed to build a playable source for one track without re-listing the directory. `file`
-// is the runtime SDK handle the bytes layer streams/downloads from; `contentType` is the allowlisted
-// inline mime the SW route accepts, or null when the file can only play through the whole-buffer blob
-// fallback (mediaType.ts's allowedMediaContentType semantics). The queue is never persisted, so holding
+// is the runtime SDK handle the bytes layer streams from; `contentType` is the allowlisted inline mime the
+// SW route serves the file as it is with, or null when it has none and plays decoded
+// (mediaType.ts's allowedMediaContentType semantics). The queue is never persisted, so holding
 // the live `AnyFile` here is fine — it never has to survive a reload.
 export interface QueueTrack {
 	uuid: string

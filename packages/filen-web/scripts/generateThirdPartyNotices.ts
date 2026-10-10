@@ -347,7 +347,7 @@ function ffmpegModuleNotices(): Collected[] {
 				repository: "https://git.ffmpeg.org/ffmpeg.git",
 				terms: [
 					[
-						`FFmpeg's AC-3, E-AC-3 and DTS decoders (libavcodec, libavutil), built to WebAssembly from the FFmpeg ${tag} release and licensed under the GNU Lesser General Public License, version 2.1 or later.`,
+						`FFmpeg's AC-3, E-AC-3, DTS, TrueHD/MLP, ALAC and FLAC decoders (libavcodec, libavutil), built to WebAssembly from the FFmpeg ${tag} release and licensed under the GNU Lesser General Public License, version 2.1 or later.`,
 						`Source: ${stringField(ffmpeg, "tarball", FFMPEG_MANIFEST)} (SHA-256 ${stringField(ffmpeg, "sha256", FFMPEG_MANIFEST)}).`,
 						`Configured with: ${stringsField(ffmpeg, "configure", FFMPEG_MANIFEST).join(" ")}.`,
 						`Built with Emscripten ${emcc}. The complete corresponding source of the module, in the filen-ts repository (https://github.com/FilenCloudDienste/filen-ts): ${sourceList}.`

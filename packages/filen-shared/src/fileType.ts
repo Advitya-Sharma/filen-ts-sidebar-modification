@@ -60,6 +60,7 @@ const MIME_TYPES: ReadonlyMap<string, string> = new Map([
 	["audio/mp3", "mp3"],
 	["audio/mp4", "m4a"],
 	["audio/x-m4a", "m4a"],
+	["audio/x-m4b", "m4b"],
 	["audio/aac", "aac"],
 	["audio/wav", "wav"],
 	["audio/wave", "wav"],

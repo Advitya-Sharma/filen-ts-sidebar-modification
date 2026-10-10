@@ -1,9 +1,8 @@
 import { deflateSync } from "node:zlib"
 import { describe, expect, it, vi } from "vitest"
 import { BLOCK_BYTES, BlockSource, OutOfFileReadError, type ReadRange } from "@/lib/media/blockSource"
-import { readContainerTracks } from "@/features/preview/lib/containerTracks"
 import { inflateCapped, parseElementHeader } from "@/lib/media/probe/ebml"
-import { initialBlockReads, probeVideo } from "@/lib/media/probe/probe"
+import { initialBlockReads, probeVideo, walkContainer } from "@/lib/media/probe/probe"
 import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
 import {
 	FTYP,
@@ -649,9 +648,11 @@ describe("probeVideo — review regressions (MP4)", () => {
 		const file = concat(FTYP, box("moov", mvhd({ duration: 0 }), video, chapters, mvex, broken))
 
 		expect((await probe(file, "full")).record).toMatchObject({ partial: true, durationSec: 7, subs: [], video: { codec: "h264" } })
-		expect(await readContainerTracks(new BlockSource(file.length, (start, end) => Promise.resolve(file.slice(start, end))))).toEqual([
-			{ kind: "video", codec: "h264" }
-		])
+		const parsed = await walkContainer(new BlockSource(file.length, (start, end) => Promise.resolve(file.slice(start, end))), "card")
+
+		expect(
+			parsed?.tracks.map(track => (track.kind === "video" ? { kind: "video", codec: track.video.codec } : { kind: track.kind }))
+		).toEqual([{ kind: "video", codec: "h264" }])
 	})
 
 	it("writes the Dolby Vision string only when no base layer is compatible", async () => {
@@ -896,5 +897,36 @@ describe("BlockSource reads outside the file", () => {
 		await expect(source.read(new Uint8Array(1), BLOCK_BYTES, 1)).rejects.toBeInstanceOf(OutOfFileReadError)
 		await expect(source.read(new Uint8Array(1), -1, 1)).rejects.toBeInstanceOf(OutOfFileReadError)
 		await expect(source.read(new Uint8Array(0), BLOCK_BYTES, 0)).resolves.toBeUndefined()
+	})
+})
+
+describe("walkContainer — ALAC's decoder configuration", () => {
+	const cookie = Uint8Array.from({ length: 24 }, (_, i) => i + 1)
+
+	it("takes the magic cookie from an MP4 sample entry's alac box", async () => {
+		const file = concat(
+			FTYP,
+			box(
+				"moov",
+				mvhd({}),
+				trak(tkhd({ id: 1 }), [mdhd({}), hdlr("soun")], audioEntry("alac", { rate: 44_100 }, fullBox("alac", 0, 0, cookie)))
+			)
+		)
+		const parsed = await walkContainer(new BlockSource(file.length, (start, end) => Promise.resolve(file.slice(start, end))), "card")
+		const track = parsed?.tracks[0]
+
+		expect(track?.kind === "audio" ? [track.audio.codec, Array.from(track.config ?? [])] : null).toEqual([
+			"alac",
+			[0, 0, 0, 0, ...cookie]
+		])
+	})
+
+	it("takes it from a Matroska track's CodecPrivate, and keeps it off the stored probe", async () => {
+		const file = mkv(INFO, tracks(trackEntry(1, 2, "A_ALAC", element(0x63a2, cookie), element(0xe1, uintElement(0x9f, 2)))))
+		const parsed = await walkContainer(new BlockSource(file.length, (start, end) => Promise.resolve(file.slice(start, end))), "card")
+		const track = parsed?.tracks[0]
+
+		expect(track?.kind === "audio" ? [track.audio.codec, track.config] : null).toEqual(["alac", cookie])
+		expect(JSON.stringify((await probe(file, "card")).record)).not.toContain("config")
 	})
 })

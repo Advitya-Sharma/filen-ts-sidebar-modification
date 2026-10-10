@@ -177,10 +177,6 @@ export function bytesReadRange(bytes: Uint8Array): ReadRange {
 	return (start, end) => Promise.resolve(bytes.subarray(start, end))
 }
 
-export function blobReadRange(blob: Blob): ReadRange {
-	return async (start, end) => new Uint8Array(await blob.slice(start, end).arrayBuffer())
-}
-
 // A Range request against a same-origin URL that answers 206 (the service worker's inline-preview
 // route). Anything else is a failure: a 200 would be the whole file, so its body is never read.
 export function urlReadRange(url: string): ReadRange {

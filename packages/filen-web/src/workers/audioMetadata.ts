@@ -1,11 +1,4 @@
-import {
-	CouldNotDetermineFileTypeError,
-	parseBlob,
-	parseFromTokenizer,
-	selectCover,
-	type IAudioMetadata,
-	type IOptions
-} from "music-metadata"
+import { CouldNotDetermineFileTypeError, parseFromTokenizer, selectCover, type IAudioMetadata, type IOptions } from "music-metadata"
 import { normalizeTrackTags } from "@filen/shared"
 import { log } from "@/lib/log"
 import { BlockTokenizer } from "@/features/audio/lib/blockTokenizer"
@@ -115,26 +108,6 @@ export async function readAudioMetadata(
 	if (source.readError !== null) {
 		return { type: "readFailed" }
 	}
-
-	return toResult(parsed, deps)
-}
-
-// Bytes already resident in the page (the player's whole-file fallback source), so no network at all.
-export async function readAudioMetadataFromBlob(blob: Blob, deps: AudioMetadataDeps): Promise<AudioMetadataResult> {
-	let parsed: IAudioMetadata
-
-	try {
-		// A Blob's type doubles as parseBlob's mime hint, so the sniff pass reads an untyped slice of it.
-		parsed = await sniffThenHint(blob.type !== "", hinted => parseBlob(hinted ? blob : blob.slice(0, blob.size, ""), PARSE_OPTIONS))
-	} catch (error) {
-		deps.signal.throwIfAborted()
-
-		log.info("audio-metadata", "unparseable audio blob", error)
-
-		return { type: "unparseable" }
-	}
-
-	deps.signal.throwIfAborted()
 
 	return toResult(parsed, deps)
 }

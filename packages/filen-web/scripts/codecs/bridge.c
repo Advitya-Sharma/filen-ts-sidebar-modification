@@ -9,6 +9,7 @@
 
 #include "libavcodec/avcodec.h"
 #include "libavutil/log.h"
+#include "libavutil/mem.h"
 
 typedef struct {
 	AVCodecContext *codec;
@@ -16,7 +17,26 @@ typedef struct {
 	AVFrame *frame;
 } Decoder;
 
-enum { CODEC_AC3 = 0, CODEC_EAC3 = 1, CODEC_DTS = 2 };
+enum { CODEC_AC3 = 0, CODEC_EAC3 = 1, CODEC_DTS = 2, CODEC_TRUEHD = 3, CODEC_ALAC = 4, CODEC_FLAC = 5 };
+
+static enum AVCodecID codec_id_of(int codec) {
+	switch (codec) {
+	case CODEC_AC3:
+		return AV_CODEC_ID_AC3;
+	case CODEC_EAC3:
+		return AV_CODEC_ID_EAC3;
+	case CODEC_DTS:
+		return AV_CODEC_ID_DTS;
+	case CODEC_TRUEHD:
+		return AV_CODEC_ID_TRUEHD;
+	case CODEC_ALAC:
+		return AV_CODEC_ID_ALAC;
+	case CODEC_FLAC:
+		return AV_CODEC_ID_FLAC;
+	default:
+		return AV_CODEC_ID_NONE;
+	}
+}
 
 // What decoder_send and decoder_receive return besides 0 (a frame is ready, or the packet was taken)
 // and AVERROR(ENOMEM), the one failure that ends the stream.
@@ -46,16 +66,24 @@ static void decoder_free(Decoder *decoder) {
 	free(decoder);
 }
 
+// A zeroed buffer of `size` bytes (plus FFmpeg's padding) the codec configuration is written into before
+// decoder_open takes it over, or NULL when out of memory.
 EMSCRIPTEN_KEEPALIVE
-Decoder *decoder_open(int codec_id) {
-	enum AVCodecID id = codec_id == CODEC_AC3 ? AV_CODEC_ID_AC3 : codec_id == CODEC_EAC3 ? AV_CODEC_ID_EAC3 : AV_CODEC_ID_DTS;
-	const AVCodec *codec = avcodec_find_decoder(id);
+uint8_t *decoder_extradata(int size) {
+	return size <= 0 ? NULL : av_mallocz((size_t)size + AV_INPUT_BUFFER_PADDING_SIZE);
+}
+
+// `extradata` (from decoder_extradata, or NULL) is the decoder's from here on, freed with it or here on failure.
+EMSCRIPTEN_KEEPALIVE
+Decoder *decoder_open(int codec_id, uint8_t *extradata, int extradata_size) {
+	const AVCodec *codec = avcodec_find_decoder(codec_id_of(codec_id));
 	Decoder *decoder = calloc(1, sizeof(Decoder));
 
 	av_log_set_level(log_level);
 
 	if (codec == NULL || decoder == NULL) {
 		free(decoder);
+		av_free(extradata);
 		return NULL;
 	}
 
@@ -64,8 +92,14 @@ Decoder *decoder_open(int codec_id) {
 	decoder->frame = av_frame_alloc();
 
 	if (decoder->codec == NULL || decoder->packet == NULL || decoder->frame == NULL) {
+		av_free(extradata);
 		decoder_free(decoder);
 		return NULL;
+	}
+
+	if (extradata != NULL) {
+		decoder->codec->extradata = extradata;
+		decoder->codec->extradata_size = extradata_size;
 	}
 
 	// Timestamps travel in microseconds and come back unchanged on the frames they belong to.

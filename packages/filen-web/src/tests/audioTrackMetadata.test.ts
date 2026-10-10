@@ -60,7 +60,6 @@ function makeService(overrides: Partial<TrackMetadataDeps> = {}) {
 	let urls = 0
 	const deps = {
 		readRemote: vi.fn<TrackMetadataDeps["readRemote"]>(() => Promise.resolve(parsed())),
-		readLocal: vi.fn<TrackMetadataDeps["readLocal"]>(() => Promise.resolve(parsed())),
 		cancelRead: vi.fn<TrackMetadataDeps["cancelRead"]>(),
 		readThumbnail: vi.fn<TrackMetadataDeps["readThumbnail"]>(() => Promise.resolve(null)),
 		createObjectUrl: vi.fn<TrackMetadataDeps["createObjectUrl"]>(() => `blob:${String(++urls)}`),
@@ -357,15 +356,11 @@ describe("TrackMetadataService", () => {
 		expect(deps.readRemote).toHaveBeenCalledTimes(4)
 	})
 
-	it("reads nothing offline, except bytes already in memory", async () => {
+	it("reads nothing offline", async () => {
 		const { service, deps } = makeService({ isOnline: () => false })
 
 		expect(await service.request(track("a")).promise).toEqual({ type: "unavailable" })
 		expect(deps.readRemote).not.toHaveBeenCalled()
-
-		await service.request(track("b"), { local: new Blob(["x"]) }).promise
-
-		expect(deps.readLocal).toHaveBeenCalledTimes(1)
 	})
 
 	it("adopts a record another tab persisted instead of reading the track again", async () => {
@@ -419,19 +414,6 @@ describe("TrackMetadataService", () => {
 			deps.readThumbnail.mockResolvedValue(thumb)
 
 			expect(await service.playbackCover(track("a"))).toEqual({ cover: thumb })
-			expect(deps.readRemote).not.toHaveBeenCalled()
-		})
-
-		it("reads a new track from the Blob the player holds, without a download", async () => {
-			const { service, deps } = makeService()
-			const bytes = new Blob(["audio"])
-
-			deps.readLocal.mockResolvedValue(parsed(new Uint8Array([5])))
-
-			const result = await service.playbackCover(track("a"), bytes)
-
-			expect(result?.cover).toBeInstanceOf(Blob)
-			expect(deps.readLocal).toHaveBeenCalledWith(bytes, "a", expect.any(String))
 			expect(deps.readRemote).not.toHaveBeenCalled()
 		})
 

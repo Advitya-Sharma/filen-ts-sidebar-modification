@@ -146,12 +146,7 @@ import {
 } from "@/workers/searchEngine"
 import { createListBatcher } from "@/workers/archiveListPacker"
 import type { PackedEntryBatch } from "@/lib/sdk/archiveListing"
-import {
-	readAudioMetadata as parseAudioMetadata,
-	readAudioMetadataFromBlob as parseAudioMetadataFromBlob,
-	type AudioMetadataDeps,
-	type AudioMetadataResult
-} from "@/workers/audioMetadata"
+import { readAudioMetadata as parseAudioMetadata, type AudioMetadataDeps, type AudioMetadataResult } from "@/workers/audioMetadata"
 import { createMemorySink, toRawPreviewResult, type RawPreviewResult } from "@/features/preview/lib/rawPreview.logic"
 import { probeSource, probeVideo } from "@/lib/media/probe/probe"
 import { EarlyCancels } from "@/workers/earlyCancels"
@@ -2485,13 +2480,6 @@ const api = {
 		return runAudioMetadata(c, uuid, previewToken, deps =>
 			parseAudioMetadata(Number(file.size), mime, (start, end) => readFileRange(c, file, start, end, deps.signal), deps)
 		)
-	},
-	// The same for bytes the page already holds (the player's whole-file fallback source): the Blob
-	// crosses as a handle, so nothing is copied and nothing is downloaded.
-	async readAudioMetadataFromBlob(blob: Blob, uuid: string, previewToken: string): Promise<AudioMetadataResult> {
-		const c = requireClient()
-
-		return runAudioMetadata(c, uuid, previewToken, deps => parseAudioMetadataFromBlob(blob, deps))
 	},
 	// ── Video probe ──────────────────────────────────────────────────────────
 	// One tier of a video's container probe (lib/media/probe), its range reads going straight to the SDK

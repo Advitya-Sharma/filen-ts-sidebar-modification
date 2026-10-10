@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #
-# Builds the AC-3, E-AC-3 and DTS audio decoders the remux worker uses (browsers decode none of them) from
-# a pinned FFmpeg release, as one WebAssembly module with its JavaScript glue and worker loop in a single
-# file, and writes it with a manifest and the licenses of what Emscripten links in to
-# src/vendor/ffmpeg-decoders/. All of it is committed; re-run this only to change the FFmpeg release, the
-# flags or the sources beside this script.
+# Builds the AC-3, E-AC-3, DTS, TrueHD/MLP, ALAC and FLAC audio decoders the remux worker uses (no browser
+# decodes the first four, only Safari ALAC, and WebKit's own FLAC decoder fails on Matroska's) from a pinned
+# FFmpeg release, as one WebAssembly module with its JavaScript glue and worker loop in a single file, and
+# writes it with a manifest and the licenses of what Emscripten links in to src/vendor/ffmpeg-decoders/. All
+# of it is committed; re-run this only to change the FFmpeg release, the flags or the sources beside this
+# script.
 #
-# The FFmpeg part is LGPL-2.1-or-later: configure enables no GPL or nonfree component, only the three
+# The FFmpeg part is LGPL-2.1-or-later: configure enables no GPL or nonfree component, only these
 # decoders and what they depend on. This script and bridge.c and decoder-worker.js beside it, whose hashes
 # the manifest records, are the complete corresponding source of the module.
 #
@@ -52,10 +53,10 @@ CONFIGURE_FLAGS=(
 	# either way.
 	--enable-small
 	--enable-avcodec
-	--enable-decoder=ac3,eac3,dca
+	--enable-decoder=ac3,eac3,dca,truehd,mlp,alac,flac
 )
 OPT_FLAGS=(-Oz -flto -msimd128 -DNDEBUG)
-EXPORTS="_decoder_log_level,_decoder_open,_decoder_packet,_decoder_send,_decoder_drain,_decoder_receive,_decoder_reset,_decoder_format,_decoder_channels,_decoder_channel_mask,_decoder_sample_rate,_decoder_frames,_decoder_plane,_decoder_timestamp,_decoder_close"
+EXPORTS="_decoder_log_level,_decoder_extradata,_decoder_open,_decoder_packet,_decoder_send,_decoder_drain,_decoder_receive,_decoder_reset,_decoder_format,_decoder_channels,_decoder_channel_mask,_decoder_sample_rate,_decoder_frames,_decoder_plane,_decoder_timestamp,_decoder_close"
 # DYNAMIC_EXECUTION=0: the app's CSP allows no eval. The worker is started from a Blob, so the wasm is
 # inlined (base64, plain ASCII) rather than fetched.
 LINK_FLAGS=(
@@ -191,7 +192,7 @@ json_array() {
 
 cat > "${OUT_DIR}/manifest.json" << EOF
 {
-	"description": "FFmpeg AC-3, E-AC-3 and DTS decoders built to WebAssembly by scripts/codecs/build-ffmpeg-decoders.sh; the module is LGPL-2.1-or-later.",
+	"description": "FFmpeg AC-3, E-AC-3, DTS, TrueHD/MLP, ALAC and FLAC decoders built to WebAssembly by scripts/codecs/build-ffmpeg-decoders.sh; the module is LGPL-2.1-or-later.",
 	"ffmpeg": {
 		"tag": "${FFMPEG_TAG}",
 		"tarball": "${FFMPEG_URL}",

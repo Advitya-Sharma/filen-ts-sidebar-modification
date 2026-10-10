@@ -1,13 +1,28 @@
 import { AudioSample, CustomAudioDecoder, type AudioCodec, type EncodedPacket } from "mediabunny"
 import WORKER_SOURCE from "@/vendor/ffmpeg-decoders/decoders.worker.js?raw"
+import { browserEngine, type BrowserEngine } from "@/lib/media/mseController.logic"
 
-// AC-3, E-AC-3 and DTS, which no browser decodes, through FFmpeg's decoders built to WebAssembly
-// (scripts/codecs/build-ffmpeg-decoders.sh). The module runs in a worker of its own, nested in the remux
-// worker, so decoding overlaps the remux worker's own work; the protocol is described in
-// scripts/codecs/decoder-worker.js. The module is bundled into the remux worker and compiled only when a
-// track first needs it.
+// AC-3, E-AC-3, DTS and TrueHD, which no browser decodes, ALAC, which only Safari does, and FLAC where the
+// browser's own decoder fails, through FFmpeg's decoders built to WebAssembly
+// (scripts/codecs/build-ffmpeg-decoders.sh). AC-3, E-AC-3, DTS and FLAC reach them through mediabunny's
+// decoder registry; TrueHD and ALAC, which mediabunny does not know, through ffmpegSampleReader. The module
+// runs in a worker of its own, nested in the remux worker, so decoding overlaps the remux worker's own work;
+// the protocol is described in scripts/codecs/decoder-worker.js. The module is bundled into the remux worker
+// and compiled only when a track first needs it.
 
-export const FFMPEG_DECODED_CODECS: readonly AudioCodec[] = ["ac3", "eac3", "dts"]
+// The codecs mediabunny hands to FFmpeg in `engine`. WebKit's WebCodecs claims FLAC (isConfigSupported says
+// yes) and then fails on every frame, so only there FLAC goes to FFmpeg too; elsewhere the native decoder.
+export function ffmpegDecodedCodecs(engine: BrowserEngine): readonly AudioCodec[] {
+	return engine === "webkit" ? ["ac3", "eac3", "dts", "flac"] : ["ac3", "eac3", "dts"]
+}
+
+export type FfmpegCodec = "ac3" | "eac3" | "dts" | "truehd" | "alac" | "flac"
+
+const FFMPEG_CODECS: ReadonlySet<string> = new Set<FfmpegCodec>(["ac3", "eac3", "dts", "truehd", "alac", "flac"])
+
+export function isFfmpegCodec(codec: string | null): codec is FfmpegCodec {
+	return codec !== null && FFMPEG_CODECS.has(codec)
+}
 
 export interface DecodedFrame {
 	data: ArrayBuffer
@@ -22,7 +37,8 @@ export interface DecodedFrame {
 }
 
 export type DecoderRequest =
-	| { type: "open"; codec: AudioCodec }
+	// `extradata`: the codec configuration (ALAC's magic cookie in its 36-byte atom form, FLAC's STREAMINFO).
+	| { type: "open"; codec: FfmpegCodec; extradata?: ArrayBuffer }
 	| { type: "decode"; handle: number; data: ArrayBuffer; timestampUs: number }
 	| { type: "flush"; handle: number }
 	| { type: "close"; handle: number }
@@ -58,11 +74,17 @@ export class DecoderWorker {
 	}
 
 	// Every open, failed or not, is balanced by exactly one release.
-	public async open(codec: AudioCodec): Promise<DecoderLease> {
+	public async open(codec: FfmpegCodec, extradata?: Uint8Array): Promise<DecoderLease> {
 		this.users++
 
 		const worker = this.worker ?? this.start()
-		const { handle } = await this.post(worker, { type: "open", codec })
+		// An empty configuration is none.
+		const config = extradata === undefined || extradata.length === 0 ? undefined : extradata.slice().buffer
+		const { handle } = await this.post(
+			worker,
+			config === undefined ? { type: "open", codec } : { type: "open", codec, extradata: config },
+			config === undefined ? [] : [config]
+		)
 
 		if (handle === undefined) {
 			throw new Error("the audio decoder worker returned no decoder")
@@ -168,7 +190,34 @@ export function decodedChannelMask(sample: AudioSample): number | null {
 	return channelMasks.get(sample) ?? null
 }
 
-export function ffmpegAudioDecoder(worker: DecoderWorker): typeof CustomAudioDecoder {
+// Decoded frames as samples, each placed where FFmpeg says, or right after the previous one when it gives no
+// timestamp; `next` is where the sample after them starts.
+export function decodedSamples(frames: readonly DecodedFrame[], nextTimestamp: number): { samples: AudioSample[]; next: number } {
+	const samples: AudioSample[] = []
+	let next = nextTimestamp
+
+	for (const frame of frames) {
+		const timestamp = Number.isNaN(frame.timestampUs) ? next : frame.timestampUs / 1_000_000
+		const sample = new AudioSample({
+			data: frame.data,
+			format: frame.format,
+			numberOfChannels: frame.channels,
+			sampleRate: frame.sampleRate,
+			timestamp
+		})
+
+		if (frame.channelMask >= 0) {
+			channelMasks.set(sample, frame.channelMask)
+		}
+
+		next = timestamp + frame.frames / frame.sampleRate
+		samples.push(sample)
+	}
+
+	return { samples, next }
+}
+
+export function ffmpegAudioDecoder(worker: DecoderWorker, codecs: readonly AudioCodec[]): typeof CustomAudioDecoder {
 	return class FfmpegAudioDecoder extends CustomAudioDecoder {
 		private lease: DecoderLease | null = null
 		private opening: Promise<DecoderLease> | null = null
@@ -176,13 +225,31 @@ export function ffmpegAudioDecoder(worker: DecoderWorker): typeof CustomAudioDec
 		private nextTimestamp = 0
 
 		public static override supports(codec: AudioCodec): boolean {
-			return FFMPEG_DECODED_CODECS.includes(codec)
+			return codecs.includes(codec)
 		}
 
 		// Mediabunny chains every call on the one before, so none may reject: a rejection would skip every
 		// later call, close() included, and keep the worker alive. Failures go to onError instead.
 		public async init(): Promise<void> {
-			this.opening = worker.open(this.codec)
+			const codec = this.codec
+
+			// Never the case: supports() admits only these.
+			if (!isFfmpegCodec(codec)) {
+				this.onError(new Error(`no FFmpeg decoder for ${codec}`))
+
+				return
+			}
+
+			const description = this.config.description
+
+			this.opening = worker.open(
+				codec,
+				description === undefined
+					? undefined
+					: ArrayBuffer.isView(description)
+						? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
+						: new Uint8Array(description)
+			)
 
 			try {
 				this.lease = await this.opening
@@ -234,25 +301,18 @@ export function ffmpegAudioDecoder(worker: DecoderWorker): typeof CustomAudioDec
 		}
 
 		private emit(response: DecoderResponse): void {
-			for (const frame of response.frames ?? []) {
-				const timestamp = Number.isNaN(frame.timestampUs) ? this.nextTimestamp : frame.timestampUs / 1_000_000
-				const sample = new AudioSample({
-					data: frame.data,
-					format: frame.format,
-					numberOfChannels: frame.channels,
-					sampleRate: frame.sampleRate,
-					timestamp
-				})
+			const decoded = decodedSamples(response.frames ?? [], this.nextTimestamp)
 
-				if (frame.channelMask >= 0) {
-					channelMasks.set(sample, frame.channelMask)
-				}
+			this.nextTimestamp = decoded.next
 
-				this.nextTimestamp = timestamp + frame.frames / frame.sampleRate
+			for (const sample of decoded.samples) {
 				this.onSample(sample)
 			}
 		}
 	}
 }
 
-export const FfmpegAudioDecoder = ffmpegAudioDecoder(new DecoderWorker(spawnBundledWorker))
+// The one decoder worker of the remux worker, shared by mediabunny's decoders and ffmpegSampleReader.
+export const ffmpegDecoders = new DecoderWorker(spawnBundledWorker)
+
+export const FfmpegAudioDecoder = ffmpegAudioDecoder(ffmpegDecoders, ffmpegDecodedCodecs(browserEngine(navigator.userAgent)))

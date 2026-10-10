@@ -86,6 +86,12 @@ export class LinearResampler {
 		this.step = fromRate / toRate
 	}
 
+	// Where the next output frame lies, in input frames from the start of the next block (negative: between
+	// the previous block's last frame and the next's first).
+	public get nextPosition(): number {
+		return this.position
+	}
+
 	public process(planes: readonly Float32Array[]): Float32Array[] {
 		const frames = planes[0]?.length ?? 0
 

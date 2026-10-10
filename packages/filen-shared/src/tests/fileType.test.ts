@@ -31,6 +31,11 @@ describe("extensionForMime", () => {
 		expect(extensionForMime("application/json; charset=utf-8")).toBe("json")
 	})
 
+	it("reads an audiobook's type as m4b", () => {
+		expect(extensionForMime("audio/x-m4b")).toBe("m4b")
+		expect(extensionForMime("audio/mp4")).toBe("m4a")
+	})
+
 	it("keeps the macro-enabled workbook type apart from plain .xlsx", () => {
 		expect(extensionForMime("application/vnd.ms-excel.sheet.macroEnabled.12")).toBe("xlsm")
 	})

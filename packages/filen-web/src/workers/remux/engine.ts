@@ -50,8 +50,17 @@ import {
 	TRANSCODE_SAMPLE_RATE,
 	type EncoderTarget
 } from "@/workers/remux/audioMix.logic"
-import { sampleReader, TranscodeWriter } from "@/workers/remux/audioTranscode"
-import { estimateFrameStreamDuration, ID3V2_HEADER_BYTES, id3v2Bytes } from "@/workers/remux/audioDuration.logic"
+import { sampleReader, TranscodeWriter, type SampleReader } from "@/workers/remux/audioTranscode"
+import {
+	containerPackets,
+	estimatedStreamDuration,
+	ffmpegSampleReader,
+	probedCodecs,
+	rawPackets,
+	rawStreamOf
+} from "@/workers/remux/audioInput"
+import type { RawStreamInfo } from "@/workers/remux/rawAudio.logic"
+import type { FfmpegCodec } from "@/workers/remux/ffmpegDecoder"
 import { ac3Layout, dtsLayout, layoutFor, type Speaker } from "@/workers/remux/channelLayout.logic"
 import { copyCodecString, isCopyableAudio, isTranscodableAudio, outputVideoCodecString } from "@/workers/remux/codecs.logic"
 import { hevcKeyIsIdr, hevcLengthSize, IDR_REACH_KEYS, idrReachSeconds } from "@/workers/remux/hevc.logic"
@@ -67,11 +76,6 @@ const FORMATS = [MATROSKA, WEBM, MP4, QTFF, MPEG_TS, WAVE, OGG, FLAC, MP3, ADTS]
 // Formats whose demuxer has no index: it finds a far position (the file's end too, for its duration) only by
 // reading every cluster or frame before it.
 const SCANNING_FORMATS = new Set<InputFormat>([MATROSKA, WEBM, FLAC, MP3, ADTS])
-
-// The head of a raw audio stream whose frames give its duration when no header does.
-const DURATION_ESTIMATE_BYTES = 262_144
-// ID3v2 tags skipped before an audio stream's first frame.
-const MAX_ID3_TAGS = 4
 
 // Reads longer than this reach the demuxer as a stream of blocks rather than one assembled buffer.
 const STREAM_READ_BYTES = 2 * BLOCK_BYTES
@@ -127,10 +131,14 @@ function bytesOf(source: AllowSharedBufferSource | undefined): Uint8Array | null
 	return ArrayBuffer.isView(source) ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength) : new Uint8Array(source)
 }
 
-interface AudioSource {
-	track: InputAudioTrack
-	codec: AudioCodec | null
-}
+// A track the demuxer reads, with FFmpeg's decoder where mediabunny has none for its codec (TrueHD, ALAC);
+// or a bare AC-3/E-AC-3/DTS stream, which no demuxer reads.
+type AudioSource =
+	| { kind: "track"; track: InputAudioTrack; codec: AudioCodec | null; ffmpeg: { codec: FfmpegCodec; extradata?: Uint8Array } | null }
+	| { kind: "raw"; info: RawStreamInfo }
+
+// The one track id a bare stream is opened under.
+const RAW_TRACK_ID = 1
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
@@ -229,6 +237,12 @@ export class RemuxEngine {
 	}
 
 	public async open(params: RemuxOpenParams): Promise<RemuxMediaInfo> {
+		const raw = await rawStreamOf(this.cache, this.input)
+
+		if (raw !== null) {
+			return this.openRaw(raw, params.size)
+		}
+
 		const [video, audio] = await Promise.all([this.input.getPrimaryVideoTrack(), this.input.getAudioTracks()])
 		const format = await this.input.getFormat()
 		const matroska = format === MATROSKA || format === WEBM
@@ -238,7 +252,7 @@ export class RemuxEngine {
 		// audio stream's is estimated from its first frames instead, and 0 leaves the MediaSource duration open.
 		const duration =
 			(await this.input.getDurationFromMetadata()) ??
-			(scanning ? await this.estimatedDuration(format) : await this.input.computeDuration())
+			(scanning ? ((await estimatedStreamDuration(this.cache, format)) ?? 0) : await this.input.computeDuration())
 
 		this.seekScansFile = matroska && index === "none"
 		this.duration = duration
@@ -257,6 +271,36 @@ export class RemuxEngine {
 			hasVideoTrack: video !== null,
 			video: video === null ? null : await this.openVideo(video),
 			audio: await Promise.all(audio.map(track => this.openAudio(track)))
+		}
+	}
+
+	// A bare AC-3, E-AC-3 or DTS stream: one audio track, always re-encoded.
+	private openRaw(raw: { info: RawStreamInfo; header: Speaker[] | null }, size: number): RemuxMediaInfo {
+		const { info } = raw
+
+		this.audio.set(RAW_TRACK_ID, { kind: "raw", info })
+		this.duration = info.duration
+		this.layouts.set(RAW_TRACK_ID, Promise.resolve(raw.header))
+
+		return {
+			duration: info.duration,
+			bitrate: (size * 8) / info.duration,
+			index: null,
+			seekScansFile: false,
+			hasVideoTrack: false,
+			video: null,
+			audio: [
+				{
+					id: RAW_TRACK_ID,
+					codec: info.codec,
+					copyCodec: null,
+					channels: info.channels,
+					sampleRate: info.sampleRate,
+					language: "und",
+					name: null,
+					isDefault: true
+				}
+			]
 		}
 	}
 
@@ -295,11 +339,14 @@ export class RemuxEngine {
 			track.getDisposition()
 		])
 
-		this.audio.set(track.id, { track, codec })
+		// A codec mediabunny does not know may be one FFmpeg decodes, which the container walk names.
+		const ffmpeg = codec === null ? ((await this.probedCodecs()).get(track.id) ?? null) : null
+
+		this.audio.set(track.id, { kind: "track", track, codec, ffmpeg })
 
 		return {
 			id: track.id,
-			codec,
+			codec: codec ?? ffmpeg?.codec ?? null,
 			copyCodec: isCopyableAudio(codec) && config !== null ? config.codec : null,
 			channels,
 			sampleRate,
@@ -307,6 +354,14 @@ export class RemuxEngine {
 			name,
 			isDefault: disposition.default
 		}
+	}
+
+	private probed: ReturnType<typeof probedCodecs> | null = null
+
+	private probedCodecs(): ReturnType<typeof probedCodecs> {
+		this.probed ??= probedCodecs(this.cache)
+
+		return this.probed
 	}
 
 	// Restarts both tracks from the key packet at or before `time`; audio starts where video does. Audio alone
@@ -435,40 +490,6 @@ export class RemuxEngine {
 			})
 		} catch {
 			// No subtitles from the file; playback goes on.
-		}
-	}
-
-	// MP3 and ADTS: the stream's size over the byte rate of its first frames (behind any ID3v2 tags); 0 when
-	// they tell nothing. The demuxer has just read the head, so these reads are served from the block cache.
-	private async estimatedDuration(format: InputFormat): Promise<number> {
-		const stream = format === MP3 ? "mp3" : format === ADTS ? "adts" : null
-
-		if (stream === null) {
-			return 0
-		}
-
-		try {
-			let start = 0
-
-			for (let i = 0; i < MAX_ID3_TAGS && start + ID3V2_HEADER_BYTES <= this.size; i++) {
-				const tag = id3v2Bytes(await this.cache.read(start, start + ID3V2_HEADER_BYTES))
-
-				if (tag === 0) {
-					break
-				}
-
-				start += tag
-			}
-
-			if (start >= this.size) {
-				return 0
-			}
-
-			const bytes = await this.cache.read(start, Math.min(this.size, start + DURATION_ESTIMATE_BYTES))
-
-			return estimateFrameStreamDuration({ stream, bytes, size: this.size - start }) ?? 0
-		} catch {
-			return 0
 		}
 	}
 
@@ -684,7 +705,6 @@ export class RemuxEngine {
 				throw new SupersededError()
 			}
 		}
-		const { track, codec } = source
 		const gate = new PumpGate(this.audioHorizon(params.horizon))
 		const onSegment = (bytes: Uint8Array<ArrayBuffer>) => {
 			this.segment("audio", params.generation, bytes)
@@ -700,6 +720,11 @@ export class RemuxEngine {
 		let close: () => Promise<void>
 
 		if (params.mode === "copy") {
+			if (source.kind !== "track") {
+				throw new Error("audio track cannot be copied")
+			}
+
+			const { track, codec } = source
 			const config = await track.getDecoderConfig()
 
 			current()
@@ -729,7 +754,9 @@ export class RemuxEngine {
 				{ floor: 0, onStart }
 			)
 		} else {
-			if (!isTranscodableAudio(codec)) {
+			const decode = this.decodedReader(source, gate)
+
+			if (decode === null) {
 				throw new Error("audio track cannot be decoded")
 			}
 
@@ -741,7 +768,10 @@ export class RemuxEngine {
 				throw new Error("no audio encoder for this browser")
 			}
 
-			const header = await this.headerLayout(track, codec, params.time)
+			const header =
+				source.kind === "raw"
+					? await (this.layouts.get(RAW_TRACK_ID) ?? Promise.resolve(null))
+					: await this.headerLayout(source.track, source.codec, params.time)
 
 			current()
 
@@ -757,7 +787,7 @@ export class RemuxEngine {
 				stats: this.stats,
 				layout: (channels, mask) => layoutFor(header, channels, mask)
 			})
-			const reader = sampleReader(track, this.stats, () => gate.isCancelled())
+			const reader = decode
 
 			mime = `audio/mp4; codecs="${target.codec}"`
 			close = async () => {
@@ -808,9 +838,28 @@ export class RemuxEngine {
 		return { startTime, mime }
 	}
 
+	// Decoded samples of `source`: mediabunny's decoders (FFmpeg's registered among them), or FFmpeg's directly for
+	// a codec mediabunny does not know and for a bare stream. Null when nothing decodes it.
+	private decodedReader(source: AudioSource, gate: PumpGate): SampleReader | null {
+		if (source.kind === "raw") {
+			return ffmpegSampleReader({ codec: source.info.codec, packets: rawPackets(this.cache, source.info), stats: this.stats })
+		}
+
+		if (source.ffmpeg !== null) {
+			return ffmpegSampleReader({
+				codec: source.ffmpeg.codec,
+				...(source.ffmpeg.extradata === undefined ? {} : { extradata: source.ffmpeg.extradata }),
+				packets: containerPackets(source.track),
+				stats: this.stats
+			})
+		}
+
+		return isTranscodableAudio(source.codec) ? sampleReader(source.track, this.stats, () => gate.isCancelled()) : null
+	}
+
 	// The speakers an AC-3/E-AC-3/DTS track's frames declare, read from the packet playback starts at
 	// (already in the block cache for the decode that follows); null for other codecs.
-	private headerLayout(track: InputAudioTrack, codec: AudioCodec, time: number): Promise<Speaker[] | null> {
+	private headerLayout(track: InputAudioTrack, codec: AudioCodec | null, time: number): Promise<Speaker[] | null> {
 		const parse = codec === "ac3" || codec === "eac3" ? ac3Layout : codec === "dts" ? dtsLayout : null
 
 		if (parse === null) {

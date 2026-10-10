@@ -1,73 +1,155 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
 
-const { downloadFileBytes, releasePreviewStream, streaming } = vi.hoisted(() => ({
-	downloadFileBytes: vi.fn(),
+const { releasePreviewStream, previewStreamUrl, openDecodedAudioStream, audioMediaSource, streaming, alive } = vi.hoisted(() => ({
+	alive: { held: 0 },
 	releasePreviewStream: vi.fn<(id: string) => void>(),
-	streaming: { value: false }
+	previewStreamUrl: vi.fn((_file: unknown, _name: string, _type: string, id: string) => Promise.resolve(`/sw/download/${id}`)),
+	openDecodedAudioStream: vi.fn(),
+	audioMediaSource: vi.fn(),
+	streaming: { value: true }
 }))
 
 vi.mock("@/features/preview/lib/previewStream", () => ({
 	isMediaStreamAvailable: () => streaming.value,
-	previewStreamUrl: (_file: unknown, _name: string, _type: string, id: string) => Promise.resolve(`/sw/download/${id}`),
-	releasePreviewStream
+	previewStreamUrl,
+	releasePreviewStream,
+	holdPreviewStreamAlive: () => {
+		alive.held++
+
+		return () => {
+			alive.held--
+		}
+	}
 }))
-vi.mock("@/lib/sdk/client", () => ({ sdkApi: { downloadFileBytes, cancelPreviewDownload: vi.fn() } }))
+vi.mock("@/lib/media/playback/audioStream", () => ({ openDecodedAudioStream, audioMediaSource }))
 
-import { holdStreamRegistration, resolveTrackSource } from "@/features/audio/lib/bytes"
+import { resolveTrackSource } from "@/features/audio/lib/bytes"
 import type { QueueTrack } from "@/features/audio/store/audioQueue"
+import { audioDemotions } from "@/lib/media/audioRoute.logic"
+import { AUDIO_UNSUPPORTED_ERROR } from "@/lib/media/remuxTypes"
+import { asErrorDTO } from "@/lib/sdk/errors"
+import { MEDIA_FORMAT_UNSUPPORTED } from "@/lib/media/mediaFailure"
 
-const track: QueueTrack = { uuid: "a", name: "a.mp3", mime: "audio/mpeg", contentType: null, file: {} as AnyFile }
+function track(name: string, contentType: string | null = "audio/mpeg"): QueueTrack {
+	return { uuid: name, name, mime: contentType ?? "", contentType, file: { size: 1024n } as unknown as AnyFile }
+}
+
+function decoded(url: string) {
+	return {
+		url,
+		info: { size: 44, contentType: "audio/wav", codec: "ac3", duration: 1, sampleRate: 48_000, channels: 2 },
+		release: vi.fn()
+	}
+}
+
+afterEach(() => {
+	alive.held = 0
+	vi.clearAllMocks()
+	audioDemotions.clear()
+	streaming.value = true
+})
 
 describe("resolveTrackSource", () => {
-	const urls: string[] = []
+	it("streams a file the browser plays as it is, and demotes it to its decoded stream on a format failure", async () => {
+		const source = await resolveTrackSource(track("a.mp3"), new AbortController().signal)
 
-	afterEach(() => {
-		for (const url of urls.splice(0)) {
-			URL.revokeObjectURL(url)
-		}
+		expect(source.media).toEqual({ kind: "url", url: expect.stringMatching(/^\/sw\/download\//) as unknown })
+		expect(openDecodedAudioStream).not.toHaveBeenCalled()
+
+		// The service worker is kept awake for as long as the stream is held.
+		expect(alive.held).toBe(1)
+
+		source.demote?.()
+		source.release()
+		expect(releasePreviewStream).toHaveBeenCalledOnce()
+		expect(alive.held).toBe(0)
+
+		openDecodedAudioStream.mockResolvedValue(decoded("/sw/download/wav"))
+
+		const again = await resolveTrackSource(track("a.mp3"), new AbortController().signal)
+
+		expect(again.media).toEqual({ kind: "url", url: "/sw/download/wav" })
+		expect(again.demote).toBeUndefined()
+		expect(await again.classify(4)).toBe("other")
 	})
 
-	it("carries the downloaded Blob on a blob source, so a local read never fetches the object URL", async () => {
-		const fetchSpy = vi.fn()
+	it("decodes what no browser plays as it is, and a file without a type to serve it as", async () => {
+		const stream = decoded("/sw/download/wav")
 
-		vi.stubGlobal("fetch", fetchSpy)
-		downloadFileBytes.mockResolvedValue(new Uint8Array([1, 2, 3]))
+		openDecodedAudioStream.mockResolvedValue(stream)
 
-		const source = await resolveTrackSource(track, new AbortController().signal)
-
-		if (source.kind !== "blob") {
-			throw new Error("expected a blob source")
+		for (const name of ["film.mka", "dialog.ac3", "score.dts"]) {
+			expect((await resolveTrackSource(track(name), new AbortController().signal)).media.kind).toBe("url")
 		}
 
-		urls.push(source.url)
+		await resolveTrackSource(track("untyped.mp3", null), new AbortController().signal)
 
-		expect(source.url.startsWith("blob:")).toBe(true)
-		expect(source.blob.type).toBe("audio/mpeg")
-		expect(new Uint8Array(await source.blob.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]))
-		expect(fetchSpy).not.toHaveBeenCalled()
+		expect(openDecodedAudioStream).toHaveBeenCalledTimes(4)
+		expect(previewStreamUrl).not.toHaveBeenCalled()
+
+		const source = await resolveTrackSource(track("x.mka"), new AbortController().signal)
+
+		source.release()
+		expect(stream.release).toHaveBeenCalledOnce()
+		// Four still held, the released one let go.
+		expect(alive.held).toBe(4)
 	})
 
-	it("hands back stream registrations older than the playing and the warmed track", async () => {
-		streaming.value = true
+	it("fails with the format when nothing in the file decodes", async () => {
+		openDecodedAudioStream.mockRejectedValue(Object.assign(new Error("no decoder"), { name: AUDIO_UNSUPPORTED_ERROR }))
 
-		try {
-			const streamed = { ...track, contentType: "audio/mpeg" }
-			const ids: string[] = []
+		const error = await resolveTrackSource(track("x.mka"), new AbortController().signal).then(
+			() => null,
+			(rejection: unknown) => asErrorDTO(rejection)
+		)
 
-			for (let index = 0; index < 4; index++) {
-				const source = await resolveTrackSource(streamed, new AbortController().signal)
+		expect(error?.kind).toBe(MEDIA_FORMAT_UNSUPPORTED)
+	})
 
-				ids.push(source.url.slice("/sw/download/".length))
-			}
+	it("plays through MediaSource where the service worker cannot take the stream, or there is none", async () => {
+		const media = { attach: vi.fn(() => Promise.resolve()), dispose: vi.fn() }
 
-			expect(releasePreviewStream.mock.calls.map(([id]) => id)).toEqual([ids[0], ids[1]])
+		audioMediaSource.mockReturnValue(media)
+		openDecodedAudioStream.mockRejectedValue(new Error("the service worker cannot serve this preview"))
 
-			// The bookkeeping alone: only ever the last two are kept.
-			holdStreamRegistration("x")
-			expect(releasePreviewStream).toHaveBeenLastCalledWith(ids[2])
-		} finally {
-			streaming.value = false
-		}
+		const fallback = await resolveTrackSource(track("x.mka"), new AbortController().signal)
+
+		expect(fallback.media.kind).toBe("session")
+
+		streaming.value = false
+
+		const source = await resolveTrackSource(track("a.mp3"), new AbortController().signal)
+
+		expect(source.media.kind).toBe("session")
+		expect(previewStreamUrl).not.toHaveBeenCalled()
+
+		source.release()
+		expect(media.dispose).toHaveBeenCalledOnce()
+	})
+
+	it("hands back a stream that resolved after its load was abandoned", async () => {
+		const abort = new AbortController()
+		const stream = decoded("/sw/download/wav")
+
+		openDecodedAudioStream.mockImplementation(() => {
+			abort.abort()
+
+			return Promise.resolve(stream)
+		})
+
+		await expect(resolveTrackSource(track("x.mka"), abort.signal)).rejects.toThrow()
+		expect(stream.release).toHaveBeenCalledOnce()
+
+		const second = new AbortController()
+
+		previewStreamUrl.mockImplementationOnce((_file, _name, _type, id) => {
+			second.abort()
+
+			return Promise.resolve(`/sw/download/${id}`)
+		})
+
+		await expect(resolveTrackSource(track("a.mp3"), second.signal)).rejects.toThrow()
+		expect(releasePreviewStream).toHaveBeenCalledOnce()
 	})
 })

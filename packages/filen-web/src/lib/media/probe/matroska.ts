@@ -454,7 +454,7 @@ function parseTrackEntry(bytes: Uint8Array, entry: EbmlElement, context: EbmlCon
 }
 
 // Codecs whose CodecPrivate the probe reads; nothing else is ever decompressed.
-const PRIVATE_CODECS = new Set<MediaCodec>(["aac", "h264", "hevc", "av1", "vp9"])
+const PRIVATE_CODECS = new Set<MediaCodec>(["aac", "h264", "hevc", "av1", "vp9", "alac"])
 
 // Bytes inflated per walk across all tracks, so many small compressed privates cannot add up.
 const MAX_INFLATED_PER_WALK = 2 * MAX_INFLATED_BYTES
@@ -646,6 +646,7 @@ function audioTrack(raw: RawTrack, codecPrivate: Uint8Array | null): ParsedTrack
 	return {
 		kind: "audio",
 		enabled: raw.enabled,
+		...(codec === "alac" ? { config: codecPrivate } : {}),
 		audio: {
 			id: raw.number,
 			codec,
@@ -659,26 +660,6 @@ function audioTrack(raw: RawTrack, codecPrivate: Uint8Array | null): ParsedTrack
 			commentary: raw.commentary
 		}
 	}
-}
-
-// Each audio/video track's kind and codec, without the async CodecPrivate decoding a full parse does.
-export function matroskaTrackCodecs(bytes: Uint8Array): { kind: "audio" | "video"; codec: MediaCodec | null }[] {
-	const context: EbmlContext = { malformed: false }
-	const tracks: { kind: "audio" | "video"; codec: MediaCodec | null }[] = []
-
-	for (const entry of ebmlChildren(bytes, 0, bytes.length, 2, context)) {
-		if (entry.id !== TRACK_ENTRY_ID) {
-			continue
-		}
-
-		const raw = parseTrackEntry(bytes, entry, context)
-
-		if (raw.type === 1 || raw.type === 2) {
-			tracks.push({ kind: raw.type === 1 ? "video" : "audio", codec: matroskaCodec(raw.codecId) })
-		}
-	}
-
-	return tracks
 }
 
 // The CodecPrivate a decoder is configured with, for the codecs that have one (VP8/VP9 have none).

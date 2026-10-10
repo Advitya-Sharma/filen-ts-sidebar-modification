@@ -1,12 +1,8 @@
 import { codecStringAlternatives } from "@filen/shared/videos"
-import type { BlockSource } from "@/lib/media/blockSource"
-import { matroskaTrackCodecs } from "@/lib/media/probe/matroska"
-import { walkContainer } from "@/lib/media/probe/probe"
 import type { MediaCodec } from "@/lib/media/probe/types"
 
-// The audio/video tracks a video file declares in its container header, read without decoding anything:
-// MP4/MOV/M4V (ISO BMFF boxes) and Matroska/WebM (EBML elements). Only ever asked once a browser has
-// shown it could not play part of a file, to name what it could not play.
+// The audio/video codecs a preview names when a browser cannot play part of a file, and how to ask a
+// browser whether it can.
 
 export type TrackKind = "audio" | "video"
 
@@ -39,57 +35,6 @@ export type CodecId = MediaCodec
 export interface ContainerTrack {
 	kind: TrackKind
 	codec: CodecId | null
-}
-
-// The tracks of a Tracks element's payload.
-export function parseMatroskaTracks(payload: Uint8Array): ContainerTrack[] {
-	return matroskaTrackCodecs(payload)
-}
-
-// The file's audio and video tracks, from the video probe's card walk, or null when it is neither
-// container, is malformed, or puts its header out of the source's budget. Reads throw like the source's
-// own reads do.
-export async function readContainerTracks(source: BlockSource): Promise<ContainerTrack[] | null> {
-	const parsed = await walkContainer(source, "card")
-
-	if (parsed?.tracksFound !== true) {
-		return null
-	}
-
-	const tracks: ContainerTrack[] = []
-
-	for (const track of parsed.tracks) {
-		if (track.kind === "video") {
-			tracks.push({ kind: "video", codec: track.video.codec })
-		} else if (track.kind === "audio") {
-			tracks.push({ kind: "audio", codec: track.audio.codec })
-		}
-	}
-
-	return tracks
-}
-
-// The tracks of `kinds` whose codec the browser says it cannot decode; a track of an unrecognised
-// codec is never claimed, since nothing can be asked about it.
-export function unplayableTracks(
-	tracks: readonly ContainerTrack[],
-	kinds: readonly TrackKind[],
-	canPlay: (query: string) => boolean
-): CodecId[] {
-	const unplayable: CodecId[] = []
-
-	for (const track of tracks) {
-		if (
-			track.codec !== null &&
-			kinds.includes(track.kind) &&
-			!canPlay(CODECS[track.codec].query) &&
-			!unplayable.includes(track.codec)
-		) {
-			unplayable.push(track.codec)
-		}
-	}
-
-	return unplayable
 }
 
 // A query once per equivalent spelling of its codec (Firefox knows MP3 in MP4 only as "mp3").

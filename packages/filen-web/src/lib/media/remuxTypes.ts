@@ -145,6 +145,27 @@ export interface RemuxStats {
 	transcodedMediaSeconds: number
 }
 
+// An audio file decoded into a WAV stream (the worker's openPcm): what the service worker serves it as.
+export interface PcmStreamInfo {
+	// The worker's handle on the stream (closePcm).
+	id: number
+	size: number
+	contentType: string
+	// The decoded audio's, before any downmix.
+	codec: string
+	duration: number
+	sampleRate: number
+	channels: number
+}
+
+// Nothing in an audio file can be decoded (no audio track, no decoder for its codec, an unknown duration).
+// Crosses Comlink by name.
+export const AUDIO_UNSUPPORTED_ERROR = "AudioUnsupportedError"
+
+export function isAudioUnsupported(error: unknown): boolean {
+	return error instanceof Error && error.name === AUDIO_UNSUPPORTED_ERROR
+}
+
 // A seek or track switch that a newer one replaced before it started. Crosses Comlink by name.
 export const SUPERSEDED_ERROR = "SupersededError"
 

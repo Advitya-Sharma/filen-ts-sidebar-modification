@@ -1,5 +1,6 @@
 import * as Comlink from "comlink"
 import type {
+	PcmStreamInfo,
 	RemuxAudioStart,
 	RemuxAudioStartParams,
 	RemuxEvent,
@@ -11,6 +12,10 @@ import type {
 	TrackKind
 } from "@/lib/media/remuxTypes"
 import { RemuxEngine } from "@/workers/remux/engine"
+import { openAudioInput } from "@/workers/remux/audioInput"
+import { PcmStream } from "@/workers/remux/pcmStream"
+import { WAV_CONTENT_TYPE } from "@/workers/remux/wav.logic"
+import { exposeRangePort } from "@/lib/media/rangePort"
 
 // Remuxes files the browser cannot play as they are (Matroska, or audio it cannot decode) into
 // fragmented MP4 for the page's MediaSource. Its own worker so the demuxer's heap is freed with it once
@@ -72,7 +77,77 @@ async function closeSession(id: number): Promise<void> {
 	}
 }
 
+// The WAV streams being served, by the id openPcm handed out.
+const pcmStreams = new Map<number, AbortController>()
+let nextPcm = 0
+
+function pcmStats(): RemuxStats {
+	return {
+		blockReads: 0,
+		bytesRead: 0,
+		rangeReads: 0,
+		readAheadBlocks: 0,
+		segmentsOut: 0,
+		bytesOut: 0,
+		transcodeSeconds: 0,
+		decodeWaitSeconds: 0,
+		transcodedMediaSeconds: 0
+	}
+}
+
 const api = {
+	// Decodes the audio file `params.port` serves into a WAV stream served by range on `output` (the service
+	// worker reads it there), until the reader closes `output`. Rejects with AudioUnsupportedError when nothing
+	// in the file can be decoded.
+	async openPcm(params: { port: MessagePort; size: number }, output: MessagePort): Promise<PcmStreamInfo> {
+		let stream: PcmStream
+
+		try {
+			const input = await openAudioInput(params.port, params.size)
+
+			try {
+				stream = await PcmStream.open(input, pcmStats())
+			} catch (error) {
+				await input.close()
+
+				throw error
+			}
+		} catch (error) {
+			output.close()
+
+			throw error
+		}
+
+		const lifetime = new AbortController()
+		const { info } = stream
+		const id = nextPcm++
+
+		pcmStreams.set(id, lifetime)
+		lifetime.signal.addEventListener(
+			"abort",
+			() => {
+				pcmStreams.delete(id)
+				void stream.close()
+			},
+			{ once: true }
+		)
+		exposeRangePort(output, (start, end, signal) => stream.read(start, end, signal), lifetime)
+
+		return {
+			id,
+			size: stream.layout.size,
+			contentType: WAV_CONTENT_TYPE,
+			codec: info.codec,
+			duration: info.duration,
+			sampleRate: info.sampleRate,
+			channels: info.channels
+		}
+	},
+	// Ends a stream openPcm opened, whether or not its reader ever closed the port (a registration the service
+	// worker refused leaves nobody reading it).
+	closePcm(id: number): void {
+		pcmStreams.get(id)?.abort()
+	},
 	// Opens `params` under `key` ahead of playback: the head, the index and the first keyframe interval are read
 	// into its cache. The port belongs to the warmed file from now on.
 	async warm(params: RemuxOpenParams, key: string): Promise<void> {

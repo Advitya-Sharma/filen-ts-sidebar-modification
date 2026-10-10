@@ -39,6 +39,10 @@ import {
 	type AudioEngineDeps,
 	type TrackSource
 } from "@/features/audio/lib/engine"
+import { loadedUrl, urlSource } from "@/tests/audioTestSources"
+
+// Every source the engine released, by URL.
+const released: string[] = []
 import type { ElementSample, QueueTrack } from "@/features/audio/store/audioQueue"
 
 function track(uuid: string): QueueTrack {
@@ -83,8 +87,8 @@ function makeFakeElement(): FakeElement {
 	let playImpl: () => Promise<void> = () => Promise.resolve()
 
 	const adapter: AudioElementAdapter = {
-		load: src => {
-			calls.load.push(src)
+		load: source => {
+			calls.load.push(loadedUrl(source))
 		},
 		play: () => {
 			calls.play++
@@ -140,7 +144,7 @@ function makeHarness(extra: Partial<AudioEngineDeps> = {}): Harness {
 	const fake = makeFakeElement()
 	const revoke = vi.fn<(url: string) => void>()
 	const resolveSource = vi.fn<(t: QueueTrack, signal: AbortSignal) => Promise<TrackSource>>(t =>
-		Promise.resolve({ kind: "blob", url: `blob:${t.uuid}`, blob: new Blob() })
+		Promise.resolve(urlSource(`src:${t.uuid}`, released))
 	)
 	let nowValue = 1_000
 	let captured: AudioElementEvents | null = null
@@ -192,6 +196,7 @@ function resetStore(): void {
 }
 
 beforeEach(() => {
+	released.length = 0
 	fakeStore.clear()
 	resetStore()
 })
@@ -204,7 +209,7 @@ describe("enqueueAndPlay", () => {
 		await flush()
 
 		expect(h.resolveSource).toHaveBeenCalledTimes(1)
-		expect(h.fake.calls.load).toEqual(["blob:a"])
+		expect(h.fake.calls.load).toEqual(["src:a"])
 		expect(h.fake.calls.play).toBe(1)
 		expect(useAudioStore.getState().status).toBe("playing")
 		expect(useAudioStore.getState().currentIndex).toBe(0)
@@ -220,8 +225,8 @@ describe("enqueueAndPlay", () => {
 	})
 })
 
-describe("blob-url revoke discipline", () => {
-	it("revokes the outgoing blob url on a track switch", async () => {
+describe("source release discipline", () => {
+	it("releases the outgoing source on a track switch", async () => {
 		const h = makeHarness()
 
 		await h.engine.enqueueAndPlay([track("a"), track("b")], 0)
@@ -229,33 +234,170 @@ describe("blob-url revoke discipline", () => {
 		await h.engine.skipNext()
 		await flush()
 
-		expect(h.revoke).toHaveBeenCalledWith("blob:a")
-		expect(h.fake.calls.load).toEqual(["blob:a", "blob:b"])
+		expect(released).toEqual(["src:a"])
+		expect(h.fake.calls.load).toEqual(["src:a", "src:b"])
 		expect(useAudioStore.getState().currentIndex).toBe(1)
 	})
 
-	it("revokes the live blob url on dispose", async () => {
+	it("releases the live source on dispose", async () => {
 		const h = makeHarness()
 
 		await h.engine.enqueueAndPlay([track("a")], 0)
 		await flush()
 		h.engine.dispose()
 
-		expect(h.revoke).toHaveBeenCalledWith("blob:a")
+		expect(released).toEqual(["src:a"])
 		expect(h.fake.calls.dispose).toBe(1)
 	})
 
-	it("does not revoke a stream source (no page-side cleanup)", async () => {
+	it("releases a source resolved for a load that was superseded meanwhile", async () => {
 		const h = makeHarness()
+		let finishA: ((source: TrackSource) => void) | undefined
 
-		h.resolveSource.mockResolvedValue({ kind: "stream", url: "/sw/download/x" })
+		h.resolveSource.mockImplementation(t =>
+			t.uuid === "a"
+				? new Promise<TrackSource>(resolve => {
+						finishA = resolve
+					})
+				: Promise.resolve(urlSource(`src:${t.uuid}`, released))
+		)
 
-		await h.engine.enqueueAndPlay([track("a"), track("b")], 0)
+		void h.engine.enqueueAndPlay([track("a"), track("b")], 0)
 		await flush()
 		await h.engine.skipNext()
 		await flush()
+		finishA?.(urlSource("src:a", released))
+		await flush()
 
-		expect(h.revoke).not.toHaveBeenCalled()
+		expect(released).toEqual(["src:a"])
+		expect(h.fake.calls.load).toEqual(["src:b"])
+	})
+})
+
+describe("format demotion", () => {
+	it("plays a track again through its other route once the browser cannot decode it as it is", async () => {
+		const onFormatFailure = vi.fn<(track: QueueTrack, stopped: boolean) => void>()
+		const h = makeHarness({ onFormatFailure })
+		const demoted: string[] = []
+
+		h.resolveSource.mockImplementation(t =>
+			Promise.resolve(
+				demoted.includes(t.uuid)
+					? urlSource(`decoded:${t.uuid}`, released)
+					: {
+							...urlSource(`src:${t.uuid}`, released),
+							demote: () => {
+								demoted.push(t.uuid)
+							}
+						}
+			)
+		)
+
+		await h.engine.enqueueAndPlay([track("a"), track("b")], 0)
+		await flush()
+
+		h.events().onError(() => Promise.resolve(mediaFailureDTO("format")))
+		await flush()
+
+		expect(demoted).toEqual(["a"])
+		expect(h.fake.calls.load).toEqual(["src:a", "decoded:a"])
+		expect(released).toEqual(["src:a"])
+		expect(onFormatFailure).not.toHaveBeenCalled()
+		expect(useAudioStore.getState().currentIndex).toBe(0)
+		expect(useAudioStore.getState().status).toBe("playing")
+
+		// The decoded route has no other: its format failure skips as before.
+		h.events().onError(() => Promise.resolve(mediaFailureDTO("format")))
+		await flush()
+
+		expect(onFormatFailure).toHaveBeenCalledOnce()
+		expect(useAudioStore.getState().currentIndex).toBe(1)
+	})
+
+	it("fails a demoted track once when its other route cannot decode it either, never retrying again", async () => {
+		const onFormatFailure = vi.fn<(track: QueueTrack, stopped: boolean) => void>()
+		const h = makeHarness({ onFormatFailure })
+		const demoted: string[] = []
+
+		h.resolveSource.mockImplementation(t =>
+			demoted.includes(t.uuid)
+				? Promise.reject(new ErrorWithDTO(mediaFailureDTO("format")))
+				: Promise.resolve({
+						...urlSource(`src:${t.uuid}`, released),
+						demote: () => {
+							demoted.push(t.uuid)
+						}
+					})
+		)
+
+		await h.engine.enqueueAndPlay([track("a")], 0)
+		await flush()
+
+		h.events().onError(() => Promise.resolve(mediaFailureDTO("format")))
+		await flush()
+
+		expect(demoted).toEqual(["a"])
+		expect(h.resolveSource).toHaveBeenCalledTimes(2)
+		expect(onFormatFailure.mock.calls.map(([failed, stopped]) => [failed.uuid, stopped])).toEqual([["a", true]])
+		expect(useAudioStore.getState().status).toBe("paused")
+		expect(useAudioStore.getState().lastError?.kind).toBe(MEDIA_FORMAT_UNSUPPORTED)
+	})
+
+	it("keeps a paused track paused when it fails as it is, and resumes it through its other route", async () => {
+		const h = makeHarness()
+		const demoted: string[] = []
+		let finish: ((source: TrackSource) => void) | undefined
+
+		h.resolveSource.mockImplementation(t =>
+			demoted.includes(t.uuid)
+				? Promise.resolve(urlSource(`decoded:${t.uuid}`, released))
+				: new Promise<TrackSource>(resolve => {
+						finish = resolve
+					})
+		)
+
+		void h.engine.enqueueAndPlay([track("a")], 0)
+		await flush()
+		// Paused while the source resolves; the bytes land, then the browser fails on their format.
+		h.engine.pause()
+		finish?.({
+			...urlSource("src:a", released),
+			demote: () => {
+				demoted.push("a")
+			}
+		})
+		await flush()
+		h.events().onError(() => Promise.resolve(mediaFailureDTO("format")))
+		await flush()
+
+		expect(demoted).toEqual(["a"])
+		expect(h.fake.calls.play).toBe(0)
+		expect(h.fake.calls.load).toEqual(["src:a"])
+		expect(useAudioStore.getState().status).toBe("paused")
+		expect(useAudioStore.getState().lastError).toBeNull()
+
+		h.engine.resume()
+		await flush()
+
+		expect(h.fake.calls.load).toEqual(["src:a", "decoded:a"])
+		expect(h.fake.calls.play).toBe(1)
+		expect(useAudioStore.getState().status).toBe("playing")
+	})
+
+	it("demotes nothing for a failure that is not the format's", async () => {
+		const h = makeHarness()
+		const demote = vi.fn()
+
+		h.resolveSource.mockImplementation(t => Promise.resolve({ ...urlSource(`src:${t.uuid}`, released), demote }))
+
+		await h.engine.enqueueAndPlay([track("a"), track("b")], 0)
+		await flush()
+
+		h.events().onError(() => Promise.resolve(mediaFailureDTO("other")))
+		await flush()
+
+		expect(demote).not.toHaveBeenCalled()
+		expect(useAudioStore.getState().currentIndex).toBe(1)
 	})
 })
 
@@ -364,7 +506,7 @@ describe("handleTrackEnd", () => {
 		await flush()
 
 		expect(useAudioStore.getState().currentIndex).toBe(1)
-		expect(h.fake.calls.load).toEqual(["blob:a", "blob:b"])
+		expect(h.fake.calls.load).toEqual(["src:a", "src:b"])
 	})
 
 	it("settles at the end of the queue with looping off", async () => {
@@ -392,7 +534,7 @@ describe("handleTrackEnd", () => {
 		expect(useAudioStore.getState().currentIndex).toBe(0)
 		// A reload would re-download and re-decrypt the whole file on every lap.
 		expect(h.resolveSource).toHaveBeenCalledTimes(1)
-		expect(h.fake.calls.load).toEqual(["blob:a"])
+		expect(h.fake.calls.load).toEqual(["src:a"])
 		expect(h.fake.calls.seek).toContain(0)
 		expect(h.fake.calls.play).toBe(2)
 		expect(useAudioStore.getState().status).toBe("playing")
@@ -407,7 +549,7 @@ describe("handleTrackEnd", () => {
 		await flush()
 
 		expect(h.resolveSource).toHaveBeenCalledTimes(1)
-		expect(h.fake.calls.load).toEqual(["blob:a"])
+		expect(h.fake.calls.load).toEqual(["src:a"])
 	})
 })
 
@@ -444,15 +586,15 @@ describe("transport", () => {
 		h.engine.pause()
 		expect(useAudioStore.getState().status).toBe("paused")
 
-		release?.({ kind: "blob", url: "blob:a", blob: new Blob() })
+		release?.(urlSource("src:a", released))
 		await flush()
 
 		expect(useAudioStore.getState().status).toBe("paused")
 		expect(h.fake.calls.play).toBe(0)
 		// The bytes are already downloaded and decrypted — leaving them on the element is what gives the
 		// paused track its duration (a scrubber the user can drag) instead of a dead 0:00 transport.
-		expect(h.fake.calls.load).toEqual(["blob:a"])
-		expect(h.revoke).not.toHaveBeenCalled()
+		expect(h.fake.calls.load).toEqual(["src:a"])
+		expect(released).toEqual([])
 	})
 
 	it("resume after a pause mid-load replays the loaded track instead of re-resolving it", async () => {
@@ -473,17 +615,17 @@ describe("transport", () => {
 		await flush()
 
 		h.engine.pause()
-		release?.({ kind: "blob", url: "blob:b", blob: new Blob() })
+		release?.(urlSource("src:b", released))
 		await flush()
 
-		expect(h.fake.calls.load).toEqual(["blob:a", "blob:b"])
+		expect(h.fake.calls.load).toEqual(["src:a", "src:b"])
 		expect(h.fake.calls.play).toBe(1)
 
 		h.engine.resume()
 		await flush()
 
 		expect(h.resolveSource).toHaveBeenCalledTimes(2)
-		expect(h.fake.calls.load).toEqual(["blob:a", "blob:b"])
+		expect(h.fake.calls.load).toEqual(["src:a", "src:b"])
 		expect(h.fake.calls.play).toBe(2)
 		expect(useAudioStore.getState().currentIndex).toBe(1)
 		expect(useAudioStore.getState().status).toBe("playing")
@@ -527,7 +669,7 @@ describe("transport", () => {
 		expect(useAudioStore.getState().lastError).not.toBeNull()
 		expect(useAudioStore.getState().currentIndex).toBe(0)
 		expect(useAudioStore.getState().status).toBe("paused")
-		expect(h.fake.calls.load).toEqual(["blob:a"])
+		expect(h.fake.calls.load).toEqual(["src:a"])
 	})
 
 	it("pause right after resume neither surfaces an error nor auto-skips", async () => {
@@ -604,14 +746,14 @@ describe("transport", () => {
 		// The element still holds track a — resuming it here would audibly restart the previous track.
 		expect(h.fake.calls.play).toBe(1)
 
-		release?.({ kind: "blob", url: "blob:b", blob: new Blob() })
+		release?.(urlSource("src:b", released))
 		await flush()
 		expect(useAudioStore.getState().status).toBe("paused")
 
 		h.engine.resume()
 		await flush()
 
-		expect(h.fake.calls.load).toEqual(["blob:a", "blob:b"])
+		expect(h.fake.calls.load).toEqual(["src:a", "src:b"])
 		expect(useAudioStore.getState().currentIndex).toBe(1)
 		expect(useAudioStore.getState().status).toBe("playing")
 	})
@@ -697,17 +839,15 @@ describe("shared media volume", () => {
 	})
 })
 
-describe("source download cancellation", () => {
-	it("aborts a superseded load's resolve so its whole-file download stops", async () => {
+describe("source resolve cancellation", () => {
+	it("aborts a superseded load's resolve", async () => {
 		const h = makeHarness()
 		const signals: AbortSignal[] = []
 
 		h.resolveSource.mockImplementation((t, signal) => {
 			signals.push(signal)
 
-			return t.uuid === "a"
-				? new Promise<TrackSource>(() => undefined)
-				: Promise.resolve({ kind: "blob", url: `blob:${t.uuid}`, blob: new Blob() })
+			return t.uuid === "a" ? new Promise<TrackSource>(() => undefined) : Promise.resolve(urlSource(`src:${t.uuid}`, released))
 		})
 
 		void h.engine.enqueueAndPlay([track("a"), track("b")], 0)

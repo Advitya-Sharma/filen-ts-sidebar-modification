@@ -1,68 +1,110 @@
-import { isMediaStreamAvailable, previewStreamUrl, releasePreviewStream } from "@/features/preview/lib/previewStream"
-import { sdkApi } from "@/lib/sdk/client"
-import { runOp } from "@/lib/actions/outcome"
+import {
+	holdPreviewStreamAlive,
+	isMediaStreamAvailable,
+	previewStreamUrl,
+	releasePreviewStream
+} from "@/features/preview/lib/previewStream"
+import { fileTypeExtension } from "@/features/drive/lib/preview.logic"
 import { ErrorWithDTO, type ErrorDTO } from "@/lib/sdk/errors"
-import { classifyMediaError, mediaFailureDTO } from "@/lib/media/mediaFailure"
-import type { BlockSource } from "@/lib/media/blockSource"
+import { classifyMediaError, mediaFailureDTO, type MediaFailureKind } from "@/lib/media/mediaFailure"
+import { BlockSource, urlReadRange } from "@/lib/media/blockSource"
+import { audioDemotions, audioRoute } from "@/lib/media/audioRoute.logic"
+import { audioMediaSource, openDecodedAudioStream } from "@/lib/media/playback/audioStream"
+import { isAudioUnsupported } from "@/lib/media/remuxTypes"
 import type { QueueTrack } from "@/features/audio/store/audioQueue"
 import type { AudioElementAdapter, AudioElementEvents, TrackSource } from "@/features/audio/lib/engine"
 import type { ElementSample } from "@/features/audio/store/audioQueue"
 
 // The browser-only half of the audio engine: the concrete media-element adapter and the track→source
 // resolver. Kept out of engine.ts (which stays node-testable) so the singleton can inject these while
-// the engine's own logic imports nothing that constructs a Worker/DOM element. Mirrors mediaViewer.tsx's
-// own byte-source choice — SW inline stream when available, whole-buffer blob fallback otherwise.
+// the engine's own logic imports nothing that constructs a Worker/DOM element.
 
-// Resolve a track to a playable src. The audio module owns only authed, drive-hosted audio (the anon
-// public-link page keeps its own surface), so this never branches on an anon access mode. The SW route
-// is preferred when a service worker controls the tab AND the file has an allowlisted inline
-// content-type (Range/206-seekable, decrypt-in-SW); otherwise a whole-buffer decrypted download is
-// played back from an object URL the engine revokes on the next track switch. Aborting `signal`
-// cancels that whole-file download in the worker, and a download that already finished is dropped
-// before it is copied into a Blob.
-export async function resolveTrackSource(track: QueueTrack, signal: AbortSignal): Promise<TrackSource> {
-	if (isMediaStreamAvailable() && track.contentType !== null) {
-		const id = crypto.randomUUID()
-		const url = await previewStreamUrl(track.file, track.name, track.contentType, id)
-
-		holdStreamRegistration(id)
-
-		return { kind: "stream", url }
-	}
-
-	signal.throwIfAborted()
-
-	const token = crypto.randomUUID()
-	const cancel = (): void => {
-		void sdkApi.cancelPreviewDownload(token)
-	}
-
-	signal.addEventListener("abort", cancel, { once: true })
-
-	try {
-		const bytes = await runOp(sdkApi.downloadFileBytes(track.file, token))
-
-		signal.throwIfAborted()
-
-		const blob = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: track.mime || "application/octet-stream" })
-
-		return { kind: "blob", url: URL.createObjectURL(blob), blob }
-	} finally {
-		signal.removeEventListener("abort", cancel)
-	}
+function aborted(signal: AbortSignal): never {
+	throw signal.reason instanceof Error ? signal.reason : new DOMException("aborted", "AbortError")
 }
 
-// The engine holds at most two tracks' sources (the one playing and the one warmed next), and every new
-// source replaces the older of them; registrations older than the last two are handed back to the
-// service worker so a long listening session does not keep every past track's entry.
-const STREAM_REGISTRATIONS_HELD = 2
-const heldStreamIds: string[] = []
+// Resolve a track to a streamed source; nothing is ever held whole. With a service worker controlling the
+// tab, a file the browser plays as it is streams through its range route, and one it cannot (Matroska audio,
+// bare AC-3/DTS, a codec the browser lacks, learned from a failure of the file as it is) is decoded in the
+// remux worker into a WAV stream the same route serves, so the element still plays a URL; the service worker
+// is kept from idling out (and losing the registration) for as long as the source lives, paused included.
+// Without one, the remux worker feeds the element through MediaSource. The audio module owns only authed, drive-hosted audio
+// (the anon public-link page keeps its own surface).
+export async function resolveTrackSource(track: QueueTrack, signal: AbortSignal): Promise<TrackSource> {
+	signal.throwIfAborted()
 
-export function holdStreamRegistration(id: string): void {
-	heldStreamIds.push(id)
+	if (isMediaStreamAvailable()) {
+		const route = audioRoute({
+			extension: fileTypeExtension(track.name, track.mime, track.uuid),
+			contentType: track.contentType,
+			demoted: audioDemotions.has(track.uuid)
+		})
 
-	for (const released of heldStreamIds.splice(0, Math.max(0, heldStreamIds.length - STREAM_REGISTRATIONS_HELD))) {
-		releasePreviewStream(released)
+		if (route === "direct" && track.contentType !== null) {
+			const id = crypto.randomUUID()
+			const url = await previewStreamUrl(track.file, track.name, track.contentType, id)
+
+			if (signal.aborted) {
+				releasePreviewStream(id)
+				aborted(signal)
+			}
+
+			const bytes = new BlockSource(Number(track.file.size), urlReadRange(url))
+			const alive = holdPreviewStreamAlive()
+
+			return {
+				media: { kind: "url", url },
+				classify: code => classifyMediaError(code, bytes),
+				release: () => {
+					releasePreviewStream(id)
+					alive()
+				},
+				demote: () => {
+					audioDemotions.add(track.uuid)
+				}
+			}
+		}
+
+		try {
+			const stream = await openDecodedAudioStream({ file: track.file, access: "authed" })
+
+			if (signal.aborted) {
+				stream.release()
+				aborted(signal)
+			}
+
+			const alive = holdPreviewStreamAlive()
+
+			return {
+				media: { kind: "url", url: stream.url },
+				// The stream is decodable by construction: a failure of it is the stream's, not the format's.
+				classify: () => Promise.resolve("other"),
+				release: () => {
+					stream.release()
+					alive()
+				}
+			}
+		} catch (error) {
+			if (isAudioUnsupported(error)) {
+				throw new ErrorWithDTO(mediaFailureDTO("format"))
+			}
+
+			signal.throwIfAborted()
+			// The service worker could not take the stream: MediaSource below.
+		}
+	}
+
+	const media = audioMediaSource({ file: track.file, access: "authed" })
+
+	return {
+		media: {
+			kind: "session",
+			attach: (element, onFailure) => media.attach(element, { onFailure })
+		},
+		classify: () => Promise.resolve("other"),
+		release: () => {
+			media.dispose()
+		}
 	}
 }
 
@@ -74,7 +116,9 @@ export function holdStreamRegistration(id: string): void {
 function createDomAudioAdapterWithPreload(initialEvents: AudioElementEvents, preload: "metadata" | "auto"): AudioElementAdapter {
 	const element = document.createElement("audio")
 	let events = initialEvents
-	let bytes: BlockSource | null = null
+	let source: TrackSource | null = null
+	// A MediaSource session still attaching: playing waits for it, there is nothing to play before.
+	let attaching: Promise<void> | null = null
 	let failure: { error: MediaError; dto: Promise<ErrorDTO> } | null = null
 
 	// One classification per failure of the loaded source, shared by the error event and the play() the
@@ -82,12 +126,12 @@ function createDomAudioAdapterWithPreload(initialEvents: AudioElementEvents, pre
 	function classifyFailure(): Promise<ErrorDTO> | null {
 		const error = element.error
 
-		if (error === null || bytes === null) {
+		if (error === null || source === null) {
 			return null
 		}
 
 		if (failure?.error !== error) {
-			failure = { error, dto: classifyMediaError(error.code, bytes).then(mediaFailureDTO) }
+			failure = { error, dto: source.classify(error.code).then(mediaFailureDTO) }
 		}
 
 		return failure.dto
@@ -124,17 +168,35 @@ function createDomAudioAdapterWithPreload(initialEvents: AudioElementEvents, pre
 	}
 
 	return {
-		load: (src, source) => {
-			bytes = source
-			element.src = src
-			element.load()
+		load: next => {
+			source = next
+			failure = null
+
+			if (next.media.kind === "url") {
+				attaching = null
+				element.src = next.media.url
+				element.load()
+
+				return
+			}
+
+			element.removeAttribute("src")
+			// A failure the session detects itself, while it is still the element's source.
+			attaching = next.media.attach(element, (kind: MediaFailureKind) => {
+				if (source === next) {
+					events.onError(() => Promise.resolve(source === next ? mediaFailureDTO(kind) : null))
+				}
+			})
 		},
 		// A rejection carries the element's own classified failure where there is one, so a source the
 		// browser cannot play reports its format, whichever of this and the error event comes first.
-		play: () =>
-			element.play().catch(async () => {
+		play: async () => {
+			await attaching
+
+			await element.play().catch(async () => {
 				throw new ErrorWithDTO((await classifyFailure()) ?? mediaFailureDTO("other"))
-			}),
+			})
+		},
 		pause: () => {
 			element.pause()
 		},
@@ -163,8 +225,8 @@ function createDomAudioAdapterWithPreload(initialEvents: AudioElementEvents, pre
 }
 
 // The main playback element — created lazily by the engine, never mounted in JSX, so it survives every
-// route change. `preload="metadata"` avoids eagerly streaming the whole file; both the SW route
-// (Range/206) and a blob URL (in-memory random access) still seek past that point.
+// route change. `preload="metadata"` avoids eagerly streaming the whole file; the SW route (Range/206) and a
+// MediaSource session both seek past that point.
 export function createDomAudioAdapter(events: AudioElementEvents): AudioElementAdapter {
 	return createDomAudioAdapterWithPreload(events, "metadata")
 }

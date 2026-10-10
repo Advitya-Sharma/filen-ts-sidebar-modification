@@ -92,9 +92,12 @@ const EXTENSION_CATEGORIES: ReadonlyMap<string, PreviewCategory> = buildExtensio
 	// MKV and transport streams play through the remux worker. A `.ts`/`.mts` reads as one only once a read
 	// of its content said so (resolveFileKind hands such a file over as "m2ts").
 	[["mp4", "webm", "mkv", "mov", "m4v", "m2ts"], "video"],
-	// AIFF and CAF play natively in Safari (through the service worker's route); elsewhere they fail with
-	// their codec named.
-	[["mp3", "m4a", "aac", "wav", "ogg", "oga", "weba", "flac", "opus", "aiff", "aif", "caf"], "audio"],
+	// AIFF and CAF play natively in Safari (through the service worker's route); elsewhere they fail.
+	// Matroska audio and bare AC-3, E-AC-3 and DTS streams play decoded in the remux worker.
+	[
+		["mp3", "m4a", "m4b", "aac", "wav", "ogg", "oga", "weba", "flac", "opus", "aiff", "aif", "caf", "mka", "ac3", "eac3", "ec3", "dts"],
+		"audio"
+	],
 	[["pdf"], "pdf"],
 	[["docx"], "docx"],
 	[SPREADSHEET_EXTENSIONS, "spreadsheet"],

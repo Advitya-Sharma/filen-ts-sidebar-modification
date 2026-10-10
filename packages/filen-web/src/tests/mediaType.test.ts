@@ -94,6 +94,16 @@ describe("allowedMediaContentType", () => {
 		expect(allowedMediaContentType(fileNamed("photo.jpg", undefined))).toBeNull()
 	})
 
+	it("serves an audio file stored without a type, or a generic binary one, as its extension says", () => {
+		expect(allowedMediaContentType(fileNamed("track.mp3", undefined))).toBe("audio/mpeg")
+		expect(allowedMediaContentType(fileNamed("track.mp3", "application/octet-stream"))).toBe("audio/mpeg")
+		expect(allowedMediaContentType(fileNamed("book.m4b", "application/octet-stream"))).toBe("audio/mp4")
+		// A specific type still decides, and only extensions the browser may play as they are get one.
+		expect(allowedMediaContentType(fileNamed("track.mp3", "text/html"))).toBeNull()
+		expect(allowedMediaContentType(fileNamed("film.mka", "application/octet-stream"))).toBeNull()
+		expect(allowedMediaContentType(fileNamed("clip.mp4", "application/octet-stream"))).toBeNull()
+	})
+
 	it("rejects an undecryptable file", () => {
 		expect(allowedMediaContentType(fileNamed("clip.mp4", "video/mp4", { undecryptable: true }))).toBeNull()
 	})

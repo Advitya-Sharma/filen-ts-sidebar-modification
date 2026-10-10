@@ -1,7 +1,6 @@
 import { asErrorDTO, type ErrorDTO } from "@/lib/sdk/errors"
 import { useMediaVolumeStore, type MediaVolume } from "@/lib/media/mediaVolume"
-import { BlockSource, blobReadRange, urlReadRange } from "@/lib/media/blockSource"
-import { MEDIA_FORMAT_UNSUPPORTED } from "@/lib/media/mediaFailure"
+import { MEDIA_FORMAT_UNSUPPORTED, type MediaFailureKind } from "@/lib/media/mediaFailure"
 import { useAudioStore } from "@/features/audio/store/useAudioStore"
 import {
 	buildShuffleOrder,
@@ -23,7 +22,7 @@ import { backfillTrackDuration, getTrackTags } from "@/features/audio/store/useT
 import { COVER_THUMBNAIL_TYPE } from "@/features/audio/lib/trackTags.logic"
 
 // The module-level playback engine — a singleton lib (constructed in audioEngine.ts with the real DOM
-// adapter + SW/blob source resolver), NOT a React component, mirroring sdkApi and the mobile Audio
+// adapter + streaming source resolver), NOT a React component, mirroring sdkApi and the mobile Audio
 // class. It owns exactly one media element for the app's life and drives the zustand store; the store
 // drives the UI. All element interaction goes through an injected adapter so the whole engine is
 // unit-testable in node, where an <audio> element cannot be constructed — the real adapter is exercised
@@ -52,8 +51,8 @@ export interface AudioElementEvents {
 // to the real playback events at the instant it is promoted to "now playing", preserving whatever the
 // browser already buffered/decoded instead of reloading from scratch.
 export interface AudioElementAdapter {
-	// `bytes` reads the same file, for classifying a failure of it.
-	load: (src: string, bytes: BlockSource) => void
+	// Hands the element the source's media; the source also classifies the element's failures.
+	load: (source: TrackSource) => void
 	play: () => Promise<void>
 	pause: () => void
 	seek: (seconds: number) => void
@@ -67,18 +66,28 @@ export interface AudioElementAdapter {
 
 export type AudioElementFactory = (events: AudioElementEvents) => AudioElementAdapter
 
-// A resolved playable source. A "blob" url is an object URL the engine owns and must revoke on the next
-// track switch / dispose; a "stream" url is an SW-served route that needs no page-side cleanup. A blob
-// source carries its Blob so a local read uses the bytes already in memory: fetching a blob: URL is
-// refused by the CSP's connect-src.
-export type TrackSource = { kind: "stream"; url: string } | { kind: "blob"; url: string; blob: Blob }
+// A resolved playable source, always streamed: a URL the service worker serves (the file as it is, or its
+// audio decoded into a WAV stream), or a MediaSource session the element is attached to where no service
+// worker serves the page. The engine owns it from resolve to `release` (a track switch, a torn-down warm-up,
+// dispose), which hands back whatever it holds.
+export interface TrackSource {
+	media:
+		| { kind: "url"; url: string }
+		// `onFailure` reports a failure the session itself detected, classified.
+		| { kind: "session"; attach: (element: HTMLMediaElement, onFailure: (kind: MediaFailureKind) => void) => Promise<void> }
+	// Tells a format failure from a broken stream, given the element's MediaError code.
+	classify: (code: number) => Promise<MediaFailureKind>
+	release: () => void
+	// Present when a format failure of this source has another route to try: records the failure, so the
+	// file resolves to that route from now on.
+	demote?: () => void
+}
 
 export interface AudioEngineDeps {
 	createElement: AudioElementFactory
-	// `signal` aborts once the engine no longer wants the source (superseded load, torn-down prefetch),
-	// so a whole-file download still in flight stops instead of finishing for nothing.
+	// `signal` aborts once the engine no longer wants the source (superseded load, torn-down prefetch).
 	resolveSource: (track: QueueTrack, signal: AbortSignal) => Promise<TrackSource>
-	// Injectable purely so tests can spy on blob revocation; production uses URL.revokeObjectURL.
+	// Injectable purely so tests can spy on cover URL revocation; production uses URL.revokeObjectURL.
 	revokeObjectUrl?: (url: string) => void
 	// Injectable clock for the position throttle, so a test can drive it deterministically.
 	now?: () => number
@@ -95,7 +104,7 @@ export interface AudioEngineDeps {
 	// tags in the track-tag store, which is where the engine reads them from. Same opt-in-by-presence
 	// pattern as createPrefetchElement — absent in tests that don't care about metadata. `null` means the
 	// track could not be read this time (not "no cover"), so a later load asks again.
-	resolveCover?: (track: QueueTrack, source: TrackSource) => Promise<{ cover: Blob | null } | null>
+	resolveCover?: (track: QueueTrack) => Promise<{ cover: Blob | null } | null>
 	// A track failed because the browser cannot play its format; `stopped` when playback stopped on it
 	// rather than skipping past it.
 	onFormatFailure?: (track: QueueTrack, stopped: boolean) => void
@@ -111,13 +120,6 @@ function defaultRevoke(url: string): void {
 	}
 }
 
-// The track's bytes: the blob already in memory, or ranges of the stream the element plays.
-function trackBytes(source: TrackSource, track: QueueTrack): BlockSource {
-	return source.kind === "blob"
-		? new BlockSource(source.blob.size, blobReadRange(source.blob))
-		: new BlockSource(Number(track.file.size), urlReadRange(source.url))
-}
-
 function applyOutput(element: AudioElementAdapter, output: MediaVolume): void {
 	element.setVolume(output.volume)
 	element.setMuted(output.muted)
@@ -126,8 +128,11 @@ function applyOutput(element: AudioElementAdapter, output: MediaVolume): void {
 export class AudioEngine {
 	private readonly deps: AudioEngineDeps
 	private element: AudioElementAdapter | null = null
-	// The object URL of the currently-loaded blob source, if any — revoked on switch/dispose.
-	private currentBlobUrl: string | null = null
+	// The source the main element plays, released on switch/dispose.
+	private currentSource: TrackSource | null = null
+	// Sources already demoted: a format failure after that (the other route cannot decode the file either) is
+	// final, never another retry.
+	private readonly demoted = new WeakSet<TrackSource>()
 	// The uuid of the track whose bytes the main element currently holds. Identity is the uuid, not the
 	// queue index, because indices shift under queue mutations. `null` means the element holds nothing
 	// playable, so anything that would resume/replay "what is loaded" must load first.
@@ -150,7 +155,7 @@ export class AudioEngine {
 	// "nothing warmed" (no prefetch dep, queue end, or the warm-up itself failed/was superseded).
 	private prefetchElement: AudioElementAdapter | null = null
 	private prefetchIndex: number | null = null
-	private prefetchBlobUrl: string | null = null
+	private prefetchSource: TrackSource | null = null
 	// Bumped on every schedulePrefetch call so a superseded in-flight resolve (a jump/shuffle-rebuild
 	// landed before the previous prefetch resolved) detects it and discards its result instead of
 	// warming a now-stale target.
@@ -281,22 +286,51 @@ export class AudioEngine {
 		}
 
 		const factory = this.deps.createPrefetchElement ?? this.deps.createElement
+		// The element these events belong to, so a late error from one already torn down touches nothing.
+		const own: { element: AudioElementAdapter | null } = { element: null }
 		const element = factory({
 			onTimeUpdate: () => undefined,
 			onDurationChange: () => undefined,
 			onEnded: () => undefined,
-			onError: () => {
+			onError: failure => {
+				const failed = this.prefetchElement
+				const source = this.prefetchSource
+
+				if (failed === null || failed !== own.element) {
+					return
+				}
+
+				// Out of the slot at once, so nothing promotes an element that failed: the track loads cold when it
+				// comes up. The element and its source are kept until the failure is classified (emptying the
+				// element clears its error, releasing the source takes the stream the classification reads); a
+				// format the browser cannot play makes the track resolve to its other route.
+				this.prefetchElement = null
+				this.prefetchSource = null
 				this.teardownPrefetch()
+				void failure()
+					.then(error => {
+						if (error?.kind === MEDIA_FORMAT_UNSUPPORTED) {
+							source?.demote?.()
+						}
+					})
+					.catch(() => undefined)
+					.finally(() => {
+						failed.pause()
+						failed.clear()
+						failed.dispose()
+						source?.release()
+					})
 			}
 		})
 
+		own.element = element
 		applyOutput(element, useMediaVolumeStore.getState())
 		this.prefetchElement = element
 
 		return element
 	}
 
-	// Tears down whatever is currently warmed (element paused/cleared/disposed, its blob URL revoked) and
+	// Tears down whatever is currently warmed (element paused/cleared/disposed, its source released) and
 	// forgets which index it held. Safe to call when nothing is warmed. Called before every reschedule —
 	// this module keeps at most ONE element ahead, never more. Also bumps the generation counter so a
 	// schedulePrefetch continuation still awaiting resolveSource when the teardown ran can never
@@ -314,10 +348,8 @@ export class AudioEngine {
 		this.prefetchElement = null
 		this.prefetchIndex = null
 
-		if (this.prefetchBlobUrl !== null) {
-			this.revoke(this.prefetchBlobUrl)
-			this.prefetchBlobUrl = null
-		}
+		this.prefetchSource?.release()
+		this.prefetchSource = null
 	}
 
 	// Re-derives "what should be warmed next" from the live queue/nav state and, if it differs from what
@@ -374,24 +406,19 @@ export class AudioEngine {
 		}
 
 		if (generation !== this.prefetchGeneration) {
-			if (source.kind === "blob") {
-				this.revoke(source.url)
-			}
+			source.release()
 
 			return
 		}
 
 		this.prefetchPendingIndex = null
 
-		this.scheduleMetadata(track, source)
+		this.scheduleMetadata(track)
 
 		const element = this.ensurePrefetchElement()
 
-		if (source.kind === "blob") {
-			this.prefetchBlobUrl = source.url
-		}
-
-		element.load(source.url, trackBytes(source, track))
+		this.prefetchSource = source
+		element.load(source)
 		this.prefetchIndex = advance.index
 	}
 
@@ -416,18 +443,13 @@ export class AudioEngine {
 		// Detach bookkeeping from the prefetch slot before touching the element — teardownPrefetch would
 		// otherwise dispose the very element being promoted.
 		this.prefetchElement = null
-		const promotedBlobUrl = this.prefetchIndex === index ? this.prefetchBlobUrl : null
+		const promotedSource = this.prefetchIndex === index ? this.prefetchSource : null
 		this.prefetchIndex = null
-		this.prefetchBlobUrl = null
+		this.prefetchSource = null
 		this.prefetchAbort = null
 
 		promoted.rebind(this.playbackEvents())
-
-		if (this.currentBlobUrl !== null && this.currentBlobUrl !== promotedBlobUrl) {
-			this.revoke(this.currentBlobUrl)
-		}
-
-		this.currentBlobUrl = promotedBlobUrl
+		this.swapSource(promotedSource)
 
 		const outgoing = this.element
 
@@ -463,7 +485,7 @@ export class AudioEngine {
 	// either it has no cover or its cover is still in the cache; a cover the LRU evicted is read again,
 	// from the thumbnail cache when it is there, so a revisit normally costs no download. A no-op when no
 	// resolveCover dep was supplied.
-	private scheduleMetadata(track: QueueTrack, source: TrackSource): void {
+	private scheduleMetadata(track: QueueTrack): void {
 		if (!this.deps.resolveCover) {
 			return
 		}
@@ -474,7 +496,7 @@ export class AudioEngine {
 			return
 		}
 
-		void this.deps.resolveCover(track, source).then(result => {
+		void this.deps.resolveCover(track).then(result => {
 			if (result === null) {
 				return
 			}
@@ -555,10 +577,10 @@ export class AudioEngine {
 	}
 
 	// Move to `index` and start it. If it is already warmed by the prefetch element, promote it instead
-	// (no re-resolve, no reload). Otherwise the cold-start path: resolve a source (SW stream or
-	// whole-buffer blob), swap the element's src, play. Every await re-checks the generation so a
-	// superseding load/skip/dispose bails cleanly; a source resolved for a superseded load still has its
-	// blob URL freed. A pause is NOT a supersede: the resolved bytes still land on the element, only the
+	// (no re-resolve, no reload). Otherwise the cold-start path: resolve a source (a service worker stream,
+	// or a MediaSource session without one), swap it onto the element, play. Every await re-checks the
+	// generation so a superseding load/skip/dispose bails cleanly; a source resolved for a superseded load is
+	// released. A pause is NOT a supersede: the resolved bytes still land on the element, only the
 	// playing is dropped. A resolve error or a rejected play() routes into the bounded auto-skip.
 	private async loadAndPlay(index: number): Promise<void> {
 		if (index === this.prefetchIndex && this.prefetchElement) {
@@ -601,19 +623,17 @@ export class AudioEngine {
 		}
 
 		if (generation !== this.loadGeneration) {
-			if (source.kind === "blob") {
-				this.revoke(source.url)
-			}
+			source.release()
 
 			return
 		}
 
-		this.scheduleMetadata(track, source)
+		this.scheduleMetadata(track)
 
 		const element = this.ensureElement()
 
-		this.swapBlobUrl(source)
-		element.load(source.url, trackBytes(source, track))
+		this.swapSource(source)
+		element.load(source)
 		this.loadedTrackUuid = track.uuid
 
 		// Paused while this was resolving: the bytes stay on the element — that is what gives the paused
@@ -626,22 +646,23 @@ export class AudioEngine {
 		await this.playAndSettle(element, generation, pauseGeneration)
 	}
 
-	// Revoke the outgoing blob URL when it is being replaced, and remember the new one (or null for a
-	// stream source, which needs no cleanup).
-	private swapBlobUrl(source: TrackSource): void {
-		const nextBlobUrl = source.kind === "blob" ? source.url : null
-
-		if (this.currentBlobUrl !== null && this.currentBlobUrl !== nextBlobUrl) {
-			this.revoke(this.currentBlobUrl)
+	// Releases the outgoing source when another replaces it (or none, `null`).
+	private swapSource(source: TrackSource | null): void {
+		if (this.currentSource !== null && this.currentSource !== source) {
+			this.currentSource.release()
 		}
 
-		this.currentBlobUrl = nextBlobUrl
+		this.currentSource = source
 	}
 
 	// A track failed to load or play. Surface it LABEL-FIRST, then bounded auto-skip: increment the
 	// guard, and once a full pass over the queue is exhausted settle instead of spinning. Otherwise
 	// advance to the next track and try it.
 	private onPlaybackFailure(error: ErrorDTO): void {
+		if (this.retryDemoted(error)) {
+			return
+		}
+
 		const state = useAudioStore.getState()
 		const track = state.queue[state.currentIndex] ?? null
 
@@ -670,6 +691,44 @@ export class AudioEngine {
 
 		this.applyAdvance(advance)
 		void this.loadAndPlay(advance.index)
+	}
+
+	// The browser cannot play the current track as it is, but its source has another route (its audio
+	// decoded): the source is demoted and the track loaded again, from where it stood. Once only: the route
+	// it falls back to has none.
+	private retryDemoted(error: ErrorDTO): boolean {
+		const source = this.currentSource
+		const state = useAudioStore.getState()
+
+		if (
+			error.kind !== MEDIA_FORMAT_UNSUPPORTED ||
+			source?.demote === undefined ||
+			this.demoted.has(source) ||
+			state.queue[state.currentIndex]?.uuid !== this.loadedTrackUuid
+		) {
+			return false
+		}
+
+		this.demoted.add(source)
+		source.demote()
+
+		// Paused (the user paused while the track loaded): nothing plays now; the element no longer counts as
+		// holding the track, so resuming loads it again, through the route it now resolves to.
+		if (state.status === "paused") {
+			this.loadedTrackUuid = null
+
+			return true
+		}
+
+		const resumeAt = this.element?.sample().currentTimeMs ?? 0
+
+		void this.loadAndPlay(state.currentIndex).then(() => {
+			if (resumeAt > 0 && useAudioStore.getState().queue[useAudioStore.getState().currentIndex]?.uuid === this.loadedTrackUuid) {
+				this.element?.seek(resumeAt / 1000)
+			}
+		})
+
+		return true
 	}
 
 	private reportFormatFailure(error: ErrorDTO, track: QueueTrack | null, stopped: boolean): void {
@@ -738,11 +797,10 @@ export class AudioEngine {
 		await this.loadAndPlay(advance.index)
 	}
 
-	// Loop "one": replay the element in place. Reloading would re-resolve the source on every lap — a
-	// full re-download and re-decrypt of the file on the blob path, a fresh SW registration on the stream
-	// path — and throw away whatever the browser had already buffered. Prefetch can never cover this: it
-	// warms what comes AFTER the current track. Falls back to a cold load only when the element no longer
-	// holds this track.
+	// Loop "one": replay the element in place. Reloading would re-resolve the source on every lap — a fresh
+	// SW registration, or a fresh decode — and throw away whatever the browser had already buffered.
+	// Prefetch can never cover this: it warms what comes AFTER the current track. Falls back to a cold load
+	// only when the element no longer holds this track.
 	private async repeatCurrent(index: number): Promise<void> {
 		const element = this.element
 		const track = useAudioStore.getState().queue[index]
@@ -933,7 +991,7 @@ export class AudioEngine {
 	}
 
 	// Empty the queue and stop — the mini-player disappears (the shell renders it only for a non-empty
-	// queue). Supersedes any in-flight load, revokes the live blob URL, and clears the OS metadata; the
+	// queue). Supersedes any in-flight load, releases the live source, and clears the OS metadata; the
 	// persisted shuffle/loop prefs survive (store.reset keeps them).
 	public clearQueue(): void {
 		this.bumpLoadGeneration()
@@ -942,10 +1000,7 @@ export class AudioEngine {
 		this.loadedTrackUuid = null
 		this.teardownPrefetch()
 
-		if (this.currentBlobUrl !== null) {
-			this.revoke(this.currentBlobUrl)
-			this.currentBlobUrl = null
-		}
+		this.swapSource(null)
 
 		this.skipGuard = 0
 		this.lastPositionWriteAt = 0
@@ -1011,8 +1066,8 @@ export class AudioEngine {
 		}
 	}
 
-	// Full teardown on logout: supersede any in-flight load, stop + tear down the element, revoke the
-	// live blob URL, and clear the store. Nothing leaks across sessions.
+	// Full teardown on logout: supersede any in-flight load, stop + tear down the element, release the
+	// live source, and clear the store. Nothing leaks across sessions.
 	public dispose(): void {
 		this.bumpLoadGeneration()
 
@@ -1030,10 +1085,7 @@ export class AudioEngine {
 		this.teardownPrefetch()
 		this.coverCache.clear()
 
-		if (this.currentBlobUrl !== null) {
-			this.revoke(this.currentBlobUrl)
-			this.currentBlobUrl = null
-		}
+		this.swapSource(null)
 
 		this.skipGuard = 0
 		this.lastPositionWriteAt = 0

@@ -2,7 +2,7 @@
 // build-ffmpeg-decoders.sh (--extern-post-js). One worker serves every open decoder; requests are answered
 // in the order they arrive.
 //
-//   { id, type: "open", codec: "ac3" | "eac3" | "dts" }        -> { id, handle }
+//   { id, type: "open", codec, extradata? }                      -> { id, handle }   (codec: a CODECS key)
 //   { id, type: "decode", handle, data, timestampUs }           -> { id, frames }
 //   { id, type: "flush", handle }                                -> { id, frames }
 //   { id, type: "close", handle }                                -> { id }
@@ -17,7 +17,7 @@
 ;(() => {
 	"use strict"
 
-	const CODECS = { ac3: 0, eac3: 1, dts: 2 }
+	const CODECS = { ac3: 0, eac3: 1, dts: 2, truehd: 3, alac: 4, flac: 5 }
 	// Indexed by AVSampleFormat: [AudioSampleFormat, bytes per sample, planar]. Doubles and 64-bit integers
 	// have no AudioSampleFormat, and none of these decoders produces them.
 	const FORMATS = [
@@ -104,7 +104,20 @@
 					throw new Error(`no FFmpeg decoder for ${String(request.codec)}`)
 				}
 
-				const handle = module._decoder_open(CODECS[request.codec])
+				// The codec configuration (ALAC's magic cookie), copied into a buffer the decoder then owns; an empty
+				// one is none.
+				const config = request.extradata === undefined || request.extradata.byteLength === 0 ? null : new Uint8Array(request.extradata)
+				const extradata = config === null ? 0 : module._decoder_extradata(config.length)
+
+				if (config !== null) {
+					if (extradata === 0) {
+						throw new Error("out of memory for an FFmpeg codec configuration")
+					}
+
+					module.HEAPU8.set(config, extradata)
+				}
+
+				const handle = module._decoder_open(CODECS[request.codec], extradata, config === null ? 0 : config.length)
 
 				if (handle === 0) {
 					throw new Error(`cannot open an FFmpeg ${request.codec} decoder`)

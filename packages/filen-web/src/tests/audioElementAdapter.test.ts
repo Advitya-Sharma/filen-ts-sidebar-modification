@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest"
 
-vi.mock("@/features/preview/lib/previewStream", () => ({ isMediaStreamAvailable: () => false, previewStreamUrl: vi.fn() }))
-vi.mock("@/lib/sdk/client", () => ({ sdkApi: { downloadFileBytes: vi.fn(), cancelPreviewDownload: vi.fn() } }))
+vi.mock("@/features/preview/lib/previewStream", () => ({
+	isMediaStreamAvailable: () => false,
+	previewStreamUrl: vi.fn(),
+	releasePreviewStream: vi.fn(),
+	holdPreviewStreamAlive: () => () => undefined
+}))
+vi.mock("@/lib/media/playback/audioStream", () => ({ audioMediaSource: vi.fn(), openDecodedAudioStream: vi.fn() }))
 
 import { createDomAudioAdapter } from "@/features/audio/lib/bytes"
-import type { AudioElementEvents } from "@/features/audio/lib/engine"
+import type { AudioElementEvents, TrackSource } from "@/features/audio/lib/engine"
 import { BlockSource, type ReadRange } from "@/lib/media/blockSource"
-import { MEDIA_FORMAT_UNSUPPORTED, MEDIA_PLAYBACK_FAILED } from "@/lib/media/mediaFailure"
+import { classifyMediaError, MEDIA_FORMAT_UNSUPPORTED, MEDIA_PLAYBACK_FAILED, type MediaFailureKind } from "@/lib/media/mediaFailure"
 import { asErrorDTO, type ErrorDTO } from "@/lib/sdk/errors"
 
 const MEDIA_ERR_SRC_NOT_SUPPORTED = 4
@@ -58,10 +63,18 @@ function makeAdapter(): {
 	}
 }
 
-function readableBytes(): { source: BlockSource; read: ReturnType<typeof vi.fn<ReadRange>> } {
+function readableBytes(): { source: TrackSource; read: ReturnType<typeof vi.fn<ReadRange>> } {
 	const read = vi.fn<ReadRange>((start, end) => Promise.resolve(new Uint8Array(end - start)))
+	const blocks = new BlockSource(64, read)
 
-	return { source: new BlockSource(64, read), read }
+	return {
+		source: {
+			media: { kind: "url", url: "/sw/download/a" },
+			classify: code => classifyMediaError(code, blocks),
+			release: () => undefined
+		},
+		read
+	}
 }
 
 describe("DOM audio adapter — failures", () => {
@@ -69,7 +82,7 @@ describe("DOM audio adapter — failures", () => {
 		const { element, failures, adapter, setError } = makeAdapter()
 		const { source, read } = readableBytes()
 
-		adapter.load("/sw/download/a", source)
+		adapter.load(source)
 		setError(MEDIA_ERR_SRC_NOT_SUPPORTED)
 		element.dispatchEvent(new Event("error"))
 
@@ -87,7 +100,7 @@ describe("DOM audio adapter — failures", () => {
 	it("reports nothing for a failure of a source the element has since replaced", async () => {
 		const { element, failures, adapter, setError } = makeAdapter()
 
-		adapter.load("/sw/download/a", readableBytes().source)
+		adapter.load(readableBytes().source)
 		setError(MEDIA_ERR_SRC_NOT_SUPPORTED)
 		element.dispatchEvent(new Event("error"))
 		setError(null)
@@ -98,7 +111,7 @@ describe("DOM audio adapter — failures", () => {
 	it("rejects a play() refused for any other reason as a playback failure", async () => {
 		const { adapter } = makeAdapter()
 
-		adapter.load("/sw/download/a", readableBytes().source)
+		adapter.load(readableBytes().source)
 
 		const error = await adapter.play().then(
 			() => null,
@@ -106,5 +119,34 @@ describe("DOM audio adapter — failures", () => {
 		)
 
 		expect(error?.kind).toBe(MEDIA_PLAYBACK_FAILED)
+	})
+})
+
+describe("DOM audio adapter — MediaSource sources", () => {
+	it("plays only once the session is attached, and reports what the session detects as the source's failure", async () => {
+		const { element, failures, adapter } = makeAdapter()
+		const attached = Promise.withResolvers<undefined>()
+		const report: { fail: ((kind: MediaFailureKind) => void) | null } = { fail: null }
+		const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => Promise.resolve())
+		const attach = vi.fn((target: HTMLMediaElement, onFailure: (kind: MediaFailureKind) => void) => {
+			expect(target).toBe(element)
+			report.fail = onFailure
+
+			return attached.promise
+		})
+
+		adapter.load({ media: { kind: "session", attach }, classify: () => Promise.resolve("other"), release: () => undefined })
+
+		const playing = adapter.play()
+
+		await Promise.resolve()
+		expect(play).not.toHaveBeenCalled()
+
+		attached.resolve(undefined)
+		await playing
+		expect(play).toHaveBeenCalledOnce()
+
+		report.fail?.("format")
+		expect((await failures[0]?.())?.kind).toBe(MEDIA_FORMAT_UNSUPPORTED)
 	})
 })
