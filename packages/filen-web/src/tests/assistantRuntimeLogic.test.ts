@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
-import { describe, expect, it } from "vitest"
-import { recommendRuntime, storageVerdict, type DeviceProbe } from "@/features/assistant/runtime/deviceCheck"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { probeDevice, recommendRuntime, storageVerdict, type DeviceProbe } from "@/features/assistant/runtime/deviceCheck"
 import { manifestBytes, modelFileUrl, parseManifest, type AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import { QWEN35_4B } from "@/features/assistant/runtime/models"
 import { readGgufSpecialTokens } from "@/features/assistant/runtime/gguf"
@@ -82,8 +82,64 @@ describe("recommendRuntime", () => {
 		// Neither a GPU nor threads: a 4B model would crawl.
 		expect(recommendRuntime(probe({ webgpu: null, crossOriginIsolated: false }))).toMatchObject({
 			supported: false,
-			reason: "unsupported-browser"
+			reason: "unsupported-browser",
+			gpuCouldHelp: true
 		})
+	})
+
+	it("expects no help from a GPU the engine would not use", () => {
+		expect(recommendRuntime(probe({ userAgent: FIREFOX_WIN, webgpu: null, crossOriginIsolated: false }))).toMatchObject({
+			supported: false,
+			gpuCouldHelp: false
+		})
+		expect(
+			recommendRuntime(
+				probe({ webgpu: null, crossOriginIsolated: false, wasm: { simd: true, exceptions: true, memory64: true, jspi: false } })
+			)
+		).toMatchObject({ supported: false, gpuCouldHelp: false })
+	})
+})
+
+describe("probeDevice", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals()
+	})
+
+	function stubBrowser(userAgent: string) {
+		const requestAdapter = vi.fn(() =>
+			Promise.resolve({
+				info: { isFallbackAdapter: false },
+				limits: { maxBufferSize: 4 * GIB, maxStorageBufferBindingSize: 2 * GIB }
+			})
+		)
+
+		vi.stubGlobal("navigator", {
+			userAgent,
+			hardwareConcurrency: 10,
+			storage: { getDirectory: () => Promise.resolve(null) },
+			gpu: { requestAdapter }
+		})
+
+		return requestAdapter
+	}
+
+	it("reads the adapter's limits when asked", async () => {
+		const requestAdapter = stubBrowser(CHROME_MAC)
+
+		expect((await probeDevice({ gpu: true })).webgpu).toEqual({
+			fallback: false,
+			maxBufferSize: 4 * GIB,
+			maxStorageBufferBindingSize: 2 * GIB
+		})
+		expect(requestAdapter).toHaveBeenCalledOnce()
+	})
+
+	// Firefox runs on the CPU path either way; asking would only start its GPU process (and log a blocklist warning).
+	it("never asks Firefox for an adapter", async () => {
+		const requestAdapter = stubBrowser(FIREFOX_WIN)
+
+		expect((await probeDevice({ gpu: true })).webgpu).toBeNull()
+		expect(requestAdapter).not.toHaveBeenCalled()
 	})
 })
 

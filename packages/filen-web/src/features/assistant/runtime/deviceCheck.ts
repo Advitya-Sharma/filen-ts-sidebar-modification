@@ -56,6 +56,11 @@ const MIN_DEVICE_MEMORY_GIB = 8
 
 const MAX_THREADS = 8
 
+// Firefox's WebGPU runs this engine far slower than its CPU path, so its adapter is never asked for.
+function gpuConsidered(userAgent: string): boolean {
+	return parseUserAgent(userAgent).browser !== "Firefox"
+}
+
 export function recommendRuntime(probe: DeviceProbe): RuntimeRecommendation {
 	const { wasm } = probe
 	const agent = parseUserAgent(probe.userAgent)
@@ -85,10 +90,9 @@ export function recommendRuntime(probe: DeviceProbe): RuntimeRecommendation {
 
 	const threads = probe.crossOriginIsolated ? Math.max(1, Math.min(MAX_THREADS, Math.floor(probe.hardwareConcurrency / 2))) : 1
 	const gpu = probe.webgpu
-	// Firefox's WebGPU runs this engine far slower than its CPU path.
 	const gpuUsable =
 		wasm.jspi &&
-		agent.browser !== "Firefox" &&
+		gpuConsidered(probe.userAgent) &&
 		gpu !== null &&
 		!gpu.fallback &&
 		gpu.maxBufferSize >= MIN_GPU_BINDING_BYTES &&
@@ -100,7 +104,12 @@ export function recommendRuntime(probe: DeviceProbe): RuntimeRecommendation {
 
 	// One thread decodes a 4B model at around a token per second: not usable.
 	if (threads < 2) {
-		return { supported: false, reason: "unsupported-browser", detail: "no WebGPU and no WebAssembly threads", gpuCouldHelp: true }
+		return {
+			supported: false,
+			reason: "unsupported-browser",
+			detail: "no WebGPU and no WebAssembly threads",
+			gpuCouldHelp: wasm.jspi && gpuConsidered(probe.userAgent)
+		}
 	}
 
 	return { supported: true, backend: "cpu", threads, estimatedSpeed: threads >= 6 ? "moderate" : "slow" }
@@ -175,6 +184,6 @@ export async function probeDevice({ gpu }: { gpu: boolean }): Promise<DeviceProb
 		opfs: typeof navigator.storage.getDirectory === "function",
 		hardwareConcurrency: navigator.hardwareConcurrency,
 		deviceMemoryGiB: typeof memory === "number" ? memory : null,
-		webgpu: gpu ? await probeWebGpu() : null
+		webgpu: gpu && gpuConsidered(navigator.userAgent) ? await probeWebGpu() : null
 	}
 }
