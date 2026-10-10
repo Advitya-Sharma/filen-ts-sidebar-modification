@@ -20,6 +20,7 @@ on:
   push:
     paths:
       - 'packages/filen-shared/**'
+      - 'packages/filen-office/**'
       - 'packages/filen-mobile/**'
       - 'packages/filen-web/**'
       - 'packages/filen-assistant-eval/**'
@@ -31,6 +32,7 @@ on:
   pull_request:
     paths:
       - 'packages/filen-shared/**'
+      - 'packages/filen-office/**'
       - 'packages/filen-mobile/**'
       - 'packages/filen-web/**'
       - 'packages/filen-assistant-eval/**'
@@ -46,6 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       filen-shared: ${{ steps.filter.outputs.filen-shared }}
+      filen-office: ${{ steps.filter.outputs.filen-office }}
       filen-mobile: ${{ steps.filter.outputs.filen-mobile }}
       filen-web: ${{ steps.filter.outputs.filen-web }}
       filen-assistant-eval: ${{ steps.filter.outputs.filen-assistant-eval }}
@@ -57,6 +60,12 @@ jobs:
           filters: |
             filen-shared:
               - 'packages/filen-shared/**'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'patches/**'
+              - 'package.json'
+            filen-office:
+              - 'packages/filen-office/**'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'patches/**'
@@ -108,6 +117,32 @@ jobs:
         run: pnpm install --frozen-lockfile --filter @filen/shared...
       - name: Test
         working-directory: packages/filen-shared
+        run: pnpm test
+  test-office:
+    needs: changes
+    if: needs.changes.outputs.filen-office == 'true' || github.event_name == 'workflow_dispatch'
+    # A superseded push to the same ref cancels its own in-flight run: this is a cheap unit job
+    # that touches nothing shared, so only the newest commit's result is worth paying for. The web
+    # job deliberately does NOT cancel — see its own concurrency block for why.
+    concurrency:
+      group: filen-office-tests-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        working-directory: packages/filen-office
+        run: pnpm install --frozen-lockfile --filter @filen/office...
+      - name: Test
+        working-directory: packages/filen-office
         run: pnpm test
   test-mobile:
     needs: changes

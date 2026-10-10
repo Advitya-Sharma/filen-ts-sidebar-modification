@@ -1,0 +1,55 @@
+export { bundledFace, bundledFaces, type BundledFace, type LineMetricsEntry, type OriginalMetrics } from "./bundled"
+export {
+	declareDocxEmbeddedFonts,
+	readDocxEmbeddedFont,
+	readDocxFontTable,
+	type DocxFontDeclaration,
+	type EmbeddedFontRef,
+	type EmbeddedStyle
+} from "./docx"
+export { FontError, type FontErrorCode } from "./errors"
+export type { FontAssets, FontFaceDescriptor, FontHost } from "./host"
+export {
+	DEFAULT_FONT_LIMITS,
+	FontManager,
+	cssFont,
+	type EmbeddedFontFailure,
+	type EmbeddedFontReader,
+	type FaceRegistration,
+	type FontDeclaration,
+	type FontLimits,
+	type FontRequest,
+	type FontSource,
+	type MetricsBasis,
+	type ResolvedFont
+} from "./manager"
+export { lineSpacingUnits, verticalMetrics, type LineSpacingRule, type VerticalMetrics } from "./metrics"
+export { deobfuscateFont, obfuscateFont, parseFontKey } from "./obfuscation"
+export { SfntFont, readSfnt, type SfntNames } from "./sfnt"
+export {
+	DEFAULT_SLOT_CONTEXT,
+	eastAsiaUsesAscii,
+	fontSlot,
+	forEachSlotRun,
+	isChineseCharset,
+	isChineseLanguage,
+	type FontHint,
+	type FontSlot,
+	type SlotContext
+} from "./slots"
+export {
+	NO_HINTS,
+	SUBSTITUTIONS,
+	UNCALIBRATED_APTOS_DISPLAY_SCALE,
+	UNCALIBRATED_APTOS_NARROW_SCALE,
+	UNCALIBRATED_APTOS_SCALE,
+	fallbackFor,
+	type BundledFamily,
+	type Fallback,
+	type FontClass,
+	type FontHints,
+	type FontPitch,
+	type GenericFamily,
+	type Substitution
+} from "./substitutes"
+export { BUNDLED_FACES, CLONE_METRICS, LINE_METRICS } from "./tables.generated"

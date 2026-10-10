@@ -1,0 +1,427 @@
+import { deflateSync } from "fflate"
+import { encodeUtf8 } from "../xml/utf8"
+import { crc32 } from "./crc32"
+import { ZipError } from "./errors"
+import type { ByteSink, ByteSource } from "./io"
+import {
+	CENTRAL_SIGNATURE,
+	EOCD_SIGNATURE,
+	FLAG_UTF8,
+	LOCAL_SIGNATURE,
+	METHOD_DEFLATE,
+	METHOD_STORED,
+	ZIP64_EOCD_SIGNATURE,
+	ZIP64_EXTRA_ID,
+	ZIP64_COMPRESSED,
+	ZIP64_LOCATOR_SIGNATURE,
+	ZIP64_OFFSET,
+	ZIP64_UNCOMPRESSED,
+	ZipArchive,
+	readEntryLayout,
+	type ZipEntry
+} from "./zipReader"
+
+// One output entry: either an original entry copied as stored (local header, compressed data and data
+// descriptor byte for byte, nothing re-deflated), or new content. A replaced part passes the entry it
+// replaces as `template`, keeping its timestamps, attributes and extra fields.
+export type ZipPlanItem =
+	| { readonly kind: "copy"; readonly entry: ZipEntry }
+	| {
+			readonly kind: "data"
+			readonly name: string
+			readonly bytes: Uint8Array
+			readonly compress: boolean
+			readonly template?: ZipEntry
+	  }
+
+export interface ZipPlan {
+	readonly items: readonly ZipPlanItem[]
+	readonly comment?: Uint8Array
+	// End with ZIP64 records even when nothing needs them (kept from an archive that had them).
+	readonly zip64End?: boolean
+}
+
+export interface WriteZipOptions {
+	readonly level?: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+	// Raw deflate for new content in place of fflate's, e.g. a native CompressionStream("deflate-raw")
+	// where the host has one: several times faster on large parts. `level` does not apply to it.
+	readonly deflate?: (data: Uint8Array) => Promise<Uint8Array>
+	// ZIP64 fields and end records on everything, as some writers always emit.
+	readonly forceZip64?: boolean
+	readonly copyChunkSize?: number
+}
+
+export interface WriteZipReport {
+	readonly size: number
+	readonly entries: number
+}
+
+const MAX_32 = 0xffffffff
+const MAX_16 = 0xffff
+// 1980-01-01 00:00, the DOS epoch: what Word stamps on every entry, and deterministic.
+const DOS_EPOCH_DATE = (1 << 5) | 1
+const VERSION_DEFLATE = 20
+const VERSION_ZIP64 = 45
+// Writes smaller than this are gathered into one chunk, so a sink behind a bridge sees few calls.
+const BATCH = 64 * 1024
+
+class BatchingSink {
+	private readonly sink: ByteSink
+	private buffer = new Uint8Array(BATCH)
+	private filled = 0
+	written = 0
+
+	constructor(sink: ByteSink) {
+		this.sink = sink
+	}
+
+	async write(chunk: Uint8Array): Promise<void> {
+		this.written += chunk.length
+
+		if (chunk.length >= BATCH) {
+			await this.flush()
+			await this.sink.write(chunk)
+
+			return
+		}
+
+		if (this.filled + chunk.length > BATCH) await this.flush()
+
+		this.buffer.set(chunk, this.filled)
+		this.filled += chunk.length
+	}
+
+	async flush(): Promise<void> {
+		if (this.filled === 0) return
+
+		// The sink may keep what it is handed, so the batch buffer is handed over and replaced.
+		const chunk = this.buffer.subarray(0, this.filled)
+
+		this.buffer = new Uint8Array(BATCH)
+		this.filled = 0
+
+		await this.sink.write(chunk)
+	}
+}
+
+interface CentralRecord {
+	readonly versionMadeBy: number
+	readonly versionNeeded: number
+	readonly flags: number
+	readonly method: number
+	readonly modTime: number
+	readonly modDate: number
+	readonly crc32: number
+	readonly compressedSize: number
+	readonly uncompressedSize: number
+	readonly localHeaderOffset: number
+	readonly internalAttributes: number
+	readonly externalAttributes: number
+	readonly nameBytes: Uint8Array
+	readonly extra: Uint8Array
+	readonly comment: Uint8Array
+	readonly zip64Fields: number
+	// Position in the central directory: the original entry's index, new entries after all of them.
+	readonly order: number
+}
+
+function zip64Field(values: readonly number[]): Uint8Array {
+	const field = new Uint8Array(4 + values.length * 8)
+	const data = new DataView(field.buffer)
+
+	data.setUint16(0, ZIP64_EXTRA_ID, true)
+	data.setUint16(2, values.length * 8, true)
+
+	values.forEach((value, k) => setUint64(data, 4 + k * 8, value))
+
+	return field
+}
+
+function setUint64(data: DataView, offset: number, value: number): void {
+	data.setUint32(offset, value % 0x1_0000_0000, true)
+	data.setUint32(offset + 4, Math.floor(value / 0x1_0000_0000), true)
+}
+
+// Forced ZIP64 leaves the sizes of stored entries alone: ODF requires its stored "mimetype" entry to carry
+// no extra field, and a stored entry under 4 GiB never needs one.
+function forcesSizes(record: CentralRecord, forceZip64: boolean): boolean {
+	return forceZip64 && record.method !== METHOD_STORED
+}
+
+function centralBytes(record: CentralRecord, forceZip64: boolean): Uint8Array {
+	const fields = record.zip64Fields
+	const forceSizes = forcesSizes(record, forceZip64)
+	const wideUncompressed = forceSizes || (fields & ZIP64_UNCOMPRESSED) !== 0 || record.uncompressedSize >= MAX_32
+	const wideCompressed = forceSizes || (fields & ZIP64_COMPRESSED) !== 0 || record.compressedSize >= MAX_32
+	const wideOffset = forceZip64 || (fields & ZIP64_OFFSET) !== 0 || record.localHeaderOffset >= MAX_32
+	const zip64Values: number[] = []
+
+	if (wideUncompressed) zip64Values.push(record.uncompressedSize)
+	if (wideCompressed) zip64Values.push(record.compressedSize)
+	if (wideOffset) zip64Values.push(record.localHeaderOffset)
+
+	const zip64 = zip64Values.length > 0 ? zip64Field(zip64Values) : new Uint8Array(0)
+	const extraLength = zip64.length + record.extra.length
+
+	if (extraLength > MAX_16 || record.nameBytes.length > MAX_16 || record.comment.length > MAX_16) {
+		throw new ZipError("tooLarge", "Zip entry header fields too long")
+	}
+
+	const out = new Uint8Array(46 + record.nameBytes.length + extraLength + record.comment.length)
+	const data = new DataView(out.buffer)
+
+	data.setUint32(0, CENTRAL_SIGNATURE, true)
+	data.setUint16(4, record.versionMadeBy, true)
+	data.setUint16(6, zip64.length > 0 ? Math.max(record.versionNeeded, VERSION_ZIP64) : record.versionNeeded, true)
+	data.setUint16(8, record.flags, true)
+	data.setUint16(10, record.method, true)
+	data.setUint16(12, record.modTime, true)
+	data.setUint16(14, record.modDate, true)
+	data.setUint32(16, record.crc32, true)
+	data.setUint32(20, wideCompressed ? MAX_32 : record.compressedSize, true)
+	data.setUint32(24, wideUncompressed ? MAX_32 : record.uncompressedSize, true)
+	data.setUint16(28, record.nameBytes.length, true)
+	data.setUint16(30, extraLength, true)
+	data.setUint16(32, record.comment.length, true)
+	data.setUint16(34, 0, true)
+	data.setUint16(36, record.internalAttributes, true)
+	data.setUint32(38, record.externalAttributes, true)
+	data.setUint32(42, wideOffset ? MAX_32 : record.localHeaderOffset, true)
+
+	let offset = 46
+
+	out.set(record.nameBytes, offset)
+	offset += record.nameBytes.length
+	out.set(zip64, offset)
+	offset += zip64.length
+	out.set(record.extra, offset)
+	offset += record.extra.length
+	out.set(record.comment, offset)
+
+	return out
+}
+
+function localBytes(record: CentralRecord, forceZip64: boolean): Uint8Array {
+	const wide = forcesSizes(record, forceZip64) || record.uncompressedSize >= MAX_32 || record.compressedSize >= MAX_32
+	const zip64 = wide ? zip64Field([record.uncompressedSize, record.compressedSize]) : new Uint8Array(0)
+	const out = new Uint8Array(30 + record.nameBytes.length + zip64.length)
+	const data = new DataView(out.buffer)
+
+	data.setUint32(0, LOCAL_SIGNATURE, true)
+	data.setUint16(4, wide ? Math.max(record.versionNeeded, VERSION_ZIP64) : record.versionNeeded, true)
+	data.setUint16(6, record.flags, true)
+	data.setUint16(8, record.method, true)
+	data.setUint16(10, record.modTime, true)
+	data.setUint16(12, record.modDate, true)
+	data.setUint32(14, record.crc32, true)
+	data.setUint32(18, wide ? MAX_32 : record.compressedSize, true)
+	data.setUint32(22, wide ? MAX_32 : record.uncompressedSize, true)
+	data.setUint16(26, record.nameBytes.length, true)
+	data.setUint16(28, zip64.length, true)
+	out.set(record.nameBytes, 30)
+	out.set(zip64, 30 + record.nameBytes.length)
+
+	return out
+}
+
+function endRecords(count: number, directoryOffset: number, directorySize: number, comment: Uint8Array, forceZip64: boolean): Uint8Array {
+	const zip64 = forceZip64 || count >= MAX_16 || directoryOffset >= MAX_32 || directorySize >= MAX_32
+	const out = new Uint8Array((zip64 ? 56 + 20 : 0) + 22 + comment.length)
+	const data = new DataView(out.buffer)
+	let offset = 0
+
+	if (zip64) {
+		data.setUint32(0, ZIP64_EOCD_SIGNATURE, true)
+		setUint64(data, 4, 44)
+		data.setUint16(12, VERSION_ZIP64, true)
+		data.setUint16(14, VERSION_ZIP64, true)
+		setUint64(data, 24, count)
+		setUint64(data, 32, count)
+		setUint64(data, 40, directorySize)
+		setUint64(data, 48, directoryOffset)
+		data.setUint32(56, ZIP64_LOCATOR_SIGNATURE, true)
+		setUint64(data, 64, directoryOffset + directorySize)
+		data.setUint32(72, 1, true)
+		offset = 76
+	}
+
+	data.setUint32(offset, EOCD_SIGNATURE, true)
+	data.setUint16(offset + 8, zip64 ? MAX_16 : count, true)
+	data.setUint16(offset + 10, zip64 ? MAX_16 : count, true)
+	data.setUint32(offset + 12, zip64 ? MAX_32 : directorySize, true)
+	data.setUint32(offset + 16, zip64 ? MAX_32 : directoryOffset, true)
+	data.setUint16(offset + 20, comment.length, true)
+	out.set(comment, offset + 22)
+
+	return out
+}
+
+function isAscii(bytes: Uint8Array): boolean {
+	for (let i = 0; i < bytes.length; i++) {
+		if ((bytes[i] ?? 0) >= 0x80) return false
+	}
+
+	return true
+}
+
+// Executes a zip plan: copied entries stream from the original unchanged (in copyChunkSize reads), new
+// content is deflated here, and a fresh central directory follows. Only DataView, the CRC table and fflate's
+// deflate are used, so the same code runs in a worker, a WebView or Hermes next to the file on disk. Given
+// the archive the plan came from, entry layouts it already read are reused; given only the source bytes
+// (as next to the file on mobile), each copied entry's local header is read once.
+export async function writeZip(
+	plan: ZipPlan,
+	original: ZipArchive | ByteSource | null,
+	sink: ByteSink,
+	options: WriteZipOptions = {}
+): Promise<WriteZipReport> {
+	const archive = original instanceof ZipArchive ? original : null
+	const source = archive?.source ?? (original instanceof ZipArchive ? null : original)
+	const forceZip64 = options.forceZip64 ?? false
+	const copyChunkSize = options.copyChunkSize ?? 4 * 1024 * 1024
+	const out = new BatchingSink(sink)
+	const records: CentralRecord[] = []
+	const names = new Set<string>()
+
+	for (const item of plan.items) {
+		const name = item.kind === "copy" ? item.entry.name : item.name
+
+		if (names.has(name)) throw new ZipError("duplicateName", `Duplicate entry ${name} in the plan`)
+
+		names.add(name)
+
+		const localHeaderOffset = out.written
+
+		if (item.kind === "copy") {
+			if (source === null) throw new ZipError("corrupt", "Copying entries needs the original source")
+
+			const entry = item.entry
+			const layout = archive !== null ? await archive.layout(entry) : await readEntryLayout(source, entry)
+			const end = layout.dataOffset + entry.compressedSize + layout.descriptorLength
+
+			for (let offset = entry.localHeaderOffset; offset < end; offset += copyChunkSize) {
+				await out.write(await source.read(offset, Math.min(copyChunkSize, end - offset)))
+			}
+
+			records.push({ ...entry, localHeaderOffset, order: entry.index })
+
+			continue
+		}
+
+		const template = item.template
+		// A replaced entry keeps its stored name bytes and their UTF-8 flag, whatever code page they are in.
+		const sameName = template !== undefined && template.name === item.name
+		const nameBytes = sameName ? template.nameBytes : encodeUtf8(item.name)
+		const data = !item.compress
+			? item.bytes
+			: options.deflate !== undefined
+				? await options.deflate(item.bytes)
+				: deflateSync(item.bytes, { level: options.level ?? 6 })
+		// Keep the template's deflate-option and UTF-8 bits; sizes are known up front, so no descriptor.
+		let flags = (template?.flags ?? 0) & (item.compress ? 0x0806 : 0x0800)
+
+		if (!sameName) flags = isAscii(nameBytes) ? flags & ~FLAG_UTF8 : flags | FLAG_UTF8
+
+		const record: CentralRecord = {
+			versionMadeBy: template?.versionMadeBy ?? VERSION_DEFLATE,
+			versionNeeded: Math.max(template?.versionNeeded ?? 0, VERSION_DEFLATE),
+			flags,
+			method: item.compress ? METHOD_DEFLATE : METHOD_STORED,
+			modTime: template?.modTime ?? 0,
+			modDate: template?.modDate ?? DOS_EPOCH_DATE,
+			crc32: crc32(item.bytes),
+			compressedSize: data.length,
+			uncompressedSize: item.bytes.length,
+			localHeaderOffset,
+			internalAttributes: template?.internalAttributes ?? 0,
+			externalAttributes: template?.externalAttributes ?? 0,
+			nameBytes,
+			extra: template?.extra ?? new Uint8Array(0),
+			comment: template?.comment ?? new Uint8Array(0),
+			zip64Fields: template?.zip64Fields ?? 0,
+			order: template?.index ?? Number.MAX_SAFE_INTEGER
+		}
+
+		await out.write(localBytes(record, forceZip64))
+		await out.write(data)
+		records.push(record)
+	}
+
+	const directoryOffset = out.written
+
+	// Stable: new entries keep plan order after the originals.
+	records.sort((a, b) => a.order - b.order)
+
+	for (const record of records) await out.write(centralBytes(record, forceZip64))
+
+	await out.write(
+		endRecords(
+			records.length,
+			directoryOffset,
+			out.written - directoryOffset,
+			plan.comment ?? new Uint8Array(0),
+			forceZip64 || (plan.zip64End ?? false)
+		)
+	)
+	await out.flush()
+	await sink.close()
+
+	return { size: out.written, entries: records.length }
+}
+
+export interface PartChange {
+	readonly name: string
+	readonly bytes: Uint8Array
+	// Compress a new entry (default true). A replaced entry keeps its original method.
+	readonly compress?: boolean
+}
+
+export interface ZipChanges {
+	readonly replace?: readonly PartChange[]
+	readonly remove?: readonly string[]
+	// Appended after the original entries, in this order.
+	readonly add?: readonly PartChange[]
+}
+
+export interface PlannedArchive {
+	readonly entries: readonly ZipEntry[]
+	readonly comment: Uint8Array
+	readonly zip64: boolean
+}
+
+// The plan that applies `changes` to an archive: every untouched entry a raw copy, a replaced entry
+// rewritten in its original place with its original metadata, new entries last. Entry data keeps the
+// archive's physical order (ODF needs "mimetype" first) and the central directory keeps its own, so a
+// plan without changes reproduces a well-formed archive byte for byte.
+export function planZip(archive: PlannedArchive, changes: ZipChanges = {}): ZipPlan {
+	const replace = new Map((changes.replace ?? []).map(change => [change.name, change]))
+	const remove = new Set(changes.remove ?? [])
+	const items: ZipPlanItem[] = []
+	const physical = [...archive.entries].sort((a, b) => a.localHeaderOffset - b.localHeaderOffset)
+
+	for (const entry of physical) {
+		if (remove.has(entry.name)) continue
+
+		const change = replace.get(entry.name)
+
+		if (change === undefined) {
+			items.push({ kind: "copy", entry })
+
+			continue
+		}
+
+		replace.delete(entry.name)
+		// Stored stays stored: ODF requires its "mimetype" entry uncompressed.
+		items.push({ kind: "data", name: entry.name, bytes: change.bytes, compress: entry.method !== METHOD_STORED, template: entry })
+	}
+
+	const missing = replace.keys().next()
+
+	if (!missing.done) throw new ZipError("corrupt", `No entry ${missing.value} to replace`)
+
+	for (const change of changes.add ?? []) {
+		items.push({ kind: "data", name: change.name, bytes: change.bytes, compress: change.compress ?? true })
+	}
+
+	return { items, comment: archive.comment, zip64End: archive.zip64 }
+}

@@ -1,0 +1,385 @@
+{
+	"comment": "Bundled substitutes for document fonts, each family with its licence file. Arimo, Tinos, Cousine, Gelasio and Selawik are the upstream WOFF2 files unchanged; Carlito and Caladea are published upstream only as TTF and were compressed to WOFF2 here (see each face's conversion). Apps serve or read the files by their path here and must ship each family's licence file with them. Regenerate src/core/fonts/tables.generated.ts with `pnpm run generate:fonts` after any change.",
+	"families": [
+		{
+			"id": "carlito",
+			"name": "Carlito",
+			"replaces": "Calibri",
+			"version": "1.104",
+			"license": "OFL-1.1",
+			"licenseFile": "carlito/OFL.txt",
+			"reservedFontName": "Carlito",
+			"source": "https://github.com/googlefonts/carlito",
+			"commit": "3a810cab78ebd6e2e4eed42af9e8453c4f9b850a",
+			"faces": [
+				{
+					"file": "carlito/Carlito-Regular.woff2",
+					"weight": 400,
+					"italic": false,
+					"bytes": 190256,
+					"sha256": "061d116e1dd01e0b61356a1717711ac681e839c968b800cb8ee3a5eb4e73c905",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/carlito/3a810cab78ebd6e2e4eed42af9e8453c4f9b850a/fonts/ttf/Carlito-Regular.ttf",
+						"sha256": "f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595",
+						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. Original font data unchanged except for WOFF compression, so not a Modified Version under OFL FAQ 2.2.1 and the Reserved Font Name stays."
+					}
+				},
+				{
+					"file": "carlito/Carlito-Italic.woff2",
+					"weight": 400,
+					"italic": true,
+					"bytes": 201544,
+					"sha256": "4f6241e74e08ddba83b5bc1ec4b8b2033375ed9ff6dc424511d5dd9c336f5cc3",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/carlito/3a810cab78ebd6e2e4eed42af9e8453c4f9b850a/fonts/ttf/Carlito-Italic.ttf",
+						"sha256": "0b019225e58d702bfedcbd35c21696769f8ee115cb6343f84c2f240312450d1c",
+						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. Original font data unchanged except for WOFF compression, so not a Modified Version under OFL FAQ 2.2.1 and the Reserved Font Name stays."
+					}
+				},
+				{
+					"file": "carlito/Carlito-Bold.woff2",
+					"weight": 700,
+					"italic": false,
+					"bytes": 198084,
+					"sha256": "6cb112074d0b2da2223dd93beaec10660a9cf6fb02ea71dc36224ce2d18a7ed8",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/carlito/3a810cab78ebd6e2e4eed42af9e8453c4f9b850a/fonts/ttf/Carlito-Bold.ttf",
+						"sha256": "bb5d20f79b82599ec72983597437373a80f2d2085fa91fc144fd74e876a594db",
+						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. Original font data unchanged except for WOFF compression, so not a Modified Version under OFL FAQ 2.2.1 and the Reserved Font Name stays."
+					}
+				},
+				{
+					"file": "carlito/Carlito-BoldItalic.woff2",
+					"weight": 700,
+					"italic": true,
+					"bytes": 206280,
+					"sha256": "09944164ea569abe2bc19db633fee60ab2d2eb67a12c3740aec2116d611c45db",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/carlito/3a810cab78ebd6e2e4eed42af9e8453c4f9b850a/fonts/ttf/Carlito-BoldItalic.ttf",
+						"sha256": "b32928186c119599e03ca6a1ffc680fdcb7fac95772f4b95d989cf6cd3861517",
+						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. Original font data unchanged except for WOFF compression, so not a Modified Version under OFL FAQ 2.2.1 and the Reserved Font Name stays."
+					}
+				}
+			]
+		},
+		{
+			"id": "caladea",
+			"name": "Caladea",
+			"replaces": "Cambria",
+			"version": "1.001",
+			"license": "OFL-1.1",
+			"licenseFile": "caladea/OFL.txt",
+			"source": "https://github.com/googlefonts/caladea",
+			"commit": "336a529cfad3d103d6527752686f8331d13e820a",
+			"faces": [
+				{
+					"file": "caladea/Caladea-Regular.woff2",
+					"weight": 400,
+					"italic": false,
+					"bytes": 31620,
+					"sha256": "ff87986b38cf673033b9f2e5767e186580ebbdac8a8631fdd6a159a380f6d568",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/caladea/336a529cfad3d103d6527752686f8331d13e820a/fonts/ttf/Caladea-Regular.ttf",
+						"sha256": "f1e899278b7b4491aba5b6a8253c4b04c050cc59b21865be5c37559a775153cd",
+						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. The DSIG signature table, invalid after re-encoding, is dropped as WOFF2 requires; that makes this a Modified Version under OFL FAQ 2.2.1, which the OFL allows. Caladea has no Reserved Font Name."
+					}
+				},
+				{
+					"file": "caladea/Caladea-Italic.woff2",
+					"weight": 400,
+					"italic": true,
+					"bytes": 33028,
+					"sha256": "93288b02286710f775182c4f787fdd8da3142b9171b59d3d20eecfbac99ecfc5",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/caladea/336a529cfad3d103d6527752686f8331d13e820a/fonts/ttf/Caladea-Italic.ttf",
+						"sha256": "4359a8e24f748b6447b1ff6d7a174febe70961d29f8bb8634b56dacd740a3deb",
+						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. The DSIG signature table, invalid after re-encoding, is dropped as WOFF2 requires; that makes this a Modified Version under OFL FAQ 2.2.1, which the OFL allows. Caladea has no Reserved Font Name."
+					}
+				},
+				{
+					"file": "caladea/Caladea-Bold.woff2",
+					"weight": 700,
+					"italic": false,
+					"bytes": 31724,
+					"sha256": "19c917451b974c27ff8dd95ec45b898064632f2dfe90c2823a06e71bd81d1571",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/caladea/336a529cfad3d103d6527752686f8331d13e820a/fonts/ttf/Caladea-Bold.ttf",
+						"sha256": "ae3cb2dcbc925809dd29d2a44e9802211cab66be541bacbfc9c08c74b27c3742",
+						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. The DSIG signature table, invalid after re-encoding, is dropped as WOFF2 requires; that makes this a Modified Version under OFL FAQ 2.2.1, which the OFL allows. Caladea has no Reserved Font Name."
+					}
+				},
+				{
+					"file": "caladea/Caladea-BoldItalic.woff2",
+					"weight": 700,
+					"italic": true,
+					"bytes": 33276,
+					"sha256": "2907e7c21f11f1c6782e31329276d80d52e0dd2262126402bf4f032b1b897f02",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/caladea/336a529cfad3d103d6527752686f8331d13e820a/fonts/ttf/Caladea-BoldItalic.ttf",
+						"sha256": "ccabaa7b7e2fdf253d2b1a5fa699dd8a3df8d835a9eb285ad82631a677eb76c0",
+						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. The DSIG signature table, invalid after re-encoding, is dropped as WOFF2 requires; that makes this a Modified Version under OFL FAQ 2.2.1, which the OFL allows. Caladea has no Reserved Font Name."
+					}
+				}
+			]
+		},
+		{
+			"id": "arimo",
+			"name": "Arimo",
+			"replaces": "Arial",
+			"version": "1.341",
+			"license": "OFL-1.1",
+			"licenseFile": "arimo/OFL.txt",
+			"source": "https://github.com/googlefonts/arimo",
+			"commit": "4a6255f269916ae7ad3fc2706b0935e7621396b8",
+			"faces": [
+				{
+					"file": "arimo/Arimo-VF.woff2",
+					"weight": [
+						400,
+						700
+					],
+					"italic": false,
+					"bytes": 222048,
+					"sha256": "0d2f65432c96632bd19360734af6c15d77a55c005e93356814ae7bc0461f2d5e",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/arimo/4a6255f269916ae7ad3fc2706b0935e7621396b8/fonts/webfonts/Arimo%5Bwght%5D.woff2",
+						"sha256": "0d2f65432c96632bd19360734af6c15d77a55c005e93356814ae7bc0461f2d5e"
+					}
+				},
+				{
+					"file": "arimo/Arimo-Italic-VF.woff2",
+					"weight": [
+						400,
+						700
+					],
+					"italic": true,
+					"bytes": 255920,
+					"sha256": "a9d5da4ebfbe0ba41c284b440ac15dec375be0ba08079e9748ff49ff6ac0066d",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/arimo/4a6255f269916ae7ad3fc2706b0935e7621396b8/fonts/webfonts/Arimo-Italic%5Bwght%5D.woff2",
+						"sha256": "a9d5da4ebfbe0ba41c284b440ac15dec375be0ba08079e9748ff49ff6ac0066d"
+					}
+				}
+			]
+		},
+		{
+			"id": "tinos",
+			"name": "Tinos",
+			"replaces": "Times New Roman",
+			"version": "1.340",
+			"license": "OFL-1.1",
+			"licenseFile": "tinos/OFL.txt",
+			"source": "https://github.com/googlefonts/tinos",
+			"commit": "3b4482a99b80ea5fc75f187b1be3120a3f5905b3",
+			"faces": [
+				{
+					"file": "tinos/Tinos-Regular.woff2",
+					"weight": 400,
+					"italic": false,
+					"bytes": 181528,
+					"sha256": "990493259cd9f78dd1d1e7f697700bb450488968138251bb2c2c046d56a91548",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/tinos/3b4482a99b80ea5fc75f187b1be3120a3f5905b3/fonts/webfonts/Tinos-Regular.woff2",
+						"sha256": "990493259cd9f78dd1d1e7f697700bb450488968138251bb2c2c046d56a91548"
+					}
+				},
+				{
+					"file": "tinos/Tinos-Italic.woff2",
+					"weight": 400,
+					"italic": true,
+					"bytes": 205504,
+					"sha256": "28d3159c92e590181a0436105a6a508f3ac334ff9586bf1e9bac761d259e8860",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/tinos/3b4482a99b80ea5fc75f187b1be3120a3f5905b3/fonts/webfonts/Tinos-Italic.woff2",
+						"sha256": "28d3159c92e590181a0436105a6a508f3ac334ff9586bf1e9bac761d259e8860"
+					}
+				},
+				{
+					"file": "tinos/Tinos-Bold.woff2",
+					"weight": 700,
+					"italic": false,
+					"bytes": 201632,
+					"sha256": "cf4ba0b63a839e462c9461e86fb7c01fef1e734405ee403ec0121b7767b3f172",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/tinos/3b4482a99b80ea5fc75f187b1be3120a3f5905b3/fonts/webfonts/Tinos-Bold.woff2",
+						"sha256": "cf4ba0b63a839e462c9461e86fb7c01fef1e734405ee403ec0121b7767b3f172"
+					}
+				},
+				{
+					"file": "tinos/Tinos-BoldItalic.woff2",
+					"weight": 700,
+					"italic": true,
+					"bytes": 206396,
+					"sha256": "fe7ac295c7672860594e97cb66cec26f65dc0a76164e88696ef357335e4a2ad2",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/tinos/3b4482a99b80ea5fc75f187b1be3120a3f5905b3/fonts/webfonts/Tinos-BoldItalic.woff2",
+						"sha256": "fe7ac295c7672860594e97cb66cec26f65dc0a76164e88696ef357335e4a2ad2"
+					}
+				}
+			]
+		},
+		{
+			"id": "cousine",
+			"name": "Cousine",
+			"replaces": "Courier New",
+			"version": "1.241",
+			"license": "OFL-1.1",
+			"licenseFile": "cousine/OFL.txt",
+			"source": "https://github.com/googlefonts/cousine",
+			"commit": "c0fbdb438443968c884a5c13f5f9bee916a7f89b",
+			"faces": [
+				{
+					"file": "cousine/Cousine-Regular.woff2",
+					"weight": 400,
+					"italic": false,
+					"bytes": 109888,
+					"sha256": "3882c5c1912dc7e218762381d93b0b22f20e97bc6aeee4864436fd34da6d6cf4",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/cousine/c0fbdb438443968c884a5c13f5f9bee916a7f89b/fonts/webfonts/Cousine-Regular.woff2",
+						"sha256": "3882c5c1912dc7e218762381d93b0b22f20e97bc6aeee4864436fd34da6d6cf4"
+					}
+				},
+				{
+					"file": "cousine/Cousine-Italic.woff2",
+					"weight": 400,
+					"italic": true,
+					"bytes": 118948,
+					"sha256": "5239caec66a180e1d9b8c9c74888660eb929b08027d1fb51ba207dae2b843188",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/cousine/c0fbdb438443968c884a5c13f5f9bee916a7f89b/fonts/webfonts/Cousine-Italic.woff2",
+						"sha256": "5239caec66a180e1d9b8c9c74888660eb929b08027d1fb51ba207dae2b843188"
+					}
+				},
+				{
+					"file": "cousine/Cousine-Bold.woff2",
+					"weight": 700,
+					"italic": false,
+					"bytes": 111096,
+					"sha256": "6e371376b51ca2828f9d39ba153c366cc29ba1a206cc4b21205e391e09362419",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/cousine/c0fbdb438443968c884a5c13f5f9bee916a7f89b/fonts/webfonts/Cousine-Bold.woff2",
+						"sha256": "6e371376b51ca2828f9d39ba153c366cc29ba1a206cc4b21205e391e09362419"
+					}
+				},
+				{
+					"file": "cousine/Cousine-BoldItalic.woff2",
+					"weight": 700,
+					"italic": true,
+					"bytes": 120364,
+					"sha256": "08accd82919cc9b3f2e73d100299084bb7af898472ef9c0293b92a207aec96d9",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/cousine/c0fbdb438443968c884a5c13f5f9bee916a7f89b/fonts/webfonts/Cousine-BoldItalic.woff2",
+						"sha256": "08accd82919cc9b3f2e73d100299084bb7af898472ef9c0293b92a207aec96d9"
+					}
+				}
+			]
+		},
+		{
+			"id": "gelasio",
+			"name": "Gelasio",
+			"replaces": "Georgia",
+			"version": "1.008",
+			"license": "OFL-1.1",
+			"licenseFile": "gelasio/OFL.txt",
+			"source": "https://github.com/SorkinType/Gelasio",
+			"commit": "9228e69b160d79f33950e026293f6e13ba9780d0",
+			"faces": [
+				{
+					"file": "gelasio/Gelasio-VF.woff2",
+					"weight": [
+						400,
+						700
+					],
+					"italic": false,
+					"bytes": 72812,
+					"sha256": "15a06d2088bbfcf250296c770704cb9bb3f229ff58289faf708fe0f3279094c3",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/SorkinType/Gelasio/9228e69b160d79f33950e026293f6e13ba9780d0/fonts/webfonts/Gelasio%5Bwght%5D.woff2",
+						"sha256": "15a06d2088bbfcf250296c770704cb9bb3f229ff58289faf708fe0f3279094c3"
+					}
+				},
+				{
+					"file": "gelasio/Gelasio-Italic-VF.woff2",
+					"weight": [
+						400,
+						700
+					],
+					"italic": true,
+					"bytes": 80240,
+					"sha256": "91164b31301c9e72922371df0ce81334d3c68e44172fc8ef597ad63c873e9215",
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/SorkinType/Gelasio/9228e69b160d79f33950e026293f6e13ba9780d0/fonts/webfonts/Gelasio-Italic%5Bwght%5D.woff2",
+						"sha256": "91164b31301c9e72922371df0ce81334d3c68e44172fc8ef597ad63c873e9215"
+					}
+				}
+			]
+		},
+		{
+			"id": "selawik",
+			"name": "Selawik",
+			"replaces": "Segoe UI",
+			"version": "1.01",
+			"license": "OFL-1.1",
+			"licenseFile": "selawik/LICENSE.txt",
+			"reservedFontName": "Selawik",
+			"source": "https://github.com/microsoft/Selawik",
+			"commit": "89362e84731d1f5777fa078fd4d5ebbd339e4378",
+			"release": {
+				"url": "https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip",
+				"sha256": "3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423"
+			},
+			"faces": [
+				{
+					"file": "selawik/selawkl.woff2",
+					"weight": 300,
+					"italic": false,
+					"bytes": 14544,
+					"sha256": "0ed6f426d9e1bcd65c40c13f1f9a900279d36db104c3927a4cde03f1dd4bf687"
+				},
+				{
+					"file": "selawik/selawksl.woff2",
+					"weight": 350,
+					"italic": false,
+					"bytes": 14864,
+					"sha256": "3ddb97e4892003dfd87daf5ec9cb49f1a182289b706c813b3c50dfc18c51c07e"
+				},
+				{
+					"file": "selawik/selawk.woff2",
+					"weight": 400,
+					"italic": false,
+					"bytes": 14632,
+					"sha256": "0f11afe1e85c8fd5d35d33e0142bd140e460a48cf3b42317d0c34e40c2b7118b"
+				},
+				{
+					"file": "selawik/selawksb.woff2",
+					"weight": 600,
+					"italic": false,
+					"bytes": 14896,
+					"sha256": "83767c05ef6b99e054a20e85ed538223c3d3147fd3bea8c372ca9c46764d8c5b"
+				},
+				{
+					"file": "selawik/selawkb.woff2",
+					"weight": 700,
+					"italic": false,
+					"bytes": 14424,
+					"sha256": "e8e9896309b2b003e2eefca4c51f82d2d3fb693a440cb969dd0650f0d5070012"
+				}
+			]
+		}
+	],
+	"metricSources": [
+		{
+			"name": "Liberation Fonts",
+			"version": "2.1.5",
+			"license": "OFL-1.1",
+			"use": "Vertical metrics of the fonts the project matches for document layout; read at generation time, not shipped",
+			"url": "https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz",
+			"sha256": "7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0",
+			"originals": {
+				"Arial": "LiberationSans-Regular.ttf",
+				"Times New Roman": "LiberationSerif-Regular.ttf",
+				"Courier New": "LiberationMono-Regular.ttf"
+			}
+		}
+	]
+}
