@@ -296,30 +296,34 @@ export function LibrariesDialog() {
 	// What focus returns to once a removal took the menu that opened it away.
 	const addRef = useRef<HTMLButtonElement>(null)
 
+	// Promise handlers rather than try/finally, which the React Compiler can't compile yet.
 	async function edit(uuid: string, change: ConfigEdit): Promise<boolean> {
 		setPending(previous => new Set(previous).add(uuid))
 
-		try {
-			const { scanned } = await editLibraryConfig(change)
+		const saved = await editLibraryConfig(change).then(
+			({ scanned }) => {
+				scanned.catch((e: unknown) => {
+					log.warn("videos.libraries", "scan after an edit failed", e)
+				})
 
-			scanned.catch((e: unknown) => {
-				log.warn("videos.libraries", "scan after an edit failed", e)
-			})
+				return true
+			},
+			(e: unknown) => {
+				toast.error(errorLabel(e))
 
-			return true
-		} catch (e) {
-			toast.error(errorLabel(e))
+				return false
+			}
+		)
 
-			return false
-		} finally {
-			setPending(previous => {
-				const next = new Set(previous)
+		setPending(previous => {
+			const next = new Set(previous)
 
-				next.delete(uuid)
+			next.delete(uuid)
 
-				return next
-			})
-		}
+			return next
+		})
+
+		return saved
 	}
 
 	return (

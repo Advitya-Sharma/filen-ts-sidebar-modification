@@ -9,7 +9,8 @@ import { DOT_FILEN_DIR_NAME } from "@/lib/dotFilen.logic"
 // The app's own directories under `.filen` at the drive root (Playlists, Chat Uploads, Videos), resolved once
 // per session and shared by every feature. createDirectory is find-or-create, idempotent and case-insensitive
 // server-side, so a lookup is one call per level and needs no listing. A read that must not create anything finds
-// instead: one existence check per level, then the same find-or-create, which returns the existing directory.
+// instead: `.filen` by an existence check and then the same find-or-create, which returns the existing directory (the
+// drive root is never listed for it), a subdirectory by listing `.filen`, one small request that takes no drive lock.
 
 export { DOT_FILEN_DIR_NAME } from "@/lib/dotFilen.logic"
 
@@ -132,8 +133,16 @@ function memoizeCreate(memo: Memo, create: () => Promise<string>): Promise<strin
 	return finding === null ? memoize(memo, create) : finding.then(found => found ?? memoize(memo, create))
 }
 
-// `name` under `parent` (null: the drive root) when it exists, creating nothing.
+// `name` under `parent` (null: the drive root) when it exists, creating nothing. Names compare case-insensitively,
+// as the server's do.
 async function findLevel(parent: string | null, name: string): Promise<string | null> {
+	if (parent !== null) {
+		const wanted = name.toLowerCase()
+		const { dirs } = await runOp(sdkApi.listDirectory({ kind: "uuid", uuid: parent }))
+
+		return dirs.find(dir => dir.meta.type === "decoded" && dir.meta.data.name.toLowerCase() === wanted)?.uuid ?? null
+	}
+
 	if (!(await runOp(sdkApi.directoryExists(parent, name)))) {
 		return null
 	}

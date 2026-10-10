@@ -15,6 +15,8 @@ const counts = vi.hoisted(() => ({
 	getFile: 0,
 	directoryExists: 0,
 	createDirectory: 0,
+	// `.filen` listed to find its Videos directory; listDirectory counts the Videos directory's own listings.
+	listDotFilen: 0,
 	listDirectory: 0,
 	downloads: 0,
 	uploads: 0,
@@ -65,6 +67,7 @@ function requests(): number {
 		counts.getFile +
 		counts.directoryExists +
 		counts.createDirectory +
+		counts.listDotFilen +
 		counts.listDirectory +
 		counts.downloads +
 		counts.uploads
@@ -163,7 +166,16 @@ function startWorker(): void {
 
 			return Promise.resolve({ uuid: parent === null ? DOT_FILEN : VIDEOS_DIR, meta: { type: "decoded", data: { name } } } as Dir)
 		},
-		listDirectory: () => {
+		listDirectory: (target: { uuid: string }) => {
+			if (target.uuid === DOT_FILEN) {
+				counts.listDotFilen++
+
+				return Promise.resolve({
+					dirs: existing === "both" ? [{ uuid: VIDEOS_DIR, meta: { type: "decoded", data: { name: "Videos" } } } as Dir] : [],
+					files: []
+				})
+			}
+
 			counts.listDirectory++
 
 			return Promise.resolve({ dirs: [], files: configFile === null ? [] : [configFile] })
@@ -510,8 +522,8 @@ describe("walk sharing", () => {
 
 		await open()
 
-		// The find-or-create of `.filen` returns the existing directory, which the second check needs.
-		expect(counts).toMatchObject({ lastEventIds: 1, directoryExists: 2, createDirectory: 1, listDirectory: 0 })
+		// The find-or-create of `.filen` returns the existing directory, whose listing has no Videos directory.
+		expect(counts).toMatchObject({ lastEventIds: 1, directoryExists: 1, createDirectory: 1, listDotFilen: 1, listDirectory: 0 })
 		expect(existing).toBe("dotFilen")
 	})
 

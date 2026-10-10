@@ -749,7 +749,8 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 				return
 			}
 
-			attempt++
+			// Not `attempt++`: the React Compiler can't compile an update of a variable a closure captures.
+			attempt += 1
 			timer = setTimeout(() => {
 				if (live && controller.getSnapshot().phase === "failed") {
 					void controller.retry().then(() => {

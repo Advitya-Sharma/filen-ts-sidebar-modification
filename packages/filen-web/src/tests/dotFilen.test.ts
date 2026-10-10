@@ -10,18 +10,27 @@ const SUBDIRS: Record<string, UuidStr> = {
 	"Chat Uploads": testUuid("chatuploads")
 }
 
-const { createDirectory, directoryExists, subscribeToSocket } = vi.hoisted(() => ({
+const { createDirectory, directoryExists, listDirectory, subscribeToSocket } = vi.hoisted(() => ({
 	createDirectory: vi.fn<(parent: string | null, name: string) => Promise<Dir>>(),
 	directoryExists: vi.fn<(parent: string | null, name: string) => Promise<boolean>>(),
+	listDirectory: vi.fn<(target: { kind: "uuid"; uuid: string }) => Promise<{ dirs: Dir[]; files: [] }>>(),
 	subscribeToSocket: vi.fn<(onEvent: (event: SocketEvent) => void) => Promise<void>>()
 }))
 
-vi.mock("@/lib/sdk/client", () => ({ sdkApi: { createDirectory, directoryExists, subscribeToSocket } }))
+vi.mock("@/lib/sdk/client", () => ({ sdkApi: { createDirectory, directoryExists, listDirectory, subscribeToSocket } }))
 vi.mock("@/queries/client", async () => ({ queryClient: (await import("@/tests/testQueryClient")).createTestQueryClient() }))
 vi.mock("@/queries/persist", () => ({ persister: { persistQuery: () => Promise.resolve() } }))
 
-function dir(uuid: UuidStr): Dir {
-	return { uuid, meta: { type: "decoded", data: { name: uuid } }, timestamp: 0n, color: "default" } as Dir
+function dir(uuid: UuidStr, name: string = uuid): Dir {
+	return { uuid, meta: { type: "decoded", data: { name } }, timestamp: 0n, color: "default" } as Dir
+}
+
+// `.filen` as a listing shows it: every subdirectory, under its own name.
+function dotFilenListing(target: { uuid: string }): Promise<{ dirs: Dir[]; files: [] }> {
+	return Promise.resolve({
+		dirs: target.uuid === DOT_FILEN ? Object.entries(SUBDIRS).map(([name, uuid]) => dir(uuid, name)) : [],
+		files: []
+	})
 }
 
 async function fresh() {
@@ -37,6 +46,7 @@ function driveEvent(inner: Extract<SocketEvent, { type: "drive" }>["inner"]): Ex
 beforeEach(() => {
 	vi.clearAllMocks()
 	directoryExists.mockImplementation(() => Promise.resolve(true))
+	listDirectory.mockImplementation(dotFilenListing)
 	createDirectory.mockImplementation((parent, name) => {
 		if (parent === null) {
 			return Promise.resolve(dir(DOT_FILEN))
@@ -278,6 +288,7 @@ describe(".filen subdirectories", () => {
 		await expect(findDotFilenSubdir("Videos")).resolves.toBeNull()
 
 		expect(createDirectory).not.toHaveBeenCalled()
+		expect(listDirectory).not.toHaveBeenCalled()
 		expect(directoryExists).toHaveBeenCalledTimes(2)
 		expect(dotFilenSubdirUuid("Videos")).toBeNull()
 	})
@@ -285,14 +296,24 @@ describe(".filen subdirectories", () => {
 	it("a find stops at the first missing level", async () => {
 		const { findDotFilenSubdir } = await fresh()
 
-		directoryExists.mockImplementation(parent => Promise.resolve(parent === null))
+		listDirectory.mockImplementation(() => Promise.resolve({ dirs: [dir(testUuid("other"), "Other")], files: [] }))
 
 		await expect(findDotFilenSubdir("Videos")).resolves.toBeNull()
 
-		// `.filen` exists: its find-or-create returns it (creating nothing) for the second check.
+		// `.filen` exists: its find-or-create returns it (creating nothing), and its listing has no Videos.
 		expect(createDirectory).toHaveBeenCalledTimes(1)
 		expect(createDirectory).toHaveBeenCalledWith(null, ".filen")
-		expect(directoryExists).toHaveBeenCalledTimes(2)
+		expect(directoryExists).toHaveBeenCalledTimes(1)
+		expect(listDirectory).toHaveBeenCalledExactlyOnceWith({ kind: "uuid", uuid: DOT_FILEN })
+	})
+
+	it("a find matches a subdirectory's name case-insensitively and never creates it", async () => {
+		const { findDotFilenSubdir } = await fresh()
+
+		listDirectory.mockImplementation(() => Promise.resolve({ dirs: [dir(SUBDIRS["Videos"] ?? testUuid("x"), "videos")], files: [] }))
+
+		await expect(findDotFilenSubdir("Videos")).resolves.toBe(SUBDIRS["Videos"])
+		expect(createDirectory).toHaveBeenCalledExactlyOnceWith(null, ".filen")
 	})
 
 	it("a found directory is remembered like a created one", async () => {

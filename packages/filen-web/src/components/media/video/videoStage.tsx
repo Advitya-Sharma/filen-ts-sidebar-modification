@@ -274,9 +274,16 @@ export function VideoStage(props: VideoStageProps) {
 		}
 	}, [video])
 
-	// Keyboard and button seeks, coalesced; made on first use (event handlers only).
+	// Keyboard and button seeks, coalesced; made on first use (event handlers only). Not `??=`, which the React
+	// Compiler can't compile yet.
 	function coalescer(): SeekCoalescer {
-		coalescerRef.current ??= new SeekCoalescer({
+		const existing = coalescerRef.current
+
+		if (existing !== null) {
+			return existing
+		}
+
+		const made = new SeekCoalescer({
 			current: () => videoRef.current?.currentTime ?? 0,
 			duration: () => {
 				const duration = videoRef.current?.duration ?? 0
@@ -298,7 +305,9 @@ export function VideoStage(props: VideoStageProps) {
 			}
 		})
 
-		return coalescerRef.current
+		coalescerRef.current = made
+
+		return made
 	}
 
 	// The stage takes the keyboard when it opens, and keeps the app behind it out of reach (focus, clicks,

@@ -60,15 +60,15 @@ function useWatchToast() {
 
 // The runtime the stored probe knows (a kv read; nothing is probed for a row).
 function useStoredRuntime(uuid: string | null, enabled: boolean): number | null {
-	return (
-		useQuery({
-			queryKey: ["videos", "storedRuntime", uuid ?? ""] as const,
-			queryFn: async () => (uuid === null ? null : ((await probeRecords.get(uuid))?.probe?.durationSec ?? null)),
-			enabled: enabled && uuid !== null,
-			staleTime: 0,
-			persister: noDiskPersister
-		}).data ?? null
-	)
+	const { data } = useQuery({
+		queryKey: ["videos", "storedRuntime", uuid ?? ""] as const,
+		queryFn: async () => (uuid === null ? null : ((await probeRecords.get(uuid))?.probe?.durationSec ?? null)),
+		enabled: enabled && uuid !== null,
+		staleTime: 0,
+		persister: noDiskPersister
+	})
+
+	return data ?? null
 }
 
 // The row takes its watch state as plain values, so a change elsewhere in the series leaves it alone.

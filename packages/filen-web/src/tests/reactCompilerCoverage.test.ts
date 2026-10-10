@@ -251,6 +251,49 @@ describe("React Compiler coverage", () => {
 		)
 	})
 
+	// Videos: every card of the home rows and grids with its art hook, the player and its stage (re-rendered by
+	// playback), the detail pages and the dialogs. A `??=`, an `x++` captured by a closure, a try with a finally, or
+	// a hook result read through `?? fallback` makes the compiler skip the whole function.
+	it.each([
+		["src/features/videos/components/videoCard.tsx", "VideoCard"],
+		["src/features/videos/hooks/useVideoArt.ts", "useVideoArt"],
+		["src/features/videos/components/homeRows.tsx", "VideosHomeRows"],
+		["src/features/videos/components/homeHero.tsx", "HomeHero"],
+		["src/features/videos/components/videosSidebar.tsx", "VideosSidebar"],
+		["src/features/videos/screens/videosHome.tsx", "VideosHomeScreen"],
+		["src/features/videos/components/detail/movieDetail.tsx", "MovieDetail"],
+		["src/features/videos/components/detail/seriesDetail.tsx", "SeriesDetail"],
+		["src/features/videos/components/detail/seriesDetail.tsx", "EpisodeRow"],
+		["src/features/videos/components/detail/seriesDetail.tsx", "useStoredRuntime"],
+		["src/features/videos/components/player/watchScreen.tsx", "WatchScreen"],
+		["src/features/videos/components/player/useTitleStill.ts", "useUpNextStill"],
+		["src/components/media/video/videoStage.tsx", "VideoStage"],
+		["src/features/videos/components/librariesDialog.tsx", "LibrariesDialog"],
+		["src/features/videos/components/detail/correctionsDialog.tsx", "CorrectionsDialog"]
+	])("compiles %s's %s", (file, fnName) => {
+		const events = compile(file)
+
+		expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
+		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(true)
+	})
+
+	// useVirtualizer opts its host out, so each Videos list keeps it in a small child: scroll-driven renders reach only
+	// that child, and each card or row is compiled on its own.
+	it.each([
+		["src/features/videos/components/videoGrid.tsx", ["VideoGrid", "GridCard"]],
+		["src/features/videos/components/player/episodesPanel.tsx", ["EpisodesPanel", "EpisodeRow"]]
+	])("compiles %s, leaving only its rows to the virtualizer", (file, fnNames) => {
+		const events = compile(file)
+
+		for (const fnName of fnNames) {
+			expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(
+				true
+			)
+		}
+
+		expect(events.filter(event => event.kind !== "CompileSuccess")).toHaveLength(1)
+	})
+
 	// useVirtualizer opts its host out, so it lives in PhotoGridRows; its scroll-driven renders must not reach PhotoGrid.
 	it("compiles PhotoGrid, leaving only PhotoGridRows to the virtualizer", () => {
 		const events = compile("src/features/photos/components/photoGrid.tsx")

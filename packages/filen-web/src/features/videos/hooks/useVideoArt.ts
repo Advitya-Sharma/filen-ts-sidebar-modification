@@ -101,7 +101,12 @@ export function useVideoArt({ titleId, stableUuid, slot, title, near, element }:
 					return
 				}
 
-				dwell ??= setTimeout(() => {
+				// Not `??=`, which the React Compiler can't compile yet.
+				if (dwell !== null) {
+					return
+				}
+
+				dwell = setTimeout(() => {
 					started = true
 					loadFull(request)
 				}, CARD_PROBE_DWELL_MS)

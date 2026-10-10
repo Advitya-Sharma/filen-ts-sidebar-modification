@@ -54,6 +54,18 @@ interface E2eHooks {
 	sweepTestChatsByNamePrefix: (prefix: string, minAgeMs?: number) => Promise<number>
 	archiveCatalogueReport: () => Promise<ArchiveCatalogueRow[]>
 	pendingSdkCalls: () => { method: string; ageMs: number }[]
+	videosSyncSnapshot: () => Promise<VideosSyncSnapshot>
+	videosSyncRestore: (snapshot: VideosSyncSnapshot) => Promise<void>
+	videosSyncFileText: (name: string) => Promise<string | null>
+	pruneDeadVideoRoots: (minAgeMs: number) => Promise<number>
+}
+
+// `.filen/Videos` as a Videos spec found it (src/e2e-hooks/videosSync.ts): plain strings, so it crosses the
+// Playwright bridge as it is.
+export interface VideosSyncSnapshot {
+	dotFilen: string | null
+	dir: string | null
+	files: { name: string; uuid: string; versions: string[]; text: string }[]
 }
 
 // One compress-catalogue entry as the real wasm answers it (src/e2e-hooks/index.ts). Plain numbers and

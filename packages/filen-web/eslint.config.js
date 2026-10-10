@@ -11,6 +11,30 @@ const ALIAS_ONLY = {
 	message: 'Use the "@/..." alias instead of a relative import.'
 }
 
+// Mediabunny demuxes and muxes on whichever thread imports it, and it is large: only the remux worker runs it,
+// so the main thread and the other workers neither parse it nor block on its work.
+const MEDIABUNNY_REMUX_ONLY = {
+	group: ["mediabunny", "mediabunny/**", "@mediabunny/*", "@mediabunny/**"],
+	message: "Mediabunny runs only in the remux worker (src/workers/remux.worker.ts, src/workers/remux/**); talk to that worker instead."
+}
+
+// Everything ships in one bundle (codeSplitting: false). Shared by the app-wide block and the assistant's, which
+// replaces the rule: an eager import.meta.glob would otherwise reach past the assistant's import restrictions.
+const NO_LAZY_LOADING = [
+	{
+		selector: "CallExpression[callee.name='lazy'], CallExpression[callee.property.name='lazy']",
+		message: "No lazy-loaded components; import statically."
+	},
+	{
+		selector: "ImportSpecifier[imported.name=/^(lazyRouteComponent|createLazyRoute|createLazyFileRoute)$/]",
+		message: "No lazy routes; define the route component statically."
+	},
+	{
+		selector: "MemberExpression[object.meta.name='import'][property.name='glob']",
+		message: "import.meta.glob defaults to lazy imports; import statically."
+	}
+]
+
 const ASSISTANT_FORBIDDEN =
 	"The assistant acts on model output that text other people wrote can steer, so it never reaches irreversible or security-critical operations."
 
@@ -81,6 +105,7 @@ const ASSISTANT_RESTRICTED_PATHS = [
 
 const ASSISTANT_RESTRICTED_PATTERNS = [
 	ALIAS_ONLY,
+	MEDIABUNNY_REMUX_ONLY,
 	{
 		// Settings are opened, never changed.
 		group: ["@/features/settings/**", "@/features/auth/**", "@/e2e-hooks", "@/e2e-hooks/**"],
@@ -151,6 +176,13 @@ export default defineConfig([
 		// scripts/*, and vite/* live outside the alias's mapped root and need relative imports.
 		files: ["src/**/*.{ts,tsx}"],
 		rules: {
+			"no-restricted-imports": ["error", { patterns: [ALIAS_ONLY, MEDIABUNNY_REMUX_ONLY] }]
+		}
+	},
+	{
+		// The remux worker and its modules run Mediabunny; tests exercise them directly.
+		files: ["src/workers/remux.worker.ts", "src/workers/remux/**/*.{ts,tsx}", "src/tests/**/*.{ts,tsx}"],
+		rules: {
 			"no-restricted-imports": ["error", { patterns: [ALIAS_ONLY] }]
 		}
 	},
@@ -166,18 +198,7 @@ export default defineConfig([
 					selector: "ImportExpression:not([source.value='@/e2e-hooks'])",
 					message: "No dynamic imports in app code; import statically."
 				},
-				{
-					selector: "CallExpression[callee.name='lazy'], CallExpression[callee.property.name='lazy']",
-					message: "No lazy-loaded components; import statically."
-				},
-				{
-					selector: "ImportSpecifier[imported.name=/^(lazyRouteComponent|createLazyRoute|createLazyFileRoute)$/]",
-					message: "No lazy routes; define the route component statically."
-				},
-				{
-					selector: "MemberExpression[object.meta.name='import'][property.name='glob']",
-					message: "import.meta.glob defaults to lazy imports; import statically."
-				}
+				...NO_LAZY_LOADING
 			]
 		}
 	},
@@ -193,7 +214,8 @@ export default defineConfig([
 			],
 			"no-restricted-syntax": [
 				"error",
-				{ selector: "ImportExpression", message: "A dynamic import would slip past the assistant's import restrictions." }
+				{ selector: "ImportExpression", message: "A dynamic import would slip past the assistant's import restrictions." },
+				...NO_LAZY_LOADING
 			]
 		}
 	},

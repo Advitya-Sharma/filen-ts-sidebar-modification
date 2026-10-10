@@ -136,6 +136,22 @@ async function sweepPrefixes(kind: string, prefixes: readonly string[], sweep: (
 	}
 }
 
+// A Videos run killed before its own restore leaves its scratch directory as a library root in
+// `.filen/Videos/library.v1.json`, and the next run would snapshot and restore it as part of the account's state.
+// Runs after the drive sweeps above, which trash and delete the directories themselves: a root whose directory is
+// gone or trashed is removed whatever its age, a live scratch-named one only past the drive debris window.
+async function pruneVideoRoots(page: Page): Promise<void> {
+	try {
+		const removed = await page.evaluate(minAgeMs => window.__filenE2E.pruneDeadVideoRoots(minAgeMs), MIN_DRIVE_DEBRIS_AGE_MS)
+
+		if (removed > 0) {
+			console.log(`cleanup-setup: removed ${String(removed)} leftover Videos library root(s)`)
+		}
+	} catch (error) {
+		console.log(`cleanup-setup: Videos library root sweep failed — left for the next run (${String(error)})`)
+	}
+}
+
 setup("sweep drive, trash and playlist debris matching a retired scratch-name prefix", async ({ page }) => {
 	try {
 		await page.goto("/drive")
@@ -156,6 +172,7 @@ setup("sweep drive, trash and playlist debris matching a retired scratch-name pr
 		console.log(`cleanup-setup: swept ${String(trashedFromRoot)} root rows, ${String(deletedFromTrash)} trash rows`)
 
 		await sweepPlaylistDebris(page)
+		await pruneVideoRoots(page)
 	} catch (error) {
 		console.log(`cleanup-setup: drive-side sweep stopped early — ${String(error)}`)
 	}

@@ -158,21 +158,30 @@ export function CorrectionsDialog({
 		setDraft(previous => ({ ...previous, ...patch }))
 	}
 
+	// Promise handlers rather than try/finally, which the React Compiler can't compile yet.
 	async function run(edit: ConfigEdit, moved: string | null): Promise<void> {
 		setPending(true)
 
-		try {
-			await editLibraryConfig(edit)
-			onClose()
+		const saved = await editLibraryConfig(edit).then(
+			() => true,
+			(e: unknown) => {
+				log.warn("videos.corrections", "saving a correction failed", e)
+				toast.error(errorLabel(e))
 
-			if (moved !== null) {
-				onMoved(moved)
+				return false
 			}
-		} catch (e) {
-			log.warn("videos.corrections", "saving a correction failed", e)
-			toast.error(errorLabel(e))
-		} finally {
-			setPending(false)
+		)
+
+		setPending(false)
+
+		if (!saved) {
+			return
+		}
+
+		onClose()
+
+		if (moved !== null) {
+			onMoved(moved)
 		}
 	}
 

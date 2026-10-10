@@ -17,7 +17,7 @@ const { sdkApi } = vi.hoisted(() => ({
 	sdkApi: {
 		createDirectory: vi.fn<(parent: string | null, name: string) => Promise<Dir>>(),
 		directoryExists: vi.fn<(parent: string | null, name: string) => Promise<boolean>>(),
-		listDirectory: vi.fn<() => Promise<{ dirs: Dir[]; files: File[] }>>(),
+		listDirectory: vi.fn<(target: { uuid: string }) => Promise<{ dirs: Dir[]; files: File[] }>>(),
 		downloadFileBytes: vi.fn<(file: File) => Promise<Uint8Array>>(),
 		uploadFileBytes: vi.fn<(parent: string, bytes: Uint8Array) => Promise<File>>(),
 		listFileVersionsOp: vi.fn<(file: File) => Promise<FileVersion[]>>(),
@@ -91,7 +91,11 @@ beforeEach(() => {
 		Promise.resolve({ uuid: parent === null ? DOT_FILEN : VIDEOS_DIR, meta: { type: "decoded", data: { name } } } as Dir)
 	)
 	sdkApi.directoryExists.mockImplementation(() => Promise.resolve(true))
-	sdkApi.listDirectory.mockImplementation(() => {
+	sdkApi.listDirectory.mockImplementation(target => {
+		if (target.uuid === DOT_FILEN) {
+			return Promise.resolve({ dirs: [{ uuid: VIDEOS_DIR, meta: { type: "decoded", data: { name: "Videos" } } } as Dir], files: [] })
+		}
+
 		const file = head()
 
 		return Promise.resolve({ dirs: [], files: file === undefined ? [] : [file] })
@@ -341,7 +345,9 @@ describe("library config", () => {
 
 		const state = await ensureLibraryConfig(eventId)
 
-		expect(sdkApi.listDirectory).toHaveBeenCalledTimes(1)
+		// `.filen`, to find its Videos directory, then that directory.
+		expect(sdkApi.listDirectory).toHaveBeenCalledTimes(2)
+		expect(sdkApi.listDirectory).toHaveBeenLastCalledWith({ kind: "uuid", uuid: VIDEOS_DIR })
 		expect(activeLibraryRoots(state.doc)).toEqual([])
 		expect(sdkApi.uploadFileBytes).not.toHaveBeenCalled()
 	})

@@ -36,8 +36,10 @@ const NO_PARENT = -1
 
 // ── CRC32 (IEEE) ─────────────────────────────────────────────────────────────
 
-const CRC_TABLE = (() => {
-	const table = new Uint32Array(256)
+// Slicing-by-8: eight bytes per step through eight tables (8 KiB), several times faster than a byte at a time over a
+// snapshot of many megabytes, which is checked on every load and written on every save.
+const CRC_TABLES = (() => {
+	const tables = new Int32Array(256 * 8)
 
 	for (let n = 0; n < 256; n++) {
 		let c = n
@@ -46,20 +48,46 @@ const CRC_TABLE = (() => {
 			c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
 		}
 
-		table[n] = c >>> 0
+		tables[n] = c
 	}
 
-	return table
+	for (let n = 0; n < 256; n++) {
+		let c = tables[n] ?? 0
+
+		for (let t = 1; t < 8; t++) {
+			c = (tables[c & 0xff] ?? 0) ^ (c >>> 8)
+			tables[t * 256 + n] = c
+		}
+	}
+
+	return tables
 })()
 
 export function crc32(bytes: Uint8Array): number {
-	let crc = 0xffffffff
+	const t = CRC_TABLES
+	const tail = bytes.length - (bytes.length % 8)
+	let crc = -1
+	let i = 0
 
-	for (const byte of bytes) {
-		crc = (CRC_TABLE[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8)
+	for (; i < tail; i += 8) {
+		const low = crc ^ ((bytes[i] ?? 0) | ((bytes[i + 1] ?? 0) << 8) | ((bytes[i + 2] ?? 0) << 16) | ((bytes[i + 3] ?? 0) << 24))
+
+		crc =
+			(t[1792 + (low & 0xff)] ?? 0) ^
+			(t[1536 + ((low >>> 8) & 0xff)] ?? 0) ^
+			(t[1280 + ((low >>> 16) & 0xff)] ?? 0) ^
+			(t[1024 + (low >>> 24)] ?? 0) ^
+			(t[768 + (bytes[i + 4] ?? 0)] ?? 0) ^
+			(t[512 + (bytes[i + 5] ?? 0)] ?? 0) ^
+			(t[256 + (bytes[i + 6] ?? 0)] ?? 0) ^
+			(t[bytes[i + 7] ?? 0] ?? 0)
 	}
 
-	return (crc ^ 0xffffffff) >>> 0
+	for (; i < bytes.length; i++) {
+		crc = (t[(crc ^ (bytes[i] ?? 0)) & 0xff] ?? 0) ^ (crc >>> 8)
+	}
+
+	return ~crc >>> 0
 }
 
 // What decides which files the index keeps, so a snapshot written under other rules is known stale.

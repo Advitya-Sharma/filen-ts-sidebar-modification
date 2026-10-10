@@ -102,6 +102,31 @@ describe("library index snapshot", () => {
 
 	it("computes the IEEE CRC-32", () => {
 		expect(crc32(new TextEncoder().encode("123456789"))).toBe(0xcbf43926)
+		expect(crc32(new Uint8Array(0))).toBe(0)
+	})
+
+	it("matches a byte-at-a-time CRC-32 at every length around the eight-byte steps", () => {
+		function reference(bytes: Uint8Array): number {
+			let crc = 0xffffffff
+
+			for (const byte of bytes) {
+				crc ^= byte
+
+				for (let k = 0; k < 8; k++) {
+					crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1
+				}
+			}
+
+			return (crc ^ 0xffffffff) >>> 0
+		}
+
+		const bytes = Uint8Array.from({ length: 70 }, (_, i) => (i * 167 + 13) & 0xff)
+
+		for (let length = 0; length <= bytes.length; length++) {
+			expect(crc32(bytes.subarray(0, length))).toBe(reference(bytes.subarray(0, length)))
+		}
+
+		expect(crc32(bytes.subarray(3, 61))).toBe(reference(bytes.subarray(3, 61)))
 	})
 })
 

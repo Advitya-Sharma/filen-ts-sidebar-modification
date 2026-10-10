@@ -18,6 +18,13 @@ import { CATALOGUE } from "@/features/drive/components/compressDialog.logic"
 import { archiveFormatInfos } from "@/features/drive/lib/archiveHelpers"
 import { withLevel } from "@/features/drive/lib/archiveFormats"
 import { pendingSdkCalls } from "@/e2e-hooks/sdkCalls"
+import {
+	pruneDeadVideoRoots,
+	videosSyncFileText,
+	videosSyncRestore,
+	videosSyncSnapshot,
+	type VideosSyncSnapshot
+} from "@/e2e-hooks/videosSync"
 
 // Test-only hooks, loaded ONLY when the app is built with VITE_E2E=1 (a dynamic import behind that
 // env condition in main.tsx, so a normal build dead-code-eliminates this whole module — proven by
@@ -188,6 +195,16 @@ interface E2eHooks {
 	// The SDK worker calls in flight, oldest first, for a failed test's diagnostics. Synchronous and
 	// main-thread only, so it answers even while the worker is stuck.
 	pendingSdkCalls: () => { method: string; ageMs: number }[]
+	// `.filen/Videos` as found (each file's text and version uuids), and putting it back that way afterwards — the
+	// Videos specs change the account's synced library and watch state. Restore from a freshly loaded page that has
+	// not opened Videos, or the app saves its own copy back over it.
+	videosSyncSnapshot: () => Promise<VideosSyncSnapshot>
+	videosSyncRestore: (snapshot: VideosSyncSnapshot) => Promise<void>
+	// Fresh server read of `.filen/Videos/<name>`; null when it doesn't exist.
+	videosSyncFileText: (name: string) => Promise<string | null>
+	// cleanup.setup.ts: removes library roots a killed Videos run left (directory gone or trashed, or scratch-named
+	// and older than `minAgeMs`) through the app's own configuration edit. Returns the count.
+	pruneDeadVideoRoots: (minAgeMs: number) => Promise<number>
 }
 
 interface ArchiveCatalogueRow {
@@ -508,6 +525,10 @@ export function installE2eHooks(): void {
 				})
 			)
 		}),
-		pendingSdkCalls
+		pendingSdkCalls,
+		videosSyncSnapshot: ready(videosSyncSnapshot),
+		videosSyncRestore: ready(videosSyncRestore),
+		videosSyncFileText: ready(videosSyncFileText),
+		pruneDeadVideoRoots: ready(pruneDeadVideoRoots)
 	}
 }
