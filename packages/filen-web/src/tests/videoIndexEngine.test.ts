@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { DirsAndFiles } from "@filen/sdk-rs"
 import { CLASSIFIER_VERSION, HLC_SPAN, itemKey, type ItemRec } from "@filen/shared/videos"
-import { CatalogCallAbandoned, VideoIndexEngine, type IndexRootConfig, type SnapshotStore } from "@/workers/videoIndex/engine"
-import { SNAPSHOT_HEADER_BYTES, crc32, readSnapshotHeader } from "@/workers/videoIndex/snapshot.logic"
-import { WALK_FLOOR_MS } from "@/workers/videoIndex/engine"
+import {
+	CatalogCallAbandoned,
+	VideoIndexEngine,
+	type IndexRootConfig,
+	type SnapshotStore,
+	type SnapshotWatermark
+} from "@/workers/videoIndex/engine"
+import { SNAPSHOT_HEADER_BYTES, crc32, decodeSnapshot, readSnapshotHeader } from "@/workers/videoIndex/snapshot.logic"
+import { LOOKUP_RETRY_MS, WALK_FLOOR_MS } from "@/workers/videoIndex/engine"
 import type { VideoTitleView } from "@/workers/videoIndex/view.logic"
 import { FakeDrive, driveDir, driveEvent, driveFile, hexUuid } from "@/tests/support/videoDrive"
 import { memoryCatalogStore, trackCatalogTitles } from "@/tests/support/videoIndex"
@@ -15,6 +21,8 @@ import { referenceGrid, referenceHome, referenceSearch } from "@/tests/support/v
 let drive: FakeDrive
 let latest: bigint
 let snapshots: Map<string, [Uint8Array | null, Uint8Array | null]>
+let watermarks: Map<string, SnapshotWatermark>
+let slotReads: number
 let walkGate: Promise<void>
 // Holds back snapshot reads (a large root still loading).
 let readGate: Promise<void>
@@ -26,6 +34,11 @@ let writeFailures: number
 let driveRootUuid: string | null
 let lastIdFails: number
 let goneRoots: Set<string>
+// Holds back snapshot slot writes (a large root still encoding or waiting for the lock).
+let writeGate: Promise<void>
+let getFileFails: number
+// Holds back file lookups (a slow network).
+let getFileGate: Promise<void>
 
 function ancestorsOf(uuid: string): string[] {
 	const out: string[] = []
@@ -38,10 +51,19 @@ function ancestorsOf(uuid: string): string[] {
 }
 
 const store: SnapshotStore = {
-	read: async rootUuid => {
+	readSlot: async (rootUuid, slot) => {
 		await readGate
+		slotReads++
 
-		return snapshots.get(rootUuid) ?? [null, null]
+		return snapshots.get(rootUuid)?.[slot] ?? null
+	},
+	readWatermark: rootUuid => Promise.resolve(watermarks.get(rootUuid) ?? null),
+	writeWatermark: (rootUuid, mark, cancelled) => {
+		if (!cancelled()) {
+			watermarks.set(rootUuid, mark)
+		}
+
+		return Promise.resolve()
 	},
 	readGenerations: rootUuid => {
 		const [a, b] = snapshots.get(rootUuid) ?? [null, null]
@@ -51,22 +73,28 @@ const store: SnapshotStore = {
 			b === null ? null : (readSnapshotHeader(b)?.generation ?? null)
 		])
 	},
-	write: (rootUuid, slot, bytes) => {
+	write: async (rootUuid, slot, bytes, cancelled) => {
+		await writeGate
+
 		if (writeFailures > 0) {
 			writeFailures--
 
-			return Promise.reject(new Error("quota"))
+			throw new Error("quota")
+		}
+
+		// As the OPFS store does under its lock: a cancelled write leaves the slot (and its file) as it was.
+		if (cancelled()) {
+			return
 		}
 
 		const slots = snapshots.get(rootUuid) ?? [null, null]
 
 		slots[slot] = bytes
 		snapshots.set(rootUuid, slots)
-
-		return Promise.resolve()
 	},
 	remove: rootUuid => {
 		snapshots.delete(rootUuid)
+		watermarks.delete(rootUuid)
 
 		return Promise.resolve()
 	}
@@ -108,10 +136,18 @@ function engineFor(catalogStore = memoryCatalogStore(), yieldSlice = () => Promi
 			return Promise.resolve(latest)
 		},
 		driveRoot: () => driveRootUuid,
-		getFile: uuid => {
+		getFile: async uuid => {
 			calls.getFile++
 
-			return Promise.resolve(drive.files.get(uuid))
+			await getFileGate
+
+			if (getFileFails > 0) {
+				getFileFails--
+
+				throw new Error("network")
+			}
+
+			return drive.files.get(uuid)
 		},
 		store,
 		catalogStore,
@@ -138,6 +174,8 @@ beforeEach(() => {
 	drive = new FakeDrive()
 	latest = 50n
 	snapshots = new Map()
+	watermarks = new Map()
+	slotReads = 0
 	walkGate = Promise.resolve()
 	readGate = Promise.resolve()
 	calls = { walks: 0, lastEventIds: 0, getFile: 0 }
@@ -148,6 +186,9 @@ beforeEach(() => {
 	driveRootUuid = null
 	lastIdFails = 0
 	goneRoots = new Set()
+	writeGate = Promise.resolve()
+	getFileFails = 0
+	getFileGate = Promise.resolve()
 })
 
 afterEach(() => {
@@ -785,7 +826,7 @@ describe("library index lifecycle", () => {
 
 		expect(snapshots.get(root)?.map(slot => (slot === null ? null : readSnapshotHeader(slot)?.generation))).toEqual([1n, null])
 
-		engine.onSocketEvent(driveEvent(++latest, { type: "trashEmpty" }))
+		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: drive.addFile(root, "Ronin (1998).mkv") }))
 		await engine.flush()
 
 		expect(snapshots.get(root)?.map(slot => (slot === null ? null : readSnapshotHeader(slot)?.generation))).toEqual([1n, 2n])
@@ -910,7 +951,7 @@ describe("library index recovery", () => {
 		expect(calls.lastEventIds).toBe(1)
 	})
 
-	it("writes a watermark-only change with the next write, or when the page goes away, not on its own", async () => {
+	it("writes a watermark-only change alone when the page goes away, never re-encoding the snapshot", async () => {
 		const engine = engineFor()
 
 		engine.setWriter(true)
@@ -927,11 +968,134 @@ describe("library index recovery", () => {
 		engine.onSocketEvent(driveEvent(++latest, { type: "trashEmpty" }))
 		await vi.advanceTimersByTimeAsync(120_000)
 
-		expect(generations()).toEqual([1n, null])
+		expect(watermarks.has(root)).toBe(false)
 
 		await engine.flush()
 
+		expect(generations()).toEqual([1n, null])
+		expect(watermarks.get(root)).toMatchObject({ generation: 1n, watermark: latest })
+
+		// The next session starts from it: no walk for what the events already covered.
+		const second = engineFor()
+
+		await second.configure(roots([root, "auto"]))
+		await second.check(latest)
+
+		expect(calls.walks).toBe(0)
+		expect(second.rootStatuses()[0]?.current).toBe(true)
+
+		// A content write supersedes the watermark kept apart.
+		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: drive.addFile(root, "Ronin (1998).mkv") }))
+		await engine.flush()
+
 		expect(generations()).toEqual([1n, 2n])
+	})
+
+	it("loads only the newest snapshot slot, and the other when that one is torn", async () => {
+		const first = engineFor()
+
+		first.setWriter(true)
+
+		const root = await indexedRoot(first)
+
+		await first.flush()
+		first.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: drive.addFile(root, "Ronin (1998).mkv") }))
+		await first.flush()
+
+		expect(snapshots.get(root)?.map(slot => (slot === null ? null : readSnapshotHeader(slot)?.generation))).toEqual([1n, 2n])
+
+		slotReads = 0
+		await engineFor().configure(roots([root, "auto"]))
+
+		expect(slotReads).toBe(1)
+
+		const newest = snapshots.get(root)?.[1]
+
+		if (newest !== null && newest !== undefined) {
+			newest.set([(newest.at(-1) ?? 0) ^ 0xff], newest.length - 1)
+		}
+
+		await settle()
+		slotReads = 0
+		titles.clear()
+
+		const second = engineFor()
+
+		await second.configure(roots([root, "auto"]))
+		await settle()
+
+		expect(slotReads).toBe(2)
+		expect(second.rootStatuses()[0]?.state).toBe("ready")
+		expect([...titles.values()].map(title => title.title)).toEqual(["Heat"])
+	})
+
+	it("keeps a walk that landed while the snapshot still loaded, and walks no root whose snapshot is loading", async () => {
+		const first = engineFor()
+
+		first.setWriter(true)
+
+		const root = await indexedRoot(first)
+
+		await first.flush()
+
+		let release = (): void => undefined
+
+		readGate = new Promise(resolve => {
+			release = resolve
+		})
+
+		const second = engineFor()
+		const configuring = second.configure(roots([root, "auto"]))
+
+		await vi.advanceTimersByTimeAsync(0)
+
+		expect(second.needsCheck()).toBe(false)
+
+		await second.check(latest)
+
+		expect(calls.walks).toBe(0)
+
+		// A rescan walks now; the snapshot landing after it doesn't replace its result.
+		drive.addFile(drive.addDir(root, "Alien (1979)"), "Alien (1979).mkv")
+		await second.rescan(root)
+		release()
+		await configuring
+		await settle()
+
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Alien", "Heat"])
+	})
+
+	it("doesn't check a root found gone before it was ever walked again, until it is restored", async () => {
+		const engine = engineFor()
+		const root = drive.addDir(hexUuid(), "Films")
+
+		goneRoots.add(root)
+		await engine.configure(roots([root, "auto"]))
+		await engine.check(latest)
+
+		expect(engine.rootStatuses()[0]?.state).toBe("missing")
+		expect(calls.walks).toBe(1)
+
+		await engine.configure(roots([root, "auto"]))
+
+		expect(engine.needsCheck()).toBe(false)
+
+		await engine.check(latest)
+
+		expect(calls.walks).toBe(1)
+
+		goneRoots.delete(root)
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+		engine.onSocketEvent(
+			driveEvent(++latest, {
+				type: "folderRestore",
+				dir: driveDir(hexUuid(), "Films", root as `${string}-${string}-${string}-${string}`)
+			})
+		)
+		await settle()
+
+		expect(calls.walks).toBe(2)
+		expect(engine.rootStatuses()[0]?.state).toBe("ready")
 	})
 
 	it("stops writing after repeated failures instead of retrying for the session", async () => {
@@ -1021,6 +1185,383 @@ describe("library index recovery", () => {
 
 		expect(calls.walks).toBe(1)
 		expect(engine.rootStatuses()[0]?.current).toBe(true)
+	})
+})
+
+// The stored snapshot with the highest generation, decoded.
+function newestSnapshot(root: string): ReturnType<typeof decodeSnapshot> {
+	const slots = (snapshots.get(root) ?? [null, null]).filter(slot => slot !== null)
+	const newest = slots.sort((a, b) => Number((readSnapshotHeader(b)?.generation ?? 0n) - (readSnapshotHeader(a)?.generation ?? 0n)))[0]
+
+	return newest === undefined ? null : decodeSnapshot(newest, root)
+}
+
+function generationsOf(root: string): (bigint | null | undefined)[] {
+	return snapshots.get(root)?.map(slot => (slot === null ? null : readSnapshotHeader(slot)?.generation)) ?? []
+}
+
+// Moves a directory holding one movie from outside into `root`, as another device would.
+function moveMovieIn(engine: VideoIndexEngine, root: string): void {
+	const outside = drive.addDir(hexUuid(), "Ronin (1998)")
+
+	drive.addFile(outside, "Ronin (1998).mkv")
+
+	const dir = drive.dirs.get(outside)
+
+	if (dir === undefined) {
+		throw new Error("no directory")
+	}
+
+	const moved = { ...dir, parent: root as typeof dir.parent }
+
+	drive.dirs.set(outside, moved)
+	engine.onSocketEvent(driveEvent(++latest, { type: "folderMove", dir: moved }))
+}
+
+describe("library index follow-ups", () => {
+	it("re-lists a directory moved in when the socket dropped before it ran and the check finds no gap", async () => {
+		const engine = engineFor()
+
+		await indexedRoot(engine)
+		moveMovieIn(engine, engine.rootStatuses()[0]?.uuid ?? "")
+		engine.onSocketEvent({ type: "reconnecting" })
+		await vi.advanceTimersByTimeAsync(3_000)
+		engine.onSocketEvent({ type: "authSuccess" })
+		await settle()
+
+		expect(calls.walks).toBe(0)
+		expect(engine.rootStatuses()[0]?.current).toBe(true)
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Heat", "Ronin"])
+	})
+
+	// Renames a non-video file in `root` into a movie name, as another device would.
+	function renameIntoVideo(engine: VideoIndexEngine, root: string): void {
+		const part = [...drive.files.values()].find(
+			file => file.parent === root && file.meta.type === "decoded" && file.meta.data.name === "ronin.part"
+		)
+		const renamed = driveFile(root, "Ronin (1998).mkv", { uuid: part?.uuid ?? hexUuid() })
+
+		drive.files.set(renamed.uuid, renamed)
+		engine.onSocketEvent(
+			driveEvent(++latest, {
+				type: "fileMetadataChanged",
+				uuid: renamed.uuid,
+				metadata: renamed.meta
+			})
+		)
+	}
+
+	it("walks the roots a renamed file may lie in when its lookup fails twice, once the floor passes", async () => {
+		const engine = engineFor()
+		const root = await indexedRoot(engine)
+
+		drive.addFile(root, "ronin.part")
+		getFileFails = 2
+		renameIntoVideo(engine, root)
+		await settle()
+
+		expect(calls.getFile).toBe(1)
+
+		await vi.advanceTimersByTimeAsync(LOOKUP_RETRY_MS)
+
+		expect(calls.getFile).toBe(2)
+		expect(engine.rootStatuses()[0]?.current).toBe(false)
+
+		await vi.advanceTimersByTimeAsync(WALK_FLOOR_MS)
+
+		expect(calls.walks).toBe(1)
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Heat", "Ronin"])
+	})
+
+	it("tries a renamed file's failed lookup again once the socket is back, and walks nothing when that one lands", async () => {
+		const engine = engineFor()
+		const root = await indexedRoot(engine)
+
+		drive.addFile(root, "ronin.part")
+		getFileFails = 1
+		renameIntoVideo(engine, root)
+		// The network drops: the lookup and the socket fail together.
+		engine.onSocketEvent({ type: "reconnecting" })
+		await vi.advanceTimersByTimeAsync(LOOKUP_RETRY_MS * 3)
+
+		expect(calls.getFile).toBe(1)
+
+		engine.onSocketEvent({ type: "authSuccess" })
+		await settle()
+		await vi.advanceTimersByTimeAsync(WALK_FLOOR_MS)
+
+		expect(calls.getFile).toBe(2)
+		expect(calls.walks).toBe(0)
+		expect(engine.rootStatuses()[0]?.current).toBe(true)
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Heat", "Ronin"])
+	})
+
+	it("walks a root that settled while a failing lookup was out, when its own held rename asked for the same file", async () => {
+		const shows = drive.addDir(hexUuid(), "Shows")
+
+		drive.addFile(shows, "ronin.part")
+
+		const first = engineFor()
+
+		first.setWriter(true)
+		await first.configure(roots([shows, "auto"]))
+		await first.check(latest)
+		await settle()
+		await first.flush()
+
+		const engine = engineFor()
+		const films = await indexedRoot(engine)
+		let releaseRead = (): void => undefined
+		let releaseLookup = (): void => undefined
+
+		readGate = new Promise(resolve => {
+			releaseRead = resolve
+		})
+		getFileGate = new Promise(resolve => {
+			releaseLookup = resolve
+		})
+
+		const configuring = engine.configure(roots([films, "auto"], [shows, "auto"]))
+
+		await vi.advanceTimersByTimeAsync(0)
+		// Held by the loading root; the loaded one asks for the file.
+		renameIntoVideo(engine, shows)
+		await vi.advanceTimersByTimeAsync(0)
+
+		expect(calls.getFile).toBe(1)
+
+		releaseRead()
+		await configuring
+		await engine.check(latest)
+		getFileFails = 2
+		releaseLookup()
+		await settle()
+		await vi.advanceTimersByTimeAsync(LOOKUP_RETRY_MS)
+		await vi.advanceTimersByTimeAsync(WALK_FLOOR_MS)
+
+		expect(calls.getFile).toBe(2)
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Heat", "Ronin"])
+	})
+
+	it("writes no watermark while a re-listing is out, and the watermark once it landed", async () => {
+		const engine = engineFor()
+
+		engine.setWriter(true)
+
+		const root = await indexedRoot(engine)
+
+		moveMovieIn(engine, root)
+		await engine.flush()
+
+		expect(newestSnapshot(root)?.header.watermark).toBeNull()
+
+		await settle()
+		await engine.flush()
+
+		const mark = watermarks.get(root)
+		const written = newestSnapshot(root)
+
+		expect(mark?.generation === written?.header.generation ? mark?.watermark : written?.header.watermark).toBe(latest)
+	})
+
+	// The watermark a write leaves, whichever of the snapshot or the record kept apart names the newer generation.
+	function writtenWatermark(root: string): bigint | null | undefined {
+		const mark = watermarks.get(root)
+		const written = newestSnapshot(root)
+
+		return mark?.generation === written?.header.generation ? mark?.watermark : written?.header.watermark
+	}
+
+	function gateWalk(): () => void {
+		let release = (): void => undefined
+
+		walkGate = new Promise(resolve => {
+			release = resolve
+		})
+
+		return () => {
+			release()
+		}
+	}
+
+	it("writes no watermark while a walk taking over too many re-listings is out, and the watermark once it landed", async () => {
+		const engine = engineFor()
+
+		engine.setWriter(true)
+
+		const root = await indexedRoot(engine)
+
+		await engine.flush()
+
+		const release = gateWalk()
+
+		for (let i = 0; i < 9; i++) {
+			moveMovieIn(engine, root)
+		}
+
+		await vi.advanceTimersByTimeAsync(0)
+		expect(engine.rootStatuses()[0]?.walking).toBe(true)
+		await engine.flush()
+
+		expect(writtenWatermark(root)).toBeNull()
+
+		release()
+		await settle()
+		await engine.flush()
+
+		expect(calls.walks).toBe(1)
+		expect(writtenWatermark(root)).toBe(latest)
+	})
+
+	it("writes no watermark while a walk under way stands in for a queued re-listing", async () => {
+		const engine = engineFor()
+
+		engine.setWriter(true)
+
+		const root = await indexedRoot(engine)
+
+		await engine.flush()
+		moveMovieIn(engine, root)
+
+		const release = gateWalk()
+		const rescanning = engine.rescan(root)
+
+		// The re-listing's timer fires while the walk is out.
+		await settle()
+		await engine.flush()
+
+		expect(writtenWatermark(root)).toBeNull()
+
+		release()
+		await rescanning
+		await settle()
+		await engine.flush()
+
+		expect(writtenWatermark(root)).toBe(latest)
+		expect([...titles.values()].map(title => title.title).sort()).toEqual(["Heat", "Ronin"])
+	})
+
+	it("leaves a root out of date when the walk standing in for its re-listings is stopped", async () => {
+		const engine = engineFor()
+
+		engine.setWriter(true)
+
+		const root = await indexedRoot(engine)
+		const release = gateWalk()
+
+		for (let i = 0; i < 9; i++) {
+			moveMovieIn(engine, root)
+		}
+
+		await vi.advanceTimersByTimeAsync(0)
+		engine.stopWalk(root)
+		release()
+		await settle()
+		await engine.flush()
+
+		expect(engine.rootStatuses()[0]?.current).toBe(false)
+		expect(writtenWatermark(root)).toBeNull()
+	})
+})
+
+describe("library index snapshot writes", () => {
+	it("writes a whole snapshot rather than a watermark naming a generation another writer superseded", async () => {
+		const a = engineFor()
+
+		a.setWriter(true)
+
+		const root = await indexedRoot(a)
+
+		await a.flush()
+
+		const b = engineFor()
+
+		await b.configure(roots([root, "auto"]))
+		await b.check(latest)
+
+		// Only the writer's index changed (a rescan); then an event that moves both watermarks.
+		await a.rescan(root)
+		await a.flush()
+
+		const event = driveEvent(++latest, { type: "trashEmpty" })
+
+		a.onSocketEvent(event)
+		b.onSocketEvent(event)
+		await a.flush()
+
+		expect(watermarks.get(root)).toMatchObject({ generation: 2n, watermark: latest })
+
+		a.setWriter(false)
+		b.setWriter(true)
+
+		const next = driveEvent(++latest, { type: "trashEmpty" })
+
+		a.onSocketEvent(next)
+		b.onSocketEvent(next)
+		await b.flush()
+
+		calls = { walks: 0, lastEventIds: 0, getFile: 0 }
+
+		const c = engineFor()
+
+		await c.configure(roots([root, "auto"]))
+		await c.check(latest)
+
+		expect(calls.walks).toBe(0)
+		expect(c.rootStatuses()[0]?.current).toBe(true)
+	})
+
+	it("overwrites a torn newer slot, never the intact one the snapshot loaded from", async () => {
+		const first = engineFor()
+
+		first.setWriter(true)
+
+		const root = await indexedRoot(first)
+
+		await first.flush()
+		first.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: drive.addFile(root, "Ronin (1998).mkv") }))
+		await first.flush()
+
+		const newest = snapshots.get(root)?.[1]
+
+		if (newest === null || newest === undefined) {
+			throw new Error("no second slot")
+		}
+
+		newest.set([(newest.at(-1) ?? 0) ^ 0xff], newest.length - 1)
+
+		const second = engineFor()
+
+		second.setWriter(true)
+		await second.configure(roots([root, "auto"]))
+		second.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: drive.addFile(root, "Heat 2 (2026).mkv") }))
+		await second.check(latest)
+		await second.flush()
+
+		expect(generationsOf(root)).toEqual([1n, 3n])
+	})
+
+	it("leaves no snapshot behind for a root removed while its write was out", async () => {
+		let release = (): void => undefined
+
+		writeGate = new Promise(resolve => {
+			release = resolve
+		})
+
+		const engine = engineFor()
+
+		engine.setWriter(true)
+
+		const root = await indexedRoot(engine)
+		const flushing = engine.flush()
+
+		await engine.configure([])
+		release()
+		await flushing
+		await settle()
+
+		expect(snapshots.has(root)).toBe(false)
+		expect(watermarks.has(root)).toBe(false)
 	})
 })
 

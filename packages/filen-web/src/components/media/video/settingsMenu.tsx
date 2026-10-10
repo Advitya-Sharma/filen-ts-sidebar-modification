@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { SettingsIcon } from "lucide-react"
 import { cn } from "@filen/shared"
@@ -17,7 +17,7 @@ import {
 import { PLAYBACK_RATES } from "@/lib/media/videoKeys.logic"
 import { setPlaybackRate, useMediaPlaybackRate } from "@/lib/media/useMediaState"
 import { StageTooltip } from "@/components/media/video/stageButton"
-import { STAGE_POPUP_TONE_CLASS, useVideoStageContainer } from "@/components/media/video/stageContext"
+import { STAGE_POPUP_TONE_CLASS, useStagePopupOpen, useVideoStageContainer } from "@/components/media/video/stageContext"
 
 // The gear: playback speed, then whatever the caller adds (subtitle style and delay; on a phone also the
 // buttons the trimmed bar leaves out).
@@ -33,20 +33,24 @@ export interface SettingsMenuItem {
 export function StageSettingsMenu({
 	video,
 	items,
-	onOpenChange,
 	compact
 }: {
 	video: HTMLVideoElement | null
 	items: readonly SettingsMenuItem[]
-	onOpenChange: (open: boolean) => void
 	compact?: boolean
 }) {
 	const { t } = useTranslation("videos")
 	const container = useVideoStageContainer()
 	const rate = useMediaPlaybackRate(video)
+	const [open, setOpen] = useState(false)
+
+	useStagePopupOpen(open)
 
 	return (
-		<DropdownMenu onOpenChange={onOpenChange}>
+		<DropdownMenu
+			open={open}
+			onOpenChange={setOpen}
+		>
 			<StageTooltip label={t("playerSettings")}>
 				<DropdownMenuTrigger
 					render={

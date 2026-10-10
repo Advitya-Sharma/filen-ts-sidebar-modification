@@ -98,6 +98,12 @@ describe("allowedMediaContentType", () => {
 		expect(allowedMediaContentType(fileNamed("track.mp3", undefined))).toBe("audio/mpeg")
 		expect(allowedMediaContentType(fileNamed("track.mp3", "application/octet-stream"))).toBe("audio/mpeg")
 		expect(allowedMediaContentType(fileNamed("book.m4b", "application/octet-stream"))).toBe("audio/mp4")
+		// Ambiguous extensions (audio or video by content) settled as audio by their usual meaning.
+		expect(allowedMediaContentType(fileNamed("song.m4a", undefined))).toBe("audio/mp4")
+		expect(allowedMediaContentType(fileNamed("song.m4a", "application/octet-stream"))).toBe("audio/mp4")
+		expect(allowedMediaContentType(fileNamed("song.ogg", undefined))).toBe("audio/ogg")
+		expect(allowedMediaContentType(fileNamed("song.oga", "application/octet-stream"))).toBe("audio/ogg")
+		expect(allowedMediaContentType(fileNamed("song.weba", "binary/octet-stream"))).toBe("audio/webm")
 		// A specific type still decides, and only extensions the browser may play as they are get one.
 		expect(allowedMediaContentType(fileNamed("track.mp3", "text/html"))).toBeNull()
 		expect(allowedMediaContentType(fileNamed("film.mka", "application/octet-stream"))).toBeNull()

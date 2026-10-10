@@ -273,8 +273,9 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 	// Typing asks for the grid's order once it pauses; clearing the box at once.
 	const settledQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS)
 	const gridQuery: GridQuery = { source, prefs, query: query.trim() === "" ? "" : settledQuery, seed: RANDOM_SEED }
-	// A sort or filter only a probe can answer waits for the stored probes' facts.
-	const enabled = prefsQuery.status === "success" && (!needsProbeFacts(prefs) || factsQuery.isSuccess)
+	// A sort or filter only a probe can answer waits for the stored probes' facts; when they can't be read, files
+	// order as unprobed ones do rather than the grid staying empty.
+	const enabled = prefsQuery.status === "success" && (!needsProbeFacts(prefs) || factsQuery.isSuccess || factsQuery.isError)
 	const headQuery = useCatalogGridHeadQuery(gridQuery, enabled)
 	// The grid lays out at transition priority once its first page lands (in short slices, never one long task).
 	const head = useDeferredValue(headQuery.data)

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { CueBuilder, type VideoProbe } from "@filen/shared/videos"
+import { CueBuilder, MAX_CONCURRENT_CUES, type VideoProbe } from "@filen/shared/videos"
 import type { VideoTitleView } from "@/workers/videoIndex/view.logic"
 import type { PlayerSubtitleTrack } from "@/features/videos/lib/player/subtitles.logic"
 
@@ -31,8 +31,8 @@ vi.mock("@/lib/media/mseController", () => ({
 }))
 
 import { nextMovieInDirectory } from "@/features/videos/lib/player/postPlay.logic"
-import { SidecarReader } from "@/features/videos/lib/player/sidecarReader"
-import { SubtitleTrackPool } from "@/lib/media/subtitles/subtitleTracks"
+import { MAX_KEPT_DECODED, MAX_KEPT_SUBTITLE_FILES, SidecarReader } from "@/features/videos/lib/player/sidecarReader"
+import { SubtitleTrackPool, addedCueIndices } from "@/lib/media/subtitles/subtitleTracks"
 import { cancelPrewarm, directSource, prewarmPlayback, remuxSource } from "@/lib/media/playback/sources"
 
 function movie(id: string, sortName: string, roots: string[], extra: Partial<VideoTitleView> = {}): VideoTitleView {
@@ -89,7 +89,10 @@ class FakeTrack {
 		return this.mode === "disabled" ? null : this.list
 	}
 
+	public added = 0
+
 	public addCue(cue: unknown): void {
+		this.added++
 		this.list.push(cue)
 	}
 
@@ -105,19 +108,30 @@ class FakeTrack {
 	public removeEventListener = (): undefined => undefined
 }
 
+function cueStore(cues: readonly [number, string][]) {
+	const builder = new CueBuilder()
+
+	for (const [start, text] of cues) {
+		builder.add(start, start + 1, text)
+	}
+
+	return builder.finish()
+}
+
 describe("SubtitleTrackPool", () => {
-	it("empties a track before disabling it, so reusing it never piles cues up", () => {
-		const tracks: FakeTrack[] = []
-		const video = {
-			addTextTrack: () => {
-				const track = new FakeTrack()
+	const tracks: FakeTrack[] = []
+	const video = {
+		addTextTrack: () => {
+			const track = new FakeTrack()
 
-				tracks.push(track)
+			tracks.push(track)
 
-				return track
-			}
+			return track
 		}
+	}
 
+	beforeEach(() => {
+		tracks.length = 0
 		vi.stubGlobal(
 			"VTTCue",
 			class {
@@ -135,7 +149,9 @@ describe("SubtitleTrackPool", () => {
 				}
 			}
 		)
+	})
 
+	it("empties a track before disabling it, so reusing it never piles cues up", () => {
 		const builder = new CueBuilder()
 
 		builder.add(1, 2, "a")
@@ -154,6 +170,98 @@ describe("SubtitleTrackPool", () => {
 		expect(tracks.reduce((sum, track) => sum + track.stored, 0)).toBe(2)
 		pool.dispose()
 		expect(tracks.every(track => track.stored === 0 && track.mode === "disabled")).toBe(true)
+	})
+
+	it("adds only the new cues when the cues just grew, and refills on a delay change or other cues", () => {
+		const pool = new SubtitleTrackPool(video as unknown as HTMLVideoElement)
+		const first = cueStore([
+			[1, "a"],
+			[5, "c"]
+		])
+		const grown = cueStore([
+			[1, "a"],
+			[3, "b"],
+			[5, "c"],
+			[7, "d"]
+		])
+
+		pool.show(first, 0)
+		pool.show(grown, 0)
+
+		expect(tracks).toHaveLength(1)
+		expect(tracks[0]?.added).toBe(4)
+		expect(tracks[0]?.stored).toBe(4)
+
+		pool.show(grown, 0)
+		expect(tracks[0]?.added).toBe(4)
+
+		pool.show(grown, 0.5)
+		expect(tracks.reduce((sum, track) => sum + track.stored, 0)).toBe(4)
+		expect(tracks.reduce((sum, track) => sum + track.added, 0)).toBe(8)
+
+		pool.show(cueStore([[2, "x"]]), 0.5)
+		expect(tracks.reduce((sum, track) => sum + track.stored, 0)).toBe(1)
+		pool.dispose()
+	})
+
+	it("never hands the browser more overlapping cues than show at once, also as embedded cues grow", () => {
+		const pool = new SubtitleTrackPool(video as unknown as HTMLVideoElement)
+		const overlapping = (from: number, count: number) => {
+			const builder = new CueBuilder()
+
+			for (let i = from; i < from + count; i++) {
+				builder.add(i / 100, 10_800, `c${String(i)}`)
+			}
+
+			return builder.finish()
+		}
+		const current = () => (tracks.find(track => track.stored > 0)?.cues ?? []) as { startTime: number; endTime: number; text: string }[]
+		const activeAt = (time: number) => current().filter(cue => cue.startTime <= time && cue.endTime > time)
+		const mostAtOnce = () => Math.max(...current().map(cue => activeAt(cue.startTime).length))
+
+		pool.show(overlapping(1, 1000), 0)
+		expect(mostAtOnce()).toBe(MAX_CONCURRENT_CUES)
+		expect(activeAt(30).map(cue => cue.text)).toEqual(
+			Array.from({ length: MAX_CONCURRENT_CUES }, (_, i) => `c${String(1001 - MAX_CONCURRENT_CUES + i)}`)
+		)
+
+		// An earlier cue read later shortens the ones after it: the track is refilled rather than left overlapping.
+		pool.show(overlapping(0, 1001), 0)
+		expect(tracks.filter(track => track.stored > 0)).toHaveLength(1)
+		expect(mostAtOnce()).toBe(MAX_CONCURRENT_CUES)
+		expect(activeAt(5).map(cue => cue.text)).toEqual(
+			Array.from({ length: MAX_CONCURRENT_CUES }, (_, i) => `c${String(501 - MAX_CONCURRENT_CUES + i)}`)
+		)
+		pool.dispose()
+	})
+
+	it("tells the added cues of a store that holds every earlier cue in order, and nothing else", () => {
+		const base = cueStore([
+			[1, "a"],
+			[5, "c"]
+		])
+
+		expect(
+			addedCueIndices(
+				base,
+				cueStore([
+					[0, "z"],
+					[1, "a"],
+					[5, "c"]
+				])
+			)
+		).toEqual([0])
+		expect(addedCueIndices(base, base)).toEqual([])
+		expect(
+			addedCueIndices(
+				base,
+				cueStore([
+					[1, "a"],
+					[5, "changed"]
+				])
+			)
+		).toBeNull()
+		expect(addedCueIndices(base, cueStore([[1, "a"]]))).toBeNull()
 	})
 })
 
@@ -194,6 +302,35 @@ describe("SidecarReader", () => {
 		expect(auto.status === "ok" ? auto.cues.texts[0] : null).toBe("При")
 		expect(latin.status === "ok" ? latin.cues.texts[0] : null).toBe("Ïðè")
 		expect(again).toBe(auto)
+	})
+
+	it("keeps only the latest subtitle files across a binge, and no .edl bytes", async () => {
+		const srt = new TextEncoder().encode("1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+		const episode = (index: number): PlayerSubtitleTrack => ({
+			...track,
+			id: `s:e${String(index)}`,
+			file: { stableUuid: `e${String(index)}`, uuid: `e${String(index)}-u`, name: "a.srt", size: 100 }
+		})
+
+		mocks.playableFiles.mockResolvedValue([{ uuid: "x", size: 100n }])
+		mocks.download.mockResolvedValue(srt)
+
+		const reader = new SidecarReader()
+		const internals = reader as unknown as { bytes: Map<string, unknown>; decoded: Map<string, unknown>; edls: Map<string, unknown> }
+
+		for (let index = 0; index < 30; index++) {
+			await reader.subtitle(episode(index), null)
+			await reader.edl({ stableUuid: `edl${String(index)}`, uuid: `edl${String(index)}-u`, name: "a.edl", size: 10 })
+		}
+
+		expect(internals.bytes.size).toBe(MAX_KEPT_SUBTITLE_FILES)
+		expect(internals.decoded.size).toBe(MAX_KEPT_DECODED)
+		expect(internals.edls.size).toBeLessThanOrEqual(4)
+
+		// The item shown now is still at hand: another encoding is decoded from the kept bytes.
+		mocks.download.mockClear()
+		await reader.subtitle(episode(29), "windows-1252")
+		expect(mocks.download).not.toHaveBeenCalled()
 	})
 
 	it("refuses by the file's size on the drive now, not the indexed one", async () => {
@@ -249,6 +386,22 @@ describe("prewarm", () => {
 		expect(mocks.warmHandOver).toHaveBeenCalledTimes(1)
 		expect(mocks.warmCancel).not.toHaveBeenCalled()
 		expect(remuxSource(file).warmKey).toBeUndefined()
+	})
+
+	it("lets the session that takes a warm wait until the warm has reached the remux worker", async () => {
+		const file = FILE as never
+
+		prewarmPlayback({ file, name: "next.mkv", probe: probeOf("mkv"), idrOnlyStart: false })
+
+		const taken = remuxSource(file)
+
+		expect(mocks.warmHandOver).not.toHaveBeenCalled()
+		expect(taken.warmPort).toBeInstanceOf(Promise)
+		await taken.warmPort
+		await taken.warmed
+		expect(mocks.warmHandOver).toHaveBeenCalledTimes(1)
+		expect(remuxSource(file).warmed).toBeUndefined()
+		expect(remuxSource(file).warmPort).toBeUndefined()
 	})
 
 	it("lets a warmed file go when nobody takes it", async () => {

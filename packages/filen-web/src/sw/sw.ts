@@ -87,11 +87,13 @@ interface PendingStreamDownload {
 // A preview the page's SDK worker reads (SW_MSG_REGISTER_PORT_PREVIEW): no file handle and no Client here,
 // only the reading end of its range port. `lost` once the serving side went away; `streams` counts the
 // responses reading through the port, which a dropped entry closes it after. `generation` orders it against
-// other registrations of its id (null from a page that sends none).
+// other registrations of its id (null from a page that sends none). `readAhead`: the windows a response reads
+// past the one its consumer waits on (none for bytes made as they are read).
 interface PendingPortPreview {
 	kind: "portPreview"
 	reader: RangePortReader
 	generation: number | null
+	readAhead: number
 	name: string
 	size: number
 	contentType: string
@@ -120,6 +122,7 @@ const downloads = new PendingRegistry<PendingDownload>(
 	entry => {
 		if (entry.kind === "portPreview") {
 			entry.dropped = true
+			dropSpare(entry)
 			closePortIfDone(entry)
 		}
 	}
@@ -473,19 +476,130 @@ function rangeResponse(
 	return new Response(body, { status: 200, headers: responseHeaders })
 }
 
-// Bytes `start`..`end` (inclusive) read through a range port as the consumer pulls them, one SDK chunk at a
-// time: each window ends on the next chunk boundary and is enqueued as soon as it arrives, so the first bytes
-// leave after one chunk, a slow link shows progress chunk by chunk, and nothing is read past what the
-// consumer has asked for (one window in flight, none queued). A cancel aborts the read in flight.
-function portBody(reader: RangePortReader, start: number, end: number, finish: () => void): ReadableStream<Uint8Array> {
+// Windows read past the one the consumer waits on: every port read is its own SDK download, so a stream read
+// one window at a time would pay a full round trip per chunk with nothing overlapping. The depth grows by one
+// per pull up to this, so a first window alone (a probe, a seek that cancels at once) reads nothing ahead and a
+// stream abandoned at its second (WebKit's habit) has read at most one window it did not take. A registration
+// whose bytes are made as they are read (decoded audio) reads none ahead: its reads cost no round trip worth
+// hiding, and work done ahead is thrown away at every cancel.
+const PORT_READ_AHEAD = 2
+
+// A window a port body read: bytes `start`..`end` (end exclusive).
+interface PortWindow {
+	start: number
+	end: number
+	bytes: Uint8Array
+}
+
+// Windows one response read and never handed on, for the next response of the same registration: WebKit
+// abandons a stream and asks again from where its bytes ended, which would otherwise download them again.
+// One registration's at a time and for a short while, so at most PORT_READ_AHEAD chunks wait here.
+const SPARE_TTL_MS = 10_000
+let spare: { entry: PendingPortPreview; windows: PortWindow[]; timer: ReturnType<typeof setTimeout> } | null = null
+
+function dropSpare(entry?: PendingPortPreview): void {
+	if (spare !== null && (entry === undefined || spare.entry === entry)) {
+		clearTimeout(spare.timer)
+		spare = null
+	}
+}
+
+function keepSpare(entry: PendingPortPreview, windows: PortWindow[]): void {
+	if (windows.length === 0 || entry.dropped || entry.lost) {
+		return
+	}
+
+	dropSpare()
+
+	const timer = setTimeout(() => {
+		dropSpare(entry)
+	}, SPARE_TTL_MS)
+
+	spare = { entry, windows, timer }
+}
+
+// The part of a spare window of `entry` from `start` on (a view, nothing copied), taken out of the store.
+function takeSpare(entry: PendingPortPreview, start: number): PortWindow | undefined {
+	if (spare?.entry !== entry) {
+		return undefined
+	}
+
+	const index = spare.windows.findIndex(window => window.start <= start && start < window.end)
+	const window = spare.windows[index]
+
+	if (window === undefined) {
+		return undefined
+	}
+
+	spare.windows.splice(index, 1)
+
+	if (spare.windows.length === 0) {
+		dropSpare()
+	}
+
+	return { start, end: window.end, bytes: window.bytes.subarray(start - window.start) }
+}
+
+// Where a port body keeps what it read and did not hand on, and finds what an earlier one left.
+interface PortSpares {
+	take: (start: number) => PortWindow | undefined
+	keep: (windows: PortWindow[]) => void
+}
+
+// Bytes `start`..`end` (inclusive) read through a range port as the consumer pulls them, one SDK chunk per
+// read: each window ends on the next chunk boundary and is enqueued as soon as it arrives, so the first bytes
+// leave after one chunk and a slow link shows progress chunk by chunk. Pull n keeps up to min(n - 1,
+// `readAhead`) further windows of the served range in flight, so at most that many chunks wait in memory;
+// nothing is read past `end`. A cancel aborts every read in flight and leaves the windows that had arrived to
+// `spares`, which also serves any window an earlier response left.
+function portBody(
+	reader: RangePortReader,
+	start: number,
+	end: number,
+	readAhead: number,
+	finish: () => void,
+	spares?: PortSpares
+): ReadableStream<Uint8Array> {
 	const reads = new AbortController()
+	// Windows read or being read, in order; the first starts at `position`. `arrived` once its bytes have.
+	const queue: { start: number; end: number; bytes: Promise<Uint8Array>; arrived?: Uint8Array }[] = []
 	let position = start
+	// Where the next window read starts.
+	let next = start
+	let pulls = 0
 	let finished = false
 	const settle = () => {
 		if (!finished) {
 			finished = true
+			reads.abort()
 			finish()
 		}
+	}
+	const readWindow = () => {
+		const kept = spares?.take(next)
+
+		if (kept !== undefined) {
+			const windowEnd = Math.min(end + 1, kept.end)
+			const bytes = kept.bytes.subarray(0, windowEnd - next)
+
+			queue.push({ start: next, end: windowEnd, bytes: Promise.resolve(bytes), arrived: bytes })
+			next = windowEnd
+
+			return
+		}
+
+		const windowEnd = Math.min(end + 1, (Math.floor(next / BLOCK_BYTES) + 1) * BLOCK_BYTES)
+		const window: (typeof queue)[number] = { start: next, end: windowEnd, bytes: reader.readRange(next, windowEnd, reads.signal) }
+
+		// A window read ahead may fail before anything awaits it; the pull that takes it sees the failure.
+		window.bytes.then(
+			bytes => {
+				window.arrived = bytes
+			},
+			() => undefined
+		)
+		queue.push(window)
+		next = windowEnd
 	}
 
 	return new ReadableStream<Uint8Array>(
@@ -497,16 +611,29 @@ function portBody(reader: RangePortReader, start: number, end: number, finish: (
 				}
 			},
 			async pull(controller) {
-				const windowEnd = Math.min(end + 1, (Math.floor(position / BLOCK_BYTES) + 1) * BLOCK_BYTES)
+				pulls++
+
+				const depth = Math.min(pulls, 1 + readAhead)
+
+				while (queue.length < depth && next <= end) {
+					readWindow()
+				}
 
 				try {
-					const bytes = await reader.readRange(position, windowEnd, reads.signal)
+					const window = queue.shift()
 
-					if (bytes.length === 0) {
-						throw new Error("range port read returned nothing")
+					if (window === undefined) {
+						throw new Error("range port body pulled past its end")
 					}
 
-					position += bytes.length
+					const bytes = await window.bytes
+
+					// The windows after it start where it was meant to end.
+					if (bytes.length !== window.end - position) {
+						throw new Error("range port read came back short")
+					}
+
+					position = window.end
 					controller.enqueue(bytes)
 
 					if (position > end) {
@@ -519,6 +646,16 @@ function portBody(reader: RangePortReader, start: number, end: number, finish: (
 				}
 			},
 			cancel(reason) {
+				if (!finished) {
+					spares?.keep(
+						queue.flatMap(window =>
+							window.arrived?.length === window.end - window.start
+								? [{ start: window.start, end: window.end, bytes: window.arrived }]
+								: []
+						)
+					)
+				}
+
 				reads.abort(reason)
 				settle()
 			}
@@ -546,9 +683,21 @@ function handlePortPreview(event: FetchEvent, id: string, pending: PendingPortPr
 	}
 
 	const done = Promise.withResolvers<undefined>()
-	const body = portBody(pending.reader, served.start, served.end, () => {
-		done.resolve(undefined)
-	})
+	const body = portBody(
+		pending.reader,
+		served.start,
+		served.end,
+		pending.readAhead,
+		() => {
+			done.resolve(undefined)
+		},
+		{
+			take: start => takeSpare(pending, start),
+			keep: windows => {
+				keepSpare(pending, windows)
+			}
+		}
+	)
 	// Built BEFORE the stream is counted (see pumpToResponse).
 	const response = rangeResponse(
 		body,
@@ -868,6 +1017,7 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 			bucket?: unknown
 			port?: unknown
 			generation?: unknown
+			readAhead?: unknown
 		}
 
 		if (!(msg.port instanceof MessagePort)) {
@@ -882,7 +1032,8 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 			typeof msg.size !== "number" ||
 			!Number.isSafeInteger(msg.size) ||
 			msg.size < 0 ||
-			(msg.generation !== undefined && !isGeneration(msg.generation))
+			(msg.generation !== undefined && !isGeneration(msg.generation)) ||
+			(msg.readAhead !== undefined && typeof msg.readAhead !== "boolean")
 		) {
 			msg.port.close()
 			port?.postMessage({ ok: false, error: "invalid registration" })
@@ -902,6 +1053,7 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 			kind: "portPreview",
 			reader: rangePortReader(msg.port),
 			generation,
+			readAhead: msg.readAhead === false ? 0 : PORT_READ_AHEAD,
 			name: msg.name,
 			size: msg.size,
 			contentType: msg.contentType,
@@ -912,6 +1064,7 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 
 		entry.reader.onLost(() => {
 			entry.lost = true
+			dropSpare(entry)
 		})
 		downloads.set(msg.id, entry, previewBucket(msg.bucket))
 		port?.postMessage({ ok: true })

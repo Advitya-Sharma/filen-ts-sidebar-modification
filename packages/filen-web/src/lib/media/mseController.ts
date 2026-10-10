@@ -6,6 +6,7 @@ import {
 	BACK_BUFFER_SECONDS,
 	backBufferEviction,
 	browserEngine,
+	bufferedAhead,
 	bufferLimits,
 	estimatedBytes,
 	evictedAhead,
@@ -33,8 +34,8 @@ import {
 	type TimeRange
 } from "@/lib/media/mseController.logic"
 import type { ProbeIndex } from "@filen/shared/videos"
+import { holdReadsWhilePlaying } from "@/lib/media/playbackReads"
 import { rangePortReader } from "@/lib/media/rangePort"
-import { rangeReads } from "@/lib/media/rangeReads"
 import {
 	AUDIO_TARGET_CODECS,
 	IdrUnreachableError,
@@ -62,7 +63,9 @@ import {
 export type MseFailure = "keyframeIntervalTooLarge" | "stalled" | "remux" | "media" | "source" | "openGopStart"
 
 export interface RemuxSessionOptions {
-	port: MessagePort
+	// Absent only with `warmKey`: the warmed file is taken over with the port it was warmed with, or the open
+	// fails with WarmGoneError (isWarmGone) when the worker no longer has it.
+	port?: MessagePort
 	size: number
 	index?: ProbeIndex
 	startTime?: number
@@ -74,7 +77,7 @@ export interface RemuxSessionOptions {
 	onFailure(reason: MseFailure, detail: string): void
 	// Embedded text subtitle cues as the remux reads them (Matroska).
 	onTextCues?: (cues: RemuxTextCue[]) => void
-	// The file was warmed under this key (warmRemuxFile): the worker takes it over, `port` closes unused.
+	// The file was warmed under this key (warmRemuxFile): the worker takes it over, a `port` given closes unused.
 	warmKey?: string
 }
 
@@ -208,6 +211,9 @@ class TrackBuffer {
 	// Every range observed buffered after this generation's appends, for telling eviction from a gap.
 	public seen: TimeRange[] = []
 	public lastEvictionAt = 0
+	// A removal of the session's own is in progress: what a ManagedSourceBuffer reports removed meanwhile is
+	// not the browser's eviction.
+	public removing = false
 	private readonly holds = new Set<HoldReason>()
 	private pieces: Piece[] = []
 	private running = false
@@ -304,6 +310,15 @@ class TrackBuffer {
 		this.buffer = null
 	}
 
+	public remove(start: number, end: number): Promise<void> {
+		return this.run(buffer => {
+			this.removing = true
+			buffer.remove(start, end)
+		}).finally(() => {
+			this.removing = false
+		})
+	}
+
 	// Queued behind every operation already asked for: two callers both seeing `updating` false and
 	// both starting one would make the second throw. The operation may decide not to start one.
 	public run(operation: (buffer: SourceBuffer) => void): Promise<void> {
@@ -380,6 +395,10 @@ class TrackBuffer {
 						outcome.appended = true
 					})
 				} catch (error) {
+					// The append never started: what the quota hook runs on the SourceBuffer (a removal) is no
+					// append a reset may abort.
+					this.appending = false
+
 					if (!isQuotaError(error)) {
 						throw error
 					}
@@ -434,8 +453,9 @@ export interface RemuxWarmth {
 // session's own hold.
 const HAND_OVER_HOLD_MS = 30_000
 
-// Opens a file in the remux worker ahead of playback (the head, the index and the first keyframe interval go
-// into its cache) under `key`, for an openRemuxSession with the same warmKey to take over.
+// Opens a file in the remux worker ahead of playback (its head and index go into the worker's cache, and where
+// video starts only at IDR pictures, the first one is found) under `key`, for an openRemuxSession with the
+// same warmKey to take over.
 export async function warmRemuxFile(options: {
 	port: MessagePort
 	size: number
@@ -503,6 +523,10 @@ export async function openRemuxSession(options: RemuxSessionOptions): Promise<Re
 			throw new Error("MediaSource is not available")
 		}
 
+		if (options.port === undefined && options.warmKey === undefined) {
+			throw new Error("no port to read the file through")
+		}
+
 		const transcodeTargets = transcodeTargetsOf(source)
 		const limits = deviceBufferLimits()
 		const hold: RemuxWorkerHold = await holdRemuxWorker()
@@ -518,24 +542,23 @@ export async function openRemuxSession(options: RemuxSessionOptions): Promise<Re
 		try {
 			port.transferred = true
 
-			const { id, info } = await Promise.race([
-				hold.remote.open(
-					Comlink.transfer(
-						{
-							port: options.port,
-							size: options.size,
-							transcodeTargets,
-							maxFragmentBytes: limits,
-							...(options.index === undefined ? {} : { index: options.index }),
-							...(options.idrOnlyStart === true ? { idrOnlyStart: true } : {}),
-							...(options.warmKey === undefined ? {} : { warmKey: options.warmKey })
-						},
-						[options.port]
-					),
-					onEvent
-				),
-				hold.dead
-			])
+			const filePort = options.port
+			const params =
+				filePort === undefined
+					? { warmKey: options.warmKey ?? "" }
+					: Comlink.transfer(
+							{
+								port: filePort,
+								size: options.size,
+								transcodeTargets,
+								maxFragmentBytes: limits,
+								...(options.index === undefined ? {} : { index: options.index }),
+								...(options.idrOnlyStart === true ? { idrOnlyStart: true } : {}),
+								...(options.warmKey === undefined ? {} : { warmKey: options.warmKey })
+							},
+							[filePort]
+						)
+			const { id, info } = await Promise.race([hold.remote.open(params, onEvent), hold.dead])
 
 			return new MseRemuxSession({ hold, id, info, source, options, events, limits })
 		} catch (error) {
@@ -545,7 +568,7 @@ export async function openRemuxSession(options: RemuxSessionOptions): Promise<Re
 		}
 	} catch (error) {
 		// The serving side would otherwise keep the file's port open until its idle timeout.
-		if (!port.transferred) {
+		if (!port.transferred && options.port !== undefined) {
 			rangePortReader(options.port).close()
 		}
 
@@ -712,9 +735,10 @@ class MseRemuxSession implements RemuxSession {
 		}
 
 		this.element = element
-		// The session reads ahead even while paused, so it keeps playback's claim on range reads until disposed.
+		// Playback's claim on range reads while the element plays or waits to: a paused session (a paused
+		// player, a prefetched next track) leaves background reads their full share.
 		if (!this.disposed) {
-			this.releaseReads ??= rangeReads.holdPlayback()
+			this.releaseReads ??= holdReadsWhilePlaying(element)
 		}
 		// Required before attaching a ManagedMediaSource (its sourceopen waits on it otherwise), and on
 		// every path: a remote player could reach neither this page's MediaSource nor its decryption. Not
@@ -782,7 +806,7 @@ class MseRemuxSession implements RemuxSession {
 				throw new DOMException("audio track cannot be played", "NotSupportedError")
 			}
 
-			const time = element.currentTime
+			const time = this.playhead(element)
 			const hadAudio = this.audio.buffer !== null
 			const rebuild = mode === "none" ? hadAudio : !hadAudio
 
@@ -964,6 +988,8 @@ class MseRemuxSession implements RemuxSession {
 
 		this.mediaSources++
 		this.endedStream = false
+		// A start still waiting for the old MediaSource's metadata is replaced by `time`.
+		this.pendingStart = null
 		this.mediaSource = mediaSource
 		this.objectUrl = url
 		this.video.attachBuffer(null)
@@ -994,10 +1020,10 @@ class MseRemuxSession implements RemuxSession {
 					throw new Error("no playable video track")
 				}
 
-				this.video.attachBuffer(this.addSourceBuffer(mediaSource, videoInfo.mime))
+				this.video.attachBuffer(this.addSourceBuffer(this.video, mediaSource, videoInfo.mime))
 			}
 
-			this.audio.attachBuffer(result.audio === null ? null : this.addSourceBuffer(mediaSource, result.audio.mime))
+			this.audio.attachBuffer(result.audio === null ? null : this.addSourceBuffer(this.audio, mediaSource, result.audio.mime))
 			this.audioMime = result.audio?.mime ?? null
 
 			// Exactly where asked (a resume position), or the key packet a cues-less file was clamped to.
@@ -1016,18 +1042,25 @@ class MseRemuxSession implements RemuxSession {
 		}
 	}
 
-	private addSourceBuffer(mediaSource: MediaSource, mime: string): SourceBuffer {
+	private addSourceBuffer(track: TrackBuffer, mediaSource: MediaSource, mime: string): SourceBuffer {
 		const buffer = mediaSource.addSourceBuffer(mime)
 
-		// A ManagedMediaSource drops buffered media on its own and says which; media ahead of the playhead
-		// is fetched again.
+		// A ManagedMediaSource drops buffered media on its own and says which (it reports the session's own
+		// removals too); media it dropped ahead of the playhead is fetched again, within the refetch budget.
 		if (this.managed) {
 			buffer.addEventListener("bufferedchange", event => {
+				// One eviction reaches every SourceBuffer: an operation queued or running (the refetch the first
+				// buffer's event started among them) already fetches from the playhead on, and maintain() looks
+				// again once it is done.
+				if (track.removing || this.disposed || this.mediaSource !== mediaSource || this.pendingStart !== null || this.ops.busy) {
+					return
+				}
+
 				const removed = "removedRanges" in event && event.removedRanges instanceof TimeRanges ? toRanges(event.removedRanges) : []
 				const now = this.element?.currentTime ?? 0
 
 				if (removed.some(([, end]) => end > now + MAX_BUFFER_HOLE)) {
-					this.ops.restart(now)
+					this.refetchEvicted(now)
 				}
 			})
 		}
@@ -1035,9 +1068,85 @@ class MseRemuxSession implements RemuxSession {
 		return buffer
 	}
 
+	// Data ahead of the playhead the browser dropped is fetched again, each time with a smaller window; one that
+	// keeps being cut means the GOPs do not fit at all. A file with an index is fetched again from where the
+	// buffer was cut, keeping what lies before it; one without restarts at the playhead, since its pumps can
+	// land only on a key packet already scanned.
+	private refetchEvicted(now: number): void {
+		const at = performance.now()
+
+		this.evictions = recentEvictions(this.evictions, at)
+
+		if (this.evictions.length >= MAX_EVICTION_REFETCHES) {
+			this.fail("keyframeIntervalTooLarge", "the browser keeps evicting buffered media ahead of the playhead")
+
+			return
+		}
+
+		this.evictions.push(at)
+		this.aheadScale *= QUOTA_SHRINK
+
+		if (this.info.seekScansFile || this.idrOnlyStart()) {
+			this.ops.restart(now)
+
+			return
+		}
+
+		void this.ops
+			.run(() => this.refill())
+			.catch((error: unknown) => {
+				this.opFailed(error, this.ops.restartQueued)
+			})
+	}
+
+	// Restarts the pumps where the playable buffer ahead of the playhead ends, keeping what lies before it; the
+	// window still ends `ahead` past the playhead.
+	private async refill(): Promise<void> {
+		const element = this.element
+
+		// A restart queued behind this fetches everything again anyway.
+		if (element === null || this.disposed || this.ops.restartQueued) {
+			return
+		}
+
+		const now = this.playhead(element)
+		const from = now + bufferedAhead(this.playable(), now)
+
+		// Whatever either track holds past the cut is fetched again with the rest, so none of it reads as a hole.
+		for (const track of this.tracks()) {
+			for (const [start, end] of rangesOutside(track.ranges, Number.NEGATIVE_INFINITY, from)) {
+				void track.remove(start, end).catch(() => undefined)
+			}
+		}
+
+		this.audio.hold("switch")
+
+		try {
+			const result = await this.startPumps(from, now)
+
+			if (result !== null && !(await this.followAudioMime(result.audio?.mime ?? null))) {
+				await this.setUp(now, !element.paused)
+			}
+		} finally {
+			this.audio.release("switch")
+		}
+	}
+
+	// Where the playhead is, or will be once the element has metadata for a start position.
+	private playhead(element: HTMLMediaElement): number {
+		return this.pendingStart ?? element.currentTime
+	}
+
+	// A ManagedMediaSource that asked the page to stop streaming gets no new horizon until it allows it again.
+	private mayStream(): boolean {
+		const mediaSource = this.mediaSource
+
+		return !this.managed || mediaSource === null || !("streaming" in mediaSource) || mediaSource.streaming !== false
+	}
+
 	// Bumps the generation for both tracks and restarts the worker's pumps at the key packet at or
-	// before `time`. Null when a newer restart replaced this one.
-	private async startPumps(time: number): Promise<RemuxSeekResult | null> {
+	// before `time`, buffering up to `ahead` past `playhead`. Null when a newer restart replaced this one.
+	private async startPumps(time: number, playhead: number = time): Promise<RemuxSeekResult | null> {
 		const generation = this.nextGeneration++
 		const mediaSource = this.mediaSource
 
@@ -1045,7 +1154,7 @@ class MseRemuxSession implements RemuxSession {
 		this.clearQuotaWait()
 		this.video.reset(generation, mediaSource)
 		this.audio.reset(generation, mediaSource)
-		this.horizon = time + this.ahead
+		this.horizon = Math.max(time, playhead + this.ahead)
 
 		const audio =
 			this.audioTrackId !== null && this.audioMode !== "none"
@@ -1098,11 +1207,7 @@ class MseRemuxSession implements RemuxSession {
 		// kept: a range left ahead of the playhead would read as a hole the browser had cut.
 		for (const track of this.tracks()) {
 			for (const [start, end] of rangesOutside(track.ranges, time - BACK_BUFFER_SECONDS, time)) {
-				void track
-					.run(buffer => {
-						buffer.remove(start, end)
-					})
-					.catch(() => undefined)
+				void track.remove(start, end).catch(() => undefined)
 			}
 		}
 
@@ -1163,10 +1268,9 @@ class MseRemuxSession implements RemuxSession {
 		this.audio.hold("switch")
 
 		try {
-			await this.audio.run(buffer => {
-				buffer.remove(0, Number.POSITIVE_INFINITY)
-			})
+			await this.audio.remove(0, Number.POSITIVE_INFINITY)
 
+			const now = this.playhead(element)
 			// A little before the playhead, so audio is there when the switch lands.
 			const result = await this.call(() =>
 				this.hold.remote.switchAudio(this.id, {
@@ -1174,8 +1278,8 @@ class MseRemuxSession implements RemuxSession {
 					trackId,
 					mode,
 					copyCodec: this.copyCodec(trackId),
-					time: Math.max(0, element.currentTime - 0.1),
-					horizon: element.currentTime + this.ahead
+					time: Math.max(0, now - 0.1),
+					horizon: now + this.ahead
 				})
 			)
 
@@ -1186,7 +1290,7 @@ class MseRemuxSession implements RemuxSession {
 			this.audioStartTime = result.startTime
 
 			if (!(await this.followAudioMime(result.mime))) {
-				await this.setUp(element.currentTime, !element.paused)
+				await this.setUp(this.playhead(element), !element.paused)
 			}
 		} finally {
 			this.audio.release("switch")
@@ -1282,27 +1386,14 @@ class MseRemuxSession implements RemuxSession {
 		const seen = playableRanges(this.audioOnly ? null : this.video.seen, this.audio.buffer === null ? null : this.audio.seen)
 
 		if (this.quotaWait === null && !this.openGopBlocked && evictedAhead({ currentTime: now, ranges: this.playable(), seen })) {
-			const at = performance.now()
-
-			this.evictions = recentEvictions(this.evictions, at)
-
-			// Each refetch shrinks the window; one that keeps being cut means the GOPs do not fit at all.
-			if (this.evictions.length >= MAX_EVICTION_REFETCHES) {
-				this.fail("keyframeIntervalTooLarge", "the browser keeps evicting buffered media ahead of the playhead")
-
-				return
-			}
-
-			this.evictions.push(at)
-			this.aheadScale *= QUOTA_SHRINK
-			this.ops.restart(now)
+			this.refetchEvicted(now)
 
 			return
 		}
 
 		const forward = forwardBuffered(now, this.videoRanges(), this.audioRanges())
 
-		if (needsMore({ bufferedAhead: forward, ahead }) && now + ahead > this.horizon + 1) {
+		if (needsMore({ bufferedAhead: forward, ahead }) && now + ahead > this.horizon + 1 && this.mayStream()) {
 			this.horizon = now + ahead
 
 			for (const track of this.tracks()) {
@@ -1336,11 +1427,7 @@ class MseRemuxSession implements RemuxSession {
 			if (eviction !== null) {
 				track.lastEvictionAt = at
 
-				void track
-					.run(buffer => {
-						buffer.remove(eviction[0], eviction[1])
-					})
-					.catch(() => undefined)
+				void track.remove(eviction[0], eviction[1]).catch(() => undefined)
 			}
 		}
 	}
@@ -1375,9 +1462,7 @@ class MseRemuxSession implements RemuxSession {
 		}
 
 		if (action.type === "evict") {
-			await track.run(buffer => {
-				buffer.remove(action.range[0], action.range[1])
-			})
+			await track.remove(action.range[0], action.range[1])
 
 			return true
 		}

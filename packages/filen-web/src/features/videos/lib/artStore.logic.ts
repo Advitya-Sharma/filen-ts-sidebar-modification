@@ -13,8 +13,9 @@ export const ART_GENERATION = "v1"
 
 export const ART_DIR = [...ART_DIR_ROOT, ART_GENERATION]
 
-// Most entries are WebP; Safari's canvas encodes JPEG instead, which an <img> sniffs the same.
-export const ART_STORE: OpfsBlobStore = { dir: ART_DIR, ext: ".webp" }
+// Most entries are WebP; Safari's canvas encodes JPEG instead, which an <img> sniffs the same. A write still out
+// when a sign-out (in any tab) wipes the tree must not bring back an image of the signed-out account.
+export const ART_STORE: OpfsBlobStore = { dir: ART_DIR, ext: ".webp", recreateWhenRemoved: false }
 
 // 128 MiB: a few thousand posters and stills at 15-120 KB each.
 export const ART_CACHE_CAP = 134_217_728

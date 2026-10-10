@@ -3,6 +3,7 @@ import type { DriveEvent, File } from "@filen/sdk-rs"
 import {
 	TOMBSTONE_MS,
 	applyDriveEvent,
+	applyScopedWalk,
 	applyWalk,
 	emptyRootState,
 	projectWalk,
@@ -202,6 +203,181 @@ describe("socket patches", () => {
 
 		expect(apply(state, { type: "deleteAll" }).changed).toBe(true)
 		expect(state.files.size + state.dirs.size).toBe(0)
+	})
+
+	it("reclassifies for a directory change only when a live file lies below it", () => {
+		const { drive, state, movies } = setup()
+		const empty = drive.addDir(ROOT, "Empty")
+		const nested = drive.addDir(empty, "Nested")
+
+		walked(drive, state, NOW + 10)
+
+		const created = driveDir(ROOT, "New")
+
+		expect(apply(state, { type: "folderSubCreated", dir: created })).toMatchObject({ changed: false, dirty: true })
+		expect(state.dirs.has(created.uuid)).toBe(true)
+		expect(
+			apply(state, { type: "folderMetadataChanged", uuid: empty as File["uuid"], meta: driveDir(ROOT, "Renamed").meta })
+		).toMatchObject({ changed: false, dirty: true })
+		expect(
+			apply(state, { type: "folderMetadataChanged", uuid: movies as File["uuid"], meta: driveDir(ROOT, "Films").meta })
+		).toMatchObject({ changed: true })
+		expect(apply(state, { type: "folderMove", dir: driveDir(created.uuid, "Empty", empty as File["uuid"]) })).toMatchObject({
+			changed: false,
+			dirty: true
+		})
+		expect(apply(state, { type: "folderTrash", parent: ROOT, uuid: empty as File["uuid"] })).toMatchObject({
+			changed: false,
+			dirty: true
+		})
+		expect(state.dirs.has(nested)).toBe(false)
+		expect(apply(state, { type: "folderTrash", parent: ROOT, uuid: movies as File["uuid"] })).toMatchObject({
+			changed: true
+		})
+		expect(live(state)).toEqual([])
+	})
+
+	it("drops each subtree of a burst of directory trashes, its own directories only", () => {
+		const { drive, state } = setup()
+		const dirs = Array.from({ length: 20 }, (_, i) => drive.addDir(ROOT, `Dir ${String(i)}`))
+		const below = dirs.map(dir => drive.addDir(dir, "Below"))
+		const keep = drive.addDir(ROOT, "Keep")
+
+		walked(drive, state, NOW + 10)
+
+		for (const dir of dirs) {
+			apply(state, { type: "folderTrash", parent: ROOT, uuid: dir as File["uuid"] })
+		}
+
+		expect(dirs.some(dir => state.dirs.has(dir))).toBe(false)
+		expect(below.some(dir => state.dirs.has(dir))).toBe(false)
+		expect(state.dirs.has(keep)).toBe(true)
+
+		// A directory created after the burst is dropped with its parent too.
+		const late = driveDir(keep, "Late")
+
+		apply(state, { type: "folderSubCreated", dir: late })
+		apply(state, { type: "folderTrash", parent: ROOT, uuid: keep as File["uuid"] })
+
+		expect(state.dirs.has(late.uuid)).toBe(false)
+	})
+
+	it("tombstones a file that came into a directory after a burst of drops when that directory goes too", () => {
+		const { drive, state, heat } = setup()
+		const a = drive.addDir(ROOT, "A")
+		const b = drive.addDir(ROOT, "B")
+
+		walked(drive, state, NOW + 10)
+		apply(state, { type: "folderTrash", parent: ROOT, uuid: a as File["uuid"] })
+		apply(state, { type: "fileMove", file: { ...heat, parent: b as File["uuid"] } })
+
+		expect(apply(state, { type: "folderTrash", parent: ROOT, uuid: b as File["uuid"] })).toMatchObject({ changed: true })
+		expect(live(state)).toEqual([])
+	})
+
+	it("refuses a replayed move that would put a directory below itself, asking for a walk, and never hangs", () => {
+		const { drive, state } = setup()
+		const x = drive.addDir(ROOT, "X")
+		const y = drive.addDir(x, "Y")
+
+		// A walk read the final tree (Y below X); events from before it replay over that: X into Y, X back, Y into X.
+		walked(drive, state, NOW + 10)
+
+		expect(apply(state, { type: "folderMove", dir: driveDir(y, "X", x as File["uuid"]) })).toEqual({
+			changed: false,
+			dirty: false,
+			followUp: { type: "fullWalk" }
+		})
+		expect(state.dirs.get(x)?.parent).toBe(ROOT)
+		expect(apply(state, { type: "folderMove", dir: driveDir(ROOT, "X", x as File["uuid"]) }).followUp).toEqual({ type: "none" })
+		expect(apply(state, { type: "folderMove", dir: driveDir(x, "Y", y as File["uuid"]) }).followUp).toEqual({ type: "none" })
+		expect(apply(state, { type: "folderRestore", dir: driveDir(y, "X", x as File["uuid"]) }).followUp).toEqual({
+			type: "fullWalk"
+		})
+		expect(apply(state, { type: "folderSubCreated", dir: driveDir(y, "X", x as File["uuid"]) }).followUp).toEqual({
+			type: "fullWalk"
+		})
+	})
+
+	it("reports a re-listing that closes a cycle with what the index held, and takes a consistent one", () => {
+		const { drive, state } = setup()
+		const x = drive.addDir(ROOT, "X")
+		const y = drive.addDir(x, "Y")
+
+		walked(drive, state, NOW + 10)
+
+		const incoming = driveDir(ROOT, "Incoming")
+		const inside = driveDir(incoming.uuid, "Inside")
+
+		apply(state, { type: "folderMove", dir: incoming })
+
+		expect(
+			applyScopedWalk({
+				state,
+				walk: { dirs: [{ uuid: inside.uuid, parent: incoming.uuid, name: "Inside" }], files: [], entries: 1, complete: true }
+			})
+		).toBe(true)
+		expect(applyScopedWalk({ state, walk: { dirs: [{ uuid: x, parent: y, name: "X" }], files: [], entries: 1, complete: true } })).toBe(
+			"cycle"
+		)
+	})
+
+	it("ends a subtree over a parent cycle already in the index", () => {
+		const { drive, state } = setup()
+		const x = drive.addDir(ROOT, "X")
+		const y = drive.addDir(x, "Y")
+
+		walked(drive, state, NOW + 10)
+
+		const dirX = state.dirs.get(x)
+
+		if (dirX === undefined) {
+			throw new Error("X not indexed")
+		}
+
+		dirX.parent = y
+
+		expect(
+			apply(state, { type: "folderMetadataChanged", uuid: x as File["uuid"], meta: driveDir(ROOT, "Renamed").meta })
+		).toMatchObject({
+			changed: false
+		})
+		expect(apply(state, { type: "folderTrash", parent: ROOT, uuid: x as File["uuid"] })).toMatchObject({ dirty: true })
+		expect(state.dirs.has(y)).toBe(false)
+	})
+
+	it("builds the child index once across a burst of moves, renames and new files, and keeps it right", () => {
+		const { drive, state, movies } = setup()
+		const dirs = Array.from({ length: 10 }, (_, i) => drive.addDir(ROOT, `Dir ${String(i)}`))
+
+		walked(drive, state, NOW + 10)
+
+		let builds = 0
+		const values = state.dirs.values.bind(state.dirs)
+
+		state.dirs.values = () => {
+			builds++
+
+			return values()
+		}
+
+		const target = dirs[0] ?? ""
+
+		for (const dir of dirs.slice(1)) {
+			apply(state, { type: "folderMove", dir: driveDir(target, "Moved", dir as File["uuid"]) })
+			apply(state, { type: "folderMetadataChanged", uuid: dir as File["uuid"], meta: driveDir(target, "Renamed").meta })
+			apply(state, { type: "fileNew", file: driveFile(dir, "New (2001).mkv") })
+		}
+
+		expect(builds).toBe(1)
+
+		// Every moved directory, and the files that came into them, now lie below the target.
+		expect(apply(state, { type: "folderMove", dir: driveDir(movies, "Target", target as File["uuid"]) })).toMatchObject({
+			changed: true
+		})
+		expect(apply(state, { type: "folderTrash", parent: ROOT, uuid: movies as File["uuid"] })).toMatchObject({ changed: true })
+		expect(live(state)).toEqual([])
+		expect(builds).toBe(1)
 	})
 
 	it("persists a favorite without reclassifying", () => {

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest"
 import { type } from "arktype"
-import { ABSENT_TTL_MS, RecordStore, planCountEviction, type RecordStoreKv } from "@/features/videos/lib/recordStore.logic"
+import {
+	ABSENT_TTL_MS,
+	RecordStore,
+	holdRecordStores,
+	planCountEviction,
+	type RecordStoreKv
+} from "@/features/videos/lib/recordStore.logic"
 import { memoryKv } from "@/tests/support/memoryKv"
 
 const schema = type({ value: "number", at: "number" })
@@ -147,6 +153,26 @@ describe("RecordStore", () => {
 		expect(records.peek("x")).toBeUndefined()
 	})
 
+	it("writes nothing to kv once a sign-out held the stores, through a reset too", async () => {
+		const { kv, rows } = memoryKv()
+		const entries = vi.spyOn(kv, "kvKeys")
+		const records = store(kv)
+
+		rows.set("test.v1.x", { value: 1, at: 1 })
+		holdRecordStores()
+		records.reset()
+		records.put("y", { value: 2, at: 2 })
+		records.delete("x")
+		await records.sweep()
+		await settle()
+
+		expect(records.writable()).toBe(false)
+		expect([...rows.keys()]).toEqual(["test.v1.x"])
+		expect(entries).not.toHaveBeenCalled()
+		// Memory still answers this page.
+		expect(records.peek("y")).toEqual({ value: 2, at: 2 })
+	})
+
 	it("trusts a known absence only briefly, and refresh reads past it", async () => {
 		const { kv, rows, reads } = memoryKv()
 		let now = 0
@@ -190,9 +216,31 @@ describe("RecordStore", () => {
 		expect(rows.has("test.v1.r1")).toBe(false)
 	})
 
-	it("keeps at most eight deletes in flight however many rows go", async () => {
+	it("evicts the planned rows in conditional batches, without reading each one again", async () => {
+		const { kv, rows, reads } = memoryKv()
+		const batches = vi.spyOn(kv, "kvDeleteIfAt")
+		const remove = vi.spyOn(kv, "kvDelete")
+		const records = store(kv, { maxRecords: 10 })
+
+		for (let i = 0; i < 100; i++) {
+			rows.set(`test.v1.r${String(i)}`, { value: i, at: i })
+		}
+
+		await records.get("r0")
+		await records.sweep()
+
+		expect(rows.size).toBe(9)
+		expect(reads()).toBe(1)
+		expect(batches).toHaveBeenCalledTimes(1)
+		expect(remove).not.toHaveBeenCalled()
+		expect(records.peek("r0")).toBeUndefined()
+	})
+
+	it("keeps at most eight deletes in flight however many rows go, without the conditional delete", async () => {
 		const { kv, rows } = memoryKv()
 		const remove = kv.kvDelete
+
+		delete kv.kvDeleteIfAt
 		let inFlight = 0
 		let peak = 0
 

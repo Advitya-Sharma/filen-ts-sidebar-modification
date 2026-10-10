@@ -110,6 +110,10 @@ export class ArtLoader {
 	private readonly unavailable = new Set<string>()
 	// The drive thumbnail's size, colour and darkness, measured once per session.
 	private readonly driveThumbs = new Map<string, MeasuredImage | null>()
+	// Bumped by reset: work started before it stores nothing.
+	private epoch = 0
+	// Tokens of the decodes running, cancelled by reset.
+	private readonly running = new Set<string>()
 
 	public constructor(deps: ArtLoaderDeps) {
 		this.deps = deps
@@ -277,6 +281,7 @@ export class ArtLoader {
 			return this.fromDriveThumb(file.uuid, slot)
 		}
 
+		const epoch = this.epoch
 		// A function, so each check reads the signal anew across the awaits.
 		const dropped = (): boolean => context.signal.aborted
 		const stored = await this.stored(source, file.uuid, slot)
@@ -289,7 +294,9 @@ export class ArtLoader {
 		const probeOptions = { rank: context.rank, signal: context.signal }
 
 		if (source === "sidecar") {
-			return file.size > ART_SOURCE_MAX_BYTES ? null : this.makeArt(source, file, { offset: 0, size: file.size }, slot, box, context)
+			return file.size > ART_SOURCE_MAX_BYTES
+				? null
+				: this.makeArt(source, file, { offset: 0, size: file.size }, slot, box, context, epoch)
 		}
 
 		if (source === "embedded") {
@@ -297,7 +304,7 @@ export class ArtLoader {
 			// A backdrop comes from the landscape cover, a poster or still from the front one.
 			const cover = slot === "b" ? probeLandscapeCover(record?.probe) : (record?.probe?.cover ?? null)
 
-			return cover === null || cover.size > ART_SOURCE_MAX_BYTES ? null : this.makeArt(source, file, cover, slot, box, context)
+			return cover === null || cover.size > ART_SOURCE_MAX_BYTES ? null : this.makeArt(source, file, cover, slot, box, context, epoch)
 		}
 
 		const record = await this.deps.probes.request({ uuid: file.uuid, file: file.file }, "card", probeOptions)
@@ -315,7 +322,7 @@ export class ArtLoader {
 			signal: context.signal
 		})
 
-		return frame === null ? null : this.persist(frame, "frame", file.uuid, slot, box)
+		return frame === null ? null : this.persist(frame, "frame", file.uuid, slot, box, epoch)
 	}
 
 	// A sidecar or an embedded cover through the SDK's decoder, in an art slot and a shared read permit.
@@ -326,12 +333,15 @@ export class ArtLoader {
 		range: ByteSpan,
 		slot: ArtSlotCode,
 		box: Size,
-		context: SourceContext
+		context: SourceContext,
+		epoch: number
 	): Promise<ImageResult | null> {
 		const token = crypto.randomUUID()
 		const unsubscribe = onAbort(context.signal, () => {
 			this.deps.cancel(token)
 		})
+
+		this.running.add(token)
 
 		try {
 			const made = await this.gate.withPermit(context.rank, () =>
@@ -347,7 +357,7 @@ export class ArtLoader {
 			}
 
 			if (made.type !== "thumbnail") {
-				this.settle(source, file.uuid, slot)
+				this.settle(source, file.uuid, slot, epoch)
 
 				return null
 			}
@@ -359,16 +369,22 @@ export class ArtLoader {
 				source,
 				file.uuid,
 				slot,
-				box
+				box,
+				epoch
 			)
 		} finally {
+			this.running.delete(token)
 			unsubscribe()
 		}
 	}
 
 	// A source that answered for good it has no image: remembered here and in its record, so neither this
 	// session nor a later one reads it again.
-	private settle(source: "sidecar" | "embedded", uuid: string, slot: ArtSlotCode): void {
+	private settle(source: "sidecar" | "embedded", uuid: string, slot: ArtSlotCode, epoch: number): void {
+		if (!this.persisting(epoch)) {
+			return
+		}
+
 		this.unavailable.add(this.sourceKey(source, uuid))
 		this.deps.records.put(artKey(uuid, slot), {
 			slot,
@@ -382,17 +398,27 @@ export class ArtLoader {
 		})
 	}
 
+	// Whether work started in `epoch` may still store: no reset and no sign-out since.
+	private persisting(epoch: number): boolean {
+		return epoch === this.epoch && this.deps.records.writable()
+	}
+
 	// Stores the image and its record; the returned Blob is built first, since storing transfers the bytes.
 	private async persist(
 		image: Omit<GeneratedFrame, "dominant"> & { dominant: Rgb | null },
 		source: "sidecar" | "embedded" | "frame",
 		uuid: string,
 		slot: ArtSlotCode,
-		box: Size
+		box: Size,
+		epoch: number
 	): Promise<ImageResult> {
 		const blob = new Blob([image.bytes as Uint8Array<ArrayBuffer>])
 		const fit = fitMode({ width: image.width, height: image.height }, box)
 		const key = artKey(uuid, slot, source === "frame" ? "frame" : "image")
+
+		if (!this.persisting(epoch)) {
+			return { type: "image", blob, source, width: image.width, height: image.height, fit, dominant: image.dominant }
+		}
 
 		try {
 			await this.deps.storeArt(key, image.bytes)
@@ -445,8 +471,15 @@ export class ArtLoader {
 		}
 	}
 
-	// Logout: forget every verdict and measurement.
+	// Logout: forget every verdict and measurement, and cancel the decodes running; nothing started before stores.
 	public reset(): void {
+		this.epoch++
+
+		for (const token of this.running) {
+			this.deps.cancel(token)
+		}
+
+		this.running.clear()
 		this.failures.clear()
 		this.unavailable.clear()
 		this.driveThumbs.clear()
@@ -521,6 +554,10 @@ export const artLoader = new ArtLoader({
 
 // A frame the player captured on pause or stop (captureFrameFromVideo), stored as the video's still.
 export async function storeCapturedFrame(videoUuid: string, slot: ArtSlotCode, frame: GeneratedFrame): Promise<void> {
+	if (!artRecords.writable()) {
+		return
+	}
+
 	const key = artKey(videoUuid, slot, "capture")
 
 	await sdkApi.storeArt(key, Comlink.transfer(frame.bytes, [frame.bytes.buffer]))

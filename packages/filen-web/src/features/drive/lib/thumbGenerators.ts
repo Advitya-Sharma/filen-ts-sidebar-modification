@@ -29,7 +29,15 @@ import {
 	isFormatMediaError
 } from "@/features/drive/lib/thumbGenerators.logic"
 import { prepareSvgThumb } from "@/features/drive/lib/svgThumb.logic"
-import { previewStreamUrl, releasePreviewStream, waitForMediaStream } from "@/features/preview/lib/previewStream"
+import {
+	previewStreamIdOf,
+	previewStreamStatus,
+	previewStreamUrl,
+	releasePreviewStream,
+	waitForMediaStream
+} from "@/features/preview/lib/previewStream"
+import type { PreviewStreamStatus } from "@/lib/sw/protocol"
+import { onAbort } from "@/lib/abort"
 import { SAMPLE_HEIGHT, SAMPLE_WIDTH, isDark, meanLuma } from "@/lib/media/framePick.logic"
 import { allowedMediaContentType } from "@/features/preview/lib/mediaType"
 import { driveItemMime, narrowItem, type BaseFileItem, type DriveItem } from "@/features/drive/lib/item"
@@ -38,6 +46,7 @@ import { getDocument, GlobalWorkerOptions, PDFWorker } from "pdfjs-dist"
 import { idleResource, type IdleResource } from "@/lib/idleResource"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 import { getPreviewBytes } from "@/features/preview/lib/previewCache"
+import type { MediaFailureKind } from "@/lib/media/mediaFailure"
 import { previewCacheScope } from "@/features/preview/lib/accessMode"
 import { PROBE_RANK } from "@/features/videos/lib/probeService.logic"
 import { frameEligible, isSettledMiss } from "@/features/videos/lib/frames.logic"
@@ -160,15 +169,19 @@ export function warmUploadThumbnail(uploaded: SdkFile, file: File): void {
 		if (contentType !== null) {
 			// A file the element cannot decode is left unanswered: the drive-side arm still has its keyframe read.
 			seedLocalThumb(item, "video", async () => {
-				const result = await videoThumb(uploaded.uuid, defer => {
-					const url = URL.createObjectURL(file.slice(0, file.size, contentType))
+				const result = await videoThumb(
+					uploaded.uuid,
+					defer => {
+						const url = URL.createObjectURL(file.slice(0, file.size, contentType))
 
-					defer(() => {
-						URL.revokeObjectURL(url)
-					})
+						defer(() => {
+							URL.revokeObjectURL(url)
+						})
 
-					return url
-				})
+						return url
+					},
+					localVideoError
+				)
 
 				return result.type === "undecodable" ? null : result
 			})
@@ -249,12 +262,38 @@ function seedLocalThumb(item: DriveItem, category: "video" | "pdf", produce: () 
 }
 
 // The element answered that it cannot decode these bytes, as opposed to a read that failed or stopped.
+// `settled` unless the answer may also have been a read that failed in passing.
 class VideoUndecodableError extends Error {
-	public constructor(message: string) {
+	public readonly settled: boolean
+
+	public constructor(message: string, settled: boolean) {
 		super(message)
 
 		this.name = "VideoUndecodableError"
+		this.settled = settled
 	}
+}
+
+// The element gave up on its source, with MediaError `code`.
+class VideoElementError extends Error {
+	public readonly code: number | undefined
+
+	public constructor(message: string, code: number | undefined) {
+		super(message)
+
+		this.name = "VideoElementError"
+		this.code = code
+	}
+}
+
+// Whether an element's MediaError `code` on `url` is a verdict about the bytes; `signal` ends the check.
+// "unsettled": most likely the format, but possibly a read that failed in passing.
+type VideoErrorVerdict = MediaFailureKind | "unsettled"
+type VideoErrorClassifier = (code: number, url: string, signal: AbortSignal) => Promise<VideoErrorVerdict>
+
+// A local file's bytes are always readable, so either format code is the file.
+function localVideoError(code: number): Promise<VideoErrorVerdict> {
+	return Promise.resolve(isFormatMediaError(code) ? "format" : "other")
 }
 
 // Resolves once `event` fires, or rejects if the element errors first — a corrupt/unplayable stream
@@ -274,7 +313,7 @@ function waitForVideoEvent(video: HTMLVideoElement, event: "loadedmetadata" | "l
 			cleanup()
 			const message = `video element errored before ${event}`
 
-			reject(isFormatMediaError(video.error?.code) ? new VideoUndecodableError(message) : new Error(message))
+			reject(new VideoElementError(message, video.error?.code))
 		}
 		const onAbort = () => {
 			cleanup()
@@ -320,13 +359,15 @@ function currentFrameLuma(video: HTMLVideoElement): number {
 // for it. `signal` stops the generation only until the frame has loaded: past that, all that is left is
 // one draw.
 //
-// "undecodable" is the element's verdict that it cannot decode the bytes (an error naming the format, or
-// metadata without a picture); a failed or stopped read stays "failed".
+// "undecodable" is the element's verdict that it cannot decode the bytes (an error `classify` names a
+// format one while the source is still open, or metadata without a picture), `settled` unless that error
+// may also have been a passing read failure; a failed or stopped read stays "failed".
 async function videoThumb(
 	uuid: string,
 	openSource: (defer: DeferFn) => Promise<string> | string,
+	classify: VideoErrorClassifier,
 	signal?: AbortSignal
-): Promise<ThumbGenerationResult | { type: "undecodable" }> {
+): Promise<ThumbGenerationResult | { type: "undecodable"; settled: boolean }> {
 	const deadline = AbortSignal.timeout(VIDEO_GENERATE_TIMEOUT_MS)
 	const beforeFirstFrame = signal === undefined ? deadline : AbortSignal.any([signal, deadline])
 
@@ -349,10 +390,26 @@ async function videoThumb(
 			video.load()
 		})
 
-		await waitForVideoEvent(video, "loadedmetadata", beforeFirstFrame)
+		const waitFor = async (event: "loadedmetadata" | "loadeddata" | "seeked"): Promise<void> => {
+			try {
+				await waitForVideoEvent(video, event, beforeFirstFrame)
+			} catch (e) {
+				if (e instanceof VideoElementError && e.code !== undefined) {
+					const verdict = await classify(e.code, url, beforeFirstFrame)
+
+					if (verdict !== "other") {
+						throw new VideoUndecodableError(e.message, verdict === "format")
+					}
+				}
+
+				throw e
+			}
+		}
+
+		await waitFor("loadedmetadata")
 
 		if (video.videoWidth === 0) {
-			throw new VideoUndecodableError("no picture in the metadata")
+			throw new VideoUndecodableError("no picture in the metadata", true)
 		}
 
 		// `seeked` fires once the frame at the new position is decoded. An indeterminate duration (NaN —
@@ -366,17 +423,17 @@ async function videoThumb(
 
 			video.currentTime = first
 
-			await waitForVideoEvent(video, "seeked", beforeFirstFrame)
+			await waitFor("seeked")
 
 			if (retry !== null && isDark(currentFrameLuma(video))) {
 				video.currentTime = retry
 
-				await waitForVideoEvent(video, "seeked", beforeFirstFrame)
+				await waitFor("seeked")
 			}
 		} else if (video.readyState < video.HAVE_CURRENT_DATA) {
 			video.preload = "auto"
 
-			await waitForVideoEvent(video, "loadeddata", beforeFirstFrame)
+			await waitFor("loadeddata")
 		}
 
 		const { width, height } = fitWithin(video.videoWidth, video.videoHeight, THUMB_MAX_DIM)
@@ -396,7 +453,7 @@ async function videoThumb(
 
 	if (!result.success) {
 		if (result.error instanceof VideoUndecodableError) {
-			return { type: "undecodable" }
+			return { type: "undecodable", settled: result.error.settled }
 		}
 
 		if (signal?.aborted !== true) {
@@ -423,7 +480,7 @@ function elementCanPlay(query: string): boolean {
 	return answer
 }
 
-// Files whose element already failed to decode this session, so a retry reads only the keyframe.
+// Files whose element settled that it cannot decode them this session, so a retry reads only the keyframe.
 const elementUndecodable = new Set<string>()
 
 // Queued like a visible card's probe: it counts toward drive's probe soft cap, which an explicit rank
@@ -610,6 +667,43 @@ async function keyframeThumb(item: BaseFileItem, signal: AbortSignal): Promise<T
 	return isSettledMiss(await frameHints.get(uuid)) ? { type: "unavailable", reason: "unsupported" } : { type: "failed" }
 }
 
+// MEDIA_ERR_SRC_NOT_SUPPORTED on the worker's stream is also what a fetch that failed before the metadata
+// raises: offline, a registration the worker lost, or an SDK read that failed while the registration held
+// (a server error, a rate limit, a timeout). The worker's registry tells a lost registration apart without
+// a range read (a read of even one byte downloads a whole SDK chunk again); the check ends with `signal`.
+// A held registration, or a worker too old to be asked, cannot rule out a failed read, so that answer
+// takes the keyframe read this once without settling the element out for the session.
+const MEDIA_ERR_SRC_NOT_SUPPORTED = 4
+
+async function streamedVideoError(code: number, url: string, signal: AbortSignal): Promise<VideoErrorVerdict> {
+	if (code !== MEDIA_ERR_SRC_NOT_SUPPORTED) {
+		return isFormatMediaError(code) ? "format" : "other"
+	}
+
+	if (!onlineManager.isOnline() || signal.aborted) {
+		return "other"
+	}
+
+	const status = await new Promise<PreviewStreamStatus | null>(resolve => {
+		const unsubscribe = onAbort(signal, () => {
+			resolve(null)
+		})
+
+		void previewStreamStatus(previewStreamIdOf(url)).then(
+			answer => {
+				unsubscribe()
+				resolve(answer)
+			},
+			() => {
+				unsubscribe()
+				resolve(null)
+			}
+		)
+	})
+
+	return status === "present" || status === "unknown" ? "unsettled" : "other"
+}
+
 // The hidden <video> on the SW's Range stream first, where it can play the file; the keyframe read
 // where it cannot, or once it has failed to decode it. A failed or timed-out stream is not retried
 // through the keyframe read, which would only double the reads.
@@ -639,6 +733,7 @@ export const generateVideoThumb: ThumbGenerator = async (item, signal) => {
 
 				return previewStreamUrl(narrowToAnyFile(item), driveItemName(item), contentType, id, { transient: true })
 			},
+			streamedVideoError,
 			signal
 		)
 
@@ -646,7 +741,9 @@ export const generateVideoThumb: ThumbGenerator = async (item, signal) => {
 			return result
 		}
 
-		elementUndecodable.add(uuid)
+		if (result.settled) {
+			elementUndecodable.add(uuid)
+		}
 
 		if (stopped()) {
 			return { type: "failed" }

@@ -62,6 +62,22 @@ vi.mock("@/features/preview/lib/previewStream", () => ({
 const { MediaViewer } = await import("@/features/preview/components/mediaViewer")
 const { PreviewAccessModeProvider } = await import("@/features/preview/lib/accessMode")
 const { linkedFileItem } = await import("@/tests/fixtures/sdk")
+const { probeTransportStream } = await import("@/features/preview/lib/transportStreamProbe")
+const { narrowToAnyFile } = await import("@/features/drive/lib/download")
+const { attachFileKindVerdictStorage, fileKindVerdict } = await import("@/features/drive/lib/fileKindVerdicts")
+
+// What reaches kv of the file-kind verdicts the previews' probes record.
+const savedVerdicts: string[] = []
+
+attachFileKindVerdictStorage({
+	load: () => Promise.resolve([]),
+	save: uuid => {
+		savedVerdicts.push(uuid)
+
+		return Promise.resolve()
+	},
+	remove: () => Promise.resolve()
+})
 
 const PROBE: VideoProbe = {
 	v: 1,
@@ -145,6 +161,57 @@ describe("audio preview without a service worker", () => {
 
 		expect(mocks.sdkApi.openLinkedRangePortAnon).toHaveBeenCalledOnce()
 		expect(mocks.sdkApi.openRangePort).not.toHaveBeenCalled()
+		expectNoWholeFileRead()
+	})
+
+	// A shared browser's next signed-in user must not inherit what an anonymous visit read.
+	it("keeps a public link's probe verdict in memory only", async () => {
+		const item = linkedFileItem("talk.webm")
+		const audioOnly: VideoProbe = {
+			...PROBE,
+			container: "webm",
+			video: null,
+			audio: [
+				{
+					id: 1,
+					codec: "opus",
+					codecString: "opus",
+					ch: 2,
+					rate: 48_000,
+					lang: null,
+					name: null,
+					def: true,
+					forced: false,
+					commentary: false
+				}
+			]
+		}
+
+		mocks.sdkApi.readLinkedVideoProbeAnon.mockResolvedValueOnce(audioOnly)
+		render(createElement(MediaViewer, { item, category: "video", alt: "v" }), { wrapper: anon })
+
+		await waitFor(() => {
+			expect(fileKindVerdict(item.data.uuid)).toBe("audio")
+		})
+		expect(savedVerdicts).not.toContain(item.data.uuid)
+	})
+
+	it("opens a public link's transport stream on the probe its gate read, reading the head once", async () => {
+		const item = linkedFileItem("clip.ts", { size: 4_000_000n })
+		const stream: VideoProbe = { ...PROBE, container: "ts", index: "none" }
+
+		mocks.sdkApi.readLinkedVideoProbeAnon.mockResolvedValueOnce(stream)
+
+		await expect(probeTransportStream(narrowToAnyFile(item), "anon", new AbortController().signal)).resolves.toBe(true)
+
+		render(createElement(MediaViewer, { item, category: "video", alt: "v" }), { wrapper: anon })
+
+		await waitFor(() => {
+			expect(mocks.openPlayback).toHaveBeenCalledOnce()
+		})
+
+		expect(mocks.openPlayback.mock.calls[0]?.[2]).toBe(stream)
+		expect(mocks.sdkApi.readLinkedVideoProbeAnon).toHaveBeenCalledOnce()
 		expectNoWholeFileRead()
 	})
 })
@@ -254,6 +321,25 @@ describe("video preview without a service worker", () => {
 
 		expect(mocks.sdkApi.openLinkedRangePortAnon).toHaveBeenCalledOnce()
 		expect(mocks.sdkApi.openRangePort).not.toHaveBeenCalled()
+		expectNoWholeFileRead()
+	})
+
+	it("opens a public link's transport stream on the probe its gate read, reading the head once", async () => {
+		const item = linkedFileItem("clip.ts", { size: 4_000_000n })
+		const stream: VideoProbe = { ...PROBE, container: "ts", index: "none" }
+
+		mocks.sdkApi.readLinkedVideoProbeAnon.mockResolvedValueOnce(stream)
+
+		await expect(probeTransportStream(narrowToAnyFile(item), "anon", new AbortController().signal)).resolves.toBe(true)
+
+		render(createElement(MediaViewer, { item, category: "video", alt: "v" }), { wrapper: anon })
+
+		await waitFor(() => {
+			expect(mocks.openPlayback).toHaveBeenCalledOnce()
+		})
+
+		expect(mocks.openPlayback.mock.calls[0]?.[2]).toBe(stream)
+		expect(mocks.sdkApi.readLinkedVideoProbeAnon).toHaveBeenCalledOnce()
 		expectNoWholeFileRead()
 	})
 })

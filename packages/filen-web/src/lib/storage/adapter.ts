@@ -75,21 +75,40 @@ const DECODE_SLICE_MS = 4
 const ENTRIES_PAGE_ROWS = 2000
 
 // kvEntriesJson for a prefix that may hold tens of thousands of rows: read a page at a time and decoded a few
-// milliseconds at a time, so the thread it runs on keeps answering in between.
-export async function kvEntriesJsonInSlices<T>(prefix: string, schema: Type<T>): Promise<[string, T][]> {
+// milliseconds at a time, so the thread it runs on keeps answering in between. With `map`, each row is reduced as
+// it is decoded and only what that returns is kept. A leader on an older build without paging answers in one read.
+export function kvEntriesJsonInSlices<T>(prefix: string, schema: Type<T>): Promise<[string, T][]>
+export function kvEntriesJsonInSlices<T, R>(prefix: string, schema: Type<T>, map: (key: string, value: T) => R): Promise<R[]>
+export async function kvEntriesJsonInSlices<T, R>(
+	prefix: string,
+	schema: Type<T>,
+	map?: (key: string, value: T) => R
+): Promise<(R | [string, T])[]> {
 	const { api } = await storage()
-	const out: [string, T][] = []
+	const out: (R | [string, T])[] = []
 	let after: string | null = null
 	let sliceStart = performance.now()
 
 	for (;;) {
-		const rows = await api.kvEntriesPage(prefix, after, ENTRIES_PAGE_ROWS)
+		let rows: [string, string][]
+		let last = false
+
+		try {
+			rows = await api.kvEntriesPage(prefix, after, ENTRIES_PAGE_ROWS)
+		} catch (e) {
+			if (after !== null || !isMissingStorageMethod(e)) {
+				throw e
+			}
+
+			rows = await api.kvEntries(prefix)
+			last = true
+		}
 
 		for (const [key, raw] of rows) {
 			const value = decodeKvValue(key, raw, schema)
 
 			if (value !== null) {
-				out.push([key, value])
+				out.push(map === undefined ? [key, value] : map(key, value))
 			}
 
 			if (performance.now() - sliceStart >= DECODE_SLICE_MS) {
@@ -99,7 +118,7 @@ export async function kvEntriesJsonInSlices<T>(prefix: string, schema: Type<T>):
 			}
 		}
 
-		if (rows.length < ENTRIES_PAGE_ROWS) {
+		if (last || rows.length < ENTRIES_PAGE_ROWS) {
 			return out
 		}
 
@@ -167,6 +186,40 @@ export async function kvDeletePrefix(prefix: string): Promise<void> {
 
 		await Promise.all(keys.map(key => api.kvDelete(key)))
 	}
+}
+
+// Deletes each key whose row still holds that `at` (a row rewritten since stays): one transaction, or a read and a
+// delete per key from a leader on an older build. Resolves the keys deleted.
+export async function kvDeleteIfAt(entries: readonly (readonly [string, number])[]): Promise<string[]> {
+	const { api } = await storage()
+
+	try {
+		return await api.kvDeleteIfAt(entries.map(([key, at]): [string, number] => [key, at]))
+	} catch (e) {
+		if (!isMissingStorageMethod(e)) {
+			throw e
+		}
+	}
+
+	const deleted: string[] = []
+
+	for (const [key, at] of entries) {
+		const raw = await api.kvGet(key)
+		let value: unknown
+
+		try {
+			value = raw === null ? null : parseEnvelope(raw)
+		} catch {
+			continue
+		}
+
+		if (typeof value === "object" && value !== null && "at" in value && value.at === at) {
+			await api.kvDelete(key)
+			deleted.push(key)
+		}
+	}
+
+	return deleted
 }
 
 // The database reset (db.worker.ts wipe), or false from a leader on an older build without it.

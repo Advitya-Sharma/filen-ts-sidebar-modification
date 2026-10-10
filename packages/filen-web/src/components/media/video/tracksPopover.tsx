@@ -5,9 +5,9 @@ import { CaptionsIcon, CheckIcon } from "lucide-react"
 import { cn } from "@filen/shared"
 import { Button } from "@/components/ui/button"
 import { StageTooltip } from "@/components/media/video/stageButton"
-import { STAGE_POPUP_TONE_CLASS, useVideoStageContainer } from "@/components/media/video/stageContext"
+import { STAGE_POPUP_TONE_CLASS, useStagePopupOpen, useVideoStageContainer } from "@/components/media/video/stageContext"
 
-// 7T1: audio and subtitles side by side in one popover over the picture. Each column is a radio list
+// Audio and subtitles side by side in one popover over the picture. Each column is a radio list
 // (arrows within it, Tab to the other column); built from what is already in memory, so opening it reads
 // nothing.
 
@@ -155,6 +155,8 @@ export function TracksPopover({
 }) {
 	const { t } = useTranslation("videos")
 	const container = useVideoStageContainer()
+
+	useStagePopupOpen(open)
 
 	return (
 		<PopoverPrimitive.Root

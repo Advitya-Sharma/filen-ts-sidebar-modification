@@ -514,6 +514,33 @@ describe("probeVideo — Matroska", () => {
 		])
 	})
 
+	it("ends a chapter without its own end at the next atom, shown or not, and at a shown one past the cap", async () => {
+		const shown = element(
+			0x1043a770,
+			element(
+				0x45b9,
+				atom(0, "Opening"),
+				atom(90, "Hidden", uintElement(0x98, 1)),
+				atom(120, "Recap"),
+				atom(150, "Disabled", uintElement(0x4598, 0)),
+				atom(200, "Linked", element(0x6e67, zeros(16))),
+				atom(300, "Part 1")
+			)
+		)
+
+		expect((await probe(mkv(INFO, tracks(VIDEO_TRACK), shown), "full")).record?.chapters).toEqual([
+			{ t: 0, end: 90, title: "Opening" },
+			{ t: 120, end: 150, title: "Recap" },
+			{ t: 300, title: "Part 1" }
+		])
+
+		const many = Array.from({ length: 66 }, (_, index) => atom(index * 10, `Chapter ${String(index)}`))
+		const capped = (await probe(mkv(INFO, tracks(VIDEO_TRACK), element(0x1043a770, element(0x45b9, ...many))), "full")).record?.chapters
+
+		expect(capped?.[62]).toEqual({ t: 620, title: "Chapter 62" })
+		expect(capped?.[63]).toEqual({ t: 630, end: 640, title: "Chapter 63" })
+	})
+
 	it("follows the SeekHead past large front attachments to the chapters, and finds the cover a hop away", async () => {
 		const font = element(
 			0x61a7,
@@ -595,6 +622,23 @@ describe("probeVideo — Matroska", () => {
 		}
 
 		expect((await probe(file, "card")).record).toMatchObject({ cover: null, coverLand: null })
+	})
+
+	it("never takes a cover MIME type from an inherited object key of the file extension", async () => {
+		const file = mkv(
+			INFO,
+			tracks(VIDEO_TRACK),
+			element(
+				0x1941a469,
+				element(0x61a7, stringElement(0x466e, "cover.constructor"), element(0x465c, [1, 2])),
+				element(0x61a7, stringElement(0x466e, "cover_land.__proto__"), element(0x465c, [3, 4]))
+			)
+		)
+		const { record } = await probe(file, "cover")
+
+		expect(record?.cover?.mime).toBe("image/*")
+		expect(record?.coverLand?.mime).toBe("image/*")
+		expect(() => structuredClone(record)).not.toThrow()
 	})
 
 	it("hops at most a few blocks between attachments looking for the cover", async () => {

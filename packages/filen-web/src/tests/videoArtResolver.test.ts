@@ -49,6 +49,16 @@ describe("art file resolution", () => {
 		expect(playableVideoFiles).toHaveBeenCalledTimes(2)
 	})
 
+	it("answers two refs of one lineage asked for in the same task, the older version with nothing", async () => {
+		const head = files[0] ?? driveFile(PARENT, "x.jpg")
+		const older = { ...ref(head), uuid: hexUuid() }
+		const [first, second] = await Promise.all([videoLibrary.resolveArtFile(older), videoLibrary.resolveArtFile(ref(head))])
+
+		expect(first).toBeNull()
+		expect(second?.uuid).toBe(head.uuid)
+		expect(playableVideoFiles).toHaveBeenCalledExactlyOnceWith([ref(head).stableUuid])
+	})
+
 	it("hands the art loader a resolver over the candidates' keyless refs", async () => {
 		videoTitleArt.mockResolvedValue({
 			candidates: [{ source: "sidecar", file: 0 }, { source: "typographic" }],

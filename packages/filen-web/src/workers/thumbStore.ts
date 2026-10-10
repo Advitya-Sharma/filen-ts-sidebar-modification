@@ -45,7 +45,15 @@ export async function writeStoreEntry(store: OpfsBlobStore, key: string, bytes: 
 			throw e
 		}
 
-		// The memoized directory was removed since (logout wipe, cleared site data): walk again, re-creating it.
+		// The memoized directory was removed since (logout wipe, cleared site data). A store that must stay wiped
+		// keeps the stale handle, so every later write of the session is dropped too.
+		if (store.recreateWhenRemoved === false) {
+			log.info("thumb-store", "writeStoreEntry: store directory removed, skipping persist", key)
+
+			return
+		}
+
+		// Any other walks again, re-creating it.
 		forgetOpfsDirectory(store.dir)
 		fileHandle = await (await cachedOpfsDirectory(store.dir)).getFileHandle(name, { create: true })
 	}
@@ -126,20 +134,34 @@ export async function copyThumbs(copies: readonly ThumbnailCopy[]): Promise<void
 	)
 }
 
+// A store that must stay wiped is reached through the session's memoized handle, which keeps failing once a wipe
+// removed its directory, and is never created here; any other is walked (and created) afresh.
+function storeDirectory(store: OpfsBlobStore): Promise<FileSystemDirectoryHandle> {
+	return store.recreateWhenRemoved === false ? cachedOpfsDirectory(store.dir, false) : opfsDirectory(store.dir)
+}
+
 // Enumerates every entry of a store with its on-disk size and last-write time — sweepStore's own
 // input. getFile() per entry (not getSize() via a sync access handle) so this stays a plain async
-// read, safely callable even while another entry in the same directory is mid-write elsewhere.
+// read, safely callable even while another entry in the same directory is mid-write elsewhere. A
+// removed directory has none.
 export async function listStoreEntries(store: OpfsBlobStore): Promise<ThumbCacheEntry[]> {
-	const dir = await opfsDirectory(store.dir)
 	const entries: ThumbCacheEntry[] = []
 
-	for await (const handle of dir.values()) {
-		if (handle.kind !== "file") {
-			continue
-		}
+	try {
+		const dir = await storeDirectory(store)
 
-		const file = await handle.getFile()
-		entries.push({ name: handle.name, size: file.size, lastModified: file.lastModified })
+		for await (const handle of dir.values()) {
+			if (handle.kind !== "file") {
+				continue
+			}
+
+			const file = await handle.getFile()
+			entries.push({ name: handle.name, size: file.size, lastModified: file.lastModified })
+		}
+	} catch (e) {
+		if (!isNotFoundError(e)) {
+			throw e
+		}
 	}
 
 	return entries
@@ -187,7 +209,7 @@ export async function sweepStore(store: OpfsBlobStore, capBytes: number): Promis
 		return
 	}
 
-	const dir = await opfsDirectory(store.dir)
+	const dir = await storeDirectory(store)
 
 	await Promise.all(
 		evict.map(async name => {

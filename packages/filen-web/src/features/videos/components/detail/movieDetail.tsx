@@ -36,7 +36,7 @@ import { Separator } from "@/components/ui/separator"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import type { VideoPartView, VideoTitleDetail, VideoVersionView } from "@/workers/videoIndex/view.logic"
 
-// The movie page (5C), also used for another video: header, Play / Resume / Start over / Mark watched, the version,
+// The movie page, also used for another video: header, Play / Resume / Start over / Mark watched, the version,
 // audio and subtitle choices handed to the player, the NFO's synopsis and cast, and the extras shelf.
 
 const BADGE_KEY = {

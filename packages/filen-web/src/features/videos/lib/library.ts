@@ -33,6 +33,7 @@ import {
 import { queryClient } from "@/queries/client"
 import { noDiskPersister, persister } from "@/queries/persist"
 import { versionAsFile } from "@/features/videos/lib/library.logic"
+import { forgetVideosDirListing, listVideosDir } from "@/features/videos/lib/videosDirListing"
 
 // The synced library configuration, `.filen/Videos/library.v1.json`: read once per session (none at all when the
 // drive hasn't changed since the cached copy was read), written only when an edit changes it. Each upload is a
@@ -99,6 +100,9 @@ let held: SdkFile[] | null = null
 let lastRemote: LibraryConfigDoc | null = null
 // A sign-out started (here or in another tab): nothing more is persisted.
 let closed = false
+// The head as last read couldn't be used (written by a newer version, or unreadable with no readable version): its
+// uuid. Nothing is saved over it until a read finds a usable head.
+let blockedHead: string | null = null
 
 export function markLibraryConfigUnsynced(): void {
 	unsynced = true
@@ -140,20 +144,44 @@ function requireAccount(): string {
 	return account
 }
 
-function parseBytes(bytes: Uint8Array): LibraryConfigDoc | null {
-	return parseLibraryConfigText(new TextDecoder().decode(bytes))
+// "newer" for a document of a later schema version, null for one that doesn't parse.
+function parseBytes(bytes: Uint8Array): LibraryConfigDoc | "newer" | null {
+	const text = new TextDecoder().decode(bytes)
+	const doc = parseLibraryConfigText(text)
+
+	if (doc !== null) {
+		return doc
+	}
+
+	try {
+		const value = JSON.parse(text) as unknown
+
+		return typeof value === "object" && value !== null && "v" in value && typeof value.v === "number" && value.v > 1 ? "newer" : null
+	} catch {
+		return null
+	}
 }
 
-async function readFileDoc(file: SdkFile): Promise<LibraryConfigDoc | null> {
+async function readFileDoc(file: SdkFile): Promise<LibraryConfigDoc | "newer" | null> {
 	return parseBytes(await runOp(sdkApi.downloadFileBytes(file, crypto.randomUUID())))
 }
 
+function isDoc(value: LibraryConfigDoc | "newer" | null): value is LibraryConfigDoc {
+	return value !== null && value !== "newer"
+}
+
 // A head that doesn't parse (a torn foreign write) is never taken for an empty document: the newest version that
-// does parse stands in for it.
+// does parse stands in for it. Null when none does, or the head is of a newer version: it is left alone.
 const CORRUPT_HEAD_VERSIONS = 3
 
-async function readHead(head: SdkFile): Promise<LibraryConfigDoc> {
+async function readHead(head: SdkFile): Promise<LibraryConfigDoc | null> {
 	const doc = await readFileDoc(head)
+
+	if (doc === "newer") {
+		log.warn("videos.library", "library file written by a newer version; left alone", head.uuid)
+
+		return null
+	}
 
 	if (doc !== null) {
 		return doc
@@ -166,16 +194,23 @@ async function readHead(head: SdkFile): Promise<LibraryConfigDoc> {
 	for (const version of versions.filter(item => item.uuid !== head.uuid).slice(0, CORRUPT_HEAD_VERSIONS)) {
 		const older = await readFileDoc(versionAsFile(head, version))
 
+		if (older === "newer") {
+			return null
+		}
+
 		if (older !== null) {
 			return older
 		}
 	}
 
-	return emptyLibraryConfig()
+	log.warn("videos.library", "no readable version of the library file; left alone", head.uuid)
+
+	return null
 }
 
-// Reads only: a missing `.filen/Videos` is an empty configuration, created by the first save.
-async function readRemote(): Promise<{ doc: LibraryConfigDoc; head: SdkFile | null; dirUuid: string | null }> {
+// Reads only: a missing `.filen/Videos` is an empty configuration, created by the first save. A null doc is a
+// head that can't be used (see readHead). The directory is listed as it is at `startedAfter` or later.
+async function readRemote(startedAfter: number): Promise<{ doc: LibraryConfigDoc | null; head: SdkFile | null; dirUuid: string | null }> {
 	const dirUuid = await findDotFilenSubdir(VIDEOS_DIR_NAME)
 
 	if (dirUuid === null) {
@@ -186,7 +221,7 @@ async function readRemote(): Promise<{ doc: LibraryConfigDoc; head: SdkFile | nu
 		}
 	}
 
-	const { files } = await runOp(sdkApi.listDirectory({ kind: "uuid", uuid: dirUuid }))
+	const files = await listVideosDir(dirUuid, startedAfter)
 	const head = files.find(file => file.meta.type === "decoded" && isConfigName(file.meta.data.name)) ?? null
 
 	if (head === null) {
@@ -264,6 +299,10 @@ async function upload(doc: LibraryConfigDoc): Promise<{ headUuid: string; replac
 const RECONCILE_ROUNDS = 3
 
 async function reconcile(state: LibraryConfigState): Promise<LibraryConfigState> {
+	if (blockedHead !== null) {
+		throw new Error("the library file can't be read by this version; it is left unchanged")
+	}
+
 	let next = state
 
 	for (let round = 0; round < RECONCILE_ROUNDS; round++) {
@@ -296,7 +335,7 @@ async function reconcile(state: LibraryConfigState): Promise<LibraryConfigState>
 		for (const file of replaced) {
 			const theirs = await readFileDoc(file).catch(() => null)
 
-			if (theirs !== null) {
+			if (isDoc(theirs)) {
 				observe(theirs)
 				doc = mergeLibraryConfig({ local: doc, remote: theirs }).doc
 			}
@@ -314,15 +353,32 @@ async function reconcile(state: LibraryConfigState): Promise<LibraryConfigState>
 }
 
 // A read, merged with the cached copy (an edit another session's save went over is restored and saved back).
-async function readAndReconcile(watermark: bigint | null): Promise<LibraryConfigState> {
+// `askedAt`: when the caller learned `watermark`; a listing started since reflects it.
+async function readAndReconcile(watermark: bigint | null, askedAt = performance.now()): Promise<LibraryConfigState> {
 	const owner = requireAccount()
 	const previous = cached()
 
 	unsynced = false
 
-	const remote = await readRemote()
+	const remote = await readRemote(askedAt)
 
 	currentTo = watermark
+
+	if (remote.doc === null) {
+		// Shown as last known, never saved over, and read again by the next session.
+		blockedHead = remote.head?.uuid ?? null
+		lastRemote = null
+
+		return store({
+			account: owner,
+			doc: previous?.doc ?? emptyLibraryConfig(),
+			dirUuid: remote.dirUuid,
+			headUuid: remote.head?.uuid ?? null,
+			watermark: null
+		})
+	}
+
+	blockedHead = null
 	observe(remote.doc)
 	lastRemote = remote.doc
 
@@ -347,6 +403,8 @@ async function readAndReconcile(watermark: bigint | null): Promise<LibraryConfig
 // The configuration, current to `watermark` (the drive's latest event id, when the caller has one): the cached
 // copy as it is when nothing in the drive changed since it was read, else read again.
 export function fetchLibraryConfig(watermark: bigint | null): Promise<LibraryConfigState> {
+	const askedAt = performance.now()
+
 	return serial(async () => {
 		const previous = cached()
 
@@ -357,7 +415,7 @@ export function fetchLibraryConfig(watermark: bigint | null): Promise<LibraryCon
 			return previous
 		}
 
-		return readAndReconcile(watermark)
+		return readAndReconcile(watermark, askedAt)
 	})
 }
 
@@ -373,6 +431,7 @@ export function persistLibraryConfigWatermark(): void {
 		state.watermark === currentTo ||
 		unsynced ||
 		held !== null ||
+		blockedHead !== null ||
 		closed ||
 		readSignOutPending()
 	) {
@@ -596,9 +655,11 @@ export function handleLibraryConfigDriveEvent(event: DriveSocketEvent): void {
 			return
 		}
 
+		// A fileTrash with newUUID retires a version superseded on a versioning-disabled account (its fileNew says
+		// whose save that was), not the file.
 		case "fileTrash":
 		case "fileDeletedPermanent":
-			if (inner.uuid === cached()?.headUuid) {
+			if (inner.uuid === cached()?.headUuid && (inner.type === "fileDeletedPermanent" || inner.newUUID === undefined)) {
 				unsynced = true
 			}
 
@@ -636,9 +697,11 @@ export function resetLibraryConfig(): void {
 	closed = false
 	account = null
 	unsynced = false
+	forgetVideosDirListing()
 	currentTo = null
 	held = null
 	lastRemote = null
+	blockedHead = null
 	ownUuids.clear()
 	clock = 0
 	queue = Promise.resolve()

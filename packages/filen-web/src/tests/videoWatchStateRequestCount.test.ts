@@ -65,6 +65,8 @@ class Server {
 	// The deadline hits after the server committed the upload.
 	public failAfterCommit = 0
 	public uploadDelayMs = 0
+	// Versioning off: each upload retires the previous head, announced as a fileTrash with newUUID before its fileNew.
+	public supersede = false
 	// Versions deleted since they were seen: downloads find nothing.
 	public readonly goneUuids = new Set<string>()
 	// Lineages the state file left (trashed): their files stay resolvable, never listed.
@@ -75,6 +77,8 @@ class Server {
 	public maxLiveDeletes = 0
 	// Replaces the head lookup's answer (a restore between two lookups).
 	public headLookup: (() => SdkFile | undefined) | null = null
+	// A listing of the directory the library configuration made, and when it started.
+	public sharedListing: { startedAt: number; files: SdkFile[] } | null = null
 	private eventId = 1_000n
 	private hung: ((error: Error) => void) | null = null
 
@@ -181,6 +185,17 @@ class Server {
 
 				return Promise.resolve(head === undefined || this.dangling ? [] : [head])
 			},
+			listVideosDir: (_dir, startedAfter) => {
+				if (this.sharedListing !== null && this.sharedListing.startedAt >= startedAfter) {
+					return Promise.resolve(this.sharedListing.files)
+				}
+
+				this.counts.list++
+
+				const head = this.head()
+
+				return Promise.resolve(head === undefined || this.dangling ? [] : [head])
+			},
 			download: file => {
 				this.counts.download++
 
@@ -213,7 +228,12 @@ class Server {
 					throw new Error(`offline ${abortToken}`)
 				}
 
+				const previous = this.head()
 				const file = this.put(bytes)
+
+				if (this.supersede && previous !== undefined) {
+					this.event({ type: "fileTrash", uuid: previous.uuid, stableUUID: hexUuid(), newUUID: file.uuid })
+				}
 
 				// The server commits, echoes, and the SDK still has requests to make before it resolves.
 				this.emit(file)
@@ -609,6 +629,24 @@ describe("watch-state flush requests", () => {
 		expect(Object.keys(server.headDoc().items).sort()).toEqual([itemKey(mine.stableUuid), itemKey(older.stableUuid)].sort())
 	})
 
+	it("takes a version superseded by its own upload (versioning off) for no change of the head", async () => {
+		versioning = false
+		server.supersede = true
+
+		const { engine } = openTab()
+		const item = movie()
+
+		await engine.markWatched({ stableUuids: [item.stableUuid] })
+		await advance(2_000, engine)
+		await engine.markUnwatched({ stableUuids: [item.stableUuid] })
+		await advance(10_000, engine)
+		server.reset()
+		await engine.markWatched({ stableUuids: [item.stableUuid] })
+		await advance(10_000, engine)
+
+		expect(server.counts).toEqual({ getFile: 0, list: 0, download: 0, upload: 1, versions: 0, deletes: 0 })
+	})
+
 	it("leaves a head written by a newer version alone", async () => {
 		server.put(new TextEncoder().encode(JSON.stringify({ v: 2, items: {}, series: {} })))
 
@@ -807,10 +845,10 @@ describe("watch-state version cleanup", () => {
 		}
 
 		// A restore elsewhere makes the oldest version the head again right after the listing. The new page's own head
-		// check comes first.
+		// check comes first, and the cleanup starts from the head it confirmed.
 		let lookups = 0
 
-		server.headLookup = () => (++lookups >= 3 ? restored : undefined)
+		server.headLookup = () => (++lookups >= 2 ? restored : undefined)
 		server.reset()
 
 		const next = openTab()
@@ -818,7 +856,7 @@ describe("watch-state version cleanup", () => {
 		await next.engine.open()
 		await settle(next.engine)
 
-		expect(server.counts).toMatchObject({ getFile: 3, versions: 1 })
+		expect(server.counts).toMatchObject({ getFile: 2, versions: 1 })
 		expect(server.deleted).not.toContain(restored.uuid)
 		expect(server.headDeleted).toBe(false)
 		// Six archived versions: the newest two kept, the restored head spared, three deleted in one batch.
@@ -1421,6 +1459,80 @@ describe("watch-state on a new page", () => {
 
 		expect(server.counts).toMatchObject({ getFile: 0, list: 1, download: 1, upload: 0 })
 		expect(fresh.engine.getSnapshot().doc.items[itemKey(item.stableUuid)]?.p?.pos).toBe(4_000)
+	})
+
+	it("takes the state file from a listing started once the page followed the socket, never from an older one", async () => {
+		const item = movie()
+		const there = otherDevice()
+
+		await there.engine.open()
+		there.engine.reportProgress({ item, pos: 3_999, dur: 7_200, playing: true })
+		there.engine.reportProgress({ item, pos: 4_000, dur: 7_200, playing: false })
+		await there.engine.executeNow()
+		await settle(there.engine)
+		there.engine.hold()
+		versioning = false
+
+		const head = server.head()
+
+		if (head === undefined) {
+			throw new Error("no head")
+		}
+
+		// Listed before this page loaded: a save in between could be missing from it.
+		server.sharedListing = { startedAt: performance.now() - 1, files: [] }
+		server.reset()
+
+		const stale = otherDevice()
+
+		await stale.engine.open()
+
+		expect(server.counts).toMatchObject({ list: 1, download: 1 })
+
+		// Listed after: what it holds, or a save the socket reports.
+		server.sharedListing = { startedAt: Number.MAX_VALUE, files: [head] }
+		server.reset()
+
+		const fresh = otherDevice()
+
+		await fresh.engine.open()
+
+		expect(server.counts).toMatchObject({ getFile: 0, list: 0, download: 1 })
+		expect(fresh.engine.getSnapshot().doc.items[itemKey(item.stableUuid)]?.p?.pos).toBe(4_000)
+	})
+
+	it("looks the head up again right before pruning at the first open, sparing a version restored since its check", async () => {
+		const { engine } = openTab()
+
+		for (let i = 0; i < 3; i++) {
+			await engine.markWatched({ stableUuids: [movie().stableUuid] })
+			await advance(10_000, engine)
+		}
+
+		engine.hold()
+		store.rows.set(META_KV_KEY, { ...(store.rows.get(META_KV_KEY) as object), gc: Date.now() })
+
+		// The oldest own upload, the one prune target; another device restores it after the open's head check,
+		// before its socket event arrives.
+		const restored = server.lineage[0]?.file
+
+		if (restored === undefined) {
+			throw new Error("no version")
+		}
+
+		let lookups = 0
+
+		server.headLookup = () => (++lookups === 2 ? restored : undefined)
+		server.reset()
+
+		const next = openTab()
+
+		await next.engine.open()
+		await settle(next.engine)
+
+		expect(server.counts).toMatchObject({ getFile: 2, list: 0, download: 0, upload: 0 })
+		expect(server.deleted).not.toContain(restored.uuid)
+		expect(server.headDeleted).toBe(false)
 	})
 
 	it("adds up to a quarter of jitter to the upload backoff", async () => {

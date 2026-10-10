@@ -10,7 +10,7 @@ import { ArtImage } from "@/features/videos/components/videoCard"
 import { useIsNarrowViewport } from "@/features/shell/hooks/useIsNarrowViewport"
 import { Button } from "@/components/ui/button"
 
-// The detail pages' header (5C): a cinematic backdrop with the poster and text over its scrim when the title has a
+// The detail pages' header: a cinematic backdrop with the poster and text over its scrim when the title has a
 // real backdrop, else the playlist-pane header under a 96 px band of the poster's dominant colour. One component,
 // one slot order (back, art, eyebrow, heading, metadata, actions); only the frame around them switches.
 

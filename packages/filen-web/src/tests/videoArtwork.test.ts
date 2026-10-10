@@ -420,6 +420,47 @@ describe("ArtLoader", () => {
 		expect(records.peek("video.s")?.source).toBe("embedded")
 	})
 
+	it("a reset cancels the decodes running, and what they finish stores nothing", async () => {
+		const made = Promise.withResolvers<SdkThumbnailResult>()
+		const { loader: art, deps, records, stored } = loader({ makeArt: vi.fn(() => made.promise) })
+		const loading = art.load({
+			candidates: [{ source: "sidecar", file: 0 }],
+			slot: "p",
+			title: "Up",
+			resolveFile: files(POSTER)
+		})
+
+		await vi.waitFor(() => {
+			expect(deps.makeArt).toHaveBeenCalled()
+		})
+		art.reset()
+
+		expect(deps.cancel).toHaveBeenCalledTimes(1)
+
+		made.resolve({ type: "thumbnail", bytes: new Uint8Array([1]), width: 342, height: 513, fromEmbeddedPreview: false })
+		await loading
+
+		expect(deps.storeArt).not.toHaveBeenCalled()
+		expect(stored.size).toBe(0)
+		expect(records.peek("poster.p")).toBeUndefined()
+	})
+
+	it("stores nothing once a sign-out held the records, and still shows the image", async () => {
+		const { loader: art, deps, records } = loader()
+
+		records.hold()
+
+		const result = await art.load({
+			candidates: [{ source: "sidecar", file: 0 }],
+			slot: "p",
+			title: "Up",
+			resolveFile: files(POSTER)
+		})
+
+		expect(result?.type).toBe("image")
+		expect(deps.storeArt).not.toHaveBeenCalled()
+	})
+
 	it("never starts a decode for a requester that gave up while it queued for a read", async () => {
 		const queued = Promise.withResolvers<undefined>()
 		const entered = Promise.withResolvers<undefined>()

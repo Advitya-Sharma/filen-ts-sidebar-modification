@@ -33,6 +33,11 @@ export interface RemuxOpenParams {
 	maxFragmentBytes: Record<TrackKind, number>
 }
 
+// Takes over the file warmed under `warmKey` (warm), with the port and options it was warmed with.
+export interface RemuxAdoptParams {
+	warmKey: string
+}
+
 export interface RemuxVideoInfo {
 	id: number
 	codec: string
@@ -208,4 +213,19 @@ export class SourceReadError extends Error {
 
 export function isSourceReadError(error: unknown): boolean {
 	return error instanceof Error && error.name === SOURCE_READ_ERROR
+}
+
+// An open naming a warmed file the worker no longer has (expired, replaced, or never warmed): the caller
+// opens it with a port of its own. Crosses Comlink by name.
+export const WARM_GONE_ERROR = "WarmGoneError"
+
+export class WarmGoneError extends Error {
+	public constructor() {
+		super("the warmed file is gone")
+		this.name = WARM_GONE_ERROR
+	}
+}
+
+export function isWarmGone(error: unknown): boolean {
+	return error instanceof Error && error.name === WARM_GONE_ERROR
 }

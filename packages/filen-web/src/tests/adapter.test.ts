@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { type } from "arktype"
-import { kvClear, kvEntriesJson, kvEntriesJsonInSlices, kvGetJson, kvHas, kvSetJson } from "@/lib/storage/adapter"
+import { kvClear, kvDeleteIfAt, kvEntriesJson, kvEntriesJsonInSlices, kvGetJson, kvHas, kvSetJson } from "@/lib/storage/adapter"
 import { log } from "@/lib/log"
 
 // node vitest cannot provide navigator.locks/BroadcastChannel/real workers (leader.ts's actual
@@ -78,6 +78,42 @@ describe("storage adapter (Map-backed fake StorageApi)", () => {
 		expect(byKey(sliced)).toEqual(byKey(await kvEntriesJson("many.", schema)))
 		expect(sliced).toHaveLength(20_000 - 21)
 		expect(turns).toBeGreaterThan(0)
+	})
+
+	it("reads a prefix in one read from a leader on an older build without paging", async () => {
+		const schema = type({ n: "number" })
+
+		for (let n = 0; n < 3; n++) {
+			await kvSetJson(`few.${String(n)}`, { n })
+		}
+
+		const unknownMethod = new Error("Cannot read properties of undefined (reading 'apply')")
+
+		unknownMethod.name = "TypeError"
+
+		const page = vi.spyOn(fakeApi, "kvEntriesPage").mockRejectedValue(unknownMethod)
+		const entries = vi.spyOn(fakeApi, "kvEntries")
+
+		expect(new Map(await kvEntriesJsonInSlices("few.", schema))).toEqual(
+			new Map([
+				["few.0", { n: 0 }],
+				["few.1", { n: 1 }],
+				["few.2", { n: 2 }]
+			])
+		)
+		expect(page).toHaveBeenCalledTimes(1)
+		expect(entries).toHaveBeenCalledExactlyOnceWith("few.")
+
+		page.mockRejectedValue(new Error("timeout"))
+
+		await expect(kvEntriesJsonInSlices("few.", schema)).rejects.toThrow("timeout")
+	})
+
+	it("keeps only what the map makes of each row", async () => {
+		await kvSetJson("m.a", { n: 1, big: "x".repeat(100) })
+		await kvSetJson("m.b", { n: "bad" })
+
+		expect(await kvEntriesJsonInSlices("m.", type({ n: "number" }), (key, value) => `${key}=${String(value.n)}`)).toEqual(["m.a=1"])
 	})
 
 	it("roundtrips a bigint through kvSetJson/kvGetJson", async () => {
@@ -180,6 +216,23 @@ describe("storage adapter (Map-backed fake StorageApi)", () => {
 		await expect(kvClear()).rejects.toBe(timeout)
 		expect(deletePrefix).toHaveBeenCalledTimes(1)
 		expect(fakeStore.size).toBe(0)
+	})
+
+	it("kvDeleteIfAt reads and deletes row by row through a leader on an older build without it", async () => {
+		await kvSetJson("r.a", { at: 1 })
+		await kvSetJson("r.b", { at: 2 })
+		await kvSetJson("r.c", { at: 3n })
+		fakeStore.set("r.d", "not json")
+
+		expect(
+			await kvDeleteIfAt([
+				["r.a", 1],
+				["r.b", 5],
+				["r.c", 3],
+				["r.d", 1]
+			])
+		).toEqual(["r.a"])
+		expect([...fakeStore.keys()].sort()).toEqual(["r.b", "r.c", "r.d"])
 	})
 
 	it("kvClear wipes through a leader on an older build that has no kvDeletePrefix", async () => {

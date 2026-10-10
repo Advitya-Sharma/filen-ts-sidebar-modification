@@ -212,6 +212,15 @@ describe("Matroska cues and blocks", () => {
 		expect(parseCues(cues, 1)).toEqual({ times: [40], clusters: [20], relatives: [7] })
 	})
 
+	it("keeps every cue point of a dense index, past the generic EBML child cap", () => {
+		const points = Array.from({ length: 15_000 }, (_, index) => cuePoint(index * 2000, index * 100, null))
+		const cues = parseCues(concat(...points), 1)
+
+		expect(cues.times.length).toBe(15_000)
+		expect(cues.times[cueAtOrBefore(cues.times, 29_001_000)]).toBe(29_000_000)
+		expect(cues.clusters.at(-1)).toBe(1_499_900)
+	})
+
 	it("picks the last cue at or before a time, else the first", () => {
 		expect(cueAtOrBefore([0, 5000, 10_000], 7000)).toBe(1)
 		expect(cueAtOrBefore([100, 200], 50)).toBe(0)

@@ -163,6 +163,23 @@ export class PcmAssembler {
 		return out
 	}
 
+	// Puts back bytes taken last (from a read given up on), so they are the next taken.
+	public giveBack(bytes: Uint8Array<ArrayBuffer>): void {
+		if (bytes.length === 0) {
+			return
+		}
+
+		const head = this.chunks[0]
+
+		if (head !== undefined && this.chunkOffset > 0) {
+			this.chunks[0] = typeof head === "number" ? head - this.chunkOffset : head.subarray(this.chunkOffset)
+			this.chunkOffset = 0
+		}
+
+		this.chunks.unshift(bytes)
+		this.queuedBytes += bytes.length
+	}
+
 	// Discards up to `max` of the bytes produced so far, without making them.
 	public skip(max: number): void {
 		this.consume(Math.min(max, this.queuedBytes), null)

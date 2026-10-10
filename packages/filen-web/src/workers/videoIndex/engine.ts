@@ -26,10 +26,11 @@ import {
 } from "@/workers/videoIndex/rootIndex.logic"
 import {
 	INDEX_KINDS_SIGNATURE,
+	decodeSnapshotSteps,
 	encodeSnapshotSteps,
 	nextSlot,
-	pickSnapshotSteps,
-	snapshotIsCurrent
+	snapshotIsCurrent,
+	type DecodedSnapshot
 } from "@/workers/videoIndex/snapshot.logic"
 import {
 	LibraryFiles,
@@ -86,6 +87,8 @@ export const PATCH_MAX_WAIT_MS = 5_000
 // Directories that came into a root are re-listed together after this; past the count, the root is walked.
 export const SCOPED_WALK_COALESCE_MS = 2_000
 export const SCOPED_WALK_MAX_PENDING = 8
+// A failed renamed-file lookup is tried once more after this (once the socket is live) before its roots are walked.
+export const LOOKUP_RETRY_MS = 10_000
 // At most one automatic walk per root in this window; a manual rescan isn't held to it.
 export const WALK_FLOOR_MS = 30 * 60_000
 // Snapshot writes: a change is written after this, and no sooner than the interval after the previous write.
@@ -104,13 +107,25 @@ export interface IndexRootConfig {
 	enabled: boolean
 }
 
+// A root's watermark kept apart from its snapshot, so a watermark-only change costs a few bytes rather than a whole
+// slot. It applies only to the snapshot of that generation and checksum.
+export interface SnapshotWatermark {
+	generation: bigint
+	crc: number
+	watermark: bigint | null
+}
+
 export interface SnapshotStore {
-	// Both slots, null for a missing one.
-	read: (rootUuid: string) => Promise<[Uint8Array | null, Uint8Array | null]>
+	// One slot, null when missing.
+	readSlot: (rootUuid: string, slot: 0 | 1) => Promise<Uint8Array | null>
 	// Each slot's header generation, null for a missing or unreadable one.
 	readGenerations: (rootUuid: string) => Promise<[bigint | null, bigint | null]>
 	// Abandons the write, leaving the slot as it was, when `cancelled` says so before it completes.
 	write: (rootUuid: string, slot: 0 | 1, bytes: Uint8Array<ArrayBuffer>, cancelled: () => boolean) => Promise<void>
+	// null when missing or unreadable.
+	readWatermark: (rootUuid: string) => Promise<SnapshotWatermark | null>
+	writeWatermark: (rootUuid: string, mark: SnapshotWatermark, cancelled: () => boolean) => Promise<void>
+	// The slots and the watermark.
 	remove: (rootUuid: string) => Promise<void>
 }
 
@@ -205,8 +220,35 @@ interface RootRuntime {
 	writeTimer: ReturnType<typeof setTimeout> | null
 	writing: Promise<void> | null
 	lastWriteAt: number
-	// Only the watermark changed since the last write: written with the next one, or when the page goes away.
+	// Only the watermark changed since the last write: written with the next one, or on its own when the page goes
+	// away.
 	watermarkDirty: boolean
+	// The checksum of the stored snapshot the state matches (loaded or last written); null when none does.
+	storedCrc: number | null
+	// The slot known intact (loaded or last written) and its generation: the next write goes to the other one.
+	storedSlot: { slot: 0 | 1; generation: bigint } | null
+	// The write epoch in which the newest stored generation was last seen to be this state's own: a watermark kept
+	// apart applies only to that generation, and another tab may have written a newer one while it held the writer
+	// role.
+	checkedEpoch: number
+	// Lookups and directory re-listings out for events already past the watermark: until they land, a write keeps no
+	// watermark, so a session ending meanwhile walks rather than trusting an index missing their result.
+	followUps: number
+	// Follow-up work was handed to a walk: held as `followUps` are until a walk's result lands (or the root goes stale).
+	walkOwed: boolean
+	// A write left the watermark out for them: written again once they land.
+	heldWatermark: boolean
+	// Taken out of the configuration: a write still out is abandoned before it re-creates the files removed.
+	removed: boolean
+}
+
+// A renamed file being looked up. Every root that may hold it keeps its watermark back until the lookup is done.
+interface Lookup {
+	concerned: Set<RootRuntime>
+	retried: boolean
+	retryTimer: ReturnType<typeof setTimeout> | null
+	// The retry waits for the socket: a dropped network fails the lookup and the socket alike.
+	awaitingSocket: boolean
 }
 
 // One classification and what it was made from: reused while neither the roots' contents nor the split corrections
@@ -227,6 +269,11 @@ interface ClassifiedInput {
 
 interface CurrentLibrary {
 	files: LibraryFiles
+}
+
+// The checksum field of a snapshot slot's header.
+function snapshotCrc(bytes: Uint8Array): number {
+	return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(12, true)
 }
 
 function isUuidStr(value: string): value is UuidStr {
@@ -314,6 +361,8 @@ export class VideoIndexEngine {
 	private catalogWriting: Promise<void> | null = null
 	private lastCatalogWriteAt = 0
 	private catalogWriteFailures = 0
+	// The catalog slot known intact (loaded or last written): the next write goes to the other one.
+	private catalogStoredSlot: { slot: 0 | 1; generation: bigint } | null = null
 	// The catalog held classifies every configured root (one that hasn't loaded yet makes a partial one).
 	private catalogComplete = false
 	// Bumped by reset: async work started before it drops its result.
@@ -334,7 +383,7 @@ export class VideoIndexEngine {
 	private eventSeq = 0
 	private asyncPatches = 0
 	private patchLog: { seq: number; root: string; inner: DriveEvent }[] = []
-	private readonly lookups = new Map<string, Promise<void>>()
+	private readonly lookups = new Map<string, Lookup>()
 	// The library configuration's manual corrections, by key, and their serialized form (to skip an unchanged set).
 	private overrides: Readonly<Record<string, LibraryOverride>> = {}
 	private overridesSignature = "{}"
@@ -419,10 +468,6 @@ export class VideoIndexEngine {
 				changed ||= existing.config.type !== config.type
 				existing.config = config
 
-				if (existing.loading !== null) {
-					loads.push(existing.loading)
-				}
-
 				continue
 			}
 
@@ -441,7 +486,15 @@ export class VideoIndexEngine {
 		for (const rt of created) {
 			if (this.roots.get(rt.config.uuid) === rt && rt.state === null && rt.loading === null) {
 				rt.loading = this.load(rt)
-				loads.push(rt.loading)
+			}
+		}
+
+		// Loads a concurrent configure started count too, so what this one reports is checked against them.
+		for (const config of roots) {
+			const loading = this.roots.get(config.uuid)?.loading ?? null
+
+			if (loading !== null) {
+				loads.push(loading)
 			}
 		}
 
@@ -485,29 +538,67 @@ export class VideoIndexEngine {
 			writeTimer: null,
 			writing: null,
 			lastWriteAt: 0,
-			watermarkDirty: false
+			watermarkDirty: false,
+			storedCrc: null,
+			storedSlot: null,
+			checkedEpoch: -1,
+			followUps: 0,
+			walkOwed: false,
+			heldWatermark: false,
+			removed: false
 		}
 	}
 
+	// The headers first, then only the newest slot (the other when that one is torn), then the watermark kept apart.
 	private async load(rt: RootRuntime): Promise<void> {
 		const token = this.token
+		const uuid = rt.config.uuid
 
 		try {
-			const slots = await this.deps.store.read(rt.config.uuid)
-			const decoded = await drainSteps(pickSnapshotSteps(slots, rt.config.uuid), this.deps.yieldSlice)
-			const state = decoded === null ? null : await drainSteps(fromRecordsSteps(decoded), this.deps.yieldSlice)
+			let decoded: DecodedSnapshot | null = null
+			let crc = 0
+			let loadedSlot: 0 | 1 = 0
 
-			if (token !== this.token || this.roots.get(rt.config.uuid) !== rt) {
+			for (const slot of catalogSlotOrder(await this.deps.store.readGenerations(uuid))) {
+				const bytes = await this.deps.store.readSlot(uuid, slot)
+
+				decoded = bytes === null ? null : await drainSteps(decodeSnapshotSteps(bytes, uuid), this.deps.yieldSlice)
+
+				if (decoded !== null && bytes !== null) {
+					crc = snapshotCrc(bytes)
+					loadedSlot = slot
+
+					break
+				}
+			}
+
+			if (decoded === null) {
 				return
 			}
 
-			if (decoded !== null && state !== null) {
-				rt.state = state
-				rt.status = "ready"
-				rt.outdated = !snapshotIsCurrent(decoded)
-				// Only partial walks were ever stored.
-				rt.incomplete = rt.state.completeAt === 0
+			if (token === this.token && this.roots.get(uuid) === rt) {
+				rt.storedSlot = { slot: loadedSlot, generation: decoded.header.generation }
 			}
+
+			const mark = await this.deps.store.readWatermark(uuid).catch(() => null)
+
+			if (mark !== null && mark.generation === decoded.header.generation && mark.crc === crc) {
+				decoded.header.watermark = mark.watermark
+			}
+
+			const state = await drainSteps(fromRecordsSteps(decoded), this.deps.yieldSlice)
+
+			// A walk that landed meanwhile is newer than any snapshot.
+			if (token !== this.token || this.roots.get(uuid) !== rt || rt.state !== null) {
+				return
+			}
+
+			rt.state = state
+			rt.storedCrc = crc
+			rt.status = "ready"
+			rt.outdated = !snapshotIsCurrent(decoded)
+			// Only partial walks were ever stored.
+			rt.incomplete = state.completeAt === 0
 		} catch (e) {
 			log.warn("videos.index", "snapshot unreadable; the root is walked instead", rt.config.uuid, e)
 		} finally {
@@ -520,8 +611,14 @@ export class VideoIndexEngine {
 
 		this.clearTimers(rt)
 		this.roots.delete(uuid)
+		rt.removed = removeSnapshot
 
-		const flushed = this.writer && rt.version > rt.writtenVersion && !removeSnapshot ? this.writeNow(rt) : Promise.resolve()
+		// A write still out ends (abandoned) before the files go, so it can't bring them back.
+		const flushed = removeSnapshot
+			? (rt.writing ?? Promise.resolve()).catch(() => undefined)
+			: this.writer && rt.version > rt.writtenVersion
+				? this.writeNow(rt)
+				: Promise.resolve()
 
 		if (removeSnapshot) {
 			void flushed
@@ -544,10 +641,15 @@ export class VideoIndexEngine {
 		rt.writeTimer = null
 	}
 
-	// Not walking, and unchecked against the drive's event stream or never walked; a root whose scan the user
-	// stopped waits for a rescan.
+	// Not walking or loading, and unchecked against the drive's event stream or never walked; a root whose scan the
+	// user stopped waits for a rescan, and one found gone before it was ever walked for its restore (or a rescan).
 	private unchecked(rt: RootRuntime): boolean {
-		return rt.walking === null && !rt.userStopped && (rt.state === null || rt.mode === "pending")
+		return (
+			rt.walking === null &&
+			rt.loading === null &&
+			!rt.userStopped &&
+			(rt.state === null ? rt.status !== "missing" : rt.mode === "pending")
+		)
 	}
 
 	// Some loaded root hasn't been checked against the drive's event stream, or hasn't been walked at all.
@@ -696,6 +798,7 @@ export class VideoIndexEngine {
 		}
 
 		this.setWatermark(rt, expected - 1n)
+		this.resumeScoped(rt)
 
 		return true
 	}
@@ -707,6 +810,8 @@ export class VideoIndexEngine {
 		rt.buffer = null
 		rt.bufferOverflow = false
 		rt.mode = "stale"
+		// Without a watermark there is nothing left to hold; only a walk makes the root current again.
+		rt.walkOwed = false
 
 		if (rt.state === null) {
 			return
@@ -719,6 +824,7 @@ export class VideoIndexEngine {
 		}
 
 		this.setWatermark(rt, null)
+		this.resumeScoped(rt)
 	}
 
 	// A watermark-only change (every drive event anywhere moves it) isn't worth a snapshot write of its own: it goes
@@ -800,7 +906,9 @@ export class VideoIndexEngine {
 	private keepAfterStop(rt: RootRuntime): void {
 		const watermark = rt.state?.watermark ?? null
 
+		// Follow-up work left to the stopped walk was never done: the watermark can't vouch for it.
 		if (
+			!rt.walkOwed &&
 			rt.mode === "live" &&
 			watermark !== null &&
 			this.socketLive &&
@@ -832,6 +940,8 @@ export class VideoIndexEngine {
 	private async runWalk(rt: RootRuntime, knownWatermark: bigint | null, mark: number): Promise<void> {
 		const token = this.token
 		const uuid = rt.config.uuid
+		// Re-listings queued before the walk began: its listing covers them.
+		const covered = [...rt.scoped]
 
 		try {
 			const watermark = knownWatermark ?? (this.socketLive ? this.lastEventId : null) ?? (await this.deps.lastDriveEventId())
@@ -871,6 +981,19 @@ export class VideoIndexEngine {
 			rt.state = state
 			rt.status = "ready"
 			rt.walkSeq++
+
+			for (const dirUuid of covered) {
+				rt.scoped.delete(dirUuid)
+			}
+
+			rt.walkOwed = false
+
+			if (rt.scoped.size === 0 && rt.scopedTimer !== null) {
+				clearTimeout(rt.scopedTimer)
+				rt.scopedTimer = null
+			}
+
+			this.releaseWatermark(rt)
 
 			const buffer = rt.buffer ?? []
 			const overflow = rt.bufferOverflow
@@ -973,6 +1096,7 @@ export class VideoIndexEngine {
 
 	private onAuthSuccess(): void {
 		this.socketLive = true
+		this.retryLookups()
 
 		if (!this.sawReconnecting) {
 			return
@@ -992,6 +1116,16 @@ export class VideoIndexEngine {
 		this.eventSeq++
 
 		for (const rt of this.roots.values()) {
+			// Gone before it was ever walked: nothing to hold events for, walked again once it is restored.
+			if (rt.state === null && rt.walking === null && rt.status === "missing") {
+				if ((inner?.type === "folderRestore" || inner?.type === "folderMove") && inner.dir.uuid === rt.config.uuid) {
+					rt.status = "loading"
+					void this.walk(rt, "event")
+				}
+
+				continue
+			}
+
 			if (rt.walking !== null || rt.mode === "pending" || rt.state === null) {
 				this.hold(rt, id, inner)
 
@@ -1088,14 +1222,14 @@ export class VideoIndexEngine {
 				return
 
 			case "fullWalk":
-				void this.walk(rt, "event")
+				this.walkInstead(rt)
 
 				return
 
 			// Known to another root: placed there by the rename itself, nothing to look up.
 			case "getFile":
 				if (![...this.roots.values()].some(other => other.state?.byUuid.has(followUp.uuid) === true)) {
-					this.lookUp(followUp.uuid)
+					this.lookUp(followUp.uuid, rt)
 				}
 
 				return
@@ -1108,7 +1242,7 @@ export class VideoIndexEngine {
 
 			case "rootRestored":
 				rt.status = "ready"
-				void this.walk(rt, "event")
+				this.walkInstead(rt)
 
 				return
 
@@ -1136,7 +1270,7 @@ export class VideoIndexEngine {
 			case "folderRestore":
 				if (rt.ancestors.has(inner.dir.uuid) && rt.status === "missing") {
 					rt.status = "ready"
-					void this.walk(rt, "event")
+					this.walkInstead(rt)
 				}
 
 				return
@@ -1195,15 +1329,42 @@ export class VideoIndexEngine {
 		}
 	}
 
-	// A file renamed into a video name, located once and placed in whichever root holds it.
-	private lookUp(uuid: string): void {
-		if (this.lookups.has(uuid)) {
+	// A file renamed into a video name, located once and placed in whichever root holds it. `asker` is the root whose
+	// event asked: one that loaded or settled while the lookup was out joins it.
+	private lookUp(uuid: string, asker: RootRuntime): void {
+		const out = this.lookups.get(uuid)
+
+		if (out !== undefined) {
+			if (asker.state !== null && !out.concerned.has(asker)) {
+				out.concerned.add(asker)
+				asker.followUps++
+			}
+
 			return
 		}
 
+		// The file may lie in any root: each holds its watermark back until the lookup is done.
+		const lookup: Lookup = {
+			concerned: new Set([...this.roots.values()].filter(rt => rt.state !== null)),
+			retried: false,
+			retryTimer: null,
+			awaitingSocket: false
+		}
+
+		for (const rt of lookup.concerned) {
+			rt.followUps++
+		}
+
+		this.lookups.set(uuid, lookup)
+		this.runLookup(uuid, lookup)
+	}
+
+	private runLookup(uuid: string, lookup: Lookup): void {
 		const token = this.token
 		const startSeq = this.beginAsyncPatch()
-		const lookup = this.deps
+		let done = true
+
+		void this.deps
 			.getFile(uuid)
 			.then(
 				file => {
@@ -1211,8 +1372,10 @@ export class VideoIndexEngine {
 						return
 					}
 
+					// A root being walked gets the file from the walk, or asks again when the event replays over it. One
+					// still unchecked takes it now and its held events after.
 					for (const rt of this.roots.values()) {
-						if (rt.state !== null && rt.walking === null && rt.mode !== "pending") {
+						if (rt.state !== null && rt.walking === null) {
 							this.afterPatch(
 								rt,
 								applyLookedUpFile({
@@ -1226,18 +1389,65 @@ export class VideoIndexEngine {
 					}
 				},
 				(e: unknown) => {
-					log.warn("videos.index", "renamed file lookup failed", uuid, e)
+					if (token !== this.token) {
+						return
+					}
+
+					// Most likely the network: tried once more before a walk of every root it may lie in.
+					if (!lookup.retried) {
+						log.warn("videos.index", "renamed file lookup failed; tried once more", uuid, e)
+
+						lookup.retried = true
+						done = false
+						lookup.retryTimer = setTimeout(() => {
+							lookup.retryTimer = null
+
+							if (this.socketLive) {
+								this.runLookup(uuid, lookup)
+							} else {
+								lookup.awaitingSocket = true
+							}
+						}, LOOKUP_RETRY_MS)
+
+						return
+					}
+
+					// The watermark is past the rename already: only a walk can place the file now.
+					log.warn("videos.index", "renamed file lookup failed again; its roots are walked", uuid, e)
+
+					for (const rt of lookup.concerned) {
+						if (this.roots.get(rt.config.uuid) === rt && rt.state !== null && rt.walking === null) {
+							this.toStale(rt)
+							void this.walk(rt, "auto")
+						}
+					}
 				}
 			)
 			.finally(() => {
-				this.lookups.delete(uuid)
-
-				if (token === this.token) {
-					this.endAsyncPatch(startSeq, null, null)
+				if (token !== this.token) {
+					return
 				}
-			})
 
-		this.lookups.set(uuid, lookup)
+				if (done) {
+					this.lookups.delete(uuid)
+
+					for (const rt of lookup.concerned) {
+						this.endFollowUp(rt)
+					}
+				}
+
+				this.endAsyncPatch(startSeq, null, null)
+			})
+	}
+
+	// Lookups that failed while the socket was down are tried again now.
+	private retryLookups(): void {
+		for (const [uuid, lookup] of this.lookups) {
+			if (lookup.awaitingSocket) {
+				lookup.awaitingSocket = false
+				this.runLookup(uuid, lookup)
+			}
+		}
 	}
 
 	private queueScoped(rt: RootRuntime, dirUuid: string): void {
@@ -1251,7 +1461,7 @@ export class VideoIndexEngine {
 				rt.scopedTimer = null
 			}
 
-			void this.walk(rt, "event")
+			this.walkInstead(rt)
 
 			return
 		}
@@ -1264,16 +1474,33 @@ export class VideoIndexEngine {
 
 	private async runScoped(rt: RootRuntime): Promise<void> {
 		const token = this.token
+
+		// Held while the root is unchecked: a check that finds no gap leaves it live with nothing walked, so they
+		// run once it is live or stale again.
+		if (rt.mode === "pending" && rt.walking === null) {
+			return
+		}
+
 		const dirs = [...rt.scoped]
 
 		rt.scoped.clear()
 
-		// A walk under way or due covers them.
-		if (rt.walking !== null || rt.mode === "pending" || rt.state === null) {
+		// A walk under way covers them: it lists the tree as it is after their events.
+		if (rt.walking !== null) {
+			rt.walkOwed = true
+
+			return
+		}
+
+		if (rt.state === null) {
+			this.releaseWatermark(rt)
+
 			return
 		}
 
 		const startSeq = this.beginAsyncPatch()
+
+		rt.followUps++
 
 		try {
 			for (const dirUuid of dirs) {
@@ -1289,7 +1516,13 @@ export class VideoIndexEngine {
 					continue
 				}
 
-				if (applyScopedWalk({ state, walk: projectWalk(dirUuid, raw) })) {
+				const applied = applyScopedWalk({ state, walk: projectWalk(dirUuid, raw) })
+
+				if (applied === "cycle") {
+					throw new Error("re-listed directory lies below itself")
+				}
+
+				if (applied) {
 					this.markPersist(rt)
 					this.scheduleRebuild("patch")
 				}
@@ -1301,8 +1534,44 @@ export class VideoIndexEngine {
 			void this.walk(rt, "event")
 		} finally {
 			if (token === this.token) {
+				this.endFollowUp(rt)
 				this.endAsyncPatch(startSeq, rt, new Set(dirs))
 			}
+		}
+	}
+
+	// Re-listings held while the root was unchecked run now.
+	private resumeScoped(rt: RootRuntime): void {
+		if (rt.scoped.size === 0 || rt.scopedTimer !== null || this.roots.get(rt.config.uuid) !== rt) {
+			return
+		}
+
+		rt.scopedTimer = setTimeout(() => {
+			rt.scopedTimer = null
+			void this.runScoped(rt)
+		}, SCOPED_WALK_COALESCE_MS)
+	}
+
+	// Follow-up work too large for re-listings (or a tree that must be listed whole): the watermark stays held until
+	// the walk's result lands.
+	private walkInstead(rt: RootRuntime): void {
+		if (rt.state !== null) {
+			rt.walkOwed = true
+		}
+
+		void this.walk(rt, "event")
+	}
+
+	private endFollowUp(rt: RootRuntime): void {
+		rt.followUps = Math.max(0, rt.followUps - 1)
+		this.releaseWatermark(rt)
+	}
+
+	// No follow-up is out any more: a watermark a write left out is written with the next one.
+	private releaseWatermark(rt: RootRuntime): void {
+		if (rt.heldWatermark && rt.followUps === 0 && rt.scoped.size === 0 && !rt.walkOwed) {
+			rt.heldWatermark = false
+			rt.watermarkDirty = true
 		}
 	}
 
@@ -1612,8 +1881,9 @@ export class VideoIndexEngine {
 		try {
 			// The headers first, then only the newest slot (the other when that one is torn or of another key).
 			let content: CatalogContent | null = null
+			const generations = await this.deps.catalogStore.readGenerations()
 
-			for (const slot of catalogSlotOrder(await this.deps.catalogStore.readGenerations())) {
+			for (const slot of catalogSlotOrder(generations)) {
 				if (token !== this.token || this.catalogSource !== "none") {
 					return
 				}
@@ -1625,7 +1895,11 @@ export class VideoIndexEngine {
 
 				content = bytes === null ? null : decodeCatalog(bytes, catalogKey(key))
 
-				if (content !== null) {
+				const generation = generations[slot]
+
+				if (content !== null && generation !== null) {
+					this.catalogStoredSlot = { slot, generation }
+
 					break
 				}
 			}
@@ -1908,7 +2182,7 @@ export class VideoIndexEngine {
 		const cancelled = (): boolean => token !== this.token || epoch !== this.writeEpoch
 
 		try {
-			const { slot, generation } = nextSlot(await this.deps.catalogStore.readGenerations())
+			const { slot, generation } = nextSlot(await this.deps.catalogStore.readGenerations(), this.catalogStoredSlot)
 
 			if (cancelled()) {
 				return
@@ -1924,6 +2198,10 @@ export class VideoIndexEngine {
 			}
 
 			await this.deps.catalogStore.write(slot, bytes, cancelled)
+
+			if (!cancelled()) {
+				this.catalogStoredSlot = { slot, generation }
+			}
 
 			if (!cancelled() && key === this.catalogKeyText) {
 				this.catalogWrittenVersion = version
@@ -2090,7 +2368,6 @@ export class VideoIndexEngine {
 
 	// ── Persistence ──
 
-	// Only the storage leader tab writes snapshots; the others keep theirs in memory.
 	// Whether this tab writes snapshots: on while it has the library open, off once a sign-out starts (here or in
 	// another tab), which also abandons a write under way.
 	public setWriter(writer: boolean): void {
@@ -2162,19 +2439,56 @@ export class VideoIndexEngine {
 		const state = rt.state
 		const uuid = rt.config.uuid
 
-		if (state === null || !this.writer || (rt.version === rt.writtenVersion && !rt.watermarkDirty)) {
+		if (state === null || !this.writer || rt.removed || (rt.version === rt.writtenVersion && !rt.watermarkDirty)) {
 			return
 		}
 
 		const version = rt.version
 		const token = this.token
 		const epoch = this.writeEpoch
-		const cancelled = (): boolean => token !== this.token || epoch !== this.writeEpoch
+		const cancelled = (): boolean => token !== this.token || epoch !== this.writeEpoch || rt.removed
+		// Follow-ups out for events the watermark already covers: what is written must not vouch for them.
+		const held = rt.followUps > 0 || rt.scoped.size > 0 || rt.walkOwed
+		const watermark = held ? null : state.watermark
 
 		rt.watermarkDirty = false
+		rt.heldWatermark ||= held
 
 		try {
-			const { slot, generation } = nextSlot(await this.deps.store.readGenerations(uuid))
+			let generations: [bigint | null, bigint | null] | null = null
+
+			// Only the watermark moved since the stored snapshot: it alone is written, unless another tab wrote a newer
+			// generation while it held the writer role (the record would name a superseded one and be ignored).
+			if (version === rt.writtenVersion && rt.storedCrc !== null) {
+				if (rt.checkedEpoch !== epoch) {
+					generations = await this.deps.store.readGenerations(uuid)
+
+					if (cancelled()) {
+						return
+					}
+
+					if (newestGeneration(generations) === state.generation) {
+						rt.checkedEpoch = epoch
+					}
+				}
+
+				if (rt.checkedEpoch === epoch) {
+					try {
+						await this.deps.store.writeWatermark(
+							uuid,
+							{ generation: state.generation, crc: rt.storedCrc, watermark },
+							cancelled
+						)
+					} catch (e) {
+						rt.watermarkDirty = true
+						log.warn("videos.index", "watermark write failed", uuid, e)
+					}
+
+					return
+				}
+			}
+
+			const { slot, generation } = nextSlot(generations ?? (await this.deps.store.readGenerations(uuid)), rt.storedSlot)
 
 			if (cancelled()) {
 				return
@@ -2182,7 +2496,7 @@ export class VideoIndexEngine {
 
 			state.generation = generation
 
-			const bytes = await drainSteps(encodeSnapshotSteps(state), this.deps.yieldSlice)
+			const bytes = await drainSteps(encodeSnapshotSteps(held ? { ...state, watermark } : state), this.deps.yieldSlice)
 
 			if (cancelled()) {
 				return
@@ -2191,6 +2505,9 @@ export class VideoIndexEngine {
 			await this.deps.store.write(uuid, slot, bytes, cancelled)
 
 			if (!cancelled()) {
+				rt.storedCrc = snapshotCrc(bytes)
+				rt.storedSlot = { slot, generation }
+				rt.checkedEpoch = epoch
 				rt.writtenVersion = version
 				rt.lastWriteAt = this.deps.now()
 				this.writeFailures = 0
@@ -2210,7 +2527,7 @@ export class VideoIndexEngine {
 		}
 	}
 
-	// Page hidden or closing: every pending snapshot write now, watermark-only changes included.
+	// Page hidden or closing: every pending snapshot write now; a watermark-only change writes the watermark alone.
 	public async flush(): Promise<void> {
 		if (!this.writer) {
 			return
@@ -2266,11 +2583,18 @@ export class VideoIndexEngine {
 		this.catalogKeyText = ""
 		this.lastCatalogWriteAt = 0
 		this.catalogWriteFailures = 0
+		this.catalogStoredSlot = null
 		this.catalogComplete = false
 
 		if (this.catalogWriteTimer !== null) {
 			clearTimeout(this.catalogWriteTimer)
 			this.catalogWriteTimer = null
+		}
+
+		for (const lookup of this.lookups.values()) {
+			if (lookup.retryTimer !== null) {
+				clearTimeout(lookup.retryTimer)
+			}
 		}
 
 		this.lookups.clear()
@@ -2290,6 +2614,10 @@ export class VideoIndexEngine {
 		// Calls waiting on the signed-out account's library answer from the empty one.
 		this.settleWaiters()
 	}
+}
+
+function newestGeneration([a, b]: readonly [bigint | null, bigint | null]): bigint | null {
+	return a === null ? b : b === null || a >= b ? a : b
 }
 
 // What a catalog classified from these configured roots (uuid, type) under these corrections is persisted under.

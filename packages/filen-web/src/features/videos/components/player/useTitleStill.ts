@@ -7,7 +7,9 @@ import { ART_STORE, artKey } from "@/features/videos/lib/artStore.logic"
 
 // The Up Next card's still, decoded only while the card shows: the next item's own frame when this browser has
 // one stored (captured on a pause, or generated for its card), else the title's still. Stored frames are local
-// reads; nothing is generated or downloaded for the card.
+// reads, as is the title's still (an image stored earlier or the drive's cached thumbnail); nothing is generated or
+// downloaded for the card.
+
 // The stored frame of `fileUuid`, else the title's still; null when there is none or the card went away first.
 async function loadStill({
 	titleId,
@@ -36,15 +38,17 @@ async function loadStill({
 		return null
 	}
 
-	const result = await artLoader.load({
+	// Local only: a candidate that would need reads ("network") leaves the card without a still.
+	const result = await artLoader.loadLocal({
 		candidates: art.candidates,
 		slot: "s",
 		title,
 		resolveFile: art.resolveFile,
+		fileUuid: art.fileUuid,
 		signal
 	})
 
-	return result?.type === "image" ? result.blob : null
+	return result !== null && result !== "network" && result.type === "image" ? result.blob : null
 }
 
 export function useUpNextStill(params: { titleId: string; title: string; fileUuid: string | null; enabled: boolean }): string | null {

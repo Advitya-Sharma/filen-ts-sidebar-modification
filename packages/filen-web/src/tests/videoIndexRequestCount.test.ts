@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { LIBRARY_CONFIG_FILE_NAME, emptyLibraryConfig, withLibraryRoot, type LibraryConfigDoc } from "@filen/shared/videos"
 import type { Dir, DirsAndFiles, File } from "@filen/sdk-rs"
 import { VideoIndexEngine, WALK_FLOOR_MS, type SnapshotStore } from "@/workers/videoIndex/engine"
+import { readSnapshotHeader } from "@/workers/videoIndex/snapshot.logic"
 import { WalkCoordinator } from "@/workers/walkCoordinator"
 import { FakeDrive, driveEvent, driveFile, hexUuid } from "@/tests/support/videoDrive"
 import { catalogTitles, memoryCatalogStore } from "@/tests/support/videoIndex"
@@ -83,8 +84,17 @@ function resetCounts(): void {
 }
 
 const store: SnapshotStore = {
-	read: rootUuid => Promise.resolve(snapshots.get(rootUuid) ?? [null, null]),
-	readGenerations: () => Promise.resolve([null, null]),
+	readSlot: (rootUuid, slot) => Promise.resolve(snapshots.get(rootUuid)?.[slot] ?? null),
+	readGenerations: rootUuid => {
+		const [a, b] = snapshots.get(rootUuid) ?? [null, null]
+
+		return Promise.resolve([
+			a === null ? null : (readSnapshotHeader(a)?.generation ?? null),
+			b === null ? null : (readSnapshotHeader(b)?.generation ?? null)
+		])
+	},
+	readWatermark: () => Promise.resolve(null),
+	writeWatermark: () => Promise.resolve(),
 	write: (rootUuid, slot, bytes) => {
 		const slots = snapshots.get(rootUuid) ?? [null, null]
 

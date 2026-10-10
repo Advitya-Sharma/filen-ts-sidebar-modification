@@ -8,6 +8,27 @@ export function useVideoStageContainer(): HTMLElement | null {
 	return useContext(VideoStageContainerContext)
 }
 
+// How a popup of the stage (a menu, a popover) tells it that it shows: +1 while open, -1 when that ends.
+export const VideoStagePopupContext = createContext<((delta: 1 | -1) => void) | null>(null)
+
+// Keeps the stage's controls up while `open` holds. Follows the popup's real state, so a close by any path (a
+// controlled prop, an unmount with the bar) ends it too.
+export function useStagePopupOpen(open: boolean): void {
+	const report = useContext(VideoStagePopupContext)
+
+	useEffect(() => {
+		if (!open || report === null) {
+			return
+		}
+
+		report(1)
+
+		return () => {
+			report(-1)
+		}
+	}, [open, report])
+}
+
 // A card or panel of the stage: when it goes, focus goes back where it was before it opened (its trigger), or
 // to the stage, so the player's keys keep working.
 export function useRestoreStageFocus(): void {

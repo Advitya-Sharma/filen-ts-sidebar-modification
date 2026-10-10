@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { findRawSync, measureRawStream, nextRawUnit, parseRawFrame, rawUnitAt } from "@/workers/remux/rawAudio.logic"
-import { alacExtradata, rawPackets, rawStreamOf } from "@/workers/remux/audioInput"
+import { alacExtradata, ffmpegSampleReader, rawPackets, rawStreamOf } from "@/workers/remux/audioInput"
+import { ffmpegDecoders } from "@/workers/remux/ffmpegDecoder"
+import type { RemuxStats } from "@/lib/media/remuxTypes"
 import { BlockCache } from "@/lib/media/blockCache"
 
 // Frame headers written field by field, the rest of each frame zeros: enough for the parser, nothing a
@@ -198,9 +200,25 @@ describe("rawUnitAt", () => {
 	})
 })
 
+// An ALACSpecificConfig: frame length, compatible version, bit depth, pb, mb, kb, channels, max run, max frame
+// bytes, average bitrate, sample rate.
+function alacConfig(frameLength: number, channels: number): Uint8Array {
+	const config = new Uint8Array(24)
+	const view = new DataView(config.buffer)
+
+	view.setUint32(0, frameLength)
+	config.set([0, 16, 40, 10, 14, channels], 4)
+	view.setUint16(10, 255)
+	view.setUint32(12, 0)
+	view.setUint32(16, 0)
+	view.setUint32(20, 44_100)
+
+	return config
+}
+
 describe("alacExtradata", () => {
 	it("gives FFmpeg the 36-byte atom from Matroska's bare config or MP4's box payload", () => {
-		const config = Uint8Array.from({ length: 24 }, (_, i) => i + 1)
+		const config = alacConfig(4096, 2)
 		const atom = alacExtradata(config)
 
 		expect(atom?.length).toBe(36)
@@ -208,6 +226,95 @@ describe("alacExtradata", () => {
 		expect(atom?.subarray(12)).toEqual(config)
 		expect(alacExtradata(concat(new Uint8Array(4), config))).toEqual(atom)
 		expect(alacExtradata(new Uint8Array(10))).toBeNull()
+	})
+
+	it("refuses a cookie whose frame length or channel count would size FFmpeg's buffers past any real stream", () => {
+		expect(alacExtradata(alacConfig(65_536, 8))).not.toBeNull()
+		expect(alacExtradata(alacConfig(16_777_216, 2))).toBeNull()
+		expect(alacExtradata(alacConfig(65_537, 2))).toBeNull()
+		expect(alacExtradata(alacConfig(0, 2))).toBeNull()
+		expect(alacExtradata(alacConfig(4096, 0))).toBeNull()
+		expect(alacExtradata(alacConfig(4096, 9))).toBeNull()
+		expect(alacExtradata(concat(new Uint8Array(4), alacConfig(16_777_216, 2)))).toBeNull()
+	})
+})
+
+function noStats(): RemuxStats {
+	return {
+		blockReads: 0,
+		bytesRead: 0,
+		rangeReads: 0,
+		readAheadBlocks: 0,
+		segmentsOut: 0,
+		bytesOut: 0,
+		transcodeSeconds: 0,
+		decodeWaitSeconds: 0,
+		transcodedMediaSeconds: 0
+	}
+}
+
+describe("ffmpegSampleReader", () => {
+	it("opens no decoder for a pull that outlives close(), so every open is released", async () => {
+		const lease = { handle: 1, worker: {} as Worker }
+		const open = vi.spyOn(ffmpegDecoders, "open").mockResolvedValue(lease)
+		const release = vi.spyOn(ffmpegDecoders, "release").mockImplementation(() => undefined)
+		// TrueHD after a seek: nothing decodes until a major sync.
+		const request = vi.spyOn(ffmpegDecoders, "request").mockResolvedValue({ id: 0, frames: [] })
+		const late = Promise.withResolvers<number | null>()
+		const reader = ffmpegSampleReader<number>({
+			codec: "ac3",
+			packets: {
+				first: () => Promise.resolve(0),
+				// The block holding the second packet is still downloading.
+				next: previous => (previous === 0 ? late.promise : Promise.resolve(null)),
+				data: () => new Uint8Array(8),
+				timestamp: packet => packet * 0.032
+			},
+			stats: noStats()
+		})
+		const pulled = reader.first(0)
+
+		await vi.waitFor(() => {
+			expect(request).toHaveBeenCalledOnce()
+		})
+		await reader.close()
+		late.resolve(1)
+
+		expect(await pulled).toBeNull()
+		expect(open).toHaveBeenCalledOnce()
+		expect(release).toHaveBeenCalledOnce()
+		expect(request).toHaveBeenCalledOnce()
+	})
+
+	it("ends a pull whose decoder close() took away without an error", async () => {
+		const lease = { handle: 1, worker: {} as Worker }
+
+		vi.spyOn(ffmpegDecoders, "open").mockResolvedValue(lease)
+		vi.spyOn(ffmpegDecoders, "release").mockImplementation(() => undefined)
+
+		const answer = Promise.withResolvers<never>()
+
+		const request = vi.spyOn(ffmpegDecoders, "request").mockReturnValue(answer.promise)
+
+		const reader = ffmpegSampleReader<number>({
+			codec: "ac3",
+			packets: {
+				first: () => Promise.resolve(0),
+				next: () => Promise.resolve(null),
+				data: () => new Uint8Array(8),
+				timestamp: () => 0
+			},
+			stats: noStats()
+		})
+		const pulled = reader.first(0)
+
+		await vi.waitFor(() => {
+			expect(request).toHaveBeenCalledOnce()
+		})
+		await reader.close()
+		answer.reject(new Error("the audio decoder worker was stopped"))
+
+		expect(await pulled).toBeNull()
 	})
 })
 

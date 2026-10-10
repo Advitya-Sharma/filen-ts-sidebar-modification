@@ -94,12 +94,24 @@ export interface PacketCursor<P> {
 	timestamp(packet: P): number
 }
 
+// Samples per ALAC frame a cookie may declare: encoders write 4096, and FFmpeg sizes its buffers by it.
+const MAX_ALAC_FRAME_LENGTH = 65_536
+const MAX_ALAC_CHANNELS = 8
+
 // ALAC's magic cookie in the 36-byte atom form FFmpeg reads: Matroska stores the 24-byte config alone, MP4
-// the full box's payload (version and flags first).
+// the full box's payload (version and flags first). Null for a cookie declaring a frame length or channel count
+// no encoder writes.
 export function alacExtradata(config: Uint8Array): Uint8Array | null {
 	const payload = config.length === 24 ? config : config.length === 28 ? config.subarray(4) : null
 
 	if (payload === null) {
+		return null
+	}
+
+	const frameLength = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint32(0)
+	const channels = payload[9] ?? 0
+
+	if (frameLength === 0 || frameLength > MAX_ALAC_FRAME_LENGTH || channels === 0 || channels > MAX_ALAC_CHANNELS) {
 		return null
 	}
 
@@ -124,8 +136,13 @@ export function ffmpegSampleReader<P>(params: {
 	let opening: Promise<DecoderLease> | null = null
 	let last: P | null = null
 	let done = false
+	// Set by close(), which a pull still waiting on a read or a decode outlives: nothing is opened or queued
+	// after it, or the decoder opened then would never be released.
+	let closed = false
 	let nextTimestamp = 0
 	const ready: SampleItem[] = []
+	// A method rather than a variable read: it changes across awaits.
+	const isClosed = (): boolean => closed
 
 	const open = (): Promise<DecoderLease> => {
 		opening ??= ffmpegDecoders.open(codec, params.extradata).then(opened => {
@@ -139,7 +156,16 @@ export function ffmpegSampleReader<P>(params: {
 
 	// The worker answers in order, so the frames are queued in decode order.
 	const decode = async (batch: readonly { data: Uint8Array; timestamp: number }[]): Promise<void> => {
+		if (isClosed()) {
+			return
+		}
+
 		const held = await open()
+
+		if (isClosed()) {
+			return
+		}
+
 		const responses = await Promise.all(
 			batch.map(({ data, timestamp }) => {
 				const buffer = data.slice().buffer
@@ -158,6 +184,10 @@ export function ffmpegSampleReader<P>(params: {
 	}
 
 	const queue = (frames: Parameters<typeof decodedSamples>[0]): void => {
+		if (isClosed()) {
+			return
+		}
+
 		const decoded = decodedSamples(frames, nextTimestamp)
 
 		nextTimestamp = decoded.next
@@ -172,13 +202,17 @@ export function ffmpegSampleReader<P>(params: {
 		const begun = performance.now()
 
 		try {
-			while (ready.length === 0 && !done) {
+			while (ready.length === 0 && !done && !isClosed()) {
 				const batch: { data: Uint8Array; timestamp: number }[] = []
 				let bytes = 0
 
 				do {
 					const packet =
 						start !== null && last === null ? await packets.first(start) : last === null ? null : await packets.next(last)
+
+					if (isClosed()) {
+						return null
+					}
 
 					if (packet === null) {
 						done = true
@@ -197,7 +231,7 @@ export function ffmpegSampleReader<P>(params: {
 					await decode(batch)
 				}
 
-				if (done && lease !== null) {
+				if (done && lease !== null && !isClosed()) {
 					const held: DecoderLease = lease
 					const response = await ffmpegDecoders.request(held, { type: "flush", handle: held.handle })
 
@@ -205,7 +239,14 @@ export function ffmpegSampleReader<P>(params: {
 				}
 			}
 
-			return ready.shift() ?? null
+			return isClosed() ? null : (ready.shift() ?? null)
+		} catch (error) {
+			// The decoder went with close(): the pull ends as the track would.
+			if (isClosed()) {
+				return null
+			}
+
+			throw error
 		} finally {
 			stats.decodeWaitSeconds += (performance.now() - begun) / 1000
 		}
@@ -215,6 +256,8 @@ export function ffmpegSampleReader<P>(params: {
 		first: time => pull(time),
 		next: () => pull(null),
 		close: async () => {
+			closed = true
+
 			for (const item of ready.splice(0)) {
 				item.sample.close()
 			}

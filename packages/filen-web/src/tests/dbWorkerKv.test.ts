@@ -102,6 +102,26 @@ describe("db.worker bulk kv ops", () => {
 		expect(await api.kvKeys("a_b")).toEqual(["a_b-1"])
 	})
 
+	it("kvDeleteIfAt drops only rows still holding the planned at, and names them", async () => {
+		await api.kvSet("r.a", '{"value":1,"at":5}')
+		await api.kvSet("r.b", '{"value":2,"at":7}')
+		await api.kvSet("r.c", "not json")
+		await api.kvSet("r.d", "[1]")
+		await api.kvSet("r.e", '{"at":"5"}')
+
+		expect(
+			await api.kvDeleteIfAt([
+				["r.a", 5],
+				["r.b", 6],
+				["r.c", 1],
+				["r.d", 1],
+				["r.e", 5],
+				["r.missing", 1]
+			])
+		).toEqual(["r.a"])
+		expect(await api.kvKeys("r.")).toEqual(["r.b", "r.c", "r.d", "r.e"])
+	})
+
 	it("kvDeletePrefix drops every row under the prefix and leaves the rest", async () => {
 		await api.kvSet("rq.v3-a", "1")
 		await api.kvSet("rq.v2-b", "2")

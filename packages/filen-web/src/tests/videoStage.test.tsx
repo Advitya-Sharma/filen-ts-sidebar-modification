@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { createElement, type ReactNode } from "react"
+import { createElement, type ReactElement, type ReactNode } from "react"
 import "@/lib/i18n"
 
 const narrow = vi.hoisted(() => ({ value: false }))
@@ -10,7 +10,8 @@ const narrow = vi.hoisted(() => ({ value: false }))
 vi.mock("@/features/shell/hooks/useIsNarrowViewport", () => ({ useIsNarrowViewport: () => narrow.value }))
 
 import { VideoStage, type VideoStageProps } from "@/components/media/video/videoStage"
-import { StageCenterCard } from "@/components/media/video/stageCards"
+import { StageCenterCard, StageNotice } from "@/components/media/video/stageCards"
+import { useStagePopupOpen } from "@/components/media/video/stageContext"
 import type { VideoKeyAction } from "@/lib/media/videoKeys.logic"
 
 let video: HTMLVideoElement | null = null
@@ -47,6 +48,28 @@ function playing(element: HTMLVideoElement): void {
 
 function stageRoot(): HTMLElement {
 	return screen.getByRole("dialog", { name: "Movie" })
+}
+
+function controlsHidden(): boolean {
+	return stageRoot().className.includes("cursor-none")
+}
+
+function startPlaying(): void {
+	const element = video
+
+	if (element === null) {
+		throw new Error("no video")
+	}
+
+	act(() => {
+		playing(element)
+	})
+}
+
+function Popup({ open }: { open: boolean }): ReactElement {
+	useStagePopupOpen(open)
+
+	return createElement("span", null, open ? "open" : "closed")
 }
 
 beforeEach(() => {
@@ -162,5 +185,84 @@ describe("VideoStage", () => {
 		})
 
 		expect(document.activeElement).toBe(stageRoot())
+	})
+
+	it("lets the controls hide while the stage itself holds a keyboard focus", () => {
+		const { matches } = Object.getOwnPropertyDescriptors(Element.prototype)
+
+		vi.spyOn(Element.prototype, "matches").mockImplementation(function (this: Element, selector: string) {
+			return selector === ":focus-visible"
+				? true
+				: (matches.value as (this: Element, selector: string) => boolean).call(this, selector)
+		})
+
+		render(createElement(VideoStage, props({ trailing: () => createElement("button", { type: "button" }, "Tracks") })))
+		startPlaying()
+		fireEvent.focus(stageRoot())
+
+		act(() => {
+			vi.advanceTimersByTime(3100)
+		})
+
+		expect(controlsHidden()).toBe(true)
+
+		// A control reached by keyboard holds them.
+		fireEvent.focus(screen.getByRole("button", { name: "Tracks" }))
+		expect(controlsHidden()).toBe(false)
+		vi.restoreAllMocks()
+	})
+
+	it("holds the controls while a popup shows, and lets go however it closes", () => {
+		const view = render(createElement(VideoStage, props({ trailing: () => createElement(Popup, { open: true }) })))
+
+		startPlaying()
+		act(() => {
+			vi.advanceTimersByTime(3100)
+		})
+		expect(controlsHidden()).toBe(false)
+
+		// Closed through its prop (no open-change event).
+		view.rerender(createElement(VideoStage, props({ trailing: () => createElement(Popup, { open: false }) })))
+		act(() => {
+			vi.advanceTimersByTime(3100)
+		})
+		expect(controlsHidden()).toBe(true)
+
+		view.rerender(createElement(VideoStage, props({ trailing: () => createElement(Popup, { open: true }) })))
+		expect(controlsHidden()).toBe(false)
+
+		// Unmounted with the bar when a failure replaces it.
+		view.rerender(
+			createElement(
+				VideoStage,
+				props({ trailing: () => createElement(Popup, { open: true }), failure: createElement("p", null, "Failed") })
+			)
+		)
+		act(() => {
+			vi.advanceTimersByTime(3100)
+		})
+		expect(controlsHidden()).toBe(true)
+	})
+
+	it("shows notices in a status region that was there before the text", () => {
+		const view = render(createElement(VideoStage, props()))
+		const region = screen.getByRole("status")
+
+		expect(region.textContent).toBe("")
+
+		view.rerender(createElement(VideoStage, props({ notice: createElement(StageNotice, null, "You're offline") })))
+		expect(screen.getByRole("status")).toBe(region)
+		expect(region.textContent).toBe("You're offline")
+	})
+
+	it("announces through a live region that was there before the text", () => {
+		const view = render(createElement(VideoStage, props()))
+		const region = stageRoot().querySelector("[aria-live=polite]")
+
+		expect(region?.textContent).toBe("")
+
+		view.rerender(createElement(VideoStage, props({ announcement: "Up next: Episode 2" })))
+		expect(stageRoot().querySelector("[aria-live=polite]")).toBe(region)
+		expect(region?.textContent).toBe("Up next: Episode 2")
 	})
 })

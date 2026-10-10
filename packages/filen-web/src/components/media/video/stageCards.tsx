@@ -65,12 +65,10 @@ export function StageCenterCard({
 	)
 }
 
+// A pill for the stage's `notice`, whose container is the status region.
 export function StageNotice({ children, className }: { children: ReactNode; className?: string }) {
 	return (
-		<div
-			role="status"
-			className={cn("flex items-center gap-1 rounded-full py-1 pr-1 pl-3 text-sm", STAGE_POPUP_TONE_CLASS, className)}
-		>
+		<div className={cn("flex items-center gap-1 rounded-full py-1 pr-1 pl-3 text-sm", STAGE_POPUP_TONE_CLASS, className)}>
 			{children}
 		</div>
 	)

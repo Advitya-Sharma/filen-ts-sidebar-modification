@@ -4,10 +4,10 @@ import { PlayIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { StageCornerCard } from "@/components/media/video/stageCards"
 
-// 7U1: the next episode in the corner, a countdown bar and the seconds in the Play button. Both follow the
+// The next episode in the corner, a countdown bar and the seconds in the Play button. Both follow the
 // playhead (a pause holds them), and neither re-renders: the bar is a compositor transform animation kept
-// at the playhead's offset, the number is written into the button on timeupdate. Announced politely once;
-// focus stays where it is.
+// at the playhead's offset, the number is written into the button on timeupdate. Focus stays where it is; the
+// stage's live region announces it (a region mounted with its text is not read out).
 
 export function UpNextCard({
 	video,
@@ -99,12 +99,6 @@ export function UpNextCard({
 
 	return (
 		<StageCornerCard label={t("upNextLabel")}>
-			<p
-				aria-live="polite"
-				className="sr-only"
-			>
-				{t("upNextAnnounce", { title })}
-			</p>
 			<p className="mb-2 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">{t("upNextLabel")}</p>
 			<div className="flex gap-3">
 				<div className="aspect-video w-28 shrink-0 overflow-hidden rounded-lg bg-white/10">

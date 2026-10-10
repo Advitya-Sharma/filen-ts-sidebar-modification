@@ -12,5 +12,11 @@ export const Route = createFileRoute("/_app/videos/title/$uuid")({
 function TitlePage() {
 	const { uuid } = Route.useParams()
 
-	return <VideoTitleScreen titleId={uuid} />
+	// Keyed: another title is another page (its own scroll offset, dialog and follow), not this one's state.
+	return (
+		<VideoTitleScreen
+			key={uuid}
+			titleId={uuid}
+		/>
+	)
 }

@@ -19,6 +19,8 @@ export interface FileKindVerdictStorage {
 
 // Most recently written last.
 const verdicts = new Map<string, StoredVerdict>()
+// Held in memory only (a public link's file, read without a session): nothing of it reaches kv.
+const unsaved = new Set<string>()
 // Each change names the files it concerns; null for any (a load, a reset).
 const changes = createListenerSet<readonly string[] | null>("file-kind-verdicts")
 let storage: FileKindVerdictStorage | null = null
@@ -62,7 +64,9 @@ export function attachFileKindVerdictStorage(target: FileKindVerdictStorage): vo
 			}
 
 			for (const uuid of drop) {
-				persist(kv => kv.remove(uuid))
+				if (!unsaved.delete(uuid)) {
+					persist(kv => kv.remove(uuid))
+				}
 			}
 
 			if (keep.length > 0) {
@@ -78,8 +82,12 @@ export function fileKindVerdict(uuid: string): ContentVerdict | undefined {
 	return verdicts.get(uuid)?.v
 }
 
-export function recordFileKindVerdict(uuid: string, verdict: ContentVerdict): void {
-	if (verdicts.get(uuid)?.v === verdict) {
+// `memoryOnly` keeps the verdict for this session alone: what an anonymous visitor's reads said is never left
+// in kv for whoever signs in on the browser next. A later persistent record of the same verdict saves it.
+export function recordFileKindVerdict(uuid: string, verdict: ContentVerdict, options: { memoryOnly?: boolean } = {}): void {
+	const memoryOnly = options.memoryOnly === true
+
+	if (verdicts.get(uuid)?.v === verdict && (memoryOnly || !unsaved.has(uuid))) {
 		return
 	}
 
@@ -87,13 +95,22 @@ export function recordFileKindVerdict(uuid: string, verdict: ContentVerdict): vo
 
 	verdicts.delete(uuid)
 	verdicts.set(uuid, value)
-	persist(kv => kv.save(uuid, value))
+
+	if (memoryOnly) {
+		unsaved.add(uuid)
+	} else {
+		unsaved.delete(uuid)
+		persist(kv => kv.save(uuid, value))
+	}
 
 	const oldest = verdicts.size > VERDICT_MAX_RECORDS ? verdicts.keys().next().value : undefined
 
 	if (oldest !== undefined) {
 		verdicts.delete(oldest)
-		persist(kv => kv.remove(oldest))
+
+		if (!unsaved.delete(oldest)) {
+			persist(kv => kv.remove(oldest))
+		}
 	}
 
 	changed(oldest === undefined ? [uuid] : [uuid, oldest])
@@ -120,5 +137,6 @@ export function filesWithVerdict(verdict: ContentVerdict): string[] {
 export function resetFileKindVerdicts(): void {
 	epoch++
 	verdicts.clear()
+	unsaved.clear()
 	changed(null)
 }

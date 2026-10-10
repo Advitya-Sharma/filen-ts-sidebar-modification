@@ -52,6 +52,8 @@ import {
  */
 
 const OUTPUT = "src/features/settings/thirdPartyNotices.gen.ts"
+const WORKSPACE_FILE = "../../pnpm-workspace.yaml"
+const FILEN_TS_REPOSITORY = "https://github.com/FilenCloudDienste/filen-ts"
 
 type Ecosystem = "npm" | "rust" | "vendored"
 
@@ -68,6 +70,31 @@ function requireJson(path: string): Record<string, unknown> {
 }
 
 /**
+ * The patch pnpm applies to a package, by `name@version` (or a bare name, for every version), from
+ * pnpm-workspace.yaml's patchedDependencies. What ships is the patched source, so its notice names the patch.
+ */
+function patchedDependencies(): Map<string, string> {
+	const patches = new Map<string, string>()
+	let inSection = false
+
+	for (const line of readFileSync(WORKSPACE_FILE, "utf8").split("\n")) {
+		if (!/^\s/.test(line)) {
+			inSection = line.trimEnd() === "patchedDependencies:"
+
+			continue
+		}
+
+		const match = inSection ? /^\s+'?(.+?)'?:\s+(\S+)\s*$/.exec(line) : null
+
+		if (match?.[1] !== undefined && match[2] !== undefined) {
+			patches.set(match[1], match[2])
+		}
+	}
+
+	return patches
+}
+
+/**
  * The npm packages that reach a browser.
  *
  * Identity is `name@version`, not the bare name: several packages ship at two versions in this tree and
@@ -76,6 +103,7 @@ function requireJson(path: string): Record<string, unknown> {
 function collectNpm(installed: InstalledNpmPackage[]): Collected[] {
 	const seen = new Set<string>()
 	const entries: Collected[] = []
+	const patches = patchedDependencies()
 
 	for (const { name, version, dir } of installed) {
 		const id = `${name}@${version}`
@@ -100,15 +128,27 @@ function collectNpm(installed: InstalledNpmPackage[]): Collected[] {
 
 		seen.add(id)
 
+		const entry = describedNotice({
+			name,
+			version,
+			license: spdxOf(manifest["license"] ?? manifest["licenses"]),
+			ecosystem: "npm",
+			dir,
+			repository: repositoryOf(manifest["repository"])
+		})
+		const patch = patches.get(id) ?? patches.get(name)
+
+		// The source of what ships (MPL-2.0 and the LGPL ask for it): the release as published, with the patch.
 		entries.push(
-			describedNotice({
-				name,
-				version,
-				license: spdxOf(manifest["license"] ?? manifest["licenses"]),
-				ecosystem: "npm",
-				dir,
-				repository: repositoryOf(manifest["repository"])
-			})
+			patch === undefined
+				? entry
+				: {
+						...entry,
+						terms: [
+							`Modified: ${name} ${version} as published, with the patch ${patch} from the filen-ts repository (${FILEN_TS_REPOSITORY}) applied. That patch is the whole of the change to its source.`,
+							...entry.terms
+						]
+					}
 		)
 	}
 
@@ -324,6 +364,7 @@ function objectField(record: Record<string, unknown>, key: string, path: string)
 const FFMPEG_DIR = "src/vendor/ffmpeg-decoders"
 const FFMPEG_MANIFEST = `${FFMPEG_DIR}/manifest.json`
 const CODECS_SOURCE = "packages/filen-web/scripts/codecs"
+const FFMPEG_REPOSITORY = "https://git.ffmpeg.org/ffmpeg.git"
 
 function ffmpegModuleNotices(): Collected[] {
 	const manifest = requireJson(FFMPEG_MANIFEST)
@@ -344,13 +385,14 @@ function ffmpegModuleNotices(): Collected[] {
 				version: tag.replace(/^n/, ""),
 				license: "LGPL-2.1-or-later",
 				copyright: ["Copyright (c) the FFmpeg developers"],
-				repository: "https://git.ffmpeg.org/ffmpeg.git",
+				repository: FFMPEG_REPOSITORY,
 				terms: [
 					[
 						`FFmpeg's AC-3, E-AC-3, DTS, TrueHD/MLP, ALAC and FLAC decoders (libavcodec, libavutil), built to WebAssembly from the FFmpeg ${tag} release and licensed under the GNU Lesser General Public License, version 2.1 or later.`,
-						`Source: ${stringField(ffmpeg, "tarball", FFMPEG_MANIFEST)} (SHA-256 ${stringField(ffmpeg, "sha256", FFMPEG_MANIFEST)}).`,
+						`Corresponding source of the library: the FFmpeg release tarball ${stringField(ffmpeg, "tarball", FFMPEG_MANIFEST)} (SHA-256 ${stringField(ffmpeg, "sha256", FFMPEG_MANIFEST)}), unmodified, the release tagged ${tag} in ${FFMPEG_REPOSITORY}.`,
 						`Configured with: ${stringsField(ffmpeg, "configure", FFMPEG_MANIFEST).join(" ")}.`,
-						`Built with Emscripten ${emcc}. The complete corresponding source of the module, in the filen-ts repository (https://github.com/FilenCloudDienste/filen-ts): ${sourceList}.`
+						`Built with Emscripten ${emcc}. The rest of the module's source and its build recipe, in the filen-ts repository (${FILEN_TS_REPOSITORY}): ${sourceList}.`,
+						`That script builds the module (packages/filen-web/${FFMPEG_DIR}/decoders.worker.js) from the tarball above, or from a modified FFmpeg, and the app built from the same repository runs the module that file then holds.`
 					].join(" "),
 					readFileSync("scripts/licenses/ffmpeg-COPYING.LGPLv2.1", "utf8")
 				]

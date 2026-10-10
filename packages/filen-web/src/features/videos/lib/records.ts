@@ -1,4 +1,4 @@
-import { kvDelete, kvEntriesJson, kvGetJson, kvKeys, kvSetJson } from "@/lib/storage/adapter"
+import { kvDelete, kvDeleteIfAt, kvEntriesJsonInSlices, kvGetJson, kvKeys, kvSetJson } from "@/lib/storage/adapter"
 import { RecordStore, type RecordStoreKv } from "@/features/videos/lib/recordStore.logic"
 import { PROBE_KV_PREFIX, PROBE_MAX_RECORDS, probeRecordSchema } from "@/features/videos/lib/probeService.logic"
 import { ART_KV_PREFIX, ART_MAX_RECORDS, artRecordSchema } from "@/features/videos/lib/artwork.logic"
@@ -6,7 +6,15 @@ import { FRAME_HINT_KV_PREFIX, FRAME_HINT_MAX_RECORDS, frameHintSchema } from "@
 
 // The Videos feature's per-file kv records, one store per kind.
 
-const kv: RecordStoreKv = { kvGetJson, kvSetJson, kvKeys, kvEntriesJson, kvDelete }
+// A sweep over a full store reads its rows a page at a time and decodes them in slices.
+const kv: RecordStoreKv = {
+	kvGetJson,
+	kvSetJson,
+	kvKeys,
+	kvEntriesJson: (prefix, schema) => kvEntriesJsonInSlices(prefix, schema),
+	kvDelete,
+	kvDeleteIfAt: entries => kvDeleteIfAt(entries)
+}
 
 // About a thousand writes between two checks of a store's record count.
 const WRITES_PER_SWEEP = 1024

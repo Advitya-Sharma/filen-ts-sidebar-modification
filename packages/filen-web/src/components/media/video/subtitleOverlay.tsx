@@ -31,7 +31,8 @@ function trackPool(video: HTMLVideoElement): SubtitleTrackPool {
 	return pool
 }
 
-// The track's cues are rebuilt this long after the last delay change (the overlay follows at once).
+// The track's cues are rebuilt this long after the last delay change (the overlay follows at once). New cues at the
+// same delay go in at once: only the added ones, when the cues just grew.
 const CUE_REBUILD_DELAY_MS = 300
 
 const REGION_CLASS: Readonly<Record<SubtitleRegion["key"], string>> = {
@@ -69,6 +70,8 @@ export function SubtitleOverlay({
 	const pool = video === null ? null : trackPool(video)
 	const shownKey = useRef("")
 	const scratch = useRef<number[]>([])
+	// The delay the track was last filled at.
+	const trackOffset = useRef<number | null>(null)
 
 	useEffect(() => {
 		void warmSubtitleStyle()
@@ -81,18 +84,26 @@ export function SubtitleOverlay({
 		[pool]
 	)
 
-	// The track: rebuilt when the cues change, and shortly after the delay settles.
+	// The track: filled when the cues change, and shortly after the delay settles.
 	useEffect(() => {
 		if (pool === null) {
 			return
 		}
 
-		const timer = setTimeout(
-			() => {
-				pool.show(cues, offset)
-			},
-			cues === null ? 0 : CUE_REBUILD_DELAY_MS
-		)
+		const target = pool
+
+		function fill(): void {
+			target.show(cues, offset)
+			trackOffset.current = offset
+		}
+
+		if (cues === null || trackOffset.current === null || trackOffset.current === offset) {
+			fill()
+
+			return
+		}
+
+		const timer = setTimeout(fill, CUE_REBUILD_DELAY_MS)
 
 		return () => {
 			clearTimeout(timer)

@@ -1,15 +1,17 @@
 import * as Comlink from "comlink"
-import type {
-	PcmStreamInfo,
-	RemuxAudioStart,
-	RemuxAudioStartParams,
-	RemuxEvent,
-	RemuxMediaInfo,
-	RemuxOpenParams,
-	RemuxSeekParams,
-	RemuxSeekResult,
-	RemuxStats,
-	TrackKind
+import {
+	WarmGoneError,
+	type PcmStreamInfo,
+	type RemuxAdoptParams,
+	type RemuxAudioStart,
+	type RemuxAudioStartParams,
+	type RemuxEvent,
+	type RemuxMediaInfo,
+	type RemuxOpenParams,
+	type RemuxSeekParams,
+	type RemuxSeekResult,
+	type RemuxStats,
+	type TrackKind
 } from "@/lib/media/remuxTypes"
 import { RemuxEngine } from "@/workers/remux/engine"
 import { openAudioInput } from "@/workers/remux/audioInput"
@@ -27,8 +29,8 @@ type EventSink = ((event: RemuxEvent) => unknown) & Partial<Comlink.ProxyMethods
 const sessions = new Map<number, { engine: RemuxEngine; onEvent: EventSink }>()
 let nextSession = 0
 
-// A file opened ahead of playback (the next episode, once Up Next shows): its head and first keyframe interval
-// are in its block cache when the player's own open adopts it. One at a time; one nobody took closes itself.
+// A file opened ahead of playback (the next episode, once Up Next shows): its head and index are in its block
+// cache when the player's own open adopts it. One at a time; one nobody took closes itself.
 interface Warmed {
 	key: string
 	engine: RemuxEngine
@@ -41,6 +43,9 @@ const WARM_EXPIRY_MS = 5 * 60_000
 // Subtitle cues found while warming wait for the session that adopts the file.
 const MAX_WARM_EVENTS = 256
 let warmed: Warmed | null = null
+// The key of the last open that named a warmed file the worker did not have: its session opened the file
+// itself, so a warm arriving for it later would read the file a second time for nobody.
+let abandonedWarm: string | null = null
 
 function dropWarmed(key?: string): Promise<void> {
 	const entry = warmed
@@ -148,10 +153,17 @@ const api = {
 	closePcm(id: number): void {
 		pcmStreams.get(id)?.abort()
 	},
-	// Opens `params` under `key` ahead of playback: the head, the index and the first keyframe interval are read
-	// into its cache. The port belongs to the warmed file from now on.
+	// Opens `params` under `key` ahead of playback: the head and the index are read into its cache, and where
+	// video starts only at IDR pictures, the first one is found. The port belongs to the warmed file from now on.
 	async warm(params: RemuxOpenParams, key: string): Promise<void> {
 		await dropWarmed()
+
+		if (abandonedWarm === key) {
+			abandonedWarm = null
+			params.port.close()
+
+			return
+		}
 
 		let sink: EventSink | null = null
 		const held: RemuxEvent[] = []
@@ -191,14 +203,21 @@ const api = {
 		return dropWarmed(key)
 	},
 	// `onEvent` is the page's Comlink proxy; segments cross transferred. With `warmKey` naming the file warmed
-	// last, that file is taken over and the port passed along closes unused.
-	async open(params: RemuxOpenParams & { warmKey?: string }, onEvent: EventSink): Promise<{ id: number; info: RemuxMediaInfo }> {
+	// last, that file is taken over and a port passed along closes unused; without a port, an open whose warmed
+	// file is gone fails with WarmGoneError.
+	async open(
+		params: (RemuxOpenParams & { warmKey?: string }) | RemuxAdoptParams,
+		onEvent: EventSink
+	): Promise<{ id: number; info: RemuxMediaInfo }> {
 		const ready = warmed
 
 		if (params.warmKey !== undefined && ready?.key === params.warmKey) {
 			warmed = null
 			clearTimeout(ready.expiry)
-			params.port.close()
+
+			if ("port" in params) {
+				params.port.close()
+			}
 
 			const id = nextSession++
 
@@ -212,6 +231,16 @@ const api = {
 
 				throw error
 			}
+		}
+
+		if (params.warmKey !== undefined) {
+			abandonedWarm = params.warmKey
+		}
+
+		if (!("port" in params)) {
+			onEvent[Comlink.releaseProxy]?.()
+
+			throw new WarmGoneError()
 		}
 
 		const id = nextSession++

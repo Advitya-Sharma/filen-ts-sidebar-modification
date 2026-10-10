@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { CueBuilder, type VideoProbe } from "@filen/shared/videos"
+import { CueBuilder, MAX_CONCURRENT_CUES, type VideoProbe } from "@filen/shared/videos"
 import {
 	DEFAULT_SUBTITLE_STYLE,
 	clampSubtitleDelay,
@@ -69,6 +69,41 @@ describe("subtitle overlay cues", () => {
 			{ key: "bottom", align: "center", cues: ["Hello <i>there</i>", "Second &amp; line"] },
 			{ key: "top", align: "center", cues: ["On top"] }
 		])
+	})
+
+	it("shows the newest of a bounded set of cues when thousands overlap", () => {
+		const builder = new CueBuilder()
+
+		// Cue i starts at i * 10 ms and every one runs to three hours.
+		for (let i = 0; i < 10_000; i++) {
+			builder.add(i / 100, 10_800, `c${String(i)}`)
+		}
+
+		const regions = subtitleRegionsAt(builder.finish(), 300, 0)
+
+		expect(regions).toEqual([
+			{
+				key: "bottom",
+				align: "center",
+				cues: Array.from({ length: MAX_CONCURRENT_CUES }, (_, i) => `c${String(10_000 - MAX_CONCURRENT_CUES + i)}`)
+			}
+		])
+		expect(subtitleRegionsKey(regions).length).toBeLessThan(MAX_CONCURRENT_CUES * 8)
+	})
+
+	it("shows dialogue that starts under a fully layered sign", () => {
+		const builder = new CueBuilder()
+
+		for (let layer = 0; layer < MAX_CONCURRENT_CUES; layer++) {
+			builder.add(10, 15, `sign ${String(layer)}`, 8)
+		}
+
+		builder.add(11, 14, "Dialogue")
+
+		const regions = subtitleRegionsAt(builder.finish(), 12, 0)
+
+		expect(regions.find(region => region.key === "bottom")?.cues).toEqual(["Dialogue"])
+		expect(regions.find(region => region.key === "top")?.cues).toHaveLength(MAX_CONCURRENT_CUES - 1)
 	})
 
 	it("applies the delay (positive shows them later)", () => {

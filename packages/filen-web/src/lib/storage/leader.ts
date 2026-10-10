@@ -69,6 +69,7 @@ const STORAGE_METHODS = [
 	"kvEntries",
 	"kvEntriesPage",
 	"kvDeletePrefix",
+	"kvDeleteIfAt",
 	"wipe"
 ] as const satisfies readonly (keyof StorageApi)[]
 

@@ -193,6 +193,34 @@ describe("third-party notices payload integrity", () => {
 		}
 
 		expect(build).not.toContain("/tree/")
+		// Where the library's own source is obtained, and how the module is rebuilt from it.
+		expect(build).toContain(
+			`Corresponding source of the library: the FFmpeg release tarball ${ffmpegManifest.ffmpeg.tarball} (SHA-256 ${ffmpegManifest.ffmpeg.sha256}), unmodified`
+		)
+		expect(build).toContain("packages/filen-web/src/vendor/ffmpeg-decoders/decoders.worker.js")
+	})
+
+	it("names the patch pnpm applies to every patched package that ships", () => {
+		// What ships is the patched source; MPL-2.0 and the LGPL ask that recipients learn where it is.
+		const workspace = readFileSync(new URL("../../../../pnpm-workspace.yaml", import.meta.url), "utf8")
+		const section = /^patchedDependencies:\n((?:[ \t]+.*\n)+)/m.exec(workspace)?.[1] ?? ""
+		const patches = [...section.matchAll(/^\s+'?(.+?)'?:\s+(\S+)\s*$/gm)].map(([, key, patch]) => ({ key, patch }))
+		const shipped = patches.flatMap(({ key, patch }) =>
+			THIRD_PARTY_NOTICES.filter(notice => notice.ecosystem === "npm" && `${notice.name}@${notice.version}` === key).map(notice => ({
+				notice,
+				patch
+			}))
+		)
+
+		expect(patches.length).toBeGreaterThan(0)
+		expect(shipped.map(({ notice }) => notice.name)).toContain("mediabunny")
+
+		for (const { notice, patch } of shipped) {
+			expect(
+				thirdPartyLicenseTexts(notice).some(text => text.includes(`the patch ${patch ?? ""} from the filen-ts repository`)),
+				`${notice.name}@${notice.version} does not name ${patch ?? ""}`
+			).toBe(true)
+		}
 	})
 
 	it("describes what Emscripten links into the decoders module, with the license files the build copied", () => {

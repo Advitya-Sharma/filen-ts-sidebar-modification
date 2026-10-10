@@ -39,10 +39,11 @@ import { registerSocketHandler } from "@/lib/sdk/socket"
 import { onSignOutPending, readSignOutPending } from "@/lib/signOutPending"
 import { onAuthBroadcast } from "@/lib/sdk/session"
 import { dotFilenSubdirUuid, findDotFilenSubdir, getDotFilenSubdir, noteDotFilenFile, onDotFilenSubdirForgotten } from "@/lib/dotFilen"
-import { kvDelete, kvDeletePrefix, kvEntriesJson, kvGetJson, kvKeys, kvSetJson } from "@/lib/storage/adapter"
+import { kvDelete, kvDeleteIfAt, kvDeletePrefix, kvEntriesJson, kvGetJson, kvKeys, kvSetJson } from "@/lib/storage/adapter"
 import { accountQueryGet } from "@/queries/account"
 import type { RecordStoreKv } from "@/features/videos/lib/recordStore.logic"
 import { versionAsFile } from "@/features/videos/lib/library.logic"
+import { listVideosDir } from "@/features/videos/lib/videosDirListing"
 import {
 	CHANNEL_NAME,
 	DELETE_BATCH,
@@ -148,6 +149,9 @@ export interface WatchStateSdk {
 	noteSystemFile: (uuid: string) => void
 	getFileByStableUuid: (stableUuid: string) => Promise<SdkFile | undefined>
 	listDirectory: (dirUuid: string) => Promise<SdkFile[]>
+	// `.filen/Videos` as listed at `startedAfter` (performance.now()) or later: a listing the library configuration
+	// started since serves too. Without it, the directory is listed.
+	listVideosDir?: (dirUuid: string, startedAfter: number) => Promise<SdkFile[]>
 	download: (file: SdkFile) => Promise<Uint8Array>
 	upload: (params: { parent: string; bytes: Uint8Array; abortToken: string }) => Promise<SdkFile>
 	cancel: (abortToken: string) => void
@@ -274,6 +278,12 @@ export class WatchStateEngine {
 	private currentUuid: string | null = null
 	// Bumped whenever the socket can no longer vouch.
 	private epoch = 0
+	// Since when (performance.now()) the socket has vouched without a gap: a listing that started since misses no save
+	// the socket didn't report.
+	private vouchedSince = Number.POSITIVE_INFINITY
+	// The head as the session's first open confirmed it, in that epoch: the weekly version listing right after needs
+	// no second lookup while the socket still vouches for it.
+	private confirmedHead: { file: SdkFile; epoch: number } | null = null
 	private remoteSave: RemoteSave | null = null
 	private saveSeq = 0
 	// A head this version can't use (a newer schema, or unreadable with no readable version); left alone.
@@ -658,14 +668,19 @@ export class WatchStateEngine {
 			if (file !== null && file.uuid === head.u) {
 				if (this.epoch === epoch && this.remoteSave === null) {
 					this.currentUuid = file.uuid
+					this.confirmedHead = { file, epoch }
 				}
 
 				return
 			}
 		} else {
 			const videosDir = await this.sdk.findVideosDir()
+			const listed =
+				videosDir === null
+					? null
+					: await (this.sdk.listVideosDir?.(videosDir, this.vouchedSince) ?? this.sdk.listDirectory(videosDir))
 
-			file = videosDir === null ? null : ((await this.sdk.listDirectory(videosDir)).find(isStateFileName) ?? null)
+			file = listed?.find(isStateFileName) ?? null
 		}
 
 		// Gone or unlisted: the next flush's own lookup sorts it out.
@@ -775,7 +790,9 @@ export class WatchStateEngine {
 			}
 
 			case "fileTrash":
-				if (inner.uuid === this.head?.u || inner.uuid === this.currentUuid) {
+				// With newUUID a version was superseded on a versioning-disabled account: the paired fileNew carries
+				// the successor through the own-upload or foreign-save path.
+				if (inner.newUUID === undefined && (inner.uuid === this.head?.u || inner.uuid === this.currentUuid)) {
 					this.loseHead()
 				}
 
@@ -802,6 +819,7 @@ export class WatchStateEngine {
 	public loseHead(): void {
 		this.currentUuid = null
 		this.epoch++
+		this.vouchedSince = performance.now()
 	}
 
 	// `.filen/Videos` was trashed, moved or renamed: looked up again before the next upload.
@@ -874,6 +892,7 @@ export class WatchStateEngine {
 		this.attach()
 		await this.mergePending()
 		this.loaded = true
+		this.vouchedSince = performance.now()
 		this.rebuild()
 
 		if (this.rows.size > 0) {
@@ -2079,8 +2098,9 @@ export class WatchStateEngine {
 	}
 
 	// Superseded versions of the state file this browser uploaded (but the newest of them), and weekly, versions older
-	// than a week beyond the newest two. The head is read right before deleting and never deleted: a version delete
-	// of the head deletes the live file.
+	// than a week beyond the newest two. The head is looked up right before each batch of deletes and never deleted: a
+	// version delete of the head deletes the live file. The head the first open confirmed serves only the weekly
+	// listing, whose deletes look it up again.
 	private async maintain({ prune, gc }: { prune: boolean; gc: boolean }): Promise<void> {
 		const meta = this.meta
 		const head = this.head
@@ -2107,9 +2127,21 @@ export class WatchStateEngine {
 		}
 
 		const epoch = this.epoch
+		const confirmed = this.confirmedHead
+
+		this.confirmedHead = null
 
 		try {
-			const live = await this.liveHead(stable)
+			const live =
+				!pruneDue &&
+				confirmed !== null &&
+				confirmed.epoch === epoch &&
+				confirmed.file.uuid === head.u &&
+				confirmed.file.stableUUID === stable &&
+				this.currentUuid === head.u &&
+				this.remoteSave === null
+					? confirmed.file
+					: await this.liveHead(stable)
 
 			if (live === null) {
 				return
@@ -2208,7 +2240,8 @@ const kv: WatchStateKv = {
 	kvKeys,
 	kvEntriesJson,
 	kvDelete,
-	kvDeletePrefix
+	kvDeletePrefix,
+	kvDeleteIfAt: entries => kvDeleteIfAt(entries)
 }
 
 export const watchState = new WatchStateEngine({
@@ -2220,6 +2253,7 @@ export const watchState = new WatchStateEngine({
 		knownVideosDir: () => dotFilenSubdirUuid(VIDEOS_DIR_NAME),
 		noteSystemFile: noteDotFilenFile,
 		getFileByStableUuid: stableUuid => runOp(sdkApi.getFileByStableUuid(stableUuid)),
+		listVideosDir: (dirUuid, startedAfter) => listVideosDir(dirUuid, startedAfter),
 		listDirectory: async dirUuid =>
 			(
 				await runOp(

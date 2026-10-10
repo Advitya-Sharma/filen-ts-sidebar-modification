@@ -1,8 +1,9 @@
 import { useTranslation } from "react-i18next"
 import { FILEN_PRIVACY_URL, FILEN_TERMS_URL } from "@/lib/externalUrls"
+import { ThirdPartyNoticesLink } from "@/features/settings/components/advanced/thirdPartyNoticesLink"
 
 // Unauthed-screen footer. The authed equivalent is settings → Advanced → About (same two URLs, one
-// const module). target="_blank" + rel="noopener noreferrer" matches every other external link here;
+// const module) and the licenses row beside it. target="_blank" + rel="noopener noreferrer" matches every other external link here;
 // inside an Electron BrowserWindow that already opens the OS browser, so no desktop bridge is needed.
 // Wraps rather than overflows: translated labels run much longer than the English pair.
 function AuthLegalLinks() {
@@ -26,6 +27,7 @@ function AuthLegalLinks() {
 			>
 				{t("legalPrivacy")}
 			</a>
+			<ThirdPartyNoticesLink className="rounded-md underline-offset-4 focus-ring outline-none hover:text-foreground hover:underline" />
 		</p>
 	)
 }

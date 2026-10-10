@@ -33,6 +33,20 @@ export function memoryKv(): { kv: RecordStoreKv; rows: Map<string, unknown>; rea
 				rows.delete(key)
 
 				return Promise.resolve()
+			},
+			kvDeleteIfAt: entries => {
+				const deleted: string[] = []
+
+				for (const [key, at] of entries) {
+					const value = rows.get(key)
+
+					if (typeof value === "object" && value !== null && "at" in value && value.at === at) {
+						rows.delete(key)
+						deleted.push(key)
+					}
+				}
+
+				return Promise.resolve(deleted)
 			}
 		}
 	}

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react"
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { useTranslation } from "react-i18next"
 import { Link, useNavigate } from "@tanstack/react-router"
 import { toast } from "sonner"
@@ -11,6 +11,7 @@ import { log } from "@/lib/log"
 import { noDiskPersister } from "@/queries/persist"
 import { useVideoArt } from "@/features/videos/hooks/useVideoArt"
 import { useTitleWatch } from "@/features/videos/hooks/useTitleWatch"
+import { useRowsInSlices } from "@/features/videos/hooks/useRowsInSlices"
 import { watchState } from "@/features/videos/lib/watchState"
 import { probeRecords } from "@/features/videos/lib/records"
 import { CardObserver, visibleCardObserver } from "@/features/videos/lib/cardObserver"
@@ -40,7 +41,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import type { VideoEpisodeView, VideoSeasonView, VideoTitleDetail } from "@/workers/videoIndex/view.logic"
 
-// The series page (6A): header with the smart primary button from Next Up, season tabs (a select past six seasons
+// The series page: header with the smart primary button from Next Up, season tabs (a select past six seasons
 // or on a phone) with each season's unwatched count or a check, and the vertical episode list: a 16:9 still, the
 // code and title, runtime, the NFO's synopsis, progress and a check, and a separate Play button. Specials come last,
 // collapsed and unmounted. Stills, synopses and runtimes are read only for rows on screen.
@@ -316,9 +317,12 @@ function EpisodeList({
 	observer: CardObserver | null
 	onEdit: (subject: CorrectionSubject) => void
 }) {
+	// A season of hundreds of episodes mounts in slices rather than in one long render.
+	const shown = useRowsInSlices(season.episodes.length)
+
 	return (
 		<ul className="flex flex-col divide-y divide-border/60">
-			{season.episodes.map((episode, index) => {
+			{season.episodes.slice(0, shown).map((episode, index) => {
 				const watch = episodeWatch(episode.versions, entries)
 
 				return (
@@ -413,6 +417,9 @@ export function SeriesDetail({
 			: defaultSeason({ regular: regularNumbers, action, lastViewed: lastSeason.data ?? null })
 	// The season last viewed is a local read: the list waits for it rather than jump from another season.
 	const season = lastSeason.isPending ? null : (layout.regular.find(item => item.number === current) ?? null)
+	// A season switch mounts the new season's rows: rendered in the background, so the tabs answer at once however
+	// long the season is. On mount it renders at once; a restored scroll position follows the rows as they mount.
+	const listSeason = useDeferredValue(season)
 	const allKeys = detail.seasons.flatMap(item => seasonKeys(item))
 	// The numbered seasons, or the specials when that is all there is.
 	const counted = countedSeasons(layout)
@@ -672,16 +679,16 @@ export function SeriesDetail({
 					</div>
 				)}
 				<Separator />
-				{season === null ? null : (
+				{listSeason === null ? null : (
 					<div
 						id={panelId}
 						role={selector === "tabs" ? "tabpanel" : undefined}
-						aria-label={t("playerSeason", { number: season.number })}
+						aria-label={t("playerSeason", { number: listSeason.number })}
 					>
 						<EpisodeList
-							key={season.number}
+							key={listSeason.number}
 							detail={detail}
-							season={season}
+							season={listSeason}
 							entries={entries}
 							observer={observer}
 							onEdit={onEdit}

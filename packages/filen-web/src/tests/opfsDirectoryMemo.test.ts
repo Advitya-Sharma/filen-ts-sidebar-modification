@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { deleteThumbnail, readThumbnailBlob, wipeThumbnailStore } from "@/features/drive/lib/thumbCache"
 import { THUMB_DIR, THUMB_EXT } from "@/features/drive/lib/thumbnails.logic"
 import { cachedOpfsDirectory, forgetOpfsDirectory } from "@/lib/storage/opfs"
-import { writeThumb } from "@/workers/thumbStore"
+import { sweepStore, writeStoreEntry, writeThumb } from "@/workers/thumbStore"
+import { readStoreBlob } from "@/lib/storage/opfsBlobStore"
+import { ART_DIR, ART_STORE } from "@/features/videos/lib/artStore.logic"
 
 function notFound(): DOMException {
 	return new DOMException("no such entry", "NotFoundError")
@@ -52,6 +54,18 @@ class FakeDirectory {
 		})
 	}
 
+	async *values(): AsyncGenerator<{ kind: "file"; name: string; getFile: () => Promise<Blob> }> {
+		if (this.removed) {
+			throw notFound()
+		}
+
+		for (const [name, bytes] of this.files) {
+			await Promise.resolve()
+
+			yield { kind: "file", name, getFile: () => Promise.resolve(new Blob([bytes])) }
+		}
+	}
+
 	removeEntry(name: string): Promise<void> {
 		const directory = this.directories.get(name)
 
@@ -95,6 +109,7 @@ async function leaf(root: FakeDirectory): Promise<FakeDirectory> {
 
 beforeEach(() => {
 	forgetOpfsDirectory(THUMB_DIR)
+	forgetOpfsDirectory(ART_DIR)
 })
 
 describe("cachedOpfsDirectory", () => {
@@ -114,6 +129,16 @@ describe("cachedOpfsDirectory", () => {
 		await expect(cachedOpfsDirectory(THUMB_DIR)).rejects.toThrow("denied")
 		expect(await cachedOpfsDirectory(THUMB_DIR)).toBe(await leaf(root))
 		expect(getDirectory).toHaveBeenCalledTimes(2)
+	})
+
+	it("creates a missing directory for a caller that may, even while a walk that may not is pending", async () => {
+		const { root } = installRoot()
+		const lookup = cachedOpfsDirectory(THUMB_DIR, false)
+		const created = cachedOpfsDirectory(THUMB_DIR)
+
+		await expect(lookup).rejects.toThrow("no such entry")
+		expect(await created).toBe(await leaf(root))
+		expect(await cachedOpfsDirectory(THUMB_DIR, false)).toBe(await created)
 	})
 })
 
@@ -141,6 +166,58 @@ describe("thumbnail store over the memoized directory", () => {
 		await writeThumb("b", new Uint8Array([2]))
 
 		expect([...(await leaf(root)).files.keys()]).toEqual([`b${THUMB_EXT}`])
+	})
+
+	it("drops an art write landing after a wipe removed the art tree, rather than re-creating it", async () => {
+		const { root } = installRoot()
+
+		await writeStoreEntry(ART_STORE, "a", new Uint8Array([1]))
+		await root.removeEntry(ART_DIR[0] ?? "")
+		await writeStoreEntry(ART_STORE, "b", new Uint8Array([2]))
+		await sweepStore(ART_STORE, 0)
+
+		expect(root.directories.has(ART_DIR[0] ?? "")).toBe(false)
+	})
+
+	it("persists art written while the session's first sweep is still looking for a missing art tree", async () => {
+		const { root } = installRoot()
+		const sweep = sweepStore(ART_STORE, 1e6)
+
+		await Promise.all([writeStoreEntry(ART_STORE, "a", new Uint8Array([1])), writeStoreEntry(ART_STORE, "b", new Uint8Array([2]))])
+		await sweep
+
+		let art = root
+
+		for (const segment of ART_DIR) {
+			art = await art.getDirectoryHandle(segment)
+		}
+
+		expect([...art.files.keys()].sort()).toEqual(["a.webp", "b.webp"])
+	})
+
+	it("sweeps an art tree that was never created without creating it", async () => {
+		const { root } = installRoot()
+
+		await sweepStore(ART_STORE, 0)
+
+		expect(root.directories.has(ART_DIR[0] ?? "")).toBe(false)
+	})
+
+	it("reads art after a wipe as misses, never re-creating the art tree a worker's stale handle would write through", async () => {
+		const { root } = installRoot()
+		let art = root
+
+		for (const segment of ART_DIR) {
+			art = await art.getDirectoryHandle(segment, { create: true })
+		}
+
+		art.files.set("a.webp", new Uint8Array([1]))
+		expect(await readStoreBlob(ART_STORE, "a")).not.toBeNull()
+		await root.removeEntry(ART_DIR[0] ?? "")
+
+		expect(await readStoreBlob(ART_STORE, "a")).toBeNull()
+		expect(await readStoreBlob(ART_STORE, "b")).toBeNull()
+		expect(root.directories.has(ART_DIR[0] ?? "")).toBe(false)
 	})
 
 	it("reads what was written after the directory was removed and re-created elsewhere", async () => {

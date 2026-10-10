@@ -15,11 +15,32 @@ vi.mock("@/features/preview/lib/transportStreamProbe", () => probe)
 const { TransportStreamGate } = await import("@/features/preview/components/transportStreamGate")
 const { previewType } = await import("@/features/drive/lib/preview.logic")
 const { linkedFileItem } = await import("@/tests/fixtures/sdk")
+const { PreviewAccessModeProvider } = await import("@/features/preview/lib/accessMode")
+const { attachFileKindVerdictStorage } = await import("@/features/drive/lib/fileKindVerdicts")
 
-function renderGate(name: string, size: bigint, uuid: `${string}-${string}-${string}-${string}-${string}`) {
+// What reaches kv of the verdicts the gate records.
+const saved: string[] = []
+
+attachFileKindVerdictStorage({
+	load: () => Promise.resolve([]),
+	save: uuid => {
+		saved.push(uuid)
+
+		return Promise.resolve()
+	},
+	remove: () => Promise.resolve()
+})
+
+function renderGate(
+	name: string,
+	size: bigint,
+	uuid: `${string}-${string}-${string}-${string}-${string}`,
+	access: "authed" | "anon" = "authed"
+) {
 	const item = linkedFileItem(name, { size, uuid })
+	const gate = createElement(TransportStreamGate, { item, render: () => createElement("p", null, `viewer:${previewType(item)}`) })
 
-	render(createElement(TransportStreamGate, { item, render: () => createElement("p", null, `viewer:${previewType(item)}`) }))
+	render(access === "anon" ? createElement(PreviewAccessModeProvider, { mode: "anon", linkScope: "scope", children: gate }) : gate)
 }
 
 afterEach(() => {
@@ -45,6 +66,19 @@ describe("TransportStreamGate", () => {
 			expect(screen.getByText("viewer:video")).toBeTruthy()
 		})
 		expect(probe.probeTransportStream).toHaveBeenCalledOnce()
+		expect(saved).toContain("a2000000-0000-0000-0000-000000000000")
+	})
+
+	// A shared browser's next signed-in user must not inherit what an anonymous visit read.
+	it("keeps a public link's verdict in memory only", async () => {
+		probe.probeTransportStream.mockResolvedValue(true)
+		renderGate("clip.ts", 4_000_000n, "a7000000-0000-0000-0000-000000000000", "anon")
+
+		await waitFor(() => {
+			expect(screen.getByText("viewer:video")).toBeTruthy()
+		})
+		expect(probe.probeTransportStream).toHaveBeenCalledOnce()
+		expect(saved).not.toContain("a7000000-0000-0000-0000-000000000000")
 	})
 
 	it("opens TypeScript as code, and offers Download when it is too large to show as text", async () => {

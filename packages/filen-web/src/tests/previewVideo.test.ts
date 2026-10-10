@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import type { LadderDecision, MediaCodec, VideoProbe } from "@filen/shared/videos"
+import { MAX_SUBTITLE_CUES, type LadderDecision, type MediaCodec, type VideoProbe } from "@filen/shared/videos"
 import type { Playback, PlaybackSnapshot, openPlayback } from "@/lib/media/playback/openPlayback"
 import type { RemuxTextCue } from "@/lib/media/remuxTypes"
 import { FakeVideo } from "@/tests/support/fakeVideo"
@@ -98,6 +98,8 @@ interface Harness {
 	textCues: () => ((cues: RemuxTextCue[]) => void) | undefined
 	setPlayback: (snapshot: Partial<PlaybackSnapshot>) => void
 	release: ReturnType<typeof vi.fn<(url: string) => void>>
+	holdAlive: ReturnType<typeof vi.fn<() => () => void>>
+	releaseAlive: ReturnType<typeof vi.fn<() => void>>
 	playback: { dispose: ReturnType<typeof vi.fn> }
 	gone: () => void
 }
@@ -135,6 +137,8 @@ function setUp(options: {
 		dispose: playback.dispose
 	}
 	const release = vi.fn<(url: string) => void>()
+	const releaseAlive = vi.fn<() => void>()
+	const holdAlive = vi.fn<() => () => void>(() => releaseAlive)
 	const registerDirect = vi.fn<() => Promise<string>>(() =>
 		options.registerFails === true
 			? Promise.reject(new Error("no worker"))
@@ -166,6 +170,7 @@ function setUp(options: {
 			capturePoster: () => options.poster ?? Promise.resolve(null),
 			status: () => Promise.resolve(options.status ?? "present"),
 			release,
+			holdAlive,
 			onStreamGone: (_url: string, listener: () => void) => {
 				goneListeners.push(listener)
 
@@ -183,6 +188,8 @@ function setUp(options: {
 		controller,
 		registerDirect,
 		release,
+		holdAlive,
+		releaseAlive,
 		probe,
 		open,
 		playbackDeps,
@@ -265,6 +272,28 @@ describe("PreviewVideo — a file the browser plays", () => {
 		expect(harness.probe).toHaveBeenCalledOnce()
 		expect(harness.open).not.toHaveBeenCalled()
 		expect(harness.video.src).toBe("/__sw/stream/1")
+	})
+
+	// A public link's probe is cached nowhere else: the one the gap check read serves a later ladder open.
+	it("opens the ladder on the probe its gap check read, when the stream later breaks", async () => {
+		const harness = setUp({ route: "direct", probe: probeOf([]) })
+
+		await flush()
+		harness.video.videoWidth = 640
+		harness.video.audioBytes = 0
+		harness.video.loadMetadata()
+		harness.video.playFor(2)
+		await flush()
+
+		expect(harness.probe).toHaveBeenCalledOnce()
+		// Kept out of the snapshot: the direct start shows what it showed before.
+		expect(harness.controller.getSnapshot().probe).toBeNull()
+
+		harness.video.fail(2)
+		await flush()
+
+		expect(harness.open).toHaveBeenCalledOnce()
+		expect(harness.probe).toHaveBeenCalledOnce()
 	})
 
 	it("moves to the ladder, without the direct rung, when the browser cannot decode its audio", async () => {
@@ -392,15 +421,56 @@ describe("PreviewVideo — the ladder", () => {
 		await flush()
 
 		const cue: RemuxTextCue = { track: 3, start: 1, end: 2, text: "Hello", hint: 0 }
+		// Starts with it: another speaker, kept beside it.
+		const together: RemuxTextCue = { track: 3, start: 1, end: 3, text: "Hi", hint: 0 }
 
-		harness.textCues()?.([cue])
+		harness.textCues()?.([cue, together])
 		harness.textCues()?.([cue])
 
 		const version = harness.controller.getSnapshot().embeddedVersion
 
 		expect(version).toBe(1)
-		expect(harness.controller.embeddedCues(3, version)?.texts).toEqual(["Hello"])
+		expect(harness.controller.embeddedCues(3, version)?.texts).toEqual(["Hello", "Hi"])
 		expect(harness.controller.embeddedCues(4, version)).toBeNull()
+	})
+
+	// The bytes are another user's when the file is shared or a public link.
+	it("keeps embedded cues only for the tracks the probe offers, at most a cue store's worth per track", async () => {
+		const harness = setUp({ route: "ladder", probe: probeOf(["aac"], "mkv") })
+
+		await flush()
+
+		const flood = Array.from({ length: MAX_SUBTITLE_CUES + 5 }, (_, index): RemuxTextCue => ({
+			track: 3,
+			start: index,
+			end: index + 0.5,
+			text: "x",
+			hint: 0
+		}))
+
+		harness.textCues()?.(flood)
+		harness.textCues()?.([{ track: 9, start: 1, end: 2, text: "stray", hint: 0 }])
+
+		const version = harness.controller.getSnapshot().embeddedVersion
+
+		expect(version).toBe(1)
+		expect(harness.controller.embeddedCues(3, version)?.texts).toHaveLength(MAX_SUBTITLE_CUES)
+		expect(harness.controller.embeddedCues(9, version)).toBeNull()
+	})
+
+	it("rebuilds a track's store only when that track got cues", async () => {
+		const harness = setUp({ route: "ladder", probe: probeOf(["aac"], "mkv") })
+
+		await flush()
+		harness.textCues()?.([{ track: 3, start: 1, end: 2, text: "Hello", hint: 0 }])
+
+		const store = harness.controller.embeddedCues(3, harness.controller.getSnapshot().embeddedVersion)
+
+		expect(harness.controller.embeddedCues(3, harness.controller.getSnapshot().embeddedVersion + 1)).toBe(store)
+
+		harness.textCues()?.([{ track: 3, start: 3, end: 4, text: "Again", hint: 0 }])
+
+		expect(harness.controller.embeddedCues(3, harness.controller.getSnapshot().embeddedVersion)).not.toBe(store)
 	})
 
 	it("an embedded subtitle moves a direct start to the remux rung", async () => {
@@ -500,6 +570,56 @@ describe("PreviewVideo — the direct start's registration", () => {
 		await vi.waitFor(() => {
 			expect(harness.release).toHaveBeenCalledExactlyOnceWith("/__sw/stream/1")
 		})
+	})
+})
+
+describe("PreviewVideo — the direct start keeps the worker alive", () => {
+	it("from registration until the controller is disposed, paused included", async () => {
+		const harness = setUp({ route: "direct" })
+
+		await vi.waitFor(() => {
+			expect(harness.holdAlive).toHaveBeenCalledOnce()
+		})
+		harness.video.emit("pause")
+		expect(harness.releaseAlive).not.toHaveBeenCalled()
+
+		harness.controller.dispose()
+		harness.controller.dispose()
+		expect(harness.releaseAlive).toHaveBeenCalledOnce()
+	})
+
+	it("until playback moves to the ladder, which holds the worker itself", async () => {
+		const harness = setUp({ route: "direct" })
+
+		await vi.waitFor(() => {
+			expect(harness.holdAlive).toHaveBeenCalledOnce()
+		})
+		harness.gone()
+
+		await vi.waitFor(() => {
+			expect(harness.releaseAlive).toHaveBeenCalledOnce()
+		})
+		harness.controller.dispose()
+		expect(harness.releaseAlive).toHaveBeenCalledOnce()
+	})
+
+	it("never, for a registration that lands after the controller was disposed or a ladder start", async () => {
+		const registration = Promise.withResolvers<undefined>()
+		const late = setUp({ route: "direct", registration: registration.promise })
+
+		late.controller.dispose()
+		registration.resolve(undefined)
+		await vi.waitFor(() => {
+			expect(late.release).toHaveBeenCalledOnce()
+		})
+
+		const ladder = setUp({ route: "ladder" })
+
+		await flush()
+		ladder.controller.dispose()
+
+		expect(late.holdAlive).not.toHaveBeenCalled()
+		expect(ladder.holdAlive).not.toHaveBeenCalled()
 	})
 })
 

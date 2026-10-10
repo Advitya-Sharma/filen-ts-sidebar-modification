@@ -358,4 +358,64 @@ describe("title page request counts", () => {
 		expect(endsAt()).not.toBe(first)
 		view.unmount()
 	})
+
+	it("switches a series' season list (rendered in the background) to the season picked", async () => {
+		vi.stubGlobal(
+			"matchMedia",
+			(query: string) =>
+				({
+					matches: false,
+					media: query,
+					addEventListener: () => undefined,
+					removeEventListener: () => undefined
+				}) as unknown as MediaQueryList
+		)
+
+		const episodes = (season: number, count: number) =>
+			Array.from({ length: count }, (_, index) => ({
+				season,
+				episode: index + 1,
+				episodeEnd: index + 1,
+				date: 0,
+				title: `S${String(season)} episode ${String(index + 1)}`,
+				dateAdded: 0,
+				versions: [{ label: "", parts: [part(`s${String(season)}e${String(index + 1)}.mkv`)] }]
+			}))
+		const SERIES = title("show", { kind: "series", title: "Show", seasonCount: 2, episodeCount: 5 })
+
+		sdkApi.videoCatalogTitle.mockImplementation((id: string) => Promise.resolve(id === SERIES.id ? SERIES : null))
+		sdkApi.videoTitleDetail.mockResolvedValue({
+			kind: "series",
+			title: SERIES,
+			seasons: [
+				{ number: 1, dirUuid: "s1", poster: null, backdrop: null, nfo: null, episodes: episodes(1, 2) },
+				{ number: 2, dirUuid: "s2", poster: null, backdrop: null, nfo: null, episodes: episodes(2, 3) }
+			],
+			extras: [],
+			nfo: null
+		} satisfies VideoTitleDetail)
+
+		const client = new QueryClient()
+		const view = render(createElement(QueryClientProvider, { client }, createElement(VideoTitleScreen, { titleId: SERIES.id })))
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(100)
+		})
+		await flush()
+		await flush()
+
+		const panel = () => view.getByRole("tabpanel")
+
+		expect(panel().querySelectorAll("li")).toHaveLength(2)
+
+		act(() => {
+			view.getByRole("tab", { name: /Season 2/ }).click()
+		})
+		await flush()
+
+		expect(view.getByRole("tab", { name: /Season 2/ }).getAttribute("aria-selected")).toBe("true")
+		expect(panel().querySelectorAll("li")).toHaveLength(3)
+		expect(panel().textContent).toContain("S2 episode 3")
+		view.unmount()
+	})
 })

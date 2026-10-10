@@ -69,12 +69,12 @@ export function linkedRemuxSource(file: AnyFile): RemuxSource {
 
 // ── Prewarm ─────────────────────────────────────────────────────────────────
 // The next item, readied while the current one ends (Up Next shows): a Matroska file or transport stream is
-// opened in the remux worker (its head, index and first keyframe interval read into the cache the session
-// then takes over); a file played as it is gets its service worker registration up front. One at a time,
-// once per file.
+// opened in the remux worker (its head and index read into the cache the session then takes over, through the
+// same port); a file played as it is gets its service worker registration up front. One at a time, once per
+// file.
 
 type Warm =
-	| { kind: "remux"; fileUuid: string; source: RemuxSource; warmth: Promise<RemuxWarmth> }
+	| { kind: "remux"; fileUuid: string; source: RemuxSource; port: Promise<void>; warmth: Promise<RemuxWarmth> }
 	| { kind: "direct"; fileUuid: string; id: string; registered: Promise<unknown> }
 
 let warm: Warm | null = null
@@ -93,14 +93,19 @@ export function prewarmPlayback(params: { file: AnyFile; name: string; probe: Vi
 	if (probe.container === "mkv" || probe.container === "ts") {
 		const key = crypto.randomUUID()
 		const source = createRemuxSource(file, { warmKey: key })
+		const port = source.openPort()
 
 		warm = {
 			kind: "remux",
 			fileUuid: file.uuid,
 			source,
-			warmth: source.openPort().then(port =>
+			port: port.then(
+				() => undefined,
+				() => undefined
+			),
+			warmth: port.then(opened =>
 				warmRemuxFile({
-					port,
+					port: opened,
 					size: Number(file.size),
 					key,
 					idrOnlyStart: params.idrOnlyStart,
@@ -157,14 +162,15 @@ function takeWarmRemux(fileUuid: string): RemuxSource | null {
 	}
 
 	warm = null
-	void current.warmth.then(
+
+	const warmed = current.warmth.then(
 		warmth => {
 			warmth.handOver()
 		},
 		() => undefined
 	)
 
-	return current.source
+	return { ...current.source, warmed, warmPort: current.port }
 }
 
 function takeWarmDirect(fileUuid: string): string | null {

@@ -469,9 +469,11 @@ describe("corrections in the library index", () => {
 	let titles: Map<string, VideoTitleView>
 
 	const store: SnapshotStore = {
-		read: () => Promise.resolve([null, null]),
+		readSlot: () => Promise.resolve(null),
 		readGenerations: () => Promise.resolve([null, null]),
 		write: () => Promise.resolve(),
+		readWatermark: () => Promise.resolve(null),
+		writeWatermark: () => Promise.resolve(),
 		remove: () => Promise.resolve()
 	}
 

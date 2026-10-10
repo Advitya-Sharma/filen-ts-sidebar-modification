@@ -1,7 +1,8 @@
 import type { Type } from "arktype"
 import { InFlight, planSizeCapEviction } from "@filen/shared"
-import type { kvDelete, kvEntriesJson, kvGetJson, kvKeys, kvSetJson } from "@/lib/storage/adapter"
+import type { kvDelete, kvDeleteIfAt, kvEntriesJson, kvGetJson, kvKeys, kvSetJson } from "@/lib/storage/adapter"
 import { log } from "@/lib/log"
+import { readSignOutPending } from "@/lib/signOutPending"
 
 // Small per-file records in kv under one prefix (probe records, artwork metadata, frame hints): read one
 // at a time and only when asked for, kept in a bounded memory cache, written behind, and held to a record
@@ -19,6 +20,8 @@ export interface RecordStoreKv {
 	kvKeys: typeof kvKeys
 	kvEntriesJson: typeof kvEntriesJson
 	kvDelete: typeof kvDelete
+	// Evicts many rows at once, each only while it still holds the `at` planned; without it, each is read first.
+	kvDeleteIfAt?: typeof kvDeleteIfAt
 }
 
 export interface RecordStoreOptions<T extends StoredRecord> {
@@ -52,6 +55,19 @@ export const ABSENT_TTL_MS = 30_000
 
 // kv round trips a sweep keeps in flight, so evicting thousands of rows never floods the storage worker.
 const SWEEP_CONCURRENCY = 8
+// Rows one conditional eviction drops in one storage transaction.
+const SWEEP_BATCH = 500
+
+// Every store of the page, so a sign-out holds them all at once.
+const stores = new Set<{ hold: () => void }>()
+
+// A sign-out started, here or in another tab: no store writes to kv again (the page reloads once it is done), so
+// nothing lands after the wipe.
+export function holdRecordStores(): void {
+	for (const store of stores) {
+		store.hold()
+	}
+}
 
 export class RecordStore<T extends StoredRecord> {
 	private readonly options: RecordStoreOptions<T>
@@ -66,11 +82,27 @@ export class RecordStore<T extends StoredRecord> {
 	private sweeping = false
 	// Bumped by reset, so a read settling after logout writes nothing back.
 	private epoch = 0
+	private held = false
 
 	public constructor(options: RecordStoreOptions<T>) {
 		this.options = options
 		this.kv = options.kv
 		this.now = options.now ?? Date.now
+		stores.add(this)
+	}
+
+	// Writes go to memory only from now on; reset doesn't lift it.
+	public hold(): void {
+		this.held = true
+	}
+
+	// Whether writes still reach kv: false once a sign-out started, here or in another tab.
+	public writable(): boolean {
+		if (!this.held && readSignOutPending()) {
+			this.held = true
+		}
+
+		return !this.held
 	}
 
 	private key(id: string): string {
@@ -160,6 +192,11 @@ export class RecordStore<T extends StoredRecord> {
 
 	public put(id: string, record: T): void {
 		this.remember(id, record)
+
+		if (!this.writable()) {
+			return
+		}
+
 		void this.kv.kvSetJson(this.key(id), record).catch((error: unknown) => {
 			log.warn(this.options.scope, "record write failed", error)
 		})
@@ -174,6 +211,11 @@ export class RecordStore<T extends StoredRecord> {
 
 	public delete(id: string): void {
 		this.remember(id, null)
+
+		if (!this.writable()) {
+			return
+		}
+
 		void this.kv.kvDelete(this.key(id)).catch((error: unknown) => {
 			log.warn(this.options.scope, "record delete failed", error)
 		})
@@ -184,7 +226,7 @@ export class RecordStore<T extends StoredRecord> {
 	private async deleteIfUnchanged(key: string, at: number | null): Promise<void> {
 		const current = await this.kv.kvGetJson(key, this.options.schema)
 
-		if (current !== null && current.at !== at) {
+		if (this.held || (current !== null && current.at !== at)) {
 			return
 		}
 
@@ -195,7 +237,7 @@ export class RecordStore<T extends StoredRecord> {
 	// Holds the prefix to its record count. Keys alone are listed first: only an overfull prefix pays for
 	// reading every row. Rows that no longer validate go too.
 	public async sweep(): Promise<void> {
-		if (this.sweeping) {
+		if (this.sweeping || !this.writable()) {
 			return
 		}
 
@@ -212,14 +254,31 @@ export class RecordStore<T extends StoredRecord> {
 
 			const rows = await this.kv.kvEntriesJson(prefix, schema)
 			const planned = new Map(rows.map(([key, record]) => [key, record.at]))
-			const evict: [string, number | null][] = [
-				...keys.filter(key => !planned.has(key)).map(key => [key, null] as [string, null]),
-				...planCountEviction(
-					rows.map(([key, record]) => [key, record.at] as const),
-					maxRecords,
-					Math.floor(maxRecords * 0.9)
-				).map(key => [key, planned.get(key) ?? null] as [string, number | null])
-			]
+			const evicted = planCountEviction(
+				rows.map(([key, record]) => [key, record.at] as const),
+				maxRecords,
+				Math.floor(maxRecords * 0.9)
+			)
+			// Rows that no longer validate are read again before they go (rare: a schema change).
+			const evict: [string, number | null][] = keys.filter(key => !planned.has(key)).map(key => [key, null] as [string, null])
+			const deleteIfAt = this.kv.kvDeleteIfAt
+
+			if (deleteIfAt === undefined) {
+				evict.push(...evicted.map(key => [key, planned.get(key) ?? null] as [string, number | null]))
+			} else {
+				for (let start = 0; start < evicted.length && !this.held; start += SWEEP_BATCH) {
+					const batch = evicted.slice(start, start + SWEEP_BATCH).flatMap(key => {
+						const at = planned.get(key)
+
+						return at === undefined ? [] : [[key, at] as const]
+					})
+
+					for (const key of await deleteIfAt(batch)) {
+						this.memory.delete(key.slice(prefix.length))
+					}
+				}
+			}
+
 			let next = 0
 			const drain = async (): Promise<void> => {
 				for (let item = evict[next++]; item !== undefined; item = evict[next++]) {
@@ -235,7 +294,7 @@ export class RecordStore<T extends StoredRecord> {
 		}
 	}
 
-	// Logout: memory only; the kv rows go with the kv wipe itself.
+	// Logout: memory only; the kv rows go with the kv wipe itself, and hold keeps any late write out of it.
 	public reset(): void {
 		this.epoch++
 		this.memory.clear()

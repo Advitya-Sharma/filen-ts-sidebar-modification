@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest"
 import { createElement, type ReactNode } from "react"
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import "@/lib/i18n"
 
@@ -112,5 +112,19 @@ describe("PublicLinkShell header", () => {
 			expect(screen.getByRole("link", { name: "Get Filen" })).toBeDefined()
 		})
 		expect(consoleError.mock.calls.flat().join(" ")).not.toContain("nativeButton")
+	})
+})
+
+describe("PublicLinkShell footer", () => {
+	// An anonymous visitor's preview runs the bundled third-party decoders, so their notices are one click away.
+	it("opens the open source licenses for a signed-out visitor", async () => {
+		hasClient.mockResolvedValue(false)
+		renderShell()
+
+		fireEvent.click(screen.getByRole("button", { name: "Open source licenses" }))
+
+		await waitFor(() => {
+			expect(screen.getByRole("dialog", { name: "Open source licenses" })).toBeDefined()
+		})
 	})
 })

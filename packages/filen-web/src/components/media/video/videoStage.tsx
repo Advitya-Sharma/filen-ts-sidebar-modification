@@ -29,7 +29,7 @@ import { useHoldReadsWhilePlaying } from "@/lib/media/useHoldReadsWhilePlaying"
 import { seekMedia, setPlaybackRate, toggleMediaPlayback, useMediaPictureInPicture, useSyncedMediaVolume } from "@/lib/media/useMediaState"
 import { useIsNarrowViewport } from "@/features/shell/hooks/useIsNarrowViewport"
 import { StageIconButton } from "@/components/media/video/stageButton"
-import { VideoStageContainerContext } from "@/components/media/video/stageContext"
+import { VideoStageContainerContext, VideoStagePopupContext } from "@/components/media/video/stageContext"
 import { SubtitleOverlay } from "@/components/media/video/subtitleOverlay"
 import { VideoScrubber } from "@/components/media/video/videoScrubber"
 import { ShortcutsDialog } from "@/components/media/video/shortcutsDialog"
@@ -46,7 +46,7 @@ import {
 	type StallState
 } from "@/components/media/video/stage.logic"
 
-// The full-screen video stage (7A): a black, always-dark layer above the app with the picture, gradient
+// The full-screen video stage: a black, always-dark layer above the app with the picture, gradient
 // scrims, a top bar, a two-row bottom bar of ghost buttons and a full-width scrubber, and slots for the
 // cards and panels a caller adds. No backdrop blur anywhere over the moving picture. The controls hide
 // after 3 s untouched and stay in the tab order. One <video> element lives as long as the stage; callers
@@ -79,12 +79,16 @@ export interface VideoStageProps {
 	onPrevious?: (() => void) | undefined
 	nextLabel?: string | undefined
 	previousLabel?: string | undefined
-	// Buttons after next: episodes, tracks, settings. `phone` lays them out for the trimmed bar.
-	trailing: (layout: { phone: boolean; onPopupChange: (open: boolean) => void }) => ReactNode
+	// Buttons after next: episodes, tracks, settings. `phone` lays them out for the trimmed bar; their popups keep the
+	// controls up through useStagePopupOpen.
+	trailing: (layout: { phone: boolean }) => ReactNode
 	cornerCard?: ReactNode
 	centerCard?: ReactNode
-	// Short messages at the top (resumed at, still loading, offline).
+	// Short messages at the top (resumed at, still loading, offline), read out through a status region that stays
+	// mounted.
 	notice?: ReactNode
+	// Read out politely (Up Next): the live region stays mounted, so a change is announced.
+	announcement?: string | null
 	sidePanel?: ReactNode
 	// A card or panel wants the controls up (blocking cards, open panels).
 	holdControls: boolean
@@ -344,8 +348,8 @@ export function VideoStage(props: VideoStageProps) {
 		onVideo(element)
 	}
 
-	function handlePopupChange(open: boolean): void {
-		setPopupCount(count => Math.max(0, count + (open ? 1 : -1)))
+	function handlePopupChange(delta: 1 | -1): void {
+		setPopupCount(count => Math.max(0, count + delta))
 	}
 
 	function seekBy(seconds: number): void {
@@ -530,8 +534,10 @@ export function VideoStage(props: VideoStageProps) {
 		}
 	}
 
+	// A control reached by keyboard keeps the controls up; the stage itself (focused on open and when a card or
+	// panel closes) doesn't, or they would never hide after a keyboard start.
 	function handleFocus(event: FocusEvent<HTMLDivElement>): void {
-		setKeyboardFocus(event.target.matches(":focus-visible"))
+		setKeyboardFocus(event.target !== event.currentTarget && event.target.matches(":focus-visible"))
 	}
 
 	function handleBlur(event: FocusEvent<HTMLDivElement>): void {
@@ -575,311 +581,322 @@ export function VideoStage(props: VideoStageProps) {
 			onBlur={handleBlur}
 		>
 			<VideoStageContainerContext.Provider value={container}>
-				<div className="relative min-w-0 flex-1">
-					<video
-						ref={attachVideo}
-						aria-label={props.videoLabel}
-						playsInline
-						preload="metadata"
-						// No cast or AirPlay: files are decrypted in this browser only.
-						x-webkit-airplay="deny"
-						controlsList="nodownload noremoteplayback"
-						className="absolute inset-0 size-full object-contain"
-						onContextMenu={event => {
-							event.preventDefault()
-						}}
-					/>
-					<SubtitleOverlay
-						video={video}
-						cues={props.cues}
-						offset={props.cueOffset}
-						sample={props.cueSample}
-						raised={visible && props.failure === undefined}
-					/>
-					{/* The picture's own click target: play/pause with a mouse, show/hide and double-tap seek by touch. */}
-					<div
-						aria-hidden="true"
-						className="absolute inset-0"
-						onPointerUp={handleSurfacePointerUp}
-						onPointerDown={event => {
-							lastPointerType.current = event.pointerType
-						}}
-						onDoubleClick={() => {
-							if (lastPointerType.current === "mouse") {
-								toggleFullscreenNow()
-							}
-						}}
-					/>
-					{ripple === null ? null : (
+				<VideoStagePopupContext.Provider value={handlePopupChange}>
+					<div className="relative min-w-0 flex-1">
+						<video
+							ref={attachVideo}
+							aria-label={props.videoLabel}
+							playsInline
+							preload="metadata"
+							// No cast or AirPlay: files are decrypted in this browser only.
+							x-webkit-airplay="deny"
+							controlsList="nodownload noremoteplayback"
+							className="absolute inset-0 size-full object-contain"
+							onContextMenu={event => {
+								event.preventDefault()
+							}}
+						/>
+						<SubtitleOverlay
+							video={video}
+							cues={props.cues}
+							offset={props.cueOffset}
+							sample={props.cueSample}
+							raised={visible && props.failure === undefined}
+						/>
+						{/* The picture's own click target: play/pause with a mouse, show/hide and double-tap seek by touch. */}
+						<div
+							aria-hidden="true"
+							className="absolute inset-0"
+							onPointerUp={handleSurfacePointerUp}
+							onPointerDown={event => {
+								lastPointerType.current = event.pointerType
+							}}
+							onDoubleClick={() => {
+								if (lastPointerType.current === "mouse") {
+									toggleFullscreenNow()
+								}
+							}}
+						/>
+						{ripple === null ? null : (
+							<div
+								aria-hidden="true"
+								className={cn(
+									"pointer-events-none absolute inset-y-0 flex w-1/3 animate-out items-center justify-center bg-white/10 text-sm font-medium text-white duration-500 fade-out-0",
+									ripple.side < 0 ? "left-0 rounded-r-[50%]" : "right-0 rounded-l-[50%]"
+								)}
+							>
+								{ripple.side < 0 ? t("playerSeekBackShort") : t("playerSeekForwardShort")}
+							</div>
+						)}
+						{/* Scrims: plain gradients, nothing blurred. */}
 						<div
 							aria-hidden="true"
 							className={cn(
-								"pointer-events-none absolute inset-y-0 flex w-1/3 animate-out items-center justify-center bg-white/10 text-sm font-medium text-white duration-500 fade-out-0",
-								ripple.side < 0 ? "left-0 rounded-r-[50%]" : "right-0 rounded-l-[50%]"
+								"pointer-events-none absolute inset-x-0 top-0 h-36 bg-linear-to-b from-black/75 to-transparent",
+								controlsClass
+							)}
+						/>
+						<div
+							aria-hidden="true"
+							className={cn(
+								"pointer-events-none absolute inset-x-0 bottom-0 h-52 bg-linear-to-t from-black/85 via-black/45 to-transparent",
+								controlsClass
+							)}
+						/>
+						<div
+							className={cn(
+								"absolute inset-x-0 top-0 flex items-center gap-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pr-[max(0.75rem,env(safe-area-inset-right))] pl-[max(0.75rem,env(safe-area-inset-left))]",
+								controlsClass
 							)}
 						>
-							{ripple.side < 0 ? t("playerSeekBackShort") : t("playerSeekForwardShort")}
+							<StageIconButton
+								label={props.backLabel}
+								onClick={props.onBack}
+							>
+								<ArrowLeftIcon className="size-5" />
+							</StageIconButton>
+							<h1 className="min-w-0 flex-1 truncate text-sm font-medium text-white sm:text-base">{props.title}</h1>
+							<StageIconButton
+								label={t("playerShortcuts")}
+								shortcut="?"
+								onClick={() => {
+									setShortcutsOpen(true)
+								}}
+							>
+								<CircleHelpIcon className="size-5" />
+							</StageIconButton>
 						</div>
-					)}
-					{/* Scrims: plain gradients, nothing blurred. */}
-					<div
-						aria-hidden="true"
-						className={cn(
-							"pointer-events-none absolute inset-x-0 top-0 h-36 bg-linear-to-b from-black/75 to-transparent",
-							controlsClass
-						)}
-					/>
-					<div
-						aria-hidden="true"
-						className={cn(
-							"pointer-events-none absolute inset-x-0 bottom-0 h-52 bg-linear-to-t from-black/85 via-black/45 to-transparent",
-							controlsClass
-						)}
-					/>
-					<div
-						className={cn(
-							"absolute inset-x-0 top-0 flex items-center gap-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pr-[max(0.75rem,env(safe-area-inset-right))] pl-[max(0.75rem,env(safe-area-inset-left))]",
-							controlsClass
-						)}
-					>
-						<StageIconButton
-							label={props.backLabel}
-							onClick={props.onBack}
+						{/* Always mounted: a status region inserted with its text is not read out. */}
+						<div
+							role="status"
+							aria-atomic="true"
+							className="pointer-events-none absolute inset-x-0 top-16 flex justify-center px-4 [&>*]:pointer-events-auto"
 						>
-							<ArrowLeftIcon className="size-5" />
-						</StageIconButton>
-						<h1 className="min-w-0 flex-1 truncate text-sm font-medium text-white sm:text-base">{props.title}</h1>
-						<StageIconButton
-							label={t("playerShortcuts")}
-							shortcut="?"
-							onClick={() => {
-								setShortcutsOpen(true)
-							}}
-						>
-							<CircleHelpIcon className="size-5" />
-						</StageIconButton>
-					</div>
-					{props.notice === undefined || props.notice === null ? null : (
-						<div className="pointer-events-none absolute inset-x-0 top-16 flex justify-center px-4 [&>*]:pointer-events-auto">
 							{props.notice}
 						</div>
-					)}
-					{props.failure !== undefined && props.failure !== null ? (
-						<div className="absolute inset-0 flex items-center justify-center p-6">{props.failure}</div>
-					) : (
-						<>
-							{stall !== "none" || props.loading ? (
-								<div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3">
-									<StageSpinner />
-									{stall === "stillLoading" ? (
-										<div className="pointer-events-auto flex flex-col items-center gap-2 text-sm text-white">
-											<p>{t("playerStillLoading")}</p>
-											{props.onRetry === undefined ? null : (
-												<Button
-													variant="secondary"
-													size="sm"
-													onClick={props.onRetry}
-												>
-													{t("playerRetry")}
-												</Button>
+						{props.failure !== undefined && props.failure !== null ? (
+							<div className="absolute inset-0 flex items-center justify-center p-6">{props.failure}</div>
+						) : (
+							<>
+								{stall !== "none" || props.loading ? (
+									<div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3">
+										<StageSpinner />
+										{stall === "stillLoading" ? (
+											<div className="pointer-events-auto flex flex-col items-center gap-2 text-sm text-white">
+												<p>{t("playerStillLoading")}</p>
+												{props.onRetry === undefined ? null : (
+													<Button
+														variant="secondary"
+														size="sm"
+														onClick={props.onRetry}
+													>
+														{t("playerRetry")}
+													</Button>
+												)}
+											</div>
+										) : null}
+									</div>
+								) : null}
+								{phone ? (
+									<div
+										className={cn(
+											"pointer-events-none absolute inset-0 flex items-center justify-center gap-10",
+											controlsClass
+										)}
+									>
+										<CenterButton
+											shown={visible}
+											label={t("playerSeekBack")}
+											onClick={() => {
+												seekBy(-10)
+												onInteraction?.()
+											}}
+										>
+											<RotateCcwIcon className="size-7" />
+										</CenterButton>
+										<CenterButton
+											shown={visible}
+											label={playLabel}
+											large
+											onClick={() => {
+												if (video !== null) {
+													toggleMediaPlayback(video)
+													onInteraction?.()
+												}
+											}}
+										>
+											{paused ? (
+												<PlayIcon className="size-9 translate-x-0.5 fill-current" />
+											) : (
+												<PauseIcon className="size-9 fill-current" />
 											)}
-										</div>
-									) : null}
-								</div>
-							) : null}
-							{phone ? (
+										</CenterButton>
+										<CenterButton
+											shown={visible}
+											label={t("playerSeekForward")}
+											onClick={() => {
+												seekBy(10)
+												onInteraction?.()
+											}}
+										>
+											<RotateCwIcon className="size-7" />
+										</CenterButton>
+									</div>
+								) : null}
 								<div
+									role="group"
+									aria-label={t("playerControls")}
 									className={cn(
-										"pointer-events-none absolute inset-0 flex items-center justify-center gap-10",
+										"absolute inset-x-0 bottom-0 flex flex-col gap-1 px-3 pr-[max(0.75rem,env(safe-area-inset-right))] pb-[max(0.75rem,env(safe-area-inset-bottom))] pl-[max(0.75rem,env(safe-area-inset-left))] sm:px-5",
 										controlsClass
 									)}
+									onPointerDown={() => {
+										onInteraction?.()
+									}}
 								>
-									<CenterButton
-										shown={visible}
-										label={t("playerSeekBack")}
-										onClick={() => {
-											seekBy(-10)
-											onInteraction?.()
+									<VideoScrubber
+										video={video}
+										visible={visible}
+										chapters={props.chapters}
+										pendingTarget={pendingSeek}
+										remainingMode={remainingMode}
+										label={t("playerSeek")}
+										partLabel={props.partLabel}
+										onSeek={seconds => {
+											seekTo(seconds)
 										}}
-									>
-										<RotateCcwIcon className="size-7" />
-									</CenterButton>
-									<CenterButton
-										shown={visible}
-										label={playLabel}
-										large
-										onClick={() => {
-											if (video !== null) {
-												toggleMediaPlayback(video)
-												onInteraction?.()
-											}
+										onSeekBy={seekBy}
+										onChapter={chapter}
+										onScrub={setScrubbing}
+										onToggleRemaining={() => {
+											setRemainingMode(mode => !mode)
 										}}
-									>
-										{paused ? (
-											<PlayIcon className="size-9 translate-x-0.5 fill-current" />
-										) : (
-											<PauseIcon className="size-9 fill-current" />
+									/>
+									<div className="flex items-center gap-0.5 sm:gap-1">
+										<StageIconButton
+											label={playLabel}
+											shortcut="K"
+											onClick={() => {
+												if (video !== null) {
+													toggleMediaPlayback(video)
+												}
+											}}
+										>
+											{paused ? (
+												<PlayIcon className="size-5 fill-current" />
+											) : (
+												<PauseIcon className="size-5 fill-current" />
+											)}
+										</StageIconButton>
+										{phone ? null : (
+											<>
+												<StageIconButton
+													label={t("playerSeekBack")}
+													shortcut="J"
+													onClick={() => {
+														seekBy(-10)
+													}}
+												>
+													<RotateCcwIcon className="size-5" />
+												</StageIconButton>
+												<StageIconButton
+													label={t("playerSeekForward")}
+													shortcut="L"
+													onClick={() => {
+														seekBy(10)
+													}}
+												>
+													<RotateCwIcon className="size-5" />
+												</StageIconButton>
+												<VolumeControl
+													className="ml-1"
+													sliderClassName="max-lg:hidden"
+												/>
+											</>
 										)}
-									</CenterButton>
-									<CenterButton
-										shown={visible}
-										label={t("playerSeekForward")}
-										onClick={() => {
-											seekBy(10)
-											onInteraction?.()
-										}}
-									>
-										<RotateCwIcon className="size-7" />
-									</CenterButton>
+										<div className="flex-1" />
+										{!phone && props.hasPrevious ? (
+											<StageIconButton
+												label={props.previousLabel ?? t("playerPrevious")}
+												shortcut="⇧P"
+												onClick={props.onPrevious}
+											>
+												<SkipBackIcon className="size-5 fill-current" />
+											</StageIconButton>
+										) : null}
+										{!phone && props.hasNext ? (
+											<StageIconButton
+												label={props.nextLabel ?? t("playerNext")}
+												shortcut="⇧N"
+												onClick={props.onNext}
+											>
+												<SkipForwardIcon className="size-5 fill-current" />
+											</StageIconButton>
+										) : null}
+										{props.trailing({ phone })}
+										{!phone && pictureInPictureSupported() ? (
+											<StageIconButton
+												label={pictureInPicture ? t("playerExitPictureInPicture") : t("playerPictureInPicture")}
+												shortcut="I"
+												pressed={pictureInPicture}
+												onClick={() => {
+													if (video !== null) {
+														togglePictureInPicture(video)
+													}
+												}}
+											>
+												<PictureInPicture2Icon className="size-5" />
+											</StageIconButton>
+										) : null}
+										{videoFullscreenSupported(video) ? (
+											<StageIconButton
+												label={fullscreen || nativeFullscreen ? t("playerExitFullscreen") : t("playerFullscreen")}
+												shortcut="F"
+												onClick={toggleFullscreenNow}
+											>
+												{fullscreen ? <MinimizeIcon className="size-5" /> : <MaximizeIcon className="size-5" />}
+											</StageIconButton>
+										) : null}
+									</div>
 								</div>
-							) : null}
+							</>
+						)}
+						{props.cornerCard === undefined || props.cornerCard === null ? null : (
 							<div
-								role="group"
-								aria-label={t("playerControls")}
 								className={cn(
-									"absolute inset-x-0 bottom-0 flex flex-col gap-1 px-3 pr-[max(0.75rem,env(safe-area-inset-right))] pb-[max(0.75rem,env(safe-area-inset-bottom))] pl-[max(0.75rem,env(safe-area-inset-left))] sm:px-5",
-									controlsClass
+									"absolute right-[max(1rem,env(safe-area-inset-right))] transition-[bottom] duration-200 motion-reduce:transition-none",
+									visible ? "bottom-32" : "bottom-8"
 								)}
 								onPointerDown={() => {
 									onInteraction?.()
 								}}
 							>
-								<VideoScrubber
-									video={video}
-									visible={visible}
-									chapters={props.chapters}
-									pendingTarget={pendingSeek}
-									remainingMode={remainingMode}
-									label={t("playerSeek")}
-									partLabel={props.partLabel}
-									onSeek={seconds => {
-										seekTo(seconds)
-									}}
-									onSeekBy={seekBy}
-									onChapter={chapter}
-									onScrub={setScrubbing}
-									onToggleRemaining={() => {
-										setRemainingMode(mode => !mode)
-									}}
-								/>
-								<div className="flex items-center gap-0.5 sm:gap-1">
-									<StageIconButton
-										label={playLabel}
-										shortcut="K"
-										onClick={() => {
-											if (video !== null) {
-												toggleMediaPlayback(video)
-											}
-										}}
-									>
-										{paused ? (
-											<PlayIcon className="size-5 fill-current" />
-										) : (
-											<PauseIcon className="size-5 fill-current" />
-										)}
-									</StageIconButton>
-									{phone ? null : (
-										<>
-											<StageIconButton
-												label={t("playerSeekBack")}
-												shortcut="J"
-												onClick={() => {
-													seekBy(-10)
-												}}
-											>
-												<RotateCcwIcon className="size-5" />
-											</StageIconButton>
-											<StageIconButton
-												label={t("playerSeekForward")}
-												shortcut="L"
-												onClick={() => {
-													seekBy(10)
-												}}
-											>
-												<RotateCwIcon className="size-5" />
-											</StageIconButton>
-											<VolumeControl
-												className="ml-1"
-												sliderClassName="max-lg:hidden"
-											/>
-										</>
-									)}
-									<div className="flex-1" />
-									{!phone && props.hasPrevious ? (
-										<StageIconButton
-											label={props.previousLabel ?? t("playerPrevious")}
-											shortcut="⇧P"
-											onClick={props.onPrevious}
-										>
-											<SkipBackIcon className="size-5 fill-current" />
-										</StageIconButton>
-									) : null}
-									{!phone && props.hasNext ? (
-										<StageIconButton
-											label={props.nextLabel ?? t("playerNext")}
-											shortcut="⇧N"
-											onClick={props.onNext}
-										>
-											<SkipForwardIcon className="size-5 fill-current" />
-										</StageIconButton>
-									) : null}
-									{props.trailing({ phone, onPopupChange: handlePopupChange })}
-									{!phone && pictureInPictureSupported() ? (
-										<StageIconButton
-											label={pictureInPicture ? t("playerExitPictureInPicture") : t("playerPictureInPicture")}
-											shortcut="I"
-											pressed={pictureInPicture}
-											onClick={() => {
-												if (video !== null) {
-													togglePictureInPicture(video)
-												}
-											}}
-										>
-											<PictureInPicture2Icon className="size-5" />
-										</StageIconButton>
-									) : null}
-									{videoFullscreenSupported(video) ? (
-										<StageIconButton
-											label={fullscreen || nativeFullscreen ? t("playerExitFullscreen") : t("playerFullscreen")}
-											shortcut="F"
-											onClick={toggleFullscreenNow}
-										>
-											{fullscreen ? <MinimizeIcon className="size-5" /> : <MaximizeIcon className="size-5" />}
-										</StageIconButton>
-									) : null}
-								</div>
+								{props.cornerCard}
 							</div>
-						</>
-					)}
-					{props.cornerCard === undefined || props.cornerCard === null ? null : (
-						<div
-							className={cn(
-								"absolute right-[max(1rem,env(safe-area-inset-right))] transition-[bottom] duration-200 motion-reduce:transition-none",
-								visible ? "bottom-32" : "bottom-8"
-							)}
-							onPointerDown={() => {
-								onInteraction?.()
-							}}
-						>
-							{props.cornerCard}
-						</div>
-					)}
-					{props.centerCard === undefined || props.centerCard === null ? null : (
-						<div
-							className="absolute inset-0 flex items-center justify-center bg-black/50 p-4"
-							onPointerDown={() => {
-								onInteraction?.()
-							}}
-						>
-							{props.centerCard}
-						</div>
-					)}
-				</div>
-				{props.sidePanel}
-				<ShortcutsDialog
-					open={shortcutsOpen}
-					onOpenChange={setShortcutsOpen}
-				/>
+						)}
+						{props.centerCard === undefined || props.centerCard === null ? null : (
+							<div
+								className="absolute inset-0 flex items-center justify-center bg-black/50 p-4"
+								onPointerDown={() => {
+									onInteraction?.()
+								}}
+							>
+								{props.centerCard}
+							</div>
+						)}
+					</div>
+					{props.sidePanel}
+					<ShortcutsDialog
+						open={shortcutsOpen}
+						onOpenChange={setShortcutsOpen}
+					/>
+					<p
+						aria-live="polite"
+						className="sr-only"
+					>
+						{props.announcement ?? ""}
+					</p>
+				</VideoStagePopupContext.Provider>
 			</VideoStageContainerContext.Provider>
 		</div>
 	)

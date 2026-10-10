@@ -184,6 +184,9 @@ export class RemuxEngine {
 	private readonly layouts = new Map<number, Promise<Speaker[] | null>>()
 	// Embedded text subtitles, taken from the blocks playback reads (Matroska only).
 	private tap: TextTap | null = null
+	// The IDR picture the last start resolved to: a seek asks canStartAt first and then starts at the same
+	// time, and the walk back to it is one read per key packet looked at.
+	private lastIdr: { at: number; timestamp: number } | null = null
 
 	public constructor(params: RemuxOpenParams, emit: Emit) {
 		this.reader = rangePortReader(params.port)
@@ -627,6 +630,17 @@ export class RemuxEngine {
 	// The key packet playback of `video` from `at` starts with: the one at or before it (for a file without
 	// an index, one already seen), moved back to an IDR picture where only those can start.
 	private async startKey(sink: EncodedPacketSink, at: number, video: VideoSource, gate: PumpGate): Promise<EncodedPacket | null> {
+		const idrOnly = video.idrOnly
+		const last = this.lastIdr
+
+		if (idrOnly !== null && last?.at === at) {
+			const idr = await surviveAbort(() => sink.getKeyPacket(last.timestamp, { verifyKeyPackets: true }), gate)
+
+			if (idr?.timestamp === last.timestamp && hevcKeyIsIdr(idr.data, idrOnly.lengthSize)) {
+				return idr
+			}
+		}
+
 		const known = this.seekScansFile ? this.keys.atOrBefore(at) : null
 		const found = await surviveAbort(
 			async () =>
@@ -635,7 +649,15 @@ export class RemuxEngine {
 			gate
 		)
 
-		return found === null || video.idrOnly === null ? found : await this.idrAtOrBefore(sink, found, at, video.idrOnly, gate)
+		if (found === null || idrOnly === null) {
+			return found
+		}
+
+		const idr = await this.idrAtOrBefore(sink, found, at, idrOnly, gate)
+
+		this.lastIdr = { at, timestamp: idr.timestamp }
+
+		return idr
 	}
 
 	// Whether video can start at `time` without disturbing what plays now: false only where starts must be

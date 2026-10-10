@@ -239,6 +239,40 @@ describe("PcmStream failures", () => {
 	})
 })
 
+describe("PcmStream given-up reads", () => {
+	// WebKit abandons a stream mid-read and asks again from where the bytes it got ended.
+	it("continues the decode for a read again from where one given up mid-way started", async () => {
+		const { input, firsts } = source(10)
+		const given = new AbortController()
+		const reader = input.reader.bind(input)
+		const stream = await PcmStream.open(
+			{
+				...input,
+				reader: (stats, isCancelled) => {
+					const inner = reader(stats, isCancelled)
+
+					return {
+						...inner,
+						next: (item: SampleItem) => {
+							// The read is given up on while its second block decodes.
+							given.abort()
+
+							return inner.next(item)
+						}
+					}
+				}
+			},
+			stats()
+		)
+
+		await expect(stream.read(WAV_HEADER_BYTES, WAV_HEADER_BYTES + 2 * 250, given.signal)).rejects.toThrow()
+		expect(frames(await stream.read(WAV_HEADER_BYTES, WAV_HEADER_BYTES + 2 * 250, never))).toEqual(
+			Array.from({ length: 250 }, (_, frame) => frame)
+		)
+		expect(firsts).toEqual([0])
+	})
+})
+
 describe("PcmStream rates", () => {
 	it("lays the stream out at the rate the decoder gives, not the one the container states", async () => {
 		// HE-AAC: the container states the core rate, the decoder gives twice that.

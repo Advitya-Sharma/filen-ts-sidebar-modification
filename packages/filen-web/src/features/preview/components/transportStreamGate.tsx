@@ -44,7 +44,10 @@ export function TransportStreamGate({ item, render }: { item: DriveItem; render:
 			if (isStream === null) {
 				setFailedAttempt(attempt)
 			} else {
-				recordContentVerdict({ uuid, name, mime, size }, isStream ? "transportStream" : "notTransportStream")
+				// A public link's verdict stays in memory: an anonymous visit leaves nothing in kv.
+				recordContentVerdict({ uuid, name, mime, size }, isStream ? "transportStream" : "notTransportStream", {
+					memoryOnly: access !== "authed"
+				})
 			}
 		})
 

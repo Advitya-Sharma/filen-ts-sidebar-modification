@@ -60,7 +60,7 @@ export async function openDecodedAudioStream(params: {
 
 				opened.info = info
 
-				return { name: "audio.wav", size: info.size, contentType: info.contentType }
+				return { name: "audio.wav", size: info.size, contentType: info.contentType, readAhead: false }
 			},
 			() => {
 				source.close()

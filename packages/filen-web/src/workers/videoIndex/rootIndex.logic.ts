@@ -187,8 +187,10 @@ function systemSubtree(rootUuid: string, raw: DirsAndFiles): Set<string> {
 
 	for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
 		for (const child of children.get(next) ?? []) {
-			excluded.add(child)
-			stack.push(child)
+			if (!excluded.has(child)) {
+				excluded.add(child)
+				stack.push(child)
+			}
 		}
 	}
 
@@ -266,6 +268,15 @@ function joinedAt(timestamp: number, state: RootState): number {
 // Upserts by stable uuid. A known one (a tombstone included) keeps its dateAdded.
 function upsertFile(state: RootState, slim: Omit<IndexFile, "dateAdded" | "tombstoneAt" | "tombstoneWalks">): void {
 	const existing = state.files.get(slim.stableUuid)
+	const index = treeIndexes.get(state)
+
+	if (index !== undefined && existing?.parent !== slim.parent) {
+		if (existing !== undefined) {
+			index.files.get(existing.parent)?.delete(slim.stableUuid)
+		}
+
+		addTo(index.files, slim.parent, slim.stableUuid)
+	}
 
 	if (existing?.tombstoneAt === 0) {
 		state.byUuid.delete(existing.uuid)
@@ -291,6 +302,7 @@ function tombstone(state: RootState, file: IndexFile, now: number): void {
 }
 
 function removeFile(state: RootState, file: IndexFile): void {
+	treeIndexes.get(state)?.files.get(file.parent)?.delete(file.stableUuid)
 	state.files.delete(file.stableUuid)
 
 	if (state.byUuid.get(file.uuid) === file.stableUuid) {
@@ -312,6 +324,8 @@ export function applyWalk({
 	startedAt: number
 	now: number
 }): void {
+	forgetChildIndex(state)
+
 	if (walk.complete) {
 		state.dirs.clear()
 	}
@@ -392,6 +406,15 @@ const CHANGED: PatchResult = {
 	}
 }
 
+// Persisted, but nothing the classification reads: a directory change with no live file below it.
+const DIRTY: PatchResult = {
+	changed: false,
+	dirty: true,
+	followUp: {
+		type: "none"
+	}
+}
+
 function followUp(next: PatchFollowUp, changed = false): PatchResult {
 	return {
 		changed,
@@ -410,49 +433,163 @@ function headOf(state: RootState, uuid: string): IndexFile | undefined {
 	return stable === undefined ? undefined : state.files.get(stable)
 }
 
-// Directories at and below `dirUuid`.
-function subtree(state: RootState, dirUuid: string): Set<string> {
-	const children = new Map<string, string[]>()
+// Each directory's child directories and files (stable uuids, tombstones included), built when a subtree is first
+// asked for and then kept current in place by every patch, so a burst of folder moves, renames or trashes costs one
+// build and then only each subtree. A walk applied replaces it.
+interface TreeIndex {
+	children: Map<string, Set<string>>
+	files: Map<string, Set<string>>
+}
 
-	for (const dir of state.dirs.values()) {
-		const list = children.get(dir.parent)
+const treeIndexes = new WeakMap<RootState, TreeIndex>()
 
-		if (list === undefined) {
-			children.set(dir.parent, [dir.uuid])
-		} else {
-			list.push(dir.uuid)
+function addTo(map: Map<string, Set<string>>, key: string, value: string): void {
+	const set = map.get(key)
+
+	if (set === undefined) {
+		map.set(key, new Set([value]))
+	} else {
+		set.add(value)
+	}
+}
+
+function treeIndex(state: RootState): TreeIndex {
+	let index = treeIndexes.get(state)
+
+	if (index === undefined) {
+		index = { children: new Map(), files: new Map() }
+
+		for (const dir of state.dirs.values()) {
+			addTo(index.children, dir.parent, dir.uuid)
 		}
+
+		for (const file of state.files.values()) {
+			addTo(index.files, file.parent, file.stableUuid)
+		}
+
+		treeIndexes.set(state, index)
 	}
 
+	return index
+}
+
+function forgetChildIndex(state: RootState): void {
+	treeIndexes.delete(state)
+}
+
+// Directories at and below `dirUuid`. A parent cycle (events replayed out of order) still ends.
+function subtree(state: RootState, dirUuid: string): Set<string> {
+	const { children } = treeIndex(state)
 	const out = new Set<string>([dirUuid])
 	const stack = [dirUuid]
 
 	for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
 		for (const child of children.get(next) ?? []) {
-			out.add(child)
-			stack.push(child)
+			if (!out.has(child)) {
+				out.add(child)
+				stack.push(child)
+			}
 		}
 	}
 
 	return out
 }
 
-// A directory left the root (moved out, trashed, deleted): its directories go and its files become tombstones,
-// which a later return revives with their dateAdded.
-function dropSubtree(state: RootState, dirUuid: string, now: number): PatchResult {
-	const dirs = subtree(state, dirUuid)
+// Whether `parent` is `dirUuid` or lies below it: placing `dirUuid` there would close a cycle. Walks up from
+// `parent`, so it costs the depth, not the subtree.
+function wouldCycle(state: RootState, dirUuid: string, parent: string): boolean {
+	let current: string | undefined = parent
 
-	for (const uuid of dirs) {
-		state.dirs.delete(uuid)
+	for (let steps = 0; current !== undefined && current !== state.uuid && steps <= state.dirs.size; steps++) {
+		if (current === dirUuid) {
+			return true
+		}
+
+		current = state.dirs.get(current)?.parent
 	}
 
-	for (const file of state.files.values()) {
-		if (dirs.has(file.parent)) {
-			tombstone(state, file, now)
+	return current === dirUuid
+}
+
+// Sets a directory, keeping the child index current.
+function placeDir(state: RootState, dir: IndexDir): void {
+	const index = treeIndexes.get(state)
+
+	if (index !== undefined) {
+		const previous = state.dirs.get(dir.uuid)
+
+		if (previous !== undefined && previous.parent !== dir.parent) {
+			index.children.get(previous.parent)?.delete(dir.uuid)
+		}
+
+		addTo(index.children, dir.parent, dir.uuid)
+	}
+
+	state.dirs.set(dir.uuid, dir)
+}
+
+// Events applied out of order (replayed over a newer walk, or after a gap) asked for a directory to go below
+// itself: the index can't be trusted, so the root is walked and the event changes nothing.
+const CYCLE: PatchResult = {
+	changed: false,
+	dirty: false,
+	followUp: {
+		type: "fullWalk"
+	}
+}
+
+// The files lying directly in one of `dirs`.
+function* filesIn(state: RootState, dirs: ReadonlySet<string>): Generator<IndexFile> {
+	const { files } = treeIndex(state)
+
+	for (const dir of dirs) {
+		for (const stable of files.get(dir) ?? []) {
+			const file = state.files.get(stable)
+
+			if (file?.parent === dir) {
+				yield file
+			}
+		}
+	}
+}
+
+// Whether a live file lies directly in one of `dirs`.
+function liveFileIn(state: RootState, dirs: ReadonlySet<string>): boolean {
+	for (const file of filesIn(state, dirs)) {
+		if (file.tombstoneAt === 0) {
+			return true
 		}
 	}
 
-	return CHANGED
+	return false
+}
+
+// A directory left the root (moved out, trashed, deleted): its directories go and its files become tombstones,
+// which a later return revives with their dateAdded. The classification changes only when a live file went.
+function dropSubtree(state: RootState, dirUuid: string, now: number): PatchResult {
+	const dirs = subtree(state, dirUuid)
+	const { children } = treeIndex(state)
+	const parent = state.dirs.get(dirUuid)?.parent
+	let changed = false
+
+	// Tombstoning keeps each file where it lies, so the index stays valid.
+	for (const file of filesIn(state, dirs)) {
+		if (file.tombstoneAt === 0) {
+			tombstone(state, file, now)
+			changed = true
+		}
+	}
+
+	for (const uuid of dirs) {
+		state.dirs.delete(uuid)
+		children.delete(uuid)
+	}
+
+	if (parent !== undefined) {
+		children.get(parent)?.delete(dirUuid)
+	}
+
+	return changed ? CHANGED : DIRTY
 }
 
 function upsertFromEvent(state: RootState, file: File, now: number): PatchResult {
@@ -581,13 +718,18 @@ export function applyDriveEvent({
 				return NONE
 			}
 
-			state.dirs.set(inner.dir.uuid, {
+			if (wouldCycle(state, inner.dir.uuid, inner.dir.parent)) {
+				return CYCLE
+			}
+
+			placeDir(state, {
 				uuid: inner.dir.uuid,
 				parent: inner.dir.parent,
 				name: dirName(inner.dir.meta)
 			})
 
-			return CHANGED
+			// New, so empty: what it will hold comes with events of its own.
+			return DIRTY
 
 		case "folderMove": {
 			const dir = inner.dir
@@ -601,15 +743,24 @@ export function applyDriveEvent({
 			const known = state.dirs.get(dir.uuid)
 			const system = isSystemDir({ parent: dir.parent, meta: dir.meta, rootUuid: state.uuid, driveRoot })
 
-			if (inRoot(state, dir.parent) && dir.parent !== dir.uuid && !system) {
-				if (known !== undefined) {
-					known.parent = dir.parent
-					known.name = dirName(dir.meta)
-
-					return CHANGED
+			if (inRoot(state, dir.parent) && !system) {
+				if (wouldCycle(state, dir.uuid, dir.parent)) {
+					return CYCLE
 				}
 
-				state.dirs.set(dir.uuid, {
+				if (known !== undefined) {
+					const holdsFiles = liveFileIn(state, subtree(state, dir.uuid))
+
+					placeDir(state, {
+						uuid: dir.uuid,
+						parent: dir.parent,
+						name: dirName(dir.meta)
+					})
+
+					return holdsFiles ? CHANGED : DIRTY
+				}
+
+				placeDir(state, {
 					uuid: dir.uuid,
 					parent: dir.parent,
 					name: dirName(dir.meta)
@@ -652,7 +803,11 @@ export function applyDriveEvent({
 				return NONE
 			}
 
-			state.dirs.set(dir.uuid, {
+			if (wouldCycle(state, dir.uuid, dir.parent)) {
+				return CYCLE
+			}
+
+			placeDir(state, {
 				uuid: dir.uuid,
 				parent: dir.parent,
 				name: dirName(dir.meta)
@@ -687,7 +842,7 @@ export function applyDriveEvent({
 
 			known.name = dirName(inner.meta)
 
-			return CHANGED
+			return liveFileIn(state, subtree(state, known.uuid)) ? CHANGED : DIRTY
 		}
 
 		case "itemFavorite": {
@@ -716,6 +871,7 @@ export function applyDriveEvent({
 
 		// The whole drive was emptied: nothing indexed survives, and a walk confirms what (if anything) is there now.
 		case "deleteAll":
+			forgetChildIndex(state)
 			state.dirs.clear()
 			state.files.clear()
 			state.byUuid.clear()
@@ -740,12 +896,20 @@ export function applyLookedUpFile({ state, file, now }: { state: RootState; file
 }
 
 // Applies a scoped walk of a directory that came into the root: inserts and updates only.
-export function applyScopedWalk({ state, walk }: { state: RootState; walk: WalkProjection }): boolean {
+export function applyScopedWalk({ state, walk }: { state: RootState; walk: WalkProjection }): boolean | "cycle" {
 	let changed = false
 
 	for (const dir of walk.dirs) {
-		state.dirs.set(dir.uuid, dir)
+		placeDir(state, dir)
 		changed = true
+	}
+
+	// The listing is consistent in itself; with what the index held of the tree meanwhile it may close a cycle, which
+	// only a walk of the root sorts out.
+	for (const dir of walk.dirs) {
+		if (wouldCycle(state, dir.uuid, dir.parent)) {
+			return "cycle"
+		}
 	}
 
 	for (const slim of walk.files) {

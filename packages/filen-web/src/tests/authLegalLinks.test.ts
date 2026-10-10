@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it } from "vitest"
-import { render, screen, cleanup } from "@testing-library/react"
+import { fireEvent, render, screen, cleanup } from "@testing-library/react"
 import { createElement } from "react"
 import "@/lib/i18n"
 import { FILEN_PRIVACY_URL, FILEN_TERMS_URL } from "@/lib/externalUrls"
@@ -28,5 +28,14 @@ describe("AuthLegalLinks", () => {
 			expect(link.getAttribute("target")).toBe("_blank")
 			expect(link.getAttribute("rel")).toBe("noopener noreferrer")
 		}
+	})
+
+	// Signed-out visitors run the same bundled third-party code, so its notices are reachable without a session.
+	it("opens the open source licenses without a session", () => {
+		render(createElement(AuthLegalLinks))
+
+		fireEvent.click(screen.getByRole("button", { name: "Open source licenses" }))
+
+		expect(screen.getByRole("dialog", { name: "Open source licenses" })).toBeDefined()
 	})
 })

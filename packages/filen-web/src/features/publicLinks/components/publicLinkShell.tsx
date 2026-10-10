@@ -5,6 +5,7 @@ import { Logo } from "@/features/shell/components/logo"
 import { buttonVariants } from "@/components/ui/button"
 import { usePublicVisitorSignedIn } from "@/features/publicLinks/queries/publicLink"
 import { useDismissBootSplash } from "@/lib/bootSplash"
+import { ThirdPartyNoticesLink } from "@/features/settings/components/advanced/thirdPartyNoticesLink"
 
 const FILEN_HOME_URL = "https://filen.io"
 const REPORT_ABUSE_MAILTO = "mailto:abuse@filen.io"
@@ -13,7 +14,7 @@ const REPORT_ABUSE_MAILTO = "mailto:abuse@filen.io"
 // the link resolves to (invalid / password / file / directory). This page deliberately drops
 // old-web's upsell sidebar: just a brand mark, a quiet sign-in link, one tasteful "Get Filen" CTA (for a
 // signed-in visitor, a single way back to Cloud Drive instead), and a one-line footer with the e2e
-// tagline and a minimal report-abuse affordance. Fully responsive and
+// tagline, a minimal report-abuse affordance and the open source licenses. Fully responsive and
 // theme-aware via the app's existing tokens (the ambient ThemeProvider resolves system default for an
 // anonymous visitor, so nothing theme-specific is hardcoded here).
 export function PublicLinkShell({ children }: { children: ReactNode }) {
@@ -83,6 +84,13 @@ export function PublicLinkShell({ children }: { children: ReactNode }) {
 				>
 					{t("reportAbuse")}
 				</a>
+				<span
+					aria-hidden="true"
+					className="hidden sm:inline"
+				>
+					·
+				</span>
+				<ThirdPartyNoticesLink className="rounded-md underline underline-offset-4 focus-ring transition-colors outline-none hover:text-foreground" />
 			</footer>
 		</div>
 	)

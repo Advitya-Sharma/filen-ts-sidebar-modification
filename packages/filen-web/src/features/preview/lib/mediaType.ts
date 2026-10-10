@@ -59,5 +59,7 @@ export function allowedMediaContentType(item: DriveItem): string | null {
 
 	const generic = normalized === undefined || GENERIC_TYPES.has(normalized)
 
-	return generic && category === "audio" && kind?.source === "extension" ? (AUDIO_TYPES_BY_EXTENSION.get(kind.extension) ?? null) : null
+	// The extension the kind was resolved for, however it was settled: an ambiguous one (`.m4a`, `.ogg`) by
+	// its usual meaning or a content verdict, which a generic type never contradicts.
+	return generic && category === "audio" && kind !== null ? (AUDIO_TYPES_BY_EXTENSION.get(kind.extension) ?? null) : null
 }

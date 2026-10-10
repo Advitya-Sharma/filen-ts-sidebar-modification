@@ -1,13 +1,12 @@
-import { useState } from "react"
+import { useLayoutEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useNavigate, useRouter } from "@tanstack/react-router"
 import { ClapperboardIcon } from "lucide-react"
-import { sdkApi } from "@/lib/sdk/client"
-import { videoLibrary } from "@/features/videos/lib/index"
+import { useFollowMovedTitle } from "@/features/videos/hooks/useFollowMovedTitle"
 import { useVideoLibrary, useVideoTitleDetailQuery } from "@/features/videos/queries/library"
 import { useCatalogSeriesQuery, useCatalogTitleQuery } from "@/features/videos/queries/catalog"
 import { useHistoryEntryKey } from "@/features/videos/hooks/useHistoryEntryKey"
-import { recallScroll, rememberScroll } from "@/features/videos/lib/scrollMemory"
+import { recallScroll, rememberScroll, restoreScroll } from "@/features/videos/lib/scrollMemory"
 import { titleSubject, type CorrectionSubject } from "@/features/videos/lib/corrections.logic"
 import { detailHeaderMode } from "@/features/videos/lib/titleDetail.logic"
 import { probeLandscapeCover } from "@/features/videos/lib/artwork.logic"
@@ -18,41 +17,6 @@ import { CorrectionsDialog } from "@/features/videos/components/detail/correctio
 import { LoadingState } from "@/components/loadingState"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Button } from "@/components/ui/button"
-
-// After a correction the item may be shown as another title; the page follows once the index has it (a
-// classification is local and quick), and stays where it is if it never turns up.
-const FOLLOW_TIMEOUT_MS = 5_000
-
-// Asks the library's worker again each time its catalog changes, until the title is there or the wait is over.
-function whenTitleKnown(id: string, then: () => void): void {
-	let done = false
-	let version = -1
-	let unsubscribe: () => void = () => undefined
-	const finish = (): void => {
-		done = true
-		clearTimeout(timer)
-		unsubscribe()
-	}
-	const timer = setTimeout(finish, FOLLOW_TIMEOUT_MS)
-	const check = (): void => {
-		const current = videoLibrary.getSnapshot().version
-
-		if (done || current === version) {
-			return
-		}
-
-		version = current
-		void sdkApi.videoCatalogTitle(id).then(title => {
-			if (title !== null && !done) {
-				finish()
-				then()
-			}
-		})
-	}
-
-	unsubscribe = videoLibrary.subscribe(check)
-	check()
-}
 
 // /videos/title/$uuid: a movie's, another video's or a series' page, from the local index (no listing).
 export function VideoTitleScreen({ titleId }: { titleId: string }) {
@@ -78,7 +42,16 @@ export function VideoTitleScreen({ titleId }: { titleId: string }) {
 			: detailHeaderMode(title, coverCheck !== null && probeLandscapeCover(storedCover.data?.get(coverCheck.uuid)) !== null)
 	const historyKey = useHistoryEntryKey()
 	const scrollKey = `${historyKey}:title:${titleId}`
+	// Read once: the route keys this screen by title, so another title mounts anew.
 	const [restoreOffset] = useState(() => recallScroll(scrollKey))
+	const followMoved = useFollowMovedTitle(titleId)
+	const [scroller, setScroller] = useState<HTMLDivElement | null>(null)
+
+	// Before paint, so the page never shows at the top first.
+	useLayoutEffect(
+		() => (scroller === null || restoreOffset === undefined ? undefined : restoreScroll(scroller, restoreOffset)),
+		[scroller, restoreOffset]
+	)
 
 	function back(): void {
 		if (router.history.canGoBack()) {
@@ -128,11 +101,7 @@ export function VideoTitleScreen({ titleId }: { titleId: string }) {
 
 	return (
 		<div
-			ref={element => {
-				if (element !== null && restoreOffset !== undefined && element.scrollTop === 0) {
-					element.scrollTop = restoreOffset
-				}
-			}}
+			ref={setScroller}
 			className="min-h-0 flex-1 overflow-y-auto"
 			onScroll={event => {
 				rememberScroll(scrollKey, event.currentTarget.scrollTop)
@@ -165,15 +134,7 @@ export function VideoTitleScreen({ titleId }: { titleId: string }) {
 					onClose={() => {
 						setEditing(null)
 					}}
-					onMoved={id => {
-						if (id === titleId) {
-							return
-						}
-
-						whenTitleKnown(id, () => {
-							void navigate({ to: "/videos/title/$uuid", params: { uuid: id }, replace: true })
-						})
-					}}
+					onMoved={followMoved}
 				/>
 			)}
 		</div>

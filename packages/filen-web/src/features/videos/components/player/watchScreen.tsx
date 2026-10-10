@@ -128,7 +128,6 @@ const SKIP_LABELS: Readonly<Record<SegmentKind, VideosKey>> = {
 	intermission: "skipIntermission"
 }
 
-const OFFLINE_RETRY_DELAYS_MS = [1000, 2000, 4000] as const
 const SUBTITLE_NOTICE_MS = 1500
 
 function titleLine(t: TFunction<"videos">, target: WatchItemTarget, versions: number): string {
@@ -452,8 +451,8 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 	const subtitleKind = embeddedTrack !== null ? "embedded-text" : subtitleUuid !== null ? "sidecar" : "none"
 
 	useEffect(() => {
-		controller.setSubtitleKind(subtitleKind)
-	}, [controller, subtitleKind])
+		controller.setSubtitleKind(subtitleKind, embeddedTrack)
+	}, [controller, subtitleKind, embeddedTrack])
 
 	// Once Up Next shows, the next episode is readied (its stream registered, or the file opened in the remux
 	// worker with its first keyframe interval read), once per item. Watch credits, a seek back before the card or
@@ -734,44 +733,27 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 		}
 	}, [controller, video, snap.phase, snap.epoch, targetKey])
 
-	// Back online after a failure: playback opens again after 1, 2 and 4 s; then the card's button is left.
+	// A failure while online opens the item again after 1, 2 and 4 s, then leaves the card's Retry; going offline and
+	// back earns those tries again. The count lives in the controller, so each reopen doesn't restart it.
 	useEffect(() => {
-		if (!online || snap.phase !== "failed") {
+		if (!online) {
+			controller.resetAutoRetries()
+
 			return
 		}
 
-		let attempt = 0
-		let timer: ReturnType<typeof setTimeout> | null = null
-		let live = true
+		const wait = snap.phase === "failed" ? controller.autoRetryDelay() : null
 
-		function schedule(): void {
-			const wait = OFFLINE_RETRY_DELAYS_MS[attempt]
-
-			if (wait === undefined) {
-				return
-			}
-
-			// Not `attempt++`: the React Compiler can't compile an update of a variable a closure captures.
-			attempt += 1
-			timer = setTimeout(() => {
-				if (live && controller.getSnapshot().phase === "failed") {
-					void controller.retry().then(() => {
-						if (live && controller.getSnapshot().phase === "failed") {
-							schedule()
-						}
-					})
-				}
-			}, wait)
+		if (wait === null) {
+			return
 		}
 
-		schedule()
+		const timer = setTimeout(() => {
+			void controller.autoRetry()
+		}, wait)
 
 		return () => {
-			live = false
-
-			if (timer !== null) {
-				clearTimeout(timer)
-			}
+			clearTimeout(timer)
 		}
 	}, [online, snap.phase, controller])
 
@@ -1026,11 +1008,12 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 				}
 			/>
 		) : null
+	const upNextTitle = card === null && failure === undefined && upNext.visible && next !== null ? titleLine(t, next, versions) : null
 	const cornerCard =
-		card !== null || failure !== undefined ? null : upNext.visible && next !== null && timing !== null ? (
+		card !== null || failure !== undefined ? null : upNextTitle !== null && next !== null && timing !== null ? (
 			<UpNextCard
 				video={video}
-				title={titleLine(t, next, versions)}
+				title={upNextTitle}
 				detail={nextMinutes === null ? null : t("upNextMinutes", { minutes: Math.max(1, Math.round(nextMinutes / 60)) })}
 				still={still}
 				showAt={timing.showAt}
@@ -1091,7 +1074,7 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 							playItem(previous, "user")
 						}
 			}
-			trailing={({ phone, onPopupChange }) => {
+			trailing={({ phone }) => {
 				const items: SettingsMenuItem[] = []
 
 				if (phone) {
@@ -1195,15 +1178,11 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 								setPanel("delay")
 							}}
 							open={tracksOpen}
-							onOpenChange={open => {
-								setTracksOpen(open)
-								onPopupChange(open)
-							}}
+							onOpenChange={setTracksOpen}
 						/>
 						<StageSettingsMenu
 							video={video}
 							items={items}
-							onOpenChange={onPopupChange}
 						/>
 					</>
 				)
@@ -1211,6 +1190,7 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 			cornerCard={cornerCard}
 			centerCard={centerCard}
 			notice={notice}
+			announcement={upNextTitle === null || timing === null ? null : t("upNextAnnounce", { title: upNextTitle })}
 			sidePanel={
 				panel === "episodes" && target !== null ? (
 					<EpisodesPanel

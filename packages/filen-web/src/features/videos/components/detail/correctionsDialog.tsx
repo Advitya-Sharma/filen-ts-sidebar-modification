@@ -32,7 +32,7 @@ import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 
-// Manual corrections for a title or an episode (research §2.10): title and year, shown as a movie, an episode
+// Manual corrections for a title or an episode: title and year, shown as a movie, an episode
 // (season and number required) or another video, merging a series into another or splitting it, hiding. Saved in
 // the synced library configuration; the classification applies them at once and they always win.
 

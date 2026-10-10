@@ -258,6 +258,38 @@ const api = {
 		const { where, bind } = prefixRange(prefix)
 
 		requireDb().exec({ sql: `DELETE FROM kv WHERE ${where}`, bind })
+	},
+	// Deletes each key whose row still holds a JSON object with that `at` (a row rewritten since stays), in one
+	// transaction; returns the keys deleted.
+	kvDeleteIfAt: (entries: [string, number][]): string[] => {
+		const connection = requireDb()
+		const deleted: string[] = []
+
+		connection.exec({ sql: "BEGIN" })
+
+		try {
+			for (const [key, at] of entries) {
+				connection.exec({
+					sql: "DELETE FROM kv WHERE key = ? AND CASE WHEN json_valid(value) THEN json_extract(value, '$.at') = ? ELSE 0 END RETURNING key",
+					bind: [key, at],
+					callback: row => {
+						const value = row[0]
+
+						if (typeof value === "string") {
+							deleted.push(value)
+						}
+					}
+				})
+			}
+
+			connection.exec({ sql: "COMMIT" })
+		} catch (e) {
+			connection.exec({ sql: "ROLLBACK" })
+
+			throw e
+		}
+
+		return deleted
 	}
 }
 

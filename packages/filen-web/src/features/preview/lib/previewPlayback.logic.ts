@@ -154,8 +154,8 @@ function extensionOfName(name: string): string {
 // in listing order. A `.sub` with an `.idx` of the same stem is VobSub (images), so it is left out; one
 // without is presumed MicroDVD. Files over `maxBytes` are left out: nothing would load them.
 export function sidecarSubtitles(videoName: string, siblings: readonly SidecarCandidate[], maxBytes: number): PreviewSidecarSubtitle[] {
-	const dot = extensionStart(videoName)
-	const stem = (dot === -1 ? videoName : videoName.slice(0, dot)).toLowerCase()
+	const videoDot = extensionStart(videoName)
+	const stem = (videoDot === -1 ? videoName : videoName.slice(0, videoDot)).toLowerCase()
 	const idxStems = new Set<string>()
 
 	for (const sibling of siblings) {
@@ -169,14 +169,15 @@ export function sidecarSubtitles(videoName: string, siblings: readonly SidecarCa
 	const found: PreviewSidecarSubtitle[] = []
 
 	for (const sibling of siblings) {
-		const lower = sibling.name.toLowerCase()
+		const dot = extensionStart(sibling.name)
 		const extension = extensionOfName(sibling.name)
 
-		if (!SIDECAR_FORMATS.has(extension) || sibling.size > maxBytes || sibling.size === 0) {
+		if (dot === -1 || !SIDECAR_FORMATS.has(extension) || sibling.size > maxBytes || sibling.size === 0) {
 			continue
 		}
 
-		const base = lower.slice(0, lower.length - extension.length - 1)
+		const name = sibling.name.slice(0, dot)
+		const base = name.toLowerCase()
 
 		if (base !== stem && !base.startsWith(`${stem}.`)) {
 			continue
@@ -192,7 +193,8 @@ export function sidecarSubtitles(videoName: string, siblings: readonly SidecarCa
 			continue
 		}
 
-		const tokens = base === stem ? [] : sibling.name.slice(stem.length + 1, sibling.name.length - extension.length - 1).split(".")
+		const end = stemEnd(name, stem)
+		const tokens = end === name.length ? [] : name.slice(end + 1).split(".")
 		const info = parseSubtitleTokens(tokens)
 
 		found.push({
@@ -207,6 +209,19 @@ export function sidecarSubtitles(videoName: string, siblings: readonly SidecarCa
 	}
 
 	return found
+}
+
+// Where the lowercased `stem` ends in `name`, measured on `name` itself: lowercasing can change a name's length
+// ("İ" becomes two code units), so the lowercased stem's length can misplace where the tokens start. `name`
+// is known to lowercase to the stem, alone or followed by a dot.
+function stemEnd(name: string, stem: string): number {
+	for (let end = name.indexOf("."); end !== -1; end = name.indexOf(".", end + 1)) {
+		if (name.slice(0, end).toLowerCase() === stem) {
+			return end
+		}
+	}
+
+	return name.length
 }
 
 // What an audio stream's MediaSource failure says: "format" when the browser cannot decode what the file

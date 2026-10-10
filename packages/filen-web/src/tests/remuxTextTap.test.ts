@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest"
-import { SIMPLE_BLOCK_CUE_SECONDS, TextTap, assBlockText, type TextTapCue, type TextTapTrack } from "@/workers/remux/textTap"
+import { describe, expect, it, vi } from "vitest"
+import {
+	SIMPLE_BLOCK_CUE_SECONDS,
+	TextTap,
+	assBlockText,
+	embeddedCueCharge,
+	isTapTextCodec,
+	type TextTapCue,
+	type TextTapTrack
+} from "@/workers/remux/textTap"
 
 // Builds Matroska bytes by hand: element = ID bytes, an 8-byte size, the payload.
 function element(id: number[], payload: Uint8Array | number[]): Uint8Array {
@@ -50,12 +58,13 @@ const blockGroup = (track: number, relative: number, frame: Uint8Array, duration
 const SRT: TextTapTrack = { number: 3, codecId: "S_TEXT/UTF8", compression: null }
 const ASS: TextTapTrack = { number: 4, codecId: "S_TEXT/ASS", compression: null }
 
-function tap(tracks: TextTapTrack[], blockBytes: number) {
+function tap(tracks: TextTapTrack[], blockBytes: number, charBudget?: number) {
 	const cues: TextTapCue[] = []
 	const instance = new TextTap({
 		tracks,
 		timestampScale: 1_000_000,
 		blockBytes,
+		...(charBudget === undefined ? {} : { charBudget }),
 		emit: batch => {
 			cues.push(...batch)
 		}
@@ -187,6 +196,153 @@ describe("TextTap", () => {
 
 		expect(cues).toEqual([])
 		expect(noisy.cues).toEqual([])
+	})
+
+	it("inflates one cue at a time and drops a cue that inflates past what a cue can show", async () => {
+		const deflate = async (value: string): Promise<Uint8Array> =>
+			new Uint8Array(
+				await new Response(
+					new Blob([new TextEncoder().encode(value)]).stream().pipeThrough(new CompressionStream("deflate"))
+				).arrayBuffer()
+			)
+		const frames = await Promise.all(Array.from({ length: 40 }, (_, i) => deflate(`Cue ${String(i)}`)))
+		const bomb = await deflate("x".repeat(64 * 1024 - 1))
+		const file = cluster(0, [...frames.map((frame, i) => simpleBlock(5, i * 10, frame)), simpleBlock(5, 1000, bomb)])
+		const Real = globalThis.DecompressionStream
+		const live = { now: 0, max: 0 }
+
+		vi.stubGlobal(
+			"DecompressionStream",
+			class {
+				public readonly writable: WritableStream<BufferSource>
+				public readonly readable: ReadableStream<Uint8Array>
+
+				public constructor(format: CompressionFormat) {
+					const real = new Real(format)
+
+					live.now++
+					live.max = Math.max(live.max, live.now)
+					this.writable = real.writable
+					this.readable = real.readable.pipeThrough(
+						new TransformStream<Uint8Array, Uint8Array>({
+							flush: () => {
+								live.now--
+							}
+						})
+					)
+				}
+			}
+		)
+
+		const { instance, cues } = tap(
+			[{ number: 5, codecId: "S_TEXT/UTF8", compression: { algorithm: 0, settings: new Uint8Array(0) } }],
+			1 << 20
+		)
+
+		feed(instance, file, 1 << 20)
+
+		for (let i = 0; i < 20 && cues.length < 40; i++) {
+			await settle()
+		}
+
+		expect(cues.map(cue => cue.text)).toEqual(frames.map((_, i) => `Cue ${String(i)}`))
+		expect(live.max).toBe(1)
+	})
+
+	it("decodes no track whose stripped header is longer than a header", async () => {
+		const { instance, cues } = tap(
+			[{ number: 6, codecId: "S_TEXT/UTF8", compression: { algorithm: 3, settings: new Uint8Array(4096).fill(0x41) } }],
+			4096
+		)
+
+		expect(instance.active).toBe(false)
+		feed(instance, cluster(0, [simpleBlock(6, 0, text("ripped"))]), 4096)
+		await settle()
+
+		expect(cues).toEqual([])
+	})
+
+	it("skips an oversized BlockGroup by its size and charges group children to the arrival's budget", async () => {
+		const header = vi.spyOn(TextTap.prototype as unknown as { header: (pos: number) => unknown }, "header")
+		// Two-byte Void children: an ID and a zero size.
+		const voids = (bytes: number) => new Uint8Array(bytes).map((_, i) => (i % 2 === 0 ? 0xec : 0x80))
+		const huge = element([0xa0], voids(512 * 1024))
+		const groups = Array.from({ length: 20 }, () => element([0xa0], voids(60 * 1024)))
+		const file = concat([
+			cluster(0, [huge, simpleBlock(3, 10, text("after the big one")), ...groups, simpleBlock(3, 20, text("last"))])
+		])
+		const size = 256 * 1024
+		const { instance, cues } = tap([SRT], size)
+		const perArrival: number[] = []
+
+		for (let index = 0; index * size < file.length; index++) {
+			header.mockClear()
+			instance.addBlock(index, file.subarray(index * size, Math.min(file.length, (index + 1) * size)))
+			perArrival.push(header.mock.calls.length)
+		}
+
+		// Arrivals with nothing new to read walk on from where the budget stopped.
+		for (let i = 0; i < 20 && cues.length < 2; i++) {
+			header.mockClear()
+			instance.addBlock(Math.floor((file.length - 1) / size), file.subarray(Math.floor((file.length - 1) / size) * size))
+			perArrival.push(header.mock.calls.length)
+		}
+
+		await settle()
+
+		expect(cues.map(cue => cue.text)).toEqual(["after the big one", "last"])
+		expect(Math.max(...perArrival)).toBeLessThanOrEqual(50_000 + 16)
+	})
+
+	it("keeps every block of a track that starts at the same time, and still reports each once", async () => {
+		const { instance, cues } = tap([ASS], 64)
+		const bytes = cluster(1000, [
+			simpleBlock(4, 0, text("0,0,Sign,,0,0,0,,{\\an8}A sign")),
+			simpleBlock(4, 0, text("0,0,Default,,0,0,0,,First speaker")),
+			simpleBlock(4, 0, text("1,0,Default,,0,0,0,,Second speaker"))
+		])
+
+		feed(instance, bytes, 64)
+		// Read again (evicted and fetched anew).
+		feed(instance, bytes, 64)
+		await settle()
+
+		expect(cues.map(cue => [cue.start, cue.text])).toEqual([
+			[1, "A sign"],
+			[1, "First speaker"],
+			[1, "Second speaker"]
+		])
+	})
+
+	it("takes no CodecID inherited from Object.prototype for a text codec", async () => {
+		expect(isTapTextCodec("S_TEXT/ASS")).toBe(true)
+
+		for (const codecId of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+			expect(isTapTextCodec(codecId)).toBe(false)
+		}
+
+		const { instance, cues } = tap([{ number: 3, codecId: "constructor", compression: null }], 128)
+
+		expect(instance.active).toBe(false)
+		feed(instance, FILE, 128)
+		await settle()
+
+		expect(cues).toEqual([])
+	})
+
+	it("hands on no more characters than the embedded cue budget, then stops walking", async () => {
+		const line = "y".repeat(100)
+		const bytes = cluster(
+			0,
+			Array.from({ length: 60 }, (_, i) => simpleBlock(3, i, text(line)))
+		)
+		const { instance, cues } = tap([SRT], 1 << 20, embeddedCueCharge(line) * 10)
+
+		feed(instance, bytes, 1 << 20)
+		await settle()
+
+		expect(cues).toHaveLength(10)
+		expect(instance.active).toBe(false)
 	})
 
 	it("reads the text field of an ASS block", () => {

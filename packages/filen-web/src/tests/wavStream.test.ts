@@ -195,6 +195,29 @@ describe("PcmAssembler", () => {
 		expect(assembler.complete).toBe(true)
 	})
 
+	it("takes bytes given back first, its place rewound, a part-taken chunk and silence count kept whole", () => {
+		const assembler = new PcmAssembler(monoLayout(100), 0)
+
+		assembler.push([ramp(0, 4)], 0)
+		assembler.push([ramp(7, 2)], 7)
+
+		// Into the gap's silence, queued as a count.
+		const taken = assembler.take(10)
+
+		expect(samples(taken)).toEqual([0, 1, 2, 3, 0])
+		assembler.giveBack(taken)
+		expect(assembler.nextOffset).toBe(WAV_HEADER_BYTES)
+		expect(samples(assembler.take(1000))).toEqual([0, 1, 2, 3, 0, 0, 0, 7, 8])
+
+		assembler.push([ramp(9, 4)], 9)
+
+		const across = assembler.take(3)
+
+		assembler.giveBack(across)
+		expect(assembler.nextOffset).toBe(WAV_HEADER_BYTES + 9 * 2)
+		expect(samples(assembler.take(1000))).toEqual([9, 10, 11, 12])
+	})
+
 	it("clamps samples beyond full scale", () => {
 		const assembler = new PcmAssembler(monoLayout(2), 0)
 

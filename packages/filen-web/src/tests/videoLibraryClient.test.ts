@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { type, type Type } from "arktype"
 import { emptyLibraryConfig, type ItemRec } from "@filen/shared/videos"
 import type { VideoIndexUpdate } from "@/workers/videoIndex/view.logic"
 import type { FactsResult, FactsUpdate, GridQuery, WatchUpdate } from "@/workers/videoIndex/catalog.logic"
@@ -40,8 +41,21 @@ const { sdkApi, listener, watch, probes, kvEntriesJsonInSlices } = vi.hoisted(()
 		snapshot: emptyWatchSnapshot()
 	},
 	probes: { listener: null as ((uuid: string, record: ProbeRecord) => void) | null },
-	kvEntriesJsonInSlices: vi.fn()
+	kvEntriesJsonInSlices: vi.fn<(prefix: string, schema: Type, map: (key: string, value: unknown) => unknown) => Promise<unknown[]>>()
 }))
+
+// Stored rows as the adapter serves them: validated by the caller's schema, each reduced by its map.
+function serveRows(rows: readonly (readonly [string, unknown])[]): void {
+	kvEntriesJsonInSlices.mockImplementation((_prefix, schema, map) =>
+		Promise.resolve(
+			rows.flatMap(([key, value]) => {
+				const out: unknown = schema(value)
+
+				return out instanceof type.errors ? [] : [map(key, out)]
+			})
+		)
+	)
+}
 
 vi.mock("@/lib/sdk/client", () => ({ sdkApi }))
 vi.mock("@/queries/client", async () => ({ queryClient: (await import("@/tests/testQueryClient")).createTestQueryClient() }))
@@ -108,7 +122,7 @@ beforeEach(async () => {
 	sdkApi.videoIndexSubscribe.mockImplementation((callback: (update: VideoIndexUpdate) => void) => {
 		listener.current = callback
 	})
-	kvEntriesJsonInSlices.mockResolvedValue([["videos.v1.probe.p1", record(6000, 1080)]])
+	serveRows([["videos.v1.probe.p1", record(6000, 1080)]])
 	await videoLibrary.configure(emptyLibraryConfig())
 })
 
@@ -137,6 +151,44 @@ describe("video library client", () => {
 		expect(queryClient.getQueryState([...VIDEO_CATALOG_KEY_PREFIX, "home"])?.isInvalidated).toBe(true)
 		expect(queryClient.getQueryState([...VIDEO_TITLE_DETAIL_KEY_PREFIX, "a"])?.isInvalidated).toBe(true)
 		expect(queryClient.getQueryState([...VIDEO_TITLE_DETAIL_KEY_PREFIX, "b"])?.isInvalidated).toBe(false)
+	})
+
+	it("writes snapshots only once it holds the writer lock, and gives it up at logout", async () => {
+		const pending: (() => Promise<void> | undefined)[] = []
+		let released = false
+
+		Object.defineProperty(navigator, "locks", {
+			configurable: true,
+			value: {
+				request: (_name: string, callback: () => Promise<void> | undefined) => {
+					pending.push(callback)
+
+					return Promise.resolve()
+				}
+			}
+		})
+
+		try {
+			videoLibrary.reset()
+			sdkApi.videoIndexSetWriter.mockClear()
+			await videoLibrary.configure(emptyLibraryConfig())
+
+			// Another tab writes: nothing here until it lets go.
+			expect(sdkApi.videoIndexSetWriter).not.toHaveBeenCalled()
+
+			void pending[0]?.()?.then(() => {
+				released = true
+			})
+
+			expect(sdkApi.videoIndexSetWriter).toHaveBeenCalledExactlyOnceWith(true)
+
+			videoLibrary.reset()
+			await Promise.resolve()
+
+			expect(released).toBe(true)
+		} finally {
+			Reflect.deleteProperty(navigator, "locks")
+		}
 	})
 
 	it("hands the watch state over once in full, then only what changed", async () => {
@@ -190,7 +242,7 @@ describe("video library client", () => {
 		const key = [...VIDEO_CATALOG_KEY_PREFIX, "home"]
 		let refetchedBeforeLast = false
 
-		kvEntriesJsonInSlices.mockResolvedValueOnce(rows)
+		serveRows(rows)
 		queryClient.setQueryData(key, {})
 		sdkApi.videoCatalogSetFacts.mockImplementation(() => {
 			refetchedBeforeLast ||= queryClient.getQueryState(key)?.isInvalidated === true

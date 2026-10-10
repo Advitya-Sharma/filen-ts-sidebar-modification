@@ -18,18 +18,23 @@ export interface VerdictFile {
 	size: number | bigint
 }
 
-export function recordContentVerdict(file: VerdictFile, verdict: ContentVerdict): void {
+// `memoryOnly`: see recordFileKindVerdict.
+export function recordContentVerdict(file: VerdictFile, verdict: ContentVerdict, options: { memoryOnly?: boolean } = {}): void {
 	if (verdictChangesKind(file, verdict, previewCategoryForExtension)) {
-		recordFileKindVerdict(file.uuid, verdict)
+		recordFileKindVerdict(file.uuid, verdict, options)
 	}
 }
 
 // What a container probe that ran anyway says about the file's kind.
-export function recordProbeVerdict(file: VerdictFile, probe: Pick<VideoProbe, "container" | "video" | "audio" | "partial"> | null): void {
+export function recordProbeVerdict(
+	file: VerdictFile,
+	probe: Pick<VideoProbe, "container" | "video" | "audio" | "partial"> | null,
+	options: { memoryOnly?: boolean } = {}
+): void {
 	const verdict = probeVerdict(probe, isTransportStreamName(file.name))
 
 	if (verdict !== null) {
-		recordContentVerdict(file, verdict)
+		recordContentVerdict(file, verdict, options)
 	}
 }
 

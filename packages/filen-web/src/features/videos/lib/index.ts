@@ -1,4 +1,5 @@
 import * as Comlink from "comlink"
+import { type } from "arktype"
 import { activeLibraryOverrides, activeLibraryRoots, type ItemRec, type LibraryConfigDoc } from "@filen/shared/videos"
 import type { File as SdkFile } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
@@ -25,8 +26,9 @@ import type { ArtCandidate } from "@/features/videos/lib/artwork.logic"
 import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
 import type { VideoKindCounts } from "@/features/videos/lib/libraryView.logic"
 import { needsProbeFacts } from "@/features/videos/lib/videoGrid.logic"
-import { PROBE_KV_PREFIX, probeRecordSchema, type ProbeRecord } from "@/features/videos/lib/probeService.logic"
+import { PROBE_KV_PREFIX, type ProbeRecord } from "@/features/videos/lib/probeService.logic"
 import { probeService } from "@/features/videos/lib/probeService"
+import { holdRecordStores } from "@/features/videos/lib/recordStore.logic"
 import { watchState } from "@/features/videos/lib/watchState"
 import { filesWithVerdict, subscribeFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 
@@ -98,12 +100,22 @@ export interface VideoArtCandidates {
 // The watch-state records last handed to the worker, by key.
 type SentWatch = Readonly<Record<string, ItemRec>>
 
-function factsOf(record: ProbeRecord): { durationSec: number | null; height: number } {
+// The two fields of a stored probe record the facts read: validating whole records (tracks, chapters) would cost
+// most of a 20k-record load.
+const probeFactsSchema = type({
+	probe: type({ v: "1", durationSec: "number | null", video: type({ h: "number" }).or("null") }).or("null")
+})
+
+function factsOf(record: Pick<ProbeRecord, "probe"> | typeof probeFactsSchema.infer): { durationSec: number | null; height: number } {
 	return {
 		durationSec: record.probe?.durationSec ?? null,
 		height: record.probe?.video?.h ?? 0
 	}
 }
+
+// Held by the one tab that writes the index snapshots while its library is open; the next tab takes over once it
+// closes.
+const INDEX_WRITER_LOCK = "filen-web-videos-index-writer"
 
 class VideoLibraryClient {
 	private snapshot = EMPTY
@@ -111,6 +123,7 @@ class VideoLibraryClient {
 	private attached = false
 	private detach: (() => void) | null = null
 	private opening: Promise<void> | null = null
+	private releaseWriter: (() => void) | null = null
 	// Keyed files asked for and not resolved yet; nothing keyed is kept once handed over.
 	private readonly artFiles = new Map<string, Promise<ArtFile | null>>()
 	private readonly artBatch = new Map<string, { ref: VideoFileRef; resolve: (file: ArtFile | null) => void }>()
@@ -288,17 +301,11 @@ class VideoLibraryClient {
 	public loadProbeFacts(): Promise<void> {
 		const generation = this.generation
 
-		this.allFacts ??= kvEntriesJsonInSlices(PROBE_KV_PREFIX, probeRecordSchema)
-			.then(rows =>
-				generation === this.generation
-					? this.sendFacts(
-							rows.map(([key, record]) => [
-								key.startsWith(PROBE_KV_PREFIX) ? key.slice(PROBE_KV_PREFIX.length) : key,
-								factsOf(record)
-							])
-						)
-					: undefined
-			)
+		this.allFacts ??= kvEntriesJsonInSlices(PROBE_KV_PREFIX, probeFactsSchema, (key, record): [string, ReturnType<typeof factsOf>] => [
+			key.startsWith(PROBE_KV_PREFIX) ? key.slice(PROBE_KV_PREFIX.length) : key,
+			factsOf(record)
+		])
+			.then(entries => (generation === this.generation ? this.sendFacts(entries) : undefined))
 			.catch((e: unknown) => {
 				this.allFacts = null
 
@@ -308,9 +315,9 @@ class VideoLibraryClient {
 		return this.allFacts
 	}
 
-	// Subscribes to the worker once per session. The tab with the library open writes its snapshots (the worker
-	// serializes writes across tabs), now and when the page goes away, until a sign-out starts here or in any other
-	// tab: from then on nothing of the account is persisted.
+	// Subscribes to the worker once per session. One tab with the library open writes the snapshots, now and when
+	// the page goes away, until a sign-out starts here or in any other tab: from then on nothing of the account is
+	// persisted.
 	private attach(): void {
 		if (this.attached) {
 			return
@@ -343,7 +350,7 @@ class VideoLibraryClient {
 			this.hold()
 		}
 
-		void sdkApi.videoIndexSetWriter(!readSignOutPending())
+		this.claimWriter()
 
 		const unwatchSignOut = onSignOutPending(hold)
 		const unwatchAuth = onAuthBroadcast(message => {
@@ -387,9 +394,43 @@ class VideoLibraryClient {
 		}
 	}
 
-	// A sign-out started: snapshot writes stop (one under way is abandoned) and the configuration persists nothing.
+	// This tab writes the snapshots once it holds the writer lock (at once where Web Locks are missing).
+	private claimWriter(): void {
+		const generation = this.generation
+		const take = (): void => {
+			if (!readSignOutPending()) {
+				void sdkApi.videoIndexSetWriter(true)
+			}
+		}
+
+		if (typeof navigator.locks === "undefined") {
+			take()
+
+			return
+		}
+
+		navigator.locks
+			.request(INDEX_WRITER_LOCK, () => {
+				if (generation !== this.generation) {
+					return undefined
+				}
+
+				take()
+
+				return new Promise<void>(resolve => {
+					this.releaseWriter = resolve
+				})
+			})
+			.catch((e: unknown) => {
+				log.warn("videos.library", "index writer lock failed", e)
+			})
+	}
+
+	// A sign-out started: snapshot writes stop (one under way is abandoned), and neither the configuration nor the
+	// probe, artwork, frame and NFO records persist anything.
 	public hold(): void {
 		holdLibraryConfig()
+		holdRecordStores()
 		void sdkApi.videoIndexSetWriter(false)
 	}
 
@@ -512,7 +553,7 @@ class VideoLibraryClient {
 		}
 
 		resolved = new Promise<ArtFile | null>(resolve => {
-			this.artBatch.set(ref.stableUuid, { ref, resolve })
+			this.artBatch.set(key, { ref, resolve })
 		}).finally(() => {
 			this.artFiles.delete(key)
 		})
@@ -532,7 +573,8 @@ class VideoLibraryClient {
 
 		this.artBatch.clear()
 
-		const files = await this.playableFiles(batch.map(entry => entry.ref.stableUuid))
+		// Two refs of one lineage (an older version and the head) share the lookup; each is answered.
+		const files = await this.playableFiles([...new Set(batch.map(entry => entry.ref.stableUuid))])
 		const byUuid = new Map<string, SdkFile>(files.map(file => [file.uuid, file]))
 
 		for (const { ref, resolve } of batch) {
@@ -594,6 +636,8 @@ class VideoLibraryClient {
 
 		this.allFacts = null
 		this.generation++
+		this.releaseWriter?.()
+		this.releaseWriter = null
 		this.artFiles.clear()
 		this.snapshot = EMPTY
 		this.changes.emit()

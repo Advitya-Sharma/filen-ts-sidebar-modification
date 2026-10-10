@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { onlineManager } from "@tanstack/react-query"
 import type { File as SdkFile, UuidStr } from "@filen/sdk-rs"
 import { narrowItem, type BaseFileItem, type DriveItem } from "@/features/drive/lib/item"
 import { type ThumbGeneratorCategory, type ThumbGenerator, type ThumbSeedResult } from "@/features/drive/lib/thumbnails"
@@ -63,17 +64,20 @@ const { narrowToAnyFileMock } = vi.hoisted(() => ({ narrowToAnyFileMock: vi.fn((
 
 vi.mock("@/features/drive/lib/download", () => ({ narrowToAnyFile: narrowToAnyFileMock }))
 
-const { waitForMediaStreamMock, previewStreamUrlMock, releasePreviewStreamMock } = vi.hoisted(() => ({
+const { waitForMediaStreamMock, previewStreamUrlMock, releasePreviewStreamMock, previewStreamStatusMock } = vi.hoisted(() => ({
 	waitForMediaStreamMock: vi.fn<() => Promise<boolean>>(),
 	previewStreamUrlMock:
 		vi.fn<(file: unknown, name: string, contentType: string, id?: string, options?: { transient?: boolean }) => Promise<string>>(),
-	releasePreviewStreamMock: vi.fn<(id: string) => void>()
+	releasePreviewStreamMock: vi.fn<(id: string) => void>(),
+	previewStreamStatusMock: vi.fn<(id: string) => Promise<"present" | "lost" | "missing" | "unknown">>()
 }))
 
 vi.mock("@/features/preview/lib/previewStream", () => ({
 	waitForMediaStream: waitForMediaStreamMock,
 	previewStreamUrl: previewStreamUrlMock,
-	releasePreviewStream: releasePreviewStreamMock
+	releasePreviewStream: releasePreviewStreamMock,
+	previewStreamStatus: previewStreamStatusMock,
+	previewStreamIdOf: (url: string) => url.slice(url.lastIndexOf("/") + 1)
 }))
 
 const { allowedMediaContentTypeMock } = vi.hoisted(() => ({ allowedMediaContentTypeMock: vi.fn<(item: DriveItem) => string | null>() }))
@@ -964,6 +968,20 @@ function stubVideoDom(
 	return { seeks }
 }
 
+// The worker's registry answer a MEDIA_ERR_SRC_NOT_SUPPORTED is checked with; any range read fails the test.
+function stubStreamStatus(events: string[], answer: "present" | "lost" | "missing" | "unknown" | "never"): void {
+	vi.stubGlobal("fetch", () => {
+		events.push("range read")
+
+		return Promise.reject(new Error("no range read expected"))
+	})
+	previewStreamStatusMock.mockImplementation(id => {
+		events.push(`status ${id}`)
+
+		return answer === "never" ? new Promise(() => undefined) : Promise.resolve(answer)
+	})
+}
+
 describe("generateVideoThumb — frame choice", () => {
 	beforeEach(() => {
 		waitForMediaStreamMock.mockResolvedValue(true)
@@ -1031,15 +1049,20 @@ describe("generateVideoThumb — element failures", () => {
 		vi.unstubAllGlobals()
 	})
 
-	// MEDIA_ERR_DECODE and MEDIA_ERR_SRC_NOT_SUPPORTED.
-	it.each([3, 4])(
-		"reads the keyframe once the element cannot decode the stream (MediaError %i), its stream released first",
-		async code => {
+	// MEDIA_ERR_DECODE; MEDIA_ERR_SRC_NOT_SUPPORTED while the worker still holds the registration.
+	it.each<[number, "present" | "unknown"]>([
+		[3, "present"],
+		[4, "present"],
+		[4, "unknown"]
+	])(
+		"reads the keyframe once the element cannot decode the stream (MediaError %i, %s), its stream released first",
+		async (code, answer) => {
 			const events: string[] = []
 
 			stubVideoDom(() => 120, events, { errorCode: code })
-			releasePreviewStreamMock.mockImplementation(() => {
-				events.push("released")
+			stubStreamStatus(events, answer)
+			releasePreviewStreamMock.mockImplementation(id => {
+				events.push(`released ${id}`)
 			})
 			frameGenerateMock.mockImplementation(() => {
 				events.push("frame")
@@ -1051,9 +1074,67 @@ describe("generateVideoThumb — element failures", () => {
 			expect(previewStreamUrlMock).toHaveBeenCalledTimes(1)
 			expect(probeRequestMock).toHaveBeenCalledTimes(1)
 			expect(frameGenerateMock).toHaveBeenCalledTimes(1)
-			expect(events).toEqual(["emptied", "released", "frame"])
+
+			const id = previewStreamUrlMock.mock.calls[0]?.[3] ?? ""
+
+			// Only the ambiguous code costs the check: the worker's registry, asked while the registration is held,
+			// and never a range read of the bytes the element has just fetched.
+			expect(events).toEqual(
+				code === 4 ? [`status ${id}`, "emptied", `released ${id}`, "frame"] : ["emptied", `released ${id}`, "frame"]
+			)
 		}
 	)
+
+	// MEDIA_ERR_SRC_NOT_SUPPORTED is also a fetch that failed before the metadata: offline, or a registration
+	// the worker lost.
+	it.each<"missing" | "lost" | "offline">(["missing", "lost", "offline"])(
+		"fails without reading the keyframe, and tries the element again, when the stream could not be fetched (%s)",
+		async answer => {
+			const events: string[] = []
+
+			stubVideoDom(() => 120, events, { errorCode: 4 })
+			stubStreamStatus(events, answer === "offline" ? "present" : answer)
+			onlineManager.setOnline(answer !== "offline")
+
+			try {
+				const item = videoItem()
+
+				await expect(generateVideoThumb(item, live())).resolves.toEqual({ type: "failed" })
+				expect(probeRequestMock).not.toHaveBeenCalled()
+				expect(frameGenerateMock).not.toHaveBeenCalled()
+
+				await expect(generateVideoThumb(item, live())).resolves.toEqual({ type: "failed" })
+				expect(previewStreamUrlMock).toHaveBeenCalledTimes(2)
+				expect(events.filter(event => event.startsWith("status"))).toHaveLength(answer === "offline" ? 0 : 2)
+				expect(events).not.toContain("range read")
+			} finally {
+				onlineManager.setOnline(true)
+			}
+		}
+	)
+
+	it("does not hold the element's cleanups on a registry check the generation stopped waiting for", async () => {
+		const events: string[] = []
+		const controller = new AbortController()
+
+		stubVideoDom(() => 120, events, { errorCode: 4 })
+		stubStreamStatus(events, "never")
+		previewStreamStatusMock.mockImplementation(() => {
+			events.push("status")
+			setTimeout(() => {
+				controller.abort()
+			}, 0)
+
+			return new Promise(() => undefined)
+		})
+		releasePreviewStreamMock.mockImplementation(() => {
+			events.push("released")
+		})
+
+		await expect(generateVideoThumb(videoItem(), controller.signal)).resolves.toEqual({ type: "failed" })
+		expect(events).toEqual(["status", "emptied", "released"])
+		expect(probeRequestMock).not.toHaveBeenCalled()
+	})
 
 	it("reads the keyframe when the metadata holds no picture", async () => {
 		stubVideoDom(() => 120, [], { videoWidth: 0 })
@@ -1073,6 +1154,27 @@ describe("generateVideoThumb — element failures", () => {
 		expect(previewStreamUrlMock).toHaveBeenCalledTimes(1)
 		expect(frameGenerateMock).toHaveBeenCalledTimes(2)
 	})
+
+	// A held registration cannot rule out an SDK read that failed in passing (a server error, a rate limit), which
+	// raises the same code before the metadata: the keyframe read runs, but the element is not settled out.
+	it.each<"present" | "unknown">(["present", "unknown"])(
+		"tries the element again on a retry after a MediaError 4 the registry could not pin on the format (%s)",
+		async answer => {
+			const events: string[] = []
+
+			stubVideoDom(() => 120, events, { errorCode: 4 })
+			stubStreamStatus(events, answer)
+			frameGenerateMock.mockResolvedValue(null)
+
+			const item = videoItem()
+
+			await expect(generateVideoThumb(item, live())).resolves.toEqual({ type: "failed" })
+			await expect(generateVideoThumb(item, live())).resolves.toEqual({ type: "failed" })
+			expect(previewStreamUrlMock).toHaveBeenCalledTimes(2)
+			expect(frameGenerateMock).toHaveBeenCalledTimes(2)
+			expect(events).not.toContain("range read")
+		}
+	)
 
 	// MEDIA_ERR_ABORTED and MEDIA_ERR_NETWORK: the reads failed, not the format.
 	it.each([1, 2])("fails a stream that errored on its reads (MediaError %i) without reading the keyframe", async code => {

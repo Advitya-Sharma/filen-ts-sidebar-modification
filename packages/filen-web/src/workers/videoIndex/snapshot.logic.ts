@@ -598,11 +598,23 @@ export function* pickSnapshotSteps(slots: readonly (Uint8Array | null)[], rootUu
 	return null
 }
 
-// Which of two slots to overwrite, given each one's header generation (null when missing or unreadable): the
-// older one, so the newest intact copy survives a torn write. The new generation is one past both.
-export function nextSlot(generations: readonly [bigint | null, bigint | null]): { slot: 0 | 1; generation: bigint } {
+// Which of two slots to overwrite, given each one's header generation (null when missing or unreadable): never
+// `intact` (the slot last loaded or written) while it still holds that generation, else the older one, so an intact
+// copy survives a torn write. A header alone doesn't prove its slot intact: a torn write lands the new header over a
+// broken body. The new generation is one past both.
+export function nextSlot(
+	generations: readonly [bigint | null, bigint | null],
+	intact: { slot: 0 | 1; generation: bigint } | null = null
+): { slot: 0 | 1; generation: bigint } {
 	const [a, b] = generations
 	const highest = [a, b].reduce<bigint>((max, value) => (value !== null && value > max ? value : max), 0n)
+
+	if (intact !== null && generations[intact.slot] === intact.generation) {
+		return {
+			slot: intact.slot === 0 ? 1 : 0,
+			generation: highest + 1n
+		}
+	}
 
 	if (a === null) {
 		return {

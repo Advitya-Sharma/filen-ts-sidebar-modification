@@ -130,7 +130,8 @@ function regionOf(hint: number): { key: SubtitleRegionKey; align: SubtitleAlign 
 }
 
 // What the overlay shows at `time` (on the video's timeline) with the cues shifted by `offset` seconds
-// (positive = later). Regions in a stable order, empty ones left out.
+// (positive = later): at most MAX_CONCURRENT_CUES, which is all a cue store lets show at once. Regions in a stable
+// order, empty ones left out.
 export function subtitleRegionsAt(store: CueStore, time: number, offset: number, scratch: number[] = []): SubtitleRegion[] {
 	const indices = activeCueIndices(store, time - offset, scratch)
 

@@ -51,8 +51,9 @@ export function driveVideoElementType(
 	return contentType
 }
 
-// HTMLMediaElement error codes that are verdicts about the bytes (MEDIA_ERR_DECODE,
-// MEDIA_ERR_SRC_NOT_SUPPORTED), unlike an aborted or failed fetch.
+// HTMLMediaElement error codes that are verdicts about bytes that are always readable (a local file):
+// MEDIA_ERR_DECODE and MEDIA_ERR_SRC_NOT_SUPPORTED, unlike an aborted or failed fetch. Over a stream that
+// can fail, MEDIA_ERR_SRC_NOT_SUPPORTED is ambiguous (classifyMediaError).
 export function isFormatMediaError(code: number | undefined): boolean {
 	return code === 3 || code === 4
 }

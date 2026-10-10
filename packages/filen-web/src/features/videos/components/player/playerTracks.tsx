@@ -9,7 +9,7 @@ import type { PlayerSubtitleTrack, SubtitleChoice } from "@/features/videos/lib/
 import { channelLabel } from "@/features/videos/lib/player/trackLabels.logic"
 import type { VideoFileRef } from "@/workers/videoIndex/view.logic"
 
-// The Videos player's audio and subtitle choices in the 7T1 popover: labels from the probe and the sidecar
+// The Videos player's audio and subtitle choices in the tracks popover: labels from the probe and the sidecar
 // names, Smart showing what it picked, a marker on audio this browser plays only converted.
 
 const CODEC_NAMES: Readonly<Record<string, string>> = {

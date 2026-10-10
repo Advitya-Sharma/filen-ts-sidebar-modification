@@ -172,6 +172,14 @@ describe("snapshot slots", () => {
 		expect(nextSlot([3n, 4n])).toEqual({ slot: 0, generation: 5n })
 		expect(nextSlot([6n, 5n])).toEqual({ slot: 1, generation: 7n })
 	})
+
+	it("never overwrites the slot known intact while it holds that generation, whatever the other's header says", () => {
+		// A torn write left generation 4's header over a broken body; generation 3 is what loaded.
+		expect(nextSlot([3n, 4n], { slot: 0, generation: 3n })).toEqual({ slot: 1, generation: 5n })
+		expect(nextSlot([5n, 4n], { slot: 1, generation: 4n })).toEqual({ slot: 0, generation: 6n })
+		// Another writer replaced it since: back to the older slot.
+		expect(nextSlot([5n, 4n], { slot: 0, generation: 3n })).toEqual({ slot: 1, generation: 6n })
+	})
 })
 
 describe("snapshot interning", () => {

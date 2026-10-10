@@ -1,6 +1,8 @@
 import type { File as SdkFile } from "@filen/sdk-rs"
-import { CueBuilder, itemKey, seriesKey, type CueStore, type ItemRec, type LadderSubtitle, type VideoProbe } from "@filen/shared/videos"
+import { itemKey, seriesKey, type CueStore, type ItemRec, type LadderSubtitle, type VideoProbe } from "@filen/shared/videos"
 import type { RemuxTextCue } from "@/lib/media/remuxTypes"
+import type { PlaybackFailure, PlaybackTrigger } from "@/lib/media/playback/types"
+import { EmbeddedCues } from "@/lib/media/playback/embeddedCues"
 import { openPlayback, type Playback, type PlaybackSnapshot } from "@/lib/media/playback/openPlayback"
 import { createListenerSet } from "@/lib/listenerSet"
 import { log } from "@/lib/log"
@@ -35,7 +37,7 @@ export interface PlayerSnapshot {
 	autoplayBlocked: boolean
 	// Bumped each time an item or part starts, so the UI can reset per-item state.
 	epoch: number
-	// Bumped whenever embedded subtitle cues arrived (embeddedCues).
+	// Bumped whenever cues of the shown embedded subtitle track arrived (embeddedCues).
 	embeddedVersion: number
 }
 
@@ -53,7 +55,22 @@ const IDLE: PlayerSnapshot = {
 	embeddedVersion: 0
 }
 
-// Audio codecs every browser decodes without transcoding: what a default track choice prefers.
+// After a failure the item opens again by itself after these waits, then the failure card's Retry is left. The
+// count holds across the reopens, so a lasting failure isn't retried forever.
+export const AUTO_RETRY_DELAYS_MS = [1000, 2000, 4000] as const
+// Playing on this long after a reopen earns the automatic retries back.
+const AUTO_RETRY_RESET_SECONDS = 30
+
+// Failures a reopen may get past. The others (a keyframe interval too large for the buffer, an open GOP start, a
+// ladder out of rungs) come back the same for the same file in the same browser.
+const PASSING_TRIGGERS: ReadonlySet<PlaybackTrigger> = new Set(["network", "stream-unavailable", "no-metadata", "decode-stall"])
+
+// A failure worth an automatic reopen: none known (the open itself threw), one of the moment, or one a hidden tab
+// may have caused.
+export function isPassingFailure(failure: PlaybackFailure | null): boolean {
+	return failure === null || failure.learnable === false || PASSING_TRIGGERS.has(failure.trigger)
+}
+
 // The player waits this long at most for the watch state's first read (another device's newer resume point)
 // before it starts from what it has; a flush in another tab can hold the lock much longer.
 export const WATCH_STATE_WAIT_MS = 1500
@@ -93,13 +110,21 @@ export class PlayerController {
 	// The item was already reported as finished (Up Next advanced past its credits).
 	private finished = false
 	// Embedded text cues of the open file, by track number, as the remux has read them.
-	private embedded = new Map<number, RemuxTextCue[]>()
-	private embeddedStores = new Map<number, { version: number; store: CueStore }>()
-	private embeddedKeys = new Set<string>()
+	private readonly embedded = new EmbeddedCues()
+	// Text tracks the open part's probe offers: cues of any other track are not kept.
+	private offeredTracks: ReadonlySet<number> = new Set()
+	private readonly offered = (track: number): boolean => this.offeredTracks.has(track)
+	// The embedded track the caller shows: only its cues re-render.
+	private shownEmbedded: number | null = null
 	// What the ladder is told about subtitles: an embedded text track needs the remux rung.
 	private subtitleKind: LadderSubtitle = "none"
 	// The audio track picked before opening, for the next part opened only.
 	private pickedAudio: number | null = null
+	// The audio track the user chose for the open item, kept across its reopens (a retry, the next part, Start over).
+	private chosenAudio: { key: string; part: number; index: number; lang: string | null } | null = null
+	// Automatic retries spent on the open item, and where its current open first really played.
+	private autoRetries = 0
+	private playedFrom: number | null = null
 
 	public readonly subscribe = (listener: () => void): (() => void) => this.changes.subscribe(listener)
 
@@ -161,16 +186,24 @@ export class PlayerController {
 		const { target } = request
 		const keepTarget = this.snapshot.target?.key === target.key
 
-		this.pickedAudio = request.audioIndex ?? null
+		if (!keepTarget) {
+			this.chosenAudio = null
+			this.autoRetries = 0
+		}
 
-		this.embedded = new Map()
-		this.embeddedStores = new Map()
-		this.embeddedKeys = new Set()
+		const part = partOverride?.part ?? 0
+
+		this.pickedAudio = request.audioIndex ?? null
+		this.playedFrom = null
+		this.embedded.clear()
+		this.offeredTracks = new Set()
 		this.update({
 			...IDLE,
 			phase: "loading",
 			target,
-			part: partOverride?.part ?? 0,
+			part,
+			// A reopen of the same part keeps its tracks on offer, so a subtitle choice holds while it reopens.
+			probe: keepTarget && part === this.snapshot.part ? this.snapshot.probe : null,
 			epoch: this.snapshot.epoch + 1,
 			embeddedVersion: this.snapshot.embeddedVersion + 1,
 			partDurations: keepTarget ? this.snapshot.partDurations : target.parts.map(() => null)
@@ -248,9 +281,43 @@ export class PlayerController {
 			: this.open({ target, start: "resume", autoplay: true }, { part: last.part, position: last.time }))
 	}
 
+	// The wait before the next automatic retry of a failed item; null once they are spent, or when the failure
+	// would only come back.
+	public autoRetryDelay(): number | null {
+		if (this.snapshot.phase === "failed" && !isPassingFailure(this.snapshot.playback?.failure ?? null)) {
+			return null
+		}
+
+		return AUTO_RETRY_DELAYS_MS[this.autoRetries] ?? null
+	}
+
+	// A retry nobody asked for: counted, and only while the item still failed.
+	public async autoRetry(): Promise<void> {
+		if (this.snapshot.phase !== "failed" || this.autoRetryDelay() === null) {
+			return
+		}
+
+		this.autoRetries += 1
+		await this.retry()
+	}
+
+	// The connection went away: coming back earns the automatic retries again.
+	public resetAutoRetries(): void {
+		this.autoRetries = 0
+	}
+
 	// An embedded text track was chosen (or not): it needs the remux rung, which a direct stream (an MKV played as
-	// it is) restarts on, at the same position.
-	public setSubtitleKind(kind: LadderSubtitle): void {
+	// it is) restarts on, at the same position. `embeddedTrack` is the track shown, whose cues re-render.
+	public setSubtitleKind(kind: LadderSubtitle, embeddedTrack: number | null = null): void {
+		if (embeddedTrack !== this.shownEmbedded) {
+			this.shownEmbedded = embeddedTrack
+
+			// Cues that arrived after the caller last read the track.
+			if (embeddedTrack !== null && this.embedded.stale(embeddedTrack)) {
+				this.update({ embeddedVersion: this.snapshot.embeddedVersion + 1 })
+			}
+		}
+
 		if (kind === this.subtitleKind) {
 			return
 		}
@@ -262,32 +329,10 @@ export class PlayerController {
 		}
 	}
 
-	// The cues of embedded track `track` read so far; null before any. `version` is the snapshot's embeddedVersion
-	// the caller rendered with, so a memoizing caller asks again when it changes.
-	public embeddedCues(track: number, version: number): CueStore | null {
-		const cues = this.embedded.get(track)
-
-		if (cues === undefined || cues.length === 0) {
-			return null
-		}
-
-		const cached = this.embeddedStores.get(track)
-
-		if (cached?.version === version) {
-			return cached.store
-		}
-
-		const builder = new CueBuilder()
-
-		for (const cue of cues) {
-			builder.add(cue.start, cue.end, cue.text, cue.hint)
-		}
-
-		const store = builder.finish()
-
-		this.embeddedStores.set(track, { version, store })
-
-		return store
+	// The cues of embedded track `track` read so far; null before any. The store is rebuilt only when that track got
+	// cues. `_version` is the snapshot's embeddedVersion the caller rendered with, so a memoizing caller asks again.
+	public embeddedCues(track: number, _version: number): CueStore | null {
+		return this.embedded.store(track)
 	}
 
 	// The autoplay-blocked card's Play: a user gesture, so play() is allowed now.
@@ -322,10 +367,11 @@ export class PlayerController {
 			return
 		}
 
+		const lang = this.snapshot.probe?.audio[index]?.lang ?? null
+
+		this.chosenAudio = { key: target.key, part: this.snapshot.part, index, lang }
 		this.update({ audioIndex: index })
 		await playback.selectAudio(index)
-
-		const lang = this.snapshot.probe?.audio[index]?.lang ?? null
 
 		if (target.seriesDirUuid !== null && lang !== null) {
 			void watchState.setSeriesLanguages({ seriesDirUuid: target.seriesDirUuid, audio: lang })
@@ -455,16 +501,31 @@ export class PlayerController {
 
 		const series = target.seriesDirUuid === null ? undefined : watchState.getSnapshot().doc.series[seriesKey(target.seriesDirUuid)]
 		const picked = this.pickedAudio
+		const chosen = this.chosenAudio?.key === target.key ? this.chosenAudio : null
 
 		this.pickedAudio = null
 
-		const audioIndex =
-			picked !== null && picked < probe.audio.length
-				? picked
-				: defaultAudioIndex({ probe, rememberedLang: series?.al?.v ?? null, userLanguages: userLanguages() })
+		// The pick made before opening, else the user's choice on this part, else the automatic one (another part of a
+		// stack may order its tracks differently: it goes by the chosen track's language).
+		let audioIndex: number
 
+		if (picked !== null && picked >= 0 && picked < probe.audio.length) {
+			audioIndex = picked
+			this.chosenAudio = { key: target.key, part, index: picked, lang: probe.audio[picked]?.lang ?? null }
+		} else if (chosen !== null && chosen.part === part && chosen.index < probe.audio.length) {
+			audioIndex = chosen.index
+		} else {
+			audioIndex = defaultAudioIndex({
+				probe,
+				rememberedLang: chosen?.lang ?? series?.al?.v ?? null,
+				userLanguages: userLanguages()
+			})
+		}
+
+		this.offeredTracks = new Set(probe.subs.map(sub => sub.id))
 		this.update({ probe, part, audioIndex, resumedAt, partDurations, autoplayBlocked: false })
 
+		const subtitleKind = this.subtitleKind
 		let playback: Playback
 
 		try {
@@ -472,7 +533,7 @@ export class PlayerController {
 				video,
 				file,
 				probe,
-				{ audioIndex, subtitle: this.subtitleKind },
+				{ audioIndex, subtitle: subtitleKind },
 				{
 					name: target.parts[part]?.file.name ?? "",
 					startTime: position,
@@ -496,6 +557,19 @@ export class PlayerController {
 
 		if (generation !== this.generation) {
 			playback.dispose()
+
+			return
+		}
+
+		// An embedded text track chosen while it opened (its tracks show only once the probe is in the snapshot) needs
+		// the remux rung a direct stream lacks.
+		if (
+			this.subtitleKind === "embedded-text" &&
+			subtitleKind !== "embedded-text" &&
+			playback.getSnapshot().decision.path === "direct"
+		) {
+			playback.dispose()
+			await this.openPart(generation, target, part, position, autoplay, resumedAt, partDurations)
 
 			return
 		}
@@ -545,30 +619,11 @@ export class PlayerController {
 		}
 	}
 
-	// A restarted remux (an audio change, a demotion) reads the same blocks again: cues are kept once.
+	// Cues of the tracks the probe offers are kept (EmbeddedCues bounds them); only cues of the shown track re-render.
 	private addTextCues(cues: readonly RemuxTextCue[]): void {
-		let added = false
+		const grown = this.embedded.add(cues, this.offered)
 
-		for (const cue of cues) {
-			const key = `${String(cue.track)}:${String(Math.round(cue.start * 1000))}`
-
-			if (this.embeddedKeys.has(key)) {
-				continue
-			}
-
-			this.embeddedKeys.add(key)
-			added = true
-
-			const list = this.embedded.get(cue.track)
-
-			if (list === undefined) {
-				this.embedded.set(cue.track, [cue])
-			} else {
-				list.push(cue)
-			}
-		}
-
-		if (added) {
+		if (this.shownEmbedded !== null && grown.has(this.shownEmbedded)) {
 			this.update({ embeddedVersion: this.snapshot.embeddedVersion + 1 })
 		}
 	}
@@ -612,6 +667,14 @@ export class PlayerController {
 		}
 
 		this.lastPosition = { key: target.key, part: this.snapshot.part, time: video.currentTime }
+
+		if (this.autoRetries > 0) {
+			if (this.playedFrom === null) {
+				this.playedFrom = video.currentTime
+			} else if (Math.abs(video.currentTime - this.playedFrom) >= AUTO_RETRY_RESET_SECONDS) {
+				this.autoRetries = 0
+			}
+		}
 
 		if (!stateChanged && video.paused) {
 			return

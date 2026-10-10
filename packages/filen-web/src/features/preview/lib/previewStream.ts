@@ -76,6 +76,9 @@ export interface PortStreamMeta {
 	name: string
 	size: number
 	contentType: string
+	// False for bytes the serving side makes as they are read (decoded audio): the service worker reads no
+	// window ahead of the one its consumer asks for.
+	readAhead?: boolean
 }
 
 // Registers a stream whose bytes come from a range port the page has served (lib/media/rangePort.ts) under

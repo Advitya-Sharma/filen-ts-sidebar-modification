@@ -60,10 +60,55 @@ function placeCue(cue: InstanceType<CueConstructor>, hint: number): void {
 	cue.align = column === 0 ? "start" : column === 2 ? "end" : "center"
 }
 
+function sameCue(a: CueStore, i: number, b: CueStore, j: number): boolean {
+	return (
+		a.starts[i] === b.starts[j] && a.ends[i] === b.ends[j] && a.texts[i] === b.texts[j] && (a.hints?.[i] ?? 0) === (b.hints?.[j] ?? 0)
+	)
+}
+
+// The indices of `next`'s cues that `previous` lacks, when `next` holds every cue of `previous` in the same order
+// (embedded cues growing as the file is read); null otherwise. One walk over both sorted stores.
+export function addedCueIndices(previous: CueStore, next: CueStore): number[] | null {
+	const had = previous.starts.length
+	const has = next.starts.length
+
+	if (has < had) {
+		return null
+	}
+
+	const added: number[] = []
+	let at = 0
+
+	for (let j = 0; j < has; j++) {
+		if (at < had && sameCue(previous, at, next, j)) {
+			at++
+		} else {
+			added.push(j)
+		}
+	}
+
+	return at === had ? added : null
+}
+
+function makeCue(Cue: CueConstructor, store: CueStore, index: number, offset: number): InstanceType<CueConstructor> {
+	const start = Math.max(0, (store.starts[index] ?? 0) + offset)
+	const end = Math.max(start, (store.ends[index] ?? 0) + offset)
+	const cue = new Cue(start, end, store.texts[index] ?? "")
+	const hint = store.hints?.[index] ?? 0
+
+	if (hint !== 0) {
+		placeCue(cue, hint)
+	}
+
+	return cue
+}
+
 export class SubtitleTrackPool {
 	private readonly video: HTMLVideoElement
 	private readonly tracks: TextTrack[] = []
 	private current: TextTrack | null = null
+	// What the current track holds: this store at this offset.
+	private source: { store: CueStore; offset: number } | null = null
 	private native = false
 	private cueListener: (() => void) | null = null
 
@@ -71,14 +116,35 @@ export class SubtitleTrackPool {
 		this.video = video
 	}
 
-	// Fills a track with `store`'s cues shifted by `offset` seconds and makes it the current one; null clears.
+	// Fills a track with `store`'s cues shifted by `offset` seconds and makes it the current one; null clears. A store
+	// that only grew the current one (same offset) adds just the new cues to the same track.
 	public show(store: CueStore | null, offset: number): void {
 		const previous = this.current
+		const source = this.source
+
+		if (previous !== null && source !== null && store !== null && source.offset === offset) {
+			const added = addedCueIndices(source.store, store)
+
+			if (added !== null) {
+				const Cue = cueConstructor()
+
+				if (Cue !== null) {
+					for (const index of added) {
+						previous.addCue(makeCue(Cue, store, index, offset))
+					}
+				}
+
+				this.source = { store, offset }
+
+				return
+			}
+		}
 
 		if (previous !== null) {
 			this.detachListener(previous)
 			retire(previous)
 			this.current = null
+			this.source = null
 		}
 
 		if (store === null || store.texts.length === 0) {
@@ -98,21 +164,11 @@ export class SubtitleTrackPool {
 		clearCues(track)
 
 		for (let i = 0; i < store.texts.length; i++) {
-			const start = Math.max(0, (store.starts[i] ?? 0) + offset)
-			const end = Math.max(start, (store.ends[i] ?? 0) + offset)
-			const cue = new Cue(start, end, store.texts[i] ?? "")
-			const hint = store.hints?.[i] ?? 0
-
-			cue.id = String(i)
-
-			if (hint !== 0) {
-				placeCue(cue, hint)
-			}
-
-			track.addCue(cue)
+			track.addCue(makeCue(Cue, store, i, offset))
 		}
 
 		this.current = track
+		this.source = { store, offset }
 		track.mode = this.native ? "showing" : "hidden"
 		this.attachListener(track)
 	}
@@ -149,6 +205,7 @@ export class SubtitleTrackPool {
 		}
 
 		this.current = null
+		this.source = null
 		this.cueListener = null
 	}
 

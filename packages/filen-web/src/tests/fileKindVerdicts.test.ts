@@ -121,6 +121,27 @@ describe("file-kind verdict cache", () => {
 		expect(heard).toEqual([["named"], null])
 	})
 
+	it("keeps a memory-only verdict out of kv until a persistent record of it", async () => {
+		kv.kvEntriesJson.mockResolvedValue([])
+		kv.kvSetJson.mockResolvedValue(undefined)
+		connectFileKindVerdictStorage()
+		await settle()
+
+		recordFileKindVerdict("visited", "audio", { memoryOnly: true })
+		recordFileKindVerdict("visited", "audio", { memoryOnly: true })
+		await settle()
+
+		expect(fileKindVerdict("visited")).toBe("audio")
+		expect(kv.kvSetJson).not.toHaveBeenCalled()
+
+		recordFileKindVerdict("visited", "audio")
+		recordFileKindVerdict("visited", "audio")
+		await settle()
+
+		expect(kv.kvSetJson).toHaveBeenCalledOnce()
+		expect(kv.kvSetJson.mock.calls[0]?.[0]).toBe(`${VERDICT_KV_PREFIX}visited`)
+	})
+
 	it("gives a .ts the video glyph only once a probe read it as a transport stream", async () => {
 		kv.kvEntriesJson.mockResolvedValue([])
 		kv.kvSetJson.mockResolvedValue(undefined)

@@ -1,6 +1,5 @@
 import type { AnyFile } from "@filen/sdk-rs"
 import {
-	CueBuilder,
 	selectAudioTrack,
 	type CueStore,
 	type LadderDecision,
@@ -11,6 +10,7 @@ import {
 import { openPlayback, type Playback, type PlaybackDeps } from "@/lib/media/playback/openPlayback"
 import { captureFramePoster } from "@/lib/media/playback/poster"
 import type { RemuxTextCue } from "@/lib/media/remuxTypes"
+import { EmbeddedCues } from "@/lib/media/playback/embeddedCues"
 import { warmMediaVolume } from "@/lib/media/mediaVolume"
 import { createListenerSet } from "@/lib/listenerSet"
 import { log } from "@/lib/log"
@@ -18,7 +18,12 @@ import { undecodedKinds } from "@/features/preview/lib/playbackGap"
 import { CODECS, browserCanPlay } from "@/features/preview/lib/containerTracks"
 import { confirmedGap, silentAudioCodec, type PreviewVideoRoute } from "@/features/preview/lib/previewPlayback.logic"
 import { STREAM_STALL_MS, STREAM_STALL_POLL_MS, expectsProgress } from "@/lib/media/playback/directSession.logic"
-import { previewStreamIdOf, previewStreamStatus, releasePreviewStreamSoon } from "@/features/preview/lib/previewStream"
+import {
+	holdPreviewStreamAlive,
+	previewStreamIdOf,
+	previewStreamStatus,
+	releasePreviewStreamSoon
+} from "@/features/preview/lib/previewStream"
 import type { PreviewStreamStatus } from "@/lib/sw/protocol"
 
 function defaultStatus(url: string): Promise<PreviewStreamStatus> {
@@ -60,6 +65,9 @@ export interface PreviewVideoDeps {
 	status?: (url: string) => Promise<PreviewStreamStatus>
 	// Hands the registration behind `url` back once nothing plays from it; releasePreviewStreamSoon by default.
 	release?: (url: string) => void
+	// Keeps the service worker, and with it the registration, alive while the element may read from it
+	// (paused included); returns the release. holdPreviewStreamAlive by default.
+	holdAlive?: () => () => void
 	// Calls `listener` when the worker answers a request for `url` with 404; returns the unsubscribe.
 	onStreamGone?: (url: string, listener: () => void) => () => void
 	now?: () => number
@@ -109,12 +117,15 @@ export class PreviewVideo {
 	private stopStallWatch: (() => void) | null = null
 	// The direct start's registration, until it is handed back.
 	private directUrl: string | null = null
+	// Ends the direct start's hold on the worker.
+	private releaseAlive: (() => void) | null = null
 	// Bumped by every ladder open: one that a newer open (a retry) overtook leaves without a trace.
 	private ladderGeneration = 0
 	private disposed = false
-	private readonly embedded = new Map<number, RemuxTextCue[]>()
-	private readonly embeddedKeys = new Set<string>()
-	private readonly embeddedStores = new Map<number, { version: number; store: CueStore }>()
+	private readonly embedded = new EmbeddedCues()
+	// What the direct start's gap check read, kept for a later ladder open: a public link's probe is cached nowhere
+	// else. Outside the snapshot, so the direct start's UI stays as it was.
+	private directProbe: Extract<PreviewProbeResult, { status: "probed" }> | null = null
 
 	public readonly subscribe = (listener: () => void): (() => void) => this.changes.subscribe(listener)
 
@@ -173,31 +184,10 @@ export class PreviewVideo {
 		}
 	}
 
-	// The embedded cues of `track` read so far; null before any. `version` is the snapshot's embeddedVersion.
-	public embeddedCues(track: number, version: number): CueStore | null {
-		const cues = this.embedded.get(track)
-
-		if (cues === undefined || cues.length === 0) {
-			return null
-		}
-
-		const cached = this.embeddedStores.get(track)
-
-		if (cached?.version === version) {
-			return cached.store
-		}
-
-		const builder = new CueBuilder()
-
-		for (const cue of cues) {
-			builder.add(cue.start, cue.end, cue.text, cue.hint)
-		}
-
-		const store = builder.finish()
-
-		this.embeddedStores.set(track, { version, store })
-
-		return store
+	// The embedded cues of `track` read so far; null before any. Rebuilt only when that track got cues; `_version`
+	// is the snapshot's embeddedVersion the caller rendered with, so a memoizing caller asks again.
+	public embeddedCues(track: number, _version: number): CueStore | null {
+		return this.embedded.store(track)
 	}
 
 	public dispose(): void {
@@ -232,6 +222,9 @@ export class PreviewVideo {
 
 	// Once the element no longer reads the direct start's URL: disposed, or moved to the ladder.
 	private releaseDirect(): void {
+		this.releaseAlive?.()
+		this.releaseAlive = null
+
 		if (this.directUrl !== null) {
 			this.releaseUrl(this.directUrl)
 			this.directUrl = null
@@ -270,6 +263,7 @@ export class PreviewVideo {
 		}
 
 		this.directUrl = url
+		this.releaseAlive = (this.options.deps.holdAlive ?? holdPreviewStreamAlive)()
 
 		const start = this.options.startTime
 
@@ -393,7 +387,13 @@ export class PreviewVideo {
 	private async checkGap(video: HTMLVideoElement, kinds: ReturnType<typeof undecodedKinds>): Promise<void> {
 		const result = await this.options.deps.probe(this.abort.signal).catch((): PreviewProbeResult => ({ status: "unavailable" }))
 
-		if (this.isDisposed() || result.status !== "probed" || result.probe === null) {
+		if (this.isDisposed() || result.status !== "probed") {
+			return
+		}
+
+		this.directProbe = result
+
+		if (result.probe === null) {
 			return
 		}
 
@@ -485,9 +485,10 @@ export class PreviewVideo {
 
 		const known = this.snapshot.probe
 		const result: PreviewProbeResult =
-			known === null
-				? await this.options.deps.probe(this.abort.signal).catch((): PreviewProbeResult => ({ status: "unavailable" }))
-				: { status: "probed", probe: known }
+			known !== null
+				? { status: "probed", probe: known }
+				: (this.directProbe ??
+					(await this.options.deps.probe(this.abort.signal).catch((): PreviewProbeResult => ({ status: "unavailable" }))))
 
 		if (superseded()) {
 			return
@@ -591,34 +592,15 @@ export class PreviewVideo {
 		})
 	}
 
-	// A restarted remux (a demotion) reads the same blocks again: cues are kept once.
+	// Only the tracks the probe offers are kept (EmbeddedCues bounds the rest).
 	private addTextCues(cues: readonly RemuxTextCue[]): void {
-		if (this.disposed) {
+		const subs = this.snapshot.probe?.subs
+
+		if (this.disposed || subs === undefined) {
 			return
 		}
 
-		let added = false
-
-		for (const cue of cues) {
-			const key = `${String(cue.track)}:${String(Math.round(cue.start * 1000))}`
-
-			if (this.embeddedKeys.has(key)) {
-				continue
-			}
-
-			this.embeddedKeys.add(key)
-			added = true
-
-			const list = this.embedded.get(cue.track)
-
-			if (list === undefined) {
-				this.embedded.set(cue.track, [cue])
-			} else {
-				list.push(cue)
-			}
-		}
-
-		if (added) {
+		if (this.embedded.add(cues, track => subs.some(sub => sub.id === track)).size > 0) {
 			this.update({ embeddedVersion: this.snapshot.embeddedVersion + 1 })
 		}
 	}

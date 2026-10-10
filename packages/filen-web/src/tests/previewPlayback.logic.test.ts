@@ -136,6 +136,21 @@ describe("sidecarSubtitles", () => {
 		expect(sidecarSubtitles("Movie.mp4", files(["Movie.srt"], 0), 100)).toEqual([])
 		expect(sidecarSubtitles("Movie.mp4", files(["Movie.srt"], 101), 100)).toEqual([])
 	})
+
+	// "İ" lowercases to two code units: the tokens are still read from where the stem ends in the name itself.
+	it("reads the tokens of a name whose lowercase is longer than the name", () => {
+		const found = sidecarSubtitles(
+			"İstanbul.2020.mkv",
+			files(["İstanbul.2020.en.srt", "i̇stanbul.2020.de.forced.srt", "İSTANBUL.2020.srt", "İstanbulx.fr.srt"]),
+			8_000_000
+		)
+
+		expect(found.map(file => [file.name, file.lang, file.forced])).toEqual([
+			["İstanbul.2020.en.srt", "en", false],
+			["i̇stanbul.2020.de.forced.srt", "de", true],
+			["İSTANBUL.2020.srt", null, false]
+		])
+	})
 })
 
 describe("mseFailureKind / mseOpenFailureKind", () => {

@@ -20,6 +20,7 @@ import {
 import { getPreviewStreamId, previewCacheEpoch, setPreviewStreamId } from "@/features/preview/lib/previewCache"
 import { usePreviewAccessMode, usePreviewCacheScope, type PreviewAccessMode } from "@/features/preview/lib/accessMode"
 import { getVideoPosition } from "@/features/preview/lib/videoContinuity"
+import { takeLinkedTransportStreamProbe } from "@/features/preview/lib/transportStreamProbe"
 import { initialVideoRoute } from "@/features/preview/lib/previewPlayback.logic"
 import { recordProbeVerdict } from "@/features/drive/lib/contentVerdicts"
 import { anyFileTypeFacts } from "@/features/drive/lib/item"
@@ -31,14 +32,15 @@ import {
 } from "@/features/preview/lib/previewVideo"
 
 // The probe the preview's ladder reads: the drive's goes through the probe service (cached per file, shared
-// with Videos); a public link's is read once, nothing kept. What it says about the file's kind is kept as a
-// verdict (contentVerdicts.ts) where it changes the file's kind.
+// with Videos); a public link's is read once, nothing kept, unless its transport stream gate just read it.
+// What it says about the file's kind is kept as a verdict (contentVerdicts.ts) where it changes the file's
+// kind; a public link's in memory only.
 async function probeFile(file: AnyFile, access: PreviewAccessMode, signal: AbortSignal): Promise<PreviewProbeResult> {
 	const result = await readProbe(file, access, signal)
 	const facts = result.status === "probed" ? anyFileTypeFacts(file) : null
 
 	if (result.status === "probed" && facts !== null) {
-		recordProbeVerdict({ uuid: file.uuid, ...facts }, result.probe)
+		recordProbeVerdict({ uuid: file.uuid, ...facts }, result.probe, { memoryOnly: access !== "authed" })
 	}
 
 	return result
@@ -49,6 +51,12 @@ async function readProbe(file: AnyFile, access: PreviewAccessMode, signal: Abort
 		const record = await probeService.request({ uuid: file.uuid, file }, "full", { rank: () => PROBE_RANK.explicit, signal })
 
 		return record === null ? { status: "unavailable" } : { status: "probed", probe: record.probe }
+	}
+
+	const gated = takeLinkedTransportStreamProbe(file.uuid)
+
+	if (gated !== null) {
+		return { status: "probed", probe: gated }
 	}
 
 	const token = crypto.randomUUID()

@@ -164,12 +164,13 @@ export class TranscodeWriter implements PumpWriter<SampleItem> {
 	}
 
 	public async write(item: SampleItem): Promise<void> {
-		this.throwIfFailed()
-
 		const begun = performance.now()
 		const { sample } = item
 
 		try {
+			// Inside: the sample is closed however the write ends.
+			this.throwIfFailed()
+
 			const frames = sample.numberOfFrames
 			const planes: Float32Array[] = []
 

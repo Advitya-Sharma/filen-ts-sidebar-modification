@@ -33,6 +33,7 @@ vi.mock("@filen/shared/videos", async importOriginal => {
 
 import { splitOverrideKey } from "@filen/shared/videos"
 import { VideoIndexEngine, type SnapshotStore } from "@/workers/videoIndex/engine"
+import { readSnapshotHeader } from "@/workers/videoIndex/snapshot.logic"
 import type { VideoIndexUpdate, VideoTitleView } from "@/workers/videoIndex/view.logic"
 import { memoryCatalogStore, trackCatalogTitles } from "@/tests/support/videoIndex"
 import { FakeDrive, hexUuid } from "@/tests/support/videoDrive"
@@ -44,8 +45,17 @@ let upserted: string[]
 let snapshots: Map<string, [Uint8Array | null, Uint8Array | null]>
 
 const store: SnapshotStore = {
-	read: root => Promise.resolve(snapshots.get(root) ?? [null, null]),
-	readGenerations: () => Promise.resolve([null, null]),
+	readSlot: (root, slot) => Promise.resolve(snapshots.get(root)?.[slot] ?? null),
+	readGenerations: root => {
+		const [a, b] = snapshots.get(root) ?? [null, null]
+
+		return Promise.resolve([
+			a === null ? null : (readSnapshotHeader(a)?.generation ?? null),
+			b === null ? null : (readSnapshotHeader(b)?.generation ?? null)
+		])
+	},
+	readWatermark: () => Promise.resolve(null),
+	writeWatermark: () => Promise.resolve(),
 	write: (root, slot, bytes) => {
 		const slots = snapshots.get(root) ?? [null, null]
 

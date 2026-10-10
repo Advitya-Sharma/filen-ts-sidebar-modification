@@ -8,8 +8,9 @@ import { outputPlanes, PcmAssembler } from "@/workers/remux/pcmAssembler.logic"
 import { frameAtOffset, WAV_HEADER_BYTES, wavHeader, wavLayout, type WavLayout } from "@/workers/remux/wav.logic"
 
 // An audio file decoded into a WAV stream of fixed size, served by byte range: a read continues the decode
-// that ended where it starts, or restarts the decoder at the sample its offset names. The browser's own
-// requests pace the decoding, so nothing is decoded ahead of what the element asks for.
+// that ended where it starts, or restarts the decoder at the sample its offset names. The element's reads pace
+// the decoding (the service worker reads such a stream with no window ahead), so nothing is decoded ahead of
+// what it asks for beyond the block a read ends in.
 
 // A decoder restarted at a seek begins this far before the requested sample: lossy codecs' first frame
 // after a restart lacks the overlap of the one before it.
@@ -159,7 +160,8 @@ export class PcmStream {
 			out.set(this.header.subarray(start, Math.min(end, WAV_HEADER_BYTES)))
 		}
 
-		let position = Math.max(start, WAV_HEADER_BYTES)
+		const from = Math.max(start, WAV_HEADER_BYTES)
+		let position = from
 
 		if (position >= end) {
 			return out
@@ -191,8 +193,12 @@ export class PcmStream {
 				position += bytes.length
 			}
 		} catch (error) {
-			// A decode that failed (a read of the file, the decoder) is not resumed: the next read starts afresh.
-			if (!signal.aborted) {
+			if (signal.aborted) {
+				// What it took goes back, so a read again from where it started (WebKit asks again from where the
+				// bytes it got ended) continues this decode instead of restarting it.
+				cursor.assembler.giveBack(out.subarray(from - start, position - start))
+			} else {
+				// A decode that failed (a read of the file, the decoder) is not resumed: the next read starts afresh.
 				this.cursors = this.cursors.filter(other => other !== cursor)
 				void dropCursor(cursor)
 			}

@@ -3,11 +3,18 @@ import { cachedOpfsDirectory, forgetOpfsDirectory, isNotFoundError, type OpfsBlo
 // The async side of an OPFS blob store, usable on the main thread (writes need a sync access handle,
 // which only a dedicated worker has: see workers/thumbStore.ts).
 
+// Neither a read nor a delete creates a store that must stay wiped: in Chromium a handle is a path, so re-creating
+// the directory would let a write still out in a worker through its pre-wipe handle.
+function storeDirectory(store: OpfsBlobStore): Promise<FileSystemDirectoryHandle> {
+	return cachedOpfsDirectory(store.dir, store.recreateWhenRemoved !== false)
+}
+
 // A miss (never written, or evicted) resolves null. A NotFoundError may also mean the memoized directory
-// itself is gone, which implies the file is too; forgetting it makes the next call walk afresh.
+// itself is gone (or was never created), which implies the file is too; forgetting it makes the next call walk
+// afresh.
 export async function readStoreBlob(store: OpfsBlobStore, key: string): Promise<Blob | null> {
 	try {
-		const dir = await cachedOpfsDirectory(store.dir)
+		const dir = await storeDirectory(store)
 		const fileHandle = await dir.getFileHandle(`${key}${store.ext}`)
 
 		return await fileHandle.getFile()
@@ -25,7 +32,7 @@ export async function readStoreBlob(store: OpfsBlobStore, key: string): Promise<
 // removeEntry needs no exclusive lock, so this runs anywhere. A missing entry is a clean no-op.
 export async function deleteStoreEntry(store: OpfsBlobStore, key: string): Promise<void> {
 	try {
-		const dir = await cachedOpfsDirectory(store.dir)
+		const dir = await storeDirectory(store)
 
 		await dir.removeEntry(`${key}${store.ext}`)
 	} catch (e) {

@@ -58,7 +58,14 @@ function byteAt(offset: number): number {
 }
 
 // Serves a file of `size` bytes on a fresh port and registers its reading end under `id`.
-async function registerPort(id: string, size: number, contentType = "video/mp4", stall = false, generation?: number) {
+async function registerPort(
+	id: string,
+	size: number,
+	contentType = "video/mp4",
+	stall = false,
+	generation?: number,
+	extra: Record<string, unknown> = {}
+) {
 	const channel = new MessageChannel()
 	const lifetime = new AbortController()
 	const reads: [number, number][] = []
@@ -90,7 +97,8 @@ async function registerPort(id: string, size: number, contentType = "video/mp4",
 		contentType,
 		bucket: SW_PREVIEW_BUCKET_PLAYER,
 		port: channel.port2,
-		...(generation === undefined ? {} : { generation })
+		...(generation === undefined ? {} : { generation }),
+		...extra
 	})
 
 	return { ack, lifetime, reads }
@@ -213,6 +221,203 @@ describe("sw.ts port-backed preview", () => {
 		await settled
 	})
 
+	it("reads windows ahead one deeper per pull once the consumer asks for a second, never past the served range", async () => {
+		const channel = new MessageChannel()
+		const reads: { start: number; end: number; answer: () => void }[] = []
+
+		channels.push(channel)
+		exposeRangePort(
+			channel.port1,
+			(start, end) =>
+				new Promise(resolve => {
+					reads.push({
+						start,
+						end,
+						answer: () => {
+							resolve(Uint8Array.from({ length: end - start }, (_, index) => byteAt(start + index)))
+						}
+					})
+				}),
+			new AbortController()
+		)
+		await message({
+			type: SW_MSG_REGISTER_PORT_PREVIEW,
+			id: "p1",
+			name: "clip.mp4",
+			size: 10 * BLOCK_BYTES,
+			contentType: "video/mp4",
+			bucket: SW_PREVIEW_BUCKET_PLAYER,
+			port: channel.port2
+		})
+
+		const { response, settled } = get("p1", "bytes=0-")
+		const body = response.body?.getReader()
+		const first = body?.read()
+		const spans = () => reads.map(read => [read.start, read.end])
+
+		await tick()
+		expect(spans()).toEqual([[0, BLOCK_BYTES]])
+		reads[0]?.answer()
+		expect((await first)?.value?.length).toBe(BLOCK_BYTES)
+
+		// The second pull reads the next window and one ahead.
+		const second = body?.read()
+
+		await tick()
+		expect(spans()).toEqual([
+			[0, BLOCK_BYTES],
+			[BLOCK_BYTES, 2 * BLOCK_BYTES],
+			[2 * BLOCK_BYTES, 3 * BLOCK_BYTES]
+		])
+
+		// Answered out of order, the windows still leave in order.
+		reads[2]?.answer()
+		reads[1]?.answer()
+		expect(Array.from((await second)?.value ?? []).slice(0, 2)).toEqual(expected(BLOCK_BYTES, BLOCK_BYTES + 1))
+
+		// The third keeps two ahead, as far as the served piece goes.
+		const third = body?.read()
+
+		await tick()
+		expect(spans()).toHaveLength(4)
+		expect(spans()[3]).toEqual([3 * BLOCK_BYTES, 4 * BLOCK_BYTES])
+		reads[3]?.answer()
+		expect(Array.from((await third)?.value ?? []).slice(0, 2)).toEqual(expected(2 * BLOCK_BYTES, 2 * BLOCK_BYTES + 1))
+		expect(Array.from((await body?.read())?.value ?? []).slice(0, 2)).toEqual(expected(3 * BLOCK_BYTES, 3 * BLOCK_BYTES + 1))
+		expect((await body?.read())?.done).toBe(true)
+		// The served piece ends at 4 chunks: nothing past it was read.
+		expect(reads).toHaveLength(4)
+		await settled
+	})
+
+	// Decoded audio: every window read ahead is decoding the element has not asked for, lost at each cancel.
+	it("reads no window ahead for a registration whose bytes are made as they are read", async () => {
+		const { ack, reads } = await registerPort("p1", 10 * BLOCK_BYTES, "audio/wav", false, undefined, { readAhead: false })
+
+		expect(ack).toMatchObject({ ok: true })
+
+		const { response, settled } = get("p1", "bytes=0-")
+		const body = response.body?.getReader()
+
+		for (let index = 0; index < 3; index++) {
+			expect(Array.from((await body?.read())?.value ?? []).slice(0, 2)).toEqual(
+				expected(index * BLOCK_BYTES, index * BLOCK_BYTES + 1)
+			)
+			await tick()
+			expect(reads).toHaveLength(index + 1)
+		}
+
+		await body?.cancel()
+		await settled
+		expect(reads).toEqual([
+			[0, BLOCK_BYTES],
+			[BLOCK_BYTES, 2 * BLOCK_BYTES],
+			[2 * BLOCK_BYTES, 3 * BLOCK_BYTES]
+		])
+	})
+
+	it("cancels the window read ahead with the response", async () => {
+		const channel = new MessageChannel()
+		const aborted: number[] = []
+		let answered = 0
+
+		channels.push(channel)
+		exposeRangePort(
+			channel.port1,
+			(start, end, signal) =>
+				new Promise((resolve, reject) => {
+					signal.addEventListener("abort", () => {
+						aborted.push(start)
+						reject(new Error("aborted"))
+					})
+
+					// Only the first window is answered.
+					if (answered++ === 0) {
+						resolve(Uint8Array.from({ length: end - start }, (_, index) => byteAt(start + index)))
+					}
+				}),
+			new AbortController()
+		)
+		await message({
+			type: SW_MSG_REGISTER_PORT_PREVIEW,
+			id: "p1",
+			name: "clip.mp4",
+			size: 10 * BLOCK_BYTES,
+			contentType: "video/mp4",
+			bucket: SW_PREVIEW_BUCKET_PLAYER,
+			port: channel.port2
+		})
+
+		const { response, settled } = get("p1", "bytes=0-")
+		const body = response.body?.getReader()
+
+		await body?.read()
+		void body?.read().catch(() => undefined)
+		await tick()
+		await body?.cancel()
+		await settled
+		await tick()
+
+		expect(aborted.sort((a, b) => a - b)).toEqual([BLOCK_BYTES, 2 * BLOCK_BYTES])
+	})
+
+	// WebKit abandons a stream a few chunks in and asks again from where its bytes ended.
+	it("serves the next response from the windows a cancelled one read ahead, instead of reading them again", async () => {
+		const { reads } = await registerPort("p1", 10 * BLOCK_BYTES)
+		const abandoned = get("p1", "bytes=0-")
+		const body = abandoned.response.body?.getReader()
+
+		await body?.read()
+		await body?.read()
+		await tick()
+		expect(reads).toEqual([
+			[0, BLOCK_BYTES],
+			[BLOCK_BYTES, 2 * BLOCK_BYTES],
+			[2 * BLOCK_BYTES, 3 * BLOCK_BYTES]
+		])
+		await body?.cancel()
+		await abandoned.settled
+
+		const resumed = get("p1", `bytes=${String(2 * BLOCK_BYTES)}-`)
+		const bytes = await bodyOf(resumed.response)
+
+		expect(bytes.length).toBe(4 * BLOCK_BYTES)
+		expect(bytes.slice(0, 2)).toEqual(expected(2 * BLOCK_BYTES, 2 * BLOCK_BYTES + 1))
+		expect(bytes.at(-1)).toBe(byteAt(6 * BLOCK_BYTES - 1))
+		// The window the first response had read is not read again.
+		expect(reads.slice(3)).toEqual([
+			[3 * BLOCK_BYTES, 4 * BLOCK_BYTES],
+			[4 * BLOCK_BYTES, 5 * BLOCK_BYTES],
+			[5 * BLOCK_BYTES, 6 * BLOCK_BYTES]
+		])
+
+		// Taken once: a third response reads it again.
+		const again = get("p1", `bytes=${String(2 * BLOCK_BYTES)}-${String(3 * BLOCK_BYTES - 1)}`)
+
+		expect(await bodyOf(again.response)).toEqual(expected(2 * BLOCK_BYTES, 3 * BLOCK_BYTES - 1))
+		expect(reads.at(-1)).toEqual([2 * BLOCK_BYTES, 3 * BLOCK_BYTES])
+	})
+
+	it("drops the windows a cancelled response read ahead with its registration", async () => {
+		const { reads } = await registerPort("p1", 10 * BLOCK_BYTES)
+		const abandoned = get("p1", "bytes=0-")
+		const body = abandoned.response.body?.getReader()
+
+		await body?.read()
+		await body?.read()
+		await tick()
+		await body?.cancel()
+		await abandoned.settled
+
+		// The same id registered again is another file's port.
+		const { reads: fresh } = await registerPort("p1", 10 * BLOCK_BYTES)
+		const resumed = get("p1", `bytes=${String(2 * BLOCK_BYTES)}-${String(3 * BLOCK_BYTES - 1)}`)
+
+		await bodyOf(resumed.response)
+		expect(reads).toHaveLength(3)
+		expect(fresh).toEqual([[2 * BLOCK_BYTES, 3 * BLOCK_BYTES]])
+	})
+
 	it("answers no Range header with the whole file and Accept-Ranges, and an unsatisfiable one with 416", async () => {
 		await registerPort("p1", 300)
 
@@ -306,7 +511,7 @@ describe("sw.ts port-backed preview", () => {
 		expect(get("p1", "bytes=0-9").response.status).toBe(404)
 	})
 
-	it("refuses a registration without a port or with a malformed size", async () => {
+	it("refuses a registration without a port, with a malformed size or with a malformed read-ahead flag", async () => {
 		expect(await message({ type: SW_MSG_REGISTER_PORT_PREVIEW, id: "p1", name: "a", size: 1, contentType: "video/mp4" })).toMatchObject(
 			{
 				ok: false
@@ -326,6 +531,11 @@ describe("sw.ts port-backed preview", () => {
 				port: channel.port2
 			})
 		).toMatchObject({ ok: false })
+		expect(get("p1", "bytes=0-0").response.status).toBe(404)
+
+		const { ack } = await registerPort("p1", 100, "audio/wav", false, undefined, { readAhead: "no" })
+
+		expect(ack).toMatchObject({ ok: false })
 		expect(get("p1", "bytes=0-0").response.status).toBe(404)
 	})
 })

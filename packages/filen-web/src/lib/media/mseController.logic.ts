@@ -422,6 +422,11 @@ export class TimelineOps {
 		return this.pending > 0
 	}
 
+	// Whether a restart is waiting for its turn.
+	public get restartQueued(): boolean {
+		return this.target !== null
+	}
+
 	public run(operation: () => Promise<void>): Promise<void> {
 		this.pending++
 

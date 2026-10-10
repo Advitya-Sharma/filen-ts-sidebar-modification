@@ -45,6 +45,7 @@ import {
 	type LibraryConfigState
 } from "@/features/videos/lib/library"
 import { resetDotFilen } from "@/lib/dotFilen"
+import { listVideosDir } from "@/features/videos/lib/videosDirListing"
 import { queryClient } from "@/queries/client"
 
 // The file on the drive: its versions by uuid, newest last.
@@ -196,6 +197,78 @@ describe("library config", () => {
 		expect(sdkApi.downloadFileBytes).toHaveBeenLastCalledWith(expect.objectContaining({ uuid: good.uuid }), expect.any(String))
 	})
 
+	it("never saves over a head no version of which parses, nor records a watermark for it", async () => {
+		const cachedDoc = rooted(emptyLibraryConfig(), "cached", 1, "a")
+
+		queryClient.setQueryData(LIBRARY_CONFIG_QUERY_KEY, {
+			account: ACCOUNT,
+			doc: cachedDoc,
+			dirUuid: VIDEOS_DIR,
+			headUuid: null,
+			watermark: null
+		} satisfies LibraryConfigState)
+		put(new TextEncoder().encode("{torn"))
+		sdkApi.listFileVersionsOp.mockResolvedValue([])
+
+		const state = await ensureLibraryConfig(eventId)
+
+		expect(sdkApi.uploadFileBytes).not.toHaveBeenCalled()
+		expect(activeLibraryRoots(state.doc).map(root => root.dirUuid)).toEqual(["cached"])
+		expect(state.watermark).toBeNull()
+
+		await expect(updateLibraryConfig((doc, stamp) => rooted(doc, "mine", stamp.t, stamp.d))).rejects.toThrow()
+
+		persistQuery.mockClear()
+		handleLibraryConfigDriveEvent(driveEvent(++eventId, { type: "trashEmpty" }))
+		persistLibraryConfigWatermark()
+
+		expect(sdkApi.uploadFileBytes).not.toHaveBeenCalled()
+		expect(persistQuery).not.toHaveBeenCalled()
+	})
+
+	it("leaves a head written by a newer version alone, without reading its versions", async () => {
+		put(encode(rooted(emptyLibraryConfig(), "old", 1, "a")))
+		put(encode({ v: 2, roots: {}, prefs: {}, overrides: {} }))
+
+		await ensureLibraryConfig(eventId)
+		await expect(updateLibraryConfig((doc, stamp) => rooted(doc, "mine", stamp.t, stamp.d))).rejects.toThrow()
+
+		expect(sdkApi.listFileVersionsOp).not.toHaveBeenCalled()
+		expect(sdkApi.uploadFileBytes).not.toHaveBeenCalled()
+		expect(remoteDoc().v).toBe(2)
+
+		// Once another session saves a readable head, edits save again.
+		echo(put(encode(rooted(emptyLibraryConfig(), "theirs", 2, "z"))))
+		await ensureLibraryConfig(++eventId)
+		await updateLibraryConfig((doc, stamp) => rooted(doc, "mine", stamp.t, stamp.d))
+
+		expect(activeLibraryRoots(remoteDoc()).map(root => root.dirUuid)).toEqual(["theirs", "mine"])
+	})
+
+	it("takes the version its own save superseded (versioning off) for no change from elsewhere", async () => {
+		await ensureLibraryConfig(eventId)
+		await updateLibraryConfig((doc, stamp) => rooted(doc, "first", stamp.t, stamp.d))
+
+		const before = head()
+
+		sdkApi.uploadFileBytes.mockImplementationOnce((_parent, bytes) => {
+			const own = put(bytes)
+
+			if (before !== undefined) {
+				handleLibraryConfigDriveEvent(
+					driveEvent(++eventId, { type: "fileTrash", uuid: before.uuid, stableUUID: hexUuid(), newUUID: own.uuid })
+				)
+			}
+
+			echo(own)
+
+			return Promise.resolve(own)
+		})
+		await updateLibraryConfig((doc, stamp) => rooted(doc, "second", stamp.t, stamp.d))
+
+		expect(libraryConfigNeedsRead()).toBe(false)
+	})
+
 	it("checks a root candidate against `.filen` and the current roots", async () => {
 		const chains: Record<string, { uuid: string; name: string }[]> = {
 			media: [
@@ -330,6 +403,27 @@ describe("library config", () => {
 		persistLibraryConfigWatermark()
 
 		expect(persistQuery).not.toHaveBeenCalled()
+	})
+
+	it("shares one listing of the directory with a reader that asked before the read, never one from before it was asked", async () => {
+		const videosListings = (): number => sdkApi.listDirectory.mock.calls.filter(([target]) => target.uuid === VIDEOS_DIR).length
+		const before = videosListings()
+		const askedBefore = performance.now()
+
+		await ensureLibraryConfig(eventId)
+
+		expect(videosListings()).toBe(before + 1)
+		await listVideosDir(VIDEOS_DIR, askedBefore)
+		expect(videosListings()).toBe(before + 1)
+
+		// A read asked for later lists again; so does a reader asking after it.
+		await updateLibraryConfig((doc, stamp) => rooted(doc, hexUuid(), stamp.t, stamp.d))
+		handleLibraryConfigDriveEvent(driveEvent(eventId + 100n, { type: "trashEmpty" }))
+		await ensureLibraryConfig(eventId + 200n)
+
+		expect(videosListings()).toBe(before + 2)
+		await listVideosDir(VIDEOS_DIR, performance.now())
+		expect(videosListings()).toBe(before + 3)
 	})
 
 	it("ignores a cached configuration of another account", async () => {
