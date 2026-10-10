@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest"
-import { BlockSource, bytesReadRange, type ReadRange } from "@/lib/media/blockSource"
-import { CARD_BLOCK_READS, initialBlockReads, probeVideo, walkContainer } from "@/lib/media/probe/probe"
-import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
+import {
+	BlockSource,
+	bytesReadRange,
+	type ReadRange,
+	CARD_BLOCK_READS,
+	initialBlockReads,
+	probeVideo,
+	walkContainer,
+	type ProbeTier,
+	type VideoProbe
+} from "@filen/shared/videos"
 import {
 	AC3_51,
 	ADTS_LC_48K_STEREO,

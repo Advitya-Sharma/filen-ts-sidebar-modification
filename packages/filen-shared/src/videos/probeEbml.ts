@@ -1,4 +1,4 @@
-import { MalformedError, utf8 } from "@/lib/media/probe/bytes"
+import { MalformedError, utf8 } from "./probeBytes"
 
 // EBML (RFC 8794) element headers and values, hardened for hostile input: IDs of at most 4 bytes, sizes
 // of at most 8 bytes and below 2^53, children that stay inside their parent, bounded counts and depth.
@@ -191,9 +191,26 @@ export function ebmlBinary(bytes: Uint8Array, element: EbmlElement): Uint8Array 
 // waits for its output to be read, so a stream stopped at the cap never holds much more than it.
 const INFLATE_INPUT_SLICE = 1024
 
-// Inflates zlib data with an output cap; null when it is corrupt or would exceed the cap.
+// The Compression Streams API (browsers, Node, Deno), declared with the shape used here.
+interface InflateStream {
+	writable: { getWriter(): { write(chunk: Uint8Array): Promise<void>; close(): Promise<void> } }
+	readable: {
+		getReader(): { read(): Promise<{ done: true; value?: undefined } | { done: false; value: Uint8Array }>; cancel(): Promise<void> }
+	}
+}
+
+type InflateStreamCtor = new (format: "deflate") => InflateStream
+
+// Inflates zlib data with an output cap; null when it is corrupt or would exceed the cap, or where the runtime
+// has no DecompressionStream (Hermes), which reads compressed data as unreadable.
 export async function inflateCapped(bytes: Uint8Array, cap: number): Promise<Uint8Array | null> {
-	const stream = new DecompressionStream("deflate")
+	const Decompression = (globalThis as unknown as { DecompressionStream?: InflateStreamCtor }).DecompressionStream
+
+	if (Decompression === undefined) {
+		return null
+	}
+
+	const stream = new Decompression("deflate")
 	const writer = stream.writable.getWriter()
 	const reader = stream.readable.getReader()
 	const feeding = (async () => {

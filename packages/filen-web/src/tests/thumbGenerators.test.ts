@@ -10,7 +10,7 @@ import {
 	THUMB_WARM_SIZE_GATE
 } from "@/features/drive/lib/thumbnails.logic"
 import type { SdkThumbnailResult } from "@/workers/sdk.worker"
-import type { ProbeTier } from "@/lib/media/probe/types"
+import type { ProbeTier } from "@filen/shared/videos"
 import type { ProbeRecord } from "@/features/videos/lib/probeService.logic"
 import type { FrameGeneratorDeps, FrameRequest, GeneratedFrame } from "@/features/videos/lib/frames"
 import type { ProbeServiceDeps } from "@/features/videos/lib/probeService"

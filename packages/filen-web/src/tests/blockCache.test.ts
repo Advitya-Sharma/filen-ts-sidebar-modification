@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { BlockAbortError, BlockCache, type AbortableReadRange } from "@/lib/media/blockCache"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
+import { BLOCK_BYTES } from "@filen/shared/videos"
 
 // A file whose byte at position p is p % 251, so any slice can be checked without storing the file.
 const PERIOD = 251

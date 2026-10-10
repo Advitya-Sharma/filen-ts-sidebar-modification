@@ -1,6 +1,5 @@
 import { type } from "arktype"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import { BLOCK_BYTES, type VideoProbe } from "@filen/shared/videos"
 
 // Generated frames: which files may have one, what a session may spend on them, and the per-file hint
 // that makes a regeneration a single read. Plain and DOM-free.

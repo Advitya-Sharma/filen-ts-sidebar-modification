@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import { type VideoProbe, BLOCK_BYTES } from "@filen/shared/videos"
 
 vi.mock("@/lib/sdk/client", () => ({ sdkApi: {} }))
 vi.mock("@/lib/storage/adapter", () => ({
@@ -32,7 +32,6 @@ import {
 } from "@/features/videos/lib/frames.logic"
 import { RecordStore } from "@/features/videos/lib/recordStore.logic"
 import type { FrameCaptureParams, FrameCaptureResult } from "@/features/videos/workers/frame.worker"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
 import { memoryKv } from "@/tests/support/memoryKv"
 
 function probe(overrides: Partial<VideoProbe> = {}): VideoProbe {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { EndOfStreamError } from "strtok3"
 import { BlockTokenizer } from "@/features/audio/lib/blockTokenizer"
-import { BLOCK_BYTES, BlockReadError, BlockSource, MAX_BLOCK_READS, ReadBudgetError } from "@/lib/media/blockSource"
+import { BLOCK_BYTES, BlockReadError, BlockSource, MAX_BLOCK_READS, ReadBudgetError } from "@filen/shared/videos"
 
 // A file whose every byte is its offset mod 251, so any window read back can be checked in place.
 function byteAt(offset: number): number {

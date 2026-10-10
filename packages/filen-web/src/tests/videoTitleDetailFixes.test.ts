@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
-import { NO_FILE, type VideoLibrary } from "@filen/shared/videos"
+import { NO_FILE, type VideoLibrary, type VideoProbe } from "@filen/shared/videos"
 import type { TFunction } from "i18next"
-import type { VideoProbe } from "@/lib/media/probe/types"
 
 const { sdkApi, library } = vi.hoisted(() => ({
 	sdkApi: { downloadFileBytes: vi.fn() },

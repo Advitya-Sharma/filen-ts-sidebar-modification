@@ -1,5 +1,5 @@
 import { plainErrorDTO, type ErrorDTO } from "@/lib/sdk/errors"
-import type { BlockSource } from "@/lib/media/blockSource"
+import type { BlockSource } from "@filen/shared/videos"
 
 // Why a media element gave up on its source: "format" when the browser cannot decode the file (nothing
 // a retry or a re-download changes), "other" for everything else (the stream broke, the fetch failed).

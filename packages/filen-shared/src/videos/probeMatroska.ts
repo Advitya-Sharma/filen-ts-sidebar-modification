@@ -14,8 +14,8 @@ import {
 	vp9CodecString,
 	vp9LevelForSize,
 	type ColourInfo
-} from "@filen/shared/videos"
-import { BLOCK_BYTES, type BlockSource } from "@/lib/media/blockSource"
+} from "./codecString"
+import { BLOCK_BYTES, type BlockSource } from "./blockSource"
 import {
 	MalformedError,
 	UnsupportedContainerError,
@@ -27,7 +27,7 @@ import {
 	transferKind,
 	utf8,
 	type DolbyVisionConfig
-} from "@/lib/media/probe/bytes"
+} from "./probeBytes"
 import {
 	MAX_EBML_CHILDREN,
 	MAX_EBML_STRING_BYTES,
@@ -40,21 +40,14 @@ import {
 	parseElementHeader,
 	type EbmlContext,
 	type EbmlElement
-} from "@/lib/media/probe/ebml"
-import {
-	MAX_CHAPTERS,
-	type MediaCodec,
-	type ParsedContainer,
-	type ParsedTrack,
-	type ProbeChapter,
-	type ProbeTier
-} from "@/lib/media/probe/types"
+} from "./probeEbml"
+import { MAX_CHAPTERS, type MediaCodec, type ParsedContainer, type ParsedTrack, type ProbeChapter, type ProbeTier } from "./probeTypes"
+import { EBML_ID } from "./transportStreamHead"
 
 // Matroska/WebM: the Segment's top-level elements are walked by header; the few a probe needs (SeekHead,
 // Info, Tracks, Chapters) are read whole under size caps, and the rest (Clusters, Cues, the payloads of
 // Attachments) are skipped by size or reached through the SeekHead, never read.
 
-export const EBML_ID = 0x1a45dfa3
 const DOC_TYPE_ID = 0x4282
 const SEGMENT_ID = 0x18538067
 const SEEK_HEAD_ID = 0x114d9b74

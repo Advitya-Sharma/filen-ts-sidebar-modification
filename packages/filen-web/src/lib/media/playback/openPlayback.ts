@@ -1,6 +1,5 @@
 import type { AnyFile } from "@filen/sdk-rs"
-import type { LadderDecision, LadderProbe, LadderSelection, PlaybackCapabilities } from "@filen/shared/videos"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import type { LadderDecision, LadderProbe, LadderSelection, PlaybackCapabilities, VideoProbe } from "@filen/shared/videos"
 import {
 	decideWithDemotions,
 	demote,

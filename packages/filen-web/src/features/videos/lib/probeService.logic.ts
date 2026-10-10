@@ -1,6 +1,6 @@
 import { type } from "arktype"
 import { extensionStart } from "@filen/shared"
-import { MEDIA_CODECS, PROBE_CONTAINERS, type ProbeTier, type VideoProbe } from "@/lib/media/probe/types"
+import { MEDIA_CODECS, PROBE_CONTAINERS, type ProbeTier, type VideoProbe } from "@filen/shared/videos"
 
 // The probe scheduler's rules and the persisted probe record. Plain and DOM-free.
 

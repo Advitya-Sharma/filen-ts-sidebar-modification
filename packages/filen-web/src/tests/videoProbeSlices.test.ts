@@ -1,9 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { BlockSource } from "@/lib/media/blockSource"
-import { initialBlockReads, probeVideo } from "@/lib/media/probe/probe"
-import type { ProbeTier } from "@/lib/media/probe/types"
+import { BlockSource, initialBlockReads, probeVideo, type ProbeTier } from "@filen/shared/videos"
 import {
 	CARD_BUDGET,
 	MEDIA_DIR,

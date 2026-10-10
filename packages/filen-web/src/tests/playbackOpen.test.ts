@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import { ladderQueries, type LadderProbe, type LadderSelection, type PlaybackCapabilities } from "@filen/shared/videos"
+import { ladderQueries, type LadderProbe, type LadderSelection, type PlaybackCapabilities, type VideoProbe } from "@filen/shared/videos"
 import type { RemuxSession, RemuxSessionOptions } from "@/lib/media/mseController"
 import { demotionSignature, toLadderProbe, type LearnedDemotion } from "@/lib/media/playback/capabilities.logic"
 import type { DirectSource } from "@/lib/media/playback/directSession"
 import type { RemuxSource } from "@/lib/media/playback/remuxSession"
-import type { VideoProbe } from "@/lib/media/probe/types"
 import { FakeVideo } from "@/tests/support/fakeVideo"
 
 const { openRemuxSession } = vi.hoisted(() => ({ openRemuxSession: vi.fn<(options: RemuxSessionOptions) => Promise<RemuxSession>>() }))

@@ -6,7 +6,7 @@ import { act, cleanup, render, waitFor } from "@testing-library/react"
 import type { AnyFile } from "@filen/sdk-rs"
 import type { OpenPlaybackOptions, Playback } from "@/lib/media/playback/openPlayback"
 import type { RemuxSessionOptions } from "@/lib/media/mseController"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import type { VideoProbe } from "@filen/shared/videos"
 import "@/lib/i18n"
 
 // Video and audio previews never buffer a whole file: with no service worker, and for a public link's

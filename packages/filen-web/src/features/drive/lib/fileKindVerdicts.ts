@@ -1,7 +1,6 @@
-import type { ContentVerdict } from "@filen/shared"
+import { boundedVerdicts, VERDICT_MAX_RECORDS, type ContentVerdict, type StoredVerdict } from "@filen/shared"
 import { createListenerSet } from "@/lib/listenerSet"
 import { log } from "@/lib/log"
-import { boundedVerdicts, VERDICT_MAX_RECORDS, type StoredVerdict } from "@/features/drive/lib/fileKindVerdicts.logic"
 
 // What reads of a file's content already said about its kind (resolveFileKind's verdict): a `.ts` that is a
 // transport stream, a `.webm` holding audio alone. Written only by reads that happen anyway (a preview's or

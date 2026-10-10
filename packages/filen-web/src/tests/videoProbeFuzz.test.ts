@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest"
-import { BLOCK_BYTES, BlockReadError, ReadBudgetError, type ReadRange } from "@/lib/media/blockSource"
-import { MAX_PROBE_BLOCK_READS } from "@/lib/media/probe/bytes"
-import { CARD_BLOCK_READS, initialBlockReads, probeVideo } from "@/lib/media/probe/probe"
-import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
+import {
+	BLOCK_BYTES,
+	BlockReadError,
+	ReadBudgetError,
+	type ReadRange,
+	MAX_PROBE_BLOCK_READS,
+	CARD_BLOCK_READS,
+	initialBlockReads,
+	probeVideo,
+	type ProbeTier,
+	type VideoProbe
+} from "@filen/shared/videos"
 import { deflateSync } from "node:zlib"
 import {
 	FTYP,

@@ -1,5 +1,4 @@
-import { codecStringAlternatives } from "@filen/shared/videos"
-import type { MediaCodec } from "@/lib/media/probe/types"
+import { codecStringAlternatives, type MediaCodec } from "@filen/shared/videos"
 
 // The audio/video codecs a preview names when a browser cannot play part of a file, and how to ask a
 // browser whether it can.

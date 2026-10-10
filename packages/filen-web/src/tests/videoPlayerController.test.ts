@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { PlaybackSnapshot } from "@/lib/media/playback/openPlayback"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import type { VideoProbe } from "@filen/shared/videos"
 import type { WatchItemTarget } from "@/features/videos/lib/player/watchTarget.logic"
 
 const mocks = vi.hoisted(() => {

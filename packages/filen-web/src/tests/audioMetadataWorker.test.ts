@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import { readAudioMetadata, type AudioMetadataDeps } from "@/workers/audioMetadata"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
+import { BLOCK_BYTES } from "@filen/shared/videos"
 
 // Real music-metadata over small synthetic files, with the SDK's range read and thumbnailer faked.
 

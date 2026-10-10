@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { CueBuilder } from "@filen/shared/videos"
+import { CueBuilder, type VideoProbe } from "@filen/shared/videos"
 import type { VideoTitleView } from "@/workers/videoIndex/view.logic"
 import type { PlayerSubtitleTrack } from "@/features/videos/lib/player/subtitles.logic"
 
@@ -34,7 +34,6 @@ import { nextMovieInDirectory } from "@/features/videos/lib/player/postPlay.logi
 import { SidecarReader } from "@/features/videos/lib/player/sidecarReader"
 import { SubtitleTrackPool } from "@/lib/media/subtitles/subtitleTracks"
 import { cancelPrewarm, directSource, prewarmPlayback, remuxSource } from "@/lib/media/playback/sources"
-import type { VideoProbe } from "@/lib/media/probe/types"
 
 function movie(id: string, sortName: string, roots: string[], extra: Partial<VideoTitleView> = {}): VideoTitleView {
 	return {

@@ -11,7 +11,7 @@ vi.mock("@/lib/media/playback/audioStream", () => ({ audioMediaSource: vi.fn(), 
 
 import { createDomAudioAdapter } from "@/features/audio/lib/bytes"
 import type { AudioElementEvents, TrackSource } from "@/features/audio/lib/engine"
-import { BlockSource, type ReadRange } from "@/lib/media/blockSource"
+import { BlockSource, type ReadRange } from "@filen/shared/videos"
 import { classifyMediaError, MEDIA_FORMAT_UNSUPPORTED, MEDIA_PLAYBACK_FAILED, type MediaFailureKind } from "@/lib/media/mediaFailure"
 import { asErrorDTO, type ErrorDTO } from "@/lib/sdk/errors"
 

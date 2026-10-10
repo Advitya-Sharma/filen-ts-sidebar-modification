@@ -1,9 +1,18 @@
 /// <reference lib="webworker" />
 import * as Comlink from "comlink"
-import { BlockReadError, BlockSource, OutOfFileReadError, ReadBudgetError, type ReadRange } from "@/lib/media/blockSource"
-import { MalformedError } from "@/lib/media/probe/bytes"
+import {
+	BlockReadError,
+	BlockSource,
+	OutOfFileReadError,
+	ReadBudgetError,
+	type ReadRange,
+	MalformedError,
+	openKeyframeIndex,
+	readKeyframe,
+	type DecoderSetup,
+	type KeyframeRef
+} from "@filen/shared/videos"
 import { rangePortReader } from "@/lib/media/rangePort"
-import { openKeyframeIndex, readKeyframe, type DecoderSetup, type KeyframeRef } from "@/lib/media/probe/keyframes"
 import {
 	FRAME_POSITIONS,
 	SAMPLE_HEIGHT,

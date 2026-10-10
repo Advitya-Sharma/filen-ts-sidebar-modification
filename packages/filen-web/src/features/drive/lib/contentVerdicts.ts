@@ -1,6 +1,6 @@
 import { verdictChangesKind, type ContentVerdict } from "@filen/shared"
 import type { AnyFile } from "@filen/sdk-rs"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import type { VideoProbe } from "@filen/shared/videos"
 import { anyFileTypeFacts } from "@/features/drive/lib/item"
 import { previewCategoryForExtension } from "@/features/drive/lib/preview.logic"
 import { isTransportStreamName } from "@/features/preview/lib/previewPlayback.logic"

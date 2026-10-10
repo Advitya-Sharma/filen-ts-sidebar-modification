@@ -1,9 +1,18 @@
 import { deflateSync } from "node:zlib"
 import { describe, expect, it, vi } from "vitest"
-import { BLOCK_BYTES, BlockSource, OutOfFileReadError, type ReadRange } from "@/lib/media/blockSource"
-import { inflateCapped, parseElementHeader } from "@/lib/media/probe/ebml"
-import { initialBlockReads, probeVideo, walkContainer } from "@/lib/media/probe/probe"
-import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
+import {
+	BLOCK_BYTES,
+	BlockSource,
+	OutOfFileReadError,
+	type ReadRange,
+	inflateCapped,
+	parseElementHeader,
+	initialBlockReads,
+	probeVideo,
+	walkContainer,
+	type ProbeTier,
+	type VideoProbe
+} from "@filen/shared/videos"
 import {
 	FTYP,
 	audioEntry,

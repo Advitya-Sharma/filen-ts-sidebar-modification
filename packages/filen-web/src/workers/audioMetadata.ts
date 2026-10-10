@@ -2,7 +2,7 @@ import { CouldNotDetermineFileTypeError, parseFromTokenizer, selectCover, type I
 import { normalizeTrackTags } from "@filen/shared"
 import { log } from "@/lib/log"
 import { BlockTokenizer } from "@/features/audio/lib/blockTokenizer"
-import { BlockSource, type ReadRange } from "@/lib/media/blockSource"
+import { BlockSource, type ReadRange } from "@filen/shared/videos"
 
 // Tag + cover extraction for one audio file, run inside the sdk worker so the parser's many small reads
 // go straight to the SDK (no page round trip per read) and the embedded cover never leaves the worker at

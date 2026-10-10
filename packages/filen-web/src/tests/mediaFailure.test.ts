@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest"
-import { BlockSource, bytesReadRange, type ReadRange } from "@/lib/media/blockSource"
+import { BlockSource, bytesReadRange, type ReadRange } from "@filen/shared/videos"
 import { classifyMediaError, mediaFailureDTO, reportMediaFailure, type MediaFailureKind } from "@/lib/media/mediaFailure"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 

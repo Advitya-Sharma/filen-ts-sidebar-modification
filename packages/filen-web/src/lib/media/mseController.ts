@@ -32,7 +32,7 @@ import {
 	type BufferLimits,
 	type TimeRange
 } from "@/lib/media/mseController.logic"
-import type { ProbeIndex } from "@/lib/media/probe/types"
+import type { ProbeIndex } from "@filen/shared/videos"
 import { rangePortReader } from "@/lib/media/rangePort"
 import { rangeReads } from "@/lib/media/rangeReads"
 import {

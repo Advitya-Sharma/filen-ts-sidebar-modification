@@ -4,9 +4,9 @@ import {
 	type RememberedSubtitle,
 	type SidecarSubtitleFormat,
 	type SubtitleFormat,
-	type SubtitleTrackInfo
+	type SubtitleTrackInfo,
+	type VideoProbe
 } from "@filen/shared/videos"
-import type { VideoProbe } from "@/lib/media/probe/types"
 import { isTapTextCodec } from "@/workers/remux/textTap"
 import type { VideoFileRef, VideoPartView } from "@/workers/videoIndex/view.logic"
 

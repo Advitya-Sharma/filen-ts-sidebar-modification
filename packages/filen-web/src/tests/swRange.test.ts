@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
+import { BLOCK_BYTES } from "@filen/shared/videos"
 import { LARGE_CLOSED_RANGE_BYTES, parseRange, previewPieceEnd, previewServedEnd, PREVIEW_PIECE_BYTES } from "@/sw/range"
 
 describe("parseRange", () => {

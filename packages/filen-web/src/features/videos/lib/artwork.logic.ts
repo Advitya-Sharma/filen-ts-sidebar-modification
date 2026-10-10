@@ -6,11 +6,12 @@ import {
 	type LibrarySeason,
 	type LibrarySeries,
 	type LibraryVersion,
-	type VideoLibrary
+	type VideoLibrary,
+	type ProbeCover,
+	type VideoProbe
 } from "@filen/shared/videos"
 import type { Rgb, Size } from "@/lib/media/framePick.logic"
 import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
-import type { ProbeCover, VideoProbe } from "@/lib/media/probe/types"
 
 // Which image fills a title's poster, backdrop or still: an ordered list of candidate sources per slot,
 // decided from the library listing alone (zero bytes read); a loader then tries them in order and the

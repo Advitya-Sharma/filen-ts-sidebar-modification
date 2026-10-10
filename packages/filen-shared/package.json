@@ -17,7 +17,8 @@
 		"./tooling": "./src/tooling/licenseNotices.ts",
 		"./tooling/i18n": "./src/tooling/i18nPipeline.ts",
 		"./assistant": "./src/assistant/index.ts",
-		"./videos": "./src/videos/index.ts"
+		"./videos": "./src/videos/index.ts",
+		"./videos/transportStreamHead": "./src/videos/transportStreamHead.ts"
 	},
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && tsc -p tsconfig.dom.json && tsc -p tsconfig.tooling.json",

@@ -1,8 +1,8 @@
-import type { BlockSource } from "@/lib/media/blockSource"
-import { MalformedError, readBytes, uint32, uint64 } from "@/lib/media/probe/bytes"
-import { ebmlChildren, ebmlUint, parseElementHeader, type EbmlContext, type EbmlElement } from "@/lib/media/probe/ebml"
-import { pictureTrack, walkContainer } from "@/lib/media/probe/probe"
-import type { ByteRange, CuesLocation, ProbeVideo, SampleTables, VideoDecodeInfo } from "@/lib/media/probe/types"
+import type { BlockSource } from "./blockSource"
+import { MalformedError, readBytes, uint32, uint64 } from "./probeBytes"
+import { ebmlChildren, ebmlUint, parseElementHeader, type EbmlContext, type EbmlElement } from "./probeEbml"
+import { pictureTrack, walkContainer } from "./probe"
+import type { ByteRange, CuesLocation, ProbeVideo, SampleTables, VideoDecodeInfo } from "./probeTypes"
 
 // Keyframes located with the probe's own walkers, reading only the index bytes a lookup needs: an MP4's
 // sample tables (stts/stss/stsc entries, one chunk offset, the sizes up to the sample) or a Matroska's

@@ -148,11 +148,10 @@ import { createListBatcher } from "@/workers/archiveListPacker"
 import type { PackedEntryBatch } from "@/lib/sdk/archiveListing"
 import { readAudioMetadata as parseAudioMetadata, type AudioMetadataDeps, type AudioMetadataResult } from "@/workers/audioMetadata"
 import { createMemorySink, toRawPreviewResult, type RawPreviewResult } from "@/features/preview/lib/rawPreview.logic"
-import { probeSource, probeVideo } from "@/lib/media/probe/probe"
+import { probeSource, probeVideo, type ProbeTier, type VideoProbe } from "@filen/shared/videos"
+import { asByteStream, imageSniffStream } from "@/lib/media/imageSniff"
 import { EarlyCancels } from "@/workers/earlyCancels"
-import { asByteStream, imageSniffStream } from "@/lib/media/probe/imageSniff"
 import { exposeRangePort } from "@/lib/media/rangePort"
-import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
 import { WalkCoordinator } from "@/workers/walkCoordinator"
 import { VideoIndexEngine, type IndexRootConfig } from "@/workers/videoIndex/engine"
 import { opfsSnapshotStore } from "@/workers/videoIndex/snapshotStore"
@@ -2482,7 +2481,7 @@ const api = {
 		)
 	},
 	// ── Video probe ──────────────────────────────────────────────────────────
-	// One tier of a video's container probe (lib/media/probe), its range reads going straight to the SDK
+	// One tier of a video's container probe (@filen/shared/videos), its range reads going straight to the SDK
 	// so only the small record crosses back. Null for a file that is no MP4/MOV/Matroska/WebM; a failed
 	// or cancelled download throws. Cancelled through cancelPreviewDownload(previewToken), like the other
 	// preview reads. The uuid keeps the call shape of readAudioMetadata, whose caller keys by it too.

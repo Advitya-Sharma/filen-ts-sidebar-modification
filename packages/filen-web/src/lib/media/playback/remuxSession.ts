@@ -1,6 +1,6 @@
 import { openRemuxSession, type MseFailure, type RemuxSession, type RemuxSessionOptions } from "@/lib/media/mseController"
 import { isIdrUnreachable, isSourceReadError, SourceReadError, type RemuxTextCue } from "@/lib/media/remuxTypes"
-import type { ProbeIndex } from "@/lib/media/probe/types"
+import type { ProbeIndex } from "@filen/shared/videos"
 import type {
 	PlaybackFailure,
 	PlaybackSession,

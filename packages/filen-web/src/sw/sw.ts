@@ -42,7 +42,7 @@ import { heldBackBody } from "@/lib/sw/heldBackBody"
 import { plainErrorDTO, toErrorDTO } from "@/lib/sdk/errors"
 import { contentDispositionAttachment } from "@/lib/filename"
 import { log } from "@/lib/log"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
+import { BLOCK_BYTES } from "@filen/shared/videos"
 import { rangePortReader, type RangePortReader } from "@/lib/media/rangePort"
 import { parseRange, previewServedEnd, type ByteRange } from "@/sw/range"
 

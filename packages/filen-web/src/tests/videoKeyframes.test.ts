@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { BlockSource, bytesReadRange } from "@/lib/media/blockSource"
 import {
+	BlockSource,
+	bytesReadRange,
 	blockFrameStart,
 	chunkOfSample,
 	cueAtOrBefore,
@@ -12,7 +13,7 @@ import {
 	sampleAtTime,
 	sampleTime,
 	syncSampleAtOrBefore
-} from "@/lib/media/probe/keyframes"
+} from "@filen/shared/videos"
 import { MEDIA_DIR, fileReadRange } from "@/tests/support/videoProbe"
 import {
 	FTYP,

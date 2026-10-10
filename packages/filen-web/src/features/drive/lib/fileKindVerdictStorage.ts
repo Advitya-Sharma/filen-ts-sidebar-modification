@@ -1,11 +1,11 @@
 import { type } from "arktype"
 import { kvDelete, kvEntriesJson, kvSetJson } from "@/lib/storage/adapter"
 import { attachFileKindVerdictStorage } from "@/features/drive/lib/fileKindVerdicts"
-import { VERDICT_KV_PREFIX } from "@/features/drive/lib/fileKindVerdicts.logic"
+import { isStoredVerdict, VERDICT_KV_PREFIX } from "@filen/shared"
 
 // The file-kind verdicts' kv rows, one per file uuid under a versioned prefix.
 
-const verdictSchema = type({ v: "'transportStream' | 'notTransportStream' | 'video' | 'audio'", at: "number" })
+const verdictSchema = type("unknown").narrow(isStoredVerdict)
 
 // Boot, once storage is open: the verdicts are in memory by the first listing's paint, or follow it as one change.
 export function connectFileKindVerdictStorage(): void {

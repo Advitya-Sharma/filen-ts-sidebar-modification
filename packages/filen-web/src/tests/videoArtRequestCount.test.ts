@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import { classifyVideoLibrary, type LibraryScanFile } from "@filen/shared/videos"
+import {
+	classifyVideoLibrary,
+	type LibraryScanFile,
+	BLOCK_BYTES,
+	type ReadRange,
+	CARD_BLOCK_READS,
+	probeSource,
+	probeVideo,
+	type ProbeTier
+} from "@filen/shared/videos"
 
 // Request counts for the Videos probe and artwork paths: what browsing costs in SDK calls and block reads.
 
@@ -42,9 +51,6 @@ vi.mock("@/lib/storage/adapter", async () => {
 	}
 })
 
-import { BLOCK_BYTES, type ReadRange } from "@/lib/media/blockSource"
-import { CARD_BLOCK_READS, probeSource, probeVideo } from "@/lib/media/probe/probe"
-import type { ProbeTier } from "@/lib/media/probe/types"
 import { probeService } from "@/features/videos/lib/probeService"
 import { artLoader } from "@/features/videos/lib/artwork"
 import { artCandidates } from "@/features/videos/lib/artwork.logic"

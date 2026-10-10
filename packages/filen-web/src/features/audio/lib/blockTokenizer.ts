@@ -1,5 +1,5 @@
 import { AbstractTokenizer, EndOfStreamError, type IReadChunkOptions } from "strtok3"
-import type { BlockSource } from "@/lib/media/blockSource"
+import type { BlockSource } from "@filen/shared/videos"
 
 // strtok3's random-access contract over a BlockSource, mirroring its own BlobTokenizer: the same
 // read/peek split, the same EndOfStreamError on a short read without `mayBeLess`.

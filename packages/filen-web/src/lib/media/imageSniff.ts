@@ -1,4 +1,4 @@
-import { sniffImageMime } from "@/lib/media/probe/bytes"
+import { sniffImageMime } from "@filen/shared/videos"
 
 // Bytes a container calls an image are passed on only once their first bytes say so: an MP4 `covr` may
 // declare only `image/*`, and a Matroska attachment named cover.jpg can hold anything.

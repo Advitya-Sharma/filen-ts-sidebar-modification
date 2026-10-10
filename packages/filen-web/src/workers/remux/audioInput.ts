@@ -16,9 +16,8 @@ import {
 	type InputAudioTrack,
 	type InputFormat
 } from "mediabunny"
-import { BLOCK_BYTES, BlockSource } from "@/lib/media/blockSource"
+import { BLOCK_BYTES, BlockSource, walkContainer } from "@filen/shared/videos"
 import { BlockCache } from "@/lib/media/blockCache"
-import { walkContainer } from "@/lib/media/probe/probe"
 import { rangePortReader, type RangePortReader } from "@/lib/media/rangePort"
 import { AUDIO_UNSUPPORTED_ERROR, SourceReadError, type RemuxStats } from "@/lib/media/remuxTypes"
 import { sampleReader, type SampleItem, type SampleReader } from "@/workers/remux/audioTranscode"

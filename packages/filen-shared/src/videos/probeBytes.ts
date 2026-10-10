@@ -1,4 +1,4 @@
-import type { BlockSource } from "@/lib/media/blockSource"
+import type { BlockSource } from "./blockSource"
 
 // Byte-level helpers shared by the container walkers. Every reader tolerates an index past the end
 // (reading zeros) so a hostile length can only ever produce a wrong value, never an exception.
@@ -58,10 +58,18 @@ export function ascii(bytes: Uint8Array, start: number, end: number): string {
 	return text
 }
 
-const utf8Decoder = new TextDecoder()
+interface Utf8Decoder {
+	decode(input: Uint8Array): string
+}
+
+// Built on first use, so evaluating this module has no side effects (on Hermes, TextDecoder is a global Expo
+// installs lazily).
+let utf8Decoder: Utf8Decoder | null = null
 
 // Text with trailing NULs dropped; null when empty.
 export function utf8(bytes: Uint8Array, start: number, end: number): string | null {
+	utf8Decoder ??= new (globalThis as unknown as { TextDecoder: new () => Utf8Decoder }).TextDecoder()
+
 	const text = utf8Decoder.decode(bytes.subarray(start, Math.max(start, end))).replace(/\0+$/, "")
 
 	return text === "" ? null : text

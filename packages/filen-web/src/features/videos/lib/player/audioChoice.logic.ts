@@ -1,5 +1,4 @@
-import { selectAudioTrack } from "@filen/shared/videos"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import { selectAudioTrack, type VideoProbe } from "@filen/shared/videos"
 
 // The audio track an item starts on, the same for the player and the detail page's select and Direct/Remux badge:
 // the series' remembered language, then the user's languages and the file's default, preferring a track this browser

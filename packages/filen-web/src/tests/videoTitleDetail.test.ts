@@ -8,9 +8,9 @@ import {
 	splitOverrideKey,
 	withLibraryOverride,
 	type LibraryConfigDoc,
-	type LibraryOverride
+	type LibraryOverride,
+	type VideoProbe
 } from "@filen/shared/videos"
-import type { VideoProbe } from "@/lib/media/probe/types"
 import {
 	defaultSeason,
 	defaultVersion,

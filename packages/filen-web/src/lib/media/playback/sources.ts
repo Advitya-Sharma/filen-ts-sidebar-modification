@@ -11,7 +11,7 @@ import {
 import type { DirectSource } from "@/lib/media/playback/directSession"
 import type { RemuxSource } from "@/lib/media/playback/remuxSession"
 import { warmRemuxFile, type RemuxWarmth } from "@/lib/media/mseController"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import type { VideoProbe } from "@filen/shared/videos"
 
 // The app's byte sources for playback sessions: the service worker's range route and the SDK worker's
 // range ports.

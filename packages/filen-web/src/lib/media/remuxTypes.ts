@@ -1,4 +1,4 @@
-import type { ProbeIndex } from "@/lib/media/probe/types"
+import type { ProbeIndex } from "@filen/shared/videos"
 
 // The contract between the page's MSE controller and the remux worker. Plain data only: it crosses a
 // worker boundary.

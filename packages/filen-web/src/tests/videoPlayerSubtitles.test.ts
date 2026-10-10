@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { CueBuilder } from "@filen/shared/videos"
+import { CueBuilder, type VideoProbe } from "@filen/shared/videos"
 import {
 	DEFAULT_SUBTITLE_STYLE,
 	clampSubtitleDelay,
@@ -21,7 +21,6 @@ import {
 	subtitleTracksOf
 } from "@/features/videos/lib/player/subtitles.logic"
 import type { VideoPartView } from "@/workers/videoIndex/view.logic"
-import type { VideoProbe } from "@/lib/media/probe/types"
 
 const { kvStore, kvSetJson } = vi.hoisted(() => {
 	const store = new Map<string, unknown>()

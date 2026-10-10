@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import type { VideoProbe } from "@filen/shared/videos"
 
 // Content verdicts: kept per uuid in kv under a versioned prefix, the newest few thousand, read
 // synchronously, filled from kv once attached, forgotten at logout; and what a probe says about a file's
@@ -19,7 +19,8 @@ vi.mock("@/lib/storage/adapter", () => ({
 	kvDelete: kv.kvDelete
 }))
 
-const { boundedVerdicts, probeVerdict, VERDICT_KV_PREFIX } = await import("@/features/drive/lib/fileKindVerdicts.logic")
+const { VERDICT_KV_PREFIX } = await import("@filen/shared")
+const { probeVerdict } = await import("@/features/drive/lib/fileKindVerdicts.logic")
 const { fileKindVerdict, recordFileKindVerdict, resetFileKindVerdicts, subscribeFileKindVerdicts } =
 	await import("@/features/drive/lib/fileKindVerdicts")
 const { adoptProbeRecords, recordContentVerdict, recordProbeVerdict } = await import("@/features/drive/lib/contentVerdicts")
@@ -83,23 +84,6 @@ describe("probeVerdict", () => {
 		expect(probeVerdict(probe({ audio: [SOUND] }), false)).toBe("audio")
 		expect(probeVerdict(probe({ audio: [SOUND], partial: true }), false)).toBeNull()
 		expect(probeVerdict(null, false)).toBeNull()
-	})
-})
-
-describe("boundedVerdicts", () => {
-	it("keeps the newest, lets this session's writes win, and names the rest for deletion", () => {
-		const { keep, drop } = boundedVerdicts(
-			[
-				["a", { at: 1 }],
-				["b", { at: 2 }],
-				["c", { at: 3 }]
-			],
-			[["a", { at: 9 }]],
-			2
-		)
-
-		expect(keep.map(([uuid]) => uuid)).toEqual(["c", "a"])
-		expect(drop).toEqual(["b"])
 	})
 })
 

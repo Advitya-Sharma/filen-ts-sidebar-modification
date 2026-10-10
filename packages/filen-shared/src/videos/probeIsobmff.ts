@@ -13,8 +13,9 @@ import {
 	simpleAudioCodecString,
 	vp9CodecString,
 	type ColourInfo
-} from "@filen/shared/videos"
-import { BLOCK_BYTES, BlockReadError, ReadBudgetError, type BlockSource } from "@/lib/media/blockSource"
+} from "./codecString"
+import { BLOCK_BYTES, BlockReadError, ReadBudgetError, type BlockSource } from "./blockSource"
+import { LEADING_BOXES } from "./transportStreamHead"
 import {
 	MalformedError,
 	ascii,
@@ -29,7 +30,7 @@ import {
 	uint32,
 	uint64,
 	utf8
-} from "@/lib/media/probe/bytes"
+} from "./probeBytes"
 import {
 	MAX_CHAPTERS,
 	type MediaCodec,
@@ -38,14 +39,11 @@ import {
 	type ProbeChapter,
 	type ProbeTier,
 	type SampleTables
-} from "@/lib/media/probe/types"
+} from "./probeTypes"
 
 // MP4/MOV/M4V (ISO BMFF) walked box header by box header: payloads are read only for the few small boxes
 // a probe needs, and the large sample tables are skipped by their sizes, so a 4 MiB `moov` costs a read
 // per block that holds a header the walk visits, never the whole box.
-
-// Box types a file may open with: `ftyp` in every MP4, the others in QuickTime files that predate it.
-export const LEADING_BOXES = new Set(["ftyp", "moov", "mdat", "wide", "free", "skip", "pnot"])
 
 // Top-level boxes visited looking for `moov`; past this the file is not shaped like one to read.
 const MAX_TOP_LEVEL_BOXES = 64
@@ -681,6 +679,8 @@ async function walkTrak(walk: Walk, trak: Box): Promise<ParsedTrack | null> {
 			// The card needs nothing after the media box; the user data with the name comes later.
 			return walk.tier === "full"
 		}
+
+		return true
 	})
 
 	const { header, handler, entry, name } = state
@@ -933,6 +933,8 @@ async function walkMoov(walk: Walk, moov: Box): Promise<void> {
 				result.partial = true
 			}
 		}
+
+		return true
 	})
 }
 

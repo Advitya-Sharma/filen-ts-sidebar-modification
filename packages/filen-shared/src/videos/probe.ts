@@ -1,9 +1,10 @@
-import { BlockSource, OutOfFileReadError, ReadBudgetError, type ReadRange } from "@/lib/media/blockSource"
-import { MalformedError, UnsupportedContainerError, ascii, readBytes, uint32 } from "@/lib/media/probe/bytes"
-import { LEADING_BOXES, walkIsobmff } from "@/lib/media/probe/isobmff"
-import { EBML_ID, walkMatroska } from "@/lib/media/probe/matroska"
-import { TS_SNIFF_BYTES, sniffTransportStream, walkMpegTs, type TsLayout } from "@/lib/media/probe/mpegts"
-import type { ParsedContainer, ParsedTrack, ProbeTier, ProbeVideo, VideoProbe } from "@/lib/media/probe/types"
+import { BlockSource, OutOfFileReadError, ReadBudgetError, type ReadRange } from "./blockSource"
+import { MalformedError, UnsupportedContainerError, ascii, readBytes, uint32 } from "./probeBytes"
+import { walkIsobmff } from "./probeIsobmff"
+import { walkMatroska } from "./probeMatroska"
+import { walkMpegTs } from "./probeMpegts"
+import { EBML_ID, LEADING_BOXES, TS_SNIFF_BYTES, sniffTransportStream, type TsLayout } from "./transportStreamHead"
+import type { ParsedContainer, ParsedTrack, ProbeTier, ProbeVideo, VideoProbe } from "./probeTypes"
 
 // The container probe: which tier reads how much, and the record each tier yields.
 

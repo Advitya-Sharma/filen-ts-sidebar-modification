@@ -1,4 +1,4 @@
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
+import { BLOCK_BYTES } from "@filen/shared/videos"
 
 export interface ByteRange {
 	start: number

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
+import type { ProbeTier, VideoProbe } from "@filen/shared/videos"
 
 vi.mock("@/lib/sdk/client", () => ({ sdkApi: {} }))
 vi.mock("@/lib/storage/adapter", () => ({

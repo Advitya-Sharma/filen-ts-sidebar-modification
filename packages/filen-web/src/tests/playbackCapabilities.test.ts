@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import type { LadderProbe, LadderSelection } from "@filen/shared/videos"
+import type { LadderProbe, LadderSelection, VideoProbe } from "@filen/shared/videos"
 import {
 	decodingConfiguration,
 	decodingKey,
@@ -18,7 +18,6 @@ import {
 	type StreamFacts
 } from "@/lib/media/playback/capabilities.logic"
 import { PlaybackCapabilityProbe, type CapabilityDeps, type PlaybackEnvironment } from "@/lib/media/playback/capabilities"
-import type { VideoProbe } from "@/lib/media/probe/types"
 
 const UA = "Mozilla/5.0 (Macintosh) Gecko/20100101 Firefox/157.0"
 const DAY = 24 * 60 * 60 * 1000

@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import type { LadderDecision } from "@filen/shared/videos"
+import type { LadderDecision, MediaCodec, VideoProbe } from "@filen/shared/videos"
 import type { Playback, PlaybackSnapshot, openPlayback } from "@/lib/media/playback/openPlayback"
-import type { MediaCodec, VideoProbe } from "@/lib/media/probe/types"
 import type { RemuxTextCue } from "@/lib/media/remuxTypes"
 import { FakeVideo } from "@/tests/support/fakeVideo"
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import type { AnyFile } from "@filen/sdk-rs"
-import { classifyVideoLibrary, type LibraryScanFile, type VideoLibrary } from "@filen/shared/videos"
+import { classifyVideoLibrary, type LibraryScanFile, type VideoLibrary, type VideoProbe } from "@filen/shared/videos"
 
 vi.mock("@/lib/sdk/client", () => ({ sdkApi: {} }))
 vi.mock("@/lib/storage/adapter", () => ({
@@ -27,7 +27,6 @@ import {
 import { mergeProbe } from "@/features/videos/lib/probeService.logic"
 import type { SdkThumbnailResult } from "@/workers/sdk.worker"
 import { RecordStore } from "@/features/videos/lib/recordStore.logic"
-import type { VideoProbe } from "@/lib/media/probe/types"
 import { memoryKv } from "@/tests/support/memoryKv"
 
 // Movies/Up (2009) with directory and stem posters, fanart and a -thumb; Movies/Bare (2010) with nothing;

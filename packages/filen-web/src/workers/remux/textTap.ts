@@ -1,6 +1,4 @@
-import { normalizeCueText, type CueTextMode } from "@filen/shared/videos"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
-import { inflateCapped, parseElementHeader, type EbmlElement } from "@/lib/media/probe/ebml"
+import { normalizeCueText, type CueTextMode, BLOCK_BYTES, inflateCapped, parseElementHeader, type EbmlElement } from "@filen/shared/videos"
 
 // Embedded Matroska text subtitles (S_TEXT/UTF8, S_TEXT/ASS and SSA, S_TEXT/WEBVTT), taken from the cluster bytes
 // playback already downloaded: every block the block cache receives passes through here, and the clusters in it

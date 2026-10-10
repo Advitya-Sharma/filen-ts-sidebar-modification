@@ -1,9 +1,16 @@
 import { readFileSync, readdirSync } from "node:fs"
 import { open } from "node:fs/promises"
 import { join } from "node:path"
-import { BLOCK_BYTES, BlockSource, type BlockSourceOptions, type ReadRange } from "@/lib/media/blockSource"
-import { initialBlockReads, probeVideo } from "@/lib/media/probe/probe"
-import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
+import {
+	BLOCK_BYTES,
+	BlockSource,
+	type BlockSourceOptions,
+	type ReadRange,
+	initialBlockReads,
+	probeVideo,
+	type ProbeTier,
+	type VideoProbe
+} from "@filen/shared/videos"
 
 // Sparse slices: the exact byte ranges a probe consumed from a real file, so committed tests replay the
 // probe against real muxer output without committing the media. Everything outside the ranges reads as

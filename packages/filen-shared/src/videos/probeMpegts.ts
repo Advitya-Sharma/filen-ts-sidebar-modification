@@ -7,37 +7,28 @@ import {
 	parseHevcSps,
 	simpleAudioCodecString,
 	type SpsPicture
-} from "@filen/shared/videos"
-import { BLOCK_BYTES, type BlockSource } from "@/lib/media/blockSource"
-import { UnsupportedContainerError, ascii, readBytes, seconds, transferKind, uint16 } from "@/lib/media/probe/bytes"
-import { AC3_CHANNELS, AC3_RATES } from "@/lib/media/probe/isobmff"
-import type { MediaCodec, ParsedContainer, ParsedTrack, ProbeTier } from "@/lib/media/probe/types"
+} from "./codecString"
+import { BLOCK_BYTES, type BlockSource } from "./blockSource"
+import { ascii, readBytes, seconds, transferKind, uint16 } from "./probeBytes"
+import { AC3_CHANNELS, AC3_RATES } from "./probeIsobmff"
+import type { MediaCodec, ParsedContainer, ParsedTrack, ProbeTier } from "./probeTypes"
+import {
+	TS_MIN_PACKETS,
+	TS_PACKET_BYTES,
+	TS_SNIFF_PACKETS,
+	TS_SYNC,
+	feedSection,
+	packetAt,
+	packetCount,
+	readPat,
+	type PsiWalk,
+	type TsLayout,
+	type TsPacket
+} from "./transportStreamHead"
 
 // MPEG transport streams (ISO/IEC 13818-1) of a single program: its PMT, each stream's first parameter set or
 // frame header from the head, and the timing stream's PTS span from the head and the tail. The stream
 // mapping follows the remux's demuxer (Mediabunny), so a track reported here is one it can read.
-
-const SYNC = 0x47
-const PACKET_BYTES = 188
-
-// Packet k's sync byte sits at k × stride + prefix: BDAV (.m2ts) puts a 4-byte timestamp before each
-// packet, and 204-byte packets carry 16 bytes of parity after it.
-export interface TsLayout {
-	stride: number
-	prefix: number
-}
-
-const LAYOUTS: readonly TsLayout[] = [
-	{ stride: 188, prefix: 0 },
-	{ stride: 192, prefix: 4 },
-	{ stride: 204, prefix: 0 }
-]
-
-// TypeScript sources share the extension: only a sync byte on every one of the first packets counts.
-const SNIFF_PACKETS = 5
-const MIN_PACKETS = 3
-
-export const TS_SNIFF_BYTES = Math.max(...LAYOUTS.map(layout => layout.prefix + layout.stride * (SNIFF_PACKETS - 1) + 1))
 
 // A card stays within CARD_BLOCK_READS: two head blocks, and at most two for a tail straddling a boundary.
 const HEAD_BYTES: Readonly<Record<ProbeTier, number>> = { card: 2 * BLOCK_BYTES, cover: 2 * BLOCK_BYTES, full: 4 * BLOCK_BYTES }
@@ -46,8 +37,6 @@ const FULL_BLOCK_READS = 6
 
 const CHUNK_PACKETS = 32
 const MAX_STREAMS = 32
-const MAX_SECTIONS = 8
-const MAX_SECTION_BYTES = 1024
 // Enough for the SEI an encoder writes ahead of its parameter sets.
 const VIDEO_PREFIX_BYTES = 16_384
 const AUDIO_PREFIX_BYTES = 256
@@ -55,30 +44,6 @@ const AUDIO_PREFIX_BYTES = 256
 const TAIL_PES = 4
 const PTS_MODULUS = 2 ** 33
 const PTS_HZ = 90_000
-
-function packetCount(size: number, layout: TsLayout): number {
-	const room = size - layout.prefix - PACKET_BYTES
-
-	return room < 0 ? 0 : Math.floor(room / layout.stride) + 1
-}
-
-// The packet layout of a file whose first TS_SNIFF_BYTES are `head`, or null.
-export function sniffTransportStream(head: Uint8Array, size: number): TsLayout | null {
-	for (const layout of LAYOUTS) {
-		const checks = Math.min(SNIFF_PACKETS, packetCount(size, layout))
-		let synced = checks >= MIN_PACKETS
-
-		for (let k = 0; k < checks && synced; k++) {
-			synced = head[layout.prefix + k * layout.stride] === SYNC
-		}
-
-		if (synced) {
-			return layout
-		}
-	}
-
-	return null
-}
 
 type Need = "avc" | "hevc" | "adts" | "dolby" | "mpeg-audio" | "dts" | null
 
@@ -105,12 +70,8 @@ interface Stream extends StreamKind {
 	searched: number
 }
 
-interface Walk {
-	sections: Map<number, { bytes: Uint8Array; length: number }>
-	patFound: boolean
-	pmtPid: number | null
+interface Walk extends PsiWalk {
 	pmtFound: boolean
-	malformed: boolean
 	streams: Stream[]
 	byPid: Map<number, Stream>
 	timingPid: number | null
@@ -245,78 +206,6 @@ function classify(type: number, found: Descriptors, bluRay: boolean): StreamKind
 		default:
 			return null
 	}
-}
-
-// Assembles one PSI section per PID across packets; returns it once complete, as a view valid until the next call.
-function feedSection(walk: Walk, pid: number, payload: Uint8Array, unitStart: boolean): Uint8Array | null {
-	let section = walk.sections.get(pid)
-
-	if (unitStart) {
-		const from = 1 + (payload[0] ?? 0)
-
-		if (from >= payload.length) {
-			return null
-		}
-
-		if (section === undefined) {
-			if (walk.sections.size >= MAX_SECTIONS) {
-				return null
-			}
-
-			section = { bytes: new Uint8Array(MAX_SECTION_BYTES), length: 0 }
-			walk.sections.set(pid, section)
-		}
-
-		section.length = 0
-		payload = payload.subarray(from)
-	} else if (section === undefined || section.length === 0) {
-		return null
-	}
-
-	const take = Math.min(payload.length, MAX_SECTION_BYTES - section.length)
-
-	section.bytes.set(payload.subarray(0, take), section.length)
-	section.length += take
-
-	if (section.length < 3) {
-		return null
-	}
-
-	const total = 3 + (uint16(section.bytes, 1) & 0x0fff)
-
-	if (total > MAX_SECTION_BYTES || total < 12) {
-		section.length = 0
-		walk.malformed = true
-
-		return null
-	}
-
-	if (section.length < total) {
-		return null
-	}
-
-	section.length = 0
-
-	return section.bytes.subarray(0, total)
-}
-
-// The remux's demuxer reads a stream with exactly one program (program 0 names the network PID, not one).
-function readPat(walk: Walk, section: Uint8Array): void {
-	const end = section.length - 4
-	let programs = 0
-
-	for (let at = 8; at + 4 <= end; at += 4) {
-		if (uint16(section, at) !== 0) {
-			walk.pmtPid = uint16(section, at + 2) & 0x1fff
-			programs++
-		}
-	}
-
-	if (programs !== 1) {
-		throw new UnsupportedContainerError()
-	}
-
-	walk.patFound = true
 }
 
 function readPmt(walk: Walk, section: Uint8Array): void {
@@ -703,34 +592,8 @@ function feedStream(walk: Walk, stream: Stream, payload: Uint8Array, unitStart: 
 	inspect(stream, false)
 }
 
-interface Packet {
-	pid: number
-	unitStart: boolean
-	payload: Uint8Array
-}
-
-// The packet whose sync byte is at `at`, or null for one without a usable payload (lost sync, a
-// transport error, scrambled, adaptation field only).
-function packetAt(bytes: Uint8Array, at: number): Packet | null {
-	const flags = bytes[at + 1] ?? 0
-	const control = bytes[at + 3] ?? 0
-
-	if (bytes[at] !== SYNC || (flags & 0x80) !== 0 || (control & 0xc0) !== 0 || (control & 0x10) === 0) {
-		return null
-	}
-
-	const start = at + 4 + ((control & 0x20) !== 0 ? 1 + (bytes[at + 4] ?? 0) : 0)
-	const end = at + PACKET_BYTES
-
-	if (start >= end || end > bytes.length) {
-		return null
-	}
-
-	return { pid: ((flags & 0x1f) << 8) | (bytes[at + 2] ?? 0), unitStart: (flags & 0x40) !== 0, payload: bytes.subarray(start, end) }
-}
-
 // A PMT on a PID no PAT named (some streams carry none): a PSI payload whose first table is a PMT.
-function guessedPmt(walk: Walk, packet: Packet): boolean {
+function guessedPmt(walk: Walk, packet: TsPacket): boolean {
 	const { pid, payload } = packet
 
 	if (pid === 0 || pid === 0x1fff) {
@@ -787,7 +650,7 @@ async function scanHead(source: BlockSource, walk: Walk, layout: TsLayout, limit
 
 	for (let first = 0; first < packets && !settled(walk); first += CHUNK_PACKETS) {
 		const count = Math.min(CHUNK_PACKETS, packets - first)
-		const bytes = await readBytes(source, first * layout.stride + layout.prefix, (count - 1) * layout.stride + PACKET_BYTES)
+		const bytes = await readBytes(source, first * layout.stride + layout.prefix, (count - 1) * layout.stride + TS_PACKET_BYTES)
 
 		for (let k = 0; k < count; k++) {
 			handlePacket(walk, bytes, k * layout.stride)
@@ -811,15 +674,15 @@ function tailGrid(bytes: Uint8Array, base: number, stride: number, expected: num
 	const fits = (residue: number): boolean => {
 		let hits = 0
 
-		for (let at = modulo(residue - base, stride); at + PACKET_BYTES <= bytes.length && hits < SNIFF_PACKETS; at += stride) {
-			if (bytes[at] !== SYNC) {
+		for (let at = modulo(residue - base, stride); at + TS_PACKET_BYTES <= bytes.length && hits < TS_SNIFF_PACKETS; at += stride) {
+			if (bytes[at] !== TS_SYNC) {
 				return false
 			}
 
 			hits++
 		}
 
-		return hits >= MIN_PACKETS
+		return hits >= TS_MIN_PACKETS
 	}
 
 	if (fits(expected)) {
@@ -841,7 +704,7 @@ async function tailTimestamps(source: BlockSource, pid: number, layout: TsLayout
 	const { size } = source
 	const { stride } = layout
 	const floor = Math.max(0, size - TAIL_BYTES)
-	const probeStart = Math.max(floor, size - SNIFF_PACKETS * stride - PACKET_BYTES)
+	const probeStart = Math.max(floor, size - TS_SNIFF_PACKETS * stride - TS_PACKET_BYTES)
 	const grid = tailGrid(await readBytes(source, probeStart, size - probeStart), probeStart, stride, layout.prefix % stride)
 	const found: number[] = []
 
@@ -852,17 +715,17 @@ async function tailTimestamps(source: BlockSource, pid: number, layout: TsLayout
 	const firstSync = probeStart + modulo(grid - probeStart, stride)
 
 	for (
-		let at = firstSync + Math.floor((size - PACKET_BYTES - firstSync) / stride) * stride;
+		let at = firstSync + Math.floor((size - TS_PACKET_BYTES - firstSync) / stride) * stride;
 		at >= floor && found.length < TAIL_PES;
 		at -= stride
 	) {
 		const header = await readBytes(source, at, 4)
 
-		if (header[0] !== SYNC || ((header[1] ?? 0) & 0x40) === 0 || ((((header[1] ?? 0) & 0x1f) << 8) | (header[2] ?? 0)) !== pid) {
+		if (header[0] !== TS_SYNC || ((header[1] ?? 0) & 0x40) === 0 || ((((header[1] ?? 0) & 0x1f) << 8) | (header[2] ?? 0)) !== pid) {
 			continue
 		}
 
-		const packet = packetAt(await readBytes(source, at, PACKET_BYTES), 0)
+		const packet = packetAt(await readBytes(source, at, TS_PACKET_BYTES), 0)
 		const pts = packet === null ? null : pesStart(packet.payload)?.pts
 
 		if (pts !== null && pts !== undefined) {

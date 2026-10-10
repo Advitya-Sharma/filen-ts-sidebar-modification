@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
+import { BLOCK_BYTES } from "@filen/shared/videos"
 import { exposeRangePort } from "@/lib/media/rangePort"
 import {
 	SW_DOWNLOAD_PREFIX,

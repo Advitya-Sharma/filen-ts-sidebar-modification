@@ -9,9 +9,9 @@ import {
 	type LadderPath,
 	type LadderProbe,
 	type LadderSelection,
-	type PlaybackCapabilities
+	type PlaybackCapabilities,
+	type VideoProbe
 } from "@filen/shared/videos"
-import type { VideoProbe } from "@/lib/media/probe/types"
 import type { PlaybackTrigger } from "@/lib/media/playback/types"
 
 // The decisions behind playback capability probing and runtime demotion, as pure functions.

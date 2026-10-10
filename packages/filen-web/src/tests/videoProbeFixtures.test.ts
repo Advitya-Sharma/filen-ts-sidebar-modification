@@ -1,8 +1,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
-import type { ProbeTier, VideoProbe } from "@/lib/media/probe/types"
+import { BLOCK_BYTES, type ProbeTier, type VideoProbe } from "@filen/shared/videos"
 import { CARD_BUDGET, MEDIA_DIR, TIERS, blocksOf, fileReadRange, measureProbe } from "@/tests/support/videoProbe"
 
 // Every generated media fixture at every tier against ffprobe's ground truth. Local only: the media

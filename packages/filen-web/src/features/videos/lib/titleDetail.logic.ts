@@ -1,6 +1,12 @@
-import { EXTRA_TYPE_ORDER, type HomeEntry, type HomeIndex, type LadderPath, type SeriesPrimaryAction } from "@filen/shared/videos"
+import {
+	EXTRA_TYPE_ORDER,
+	type HomeEntry,
+	type HomeIndex,
+	type LadderPath,
+	type SeriesPrimaryAction,
+	type VideoProbe
+} from "@filen/shared/videos"
 import type { TFunction } from "i18next"
-import type { VideoProbe } from "@/lib/media/probe/types"
 import { qualityLabel } from "@/features/videos/lib/videoGrid.logic"
 import type {
 	VideoExtraView,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { asByteStream, imageSniffStream } from "@/lib/media/probe/imageSniff"
+import { asByteStream, imageSniffStream } from "@/lib/media/imageSniff"
 
 // The SDK's image decoder reads its input with a BYOB reader, which a TransformStream's readable doesn't offer: art
 // made from a byte range (sidecar posters, embedded covers) goes through asByteStream.

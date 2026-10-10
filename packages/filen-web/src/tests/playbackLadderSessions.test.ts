@@ -5,7 +5,10 @@ import {
 	type AudioTarget,
 	type LadderBrowser,
 	type LadderSelection,
-	type PlaybackCapabilities
+	type PlaybackCapabilities,
+	type MediaCodec,
+	type ProbeContainer,
+	type VideoProbe
 } from "@filen/shared/videos"
 import {
 	decideWithDemotions,
@@ -17,7 +20,6 @@ import {
 	type LearnedDemotion
 } from "@/lib/media/playback/capabilities.logic"
 import { samePipeline, sessionPlan } from "@/lib/media/playback/openPlayback.logic"
-import type { MediaCodec, ProbeContainer, VideoProbe } from "@/lib/media/probe/types"
 
 // A fake browser: which codec strings each surface takes. Capabilities are built by answering the ladder's
 // own queries, as the real probe does.

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { AnyFile, File as SdkFile } from "@filen/sdk-rs"
 import { narrowItem, type BaseFileItem } from "@/features/drive/lib/item"
 import type { FrameCaptureParams, FrameCaptureResult } from "@/features/videos/workers/frame.worker"
-import type { VideoProbe } from "@/lib/media/probe/types"
+import type { VideoProbe } from "@filen/shared/videos"
 import { FRAME_SESSION_MAX_FRAMES } from "@/features/videos/lib/frames.logic"
 import { testUuid } from "@/tests/support/uuid"
 

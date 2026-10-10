@@ -1,4 +1,4 @@
-import { BLOCK_BYTES } from "@/lib/media/blockSource"
+import { BLOCK_BYTES } from "@filen/shared/videos"
 
 // A range read that can be called off. `end` is exclusive.
 export type AbortableReadRange = (start: number, end: number, signal: AbortSignal) => Promise<Uint8Array>

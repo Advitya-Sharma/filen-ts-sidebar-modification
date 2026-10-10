@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest"
-import type { LadderDecision } from "@filen/shared/videos"
-import type { MediaCodec, VideoProbe } from "@/lib/media/probe/types"
+import type { LadderDecision, MediaCodec, VideoProbe } from "@filen/shared/videos"
 import {
 	cannotStream,
 	confirmedGap,
