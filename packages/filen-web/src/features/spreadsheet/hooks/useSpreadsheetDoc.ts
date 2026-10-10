@@ -16,8 +16,18 @@ export type SpreadsheetDocState =
 	// `unnamed`: the file's name does not say it is a spreadsheet, so its kind was read from its bytes and
 	// it opens read-only (saving could rewrite it as the wrong format). `renamed`: the file has since been
 	// renamed to another format's extension, which a save would mislabel, so it is read-only too.
-	// `bytes`: the file as opened (the preview cache's own buffer: read it, never transfer it).
-	| { status: "ready"; id: number; doc: GridDoc; unnamed: boolean; renamed: boolean; bytes: Uint8Array }
+	// `bytes`: the file as opened (the preview cache's own buffer: read it, never transfer it). `doc`: the
+	// view as it now stands, edits folded in through `updateDoc` (the one copy held: the view as opened is
+	// let go once edits move past it).
+	| {
+			status: "ready"
+			id: number
+			doc: GridDoc
+			updateDoc: (update: (doc: GridDoc) => GridDoc) => void
+			unnamed: boolean
+			renamed: boolean
+			bytes: Uint8Array
+	  }
 
 type Opened = { status: "unreadable" } | { status: "ready"; id: number; doc: GridDoc; unnamed: boolean; format: string | null }
 
@@ -104,5 +114,9 @@ export function useSpreadsheetDoc(item: DriveItem, documentKey: string): Spreads
 
 	const { id, doc, unnamed, format: openedAs } = opened.state
 
-	return { status: "ready", id, doc, unnamed, renamed: !unnamed && nameFormat(item) !== openedAs, bytes: opened.bytes }
+	function updateDoc(update: (doc: GridDoc) => GridDoc): void {
+		setOpened(prev => (prev?.state.status === "ready" ? { ...prev, state: { ...prev.state, doc: update(prev.state.doc) } } : prev))
+	}
+
+	return { status: "ready", id, doc, updateDoc, unnamed, renamed: !unnamed && nameFormat(item) !== openedAs, bytes: opened.bytes }
 }

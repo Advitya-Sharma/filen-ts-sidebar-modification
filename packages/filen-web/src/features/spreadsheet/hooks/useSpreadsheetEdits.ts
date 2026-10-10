@@ -11,7 +11,6 @@ export interface SpreadsheetSnapshot {
 }
 
 export interface SpreadsheetEdits {
-	doc: GridDoc
 	state: DocState
 	// An edit is queued or in flight: the worker's `state` does not show it yet.
 	pending: boolean
@@ -22,14 +21,14 @@ export interface SpreadsheetEdits {
 }
 
 // The grid's side of editing: every call to the worker goes through one queue (a later one never
-// overtakes an earlier one, a save included), and each result folds into the view. `onShift` hears where a
-// CSV's rows or columns moved (edit, undo or redo), for the sizes kept beside it.
+// overtakes an earlier one, a save included), and each result folds into the view through `updateDoc`
+// (useSpreadsheetDoc holds the view). `onShift` hears where a CSV's rows or columns moved (edit, undo or
+// redo), for the sizes kept beside it.
 export function useSpreadsheetEdits(
 	id: number,
-	initial: GridDoc,
+	updateDoc: (update: (doc: GridDoc) => GridDoc) => void,
 	onShift?: (sheet: number, shift: AxisEdit & { revert: boolean }) => void
 ): SpreadsheetEdits {
-	const [doc, setDoc] = useState(initial)
 	const [state, setState] = useState<DocState>({ dirty: false, canUndo: false, canRedo: false })
 	const [pending, setPending] = useState(0)
 	const queue = useRef<Promise<unknown>>(Promise.resolve())
@@ -49,7 +48,7 @@ export function useSpreadsheetEdits(
 
 		return enqueue(call).then(
 			result => {
-				setDoc(prev => applyEditResult(prev, result))
+				updateDoc(prev => applyEditResult(prev, result))
 				setState(result.state)
 				setPending(count => count - 1)
 
@@ -88,7 +87,6 @@ export function useSpreadsheetEdits(
 	}
 
 	return {
-		doc,
 		state,
 		pending: pending > 0,
 		apply: op => run(() => withOpenSpreadsheet<EditResult>(id, (remote, workerId) => remote.apply(workerId, op))),
@@ -98,20 +96,24 @@ export function useSpreadsheetEdits(
 	}
 }
 
-export type Writability = "checking" | "writable" | "readOnly"
+// "unproven": a workbook nothing asked to prove yet; "tooLarge": one too large to prove, so read-only.
+export type Writability = "unproven" | "checking" | "writable" | "readOnly" | "tooLarge"
 
 // Whether the open document may be edited and saved. A workbook opens unproven: the worker proves that
-// saving it loses nothing, and until that answers nothing may be sent to it (an edit before the verdict
-// would make it view-only). Asked once editing could follow (`wanted`, which may turn true later); a file
-// that will never be edited here (`neverEditable`) tells the worker to skip the proof instead. An answer
-// arriving after the viewer has gone is ignored, as the document is closed by then.
+// saving it loses nothing before it makes any edit (one sent meanwhile waits for the proof, and is refused
+// if it fails). Proven only once wanted (`wanted`: the user set out to edit, which may turn true later), as
+// the proof costs the worker seconds and several times the workbook's memory on a large one; a workbook
+// known at open to stay view-only is never asked about, and a file that will never be edited here
+// (`neverEditable`) tells the worker to skip the proof. The proof reads the file as opened (`bytes`), sent
+// along. An answer arriving after the viewer has gone is ignored, as the document is closed by then.
 export function useSpreadsheetWritability(
 	id: number,
-	doc: Pick<GridDoc, "kind" | "writable">,
+	doc: Pick<GridDoc, "kind" | "writable" | "unprovable">,
+	bytes: Uint8Array,
 	wanted: boolean,
 	neverEditable: boolean
 ): Writability {
-	const proven = doc.kind === "xlsx"
+	const proven = doc.kind === "xlsx" && doc.unprovable === undefined
 	const [verdict, setVerdict] = useState<boolean | null>(null)
 
 	useEffect(() => {
@@ -129,7 +131,7 @@ export function useSpreadsheetWritability(
 
 		let live = true
 
-		withOpenSpreadsheet(id, (remote, workerId) => remote.writability(workerId)).then(
+		withOpenSpreadsheet(id, (remote, workerId) => remote.writability(workerId, bytes)).then(
 			writable => {
 				if (live) {
 					setVerdict(writable)
@@ -145,11 +147,15 @@ export function useSpreadsheetWritability(
 		return () => {
 			live = false
 		}
-	}, [id, proven, neverEditable, wanted, verdict])
+	}, [id, proven, neverEditable, wanted, verdict, bytes])
+
+	if (doc.unprovable !== undefined) {
+		return doc.unprovable === "tooLarge" ? "tooLarge" : "readOnly"
+	}
 
 	if (!proven) {
 		return doc.writable ? "writable" : "readOnly"
 	}
 
-	return verdict === null ? "checking" : verdict ? "writable" : "readOnly"
+	return verdict === null ? (wanted && !neverEditable ? "checking" : "unproven") : verdict ? "writable" : "readOnly"
 }

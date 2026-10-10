@@ -6,9 +6,6 @@ import { colWidthToPx, rowHeightToPx } from "@/features/spreadsheet/lib/sizes.lo
 
 const DEFAULT_FONT_SIZE = 11
 
-// An Excel error literal ("#DIV/0!", "#GETTING_DATA").
-export const ERROR_VALUE = /^#[A-Z0-9/!?_]+$/
-
 // hucre's key for a cell in a sheet's cell map.
 export function cellIdOf(row: number, col: number): string {
 	return `${String(row)},${String(col)}`
@@ -173,7 +170,7 @@ export class WorkbookViews {
 		if (input !== text) view.input = input
 		if (styleId !== undefined) view.style = styleId
 		if (typeof shown === "number" || typeof shown === "boolean" || shown instanceof Date) view.numeric = true
-		if (cell?.type === "error" || (typeof shown === "string" && cell?.formula !== undefined && ERROR_VALUE.test(shown))) {
+		if (cell?.type === "error" || cell?.formulaResultError === true) {
 			view.error = true
 		}
 
@@ -186,28 +183,40 @@ export class WorkbookViews {
 }
 
 // A workbook's cells, one view per non-empty or formatted cell.
+// Whether a row or column has the Text ("@") format.
+function hasTextFormat(sheet: Sheet): boolean {
+	if (sheet.columns?.some(column => column.style?.numFmt === "@") === true) return true
+
+	for (const def of sheet.rowDefs?.values() ?? []) {
+		if (def.style?.numFmt === "@") return true
+	}
+
+	return false
+}
+
 function sheetView(sheet: Sheet, views: WorkbookViews, lockStructure: boolean): SheetView {
 	const cells = new Map<number, CellView>()
 	let colCount = 0
 	// Cells with details are read from their map once, rather than looked up by a string key at every
 	// position; the positions they cover are skipped when the plain values are read.
 	const detailed = new Set<number>()
+	// Cells with details that show nothing: their own (absent) format, not their row's or column's, says
+	// how what is typed into them reads.
+	const unshown: number[] = []
+	const textFormatted = hasTextFormat(sheet)
 
 	for (const [cellId, cell] of sheet.cells ?? []) {
 		const [row, col] = parseCellId(cellId)
 		const values = sheet.rows[row]
-
-		if (values === undefined || col >= values.length) {
-			continue
-		}
-
 		const at = cellKey(row, col)
-		const view = views.view(values[col], cell)
+		const view = values === undefined || col >= values.length ? null : views.view(values[col], cell)
 
 		detailed.add(at)
 
 		if (view !== null) {
 			cells.set(at, view)
+		} else if (textFormatted) {
+			unshown.push(at)
 		}
 	}
 
@@ -247,8 +256,15 @@ function sheetView(sheet: Sheet, views: WorkbookViews, lockStructure: boolean): 
 
 	const colWidths = new Map<number, number>()
 	const hiddenCols: number[] = []
+	const textCols: number[] = []
+	const textRows: number[] = []
+	const formattedRows: number[] = []
 
 	sheet.columns?.forEach((column, index) => {
+		if (column.style?.numFmt === "@") {
+			textCols.push(index)
+		}
+
 		if (column.width !== undefined) {
 			colWidths.set(index, colWidthToPx(column.width))
 		}
@@ -262,6 +278,12 @@ function sheetView(sheet: Sheet, views: WorkbookViews, lockStructure: boolean): 
 	const hiddenRows: number[] = []
 
 	sheet.rowDefs?.forEach((def, index) => {
+		if (def.style?.numFmt === "@") {
+			textRows.push(index)
+		} else if (def.style !== undefined) {
+			formattedRows.push(index)
+		}
+
 		if (def.height !== undefined) {
 			rowHeights.set(index, rowHeightToPx(def.height))
 		}
@@ -283,7 +305,10 @@ function sheetView(sheet: Sheet, views: WorkbookViews, lockStructure: boolean): 
 		hiddenRows,
 		frozenRows: sheet.freezePane?.rows ?? 0,
 		frozenCols: sheet.freezePane?.columns ?? 0,
-		structureLocked: lockStructure || structureLocked(sheet)
+		structureLocked: lockStructure || structureLocked(sheet),
+		...(textRows.length > 0 || textCols.length > 0
+			? { textFormat: { rows: textRows, cols: textCols, otherRows: textCols.length > 0 ? formattedRows : [], otherCells: unshown } }
+			: {})
 	}
 }
 

@@ -5,6 +5,9 @@ import type { SpreadsheetFileKind } from "@/features/spreadsheet/workers/spreads
 const KINDS: ReadonlyMap<string, SpreadsheetFileKind> = new Map([
 	["xlsx", "xlsx"],
 	["xlsm", "xlsx"],
+	// Templates: edited in place, saved as the templates they are.
+	["xltx", "xlsx"],
+	["xltm", "xlsx"],
 	["xls", "xls"],
 	["csv", "csv"],
 	["tsv", "tsv"]
@@ -23,8 +26,8 @@ export function isEditableSpreadsheetExtension(extension: string): boolean {
 	return kind !== null && kind !== "xls"
 }
 
-// The format a name promises, for telling whether a rename changed it: its kind, except that .xlsm
-// (macros kept) and .xlsx (none allowed) open alike but are different files.
+// The format a name promises, for telling whether a rename changed it: its kind, except that .xlsx, .xlsm
+// (macros kept) and the templates open alike but are different files.
 export function spreadsheetSaveFormat(extension: string): string | null {
 	const kind = spreadsheetFileKind(extension)
 

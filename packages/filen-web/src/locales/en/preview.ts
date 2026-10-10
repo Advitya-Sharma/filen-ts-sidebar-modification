@@ -244,6 +244,10 @@ export const preview = {
 	previewSpreadsheetCheckingWritable: "Checking this file can be saved…",
 	/** Spreadsheet viewer — note beside the cell contents when an Excel file stays read-only because saving it here would lose some of its content */
 	previewSpreadsheetReadOnlyLossy: "Read-only here: this file has content this app can't save without losing it.",
+	/** Spreadsheet viewer — note beside the cell contents when an Excel file opens read-only because it is too large to check that saving it keeps everything in it */
+	previewSpreadsheetReadOnlyTooLarge: "Read-only here: this file is too large to edit in the browser.",
+	/** Spreadsheet viewer — shown beside the formula bar (and as a toast for a paste) when an entry starts with "=" but isn't a formula Excel can read, e.g. a parenthesis left open or ";" between arguments */
+	previewSpreadsheetFormulaInvalid: "This formula can't be read. Check its parentheses and quotes, and separate arguments with commas.",
 	/** Spreadsheet grid — below a sheet too tall to show whole; {{rows}} is the number of rows shown, already formatted */
 	previewSpreadsheetRowsTruncated: "Showing the first {{rows}} rows. Rows further down can't be shown here.",
 

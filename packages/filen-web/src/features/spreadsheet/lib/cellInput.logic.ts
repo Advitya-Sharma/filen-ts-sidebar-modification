@@ -1,4 +1,6 @@
 import type { CellValue } from "hucre"
+import { cellKey, type CellStyleView, type CellView, type SheetView } from "@/features/spreadsheet/lib/model"
+import { wellFormedFormula } from "@/features/spreadsheet/lib/formulaRefs"
 
 // What a typed entry becomes, the way spreadsheets read it: a leading "=" starts a formula, a leading "'"
 // keeps the rest as text whatever it looks like, and otherwise numbers (with thousands separators, a
@@ -57,4 +59,39 @@ export function parseCellInput(input: string): ParsedInput {
 	}
 
 	return { type: "value", value: input }
+}
+
+// Whether a workbook cell takes what is typed as text, as the worker reads it: by the cell's own format
+// when it has a cell, else by its row's format, else by its column's.
+export function takesText(
+	sheet: Pick<SheetView, "textFormat">,
+	row: number,
+	col: number,
+	cell: CellView | undefined,
+	styles: readonly CellStyleView[]
+): boolean {
+	if (cell !== undefined) {
+		return cell.style !== undefined && styles[cell.style]?.numFmt === "@"
+	}
+
+	const format = sheet.textFormat
+
+	return (
+		format !== undefined &&
+		!format.otherCells.includes(cellKey(row, col)) &&
+		(format.rows.includes(row) || (!format.otherRows.includes(row) && format.cols.includes(col)))
+	)
+}
+
+// Whether an entry would be stored as a formula that does not read as one (a parenthesis left open, ";"
+// between arguments): refused rather than written to the file, where Excel would drop it. A Text ("@")
+// cell takes it as text.
+export function malformedFormula(input: string, textFormat = false): boolean {
+	if (textFormat) {
+		return false
+	}
+
+	const parsed = parseCellInput(input)
+
+	return parsed.type === "formula" && !wellFormedFormula(parsed.formula)
 }

@@ -13,7 +13,7 @@ import {
 import { openXlsx, parseRange, saveXlsx, writeXlsx, type RoundtripWorkbook } from "hucre/xlsx"
 import type { RawCellContent } from "hyperformula"
 import { parseCellInput, type ParsedInput } from "@/features/spreadsheet/lib/cellInput.logic"
-import { EditHistory } from "@/features/spreadsheet/lib/editHistory"
+import { EditHistory, HISTORY_BYTES } from "@/features/spreadsheet/lib/editHistory"
 import { rangeArea, rangeContains } from "@/features/spreadsheet/lib/cellRef.logic"
 import {
 	MAX_EDIT_CELLS,
@@ -43,13 +43,13 @@ import {
 	sameSheet,
 	shiftFormula,
 	shiftSpan,
-	storedFormula
+	storedFormula,
+	wellFormedFormula
 } from "@/features/spreadsheet/lib/formulaRefs"
 import type { CellEntry } from "@/features/spreadsheet/lib/gridEdits.logic"
 import { cellKey, MAX_COLUMNS, MAX_ROWS, type CellRange, type CellView, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
 import {
 	cellIdOf,
-	ERROR_VALUE,
 	hasArrayFormulas,
 	isWorksheet,
 	parseCellId,
@@ -76,8 +76,10 @@ import { readZip } from "@/features/spreadsheet/lib/zipLimits"
 // Excel's own limit.
 const SHEET_NAME = /^[^\\/?*[\]:]{1,31}$/
 const THEME_PART = "xl/theme/theme1.xml"
-// The most file bytes (inflated) proven by an unedited save; a larger workbook opens view-only.
+// The most file bytes (inflated), and the most filled cells, proven by an unedited save: the proof holds
+// the workbook several times over while it runs, so a larger one opens view-only.
 const VERIFY_LIMIT = 192 * 1024 * 1024
+const PROOF_CELL_LIMIT = 1_000_000
 // Parts saveXlsx writes anew from the model and never reads: dropped once the workbook is proven. Sheet
 // relationships stay (it reads them for the parts it re-attaches), and so does every drawing it keeps.
 const REGENERATED =
@@ -171,7 +173,7 @@ function storedResult(cell: Cell, date1904: boolean): RawCellContent | undefined
 	const result = cell.formulaResult
 
 	if (result === undefined || result === null) return undefined
-	if (typeof result === "string" && ERROR_VALUE.test(result)) return result
+	if (typeof result === "string" && cell.formulaResultError === true) return result
 
 	return engineValue(result, date1904)
 }
@@ -228,11 +230,15 @@ function expandSharedFormulas(sheets: readonly Sheet[]): void {
 			if (cell.formula === "" || cell.formula === undefined) {
 				const master = cell.formulaSharedIndex === undefined ? undefined : masters.get(cell.formulaSharedIndex)
 
+				// The reader reads a filled-in cell's cached error as the cell's own.
+				const error = cell.type === "error"
+
 				if (master === undefined) {
 					// Its formula is lost: the value it showed stays.
 					delete cell.formula
 					delete cell.formulaResult
-					cell.type = typeOf(cell.value)
+					delete cell.formulaResultError
+					cell.type = error ? "error" : typeOf(cell.value)
 				} else {
 					const [row, col] = parseCellId(cellId)
 
@@ -241,6 +247,8 @@ function expandSharedFormulas(sheets: readonly Sheet[]): void {
 
 					if (cell.value !== null) {
 						cell.formulaResult = cell.value
+
+						if (error) cell.formulaResultError = true
 					}
 				}
 			}
@@ -250,6 +258,29 @@ function expandSharedFormulas(sheets: readonly Sheet[]): void {
 			delete cell.formulaRef
 		}
 	}
+}
+
+// The cells holding something (a value, a format, a note), counted until past `limit`.
+function filledCells(sheets: readonly Sheet[], limit: number): number {
+	let count = 0
+
+	for (const sheet of sheets) {
+		for (const values of sheet.rows) {
+			for (const value of values) {
+				if (value !== null) count++
+			}
+		}
+
+		if (count > limit) break
+
+		for (const cell of sheet.cells?.values() ?? []) {
+			if (cell.value === null) count++
+		}
+
+		if (count > limit) break
+	}
+
+	return count
 }
 
 // A rename rewrites cell formulas, defined names and hyperlinks; formulas elsewhere in the file it cannot
@@ -301,6 +332,7 @@ interface ResultBefore {
 	sheet: number
 	key: string
 	result: CellValue | undefined
+	error: boolean
 	value: CellValue
 }
 
@@ -318,6 +350,16 @@ interface Removed {
 type Step =
 	// `extent`: the sheet's value rectangle before the edit, which writing past its edge grows.
 	| { type: "cells"; sheet: number; before: Map<string, CellBefore>; extent: { rows: number; cols: number } }
+	// A range's formats changed and nothing else: each cell's format before, row by row, as an index into
+	// `styles` (0: the cell had no details of its own). A range repeats a few formats, held once each.
+	| {
+			type: "format"
+			sheet: number
+			range: CellRange
+			styles: readonly (CellStyle | undefined)[]
+			before: Uint32Array
+			extent: { rows: number; cols: number }
+	  }
 	| {
 			type: "structure"
 			sheet: number
@@ -358,24 +400,135 @@ function grownBox(sheet: Sheet, cells: readonly { row: number; col: number }[]):
 	return rows * cols
 }
 
-function stepCells(step: Step): number {
+// Rough heap costs, for weighing undo steps: a cell held whole (its key, entry and details), a value, a
+// format, a remembered text (beside its characters), anything smaller.
+const CELL_BYTES = 160
+const VALUE_BYTES = 16
+const STYLE_BYTES = 200
+const TEXT_BYTES = 64
+const ENTRY_BYTES = 32
+
+function valueBytes(value: CellValue): number {
+	return VALUE_BYTES + (typeof value === "string" ? value.length : 0)
+}
+
+// The text a cell's details hold beside its value: a formula, rich-text runs, a note.
+function detailBytes(cell: Cell | undefined): number {
+	if (cell === undefined) return 0
+
+	let bytes = (cell.formula?.length ?? 0) + (cell.hyperlink === undefined ? 0 : TEXT_BYTES + cell.hyperlink.target.length)
+
+	for (const run of cell.richText ?? []) bytes += VALUE_BYTES + run.text.length
+
+	if (cell.comment !== undefined) {
+		bytes += TEXT_BYTES + cell.comment.text.length + (cell.comment.author?.length ?? 0)
+
+		for (const run of cell.comment.richText ?? []) bytes += VALUE_BYTES + run.text.length
+	}
+
+	return bytes
+}
+
+function textBytes(edits: readonly TextEdit[]): number {
+	let bytes = 0
+
+	for (const edit of edits) bytes += TEXT_BYTES + edit.text.length
+
+	return bytes
+}
+
+// What a step holds, in bytes as estimated.
+function stepBytes(step: Step): number {
 	switch (step.type) {
-		case "cells":
-			return step.before.size
-		case "structure":
+		case "cells": {
+			let bytes = 0
+
+			for (const before of step.before.values()) bytes += CELL_BYTES + valueBytes(before.value) + detailBytes(before.cell)
+
+			return bytes
+		}
+		case "format":
+			return step.before.byteLength + step.styles.length * STYLE_BYTES
+		case "structure": {
+			let bytes = textBytes(step.formulas) + textBytes(step.links)
+
+			for (const [, cell] of step.removed.cells) bytes += CELL_BYTES + detailBytes(cell)
+
+			for (const values of step.removed.values) {
+				for (const value of values) bytes += valueBytes(value)
+			}
+
 			return (
-				1 +
-				step.formulas.length +
-				step.links.length +
-				step.removed.cells.length +
-				step.removed.values.reduce((count, values) => count + values.length, 0)
+				bytes +
+				(step.removed.rowDefs.length + step.removed.columns.length + (step.merges?.length ?? 0) + (step.breaks?.length ?? 0)) *
+					ENTRY_BYTES
 			)
+		}
 		case "addSheet":
-			return 1 + step.results.length
+			return ENTRY_BYTES * (1 + step.results.length)
 		case "sizes":
-			return step.before.length
+			return ENTRY_BYTES * (1 + step.before.length)
 		case "rename":
-			return 1 + step.formulas.length + step.links.length + (step.names?.length ?? 0) + step.placeholders.length + step.results.length
+			return (
+				textBytes(step.formulas) +
+				textBytes(step.links) +
+				ENTRY_BYTES * (1 + (step.names?.length ?? 0) + step.placeholders.length + step.results.length)
+			)
+	}
+}
+
+// Numbers objects by identity, for telling formats apart by what they are made of.
+const objectIds = new WeakMap<object, number>()
+let nextObjectId = 1
+
+function objectId(value: object): number {
+	let id = objectIds.get(value)
+
+	if (id === undefined) {
+		id = nextObjectId++
+		objectIds.set(value, id)
+	}
+
+	return id
+}
+
+// The distinct formats among many cells', numbered from 1. Formats count as one when they are the same
+// object, or hold the same values and the very same font, fill, border and other parts (as the reader
+// gives every cell of one file format): they are then interchangeable.
+class FormatTable {
+	readonly styles: (CellStyle | undefined)[] = [undefined]
+	private readonly byObject = new Map<CellStyle | undefined, number>()
+	private readonly byParts = new Map<string, number>()
+
+	index(style: CellStyle | undefined): number {
+		const known = this.byObject.get(style)
+
+		if (known !== undefined) {
+			return known
+		}
+
+		let key = ""
+
+		if (style !== undefined) {
+			for (const name of Object.keys(style)) {
+				const part: unknown = Reflect.get(style, name)
+
+				key += `${name}=${typeof part === "object" && part !== null ? `#${String(objectId(part))}` : `${typeof part}:${String(part)}`};`
+			}
+		}
+
+		let index = style === undefined ? undefined : this.byParts.get(key)
+
+		if (index === undefined) {
+			index = this.styles.length
+			this.styles.push(style)
+
+			if (style !== undefined) this.byParts.set(key, index)
+		}
+
+		this.byObject.set(style, index)
+
+		return index
 	}
 }
 
@@ -390,24 +543,28 @@ export class XlsxDocument {
 	private readonly savePlan: SavePlan
 	// Settled by verifyWritable: until then, and after it finds a loss, the workbook is view-only.
 	private proven = false
+	// Known at open to stay view-only, with why: saving would lose part of it, or it is too large to prove.
+	private readonly unprovable: SpreadsheetDoc["unprovable"]
 	private verification: Promise<boolean> | null = null
+	// The file's bytes, which a proof waits for once the parts it compares were let go (dropOriginals).
+	private source: PromiseWithResolvers<Uint8Array | null> | null = null
 	// What the check found saving would lose (for diagnosis).
 	losses: string[] = []
 	// Built from the workbook as it stands the first time a formula needs calculating, then kept in step
 	// with every edit. Once the workbook has had a formula, every edit that changes cells goes through it.
 	private engine: FormulaEngine | null = null
 	private hasFormulas = false
-	// Undo keeps what each step replaced, up to `historyBudget` cells in all.
+	// Undo keeps what each step replaced, up to `historyBudget` bytes in all.
 	private readonly history: EditHistory<Step>
 	// The style table's length when the running edit started.
 	private styleMark = 0
 	private prepared = false
 	private closed = false
 
-	constructor(workbook: RoundtripWorkbook, historyBudget = MAX_SHEET_CELLS) {
+	constructor(workbook: RoundtripWorkbook, historyBudget = HISTORY_BYTES, proofCellLimit = PROOF_CELL_LIMIT) {
 		this.workbook = workbook
 		this.date1904 = workbook.dateSystem === "1904"
-		this.history = new EditHistory<Step>(stepCells, historyBudget)
+		this.history = new EditHistory<Step>(stepBytes, historyBudget)
 		this.views = new WorkbookViews(workbook.themeColors, this.date1904)
 		this.savePlan = xlsxSavePlan(workbook)
 
@@ -425,6 +582,23 @@ export class XlsxDocument {
 
 		if (this.hasFormulas) {
 			this.calculateMissing()
+		}
+
+		const raw = rawEntries(workbook)
+		let size = 0
+
+		for (const bytes of raw?.values() ?? []) size += bytes.length
+
+		this.unprovable =
+			raw === null || !this.savePlan.writable
+				? "unsafe"
+				: size > VERIFY_LIMIT || filledCells(worksheets, proofCellLimit) > proofCellLimit
+					? "tooLarge"
+					: undefined
+
+		// Nothing will be proven: what only saving needs goes now.
+		if (this.unprovable !== undefined) {
+			this.viewOnly()
 		}
 	}
 
@@ -450,12 +624,16 @@ export class XlsxDocument {
 		const engine = this.ensureEngine()
 
 		for (const { sheet, index, row, col, cell } of missing) {
-			this.storeResult(sheet, row, col, cell, engine.value(index, row, col))
+			const { value, error } = engine.result(index, row, col)
+
+			this.storeResult(sheet, row, col, cell, value, error === true)
 		}
 	}
 
 	doc(): SpreadsheetDoc {
-		return workbookDoc(this.workbook, this.views, this.writable)
+		const doc = workbookDoc(this.workbook, this.views, this.writable)
+
+		return this.unprovable === undefined ? doc : { ...doc, unprovable: this.unprovable }
 	}
 
 	// Grid sheet index → workbook sheet (worksheets only).
@@ -527,8 +705,10 @@ export class XlsxDocument {
 		return { row, col, content: cell?.type === "error" ? value : engineValue(value, this.date1904) }
 	}
 
-	// A formula's result stored in its cell: a number shown as a date is kept as the date it is.
-	private storeResult(sheet: Sheet, row: number, col: number, cell: Cell, value: RecalculatedCell["value"]): void {
+	// A formula's result stored in its cell: a number shown as a date is kept as the date it is. One the
+	// engine could not work out itself shows, but the file keeps no result for it, so whatever opens it
+	// calculates the formula rather than read the engine's failure as Excel's.
+	private storeResult(sheet: Sheet, row: number, col: number, cell: Cell, value: RecalculatedCell["value"], error: boolean): void {
 		const numFmt = cell.style?.numFmt
 		// A circular reference with no result to keep shows 0, as in Excel.
 		const result =
@@ -539,8 +719,11 @@ export class XlsxDocument {
 					: value
 		const values = sheet.rows[row]
 
-		cell.formulaResult = result
+		cell.formulaResult = value !== CYCLE && FormulaEngine.unsupported(value) ? null : result
 		cell.value = result
+
+		if (error && value !== CYCLE) cell.formulaResultError = true
+		else delete cell.formulaResultError
 
 		if (values !== undefined) {
 			values[col] = result
@@ -565,7 +748,7 @@ export class XlsxDocument {
 				continue
 			}
 
-			this.storeResult(sheet, recalculated.row, recalculated.col, cell, recalculated.value)
+			this.storeResult(sheet, recalculated.row, recalculated.col, cell, recalculated.value, recalculated.error === true)
 			applied.push(recalculated)
 		}
 
@@ -628,6 +811,12 @@ export class XlsxDocument {
 		return result.result()
 	}
 
+	// An edit from the page: made once the workbook is proven to save intact, which this proves first when
+	// nothing asked yet, and refused when it is not.
+	async edit(op: EditOp): Promise<EditResult> {
+		return (await this.verifyWritable()) ? this.apply(op) : { type: "refused", reason: "readOnly", state: this.history.state() }
+	}
+
 	undo(): EditResult {
 		this.styleMark = this.views.styles.styles.length
 
@@ -678,17 +867,55 @@ export class XlsxDocument {
 
 		this.verification = Promise.resolve(false)
 		this.proven = false
+		this.source?.resolve(null)
+		this.source = null
 		this.releaseRaw(rawEntries(this.workbook))
 		// Only edits read it (calculating what the file left out is done by now).
 		this.dropEngine()
 	}
 
-	// Proves (once) whether saving loses anything. Must run before any edit: an edit made first would read
-	// as a loss, so a workbook edited first stays view-only.
-	verifyWritable(): Promise<boolean> {
+	// For a workbook that may only be looked at: lets go of the parts saving writes anew (the bulk of the
+	// file, inflated), which only the proof reads. It reads them again from the file's bytes, which
+	// verifyWritable is then given.
+	dropOriginals(): void {
+		const raw = rawEntries(this.workbook)
+
+		if (raw === null || this.verification !== null) {
+			return
+		}
+
+		for (const path of [...raw.keys()]) {
+			if (REGENERATED.test(path)) raw.delete(path)
+		}
+
+		this.source = Promise.withResolvers()
+	}
+
+	// Proves (once) whether saving loses anything, from the file's bytes (`source`) when its originals were
+	// let go. Must run before any edit: an edit made first would read as a loss, so a workbook edited first
+	// stays view-only. An edit that asks first waits for the bytes.
+	verifyWritable(source?: Uint8Array): Promise<boolean> {
+		if (source !== undefined) {
+			this.source?.resolve(source)
+		}
+
 		this.verification ??= this.verify()
 
 		return this.verification
+	}
+
+	// The file's parts as opened, read again from its bytes for those let go; null when closed meanwhile.
+	private async originals(raw: Map<string, Uint8Array>, closed: () => boolean): Promise<Map<string, Uint8Array> | null> {
+		if (this.source === null) {
+			return new Map(raw)
+		}
+
+		const bytes = await this.source.promise
+
+		this.source = null
+		const read = bytes === null || closed() ? null : await readZip(bytes, closed, path => REGENERATED.test(path))
+
+		return read === null ? null : new Map([...raw, ...read])
 	}
 
 	private async verify(): Promise<boolean> {
@@ -699,33 +926,26 @@ export class XlsxDocument {
 		// Yields first, so a close already on its way is seen before any work.
 		await pause()
 
-		if (raw !== null && this.savePlan.writable && this.history.untouched() && !closed()) {
-			let size = 0
+		const original = raw !== null && this.unprovable === undefined && !closed() ? await this.originals(raw, closed) : null
 
-			for (const bytes of raw.values()) size += bytes.length
+		if (raw !== null && original !== null && this.history.untouched() && !closed()) {
+			await this.prepareSave()
 
-			// Too large to prove without holding the file twice over: view-only.
-			if (size <= VERIFY_LIMIT) {
-				const original = new Map(raw)
+			// Closed meanwhile: every buffer below is dropped unused.
+			const saved = closed() ? null : await this.unzippedSave(raw, closed)
 
-				await this.prepareSave()
+			const losses =
+				saved === null || closed()
+					? null
+					: await saveLosses(
+							{ original, saved, sheetPaths: this.savePlan.sheets, dropped: this.savePlan.drop, release: true },
+							closed
+						)
 
-				// Closed meanwhile: every buffer below is dropped unused.
-				const saved = closed() ? null : await this.unzippedSave(raw, closed)
-
-				const losses =
-					saved === null || closed()
-						? null
-						: await saveLosses(
-								{ original, saved, sheetPaths: this.savePlan.sheets, dropped: this.savePlan.drop, release: true },
-								closed
-							)
-
-				if (losses !== null && !closed()) {
-					this.losses = losses
-					// An edit that came in while it saved would be read as the file.
-					proven = losses.length === 0 && this.history.untouched()
-				}
+			if (losses !== null && !closed()) {
+				this.losses = losses
+				// An edit that came in while it saved would be read as the file.
+				proven = losses.length === 0 && this.history.untouched()
 			}
 		}
 
@@ -820,6 +1040,8 @@ export class XlsxDocument {
 	// Stops a proof still running (it resolves false) and lets go of the engine and the file's parts.
 	close(): void {
 		this.closed = true
+		this.source?.resolve(null)
+		this.source = null
 		this.proven = false
 		this.engine?.destroy()
 		this.engine = null
@@ -832,6 +1054,8 @@ export class XlsxDocument {
 				return this.revertSizes(step)
 			case "cells":
 				return this.revertCells(step)
+			case "format":
+				return this.revertFormat(step)
 			case "structure":
 				return this.revertStructure(step)
 			case "addSheet": {
@@ -903,6 +1127,9 @@ export class XlsxDocument {
 
 			if (before.result === undefined) delete cell.formulaResult
 			else cell.formulaResult = before.result
+
+			if (before.error) cell.formulaResultError = true
+			else delete cell.formulaResultError
 
 			cell.value = before.value
 
@@ -998,14 +1225,7 @@ export class XlsxDocument {
 			touched.push({ row, col })
 		}
 
-		// Writing past the sheet's edge grew it; it shrinks back.
-		if (sheet.rows.length > step.extent.rows) {
-			sheet.rows.length = step.extent.rows
-		}
-
-		if ((sheet.rows[0]?.length ?? 0) > step.extent.cols) {
-			for (const values of sheet.rows) values.length = step.extent.cols
-		}
+		shrinkTo(sheet, step.extent)
 
 		const recalculated = this.recalculate(engine =>
 			engine.set(
@@ -1015,6 +1235,44 @@ export class XlsxDocument {
 		)
 
 		return this.cellsResult(gridIndex, touched, recalculated)
+	}
+
+	private revertFormat(step: Extract<Step, { type: "format" }>): EditResult {
+		const sheet = this.workbook.sheets[step.sheet]
+
+		if (sheet === undefined) {
+			return { type: "none", state: this.history.state() }
+		}
+
+		const { startRow, startCol, endRow, endCol } = step.range
+		const touched: { row: number; col: number }[] = []
+		let at = 0
+
+		for (let row = startRow; row <= endRow; row++) {
+			for (let col = startCol; col <= endCol; col++) {
+				const index = step.before[at++] ?? 0
+				const current = sheet.cells?.get(cellIdOf(row, col))
+				const value = sheet.rows[row]?.[col] ?? null
+
+				if (index === 0) {
+					this.write(sheet, row, col, value, undefined)
+				} else if (current !== undefined) {
+					const restored: Cell = { ...current }
+					const style = step.styles[index]
+
+					if (style === undefined) delete restored.style
+					else restored.style = style
+
+					this.write(sheet, row, col, value, restored)
+				}
+
+				touched.push({ row, col })
+			}
+		}
+
+		shrinkTo(sheet, step.extent)
+
+		return this.cellsResult(this.worksheets().indexOf(sheet), touched, [])
 	}
 
 	private revertStructure(step: Extract<Step, { type: "structure" }>): EditResult {
@@ -1183,6 +1441,10 @@ export class XlsxDocument {
 			)
 		}))
 
+		if (parsedCells.some(cell => cell.parsed.type === "formula" && !wellFormedFormula(cell.parsed.formula))) {
+			return this.refused("formula")
+		}
+
 		if (splitsArray(sheet, cells)) {
 			return this.refused("arrayFormula")
 		}
@@ -1208,8 +1470,9 @@ export class XlsxDocument {
 			const cellId = cellIdOf(row, col)
 			const existing = sheet.cells?.get(cellId)
 
+			// The cell's details are replaced below, never changed in place: the step can hold them as they are.
 			if (!before.has(cellId)) {
-				before.set(cellId, { value: sheet.rows[row]?.[col] ?? null, cell: existing === undefined ? undefined : { ...existing } })
+				before.set(cellId, { value: sheet.rows[row]?.[col] ?? null, cell: existing })
 			}
 
 			const base: Partial<Cell> = { ...existing }
@@ -1221,6 +1484,7 @@ export class XlsxDocument {
 
 			delete base.formula
 			delete base.formulaResult
+			delete base.formulaResultError
 			delete base.formulaType
 			delete base.formulaSharedIndex
 			delete base.formulaRef
@@ -1379,27 +1643,39 @@ export class XlsxDocument {
 		}
 
 		const extent = { rows: sheet.rows.length, cols: sheet.rows[0]?.length ?? 0 }
-		const before = new Map<string, CellBefore>()
+		const formats = new FormatTable()
+		const before = new Uint32Array((lastRow - startRow + 1) * (lastCol - startCol + 1))
 		const touched: { row: number; col: number }[] = []
 		const patch = stylePatcher(op.patch)
+		// By the index of the format patched: each distinct one is patched once, and its cells share the result.
+		const patched: CellStyle[] = []
+		let at = 0
 
 		for (let row = startRow; row <= lastRow; row++) {
 			for (let col = startCol; col <= lastCol; col++) {
-				const cellId = cellIdOf(row, col)
-				const existing = sheet.cells?.get(cellId)
+				const existing = sheet.cells?.get(cellIdOf(row, col))
 				const value = sheet.rows[row]?.[col] ?? null
+				const source = startingStyle(sheet, row, col, existing)
+				const index = formats.index(source)
 
-				before.set(cellId, { value, cell: existing === undefined ? undefined : { ...existing } })
+				before[at++] = existing === undefined ? 0 : formats.index(existing.style)
 				this.write(sheet, row, col, value, {
 					...(existing ?? { value, type: typeOf(value) }),
-					style: patch(startingStyle(sheet, row, col, existing))
+					style: (patched[index] ??= patch(source))
 				})
 				touched.push({ row, col })
 			}
 		}
 
 		return {
-			step: { type: "cells", sheet: this.workbook.sheets.indexOf(sheet), before, extent },
+			step: {
+				type: "format",
+				sheet: this.workbook.sheets.indexOf(sheet),
+				range: { startRow, startCol, endRow: lastRow, endCol: lastCol },
+				styles: formats.styles,
+				before,
+				extent
+			},
 			result: () => this.cellsResult(sheetIndex, touched, [])
 		}
 	}
@@ -1567,18 +1843,32 @@ export class XlsxDocument {
 				}
 
 				const [row, col] = parseCellId(cellId)
-				const value = engine.value(index, row, col)
+				const { value, error } = engine.result(index, row, col)
 				const stored = cell.formulaResult
 
 				if (
 					(FormulaEngine.unsupported(value) && hasStoredResult(cell)) ||
-					(stored instanceof Date ? typeof value === "number" && dateToSerial(stored, this.date1904) === value : stored === value)
+					// What the engine cannot work out shows and is not stored: unchanged while it shows the same.
+					(FormulaEngine.unsupported(value) &&
+						cell.formulaResult === null &&
+						cell.value === value &&
+						(cell.formulaResultError === true) === (error === true)) ||
+					((stored instanceof Date
+						? typeof value === "number" && dateToSerial(stored, this.date1904) === value
+						: stored === value) &&
+						(cell.formulaResultError === true) === (error === true))
 				) {
 					continue
 				}
 
-				changed.push({ sheet: sheetIndex, key: cellId, result: stored, value: sheet.rows[row]?.[col] ?? null })
-				this.storeResult(sheet, row, col, cell, value)
+				changed.push({
+					sheet: sheetIndex,
+					key: cellId,
+					result: stored,
+					error: cell.formulaResultError === true,
+					value: sheet.rows[row]?.[col] ?? null
+				})
+				this.storeResult(sheet, row, col, cell, value, error === true)
 			}
 		})
 
@@ -1770,6 +2060,17 @@ export class XlsxDocument {
 	}
 }
 
+// Writing past the sheet's edge grew it; it shrinks back to `extent`.
+function shrinkTo(sheet: Sheet, extent: { rows: number; cols: number }): void {
+	if (sheet.rows.length > extent.rows) {
+		sheet.rows.length = extent.rows
+	}
+
+	if ((sheet.rows[0]?.length ?? 0) > extent.cols) {
+		for (const values of sheet.rows) values.length = extent.cols
+	}
+}
+
 // The sheets these cells are on.
 function sheetsOf(...lists: (readonly { sheet: number }[])[]): Set<number> {
 	const sheets = new Set<number>()
@@ -1827,9 +2128,9 @@ function hexColor(css: string): { rgb: string } {
 	return { rgb: css.replace("#", "").toUpperCase() }
 }
 
-// Applies one patch to many cells' formats. Cells sharing a font or an alignment (as the reader and
+// Applies one patch to many cells' formats. Formats sharing a font or an alignment (as the reader and
 // earlier patches leave them) share the patched one too, so the views key them as one format rather
-// than one per cell. Each cell still gets a format object of its own.
+// than one per cell.
 function stylePatcher(patch: FormatPatch): (style: CellStyle | undefined) => CellStyle {
 	const fonts = new Map<CellStyle["font"], NonNullable<CellStyle["font"]>>()
 	const alignments = new Map<CellStyle["alignment"], NonNullable<CellStyle["alignment"]>>()

@@ -4,6 +4,7 @@ import { openXlsx, writeXlsx } from "hucre/xlsx"
 import { cellKey, type CellView } from "@/features/spreadsheet/lib/model"
 import { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import { displayText } from "@/features/spreadsheet/lib/xlsxView"
+import { takesText } from "@/features/spreadsheet/lib/cellInput.logic"
 import { proven } from "@/tests/spreadsheetProven"
 
 async function workbookBytes(rows: CellValue[][], cells?: Map<string, Cell>, dateSystem?: "1904"): Promise<Uint8Array> {
@@ -114,5 +115,57 @@ describe("workbook memory", () => {
 
 		expect(structuralIds() - before).toBeLessThanOrEqual(4)
 		expect(new Set(Array.from(document.doc().sheets[0]?.cells.values() ?? [], view => view.style)).size).toBe(1)
+	})
+})
+
+describe("Text-formatted rows and columns", () => {
+	it("tells where typing is taken as text exactly as the worker reads it", async () => {
+		const document = await proven(
+			await openXlsx(
+				await writeXlsx({
+					sheets: [
+						{
+							name: "S",
+							rows: [[1], [2], [3], [4], [5]],
+							columns: [{}, { style: { numFmt: "@" } }],
+							rowDefs: new Map([
+								[2, { style: { numFmt: "0.00" } }],
+								[3, { style: { numFmt: "@" } }]
+							]),
+							// Written as <c r="B1" s="0"/>: a cell of its own, with the default format.
+							cells: new Map<string, Cell>([["0,1", { value: null, type: "empty", style: {} }]])
+						}
+					]
+				}),
+				{ readStyles: true }
+			)
+		)
+		const doc = document.doc()
+		const sheet = doc.sheets[0]
+		// Row 3 and 4's formats win over column B's; a cell with details of its own keeps its own (none); a
+		// value without details has none.
+		const cases: [number, number, boolean][] = [
+			[1, 1, true],
+			[3, 1, true],
+			[3, 2, true],
+			[0, 1, false],
+			[2, 1, false],
+			[1, 0, false]
+		]
+
+		expect(sheet?.textFormat).toMatchObject({ rows: [3], cols: [1], otherRows: [2], otherCells: [cellKey(0, 1)] })
+
+		for (const [row, col, text] of cases) {
+			const shown = takesText(sheet ?? {}, row, col, sheet?.cells.get(cellKey(row, col)), doc.styles)
+			const result = document.apply({ type: "setCells", sheet: 0, cells: [{ row, col, input: "=SUM(" }] })
+
+			expect([row, col, shown, result.type === "refused"]).toEqual([row, col, text, !text])
+		}
+	})
+
+	it("lists nothing for a sheet without Text formats", async () => {
+		const document = await proven(await openXlsx(await writeXlsx({ sheets: [{ name: "S", rows: [[1]] }] }), { readStyles: true }))
+
+		expect(document.doc().sheets[0]?.textFormat).toBeUndefined()
 	})
 })

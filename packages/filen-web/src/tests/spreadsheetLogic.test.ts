@@ -4,6 +4,8 @@ import { cellName, columnIndex, columnName, expandToMerges, rangeName } from "@/
 import { gridMove, type GridBounds } from "@/features/spreadsheet/lib/navigation.logic"
 import { parseTsv, rangeToTsv } from "@/features/spreadsheet/lib/tsv.logic"
 import { cellKey, type SheetView } from "@/features/spreadsheet/lib/model"
+import { wellFormedFormula } from "@/features/spreadsheet/lib/formulaRefs"
+import { malformedFormula } from "@/features/spreadsheet/lib/cellInput.logic"
 
 describe("createAxis", () => {
 	const axis = createAxis(10, 20, new Map([[2, 50]]), [5])
@@ -121,5 +123,94 @@ describe("TSV", () => {
 			["two\nlines", "3"]
 		])
 		expect(parseTsv("a\t\tb")).toEqual([["a", "", "b"]])
+	})
+})
+
+describe("formula syntax", () => {
+	it("reads what Excel's grammar allows, however the engine fares with it", () => {
+		const formulas = [
+			"SUM(A1,B1)",
+			"NOW()",
+			"IF(A1,,)",
+			"SUM( , 1,,2)",
+			"{1,2;3,4}",
+			'{-1, 2.5 ; "a",TRUE}+{#N/A,1E+5;.5,false}',
+			"A:A+1:1",
+			"'My Sheet'!A1+Sheet1!$A$1:$B$2",
+			"Table1[@Col]+Table1[[#This Row],[Col]]+[@Col]",
+			"[1]Sheet1!A1+'[Book.xlsx]S 1'!A1+Sheet1:Sheet3!A1",
+			"LET(x,1,x+1)+LAMBDA(x,x+1)(2)",
+			"-A1%^-2",
+			'"a ""b"""&TRUE',
+			"A1<>B1",
+			"A1<=B1",
+			"_xlfn.XLOOKUP(1,A:A,B:B)",
+			"SUM(A1:A3 B2:B4)",
+			" SUM( A1 , B1 ) ",
+			"A1#+@A1:A10",
+			"Sheet1!#REF!+#N/A+#DIV/0!",
+			"1E+5+.5",
+			"(1+2)*SUM((A1,B1))",
+			"A1\n+B1",
+			"'O''Brien'!A1",
+			// What Excel leaves of a reference into a deleted sheet.
+			"#REF!A1",
+			"SUM(#REF!A1:B2)"
+		]
+
+		for (const formula of formulas) expect([formula, wellFormedFormula(formula)]).toEqual([formula, true])
+	})
+
+	it("refuses text that is not a formula: locale separators, unclosed parts, operators without operands", () => {
+		const formulas = [
+			"SUM(A1;B1)",
+			"SUM(A1",
+			"SUM(A1))",
+			"1+",
+			"",
+			" ",
+			"=A1",
+			"()",
+			"(1+)",
+			'"abc',
+			"'Sheet1'",
+			"A1!",
+			"{1,}",
+			"{}",
+			"(,)",
+			"*A1",
+			"A1**B1",
+			"#",
+			"Table1[[a]",
+			"A1@",
+			"!A1",
+			// An operator before ")" or "," is not an argument left empty.
+			"SUM(A1+)",
+			"IF(A1>,1,2)",
+			"IF(A1=,1,2)",
+			"SUM(1,-)",
+			"SUM(A1&)",
+			"SUM(-)",
+			// An array constant holds constants only.
+			"{A1,B1}",
+			"{SUM(1)}",
+			"{(1)}",
+			"{1,{2}}",
+			"{1 2}",
+			"{1+2}",
+			"{-}"
+		]
+
+		for (const formula of formulas) expect([formula, wellFormedFormula(formula)]).toEqual([formula, false])
+	})
+
+	it("tells which entries would be stored as a malformed formula", () => {
+		expect(malformedFormula("=SUM(A1;B1)")).toBe(true)
+		expect(malformedFormula("=SUM(A1,B1)")).toBe(false)
+		// Text: not a formula at all, or kept as typed.
+		expect(malformedFormula("SUM(A1;B1)")).toBe(false)
+		expect(malformedFormula("'=SUM(A1;B1)")).toBe(false)
+		expect(malformedFormula("=")).toBe(false)
+		expect(malformedFormula("=SUM(A1;B1)", true)).toBe(false)
 	})
 })

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
+import { readFileSync } from "node:fs"
 import { openXlsx, saveXlsx, writeXlsx } from "hucre/xlsx"
 import { FormulaEngine } from "@/features/spreadsheet/lib/formulaEngine"
 import { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
@@ -74,6 +75,37 @@ describe("proof that saving loses nothing", () => {
 		).toBe(true)
 	})
 
+	it("finds a cached error saved as text, or text saved as an error", async () => {
+		const workbook = await openXlsx(
+			await writeXlsx({
+				sheets: [
+					{
+						name: "S",
+						rows: [["#N/A"]],
+						cells: new Map([
+							["0,0", { value: "#N/A", type: "formula", formula: "NA()", formulaResult: "#N/A", formulaResultError: true }]
+						])
+					}
+				]
+			}),
+			{ readStyles: true }
+		)
+		const plan = xlsxSavePlan(workbook)
+		const original = new Map(rawEntries(workbook))
+		const saved = (await readZip(await saveXlsx(workbook))) ?? new Map<string, Uint8Array>()
+		const sheet = new TextDecoder().decode(saved.get("xl/worksheets/sheet1.xml"))
+		const losses = async (xml: string) =>
+			(await saveLosses({
+				original,
+				saved: new Map([...saved, ["xl/worksheets/sheet1.xml", new TextEncoder().encode(xml)]]),
+				sheetPaths: plan.sheets,
+				dropped: plan.drop
+			})) ?? []
+
+		expect(await losses(sheet)).toEqual([])
+		expect((await losses(sheet.replace('t="e"', 't="str"'))).some(loss => loss.includes("cell 1,1"))).toBe(true)
+	})
+
 	it("stops a proof when its workbook closes, resolving false and letting go of the file's parts", async () => {
 		const rows = Array.from({ length: 20_000 }, (_, row) => Array.from({ length: 10 }, (_, col) => row * 10 + col))
 		const workbook = await openXlsx(await writeXlsx({ sheets: [{ name: "S", rows }] }), { readStyles: true })
@@ -134,6 +166,93 @@ describe("proof that saving loses nothing", () => {
 		const excel = await openXlsx(await saveXlsx(await openFixture("excel_full.xlsx")))
 
 		expect(excel.namedRanges?.find(named => named.name === "_xlnm._FilterDatabase")?.hidden).toBe(true)
+	})
+})
+
+describe("proof on demand", () => {
+	const typed = { type: "setCells", sheet: 0, cells: [{ row: 0, col: 0, input: "x" }] } as const
+
+	it("proves a workbook at its first edit, and makes the edit once the proof passes", async () => {
+		const document = new XlsxDocument(await openFixture("gs.xlsx"))
+
+		expect(document.writable).toBe(false)
+		expect(await document.edit(typed)).toMatchObject({ type: "cells", state: { dirty: true, canUndo: true } })
+		expect(document.writable).toBe(true)
+		expect(shownCell(document, 0, 0)).toMatchObject({ text: "x" })
+	})
+
+	it("refuses an edit to a workbook whose proof fails, changing nothing", async () => {
+		const document = new XlsxDocument(await openFixture("excel_full.xlsx"))
+		const before = shownCell(document, 0, 0)
+
+		expect(await document.edit(typed)).toMatchObject({ type: "refused", reason: "readOnly", state: { dirty: false, canUndo: false } })
+		expect(shownCell(document, 0, 0)).toEqual(before)
+	})
+
+	it("opens a workbook with more filled cells than it proves view-only, saying why, and lets go of its parts", async () => {
+		const bytes = await writeXlsx({
+			sheets: [
+				{
+					name: "S",
+					rows: [
+						[1, 2],
+						[3, null]
+					]
+				}
+			]
+		})
+		const large = await openXlsx(bytes, { readStyles: true })
+		const document = new XlsxDocument(large, undefined, 2)
+
+		expect(document.doc()).toMatchObject({ writable: false, unprovable: "tooLarge" })
+		expect(rawEntries(large)?.size).toBe(0)
+		expect(await document.verifyWritable()).toBe(false)
+		expect(new XlsxDocument(await openXlsx(bytes, { readStyles: true }), undefined, 3).doc().unprovable).toBeUndefined()
+	})
+
+	it("keeps only what saving copies until proven, reading the rest again from the file's bytes", async () => {
+		const bytes = readFileSync(new URL("./fixtures/spreadsheet/lo-plain.xlsx", import.meta.url))
+		const workbook = await openXlsx(bytes, { readStyles: true })
+		const document = new XlsxDocument(workbook)
+
+		document.dropOriginals()
+
+		expect([...(rawEntries(workbook)?.keys() ?? [])].some(path => /worksheets\/sheet\d+\.xml$|styles\.xml/i.test(path))).toBe(false)
+
+		// The first edit waits for the bytes the page sends with its proof.
+		const edited = document.edit(typed)
+		let settled = false
+
+		void edited.then(() => {
+			settled = true
+		})
+		await new Promise(resolve => setTimeout(resolve, 5))
+
+		expect(settled).toBe(false)
+		expect(await document.verifyWritable(new Uint8Array(bytes))).toBe(true)
+		expect(await edited).toMatchObject({ type: "cells" })
+		expect(document.losses).toEqual([])
+	})
+
+	it("stops waiting for the bytes when the workbook closes", async () => {
+		const document = new XlsxDocument(await openFixture("lo-plain.xlsx"))
+
+		document.dropOriginals()
+
+		const edited = document.edit(typed)
+
+		document.close()
+
+		expect(await edited).toMatchObject({ type: "refused", reason: "readOnly" })
+	})
+
+	it("opens a workbook saving would damage view-only at once, without proving it", async () => {
+		const workbook = await openFixture("chartsheet.xlsx")
+		const document = new XlsxDocument(workbook)
+
+		expect(document.doc().unprovable).toBe("unsafe")
+		expect(rawEntries(workbook)?.size).toBe(0)
+		expect(await document.edit(typed)).toMatchObject({ type: "refused", reason: "readOnly" })
 	})
 })
 

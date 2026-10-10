@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest"
 import { canEncodeWindows1252, parseCsvFile, serializeCsv, type CsvFormat } from "@/features/spreadsheet/lib/csvView"
 import { applyEditResult, gridDoc, type GridDoc } from "@/features/spreadsheet/lib/cellStore.logic"
 import { CsvDocument } from "@/features/spreadsheet/lib/csvDocument"
-import { MAX_SHEET_CELLS, type EditOp, type EditResult } from "@/features/spreadsheet/lib/edits"
+import type { EditOp, EditResult } from "@/features/spreadsheet/lib/edits"
 import { MAX_COLUMNS } from "@/features/spreadsheet/lib/model"
 import { standardWindows1252Decoding } from "@/tests/whatwgWindows1252"
 
@@ -484,11 +484,8 @@ describe("CsvDocument undo-history memory budget", () => {
 		expect(document.undo().type).toBe("none")
 	})
 
-	it("bounds total snapshotted cells to MAX_SHEET_CELLS, evicting the oldest step first", () => {
-		// Two column deletes together exceed the budget by construction; the first (oldest) must be evicted
-		// once the second is applied, leaving only one step to undo.
-		const chunk = Math.ceil(MAX_SHEET_CELLS / 2) + 1
-		const bigRow = new Array<string>(chunk * 2).fill("")
+	// Two columns of ten 100-character cells, each about 1.5 kB held once deleted.
+	function twoDeletes(): CsvDocument {
 		const format: CsvFormat = {
 			delimiter: ",",
 			lineSeparator: "\n",
@@ -497,35 +494,25 @@ describe("CsvDocument undo-history memory budget", () => {
 			encoding: "utf-8",
 			writable: true
 		}
-		const document = new CsvDocument([bigRow], format)
+		const document = new CsvDocument([new Array<string>(20).fill("x".repeat(100))], format, 2000)
 
-		document.apply({ type: "delete", sheet: 0, axis: "cols", at: 0, count: chunk })
-		document.apply({ type: "delete", sheet: 0, axis: "cols", at: 0, count: chunk })
+		document.apply({ type: "delete", sheet: 0, axis: "cols", at: 0, count: 10 })
+		document.apply({ type: "delete", sheet: 0, axis: "cols", at: 0, count: 10 })
 
+		return document
+	}
+
+	it("bounds what the history holds in bytes, evicting the oldest step first", () => {
+		const document = twoDeletes()
 		const undone = document.undo()
 
 		expect(undone.state.canUndo).toBe(false)
-		expect(document.doc().sheets[0]?.colCount).toBe(chunk)
+		expect(document.doc().sheets[0]?.colCount).toBe(10)
 	})
 
 	it("keeps a save point permanently dirty once its undo step falls out of the history budget", () => {
-		const chunk = Math.ceil(MAX_SHEET_CELLS / 2) + 1
-		const bigRow = new Array<string>(chunk * 2).fill("")
-		const format: CsvFormat = {
-			delimiter: ",",
-			lineSeparator: "\n",
-			bom: false,
-			trailingNewline: false,
-			encoding: "utf-8",
-			writable: true
-		}
-		const document = new CsvDocument([bigRow], format)
-
 		// The document's opened state (version 0) is implicitly "saved" and is never re-marked.
-		document.apply({ type: "delete", sheet: 0, axis: "cols", at: 0, count: chunk })
-		document.apply({ type: "delete", sheet: 0, axis: "cols", at: 0, count: chunk })
-
-		const last = document.undo()
+		const last = twoDeletes().undo()
 
 		// Only one of the two steps survived the budget, so the version-0 save point is unreachable.
 		expect(last.state.canUndo).toBe(false)

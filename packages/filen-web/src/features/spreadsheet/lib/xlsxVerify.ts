@@ -770,13 +770,10 @@ async function compareSheetData(
 			continue
 		}
 
-		// A formula's cached error may come back as text: Excel calculates the formula again either way.
-		const cached = (value: string | undefined) =>
-			item.formula !== undefined && value?.startsWith("e:") === true ? `s:t:${value.slice(2)}` : value
 		const sameValue =
 			item.value === undefined ||
 			(item.formula !== undefined && match.value === undefined) ||
-			cached(item.value) === cached(match.value) ||
+			item.value === match.value ||
 			(item.value.startsWith("n:") && match.value?.startsWith("n:") === true && numbersClose(item.value, match.value))
 
 		if (!sameValue || item.formula !== match.formula || item.attrs !== match.attrs || item.style !== match.style) {
@@ -1028,8 +1025,82 @@ function drawingRecords(pkg: Package, paths: readonly string[]): Map<string, num
 	return set
 }
 
-// The parts an unedited save writes anew, compared by meaning; everything else must come back byte for
-// byte at the same path.
+const CONTENT_TYPES = "[content_types].xml"
+
+// A part name as the package's content types give it ("/xl/Workbook.xml", percent-encoded), as a path.
+function partPath(name: string): string {
+	let path = name.startsWith("/") ? name.slice(1) : name
+
+	try {
+		path = decodeURIComponent(path)
+	} catch {
+		// Kept as written.
+	}
+
+	return path.toLowerCase()
+}
+
+// Each part's content type as the package declares it (its own override, else its extension's default),
+// and the parts it declares more than once, which Excel refuses.
+function contentTypes(pkg: Package): { typeOf: (path: string) => string | undefined; repeated: string[] } {
+	const defaults = new Map<string, string>()
+	const overrides = new Map<string, string>()
+	const repeated: string[] = []
+	const xml = pkg.text(CONTENT_TYPES)
+
+	for (const node of xml === undefined ? [] : parseXml(xml).children) {
+		const type = node.attrs.get("ContentType")
+
+		if (type === undefined) continue
+
+		const [declared, name] =
+			node.name === "Default"
+				? [defaults, (node.attrs.get("Extension") ?? "").toLowerCase()]
+				: node.name === "Override"
+					? [overrides, partPath(node.attrs.get("PartName") ?? "")]
+					: [null, ""]
+
+		if (declared === null) continue
+		if (declared.has(name)) repeated.push(name)
+
+		declared.set(name, type)
+	}
+
+	return { typeOf: path => overrides.get(path) ?? defaults.get(path.slice(path.lastIndexOf(".") + 1)), repeated }
+}
+
+// What saving changes of what the parts are: a part it writes with no content type (Excel then refuses
+// the file) or with another one than the file gave it (a signature read as the macros it signs, a
+// template saved as a workbook). The workbook and its sheets are compared wherever saving puts them.
+function contentTypeLosses(original: Package, saved: Package, sheetPaths: readonly string[]): string[] {
+	const before = contentTypes(original).typeOf
+	const { typeOf: after, repeated } = contentTypes(saved)
+	const lost = repeated.map(name => `${name}: content type declared more than once`)
+	const compare = (from: string, to: string) => {
+		const was = before(from)
+		const is = after(to)
+
+		if (was !== undefined && was !== is) lost.push(`${from}: content type ${was} saved as ${is ?? "none"}`)
+	}
+
+	for (const path of saved.entries.keys()) {
+		if (path === CONTENT_TYPES || path.endsWith("/")) continue
+
+		if (after(path) === undefined) lost.push(`${path}: saved with no content type`)
+		else if (original.entries.has(path)) compare(path, path)
+	}
+
+	const workbook = relationships(original.text("_rels/.rels")).find(rel => rel.type === "officeDocument" && !rel.external)
+
+	if (workbook !== undefined) compare(resolvePart("", workbook.target), "xl/workbook.xml")
+
+	for (const [index, path] of sheetPaths.entries()) compare(path.toLowerCase(), `xl/worksheets/sheet${String(index + 1)}.xml`)
+
+	return [...new Set(lost)]
+}
+
+// The parts an unedited save writes anew, compared by meaning (the content types as above); everything
+// else must come back byte for byte at the same path.
 const REWRITTEN =
 	/^(\[content_types\]\.xml|_rels\/\.rels|xl\/_rels\/workbook\.xml\.rels|docprops\/app\.xml|xl\/calcchain\.xml|xl\/sharedstrings\.xml|xl\/styles\.xml|xl\/workbook\.xml|docprops\/core\.xml)$/
 
@@ -1091,6 +1162,8 @@ export async function saveLosses(input: VerifyInput, cancelled: () => boolean = 
 		// Differential formats are compared where rules and tables use them: saving keeps only those.
 		return set
 	}
+
+	report("[Content_Types].xml", contentTypeLosses(original, saved, input.sheetPaths))
 
 	report(
 		"styles",

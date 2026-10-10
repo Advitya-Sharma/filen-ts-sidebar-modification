@@ -16,6 +16,8 @@ export interface RecalculatedCell {
 	col: number
 	// A number, string, boolean, error text ("#DIV/0!") or null. Dates come as serial numbers.
 	value: number | string | boolean | null
+	// The value is an error, not text that reads like one.
+	error?: true
 }
 
 // A cell to give the engine. A formula also carries the result the file stored, when it has one: should
@@ -224,7 +226,8 @@ export class FormulaEngine {
 				sheet,
 				row: change.address.row,
 				col: change.address.col,
-				value: exported(change.newValue)
+				value: exported(change.newValue),
+				...(change.newValue instanceof DetailedCellError ? { error: true } : {})
 			})
 		}
 	}
@@ -351,10 +354,12 @@ export class FormulaEngine {
 		}
 	}
 
-	value(sheet: number, row: number, col: number): RecalculatedCell["value"] {
+	// A cell's value, and whether it is an error.
+	result(sheet: number, row: number, col: number): Pick<RecalculatedCell, "value" | "error"> {
 		const id = this.sheetIds[sheet]
+		const value: unknown = id === undefined ? null : this.engine.getCellValue({ sheet: id, row, col })
 
-		return id === undefined ? null : exported(this.engine.getCellValue({ sheet: id, row, col }))
+		return value instanceof DetailedCellError ? { value: exported(value), error: true } : { value: exported(value) }
 	}
 
 	destroy(): void {

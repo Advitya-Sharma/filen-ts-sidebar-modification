@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it, vi } from "vitest"
+import { useState } from "react"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import type { DriveItem } from "@/features/drive/lib/item"
 import { cellKey, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
+import type { GridDoc } from "@/features/spreadsheet/lib/cellStore.logic"
 
 const { open, close, undo, redo, apply, writability, viewOnly } = vi.hoisted(() => ({
 	viewOnly: vi.fn(() => Promise.resolve()),
@@ -37,6 +39,13 @@ const { csvDoc } = await import("@/features/spreadsheet/lib/csvView")
 
 const DOC: SpreadsheetDoc = { kind: "csv", sheets: [], activeSheet: 0, styles: [], writable: true }
 
+// The edits over a view held as useSpreadsheetDoc holds it.
+function useEditsOver(initial: GridDoc, onShift?: Parameters<typeof useSpreadsheetEdits>[2]) {
+	const [doc, setDoc] = useState(initial)
+
+	return { doc, ...useSpreadsheetEdits(1, setDoc, onShift) }
+}
+
 function file(uuid: string, name: string): DriveItem {
 	return { type: "file", data: { uuid, decryptedMeta: { name } } } as unknown as DriveItem
 }
@@ -63,6 +72,29 @@ describe("useSpreadsheetDoc", () => {
 	})
 })
 
+describe("useSpreadsheetDoc held view", () => {
+	it("holds one view, which edits replace rather than keep beside the view as opened", async () => {
+		open.mockResolvedValue({ id: 9, doc: csvDoc([["a"]], true) })
+
+		const { result } = renderHook(() => useSpreadsheetDoc(file("v1", "v.csv"), "view"))
+
+		await waitFor(() => {
+			expect(result.current.status).toBe("ready")
+		})
+
+		const opened = result.current.status === "ready" ? result.current.doc : null
+
+		act(() => {
+			if (result.current.status === "ready") {
+				result.current.updateDoc(doc => ({ ...doc, activeSheet: 1 }))
+			}
+		})
+
+		expect(result.current).toMatchObject({ status: "ready", id: 9, doc: { activeSheet: 1 } })
+		expect(result.current.status === "ready" && result.current.doc).not.toBe(opened)
+	})
+})
+
 describe("useSpreadsheetDoc renames", () => {
 	it("treats .xlsm and .xlsx as different formats, but a changed letter case as the same", async () => {
 		open.mockResolvedValue({ id: 8, doc: DOC })
@@ -85,7 +117,7 @@ describe("useSpreadsheetDoc renames", () => {
 
 describe("useSpreadsheetEdits", () => {
 	it("sends no undo or redo when there is nothing to undo or redo, so nothing shows as pending", async () => {
-		const { result } = renderHook(() => useSpreadsheetEdits(1, gridDoc(DOC)))
+		const { result } = renderHook(() => useEditsOver(gridDoc(DOC)))
 		let outcome: unknown
 
 		await act(async () => {
@@ -108,7 +140,7 @@ describe("useSpreadsheetEdits", () => {
 			})
 		)
 
-		const { result } = renderHook(() => useSpreadsheetEdits(1, gridDoc(DOC)))
+		const { result } = renderHook(() => useEditsOver(gridDoc(DOC)))
 		let done: Promise<unknown> = Promise.resolve()
 
 		act(() => {
@@ -138,7 +170,7 @@ describe("useSpreadsheetEdits", () => {
 			state: { dirty: true, canUndo: true, canRedo: false }
 		})
 
-		const { result } = renderHook(() => useSpreadsheetEdits(1, gridDoc(csvDoc([["a"]], true)), onShift))
+		const { result } = renderHook(() => useEditsOver(gridDoc(csvDoc([["a"]], true)), onShift))
 
 		await act(async () => {
 			await result.current.apply({ type: "insert", sheet: 0, axis: "rows", at: 0, count: 1 })
@@ -162,10 +194,10 @@ describe("useSpreadsheetWritability", () => {
 			})
 		)
 
-		const { result } = renderHook(() => useSpreadsheetWritability(3, XLSX, true, false))
+		const { result } = renderHook(() => useSpreadsheetWritability(3, XLSX, BYTES, true, false))
 
 		expect(result.current).toBe("checking")
-		expect(writability).toHaveBeenCalledWith(3)
+		expect(writability).toHaveBeenCalledWith(3, BYTES)
 
 		await act(async () => {
 			answer(true)
@@ -177,8 +209,8 @@ describe("useSpreadsheetWritability", () => {
 	it("stays read-only when the proof fails or the check throws", async () => {
 		writability.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("closed"))
 
-		const refused = renderHook(() => useSpreadsheetWritability(4, XLSX, true, false))
-		const failed = renderHook(() => useSpreadsheetWritability(5, XLSX, true, false))
+		const refused = renderHook(() => useSpreadsheetWritability(4, XLSX, BYTES, true, false))
+		const failed = renderHook(() => useSpreadsheetWritability(5, XLSX, BYTES, true, false))
 
 		await waitFor(() => {
 			expect(refused.result.current).toBe("readOnly")
@@ -191,14 +223,17 @@ describe("useSpreadsheetWritability", () => {
 
 		viewOnly.mockClear()
 
-		expect(renderHook(() => useSpreadsheetWritability(6, { kind: "csv", writable: true }, true, false)).result.current).toBe("writable")
-		expect(renderHook(() => useSpreadsheetWritability(7, XLSX, false, false)).result.current).toBe("checking")
+		expect(renderHook(() => useSpreadsheetWritability(6, { kind: "csv", writable: true }, BYTES, true, false)).result.current).toBe(
+			"writable"
+		)
+		// Not asked to edit yet: nothing is proven, and editing is still on offer.
+		expect(renderHook(() => useSpreadsheetWritability(7, XLSX, BYTES, false, false)).result.current).toBe("unproven")
 		expect(writability).not.toHaveBeenCalled()
 		// Not editable for now is not "never": the proof stays possible.
 		expect(viewOnly).not.toHaveBeenCalled()
 
 		// A public link: nothing will edit it, so the worker skips the proof.
-		renderHook(() => useSpreadsheetWritability(9, XLSX, false, true))
+		renderHook(() => useSpreadsheetWritability(9, XLSX, BYTES, false, true))
 		expect(viewOnly).toHaveBeenCalledWith(9)
 		expect(writability).not.toHaveBeenCalled()
 
@@ -210,7 +245,7 @@ describe("useSpreadsheetWritability", () => {
 			})
 		)
 
-		const gone = renderHook(() => useSpreadsheetWritability(8, XLSX, true, false))
+		const gone = renderHook(() => useSpreadsheetWritability(8, XLSX, BYTES, true, false))
 
 		gone.unmount()
 		await act(async () => {
@@ -220,12 +255,28 @@ describe("useSpreadsheetWritability", () => {
 		expect(gone.result.current).toBe("checking")
 	})
 
+	it("asks nothing about a workbook known at open to stay view-only, and says why", () => {
+		writability.mockClear()
+		viewOnly.mockClear()
+
+		expect(
+			renderHook(() => useSpreadsheetWritability(11, { kind: "xlsx", writable: false, unprovable: "unsafe" }, BYTES, true, false))
+				.result.current
+		).toBe("readOnly")
+		expect(
+			renderHook(() => useSpreadsheetWritability(12, { kind: "xlsx", writable: false, unprovable: "tooLarge" }, BYTES, true, false))
+				.result.current
+		).toBe("tooLarge")
+		expect(writability).not.toHaveBeenCalled()
+		expect(viewOnly).not.toHaveBeenCalled()
+	})
+
 	it("asks once editing becomes possible later, as after a rename back", async () => {
 		writability.mockReset()
 		viewOnly.mockClear()
 		writability.mockResolvedValue(true)
 
-		const { result, rerender } = renderHook(({ wanted }) => useSpreadsheetWritability(10, XLSX, wanted, false), {
+		const { result, rerender } = renderHook(({ wanted }) => useSpreadsheetWritability(10, XLSX, BYTES, wanted, false), {
 			initialProps: { wanted: false }
 		})
 
@@ -234,7 +285,7 @@ describe("useSpreadsheetWritability", () => {
 		await waitFor(() => {
 			expect(result.current).toBe("writable")
 		})
-		expect(writability).toHaveBeenCalledWith(10)
+		expect(writability).toHaveBeenCalledWith(10, BYTES)
 		expect(viewOnly).not.toHaveBeenCalled()
 	})
 })

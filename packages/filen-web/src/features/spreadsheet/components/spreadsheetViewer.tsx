@@ -30,10 +30,11 @@ import {
 	type FormatPatch
 } from "@/features/spreadsheet/lib/edits"
 import { clearedCells, newSheetName } from "@/features/spreadsheet/lib/gridEdits.logic"
+import { malformedFormula, takesText } from "@/features/spreadsheet/lib/cellInput.logic"
 import { cellKey, type CellRange } from "@/features/spreadsheet/lib/model"
 import { gridMove, isTypedCharacter, sheetBounds, sheetCols, sheetRows, snapToMerge } from "@/features/spreadsheet/lib/navigation.logic"
 import { layeredSheet, type LayerKey } from "@/features/spreadsheet/lib/sizeLayer"
-import { layerKeyFor, resizable, sizesInFile } from "@/features/spreadsheet/lib/sizeRouting.logic"
+import { layerKeyFor, sizesInFile } from "@/features/spreadsheet/lib/sizeRouting.logic"
 import { resetTargets, type SizeAxis, type SizeEntry } from "@/features/spreadsheet/lib/sizes.logic"
 import { endedCut, pastedCells, rangeToClip, rangeToTsv, type GridClip } from "@/features/spreadsheet/lib/tsv.logic"
 import { errorLabel } from "@/lib/i18n/errorLabel"
@@ -94,12 +95,15 @@ const NO_SHEET: GridSheet = {
 function CellEditor({
 	label,
 	value,
+	invalid,
 	onChange,
 	onKeyDown,
 	onBlur
 }: {
 	label: string
 	value: string
+	// What was typed would not be stored: it is kept open, marked.
+	invalid: boolean
 	onChange: (text: string) => void
 	onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void
 	onBlur: (event: FocusEvent<HTMLInputElement>) => void
@@ -117,8 +121,9 @@ function CellEditor({
 		<input
 			ref={inputRef}
 			aria-label={label}
+			aria-invalid={invalid}
 			value={value}
-			className="size-full min-w-full bg-background px-1.5 text-[13px] outline-2 -outline-offset-2 outline-primary"
+			className={`size-full min-w-full bg-background px-1.5 text-[13px] outline-2 -outline-offset-2 ${invalid ? "outline-destructive" : "outline-primary"}`}
 			onChange={event => {
 				onChange(event.target.value)
 			}}
@@ -134,6 +139,8 @@ const REFUSED_MESSAGES = {
 	tooLarge: "previewSpreadsheetTooLarge",
 	arrayFormula: "previewSpreadsheetArrayFormula",
 	tableHeader: "previewSpreadsheetTableHeader",
+	formula: "previewSpreadsheetFormulaInvalid",
+	readOnly: "previewSpreadsheetReadOnlyLossy",
 	encoding: "previewSpreadsheetEncodingUnsupported"
 } as const satisfies Record<Extract<EditResult, { type: "refused" }>["reason"], string>
 
@@ -158,6 +165,8 @@ interface Editing {
 	text: string
 	// Where the typing happens: in the cell, or in the formula bar.
 	from: "cell" | "bar"
+	// Committing it was refused: it holds a formula that does not read as one.
+	invalid?: boolean
 }
 
 function sameSelection(a: Selection, b: Selection): boolean {
@@ -166,7 +175,9 @@ function sameSelection(a: Selection, b: Selection): boolean {
 
 function SpreadsheetBody({
 	id,
-	initial,
+	doc,
+	updateDoc,
+	bytes,
 	alt,
 	editable,
 	unnamed,
@@ -179,7 +190,10 @@ function SpreadsheetBody({
 	onSaveAsXlsx
 }: {
 	id: number
-	initial: GridDoc
+	doc: GridDoc
+	updateDoc: (update: (doc: GridDoc) => GridDoc) => void
+	// The file as opened, which proving it reads.
+	bytes: Uint8Array
 	alt: string
 	editable: boolean
 	unnamed: boolean
@@ -193,22 +207,24 @@ function SpreadsheetBody({
 	onSaveAsXlsx: (() => Promise<void>) | undefined
 }) {
 	const { t } = useTranslation(["preview", "common"])
-	// Loaded whatever the file: CSV shifts reach it from the edits below, and only an editable workbook,
-	// which keeps its sizes in the file, leaves it unapplied.
+	// Loaded whatever the file: CSV shifts reach it from the edits below, and only a workbook proven
+	// editable, which keeps its sizes in the file, leaves it unapplied.
 	const local = useSizeLayer(layerKey)
-	const edits = useSpreadsheetEdits(id, initial, (sheetAt, shift) => {
+	const edits = useSpreadsheetEdits(id, updateDoc, (sheetAt, shift) => {
 		local.follow(sheetAt, shift)
 	})
-	const doc = edits.doc
+	// A workbook is proven to save intact only once the user sets out to edit it (an entry opened, an edit
+	// made): the proof is costly, and most files are only looked at.
+	const [editIntent, setEditIntent] = useState(false)
 	// A file without a spreadsheet extension is never edited, whatever it may say.
-	const writability = useSpreadsheetWritability(id, doc, editable && !unnamed, neverEditable || unnamed)
+	const writability = useSpreadsheetWritability(id, doc, bytes, editable && !unnamed && editIntent, neverEditable || unnamed)
 	const mayEdit = editable && !unnamed && !renamed
-	const canEdit = mayEdit && writability === "writable"
-	const inFile = sizesInFile(doc.kind, writability, canEdit)
-	const canResize = resizable(doc.kind, writability, mayEdit)
-	// Editing waits on the worker's proof: the toolbar holds its place meanwhile, disabled, and stays so
-	// when the proof fails, so the grid never moves as the verdict lands.
-	const toolbarShown = canEdit || (mayEdit && (writability === "checking" || doc.kind === "xlsx"))
+	// Edits made before the verdict wait for it in the worker, which refuses them if the proof fails.
+	const canEdit = mayEdit && (writability === "writable" || writability === "unproven" || writability === "checking")
+	const inFile = sizesInFile(doc.kind, canEdit)
+	// A workbook that turns out read-only keeps the toolbar, disabled, so the grid never moves as the
+	// verdict lands.
+	const toolbarShown = canEdit || (mayEdit && doc.kind === "xlsx")
 	const readOnlyNote = !editable
 		? readOnlyReason === "renamed"
 			? t("previewSpreadsheetReadOnlyRenamed")
@@ -219,11 +235,13 @@ function SpreadsheetBody({
 				? t("previewSpreadsheetReadOnlyRenamed")
 				: writability === "checking"
 					? t("previewSpreadsheetCheckingWritable")
-					: writability === "readOnly" && doc.kind === "xlsx"
-						? t("previewSpreadsheetReadOnlyLossy")
-						: writability === "readOnly" && doc.kind !== "xls"
-							? t("previewSpreadsheetReadOnlyUnsafe")
-							: null
+					: writability === "tooLarge"
+						? t("previewSpreadsheetReadOnlyTooLarge")
+						: writability === "readOnly" && doc.kind === "xlsx"
+							? t("previewSpreadsheetReadOnlyLossy")
+							: writability === "readOnly" && doc.kind !== "xls"
+								? t("previewSpreadsheetReadOnlyUnsafe")
+								: null
 	const shownNote = readOnlyNote ?? (doc.kind === "xls" ? t("previewSpreadsheetReadOnlyXls") : null)
 	const [xlsxAsked, setXlsxAsked] = useState(false)
 	const [xlsxSaving, setXlsxSaving] = useState(false)
@@ -269,8 +287,9 @@ function SpreadsheetBody({
 	}
 
 	const sheet = doc.sheets[sheetIndex] ?? NO_SHEET
-	// The sheet as laid out: its own sizes, with the ones kept beside the file over them.
-	const laidOutSheet = inFile ? sheet : layeredSheet(sheet, local.layer.get(sheetIndex))
+	// The sheet as laid out: its own sizes, with the ones kept beside the file over them until the workbook
+	// is proven editable (it may yet turn out read-only, keeping them).
+	const laidOutSheet = inFile && writability === "writable" ? sheet : layeredSheet(sheet, local.layer.get(sheetIndex))
 	const selection = selections.get(sheetIndex) ?? ORIGIN
 	const range = selectionRange(selection)
 	const active = sheet.cells.get(cellKey(selection.focus.row, selection.focus.col))
@@ -278,6 +297,13 @@ function SpreadsheetBody({
 	const activeStyle = active?.style === undefined ? undefined : doc.styles[active.style]
 	const entryCell = editing === null ? undefined : sheet.cells.get(cellKey(editing.row, editing.col))
 	const entryChanged = editing !== null && editing.text !== (entryCell?.input ?? entryCell?.text ?? "")
+	// A workbook stores a formula as typed, so one that does not read as one is refused at entry (a Text
+	// cell takes it as text). Text files store whatever is typed.
+	const entryMalformed =
+		editing !== null &&
+		entryChanged &&
+		doc.kind === "xlsx" &&
+		malformedFormula(editing.text, takesText(sheet, editing.row, editing.col, entryCell, doc.styles))
 	// Unsaved as soon as anything is typed: an open entry, and edits the worker has not answered yet.
 	const dirty = edits.state.dirty || edits.pending || entryChanged
 
@@ -299,7 +325,15 @@ function SpreadsheetBody({
 			return
 		}
 
-		toast.error(t(REFUSED_MESSAGES[result.reason]))
+		// One toast per reason: edits queued behind a failing proof are all refused alike.
+		toast.error(t(REFUSED_MESSAGES[result.reason]), { id: result.reason })
+	}
+
+	// The user set out to edit: a workbook's proof starts now, while they type.
+	function intend(): void {
+		if (!editIntent) {
+			setEditIntent(true)
+		}
 	}
 
 	// Any change to the sheet ends a held cut; the cut's own clear restores it after.
@@ -308,6 +342,7 @@ function SpreadsheetBody({
 	}
 
 	function apply(op: EditOp): void {
+		intend()
 		endCut()
 		edits.apply(op).then(report, () => {
 			if (alive.current) {
@@ -326,6 +361,7 @@ function SpreadsheetBody({
 			return
 		}
 
+		intend()
 		setEditing({ row: selection.focus.row, col: selection.focus.col, text, from })
 	}
 
@@ -344,9 +380,19 @@ function SpreadsheetBody({
 		return next?.focus ?? position
 	}
 
-	function commit(move: Move): void {
+	// Whether the entry is done with: one holding a malformed formula stays open, marked, until mended or
+	// cancelled.
+	function commit(move: Move): boolean {
 		if (editing === null || finished.current === editing) {
-			return
+			return true
+		}
+
+		if (entryMalformed) {
+			if (editing.invalid !== true) {
+				setEditing({ ...editing, invalid: true })
+			}
+
+			return false
 		}
 
 		finished.current = editing
@@ -360,6 +406,8 @@ function SpreadsheetBody({
 		setEditing(null)
 		select({ anchor: next, focus: next })
 		focusGrid()
+
+		return true
 	}
 
 	function cancel(): void {
@@ -580,8 +628,9 @@ function SpreadsheetBody({
 	useEffect(() => {
 		clipboardRef.current = handleClipboard
 
-		if (wasEditable.current && !canEdit) {
-			commit("none")
+		// A malformed entry cannot be committed, and can no longer be mended either.
+		if (wasEditable.current && !canEdit && !commit("none")) {
+			cancel()
 		}
 
 		wasEditable.current = canEdit
@@ -622,7 +671,14 @@ function SpreadsheetBody({
 	// Into the file for an editable workbook (an undoable edit), beside it for everything else.
 	function resize(axis: SizeAxis, sizes: readonly SizeEntry[]): Promise<void> {
 		if (inFile) {
-			return edits.apply({ type: "resize", sheet: sheetIndex, axis, sizes }).then(() => undefined)
+			intend()
+
+			return edits.apply({ type: "resize", sheet: sheetIndex, axis, sizes }).then(result => {
+				// The workbook turned out read-only: the size is kept beside it instead.
+				if (result.type === "refused" && result.reason === "readOnly") {
+					local.update(sheetIndex, axis, sizes)
+				}
+			})
 		}
 
 		local.update(sheetIndex, axis, sizes)
@@ -636,8 +692,9 @@ function SpreadsheetBody({
 			styles={doc.styles}
 			selection={selection}
 			onSelectionChange={next => {
-				if (editing !== null) {
-					commit("none")
+				// A malformed entry holds the selection where it is.
+				if (editing !== null && !commit("none")) {
+					return
 				}
 
 				select(next)
@@ -649,11 +706,12 @@ function SpreadsheetBody({
 					const anchor = snapToMerge(position, sheet.merges)
 					const view = sheet.cells.get(cellKey(anchor.row, anchor.col))
 
+					intend()
 					setEditing({ row: anchor.row, col: anchor.col, text: view?.input ?? view?.text ?? "", from: "cell" })
 				}
 			}}
 			gridRef={gridRef}
-			{...(canResize ? { onResize: resize } : {})}
+			onResize={resize}
 			editor={
 				editing?.from === "cell"
 					? {
@@ -663,8 +721,9 @@ function SpreadsheetBody({
 								<CellEditor
 									label={t("previewSpreadsheetCellContents")}
 									value={editing.text}
+									invalid={editing.invalid === true}
 									onChange={text => {
-										setEditing({ ...editing, text })
+										setEditing({ ...editing, text, invalid: false })
 									}}
 									onKeyDown={handleEditorKey}
 									onBlur={event => {
@@ -715,7 +774,8 @@ function SpreadsheetBody({
 						ref={barRef}
 						aria-label={t("previewSpreadsheetCellContents")}
 						value={editing === null ? activeInput : editing.text}
-						className="h-7 min-w-0 flex-1 rounded-md bg-transparent px-2 font-mono text-xs outline-none focus-visible:bg-muted/60"
+						aria-invalid={editing?.invalid === true}
+						className="h-7 min-w-0 flex-1 rounded-md bg-transparent px-2 font-mono text-xs outline-none focus-visible:bg-muted/60 aria-invalid:text-destructive"
 						onFocus={() => {
 							if (editing === null) {
 								startEditing("bar", activeInput)
@@ -724,7 +784,7 @@ function SpreadsheetBody({
 							}
 						}}
 						onChange={event => {
-							setEditing(prev => (prev === null ? null : { ...prev, text: event.target.value }))
+							setEditing(prev => (prev === null ? null : { ...prev, text: event.target.value, invalid: false }))
 						}}
 						onKeyDown={handleEditorKey}
 						onBlur={() => {
@@ -741,7 +801,14 @@ function SpreadsheetBody({
 						{activeInput}
 					</span>
 				)}
-				{shownNote === null ? null : (
+				{editing?.invalid === true ? (
+					<span
+						role="alert"
+						className="max-w-1/2 shrink truncate text-xs text-destructive"
+					>
+						{t("previewSpreadsheetFormulaInvalid")}
+					</span>
+				) : shownNote === null ? null : (
 					<span
 						role="status"
 						title={shownNote}
@@ -803,7 +870,6 @@ function SpreadsheetBody({
 					<ResetSizeItems
 						sheet={laidOutSheet}
 						range={range}
-						disabled={!canResize}
 						onReset={(axis, entries) => {
 							void resize(axis, entries)
 						}}
@@ -835,8 +901,9 @@ function SpreadsheetBody({
 					sheets={doc.sheets}
 					active={sheetIndex}
 					onSelect={index => {
-						commit("none")
-						setChosenSheet(index)
+						if (commit("none")) {
+							setChosenSheet(index)
+						}
 					}}
 					onAdd={
 						canEdit
@@ -885,12 +952,10 @@ function SpreadsheetBody({
 function ResetSizeItems({
 	sheet,
 	range,
-	disabled,
 	onReset
 }: {
 	sheet: GridSheet
 	range: CellRange
-	disabled: boolean
 	onReset: (axis: SizeAxis, entries: SizeEntry[]) => void
 }) {
 	const { t } = useTranslation("preview")
@@ -910,7 +975,7 @@ function ResetSizeItems({
 	return (
 		<>
 			<ContextMenuItem
-				disabled={disabled || cols.length === 0}
+				disabled={cols.length === 0}
 				onClick={() => {
 					onReset("cols", cols)
 				}}
@@ -918,7 +983,7 @@ function ResetSizeItems({
 				{t("previewSpreadsheetResetColumnWidth", { count: cols.length })}
 			</ContextMenuItem>
 			<ContextMenuItem
-				disabled={disabled || rows.length === 0}
+				disabled={rows.length === 0}
 				onClick={() => {
 					onReset("rows", rows)
 				}}
@@ -975,7 +1040,9 @@ export function SpreadsheetViewer({
 				<SpreadsheetBody
 					key={state.id}
 					id={state.id}
-					initial={state.doc}
+					doc={state.doc}
+					updateDoc={state.updateDoc}
+					bytes={state.bytes}
 					alt={alt}
 					editable={editable === true}
 					unnamed={state.unnamed}

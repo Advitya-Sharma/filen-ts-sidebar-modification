@@ -821,6 +821,282 @@ export function shownFormula(formula: string): string {
 	})
 }
 
+// Past a quoted run ("…" or '…', the quote doubled inside), or -1 when it never closes.
+function closedQuote(text: string, start: number, quote: number): number {
+	let index = start + 1
+
+	while (index < text.length) {
+		if (text.charCodeAt(index) === quote) {
+			if (text.charCodeAt(index + 1) !== quote) return index + 1
+
+			index++
+		}
+
+		index++
+	}
+
+	return -1
+}
+
+// Past a bracketed run (a structured reference, an external workbook's number), nested brackets included
+// ("'" escaping the next character), or -1 when it never closes.
+function closedBracket(text: string, start: number): number {
+	let depth = 0
+	let index = start
+
+	while (index < text.length) {
+		const code = text.charCodeAt(index)
+
+		if (code === APOSTROPHE) {
+			index += 2
+
+			continue
+		}
+
+		if (code === BRACKET_OPEN) depth++
+		else if (code === BRACKET_CLOSE && --depth === 0) return index + 1
+
+		index++
+	}
+
+	return -1
+}
+
+// Past one operand that names something: a number, name, function name or reference, with what may
+// prefix it (an external workbook, a sheet, quoted or not) and follow it (a structured reference); -1 when
+// it does not read as one.
+function nameEnd(text: string, start: number): number {
+	let index = start
+
+	if (text.charCodeAt(index) === BRACKET_OPEN) {
+		index = closedBracket(text, index)
+
+		if (index < 0) return -1
+	}
+
+	if (text.charCodeAt(index) === APOSTROPHE) {
+		index = closedQuote(text, index, APOSTROPHE)
+
+		// A quoted name is a sheet's: a reference follows.
+		if (index < 0 || text.charCodeAt(index) !== 33) return -1
+	} else {
+		index = readWord(text, index)
+	}
+
+	if (text.charCodeAt(index) === 33) {
+		index++
+
+		if (text.charCodeAt(index) === HASH) {
+			index = skipError(text, index)
+		} else if (isWordChar(text.charCodeAt(index))) {
+			index = readWord(text, index)
+		} else {
+			return -1
+		}
+	}
+
+	while (text.charCodeAt(index) === BRACKET_OPEN) {
+		index = closedBracket(text, index)
+
+		if (index < 0) return -1
+	}
+
+	return index > start ? index : -1
+}
+
+// What may begin an operand right after a space, which between two operands intersects them.
+function startsOperand(code: number): boolean {
+	return isWordChar(code) || code === APOSTROPHE || code === BRACKET_OPEN || code === 40
+}
+
+const ARRAY_NUMBER = /(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/y
+
+// Past an array constant ({1,2;"a",TRUE}), or -1 when it is not one: it holds constants only (numbers,
+// a minus sign before one, strings, TRUE and FALSE, error values), between "," and ";".
+function arrayEnd(text: string, start: number): number {
+	let index = start + 1
+
+	for (;;) {
+		while (isSpace(text.charCodeAt(index))) index++
+
+		if (text.charCodeAt(index) === 45) index++
+
+		const code = text.charCodeAt(index)
+
+		ARRAY_NUMBER.lastIndex = index
+
+		if (code === QUOTE) {
+			index = closedQuote(text, index, QUOTE)
+		} else if (code === HASH) {
+			const end = skipError(text, index)
+
+			index = end === index + 1 ? -1 : end
+		} else if (ARRAY_NUMBER.test(text)) {
+			index = ARRAY_NUMBER.lastIndex
+		} else {
+			const end = readWord(text, index)
+			const word = text.slice(index, end).toUpperCase()
+
+			index = word === "TRUE" || word === "FALSE" ? end : -1
+		}
+
+		if (index < 0) return -1
+
+		while (isSpace(text.charCodeAt(index))) index++
+
+		const separator = text.charCodeAt(index++)
+
+		if (separator === 125) return index
+		if (separator !== 44 && separator !== 59) return -1
+	}
+}
+
+// Whether a typed formula (without its "=") reads as one, as Excel's grammar has it: strings, quoted sheet
+// names and brackets closed, parentheses paired, an operand on either side of every operator, array
+// constants of constants only, and ";" only between an array's rows (an argument separator elsewhere, as
+// some locales type it, is not Excel's). Anything past the grammar (an unknown name, a wrong argument
+// count) is a result for the formula to show, not a reason to refuse it.
+export function wellFormedFormula(formula: string): boolean {
+	// Each open parenthesis: a call's, whose arguments may be left empty, or a group's.
+	const frames: ("call" | "group")[] = []
+	// Whether an operand comes next, rather than an operator; and whether, right after a call's "(" or
+	// ",", nothing may come instead (an argument left empty).
+	let operand = true
+	let empty = false
+	let index = 0
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+		const frame = frames.at(-1)
+
+		if (isSpace(code)) {
+			while (isSpace(formula.charCodeAt(index))) index++
+
+			// Between two operands, a space is the intersection operator.
+			if (!operand && index < formula.length && startsOperand(formula.charCodeAt(index))) operand = true
+
+			continue
+		}
+
+		const allowsEmpty = empty
+
+		empty = false
+
+		if (code === QUOTE || code === 123) {
+			const end = code === QUOTE ? closedQuote(formula, index, QUOTE) : arrayEnd(formula, index)
+
+			if (!operand || end < 0) return false
+
+			index = end
+			operand = false
+
+			continue
+		}
+
+		if (isWordChar(code) || code === APOSTROPHE || code === BRACKET_OPEN) {
+			const end = operand ? nameEnd(formula, index) : -1
+
+			if (end < 0) return false
+
+			index = end
+
+			if (formula.charCodeAt(index) === 40) {
+				frames.push("call")
+				index++
+				empty = true
+			} else {
+				operand = false
+			}
+
+			continue
+		}
+
+		index++
+
+		switch (code) {
+			case HASH:
+				// An error value, or (after a reference) its spilled range.
+				if (operand) {
+					const end = skipError(formula, index - 1)
+
+					if (end === index) return false
+
+					// A reference into a deleted sheet (#REF!A1) goes on past its error.
+					index = formula.charCodeAt(end - 1) === 33 && isWordChar(formula.charCodeAt(end)) ? readWord(formula, end) : end
+					operand = false
+				}
+
+				break
+			case 40:
+				// A group, or a call on what a call returned (LAMBDA(x, x + 1)(2)).
+				if (operand) {
+					frames.push("group")
+				} else if (formula.charCodeAt(index - 2) === 41) {
+					frames.push("call")
+					operand = true
+					empty = true
+				} else {
+					return false
+				}
+
+				break
+			case 41:
+				if ((operand && !(frame === "call" && allowsEmpty)) || frames.pop() === undefined) return false
+
+				operand = false
+
+				break
+			case 44:
+				// An argument may be left empty; anywhere else a comma joins two operands.
+				if (operand && !(frame === "call" && allowsEmpty)) return false
+
+				operand = true
+				empty = frame === "call"
+
+				break
+			case 43:
+			case 45:
+				operand = true
+
+				break
+			case 64:
+				// Implicit intersection, before what it applies to.
+				if (!operand) return false
+
+				break
+			case 37:
+				if (operand) return false
+
+				break
+			case 42:
+			case 47:
+			case 94:
+			case 38:
+			case 61:
+			case 58:
+			case 60:
+			case 62:
+				if (operand) return false
+
+				// <=, >=, <>
+				if (
+					(code === 60 || code === 62) &&
+					(formula.charCodeAt(index) === 61 || (code === 60 && formula.charCodeAt(index) === 62))
+				) {
+					index++
+				}
+
+				operand = true
+
+				break
+			default:
+				return false
+		}
+	}
+
+	return !operand && frames.length === 0
+}
+
 // Parentheses past this depth overflow HyperFormula's recursive parser (Excel stops at 64 levels).
 const MAX_DEPTH = 100
 

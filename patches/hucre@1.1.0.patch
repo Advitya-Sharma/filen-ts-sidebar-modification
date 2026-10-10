@@ -1,5 +1,5 @@
 diff --git a/dist/_types.d.mts b/dist/_types.d.mts
-index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc829bc57f 100644
+index 0106cd5a6d4550a57f4669754d72accd7c946bce..8aaf7ac86b621daf84d886fdfcf2db0950759f5f 100644
 --- a/dist/_types.d.mts
 +++ b/dist/_types.d.mts
 @@ -15,7 +15,8 @@ export interface FontStyle {
@@ -47,7 +47,16 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc
  }
  export interface CellProtection {
  	locked?: boolean;
-@@ -192,6 +211,8 @@ export interface DataValidation {
+@@ -132,6 +151,8 @@ export interface Cell {
+ 	checkbox?: boolean;
+ 	formula?: string;
+ 	formulaResult?: CellValue;
++	/** The cached result is an error value (`t="e"`), not text that reads like one */
++	formulaResultError?: boolean;
+ 	/** Formula type: "shared" | "array". Undefined means normal formula. */
+ 	formulaType?: "shared" | "array";
+ 	/** Shared formula index (si attribute) */
+@@ -192,6 +213,8 @@ export interface DataValidation {
  	/** List values (for type: "list") */
  	values?: string[];
  	allowBlank?: boolean;
@@ -56,7 +65,7 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc
  	showInputMessage?: boolean;
  	showErrorMessage?: boolean;
  	inputTitle?: string;
-@@ -202,11 +223,21 @@ export interface DataValidation {
+@@ -202,11 +225,21 @@ export interface DataValidation {
  	/** Cell range (e.g. "A1:A100") */
  	range: string;
  }
@@ -80,7 +89,7 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc
  	formula?: string | string[];
  	style?: CellStyle;
  	stopIfTrue?: boolean;
-@@ -270,6 +301,8 @@ export interface NamedRange {
+@@ -270,6 +303,8 @@ export interface NamedRange {
  	/** Scope: undefined = workbook level, string = sheet name */
  	scope?: string;
  	comment?: string;
@@ -89,7 +98,7 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc
  }
  /**
  * A paper size, either by name or by its raw OOXML `paperSize` code.
-@@ -577,6 +610,10 @@ export interface TableDefinition {
+@@ -577,6 +612,10 @@ export interface TableDefinition {
  export interface TableColumn {
  	/** Column header name */
  	name: string;
@@ -100,7 +109,7 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc
  	/** Total row function (sum, count, average, min, max, countNums, stdDev, var, custom) */
  	totalFunction?: string;
  	/** Total row formula (for custom) */
-@@ -593,6 +630,8 @@ export interface RowDef {
+@@ -593,6 +632,8 @@ export interface RowDef {
  	outlineLevel?: number;
  	/** Whether this outline group is collapsed */
  	collapsed?: boolean;
@@ -109,7 +118,7 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc
  }
  /**
  * What kind of sheet a tab holds.
-@@ -655,6 +694,16 @@ export interface Sheet {
+@@ -655,6 +696,16 @@ export interface Sheet {
  	* Excel picks its own from the default font.
  	*/
  	defaultColWidth?: number;
@@ -126,7 +135,7 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc
  	merges?: MergeRange[];
  	dataValidations?: DataValidation[];
  	conditionalRules?: ConditionalRule[];
-@@ -1074,6 +1123,12 @@ export interface Workbook {
+@@ -1074,6 +1125,12 @@ export interface Workbook {
  	activeSheet?: number;
  	/** Theme color palette (resolved from xl/theme/theme1.xml) */
  	themeColors?: string[];
@@ -139,7 +148,7 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..01ef08f77519219f47118420886ac0dc
  	/** Workbook-level protection */
  	workbookProtection?: {
  		lockStructure?: boolean;
-@@ -1366,6 +1421,14 @@ export interface WriteSheet {
+@@ -1366,6 +1423,14 @@ export interface WriteSheet {
  	* Excel picks its own from the default font.
  	*/
  	defaultColWidth?: number;
@@ -475,10 +484,103 @@ index 8d11fc8828e051c0560e66f792c7d04ca3e302cf..a40eb9aee40a668faf8838a758c07fe6
  						col.totalFunction = colChild.attrs["totalsRowFunction"];
  					}
 diff --git a/dist/xlsx/roundtrip.mjs b/dist/xlsx/roundtrip.mjs
-index ad31ffaa4777b8ad9bbccfe450718b0df7eac412..ed4254e7502f27a6500ce4ecc73483b34901f6f8 100644
+index ad31ffaa4777b8ad9bbccfe450718b0df7eac412..836848b109c654b077c86c2f7c5703a37630ff6a 100644
 --- a/dist/xlsx/roundtrip.mjs
 +++ b/dist/xlsx/roundtrip.mjs
-@@ -135,6 +135,15 @@ export async function saveXlsx(workbook, saveOptions) {
+@@ -18,11 +18,82 @@ import { assignBackgroundImagePaths } from "./background-image.mjs";
+ import { writeComments } from "./comments-writer.mjs";
+ import { writeTable } from "./table-writer.mjs";
+ import { buildNamedRanges, computeTableRange } from "./derived-ranges.mjs";
+-import { xmlDocument, xmlSelfClose } from "../xml/writer.mjs";
++import { xmlDocument, xmlEscapeAttr, xmlSelfClose } from "../xml/writer.mjs";
+ import { writeCoreProperties, writeAppProperties } from "./doc-props-writer.mjs";
+ 
+ export const ROUNDTRIP_STATE = Symbol("hucre.xlsx.roundtripState");
+ 
++const COMPRESSED_MEDIA = /\.(?:png|jpe?g|gif|webp)$/i;
++
++// Workbook content types by whether they carry macros: a template or add-in keeps its own on save.
++const WORKBOOK_TYPES = new Map([
++	["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml", false],
++	["application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml", false],
++	["application/vnd.ms-excel.sheet.macroEnabled.main+xml", true],
++	["application/vnd.ms-excel.template.macroEnabled.main+xml", true],
++	["application/vnd.ms-excel.addin.macroEnabled.main+xml", true]
++]);
++
++function partKey(name) {
++	let path = name.startsWith("/") ? name.slice(1) : name;
++	try {
++		path = decodeURIComponent(path);
++	} catch {}
++	return path.toLowerCase();
++}
++
++function parseContentTypes(xml) {
++	const defaults = new Map();
++	const overrides = new Map();
++	for (const [, kind, attrText] of xml.matchAll(/<(?:[\w.-]+:)?(Default|Override)\b([^>]*)>/g)) {
++		const attrs = new Map();
++		for (const [, name, double, single] of attrText.matchAll(/([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) attrs.set(name, (double ?? single).replace(/&quot;/g, "\"").replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"));
++		const type = attrs.get("ContentType");
++		if (type === undefined) continue;
++		if (kind === "Default") defaults.set((attrs.get("Extension") ?? "").toLowerCase(), type);
++		else overrides.set(partKey(attrs.get("PartName") ?? ""), type);
++	}
++	return {
++		overrides,
++		typeOf: (path) => overrides.get(partKey(path)) ?? defaults.get(path.slice(path.lastIndexOf(".") + 1).toLowerCase())
++	};
++}
++
++// The written content types, with the file's own for every part copied as it was (one the written
++// defaults would read otherwise, a signature or printer settings among them), and the file's own workbook
++// type when it is a template's or an add-in's and agrees on macros.
++function keepContentTypes(written, original, copiedPaths, hasMacros) {
++	if (!original) return written;
++	const before = parseContentTypes(original);
++	const after = parseContentTypes(written);
++	let result = written;
++	for (const [part, type] of before.overrides) {
++		if (part === "xl/workbook.xml" && WORKBOOK_TYPES.get(type) === Boolean(hasMacros)) {
++			const writtenType = after.overrides.get(part);
++			if (writtenType !== undefined && writtenType !== type) result = result.replace(`ContentType="${writtenType}"`, `ContentType="${xmlEscapeAttr(type)}"`);
++		}
++	}
++	const kept = [];
++	const keptParts = new Set();
++	for (const path of copiedPaths) {
++		const type = before.typeOf(path);
++		if (type !== undefined && type !== after.typeOf(path)) {
++			keptParts.add(partKey(path));
++			kept.push(xmlSelfClose("Override", {
++				PartName: encodeURI(`/${path}`),
++				ContentType: type
++			}));
++		}
++	}
++	if (kept.length === 0) return result;
++	// One override per part: one written for a part whose type the file's replaces goes.
++	result = result.replace(/<(?:[\w.-]+:)?Override\b[^>]*>/g, (element) => {
++		const name = /PartName\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(element);
++		return name !== null && keptParts.has(partKey(name[1] ?? name[2])) ? "" : element;
++	});
++	return result.replace("</Types>", `${kept.join("")}</Types>`);
++}
++
+ function roundtripState(workbook) {
+ 	const state = workbook[ROUNDTRIP_STATE];
+ 	if (!state) {
+@@ -114,7 +185,7 @@ export async function openXlsx(input, options) {
+ 
+ export async function saveXlsx(workbook, saveOptions) {
+ 	const { sheets, properties, namedRanges, dateSystem, defaultFont, activeSheet } = workbook;
+-	const { rawEntries } = roundtripState(workbook);
++	const { rawEntries, contentTypes } = roundtripState(workbook);
+ 	
+ 	const writeSheets = sheets.map((sheet) => ({
+ 		name: sheet.name,
+@@ -135,6 +206,15 @@ export async function saveXlsx(workbook, saveOptions) {
  		veryHidden: sheet.veryHidden,
  		tables: sheet.tables,
  		rowDefs: sheet.rowDefs,
@@ -494,7 +596,7 @@ index ad31ffaa4777b8ad9bbccfe450718b0df7eac412..ed4254e7502f27a6500ce4ecc73483b3
  		
  		
  		
-@@ -148,6 +157,8 @@ export async function saveXlsx(workbook, saveOptions) {
+@@ -148,6 +228,8 @@ export async function saveXlsx(workbook, saveOptions) {
  	}));
  	
  	const styles = createStylesCollector(defaultFont);
@@ -503,7 +605,36 @@ index ad31ffaa4777b8ad9bbccfe450718b0df7eac412..ed4254e7502f27a6500ce4ecc73483b3
  	const sharedStrings = createSharedStrings();
  	
  	let globalTableCounter = 1;
-@@ -711,7 +722,9 @@ export async function saveXlsx(workbook, saveOptions) {
+@@ -596,6 +678,8 @@ export async function saveXlsx(workbook, saveOptions) {
+ 	const hasFeaturePropertyBag = styles.hasCheckboxFeature();
+ 	
+ 	const zip = new ZipWriter();
++	// The parts copied as the file had them, whose content types the file's own say.
++	const copiedPaths = [];
+ 	
+ 	for (const [path, data] of rawEntries) {
+ 		
+@@ -647,7 +731,9 @@ export async function saveXlsx(workbook, saveOptions) {
+ 			}
+ 			if (!isRegenerated) {
+ 				
+-				zip.add(path, data, { compress: false });
++				// Compressed as the file most likely had them: only pictures already are.
++				zip.add(path, data, { compress: !COMPRESSED_MEDIA.test(path) });
++				copiedPaths.push(path);
+ 			}
+ 		}
+ 	}
+@@ -688,7 +774,7 @@ export async function saveXlsx(workbook, saveOptions) {
+ 		hasFeaturePropertyBag,
+ 		hasMetadata
+ 	};
+-	zip.add("[Content_Types].xml", encoder.encode(writeContentTypes(ctOpts)));
++	zip.add("[Content_Types].xml", encoder.encode(keepContentTypes(writeContentTypes(ctOpts), contentTypes, copiedPaths, workbook.hasMacros)));
+ 	
+ 	zip.add("_rels/.rels", encoder.encode(writeRootRels({
+ 		hasCoreProps: true,
+@@ -711,7 +797,9 @@ export async function saveXlsx(workbook, saveOptions) {
  		externalLinkRels.length > 0 ? externalLinkRels : undefined,
  		pivotCacheRefs.length > 0 ? pivotCacheRefs : undefined,
  		slicerCacheRels.length > 0 ? slicerCacheRels : undefined,
@@ -514,7 +645,7 @@ index ad31ffaa4777b8ad9bbccfe450718b0df7eac412..ed4254e7502f27a6500ce4ecc73483b3
  	)));
  	
  	zip.add("xl/_rels/workbook.xml.rels", encoder.encode(writeWorkbookRels(writeSheets.length, hasSharedStrings, workbook.hasMacros, hasFeaturePropertyBag, hasPersons, externalLinkRels.length > 0 ? externalLinkRels : undefined, pivotCacheRels.length > 0 ? pivotCacheRels : undefined, slicerCacheRels.length > 0 ? slicerCacheRels : undefined, timelineCacheRels.length > 0 ? timelineCacheRels : undefined, hasCellImages, hasMetadata)));
-@@ -948,7 +961,7 @@ export async function saveXlsx(workbook, saveOptions) {
+@@ -948,7 +1036,7 @@ export async function saveXlsx(workbook, saveOptions) {
  					...tableDef,
  					range: tableRange
  				};
@@ -1023,7 +1154,7 @@ index 8852c8d7b0b94c0c1dfa0cf927a05c7df33d89c4..a1c88c84f40593aa350a972a741ddb7f
  	}));
  	
 diff --git a/dist/xlsx/worksheet-writer.mjs b/dist/xlsx/worksheet-writer.mjs
-index 2b9ee5c2b80b989625934e8d57272c7a268910c5..1bc1bf2f40b4d9df5114ff205e9ac9a5498817ba 100644
+index 2b9ee5c2b80b989625934e8d57272c7a268910c5..0769ed16fb219058c2c3d47d33e34aa84c0485ca 100644
 --- a/dist/xlsx/worksheet-writer.mjs
 +++ b/dist/xlsx/worksheet-writer.mjs
 @@ -32,8 +32,12 @@ export function colToLetter(col) {
@@ -1167,7 +1298,34 @@ index 2b9ee5c2b80b989625934e8d57272c7a268910c5..1bc1bf2f40b4d9df5114ff205e9ac9a5
  				resolvedRow.push(style ? {
  					value,
  					style
-@@ -851,6 +884,9 @@ function serializeDataValidations(validations) {
+@@ -620,6 +653,7 @@ function resolveRows(sheet) {
+ 				checkbox: cellOverride.checkbox ?? existing?.checkbox,
+ 				formula: cellOverride.formula ?? existing?.formula,
+ 				formulaResult: cellOverride.formulaResult ?? existing?.formulaResult,
++				formulaResultError: cellOverride.formulaResultError ?? existing?.formulaResultError,
+ 				formulaType: cellOverride.formulaType ?? existing?.formulaType,
+ 				formulaSharedIndex: cellOverride.formulaSharedIndex ?? existing?.formulaSharedIndex,
+ 				formulaRef: cellOverride.formulaRef ?? existing?.formulaRef,
+@@ -641,7 +675,7 @@ function simpleCell(ref, styleIdx, type, content) {
+ 	return type === "" ? `<c r="${ref}" s="${styleIdx}"><v>${content}</v></c>` : `<c r="${ref}" t="${type}" s="${styleIdx}"><v>${content}</v></c>`;
+ }
+ export function serializeCell(row, col, resolved, styles, sharedStrings, is1904, inlineStrings) {
+-	const { value, style, formula, formulaResult, formulaType, formulaSharedIndex, formulaRef, formulaDynamic, richText } = resolved;
++	const { value, style, formula, formulaResult, formulaResultError, formulaType, formulaSharedIndex, formulaRef, formulaDynamic, richText } = resolved;
+ 	
+ 	let styleIdx = 0;
+ 	let effectiveStyle = style;
+@@ -723,7 +757,8 @@ export function serializeCell(row, col, resolved, styles, sharedStrings, is1904,
+ 		
+ 		if (formulaResult !== undefined && formulaResult !== null) {
+ 			if (typeof formulaResult === "string") {
+-				cellAttrs["t"] = "str";
++				// An error result is an error, and text that reads like one is text.
++				cellAttrs["t"] = formulaResultError ? "e" : "str";
+ 				children.push(xmlElement("v", undefined, xmlEscape(formulaResult)));
+ 			} else if (typeof formulaResult === "boolean") {
+ 				cellAttrs["t"] = "b";
+@@ -851,6 +886,9 @@ function serializeDataValidations(validations) {
  		if (dv.operator) {
  			attrs["operator"] = dv.operator;
  		}
@@ -1177,7 +1335,7 @@ index 2b9ee5c2b80b989625934e8d57272c7a268910c5..1bc1bf2f40b4d9df5114ff205e9ac9a5
  		if (dv.allowBlank) {
  			attrs["allowBlank"] = 1;
  		}
-@@ -1052,13 +1088,11 @@ function serializePageSetup(ps) {
+@@ -1052,13 +1090,11 @@ function serializePageSetup(ps) {
  	if (ps.scale !== undefined) {
  		attrs["scale"] = ps.scale;
  	}
@@ -1196,7 +1354,7 @@ index 2b9ee5c2b80b989625934e8d57272c7a268910c5..1bc1bf2f40b4d9df5114ff205e9ac9a5
  	}
  	
  	
-@@ -1148,7 +1182,7 @@ function serializeColorAttrs(color) {
+@@ -1148,7 +1184,7 @@ function serializeColorAttrs(color) {
  }
  
  
@@ -1205,7 +1363,7 @@ index 2b9ee5c2b80b989625934e8d57272c7a268910c5..1bc1bf2f40b4d9df5114ff205e9ac9a5
  	const elements = [];
  	for (const run of runs) {
  		const runChildren = [];
-@@ -1246,6 +1280,13 @@ function serializeCfRule(rule, styles) {
+@@ -1246,6 +1282,13 @@ function serializeCfRule(rule, styles) {
  	if (rule.stopIfTrue) {
  		attrs["stopIfTrue"] = true;
  	}
@@ -1220,7 +1378,7 @@ index 2b9ee5c2b80b989625934e8d57272c7a268910c5..1bc1bf2f40b4d9df5114ff205e9ac9a5
  	if (rule.text !== undefined) {
  		attrs["text"] = rule.text;
 diff --git a/dist/xlsx/worksheet.mjs b/dist/xlsx/worksheet.mjs
-index 2da07a93c6d60d1b9f2092a99edfd43446677dbb..b83d709178783239c241f45087f844a07038b2a1 100644
+index 2da07a93c6d60d1b9f2092a99edfd43446677dbb..aad9eb47776b80231bac425eced37508f4427e39 100644
 --- a/dist/xlsx/worksheet.mjs
 +++ b/dist/xlsx/worksheet.mjs
 @@ -147,6 +147,11 @@ function worksheetParser(name, ctx) {
@@ -1356,7 +1514,35 @@ index 2da07a93c6d60d1b9f2092a99edfd43446677dbb..b83d709178783239c241f45087f844a0
  	
  	
  	
-@@ -1763,8 +1808,8 @@ function parsePageSetupAttrs(attrs, ctx) {
+@@ -1448,6 +1493,7 @@ function processCell(ref, type, styleIndex, valueText, formulaText, inlineText,
+ 	let cellType = "empty";
+ 	let formula;
+ 	let formulaResult;
++	let formulaResultError = false;
+ 	let richText;
+ 	
+ 	if (formulaText) {
+@@ -1528,7 +1574,10 @@ function processCell(ref, type, styleIndex, valueText, formulaText, inlineText,
+ 			
+ 			value = valueText;
+ 			cellType = formula ? "formula" : "error";
+-			if (formula) formulaResult = value;
++			if (formula) {
++				formulaResult = value;
++				formulaResultError = true;
++			}
+ 			break;
+ 		}
+ 		case "d": {
+@@ -1615,6 +1664,7 @@ function processCell(ref, type, styleIndex, valueText, formulaText, inlineText,
+ 			cell.formula = formula;
+ 			if (formulaResult !== undefined) {
+ 				cell.formulaResult = formulaResult;
++				if (formulaResultError) cell.formulaResultError = true;
+ 			}
+ 			
+ 			if (formulaType === "shared") {
+@@ -1763,8 +1813,8 @@ function parsePageSetupAttrs(attrs, ctx) {
  	if (attrs["scale"]) {
  		ps.scale = Number(attrs["scale"]);
  	}

@@ -78,9 +78,14 @@ async function inflate(data: Uint8Array): Promise<Uint8Array> {
 	return new Uint8Array(await new Response(stream).arrayBuffer())
 }
 
-// The entries of a zip saveXlsx wrote (no ZIP64, sizes in the central directory), by path; null when
-// `cancelled` said to stop (checked between entries).
-export async function readZip(bytes: Uint8Array, cancelled: () => boolean = () => false): Promise<Map<string, Uint8Array> | null> {
+// The entries of a zip saveXlsx wrote, or one already checked against the limits (no ZIP64, sizes in the
+// central directory), by path, only those `wanted` when given; null when `cancelled` said to stop
+// (checked between entries).
+export async function readZip(
+	bytes: Uint8Array,
+	cancelled: () => boolean = () => false,
+	wanted?: (path: string) => boolean
+): Promise<Map<string, Uint8Array> | null> {
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 	const entries = new Map<string, Uint8Array>()
 	const decoder = new TextDecoder()
@@ -111,12 +116,15 @@ export async function readZip(bytes: Uint8Array, cancelled: () => boolean = () =
 		const nameLength = view.getUint16(position + 28, true)
 		const local = view.getUint32(position + 42, true)
 		const name = decoder.decode(bytes.subarray(position + 46, position + 46 + nameLength))
-		const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true)
-		const data = bytes.subarray(start, start + compressed)
 
-		entries.set(name, method === 8 ? await inflate(data) : data)
+		if (wanted === undefined || wanted(name)) {
+			const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true)
+			const data = bytes.subarray(start, start + compressed)
 
-		if (cancelled()) return null
+			entries.set(name, method === 8 ? await inflate(data) : data)
+
+			if (cancelled()) return null
+		}
 
 		position += 46 + nameLength + view.getUint16(position + 30, true) + view.getUint16(position + 32, true)
 	}

@@ -1,13 +1,6 @@
 import { canEncodeWindows1252, csvCellView, csvDoc, serializeCsv, type CsvFormat } from "@/features/spreadsheet/lib/csvView"
-import { EditHistory } from "@/features/spreadsheet/lib/editHistory"
-import {
-	MAX_EDIT_CELLS,
-	MAX_SHEET_CELLS,
-	type AxisEdit,
-	type DocState,
-	type EditOp,
-	type EditResult
-} from "@/features/spreadsheet/lib/edits"
+import { EditHistory, HISTORY_BYTES } from "@/features/spreadsheet/lib/editHistory"
+import { MAX_EDIT_CELLS, type AxisEdit, type DocState, type EditOp, type EditResult } from "@/features/spreadsheet/lib/edits"
 import { cellKey, keyCol, keyRow, MAX_COLUMNS, MAX_ROWS, type CellView, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
 import type { SizeAxis } from "@/features/spreadsheet/lib/sizes.logic"
 
@@ -19,9 +12,28 @@ type Step =
 
 type StructureStep = Extract<Step, { type: "structure" }>
 
-// How many cells a step's snapshot holds, for the history's total memory budget.
-function stepWeight(step: Step): number {
-	return step.type === "cells" ? step.before.size : step.removed.reduce((total, row) => total + row.length, 0)
+// Rough heap costs, for weighing undo steps: a remembered cell (its entry and key) or a text beside its
+// characters, and a row.
+const CELL_BYTES = 48
+const ROW_BYTES = 32
+
+// What a step holds, in bytes as estimated.
+function stepBytes(step: Step): number {
+	let bytes = 0
+
+	if (step.type === "cells") {
+		for (const text of step.before.values()) bytes += CELL_BYTES + text.length
+
+		return bytes + step.rowWidths.size * CELL_BYTES
+	}
+
+	for (const row of step.removed) {
+		bytes += ROW_BYTES
+
+		for (const text of row) bytes += CELL_BYTES + text.length
+	}
+
+	return bytes
 }
 
 // An open CSV or TSV: its rows of text (a CSV holds no formulas or formats: what is typed is what is
@@ -29,11 +41,12 @@ function stepWeight(step: Step): number {
 export class CsvDocument {
 	private rows: string[][]
 	private readonly format: CsvFormat
-	private readonly history = new EditHistory<Step>(stepWeight, MAX_SHEET_CELLS)
+	private readonly history: EditHistory<Step>
 
-	constructor(rows: string[][], format: CsvFormat) {
+	constructor(rows: string[][], format: CsvFormat, historyBudget = HISTORY_BYTES) {
 		this.rows = rows
 		this.format = format
+		this.history = new EditHistory<Step>(stepBytes, historyBudget)
 	}
 
 	get writable(): boolean {

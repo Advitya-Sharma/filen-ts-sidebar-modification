@@ -76,6 +76,10 @@ export interface SheetView {
 	// Rows and columns cannot be inserted or deleted here: something in the sheet refers to cell ranges
 	// the workbook model cannot shift (tables, conditional formats, validations, charts, named ranges).
 	structureLocked: boolean
+	// Where an empty cell takes what is typed as text: rows and columns with the Text ("@") format, the rows
+	// formatted otherwise, whose format wins over a Text column's, and the cells (keys) with details of
+	// their own that show nothing, whose own format wins over both. Absent when there are no Text ones.
+	textFormat?: { rows: number[]; cols: number[]; otherRows: number[]; otherCells: number[] }
 }
 
 export interface SpreadsheetDoc {
@@ -85,6 +89,9 @@ export interface SpreadsheetDoc {
 	styles: CellStyleView[]
 	// Whether this format can be saved back as it is (.xls cannot; it saves as an .xlsx copy).
 	writable: boolean
+	// A workbook known at open to stay view-only: saving it would lose part of it ("unsafe"), or it is too
+	// large to prove that saving loses nothing ("tooLarge").
+	unprovable?: "unsafe" | "tooLarge"
 }
 
 export const DEFAULT_COL_WIDTH = 96

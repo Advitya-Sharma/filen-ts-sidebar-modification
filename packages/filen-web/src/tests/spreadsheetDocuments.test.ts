@@ -6,6 +6,7 @@ import { proven, viewCell } from "@/tests/spreadsheetProven"
 import { CsvDocument } from "@/features/spreadsheet/lib/csvDocument"
 import { parseCsvFile } from "@/features/spreadsheet/lib/csvView"
 import { cellKey, type CellView } from "@/features/spreadsheet/lib/model"
+import { readZip } from "@/features/spreadsheet/lib/zipLimits"
 
 async function workbook(): Promise<XlsxDocument> {
 	const bytes = await writeXlsx({
@@ -123,6 +124,69 @@ describe("XlsxDocument", () => {
 		expect(reopened.styles[header?.style ?? -1]).toMatchObject({ bold: true, fill: "#ffcc00" })
 		expect(sheet?.cells.get(cellKey(3, 1))).toMatchObject({ text: "1600", input: "=SUM(B2:B3)" })
 		expect(document.apply({ type: "setCells", sheet: 0, cells: [] }).state.dirty).toBe(true)
+	})
+})
+
+describe("XlsxDocument formulas as stored", () => {
+	it("refuses a formula that does not read as one, writing nothing", async () => {
+		const document = await proven(await openXlsx(await writeXlsx({ sheets: [{ name: "S", rows: [[1, 2]] }] }), { readStyles: true }))
+
+		for (const input of ["=SUM(A1;B1)", "=SUM(A1"]) {
+			expect(document.apply({ type: "setCells", sheet: 0, cells: [{ row: 1, col: 0, input }] })).toMatchObject({
+				type: "refused",
+				reason: "formula",
+				state: { dirty: false, canUndo: false }
+			})
+		}
+
+		expect(document.doc().sheets[0]?.cells.get(cellKey(1, 0))).toBeUndefined()
+	})
+
+	it("stores an error result as an error, and none for one the engine cannot work out", async () => {
+		const document = await proven(await openXlsx(await writeXlsx({ sheets: [{ name: "S", rows: [[1, 2]] }] }), { readStyles: true }))
+		const inputs = ["=1/0", "=NA()", "=SUM(Table1[Col])", "=NOSUCHFN(1)", '="text"', '="#N/A"']
+
+		document.apply({ type: "setCells", sheet: 0, cells: inputs.map((input, col) => ({ row: 1, col, input })) })
+
+		// The grid shows what the engine gave.
+		expect(document.doc().sheets[0]?.cells.get(cellKey(1, 2))).toMatchObject({ text: "#ERROR!", error: true })
+
+		const sheet = new TextDecoder().decode((await readZip((await document.serialize()).bytes))?.get("xl/worksheets/sheet1.xml"))
+
+		expect(sheet).toContain('<c r="A2" t="e"><f>1/0</f><v>#DIV/0!</v></c>')
+		expect(sheet).toContain('<c r="B2" t="e"><f>NA()</f><v>#N/A</v></c>')
+		expect(sheet).toContain('<c r="C2"><f>SUM(Table1[Col])</f></c>')
+		expect(sheet).toContain('<c r="D2"><f>NOSUCHFN(1)</f></c>')
+		expect(sheet).toContain('<c r="E2" t="str"><f>"text"</f><v>text</v></c>')
+		// Text that reads like an error is text.
+		expect(sheet).toContain('<c r="F2" t="str"><f>"#N/A"</f><v>#N/A</v></c>')
+		expect(document.doc().sheets[0]?.cells.get(cellKey(1, 5))?.error).toBeUndefined()
+		expect(document.doc().sheets[0]?.cells.get(cellKey(1, 1))?.error).toBe(true)
+	})
+
+	it("saves a cached error as an error and cached text that reads like one as text", async () => {
+		const bytes = await writeXlsx({
+			sheets: [
+				{
+					name: "S",
+					rows: [["#N/A", "#N/A"]],
+					cells: new Map([
+						["0,0", { value: "#N/A", type: "formula", formula: "NA()", formulaResult: "#N/A", formulaResultError: true }],
+						["0,1", { value: "#N/A", type: "formula", formula: '"#N/A"', formulaResult: "#N/A" }]
+					])
+				}
+			]
+		})
+		const document = await proven(await openXlsx(bytes, { readStyles: true }))
+
+		expect(document.losses).toEqual([])
+		expect(document.doc().sheets[0]?.cells.get(cellKey(0, 0))?.error).toBe(true)
+		expect(document.doc().sheets[0]?.cells.get(cellKey(0, 1))?.error).toBeUndefined()
+
+		const sheet = new TextDecoder().decode((await readZip((await document.serialize()).bytes))?.get("xl/worksheets/sheet1.xml"))
+
+		expect(sheet).toContain('<c r="A1" t="e"><f>NA()</f><v>#N/A</v></c>')
+		expect(sheet).toContain('<c r="B1" t="str"><f>"#N/A"</f><v>#N/A</v></c>')
 	})
 })
 

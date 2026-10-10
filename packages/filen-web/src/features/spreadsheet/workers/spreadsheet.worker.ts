@@ -37,8 +37,10 @@ async function open(bytes: Uint8Array, kind: SpreadsheetFileKind): Promise<{ id:
 				await openXlsx(bytes, { readStyles: true, maxTotalCells: CELL_LIMIT, maxDecompressedBytes: DECOMPRESSED_LIMIT })
 			)
 
-			// View-only until proven: the page asks writability(id) when it may edit, which runs the proof, or
-			// viewOnly(id) when it won't, which skips it.
+			// View-only until proven: the proof runs once the page shows it may edit (writability(id, bytes):
+			// its first edit waits for it), and is skipped once it says it won't (viewOnly(id)). Until then
+			// only what saving copies is kept; the proof reads the rest again from the bytes it is given.
+			document.dropOriginals()
 			documents.set(id, document)
 
 			return { id, doc: document.doc() }
@@ -77,7 +79,11 @@ function document(id: number): XlsxDocument | CsvDocument {
 
 const api = {
 	open,
-	apply: (id: number, op: EditOp): EditResult => document(id).apply(op),
+	apply: async (id: number, op: EditOp): Promise<EditResult> => {
+		const found = document(id)
+
+		return found instanceof XlsxDocument ? await found.edit(op) : found.apply(op)
+	},
 	undo: (id: number): EditResult => document(id).undo(),
 	redo: (id: number): EditResult => document(id).redo(),
 	// The file's bytes as they now stand, handed over rather than copied, and the edit state they hold.
@@ -86,12 +92,13 @@ const api = {
 
 		return Comlink.transfer(serialized, [serialized.bytes.buffer as ArrayBuffer])
 	},
-	// Whether the open document can be saved: for a workbook, once proven that saving loses nothing (its
-	// doc opens with writable false until then); for text, as its format allows.
-	writability: async (id: number): Promise<boolean> => {
+	// Whether the open document can be saved: for a workbook, once proven from the file's bytes (`source`,
+	// a copy the proof lets go) that saving loses nothing (its doc opens with writable false until then);
+	// for text, as its format allows.
+	writability: async (id: number, source: Uint8Array): Promise<boolean> => {
 		const found = document(id)
 
-		return found instanceof XlsxDocument ? await found.verifyWritable() : found.writable
+		return found instanceof XlsxDocument ? await found.verifyWritable(source) : found.writable
 	},
 	// The page will not edit this document: a workbook skips its proof and drops what only saving needs.
 	viewOnly: (id: number): void => {

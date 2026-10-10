@@ -183,8 +183,8 @@ describe("XlsxDocument formulas", () => {
 				name: "S",
 				rows: [["#REF!", "#REF!"]],
 				cells: new Map([
-					["0,0", formula("New!A1+1", "#REF!")],
-					["0,1", formula("A1*2", "#REF!")]
+					["0,0", { ...formula("New!A1+1", "#REF!"), formulaResultError: true }],
+					["0,1", { ...formula("A1*2", "#REF!"), formulaResultError: true }]
 				])
 			}
 		])
@@ -394,22 +394,35 @@ describe("XlsxDocument edits", () => {
 		expect(viewCell(edited, 0, 0, 1)).toMatchObject({ text: "30", input: "=S!A3" })
 	})
 
-	it("keeps undo history within a cell budget", async () => {
+	it("keeps undo history within a byte budget, always keeping the latest step", async () => {
 		const rows = Array.from({ length: 10 }, (_, row) => Array.from({ length: 10 }, (_, col) => row * 10 + col))
-		const workbook = await openXlsx(await writeXlsx({ sheets: [{ name: "S", rows }] }))
-		// Room for two deletions of 30 cells, not three.
-		const document = await proven(workbook, 70)
+		// About 0.6 MiB each: the text typed, held for redo, and what it replaced.
+		const large = (text: string) =>
+			Array.from({ length: 1000 }, (_, index) => ({ row: 20 + Math.floor(index / 10), col: index % 10, input: text.repeat(400) }))
+		const undoable = async (inputs: string[]) => {
+			const document = await proven(await openXlsx(await writeXlsx({ sheets: [{ name: "S", rows }] })), 1024 * 1024)
 
-		for (let step = 0; step < 3; step++) {
-			document.apply({ type: "delete", sheet: 0, axis: "rows", at: 0, count: 3 })
+			for (const input of inputs) {
+				document.apply({
+					type: "setCells",
+					sheet: 0,
+					cells: input === "small" ? [{ row: 0, col: 0, input: "1" }] : large(input)
+				})
+			}
+
+			let undone = 0
+
+			while (document.undo().type !== "none") undone++
+
+			return { undone, document }
 		}
 
-		let undone = 0
+		expect((await undoable(["a", "small"])).undone).toBe(2)
 
-		while (document.undo().type !== "none") undone++
+		const evicted = await undoable(["a", "b"])
 
-		expect(undone).toBe(2)
-		expect(shownCell(document, 0, 0)).toMatchObject({ text: "30" })
+		expect(evicted.undone).toBe(1)
+		expect(shownCell(evicted.document, 20, 0)).toMatchObject({ text: "a".repeat(400) })
 	})
 
 	it("tracks the saved state across undo and redo", async () => {
