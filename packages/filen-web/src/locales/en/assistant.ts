@@ -289,8 +289,12 @@ export const assistant = {
 	assistantStepCountItems_one: "{{count}} item",
 	/** Step result — how many files and directories a listing or search returned */
 	assistantStepCountItems_other: "{{count}} items",
-	/** Step result — a search returned this many and stopped; more exist */
-	assistantStepCountItemsMore: "More than {{count}} items",
+	/** Step result — an incomplete search (index still building, too many names, failed) found none */
+	assistantStepCountItemsMore_zero: "None found, search incomplete",
+	/** Step result — an incomplete search returned this many; whether more exist is unknown */
+	assistantStepCountItemsMore_one: "{{count}} item, search incomplete",
+	/** Step result — an incomplete search returned this many; whether more exist is unknown */
+	assistantStepCountItemsMore_other: "{{count}} items, search incomplete",
 	/** Step result — how many notes a listing returned */
 	assistantStepCountNotes_one: "{{count}} note",
 	/** Step result — how many notes a listing returned */

@@ -134,6 +134,19 @@ describe("AssistantSteps", () => {
 		expect(document.querySelector('[style*="scaleX(0.3)"]')).not.toBeNull()
 	})
 
+	it("words an incomplete search's count by how many it found", () => {
+		const search = (resultCount: number) =>
+			tool({ id: `t1:call_${String(resultCount)}`, tool: "search_items", subject: "invoice", resultCount, resultMore: true })
+
+		render(<AssistantSteps entry={entry([search(0), search(1), search(12)])} />)
+
+		expect(screen.getAllByRole("listitem").map(row => row.textContent)).toEqual([
+			'Searching for "invoice"· None found, search incomplete',
+			'Searching for "invoice"· 1 item, search incomplete',
+			'Searching for "invoice"· 12 items, search incomplete'
+		])
+	})
+
 	it("shows the prompt-reading bar only while part of the prompt is left", () => {
 		const { container, rerender } = render(
 			<AssistantSteps
