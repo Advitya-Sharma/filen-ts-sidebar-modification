@@ -9,17 +9,16 @@ vi.mock("expo/fetch", () => ({
 }))
 
 import { fs } from "@/tests/mocks/expoFileSystem"
-import { TS_SNIFF_BYTES } from "@filen/shared/videos/transportStreamHead"
-import { readRangeFromUrl, sniffTransportStream, transportStreamOutcome } from "@/lib/transportStreamSniff"
+import { SNIFF_HEAD_BYTES, readRangeFromUrl, sniffTransportStream, transportStreamLayout, transportStreamOutcome } from "@/lib/transportStreamSniff"
 
 const MIB = 1024 * 1024
 
-// `packets` sync bytes in `layout`, the first packet carrying `first` (a PAT) when given.
-function stream(stride: number, prefix: number, first: number[] | null = null, packets = 5): Uint8Array {
-	const bytes = new Uint8Array(TS_SNIFF_BYTES)
+// `packets` sync bytes every `stride` bytes from `offset`, the first packet carrying `first` (a PAT) when given.
+function stream(stride: number, offset: number, first: number[] | null = null, packets = 5): Uint8Array {
+	const bytes = new Uint8Array(SNIFF_HEAD_BYTES)
 
 	for (let k = 0; k < packets; k++) {
-		const at = prefix + k * stride
+		const at = offset + k * stride
 
 		if (at < bytes.length) {
 			bytes[at] = 0x47
@@ -27,7 +26,7 @@ function stream(stride: number, prefix: number, first: number[] | null = null, p
 	}
 
 	if (first !== null) {
-		bytes.set([0x47, 0x40, 0x00, 0x10, 0x00, ...first], prefix)
+		bytes.set([0x47, 0x40, 0x00, 0x10, 0x00, ...first], offset)
 	}
 
 	return bytes
@@ -45,34 +44,51 @@ function reading(bytes: Uint8Array) {
 	return vi.fn(async (_start: number, length: number) => bytes.subarray(0, length))
 }
 
+// Text whose every line is `line`, so a character in one column repeats every `line.length` bytes.
+function text(line: string): Uint8Array {
+	return new TextEncoder().encode(line.repeat(Math.ceil(SNIFF_HEAD_BYTES / line.length)))
+}
+
 describe("sniffTransportStream", () => {
 	it("reads only the head, once, and reports the packet layout", async () => {
 		const readRange = reading(stream(188, 0))
 
-		expect(TS_SNIFF_BYTES).toBe(817)
+		expect(SNIFF_HEAD_BYTES).toBe(1020)
 		expect(await sniffTransportStream(readRange, 10 * MIB)).toEqual({ stride: 188, prefix: 0 })
 		expect(readRange).toHaveBeenCalledTimes(1)
-		expect(readRange).toHaveBeenCalledWith(0, TS_SNIFF_BYTES)
+		expect(readRange).toHaveBeenCalledWith(0, SNIFF_HEAD_BYTES)
 		expect(await sniffTransportStream(reading(stream(192, 4)), MIB)).toEqual({ stride: 192, prefix: 4 })
 		expect(await sniffTransportStream(reading(stream(204, 0)), MIB)).toEqual({ stride: 204, prefix: 0 })
 	})
 
-	it("is no stream for TypeScript, or a stream whose PAT names more than one program", async () => {
-		expect(await sniffTransportStream(reading(new TextEncoder().encode("export const x = 1\n".repeat(60))), MIB)).toBe(false)
-		expect(await sniffTransportStream(reading(stream(188, 0, pat([1, 2]))), MIB)).toBe(false)
+	it("is a stream whatever its PAT names, a multiplex of several programs included", async () => {
+		expect(await sniffTransportStream(reading(stream(188, 0, pat([1, 2]))), MIB)).toEqual({ stride: 188, prefix: 0 })
 		expect(await sniffTransportStream(reading(stream(188, 0, pat([0, 1]))), MIB)).toEqual({ stride: 188, prefix: 0 })
 	})
 
-	it("reads a file smaller than the head whole, and nothing of one too small to hold a header", async () => {
-		const small = vi.fn(async (_start: number, length: number) => new Uint8Array(length))
+	it("finds a stream cut mid-packet at whatever offset its first sync byte sits", async () => {
+		expect(await sniffTransportStream(reading(stream(188, 1)), MIB)).toEqual({ stride: 188, prefix: 1 })
+		expect(await sniffTransportStream(reading(stream(188, 187)), MIB)).toEqual({ stride: 188, prefix: 187 })
+		expect(await sniffTransportStream(reading(stream(192, 100)), MIB)).toEqual({ stride: 192, prefix: 100 })
+		expect(await sniffTransportStream(reading(stream(204, 203)), MIB)).toEqual({ stride: 204, prefix: 203 })
+	})
 
-		expect(await sniffTransportStream(small, 500)).toBe(false)
-		expect(small).toHaveBeenCalledWith(0, 500)
+	it("is no stream for TypeScript, for fixed-width lines that repeat a G every packet, or for too few packets", async () => {
+		expect(await sniffTransportStream(reading(new TextEncoder().encode("export const x = 1\n".repeat(60))), MIB)).toBe(false)
+		expect(await sniffTransportStream(reading(text(`${"G".padEnd(46, "x")}\n`)), MIB)).toBe(false)
+		expect(await sniffTransportStream(reading(stream(188, 0, null, 4)), MIB)).toBe(false)
+	})
 
+	it("reads nothing of a file too small for a player to sync, and a file smaller than the head whole", async () => {
 		const tiny = vi.fn(async (_start: number, length: number) => new Uint8Array(length))
 
-		expect(await sniffTransportStream(tiny, 7)).toBe(false)
+		expect(await sniffTransportStream(tiny, 939)).toBe(false)
 		expect(tiny).not.toHaveBeenCalled()
+
+		const small = reading(stream(188, 0))
+
+		expect(await sniffTransportStream(small, 950)).toEqual({ stride: 188, prefix: 0 })
+		expect(small).toHaveBeenCalledWith(0, 950)
 	})
 
 	it("is null when the read fails", async () => {
@@ -84,14 +100,22 @@ describe("sniffTransportStream", () => {
 	})
 })
 
+describe("transportStreamLayout", () => {
+	it("prefers 188-byte packets and checks no stride its head is too short for", () => {
+		expect(transportStreamLayout(stream(188, 0).subarray(0, 940))).toEqual({ stride: 188, prefix: 0 })
+		expect(transportStreamLayout(stream(204, 0).subarray(0, 1019))).toBe(false)
+	})
+})
+
 describe("transportStreamOutcome", () => {
 	it("is notTransportStream for no stream, on either platform", () => {
 		expect(transportStreamOutcome(false, "android")).toBe("notTransportStream")
 		expect(transportStreamOutcome(false, "ios")).toBe("notTransportStream")
 	})
 
-	it("keeps only a 188-byte stream on Android, which Media3 reads; BDAV and parity streams are unplayable", () => {
+	it("keeps only a 188-byte stream on Android, which Media3 reads from any offset; BDAV and parity streams are unplayable", () => {
 		expect(transportStreamOutcome({ stride: 188, prefix: 0 }, "android")).toBe("transportStream")
+		expect(transportStreamOutcome({ stride: 188, prefix: 37 }, "android")).toBe("transportStream")
 		expect(transportStreamOutcome({ stride: 192, prefix: 4 }, "android")).toBe("unplayable")
 		expect(transportStreamOutcome({ stride: 204, prefix: 0 }, "android")).toBe("unplayable")
 	})

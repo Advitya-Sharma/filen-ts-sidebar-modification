@@ -217,6 +217,12 @@ export function linkedFilePreviewType(file: LinkedFile, resolved: PreviewType, v
 	return facts === null ? resolved : getPreviewType(facts.name, facts.mime, verdict)
 }
 
+// Whether a link renders as media at all, decided without building a URL: every internal link does (as the
+// generic attachment at worst), an external one only as an image or video.
+export function rendersLinkMedia(link: SuccessfulLink): boolean {
+	return link.type === "internal" || resolveLinkMedia(link, null).type !== null
+}
+
 // Pure classifier shared by the single- and multi-attachment render paths. `getFileUrl` builds
 // the AnyFile.Linked HTTP url; without it internal media cannot be served and degrades to the
 // generic internal attachment.

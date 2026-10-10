@@ -11,7 +11,7 @@ vi.mock("@/lib/serializer", () => ({
 	serialize: (value: unknown) => JSON.stringify(value)
 }))
 
-import { isPhotoGridItem } from "@/features/photos/utils"
+import { holdsAnyOf, isPhotoGridItem } from "@/features/photos/utils"
 import { type DriveItem } from "@/types"
 import fileKindVerdicts from "@/lib/fileKindVerdicts"
 
@@ -137,5 +137,21 @@ describe("isPhotoGridItem on Android", () => {
 			Platform.OS = "ios"
 			vi.resetModules()
 		}
+	})
+})
+
+describe("holdsAnyOf", () => {
+	const items = [makeItem({ type: "file", name: "a.mp4" }), makeItem({ type: "file", name: "b.jpg" })]
+
+	it("finds a changed file in the listing, alone or among several", () => {
+		expect(holdsAnyOf(items, ["uuid-a.mp4"])).toBe(true)
+		expect(holdsAnyOf(items, ["elsewhere", "uuid-b.jpg"])).toBe(true)
+	})
+
+	it("is false for files outside the listing, no change, or no listing yet", () => {
+		expect(holdsAnyOf(items, ["elsewhere"])).toBe(false)
+		expect(holdsAnyOf(items, ["elsewhere", "other"])).toBe(false)
+		expect(holdsAnyOf(items, [])).toBe(false)
+		expect(holdsAnyOf(undefined, ["uuid-a.mp4"])).toBe(false)
 	})
 })

@@ -1018,7 +1018,7 @@ class LibraryClassifier {
 			}
 
 			let video = -1
-			let tokenStart = 0
+			let key = ""
 
 			if (!wholeStemIsTokens) {
 				// Longest video stem the subtitle stem equals or continues with ".": "Movie.en.forced" → "Movie".
@@ -1027,7 +1027,7 @@ class LibraryClassifier {
 
 					if (found !== undefined) {
 						video = found
-						tokenStart = candidate.length + 1
+						key = candidate
 
 						break
 					}
@@ -1046,7 +1046,7 @@ class LibraryClassifier {
 			let info: SubtitleNameInfo
 
 			if (video >= 0) {
-				info = parseSubtitleTokens(tokenStart >= stem.length ? [] : stem.slice(tokenStart).split("."))
+				info = parseSubtitleTokens(tokensAfterKey(stem, key))
 			} else if (soleVideo >= 0) {
 				video = soleVideo
 				info = parseUnmatchedSubtitleName(stem)
@@ -1165,13 +1165,7 @@ class LibraryClassifier {
 						break
 					}
 
-					const info = parseSubtitleTokens(
-						lower === key
-							? []
-							: this.stem(file)
-									.slice(key.length + 1)
-									.split(".")
-					)
+					const info = parseSubtitleTokens(tokensAfterKey(this.stem(file), key))
 
 					for (const target of targets) {
 						target.subtitles.push(subtitleEntry(file, format, info))
@@ -2341,6 +2335,24 @@ class LibraryClassifier {
 
 		return out
 	}
+}
+
+// The "."-separated tokens of `stem` after `key`, its lowercase prefix. Positions come from counting dots: lowercasing
+// keeps every "." but can change length ("İ" → "i̇"), so `key.length` is no offset into `stem`.
+function tokensAfterKey(stem: string, key: string): string[] {
+	let dots = 0
+
+	for (let dot = key.indexOf("."); dot >= 0; dot = key.indexOf(".", dot + 1)) {
+		dots++
+	}
+
+	let separator = stem.indexOf(".")
+
+	for (; dots > 0 && separator >= 0; dots--) {
+		separator = stem.indexOf(".", separator + 1)
+	}
+
+	return separator < 0 ? [] : stem.slice(separator + 1).split(".")
 }
 
 function subtitleEntry(file: number, format: SidecarSubtitleFormat, info: SubtitleNameInfo): LibrarySubtitle {

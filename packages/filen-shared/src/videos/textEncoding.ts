@@ -40,42 +40,43 @@ export const SUBTITLE_ENCODINGS: readonly { label: string; name: string }[] = [
 
 const KNOWN_LABELS: ReadonlySet<string> = new Set(SUBTITLE_ENCODINGS.map(encoding => encoding.label))
 
-const LEGACY_BY_LANGUAGE: Readonly<Record<string, string>> = {
-	ru: "windows-1251",
-	uk: "windows-1251",
-	bg: "windows-1251",
-	sr: "windows-1251",
-	mk: "windows-1251",
-	be: "windows-1251",
-	kk: "windows-1251",
-	mn: "windows-1251",
-	el: "windows-1253",
-	tr: "windows-1254",
-	az: "windows-1254",
-	he: "windows-1255",
-	yi: "windows-1255",
-	ar: "windows-1256",
-	fa: "windows-1256",
-	ur: "windows-1256",
-	et: "windows-1257",
-	lv: "windows-1257",
-	lt: "windows-1257",
-	pl: "windows-1250",
-	cs: "windows-1250",
-	sk: "windows-1250",
-	hu: "windows-1250",
-	hr: "windows-1250",
-	sl: "windows-1250",
-	ro: "windows-1250",
-	sq: "windows-1250",
-	bs: "windows-1250",
-	vi: "windows-1258",
-	th: "windows-874",
-	zh: "gb18030",
-	yue: "big5",
-	ja: "shift_jis",
-	ko: "euc-kr"
-}
+// A Map, so a language code never resolves an inherited object key.
+const LEGACY_BY_LANGUAGE: ReadonlyMap<string, string> = new Map([
+	["ru", "windows-1251"],
+	["uk", "windows-1251"],
+	["bg", "windows-1251"],
+	["sr", "windows-1251"],
+	["mk", "windows-1251"],
+	["be", "windows-1251"],
+	["kk", "windows-1251"],
+	["mn", "windows-1251"],
+	["el", "windows-1253"],
+	["tr", "windows-1254"],
+	["az", "windows-1254"],
+	["he", "windows-1255"],
+	["yi", "windows-1255"],
+	["ar", "windows-1256"],
+	["fa", "windows-1256"],
+	["ur", "windows-1256"],
+	["et", "windows-1257"],
+	["lv", "windows-1257"],
+	["lt", "windows-1257"],
+	["pl", "windows-1250"],
+	["cs", "windows-1250"],
+	["sk", "windows-1250"],
+	["hu", "windows-1250"],
+	["hr", "windows-1250"],
+	["sl", "windows-1250"],
+	["ro", "windows-1250"],
+	["sq", "windows-1250"],
+	["bs", "windows-1250"],
+	["vi", "windows-1258"],
+	["th", "windows-874"],
+	["zh", "gb18030"],
+	["yue", "big5"],
+	["ja", "shift_jis"],
+	["ko", "euc-kr"]
+])
 
 const TRADITIONAL_HINT = /traditional|(?:^|[-_ (])(?:tw|hk|mo|hant)(?:$|[-_ )])/
 
@@ -101,7 +102,7 @@ export function legacyEncodingForLanguage(hint: string | null | undefined): stri
 		return "windows-1250"
 	}
 
-	return lang === null ? "windows-1252" : (LEGACY_BY_LANGUAGE[lang] ?? "windows-1252")
+	return lang === null ? "windows-1252" : (LEGACY_BY_LANGUAGE.get(lang) ?? "windows-1252")
 }
 
 function getDecoder(): TextDecoderCtor {
@@ -167,20 +168,6 @@ export function decodeSubtitleBytes(bytes: Uint8Array, options: DecodeSubtitleOp
 		return null
 	}
 
-	const forced = options.encoding
-
-	if (forced !== null && forced !== undefined && KNOWN_LABELS.has(forced.toLowerCase())) {
-		const text = tryDecode(forced.toLowerCase(), bytes, false)
-
-		if (text !== null) {
-			return {
-				text: stripBom(text),
-				encoding: forced.toLowerCase(),
-				confident: false
-			}
-		}
-	}
-
 	let body = bytes
 	let bomLabel: string | null = null
 
@@ -193,6 +180,21 @@ export function decodeSubtitleBytes(bytes: Uint8Array, options: DecodeSubtitleOp
 	} else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
 		bomLabel = "utf-16be"
 		body = bytes.subarray(2)
+	}
+
+	const forced = options.encoding?.toLowerCase()
+
+	if (forced !== undefined && KNOWN_LABELS.has(forced)) {
+		// A BOM of another encoding is a marker, not text: decoded as a legacy codepage it would survive stripBom.
+		const text = tryDecode(forced, bomLabel !== null && bomLabel !== forced ? body : bytes, false)
+
+		if (text !== null) {
+			return {
+				text: stripBom(text),
+				encoding: forced,
+				confident: false
+			}
+		}
 	}
 
 	if (bomLabel !== null) {
@@ -247,7 +249,8 @@ export function decodeSubtitleBytes(bytes: Uint8Array, options: DecodeSubtitleOp
 	}
 
 	const legacy = legacyEncodingForLanguage(options.languageHint)
-	const text = tryDecode(legacy, bytes, false) ?? tryDecode("windows-1252", bytes, false)
+	// `body`: a UTF-8 BOM in front of a legacy payload would decode as "ï»¿" and survive stripBom.
+	const text = tryDecode(legacy, body, false) ?? tryDecode("windows-1252", body, false)
 
 	return {
 		text: stripBom(text ?? ""),

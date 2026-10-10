@@ -2,10 +2,10 @@ import { create } from "zustand"
 import type { GalleryItemTagged, InitialItem } from "@/components/drivePreview/gallery"
 import { router } from "@/lib/router"
 import type { DrivePath } from "@/hooks/useDrivePath"
-import { getDriveItemPreviewType, isImagePreviewType, isUncheckedTransportStream } from "@/lib/previewType"
+import { getDriveItemFileKind, getDriveItemPreviewType, isImagePreviewType, isUncheckedTransportStream } from "@/lib/previewType"
 import { isFileItem } from "@/features/drive/driveSelectors"
 import fileKindVerdicts from "@/lib/fileKindVerdicts"
-import { type ContentVerdict } from "@filen/shared"
+import { VERDICT_MAX_RECORDS, type ContentVerdict } from "@filen/shared"
 
 export type OpenPreviewParams = {
 	items: GalleryItemTagged[]
@@ -65,6 +65,22 @@ export type DrivePreviewStore = {
 	setContentScrolled: (value: boolean) => void
 }
 
+// Files the `.ts` gate found to be streams this platform's player does not read: no verdict says so, so this
+// session keeps them (newest VERDICT_MAX_RECORDS) and a later open shows no preview without reading again. Per
+// uuid, which a content change rotates.
+const unplayableStreams = new Set<string>()
+
+function rememberUnplayable(uuid: string): void {
+	unplayableStreams.delete(uuid)
+	unplayableStreams.add(uuid)
+
+	const oldest = unplayableStreams.size > VERDICT_MAX_RECORDS ? unplayableStreams.values().next().value : undefined
+
+	if (oldest !== undefined) {
+		unplayableStreams.delete(oldest)
+	}
+}
+
 // Each page renders by the verdicts known when the gallery opens (GalleryItemTagged.verdict); one recorded while
 // it is open waits for the next open. The same array when no item has one.
 function withOpenVerdicts(items: GalleryItemTagged[]): GalleryItemTagged[] {
@@ -77,17 +93,16 @@ function withOpenVerdicts(items: GalleryItemTagged[]): GalleryItemTagged[] {
 			continue
 		}
 
-		const verdict = fileKindVerdicts.get(item.data.data.uuid)
+		const uuid = item.data.data.uuid
+		const verdict = fileKindVerdicts.get(uuid)
+		const unplayable = verdict === undefined && unplayableStreams.has(uuid)
 
-		if (verdict !== undefined) {
+		if (verdict !== undefined || unplayable) {
 			if (stamped === items) {
 				stamped = items.slice()
 			}
 
-			stamped[index] = {
-				...item,
-				verdict
-			}
+			stamped[index] = verdict !== undefined ? { ...item, verdict } : { ...item, unplayable: true }
 		}
 	}
 
@@ -152,6 +167,10 @@ export const useDrivePreviewStore = create<DrivePreviewStore>((set, get) => ({
 		}))
 	},
 	pinVerdict(uuid, found) {
+		if (found === "unplayable") {
+			rememberUnplayable(uuid)
+		}
+
 		const pin = (item: GalleryItemTagged): GalleryItemTagged =>
 			item.type !== "drive" || item.data.data.uuid !== uuid || item.verdict !== undefined || item.unplayable
 				? item
@@ -221,11 +240,14 @@ export const useDrivePreviewStore = create<DrivePreviewStore>((set, get) => ({
 				}
 
 				const base = initialItem.data.item
-				const basePreviewType = getDriveItemPreviewType(base)
+				const baseKind = getDriveItemFileKind(base)
+				const basePreviewType = baseKind.kind ?? "unknown"
 
 				// If it's a docx, text, pdf, or code file, we won't show the gallery and just show that file, so we return an array with just that file as the item to render.
-				// A `.ts`/`.mts` a read could still find to be a transport stream opens alone too, behind its gate.
+				// A `.ts`/`.mts` a read could still find to be a transport stream opens alone too, behind its gate, and so
+				// does one a read found to be a stream this platform does not play, to its no-preview page.
 				if (
+					(basePreviewType === "unknown" && baseKind.source === "sniff") ||
 					basePreviewType === "docx" ||
 					basePreviewType === "text" ||
 					basePreviewType === "pdf" ||

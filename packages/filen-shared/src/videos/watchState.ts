@@ -42,7 +42,8 @@ export function hlcObserve({ clock, seen, now }: { clock: Hlc; seen: Hlc; now: n
 // ── Schema ───────────────────────────────────────────────────────────────────
 
 // d is the writer id and must be unique per writer: two writers sharing one (say, two tabs of one browser) can issue
-// the same stamp for different values, and one of them is then silently lost. Use the device id plus a per-tab suffix.
+// the same stamp for different values, and one of them is then silently lost. Use "<device id>.<tab id>" with no "." in
+// the device id: compaction reads the device from it.
 export interface Stamp {
 	t: Hlc
 	d: string
@@ -1217,10 +1218,32 @@ function isTombstoneOnly(rec: WatchRecord): rec is WatchRecord & { x: Tombstone 
 	return rec.x !== undefined && newestStamp(rec) === null
 }
 
-// The document's own clock: its newest stamp or deletion time. Compaction depends on nothing else, so every replica
-// compacts the same merged document identically.
+// Writer ids are "<device>.<tab>": every tab of a device shares its clock.
+function writerDevice(d: string): string {
+	const dot = d.indexOf(".")
+
+	return dot < 0 ? d : d.slice(0, dot)
+}
+
+interface WallTime {
+	at: number
+	// Device of a progress lp; null for a tombstone e (an earlier reference, or a deleting device's clock)
+	device: string | null
+}
+
+// The document's own clock, so every replica compacts the same merged document identically. It reads wall-clock
+// times (progress lp, tombstone e): stamps follow any stamp they observe up to MAX_CLOCK_SKEW_MS ahead, so one fast
+// clock would carry every replica's stamps forward; stamps count only in a document with no wall-clock time.
+// Times split into runs wherever two neighbours lie more than TOMBSTONE_TTL_MS apart, and the newest run counts when
+// it holds two times or more and either has two devices, continues a device of an older run, or no older run has a
+// device: a clock running far ahead from a device no older time names, alone or from its many plays, never expires
+// tombstones. A new device after a longer pause is held back the same way until the older devices' times are gone.
+// A known device whose clock jumps ahead reads the same as its return after a pause longer than the TTL, so its
+// far-ahead times do count; only a clamp to each caller's own clock could tell them apart, and that would stop
+// replicas compacting the same document alike.
 function referenceMs(doc: WatchStateDoc): number {
-	let at = 0
+	const wall: WallTime[] = []
+	let stamped = 0
 
 	for (const map of [doc.items, doc.series] as Record<string, WatchRecord>[]) {
 		for (const key in map) {
@@ -1234,17 +1257,83 @@ function referenceMs(doc: WatchStateDoc): number {
 				const value = rec[field]
 
 				if (isStamped(value)) {
-					at = Math.max(at, hlcPhysicalMs(value.t))
+					stamped = Math.max(stamped, hlcPhysicalMs(value.t))
 				}
 			}
 
-			if (rec.x !== undefined) {
-				at = Math.max(at, rec.x.e)
+			const p = rec["p"]
+
+			if (isRecord(p) && typeof p["lp"] === "number" && p["lp"] > 0) {
+				wall.push({
+					at: p["lp"],
+					device: typeof p["d"] === "string" ? writerDevice(p["d"]) : null
+				})
+			}
+
+			if (rec.x !== undefined && rec.x.e > 0) {
+				wall.push({
+					at: rec.x.e,
+					device: null
+				})
 			}
 		}
 	}
 
-	return at
+	if (wall.length === 0) {
+		return stamped
+	}
+
+	wall.sort((a, b) => b.at - a.at)
+
+	// Newest first: run index of every time, and the oldest run each device appears in.
+	const runOf = new Int32Array(wall.length)
+	const oldestRun = new Map<string, number>()
+	let lastDeviceRun = -1
+	let run = 0
+
+	for (let i = 0; i < wall.length; i++) {
+		const time = wall[i] as WallTime
+
+		if (i > 0 && (wall[i - 1] as WallTime).at - time.at > TOMBSTONE_TTL_MS) {
+			run++
+		}
+
+		runOf[i] = run
+
+		if (time.device !== null) {
+			oldestRun.set(time.device, run)
+			lastDeviceRun = run
+		}
+	}
+
+	for (let start = 0; start < wall.length;) {
+		const current = runOf[start] as number
+		let end = start
+		let first: string | null = null
+		let trusted = current >= lastDeviceRun
+
+		for (; end < wall.length && runOf[end] === current; end++) {
+			const device = (wall[end] as WallTime).device
+
+			if (device === null || trusted) {
+				continue
+			}
+
+			if ((oldestRun.get(device) as number) > current || (first !== null && first !== device)) {
+				trusted = true
+			}
+
+			first ??= device
+		}
+
+		if (trusted && end - start >= 2) {
+			return (wall[start] as WallTime).at
+		}
+
+		start = end
+	}
+
+	return (wall[wall.length - 1] as WallTime).at
 }
 
 export interface WatchStateCompaction {
@@ -1262,7 +1351,7 @@ interface Candidate {
 
 // Deterministic in `doc` alone. Always expires tombstone-only records past TOMBSTONE_TTL_MS; past `limitBytes`,
 // tombstones oldest first and only as far as needed: progress older than STALE_PROGRESS_MS on unplayed items, progress
-// superseded by a completion, then whole items and series preferences (toward `limitBytes` when tombstoning can get
+// superseded by a completion (each only where no other register would go with it), then whole items and series preferences (toward `limitBytes` when tombstoning can get
 // there, else only below `hardLimitBytes`). Past `hardLimitBytes` it finally drops the oldest tombstone-only records.
 // Unknown top-level fields are never touched. Returns `doc` itself when nothing changes.
 export function compactWatchState({
@@ -1363,6 +1452,31 @@ export function compactWatchState({
 	const progressOf = (rec: WatchRecord): ProgressRegister | undefined => (rec as ItemRec).p
 	const watchedOf = (rec: WatchRecord): WatchedRegister | undefined => (rec as ItemRec).w
 	const staleBefore = now - STALE_PROGRESS_MS
+	// A tombstone at the progress stamp deletes every register stamped at or before it, so a progress-only deletion
+	// is offered only where nothing else of value goes with it: an older hide (it only ever applies over a newer
+	// progress) and an unplayed, uncounted watched register are inert; an older offset or an unknown register is not.
+	const progressOnlyCovered = (rec: WatchRecord, p: ProgressRegister): boolean => {
+		for (const key in rec) {
+			if (key === "x" || key === "p") {
+				continue
+			}
+
+			const value = rec[key]
+
+			if (isStamped(value) && compareStamps(value, p) > 0) {
+				continue
+			}
+
+			if (key === "h" || (key === "w" && isRecord(value) && value["pl"] === false && value["pc"] === 0)) {
+				continue
+			}
+
+			return false
+		}
+
+		return true
+	}
+
 	const tombstoneProgress = (rec: WatchRecord): WatchRecord => {
 		const p = progressOf(rec)
 
@@ -1381,7 +1495,7 @@ export function compactWatchState({
 		rec => {
 			const p = progressOf(rec)
 
-			return p !== undefined && watchedOf(rec)?.pl !== true && p.lp < staleBefore ? p.lp : null
+			return p !== undefined && watchedOf(rec)?.pl !== true && p.lp < staleBefore && progressOnlyCovered(rec, p) ? p.lp : null
 		},
 		tombstoneProgress
 	)
@@ -1392,7 +1506,7 @@ export function compactWatchState({
 			const p = progressOf(rec)
 			const w = watchedOf(rec)
 
-			return p !== undefined && w !== undefined && w.pl && compareStamps(w, p) > 0 ? p.lp : null
+			return p !== undefined && w !== undefined && w.pl && compareStamps(w, p) > 0 && progressOnlyCovered(rec, p) ? p.lp : null
 		},
 		tombstoneProgress
 	)

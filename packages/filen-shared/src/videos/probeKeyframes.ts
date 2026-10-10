@@ -269,8 +269,18 @@ export function parseCues(bytes: Uint8Array, track: number): CuePoints {
 	const context: EbmlContext = { malformed: false }
 	const points: CuePoints = { times: [], clusters: [], relatives: [] }
 
-	for (const point of ebmlChildren(bytes, 0, bytes.length, 2, context)) {
-		if (point.id !== CUE_POINT_ID || point.end === null) {
+	// Walked in place, not through ebmlChildren: its child cap would drop the points of a long or short-GOP
+	// file past MAX_EBML_CHILDREN, while MAX_CUES_BYTES already bounds this walk.
+	for (let at = 0; at < bytes.length; ) {
+		const point = parseElementHeader(bytes, at)
+
+		if (typeof point === "string" || point.end === null || point.end > bytes.length) {
+			break
+		}
+
+		at = point.end
+
+		if (point.id !== CUE_POINT_ID) {
 			continue
 		}
 

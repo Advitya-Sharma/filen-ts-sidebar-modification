@@ -18,3 +18,20 @@ export function isPhotoGridItem(item: DriveItem, verdict?: ContentVerdict | null
 
 	return isImagePreviewType(previewType) || previewType === "video"
 }
+
+// Whether `items` holds a file among `changed`: a scan with no kind resolved, one Set for a bulk change.
+export function holdsAnyOf(items: readonly DriveItem[] | undefined, changed: readonly string[]): boolean {
+	if (items === undefined || changed.length === 0) {
+		return false
+	}
+
+	if (changed.length === 1) {
+		const [uuid] = changed
+
+		return items.some(item => item.data.uuid === uuid)
+	}
+
+	const uuids = new Set(changed)
+
+	return items.some(item => uuids.has(item.data.uuid))
+}

@@ -10,7 +10,7 @@ import useHttpStore from "@/stores/useHttp.store"
 import VideoAttachment from "@/features/chats/components/chat/message/videoAttachment"
 import ImageAttachment from "@/features/chats/components/chat/message/imageAttachment"
 import InternalAttachment from "@/features/chats/components/chat/message/internalAttachment"
-import { resolveLinkMedia, type SuccessfulLink } from "@/features/chats/utils"
+import { rendersLinkMedia, resolveLinkMedia, type SuccessfulLink } from "@/features/chats/utils"
 import { type AnyFile } from "@filen/sdk-rs"
 import { parseFilenPublicLink } from "@filen/shared"
 import useFileKindVerdict from "@/hooks/useFileKindVerdict"
@@ -21,12 +21,6 @@ type LinkMediaProps = {
 	maxWidth: number
 	getFileUrl: ((file: AnyFile) => string) | null
 	onLoadFailed?: () => void
-}
-
-// Whether a link renders as media at all. A content verdict only moves a linked file between video and the
-// generic file attachment, so this is decided without one.
-function rendersLinkMedia(link: SuccessfulLink, getFileUrl: ((file: AnyFile) => string) | null): boolean {
-	return resolveLinkMedia(link, getFileUrl, () => undefined).type !== null
 }
 
 // One link's attachment. A component so a linked file follows its own content verdict (a player that found an
@@ -128,7 +122,7 @@ export const Attachments = ({
 	if (single) {
 		const link = chatMessageLinksQuery.data[0]
 
-		if (link && link.success && !singleAttachmentLoadFailed && rendersLinkMedia(link, getHttpProviderFileUrl)) {
+		if (link && link.success && !singleAttachmentLoadFailed && rendersLinkMedia(link)) {
 			return (
 				<LinkMedia
 					link={link}

@@ -5,7 +5,8 @@ import { createElement, type ReactNode } from "react"
 
 const mocks = vi.hoisted(() => ({
 	linksQuery: vi.fn(),
-	verdictHook: vi.fn((_uuid: string | null) => undefined)
+	verdictHook: vi.fn((_uuid: string | null) => undefined),
+	resolveLinkMedia: vi.fn(() => ({ type: "internal", linked: {} }))
 }))
 
 vi.mock("@/lib/logger", async () => await import("@/tests/mocks/logger"))
@@ -27,7 +28,8 @@ vi.mock("@/features/chats/components/chat/message/internalAttachment", () => ({
 	default: () => createElement("span", { "data-testid": "internal" })
 }))
 vi.mock("@/features/chats/utils", () => ({
-	resolveLinkMedia: () => ({ type: "internal", linked: {} })
+	resolveLinkMedia: mocks.resolveLinkMedia,
+	rendersLinkMedia: (link: { type: string }) => link.type === "internal"
 }))
 vi.mock("@/features/chats/queries/useChatMessageLinks.query", () => ({ default: mocks.linksQuery }))
 
@@ -62,6 +64,7 @@ function renderAttachments(text: string, single: boolean) {
 
 beforeEach(() => {
 	mocks.verdictHook.mockClear()
+	mocks.resolveLinkMedia.mockClear()
 	mocks.linksQuery.mockReset()
 	mocks.linksQuery.mockReturnValue({ data: undefined })
 })
@@ -135,5 +138,14 @@ describe("Attachments", () => {
 
 		expect(mocks.verdictHook).toHaveBeenCalledWith("f1")
 		expect(mocks.verdictHook.mock.calls.every(([uuid]) => uuid === "f1")).toBe(true)
+	})
+
+	it("resolves a link-only message's link once per render", () => {
+		mocks.linksQuery.mockReturnValue({ data: [SUCCESSFUL] })
+
+		const { getByTestId } = renderAttachments(`see ${FILEN_LINK}`, true)
+
+		expect(getByTestId("internal")).toBeTruthy()
+		expect(mocks.resolveLinkMedia).toHaveBeenCalledTimes(1)
 	})
 })

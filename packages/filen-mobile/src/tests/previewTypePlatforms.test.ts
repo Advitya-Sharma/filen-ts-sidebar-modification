@@ -134,7 +134,7 @@ describe.each([
 		expect(isUncheckedTransportStream("capture.ts", null, 2 * MIB, null)).toBe(true)
 	})
 
-	it(`keeps a stream verdict for an .m2ts ${reads ? "" : "never"}`, async () => {
+	it(`keeps what a read found in an .m2ts ${reads ? "" : "never"}`, async () => {
 		const { recordContentVerdict } = await loadFor(os)
 		const verdicts = (await import("@/lib/fileKindVerdicts")).default
 
@@ -142,6 +142,7 @@ describe.each([
 		recordContentVerdict({ uuid: "m2ts-not", name: "clip.m2ts", mime: null, size: 10 }, "notTransportStream")
 
 		expect(verdicts.get("m2ts")).toBe(reads ? "transportStream" : undefined)
-		expect(verdicts.get("m2ts-not")).toBeUndefined()
+		// Kept where the gate reads an .m2ts, so it is not read again.
+		expect(verdicts.get("m2ts-not")).toBe(reads ? "notTransportStream" : undefined)
 	})
 })

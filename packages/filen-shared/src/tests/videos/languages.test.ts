@@ -42,6 +42,13 @@ describe("normalizeLanguage", () => {
 		expect(normalizeLanguage(input)).toBeNull()
 	})
 
+	it.each(["constructor", "Constructor (US)", "hasOwnProperty", "valueOf", "__proto__", "toString"])(
+		"never resolves the object prototype key %s",
+		input => {
+			expect(normalizeLanguage(input)).toBeNull()
+		}
+	)
+
 	it("handles null, undefined and oversized input", () => {
 		expect(normalizeLanguage(null)).toBeNull()
 		expect(normalizeLanguage(undefined)).toBeNull()

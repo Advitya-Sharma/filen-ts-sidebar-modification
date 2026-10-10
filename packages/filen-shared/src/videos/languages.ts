@@ -191,43 +191,43 @@ zu zul - Zulu
 - tlh - Klingon`
 
 // Legacy and macro codes folded into one canonical primary subtag.
-const LEGACY: Readonly<Record<string, string>> = {
-	iw: "he",
-	in: "id",
-	ji: "yi",
-	jw: "jv",
-	nb: "no",
-	nn: "no",
-	fil: "tl",
-	tgl: "tl",
-	nob: "no",
-	nno: "no",
-	cmn: "zh",
-	sh: "sr",
-	scc: "sr",
-	scr: "hr"
-}
+const LEGACY: ReadonlyMap<string, string> = new Map([
+	["iw", "he"],
+	["in", "id"],
+	["ji", "yi"],
+	["jw", "jv"],
+	["nb", "no"],
+	["nn", "no"],
+	["fil", "tl"],
+	["tgl", "tl"],
+	["nob", "no"],
+	["nno", "no"],
+	["cmn", "zh"],
+	["sh", "sr"],
+	["scc", "sr"],
+	["scr", "hr"]
+])
 
-const NAME_ALIASES: Readonly<Record<string, string>> = {
-	castilian: "es",
-	flemish: "nl",
-	mandarin: "zh",
-	"simplified chinese": "zh",
-	"traditional chinese": "zh",
-	brazilian: "pt",
-	deutsch: "de",
-	espanol: "es",
-	francais: "fr",
-	italiano: "it",
-	bokmål: "no",
-	"norwegian bokmål": "no",
-	farsi: "fa",
-	"brazilian portuguese": "pt",
-	"portuguese brazilian": "pt",
-	"modern greek": "el",
-	"chinese simplified": "zh",
-	"chinese traditional": "zh"
-}
+const NAME_ALIASES: ReadonlyMap<string, string> = new Map([
+	["castilian", "es"],
+	["flemish", "nl"],
+	["mandarin", "zh"],
+	["simplified chinese", "zh"],
+	["traditional chinese", "zh"],
+	["brazilian", "pt"],
+	["deutsch", "de"],
+	["espanol", "es"],
+	["francais", "fr"],
+	["italiano", "it"],
+	["bokmål", "no"],
+	["norwegian bokmål", "no"],
+	["farsi", "fa"],
+	["brazilian portuguese", "pt"],
+	["portuguese brazilian", "pt"],
+	["modern greek", "el"],
+	["chinese simplified", "zh"],
+	["chinese traditional", "zh"]
+])
 
 // Codes that mean "no usable language".
 const UNDETERMINED: ReadonlySet<string> = new Set([
@@ -290,7 +290,7 @@ function languageIndex(): LanguageIndex {
 }
 
 function foldToCanonical(primary: string): string {
-	return LEGACY[primary] ?? primary
+	return LEGACY.get(primary) ?? primary
 }
 
 // Primary BCP 47 subtag (639-1 where one exists, else 639-2), from 639-1/-2B/-2T codes, BCP 47 tags or English names. null when unknown or undetermined.
@@ -325,7 +325,7 @@ export function normalizeLanguage(input: string | null | undefined): string | nu
 			return foldToCanonical(known)
 		}
 
-		const legacy = LEGACY[head]
+		const legacy = LEGACY.get(head)
 
 		if (legacy !== undefined) {
 			return foldToCanonical(legacy)
@@ -341,7 +341,7 @@ export function normalizeLanguage(input: string | null | undefined): string | nu
 		.replace(/\s*[(,].*$/, "")
 		.replace(/-/g, " ")
 		.trim()
-	const byName = idx.byName.get(name) ?? NAME_ALIASES[name]
+	const byName = idx.byName.get(name) ?? NAME_ALIASES.get(name)
 
 	return byName === undefined ? null : foldToCanonical(byName)
 }

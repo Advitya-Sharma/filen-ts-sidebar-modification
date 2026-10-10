@@ -6,6 +6,15 @@
 export const MAX_SUBTITLE_CHARS = 8 * 1024 * 1024
 export const MAX_SUBTITLE_CUES = 100_000
 export const MAX_SUBTITLE_CUE_CHARS = 2048
+// A cue shows this long at most: a file's times are anyone's, and a cue running for hours would keep every lookup
+// scanning back over everything that started since.
+export const MAX_CUE_SECONDS = 10 * 60
+// Cues shown at once at most, so neither the overlay nor the browser's own rendering grows with a file of thousands of
+// overlapping cues. Typeset ASS layers dozens of long signs under short dialogue; past this many the longest cue gives
+// way, so dialogue never does to a sign.
+export const MAX_CONCURRENT_CUES = 32
+
+const CUE_BLOCK_SHIFT = 6
 
 export interface CueStore {
 	starts: Float64Array
@@ -15,6 +24,8 @@ export interface CueStore {
 	hints: Uint8Array | null
 	// Longest cue, bounds the backwards scan of `activeCueIndices`.
 	maxDuration: number
+	// Latest end of each run of 64 cues in start order: the scan skips runs that all ended.
+	blockEnds: Float64Array
 }
 
 export const EMPTY_CUES: CueStore = {
@@ -22,7 +33,24 @@ export const EMPTY_CUES: CueStore = {
 	ends: new Float64Array(0),
 	texts: [],
 	hints: null,
-	maxDuration: 0
+	maxDuration: 0,
+	blockEnds: new Float64Array(0)
+}
+
+function blockEndsOf(ends: Float64Array): Float64Array {
+	const n = ends.length
+	const blocks = new Float64Array((n + (1 << CUE_BLOCK_SHIFT) - 1) >>> CUE_BLOCK_SHIFT)
+
+	for (let i = 0; i < n; i++) {
+		const block = i >>> CUE_BLOCK_SHIFT
+		const end = ends[i] as number
+
+		if (end > (blocks[block] as number)) {
+			blocks[block] = end
+		}
+	}
+
+	return blocks
 }
 
 export class CueBuilder {
@@ -43,6 +71,8 @@ export class CueBuilder {
 		if (n >= MAX_SUBTITLE_CUES || text.length === 0 || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) {
 			return false
 		}
+
+		end = Math.min(end, start + MAX_CUE_SECONDS)
 
 		if (n === this.starts.length) {
 			const cap = n * 2
@@ -78,14 +108,114 @@ export class CueBuilder {
 			return EMPTY_CUES
 		}
 
-		let sorted = true
+		let order: Uint32Array | null = null
 
 		for (let i = 1; i < n; i++) {
 			if ((this.starts[i] as number) < (this.starts[i - 1] as number)) {
-				sorted = false
+				order = new Uint32Array(n)
+
+				for (let j = 0; j < n; j++) {
+					order[j] = j
+				}
+
+				const source = this.starts
+
+				order.sort((a, b) => (source[a] as number) - (source[b] as number) || a - b)
 
 				break
 			}
+		}
+
+		// In start order. A cue repeating one that shows (same times, text and placement: the layers of an ASS sign) is
+		// dropped. A cue starting while MAX_CONCURRENT_CUES show makes the longest of them and itself give way: a showing
+		// one ends at this start (dropped when that leaves nothing), the new one is dropped. Equal lengths keep the later
+		// start, so cues starting together keep the same ones in any file order, and no instant has more active.
+		const kept = new Uint32Array(n)
+		const keptEnds = new Float64Array(n)
+		const showing = new Uint32Array(MAX_CONCURRENT_CUES)
+		let dropped: Uint8Array | null = null
+		let changed = order !== null
+		let shown = 0
+		let count = 0
+
+		for (let k = 0; k < n; k++) {
+			const from = order === null ? k : (order[k] as number)
+			const start = this.starts[from] as number
+			const end = this.ends[from] as number
+			let still = 0
+			let repeat = false
+
+			// Starts ascend, so a kept cue that ended by this start stays ended.
+			for (let a = 0; a < shown; a++) {
+				const slot = showing[a] as number
+
+				if ((keptEnds[slot] as number) > start) {
+					showing[still++] = slot
+
+					const other = kept[slot] as number
+
+					if (
+						!repeat &&
+						this.starts[other] === start &&
+						keptEnds[slot] === end &&
+						this.hints[other] === this.hints[from] &&
+						this.texts[other] === this.texts[from]
+					) {
+						repeat = true
+					}
+				}
+			}
+
+			shown = still
+
+			if (repeat) {
+				changed = true
+
+				continue
+			}
+
+			if (end > start && shown === MAX_CONCURRENT_CUES) {
+				changed = true
+
+				// Lengths in whole milliseconds, so float noise never splits equal ones. Ties go to the earlier-starting
+				// showing cue: slots are numbered in start order.
+				let longest = -1
+				let longestLength = Math.round((end - start) * 1000)
+
+				for (let a = 0; a < shown; a++) {
+					const slot = showing[a] as number
+					const length = Math.round(((keptEnds[slot] as number) - (this.starts[kept[slot] as number] as number)) * 1000)
+
+					if (length > longestLength || (length === longestLength && (longest === -1 || slot < (showing[longest] as number)))) {
+						longest = a
+						longestLength = length
+					}
+				}
+
+				if (longest === -1) {
+					continue
+				}
+
+				const ended = showing[longest] as number
+
+				keptEnds[ended] = start
+
+				if (this.starts[kept[ended] as number] === start) {
+					dropped ??= new Uint8Array(n)
+					dropped[ended] = 1
+				}
+
+				showing[longest] = showing[--shown] as number
+			}
+
+			kept[count] = from
+			keptEnds[count] = end
+
+			if (end > start) {
+				showing[shown++] = count
+			}
+
+			count++
 		}
 
 		let starts: Float64Array
@@ -93,43 +223,51 @@ export class CueBuilder {
 		let hints: Uint8Array | null
 		let texts: string[]
 
-		if (sorted) {
+		if (!changed) {
 			starts = this.starts.slice(0, n)
-			ends = this.ends.slice(0, n)
+			ends = keptEnds
 			hints = this.anyHint ? this.hints.slice(0, n) : null
 			texts = this.texts
 		} else {
-			const order = new Uint32Array(n)
+			let size = count
 
-			for (let i = 0; i < n; i++) {
-				order[i] = i
-			}
-
-			const source = this.starts
-
-			order.sort((a, b) => (source[a] as number) - (source[b] as number) || a - b)
-
-			starts = new Float64Array(n)
-			ends = new Float64Array(n)
-			hints = this.anyHint ? new Uint8Array(n) : null
-			texts = new Array<string>(n)
-
-			for (let i = 0; i < n; i++) {
-				const from = order[i] as number
-
-				starts[i] = source[from] as number
-				ends[i] = this.ends[from] as number
-				texts[i] = this.texts[from] as string
-
-				if (hints !== null) {
-					hints[i] = this.hints[from] as number
+			if (dropped !== null) {
+				for (let i = 0; i < count; i++) {
+					size -= dropped[i] as number
 				}
 			}
+
+			starts = new Float64Array(size)
+			ends = new Float64Array(size)
+			hints = this.anyHint ? new Uint8Array(size) : null
+			texts = new Array<string>(size)
+
+			let to = 0
+
+			for (let i = 0; i < count; i++) {
+				if (dropped !== null && dropped[i] === 1) {
+					continue
+				}
+
+				const from = kept[i] as number
+
+				starts[to] = this.starts[from] as number
+				ends[to] = keptEnds[i] as number
+				texts[to] = this.texts[from] as string
+
+				if (hints !== null) {
+					hints[to] = this.hints[from] as number
+				}
+
+				to++
+			}
+
+			count = size
 		}
 
 		let maxDuration = 0
 
-		for (let i = 0; i < n; i++) {
+		for (let i = 0; i < count; i++) {
 			const d = (ends[i] as number) - (starts[i] as number)
 
 			if (d > maxDuration) {
@@ -142,7 +280,8 @@ export class CueBuilder {
 			ends,
 			texts,
 			hints,
-			maxDuration
+			maxDuration,
+			blockEnds: blockEndsOf(ends)
 		}
 	}
 }
@@ -165,19 +304,48 @@ function lowerBound(starts: Float64Array, value: number): number {
 	return lo
 }
 
+// First index with starts[i] > value.
+function upperBound(starts: Float64Array, value: number): number {
+	let lo = 0
+	let hi = starts.length
+
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1
+
+		if ((starts[mid] as number) <= value) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+
+	return lo
+}
+
 // Fills `out` with the indices of every cue active at `time` (start <= time < end), in start order.
 export function activeCueIndices(store: CueStore, time: number, out: number[] = []): number[] {
 	out.length = 0
 
-	const n = store.starts.length
+	const from = lowerBound(store.starts, time - store.maxDuration)
+	let i = upperBound(store.starts, time) - 1
 
-	for (let i = lowerBound(store.starts, time - store.maxDuration); i < n && (store.starts[i] as number) <= time; i++) {
+	while (i >= from) {
+		const block = i >>> CUE_BLOCK_SHIFT
+
+		if ((store.blockEnds[block] as number) <= time) {
+			i = (block << CUE_BLOCK_SHIFT) - 1
+
+			continue
+		}
+
 		if ((store.ends[i] as number) > time) {
 			out.push(i)
 		}
+
+		i--
 	}
 
-	return out
+	return out.reverse()
 }
 
 // Index of the first cue starting at or after `time`, `size` when none.
@@ -213,7 +381,8 @@ export function applyCueOffset(store: CueStore, offsetSeconds: number): CueStore
 		ends,
 		texts: store.texts,
 		hints: store.hints,
-		maxDuration
+		maxDuration,
+		blockEnds: blockEndsOf(ends)
 	}
 }
 
@@ -226,16 +395,17 @@ export interface NormalizedCueText {
 	drawing: boolean
 }
 
-const NAMED_ENTITIES: Readonly<Record<string, string>> = {
-	amp: "&amp;",
-	lt: "&lt;",
-	gt: ">",
-	nbsp: "&nbsp;",
-	quot: "\"",
-	apos: "'",
-	lrm: "&lrm;",
-	rlm: "&rlm;"
-}
+// A Map, so an entity name never resolves an inherited object key.
+const NAMED_ENTITIES: ReadonlyMap<string, string> = new Map([
+	["amp", "&amp;"],
+	["lt", "&lt;"],
+	["gt", ">"],
+	["nbsp", "&nbsp;"],
+	["quot", "\""],
+	["apos", "'"],
+	["lrm", "&lrm;"],
+	["rlm", "&rlm;"]
+])
 
 // indexOf bounded to `max` chars after `from`, so adversarial runs of openers stay linear.
 function findWithin(text: string, code: number, from: number, max: number): number {
@@ -283,7 +453,7 @@ function overrideDraws(inner: string): boolean {
 }
 
 function decodeEntity(name: string): string | null {
-	const named = NAMED_ENTITIES[name]
+	const named = NAMED_ENTITIES.get(name)
 
 	if (named !== undefined) {
 		return named

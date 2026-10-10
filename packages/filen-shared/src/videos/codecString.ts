@@ -1117,14 +1117,21 @@ export function mp4aCodecString({
 }
 
 // Matroska's legacy A_AAC/<version>/<profile> IDs from before CodecPrivate carried the config.
-const MATROSKA_AAC_PROFILES: Readonly<Record<string, number>> = { MAIN: 1, LC: 2, SSR: 3, LTP: 4, "LC/SBR": 5 }
+// A Map, so a codec ID never resolves an inherited object key.
+const MATROSKA_AAC_PROFILES: ReadonlyMap<string, number> = new Map([
+	["MAIN", 1],
+	["LC", 2],
+	["SSR", 3],
+	["LTP", 4],
+	["LC/SBR", 5]
+])
 
 export function matroskaAacCodecString({ codecId, codecPrivate }: { codecId: string; codecPrivate: Uint8Array | null }): string | null {
 	if (codecPrivate !== null && codecPrivate.length >= 2) {
 		return mp4aCodecString({ objectTypeIndication: 0x40, audioSpecificConfig: codecPrivate })
 	}
 
-	const profile = MATROSKA_AAC_PROFILES[codecId.replace(/^A_AAC\/MPEG[24]\//, "")]
+	const profile = MATROSKA_AAC_PROFILES.get(codecId.replace(/^A_AAC\/MPEG[24]\//, ""))
 
 	return profile === undefined ? null : `mp4a.40.${String(profile)}`
 }
@@ -1169,24 +1176,25 @@ export function dtsCodecString(name: string): string | null {
 // ── Dolby Vision ─────────────────────────────────────────────────────────────
 
 // Dolby Vision sample entries by the base codec's: hvc1 → dvh1, hev1 → dvhe, av01 → dav1, avc1 → dva1,
-// avc3 → dvav. A Matroska track is written as a remux would write it.
-const DOLBY_VISION_ENTRIES: Readonly<Record<string, string>> = {
-	hvc1: "dvh1",
-	hev1: "dvhe",
-	dvh1: "dvh1",
-	dvhe: "dvhe",
-	av01: "dav1",
-	dav1: "dav1",
-	avc1: "dva1",
-	avc3: "dvav",
-	dva1: "dva1",
-	dvav: "dvav"
-}
+// avc3 → dvav. A Matroska track is written as a remux would write it, else under its raw codec ID,
+// so this is a Map: no ID resolves an inherited object key.
+const DOLBY_VISION_ENTRIES: ReadonlyMap<string, string> = new Map([
+	["hvc1", "dvh1"],
+	["hev1", "dvhe"],
+	["dvh1", "dvh1"],
+	["dvhe", "dvhe"],
+	["av01", "dav1"],
+	["dav1", "dav1"],
+	["avc1", "dva1"],
+	["avc3", "dvav"],
+	["dva1", "dva1"],
+	["dvav", "dvav"]
+])
 
 // The Dolby Vision string (dvh1.PP.LL) a decoder must accept when the stream has no base layer that
 // plays without Dolby Vision; null for a sample entry type that carries no Dolby Vision.
 export function dolbyVisionCodecString({ fourcc, profile, level }: { fourcc: string; profile: number; level: number }): string | null {
-	const entry = DOLBY_VISION_ENTRIES[fourcc]
+	const entry = DOLBY_VISION_ENTRIES.get(fourcc)
 
 	return entry === undefined ? null : `${entry}.${dec(profile, 2)}.${dec(level, 2)}`
 }

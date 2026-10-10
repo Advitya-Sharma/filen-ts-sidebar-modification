@@ -36,6 +36,7 @@ vi.mock("@/lib/i18n", async () => await import("@/tests/mocks/i18n"))
 
 import { MaybeEncryptedUniffi_Tags } from "@filen/sdk-rs"
 import {
+	rendersLinkMedia,
 	resolveLinkMedia,
 	resolveReplySenderDisplayName,
 	messageSenderLabel,
@@ -105,6 +106,22 @@ function internalDirectoryLink(): SuccessfulLink {
 
 // Access inner[0] to match the real AnyFile.Linked tuple shape (inner: Readonly<[LinkedFile]>).
 const getFileUrl = vi.fn((file: unknown) => `http://localhost/serve/${(file as { inner: [{ uuid: string }] }).inner[0].uuid}`)
+
+// ─── rendersLinkMedia ────────────────────────────────────────────────────────────
+
+describe("rendersLinkMedia", () => {
+	it("renders every internal link and an external one only as an image or video, building no URL", () => {
+		getFileUrl.mockClear()
+
+		expect(rendersLinkMedia(internalFileLink("video", "clip.mp4"))).toBe(true)
+		expect(rendersLinkMedia(internalFileLink("unknown", "notes.bin"))).toBe(true)
+		expect(rendersLinkMedia(internalDirectoryLink())).toBe(true)
+		expect(rendersLinkMedia(externalLink("image"))).toBe(true)
+		expect(rendersLinkMedia(externalLink("video", { url: null }))).toBe(false)
+		expect(rendersLinkMedia(externalLink("unknown"))).toBe(false)
+		expect(getFileUrl).not.toHaveBeenCalled()
+	})
+})
 
 // ─── resolveLinkMedia ────────────────────────────────────────────────────────────
 

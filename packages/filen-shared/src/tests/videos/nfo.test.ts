@@ -65,6 +65,12 @@ describe("parseNfo", () => {
 		).toEqual(["One"])
 	})
 
+	it("leaves entity names that are inherited object keys literal", () => {
+		expect(parseNfo("<movie><title>Up &valueOf; &toString; &__proto__;</title></movie>")?.title).toBe(
+			"Up &valueOf; &toString; &__proto__;"
+		)
+	})
+
 	it("decodes numeric entities in titles", () => {
 		expect(parseNfo("<movie><title>Tom &amp; Jerry &#169; &#x263A;</title></movie>")?.title).toBe("Tom & Jerry © ☺")
 	})
@@ -165,6 +171,15 @@ describe("parseNfo", () => {
 		expect(() => parseNfo(unterminated)).not.toThrow()
 		expect(parseNfo(entities)?.title?.length).toBeGreaterThan(0)
 		expect(performance.now() - started).toBeLessThan(1000)
+	})
+
+	it("skips runs of declarations without rescanning the rest of the text", () => {
+		const text = `<movie><title>x</title>${"<!a>".repeat(65_000)}</movie>`
+		const started = performance.now()
+
+		expect(parseNfo(text)?.title).toBe("x")
+		expect(performance.now() - started).toBeLessThan(100)
+		expect(parseNfo("<!DOCTYPE movie [<!ENTITY a \"<title>no</title>\">]><movie><title>yes</title></movie>")?.title).toBe("yes")
 	})
 
 	it("never throws on random markup soup", () => {

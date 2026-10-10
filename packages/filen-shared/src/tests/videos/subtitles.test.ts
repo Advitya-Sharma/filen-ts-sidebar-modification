@@ -6,6 +6,9 @@ import {
 	firstCueAtOrAfter,
 	formatAssTime,
 	isMicroDvd,
+	MAX_CONCURRENT_CUES,
+	MAX_CUE_SECONDS,
+	MAX_SUBTITLE_CUES,
 	matroskaAssBlockToCue,
 	matroskaAssBlockToDialogue,
 	normalizeCueText,
@@ -110,6 +113,257 @@ describe("cue store", () => {
 		expect(activeCueIndices(later, 13)).toEqual([1])
 		expect(applyCueOffset(store, 0)).toBe(store)
 	})
+
+	it("shows no cue longer than MAX_CUE_SECONDS", () => {
+		const b = new CueBuilder()
+
+		b.add(10, 3 * 3600, "hours")
+
+		const store = b.finish()
+
+		expect(Array.from(store.ends)).toEqual([10 + MAX_CUE_SECONDS])
+		expect(store.maxDuration).toBe(MAX_CUE_SECONDS)
+		expect(activeCueIndices(store, 11 + MAX_CUE_SECONDS)).toEqual([])
+	})
+
+	it("keeps no more than MAX_CONCURRENT_CUES showing at once, the newest ones", () => {
+		const b = new CueBuilder()
+
+		// Added backwards, so the cap is applied in start order.
+		for (let i = 99_998; i >= 0; i--) {
+			b.add(i / 1000, MAX_CUE_SECONDS, `c${String(i)}`)
+		}
+
+		b.add(MAX_CUE_SECONDS, MAX_CUE_SECONDS + 1, "after")
+
+		const store = b.finish()
+
+		for (const time of [0.0035, 7, 50, 99.998, 300]) {
+			const newest = Math.min(Math.floor(time * 1000 + 1e-6), 99_998)
+
+			expect(activeCueIndices(store, time).map(i => store.texts[i])).toEqual(
+				Array.from(
+					{ length: Math.min(newest + 1, MAX_CONCURRENT_CUES) },
+					(_, k) => `c${String(newest - Math.min(newest, MAX_CONCURRENT_CUES - 1) + k)}`
+				)
+			)
+		}
+
+		expect(activeCueIndices(store, MAX_CUE_SECONDS).map(i => store.texts[i])).toEqual(["after"])
+	})
+
+	// Each case runs as found in real files and again filling every place, so the longest cue has to give way.
+	it.each([4, MAX_CONCURRENT_CUES / 2])("shows two speakers over two signs of %i layers", layers => {
+		const b = new CueBuilder()
+
+		for (let layer = 0; layer < layers; layer++) {
+			b.add(10, 15, `sign A ${String(layer)}`, 8)
+			b.add(10, 15, `sign B ${String(layer)}`, 7)
+		}
+
+		b.add(11, 14, "Speaker 1")
+		b.add(12, 14.5, "Speaker 2")
+
+		const store = b.finish()
+		const at13 = activeCueIndices(store, 13).map(i => store.texts[i])
+
+		expect(at13).toContain("Speaker 1")
+		expect(at13).toContain("Speaker 2")
+		expect(at13.length).toBeLessThanOrEqual(MAX_CONCURRENT_CUES)
+		expect(activeCueIndices(store, 10.5)).toHaveLength(layers * 2)
+	})
+
+	it.each([7, MAX_CONCURRENT_CUES - 1])("keeps dialogue under %i sign layers when another layer starts", layers => {
+		const b = new CueBuilder()
+
+		for (let layer = 0; layer < layers; layer++) {
+			b.add(10, 20, `sign ${String(layer)}`)
+		}
+
+		b.add(11, 14, "Dialogue")
+		b.add(12, 20, "late sign")
+
+		const store = b.finish()
+		const at13 = activeCueIndices(store, 13).map(i => store.texts[i])
+
+		expect(at13).toContain("Dialogue")
+		expect(at13).toContain("late sign")
+		expect(at13.length).toBeLessThanOrEqual(MAX_CONCURRENT_CUES)
+	})
+
+	it.each([8, MAX_CONCURRENT_CUES])("keeps dialogue stored before %i signs starting with it", signs => {
+		const b = new CueBuilder()
+
+		b.add(10, 13, "Dialogue")
+
+		for (let i = 0; i < signs; i++) {
+			b.add(10, 15, `sign ${String(i)}`)
+		}
+
+		const store = b.finish()
+		const at12 = activeCueIndices(store, 12).map(i => store.texts[i])
+
+		expect(at12).toContain("Dialogue")
+		expect(at12).toHaveLength(Math.min(signs + 1, MAX_CONCURRENT_CUES))
+	})
+
+	it("drops a sign starting while MAX_CONCURRENT_CUES shorter lines show", () => {
+		const b = new CueBuilder()
+
+		for (let i = 0; i < MAX_CONCURRENT_CUES; i++) {
+			b.add(10, 12, `line ${String(i)}`)
+		}
+
+		b.add(10.5, 20, "sign")
+
+		const store = b.finish()
+
+		expect(store.texts).toHaveLength(MAX_CONCURRENT_CUES)
+		expect(store.texts).not.toContain("sign")
+		expect(Array.from(store.ends).every(end => end === 12)).toBe(true)
+	})
+
+	it("shows a line starting with MAX_CONCURRENT_CUES others but stored after them", () => {
+		const b = new CueBuilder()
+
+		for (let i = 0; i < MAX_CONCURRENT_CUES; i++) {
+			b.add(10, 15, `sign ${String(i)}`)
+		}
+
+		b.add(10, 13, "Dialogue")
+
+		const store = b.finish()
+
+		expect(store.texts).toHaveLength(MAX_CONCURRENT_CUES)
+		expect(activeCueIndices(store, 12).map(i => store.texts[i])).toContain("Dialogue")
+		expect(Array.from(store.ends).every(end => end > 10)).toBe(true)
+	})
+
+	it("keeps one of identical layered cues, so they take a single place", () => {
+		const b = new CueBuilder()
+
+		for (let layer = 0; layer < 4; layer++) {
+			b.add(10, 15, "Sign", 8)
+			b.add(10, 15, "Other sign")
+		}
+
+		b.add(10, 15, "Sign", 2)
+		b.add(10, 16, "Sign", 8)
+		b.add(11, 14, "Dialogue")
+
+		const store = b.finish()
+
+		expect(store.texts).toEqual(["Sign", "Other sign", "Sign", "Sign", "Dialogue"])
+		expect(Array.from(store.ends)).toEqual([15, 15, 15, 16, 14])
+	})
+
+	it("never has more than MAX_CONCURRENT_CUES active, and shows every kept cue from its start", () => {
+		const random = seeded(11)
+
+		for (let round = 0; round < 20; round++) {
+			const b = new CueBuilder()
+
+			for (let i = 0; i < 3000; i++) {
+				const start = Math.floor(random() * 2000) / 10
+
+				b.add(start, start + random() * 20, String(i % 50), i % 3)
+			}
+
+			const store = b.finish()
+
+			for (let i = 0; i < store.starts.length; i++) {
+				const start = store.starts[i] as number
+				const active = activeCueIndices(store, start)
+
+				expect(store.ends[i]).toBeGreaterThan(start)
+				expect(active.length).toBeLessThanOrEqual(MAX_CONCURRENT_CUES)
+				expect(active).toContain(i)
+			}
+		}
+	})
+
+	it("stays bounded and fast when MAX_SUBTITLE_CUES cues all overlap", () => {
+		const random = seeded(3)
+
+		for (const shape of ["same start", "random"] as const) {
+			const b = new CueBuilder()
+
+			for (let i = 0; i < MAX_SUBTITLE_CUES; i++) {
+				const start = shape === "same start" ? 0 : random() * 60
+
+				b.add(start, 60 + random() * 500, String(i))
+			}
+
+			const started = performance.now()
+			const store = b.finish()
+
+			expect(performance.now() - started).toBeLessThan(1000)
+
+			if (shape === "same start") {
+				expect(store.texts).toHaveLength(MAX_CONCURRENT_CUES)
+			}
+
+			for (let time = 0; time < 600; time += 0.5) {
+				expect(activeCueIndices(store, time).length).toBeLessThanOrEqual(MAX_CONCURRENT_CUES)
+			}
+		}
+	})
+
+	it("finds the same active cues as a full scan, over runs that ended and runs that didn't", () => {
+		const random = seeded(7)
+
+		for (let round = 0; round < 20; round++) {
+			const b = new CueBuilder()
+
+			for (let i = 0; i < 2000; i++) {
+				const start = random() * 600
+				// Mostly short cues, a few long ones reaching over many runs.
+				const length = random() < 0.01 ? random() * 300 : random() * 2
+
+				b.add(start, start + length, String(i))
+			}
+
+			const store = applyCueOffset(b.finish(), round % 2 === 0 ? 0 : -3)
+
+			for (let probe = 0; probe < 200; probe++) {
+				const time = random() * 620 - 10
+				const expected: number[] = []
+
+				for (let i = 0; i < store.starts.length; i++) {
+					if ((store.starts[i] as number) <= time && (store.ends[i] as number) > time) {
+						expected.push(i)
+					}
+				}
+
+				expect(activeCueIndices(store, time)).toEqual(expected)
+			}
+		}
+	})
+
+	it("skips the cues that ended when one long cue keeps the scan reaching back", () => {
+		const b = new CueBuilder()
+
+		b.add(0, MAX_CUE_SECONDS, "long")
+
+		// 1 ms cues packed into the long cue's span.
+		for (let i = 1; i < 100_000; i++) {
+			const start = (i * MAX_CUE_SECONDS) / 100_000
+
+			b.add(start, start + 0.001, "short")
+		}
+
+		const store = b.finish()
+		const out: number[] = []
+		const started = performance.now()
+		let hits = 0
+
+		for (let i = 0; i < 50_000; i++) {
+			hits += activeCueIndices(store, ((i * 7919) % 590_000) / 1000 + 5.0005, out).length
+		}
+
+		expect(hits).toBeGreaterThanOrEqual(50_000)
+		expect(performance.now() - started).toBeLessThan(1000)
+	})
 })
 
 describe("normalizeCueText", () => {
@@ -128,7 +382,8 @@ describe("normalizeCueText", () => {
 		["keep {braces} literal", "srt", "keep {braces} literal"],
 		["<v Roger>hello</v> <c.yellow>x</c> <00:01.000>y", "vtt", "hello x y"],
 		["{\\i1}Hello{\\i0}\\Nworld\\hx", "ass", "Hello\nworld&nbsp;x"],
-		["a<b>c", "ass", "a&lt;b>c"]
+		["a<b>c", "ass", "a&lt;b>c"],
+		["a &toString; b &__proto__; c &valueOf;", "srt", "a &amp;toString; b &amp;__proto__; c &amp;valueOf;"]
 	] as const)("%j (%s)", (input, mode, expected) => {
 		expect(normalizeCueText(input, mode).text).toBe(expected)
 	})
@@ -340,6 +595,22 @@ describe("SMI blank sync", () => {
 
 		expect(Array.from(a.ends)).toEqual([2, 10])
 		expect(Array.from(b.ends)).toEqual([2])
+	})
+
+	it("keeps the first classes only, and an entry of a dropped class still counts as one", () => {
+		let input = "<SAMI><BODY><SYNC Start=0><P Class=keep>first"
+
+		for (let i = 0; i < 1000; i++) {
+			input += `<SYNC Start=${1000 + i * 10}><P Class=c${i}>x${i}`
+		}
+
+		input += "<SYNC Start=20000><P Class=keep>&nbsp;</BODY></SAMI>"
+
+		const tracks = parseSmi(input) ?? []
+
+		expect(tracks).toHaveLength(32)
+		expect(tracks.map(t => t.className)).toEqual(["keep", ...Array.from({ length: 31 }, (_, i) => `c${i}`)])
+		expect(Array.from((tracks[0] as { store: CueStore }).store.ends)).toEqual([20])
 	})
 
 	it("also closes at a trailing blank sync", () => {
@@ -561,8 +832,11 @@ describe("robustness", () => {
 	it("bounds cue count and cue length", () => {
 		let input = ""
 
+		// One cue a second, so none overlap.
 		for (let i = 0; i < 120_000; i++) {
-			input += `00:00:${String(i % 60).padStart(2, "0")},000 --> 00:01:00,000\nx\n\n`
+			const at = `${String(Math.floor(i / 3600)).padStart(2, "0")}:${String(Math.floor(i / 60) % 60).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}`
+
+			input += `${at},000 --> ${at},500\nx\n\n`
 		}
 
 		expect(mustParse(parseSrt(input)).texts.length).toBe(100_000)

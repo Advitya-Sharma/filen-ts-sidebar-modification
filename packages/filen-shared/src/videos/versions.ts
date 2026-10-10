@@ -111,11 +111,20 @@ export interface VersionCandidate {
 	height: number
 }
 
-// Picker order: versions whose names state a resolution first, highest first; the rest by name.
+let fixedCollator: Intl.Collator | null = null
+
+// Picker order: versions whose names state a resolution first, highest first; the rest by name. The first one is
+// the title's identity (movie id, episode override key), so names compare under one fixed locale and then by code
+// unit: every device picks the same primary whatever its own locale.
 export function compareVersionCandidates(a: VersionCandidate, b: VersionCandidate): number {
 	if (a.height !== b.height) {
 		return b.height - a.height
 	}
 
-	return compareVideoNames(a.name, b.name)
+	fixedCollator ??= new Intl.Collator("en", {
+		numeric: true,
+		sensitivity: "base"
+	})
+
+	return fixedCollator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 }

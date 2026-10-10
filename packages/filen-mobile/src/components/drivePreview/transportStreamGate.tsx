@@ -13,9 +13,9 @@ import type { DriveItemFileExtracted } from "@/types"
 // Holds a `.ts`/`.mts` that may be a transport stream, or an `.m2ts` not yet found playable, until a read of its
 // first bytes says what it is, then pins that to its page (pinVerdict), which picks the renderer: the video
 // player for a stream the platform plays, no preview for one it does not (transportStreamOutcome), the text
-// viewer for TypeScript. Only a verdict is kept, so an unplayable stream is read again on a later open. A verdict
-// already known is pinned at once, with no read. The read is one Range request against the HTTP provider, or the
-// local copy's head.
+// viewer for TypeScript. A verdict is kept in the verdict store, an unplayable stream for the session
+// (pinVerdict), so a later open pins either at once, with no read. The read is one Range request against the
+// HTTP provider, or the local copy's head.
 const TransportStreamGate = ({
 	item,
 	fileUrlQuery,

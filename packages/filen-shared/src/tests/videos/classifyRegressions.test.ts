@@ -222,6 +222,30 @@ describe("subtitles named after another title", () => {
 		])
 	})
 
+	it("reads the tokens of a name whose lowercase form is longer", () => {
+		// "İ" lowercases to two code units, so offsets taken from the lowercase stem land one character early.
+		const { library, input } = classifyPaths([
+			{
+				name: "Movies",
+				paths: [
+					"İstanbul (2020)/İstanbul.2020.mkv",
+					"İstanbul (2020)/İstanbul.2020.en.forced.srt",
+					"İzmir (2021)/İzmir (2021) - 1080p.mkv",
+					"İzmir (2021)/İzmir (2021) - 4K.mkv",
+					"İzmir (2021)/İzmir (2021).de.sdh.srt"
+				]
+			}
+		])
+		const tracks = library.videos.map(video =>
+			video.subtitles.map(subtitle => [input.files[subtitle.file]?.name, subtitle.language, subtitle.forced, subtitle.sdh])
+		)
+
+		expect(tracks).toEqual(
+			expect.arrayContaining([[["İstanbul.2020.en.forced.srt", "en", true, false]], [["İzmir (2021).de.sdh.srt", "de", false, true]]])
+		)
+		expect(tracks.filter(subtitles => subtitles[0]?.[0] === "İzmir (2021).de.sdh.srt")).toHaveLength(2)
+	})
+
 	it.each<[string, string | null, boolean, boolean]>([
 		["It.2017.1080p.BluRay.x264-SPARKS", null, false, false],
 		["English", "en", false, false],

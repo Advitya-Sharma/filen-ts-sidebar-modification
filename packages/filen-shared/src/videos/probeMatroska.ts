@@ -725,7 +725,13 @@ interface ChapterCount {
 	atoms: number
 }
 
-function parseAtom(bytes: Uint8Array, atom: EbmlElement, context: EbmlContext): ProbeChapter | null {
+interface ParsedAtom {
+	chapter: ProbeChapter
+	// A hidden or disabled chapter is not shown; one naming another segment plays content this file lacks.
+	shown: boolean
+}
+
+function parseAtom(bytes: Uint8Array, atom: EbmlElement, context: EbmlContext): ParsedAtom | null {
 	let start: number | null = null
 	let end: number | null = null
 	let hidden = false
@@ -766,16 +772,18 @@ function parseAtom(bytes: Uint8Array, atom: EbmlElement, context: EbmlContext): 
 		}
 	}
 
-	// A hidden or disabled chapter is not shown; one naming another segment plays content this file lacks.
-	if (start === null || hidden || !enabled || linked) {
+	if (start === null) {
 		return null
 	}
 
 	return {
-		t: seconds(start / 1e9),
-		...(end !== null && end > start ? { end: seconds(end / 1e9) } : {}),
-		title,
-		...(skipType !== null && skipType <= 7 ? { skipType } : {})
+		chapter: {
+			t: seconds(start / 1e9),
+			...(end !== null && end > start ? { end: seconds(end / 1e9) } : {}),
+			title,
+			...(skipType !== null && skipType <= 7 ? { skipType } : {})
+		},
+		shown: !hidden && enabled && !linked
 	}
 }
 
@@ -815,6 +823,8 @@ function parseChaptersPayload(bytes: Uint8Array, context: EbmlContext): ProbeCha
 	}
 
 	const chapters: ProbeChapter[] = []
+	// Starts of the atoms that are not shown: each still ends the shown chapter before it.
+	const unshown: number[] = []
 
 	for (const atom of ebmlChildren(bytes, chosen.dataStart, chosen.end ?? chosen.dataStart, 3, context)) {
 		if (atom.id !== CHAPTER_ATOM_ID) {
@@ -829,27 +839,63 @@ function parseChaptersPayload(bytes: Uint8Array, context: EbmlContext): ProbeCha
 			break
 		}
 
-		const chapter = parseAtom(bytes, atom, context)
+		const parsed = parseAtom(bytes, atom, context)
 
-		if (chapter !== null) {
-			chapters.push(chapter)
+		if (parsed === null) {
+			continue
+		}
+
+		if (parsed.shown) {
+			chapters.push(parsed.chapter)
+		} else {
+			unshown.push(parsed.chapter.t)
 		}
 	}
 
 	// Sorted before the cap, so a file storing its chapters out of order keeps its earliest ones.
-	return chapters.sort((a, b) => a.t - b.t).slice(0, MAX_CHAPTERS)
+	chapters.sort((a, b) => a.t - b.t)
+	unshown.sort((a, b) => a - b)
+
+	const kept = Math.min(chapters.length, MAX_CHAPTERS)
+	let cursor = 0
+
+	// A chapter without its own end runs to the next shown one; a closer unshown atom, or a shown one
+	// beyond the cap, would be lost from the record, so it becomes the explicit end.
+	for (let i = 0; i < kept; i++) {
+		const chapter = chapters[i] as ProbeChapter
+
+		while (cursor < unshown.length && (unshown[cursor] as number) <= chapter.t) {
+			cursor++
+		}
+
+		if (chapter.end !== undefined) {
+			continue
+		}
+
+		const next = chapters[i + 1]?.t
+		const boundary = unshown[cursor]
+
+		if (boundary !== undefined && (next === undefined || boundary < next)) {
+			chapter.end = boundary
+		} else if (i === kept - 1 && next !== undefined && next > chapter.t) {
+			chapter.end = next
+		}
+	}
+
+	return chapters.slice(0, kept)
 }
 
 // ── Attachments (covers) ────────────────────────────────────────────────────
 
-const COVER_MIMES: Readonly<Record<string, string>> = {
-	jpg: "image/jpeg",
-	jpeg: "image/jpeg",
-	png: "image/png",
-	webp: "image/webp",
-	gif: "image/gif",
-	bmp: "image/bmp"
-}
+// A Map, so a file name's extension never resolves an inherited object key.
+const COVER_MIMES: ReadonlyMap<string, string> = new Map([
+	["jpg", "image/jpeg"],
+	["jpeg", "image/jpeg"],
+	["png", "image/png"],
+	["webp", "image/webp"],
+	["gif", "image/gif"],
+	["bmp", "image/bmp"]
+])
 
 // Whether the cover walk may read [from, to): free inside fetched blocks, else one hop of its budget.
 // False (and the record partial) once the hops are spent.
@@ -961,7 +1007,7 @@ async function findCover(walk: Walk, attachments: EbmlElement): Promise<void> {
 			if (name !== null && slot !== null && result[slot] === null && data !== null) {
 				const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase()
 
-				result[slot] = { ...data, mime: mime ?? COVER_MIMES[extension] ?? "image/*" }
+				result[slot] = { ...data, mime: mime ?? COVER_MIMES.get(extension) ?? "image/*" }
 			}
 		}
 

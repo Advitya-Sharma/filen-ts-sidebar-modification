@@ -232,6 +232,55 @@ describe("mergeSegments", () => {
 		expect(merged).toEqual([seg("intro", 0, 12, "skipType"), seg("commercial", 500, 520, "edl")])
 	})
 
+	it("keeps must-skip cuts whole, joins overlapping ones and trims every other segment around them", () => {
+		const cut = (start: number, end: number): SkipSegment => ({ ...seg("commercial", start, end, "edl"), mustSkip: true })
+		const merged = mergeSegments(
+			[
+				[seg("intro", 590, 605, "chapter"), seg("outro", 900, 1000, "chapter"), seg("recap", 100, 110, "chapter")],
+				[cut(600, 660), cut(650, 700), cut(950, 960), cut(95, 120)],
+				[seg("preview", 300, 400, "skipType")]
+			],
+			1000
+		)
+
+		expect(merged).toEqual([
+			cut(95, 120),
+			seg("preview", 300, 400, "skipType"),
+			seg("intro", 590, 600, "chapter"),
+			cut(600, 700),
+			seg("outro", 900, 950, "chapter"),
+			cut(950, 960),
+			seg("outro", 960, 1000, "chapter")
+		])
+		expect(segmentAction(merged[3] as SkipSegment, "off", 1000)).toBe("autoskip")
+		expect(segmentAction(merged[6] as SkipSegment, "ask", 1000)).toBe("upNext")
+	})
+
+	it("drops a lower-priority segment overlapping a kept one whether or not a cut splits it", () => {
+		const cut: SkipSegment = { ...seg("commercial", 100, 110, "edl"), mustSkip: true }
+		const intro = seg("intro", 0, 90, "skipType")
+		const sources = [[intro], [seg("recap", 50, 150, "chapter"), seg("outro", 85, 200, "chapter")]]
+
+		expect(mergeSegments(sources, 1000)).toEqual([intro])
+		expect(mergeSegments([...sources, [cut]], 1000)).toEqual([intro, cut])
+	})
+
+	it("merges thousands of cuts and segments spanning them in near-linear time", () => {
+		const cuts: SkipSegment[] = Array.from({ length: 3000 }, (_, index) => ({
+			...seg("commercial", index * 10 + 1, index * 10 + 2, "edl"),
+			mustSkip: true
+		}))
+		const spanning = Array.from({ length: 7000 }, () => seg("commercial", 0, 30_000, "edl"))
+		const started = performance.now()
+		const merged = mergeSegments([cuts, spanning], 30_000)
+
+		expect(performance.now() - started).toBeLessThan(1000)
+		expect(merged.length).toBe(3000 + 3001)
+		expect(merged[0]).toEqual(seg("commercial", 0, 1, "edl"))
+		expect(merged[1]).toEqual(cuts[0])
+		expect(merged.at(-1)).toEqual(seg("commercial", 29_992, 30_000, "edl"))
+	})
+
 	it("clamps and drops degenerate segments", () => {
 		expect(
 			mergeSegments([[seg("outro", 90, 200, "chapter"), seg("intro", 5, 5, "chapter"), seg("intro", -5, 3, "chapter")]], 100)

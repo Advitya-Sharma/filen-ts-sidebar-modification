@@ -344,38 +344,137 @@ export function parseEdl(text: string, fps?: number | null): SkipSegment[] {
 
 const SOURCE_PRIORITY: Readonly<Record<SegmentSource, number>> = { skipType: 0, chapter: 1, edl: 2 }
 
-// Merges sources by priority (skipType > chapter > edl): a lower-priority segment overlapping a kept one is dropped.
-// Result is clamped to [0, duration] and sorted by start.
+// First index whose end is after `time` in a start-sorted, non-overlapping list (so its ends ascend too).
+function firstEndingAfter(list: readonly SkipSegment[], time: number): number {
+	let lo = 0
+	let hi = list.length
+
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1
+
+		if ((list[mid] as SkipSegment).end <= time) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+
+	return lo
+}
+
+function mergeByStart(a: readonly SkipSegment[], b: readonly SkipSegment[]): SkipSegment[] {
+	const out: SkipSegment[] = []
+	let i = 0
+	let j = 0
+
+	while (i < a.length || j < b.length) {
+		const left = a[i]
+		const right = b[j]
+
+		if (right === undefined || (left !== undefined && left.start <= right.start)) {
+			out.push(left as SkipSegment)
+			i++
+		} else {
+			out.push(right)
+			j++
+		}
+	}
+
+	return out
+}
+
+// Must-skip cuts are kept whole (overlapping ones joined). The rest merge by priority (skipType > chapter > edl): a
+// lower-priority segment overlapping a kept one is dropped, cuts aside, so a cut never decides what survives; each kept
+// segment is then trimmed around the cuts. Result is clamped to [0, duration] and sorted by start.
 export function mergeSegments(sources: readonly (readonly SkipSegment[])[], duration: number): SkipSegment[] {
+	const cuts: SkipSegment[] = []
 	const all: SkipSegment[] = []
 
 	for (const list of sources) {
 		for (const segment of list) {
-			pushSegment(all, segment, duration)
+			pushSegment(segment.mustSkip === true ? cuts : all, segment, duration)
 		}
+	}
+
+	cuts.sort((a, b) => a.start - b.start)
+
+	const joinedCuts: SkipSegment[] = []
+
+	for (const cut of cuts) {
+		const last = joinedCuts[joinedCuts.length - 1]
+
+		if (last !== undefined && cut.start < last.end) {
+			if (cut.end > last.end) {
+				joinedCuts[joinedCuts.length - 1] = {
+					...last,
+					end: cut.end
+				}
+			}
+
+			continue
+		}
+
+		joinedCuts.push(cut)
 	}
 
 	all.sort((a, b) => SOURCE_PRIORITY[a.source] - SOURCE_PRIORITY[b.source] || a.start - b.start)
 
-	const kept: SkipSegment[] = []
+	// Untrimmed kept segments of the finished priorities, and of the current one: each start-sorted and non-overlapping,
+	// so an overlap is one binary search plus a look at the current priority's last.
+	let accepted: SkipSegment[] = []
+	let group: SkipSegment[] = []
+	let groupPriority = -1
+	const out: SkipSegment[] = joinedCuts.slice()
 
 	for (const segment of all) {
-		let overlaps = false
+		const priority = SOURCE_PRIORITY[segment.source]
 
-		for (const other of kept) {
-			if (segment.start < other.end && other.start < segment.end) {
-				overlaps = true
-
-				break
-			}
+		if (priority !== groupPriority) {
+			accepted = mergeByStart(accepted, group)
+			group = []
+			groupPriority = priority
 		}
 
-		if (!overlaps) {
-			kept.push(segment)
+		const earlier = accepted[firstEndingAfter(accepted, segment.start)]
+		const previous = group[group.length - 1]
+
+		if ((earlier !== undefined && earlier.start < segment.end) || (previous !== undefined && previous.end > segment.start)) {
+			continue
+		}
+
+		group.push(segment)
+
+		let from = segment.start
+
+		for (let c = firstEndingAfter(joinedCuts, from); c < joinedCuts.length; c++) {
+			const cut = joinedCuts[c] as SkipSegment
+
+			if (cut.start >= segment.end) {
+				break
+			}
+
+			if (cut.start > from) {
+				out.push({
+					...segment,
+					start: from,
+					end: cut.start
+				})
+			}
+
+			from = cut.end
+		}
+
+		if (from === segment.start) {
+			out.push(segment)
+		} else if (from < segment.end) {
+			out.push({
+				...segment,
+				start: from
+			})
 		}
 	}
 
-	return kept.sort((a, b) => a.start - b.start)
+	return out.sort((a, b) => a.start - b.start)
 }
 
 // Segment containing `time` (start <= time < end) in a start-sorted, non-overlapping list.

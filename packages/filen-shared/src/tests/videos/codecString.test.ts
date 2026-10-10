@@ -242,6 +242,8 @@ describe("AAC", () => {
 		expect(matroskaAacCodecString({ codecId: "A_AAC/MPEG4/LC/SBR", codecPrivate: null })).toBe("mp4a.40.5")
 		expect(matroskaAacCodecString({ codecId: "A_AAC/MPEG2/MAIN", codecPrivate: null })).toBe("mp4a.40.1")
 		expect(matroskaAacCodecString({ codecId: "A_AAC", codecPrivate: null })).toBeNull()
+		expect(matroskaAacCodecString({ codecId: "A_AAC/MPEG4/toString", codecPrivate: null })).toBeNull()
+		expect(matroskaAacCodecString({ codecId: "A_AAC/MPEG4/__proto__", codecPrivate: null })).toBeNull()
 	})
 })
 
@@ -279,6 +281,7 @@ describe("other audio", () => {
 describe("dolbyVisionCodecString", () => {
 	it("names the Dolby Vision sample entry for the base entry, with two-digit profile and level (Dolby Vision in ISOBMFF §2.2)", () => {
 		expect(dolbyVisionCodecString({ fourcc: "hvc1", profile: 5, level: 6 })).toBe("dvh1.05.06")
+		expect(dolbyVisionCodecString({ fourcc: "toString", profile: 5, level: 6 })).toBeNull()
 		expect(dolbyVisionCodecString({ fourcc: "hev1", profile: 5, level: 9 })).toBe("dvhe.05.09")
 		expect(dolbyVisionCodecString({ fourcc: "av01", profile: 10, level: 1 })).toBe("dav1.10.01")
 		expect(dolbyVisionCodecString({ fourcc: "avc3", profile: 9, level: 5 })).toBe("dvav.09.05")

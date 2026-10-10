@@ -204,17 +204,35 @@ export function verdictFileOf(item: DriveItemFileExtracted): VerdictFile {
 	}
 }
 
+// The verdict a read finding the other answer contradicts.
+const CONTRARY_VERDICT: Readonly<Record<ContentVerdict, ContentVerdict>> = {
+	video: "audio",
+	audio: "video",
+	transportStream: "notTransportStream",
+	notTransportStream: "transportStream"
+}
+
 // Keeps a content read's verdict only where it changes what the file resolves to here (a stream an `.m2ts` was
-// read to be included), or settles a `.ts` that would otherwise be read again: the store holds no confirmations
-// of what the name already said.
+// read to be included), or settles a file the `.ts` gate would otherwise read again: the store holds no
+// confirmations of what the name already said. One that only confirms the name drops a contrary verdict an
+// earlier read left.
 export function recordContentVerdict(file: VerdictFile, verdict: ContentVerdict): void {
+	if (file.name === "") {
+		return
+	}
+
 	if (
-		file.name !== "" &&
-		(verdictChangesKind(file, verdict, previewTypeOf) ||
-			getPreviewType(file.name, file.mime, verdict) !== getPreviewType(file.name, file.mime, null))
+		verdictChangesKind(file, verdict, previewTypeOf) ||
+		getPreviewType(file.name, file.mime, verdict) !== getPreviewType(file.name, file.mime, null) ||
+		((verdict === "transportStream" || verdict === "notTransportStream") &&
+			isUncheckedTransportStream(file.name, file.mime, file.size, null))
 	) {
 		fileKindVerdicts.record(file.uuid, verdict)
+
+		return
 	}
+
+	fileKindVerdicts.forget(file.uuid, CONTRARY_VERDICT[verdict])
 }
 
 // SVG previews render via react-native-svg and RAW camera files via the SDK-extracted JPEG, but

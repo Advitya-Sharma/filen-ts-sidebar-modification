@@ -10,6 +10,8 @@ export interface SmiTrack {
 }
 
 const TAIL_SECONDS = 5
+// Real files carry a handful of classes; every class holds its own cue builder, so entries of any further class are dropped.
+const MAX_SMI_CLASSES = 32
 
 function indexOfCI(text: string, needle: string, from: number): number {
 	const first = needle.charCodeAt(0)
@@ -161,10 +163,14 @@ export function parseSmi(input: string): SmiTrack[] | null {
 	let segmentStart = 0
 	let syncHadEntry = false
 
-	const stateFor = (className: string): ClassState => {
+	const stateFor = (className: string): ClassState | null => {
 		let state = classes.get(className)
 
 		if (state === undefined) {
+			if (classes.size >= MAX_SMI_CLASSES) {
+				return null
+			}
+
 			state = {
 				builder: new CueBuilder(),
 				pendingStart: 0,
@@ -216,11 +222,16 @@ export function parseSmi(input: string): SmiTrack[] | null {
 
 		const state = stateFor(currentClass)
 
+		syncHadEntry = true
+
+		if (state === null) {
+			return
+		}
+
 		closePending(state, syncMs)
 		state.pendingStart = syncMs
 		state.pendingRaw = raw
 		state.hasPending = true
-		syncHadEntry = true
 	}
 
 	let i = 0

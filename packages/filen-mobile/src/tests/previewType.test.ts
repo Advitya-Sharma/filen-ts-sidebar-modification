@@ -528,6 +528,17 @@ describe("content verdicts", () => {
 		expect(fileKindVerdicts.get("source")).toBe("notTransportStream")
 	})
 
+	it("drops a contrary verdict when a later read only confirms the name", () => {
+		fileKindVerdicts.record("film", "audio")
+		fileKindVerdicts.record("capture", "transportStream")
+
+		recordContentVerdict({ uuid: "film", name: "film.mkv", mime: null, size: 10 }, "video")
+		recordContentVerdict({ uuid: "capture", name: "capture.ts", mime: null, size: 2 * MIB }, "video")
+
+		expect(fileKindVerdicts.get("film")).toBeUndefined()
+		expect(fileKindVerdicts.get("capture")).toBe("transportStream")
+	})
+
 	it("reads a drive item's verdict from the store unless one is passed", () => {
 		fileKindVerdicts.record("held", "audio")
 

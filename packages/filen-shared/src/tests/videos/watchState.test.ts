@@ -1486,7 +1486,7 @@ describe("compactWatchState", () => {
 	})
 
 	it("tombstones stale unplayed progress, then superseded progress, then whole records, against the document's own clock", () => {
-		// The document's newest stamp is a day before NOW; wall clocks play no part.
+		// The document's newest time is a day before NOW; the local clock plays no part.
 		const ref = NOW - DAY
 		const items: Record<string, ItemRec> = {
 			"s:stale": progress({
@@ -1575,6 +1575,94 @@ describe("compactWatchState", () => {
 		).toBe(tight.doc)
 	})
 
+	it("deletes progress alone only where no offset or unknown register would go with it", () => {
+		const ref = NOW - DAY
+		const offsetFirst = (rec: ItemRec | undefined, t: number): ItemRec =>
+			withSubtitleOffset({
+				rec,
+				stamp: stamp(t),
+				subMs: 1500
+			})
+		const superseded = (t: number, before?: (rec: ItemRec | undefined, t: number) => ItemRec): ItemRec =>
+			withCompletion({
+				rec: withProgress({
+					rec: before?.(undefined, t - 1),
+					stamp: stamp(t),
+					pos: 3500,
+					dur: 3600,
+					lp: hlcPhysicalMs(t),
+					uuid: "file-1",
+					size: 1000
+				}),
+				stamp: stamp(t + 1)
+			})
+		const staleAt = ref - STALE_PROGRESS_MS - 10 * DAY
+		const stale = (lpMs: number, before: (rec: ItemRec | undefined, t: number) => ItemRec): ItemRec =>
+			withProgress({
+				rec: before(undefined, at(lpMs) - 1),
+				stamp: stamp(at(lpMs)),
+				pos: 100,
+				dur: 3600,
+				lp: lpMs,
+				uuid: "file-1",
+				size: 1000
+			})
+		const items: Record<string, ItemRec> = {
+			// Oldest candidates of each pass, but their offset (or a newer client's register) predates the progress
+			"s:offset": superseded(at(ref - 5 * DAY), offsetFirst),
+			"s:unknown": superseded(at(ref - 5 * DAY) + 10, (rec, t) => ({
+				...rec,
+				future: {
+					t,
+					d: "dev-b",
+					v: 1
+				}
+			})),
+			"s:staleOffset": stale(staleAt - DAY, offsetFirst),
+			// An older hide and an unplayed, uncounted watched register are inert
+			"s:staleInert": stale(staleAt, (rec, t) =>
+				hideFromContinueWatching({
+					rec: markUnwatched({
+						rec,
+						stamp: stamp(t - 1)
+					}),
+					stamp: stamp(t)
+				})
+			),
+			"s:plain": superseded(at(ref - 3 * DAY)),
+			"s:recent": progress({
+				t: at(ref),
+				pos: 100,
+				lp: ref
+			})
+		}
+		const doc = docWith(items)
+		const result = compactWatchState({
+			doc,
+			limitBytes: sizeOf(doc) - 1
+		})
+
+		expect(result.doc.items["s:staleOffset"]).toBe(items["s:staleOffset"])
+		expect(result.doc.items["s:staleInert"]).toEqual({
+			x: {
+				t: at(staleAt),
+				d: "dev-a",
+				e: ref
+			}
+		})
+
+		const superseding = compactWatchState({
+			doc: result.doc,
+			limitBytes: result.bytes - 1
+		})
+
+		expect(superseding.doc.items["s:offset"]).toBe(items["s:offset"])
+		expect(superseding.doc.items["s:unknown"]).toBe(items["s:unknown"])
+		expect(superseding.doc.items["s:plain"]?.p).toBeUndefined()
+		expect(superseding.doc.items["s:plain"]?.w).toEqual(items["s:plain"]?.w)
+		expect(superseding.doc.items["s:recent"]).toBe(items["s:recent"])
+	})
+
 	it("expires tombstone-only records after the TTL measured on the document's own clock", () => {
 		const doc = docWith({
 			"s:live": progress({
@@ -1604,6 +1692,146 @@ describe("compactWatchState", () => {
 				}).doc.items
 			)
 		).toEqual(["s:live", "s:kept"])
+	})
+
+	it("keeps young tombstones when a lone time runs far ahead or stamps were carried ahead of the wall clock", () => {
+		const young = {
+			x: {
+				t: 1,
+				d: "dev-a",
+				e: NOW - 10 * DAY
+			}
+		}
+		const kept = (items: Record<string, ItemRec>): string[] =>
+			Object.keys(
+				compactWatchState({
+					doc: docWith({
+						"s:young": young,
+						...items
+					})
+				}).doc.items
+			)
+		const future = NOW + 10 * 365 * DAY
+		const live = progress({
+			t: at(NOW),
+			pos: 100
+		})
+
+		// One record from a clock years ahead.
+		expect(
+			kept({
+				"s:live": live,
+				"s:fast": progress({
+					t: at(future),
+					pos: 100,
+					lp: future,
+					d: "dev-fast"
+				})
+			})
+		).toEqual(["s:young", "s:live", "s:fast"])
+		// A tombstone decided by such a clock.
+		expect(
+			kept({
+				"s:live": live,
+				"s:fastTombstone": {
+					x: {
+						t: at(future),
+						d: "dev-fast",
+						e: future
+					}
+				}
+			})
+		).toEqual(["s:young", "s:live", "s:fastTombstone"])
+		// Honest clocks that observed a far-ahead stamp write stamps up to MAX_CLOCK_SKEW_MS ahead, but play at the wall clock.
+		expect(
+			kept({
+				"s:a": progress({
+					t: at(NOW + 300 * DAY),
+					pos: 100
+				}),
+				"s:b": progress({
+					t: at(NOW + 300 * DAY) + 1,
+					pos: 200,
+					d: "dev-b"
+				})
+			})
+		).toEqual(["s:young", "s:a", "s:b"])
+		// Corroborated wall-clock times still expire it.
+		expect(
+			kept({
+				"s:a": progress({
+					t: at(NOW + 90 * DAY),
+					pos: 100,
+					lp: NOW + 90 * DAY
+				}),
+				"s:b": progress({
+					t: at(NOW + 89 * DAY),
+					pos: 200,
+					lp: NOW + 89 * DAY,
+					d: "dev-b"
+				})
+			})
+		).toEqual(["s:a", "s:b"])
+	})
+
+	it("keeps young tombstones when a device no older time names runs far ahead, however many items it plays", () => {
+		const young = {
+			x: {
+				t: 1,
+				d: "dev-a",
+				e: NOW - 10 * DAY
+			}
+		}
+		const kept = (items: Record<string, ItemRec>): string[] =>
+			Object.keys(
+				compactWatchState({
+					doc: docWith({
+						"s:young": young,
+						...items
+					})
+				}).doc.items
+			)
+		const future = NOW + 10 * 365 * DAY
+		const fastPlays = (count: number, writer: (i: number) => string): Record<string, ItemRec> =>
+			Object.fromEntries(
+				Array.from({ length: count }, (_, i) => [
+					`s:fast${i}`,
+					progress({
+						t: at(future + i * DAY),
+						pos: 100,
+						lp: future + i * DAY,
+						d: writer(i)
+					})
+				])
+			)
+		const honest = {
+			"s:a": progress({
+				t: at(NOW - 5 * DAY),
+				pos: 100,
+				lp: NOW - 5 * DAY,
+				d: "dev-a.tab1"
+			}),
+			"s:b": progress({
+				t: at(NOW),
+				pos: 100,
+				d: "dev-a.tab2"
+			})
+		}
+
+		// Many plays from the fast device, across its tabs, never outvote the other device.
+		expect(kept({ ...honest, ...fastPlays(5, i => `dev-fast.tab${i}`) })).toContain("s:young")
+		// A device seen before moves the clock: back after a pause longer than the TTL, or (indistinguishably, from the
+		// document alone) its clock jumped ahead.
+		expect(
+			kept({
+				...honest,
+				...fastPlays(2, () => "dev-a.tab3")
+			})
+		).not.toContain("s:young")
+		// So do two devices that agree.
+		expect(kept({ ...honest, ...fastPlays(2, i => `dev-${i}.tab`) })).not.toContain("s:young")
+		// A lone device's plays are the only clock there is.
+		expect(kept(fastPlays(2, () => "dev-fast.tab"))).not.toContain("s:young")
 	})
 
 	it("prunes registers covered by a tombstone in every merge order and keeps later writes", () => {

@@ -668,5 +668,44 @@ describe("useDrivePreviewStore.open — navigation identity", () => {
 			expect(useDrivePreviewStore.getState().currentItem).toMatchObject({ unplayable: true })
 			expect(useDrivePreviewStore.getState().currentItem).not.toHaveProperty("verdict")
 		})
+
+		it("opens a stream it found unplayable before straight to its no-preview page, with no read", () => {
+			const stream = sized("bdav-again", "capture.ts", 4n * 1024n * 1024n)
+			const open = () =>
+				useDrivePreviewStore.getState().open({
+					items: [stream],
+					initialItem: {
+						type: "drive",
+						data: { item: (stream as Extract<GalleryItemTagged, { type: "drive" }>).data, drivePath: makeDrivePath() }
+					}
+				})
+
+			open()
+			useDrivePreviewStore.getState().pinVerdict("bdav-again", "unplayable")
+			useDrivePreviewStore.getState().endSession()
+			open()
+
+			expect(useDrivePreviewStore.getState().items).toHaveLength(1)
+			expect(useDrivePreviewStore.getState().currentItem).toMatchObject({ unplayable: true })
+		})
+
+		// iOS: a stream reads as unknown, so the file stays out of the media gallery.
+		it("opens a file a read found to be a stream the platform does not play alone, as on its first open", () => {
+			const stream = sized("ios-stream", "capture.ts", 4n * 1024n * 1024n)
+
+			fileKindVerdicts.record("ios-stream", "transportStream")
+
+			useDrivePreviewStore.getState().open({
+				items: [stream, makeDriveGalleryItem("photo", "photo.jpg")],
+				initialItem: {
+					type: "drive",
+					data: { item: (stream as Extract<GalleryItemTagged, { type: "drive" }>).data, drivePath: makeDrivePath() }
+				}
+			})
+
+			expect(useDrivePreviewStore.getState().items).toHaveLength(1)
+			expect(useDrivePreviewStore.getState().currentItem).toMatchObject({ verdict: "transportStream" })
+			expect(mockRouterPush).toHaveBeenCalledTimes(1)
+		})
 	})
 })

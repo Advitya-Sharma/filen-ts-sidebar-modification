@@ -150,6 +150,26 @@ describe("legacy hints and malformed UTF-16", () => {
 		expect(decoded?.text.startsWith("1\n00:00:01,000")).toBe(true)
 	})
 
+	it("drops a UTF-8 BOM in front of a legacy payload", () => {
+		// cp1250 "ž" (0x9E) is not UTF-8, so the BOM'd bytes fall back to the language's codepage.
+		const body = [..."{1}{25}"].map(c => c.charCodeAt(0))
+		const decoded = decodeSubtitleBytes(Uint8Array.from([0xef, 0xbb, 0xbf, ...body, 0x9e]), { languageHint: "cs" })
+
+		expect(decoded).toEqual({ text: "{1}{25}ž", encoding: "windows-1250", confident: false })
+	})
+
+	it("drops a UTF-8 BOM in front of a payload forced to a legacy codepage", () => {
+		const body = [..."{1}{25}Ahoj"].map(c => c.charCodeAt(0))
+		const bytes = Uint8Array.from([0xef, 0xbb, 0xbf, ...body, 0x9e])
+
+		expect(decodeSubtitleBytes(bytes, { encoding: "windows-1250" })).toEqual({
+			text: "{1}{25}Ahojž",
+			encoding: "windows-1250",
+			confident: false
+		})
+		expect(decodeSubtitleBytes(Uint8Array.from([0xef, 0xbb, 0xbf, ...body]), { encoding: "UTF-8" })?.text).toBe("{1}{25}Ahoj")
+	})
+
 	it("flags a malformed BOM'd UTF-16 payload as not confident", () => {
 		const decoded = decodeSubtitleBytes(Uint8Array.from([0xff, 0xfe, 0x00, 0xd8, 0x41, 0x00]))
 

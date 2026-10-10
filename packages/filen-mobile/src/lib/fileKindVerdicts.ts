@@ -19,16 +19,28 @@ export type FileKindVerdictReader = {
 	get: (uuid: string) => ContentVerdict | undefined
 }
 
+// The files a change touched, or null for any file (a reset).
+type AnyListener = (changed: readonly string[] | null) => void
+
+export type FileKindVerdictWatch = {
+	subscribe: (listener: () => void) => () => void
+	getSnapshot: () => FileKindVerdictReader
+}
+
 class FileKindVerdicts {
 	// Most recently written last.
 	private readonly verdicts = new Map<string, StoredVerdict>()
 	// Per file, so a change re-renders only the rows showing that file.
 	private readonly fileListeners = new Map<string, Set<() => void>>()
-	private readonly anyListeners = new Set<() => void>()
+	private readonly anyListeners = new Set<AnyListener>()
 	private storage: FileKindVerdictStorage | null = null
 	// Set at logout and never cleared: the bundle reloads, and nothing may be written for the outgoing
 	// account after the kv wipe.
 	private locked = false
+	// Settled once the kv load has: a forget before then has to reach the row it loads.
+	private loaded = false
+	// What forget() dropped before the kv load landed, per file: the loaded row holding it is dropped too.
+	private readonly forgottenBeforeLoad = new Map<string, ContentVerdict>()
 	// A new object per change, so a reader held by a component tells it the store changed.
 	private reader: FileKindVerdictReader = this.newReader()
 
@@ -38,7 +50,7 @@ class FileKindVerdicts {
 		}
 	}
 
-	// `uuids` null: any file (a load, a reset).
+	// `uuids` null: any file (a reset).
 	private changed(uuids: readonly string[] | null): void {
 		this.reader = this.newReader()
 
@@ -61,7 +73,7 @@ class FileKindVerdicts {
 		}
 
 		for (const listener of this.anyListeners) {
-			listener()
+			listener(uuids)
 		}
 	}
 
@@ -93,32 +105,54 @@ class FileKindVerdicts {
 				}
 
 				const stored: (readonly [string, StoredVerdict])[] = []
+				const forgotten = this.forgottenBeforeLoad
+
+				this.loaded = true
 
 				for (const [uuid, value] of entries) {
-					if (isStoredVerdict(value)) {
+					if (isStoredVerdict(value) && forgotten.get(uuid) !== value.v) {
 						stored.push([uuid, value])
-					} else {
+					} else if (!this.verdicts.has(uuid)) {
+						// A row this session saved since stays.
 						this.persist(kv => kv.remove(uuid))
 					}
 				}
 
 				const { keep, drop } = boundedVerdicts(stored, [...this.verdicts.entries()], VERDICT_MAX_RECORDS)
+				const before = new Map(this.verdicts)
+				const changed: string[] = []
 
 				this.verdicts.clear()
 
 				for (const [uuid, value] of keep) {
 					this.verdicts.set(uuid, value)
+
+					if (before.get(uuid)?.v !== value.v) {
+						changed.push(uuid)
+					}
+
+					before.delete(uuid)
 				}
 
 				for (const uuid of drop) {
 					this.persist(kv => kv.remove(uuid))
 				}
 
-				if (keep.length > 0) {
-					this.changed(null)
+				// What this session wrote and the bound evicted.
+				for (const uuid of before.keys()) {
+					changed.push(uuid)
+				}
+
+				forgotten.clear()
+
+				if (changed.length > 0) {
+					this.changed(changed)
 				}
 			})
 			.catch((error: unknown) => {
+				this.loaded = true
+				this.forgottenBeforeLoad.clear()
+
 				target.onError("verdicts not read", error)
 			})
 	}
@@ -137,6 +171,8 @@ class FileKindVerdicts {
 			at: Date.now()
 		}
 
+		this.forgottenBeforeLoad.delete(uuid)
+
 		this.verdicts.delete(uuid)
 		this.verdicts.set(uuid, value)
 		this.persist(kv => kv.save(uuid, value))
@@ -149,6 +185,32 @@ class FileKindVerdicts {
 		}
 
 		this.changed(oldest === undefined ? [uuid] : [uuid, oldest])
+	}
+
+	// Drops the file's verdict where it is `verdict`: a later read contradicted it with what the name already says.
+	public forget(uuid: string, verdict: ContentVerdict): void {
+		if (this.locked) {
+			return
+		}
+
+		if (!this.loaded) {
+			this.forgottenBeforeLoad.delete(uuid)
+			this.forgottenBeforeLoad.set(uuid, verdict)
+
+			const oldest = this.forgottenBeforeLoad.size > VERDICT_MAX_RECORDS ? this.forgottenBeforeLoad.keys().next().value : undefined
+
+			if (oldest !== undefined) {
+				this.forgottenBeforeLoad.delete(oldest)
+			}
+		}
+
+		if (this.verdicts.get(uuid)?.v !== verdict) {
+			return
+		}
+
+		this.verdicts.delete(uuid)
+		this.persist(kv => kv.remove(uuid))
+		this.changed([uuid])
 	}
 
 	public subscribeFile(uuid: string, listener: () => void): () => void {
@@ -177,7 +239,7 @@ class FileKindVerdicts {
 		}
 	}
 
-	public subscribeAny(listener: () => void): () => void {
+	public subscribeAny(listener: AnyListener): () => void {
 		this.anyListeners.add(listener)
 
 		return () => {
@@ -189,6 +251,30 @@ class FileKindVerdicts {
 		return this.reader
 	}
 
+	// A useSyncExternalStore source whose reader is replaced only after a change `affects` says touches the
+	// caller (a reset always does): a list filtered by its files' kinds filters again only for its own files.
+	public watch(affects: (changed: readonly string[]) => boolean): FileKindVerdictWatch {
+		let reader = this.reader
+
+		return {
+			subscribe: listener => {
+				// A change while unsubscribed is not known to be another file's.
+				if (reader !== this.reader) {
+					reader = this.reader
+				}
+
+				return this.subscribeAny(changed => {
+					if (changed === null || affects(changed)) {
+						reader = this.reader
+
+						listener()
+					}
+				})
+			},
+			getSnapshot: () => reader
+		}
+	}
+
 	public size(): number {
 		return this.verdicts.size
 	}
@@ -198,6 +284,7 @@ class FileKindVerdicts {
 		this.locked = true
 		this.storage = null
 		this.verdicts.clear()
+		this.forgottenBeforeLoad.clear()
 		this.changed(null)
 	}
 }

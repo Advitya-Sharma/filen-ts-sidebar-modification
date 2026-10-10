@@ -58,7 +58,25 @@ const MAX_FIELD_CHARS = 64 * 1024
 const MAX_LIST = 64
 const MAX_ITEM_CHARS = 256
 
-const XML_ENTITIES: Readonly<Record<string, string>> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'" }
+// A Map, so an entity name never resolves an inherited object key.
+const XML_ENTITIES: ReadonlyMap<string, string> = new Map([
+	["amp", "&"],
+	["lt", "<"],
+	["gt", ">"],
+	["quot", "\""],
+	["apos", "'"]
+])
+
+// First index of the char `code` in [from, to), else -1.
+function findBefore(text: string, code: number, from: number, to: number): number {
+	for (let i = from; i < to; i++) {
+		if (text.charCodeAt(i) === code) {
+			return i
+		}
+	}
+
+	return -1
+}
 
 // Entities are bounded (`&...;` within 10 chars); unknown ones stay literal. No DTD, so nothing can expand.
 function decodeXmlText(value: string): string {
@@ -89,7 +107,7 @@ function decodeXmlText(value: string): string {
 		if (end !== -1) {
 			const name = value.slice(at + 1, end)
 
-			decoded = XML_ENTITIES[name]
+			decoded = XML_ENTITIES.get(name)
 
 			if (decoded === undefined && name.charCodeAt(0) === 35) {
 				const hex = name.charCodeAt(1) === 120
@@ -366,12 +384,13 @@ export function parseNfo(input: string): NfoData | null {
 		}
 
 		if (text.startsWith("<!", lt)) {
-			// DOCTYPE, possibly with an internal subset in brackets; skipped, never interpreted.
-			const bracket = text.indexOf("[", lt)
+			// DOCTYPE, possibly with an internal subset in brackets; skipped, never interpreted. A subset opens before
+			// the first `>`, so the bracket is looked for only up to it and runs of `<!x>` stay linear.
 			const gt = text.indexOf(">", lt)
-			const end = bracket !== -1 && (gt === -1 || bracket < gt) ? text.indexOf("]>", bracket) : gt
+			const bracket = findBefore(text, 91, lt + 2, gt === -1 ? limit : gt)
+			const end = bracket === -1 ? gt : text.indexOf("]>", bracket)
 
-			i = end === -1 ? limit : end + (bracket !== -1 && (gt === -1 || bracket < gt) ? 2 : 1)
+			i = end === -1 ? limit : end + (bracket === -1 ? 1 : 2)
 
 			continue
 		}

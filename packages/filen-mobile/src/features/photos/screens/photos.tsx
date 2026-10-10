@@ -22,7 +22,7 @@ import { useTranslation } from "react-i18next"
 import Header from "@/features/photos/components/photosHeader"
 import Photo from "@/features/photos/components/photoItem"
 import DateRange from "@/features/photos/components/dateRange"
-import { isPhotoGridItem } from "@/features/photos/utils"
+import { holdsAnyOf, isPhotoGridItem } from "@/features/photos/utils"
 import { LazyWrapper } from "@/components/lazyWrapper"
 import logger from "@/lib/logger"
 import { useFileKindVerdicts } from "@/hooks/useFileKindVerdict"
@@ -62,15 +62,11 @@ const Photos = () => {
 	// mount before the destination has been resolved.
 	const destinationUnavailable = config.enabled && config.remoteDir !== null && !destination.loading && !destination.usable
 
-	// Filtered again, with no refetch, when a content verdict changes what a file is.
-	const verdicts = useFileKindVerdicts()
-
-	const items = driveItemsQuery.data
-		? itemSorter.sortItems(
-				driveItemsQuery.data.filter(item => isPhotoGridItem(item, verdicts.get(item.data.uuid) ?? null)),
-				"captureDesc"
-			)
-		: []
+	const listing = driveItemsQuery.data
+	// Sorted once per listing; a content verdict that changes what one of its files is only filters it again.
+	const sorted = listing ? itemSorter.sortItems(listing, "captureDesc") : []
+	const verdicts = useFileKindVerdicts(changed => holdsAnyOf(listing, changed))
+	const items = sorted.filter(item => isPhotoGridItem(item, verdicts.get(item.data.uuid) ?? null))
 
 	return (
 		<Fragment>

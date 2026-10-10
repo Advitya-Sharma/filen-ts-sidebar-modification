@@ -147,6 +147,72 @@ describe("FileKindVerdicts", () => {
 		expect(onAny).toHaveBeenCalledTimes(2)
 	})
 
+	it("tells any-listeners which files a load changed, leaving out what this session already held", async () => {
+		const store = new FileKindVerdicts()
+		const { storage, loaded } = memoryStorage([
+			["same", { v: "audio", at: 1 }],
+			["fresh", { v: "video", at: 2 }]
+		])
+		const onAny = vi.fn()
+		const onSame = vi.fn()
+
+		store.attach(storage)
+		store.record("same", "audio")
+		store.subscribeAny(onAny)
+		store.subscribeFile("same", onSame)
+
+		await loaded()
+
+		expect(onAny).toHaveBeenCalledTimes(1)
+		expect(onAny).toHaveBeenCalledWith(["fresh"])
+		expect(onSame).not.toHaveBeenCalled()
+	})
+
+	it("replaces a watch's reader only for a change it is affected by, or a reset", () => {
+		const store = new FileKindVerdicts()
+		const watch = store.watch(changed => changed.includes("mine"))
+		const listener = vi.fn()
+		const initial = watch.getSnapshot()
+
+		watch.subscribe(listener)
+		store.record("other", "audio")
+
+		expect(listener).not.toHaveBeenCalled()
+		expect(watch.getSnapshot()).toBe(initial)
+
+		store.record("mine", "audio")
+
+		expect(listener).toHaveBeenCalledTimes(1)
+		expect(watch.getSnapshot()).not.toBe(initial)
+		expect(watch.getSnapshot().get("mine")).toBe("audio")
+
+		const afterMine = watch.getSnapshot()
+
+		store.clearForLogout()
+
+		expect(listener).toHaveBeenCalledTimes(2)
+		expect(watch.getSnapshot()).not.toBe(afterMine)
+	})
+
+	it("takes up a change made between a watch's creation and its subscription", () => {
+		const store = new FileKindVerdicts()
+		const watch = store.watch(() => false)
+		const created = watch.getSnapshot()
+
+		store.record("mine", "audio")
+
+		watch.subscribe(vi.fn())
+
+		const subscribed = watch.getSnapshot()
+
+		expect(subscribed).not.toBe(created)
+		expect(subscribed).toBe(store.getReader())
+
+		store.record("other", "audio")
+
+		expect(watch.getSnapshot()).toBe(subscribed)
+	})
+
 	it("hands out a new reader after each change", () => {
 		const store = new FileKindVerdicts()
 		const before = store.getReader()
@@ -178,6 +244,59 @@ describe("FileKindVerdicts", () => {
 
 		expect(store.size()).toBe(0)
 		expect(saved.has("c")).toBe(false)
+	})
+
+	it("forgets a verdict only where it holds the contradicted one", () => {
+		const store = new FileKindVerdicts()
+		const { storage, removed } = memoryStorage()
+		const listener = vi.fn()
+
+		store.attach(storage)
+		store.record("a", "audio")
+		store.record("b", "transportStream")
+		store.subscribeFile("a", listener)
+		store.forget("a", "audio")
+		store.forget("b", "audio")
+
+		expect(store.get("a")).toBeUndefined()
+		expect(store.get("b")).toBe("transportStream")
+		expect(removed).toEqual(["a"])
+		expect(listener).toHaveBeenCalledTimes(1)
+	})
+
+	it("drops a loaded row a forget before the load contradicted, keeping what the session wrote since", async () => {
+		const store = new FileKindVerdicts()
+		const { storage, removed, loaded } = memoryStorage([
+			["contradicted", { v: "audio", at: 1 }],
+			["other", { v: "video", at: 2 }],
+			["rewritten", { v: "audio", at: 3 }]
+		])
+
+		store.forget("contradicted", "audio")
+		store.forget("other", "audio")
+		store.attach(storage)
+		store.forget("rewritten", "audio")
+		store.record("rewritten", "audio")
+
+		await loaded()
+
+		expect(store.get("contradicted")).toBeUndefined()
+		expect(store.get("other")).toBe("video")
+		expect(store.get("rewritten")).toBe("audio")
+		expect(removed).toEqual(["contradicted"])
+	})
+
+	it("keeps a row the session saved while the load was pending, even when the loaded one is malformed", async () => {
+		const store = new FileKindVerdicts()
+		const { storage, removed, loaded } = memoryStorage([["a", { v: 7, at: 1 }]])
+
+		store.attach(storage)
+		store.record("a", "audio")
+
+		await loaded()
+
+		expect(store.get("a")).toBe("audio")
+		expect(removed).toEqual([])
 	})
 
 	it("reports a failed save through the storage", async () => {

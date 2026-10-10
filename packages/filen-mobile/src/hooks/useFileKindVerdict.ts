@@ -18,14 +18,13 @@ export function useFileKindVerdict(uuid: string | null): ContentVerdict | undefi
 }
 
 /**
- * Every verdict, as a reader that is a new object after each change: for a list filtered by its files' kinds,
- * which then filters again only when a verdict changed.
+ * Every verdict, as a reader that is a new object only after a change `affects` says touches the caller's files
+ * (fileKindVerdicts.watch): for a list filtered by its files' kinds, which then filters again only for its own.
  */
-export function useFileKindVerdicts(): FileKindVerdictReader {
-	return useSyncExternalStore(
-		listener => fileKindVerdicts.subscribeAny(listener),
-		() => fileKindVerdicts.getReader()
-	)
+export function useFileKindVerdicts(affects: (changed: readonly string[]) => boolean): FileKindVerdictReader {
+	const watch = fileKindVerdicts.watch(affects)
+
+	return useSyncExternalStore(watch.subscribe, watch.getSnapshot)
 }
 
 export default useFileKindVerdict

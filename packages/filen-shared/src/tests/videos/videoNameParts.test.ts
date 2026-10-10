@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
 	commonStemPrefix,
 	compareVersionCandidates,
@@ -281,6 +281,33 @@ describe("versions", () => {
 		].sort(compareVersionCandidates)
 
 		expect(sorted.map(entry => entry.name)).toEqual(["Movie 2160p", "Movie 720p", "Movie 9", "Movie 10", "Movie a", "Movie b"])
+	})
+
+	it("orders versions the same on every device locale, and names equal but for case by code unit", async () => {
+		const names = ["Film (2010) - Director's Cut", "Film (2010) - Chinese dub", "Film (2010) - aa", "Film (2010) - b"]
+		const Collator = Intl.Collator
+
+		vi.resetModules()
+		vi.stubGlobal("Intl", {
+			...Intl,
+			Collator: function (locales?: string | string[], options?: Intl.CollatorOptions) {
+				return new Collator(locales ?? "cs", options)
+			}
+		})
+
+		try {
+			const { compareVersionCandidates: underCzech } = await import("../../videos/versions")
+			const order = (list: string[]): string[] =>
+				list
+					.map(name => ({ name, height: 0 }))
+					.sort(underCzech)
+					.map(entry => entry.name)
+
+			expect(order(names)).toEqual(["Film (2010) - aa", "Film (2010) - b", "Film (2010) - Chinese dub", "Film (2010) - Director's Cut"])
+			expect(order(["film b", "Film B"])).toEqual(order(["Film B", "film b"]))
+		} finally {
+			vi.unstubAllGlobals()
+		}
 	})
 })
 
