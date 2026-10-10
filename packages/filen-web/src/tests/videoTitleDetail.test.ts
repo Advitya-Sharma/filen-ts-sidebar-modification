@@ -44,7 +44,6 @@ import { VideoIndexEngine, type SnapshotStore } from "@/workers/videoIndex/engin
 import type {
 	VideoExtraView,
 	VideoHomeItem,
-	VideoIndexUpdate,
 	VideoPartView,
 	VideoSeasonView,
 	VideoTitleView,
@@ -52,6 +51,7 @@ import type {
 } from "@/workers/videoIndex/view.logic"
 import { episodeItem, movieItem, progress, title, watched } from "@/tests/support/videoHome"
 import { FakeDrive, hexUuid } from "@/tests/support/videoDrive"
+import { memoryCatalogStore, trackCatalogTitles } from "@/tests/support/videoIndex"
 
 const NOW = Date.UTC(2026, 9, 1, 20, 0)
 
@@ -467,7 +467,6 @@ describe("manual corrections", () => {
 describe("corrections in the library index", () => {
 	let drive: FakeDrive
 	let titles: Map<string, VideoTitleView>
-	let home: Map<string, VideoHomeItem>
 
 	const store: SnapshotStore = {
 		read: () => Promise.resolve([null, null]),
@@ -490,31 +489,13 @@ describe("corrections in the library index", () => {
 			driveRoot: () => null,
 			getFile: uuid => Promise.resolve(drive.files.get(uuid)),
 			store,
+			catalogStore: memoryCatalogStore(),
 			now: () => Date.now(),
 			yieldSlice: () => Promise.resolve()
 		})
 
 		engine.onSocketEvent({ type: "authSuccess" })
-		engine.subscribe((update: VideoIndexUpdate) => {
-			const target = update.type === "titles" ? titles : update.type === "home" ? home : null
-
-			if (target === null || update.type === "roots") {
-				return
-			}
-
-			if (update.reset) {
-				target.clear()
-			}
-
-			for (const record of update.upserts) {
-				target.set("stableUuid" in record ? record.stableUuid : record.id, record as never)
-			}
-
-			for (const id of update.removed) {
-				target.delete(id)
-			}
-		})
-		engine.setHomeEnabled(true)
+		trackCatalogTitles(engine, titles)
 
 		return engine
 	}
@@ -523,7 +504,6 @@ describe("corrections in the library index", () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
 		drive = new FakeDrive()
 		titles = new Map()
-		home = new Map()
 	})
 
 	afterEach(() => {
@@ -557,11 +537,16 @@ describe("corrections in the library index", () => {
 			"movie:A Clip:hidden",
 			"series:Heat:shown"
 		])
-		// Hidden titles stay out of the home list; the new series' episode is there.
-		expect([...home.values()].map(item => `${item.itemClass}:${String(item.season)}x${String(item.episode)}`)).toEqual(["episode:1x3"])
-
 		const series = shown.find(item => item.kind === "series")
-		const detail = series === undefined ? null : engine.titleDetail(series.id)
+		const hidden = shown.find(item => item.hidden === true)
+		const episode = (await engine.catalogSearch("pilot")).groups.find(group => group.kind === "episodes")?.cards[0]?.item
+
+		// Hidden titles stay out of the home rows, grids and search; the new series' episode is there.
+		expect(await engine.catalogMarkTargets(hidden?.id ?? "", null)).toEqual([])
+		expect(await engine.catalogMarkTargets(series?.id ?? "", null)).toHaveLength(1)
+		expect(episode).toMatchObject({ itemClass: "episode", season: 1, episode: 3 })
+
+		const detail = series === undefined ? null : await engine.titleDetail(series.id)
 
 		// The episode remembers where its correction lives (its directory's key, not its file's).
 		expect(detail?.kind === "series" ? detail.seasons[0]?.episodes[0]?.overrideKey : null).toBe(`d:${heatDir}`)

@@ -1,5 +1,4 @@
 import type { TFunction } from "i18next"
-import type { VideoHomeItem } from "@/workers/videoIndex/view.logic"
 import type { CardSubline, VideoCardModel } from "@/features/videos/lib/homeRows.logic"
 
 // Card text and colour that need no DOM: the title-set card's tone, the episode code and the link's accessible name.
@@ -79,14 +78,4 @@ export function cardLabel(card: VideoCardModel, t: TFunction<"videos">): string 
 	}
 
 	return t("videosCardLabel", { parts: parts.filter(part => part.length > 0) })
-}
-
-// The videos a card's Mark watched / unwatched applies to: every version of its episode or movie, every episode of
-// its series.
-export function markTargets(card: Pick<VideoCardModel, "title" | "item">, items: readonly VideoHomeItem[]): string[] {
-	const group = card.item?.group
-
-	return items
-		.filter(item => (group === undefined ? item.titleId === card.title.id : item.group === group) && !item.unsupported)
-		.map(item => item.stableUuid)
 }

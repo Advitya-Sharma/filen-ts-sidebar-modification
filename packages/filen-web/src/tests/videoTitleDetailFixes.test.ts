@@ -14,6 +14,7 @@ vi.mock("@/lib/storage/adapter", () => ({
 	kvSetJson: () => Promise.resolve(),
 	kvKeys: () => Promise.resolve([]),
 	kvEntriesJson: () => Promise.resolve([]),
+	kvEntriesJsonInSlices: () => Promise.resolve([]),
 	kvDelete: () => Promise.resolve()
 }))
 

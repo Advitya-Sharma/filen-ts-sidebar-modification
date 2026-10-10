@@ -144,7 +144,12 @@ async function wipe(): Promise<void> {
 // A prefix scan as a range on the primary key: no LIKE, so "_" and "%" in a prefix match literally and the
 // index serves it. The upper bound is the prefix with its last code point incremented (the smallest string
 // above every extension of it); an empty prefix matches every key.
-function prefixRange(prefix: string): { where: string; bind: string[] } {
+// `from` (default: the prefix itself) moves the lower bound up, exclusive, for a scan that resumes after a key: one
+// bound per side, so the index seeks straight to it. A `from` below the prefix leaves the prefix as the bound.
+function prefixRange(prefix: string, from: string | null = null): { where: string; bind: string[] } {
+	const resume = from !== null && from >= prefix
+	const lower = resume ? "key > ?" : "key >= ?"
+	const start = resume ? from : prefix
 	const points = Array.from(prefix)
 
 	for (let i = points.length - 1; i >= 0; i--) {
@@ -154,11 +159,11 @@ function prefixRange(prefix: string): { where: string; bind: string[] } {
 			// 0xD800-0xDFFF are surrogates, never a character of their own.
 			const next = code === 0xd7ff ? 0xe000 : code + 1
 
-			return { where: "key >= ? AND key < ?", bind: [prefix, points.slice(0, i).join("") + String.fromCodePoint(next)] }
+			return { where: `${lower} AND key < ?`, bind: [start, points.slice(0, i).join("") + String.fromCodePoint(next)] }
 		}
 	}
 
-	return { where: "key >= ?", bind: [prefix] }
+	return { where: lower, bind: [start] }
 }
 
 const api = {
@@ -217,6 +222,26 @@ const api = {
 		requireDb().exec({
 			sql: `SELECT key, value FROM kv WHERE ${where}`,
 			bind,
+			callback: row => {
+				const [key, value] = row
+
+				if (typeof key === "string" && typeof value === "string") {
+					out.push([key, value])
+				}
+			}
+		})
+
+		return out
+	},
+	// Up to `limit` rows under a prefix in key order, from after the key `after` (from the start for null): a prefix
+	// too large to cross to the page in one message is read a page at a time.
+	kvEntriesPage: (prefix: string, after: string | null, limit: number): [string, string][] => {
+		const out: [string, string][] = []
+		const { where, bind } = prefixRange(prefix, after)
+
+		requireDb().exec({
+			sql: `SELECT key, value FROM kv WHERE ${where} ORDER BY key LIMIT ?`,
+			bind: [...bind, limit],
 			callback: row => {
 				const [key, value] = row
 

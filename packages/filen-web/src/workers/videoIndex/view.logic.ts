@@ -7,6 +7,8 @@ import {
 	type LibraryArt,
 	type LibraryEpisode,
 	type LibraryExtra,
+	type LibraryMovie,
+	type LibraryOther,
 	type LibraryRootType,
 	type LibrarySeries,
 	type LibrarySubtitle,
@@ -16,12 +18,13 @@ import {
 	type CorrectionOriginal
 } from "@filen/shared/videos"
 import type { IndexFile } from "@/workers/videoIndex/rootIndex.logic"
+import type { CatalogSummary } from "@/workers/videoIndex/catalog.logic"
 import { artCandidates, type ArtCandidate, type ArtSubject } from "@/features/videos/lib/artwork.logic"
 import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
 
-// What the main thread gets of the library: plain, keyless records. Titles go over in full (diffed); a title's
-// versions, seasons and episodes only when asked for. A file is named by its stable uuid; the worker rebuilds
-// the playable file from it on demand.
+// What the main thread gets of the library: plain, keyless records, a screen's worth at a time (the catalog's rows,
+// pages and results); a title's versions, seasons and episodes only when asked for. A file is named by its stable
+// uuid; the worker rebuilds the playable file from it on demand.
 
 export interface VideoFileRef {
 	stableUuid: string
@@ -60,7 +63,7 @@ export interface VideoTitleView {
 	// A manual correction hides it: left out of home rows, grids and search, still reachable to unhide.
 	hidden?: true
 	// Changes with the title's versions, extras, seasons and episodes (by stable uuid: a new version of a file isn't a
-	// change), so a change only they see still refreshes its detail (set by buildTitles).
+	// change) and its card art's candidates, so a change only they see still refreshes it (set by buildTitlesSteps).
 	detailHash?: number
 }
 
@@ -193,10 +196,10 @@ export interface VideoHomeItem {
 }
 
 export type VideoIndexUpdate =
-	| { type: "titles"; reset: boolean; upserts: VideoTitleView[]; removed: string[] }
 	| { type: "roots"; roots: VideoRootStatus[] }
-	// The library's videos, keyed by stable uuid: all of them on `reset`, else what changed since the last update.
-	| { type: "home"; reset: boolean; upserts: VideoHomeItem[]; removed: string[] }
+	// The catalog changed (or became available): what the screens show is fetched again. `titles` names the titles
+	// whose own view changed, null for all of them.
+	| { type: "catalog"; version: number; titles: string[] | null; summary: CatalogSummary }
 
 // The classifier's file indices resolved against the files it was given.
 export class LibraryFiles {
@@ -209,6 +212,9 @@ export class LibraryFiles {
 	public readonly autoMerged: ReadonlyMap<string, number>
 	private readonly files: readonly IndexFile[]
 	private readonly rootUuids: readonly string[]
+	private movieIndex: Map<string, LibraryMovie> | null = null
+	private seriesIndex: Map<string, LibrarySeries> | null = null
+	private otherIndex: Map<string, LibraryOther> | null = null
 
 	public constructor({
 		library,
@@ -237,6 +243,25 @@ export class LibraryFiles {
 		this.episodeKeys = episodeKeys
 		this.originals = originals
 		this.autoMerged = autoMerged
+	}
+
+	// A title's classifier entry by id (indexed on first use).
+	public movie(id: string): LibraryMovie | undefined {
+		this.movieIndex ??= new Map(this.library.movies.map(movie => [movie.id, movie]))
+
+		return this.movieIndex.get(id)
+	}
+
+	public seriesById(id: string): LibrarySeries | undefined {
+		this.seriesIndex ??= new Map(this.library.series.map(series => [series.id, series]))
+
+		return this.seriesIndex.get(id)
+	}
+
+	public other(id: string): LibraryOther | undefined {
+		this.otherIndex ??= new Map(this.library.others.map(other => [other.id, other]))
+
+		return this.otherIndex.get(id)
 	}
 
 	public file(index: number): IndexFile | undefined {
@@ -372,13 +397,21 @@ function playable(files: LibraryFiles, versions: readonly LibraryVersion[]): Pic
 	}
 }
 
-// Every title of the library, in classifier order.
-export function buildTitles(files: LibraryFiles): VideoTitleView[] {
+// Titles (and videos) built between yields of the steps below.
+const BUILD_STEP = 256
+
+// Every title of the library, in classifier order, in steps (yields between them).
+export function* buildTitlesSteps(files: LibraryFiles): Generator<void, VideoTitleView[]> {
 	const library = files.library
 	const hashes = new Map<string, number>()
+	let built = 0
 
 	for (const movie of library.movies) {
 		hashes.set(movie.id, versionsHash(files, movie.versions, movie.extras, 0x811c9dc5))
+
+		if (++built % BUILD_STEP === 0) {
+			yield
+		}
 	}
 
 	for (const series of library.series) {
@@ -394,14 +427,25 @@ export function buildTitles(files: LibraryFiles): VideoTitleView[] {
 		}
 
 		hashes.set(series.id, hash)
+
+		if (++built % BUILD_STEP === 0) {
+			yield
+		}
 	}
 
-	return buildVisibleTitles(files).map(title => {
-		const detailHash = hashes.get(title.id)
-		const withHash = detailHash === undefined ? title : { ...title, detailHash }
+	const out: VideoTitleView[] = []
 
-		return files.hidden.has(title.id) ? { ...withHash, hidden: true } : withHash
-	})
+	for (const title of visibleTitles(files)) {
+		const withHash = { ...title, detailHash: hashes.get(title.id) ?? 0x811c9dc5 }
+
+		out.push(files.hidden.has(title.id) ? { ...withHash, hidden: true } : withHash)
+
+		if (out.length % BUILD_STEP === 0) {
+			yield
+		}
+	}
+
+	return out
 }
 
 // 32-bit FNV-1a over `text`, continuing from `hash`.
@@ -433,12 +477,11 @@ function versionsHash(files: LibraryFiles, versions: readonly LibraryVersion[], 
 	return hash
 }
 
-function buildVisibleTitles(files: LibraryFiles): VideoTitleView[] {
+function* visibleTitles(files: LibraryFiles): Generator<VideoTitleView> {
 	const library = files.library
-	const out: VideoTitleView[] = []
 
 	for (const movie of library.movies) {
-		out.push({
+		yield {
 			id: movie.id,
 			kind: "movie",
 			title: movie.title,
@@ -455,7 +498,7 @@ function buildVisibleTitles(files: LibraryFiles): VideoTitleView[] {
 			extraCount: movie.extras.length,
 			seasonCount: 0,
 			episodeCount: 0
-		})
+		}
 	}
 
 	for (const series of library.series) {
@@ -466,7 +509,7 @@ function buildVisibleTitles(files: LibraryFiles): VideoTitleView[] {
 			episodeCount += season.episodes.length
 		}
 
-		out.push({
+		yield {
 			id: series.id,
 			kind: "series",
 			title: series.title,
@@ -483,13 +526,13 @@ function buildVisibleTitles(files: LibraryFiles): VideoTitleView[] {
 			extraCount: series.extras.length,
 			seasonCount: series.seasons.length,
 			episodeCount
-		})
+		}
 	}
 
 	for (const other of library.others) {
 		const entry = library.videos[other.video]
 
-		out.push({
+		yield {
 			id: other.id,
 			kind: "other",
 			title: other.title,
@@ -510,10 +553,8 @@ function buildVisibleTitles(files: LibraryFiles): VideoTitleView[] {
 			extraCount: 0,
 			seasonCount: 0,
 			episodeCount: 0
-		})
+		}
 	}
-
-	return out
 }
 
 function episodeView(files: LibraryFiles, episode: LibraryEpisode): VideoEpisodeView {
@@ -551,11 +592,9 @@ function partStableUuids(versions: readonly VideoVersionView[]): string[] {
 }
 
 export function buildTitleDetail(files: LibraryFiles, title: VideoTitleView): VideoTitleDetail | null {
-	const library = files.library
-
 	switch (title.kind) {
 		case "movie": {
-			const movie = library.movies.find(item => item.id === title.id)
+			const movie = files.movie(title.id)
 
 			if (movie === undefined) {
 				return null
@@ -574,7 +613,7 @@ export function buildTitleDetail(files: LibraryFiles, title: VideoTitleView): Vi
 		}
 
 		case "series": {
-			const series = library.series.find(item => item.id === title.id)
+			const series = files.seriesById(title.id)
 
 			return series === undefined
 				? null
@@ -597,7 +636,7 @@ export function buildTitleDetail(files: LibraryFiles, title: VideoTitleView): Vi
 		}
 
 		case "other": {
-			const other = library.others.find(item => item.id === title.id)
+			const other = files.other(title.id)
 
 			if (other === undefined) {
 				return null
@@ -648,12 +687,18 @@ function pushHomeItems({
 	}
 }
 
-// Every playable video of the library, in classifier order, hidden titles left out; `folder` names a directory by uuid.
-export function buildHomeItems(files: LibraryFiles, folder: (parent: string) => string): VideoHomeItem[] {
+// Every playable video of the library, in classifier order, hidden titles left out; `folder` names a directory by
+// uuid. In steps (yields between them).
+export function* buildHomeItemsSteps(files: LibraryFiles, folder: (parent: string) => string): Generator<void, VideoHomeItem[]> {
 	const library = files.library
 	const out: VideoHomeItem[] = []
+	let built = 0
 
 	for (const movie of library.movies) {
+		if (++built % BUILD_STEP === 0) {
+			yield
+		}
+
 		if (files.hidden.has(movie.id)) {
 			continue
 		}
@@ -677,6 +722,16 @@ export function buildHomeItems(files: LibraryFiles, folder: (parent: string) => 
 	}
 
 	for (const series of library.series) {
+		for (const season of series.seasons) {
+			built += season.episodes.length
+		}
+
+		if (built >= BUILD_STEP) {
+			built = 0
+
+			yield
+		}
+
 		if (files.hidden.has(series.id)) {
 			continue
 		}
@@ -704,6 +759,10 @@ export function buildHomeItems(files: LibraryFiles, folder: (parent: string) => 
 	}
 
 	for (const other of library.others) {
+		if (++built % BUILD_STEP === 0) {
+			yield
+		}
+
 		if (files.hidden.has(other.id)) {
 			continue
 		}
@@ -736,23 +795,21 @@ export interface TitleArtCandidates {
 }
 
 function artSubject(files: LibraryFiles, title: VideoTitleView): ArtSubject | null {
-	const library = files.library
-
 	switch (title.kind) {
 		case "movie": {
-			const movie = library.movies.find(item => item.id === title.id)
+			const movie = files.movie(title.id)
 
 			return movie === undefined ? null : { kind: "movie", movie }
 		}
 
 		case "series": {
-			const series = library.series.find(item => item.id === title.id)
+			const series = files.seriesById(title.id)
 
 			return series === undefined ? null : { kind: "series", series }
 		}
 
 		case "other": {
-			const other = library.others.find(item => item.id === title.id)
+			const other = files.other(title.id)
 
 			// Another video's art is a still of itself, as an episode's is.
 			return other === undefined
@@ -860,11 +917,7 @@ export function itemArtCandidates(
 	slot: ArtSlotCode
 ): TitleArtCandidates | null {
 	const extras =
-		title.kind === "movie"
-			? files.library.movies.find(item => item.id === title.id)?.extras
-			: title.kind === "series"
-				? files.library.series.find(item => item.id === title.id)?.extras
-				: undefined
+		title.kind === "movie" ? files.movie(title.id)?.extras : title.kind === "series" ? files.seriesById(title.id)?.extras : undefined
 	const extra = extras === undefined ? null : extraSubject(files, extras, stableUuid)
 
 	if (extra !== null) {
@@ -875,7 +928,7 @@ export function itemArtCandidates(
 		return titleArtCandidates(files, title, slot)
 	}
 
-	const series = files.library.series.find(item => item.id === title.id)
+	const series = files.seriesById(title.id)
 
 	for (const season of series?.seasons ?? []) {
 		const episode = season.episodes.find(item => hasVideoFile(files, item.versions, stableUuid))
@@ -886,51 +939,4 @@ export function itemArtCandidates(
 	}
 
 	return titleArtCandidates(files, title, slot)
-}
-
-// Records that changed since `previous` (id -> serialized record), and ids that are gone. Updates `previous`.
-export function diffRecords<T>(
-	previous: Map<string, string>,
-	next: readonly T[],
-	idOf: (record: T) => string
-): { upserts: T[]; removed: string[] } {
-	const upserts: T[] = []
-	const seen = new Set<string>()
-
-	for (const record of next) {
-		const id = idOf(record)
-		const signature = JSON.stringify(record)
-
-		seen.add(id)
-
-		if (previous.get(id) !== signature) {
-			previous.set(id, signature)
-			upserts.push(record)
-		}
-	}
-
-	const removed: string[] = []
-
-	for (const id of previous.keys()) {
-		if (!seen.has(id)) {
-			removed.push(id)
-		}
-	}
-
-	for (const id of removed) {
-		previous.delete(id)
-	}
-
-	return {
-		upserts,
-		removed
-	}
-}
-
-// Titles that changed since `previous` (id -> serialized title), and ids that are gone. Updates `previous`.
-export function diffTitles(
-	previous: Map<string, string>,
-	next: readonly VideoTitleView[]
-): { upserts: VideoTitleView[]; removed: string[] } {
-	return diffRecords(previous, next, title => title.id)
 }

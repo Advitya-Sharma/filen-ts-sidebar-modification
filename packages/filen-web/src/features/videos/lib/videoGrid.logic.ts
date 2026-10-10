@@ -1,7 +1,7 @@
 import { type } from "arktype"
-import { fastLocaleCompare } from "@filen/shared"
 import type { VideoTitleView } from "@/workers/videoIndex/view.logic"
-import { titleWatchOf, type TitleWatch, type WatchCategory } from "@/features/videos/lib/titleWatch.logic"
+import type { TitleWatch, WatchCategory } from "@/features/videos/lib/titleWatch.logic"
+import { byTitleName } from "@/features/videos/lib/homeRows.logic"
 
 // A library view's grid: its remembered sort and filters, and the titles they leave in order. Plain and DOM-free.
 
@@ -39,16 +39,16 @@ export function gridPrefsKey(source: GridSource): string {
 	return `${GRID_PREFS_KV_PREFIX}${source.kind === "root" ? `root:${source.uuid}` : source.kind}`
 }
 
-export function sourceTitles(titles: readonly VideoTitleView[], source: GridSource): VideoTitleView[] {
+export function inGridSource(title: VideoTitleView, source: GridSource): boolean {
 	switch (source.kind) {
 		case "movies":
-			return titles.filter(title => title.kind === "movie")
+			return title.kind === "movie"
 		case "shows":
-			return titles.filter(title => title.kind === "series")
+			return title.kind === "series"
 		case "other":
-			return titles.filter(title => title.kind === "other")
+			return title.kind === "other"
 		case "root":
-			return titles.filter(title => title.roots.includes(source.uuid))
+			return title.roots.includes(source.uuid)
 	}
 }
 
@@ -59,6 +59,11 @@ export interface ProbeFacts {
 }
 
 // Sorts and filters whose values only a probe knows (runtime, a resolution the name doesn't give).
+// Whether a grid's order reads the watch state.
+export function gridReadsWatch(prefs: GridPrefs): boolean {
+	return prefs.watch !== "all" || prefs.sort === "played"
+}
+
 export function needsProbeFacts(prefs: GridPrefs): boolean {
 	return prefs.sort === "runtime" || prefs.quality !== "all"
 }
@@ -122,10 +127,6 @@ function shuffleKey(id: string, seed: number): number {
 	return hash >>> 0
 }
 
-function byName(a: VideoTitleView, b: VideoTitleView): number {
-	return fastLocaleCompare(a.sortName, b.sortName) || a.year - b.year || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
-}
-
 // Unknown values (null) last, whatever the direction.
 function unknownLast(a: number | null, b: number | null): number {
 	if (a === null || b === null) {
@@ -141,19 +142,16 @@ export interface GridView {
 	coverage: { kind: "runtime" | "quality"; known: number; total: number } | null
 }
 
-export function gridView({
-	titles,
-	prefs,
-	watch,
-	facts,
-	seed
-}: {
-	titles: readonly VideoTitleView[]
+export interface GridInput {
 	prefs: GridPrefs
-	watch: ReadonlyMap<string, TitleWatch>
+	// Read for its category and last play only.
+	watchOf: (titleId: string) => Pick<TitleWatch, "category" | "lastPlayedMs">
 	facts: ReadonlyMap<string, ProbeFacts>
 	seed: number
-}): GridView {
+}
+
+// The titles the filters leave, in their order, with what the resolution filter knew.
+export function gridFilter(titles: readonly VideoTitleView[], { prefs, watchOf, facts }: GridInput) {
 	let qualityKnown = 0
 	let qualityTotal = 0
 	const out: VideoTitleView[] = []
@@ -163,7 +161,7 @@ export function gridView({
 			continue
 		}
 
-		if (prefs.watch !== "all" && titleWatchOf(watch, title.id).category !== prefs.watch) {
+		if (prefs.watch !== "all" && watchOf(title.id).category !== prefs.watch) {
 			continue
 		}
 
@@ -188,53 +186,59 @@ export function gridView({
 		out.push(title)
 	}
 
-	let compare: (a: VideoTitleView, b: VideoTitleView) => number
+	return { titles: out, qualityKnown, qualityTotal }
+}
 
+// The sort's order (total: ties end on byTitleName, which ends on the id).
+export function gridCompare({ prefs, watchOf, facts, seed }: GridInput): (a: VideoTitleView, b: VideoTitleView) => number {
 	switch (prefs.sort) {
 		case "title":
-			compare = byName
-			break
+			return byTitleName
 		case "added":
-			compare = (a, b) => b.dateAdded - a.dateAdded || byName(a, b)
-			break
+			return (a, b) => b.dateAdded - a.dateAdded || byTitleName(a, b)
 		case "year":
-			compare = (a, b) => unknownLast(a.year > 0 ? a.year : null, b.year > 0 ? b.year : null) || byName(a, b)
-			break
+			return (a, b) => unknownLast(a.year > 0 ? a.year : null, b.year > 0 ? b.year : null) || byTitleName(a, b)
 		case "runtime":
-			compare = (a, b) => unknownLast(titleRuntime(a, facts), titleRuntime(b, facts)) || byName(a, b)
-			break
+			return (a, b) => unknownLast(titleRuntime(a, facts), titleRuntime(b, facts)) || byTitleName(a, b)
 		case "played":
-			compare = (a, b) => {
-				const playedA = titleWatchOf(watch, a.id).lastPlayedMs
-				const playedB = titleWatchOf(watch, b.id).lastPlayedMs
+			return (a, b) => {
+				const playedA = watchOf(a.id).lastPlayedMs
+				const playedB = watchOf(b.id).lastPlayedMs
 
-				return unknownLast(playedA > 0 ? playedA : null, playedB > 0 ? playedB : null) || byName(a, b)
+				return unknownLast(playedA > 0 ? playedA : null, playedB > 0 ? playedB : null) || byTitleName(a, b)
 			}
-			break
 		case "random":
-			compare = (a, b) => shuffleKey(a.id, seed) - shuffleKey(b.id, seed) || byName(a, b)
-			break
+			return (a, b) => shuffleKey(a.id, seed) - shuffleKey(b.id, seed) || byTitleName(a, b)
 	}
+}
 
-	out.sort(compare)
-
-	let coverage: GridView["coverage"] = null
-
+// For a sort or filter only a probe can answer: how many of the listed titles it knows the value for.
+export function gridCoverage(
+	sorted: readonly VideoTitleView[],
+	filtered: { qualityKnown: number; qualityTotal: number },
+	{ prefs, facts }: GridInput
+): GridView["coverage"] {
 	if (prefs.sort === "runtime") {
-		const candidates = out.filter(title => title.kind !== "series")
+		const candidates = sorted.filter(title => title.kind !== "series")
 
-		coverage = {
+		return {
 			kind: "runtime",
 			known: candidates.filter(title => titleRuntime(title, facts) !== null).length,
 			total: candidates.length
 		}
-	} else if (prefs.quality !== "all") {
-		coverage = { kind: "quality", known: qualityKnown, total: qualityTotal }
 	}
 
+	return prefs.quality !== "all" ? { kind: "quality", known: filtered.qualityKnown, total: filtered.qualityTotal } : null
+}
+
+// `titles` already in name order makes the title sort a single pass.
+export function gridView({ titles, ...input }: GridInput & { titles: readonly VideoTitleView[] }): GridView {
+	const filtered = gridFilter(titles, input)
+	const sorted = filtered.titles.sort(gridCompare(input))
+
 	return {
-		titles: out,
-		coverage
+		titles: sorted,
+		coverage: gridCoverage(sorted, filtered, input)
 	}
 }
 

@@ -1,16 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { DirsAndFiles } from "@filen/sdk-rs"
-import { CLASSIFIER_VERSION } from "@filen/shared/videos"
-import { VideoIndexEngine, type IndexRootConfig, type SnapshotStore } from "@/workers/videoIndex/engine"
+import { CLASSIFIER_VERSION, HLC_SPAN, itemKey, type ItemRec } from "@filen/shared/videos"
+import { CatalogCallAbandoned, VideoIndexEngine, type IndexRootConfig, type SnapshotStore } from "@/workers/videoIndex/engine"
 import { SNAPSHOT_HEADER_BYTES, crc32, readSnapshotHeader } from "@/workers/videoIndex/snapshot.logic"
 import { WALK_FLOOR_MS } from "@/workers/videoIndex/engine"
-import type { VideoIndexUpdate, VideoTitleView } from "@/workers/videoIndex/view.logic"
+import type { VideoTitleView } from "@/workers/videoIndex/view.logic"
 import { FakeDrive, driveDir, driveEvent, driveFile, hexUuid } from "@/tests/support/videoDrive"
+import { memoryCatalogStore, trackCatalogTitles } from "@/tests/support/videoIndex"
+import { decodeCatalog, encodeCatalog, readCatalogHeader } from "@/workers/videoIndex/catalogFile.logic"
+import { VideoCatalog, allItems, allTitles, catalogContent, type GridQuery } from "@/workers/videoIndex/catalog.logic"
+import { DEFAULT_GRID_PREFS } from "@/features/videos/lib/videoGrid.logic"
+import { referenceGrid, referenceHome, referenceSearch } from "@/tests/support/videoReference/compose"
 
 let drive: FakeDrive
 let latest: bigint
 let snapshots: Map<string, [Uint8Array | null, Uint8Array | null]>
 let walkGate: Promise<void>
+// Holds back snapshot reads (a large root still loading).
+let readGate: Promise<void>
 let calls: { walks: number; lastEventIds: number; getFile: number }
 let titles: Map<string, VideoTitleView>
 let walkFails: number
@@ -31,7 +38,11 @@ function ancestorsOf(uuid: string): string[] {
 }
 
 const store: SnapshotStore = {
-	read: rootUuid => Promise.resolve(snapshots.get(rootUuid) ?? [null, null]),
+	read: async rootUuid => {
+		await readGate
+
+		return snapshots.get(rootUuid) ?? [null, null]
+	},
 	readGenerations: rootUuid => {
 		const [a, b] = snapshots.get(rootUuid) ?? [null, null]
 
@@ -61,7 +72,7 @@ const store: SnapshotStore = {
 	}
 }
 
-function engineFor(): VideoIndexEngine {
+function engineFor(catalogStore = memoryCatalogStore(), yieldSlice = () => Promise.resolve()): VideoIndexEngine {
 	const engine = new VideoIndexEngine({
 		walkRoot: async uuid => {
 			calls.walks++
@@ -103,28 +114,13 @@ function engineFor(): VideoIndexEngine {
 			return Promise.resolve(drive.files.get(uuid))
 		},
 		store,
+		catalogStore,
 		now: () => Date.now(),
-		yieldSlice: () => Promise.resolve()
+		yieldSlice
 	})
 
 	engine.onSocketEvent({ type: "authSuccess" })
-	engine.subscribe((update: VideoIndexUpdate) => {
-		if (update.type !== "titles") {
-			return
-		}
-
-		if (update.reset) {
-			titles.clear()
-		}
-
-		for (const title of update.upserts) {
-			titles.set(title.id, title)
-		}
-
-		for (const id of update.removed) {
-			titles.delete(id)
-		}
-	})
+	trackCatalogTitles(engine, titles)
 
 	return engine
 }
@@ -143,6 +139,7 @@ beforeEach(() => {
 	latest = 50n
 	snapshots = new Map()
 	walkGate = Promise.resolve()
+	readGate = Promise.resolve()
 	calls = { walks: 0, lastEventIds: 0, getFile: 0 }
 	titles = new Map()
 	walkFails = 0
@@ -209,7 +206,7 @@ describe("library index classification", () => {
 		await settle()
 
 		const show = [...titles.values()].find(title => title.kind === "series")
-		const detail = show === undefined ? null : engine.titleDetail(show.id)
+		const detail = show === undefined ? null : await engine.titleDetail(show.id)
 
 		expect(detail?.kind).toBe("series")
 
@@ -239,11 +236,52 @@ describe("library index art", () => {
 		await engine.check(latest)
 		await settle()
 
-		const art = engine.titleArt([...titles.keys()][0] ?? "", "p")
+		const art = await engine.titleArt([...titles.keys()][0] ?? "", "p")
 
 		expect(art?.candidates[0]).toEqual({ source: "sidecar", file: 0 })
 		expect(art?.files[0]).toEqual({ stableUuid: poster.uuid, uuid: poster.uuid, name: "poster.jpg", size: Number(poster.size) })
 		expect(JSON.stringify(art)).not.toContain('"key"')
+	})
+
+	it("announces a title whose card art alone changed (a video's own thumbnail added), and persists it", async () => {
+		const root = drive.addDir(hexUuid(), "Films")
+		const movie = drive.addDir(root, "Heat (1995)")
+
+		drive.addFile(movie, "Heat (1995).mkv")
+		drive.addFile(movie, "poster.jpg")
+
+		const catalogStore = memoryCatalogStore()
+		const engine = engineFor(catalogStore)
+		const changed: (string[] | null)[] = []
+
+		engine.setWriter(true)
+		await engine.configure(roots([root, "auto"]))
+		await engine.check(latest)
+		await settle()
+		await engine.flush()
+		engine.subscribe(update => {
+			if (update.type === "catalog") {
+				changed.push(update.titles)
+			}
+		})
+
+		const id = [...titles.keys()][0] ?? ""
+		const before = titles.get(id)
+		const sidecars = async (): Promise<string[]> =>
+			((await engine.titleArt(id, "s"))?.files ?? []).map(file => file.name).filter(name => name.endsWith(".jpg"))
+
+		expect(await sidecars()).toEqual([])
+
+		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: drive.addFile(movie, "Heat (1995)-thumb.jpg") }))
+		await settle()
+		await engine.flush()
+
+		// The title's own fields are as they were; its card art is not.
+		expect(titles.get(id)).toEqual(before)
+		expect(await sidecars()).toEqual(["Heat (1995)-thumb.jpg"])
+		// After the current state a subscriber is handed at once: that title alone.
+		expect(changed).toEqual([null, [id]])
+		expect(catalogStore.writes).toBe(2)
 	})
 })
 
@@ -268,48 +306,45 @@ describe("library index videos", () => {
 		await settle()
 
 		const before = { ...calls }
-		const items = engine.homeItems()
 		const heat = [...titles.values()].find(title => title.kind === "movie")
 		const lost = [...titles.values()].find(title => title.kind === "series")
+		const pilotResult = (await engine.catalogSearch("pilot")).groups.find(group => group.kind === "episodes")?.cards[0]?.item
+		const lisbon = (await engine.catalogSearch("lisbon")).groups.find(group => group.kind === "other")?.cards[0]
 
-		expect(items.filter(item => item.itemClass === "movie").map(item => [item.titleId, item.group, item.folder])).toEqual([
-			[heat?.id, heat?.id, "Heat (1995)"],
-			[heat?.id, heat?.id, "Heat (1995)"]
+		expect(await engine.catalogMarkTargets(heat?.id ?? "", null)).toHaveLength(2)
+		expect(await engine.catalogMarkTargets(lost?.id ?? "", null)).toHaveLength(2)
+		expect(pilotResult).toMatchObject({ titleId: lost?.id, season: 1, episode: 1, episodeTitle: "Pilot", folder: "Season 1" })
+		expect(lisbon?.title.kind).toBe("other")
+		const shown = JSON.stringify([
+			await engine.catalogHome({ roots: [root], now: Date.now(), heroPreviousId: null, heroSeed: 0 }),
+			await engine.catalogSearch("lost")
 		])
-		expect(
-			items.filter(item => item.itemClass === "episode").map(item => [item.titleId, item.season, item.episode, item.episodeTitle])
-		).toEqual([
-			[lost?.id, 1, 1, "Pilot"],
-			[lost?.id, 1, 2, ""]
-		])
-		expect(items.find(item => item.itemClass === "other")?.folder).toBe("Holiday Lisbon")
-		expect(engine.homeItems()).toEqual(items)
-		expect(JSON.stringify(items)).not.toContain('"key"')
 
-		const still = engine.itemArt(lost?.id ?? "", pilot.uuid, "s")
+		for (const file of drive.files.values()) {
+			expect(shown).not.toContain(file.meta.type === "decoded" ? file.meta.data.key : "")
+		}
+
+		const still = await engine.itemArt(lost?.id ?? "", pilot.uuid, "s")
 
 		expect(still?.files.map(file => file.uuid)).toEqual([pilot.uuid])
 		expect(calls).toEqual(before)
 	})
 })
 
-describe("library index video list", () => {
-	it("sends the videos only while asked, then each classification's changes, including ones no title shows", async () => {
+describe("library index catalog notices", () => {
+	it("tells of each classification's changes, including ones no title view shows", async () => {
 		const root = drive.addDir(hexUuid(), "Shows")
 		const season = drive.addDir(drive.addDir(root, "Lost"), "Season 1")
 
 		drive.addFile(season, "Lost S01E01.mkv")
 
-		const second = drive.addFile(season, "Lost S01E02.mkv")
+		const second = drive.addFile(season, "Lost S01E02 - Tabula Rasa.mkv")
 		const engine = engineFor()
-		const home: Extract<VideoIndexUpdate, { type: "home" }>[] = []
-		let titleUpdates = 0
+		const notices: { version: number; titles: string[] | null }[] = []
 
 		engine.subscribe(update => {
-			if (update.type === "home") {
-				home.push(update)
-			} else if (update.type === "titles") {
-				titleUpdates++
+			if (update.type === "catalog") {
+				notices.push({ version: update.version, titles: update.titles })
 			}
 		})
 
@@ -317,17 +352,12 @@ describe("library index video list", () => {
 		await engine.check(latest)
 		await settle()
 
-		expect(home).toEqual([])
+		const before = notices.length
 
-		engine.setHomeEnabled(true)
-
-		expect(home).toHaveLength(1)
-		expect(home[0]).toMatchObject({ reset: true, removed: [] })
-		expect(home[0]?.upserts).toHaveLength(2)
+		expect(notices[0]).toEqual({ version: 1, titles: null })
 
 		// A new version of the second episode: its file rotates, the series' title view stays the same.
-		const version = driveFile(season, "Lost S01E02.mkv", { stableUuid: second.uuid, size: 5 })
-		const titlesBefore = titleUpdates
+		const version = driveFile(season, "Lost S01E02 - Tabula Rasa.mkv", { stableUuid: second.uuid, size: 5 })
 
 		engine.onSocketEvent(
 			driveEvent(++latest, { type: "fileArchived", uuid: second.uuid, stableUUID: second.uuid, newUUID: version.uuid })
@@ -335,15 +365,313 @@ describe("library index video list", () => {
 		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: version }))
 		await settle()
 
-		expect(titleUpdates).toBe(titlesBefore)
-		expect(home).toHaveLength(2)
-		expect(home[1]).toMatchObject({ reset: false, removed: [], upserts: [{ stableUuid: second.uuid, uuid: version.uuid, size: 5 }] })
+		expect(notices.slice(before)).toEqual([{ version: before + 1, titles: [] }])
+		expect((await engine.catalogSearch("tabula")).groups[0]?.cards[0]?.item).toMatchObject({ uuid: version.uuid, size: 5 })
+	})
+})
 
-		engine.setHomeEnabled(false)
-		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: driveFile(season, "Lost S01E03.mkv") }))
+describe("library index persisted catalog", () => {
+	async function firstSession(root: string, catalogStore: ReturnType<typeof memoryCatalogStore>): Promise<void> {
+		const first = engineFor(catalogStore)
+
+		first.setWriter(true)
+		await first.configure(roots([root, "auto"]))
+		await first.check(latest)
+		await settle()
+		await first.flush()
+	}
+
+	it("paints a cold open from the persisted catalog while the snapshots still load, and writes nothing new after", async () => {
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+
+		const catalogStore = memoryCatalogStore()
+
+		await firstSession(root, catalogStore)
+
+		expect(catalogStore.writes).toBe(1)
+
+		let release = (): void => undefined
+
+		readGate = new Promise(resolve => {
+			release = resolve
+		})
+
+		const second = engineFor(catalogStore)
+
+		second.setWriter(true)
+
+		const configuring = second.configure(roots([root, "auto"]))
+		const home = await second.catalogHome({ roots: [root], now: Date.now(), heroPreviousId: null, heroSeed: 0 })
+
+		expect(home.rows.find(row => row.kind === "movies")?.cards.map(card => card.title.title)).toEqual(["Heat"])
+		expect(second.rootStatuses()[0]?.state).toBe("loading")
+		expect(calls.walks).toBe(1)
+
+		// A card's art is looked up from the persisted catalog too, before the library is classified again.
+		const heat = home.rows.find(row => row.kind === "movies")?.cards[0]?.title.id ?? ""
+		const kept = await second.titleArt(heat, "p")
+
+		release()
+		await configuring
+		await settle()
+		await second.flush()
+
+		expect(kept).not.toBeNull()
+		expect(kept).toEqual(await second.titleArt(heat, "p"))
+		// The classification behind it found the same library: nothing more is written.
+		expect(catalogStore.writes).toBe(1)
+		expect(second.rootStatuses()[0]?.state).toBe("ready")
+	})
+
+	it("answers from the persisted catalog and then the classification as the page's own composition would", async () => {
+		const root = drive.addDir(hexUuid(), "Films")
+		const heat = drive.addDir(root, "Heat (1995)")
+		const season = drive.addDir(drive.addDir(root, "Lost"), "Season 1")
+
+		drive.addFile(heat, "Heat (1995) - 1080p.mkv")
+		drive.addFile(heat, "Heat (1995) - 2160p.mkv")
+		drive.addFile(drive.addDir(root, "Alien (1979)"), "Alien (1979).mkv")
+		drive.addFile(season, "Lost S01E01-E02 - Pilot.mkv")
+		drive.addFile(season, "Lost S01E03.mkv")
+		drive.addFile(drive.addDir(root, "Holiday Lisbon"), "VID_0001.mp4")
+
+		const catalogStore = memoryCatalogStore()
+
+		await firstSession(root, catalogStore)
+
+		const bytes = catalogStore.slots.find(slot => slot !== null) ?? new Uint8Array(0)
+		const decoded = decodeCatalog(bytes, readCatalogHeader(bytes)?.key ?? [0, 0])
+		const library = {
+			titles: decoded === null ? [] : allTitles(decoded.titles),
+			items: decoded === null ? [] : allItems(decoded.items)
+		}
+		const at = Date.now() - 86_400_000
+		const pilot = library.items.find(item => item.episodeEnd > item.episode)
+		const version = library.items.find(item => item.label !== "")
+		const records: Record<string, ItemRec> = {
+			[itemKey(pilot?.stableUuid ?? "")]: {
+				p: { t: at * HLC_SPAN, d: "dev", pos: 900, dur: 0, lp: at, u: pilot?.uuid ?? "", sz: pilot?.size ?? 0 }
+			},
+			[itemKey(version?.stableUuid ?? "")]: { w: { t: at * HLC_SPAN + 1, d: "dev", pl: true, pc: 1 } }
+		}
+		const facts = new Map([[pilot?.uuid ?? "", { durationSec: 2700, height: 1080 }]])
+		const reference = { ...library, records, facts, lastPlayedCeilingMs: Date.now() }
+		const homeQuery = { roots: [root], now: Date.now(), heroPreviousId: null, heroSeed: 0.5 }
+		const gridQueries: GridQuery[] = [
+			{ source: { kind: "movies" }, prefs: DEFAULT_GRID_PREFS, query: "", seed: 1 },
+			{ source: { kind: "movies" }, prefs: { ...DEFAULT_GRID_PREFS, sort: "played" }, query: "", seed: 1 },
+			{ source: { kind: "shows" }, prefs: { ...DEFAULT_GRID_PREFS, quality: "1080" }, query: "", seed: 1 },
+			{ source: { kind: "root", uuid: root }, prefs: { ...DEFAULT_GRID_PREFS, sort: "runtime" }, query: "lo", seed: 1 }
+		]
+		const expectAsReference = async (engine: VideoIndexEngine): Promise<void> => {
+			expect(await engine.catalogHome(homeQuery)).toEqual(referenceHome(reference, homeQuery))
+
+			for (const query of gridQueries) {
+				expect((await engine.catalogGrid(query, 0, 100)).cards).toEqual(referenceGrid(reference, query).cards)
+			}
+
+			for (const text of ["pilot", "lisbon", "heat"]) {
+				expect((await engine.catalogSearch(text)).groups).toEqual(referenceSearch(reference, text))
+			}
+		}
+
+		let release = (): void => undefined
+
+		readGate = new Promise(resolve => {
+			release = resolve
+		})
+
+		const second = engineFor(catalogStore)
+		const configuring = second.configure(roots([root, "auto"]))
+
+		second.setWatch({ reset: true, upserts: records, removed: [], lastPlayedCeilingMs: reference.lastPlayedCeilingMs })
+		await second.setFacts({ reset: true, uuids: [...facts.keys()], durations: [2700], heights: [1080] })
+
+		expect(pilot).toBeDefined()
+		expect(version).toBeDefined()
+		await expectAsReference(second)
+		expect(second.rootStatuses()[0]?.state).toBe("loading")
+
+		release()
+		await configuring
 		await settle()
 
-		expect(home).toHaveLength(2)
+		expect(second.rootStatuses()[0]?.state).toBe("ready")
+		await expectAsReference(second)
+	})
+
+	it("rebuilds the orders when the classification places a title where the persisted catalog did not", async () => {
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+		drive.addFile(drive.addDir(root, "Ronin (1998)"), "Ronin (1998).mkv")
+
+		const clip = drive.addFile(root, "clip.mp4")
+		const overrides = { [`s:${clip.uuid}`]: { kind: "movie" as const, title: "A Clip", year: 2001, hidden: true } }
+		const catalogStore = memoryCatalogStore()
+		const first = engineFor(catalogStore)
+
+		first.setWriter(true)
+		first.setOverrides(overrides)
+		await first.configure(roots([root, "auto"]))
+		await first.check(latest)
+		await settle()
+		await first.flush()
+
+		// The persisted copy holds the hidden title elsewhere (its own orders consistent with that).
+		const slot = catalogStore.slots.findIndex(bytes => bytes !== null) as 0 | 1
+		const header = readCatalogHeader(catalogStore.slots[slot] ?? new Uint8Array(0))
+		const decoded = header === null ? null : decodeCatalog(catalogStore.slots[slot] ?? new Uint8Array(0), header.key)
+		const titles = decoded === null ? [] : allTitles(decoded.titles)
+		const moved = [...titles.filter(title => title.hidden === true), ...titles.filter(title => title.hidden !== true)]
+
+		expect(titles.findIndex(title => title.hidden === true)).toBeGreaterThan(0)
+
+		const content = catalogContent(moved, decoded === null ? [] : allItems(decoded.items))
+		// The same card art, at the titles' new places.
+		const art = {
+			at: (index: number, slot: "p" | "s") =>
+				decoded?.art.at(
+					titles.findIndex(title => title === moved[index]),
+					slot
+				) ?? null
+		}
+
+		catalogStore.slots[slot] = encodeCatalog({
+			content: { ...content, art },
+			key: header?.key ?? [0, 0],
+			generation: (header?.generation ?? 0n) + 1n
+		})
+
+		const second = engineFor(catalogStore)
+
+		second.setWriter(true)
+		second.setOverrides(overrides)
+		await second.configure(roots([root, "auto"]))
+		await settle()
+		await second.flush()
+
+		const home = await second.catalogHome({ roots: [root], now: Date.now(), heroPreviousId: null, heroSeed: 0 })
+		const shown = home.rows.flatMap(row => row.cards.map(card => card.title.title))
+
+		expect(shown).not.toContain("A Clip")
+		expect(new Set(shown)).toEqual(new Set(["Heat", "Ronin"]))
+		expect(catalogStore.writes).toBe(2)
+	})
+
+	it("reads only the newest catalog slot at a cold open, and the other when that one is torn", async () => {
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+
+		const catalogStore = memoryCatalogStore()
+
+		await firstSession(root, catalogStore)
+
+		const written = catalogStore.slots.findIndex(bytes => bytes !== null) as 0 | 1
+		const intact = catalogStore.slots[written] ?? new Uint8Array(0)
+		const header = readCatalogHeader(intact)
+
+		// A newer write torn halfway in the other slot.
+		const torn = encodeCatalog({
+			content: catalogContent([], []),
+			key: header?.key ?? [0, 0],
+			generation: (header?.generation ?? 0n) + 1n
+		})
+
+		catalogStore.slots[written === 0 ? 1 : 0] = torn.slice(0, torn.length - 8)
+		catalogStore.reads = 0
+
+		const second = engineFor(catalogStore)
+
+		void second.configure(roots([root, "auto"]))
+
+		const home = await second.catalogHome({ roots: [root], now: Date.now(), heroPreviousId: null, heroSeed: 0 })
+
+		expect(home.rows.some(row => row.cards.some(card => card.title.title === "Heat"))).toBe(true)
+		expect(catalogStore.reads).toBe(2)
+
+		catalogStore.slots[written === 0 ? 1 : 0] = null
+		catalogStore.reads = 0
+
+		const third = engineFor(catalogStore)
+
+		void third.configure(roots([root, "auto"]))
+		await third.catalogHome({ roots: [root], now: Date.now(), heroPreviousId: null, heroSeed: 0 })
+
+		expect(catalogStore.reads).toBe(1)
+	})
+
+	it("persists only a catalog that classifies every configured root", async () => {
+		const a = drive.addDir(hexUuid(), "Films")
+		const b = drive.addDir(hexUuid(), "More films")
+
+		drive.addFile(drive.addDir(a, "Heat (1995)"), "Heat (1995).mkv")
+		drive.addFile(drive.addDir(b, "Ronin (1998)"), "Ronin (1998).mkv")
+
+		const catalogStore = memoryCatalogStore()
+		const engine = engineFor(catalogStore)
+
+		walkFails = 1
+		engine.setWriter(true)
+		await engine.configure(roots([a, "auto"], [b, "auto"]))
+		await engine.check(latest)
+		await settle()
+		await engine.flush()
+
+		// One root's walk failed: what is held lacks it, and a cold open (keyed on both) couldn't use it.
+		expect(catalogStore.writes).toBe(0)
+
+		await Promise.all([engine.rescan(a), engine.rescan(b)])
+		await settle()
+		await engine.flush()
+
+		expect(catalogStore.writes).toBe(1)
+
+		// A later change is persisted too.
+		engine.onSocketEvent(driveEvent(++latest, { type: "fileNew", file: drive.addFile(a, "Alien (1979).mkv") }))
+		await settle()
+		await engine.flush()
+
+		expect(catalogStore.writes).toBe(2)
+	})
+
+	it("ignores a persisted catalog classified under other corrections, and replaces it", async () => {
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+
+		const catalogStore = memoryCatalogStore()
+
+		await firstSession(root, catalogStore)
+
+		let release = (): void => undefined
+
+		readGate = new Promise(resolve => {
+			release = resolve
+		})
+
+		const second = engineFor(catalogStore)
+		let answered = false
+
+		second.setWriter(true)
+		second.setOverrides({ [`r:${root}`]: { hidden: true } })
+		void second.configure(roots([root, "auto"]))
+		void second.catalogTitle("none").then(() => {
+			answered = true
+		})
+		await vi.advanceTimersByTimeAsync(0)
+
+		expect(answered).toBe(false)
+
+		release()
+		await settle()
+		await second.flush()
+
+		expect(answered).toBe(true)
+		expect(catalogStore.writes).toBe(2)
 	})
 })
 
@@ -430,14 +758,14 @@ describe("library index lifecycle", () => {
 		await engine.configure(roots([root, "auto"]))
 		await engine.check(latest)
 
-		const [file] = engine.playableFiles([heat.uuid])
+		const [file] = await engine.playableFiles([heat.uuid])
 
 		expect(file).toMatchObject({ uuid: heat.uuid, stableUUID: heat.uuid, parent: heat.parent, size: heat.size, chunks: heat.chunks })
 		expect(file?.meta).toEqual(heat.meta)
 
 		engine.onSocketEvent(driveEvent(++latest, { type: "fileTrash", uuid: heat.uuid, stableUUID: heat.uuid, newUUID: undefined }))
 
-		expect(engine.playableFiles([heat.uuid])).toEqual([])
+		expect(await engine.playableFiles([heat.uuid])).toEqual([])
 	})
 
 	it("writes snapshots only as the leader, alternating slots with rising generations", async () => {
@@ -972,5 +1300,113 @@ describe("library index checks", () => {
 		await settle()
 
 		expect([...titles.values()].map(title => title.title)).toEqual(["Heat"])
+	})
+})
+
+describe("library catalog queries", () => {
+	// Real macrotasks (only timeouts are faked): every pending slice and reaction runs.
+	const flush = (): Promise<void> =>
+		new Promise(resolve => {
+			setImmediate(resolve)
+		})
+
+	it("shares a grid order's warm-up, answers only from a held order, and stops a warm-up nobody waits for", async () => {
+		// Slices end only when the test lets them, so calls can come and go mid warm-up.
+		let releases: (() => void)[] = []
+		const release = (): void => {
+			const pending = releases
+
+			releases = []
+			pending.forEach(resolve => {
+				resolve()
+			})
+		}
+		const engine = engineFor(memoryCatalogStore(), () => new Promise(resolve => releases.push(resolve)))
+		const root = drive.addDir(hexUuid(), "Films")
+
+		drive.addFile(drive.addDir(root, "Heat (1995)"), "Heat (1995).mkv")
+		drive.addFile(drive.addDir(root, "Ronin (1998)"), "Ronin (1998).mkv")
+
+		const configured = engine.configure(roots([root, "auto"])).then(() => engine.check(latest))
+
+		for (let i = 0; i < 50; i++) {
+			release()
+			await flush()
+			await vi.advanceTimersByTimeAsync(1_000)
+		}
+
+		await configured
+
+		const grid = Object.getOwnPropertyDescriptor(VideoCatalog.prototype, "grid")?.value as VideoCatalog["grid"]
+		const gridWarmSteps = Object.getOwnPropertyDescriptor(VideoCatalog.prototype, "gridWarmSteps")
+			?.value as VideoCatalog["gridWarmSteps"]
+		const answeredFromHeld: boolean[] = []
+		const cancelledSeen: boolean[] = []
+
+		vi.spyOn(VideoCatalog.prototype, "grid").mockImplementation(function (this: VideoCatalog, query, start, count) {
+			answeredFromHeld.push(this.hasGrid(query))
+
+			return grid.call(this, query, start, count)
+		})
+
+		const warmUps = vi.spyOn(VideoCatalog.prototype, "gridWarmSteps").mockImplementation(function* (
+			this: VideoCatalog,
+			query,
+			cancelled
+		) {
+			// Three slices' worth of work before the real build.
+			for (let step = 0; step < 3; step++) {
+				const until = performance.now() + 8
+
+				while (performance.now() < until) {
+					// Busy: the slice runs out.
+				}
+
+				if (cancelled()) {
+					cancelledSeen.push(true)
+
+					return
+				}
+
+				yield
+			}
+
+			yield* gridWarmSteps.call(this, query, cancelled)
+		})
+
+		const byYear: GridQuery = { source: { kind: "movies" }, prefs: { ...DEFAULT_GRID_PREFS, sort: "year" }, query: "", seed: 1 }
+		const first = engine.catalogGrid(byYear, 0, 10, 1)
+		const second = engine.catalogGrid(byYear, 0, 10, 2)
+
+		await flush()
+		engine.catalogAbandon(1)
+
+		await expect(first).rejects.toBeInstanceOf(CatalogCallAbandoned)
+
+		for (let i = 0; i < 10; i++) {
+			release()
+			await flush()
+		}
+
+		expect((await second).total).toBe(2)
+		expect(warmUps).toHaveBeenCalledTimes(1)
+		expect(cancelledSeen).toEqual([])
+
+		const byAdded: GridQuery = { ...byYear, prefs: { ...DEFAULT_GRID_PREFS, sort: "added" } }
+		const third = engine.catalogGrid(byAdded, 0, 10, 3)
+
+		await flush()
+		engine.catalogAbandon(3)
+
+		await expect(third).rejects.toBeInstanceOf(CatalogCallAbandoned)
+
+		for (let i = 0; i < 10; i++) {
+			release()
+			await flush()
+		}
+
+		expect(cancelledSeen).toEqual([true])
+		expect(answeredFromHeld).toEqual([true])
+		vi.restoreAllMocks()
 	})
 })

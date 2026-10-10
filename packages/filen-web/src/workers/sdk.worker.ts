@@ -156,9 +156,25 @@ import { exposeRangePort } from "@/lib/media/rangePort"
 import { WalkCoordinator } from "@/workers/walkCoordinator"
 import { noteFoundDir, resolveParentDir as resolveParentDirFrom } from "@/workers/parentDir"
 import { VideoIndexEngine, type IndexRootConfig } from "@/workers/videoIndex/engine"
-import { opfsSnapshotStore } from "@/workers/videoIndex/snapshotStore"
+import { opfsCatalogStore, opfsSnapshotStore } from "@/workers/videoIndex/snapshotStore"
 import { dirName } from "@/workers/videoIndex/rootIndex.logic"
-import type { TitleArtCandidates, VideoIndexUpdate, VideoRootStatus, VideoTitleDetail } from "@/workers/videoIndex/view.logic"
+import type {
+	TitleArtCandidates,
+	VideoIndexUpdate,
+	VideoRootStatus,
+	VideoTitleDetail,
+	VideoTitleView
+} from "@/workers/videoIndex/view.logic"
+import type {
+	FactsResult,
+	FactsUpdate,
+	GridPage,
+	GridQuery,
+	HomeQuery,
+	HomeResult,
+	SearchResult,
+	WatchUpdate
+} from "@/workers/videoIndex/catalog.logic"
 import {
 	archivePassword,
 	COMPRESS_EVENT_CAPS,
@@ -1081,6 +1097,7 @@ const videoIndex = new VideoIndexEngine({
 		return isUuid(uuid) ? requireClient().getFileOptional(uuid) : Promise.resolve(undefined)
 	},
 	store: opfsSnapshotStore,
+	catalogStore: opfsCatalogStore,
 	now: () => Date.now(),
 	yieldSlice: () =>
 		new Promise(resolve => {
@@ -2634,24 +2651,55 @@ const api = {
 		return videoIndex.flush()
 	},
 	// A slot's art candidates for a title, naming files by keyless ref (resolved with playableVideoFiles).
-	videoTitleArt(id: string, slot: ArtSlotCode): TitleArtCandidates | null {
+	videoTitleArt(id: string, slot: ArtSlotCode): Promise<TitleArtCandidates | null> {
 		return videoIndex.titleArt(id, slot)
 	},
-	videoTitleDetail(id: string): VideoTitleDetail | null {
+	videoTitleDetail(id: string): Promise<VideoTitleDetail | null> {
 		return videoIndex.titleDetail(id)
 	},
 	// One video's art candidates: an episode's own still, else its title's.
-	videoItemArt(titleId: string, stableUuid: string, slot: ArtSlotCode): TitleArtCandidates | null {
+	videoItemArt(titleId: string, stableUuid: string, slot: ArtSlotCode): Promise<TitleArtCandidates | null> {
 		return videoIndex.itemArt(titleId, stableUuid, slot)
 	},
-	// Sends the library's videos (keyless) to the index subscriber while on: all of them, then each classification's
-	// changes. The home rows', grids' and search's input.
-	videoHomeSubscribe(enabled: boolean): void {
-		videoIndex.setHomeEnabled(enabled)
-	},
 	// Playable drive files for indexed videos and sidecars, rebuilt from the index on request.
-	playableVideoFiles(stableUuids: string[]): File[] {
+	playableVideoFiles(stableUuids: string[]): Promise<File[]> {
 		return videoIndex.playableFiles(stableUuids)
+	},
+	// The library catalog, a screen at a time: home rows, a grid page, search results, one title (all keyless).
+	videoCatalogHome(query: HomeQuery): Promise<HomeResult> {
+		return videoIndex.catalogHome(query)
+	},
+	// `ticket`: names the call for videoCatalogAbandon (sent when the page no longer shows the query).
+	videoCatalogGrid(query: GridQuery, start: number, count: number, ticket?: number): Promise<GridPage> {
+		return videoIndex.catalogGrid(query, start, count, ticket)
+	},
+	videoCatalogAbandon(ticket: number): void {
+		videoIndex.catalogAbandon(ticket)
+	},
+	videoCatalogSearch(query: string): Promise<SearchResult> {
+		return videoIndex.catalogSearch(query)
+	},
+	videoCatalogTitle(id: string): Promise<VideoTitleView | null> {
+		return videoIndex.catalogTitle(id)
+	},
+	videoCatalogHidden(): Promise<VideoTitleView[]> {
+		return videoIndex.catalogHidden()
+	},
+	videoCatalogSeries(): Promise<{ id: string; title: string }[]> {
+		return videoIndex.catalogSeries()
+	},
+	videoCatalogMarkTargets(titleId: string, group: string | null): Promise<string[]> {
+		return videoIndex.catalogMarkTargets(titleId, group)
+	},
+	videoCatalogNextMovie(titleId: string): Promise<{ id: string; title: string } | null> {
+		return videoIndex.catalogNextMovie(titleId)
+	},
+	// The page's watch state and probe facts, changes only: what the catalog's rows, filters and sorts read.
+	videoCatalogSetWatch(update: WatchUpdate): void {
+		videoIndex.setWatch(update)
+	},
+	videoCatalogSetFacts(update: FactsUpdate): Promise<FactsResult> {
+		return videoIndex.setFacts(update)
 	},
 	// A directory's chain from the drive root down to itself (both included), for root validation and paths; null
 	// when it doesn't resolve or sits in the trash. Costs one request per ancestor (getItemPath reads each), so the

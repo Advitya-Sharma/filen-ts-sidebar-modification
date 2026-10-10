@@ -12,13 +12,8 @@ import { useIsOnline } from "@/lib/useIsOnline"
 import { videoLibrary } from "@/features/videos/lib/index"
 import { editLibraryConfig, useVideoRootChainQuery } from "@/features/videos/queries/library"
 import { useVideoLibraryView, useVideoRootNames } from "@/features/videos/hooks/useVideoLibraryView"
-import {
-	detectedRootKind,
-	isRootBusy,
-	videoKindCounts,
-	type VideoKindCounts,
-	type VideoLibraryRootView
-} from "@/features/videos/lib/libraryView.logic"
+import { useCatalogHiddenQuery } from "@/features/videos/queries/catalog"
+import { detectedRootKind, isRootBusy, type VideoKindCounts, type VideoLibraryRootView } from "@/features/videos/lib/libraryView.logic"
 import { closeVideosDialogs, openVideosChooser, setVideosLibrariesOpen } from "@/features/videos/store/useVideosDialogStore"
 import { videosFocusFallback } from "@/features/videos/lib/focusTargets"
 import { unhideEdit } from "@/features/videos/lib/corrections.logic"
@@ -282,14 +277,17 @@ function HiddenTitles({
 	)
 }
 
-// Mounted only while open; reads the configuration and the index already held, so opening it costs no request
-// beyond resolving the directories' paths (usually cached).
+// Mounted only while open; reads the configuration and the index's counts already held (hidden titles from the
+// library's worker), so opening it costs no request beyond resolving the directories' paths (usually cached).
 export function LibrariesDialog() {
 	const { t } = useTranslation(["videos", "common"])
 	const isOnline = useIsOnline()
 	const { snapshot, roots } = useVideoLibraryView()
 	const names = useVideoRootNames(roots)
-	const counts = videoKindCounts(snapshot.titles).byRoot
+	const counts = snapshot.summary.byRoot
+	// Hidden titles are read from the library's worker only when there are any.
+	const hiddenQuery = useCatalogHiddenQuery(snapshot.summary.hiddenCount > 0)
+	const hidden = snapshot.summary.hiddenCount > 0 ? (hiddenQuery.data ?? []) : []
 	const [pending, setPending] = useState<ReadonlySet<string>>(new Set())
 	const [removing, setRemoving] = useState<string | null>(null)
 	const removingName = removing === null ? "" : (names.get(removing) ?? "")
@@ -368,9 +366,9 @@ export function LibrariesDialog() {
 								))}
 							</SettingsGroup>
 						)}
-						{snapshot.hidden.length === 0 ? null : (
+						{hidden.length === 0 ? null : (
 							<HiddenTitles
-								titles={snapshot.hidden}
+								titles={hidden}
 								pending={pending}
 								onEdit={edit}
 							/>

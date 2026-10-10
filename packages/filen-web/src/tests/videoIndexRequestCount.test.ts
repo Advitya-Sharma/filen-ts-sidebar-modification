@@ -6,6 +6,7 @@ import type { Dir, DirsAndFiles, File } from "@filen/sdk-rs"
 import { VideoIndexEngine, WALK_FLOOR_MS, type SnapshotStore } from "@/workers/videoIndex/engine"
 import { WalkCoordinator } from "@/workers/walkCoordinator"
 import { FakeDrive, driveEvent, driveFile, hexUuid } from "@/tests/support/videoDrive"
+import { catalogTitles, memoryCatalogStore } from "@/tests/support/videoIndex"
 
 // Every network call the library makes, by kind. Walks count the coordinator's runs: a joined walk is not a
 // second request.
@@ -52,6 +53,7 @@ let drive: FakeDrive
 let latest: bigint
 let clock: number
 let snapshots: Map<string, [Uint8Array | null, Uint8Array | null]>
+let catalogStore: ReturnType<typeof memoryCatalogStore>
 let engine: VideoIndexEngine
 let coordinator: WalkCoordinator<DirsAndFiles>
 let rootA: string
@@ -126,11 +128,18 @@ function startWorker(): void {
 			return Promise.resolve(drive.files.get(uuid))
 		},
 		store,
+		catalogStore,
 		now: () => clock,
 		yieldSlice: () => Promise.resolve()
 	})
 
 	Object.assign(sdkApi, {
+		videoCatalogSetWatch: (update: Parameters<VideoIndexEngine["setWatch"]>[0]) => {
+			engine.setWatch(update)
+
+			return Promise.resolve()
+		},
+		videoCatalogSetFacts: (update: Parameters<VideoIndexEngine["setFacts"]>[0]) => engine.setFacts(update),
 		videoIndexAccount: () => Promise.resolve(ACCOUNT),
 		getLastDriveEventId: () => {
 			counts.lastEventIds++
@@ -252,6 +261,7 @@ beforeEach(() => {
 	latest = 1_000n
 	clock = 1_800_000_000_000
 	snapshots = new Map()
+	catalogStore = memoryCatalogStore()
 	configFile = null
 	existing = "both"
 	rootA = drive.addDir(hexUuid(), "Movies")
@@ -303,12 +313,7 @@ describe("video library request counts", () => {
 		await open()
 
 		expect(counts).toMatchObject({ walks: 2, lastEventIds: 1, listDirectory: 0, downloads: 0, uploads: 0 })
-		expect(
-			videoLibrary
-				.getSnapshot()
-				.titles.map(title => title.title)
-				.sort()
-		).toEqual(["Heat", "Show"])
+		expect((await catalogTitles(engine)).map(title => title.title).sort()).toEqual(["Heat", "Show"])
 	})
 
 	it("an open in a later session is one request and no walk when the watermark matches", async () => {
@@ -318,7 +323,7 @@ describe("video library request counts", () => {
 
 		expect(requests()).toBe(1)
 		expect(counts.lastEventIds).toBe(1)
-		expect(videoLibrary.getSnapshot().titles).toHaveLength(2)
+		expect(await catalogTitles(engine)).toHaveLength(2)
 	})
 
 	it("a later session walks again when the drive changed meanwhile (past the floor)", async () => {
@@ -372,7 +377,7 @@ describe("video library request counts", () => {
 		await vi.advanceTimersByTimeAsync(5_000)
 
 		expect(requests()).toBe(0)
-		expect(videoLibrary.getSnapshot().titles.map(title => title.title)).toContain("Ronin")
+		expect((await catalogTitles(engine)).map(title => title.title)).toContain("Ronin")
 	})
 
 	it("a file renamed into a video name anywhere costs one lookup", async () => {

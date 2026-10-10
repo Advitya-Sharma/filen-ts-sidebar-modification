@@ -3,7 +3,7 @@ import { pathIsUnder } from "@/features/shell/lib/appShell.logic"
 import type { VideoRootStatus, VideoTitleView } from "@/workers/videoIndex/view.logic"
 
 // What the Videos shell shows of the library: per-directory phases, counts, the scan line and the home's
-// state, all derived from the configuration and the index snapshot already held (no requests).
+// state, all derived from the configuration and the index's root statuses and counts already held (no requests).
 
 export type VideoRootPhase = "loading" | "scanning" | "ready" | "empty" | "incomplete" | "missing"
 

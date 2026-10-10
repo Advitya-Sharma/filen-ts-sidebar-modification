@@ -460,7 +460,7 @@ describe("Videos browsing compiles", () => {
 		["src/features/videos/components/homeHero.tsx", "HomeHero"],
 		["src/features/videos/screens/videosSearch.tsx", "VideosSearchScreen"],
 		["src/features/videos/screens/videosSearch.tsx", "ResultGroup"],
-		["src/features/videos/hooks/useVideoHomeData.ts", "useVideoHomeData"]
+		["src/features/videos/hooks/useWatchStateLoaded.ts", "useWatchStateLoaded"]
 	])("compiles %s %s", (file, fnName) => {
 		const events = compile(file)
 
@@ -481,20 +481,19 @@ describe("Videos browsing compiles", () => {
 		expect(events.filter(event => event.kind !== "CompileSuccess")).toHaveLength(1)
 	})
 
-	it("memoizes the home rows and the grid view, so a cursor move skips rebuilding them", () => {
-		expect(
-			unguardedCalls(compileWithCode("src/features/videos/components/homeRows.tsx").code, "useHomeRows", ["buildHomeRows("])
-		).toEqual([])
-		expect(
-			unguardedCalls(compileWithCode("src/features/videos/components/videoGrid.tsx").code, "useGridModel", [
-				"gridView(",
-				"sourceTitles("
-			])
-		).toEqual([])
-		expect(
-			unguardedCalls(compileWithCode("src/features/videos/hooks/useVideoHomeData.ts").code, "useVideoHomeData", [
-				"buildVideoHomeIndex("
-			])
-		).toEqual([])
+	// The library stays in the SDK worker: the screens only show the rows, pages and results it sends.
+	it("builds no rows, grid orders, search index or watch index on the main thread", () => {
+		for (const file of [
+			"src/features/videos/components/homeRows.tsx",
+			"src/features/videos/components/videoGrid.tsx",
+			"src/features/videos/screens/videosSearch.tsx",
+			"src/features/videos/components/player/watchScreen.tsx"
+		]) {
+			const code = compileWithCode(file).code
+
+			for (const call of ["buildHomeRows(", "gridView(", "buildVideoSearchIndex(", "buildHomeIndex(", "nextMovieInDirectory("]) {
+				expect(code.includes(call), `${file} calls ${call}`).toBe(false)
+			}
+		}
 	})
 })

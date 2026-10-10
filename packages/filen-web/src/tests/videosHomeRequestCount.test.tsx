@@ -6,14 +6,12 @@ import { act, render } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import type { AnyFile } from "@filen/sdk-rs"
 import "@/lib/i18n"
-import type { VideoHomeItem, VideoTitleView } from "@/workers/videoIndex/view.logic"
+import type { HomeQuery, VideoCatalog } from "@/workers/videoIndex/catalog.logic"
 
-// What opening Videos Home costs: rendering it from a held library snapshot makes no listing or probe at all, and a
-// card's artwork may only cost a download once that card has been on screen for the dwell.
+// What opening Videos Home costs: rendering it from the library's catalog (one worker call) makes no listing or probe
+// at all, and a card's artwork may only cost a download once that card has been on screen for the dwell.
 
-const { sdkApi, library, observers } = vi.hoisted(() => {
-	const listeners = new Set<() => void>()
-
+const { sdkApi, catalog, observers } = vi.hoisted(() => {
 	return {
 		sdkApi: {
 			readVideoProbe: vi.fn(),
@@ -29,14 +27,10 @@ const { sdkApi, library, observers } = vi.hoisted(() => {
 			listDirectory: vi.fn(),
 			videoTitleArt: vi.fn(),
 			videoItemArt: vi.fn(),
-			videoHomeSubscribe: vi.fn(),
+			videoCatalogHome: vi.fn(),
 			playableVideoFiles: vi.fn()
 		},
-		library: {
-			listeners,
-			snapshot: { titles: [] as VideoTitleView[], byId: new Map<string, VideoTitleView>(), roots: [], loaded: true },
-			items: null as VideoHomeItem[] | null
-		},
+		catalog: { current: null as VideoCatalog | null },
 		observers: [] as { callback: IntersectionObserverCallback; options: IntersectionObserverInit | undefined; targets: Set<Element> }[]
 	}
 })
@@ -49,6 +43,7 @@ vi.mock("@/lib/storage/adapter", () => ({
 	kvSetJson: () => Promise.resolve(),
 	kvKeys: () => Promise.resolve([]),
 	kvEntriesJson: () => Promise.resolve([]),
+	kvEntriesJsonInSlices: () => Promise.resolve([]),
 	kvDelete: () => Promise.resolve()
 }))
 vi.mock("@tanstack/react-router", () => {
@@ -90,27 +85,9 @@ vi.mock("@/features/videos/lib/watchState", () => {
 })
 // The library client as the index's worker feeds it: art lookups and file rebuilds are worker calls, never requests.
 vi.mock("@/features/videos/lib/index", () => ({
+	VIDEO_CATALOG_KEY_PREFIX: ["videos", "catalog"],
 	videoLibrary: {
-		subscribe: (listener: () => void) => {
-			library.listeners.add(listener)
-
-			return () => library.listeners.delete(listener)
-		},
-		getSnapshot: () => library.snapshot,
-		getHomeItems: () => library.items,
-		retainHome: () => {
-			if (library.items === null) {
-				void (sdkApi.videoHomeSubscribe(true) as Promise<VideoHomeItem[]>).then(items => {
-					library.items = items
-
-					for (const listener of library.listeners) {
-						listener()
-					}
-				})
-			}
-
-			return () => undefined
-		},
+		markTargets: () => Promise.resolve([]),
 		titleArt: async (id: string, slot: string) => {
 			const art = (await sdkApi.videoTitleArt(id, slot)) as { candidates: unknown[]; files: { uuid: string; size: number }[] }
 
@@ -133,7 +110,7 @@ vi.mock("@/features/videos/lib/index", () => ({
 import { VideosHomeRows } from "@/features/videos/components/homeRows"
 import { CARD_PROBE_DWELL_MS } from "@/features/videos/lib/probeService.logic"
 import type { VideoLibraryRootView } from "@/features/videos/lib/libraryView.logic"
-import { movieItem, title } from "@/tests/support/videoHome"
+import { homeCatalog, movieItem, title } from "@/tests/support/videoHome"
 
 class FakeIntersectionObserver {
 	private readonly entry: { callback: IntersectionObserverCallback; options: IntersectionObserverInit | undefined; targets: Set<Element> }
@@ -221,9 +198,8 @@ beforeEach(() => {
 
 	const titles = Array.from({ length: 30 }, (_, i) => title(`m${String(i).padStart(2, "0")}`, { dateAdded: i }))
 
-	library.snapshot = { titles, byId: new Map(titles.map(item => [item.id, item])), roots: [], loaded: true }
-	library.items = null
-	sdkApi.videoHomeSubscribe.mockResolvedValue(titles.map(item => movieItem(item.id, { dateAdded: item.dateAdded })))
+	catalog.current = homeCatalog({ titles, items: titles.map(item => movieItem(item.id, { dateAdded: item.dateAdded })) })
+	sdkApi.videoCatalogHome.mockImplementation((query: HomeQuery) => Promise.resolve(catalog.current?.home(query)))
 	// Every poster comes from a sidecar image: stored nowhere yet, so only a download can make it.
 	sdkApi.videoTitleArt.mockImplementation((id: string) =>
 		Promise.resolve({
@@ -239,7 +215,7 @@ afterEach(() => {
 })
 
 describe("Videos home request counts", () => {
-	it("renders from the held snapshot with no listing or probe, and downloads art only for cards on screen after the dwell", async () => {
+	it("renders from the catalog with no listing or probe, and downloads art only for cards on screen after the dwell", async () => {
 		const scroll = document.createElement("div")
 		const client = new QueryClient()
 		const view = render(
@@ -248,11 +224,12 @@ describe("Videos home request counts", () => {
 
 		await flush()
 
-		// The library's videos: one worker read, no request.
-		expect(sdkApi.videoHomeSubscribe).toHaveBeenCalledTimes(1)
+		// The rows: one worker read, no request.
+		expect(sdkApi.videoCatalogHome).toHaveBeenCalledTimes(1)
 		expect(view.container.querySelectorAll("section")).toHaveLength(3)
-		// The first row holds the keyboard cursor, so it mounts at once; the rest wait for the viewport.
-		expect(view.container.querySelectorAll("[role=listitem]")).toHaveLength(30)
+		// The first row holds the keyboard cursor, so it mounts at once (the cards in view and the next); the rest wait
+		// for the viewport.
+		expect(view.container.querySelectorAll("[role=listitem]")).toHaveLength(8)
 
 		// The first two rows come within a viewport; their cards mount, still reading nothing.
 		act(() => {
@@ -260,7 +237,7 @@ describe("Videos home request counts", () => {
 		})
 		await flush()
 
-		expect(view.container.querySelectorAll("[role=listitem]")).toHaveLength(60)
+		expect(view.container.querySelectorAll("[role=listitem]")).toHaveLength(16)
 		expect(sdkApi.videoTitleArt).not.toHaveBeenCalled()
 
 		// Only the first row is within half a viewport: only its cards may read art, once near its visible part.

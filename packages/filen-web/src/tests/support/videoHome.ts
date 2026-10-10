@@ -1,8 +1,8 @@
 import { HLC_SPAN, itemKey, type ItemRec } from "@filen/shared/videos"
 import type { VideoHomeItem, VideoTitleView } from "@/workers/videoIndex/view.logic"
-import type { HomeData } from "@/features/videos/lib/homeRows.logic"
-import { homeEntries } from "@/features/videos/lib/homeRows.logic"
-import { buildTitleWatch, buildVideoHomeIndex } from "@/features/videos/lib/titleWatch.logic"
+import type { HomeRowModel, TitleWatchData } from "@/features/videos/lib/homeRows.logic"
+import { buildTitleWatch, buildVideoHomeIndex, homeEntries } from "@/features/videos/lib/titleWatch.logic"
+import { VideoCatalog, catalogContent } from "@/workers/videoIndex/catalog.logic"
 
 // Library fixtures for the Videos home, grid and search tests: titles, their videos and watch-state records.
 
@@ -95,19 +95,44 @@ export function watched(item: VideoHomeItem, at: number): [string, ItemRec] {
 	return [itemKey(item.stableUuid), { w: { t: at * HLC_SPAN + clock, d: "dev", pl: true, pc: 1 } }]
 }
 
-export function homeData({
+export const HOME_NOW = Date.UTC(2026, 9, 1)
+
+// The library's catalog as the SDK worker holds it, with these watch-state records.
+export function homeCatalog({
+	titles,
+	items,
+	records = []
+}: {
+	titles: VideoTitleView[]
+	items: VideoHomeItem[]
+	records?: [string, ItemRec][]
+}): VideoCatalog {
+	const catalog = new VideoCatalog()
+
+	catalog.setContent(catalogContent(titles, items))
+	catalog.setWatch({ reset: true, upserts: Object.fromEntries(records), removed: [], lastPlayedCeilingMs: undefined })
+
+	return catalog
+}
+
+export function homeRows({
 	titles,
 	items,
 	records = [],
 	roots = ["root"],
-	now = Date.UTC(2026, 9, 1)
+	now = HOME_NOW
 }: {
 	titles: VideoTitleView[]
 	items: VideoHomeItem[]
 	records?: [string, ItemRec][]
 	roots?: string[]
 	now?: number
-}): HomeData {
+}): HomeRowModel[] {
+	return homeCatalog({ titles, items, records }).home({ roots, now, heroPreviousId: null, heroSeed: 0 }).rows
+}
+
+// A card's watch state from an index over these videos.
+export function watchData({ items, records = [] }: { items: VideoHomeItem[]; records?: [string, ItemRec][] }): TitleWatchData {
 	const index = buildVideoHomeIndex({
 		items,
 		watchItems: Object.fromEntries(records),
@@ -116,13 +141,8 @@ export function homeData({
 	})
 
 	return {
-		titles,
-		byId: new Map(titles.map(item => [item.id, item])),
-		items,
 		index,
 		entries: homeEntries(index),
-		watch: buildTitleWatch(index),
-		roots,
-		now
+		watch: buildTitleWatch(index)
 	}
 }

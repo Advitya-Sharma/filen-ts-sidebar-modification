@@ -3,6 +3,7 @@ import { acquireStorage, type StorageHandle } from "@/lib/storage/leader"
 import { parseEnvelope, stringifyEnvelope } from "@/lib/serialize"
 import { log } from "@/lib/log"
 import { decodeValue } from "@/lib/storage/decode"
+import { nextTask } from "@/lib/nextTask"
 
 let handle: Promise<StorageHandle> | null = null
 
@@ -66,6 +67,44 @@ export async function kvEntriesJson<T>(prefix: string, schema: Type<T>): Promise
 	}
 
 	return out
+}
+
+// How long kvEntriesJsonInSlices decodes before it lets the thread go, and how many rows cross from the storage
+// worker per message.
+const DECODE_SLICE_MS = 4
+const ENTRIES_PAGE_ROWS = 2000
+
+// kvEntriesJson for a prefix that may hold tens of thousands of rows: read a page at a time and decoded a few
+// milliseconds at a time, so the thread it runs on keeps answering in between.
+export async function kvEntriesJsonInSlices<T>(prefix: string, schema: Type<T>): Promise<[string, T][]> {
+	const { api } = await storage()
+	const out: [string, T][] = []
+	let after: string | null = null
+	let sliceStart = performance.now()
+
+	for (;;) {
+		const rows = await api.kvEntriesPage(prefix, after, ENTRIES_PAGE_ROWS)
+
+		for (const [key, raw] of rows) {
+			const value = decodeKvValue(key, raw, schema)
+
+			if (value !== null) {
+				out.push([key, value])
+			}
+
+			if (performance.now() - sliceStart >= DECODE_SLICE_MS) {
+				await nextTask()
+
+				sliceStart = performance.now()
+			}
+		}
+
+		if (rows.length < ENTRIES_PAGE_ROWS) {
+			return out
+		}
+
+		after = rows.at(-1)?.[0] ?? null
+	}
 }
 
 export async function kvSetJson(key: string, value: unknown): Promise<void> {

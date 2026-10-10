@@ -1,5 +1,6 @@
 import {
 	useCallback,
+	useDeferredValue,
 	useEffect,
 	useLayoutEffect,
 	useMemo,
@@ -16,16 +17,25 @@ import { SearchXIcon, SlidersHorizontalIcon, ClapperboardIcon } from "lucide-rea
 import { useElementSize } from "@/lib/useElementSize"
 import { observeElementOffsetFromAttach } from "@/lib/virtualScroll"
 import { SearchInput } from "@/features/drive/components/searchInput"
+import { useDebouncedValue } from "@/lib/useDebouncedValue"
+import { log } from "@/lib/log"
 import { columnsForWidth } from "@/features/drive/lib/gridLayout"
 import { DEFAULT_DENSITY_INDEX, tileSizeForDensity } from "@/features/photos/lib/gridDensity"
-import { useVideoHomeData } from "@/features/videos/hooks/useVideoHomeData"
 import { useVideoCardActions } from "@/features/videos/hooks/useVideoCardActions"
 import { useCardFocus } from "@/features/videos/hooks/useCardFocus"
 import { useHistoryEntryKey } from "@/features/videos/hooks/useHistoryEntryKey"
 import { recallScroll, rememberScroll } from "@/features/videos/lib/scrollMemory"
 import { CardObserver } from "@/features/videos/lib/cardObserver"
 import { useGridPrefsQuery, useProbeFactsQuery, useVideosGridDensityQuery, setGridPrefs } from "@/features/videos/queries/grid"
-import { rowLiftPadding, titleCard, rowShape, type CardShape, type HomeData } from "@/features/videos/lib/homeRows.logic"
+import {
+	cachedGridCard,
+	fetchGridCard,
+	gridPageCard,
+	useCatalogGridHeadQuery,
+	useCatalogGridPages,
+	type GridPages
+} from "@/features/videos/queries/catalog"
+import { rowLiftPadding, type CardShape } from "@/features/videos/lib/homeRows.logic"
 import {
 	DEFAULT_GRID_PREFS,
 	GRID_QUALITIES,
@@ -33,20 +43,16 @@ import {
 	gridKeyAction,
 	gridPrefsKey,
 	withActiveRow,
-	gridView,
 	needsProbeFacts,
-	sourceTitles,
 	type GridPrefs,
 	type GridQuality,
 	type GridSort,
 	type GridSource,
-	type GridWatchFilter,
-	type ProbeFacts
+	type GridWatchFilter
 } from "@/features/videos/lib/videoGrid.logic"
-import { filterTitlesByQuery, titleSearchTokens } from "@/features/videos/lib/search.logic"
 import { VideoCard, type VideoCardAction } from "@/features/videos/components/videoCard"
 import type { VideoCardModel } from "@/features/videos/lib/homeRows.logic"
-import type { VideoTitleView } from "@/workers/videoIndex/view.logic"
+import type { GridQuery } from "@/workers/videoIndex/catalog.logic"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -87,10 +93,13 @@ const WATCH_CHIPS: readonly {
 	{ value: "watched", key: "videosGridFilterWatched" }
 ]
 
-const EMPTY_FACTS: ReadonlyMap<string, ProbeFacts> = new Map()
+// Before the first pages render (at transition priority, after the empty grid's first frame).
+const NO_PAGES: GridPages = { first: 0, pages: [] }
 
 // One session seed for the Random sort, so it reads the same until the page reloads.
 const RANDOM_SEED = Math.floor(Math.random() * 0x7fffffff)
+
+const SEARCH_DEBOUNCE_MS = 150
 
 function searchLabelKey(source: GridSource): "videosGridSearchMovies" | "videosGridSearchShows" | "videosGridSearchTitles" {
 	return source.kind === "movies"
@@ -251,30 +260,6 @@ export interface VideoGridProps {
 	rootNames: ReadonlyMap<string, string>
 }
 
-// The view's titles in order and what its cards are built from: a hook of its own, so the cursor and layout state of
-// the grid never join their memoization.
-function useGridModel({
-	source,
-	query,
-	prefs,
-	facts
-}: {
-	source: GridSource
-	query: string
-	prefs: GridPrefs
-	facts: ReadonlyMap<string, ProbeFacts>
-}) {
-	const data = useVideoHomeData()
-	const titles = sourceTitles(data.snapshot.titles, source)
-	const tokens = titleSearchTokens(titles)
-	const searched = filterTitlesByQuery({ titles, query, tokens })
-	const view = gridView({ titles: searched, prefs, watch: data.watch, facts, seed: RANDOM_SEED })
-	const shape: CardShape = source.kind === "other" ? "landscape" : source.kind === "root" ? rowShape(titles) : "poster"
-	const homeData: Pick<HomeData, "index" | "entries" | "watch"> = { index: data.index, entries: data.entries, watch: data.watch }
-
-	return { data, titles, view, shape, homeData }
-}
-
 // A library view: the Photos-style toolbar (search, sort, watch chips, resolution and directory, count, a coverage
 // hint for sorts and filters only a probe can answer) over a virtualized grid of cards. Sort and filters are
 // remembered per view.
@@ -285,11 +270,26 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 	const prefs = prefsQuery.data ?? DEFAULT_GRID_PREFS
 	const factsQuery = useProbeFactsQuery(needsProbeFacts(prefs))
 	const [query, setQuery] = useState("")
-	const { data, titles, view, shape, homeData } = useGridModel({ source, query, prefs, facts: factsQuery.data ?? EMPTY_FACTS })
-	const onAction = useVideoCardActions(data.items)
+	// Typing asks for the grid's order once it pauses; clearing the box at once.
+	const settledQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS)
+	const gridQuery: GridQuery = { source, prefs, query: query.trim() === "" ? "" : settledQuery, seed: RANDOM_SEED }
+	// A sort or filter only a probe can answer waits for the stored probes' facts.
+	const enabled = prefsQuery.status === "success" && (!needsProbeFacts(prefs) || factsQuery.isSuccess)
+	const headQuery = useCatalogGridHeadQuery(gridQuery, enabled)
+	// The grid lays out at transition priority once its first page lands (in short slices, never one long task).
+	const head = useDeferredValue(headQuery.data)
+	const total = head?.total ?? 0
+	const shape: CardShape = head?.shape ?? (source.kind === "other" ? "landscape" : "poster")
+	const onAction = useVideoCardActions()
 	const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null)
 	const { width } = useElementSize(scrollElement)
-	const [activeId, setActiveId] = useState<string | null>(null)
+	const [activeState, setActiveIndex] = useState(0)
+	// The card holding focus: its row stays mounted until the card a cursor move asked for took focus over.
+	const [focusedState, setFocusedIndex] = useState(0)
+	// The card a cursor move asked to focus, until it took focus; bumped `moves` makes an Enter or Play still waiting
+	// for its card's page act only if nothing moved since.
+	const pendingFocus = useRef<number | null>(null)
+	const moves = useRef(0)
 	const rowScroller = useRowScroller()
 	const cardFocus = useCardFocus<number>()
 	const router = useRouter()
@@ -316,18 +316,17 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 	const cardWidth = columns > 0 ? (contentWidth - GRID_GAP * (columns - 1)) / columns : 0
 	const artHeight = Math.round(cardWidth * (shape === "poster" ? 1.5 : 9 / 16))
 	const rowHeight = artHeight + CAPTION_HEIGHT
-	const rowCount = Math.ceil(view.titles.length / columns)
-	const activeIndex = Math.max(0, activeId === null ? 0 : view.titles.findIndex(title => title.id === activeId))
-	const rootOptions =
-		source.kind === "root"
-			? []
-			: [...new Set(titles.flatMap(title => title.roots))].map(uuid => ({ uuid, name: rootNames.get(uuid) ?? "" }))
+	const rowCount = columns > 0 ? Math.ceil(total / columns) : 0
+	const activeIndex = Math.max(0, Math.min(activeState, total - 1))
+	const focusedIndex = Math.max(0, Math.min(focusedState, total - 1))
+	const rootOptions = (head?.rootOptions ?? []).map(uuid => ({ uuid, name: rootNames.get(uuid) ?? "" }))
 	const showQuality = source.kind !== "shows"
 	const filtersActive = prefs.watch !== "all" || prefs.quality !== "all" || prefs.root !== "" || query.length > 0
 
 	function updatePrefs(next: GridPrefs): void {
 		setGridPrefs(source, next)
-		setActiveId(null)
+		pendingFocus.current = null
+		setActiveIndex(0)
 		scrollElement?.scrollTo({ top: 0 })
 	}
 
@@ -347,12 +346,13 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 		const action = gridKeyAction({
 			key: event.key,
 			index: activeIndex,
-			count: view.titles.length,
+			count: total,
 			columns,
 			pageRows: Math.max(1, Math.floor((scrollElement?.clientHeight ?? 0) / (rowHeight + GRID_GAP)))
 		})
 
-		if (action.kind === "none" || action.kind === "open") {
+		// Enter on the card holding focus opens it natively; while a cursor move waits for its card, that card opens.
+		if (action.kind === "none" || (action.kind === "open" && pendingFocus.current === null)) {
 			return
 		}
 
@@ -367,21 +367,41 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 
 		event.preventDefault()
 
-		if (action.kind === "play") {
-			const title = view.titles[activeIndex]
+		if (action.kind === "open" || action.kind === "play") {
+			// The cursor's card may not be on screen yet (its page on the way): act on it once it is.
+			const move = moves.current
+			const act = (card: VideoCardModel | undefined): void => {
+				if (card === undefined || move !== moves.current) {
+					return
+				}
 
-			if (title !== undefined) {
-				onAction("play", titleCard({ data: homeData, title, shape }))
+				if (action.kind === "play") {
+					onAction("play", card)
+				} else {
+					void router.navigate({ to: "/videos/title/$uuid", params: { uuid: card.title.id } })
+				}
+			}
+			const cached = cachedGridCard(gridQuery, activeIndex)
+
+			if (cached !== undefined) {
+				act(cached)
+			} else {
+				fetchGridCard(gridQuery, activeIndex).then(act, (e: unknown) => {
+					log.warn("videos.grid", "loading the card under the cursor failed", e)
+				})
 			}
 
 			return
 		}
 
-		setActiveId(view.titles[action.index]?.id ?? null)
+		moves.current++
+		pendingFocus.current = action.index
+		setActiveIndex(action.index)
 		rowScroller.scrollToRow(Math.floor(action.index / columns))
 		cardFocus.focus(action.index, { scroll: false })
 	}
 
+	// The toolbar shows at once; the grid (and its counts) once the library's worker sent the first page.
 	if (prefsQuery.status === "pending") {
 		return null
 	}
@@ -397,7 +417,7 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 
 	let body: ReactNode
 
-	if (titles.length === 0) {
+	if (head?.sourceCount === 0) {
 		body = (
 			<div className="flex flex-1 overflow-y-auto">
 				<EmptyMessage
@@ -407,7 +427,7 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 				/>
 			</div>
 		)
-	} else if (view.titles.length === 0) {
+	} else if (head !== undefined && total === 0) {
 		body = (
 			<div className="flex flex-1 overflow-y-auto">
 				<EmptyMessage
@@ -440,7 +460,7 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 					value={query}
 					onChange={next => {
 						setQuery(next)
-						setActiveId(null)
+						setActiveIndex(0)
 					}}
 					onClear={() => {
 						setQuery("")
@@ -471,14 +491,14 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 					role="status"
 					className="ml-auto text-xs text-muted-foreground tabular-nums"
 				>
-					{t("videosGridCount", { count: view.titles.length })}
+					{head === undefined ? "" : t("videosGridCount", { count: total })}
 				</span>
 			</div>
-			{view.coverage !== null && view.coverage.known < view.coverage.total ? (
+			{head !== undefined && head.coverage !== null && head.coverage.known < head.coverage.total ? (
 				<p className="shrink-0 px-4 pb-2 text-xs text-muted-foreground tabular-nums">
-					{view.coverage.kind === "runtime"
-						? t("videosGridCoverageRuntime", { known: view.coverage.known, total: view.coverage.total })
-						: t("videosGridCoverageQuality", { known: view.coverage.known, total: view.coverage.total })}
+					{head.coverage.kind === "runtime"
+						? t("videosGridCoverageRuntime", { known: head.coverage.known, total: head.coverage.total })
+						: t("videosGridCoverageQuality", { known: head.coverage.known, total: head.coverage.total })}
 				</p>
 			) : null}
 			{body ?? (
@@ -493,23 +513,29 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 						rememberScroll(scrollKey, event.currentTarget.scrollTop)
 					}}
 				>
-					{width > 0 ? (
+					{width > 0 && head !== undefined ? (
 						<VideoGridRows
 							scrollElement={scrollElement}
-							titles={view.titles}
+							gridQuery={gridQuery}
+							enabled={enabled}
+							total={total}
 							rowCount={rowCount}
 							columns={columns}
 							rowHeight={rowHeight}
 							cardWidth={cardWidth}
-							shape={shape}
-							homeData={homeData}
 							activeIndex={activeIndex}
+							focusedIndex={focusedIndex}
 							nearObserver={nearObserver}
 							restoreOffset={restoreOffset}
 							registerCard={cardFocus.register}
 							virtualizerRef={rowScroller.ref}
 							onFocusCard={index => {
-								setActiveId(view.titles[index]?.id ?? null)
+								if (pendingFocus.current === index) {
+									pendingFocus.current = null
+								}
+
+								setActiveIndex(index)
+								setFocusedIndex(index)
 							}}
 							onAction={onAction}
 						/>
@@ -521,9 +547,7 @@ export function VideoGrid({ source, name, rootNames }: VideoGridProps) {
 }
 
 interface GridCardProps {
-	title: VideoTitleView
-	shape: CardShape
-	homeData: Pick<HomeData, "index" | "entries" | "watch">
+	card: VideoCardModel
 	index: number
 	setSize: number
 	active: boolean
@@ -533,12 +557,12 @@ interface GridCardProps {
 	onAction: (action: VideoCardAction, card: VideoCardModel) => void
 }
 
-// Compiled, unlike the virtualizer host around it: builds the card's model and callbacks from what it is given, so a
-// scroll step or cursor move leaves every card whose props didn't change as it was.
-function GridCard({ title, shape, homeData, index, setSize, active, nearObserver, registerCard, onFocusCard, onAction }: GridCardProps) {
+// Compiled, unlike the virtualizer host around it: builds the card's callbacks from what it is given, so a scroll step
+// or cursor move leaves every card whose props didn't change as it was.
+function GridCard({ card, index, setSize, active, nearObserver, registerCard, onFocusCard, onAction }: GridCardProps) {
 	return (
 		<VideoCard
-			card={titleCard({ data: homeData, title, shape })}
+			card={card}
 			nearObserver={nearObserver}
 			active={active}
 			posInSet={index + 1}
@@ -556,14 +580,15 @@ function GridCard({ title, shape, homeData, index, setSize, active, nearObserver
 
 interface VideoGridRowsProps {
 	scrollElement: HTMLDivElement | null
-	titles: readonly VideoTitleView[]
+	gridQuery: GridQuery
+	enabled: boolean
+	total: number
 	rowCount: number
 	columns: number
 	rowHeight: number
 	cardWidth: number
-	shape: CardShape
-	homeData: Pick<HomeData, "index" | "entries" | "watch">
 	activeIndex: number
+	focusedIndex: number
 	nearObserver: CardObserver | null
 	// Where Back left the list, applied once the rows are laid out.
 	restoreOffset: number | undefined
@@ -574,17 +599,20 @@ interface VideoGridRowsProps {
 }
 
 // Owns the virtualizer, which opts its host out of the React Compiler and re-renders it on every range change; split
-// out so VideoGrid compiles. The row holding the cursor stays mounted when scrolled away, so focus never drops.
+// out so VideoGrid compiles. Only the pages holding the rendered rows are fetched from the library's worker; a card
+// whose page hasn't arrived keeps its slot empty. The rows holding the cursor and the focused card stay mounted when
+// scrolled away, so focus never drops (while a cursor move waits for its card, too).
 function VideoGridRows({
 	scrollElement,
-	titles,
+	gridQuery,
+	enabled,
+	total,
 	rowCount,
 	columns,
 	rowHeight,
 	cardWidth,
-	shape,
-	homeData,
 	activeIndex,
+	focusedIndex,
 	nearObserver,
 	restoreOffset,
 	registerCard,
@@ -595,7 +623,11 @@ function VideoGridRows({
 	// Changing with the layout is what makes the virtualizer re-read row sizes; stable while scrolling.
 	const getRowKey = useCallback((index: number) => `${String(columns)}:${String(rowHeight)}:${String(index)}`, [columns, rowHeight])
 	const activeRow = Math.floor(activeIndex / columns)
-	const rangeExtractor = useCallback((range: Range) => withActiveRow(defaultRangeExtractor(range), activeRow, range.count), [activeRow])
+	const focusedRow = Math.floor(focusedIndex / columns)
+	const rangeExtractor = useCallback(
+		(range: Range) => withActiveRow(withActiveRow(defaultRangeExtractor(range), activeRow, range.count), focusedRow, range.count),
+		[activeRow, focusedRow]
+	)
 	const virtualizer = useVirtualizer({
 		count: rowCount,
 		getScrollElement: () => scrollElement,
@@ -617,6 +649,13 @@ function VideoGridRows({
 	}, [virtualizer, virtualizerRef])
 
 	const totalSize = virtualizer.getTotalSize()
+	const virtualRows = virtualizer.getVirtualItems()
+	const firstCard = (virtualRows[0]?.index ?? 0) * columns
+	const lastCard = Math.min(total, ((virtualRows.at(-1)?.index ?? -1) + 1) * columns) - 1
+	const fetched = useCatalogGridPages(gridQuery, firstCard, lastCard, enabled)
+	// Cards render at transition priority (in short slices): the first screen of cards or a page landing never lays
+	// out in one task.
+	const pages = useDeferredValue(fetched, NO_PAGES)
 
 	useLayoutEffect(() => {
 		if (restored.current || restoreOffset === undefined || scrollElement === null || totalSize === 0) {
@@ -629,8 +668,13 @@ function VideoGridRows({
 
 	return (
 		<div style={{ position: "relative", width: "100%", height: totalSize }}>
-			{virtualizer.getVirtualItems().map(virtualRow => {
+			{virtualRows.map(virtualRow => {
 				const start = virtualRow.index * columns
+				const indices: number[] = []
+
+				for (let index = start; index < Math.min(total, start + columns); index++) {
+					indices.push(index)
+				}
 
 				return (
 					<div
@@ -647,17 +691,20 @@ function VideoGridRows({
 							columnGap: GRID_GAP
 						}}
 					>
-						{titles.slice(start, start + columns).map((title, column) => {
-							const index = start + column
+						{indices.map(index => {
+							const card = gridPageCard(pages, index)
 
-							return (
+							return card === undefined ? (
+								<div
+									key={`slot:${String(index)}`}
+									aria-hidden="true"
+								/>
+							) : (
 								<GridCard
-									key={title.id}
-									title={title}
-									shape={shape}
-									homeData={homeData}
+									key={card.key}
+									card={card}
 									index={index}
-									setSize={titles.length}
+									setSize={total}
 									active={index === activeIndex}
 									nearObserver={nearObserver}
 									registerCard={registerCard}

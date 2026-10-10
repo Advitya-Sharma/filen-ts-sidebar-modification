@@ -5,18 +5,11 @@ import { kvPreference } from "@/lib/storage/preference"
 import { noDiskPersister } from "@/queries/persist"
 import { queryClient } from "@/queries/client"
 import { DEFAULT_DENSITY_INDEX, clampDensityIndex } from "@/features/photos/lib/gridDensity"
-import { probeFacts } from "@/features/videos/lib/probeFacts"
-import {
-	DEFAULT_GRID_PREFS,
-	gridPrefsKey,
-	gridPrefsSchema,
-	type GridPrefs,
-	type GridSource,
-	type ProbeFacts
-} from "@/features/videos/lib/videoGrid.logic"
+import { videoLibrary } from "@/features/videos/lib/index"
+import { DEFAULT_GRID_PREFS, gridPrefsKey, gridPrefsSchema, type GridPrefs, type GridSource } from "@/features/videos/lib/videoGrid.logic"
 
 // The library grids' kv-backed state: sort and filters per library view, the card density, and what the stored
-// probe records say of runtimes and resolutions (all local reads).
+// probe records say of runtimes and resolutions, handed to the library's worker (all local reads).
 
 function gridPrefsQueryKey(source: GridSource) {
 	return ["videos", "gridPrefs", gridPrefsKey(source)] as const
@@ -54,13 +47,18 @@ export function useVideosGridDensityQuery(): UseQueryResult<number> {
 	})
 }
 
-// Runtime and picture height per file uuid (local reads only, see probeFacts), while a sort or filter needs them.
-export function useProbeFactsQuery(enabled: boolean): UseQueryResult<ReadonlyMap<string, ProbeFacts>> {
+// Settles once the worker holds every stored probe's runtime and picture height (once per session), while a sort or
+// filter needs them.
+export function useProbeFactsQuery(enabled: boolean): UseQueryResult<true> {
 	return useQuery({
 		queryKey: ["videos", "probeFacts"] as const,
-		queryFn: () => probeFacts.load(),
+		queryFn: async () => {
+			await videoLibrary.loadProbeFacts()
+
+			return true as const
+		},
 		enabled,
-		staleTime: 0,
+		staleTime: Infinity,
 		persister: noDiskPersister
 	})
 }

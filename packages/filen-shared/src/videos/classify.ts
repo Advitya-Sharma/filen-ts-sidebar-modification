@@ -327,6 +327,8 @@ interface DirSidecars {
 
 // Titles a slice of loose titles in one directory covers before the walk yields.
 const LOOSE_TITLES_PER_STEP = 256
+// Entries (directories, files, titles) handled between yields in the classifier's other long passes.
+const WORK_PER_STEP = 512
 
 interface VersionGroup {
 	files: number[]
@@ -431,21 +433,22 @@ class LibraryClassifier {
 	private readonly rootCount: number
 	private readonly nodeName: string[] = []
 	private readonly nodeUuid: string[] = []
-	private readonly nodeParent: Int32Array
-	private readonly nodeIgnored: Uint8Array
-	private readonly ownerOf: Int32Array
-	private readonly subtreeVideos: Int32Array
+	// The input's tree and file facts, filled by indexSteps before the walk.
+	private nodeParent: Int32Array = new Int32Array(0)
+	private nodeIgnored: Uint8Array = new Uint8Array(0)
+	private ownerOf: Int32Array = new Int32Array(0)
+	private subtreeVideos: Int32Array = new Int32Array(0)
 	// Like subtreeVideos, without anything below extras and sidecar directories.
-	private readonly subtreeMainVideos: Int32Array
-	private readonly childDirStart: Int32Array
-	private readonly childDirs: Int32Array
-	private readonly childFileStart: Int32Array
-	private readonly childFiles: Int32Array
-	private readonly fileKind: Uint8Array
-	private readonly fileStem: string[]
-	private readonly fileLowerStem: string[]
-	private readonly fileExtension: string[]
-	private readonly videoOfFile: Int32Array
+	private subtreeMainVideos: Int32Array = new Int32Array(0)
+	private childDirStart: Int32Array = new Int32Array(0)
+	private childDirs: Int32Array = new Int32Array(0)
+	private childFileStart: Int32Array = new Int32Array(0)
+	private childFiles: Int32Array = new Int32Array(0)
+	private fileKind: Uint8Array = new Uint8Array(0)
+	private fileStem: string[] = []
+	private fileLowerStem: string[] = []
+	private fileExtension: string[] = []
+	private videoOfFile: Int32Array = new Int32Array(0)
 	private readonly videos: LibraryVideo[] = []
 	private readonly videoArt = new Map<number, ArtBuild>()
 	private readonly movies: MovieBuild[] = []
@@ -453,11 +456,30 @@ class LibraryClassifier {
 	private readonly others: LibraryOther[] = []
 	private pendingExtras: PendingExtrasDir[] = []
 	private readonly seasonPacks = new Map<string, { series: SeriesBuild; code: number }>()
+	// Work done since the last yield, in entries (directories, files, titles) handled.
+	private work = 0
 
 	public constructor(input: LibraryScanInput) {
 		this.input = input
 		this.rootCount = input.roots.length
+	}
 
+	// True once about a slice's worth of entries was handled since the last yield (the caller then yields).
+	private tick(entries = 1): boolean {
+		this.work += entries
+
+		if (this.work < WORK_PER_STEP) {
+			return false
+		}
+
+		this.work = 0
+
+		return true
+	}
+
+	// Indexes the input: the directory tree, each file's kind and name parts, video counts per subtree.
+	private *indexSteps(): Generator<void, void> {
+		const input = this.input
 		const nodeCount = input.roots.length + input.dirs.length
 		const byUuid = new Map<string, number>()
 
@@ -472,6 +494,10 @@ class LibraryClassifier {
 
 		for (let d = 0; d < input.dirs.length; d++) {
 			const dir = input.dirs[d]
+
+			if (this.tick()) {
+				yield
+			}
 
 			if (dir === undefined || byUuid.has(dir.uuid)) {
 				continue
@@ -494,6 +520,10 @@ class LibraryClassifier {
 		for (let d = 0; d < input.dirs.length; d++) {
 			const node = dirNode[d] ?? -1
 			const dir = input.dirs[d]
+
+			if (this.tick()) {
+				yield
+			}
 
 			if (node < 0 || dir === undefined) {
 				continue
@@ -538,6 +568,10 @@ class LibraryClassifier {
 
 		for (let f = 0; f < fileCount; f++) {
 			const file = input.files[f]
+
+			if (this.tick()) {
+				yield
+			}
 
 			if (file === undefined) {
 				continue
@@ -600,10 +634,10 @@ class LibraryClassifier {
 			}
 		}
 
-		this.countSubtreeVideos()
+		yield* this.countSubtreeVideosSteps()
 	}
 
-	private countSubtreeVideos(): void {
+	private *countSubtreeVideosSteps(): Generator<void, void> {
 		const order: number[] = []
 
 		for (let root = 0; root < this.rootCount; root++) {
@@ -618,6 +652,10 @@ class LibraryClassifier {
 
 				order.push(node)
 
+				if (this.tick()) {
+					yield
+				}
+
 				for (let i = this.childDirStart[node] ?? 0, end = this.childDirStart[node + 1] ?? 0; i < end; i++) {
 					const child = this.childDirs[i] ?? 0
 
@@ -631,6 +669,10 @@ class LibraryClassifier {
 		for (let o = order.length - 1; o >= 0; o--) {
 			const node = order[o] ?? 0
 			let own = 0
+
+			if (this.tick()) {
+				yield
+			}
 
 			for (let i = this.childFileStart[node] ?? 0, end = this.childFileStart[node + 1] ?? 0; i < end; i++) {
 				const kind = this.fileKind[this.childFiles[i] ?? 0]
@@ -663,6 +705,8 @@ class LibraryClassifier {
 
 	// Yields after each directory, so a caller can spread one run over several tasks.
 	public *steps(): Generator<void, VideoLibrary> {
+		yield* this.indexSteps()
+
 		for (let root = 0; root < this.rootCount; root++) {
 			const scanRoot = this.input.roots[root]
 
@@ -677,7 +721,7 @@ class LibraryClassifier {
 			yield
 		}
 
-		return this.finish()
+		return yield* this.finishSteps()
 	}
 
 	// ── Tree access ──
@@ -1191,7 +1235,7 @@ class LibraryClassifier {
 				return
 			}
 
-			evidence = rootType === "shows" && depth === 1 ? LAYOUT_SERIES : this.seriesEvidence(node, listing)
+			evidence = rootType === "shows" && depth === 1 ? LAYOUT_SERIES : yield* this.seriesEvidence(node, listing)
 
 			if (evidence.isSeries && evidence.episodeFiles === null) {
 				this.buildSeries(node, root, listing)
@@ -1258,6 +1302,10 @@ class LibraryClassifier {
 		for (const child of listing.dirs) {
 			const name = this.nodeName[child] ?? ""
 
+			if (this.tick()) {
+				yield
+			}
+
 			if (DISC_DIRS.has(name.toLowerCase())) {
 				disc = !isRoot
 
@@ -1323,6 +1371,10 @@ class LibraryClassifier {
 	): Generator<void, void> {
 		for (const child of listing.dirs) {
 			const name = this.nodeName[child] ?? ""
+
+			if (this.tick()) {
+				yield
+			}
 
 			if (sidecarDirKind(name) !== null || DISC_DIRS.has(name.toLowerCase()) || (this.subtreeVideos[child] ?? 0) === 0) {
 				continue
@@ -1711,7 +1763,7 @@ class LibraryClassifier {
 
 	// ── Series ──
 
-	private seriesEvidence(node: number, listing: DirListing): SeriesEvidence {
+	private *seriesEvidence(node: number, listing: DirListing): Generator<void, SeriesEvidence> {
 		if (listing.nfos.some(file => this.lowerStem(file) === "tvshow")) {
 			return LAYOUT_SERIES
 		}
@@ -1719,6 +1771,10 @@ class LibraryClassifier {
 		const folderKey = identityKey(splitTitleYear(stripNameTags(this.nodeName[node] ?? "")).title)
 
 		for (const child of listing.dirs) {
+			if (this.tick()) {
+				yield
+			}
+
 			if ((this.subtreeVideos[child] ?? 0) === 0) {
 				continue
 			}
@@ -1745,6 +1801,10 @@ class LibraryClassifier {
 		for (const file of listing.videos) {
 			const stem = this.stem(file)
 			const match = parseEpisode(stem, false)
+
+			if (this.tick()) {
+				yield
+			}
 
 			if (match === null) {
 				continue
@@ -2022,9 +2082,10 @@ class LibraryClassifier {
 
 	// ── Output ──
 
-	private finish(): VideoLibrary {
-		const movies = this.mergeMovies()
-		const series = this.mergeSeries()
+	// Assembles the result: titles merged across roots, every video renumbered in the order titles use them.
+	private *finishSteps(): Generator<void, VideoLibrary> {
+		const merged = this.mergeMovies()
+		const mergedSeries = this.mergeSeries()
 		const remap = new Int32Array(this.videos.length).fill(-1)
 		const videos: LibraryVideo[] = []
 		const use = (video: number): number => {
@@ -2057,10 +2118,12 @@ class LibraryClassifier {
 					video: use(extra.video)
 				}))
 				.sort((a, b) => EXTRA_TYPE_ORDER.indexOf(a.type) - EXTRA_TYPE_ORDER.indexOf(b.type) || compareVideoNames(a.title, b.title))
+		const movies: LibraryMovie[] = []
 
-		return {
-			classifierVersion: CLASSIFIER_VERSION,
-			movies: movies.map(movie => ({
+		yield
+
+		for (const movie of merged) {
+			movies.push({
 				id: movie.id,
 				title: movie.title,
 				sortName: videoSortName(movie.title),
@@ -2073,12 +2136,41 @@ class LibraryClassifier {
 				extras: useExtras(movie.extras),
 				dateAdded: movie.dateAdded,
 				disc: movie.disc
-			})),
-			series: series.map(entry => this.finishSeries(entry, useVersions, useExtras)),
-			others: this.others.map(other => ({
+			})
+
+			if (this.tick()) {
+				yield
+			}
+		}
+
+		const series: LibrarySeries[] = []
+
+		for (const entry of mergedSeries) {
+			series.push(this.finishSeries(entry, useVersions, useExtras))
+
+			if (this.tick(entry.episodes.size)) {
+				yield
+			}
+		}
+
+		const others: LibraryOther[] = []
+
+		for (const other of this.others) {
+			others.push({
 				...other,
 				video: use(other.video)
-			})),
+			})
+
+			if (this.tick()) {
+				yield
+			}
+		}
+
+		return {
+			classifierVersion: CLASSIFIER_VERSION,
+			movies,
+			series,
+			others,
 			videos
 		}
 	}
@@ -2297,8 +2389,8 @@ export function classifyVideoLibrary(input: LibraryScanInput): VideoLibrary {
 	}
 }
 
-// classifyVideoLibrary in steps: each `next()` runs at most one directory's worth of work (indexing the
-// input, and assembling the result, run as one step each), so a caller can yield between slices.
+// classifyVideoLibrary in steps: each `next()` runs a bounded share of the work (a few hundred input records
+// indexed, one directory classified, or a part of the result assembled), so a caller can yield between slices.
 export function* classifyVideoLibrarySteps(input: LibraryScanInput): Generator<void, VideoLibrary> {
 	const classifier = new LibraryClassifier(input)
 

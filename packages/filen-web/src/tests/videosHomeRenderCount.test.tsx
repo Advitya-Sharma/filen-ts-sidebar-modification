@@ -4,28 +4,28 @@ import { createElement, type ComponentType, type ReactNode } from "react"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, fireEvent, render } from "@testing-library/react"
+import { act, fireEvent, render, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { transformFileSync } from "@babel/core"
 import "@/lib/i18n"
-import type { VideoHomeItem, VideoTitleView } from "@/workers/videoIndex/view.logic"
 import type { VideoLibraryRootView } from "@/features/videos/lib/libraryView.logic"
+import type { HomeQuery } from "@/workers/videoIndex/catalog.logic"
+import type { VideoCatalog } from "@/workers/videoIndex/catalog.logic"
 
 // What a keyboard cursor move on Home costs in renders: only the card losing and the card gaining the tab stop. The
 // tests run uncompiled, so the home rows and the hooks they use are compiled here the way vite.config.ts compiles
 // them, into a git-ignored directory inside the package (so the test runner transforms them and resolves aliases).
 
-const { library, renders, compiledPath } = vi.hoisted(() => ({
+const { catalog, renders, compiledPath } = vi.hoisted(() => ({
 	compiledPath: (name: string) => `${process.cwd()}/test-results/videos-compiled-${String(process.pid)}/${name}.jsx`,
-	library: {
-		listeners: new Set<() => void>(),
-		snapshot: { titles: [] as VideoTitleView[], byId: new Map<string, VideoTitleView>(), roots: [], loaded: true },
-		items: [] as VideoHomeItem[]
-	},
+	catalog: { current: null as VideoCatalog | null },
 	renders: { count: 0 }
 }))
 
-vi.mock("@/lib/sdk/client", () => ({ sdkApi: {} }))
+// The rows come from the library's worker; here, the same catalog code in-process.
+vi.mock("@/lib/sdk/client", () => ({
+	sdkApi: { videoCatalogHome: (query: HomeQuery) => Promise.resolve(catalog.current?.home(query)) }
+}))
 vi.mock("@/features/videos/workers/frame.worker.ts?worker", () => ({ default: vi.fn() }))
 vi.mock("@tanstack/react-router", () => {
 	const navigate = vi.fn()
@@ -50,7 +50,7 @@ vi.mock("@tanstack/react-router", () => {
 		}) => createElement("a", { ...props, href: "#" }, children)
 	}
 })
-vi.mock("@/features/videos/hooks/useVideoHomeData", () => import(/* @vite-ignore */ compiledPath("useVideoHomeData")))
+vi.mock("@/features/videos/hooks/useWatchStateLoaded", () => import(/* @vite-ignore */ compiledPath("useWatchStateLoaded")))
 vi.mock("@/features/videos/hooks/useVideoCardActions", () => import(/* @vite-ignore */ compiledPath("useVideoCardActions")))
 vi.mock("@/features/videos/hooks/useCardFocus", () => import(/* @vite-ignore */ compiledPath("useCardFocus")))
 vi.mock("@/features/videos/components/videoCard", () => import(/* @vite-ignore */ compiledPath("videoCard")))
@@ -77,19 +77,11 @@ vi.mock("@/features/videos/lib/watchState", () => {
 	}
 })
 vi.mock("@/features/videos/lib/index", () => ({
-	videoLibrary: {
-		subscribe: (listener: () => void) => {
-			library.listeners.add(listener)
-
-			return () => library.listeners.delete(listener)
-		},
-		getSnapshot: () => library.snapshot,
-		getHomeItems: () => library.items,
-		retainHome: () => () => undefined
-	}
+	VIDEO_CATALOG_KEY_PREFIX: ["videos", "catalog"],
+	videoLibrary: { markTargets: () => Promise.resolve([]) }
 }))
 
-import { movieItem, title } from "@/tests/support/videoHome"
+import { homeCatalog, movieItem, title } from "@/tests/support/videoHome"
 
 class SizedResizeObserver implements ResizeObserver {
 	private readonly callback: ResizeObserverCallback
@@ -132,7 +124,7 @@ let VideosHomeRows: ComponentType<{ roots: readonly VideoLibraryRootView[]; scro
 const COMPILED: readonly (readonly [string, string])[] = [
 	["src/features/videos/components/homeRows.tsx", "homeRows"],
 	["src/features/videos/components/videoCard.tsx", "videoCard"],
-	["src/features/videos/hooks/useVideoHomeData.ts", "useVideoHomeData"],
+	["src/features/videos/hooks/useWatchStateLoaded.ts", "useWatchStateLoaded"],
 	["src/features/videos/hooks/useVideoCardActions.ts", "useVideoCardActions"],
 	["src/features/videos/hooks/useCardFocus.ts", "useCardFocus"]
 ]
@@ -167,8 +159,7 @@ beforeEach(() => {
 
 	const titles = Array.from({ length: 30 }, (_, i) => title(`m${String(i).padStart(2, "0")}`, { dateAdded: i }))
 
-	library.snapshot = { titles, byId: new Map(titles.map(item => [item.id, item])), roots: [], loaded: true }
-	library.items = titles.map(item => movieItem(item.id, { dateAdded: item.dateAdded }))
+	catalog.current = homeCatalog({ titles, items: titles.map(item => movieItem(item.id, { dateAdded: item.dateAdded })) })
 	renders.count = 0
 })
 
@@ -177,7 +168,7 @@ afterEach(() => {
 })
 
 describe("Videos home render counts", () => {
-	it("re-renders only the two cards a cursor move touches", () => {
+	it("re-renders only the two cards a cursor move touches", async () => {
 		const view = render(
 			createElement(
 				QueryClientProvider,
@@ -185,13 +176,23 @@ describe("Videos home render counts", () => {
 				createElement(VideosHomeRows, { roots: ROOTS, scrollElement: document.createElement("div") })
 			)
 		)
+
+		await waitFor(() => {
+			expect(view.container.querySelector('[data-video-card][tabindex="0"]')).not.toBeNull()
+		})
+
 		const first = view.container.querySelector<HTMLElement>('[data-video-card][tabindex="0"]')
 
 		expect(first).not.toBeNull()
-		expect(view.container.querySelectorAll("[data-video-card]")).toHaveLength(30)
+		// The cards in view and the next; focusing the row mounts the rest.
+		expect(view.container.querySelectorAll("[data-video-card]")).toHaveLength(8)
 
 		act(() => {
 			first?.focus()
+		})
+
+		await waitFor(() => {
+			expect(view.container.querySelectorAll("[data-video-card]")).toHaveLength(30)
 		})
 
 		const before = renders.count

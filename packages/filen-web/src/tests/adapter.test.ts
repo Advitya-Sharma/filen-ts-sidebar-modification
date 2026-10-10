@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { type } from "arktype"
-import { kvClear, kvGetJson, kvHas, kvSetJson } from "@/lib/storage/adapter"
+import { kvClear, kvEntriesJson, kvEntriesJsonInSlices, kvGetJson, kvHas, kvSetJson } from "@/lib/storage/adapter"
 import { log } from "@/lib/log"
 
 // node vitest cannot provide navigator.locks/BroadcastChannel/real workers (leader.ts's actual
@@ -21,6 +21,14 @@ const { fakeStore, fakeApi } = vi.hoisted(() => {
 			return Promise.resolve()
 		},
 		kvKeys: (prefix: string) => Promise.resolve([...fakeStore.keys()].filter(k => k.startsWith(prefix))),
+		kvEntries: (prefix: string) => Promise.resolve([...fakeStore.entries()].filter(([k]) => k.startsWith(prefix))),
+		kvEntriesPage: (prefix: string, after: string | null, limit: number) =>
+			Promise.resolve(
+				[...fakeStore.entries()]
+					.filter(([k]) => k.startsWith(prefix) && (after === null || k > after))
+					.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+					.slice(0, limit)
+			),
 		kvDeletePrefix: (prefix: string) => {
 			for (const key of [...fakeStore.keys()]) {
 				if (key.startsWith(prefix)) {
@@ -50,6 +58,28 @@ beforeEach(() => {
 })
 
 describe("storage adapter (Map-backed fake StorageApi)", () => {
+	it("reads and decodes a large prefix in pages and slices, as the one-pass read would", async () => {
+		const schema = type({ n: "number" })
+
+		for (let n = 0; n < 20_000; n++) {
+			await kvSetJson(`many.${String(n)}`, n % 997 === 0 ? { n: "not a number" } : { n })
+		}
+
+		let turns = 0
+		const counter = setInterval(() => {
+			turns++
+		}, 0)
+		const sliced = await kvEntriesJsonInSlices("many.", schema)
+
+		clearInterval(counter)
+
+		const byKey = (rows: [string, unknown][]) => new Map(rows)
+
+		expect(byKey(sliced)).toEqual(byKey(await kvEntriesJson("many.", schema)))
+		expect(sliced).toHaveLength(20_000 - 21)
+		expect(turns).toBeGreaterThan(0)
+	})
+
 	it("roundtrips a bigint through kvSetJson/kvGetJson", async () => {
 		const schema = type({ n: "bigint" })
 

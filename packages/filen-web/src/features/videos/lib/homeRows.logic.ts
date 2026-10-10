@@ -1,13 +1,10 @@
 import { fastLocaleCompare } from "@filen/shared"
 import {
-	buildContinueWatchingRow,
-	selectContinueWatching,
-	selectLatestEpisodes,
-	selectLatestMovies,
-	selectNextUp,
 	selectSeriesPrimaryAction,
+	type ContinueWatchingCard,
 	type HomeEntry,
-	type HomeIndex
+	type HomeIndex,
+	type LatestEpisodeCard
 } from "@filen/shared/videos"
 import type { VideoHomeItem, VideoTitleView } from "@/workers/videoIndex/view.logic"
 import {
@@ -19,8 +16,8 @@ import {
 	type TitleWatch
 } from "@/features/videos/lib/titleWatch.logic"
 
-// The Videos home: which rows exist, in which order, and the cards in each, all from the library's titles, its
-// videos and the watch state already held. Plain and DOM-free.
+// The Videos home: which rows exist, in which order, and the cards in each, from the library's titles, its videos
+// and the watch state. Plain and DOM-free; the SDK worker builds them and only the rows cross to the page.
 
 export const HOME_ROW_MAX_CARDS = 40
 export const HOME_ROOT_ROW_CARDS = 20
@@ -88,17 +85,12 @@ export function seeAllTarget(row: Pick<HomeRowModel, "kind">): SeeAllTarget | nu
 	}
 }
 
-export interface HomeData {
-	titles: readonly VideoTitleView[]
-	byId: ReadonlyMap<string, VideoTitleView>
-	items: readonly VideoHomeItem[]
+// The watch state a title's card reads: an index of that title's own videos (every title-level derivation reads only
+// them), its entries by stable uuid and its watch summary.
+export interface TitleWatchData {
 	index: HomeIndex
-	// The index's entries by stable uuid.
 	entries: ReadonlyMap<string, HomeEntry>
 	watch: ReadonlyMap<string, TitleWatch>
-	// Enabled library directories, in their configured order.
-	roots: readonly string[]
-	now: number
 }
 
 // A title's own card: its poster or still, year, badge and what Play starts.
@@ -108,7 +100,7 @@ export function titleCard({
 	shape,
 	key
 }: {
-	data: Pick<HomeData, "index" | "entries" | "watch">
+	data: TitleWatchData
 	title: VideoTitleView
 	shape: CardShape
 	key?: string
@@ -140,7 +132,7 @@ export function titleCard({
 // What a title's Play starts: a series' next or in-progress episode, else its primary video, resumed when it has a
 // resume point.
 export function titlePlay(
-	{ index, entries }: Pick<HomeData, "index" | "entries">,
+	{ index, entries }: Pick<TitleWatchData, "index" | "entries">,
 	title: VideoTitleView
 ): { stableUuid: string; resumeSec: number } | null {
 	if (title.unsupported) {
@@ -170,23 +162,19 @@ export function titlePlay(
 	}
 }
 
-function itemByStableUuid(items: readonly VideoHomeItem[]): Map<string, VideoHomeItem> {
-	return new Map(items.map(item => [item.stableUuid, item]))
-}
-
 function episodeSubline(item: VideoHomeItem): CardSubline {
 	return { kind: "episode", season: item.season, episode: item.episode, episodeEnd: item.episodeEnd, title: item.episodeTitle }
 }
 
 // A card for one video: an episode's still, or a movie's or other video's still with its resume point.
-function entryCard({
+export function entryCard({
 	data,
 	entry,
 	item,
 	title,
 	type
 }: {
-	data: Pick<HomeData, "watch">
+	data: Pick<TitleWatchData, "watch">
 	entry: HomeEntry
 	item: VideoHomeItem
 	title: VideoTitleView
@@ -234,7 +222,7 @@ export function itemCard({
 	item,
 	title
 }: {
-	data: Pick<HomeData, "entries" | "watch">
+	data: Pick<TitleWatchData, "entries" | "watch">
 	item: VideoHomeItem
 	title: VideoTitleView
 }): VideoCardModel {
@@ -260,41 +248,58 @@ export function itemCard({
 	return entryCard({ data, entry, item, title, type: entry.state.resumable ? "resume" : "latest" })
 }
 
-function continueWatchingCards(data: HomeData, byStable: ReadonlyMap<string, VideoHomeItem>): VideoCardModel[] {
-	const row = buildContinueWatchingRow({
-		resume: selectContinueWatching({ index: data.index, limit: HOME_ROW_MAX_CARDS }),
-		nextUp: selectNextUp({ index: data.index, now: data.now, limit: HOME_ROW_MAX_CARDS }),
-		limit: HOME_ROW_MAX_CARDS
-	})
+// What the home rows are drawn from. Every selection is the one a single index over the whole library would make;
+// a card's watch state comes from its own title's videos.
+export interface HomeRowsSource {
+	// Enabled library directories, in their configured order.
+	roots: readonly string[]
+	// Continue Watching merged with Next Up, newest play first.
+	continueWatching: readonly ContinueWatchingCard[]
+	// Movies newest first, one per title.
+	latestMovies: readonly VideoTitleView[]
+	latestEpisodes: readonly LatestEpisodeCard[]
+	// The first `limit` titles of a kind in name order (byTitleName).
+	topByName: (kind: "movie" | "series", limit: number) => VideoTitleView[]
+	// The first `limit` titles of a directory, or of other videos, newest first (newestFirst).
+	topNewest: (filter: { root: string } | { kind: "other" }, limit: number) => VideoTitleView[]
+	title: (id: string) => VideoTitleView | undefined
+	item: (stableUuid: string) => VideoHomeItem | undefined
+	watchData: (titleId: string) => TitleWatchData
+}
+
+function continueWatchingCards(source: HomeRowsSource): VideoCardModel[] {
 	const out: VideoCardModel[] = []
 
-	for (const card of row) {
-		const item = byStable.get(card.entry.video.id)
-		const title = data.byId.get(entryTitleId(card.entry))
+	for (const card of source.continueWatching) {
+		const item = source.item(card.entry.video.id)
+		const title = source.title(entryTitleId(card.entry))
 
 		if (item !== undefined && title !== undefined) {
-			out.push(entryCard({ data, entry: card.entry, item, title, type: card.type }))
+			out.push(entryCard({ data: source.watchData(title.id), entry: card.entry, item, title, type: card.type }))
 		}
 	}
 
 	return out
 }
 
-function latestEpisodeCards(data: HomeData, byStable: ReadonlyMap<string, VideoHomeItem>): VideoCardModel[] {
+function latestEpisodeCards(source: HomeRowsSource): VideoCardModel[] {
 	const out: VideoCardModel[] = []
 
-	for (const card of selectLatestEpisodes({ index: data.index, limit: HOME_ROW_MAX_CARDS })) {
-		const title = data.byId.get(card.seriesId)
+	for (const card of source.latestEpisodes) {
+		const title = source.title(card.seriesId)
 
 		if (title === undefined) {
 			continue
 		}
 
-		if (card.type === "episode") {
-			const item = byStable.get(card.entry.video.id)
+		const data = source.watchData(title.id)
 
-			if (item !== undefined) {
-				out.push(entryCard({ data, entry: card.entry, item, title, type: "latest" }))
+		if (card.type === "episode") {
+			const item = source.item(card.entry.video.id)
+			const entry = data.entries.get(card.entry.video.id)
+
+			if (item !== undefined && entry !== undefined) {
+				out.push(entryCard({ data, entry, item, title, type: "latest" }))
 			}
 
 			continue
@@ -315,45 +320,12 @@ function latestEpisodeCards(data: HomeData, byStable: ReadonlyMap<string, VideoH
 	return out
 }
 
-function byTitleName(a: VideoTitleView, b: VideoTitleView): number {
+export function byTitleName(a: VideoTitleView, b: VideoTitleView): number {
 	return fastLocaleCompare(a.sortName, b.sortName) || a.year - b.year || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 }
 
-function newestFirst(a: VideoTitleView, b: VideoTitleView): number {
+export function newestFirst(a: VideoTitleView, b: VideoTitleView): number {
 	return b.dateAdded - a.dateAdded || byTitleName(a, b)
-}
-
-// The first `limit` of `titles` in `compare` order, without sorting the rest.
-export function topTitles(titles: readonly VideoTitleView[], limit: number, compare: (a: VideoTitleView, b: VideoTitleView) => number) {
-	const out: VideoTitleView[] = []
-
-	for (const title of titles) {
-		if (out.length === limit) {
-			const last = out[limit - 1]
-
-			if (last === undefined || compare(title, last) >= 0) {
-				continue
-			}
-
-			out.pop()
-		}
-
-		let at = out.length
-
-		while (at > 0) {
-			const previous = out[at - 1]
-
-			if (previous === undefined || compare(previous, title) <= 0) {
-				break
-			}
-
-			at--
-		}
-
-		out.splice(at, 0, title)
-	}
-
-	return out
 }
 
 // The nominal aspect of a title's card art: posters for movies and series, stills for other videos.
@@ -375,94 +347,59 @@ export function rowShape(titles: readonly VideoTitleView[]): CardShape {
 }
 
 function titleRow({
-	data,
+	source,
 	id,
 	kind,
 	rootUuid,
-	titles,
-	limit,
-	compare
+	titles
 }: {
-	data: HomeData
+	source: HomeRowsSource
 	id: string
 	kind: HomeRowKind
 	rootUuid: string | null
 	titles: readonly VideoTitleView[]
-	limit: number
-	compare: (a: VideoTitleView, b: VideoTitleView) => number
 }): HomeRowModel {
-	const top = topTitles(titles, limit, compare)
-	const shape = rowShape(top)
+	const shape = rowShape(titles)
 
 	return {
 		id,
 		kind,
 		rootUuid,
 		shape,
-		cards: top.map(title => titleCard({ data, title, shape }))
+		cards: titles.map(title => titleCard({ data: source.watchData(title.id), title, shape }))
 	}
-}
-
-export function homeEntries(index: HomeIndex): Map<string, HomeEntry> {
-	return new Map(index.entries.map(entry => [entry.video.id, entry]))
 }
 
 // Every home row in order; rows with no cards are left out.
-export function buildHomeRows(data: HomeData): HomeRowModel[] {
-	const byStable = itemByStableUuid(data.items)
-	const movies: VideoTitleView[] = []
-	const shows: VideoTitleView[] = []
-	const others: VideoTitleView[] = []
-	const byRoot = new Map<string, VideoTitleView[]>(data.roots.map(uuid => [uuid, []]))
-
-	for (const title of data.titles) {
-		;(title.kind === "movie" ? movies : title.kind === "series" ? shows : others).push(title)
-
-		for (const root of title.roots) {
-			byRoot.get(root)?.push(title)
-		}
-	}
-
-	const latestMovies: VideoTitleView[] = []
-
-	for (const entry of selectLatestMovies({ index: data.index, limit: HOME_ROW_MAX_CARDS })) {
-		const title = data.byId.get(entry.group)
-
-		if (title !== undefined) {
-			latestMovies.push(title)
-		}
-	}
-
+export function buildHomeRows(source: HomeRowsSource): HomeRowModel[] {
 	const rows: HomeRowModel[] = [
-		{ id: "continue", kind: "continue", rootUuid: null, shape: "landscape", cards: continueWatchingCards(data, byStable) },
+		{ id: "continue", kind: "continue", rootUuid: null, shape: "landscape", cards: continueWatchingCards(source) },
 		{
 			id: "latestMovies",
 			kind: "latestMovies",
 			rootUuid: null,
 			shape: "poster",
-			cards: latestMovies.map(title => titleCard({ data, title, shape: "poster" }))
+			cards: source.latestMovies.map(title => titleCard({ data: source.watchData(title.id), title, shape: "poster" }))
 		},
 		{
 			id: "latestEpisodes",
 			kind: "latestEpisodes",
 			rootUuid: null,
 			shape: "landscape",
-			cards: latestEpisodeCards(data, byStable)
+			cards: latestEpisodeCards(source)
 		},
-		titleRow({ data, id: "movies", kind: "movies", rootUuid: null, titles: movies, limit: HOME_ROW_MAX_CARDS, compare: byTitleName }),
-		titleRow({ data, id: "shows", kind: "shows", rootUuid: null, titles: shows, limit: HOME_ROW_MAX_CARDS, compare: byTitleName }),
-		...data.roots.map(uuid =>
+		titleRow({ source, id: "movies", kind: "movies", rootUuid: null, titles: source.topByName("movie", HOME_ROW_MAX_CARDS) }),
+		titleRow({ source, id: "shows", kind: "shows", rootUuid: null, titles: source.topByName("series", HOME_ROW_MAX_CARDS) }),
+		...source.roots.map(uuid =>
 			titleRow({
-				data,
+				source,
 				id: `root:${uuid}`,
 				kind: "root",
 				rootUuid: uuid,
-				titles: byRoot.get(uuid) ?? [],
-				limit: HOME_ROOT_ROW_CARDS,
-				compare: newestFirst
+				titles: source.topNewest({ root: uuid }, HOME_ROOT_ROW_CARDS)
 			})
 		),
-		titleRow({ data, id: "other", kind: "other", rootUuid: null, titles: others, limit: HOME_ROW_MAX_CARDS, compare: newestFirst })
+		titleRow({ source, id: "other", kind: "other", rootUuid: null, titles: source.topNewest({ kind: "other" }, HOME_ROW_MAX_CARDS) })
 	]
 
 	return rows.filter(row => row.cards.length > 0)
@@ -476,21 +413,25 @@ export interface HeroModel {
 	card: VideoCardModel | null
 }
 
+// Titles the hero may show when nothing is in Continue Watching: a backdrop of their own and playable here, by id.
+export function heroCandidates(titles: readonly VideoTitleView[]): VideoTitleView[] {
+	return titles.filter(title => title.backdrop !== null && !title.unsupported).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
 // One per session: the previous pick while it is still eligible (its Continue Watching card refreshed), else the top
-// Continue Watching card's title, else a title with a backdrop of its own picked by `seed` (0-1).
+// Continue Watching card's title, else one of `candidates` (heroCandidates) picked by `seed` (0-1).
 export function pickHero({
 	rows,
-	titles,
+	candidates,
 	previousId,
 	seed
 }: {
 	rows: readonly HomeRowModel[]
-	titles: readonly VideoTitleView[]
+	candidates: readonly VideoTitleView[]
 	previousId: string | null
 	seed: number
 }): HeroModel | null {
 	const continueCards = rows.find(row => row.kind === "continue")?.cards ?? []
-	const eligible = titles.filter(title => title.backdrop !== null && !title.unsupported)
 
 	if (previousId !== null) {
 		const card = continueCards.find(candidate => candidate.title.id === previousId)
@@ -499,7 +440,7 @@ export function pickHero({
 			return { title: card.title, card }
 		}
 
-		const kept = eligible.find(title => title.id === previousId)
+		const kept = candidates.find(title => title.id === previousId)
 
 		if (kept !== undefined) {
 			return { title: kept, card: null }
@@ -512,12 +453,7 @@ export function pickHero({
 		return { title: top.title, card: top }
 	}
 
-	if (eligible.length === 0) {
-		return null
-	}
-
-	const sorted = [...eligible].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-	const picked = sorted[Math.min(sorted.length - 1, Math.floor(seed * sorted.length))]
+	const picked = candidates[Math.min(candidates.length - 1, Math.floor(seed * candidates.length))]
 
 	return picked === undefined ? null : { title: picked, card: null }
 }

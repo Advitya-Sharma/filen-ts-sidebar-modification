@@ -52,6 +52,10 @@ export interface TitleWatch {
 	lastPlayedMs: number
 }
 
+export function homeEntries(index: HomeIndex): Map<string, HomeEntry> {
+	return new Map(index.entries.map(entry => [entry.video.id, entry]))
+}
+
 // The title an entry belongs to: an episode's series, else its version group (the movie or other video).
 export function entryTitleId(entry: HomeEntry): string {
 	return entry.video.itemClass === "episode" ? (entry.video.seriesId ?? entry.group) : entry.group

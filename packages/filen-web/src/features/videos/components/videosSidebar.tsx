@@ -16,7 +16,7 @@ import { cn } from "@filen/shared"
 import { ResizableSidebarPanel } from "@/features/shell/components/sidebarPanel"
 import { GROUP_HEADER_CLASS, SIDEBAR_NAV_ITEM_CLASS } from "@/features/shell/lib/sidebarNavItem"
 import { useVideoLibraryView, useVideoRootName } from "@/features/videos/hooks/useVideoLibraryView"
-import { isRootBusy, videoKindCounts, type VideoLibraryRootView } from "@/features/videos/lib/libraryView.logic"
+import { isRootBusy, type VideoLibraryRootView } from "@/features/videos/lib/libraryView.logic"
 import { openVideosChooser, setVideosLibrariesOpen } from "@/features/videos/store/useVideosDialogStore"
 import { useIsOnline } from "@/lib/useIsOnline"
 import { Button } from "@/components/ui/button"
@@ -75,7 +75,7 @@ function NavRow({
 // A library directory: its count, or a spinner or a warning in the count's place.
 function RootRow({ root }: { root: VideoLibraryRootView }) {
 	const { t } = useTranslation("videos")
-	const name = useVideoRootName(root.uuid, root.status?.name)
+	const name = useVideoRootName(root.uuid, root)
 	const busy = isRootBusy(root.phase)
 	const warn = root.phase === "incomplete" || root.phase === "missing"
 
@@ -114,14 +114,14 @@ function RootRow({ root }: { root: VideoLibraryRootView }) {
 }
 
 // The Videos contextual sidebar: Home and the kind views with their counts, the library directories with
-// their status, and the Libraries dialog below. Text only; every count comes from the index already held.
+// their status, and the Libraries dialog below. Text only; every count comes from the index's summary already held.
 export function VideosSidebar() {
 	const { t } = useTranslation(["videos", "common"])
 	const isOnline = useIsOnline()
 	const { configQuery, snapshot, roots } = useVideoLibraryView()
 	const enabled = roots.filter(root => root.enabled)
 	const firstRun = configQuery.status === "success" && roots.length === 0
-	const counts = videoKindCounts(snapshot.titles).total
+	const counts = snapshot.summary.total
 
 	return (
 		<ResizableSidebarPanel

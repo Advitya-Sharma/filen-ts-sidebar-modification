@@ -1093,4 +1093,41 @@ describe("classifyVideoLibrarySteps", () => {
 		expect(yields).toBeGreaterThan(20)
 		expect(step.value).toEqual(classifyVideoLibrary(input))
 	})
+
+	it("yields while indexing, passing thousands of empty directories and assembling, with the same result", () => {
+		const input = {
+			roots: [{ uuid: "root", name: "Library", type: "auto" as const }],
+			dirs: [
+				{ uuid: "big", parent: "root", name: "Archive" },
+				...Array.from({ length: 6000 }, (_, index) => ({
+					uuid: `e${String(index)}`,
+					parent: "big",
+					name: `Empty ${String(index)}`
+				}))
+			],
+			files: [
+				...Array.from({ length: 6000 }, (_, index) => ({
+					uuid: `n${String(index)}`,
+					parent: `e${String(index)}`,
+					name: `notes ${String(index)}.txt`,
+					size: 100,
+					timestamp: index
+				})),
+				{ uuid: "v", parent: "big", name: "Holiday (2001).mkv", size: 1_000_000_000, timestamp: 1 }
+			]
+		}
+		const steps = classifyVideoLibrarySteps(input)
+		let yields = 0
+		let step = steps.next()
+
+		while (step.done !== true) {
+			yields++
+			step = steps.next()
+		}
+
+		// 6000 directories and 6000 files indexed, then 6000 children passed, a few hundred per step.
+		expect(yields).toBeGreaterThan(30)
+		expect(step.value).toEqual(classifyVideoLibrary(input))
+		expect(step.value.movies.map(movie => movie.title)).toEqual(["Holiday"])
+	})
 })

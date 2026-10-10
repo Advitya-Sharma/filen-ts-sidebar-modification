@@ -759,19 +759,27 @@ export function applyScopedWalk({ state, walk }: { state: RootState; walk: WalkP
 }
 
 // Live (non-tombstoned) files.
-export function liveFiles(state: RootState): IndexFile[] {
-	const out: IndexFile[] = []
+// Records materialized between yields of fromRecordsSteps.
+const RECORD_STEP = 4096
 
-	for (const file of state.files.values()) {
-		if (file.tombstoneAt === 0) {
-			out.push(file)
+export function fromRecords(records: {
+	header: Omit<RootState, "dirs" | "files" | "byUuid">
+	dirs: readonly IndexDir[]
+	files: readonly IndexFile[]
+}): RootState {
+	const steps = fromRecordsSteps(records)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) {
+			return step.value
 		}
 	}
-
-	return out
 }
 
-export function fromRecords({
+// fromRecords in steps (yields between them), for a large root loaded while the worker serves other calls.
+export function* fromRecordsSteps({
 	header,
 	dirs,
 	files
@@ -779,15 +787,41 @@ export function fromRecords({
 	header: Omit<RootState, "dirs" | "files" | "byUuid">
 	dirs: readonly IndexDir[]
 	files: readonly IndexFile[]
-}): RootState {
+}): Generator<void, RootState> {
 	const state: RootState = {
 		...header,
-		dirs: new Map(dirs.map(dir => [dir.uuid, dir])),
-		files: new Map(files.map(file => [file.stableUuid, file])),
+		dirs: new Map(),
+		files: new Map(),
 		byUuid: new Map()
 	}
 
-	rebuildByUuid(state)
+	let step = 0
+
+	for (const dir of dirs) {
+		state.dirs.set(dir.uuid, dir)
+
+		if (++step % RECORD_STEP === 0) {
+			yield
+		}
+	}
+
+	for (const file of files) {
+		state.files.set(file.stableUuid, file)
+
+		if (++step % RECORD_STEP === 0) {
+			yield
+		}
+	}
+
+	for (const file of state.files.values()) {
+		if (file.tombstoneAt === 0) {
+			state.byUuid.set(file.uuid, file.stableUuid)
+		}
+
+		if (++step % RECORD_STEP === 0) {
+			yield
+		}
+	}
 
 	return state
 }

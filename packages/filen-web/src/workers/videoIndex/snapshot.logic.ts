@@ -63,16 +63,17 @@ const CRC_TABLES = (() => {
 	return tables
 })()
 
-export function crc32(bytes: Uint8Array): number {
+// The running CRC (pre-inversion) over `bytes`, continuing from `crc` (-1 to start).
+function crc32Update(crc: number, bytes: Uint8Array): number {
 	const t = CRC_TABLES
 	const tail = bytes.length - (bytes.length % 8)
-	let crc = -1
+	let out = crc
 	let i = 0
 
 	for (; i < tail; i += 8) {
-		const low = crc ^ ((bytes[i] ?? 0) | ((bytes[i + 1] ?? 0) << 8) | ((bytes[i + 2] ?? 0) << 16) | ((bytes[i + 3] ?? 0) << 24))
+		const low = out ^ ((bytes[i] ?? 0) | ((bytes[i + 1] ?? 0) << 8) | ((bytes[i + 2] ?? 0) << 16) | ((bytes[i + 3] ?? 0) << 24))
 
-		crc =
+		out =
 			(t[1792 + (low & 0xff)] ?? 0) ^
 			(t[1536 + ((low >>> 8) & 0xff)] ?? 0) ^
 			(t[1280 + ((low >>> 16) & 0xff)] ?? 0) ^
@@ -84,7 +85,26 @@ export function crc32(bytes: Uint8Array): number {
 	}
 
 	for (; i < bytes.length; i++) {
-		crc = (t[(crc ^ (bytes[i] ?? 0)) & 0xff] ?? 0) ^ (crc >>> 8)
+		out = (t[(out ^ (bytes[i] ?? 0)) & 0xff] ?? 0) ^ (out >>> 8)
+	}
+
+	return out
+}
+
+export function crc32(bytes: Uint8Array): number {
+	return ~crc32Update(-1, bytes) >>> 0
+}
+
+// crc32 in steps of CRC_STEP_BYTES, so a large snapshot's check yields between them.
+const CRC_STEP_BYTES = 1 << 20
+
+function* crc32Steps(bytes: Uint8Array): Generator<void, number> {
+	let crc = -1
+
+	for (let at = 0; at < bytes.length; at += CRC_STEP_BYTES) {
+		crc = crc32Update(crc, bytes.subarray(at, at + CRC_STEP_BYTES))
+
+		yield
 	}
 
 	return ~crc >>> 0
@@ -180,6 +200,29 @@ class StringBlob {
 // ── Encode ───────────────────────────────────────────────────────────────────
 
 export function encodeSnapshot(state: RootState): Uint8Array<ArrayBuffer> {
+	const steps = encodeSnapshotSteps(state)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) {
+			return step.value
+		}
+	}
+}
+
+// encodeSnapshot in steps (yields between runs of records). The root's records and header are taken when it starts,
+// so a patch landing meanwhile goes to the next write.
+export function* encodeSnapshotSteps(state: RootState): Generator<void, Uint8Array<ArrayBuffer>> {
+	const root = {
+		uuid: state.uuid,
+		name: state.name,
+		watermark: state.watermark,
+		generation: state.generation,
+		completeAt: state.completeAt,
+		prevCompleteAt: state.prevCompleteAt,
+		walkedEntries: state.walkedEntries
+	}
 	const blob = new StringBlob()
 	const interned: string[] = []
 	const internIndex = new Map<string, number>()
@@ -196,17 +239,28 @@ export function encodeSnapshot(state: RootState): Uint8Array<ArrayBuffer> {
 	}
 	const dirs = [...state.dirs.values()]
 	const dirIndex = new Map<string, number>()
+	const files = [...state.files.values()]
 
 	for (let i = 0; i < dirs.length; i++) {
 		dirIndex.set(dirs[i]?.uuid ?? "", i)
+
+		if (i % (DECODE_STEP_RECORDS * 4) === DECODE_STEP_RECORDS * 4 - 1) {
+			yield
+		}
 	}
 
-	const files = [...state.files.values()]
+	for (let i = 0; i < files.length; i++) {
+		const file = files[i]
 
-	for (const file of files) {
-		intern(file.mime)
-		intern(file.region)
-		intern(file.bucket)
+		if (file !== undefined) {
+			intern(file.mime)
+			intern(file.region)
+			intern(file.bucket)
+		}
+
+		if (i % (DECODE_STEP_RECORDS * 4) === DECODE_STEP_RECORDS * 4 - 1) {
+			yield
+		}
 	}
 
 	const internBytes = interned.length * 8
@@ -215,7 +269,7 @@ export function encodeSnapshot(state: RootState): Uint8Array<ArrayBuffer> {
 	const stringsAt = filesAt + files.length * SNAPSHOT_FILE_BYTES
 	const head = new Uint8Array(stringsAt)
 	const view = new DataView(head.buffer)
-	const parentIndex = (parent: string): number => (parent === state.uuid ? NO_PARENT : (dirIndex.get(parent) ?? NO_PARENT))
+	const parentIndex = (parent: string): number => (parent === root.uuid ? NO_PARENT : (dirIndex.get(parent) ?? NO_PARENT))
 	const writeString = (at: number, text: string): void => {
 		const [offset, length] = blob.add(text)
 
@@ -245,6 +299,10 @@ export function encodeSnapshot(state: RootState): Uint8Array<ArrayBuffer> {
 			continue
 		}
 
+		if (i % DECODE_STEP_RECORDS === DECODE_STEP_RECORDS - 1) {
+			yield
+		}
+
 		const at = dirsAt + i * SNAPSHOT_DIR_BYTES
 		const stringUuid = writeUuidField(at, dir.uuid)
 
@@ -258,6 +316,10 @@ export function encodeSnapshot(state: RootState): Uint8Array<ArrayBuffer> {
 
 		if (file === undefined) {
 			continue
+		}
+
+		if (i % DECODE_STEP_RECORDS === DECODE_STEP_RECORDS - 1) {
+			yield
 		}
 
 		const at = filesAt + i * SNAPSHOT_FILE_BYTES
@@ -302,7 +364,7 @@ export function encodeSnapshot(state: RootState): Uint8Array<ArrayBuffer> {
 		view.setUint8(at + 150, flags)
 	}
 
-	const [rootNameOffset, rootNameLength] = blob.add(state.name)
+	const [rootNameOffset, rootNameLength] = blob.add(root.name)
 	const out = new Uint8Array(stringsAt + blob.length)
 
 	out.set(head)
@@ -313,21 +375,21 @@ export function encodeSnapshot(state: RootState): Uint8Array<ArrayBuffer> {
 	header.setUint32(0, SNAPSHOT_MAGIC, true)
 	header.setUint16(4, SNAPSHOT_FORMAT_VERSION, true)
 	header.setUint16(6, CLASSIFIER_VERSION, true)
-	header.setUint32(8, state.watermark === null ? 0 : HEADER_FLAG_WATERMARK, true)
-	header.setBigUint64(16, state.generation, true)
-	header.setBigUint64(24, state.watermark ?? 0n, true)
-	header.setFloat64(32, state.completeAt, true)
-	header.setFloat64(40, state.prevCompleteAt, true)
+	header.setUint32(8, root.watermark === null ? 0 : HEADER_FLAG_WATERMARK, true)
+	header.setBigUint64(16, root.generation, true)
+	header.setBigUint64(24, root.watermark ?? 0n, true)
+	header.setFloat64(32, root.completeAt, true)
+	header.setFloat64(40, root.prevCompleteAt, true)
 	header.setUint32(48, dirs.length, true)
 	header.setUint32(52, files.length, true)
 	header.setUint32(56, blob.length, true)
-	header.setUint32(60, state.walkedEntries, true)
-	writeHex(out, 64, CANONICAL_UUID.test(state.uuid) ? state.uuid : "00000000-0000-0000-0000-000000000000")
+	header.setUint32(60, root.walkedEntries, true)
+	writeHex(out, 64, CANONICAL_UUID.test(root.uuid) ? root.uuid : "00000000-0000-0000-0000-000000000000")
 	header.setUint32(80, rootNameOffset, true)
 	header.setUint32(84, rootNameLength, true)
 	header.setUint32(88, interned.length, true)
 	header.setUint32(92, INDEX_KINDS_SIGNATURE, true)
-	header.setUint32(12, crc32(out.subarray(16)), true)
+	header.setUint32(12, yield* crc32Steps(out.subarray(16)), true)
 
 	return out
 }
@@ -366,9 +428,25 @@ export interface DecodedSnapshot {
 	files: IndexFile[]
 }
 
+// Records decoded between yields of decodeSnapshotSteps.
+const DECODE_STEP_RECORDS = 1024
+
 // null for anything but an intact snapshot of `rootUuid`: wrong magic or version, a size that doesn't add up, or
 // a CRC mismatch.
 export function decodeSnapshot(bytes: Uint8Array, rootUuid: string): DecodedSnapshot | null {
+	const steps = decodeSnapshotSteps(bytes, rootUuid)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) {
+			return step.value
+		}
+	}
+}
+
+// decodeSnapshot in steps (yields between them), so a large snapshot never holds the worker for long.
+export function* decodeSnapshotSteps(bytes: Uint8Array, rootUuid: string): Generator<void, DecodedSnapshot | null> {
 	const header = readSnapshotHeader(bytes)
 
 	if (header === null || (CANONICAL_UUID.test(rootUuid) && header.rootUuid !== rootUuid)) {
@@ -384,7 +462,7 @@ export function decodeSnapshot(bytes: Uint8Array, rootUuid: string): DecodedSnap
 	const filesAt = dirsAt + dirCount * SNAPSHOT_DIR_BYTES
 	const stringsAt = filesAt + fileCount * SNAPSHOT_FILE_BYTES
 
-	if (stringsAt + stringBytes !== bytes.length || view.getUint32(12, true) !== crc32(bytes.subarray(16))) {
+	if (stringsAt + stringBytes !== bytes.length || view.getUint32(12, true) !== (yield* crc32Steps(bytes.subarray(16)))) {
 		return null
 	}
 
@@ -404,6 +482,10 @@ export function decodeSnapshot(bytes: Uint8Array, rootUuid: string): DecodedSnap
 	const dirs: IndexDir[] = []
 
 	for (let i = 0; i < dirCount; i++) {
+		if (i % DECODE_STEP_RECORDS === DECODE_STEP_RECORDS - 1) {
+			yield
+		}
+
 		const at = dirsAt + i * SNAPSHOT_DIR_BYTES
 		const flags = view.getUint8(at + 28)
 
@@ -427,6 +509,10 @@ export function decodeSnapshot(bytes: Uint8Array, rootUuid: string): DecodedSnap
 	const files: IndexFile[] = []
 
 	for (let i = 0; i < fileCount; i++) {
+		if (i % DECODE_STEP_RECORDS === DECODE_STEP_RECORDS - 1) {
+			yield
+		}
+
 		const at = filesAt + i * SNAPSHOT_FILE_BYTES
 		const flags = view.getUint8(at + 150)
 		const keyVersion = view.getUint8(at + 136)
@@ -481,6 +567,18 @@ export function decodeSnapshot(bytes: Uint8Array, rootUuid: string): DecodedSnap
 
 // The slot to load: the intact one with the highest generation, else the other. null when neither is intact.
 export function pickSnapshot(slots: readonly (Uint8Array | null)[], rootUuid: string): DecodedSnapshot | null {
+	const steps = pickSnapshotSteps(slots, rootUuid)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) {
+			return step.value
+		}
+	}
+}
+
+export function* pickSnapshotSteps(slots: readonly (Uint8Array | null)[], rootUuid: string): Generator<void, DecodedSnapshot | null> {
 	const ordered = slots
 		.filter((slot): slot is Uint8Array => slot !== null)
 		.map(slot => ({
@@ -490,7 +588,7 @@ export function pickSnapshot(slots: readonly (Uint8Array | null)[], rootUuid: st
 		.sort((a, b) => (a.generation === b.generation ? 0 : a.generation > b.generation ? -1 : 1))
 
 	for (const { slot } of ordered) {
-		const decoded = decodeSnapshot(slot, rootUuid)
+		const decoded = yield* decodeSnapshotSteps(slot, rootUuid)
 
 		if (decoded !== null) {
 			return decoded

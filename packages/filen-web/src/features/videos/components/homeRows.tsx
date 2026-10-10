@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useState, type KeyboardEvent } from "react"
+import { startTransition, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useState, type KeyboardEvent } from "react"
 import { useTranslation } from "react-i18next"
 import type { TFunction } from "i18next"
 import { Link, useRouter } from "@tanstack/react-router"
@@ -6,8 +6,9 @@ import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react"
 import { cn } from "@filen/shared"
 import { useElementSize } from "@/lib/useElementSize"
 import { prefersReducedMotion } from "@/lib/motion"
-import { useVideoHomeData } from "@/features/videos/hooks/useVideoHomeData"
 import { useVideoRootNames } from "@/features/videos/hooks/useVideoLibraryView"
+import { useWatchStateLoaded } from "@/features/videos/hooks/useWatchStateLoaded"
+import { useCatalogHomeQuery } from "@/features/videos/queries/catalog"
 import { useVideoCardActions } from "@/features/videos/hooks/useVideoCardActions"
 import { useCardFocus } from "@/features/videos/hooks/useCardFocus"
 import { useHistoryEntryKey } from "@/features/videos/hooks/useHistoryEntryKey"
@@ -15,9 +16,8 @@ import { recallScroll, rememberScroll } from "@/features/videos/lib/scrollMemory
 import { CardObserver } from "@/features/videos/lib/cardObserver"
 import {
 	CARD_GAP,
-	buildHomeRows,
+	cardsInView,
 	peekCardWidth,
-	pickHero,
 	rowLiftPadding,
 	seeAllTarget,
 	type HomeRowModel,
@@ -27,6 +27,7 @@ import { rowsKeyAction } from "@/features/videos/lib/videoGrid.logic"
 import type { VideoLibraryRootView } from "@/features/videos/lib/libraryView.logic"
 import { VideoCard, type VideoCardAction } from "@/features/videos/components/videoCard"
 import { HomeHero } from "@/features/videos/components/homeHero"
+import { minuteStamp } from "@/lib/useNowMinute"
 
 // The rows' inline padding: cards start this far in, and the last card is cut at the panel's edge.
 const ROW_INSET = 16
@@ -41,6 +42,12 @@ const sessionHeroSeed = Math.random()
 function rememberHero(id: string | null): void {
 	sessionHeroId = id
 }
+
+function sessionHero(): string | null {
+	return sessionHeroId
+}
+
+const NO_ROWS: readonly HomeRowModel[] = []
 
 interface RowCursor {
 	row: string
@@ -82,6 +89,8 @@ interface HomeRowProps {
 	row: HomeRowModel
 	heading: string
 	cardWidth: number
+	// Cards mounted before the row is scrolled, pointed at or focused: the ones in view and the next.
+	initialCards: number
 	// The cursor's column in this row, -1 when it is in another.
 	activeColumn: number
 	// Rows within a viewport of the screen mount their cards.
@@ -104,6 +113,7 @@ function HomeRow({
 	row,
 	heading,
 	cardWidth,
+	initialCards,
 	activeColumn,
 	mountObserver,
 	artObserver,
@@ -121,13 +131,31 @@ function HomeRow({
 	const mounted = near || activeColumn >= 0
 	const rowId = row.id
 	const scrollKey = `${historyKey}:home:${rowId}`
+	// The cards past the row's visible part mount once the row is scrolled, pointed at or focused (or holds the
+	// cursor past them, or comes back scrolled with Back): a home of rows lays out only what shows.
+	const [expandedState, setExpanded] = useState(() => recallScroll(scrollKey) !== undefined)
+	const expanded = expandedState || activeColumn >= initialCards - 1
+	const cards = expanded ? row.cards : row.cards.slice(0, initialCards)
 
+	function expand(): void {
+		if (!expandedState) {
+			startTransition(() => {
+				setExpanded(true)
+			})
+		}
+	}
+
+	// A row coming near mounts its cards at transition priority (in short slices, never one long task).
 	useEffect(() => {
 		if (section === null || mountObserver === null) {
 			return
 		}
 
-		return mountObserver.observe(section, setNear)
+		return mountObserver.observe(section, value => {
+			startTransition(() => {
+				setNear(value)
+			})
+		})
 	}, [section, mountObserver])
 
 	useEffect(() => {
@@ -208,10 +236,13 @@ function HomeRow({
 					style={{ gap: CARD_GAP, minHeight: rowHeight, paddingBlock: liftPadding }}
 					onScroll={event => {
 						rememberScroll(scrollKey, event.currentTarget.scrollLeft)
+						expand()
 					}}
+					onPointerEnter={expand}
+					onFocus={expand}
 				>
 					{mounted
-						? row.cards.map((card, column) => (
+						? cards.map((card, column) => (
 								<RowCard
 									key={card.key}
 									card={card}
@@ -277,27 +308,25 @@ function rowHeading({ row, names, t }: { row: HomeRowModel; names: ReadonlyMap<s
 	}
 }
 
-// The rows and the hero, rebuilt only when the library, its videos or the watch state change: a hook of its own, so
-// the cursor state of the component using them never joins their memoization.
+// The rows and the hero, built in the library's worker from what it holds and the watch state; fetched again when
+// either changes. A hook of its own, so the cursor state of the component using them never joins their memoization.
 function useHomeRows(roots: readonly VideoLibraryRootView[]) {
-	const data = useVideoHomeData()
-	const rows =
-		data.items === null
-			? []
-			: buildHomeRows({
-					titles: data.snapshot.titles,
-					byId: data.snapshot.byId,
-					items: data.items,
-					index: data.index,
-					entries: data.entries,
-					watch: data.watch,
-					roots: roots.filter(root => root.enabled).map(root => root.uuid),
-					now: data.now
-				})
-	const hero =
-		data.items === null ? null : pickHero({ rows, titles: data.snapshot.titles, previousId: sessionHeroId, seed: sessionHeroSeed })
+	// Fixed per mount, so the rows don't move while they are looked at; on the minute, so Back within it reuses the rows
+	// already fetched.
+	const [now] = useState(() => minuteStamp(Date.now()))
+	// The first rows wait (briefly) for the local watch state, so Continue Watching doesn't push the others down.
+	const watchLoaded = useWatchStateLoaded()
+	const query = useCatalogHomeQuery(
+		{ roots: roots.filter(root => root.enabled).map(root => root.uuid), now, heroSeed: sessionHeroSeed },
+		sessionHero,
+		watchLoaded
+	)
 
-	return { data, rows, hero }
+	// The rows render at transition priority, so React lays a whole home of cards out in short slices rather than one
+	// long task.
+	const data = useDeferredValue(query.data)
+
+	return { rows: data?.rows ?? NO_ROWS, hero: data?.hero ?? null, ready: data !== undefined, now }
 }
 
 // The cursor and a focus handler that stays the same function across cursor moves, so the cards it is passed to
@@ -317,9 +346,9 @@ function useRowCursor() {
 export function VideosHomeRows({ roots, scrollElement }: { roots: readonly VideoLibraryRootView[]; scrollElement: HTMLElement | null }) {
 	const { t } = useTranslation("videos")
 	const router = useRouter()
-	const { data, rows, hero } = useHomeRows(roots)
+	const { rows, hero, ready: rowsReady, now } = useHomeRows(roots)
 	const names = useVideoRootNames(roots)
-	const onAction = useVideoCardActions(data.items)
+	const onAction = useVideoCardActions()
 	const historyKey = useHistoryEntryKey()
 	const [container, setContainer] = useState<HTMLDivElement | null>(null)
 	const { width } = useElementSize(container)
@@ -361,7 +390,7 @@ export function VideosHomeRows({ roots, scrollElement }: { roots: readonly Video
 		}
 	}, [scrollElement, pageKey])
 
-	const ready = width > 0 && data.items !== null
+	const ready = width > 0 && rowsReady
 
 	// Back to this entry: the page scrolls where it was once the rows are laid out.
 	useLayoutEffect(() => {
@@ -443,7 +472,7 @@ export function VideosHomeRows({ roots, scrollElement }: { roots: readonly Video
 				<div className="px-4 pb-3">
 					<HomeHero
 						hero={hero}
-						now={data.now}
+						now={now}
 						onShown={rememberHero}
 					/>
 				</div>
@@ -456,6 +485,7 @@ export function VideosHomeRows({ roots, scrollElement }: { roots: readonly Video
 							row={row}
 							heading={rowHeading({ row, names, t })}
 							cardWidth={row.shape === "poster" ? posterWidth : landscapeWidth}
+							initialCards={Math.ceil(cardsInView(rowRange, row.shape)) + 1}
 							activeColumn={cursor.row === row.id ? cursor.column : -1}
 							mountObserver={mountObserver}
 							artObserver={artObserver}

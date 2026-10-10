@@ -2,8 +2,10 @@ import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useNavigate, useRouter } from "@tanstack/react-router"
 import { ClapperboardIcon } from "lucide-react"
+import { sdkApi } from "@/lib/sdk/client"
 import { videoLibrary } from "@/features/videos/lib/index"
 import { useVideoLibrary, useVideoTitleDetailQuery } from "@/features/videos/queries/library"
+import { useCatalogSeriesQuery, useCatalogTitleQuery } from "@/features/videos/queries/catalog"
 import { useHistoryEntryKey } from "@/features/videos/hooks/useHistoryEntryKey"
 import { recallScroll, rememberScroll } from "@/features/videos/lib/scrollMemory"
 import { titleSubject, type CorrectionSubject } from "@/features/videos/lib/corrections.logic"
@@ -21,25 +23,35 @@ import { Button } from "@/components/ui/button"
 // classification is local and quick), and stays where it is if it never turns up.
 const FOLLOW_TIMEOUT_MS = 5_000
 
+// Asks the library's worker again each time its catalog changes, until the title is there or the wait is over.
 function whenTitleKnown(id: string, then: () => void): void {
-	if (videoLibrary.getSnapshot().byId.has(id)) {
-		then()
+	let done = false
+	let version = -1
+	let unsubscribe: () => void = () => undefined
+	const finish = (): void => {
+		done = true
+		clearTimeout(timer)
+		unsubscribe()
+	}
+	const timer = setTimeout(finish, FOLLOW_TIMEOUT_MS)
+	const check = (): void => {
+		const current = videoLibrary.getSnapshot().version
 
-		return
+		if (done || current === version) {
+			return
+		}
+
+		version = current
+		void sdkApi.videoCatalogTitle(id).then(title => {
+			if (title !== null && !done) {
+				finish()
+				then()
+			}
+		})
 	}
 
-	let unsubscribe: () => void = () => undefined
-	const timer = setTimeout(() => {
-		unsubscribe()
-	}, FOLLOW_TIMEOUT_MS)
-
-	unsubscribe = videoLibrary.subscribe(() => {
-		if (videoLibrary.getSnapshot().byId.has(id)) {
-			clearTimeout(timer)
-			unsubscribe()
-			then()
-		}
-	})
+	unsubscribe = videoLibrary.subscribe(check)
+	check()
 }
 
 // /videos/title/$uuid: a movie's, another video's or a series' page, from the local index (no listing).
@@ -48,11 +60,13 @@ export function VideoTitleScreen({ titleId }: { titleId: string }) {
 	const navigate = useNavigate()
 	const router = useRouter()
 	const library = useVideoLibrary()
-	const title = library.byId.get(titleId) ?? null
+	const titleQuery = useCatalogTitleQuery(titleId)
+	const title = titleQuery.data ?? null
 	const scanning = library.roots.some(root => root.walking || root.state === "loading")
 	const detailQuery = useVideoTitleDetailQuery(titleId)
 	const detail = detailQuery.data ?? null
 	const [editing, setEditing] = useState<CorrectionSubject | null>(null)
+	const seriesQuery = useCatalogSeriesQuery(editing !== null)
 	// A Matroska movie without a backdrop image may carry a landscape cover its stored probe located (a local read,
 	// waited for so the header never switches form after it shows).
 	const primary = title?.primary ?? null
@@ -78,6 +92,7 @@ export function VideoTitleScreen({ titleId }: { titleId: string }) {
 
 	if (
 		!library.loaded ||
+		titleQuery.isPending ||
 		(title === null && scanning) ||
 		(title !== null && detailQuery.isPending) ||
 		(coverCheck !== null && storedCover.isPending)
@@ -109,7 +124,7 @@ export function VideoTitleScreen({ titleId }: { titleId: string }) {
 		)
 	}
 
-	const series = library.titles.filter(item => item.kind === "series").map(item => ({ id: item.id, title: item.title }))
+	const series = seriesQuery.data ?? []
 
 	return (
 		<div

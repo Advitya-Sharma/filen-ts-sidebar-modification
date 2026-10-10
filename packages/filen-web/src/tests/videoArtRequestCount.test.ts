@@ -43,6 +43,7 @@ vi.mock("@/lib/storage/adapter", async () => {
 		},
 		kvKeys: (prefix: string) => Promise.resolve([...kvRows.keys()].filter(key => key.startsWith(prefix))),
 		kvEntriesJson: () => Promise.resolve([]),
+		kvEntriesJsonInSlices: () => Promise.resolve([]),
 		kvDelete: (key: string) => {
 			kvRows.delete(key)
 

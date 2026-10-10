@@ -34,6 +34,7 @@ vi.mock("@filen/shared/videos", async importOriginal => {
 import { splitOverrideKey } from "@filen/shared/videos"
 import { VideoIndexEngine, type SnapshotStore } from "@/workers/videoIndex/engine"
 import type { VideoIndexUpdate, VideoTitleView } from "@/workers/videoIndex/view.logic"
+import { memoryCatalogStore, trackCatalogTitles } from "@/tests/support/videoIndex"
 import { FakeDrive, hexUuid } from "@/tests/support/videoDrive"
 
 let drive: FakeDrive
@@ -74,29 +75,18 @@ function engineFor(yieldSlice: () => Promise<void> = () => Promise.resolve()): V
 		driveRoot: () => null,
 		getFile: uuid => Promise.resolve(drive.files.get(uuid)),
 		store,
+		catalogStore: memoryCatalogStore(),
 		now: () => Date.now(),
 		yieldSlice
 	})
 
 	engine.onSocketEvent({ type: "authSuccess" })
 	engine.subscribe((update: VideoIndexUpdate) => {
-		if (update.type !== "titles") {
-			return
-		}
-
-		if (update.reset) {
-			titles.clear()
-		}
-
-		for (const title of update.upserts) {
-			titles.set(title.id, title)
-			upserted.push(title.id)
-		}
-
-		for (const id of update.removed) {
-			titles.delete(id)
+		if (update.type === "catalog") {
+			upserted.push(...(update.titles ?? []))
 		}
 	})
+	trackCatalogTitles(engine, titles)
 
 	return engine
 }

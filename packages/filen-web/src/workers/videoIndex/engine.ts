@@ -1,4 +1,5 @@
 import {
+	CLASSIFIER_VERSION,
 	applyLibraryOverrides,
 	classifyVideoLibrarySteps,
 	splitMergeKeysOf,
@@ -17,21 +18,24 @@ import {
 	applyScopedWalk,
 	applyWalk,
 	emptyRootState,
-	fromRecords,
-	liveFiles,
+	fromRecordsSteps,
 	projectWalk,
 	type IndexFile,
 	type PatchResult,
 	type RootState
 } from "@/workers/videoIndex/rootIndex.logic"
-import { encodeSnapshot, nextSlot, pickSnapshot, snapshotIsCurrent } from "@/workers/videoIndex/snapshot.logic"
+import {
+	INDEX_KINDS_SIGNATURE,
+	encodeSnapshotSteps,
+	nextSlot,
+	pickSnapshotSteps,
+	snapshotIsCurrent
+} from "@/workers/videoIndex/snapshot.logic"
 import {
 	LibraryFiles,
 	buildTitleDetail,
-	buildTitles,
-	buildHomeItems,
-	diffRecords,
-	diffTitles,
+	buildTitlesSteps,
+	buildHomeItemsSteps,
 	itemArtCandidates,
 	titleArtCandidates,
 	type TitleArtCandidates,
@@ -41,10 +45,40 @@ import {
 	type VideoTitleDetail,
 	type VideoTitleView
 } from "@/workers/videoIndex/view.logic"
+import {
+	VideoCatalog,
+	arrayTitles,
+	catalogContent,
+	libraryArt,
+	type CatalogChange,
+	type CatalogContent,
+	type CatalogDerived,
+	type CatalogItems,
+	deriveCatalogSteps,
+	groupedItemsSteps,
+	type CatalogSummary,
+	type FactsResult,
+	type FactsUpdate,
+	type GridPage,
+	type GridQuery,
+	gridKey,
+	type HomeQuery,
+	type HomeResult,
+	type SearchResult,
+	type WatchUpdate
+} from "@/workers/videoIndex/catalog.logic"
+import {
+	CATALOG_FORMAT_VERSION,
+	catalogKey,
+	catalogSlotOrder,
+	decodeCatalog,
+	encodeCatalogSteps
+} from "@/workers/videoIndex/catalogFile.logic"
 
 // The Videos library index, inside the SDK worker: per-root snapshots loaded from OPFS, kept current from the
 // socket's drive events, re-walked only when the event stream can't vouch for them, and classified into the
-// keyless view the main thread renders.
+// keyless catalog the screens query a page or row at a time. The catalog is persisted too, so a cold open paints
+// from it while the snapshots load and classify behind.
 
 // Patches to the classification wait for a quiet spell, but never longer than the cap.
 export const PATCH_DEBOUNCE_MS = 1_500
@@ -58,7 +92,9 @@ export const WALK_FLOOR_MS = 30 * 60_000
 export const WRITE_DEBOUNCE_MS = 10_000
 export const WRITE_MIN_INTERVAL_MS = 60_000
 // Classification runs in slices of about this much, so other worker calls aren't held up.
-export const SLICE_MS = 8
+export const SLICE_MS = 6
+// Files gathered for the classifier between yields.
+const INPUT_STEP = 8192
 // Events held for a root while it can't apply them; past this, it is walked instead.
 export const EVENT_BUFFER_CAP = 5_000
 
@@ -78,6 +114,13 @@ export interface SnapshotStore {
 	remove: (rootUuid: string) => Promise<void>
 }
 
+// The persisted catalog's two slots.
+export interface CatalogStore {
+	readSlot: (slot: 0 | 1) => Promise<Uint8Array | null>
+	readGenerations: () => Promise<[bigint | null, bigint | null]>
+	write: (slot: 0 | 1, bytes: Uint8Array<ArrayBuffer>, cancelled: () => boolean) => Promise<void>
+}
+
 // `ancestors`: the root's ancestor directories as far as known (trashing one takes the root away too).
 export type WalkOutcome = { type: "ok"; name: string; raw: DirsAndFiles; ancestors: string[] } | { type: "gone" }
 
@@ -93,6 +136,7 @@ export interface VideoIndexDeps {
 	driveRoot: () => string | null
 	getFile: (uuid: string) => Promise<File | undefined>
 	store: SnapshotStore
+	catalogStore: CatalogStore
 	now: () => number
 	// Ends the current task, so a long classification yields between slices.
 	yieldSlice: () => Promise<void>
@@ -175,20 +219,35 @@ interface ClassifiedInput {
 	loaded: RootRuntime[]
 	seqs: number[]
 	ends: number[]
+	// The configured roots (uuid and type) when it ran, and whether every one of them is in it (one known gone holds
+	// nothing): what its catalog is persisted under, and whether it may be.
+	roots: [string, LibraryRootType][]
+	complete: boolean
 }
 
 interface CurrentLibrary {
 	files: LibraryFiles
-	titles: Map<string, VideoTitleView>
 }
 
 function isUuidStr(value: string): value is UuidStr {
 	return value.split("-").length >= 4
 }
 
-async function drainSteps<T>(steps: Generator<void, T>, yieldSlice: () => Promise<void>): Promise<T> {
-	let sliceStart = performance.now()
+function drainSync<T>(steps: Generator<void, T>): T {
+	for (;;) {
+		const step = steps.next()
 
+		if (step.done === true) {
+			return step.value
+		}
+	}
+}
+
+// When the worker last came back from a yield: every drain shares one slice, so work several of them start in the same
+// task (a classification landing and the queries it releases) still yields after SLICE_MS together.
+let sliceStart = 0
+
+async function drainSteps<T>(steps: Generator<void, T>, yieldSlice: () => Promise<void>): Promise<T> {
 	for (;;) {
 		const step = steps.next()
 
@@ -204,15 +263,59 @@ async function drainSteps<T>(steps: Generator<void, T>, yieldSlice: () => Promis
 	}
 }
 
+// A query's warm steps, shared by every call that needs them. `cancelled` turns true once no call waits any more
+// (when it can be), so a grid order nobody shows is not built to the end.
+interface CatalogWarm {
+	callers: number
+	cancelled: boolean
+	done: Promise<void>
+}
+
+// A call the page gave up on (its query is no longer shown): it rejects with this, and its warm-up stops when no other
+// call waits on it.
+export class CatalogCallAbandoned extends Error {
+	public constructor() {
+		super("Catalog call abandoned")
+		this.name = "CatalogCallAbandoned"
+	}
+}
+
+// A race arm that never settles: a call nobody can abandon.
+const NEVER = new Promise<never>(() => undefined)
+
+// A slice of its own for what follows (a query's answer after its warm steps).
+async function freshSlice(yieldSlice: () => Promise<void>): Promise<void> {
+	if (performance.now() - sliceStart >= SLICE_MS / 2) {
+		await yieldSlice()
+
+		sliceStart = performance.now()
+	}
+}
+
 export class VideoIndexEngine {
 	private readonly deps: VideoIndexDeps
 	private readonly roots = new Map<string, RootRuntime>()
 	private readonly listeners = new Set<(update: VideoIndexUpdate) => void>()
-	private readonly signatures = new Map<string, string>()
-	// The video list's last sent state (stable uuid -> serialized item) while the main thread wants it.
-	private homeSignatures: Map<string, string> | null = null
-	private homeSent = false
 	private current: CurrentLibrary | null = null
+	// Calls waiting for the first classification (or the end of a failed one).
+	private classifiedWaiters: (() => void)[] = []
+	// What the screens query. Filled from the persisted catalog when it matches the configuration, else (and then
+	// anyway, behind) from each classification.
+	private readonly catalog = new VideoCatalog()
+	private catalogSource: "none" | "file" | "classified" = "none"
+	private catalogLoad: Promise<void> | null = null
+	private catalogWaiters: (() => void)[] = []
+	// Bumped with each change of the catalog's content; the screens refetch what they show.
+	private catalogVersion = 0
+	private catalogWrittenVersion = 0
+	// The key the catalog in memory was classified under (roots, corrections, classifier).
+	private catalogKeyText = ""
+	private catalogWriteTimer: ReturnType<typeof setTimeout> | null = null
+	private catalogWriting: Promise<void> | null = null
+	private lastCatalogWriteAt = 0
+	private catalogWriteFailures = 0
+	// The catalog held classifies every configured root (one that hasn't loaded yet makes a partial one).
+	private catalogComplete = false
 	// Bumped by reset: async work started before it drops its result.
 	private token = 0
 	private writer = false
@@ -303,6 +406,7 @@ export class VideoIndexEngine {
 		}
 
 		const loads: Promise<void>[] = []
+		const created: RootRuntime[] = []
 
 		for (const config of roots) {
 			if (!config.enabled) {
@@ -325,9 +429,20 @@ export class VideoIndexEngine {
 			const rt = this.createRuntime(config)
 
 			this.roots.set(config.uuid, rt)
-			rt.loading = this.load(rt)
-			loads.push(rt.loading)
+			created.push(rt)
 			changed = true
+		}
+
+		// The first configuration paints from the persisted catalog when it was classified under the same roots and
+		// corrections; the snapshots load after it.
+		this.catalogLoad ??= this.loadCatalog()
+		await this.catalogLoad
+
+		for (const rt of created) {
+			if (this.roots.get(rt.config.uuid) === rt && rt.state === null && rt.loading === null) {
+				rt.loading = this.load(rt)
+				loads.push(rt.loading)
+			}
 		}
 
 		await Promise.all(loads)
@@ -378,14 +493,16 @@ export class VideoIndexEngine {
 		const token = this.token
 
 		try {
-			const decoded = pickSnapshot(await this.deps.store.read(rt.config.uuid), rt.config.uuid)
+			const slots = await this.deps.store.read(rt.config.uuid)
+			const decoded = await drainSteps(pickSnapshotSteps(slots, rt.config.uuid), this.deps.yieldSlice)
+			const state = decoded === null ? null : await drainSteps(fromRecordsSteps(decoded), this.deps.yieldSlice)
 
 			if (token !== this.token || this.roots.get(rt.config.uuid) !== rt) {
 				return
 			}
 
-			if (decoded !== null) {
-				rt.state = fromRecords(decoded)
+			if (decoded !== null && state !== null) {
+				rt.state = state
 				rt.status = "ready"
 				rt.outdated = !snapshotIsCurrent(decoded)
 				// Only partial walks were ever stored.
@@ -1241,6 +1358,8 @@ export class VideoIndexEngine {
 				}
 
 				this.pushRoots()
+				// Nothing is coming for calls waiting on it: they answer from what is held.
+				this.settleWaiters()
 			})
 			.finally(() => {
 				this.rebuilding = null
@@ -1257,6 +1376,7 @@ export class VideoIndexEngine {
 	private async runRebuild(): Promise<void> {
 		const token = this.token
 		const overrides = this.overrides
+		const overridesSignature = this.overridesSignature
 		const split = splitSignature(overrides)
 		const cached = this.classified
 		const input =
@@ -1287,11 +1407,7 @@ export class VideoIndexEngine {
 			autoMerged: corrected.autoMerged
 		})
 
-		if (input !== cached) {
-			this.countVideos(input)
-		}
-
-		this.publish(libraryFiles)
+		await this.publish(libraryFiles, input, input === cached, overridesSignature)
 	}
 
 	// The classifier's view of every loaded root, in slices; null when a reset came in meanwhile.
@@ -1301,7 +1417,10 @@ export class VideoIndexEngine {
 		split: string
 	): Promise<ClassifiedInput | null> {
 		const token = this.token
-		const loaded = [...this.roots.values()].filter(rt => rt.state !== null)
+		const configured = [...this.roots.values()]
+		const loaded = configured.filter(rt => rt.state !== null)
+		const roots = configured.map((rt): [string, LibraryRootType] => [rt.config.uuid, rt.config.type])
+		const complete = configured.every(rt => rt.state !== null || rt.status === "missing")
 		const seqs = loaded.map(rt => rt.walkSeq)
 		const dirs: LibraryScanDir[] = []
 		const files: IndexFile[] = []
@@ -1309,16 +1428,36 @@ export class VideoIndexEngine {
 		// Each root's files sit together in `files`, ending at its offset.
 		const ends: number[] = []
 
-		for (const rt of loaded) {
-			for (const dir of rt.state?.dirs.values() ?? []) {
-				dirs.push(dir)
-			}
+		// Taken at once (references only), so no patch lands halfway; the live files are picked out in slices.
+		const taken = loaded.map(rt => ({ dirs: [...(rt.state?.dirs.values() ?? [])], files: [...(rt.state?.files.values() ?? [])] }))
 
-			for (const file of rt.state === null ? [] : liveFiles(rt.state)) {
-				files.push(file)
-			}
+		await drainSteps(
+			(function* () {
+				let step = 0
 
-			ends.push(files.length)
+				for (const root of taken) {
+					for (const dir of root.dirs) {
+						dirs.push(dir)
+					}
+
+					for (const file of root.files) {
+						if (file.tombstoneAt === 0) {
+							files.push(file)
+						}
+
+						if (++step % INPUT_STEP === 0) {
+							yield
+						}
+					}
+
+					ends.push(files.length)
+				}
+			})(),
+			this.deps.yieldSlice
+		)
+
+		if (token !== this.token) {
+			return null
 		}
 
 		const library = await drainSteps(
@@ -1336,7 +1475,7 @@ export class VideoIndexEngine {
 			this.deps.yieldSlice
 		)
 
-		return token === this.token ? { seq, split, library, files, loaded, seqs, ends } : null
+		return token === this.token ? { seq, split, library, files, loaded, seqs, ends, roots, complete } : null
 	}
 
 	private countVideos({ library, loaded, seqs, ends }: ClassifiedInput): void {
@@ -1354,81 +1493,463 @@ export class VideoIndexEngine {
 		})
 	}
 
-	private publish(libraryFiles: LibraryFiles): void {
-		const titles = buildTitles(libraryFiles)
-		const reset = this.current === null
-		const { upserts, removed } = diffTitles(this.signatures, titles)
+	// The catalog from a classification, built in slices; swapped in (and announced) only when it changed. A new
+	// classification's video counts land with it, so a scan reads as under way until its titles show.
+	// `input`: what it classified (its roots key the persisted copy); `counted`: its video counts landed already.
+	private async publish(libraryFiles: LibraryFiles, input: ClassifiedInput, counted: boolean, overridesSignature: string): Promise<void> {
+		const token = this.token
+		const built = await drainSteps(this.catalogSteps(libraryFiles), this.deps.yieldSlice)
 
-		this.current = {
-			files: libraryFiles,
-			titles: new Map(titles.map(title => [title.id, title]))
-		}
-
-		if (reset || upserts.length > 0 || removed.length > 0) {
-			this.emit({
-				type: "titles",
-				reset,
-				upserts: reset ? titles : upserts,
-				removed: reset ? [] : removed
-			})
-		}
-
-		this.pushHome()
-		this.pushRoots()
-	}
-
-	// ── Subscriptions and reads ──
-
-	// The main thread's video list (home rows, grids, search): sent while a screen that reads it is mounted, all of
-	// it first and then only what each classification changed. Off, nothing of it is held here.
-	public setHomeEnabled(enabled: boolean): void {
-		this.homeSignatures = enabled ? new Map() : null
-		this.homeSent = false
-		this.pushHome()
-	}
-
-	private pushHome(): void {
-		const signatures = this.homeSignatures
-
-		if (signatures === null || this.current === null) {
+		if (token !== this.token) {
 			return
 		}
 
-		const items = this.homeItems()
-		const reset = !this.homeSent
-		const { upserts, removed } = diffRecords(signatures, items, item => item.stableUuid)
+		if (!counted) {
+			this.countVideos(input)
+		}
 
-		this.homeSent = true
+		const { titles, items, itemsView, derived } = built
+		const first = this.catalogSource === "none"
+		const change = first
+			? { changed: true, titles: [] }
+			: (built.change ?? this.catalog.diff(titles, items, libraryArt(libraryFiles, arrayTitles(titles))))
 
-		if (reset || upserts.length > 0 || removed.length > 0) {
-			this.emit({
-				type: "home",
-				reset,
-				upserts: reset ? items : upserts,
-				removed: reset ? [] : removed
+		this.current = { files: libraryFiles }
+
+		// An unchanged classification (the usual one behind a persisted catalog) keeps what is held, orders included.
+		if (change.changed) {
+			const held = arrayTitles(titles)
+
+			this.catalog.setContent({
+				titles: held,
+				items: itemsView,
+				derived: derived ?? drainSync(deriveCatalogSteps(titles, items)),
+				art: libraryArt(libraryFiles, held)
 			})
+			this.catalogVersion++
+		} else if (this.catalogSource === "file") {
+			// The persisted copy was right: the classification's own records replace its columns (which go), and its
+			// orders and selections stay.
+			const held = arrayTitles(titles)
+
+			this.catalog.setContent({
+				titles: held,
+				items: itemsView,
+				derived: this.catalog.persisted().derived,
+				art: libraryArt(libraryFiles, held)
+			})
+		} else {
+			// Card art reads this classification from now on (the previous one goes).
+			this.catalog.replaceArt(libraryArt(libraryFiles, this.catalog.persisted().titles))
+		}
+
+		this.catalogSource = "classified"
+		// Only a classification of every configured root (one known gone holds nothing) is worth persisting: a cold
+		// open keys on all of them.
+		this.catalogComplete = input.complete
+
+		if (first || change.changed) {
+			this.emitCatalog(first ? null : change.titles)
+		}
+
+		const key = catalogKeyFor(input.roots, overridesSignature)
+
+		if (key !== this.catalogKeyText) {
+			this.catalogKeyText = key
+			this.catalogWrittenVersion = -1
+		}
+
+		this.scheduleCatalogWrite()
+		this.settleWaiters()
+		this.pushRoots()
+	}
+
+	private *catalogSteps(libraryFiles: LibraryFiles): Generator<
+		void,
+		{
+			titles: VideoTitleView[]
+			items: VideoHomeItem[]
+			itemsView: CatalogItems
+			change: CatalogChange | null
+			derived: CatalogDerived | null
+		}
+	> {
+		const titles = yield* buildTitlesSteps(libraryFiles)
+		const grouped = yield* groupedItemsSteps(titles, yield* buildHomeItemsSteps(libraryFiles, parent => this.dirName(parent)))
+		const { items } = grouped
+		// Against what is held when this runs: the first classification has nothing to compare with.
+		const change =
+			this.catalogSource === "none"
+				? null
+				: yield* this.catalog.diffSteps(titles, items, libraryArt(libraryFiles, arrayTitles(titles)))
+		const derived = change === null || change.changed ? yield* deriveCatalogSteps(titles, items) : null
+
+		yield
+
+		return { titles, items, itemsView: grouped.view, change, derived }
+	}
+
+	private settleWaiters(): void {
+		const waiters = [...this.catalogWaiters, ...this.classifiedWaiters]
+
+		this.catalogWaiters = []
+		this.classifiedWaiters = []
+
+		for (const resolve of waiters) {
+			resolve()
 		}
 	}
+
+	// ── Catalog ──
+
+	private async loadCatalog(): Promise<void> {
+		const token = this.token
+		const key = catalogKeyFor(
+			[...this.roots.values()].map((rt): [string, LibraryRootType] => [rt.config.uuid, rt.config.type]),
+			this.overridesSignature
+		)
+
+		try {
+			// The headers first, then only the newest slot (the other when that one is torn or of another key).
+			let content: CatalogContent | null = null
+
+			for (const slot of catalogSlotOrder(await this.deps.catalogStore.readGenerations())) {
+				if (token !== this.token || this.catalogSource !== "none") {
+					return
+				}
+
+				const bytes = await this.deps.catalogStore.readSlot(slot)
+
+				// The decode (a few ms at 50k) and the screens' first queries after it each start a slice of their own.
+				await freshSlice(this.deps.yieldSlice)
+
+				content = bytes === null ? null : decodeCatalog(bytes, catalogKey(key))
+
+				if (content !== null) {
+					break
+				}
+			}
+
+			await freshSlice(this.deps.yieldSlice)
+
+			if (content === null || token !== this.token || this.catalogSource !== "none") {
+				return
+			}
+
+			this.catalog.setContent(content)
+			this.catalogSource = "file"
+			this.catalogKeyText = key
+			this.catalogVersion++
+			this.catalogWrittenVersion = this.catalogVersion
+			this.emitCatalog(null)
+
+			const waiters = this.catalogWaiters
+
+			this.catalogWaiters = []
+
+			for (const resolve of waiters) {
+				resolve()
+			}
+		} catch (e) {
+			log.warn("videos.index", "persisted catalog unreadable; the library classifies first", e)
+		}
+	}
+
+	private emitCatalog(titles: string[] | null): void {
+		this.emit({
+			type: "catalog",
+			version: this.catalogVersion,
+			titles,
+			summary: this.catalog.summary()
+		})
+	}
+
+	// Resolves once the catalog holds something to show: the persisted one or the first classification.
+	private catalogReady(): Promise<void> {
+		return this.catalogSource === "none"
+			? new Promise(resolve => {
+					this.catalogWaiters.push(resolve)
+				})
+			: Promise.resolve()
+	}
+
+	// Resolves once a classification is held, or the one under way failed.
+	private whenClassified(): Promise<void> {
+		return this.current === null
+			? new Promise(resolve => {
+					this.classifiedWaiters.push(resolve)
+				})
+			: Promise.resolve()
+	}
+
+	// Each query first fills what it reads in slices (catalog warm steps), so the worker stays free for other calls; the
+	// answer is read only once what it reads is held (a change landing between the two warms again, never builds inline).
+	public async catalogHome(query: HomeQuery): Promise<HomeResult> {
+		await this.catalogReady()
+		await drainSteps(this.catalog.homeWarmSteps(query), this.deps.yieldSlice)
+		await freshSlice(this.deps.yieldSlice)
+
+		return this.catalog.home(query)
+	}
+
+	// `ticket`: names the call for catalogAbandon.
+	public async catalogGrid(query: GridQuery, start: number, count: number, ticket?: number): Promise<GridPage> {
+		const gone = this.ticket(ticket)
+
+		try {
+			await Promise.race([this.catalogReady(), gone.abandoned])
+
+			for (;;) {
+				if (this.catalog.hasGrid(query)) {
+					await freshSlice(this.deps.yieldSlice)
+
+					if (this.catalog.hasGrid(query)) {
+						return this.catalog.grid(query, start, count)
+					}
+				}
+
+				await this.warm(`grid:${gridKey(query)}`, cancelled => this.catalog.gridWarmSteps(query, cancelled), true, gone.abandoned)
+			}
+		} finally {
+			gone.release()
+		}
+	}
+
+	// The page gave up on a call (catalogGrid's `ticket`): it rejects, and stops its warm-up unless another waits on it.
+	public catalogAbandon(ticket: number): void {
+		this.abandons.get(ticket)?.()
+	}
+
+	private readonly abandons = new Map<number, () => void>()
+	private readonly warms = new Map<string, CatalogWarm>()
+
+	private ticket(ticket: number | undefined): { abandoned: Promise<never>; release: () => void } {
+		if (ticket === undefined) {
+			return { abandoned: new Promise<never>(() => undefined), release: () => undefined }
+		}
+
+		const abandoned = new Promise<never>((_, reject) => {
+			this.abandons.set(ticket, () => {
+				reject(new CatalogCallAbandoned())
+			})
+		})
+
+		// Abandoned outside a race (between two awaits) is no failure of anything.
+		abandoned.catch(() => undefined)
+
+		return {
+			abandoned,
+			release: () => {
+				this.abandons.delete(ticket)
+			}
+		}
+	}
+
+	// Runs (or joins) the warm-up under `key`; with `cancellable`, the last call leaving stops it.
+	private async warm(
+		key: string,
+		steps: (cancelled: () => boolean) => Generator<void, void>,
+		cancellable: boolean,
+		abandoned: Promise<never>
+	): Promise<void> {
+		let warm = this.warms.get(key)
+
+		if (warm === undefined || warm.cancelled) {
+			const entry: CatalogWarm = { callers: 0, cancelled: false, done: Promise.resolve() }
+
+			entry.done = drainSteps(
+				steps(() => entry.cancelled),
+				this.deps.yieldSlice
+			).finally(() => {
+				if (this.warms.get(key) === entry) {
+					this.warms.delete(key)
+				}
+			})
+			this.warms.set(key, entry)
+			warm = entry
+		}
+
+		warm.callers++
+
+		try {
+			await Promise.race([warm.done, abandoned])
+		} finally {
+			warm.callers--
+
+			if (cancellable && warm.callers === 0) {
+				warm.cancelled = true
+			}
+		}
+	}
+
+	public async catalogSearch(query: string): Promise<SearchResult> {
+		await this.catalogReady()
+
+		for (;;) {
+			if (this.catalog.hasSearchIndex()) {
+				await freshSlice(this.deps.yieldSlice)
+
+				if (this.catalog.hasSearchIndex()) {
+					return this.catalog.search(query)
+				}
+			}
+
+			await this.warm("search", () => this.catalog.searchWarmSteps(), false, NEVER)
+		}
+	}
+
+	public async catalogTitle(id: string): Promise<VideoTitleView | null> {
+		await this.catalogReady()
+
+		return this.catalog.title(id)
+	}
+
+	public async catalogHidden(): Promise<VideoTitleView[]> {
+		await this.catalogReady()
+
+		return this.catalog.hidden()
+	}
+
+	public async catalogSeries(): Promise<{ id: string; title: string }[]> {
+		await this.catalogReady()
+
+		return this.catalog.series()
+	}
+
+	public async catalogMarkTargets(titleId: string, group: string | null): Promise<string[]> {
+		await this.catalogReady()
+
+		return this.catalog.markTargets(titleId, group)
+	}
+
+	public async catalogNextMovie(titleId: string): Promise<{ id: string; title: string } | null> {
+		await this.catalogReady()
+
+		for (;;) {
+			if (this.catalog.hasNextMovies()) {
+				await freshSlice(this.deps.yieldSlice)
+
+				if (this.catalog.hasNextMovies()) {
+					return this.catalog.nextMovie(titleId)
+				}
+			}
+
+			await this.warm("nextMovie", () => this.catalog.nextMovieWarmSteps(), false, NEVER)
+		}
+	}
+
+	public catalogSummary(): CatalogSummary {
+		return this.catalog.summary()
+	}
+
+	// The page's watch state and probe facts, which the catalog's rows, filters and sorts read.
+	public setWatch(update: WatchUpdate): void {
+		this.catalog.setWatch(update)
+	}
+
+	// Says whether the facts reached titles with watch-state records (whose rows and watch-reading orders change too).
+	public setFacts(update: FactsUpdate): Promise<FactsResult> {
+		return drainSteps(this.catalog.setFactsSteps(update), this.deps.yieldSlice)
+	}
+
+	private scheduleCatalogWrite(): void {
+		if (
+			!this.writer ||
+			!this.catalogComplete ||
+			this.catalogWriteFailures >= MAX_WRITE_FAILURES ||
+			this.catalogSource !== "classified" ||
+			this.catalogVersion === this.catalogWrittenVersion ||
+			this.catalogWriteTimer !== null
+		) {
+			return
+		}
+
+		const delay = Math.max(WRITE_DEBOUNCE_MS, this.lastCatalogWriteAt + WRITE_MIN_INTERVAL_MS - this.deps.now())
+
+		this.catalogWriteTimer = setTimeout(() => {
+			this.catalogWriteTimer = null
+			void this.writeCatalogNow()
+		}, delay)
+	}
+
+	private writeCatalogNow(): Promise<void> {
+		if (this.catalogWriting !== null) {
+			return this.catalogWriting.then(() => this.writeCatalogNow())
+		}
+
+		const token = this.token
+		const writing = this.runCatalogWrite().finally(() => {
+			this.catalogWriting = null
+
+			if (token === this.token) {
+				this.scheduleCatalogWrite()
+			}
+		})
+
+		this.catalogWriting = writing
+
+		return writing
+	}
+
+	private async runCatalogWrite(): Promise<void> {
+		if (
+			!this.writer ||
+			!this.catalogComplete ||
+			this.catalogSource !== "classified" ||
+			this.catalogVersion === this.catalogWrittenVersion
+		) {
+			return
+		}
+
+		const version = this.catalogVersion
+		const key = this.catalogKeyText
+		const token = this.token
+		const epoch = this.writeEpoch
+		const cancelled = (): boolean => token !== this.token || epoch !== this.writeEpoch
+
+		try {
+			const { slot, generation } = nextSlot(await this.deps.catalogStore.readGenerations())
+
+			if (cancelled()) {
+				return
+			}
+
+			const bytes = await drainSteps(
+				encodeCatalogSteps({ content: this.catalog.persisted(), key: catalogKey(key), generation }),
+				this.deps.yieldSlice
+			)
+
+			if (cancelled()) {
+				return
+			}
+
+			await this.deps.catalogStore.write(slot, bytes, cancelled)
+
+			if (!cancelled() && key === this.catalogKeyText) {
+				this.catalogWrittenVersion = version
+				this.lastCatalogWriteAt = this.deps.now()
+				this.catalogWriteFailures = 0
+			}
+		} catch (e) {
+			this.lastCatalogWriteAt = this.deps.now()
+			this.catalogWriteFailures++
+			// Past the limit, the catalog stays in memory this session (the snapshots keep their own count).
+			log.warn("videos.index", "catalog write failed", e)
+		}
+	}
+
+	// ── Subscriptions and reads ──
 
 	// The listener gets everything known now, then every change.
 	public subscribe(listener: (update: VideoIndexUpdate) => void): () => void {
 		this.listeners.add(listener)
 
-		if (this.current !== null) {
+		if (this.catalogSource !== "none") {
 			listener({
-				type: "titles",
-				reset: true,
-				upserts: [...this.current.titles.values()],
-				removed: []
-			})
-		}
-
-		if (this.homeSignatures !== null && this.current !== null && this.homeSent) {
-			listener({
-				type: "home",
-				reset: true,
-				upserts: this.homeItems(),
-				removed: []
+				type: "catalog",
+				version: this.catalogVersion,
+				titles: null,
+				summary: this.catalog.summary()
 			})
 		}
 
@@ -1477,26 +1998,37 @@ export class VideoIndexEngine {
 		})
 	}
 
-	public titleArt(id: string, slot: ArtSlotCode): TitleArtCandidates | null {
-		const current = this.current
-		const title = current?.titles.get(id)
+	// A card's art candidates come from the catalog until the library is classified (a cold open's cards look theirs
+	// up at once); anything else waits for the classification.
+	public async titleArt(id: string, slot: ArtSlotCode): Promise<TitleArtCandidates | null> {
+		const kept = this.current === null && slot !== "b" ? this.catalog.cardArt(id, slot, null) : null
 
-		return current === null || title === undefined ? null : titleArtCandidates(current.files, title, slot)
+		if (kept !== null) {
+			return kept
+		}
+
+		await this.whenClassified()
+
+		const current = this.current
+		const title = this.catalog.title(id)
+
+		return current === null || title === null ? null : titleArtCandidates(current.files, title, slot)
 	}
 
 	// One video's art: an episode's own still, else its title's.
-	public itemArt(titleId: string, stableUuid: string, slot: ArtSlotCode): TitleArtCandidates | null {
+	public async itemArt(titleId: string, stableUuid: string, slot: ArtSlotCode): Promise<TitleArtCandidates | null> {
+		const kept = this.current === null && slot !== "b" ? this.catalog.cardArt(titleId, slot, stableUuid) : null
+
+		if (kept !== null) {
+			return kept
+		}
+
+		await this.whenClassified()
+
 		const current = this.current
-		const title = current?.titles.get(titleId)
+		const title = this.catalog.title(titleId)
 
-		return current === null || title === undefined ? null : itemArtCandidates(current.files, title, stableUuid, slot)
-	}
-
-	// Every playable video of the classification.
-	public homeItems(): VideoHomeItem[] {
-		const current = this.current
-
-		return current === null ? [] : buildHomeItems(current.files, parent => this.dirName(parent))
+		return current === null || title === null ? null : itemArtCandidates(current.files, title, stableUuid, slot)
 	}
 
 	private dirName(uuid: string): string {
@@ -1521,16 +2053,20 @@ export class VideoIndexEngine {
 		return ""
 	}
 
-	public titleDetail(id: string): VideoTitleDetail | null {
-		const current = this.current
-		const title = current?.titles.get(id)
+	public async titleDetail(id: string): Promise<VideoTitleDetail | null> {
+		await this.whenClassified()
 
-		return current === null || title === undefined ? null : buildTitleDetail(current.files, title)
+		const current = this.current
+		const title = this.catalog.title(id)
+
+		return current === null || title === null ? null : buildTitleDetail(current.files, title)
 	}
 
 	// Playable drive files rebuilt from the index, for the ones it holds live. These carry key material and are
-	// built only on request, a few at a time.
-	public playableFiles(stableUuids: readonly string[]): File[] {
+	// built only on request, a few at a time; a root still loading its snapshot is waited for.
+	public async playableFiles(stableUuids: readonly string[]): Promise<File[]> {
+		await Promise.all([...this.roots.values()].flatMap(rt => rt.loading ?? []))
+
 		const out: File[] = []
 
 		for (const stableUuid of stableUuids) {
@@ -1570,12 +2106,19 @@ export class VideoIndexEngine {
 				}
 			}
 
+			if (this.catalogWriteTimer !== null) {
+				clearTimeout(this.catalogWriteTimer)
+				this.catalogWriteTimer = null
+			}
+
 			return
 		}
 
 		for (const rt of this.roots.values()) {
 			this.scheduleWrite(rt)
 		}
+
+		this.scheduleCatalogWrite()
 	}
 
 	private markPersist(rt: RootRuntime): void {
@@ -1639,7 +2182,13 @@ export class VideoIndexEngine {
 
 			state.generation = generation
 
-			await this.deps.store.write(uuid, slot, encodeSnapshot(state), cancelled)
+			const bytes = await drainSteps(encodeSnapshotSteps(state), this.deps.yieldSlice)
+
+			if (cancelled()) {
+				return
+			}
+
+			await this.deps.store.write(uuid, slot, bytes, cancelled)
 
 			if (!cancelled()) {
 				rt.writtenVersion = version
@@ -1680,6 +2229,15 @@ export class VideoIndexEngine {
 			}
 		}
 
+		if (this.catalogWriteTimer !== null) {
+			clearTimeout(this.catalogWriteTimer)
+			this.catalogWriteTimer = null
+		}
+
+		if (this.catalogSource === "classified" && this.catalogComplete && this.catalogVersion !== this.catalogWrittenVersion) {
+			writes.push(this.writeCatalogNow())
+		}
+
 		await Promise.all(writes)
 	}
 
@@ -1698,9 +2256,23 @@ export class VideoIndexEngine {
 
 		this.roots.clear()
 		this.listeners.clear()
-		this.signatures.clear()
-		this.homeSignatures = null
-		this.homeSent = false
+		this.catalog.setContent(catalogContent([], []))
+		this.catalog.setWatch({ reset: true, upserts: {}, removed: [], lastPlayedCeilingMs: undefined })
+		this.catalog.setFacts({ reset: true, uuids: [], durations: [], heights: [] })
+		this.catalogSource = "none"
+		this.catalogLoad = null
+		this.catalogVersion = 0
+		this.catalogWrittenVersion = 0
+		this.catalogKeyText = ""
+		this.lastCatalogWriteAt = 0
+		this.catalogWriteFailures = 0
+		this.catalogComplete = false
+
+		if (this.catalogWriteTimer !== null) {
+			clearTimeout(this.catalogWriteTimer)
+			this.catalogWriteTimer = null
+		}
+
 		this.lookups.clear()
 		this.patchLog = []
 		this.asyncPatches = 0
@@ -1715,7 +2287,14 @@ export class VideoIndexEngine {
 		this.overrides = {}
 		this.overridesSignature = "{}"
 		this.classified = null
+		// Calls waiting on the signed-out account's library answer from the empty one.
+		this.settleWaiters()
 	}
+}
+
+// What a catalog classified from these configured roots (uuid, type) under these corrections is persisted under.
+function catalogKeyFor(roots: readonly [string, LibraryRootType][], overridesSignature: string): string {
+	return JSON.stringify([CATALOG_FORMAT_VERSION, CLASSIFIER_VERSION, INDEX_KINDS_SIGNATURE, roots, overridesSignature])
 }
 
 // The split corrections alone: the only ones the classifier itself reads.

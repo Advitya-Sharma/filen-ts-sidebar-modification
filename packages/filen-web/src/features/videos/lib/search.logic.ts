@@ -84,13 +84,29 @@ function addTokens(postings: Map<string, number[]>, entry: number, texts: readon
 }
 
 // Titles match on their name, year and directory names; an episode only on its own title.
-export function buildVideoSearchIndex({
+export function buildVideoSearchIndex(input: { titles: readonly VideoTitleView[]; items: readonly VideoHomeItem[] }): VideoSearchIndex {
+	const steps = buildVideoSearchIndexSteps(input)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) {
+			return step.value
+		}
+	}
+}
+
+// Entries indexed between yields of buildVideoSearchIndexSteps.
+const INDEX_STEP = 256
+
+// buildVideoSearchIndex in steps (yields between runs of entries).
+export function* buildVideoSearchIndexSteps({
 	titles,
 	items
 }: {
 	titles: readonly VideoTitleView[]
 	items: readonly VideoHomeItem[]
-}): VideoSearchIndex {
+}): Generator<void, VideoSearchIndex> {
 	const folders = new Map<string, Set<string>>()
 
 	for (const item of items) {
@@ -113,6 +129,10 @@ export function buildVideoSearchIndex({
 	const byId = new Map<string, VideoTitleView>()
 
 	for (const title of titles) {
+		if (entries.length % INDEX_STEP === INDEX_STEP - 1) {
+			yield
+		}
+
 		byId.set(title.id, title)
 		addTokens(postings, entries.length, [title.title, title.year > 0 ? String(title.year) : "", ...(folders.get(title.id) ?? [])])
 		entries.push({
@@ -125,7 +145,17 @@ export function buildVideoSearchIndex({
 
 	const seenGroups = new Set<string>()
 
-	for (const item of items) {
+	for (let at = 0; at < items.length; at++) {
+		const item = items[at]
+
+		if (at % (INDEX_STEP * 4) === INDEX_STEP * 4 - 1) {
+			yield
+		}
+
+		if (item === undefined) {
+			continue
+		}
+
 		const title = item.itemClass === "episode" && item.episodeTitle.length > 0 ? byId.get(item.titleId) : undefined
 
 		// One result per episode, not per version.
@@ -142,6 +172,8 @@ export function buildVideoSearchIndex({
 			name: searchTokens(item.episodeTitle).join(" ")
 		})
 	}
+
+	yield
 
 	return {
 		entries,

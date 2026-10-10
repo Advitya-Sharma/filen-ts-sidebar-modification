@@ -101,6 +101,7 @@ vi.mock("@/lib/storage/adapter", () => ({
 	kvSetJson: () => Promise.resolve(),
 	kvKeys: () => Promise.resolve([]),
 	kvEntriesJson: () => Promise.resolve([]),
+	kvEntriesJsonInSlices: () => Promise.resolve([]),
 	kvDelete: () => Promise.resolve()
 }))
 vi.mock("@/features/drive/lib/thumbCache", () => ({ wipeThumbnailStore, readThumbnailBlob: vi.fn(), deleteThumbnail: vi.fn() }))

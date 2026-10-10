@@ -9,7 +9,7 @@ import {
 	needsProbeFacts,
 	withActiveRow,
 	qualityOf,
-	sourceTitles,
+	inGridSource,
 	type GridPrefs,
 	type ProbeFacts
 } from "@/features/videos/lib/videoGrid.logic"
@@ -20,10 +20,12 @@ import {
 	searchVideos,
 	titleSearchTokens
 } from "@/features/videos/lib/search.logic"
-import { episodeItem, homeData, movieItem, progress, title, watched } from "@/tests/support/videoHome"
+import { episodeItem, homeCatalog, movieItem, progress, title, watched } from "@/tests/support/videoHome"
+import type { GridQuery } from "@/workers/videoIndex/catalog.logic"
 
 const NOW = Date.UTC(2026, 9, 1)
 const NO_FACTS: ReadonlyMap<string, ProbeFacts> = new Map()
+const UNWATCHED = () => ({ category: "unwatched" as const, lastPlayedMs: 0 })
 
 function ids(titles: readonly { id: string }[]): string[] {
 	return titles.map(item => item.id)
@@ -41,18 +43,17 @@ describe("library grid sort and filters", () => {
 	const titles = [matrix, arrival, alien, lost]
 
 	it("selects a view's titles by kind or directory", () => {
-		expect(ids(sourceTitles(titles, { kind: "movies" }))).toEqual(["The Matrix", "Arrival", "Alien"])
-		expect(ids(sourceTitles(titles, { kind: "shows" }))).toEqual(["Lost"])
-		expect(ids(sourceTitles(titles, { kind: "root", uuid: "r2" }))).toEqual(["Arrival"])
+		expect(ids(titles.filter(item => inGridSource(item, { kind: "movies" })))).toEqual(["The Matrix", "Arrival", "Alien"])
+		expect(ids(titles.filter(item => inGridSource(item, { kind: "shows" })))).toEqual(["Lost"])
+		expect(ids(titles.filter(item => inGridSource(item, { kind: "root", uuid: "r2" })))).toEqual(["Arrival"])
 		expect(gridPrefsKey({ kind: "root", uuid: "r2" })).toBe("videos.v1.grid.root:r2")
 		expect(gridPrefsKey({ kind: "movies" })).toBe("videos.v1.grid.movies")
 	})
 
 	it("sorts by title without articles, date added, year, and by a stable random order", () => {
 		const movies = [matrix, arrival, alien]
-		const watch = new Map()
 		const view = (patch: Partial<GridPrefs>, seed = 1) =>
-			ids(gridView({ titles: movies, prefs: prefs(patch), watch, facts: NO_FACTS, seed }).titles)
+			ids(gridView({ titles: movies, prefs: prefs(patch), watchOf: UNWATCHED, facts: NO_FACTS, seed }).titles)
 
 		expect(view({ sort: "title" })).toEqual(["Alien", "Arrival", "The Matrix"])
 		expect(view({ sort: "added" })).toEqual(["Alien", "The Matrix", "Arrival"])
@@ -66,7 +67,7 @@ describe("library grid sort and filters", () => {
 			[alien.primary?.uuid ?? "", { durationSec: 7000, height: 0 }],
 			[arrival.primary?.uuid ?? "", { durationSec: 6900, height: 0 }]
 		])
-		const view = gridView({ titles: [matrix, arrival, alien], prefs: prefs({ sort: "runtime" }), watch: new Map(), facts, seed: 1 })
+		const view = gridView({ titles: [matrix, arrival, alien], prefs: prefs({ sort: "runtime" }), watchOf: UNWATCHED, facts, seed: 1 })
 
 		expect(ids(view.titles)).toEqual(["Alien", "Arrival", "The Matrix"])
 		expect(view.coverage).toEqual({ kind: "runtime", known: 2, total: 3 })
@@ -77,7 +78,7 @@ describe("library grid sort and filters", () => {
 	it("filters by resolution from the name, else a probe, leaving unknown out", () => {
 		const facts = new Map<string, ProbeFacts>([[arrival.primary?.uuid ?? "", { durationSec: null, height: 720 }]])
 		const view = (quality: GridPrefs["quality"]) =>
-			gridView({ titles: [matrix, arrival, alien], prefs: prefs({ quality }), watch: new Map(), facts, seed: 1 })
+			gridView({ titles: [matrix, arrival, alien], prefs: prefs({ quality }), watchOf: UNWATCHED, facts, seed: 1 })
 
 		expect(ids(view("2160").titles)).toEqual(["The Matrix"])
 		expect(ids(view("1080").titles)).toEqual(["Alien"])
@@ -89,13 +90,16 @@ describe("library grid sort and filters", () => {
 	it("filters by watch state and directory", () => {
 		const alienItem = movieItem("Alien")
 		const arrivalItem = movieItem("Arrival")
-		const data = homeData({
+		const catalog = homeCatalog({
 			titles: [matrix, arrival, alien],
 			items: [alienItem, arrivalItem, movieItem("The Matrix")],
 			records: [watched(alienItem, NOW - 1000), progress(arrivalItem, { pos: 600, dur: 6000, at: NOW })]
 		})
-		const view = (patch: Partial<GridPrefs>) =>
-			ids(gridView({ titles: [matrix, arrival, alien], prefs: prefs(patch), watch: data.watch, facts: NO_FACTS, seed: 1 }).titles)
+		const view = (patch: Partial<GridPrefs>) => {
+			const query: GridQuery = { source: { kind: "movies" }, prefs: prefs(patch), query: "", seed: 1 }
+
+			return catalog.grid(query, 0, 100).cards.map(card => card.title.id)
+		}
 
 		expect(view({ watch: "watched" })).toEqual(["Alien"])
 		expect(view({ watch: "inProgress" })).toEqual(["Arrival"])

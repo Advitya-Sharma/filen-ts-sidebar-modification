@@ -6,7 +6,7 @@ import { act, render } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import type { AnyFile } from "@filen/sdk-rs"
 import "@/lib/i18n"
-import type { VideoFileRef, VideoPartView, VideoTitleDetail, VideoTitleView } from "@/workers/videoIndex/view.logic"
+import type { VideoFileRef, VideoPartView, VideoTitleDetail } from "@/workers/videoIndex/view.logic"
 
 // What opening a movie's page costs: the title's full probe (one), its NFO (one read), and art only for what is on
 // screen after the dwell. Nothing is listed, walked or checked against the drive; the extras' stills wait for the
@@ -30,12 +30,14 @@ const { sdkApi, library, observers } = vi.hoisted(() => ({
 		videoTitleDetail: vi.fn(),
 		videoTitleArt: vi.fn(),
 		videoItemArt: vi.fn(),
+		videoCatalogTitle: vi.fn(),
+		videoCatalogHome: vi.fn(),
+		videoCatalogGrid: vi.fn(),
+		videoCatalogSearch: vi.fn(),
 		playableVideoFiles: vi.fn()
 	},
 	library: {
-		snapshot: { titles: [] as VideoTitleView[], hidden: [], byId: new Map<string, VideoTitleView>(), roots: [], loaded: true },
-		items: [],
-		retainHome: vi.fn(() => () => undefined)
+		snapshot: { roots: [], loaded: true, version: 1, summary: { titleCount: 1, total: {}, byRoot: new Map(), hiddenCount: 0 } }
 	},
 	observers: [] as { callback: IntersectionObserverCallback; options: IntersectionObserverInit | undefined; targets: Set<Element> }[]
 }))
@@ -48,6 +50,7 @@ vi.mock("@/lib/storage/adapter", () => ({
 	kvSetJson: () => Promise.resolve(),
 	kvKeys: () => Promise.resolve([]),
 	kvEntriesJson: () => Promise.resolve([]),
+	kvEntriesJsonInSlices: () => Promise.resolve([]),
 	kvDelete: () => Promise.resolve()
 }))
 vi.mock("@tanstack/react-router", () => {
@@ -108,11 +111,10 @@ vi.mock("@/features/videos/lib/index", () => {
 
 	return {
 		VIDEO_TITLE_DETAIL_KEY_PREFIX: ["videos", "title"],
+		VIDEO_CATALOG_KEY_PREFIX: ["videos", "catalog"],
 		videoLibrary: {
 			subscribe: () => () => undefined,
 			getSnapshot: () => library.snapshot,
-			getHomeItems: () => library.items,
-			retainHome: library.retainHome,
 			open: () => Promise.resolve(),
 			titleArt: (id: string, slot: string) => artOf(sdkApi.videoTitleArt(id, slot) as Promise<never>),
 			itemArt: (id: string, stableUuid: string, slot: string) => artOf(sdkApi.videoItemArt(id, stableUuid, slot) as Promise<never>),
@@ -233,7 +235,7 @@ beforeEach(() => {
 			}) as unknown as MediaQueryList
 	)
 	observers.length = 0
-	library.snapshot = { titles: [MOVIE], hidden: [], byId: new Map([[MOVIE.id, MOVIE]]), roots: [], loaded: true }
+	sdkApi.videoCatalogTitle.mockImplementation((id: string) => Promise.resolve(id === MOVIE.id ? MOVIE : null))
 	sdkApi.videoTitleDetail.mockResolvedValue(DETAIL)
 	sdkApi.playableVideoFiles.mockImplementation((stableUuids: string[]) =>
 		Promise.resolve(stableUuids.map(stableUuid => ({ uuid: stableUuid.replace(/-s$/, "-u"), stableUUID: stableUuid, size: 1_000n })))
@@ -289,8 +291,11 @@ describe("title page request counts", () => {
 		expect(view.container.querySelectorAll("[data-slot=skeleton]")).toHaveLength(0)
 		// The metadata line reads as one run, with separators.
 		expect(view.getByText("1995 · 1h 41m · R")).toBeTruthy()
-		// Only this title's watch state is read: the library's video list is never asked for.
-		expect(library.retainHome).not.toHaveBeenCalled()
+		// Only this title's watch state is read, and one title from the catalog: no rows, pages or results.
+		expect(sdkApi.videoCatalogTitle).toHaveBeenCalledTimes(1)
+		expect(sdkApi.videoCatalogHome).not.toHaveBeenCalled()
+		expect(sdkApi.videoCatalogGrid).not.toHaveBeenCalled()
+		expect(sdkApi.videoCatalogSearch).not.toHaveBeenCalled()
 
 		expect(view.getByRole("heading", { level: 1 }).textContent).toBe("Heat")
 		expect(networkCalls()).toEqual({ probes: 1, nfoReads: 1, art: 0, listings: 0 })

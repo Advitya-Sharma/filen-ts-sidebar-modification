@@ -32,6 +32,8 @@ import { runOp } from "@/lib/actions/outcome"
 import { noDiskPersister } from "@/queries/persist"
 import { useIsOnline } from "@/lib/useIsOnline"
 import { useVideoLibrary, videoTitleDetailQueryKey } from "@/features/videos/queries/library"
+import { useCatalogTitleQuery } from "@/features/videos/queries/catalog"
+import { log } from "@/lib/log"
 import { videoLibrary } from "@/features/videos/lib/index"
 import { watchState } from "@/features/videos/lib/watchState"
 import { probeService } from "@/features/videos/lib/probeService"
@@ -40,7 +42,6 @@ import { PlayerController } from "@/features/videos/lib/player/playerController"
 import { RESUME_PILL_MS } from "@/features/videos/lib/player/resume.logic"
 import { cancelPrewarm, prewarmPlayback } from "@/lib/media/playback/sources"
 import { playbackEnvironment } from "@/lib/media/playback/capabilities"
-import { nextMovieInDirectory } from "@/features/videos/lib/player/postPlay.logic"
 import { SkipPromptTracker, creditsStart } from "@/features/videos/lib/player/skipPrompts.logic"
 import { StillWatchingCounter, autoAdvance, upNextState, upNextTimingFor } from "@/features/videos/lib/player/upNextFlow.logic"
 import {
@@ -166,7 +167,8 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 	const navigate = useNavigate()
 	const router = useRouter()
 	const library = useVideoLibrary()
-	const known = library.byId.has(titleId)
+	const titleQuery = useCatalogTitleQuery(titleId)
+	const known = titleQuery.data !== undefined && titleQuery.data !== null
 	// A deep link opened before the library finished its first scan: the title may still turn up.
 	const scanning = library.roots.some(root => root.walking || root.state === "loading")
 	const detailQuery = useQuery({
@@ -301,8 +303,9 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 		playItem(next, how)
 	}
 
-	// From what is in memory only: the season's episodes, or the library's movies and the watch state.
-	function postPlayNext(current: WatchItemTarget): PostPlayNext | null {
+	// The season's next unwatched episode (from what is in memory), or the next unwatched movie from the same library
+	// directory (asked of the library's worker).
+	async function postPlayNext(current: WatchItemTarget): Promise<PostPlayNext | null> {
 		if (current.kind === "episode") {
 			const played = (episode: WatchItemTarget): boolean => {
 				const first = episode.parts[0]?.file
@@ -318,15 +321,10 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 			return null
 		}
 
-		const movie = nextMovieInDirectory({
-			titles: library.titles,
-			currentId: titleId,
-			played: title =>
-				title.primary !== null &&
-				deriveWatchState({
-					rec: doc.items[itemKey(title.primary.stableUuid)],
-					file: { uuid: title.primary.uuid, size: title.primary.size }
-				}).played
+		const movie = await videoLibrary.nextMovie(titleId).catch((e: unknown) => {
+			log.warn("videos.player", "next movie unavailable", e)
+
+			return null
 		})
 
 		return movie === null ? null : { kind: "title", id: movie.id, name: movie.title }
@@ -600,7 +598,11 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 			}
 
 			if (next === null) {
-				setCard({ kind: "postPlay", next: postPlayNext(current) })
+				void postPlayNext(current).then(choice => {
+					if (targetRef.current === current) {
+						setCard({ kind: "postPlay", next: choice })
+					}
+				})
 
 				return
 			}
@@ -865,8 +867,10 @@ export function WatchScreen({ titleId, search }: { titleId: string; search: Watc
 	}
 
 	const failure =
-		!library.loaded || (!known && scanning) || (detail === null && detailQuery.isPending && known) ? undefined : !known ||
-		  target === null ? (
+		!library.loaded ||
+		titleQuery.isPending ||
+		(!known && scanning) ||
+		(detail === null && detailQuery.isPending && known) ? undefined : !known || target === null ? (
 			<FailureCard
 				title={t("playerMissingTitle")}
 				onBack={goBack}

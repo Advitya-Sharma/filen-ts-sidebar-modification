@@ -1,8 +1,10 @@
 import * as Comlink from "comlink"
-import { activeLibraryOverrides, activeLibraryRoots, type LibraryConfigDoc } from "@filen/shared/videos"
+import { activeLibraryOverrides, activeLibraryRoots, type ItemRec, type LibraryConfigDoc } from "@filen/shared/videos"
 import type { File as SdkFile } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
 import { log } from "@/lib/log"
+import { kvEntriesJsonInSlices } from "@/lib/storage/adapter"
+import { nextTask } from "@/lib/nextTask"
 import { createListenerSet } from "@/lib/listenerSet"
 import { onSignOutPending, readSignOutPending } from "@/lib/signOutPending"
 import { onAuthBroadcast } from "@/lib/sdk/session"
@@ -16,43 +18,56 @@ import {
 } from "@/features/videos/lib/library"
 import { queryClient } from "@/queries/client"
 import type { IndexRootConfig } from "@/workers/videoIndex/engine"
-import type {
-	TitleArtCandidates,
-	VideoFileRef,
-	VideoHomeItem,
-	VideoIndexUpdate,
-	VideoRootStatus,
-	VideoTitleView
-} from "@/workers/videoIndex/view.logic"
+import type { CatalogSummary, FactsResult, GridQuery } from "@/workers/videoIndex/catalog.logic"
+import type { TitleArtCandidates, VideoFileRef, VideoIndexUpdate, VideoRootStatus } from "@/workers/videoIndex/view.logic"
 import type { ArtFile } from "@/features/videos/lib/artwork"
 import type { ArtCandidate } from "@/features/videos/lib/artwork.logic"
 import type { ArtSlotCode } from "@/features/videos/lib/artStore.logic"
+import type { VideoKindCounts } from "@/features/videos/lib/libraryView.logic"
+import { needsProbeFacts } from "@/features/videos/lib/videoGrid.logic"
+import { PROBE_KV_PREFIX, probeRecordSchema, type ProbeRecord } from "@/features/videos/lib/probeService.logic"
+import { probeService } from "@/features/videos/lib/probeService"
+import { watchState } from "@/features/videos/lib/watchState"
 import { filesWithVerdict, subscribeFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 
-// The main thread's side of the library index: the titles and root statuses the SDK worker pushes, held as one
-// immutable snapshot per change for useSyncExternalStore. Nothing here holds key material; a playable file is
-// asked for when it is about to be played.
+// The main thread's side of the library index. The library itself stays in the SDK worker: screens ask it for the
+// rows, grid pages and results they show (queries/catalog.ts), and this keeps only the root statuses, the library's
+// counts and a version that changes with its content. The page's watch state and probe facts are handed to the
+// worker as they change, since its rows, filters and sorts read them. Nothing here holds key material; a playable
+// file is asked for when it is about to be played.
 
 export const VIDEO_TITLE_DETAIL_KEY_PREFIX = ["videos", "title"] as const
+// Every catalog query (rows, pages, results, titles): fetched again whenever the catalog or what it reads changes.
+export const VIDEO_CATALOG_KEY_PREFIX = ["videos", "catalog"] as const
 
-export interface VideoLibrarySnapshot {
-	// What the library shows: hidden titles left out.
-	titles: readonly VideoTitleView[]
-	// Titles a manual correction hides.
-	hidden: readonly VideoTitleView[]
-	// Every title, hidden ones included.
-	byId: ReadonlyMap<string, VideoTitleView>
-	roots: readonly VideoRootStatus[]
-	// Whether the worker has classified anything yet this session.
-	loaded: boolean
+export interface VideoLibrarySummary {
+	// Titles the library shows (hidden ones left out).
+	titleCount: number
+	total: VideoKindCounts
+	byRoot: ReadonlyMap<string, VideoKindCounts>
+	hiddenCount: number
 }
 
+export interface VideoLibrarySnapshot {
+	roots: readonly VideoRootStatus[]
+	// Whether the worker holds a catalog yet this session (persisted or classified).
+	loaded: boolean
+	// Changes with the catalog's content.
+	version: number
+	summary: VideoLibrarySummary
+}
+
+// How long probe facts gather before going to the worker, and how many go in one message.
+const FACTS_BATCH_MS = 250
+const FACTS_PART = 4000
+
+const EMPTY_COUNTS: VideoKindCounts = { movies: 0, shows: 0, other: 0, episodes: 0 }
+
 const EMPTY: VideoLibrarySnapshot = {
-	titles: [],
-	hidden: [],
-	byId: new Map(),
 	roots: [],
-	loaded: false
+	loaded: false,
+	version: 0,
+	summary: { titleCount: 0, total: EMPTY_COUNTS, byRoot: new Map(), hiddenCount: 0 }
 }
 
 export function indexRootsOf(doc: LibraryConfigDoc): IndexRootConfig[] {
@@ -63,6 +78,15 @@ export function indexRootsOf(doc: LibraryConfigDoc): IndexRootConfig[] {
 	}))
 }
 
+function summaryOf(summary: CatalogSummary): VideoLibrarySummary {
+	return {
+		titleCount: summary.titleCount,
+		total: summary.total,
+		byRoot: new Map(summary.byRoot),
+		hiddenCount: summary.hiddenCount
+	}
+}
+
 export interface VideoArtCandidates {
 	candidates: ArtCandidate[]
 	// The keyless uuid of a candidate's file: all a stored-art or drive-thumbnail lookup needs.
@@ -71,15 +95,18 @@ export interface VideoArtCandidates {
 	resolveFile: (file: number) => Promise<ArtFile | null>
 }
 
-// Home rows, grids and search unmounted this long stop the worker's video list (a screen switch remounts them).
-const HOME_RELEASE_MS = 30_000
-// Retries of a failed subscription to the worker's video list, doubling from the first delay.
-const HOME_RETRY_LIMIT = 5
-const HOME_RETRY_MS = 1_000
+// The watch-state records last handed to the worker, by key.
+type SentWatch = Readonly<Record<string, ItemRec>>
+
+function factsOf(record: ProbeRecord): { durationSec: number | null; height: number } {
+	return {
+		durationSec: record.probe?.durationSec ?? null,
+		height: record.probe?.video?.h ?? 0
+	}
+}
 
 class VideoLibraryClient {
 	private snapshot = EMPTY
-	private titles = new Map<string, VideoTitleView>()
 	private readonly changes = createListenerSet("videos.library")
 	private attached = false
 	private detach: (() => void) | null = null
@@ -87,170 +114,23 @@ class VideoLibraryClient {
 	// Keyed files asked for and not resolved yet; nothing keyed is kept once handed over.
 	private readonly artFiles = new Map<string, Promise<ArtFile | null>>()
 	private readonly artBatch = new Map<string, { ref: VideoFileRef; resolve: (file: ArtFile | null) => void }>()
-	// The library's videos (home rows, watch filters, search) by stable uuid, kept current by the worker's diffs
-	// while a screen that reads them is mounted.
-	private home = new Map<string, VideoHomeItem>()
-	private homeItems: readonly VideoHomeItem[] | null = null
-	private homeConsumers = 0
-	private homeWanted = false
-	private homeEnabled = false
-	private homeAttempts = 0
-	private homeTimer: ReturnType<typeof setTimeout> | null = null
-	private homeRetryArmed = false
 	// The manual corrections last handed to the worker, serialized.
 	private sentOverrides = "{}"
 	// The notTransportStream verdicts last handed to the index, as a signature.
 	private sentNotTransportStream = ""
+	private sentWatch: SentWatch | null = null
+	private sentCeiling: number | undefined = undefined
+	// Probe facts gathered for a while (probes land in bursts) to go to the worker together.
+	private readonly pendingFacts = new Map<string, { durationSec: number | null; height: number }>()
+	private factsTimer: ReturnType<typeof setTimeout> | null = null
+	private allFacts: Promise<void> | null = null
+	private generation = 0
 
 	public readonly subscribe = (listener: () => void): (() => void) => this.changes.subscribe(listener)
 
 	public readonly getSnapshot = (): VideoLibrarySnapshot => this.snapshot
 
-	public readonly getHomeItems = (): readonly VideoHomeItem[] | null => this.homeItems
-
-	// A screen that reads the library's videos mounted; the returned release unmounts it. While any is mounted the
-	// worker sends the list once and then only what changed with each classification; a while after the last one
-	// went, it stops and both sides drop the list.
-	public retainHome(): () => void {
-		this.homeConsumers++
-
-		if (this.homeTimer !== null) {
-			clearTimeout(this.homeTimer)
-			this.homeTimer = null
-		}
-
-		this.setHomeWanted(true)
-
-		let released = false
-
-		return () => {
-			if (released) {
-				return
-			}
-
-			released = true
-			this.homeConsumers--
-
-			if (this.homeConsumers === 0) {
-				this.homeTimer = setTimeout(() => {
-					this.homeTimer = null
-					this.setHomeWanted(false)
-				}, HOME_RELEASE_MS)
-			}
-		}
-	}
-
-	private setHomeWanted(wanted: boolean): void {
-		if (this.homeWanted === wanted) {
-			return
-		}
-
-		this.homeWanted = wanted
-		this.homeAttempts = 0
-
-		if (!wanted) {
-			this.home = new Map()
-			this.homeItems = null
-			this.changes.emit()
-		}
-
-		this.syncHome()
-	}
-
-	// Brings the worker's subscription in line with what the screens want; a failure is retried with backoff (a few
-	// times), and again when the page comes back online or into focus.
-	private syncHome(): void {
-		const wanted = this.homeWanted
-
-		// Nothing to stop in a worker this session never subscribed to (or one a sign-out reset).
-		if (!wanted && !this.attached) {
-			this.homeEnabled = false
-
-			return
-		}
-
-		// Attaching subscribes the index first, and syncs on its own.
-		this.attach()
-
-		if (wanted === this.homeEnabled) {
-			return
-		}
-
-		this.homeEnabled = wanted
-
-		sdkApi.videoHomeSubscribe(wanted).catch((e: unknown) => {
-			log.warn("videos.library", "subscribing to the library's videos failed", e)
-
-			if (this.homeEnabled !== wanted) {
-				return
-			}
-
-			this.homeEnabled = !wanted
-			this.retryHome()
-		})
-	}
-
-	private retryHome(): void {
-		if (this.homeAttempts >= HOME_RETRY_LIMIT) {
-			this.armHomeRetry()
-
-			return
-		}
-
-		const delay = HOME_RETRY_MS * 2 ** this.homeAttempts
-
-		this.homeAttempts++
-		setTimeout(() => {
-			this.syncHome()
-		}, delay)
-	}
-
-	private armHomeRetry(): void {
-		if (this.homeRetryArmed) {
-			return
-		}
-
-		this.homeRetryArmed = true
-
-		const retry = (): void => {
-			window.removeEventListener("online", retry)
-			window.removeEventListener("focus", retry)
-			this.homeRetryArmed = false
-			this.homeAttempts = 0
-			this.syncHome()
-		}
-
-		window.addEventListener("online", retry)
-		window.addEventListener("focus", retry)
-	}
-
-	private applyHome(update: Extract<VideoIndexUpdate, { type: "home" }>): void {
-		if (!this.homeWanted) {
-			return
-		}
-
-		const home = update.reset ? new Map<string, VideoHomeItem>() : new Map(this.home)
-
-		for (const item of update.upserts) {
-			home.set(item.stableUuid, item)
-		}
-
-		for (const stableUuid of update.removed) {
-			home.delete(stableUuid)
-		}
-
-		this.home = home
-		this.homeItems = [...home.values()]
-		this.changes.emit()
-	}
-
 	private apply(update: VideoIndexUpdate): void {
-		if (update.type === "home") {
-			this.applyHome(update)
-
-			return
-		}
-
 		if (update.type === "roots") {
 			this.snapshot = {
 				...this.snapshot,
@@ -261,43 +141,22 @@ class VideoLibraryClient {
 			return
 		}
 
-		const titles = update.reset ? new Map<string, VideoTitleView>() : new Map(this.titles)
-
-		for (const title of update.upserts) {
-			titles.set(title.id, title)
-		}
-
-		for (const id of update.removed) {
-			titles.delete(id)
-		}
-
-		const shown: VideoTitleView[] = []
-		const hidden: VideoTitleView[] = []
-
-		for (const title of titles.values()) {
-			if (title.hidden === true) {
-				hidden.push(title)
-			} else {
-				shown.push(title)
-			}
-		}
-
-		this.titles = titles
 		this.snapshot = {
 			...this.snapshot,
-			titles: shown,
-			hidden,
-			byId: titles,
-			loaded: true
+			loaded: true,
+			version: update.version,
+			summary: summaryOf(update.summary)
 		}
 
-		// A title's details follow its row: one pass over the cached detail queries (all of them on a reset, which may
-		// bring a title a detail page asked for before it was known).
-		const changed = new Set(update.reset ? [] : [...update.upserts.map(title => title.id), ...update.removed])
+		this.invalidateCatalog()
 
-		if (update.reset) {
+		// A title's details follow its view: those of the titles that changed, all of them when the catalog was
+		// (re)loaded (it may bring a title a detail page asked for before it was known).
+		if (update.titles === null) {
 			void queryClient.invalidateQueries({ queryKey: VIDEO_TITLE_DETAIL_KEY_PREFIX })
-		} else if (changed.size > 0) {
+		} else if (update.titles.length > 0) {
+			const changed = new Set(update.titles)
+
 			void queryClient.invalidateQueries({
 				queryKey: VIDEO_TITLE_DETAIL_KEY_PREFIX,
 				predicate: query => typeof query.queryKey[2] === "string" && changed.has(query.queryKey[2])
@@ -305,6 +164,148 @@ class VideoLibraryClient {
 		}
 
 		this.changes.emit()
+	}
+
+	// The screens fetch what they show again (only mounted queries refetch; the others are dropped soon).
+	private invalidateCatalog(): void {
+		void queryClient.invalidateQueries({ queryKey: VIDEO_CATALOG_KEY_PREFIX })
+	}
+
+	// Hands the watch state's changed records to the worker; the screens refetch once it holds them.
+	private sendWatch(): void {
+		const { doc, lastPlayedCeilingMs } = watchState.getSnapshot()
+		const previous = this.sentWatch
+
+		if (previous === doc.items && this.sentCeiling === lastPlayedCeilingMs) {
+			return
+		}
+
+		const upserts: Record<string, ItemRec> = {}
+		const removed: string[] = []
+		let changes = 0
+
+		for (const [key, rec] of Object.entries(doc.items)) {
+			const before = previous?.[key]
+
+			if (before !== rec && (before === undefined || JSON.stringify(before) !== JSON.stringify(rec))) {
+				upserts[key] = rec
+				changes++
+			}
+		}
+
+		for (const key of Object.keys(previous ?? {})) {
+			if (!(key in doc.items)) {
+				removed.push(key)
+				changes++
+			}
+		}
+
+		const reset = previous === null
+
+		this.sentWatch = doc.items
+
+		if (!reset && changes === 0 && this.sentCeiling === lastPlayedCeilingMs) {
+			return
+		}
+
+		this.sentCeiling = lastPlayedCeilingMs
+		sdkApi
+			.videoCatalogSetWatch({ reset, upserts, removed, lastPlayedCeilingMs })
+			.then(() => {
+				this.invalidateCatalog()
+			})
+			.catch((e: unknown) => {
+				log.warn("videos.library", "handing the watch state to the library failed", e)
+				// The next change sends everything again.
+				this.sentWatch = null
+			})
+	}
+
+	private queueFacts(uuid: string, record: ProbeRecord): void {
+		this.pendingFacts.set(uuid, factsOf(record))
+
+		this.factsTimer ??= setTimeout(() => {
+			const entries = [...this.pendingFacts]
+
+			this.factsTimer = null
+			this.pendingFacts.clear()
+			this.sendFacts(entries).catch((e: unknown) => {
+				log.warn("videos.library", "handing probe facts to the library failed", e)
+			})
+		}, FACTS_BATCH_MS)
+	}
+
+	// In parts, so no single message (or its handling on either side) holds a thread for long; sent one task apart
+	// without waiting for the answers (the worker takes them in order), the screens refetching once, after the last.
+	private async sendFacts(entries: readonly [string, { durationSec: number | null; height: number }][]): Promise<void> {
+		const parts: Promise<FactsResult>[] = []
+
+		for (let at = 0; at < entries.length; at += FACTS_PART) {
+			const part = entries.slice(at, at + FACTS_PART)
+
+			if (at > 0) {
+				await nextTask()
+			}
+
+			parts.push(
+				sdkApi.videoCatalogSetFacts({
+					reset: false,
+					uuids: part.map(([uuid]) => uuid),
+					durations: part.map(([, facts]) => facts.durationSec),
+					heights: part.map(([, facts]) => facts.height)
+				})
+			)
+		}
+
+		const results = await Promise.all(parts)
+
+		this.invalidateForFacts({
+			changed: results.some(result => result.changed),
+			affectsWatch: results.some(result => result.affectsWatch)
+		})
+	}
+
+	// Facts change the grids whose order reads them; rows too when they reached a title with watch-state records
+	// (they decide what counts as played).
+	private invalidateForFacts({ changed, affectsWatch }: FactsResult): void {
+		if (affectsWatch) {
+			this.invalidateCatalog()
+
+			return
+		}
+
+		if (changed) {
+			void queryClient.invalidateQueries({
+				queryKey: [...VIDEO_CATALOG_KEY_PREFIX, "grid"],
+				predicate: query =>
+					typeof query.queryKey[3] === "string" && needsProbeFacts((JSON.parse(query.queryKey[3]) as GridQuery).prefs)
+			})
+		}
+	}
+
+	// Every stored probe's runtime and picture height, handed to the worker once per session (the grids' runtime
+	// sort and resolution filter read them). Local reads only; never probes.
+	public loadProbeFacts(): Promise<void> {
+		const generation = this.generation
+
+		this.allFacts ??= kvEntriesJsonInSlices(PROBE_KV_PREFIX, probeRecordSchema)
+			.then(rows =>
+				generation === this.generation
+					? this.sendFacts(
+							rows.map(([key, record]) => [
+								key.startsWith(PROBE_KV_PREFIX) ? key.slice(PROBE_KV_PREFIX.length) : key,
+								factsOf(record)
+							])
+						)
+					: undefined
+			)
+			.catch((e: unknown) => {
+				this.allFacts = null
+
+				throw e
+			})
+
+		return this.allFacts
 	}
 
 	// Subscribes to the worker once per session. The tab with the library open writes its snapshots (the worker
@@ -354,9 +355,6 @@ class VideoLibraryClient {
 		document.addEventListener("visibilitychange", onVisibility)
 		window.addEventListener("pagehide", flush)
 
-		// A screen may want the video list from before the subscription (re)started.
-		this.syncHome()
-
 		// A `.ts` a content read found to be TypeScript leaves the library (the index keeps it otherwise).
 		const sendVerdicts = (): void => {
 			const uuids = filesWithVerdict("notTransportStream")
@@ -368,11 +366,20 @@ class VideoLibraryClient {
 			}
 		}
 		const unwatchVerdicts = subscribeFileKindVerdicts(sendVerdicts)
+		const unwatchState = watchState.subscribe(() => {
+			this.sendWatch()
+		})
+		const unwatchProbes = probeService.onRecord((uuid, record) => {
+			this.queueFacts(uuid, record)
+		})
 
 		sendVerdicts()
+		this.sendWatch()
 
 		this.detach = () => {
 			unwatchVerdicts()
+			unwatchState()
+			unwatchProbes()
 			unwatchSignOut()
 			unwatchAuth()
 			document.removeEventListener("visibilitychange", onVisibility)
@@ -386,8 +393,8 @@ class VideoLibraryClient {
 		void sdkApi.videoIndexSetWriter(false)
 	}
 
-	// Brings the library current: the cached roots render from their snapshots first; then, when the session
-	// hasn't checked yet, one request for the drive's latest event id decides what still needs reading.
+	// Brings the library current: the persisted catalog (or the cached roots' snapshots) renders first; then, when
+	// the session hasn't checked yet, one request for the drive's latest event id decides what still needs reading.
 	public open(): Promise<void> {
 		this.opening ??= this.runOpen().finally(() => {
 			this.opening = null
@@ -476,6 +483,24 @@ class VideoLibraryClient {
 		}
 	}
 
+	// The videos a card's Mark watched / unwatched applies to: every version of its episode or movie (its group),
+	// every episode of its series.
+	public markTargets(titleId: string, group: string | null): Promise<string[]> {
+		return sdkApi.videoCatalogMarkTargets(titleId, group)
+	}
+
+	// Builds the worker's search index ahead of the first query (an empty one answers nothing).
+	public prepareSearch(): void {
+		sdkApi.videoCatalogSearch("").catch((e: unknown) => {
+			log.warn("videos.library", "preparing library search failed", e)
+		})
+	}
+
+	// Post-play after a movie: the next unwatched one from the same library directory.
+	public nextMovie(titleId: string): Promise<{ id: string; title: string } | null> {
+		return sdkApi.videoCatalogNextMovie(titleId)
+	}
+
 	// The file behind a keyless ref, as the art loader takes it right before a read. Refs asked for in the same task
 	// go to the worker as one call (rebuilt from the index there, no request); nothing keyed stays here afterwards.
 	public resolveArtFile(ref: VideoFileRef): Promise<ArtFile | null> {
@@ -556,19 +581,19 @@ class VideoLibraryClient {
 		this.detach = null
 		this.attached = false
 		this.opening = null
-		this.titles = new Map()
-		this.home = new Map()
-		this.homeItems = null
-		this.homeEnabled = false
-		this.homeWanted = this.homeConsumers > 0
 		this.sentOverrides = "{}"
 		this.sentNotTransportStream = ""
+		this.sentWatch = null
+		this.sentCeiling = undefined
+		this.pendingFacts.clear()
 
-		if (this.homeTimer !== null) {
-			clearTimeout(this.homeTimer)
-			this.homeTimer = null
+		if (this.factsTimer !== null) {
+			clearTimeout(this.factsTimer)
+			this.factsTimer = null
 		}
 
+		this.allFacts = null
+		this.generation++
 		this.artFiles.clear()
 		this.snapshot = EMPTY
 		this.changes.emit()

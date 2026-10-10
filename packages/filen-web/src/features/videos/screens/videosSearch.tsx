@@ -1,16 +1,17 @@
-import { useEffect, useId, useMemo, useState, type KeyboardEvent } from "react"
+import { useDeferredValue, useEffect, useId, useMemo, useState, type KeyboardEvent } from "react"
 import { useTranslation } from "react-i18next"
 import { useRouter } from "@tanstack/react-router"
 import { SearchIcon, SearchXIcon } from "lucide-react"
 import { useElementSize } from "@/lib/useElementSize"
 import { SearchInput } from "@/features/drive/components/searchInput"
 import { columnsForWidth } from "@/features/drive/lib/gridLayout"
-import { useVideoHomeData } from "@/features/videos/hooks/useVideoHomeData"
 import { useVideoCardActions } from "@/features/videos/hooks/useVideoCardActions"
+import { useCatalogSearchQuery } from "@/features/videos/queries/catalog"
+import { videoLibrary } from "@/features/videos/lib/index"
 import { useCardFocus } from "@/features/videos/hooks/useCardFocus"
 import { CardObserver } from "@/features/videos/lib/cardObserver"
-import { itemCard, titleCard, type HomeData, type VideoCardModel } from "@/features/videos/lib/homeRows.logic"
-import { SEARCH_DEBOUNCE_MS, buildVideoSearchIndex, searchVideos, type SearchResultGroup } from "@/features/videos/lib/search.logic"
+import type { VideoCardModel } from "@/features/videos/lib/homeRows.logic"
+import { SEARCH_DEBOUNCE_MS, type SearchGroupKind } from "@/features/videos/lib/search.logic"
 import { gridKeyAction } from "@/features/videos/lib/videoGrid.logic"
 import { VideoCard, type VideoCardAction } from "@/features/videos/components/videoCard"
 import { EmptyMessage } from "@/components/emptyMessage"
@@ -26,17 +27,9 @@ const GROUP_LABEL_KEYS = {
 	other: "videosOther"
 } as const
 
-function groupCards(group: SearchResultGroup, data: Pick<HomeData, "index" | "entries" | "watch">): VideoCardModel[] {
-	return group.results.map(result =>
-		result.item === null
-			? titleCard({ data, title: result.title, shape: result.title.kind === "other" ? "landscape" : "poster" })
-			: itemCard({ data, item: result.item, title: result.title })
-	)
-}
-
 interface ResultGroupProps {
-	group: SearchResultGroup
-	cards: VideoCardModel[]
+	group: { kind: SearchGroupKind; total: number }
+	cards: readonly VideoCardModel[]
 	width: number
 	observer: CardObserver | null
 	onAction: (action: VideoCardAction, card: VideoCardModel) => void
@@ -109,9 +102,9 @@ function ResultGroup({ group, cards, width, observer, onAction }: ResultGroupPro
 				>
 					{t(GROUP_LABEL_KEYS[group.kind])}
 				</h2>
-				{group.total > group.results.length ? (
+				{group.total > cards.length ? (
 					<span className="text-xs text-muted-foreground tabular-nums">
-						{t("videosSearchShownOf", { shown: group.results.length, total: group.total })}
+						{t("videosSearchShownOf", { shown: cards.length, total: group.total })}
 					</span>
 				) : null}
 			</div>
@@ -142,12 +135,12 @@ function ResultGroup({ group, cards, width, observer, onAction }: ResultGroupPro
 	)
 }
 
-// Videos search: a debounced query over an in-memory index of what the library holds, grouped Movies, Shows,
-// Episodes and Other. Nothing is listed or probed to answer it; card art loads as the cards come near.
+// Videos search: a debounced query over the library's index in its worker, grouped Movies, Shows, Episodes and
+// Other; only the results shown come over. Nothing is listed or probed to answer it; card art loads as the cards
+// come near.
 export function VideosSearchScreen() {
 	const { t } = useTranslation("videos")
-	const data = useVideoHomeData()
-	const onAction = useVideoCardActions(data.items)
+	const onAction = useVideoCardActions()
 	const [input, setInput] = useState("")
 	const [query, setQuery] = useState("")
 	const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null)
@@ -157,6 +150,11 @@ export function VideosSearchScreen() {
 	useEffect(() => {
 		toolbar?.querySelector("input")?.focus()
 	}, [toolbar])
+
+	// The library's worker builds its search index while the box is still empty, so the first query answers at once.
+	useEffect(() => {
+		videoLibrary.prepareSearch()
+	}, [])
 
 	useEffect(() => {
 		const timer = setTimeout(() => {
@@ -180,13 +178,12 @@ export function VideosSearchScreen() {
 		}
 	}, [observer])
 
-	// No hook call below: the compiler keeps these derivations memoized only while none follows them.
-	const index = buildVideoSearchIndex({ titles: data.snapshot.titles, items: data.items ?? [] })
-	const groups = searchVideos({ index, query })
-	const homeData: Pick<HomeData, "index" | "entries" | "watch"> = { index: data.index, entries: data.entries, watch: data.watch }
-	const cards = groups.map(group => groupCards(group, homeData))
-	const total = groups.reduce((sum, group) => sum + group.total, 0)
 	const trimmed = query.trim()
+	// Results render at transition priority (in short slices, never one long task).
+	const searchQuery = useCatalogSearchQuery(trimmed)
+	const results = useDeferredValue(searchQuery.data)
+	const groups = trimmed.length === 0 ? [] : (results?.groups ?? [])
+	const total = groups.reduce((sum, group) => sum + group.total, 0)
 
 	return (
 		<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -220,18 +217,18 @@ export function VideosSearchScreen() {
 						title={t("videosSearchEmptyTitle")}
 						description={t("videosSearchEmptyBody")}
 					/>
-				) : groups.length === 0 ? (
+				) : results === undefined ? null : groups.length === 0 ? (
 					<EmptyMessage
 						icon={SearchXIcon}
 						title={t("videosSearchNoResultsTitle", { query: trimmed })}
 						description={t("videosSearchNoResultsBody")}
 					/>
 				) : width > 0 ? (
-					groups.map((group, position) => (
+					groups.map(group => (
 						<ResultGroup
 							key={group.kind}
 							group={group}
-							cards={cards[position] ?? []}
+							cards={group.cards}
 							width={width}
 							observer={observer}
 							onAction={onAction}

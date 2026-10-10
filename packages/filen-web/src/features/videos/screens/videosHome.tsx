@@ -85,7 +85,7 @@ function AllOff() {
 function Notice({ notice, root }: { notice: VideoRootNotice; root: VideoLibraryRootView | undefined }) {
 	const { t } = useTranslation("videos")
 	const isOnline = useIsOnline()
-	const name = useVideoRootName(notice.uuid, root?.status?.name)
+	const name = useVideoRootName(notice.uuid, root)
 	const text =
 		notice.kind === "missing"
 			? t("videosMissingBanner", { name })
@@ -131,7 +131,7 @@ function EmptyLibrary({ uuids, roots }: { uuids: string[]; roots: readonly Video
 	const { t } = useTranslation("videos")
 	const isOnline = useIsOnline()
 	const only = uuids.length === 1 ? roots.find(root => root.uuid === uuids[0]) : undefined
-	const name = useVideoRootName(only?.uuid ?? "", only?.status?.name)
+	const name = useVideoRootName(only?.uuid ?? "", only)
 
 	return (
 		<Empty className="p-6 sm:p-12">
@@ -201,7 +201,7 @@ export function VideosHomeScreen() {
 		)
 	}
 
-	const view = videosHomeView({ roots, titleCount: snapshot.titles.length })
+	const view = videosHomeView({ roots, titleCount: snapshot.summary.titleCount })
 
 	if (view.kind === "firstRun") {
 		return <FirstRun />
