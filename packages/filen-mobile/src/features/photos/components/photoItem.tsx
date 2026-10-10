@@ -13,6 +13,7 @@ import Menu from "@/features/drive/components/item/menu"
 import useDrivePreviewStore from "@/stores/useDrivePreview.store"
 import useDriveStore, { isUuidSelected } from "@/features/drive/store/useDrive.store"
 import { IndicatorBadge } from "@/features/drive/components/item/indicators"
+import useFileKindVerdict from "@/hooks/useFileKindVerdict"
 
 function VideoIndicator() {
 	return (
@@ -39,7 +40,8 @@ export const Photo = ({
 	drivePath: DrivePath
 	getListItems: () => DriveItemFileExtracted[]
 }) => {
-	const previewType = getDriveItemPreviewType(info.item)
+	const verdict = useFileKindVerdict(info.item.data.uuid) ?? null
+	const previewType = getDriveItemPreviewType(info.item, verdict)
 	const isSelected = useDriveStore(state => isUuidSelected(state.selectedItems, info.item.data.uuid))
 	const arePhotosSelected = useDriveStore(state => state.selectedItems.length > 0)
 
@@ -88,6 +90,7 @@ export const Photo = ({
 				drivePath={drivePath}
 				isStoredOffline={isStoredOffline}
 				isSelected={isSelected}
+				verdict={verdict}
 			>
 				<View style={viewStyle}>
 					<PressableOpacity
@@ -133,6 +136,7 @@ export const Photo = ({
 						)}
 						<Thumbnail
 							item={info.item}
+							verdict={verdict}
 							target={info.target}
 							contentFit="cover"
 							size={{

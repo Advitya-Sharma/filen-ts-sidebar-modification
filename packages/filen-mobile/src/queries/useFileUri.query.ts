@@ -20,8 +20,14 @@ export async function fetchData(
 	}
 }
 
-export function useFileUriQuery(params: UseFileUriQueryParams): UseQueryResult<Awaited<ReturnType<typeof fetchData>>, Error> {
+export function useFileUriQuery(
+	params: UseFileUriQueryParams,
+	options?: {
+		enabled?: boolean
+	}
+): UseQueryResult<Awaited<ReturnType<typeof fetchData>>, Error> {
 	const query = useQuery<Awaited<ReturnType<typeof fetchData>>, Error>({
+		enabled: options?.enabled ?? true,
 		// Evict immediately when the last subscriber unmounts. The underlying fileCache file may be evicted independently, so a fresh resolve on next mount is the correct behavior anyway.
 		gcTime: 0,
 		// Key off identity only (fileSourceKey strips the by-value item) — the byte content

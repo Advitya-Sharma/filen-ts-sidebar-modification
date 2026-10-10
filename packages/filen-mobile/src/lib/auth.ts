@@ -27,6 +27,7 @@ import { sync as notesSync } from "@/features/notes/components/sync"
 import notesOffline from "@/features/notes/notesOffline"
 import cache from "@/lib/cache"
 import { clearSortCaches } from "@/lib/sort"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
 import fileCache from "@/lib/fileCache"
 import rawPreviewCache from "@/lib/rawPreviewCache"
 import audioCache from "@/features/audio/audioCache"
@@ -484,6 +485,9 @@ class Auth {
 
 		// The drive clipboard holds decrypted items of this account.
 		useDriveClipboardStore.getState().clear()
+
+		// File-kind verdicts are this account's: memory forgotten here, kv rows in Phase 6, and no write after.
+		fileKindVerdicts.clearForLogout()
 
 		// Sort memo caches key on decrypted names — same session-scoped wipe as cache.clear().
 		try {

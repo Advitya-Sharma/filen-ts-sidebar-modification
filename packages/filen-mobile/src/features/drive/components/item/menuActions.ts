@@ -19,13 +19,13 @@ import { type DriveClipboardEntry } from "@/features/drive/store/useDriveClipboa
 import { buildSaveToCloudDriveButton, linkAllowsDownload } from "@/features/drive/linkedSave"
 import { runWithLoading } from "@/components/ui/fullScreenLoadingModal"
 import { inputPrompt } from "@/lib/promptFlow"
-import { run } from "@filen/shared"
+import { run, type ContentVerdict } from "@filen/shared"
 import { randomUUID } from "expo-crypto"
 import offline from "@/features/offline/offline"
 import { getRealDriveItemParent, normalParentUuidOf } from "@/lib/sdkUnwrap"
 import * as Clipboard from "expo-clipboard"
 import { fetchData as fetchPublicLinkStatus, publicLinkUrlFromStatus } from "@/features/drive/queries/useDriveItemPublicLinkStatus.query"
-import { getPreviewType } from "@/lib/previewType"
+import { getDriveItemFileKind, getPreviewType } from "@/lib/previewType"
 import useDrivePreviewStore from "@/stores/useDrivePreview.store"
 import { MAX_TEXT_BYTES } from "@/components/textEditor/constants"
 import type { DrivePath } from "@/hooks/useDrivePath"
@@ -68,6 +68,7 @@ export function createMenuButtons({
 	clipboard,
 	linkSaveable,
 	isSelected,
+	verdict,
 	t
 }: {
 	item: DriveItem
@@ -83,6 +84,8 @@ export function createMenuButtons({
 	linkSaveable?: boolean
 	// Passed in rather than read from the store so it is part of the callers' compiler memo key.
 	isSelected?: boolean
+	// The file's content verdict (useFileKindVerdict); the store's when absent.
+	verdict?: ContentVerdict | null
 	t: TFunction
 }): MenuButton[] {
 	if (item.data.undecryptable) {
@@ -90,7 +93,8 @@ export function createMenuButtons({
 	}
 
 	const menuButtons: MenuButton[] = []
-	const previewType = isFileItem(item) ? getPreviewType(item.data.decryptedMeta?.name ?? "", item.data.decryptedMeta?.mime) : null
+	const fileKind = isFileItem(item) ? getDriveItemFileKind(item, verdict) : null
+	const previewType = fileKind === null ? null : (fileKind.kind ?? "unknown")
 
 	const parentForOfflineStorage = getRealDriveItemParent({
 		item,
@@ -164,10 +168,12 @@ export function createMenuButtons({
 	}
 
 	// A file nothing recognises may still be text (a config with an odd extension, a log): offer the read-only
-	// text viewer, within its size cap. Not inside the preview, which already shows the file.
+	// text viewer, within its size cap. Not inside the preview, which already shows the file, and not for one a
+	// read of its content already recognised (a transport stream iOS does not play).
 	if (
 		!isPreview &&
 		previewType === "unknown" &&
+		fileKind?.source !== "sniff" &&
 		isFileItem(item) &&
 		item.data.decryptedMeta &&
 		Number(item.data.decryptedMeta.size) <= MAX_TEXT_BYTES

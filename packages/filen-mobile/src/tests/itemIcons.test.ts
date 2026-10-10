@@ -373,4 +373,14 @@ describe("resolveFileIconKey", () => {
 		expect(resolveFileIconKey("clip.m4a", "video/mp4")).toBe("video")
 		expect(resolveFileIconKey("main.ts", "video/mp2t")).toBe("code")
 	})
+
+	it("icons a file by its content verdict, and a stream as a video only once a read found one", () => {
+		expect(resolveFileIconKey("voice.mp4", null, "audio")).toBe("audio")
+		expect(resolveFileIconKey("capture.ts")).toBe("code")
+		expect(resolveFileIconKey("capture.ts", null, "notTransportStream")).toBe("code")
+		expect(resolveFileIconKey("capture.ts", null, "transportStream")).toBe("video")
+		expect(resolveFileIconKey("clip.m2ts")).toBe("other")
+		expect(resolveFileIconKey("recording", "video/mp2t")).toBe("other")
+		expect(resolveFileIconKey("clip.m2ts", null, "transportStream")).toBe("video")
+	})
 })

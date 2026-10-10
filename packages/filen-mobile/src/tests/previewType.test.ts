@@ -15,6 +15,8 @@ vi.mock("@/constants", () => {
 import {
 	getPreviewType,
 	getDriveItemPreviewType,
+	isUncheckedTransportStream,
+	recordContentVerdict,
 	fileTypeExtension,
 	extnameOf,
 	isImagePreviewType,
@@ -23,6 +25,7 @@ import {
 } from "@/lib/previewType"
 import type { DriveItemFileExtracted } from "@/types"
 import { Paths } from "@/tests/mocks/expoFileSystem"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
 
 // ---------------------------------------------------------------------------
 // getPreviewType
@@ -427,10 +430,10 @@ describe("getPreviewType — ambiguous extensions", () => {
 		// A sibling of the same type keeps the name's own extension.
 		["Song.OGG", "audio/ogg", "audio", "ogg"],
 		["song.oga", "audio/ogg", "audio", "oga"],
-		// A mime never makes a .ts a video, and the table has no transport-stream type.
+		// A mime never makes a .ts a video; a transport stream (.m2ts) shows no preview on iOS.
 		["main.ts", "video/mp2t", "code", "ts"],
 		["camera.mts", "video/mp2t", "unknown", "mts"],
-		["recording", "video/mp2t", "unknown", ""]
+		["recording", "video/mp2t", "unknown", "m2ts"]
 	])("%s (%s) is %s by .%s", (name, mime, type, extension) => {
 		expect(getPreviewType(name, mime)).toBe(type)
 		expect(fileTypeExtension(name, mime)).toBe(extension)
@@ -459,6 +462,80 @@ describe("getDriveItemPreviewType", () => {
 
 	it("classifies an undecryptable file unknown", () => {
 		expect(getDriveItemPreviewType(fileItem(null))).toBe("unknown")
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Content verdicts
+// ---------------------------------------------------------------------------
+
+describe("content verdicts", () => {
+	const MIB = 1024 * 1024
+
+	function sizedItem(uuid: string, name: string, size: number, mime = ""): DriveItemFileExtracted {
+		return {
+			type: "file",
+			data: { uuid, size: BigInt(size), decryptedMeta: { name, mime }, undecryptable: false }
+		} as unknown as DriveItemFileExtracted
+	}
+
+	it("settles an ambiguous extension by a verdict, never an unambiguous one", () => {
+		expect(getPreviewType("voice.mp4", null, "audio")).toBe("audio")
+		expect(fileTypeExtension("voice.mp4", null, "audio")).toBe("m4a")
+		expect(getPreviewType("voice.mp4", "video/mp4", "audio")).toBe("audio")
+		expect(getPreviewType("clip.m4a", null, "video")).toBe("video")
+		expect(getPreviewType("main.ts", null, "notTransportStream")).toBe("code")
+		expect(getPreviewType("photo.jpg", null, "audio")).toBe("image")
+	})
+
+	it("reads a transport stream as m2ts, which iOS does not preview", () => {
+		expect(getPreviewType("capture.ts", null, "transportStream")).toBe("unknown")
+		expect(fileTypeExtension("capture.ts", null, "transportStream")).toBe("m2ts")
+		expect(getPreviewType("camera.mts", null, "transportStream")).toBe("unknown")
+	})
+
+	it("marks a .ts large enough to be a stream, without a verdict, as unchecked", () => {
+		expect(isUncheckedTransportStream("capture.ts", null, 2 * MIB, null)).toBe(true)
+		expect(isUncheckedTransportStream("main.ts", null, 1024, null)).toBe(false)
+		expect(isUncheckedTransportStream("lib.d.ts", null, 2 * MIB, null)).toBe(false)
+		expect(isUncheckedTransportStream("capture.ts", null, 2 * MIB, "notTransportStream")).toBe(false)
+		expect(isUncheckedTransportStream("clip.mp4", null, 2 * MIB, null)).toBe(false)
+	})
+
+	it("has nothing to read an .mts for on iOS, which shows neither a stream nor an .mts", () => {
+		expect(isUncheckedTransportStream("camera.mts", null, 2 * MIB, null)).toBe(false)
+	})
+
+	it("records only a verdict that changes what the file resolves to", () => {
+		recordContentVerdict({ uuid: "same", name: "clip.mp4", mime: null, size: 10 }, "video")
+		recordContentVerdict({ uuid: "plain", name: "photo.jpg", mime: null, size: 10 }, "audio")
+		recordContentVerdict({ uuid: "small", name: "main.ts", mime: null, size: 10 }, "notTransportStream")
+		recordContentVerdict({ uuid: "decl", name: "lib.d.ts", mime: null, size: 2 * MIB }, "notTransportStream")
+		recordContentVerdict({ uuid: "nameless", name: "", mime: null, size: 2 * MIB }, "audio")
+
+		expect(fileKindVerdicts.get("same")).toBeUndefined()
+		expect(fileKindVerdicts.get("plain")).toBeUndefined()
+		expect(fileKindVerdicts.get("small")).toBeUndefined()
+		expect(fileKindVerdicts.get("decl")).toBeUndefined()
+		expect(fileKindVerdicts.get("nameless")).toBeUndefined()
+
+		recordContentVerdict({ uuid: "voice", name: "voice.mp4", mime: null, size: 10 }, "audio")
+		recordContentVerdict({ uuid: "stream", name: "capture.ts", mime: null, size: 2 * MIB }, "transportStream")
+		recordContentVerdict({ uuid: "source", name: "app.ts", mime: null, size: 2 * MIB }, "notTransportStream")
+
+		expect(fileKindVerdicts.get("voice")).toBe("audio")
+		expect(fileKindVerdicts.get("stream")).toBe("transportStream")
+		expect(fileKindVerdicts.get("source")).toBe("notTransportStream")
+	})
+
+	it("reads a drive item's verdict from the store unless one is passed", () => {
+		fileKindVerdicts.record("held", "audio")
+
+		const item = sizedItem("held", "voice.mp4", 10)
+
+		expect(getDriveItemPreviewType(item)).toBe("audio")
+		expect(getDriveItemPreviewType(item, null)).toBe("video")
+		expect(getDriveItemPreviewType(sizedItem("other", "voice.mp4", 10), "audio")).toBe("audio")
 	})
 })
 

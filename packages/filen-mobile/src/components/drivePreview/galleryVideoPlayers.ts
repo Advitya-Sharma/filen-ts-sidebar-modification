@@ -1,6 +1,8 @@
 import { createVideoPlayer, type VideoPlayer } from "expo-video"
 import usePipStore from "@/stores/usePip.store"
 import events from "@/lib/events"
+import { recordPlayerVerdict } from "@/lib/playerVerdict"
+import { type VerdictFile } from "@/lib/previewType"
 
 // Silence + free a session player. `release()` alone is NOT enough on iOS: `VideoView.player` is a
 // WEAK ref, so the AVPlayer's audio only stops in the VideoPlayer's deinit (replaceCurrentItem nil).
@@ -41,11 +43,14 @@ export const MAX_GALLERY_VIDEO_PLAYERS = 3
  *
  * Like useVideoPlayer, the source is initial-only: a later fileUrl for the
  * same item does not re-resolve into the existing player.
+ *
+ * `file` (a drive file) gets the verdict the player's load leaves (playerVerdict.ts): the next open of an
+ * `.mp4` holding audio alone uses the audio player, while this session keeps the page it opened with.
  */
 export class GalleryVideoPlayers {
 	private players = new Map<string, VideoPlayer>()
 
-	public acquire({ key, fileUrl }: { key: string; fileUrl: string }): VideoPlayer {
+	public acquire({ key, fileUrl, file }: { key: string; fileUrl: string; file?: VerdictFile }): VideoPlayer {
 		const existing = this.players.get(key)
 
 		if (existing) {
@@ -86,6 +91,13 @@ export class GalleryVideoPlayers {
 
 		player.loop = false
 		player.staysActiveInBackground = false
+
+		if (file) {
+			// Lives as long as the player; released with it.
+			player.addListener("sourceLoad", loaded => {
+				recordPlayerVerdict(file, loaded, player.status === "error")
+			})
+		}
 
 		player.play()
 

@@ -12,7 +12,6 @@ const BOTH: Row[] = [
 	["song.m4a", "audio/mp4", "audio", "m4a"],
 	["main.ts", "video/mp2t", "code", "ts"],
 	["camera.mts", "video/mp2t", "unknown", "mts"],
-	["recording", "video/mp2t", "unknown", ""],
 	// None of an extension's meanings playable here: read like an unknown extension, by its type.
 	["notes.mts", "text/plain", "text", "txt"],
 	["module.mts", "application/typescript", "code", "ts"]
@@ -20,6 +19,8 @@ const BOTH: Row[] = [
 
 const IOS: Row[] = [
 	...BOTH,
+	// A transport stream: AVPlayer plays one only as HLS segments.
+	["recording", "video/mp2t", "unknown", "m2ts"],
 	["song.ogg", "audio/ogg", "unknown", "ogg"],
 	["song.oga", "audio/ogg", "unknown", "oga"],
 	["voice.ogg", "audio/opus", "audio", "opus"],
@@ -30,6 +31,9 @@ const IOS: Row[] = [
 
 const ANDROID: Row[] = [
 	...BOTH,
+	// A stream by its type alone: no player until a read found one Media3 plays.
+	["recording", "video/mp2t", "unknown", "m2ts"],
+	["clip.m2ts", null as never, "unknown", "m2ts"],
 	["song.ogg", "audio/ogg", "audio", "ogg"],
 	["song.ogg", "video/ogg", "audio", "ogg"],
 	["film.ogv", "audio/ogg", "audio", "oga"],
@@ -65,5 +69,79 @@ describe.each([
 
 		expect(getPreviewType(name, mime)).toBe(type)
 		expect(fileTypeExtension(name, mime)).toBe(extension)
+	})
+})
+
+// What a content verdict makes a file on each platform: Media3 plays a progressive transport stream, AVPlayer
+// only HLS segments; an .mp4 holding audio alone is audio on both.
+type VerdictRow = [name: string, verdict: "transportStream" | "notTransportStream" | "audio" | "video", type: string, extension: string]
+
+const VERDICTS_BOTH: VerdictRow[] = [
+	["capture.ts", "notTransportStream", "code", "ts"],
+	["voice.mp4", "audio", "audio", "m4a"],
+	["clip.m4a", "video", "video", "mp4"]
+]
+
+describe.each([
+	[
+		"ios",
+		[
+			...VERDICTS_BOTH,
+			["capture.ts", "transportStream", "unknown", "m2ts"],
+			["camera.mts", "transportStream", "unknown", "m2ts"],
+			["clip.m2ts", "transportStream", "unknown", "m2ts"]
+		]
+	],
+	[
+		"android",
+		[
+			...VERDICTS_BOTH,
+			["capture.ts", "transportStream", "video", "m2ts"],
+			["camera.mts", "transportStream", "video", "m2ts"],
+			["clip.m2ts", "transportStream", "video", "m2ts"],
+			["clip.m2ts", "notTransportStream", "unknown", "m2ts"]
+		]
+	]
+] as const)("content verdicts on %s", (os, rows) => {
+	afterEach(() => {
+		vi.resetModules()
+	})
+
+	it.each(rows as readonly VerdictRow[])("%s with %s is %s by .%s", async (name, verdict, type, extension) => {
+		const { getPreviewType, fileTypeExtension } = await loadFor(os)
+
+		expect(getPreviewType(name, null, verdict)).toBe(type)
+		expect(fileTypeExtension(name, null, verdict)).toBe(extension)
+	})
+})
+
+describe.each([
+	["ios", false],
+	["android", true]
+] as const)("a stream read on %s", (os, reads) => {
+	afterEach(() => {
+		vi.resetModules()
+	})
+
+	it(`${reads ? "is made" : "is skipped"} for an .mts, an .m2ts or a video/mp2t file`, async () => {
+		const { isUncheckedTransportStream } = await loadFor(os)
+		const MIB = 1024 * 1024
+
+		expect(isUncheckedTransportStream("camera.mts", null, 2 * MIB, null)).toBe(reads)
+		expect(isUncheckedTransportStream("clip.m2ts", null, 10, null)).toBe(reads)
+		expect(isUncheckedTransportStream("recording", "video/mp2t", 2 * MIB, null)).toBe(reads)
+		expect(isUncheckedTransportStream("clip.m2ts", null, 2 * MIB, "transportStream")).toBe(false)
+		expect(isUncheckedTransportStream("capture.ts", null, 2 * MIB, null)).toBe(true)
+	})
+
+	it(`keeps a stream verdict for an .m2ts ${reads ? "" : "never"}`, async () => {
+		const { recordContentVerdict } = await loadFor(os)
+		const verdicts = (await import("@/lib/fileKindVerdicts")).default
+
+		recordContentVerdict({ uuid: "m2ts", name: "clip.m2ts", mime: null, size: 10 }, "transportStream")
+		recordContentVerdict({ uuid: "m2ts-not", name: "clip.m2ts", mime: null, size: 10 }, "notTransportStream")
+
+		expect(verdicts.get("m2ts")).toBe(reads ? "transportStream" : undefined)
+		expect(verdicts.get("m2ts-not")).toBeUndefined()
 	})
 })

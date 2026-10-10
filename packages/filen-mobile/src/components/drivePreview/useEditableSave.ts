@@ -13,6 +13,7 @@ import alerts from "@/lib/alerts"
 import logger from "@/lib/logger"
 import type { File } from "expo-file-system"
 import type { DriveItemFileExtracted } from "@/types"
+import { recordContentVerdict, verdictFileOf } from "@/lib/previewType"
 
 /**
  * The save flow of an editable preview (text/code, PDF): writes the editor's content back over its file, asks
@@ -26,7 +27,9 @@ export default function useEditableSave(
 		failed: string
 		// Thrown, and shown, when the editor could not serialise its content.
 		notSerialised: string
-	}
+	},
+	// The editor saves text: a `.ts` it writes is TypeScript, never re-read to ask whether it is a stream.
+	savesText = false
 ) {
 	const isOnline = useIsOnline()
 	const { itemToUse, resolveParent, readOnly, applySaved } = useEditableTarget(item)
@@ -119,6 +122,13 @@ export default function useEditableSave(
 			})
 		})
 
+	// A save makes a new version (a new uuid) of what the editor showed.
+	const markSavedText = (saved: DriveItemFileExtracted) => {
+		if (savesText) {
+			recordContentVerdict(verdictFileOf(saved), "notTransportStream")
+		}
+	}
+
 	// Writes the edits over `target`, under its name: what the save made, when it made a file.
 	const runSave = async (target: DriveItemFileExtracted): Promise<{ ok: boolean; saved: DriveItemFileExtracted | null }> => {
 		const name = target.data.decryptedMeta?.name
@@ -152,6 +162,7 @@ export default function useEditableSave(
 			return { ok: true, saved: null }
 		}
 
+		markSavedText(newDriveItem)
 		applySaved(newDriveItem)
 
 		return { ok: true, saved: newDriveItem }
@@ -178,6 +189,7 @@ export default function useEditableSave(
 			return null
 		}
 
+		markSavedText(newDriveItem)
 		setHasEdits(false)
 
 		return newDriveItem

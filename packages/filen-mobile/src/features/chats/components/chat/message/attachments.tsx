@@ -13,22 +13,27 @@ import InternalAttachment from "@/features/chats/components/chat/message/interna
 import { resolveLinkMedia, type SuccessfulLink } from "@/features/chats/utils"
 import { type AnyFile } from "@filen/sdk-rs"
 import { parseFilenPublicLink } from "@filen/shared"
+import useFileKindVerdict from "@/hooks/useFileKindVerdict"
 
-// A plain function rather than a component so each attachment costs no extra fiber.
-function renderLinkMedia({
-	link,
-	fromSelf,
-	maxWidth,
-	getFileUrl,
-	onLoadFailed
-}: {
+type LinkMediaProps = {
 	link: SuccessfulLink
 	fromSelf: boolean
 	maxWidth: number
 	getFileUrl: ((file: AnyFile) => string) | null
 	onLoadFailed?: () => void
-}) {
-	const media = resolveLinkMedia(link, getFileUrl)
+}
+
+// Whether a link renders as media at all. A content verdict only moves a linked file between video and the
+// generic file attachment, so this is decided without one.
+function rendersLinkMedia(link: SuccessfulLink, getFileUrl: ((file: AnyFile) => string) | null): boolean {
+	return resolveLinkMedia(link, getFileUrl, () => undefined).type !== null
+}
+
+// One link's attachment. A component so a linked file follows its own content verdict (a player that found an
+// `.mp4` holds audio alone turns it into a file attachment), re-rendering this attachment alone.
+const LinkMedia = ({ link, fromSelf, maxWidth, getFileUrl, onLoadFailed }: LinkMediaProps) => {
+	const verdict = useFileKindVerdict(link.type === "internal" && link.data.type === "file" ? link.data.file.uuid : null)
+	const media = resolveLinkMedia(link, getFileUrl, () => verdict)
 
 	switch (media.type) {
 		case "image": {
@@ -122,25 +127,25 @@ export const Attachments = ({
 
 	if (single) {
 		const link = chatMessageLinksQuery.data[0]
-		const media =
-			link && link.success && !singleAttachmentLoadFailed
-				? renderLinkMedia({
-						link,
-						fromSelf,
-						maxWidth,
-						getFileUrl: getHttpProviderFileUrl,
-						onLoadFailed: () => setSingleAttachmentLoadFailed(true)
-					})
-				: null
 
-		return (
-			media ?? (
-				<Regexed
-					chat={chat}
-					message={message}
+		if (link && link.success && !singleAttachmentLoadFailed && rendersLinkMedia(link, getHttpProviderFileUrl)) {
+			return (
+				<LinkMedia
+					link={link}
 					fromSelf={fromSelf}
+					maxWidth={maxWidth}
+					getFileUrl={getHttpProviderFileUrl}
+					onLoadFailed={() => setSingleAttachmentLoadFailed(true)}
 				/>
 			)
+		}
+
+		return (
+			<Regexed
+				chat={chat}
+				message={message}
+				fromSelf={fromSelf}
+			/>
 		)
 	}
 
@@ -166,12 +171,12 @@ export const Attachments = ({
 						key={mappingHelper.getMappingKey(linkKey, index)}
 						className="bg-transparent basis-full"
 					>
-						{renderLinkMedia({
-							link,
-							fromSelf,
-							maxWidth,
-							getFileUrl: getHttpProviderFileUrl
-						})}
+						<LinkMedia
+							link={link}
+							fromSelf={fromSelf}
+							maxWidth={maxWidth}
+							getFileUrl={getHttpProviderFileUrl}
+						/>
 					</View>
 				)
 			})}

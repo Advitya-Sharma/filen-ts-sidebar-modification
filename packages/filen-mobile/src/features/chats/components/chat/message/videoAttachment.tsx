@@ -3,7 +3,8 @@ import { cn } from "@filen/shared"
 import Ionicons from "@expo/vector-icons/Ionicons"
 import { useVideoPlayer, VideoView } from "expo-video"
 import { PressableScale } from "@/components/ui/pressables"
-import { type InternalLinkData, openAttachmentPreview } from "@/features/chats/utils"
+import { type InternalLinkData, linkedVerdictFile, openAttachmentPreview } from "@/features/chats/utils"
+import { recordPlayerVerdict } from "@/lib/playerVerdict"
 
 export const VideoAttachment = ({
 	url,
@@ -21,6 +22,16 @@ export const VideoAttachment = ({
 	const player = useVideoPlayer(url, p => {
 		p.loop = false
 		p.staysActiveInBackground = false
+
+		// The poster frame loads the file anyway: what the load found about a linked file's kind is kept, so
+		// an `.mp4` holding audio alone shows as a file attachment from then on.
+		const file = linked?.type === "file" ? linkedVerdictFile(linked.file) : null
+
+		if (file) {
+			p.addListener("sourceLoad", loaded => {
+				recordPlayerVerdict(file, loaded, p.status === "error")
+			})
+		}
 	})
 
 	const style = {

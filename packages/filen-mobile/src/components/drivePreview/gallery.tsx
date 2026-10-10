@@ -6,6 +6,7 @@ import { AnimatedView } from "@/components/ui/animated"
 import { useNavigation } from "expo-router"
 import { goBackIfPossible, router } from "@/lib/router"
 import { type DriveItemFileExtracted } from "@/types"
+import { type ContentVerdict } from "@filen/shared"
 import { isImagePreviewType } from "@/lib/previewType"
 import { useWindowDimensions, Platform, type NativeSyntheticEvent, type NativeScrollEvent, type LayoutChangeEvent } from "react-native"
 import { SystemBars } from "react-native-edge-to-edge"
@@ -109,6 +110,11 @@ export type GalleryItemTagged =
 			openedName?: string
 			// Shown in the text viewer, read-only, whatever its type: a file nothing recognised, opened as text.
 			asText?: boolean
+			// The content verdict the page picks its renderer by (galleryRenderName.ts): the store's when the
+			// gallery opened, or what the `.ts` gate found. A verdict recorded while the page is open never swaps it.
+			verdict?: ContentVerdict
+			// The `.ts` gate found a stream this platform's player does not read (galleryRenderName.ts): no preview.
+			unplayable?: boolean
 	  }
 	| {
 			type: "external"

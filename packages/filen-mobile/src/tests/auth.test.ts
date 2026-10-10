@@ -105,6 +105,14 @@ vi.mock("@/queries/client", () => ({
 	}
 }))
 
+vi.mock("@/lib/fileKindVerdicts", () => ({
+	default: {
+		clearForLogout: vi.fn(() => {
+			callLog.push("fileKindVerdicts.clearForLogout")
+		})
+	}
+}))
+
 // notesOffline reaches SQLite; stubbed wholesale so this suite stays free of native modules.
 vi.mock("@/features/notes/notesOffline", () => ({
 	default: {
@@ -522,6 +530,15 @@ describe("auth.logout", () => {
 
 		if (kvWipeIdx > -1) {
 			expect(notesLedgerClearIdx).toBeLessThan(kvWipeIdx)
+		}
+
+		// The file-kind verdicts are account-scoped too: memory forgotten and writes refused before the kv wipe.
+		const verdictsClearIdx = callLog.indexOf("fileKindVerdicts.clearForLogout")
+
+		expect(verdictsClearIdx).toBeGreaterThan(cacheClearIdx)
+
+		if (kvWipeIdx > -1) {
+			expect(verdictsClearIdx).toBeLessThan(kvWipeIdx)
 		}
 
 		// The persister's writes bypass sqlite's wipe generation, so it must be emptied and closed BEFORE

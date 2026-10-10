@@ -14,6 +14,8 @@ import {
 	driveItemHasLeadingCheckbox
 } from "@/features/drive/driveSelectors"
 import { router } from "@/lib/router"
+import useFileKindVerdict from "@/hooks/useFileKindVerdict"
+import { type ContentVerdict } from "@filen/shared"
 
 export default function useDriveItemInteraction({
 	info,
@@ -30,6 +32,8 @@ export default function useDriveItemInteraction({
 	navigateOnly: boolean
 	areDriveItemsSelected: boolean
 	hasCheckbox: boolean
+	// The file's content verdict, followed for the row's icon, thumbnail and menu; null for none or a directory.
+	verdict: ContentVerdict | null
 	checkbox: {
 		value: boolean
 		onValueChange: (() => void) | undefined
@@ -42,7 +46,8 @@ export default function useDriveItemInteraction({
 	const isSelectedFromDriveSelect = useDriveSelectStore(state =>
 		selectDriveSelectSelection(state, selectSessionId).some(i => i.data.uuid === info.item.data.uuid && i.type === info.item.type)
 	)
-	const previewType = isFileItem(info.item) ? getDriveItemPreviewType(info.item) : null
+	const verdict = useFileKindVerdict(isFileItem(info.item) ? info.item.data.uuid : null) ?? null
+	const previewType = isFileItem(info.item) ? getDriveItemPreviewType(info.item, verdict) : null
 
 	const disabled = isDriveItemDisabled({
 		item: info.item,
@@ -165,6 +170,7 @@ export default function useDriveItemInteraction({
 		navigateOnly,
 		areDriveItemsSelected,
 		hasCheckbox: driveItemHasLeadingCheckbox({ drivePath, areDriveItemsSelected }),
-		checkbox
+		checkbox,
+		verdict
 	}
 }

@@ -17,6 +17,7 @@ import { Image } from "expo-image"
 import { Platform } from "react-native"
 import { CACHE_MAX_SIZE_BYTES } from "@/lib/cacheEviction"
 import logger from "@/lib/logger"
+import { connectFileKindVerdictStorage } from "@/lib/fileKindVerdictStorage"
 
 // Serializes setup() so a concurrent invocation (e.g. background task overlapping the
 // foreground launch) can't run the init flow twice. No other instance state -> plain object.
@@ -166,6 +167,12 @@ const setup = {
 				sqlite.kvAsync.removeByPrefixRange("cache:v1:").catch(e => {
 					logger.warn("setup", "legacy cache row sweep failed", { error: e })
 				})
+
+				// File-kind verdicts are the account's, read once into memory; fire-and-forget, a listing painted
+				// before they land follows them. A headless background run shows nothing they decide.
+				if (isAuthed.isAuthed && !options?.background) {
+					connectFileKindVerdictStorage()
+				}
 
 				// Rebuilds the session-scoped uuid indexes from the restored listing queries so socket patches,
 				// breadcrumbs, and shared-context resolution keep their pre-fetch coverage.

@@ -1,5 +1,7 @@
-import { AnyFile, MaybeEncryptedUniffi_Tags } from "@filen/sdk-rs"
-import { contactDisplayName } from "@filen/shared"
+import { AnyFile, MaybeEncryptedUniffi_Tags, type LinkedFile } from "@filen/sdk-rs"
+import { contactDisplayName, type ContentVerdict } from "@filen/shared"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
+import { getPreviewType, type PreviewType, type VerdictFile } from "@/lib/previewType"
 import { type TFunction } from "i18next"
 import { type Chat, type ChatMessage } from "@/types"
 import { type LinkResult } from "@/features/chats/queries/useChatMessageLinks.query"
@@ -193,10 +195,36 @@ export type ResolvedLinkMedia =
 			linked: null
 	  }
 
+// A linked file's facts for the content verdicts; null for one whose name did not decrypt.
+export function linkedVerdictFile(file: LinkedFile): VerdictFile | null {
+	if (file.name.tag !== MaybeEncryptedUniffi_Tags.Decrypted) {
+		return null
+	}
+
+	return {
+		uuid: file.uuid,
+		name: file.name.inner[0],
+		mime: file.mime.tag === MaybeEncryptedUniffi_Tags.Decrypted ? file.mime.inner[0] : null,
+		size: file.size
+	}
+}
+
+// What a linked file in a message shows as: the type its link resolved to, or what a content verdict left for it
+// since (a player that found an `.mp4` holds audio alone) makes it.
+export function linkedFilePreviewType(file: LinkedFile, resolved: PreviewType, verdict: ContentVerdict | undefined): PreviewType {
+	const facts = verdict === undefined ? null : linkedVerdictFile(file)
+
+	return facts === null ? resolved : getPreviewType(facts.name, facts.mime, verdict)
+}
+
 // Pure classifier shared by the single- and multi-attachment render paths. `getFileUrl` builds
 // the AnyFile.Linked HTTP url; without it internal media cannot be served and degrades to the
 // generic internal attachment.
-export function resolveLinkMedia(link: SuccessfulLink, getFileUrl: ((file: AnyFile) => string) | null | undefined): ResolvedLinkMedia {
+export function resolveLinkMedia(
+	link: SuccessfulLink,
+	getFileUrl: ((file: AnyFile) => string) | null | undefined,
+	verdictOf: (uuid: string) => ContentVerdict | undefined = uuid => fileKindVerdicts.get(uuid)
+): ResolvedLinkMedia {
 	if (link.type === "external") {
 		const { previewType, url, name } = link.data
 
@@ -218,14 +246,15 @@ export function resolveLinkMedia(link: SuccessfulLink, getFileUrl: ((file: AnyFi
 	}
 
 	const data = link.data
+	const previewType = data.type === "file" ? linkedFilePreviewType(data.file, data.previewType, verdictOf(data.file.uuid)) : null
 
-	if (data.type === "file" && getFileUrl && (data.previewType === "image" || data.previewType === "video")) {
+	if (data.type === "file" && getFileUrl && (previewType === "image" || previewType === "video")) {
 		const url = getFileUrl(new AnyFile.Linked(data.file))
 		const name = data.file.name.tag === MaybeEncryptedUniffi_Tags.Decrypted ? data.file.name.inner[0] : data.file.uuid
 
 		if (url && name) {
 			return {
-				type: data.previewType,
+				type: previewType,
 				url,
 				name,
 				linked: data

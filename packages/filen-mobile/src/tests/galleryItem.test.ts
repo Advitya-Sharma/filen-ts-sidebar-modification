@@ -92,6 +92,9 @@ function marker(testId: string) {
 	}
 }
 
+vi.mock("react-i18next", async () => await import("@/tests/mocks/reactI18next"))
+vi.mock("@/components/drivePreview/transportStreamGate", marker("ts-gate"))
+vi.mock("@/components/ui/listEmpty", marker("no-preview"))
 vi.mock("@/components/drivePreview/previewSvg", marker("preview-svg"))
 vi.mock("@/components/drivePreview/previewVideo", marker("preview-video"))
 vi.mock("@/components/drivePreview/previewAudio", marker("preview-audio"))
@@ -100,9 +103,14 @@ vi.mock("@/components/drivePreview/previewPdf", marker("preview-pdf"))
 vi.mock("@/components/drivePreview/previewDocx", marker("preview-docx"))
 
 import GalleryItem from "@/components/drivePreview/galleryItem"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
 import { isUnavailableOffline } from "@/components/drivePreview/previewAvailability"
 
-function renderItem(name: string, index = 0) {
+function renderItem(
+	name: string,
+	index = 0,
+	{ size = 1n, verdict, unplayable }: { size?: bigint; verdict?: string; unplayable?: boolean } = {}
+) {
 	return render(
 		createElement(GalleryItem, {
 			info: {
@@ -110,8 +118,10 @@ function renderItem(name: string, index = 0) {
 					type: "drive" as const,
 					data: {
 						type: "file" as const,
-						data: { uuid: "file-uuid", size: 1n, canMakeThumbnail: true, undecryptable: false, decryptedMeta: { name } }
-					}
+						data: { uuid: "file-uuid", size, canMakeThumbnail: true, undecryptable: false, decryptedMeta: { name } }
+					},
+					...(verdict === undefined ? {} : { verdict }),
+					...(unplayable ? { unplayable } : {})
 				},
 				index,
 				target: "Cell",
@@ -209,6 +219,62 @@ describe("GalleryItem — rawImage", () => {
 
 		expect(container.querySelector("[data-testid='offline-notice']")).toBeNull()
 		expect(container.querySelector("[data-testid='preview-raw-image']")).not.toBeNull()
+	})
+})
+
+describe("GalleryItem — transport stream gate", () => {
+	const STREAM_SIZED = 2n * 1024n * 1024n
+
+	beforeEach(() => {
+		mockUseFileUrlQuery.mockReset().mockReturnValue({ status: "pending", fetchStatus: "idle", data: undefined })
+	})
+
+	it("holds an unchecked .ts behind the gate, its URL resolved for the read", () => {
+		const { container } = renderItem("capture.ts", 0, { size: STREAM_SIZED })
+
+		expect(mockUseFileUrlQuery).toHaveBeenCalledWith(expect.objectContaining({ type: "drive" }), { enabled: true })
+		expect(container.querySelector("[data-testid='ts-gate']")).not.toBeNull()
+		expect(container.querySelector("[data-testid='preview-text']")).toBeNull()
+	})
+
+	it("resolves no URL for a neighbouring gated page", () => {
+		const { container } = renderItem("capture.ts", 1, { size: STREAM_SIZED })
+
+		expect(mockUseFileUrlQuery).toHaveBeenCalledWith(expect.objectContaining({ type: "drive" }), { enabled: false })
+		expect(container.querySelector("[data-testid='slot']")?.getAttribute("data-active")).toBe("false")
+	})
+
+	it("never gates a file too small to be a stream, or a declaration file", () => {
+		expect(renderItem("main.ts").container.querySelector("[data-testid='preview-text']")).not.toBeNull()
+		expect(renderItem("lib.d.ts", 0, { size: STREAM_SIZED }).container.querySelector("[data-testid='preview-text']")).not.toBeNull()
+	})
+
+	it("renders by the verdict the page holds", () => {
+		expect(
+			renderItem("main.ts", 0, { size: STREAM_SIZED, verdict: "notTransportStream" }).container.querySelector(
+				"[data-testid='preview-text']"
+			)
+		).not.toBeNull()
+
+		// iOS (the mocked platform): AVPlayer plays no progressive transport stream.
+		const stream = renderItem("capture.ts", 0, { size: STREAM_SIZED, verdict: "transportStream" }).container
+
+		expect(stream.querySelector("[data-testid='no-preview']")).not.toBeNull()
+		expect(stream.querySelector("[data-testid='ts-gate']")).toBeNull()
+	})
+
+	it("shows no preview for a stream the gate found unplayable", () => {
+		const { container } = renderItem("clip.m2ts", 0, { size: STREAM_SIZED, unplayable: true })
+
+		expect(container.querySelector("[data-testid='no-preview']")).not.toBeNull()
+		expect(container.querySelector("[data-testid='ts-gate']")).toBeNull()
+	})
+
+	it("keeps an .mp4 on the video page it opened with when a player records it holds audio alone", () => {
+		fileKindVerdicts.record("file-uuid", "audio")
+
+		expect(renderItem("voice.mp4").container.querySelector("[data-testid='spinner']")).not.toBeNull()
+		expect(renderItem("voice.mp4", 0, { verdict: "audio" }).container.querySelector("[data-testid='preview-audio']")).not.toBeNull()
 	})
 })
 

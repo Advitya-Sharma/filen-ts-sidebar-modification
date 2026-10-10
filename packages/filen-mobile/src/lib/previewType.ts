@@ -2,8 +2,17 @@ import * as FileSystem from "expo-file-system"
 // Metro aliases "path" to path-browserify (metro.config.js); under vitest it resolves to node's
 // built-in. Both are ports of the same algorithm expo-file-system vendors, so extname is identical.
 import pathModule from "path"
+import { Platform } from "react-native"
 import { EXPO_IMAGE_SUPPORTED_EXTENSIONS, EXPO_AUDIO_SUPPORTED_EXTENSIONS, EXPO_VIDEO_SUPPORTED_EXTENSIONS } from "@/constants"
-import { CODE_FILE_EXTENSIONS, resolveFileKind, type FileKind, type FileKindInput } from "@filen/shared"
+import {
+	CODE_FILE_EXTENSIONS,
+	resolveFileKind,
+	verdictChangesKind,
+	type ContentVerdict,
+	type FileKind,
+	type FileKindInput
+} from "@filen/shared"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
 import type { DriveItemFileExtracted } from "@/types"
 
 export type PreviewType = "image" | "svg" | "rawImage" | "video" | "unknown" | "pdf" | "text" | "code" | "audio" | "docx"
@@ -43,6 +52,10 @@ export const SDK_RAW_PREVIEW_EXTENSIONS = new Set<string>([".cr2", ".cr3", ".nef
 // own comment).
 const MOBILE_CODE_EXTENSIONS = [...CODE_FILE_EXTENSIONS, "md", "markdown", "log"]
 
+// The extension resolveFileKind reads a transport stream as, and whether this platform's player plays any.
+export const TRANSPORT_STREAM_EXTENSION = "m2ts"
+const PLAYS_TRANSPORT_STREAMS = Platform.OS === "android"
+
 // Dot-less extension → preview type, one lookup per classification. First entry wins, which keeps the
 // precedence the old chain of set checks had: .svg ahead of the image set that also holds it (it renders
 // through react-native-svg, never expo-image — on Android expo-image decodes SVG via the unmaintained
@@ -66,6 +79,11 @@ const PREVIEW_TYPES: ReadonlyMap<string, PreviewType> = (() => {
 	add(SDK_RAW_PREVIEW_EXTENSIONS, "rawImage")
 	add(EXPO_VIDEO_SUPPORTED_EXTENSIONS, "video")
 	add(EXPO_AUDIO_SUPPORTED_EXTENSIONS, "audio")
+	// What resolveFileKind reads a transport stream as (a `.ts`/`.mts` a read found to be one). Media3 plays one
+	// of 188-byte packets from a plain file; AVPlayer plays it only as HLS segments behind a playlist, so iOS
+	// shows no preview for one rather than its bytes as code. An `.m2ts` or video/mp2t file nothing has read
+	// yet is no video either (getFileKind).
+	add([TRANSPORT_STREAM_EXTENSION], PLAYS_TRANSPORT_STREAMS ? "video" : "unknown")
 	add(MOBILE_CODE_EXTENSIONS, "code")
 	add(["pdf"], "pdf")
 	add(["txt"], "text")
@@ -79,26 +97,44 @@ function previewTypeOf(extension: string): PreviewType | null {
 }
 
 // The file's type by @filen/shared's resolveFileKind over this app's table: its own extension when the
-// table knows it and it means one thing; for one that means two (.mp4/.m4a, .ogg, .webm, .mkv, .ts) an
-// audio or video mime, else its usual meaning; else a well-known name (LICENSE, Makefile, .bashrc), else
-// its stored mime. No content verdicts: nothing here reads a file to classify it. Pure string work: a file
-// name is not a URL, so this never reaches Paths.extname (extnameOf).
+// table knows it and it means one thing; for one that means two (.mp4/.m4a, .ogg, .webm, .mkv, .ts) a content
+// verdict an earlier read of the file left (lib/fileKindVerdicts.ts), else an audio or video mime, else its
+// usual meaning; else a well-known name (LICENSE, Makefile, .bashrc), else its stored mime. Pure string work: a
+// file name is not a URL, so this never reaches Paths.extname (extnameOf).
+//
+// `verdict`, here and below: the file's verdict as a component holds it (useFileKindVerdict), so what it
+// computes follows a change. Null or absent resolves without one; the drive-item functions read the store's
+// when absent.
 // One input reused across calls (this runs per list row): resolveFileKind is synchronous and keeps nothing.
-const kindInput: FileKindInput = { name: "", mime: null }
+const kindInput: FileKindInput = { name: "", mime: null, size: undefined, verdict: null }
 
-function fileKind(name: string, mime: string | null | undefined): FileKind<PreviewType> {
+export function getFileKind(
+	name: string,
+	mime: string | null | undefined,
+	verdict: ContentVerdict | null | undefined,
+	size?: number | bigint
+): FileKind<PreviewType> {
 	kindInput.name = name
 	kindInput.mime = mime
+	kindInput.verdict = verdict
+	kindInput.size = size
 
-	return resolveFileKind(kindInput, previewTypeOf)
+	const resolved = resolveFileKind(kindInput, previewTypeOf)
+
+	// An `.m2ts`, or a file typed video/mp2t, promises a stream by name alone, and Media3 plays only some (188-byte
+	// packets): unknown until a read found one it plays and left the verdict.
+	return resolved.extension === TRANSPORT_STREAM_EXTENSION && resolved.source !== "sniff" && verdict !== "transportStream"
+		? { ...resolved, kind: "unknown" }
+		: resolved
 }
 
-// The lowercase, dot-less extension a file's type is read from (fileKind). Preview type, icon, editor
+// The lowercase, dot-less extension a file's type is read from (getFileKind). Preview type, icon, editor
 // language, audio tags, thumbnails and the file-cache suffix all key on this, so they agree. A mime that
 // picks a sibling this table reads as the same type (Android: .ogg with audio/ogg is .oga) keeps the name's
-// own extension: only a change of type is worth moving the cache suffix, icon and audio-tag gate.
-export function fileTypeExtension(name: string, mime?: string | null): string {
-	const resolved = fileKind(name, mime)
+// own extension: only a change of type is worth moving the cache suffix, icon and audio-tag gate. The cache
+// suffix and the audio-tag gate pass no verdict, so a verdict never moves a cached copy.
+export function fileTypeExtension(name: string, mime?: string | null, verdict?: ContentVerdict | null): string {
+	const resolved = getFileKind(name, mime, verdict)
 
 	if (!resolved.ambiguous || resolved.source !== "mime") {
 		return resolved.extension
@@ -112,13 +148,73 @@ export function fileTypeExtension(name: string, mime?: string | null): string {
 }
 
 // `mime` is the file's stored metadata mime, where the caller has one; without it the name alone decides.
-export function getPreviewType(name: string, mime?: string | null): PreviewType {
-	return fileKind(name, mime).kind ?? "unknown"
+export function getPreviewType(name: string, mime?: string | null, verdict?: ContentVerdict | null): PreviewType {
+	return getFileKind(name, mime, verdict).kind ?? "unknown"
+}
+
+// A drive file's kind, its size included (whether a read could still change it: FileKind.sniffable).
+export function getDriveItemFileKind(item: DriveItemFileExtracted, verdict?: ContentVerdict | null): FileKind<PreviewType> {
+	return getFileKind(
+		item.data.decryptedMeta?.name ?? "",
+		item.data.decryptedMeta?.mime,
+		verdict === undefined ? fileKindVerdicts.get(item.data.uuid) : verdict,
+		item.data.size
+	)
 }
 
 // An undecryptable file has neither name nor mime, and classifies "unknown".
-export function getDriveItemPreviewType(item: DriveItemFileExtracted): PreviewType {
-	return getPreviewType(item.data.decryptedMeta?.name ?? "", item.data.decryptedMeta?.mime)
+export function getDriveItemPreviewType(item: DriveItemFileExtracted, verdict?: ContentVerdict | null): PreviewType {
+	return getDriveItemFileKind(item, verdict).kind ?? "unknown"
+}
+
+// A file its preview has to read before it knows its viewer: a `.ts`/`.mts` large enough to be a transport stream,
+// TypeScript until a read says otherwise, where finding a stream changes what opens here (iOS shows neither an
+// `.mts` nor a stream, so an `.mts` there has nothing to read for); or, where streams play, an `.m2ts` or
+// video/mp2t file no read has found playable yet.
+export function isUncheckedTransportStream(
+	name: string,
+	mime: string | null | undefined,
+	size: number | bigint,
+	verdict: ContentVerdict | null | undefined
+): boolean {
+	const kind = getFileKind(name, mime, verdict, size)
+
+	if (kind.extension === "ts" || kind.extension === "mts") {
+		return kind.sniffable && getPreviewType(name, mime, "transportStream") !== getPreviewType(name, mime, "notTransportStream")
+	}
+
+	return (
+		PLAYS_TRANSPORT_STREAMS && kind.extension === TRANSPORT_STREAM_EXTENSION && kind.source !== "sniff" && verdict !== "transportStream"
+	)
+}
+
+export type VerdictFile = {
+	uuid: string
+	name: string
+	mime: string | null | undefined
+	size: number | bigint
+}
+
+export function verdictFileOf(item: DriveItemFileExtracted): VerdictFile {
+	return {
+		uuid: item.data.uuid,
+		name: item.data.decryptedMeta?.name ?? "",
+		mime: item.data.decryptedMeta?.mime,
+		size: item.data.size
+	}
+}
+
+// Keeps a content read's verdict only where it changes what the file resolves to here (a stream an `.m2ts` was
+// read to be included), or settles a `.ts` that would otherwise be read again: the store holds no confirmations
+// of what the name already said.
+export function recordContentVerdict(file: VerdictFile, verdict: ContentVerdict): void {
+	if (
+		file.name !== "" &&
+		(verdictChangesKind(file, verdict, previewTypeOf) ||
+			getPreviewType(file.name, file.mime, verdict) !== getPreviewType(file.name, file.mime, null))
+	) {
+		fileKindVerdicts.record(file.uuid, verdict)
+	}
 }
 
 // SVG previews render via react-native-svg and RAW camera files via the SDK-extracted JPEG, but

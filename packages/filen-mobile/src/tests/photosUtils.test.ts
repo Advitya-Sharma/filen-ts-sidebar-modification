@@ -13,11 +13,14 @@ vi.mock("@/lib/serializer", () => ({
 
 import { isPhotoGridItem } from "@/features/photos/utils"
 import { type DriveItem } from "@/types"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
 
-function makeItem({ type, name }: { type: string; name: string | null }): DriveItem {
+function makeItem({ type, name, size = 0 }: { type: string; name: string | null; size?: number }): DriveItem {
 	return {
 		type,
 		data: {
+			uuid: `uuid-${name ?? ""}`,
+			size: BigInt(size),
 			decryptedMeta: name === null ? null : { name }
 		}
 	} as unknown as DriveItem
@@ -80,11 +83,59 @@ describe("isPhotoGridItem", () => {
 			makeItem({ type: "file", name: null })
 		]
 
-		expect(items.filter(isPhotoGridItem).map(item => item.data.decryptedMeta?.name)).toEqual([
+		expect(items.filter(item => isPhotoGridItem(item)).map(item => item.data.decryptedMeta?.name)).toEqual([
 			"photo.jpg",
 			"clip.mp4",
 			"shot.dng",
 			"shared.png"
 		])
+	})
+
+	describe("content verdicts", () => {
+		const STREAM_SIZED = 2 * 1024 * 1024
+
+		it("drops a video a player found to hold audio alone", () => {
+			expect(isPhotoGridItem(makeItem({ type: "file", name: "voice.mp4" }), "audio")).toBe(false)
+			expect(isPhotoGridItem(makeItem({ type: "file", name: "clip.mp4" }), null)).toBe(true)
+		})
+
+		it("takes a .ts only once a read found it to be a stream the platform plays", () => {
+			const capture = makeItem({ type: "file", name: "capture.ts", size: STREAM_SIZED })
+
+			expect(isPhotoGridItem(capture, null)).toBe(false)
+			expect(isPhotoGridItem(capture, "notTransportStream")).toBe(false)
+			// iOS (the mocked platform): AVPlayer plays no progressive transport stream.
+			expect(isPhotoGridItem(capture, "transportStream")).toBe(false)
+		})
+
+		it("reads the store's verdict when none is passed", () => {
+			fileKindVerdicts.record("uuid-voice.m4v.mp4", "audio")
+
+			expect(isPhotoGridItem(makeItem({ type: "file", name: "voice.m4v.mp4" }))).toBe(false)
+		})
+	})
+})
+
+describe("isPhotoGridItem on Android", () => {
+	it("takes a .ts a read found to be a transport stream, which Media3 plays", async () => {
+		vi.resetModules()
+
+		const { Platform } = await import("react-native")
+
+		Platform.OS = "android"
+
+		try {
+			const { isPhotoGridItem: isAndroidPhoto } = await import("@/features/photos/utils")
+			const capture = {
+				type: "file",
+				data: { uuid: "c", size: BigInt(2 * 1024 * 1024), decryptedMeta: { name: "capture.ts" } }
+			} as unknown as DriveItem
+
+			expect(isAndroidPhoto(capture, "transportStream")).toBe(true)
+			expect(isAndroidPhoto(capture, null)).toBe(false)
+		} finally {
+			Platform.OS = "ios"
+			vi.resetModules()
+		}
 	})
 })

@@ -32,10 +32,14 @@ const PreviewTextInner = ({
 	const setContentScrolled = useDrivePreviewStore(useShallow(state => state.setContentScrolled))
 	const insets = useSafeAreaInsets()
 	const [status, setStatus] = useRecyclingState<TextEditorDocumentStatus | "loading">("loading", [galleryItemKey(item)])
-	const { hasEdits, setHasEdits, saveHandleRef, readOnly, save, isOnline } = useEditableSave(item, {
-		failed: "Text file save failed",
-		notSerialised: "The file could not be saved"
-	})
+	const { hasEdits, setHasEdits, saveHandleRef, readOnly, save, isOnline } = useEditableSave(
+		item,
+		{
+			failed: "Text file save failed",
+			notSerialised: "The file could not be saved"
+		},
+		true
+	)
 
 	// The editor's mode and highlighting follow the type extension of the name the page opened with
 	// (galleryItemRenderName), never a rename that would remount it under unsaved edits — and the same type

@@ -4,7 +4,8 @@ import { cleanup, render } from "@testing-library/react"
 import { createElement, type ReactNode } from "react"
 
 const mocks = vi.hoisted(() => ({
-	linksQuery: vi.fn()
+	linksQuery: vi.fn(),
+	verdictHook: vi.fn((_uuid: string | null) => undefined)
 }))
 
 vi.mock("@/lib/logger", async () => await import("@/tests/mocks/logger"))
@@ -29,6 +30,8 @@ vi.mock("@/features/chats/utils", () => ({
 	resolveLinkMedia: () => ({ type: "internal", linked: {} })
 }))
 vi.mock("@/features/chats/queries/useChatMessageLinks.query", () => ({ default: mocks.linksQuery }))
+
+vi.mock("@/hooks/useFileKindVerdict", () => ({ default: mocks.verdictHook }))
 vi.mock("@/stores/useHttp.store", () => ({ default: () => null }))
 vi.mock("@shopify/flash-list", async () => {
 	const { useState } = await import("react")
@@ -58,6 +61,7 @@ function renderAttachments(text: string, single: boolean) {
 }
 
 beforeEach(() => {
+	mocks.verdictHook.mockClear()
 	mocks.linksQuery.mockReset()
 	mocks.linksQuery.mockReturnValue({ data: undefined })
 })
@@ -119,5 +123,17 @@ describe("Attachments", () => {
 
 		expect(getByTestId("regexed")).toBeTruthy()
 		expect(mocks.linksQuery).toHaveBeenCalledWith({ urls: [] }, { enabled: false })
+	})
+
+	it("follows the content verdict of each linked file alone, and of none for a message without one", () => {
+		renderAttachments("no links here", false)
+
+		expect(mocks.verdictHook).not.toHaveBeenCalled()
+
+		mocks.linksQuery.mockReturnValue({ data: [SUCCESSFUL] })
+		renderAttachments(`see ${FILEN_LINK}`, true)
+
+		expect(mocks.verdictHook).toHaveBeenCalledWith("f1")
+		expect(mocks.verdictHook.mock.calls.every(([uuid]) => uuid === "f1")).toBe(true)
 	})
 })

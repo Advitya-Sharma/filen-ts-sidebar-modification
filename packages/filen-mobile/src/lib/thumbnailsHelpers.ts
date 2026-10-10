@@ -4,7 +4,9 @@ import { AnyFile } from "@filen/sdk-rs"
 import { type DriveItem } from "@/types"
 import useHttpStore from "@/stores/useHttp.store"
 import { THUMBNAILS_DIRECTORY as DIRECTORY } from "@/lib/storageRoots"
-import { getPreviewType } from "@/lib/previewType"
+import { getFileKind, TRANSPORT_STREAM_EXTENSION } from "@/lib/previewType"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
+import { type ContentVerdict } from "@filen/shared"
 import { isFileItem } from "@/features/drive/driveSelectors"
 
 export function abortError(signal?: AbortSignal): Error {
@@ -95,15 +97,24 @@ export type ThumbnailKind = "image" | "video"
 // extractor (the SDK flag is about images and does not apply). svg is excluded on purpose: resvg renders
 // <text> and raster <image> as nothing, and a transparent tile on the OLED-black theme is worse
 // than the icon.
-export function getThumbnailKindForName(name: string, canMakeThumbnail: boolean, mime?: string | null): ThumbnailKind | null {
-	switch (getPreviewType(name, mime)) {
+export function getThumbnailKindForName(
+	name: string,
+	canMakeThumbnail: boolean,
+	mime?: string | null,
+	verdict?: ContentVerdict | null
+): ThumbnailKind | null {
+	const kind = getFileKind(name, mime, verdict)
+
+	switch (kind.kind) {
 		case "image":
 		case "rawImage": {
 			return canMakeThumbnail ? "image" : null
 		}
 
 		case "video": {
-			return "video"
+			// A transport stream (Android, the one platform that plays one) keeps its icon: expo-video-thumbnails'
+			// frame extractor fails on it, so a grab would only cost reads and an error.
+			return kind.extension === TRANSPORT_STREAM_EXTENSION ? null : "video"
 		}
 
 		default: {
@@ -114,8 +125,9 @@ export function getThumbnailKindForName(name: string, canMakeThumbnail: boolean,
 
 // The upload path knows a name, a mime and a flag but has no DriveItem yet, so it calls
 // getThumbnailKindForName directly. Both entry points must answer identically: a format that
-// thumbnails only on the device that uploaded it is worse than one that never does.
-export function getThumbnailKind(item: DriveItem): ThumbnailKind | null {
+// thumbnails only on the device that uploaded it is worse than one that never does. `verdict` is the file's
+// content verdict (an `.mp4` holding audio alone has no frame to grab); the store's when absent.
+export function getThumbnailKind(item: DriveItem, verdict?: ContentVerdict | null): ThumbnailKind | null {
 	if (!isFileItem(item)) {
 		return null
 	}
@@ -126,7 +138,12 @@ export function getThumbnailKind(item: DriveItem): ThumbnailKind | null {
 		return null
 	}
 
-	return getThumbnailKindForName(name, item.data.canMakeThumbnail === true, item.data.decryptedMeta?.mime)
+	return getThumbnailKindForName(
+		name,
+		item.data.canMakeThumbnail === true,
+		item.data.decryptedMeta?.mime,
+		verdict === undefined ? fileKindVerdicts.get(item.data.uuid) : verdict
+	)
 }
 
 export function waitForHttpProvider(signal?: AbortSignal): Promise<(file: AnyFile) => string> {

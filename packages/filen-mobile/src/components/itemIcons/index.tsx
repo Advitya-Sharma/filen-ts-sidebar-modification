@@ -1,8 +1,8 @@
 import Image from "@/components/ui/image"
-import { cn, directoryFolderTint, fileIconKey, type FileIconKey } from "@filen/shared"
+import { cn, directoryFolderTint, fileIconKey, type ContentVerdict, type FileIconKey } from "@filen/shared"
 import { memoize } from "es-toolkit/function"
 import { type DirColor, DirColor_Tags } from "@filen/sdk-rs"
-import { SDK_RAW_PREVIEW_EXTENSIONS, fileTypeExtension } from "@/lib/previewType"
+import { SDK_RAW_PREVIEW_EXTENSIONS, TRANSPORT_STREAM_EXTENSION, fileTypeExtension } from "@/lib/previewType"
 import { EXPO_IMAGE_SUPPORTED_EXTENSIONS, EXPO_VIDEO_SUPPORTED_EXTENSIONS, EXPO_AUDIO_SUPPORTED_EXTENSIONS } from "@/constants"
 
 const FILE_ICONS = {
@@ -48,20 +48,27 @@ const ICON_SETS = { isImage: isImageIconExtension, isVideo: isVideoIconExtension
 
 // Resolves a file to its type-icon key by the same type extension its preview reads (fileTypeExtension), so
 // a LICENSE gets the text icon and an extension-less video the video icon. `mime` is the file's stored
-// metadata mime where the caller has one. Exported for itemIcons.test.ts.
-export function resolveFileIconKey(name: string, mime?: string | null): FileIconKey {
-	return fileIconKey(fileTypeExtension(name, mime), ICON_SETS)
+// metadata mime where the caller has one, `verdict` its content verdict (useFileKindVerdict). Exported for
+// itemIcons.test.ts.
+export function resolveFileIconKey(name: string, mime?: string | null, verdict?: ContentVerdict | null): FileIconKey {
+	const extension = fileTypeExtension(name, mime, verdict)
+
+	// A transport stream is a video once a read found it to be one, whether or not this platform plays it; an
+	// `.m2ts` nothing has read keeps the icon its name gives.
+	return extension === TRANSPORT_STREAM_EXTENSION && verdict === "transportStream" ? "video" : fileIconKey(extension, ICON_SETS)
 }
 
 export const FileIcon = ({
 	name,
 	mime,
+	verdict,
 	width,
 	height,
 	className
 }: {
 	name: string
 	mime?: string | null
+	verdict?: ContentVerdict | null
 	width?: number
 	height?: number
 	className?: string
@@ -69,7 +76,7 @@ export const FileIcon = ({
 	return (
 		<Image
 			className={cn("shrink-0 bg-transparent", className, "rounded-none")}
-			source={FILE_ICONS[resolveFileIconKey(name, mime)]}
+			source={FILE_ICONS[resolveFileIconKey(name, mime, verdict)]}
 			style={{
 				width: width ?? 32,
 				height: height ?? 32

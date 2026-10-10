@@ -43,7 +43,7 @@ const Item = ({
 	const { t } = useTranslation()
 	const textForeground = useResolveClassNames("text-foreground")
 	const [isMenuOpen, setIsMenuOpen] = useRecyclingState<boolean>(false, [info.item.data.uuid])
-	const { onPress, isSelected, disabled, navigateOnly, areDriveItemsSelected, hasCheckbox, checkbox } = useDriveItemInteraction({
+	const { onPress, isSelected, disabled, navigateOnly, areDriveItemsSelected, hasCheckbox, checkbox, verdict } = useDriveItemInteraction({
 		info,
 		drivePath,
 		getListItems
@@ -81,6 +81,7 @@ const Item = ({
 				drivePath={drivePath}
 				isStoredOffline={isStoredOffline}
 				isSelected={isSelected}
+				verdict={verdict}
 			>
 				<View
 					className={cn(
@@ -128,6 +129,7 @@ const Item = ({
 							)}
 							<Thumbnail
 								item={info.item}
+								verdict={verdict}
 								target={info.target}
 								size={{
 									icon: 38,
@@ -187,6 +189,7 @@ const Item = ({
 										drivePath={drivePath}
 										isStoredOffline={isStoredOffline}
 										isSelected={isSelected}
+										verdict={verdict}
 									>
 										<View className="pl-4 h-full items-center justify-center flex-row bg-transparent">
 											<Ionicons

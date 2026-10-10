@@ -24,6 +24,7 @@ vi.mock("@filen/sdk-rs", () => ({}))
 import { useDrivePreviewStore } from "@/stores/useDrivePreview.store"
 import type { GalleryItemTagged } from "@/components/drivePreview/gallery"
 import type { DrivePath } from "@/hooks/useDrivePath"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
 import {
 	makeDrivePath,
 	makeDriveGalleryItem,
@@ -607,6 +608,65 @@ describe("useDrivePreviewStore.open — navigation identity", () => {
 			useDrivePreviewStore.getState().endSession()
 
 			expect(useDrivePreviewStore.getState().contentScrolled).toBe(false)
+		})
+	})
+
+	describe("content verdicts", () => {
+		function sized(uuid: string, name: string, size: bigint): GalleryItemTagged {
+			const item = makeDriveGalleryItem(uuid, name) as Extract<GalleryItemTagged, { type: "drive" }>
+
+			return { ...item, data: { ...item.data, data: { ...item.data.data, size } } as never }
+		}
+
+		it("pins each page to the verdict the store holds when the gallery opens", () => {
+			fileKindVerdicts.record("voice", "audio")
+
+			useDrivePreviewStore.getState().open({
+				items: [makeDriveGalleryItem("voice", "voice.mp4"), makeDriveGalleryItem("clip", "clip.mp4")],
+				initialItem: makeInitialDriveItem("clip", "clip.mp4")
+			})
+
+			expect(useDrivePreviewStore.getState().items).toMatchObject([{ verdict: "audio" }, {}])
+			expect(useDrivePreviewStore.getState().items[1]).not.toHaveProperty("verdict")
+		})
+
+		it("opens an unchecked .ts alone, behind its gate, and pins what the gate found", () => {
+			const stream = sized("stream", "capture.ts", 4n * 1024n * 1024n)
+
+			useDrivePreviewStore.getState().open({
+				items: [stream, makeDriveGalleryItem("photo", "photo.jpg")],
+				initialItem: {
+					type: "drive",
+					data: { item: (stream as Extract<GalleryItemTagged, { type: "drive" }>).data, drivePath: makeDrivePath() }
+				}
+			})
+
+			expect(useDrivePreviewStore.getState().items).toHaveLength(1)
+
+			useDrivePreviewStore.getState().pinVerdict("stream", "transportStream")
+			// A pinned page is never pinned again.
+			useDrivePreviewStore.getState().pinVerdict("stream", "notTransportStream")
+
+			expect(useDrivePreviewStore.getState().items[0]).toMatchObject({ verdict: "transportStream" })
+			expect(useDrivePreviewStore.getState().currentItem).toMatchObject({ verdict: "transportStream" })
+		})
+
+		it("pins a stream the platform does not play as unplayable, never as a verdict", () => {
+			const stream = sized("bdav", "capture.ts", 4n * 1024n * 1024n)
+
+			useDrivePreviewStore.getState().open({
+				items: [stream],
+				initialItem: {
+					type: "drive",
+					data: { item: (stream as Extract<GalleryItemTagged, { type: "drive" }>).data, drivePath: makeDrivePath() }
+				}
+			})
+
+			useDrivePreviewStore.getState().pinVerdict("bdav", "unplayable")
+			useDrivePreviewStore.getState().pinVerdict("bdav", "transportStream")
+
+			expect(useDrivePreviewStore.getState().currentItem).toMatchObject({ unplayable: true })
+			expect(useDrivePreviewStore.getState().currentItem).not.toHaveProperty("verdict")
 		})
 	})
 })

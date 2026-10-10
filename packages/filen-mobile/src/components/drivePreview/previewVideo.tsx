@@ -14,8 +14,9 @@ import { useSecureStore } from "@/lib/secureStore"
 import { PIP_ENABLED_SECURE_STORE_KEY, DEFAULT_PIP_ENABLED } from "@/constants"
 import { ensureHttpProviderHealthy } from "@/components/http"
 import logger from "@/lib/logger"
+import { type VerdictFile } from "@/lib/previewType"
 
-const PreviewVideo = ({ cacheKey, fileUrl }: { cacheKey: string; fileUrl: string }) => {
+const PreviewVideo = ({ cacheKey, fileUrl, file }: { cacheKey: string; fileUrl: string; file?: VerdictFile }) => {
 	const dimensions = useWindowDimensions()
 	const headerHeight = useDrivePreviewStore(useShallow(state => state.headerHeight))
 	const insets = useSafeAreaInsets()
@@ -31,7 +32,8 @@ const PreviewVideo = ({ cacheKey, fileUrl }: { cacheKey: string; fileUrl: string
 	// rotation remount of the carousel so playback continues uninterrupted.
 	const player = galleryVideoPlayers.acquire({
 		key: cacheKey,
-		fileUrl
+		fileUrl,
+		file
 	})
 
 	const { status } = useEvent(player, "statusChange", {

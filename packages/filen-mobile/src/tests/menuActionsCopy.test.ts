@@ -19,7 +19,10 @@ vi.mock("@/features/drive/queries/useDriveItemPublicLinkStatus.query", () => ({
 	publicLinkUrlFromStatus: vi.fn()
 }))
 vi.mock("@/lib/serializer", () => ({ serialize: vi.fn((x: unknown) => JSON.stringify(x)) }))
-vi.mock("@/lib/previewType", () => ({ getPreviewType: vi.fn(() => "other") }))
+vi.mock("@/lib/previewType", () => ({
+	getPreviewType: vi.fn(() => "other"),
+	getDriveItemFileKind: vi.fn(() => ({ kind: "other", extension: "", source: "extension", ambiguous: false, sniffable: false }))
+}))
 vi.mock("@filen/sdk-rs", () => ({ AnyNormalDir_Tags: { Dir: "Dir", Root: "Root" } }))
 vi.mock("@/lib/cache", () => ({
 	default: {

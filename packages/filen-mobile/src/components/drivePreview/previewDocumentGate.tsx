@@ -32,11 +32,25 @@ const PreviewDocumentGate = ({
 	children: (source: Extract<RangeSource, { status: "ready" }>) => ReactNode
 }) => {
 	const isOnline = useIsOnline()
-	const query = useFileUriQuery(galleryItemFileSource(item))
+	// A drive file its size already refuses is never fetched.
+	const declaredTooLarge = item.type === "drive" && Number(item.data.data.decryptedMeta?.size ?? 0) > maxBytes
+	const query = useFileUriQuery(galleryItemFileSource(item), {
+		enabled: !declaredTooLarge
+	})
 	const source = useRangeSource(query.status === "success" ? query.data.uri : null, {
 		maxBytes,
 		magic
 	})
+
+	if (declaredTooLarge) {
+		return (
+			<PreviewMessage
+				icon="document-outline"
+				text={refusedText.tooLarge}
+				style={style}
+			/>
+		)
+	}
 
 	if (isUnavailableOffline(query, isOnline)) {
 		return (

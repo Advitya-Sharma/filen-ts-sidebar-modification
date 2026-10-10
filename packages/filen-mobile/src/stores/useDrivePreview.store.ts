@@ -2,8 +2,10 @@ import { create } from "zustand"
 import type { GalleryItemTagged, InitialItem } from "@/components/drivePreview/gallery"
 import { router } from "@/lib/router"
 import type { DrivePath } from "@/hooks/useDrivePath"
-import { getDriveItemPreviewType, isImagePreviewType } from "@/lib/previewType"
+import { getDriveItemPreviewType, isImagePreviewType, isUncheckedTransportStream } from "@/lib/previewType"
 import { isFileItem } from "@/features/drive/driveSelectors"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
+import { type ContentVerdict } from "@filen/shared"
 
 export type OpenPreviewParams = {
 	items: GalleryItemTagged[]
@@ -41,6 +43,9 @@ export type DrivePreviewStore = {
 	endSession: () => void
 	setCurrentItem: (fn: GalleryItemTagged | null | ((prev: GalleryItemTagged | null) => GalleryItemTagged | null)) => void
 	setCurrentItems: (fn: GalleryItemTagged[] | ((prev: GalleryItemTagged[]) => GalleryItemTagged[])) => void
+	// Pins what the `.ts` gate found as the verdict the file's page renders by, or a stream the platform's player
+	// does not read.
+	pinVerdict: (uuid: string, found: ContentVerdict | "unplayable") => void
 	open(params: OpenPreviewParams): void
 	// Whether the currently-open editable text preview has unsaved edits. Published by previewText;
 	// read by the route-level unsaved-changes guard to decide whether to prompt on navigate-away.
@@ -58,6 +63,35 @@ export type DrivePreviewStore = {
 	// and no second document whose scroll position could be confused with this one.
 	contentScrolled: boolean
 	setContentScrolled: (value: boolean) => void
+}
+
+// Each page renders by the verdicts known when the gallery opens (GalleryItemTagged.verdict); one recorded while
+// it is open waits for the next open. The same array when no item has one.
+function withOpenVerdicts(items: GalleryItemTagged[]): GalleryItemTagged[] {
+	let stamped = items
+
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index]
+
+		if (item?.type !== "drive") {
+			continue
+		}
+
+		const verdict = fileKindVerdicts.get(item.data.data.uuid)
+
+		if (verdict !== undefined) {
+			if (stamped === items) {
+				stamped = items.slice()
+			}
+
+			stamped[index] = {
+				...item,
+				verdict
+			}
+		}
+	}
+
+	return stamped
 }
 
 // Per-session state, cleared by reset(). A function so every session gets a fresh `items` array.
@@ -117,6 +151,19 @@ export const useDrivePreviewStore = create<DrivePreviewStore>((set, get) => ({
 			items: typeof fn === "function" ? fn(state.items) : fn
 		}))
 	},
+	pinVerdict(uuid, found) {
+		const pin = (item: GalleryItemTagged): GalleryItemTagged =>
+			item.type !== "drive" || item.data.data.uuid !== uuid || item.verdict !== undefined || item.unplayable
+				? item
+				: found === "unplayable"
+					? { ...item, unplayable: true }
+					: { ...item, verdict: found }
+
+		set(state => ({
+			items: state.items.map(pin),
+			currentItem: state.currentItem ? pin(state.currentItem) : null
+		}))
+	},
 	setHasUnsavedEdits(value) {
 		set({
 			hasUnsavedEdits: value
@@ -151,54 +198,69 @@ export const useDrivePreviewStore = create<DrivePreviewStore>((set, get) => ({
 			return
 		}
 
-		const itemsFiltered = ((): GalleryItemTagged[] => {
-			if (initialItem.type === "external") {
-				return [
-					{
-						type: "external",
-						data: initialItem.data
-					}
-				]
-			}
-
-			// Opened as text from the item menu: a read-only text page of just that file, whatever its type.
-			if (initialItem.data.asText) {
-				return [
-					{
-						type: "drive",
-						data: initialItem.data.item,
-						asText: true
-					}
-				]
-			}
-
-			const basePreviewType = getDriveItemPreviewType(initialItem.data.item)
-
-			// If it's a docx, text, pdf, or code file, we won't show the gallery and just show that file, so we return an array with just that file as the item to render
-			if (basePreviewType === "docx" || basePreviewType === "text" || basePreviewType === "pdf" || basePreviewType === "code") {
-				return [
-					{
-						type: "drive",
-						data: initialItem.data.item
-					}
-				]
-			}
-
-			// The photos grid (its only opener) is already filtered with isPhotoGridItem.
-			if (initialItem.data.drivePath.type === "photos") {
-				return items
-			}
-
-			return items.filter(item => {
-				if (item.type !== "drive" || !isFileItem(item.data) || !item.data.data.decryptedMeta) {
-					return false
+		const itemsFiltered = withOpenVerdicts(
+			((): GalleryItemTagged[] => {
+				if (initialItem.type === "external") {
+					return [
+						{
+							type: "external",
+							data: initialItem.data
+						}
+					]
 				}
 
-				const type = getDriveItemPreviewType(item.data)
+				// Opened as text from the item menu: a read-only text page of just that file, whatever its type.
+				if (initialItem.data.asText) {
+					return [
+						{
+							type: "drive",
+							data: initialItem.data.item,
+							asText: true
+						}
+					]
+				}
 
-				return isImagePreviewType(type) || type === "video" || type === "audio"
-			})
-		})()
+				const base = initialItem.data.item
+				const basePreviewType = getDriveItemPreviewType(base)
+
+				// If it's a docx, text, pdf, or code file, we won't show the gallery and just show that file, so we return an array with just that file as the item to render.
+				// A `.ts`/`.mts` a read could still find to be a transport stream opens alone too, behind its gate.
+				if (
+					basePreviewType === "docx" ||
+					basePreviewType === "text" ||
+					basePreviewType === "pdf" ||
+					basePreviewType === "code" ||
+					isUncheckedTransportStream(
+						base.data.decryptedMeta?.name ?? "",
+						base.data.decryptedMeta?.mime,
+						base.data.size,
+						fileKindVerdicts.get(base.data.uuid)
+					)
+				) {
+					return [
+						{
+							type: "drive",
+							data: initialItem.data.item
+						}
+					]
+				}
+
+				// The photos grid (its only opener) is already filtered with isPhotoGridItem.
+				if (initialItem.data.drivePath.type === "photos") {
+					return items
+				}
+
+				return items.filter(item => {
+					if (item.type !== "drive" || !isFileItem(item.data) || !item.data.data.decryptedMeta) {
+						return false
+					}
+
+					const type = getDriveItemPreviewType(item.data)
+
+					return isImagePreviewType(type) || type === "video" || type === "audio"
+				})
+			})()
+		)
 
 		const initialScrollIndex =
 			initialItem.type === "external"

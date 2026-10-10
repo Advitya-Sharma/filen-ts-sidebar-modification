@@ -1,7 +1,7 @@
 import * as FileSystem from "expo-file-system"
 import { type DriveItem } from "@/types"
 import { normalizeFilePathForExpo, normalizeFilePathForSdk } from "@/lib/paths"
-import { run, Semaphore, isAbortError, InFlight } from "@filen/shared"
+import { run, Semaphore, isAbortError, InFlight, type ContentVerdict } from "@filen/shared"
 import { ClearBarrier } from "@/lib/clearBarrier"
 import { resetDirectory, flatDirectoryFileBytes } from "@/lib/fsUtils"
 import { Platform } from "react-native"
@@ -218,8 +218,9 @@ class Thumbnails {
 		})
 	}
 
-	public canGenerate(item: DriveItem): boolean {
-		return getThumbnailKind(item) !== null
+	// `verdict` as getThumbnailKind takes it.
+	public canGenerate(item: DriveItem, verdict?: ContentVerdict | null): boolean {
+		return getThumbnailKind(item, verdict) !== null
 	}
 
 	// Bytes on disk outrank any earlier session verdict for this uuid.

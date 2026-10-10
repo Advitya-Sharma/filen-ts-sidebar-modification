@@ -79,6 +79,7 @@ function internalFileLink(previewType: string, name: string | null): SuccessfulL
 			file: {
 				uuid: "file-uuid",
 				size: 10n,
+				mime: { tag: MaybeEncryptedUniffi_Tags.Decrypted, inner: ["video/mp4"] },
 				name:
 					name === null
 						? { tag: MaybeEncryptedUniffi_Tags.Encrypted, inner: [] }
@@ -182,6 +183,16 @@ describe("resolveLinkMedia", () => {
 			expect(media.type).not.toBe("image")
 			expect(media.type).not.toBe("video")
 			expect(getFileUrl).not.toHaveBeenCalled()
+		})
+
+		it("follows a content verdict a player left for the linked file", () => {
+			const verdictOf = (uuid: string) => (uuid === "file-uuid" ? ("audio" as const) : undefined)
+			const audio = resolveLinkMedia(internalFileLink("video", "voice.mp4"), getFileUrl, verdictOf)
+
+			expect(audio.type).toBe("internal")
+			expect(resolveLinkMedia(internalFileLink("video", "clip.mp4"), getFileUrl, () => undefined).type).toBe("video")
+			// A name that did not decrypt keeps what the link resolved to.
+			expect(resolveLinkMedia(internalFileLink("image", null), getFileUrl, verdictOf).type).toBe("image")
 		})
 
 		it("classifies a non-previewable internal file (unknown) as internal", () => {

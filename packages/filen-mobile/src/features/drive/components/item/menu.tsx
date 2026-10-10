@@ -8,6 +8,7 @@ import useDriveClipboardStore from "@/features/drive/store/useDriveClipboard.sto
 import { offersPasteInto } from "@/features/drive/components/clipboardMenu"
 import useLinkSaveable from "@/features/drive/hooks/useLinkSaveable"
 import { linkSaveTarget } from "@/features/drive/linkedSave"
+import { type ContentVerdict } from "@filen/shared"
 
 type MenuProps = {
 	item: DriveItem
@@ -25,6 +26,8 @@ type MenuProps = {
 	isPreview?: boolean
 	previewBackground?: boolean
 	isSelected?: boolean
+	// The file's content verdict as its row holds it (useFileKindVerdict); the store's at render when absent.
+	verdict?: ContentVerdict | null
 }
 
 const MenuInner = ({
@@ -42,6 +45,7 @@ const MenuInner = ({
 	isPreview,
 	previewBackground,
 	isSelected,
+	verdict,
 	linkSaveable
 }: MenuProps & { linkSaveable?: boolean }) => {
 	const { t } = useTranslation()
@@ -58,6 +62,7 @@ const MenuInner = ({
 				clipboard,
 				linkSaveable,
 				isSelected,
+				verdict,
 				t
 			})
 

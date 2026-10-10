@@ -426,3 +426,45 @@ describe("getPathForUuid against the real expo Paths.join", () => {
 		expect(join).toHaveBeenLastCalledWith(directoryUri, `${uuid}.webp`)
 	})
 })
+
+describe("getThumbnailKind — content verdicts", () => {
+	const file = (name: string) =>
+		({ type: "file", data: { uuid: `u-${name}`, size: 1n, canMakeThumbnail: true, decryptedMeta: { name } } }) as never
+
+	it("grabs no frame from an .mp4 a player found to hold audio alone", () => {
+		expect(getThumbnailKind(file("voice.mp4"), "audio")).toBeNull()
+		expect(getThumbnailKind(file("voice.mp4"), null)).toBe("video")
+	})
+
+	it("grabs no frame from a transport stream on Android, before or after a read found it playable", async () => {
+		vi.resetModules()
+
+		const { Platform } = await import("react-native")
+
+		Platform.OS = "android"
+
+		try {
+			const { getThumbnailKind: androidKind } = await import("@/lib/thumbnailsHelpers")
+
+			expect(androidKind(file("clip.m2ts"), null)).toBeNull()
+			expect(androidKind(file("capture.ts"), null)).toBeNull()
+			expect(androidKind(file("clip.m2ts"), "transportStream")).toBeNull()
+			expect(androidKind(file("capture.ts"), "transportStream")).toBeNull()
+			expect(androidKind(file("clip.mp4"), null)).toBe("video")
+		} finally {
+			Platform.OS = "ios"
+			vi.resetModules()
+		}
+	})
+})
+
+describe("getThumbnailKind — transport streams on iOS", () => {
+	const file = (name: string) =>
+		({ type: "file", data: { uuid: `u-${name}`, size: 1n, canMakeThumbnail: true, decryptedMeta: { name } } }) as never
+
+	it("never grabs a frame: a stream is no video there", () => {
+		expect(getThumbnailKind(file("capture.ts"), "transportStream")).toBeNull()
+		expect(getThumbnailKind(file("clip.m2ts"), "transportStream")).toBeNull()
+		expect(getThumbnailKind(file("clip.mp4"), null)).toBe("video")
+	})
+})

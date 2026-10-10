@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback, type RefObject } from "react"
 import type { DriveItem, DriveItemFileExtracted, DriveItemDirectoryExtracted } from "@/types"
 import thumbnails from "@/lib/thumbnails"
 import { getPath } from "@/lib/thumbnailsHelpers"
-import { run, runEffect } from "@filen/shared"
+import { run, runEffect, type ContentVerdict } from "@filen/shared"
 import Image from "@/components/ui/image"
 import { FileIcon, DirectoryIcon } from "@/components/itemIcons"
 import { DirColor } from "@filen/sdk-rs"
@@ -12,6 +12,7 @@ import useHttpStore from "@/stores/useHttp.store"
 import { useFocusEffect } from "expo-router"
 import logger from "@/lib/logger"
 import { isFileItem } from "@/features/drive/driveSelectors"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
 
 const MAX_ERROR_RETRIES = 3
 const MAX_GENERATE_RETRIES = 3
@@ -41,12 +42,14 @@ const DirectoryThumbnail = ({ item, size, className }: { item: DriveItemDirector
 
 const FileThumbnailWithGenerate = ({
 	item,
+	verdict,
 	size,
 	className,
 	contentFit,
 	target = "Cell"
 }: {
 	item: DriveItemFileExtracted
+	verdict: ContentVerdict | null
 	size: ThumbnailSize
 	className?: string
 	contentFit?: React.ComponentProps<typeof Image>["contentFit"]
@@ -86,7 +89,7 @@ const FileThumbnailWithGenerate = ({
 			// Settled by the lib for this session — a sync Set read; the verdict disappears on the
 			// online flip, after which the next entry point regenerates.
 			thumbnails.isUnavailable(item.data.uuid) ||
-			!thumbnails.canGenerate(item) ||
+			!thumbnails.canGenerate(item, verdict) ||
 			AppState.currentState !== "active"
 		) {
 			return
@@ -155,7 +158,7 @@ const FileThumbnailWithGenerate = ({
 
 			return
 		}
-	}, [item, setLocalPath, target])
+	}, [item, verdict, setLocalPath, target])
 
 	const generateRef = useRef(generate)
 
@@ -266,6 +269,7 @@ const FileThumbnailWithGenerate = ({
 			<FileIcon
 				name={item.data.decryptedMeta?.name ?? ""}
 				mime={item.data.decryptedMeta?.mime}
+				verdict={verdict}
 				width={size.icon}
 				height={size.icon}
 				className={className}
@@ -288,17 +292,20 @@ const FileThumbnailWithGenerate = ({
 
 const FileThumbnail = ({
 	item,
+	verdict: heldVerdict,
 	size,
 	className,
 	contentFit,
 	target
 }: {
 	item: DriveItemFileExtracted
+	verdict?: ContentVerdict | null
 	size: ThumbnailSize
 	className?: string
 	contentFit?: React.ComponentProps<typeof Image>["contentFit"]
 	target?: RenderTarget
 }) => {
+	const verdict = heldVerdict === undefined ? (fileKindVerdicts.get(item.data.uuid) ?? null) : heldVerdict
 	const [localPath] = useRecyclingState<string | null>(() => (thumbnails.hasThumbnail(item.data.uuid) ? getPath(item) : null), [item.data.uuid])
 
 	const [didFail, setDidFail] = useRecyclingState<boolean>(false, [item.data.uuid])
@@ -334,12 +341,13 @@ const FileThumbnail = ({
 	// keeps a generator mounted for a thumbnail generated in-cell before a rename to a non-media name.
 	if (
 		thumbnails.isUnavailable(item.data.uuid) ||
-		(!source && !thumbnails.hasThumbnail(item.data.uuid) && !thumbnails.canGenerate(item))
+		(!source && !thumbnails.hasThumbnail(item.data.uuid) && !thumbnails.canGenerate(item, verdict))
 	) {
 		return (
 			<FileIcon
 				name={item.data.decryptedMeta?.name ?? ""}
 				mime={item.data.decryptedMeta?.mime}
+				verdict={verdict}
 				width={size.icon}
 				height={size.icon}
 				className={className}
@@ -350,6 +358,7 @@ const FileThumbnail = ({
 	return (
 		<FileThumbnailWithGenerate
 			item={item}
+			verdict={verdict}
 			size={size}
 			className={className}
 			contentFit={contentFit}
@@ -358,14 +367,18 @@ const FileThumbnail = ({
 	)
 }
 
+// `verdict`: the file's content verdict as its row holds it (useFileKindVerdict), so the icon and the thumbnail
+// gate follow a change; the store's at render when absent.
 const Thumbnail = ({
 	item,
+	verdict,
 	size,
 	className,
 	contentFit,
 	target
 }: {
 	item: DriveItem
+	verdict?: ContentVerdict | null
 	size: ThumbnailSize
 	className?: string
 	contentFit?: React.ComponentProps<typeof Image>["contentFit"]
@@ -375,6 +388,7 @@ const Thumbnail = ({
 		return (
 			<FileThumbnail
 				item={item}
+				verdict={verdict}
 				size={size}
 				className={className}
 				contentFit={contentFit}

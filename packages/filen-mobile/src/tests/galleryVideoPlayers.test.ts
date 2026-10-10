@@ -3,21 +3,34 @@ import { vi, describe, it, expect, beforeEach } from "vitest"
 // ─── Module boundary mocks ───────────────────────────────────────────────────
 
 vi.mock("expo-video", () => ({
-	createVideoPlayer: vi.fn(() => ({
-		loop: true,
-		staysActiveInBackground: true,
-		play: vi.fn(),
-		pause: vi.fn(),
-		release: vi.fn()
-	}))
+	createVideoPlayer: vi.fn(() => {
+		const listeners = new Map<string, (payload: unknown) => void>()
+
+		return {
+			loop: true,
+			staysActiveInBackground: true,
+			status: "readyToPlay",
+			listeners,
+			play: vi.fn(),
+			pause: vi.fn(),
+			release: vi.fn(),
+			addListener: vi.fn((event: string, listener: (payload: unknown) => void) => {
+				listeners.set(event, listener)
+			})
+		}
+	})
 }))
 
 // ─── Actual import ───────────────────────────────────────────────────────────
 
 import { createVideoPlayer } from "expo-video"
 import { GalleryVideoPlayers, MAX_GALLERY_VIDEO_PLAYERS } from "@/components/drivePreview/galleryVideoPlayers"
+import fileKindVerdicts from "@/lib/fileKindVerdicts"
 
 type MockPlayer = {
+	listeners: Map<string, (payload: unknown) => void>
+	addListener: ReturnType<typeof vi.fn>
+	status: string
 	loop: boolean
 	staysActiveInBackground: boolean
 	play: ReturnType<typeof vi.fn>
@@ -49,6 +62,33 @@ describe("galleryVideoPlayers", () => {
 		expect(player.loop).toBe(false)
 		expect(player.staysActiveInBackground).toBe(false)
 		expect(player.play).toHaveBeenCalledTimes(1)
+	})
+
+	it("keeps what a drive file's load found about its kind, and listens for nothing without one", () => {
+		const voice = manager.acquire({
+			key: "voice",
+			fileUrl: "http://localhost/voice.mp4",
+			file: { uuid: "voice-uuid", name: "voice.mp4", mime: null, size: 10 }
+		}) as unknown as MockPlayer
+
+		voice.listeners.get("sourceLoad")?.({ availableVideoTracks: [], availableAudioTracks: [{}], duration: 60 })
+
+		expect(fileKindVerdicts.get("voice-uuid")).toBe("audio")
+
+		const failed = manager.acquire({
+			key: "failed",
+			fileUrl: "http://localhost/failed.mp4",
+			file: { uuid: "failed-uuid", name: "failed.mp4", mime: null, size: 10 }
+		}) as unknown as MockPlayer
+
+		failed.status = "error"
+		failed.listeners.get("sourceLoad")?.({ availableVideoTracks: [], availableAudioTracks: [{}], duration: 60 })
+
+		expect(fileKindVerdicts.get("failed-uuid")).toBeUndefined()
+
+		const external = manager.acquire({ key: "external", fileUrl: "http://localhost/x.mp4" }) as unknown as MockPlayer
+
+		expect(external.addListener).not.toHaveBeenCalled()
 	})
 
 	it("returns the SAME player on re-acquire without recreating or replaying", () => {

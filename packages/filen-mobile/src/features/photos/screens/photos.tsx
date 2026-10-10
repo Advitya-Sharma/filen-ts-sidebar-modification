@@ -25,6 +25,7 @@ import DateRange from "@/features/photos/components/dateRange"
 import { isPhotoGridItem } from "@/features/photos/utils"
 import { LazyWrapper } from "@/components/lazyWrapper"
 import logger from "@/lib/logger"
+import { useFileKindVerdicts } from "@/hooks/useFileKindVerdict"
 
 const Photos = () => {
 	const { t } = useTranslation()
@@ -61,9 +62,12 @@ const Photos = () => {
 	// mount before the destination has been resolved.
 	const destinationUnavailable = config.enabled && config.remoteDir !== null && !destination.loading && !destination.usable
 
+	// Filtered again, with no refetch, when a content verdict changes what a file is.
+	const verdicts = useFileKindVerdicts()
+
 	const items = driveItemsQuery.data
 		? itemSorter.sortItems(
-				driveItemsQuery.data.filter(isPhotoGridItem),
+				driveItemsQuery.data.filter(item => isPhotoGridItem(item, verdicts.get(item.data.uuid) ?? null)),
 				"captureDesc"
 			)
 		: []
