@@ -601,6 +601,16 @@ describe("list_directory", () => {
 
 		expect(result).toMatchObject({ ok: false, invalid: true })
 	})
+
+	// A later turn knows the directory's path from the reply but no longer its handle.
+	it("lists a path that resolves beside a guessed handle, and still refuses the guess alone or beside no directory", async () => {
+		expect(json(await call("list_directory", { handle: "f9", path: "/Docs", offset: 0 }))).toMatchObject({
+			directory: { handle: "d1", path: "/Docs" },
+			items: [{ name: "Invoice_2024.pdf" }, { name: "song.mp3" }]
+		})
+		expect(await call("list_directory", { handle: "f9" })).toMatchObject({ ok: false, invalid: true })
+		expect(await call("list_directory", { handle: "f9", path: "/Nowhere" })).toMatchObject({ ok: false, invalid: true })
+	})
 })
 
 describe("get_item_info", () => {

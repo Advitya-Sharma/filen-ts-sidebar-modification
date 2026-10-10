@@ -157,6 +157,18 @@ describe("FakeApp", () => {
 		})
 	})
 
+	it("checks a guessed handle beside a directory's path as left out, like the app, and refuses it otherwise", () => {
+		const app = new FakeApp()
+
+		expect(app.checkHandles({ tool: "list_directory", args: { handle: "f99", path: "/Documents/Invoices" } })).toBeNull()
+		expect(app.checkHandles({ tool: "list_directory", args: { handle: "f99", path: "/Nowhere" } })).toMatchObject({
+			ok: false,
+			invalid: true
+		})
+		expect(app.checkHandles({ tool: "list_directory", args: { handle: "f99" } })).toMatchObject({ ok: false, invalid: true })
+		expect(app.checkHandles({ tool: "get_item_info", args: { handle: "f99", path: "/Documents" } })).toMatchObject({ ok: false })
+	})
+
 	it("plays a playlist from its first track and controls playback", () => {
 		const app = new FakeApp()
 

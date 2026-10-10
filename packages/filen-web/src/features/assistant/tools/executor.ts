@@ -24,6 +24,7 @@ import {
 	entityName,
 	freshDriveItem,
 	noteTitle,
+	resolveDrivePath,
 	resolveHandle,
 	type ToolAdapter,
 	type ToolScope
@@ -217,6 +218,25 @@ function isBlank(value: unknown): boolean {
 	return (typeof value === "string" && value.trim().length === 0) || (Array.isArray(value) && value.length === 0)
 }
 
+// Whether `path` names a directory of the user's own drive.
+async function isDrivePath(path: unknown): Promise<boolean> {
+	if (typeof path !== "string" || isBlank(path)) {
+		return false
+	}
+
+	try {
+		await resolveDrivePath(path)
+
+		return true
+	} catch (e) {
+		if (e instanceof AssistantToolError) {
+			return false
+		}
+
+		throw e
+	}
+}
+
 // Checks a tool needs before its confirmation card shows, so the user never confirms a call that then fails.
 const PRECHECKS: Partial<Record<AssistantToolName, (scope: ToolScope, input: Record<string, unknown>) => Promise<string | null>>> = {
 	draft_chat_message: draftChatProblem
@@ -285,9 +305,30 @@ export function createAssistantToolExecutor(): ToolExecutor {
 			}
 
 			const handles: string[] = []
+			let superseded = false
 
 			for (const handle of Array.isArray(value) ? value.map(String) : [String(value)]) {
-				const entity = await resolveHandle(scope, handle, allowed)
+				const entity = await resolveHandle(scope, handle, allowed).catch(async (e: unknown) => {
+					// A path beside the handle decides in the adapter (list_directory), so a guessed handle there is left
+					// out rather than refused: a later turn knows a directory's path from the reply, seldom its handle.
+					if (
+						key === "handle" &&
+						!isConsequentialTool(tool) &&
+						e instanceof AssistantToolError &&
+						(await isDrivePath(args["path"]))
+					) {
+						return null
+					}
+
+					throw e
+				})
+
+				if (entity === null) {
+					superseded = true
+
+					break
+				}
+
 				const name = entityName(entity)
 
 				// The trash is read-only to the assistant: a move or a favorite there would restore or change what the
@@ -299,6 +340,12 @@ export function createAssistantToolExecutor(): ToolExecutor {
 
 				handles.push(resolved)
 				targets.push({ handle: resolved, name, ...(entity.kind === "chat" ? { recipients: chatRecipients(entity.chat) } : {}) })
+			}
+
+			if (superseded) {
+				delete args["handle"]
+
+				continue
 			}
 
 			args[key] = Array.isArray(value) ? handles : handles[0]

@@ -254,6 +254,20 @@ export class FakeApp {
 		return found
 	}
 
+	private isDirectoryPath(path: string): boolean {
+		try {
+			this.directoryAt(path)
+
+			return true
+		} catch (e) {
+			if (e instanceof CallError) {
+				return false
+			}
+
+			throw e
+		}
+	}
+
 	// Like the app: a path wins, being unambiguous, but one that names nothing (a model's guess beside a valid
 	// handle, e.g. a shared directory's name as a path) leaves the handle to decide.
 	private directoryAtOr(path: string, handle: string | undefined): DriveItem {
@@ -319,6 +333,16 @@ export class FakeApp {
 		try {
 			for (const key of ["handle", "handles", "parent", "destination", "chat", "playlist"]) {
 				const value = args[key]
+
+				// Like the app: a path beside the handle decides, so a guessed handle there is left out, not refused.
+				if (
+					key === "handle" &&
+					tool === "list_directory" &&
+					typeof args["path"] === "string" &&
+					this.isDirectoryPath(args["path"])
+				) {
+					continue
+				}
 
 				for (const handle of typeof value === "string" ? [value] : Array.isArray(value) ? value.map(String) : []) {
 					this.known(handle, kindOf(key, handle))
