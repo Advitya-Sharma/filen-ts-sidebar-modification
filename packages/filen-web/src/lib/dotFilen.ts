@@ -1,5 +1,6 @@
-import type { DirMeta, SocketEvent } from "@filen/sdk-rs"
+import type { Dir, DirMeta, SocketEvent } from "@filen/sdk-rs"
 import { sdkApi } from "@/lib/sdk/client"
+import { accountQueryGet } from "@/queries/account"
 import { runOp } from "@/lib/actions/outcome"
 import { registerSocketHandler } from "@/lib/sdk/socket"
 import { narrowItem } from "@/features/drive/lib/item"
@@ -7,10 +8,10 @@ import { isPhotoCandidate } from "@/features/photos/lib/predicate"
 import { DOT_FILEN_DIR_NAME } from "@/lib/dotFilen.logic"
 
 // The app's own directories under `.filen` at the drive root (Playlists, Chat Uploads, Videos), resolved once
-// per session and shared by every feature. createDirectory is find-or-create, idempotent and case-insensitive
-// server-side, so a lookup is one call per level and needs no listing. A read that must not create anything finds
-// instead: `.filen` by an existence check and then the same find-or-create, which returns the existing directory (the
-// drive root is never listed for it), a subdirectory by listing `.filen`, one small request that takes no drive lock.
+// per session and shared by every feature. Each level is found by name hash, one request that lists, decrypts and
+// locks nothing. A read only finds; a write finds first and creates only a missing level. createDirectory is
+// find-or-create, idempotent and case-insensitive server-side, so concurrent creates elsewhere still end on one
+// directory.
 
 export { DOT_FILEN_DIR_NAME } from "@/lib/dotFilen.logic"
 
@@ -23,6 +24,11 @@ interface Memo {
 	// A find in flight; a find that comes back empty leaves nothing behind, so the next find or create asks again.
 	finding: Promise<string | null> | null
 	uuid: string | null
+	// Created by this session rather than found.
+	created: boolean
+	// The last find came back empty, with no restore, create or socket gap since: a write creates without finding
+	// again (createDirectory being find-or-create, a stale answer costs nothing). Reads still find.
+	absent: boolean
 	pending: number
 	generation: number
 }
@@ -32,6 +38,8 @@ function emptyMemo(): Memo {
 		promise: null,
 		finding: null,
 		uuid: null,
+		created: false,
+		absent: false,
 		pending: 0,
 		generation: 0
 	}
@@ -90,7 +98,7 @@ function memoize(memo: Memo, resolve: () => Promise<string>): Promise<string> {
 	return promise
 }
 
-// A found directory is remembered like a created one; absence never is.
+// A found directory is remembered like a created one; absence only for a write's sake (Memo.absent).
 function memoizeFind(memo: Memo, find: () => Promise<string | null>): Promise<string | null> {
 	if (memo.promise !== null) {
 		return memo.promise
@@ -106,9 +114,13 @@ function memoizeFind(memo: Memo, find: () => Promise<string | null>): Promise<st
 
 	const finding = find()
 		.then(uuid => {
-			if (uuid !== null && generation === memo.generation && memo.promise === null) {
-				memo.uuid = uuid
-				memo.promise = Promise.resolve(uuid)
+			if (generation === memo.generation && memo.promise === null) {
+				if (uuid === null) {
+					memo.absent = true
+				} else {
+					memo.uuid = uuid
+					memo.promise = Promise.resolve(uuid)
+				}
 			}
 
 			return uuid
@@ -126,41 +138,52 @@ function memoizeFind(memo: Memo, find: () => Promise<string | null>): Promise<st
 	return finding
 }
 
-// Creates when no find is out; after one that came back empty, creates.
-function memoizeCreate(memo: Memo, create: () => Promise<string>): Promise<string> {
-	const finding = memo.promise === null ? memo.finding : null
-
-	return finding === null ? memoize(memo, create) : finding.then(found => found ?? memoize(memo, create))
+// `name` under `parent` (null: the drive root) when it exists, creating nothing.
+async function findLevel(parent: string | null, name: string): Promise<string | null> {
+	return (await runOp(sdkApi.findDirectoryUuid(parent, name))) ?? null
 }
 
-// `name` under `parent` (null: the drive root) when it exists, creating nothing. Names compare case-insensitively,
-// as the server's do.
-async function findLevel(parent: string | null, name: string): Promise<string | null> {
-	if (parent !== null) {
-		const wanted = name.toLowerCase()
-		const { dirs } = await runOp(sdkApi.listDirectory({ kind: "uuid", uuid: parent }))
-
-		return dirs.find(dir => dir.meta.type === "decoded" && dir.meta.data.name.toLowerCase() === wanted)?.uuid ?? null
-	}
-
-	if (!(await runOp(sdkApi.directoryExists(parent, name)))) {
-		return null
-	}
-
+async function createLevel(parent: string | null, name: string): Promise<string> {
 	return (await runOp(sdkApi.createDirectory(parent, name))).uuid
 }
 
+// Finds, then creates what's missing. After a find that came back empty, and under a `.filen` this session created,
+// it creates straight away (createDirectory returns one made since elsewhere).
+function memoizeCreate(memo: Memo, name: string, underDotFilen: boolean): Promise<string> {
+	const resolve = async (find: boolean): Promise<string> => {
+		const generation = memo.generation
+		const parent = underDotFilen ? await dotFilenUuid() : null
+		const found = find && !memo.absent && !(underDotFilen && dotFilen.created) ? await findLevel(parent, name) : null
+
+		if (found !== null) {
+			return found
+		}
+
+		const uuid = await createLevel(parent, name)
+
+		if (generation === memo.generation) {
+			memo.created = true
+		}
+
+		return uuid
+	}
+
+	const finding = memo.promise === null ? memo.finding : null
+
+	if (finding !== null) {
+		return finding.then(found => found ?? memoize(memo, () => resolve(false)))
+	}
+
+	return memoize(memo, () => resolve(true))
+}
+
 function dotFilenUuid(): Promise<string> {
-	return memoizeCreate(dotFilen, async () => (await runOp(sdkApi.createDirectory(null, DOT_FILEN_DIR_NAME))).uuid)
+	return memoizeCreate(dotFilen, DOT_FILEN_DIR_NAME, false)
 }
 
 // `.filen/<name>`, created when missing, memoized until forgotten.
 export function getDotFilenSubdir(name: string): Promise<string> {
-	return memoizeCreate(subdirMemo(name), async () => {
-		const parent = await dotFilenUuid()
-
-		return (await runOp(sdkApi.createDirectory(parent, name))).uuid
-	})
+	return memoizeCreate(subdirMemo(name), name, true)
 }
 
 // `.filen/<name>` when it exists, else null; never creates either level. For reads: a feature's directory is
@@ -198,6 +221,8 @@ function clearMemo(memo: Memo): void {
 	memo.promise = null
 	memo.finding = null
 	memo.uuid = null
+	memo.created = false
+	memo.absent = false
 }
 
 function notifyForgotten(name: string): void {
@@ -311,6 +336,64 @@ function forgetDirectory({ uuid, parent, renamed }: { uuid: string; parent: stri
 	}
 }
 
+function isDotFilenAtRoot(dir: Dir): boolean {
+	if (!keepsName(dir.meta, DOT_FILEN_DIR_NAME)) {
+		return false
+	}
+
+	const root = accountQueryGet()?.rootDirUuid
+
+	return root === undefined || dir.parent === root
+}
+
+// The subdirectory names `dir` could be one of: under the known `.filen`, or, while `.filen` is still being looked
+// up, under any parent but the drive root (only those lookups are concerned).
+function subdirNamesFor(dir: Dir): { name: string; memo: Memo }[] {
+	const underDotFilen = dotFilen.uuid !== null && dir.parent === dotFilen.uuid
+	const mayBeUnderDotFilen = dotFilen.uuid === null && dotFilen.pending > 0 && dir.parent !== accountQueryGet()?.rootDirUuid
+
+	if (!underDotFilen && !mayBeUnderDotFilen) {
+		return []
+	}
+
+	return [...new Set([...subdirs.keys(), ...forgetListeners.keys()])]
+		.filter(name => keepsName(dir.meta, name))
+		.map(name => ({ name, memo: subdirMemo(name) }))
+		.filter(({ memo }) => underDotFilen || memo.pending > 0)
+}
+
+// A restored `.filen` or subdirectory may now stand beside the one a memo names (created while it sat in the trash)
+// and holds what was saved into it, so the next lookup finds again and features re-read.
+function restoreDirectory(dir: Dir): void {
+	if (isDotFilenAtRoot(dir)) {
+		forgetAll()
+
+		return
+	}
+
+	for (const { name, memo } of subdirNamesFor(dir)) {
+		clearMemo(memo)
+		notifyForgotten(name)
+	}
+}
+
+// A `.filen` or subdirectory created elsewhere: an empty find from before no longer holds.
+function createdElsewhere(dir: Dir): void {
+	if (isDotFilenAtRoot(dir)) {
+		dotFilen.absent = false
+
+		for (const memo of subdirs.values()) {
+			memo.absent = false
+		}
+
+		return
+	}
+
+	for (const { memo } of subdirNamesFor(dir)) {
+		memo.absent = false
+	}
+}
+
 function anythingKnown(): boolean {
 	return dotFilen.uuid !== null || dotFilen.pending > 0 || [...subdirs.values()].some(memo => memo.uuid !== null || memo.pending > 0)
 }
@@ -377,6 +460,16 @@ export function handleDotFilenDriveEvent(event: Extract<SocketEvent, { type: "dr
 
 			return
 
+		case "folderRestore":
+			restoreDirectory(inner.dir)
+
+			return
+
+		case "folderSubCreated":
+			createdElsewhere(inner.dir)
+
+			return
+
 		case "folderMetadataChanged":
 			forgetDirectory({ uuid: inner.uuid, parent: null, renamed: inner.meta })
 
@@ -394,14 +487,58 @@ export function handleDotFilenDriveEvent(event: Extract<SocketEvent, { type: "dr
 	}
 }
 
+// Events missed in a socket gap (or one that couldn't be decoded) may have trashed, moved or created what the memos
+// say, so every level is found again on its next use. Features re-read on reconnect themselves, so none is told.
+function forgetAfterGap(): void {
+	clearMemo(dotFilen)
+
+	for (const memo of subdirs.values()) {
+		clearMemo(memo)
+	}
+
+	sdkApi.forgetFoundDirectories().catch(() => undefined)
+}
+
+// Set by a drop, so the authSuccess that ends it forgets again what a lookup during the gap remembered. The first
+// authSuccess of a session forgets nothing.
+let sawReconnecting = false
+
+export function handleDotFilenReconnecting(): void {
+	sawReconnecting = true
+
+	forgetAfterGap()
+}
+
+export function handleDotFilenAuthSuccess(): void {
+	if (!sawReconnecting) {
+		return
+	}
+
+	sawReconnecting = false
+
+	forgetAfterGap()
+}
+
 // Called once by the authed shell's socket host.
 export function registerDotFilenSocketHandlers(): () => void {
-	return registerSocketHandler("drive", handleDotFilenDriveEvent)
+	const unregister = [
+		registerSocketHandler("drive", handleDotFilenDriveEvent),
+		registerSocketHandler("driveMalformed", forgetAfterGap),
+		registerSocketHandler("reconnecting", handleDotFilenReconnecting),
+		registerSocketHandler("authSuccess", handleDotFilenAuthSuccess)
+	]
+
+	return () => {
+		for (const off of unregister) {
+			off()
+		}
+	}
 }
 
 // Logout: nothing resolved under the signed-out account survives, and a lookup still in flight answers its own
 // callers only.
 export function resetDotFilen(): void {
+	sawReconnecting = false
 	clearMemo(dotFilen)
 
 	for (const memo of subdirs.values()) {

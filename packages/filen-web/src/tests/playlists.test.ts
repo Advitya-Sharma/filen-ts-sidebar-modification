@@ -7,19 +7,21 @@ import { testUuid } from "@/tests/support/uuid"
 const DOT_FILEN_UUID = testUuid("dotfilen")
 const PLAYLISTS_DIR_UUID = testUuid("playlistsdir")
 
-const { createDirectory, listDirectory, downloadFileBytes, uploadFileBytes, getFile, deleteFilePermanently } = vi.hoisted(() => ({
-	createDirectory: vi.fn(),
-	listDirectory: vi.fn(),
-	downloadFileBytes: vi.fn(),
-	uploadFileBytes: vi.fn(),
-	getFile: vi.fn(),
-	deleteFilePermanently: vi.fn()
-}))
+const { createDirectory, findDirectoryUuid, listDirectory, downloadFileBytes, uploadFileBytes, getFile, deleteFilePermanently } =
+	vi.hoisted(() => ({
+		createDirectory: vi.fn(),
+		findDirectoryUuid: vi.fn(),
+		listDirectory: vi.fn(),
+		downloadFileBytes: vi.fn(),
+		uploadFileBytes: vi.fn(),
+		getFile: vi.fn(),
+		deleteFilePermanently: vi.fn()
+	}))
 
 // Mock boundary matching notesQueries.test.ts/drive.test.ts: the real sdk client module imports a Vite
 // `?worker`, unresolvable under node vitest.
 vi.mock("@/lib/sdk/client", () => ({
-	sdkApi: { createDirectory, listDirectory, downloadFileBytes, uploadFileBytes, getFile, deleteFilePermanently }
+	sdkApi: { createDirectory, findDirectoryUuid, listDirectory, downloadFileBytes, uploadFileBytes, getFile, deleteFilePermanently }
 }))
 
 // A bare, unconfigured QueryClient stands in for the real singleton — same rationale as
@@ -79,18 +81,18 @@ function playlistJsonBytes(playlist: unknown): Uint8Array {
 }
 
 // Every test that reaches the read/write path needs `.filen`/`Playlists` to resolve — wired once here
-// so individual tests only configure the calls they actually care about.
+// so individual tests only configure the calls they actually care about. Both exist, so they are found.
 function mockDirectoryResolve(): void {
-	createDirectory.mockImplementation((parentUuid: string | null, name: string) => {
-		if (name === ".filen") {
-			return Promise.resolve(fakeDir(DOT_FILEN_UUID))
+	findDirectoryUuid.mockImplementation((parentUuid: string | null, name: string) => {
+		if (name === ".filen" && parentUuid === null) {
+			return Promise.resolve(DOT_FILEN_UUID)
 		}
 
 		if (name === "Playlists" && parentUuid === DOT_FILEN_UUID) {
-			return Promise.resolve(fakeDir(PLAYLISTS_DIR_UUID))
+			return Promise.resolve(PLAYLISTS_DIR_UUID)
 		}
 
-		return Promise.reject(new Error(`unexpected createDirectory(${parentUuid ?? "null"}, ${name})`))
+		return Promise.reject(new Error(`unexpected findDirectoryUuid(${parentUuid ?? "null"}, ${name})`))
 	})
 }
 
@@ -106,11 +108,24 @@ describe("getPlaylistsDirectoryUuid", () => {
 		await expect(getPlaylistsDirectoryUuid()).resolves.toBe(PLAYLISTS_DIR_UUID)
 		await expect(getPlaylistsDirectoryUuid()).resolves.toBe(PLAYLISTS_DIR_UUID)
 
-		expect(createDirectory).toHaveBeenCalledTimes(2) // .filen + Playlists, ONCE despite two calls
+		expect(findDirectoryUuid).toHaveBeenCalledTimes(2) // .filen + Playlists, ONCE despite two calls
+		expect(createDirectory).not.toHaveBeenCalled()
+	})
+
+	it("creates only Playlists when `.filen` exists without it", async () => {
+		findDirectoryUuid.mockImplementation((parentUuid: string | null) =>
+			Promise.resolve(parentUuid === null ? DOT_FILEN_UUID : undefined)
+		)
+		createDirectory.mockResolvedValueOnce(fakeDir(PLAYLISTS_DIR_UUID))
+		const { getPlaylistsDirectoryUuid } = await freshPlaylists()
+
+		await expect(getPlaylistsDirectoryUuid()).resolves.toBe(PLAYLISTS_DIR_UUID)
+
+		expect(createDirectory).toHaveBeenCalledExactlyOnceWith(DOT_FILEN_UUID, "Playlists")
 	})
 
 	it("clears the memo on a rejection so the next call retries instead of failing forever", async () => {
-		createDirectory.mockRejectedValueOnce(new Error("network blip"))
+		findDirectoryUuid.mockRejectedValueOnce(new Error("network blip"))
 		const { getPlaylistsDirectoryUuid } = await freshPlaylists()
 
 		await expect(getPlaylistsDirectoryUuid()).rejects.toThrow("network blip")
@@ -397,7 +412,7 @@ describe("the remembered Playlists directory", () => {
 		return { type: "folderMetadataChanged", uuid, meta: { type: "decoded", data: { name } } }
 	}
 
-	// Resolving costs two createDirectory calls (.filen, then Playlists), so four means it re-resolved.
+	// Resolving costs two finds (.filen, then Playlists), so four means it re-resolved.
 	async function resolveCountAfter(act: (modules: Awaited<ReturnType<typeof freshPlaylists>>) => Promise<void>): Promise<number> {
 		mockDirectoryResolve()
 		const modules = await freshPlaylists()
@@ -406,7 +421,7 @@ describe("the remembered Playlists directory", () => {
 		await act(modules)
 		await expect(modules.getPlaylistsDirectoryUuid()).resolves.toBe(PLAYLISTS_DIR_UUID)
 
-		return createDirectory.mock.calls.length
+		return findDirectoryUuid.mock.calls.length
 	}
 
 	it.each<{ name: string; inner: DriveEvent }>([
@@ -451,11 +466,11 @@ describe("the remembered Playlists directory", () => {
 	function holdFirstLookup(): { release: () => void; fail: () => void } {
 		const gate: { release: () => void; fail: () => void } = { release: () => undefined, fail: () => undefined }
 
-		createDirectory.mockImplementationOnce(
+		findDirectoryUuid.mockImplementationOnce(
 			() =>
 				new Promise((resolve, reject) => {
 					gate.release = () => {
-						resolve(fakeDir(DOT_FILEN_UUID))
+						resolve(DOT_FILEN_UUID)
 					}
 					gate.fail = () => {
 						reject(new Error("network blip"))
@@ -495,7 +510,7 @@ describe("the remembered Playlists directory", () => {
 		await expect(pending).resolves.toBe(PLAYLISTS_DIR_UUID)
 		await expect(getPlaylistsDirectoryUuid()).resolves.toBe(PLAYLISTS_DIR_UUID)
 
-		expect(createDirectory).toHaveBeenCalledTimes(expected)
+		expect(findDirectoryUuid).toHaveBeenCalledTimes(expected)
 	})
 
 	it("keeps the successor's memo when a lookup forgotten mid-flight later fails", async () => {
@@ -511,7 +526,7 @@ describe("the remembered Playlists directory", () => {
 		await expect(forgotten).rejects.toThrow("network blip")
 		await expect(getPlaylistsDirectoryUuid()).resolves.toBe(PLAYLISTS_DIR_UUID)
 
-		expect(createDirectory).toHaveBeenCalledTimes(3) // the held call + one full successor lookup
+		expect(findDirectoryUuid).toHaveBeenCalledTimes(3) // the held call + one full successor lookup
 	})
 
 	const goneListing: ErrorDTO = {

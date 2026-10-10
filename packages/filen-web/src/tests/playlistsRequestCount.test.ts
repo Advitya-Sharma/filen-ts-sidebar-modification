@@ -3,27 +3,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { focusManager, onlineManager } from "@tanstack/react-query"
-import type { Dir, File as SdkFile, SocketEvent, UuidStr } from "@filen/sdk-rs"
+import type { File as SdkFile, SocketEvent, UuidStr } from "@filen/sdk-rs"
 
-const { createDirectory, listDirectory, downloadFileBytes, uploadFileBytes, subscribeToSocket, socket } = vi.hoisted(() => {
-	// The bridge subscribes once per module life, so the callback it hands over is kept here.
-	const socket: { emit: (event: SocketEvent) => void } = { emit: () => undefined }
+const { createDirectory, findDirectoryUuid, listDirectory, downloadFileBytes, uploadFileBytes, subscribeToSocket, socket } = vi.hoisted(
+	() => {
+		// The bridge subscribes once per module life, so the callback it hands over is kept here.
+		const socket: { emit: (event: SocketEvent) => void } = { emit: () => undefined }
 
-	return {
-		createDirectory: vi.fn(),
-		listDirectory: vi.fn(),
-		downloadFileBytes: vi.fn(),
-		uploadFileBytes: vi.fn(),
-		subscribeToSocket: vi.fn((callback: (event: SocketEvent) => void) => {
-			socket.emit = callback
+		return {
+			createDirectory: vi.fn(),
+			findDirectoryUuid: vi.fn(),
+			listDirectory: vi.fn(),
+			downloadFileBytes: vi.fn(),
+			uploadFileBytes: vi.fn(),
+			subscribeToSocket: vi.fn((callback: (event: SocketEvent) => void) => {
+				socket.emit = callback
 
-			return Promise.resolve()
-		}),
-		socket
+				return Promise.resolve()
+			}),
+			socket
+		}
 	}
-})
+)
 
-vi.mock("@/lib/sdk/client", () => ({ sdkApi: { createDirectory, listDirectory, downloadFileBytes, uploadFileBytes, subscribeToSocket } }))
+vi.mock("@/lib/sdk/client", () => ({
+	sdkApi: { createDirectory, findDirectoryUuid, listDirectory, downloadFileBytes, uploadFileBytes, subscribeToSocket }
+}))
 
 // The same instance backs the provider below AND the write path's cache patches.
 vi.mock("@/queries/client", async () => ({ queryClient: (await import("@/tests/testQueryClient")).createTestQueryClient() }))
@@ -46,10 +51,6 @@ const PLAYLIST_FILE_UUIDS = [FIRST_PLAYLIST_FILE_UUID, testUuid("pl2"), testUuid
 // The first playlist after an edit elsewhere, which rotates its file uuid.
 const EDITED_FILE_UUID = testUuid("pl1edited")
 const EDITED_FILE_UUIDS = [EDITED_FILE_UUID, testUuid("pl2"), testUuid("pl3")]
-
-function fakeDir(uuid: UuidStr): Dir {
-	return { uuid, meta: { type: "decoded", data: { name: uuid } }, timestamp: 0n, color: "default" } as Dir
-}
 
 function fakeJsonFile(uuid: UuidStr, parent: UuidStr = PLAYLISTS_DIR_UUID): SdkFile {
 	return {
@@ -120,8 +121,8 @@ beforeEach(() => {
 	queryClient.clear()
 	vi.clearAllMocks()
 
-	createDirectory.mockImplementation((parentUuid: string | null, name: string) =>
-		Promise.resolve(fakeDir(name === "Playlists" && parentUuid === DOT_FILEN_UUID ? PLAYLISTS_DIR_UUID : DOT_FILEN_UUID))
+	findDirectoryUuid.mockImplementation((parentUuid: string | null, name: string) =>
+		Promise.resolve(name === "Playlists" && parentUuid === DOT_FILEN_UUID ? PLAYLISTS_DIR_UUID : DOT_FILEN_UUID)
 	)
 	listDirectory.mockImplementation(() => Promise.resolve({ dirs: [], files: PLAYLIST_FILE_UUIDS.map(uuid => fakeJsonFile(uuid)) }))
 	downloadFileBytes.mockImplementation((file: SdkFile) => Promise.resolve(playlistBytes(file)))
@@ -145,6 +146,9 @@ describe("usePlaylistsQuery request counts", () => {
 		await mountLoaded()
 
 		expect(counts()).toEqual({ list: 1, download: 3 })
+		// The directory: one find per level, nothing created.
+		expect(findDirectoryUuid).toHaveBeenCalledTimes(2)
+		expect(createDirectory).not.toHaveBeenCalled()
 	})
 
 	it("serves a remount, a window focus and a reconnect from the synced cache", async () => {

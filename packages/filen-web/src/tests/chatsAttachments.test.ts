@@ -4,20 +4,38 @@ import type { File as SdkFile, Dir, FilePublicLink, DirPublicLinkRW, UserInfo } 
 
 // Mock boundary matching upload.test.ts: the real sdk client/query client modules import a Vite
 // `?worker` / touch an OPFS-backed persister, unresolvable/unwanted under node vitest.
-const { createDirectory, uploadFile, getFileLinkStatus, getDirectoryLinkStatus, createFileLink, createDirectoryLink, getUserInfo } =
-	vi.hoisted(() => ({
-		createDirectory: vi.fn<(parentUuid: string | null, name: string) => Promise<Dir>>(),
-		uploadFile:
-			vi.fn<(parentUuid: string | null, transferId: string, file: File, onProgress: (bytes: bigint) => void) => Promise<SdkFile>>(),
-		getFileLinkStatus: vi.fn<(file: unknown) => Promise<FilePublicLink | undefined>>(),
-		getDirectoryLinkStatus: vi.fn<(dir: unknown) => Promise<DirPublicLinkRW | undefined>>(),
-		createFileLink: vi.fn<(file: unknown) => Promise<FilePublicLink>>(),
-		createDirectoryLink: vi.fn<(dir: unknown, onProgress: unknown) => Promise<DirPublicLinkRW>>(),
-		getUserInfo: vi.fn<() => Promise<UserInfo>>()
-	}))
+const {
+	createDirectory,
+	findDirectoryUuid,
+	uploadFile,
+	getFileLinkStatus,
+	getDirectoryLinkStatus,
+	createFileLink,
+	createDirectoryLink,
+	getUserInfo
+} = vi.hoisted(() => ({
+	createDirectory: vi.fn<(parentUuid: string | null, name: string) => Promise<Dir>>(),
+	findDirectoryUuid: vi.fn<(parentUuid: string | null, name: string) => Promise<string | undefined>>(),
+	uploadFile:
+		vi.fn<(parentUuid: string | null, transferId: string, file: File, onProgress: (bytes: bigint) => void) => Promise<SdkFile>>(),
+	getFileLinkStatus: vi.fn<(file: unknown) => Promise<FilePublicLink | undefined>>(),
+	getDirectoryLinkStatus: vi.fn<(dir: unknown) => Promise<DirPublicLinkRW | undefined>>(),
+	createFileLink: vi.fn<(file: unknown) => Promise<FilePublicLink>>(),
+	createDirectoryLink: vi.fn<(dir: unknown, onProgress: unknown) => Promise<DirPublicLinkRW>>(),
+	getUserInfo: vi.fn<() => Promise<UserInfo>>()
+}))
 
 vi.mock("@/lib/sdk/client", () => ({
-	sdkApi: { createDirectory, uploadFile, getFileLinkStatus, getDirectoryLinkStatus, createFileLink, createDirectoryLink, getUserInfo }
+	sdkApi: {
+		createDirectory,
+		findDirectoryUuid,
+		uploadFile,
+		getFileLinkStatus,
+		getDirectoryLinkStatus,
+		createFileLink,
+		createDirectoryLink,
+		getUserInfo
+	}
 }))
 
 vi.mock("@/queries/client", () => ({ queryClient: new QueryClient() }))
@@ -110,6 +128,8 @@ beforeEach(() => {
 	// directory-creation tests can only ever pass in the one order where they run before the memo is
 	// warm — which is why two of them failed under shuffle.
 	resetDotFilen()
+	// A fresh account unless a test says otherwise: neither `.filen` nor Chat Uploads exists yet.
+	findDirectoryUuid.mockResolvedValue(undefined)
 	// Room to spare: the quota pre-flight passes from the cache without a read.
 	queryClient.setQueryData(ACCOUNT_QUERY_KEY, { storageUsed: 0n, maxStorage: 1n << 40n })
 })
@@ -157,6 +177,8 @@ describe("uploadAttachment", () => {
 
 		const outcome = await uploadAttachment(mockBrowserFile(), noop)
 
+		// `.filen` is found missing; the Chat Uploads under a `.filen` just created needs no find.
+		expect(findDirectoryUuid).toHaveBeenCalledExactlyOnceWith(null, ".filen")
 		expect(createDirectory).toHaveBeenNthCalledWith(1, null, ".filen")
 		expect(createDirectory).toHaveBeenNthCalledWith(2, testUuid("dot-filen"), "Chat Uploads")
 		expect(uploadFile).toHaveBeenCalledOnce()
@@ -169,6 +191,21 @@ describe("uploadAttachment", () => {
 		expect(queryClient.getQueryData<UserInfo>(ACCOUNT_QUERY_KEY)?.storageUsed).toBe(1_024n)
 		// Nobody browses the chat-uploads directory, so the upload leaves no listing behind for it.
 		expect(queryClient.getQueryData(driveListingQueryKey({ variant: "drive", uuid: testUuid("chat-uploads") }))).toBeUndefined()
+	})
+
+	it("uploads into an existing .filen/Chat Uploads found by name, creating nothing", async () => {
+		findDirectoryUuid.mockResolvedValueOnce(testUuid("dot-filen")).mockResolvedValueOnce(testUuid("chat-uploads"))
+		uploadFile.mockResolvedValueOnce(mockSdkFile())
+		createFileLink.mockResolvedValueOnce(mockFilePublicLink())
+
+		expect((await uploadAttachment(mockBrowserFile(), noop)).status).toBe("success")
+
+		expect(findDirectoryUuid.mock.calls).toEqual([
+			[null, ".filen"],
+			[testUuid("dot-filen"), "Chat Uploads"]
+		])
+		expect(createDirectory).not.toHaveBeenCalled()
+		expect(uploadFile.mock.calls[0]?.[0]).toBe(testUuid("chat-uploads"))
 	})
 
 	it("creates the link straight away, with no link-status read, for the just-uploaded file", async () => {
@@ -231,6 +268,7 @@ describe("uploadAttachment", () => {
 		])
 
 		expect(createDirectory).toHaveBeenCalledTimes(2)
+		expect(findDirectoryUuid).toHaveBeenCalledOnce()
 		expect(uploadFile.mock.calls.map(call => call[0])).toEqual([
 			testUuid("chat-uploads"),
 			testUuid("chat-uploads"),

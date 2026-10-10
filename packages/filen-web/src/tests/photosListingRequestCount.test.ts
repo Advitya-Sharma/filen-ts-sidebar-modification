@@ -45,6 +45,7 @@ import { handleDriveEvent } from "@/features/drive/lib/socketHandlers"
 import { socketAuthenticated, socketDropped } from "@/lib/sdk/socketSession"
 import { testUuid } from "@/tests/support/uuid"
 import { noteDotFilenFile } from "@/lib/dotFilen"
+import { noteFoundDir } from "@/workers/parentDir"
 import { recordFileKindVerdict, resetFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 
 function mockDir(uuid: UuidStr, parent: UuidStr): Dir {
@@ -477,6 +478,21 @@ describe("photos listing socket scoping", () => {
 		await fire({ type: "fileNew", file: mockFile(UNLISTED, C) })
 
 		expect(isOutsidePhotosRoot).toHaveBeenCalledWith(root, [C])
+		expect(walks()).toBe(1)
+	})
+
+	it("an image chat attachment in a `.filen/Chat Uploads` found by name does not walk", async () => {
+		const dotFilen = crypto.randomUUID()
+		const chatUploads = crypto.randomUUID()
+
+		// What the worker's findDirectoryUuid notes for the two levels it found.
+		noteFoundDir(dotFilen, DRIVE_ROOT)
+		noteFoundDir(chatUploads, dotFilen)
+		await mountRead()
+
+		await fire({ type: "fileNew", file: mockFile(UNLISTED, chatUploads, "image.jpg") })
+
+		expect(isOutsidePhotosRoot).toHaveBeenCalledWith(root, [chatUploads])
 		expect(walks()).toBe(1)
 	})
 

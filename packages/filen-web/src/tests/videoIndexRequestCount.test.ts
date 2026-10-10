@@ -13,9 +13,9 @@ const counts = vi.hoisted(() => ({
 	walks: 0,
 	lastEventIds: 0,
 	getFile: 0,
-	directoryExists: 0,
+	findDirectoryUuid: 0,
 	createDirectory: 0,
-	// `.filen` listed to find its Videos directory; listDirectory counts the Videos directory's own listings.
+	// `.filen` listed, which finding its Videos directory never needs; listDirectory counts the Videos directory's.
 	listDotFilen: 0,
 	listDirectory: 0,
 	downloads: 0,
@@ -65,7 +65,7 @@ function requests(): number {
 		counts.walks +
 		counts.lastEventIds +
 		counts.getFile +
-		counts.directoryExists +
+		counts.findDirectoryUuid +
 		counts.createDirectory +
 		counts.listDotFilen +
 		counts.listDirectory +
@@ -154,10 +154,14 @@ function startWorker(): void {
 
 			return Promise.resolve(null)
 		},
-		directoryExists: (parent: string | null) => {
-			counts.directoryExists++
+		findDirectoryUuid: (parent: string | null) => {
+			counts.findDirectoryUuid++
 
-			return Promise.resolve(parent === null ? existing !== "none" : existing === "both")
+			if (parent === null) {
+				return Promise.resolve(existing === "none" ? undefined : DOT_FILEN)
+			}
+
+			return Promise.resolve(existing === "both" ? VIDEOS_DIR : undefined)
 		},
 		createDirectory: (parent: string | null, name: string) => {
 			counts.createDirectory++
@@ -510,7 +514,7 @@ describe("walk sharing", () => {
 
 		await open()
 
-		expect(counts).toMatchObject({ lastEventIds: 1, directoryExists: 1, createDirectory: 0, listDirectory: 0, walks: 0 })
+		expect(counts).toMatchObject({ lastEventIds: 1, findDirectoryUuid: 1, createDirectory: 0, listDirectory: 0, walks: 0 })
 		expect(existing).toBe("none")
 	})
 
@@ -522,8 +526,8 @@ describe("walk sharing", () => {
 
 		await open()
 
-		// The find-or-create of `.filen` returns the existing directory, whose listing has no Videos directory.
-		expect(counts).toMatchObject({ lastEventIds: 1, directoryExists: 1, createDirectory: 1, listDotFilen: 1, listDirectory: 0 })
+		// One find per level, no listing of `.filen`.
+		expect(counts).toMatchObject({ lastEventIds: 1, findDirectoryUuid: 2, createDirectory: 0, listDotFilen: 0, listDirectory: 0 })
 		expect(existing).toBe("dotFilen")
 	})
 
@@ -537,7 +541,8 @@ describe("walk sharing", () => {
 
 		await saveLibraryConfig((doc, stamp) => withLibraryRoot({ doc, dirUuid: rootA, type: "movies", enabled: true, stamp, now: clock }))
 
-		expect(counts).toMatchObject({ createDirectory: 2, uploads: 1 })
+		// The open's empty find stands: both levels are created without finding again.
+		expect(counts).toMatchObject({ findDirectoryUuid: 0, createDirectory: 2, uploads: 1 })
 		expect(existing).toBe("both")
 	})
 

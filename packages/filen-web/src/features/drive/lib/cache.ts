@@ -5,13 +5,16 @@ import type { Dir, AnySharedDir, SharingRole } from "@filen/sdk-rs"
 
 // In-memory only — persistence is deferred. Imported into sdk.worker.ts (the only place that calls
 // listDir/createDir/getDirOptional), so population and cache-first reads live right next to the SDK
-// calls they save: every listing and every directory create populates it; listDirectory/
-// createDirectory/resolveDirectoryName consult it before any getDirOptional round trip
+// calls they save: every listing and every directory create populates it; listDirectory, every
+// create/upload/copy/move parent and resolveDirectoryName consult it before any getDirOptional round trip
 // (cache-first — getDirOptional only on a cold miss, e.g. a deep-linked uuid this tab has never
 // listed). Cleared on every new client adoption (see sdk.worker.ts's adoptClient) so a fresh session
 // never sees a prior account's directories.
 const dirsByUuid = new Map<string, Dir>()
 const namesByUuid = new Map<string, string>()
+// Directories found by name hash (findDirUuid), of which only the uuid and parent are known: enough for
+// classifyUnderRoot, and for a uuid-only parent (workers/parentDir.ts). A cached Dir supersedes its entry.
+const foundParentsByUuid = new Map<string, string>()
 
 // The raw shared-dir handle plus the role under which it was reached — the two arguments
 // listSharedDir needs. A nested shared listing (browsing into a shared directory by uuid) resolves
@@ -37,6 +40,21 @@ export function getCachedName(uuid: string): string | undefined {
 	return namesByUuid.get(uuid)
 }
 
+export function cacheFoundDir(uuid: string, parent: string): void {
+	if (!dirsByUuid.has(uuid)) {
+		foundParentsByUuid.set(uuid, parent)
+	}
+}
+
+export function isFoundDir(uuid: string): boolean {
+	return foundParentsByUuid.has(uuid)
+}
+
+// After a socket gap a found directory may have been trashed or moved unseen.
+export function forgetFoundDirs(): void {
+	foundParentsByUuid.clear()
+}
+
 export type RootMembership = "member" | "nonMember" | "unknown"
 
 // Whether directory `uuid` is `rootUuid` or sits under it, by walking cached parent pointers up to the
@@ -55,14 +73,14 @@ export function classifyUnderRoot(uuid: string, rootUuid: string, driveRootUuid:
 			return "nonMember"
 		}
 
-		const dir = dirsByUuid.get(current)
+		const parent = dirsByUuid.get(current)?.parent ?? foundParentsByUuid.get(current)
 
-		if (dir === undefined) {
+		if (parent === undefined) {
 			return "unknown"
 		}
 
 		seen.add(current)
-		current = dir.parent
+		current = parent
 	}
 
 	return "unknown"
@@ -73,15 +91,16 @@ export function isOutsideRoot(dirUuids: readonly string[], rootUuid: string, dri
 	return dirUuids.every(uuid => classifyUnderRoot(uuid, rootUuid, driveRootUuid) === "nonMember")
 }
 
-// Upserts every dir into both maps — the single population point for listDirectory's returned
-// dirs, createDirectory's created-or-idempotent-existing dir, and resolveOwnedDir's cold
-// getDirOptional fallback. A dir whose meta isn't decodable updates the Dir map only; any name
+// Upserts every dir into both maps — the population point for every Dir the worker sees: listings,
+// creates, renames/moves/trashes/restores, item paths and resolveOwnedDir's cold getDirOptional
+// fallback. A found directory's uuid-only entry gives way to the Dir. A dir whose meta isn't decodable updates the Dir map only; any name
 // cached for it earlier is left in place rather than clobbered with nothing — the name can only
 // become stale if decryption itself regresses mid-session, and a stale-but-real name is a better
 // fallback than reverting the UI to a raw uuid.
 export function cacheDirs(dirs: readonly Dir[]): void {
 	for (const dir of dirs) {
 		dirsByUuid.set(dir.uuid, dir)
+		foundParentsByUuid.delete(dir.uuid)
 
 		const name = extractName(dir)
 		if (name !== undefined) {
@@ -112,6 +131,7 @@ export function sharedDirName(dir: AnySharedDir): string | undefined {
 export function clearDirectoryCache(): void {
 	dirsByUuid.clear()
 	namesByUuid.clear()
+	foundParentsByUuid.clear()
 	sharedDirContextByUuid.clear()
 }
 
@@ -123,5 +143,6 @@ export function evictDirs(uuids: readonly string[]): void {
 	for (const uuid of uuids) {
 		dirsByUuid.delete(uuid)
 		namesByUuid.delete(uuid)
+		foundParentsByUuid.delete(uuid)
 	}
 }

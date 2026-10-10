@@ -109,6 +109,7 @@ import {
 	cacheSharedDirContext,
 	clearDirectoryCache,
 	evictDirs,
+	forgetFoundDirs,
 	getCachedDir,
 	getCachedName,
 	getSharedDirContext,
@@ -153,6 +154,7 @@ import { asByteStream, imageSniffStream } from "@/lib/media/imageSniff"
 import { EarlyCancels } from "@/workers/earlyCancels"
 import { exposeRangePort } from "@/lib/media/rangePort"
 import { WalkCoordinator } from "@/workers/walkCoordinator"
+import { noteFoundDir, resolveParentDir as resolveParentDirFrom } from "@/workers/parentDir"
 import { VideoIndexEngine, type IndexRootConfig } from "@/workers/videoIndex/engine"
 import { opfsSnapshotStore } from "@/workers/videoIndex/snapshotStore"
 import { dirName } from "@/workers/videoIndex/rootIndex.logic"
@@ -836,14 +838,14 @@ function narrowOwnedWalk({ dirs, files }: { dirs: NonRootDirTagged[]; files: Nor
 
 // Cache-first parent resolve shared by createDirectory/moveDirectory/moveFile: `null` maps to
 // client.root() (the only "parent" a create/move can target that isn't itself a real Dir); any other
-// uuid goes through resolveOwnedDir, so concurrent ops into a cold parent share one lookup. Throws when the uuid can't be resolved at all — every caller treats a
+// uuid goes through resolveParentDir, so concurrent ops into a cold parent share one lookup. Throws when the uuid can't be resolved at all — every caller treats a
 // missing parent as a hard failure; there is no sensible partial result for "create/move into a
 // directory that doesn't exist".
 async function resolveNormalDirParent(c: Client, parentUuid: string | null): Promise<AnyNormalDir> {
 	if (parentUuid === null) {
 		return c.root()
 	}
-	const found = await resolveOwnedDir(c, parentUuid)
+	const found = await resolveParentDir(c, parentUuid)
 	if (found === undefined) {
 		throw new Error(`${PARENT_NOT_FOUND_PREFIX}${parentUuid}`)
 	}
@@ -888,8 +890,8 @@ function lookupsFor(c: Client): ClientLookups {
 	return lookups
 }
 
-// Cache-first owned-dir resolve (listDirectory's uuid case, the breadcrumb's name lookup, every
-// create/move/upload parent): concurrent asks for the same cold uuid share one getDirOptional. A
+// Cache-first owned-dir resolve (the breadcrumb's name lookup, and through resolveParentDir every listing,
+// create, upload, copy and move parent not found by name): concurrent asks for the same cold uuid share one getDirOptional. A
 // malformed uuid (a hand-edited URL) is simply not found: the SDK would reject it as a conversion
 // failure, which reads as a generic error instead of the not-found path.
 async function resolveOwnedDir(c: Client, uuid: string): Promise<Dir | undefined> {
@@ -912,6 +914,10 @@ async function resolveOwnedDir(c: Client, uuid: string): Promise<Dir | undefined
 
 		return dir
 	})
+}
+
+function resolveParentDir(c: Client, uuid: string): Promise<AnyNormalDir | undefined> {
+	return resolveParentDirFrom(uuid, dirUuid => resolveOwnedDir(c, dirUuid))
 }
 
 // The walk's ancestors are exactly the crumbs a reveal or Location click then renders, so caching them
@@ -1272,12 +1278,10 @@ const api = {
 					// roots, so its dirs/files narrow to plain directory/file arms.
 					return c.listLinkedItems()
 				case "uuid": {
-					// Cache-first: a directory just listed as part of its own parent's listing is
-					// already held here, so browsing into it costs zero extra round trips.
-					// getDirOptional (not listDir({uuid})) is the cold-miss fallback — a plain
-					// `{uuid}` object is structurally a Root, and a bare string isn't assignable to
-					// the branded UuidStr AnyNormalDir needs.
-					const dir = await resolveOwnedDir(c, target.uuid)
+					// Cache-first: a directory just listed as part of its own parent's listing, or
+					// found by findDirectoryUuid, is already held here, so browsing into it costs zero
+					// extra round trips. getDirOptional is the cold-miss fallback for any other uuid.
+					const dir = await resolveParentDir(c, target.uuid)
 					if (dir === undefined) {
 						throw new Error(`${DIRECTORY_NOT_FOUND_PREFIX}${target.uuid}`)
 					}
@@ -1319,12 +1323,23 @@ const api = {
 		cacheDirs([created])
 		return created
 	},
-	// Whether a directory named `name` sits under `parentUuid` (null: the drive root): one request by name hash, for
-	// a read that must not create what it looks for.
-	async directoryExists(parentUuid: string | null, name: string): Promise<boolean> {
+	// The uuid of the directory named `name` under `parentUuid` (null: the drive root), undefined when absent or
+	// trashed: one request by name hash, with no listing, decryption, drive lock or parent lookup. What it finds is a
+	// parent from then on without a getDir (resolveParentDir).
+	async findDirectoryUuid(parentUuid: string | null, name: string): Promise<string | undefined> {
 		const c = requireClient()
+		const parent = parentUuid ?? c.root().uuid
+		const uuid = await c.findDirUuid(parent, name)
 
-		return c.dirExists(await resolveNormalDirParent(c, parentUuid), name)
+		if (uuid !== undefined) {
+			noteFoundDir(uuid, parent)
+		}
+
+		return uuid
+	},
+	// After a socket gap: what findDirectoryUuid found may have been trashed or moved unseen.
+	forgetFoundDirectories(): void {
+		forgetFoundDirs()
 	},
 	// Thin getDirOptional pass-through; a malformed uuid is not found (see resolveOwnedDir).
 	async getDirectory(uuid: string): Promise<Dir | undefined> {
