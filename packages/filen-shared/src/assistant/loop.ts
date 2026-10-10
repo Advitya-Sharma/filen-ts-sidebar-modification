@@ -22,7 +22,7 @@ import {
 	type AssistantToolGroup,
 	type PortableObjectSchema
 } from "./tool"
-import { ASSISTANT_TOOL_GROUPS, assistantToolByName } from "./tools"
+import { ASSISTANT_TOOL_GROUPS, ASSISTANT_TOOLS, assistantToolByName } from "./tools"
 import {
 	mapUntrustedStrings,
 	quarantinedExtractionPrompt,
@@ -41,9 +41,12 @@ import {
 // 1. The router reads only the user's own words (this message and the one before it, so the answer to a
 //    clarifying question routes like the request it answers) and picks one tool group plus read or change,
 //    under a grammar that admits nothing else.
-// 2. Up to MAX_STEPS steps offer that group's tools, minus what the guard withdraws (guard.ts). Every
-//    call is schema-validated, checked by the app (unknown handles, names where handles belong) and by
-//    the guard; one malformed step is retried with the error, a second ends the loop.
+// 2. Up to MAX_STEPS steps may call that group's tools, minus what the guard withdraws (guard.ts). Every
+//    step renders the tools of the group's whole family (ASSISTANT_PROMPT_FAMILIES), the same for every
+//    route in it, so the engine reuses the prompt when the route changes within a family; when that is more
+//    than the request may call, the user's turn names what it may. A call outside them is refused here.
+//    Every call is schema-validated, checked by the app (unknown handles, names where handles belong) and
+//    by the guard; one malformed step is retried with the error, a second ends the loop.
 // 3. Content other people wrote (note bodies, file text, chat messages) is summarized by a tool-less
 //    quarantine call before the main loop sees it, and every untrusted string is sanitized and
 //    spotlighted. The executor's context line carries other people's names too and is sanitized as well.
@@ -337,7 +340,7 @@ function callPattern(toolNames: readonly string[]): RegExp {
 	)
 }
 
-// The call syntax in a closing reply, which may not call tools: removed, the text around it kept.
+// The call syntax in a reply that may not call tools: removed, the text around it kept.
 function stripCallSyntax(text: string, toolNames: readonly string[]): string {
 	const names = toolNames.join("|")
 	let stripped = text
@@ -562,30 +565,87 @@ function toModelTools(tools: readonly AssistantTool[]): AssistantModelTool[] {
 	}))
 }
 
+// Routes whose requests render the same tools, so a route change within one reuses the prompt the engine
+// read: the chat template puts the tools first, and a hybrid model resumes a cached prompt only from a stored
+// state, which a prompt differing in its first lines leaves none of. Each family stays near the size of its
+// largest group, so a conversation that keeps to one group pays little for the others, and its groups take
+// the same form of every tool they share (insights, which searches and lists by date, is a family of its
+// own). Organize stays alone: shown the drive family, its refusals of writes an app does not run drifted
+// out of the user's language. The answer route renders no tools: shown tools it may not call, the model
+// tries them anyway.
+export const ASSISTANT_PROMPT_FAMILIES: readonly (readonly AssistantToolGroup[])[] = [
+	["files", "trash", "shared"],
+	["organize"],
+	["insights"],
+	["notes", "chats"],
+	["audio", "navigation"]
+]
+
+// Every tool of a route's family, supported or not, in the family's order: its first group's as that group
+// alone lists them, then each later group's new ones; none for the answer route.
+function familyTools(route: AssistantRoute | null): AssistantTool[] {
+	const family = route === null || route === "answer" ? [] : (ASSISTANT_PROMPT_FAMILIES.find(groups => groups.includes(route)) ?? [route])
+
+	return [...new Map(family.flatMap(group => ASSISTANT_TOOL_GROUPS[group].tools).map(tool => [tool.name, tool])).values()]
+}
+
 // The tokens every main step needs besides the user's message: the instructions with the longest spotlight
-// line, room for the context and date lines, the largest group's tool schemas and the reply.
+// line and the family's unavailable-tools line, room for the context, date and tools lines, the largest
+// family's tool schemas and the reply.
 const CONTEXT_RESERVE_TOKENS = 400
 
-const FIXED_STEP_TOKENS =
-	Math.max(
-		...[true, false].map(canTrash =>
-			estimateTokens(
-				assistantSystemPrompt({
-					spotlight: spotlightInstruction({ mode: "delimit" }),
-					canary: "x".repeat(32),
-					canTrash
-				})
-			)
-		)
-	) +
-	CONTEXT_RESERVE_TOKENS +
-	Math.max(...Object.values(ASSISTANT_TOOL_GROUPS).map(group => estimateTokens(JSON.stringify(toModelTools(group.tools))))) +
-	STEP_MAX_TOKENS +
-	MESSAGE_OVERHEAD_TOKENS * 2
+// By the tools the app cannot run, which an executor never changes.
+const fixedStepTokensCache = new Map<string, number>()
 
-// A message that cannot fit even a first step is refused before the router reads it.
-export function messageFitsContext(message: string, contextTokens: number): boolean {
-	return estimateTokens(message) + MESSAGE_OVERHEAD_TOKENS <= contextTokens - FIXED_STEP_TOKENS
+function fixedStepTokens(supports: (tool: AssistantTool) => boolean): number {
+	const key = ASSISTANT_TOOLS.filter(tool => !supports(tool))
+		.map(tool => tool.name)
+		.join(",")
+	const cached = fixedStepTokensCache.get(key)
+
+	if (cached !== undefined) {
+		return cached
+	}
+
+	const tokens =
+		Math.max(
+			...ASSISTANT_PROMPT_FAMILIES.map(groups => {
+				const family = familyTools(groups[0] ?? null)
+				const unavailable = family.filter(tool => !supports(tool)).map(tool => tool.title)
+
+				return (
+					Math.max(
+						...[true, false].map(canTrash =>
+							estimateTokens(
+								assistantSystemPrompt({
+									spotlight: spotlightInstruction({ mode: "delimit" }),
+									canary: "x".repeat(32),
+									unavailable,
+									canTrash
+								})
+							)
+						)
+					) + estimateTokens(JSON.stringify(toModelTools(family.filter(supports))))
+				)
+			})
+		) +
+		CONTEXT_RESERVE_TOKENS +
+		STEP_MAX_TOKENS +
+		MESSAGE_OVERHEAD_TOKENS * 2
+
+	fixedStepTokensCache.set(key, tokens)
+
+	return tokens
+}
+
+// A message that cannot fit even a first step is refused before the router reads it. `supports` as the
+// executor's: a step renders the tools the app runs of the route's whole family.
+export function messageFitsContext(
+	message: string,
+	contextTokens: number,
+	supports: (tool: AssistantTool) => boolean = () => true
+): boolean {
+	return estimateTokens(message) + MESSAGE_OVERHEAD_TOKENS <= contextTokens - fixedStepTokens(supports)
 }
 
 function parseArguments(raw: string): Record<string, unknown> | null {
@@ -638,7 +698,9 @@ export async function runAssistantTurn({
 }): Promise<AssistantTurnResult> {
 	checkAborted(signal)
 
-	if (!messageFitsContext(message, model.contextTokens)) {
+	const supports = (tool: AssistantTool) => executor.supports?.(tool) ?? true
+
+	if (!messageFitsContext(message, model.contextTokens, supports)) {
 		throw new AssistantMessageTooLongError()
 	}
 
@@ -700,7 +762,6 @@ export async function runAssistantTurn({
 	const canary = secrets?.canary ?? nonce()
 	const spotlightOptions: SpotlightOptions | null = spotlight === "off" ? null : { mode: spotlight }
 	const instructionSpotlight = spotlightOptions === null ? null : spotlightInstruction(spotlightOptions)
-	const supports = (tool: AssistantTool) => executor.supports?.(tool) ?? true
 	const trashTool = assistantToolByName("trash_items")
 	const canTrash = trashTool !== undefined && supports(trashTool)
 	const instructions = assistantInstructionLines(instructionSpotlight, { canTrash })
@@ -713,16 +774,23 @@ export async function runAssistantTurn({
 		userMessage: userText,
 		contextHandles: context.handles
 	})
-	const routedTools: readonly AssistantTool[] = route === null || route === "answer" ? [] : ASSISTANT_TOOL_GROUPS[route].tools
-	const groupTools = routedTools.filter(supports)
-	const toolNames = groupTools.map(tool => tool.name)
-	const malformed = callPattern(toolNames)
+	const family = familyTools(route)
+	const rendered = family.filter(supports)
+	// The same for every route of the family (and so the same prompt prefix), never narrowed per turn: what
+	// this turn may call is decided below and by the guard.
+	const tools = toModelTools(rendered)
+	const renderedNames = rendered.map(tool => tool.name)
+	const groupTools = route === null || route === "answer" ? [] : ASSISTANT_TOOL_GROUPS[route].tools.filter(supports)
+	// What this request may call at its start; only a request that renders more is told which.
+	const callable = guard.offered(groupTools)
+	// Any tool the model was shown: a call to one written as text is a call, not a reply.
+	const malformed = callPattern(renderedNames)
 	const system: AssistantChatMessage = {
 		role: "system",
 		content: assistantSystemPrompt({
 			spotlight: instructionSpotlight,
 			canary,
-			unavailable: routedTools.filter(tool => !supports(tool)).map(tool => tool.title),
+			unavailable: family.filter(tool => !supports(tool)).map(tool => tool.title),
 			canTrash
 		})
 	}
@@ -730,6 +798,7 @@ export async function runAssistantTurn({
 		message,
 		context: contextLine,
 		date: now === undefined ? null : assistantDateLine({ now, timeZone, weekStart }),
+		tools: callable.length === rendered.length ? null : callable.map(tool => tool.name),
 		earlier: history.flatMap(entry => (entry.prompt === undefined ? [] : [entry.prompt]))
 	})
 	const past: AssistantChatMessage[] = history.flatMap(entry => [
@@ -808,9 +877,9 @@ export async function runAssistantTurn({
 			executedCalls.delete(signature)
 		}
 	}
-	// The tools the last step offered: the closing reply renders them too, so its prompt continues that step's.
-	let lastTools: AssistantModelTool[] = []
 	let answer = ""
+	// A step that could call nothing wrote nothing but a call.
+	let callOnly = false
 	let retryUsed = false
 	let blockedSteps = 0
 	let unrecovered = false
@@ -825,9 +894,6 @@ export async function runAssistantTurn({
 		})
 
 		const offered = guard.offered(groupTools)
-		const tools = toModelTools(offered)
-
-		lastTools = tools
 		// Calls the engine named while the model was still writing their arguments, by position. Only the
 		// newest is being written; those before it wait to be dispatched.
 		const announced = new Map<number, AssistantToolCallRecord>()
@@ -902,7 +968,8 @@ export async function runAssistantTurn({
 				}),
 				...(tools.length > 0
 					? {
-							tools
+							tools,
+							...(offered.length === 0 ? { toolChoice: "none" as const } : {})
 						}
 					: {}),
 				slot: "main",
@@ -919,9 +986,20 @@ export async function runAssistantTurn({
 		if (generated.toolCalls.length === 0) {
 			discardUnfinished(new Set())
 
-			const text = generated.content.trim()
+			let text = generated.content.trim()
 
-			if (malformed.test(text)) {
+			if (offered.length === 0) {
+				// Nothing could be called, so this is the reply: call syntax goes, the text around it stays. The same
+				// request again would get the same output back, so a reply with nothing left goes to the closing
+				// reply, which asks for plain text.
+				text = stripCallSyntax(text, renderedNames)
+
+				if (text.length === 0) {
+					callOnly = true
+
+					break
+				}
+			} else if (malformed.test(text)) {
 				if (!retryUsed && step < MAX_STEPS) {
 					retryUsed = true
 					turn.push(
@@ -968,10 +1046,47 @@ export async function runAssistantTurn({
 		for (const call of stepCalls) {
 			checkAborted(signal)
 
-			// Only the routed group's tools exist for this turn, whatever the engine let through; the guard
-			// refuses those it withdrew.
+			// Only the routed group's tools exist for this turn, whatever the model saw or the engine let through;
+			// the guard refuses those it withdrew.
 			const tool = groupTools.find(candidate => candidate.name === call.name)
 			const raw = parseArguments(call.arguments)
+
+			const shown = tool === undefined ? rendered.find(candidate => candidate.name === call.name) : undefined
+
+			if (shown !== undefined) {
+				// Shown, but not this request's to call: refused like a guard refusal, so it does not spend the
+				// retry a malformed call needs, and kept off the step list, which would show an action the user
+				// never asked for.
+				const offeredNames = guard.offered(groupTools).map(candidate => candidate.name)
+				const reason =
+					offeredNames.length === 0
+						? "No tools are available for this request; reply in plain text."
+						: `Not available for this request; use ${offeredNames.join(", ")}.`
+
+				blockedThisStep++
+				calls.push({
+					id: call.id,
+					step,
+					tool: shown.name,
+					title: shown.title,
+					effect: shown.effect,
+					consequential: isConsequentialTool(shown),
+					args: raw ?? {},
+					status: "blocked",
+					error: reason
+				})
+				processed.push(call)
+				results.push({
+					role: "tool",
+					toolCallId: call.id,
+					content: serializeToolResult({
+						error: `Blocked: ${reason}`
+					})
+				})
+
+				continue
+			}
+
 			let record: AssistantToolCallRecord = {
 				id: call.id,
 				step,
@@ -1272,7 +1387,7 @@ export async function runAssistantTurn({
 					history: past,
 					// Without it, a model whose turn so far was all tool calls tends to write another one.
 					turn:
-						calls.length > 0
+						calls.length > 0 || callOnly
 							? [
 									...turn,
 									{
@@ -1281,15 +1396,15 @@ export async function runAssistantTurn({
 									}
 								]
 							: turn,
-					tools: lastTools,
+					tools,
 					maxTokens: STEP_MAX_TOKENS,
 					contextTokens: model.contextTokens,
 					onStub: forgetStubbed
 				}),
 				// Rendered, never called: the prompt then continues the last step's, which the engine has read.
-				...(lastTools.length > 0
+				...(tools.length > 0
 					? {
-							tools: lastTools,
+							tools,
 							toolChoice: "none" as const
 						}
 					: {}),
@@ -1303,10 +1418,7 @@ export async function runAssistantTurn({
 			}
 		)
 		// This generation may not call tools, so call syntax in it is dropped and the text around it kept.
-		const text = stripCallSyntax(
-			closing.content,
-			routedTools.map(tool => tool.name)
-		)
+		const text = stripCallSyntax(closing.content, renderedNames)
 
 		answer = closing.truncated === true && text.length > 0 ? markCut(text) : text
 	}

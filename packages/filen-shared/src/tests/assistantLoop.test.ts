@@ -1,17 +1,23 @@
 import { describe, expect, it } from "vitest"
 import {
 	AssistantAbortError,
+	ASSISTANT_CLOSING_NUDGE,
+	ASSISTANT_MALFORMED_RETRY,
+	ASSISTANT_PROMPT_FAMILIES,
+	ASSISTANT_TOOL_GROUPS,
 	AssistantContextError,
 	assistantDateLine,
 	assistantUserPrompt,
 	capToolResult,
 	estimateTokens,
 	fitMessages,
+	isAssistantWebTool,
 	LISTING_PAGE_ITEMS,
 	listingPage,
 	localeWeekStart,
 	messageLines,
 	MESSAGE_OVERHEAD_TOKENS,
+	messageFitsContext,
 	parseRoute,
 	QUARANTINE_CONTEXT_TOKENS,
 	QUARANTINE_MAX_TOKENS,
@@ -313,8 +319,8 @@ describe("runAssistantTurn", () => {
 				call("list_notes", { query: "plan" }),
 				call("read_note", { handle: "n1" }),
 				(request: AssistantGenerateRequest) => {
-					// Taint: no consequential tool is offered any more.
-					expect(request.tools?.map(tool => tool.name)).not.toContain("set_note_flags")
+					// Taint withdraws the consequential tools in the dispatcher; the prompt still renders them.
+					expect(request.tools).toEqual(model.requests[1]?.tools)
 
 					return { content: "", toolCalls: call("set_note_flags", { handle: "n1", archived: true }) }
 				},
@@ -417,13 +423,152 @@ describe("runAssistantTurn", () => {
 		expect(result.reply).toBe("Opened the trash.")
 	})
 
-	it("offers no tools for the answer route and none outside the routed group", async () => {
+	it("renders no tools for the answer route", async () => {
 		const executor = new FakeExecutor({ items: [] })
 		const model = new ScriptedModel({ route: "answer", steps: ["Knead the dough."] })
 		const { result } = await turn({ model, executor, message: "How do I bake bread?" })
 
 		expect(model.requests[1]?.tools).toBeUndefined()
+		expect(model.requests[1]?.messages[0]?.content).not.toContain("Not available")
+		expect(result.prompt).not.toContain("for this request")
 		expect(result.reply).toBe("Knead the dough.")
+	})
+
+	// An engine parses no calls where none may be made: they come back as text, or as nothing.
+	it.each([
+		["call markup", "<tool_call>\n{\"name\": \"search_items\", \"arguments\": {\"query\": \"bread\"}}\n</tool_call>"],
+		["nothing", ""]
+	])("asks the answer route for plain text after a reply of %s, never retrying the call", async (_, content) => {
+		const executor = new FakeExecutor({ items: [] })
+		const model = new ScriptedModel({ route: "answer", steps: [() => ({ content, toolCalls: [] }), "Knead the dough."] })
+		const { result } = await turn({ model, executor, message: "How do I bake bread?" })
+
+		expect(model.requests).toHaveLength(3)
+		expect(model.requests[2]?.messages.at(-1)?.content).toBe(ASSISTANT_CLOSING_NUDGE)
+		expect(JSON.stringify(model.requests[2]?.messages)).not.toContain(ASSISTANT_MALFORMED_RETRY)
+		expect(result.calls).toHaveLength(0)
+		expect(result.reply).toBe("Knead the dough.")
+	})
+
+	it("keeps the text of a step that could call nothing and wrote a call anyway", async () => {
+		const executor = new FakeExecutor({ items: [] })
+		// Read intent on a group whose remaining tools all change data: nothing may be called.
+		executor.supports = tool => tool.name !== "search_items" && tool.name !== "list_directory"
+		const model = new ScriptedModel({
+			route: "organize read",
+			steps: [
+				() => ({
+					content: "I can't move files here.\n<tool_call>\n{\"name\": \"move_items\", \"arguments\": {}}\n</tool_call>\nrename_item({\"handle\": \"d0\"})",
+					toolCalls: []
+				})
+			]
+		})
+		const { result, events } = await turn({ model, executor, message: "Where would my reports go?" })
+
+		expect(model.requests[1]?.toolChoice).toBe("none")
+		expect(model.requests[1]?.tools?.map(tool => tool.name)).toContain("move_items")
+		expect(result.prompt).toContain("No tools for this request.")
+		expect(model.requests).toHaveLength(2)
+		expect(result.reply).toBe("I can't move files here.")
+		expect(events.some(event => event.type === "reply" && event.text.includes("tool_call"))).toBe(false)
+		expect(executor.executed).toHaveLength(0)
+	})
+
+	it("treats a call to a shown tool outside the group, written as text, as a malformed call", async () => {
+		const executor = new FakeExecutor({ items: [], results: { search_items: () => ({ items: [] }) } })
+		const model = new ScriptedModel({
+			route: "files read",
+			steps: ["list_section({\"section\": \"favorites\"})", "No favorites."]
+		})
+		const { result, events } = await turn({ model, executor, message: "What's in Documents?" })
+
+		expect(model.requests[2]?.messages.at(-1)?.content).toBe(ASSISTANT_MALFORMED_RETRY)
+		expect(events.some(event => event.type === "reply" && event.text.includes("list_section"))).toBe(false)
+		expect(result.reply).toBe("No favorites.")
+	})
+
+	it("renders the same tools within a route family and names the ones the request may call", async () => {
+		const executor = new FakeExecutor({ items: [], results: { search_items: () => ({ items: [] }) } })
+		executor.supports = tool => tool.name !== "set_favorite"
+		const files = new ScriptedModel({ route: "files read", steps: [call("list_section", { section: "favorites" }), "Nothing."] })
+		const shared = new ScriptedModel({ route: "shared read", steps: ["None."] })
+		const notes = new ScriptedModel({ route: "notes read", steps: ["None."] })
+		const first = await turn({ model: files, executor, message: "What's in Documents?" })
+		const history = [{ user: "What's in Documents?", reply: "Nothing.", prompt: first.result.prompt }]
+		const second = await turn({ model: shared, executor, message: "Show my favorites", history })
+		const third = await turn({ model: notes, executor, message: "List my notes", history })
+		const shown = files.requests[1]
+		const names = (request: AssistantGenerateRequest | undefined) => request?.tools?.map(tool => tool.name)
+
+		// The first group's tools as it alone lists them, then each later group's new ones.
+		expect(names(shown)).toEqual([
+			"search_items",
+			"list_directory",
+			"get_item_info",
+			"read_text_file",
+			"reveal_item",
+			"list_notes",
+			"trash_items",
+			"list_section",
+			"get_sharing"
+		])
+		expect(shared.requests[1]?.tools).toEqual(shown?.tools)
+		expect(shared.requests[1]?.messages[0]).toEqual(shown?.messages[0])
+		expect(names(notes.requests[1])).not.toEqual(names(shown))
+		const notesGroup = ASSISTANT_TOOL_GROUPS.notes.tools.map(tool => tool.name)
+
+		expect(names(notes.requests[1])?.slice(0, notesGroup.length)).toEqual(notesGroup)
+		expect(shown?.messages[0]?.content).toContain("Not available in this version of the app: Add or remove favorites.")
+		expect(first.result.prompt).toContain("Tools for this request: search_items, list_directory, get_item_info, read_text_file, reveal_item.")
+		expect(second.result.prompt).toContain("Tools for this request: list_section, get_sharing, search_items, list_directory.")
+		expect(third.result.prompt).toContain("Tools for this request: list_notes, read_note, open_note.")
+		// Rendered, but not in the files group: refused without spending the retry.
+		expect(first.result.calls.map(record => `${record.tool}:${record.status}`)).toEqual(["list_section:blocked"])
+		expect(first.result.calls[0]?.error).toContain("use search_items, list_directory")
+		// Nothing the user asked for: the step list never shows it.
+		expect(first.events.some(event => event.type === "call")).toBe(false)
+		expect(executor.executed).toHaveLength(0)
+	})
+
+	// Every step renders its family's tools: a family that grows takes room from the user's message.
+	it("pins the longest message the web app's tools leave room for", () => {
+		const web = (tool: AssistantTool) => isAssistantWebTool(tool.name)
+
+		expect(messageFitsContext("a".repeat(16_227), 8192, web)).toBe(true)
+		expect(messageFitsContext("a".repeat(16_228), 8192, web)).toBe(false)
+	})
+
+	it("names the tools only when the prompt shows more than the request may call", async () => {
+		const executor = new FakeExecutor({ items: [] })
+		const insights = new ScriptedModel({ route: "insights read", steps: ["Nothing recent."] })
+		const files = new ScriptedModel({ route: "files read", steps: ["Nothing."] })
+		const first = await turn({ model: insights, executor, message: "What did I change today?" })
+		const history = [{ user: "What did I change today?", reply: "Nothing recent.", prompt: first.result.prompt }]
+		const second = await turn({ model: files, executor, message: "What's in Documents?", history })
+		const third = await turn({
+			model: new ScriptedModel({ route: "files read", steps: ["Still nothing."] }),
+			executor,
+			message: "And now?",
+			history: [...history, { user: "What's in Documents?", reply: "Nothing.", prompt: second.result.prompt }]
+		})
+
+		expect(insights.requests[1]?.tools?.map(tool => tool.name)).toEqual(ASSISTANT_TOOL_GROUPS.insights.tools.map(tool => tool.name))
+		expect(first.result.prompt).not.toContain("for this request")
+		// Every turn that needs the line carries its own: an earlier one may have been cut from the context.
+		expect(second.result.prompt).toContain("Tools for this request: ")
+		expect(third.result.prompt).toContain("Tools for this request: ")
+	})
+
+	it("has every tool group in one prompt family, whose groups share one form of each tool", () => {
+		expect(ASSISTANT_PROMPT_FAMILIES.flat().toSorted()).toEqual(Object.keys(ASSISTANT_TOOL_GROUPS).toSorted())
+
+		for (const family of ASSISTANT_PROMPT_FAMILIES) {
+			const forms = family.flatMap(group => ASSISTANT_TOOL_GROUPS[group].tools)
+
+			for (const form of forms) {
+				expect(forms.filter(other => other.name === form.name).every(other => other === form)).toBe(true)
+			}
+		}
 	})
 
 	it("stops after the step cap with a closing reply that may call no tools", async () => {

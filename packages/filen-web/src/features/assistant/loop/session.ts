@@ -23,7 +23,7 @@ import {
 	type AssistantStepFailure,
 	type AssistantStepStatus
 } from "@/features/assistant/types"
-import { buildProposal, turnExecutor, type TurnExecutor } from "@/features/assistant/loop/executorAdapter"
+import { buildProposal, supportedTools, turnExecutor, type TurnExecutor } from "@/features/assistant/loop/executorAdapter"
 import { log } from "@/lib/log"
 
 // What the session needs of the model runtime (runtime/client.ts), so tests drive it with a fake.
@@ -377,7 +377,7 @@ export function createAssistantSession({
 		controller: AbortController
 	}): Promise<void> {
 		// Refused before anything loads: a message too long for even a first step would load ~4 GB for nothing.
-		if (!messageFitsContext(message, runtime.model.contextTokens)) {
+		if (!messageFitsContext(message, runtime.model.contextTokens, supportedTools(executor))) {
 			if (active === controller) {
 				active = null
 			}

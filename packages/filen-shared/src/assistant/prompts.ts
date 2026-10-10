@@ -161,9 +161,10 @@ export function assistantDateLine({
 
 // `canary` marks the prompt so a reply that repeats it is withheld (screenAssistantReply); a per-session
 // random value keeps other people's text from planting it to suppress replies. Nothing in it changes between
-// turns of one tool group: Qwen3.5 is a hybrid model, which reuses a cached prompt only up to where it
-// first differs and only from a stored copy of its state, so a change here would have every later turn
-// read the whole conversation again. What changes per turn goes into the user's turn (assistantUserPrompt).
+// turns of one prompt family (ASSISTANT_PROMPT_FAMILIES): Qwen3.5 is a hybrid model, which reuses a cached
+// prompt only up to where it first differs and only from a stored copy of its state, so a change here would
+// have every later turn read the whole conversation again. What changes per turn goes into the user's turn
+// (assistantUserPrompt).
 export function assistantSystemPrompt({
 	spotlight,
 	canary,
@@ -172,7 +173,7 @@ export function assistantSystemPrompt({
 }: {
 	spotlight: string | null
 	canary: string
-	// Titles of tools in the routed group this app cannot run yet.
+	// Titles of the tools of the route's prompt family this app cannot run yet.
 	unavailable?: readonly string[]
 	canTrash?: boolean
 }): string {
@@ -194,29 +195,39 @@ function contextPart(context: string): string {
 	return `Context: ${context}.`
 }
 
+function toolsPart(tools: readonly string[]): string {
+	return tools.length === 0 ? "No tools for this request." : `Tools for this request: ${tools.join(", ")}.`
+}
+
 // The app info a user turn carried, "" for none. Its parts are on one line, so it ends at the first break.
 function promptInfo(prompt: string): string {
 	return prompt.startsWith(INFO_OPEN) ? prompt.slice(INFO_OPEN.length, prompt.indexOf(INFO_CLOSE)) : ""
 }
 
-// The user's turn as the model reads it: what the app shows right now (date, screen, selection, open note or
-// chat, playback), then the message itself, last, so its language is the one the reply follows. Only what
-// the conversation's earlier turns (`earlier`, as the model read them) do not already say: the day's line
-// once a day, the context when it changed since the last turn that gave one.
+// The user's turn as the model reads it: the tools this request may call and what the app shows right now
+// (date, screen, selection, open note or chat, playback), then the message itself, last, so its language is
+// the one the reply follows. The day's line and the context only when the conversation's earlier turns
+// (`earlier`, as the model read them) do not already say them: once a day, and when the context changed
+// since the last turn that gave one.
 export function assistantUserPrompt({
 	message,
 	context,
 	date = null,
+	tools = null,
 	earlier = []
 }: {
 	message: string
 	context: string
 	date?: string | null
+	// Names of the tools this request may call, for a request whose prompt shows more (runAssistantTurn, so
+	// it stays the same across routes); null when it may call whatever it shows.
+	tools?: readonly string[] | null
 	earlier?: readonly string[]
 }): string {
 	const infos = earlier.map(promptInfo)
 	const lastContext = infos.findLast(info => info.includes("Context: "))
 	const info = [
+		...(tools === null ? [] : [toolsPart(tools)]),
 		...(date === null || infos.some(earlierInfo => earlierInfo.includes(date)) ? [] : [date]),
 		...(lastContext?.includes(contextPart(context)) === true ? [] : [contextPart(context)])
 	]

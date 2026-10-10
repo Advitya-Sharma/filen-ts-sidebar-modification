@@ -84,6 +84,12 @@ export interface TurnExecutor {
 	start(call: { callId: string; tool: AssistantTool; args: Record<string, unknown> }): Promise<AssistantToolExecution>
 }
 
+// The tools the loop may offer: those the executor runs, a consequential one only with a card the UI can show.
+export function supportedTools(executor: ToolExecutor): (tool: AssistantTool) => boolean {
+	return tool =>
+		(executor.supports?.(tool) ?? true) && (!isConsequentialTool(tool) || proposalAction({ tool: tool.name, args: {} }) !== null)
+}
+
 // The app's ToolExecutor for one turn: every check and call gets the turn's signal, a confirmed call can be started
 // before the loop resumes, and a consequential tool the UI has no card for is refused at the check.
 export function turnExecutor({
@@ -106,10 +112,7 @@ export function turnExecutor({
 
 			name: handle => executor.name?.(handle),
 
-			// A consequential tool also needs a card the UI can show.
-			supports: tool =>
-				(executor.supports?.(tool) ?? true) &&
-				(!isConsequentialTool(tool) || proposalAction({ tool: tool.name, args: {} }) !== null),
+			supports: supportedTools(executor),
 
 			// Raced against the turn like execute: resolving a path reads listings, which wait while offline, and
 			// a check that never settles would keep the turn's hold on the model after Stop.

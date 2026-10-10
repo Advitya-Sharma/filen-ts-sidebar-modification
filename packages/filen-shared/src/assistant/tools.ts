@@ -701,8 +701,9 @@ export type AssistantGroupDefinition = {
 	readonly tools: readonly AssistantTool[]
 }
 
-// Small models pick tools reliably from about six, so a request is first routed to one group and
-// only that group's tools are offered. Lookup tools appear in every group that needs their handles.
+// Small models pick tools reliably from about six, so a request is first routed to one group and may call
+// only that group's tools. The prompt shows those of the group's family (ASSISTANT_PROMPT_FAMILIES) and,
+// when that is more, names the group's. Lookup tools appear in every group that needs their handles.
 export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, AssistantGroupDefinition>> = {
 	files: {
 		description: "find files and directories (folders) by name or location, list, read, summarize or show them",
