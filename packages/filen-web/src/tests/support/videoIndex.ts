@@ -48,14 +48,23 @@ export async function catalogTitles(engine: VideoIndexEngine): Promise<VideoTitl
 	return [...out, ...(await engine.catalogHidden())]
 }
 
-// Keeps `into` holding the catalog's titles, refreshed on each catalog change.
+// Keeps `into` holding the catalog's titles, refreshed on each catalog change. Reads overlap and finish in any order
+// (their slices are wall-timed), so only the latest change's read lands.
 export function trackCatalogTitles(engine: VideoIndexEngine, into: Map<string, VideoTitleView>): void {
+	let latest = 0
+
 	engine.subscribe(update => {
 		if (update.type !== "catalog") {
 			return
 		}
 
+		const read = ++latest
+
 		void catalogTitles(engine).then(titles => {
+			if (read !== latest) {
+				return
+			}
+
 			into.clear()
 
 			for (const title of titles) {
