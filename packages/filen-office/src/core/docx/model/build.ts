@@ -512,8 +512,6 @@ class PartBuilder {
 					case El.SectPr: {
 						const item = this.leaf(Item.SectionProperties, node, parent, 0)
 
-						this.sweep(node)
-
 						this.childRevision(node, El.SectPrChange, Revision.SectionProperties, item)
 
 						if (top && this.storyKind === "body") {
@@ -915,15 +913,9 @@ class PartBuilder {
 	}
 
 	// A style reference's id; a malformed one counts as absent.
-	// A style reference's id (inside a property container already swept); a malformed one counts as absent.
+	// A style reference's id; a malformed one counts as absent.
 	private styleId(node: number): number {
 		return this.reader.malformedNodes.has(node) ? -1 : this.shared.strings.intern(this.reader.attr(node, Ns.W, "val"))
-	}
-
-	// Checks every start tag of a property container (pPr, rPr, tblPr, trPr, tcPr, sectPr...), so markup the
-	// styles layer would read as empty marks the document malformed.
-	private sweep(node: number): void {
-		this.reader.sweep(node)
 	}
 
 	private addRevision(kind: Revision, item: number, node: number): number {
@@ -1022,10 +1014,8 @@ class PartBuilder {
 
 			if (code === El.SdtPr && sdtPr < 0) {
 				sdtPr = child
-				this.sweep(child)
 			} else if (code === El.SdtEndPr && sdtEndPr < 0) {
 				sdtEndPr = child
-				this.sweep(child)
 			} else if (code === El.SdtContent && content < 0) {
 				content = child
 				this.children(child, item, depth + 1, contentCtx, top)
@@ -1067,7 +1057,6 @@ class PartBuilder {
 		for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
 			if (pPr < 0 && reader.code(child) === El.PPr) {
 				pPr = child
-				this.sweep(child)
 
 				for (let property = document.firstChildElement(child); property >= 0; property = document.nextSiblingElement(property)) {
 					switch (reader.code(property)) {
@@ -1185,7 +1174,6 @@ class PartBuilder {
 
 			if (code === El.RPr && rPr < 0) {
 				rPr = child
-				this.sweep(child)
 
 				for (let property = document.firstChildElement(child); property >= 0; property = document.nextSiblingElement(property)) {
 					const propertyCode = reader.code(property)
@@ -1239,7 +1227,6 @@ class PartBuilder {
 
 			if (code === El.TblPr && tblPr < 0) {
 				tblPr = child
-				this.sweep(child)
 
 				for (let property = document.firstChildElement(child); property >= 0; property = document.nextSiblingElement(property)) {
 					const propertyCode = reader.code(property)
@@ -1249,7 +1236,6 @@ class PartBuilder {
 				}
 			} else if (code === El.TblGrid && tblGrid < 0) {
 				tblGrid = child
-				this.sweep(child)
 				this.childRevision(child, El.TblGridChange, Revision.TableGrid, item)
 			} else {
 				this.content(child, item, depth + 1, Ctx.Rows, false)
@@ -1283,7 +1269,6 @@ class PartBuilder {
 
 			if (code === El.TrPr && trPr < 0) {
 				trPr = child
-				this.sweep(child)
 
 				for (let property = document.firstChildElement(child); property >= 0; property = document.nextSiblingElement(property)) {
 					switch (reader.code(property)) {
@@ -1303,7 +1288,6 @@ class PartBuilder {
 				}
 			} else if (code === El.TblPrEx && tblPrEx < 0) {
 				tblPrEx = child
-				this.sweep(child)
 				this.childRevision(child, El.TblPrExChange, Revision.TablePropertiesException, item)
 			} else {
 				this.content(child, item, depth + 1, Ctx.Cells, false)
@@ -1331,7 +1315,6 @@ class PartBuilder {
 		for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
 			if (tcPr < 0 && reader.code(child) === El.TcPr) {
 				tcPr = child
-				this.sweep(child)
 
 				for (let property = document.firstChildElement(child); property >= 0; property = document.nextSiblingElement(property)) {
 					switch (reader.code(property)) {

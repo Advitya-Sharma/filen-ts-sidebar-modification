@@ -1,4 +1,4 @@
-import { NodeKind, type XmlDocument } from "../../xml/index"
+import type { XmlDocument } from "../../xml/index"
 import {
 	EMPTY_CELL,
 	EMPTY_PARAGRAPH,
@@ -74,10 +74,24 @@ class InternTable<T extends object> {
 	// half-parsed: its attributes could not be trusted.
 	private parseChecked(reader: PropsReader, node: number): T {
 		const document = reader.document
-		const end = document.end(node)
+		const malformed = document.malformed
 
-		for (let n = node; n < document.count && document.start(n) < end; n++) {
-			if (document.kinds[n] === NodeKind.Element && !reader.wellFormed(n)) return this.reject(document, node)
+		if (malformed.length > 0) {
+			// The parser lists malformed elements in node order; the subtree is the nodes from `node` up to
+			// the first that starts after it ends.
+			let low = 0
+			let high = malformed.length
+
+			while (low < high) {
+				const middle = (low + high) >> 1
+
+				if ((malformed[middle] ?? 0) < node) low = middle + 1
+				else high = middle
+			}
+
+			const first = malformed[low] ?? -1
+
+			if (first >= 0 && document.start(first) < document.end(node)) return this.reject(document, node)
 		}
 
 		try {

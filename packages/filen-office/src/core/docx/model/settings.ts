@@ -273,7 +273,7 @@ export function readSettings(document: XmlDocument): DocxSettings {
 
 	return {
 		present: true,
-		malformed: reader.sweepAll(),
+		malformed: reader.hasMalformed(),
 		strict: namespaces.elementUri(root) === STRICT_WORDPROCESSINGML,
 		trackRevisions: flags.get("trackRevisions") ?? false,
 		evenAndOddHeaders: flags.get("evenAndOddHeaders") ?? false,

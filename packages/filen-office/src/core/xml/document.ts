@@ -35,7 +35,12 @@ export interface XmlNodeArrays {
 	readonly names: readonly string[]
 	readonly nameLengths: readonly number[]
 	readonly encoding: XmlEncoding
+	// Elements whose start tag does not read as whitespace-separated name="value" pairs with distinct names,
+	// ascending. Absent means none.
+	readonly malformed?: Int32Array | undefined
 }
+
+const NO_NODES = new Int32Array(0)
 
 // Above this many attributes, duplicates are found through a set instead of pairwise.
 const PAIRWISE_DUPLICATE_LIMIT = 8
@@ -67,6 +72,8 @@ export class XmlDocument {
 	readonly nameIds: Int32Array
 	readonly names: readonly string[]
 	readonly encoding: XmlEncoding
+	// Elements with a malformed start tag (see isMalformed), ascending; found while parsing, at no extra pass.
+	readonly malformed: Int32Array
 	// Byte length of each interned name, for scanning past it without decoding.
 	private readonly nameLengths: readonly number[]
 	private nameIndex: Map<string, number> | null = null
@@ -90,6 +97,7 @@ export class XmlDocument {
 		this.names = arrays.names
 		this.nameLengths = arrays.nameLengths
 		this.encoding = arrays.encoding
+		this.malformed = arrays.malformed ?? NO_NODES
 	}
 
 	kind(node: number): NodeKind {
@@ -175,6 +183,26 @@ export class XmlDocument {
 		}
 
 		return this.nameIndex.get(qualifiedName) ?? -1
+	}
+
+	// Whether an element's start tag failed the attribute syntax check made while parsing: missing "=",
+	// unquoted values, attributes not separated by whitespace, or a repeated name. Its attributes are
+	// unreliable; attributeSpans throws for it.
+	isMalformed(node: number): boolean {
+		const malformed = this.malformed
+		let low = 0
+		let high = malformed.length - 1
+
+		while (low <= high) {
+			const middle = (low + high) >> 1
+			const value = malformed[middle] ?? 0
+
+			if (value === node) return true
+			if (value < node) low = middle + 1
+			else high = middle - 1
+		}
+
+		return false
 	}
 
 	isSelfClosing(node: number): boolean {

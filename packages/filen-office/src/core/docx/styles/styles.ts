@@ -487,8 +487,7 @@ function readStyle(r: PropsReader, store: PropsStore, node: number, index: numbe
 
 export function parseStyles(document: XmlDocument, store: PropsStore): DocxStyles {
 	const r = PropsReader.for(document)
-	// Checked first, so the property reads that follow find every start tag already validated.
-	const malformed = r.model.sweepAll()
+	const malformed = r.model.hasMalformed()
 	const root = document.documentElement()
 
 	if (root < 0 || r.local(root) !== "styles") return new DocxStyles(EMPTY_RUN, EMPTY_PARAGRAPH, [], EMPTY_LATENT, malformed)

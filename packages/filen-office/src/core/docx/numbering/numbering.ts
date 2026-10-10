@@ -346,8 +346,7 @@ function pictureRelationship(r: PropsReader, node: number): string | undefined {
 
 export function parseNumbering(document: XmlDocument, store: PropsStore, styles?: DocxStyles): Numbering {
 	const r = PropsReader.for(document)
-	// Checked first, so the property reads that follow find every start tag already validated.
-	const malformed = r.model.sweepAll()
+	const malformed = r.model.hasMalformed()
 	const root = document.documentElement()
 
 	if (root < 0 || r.local(root) !== "numbering") return new Numbering(undefined, new Map(), new Map(), new Map(), undefined, malformed)

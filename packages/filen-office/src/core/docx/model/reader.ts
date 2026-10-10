@@ -28,8 +28,6 @@ const NO_PREFIX_SET: PrefixSet = { list: [], set: new Set() }
 const XML_PREFIX_SET: PrefixSet = { list: ["xml"], set: new Set(["xml"]) }
 // Up to this many aliases are compared byte for byte; more go through a set lookup.
 const LINEAR_PREFIXES = 4
-// Up to this many attributes are checked for duplicates pairwise; more through a set.
-const PAIRWISE_NAMES = 8
 
 // Element classification and attribute reads for one part. When every namespace is declared on the root
 // (Word always does this) an element's code depends only on its interned name, so it is computed once per
@@ -47,13 +45,13 @@ export class PartReader {
 	private readonly groupByName: Int8Array
 	private readonly prefixCache = new Map<ReadonlyMap<string, string>, PrefixSet[]>()
 	private readonly span = new Int32Array(2)
-	private swept = false
 
 	constructor(document: XmlDocument, namespaces: Namespaces = new Namespaces(document, { lenient: true })) {
 		this.document = document
 		this.namespaces = namespaces
 		this.bytes = document.bytes
 
+		for (const node of document.malformed) this.malformedNodes.add(node)
 		for (const node of namespaces.malformed) this.malformedNodes.add(node)
 
 		const root = document.documentElement()
@@ -141,53 +139,14 @@ export class PartReader {
 		return -1
 	}
 
-	// Whether the element's start tag reads as name="value" pairs with distinct names. A malformed one is
-	// recorded.
+	// Whether the element's start tag reads as name="value" pairs with distinct names: the parser records
+	// the ones that do not, and attribute reads add any they find unreadable.
 	wellFormed(node: number): boolean {
-		if (this.swept) return !this.malformedNodes.has(node)
-
-		const document = this.document
-
-		if (document.kinds[node] !== NodeKind.Element) return true
-
-		if (malformedTag(this.bytes, document.starts[node] ?? 0, (document.openEnds[node] ?? 0) - 1)) {
-			this.malformedNodes.add(node)
-
-			return false
-		}
-
-		return true
+		return !this.malformedNodes.has(node)
 	}
 
-	// wellFormed over an element and everything below it, reading the tree arrays directly: property
-	// containers are swept whole during the build.
-	sweep(node: number): void {
-		if (this.swept) return
-
-		const { kinds, starts, openEnds, count } = this.document
-		const bytes = this.bytes
-		const end = this.document.end(node)
-
-		for (let n = node; n < count; n++) {
-			const start = starts[n] ?? 0
-
-			if (start >= end) break
-
-			if (kinds[n] === NodeKind.Element && malformedTag(bytes, start, (openEnds[n] ?? 0) - 1)) this.malformedNodes.add(n)
-		}
-	}
-
-	// Checks every start tag of the part once (for small parts read leniently, like settings and styles);
-	// afterwards wellFormed answers from the record. Returns whether anything was malformed.
-	sweepAll(): boolean {
-		if (!this.swept) {
-			const root = this.document.documentElement()
-
-			if (root >= 0) this.sweep(root)
-
-			this.swept = true
-		}
-
+	// Whether anything in the part was found malformed.
+	hasMalformed(): boolean {
 		return this.malformedNodes.size > 0
 	}
 
@@ -486,128 +445,6 @@ function decodeLenient(bytes: Uint8Array, start: number, end: number, attribute:
 	}
 
 	return out + decodeCharacterData(bytes, from, end, attribute)
-}
-
-let nameSpans = new Int32Array(32)
-
-// Whether a start tag ("<" at `start`, ">" at `tagEnd`) fails to read as name="value" pairs with distinct
-// names. Runs over every property element during the build, so it is a flat byte loop.
-function malformedTag(bytes: Uint8Array, start: number, tagEnd: number): boolean {
-	let i = start + 1
-
-	while (i < tagEnd) {
-		const b = bytes[i]
-
-		if (b === 32 || b === 9 || b === 10 || b === 13 || b === 47) break
-
-		i++
-	}
-
-	let names = 0
-	let spans = nameSpans
-
-	for (;;) {
-		while (i < tagEnd) {
-			const b = bytes[i]
-
-			if (b !== 32 && b !== 9 && b !== 10 && b !== 13) break
-
-			i++
-		}
-
-		if (i >= tagEnd || (bytes[i] === 47 && i === tagEnd - 1)) return names > 1 && duplicateNames(bytes, spans, names)
-
-		const nameStart = i
-
-		while (i < tagEnd) {
-			const b = bytes[i]
-
-			if (b === 61 || b === 47 || b === 32 || b === 9 || b === 10 || b === 13) break
-
-			i++
-		}
-
-		const nameEnd = i
-
-		while (i < tagEnd) {
-			const b = bytes[i]
-
-			if (b !== 32 && b !== 9 && b !== 10 && b !== 13) break
-
-			i++
-		}
-
-		if (nameEnd === nameStart || bytes[i] !== 61) return true
-
-		i++
-
-		while (i < tagEnd) {
-			const b = bytes[i]
-
-			if (b !== 32 && b !== 9 && b !== 10 && b !== 13) break
-
-			i++
-		}
-
-		const quote = bytes[i]
-
-		if (quote !== 34 && quote !== 39) return true
-
-		// Values are short: a plain loop beats indexOf's call overhead.
-		i++
-
-		while (i < tagEnd && bytes[i] !== quote) i++
-
-		if (i >= tagEnd) return true
-
-		if (names * 2 + 2 > spans.length) {
-			const grown = new Int32Array(spans.length * 2)
-
-			grown.set(spans)
-			spans = grown
-			nameSpans = grown
-		}
-
-		spans[names * 2] = nameStart
-		spans[names * 2 + 1] = nameEnd
-		names++
-		i++
-	}
-}
-
-function duplicateNames(bytes: Uint8Array, spans: Int32Array, count: number): boolean {
-	if (count > PAIRWISE_NAMES) {
-		const seen = new Set<string>()
-
-		for (let k = 0; k < count; k++) {
-			const name = decodeUtf8(bytes, spans[k * 2] ?? 0, spans[k * 2 + 1] ?? 0)
-
-			if (seen.has(name)) return true
-
-			seen.add(name)
-		}
-
-		return false
-	}
-
-	for (let a = 1; a < count; a++) {
-		const aStart = spans[a * 2] ?? 0
-		const length = (spans[a * 2 + 1] ?? 0) - aStart
-
-		for (let b = 0; b < a; b++) {
-			const bStart = spans[b * 2] ?? 0
-
-			if (length !== (spans[b * 2 + 1] ?? 0) - bStart || bytes[aStart] !== bytes[bStart]) continue
-
-			let same = true
-
-			for (let k = 1; k < length && same; k++) same = bytes[aStart + k] === bytes[bStart + k]
-
-			if (same) return true
-		}
-	}
-
-	return false
 }
 
 const FOUND = 1

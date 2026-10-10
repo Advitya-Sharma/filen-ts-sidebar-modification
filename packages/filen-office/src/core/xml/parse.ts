@@ -109,9 +109,35 @@ function detectEncoding(bytes: Uint8Array): XmlEncoding {
 	return "utf-8"
 }
 
+// Start-tag attribute name spans, reused across tags.
+let attributeNames = new Int32Array(32)
+
+// Whether two of a start tag's attribute names are the same bytes.
+function repeatsName(bytes: Uint8Array, spans: Int32Array, count: number): boolean {
+	for (let a = 1; a < count; a++) {
+		const aStart = spans[a * 2] ?? 0
+		const length = (spans[a * 2 + 1] ?? 0) - aStart
+
+		for (let b = 0; b < a; b++) {
+			const bStart = spans[b * 2] ?? 0
+
+			if (length !== (spans[b * 2 + 1] ?? 0) - bStart || bytes[aStart + length - 1] !== bytes[bStart + length - 1]) continue
+
+			let same = true
+
+			for (let k = 0; k < length && same; k++) same = bytes[aStart + k] === bytes[bStart + k]
+
+			if (same) return true
+		}
+	}
+
+	return false
+}
+
 // Parses one part into an XmlDocument. Structure is checked strictly (every tag closed by its own name, one
-// root element, nothing but whitespace, comments and processing instructions around it); names, characters,
-// attribute syntax and references are checked by assertWellFormed, as only written parts need them.
+// root element, nothing but whitespace, comments and processing instructions around it); a start tag whose
+// attributes do not read as name="value" pairs is recorded (XmlDocument.isMalformed) rather than refused;
+// names, characters and references are checked by assertWellFormed, as only written parts need them.
 // A DOCTYPE with an internal subset is refused, so no entity can ever expand; an external one is kept as an
 // opaque node and never read. UTF-16 parts are transcoded: the document's bytes are then UTF-8.
 export function parseXml(input: Uint8Array): XmlDocument {
@@ -137,6 +163,7 @@ export function parseXml(input: Uint8Array): XmlDocument {
 	const names = new NameTable(bytes)
 	// Last child per open depth, so siblings link without a per-node lastChild array.
 	let lastChild = new Int32Array(64)
+	const malformed: number[] = []
 	let depth = 0
 	let count = 0
 
@@ -332,6 +359,74 @@ export function parseXml(input: Uint8Array): XmlDocument {
 		}
 
 		const nameId = names.intern(i + 1, j, hash)
+		// Attributes are checked on the way to the tag's end: whitespace, name, "=", quoted value, repeated.
+		// The first irregularity marks the element malformed and hands the rest to the permissive scan below,
+		// which only finds the end.
+		let malformedTag = false
+		let attributes = 0
+
+		for (;;) {
+			const separated = isSpace(bytes[j])
+
+			while (j < length && isSpace(bytes[j])) j++
+
+			const b = bytes[j]
+
+			if (b === GT || (b === SLASH && bytes[j + 1] === GT)) break
+
+			if (!separated || b === SLASH || j >= length) {
+				malformedTag = j < length
+				break
+			}
+
+			const nameStart = j
+
+			while (j < length) {
+				const c = bytes[j]
+
+				if (c === 61 || c === GT || c === SLASH || c === LT || c === 32 || c === 10 || c === 9 || c === 13) break
+
+				j++
+			}
+
+			const nameEnd = j
+
+			while (j < length && isSpace(bytes[j])) j++
+
+			if (bytes[j] !== 61) {
+				malformedTag = true
+				break
+			}
+
+			j++
+
+			while (j < length && isSpace(bytes[j])) j++
+
+			const quote = bytes[j]
+
+			if (quote !== DQUOTE && quote !== SQUOTE) {
+				malformedTag = true
+				break
+			}
+
+			const close = bytes.indexOf(quote, j + 1)
+
+			if (close < 0) throw new XmlError("unterminated", "Unterminated attribute value", j)
+
+			if (attributes * 2 + 2 > attributeNames.length) {
+				const grown = new Int32Array(attributeNames.length * 2)
+
+				grown.set(attributeNames)
+				attributeNames = grown
+			}
+
+			attributeNames[attributes * 2] = nameStart
+			attributeNames[attributes * 2 + 1] = nameEnd
+			attributes++
+			j = close + 1
+		}
+
+		if (!malformedTag && attributes > 1) malformedTag = repeatsName(bytes, attributeNames, attributes)
 
 		// The ">" ending the start tag is the first one outside a quoted value. A "<" inside a quoted value is
 		// left to attribute decoding; one outside means the tag never ended.
@@ -359,6 +454,8 @@ export function parseXml(input: Uint8Array): XmlDocument {
 		}
 
 		const element = add(NodeKind.Element, i, j + 1, current, nameId)
+
+		if (malformedTag) malformed.push(element)
 
 		i = j + 1
 
@@ -413,6 +510,7 @@ export function parseXml(input: Uint8Array): XmlDocument {
 		nameIds,
 		names: names.names,
 		nameLengths: names.lengths,
-		encoding
+		encoding,
+		malformed: malformed.length === 0 ? undefined : Int32Array.from(malformed)
 	})
 }

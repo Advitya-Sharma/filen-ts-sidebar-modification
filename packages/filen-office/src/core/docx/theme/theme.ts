@@ -411,8 +411,7 @@ function childByLocal(r: PartReader, node: number, local: string): number {
 
 export function parseTheme(document: XmlDocument): Theme {
 	const r = partReader(document)
-	// Checked first, so the property reads that follow find every start tag already validated.
-	const malformed = r.sweepAll()
+	const malformed = r.hasMalformed()
 	const root = document.documentElement()
 
 	if (root < 0 || drawingLocal(r, root) !== "theme") return new Theme(undefined, new Map(), EMPTY_FONTS, EMPTY_FONTS, malformed)
