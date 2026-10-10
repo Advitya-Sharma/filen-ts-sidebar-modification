@@ -137,6 +137,23 @@ describe("getPlaylistsDirectoryUuid", () => {
 })
 
 describe("fetchPlaylistEntries", () => {
+	it("lists nothing and creates nothing when `.filen` or Playlists is missing", async () => {
+		findDirectoryUuid.mockImplementation((parentUuid: string | null) =>
+			Promise.resolve(parentUuid === null ? DOT_FILEN_UUID : undefined)
+		)
+		const { fetchPlaylistEntries } = await freshPlaylists()
+
+		await expect(fetchPlaylistEntries()).resolves.toEqual([])
+
+		findDirectoryUuid.mockResolvedValue(undefined)
+
+		const { fetchPlaylistEntries: fetchWithoutDotFilen } = await freshPlaylists()
+
+		await expect(fetchWithoutDotFilen()).resolves.toEqual([])
+		expect(createDirectory).not.toHaveBeenCalled()
+		expect(listDirectory).not.toHaveBeenCalled()
+	})
+
 	it("isolates a per-file failure: one ok, one download-rejected, one parse-invalid — never rejects the whole call", async () => {
 		mockDirectoryResolve()
 

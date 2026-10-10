@@ -16,7 +16,14 @@ import { sdkApi } from "@/lib/sdk/client"
 import { runOp } from "@/lib/actions/outcome"
 import { asErrorDTO, DIRECTORY_NOT_FOUND_PREFIX, PARENT_NOT_FOUND_PREFIX, type ErrorDTO } from "@/lib/sdk/errors"
 import { log } from "@/lib/log"
-import { dotFilenSubdirUuid, forgetDotFilenSubdir, getDotFilenSubdir, noteDotFilenFile, onDotFilenSubdirForgotten } from "@/lib/dotFilen"
+import {
+	dotFilenSubdirUuid,
+	findDotFilenSubdir,
+	forgetDotFilenSubdir,
+	getDotFilenSubdir,
+	noteDotFilenFile,
+	onDotFilenSubdirForgotten
+} from "@/lib/dotFilen"
 import { narrowItem, asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
 import { buildQueueTrack } from "@/features/audio/lib/handoff"
 import type { QueueTrack } from "@/features/audio/store/audioQueue"
@@ -190,7 +197,16 @@ async function readOnePlaylistEntry(file: SdkFile, existence: TrackExistence, ne
 // isolated: a parse/download failure on ONE playlist file surfaces as a degraded row rather than
 // rejecting the whole call.
 export async function fetchPlaylistEntries(): Promise<PlaylistEntry[]> {
-	const dirUuid = await getPlaylistsDirectoryUuid()
+	// A read creates nothing: no Playlists directory (or no `.filen`) is no playlists, until the first one is saved.
+	const dirUuid = await findDotFilenSubdir(PLAYLISTS_DIR_NAME)
+
+	if (dirUuid === null) {
+		knownPlaylistFileUuids.clear()
+		parsedByFileUuid = new Map()
+
+		return []
+	}
+
 	const { files } = await runPlaylistsDirectoryOp(sdkApi.listDirectory({ kind: "uuid", uuid: dirUuid }))
 
 	knownPlaylistFileUuids.clear()
