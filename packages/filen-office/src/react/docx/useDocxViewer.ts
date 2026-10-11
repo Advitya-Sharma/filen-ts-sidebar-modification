@@ -19,13 +19,15 @@ export interface DocxViewerOptions {
 	// Space between and around pages (px).
 	readonly gap?: number
 	readonly capabilities?: DocxCapabilities
+	// Space kept right of the pages (px on screen), left out of fit-to-width.
+	readonly aside?: number
 }
 
 export interface DocxViewer {
 	readonly state: DocxViewerState
 	readonly dispatch: (command: DocxViewerCommand) => void
 	// Spread onto <DocxPages>.
-	readonly pages: Pick<DocxPagesProps, "document" | "zoom" | "gap" | "ref" | "onPageChange" | "onViewportWidth" | "find">
+	readonly pages: Pick<DocxPagesProps, "document" | "zoom" | "gap" | "ref" | "onPageChange" | "onViewportWidth" | "find" | "asideWidth">
 }
 
 interface FindState {
@@ -43,13 +45,14 @@ const CLOSED: FindState = { open: false, query: "", caseSensitive: false, active
 
 export function useDocxViewer(document: DocxDocument, options: DocxViewerOptions = {}): DocxViewer {
 	const gap = options.gap ?? 16
+	const aside = Math.max(0, options.aside ?? 0)
 	const pagesRef = useRef<DocxPagesHandle | null>(null)
 	const [zoomMode, setZoomMode] = useState<"fitWidth" | number>("fitWidth")
 	const [viewportWidth, setViewportWidth] = useState(0)
 	const [page, setPage] = useState(0)
 	const [find, setFind] = useState<FindState>(CLOSED)
 	const pageWidth = document.pages[0]?.width ?? document.info?.pageWidth ?? 816
-	const fitZoom = fitWidthZoom(viewportWidth, pageWidth, gap)
+	const fitZoom = fitWidthZoom(viewportWidth - aside, pageWidth, gap)
 	const zoom = zoomMode === "fitWidth" ? fitZoom : zoomMode
 	const pendingScroll = useRef<DocxFindMatch | null>(null)
 	const session = document.session
@@ -201,7 +204,8 @@ export function useDocxViewer(document: DocxDocument, options: DocxViewerOptions
 			ref: pagesRef,
 			onPageChange: setPage,
 			onViewportWidth: setViewportWidth,
-			find: open ? { matches: find.matches, active } : undefined
+			find: open ? { matches: find.matches, active } : undefined,
+			asideWidth: aside
 		}
 	}
 }

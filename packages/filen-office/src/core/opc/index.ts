@@ -43,3 +43,4 @@ export {
 	type ZipPlan,
 	type ZipPlanItem
 } from "./zipWriter"
+export { SliceClock, sliceClock, type Slicing } from "../slicing"

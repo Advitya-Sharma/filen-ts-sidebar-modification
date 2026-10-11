@@ -1,7 +1,7 @@
 import { OpcError, Relationships, ZipError, partKey } from "../../opc/index"
-import { XmlError, type XmlDocument } from "../../xml/index"
+import { XmlError, sliceClock, type Slicing, type XmlDocument } from "../../xml/index"
 import type { DocxPackage } from "../package"
-import { ModelTables, buildPart, type BuildCounts, type MaxIds } from "./build"
+import { ModelTables, buildPart, buildPartSliced, type BuildCounts, type MaxIds } from "./build"
 import {
 	readCommentsExtended,
 	readCommentsExtensible,
@@ -15,7 +15,7 @@ import type { DrawingInfo, VmlInfo } from "./drawings"
 import { Item } from "./kinds"
 import { El, Ns, STRICT_WORDPROCESSINGML } from "./namespaces"
 import type { StoryPart } from "./part"
-import { partReader, type PartReader } from "./reader"
+import { partReader, partReaderSliced, type PartReader } from "./reader"
 import type { DocxSettings } from "./settings"
 import type { Story } from "./story"
 
@@ -80,6 +80,14 @@ export interface ModelInit {
 	readonly missingParts: readonly string[]
 	readonly malformedParts: readonly string[]
 	readonly rejectedParts: readonly string[]
+}
+
+// The growable lists of a derived model (DocxModel.derive): entries added at the end, removed as undefined.
+export interface ModelExtension {
+	readonly parts: (StoryPart | undefined)[]
+	readonly stories: (Story | undefined)[]
+	readonly drawings: (DrawingInfo | undefined)[]
+	readonly vml: (VmlInfo | undefined)[]
 }
 
 // The read model of one document: story parts as item streams, stories, sections, notes and comments.
@@ -154,6 +162,21 @@ export class DocxModel {
 	// Malformed markup was found and kept opaque: such a document is view-only.
 	get malformed(): boolean {
 		return this.counts.malformed > 0 || this.malformedParts.length > 0
+	}
+
+	// A model sharing this one's parts and tables whose part, story, drawing and VML lists can grow (and
+	// drop what was added): layout of unsaved edits adds a part for every edited block and drops it when the
+	// block changes again. This model is left as it is.
+	derive(): { readonly model: DocxModel; readonly extension: ModelExtension } {
+		const extension: ModelExtension = {
+			parts: this.parts.slice(),
+			stories: this.stories.slice(),
+			drawings: this.drawings.slice(),
+			vml: this.vml.slice()
+		}
+		const model = Object.assign(Object.create(DocxModel.prototype) as DocxModel, this, extension)
+
+		return { model, extension }
 	}
 
 	partOf(story: Story): StoryPart {
@@ -301,10 +324,17 @@ function openWrappers(part: StoryPart, start: number, end: number, body: number)
 	return out.reverse()
 }
 
+export interface DocxModelOptions {
+	// Inflates, parses and builds in slices, giving the host a turn whenever one is used up (between
+	// top-level blocks while building), so no long task blocks a UI thread.
+	readonly slicing?: Slicing
+}
+
 // Reads every story part the main document needs: the body, the headers and footers its sections refer
 // to, notes and comments. Parts are fetched in parallel and built one after the other. Malformed markup
 // never throws: unreadable parts are listed in malformedParts, unreadable elements become opaque items.
-export async function buildDocxModel(pkg: DocxPackage): Promise<DocxModel> {
+export async function buildDocxModel(pkg: DocxPackage, options: DocxModelOptions = {}): Promise<DocxModel> {
+	const clock = options.slicing === undefined ? undefined : sliceClock(options.slicing)
 	const tables = new ModelTables()
 	const parts: StoryPart[] = []
 	const indexByKey = new Map<string, number>()
@@ -322,7 +352,7 @@ export async function buildDocxModel(pkg: DocxPackage): Promise<DocxModel> {
 		let relationships: Relationships
 
 		try {
-			document = await pkg.xml(name)
+			document = await pkg.xml(name, clock)
 		} catch (error) {
 			if (!isDocumentError(error)) throw error
 
@@ -342,9 +372,14 @@ export async function buildDocxModel(pkg: DocxPackage): Promise<DocxModel> {
 
 		return { name, document, relationships }
 	}
-	const add = (loaded: LoadedPart, reader: PartReader): StoryPart => {
+	const readerOf = (document: XmlDocument): PartReader | Promise<PartReader> =>
+		clock === undefined ? partReader(document) : partReaderSliced(document, clock)
+	const add = async (loaded: LoadedPart, reader: PartReader): Promise<StoryPart> => {
 		const index = parts.length
-		const part = buildPart(reader, tables, index, loaded.name, loaded.relationships)
+		const part =
+			clock === undefined
+				? buildPart(reader, tables, index, loaded.name, loaded.relationships)
+				: await buildPartSliced(reader, tables, index, loaded.name, loaded.relationships, clock)
 
 		parts.push(part)
 		indexByKey.set(partKey(loaded.name), index)
@@ -357,7 +392,7 @@ export async function buildDocxModel(pkg: DocxPackage): Promise<DocxModel> {
 		if (name === undefined) return undefined
 
 		try {
-			return await pkg.xml(name)
+			return await pkg.xml(name, clock)
 		} catch (error) {
 			if (!isDocumentError(error)) throw error
 
@@ -368,8 +403,8 @@ export async function buildDocxModel(pkg: DocxPackage): Promise<DocxModel> {
 	}
 
 	const main = await load(pkg.mainPart)
-	const mainReader = main === undefined ? undefined : partReader(main.document)
-	const body = main === undefined || mainReader === undefined ? undefined : add(main, mainReader)
+	const mainReader = main === undefined ? undefined : await readerOf(main.document)
+	const body = main === undefined || mainReader === undefined ? undefined : await add(main, mainReader)
 	const seeds = tables.sections.slice()
 	const references = seeds.map(seed => ({
 		headers:
@@ -413,21 +448,21 @@ export async function buildDocxModel(pkg: DocxPackage): Promise<DocxModel> {
 		optional("people")
 	])
 
-	loaded.forEach((part, k) => {
+	for (const [k, part] of loaded.entries()) {
 		const role = wanted[k]?.role
 
-		if (part === undefined || role === undefined) return
+		if (part === undefined || role === undefined) continue
 
-		const reader = partReader(part.document)
+		const reader = await readerOf(part.document)
 
 		if (reader.code(part.document.documentElement()) !== ROOTS[role]) {
 			rejectedParts.push(part.name)
 
-			return
+			continue
 		}
 
-		add(part, reader)
-	})
+		await add(part, reader)
+	}
 
 	const storyOfPart = (name: string | undefined, kind: Item): number => {
 		if (name === undefined) return -1

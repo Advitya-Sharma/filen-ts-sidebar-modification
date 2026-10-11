@@ -68,6 +68,8 @@ export interface DocxEditorOptions {
 	readonly normalizeList?: ListNormalizer
 	// Undo steps kept (default 100, as ProseMirror's history).
 	readonly historyDepth?: number
+	// The story's editing document built ahead (DocxEditorSession.open builds it in slices).
+	readonly built?: StoryDoc
 }
 
 const nodes = docxSchema.nodes
@@ -148,6 +150,7 @@ export class DocxEditorSession {
 	private readonly formats: FormatResolver
 	private readonly hostReadOnly: boolean
 	private readonly listeners = new Set<(snapshot: DocxEditorSnapshot) => void>()
+	private readonly appliedListeners = new Set<(transactions: readonly Transaction[], state: EditorState) => void>()
 	private current: EditorState
 	private saved: Node
 	private version = 0
@@ -167,7 +170,7 @@ export class DocxEditorSession {
 		this.context = context
 		this.hostReadOnly = options.readOnly ?? false
 		this.builder = new DocxDocBuilder(context)
-		this.story = this.builder.build(story)
+		this.story = options.built !== undefined && options.built.story === story ? options.built : this.builder.build(story)
 		this.formats = new FormatResolver(context, this.story.part)
 		this.current = EditorState.create({
 			doc: this.story.doc,
@@ -185,6 +188,22 @@ export class DocxEditorSession {
 		if (proof !== null) this.prove(proof)
 
 		this.saved = this.current.doc
+	}
+
+	// Opens a session building the story's document in slices (`pause` gives the host a turn whenever
+	// `sliceMs` passed): no long task on a UI thread however long the document.
+	static async open(
+		context: DocxEditContext,
+		options: DocxEditorOptions,
+		slicing: { readonly pause: () => Promise<void>; readonly sliceMs: number; readonly now: () => number }
+	): Promise<DocxEditorSession> {
+		const story = options.story ?? context.model.body
+
+		if (story === undefined) throw new RangeError("The document has no body")
+
+		const built = await new DocxDocBuilder(context).buildSliced(story, slicing.pause, slicing.sliceMs, slicing.now)
+
+		return new DocxEditorSession(context, { ...options, built })
 	}
 
 	get state(): EditorState {
@@ -268,9 +287,20 @@ export class DocxEditorSession {
 		}
 	}
 
+	// Hears every change of state synchronously, with the transactions that made it (the one applied first,
+	// then those the invariants appended): a paged view lays the document out again from them.
+	onApplied(listener: (transactions: readonly Transaction[], state: EditorState) => void): () => void {
+		this.appliedListeners.add(listener)
+
+		return () => {
+			this.appliedListeners.delete(listener)
+		}
+	}
+
 	dispose(): void {
 		this.disposed = true
 		this.listeners.clear()
+		this.appliedListeners.clear()
 	}
 
 	snapshot(): DocxEditorSnapshot {
@@ -289,6 +319,9 @@ export class DocxEditorSession {
 		if (result.transactions.length === 0) return false
 
 		this.current = result.state
+
+		for (const listener of this.appliedListeners) listener(result.transactions, result.state)
+
 		this.changed()
 
 		return true

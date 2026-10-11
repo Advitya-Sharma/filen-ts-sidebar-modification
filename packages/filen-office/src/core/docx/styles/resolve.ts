@@ -192,13 +192,13 @@ const ZERO_DXA: WidthProps = { value: 0, type: "dxa" }
 const AUTO_WIDTH: WidthProps = { value: 0, type: "auto" }
 
 export class PropertyResolver {
-	readonly styles: DocxStyles
-	readonly numbering: Numbering | undefined
+	private stylesValue: DocxStyles
+	private numberingValue: Numbering | undefined
 	readonly theme: Theme | undefined
 	readonly settings: StyleSettings
-	private readonly defaultParagraphStyle: StyleDef | undefined
-	private readonly defaultCharacterStyle: StyleDef | undefined
-	private readonly defaultTableStyle: StyleDef | undefined
+	private defaultParagraphStyle: StyleDef | undefined
+	private defaultCharacterStyle: StyleDef | undefined
+	private defaultTableStyle: StyleDef | undefined
 	// Per style index: the chain's own properties merged root to leaf.
 	private readonly flatParagraph: (ParagraphProps | undefined)[] = []
 	private readonly flatRun: (RunProps | undefined)[] = []
@@ -217,13 +217,38 @@ export class PropertyResolver {
 	private resolvedRuns = 0
 
 	constructor(parts: ResolverParts = {}) {
-		this.styles = parts.styles ?? DocxStyles.empty()
-		this.numbering = parts.numbering
+		this.stylesValue = parts.styles ?? DocxStyles.empty()
+		this.numberingValue = parts.numbering
 		this.theme = parts.theme
 		this.settings = parts.settings ?? DEFAULT_STYLE_SETTINGS
-		this.defaultParagraphStyle = this.styles.defaultOf("paragraph")
-		this.defaultCharacterStyle = this.styles.defaultOf("character")
-		this.defaultTableStyle = this.styles.defaultOf("table")
+		this.defaultParagraphStyle = this.stylesValue.defaultOf("paragraph")
+		this.defaultCharacterStyle = this.stylesValue.defaultOf("character")
+		this.defaultTableStyle = this.stylesValue.defaultOf("table")
+	}
+
+	get styles(): DocxStyles {
+		return this.stylesValue
+	}
+
+	get numbering(): Numbering | undefined {
+		return this.numberingValue
+	}
+
+	// Resolves with other style and numbering definitions from now on (an editor adding the definitions a save
+	// will add): what was resolved with the old ones is forgotten.
+	redefine(styles: DocxStyles, numbering: Numbering | undefined): void {
+		this.stylesValue = styles
+		this.numberingValue = numbering
+		this.defaultParagraphStyle = styles.defaultOf("paragraph")
+		this.defaultCharacterStyle = styles.defaultOf("character")
+		this.defaultTableStyle = styles.defaultOf("table")
+		this.flatParagraph.length = 0
+		this.flatRun.length = 0
+		this.flatTable.length = 0
+		this.contexts.clear()
+		this.paragraphs.clear()
+		this.tables.clear()
+		this.sections.clear()
 	}
 
 	// ---- styles -----------------------------------------------------------------------------------------

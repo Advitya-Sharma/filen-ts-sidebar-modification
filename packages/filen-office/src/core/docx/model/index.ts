@@ -1,4 +1,14 @@
-export { buildDocxModel, DocxModel, type CommentAnchorTable, type HeaderFooterSet, type MediaRef, type Section } from "./document"
+export {
+	buildDocxModel,
+	DocxModel,
+	type CommentAnchorTable,
+	type DocxModelOptions,
+	type HeaderFooterSet,
+	type MediaRef,
+	type ModelExtension,
+	type Section
+} from "./document"
+export { CommentAnchors, ModelTables, buildPart, buildPartSliced } from "./build"
 export type { BuildCounts, MaxIds } from "./build"
 export type { CommentExtension, CommentInfo, Person } from "./comments"
 export type { AnchorInfo, AnchorPosition, DiagramIds, DrawingInfo, DrawingPlacement, VmlInfo, VmlKind, WrapType } from "./drawings"
@@ -33,7 +43,7 @@ export {
 	type SdtTable,
 	type TableTable
 } from "./part"
-export { PartReader, partReader } from "./reader"
+export { PartReader, partReader, partReaderSliced } from "./reader"
 export { NO_SETTINGS, readSettings, type CompatSetting, type DocumentProtection, type DocxSettings, type WriteProtection } from "./settings"
 export { modelStats, type DocxModelStats } from "./stats"
 export type { NoteType, Story, StoryKind } from "./story"

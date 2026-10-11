@@ -5,6 +5,7 @@ import {
 	OBJECT_INTS,
 	ObjectKind,
 	PropertyResolver,
+	Revision,
 	PropsStore,
 	RevisionView,
 	SOURCE_INTS,
@@ -20,6 +21,9 @@ import {
 	type DocumentLayout,
 	type DocxModel,
 	type DocxPackage,
+	type DocxStyles,
+	type LayoutEdits,
+	type Numbering,
 	type ObjectSizer,
 	type PageDisplayList
 } from "../../core/docx/index"
@@ -31,9 +35,10 @@ import {
 	readDocxFontTable,
 	type FontAssets,
 	type FontFaceDescriptor,
-	type FontHost
+	type FontHost,
+	type FontRequest
 } from "../../core/fonts/index"
-import { OpcError, ZipError, type ByteSource, type ContentTypes, type OpcPackage } from "../../core/opc/index"
+import { OpcError, SliceClock, ZipError, type ByteSource, type ContentTypes, type OpcPackage, type Slicing } from "../../core/opc/index"
 import {
 	FRAGMENT_FLOATS,
 	FRAGMENT_INTS,
@@ -46,6 +51,8 @@ import {
 	type TextMeasurer
 } from "../../core/text/index"
 import { XmlError, type XmlDocument } from "../../core/xml/index"
+import { collectAnnotations } from "./annotate"
+import type { DocxAnnotations } from "./annotations"
 import { findMatches, type FindablePage } from "./find"
 import { bookmarkIndex, paragraphLinks, paragraphOf, type LinkRange } from "./links"
 import {
@@ -84,6 +91,26 @@ export interface DocxEngineServices {
 
 export type DocxEmit = (event: DocxEvent, transfer: readonly ArrayBuffer[]) => void
 
+// What an editing host (in-thread) gets from the engine once the document is laid out the first time.
+export interface DocxEngineOpen {
+	readonly pkg: DocxPackage
+	// The model as opened, and the one the layout reads (edited blocks added as overlay parts).
+	readonly model: DocxModel
+	readonly layoutModel: DocxModel
+	readonly layout: DocumentLayout
+	readonly store: PropsStore
+	readonly styles: DocxStyles | undefined
+	readonly numbering: Numbering | undefined
+	readonly resolver: PropertyResolver
+}
+
+// Editing: the engine lays out `edits` over the model `prepare` derives, records the item maps positions
+// need, keeps the model, and hands the host what it built.
+export interface DocxEngineEditing {
+	prepare(model: DocxModel): { readonly model: DocxModel; readonly edits: LayoutEdits }
+	opened(open: DocxEngineOpen): void
+}
+
 // Images larger than this (inflated) are not shown.
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024
 const COLOR = /^[0-9A-Fa-f]{6}$/
@@ -97,13 +124,13 @@ function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
 }
 
-async function optionalXml(pkg: DocxPackage, kind: string): Promise<XmlDocument | undefined> {
+async function optionalXml(pkg: DocxPackage, kind: string, slicing?: Slicing): Promise<XmlDocument | undefined> {
 	const name = pkg.part(kind)
 
 	if (name === undefined) return undefined
 
 	try {
-		return await pkg.xml(name)
+		return await pkg.xml(name, slicing)
 	} catch (error) {
 		if (isDocumentError(error)) return undefined
 
@@ -117,7 +144,7 @@ function bufferOf(array: ArrayBufferView): ArrayBuffer | undefined {
 	return buffer instanceof ArrayBuffer ? buffer : undefined
 }
 
-function drawingData(list: DrawingList, transfer: ArrayBuffer[]): DrawingData {
+function drawingData(list: DrawingList, transfer: ArrayBuffer[], textFonts?: readonly string[]): DrawingData {
 	const compact = list.compact()
 	const data: DrawingData = {
 		width: compact.width,
@@ -131,16 +158,38 @@ function drawingData(list: DrawingList, transfer: ArrayBuffer[]): DrawingData {
 		strokes: compact.strokes,
 		images: compact.images,
 		texts: compact.texts,
-		shadows: compact.shadows
+		shadows: compact.shadows,
+		...(compact.itemClips === null ? {} : { clips: compact.clips, itemClips: compact.itemClips }),
+		...(textFonts === undefined ? {} : { textFonts }),
+		...(compact.background === undefined ? {} : { background: compact.background })
 	}
 
-	for (const array of [data.commands, data.coords, data.itemFloats, data.itemInts]) {
+	for (const array of [
+		data.commands,
+		data.coords,
+		data.itemFloats,
+		data.itemInts,
+		...(data.itemClips === undefined ? [] : [data.itemClips])
+	]) {
 		const buffer = bufferOf(array)
 
 		if (buffer !== undefined) transfer.push(buffer)
 	}
 
 	return data
+}
+
+// Formatting changes (property revisions other than a section's): what puts balloons in All Markup.
+function formattingChanges(kinds: Int32Array): number {
+	let count = 0
+
+	for (const kind of kinds) {
+		const property = kind >= Revision.RunProperties && kind <= Revision.Numbering && kind !== Revision.SectionProperties
+
+		if (property || kind === Revision.CellMerge) count++
+	}
+
+	return count
 }
 
 // Records what the layout realm registered so a renderer in another realm can register the same aliases.
@@ -189,6 +238,7 @@ export class DocxEngine implements DocxSessionApi {
 	private objectCache: Map<number, DocxObjectData> | undefined = undefined
 	private bookmarkLocations: Map<string, DocxLocation> | undefined = undefined
 	private releasing: Promise<void> | undefined = undefined
+	private annotationCache: DocxAnnotations | undefined = undefined
 	private readonly mathSizes = new Map<number, number>()
 	private readonly pendingFaces: DocxFontFace[] = []
 	private readonly links: DocxLinkTarget[] = []
@@ -199,12 +249,24 @@ export class DocxEngine implements DocxSessionApi {
 	private shippedDecorations = 0
 	private shippedLinks = 0
 
-	constructor(source: ByteSource, services: DocxEngineServices, emit: DocxEmit, options: DocxOpenOptions = {}) {
+	// The model the layout reads when editing (overlay parts of edited blocks included).
+	private layoutModel: DocxModel | undefined = undefined
+	private readonly editing: DocxEngineEditing | undefined
+
+	constructor(
+		source: ByteSource,
+		services: DocxEngineServices,
+		emit: DocxEmit,
+		options: DocxOpenOptions = {},
+		editing?: DocxEngineEditing
+	) {
 		this.source = source
 		this.services = services
 		this.emit = emit
-		this.view = options.view === "original" ? RevisionView.Original : RevisionView.Final
-		this.retain = options.retain === true
+		this.view =
+			options.view === "original" ? RevisionView.Original : options.view === "markup" ? RevisionView.Markup : RevisionView.Final
+		this.retain = options.retain === true || editing !== undefined
+		this.editing = editing
 	}
 
 	get closed(): boolean {
@@ -231,7 +293,18 @@ export class DocxEngine implements DocxSessionApi {
 	}
 
 	private async open(): Promise<void> {
-		const opened = await openDocxPackage(this.source)
+		// Inflating, parsing and building the model in slices: no long task on a UI thread. Closing the engine
+		// stops the open at the next slice.
+		const slicing = new SliceClock({
+			pause: async () => {
+				await this.services.yield()
+
+				if (this.closed) throw new Error("Closed")
+			},
+			sliceMs: this.services.sliceMs ?? 12,
+			now: this.services.now ?? Date.now
+		})
+		const opened = await openDocxPackage(this.source, { slicing })
 
 		if (this.closed) return
 
@@ -246,21 +319,21 @@ export class DocxEngine implements DocxSessionApi {
 		this.pkg = { opc: pkg.opc, contentTypes: pkg.contentTypes }
 		this.mainPartBytes = pkg.opc.entry(pkg.mainPart)?.uncompressedSize ?? 0
 
-		const model = await buildDocxModel(pkg)
+		const model = await buildDocxModel(pkg, { slicing })
 
 		if (this.closed) return
 
 		this.model = model
 
 		const store = new PropsStore()
-		const stylesXml = await optionalXml(pkg, "styles")
+		const stylesXml = await optionalXml(pkg, "styles", slicing)
 		const styles = stylesXml === undefined ? undefined : parseStyles(stylesXml, store)
-		const numberingXml = await optionalXml(pkg, "numbering")
+		const numberingXml = await optionalXml(pkg, "numbering", slicing)
 		const numbering = numberingXml === undefined ? undefined : parseNumbering(numberingXml, store, styles)
-		const themeXml = await optionalXml(pkg, "theme")
+		const themeXml = await optionalXml(pkg, "theme", slicing)
 		const theme = themeXml === undefined ? undefined : parseTheme(themeXml)
 		const fontTablePart = pkg.part("fontTable")
-		const fontTable = await optionalXml(pkg, "fontTable")
+		const fontTable = await optionalXml(pkg, "fontTable", slicing)
 
 		if (this.closed) return
 
@@ -301,7 +374,10 @@ export class DocxEngine implements DocxSessionApi {
 					estimatedPages: breaks + 1,
 					pageWidth: pageWidth > 0 && Number.isFinite(pageWidth) ? pageWidth : 816,
 					pageHeight: pageHeight > 0 && Number.isFinite(pageHeight) ? pageHeight : 1056,
-					mainPartBytes: this.mainPartBytes
+					mainPartBytes: this.mainPartBytes,
+					comments: model.comments.length,
+					revisions: model.parts.reduce((sum, part) => sum + part.revisions.count, 0),
+					formatting: model.parts.reduce((sum, part) => sum + formattingChanges(part.revisions.kind), 0)
 				}
 			},
 			[]
@@ -316,18 +392,24 @@ export class DocxEngine implements DocxSessionApi {
 				return undefined
 			}
 		}
-		const layout = layoutDocument(model, resolver, fonts, services.measurer, {
+		const prepared = this.editing?.prepare(model)
+
+		this.layoutModel = prepared?.model
+
+		const layout = layoutDocument(prepared?.model ?? model, resolver, fonts, services.measurer, {
 			store,
 			sizer,
 			view: this.view,
 			signal: this.signal,
 			sliceMs: services.sliceMs ?? 12,
 			yield: services.yield,
-			...(services.now === undefined ? {} : { now: services.now })
+			...(services.now === undefined ? {} : { now: services.now }),
+			...(prepared === undefined ? {} : { edits: prepared.edits, recordMaps: true })
 		})
 
 		this.layout = layout
 		this.pages = layout.pages
+		this.editing?.opened({ pkg, model, layoutModel: prepared?.model ?? model, layout, store, styles, numbering, resolver })
 
 		const unsubscribe = layout.subscribe(event => {
 			// The final batch goes out once, below, with the pages laid out again for page count fields.
@@ -351,6 +433,20 @@ export class DocxEngine implements DocxSessionApi {
 			this.releasing = this.release()
 			await this.releasing
 		}
+	}
+
+	// Editing: sends pages laid out again (and any new ones); a layout with fewer pages than were sent says
+	// so in pageCount.
+	shipPages(replace: readonly number[], final = false): void {
+		const layout = this.layout
+
+		if (layout === undefined || this.closed) return
+
+		this.shippedPages = Math.min(this.shippedPages, layout.pages.length)
+		this.ship(
+			final,
+			replace.filter(index => index < this.shippedPages)
+		)
 	}
 
 	private ship(final: boolean, replace: readonly number[] = []): void {
@@ -430,7 +526,8 @@ export class DocxEngine implements DocxSessionApi {
 				shift: table.shift[id] ?? 0,
 				ascent: extents.ascent,
 				descent: extents.descent,
-				revision: info[id]?.revision ?? 0
+				revision: info[id]?.revision ?? 0,
+				author: info[id]?.author ?? 0
 			})
 		}
 
@@ -453,17 +550,18 @@ export class DocxEngine implements DocxSessionApi {
 		return index
 	}
 
-	private sourceLinks(story: number, item: number, text: string): readonly LinkRange[] {
-		const model = this.model
+	private sourceLinks(story: number, sourcePart: number, item: number, text: string): readonly LinkRange[] {
+		const model = this.layoutModel ?? this.model
 
 		if (model === undefined || story < 0 || item < 0) return []
 
-		const key = story * 0x4000000 + item
+		// The paragraph's own part (an edited one is laid out from its overlay part), else its story's.
+		const partIndex = sourcePart >= 0 ? sourcePart : (model.stories[story]?.part ?? -1)
+		const key = partIndex * 0x4000000 + item
 		let ranges = this.paragraphLinkCache.get(key)
 
 		if (ranges === undefined) {
-			const storyInfo = model.stories[story]
-			const part = storyInfo === undefined ? undefined : model.parts[storyInfo.part]
+			const part = model.parts[partIndex]
 
 			ranges = part === undefined || part.kinds[item] !== Item.Paragraph ? [] : paragraphLinks(part, item, text, this.view)
 			this.paragraphLinkCache.set(key, ranges)
@@ -522,6 +620,7 @@ export class DocxEngine implements DocxSessionApi {
 			const at = source * SOURCE_INTS
 			const ranges = this.sourceLinks(
 				page.sourceInts[at + SourceInt.STORY] ?? -1,
+				page.sourceParts[source] ?? -1,
 				page.sourceInts[at + SourceInt.ITEM] ?? -1,
 				page.sourceTexts[source] ?? ""
 			)
@@ -584,6 +683,38 @@ export class DocxEngine implements DocxSessionApi {
 		return data
 	}
 
+	// The family list each positioned text of a drawing (metafile text) is drawn in, resolved like page
+	// text: an internal alias and a generic family, never the document's family name.
+	private async drawingFonts(list: DrawingList): Promise<string[] | undefined> {
+		const fonts = this.fonts
+		const requests: FontRequest[] = []
+
+		for (const text of list.texts) {
+			if (text.kind === "glyphs" || text.kind === "block")
+				requests.push({ family: text.run.font, bold: text.run.bold, italic: text.run.italic, slot: "ascii" })
+		}
+
+		if (fonts === undefined || requests.length === 0) return undefined
+
+		try {
+			await fonts.prepare(requests)
+		} catch {
+			return undefined
+		}
+
+		if (this.fonts !== fonts) return undefined
+
+		this.flushFaces()
+
+		return list.texts.map(text => {
+			if (text.kind !== "glyphs" && text.kind !== "block") return ""
+
+			const resolved = fonts.resolve({ family: text.run.font, bold: text.run.bold, italic: text.run.italic, slot: "ascii" })
+
+			return resolved.family === null ? resolved.generic : `"${resolved.family}", ${resolved.generic}`
+		})
+	}
+
 	private drawingLayer(model: DocxModel): Promise<DocxDrawings> {
 		this.drawings ??= DocxDrawings.open(model)
 
@@ -592,7 +723,7 @@ export class DocxEngine implements DocxSessionApi {
 
 	// One object as the renderer draws it, from the live model.
 	private async objectData(id: number, transfer: ArrayBuffer[]): Promise<DocxObjectData> {
-		const model = this.model
+		const model = this.layoutModel ?? this.model
 		const table = this.layout?.objects
 
 		if (model === undefined || table === undefined) return { kind: "placeholder", id, reason: "closed" }
@@ -621,11 +752,11 @@ export class DocxEngine implements DocxSessionApi {
 				drawingInfo !== undefined
 					? await drawings.drawing(drawingInfo)
 					: vmlInfo !== undefined
-						? drawings.vml(vmlInfo)
+						? await drawings.vmlDrawing(vmlInfo)
 						: ({ kind: "placeholder", reason: "missing" } as const)
 
 			return result.kind === "drawing"
-				? { kind: "drawing", id, drawing: drawingData(result.list, transfer) }
+				? { kind: "drawing", id, drawing: drawingData(result.list, transfer, await this.drawingFonts(result.list)) }
 				: { kind: "placeholder", id, reason: result.reason }
 		}
 
@@ -687,6 +818,21 @@ export class DocxEngine implements DocxSessionApi {
 				lineInts: page.text.lineInts
 			}
 		}
+	}
+
+	// Kept answers are cloned by the message, never transferred.
+	async annotations(): Promise<DocxAnnotations | null> {
+		await this.layout?.done.catch(() => undefined)
+
+		if (this.releasing !== undefined) await this.releasing
+
+		if (this.closed) return null
+
+		if (this.annotationCache === undefined && this.model !== undefined && this.layout?.final === true) {
+			this.annotationCache = collectAnnotations(this.model, this.layout.pages, this.view, this.layout.styles)
+		}
+
+		return this.annotationCache ?? null
 	}
 
 	// Where every laid-out paragraph starts: "part:paragraph" -> its first line.
@@ -788,6 +934,7 @@ export class DocxEngine implements DocxSessionApi {
 
 		this.objectCache = cache
 		this.bookmarkLocations = bookmarks
+		this.annotationCache ??= collectAnnotations(model, this.pages, this.view, this.layout?.styles)
 
 		// A worker's faces only served measuring; an in-thread engine's are the page's own, drawn until close.
 		if (this.services.replayFonts) {
@@ -819,6 +966,7 @@ export class DocxEngine implements DocxSessionApi {
 		this.bookmarks = undefined
 		this.objectCache = undefined
 		this.bookmarkLocations = undefined
+		this.annotationCache = undefined
 		this.paragraphLinkCache.clear()
 		this.mathSizes.clear()
 		this.objectIds.clear()

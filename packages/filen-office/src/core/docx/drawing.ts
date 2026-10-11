@@ -6,6 +6,7 @@ import { drawingReader } from "../drawingml/reader"
 import { convertGraphic, type ShapeContext } from "../drawingml/shape"
 import { convertSmartArt } from "../drawingml/smartart"
 import { ommlToMathTree, type MathElement, type OmmlOptions } from "../math/index"
+import { MAX_METAFILE_BYTES, convertMetafile, expandMetafiles, hasMetafileImages, type MetafileConversion } from "../metafile/index"
 import { OpcError, ZipError, type Relationships } from "../opc/index"
 import { convertVml, type VmlPlacement } from "../vml/index"
 import { XmlError, type XmlDocument } from "../xml/index"
@@ -13,8 +14,25 @@ import type { DocxModel, DrawingInfo, VmlInfo } from "./model/index"
 import { DEFAULT_COLOR_SCHEME_MAPPING, parseTheme, type Theme } from "./theme/index"
 
 // Bridges the docx model to the shared drawing layer: w:drawing (pictures, shapes, groups, canvases,
-// charts, SmartArt), VML (w:pict, w:object) and OMML. Media are resolved to part names, never read; external
-// targets resolve to nothing and draw as placeholders.
+// charts, SmartArt), VML (w:pict, w:object) and OMML. Media are resolved to part names, never read, except
+// EMF/WMF pictures, which are read and converted into the drawing; external targets resolve to nothing and
+// draw as placeholders.
+
+// Converted metafiles kept per document (equations repeat their pictures across pages), by count and by
+// the bytes their lists and embedded bitmaps hold.
+const MAX_CACHED_METAFILES = 48
+const MAX_CACHED_METAFILE_BYTES = 32 * 1024 * 1024
+
+function conversionBytes(conversion: MetafileConversion | undefined): number {
+	if (conversion === undefined || !conversion.ok) return 0
+
+	const list = conversion.list
+	let bytes = list.commands.byteLength + list.coords.byteLength + list.itemFloats.byteLength + list.itemInts.byteLength
+
+	for (const image of list.images) bytes += image.bytes?.byteLength ?? 0
+
+	return bytes
+}
 
 export interface DocxDrawingOptions {
 	// Draw outer shadows (a:outerShdw, v:shadow).
@@ -87,6 +105,9 @@ export class DocxDrawings {
 	private readonly mathOptions: OmmlOptions
 	// "part:node" of each w:txbxContent -> its story.
 	private textboxStories: Map<string, number> | null = null
+	// Part name -> its conversion, oldest first.
+	private readonly metafiles = new Map<string, { conversion: Promise<MetafileConversion | undefined>; bytes: number }>()
+	private metafileBytes = 0
 
 	constructor(model: DocxModel, theme: DrawingTheme, options: DocxDrawingOptions = {}) {
 		this.model = model
@@ -152,10 +173,92 @@ export class DocxDrawings {
 
 	// Never throws: anything unexpected becomes a "failed" placeholder.
 	async drawing(info: DrawingInfo): Promise<DocxDrawingResult> {
+		let result: DocxDrawingResult
+
 		try {
-			return await this.convert(info)
+			result = await this.convert(info)
 		} catch {
 			return { kind: "placeholder", reason: "failed" }
+		}
+
+		return result.kind === "drawing" ? { ...result, list: await this.withMetafiles(result.list) } : result
+	}
+
+	// vml() with its metafile pictures (MathType equations, legacy objects) converted. Never throws.
+	async vmlDrawing(info: VmlInfo): Promise<DocxVmlResult> {
+		const result = this.vml(info)
+
+		return result.kind === "drawing" ? { ...result, list: await this.withMetafiles(result.list) } : result
+	}
+
+	// The list with its EMF/WMF images replaced by their drawings; unchanged when none converts or anything
+	// fails (the images then draw as placeholders).
+	private async withMetafiles(list: DrawingList): Promise<DrawingList> {
+		if (!hasMetafileImages(list)) return list
+
+		try {
+			return await expandMetafiles(list, image => this.metafile(image.partName))
+		} catch {
+			return list
+		}
+	}
+
+	private metafile(partName: string | undefined): Promise<MetafileConversion | undefined> {
+		if (partName === undefined) return Promise.resolve(undefined)
+
+		const cached = this.metafiles.get(partName)
+
+		if (cached !== undefined) {
+			// Least recently used last out: a hit moves to the end.
+			this.metafiles.delete(partName)
+			this.metafiles.set(partName, cached)
+
+			return cached.conversion
+		}
+
+		const entry = { conversion: this.loadMetafile(partName), bytes: 0 }
+
+		this.metafiles.set(partName, entry)
+		void entry.conversion.then(
+			conversion => {
+				if (this.metafiles.get(partName) !== entry) return
+
+				entry.bytes = conversionBytes(conversion)
+				this.metafileBytes += entry.bytes
+				this.trimMetafiles()
+			},
+			() => {
+				if (this.metafiles.get(partName) === entry) this.metafiles.delete(partName)
+			}
+		)
+		this.trimMetafiles()
+
+		return entry.conversion
+	}
+
+	// Drops the least recently used conversions beyond the cache's bounds; a conversion larger than the
+	// whole budget is not kept at all.
+	private trimMetafiles(): void {
+		for (const [partName, entry] of this.metafiles) {
+			if (this.metafiles.size <= MAX_CACHED_METAFILES && this.metafileBytes <= MAX_CACHED_METAFILE_BYTES) return
+
+			this.metafiles.delete(partName)
+			this.metafileBytes -= entry.bytes
+		}
+	}
+
+	private async loadMetafile(partName: string): Promise<MetafileConversion | undefined> {
+		const opc = this.model.package.opc
+		const entry = opc.entry(partName)
+
+		if (entry === undefined || entry.uncompressedSize > MAX_METAFILE_BYTES) return undefined
+
+		try {
+			return convertMetafile(await opc.read(partName))
+		} catch (error) {
+			if (!isDocumentError(error)) throw error
+
+			return undefined
 		}
 	}
 

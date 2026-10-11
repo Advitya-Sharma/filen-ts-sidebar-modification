@@ -61,7 +61,13 @@ export const ItemFlag = {
 	// The item is hidden (kept for hit testing and alt text).
 	HIDDEN: 16,
 	// An arrowhead or other decoration generated for the preceding item.
-	DECORATION: 32
+	DECORATION: 32,
+	// Bits 6-7: how the item composites with what is under it (a metafile raster operation): multiply for
+	// AND, lighten for OR, difference for XOR.
+	BLEND_MULTIPLY: 64,
+	BLEND_LIGHTEN: 128,
+	BLEND_DIFFERENCE: 192,
+	BLEND_MASK: 192
 } as const
 
 export const ITEM_FILL_MODIFIER_MASK = 7
@@ -171,6 +177,33 @@ export type Paint =
 			readonly stretch: Inset | undefined
 			readonly tile: ImageTile | undefined
 	  }
+	// Triangles with a colour per vertex (x, y of three vertices each in the item's local space, and three
+	// colours each), shaded across (Gouraud), or through `ramp` from each triangle's first vertex (a centre);
+	// a renderer rasterises it at the resolution it draws at.
+	| { readonly kind: "shaded"; readonly points: Float32Array; readonly colors: Uint32Array; readonly ramp: ShadeRamp | null }
+	// A gradient in the item's local space through `matrix`: linear along (0, 0) to (1, 0), radial over the unit
+	// circle around the origin with its first stop at `focus` (default the centre); beyond its ends it pads,
+	// reflects or repeats.
+	| {
+			readonly kind: "gradient"
+			readonly type: "linear" | "radial"
+			readonly stops: GradientStops
+			readonly matrix: readonly number[]
+			readonly spread: "pad" | "reflect" | "repeat"
+			readonly focus?: readonly [number, number]
+	  }
+
+// How a shaded triangle's colour runs from its edge (position 0) to its centre vertex (1): preset colours
+// (`offsets`, `colors`), else blend factors (the share of `center` at each of `positions`), else linear.
+// Inside the `focus` scale (0..1) the centre colour is solid.
+export interface ShadeRamp {
+	readonly center: Rgba
+	readonly offsets: Float32Array | null
+	readonly colors: Uint32Array | null
+	readonly positions: Float32Array | null
+	readonly factors: Float32Array | null
+	readonly focus: number
+}
 
 export interface ImageTile {
 	readonly tx: number
@@ -179,6 +212,12 @@ export interface ImageTile {
 	readonly sy: number
 	readonly flip: "none" | "x" | "y" | "xy"
 	readonly align: "tl" | "t" | "tr" | "l" | "ctr" | "r" | "bl" | "b" | "br"
+	// An explicit tile: `width` x `height` units placed by `matrix` (tile space to the item's local space),
+	// mirrored per `flip`; tx, ty, sx, sy and align are then unused. `clamp` draws it once, without repeats.
+	readonly width?: number
+	readonly height?: number
+	readonly matrix?: readonly number[]
+	readonly clamp?: boolean
 }
 
 export type DashPreset =
@@ -224,6 +263,9 @@ export interface DrawingImage {
 	readonly contrast: number
 	// a:clrChange: pixels of colour `from` become `to` (alpha included), or null.
 	readonly colorChange: readonly [Rgba, Rgba] | null
+	// The encoded image itself (`format` names its encoding) for a bitmap the drawing carries, such as one
+	// embedded in a metafile; `partName` is then undefined.
+	readonly bytes?: Uint8Array
 }
 
 export type TextAnchor = "t" | "ctr" | "b" | "just" | "dist"
@@ -319,6 +361,39 @@ export type DrawingText =
 	| { readonly kind: "body"; readonly body: TextBodyProps; readonly paragraphs: readonly TextParagraph[] }
 	// A story the host lays out (a WordprocessingML text box): `story` is the caller's reference.
 	| { readonly kind: "story"; readonly body: TextBodyProps; readonly story: number }
+	// Positioned text (metafile text output): `run` drawn on the baseline through the item's local origin.
+	// With `positions`, each character (code point) is anchored at its own x offset (local units); without,
+	// the renderer lays the run out from the origin. `run.size` is in points of the local space (local units
+	// × 0.75).
+	// `fill`, when set, is a paint (local space) drawn instead of the run's colour.
+	| {
+			readonly kind: "glyphs"
+			readonly run: TextRun
+			readonly positions: Float32Array | null
+			readonly anchor: "start" | "middle" | "end"
+			readonly fill?: number
+	  }
+	// Text laid out by the renderer in a rectangle from the local origin (`width` x `height`; 0 for an
+	// unbounded side): lines split at "\n" in `run.text`, wrapped greedily at the width unless `wrap` is off,
+	// cut to the height (whole lines only with `lineLimit`) and trimmed as `trimming` says, aligned per
+	// `align` and `lineAlign`, `lineHeight` apart (local units), each baseline `ascent` (fraction of the em)
+	// below its line's top; clipped to the rectangle when `clip`.
+	| {
+			readonly kind: "block"
+			readonly run: TextRun
+			readonly width: number
+			readonly height: number
+			readonly align: "start" | "middle" | "end"
+			readonly lineAlign: "start" | "middle" | "end"
+			readonly wrap: boolean
+			readonly clip: boolean
+			readonly lineLimit: boolean
+			readonly trimming: "none" | "character" | "word" | "ellipsisCharacter" | "ellipsisWord" | "ellipsisPath"
+			readonly lineHeight: number
+			readonly ascent: number
+			readonly rtl: boolean
+			readonly fill?: number
+	  }
 
 // a:outerShdw (only outer shadows are drawn).
 export interface Shadow {
@@ -328,6 +403,42 @@ export interface Shadow {
 	readonly dy: number
 	readonly sx: number
 	readonly sy: number
+}
+
+// A clip region: path commands in the list's command and coordinate arrays, placed into drawing space by
+// `matrix` and filled with the nonzero or even-odd rule. An item clipped by it is clipped by its parent too
+// (an earlier clip, or -1). A clip without commands hides everything it clips.
+export interface DrawingClip {
+	readonly matrix: readonly number[]
+	readonly firstCommand: number
+	readonly commandCount: number
+	readonly firstCoord: number
+	readonly evenOdd: boolean
+	readonly parent: number
+	// Further shapes, each with its own placement and fill rule, unioned with the first.
+	readonly shapes?: readonly DrawingClipShape[]
+	// A boolean region instead of shapes: the union of the `add` clips' areas (earlier clips, each with its own
+	// parents) minus the union of the `subtract` clips' areas, still intersected with `parent`.
+	readonly add?: readonly number[]
+	readonly subtract?: readonly number[]
+	// The items it clips draw as one group at this opacity (0..1).
+	readonly opacity?: number
+}
+
+export interface DrawingClipShape {
+	readonly matrix: readonly number[]
+	readonly firstCommand: number
+	readonly commandCount: number
+	readonly firstCoord: number
+	readonly evenOdd: boolean
+}
+
+// Optional parts of a clip given to DrawingList.clipWith().
+export interface ClipExtras {
+	readonly shapes?: readonly DrawingClipShape[]
+	readonly add?: readonly number[]
+	readonly subtract?: readonly number[]
+	readonly opacity?: number
 }
 
 export const IDENTITY: readonly number[] = [1, 0, 0, 1, 0, 0]
@@ -370,6 +481,16 @@ function grownBytes(array: Uint8Array, needed: number): Uint8Array {
 	return grown
 }
 
+function grownClips(array: Int32Array, needed: number): Int32Array {
+	if (needed <= array.length) return array
+
+	const grown = new Int32Array(Math.max(needed, array.length * 2)).fill(-1)
+
+	grown.set(array)
+
+	return grown
+}
+
 function insetKey(inset: Inset | undefined): string {
 	return inset === undefined ? "" : `${inset.left},${inset.top},${inset.right},${inset.bottom}`
 }
@@ -380,6 +501,14 @@ function stopsKey(stops: GradientStops): string {
 	for (let k = 0; k < stops.offsets.length; k++) key += `${stops.offsets[k]}:${stops.colors[k]};`
 
 	return key
+}
+
+let uniquePaint = 0
+
+function rampKey(ramp: ShadeRamp | null): string {
+	return ramp === null
+		? ""
+		: `${ramp.center},${ramp.focus},${ramp.offsets?.join(":") ?? ""},${ramp.colors?.join(":") ?? ""},${ramp.positions?.join(":") ?? ""},${ramp.factors?.join(":") ?? ""}`
 }
 
 function paintKey(paint: Paint): string {
@@ -394,9 +523,20 @@ function paintKey(paint: Paint): string {
 			return `t${paint.pattern},${paint.foreground},${paint.background}`
 		case "image": {
 			const tile = paint.tile
+			const explicit =
+				tile === undefined || tile.width === undefined
+					? ""
+					: `,${tile.width},${tile.height},${tile.matrix?.join(":") ?? ""},${tile.clamp === true ? 1 : 0}`
 
-			return `i${paint.image},${insetKey(paint.stretch)},${tile === undefined ? "" : `${tile.tx},${tile.ty},${tile.sx},${tile.sy},${tile.flip},${tile.align}`}`
+			return `i${paint.image},${insetKey(paint.stretch)},${tile === undefined ? "" : `${tile.tx},${tile.ty},${tile.sx},${tile.sy},${tile.flip},${tile.align}${explicit}`}`
 		}
+		case "shaded":
+			// Large meshes are not compared, only kept apart.
+			return paint.points.length > 4096
+				? `h${uniquePaint++}`
+				: `h${paint.points.join(":")};${paint.colors.join(":")};${rampKey(paint.ramp)}`
+		case "gradient":
+			return `g${paint.type},${paint.spread},${paint.matrix.join(":")},${paint.focus?.join(":") ?? ""},${stopsKey(paint.stops)}`
 	}
 }
 
@@ -421,9 +561,17 @@ export class DrawingList {
 	readonly images: DrawingImage[] = []
 	readonly texts: DrawingText[] = []
 	readonly shadows: Shadow[] = []
+	readonly clips: DrawingClip[] = []
+	// Per item: its clip, or -1; null while no item is clipped.
+	itemClips: Int32Array | null = null
+	// Per clip: min x, min y, max x, max y in drawing space, parents included.
+	clipBounds: Float32Array = new Float32Array(0)
 	// The frame the drawing was built for (px); content may overflow it (see bounds()).
 	width = 0
 	height = 0
+	// The surface the drawing starts on (a metafile with raster operations composites with it), or undefined
+	// for a transparent one.
+	background: Rgba | undefined = undefined
 	private readonly paintIndex = new Map<string, number>()
 	private readonly strokeIndex = new Map<string, number>()
 
@@ -469,6 +617,139 @@ export class DrawingList {
 		this.shadows.push(shadow)
 
 		return this.shadows.length - 1
+	}
+
+	// Adds a clip over the commands appended since `firstCommand`/`firstCoord` (or the given count). A parent
+	// that is not an earlier clip is dropped.
+	clip(
+		matrix: ArrayLike<number>,
+		firstCommand: number,
+		firstCoord: number,
+		evenOdd: boolean,
+		parent: number,
+		commandCount: number = this.commandCount - firstCommand,
+		extras: ClipExtras = {}
+	): number {
+		const index = this.clips.length
+		const earlier = (value: number): boolean => Number.isInteger(value) && value >= 0 && value < index
+		const checkedParent = earlier(parent) ? parent : -1
+		const placed = (m: ArrayLike<number>): number[] => {
+			const out = [0, 0, 0, 0, 0, 0]
+
+			for (let k = 0; k < 6; k++) out[k] = safe(m[k] ?? 0)
+
+			return out
+		}
+		const m = placed(matrix)
+		const shapes = extras.shapes?.map(shape => ({ ...shape, matrix: placed(shape.matrix) }))
+		const add = extras.add?.filter(earlier)
+		const subtract = extras.subtract?.filter(earlier)
+		const opacity = extras.opacity
+
+		this.clips.push({
+			matrix: m,
+			firstCommand,
+			commandCount,
+			firstCoord,
+			evenOdd,
+			parent: checkedParent,
+			...(shapes !== undefined && shapes.length > 0 ? { shapes } : {}),
+			...(add !== undefined ? { add, subtract: subtract ?? [] } : {}),
+			...(opacity !== undefined && Number.isFinite(opacity) ? { opacity: Math.min(1, Math.max(0, opacity)) } : {})
+		})
+
+		const box = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+		const measure = (shape: DrawingClipShape): void => {
+			const [a = 1, b = 0, c = 0, d = 1, e = 0, f = 0] = shape.matrix
+
+			measurePath(this.commands, this.coords, shape.firstCommand, shape.commandCount, shape.firstCoord, (x, y) => {
+				const tx = a * x + c * y + e
+				const ty = b * x + d * y + f
+
+				if (tx < box.minX) box.minX = tx
+				if (tx > box.maxX) box.maxX = tx
+				if (ty < box.minY) box.minY = ty
+				if (ty > box.maxY) box.maxY = ty
+			})
+		}
+
+		if (add !== undefined) {
+			// A boolean region lies within the union of what it adds.
+			for (const member of add) {
+				const p = member * 4
+
+				if (
+					(this.clipBounds[p + 2] ?? 0) <= (this.clipBounds[p] ?? 0) ||
+					(this.clipBounds[p + 3] ?? 0) <= (this.clipBounds[p + 1] ?? 0)
+				)
+					continue
+
+				box.minX = Math.min(box.minX, this.clipBounds[p] ?? 0)
+				box.minY = Math.min(box.minY, this.clipBounds[p + 1] ?? 0)
+				box.maxX = Math.max(box.maxX, this.clipBounds[p + 2] ?? 0)
+				box.maxY = Math.max(box.maxY, this.clipBounds[p + 3] ?? 0)
+			}
+		} else {
+			measure({ matrix: m, firstCommand, commandCount, firstCoord, evenOdd })
+
+			for (const shape of shapes ?? []) measure(shape)
+		}
+
+		if (checkedParent >= 0) {
+			const p = checkedParent * 4
+
+			box.minX = Math.max(box.minX, this.clipBounds[p] ?? 0)
+			box.minY = Math.max(box.minY, this.clipBounds[p + 1] ?? 0)
+			box.maxX = Math.min(box.maxX, this.clipBounds[p + 2] ?? 0)
+			box.maxY = Math.min(box.maxY, this.clipBounds[p + 3] ?? 0)
+		}
+
+		this.clipBounds = grownFloats(this.clipBounds, (index + 1) * 4)
+
+		const at = index * 4
+
+		// An empty clip keeps an empty box at its first corner.
+		this.clipBounds[at] = box.minX === Infinity ? 0 : box.minX
+		this.clipBounds[at + 1] = box.minY === Infinity ? 0 : box.minY
+		this.clipBounds[at + 2] = box.minX === Infinity ? 0 : Math.max(box.minX, box.maxX)
+		this.clipBounds[at + 3] = box.minX === Infinity ? 0 : Math.max(box.minY, box.maxY)
+
+		return index
+	}
+
+	// Clips an item; its bounds shrink to the clip's.
+	setItemClip(item: number, clip: number): void {
+		if (item < 0 || item >= this.itemCount) return
+
+		const checked = Number.isInteger(clip) && clip >= 0 && clip < this.clips.length ? clip : -1
+
+		if (this.itemClips === null) {
+			if (checked < 0) return
+
+			this.itemClips = new Int32Array(Math.max(8, this.itemInts.length / ITEM_INTS)).fill(-1)
+		}
+
+		this.itemClips = grownClips(this.itemClips, item + 1)
+		this.itemClips[item] = checked
+
+		if (checked < 0) return
+
+		const b = item * 4
+		const c = checked * 4
+		const bounds = this.itemBounds
+		const minX = Math.max(bounds[b] ?? 0, this.clipBounds[c] ?? 0)
+		const minY = Math.max(bounds[b + 1] ?? 0, this.clipBounds[c + 1] ?? 0)
+		const maxX = Math.min(bounds[b + 2] ?? 0, this.clipBounds[c + 2] ?? 0)
+		const maxY = Math.min(bounds[b + 3] ?? 0, this.clipBounds[c + 3] ?? 0)
+
+		bounds[b] = minX
+		bounds[b + 1] = minY
+		bounds[b + 2] = Math.max(minX, maxX)
+		bounds[b + 3] = Math.max(minY, maxY)
+	}
+
+	itemClip(item: number): number {
+		return this.itemClips === null ? -1 : (this.itemClips[item] ?? -1)
 	}
 
 	private command(code: PathCommand, coords: number): void {
@@ -573,6 +854,12 @@ export class DrawingList {
 		ints[i + ItemInt.SHADOW] = shadow
 		ints[i + ItemInt.FLAGS] = flags
 		ints[i + ItemInt.SOURCE] = source
+
+		if (this.itemClips !== null) {
+			this.itemClips = grownClips(this.itemClips, item + 1)
+			this.itemClips[item] = -1
+		}
+
 		this.itemCount = item + 1
 		this.measureItem(item)
 
@@ -627,8 +914,12 @@ export class DrawingList {
 		for (const image of this.images) out.images.push(image)
 		for (const text of this.texts) out.texts.push(text)
 		for (const shadow of this.shadows) out.shadows.push(shadow)
+		for (const clip of this.clips) out.clips.push(clip)
+		out.itemClips = this.itemClips === null ? null : this.itemClips.slice(0, this.itemCount)
+		out.clipBounds = this.clipBounds.slice(0, this.clips.length * 4)
 		out.width = this.width
 		out.height = this.height
+		out.background = this.background
 
 		return out
 	}

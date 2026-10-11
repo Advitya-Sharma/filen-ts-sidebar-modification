@@ -4,6 +4,7 @@ export { decodeCData, decodeCharacterData, escapeAttribute, escapeText } from ".
 export { XmlError, type XmlErrorCode } from "./errors"
 export { MC_NAMESPACE, selectAlternateContent } from "./markupCompatibility"
 export { Namespaces, XML_NAMESPACE, XMLNS_NAMESPACE } from "./namespaces"
-export { parseXml } from "./parse"
+export { parseXml, parseXmlSliced } from "./parse"
 export { decodeUtf8, encodeUtf8, transcodeUtf16 } from "./utf8"
 export { assertWellFormed } from "./wellFormed"
+export { SliceClock, sliceClock, type Slicing } from "../slicing"

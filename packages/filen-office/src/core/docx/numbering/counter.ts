@@ -37,12 +37,17 @@ export interface CounterSnapshot {
 // Counts list items in document order. Call `next` once for every numbered paragraph of a story, in
 // order; use one instance per story that numbers on its own (the body, each text box...).
 export class NumberingCounters {
-	private readonly numbering: Numbering
+	private numbering: Numbering
 	private readonly sets = new Map<number, CounterSet>()
 	// Per numId, a bit per level whose w:startOverride has been applied.
 	private readonly overridesApplied = new Map<number, number>()
 
 	constructor(numbering: Numbering) {
+		this.numbering = numbering
+	}
+
+	// Counts with other definitions from now on (the counts so far stay).
+	use(numbering: Numbering): void {
 		this.numbering = numbering
 	}
 

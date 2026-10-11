@@ -2,6 +2,7 @@ import {
 	useEffect,
 	useImperativeHandle,
 	useLayoutEffect,
+	useMemo,
 	useRef,
 	useState,
 	type KeyboardEvent,
@@ -27,6 +28,15 @@ export interface DocxPagesHandle {
 	scrollToMatch(match: DocxFindMatch): void
 }
 
+// Where a mounted page sits in the scrolled content (px, zoom applied).
+export interface DocxPageFrame {
+	readonly index: number
+	readonly top: number
+	readonly left: number
+	readonly width: number
+	readonly height: number
+}
+
 export interface DocxPagesFind {
 	readonly matches: readonly DocxFindMatch[]
 	// Index into matches of the current one, or -1.
@@ -49,6 +59,10 @@ export interface DocxPagesProps {
 	// The scroll area's content width, for fit-to-width zoom.
 	readonly onViewportWidth?: (width: number) => void
 	readonly find?: DocxPagesFind | undefined
+	// Space kept free right of the pages (px on screen, not zoomed), e.g. for margin balloons.
+	readonly asideWidth?: number
+	// Drawn in the scrolled content over and beside the mounted pages (comment balloons, change bars).
+	readonly overlay?: (frames: readonly DocxPageFrame[]) => ReactNode
 	readonly ref?: Ref<DocxPagesHandle>
 }
 
@@ -97,7 +111,7 @@ interface Layout {
 	readonly contentWidth: number
 }
 
-function pageLayout(document: DocxDocument, zoom: number, gap: number): Layout {
+function pageLayout(document: DocxDocument, zoom: number, gap: number, aside: number): Layout {
 	const count = Math.max(document.pageCount, document.pages.length)
 	const tops = new Float64Array(count)
 	const heights = new Float64Array(count)
@@ -118,7 +132,38 @@ function pageLayout(document: DocxDocument, zoom: number, gap: number): Layout {
 		y += height + gap
 	}
 
-	return { tops, heights, widths, total: y, contentWidth: widest + 2 * gap }
+	return { tops, heights, widths, total: y, contentWidth: widest + 2 * gap + aside }
+}
+
+function frameLeft(layout: Layout, index: number, viewportWidth: number, aside: number, gap: number): number {
+	return Math.max(gap, ((Math.max(viewportWidth, layout.contentWidth) - aside - (layout.widths[index] ?? 0)) / 2) | 0)
+}
+
+// The overlay, given where the mounted pages sit. Its own component, so a scroll step within the mounted
+// range renders neither it nor what it draws.
+function PagesOverlay(props: {
+	readonly overlay: (frames: readonly DocxPageFrame[]) => ReactNode
+	readonly layout: Layout
+	readonly gap: number
+	readonly aside: number
+	readonly first: number
+	readonly last: number
+	readonly viewportWidth: number
+}) {
+	const layout = props.layout
+	const frames: DocxPageFrame[] = []
+
+	for (let index = props.first; index <= props.last; index++) {
+		frames.push({
+			index,
+			top: layout.tops[index] ?? 0,
+			left: frameLeft(layout, index, props.viewportWidth, props.aside, props.gap),
+			width: layout.widths[index] ?? 0,
+			height: layout.heights[index] ?? 0
+		})
+	}
+
+	return <>{props.overlay(frames)}</>
 }
 
 // The first page whose bottom is below `y`.
@@ -153,13 +198,17 @@ export function DocxPages({
 	onLinkActivate,
 	onPageChange,
 	onViewportWidth,
+	asideWidth,
+	overlay,
 	ref
 }: DocxPagesProps) {
 	const gap = gapProp ?? 16
 	const overscan = overscanProp ?? 2
+	const aside = Math.max(0, asideWidth ?? 0)
 	const containerRef = useRef<HTMLDivElement | null>(null)
 	const [viewport, setViewport] = useState({ top: 0, height: 0, width: 0 })
-	const layout = pageLayout(document, zoom, gap)
+	// Page positions change with the pages, not with scrolling: computed once per document, zoom and gap.
+	const layout = useMemo(() => pageLayout(document, zoom, gap, aside), [document, zoom, gap, aside])
 	const count = layout.tops.length
 	// Where the view is, as a page and a fraction of it: kept across zoom changes.
 	const lastPageRef = useRef(-1)
@@ -344,7 +393,7 @@ export function DocxPages({
 
 	for (let index = visible.first; index <= visible.last; index++) {
 		const page = document.pages[index]
-		const left = Math.max(gap, ((Math.max(viewport.width, layout.contentWidth) - (layout.widths[index] ?? 0)) / 2) | 0)
+		const left = frameLeft(layout, index, viewport.width, aside, gap)
 
 		pages.push(
 			page === undefined || cache === undefined || session === undefined ? (
@@ -390,6 +439,17 @@ export function DocxPages({
 				style={{ height: layout.total, width: layout.contentWidth }}
 			>
 				{pages}
+				{overlay === undefined ? null : (
+					<PagesOverlay
+						overlay={overlay}
+						layout={layout}
+						gap={gap}
+						aside={aside}
+						first={visible.first}
+						last={visible.last}
+						viewportWidth={viewport.width}
+					/>
+				)}
 			</div>
 		</div>
 	)

@@ -25,7 +25,10 @@
 		"./react/docx": "./src/react/docx/index.ts",
 		"./css/docx.css": "./src/css/docx.css",
 		"./core/docx/edit": "./src/core/docx/edit/index.ts",
-		"./core/docx/write": "./src/core/docx/write/index.ts"
+		"./core/docx/write": "./src/core/docx/write/index.ts",
+		"./core/docx/paged": "./src/core/docx/paged/index.ts",
+		"./dom/docx/editing": "./src/dom/docx/editing.ts",
+		"./react/docx/editor": "./src/react/docx/editor.ts"
 	},
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.react.json && tsc -p tsconfig.test.json && tsc -p tsconfig.dom-test.json",
@@ -58,6 +61,7 @@
 		"prosemirror-model": "1.25.12",
 		"prosemirror-state": "1.4.4",
 		"prosemirror-transform": "1.12.2",
+		"prosemirror-view": "1.42.6",
 		"react": "19.2.3",
 		"react-dom": "19.2.3",
 		"tsx": "4.23.13",
@@ -73,6 +77,7 @@
 		"prosemirror-model": "^1.25.12",
 		"prosemirror-state": "^1.4.4",
 		"prosemirror-transform": "^1.12.2",
+		"prosemirror-view": "^1.42.6",
 		"react": ">=19.2.3",
 		"react-dom": ">=19.2.3"
 	},
@@ -87,6 +92,9 @@
 			"optional": true
 		},
 		"prosemirror-transform": {
+			"optional": true
+		},
+		"prosemirror-view": {
 			"optional": true
 		},
 		"react": {

@@ -122,6 +122,28 @@ export class NoteNumbering implements NoteNumbers {
 		this.paragraphRefs = 0
 	}
 
+	// Numbers assigned to references of `part` items for which `keep` holds, to carry into a snapshot.
+	assignedWhere(keep: (part: number, item: number) => boolean): [number, string][] {
+		const out: [number, string][] = []
+
+		for (const [key, text] of this.assigned) {
+			const reference = Math.floor(key / 2)
+			const part = Math.floor(reference / 0x4000000)
+
+			if (keep(part, reference - part * 0x4000000)) out.push([key, text])
+		}
+
+		return out
+	}
+
+	// Forgets the numbers of references in parts for which `drop` holds (layout numbers them again), then
+	// takes `kept` back.
+	forgetAssigned(drop: (part: number) => boolean, kept: readonly (readonly [number, string])[]): void {
+		for (const key of this.assigned.keys()) if (drop(Math.floor(key / 2 / 0x4000000))) this.assigned.delete(key)
+
+		for (const [key, text] of kept) this.assigned.set(key, text)
+	}
+
 	reference(endnote: boolean, part: number, item: number, story: number): string {
 		// Per-page numbering is decided where the paragraph is laid out: after the notes already on its page.
 		if (!endnote && this.footnotes.restart === "eachPage") {

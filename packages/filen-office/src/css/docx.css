@@ -147,3 +147,143 @@
 .fo-docx-find[data-fo-active] {
 	background: var(--fo-find-active-bg, rgb(249 115 22 / 0.6));
 }
+
+/* A painted line: its spans and decorations are placed relative to it. */
+.fo-docx-line {
+	position: absolute;
+	left: 0;
+	width: 0;
+	height: 0;
+}
+
+/* Paged editing. The pages are a picture of the document: the input view (invisible, aligned with the
+   painted caret) holds focus and the text. */
+.fo-docx-editor {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.fo-docx-editor > .fo-docx-pages {
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+.fo-docx-editor .fo-docx-page-content {
+	user-select: none;
+	-webkit-user-select: none;
+	-webkit-touch-callout: none;
+}
+
+.fo-docx-editor .fo-docx-page-content ::selection {
+	background: transparent;
+}
+
+.fo-docx-edit-layer {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+
+.fo-docx-dim,
+.fo-docx-selection,
+.fo-docx-composition,
+.fo-docx-mark,
+.fo-docx-caret {
+	position: absolute;
+}
+
+.fo-docx-selection {
+	background: var(--fo-selection, rgb(37 99 235 / 0.3));
+}
+
+/* The body while a header, footer or note is edited. */
+.fo-docx-dim {
+	background: var(--fo-dim, rgb(255 255 255 / 0.55));
+}
+
+.fo-docx-editor:not([data-fo-focused]) .fo-docx-selection {
+	background: var(--fo-selection-inactive, rgb(0 0 0 / 0.12));
+}
+
+.fo-docx-composition {
+	border-bottom: var(--fo-composition-width, 1px) solid var(--fo-composition, currentColor);
+	box-sizing: border-box;
+}
+
+.fo-docx-mark {
+	border-bottom: var(--fo-mark-width, 2px) dotted var(--fo-mark, #dc2626);
+	box-sizing: border-box;
+}
+
+/* A misspelt word: a wavy underline (alternating arcs). */
+.fo-docx-mark[data-fo-mark="spelling"] {
+	border-bottom: 0;
+	background:
+		radial-gradient(circle at 1.5px 0, transparent 0.9px, var(--fo-spelling, #dc2626) 1px 1.9px, transparent 2px),
+		radial-gradient(circle at 4.5px 3px, transparent 0.9px, var(--fo-spelling, #dc2626) 1px 1.9px, transparent 2px);
+	background-position: left bottom;
+	background-repeat: repeat-x;
+	background-size: 6px 3px;
+}
+
+/* A word repeated (the same word twice in a row). */
+.fo-docx-mark[data-fo-mark="repeated"] {
+	border-bottom: var(--fo-repeated-width, 3px) double var(--fo-repeated, #d97706);
+}
+
+.fo-docx-caret {
+	width: var(--fo-caret-width, 1.5px);
+	margin-left: calc(var(--fo-caret-width, 1.5px) / -2);
+	background: var(--fo-caret, #000);
+}
+
+.fo-docx-editor:not([data-fo-focused]) .fo-docx-caret {
+	visibility: hidden;
+}
+
+.fo-docx-caret[data-fo-blink] {
+	animation: fo-docx-blink 1.06s steps(1) infinite;
+}
+
+@keyframes fo-docx-blink {
+	50% {
+		opacity: 0;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.fo-docx-caret[data-fo-blink] {
+		animation: none;
+	}
+}
+
+/* Never display:none or visibility:hidden (it must keep focus), never aria-hidden (it is what assistive
+   technology reads); moved by transform so its caret lies on the painted one. */
+.fo-docx-sink {
+	position: fixed;
+	left: 0;
+	top: 0;
+	width: 640px;
+	height: 24px;
+	overflow: hidden;
+	opacity: 0;
+	z-index: -1;
+	pointer-events: none;
+	caret-color: transparent;
+	color: transparent;
+	font: 16px/24px sans-serif;
+	white-space: pre-wrap;
+	contain: layout style;
+}
+
+.fo-docx-sink .ProseMirror {
+	outline: none;
+	white-space: pre-wrap;
+	word-wrap: break-word;
+}
+
+.fo-docx-sink p {
+	margin: 0;
+}

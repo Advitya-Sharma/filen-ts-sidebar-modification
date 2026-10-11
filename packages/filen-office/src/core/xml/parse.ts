@@ -1,5 +1,6 @@
 import { NodeKind, XmlDocument, type XmlEncoding } from "./document"
 import { XmlError } from "./errors"
+import { sliceClock, type Slicing } from "../slicing"
 import { decodeUtf8, transcodeUtf16 } from "./utf8"
 
 const LT = 60
@@ -168,13 +169,33 @@ function repeatsName(bytes: Uint8Array, spans: Int32Array, count: number): boole
 	return false
 }
 
-// Parses one part into an XmlDocument. Structure is checked strictly (every tag closed by its own name, one
-// root element, nothing but whitespace, comments and processing instructions around it); a start tag whose
-// attributes do not read as name="value" pairs is recorded (XmlDocument.isMalformed) rather than refused;
-// names, characters and references are checked by assertWellFormed, as only written parts need them.
-// A DOCTYPE with an internal subset is refused, so no entity can ever expand; an external one is kept as an
-// opaque node and never read. UTF-16 parts are transcoded: the document's bytes are then UTF-8.
-export function parseXml(input: Uint8Array): XmlDocument {
+// Everything the main loop changes, so a parse can stop between two nodes and carry on later.
+interface ParseState {
+	readonly bytes: Uint8Array
+	readonly encoding: XmlEncoding
+	readonly prologStart: number
+	readonly names: NameTable
+	readonly malformed: number[]
+	capacity: number
+	kinds: Uint8Array
+	starts: Int32Array
+	openEnds: Int32Array
+	ends: Int32Array
+	parents: Int32Array
+	firstChildren: Int32Array
+	nextSiblings: Int32Array
+	nameIds: Int32Array
+	// Last child per open depth, so siblings link without a per-node lastChild array.
+	lastChild: Int32Array
+	depth: number
+	count: number
+	current: number
+	rootElements: number
+	doctype: boolean
+	i: number
+}
+
+function begin(input: Uint8Array): ParseState {
 	const encoding = detectEncoding(input)
 
 	if (encoding !== "utf-8" && input.length % 2 !== 0) throw new XmlError("encoding", "Truncated UTF-16 part", input.length - 1)
@@ -183,23 +204,53 @@ export function parseXml(input: Uint8Array): XmlDocument {
 	const bytes = encoding === "utf-8" ? input : transcodeUtf16(input, bom, encoding === "utf-16le")
 	const length = bytes.length
 	const prologStart = length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0
-
 	// OOXML averages 35-40 bytes per node; starting near that grows the arrays once or twice at most.
-	let capacity = (length >> 5) + 64
-	let kinds = new Uint8Array(capacity)
-	let starts = new Int32Array(capacity)
-	let openEnds = new Int32Array(capacity)
-	let ends = new Int32Array(capacity)
-	let parents = new Int32Array(capacity)
-	let firstChildren = new Int32Array(capacity)
-	let nextSiblings = new Int32Array(capacity)
-	let nameIds = new Int32Array(capacity)
-	const names = new NameTable(bytes)
-	// Last child per open depth, so siblings link without a per-node lastChild array.
-	let lastChild = new Int32Array(64)
-	const malformed: number[] = []
-	let depth = 0
-	let count = 0
+	const capacity = (length >> 5) + 64
+	const state: ParseState = {
+		bytes,
+		encoding,
+		prologStart,
+		names: new NameTable(bytes),
+		malformed: [],
+		capacity,
+		kinds: new Uint8Array(capacity),
+		starts: new Int32Array(capacity),
+		openEnds: new Int32Array(capacity),
+		ends: new Int32Array(capacity),
+		parents: new Int32Array(capacity),
+		firstChildren: new Int32Array(capacity),
+		nextSiblings: new Int32Array(capacity),
+		nameIds: new Int32Array(capacity),
+		lastChild: new Int32Array(64),
+		depth: 0,
+		count: 1,
+		current: 0,
+		rootElements: 0,
+		doctype: false,
+		i: prologStart
+	}
+
+	// Node 0, the document.
+	state.kinds[0] = NodeKind.Document
+	state.openEnds[0] = length
+	state.ends[0] = length
+	state.parents[0] = -1
+	state.firstChildren[0] = -1
+	state.nextSiblings[0] = -1
+	state.nameIds[0] = -1
+	state.lastChild[0] = -1
+
+	return state
+}
+
+// Parses the nodes starting before `stop` (the last may end after it), and stops early once `limit` nodes
+// exist (each step adds at most one). The state is held in locals while the loop runs and stored back at
+// the end.
+function advance(state: ParseState, stop: number, limit: number): void {
+	const { bytes, names, malformed, prologStart } = state
+	const length = bytes.length
+	let { capacity, kinds, starts, openEnds, ends, parents, firstChildren, nextSiblings, nameIds, lastChild, depth, count } = state
+	let { current, rootElements, doctype, i } = state
 
 	const grow = (): void => {
 		capacity = Math.ceil(capacity * 1.5)
@@ -251,15 +302,7 @@ export function parseXml(input: Uint8Array): XmlDocument {
 		return node
 	}
 
-	add(NodeKind.Document, 0, length, -1, -1)
-	lastChild[0] = -1
-
-	let current = 0
-	let rootElements = 0
-	let doctype = false
-	let i = prologStart
-
-	while (i < length) {
+	while (i < stop && count < limit) {
 		if (bytes[i] !== LT) {
 			const lt = bytes.indexOf(LT, i)
 			const end = lt < 0 ? length : lt
@@ -508,6 +551,53 @@ export function parseXml(input: Uint8Array): XmlDocument {
 		}
 	}
 
+	state.capacity = capacity
+	state.kinds = kinds
+	state.starts = starts
+	state.openEnds = openEnds
+	state.ends = ends
+	state.parents = parents
+	state.firstChildren = firstChildren
+	state.nextSiblings = nextSiblings
+	state.nameIds = nameIds
+	state.lastChild = lastChild
+	state.depth = depth
+	state.count = count
+	state.current = current
+	state.rootElements = rootElements
+	state.doctype = doctype
+	state.i = i
+}
+
+function copyInto<T extends Uint8Array | Int32Array>(into: T, array: Uint8Array | Int32Array): T {
+	into.set(array.length > into.length ? array.subarray(0, into.length) : array)
+
+	return into
+}
+
+// Grows or trims the node arrays to `size`, one array per step.
+function* resize(state: ParseState, size: number): Generator<void, void> {
+	state.kinds = copyInto(new Uint8Array(size), state.kinds)
+	yield
+	state.starts = copyInto(new Int32Array(size), state.starts)
+	yield
+	state.openEnds = copyInto(new Int32Array(size), state.openEnds)
+	yield
+	state.ends = copyInto(new Int32Array(size), state.ends)
+	yield
+	state.parents = copyInto(new Int32Array(size), state.parents)
+	yield
+	state.firstChildren = copyInto(new Int32Array(size), state.firstChildren)
+	yield
+	state.nextSiblings = copyInto(new Int32Array(size), state.nextSiblings)
+	yield
+	state.nameIds = copyInto(new Int32Array(size), state.nameIds)
+	state.capacity = size
+}
+
+function check(state: ParseState): void {
+	const { names, current, nameIds, starts } = state
+
 	if (current !== 0) {
 		throw new XmlError(
 			"unclosedElement",
@@ -516,21 +606,18 @@ export function parseXml(input: Uint8Array): XmlDocument {
 		)
 	}
 
-	if (rootElements === 0) {
-		throw new XmlError("contentOutsideRoot", "No root element", prologStart)
+	if (state.rootElements === 0) {
+		throw new XmlError("contentOutsideRoot", "No root element", state.prologStart)
 	}
+}
 
-	// The first guess and growth leave slack; trees live as long as the document, so copy it away.
-	if (capacity - count > count >> 5) {
-		kinds = kinds.slice(0, count)
-		starts = starts.slice(0, count)
-		openEnds = openEnds.slice(0, count)
-		ends = ends.slice(0, count)
-		parents = parents.slice(0, count)
-		firstChildren = firstChildren.slice(0, count)
-		nextSiblings = nextSiblings.slice(0, count)
-		nameIds = nameIds.slice(0, count)
-	}
+// The first guess and growth leave slack; trees live as long as the document, so copy it away.
+function hasSlack(state: ParseState): boolean {
+	return state.capacity - state.count > state.count >> 5
+}
+
+function documentOf(state: ParseState): XmlDocument {
+	const { bytes, names, malformed, count, kinds, starts, openEnds, ends, parents, firstChildren, nextSiblings, nameIds } = state
 
 	return new XmlDocument(bytes, {
 		count,
@@ -544,7 +631,54 @@ export function parseXml(input: Uint8Array): XmlDocument {
 		nameIds,
 		names: names.names,
 		nameLengths: names.lengths,
-		encoding,
+		encoding: state.encoding,
 		malformed: malformed.length === 0 ? undefined : Int32Array.from(malformed)
 	})
+}
+
+// Parses one part into an XmlDocument. Structure is checked strictly (every tag closed by its own name, one
+// root element, nothing but whitespace, comments and processing instructions around it); a start tag whose
+// attributes do not read as name="value" pairs is recorded (XmlDocument.isMalformed) rather than refused;
+// names, characters and references are checked by assertWellFormed, as only written parts need them.
+// A DOCTYPE with an internal subset is refused, so no entity can ever expand; an external one is kept as an
+// opaque node and never read. UTF-16 parts are transcoded: the document's bytes are then UTF-8.
+export function parseXml(input: Uint8Array): XmlDocument {
+	const state = begin(input)
+
+	advance(state, state.bytes.length, Infinity)
+	check(state)
+
+	if (hasSlack(state)) for (const _ of resize(state, state.count)) continue
+
+	return documentOf(state)
+}
+
+// Bytes parsed between two looks at the clock: about a millisecond on a slow device.
+const SLICE_BYTES = 64 * 1024
+
+// parseXml in slices, giving the host a turn whenever the slice is used up; the same document, or the same
+// error, as parseXml.
+export async function parseXmlSliced(input: Uint8Array, slicing: Slicing): Promise<XmlDocument> {
+	const clock = sliceClock(slicing)
+	const state = begin(input)
+	const length = state.bytes.length
+
+	// Arrays are grown and trimmed here a step at a time, never inside advance().
+	const resizing = async (size: number): Promise<void> => {
+		for (const _ of resize(state, size)) if (clock.due) await clock.pause()
+	}
+
+	while (state.i < length) {
+		if (state.count === state.capacity) await resizing(Math.ceil(state.capacity * 1.5))
+
+		advance(state, Math.min(length, state.i + SLICE_BYTES), state.capacity)
+
+		if (clock.due) await clock.pause()
+	}
+
+	check(state)
+
+	if (hasSlack(state)) await resizing(state.count)
+
+	return documentOf(state)
 }

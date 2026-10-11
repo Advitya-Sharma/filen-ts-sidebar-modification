@@ -1,4 +1,13 @@
-import { OpcError, OpcPackage, ZipError, type ByteSource, type ContentTypes, type Relationships, type ZipOpenOptions } from "../opc/index"
+import {
+	OpcError,
+	OpcPackage,
+	ZipError,
+	type ByteSource,
+	type ContentTypes,
+	type Relationships,
+	type Slicing,
+	type ZipOpenOptions
+} from "../opc/index"
 import { XmlError, type XmlDocument } from "../xml/index"
 import { NO_SETTINGS, readSettings, type DocumentProtection, type DocxSettings, type WriteProtection } from "./model/settings"
 
@@ -146,12 +155,13 @@ export class DocxPackage {
 		return this.opc.has(part)
 	}
 
-	// A parsed part. The parse is shared by every caller until released.
-	xml(part: string): Promise<XmlDocument> {
+	// A parsed part. The parse is shared by every caller until released; the first caller's `slicing` (host
+	// turns while inflating and parsing) applies.
+	xml(part: string, slicing?: Slicing): Promise<XmlDocument> {
 		let promise = this.documents.get(part)
 
 		if (promise === undefined) {
-			promise = this.opc.xml(part)
+			promise = this.opc.xml(part, slicing)
 			this.documents.set(part, promise)
 		}
 
@@ -173,10 +183,15 @@ function failure(reason: DocxOpenFailure, message: string): DocxOpenResult {
 	return { ok: false, reason, message }
 }
 
+export interface DocxPackageOptions extends ZipOpenOptions {
+	// Host turns while the settings part is inflated and parsed.
+	readonly slicing?: Slicing
+}
+
 // Opens a word-processing package: finds the main document through the package relationships, decides
 // the variant from its content type and gathers the gate-0 facts (signatures, protection, Strict). Nothing
 // but the content types, relationships and settings is read.
-export async function openDocxPackage(source: ByteSource, options: ZipOpenOptions = {}): Promise<DocxOpenResult> {
+export async function openDocxPackage(source: ByteSource, options: DocxPackageOptions = {}): Promise<DocxOpenResult> {
 	if (source.size >= 8) {
 		const head = await source.read(0, 8)
 
@@ -217,7 +232,7 @@ export async function openDocxPackage(source: ByteSource, options: ZipOpenOption
 	}
 
 	try {
-		return await openWordprocessing(opc)
+		return await openWordprocessing(opc, options.slicing)
 	} catch (error) {
 		if (error instanceof OpcError || error instanceof XmlError || error instanceof ZipError) {
 			return failure(error instanceof ZipError && error.code === "tooLarge" ? "tooLarge" : "invalidPackage", error.message)
@@ -227,7 +242,7 @@ export async function openDocxPackage(source: ByteSource, options: ZipOpenOption
 	}
 }
 
-async function openWordprocessing(opc: OpcPackage): Promise<DocxOpenResult> {
+async function openWordprocessing(opc: OpcPackage, slicing: Slicing | undefined): Promise<DocxOpenResult> {
 	const [contentTypes, packageRelationships] = await Promise.all([opc.contentTypes(), opc.relationships("")])
 	const main = packageRelationships.all.find(
 		relationship => !relationship.external && relationshipKind(relationship.type) === "officeDocument"
@@ -265,7 +280,7 @@ async function openWordprocessing(opc: OpcPackage): Promise<DocxOpenResult> {
 
 	if (settingsPart !== undefined) {
 		try {
-			settings = readSettings(await opc.xml(settingsPart))
+			settings = readSettings(await opc.xml(settingsPart, slicing))
 			malformed = settings.malformed
 			settingsRelationships = await opc.relationships(settingsPart)
 		} catch (error) {

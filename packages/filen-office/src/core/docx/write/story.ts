@@ -208,6 +208,9 @@ export class StoryWriter {
 		this.shared.clear()
 		this.claimed.clear()
 		this.findOwners(node)
+		// Only a whole story's output reports these; a block alone would keep every node it wrote alive.
+		this.paragraphs.length = 0
+		this.containers.length = 0
 
 		const out = new Out()
 

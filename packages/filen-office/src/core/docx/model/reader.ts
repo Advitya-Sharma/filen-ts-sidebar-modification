@@ -1,4 +1,4 @@
-import { Namespaces, NodeKind, decodeCharacterData, decodeUtf8, type XmlDocument } from "../../xml/index"
+import { Namespaces, NodeKind, decodeCharacterData, decodeUtf8, type Slicing, type XmlDocument } from "../../xml/index"
 import { CODES_BY_GROUP, El, Ns, URIS_OF_GROUP, groupOf } from "./namespaces"
 
 const UNSET = -1
@@ -9,6 +9,17 @@ const shared = new WeakMap<XmlDocument, PartReader>()
 
 export function partReader(document: XmlDocument): PartReader {
 	return shared.get(document) ?? new PartReader(document)
+}
+
+// partReader with the part's namespace scan in slices.
+export async function partReaderSliced(document: XmlDocument, slicing: Slicing): Promise<PartReader> {
+	const existing = shared.get(document)
+
+	if (existing !== undefined) return existing
+
+	const namespaces = await Namespaces.sliced(document, { lenient: true }, slicing)
+
+	return shared.get(document) ?? new PartReader(document, namespaces)
 }
 
 function isSpace(b: number | undefined): boolean {

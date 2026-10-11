@@ -1,4 +1,5 @@
 import { NodeKind, type XmlDocument } from "./document"
+import { sliceClock, type Slicing } from "../slicing"
 import { decodeCharacterData } from "./entities"
 import { decodeUtf8 } from "./utf8"
 
@@ -7,14 +8,16 @@ export const XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/"
 
 const NO_BINDINGS: ReadonlyMap<string, string> = new Map()
 
-// Elements whose start tag contains "xmlns": found by one native scan of the part for the byte sequence,
-// each hit mapped to its node by binary search over the (ascending) node starts. A tag holds no child, so
-// the last node starting at or before a hit inside a start tag is that element.
-function declaringElements(document: XmlDocument): number[] {
+// Elements whose start tag contains "xmlns" among the hits in bytes [from, to), added to `found`: found by a
+// native scan of the part for the byte sequence, each hit mapped to its node by binary search over the
+// (ascending) node starts. A tag holds no child, so the last node starting at or before a hit inside a start
+// tag is that element.
+function declaringElements(document: XmlDocument, found: number[], from: number, to: number): void {
 	const { bytes, kinds, starts, openEnds, count } = document
-	const found: number[] = []
+	// Hits are looked for in the range only, so a part without one is scanned once however it is cut.
+	const range = to === bytes.length ? bytes : bytes.subarray(0, to)
 
-	for (let at = bytes.indexOf(120); at >= 0; at = bytes.indexOf(120, at + 1)) {
+	for (let at = range.indexOf(120, from); at >= 0; at = range.indexOf(120, at + 1)) {
 		if (bytes[at + 1] !== 109 || bytes[at + 2] !== 108 || bytes[at + 3] !== 110 || bytes[at + 4] !== 115) continue
 
 		let low = 0
@@ -32,9 +35,10 @@ function declaringElements(document: XmlDocument): number[] {
 
 		if (kinds[low] === NodeKind.Element && at < (openEnds[low] ?? 0) && found[found.length - 1] !== low) found.push(low)
 	}
-
-	return found
 }
+
+// Bytes scanned for declarations between two looks at the clock.
+const SLICE_BYTES = 1024 * 1024
 
 function declarations(document: XmlDocument, node: number): Map<string, string> | null {
 	const spans = document.attributeSpans(node)
@@ -73,13 +77,23 @@ export class Namespaces {
 
 	// `lenient`: a declaring element with a malformed start tag (duplicate or unquoted attributes, a bad
 	// reference) is recorded in `malformed` instead of throwing, for readers that degrade such content.
-	constructor(document: XmlDocument, options: { readonly lenient?: boolean } = {}) {
+	// `declaring`: the elements whose start tag contains "xmlns", ascending, when already found.
+	constructor(document: XmlDocument, options: { readonly lenient?: boolean } = {}, declaring?: readonly number[]) {
 		this.document = document
 
+		if (declaring === undefined) {
+			const found: number[] = []
+
+			declaringElements(document, found, 0, document.bytes.length)
+			declaring = found
+		}
+
 		const root = document.documentElement()
+		// Declaring elements with bindings, ascending.
+		const declared: number[] = []
 		let flat = true
 
-		for (const node of declaringElements(document)) {
+		for (const node of declaring) {
 			let bindings: Map<string, string> | null = null
 
 			try {
@@ -93,6 +107,7 @@ export class Namespaces {
 			if (bindings === null) continue
 
 			this.own.set(node, bindings)
+			declared.push(node)
 
 			if (node !== root) flat = false
 		}
@@ -107,13 +122,16 @@ export class Namespaces {
 		// Parents precede children in node order, so one forward pass settles every node, and each declaring
 		// element's map extends its parent's scope, which is already built.
 		const { parents, count } = document
-		const scopeOf = new Int32Array(count).fill(-1)
+		const scopeOf = new Int32Array(count)
+		let next = 0
+		let nextNode = declared[0] ?? count
+
+		scopeOf[0] = -1
 
 		for (let node = 1; node < count; node++) {
 			const inherited = scopeOf[parents[node] ?? 0] ?? -1
-			const bindings = this.own.get(node)
 
-			if (bindings === undefined) {
+			if (node !== nextNode) {
 				scopeOf[node] = inherited
 
 				continue
@@ -121,14 +139,31 @@ export class Namespaces {
 
 			const scope = new Map(inherited < 0 ? NO_BINDINGS : (this.scopes.get(inherited) ?? NO_BINDINGS))
 
-			for (const [prefix, uri] of bindings) scope.set(prefix, uri)
+			for (const [prefix, uri] of this.own.get(node) ?? NO_BINDINGS) scope.set(prefix, uri)
 
 			this.scopes.set(node, scope)
 			scopeOf[node] = node
+			nextNode = declared[++next] ?? count
 		}
 
 		this.scopeOf = scopeOf
 		this.rootScope = NO_BINDINGS
+	}
+
+	// The same as the constructor, with the part scanned for declarations a range at a time and the host
+	// given a turn whenever the slice is used up.
+	static async sliced(document: XmlDocument, options: { readonly lenient?: boolean }, slicing: Slicing): Promise<Namespaces> {
+		const clock = sliceClock(slicing)
+		const length = document.bytes.length
+		const found: number[] = []
+
+		for (let from = 0; from < length; from += SLICE_BYTES) {
+			declaringElements(document, found, from, Math.min(length, from + SLICE_BYTES))
+
+			if (clock.due) await clock.pause()
+		}
+
+		return new Namespaces(document, options, found)
 	}
 
 	// Every declaring element's own bindings, in document order.

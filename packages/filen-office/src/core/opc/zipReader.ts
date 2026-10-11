@@ -1,4 +1,5 @@
 import { Inflate } from "fflate"
+import { sliceClock, type SliceClock, type Slicing } from "../slicing"
 import { decodeUtf8 } from "../xml/utf8"
 import { crc32 } from "./crc32"
 import { ZipError } from "./errors"
@@ -41,6 +42,8 @@ const READ_STEP = 1024 * 1024
 const MAX_FFLATE_STEP = 8 * 1024
 const MAX_HOOK_STEP = 64 * 1024
 const MIN_INFLATE_STEP = 1024
+// Stored bytes CRC-checked between two looks at the clock.
+const CRC_STEP = 1024 * 1024
 
 // The code page zip names use when the UTF-8 flag is clear and the bytes are not UTF-8 either.
 const CP437_HIGH =
@@ -619,18 +622,34 @@ export class ZipArchive {
 	}
 
 	// The entry's content: inflated, size- and CRC-checked. A stored entry is a view of the source bytes.
-	async read(entry: ZipEntry): Promise<Uint8Array> {
+	read(entry: ZipEntry): Promise<Uint8Array> {
+		return this.content(entry, undefined)
+	}
+
+	// read() giving the host a turn between inflate (or CRC) steps whenever the slice is used up.
+	readSliced(entry: ZipEntry, slicing: Slicing): Promise<Uint8Array> {
+		return this.content(entry, sliceClock(slicing))
+	}
+
+	private async content(entry: ZipEntry, clock: SliceClock | undefined): Promise<Uint8Array> {
 		if (entry.method !== METHOD_STORED && entry.method !== METHOD_DEFLATE) {
 			throw new ZipError("unsupported", `Compression method ${entry.method} of ${entry.name} is not supported`)
 		}
 
 		const { dataOffset } = await this.layout(entry)
-		const out =
-			entry.method === METHOD_STORED
-				? await this.source.read(dataOffset, entry.compressedSize)
-				: await this.inflate(entry, dataOffset)
 
-		if (crc32(out) !== entry.crc32) throw new ZipError("corrupt", `CRC mismatch in ${entry.name}`)
+		if (entry.method === METHOD_DEFLATE) return this.inflate(entry, dataOffset, clock)
+
+		const out = await this.source.read(dataOffset, entry.compressedSize)
+		let crc = 0
+
+		for (let at = 0; at < out.length; at += CRC_STEP) {
+			crc = crc32(out.subarray(at, Math.min(out.length, at + CRC_STEP)), crc)
+
+			if (clock?.due === true) await clock.pause()
+		}
+
+		if (crc !== entry.crc32) throw new ZipError("corrupt", `CRC mismatch in ${entry.name}`)
 
 		return out
 	}
@@ -646,10 +665,12 @@ export class ZipArchive {
 
 	// No compression-ratio limit: deflate legitimately reaches ~1030:1 on uniform data, and nothing needs
 	// one. Memory is bounded by the declared-size limits (the output buffer is the declared size, and its
-	// untouched pages stay unbacked) and by the overflow cut-off below; CPU by both plus one step.
-	private async inflate(entry: ZipEntry, dataOffset: number): Promise<Uint8Array> {
+	// untouched pages stay unbacked) and by the overflow cut-off below; CPU by both plus one step. The CRC
+	// is taken as the output arrives.
+	private async inflate(entry: ZipEntry, dataOffset: number, clock: SliceClock | undefined): Promise<Uint8Array> {
 		const out = new Uint8Array(entry.uncompressedSize)
 		let written = 0
+		let crc = 0
 		let overflow = false
 		const accept = (chunk: Uint8Array): void => {
 			if (overflow) return
@@ -661,12 +682,15 @@ export class ZipArchive {
 			}
 
 			out.set(chunk, written)
+			crc = crc32(chunk, crc)
 			written += chunk.length
 		}
 		// Small enough that one step cannot expand far past what the entry may still produce.
 		const maxStep = this.inflateHook === undefined ? MAX_FFLATE_STEP : MAX_HOOK_STEP
 		const stepSize = (): number => Math.min(maxStep, Math.max(MIN_INFLATE_STEP, Math.ceil((out.length - written) / 1024)))
 		const input = steps(this.compressed(entry, dataOffset), stepSize)
+		// Set while the host has its turn: what that throws (a cancelled open) is not damage.
+		let pausing = false
 
 		try {
 			if (this.inflateHook !== undefined) {
@@ -674,6 +698,12 @@ export class ZipArchive {
 					accept(chunk)
 
 					if (overflow) break
+
+					if (clock?.due === true) {
+						pausing = true
+						await clock.pause()
+						pausing = false
+					}
 				}
 			} else {
 				const inflater = new Inflate(accept)
@@ -684,18 +714,25 @@ export class ZipArchive {
 					inflater.push(step, consumed === entry.compressedSize)
 
 					if (overflow) break
+
+					if (clock?.due === true) {
+						pausing = true
+						await clock.pause()
+						pausing = false
+					}
 				}
 
 				if (entry.compressedSize === 0) inflater.push(new Uint8Array(0), true)
 			}
 		} catch (error) {
-			if (error instanceof ZipError) throw error
+			if (error instanceof ZipError || pausing) throw error
 
 			throw new ZipError("corrupt", `Damaged deflate data in ${entry.name}`)
 		}
 
 		if (overflow) throw new ZipError("corrupt", `${entry.name} inflates past its declared size`)
 		if (written !== out.length) throw new ZipError("corrupt", `${entry.name} is shorter than its declared size`)
+		if (crc !== entry.crc32) throw new ZipError("corrupt", `CRC mismatch in ${entry.name}`)
 
 		return out
 	}

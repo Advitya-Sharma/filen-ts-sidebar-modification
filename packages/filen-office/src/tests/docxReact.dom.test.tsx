@@ -110,8 +110,9 @@ describe("paintPage", () => {
 		expect(spans[0]?.textContent).toBe("Hello <b>world</b>")
 		expect(painted.root.querySelector("b")).toBeNull()
 		expect(spans[0]?.style.left).toBe("96px")
-		// Baseline 112 minus the font's ascent 12.
-		expect(spans[0]?.style.top).toBe("100px")
+		// Baseline 112 minus the font's ascent 12, inside its line's group at the line's top (96).
+		expect(spans[0]?.parentElement?.style.top).toBe("96px")
+		expect(spans[0]?.style.top).toBe("4px")
 		expect(spans[0]?.style.lineHeight).toBe("16px")
 		expect(spans[0]?.style.color).toMatch(/^(#c00000|rgb\(192, 0, 0\))$/i)
 		// A link over part of a fragment is an inline child; over all of it, the span itself.
@@ -145,7 +146,7 @@ describe("paintPage", () => {
 			fragmentInts: Int32Array.from([0, 3, 0, 0, 0, 8, 11, 0, 1 << 8, 0, 4, 7, 0, 1 << 8, 0])
 		}
 		const painted = paintPage(wrapped, { document, tables: TABLES })
-		const order = Array.from(painted.root.querySelectorAll(".fo-docx-text > span"), span => span.textContent)
+		const order = Array.from(painted.root.querySelectorAll(".fo-docx-text > .fo-docx-line > span"), span => span.textContent)
 
 		expect(order).toEqual(["abc", " ", "def", "ghi", "\n"])
 		expect(painted.texts.map(item => item.start)).toEqual([0, 4, 8])
@@ -341,6 +342,47 @@ describe("useDocxDocument and DocxPages", () => {
 		expect(mounted.length).toBeGreaterThan(0)
 		expect(mounted.length).toBeLessThan(5)
 		expect(container.querySelector(".fo-docx-pages-content")?.getAttribute("style")).toContain("height")
+	})
+
+	it("keeps an aside free right of the pages and draws an overlay over the mounted ones", async () => {
+		const manual = manualHost()
+		const source: DocxSource = { host: manual.host, bytes: bytesSource(new Uint8Array(1)) }
+		const frames: { index: number; left: number; width: number }[][] = []
+
+		function Aside() {
+			const document = useDocxDocument(source)
+
+			return (
+				<DocxPages
+					document={document}
+					zoom={1}
+					overscan={0}
+					asideWidth={300}
+					pageLabel={index => `Page ${index + 1}`}
+					overlay={mounted => {
+						frames.push(mounted.map(frame => ({ index: frame.index, left: frame.left, width: frame.width })))
+
+						return <div className="probe-overlay" />
+					}}
+				/>
+			)
+		}
+
+		act(() => root.render(<Aside />))
+		manual.emit({
+			type: "opened",
+			info: { variant: "docx", gate: [], estimatedPages: 1, pageWidth: 816, pageHeight: 1056, mainPartBytes: 1000 }
+		})
+		manual.emit(pagesEvent([page(0, ["Text"], [0, 0, 4, 0])], true, false))
+		await flush()
+
+		const last = frames[frames.length - 1]
+
+		expect(last?.map(frame => frame.index)).toEqual([0])
+		// The content is as wide as the page, its gaps and the aside; the page keeps to the left of the aside.
+		expect(container.querySelector<HTMLElement>(".fo-docx-pages-content")?.style.width).toBe(`${816 + 2 * 16 + 300}px`)
+		expect(last?.[0]?.left).toBe(16)
+		expect(container.querySelector(".fo-docx-pages-content .probe-overlay")).not.toBeNull()
 	})
 
 	it("opens external links through the policy and scrolls to internal ones", async () => {

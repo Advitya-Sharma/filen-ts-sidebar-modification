@@ -1,5 +1,6 @@
 import type { ByteSource } from "../../core/opc/index"
 import { DocxEngine, type DocxEngineServices } from "./engine"
+import type { DocxAnnotations } from "./annotations"
 import type { DocxEvent, DocxFindOptions, DocxSessionApi, DocxLocation, DocxMedia, DocxObjectData, DocxOpenOptions } from "./protocol"
 
 // Two ways to run the engine behind the same DocxSessionApi: in a worker (web), talking over a small
@@ -47,7 +48,7 @@ export function macrotaskYield(): () => Promise<void> {
 
 // --- Messages ---
 
-type Method = "objects" | "media" | "locate" | "find"
+type Method = "objects" | "media" | "locate" | "find" | "annotations"
 
 // `s`: the session (one open document) a message belongs to.
 type ToWorker =
@@ -206,6 +207,8 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 
 							return matches
 						}
+						case "annotations":
+							return engine.annotations()
 					}
 				}
 
@@ -421,6 +424,7 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 			media: partName => call<DocxMedia | null>("media", partName),
 			locate: anchor => call<DocxLocation | null>("locate", anchor),
 			find: (query, findOptions) => call<Int32Array>("find", query, findOptions),
+			annotations: () => call<DocxAnnotations | null>("annotations", null),
 			close
 		}
 	}
@@ -467,6 +471,7 @@ export function inThreadDocxHost(services: (options: DocxOpenOptions) => DocxEng
 			media: partName => engine.media(partName),
 			locate: anchor => engine.locate(anchor),
 			find: (query, findOptions) => engine.find(query, findOptions),
+			annotations: () => engine.annotations(),
 			close() {
 				closed = true
 				engine.close()

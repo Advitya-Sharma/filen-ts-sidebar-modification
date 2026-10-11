@@ -36,7 +36,8 @@ const GROUP_URIS: readonly (readonly [Ns, readonly string[]])[] = [
 		["http://schemas.openxmlformats.org/officeDocument/2006/relationships", "http://purl.oclc.org/ooxml/officeDocument/relationships"]
 	],
 	[Ns.W14, ["http://schemas.microsoft.com/office/word/2010/wordml"]],
-	[Ns.W15, ["http://schemas.microsoft.com/office/word/2012/wordml"]],
+	// Word 2013 previews wrote comment threading under a pre-release URI; the elements are the same.
+	[Ns.W15, ["http://schemas.microsoft.com/office/word/2012/wordml", "http://schemas.microsoft.com/office/word/2010/11/wordml"]],
 	[Ns.W16Cid, ["http://schemas.microsoft.com/office/word/2016/wordml/cid"]],
 	[Ns.W16Cex, ["http://schemas.microsoft.com/office/word/2018/wordml/cex"]],
 	[Ns.MC, ["http://schemas.openxmlformats.org/markup-compatibility/2006"]],

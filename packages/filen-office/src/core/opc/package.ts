@@ -1,4 +1,5 @@
-import { parseXml, type XmlDocument } from "../xml/index"
+import type { Slicing } from "../slicing"
+import { parseXml, parseXmlSliced, type XmlDocument } from "../xml/index"
 import { CONTENT_TYPES_PART, parseContentTypes, type ContentTypes } from "./contentTypes"
 import { OpcError } from "./errors"
 import type { ByteSource } from "./io"
@@ -50,16 +51,19 @@ export class OpcPackage {
 		return this.parts.has(partKey(partName))
 	}
 
-	async read(partName: string): Promise<Uint8Array> {
+	// With `slicing`, the host is given a turn whenever the slice is used up (inflating and parsing).
+	async read(partName: string, slicing?: Slicing): Promise<Uint8Array> {
 		const entry = this.entry(partName)
 
 		if (entry === undefined) throw new OpcError("missingPart", `No part ${partName}`)
 
-		return this.zip.read(entry)
+		return slicing === undefined ? this.zip.read(entry) : this.zip.readSliced(entry, slicing)
 	}
 
-	async xml(partName: string): Promise<XmlDocument> {
-		return parseXml(await this.read(partName))
+	async xml(partName: string, slicing?: Slicing): Promise<XmlDocument> {
+		const bytes = await this.read(partName, slicing)
+
+		return slicing === undefined ? parseXml(bytes) : parseXmlSliced(bytes, slicing)
 	}
 
 	contentTypes(): Promise<ContentTypes> {

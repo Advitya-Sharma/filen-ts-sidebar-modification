@@ -1,8 +1,9 @@
 import type { DocxGateReason, DocxOpenFailure, DocxVariant } from "../../core/docx/index"
 import type { DecorationValue } from "../../core/docx/layout/index"
-import type { DrawingImage, DrawingText, Paint, Shadow, Stroke } from "../../core/drawingml/index"
+import type { DrawingClip, DrawingImage, DrawingText, Paint, Shadow, Stroke } from "../../core/drawingml/index"
 import type { FontFaceDescriptor } from "../../core/fonts/index"
 import type { MathElement } from "../../core/math/index"
+import type { DocxAnnotations } from "./annotations"
 
 // What the DOCX engine sends to a renderer. Everything here is plain data (numbers, enums, strings and
 // typed arrays) so it crosses a worker boundary by structured clone, with the typed arrays transferred. A
@@ -23,6 +24,12 @@ export interface DocxOpenInfo {
 	// Uncompressed size of the main document part, from the zip directory (a host can tell how heavy any
 	// other renderer would find the file).
 	readonly mainPartBytes: number
+	// How many comments and tracked changes the document holds (an app offers its markup controls before
+	// the annotations themselves are ready).
+	readonly comments?: number
+	readonly revisions?: number
+	// Of the tracked changes, those to formatting (run, paragraph, numbering, table properties).
+	readonly formatting?: number
 }
 
 // One text style of the layout (the fragment STYLE ints index these).
@@ -45,6 +52,9 @@ export interface DocxTextStyle {
 	readonly descent: number
 	// TrackedLook of the run (0 none).
 	readonly revision: number
+	// The colour slot (1..8) of the tracked change's author, 0 without one: inserted and deleted text is drawn
+	// in --fo-revision-<slot>.
+	readonly author?: number
 }
 
 export type DocxLinkTarget =
@@ -100,6 +110,14 @@ export interface DrawingData {
 	readonly images: readonly DrawingImage[]
 	readonly texts: readonly DrawingText[]
 	readonly shadows: readonly Shadow[]
+	readonly clips?: readonly DrawingClip[]
+	// Per item: its clip, or -1; absent when no item is clipped.
+	readonly itemClips?: Int32Array
+	// Per text: the font family list the engine resolved for it (an internal alias and a generic family),
+	// or "" for none.
+	readonly textFonts?: readonly string[]
+	// The surface the drawing starts on (0xRRGGBBAA), absent for a transparent one.
+	readonly background?: number
 }
 
 export type DocxObjectData =
@@ -150,6 +168,9 @@ export interface DocxSessionApi {
 	locate(anchor: string): Promise<DocxLocation | null>
 	// Every match of `query` in the whole document (laid out so far), as FIND_INTS per match.
 	find(query: string, options?: DocxFindOptions): Promise<Int32Array>
+	// Comments and tracked changes with their boxes on the pages, once every page is laid out (null when
+	// the document closed first).
+	annotations?(): Promise<DocxAnnotations | null>
 	close(): void
 }
 
@@ -163,8 +184,9 @@ export interface DocxFindOptions {
 export const FIND_INTS = 4
 
 export interface DocxOpenOptions {
-	// Lay out tracked changes as Word's Simple Markup does (Final) or the original text.
-	readonly view?: "final" | "original"
+	// Lay out tracked changes accepted (Final, what Simple Markup shows), rejected (the original text) or
+	// inline with insertions and deletions marked (All Markup).
+	readonly view?: "final" | "original" | "markup"
 	// Where the host serves each bundled font (path under assets/fonts -> same-origin URL).
 	readonly fontUrls?: Readonly<Record<string, string>>
 	// Keep the model after layout (editing needs it). A viewer lets the engine drop it once every page and

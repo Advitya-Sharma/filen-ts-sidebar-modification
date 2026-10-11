@@ -1,3 +1,21 @@
+export {
+	DEFAULT_MARKUP_MODE,
+	DOCX_MARKUP_MODES,
+	DOCX_REVISION_COLORS,
+	EMPTY_ANNOTATIONS,
+	RECT_FLOATS,
+	markupInfo,
+	parseDocxMarkupMode,
+	revisionColor,
+	type DocxAnnotations,
+	type DocxComment,
+	type DocxCommentRun,
+	type DocxMarkupInfo,
+	type DocxMarkupMode,
+	type DocxRevision,
+	type DocxRevisionKind,
+	type DocxRevisionTarget
+} from "./annotations"
 export { DocxEngine, type DocxEmit, type DocxEngineServices } from "./engine"
 export { findMatches, lineOf, type FindablePage } from "./find"
 export {

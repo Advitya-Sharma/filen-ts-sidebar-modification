@@ -29,6 +29,9 @@ export {
 	rgbaAlpha,
 	rgbaHex,
 	type DashPreset,
+	type ClipExtras,
+	type DrawingClip,
+	type DrawingClipShape,
 	type DrawingImage,
 	type DrawingText,
 	type GradientStops,
@@ -39,6 +42,7 @@ export {
 	type Paint,
 	type PatternPreset,
 	type Rgba,
+	type ShadeRamp,
 	type Shadow,
 	type Stroke,
 	type TextAlign,
@@ -67,6 +71,7 @@ export { appendArc, emitPaths, evaluateGuides, presetNames, presetProgram, textR
 export { parseProgram, type GeometryProgram } from "./geometry/program"
 export { MISSING_IMAGE, imageFormat, imageHandling, readBlip, type ImageResolver, type ImageTarget } from "./picture"
 export { D, DrawingReader, EMU_PER_PT, EMU_PER_PX, drawingReader, emuToPx, parseEmu, parseFraction } from "./reader"
+export { averageShade, rampColor, shadeBounds, shadeRaster, type ShadedRaster } from "./shade"
 export { addArrowhead, convertGraphic, convertShapeTree, pathEnds, shapeGeometry, type ShapeContext, type ShapeConversion } from "./shape"
 export { convertSmartArt } from "./smartart"
 export { DEFAULT_TEXT, plainParagraph, readBodyProps, readTextBody, resolveTypeface, type TextDefaults } from "./text"

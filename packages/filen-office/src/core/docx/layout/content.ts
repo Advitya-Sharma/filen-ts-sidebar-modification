@@ -10,7 +10,7 @@ import type { ResolvedRunProps } from "../props/types"
 import type { CellFormat, ParagraphFormat, PropertyResolver } from "../styles/resolve"
 import { FieldKind, fieldInfo, numberText } from "./fields"
 import { objectAt, ObjectKind, type ObjectSizer, type ObjectTable } from "./objects"
-import { TrackedLook, type RunStyles } from "./styles"
+import { TrackedLook, revisionLook, type RunStyles } from "./styles"
 import { halfPoints, twips } from "./units"
 
 // Builds the text a paragraph lays out from the model: runs resolved to styles, fields shown as their
@@ -49,6 +49,8 @@ export const FieldFlag = { PAGE: 1, TOTALS: 2 } as const
 
 export class BuiltParagraph {
 	first = -1
+	// The part of the first paragraph.
+	firstPart = -1
 	last = -1
 	format: ParagraphFormat | undefined = undefined
 	markStyle = 0
@@ -72,9 +74,12 @@ export class BuiltParagraph {
 	// The paragraph has only a mark (no text, tabs or objects).
 	empty = true
 	dropCap: "drop" | "margin" | undefined = undefined
+	// Where each item's content landed in `text` (SOURCE_MAP_INTS per item), when the layout records it.
+	map: Int32Array | undefined = undefined
 
 	reset(): void {
 		this.first = -1
+		this.firstPart = -1
 		this.last = -1
 		this.format = undefined
 		this.markStyle = 0
@@ -91,6 +96,7 @@ export class BuiltParagraph {
 		this.pageFields.length = 0
 		this.empty = true
 		this.dropCap = undefined
+		this.map = undefined
 	}
 }
 
@@ -121,6 +127,12 @@ export interface ContentServices {
 	readonly showHidden: boolean
 	// List markers already counted, by paragraph: a paragraph laid out again must not count twice.
 	readonly markers: Map<number, ListMarker | null>
+	// Record where each item's content lands in the paragraph text (editing maps positions through it).
+	readonly recordMaps: boolean
+	// The key list markers are counted under for paragraph `item` of part `part`.
+	readonly memoKey: (part: number, item: number) => number
+	// The index of a tracked change's author (-1 for none), numbered as reviewers are.
+	readonly authors: (name: string | undefined) => number
 }
 
 export class ContentBuilder {
@@ -137,6 +149,7 @@ export class ContentBuilder {
 	private format: ParagraphFormat | undefined = undefined
 	private columnWidth = 0
 	private readonly separators = new Map<number, number>()
+	private readonly map: number[] = []
 
 	constructor(services: ContentServices) {
 		this.services = services
@@ -163,9 +176,10 @@ export class ContentBuilder {
 	}
 
 	// Builds paragraphs first..last (joined: every mark but the last hidden) into the paragraph builder;
-	// `formats` are their formats in order.
+	// `parts` and `formats` are their parts and formats in order.
 	build(
 		story: StoryContext,
+		parts: readonly StoryPart[],
 		items: readonly number[],
 		formats: readonly ParagraphFormat[],
 		columnWidth: number,
@@ -175,6 +189,7 @@ export class ContentBuilder {
 		const services = this.services
 		const lastFormat = formats[formats.length - 1]
 		const first = items[0] ?? -1
+		const firstPart = parts[0] ?? story.part
 
 		out.reset()
 
@@ -184,7 +199,9 @@ export class ContentBuilder {
 		this.page = page
 		this.story = story
 		this.columnWidth = columnWidth
+		this.map.length = 0
 		out.first = first
+		out.firstPart = firstPart.index
 		out.last = items[items.length - 1] ?? first
 		out.format = lastFormat
 		out.markStyle = services.styles.style(services.resolver.paragraphMark(lastFormat), "ascii")
@@ -197,27 +214,30 @@ export class ContentBuilder {
 
 		services.notes.beginParagraph()
 
-		this.marker(story, first, formats[0] ?? lastFormat)
+		this.marker(story, firstPart, first, formats[0] ?? lastFormat)
 
 		for (let k = 0; k < items.length; k++) {
 			const format = formats[k] ?? lastFormat
 
 			this.format = format
-			this.paragraph(story.part, items[k] ?? -1, format)
+			this.paragraph(parts[k] ?? firstPart, items[k] ?? -1, format)
 		}
 
 		out.text = builder.finish().text
+
+		if (services.recordMaps) out.map = Int32Array.from(this.map)
+
 		this.story = undefined
 		this.format = undefined
 	}
 
-	private marker(story: StoryContext, item: number, format: ParagraphFormat): void {
+	private marker(story: StoryContext, part: StoryPart, item: number, format: ParagraphFormat): void {
 		const services = this.services
 		const numbering = format.props.numbering
 
 		if (numbering === undefined || format.level === undefined || story.counters === undefined) return
 
-		const key = story.part.index * 0x4000000 + item
+		const key = services.memoKey(part.index, item)
 		let marker = services.markers.get(key)
 
 		if (marker === undefined) {
@@ -277,6 +297,7 @@ export class ContentBuilder {
 		let runEnd = -1
 		let revision: TrackedLook = TrackedLook.NONE
 		let runHidden = false
+		const map = services.recordMaps ? this.map : undefined
 
 		this.fieldKinds.length = 0
 		this.fieldModes.length = 0
@@ -293,6 +314,8 @@ export class ContentBuilder {
 				revision = TrackedLook.NONE
 				runHidden = false
 			}
+
+			const before = builder.length
 
 			switch (kind) {
 				case Item.Run: {
@@ -433,6 +456,8 @@ export class ContentBuilder {
 					break
 			}
 
+			if (map !== undefined && builder.length > before) map.push(part.index, item, before, builder.length)
+
 			item = next
 		}
 	}
@@ -443,18 +468,26 @@ export class ContentBuilder {
 		return -1
 	}
 
+	// The tracked change a run sits in, with its author (see revisionLook).
 	private revisionOf(part: StoryPart, item: number, paragraph: number): TrackedLook {
 		for (let at = part.parent(item); at > paragraph; at = part.parent(at)) {
-			switch (part.kinds[at]) {
-				case Item.Insertion:
-					return TrackedLook.INSERTED
-				case Item.Deletion:
-					return TrackedLook.DELETED
-				case Item.MoveFrom:
-					return TrackedLook.MOVED_FROM
-				case Item.MoveTo:
-					return TrackedLook.MOVED_TO
-			}
+			const look =
+				part.kinds[at] === Item.Insertion
+					? TrackedLook.INSERTED
+					: part.kinds[at] === Item.Deletion
+						? TrackedLook.DELETED
+						: part.kinds[at] === Item.MoveFrom
+							? TrackedLook.MOVED_FROM
+							: part.kinds[at] === Item.MoveTo
+								? TrackedLook.MOVED_TO
+								: TrackedLook.NONE
+
+			if (look === TrackedLook.NONE) continue
+
+			const node = part.revisions.node[part.aux[at] ?? -1] ?? -1
+			const author = node < 0 ? undefined : part.reader.attr(node, Ns.W, "author")
+
+			return revisionLook(look, this.services.authors(author))
 		}
 
 		return TrackedLook.NONE

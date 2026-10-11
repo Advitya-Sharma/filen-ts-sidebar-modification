@@ -741,6 +741,9 @@ importers:
       prosemirror-transform:
         specifier: 1.12.2
         version: 1.12.2
+      prosemirror-view:
+        specifier: 1.42.6
+        version: 1.42.6
       react:
         specifier: 19.2.3
         version: 19.2.3

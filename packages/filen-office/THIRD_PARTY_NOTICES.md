@@ -72,6 +72,32 @@ internal or external distribution as long as this notice remains
 attached.
 ```
 
+## Metafile symbol-font supplements
+
+`src/core/metafile/text.ts` and `src/core/metafile/mtextra.ts` map further symbol-font tables for metafile text, re-encoded as code tables (no file is copied):
+
+- The Symbol font's bracket, brace and integral pieces and arrow extensions: 22 factual code-to-character mappings (0xBD → U+23D0, 0xBE → U+23AF, 0xE6–0xEF → U+239B–U+239D, U+23A1–U+23A3, U+23A7–U+23AA, 0xF4 → U+23AE, 0xF6–0xFE → U+239E–U+23A0, U+23A4–U+23A6, U+23AB–U+23AD) taken from Apple's "Map (external version) from Mac OS Symbol character set to Unicode 4.0 and later", version c02 (2005-04-05), https://www.unicode.org/Public/MAPPINGS/VENDORS/APPLE/SYMBOL.TXT (SHA-256 `b8c529daba09a45872ec3b493e944680528206b829193594dcdd774a02d49d12`). Its copyright line and disclaimer, reproduced verbatim:
+
+```
+Copyright:  (c) 1994-2002, 2005 by Apple Computer, Inc., all rights
+            reserved.
+
+Apple Computer, Inc. ("Apple") makes no warranty or representation,
+either express or implied, with respect to this document and the
+included data, its quality, accuracy, or fitness for a particular
+purpose. In no event will Apple be liable for direct, indirect,
+special, incidental, or consequential damages resulting from any
+defect or inaccuracy in this document or the included data.
+```
+
+- The advance widths of those pieces in Symbol (five facts: 384, 494, 686, 603 and 1000 units per em), from Adobe's Symbol font metrics, `Symbol.afm` version 001.008 of the Core 14 AFM set ("Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems Incorporated. All rights reserved."), used to centre a piece in its Symbol cell.
+- MT Extra (MathType's companion font), codes 0x20–0x7F, in `src/core/metafile/mtextra.ts`:
+  - Source: the Mozilla MathML project's "MT Extra" encoding page, https://www-archive.mozilla.org/projects/mathml/fonts/encoding/mtextra (SHA-256 `b36a96233316626a49c26e9e30d42ae422283798c3b87664510474c7da03e06a`). No MT Extra font file was read.
+  - Attribution: "Portions of this content are © 1998–2009 by individual mozilla.org contributors".
+  - Licence to us: Creative Commons Attribution-ShareAlike 4.0 International (https://creativecommons.org/licenses/by-sa/4.0/). The page's licence (https://www.mozilla.org/foundation/licensing/website-content/) is CC BY-SA 3.0 Unported "or any later version".
+  - Modified: the combining embellishments are mapped to their spacing forms, the arrow embellishments to spacing arrows, and the stretchy brace pieces are left out.
+  - Our adaptation is licensed under the GNU General Public License version 3 (GPL-3.0-only), under Creative Commons' declared one-way compatibility of BY-SA 4.0 with GPLv3 (https://wiki.creativecommons.org/wiki/ShareAlike_compatibility:_GPLv3), and is combined with the rest of `@filen/office` under section 13 of the GNU Affero General Public License v3.0.
+
 ## Apache License 2.0
 
 ```

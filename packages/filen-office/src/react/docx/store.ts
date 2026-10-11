@@ -135,6 +135,7 @@ export class DocxDocumentStore {
 
 		this.session = session
 		this.media = new DocxMediaCache(session)
+		this.media.fontsReady = () => this.fontsReady
 		this.set({ ...this.snapshot, session, media: this.media })
 	}
 

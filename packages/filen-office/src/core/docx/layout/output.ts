@@ -96,10 +96,20 @@ export interface OutputView {
 	readonly sourceCount: number
 	readonly sourceInts: Int32Array
 	readonly sourceTexts: readonly string[]
+	// The part each source's item belongs to (its paragraph may come from an overlay part), -1 without one.
+	readonly sourceParts: Int32Array
+	// Per source, when the layout records them, SOURCE_MAP_INTS per laid-out item of its paragraphs: all in
+	// one pool per page, source s using [sourceMapRanges[2s], sourceMapRanges[2s + 1]) of it.
+	readonly sourceMapPool: Int32Array
+	readonly sourceMapRanges: Int32Array
 	readonly clipCount: number
 	readonly clipFloats: Float32Array
 	readonly clipInts: Int32Array
 }
+
+// A source's map from items to its text: part, item, start and end offset of what the item laid out, in
+// text order (items of one paragraph ascending). Items that laid out nothing have no entry.
+export const SOURCE_MAP_INTS = 4
 
 // A position in an output to roll back to or move content after.
 export class OutputMark {
@@ -166,6 +176,10 @@ export class PageOutput {
 	sourceCount = 0
 	sourceInts = new Int32Array(SOURCE_INTS * 64)
 	sourceTexts: string[] = []
+	sourceParts = new Int32Array(64)
+	sourceMapPool = new Int32Array(0)
+	sourceMapRanges = new Int32Array(128)
+	private mapLength = 0
 	clipCount = 0
 	clipFloats = new Float32Array(CLIP_FLOATS * 4)
 	clipInts = new Int32Array(CLIP_INTS * 4)
@@ -178,6 +192,7 @@ export class PageOutput {
 		this.objectCount = 0
 		this.sourceCount = 0
 		this.sourceTexts.length = 0
+		this.mapLength = 0
 		this.sourceBreaks.length = 0
 		this.clipCount = 0
 	}
@@ -215,10 +230,23 @@ export class PageOutput {
 		this.clipCount++
 	}
 
-	addSource(region: Region, story: number, item: number, flags: number, text: string, breaks?: readonly number[]): number {
+	addSource(
+		region: Region,
+		story: number,
+		item: number,
+		flags: number,
+		text: string,
+		breaks?: readonly number[],
+		part = -1,
+		map?: ArrayLike<number>,
+		mapStart = 0,
+		mapEnd: number = map?.length ?? 0
+	): number {
 		const source = this.sourceCount
 
 		if ((source + 1) * SOURCE_INTS > this.sourceInts.length) this.sourceInts = growI32(this.sourceInts, (source + 1) * SOURCE_INTS)
+		if (source + 1 > this.sourceParts.length) this.sourceParts = growI32(this.sourceParts, source + 1)
+		if ((source + 1) * 2 > this.sourceMapRanges.length) this.sourceMapRanges = growI32(this.sourceMapRanges, (source + 1) * 2)
 
 		const at = source * SOURCE_INTS
 
@@ -227,6 +255,21 @@ export class PageOutput {
 		this.sourceInts[at + 2] = item
 		this.sourceInts[at + 3] = flags
 		this.sourceTexts[source] = text
+		this.sourceParts[source] = part
+		this.sourceMapRanges[source * 2] = this.mapLength
+
+		if (map !== undefined && mapEnd > mapStart) {
+			const length = mapEnd - mapStart
+
+			if (this.mapLength + length > this.sourceMapPool.length)
+				this.sourceMapPool = growI32(this.sourceMapPool, this.mapLength + length)
+
+			for (let k = 0; k < length; k++) this.sourceMapPool[this.mapLength + k] = map[mapStart + k] ?? 0
+
+			this.mapLength += length
+		}
+
+		this.sourceMapRanges[source * 2 + 1] = this.mapLength
 		this.sourceBreaks[source] = breaks
 		this.sourceCount++
 
@@ -300,6 +343,7 @@ export class PageOutput {
 		if (mark.sources < this.sourceCount) {
 			this.sourceCount = mark.sources
 			this.sourceTexts.length = mark.sources
+			this.mapLength = mark.sources > 0 ? (this.sourceMapRanges[mark.sources * 2 - 1] ?? 0) : 0
 			this.sourceBreaks.length = mark.sources
 		}
 	}
@@ -407,7 +451,12 @@ export class PageOutput {
 				source.sourceInts[at + 1] ?? -1,
 				source.sourceInts[at + 2] ?? -1,
 				source.sourceInts[at + 3] ?? 0,
-				source.sourceTexts[s] ?? ""
+				source.sourceTexts[s] ?? "",
+				undefined,
+				source.sourceParts[s] ?? -1,
+				source.sourceMapPool,
+				source.sourceMapRanges[s * 2] ?? 0,
+				source.sourceMapRanges[s * 2 + 1] ?? 0
 			)
 		}
 
@@ -569,6 +618,9 @@ export class PageDisplayList implements OutputView {
 	readonly sourceCount: number
 	readonly sourceInts: Int32Array
 	readonly sourceTexts: readonly string[]
+	readonly sourceParts: Int32Array
+	readonly sourceMapPool: Int32Array
+	readonly sourceMapRanges: Int32Array
 	readonly clipCount: number
 	readonly clipFloats: Float32Array
 	readonly clipInts: Int32Array
@@ -587,7 +639,9 @@ export class PageDisplayList implements OutputView {
 			height: number
 			bodyFirst: number
 			bodyLast: number
-		}
+		},
+		// Share the arrays of a finished page instead of copying them.
+		shared = false
 	) {
 		this.index = info.index
 		this.number = info.number
@@ -597,6 +651,27 @@ export class PageDisplayList implements OutputView {
 		this.height = info.height
 		this.bodyFirst = info.bodyFirst
 		this.bodyLast = info.bodyLast
+		if (output instanceof PageDisplayList && shared) {
+			this.text = output.text
+			this.graphicCount = output.graphicCount
+			this.graphicFloats = output.graphicFloats
+			this.graphicInts = output.graphicInts
+			this.objectCount = output.objectCount
+			this.objectFloats = output.objectFloats
+			this.objectInts = output.objectInts
+			this.sourceCount = output.sourceCount
+			this.sourceInts = output.sourceInts
+			this.sourceTexts = output.sourceTexts
+			this.sourceParts = output.sourceParts
+			this.sourceMapPool = output.sourceMapPool
+			this.sourceMapRanges = output.sourceMapRanges
+			this.clipCount = output.clipCount
+			this.clipFloats = output.clipFloats
+			this.clipInts = output.clipInts
+
+			return
+		}
+
 		this.text = output.text.compact()
 		this.graphicCount = output.graphicCount
 		this.graphicFloats = output.graphicFloats.slice(0, output.graphicCount * GRAPHIC_FLOATS)
@@ -607,6 +682,9 @@ export class PageDisplayList implements OutputView {
 		this.sourceCount = output.sourceCount
 		this.sourceInts = output.sourceInts.slice(0, output.sourceCount * SOURCE_INTS)
 		this.sourceTexts = output.sourceTexts.slice(0, output.sourceCount)
+		this.sourceParts = output.sourceParts.slice(0, output.sourceCount)
+		this.sourceMapRanges = output.sourceMapRanges.slice(0, output.sourceCount * 2)
+		this.sourceMapPool = output.sourceMapPool.slice(0, this.sourceMapRanges[output.sourceCount * 2 - 1] ?? 0)
 		this.clipCount = output.clipCount
 		this.clipFloats = output.clipFloats.slice(0, output.clipCount * CLIP_FLOATS)
 		this.clipInts = output.clipInts.slice(0, output.clipCount * CLIP_INTS)
@@ -637,6 +715,25 @@ export class PageDisplayList implements OutputView {
 		return length
 	}
 
+	// The same page at another index or page number (a page kept from an earlier layout): the arrays are
+	// shared, page number fields are not redone.
+	moved(index: number, number: number, numberText: string): PageDisplayList {
+		return new PageDisplayList(
+			this,
+			{
+				index,
+				number,
+				numberText,
+				section: this.section,
+				width: this.width,
+				height: this.height,
+				bodyFirst: this.bodyFirst,
+				bodyLast: this.bodyLast
+			},
+			true
+		)
+	}
+
 	sourceRegion(source: number): Region {
 		return (this.sourceInts[source * SOURCE_INTS] ?? 0) as Region
 	}
@@ -647,5 +744,9 @@ export class PageDisplayList implements OutputView {
 
 	sourceStory(source: number): number {
 		return this.sourceInts[source * SOURCE_INTS + SourceInt.STORY] ?? -1
+	}
+
+	sourcePart(source: number): number {
+		return this.sourceParts[source] ?? -1
 	}
 }

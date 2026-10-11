@@ -1,5 +1,5 @@
 import type { Relationships } from "../../opc/index"
-import { NodeKind } from "../../xml/index"
+import { NodeKind, sliceClock, type Slicing } from "../../xml/index"
 import { Column, StringTable } from "./columns"
 import { readDrawing, readVml, type DrawingInfo, type VmlInfo, type VmlKind } from "./drawings"
 import { FieldCharType, Item, Revision, RevisionFlag, SdtLevel } from "./kinds"
@@ -187,7 +187,8 @@ class PartBuilder {
 		this.aux = new Int32Array(capacity)
 	}
 
-	build(name: string, relationships: Relationships): StoryPart {
+	// The build, yielding after each top-level block of a story part.
+	*steps(name: string, relationships: Relationships): Generator<void, StoryPart> {
 		const document = this.document
 		const root = document.documentElement()
 
@@ -197,7 +198,7 @@ class PartBuilder {
 					const code = this.reader.code(child)
 
 					if (code === El.Body) {
-						this.storyContainer(child, -1, Item.Body, "body", undefined)
+						yield* this.storySteps(child, -1, Item.Body, "body", undefined)
 					} else if (code !== El.Background) {
 						this.leaf(Item.Opaque, child, -1, 0)
 					}
@@ -205,11 +206,11 @@ class PartBuilder {
 
 				break
 			case El.Header:
-				this.storyContainer(root, -1, Item.Header, "header", undefined)
+				yield* this.storySteps(root, -1, Item.Header, "header", undefined)
 
 				break
 			case El.Footer:
-				this.storyContainer(root, -1, Item.Footer, "footer", undefined)
+				yield* this.storySteps(root, -1, Item.Footer, "footer", undefined)
 
 				break
 			case El.Footnotes:
@@ -224,7 +225,7 @@ class PartBuilder {
 						if (kind === "footnote") this.shared.maxIds.footnote = Math.max(this.shared.maxIds.footnote, id)
 						else this.shared.maxIds.endnote = Math.max(this.shared.maxIds.endnote, id)
 
-						this.storyContainer(child, -1, Item.Note, kind, this.reader.attr(child, Ns.W, "type"))
+						yield* this.storySteps(child, -1, Item.Note, kind, this.reader.attr(child, Ns.W, "type"))
 					} else {
 						this.leaf(Item.Opaque, child, -1, 0)
 					}
@@ -236,7 +237,7 @@ class PartBuilder {
 				for (let child = document.firstChildElement(root); child >= 0; child = document.nextSiblingElement(child)) {
 					if (this.reader.code(child) === El.Comment) {
 						this.shared.maxIds.comment = Math.max(this.shared.maxIds.comment, this.reader.int(child, Ns.W, "id", -1))
-						this.storyContainer(child, -1, Item.Comment, "comment", undefined)
+						yield* this.storySteps(child, -1, Item.Comment, "comment", undefined)
 					} else {
 						this.leaf(Item.Opaque, child, -1, 0)
 					}
@@ -382,6 +383,18 @@ class PartBuilder {
 		type: string | undefined,
 		depth: number = 1
 	): void {
+		drain(this.storySteps(node, parent, kind, storyKind, type, depth))
+	}
+
+	// A story's blocks, yielding after each.
+	private *storySteps(
+		node: number,
+		parent: number,
+		kind: Item,
+		storyKind: StoryKind,
+		type: string | undefined,
+		depth: number = 1
+	): Generator<void, void> {
 		const stories = this.shared.stories
 		const index = stories.length
 		const item = this.open(kind, node, parent, index)
@@ -408,7 +421,16 @@ class PartBuilder {
 		this.storyKind = storyKind
 		this.fieldStack = []
 		this.tableDepth = 0
-		this.children(node, item, depth, Ctx.Block, storyKind === "body")
+
+		const document = this.document
+		const top = storyKind === "body"
+
+		for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
+			this.content(child, item, depth, Ctx.Block, top)
+
+			yield
+		}
+
 		this.shared.counts.unterminatedFields += this.fieldStack.length
 		this.story = savedStory
 		this.storyKind = savedKind
@@ -1461,6 +1483,14 @@ class PartBuilder {
 	}
 }
 
+function drain<T>(steps: Generator<void, T>): T {
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+	}
+}
+
 export function buildPart(
 	reader: PartReader,
 	shared: ModelTables,
@@ -1468,5 +1498,26 @@ export function buildPart(
 	name: string,
 	relationships: Relationships
 ): StoryPart {
-	return new PartBuilder(reader, shared, partIndex).build(name, relationships)
+	return drain(new PartBuilder(reader, shared, partIndex).steps(name, relationships))
+}
+
+// buildPart in slices: the host is given a turn between top-level blocks whenever the slice is used up.
+// Nothing else may build into `shared` meanwhile.
+export async function buildPartSliced(
+	reader: PartReader,
+	shared: ModelTables,
+	partIndex: number,
+	name: string,
+	relationships: Relationships,
+	slicing: Slicing
+): Promise<StoryPart> {
+	const clock = sliceClock(slicing)
+	const steps = new PartBuilder(reader, shared, partIndex).steps(name, relationships)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+		if (clock.due) await clock.pause()
+	}
 }

@@ -287,7 +287,7 @@ class InlineSink {
 // round-trip proof can lock more later.
 export class DocxDocBuilder {
 	private readonly context: DocxEditContext
-	private readonly infos = new Map<StoryPart, PartInfo>()
+	private readonly infos = new WeakMap<StoryPart, PartInfo>()
 	private readonly combined = new WeakMap<readonly Mark[], Map<number, readonly Mark[]>>()
 	private part!: StoryPart
 	private plan!: FieldPlan
@@ -305,6 +305,35 @@ export class DocxDocBuilder {
 	}
 
 	build(story: Story): StoryDoc {
+		const steps = this.steps(story)
+
+		for (;;) {
+			const step = steps.next()
+
+			if (step.done === true) return step.value
+		}
+	}
+
+	// The same build in slices: the host gets a turn (`pause`) whenever `sliceMs` passed, between top-level
+	// blocks, so a long document builds without long tasks on a UI thread.
+	async buildSliced(story: Story, pause: () => Promise<void>, sliceMs: number, now: () => number): Promise<StoryDoc> {
+		const steps = this.steps(story)
+		let started = now()
+
+		for (;;) {
+			const step = steps.next()
+
+			if (step.done === true) return step.value
+
+			if (now() - started >= sliceMs) {
+				await pause()
+				started = now()
+			}
+		}
+	}
+
+	// The build, yielding after each top-level block.
+	private *steps(story: Story): Generator<void, StoryDoc> {
 		const model = this.context.model
 		const part = model.partOf(story)
 
@@ -318,13 +347,41 @@ export class DocxDocBuilder {
 
 		const blocks: Node[] = []
 		let sectPr = NO_SOURCE
-		const end = this.blocks(story.item, blocks, item => {
-			if (part.kinds[item] !== Item.SectionProperties) return false
+		const pristine = this.pristine
+		const plan = this.plan
+		const info = this.info
+		let pending: MarkerAttrs[] | null = null
+		const storyEnd = part.end(story.item)
 
-			sectPr = item
+		// As blocks(), a block at a time: the builder's state is restored after each pause (a host may build
+		// another story meanwhile).
+		for (let item = story.item + 1; item < storyEnd; item = part.end(item)) {
+			const marker = this.marker(item)
 
-			return true
-		})
+			if (marker !== undefined) {
+				;(pending ??= []).push(marker)
+
+				continue
+			}
+
+			if (part.kinds[item] === Item.SectionProperties) {
+				sectPr = item
+
+				continue
+			}
+
+			blocks.push(this.block(item, pending ?? NO_MARKERS))
+			pending = null
+
+			yield
+
+			this.part = part
+			this.plan = plan
+			this.info = info
+			this.pristine = pristine
+		}
+
+		const end = pending ?? NO_MARKERS
 
 		// A story with no block at all still needs a place for the cursor; the empty paragraph is new content.
 		if (blocks.length === 0) blocks.push(docxSchema.nodes.paragraph.create())
@@ -338,6 +395,25 @@ export class DocxDocBuilder {
 			pristine: this.pristine,
 			stats: { paragraphs: this.paragraphs, tables: this.tables, lockedBlocks: this.lockedBlocks, lockReasons: this.lockReasons }
 		}
+	}
+
+	// The top-level block at `item` of `story` as build() builds it, the markers right before it included.
+	buildBlock(story: Story, item: number): Node {
+		const part = this.context.model.partOf(story)
+		let pending: MarkerAttrs[] | null = null
+
+		this.part = part
+		this.plan = this.planOf(part)
+		this.pristine = new WeakSet()
+
+		for (let at = story.item + 1; at < item; at = part.end(at)) {
+			const marker = this.marker(at)
+
+			if (marker !== undefined) (pending ??= []).push(marker)
+			else if (part.kinds[at] !== Item.SectionProperties) pending = null
+		}
+
+		return this.block(item, pending ?? NO_MARKERS)
 	}
 
 	// A locked block standing for `node` (a source paragraph, table or content control of `story`), for a

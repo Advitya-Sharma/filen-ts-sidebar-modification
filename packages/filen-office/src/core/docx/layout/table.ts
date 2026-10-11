@@ -3,6 +3,7 @@ import { Ns } from "../model/namespaces"
 import type { StoryPart } from "../model/part"
 import type { ResolvedBorder, ResolvedTableRowProps, TableCellProps, TablePositionProps, WidthProps } from "../props/types"
 import type { CellFormat, TableFormat } from "../styles/resolve"
+import { ref, refItem, refPart } from "./edits"
 import { Area, BlockFlow, FlowStatus, nextToken, type Engine, type FlowSnapshot } from "./flow"
 import { PageGraphic, Layer, OutputMark } from "./output"
 import { borderWidth } from "./styles"
@@ -217,11 +218,8 @@ export class TableLayout {
 	private readonly mergeAreas: number[] = []
 	private readonly cells = new Map<number, TableCellProps>()
 
-	constructor(flow: BlockFlow, item: number, area: Area) {
+	constructor(flow: BlockFlow, part: StoryPart, item: number, area: Area) {
 		const engine = flow.engine
-		const part = flow.part
-
-		if (part === undefined) throw new Error("A table needs its part")
 
 		this.flow = flow
 		this.engine = engine
@@ -835,7 +833,14 @@ export class TableLayout {
 		if (slot === undefined) return false
 
 		for (let item = slot.item + 1; item < part.end(slot.item); item++) {
-			if (part.kinds[item] === Item.Paragraph) return this.engine.content.formatOf(part, item, slot.format).props.pageBreakBefore
+			if (part.kinds[item] !== Item.Paragraph) continue
+
+			// An edited paragraph is laid out from its overlay.
+			const substitute = this.engine.edits?.substitutes.get(ref(part.index, item))
+			const from = substitute === undefined ? part : this.engine.part(refPart(substitute))
+			const at = substitute === undefined ? item : refItem(substitute)
+
+			return from === undefined ? false : this.engine.content.formatOf(from, at, slot.format).props.pageBreakBefore
 		}
 
 		return false

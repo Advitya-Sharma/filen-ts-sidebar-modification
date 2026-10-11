@@ -30,7 +30,8 @@ import { FIXED_AUTO_SPACING, Geometry, paragraphGeometry, spaceAfter, spaceBefor
 import type { NoteNumbering } from "./notes"
 import { ObjectKind, type FloatSpec, type ObjectSizer, type ObjectTable } from "./objects"
 import { PageGraphic, Layer, OBJECT_FLOATS, OBJECT_INTS, OutputMark, PageOutput, Region, SourceFlag } from "./output"
-import { borderWidth, type DecorationTable, type RunStyles } from "./styles"
+import { REF_SPAN, refItem, refPart, type LayoutEdits } from "./edits"
+import { borderWidth, revisionAuthors, type DecorationTable, type RunStyles } from "./styles"
 import { TableLayout } from "./table"
 import { EPSILON, twips } from "./units"
 
@@ -166,6 +167,8 @@ export interface EngineInit {
 	readonly showHidden: boolean
 	readonly compat: LayoutCompat
 	readonly tuning: LayoutTuning
+	readonly recordMaps?: boolean
+	readonly edits?: LayoutEdits
 }
 
 // Services shared by every flow of one document layout.
@@ -191,6 +194,8 @@ export class Engine {
 	private readonly scanBuilt = new BuiltParagraph()
 	gridPitch = 0
 	readonly autoSpacing: AutoSpacing
+	// Unsaved edits laid out in place of their source (see LayoutEdits), read whenever a flow is set up.
+	readonly edits: LayoutEdits | undefined
 
 	constructor(init: EngineInit) {
 		this.model = init.model
@@ -203,6 +208,7 @@ export class Engine {
 		this.view = init.view
 		this.compat = init.compat
 		this.tuning = init.tuning
+		this.edits = init.edits
 		this.layouter = new ParagraphLayouter(init.styles.table)
 		this.autoSpacing = init.compat.htmlSpacing
 			? { before: (init.tuning.htmlAutoSpacing[0] * 4) / 3, after: (init.tuning.htmlAutoSpacing[1] * 4) / 3 }
@@ -218,8 +224,20 @@ export class Engine {
 			stretchObjects: init.tuning.multipleStretches === "all",
 			view: init.view,
 			showHidden: init.showHidden,
-			markers: this.markers
+			markers: this.markers,
+			recordMaps: init.recordMaps ?? false,
+			memoKey: (part, item) => this.memoKey(part, item),
+			authors: revisionAuthors(init.model).index
 		})
+	}
+
+	memoKey(part: number, item: number): number {
+		return this.edits?.memoKey?.(part, item) ?? part * REF_SPAN + item
+	}
+
+	// The part a ref of a flow's blocks points into (the model's parts plus overlays).
+	part(index: number): StoryPart | undefined {
+		return this.model.parts[index]
 	}
 
 	// Keeps the first `count` endnotes referenced (layout restarting at a page).
@@ -283,7 +301,7 @@ export class Engine {
 
 			const format = content.formatOf(part, item, undefined)
 
-			content.build(story, [item], [format], 600, values, this.scanBuilt)
+			content.build(story, [part], [item], [format], 600, values, this.scanBuilt)
 		}
 	}
 
@@ -307,8 +325,10 @@ export class Engine {
 
 		const flow = new BlockFlow(this, story, region, false)
 		const area = new Area()
+		const edited = this.edits?.stories?.get(story.story)
 
-		flow.setContainer(part, root.item)
+		if (edited === undefined) flow.setContainer(part, root.item)
+		else flow.setRefs(part, edited, 0, edited.length)
 		area.page = page
 		area.region = region
 		area.left = left
@@ -371,6 +391,7 @@ interface Chain {
 }
 
 const SCRATCH_ITEMS: number[] = []
+const SCRATCH_PARTS: StoryPart[] = []
 const SCRATCH_FORMATS: ParagraphFormat[] = []
 
 // Lays out a container's blocks (paragraphs and tables) into areas, resumably: run() returns when an
@@ -382,9 +403,14 @@ export class BlockFlow {
 	// Fonts that are missing suspend the flow (otherwise layout goes on with what resolves).
 	readonly suspendable: boolean
 	cell: CellFormat | undefined = undefined
+	// The container's part (blocks may be laid out from overlay parts instead: see parts).
 	part: StoryPart | undefined = undefined
+	// Items of the blocks, and the parts they belong to.
 	blocks = new Int32Array(16)
+	parts = new Int32Array(16)
 	count = 0
+	// The last block whose content has been built (keep chains and frames build ahead of index).
+	furthest = -1
 	index = 0
 	y = 0
 	// Space after of the last paragraph placed (pending until the next block).
@@ -435,23 +461,17 @@ export class BlockFlow {
 	setRange(part: StoryPart, start: number, end: number, cell?: CellFormat): this {
 		const kinds = part.kinds
 		const view = this.engine.view
-		let count = 0
+		const substitutes = this.substitutes()
 
 		this.part = part
 		this.cell = cell
+		this.count = 0
 
 		for (let item = start; item < end;) {
 			const kind = kinds[item] ?? 0
 
 			if (kind === Item.Paragraph || kind === Item.Table) {
-				if (count === this.blocks.length) {
-					const grown = new Int32Array(this.blocks.length * 2)
-
-					grown.set(this.blocks)
-					this.blocks = grown
-				}
-
-				this.blocks[count++] = item
+				this.push(part.index, item, substitutes)
 				item = part.end(item)
 			} else if (
 				kind === Item.Sdt ||
@@ -466,14 +486,82 @@ export class BlockFlow {
 			}
 		}
 
-		this.count = count
 		this.reset()
 
 		return this
 	}
 
+	// Blocks given as refs (the body's blocks once its structure was edited): refs[from, to).
+	setRefs(part: StoryPart, refs: Float64Array, from: number, to: number): this {
+		const substitutes = this.substitutes()
+
+		this.part = part
+		this.cell = undefined
+		this.count = 0
+
+		for (let k = from; k < to; k++) {
+			const value = refs[k] ?? 0
+
+			this.push(refPart(value), refItem(value), substitutes)
+		}
+
+		this.reset()
+
+		return this
+	}
+
+	// Blocks [from, to) of another flow, as it lays them out.
+	copyBlocks(flow: BlockFlow, from: number, to: number): this {
+		this.part = flow.part
+		this.cell = flow.cell
+		this.count = 0
+
+		for (let k = from; k < to; k++) this.push(flow.parts[k] ?? -1, flow.blocks[k] ?? -1, undefined)
+
+		this.reset()
+
+		return this
+	}
+
+	private substitutes(): ReadonlyMap<number, number> | undefined {
+		const substitutes = this.engine.edits?.substitutes
+
+		return substitutes === undefined || substitutes.size === 0 ? undefined : substitutes
+	}
+
+	private push(part: number, item: number, substitutes: ReadonlyMap<number, number> | undefined): void {
+		const count = this.count
+
+		if (count === this.blocks.length) {
+			const blocks = new Int32Array(count * 2)
+			const parts = new Int32Array(count * 2)
+
+			blocks.set(this.blocks)
+			parts.set(this.parts)
+			this.blocks = blocks
+			this.parts = parts
+		}
+
+		const substitute = substitutes?.get(part * REF_SPAN + item)
+
+		this.blocks[count] = substitute === undefined ? item : refItem(substitute)
+		this.parts[count] = substitute === undefined ? part : refPart(substitute)
+		this.count = count + 1
+	}
+
+	// The part block k is laid out from.
+	partAt(k: number): StoryPart | undefined {
+		return this.engine.model.parts[this.parts[k] ?? -1]
+	}
+
+	// The ref of block k as laid out.
+	refAt(k: number): number {
+		return (this.parts[k] ?? 0) * REF_SPAN + (this.blocks[k] ?? 0)
+	}
+
 	reset(): void {
 		this.index = 0
+		this.furthest = -1
 		this.y = 0
 		this.after = 0
 		this.contextual = false
@@ -511,7 +599,7 @@ export class BlockFlow {
 			breakBeforeDone: this.breakBeforeDone,
 			noRoom: this.noRoom,
 			values: this.builtValues,
-			marker: this.engine.markers.get(this.part.index * 0x4000000 + first)
+			marker: this.engine.markers.get(this.engine.memoKey(this.parts[this.index] ?? 0, first))
 		}
 	}
 
@@ -533,12 +621,12 @@ export class BlockFlow {
 
 		const first = this.blocks[this.index] ?? -1
 
-		if (snapshot.marker !== undefined) engine.markers.set(part.index * 0x4000000 + first, snapshot.marker)
+		if (snapshot.marker !== undefined) engine.markers.set(engine.memoKey(this.parts[this.index] ?? 0, first), snapshot.marker)
 
-		const { items, formats } = this.group()
+		const { items, parts, formats } = this.group()
 		const values = snapshot.values ?? area.values
 
-		engine.content.build(this.story, items, formats, area.width, values, this.built)
+		engine.content.build(this.story, parts, items, formats, area.width, values, this.built)
 		this.builtValues = values
 
 		const props = this.built.format?.props
@@ -566,9 +654,9 @@ export class BlockFlow {
 		const prepared = this.prepared
 		const old = built.pageFields.slice()
 		let offset = cursor.offset >= 0 ? cursor.offset : (prepared.start[cursor.item] ?? prepared.text.length)
-		const { items, formats } = this.group()
+		const { items, parts, formats } = this.group()
 
-		engine.content.build(this.story, items, formats, area.width, area.values, built)
+		engine.content.build(this.story, parts, items, formats, area.width, area.values, built)
 		this.builtValues = area.values
 
 		const props = built.format?.props
@@ -597,8 +685,9 @@ export class BlockFlow {
 
 	// Where the flow continues: the next block, the table row it is in, and the text offset inside a
 	// paragraph it is in the middle of.
-	position(): { block: number; row: number; offset: number } {
+	position(): { block: number; part: number; index: number; row: number; offset: number } {
 		const block = this.index < this.count ? (this.blocks[this.index] ?? -1) : -1
+		const part = this.index < this.count ? (this.parts[this.index] ?? -1) : -1
 		const cursor = this.cursor
 		const offset = !this.inParagraph
 			? 0
@@ -606,7 +695,7 @@ export class BlockFlow {
 				? cursor.offset
 				: (this.prepared.start[cursor.item] ?? this.prepared.text.length)
 
-		return { block, row: this.table?.currentRow ?? -1, offset: cursor.rows === 0 ? 0 : offset }
+		return { block, part, index: this.index, row: this.table?.currentRow ?? -1, offset: cursor.rows === 0 ? 0 : offset }
 	}
 
 	// Bottom of the content including the last paragraph's space after (cells grow by it).
@@ -629,17 +718,19 @@ export class BlockFlow {
 			if (this.table !== undefined) status = this.runTable(area)
 			else {
 				const block = this.blocks[this.index] ?? -1
-				const kind = this.part?.kinds[block]
+				const part = this.partAt(this.index)
+				const kind = part?.kinds[block]
 
-				if (kind === Item.Table) {
+				if (kind === Item.Table && part !== undefined) {
 					this.closeBox(area)
+					this.furthest = Math.max(this.furthest, this.index)
 
-					const table = new TableLayout(this, block, area)
+					const table = new TableLayout(this, part, block, area)
 					const floated = this.floatTable(area, table)
 
 					if (floated === undefined) {
 						// A table that flows with the text (one too tall to float starts over).
-						this.table = table.floated ? new TableLayout(this, block, area) : table
+						this.table = table.floated ? new TableLayout(this, part, block, area) : table
 						status = this.runTable(area)
 					} else status = floated
 				} else status = this.paragraph(area)
@@ -816,49 +907,48 @@ export class BlockFlow {
 		return true
 	}
 
-	private group(): { items: number[]; formats: ParagraphFormat[] } {
-		const part = this.part
+	private group(): { items: number[]; parts: StoryPart[]; formats: ParagraphFormat[] } {
 		const content = this.engine.content
 		const items = SCRATCH_ITEMS
+		const parts = SCRATCH_PARTS
 		const formats = SCRATCH_FORMATS
 
 		items.length = 0
+		parts.length = 0
 		formats.length = 0
-
-		if (part === undefined) return { items, formats }
 
 		for (let k = this.index; k < this.count; k++) {
 			const item = this.blocks[k] ?? -1
+			const part = this.partAt(k)
 
-			if (part.kinds[item] !== Item.Paragraph) break
+			if (part === undefined || part.kinds[item] !== Item.Paragraph) break
 
 			const format = content.formatOf(part, item, this.cell)
 
 			items.push(item)
+			parts.push(part)
 			formats.push(format)
+			this.furthest = Math.max(this.furthest, k)
 
 			if (!content.markHidden(part, item, format) || k + 1 >= this.count) break
 		}
 
-		return { items, formats }
+		return { items, parts, formats }
 	}
 
 	private paragraph(area: Area): FlowStatus {
 		const engine = this.engine
-		const part = this.part
 		const built = this.built
 		const page = area.page
-
-		if (part === undefined) return FlowStatus.DONE
 
 		if (!this.inParagraph) {
 			const framed = this.frame(area)
 
 			if (framed !== undefined) return framed
 
-			const { items, formats } = this.group()
+			const { items, parts, formats } = this.group()
 
-			engine.content.build(this.story, items, formats, area.width, area.values, built)
+			engine.content.build(this.story, parts, items, formats, area.width, area.values, built)
 			this.builtValues = area.values
 
 			const props = built.format?.props
@@ -938,7 +1028,9 @@ export class BlockFlow {
 					(built.fieldFlags & 1 ? SourceFlag.PAGE_FIELDS : 0) |
 					(built.fieldFlags & 2 ? SourceFlag.TOTAL_FIELDS : 0),
 				built.text,
-				this.region === Region.BODY && built.renderedBreaks.length > 0 ? built.renderedBreaks.slice() : undefined
+				this.region === Region.BODY && built.renderedBreaks.length > 0 ? built.renderedBreaks.slice() : undefined,
+				built.firstPart,
+				built.map
 			)
 		}
 
@@ -1360,7 +1452,7 @@ export class BlockFlow {
 	// paragraph has no frame.
 	private frame(area: Area): FlowStatus | undefined {
 		const engine = this.engine
-		const part = this.part
+		const part = this.partAt(this.index)
 		const content = engine.content
 
 		if (part === undefined || this.inFrame) return undefined
@@ -1376,20 +1468,27 @@ export class BlockFlow {
 
 		while (end < this.count) {
 			const item = this.blocks[end] ?? -1
+			const other = this.partAt(end)
 
-			if (part.kinds[item] !== Item.Paragraph || !sameFrame(content.formatOf(part, item, this.cell).props.frame, frame)) break
+			if (
+				other === undefined ||
+				other.kinds[item] !== Item.Paragraph ||
+				!sameFrame(content.formatOf(other, item, this.cell).props.frame, frame)
+			)
+				break
 
 			end++
 		}
 
-		const last = this.blocks[end - 1] ?? first
+		this.furthest = Math.max(this.furthest, end - 1)
 
 		// The fonts the frame's text needs, loaded before it is laid out.
 		if (this.suspendable) {
 			for (let k = this.index; k < end; k++) {
 				const item = this.blocks[k] ?? -1
+				const other = this.partAt(k) ?? part
 
-				content.build(this.story, [item], [content.formatOf(part, item, this.cell)], area.width, area.values, this.built)
+				content.build(this.story, [other], [item], [content.formatOf(other, item, this.cell)], area.width, area.values, this.built)
 			}
 
 			if (engine.styles.hasMissing) return FlowStatus.SUSPEND
@@ -1398,11 +1497,7 @@ export class BlockFlow {
 		const page = area.page
 		const pageFrame = area.frame
 		const mark = page.mark(new OutputMark())
-		const inner = new BlockFlow(engine, { ...this.story, breaksAsLines: true }, this.region, false).setRange(
-			part,
-			first,
-			part.end(last)
-		)
+		const inner = new BlockFlow(engine, { ...this.story, breaksAsLines: true }, this.region, false).copyBlocks(this, this.index, end)
 
 		inner.inFrame = true
 		const box = this.floatArea.copy(area)
@@ -1528,7 +1623,16 @@ export class BlockFlow {
 		g.left = x
 		g.width = width + 1
 		cursor.reset()
-		this.prepared.source = page.addSource(this.region, this.story.story, this.built.first, 0, this.built.text)
+		this.prepared.source = page.addSource(
+			this.region,
+			this.story.story,
+			this.built.first,
+			0,
+			this.built.text,
+			undefined,
+			this.built.firstPart,
+			this.built.map
+		)
 		engine.layouter.layout(this.prepared, g, page.text, cursor, top, Infinity, true)
 
 		if (this.built.dropCap === "drop" && area.exclusions !== null)

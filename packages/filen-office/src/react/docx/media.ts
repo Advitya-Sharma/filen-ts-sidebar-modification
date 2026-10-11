@@ -37,6 +37,11 @@ export class DocxMediaCache {
 	private readonly entries = new Map<string, Entry>()
 	private bytes = 0
 	private disposed = false
+	// Object URLs of bytes drawings carry, until revokeBytesUrl() or dispose.
+	private readonly bytesUrls = new Set<string>()
+	// Settles when the font faces the document registered so far have loaded (text a drawing lays out is
+	// measured with them); the document's store sets it.
+	fontsReady: () => Promise<unknown> = () => Promise.resolve()
 
 	constructor(session: DocxSessionApi, limits: MediaCacheLimits = DEFAULT_MEDIA_LIMITS, urls: UrlFactory = browserUrls) {
 		this.session = session
@@ -118,6 +123,24 @@ export class DocxMediaCache {
 		entry.url = undefined
 	}
 
+	// An object URL for image bytes a drawing carries (a bitmap inside a metafile); undefined after dispose.
+	// Every URL needs one revokeBytesUrl().
+	createBytesUrl(bytes: Uint8Array, type: string): string | undefined {
+		if (this.disposed || type.length === 0) return undefined
+
+		const url = this.urls.create(bytes, type)
+
+		this.bytesUrls.add(url)
+
+		return url
+	}
+
+	revokeBytesUrl(url: string): void {
+		if (!this.bytesUrls.delete(url)) return
+
+		this.urls.revoke(url)
+	}
+
 	get size(): number {
 		return this.entries.size
 	}
@@ -132,5 +155,8 @@ export class DocxMediaCache {
 		this.disposed = true
 
 		for (const entry of [...this.entries.values()]) this.drop(entry)
+		for (const url of this.bytesUrls) this.urls.revoke(url)
+
+		this.bytesUrls.clear()
 	}
 }

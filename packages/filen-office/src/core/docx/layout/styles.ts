@@ -10,6 +10,7 @@ import {
 	type SymbolTable
 } from "../../fonts/index"
 import { Caps, Strike, verticalAlignment, type StyleTable, type TextStyle } from "../../text/index"
+import type { DocxModel } from "../model/index"
 import type { ResolvedBorder, ResolvedRunProps, ResolvedShading } from "../props/types"
 import { shadingColor } from "../theme/color"
 import { eighthPoints, halfPoints, points, twips } from "./units"
@@ -25,6 +26,60 @@ export interface FontSource {
 export const TrackedLook = { NONE: 0, INSERTED: 1, DELETED: 2, MOVED_FROM: 3, MOVED_TO: 4 } as const
 
 export type TrackedLook = (typeof TrackedLook)[keyof typeof TrackedLook]
+
+// Authors told apart by colour (more wrap around); index -1 is a change without an author.
+export const REVISION_AUTHOR_COLORS = 8
+
+// A tracked look with its author's colour slot packed in (0: no author, 1..8 an author's colour): what text
+// styles key on in the Markup view.
+export function revisionLook(look: TrackedLook, author: number): TrackedLook {
+	if (look === TrackedLook.NONE) return look
+
+	const slot = author < 0 ? REVISION_AUTHOR_COLORS : (author % REVISION_AUTHOR_COLORS) + 1
+
+	return (look | (slot << 3)) as TrackedLook
+}
+
+// Reviewers numbered as Word numbers them: people.xml first, then comment authors, then the authors of tracked
+// changes in document order (by part); names met later (edits) are numbered after them.
+export interface RevisionAuthors {
+	readonly names: readonly string[]
+	index(name: string | undefined): number
+}
+
+export function revisionAuthors(model: DocxModel): RevisionAuthors {
+	const names: string[] = []
+	const indices = new Map<string, number>()
+	const index = (name: string | undefined): number => {
+		const trimmed = name?.trim() ?? ""
+
+		if (trimmed.length === 0) return -1
+
+		let at = indices.get(trimmed)
+
+		if (at === undefined) {
+			at = names.length
+			names.push(trimmed)
+			indices.set(trimmed, at)
+		}
+
+		return at
+	}
+
+	for (const person of model.people) index(person.author)
+	for (const comment of model.comments) index(comment.author)
+
+	// Parts an editing layout dropped are gone from the list.
+	for (let part = 0; part < model.parts.length; part++) {
+		const table = model.parts[part]?.revisions
+
+		if (table === undefined) continue
+
+		for (let row = 0; row < table.count; row++) index(model.string(table.author[row] ?? -1))
+	}
+
+	return { names, index }
+}
 
 export type DecorationValue =
 	| { readonly kind: "color"; readonly color: string }
@@ -113,6 +168,10 @@ export class DecorationTable {
 	}
 }
 
+function fontKey(request: FontRequest): string {
+	return `${request.family.toLowerCase()}\u0000${request.bold ? 1 : 0}${request.italic ? 1 : 0}${request.slot}`
+}
+
 // Drawn thickness of a border in px. Double and multi-line styles take more room than their stroke width.
 export function borderWidth(border: ResolvedBorder): number {
 	const size = eighthPoints(border.size > 0 ? border.size : 2)
@@ -140,6 +199,8 @@ export interface RunStyleInfo {
 	readonly color: string | undefined
 	readonly run: ResolvedRunProps | undefined
 	readonly revision: TrackedLook
+	// The colour slot of the change's author (1..8), 0 without a tracked change.
+	readonly author: number
 }
 
 const SLOT_INDEX: Readonly<Record<FontSlot, number>> = { ascii: 0, hAnsi: 1, eastAsia: 2, cs: 3 }
@@ -157,6 +218,7 @@ export class RunStyles {
 	private readonly byFont = new Map<string, number>()
 	private readonly prepared = new Set<string>()
 	private readonly pending = new Set<string>()
+	private readonly loads = new Set<Promise<void>>()
 	// Per style, the code table of a symbol font drawn without the font itself, whose characters must be
 	// drawn as the Unicode characters they show.
 	private readonly symbols: (SymbolTable | undefined)[] = []
@@ -167,21 +229,33 @@ export class RunStyles {
 		this.decorations = decorations
 	}
 
+	// Fonts styles were made without are not loaded yet (requested, or loading).
 	get hasMissing(): boolean {
-		return this.missing.length > 0
+		return this.missing.length > 0 || this.pending.size > 0
 	}
 
-	// Loads the missing fonts; styles needing them can be made afterwards.
+	// Loads the missing fonts, those requested while loading too; styles needing them can be made afterwards.
 	async prepareMissing(): Promise<void> {
-		if (this.missing.length === 0) return
+		for (;;) {
+			if (this.missing.length > 0) {
+				const requests = this.missing.splice(0)
+				const keys = requests.map(fontKey)
+				const done = (): void => {
+					for (const key of keys) {
+						this.prepared.add(key)
+						this.pending.delete(key)
+					}
+				}
+				const load = this.fonts.prepare(requests).then(done, done)
 
-		const requests = this.missing.splice(0)
+				this.loads.add(load)
+				void load.then(() => this.loads.delete(load))
+			}
 
-		await this.fonts.prepare(requests)
+			if (this.loads.size === 0) return
 
-		for (const key of this.pending) this.prepared.add(key)
-
-		this.pending.clear()
+			await Promise.all(this.loads)
+		}
 	}
 
 	// Requests for fonts layout will need, prepared ahead.
@@ -210,7 +284,7 @@ export class RunStyles {
 		if (slot === "hAnsi" && run.fonts.hAnsi === run.fonts.ascii) slot = "ascii"
 		else if (slot === "eastAsia" && run.fonts.eastAsiaUsesAscii) slot = "ascii"
 
-		const key = (run.id * 4 + SLOT_INDEX[slot]) * 8 + revision
+		const key = (run.id * 4 + SLOT_INDEX[slot]) * 128 + revision
 		const cached = this.byKey.get(key)
 
 		if (cached !== undefined) return cached
@@ -261,7 +335,7 @@ export class RunStyles {
 	}
 
 	private need(request: FontRequest): boolean {
-		const key = `${request.family.toLowerCase()}\u0000${request.bold ? 1 : 0}${request.italic ? 1 : 0}${request.slot}`
+		const key = fontKey(request)
 
 		if (this.prepared.has(key)) return true
 
@@ -313,6 +387,9 @@ export class RunStyles {
 		const decorations = this.decorations
 		let underline = run.underline === undefined ? 0 : decorations.underline(run.underline.style, run.underline.color ?? run.color)
 		let strike: Strike = run.doubleStrike ? Strike.DOUBLE : run.strike ? Strike.SINGLE : Strike.NONE
+		const author = revision >> 3
+
+		revision = (revision & 7) as TrackedLook
 
 		if (revision === TrackedLook.INSERTED || revision === TrackedLook.MOVED_TO) {
 			underline = decorations.underline(revision === TrackedLook.MOVED_TO ? "double" : "single", undefined)
@@ -337,7 +414,7 @@ export class RunStyles {
 		}
 		const id = this.table.add(style)
 
-		this.info[id] = { css: cssFont(font, size), color: run.color, run, revision }
+		this.info[id] = { css: cssFont(font, size), color: run.color, run, revision, author: revision === TrackedLook.NONE ? 0 : author }
 		this.symbols[id] = font.source === "embedded" || font.source === "local" ? undefined : symbolTable(family)
 
 		return { id, cacheable: ready }

@@ -8,9 +8,13 @@ import {
 	ItemKind,
 	PATH_COMMAND_COORDS,
 	PathCommand,
+	averageShade,
+	shadeBounds,
+	type DrawingClip,
 	type DrawingImage,
 	type DrawingText,
 	type GradientStops,
+	type ImageTile,
 	type Inset,
 	type Paint,
 	type Rgba,
@@ -30,7 +34,17 @@ export interface DrawingPaintContext {
 	readonly idPrefix: string
 	// A blob: URL of the image's loaded media, or undefined when it cannot be shown.
 	imageUrl(image: DrawingImage): string | undefined
+	// Gives `image` the raster of a shaded paint for the resolution it is drawn at (`localScale`: drawing
+	// units per local unit of the paint), now and when the zoom changes; the paint draws its mean colour
+	// without it.
+	shade?(image: SVGImageElement, paint: Extract<Paint, { kind: "shaded" }>, localScale: number): void
+	// The advance width (px) of `text` in a CSS font shorthand, for text the renderer wraps; estimated
+	// without it.
+	measureText?(text: string, font: string): number
 }
+
+// A font family list the engine resolved for a text (an internal alias and a generic family).
+const FONT_FAMILY = /^(?:"[A-Za-z0-9_-]{1,128}", )?(?:serif|sans-serif|monospace)$/
 
 const SVG_NS = "http://www.w3.org/2000/svg"
 const XML_NS = "http://www.w3.org/XML/1998/namespace"
@@ -39,6 +53,14 @@ const MAX_COORD = 2 ** 31
 const MAX_STOPS = 64
 const MAX_DASHES = 32
 const MAX_RUNS = 50_000
+const MAX_CLIPS = 100_000
+const MAX_CLIP_CHAIN = 1024
+const MAX_CLIP_SHAPES = 4096
+// Clip groups made over one drawing (items and mask contents).
+const MAX_CLIP_ELEMENTS = 200_000
+const EMPTY_CHAIN: readonly number[] = []
+// Characters of positioned text, and of the coordinate list positioning it.
+const MAX_GLYPHS = 20_000
 const PX_PER_PT = 96 / 72
 
 type PaintSlot = "fill" | "stroke"
@@ -362,6 +384,9 @@ class Painter {
 	private readonly shadowIds = new Map<string, string>()
 	private readonly filterIds = new Map<number, string>()
 	private readonly urls = new Map<number, string | undefined>()
+	private readonly clipIds = new Map<number, string | undefined>()
+	private readonly chains = new Map<number, readonly number[] | undefined>()
+	private clipElementsLeft = MAX_CLIP_ELEMENTS
 	private runsLeft = MAX_RUNS
 	// The opacity of the last paint value resolved.
 	private opacity = 1
@@ -404,6 +429,20 @@ class Painter {
 		root.setAttribute("width", "100%")
 		root.setAttribute("height", "100%")
 		root.setAttribute("aria-hidden", "true")
+		// Blended items (metafile raster operations) composite with the picture drawn so far, never the page.
+		root.style.setProperty("isolation", "isolate")
+
+		// The surface the drawing starts on (white under a metafile's raster operations).
+		const background = typeof data.background === "number" ? rgbaOf(data.background) : undefined
+
+		if (background !== undefined && width > 0 && height > 0) {
+			const surface = this.el("rect")
+
+			surface.setAttribute("width", fmt(width))
+			surface.setAttribute("height", fmt(height))
+			setColor(surface, "fill", background)
+			root.appendChild(surface)
+		}
 
 		const floats = data.itemFloats
 		const ints = data.itemInts
@@ -413,6 +452,10 @@ class Painter {
 			Math.floor(floats.length / ITEM_FLOATS),
 			Math.floor(ints.length / ITEM_INTS)
 		)
+
+		const itemClips = data.itemClips instanceof Int32Array ? data.itemClips : null
+		// The open clip groups, outermost first: consecutive items share the groups of their common clips.
+		const open: { clip: number; group: Element }[] = []
 
 		for (let item = 0; item < count; item++) {
 			const i = item * ITEM_INTS
@@ -439,33 +482,274 @@ class Painter {
 
 			if (element === undefined) continue
 
+			const chain = this.clipChain(itemClips === null ? -1 : index(itemClips[item]))
+
+			// A malformed clip hides the item rather than showing what it would have clipped away.
+			if (chain === undefined) continue
+
+			const blend = blendMode(flags)
 			const shadow = this.shadow(index(ints[i + ItemInt.SHADOW]))
+			let content: SVGElement = element
 
-			if (shadow === undefined) {
-				root.appendChild(element)
-			} else {
+			if (shadow !== undefined) {
 				// Wrapped so the offset applies in drawing space, not scaled or rotated by the item's matrix.
-				const group = this.el("g")
-
-				group.setAttribute("filter", `url(#${shadow})`)
-				group.appendChild(element)
-				root.appendChild(group)
+				content = this.el("g")
+				content.setAttribute("filter", `url(#${shadow})`)
+				content.appendChild(element)
 			}
+
+			if (blend !== undefined) {
+				// A blended item gets its own clip groups as a child of the root, blending from the outermost:
+				// a blend inside a clip or mask group would composite against that group alone.
+				open.length = 0
+
+				let outer: SVGElement = content
+				let wrapped = 0
+
+				for (let k = chain.length - 1; k >= 0; k--) {
+					const group = this.clipGroup(chain[k] ?? -1)
+
+					if (group === undefined) break
+
+					group.appendChild(outer)
+					outer = group
+					wrapped++
+				}
+
+				if (wrapped !== chain.length) continue
+
+				outer.style.setProperty("mix-blend-mode", blend)
+				root.appendChild(outer)
+				continue
+			}
+
+			let shared = 0
+
+			while (shared < open.length && shared < chain.length && open[shared]?.clip === chain[shared]) shared++
+
+			open.length = shared
+
+			for (let k = shared; k < chain.length; k++) {
+				const clip = chain[k] ?? -1
+				const group = this.clipGroup(clip)
+
+				if (group === undefined) break
+
+				;(open[k - 1]?.group ?? root).appendChild(group)
+				open.push({ clip, group })
+			}
+
+			if (open.length !== chain.length) {
+				open.length = 0
+				continue
+			}
+
+			;(open[open.length - 1]?.group ?? root).appendChild(content)
 		}
 	}
 
+	private clips(): readonly DrawingClip[] {
+		return Array.isArray(this.data.clips) ? this.data.clips : []
+	}
+
+	// A clip and its parents, outermost first; [] for none, undefined when malformed.
+	private clipChain(clipIndex: number): readonly number[] | undefined {
+		if (clipIndex < 0) return EMPTY_CHAIN
+
+		const cached = this.chains.get(clipIndex)
+
+		if (cached !== undefined || this.chains.has(clipIndex)) return cached
+
+		const clips = this.clips()
+		const chain: number[] = []
+
+		for (let at = clipIndex; at >= 0;) {
+			const clip = clips[at]
+
+			if (clip === undefined || clip === null || at >= MAX_CLIPS || chain.length >= MAX_CLIP_CHAIN) {
+				this.chains.set(clipIndex, undefined)
+
+				return undefined
+			}
+
+			chain.push(at)
+
+			const parent = index(clip.parent)
+
+			// Parents precede their children; anything else ends the chain.
+			at = parent < at ? parent : -1
+		}
+
+		chain.reverse()
+		this.chains.set(clipIndex, chain)
+
+		return chain
+	}
+
+	// A fresh group applying one clip level: a clip path for shapes, a mask for a boolean region, with the
+	// clip's group opacity. Undefined when the clip is malformed or the budget is spent.
+	private clipGroup(clipIndex: number): SVGGElement | undefined {
+		const clip = this.clips()[clipIndex]
+
+		if (clip === undefined || clip === null || this.clipElementsLeft-- <= 0) return undefined
+
+		const group = this.el("g")
+		const isBoolean = Array.isArray(clip.add)
+		const id = isBoolean ? this.clipMask(clipIndex) : this.clipPath(clipIndex)
+
+		if (id === undefined) return undefined
+
+		group.setAttribute(isBoolean ? "mask" : "clip-path", `url(#${id})`)
+
+		const opacity = clamp(clip.opacity ?? 1, 0, 1, 1)
+
+		if (opacity < 1) group.setAttribute("opacity", fmt(opacity))
+
+		return group
+	}
+
+	// A <clipPath> uniting a clip's shapes, each with its own placement and fill rule (no shapes: hides all).
+	private clipPath(clipIndex: number): string | undefined {
+		const done = this.clipIds.get(clipIndex)
+
+		if (done !== undefined || this.clipIds.has(clipIndex)) return done
+
+		const clip = this.clips()[clipIndex]
+
+		if (clip === undefined || clip === null) return undefined
+
+		const id = this.id("k")
+		const element = this.el("clipPath")
+		const shapes = [clip, ...(Array.isArray(clip.shapes) ? clip.shapes.slice(0, MAX_CLIP_SHAPES) : [])]
+
+		element.setAttribute("id", id)
+		element.setAttribute("clipPathUnits", "userSpaceOnUse")
+
+		for (const shape of shapes) {
+			if (shape === undefined || shape === null) continue
+
+			const d = this.pathRange(index(shape.firstCommand), index(shape.commandCount), index(shape.firstCoord))
+
+			if (d === "") continue
+
+			const path = this.el("path")
+			const transform = this.matrixAttribute(Array.isArray(shape.matrix) ? shape.matrix : [])
+
+			path.setAttribute("d", d)
+
+			if (transform !== "") path.setAttribute("transform", transform)
+			if (shape.evenOdd === true) path.setAttribute("clip-rule", "evenodd")
+
+			element.appendChild(path)
+		}
+
+		this.defs().appendChild(element)
+		this.clipIds.set(clipIndex, id)
+
+		return id
+	}
+
+	// A <mask> showing the union of the `add` clips' areas minus the `subtract` clips' areas.
+	private clipMask(clipIndex: number): string | undefined {
+		const done = this.clipIds.get(clipIndex)
+
+		if (done !== undefined || this.clipIds.has(clipIndex)) return done
+
+		const clip = this.clips()[clipIndex]
+
+		if (clip === undefined || clip === null || !Array.isArray(clip.add)) return undefined
+
+		// Members are earlier clips; marking this one first keeps a malformed cycle from recursing.
+		this.clipIds.set(clipIndex, undefined)
+
+		const id = this.id("m")
+		const mask = this.el("mask")
+		const [x, y, width, height] = this.plane()
+
+		mask.setAttribute("id", id)
+		mask.setAttribute("maskUnits", "userSpaceOnUse")
+		mask.setAttribute("maskContentUnits", "userSpaceOnUse")
+		mask.setAttribute("x", fmt(x))
+		mask.setAttribute("y", fmt(y))
+		mask.setAttribute("width", fmt(width))
+		mask.setAttribute("height", fmt(height))
+
+		const members: [readonly unknown[], string][] = [
+			[clip.add.slice(0, MAX_CLIP_SHAPES), "#fff"],
+			[Array.isArray(clip.subtract) ? clip.subtract.slice(0, MAX_CLIP_SHAPES) : [], "#000"]
+		]
+
+		for (const [list, color] of members) {
+			for (const member of list) {
+				const memberIndex = typeof member === "number" ? index(member) : -1
+
+				if (memberIndex < 0 || memberIndex >= clipIndex) continue
+
+				const area = this.clipArea(memberIndex, color)
+
+				if (area !== undefined) mask.appendChild(area)
+			}
+		}
+
+		this.defs().appendChild(mask)
+		this.clipIds.set(clipIndex, id)
+
+		return id
+	}
+
+	// The area of a clip painted in `color`: a plane-sized rectangle inside the clip's groups.
+	private clipArea(clipIndex: number, color: string): SVGElement | undefined {
+		const chain = this.clipChain(clipIndex)
+
+		if (chain === undefined) return undefined
+
+		const [x, y, width, height] = this.plane()
+		const rect = this.el("rect")
+
+		rect.setAttribute("x", fmt(x))
+		rect.setAttribute("y", fmt(y))
+		rect.setAttribute("width", fmt(width))
+		rect.setAttribute("height", fmt(height))
+		rect.setAttribute("fill", color)
+
+		let inner: SVGElement = rect
+
+		for (let k = chain.length - 1; k >= 0; k--) {
+			const group = this.clipGroup(chain[k] ?? -1)
+
+			if (group === undefined) return undefined
+
+			// Opacity belongs to drawing, not to the area a region covers.
+			group.removeAttribute("opacity")
+			group.appendChild(inner)
+			inner = group
+		}
+
+		return inner
+	}
+
+	// A rectangle far beyond the drawing, standing for the whole plane in masks.
+	private plane(): [number, number, number, number] {
+		const size = Math.max(clamp(this.data.width, 0, MAX_COORD, 0), clamp(this.data.height, 0, MAX_COORD, 0), 1) * 64
+
+		return [-size, -size, size * 2, size * 2]
+	}
+
+	private matrixAttribute(m: ArrayLike<number>): string {
+		const a = finite(m[0] ?? 1, 1)
+		const b = finite(m[1] ?? 0, 0)
+		const c = finite(m[2] ?? 0, 0)
+		const d = finite(m[3] ?? 1, 1)
+		const e = finite(m[4] ?? 0, 0)
+		const f = finite(m[5] ?? 0, 0)
+
+		if (a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0) return ""
+
+		return `matrix(${fmt(a)} ${fmt(b)} ${fmt(c)} ${fmt(d)} ${fmt(e)} ${fmt(f)})`
+	}
+
 	private transform(f: number): string {
-		const m = this.data.itemFloats
-		const a = finite(m[f + ItemFloat.A] ?? 1, 1)
-		const b = finite(m[f + ItemFloat.B] ?? 0, 0)
-		const c = finite(m[f + ItemFloat.C] ?? 0, 0)
-		const d = finite(m[f + ItemFloat.D] ?? 1, 1)
-		const e = finite(m[f + ItemFloat.E] ?? 0, 0)
-		const ff = finite(m[f + ItemFloat.F] ?? 0, 0)
-
-		if (a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && ff === 0) return ""
-
-		return `matrix(${fmt(a)} ${fmt(b)} ${fmt(c)} ${fmt(d)} ${fmt(e)} ${fmt(ff)})`
+		return this.matrixAttribute(this.data.itemFloats.subarray(f, f + 6))
 	}
 
 	private box(f: number): [number, number, number, number] {
@@ -481,11 +765,18 @@ class Painter {
 
 	private pathData(i: number): string {
 		const ints = this.data.itemInts
+
+		return this.pathRange(
+			index(ints[i + ItemInt.FIRST_COMMAND]),
+			index(ints[i + ItemInt.COMMAND_COUNT]),
+			index(ints[i + ItemInt.FIRST_COORD])
+		)
+	}
+
+	private pathRange(first: number, count: number, firstCoord: number): string {
 		const commands = this.data.commands
 		const coords = this.data.coords
-		const first = index(ints[i + ItemInt.FIRST_COMMAND])
-		const count = index(ints[i + ItemInt.COMMAND_COUNT])
-		let at = index(ints[i + ItemInt.FIRST_COORD])
+		let at = firstCoord
 
 		if (first < 0 || count <= 0 || at < 0) return ""
 
@@ -522,6 +813,78 @@ class Painter {
 		return d
 	}
 
+	// What a clamped tile or a shaded paint draws: one image in the item's local space (placed by the tile's
+	// matrix), clipped by the item's own outline: crisp at any scale, unlike a pattern cell spanning the plane.
+	// A shaded paint's raster comes from the context at the resolution it is drawn at (`localScale`: drawing
+	// units per local unit). Undefined when the paint is neither, or cannot be drawn so.
+	private imageFill(paintIndex: number, localScale: number): { content: SVGElement; placement: string } | undefined {
+		const paint: Paint | undefined = this.data.paints[paintIndex]
+
+		if (paint === undefined || paint === null) return undefined
+
+		if (paint.kind === "shaded") {
+			const bounds =
+				paint.points instanceof Float32Array && paint.colors instanceof Uint32Array ? shadeBounds(paint.points) : undefined
+
+			if (bounds === undefined || this.context.shade === undefined) return undefined
+
+			const image = this.el("image")
+
+			image.setAttribute("x", fmt(bounds[0]))
+			image.setAttribute("y", fmt(bounds[1]))
+			image.setAttribute("width", fmt(bounds[2]))
+			image.setAttribute("height", fmt(bounds[3]))
+			image.setAttribute("preserveAspectRatio", "none")
+			this.context.shade(image, paint, finite(localScale, 1))
+
+			return { content: image, placement: "" }
+		}
+
+		const tile = paint.kind === "image" ? paint.tile : undefined
+
+		if (paint.kind !== "image" || tile === undefined || tile === null || tile.clamp !== true || tile.width === undefined)
+			return undefined
+
+		const width = clamp(tile.width, 0, MAX_COORD, 0)
+		const height = clamp(tile.height ?? 0, 0, MAX_COORD, 0)
+		const content = width > 0 && height > 0 ? this.imageContent(index(paint.image), 0, 0, width, height) : undefined
+
+		return content === undefined
+			? undefined
+			: { content, placement: this.matrixAttribute(Array.isArray(tile.matrix) ? tile.matrix : []) }
+	}
+
+	// `fill` drawn inside `shape` (a path or text, with its own transform) as its clip; `transform` is the
+	// shape's local space.
+	private clippedFill(shape: SVGElement, transform: string, fill: { content: SVGElement; placement: string }): SVGGElement {
+		const id = this.id("c")
+		const clipPath = this.el("clipPath")
+		const group = this.el("g")
+		const inner = this.el("g")
+
+		clipPath.setAttribute("id", id)
+		clipPath.setAttribute("clipPathUnits", "userSpaceOnUse")
+		clipPath.appendChild(shape)
+		this.defs().appendChild(clipPath)
+		group.setAttribute("clip-path", `url(#${id})`)
+
+		const local = [transform, fill.placement].filter(part => part !== "").join(" ")
+
+		if (local !== "") inner.setAttribute("transform", local)
+
+		inner.appendChild(fill.content)
+		group.appendChild(inner)
+
+		return group
+	}
+
+	// The scale of an item's matrix (drawing units per local unit).
+	private localScale(f: number): number {
+		const m = this.data.itemFloats
+
+		return Math.sqrt(Math.abs((m[f] ?? 1) * (m[f + 3] ?? 1) - (m[f + 1] ?? 0) * (m[f + 2] ?? 0)))
+	}
+
 	private pathItem(i: number, f: number, flags: number): SVGElement | undefined {
 		const d = this.pathData(i)
 
@@ -531,6 +894,35 @@ class Painter {
 		const path = this.el("path")
 		const transform = this.transform(f)
 		const [, , width, height] = this.box(f)
+		const image = this.imageFill(index(ints[i + ItemInt.FILL]), this.localScale(f))
+
+		if (image !== undefined) {
+			const shape = this.el("path")
+
+			shape.setAttribute("d", d)
+
+			if (transform !== "") shape.setAttribute("transform", transform)
+			if ((flags & ItemFlag.EVEN_ODD) !== 0) shape.setAttribute("clip-rule", "evenodd")
+
+			const clipped = this.clippedFill(shape, transform, image)
+			const stroke = index(ints[i + ItemInt.STROKE])
+
+			if (stroke < 0) return clipped
+
+			// The outline stays outside the fill's clip.
+			const both = this.el("g")
+
+			path.setAttribute("d", d)
+
+			if (transform !== "") path.setAttribute("transform", transform)
+
+			path.setAttribute("fill", "none")
+			this.applyStroke(path, stroke, width, height)
+			both.appendChild(clipped)
+			both.appendChild(path)
+
+			return both
+		}
 
 		path.setAttribute("d", d)
 
@@ -634,10 +1026,120 @@ class Painter {
 
 				return this.pattern(paintIndex, paint)
 			case "image":
-				return this.imagePaint(paintIndex, paint)
+				return paint.tile !== undefined && paint.tile !== null && paint.tile.width !== undefined
+					? this.tilePaint(paintIndex, paint, paint.tile)
+					: this.imagePaint(paintIndex, paint)
+			case "gradient":
+				if (stopCount(paint.stops) === 0) return "none"
+
+				return this.gradient(paintIndex, paint)
+			case "shaded":
+				// Where it cannot be drawn as an image (an outline, no rasteriser): its mean colour.
+				return paint.colors instanceof Uint32Array ? this.color(averageShade(paint.colors)) : "none"
 			default:
 				return "none"
 		}
+	}
+
+	// A gradient in user space (the item's local coordinates).
+	private gradient(paintIndex: number, paint: Extract<Paint, { kind: "gradient" }>): string {
+		const key = `g${paintIndex}`
+		const cached = this.paintIds.get(key)
+
+		if (cached !== undefined) return `url(#${cached})`
+
+		const id = this.id("g")
+		const radial = paint.type === "radial"
+		const gradient = radial ? this.el("radialGradient") : this.el("linearGradient")
+		const transform = this.matrixAttribute(Array.isArray(paint.matrix) ? paint.matrix : [])
+
+		gradient.setAttribute("id", id)
+		gradient.setAttribute("gradientUnits", "userSpaceOnUse")
+
+		if (transform !== "") gradient.setAttribute("gradientTransform", transform)
+
+		if (radial) {
+			const focus = Array.isArray(paint.focus) ? paint.focus : [0, 0]
+
+			gradient.setAttribute("cx", "0")
+			gradient.setAttribute("cy", "0")
+			gradient.setAttribute("r", "1")
+			gradient.setAttribute("fx", fmt(clamp(focus[0] ?? 0, -1, 1, 0)))
+			gradient.setAttribute("fy", fmt(clamp(focus[1] ?? 0, -1, 1, 0)))
+		} else {
+			gradient.setAttribute("x1", "0")
+			gradient.setAttribute("y1", "0")
+			gradient.setAttribute("x2", "1")
+			gradient.setAttribute("y2", "0")
+		}
+
+		gradient.setAttribute("spreadMethod", paint.spread === "reflect" ? "reflect" : paint.spread === "repeat" ? "repeat" : "pad")
+		this.stops(gradient, paint.stops, 0)
+		this.defs().appendChild(gradient)
+		this.paintIds.set(key, id)
+
+		return `url(#${id})`
+	}
+
+	// An image tile of explicit size placed by its matrix, mirrored per flip, repeated unless clamped.
+	private tilePaint(paintIndex: number, paint: Extract<Paint, { kind: "image" }>, tile: ImageTile): string {
+		const key = `t${paintIndex}`
+		const cached = this.paintIds.get(key)
+
+		if (cached !== undefined) return `url(#${cached})`
+
+		const width = clamp(tile.width ?? 0, 0, MAX_COORD, 0)
+		const height = clamp(tile.height ?? 0, 0, MAX_COORD, 0)
+		const flipX = tile.flip === "x" || tile.flip === "xy"
+		const flipY = tile.flip === "y" || tile.flip === "xy"
+
+		if (!(width > 0 && height > 0)) return ""
+
+		const id = this.id("t")
+		const pattern = this.el("pattern")
+		const transform = this.matrixAttribute(Array.isArray(tile.matrix) ? tile.matrix : [])
+		const clamped = tile.clamp === true
+		const [planeX, , planeWidth] = this.plane()
+		// A clamped tile repeats only beyond the plane, so it draws once.
+		const cellWidth = clamped ? planeWidth : width * (flipX ? 2 : 1)
+		const cellHeight = clamped ? planeWidth : height * (flipY ? 2 : 1)
+
+		pattern.setAttribute("id", id)
+		pattern.setAttribute("patternUnits", "userSpaceOnUse")
+		pattern.setAttribute("x", clamped ? fmt(planeX) : "0")
+		pattern.setAttribute("y", clamped ? fmt(planeX) : "0")
+		pattern.setAttribute("width", fmt(cellWidth))
+		pattern.setAttribute("height", fmt(cellHeight))
+
+		if (transform !== "") pattern.setAttribute("patternTransform", transform)
+
+		const copies = clamped
+			? [[1, 1]]
+			: [[1, 1], ...(flipX ? [[-1, 1]] : []), ...(flipY ? [[1, -1]] : []), ...(flipX && flipY ? [[-1, -1]] : [])]
+
+		for (const [sx = 1, sy = 1] of copies) {
+			const content = this.imageContent(index(paint.image), 0, 0, width, height)
+
+			if (content === undefined) return ""
+
+			// Mirrored copies sit in the cell's second column or row, flipped about their own edge.
+			if (sx < 0 || sy < 0 || clamped) {
+				const group = this.el("g")
+				const ox = clamped ? -planeX : sx < 0 ? width * 2 : 0
+				const oy = clamped ? -planeX : sy < 0 ? height * 2 : 0
+
+				group.setAttribute("transform", `matrix(${sx} 0 0 ${sy} ${fmt(ox)} ${fmt(oy)})`)
+				group.appendChild(content)
+				pattern.appendChild(group)
+			} else {
+				pattern.appendChild(content)
+			}
+		}
+
+		this.defs().appendChild(pattern)
+		this.paintIds.set(key, id)
+
+		return `url(#${id})`
 	}
 
 	private color(color: number): string {
@@ -1041,9 +1543,171 @@ class Painter {
 		return id
 	}
 
+	// Positioned text: one run on the item's baseline, each character anchored at its offset when positions
+	// are given.
+	private glyphItem(text: Extract<DrawingText, { kind: "glyphs" }>, textIndex: number, f: number): SVGElement | undefined {
+		const run = text.run
+
+		if (typeof run !== "object" || run === null || typeof run.text !== "string" || run.text === "" || this.runsLeft <= 0)
+			return undefined
+
+		this.runsLeft--
+
+		const element = this.el("text")
+		const transform = this.transform(f)
+		const characters = Array.from(run.text.slice(0, MAX_GLYPHS * 2)).slice(0, MAX_GLYPHS)
+		const positions = text.positions instanceof Float32Array ? text.positions : null
+
+		if (positions !== null && positions.length > 0) {
+			let x = ""
+
+			for (let k = 0; k < Math.min(characters.length, positions.length); k++)
+				x += k === 0 ? fmt(positions[k] ?? 0) : ` ${fmt(positions[k] ?? 0)}`
+
+			element.setAttribute("x", x)
+		} else {
+			element.setAttribute("x", "0")
+		}
+
+		// Absolutely positioned characters each start a text chunk, so the anchor applies to each of them.
+		if (text.anchor === "middle" || text.anchor === "end") element.setAttribute("text-anchor", text.anchor)
+
+		element.setAttribute("y", "0")
+		element.setAttributeNS(XML_NS, "xml:space", "preserve")
+
+		if (transform !== "") element.setAttribute("transform", transform)
+
+		element.textContent = characters.join("")
+		this.runStyle(element, run, 1, this.family(textIndex, run.font))
+
+		return this.textFill(element, text.fill, f)
+	}
+
+	// A text's paint instead of its colour, laid over the item's box; a clamped tile or shaded paint is drawn
+	// as an image clipped by the text's own outline. The element to place.
+	private textFill(element: SVGElement, fill: number | undefined, f: number): SVGElement {
+		const paintIndex = index(fill)
+
+		if (paintIndex < 0) return element
+
+		const image = this.imageFill(paintIndex, this.localScale(f))
+
+		if (image !== undefined) {
+			element.removeAttribute("fill-opacity")
+
+			return this.clippedFill(element, element.getAttribute("transform") ?? "", image)
+		}
+
+		const [, , width, height] = this.box(f)
+
+		element.removeAttribute("fill-opacity")
+		this.applyPaint(element, "fill", paintIndex, width, height, 0)
+
+		return element
+	}
+
+	// The family list to draw a text in: the alias the engine registered for it, else a generic family.
+	private family(textIndex: number, font: string): string {
+		const resolved = Array.isArray(this.data.textFonts) ? this.data.textFonts[textIndex] : undefined
+
+		return typeof resolved === "string" && FONT_FAMILY.test(resolved) ? resolved : genericFamily(font)
+	}
+
+	// Text the renderer lays out in its rectangle: measured greedy wrapping, cut to the height, trimmed,
+	// aligned and clipped.
+	private blockItem(text: Extract<DrawingText, { kind: "block" }>, textIndex: number, f: number): SVGElement | undefined {
+		const run = text.run
+
+		if (typeof run !== "object" || run === null || typeof run.text !== "string" || run.text === "" || this.runsLeft <= 0)
+			return undefined
+
+		this.runsLeft--
+
+		const size = runPx(run, 1)
+		const family = this.family(textIndex, run.font)
+		const font = `${run.italic === true ? "italic " : ""}${run.bold === true ? 700 : 400} ${fmt(size)}px ${family}`
+		const measure = (value: string): number => {
+			const measured = this.context.measureText?.(value, font)
+
+			return typeof measured === "number" && Number.isFinite(measured) && measured >= 0 ? measured : value.length * size * 0.55
+		}
+		const width = clamp(text.width, 0, MAX_COORD, 0)
+		const height = clamp(text.height, 0, MAX_COORD, 0)
+		const lineHeight = clamp(text.lineHeight, 0.01, MAX_COORD, size * 1.2)
+		const trimming = typeof text.trimming === "string" ? text.trimming : "none"
+		const lines = layoutBlock(
+			run.text.slice(0, MAX_GLYPHS),
+			width,
+			height,
+			lineHeight,
+			text.wrap === true,
+			text.lineLimit === true,
+			trimming,
+			measure
+		)
+
+		if (lines.length === 0) return undefined
+
+		const total = lines.length * lineHeight
+		const top =
+			height <= 0
+				? text.lineAlign === "middle"
+					? -total / 2
+					: text.lineAlign === "end"
+						? -total
+						: 0
+				: text.lineAlign === "middle"
+					? (height - total) / 2
+					: text.lineAlign === "end"
+						? height - total
+						: 0
+		const anchor = text.align === "middle" ? "middle" : text.align === "end" ? "end" : "start"
+		const x = anchor === "middle" ? width / 2 : anchor === "end" ? width : 0
+		const ascent = clamp(text.ascent, 0, 3, 0.9) * size
+		const group = this.el("g")
+		const transform = this.transform(f)
+
+		if (transform !== "") group.setAttribute("transform", transform)
+
+		if (text.clip === true && width > 0 && height > 0) {
+			const id = this.id("b")
+			const clipPath = this.el("clipPath")
+			const rect = this.el("rect")
+
+			rect.setAttribute("width", fmt(width))
+			rect.setAttribute("height", fmt(height))
+			clipPath.setAttribute("id", id)
+			clipPath.appendChild(rect)
+			this.defs().appendChild(clipPath)
+			group.setAttribute("clip-path", `url(#${id})`)
+		}
+
+		for (let k = 0; k < lines.length; k++) {
+			const line = this.el("text")
+
+			line.setAttribute("x", fmt(x))
+			line.setAttribute("y", fmt(top + k * lineHeight + ascent))
+			line.setAttributeNS(XML_NS, "xml:space", "preserve")
+
+			if (anchor !== "start") line.setAttribute("text-anchor", anchor)
+			if (text.rtl === true) line.setAttribute("direction", "rtl")
+
+			line.textContent = lines[k] ?? ""
+			this.runStyle(line, run, 1, family)
+			group.appendChild(this.textFill(line, text.fill, f))
+		}
+
+		return group
+	}
+
 	// Rich text laid out simply: a line per paragraph or line break, no wrapping, anchored in the box.
 	private textItem(i: number, f: number): SVGElement | undefined {
 		const text: DrawingText | undefined = this.data.texts[index(this.data.itemInts[i + ItemInt.REF])]
+
+		const textIndex = index(this.data.itemInts[i + ItemInt.REF])
+
+		if (text !== undefined && text !== null && text.kind === "glyphs") return this.glyphItem(text, textIndex, f)
+		if (text !== undefined && text !== null && text.kind === "block") return this.blockItem(text, textIndex, f)
 
 		// A story is a text box the page layout draws itself.
 		if (text === undefined || text === null || text.kind !== "body" || !Array.isArray(text.paragraphs)) return undefined
@@ -1205,7 +1869,7 @@ class Painter {
 		return element
 	}
 
-	private runStyle(element: SVGElement, run: TextRun, scale: number): void {
+	private runStyle(element: SVGElement, run: TextRun, scale: number, family: string = genericFamily(run.font)): void {
 		const color = rgbaOf(run.color)
 		const alpha = alphaOf(color)
 		const spacing = clamp(run.spacing, -100, 100, 0) * PX_PER_PT
@@ -1213,7 +1877,7 @@ class Painter {
 		const strike = run.strike === "sngStrike" || run.strike === "dblStrike"
 
 		element.setAttribute("font-size", fmt(runPx(run, scale)))
-		element.setAttribute("font-family", genericFamily(run.font))
+		element.setAttribute("font-family", family)
 		element.setAttribute("fill", hex(color))
 
 		if (alpha < 1) element.setAttribute("fill-opacity", fmt(alpha))
@@ -1226,6 +1890,183 @@ class Painter {
 				"text-decoration",
 				underline && strike ? "underline line-through" : underline ? "underline" : "line-through"
 			)
+	}
+}
+
+type Trimming = Extract<DrawingText, { kind: "block" }>["trimming"]
+
+// Lines of block text: paragraphs at "\n", wrapped greedily at spaces (a word wider than the line breaks
+// between characters), cut to the height and trimmed where text is cut. Each word and each character is
+// measured once; a line's width is the sum of its pieces.
+function layoutBlock(
+	source: string,
+	width: number,
+	height: number,
+	lineHeight: number,
+	wrap: boolean,
+	lineLimit: boolean,
+	trimming: Trimming,
+	measureText: (text: string) => number
+): string[] {
+	const widths = new Map<string, number>()
+	const measure = (value: string): number => {
+		let known = widths.get(value)
+
+		if (known === undefined) {
+			known = measureText(value)
+			widths.set(value, known)
+		}
+
+		return known
+	}
+	const lines: string[] = []
+	const maxLines = height <= 0 ? Infinity : lineLimit ? Math.floor(height / lineHeight + 1e-6) : Math.ceil(height / lineHeight - 1e-6)
+	let cut = false
+
+	for (const paragraph of source.split("\n")) {
+		if (lines.length >= maxLines) {
+			cut = true
+			break
+		}
+
+		if (!wrap || width <= 0) {
+			lines.push(paragraph)
+			continue
+		}
+
+		let line = ""
+		let lineWidth = 0
+		const flush = (): void => {
+			lines.push(line.trimEnd())
+			line = ""
+			lineWidth = 0
+		}
+		// A word wider than the line, character by character.
+		const breakWord = (token: string): void => {
+			for (const character of token) {
+				const step = measure(character)
+
+				if (line !== "" && lineWidth + step > width) flush()
+
+				line += character
+				lineWidth += step
+			}
+		}
+
+		for (const token of paragraph.split(/(\s+)/)) {
+			if (token === "") continue
+
+			const space = /^\s+$/.test(token)
+			const step = measure(token)
+
+			if (lineWidth + step <= width) {
+				line += token
+				lineWidth += step
+				continue
+			}
+
+			// Spaces at a break vanish; a word starts the next line.
+			if (space) {
+				if (line.trim() !== "") flush()
+
+				continue
+			}
+
+			if (line.trim() !== "") flush()
+
+			if (step <= width) {
+				line = token
+				lineWidth = step
+			} else {
+				line = ""
+				lineWidth = 0
+				breakWord(token)
+			}
+		}
+
+		lines.push(line.trimEnd())
+	}
+
+	if (lines.length > maxLines) {
+		cut = true
+		lines.length = Number.isFinite(maxLines) ? maxLines : lines.length
+	}
+
+	if (lines.length === 0) return lines
+
+	// Trimming applies where text is cut: the last kept line, or a line wider than an unwrapped box.
+	const last = lines.length - 1
+
+	for (let k = 0; k < lines.length; k++) {
+		const line = lines[k] ?? ""
+		const forced = k === last && cut
+
+		if (forced || (width > 0 && measure(line) > width)) lines[k] = trim(line, width, trimming, measure, forced)
+	}
+
+	return lines
+}
+
+// One line cut to the width: characters or words dropped from the end (or the middle, for a path), with an
+// ellipsis for the ellipsis kinds. Character prefix widths are summed once.
+function trim(line: string, width: number, trimming: Trimming, measure: (text: string) => number, forced: boolean): string {
+	const characters = Array.from(line.trimEnd())
+	const ellipsis = trimming === "ellipsisCharacter" || trimming === "ellipsisWord" || trimming === "ellipsisPath"
+	const prefix = [0]
+
+	for (const character of characters) prefix.push((prefix[prefix.length - 1] ?? 0) + measure(character))
+
+	const total = prefix[prefix.length - 1] ?? 0
+	const mark = ellipsis ? measure("…") : 0
+	// The last space before each position (-1 for none).
+	const spaces = [-1]
+
+	for (let k = 0; k < characters.length; k++) spaces.push(characters[k] === " " ? k : (spaces[k] ?? -1))
+	const fits = (value: number): boolean => width <= 0 || value <= width
+
+	if (trimming === "none" || (!forced && fits(total))) return characters.join("")
+
+	if (trimming === "ellipsisPath") {
+		// The middle gives way, keeping both ends.
+		for (let keep = characters.length - 1; keep > 0; keep--) {
+			const head = Math.ceil(keep / 2)
+			const tail = keep - head
+			const used = (prefix[head] ?? 0) + (total - (prefix[characters.length - tail] ?? 0)) + mark
+
+			if (fits(used)) return `${characters.slice(0, head).join("")}…${characters.slice(characters.length - tail).join("")}`
+		}
+
+		return "…"
+	}
+
+	for (let keep = characters.length - (forced && ellipsis ? 0 : 1); keep >= 0; keep--) {
+		let end = keep
+
+		if ((trimming === "word" || trimming === "ellipsisWord") && keep < characters.length) {
+			const space = spaces[keep] ?? -1
+
+			if (space > 0) end = space
+		}
+
+		while (end > 0 && characters[end - 1] === " ") end--
+
+		if (fits((prefix[end] ?? 0) + mark)) return characters.slice(0, end).join("") + (ellipsis ? "…" : "")
+	}
+
+	return ellipsis ? "…" : ""
+}
+
+// The compositing of an item drawn with a raster operation (metafile blits).
+function blendMode(flags: number): "multiply" | "lighten" | "difference" | undefined {
+	switch (flags & ItemFlag.BLEND_MASK) {
+		case ItemFlag.BLEND_MULTIPLY:
+			return "multiply"
+		case ItemFlag.BLEND_LIGHTEN:
+			return "lighten"
+		case ItemFlag.BLEND_DIFFERENCE:
+			return "difference"
+		default:
+			return undefined
 	}
 }
 
