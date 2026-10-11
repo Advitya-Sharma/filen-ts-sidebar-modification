@@ -23,7 +23,8 @@
 		"./assets/fonts/*": "./assets/fonts/*",
 		"./dom/docx": "./src/dom/docx/index.ts",
 		"./react/docx": "./src/react/docx/index.ts",
-		"./css/docx.css": "./src/css/docx.css"
+		"./css/docx.css": "./src/css/docx.css",
+		"./core/docx/edit": "./src/core/docx/edit/index.ts"
 	},
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.react.json && tsc -p tsconfig.test.json && tsc -p tsconfig.dom-test.json",
@@ -51,6 +52,10 @@
 		"eslint": "^9.39.3",
 		"happy-dom": "^20.14.0",
 		"prettier": "^3.9.6",
+		"prosemirror-history": "1.5.1",
+		"prosemirror-model": "1.25.12",
+		"prosemirror-state": "1.4.4",
+		"prosemirror-transform": "1.12.2",
 		"react": "19.2.3",
 		"react-dom": "19.2.3",
 		"tsx": "4.23.13",
@@ -62,10 +67,26 @@
 		"fflate": "0.8.3"
 	},
 	"peerDependencies": {
+		"prosemirror-history": "^1.5.1",
+		"prosemirror-model": "^1.25.12",
+		"prosemirror-state": "^1.4.4",
+		"prosemirror-transform": "^1.12.2",
 		"react": ">=19.2.3",
 		"react-dom": ">=19.2.3"
 	},
 	"peerDependenciesMeta": {
+		"prosemirror-history": {
+			"optional": true
+		},
+		"prosemirror-model": {
+			"optional": true
+		},
+		"prosemirror-state": {
+			"optional": true
+		},
+		"prosemirror-transform": {
+			"optional": true
+		},
 		"react": {
 			"optional": true
 		},
