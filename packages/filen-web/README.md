@@ -50,12 +50,13 @@ Note that nginx's `add_header` does not inherit into a nested `location`, so eve
 
 ### MIME types and compression
 
-`.wasm` must be served as `application/wasm` or the browser cannot stream-compile it. The SDK wasm is roughly 10 MiB, so pre-compressed Brotli (`brotli_static` or equivalent) is required, not optional.
+`.wasm` must be served as `application/wasm` or the browser cannot stream-compile it. The SDK wasm is roughly 10 MiB, so pre-compressed Brotli (`brotli_static` or equivalent) is required, not optional. The office fonts' `.woff2` files are `font/woff2` (already compressed).
 
 ### Caching
 
 - `/assets/*` is content-hashed — `Cache-Control: public, max-age=31536000, immutable`.
 - The SDK artifacts and `/sw.js` are **unhashed by contract** and must be revalidated on every load (`Cache-Control: no-cache`). Long-caching them pins users to a stale SDK or service worker.
+- The document fonts (from `@filen/office`, emitted by `vite/office-fonts-plugin.ts`) are content-hashed under `/assets/office-fonts/`; only their licence files under `/office/fonts/` are unhashed and revalidated the same way.
 - `index.html` is the SPA fallback for unknown page loads and must never be long-cached. A missing file that is not a page load must get a real 404: a tab opened before a deploy can ask for a worker file the new build no longer has, and an `index.html` fallback there would be cached as immutable under `/assets/*`.
 
 ### Cloudflare

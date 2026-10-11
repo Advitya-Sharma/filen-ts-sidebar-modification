@@ -1,6 +1,11 @@
 import { defineConfig } from "vitest/config"
+import { SINGLETONS } from "./vite/singletons"
+import { officeFonts } from "./vite/office-fonts-plugin"
 export default defineConfig({
-	resolve: { alias: { "@": new URL("./src", import.meta.url).pathname } },
+	// virtual:office-fonts (the viewer's font URLs) resolves in tests as in the app.
+	plugins: [officeFonts()],
+	// The same single copies the app build resolves (vite.config.ts): tests render @filen/office's components.
+	resolve: { alias: { "@": new URL("./src", import.meta.url).pathname }, dedupe: SINGLETONS },
 	test: {
 		// @testing-library/react registers its auto-cleanup only when a GLOBAL `afterEach` exists
 		// (its index.js guards on `typeof afterEach === "function"`). Without this every render/renderHook

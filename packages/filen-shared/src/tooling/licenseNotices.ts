@@ -246,7 +246,7 @@ function isHeadingLine(line: string): boolean {
  * ever lifted; headings are held back and restored, so widening the region changes where we stop
  * looking, never what counts as a copyright.
  */
-function splitCopyright(text: string): { copyright: string[]; terms: string } {
+export function splitCopyright(text: string): { copyright: string[]; terms: string } {
 	const copyright: string[] = []
 	const kept: string[] = []
 	const heldBack: string[] = []

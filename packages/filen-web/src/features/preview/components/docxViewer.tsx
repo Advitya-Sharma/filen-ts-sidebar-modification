@@ -1,138 +1,232 @@
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { renderAsync } from "docx-preview"
+import { ChevronLeftIcon, ChevronRightIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
+import { bytesSource } from "@filen/office/core/opc"
+import { isDocxCommandEnabled } from "@filen/office/dom/docx"
+import { DocxPages, linkActivator, useDocxDocument, useDocxViewer, type DocxDocument, type DocxSource } from "@filen/office/react/docx"
+import "@filen/office/css/docx.css"
 import { type DriveItem } from "@/features/drive/lib/item"
 import { usePreviewBytes } from "@/features/preview/hooks/usePreviewBytes"
-import { collectBlobUrls, sanitizeDocxLinks } from "@/features/preview/lib/docxDom"
+import { DOCX_FONT_URLS, docxHost, prewarmDocxWorker } from "@/features/preview/lib/docxEngine"
+import { docxErrorKey, docxFailure } from "@/features/preview/components/docxViewer.logic"
+import { DocxPreviewFallback } from "@/features/preview/components/docxPreviewFallback"
 import { LoadingState } from "@/components/loadingState"
+import { Button } from "@/components/ui/button"
 import { PreviewErrorState, PreviewGate } from "@/features/preview/components/previewErrorState"
+import { isSafeAbsoluteHref } from "@/lib/safeUrl"
+import { log } from "@/lib/log"
+import { useLatestRef } from "@/lib/useLatestRef"
 
 export interface DocxViewerProps {
 	item: DriveItem
 	alt: string
 }
 
-function revokeAll(urls: readonly string[]): void {
-	for (const url of urls) {
-		URL.revokeObjectURL(url)
+// Space around and between pages (px); fit-to-width leaves it on both sides.
+const PAGE_GAP = 16
+const WHEEL_SENSITIVITY = 0.0015
+
+// Links are judged when clicked (never when painted): http(s) and mailto open in a new tab with no opener
+// or referrer, inside the click's user activation so no popup blocker interferes; anything else is ignored.
+const openLink = linkActivator({
+	allow: isSafeAbsoluteHref,
+	open: href => {
+		window.open(href, "_blank", "noopener,noreferrer")
 	}
+})
+
+// The engine reads ranges of the cached buffer and gets a copy of each range it asked for, never of the
+// whole file: the buffer stays shared with the preview cache and the Download action.
+function sourceFor(bytes: Uint8Array): DocxSource {
+	return { host: docxHost, bytes: bytesSource(bytes), options: { fontUrls: DOCX_FONT_URLS } }
 }
 
-// renderAsync feeds `bytes` straight into JSZip.loadAsync (verified against the installed 0.4.0
-// source) — a Uint8Array is a directly-supported input, no Blob wrapping needed. `renderAltChunks:
-// false` is the one deliberate option override: an altChunk part renders via `renderAltChunk`, which
-// creates a real <iframe> and assigns raw HTML/MHT content to its `.srcdoc` (verified against the
-// installed source) — a real XSS vector for a file this app can receive from anyone via a share.
-// frame-src/default-src don't govern srcdoc (confirmed empirically against this exact CSP: the
-// markup still renders); the actual backstop is that a srcdoc document inherits its parent's CSP, and
-// script-src here has no unsafe-inline — the same mechanism the rest of this pipeline already relies
-// on for its real DOM nodes. Disabling the option keeps the content out of the render entirely
-// instead of depending on that inheritance alone. `experimental: true` governs exactly one thing in
-// the installed build — tab-stop positioning: it makes renderTab register each tab span so
-// refreshTabStops can measure and place it, and without it a document's tab stops collapse to a bare
-// em space. Every other option keeps docx-preview's own default (the page-like white-on-gray wrapper
-// it injects via its own <style> element into this same container needs no extra styling from this
-// file).
-//
-// renderHyperlink (same source) copies a relationship's target straight into `href` with no scheme
-// check of its own — sanitizeDocxLinks (lib/docxDom.ts) is the closing sweep for that, run once per
-// render.
-function DocxRender({ bytes, alt }: { bytes: Uint8Array; alt: string }) {
-	const { t } = useTranslation("preview")
-	const containerRef = useRef<HTMLDivElement | null>(null)
-	const [status, setStatus] = useState<"pending" | "success" | "error">("pending")
-	// Bumped by the error state's own Retry button — `bytes` never changes on a retry (already the
-	// whole file, held by the caller's usePreviewBytes), so a dedicated counter re-runs this effect
-	// against the SAME buffer, mirroring imageViewer.tsx's own TransformedImageBytes retry idiom.
-	const [retryToken, setRetryToken] = useState(0)
-
-	useEffect(() => {
-		let live = true
-		const container = containerRef.current
-
-		if (!container) {
-			return
-		}
-
-		// Each run renders into its own host: a run still in flight when the next one starts (a retry, a
-		// new buffer) can then only write into its own host, which the newer run has already detached.
-		const host = document.createElement("div")
-		// The object URLs this run's render minted; revoked on teardown, not right after renderAsync,
-		// since @font-face rules and images keep reading them while the document is shown.
-		let urls: string[] = []
-
-		container.replaceChildren(host)
-
-		async function render(): Promise<void> {
-			try {
-				await renderAsync(bytes, host, undefined, { renderAltChunks: false, experimental: true })
-				sanitizeDocxLinks(host)
-
-				if (live) {
-					setStatus("success")
-				}
-			} catch {
-				if (live) {
-					setStatus("error")
-				}
-			} finally {
-				urls = collectBlobUrls(host)
-
-				// Torn down mid-render: the cleanup below has already run with nothing to revoke.
-				if (!live) {
-					revokeAll(urls)
-				}
-			}
-		}
-
-		void render()
-
-		return () => {
-			live = false
-			revokeAll(urls)
-		}
-	}, [bytes, retryToken])
-
-	return (
-		<div className="relative size-full overflow-auto">
-			{status === "pending" ? (
-				<LoadingState
-					size="lg"
-					className="absolute inset-0 text-inherit"
-				/>
-			) : null}
-			{status === "error" ? (
-				<div className="absolute inset-0">
-					<PreviewErrorState
-						message={t("previewDocxLoadFailed")}
-						onRetry={() => {
-							setStatus("pending")
-							setRetryToken(prev => prev + 1)
-						}}
-					/>
-				</div>
-			) : null}
-			<div
-				ref={containerRef}
-				role="document"
-				aria-label={alt}
-				className={status === "success" ? "select-text" : "hidden"}
-			/>
-		</div>
-	)
-}
-
-// Top-level gate on the whole-buffer download (usePreviewBytes, shared with every other buffered
-// category) — DocxRender above owns everything docx-preview-specific once bytes are in hand.
 export function DocxViewer({ item, alt }: DocxViewerProps) {
+	const result = usePreviewBytes(item)
+	const downloading = result.status === "pending"
+
+	// The worker starts while the file downloads; a buffer already cached, or a failed download, starts none.
+	useEffect(() => {
+		if (downloading) {
+			prewarmDocxWorker()
+		}
+	}, [downloading])
+
 	return (
-		<PreviewGate result={usePreviewBytes(item)}>
+		<PreviewGate result={result}>
 			{ready => (
-				<DocxRender
+				<DocxDocumentView
 					bytes={ready.bytes}
 					alt={alt}
 				/>
 			)}
 		</PreviewGate>
+	)
+}
+
+function DocxDocumentView({ bytes, alt }: { bytes: Uint8Array; alt: string }) {
+	const { t } = useTranslation("preview")
+	// A retry opens the same buffer again under a fresh source (a new document on the shared worker).
+	const [opened, setOpened] = useState(() => ({ bytes, source: sourceFor(bytes) }))
+	let current = opened
+
+	if (opened.bytes !== bytes) {
+		current = { bytes, source: sourceFor(bytes) }
+		setOpened(current)
+	}
+
+	const document = useDocxDocument(current.source)
+	const failure = docxFailure(document, bytes.byteLength)
+	const fallback = failure?.fallback === true
+	const detail = failure?.detail
+
+	useEffect(() => {
+		if (detail !== undefined) {
+			log.warn(
+				"docx",
+				fallback ? "Engine failed, showing docx-preview instead:" : "Engine failed, too large for docx-preview:",
+				detail
+			)
+		}
+	}, [detail, fallback])
+
+	if (fallback) {
+		return (
+			<DocxPreviewFallback
+				bytes={bytes}
+				alt={alt}
+			/>
+		)
+	}
+
+	if (document.status === "error") {
+		return (
+			<PreviewErrorState
+				message={t(docxErrorKey(document.error?.reason))}
+				onRetry={() => {
+					setOpened({ bytes, source: sourceFor(bytes) })
+				}}
+			/>
+		)
+	}
+
+	return (
+		<DocxPageList
+			document={document}
+			alt={alt}
+		/>
+	)
+}
+
+function DocxPageList({ document, alt }: { document: DocxDocument; alt: string }) {
+	const { t } = useTranslation("preview")
+	const wrapperRef = useRef<HTMLDivElement | null>(null)
+	const viewer = useDocxViewer(document, { gap: PAGE_GAP })
+	const { state, dispatch } = viewer
+	const dispatchRef = useLatestRef(dispatch)
+
+	// Ctrl/Cmd+wheel zooms (a native non-passive listener: React registers wheel passively, so it could
+	// not stop the browser's own page zoom); a plain wheel scrolls.
+	useEffect(() => {
+		const wrapper = wrapperRef.current
+
+		if (wrapper === null) {
+			return
+		}
+
+		const onWheel = (event: WheelEvent): void => {
+			if (!event.ctrlKey && !event.metaKey) {
+				return
+			}
+
+			event.preventDefault()
+			// Relative, so events faster than renders add up.
+			dispatchRef.current({ type: "zoom.by", delta: -event.deltaY * WHEEL_SENSITIVITY })
+		}
+
+		wrapper.addEventListener("wheel", onWheel, { passive: false })
+
+		return () => {
+			wrapper.removeEventListener("wheel", onWheel)
+		}
+	}, [dispatchRef])
+
+	return (
+		<div className="flex size-full flex-col">
+			<div className="flex h-10 shrink-0 items-center justify-center gap-2">
+				<Button
+					variant="ghost"
+					size="icon-sm"
+					disabled={!isDocxCommandEnabled(state, "page.previous")}
+					aria-label={t("previewDocxPreviousPageAction")}
+					onClick={() => {
+						dispatch({ type: "page.previous" })
+					}}
+				>
+					<ChevronLeftIcon />
+				</Button>
+				<span className="text-xs text-muted-foreground tabular-nums">
+					{t("previewDocxPageIndicator", { current: Math.min(state.page + 1, state.pageCount), total: state.pageCount })}
+				</span>
+				<Button
+					variant="ghost"
+					size="icon-sm"
+					disabled={!isDocxCommandEnabled(state, "page.next")}
+					aria-label={t("previewDocxNextPageAction")}
+					onClick={() => {
+						dispatch({ type: "page.next" })
+					}}
+				>
+					<ChevronRightIcon />
+				</Button>
+				<span
+					aria-hidden="true"
+					className="mx-1 h-4 w-px bg-border"
+				/>
+				<Button
+					variant="ghost"
+					size="icon-sm"
+					disabled={!isDocxCommandEnabled(state, "zoom.out")}
+					aria-label={t("previewDocxZoomOutAction")}
+					onClick={() => {
+						dispatch({ type: "zoom.out" })
+					}}
+				>
+					<ZoomOutIcon />
+				</Button>
+				<span className="w-10 text-center text-xs text-muted-foreground tabular-nums">
+					{t("previewDocxZoomIndicator", { percent: Math.round(state.zoom * 100) })}
+				</span>
+				<Button
+					variant="ghost"
+					size="icon-sm"
+					disabled={!isDocxCommandEnabled(state, "zoom.in")}
+					aria-label={t("previewDocxZoomInAction")}
+					onClick={() => {
+						dispatch({ type: "zoom.in" })
+					}}
+				>
+					<ZoomInIcon />
+				</Button>
+			</div>
+			<div
+				ref={wrapperRef}
+				className="relative min-h-0 flex-1"
+			>
+				<DocxPages
+					{...viewer.pages}
+					className="size-full select-text"
+					label={alt}
+					pageLabel={(index, total) => t("previewDocxPageIndicator", { current: index + 1, total })}
+					onLinkActivate={openLink}
+				/>
+				{document.status === "loading" ? (
+					<LoadingState
+						size="lg"
+						className="absolute inset-0 text-inherit"
+					/>
+				) : null}
+			</div>
+		</div>
 	)
 }

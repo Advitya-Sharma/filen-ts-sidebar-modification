@@ -282,6 +282,24 @@ export const preview = {
 	// ── Docx ─────────────────────────────────────────────────────────────────
 	/** Docx viewer — shown in place of the document when it fails to load or render */
 	previewDocxLoadFailed: "This document couldn't be rendered.",
+	/** Docx viewer — shown in place of a password-protected (encrypted) Word document, which can't be opened here */
+	previewDocxEncrypted: "This document is password-protected and can't be opened here.",
+	/** Docx viewer — shown in place of an older binary Word document (.doc) saved with a .docx name */
+	previewDocxLegacyFormat: "This document uses an older Word format that can't be opened here.",
+	/** Docx viewer — shown when the file is not a Word document at all (another Office file, or not a document) */
+	previewDocxNotDocument: "This file isn't a Word document.",
+	/** Docx viewer — accessible label for the page-nav button stepping to the previous page; distinct from the overlay's own file-level previous/next */
+	previewDocxPreviousPageAction: "Previous page",
+	/** Docx viewer — accessible label for the page-nav button stepping to the next page */
+	previewDocxNextPageAction: "Next page",
+	/** Docx viewer — page-nav indicator and each page's accessible label; {{current}} = the page in view, {{total}} = page count */
+	previewDocxPageIndicator: "Page {{current}} of {{total}}",
+	/** Docx viewer — accessible label for the toolbar button stepping the zoom level down */
+	previewDocxZoomOutAction: "Zoom out",
+	/** Docx viewer — accessible label for the toolbar button stepping the zoom level up */
+	previewDocxZoomInAction: "Zoom in",
+	/** Docx viewer — zoom-level indicator between the zoom out/in buttons; {{percent}} = zoom relative to the document's actual size */
+	previewDocxZoomIndicator: "{{percent}}%",
 
 	// ── Markdown ─────────────────────────────────────────────────────────────
 	/** Markdown viewer — toolbar button shown while viewing the rendered output; switches to the raw-text source view */

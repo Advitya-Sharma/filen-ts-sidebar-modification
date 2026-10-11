@@ -1,0 +1,149 @@
+/* Structure of @filen/office's DOCX pages. Every visual value is a --fo-* variable with a neutral default;
+   apps map them to their tokens. The document's own formatting is set inline from the display list. */
+
+.fo-docx-pages {
+	position: relative;
+	overflow: auto;
+	background: var(--fo-canvas, #e6e6e6);
+	contain: content;
+	outline: none;
+}
+
+.fo-docx-pages:focus-visible {
+	box-shadow: inset 0 0 0 2px var(--fo-focus-ring, #2563eb);
+}
+
+.fo-docx-pages-content {
+	position: relative;
+	min-width: 100%;
+}
+
+.fo-docx-page {
+	position: absolute;
+	overflow: hidden;
+	background: var(--fo-page-bg, #fff);
+	box-shadow: var(--fo-page-shadow, 0 1px 3px rgb(0 0 0 / 0.2));
+	outline: 1px solid var(--fo-page-edge, transparent);
+	contain: strict;
+}
+
+.fo-docx-page-scale {
+	position: absolute;
+	inset: 0 auto auto 0;
+	transform-origin: 0 0;
+}
+
+.fo-docx-page-content {
+	position: relative;
+	color: var(--fo-auto-text, #000);
+	cursor: text;
+}
+
+.fo-docx-page-content ::selection {
+	background: var(--fo-selection, rgb(37 99 235 / 0.3));
+}
+
+.fo-docx-layer {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+
+.fo-docx-text,
+.fo-docx-text * {
+	pointer-events: auto;
+}
+
+.fo-docx-box,
+.fo-docx-object,
+.fo-docx-run,
+.fo-docx-tab,
+.fo-docx-leader {
+	position: absolute;
+}
+
+.fo-docx-run,
+.fo-docx-tab {
+	margin: 0;
+	padding: 0;
+	white-space: pre;
+	transform-origin: 0 0;
+	font-synthesis: weight style;
+}
+
+.fo-docx-run[data-fo-hyphen]::after {
+	content: "-";
+}
+
+.fo-docx-run[data-fo-link] {
+	cursor: pointer;
+}
+
+.fo-docx-run[data-fo-link]:focus-visible {
+	outline: 2px solid var(--fo-focus-ring, #2563eb);
+	outline-offset: 1px;
+}
+
+.fo-docx-tab {
+	overflow: hidden;
+	color: inherit;
+}
+
+.fo-docx-leader {
+	left: 0;
+	right: 0;
+	height: 0;
+}
+
+.fo-docx-eol {
+	position: absolute;
+	opacity: 0;
+	white-space: pre;
+	pointer-events: none;
+}
+
+.fo-docx-object > svg {
+	display: block;
+	width: 100%;
+	height: 100%;
+	overflow: visible;
+}
+
+.fo-docx-math {
+	display: flex;
+	align-items: center;
+	color: var(--fo-auto-text, #000);
+}
+
+.fo-docx-separator {
+	border-top: 1px solid var(--fo-auto-text, #000);
+}
+
+.fo-docx-placeholder {
+	background: var(--fo-placeholder-fill, #f1f1f1);
+	outline: 1px solid var(--fo-placeholder-stroke, #c8c8c8);
+	outline-offset: -1px;
+}
+
+.fo-docx-page[data-fo-pending] {
+	opacity: 0.6;
+}
+
+::highlight(fo-docx-find) {
+	background-color: var(--fo-find-bg, rgb(250 204 21 / 0.45));
+}
+
+::highlight(fo-docx-find-active) {
+	background-color: var(--fo-find-active-bg, rgb(249 115 22 / 0.6));
+}
+
+/* Find without the CSS Custom Highlight API: boxes over the matches. */
+.fo-docx-find {
+	position: absolute;
+	background: var(--fo-find-bg, rgb(250 204 21 / 0.45));
+	mix-blend-mode: multiply;
+}
+
+.fo-docx-find[data-fo-active] {
+	background: var(--fo-find-active-bg, rgb(249 115 22 / 0.6));
+}

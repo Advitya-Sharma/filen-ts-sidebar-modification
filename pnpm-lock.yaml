@@ -714,12 +714,27 @@ importers:
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.4
+      '@types/react':
+        specifier: ~19.2.18
+        version: 19.2.18
+      '@types/react-dom':
+        specifier: ~19.2.3
+        version: 19.2.7(@types/react@19.2.18)
       eslint:
         specifier: ^9.39.3
         version: 9.39.5(jiti@2.7.0)(supports-color@8.1.1)
+      happy-dom:
+        specifier: ^20.14.0
+        version: 20.14.5
       prettier:
         specifier: ^3.9.6
         version: 3.9.6
+      react:
+        specifier: 19.2.3
+        version: 19.2.3
+      react-dom:
+        specifier: 19.2.3
+        version: 19.2.3(react@19.2.3)
       tsx:
         specifier: 4.23.13
         version: 4.23.13
@@ -850,6 +865,9 @@ importers:
       '@codemirror/view':
         specifier: 6.43.11
         version: 6.43.11
+      '@filen/office':
+        specifier: workspace:*
+        version: link:../filen-office
       '@filen/sdk-rs':
         specifier: 0.5.3
         version: 0.5.3
@@ -4163,6 +4181,11 @@ packages:
 
   '@types/prismjs@1.26.6':
     resolution: {integrity: sha512-vqlvI7qlMvcCBbVe0AKAb4f97//Hy0EBTaiW8AalRnG/xAN5zOiWWyrNqNXeq8+KAuvRewjCVY1+IPxk4RdNYw==}
+
+  '@types/react-dom@19.2.7':
+    resolution: {integrity: sha512-I8bPpDLcHBv1qiIiXDCy71Rt8eQDKJP0sMSWJphDdAcdqiJ1sGpZamavoEIRZmYzjia9LuEb2HlYdDpmoENpvQ==}
+    peerDependencies:
+      '@types/react': ^19.2.0
 
   '@types/react-dom@19.3.0':
     resolution: {integrity: sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==}
@@ -14058,6 +14081,10 @@ snapshots:
       undici-types: 7.24.6
 
   '@types/prismjs@1.26.6': {}
+
+  '@types/react-dom@19.2.7(@types/react@19.2.18)':
+    dependencies:
+      '@types/react': 19.2.18
 
   '@types/react-dom@19.3.0(@types/react@19.2.18)':
     dependencies:

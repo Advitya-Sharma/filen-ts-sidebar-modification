@@ -68,13 +68,10 @@ async function seedLeaveRouteForward(page: Page): Promise<void> {
 	expect(entriesAfter - entriesBefore).toBe(1)
 }
 
-// The one live proof the docx-preview path actually works: real JSZip/DOMParser XML parsing (neither
-// is provable in node — DOMParser doesn't exist there) and real DOM rendering into the overlay, in a
-// real browser. Also the empirical check for the one CSP-adjacent finding worth calling out: the
-// shipped chunk bundles jszip's own `setimmediate` dependency, which contains a `Function(""+e)`
-// fallback for a string-callback form of setImmediate — dead code (jszip only ever calls it with a
-// real function), but this run's own zero-CSP-violations assertion is the empirical proof that dead
-// path is never actually reached, not just an assumption from reading the source.
+// The one live proof the own DOCX engine works in a real browser: the docx worker parses the package,
+// fetches its substitute font from 'self' and lays the page out; the page shows it as real DOM text.
+// Asserts the engine drew it (not the docx-preview fallback) and that nothing violated the CSP (fonts
+// load from bytes, so font-src 'self' holds).
 test("docx preview renders document content and closes, no CSP console errors", async ({ page }) => {
 	const cspViolations = trackCspViolations(page)
 
@@ -84,10 +81,11 @@ test("docx preview renders document content and closes, no CSP console errors", 
 		rows: [row]
 	} = await openFixtureRows(page, "preview-docx")
 
-	// Opens the docx-preview lazy chunk for the first time this run.
+	// Starts the docx worker for the first time this run.
 	await row.dblclick()
-	const text = page.getByText("Hello from a tiny docx fixture.")
+	const text = page.locator(".fo-docx-page .fo-docx-run").getByText("Hello from a tiny docx fixture.")
 	await expect(text).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+	await expect(page.locator(".docx-wrapper")).toHaveCount(0)
 
 	await page.keyboard.press("Escape")
 	await expect(text).toHaveCount(0)

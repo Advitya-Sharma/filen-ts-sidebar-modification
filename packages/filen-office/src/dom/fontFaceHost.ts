@@ -51,6 +51,8 @@ export function localSource(name: string): string {
 
 export function fontFaceHost(scope: FontFaceScope): FontHost {
 	const faces = new Map<string, FontFaceLike[]>()
+	// Families removed while one of their faces was still loading: that face must not be added after.
+	const removed = new Set<string>()
 
 	const add = async (face: FontFaceDescriptor, source: string | ArrayBuffer): Promise<boolean> => {
 		let fontFace: FontFaceLike
@@ -61,6 +63,8 @@ export function fontFaceHost(scope: FontFaceScope): FontHost {
 		} catch {
 			return false
 		}
+
+		if (removed.has(face.family)) return false
 
 		scope.fonts.add(fontFace)
 
@@ -79,6 +83,8 @@ export function fontFaceHost(scope: FontFaceScope): FontHost {
 			for (const face of faces.get(family) ?? []) scope.fonts.delete(face)
 
 			faces.delete(family)
+			// Aliases are never reused, so the set only grows by the families a document used.
+			removed.add(family)
 		}
 	}
 }

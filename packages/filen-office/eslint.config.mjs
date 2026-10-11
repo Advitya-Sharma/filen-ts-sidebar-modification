@@ -29,7 +29,7 @@ export default tseslint.config(
 		ignores: ["node_modules/**/*"]
 	},
 	{
-		files: ["**/*.ts"],
+		files: ["**/*.{ts,tsx}"],
 		rules: {
 			eqeqeq: 2,
 			quotes: ["error", "double", { avoidEscape: true }],

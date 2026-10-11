@@ -1,6 +1,6 @@
 {
 	"include": ["src"],
-	"exclude": ["src/tests", "src/bench", "src/scripts"],
+	"exclude": ["src/tests", "src/bench", "src/scripts", "src/react"],
 	"compilerOptions": {
 		"target": "ES2024",
 		"module": "ESNext",

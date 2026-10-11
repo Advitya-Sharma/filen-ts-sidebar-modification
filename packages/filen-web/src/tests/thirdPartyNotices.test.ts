@@ -11,6 +11,7 @@ import {
 } from "@/features/settings/lib/thirdPartyNotices"
 import { noticeRepositoryHref } from "@/features/settings/components/advanced/thirdPartyNoticesDialog.logic"
 import ffmpegManifest from "@/vendor/ffmpeg-decoders/manifest.json"
+import officeFontsManifest from "@filen/office/assets/fonts/manifest.json"
 
 const { notices: THIRD_PARTY_NOTICES, texts: LICENSE_TEXTS } = thirdPartyNoticesPayload()
 
@@ -236,6 +237,46 @@ describe("third-party notices payload integrity", () => {
 		expect(musl === undefined ? [] : thirdPartyLicenseTexts(musl)).toContain(
 			readFileSync(new URL("../vendor/ffmpeg-decoders/licenses/musl-COPYRIGHT", import.meta.url), "utf8")
 		)
+	})
+
+	it("describes every font @filen/office ships, as its manifest records it", () => {
+		const flat = (text: string) => text.replace(/\s+/g, " ").trim()
+
+		for (const family of officeFontsManifest.families) {
+			const notice = THIRD_PARTY_NOTICES.find(entry => entry.ecosystem === "vendored" && entry.name === family.name)
+			const terms = notice === undefined ? [] : thirdPartyLicenseTexts(notice)
+			const licence = readFileSync(
+				new URL(`../../node_modules/@filen/office/assets/fonts/${family.licenseFile}`, import.meta.url),
+				"utf8"
+			)
+
+			expect(notice, family.name).toMatchObject({ version: family.version, license: family.license, repository: family.source })
+			expect(
+				terms.some(text => text.includes(family.commit) && family.faces.every(face => text.includes(face.file))),
+				family.name
+			).toBe(true)
+			// Terms are pooled on whitespace-normalised text, so a family may point at another package's copy.
+			expect(
+				terms.some(text => text.includes("SIL Open Font License") && flat(licence).includes(flat(text))),
+				family.name
+			).toBe(true)
+		}
+	})
+
+	it("describes the code @filen/office derives from other projects, as its notices file records it", () => {
+		// Every source the file names reaches the payload verbatim, so an edit to that file that skips the generator fails here.
+		const record = readFileSync(new URL("../../node_modules/@filen/office/THIRD_PARTY_NOTICES.md", import.meta.url), "utf8")
+		const sources = [...record.matchAll(/^- Source: (.+)$/gm)].map(([, source]) => (source ?? "").replaceAll("`", ""))
+		const vendoredTexts = THIRD_PARTY_NOTICES.filter(notice => notice.ecosystem === "vendored").flatMap(thirdPartyLicenseTexts)
+
+		expect(sources.length).toBeGreaterThan(0)
+
+		for (const source of sources) {
+			expect(
+				vendoredTexts.some(text => text.includes(`- Source: ${source}\n`)),
+				source
+			).toBe(true)
+		}
 	})
 
 	it("records a release tag as the crate source", () => {

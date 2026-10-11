@@ -108,6 +108,23 @@ describe("React Compiler coverage", () => {
 		).toEqual([])
 	})
 
+	it("compiles the DOCX viewer and @filen/office's page list, so a scroll step re-renders only the pages that changed", () => {
+		for (const [file, fnName] of [
+			["src/features/preview/components/docxViewer.tsx", "DocxPageList"],
+			["../filen-office/src/react/docx/DocxPages.tsx", "DocxPages"],
+			["../filen-office/src/react/docx/DocxPages.tsx", "DocxPageView"],
+			["../filen-office/src/react/docx/useDocxViewer.ts", "useDocxViewer"],
+			["../filen-office/src/react/docx/useDocxDocument.ts", "useDocxDocument"]
+		] as const) {
+			const events = compile(file)
+
+			expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
+			expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(
+				true
+			)
+		}
+	})
+
 	it("compiles the archive browser, its rows and footer, so a listing notification re-renders only what changed", () => {
 		for (const [file, fnName] of [
 			["src/features/archive/components/archiveBrowser.tsx", "ArchiveBrowser"],

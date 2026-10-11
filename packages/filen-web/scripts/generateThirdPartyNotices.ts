@@ -10,6 +10,7 @@ import {
 	readJson,
 	repositoryOf,
 	spdxOf,
+	splitCopyright,
 	vendoredNotice,
 	type CollectedNotice,
 	type InstalledNpmPackage
@@ -34,8 +35,9 @@ import {
  * Three sources reach the browser: the npm tree (minus dev/optional entries, which are build tooling),
  * the Rust crates the SDK wasm is compiled from, and components vendored into this package as built
  * output, described from the manifest their build script writes. @filen/sdk-rs is a registry package and
- * is described here; @filen/shared is a workspace member, so pnpm does not report it and it is correctly
- * absent — first-party code needs no attribution.
+ * is described here; @filen/shared and @filen/office are workspace members, so pnpm does not report them
+ * and they are correctly absent — first-party code needs no attribution. The third-party material
+ * @filen/office carries (fonts, derived code) is vendored and described from its own records.
  *
  * The licensing core is shared with filen-mobile's generator through @filen/shared/tooling. Unlike
  * mobile, the npm dedup key here is `name@version` rather than the bare name (this tree ships 30
@@ -430,9 +432,198 @@ function ffmpegModuleNotices(): Collected[] {
 	]
 }
 
+/**
+ * The third-party material @filen/office brings into the app, read from the records that package keeps:
+ *
+ * - The document fonts the app serves at /office/fonts/ (vite/office-fonts-plugin.ts), from
+ *   assets/fonts/manifest.json, each family with its own licence file.
+ * - Code derived from other projects, from THIRD_PARTY_NOTICES.md. This table names its sections, how to
+ *   read a version off each section's Source line, and the licence text that applies; everything else,
+ *   the notice texts included, is read from that file. AGPL-3.0 is the repository's own LICENSE.
+ */
+const OFFICE_DIR = "node_modules/@filen/office"
+const OFFICE_FONTS = `${OFFICE_DIR}/assets/fonts`
+const OFFICE_FONTS_MANIFEST = `${OFFICE_FONTS}/manifest.json`
+const OFFICE_NOTICES = `${OFFICE_DIR}/THIRD_PARTY_NOTICES.md`
+const OFFICE_REPO_DIR = "packages/filen-office"
+
+interface NoticeSection {
+	body: string
+	fence: string | null
+}
+
+const OFFICE_DERIVED: {
+	section: string
+	name: string
+	version: RegExp
+	license: string
+	text: (sections: Map<string, NoticeSection>) => string
+}[] = [
+	{
+		section: "SuperDoc 1.x",
+		name: "SuperDoc",
+		version: /^SuperDoc v(\d+\.\d+\.\d+) /,
+		license: "AGPL-3.0",
+		text: () => readFileSync("../../LICENSE", "utf8")
+	},
+	{
+		section: "docx-preview (docxjs)",
+		name: "docx-preview",
+		version: /^docx-preview (\d+\.\d+\.\d+) /,
+		license: "Apache-2.0",
+		text: sections => noticeFence(sections, "Apache License 2.0")
+	},
+	{
+		section: "ECMA-376 preset shape definitions",
+		name: "ECMA-376 preset shape definitions",
+		version: /^ECMA-376 Part 1, (\S+ edition) /,
+		license: "LicenseRef-Ecma-Copyright-Notice",
+		text: sections => noticeFence(sections, "ECMA-376 preset shape definitions")
+	}
+]
+
+function asRecord(value: unknown, path: string): Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error(`${path}: expected an object`)
+	}
+
+	return Object.fromEntries(Object.entries(value))
+}
+
+function officeFontNotices(): Collected[] {
+	const families = requireJson(OFFICE_FONTS_MANIFEST)["families"]
+
+	if (!Array.isArray(families) || families.length === 0) {
+		throw new Error(`${OFFICE_FONTS_MANIFEST}: "families" is missing`)
+	}
+
+	return families.map(value => {
+		const family = asRecord(value, OFFICE_FONTS_MANIFEST)
+		const name = stringField(family, "name", OFFICE_FONTS_MANIFEST)
+		const source = stringField(family, "source", OFFICE_FONTS_MANIFEST)
+		const faces = family["faces"]
+
+		if (!Array.isArray(faces) || faces.length === 0) {
+			throw new Error(`${OFFICE_FONTS_MANIFEST}: ${name} has no faces`)
+		}
+
+		const records = faces.map(face => asRecord(face, OFFICE_FONTS_MANIFEST))
+		const conversions = new Set(
+			records.flatMap(face => {
+				const conversion =
+					face["upstream"] === undefined ? undefined : asRecord(face["upstream"], OFFICE_FONTS_MANIFEST)["conversion"]
+
+				return typeof conversion === "string" ? [conversion] : []
+			})
+		)
+		const license = splitCopyright(readFileSync(`${OFFICE_FONTS}/${stringField(family, "licenseFile", OFFICE_FONTS_MANIFEST)}`, "utf8"))
+
+		return vendoredNotice(
+			{
+				name,
+				version: stringField(family, "version", OFFICE_FONTS_MANIFEST),
+				license: stringField(family, "license", OFFICE_FONTS_MANIFEST),
+				copyright: license.copyright,
+				repository: source,
+				terms: [
+					[
+						`The ${name} typeface, ${source} at commit ${stringField(family, "commit", OFFICE_FONTS_MANIFEST)}, used in place of ${stringField(family, "replaces", OFFICE_FONTS_MANIFEST)} when documents are displayed.`,
+						`Bundled by @filen/office (${OFFICE_REPO_DIR}/assets/fonts in the filen-ts repository, ${FILEN_TS_REPOSITORY}) and served with the app as ${records.map(face => stringField(face, "file", OFFICE_FONTS_MANIFEST)).join(", ")}.`,
+						...conversions
+					].join(" "),
+					license.terms
+				]
+			},
+			"vendored"
+		)
+	})
+}
+
+/** THIRD_PARTY_NOTICES.md by its level-2 headings: each section's prose and its first fenced block, verbatim. */
+function noticeSections(): Map<string, NoticeSection> {
+	const sections = new Map<string, NoticeSection>()
+
+	for (const chunk of readFileSync(OFFICE_NOTICES, "utf8").split(/^## /m).slice(1)) {
+		const newline = chunk.indexOf("\n")
+		const body = chunk.slice(newline + 1)
+
+		sections.set(chunk.slice(0, newline).trim(), { body, fence: /^```\n([\s\S]*?)\n```$/m.exec(body)?.[1] ?? null })
+	}
+
+	return sections
+}
+
+function noticeSection(sections: Map<string, NoticeSection>, heading: string): NoticeSection {
+	const section = sections.get(heading)
+
+	if (section === undefined) {
+		throw new Error(`${OFFICE_NOTICES} has no section "${heading}"`)
+	}
+
+	return section
+}
+
+function noticeFence(sections: Map<string, NoticeSection>, heading: string): string {
+	const fence = noticeSection(sections, heading).fence
+
+	if (fence === null) {
+		throw new Error(`${OFFICE_NOTICES}: section "${heading}" has no notice text`)
+	}
+
+	return fence
+}
+
+function officeDerivedNotices(): Collected[] {
+	const sections = noticeSections()
+
+	return OFFICE_DERIVED.map(entry => {
+		const { body } = noticeSection(sections, entry.section)
+		const field = (label: string) => {
+			const value = new RegExp(`^- ${label}: (.+)$`, "m").exec(body)?.[1]
+
+			if (value === undefined) {
+				throw new Error(`${OFFICE_NOTICES}: section "${entry.section}" has no ${label}`)
+			}
+
+			return value
+		}
+		const source = field("Source")
+		const version = entry.version.exec(source)?.[1]
+		const repository = /(https:\/\/\S+)$/.exec(source)?.[1]
+
+		if (version === undefined || repository === undefined) {
+			throw new Error(`${OFFICE_NOTICES}: section "${entry.section}" names no version or URL in its Source`)
+		}
+
+		const record = body
+			.replace(/^```\n[\s\S]*?\n```$/gm, "")
+			.replace(/^- Copyright: .+\n/m, "")
+			.replaceAll("`", "")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim()
+
+		return vendoredNotice(
+			{
+				name: entry.name,
+				version,
+				license: entry.license,
+				copyright: [`Copyright ${field("Copyright")}`],
+				repository,
+				terms: [
+					`Code in @filen/office (${OFFICE_REPO_DIR} in the filen-ts repository, ${FILEN_TS_REPOSITORY}) derived from this work, as ${OFFICE_REPO_DIR}/THIRD_PARTY_NOTICES.md records it:\n${record}`,
+					entry.text(sections)
+				]
+			},
+			"vendored"
+		)
+	})
+}
+
 const npm = collectNpm(installed)
 const rust = collectRust(expectedSdk)
-const vendored = ffmpegModuleNotices()
+const ffmpeg = ffmpegModuleNotices()
+const office = [...officeFontNotices(), ...officeDerivedNotices()]
+const vendored = [...ffmpeg, ...office]
 const collected = [...npm, ...rust.entries, ...vendored]
 
 const { texts, notices } = finalizeNotices(collected)
@@ -451,7 +642,8 @@ const output = `// AUTO-GENERATED by scripts/generateThirdPartyNotices.ts — do
 //
 // npm:  pnpm licenses list --json --prod --no-optional --filter @filen/web... (${String(npm.length)} name@version packages)
 // rust: filen-rs @ ${rust.ref} (${String(rust.crates)} crates)  [resolved via: ${rust.source}]
-// vendored: ${vendored.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${FFMPEG_MANIFEST})
+// vendored: ${ffmpeg.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${FFMPEG_MANIFEST})
+//   @filen/office: ${office.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${OFFICE_REPO_DIR}/assets/fonts/manifest.json, ${OFFICE_REPO_DIR}/THIRD_PARTY_NOTICES.md)
 //
 // Cannot run in CI: needs a filen-rs checkout and the local cargo caches. Re-run after any SDK bump.
 

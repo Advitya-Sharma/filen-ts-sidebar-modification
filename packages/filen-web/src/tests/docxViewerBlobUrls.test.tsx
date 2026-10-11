@@ -3,27 +3,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { render, waitFor } from "@testing-library/react"
 import "@/lib/i18n"
-import { linkedFileItem } from "@/tests/fixtures/sdk"
 
-// docx-preview mints an object URL per embedded image and font and never revokes one; the viewer
-// owns that, once the render it belongs to is gone.
+// docx-preview (now only the fallback when the own engine fails) mints an object URL per embedded image
+// and font and never revokes one; the fallback owns that, once the render it belongs to is gone.
 
 const { renderAsync } = vi.hoisted(() => ({
 	renderAsync: vi.fn<(bytes: Uint8Array, host: HTMLElement) => Promise<void>>()
 }))
 
 vi.mock("docx-preview", () => ({ renderAsync }))
-vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
-	usePreviewBytes: () => ({ status: "success", bytes: new Uint8Array([1]), refetch: () => undefined })
-}))
 
-const { DocxViewer } = await import("@/features/preview/components/docxViewer")
+const { DocxPreviewFallback } = await import("@/features/preview/components/docxPreviewFallback")
 
-const item = linkedFileItem("doc.docx", {
-	uuid: "aaaaaaaa-0000-0000-0000-000000000001",
-	mime: { Decrypted: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
-	size: 1n
-})
+const bytes = new Uint8Array([1])
 
 const revokeObjectURL = vi.fn<(url: string) => void>()
 
@@ -39,7 +31,7 @@ function paint(host: HTMLElement): void {
 	host.innerHTML = `<style>@font-face { src: url(blob:https://app/font) }</style><img src="blob:https://app/img">`
 }
 
-describe("DocxViewer object URLs", () => {
+describe("DocxPreviewFallback object URLs", () => {
 	it("keeps them while the document is shown and revokes them on unmount", async () => {
 		renderAsync.mockImplementation((_bytes, host) => {
 			paint(host)
@@ -48,8 +40,8 @@ describe("DocxViewer object URLs", () => {
 		})
 
 		const view = render(
-			<DocxViewer
-				item={item}
+			<DocxPreviewFallback
+				bytes={bytes}
 				alt="doc.docx"
 			/>
 		)
@@ -78,8 +70,8 @@ describe("DocxViewer object URLs", () => {
 		)
 
 		const view = render(
-			<DocxViewer
-				item={item}
+			<DocxPreviewFallback
+				bytes={bytes}
 				alt="doc.docx"
 			/>
 		)

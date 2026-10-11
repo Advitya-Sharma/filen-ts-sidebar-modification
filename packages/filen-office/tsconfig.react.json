@@ -1,0 +1,9 @@
+{
+	"extends": "./tsconfig.json",
+	"include": ["src/react", "src/globals.d.ts"],
+	"exclude": [],
+	"compilerOptions": {
+		"lib": ["ESNext", "DOM", "DOM.Iterable"],
+		"jsx": "react-jsx"
+	}
+}

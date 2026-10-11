@@ -1,0 +1,296 @@
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { act, render, screen, waitFor } from "@testing-library/react"
+import type { ByteSource } from "@filen/office/core/opc"
+import type { DocxEvent, DocxListener, DocxPageData, DocxSessionApi, DrawingData } from "@filen/office/dom/docx"
+import "@/lib/i18n"
+import { linkedFileItem } from "@/tests/fixtures/sdk"
+
+// The new viewer: the engine reads ranges of the cached buffer (never a copy of the whole file), docx-preview
+// takes over only when the engine fails, and image object URLs live exactly as long as the document.
+
+const { renderAsync, warn, host, prewarm } = vi.hoisted(() => ({
+	prewarm: vi.fn(),
+	renderAsync: vi.fn<(bytes: Uint8Array, container: HTMLElement) => Promise<void>>(() => Promise.resolve()),
+	warn: vi.fn(),
+	host: {
+		listener: null as DocxListener | null,
+		source: null as ByteSource | null,
+		session: null as DocxSessionApi | null,
+		closed: 0
+	}
+}))
+
+const BYTES = new Uint8Array([80, 75, 3, 4, 9, 9, 9, 9])
+
+vi.mock("docx-preview", () => ({ renderAsync }))
+vi.mock("@/lib/log", () => ({ log: { warn, info: vi.fn(), error: vi.fn(), debug: vi.fn() } }))
+vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
+	usePreviewBytes: () => ({ status: "success", bytes: BYTES, refetch: () => undefined })
+}))
+vi.mock("@/features/preview/lib/docxEngine", () => ({
+	prewarmDocxWorker: prewarm,
+	DOCX_FONT_URLS: {},
+	docxHost: (source: ByteSource, listener: DocxListener) => {
+		host.source = source
+		host.listener = listener
+
+		const session = host.session ?? {
+			objects: () => Promise.resolve([]),
+			media: () => Promise.resolve(null),
+			locate: () => Promise.resolve(null),
+			find: () => Promise.resolve(new Int32Array(0)),
+			close: () => undefined
+		}
+
+		return {
+			...session,
+			close: () => {
+				host.closed++
+				session.close()
+			}
+		}
+	}
+}))
+
+const { DocxViewer } = await import("@/features/preview/components/docxViewer")
+
+const item = linkedFileItem("doc.docx", {
+	uuid: "aaaaaaaa-0000-0000-0000-000000000002",
+	mime: { Decrypted: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+	size: 8n
+})
+
+function emit(event: DocxEvent): Promise<void> {
+	return act(async () => {
+		host.listener?.(event)
+		await new Promise(resolve => setTimeout(resolve, 0))
+	})
+}
+
+function page(objects = 0): DocxPageData {
+	return {
+		index: 0,
+		number: 1,
+		numberText: "1",
+		section: 0,
+		width: 816,
+		height: 1056,
+		lineCount: 1,
+		fragmentCount: 1,
+		decorationCount: 0,
+		lineFloats: Float32Array.from([96, 20, 112, 96, 40]),
+		lineInts: Int32Array.from([0, 1, 0, 5, 1, 0, 0]),
+		fragmentFloats: Float32Array.from([96, 40, 0, 0]),
+		fragmentInts: Int32Array.from([0, 5, 0, 0, 0]),
+		decorationFloats: new Float32Array(0),
+		decorationInts: new Int32Array(0),
+		graphicCount: 0,
+		graphicFloats: new Float32Array(0),
+		graphicInts: new Int32Array(0),
+		objectCount: objects,
+		objectFloats: Float32Array.from(objects > 0 ? [96, 200, 100, 50] : []),
+		objectInts: Int32Array.from(objects > 0 ? [7, 1, 0] : []),
+		objectKinds: Uint8Array.from(objects > 0 ? [1] : []),
+		sourceCount: 1,
+		sourceInts: Int32Array.from([0, 0, 1, 0]),
+		sourceTexts: ["Hello"],
+		linkCount: 0,
+		linkInts: new Int32Array(0)
+	}
+}
+
+const STYLE = {
+	font: '400 16px "fo1-carlito", sans-serif',
+	smallCapsFont: '400 11px "fo1-carlito", sans-serif',
+	color: "",
+	kerning: true,
+	letterSpacing: 0,
+	scaleX: 1,
+	shift: 0,
+	ascent: 12,
+	descent: 4,
+	revision: 0
+}
+
+function pages(objects = 0): DocxEvent {
+	return { type: "pages", pages: [page(objects)], styles: [STYLE], decorations: [], links: [], final: true, pageCount: 1 }
+}
+
+// One image item filling the drawing.
+const DRAWING: DrawingData = {
+	width: 100,
+	height: 50,
+	commands: new Uint8Array(0),
+	coords: new Float32Array(0),
+	itemCount: 1,
+	itemFloats: Float32Array.from([1, 0, 0, 1, 0, 0, 0, 0, 100, 50]),
+	itemInts: Int32Array.from([1, 0, 0, 0, -1, -1, 0, -1, 0, 0]),
+	paints: [],
+	strokes: [],
+	images: [
+		{
+			partName: "word/media/image1.png",
+			format: "png",
+			handling: "native",
+			svgPartName: undefined,
+			crop: { left: 0, top: 0, right: 0, bottom: 0 },
+			alpha: 1,
+			grayscale: false,
+			biLevel: -1,
+			duotone: null,
+			brightness: 0,
+			contrast: 0,
+			colorChange: null
+		}
+	],
+	texts: [],
+	shadows: []
+}
+
+beforeEach(() => {
+	host.listener = null
+	host.source = null
+	host.session = null
+	host.closed = 0
+})
+
+afterEach(() => {
+	renderAsync.mockClear()
+	warn.mockClear()
+	prewarm.mockClear()
+})
+
+describe("DocxViewer", () => {
+	it("reads ranges of the cached buffer without copying it", async () => {
+		const view = render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		expect(host.source?.size).toBe(BYTES.length)
+
+		const range = await host.source?.read(2, 4)
+
+		// A view into the same buffer: the engine host copies only the range it sends to the worker.
+		expect(range?.buffer).toBe(BYTES.buffer)
+		expect(Array.from(range ?? [])).toEqual([3, 4, 9, 9])
+
+		await emit(pages())
+
+		await waitFor(() => {
+			expect(view.container.querySelector(".fo-docx-run")?.textContent).toBe("Hello")
+		})
+		expect(renderAsync).not.toHaveBeenCalled()
+
+		view.unmount()
+		await waitFor(() => {
+			expect(host.closed).toBe(1)
+		})
+	})
+
+	it("falls back to docx-preview with the same buffer when the engine fails, and logs it", async () => {
+		const view = render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		await emit({ type: "error", reason: "failed", message: "boom" })
+
+		await waitFor(() => {
+			expect(renderAsync).toHaveBeenCalledTimes(1)
+		})
+		expect(renderAsync.mock.calls[0]?.[0]).toBe(BYTES)
+		expect(warn).toHaveBeenCalledWith("docx", expect.stringContaining("docx-preview instead"), "failed: boom (main part unknown bytes)")
+		view.unmount()
+	})
+
+	it("shows the error instead of docx-preview when the document is too large for it", async () => {
+		render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		await emit({ type: "error", reason: "failed", message: "out of memory", mainPartBytes: 64 * 1024 * 1024 })
+
+		expect(await screen.findByText("This document couldn't be rendered.")).toBeTruthy()
+		expect(renderAsync).not.toHaveBeenCalled()
+		expect(warn).toHaveBeenCalledWith("docx", expect.stringContaining("too large"), expect.any(String))
+	})
+
+	it("does not start a spare worker for a buffer that is already loaded", () => {
+		const view = render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		expect(prewarm).not.toHaveBeenCalled()
+		view.unmount()
+	})
+
+	it("explains a file it cannot open instead of falling back", async () => {
+		render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		await emit({ type: "error", reason: "encrypted", message: "EncryptedPackage" })
+
+		expect(await screen.findByText("This document is password-protected and can't be opened here.")).toBeTruthy()
+		expect(renderAsync).not.toHaveBeenCalled()
+	})
+
+	it("revokes the images' object URLs when the viewer closes", async () => {
+		let next = 0
+		const created: string[] = []
+		const createObjectURL = vi.fn(() => {
+			const url = `blob:test/${String(next++)}`
+
+			created.push(url)
+
+			return url
+		})
+		const revokeObjectURL = vi.fn<(url: string) => void>()
+
+		URL.createObjectURL = createObjectURL
+		URL.revokeObjectURL = revokeObjectURL
+		host.session = {
+			objects: ids => Promise.resolve(ids.map(id => ({ kind: "drawing" as const, id, drawing: DRAWING }))),
+			media: () => Promise.resolve({ bytes: new Uint8Array([137, 80, 78, 71]), type: "image/png" }),
+			locate: () => Promise.resolve(null),
+			find: () => Promise.resolve(new Int32Array(0)),
+			close: () => undefined
+		}
+
+		const view = render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		await emit(pages(1))
+
+		await waitFor(() => {
+			expect(view.container.querySelector(".fo-docx-object image")?.getAttribute("href")).toBe("blob:test/0")
+		})
+		expect(revokeObjectURL).not.toHaveBeenCalled()
+
+		view.unmount()
+
+		await waitFor(() => {
+			expect(revokeObjectURL.mock.calls.map(([url]) => url)).toEqual(created)
+		})
+	})
+})

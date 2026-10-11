@@ -176,6 +176,31 @@
     --scrollbar-thumb-hover: oklch(1 0 0 / 25%);
 }
 
+/* These feed @filen/office's docx.css: pages are white paper in both themes, only their surroundings follow the app. */
+:root,
+.dark {
+    --fo-canvas: var(--canvas);
+    --fo-page-bg: #fff;
+    --fo-page-shadow: 0 1px 3px oklch(0 0 0 / 12%), 0 1px 2px oklch(0 0 0 / 8%);
+    --fo-page-edge: transparent;
+    --fo-auto-text: #000;
+    --fo-selection: color-mix(in oklab, var(--primary) 22%, transparent);
+    --fo-focus-ring: var(--ring);
+    --fo-find-bg: color-mix(in oklab, var(--warning) 35%, transparent);
+    --fo-find-active-bg: color-mix(in oklab, var(--warning) 70%, transparent);
+    --fo-placeholder-fill: #f1f1f1;
+    --fo-placeholder-stroke: #c8c8c8;
+    --fo-revision-mark: oklch(0.488 0.243 264.376);
+    --fo-revision-bar: oklch(0.488 0.243 264.376);
+}
+
+.dark {
+    --fo-page-shadow: none;
+    --fo-page-edge: var(--border);
+    /* Dark --primary is near-white and would vanish on the page; its foreground is light's --primary. */
+    --fo-selection: color-mix(in oklab, var(--primary-foreground) 22%, transparent);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
