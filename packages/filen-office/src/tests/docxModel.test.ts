@@ -784,7 +784,7 @@ describe("robustness", () => {
 				'<w:writeProtection w:recommended="1"/><w:trackRevisions/><w:documentProtection w:edit="forms" w:enforcement="1" w:hashValue="abc"/>' +
 				'<w:defaultTabStop w:val="720"/><w:evenAndOddHeaders w:val="false"/><w:mirrorMargins/><w:gutterAtTop w:val="1"/><w:updateFields w:val="true"/>' +
 				'<w:autoHyphenation/><w:hyphenationZone w:val="357"/><w:characterSpacingControl w:val="doNotCompress"/>' +
-				'<w:compat><w:doNotExpandShiftReturn/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>' +
+				'<w:compat><w:doNotExpandShiftReturn/><w:suppressTopSpacing w:val="0"/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>' +
 				'<w:themeFontLang w:val="en-GB" w:eastAsia="ja-JP"/><w:decimalSymbol w:val=","/><w:listSeparator w:val=";"/>'
 		})
 

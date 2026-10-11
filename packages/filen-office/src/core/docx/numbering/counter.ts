@@ -29,6 +29,11 @@ interface CounterSet {
 	readonly active: Uint8Array
 }
 
+export interface CounterSnapshot {
+	readonly sets: ReadonlyMap<number, CounterSet>
+	readonly overridesApplied: ReadonlyMap<number, number>
+}
+
 // Counts list items in document order. Call `next` once for every numbered paragraph of a story, in
 // order; use one instance per story that numbers on its own (the body, each text box...).
 export class NumberingCounters {
@@ -44,6 +49,25 @@ export class NumberingCounters {
 	reset(): void {
 		this.sets.clear()
 		this.overridesApplied.clear()
+	}
+
+	// The counting state, to continue from later (layout restarting at a page).
+	snapshot(): CounterSnapshot {
+		const sets = new Map<number, CounterSet>()
+
+		for (const [id, set] of this.sets) sets.set(id, { values: set.values.slice(), active: set.active.slice() })
+
+		return { sets, overridesApplied: new Map(this.overridesApplied) }
+	}
+
+	restore(snapshot: CounterSnapshot): void {
+		this.sets.clear()
+
+		for (const [id, set] of snapshot.sets) this.sets.set(id, { values: set.values.slice(), active: set.active.slice() })
+
+		this.overridesApplied.clear()
+
+		for (const [id, applied] of snapshot.overridesApplied) this.overridesApplied.set(id, applied)
 	}
 
 	next(numId: number, ilvl: number): ListMarker | undefined {

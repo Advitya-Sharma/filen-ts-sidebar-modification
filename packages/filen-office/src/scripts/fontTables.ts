@@ -42,9 +42,20 @@ interface MetricSource {
 	originals: Record<string, string>
 }
 
+// Line metrics of a family no font file describes, calibrated from Word's recorded page breaks.
+interface CalibratedLineMetrics {
+	family: string
+	lineHeight: number
+	// Thousandths of an em; they add up to the line height.
+	ascent: number
+	descent: number
+	evidence: string
+}
+
 export interface Manifest {
 	families: ManifestFamily[]
 	metricSources: MetricSource[]
+	calibratedLineMetrics: CalibratedLineMetrics[]
 }
 
 export function readManifest(): Manifest {
@@ -142,6 +153,34 @@ export function lineMetricsTable(manifest: Manifest, archives: ReadonlyMap<strin
 		}
 	}
 
+	for (const calibrated of manifest.calibratedLineMetrics) {
+		const key = calibrated.family.toLowerCase()
+
+		if (!SUBSTITUTIONS.has(key)) throw new Error(`${calibrated.family} has no substitute`)
+		if (originals.has(key)) throw new Error(`${calibrated.family} has published metrics`)
+		if (Math.abs(calibrated.ascent + calibrated.descent - calibrated.lineHeight * 1000) > 1)
+			throw new Error(`${calibrated.family}: ascent and descent do not add up`)
+
+		const { ascent, descent } = calibrated
+
+		originals.set(key, {
+			basis: "calibrated",
+			source: calibrated.evidence,
+			metrics: {
+				unitsPerEm: 1000,
+				hheaAscender: ascent,
+				hheaDescender: -descent,
+				hheaLineGap: 0,
+				typoAscender: ascent,
+				typoDescender: -descent,
+				typoLineGap: 0,
+				winAscent: ascent,
+				winDescent: descent,
+				useTypoMetrics: false
+			}
+		})
+	}
+
 	const table = new Map<string, LineMetricsEntry>()
 
 	for (const family of SUBSTITUTIONS.keys()) table.set(family, originals.get(family) ?? { basis: "substitute" })
@@ -184,8 +223,8 @@ export async function renderTables(
 		return `${JSON.stringify(rest).slice(0, -1)}, "metrics": ${metricsCall(metrics)}}`
 	})
 	const lineRows = [...lineMetrics].map(([family, entry]) =>
-		entry.basis === "original"
-			? `[${JSON.stringify(family)}, { basis: "original", source: ${JSON.stringify(entry.source)}, metrics: ${metricsCall(entry.metrics)} }]`
+		entry.basis !== "substitute"
+			? `[${JSON.stringify(family)}, { basis: ${JSON.stringify(entry.basis)}, source: ${JSON.stringify(entry.source)}, metrics: ${metricsCall(entry.metrics)} }]`
 			: `[${JSON.stringify(family)}, { basis: "substitute" }]`
 	)
 	const cloneRows = [...cloneMetrics].map(

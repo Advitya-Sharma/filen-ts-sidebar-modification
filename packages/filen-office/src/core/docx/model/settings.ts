@@ -45,7 +45,8 @@ export interface DocxSettings {
 	// files that predate it, which Word treats as 11 or lower.
 	readonly compatibilityMode: number | undefined
 	readonly compatSettings: readonly CompatSetting[]
-	// Legacy compatibility switches present in w:compat (local names), e.g. "doNotExpandShiftReturn".
+	// Legacy compatibility switches turned on in w:compat (local names), e.g. "doNotExpandShiftReturn"; a
+	// switch written with w:val="0" (or "false", "off") is off.
 	readonly legacyCompat: readonly string[]
 	readonly documentProtection: DocumentProtection | undefined
 	readonly writeProtection: WriteProtection | undefined
@@ -201,7 +202,7 @@ export function readSettings(document: XmlDocument): DocxSettings {
 							uri: reader.attr(setting, Ns.W, "uri"),
 							value: reader.attr(setting, Ns.W, "val")
 						})
-					} else {
+					} else if (reader.onOff(setting)) {
 						legacyCompat.push(document.localName(setting))
 					}
 				}

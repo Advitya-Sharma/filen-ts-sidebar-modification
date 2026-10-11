@@ -16,7 +16,7 @@ import {
 	type LayoutOptions
 } from "@filen/office/core/docx"
 import { buildDocx, type SyntheticDocx } from "./docxSynthetic"
-import { HmtxMeasurer, layOut, loadDocx, pageLines, type LineInfo } from "./layoutFixtures"
+import { HmtxMeasurer, layOut, layoutDigest, loadDocx, pageLines, type LineInfo } from "./layoutFixtures"
 import { wordLikeDocument } from "./wordLike"
 
 // Letter paper, 1 in margins: a 624 x 864 px text area. Without a styles part text is Times New Roman 10 pt
@@ -178,6 +178,46 @@ describe("pages", () => {
 				.slice(split.anchors[1]?.offset ?? 0)
 				.slice(0, (body(split, 1)[0]?.text ?? "").length)
 		)
+	})
+
+	it("lays out again from a page exactly as a full layout does", async () => {
+		const bytes = buildDocx({
+			body:
+				Array.from({ length: 120 }, (_, k) =>
+					k % 7 === 0
+						? p(`item ${k}`, '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>')
+						: k % 11 === 0
+							? `<w:p><w:r><w:t xml:space="preserve">${words(30)} </w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`
+							: p(words(40 + (k % 5) * 13), k % 13 === 0 ? "<w:keepNext/>" : "")
+				).join("") + SECTION,
+			footnotes:
+				'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> note</w:t></w:r></w:p></w:footnote>',
+			settings: '<w:footnotePr><w:footnote w:id="-1"/></w:footnotePr>',
+			...NUMBERING
+		})
+		const full = await layOut(bytes)
+		const expected = layoutDigest(full)
+
+		expect(full.pages.length).toBeGreaterThan(8)
+
+		for (const page of [1, 3, Math.floor(full.pages.length / 2), full.pages.length - 1]) {
+			const from = await full.relayoutFrom(page)
+
+			expect(from).toBeLessThanOrEqual(page)
+			expect(from).toBeGreaterThan(0)
+			expect(layoutDigest(full)).toEqual(expected)
+		}
+
+		// Not while a layout runs.
+		const loaded = await loadDocx(bytes)
+		const running = layoutDocument(loaded.model, loaded.resolver, loaded.fonts, new HmtxMeasurer(), {
+			store: loaded.store,
+			sliceMs: 0,
+			yield: () => setImmediate()
+		})
+
+		await expect(running.relayoutFrom(1)).rejects.toThrow()
+		await running.done
 	})
 
 	it("can be cancelled between slices", async () => {
@@ -393,6 +433,28 @@ describe("sections", () => {
 		expect(graphics(result, 0, PageGraphic.COLUMN_SEPARATOR).length).toBe(1)
 	})
 
+	it("balances the columns of a section ending at a continuous section break", async () => {
+		const columns =
+			'<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:cols w:num="2" w:space="720" w:sep="1"/></w:sectPr></w:pPr></w:p>'
+		const result = await layout({
+			body: lines(19) + columns + p("after"),
+			section:
+				'<w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+		})
+		const all = body(result, 0)
+		const left = all.filter(line => line.x < 300 && line.text !== "after")
+		const right = all.filter(line => line.x >= 300)
+		const after = all.find(line => line.text === "after")
+
+		expect(result.pages.length).toBe(1)
+		// 19 lines and the section's empty last paragraph: ten in each column.
+		expect(left.length).toBe(10)
+		expect(right.length).toBe(10)
+		expect(right[0]?.text).toBe("line 11")
+		expect(after?.top).toBeCloseTo(96 + 10 * LINE, 1)
+		expect(graphics(result, 0, PageGraphic.COLUMN_SEPARATOR)[0]?.height).toBeCloseTo(10 * LINE, 1)
+	})
+
 	it("numbers pages in fields, restarts and formats page numbers", async () => {
 		const footer =
 			'<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>9</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> of </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
@@ -412,6 +474,23 @@ describe("sections", () => {
 		expect(result.pages[1]?.numberText).toBe("iv")
 		// The footer sits above its distance from the page bottom.
 		expect(pageLines(result, 0).find(line => line.region === Region.FOOTER)?.bottom).toBeCloseTo(1056 - 48, 1)
+	})
+
+	it("numbers pages in body fields where the text is, also in a paragraph split across pages", async () => {
+		const field = (instr: string): string =>
+			`<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`
+		const run = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`
+		const result = await layout({
+			body:
+				lines(50) +
+				`<w:p>${run("on ")}${field("PAGE")}${run(" of ")}${field("NUMPAGES")}${run(` ${words(200)} at `)}${field("PAGE")}${run(" of ")}${field("NUMPAGES")}${run(" in ")}${field("SECTIONPAGES")}</w:p>` +
+				lines(60)
+		})
+		const all = [0, 1, 2].map(page => texts(body(result, page)).join(" "))
+
+		expect(result.pages.length).toBe(3)
+		expect(all[0]).toContain("on 1 of 3 ")
+		expect(all[1]).toContain(" at 2 of 3 in 3")
 	})
 
 	it("uses the first-page header and even-page headers", async () => {
@@ -492,6 +571,16 @@ describe("lists, fields and hidden text", () => {
 		})
 
 		expect(texts(body(result, 0))).toEqual(["see result page 1"])
+	})
+
+	it("draws symbol-font characters as the Unicode characters they show when the font is missing", async () => {
+		const result = await layout({
+			body:
+				'<w:p><w:r><w:sym w:font="Wingdings" w:char="F0FC"/><w:sym w:font="Symbol" w:char="F061"/><w:sym w:font="Wingdings" w:char="F026"/></w:r>' +
+				'<w:r><w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/></w:rPr><w:t>pD</w:t></w:r><w:r><w:t>x\uF0FC</w:t></w:r></w:p>'
+		})
+
+		expect(texts(body(result, 0))).toEqual(["\u2713\u03b1\u{1f56e}\u03c0\u0394x\uf0fc"])
 	})
 
 	it("joins a paragraph whose mark is hidden to the next one", async () => {
@@ -583,6 +672,26 @@ describe("tables", () => {
 		expect(texts(body(split, 1)).slice(0, 2)).toEqual(["line 56", "line 57"])
 	})
 
+	it("continues a vertically merged cell that does not fit its page on the next one", async () => {
+		const merged = `<w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>${lines(80)}</w:tc>`
+		const continued = "<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>"
+		const result = await layout({
+			body:
+				lines(10) +
+				table(`<w:tr>${merged}${cell("a")}${cell("b")}</w:tr><w:tr>${continued}${cell("c")}${cell("d")}</w:tr>`) +
+				p("after")
+		})
+		const first = texts(body(result, 0))
+		const second = texts(body(result, 1))
+
+		expect(result.pages.length).toBe(2)
+		expect(body(result, 0).every(line => line.bottom <= 960 + 0.01)).toBe(true)
+		expect(first).toContain("line 40")
+		expect(second).toContain("line 80")
+		expect(second[second.length - 1]).toBe("after")
+		expect([...first, ...second].filter(text => /^line \d+$/.test(text)).length).toBe(90)
+	})
+
 	it("lays out thousands of vertically merged rows", async () => {
 		const rows = Array.from(
 			{ length: 4000 },
@@ -624,6 +733,19 @@ describe("tables", () => {
 		expect(shared[0]?.width).toBeCloseTo(2, 1)
 	})
 
+	it("hides both sides of an edge with a cell's nil border, while its none leaves the table's", async () => {
+		const nil = '<w:tcBorders><w:top w:val="none"/><w:right w:val="nil"/></w:tcBorders>'
+		const none = '<w:tcBorders><w:right w:val="none"/></w:tcBorders>'
+		const result = await layout({ body: table(`<w:tr>${cell("a", nil)}${cell("b", none)}${cell("c")}</w:tr>`) })
+		const lines = graphics(result, 0, PageGraphic.BORDER)
+		const vertical = (x: number): number => lines.filter(line => line.height > 2 && Math.abs(line.x + line.width / 2 - x) < 2).length
+		const top = lines.filter(line => line.width > 2 && line.y < 100)
+
+		expect(vertical(288)).toBe(0)
+		expect(vertical(480)).toBe(1)
+		expect(top.length).toBe(3)
+	})
+
 	it("moves a row that cannot split", async () => {
 		const row = `<w:tr><w:trPr><w:cantSplit/></w:trPr>${cell("")}${cell("")}<w:tc>${lines(10)}</w:tc></w:tr>`
 		const result = await layout({ body: lines(50) + table(row) })
@@ -647,7 +769,41 @@ describe("tables", () => {
 			body: table(`<w:tr>${cell("a")}${cell("b")}${cell("c")}</w:tr>`, '<w:tblpPr w:horzAnchor="margin" w:tblpX="720"/>')
 		})
 
-		expect(body(result, 0)[0]?.x).toBe(96 + 48)
+		// Word places the table a twip before tblpX.
+		expect(body(result, 0)[0]?.x).toBeCloseTo(96 + 719 / 15, 3)
+	})
+
+	it("ignores a tblpPr Word ignores and anchors by Word's defaults", async () => {
+		const row = `<w:tr>${cell("a")}${cell("b")}${cell("c")}</w:tr>`
+		const empty = await layout({ body: p("before") + table(row, "<w:tblpPr/>") })
+		const origin = await layout({ body: p("before") + table(row, '<w:tblpPr w:tblpX="0" w:tblpY="0"/>') })
+		// No vertAnchor: from the top margin; no horzAnchor: from the column.
+		const anchored = await layout({ body: p("before") + table(row, '<w:tblpPr w:tblpX="1441" w:tblpY="1501"/>') + p("after") })
+		const cells = (result: DocumentLayout): LineInfo[] => body(result, 0).filter(line => line.text.length === 1)
+
+		expect(cells(empty)[0]?.top).toBeGreaterThan(96 + LINE)
+		expect(cells(origin)[0]?.top).toBeGreaterThan(96 + LINE)
+		expect(cells(anchored)[0]?.top).toBeCloseTo(96 + 100, 1)
+		expect(cells(anchored)[0]?.x).toBeCloseTo(96 + 96, 1)
+	})
+
+	it("wraps the text after a floating table around it", async () => {
+		const floating =
+			'<w:tbl><w:tblPr><w:tblpPr w:leftFromText="180" w:rightFromText="180" w:vertAnchor="text" w:horzAnchor="margin" w:tblpXSpec="right" w:tblpY="1"/><w:tblW w:w="2880" w:type="dxa"/></w:tblPr>' +
+			`<w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid><w:tr>${cell("a")}</w:tr><w:tr>${cell("b")}</w:tr><w:tr>${cell("c")}</w:tr></w:tbl>`
+		const result = await layout({ body: p("before") + floating + p(words(300)) })
+		const all = body(result, 0)
+		const cells = all.filter(line => line.text.length === 1)
+		const text = all.filter(line => line.text.length > 1 && line.text !== "before")
+		const beside = text.filter(line => line.top < (cells[2]?.bottom ?? 0))
+
+		expect(cells.map(line => line.text)).toEqual(["a", "b", "c"])
+		expect(cells[0]?.top).toBeCloseTo(96 + LINE, 0)
+		// Lines beside the table stop short of it; the text starts beside its first row.
+		expect(text[0]?.top).toBeCloseTo(96 + LINE, 0)
+		expect(beside.length).toBeGreaterThan(1)
+		expect(beside.every(line => line.x + line.width <= 720 - 192 - 12 + 0.5)).toBe(true)
+		expect(Math.max(...text.filter(line => line.top > (cells[2]?.bottom ?? 0)).map(line => line.width))).toBeGreaterThan(500)
 	})
 
 	it("starts a table with a page break before its first paragraph on a new page", async () => {
@@ -694,6 +850,25 @@ describe("notes", () => {
 		expect(body(result, 0).length).toBe(54)
 		expect(texts(body(result, 1))).toEqual(["ref1"])
 		expect(pageLines(result, 1).filter(line => line.region === Region.FOOTNOTE).length).toBe(5)
+	})
+
+	it("places notes at the bottom of the column that refers to them", async () => {
+		const result = await layout({
+			body: lines(60) + `<w:p><w:r><w:t>ref</w:t></w:r>${reference(1)}</w:p>` + lines(10),
+			footnotes,
+			settings: '<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>',
+			section:
+				'<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:cols w:num="2" w:space="720"/></w:sectPr>'
+		})
+		const notes = pageLines(result, 0).filter(line => line.region === Region.FOOTNOTE)
+		const all = body(result, 0)
+		const second = all.filter(line => line.x > 300)
+
+		// The first column fills to the bottom; the second keeps room for its note.
+		expect(all.filter(line => line.x < 300).length).toBe(56)
+		expect(notes.map(line => line.text)).toEqual(["\ufffc", "1 first note"])
+		expect(notes.every(line => line.x >= 408)).toBe(true)
+		expect(Math.max(...second.map(line => line.bottom))).toBeLessThanOrEqual((notes[0]?.top ?? 0) + 0.01)
 	})
 
 	it("continues a note that does not fit on the next page", async () => {
@@ -794,6 +969,29 @@ describe("objects", () => {
 		expect(body(band, 0)[0]?.top).toBeGreaterThanOrEqual(96 + 100)
 	})
 
+	it("wraps text along the polygon of tight wrapping", async () => {
+		const triangle =
+			'<wp:wrapTight wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>'
+		const result = await layout({ body: `<w:p>${anchor(triangle, 0, 0, 2857500, 2857500)}<w:r><w:t>${words(400)}</w:t></w:r></w:p>` })
+		const lines = body(result, 0).filter(line => line.top < 96 + 300)
+
+		// The text follows the hypotenuse: lines start further left the lower they are.
+		expect(lines[0]?.x).toBeGreaterThan(96 + 250)
+		expect(lines[lines.length - 1]?.x).toBeLessThan(96 + 80)
+		expect(lines.every((line, k) => k === 0 || line.x <= (lines[k - 1]?.x ?? 0) + 0.01)).toBe(true)
+	})
+
+	it("moves an object that may not overlap below the one it would cover", async () => {
+		const square = '<wp:wrapSquare wrapText="bothSides"/>'
+		const second = anchor(square, 0, 0, 952500, 952500).replace('allowOverlap="1"', 'allowOverlap="0"').replace('id="2"', 'id="3"')
+		const result = await layout({ body: `<w:p>${anchor(square, 0, 0, 952500, 952500)}${second}<w:r><w:t>text</w:t></w:r></w:p>` })
+		const page = result.pages[0]
+
+		expect(page?.objectCount).toBe(2)
+		expect(page?.objectFloats[1]).toBe(96)
+		expect(page?.objectFloats[OBJECT_FLOATS + 1]).toBeCloseTo(196, 1)
+	})
+
 	it("lays out a text box's story inside its frame", async () => {
 		const box =
 			'<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor behindDoc="0" allowOverlap="1" layoutInCell="1" relativeHeight="1" simplePos="0" locked="0"><wp:simplePos x="0" y="0"/>' +
@@ -810,6 +1008,24 @@ describe("objects", () => {
 		expect(inside?.top).toBe(500)
 	})
 
+	it("sizes equations from their structure", async () => {
+		const run = (text: string): string => `<m:r><m:t>${text}</m:t></m:r>`
+		const fraction = `<m:f><m:num>${run("a+b")}</m:num><m:den>${run("c")}</m:den></m:f>`
+		const inline = await layout({
+			body: `<w:p><w:r><w:t xml:space="preserve">x </w:t></w:r><m:oMath>${run("y")}</m:oMath></w:p><w:p><m:oMath>${fraction}</m:oMath></w:p>`
+		})
+		const display = await layout({ body: `<w:p><m:oMathPara><m:oMath>${fraction}</m:oMath></m:oMathPara></w:p>` })
+		const height = (line: LineInfo | undefined): number => (line?.bottom ?? 0) - (line?.top ?? 0)
+		const [plain, inlineFraction] = body(inline, 0)
+		const displayFraction = body(display, 0)[0]
+
+		// A single letter keeps the line; a fraction is taller, more so in display style.
+		expect(height(plain)).toBeCloseTo(LINE, 0)
+		expect(height(inlineFraction)).toBeGreaterThan(LINE * 1.2)
+		expect(height(displayFraction)).toBeGreaterThan(height(inlineFraction))
+		expect(inline.objects.widths[1] ?? 0).toBeLessThan(display.objects.widths[0] ?? 0)
+	})
+
 	it("sizes VML pictures from their style", async () => {
 		const result = await layout({
 			body: '<w:p><w:r><w:pict><v:shape style="width:72pt;height:144pt" type="#_x0000_t75"><v:imagedata r:id="rId9"/></v:shape></w:pict></w:r></w:p>'
@@ -817,6 +1033,23 @@ describe("objects", () => {
 
 		expect(result.objects.widths[0]).toBe(96)
 		expect(result.objects.heights[0]).toBe(192)
+	})
+
+	it("lays out framed paragraphs in one frame at its position, the text around it", async () => {
+		const framePr =
+			'<w:framePr w:w="2880" w:wrap="around" w:hSpace="180" w:vAnchor="text" w:hAnchor="margin" w:xAlign="right" w:y="1"/>'
+		const result = await layout({ body: p("framed one", framePr) + p("framed two", framePr) + p(words(200)) })
+		const all = body(result, 0)
+		const framed = all.filter(line => line.text.startsWith("framed"))
+		const text = all.filter(line => !line.text.startsWith("framed"))
+
+		// The frame's right edge is at the margin; the text starts at its top, beside it.
+		expect(framed.map(line => line.x)).toEqual([720 - 192, 720 - 192])
+		expect(framed[1]?.top).toBeCloseTo(96 + 1 / 15 + LINE, 1)
+		expect(text[0]?.top).toBeCloseTo(96, 0)
+		expect(text[0]?.x).toBe(96)
+		expect((text[0]?.x ?? 0) + (text[0]?.width ?? 0)).toBeLessThanOrEqual(720 - 192 - 12 + 0.5)
+		expect(Math.max(...text.map(line => line.width))).toBeGreaterThan(500)
 	})
 
 	it("sets a drop cap beside the following lines", async () => {

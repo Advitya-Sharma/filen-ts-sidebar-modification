@@ -1,17 +1,28 @@
 import type { LineSpacingRule } from "../../fonts/index"
-import { Exclusions, LINE_FLOATS, LINE_INTS, LineInt, MeasureCache, StyleTable, type TextMeasurer } from "../../text/index"
+import { Exclusions, LINE_FLOATS, LINE_INTS, LineInt, MeasureCache, StyleTable, Wrap, type TextMeasurer } from "../../text/index"
 import type { DocxModel, Section } from "../model/document"
 import { Item, RevisionView } from "../model/kinds"
 import type { StoryPart } from "../model/part"
-import { NumberingCounters } from "../numbering/counter"
+import { NumberingCounters, type CounterSnapshot, type ListMarker } from "../numbering/counter"
 import { PropsStore } from "../props/store"
 import type { ResolvedSectionProps } from "../props/types"
 import { resolveSection, type PropertyResolver } from "../styles/resolve"
 import type { PageValues, StoryContext } from "./content"
 import { numberText } from "./fields"
-import { Area, AreaStart, BlockFlow, DEFAULT_TUNING, Engine, FlowStatus, nextToken, type LayoutTuning, type PageFrame } from "./flow"
+import {
+	Area,
+	AreaStart,
+	BlockFlow,
+	DEFAULT_TUNING,
+	Engine,
+	FlowStatus,
+	nextToken,
+	type FlowSnapshot,
+	type LayoutTuning,
+	type PageFrame
+} from "./flow"
 import { layoutCompat, pageGeometry, type LayoutCompat, type PageGeometry } from "./geometry"
-import { FootnoteArea, NoteNumbering } from "./notes"
+import { FootnoteArea, NoteNumbering, type FootnoteState, type NoteNumberingSnapshot, type PlacedNote } from "./notes"
 import { ObjectTable, type ObjectSizer } from "./objects"
 import { PageGraphic, Layer, OutputMark, PageDisplayList, PageOutput, Region, SOURCE_INTS, SourceFlag, SourceInt } from "./output"
 import { DecorationTable, RunStyles, borderWidth, type DecorationValue, type FontSource, type RunStyleInfo } from "./styles"
@@ -130,6 +141,33 @@ export class DocumentLayout {
 		this.cancelled = true
 	}
 
+	private relayout: ((page: number) => Promise<number>) | undefined = undefined
+	private running: () => boolean = () => false
+
+	attach(relayout: (page: number) => Promise<number>, running?: () => boolean): void {
+		this.relayout = relayout
+
+		if (running !== undefined) this.running = running
+	}
+
+	// Lays the document out again from page `page` on: pages before the nearest page layout can restart at
+	// (at or before `page`) are kept, the rest arrive again as events. Resolves to the first page laid out
+	// again once the layout is final. The model is the one laid out (an edit will come with a new model or a
+	// patch to it); call it once `done` has settled, never while a layout runs (that rejects).
+	async relayoutFrom(page: number): Promise<number> {
+		if (this.relayout === undefined) return 0
+
+		if (this.running()) throw new Error("relayoutFrom while the layout runs")
+
+		this.cancelled = false
+
+		const run = this.relayout(Math.max(0, page))
+
+		this.done = run.then(() => undefined)
+
+		return run
+	}
+
 	// Bytes of all pages' display lists.
 	get byteLength(): number {
 		return this.pages.reduce((sum, page) => sum + page.byteLength, 0)
@@ -160,6 +198,30 @@ export class DocumentLayout {
 
 		for (const listener of this.listeners) listener(event)
 	}
+}
+
+// The paginator's state where a page opens: layout can restart there.
+interface PageSnapshot {
+	readonly sectionIndex: number
+	readonly section: ResolvedSectionProps
+	readonly flow: FlowSnapshot
+	readonly pageNumber: number
+	readonly restart: number | undefined
+	readonly sectionFirstPage: boolean
+	readonly nextStart: AreaStart
+	readonly bodyLines: number
+	readonly lineSection: number
+	readonly endnotesDone: number
+	readonly globalLine: number
+	readonly sectionPageCounts: readonly number[]
+	readonly counters: CounterSnapshot | undefined
+	readonly notes: NoteNumberingSnapshot
+	readonly carried: readonly PlacedNote[]
+	// Endnotes referenced and not placed yet.
+	readonly endnotes: readonly number[]
+	readonly renderedBreaks: number
+	// List markers counted before the page opened for paragraphs laid out from it on (built ahead).
+	readonly markers: readonly (readonly [number, ListMarker | null])[]
 }
 
 const Step = { PROGRESS: 0, PAGE: 1, SUSPEND: 2, FINISHED: 3 } as const
@@ -206,7 +268,10 @@ class Paginator {
 	private readonly pending: PendingTotals[] = []
 	private readonly sectionPageCounts: number[] = []
 	private readonly sectionEstimates: number[] = []
-	private readonly estimate: number
+	// Per page, the values page count fields in its body, notes or text boxes showed (undefined: none).
+	private readonly bodyTotals: (PageValues | undefined)[] = []
+	private estimate: number
+	private readonly initialNotes: NoteNumberingSnapshot
 	private sectionIndex = -1
 	private section: ResolvedSectionProps = resolveSection({})
 	private flows: BlockFlow[] = []
@@ -219,6 +284,13 @@ class Paginator {
 	private firstOfSection = true
 	private geometry: PageGeometry | undefined = undefined
 	private column = 0
+	// Where the section's part of the open page began (undefined until its first step there; null when it
+	// cannot be laid out again: it began inside a table): to balance its columns.
+	private balanceStart: BalanceStart | null | undefined = undefined
+	// Each column of the page has notes of its own (the page began in a section with columns); the lowest
+	// content of the column being filled.
+	private notesPerColumn = false
+	private columnBottom = 0
 	private sectionTop = 0
 	private bodyTop = 0
 	private bodyBottom = 0
@@ -247,6 +319,7 @@ class Paginator {
 		this.compat = engine.compat
 		this.maxPages = maxPages
 		this.footnotes = new FootnoteArea(engine)
+		this.initialNotes = engine.notes.snapshot()
 		engine.notes.pageNotes = () => this.footnotes.count
 
 		const story = this.model.body
@@ -292,16 +365,22 @@ class Paginator {
 		return { part, story, counters, noteMark: "", breaksAsLines: true }
 	}
 
-	// Builds every header, footer and note once so the fonts they need are known before layout starts.
+	// Lays out every header, footer and note once off-page, so the fonts they need (tables and text boxes
+	// included) are loaded before layout starts: they are laid out where layout cannot wait for fonts.
 	scanStories(): void {
-		const values = this.values
+		const scratch = new PageOutput()
 
 		for (const story of this.model.stories) {
 			if (story.kind !== "header" && story.kind !== "footer" && story.kind !== "footnote" && story.kind !== "endnote") continue
 
 			const context = this.storyContext(story.index)
 
-			if (context !== undefined) this.engine.scan({ ...context, counters: undefined }, story.item, values)
+			if (context === undefined) continue
+
+			const region = story.kind === "header" ? Region.HEADER : story.kind === "footer" ? Region.FOOTER : Region.FOOTNOTE
+
+			this.engine.layoutBox({ ...context, counters: undefined }, region, scratch, this.values, this.frame, 0, 0, 600)
+			scratch.reset()
 		}
 	}
 
@@ -325,15 +404,43 @@ class Paginator {
 			}
 		}
 
-		if (!this.pageOpen) this.openPage()
+		if (!this.pageOpen) {
+			this.takeSnapshot()
+			this.openPage()
+		}
 
 		const flow = this.flows[this.flowIndex]
 
 		if (flow === undefined) return this.nextSection()
 
+		if (
+			this.balanceStart === undefined &&
+			this.column === 0 &&
+			this.flowIndex === 0 &&
+			flow.region === Region.BODY &&
+			(this.geometry?.columnX.length ?? 1) > 1
+		) {
+			const state = flow.snapshot()
+
+			this.balanceStart =
+				state === undefined
+					? null
+					: {
+							body: flow,
+							flow: state,
+							mark: this.page.mark(),
+							notes: this.footnotes.save(),
+							exclusions: this.exclusions.count,
+							endnotes: this.engine.endnotes.length,
+							empty: this.area.empty,
+							start: this.area.start
+						}
+		}
+
 		const status = flow.run(this.area)
 
 		this.contentBottom = Math.max(this.contentBottom, flow.y)
+		this.columnBottom = Math.max(this.columnBottom, flow.y)
 
 		switch (status) {
 			case FlowStatus.DONE:
@@ -351,6 +458,157 @@ class Paginator {
 				return this.nextColumn(AreaStart.BREAK)
 			default:
 				return this.nextColumn(AreaStart.OVERFLOW)
+		}
+	}
+
+	// Snapshots by page index; a page opened inside a table or among endnotes has none.
+	private readonly snapshots: (PageSnapshot | undefined)[] = []
+
+	private takeSnapshot(): void {
+		const index = this.layout.pages.length
+		const flow = this.flows[this.flowIndex]
+		const state = this.flowIndex === 0 && flow?.region === Region.BODY ? flow.snapshot() : undefined
+
+		this.snapshots[index] =
+			state === undefined
+				? undefined
+				: {
+						sectionIndex: this.sectionIndex,
+						section: this.section,
+						flow: state,
+						pageNumber: this.pageNumber,
+						restart: this.restart,
+						sectionFirstPage: this.sectionFirstPage,
+						nextStart: this.nextStart,
+						bodyLines: this.bodyLines,
+						lineSection: this.lineSection,
+						endnotesDone: this.endnotesDone,
+						globalLine: this.globalLine,
+						sectionPageCounts: this.sectionPageCounts.slice(),
+						counters: this.bodyStory?.counters?.snapshot(),
+						notes: this.engine.notes.snapshot(),
+						carried: this.footnotes.carriedNotes,
+						endnotes: this.engine.endnotes.slice(),
+						renderedBreaks: this.layout.renderedBreaks.length,
+						markers: this.markersFrom(flow?.blocks[state.index] ?? 0)
+					}
+	}
+
+	// The nearest page at or before `page` layout can restart at.
+	restartPage(page: number): number {
+		for (let index = Math.min(page, this.snapshots.length - 1); index > 0; index--)
+			if (this.snapshots[index] !== undefined) return index
+
+		return 0
+	}
+
+	// Drops pages from `page` (one with a snapshot, or 0) and continues from there.
+	restartAt(page: number): void {
+		const layout = this.layout
+		const snapshot = page > 0 ? this.snapshots[page] : undefined
+
+		this.pageOpen = false
+		this.finished = false
+		this.pending.splice(0, this.pending.length, ...this.pending.filter(entry => entry.index < page))
+		this.snapshots.length = page
+		this.bodyTotals.length = Math.min(this.bodyTotals.length, page)
+		layout.pages.length = page
+		layout.anchors.length = page
+		layout.pageFirstLines.length = page
+		layout.final = false
+
+		for (const index of [...layout.dirty]) if (index >= page) layout.dirty.delete(index)
+
+		if (snapshot === undefined) {
+			this.restartFromStart()
+
+			return
+		}
+
+		layout.renderedBreaks.length = snapshot.renderedBreaks
+		this.sectionIndex = snapshot.sectionIndex
+		this.section = snapshot.section
+
+		const section = this.model.sections[snapshot.sectionIndex]
+		const body = this.body
+		const story = this.bodyStory
+
+		if (section === undefined || body === undefined || story === undefined) return
+
+		const flow = new BlockFlow(this.engine, story, Region.BODY, true).setRange(body, section.start, section.end)
+
+		this.flows = [flow]
+		this.flowIndex = 0
+		this.pageNumber = snapshot.pageNumber
+		this.restart = snapshot.restart
+		this.sectionFirstPage = snapshot.sectionFirstPage
+		this.nextStart = snapshot.nextStart
+		this.bodyLines = snapshot.bodyLines
+		this.lineSection = snapshot.lineSection
+		this.endnotesDone = snapshot.endnotesDone
+		this.globalLine = snapshot.globalLine
+		this.sectionPageCounts.splice(0, this.sectionPageCounts.length, ...snapshot.sectionPageCounts)
+
+		if (snapshot.counters !== undefined) story.counters?.restore(snapshot.counters)
+
+		this.engine.notes.restore(snapshot.notes)
+		this.footnotes.carriedNotes = snapshot.carried
+		this.engine.setEndnotes(snapshot.endnotes)
+		this.forgetMarkers(flow.blocks[snapshot.flow.index] ?? 0)
+
+		for (const [key, marker] of snapshot.markers) this.engine.markers.set(key, marker)
+
+		// The page opens again with the restored state; the flow resumes in its first area.
+		this.snapshots[page] = snapshot
+		this.openPage()
+		flow.restore(snapshot.flow, this.area)
+		this.anchor = this.anchorHere()
+	}
+
+	private restartFromStart(): void {
+		this.layout.renderedBreaks.length = 0
+		this.sectionIndex = -1
+		this.section = resolveSection({})
+		this.flows = []
+		this.flowIndex = 0
+		this.pageNumber = 0
+		this.restart = undefined
+		this.sectionFirstPage = true
+		this.nextStart = AreaStart.DOCUMENT
+		this.bodyLines = 0
+		this.lineSection = -1
+		this.endnotesDone = -1
+		this.globalLine = 0
+		this.sectionPageCounts.length = 0
+		this.bodyStory?.counters?.reset()
+		this.engine.notes.restore(this.initialNotes)
+		this.footnotes.carriedNotes = []
+		this.engine.truncateEndnotes(0)
+		this.forgetMarkers(0)
+	}
+
+	private markersFrom(item: number): [number, ListMarker | null][] {
+		const part = this.body?.index ?? -1
+		const out: [number, ListMarker | null][] = []
+
+		for (const [key, marker] of this.engine.markers) {
+			const keyPart = Math.floor(key / 0x4000000)
+
+			if (keyPart === part && key - keyPart * 0x4000000 >= item) out.push([key, marker])
+		}
+
+		return out
+	}
+
+	// List markers counted from `item` on are counted again.
+	private forgetMarkers(item: number): void {
+		const part = this.body?.index ?? -1
+		const markers = this.engine.markers
+
+		for (const key of markers.keys()) {
+			const keyPart = Math.floor(key / 0x4000000)
+
+			if (keyPart === part && key - keyPart * 0x4000000 >= item) markers.delete(key)
 		}
 	}
 
@@ -396,13 +654,23 @@ class Paginator {
 		const sameSize = Math.abs(next.pageWidth - previous.pageWidth) < 1 && Math.abs(next.pageHeight - previous.pageHeight) < 1
 
 		if (this.pageOpen && next.type === "continuous" && sameSize) {
+			// The section's columns end level before the next section starts below them.
+			this.balanceColumns()
+
+			if (this.geometry !== undefined) this.columnSeparators(this.geometry)
+
+			if (this.notesPerColumn) this.closeColumnNotes()
+
 			this.startSection(index)
+			this.balanceStart = undefined
 			this.geometry = pageGeometry(next, this.compat, this.frame.odd)
 			this.engine.gridPitch = this.geometry.gridPitch
 			this.sectionTop = this.contentBottom
 			this.column = 0
 			this.setArea(0, this.sectionTop, this.sectionTop <= this.bodyTop + EPSILON)
 			this.area.start = AreaStart.BREAK
+
+			if (this.notesPerColumn) this.footnotes.startColumn(this.area.left, this.area.width)
 
 			return Step.PROGRESS
 		}
@@ -446,7 +714,7 @@ class Paginator {
 
 		if (engine.endnotes.length === 0 || (engine.notes.endnotes.position !== "sectEnd" && !atEnd)) return false
 
-		const stories = engine.endnotes.splice(0)
+		const stories = engine.takeEndnotes()
 
 		const flows: BlockFlow[] = []
 		const model = this.model
@@ -483,13 +751,103 @@ class Paginator {
 		return true
 	}
 
+	// Lays the section's part of the page out again with the lowest column bottom that still holds it, so the
+	// columns end level (the first ones longer when they cannot be equal).
+	private balanceColumns(): void {
+		const geometry = this.geometry
+		const start = this.balanceStart
+		const flow = this.flows[0]
+
+		// Not when the section's endnotes ran on after its text (they are no part to lay out again).
+		if (geometry === undefined || start === undefined || start === null || flow !== start.body || geometry.columnX.length < 2) return
+
+		let low = this.sectionTop
+		let high = this.bodyBottom
+
+		for (let k = 0; k < BALANCE_STEPS && high - low > 0.5; k++) {
+			const middle = (low + high) / 2
+
+			if (this.fillColumns(start, flow, middle, geometry.columnX.length)) high = middle
+			else low = middle
+		}
+
+		if (!this.fillColumns(start, flow, high, geometry.columnX.length))
+			this.fillColumns(start, flow, this.bodyBottom, geometry.columnX.length)
+	}
+
+	// Lays the section's part of the page out from `start` into its columns ending at `bottom`; whether it
+	// all fitted.
+	private fillColumns(start: BalanceStart, flow: BlockFlow, bottom: number, columns: number): boolean {
+		this.page.rollback(start.mark)
+		this.footnotes.load(start.notes)
+		this.exclusions.count = start.exclusions
+		this.engine.truncateEndnotes(start.endnotes)
+		this.contentBottom = this.sectionTop
+		this.column = 0
+		this.setArea(0, this.sectionTop, start.empty)
+		this.area.start = start.start
+		this.area.bottom = bottom
+		flow.restore(start.flow, this.area)
+
+		for (;;) {
+			const status = flow.run(this.area)
+
+			this.contentBottom = Math.max(this.contentBottom, flow.y)
+
+			if (status === FlowStatus.DONE) return true
+
+			if ((status !== FlowStatus.OVERFLOW && status !== FlowStatus.COLUMN_BREAK) || this.column + 1 >= columns) return false
+
+			if (this.notesPerColumn) this.closeColumnNotes()
+
+			this.column++
+			this.setArea(this.column, this.sectionTop, this.sectionTop <= this.bodyTop + EPSILON)
+			this.area.start = status === FlowStatus.COLUMN_BREAK ? AreaStart.BREAK : AreaStart.OVERFLOW
+			this.area.bottom = bottom
+
+			if (this.notesPerColumn) this.footnotes.startColumn(this.area.left, this.area.width)
+		}
+	}
+
+	// Draws the notes of the column being left at its bottom; text that comes later on the page keeps clear
+	// of them.
+	private closeColumnNotes(): void {
+		const top = this.footnotes.close(this.page, this.bodyBottom, this.columnBottom)
+
+		if (top < this.bodyBottom - EPSILON)
+			this.exclusions.add(this.area.left, top, this.area.left + this.area.width, this.bodyBottom, Wrap.BOTH)
+	}
+
+	private columnSeparators(geometry: PageGeometry): void {
+		if (!geometry.separator) return
+
+		for (let c = 1; c < geometry.columnX.length; c++) {
+			const previousEnd = (geometry.columnX[c - 1] ?? 0) + (geometry.columnWidths[c - 1] ?? 0)
+			const x = geometry.left + (previousEnd + (geometry.columnX[c] ?? 0)) / 2
+
+			this.page.addGraphic(
+				PageGraphic.COLUMN_SEPARATOR,
+				0,
+				Layer.TEXT,
+				x - 0.5,
+				this.sectionTop,
+				1,
+				Math.max(1, this.contentBottom - this.sectionTop)
+			)
+		}
+	}
+
 	private nextColumn(start: AreaStart): Step {
 		const geometry = this.geometry
 
 		if (geometry !== undefined && this.column + 1 < geometry.columnX.length) {
+			if (this.notesPerColumn) this.closeColumnNotes()
+
 			this.column++
 			this.setArea(this.column, this.sectionTop, this.sectionTop <= this.bodyTop + EPSILON)
 			this.area.start = start
+
+			if (this.notesPerColumn) this.footnotes.startColumn(this.area.left, this.area.width)
 
 			return Step.PROGRESS
 		}
@@ -506,6 +864,7 @@ class Paginator {
 
 		if (geometry === undefined) return
 
+		this.columnBottom = top
 		area.page = this.page
 		area.region = Region.BODY
 		area.left = geometry.left + (geometry.columnX[column] ?? 0)
@@ -543,6 +902,19 @@ class Paginator {
 			top,
 			geometry.width - geometry.left - geometry.right
 		)
+	}
+
+	private anchorHere(): PageAnchor {
+		const flow = this.flows[this.flowIndex]
+		const position = flow?.position()
+
+		return {
+			section: this.sectionIndex,
+			story: flow?.story.story ?? -1,
+			block: position?.block ?? -1,
+			row: position?.row ?? -1,
+			offset: position?.offset ?? 0
+		}
 	}
 
 	private headerFooter(set: Section["effectiveHeaders"], odd: boolean): number {
@@ -588,16 +960,7 @@ class Paginator {
 		this.pageSection = this.sectionIndex
 		this.pageProps = section
 
-		const flow = this.flows[this.flowIndex]
-		const position = flow?.position()
-
-		this.anchor = {
-			section: this.sectionIndex,
-			story: flow?.story.story ?? -1,
-			block: position?.block ?? -1,
-			row: position?.row ?? -1,
-			offset: position?.offset ?? 0
-		}
+		this.anchor = this.anchorHere()
 
 		const textWidth = geometry.width - geometry.left - geometry.right
 
@@ -622,8 +985,15 @@ class Paginator {
 
 		if (this.bodyBottom - this.bodyTop < 24) this.bodyBottom = this.bodyTop + 24
 
-		this.footnotes.startPage(geometry.left, textWidth, this.values, this.frame)
+		this.notesPerColumn = geometry.columnX.length > 1
+		this.footnotes.startPage(
+			geometry.left + (this.notesPerColumn ? (geometry.columnX[0] ?? 0) : 0),
+			this.notesPerColumn ? (geometry.columnWidths[0] ?? textWidth) : textWidth,
+			this.values,
+			this.frame
+		)
 		this.column = 0
+		this.balanceStart = undefined
 		this.sectionTop = this.bodyTop
 		this.contentBottom = this.bodyTop
 		this.setArea(0, this.bodyTop, true)
@@ -646,24 +1016,9 @@ class Paginator {
 		if (geometry === undefined) return
 
 		this.verticalAlign(page)
-		this.footnotes.close(page, this.bodyBottom, this.contentBottom)
+		this.footnotes.close(page, this.bodyBottom, this.notesPerColumn ? this.columnBottom : this.contentBottom)
 
-		if (geometry.separator) {
-			for (let c = 1; c < geometry.columnX.length; c++) {
-				const previousEnd = (geometry.columnX[c - 1] ?? 0) + (geometry.columnWidths[c - 1] ?? 0)
-				const x = geometry.left + (previousEnd + (geometry.columnX[c] ?? 0)) / 2
-
-				page.addGraphic(
-					PageGraphic.COLUMN_SEPARATOR,
-					0,
-					Layer.TEXT,
-					x - 0.5,
-					this.sectionTop,
-					1,
-					Math.max(1, this.contentBottom - this.sectionTop)
-				)
-			}
-		}
+		this.columnSeparators(geometry)
 
 		this.lineNumbers(page)
 		this.pageBorders(page, geometry)
@@ -682,6 +1037,7 @@ class Paginator {
 		}
 
 		this.renderedBreaks(page, index)
+		this.bodyTotals[index] = this.usesTotals(page) ? this.values : undefined
 
 		const totals = this.usesTotals(this.header) || this.usesTotals(this.footer)
 
@@ -874,6 +1230,34 @@ class Paginator {
 
 	private globalLine = 0
 
+	// The first page whose body showed page counts other than the layout's, or -1.
+	totalsMismatch(): number {
+		const total = this.layout.pages.length
+
+		for (let index = 0; index < this.bodyTotals.length; index++) {
+			const values = this.bodyTotals[index]
+
+			if (values === undefined) continue
+
+			const section = this.layout.pages[index]?.section ?? 0
+
+			if (values.numPages !== total || values.sectionPages !== (this.sectionPageCounts[section] ?? 1)) return index
+		}
+
+		return -1
+	}
+
+	// Takes the page counts of the layout so far as the estimates fields show from now on.
+	adoptTotals(): void {
+		this.estimate = Math.max(1, this.layout.pages.length)
+
+		for (let section = 0; section < this.sectionEstimates.length; section++) {
+			const count = this.sectionPageCounts[section]
+
+			if (count !== undefined) this.sectionEstimates[section] = count
+		}
+	}
+
 	// Page count fields: pages whose headers or footers used the estimate are laid out again.
 	finish(): void {
 		const layout = this.layout
@@ -918,6 +1302,24 @@ class Paginator {
 	}
 }
 
+// Halvings of the column bottom when balancing columns (to under a pixel on any page).
+const BALANCE_STEPS = 12
+
+// Where a section's part of a page began, to lay it out again.
+interface BalanceStart {
+	readonly body: BlockFlow
+	readonly flow: FlowSnapshot
+	readonly mark: OutputMark
+	readonly notes: FootnoteState
+	readonly exclusions: number
+	readonly endnotes: number
+	readonly empty: boolean
+	readonly start: AreaStart
+}
+
+// Layouts again for page count fields in the text, at most.
+const MAX_TOTALS_ROUNDS = 3
+
 function defaultYield(): Promise<void> {
 	return Promise.resolve()
 }
@@ -958,10 +1360,18 @@ export function layoutDocument(
 	const now = options.now ?? Date.now
 	const pause = options.yield ?? defaultYield
 
-	layout.done = (async () => {
+	// Runs the paginator to the end (or cancellation), from wherever it stands.
+	let running = false
+	const drive = async (scan: boolean): Promise<void> => {
+		let rounds = 0
+
+		running = true
+
 		try {
-			paginator.scanStories()
-			await runStyles.prepareMissing()
+			if (scan) {
+				paginator.scanStories()
+				await runStyles.prepareMissing()
+			}
 
 			for (;;) {
 				if (layout.cancelled || options.signal?.aborted === true) {
@@ -993,7 +1403,21 @@ export function layoutDocument(
 					if (now() - started >= slice) break
 				}
 
-				if (finished) break
+				if (finished) {
+					// Page count fields in the text showed estimates: laid out again from there with the counts
+					// found, a bounded number of times (the counts can change again).
+					const from = rounds < MAX_TOTALS_ROUNDS ? paginator.totalsMismatch() : -1
+
+					if (from < 0) break
+
+					rounds++
+					paginator.adoptTotals()
+
+					const start = paginator.restartPage(from)
+
+					paginator.restartAt(start)
+					layout.notify(start, start, false)
+				}
 
 				await pause()
 			}
@@ -1005,8 +1429,24 @@ export function layoutDocument(
 			layout.error = error
 
 			throw error
+		} finally {
+			running = false
 		}
-	})()
+	}
+
+	layout.attach(
+		async (page: number) => {
+			const from = paginator.restartPage(page)
+
+			paginator.restartAt(from)
+			layout.notify(from, from, false)
+			await drive(false)
+
+			return from
+		},
+		() => running
+	)
+	layout.done = drive(true)
 
 	return layout
 }

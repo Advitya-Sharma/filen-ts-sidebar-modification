@@ -3,6 +3,8 @@ import type { AnchorPosition, DrawingInfo, VmlInfo, WrapType } from "../model/dr
 import { Item } from "../model/kinds"
 import { Ns } from "../model/namespaces"
 import type { StoryPart } from "../model/part"
+import { ommlToMathTree, type MathElement } from "../../math/index"
+import { mathBox } from "./math"
 import { emu, points } from "./units"
 
 // Everything layout places as a box: drawings, VML, equations and note separators. Drawing content is
@@ -61,6 +63,8 @@ export interface FloatSpec {
 	readonly distLeft: number
 	readonly distRight: number
 	readonly zOrder: number
+	// wp:wrapPolygon of tight and through wrapping: x, y pairs as fractions of the object's size.
+	readonly polygon?: readonly number[] | undefined
 }
 
 // Objects by id, one per model item.
@@ -126,10 +130,36 @@ function position(position: AnchorPosition | undefined, horizontal: boolean): { 
 	}
 }
 
-function drawingFloat(drawing: DrawingInfo): FloatSpec | undefined {
+// Word's wrap polygon coordinates: 21600 spans the object.
+const POLYGON_UNITS = 21600
+
+// The wrap polygon of a tight or through wrapping anchor, normalized; undefined without one.
+function wrapPolygon(part: StoryPart, frame: number): number[] | undefined {
+	const reader = part.reader
+	const document = part.document
+	const wrap = Math.max(reader.child(frame, Ns.WP, "wrapTight"), reader.child(frame, Ns.WP, "wrapThrough"))
+	const polygon = wrap < 0 ? -1 : reader.child(wrap, Ns.WP, "wrapPolygon")
+
+	if (polygon < 0) return undefined
+
+	const points: number[] = []
+
+	for (let child = document.firstChildElement(polygon); child >= 0; child = document.nextSiblingElement(child)) {
+		const local = document.localName(child)
+
+		if (local === "start" || local === "lineTo")
+			points.push(reader.int(child, Ns.None, "x", 0) / POLYGON_UNITS, reader.int(child, Ns.None, "y", 0) / POLYGON_UNITS)
+	}
+
+	return points.length >= 6 ? points : undefined
+}
+
+function drawingFloat(drawing: DrawingInfo, part: StoryPart): FloatSpec | undefined {
 	const anchor = drawing.anchor
 
 	if (anchor === undefined) return undefined
+
+	const polygon = anchor.wrap === "tight" || anchor.wrap === "through" ? wrapPolygon(part, drawing.frame) : undefined
 
 	if (anchor.simplePos) {
 		return {
@@ -148,7 +178,8 @@ function drawingFloat(drawing: DrawingInfo): FloatSpec | undefined {
 			distBottom: emu(drawing.distBottom),
 			distLeft: emu(drawing.distLeft),
 			distRight: emu(drawing.distRight),
-			zOrder: anchor.relativeHeight
+			zOrder: anchor.relativeHeight,
+			polygon
 		}
 	}
 
@@ -171,7 +202,8 @@ function drawingFloat(drawing: DrawingInfo): FloatSpec | undefined {
 		distBottom: emu(drawing.distBottom),
 		distLeft: emu(drawing.distLeft),
 		distRight: emu(drawing.distRight),
-		zOrder: anchor.relativeHeight
+		zOrder: anchor.relativeHeight,
+		polygon
 	}
 }
 
@@ -251,6 +283,35 @@ function drawingInsets(part: StoryPart, drawing: DrawingInfo): number[] {
 	return [inset("lIns", 91440), inset("tIns", 45720), inset("rIns", 91440), inset("bIns", 45720)]
 }
 
+// An equation's size from its MathML tree, its text measured in the run's font; for a tree that cannot be
+// built, its text one and a half lines high.
+function equationSize(
+	part: StoryPart,
+	item: number,
+	display: boolean,
+	fontSize: number,
+	measureText: (text: string) => number
+): ObjectSize {
+	const node = part.node(item)
+	let tree: MathElement | undefined
+
+	try {
+		tree = ommlToMathTree(part.document, node, { namespaces: part.reader.namespaces })
+	} catch {
+		tree = undefined
+	}
+
+	if (tree === undefined) {
+		const height = fontSize * 1.5
+
+		return { width: measureText(part.document.textContent(node)), height, ascent: height * 0.75 }
+	}
+
+	const box = mathBox(tree, fontSize, display, (text, size) => (fontSize > 0 ? (measureText(text) * size) / fontSize : 0))
+
+	return { width: box.width, height: box.ascent + box.descent, ascent: box.ascent }
+}
+
 export interface PlacedObject {
 	readonly id: number
 	readonly width: number
@@ -288,7 +349,7 @@ export function objectAt(
 
 		if (drawing === undefined || drawing.hidden) return undefined
 
-		const float = drawingFloat(drawing)
+		const float = drawingFloat(drawing, part)
 		const anchored = float !== undefined
 		const custom = sizer?.size({ kind: ObjectKind.DRAWING, part, item, drawing, vml: undefined, fontSize })
 		// Inline objects take their effect extent too (shadows and glow push the text away).
@@ -370,11 +431,10 @@ export function objectAt(
 
 	if (kind === Item.Math || kind === Item.MathParagraph) {
 		const custom = sizer?.size({ kind: ObjectKind.MATH, part, item, drawing: undefined, vml: undefined, fontSize })
-		const text = custom === undefined ? part.document.textContent(part.node(item)) : ""
-		// Until equations are laid out: their text set in the run's font, one and a half lines high.
-		const width = custom?.width ?? measureText(text)
-		const height = custom?.height ?? fontSize * 1.5
-		const ascent = custom?.ascent ?? height * 0.75
+		const estimated = custom === undefined ? equationSize(part, item, kind === Item.MathParagraph, fontSize, measureText) : undefined
+		const width = custom?.width ?? estimated?.width ?? 0
+		const height = custom?.height ?? estimated?.height ?? 0
+		const ascent = custom?.ascent ?? estimated?.ascent ?? height
 		const id = table.add(ObjectKind.MATH, part.index, item, -1, width, height, ascent, undefined, undefined, undefined)
 
 		return { id, width, height, ascent, anchored: false }

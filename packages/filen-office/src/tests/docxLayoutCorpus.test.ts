@@ -1,11 +1,18 @@
-import { existsSync, readdirSync } from "node:fs"
+import { existsSync, readdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { strFromU8, unzipSync } from "fflate"
 import { describe, expect, it } from "vitest"
-import { Item, type DocumentLayout, type LayoutOptions, type StyleSettings } from "@filen/office/core/docx"
-import type { FontManager, FontRequest, ResolvedFont } from "@filen/office/core/fonts"
+import { Item, modelStats, type DocumentLayout, type LayoutOptions, type StyleSettings } from "@filen/office/core/docx"
+import {
+	SUBSTITUTIONS,
+	bundledFace,
+	verticalMetrics,
+	type FontManager,
+	type FontRequest,
+	type ResolvedFont
+} from "@filen/office/core/fonts"
 import { CORPUS_DIR } from "./corpusDir"
-import { adjustedFonts, layOut, readBytes } from "./layoutFixtures"
+import { adjustedFonts, layOut, layoutDigest, readBytes } from "./layoutFixtures"
 
 // Page breaks Word recorded (w:lastRenderedPageBreak) against ours, on Word-authored files whose recorded
 // breaks agree with docProps/app.xml <Pages> (the corpus README's page-count ground truth). Widths come from
@@ -24,8 +31,14 @@ interface Truth {
 	readonly minorFont: string
 }
 
-// `loose`: every Word-authored file with recorded breaks, consistent with <Pages> or not.
-function groundTruth(loose = false): Truth[] {
+// Which files count: "corrected" (the ground truth) those whose recorded breaks agree with <Pages> and with
+// their own page references; "pages" those agreeing with <Pages> only (the definition before page references
+// were checked, kept to track the files it adds); "loose" every Word-authored file with recorded breaks.
+type TruthSet = "corrected" | "pages" | "loose"
+
+function groundTruth(set: TruthSet = "corrected"): Truth[] {
+	const loose = set === "loose"
+
 	const out: Truth[] = []
 
 	for (const name of readdirSync(DIRECTORY).sort()) {
@@ -55,7 +68,8 @@ function groundTruth(loose = false): Truth[] {
 		const pages = Number(/<Pages>(\d+)<\/Pages>/.exec(appXml)?.[1] ?? "NaN")
 		const breaks = (strFromU8(document).match(/<w:lastRenderedPageBreak\/>/g) ?? []).length
 
-		if (loose ? breaks === 0 : !(pages === breaks + 1) || pages < 2) continue
+		if (loose ? breaks === 0 : !(pages === breaks + 1) || pages < 2 || (set === "corrected" && !pageRefsAgree(strFromU8(document))))
+			continue
 
 		const theme = files["word/theme/theme1.xml"]
 		const minorFont = theme === undefined ? "" : (/<a:minorFont><a:latin typeface="([^"]*)"/.exec(strFromU8(theme))?.[1] ?? "")
@@ -64,6 +78,45 @@ function groundTruth(loose = false): Truth[] {
 	}
 
 	return out
+}
+
+// Whether the page numbers PAGEREF fields (a table of contents) last showed agree with the recorded breaks,
+// up to one offset (the first page number). Word leaves breaks out of some field results and records
+// some it never made, which shifts every page after them: such files are no ground truth.
+function pageRefsAgree(xml: string): boolean {
+	const breaks: number[] = []
+	const marks = new Map<string, number>()
+
+	for (const match of xml.matchAll(/<w:lastRenderedPageBreak\/>|<w:bookmarkStart [^>]*w:name="([^"]+)"/g)) {
+		if (match[1] === undefined) breaks.push(match.index)
+		else marks.set(match[1], match.index)
+	}
+
+	let offset: number | undefined
+
+	for (const match of xml.matchAll(
+		/PAGEREF\s+(\S+)[^<]*<\/w:instrText>[\s\S]{0,1200}?w:fldCharType="separate"\/>[\s\S]{0,600}?<w:t>(\d+)<\/w:t>/g
+	)) {
+		const at = marks.get(match[1] ?? "")
+
+		if (at === undefined) continue
+
+		let page = 1
+
+		while (page - 1 < breaks.length && (breaks[page - 1] ?? Infinity) < at) page++
+
+		// A break after the bookmark with no text between them starts the bookmarked text's page.
+		const next = breaks[page - 1]
+
+		if (next !== undefined && !/<w:t[ >]/.test(xml.slice(at, next))) page++
+
+		const difference = Number(match[2]) - page
+
+		if (offset === undefined) offset = difference
+		else if (offset !== difference) return false
+	}
+
+	return true
 }
 
 interface FileResult {
@@ -204,6 +257,47 @@ function scaleFamily(prefix: string, scale: number): (manager: FontManager) => R
 		)
 }
 
+// Draws `family` in its substitute at `scale`, with the substitute's own line metrics (`line` undefined) or
+// single lines `line` em high (the substitute's descent kept in proportion): no calibrated table entry.
+function candidateMetrics(
+	family: string,
+	scale: number,
+	line: number | undefined
+): (manager: FontManager) => ReturnType<typeof adjustedFonts> {
+	const substitution = SUBSTITUTIONS.get(family)
+
+	return manager =>
+		adjustedFonts(manager, (request: FontRequest, font: ResolvedFont) => {
+			if (request.family.toLowerCase() !== family || substitution === undefined) return font
+
+			const face = bundledFace(substitution.family, font.weight, font.italic)
+			const m = face?.metrics ?? null
+
+			if (line === undefined) return { ...font, id: font.id + 300000, scale, metrics: m, metricsBasis: "substitute" }
+
+			const units = m === null ? 1000 : m.winAscent + m.winDescent
+			const descent = m === null || units <= 0 ? 0.21 : m.winDescent / units
+			const ascent = Math.round(1000 * line * (1 - descent))
+			const below = Math.round(1000 * line * descent)
+
+			return {
+				...font,
+				id: font.id + 300000,
+				scale,
+				metricsBasis: "original",
+				metrics: verticalMetrics(1000, ascent, -below, 0, ascent, -below, 0, ascent, below, false)
+			}
+		})
+}
+
+// Calibration evidence a family needs, and the grid searched (then refined around the best).
+const CALIBRATION_MIN_FILES = 5
+const CALIBRATION_MIN_BREAKS = 40
+const CALIBRATION_STEPS: readonly { readonly lines: readonly number[]; readonly scales: readonly number[] }[] = [
+	{ lines: [1.0, 1.04, 1.08, 1.12, 1.16, 1.2, 1.24, 1.28, 1.32, 1.36], scales: [0.88, 0.91, 0.94, 0.97, 1, 1.03, 1.06, 1.09, 1.12] },
+	{ lines: [-0.03, -0.02, -0.01, 0.01, 0.02, 0.03], scales: [-0.02, -0.01, 0.01, 0.02] }
+]
+
 function lineHeightOf(family: string, factor: number): (manager: FontManager) => ReturnType<typeof adjustedFonts> {
 	return manager =>
 		adjustedFonts(manager, (request: FontRequest, font: ResolvedFont) => {
@@ -231,13 +325,33 @@ function lineHeightOf(family: string, factor: number): (manager: FontManager) =>
 
 describe.skipIf(!present)("layout against Word's recorded page breaks", () => {
 	it("agrees on the page count of Word-authored files", async () => {
-		const truths = groundTruth()
-		const results: FileResult[] = []
+		const byName = new Map<string, FileResult>()
+		const run = async (set: TruthSet): Promise<FileResult[]> => {
+			const results: FileResult[] = []
 
-		for (const truth of truths) results.push(await measure(truth, {}))
+			for (const truth of groundTruth(set)) {
+				let result = byName.get(truth.name)
 
+				if (result === undefined) {
+					result = await measure(truth, {})
+					byName.set(truth.name, result)
+				}
+
+				results.push(result)
+			}
+
+			return results
+		}
+		const results = await run("corrected")
+		const pages = await run("pages")
+		const corrected = new Set(results.map(result => result.name))
 		const summary = summarize(results)
-		const lines = [format("default", summary)]
+		const lines = [format("corrected ground truth", summary), format("<Pages> only", summarize(pages))]
+
+		for (const result of pages) {
+			if (!corrected.has(result.name))
+				lines.push(`  not ground truth (page references disagree): ${result.name}, ${format("", summarize([result])).trim()}`)
+		}
 
 		for (const result of results) {
 			if (result.ours !== result.truth) {
@@ -255,6 +369,46 @@ describe.skipIf(!present)("layout against Word's recorded page breaks", () => {
 		expect(summary.files).toBeGreaterThan(50)
 		expect(summary.withinOne / summary.files).toBeGreaterThanOrEqual(0.9)
 	}, 600000)
+
+	// Every corpus document that lays out (all of docx/), from a third and two thirds of its pages.
+	it("lays out again from any page exactly as a full layout does", async () => {
+		const differences: string[] = []
+		let checked = 0
+
+		for (const name of readdirSync(DIRECTORY).sort()) {
+			if (!name.endsWith(".docx")) continue
+
+			let layout: DocumentLayout
+
+			try {
+				layout = await layOut(readBytes(join(DIRECTORY, name)), { maxPages: 5000 })
+			} catch {
+				// Packages that do not open are covered by the test below.
+				continue
+			}
+
+			const expected = layoutDigest(layout)
+
+			checked++
+
+			for (const page of [Math.floor(layout.pages.length / 3), Math.floor((2 * layout.pages.length) / 3)]) {
+				const from = await layout.relayoutFrom(page)
+				const actual = layoutDigest(layout)
+
+				if (actual.join() !== expected.join()) {
+					const first = actual.findIndex((digest, k) => digest !== expected[k])
+
+					differences.push(
+						`${name} from page ${from}: first difference on page ${first} (${actual.length} vs ${expected.length} pages)`
+					)
+				}
+			}
+		}
+
+		console.log(`laid out again from two pages each: ${checked} documents`)
+		expect(checked).toBeGreaterThan(100)
+		expect(differences).toEqual([])
+	}, 1200000)
 
 	it("lays out every corpus document", async () => {
 		const failures: string[] = []
@@ -285,6 +439,156 @@ describe.skipIf(!present)("layout against Word's recorded page breaks", () => {
 		expect(failures).toEqual([])
 	}, 600000)
 
+	// FILEN_OFFICE_LAYOUT_CALIBRATE=<families, lower case> fits a line height (em) and a width scale per family to
+	// Word's recorded breaks over the ground-truth files using it, starting from the substitute's own metrics
+	// (coordinate descent, ties keep the current value). A family qualifies only with at least
+	// CALIBRATION_MIN_FILES files and CALIBRATION_MIN_BREAKS breaks, and its fit ships only when it beats the
+	// substitute's own metrics held out: each file scored with the values fitted on the others.
+	it.runIf(process.env["FILEN_OFFICE_LAYOUT_CALIBRATE"] !== undefined)(
+		"calibrates families",
+		async () => {
+			const truths = groundTruth(process.env["FILEN_OFFICE_LAYOUT_LOOSE"] === "1" ? "loose" : "corrected")
+			const users = new Map<string, Truth[]>()
+
+			for (const truth of truths) {
+				for (const family of (await measure(truth, {})).families) users.set(family, [...(users.get(family) ?? []), truth])
+			}
+
+			for (const family of (process.env["FILEN_OFFICE_LAYOUT_CALIBRATE"] ?? "").split(",")) {
+				const subset = users.get(family) ?? []
+				const scores = new Map<string, { exact: number; total: number }>()
+				// Exact breaks and breaks of one file under (scale, line); `line` undefined: the substitute's own.
+				const fileScore = async (
+					truth: Truth,
+					scale: number,
+					line: number | undefined
+				): Promise<{ exact: number; total: number }> => {
+					const key = `${truth.name}|${scale}|${line ?? "own"}`
+					let score = scores.get(key)
+
+					if (score === undefined) {
+						const result = await measure(truth, {}, candidateMetrics(family, scale, line))
+
+						score = { exact: result.offsets.filter(offset => offset === 0).length, total: result.offsets.length }
+						scores.set(key, score)
+					}
+
+					return score
+				}
+				const score = async (files: readonly Truth[], scale: number, line: number | undefined): Promise<number> => {
+					let exact = 0
+
+					for (const truth of files) exact += (await fileScore(truth, scale, line)).exact
+
+					return exact
+				}
+				const fit = async (files: readonly Truth[]): Promise<{ scale: number; line: number | undefined }> => {
+					let scale = 1
+					let line: number | undefined = undefined
+					let best = await score(files, scale, line)
+
+					for (const [round, step] of CALIBRATION_STEPS.entries()) {
+						const center = line
+						const lines: readonly number[] =
+							round === 0
+								? step.lines
+								: center === undefined
+									? []
+									: step.lines.map(delta => Math.round((center + delta) * 100) / 100)
+						const scales: readonly number[] =
+							round === 0 ? step.scales : step.scales.map(delta => Math.round((scale + delta) * 100) / 100)
+
+						for (const candidate of lines) {
+							const value = await score(files, scale, candidate)
+
+							if (value > best) {
+								best = value
+								line = candidate
+							}
+						}
+
+						for (const candidate of scales) {
+							const value = await score(files, candidate, line)
+
+							if (value > best) {
+								best = value
+								scale = candidate
+							}
+						}
+					}
+
+					return { scale, line }
+				}
+
+				let breaks = 0
+
+				for (const truth of subset) breaks += (await fileScore(truth, 1, undefined)).total
+
+				const own = await score(subset, 1, undefined)
+				const all = await fit(subset)
+				const fitted = await score(subset, all.scale, all.line)
+				let heldOut = 0
+
+				for (const truth of subset) {
+					const values = await fit(subset.filter(other => other !== truth))
+
+					heldOut += (await fileScore(truth, values.scale, values.line)).exact
+				}
+
+				const qualifies = subset.length >= CALIBRATION_MIN_FILES && breaks >= CALIBRATION_MIN_BREAKS
+				const percent = (exact: number): string => `${((100 * exact) / Math.max(1, breaks)).toFixed(1)} %`
+
+				console.log(
+					`${family}: ${subset.length} files, ${breaks} breaks; substitute ${percent(own)}; fitted scale ${all.scale}, line ${all.line ?? "own"} em: ` +
+						`${percent(fitted)} in sample, ${percent(heldOut)} held out (leave one file out) -> ` +
+						(!qualifies ? "too little evidence" : heldOut > own ? "ship" : "keep the substitute's metrics")
+				)
+			}
+		},
+		3600000
+	)
+
+	it.runIf(process.env["FILEN_OFFICE_LAYOUT_DIAGNOSE"] !== undefined)(
+		"diagnoses where breaks miss",
+		async () => {
+			const lines: string[] = []
+
+			for (const truth of groundTruth()) {
+				const layout = await layOut(truth.bytes, {})
+				const result = await measure(truth, {})
+				const stats = modelStats(layout.model)
+				const fonts = new Map<string, string>()
+
+				for (const info of layout.styleInfo) {
+					const run = info?.run
+
+					if (run === undefined) continue
+
+					const family = run.fonts.ascii.toLowerCase()
+
+					if (!fonts.has(family)) fonts.set(family, SUBSTITUTIONS.has(family) ? "sub" : "fallback")
+				}
+
+				const exact = result.offsets.filter(offset => offset === 0).length
+				const steps = result.offsets.map((offset, k) => offset - (k === 0 ? 0 : (result.offsets[k - 1] ?? 0)))
+
+				lines.push(
+					[
+						truth.name.slice(0, 48).padEnd(48),
+						`${exact}/${result.offsets.length}`.padStart(7),
+						`pages ${result.ours}/${truth.pages}`,
+						`tbl ${stats.tables} math ${stats.kinds["Math"] ?? 0}+${stats.kinds["MathParagraph"] ?? 0} drw ${stats.anchoredDrawings}/${stats.drawings["total"] ?? Object.values(stats.drawings).reduce((a, b) => a + b, 0)} fn ${stats.footnotes} sec ${stats.sections}`,
+						`fonts ${[...fonts].map(([family, kind]) => (kind === "sub" ? family : `${family}*`)).join(",")}`,
+						`steps ${steps.join(" ")}`
+					].join(" | ")
+				)
+			}
+
+			writeFileSync(process.env["FILEN_OFFICE_LAYOUT_DIAGNOSE"] ?? "", lines.join("\n"))
+		},
+		3600000
+	)
+
 	it.runIf(process.env["FILEN_OFFICE_LAYOUT_COMPARE"] !== undefined)(
 		"compares two settings per file",
 		async () => {
@@ -311,7 +615,7 @@ describe.skipIf(!present)("layout against Word's recorded page breaks", () => {
 	it.runIf(process.env["FILEN_OFFICE_LAYOUT_SWEEP"] === "1")(
 		"overrideTableStyleFontSizeAndJustification under compatibility mode 15",
 		async () => {
-			const truths = groundTruth(true)
+			const truths = groundTruth("loose")
 			const on = (settings: StyleSettings): StyleSettings =>
 				settings.compatibilityMode === 15 ? { ...settings, overrideTableStyleFontSizeAndJustification: true } : settings
 			const lines: string[] = []
@@ -367,7 +671,10 @@ describe.skipIf(!present)("layout against Word's recorded page breaks", () => {
 			for (const mode of ["sum", "max", "auto"] as const)
 				await run(`paragraph spacing: ${mode}`, truths, { tuning: { paragraphSpacing: mode } })
 
-			const aptos = groundTruth(true).filter(truth => truth.minorFont.startsWith("Aptos"))
+			for (const mode of ["fit", "overhang"] as const)
+				await run(`space after above notes: ${mode}`, truths, { tuning: { noteSpaceAfter: mode } })
+
+			const aptos = groundTruth("loose").filter(truth => truth.minorFont.startsWith("Aptos"))
 
 			for (const scale of [1, 1.01, 1.015, 1.02, 1.025, 1.03, 1.04, 1.05, 1.06, 1.07]) {
 				await run(`aptos ×${scale} (${aptos.length})`, aptos, {}, scaleFamily("aptos", scale))

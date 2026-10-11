@@ -66,6 +66,25 @@ export class Exclusions {
 		return false
 	}
 
+	// The lowest bottom of the obstacles overlapping the rectangle [left, right) x [top, bottom), or -Infinity.
+	overlapBottom(left: number, top: number, right: number, bottom: number): number {
+		let lowest = -Infinity
+
+		for (let k = 0; k < this.count; k++) {
+			const at = k * 4
+
+			if (
+				(this.rects[at + 1] ?? 0) < bottom &&
+				(this.rects[at + 3] ?? 0) > top &&
+				(this.rects[at] ?? 0) < right &&
+				(this.rects[at + 2] ?? 0) > left
+			)
+				lowest = Math.max(lowest, this.rects[at + 3] ?? 0)
+		}
+
+		return lowest
+	}
+
 	// Free intervals of [minX, maxX) beside the obstacles overlapping the band [top, bottom), left to right,
 	// as [start, end) pairs in `out` (room for 2 × (count + 1) numbers). Returns the number of intervals.
 	free(top: number, bottom: number, minX: number, maxX: number, out: Float64Array): number {

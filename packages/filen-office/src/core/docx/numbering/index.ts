@@ -1,4 +1,4 @@
-export { NumberingCounters, type ListMarker } from "./counter"
+export { NumberingCounters, type CounterSnapshot, type ListMarker } from "./counter"
 export { englishCardinal, englishOrdinal, formatNumber } from "./formats"
 export {
 	MAX_LEVEL,

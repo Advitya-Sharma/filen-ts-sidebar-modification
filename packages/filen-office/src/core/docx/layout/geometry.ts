@@ -85,24 +85,33 @@ const TAB_LEADERS: Readonly<Record<string, TabLeader>> = {
 	middleDot: TabLeader.MIDDLE_DOT
 }
 
-const tabCache = new WeakMap<ResolvedParagraphProps, TabStops | null>()
+const tabCache = new WeakMap<ResolvedParagraphProps, { readonly end: number; readonly stops: TabStops | null }>()
 
-function tabStops(props: ResolvedParagraphProps): TabStops | null {
-	let stops = tabCache.get(props)
+// A paragraph's tab stops for a line ending at `end` (px from the column's start). A right, centre or
+// decimal stop past the end aligns there: Word keeps the text after it on the line, running into the margin
+// rather than wrapping (tables of contents set their page number stop a hair past the margin).
+function tabStops(props: ResolvedParagraphProps, end: number): TabStops | null {
+	const cached = tabCache.get(props)
 
-	if (stops === undefined) {
-		stops =
-			props.tabs.length === 0
-				? null
-				: new TabStops(
-						props.tabs.map((tab): TabStop => ({
-							position: twips(tab.position),
-							alignment: TAB_ALIGNMENTS[tab.alignment] ?? TabAlignment.START,
+	if (cached !== undefined && cached.end === end) return cached.stops
+
+	const stops =
+		props.tabs.length === 0
+			? null
+			: new TabStops(
+					props.tabs.map((tab): TabStop => {
+						const alignment = TAB_ALIGNMENTS[tab.alignment] ?? TabAlignment.START
+						const position = twips(tab.position)
+
+						return {
+							position: alignment !== TabAlignment.START && alignment !== TabAlignment.BAR && position > end ? end : position,
+							alignment,
 							leader: TAB_LEADERS[tab.leader] ?? TabLeader.NONE
-						}))
-					)
-		tabCache.set(props, stops)
-	}
+						}
+					})
+				)
+
+	tabCache.set(props, { end, stops })
 
 	return stops
 }
@@ -147,7 +156,7 @@ export function paragraphGeometry(
 	g.firstLineIndent = twips(indent.firstLine)
 	g.rtl = props.bidi
 	g.alignment = alignmentOf(props)
-	g.tabs = tabStops(props)
+	g.tabs = tabStops(props, width - twips(indent.end))
 	g.defaultTabStop = compat.defaultTabStop
 	g.expandLineBreaks = compat.expandLineBreaks
 	g.hangingIndentTab = compat.hangingIndentTab
@@ -175,28 +184,32 @@ export function paragraphGeometry(
 	return g
 }
 
-// Auto spacing (w:beforeAutospacing / w:afterAutospacing): HTML-style 0 before and 1 em (12 pt) after, or a
-// fixed 5 pt before and 10 pt after under w:doNotUseHTMLParagraphAutoSpacing (ECMA-376 Part 4; Microsoft's
-// statement of Word 2013+ behaviour).
-const AUTO_AFTER = points(12)
-const FIXED_AUTO_BEFORE = points(5)
-const FIXED_AUTO_AFTER = points(10)
+// Auto spacing (w:beforeAutospacing / w:afterAutospacing), before and after in px: under
+// w:doNotUseHTMLParagraphAutoSpacing a fixed 5 pt before and 10 pt after (ECMA-376 Part 4); otherwise
+// HTML-style values the layout tuning gives.
+export interface AutoSpacing {
+	readonly before: number
+	readonly after: number
+}
+
+export const FIXED_AUTO_SPACING: AutoSpacing = { before: points(5), after: points(10) }
+
 // w:beforeLines / w:afterLines count hundredths of a 12 pt line.
 const LINE_UNIT = points(12)
 
-export function spaceBefore(props: ResolvedParagraphProps, htmlSpacing: boolean): number {
+export function spaceBefore(props: ResolvedParagraphProps, auto: AutoSpacing): number {
 	const spacing = props.spacing
 
-	if (spacing.beforeAutospacing) return htmlSpacing ? 0 : FIXED_AUTO_BEFORE
+	if (spacing.beforeAutospacing) return auto.before
 	if (spacing.beforeLines !== undefined && spacing.beforeLines > 0) return (spacing.beforeLines / 100) * LINE_UNIT
 
 	return twips(Math.max(0, spacing.before))
 }
 
-export function spaceAfter(props: ResolvedParagraphProps, htmlSpacing: boolean): number {
+export function spaceAfter(props: ResolvedParagraphProps, auto: AutoSpacing): number {
 	const spacing = props.spacing
 
-	if (spacing.afterAutospacing) return htmlSpacing ? AUTO_AFTER : FIXED_AUTO_AFTER
+	if (spacing.afterAutospacing) return auto.after
 	if (spacing.afterLines !== undefined && spacing.afterLines > 0) return (spacing.afterLines / 100) * LINE_UNIT
 
 	return twips(Math.max(0, spacing.after))

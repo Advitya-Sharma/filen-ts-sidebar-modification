@@ -210,7 +210,14 @@ export const BUNDLED_FACES: readonly BundledFace[] = [
 export const LINE_METRICS: ReadonlyMap<string, LineMetricsEntry> = new Map<string, LineMetricsEntry>([
 	["calibri", { basis: "substitute" }],
 	["calibri light", { basis: "substitute" }],
-	["cambria", { basis: "substitute" }],
+	[
+		"cambria",
+		{
+			basis: "calibrated",
+			source: "Line height fitted to Word's recorded page breaks in 25 public Word documents of the test corpus using the family (68 breaks, ground truth consistent with the documents' page references): on the same line 51.5 % with the substitute's own metrics, 67.6 % fitted, 55.9 % held out (each file scored with the values fitted on the others); never measured from the font.",
+			metrics: verticalMetrics(1000, 937, -223, 0, 937, -223, 0, 937, 223, false)
+		}
+	],
 	[
 		"arial",
 		{
@@ -247,7 +254,29 @@ export const LINE_METRICS: ReadonlyMap<string, LineMetricsEntry> = new Map<strin
 	["aptos light", { basis: "substitute" }],
 	["aptos semibold", { basis: "substitute" }],
 	["aptos serif", { basis: "substitute" }],
-	["aptos mono", { basis: "substitute" }]
+	["aptos mono", { basis: "substitute" }],
+	["liberation sans", { basis: "substitute" }],
+	["liberation serif", { basis: "substitute" }],
+	["liberation mono", { basis: "substitute" }],
+	["carlito", { basis: "substitute" }],
+	["caladea", { basis: "substitute" }],
+	["arimo", { basis: "substitute" }],
+	["tinos", { basis: "substitute" }],
+	["cousine", { basis: "substitute" }],
+	["gelasio", { basis: "substitute" }],
+	["selawik", { basis: "substitute" }],
+	[
+		"tahoma",
+		{
+			basis: "calibrated",
+			source: "Line height fitted to Word's recorded page breaks in 10 public Word documents of the test corpus using the family (41 breaks, ground truth consistent with the documents' page references): on the same line 12.2 % with the substitute's own metrics, 43.9 % fitted, 17.1 % held out (each file scored with the values fitted on the others); never measured from the font. Drawn with Arimo at the fitted size 1.01 (CALIBRATED_TAHOMA_SCALE).",
+			metrics: verticalMetrics(1000, 903, -337, 0, 903, -337, 0, 903, 337, false)
+		}
+	],
+	["consolas", { basis: "substitute" }],
+	["palatino linotype", { basis: "substitute" }],
+	["univers", { basis: "substitute" }],
+	["univers light", { basis: "substitute" }]
 ])
 
 export const CLONE_METRICS: ReadonlyMap<BundledFamily, OriginalMetrics> = new Map<BundledFamily, OriginalMetrics>([

@@ -290,6 +290,17 @@ export function mergeCell(target: Mutable<TableCellProps>, source: TableCellProp
 		if (value !== undefined) (target as Record<string, unknown>)[key] = value
 	}
 
-	if (source.borders !== undefined) target.borders = mergeSides<CellBordersProps>(target.borders, source.borders)
+	if (source.borders !== undefined) target.borders = mergeCellBorders(target.borders, source.borders)
 	if (source.margins !== undefined) target.margins = mergeSides<CellMarginsProps>(target.margins, source.margins)
+}
+
+// A cell side of "none" leaves the border beneath it (the table style's, then the table's) in place: only
+// "nil" removes one (MS-OI29500 §17.4.66 a).
+function mergeCellBorders(target: CellBordersProps | undefined, source: CellBordersProps): CellBordersProps {
+	const out: Record<string, unknown> = { ...target }
+
+	for (const [side, border] of Object.entries(source) as [string, CellBordersProps["top"]][])
+		if (border !== undefined && border.style !== "none") out[side] = border
+
+	return out as CellBordersProps
 }

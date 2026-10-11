@@ -709,9 +709,9 @@ export class FontManager {
 		})
 	}
 
-	// null when the face is not loaded (not prepared, or the asset failed). The requested family's published
-	// metrics win; otherwise those of the original the substitute clones, whose own tables may have been
-	// rebuilt (Arimo's win metrics are not Arial's); otherwise the substitute's own.
+	// null when the face is not loaded (not prepared, or the asset failed). The requested family's published or
+	// calibrated metrics win; otherwise those of the original the substitute clones, whose own tables may have
+	// been rebuilt (Arimo's win metrics are not Arial's); otherwise the substitute's own.
 	private fromBundled(
 		family: BundledFamily,
 		weight: number,
@@ -725,7 +725,7 @@ export class FontManager {
 		if (face === undefined || !this.loadedAssets.has(face.file)) return null
 
 		const line = original === null ? undefined : LINE_METRICS.get(original)
-		const published = line !== undefined && line.basis === "original"
+		const published = line !== undefined && line.basis !== "substitute"
 
 		return this.intern({
 			family: `${this.prefix}-${family}`,

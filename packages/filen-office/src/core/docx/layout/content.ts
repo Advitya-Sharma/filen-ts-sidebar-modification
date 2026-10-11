@@ -67,6 +67,8 @@ export class BuiltParagraph {
 	// w:lastRenderedPageBreak positions (text offsets).
 	readonly renderedBreaks: number[] = []
 	fieldFlags = 0
+	// PAGE field results: start and end text offsets.
+	readonly pageFields: number[] = []
 	// The paragraph has only a mark (no text, tabs or objects).
 	empty = true
 	dropCap: "drop" | "margin" | undefined = undefined
@@ -86,6 +88,7 @@ export class BuiltParagraph {
 		this.boxedObjects.length = 0
 		this.renderedBreaks.length = 0
 		this.fieldFlags = 0
+		this.pageFields.length = 0
 		this.empty = true
 		this.dropCap = undefined
 	}
@@ -234,8 +237,10 @@ export class ContentBuilder {
 
 		if (text !== "") {
 			services.styles.forEachStyle(text, run, TrackedLook.NONE, (from, to, style) => {
-				builder.append(text.slice(from, to), style)
-				this.out.markerWidth += this.width(style, text, from, to)
+				const drawn = services.styles.drawn(style, text.slice(from, to))
+
+				builder.append(drawn, style)
+				this.out.markerWidth += this.width(style, drawn, 0, drawn.length)
 			})
 		}
 
@@ -370,7 +375,9 @@ export class ContentBuilder {
 						const symbol = part.symbol(item)
 
 						if (symbol.char > 0 && symbol.char <= 0x10ffff) {
-							builder.append(String.fromCodePoint(symbol.char), services.styles.style(run, "ascii", revision, symbol.font))
+							const style = services.styles.style(run, "ascii", revision, symbol.font)
+
+							builder.append(services.styles.drawn(style, String.fromCodePoint(symbol.char)), style)
 							this.out.empty = false
 						}
 					}
@@ -458,8 +465,10 @@ export class ContentBuilder {
 
 		const builder = this.builder
 
-		this.services.styles.forEachStyle(text, run, revision, (from, to, style) => {
-			builder.append(from === 0 && to === text.length ? text : text.slice(from, to), style)
+		const styles = this.services.styles
+
+		styles.forEachStyle(text, run, revision, (from, to, style) => {
+			builder.append(styles.drawn(style, from === 0 && to === text.length ? text : text.slice(from, to)), style)
 		})
 		this.out.empty = false
 	}
@@ -569,17 +578,19 @@ export class ContentBuilder {
 
 	private computedField(kind: FieldKind, format: string | undefined, run: ResolvedRunProps, revision: TrackedLook): void {
 		const page = this.page
-		let text: string
 
 		if (kind === FieldKind.PAGE) {
-			text = numberText(page.page, format ?? page.pageFormat)
+			const start = this.builder.length
+
 			this.out.fieldFlags |= 1
-		} else {
-			text = numberText(kind === FieldKind.NUMPAGES ? page.numPages : page.sectionPages, format)
-			this.out.fieldFlags |= 2
+			this.text(numberText(page.page, format ?? page.pageFormat), run, revision)
+			this.out.pageFields.push(start, this.builder.length)
+
+			return
 		}
 
-		this.text(text, run, revision)
+		this.out.fieldFlags |= 2
+		this.text(numberText(kind === FieldKind.NUMPAGES ? page.numPages : page.sectionPages, format), run, revision)
 	}
 
 	private noteReference(part: StoryPart, item: number, endnote: boolean, run: ResolvedRunProps, revision: TrackedLook): void {

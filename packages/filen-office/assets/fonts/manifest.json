@@ -381,5 +381,21 @@
 				"Courier New": "LiberationMono-Regular.ttf"
 			}
 		}
+	],
+	"calibratedLineMetrics": [
+		{
+			"family": "Cambria",
+			"lineHeight": 1.16,
+			"ascent": 937,
+			"descent": 223,
+			"evidence": "Line height fitted to Word's recorded page breaks in 25 public Word documents of the test corpus using the family (68 breaks, ground truth consistent with the documents' page references): on the same line 51.5 % with the substitute's own metrics, 67.6 % fitted, 55.9 % held out (each file scored with the values fitted on the others); never measured from the font."
+		},
+		{
+			"family": "Tahoma",
+			"lineHeight": 1.24,
+			"ascent": 903,
+			"descent": 337,
+			"evidence": "Line height fitted to Word's recorded page breaks in 10 public Word documents of the test corpus using the family (41 breaks, ground truth consistent with the documents' page references): on the same line 12.2 % with the substitute's own metrics, 43.9 % fitted, 17.1 % held out (each file scored with the values fitted on the others); never measured from the font. Drawn with Arimo at the fitted size 1.01 (CALIBRATED_TAHOMA_SCALE)."
+		}
 	]
 }

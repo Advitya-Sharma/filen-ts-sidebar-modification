@@ -19,9 +19,10 @@ export interface OriginalMetrics {
 	readonly metrics: VerticalMetrics
 }
 
-// Line metrics for a document's family name. "original": the original font's are published; "substitute":
-// they are not, so layout uses what the substitute draws with.
-export type LineMetricsEntry = ({ readonly basis: "original" } & OriginalMetrics) | { readonly basis: "substitute" }
+// Line metrics for a document's family name. "original": the original font's are published; "calibrated":
+// derived from page breaks Word recorded in public documents (no font file is read); "substitute": neither,
+// so layout uses what the substitute draws with.
+export type LineMetricsEntry = ({ readonly basis: "original" | "calibrated" } & OriginalMetrics) | { readonly basis: "substitute" }
 
 const facesByFamily = new Map<BundledFamily, BundledFace[]>()
 

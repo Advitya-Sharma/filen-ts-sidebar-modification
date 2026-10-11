@@ -63,6 +63,13 @@ function override(base: NoteSettings, section: NotePositionProps | undefined): N
 	}
 }
 
+export interface NoteNumberingSnapshot {
+	readonly footnotes: NoteSettings
+	readonly endnotes: NoteSettings
+	readonly footnoteNext: number
+	readonly endnoteNext: number
+}
+
 export class NoteNumbering implements NoteNumbers {
 	readonly documentFootnotes: NoteSettings
 	readonly documentEndnotes: NoteSettings
@@ -99,6 +106,18 @@ export class NoteNumbering implements NoteNumbers {
 		if (this.footnotes.restart === "eachPage") this.footnoteNext = this.footnotes.start
 	}
 
+	// Numbering state to restart layout from.
+	snapshot(): NoteNumberingSnapshot {
+		return { footnotes: this.footnotes, endnotes: this.endnotes, footnoteNext: this.footnoteNext, endnoteNext: this.endnoteNext }
+	}
+
+	restore(snapshot: NoteNumberingSnapshot): void {
+		this.footnotes = snapshot.footnotes
+		this.endnotes = snapshot.endnotes
+		this.footnoteNext = snapshot.footnoteNext
+		this.endnoteNext = snapshot.endnoteNext
+	}
+
 	beginParagraph(): void {
 		this.paragraphRefs = 0
 	}
@@ -133,8 +152,18 @@ interface LaidNote {
 	readonly height: number
 }
 
+// A footnote area's state (FootnoteArea.save).
+export interface FootnoteState {
+	readonly notes: readonly PlacedNote[]
+	readonly carry: readonly PlacedNote[]
+	readonly left: number
+	readonly width: number
+	readonly reserved: number
+	readonly splitAt: number
+}
+
 // A note to place on the page: its laid-out content from `from` (px into it; > 0 when continued).
-interface PlacedNote {
+export interface PlacedNote {
 	readonly story: number
 	readonly from: number
 	readonly height: number
@@ -143,6 +172,8 @@ interface PlacedNote {
 // The footnote area of the page being laid out.
 export class FootnoteArea implements FootnoteSink {
 	reserved = 0
+	// The index of the last note, started on this page but too long to end here, or -1.
+	private splitAt = -1
 	private readonly engine: Engine
 	private readonly notes: PlacedNote[] = []
 	private readonly cache = new Map<number, LaidNote>()
@@ -178,6 +209,15 @@ export class FootnoteArea implements FootnoteSink {
 		return this.carry.length > 0
 	}
 
+	// Notes continued onto the next page, to restart layout there.
+	get carriedNotes(): readonly PlacedNote[] {
+		return this.carry.slice()
+	}
+
+	set carriedNotes(notes: readonly PlacedNote[]) {
+		this.carry = notes.slice()
+	}
+
 	// Notes that start on this page.
 	get count(): number {
 		let count = 0
@@ -191,19 +231,59 @@ export class FootnoteArea implements FootnoteSink {
 	startPage(left: number, width: number, values: PageValues, frame: PageFrame): void {
 		if (Math.abs(width - this.width) > EPSILON) this.cache.clear()
 
-		this.left = left
 		this.width = width
 		this.values = values
 		this.frame = frame
-		this.notes.length = 0
 		this.separatorHeight = this.separatorStory < 0 ? points(12) : this.laid(this.separatorStory).height
 		this.continuationHeight = this.continuationStory < 0 ? points(12) : this.laid(this.continuationStory).height
+		this.startColumn(left, width)
+	}
+
+	// A new column with notes of its own, spanning [left, left + width); notes continued from the column
+	// before come first.
+	startColumn(left: number, width: number): void {
+		if (Math.abs(width - this.width) > EPSILON) {
+			this.cache.clear()
+			this.width = width
+			this.separatorHeight = this.separatorStory < 0 ? points(12) : this.laid(this.separatorStory).height
+			this.continuationHeight = this.continuationStory < 0 ? points(12) : this.laid(this.continuationStory).height
+		}
+
+		this.left = left
+		this.notes.length = 0
 		this.reserved = 0
 
 		for (const note of this.carry) this.notes.push(note)
 
 		this.carry = []
+		this.splitAt = -1
 		this.reserved = this.notes.length === 0 ? 0 : this.continuationHeight + this.notes.reduce((sum, note) => sum + note.height, 0)
+	}
+
+	get split(): boolean {
+		return this.splitAt >= 0
+	}
+
+	// The whole state, to lay a part of the page out again from here.
+	save(): FootnoteState {
+		return {
+			notes: this.notes.slice(),
+			carry: this.carry.slice(),
+			left: this.left,
+			width: this.width,
+			reserved: this.reserved,
+			splitAt: this.splitAt
+		}
+	}
+
+	load(state: FootnoteState): void {
+		if (Math.abs(state.width - this.width) > EPSILON) this.startColumn(state.left, state.width)
+
+		this.notes.splice(0, this.notes.length, ...state.notes)
+		this.carry = state.carry.slice()
+		this.left = state.left
+		this.reserved = state.reserved
+		this.splitAt = state.splitAt
 	}
 
 	mark(): number {
@@ -214,6 +294,9 @@ export class FootnoteArea implements FootnoteSink {
 		if (mark >= this.notes.length) return
 
 		this.notes.length = mark
+
+		if (this.splitAt >= mark) this.splitAt = -1
+
 		this.reserved = this.notes.length === 0 ? 0 : this.separator() + this.notes.reduce((sum, note) => sum + note.height, 0)
 	}
 
@@ -224,10 +307,25 @@ export class FootnoteArea implements FootnoteSink {
 	add(story: number, lineBottom: number, limit: number, force: boolean): boolean {
 		if (this.notes.some(note => note.story === story && note.from === 0)) return true
 
-		const laid = this.laid(story)
-		const needed = (this.notes.length === 0 ? this.separatorHeight : this.reserved) + laid.height
+		if (this.splitAt >= 0) return force
 
-		if (!force && lineBottom + needed > limit + EPSILON) return false
+		const laid = this.laid(story)
+		const before = this.notes.length === 0 ? this.separatorHeight : this.reserved
+		const needed = before + laid.height
+
+		if (!force && lineBottom + needed > limit + EPSILON) {
+			// A note too long for the room left starts here when its first line fits; the rest continues on the
+			// next page, and the page takes no more text.
+			const text = laid.output.text
+
+			if (text.lineCount === 0 || lineBottom + before + text.lineTop(0) + text.lineHeight(0) > limit + EPSILON) return false
+
+			this.splitAt = this.notes.length
+			this.notes.push({ story, from: 0, height: laid.height })
+			this.reserved = limit - lineBottom
+
+			return true
+		}
 
 		this.notes.push({ story, from: 0, height: laid.height })
 		this.reserved = needed
@@ -254,7 +352,20 @@ export class FootnoteArea implements FootnoteSink {
 					breaksAsLines: true
 				}
 
-				height = engine.layoutBox(context, Region.FOOTNOTE, output, this.values, this.frame, 0, 0, this.width)
+				const trailing = engine.tuning.noteTrailingSpace
+				const separator = root.noteType === "separator" || root.noteType === "continuationSeparator"
+
+				height = engine.layoutBox(
+					context,
+					Region.FOOTNOTE,
+					output,
+					this.values,
+					this.frame,
+					0,
+					0,
+					this.width,
+					trailing === "all" || (trailing === "notes" && !separator)
+				)
 			}
 
 			laid = { output, height }
@@ -265,11 +376,12 @@ export class FootnoteArea implements FootnoteSink {
 	}
 
 	// Draws the notes at the bottom of the text area (bottom edge `bottom`); notes that do not fit continue
-	// on the next page.
-	close(page: PageOutput, bottom: number, contentBottom: number): void {
-		if (this.notes.length === 0) return
+	// on the next page (or column). Returns the top of the notes, `bottom` without any.
+	close(page: PageOutput, bottom: number, contentBottom: number): number {
+		if (this.notes.length === 0) return bottom
 
 		let y = Math.max(bottom - this.reserved, Math.min(contentBottom, bottom))
+		const top = y
 		const continued = (this.notes[0]?.from ?? 0) > 0
 		const separator = continued ? this.continuationStory : this.separatorStory
 
@@ -308,6 +420,8 @@ export class FootnoteArea implements FootnoteSink {
 			this.carry.push({ story: note.story, from: cut, height: laid.height - cut })
 			y = bottom
 		}
+
+		return top
 	}
 
 	// The top of the first line that does not end by `limit` (in the note's own coordinates).

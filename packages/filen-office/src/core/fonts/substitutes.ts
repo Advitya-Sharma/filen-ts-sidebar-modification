@@ -33,6 +33,11 @@ export const UNCALIBRATED_APTOS_SCALE = 1.015
 export const UNCALIBRATED_APTOS_DISPLAY_SCALE = 1
 export const UNCALIBRATED_APTOS_NARROW_SCALE = 1
 
+// Tahoma set in Arimo: the size factor fitted, with Tahoma's line height, to Word's recorded page breaks in
+// the 10 corpus files using it, kept because it beats Arimo's own metrics on files left out of the fit
+// (leave one file out: 12.2 % -> 17.1 % of 41 breaks on the same line).
+export const CALIBRATED_TAHOMA_SCALE = 1.01
+
 function substitute(
 	family: BundledFamily,
 	generic: GenericFamily,
@@ -63,7 +68,28 @@ export const SUBSTITUTIONS: ReadonlyMap<string, Substitution> = new Map([
 	["aptos light", substitute("carlito", "sans-serif", { scale: UNCALIBRATED_APTOS_SCALE, weight: 300, preferLocal: true })],
 	["aptos semibold", substitute("carlito", "sans-serif", { scale: UNCALIBRATED_APTOS_SCALE, weight: 600, preferLocal: true })],
 	["aptos serif", substitute("tinos", "serif", { preferLocal: true })],
-	["aptos mono", substitute("cousine", "monospace", { preferLocal: true })]
+	["aptos mono", substitute("cousine", "monospace", { preferLocal: true })],
+	// The Liberation fonts share their metrics with the clones bundled here (both are metric-compatible with
+	// Arial, Times New Roman and Courier New); the bundled families are named by documents made with them.
+	["liberation sans", substitute("arimo", "sans-serif")],
+	["liberation serif", substitute("tinos", "serif")],
+	["liberation mono", substitute("cousine", "monospace")],
+	["carlito", substitute("carlito", "sans-serif")],
+	["caladea", substitute("caladea", "serif")],
+	["arimo", substitute("arimo", "sans-serif")],
+	["tinos", substitute("tinos", "serif")],
+	["cousine", substitute("cousine", "monospace")],
+	["gelasio", substitute("gelasio", "serif")],
+	["selawik", substitute("selawik", "sans-serif")],
+	// Common fonts without a free width-compatible clone: an installed copy when there is one, otherwise the
+	// closest bundled family, at a size and with line metrics calibrated from Word's recorded page breaks
+	// where the corpus holds enough evidence (assets/fonts/manifest.json calibratedLineMetrics), with the
+	// family's own metrics otherwise.
+	["tahoma", substitute("arimo", "sans-serif", { scale: CALIBRATED_TAHOMA_SCALE, preferLocal: true })],
+	["consolas", substitute("cousine", "monospace", { preferLocal: true })],
+	["palatino linotype", substitute("tinos", "serif", { preferLocal: true })],
+	["univers", substitute("arimo", "sans-serif", { preferLocal: true })],
+	["univers light", substitute("arimo", "sans-serif", { preferLocal: true })]
 ])
 
 // w:family in a font table (ECMA-376 ST_FontFamily).

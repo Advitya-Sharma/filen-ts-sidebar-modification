@@ -31,6 +31,7 @@
 		"generate:fonts": "tsx src/scripts/fontTables.ts",
 		"generate:unicode": "tsx src/scripts/unicodeTables.ts",
 		"generate:geometry": "tsx src/scripts/presetGeometry.ts",
+		"generate:symbols": "tsx src/scripts/symbolTables.ts",
 		"corpus:manifest": "tsx src/scripts/corpusManifest.ts",
 		"corpus:fetch": "tsx src/scripts/fetchCorpus.ts",
 		"lint": "eslint src/ && prettier --check \"src/**/*.ts\""

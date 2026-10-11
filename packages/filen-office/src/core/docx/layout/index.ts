@@ -9,6 +9,7 @@ export {
 	type RenderedBreak,
 	type TableRange
 } from "./document"
+export { mathBox, type MathBox, type MathMeasure } from "./math"
 export { ObjectKind, ObjectTable, type FloatSpec, type ObjectRef, type ObjectSize, type ObjectSizer } from "./objects"
 export {
 	CLIP_FLOATS,

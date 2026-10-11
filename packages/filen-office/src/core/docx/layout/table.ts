@@ -1,9 +1,9 @@
 import { Item, RevisionView } from "../model/kinds"
 import { Ns } from "../model/namespaces"
 import type { StoryPart } from "../model/part"
-import type { ResolvedBorder, ResolvedTableRowProps, TableCellProps, WidthProps } from "../props/types"
+import type { ResolvedBorder, ResolvedTableRowProps, TableCellProps, TablePositionProps, WidthProps } from "../props/types"
 import type { CellFormat, TableFormat } from "../styles/resolve"
-import { Area, BlockFlow, FlowStatus, nextToken, type Engine } from "./flow"
+import { Area, BlockFlow, FlowStatus, nextToken, type Engine, type FlowSnapshot } from "./flow"
 import { PageGraphic, Layer, OutputMark } from "./output"
 import { borderWidth } from "./styles"
 import { EPSILON, twips } from "./units"
@@ -118,8 +118,9 @@ function brightness(color: string | undefined, test: number): number {
 	return test === 0 ? r + b + 2 * g : test === 1 ? b + 2 * g : g
 }
 
-// The border drawn where `a` (first in reading order) and `b` meet.
+// The border drawn where `a` (first in reading order) and `b` meet. A cell's "nil" hides both.
 function heavier(a: ResolvedBorder | undefined, b: ResolvedBorder | undefined): ResolvedBorder | undefined {
+	if (a?.style === "nil" || b?.style === "nil") return undefined
 	if (a === undefined) return b
 	if (b === undefined || a === b) return a
 
@@ -140,16 +141,58 @@ function heavier(a: ResolvedBorder | undefined, b: ResolvedBorder | undefined): 
 	return a
 }
 
+// w:tblpPr with Word's defaults and adjustments (MS-OI29500 §17.4.57).
+export interface FloatingTablePosition extends TablePositionProps {
+	readonly horzAnchor: "text" | "margin" | "page"
+	readonly vertAnchor: "text" | "margin" | "page"
+	// Twips from the anchor.
+	readonly x: number
+	readonly y: number
+}
+
+// Word anchors a table horizontally to the text and vertically to the margin by default, ignores a tblpPr
+// without attributes and one at 0, 0 from the text horizontally but not vertically, and places tables one
+// twip before tblpX and tblpY (MS-OI29500 §17.4.57 a, b, e).
+function floatingPosition(position: TablePositionProps | undefined): FloatingTablePosition | undefined {
+	if (position === undefined || Object.values(position).every(value => value === undefined)) return undefined
+
+	const horzAnchor = position.horzAnchor ?? "text"
+	const vertAnchor = position.vertAnchor ?? "margin"
+	const x = position.x ?? 0
+	const y = position.y ?? 0
+
+	if (
+		x === 0 &&
+		y === 0 &&
+		horzAnchor === "text" &&
+		vertAnchor !== "text" &&
+		position.xSpec === undefined &&
+		position.ySpec === undefined
+	)
+		return undefined
+
+	return {
+		...position,
+		horzAnchor,
+		vertAnchor,
+		x: position.x === undefined ? 0 : x - 1,
+		y: position.y === undefined ? 0 : y - 1
+	}
+}
+
 export class TableLayout {
 	readonly flow: BlockFlow
 	readonly engine: Engine
 	readonly part: StoryPart
 	readonly item: number
 	y = 0
+	// Laid out as a floating table (w:tblpPr) at a position the flow chose: its own offset is applied.
+	floated = false
 	// Body rows placed in the current area (repeated header rows not counted).
 	rowsPlaced = 0
 	private readonly rows: number[] = []
 	private readonly direct: TableFormat
+	private readonly floating: FloatingTablePosition | undefined
 	private readonly grid: number[] = []
 	private readonly gridX: number[] = []
 	private tableX = 0
@@ -165,7 +208,13 @@ export class TableLayout {
 	private readonly headerPool: BlockFlow[] = []
 	private readonly cellArea = new Area()
 	private readonly mark = new OutputMark()
+	// Per grid column: where the content of a vertical merge ends, and the area (token) it ends in.
 	private readonly mergeBottoms: number[] = []
+	private readonly mergeTokens: number[] = []
+	// Per grid column, a vertical merge whose content did not fit its page: it continues in the rows the
+	// merge spans on the next page, and the area (token) it last ran in.
+	private readonly mergeFlows: (BlockFlow | undefined)[] = []
+	private readonly mergeAreas: number[] = []
 	private readonly cells = new Map<number, TableCellProps>()
 
 	constructor(flow: BlockFlow, item: number, area: Area) {
@@ -183,6 +232,7 @@ export class TableLayout {
 		const tblPr = part.tables.tblPr[tableRow] ?? -1
 
 		this.direct = engine.resolver.table(engine.store.table(part.document, tblPr))
+		this.floating = floatingPosition(this.direct.props.position)
 		this.collectRows()
 		this.computeGrid(area)
 	}
@@ -307,23 +357,45 @@ export class TableLayout {
 			if (this.engine.compat.compatibilityMode < 15) left -= firstMargin
 		}
 
-		const position = props.position
+		const position = this.floating
 
-		if (position !== undefined && position.horzAnchor !== undefined) {
+		if (position !== undefined) {
 			const frame = area.frame
-			const offset = twips(position.x ?? 0)
+			const anchor = position.horzAnchor
+			const start = anchor === "page" ? 0 : anchor === "margin" ? frame.marginLeft : area.left
+			const size =
+				anchor === "page" ? frame.width : anchor === "margin" ? frame.width - frame.marginLeft - frame.marginRight : area.width
+			const align = position.xSpec
 
-			if (position.horzAnchor === "page") left = offset
-			else if (position.horzAnchor === "margin") left = frame.marginLeft + offset
-			else left = area.left + offset
-
-			if (position.xSpec === "center")
-				left =
-					(position.horzAnchor === "page" ? 0 : area.left) + ((position.horzAnchor === "page" ? frame.width : area.width) - x) / 2
-			else if (position.xSpec === "right") left = (position.horzAnchor === "page" ? frame.width : area.left + area.width) - x
+			left =
+				align === "center"
+					? start + (size - x) / 2
+					: align === "right" || (align === "outside" && frame.odd) || (align === "inside" && !frame.odd)
+						? start + size - x
+						: align === "left" || align === "inside" || align === "outside"
+							? start
+							: start + twips(position.x)
 		}
 
 		this.tableX = left
+	}
+
+	// w:tblpPr as Word applies it, when the table floats.
+	get position(): FloatingTablePosition | undefined {
+		return this.floating
+	}
+
+	get overlap(): "never" | "overlap" {
+		return this.direct.props.overlap
+	}
+
+	// The table's left edge and width.
+	get left(): number {
+		return this.tableX
+	}
+
+	get width(): number {
+		return this.tableWidth
 	}
 
 	// A cell's direct properties, parsed once (the grid reads the first rows before they are laid out).
@@ -455,10 +527,10 @@ export class TableLayout {
 			// A page break before the table's first paragraph breaks before the table.
 			if (area.breaks && !area.empty && this.firstParagraphBreaks()) return FlowStatus.PAGE_BREAK
 
-			const position = this.direct.props.position
+			const position = this.floating
 
-			if (position !== undefined && (position.vertAnchor === undefined || position.vertAnchor === "text") && (position.y ?? 0) > 0)
-				this.y += twips(position.y ?? 0)
+			if (!this.floated && position !== undefined && position.vertAnchor === "text" && position.ySpec === undefined && position.y > 0)
+				this.y += twips(position.y)
 		}
 
 		while (this.row < this.rows.length) {
@@ -515,13 +587,20 @@ export class TableLayout {
 		const footnoteMark = area.footnotes?.mark() ?? 0
 		const exclusionMark = area.exclusions?.count ?? 0
 		const missingBefore = engine.styles.hasMissing
+		// The rest of a split row is laid out again when it needed fonts not loaded yet: its cells resume from
+		// these (none when a cell is inside a nested table).
+		const resume = continuing && this.flow.suspendable ? info.slots.map((_, k) => pool[k]?.snapshot() ?? null) : undefined
+		// Merges continued in this row: their state before, to take back when the row is.
+		const merges: { column: number; state: FlowSnapshot | undefined; area: number; bottom: number; token: number }[] = []
+		// Merges starting in this row that did not fit: they continue on the next page once the row stays.
+		const started: { slot: number; column: number }[] = []
 
 		if (!continuing) {
 			info.slots.forEach((slot, k) => {
 				let flow = pool[k]
 
 				if (flow === undefined) {
-					flow = new BlockFlow(engine, { ...this.flow.story, breaksAsLines: true }, this.flow.region, false)
+					flow = this.cellFlow()
 					pool[k] = flow
 				}
 
@@ -543,42 +622,82 @@ export class TableLayout {
 
 		info.slots.forEach((slot, k) => {
 			const flow = pool[k]
+			const margins = this.cellMargins(slot)
 
 			cellMarks.push(page.mark(new OutputMark()))
+			cellArea.left = slot.x + margins.start
+			cellArea.width = Math.max(1, slot.width - margins.start - margins.end)
+			cellArea.empty = atTop
+
+			const merge = this.mergeFlows[slot.column]
+
+			if (merge !== undefined && (slot.continued || continuing)) {
+				// A merge that ran out of page continues at the top of this page's first row it spans.
+				if (this.mergeAreas[slot.column] === area.token) return
+
+				merges.push({
+					column: slot.column,
+					state: merge.snapshot(),
+					area: this.mergeAreas[slot.column] ?? -1,
+					bottom: this.mergeBottoms[slot.column] ?? Number.NaN,
+					token: this.mergeTokens[slot.column] ?? -1
+				})
+				cellArea.top = top
+				cellArea.bottom = area.bottom - margins.bottom
+
+				const before = page.text.lineCount
+
+				merge.run(cellArea)
+
+				if (page.text.lineCount > before) anyPlaced = true
+
+				this.mergeAreas[slot.column] = area.token
+				this.mergeBottoms[slot.column] = merge.contentBottom() + margins.bottom
+				this.mergeTokens[slot.column] = area.token
+
+				return
+			}
 
 			if (flow === undefined || slot.continued) return
 
-			const margins = this.cellMargins(slot)
-
-			cellArea.left = slot.x + margins.start
-			cellArea.width = Math.max(1, slot.width - margins.start - margins.end)
 			cellArea.top = top + (continuing ? 0 : margins.top)
+
 			const merged = this.spanOf(index, slot) > 1
 
-			cellArea.bottom = merged || exact ? Infinity : area.bottom - margins.bottom
-			cellArea.empty = atTop
+			// A merge's content fills the rows it spans; what does not fit the page continues on the next.
+			cellArea.bottom = exact ? Infinity : area.bottom - margins.bottom
 
 			const before = page.text.lineCount
 			const status = flow.run(cellArea)
 
 			if (page.text.lineCount > before) anyPlaced = true
-			if (status === FlowStatus.OVERFLOW) overflow = true
 
 			const bottom = flow.contentBottom() + margins.bottom
 
-			if (merged) this.mergeBottoms[slot.column] = bottom
-			else height = Math.max(height, bottom - top)
+			if (merged) {
+				this.mergeBottoms[slot.column] = bottom
+				this.mergeTokens[slot.column] = area.token
+
+				if (status === FlowStatus.OVERFLOW) started.push({ slot: k, column: slot.column })
+			} else {
+				if (status === FlowStatus.OVERFLOW) overflow = true
+
+				height = Math.max(height, bottom - top)
+			}
 		})
 
 		for (const slot of info.slots) {
 			if (!slot.continued) continue
 
-			const merged = this.mergeBottoms[slot.column] ?? Number.NaN
+			const column = slot.column
+			const merged = this.mergeTokens[column] === area.token ? (this.mergeBottoms[column] ?? Number.NaN) : Number.NaN
 
-			if (!Number.isNaN(merged) && this.lastOfMerge(index, slot.column)) {
-				height = Math.max(height, merged - top)
-				this.mergeBottoms[slot.column] = Number.NaN
-			}
+			if (Number.isNaN(merged) || !this.lastOfMerge(index, column)) continue
+
+			height = Math.max(height, merged - top)
+
+			// The merge ends here with content left: the row splits so that it continues.
+			if (this.mergeFlows[column]?.done === false && this.mergeAreas[column] === area.token) overflow = true
 		}
 
 		if (props.height !== undefined) {
@@ -588,12 +707,27 @@ export class TableLayout {
 			else height = Math.max(height, h)
 		}
 
-		// A fresh row that needed fonts not loaded yet is laid out again once they are.
-		if (!continuing && !missingBefore && this.flow.suspendable && engine.styles.hasMissing) {
-			page.rollback(rowMark)
-			area.footnotes?.rollback(footnoteMark)
+		// A row that needed fonts not loaded yet is laid out again once they are.
+		const resumable =
+			(!continuing || (resume !== undefined && resume.every(state => state !== undefined))) &&
+			merges.every(entry => entry.state !== undefined)
 
-			if (area.exclusions !== null) area.exclusions.count = exclusionMark
+		if (!missingBefore && this.flow.suspendable && engine.styles.hasMissing && resumable) {
+			this.takeBack(area, info, merges, rowMark, footnoteMark, exclusionMark)
+
+			if (resume !== undefined) {
+				info.slots.forEach((slot, k) => {
+					const state = resume[k]
+					const flow = pool[k]
+
+					if (state === undefined || state === null || flow === undefined || slot.continued) return
+
+					const margins = this.cellMargins(slot)
+
+					cellArea.width = Math.max(1, slot.width - margins.start - margins.end)
+					flow.restore(state, cellArea)
+				})
+			}
 
 			return FlowStatus.SUSPEND
 		}
@@ -604,10 +738,7 @@ export class TableLayout {
 			const splittable = !props.cantSplit && !exact
 
 			if (!atTop && (!splittable || !anyPlaced || !overflow)) {
-				page.rollback(rowMark)
-				area.footnotes?.rollback(footnoteMark)
-
-				if (area.exclusions !== null) area.exclusions.count = exclusionMark
+				this.takeBack(area, info, merges, rowMark, footnoteMark, exclusionMark)
 
 				return FlowStatus.OVERFLOW
 			}
@@ -615,6 +746,7 @@ export class TableLayout {
 			if (overflow) {
 				// Split: this part reaches the area's bottom, the rest continues on the next page.
 				height = Math.max(0, area.bottom - top)
+				this.keepMerges(area, pool, started)
 				this.drawRow(area, info, index, top, height, true)
 				this.y = top + height
 				this.continuing = true
@@ -623,6 +755,8 @@ export class TableLayout {
 				return FlowStatus.OVERFLOW
 			}
 		}
+
+		this.keepMerges(area, pool, started)
 
 		this.alignCells(area, info, pool, cellMarks, top, height)
 
@@ -643,6 +777,55 @@ export class TableLayout {
 		this.y = top + height
 
 		return FlowStatus.DONE
+	}
+
+	private cellFlow(): BlockFlow {
+		return new BlockFlow(this.engine, { ...this.flow.story, breaksAsLines: true }, this.flow.region, false)
+	}
+
+	// Takes a row back: its output, notes and exclusions, and the merges it continued.
+	private takeBack(
+		area: Area,
+		info: RowInfo,
+		merges: readonly { column: number; state: FlowSnapshot | undefined; area: number; bottom: number; token: number }[],
+		rowMark: OutputMark,
+		footnoteMark: number,
+		exclusionMark: number
+	): void {
+		area.page.rollback(rowMark)
+		area.footnotes?.rollback(footnoteMark)
+
+		if (area.exclusions !== null) area.exclusions.count = exclusionMark
+
+		for (const entry of merges) {
+			const flow = this.mergeFlows[entry.column]
+			const slot = info.slots.find(candidate => candidate.column === entry.column)
+
+			if (flow !== undefined && entry.state !== undefined && slot !== undefined) {
+				const margins = this.cellMargins(slot)
+
+				this.cellArea.width = Math.max(1, slot.width - margins.start - margins.end)
+				flow.restore(entry.state, this.cellArea)
+			}
+
+			this.mergeAreas[entry.column] = entry.area
+			this.mergeBottoms[entry.column] = entry.bottom
+			this.mergeTokens[entry.column] = entry.token
+		}
+	}
+
+	// Once a row stays: merges starting in it that did not fit continue later (their flows leave the pool),
+	// and merges that ended are dropped.
+	private keepMerges(area: Area, pool: BlockFlow[], started: readonly { slot: number; column: number }[]): void {
+		for (const entry of started) {
+			this.mergeFlows[entry.column] = pool[entry.slot]
+			this.mergeAreas[entry.column] = area.token
+			pool[entry.slot] = this.cellFlow()
+		}
+
+		for (let column = 0; column < this.mergeFlows.length; column++) {
+			if (this.mergeFlows[column]?.done === true) this.mergeFlows[column] = undefined
+		}
 	}
 
 	private firstParagraphBreaks(): boolean {
@@ -697,7 +880,7 @@ export class TableLayout {
 		const next = last ? undefined : this.info(index + 1)
 		const tableShading = decorations.shading(info.table.props.shading)
 		const line = (border: ResolvedBorder | undefined, x: number, y: number, horizontal: boolean, length: number): void => {
-			if (border === undefined || length <= 0) return
+			if (border === undefined || border.style === "nil" || length <= 0) return
 
 			const width = borderWidth(border)
 

@@ -268,3 +268,23 @@ export function pageLines(layout: DocumentLayout, index: number): LineInfo[] {
 
 	return out
 }
+
+// A fingerprint of every page's display list (geometry, text and sources), to compare two layouts.
+export function layoutDigest(layout: DocumentLayout, from = 0): string[] {
+	return layout.pages.slice(from).map(page => {
+		let hash = 0
+		const mix = (values: ArrayLike<number>): void => {
+			for (let i = 0; i < values.length; i++) hash = (Math.imul(hash, 31) + Math.round((values[i] ?? 0) * 100)) | 0
+		}
+
+		mix(page.text.lineFloats)
+		mix(page.text.lineInts)
+		mix(page.text.fragmentFloats)
+		mix(page.text.fragmentInts)
+		mix(page.graphicFloats)
+		mix(page.objectFloats)
+		mix(page.sourceInts)
+
+		return `${page.number}:${page.text.lineCount}:${hash}:${page.sourceTexts.join("|").length}`
+	})
+}

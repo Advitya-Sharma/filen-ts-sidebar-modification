@@ -742,6 +742,9 @@ export interface ResolvedTableRowProps {
 	readonly alignment: string | undefined
 }
 
+// A cell's sides keep an explicit "nil" as a border of that style and no width: it overrides the table's
+// borders and hides the neighbouring cell's border on the shared edge. A cell's "none" is no border of its
+// own: the table style's and the table's apply (MS-OI29500 §17.4.66 a).
 export interface ResolvedCellBorders extends ResolvedTableBorders {
 	readonly tl2br: ResolvedBorder | undefined
 	readonly tr2bl: ResolvedBorder | undefined

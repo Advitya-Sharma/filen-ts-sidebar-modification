@@ -1,4 +1,14 @@
-import { cssFont, forEachSlotRun, isChineseLanguage, type FontRequest, type FontSlot, type ResolvedFont } from "../../fonts/index"
+import {
+	cssFont,
+	forEachSlotRun,
+	isChineseLanguage,
+	symbolTable,
+	symbolText,
+	type FontRequest,
+	type FontSlot,
+	type ResolvedFont,
+	type SymbolTable
+} from "../../fonts/index"
 import { Caps, Strike, verticalAlignment, type StyleTable, type TextStyle } from "../../text/index"
 import type { ResolvedBorder, ResolvedRunProps, ResolvedShading } from "../props/types"
 import { shadingColor } from "../theme/color"
@@ -147,6 +157,9 @@ export class RunStyles {
 	private readonly byFont = new Map<string, number>()
 	private readonly prepared = new Set<string>()
 	private readonly pending = new Set<string>()
+	// Per style, the code table of a symbol font drawn without the font itself, whose characters must be
+	// drawn as the Unicode characters they show.
+	private readonly symbols: (SymbolTable | undefined)[] = []
 
 	constructor(table: StyleTable, fonts: FontSource, decorations: DecorationTable) {
 		this.table = table
@@ -207,6 +220,13 @@ export class RunStyles {
 		if (made.cacheable) this.byKey.set(key, made.id)
 
 		return made.id
+	}
+
+	// `text` as `style` draws it: a symbol font's codes become Unicode characters when the font is missing.
+	drawn(style: number, text: string): string {
+		const table = this.symbols[style]
+
+		return table === undefined ? text : symbolText(table, text)
 	}
 
 	// Calls `out` for each stretch of `text` drawn by one style.
@@ -318,6 +338,7 @@ export class RunStyles {
 		const id = this.table.add(style)
 
 		this.info[id] = { css: cssFont(font, size), color: run.color, run, revision }
+		this.symbols[id] = font.source === "embedded" || font.source === "local" ? undefined : symbolTable(family)
 
 		return { id, cacheable: ready }
 	}

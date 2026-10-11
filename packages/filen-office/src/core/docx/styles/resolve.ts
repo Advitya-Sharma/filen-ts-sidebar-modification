@@ -797,6 +797,13 @@ export class PropertyResolver {
 		return format
 	}
 
+	// A cell's border, keeping an explicit "nil" (ResolvedCellBorders).
+	private cellBorder(border: BorderProps | undefined): ResolvedBorder | undefined {
+		if (border?.style !== "nil") return this.border(border)
+
+		return this.borderInterner.intern({ style: "nil", size: 0, space: 0, color: undefined, shadow: false, frame: false })
+	}
+
 	private tableBorders(borders: TableBordersProps | undefined): ResolvedTableBorders {
 		return {
 			top: this.border(borders?.top),
@@ -950,7 +957,16 @@ export class PropertyResolver {
 				gridSpan: acc.gridSpan ?? 1,
 				hMerge: acc.hMerge,
 				vMerge: acc.vMerge,
-				borders: { ...this.tableBorders(borders), tl2br: this.border(borders?.tl2br), tr2bl: this.border(borders?.tr2bl) },
+				borders: {
+					top: this.cellBorder(borders?.top),
+					start: this.cellBorder(borders?.start),
+					bottom: this.cellBorder(borders?.bottom),
+					end: this.cellBorder(borders?.end),
+					insideH: this.cellBorder(borders?.insideH),
+					insideV: this.cellBorder(borders?.insideV),
+					tl2br: this.border(borders?.tl2br),
+					tr2bl: this.border(borders?.tr2bl)
+				},
 				shading: this.shading(acc.shading),
 				margins: this.margins([
 					internal.styleTable.cellMargins,

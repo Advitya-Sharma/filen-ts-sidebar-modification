@@ -52,4 +52,5 @@ export {
 	type GenericFamily,
 	type Substitution
 } from "./substitutes"
+export { symbolTable, symbolText, symbolToUnicode, type SymbolTable } from "./symbols"
 export { BUNDLED_FACES, CLONE_METRICS, LINE_METRICS } from "./tables.generated"
