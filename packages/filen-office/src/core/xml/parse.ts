@@ -112,8 +112,42 @@ function detectEncoding(bytes: Uint8Array): XmlEncoding {
 // Start-tag attribute name spans, reused across tags.
 let attributeNames = new Int32Array(32)
 
-// Whether two of a start tag's attribute names are the same bytes.
+function sameName(bytes: Uint8Array, spans: Int32Array, a: number, b: number): boolean {
+	const aStart = spans[a * 2] ?? 0
+	const bStart = spans[b * 2] ?? 0
+	const length = (spans[a * 2 + 1] ?? 0) - aStart
+
+	if (length !== (spans[b * 2 + 1] ?? 0) - bStart) return false
+
+	for (let k = 0; k < length; k++) if (bytes[aStart + k] !== bytes[bStart + k]) return false
+
+	return true
+}
+
+// Whether two of a start tag's attribute names are the same bytes. Pairwise for the few attributes real tags
+// carry; hashed above that, so a hostile tag with thousands of attributes stays linear.
 function repeatsName(bytes: Uint8Array, spans: Int32Array, count: number): boolean {
+	if (count > 8) {
+		const seen = new Map<number, number[]>()
+
+		for (let a = 0; a < count; a++) {
+			const hash = hashName(bytes, spans[a * 2] ?? 0, spans[a * 2 + 1] ?? 0)
+			const bucket = seen.get(hash)
+
+			if (bucket === undefined) {
+				seen.set(hash, [a])
+
+				continue
+			}
+
+			for (const b of bucket) if (sameName(bytes, spans, a, b)) return true
+
+			bucket.push(a)
+		}
+
+		return false
+	}
+
 	for (let a = 1; a < count; a++) {
 		const aStart = spans[a * 2] ?? 0
 		const length = (spans[a * 2 + 1] ?? 0) - aStart
