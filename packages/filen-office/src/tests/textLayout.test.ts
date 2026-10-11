@@ -947,7 +947,8 @@ describe("performance", () => {
 			`text layout: 10k paragraphs, ${lineCount} lines in ${elapsed.toFixed(1)} ms (${((elapsed * 1000) / lineCount).toFixed(2)} µs/line), heap +${((heapAfter - heapBefore) / 1024 / 1024).toFixed(1)} MB, ${h.cache.entries} cached widths`
 		)
 		expect(lineCount).toBeGreaterThan(40_000)
-		// Generous: vitest's module runner slows hot loops several times over a bundled build (src/bench/textBench.ts).
-		expect(elapsed).toBeLessThan(8000)
-	})
+		// Generous: vitest's module runner slows hot loops several times over a bundled build (src/bench/textBench.ts),
+		// and loaded CI machines slow it further; a quadratic regression would still be far beyond this.
+		expect(elapsed).toBeLessThan(15_000)
+	}, 60_000)
 })
