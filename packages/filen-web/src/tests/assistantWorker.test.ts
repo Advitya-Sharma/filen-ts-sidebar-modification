@@ -226,15 +226,23 @@ describe("assistant worker API", () => {
 			reasoning: false,
 			n_batch: 128,
 			n_ubatch: 128,
-			// Enough for the next turn to resume from the first step of a turn that used every step.
-			n_ctx_checkpoints: 7
+			// The CPU build's 4 GiB of wasm memory also holds the weights: more copies ran out of it.
+			n_ctx_checkpoints: 4,
+			checkpoint_min_step: 256
 		})
 	})
 
-	it("offloads to the GPU on the WebGPU backend", async () => {
+	it("offloads to the GPU on the WebGPU backend, keeping more state copies there", async () => {
 		await api.load(MANIFEST, { backend: "webgpu", threads: 4, contextTokens: 8192 })
 
-		expect(engines[0]?.loadModel.mock.calls[0]?.[1]).toMatchObject({ n_gpu_layers: 999 })
+		// Fewer, and a turn of several tool steps pushed out the copy the next turn resumes from.
+		expect(engines[0]?.loadModel.mock.calls[0]?.[1]).toMatchObject({
+			n_gpu_layers: 999,
+			n_batch: 512,
+			n_ubatch: 512,
+			n_ctx_checkpoints: 6,
+			checkpoint_min_step: 256
+		})
 	})
 
 	it("trusts the verified record without reading the shards", async () => {

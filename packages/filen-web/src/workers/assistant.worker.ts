@@ -3,7 +3,7 @@ import { createSHA256 } from "hash-wasm"
 import { LogLevel, Wllama, WllamaAbortError, WllamaError, type ChatCompletionTool, type WllamaLogger } from "@wllama/wllama/esm/index.js"
 // Emitted by Vite as a hashed asset of this build: the engine is self-hosted, never fetched from a CDN.
 import wllamaWasmUrl from "@wllama/wllama/esm/wasm/wllama.wasm?url"
-import { MAX_STEPS, type AssistantGenerateRequest, type AssistantGenerateResult } from "@filen/shared/assistant"
+import type { AssistantGenerateRequest, AssistantGenerateResult } from "@filen/shared/assistant"
 import type { AssistantModelFile, AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import {
 	accumulateChunk,
@@ -116,10 +116,16 @@ const PRIME_REUSED_MIN = 64
 // batch is a fraction of a second either way, and the progress steps stay readable.
 const BATCH_TOKENS: Readonly<Record<AssistantBackend, number>> = { webgpu: 512, cpu: 128 }
 
-// Copies of the recurrent state kept per slot, ~50 MiB each in host memory, which is where a hybrid model
-// can resume a cached prompt. The engine drops the oldest first, and the next turn resumes from the one its
-// first step stored: kept through every step of the turn and its closing reply, plus the one before it.
-const CONTEXT_CHECKPOINTS = MAX_STEPS + 2
+// Copies of the recurrent state kept per slot, ~50 MiB each in host memory, from which a hybrid model
+// resumes a cached prompt; a request stores up to two, near the end of its prompt. Once a slot is nearly
+// full, the engine first drops earlier requests' copies that lie within CHECKPOINT_MIN_STEP tokens of an
+// older kept one, then the oldest. Its default step (8192 tokens) left little but the oldest copy, so a
+// turn resumed far back. With fewer copies, a turn of several tool steps with long results pushes out the
+// one the next turn resumes from, and that turn reads its whole prompt again (4 copies on the GPU path
+// did). The CPU build keeps the weights in its 4 GiB of wasm memory too, and 6 copies ran out of it on the
+// second turn; 4 got through the turns measured, yet long sessions still run out on both paths.
+const CONTEXT_CHECKPOINTS: Readonly<Record<AssistantBackend, number>> = { webgpu: 6, cpu: 4 }
+const CHECKPOINT_MIN_STEP = 256
 
 // Read through a call: TypeScript would keep `download` narrowed across the awaits before it.
 function clearDownload(controller: AbortController): void {
@@ -556,7 +562,8 @@ const api = {
 					n_parallel: 3,
 					kv_unified: true,
 					cache_idle_slots: false,
-					n_ctx_checkpoints: CONTEXT_CHECKPOINTS,
+					n_ctx_checkpoints: CONTEXT_CHECKPOINTS[options.backend],
+					checkpoint_min_step: CHECKPOINT_MIN_STEP,
 					log_level: LogLevel.ERROR
 				})
 
