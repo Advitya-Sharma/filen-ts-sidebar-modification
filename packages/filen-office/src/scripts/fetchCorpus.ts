@@ -4,25 +4,25 @@ import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat } from "node
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { parseArgs } from "node:util"
-import type { CorpusFile, CorpusManifest } from "./corpusManifest"
+import { FAMILIES, familyOf, unavailableAllowed, type CorpusFamily, type CorpusFile, type CorpusManifest } from "./corpusManifest"
 
 // Downloads the real-world corpus listed in corpus/manifest.json into a cache directory (default .corpus/).
 // Resumable: files already present with the right SHA-256 are kept. Every download is verified before it is
 // renamed into place, so the cache never holds an unverified file. Files no longer in the manifest are removed.
 // Exits non-zero when more than a few files are unavailable (any with --strict). --check-remote also asks every
-// source of an already cached file whether it is still there, without downloading it.
+// source of an already cached file whether it is still there, without downloading it. --family limits the
+// download to some families (see FAMILIES); files of other families already cached stay.
 //
-//   pnpm run corpus:fetch [--strict] [--check-remote] [--dir <directory>]
+//   pnpm run corpus:fetch [--strict] [--check-remote] [--dir <directory>] [--family pptx,ppt]
 
 const PACKAGE = fileURLToPath(new URL("../../", import.meta.url))
 const MANIFEST = join(PACKAGE, "corpus", "manifest.json")
 const README = join(PACKAGE, "corpus", "README.md")
-const CONCURRENCY = 6
+// At most CONCURRENCY requests in flight, fewer to a host that rate-limits: GOV.UK blocks an address that asks too fast.
+const CONCURRENCY = 8
+const HOST_CONCURRENCY: Readonly<Record<string, number>> = { "assets.publishing.service.gov.uk": 3 }
 const ATTEMPTS = 4
 const TIMEOUT_MS = 120_000
-// The corpus tolerates a few vanished sources; more than this many is a failure.
-const MAX_UNAVAILABLE_FRACTION = 0.02
-const MAX_UNAVAILABLE_FILES = 10
 const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504])
 
 type Failure = { kind: "missing" | "changed" | "failed"; detail: string }
@@ -164,18 +164,60 @@ async function probe(file: CorpusFile): Promise<Failure | null> {
 	}
 }
 
-async function pool<T>(items: readonly T[], work: (item: T) => Promise<void>): Promise<void> {
-	let next = 0
+// Runs `work` over the files, in order per host, with at most CONCURRENCY in flight and HOST_CONCURRENCY per host.
+async function pool(files: readonly CorpusFile[], work: (file: CorpusFile) => Promise<void>): Promise<void> {
+	const byHost = Map.groupBy(files, file => new URL(file.url).host)
+	let free = CONCURRENCY
+	const waiting: (() => void)[] = []
+	const acquire = async (): Promise<void> => {
+		if (free > 0) {
+			free--
+
+			return
+		}
+
+		await new Promise<void>(granted => waiting.push(granted))
+	}
+	const release = (): void => {
+		const next = waiting.shift()
+
+		if (next === undefined) free++
+		else next()
+	}
 
 	await Promise.all(
-		Array.from({ length: Math.min(CONCURRENCY, items.length) }, async () => {
-			while (next < items.length) {
-				const item = items[next++] as T
+		[...byHost].flatMap(([host, queue]) => {
+			let next = 0
 
-				await work(item)
-			}
+			return Array.from({ length: Math.min(HOST_CONCURRENCY[host] ?? CONCURRENCY, queue.length) }, async () => {
+				while (next < queue.length) {
+					const file = queue[next++] as CorpusFile
+
+					await acquire()
+
+					try {
+						await work(file)
+					} finally {
+						release()
+					}
+				}
+			})
 		})
 	)
+}
+
+function families(option: string | undefined): ReadonlySet<CorpusFamily> | undefined {
+	if (option === undefined) return undefined
+
+	const names = option.split(",").map(name => name.trim())
+	const unknown = names.filter(name => !Object.hasOwn(FAMILIES, name))
+
+	if (unknown.length > 0) {
+		annotate("error", `unknown --family ${unknown.join(", ")}; families: ${Object.keys(FAMILIES).join(", ")}`)
+		process.exit(2)
+	}
+
+	return new Set(names as CorpusFamily[])
 }
 
 // Removes what the manifest no longer lists, only inside a directory this script populated before.
@@ -209,9 +251,11 @@ async function main(): Promise<void> {
 		options: {
 			dir: { type: "string", default: join(PACKAGE, ".corpus") },
 			strict: { type: "boolean", default: false },
-			"check-remote": { type: "boolean", default: false }
+			"check-remote": { type: "boolean", default: false },
+			family: { type: "string" }
 		}
 	})
+	const only = families(values.family)
 	const directory = resolve(values.dir)
 	const manifest = JSON.parse(await readFile(MANIFEST, "utf8")) as CorpusManifest
 	const started = performance.now()
@@ -224,10 +268,17 @@ async function main(): Promise<void> {
 	await mkdir(directory, { recursive: true })
 
 	const removed = await prune(directory, new Set(manifest.files.map(file => file.path)))
+	const wanted = manifest.files.filter(file => {
+		const family = familyOf(file.path)
+
+		if (family === undefined) throw new Error(`${file.path}: no corpus family for this extension`)
+
+		return only === undefined || only.has(family)
+	})
 
 	// Largest first, so one big file does not trail at the end.
 	await pool(
-		[...manifest.files].sort((a, b) => b.size - a.size),
+		[...wanted].sort((a, b) => b.size - a.size),
 		async file => {
 			const path = join(directory, file.path)
 
@@ -265,7 +316,7 @@ async function main(): Promise<void> {
 	const seconds = ((performance.now() - started) / 1000).toFixed(1)
 
 	console.log(
-		`corpus: ${manifest.files.length - unavailable.size}/${manifest.files.length} files verified in ${directory} ` +
+		`corpus: ${wanted.length - unavailable.size}/${wanted.length} files verified in ${directory} ` +
 			`(${cached.length} already cached, ${downloaded} downloaded, ${(bytes / 1e6).toFixed(1)} MB, ${removed} stale removed) in ${seconds} s`
 	)
 
@@ -277,7 +328,7 @@ async function main(): Promise<void> {
 		annotate("warning", `${file.path} cached, but its source is ${failure.kind} (${failure.detail}): ${file.url}`)
 	}
 
-	const allowed = values.strict ? 0 : Math.min(MAX_UNAVAILABLE_FILES, Math.floor(manifest.files.length * MAX_UNAVAILABLE_FRACTION))
+	const allowed = values.strict ? 0 : unavailableAllowed(wanted.length)
 	const problems = unavailable.size + (values.strict ? remote.size : 0)
 
 	if (problems > allowed) {
