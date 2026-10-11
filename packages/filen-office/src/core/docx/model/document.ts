@@ -26,7 +26,17 @@ export interface HeaderFooterSet {
 	readonly even: number
 }
 
-const NO_HEADERS: HeaderFooterSet = { default: -1, first: -1, even: -1 }
+export const NO_HEADERS: HeaderFooterSet = { default: -1, first: -1, even: -1 }
+
+// A section's headers or footers with the references it leaves out inherited from the previous section's
+// (ECMA-376 §17.10.5).
+export function inheritHeaders(own: HeaderFooterSet, previous: HeaderFooterSet): HeaderFooterSet {
+	return {
+		default: own.default >= 0 ? own.default : previous.default,
+		first: own.first >= 0 ? own.first : previous.first,
+		even: own.even >= 0 ? own.even : previous.even
+	}
+}
 
 // A body section. Its blocks are the body items [start, end); `item` is the paragraph carrying the
 // section's sectPr, the body's final SectionProperties item, or -1 when the body ends without one.
@@ -88,6 +98,8 @@ export interface ModelExtension {
 	readonly stories: (Story | undefined)[]
 	readonly drawings: (DrawingInfo | undefined)[]
 	readonly vml: (VmlInfo | undefined)[]
+	// The body's sections as edited (a section break pasted or removed changes them).
+	readonly sections: Section[]
 }
 
 // The read model of one document: story parts as item streams, stories, sections, notes and comments.
@@ -172,7 +184,8 @@ export class DocxModel {
 			parts: this.parts.slice(),
 			stories: this.stories.slice(),
 			drawings: this.drawings.slice(),
-			vml: this.vml.slice()
+			vml: this.vml.slice(),
+			sections: this.sections.slice()
 		}
 		const model = Object.assign(Object.create(DocxModel.prototype) as DocxModel, this, extension)
 
@@ -479,11 +492,6 @@ export async function buildDocxModel(pkg: DocxPackage, options: DocxModelOptions
 		first: storyOfPart(map.get("first"), kind),
 		even: storyOfPart(map.get("even"), kind)
 	})
-	const inherit = (own: HeaderFooterSet, previous: HeaderFooterSet): HeaderFooterSet => ({
-		default: own.default >= 0 ? own.default : previous.default,
-		first: own.first >= 0 ? own.first : previous.first,
-		even: own.even >= 0 ? own.even : previous.even
-	})
 	const sections: Section[] = []
 	const bodyStory = tables.stories.find(story => story.kind === "body")
 
@@ -498,8 +506,8 @@ export async function buildDocxModel(pkg: DocxPackage, options: DocxModelOptions
 			const headers = reference === undefined ? NO_HEADERS : set(reference.headers, Item.Header)
 			const footers = reference === undefined ? NO_HEADERS : set(reference.footers, Item.Footer)
 			const end = body.end(seed.item)
-			const effectiveHeaders = inherit(headers, previousHeaders)
-			const effectiveFooters = inherit(footers, previousFooters)
+			const effectiveHeaders = inheritHeaders(headers, previousHeaders)
+			const effectiveFooters = inheritHeaders(footers, previousFooters)
 
 			sections.push({
 				index,

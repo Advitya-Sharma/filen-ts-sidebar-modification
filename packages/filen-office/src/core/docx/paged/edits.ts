@@ -24,10 +24,13 @@ import {
 	partReader,
 	type DocxModel,
 	type ModelExtension,
+	type Section,
 	type Story,
 	type StoryPart
 } from "../model/index"
+import { inheritHeaders, NO_HEADERS } from "../model/document"
 import { DocxWriteError, StoryWriter, planNumbering, stylesWithDefinitions, type WriteEnvironment } from "../write/index"
+import { inCell, sectionWritten } from "../write/story"
 
 // What the layout lays out while a document is edited, kept in step with the editing sessions: every
 // edited block is written as it will be saved (StoryWriter), parsed again into a small overlay part and laid
@@ -83,6 +86,11 @@ export interface TopEntry {
 	// Overlay records and substituted source refs this entry owns.
 	readonly records: OverlayRecord[]
 	readonly substituted: number[]
+	// The source refs of its blocks, laid out from or not (a copy of another block's source).
+	readonly sources: number[]
+	// Where its blocks end sections: after how many of its refs, per block carrying a section break (none:
+	// undefined).
+	breaks: number[] | undefined
 }
 
 // The part of an edit the layout must redo: the changed top-level blocks as laid out now, the entries the
@@ -112,6 +120,8 @@ export class DocumentEdits implements LayoutEdits {
 	readonly storyCount: number
 	private readonly bodyIndex: number
 	private readonly bodyParts = new Set<number>()
+	// The sections as opened, by their w:sectPr.
+	private readonly openedSections: readonly Section[]
 	// The w:numId each list a command started will get when saved (the overlays write them).
 	numIds: ReadonlyMap<number, number> = new Map()
 	private definitions: EditDefinitions | undefined = undefined
@@ -127,6 +137,7 @@ export class DocumentEdits implements LayoutEdits {
 		this.extension = derived.extension
 		this.view = view
 		this.storyCount = model.stories.length
+		this.openedSections = model.sections
 		this.bodyIndex = model.body?.part ?? -1
 	}
 
@@ -220,6 +231,51 @@ export class DocumentEdits implements LayoutEdits {
 		return this.extension.parts[index]
 	}
 
+	// The body's sections become those ending at the blocks carrying the section properties of source
+	// paragraphs `ends` (items, in order) and the body's own (`last`, an item): a section break copied or
+	// removed adds or drops one. Without the body's own, a last section of default properties follows when
+	// blocks or markup come after the last break (`trailing`), as when a document is opened. The first section
+	// whose properties changed, or -1.
+	resection(ends: readonly number[], last: number, trailing: boolean): number {
+		const sections = this.extension.sections
+		const opened = this.openedSections
+		const bases: Section[] = []
+
+		for (const item of ends) {
+			const base = opened.find(section => section.item === item)
+
+			if (base !== undefined) bases.push(base)
+		}
+
+		if (last >= 0 || trailing || bases.length === 0)
+			bases.push(opened.find(section => section.item === (last >= 0 ? last : -1)) ?? defaultSection(opened))
+
+		let changed = 0
+
+		while (changed < bases.length && sections[changed]?.item === bases[changed]?.item) changed++
+
+		if (changed === bases.length && sections.length === bases.length) return -1
+
+		const previous = sections[changed - 1]
+		let headers = previous?.effectiveHeaders ?? NO_HEADERS
+		let footers = previous?.effectiveFooters ?? NO_HEADERS
+
+		sections.length = changed
+
+		for (let k = changed; k < bases.length; k++) {
+			const base = bases[k]
+
+			if (base === undefined) continue
+
+			// References a section leaves out come from the section before it as the document now stands.
+			headers = inheritHeaders(base.headers, headers)
+			footers = inheritHeaders(base.footers, footers)
+			sections.push({ ...base, index: k, effectiveHeaders: headers, effectiveFooters: footers })
+		}
+
+		return changed
+	}
+
 	// Parses `bytes` (blocks written by StoryWriter) inside the root of `source` into a new overlay part, and
 	// its top-level paragraphs and tables in order; undefined when it does not parse.
 	addPart(
@@ -227,7 +283,7 @@ export class DocumentEdits implements LayoutEdits {
 		container: number,
 		bytes: Uint8Array,
 		body: boolean
-	): { readonly part: StoryPart; readonly items: readonly number[] } | undefined {
+	): { readonly part: StoryPart; readonly items: readonly number[]; readonly offset: number } | undefined {
 		const document = source.document
 		const root = document.documentElement()
 		const node = source.node(container)
@@ -286,7 +342,7 @@ export class DocumentEdits implements LayoutEdits {
 			}
 		}
 
-		return { part, items }
+		return { part, items, offset: open.length + inner.open.length }
 	}
 
 	// The record of the overlay block holding item `item` of part `part`, or undefined.
@@ -400,6 +456,11 @@ export class StoryEdits {
 	// The entry laying out each source block (ref): when an edit leaves two blocks with the same source (a
 	// split paragraph keeps its identity in both halves), the first owns it and the other is a new block.
 	private readonly owners = new Map<number, TopEntry>()
+	// The live entries holding each source ref, the owner among them: a save writes the first in document
+	// order as the source and later ones as copies, so layout does the same.
+	private readonly holders = new Map<number, TopEntry | TopEntry[]>()
+	// While ownership is set right (reconcile): an entry earlier in the document takes a source over.
+	private ordered = false
 	// Entries built by the edit being applied, not in `entries` yet.
 	private readonly building = new Set<TopEntry>()
 	// Tables of the document as opened (the builder records paragraphs only): written as their source.
@@ -564,10 +625,28 @@ export class StoryEdits {
 		this.entries.splice(first, oldLast - first + 1, ...fresh)
 		this.building.clear()
 
+		if (newCount !== oldCount) {
+			for (let k = first + fresh.length; k < this.entries.length; k++) {
+				const entry = this.entries[k]
+
+				if (entry !== undefined) entry.index = k
+			}
+		}
+
+		// A copy pasted before its source, or a source removed while copies stay: the first holder owns.
+		const moved = this.reconcile(removed.concat(fresh))
+
+		if (moved.length > 0) structural = true
+
 		const delta = after.content.size - before.content.size
+		const sectionStart: TopEntry[] = []
 		// Section boundaries move only when a block carrying section properties came or went (or gained or
 		// lost them).
-		const sections = removed.some(entry => endsSection(entry.node)) || fresh.some(entry => endsSection(entry.node))
+		const sections =
+			removed.some(entry => entry.breaks !== undefined) ||
+			fresh.some(entry => entry.breaks !== undefined) ||
+			// A body without section properties of its own has a last section while anything follows its last break.
+			(this.body && (after.attrs["sectPr"] as number) < 0 && first + fresh.length >= this.entries.length)
 
 		if (structural || newCount !== oldCount || sections) {
 			for (let k = first; k < this.entries.length; k++) {
@@ -581,19 +660,32 @@ export class StoryEdits {
 			this.sourcesValid = false
 
 			if (sections) {
-				this.renumberSections()
-				this.publish()
+				const changed = this.renumberSections()
+
+				// A section whose properties changed is laid out again from its start, with the block before it: the
+				// page before then closes the section before (page numbering and notes start anew after it).
+				if (changed >= 0) {
+					const start = this.entries.findIndex(entry => entry.section >= changed)
+					const at = start < 0 ? this.entries.length : start
+
+					for (const entry of [this.entries[at - 1], this.entries[at]]) if (entry !== undefined) sectionStart.push(entry)
+				}
 			} else {
-				// The section of the blocks replaced; for blocks added, that of the block before (or the next
-				// section when that block ends its own).
+				// The section of the blocks replaced; for blocks added, that of the block before (or the section
+				// after the ones that block ends). Entries laid out again elsewhere keep theirs.
 				const previous = this.entries[first - 1]
-				const section =
-					removed[0]?.section ?? (previous === undefined ? 0 : previous.section + (endsSection(previous.node) ? 1 : 0))
+				const section = removed[0]?.section ?? (previous === undefined ? 0 : previous.section + (previous.breaks?.length ?? 0))
 
-				for (const entry of fresh) entry.section = section
+				for (let k = first; k < first + fresh.length; k++) {
+					const entry = this.entries[k]
 
-				this.publish(first, removed, fresh)
+					if (entry !== undefined) entry.section = section
+				}
 			}
+
+			// Blocks laid out again outside the change: the whole list.
+			if (sections || moved.length > 0) this.publish()
+			else this.publish(first, removed, fresh)
 		} else {
 			for (let k = last + 1; k < this.entries.length; k++) this.starts[k] = (this.starts[k] ?? 0) + delta
 		}
@@ -601,7 +693,7 @@ export class StoryEdits {
 		// A removal dirties its neighbours: what comes after it moves up.
 		const from = last >= first ? first : Math.max(0, first - 1)
 		const to = last >= first ? last : Math.min(this.entries.length - 1, first)
-		const around: TopEntry[] = []
+		const around = sectionStart
 
 		if (structural) {
 			const before = this.entries[first - 1]
@@ -611,7 +703,59 @@ export class StoryEdits {
 			if (after !== undefined) around.push(after)
 		}
 
-		return { dirty: this.dirtyOf(from, to), replaced: removed, around, whole: false }
+		const dirty = this.dirtyOf(from, to)
+
+		for (const [, entry] of moved) dirtyBlocks(entry, dirty)
+
+		return { dirty, replaced: moved.length === 0 ? removed : removed.concat(moved.map(([old]) => old)), around, whole: false }
+	}
+
+	// Gives each source among those `changed` entries hold to its first holder in document order; the entries
+	// laid out again for it, with the ones they replace.
+	private reconcile(changed: readonly TopEntry[]): [TopEntry, TopEntry][] {
+		const moved: [TopEntry, TopEntry][] = []
+		const values = new Set<number>()
+
+		for (const entry of changed) for (const value of entry.sources) values.add(value)
+
+		for (const value of values) {
+			const held = this.holders.get(value)
+			let first: TopEntry | undefined
+
+			for (const holder of held === undefined ? NO_ENTRIES : Array.isArray(held) ? held : [held]) {
+				if (this.entries[holder.index] === holder && (first === undefined || holder.index < first.index)) first = holder
+			}
+
+			const owner = this.owners.get(value)
+
+			if (first === undefined || owner === first) continue
+
+			this.ordered = true
+
+			const taken = this.rebuild(first)
+
+			moved.push([first, taken])
+
+			if (owner !== undefined && this.entries[owner.index] === owner) moved.push([owner, this.rebuild(owner)])
+
+			this.ordered = false
+		}
+
+		if (moved.length > 0) {
+			this.place()
+			this.building.clear()
+		}
+
+		return moved
+	}
+
+	private rebuild(entry: TopEntry): TopEntry {
+		const rebuilt = this.entry(entry.node, entry.index, entry)
+
+		rebuilt.section = entry.section
+		this.entries[entry.index] = rebuilt
+
+		return rebuilt
 	}
 
 	private dirtyOf(from: number, to: number): DirtyBlock[] {
@@ -620,9 +764,7 @@ export class StoryEdits {
 		for (let k = Math.max(0, from); k <= to && k < this.entries.length; k++) {
 			const entry = this.entries[k]
 
-			if (entry === undefined) continue
-
-			for (const laid of entry.laid) out.push({ section: entry.section, ref: laid })
+			if (entry !== undefined) dirtyBlocks(entry, out)
 		}
 
 		return out
@@ -632,6 +774,7 @@ export class StoryEdits {
 		for (const entry of this.entries) this.release(entry)
 
 		this.owners.clear()
+		this.holders.clear()
 		this.entries.length = 0
 		doc.forEach((node, _offset, index) => {
 			this.entries.push(this.entry(node, index, undefined))
@@ -678,18 +821,28 @@ export class StoryEdits {
 		return at === expected.length
 	}
 
-	// Section of each body entry: sections end with the block carrying their properties.
-	private renumberSections(): void {
-		if (!this.body) return
+	// Section of each body entry (that of its first block): sections end with the blocks carrying their
+	// properties. The first section whose properties changed, or -1.
+	private renumberSections(): number {
+		if (!this.body) return -1
 
+		const ends: number[] = []
+
+		for (const entry of this.entries) sectionEnds(this.part, entry.node, ends)
+
+		const last = this.entries[this.entries.length - 1]
+		const end = this.doc.attrs["end"]
+		const trailing = last === undefined || !endsLast(this.part, last.node) || (Array.isArray(end) && end.length > 0)
+		const changed = this.edits.resection(ends, this.doc.attrs["sectPr"] as number, trailing)
 		const sections = this.edits.model.sections
 		let section = 0
 
 		for (const entry of this.entries) {
 			entry.section = Math.min(section, Math.max(0, sections.length - 1))
-
-			if (endsSection(entry.node)) section++
+			section += entry.breaks?.length ?? 0
 		}
+
+		return changed
 	}
 
 	// Hands the story's block list to the layout once its structure is its own. With the change (entries
@@ -763,9 +916,9 @@ export class StoryEdits {
 		at = 0
 
 		for (const entry of this.entries) {
-			at += entry.base.length
+			for (const end of entry.breaks ?? NO_BREAKS) if (section < ends.length - 1) ends[section++] = at + end
 
-			if (endsSection(entry.node) && section < ends.length - 1) ends[section++] = at
+			at += entry.base.length
 		}
 
 		while (section < ends.length) ends[section++] = at
@@ -784,7 +937,9 @@ export class StoryEdits {
 			laid: [],
 			offsets: [],
 			records: [],
-			substituted: []
+			substituted: [],
+			sources: [],
+			breaks: undefined
 		}
 
 		this.building.add(entry)
@@ -793,10 +948,19 @@ export class StoryEdits {
 
 		if (old !== undefined) this.release(old)
 
+		for (const source of entry.sources) this.hold(source, entry)
+
 		return entry
 	}
 
 	private block(entry: TopEntry, node: Node, offset: number, old: TopEntry | undefined): void {
+		this.blockRefs(entry, node, offset, old)
+
+		// A block ending a section ends it after its refs (a content control's children each say).
+		if (node.type !== nodes.sdt && endsSection(this.part, node)) (entry.breaks ??= []).push(entry.base.length)
+	}
+
+	private blockRefs(entry: TopEntry, node: Node, offset: number, old: TopEntry | undefined): void {
 		const part = this.part
 		const src = (node.attrs["src"] as number | undefined) ?? -1
 		const pristine = this.story.pristine.has(node) || this.openedTables.has(node)
@@ -804,7 +968,12 @@ export class StoryEdits {
 		switch (node.type) {
 			case nodes.paragraph:
 			case nodes.table: {
-				const base = src >= 0 && this.claim(ref(part.index, src), entry, old) ? ref(part.index, src) : -1
+				// A copy of a block from inside a table cell stays a copy: the table lays its source out.
+				const own = src >= 0 && !inCell(part, src) ? src : -1
+
+				if (own >= 0) entry.sources.push(ref(part.index, own))
+
+				const base = own >= 0 && this.claim(ref(part.index, own), entry, old) ? ref(part.index, own) : -1
 
 				if (base >= 0 && pristine) {
 					this.source(entry, base, offset)
@@ -842,9 +1011,11 @@ export class StoryEdits {
 	// Whether `entry` (replacing `old`) lays out source block `base`: no other live entry does.
 	private claim(base: number, entry: TopEntry, old: TopEntry | undefined): boolean {
 		const owner = this.owners.get(base)
+		const live = owner !== undefined && (this.entries[owner.index] === owner || this.building.has(owner))
 
-		if (owner !== undefined && owner !== old && owner !== entry && (this.entries[owner.index] === owner || this.building.has(owner)))
-			return false
+		if (live && owner !== old && owner !== entry && !(this.ordered && owner.index > entry.index)) return false
+		// Two blocks of one entry (a paragraph split inside a content control): the first has the source.
+		if (owner === entry && entry.base.includes(base)) return false
 
 		this.owners.set(base, entry)
 
@@ -888,7 +1059,8 @@ export class StoryEdits {
 		const changed: ChangedParagraph[] = []
 
 		if (table === undefined) {
-			if (base < 0 || substitute !== undefined || !sameStructure(previous, node)) return false
+			// Only a table laid out from its source last time (not a copy written on its own) keeps it.
+			if (base < 0 || substitute !== undefined || !old.laid.includes(base) || !sameStructure(previous, node)) return false
 
 			changedParagraphs(previous, node, offset, [], changed)
 		} else {
@@ -934,7 +1106,7 @@ export class StoryEdits {
 				entry.substituted.push(value)
 			}
 
-			const bytes = this.written(paragraph.node)
+			const bytes = this.written(paragraph.node, true)
 
 			if (bytes === undefined) this.edits.substitutes.delete(value)
 			else this.queued.push({ entry, node: paragraph.node, offset: paragraph.offset, base: value, bytes, slot: -1 })
@@ -956,7 +1128,7 @@ export class StoryEdits {
 
 	// A block laid out from an overlay of what it writes as (once the edit's blocks are parsed, see place()).
 	private overlay(entry: TopEntry, node: Node, offset: number, base: number): void {
-		const bytes = this.written(node)
+		const bytes = this.written(node, false, base < 0 && ((node.attrs["src"] as number | undefined) ?? -1) >= 0)
 
 		// What the writer refuses (the save refuses it too) is laid out as its source.
 		if (bytes === undefined) {
@@ -979,9 +1151,10 @@ export class StoryEdits {
 		this.queued.push({ entry, node, offset, base, bytes, slot: entry.laid.length - 1 })
 	}
 
-	private written(node: Node): Uint8Array | undefined {
+	// `cell`: whether the block is in a table cell.
+	private written(node: Node, cell: boolean, copy = false): Uint8Array | undefined {
 		try {
-			return this.writer.writeBlockAlone(node).finish()
+			return this.writer.writeBlockAlone(node, copy, cell).finish()
 		} catch (error) {
 			if (error instanceof DocxWriteError) return undefined
 
@@ -1008,19 +1181,36 @@ export class StoryEdits {
 		}
 
 		const added = this.edits.addPart(this.part, this.story.story.item, bytes, this.body)
+		const left: QueuedBlock[] = []
 
-		if (added !== undefined && added.items.length === blocks.length) {
-			blocks.forEach((block, k) => this.placed(block, added.part, added.items[k] ?? -1))
+		if (added === undefined) {
+			left.push(...blocks)
+		} else {
+			// Each block gets the first paragraph or table that starts within its bytes.
+			const document = added.part.document
+			let next = 0
+			let start = 0
 
-			return
+			for (const block of blocks) {
+				const end = start + block.bytes.length
+
+				while (next < added.items.length && document.start(added.part.node(added.items[next] ?? -1)) - added.offset < start) next++
+
+				const item = added.items[next]
+
+				if (item !== undefined && document.start(added.part.node(item)) - added.offset < end) this.placed(block, added.part, item)
+				else left.push(block)
+
+				start = end
+			}
+
+			this.edits.dropUnused(added.part)
 		}
-
-		if (added !== undefined) this.edits.dropUnused(added.part)
 
 		const unplaced = new Map<TopEntry, Set<number>>()
 
-		for (const block of blocks) {
-			const one = blocks.length === 1 ? added : this.edits.addPart(this.part, this.story.story.item, block.bytes, this.body)
+		for (const block of left) {
+			const one = this.edits.addPart(this.part, this.story.story.item, block.bytes, this.body)
 			const item = one?.items[0]
 
 			if (one !== undefined && item !== undefined) {
@@ -1050,6 +1240,18 @@ export class StoryEdits {
 			entry.base.splice(0, entry.base.length, ...base)
 			entry.laid.splice(0, entry.laid.length, ...laid)
 			entry.offsets.splice(0, entry.offsets.length, ...offsets)
+
+			const breaks = entry.breaks
+
+			if (breaks !== undefined) {
+				for (let k = 0; k < breaks.length; k++) {
+					let gone = 0
+
+					for (const slot of slots) if (slot < (breaks[k] ?? 0)) gone++
+
+					breaks[k] = (breaks[k] ?? 0) - gone
+				}
+			}
 		}
 	}
 
@@ -1078,8 +1280,41 @@ export class StoryEdits {
 		}
 	}
 
+	// Records that `entry` holds source `source` (one holder is kept as itself, more as a list).
+	private hold(source: number, entry: TopEntry): void {
+		const held = this.holders.get(source)
+
+		if (held === undefined) this.holders.set(source, entry)
+		else if (!Array.isArray(held)) {
+			if (held !== entry) this.holders.set(source, [held, entry])
+		} else if (!held.includes(entry)) held.push(entry)
+	}
+
+	private unhold(source: number, entry: TopEntry): void {
+		const held = this.holders.get(source)
+
+		if (held === entry) {
+			this.holders.delete(source)
+
+			return
+		}
+
+		if (!Array.isArray(held)) return
+
+		const at = held.indexOf(entry)
+
+		if (at >= 0) held.splice(at, 1)
+
+		const only = held.length === 1 ? held[0] : undefined
+
+		if (only !== undefined) this.holders.set(source, only)
+	}
+
 	private release(entry: TopEntry): void {
 		for (const base of entry.base) if (this.owners.get(base) === entry) this.owners.delete(base)
+
+		for (const source of entry.sources) this.unhold(source, entry)
+
 		for (const record of entry.records) this.edits.dropRecord(record)
 		for (const base of entry.substituted) {
 			const substitute = this.edits.substitutes.get(base)
@@ -1322,20 +1557,69 @@ function sameRefs(a: readonly number[], b: readonly number[]): boolean {
 	return true
 }
 
-function endsSection(node: Node): boolean {
+const NO_BREAKS: readonly number[] = []
+const NO_ENTRIES: readonly TopEntry[] = []
+
+// The blocks `entry` lays out, dirty, each in its section: one after a section break inside a content
+// control is in the next.
+function dirtyBlocks(entry: TopEntry, out: DirtyBlock[]): void {
+	const breaks = entry.breaks ?? NO_BREAKS
+	let section = entry.section
+	let next = 0
+
+	entry.laid.forEach((laid, k) => {
+		while (next < breaks.length && (breaks[next] ?? 0) <= k) {
+			section++
+			next++
+		}
+
+		out.push({ section, ref: laid })
+	})
+}
+
+// Whether nothing follows the section break a block ends with (no block, nor markup a content control
+// closes with).
+function endsLast(part: StoryPart, node: Node): boolean {
 	if (node.type === nodes.sdt) {
-		let ends = false
+		const end = node.attrs["end"]
 
-		node.forEach(child => {
-			if (endsSection(child)) ends = true
-		})
-
-		return ends
+		return (!Array.isArray(end) || end.length === 0) && node.lastChild !== null && endsLast(part, node.lastChild)
 	}
 
+	return endsSection(part, node)
+}
+
+// A last section of default properties after the sections `opened`, for a body without w:sectPr of its own.
+function defaultSection(opened: readonly Section[]): Section {
+	const end = opened[opened.length - 1]?.end ?? 0
+
+	return {
+		index: opened.length,
+		item: -1,
+		sectPr: -1,
+		start: end,
+		end,
+		openWrappers: [],
+		headers: NO_HEADERS,
+		footers: NO_HEADERS,
+		effectiveHeaders: NO_HEADERS,
+		effectiveFooters: NO_HEADERS
+	}
+}
+
+// The source paragraphs (items) whose section properties a top-level block ends sections with, added to
+// `out`.
+function sectionEnds(part: StoryPart, node: Node, out: number[]): void {
+	if (node.type === nodes.sdt) node.forEach(child => sectionEnds(part, child, out))
+	else if (endsSection(part, node)) out.push(node.attrs["sectPr"] as number)
+}
+
+// Whether a block other than a content control ends a section: the break of a paragraph from a table cell
+// is none (the save leaves it out).
+function endsSection(part: StoryPart, node: Node): boolean {
 	const sectPr = node.attrs["sectPr"]
 
-	return typeof sectPr === "number" && sectPr >= 0
+	return typeof sectPr === "number" && sectionWritten(part, sectPr, false)
 }
 
 // Whether two tables have the same rows and cells (attributes included) and blocks of the same kinds and

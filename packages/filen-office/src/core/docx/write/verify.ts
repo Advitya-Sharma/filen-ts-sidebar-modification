@@ -25,7 +25,7 @@ import { PropsStore } from "../props/index"
 import { parseStyles, type DocxStyles } from "../styles/index"
 import { canonicalElement, canonicalFragment } from "./canonical"
 import type { DocxChanges, DocxSavePlan, StoryChange } from "./save"
-import type { StoryOutput } from "./story"
+import { cellWithin, inCell, sectionWritten, type StoryOutput } from "./story"
 
 // Gate 2: the written file is checked before it may be uploaded, in two halves.
 // Parts (before the zip is written): every changed part well-formed with declared prefixes, every new part
@@ -618,6 +618,8 @@ interface Rewritten {
 	readonly part: StoryPart
 	readonly markup: Uint8Array[]
 	readonly nodes: Node[]
+	// Per node, whether it is written with its section break (see sectionWritten).
+	readonly sections: boolean[]
 }
 
 function sameBytes(a: Uint8Array, aFrom: number, b: Uint8Array, bFrom: number, length: number): boolean {
@@ -764,17 +766,27 @@ function originals(story: StoryDoc): Map<number, Node> {
 // A copied paragraph must be the editor's paragraph there, unchanged; a rewritten one is read back below.
 function checkParagraphs(name: string, part: StoryPart, stories: readonly StoryChange[], written: XmlDocument, out: Rewritten[]): void {
 	const reader = partReader(written)
-	const rewritten: Rewritten = { part, markup: [], nodes: [] }
+	const rewritten: Rewritten = { part, markup: [], nodes: [], sections: [] }
 	let container = written.firstChildElement(written.documentElement())
 
 	for (const story of stories) {
 		if (container < 0) fail("content", `${name}: a rewritten story is missing`)
 
-		const expected: { readonly node: Node | null; readonly item: number }[] = []
+		const expected: { readonly node: Node | null; readonly item: number; readonly cell: boolean; readonly section: boolean }[] = []
+		// Table cells holding the blocks visited, by their end position.
+		const cells: number[] = []
 
-		story.session.state.doc.descendants(node => {
+		story.session.state.doc.descendants((node, pos) => {
+			while (cells.length > 0 && (cells[cells.length - 1] ?? 0) <= pos) cells.pop()
+
+			if (node.type === nodes.table_cell) cells.push(pos + node.nodeSize)
+
 			if (node.type === nodes.paragraph) {
-				expected.push({ node, item: node.attrs["src"] as number })
+				const item = node.attrs["src"] as number
+
+				const cell = cells.length > 0
+
+				expected.push({ node, item, cell, section: sectionWritten(part, node.attrs["sectPr"] as number, cell) })
 
 				return false
 			}
@@ -785,7 +797,13 @@ function checkParagraphs(name: string, part: StoryPart, stories: readonly StoryC
 
 				sourceParagraphs(part, part.start(item), part.byteEnd(item), items)
 
-				for (const paragraph of items) expected.push({ node: null, item: paragraph })
+				for (const paragraph of items)
+					expected.push({
+						node: null,
+						item: paragraph,
+						cell: cells.length > 0 || cellWithin(part, paragraph, item),
+						section: false
+					})
 
 				return false
 			}
@@ -843,11 +861,16 @@ function checkParagraphs(name: string, part: StoryPart, stories: readonly StoryC
 						: editor.item === paragraph.item && sameAsSource(sources.get(paragraph.item), editor.node)
 
 				if (!same) fail("content", `${name}: a copied paragraph is not the editor's paragraph there`)
+
+				// Its bytes keep a section break only where its source had it: in a table cell or out of one.
+				if ((part.paragraphs.sectPr[part.aux[paragraph.item] ?? -1] ?? -1) >= 0 && inCell(part, paragraph.item) !== editor.cell)
+					fail("content", `${name}: a copied section break moved into or out of a table cell`)
 			} else {
 				if (editor.node === null) fail("content", `${name}: a locked block was rewritten`)
 
 				rewritten.markup.push(written.bytes.subarray(written.start(paragraph.element), written.end(paragraph.element)))
 				rewritten.nodes.push(editor.node)
+				rewritten.sections.push(editor.section)
 			}
 		})
 
@@ -925,7 +948,7 @@ async function readBack(
 
 			if (other === undefined || other.type !== nodes.paragraph) return
 
-			const expected = paragraphSignature(paragraph, input.changes.numIds)
+			const expected = paragraphSignature(paragraph, input.changes.numIds, story.sections[index])
 			const actual = paragraphSignature(other, input.changes.numIds)
 
 			if (expected !== actual)
@@ -1079,7 +1102,12 @@ function xmlText(text: string): string {
 	return out ?? text
 }
 
-export function paragraphSignature(node: Node, numIds: ReadonlyMap<number, number>): string {
+// `section`: whether the paragraph is a section break as written (its own w:sectPr by default).
+export function paragraphSignature(
+	node: Node,
+	numIds: ReadonlyMap<number, number>,
+	section = (node.attrs["sectPr"] as number) >= 0
+): string {
 	const numId = node.attrs["numId"] as number | null
 	const parts: string[] = [
 		JSON.stringify([
@@ -1088,7 +1116,7 @@ export function paragraphSignature(node: Node, numIds: ReadonlyMap<number, numbe
 			node.attrs["ilvl"],
 			node.attrs["align"],
 			sorted(node.attrs["indent"]),
-			(node.attrs["sectPr"] as number) >= 0
+			section
 		])
 	]
 	let lastText = -1

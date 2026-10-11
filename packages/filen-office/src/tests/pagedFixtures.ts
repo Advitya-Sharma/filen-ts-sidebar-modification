@@ -105,7 +105,7 @@ export async function editedLayout(bytes: Uint8Array): Promise<EditedLayout> {
 	})
 
 	const relayout = async (change: StoryChange): Promise<void> => {
-		const first = change.whole ? 0 : index.restartPage([...change.replaced, ...change.around])
+		const first = change.whole ? 0 : index.restartPage([...change.replaced, ...change.around], page => layout.keepFrom(page))
 		const restart = layout.beginEdit(first < 0 ? 0 : first, change.dirty)
 
 		changed.clear()

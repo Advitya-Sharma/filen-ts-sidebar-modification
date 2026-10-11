@@ -339,6 +339,10 @@ export class PagedEditor {
 			this.goal = undefined
 		}
 
+		// Pages laid out since the last flush are indexed first, with the entries they were laid out from: the
+		// change's replaced entries are found on them.
+		if (this.changed.size > 0) this.flush()
+
 		this.syncDefinitions()
 
 		const change = story.edits.applyAll(transactions)
@@ -387,10 +391,12 @@ export class PagedEditor {
 
 	private relayout(change: StoryChange): void {
 		const layout = this.layout
-		const found = change.whole ? 0 : this.body.index.restartPage([...change.replaced, ...change.around])
-		// A block the layout has not reached yet is laid out when it gets there.
-		const first = found < 0 && !layout.final ? layout.pages.length : found
-		const restart = layout.beginEdit(first < 0 ? 0 : first, change.whole ? undefined : change.dirty)
+		const found = change.whole ? 0 : this.body.index.restartPage([...change.replaced, ...change.around], page => layout.keepFrom(page))
+		const laid = layout.pages.length
+		// Pages a run under way has not reached show the document as it was: a block found there, or not shown
+		// yet, may now end the last page it laid out.
+		const first = !layout.final && (found < 0 || found >= laid) ? Math.max(0, laid - 1) : Math.max(0, found)
+		const restart = layout.beginEdit(first, change.whole ? undefined : change.dirty)
 		// The pages in view after the restart page are laid out now, with what the budget allows beyond.
 		const through = Math.max(restart, this.visible.last)
 		const result = layout.advance(this.now() + this.budget, through)

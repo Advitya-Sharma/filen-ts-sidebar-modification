@@ -78,6 +78,27 @@ const MARK_REVISIONS = new Map([
 	["rPrChange", ""]
 ])
 
+// Whether source item `item` lies inside a table cell.
+export function inCell(part: StoryPart, item: number): boolean {
+	for (let at = part.parent(item); at >= 0; at = part.parent(at)) if (part.kinds[at] === Item.Cell) return true
+
+	return false
+}
+
+// Whether source item `item` lies in a table cell inside source item `container`.
+export function cellWithin(part: StoryPart, item: number, container: number): boolean {
+	for (let at = part.parent(item); at >= 0 && at !== container; at = part.parent(at)) if (part.kinds[at] === Item.Cell) return true
+
+	return false
+}
+
+// Whether a paragraph ending with the section break of source paragraph `sectPr` writes it, in a table cell
+// or not: a break written in a cell is no section break (the model ignores it), so one is written only
+// where its source paragraph had it, in a cell or out of one.
+export function sectionWritten(part: StoryPart, sectPr: number, cell: boolean): boolean {
+	return sectPr !== NO_SOURCE && inCell(part, sectPr) === cell
+}
+
 function src(node: Node | Mark): number {
 	const value: unknown = node.attrs["src"]
 
@@ -128,13 +149,17 @@ export class StoryWriter {
 	private readonly env: WriteEnvironment
 	private readonly bytes: Uint8Array
 	private force: Node | undefined
+	// Table cells the block being written is in.
+	private cells = 0
 	private readonly owners = new Map<number, Node>()
 	// Source items whose owning node object stands at more than one place, those already written, and the
 	// depth of later occurrences being written.
 	private readonly shared = new Set<number>()
 	private readonly claimed = new Set<number>()
 	private repeating = 0
+	// Whether a block can be written as its source bytes, outside table cells and inside one.
 	private readonly copyable = new Map<Node, boolean>()
+	private readonly copyableInCell = new Map<Node, boolean>()
 	private readonly siblings = new Map<number, number[]>()
 	private originalsBySrc: Map<number, Node> | null = null
 	private readonly copiedRuns = new Set<number>()
@@ -167,11 +192,13 @@ export class StoryWriter {
 	writeStory(doc: Node): StoryOutput {
 		this.owners.clear()
 		this.copyable.clear()
+		this.copyableInCell.clear()
 		this.shared.clear()
 		this.claimed.clear()
 		this.findOwners(doc)
 		this.paragraphs.length = 0
 		this.containers.length = 0
+		this.cells = 0
 
 		const out = new Out()
 		const document = this.part.document
@@ -196,10 +223,13 @@ export class StoryWriter {
 
 	// One block through the edit path, for gate 1: runs rebuilt from their bases, properties spliced,
 	// containers rebuilt from their parts (a table's paragraphs are copied, each is proved on its own).
-	writeBlockAlone(node: Node): Out {
+	// `copy`: an earlier block of the story holds the same source (a pasted copy), as writeStory finds it.
+	// `cell`: whether the block is in a table cell (by default, where its source is).
+	writeBlockAlone(node: Node, copy = false, cell?: boolean): Out {
 		this.force = node
 		this.owners.clear()
 		this.copyable.clear()
+		this.copyableInCell.clear()
 		this.copiedRuns.clear()
 		this.startedRuns.clear()
 		this.openedWrappers.clear()
@@ -208,6 +238,23 @@ export class StoryWriter {
 		this.shared.clear()
 		this.claimed.clear()
 		this.findOwners(node)
+		this.cells = (cell ?? (node.type === nodes.paragraph && src(node) !== NO_SOURCE && inCell(this.part, src(node)))) ? 1 : 0
+
+		// The earlier block owns the sources and wrote its runs first: this one is written as a copy.
+		if (copy) {
+			const other = copyOwner()
+
+			for (const own of this.owners.keys()) this.owners.set(own, other)
+
+			node.descendants(child => {
+				const run = marks.run.isInSet(child.marks)
+
+				if (run !== undefined && src(run) !== NO_SOURCE) this.copiedRuns.add(src(run))
+
+				return true
+			})
+		}
+
 		// Only a whole story's output reports these; a block alone would keep every node it wrote alive.
 		this.paragraphs.length = 0
 		this.containers.length = 0
@@ -278,11 +325,12 @@ export class StoryWriter {
 		return this.originalsBySrc.get(src(node))
 	}
 
-	// Whether a block can be written as its source bytes (see StoryDoc).
-	private canCopy(node: Node): boolean {
+	// Whether a block can be written as its source bytes (see StoryDoc), in a table cell (`cell`) or not.
+	private canCopy(node: Node, cell = this.cells > 0): boolean {
 		if (this.repeating > 0 || this.claimed.has(src(node))) return false
 
-		let result = this.copyable.get(node)
+		const memo = cell ? this.copyableInCell : this.copyable
+		let result = memo.get(node)
 
 		if (result !== undefined) return result
 
@@ -290,10 +338,15 @@ export class StoryWriter {
 			result = false
 		} else if (node.type === nodes.paragraph) {
 			// An edited paragraph that is again what it was (an undo; markers before it are written apart) is
-			// its bytes too.
-			result = this.story.pristine.has(node) || sameParagraph(this.original(node), node)
+			// its bytes too, unless they hold a section break and it moved into or out of a table cell.
+			const row = this.part.aux[src(node)] ?? -1
+
+			result =
+				(this.story.pristine.has(node) || sameParagraph(this.original(node), node)) &&
+				((this.part.paragraphs.sectPr[row] ?? -1) < 0 || inCell(this.part, src(node)) === cell)
 		} else if (node.type === nodes.locked_block) {
-			result = true
+			// One whose section break moved into or out of a table cell is refused (see writeBlock).
+			result = !this.lockedBreakMoved(node, cell)
 		} else if (this.force !== undefined && this.force.type !== nodes.paragraph) {
 			// A table under proof is rebuilt down to its paragraphs.
 			result = false
@@ -304,12 +357,24 @@ export class StoryWriter {
 				original !== undefined &&
 				original.attrs === node.attrs &&
 				original.childCount === node.childCount &&
-				original.content.content.every((child, index) => src(child) === src(node.child(index)) && this.canCopy(node.child(index)))
+				original.content.content.every(
+					(child, index) =>
+						src(child) === src(node.child(index)) && this.canCopy(node.child(index), cell || node.type === nodes.table_cell)
+				)
 		}
 
-		this.copyable.set(node, result)
+		memo.set(node, result)
 
 		return result
+	}
+
+	// Whether locked block `node`, in a table cell (`cell`) or not, has a section break that moved into or out
+	// of one: a break in a cell of the block moves with it, one of the block itself only when the block did.
+	private lockedBreakMoved(node: Node, cell: boolean): boolean {
+		const sectPr = node.attrs["sectPr"] as number
+		const own = src(node)
+
+		return sectPr >= 0 && !cellWithin(this.part, sectPr, own) && inCell(this.part, own) !== cell
 	}
 
 	// ---- containers --------------------------------------------------------------------------------------
@@ -433,6 +498,11 @@ export class StoryWriter {
 				return
 			case nodes.locked_block:
 				if (!this.owns(node)) throw new DocxWriteError("missingSource", "A locked block appears twice")
+
+				// Its bytes are all it can be written as: a section break in them must stay in or out of a table
+				// cell as it was.
+				if (this.lockedBreakMoved(node, this.cells > 0))
+					throw new DocxWriteError("unsupported", "A locked section break moved into or out of a table cell")
 
 				this.copyWhole(out, this.part.node(src(node)))
 
@@ -565,6 +635,16 @@ export class StoryWriter {
 	}
 
 	private writeCell(out: Out, node: Node): void {
+		this.cells++
+
+		try {
+			this.writeCellContent(out, node)
+		} finally {
+			this.cells--
+		}
+	}
+
+	private writeCellContent(out: Out, node: Node): void {
 		const document = this.part.document
 		const names = this.names
 		// Word wants a cell to end with a paragraph, which a table as its last block would not.
@@ -799,7 +879,7 @@ export class StoryWriter {
 
 		const hasSection = row >= 0 && (part.paragraphs.sectPr[row] ?? -1) >= 0
 
-		if (sectPr === NO_SOURCE) {
+		if (!sectionWritten(part, sectPr, this.cells > 0)) {
 			if (hasSection) changes.set("sectPr", "")
 		} else if (sectPr !== source || !hasSection) {
 			const from = part.paragraphs.sectPr[part.aux[sectPr] ?? -1] ?? -1
@@ -1331,4 +1411,13 @@ function sameMarks(a: readonly Mark[], b: readonly Mark[]): boolean {
 	for (let k = 0; k < a.length; k++) if (!(a[k] as Mark).eq(b[k] as Mark)) return false
 
 	return true
+}
+
+let copyOwnerNode: Node | undefined
+
+// Stands for the block owning sources a copy is written without.
+function copyOwner(): Node {
+	copyOwnerNode ??= docxSchema.nodes.paragraph.create()
+
+	return copyOwnerNode
 }

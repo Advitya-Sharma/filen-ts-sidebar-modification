@@ -224,6 +224,13 @@ export class DocumentLayout {
 		return this.driver?.restory(story) ?? -1
 	}
 
+	// The page layout restarts at for an edit to what page `page` shows: an earlier one when a keep-with-next
+	// chain moved off it and the block it ran out of room at there is on this page or later (the edit may let
+	// the chain fit there).
+	keepFrom(page: number): number {
+		return this.driver?.keepFrom(page) ?? page
+	}
+
 	get editing(): boolean {
 		return this.driver !== undefined
 	}
@@ -286,7 +293,6 @@ export class DocumentLayout {
 // The paginator's state where a page opens: layout can restart there.
 interface PageSnapshot {
 	readonly sectionIndex: number
-	readonly section: ResolvedSectionProps
 	readonly flow: FlowSnapshot
 	readonly pageNumber: number
 	readonly restart: number | undefined
@@ -330,6 +336,11 @@ interface PageRecord {
 	readonly geometry: PageGeometry
 	readonly values: PageValues
 	readonly frame: PageFrame
+	// Something on it was placed by whether the page is odd or even.
+	readonly parity: boolean
+	// Pages back to the page a keep-with-next chain moved off while the block it ran out of room at there is
+	// still to come here or later (0: none).
+	readonly keep: number
 	readonly info: ConstructorParameters<typeof PageDisplayList>[1]
 }
 
@@ -595,7 +606,6 @@ class Paginator {
 				? undefined
 				: {
 						sectionIndex: this.sectionIndex,
-						section: this.section,
 						flow: state,
 						pageNumber: this.pageNumber,
 						restart: this.restart,
@@ -657,7 +667,8 @@ class Paginator {
 
 		layout.renderedBreaks.length = snapshot.renderedBreaks
 		this.sectionIndex = snapshot.sectionIndex
-		this.section = snapshot.section
+		// As the section reads now: an edit may have given the sections other properties.
+		this.section = this.resolved(snapshot.sectionIndex)
 
 		const section = this.model.sections[snapshot.sectionIndex]
 		const body = this.body
@@ -695,6 +706,7 @@ class Paginator {
 		this.snapshots[page] = snapshot
 		this.openPage()
 		flow.restore(snapshot.flow, this.area)
+		this.pageKeep = flow.keepBack
 		this.anchor = this.anchorHere()
 	}
 
@@ -834,6 +846,7 @@ class Paginator {
 			this.startSection(index)
 			this.balanceStart = undefined
 			this.geometry = pageGeometry(next, this.compat, this.frame.odd)
+			this.pageParity ||= mirrored(next, this.compat)
 			this.engine.gridPitch = this.geometry.gridPitch
 			this.sectionTop = this.contentBottom
 			this.column = 0
@@ -1103,6 +1116,8 @@ class Paginator {
 
 		this.restart = undefined
 		this.pageNumber = number
+		this.parityAtOpen = this.engine.parityReads
+		this.pageKeep = this.flows[this.flowIndex]?.keepBack ?? 0
 
 		const odd = number % 2 !== 0
 		const geometry = pageGeometry(section, this.compat, odd)
@@ -1141,6 +1156,15 @@ class Paginator {
 
 		this.headerStory = sectionInfo === undefined ? -1 : this.headerFooter(sectionInfo.effectiveHeaders, odd)
 		this.footerStory = sectionInfo === undefined ? -1 : this.headerFooter(sectionInfo.effectiveFooters, odd)
+		// Its section starts on a page of one parity, its margins swap with it, or it shows the other header or
+		// footer on a page of the other parity.
+		this.pageParity =
+			section.type === "oddPage" ||
+			section.type === "evenPage" ||
+			mirrored(section, this.compat) ||
+			(sectionInfo !== undefined &&
+				(this.headerFooter(sectionInfo.effectiveHeaders, !odd) !== this.headerStory ||
+					this.headerFooter(sectionInfo.effectiveFooters, !odd) !== this.footerStory))
 
 		let headerBottom = 0
 		let footerTop = geometry.height
@@ -1190,6 +1214,7 @@ class Paginator {
 		const layout = this.layout
 
 		this.pageOpen = false
+		this.flows[this.flowIndex]?.leavePage()
 
 		if (geometry === undefined) return
 
@@ -1237,6 +1262,8 @@ class Paginator {
 			geometry,
 			values: this.values,
 			frame: this.frame,
+			parity: this.engine.parityReads !== this.parityAtOpen || this.pageParity,
+			keep: this.pageKeep,
 			info
 		}
 
@@ -1580,6 +1607,18 @@ class Paginator {
 	}
 
 	private resyncs: Resync | undefined = undefined
+	// The engine's parity reads when the page being laid out opened.
+	private parityAtOpen = 0
+	// The page being laid out depends on its parity beyond what parity reads count.
+	private pageParity = false
+	// The keep of the page being laid out (see PageRecord).
+	private pageKeep = 0
+
+	// The page to lay out again from for an edit to what page `index` shows (see DocumentLayout.keepFrom).
+	keepFrom(index: number): number {
+		return index - (this.records[index]?.keep ?? 0)
+	}
+
 	// The first page closed while fonts it may have used were loading (-1: none).
 	missedFonts = -1
 
@@ -1588,14 +1627,28 @@ class Paginator {
 	// that run stands (none to meet again when no such page is found: the run then lays out to the end).
 	private previousLayout(page: number, dirty: readonly DirtyBlock[]): Resync | undefined {
 		const layout = this.layout
+		let previous = this.resyncs
+		let deliver = false
+
+		// A run standing between pages first meets the earlier layout there if its next step would; one that
+		// laid out to the end has nothing of it left. Either way the layout is whole again. Pages it keeps now
+		// are not taken in before the next run starts: they go out when that run keeps them.
+		if (previous !== undefined && !this.finished && !this.pageOpen && this.sectionIndex >= 0) {
+			this.takeSnapshot()
+			deliver = this.resynchronise(previous)
+		}
+
+		if (this.finished) previous = undefined
+
 		const progress = layout.pages.length
-		const previous = this.resyncs
 
 		if (previous === undefined) {
 			if (page >= progress) return undefined
 
 			return {
 				from: page,
+				floor: page,
+				deliver,
 				pages: layout.pages.slice(page),
 				anchors: layout.anchors.slice(page),
 				firstLines: layout.pageFirstLines.slice(page),
@@ -1614,38 +1667,41 @@ class Paginator {
 			}
 		}
 
-		// The earlier layout's pages continue the run's pages only from the page beginning where the run stands.
+		// The earlier layout's pages continue the run's only from the page beginning where the run stands, and
+		// the run did not meet them there: they are met again as they are, as pages from `progress` on. The run's
+		// own pages are not (what follows them is not the earlier layout).
 		const anchor = this.pageOpen ? this.anchor : this.anchorHere()
 		const cut = anchor.block < 0 ? -1 : previous.anchors.findIndex(old => sameAnchor(old, anchor))
 
 		if (cut < 0) return undefined
 
 		const first = previous.from + cut
-		const rest = <T>(own: readonly T[], earlier: readonly T[]): T[] => own.slice(page, progress).concat(earlier.slice(cut))
-		const breaks = layout.renderedBreaks.slice()
-
-		for (const entry of previous.renderedBreaks) if (entry.page >= first) breaks.push({ ...entry, page: entry.page - first + progress })
-
-		const marks = (own: ReadonlySet<number>, earlier: ReadonlySet<number>): Set<number> => {
-			const set = within(own, page, progress)
+		const breaks: RenderedBreak[] = []
+		const marks = (earlier: ReadonlySet<number>): Set<number> => {
+			const set = new Set<number>()
 
 			for (const index of earlier) if (index >= first) set.add(index - first + progress)
 
 			return set
 		}
 
+		for (const entry of previous.renderedBreaks) if (entry.page >= first) breaks.push({ ...entry, page: entry.page - first + progress })
+
 		return {
-			from: page,
-			pages: rest(layout.pages, previous.pages),
-			anchors: rest(layout.anchors, previous.anchors),
-			firstLines: rest(layout.pageFirstLines, previous.firstLines),
-			snapshots: rest(this.snapshots, previous.snapshots),
-			bodyTotals: rest(this.bodyTotals, previous.bodyTotals),
-			records: rest(this.records, previous.records),
-			bodyNumbers: rest(this.bodyNumbers, previous.bodyNumbers),
+			from: progress,
+			floor: page,
+			// Shown at other indices, or behind the run's pages.
+			deliver: true,
+			pages: previous.pages.slice(cut),
+			anchors: previous.anchors.slice(cut),
+			firstLines: previous.firstLines.slice(cut),
+			snapshots: previous.snapshots.slice(cut),
+			bodyTotals: previous.bodyTotals.slice(cut),
+			records: previous.records.slice(cut),
+			bodyNumbers: previous.bodyNumbers.slice(cut),
 			renderedBreaks: breaks,
-			stale: marks(layout.stale, previous.stale),
-			redone: marks(layout.dirty, previous.redone),
+			stale: marks(previous.stale),
+			redone: marks(previous.redone),
 			sectionPageCounts: previous.sectionPageCounts.slice(),
 			globalLine: previous.globalLine,
 			dirty: previous.dirty.concat(dirty),
@@ -1673,7 +1729,7 @@ class Paginator {
 		const snapshot = this.snapshots[index]
 		const flow = this.flows[this.flowIndex]
 
-		if (index <= resync.from || snapshot === undefined || flow === undefined || !this.dirtyDone(resync, flow)) return false
+		if (index <= resync.floor || snapshot === undefined || flow === undefined || !this.dirtyDone(resync, flow)) return false
 
 		const anchor = this.anchorHere()
 		const old = this.matchingPage(resync, anchor, index)
@@ -1683,6 +1739,13 @@ class Paginator {
 		const oldSnapshot = resync.snapshots[old - resync.from]
 
 		if (oldSnapshot === undefined || !sameState(snapshot, oldSnapshot)) return false
+
+		// Pages placing things by whether they are odd or even cannot move to the other parity.
+		const shift = snapshot.restart === undefined ? snapshot.pageNumber - oldSnapshot.pageNumber : 0
+
+		if (shift % 2 !== 0) {
+			for (let k = old - resync.from; k < resync.records.length; k++) if (resync.records[k]?.parity === true) return false
+		}
 
 		this.keepTail(resync, old, index, snapshot, oldSnapshot, anchor)
 
@@ -1822,7 +1885,7 @@ class Paginator {
 		this.finished = true
 		this.resyncedAt = index
 
-		if (shift !== 0 || numberShift !== 0) layout.notify(index, layout.pages.length, false)
+		if (stale || resync.deliver) layout.notify(index, layout.pages.length, false)
 	}
 
 	// The first section after `section`, up to `last`, whose page numbering starts anew (last + 1 when none).
@@ -1847,7 +1910,12 @@ class Paginator {
 
 // Previous-layout state a relayout for edits compares new pages with (see resynchronise).
 interface Resync {
+	// The index of its first page as numbered here, and the page the run restarted at (it meets none at or
+	// before it).
 	readonly from: number
+	readonly floor: number
+	// Its pages go out again when kept: they may not be the pages shown at their indices.
+	readonly deliver: boolean
 	readonly pages: readonly PageDisplayList[]
 	readonly anchors: readonly PageAnchor[]
 	readonly firstLines: readonly number[]
@@ -1885,6 +1953,13 @@ function usesFlag(output: PageOutput, flag: number): boolean {
 
 function anchorKey(anchor: PageAnchor): string {
 	return `${anchor.section}:${anchor.story}:${anchor.part}:${anchor.block}:${anchor.row}:${anchor.offset}`
+}
+
+// Whether mirrored margins give the section's pages of one parity other margins than the other's.
+function mirrored(section: ResolvedSectionProps, compat: LayoutCompat): boolean {
+	const margins = section.margins
+
+	return compat.mirrorMargins && (margins.left !== margins.right || (margins.gutter > 0 && !compat.gutterAtTop && !section.rtlGutter))
 }
 
 function sameAnchor(a: PageAnchor, b: PageAnchor): boolean {
@@ -1985,6 +2060,9 @@ function sameState(a: PageSnapshot, b: PageSnapshot): boolean {
 		fa.hasPrevious === fb.hasPrevious &&
 		fa.breakBeforeDone === fb.breakBeforeDone &&
 		fa.noRoom === fb.noRoom &&
+		fa.chained === fb.chained &&
+		fa.moves.length === fb.moves.length &&
+		fa.moves.every((value, k) => value === fb.moves[k]) &&
 		sameValues(fa.values, fb.values, pageShift) &&
 		sameMarker(fa.marker, fb.marker) &&
 		sameCounters(a.counters, b.counters) &&
@@ -2168,6 +2246,10 @@ export class LayoutDriver {
 
 	refresh(page: number): RefreshResult {
 		return this.paginator.refresh(page)
+	}
+
+	keepFrom(page: number): number {
+		return this.paginator.keepFrom(page)
 	}
 
 	restory(story: number): number {

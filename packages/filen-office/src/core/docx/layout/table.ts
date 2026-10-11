@@ -4,7 +4,7 @@ import type { StoryPart } from "../model/part"
 import type { ResolvedBorder, ResolvedTableRowProps, TableCellProps, TablePositionProps, WidthProps } from "../props/types"
 import type { CellFormat, TableFormat } from "../styles/resolve"
 import { ref, refItem, refPart } from "./edits"
-import { Area, BlockFlow, FlowStatus, nextToken, type Engine, type FlowSnapshot } from "./flow"
+import { Area, BlockFlow, byParity, FlowStatus, nextToken, type Engine, type FlowSnapshot } from "./flow"
 import { PageGraphic, Layer, OutputMark } from "./output"
 import { borderWidth } from "./styles"
 import { EPSILON, twips } from "./units"
@@ -365,6 +365,8 @@ export class TableLayout {
 				anchor === "page" ? frame.width : anchor === "margin" ? frame.width - frame.marginLeft - frame.marginRight : area.width
 			const align = position.xSpec
 
+			if (byParity(align)) this.engine.parityReads++
+
 			left =
 				align === "center"
 					? start + (size - x) / 2
@@ -586,8 +588,15 @@ export class TableLayout {
 		const exclusionMark = area.exclusions?.count ?? 0
 		const missingBefore = engine.styles.hasMissing
 		// The rest of a split row is laid out again when it needed fonts not loaded yet: its cells resume from
-		// these (none when a cell is inside a nested table).
-		const resume = continuing && this.flow.suspendable ? info.slots.map((_, k) => pool[k]?.snapshot() ?? null) : undefined
+		// these (null for a cell without a flow; undefined, so no resuming, for one inside a nested table).
+		const resume =
+			continuing && this.flow.suspendable
+				? info.slots.map((_, k) => {
+						const flow = pool[k]
+
+						return flow === undefined ? null : flow.snapshot()
+					})
+				: undefined
 		// Merges continued in this row: their state before, to take back when the row is.
 		const merges: { column: number; state: FlowSnapshot | undefined; area: number; bottom: number; token: number }[] = []
 		// Merges starting in this row that did not fit: they continue on the next page once the row stays.

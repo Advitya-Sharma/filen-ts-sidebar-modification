@@ -186,6 +186,9 @@ export class Engine {
 	readonly content: ContentBuilder
 	readonly layouter: ParagraphLayouter
 	readonly markers = new Map<number, ListMarker | null>()
+	// Placements read so far that depend on whether the page is odd or even (inside/outside alignment): a page
+	// that read one is laid out again rather than kept when its number changes parity.
+	parityReads = 0
 	// Endnote stories in reference order.
 	readonly endnotes: number[] = []
 	private readonly endnoteSet = new Set<number>()
@@ -360,6 +363,10 @@ export interface FlowSnapshot {
 	readonly noRoom: number
 	readonly values: PageValues | undefined
 	readonly marker: ListMarker | null | undefined
+	// A keep-with-next chain is under way (one that can no longer move: it began in an earlier area).
+	readonly chained: boolean
+	// BlockFlow.moves, each block relative to `index`.
+	readonly moves: readonly number[]
 }
 
 // A run of consecutive paragraphs with identical borders, drawn as one box.
@@ -389,6 +396,24 @@ interface Chain {
 	footnotes: number
 	token: number
 }
+
+// A chain carried over from an earlier area (a page break inside it): it can no longer move, it only keeps
+// the blocks after it from starting chains of their own.
+const STALE_CHAIN: Chain = {
+	index: 0,
+	y: 0,
+	after: 0,
+	contextual: false,
+	style: undefined,
+	hasPrevious: false,
+	empty: true,
+	mark: new OutputMark(),
+	exclusions: 0,
+	footnotes: 0,
+	token: -1
+}
+
+const NO_MOVES: readonly number[] = []
 
 const SCRATCH_ITEMS: number[] = []
 const SCRATCH_PARTS: StoryPart[] = []
@@ -444,6 +469,10 @@ export class BlockFlow {
 	// The page values the pending paragraph was built with.
 	private builtValues: PageValues | undefined = undefined
 	private chain: Chain | undefined = undefined
+	// Keep-with-next chains that moved off a page while the block they ran out of room at is still to come:
+	// pairs of pages back to that page and the block's index. An edit to that block or one before it may let
+	// the chain fit there again; blocks after it were never tried there.
+	private moves: number[] = []
 	private box: BorderBox = { borders: undefined, shading: 0, left: 0, right: 0, top: 0, bottom: 0, joins: [], open: false }
 
 	constructor(engine: Engine, story: StoryContext, region: Region, suspendable: boolean) {
@@ -570,6 +599,7 @@ export class BlockFlow {
 		this.inParagraph = false
 		this.table = undefined
 		this.chain = undefined
+		this.moves.length = 0
 		this.token = -1
 		this.box.open = false
 	}
@@ -599,7 +629,9 @@ export class BlockFlow {
 			breakBeforeDone: this.breakBeforeDone,
 			noRoom: this.noRoom,
 			values: this.builtValues,
-			marker: this.engine.markers.get(this.engine.memoKey(this.parts[this.index] ?? 0, first))
+			marker: this.engine.markers.get(this.engine.memoKey(this.parts[this.index] ?? 0, first)),
+			chained: this.chain !== undefined,
+			moves: this.moves.length === 0 ? NO_MOVES : this.moves.map((value, k) => (k % 2 === 0 ? value : value - this.index))
 		}
 	}
 
@@ -616,6 +648,10 @@ export class BlockFlow {
 		this.styleId = snapshot.styleId
 		this.hasPrevious = snapshot.hasPrevious
 		this.noRoom = snapshot.noRoom
+		for (let k = 0; k < snapshot.moves.length; k += 2)
+			this.moves.push(snapshot.moves[k] ?? 0, (snapshot.moves[k + 1] ?? 0) + snapshot.index)
+
+		if (snapshot.chained) this.chain = STALE_CHAIN
 
 		if (!snapshot.inParagraph || part === undefined) return
 
@@ -826,7 +862,7 @@ export class BlockFlow {
 		area.empty = false
 		this.areaPlaced++
 		this.index++
-		this.chain = undefined
+		this.endChain()
 
 		return FlowStatus.DONE
 	}
@@ -846,7 +882,7 @@ export class BlockFlow {
 			area.empty = false
 			this.areaPlaced++
 
-			if (table.rowsPlaced > 0) this.chain = undefined
+			if (table.rowsPlaced > 0) this.endChain()
 		}
 
 		if (status === FlowStatus.DONE) {
@@ -880,6 +916,37 @@ export class BlockFlow {
 		}
 	}
 
+	// A block not kept with the next one placed content: the chain ends with it.
+	private endChain(): void {
+		this.chain = undefined
+	}
+
+	// The page closes: moved chains whose block is laid out are done, the others are a page further on.
+	leavePage(): void {
+		const moves = this.moves
+		let kept = 0
+
+		for (let k = 0; k < moves.length; k += 2) {
+			const block = moves[k + 1] ?? 0
+
+			if (block < this.index) continue
+
+			moves[kept++] = (moves[k] ?? 0) + 1
+			moves[kept++] = block
+		}
+
+		moves.length = kept
+	}
+
+	// Pages back to the earliest page a chain moved off whose block is still to come (0: none).
+	get keepBack(): number {
+		let back = 0
+
+		for (let k = 0; k < this.moves.length; k += 2) back = Math.max(back, this.moves[k] ?? 0)
+
+		return back
+	}
+
 	// Moves an unfinished chain that started in this area to the next one; false when there is none or it
 	// started at the area's top (it cannot move anywhere better).
 	private rollbackChain(area: Area): boolean {
@@ -889,6 +956,7 @@ export class BlockFlow {
 
 		if (chain === undefined || chain.token !== area.token || chain.empty) return false
 
+		this.moves.push(0, this.index)
 		area.page.rollback(chain.mark)
 
 		if (area.exclusions !== null) area.exclusions.count = Math.min(area.exclusions.count, chain.exclusions)
@@ -1143,7 +1211,7 @@ export class BlockFlow {
 
 			// The paragraph after a keep-with-next run has its first lines here (widow control keeps two): the
 			// run stays on this page.
-			if (!props.keepNext) this.chain = undefined
+			if (!props.keepNext) this.endChain()
 		}
 
 		if (status === LayoutStatus.OVERFLOW) {
@@ -1197,7 +1265,7 @@ export class BlockFlow {
 		this.styleId = props.styleId
 		this.hasPrevious = true
 
-		if (this.chain !== undefined && !props.keepNext) this.chain = undefined
+		if (!props.keepNext) this.endChain()
 	}
 
 	private prepareOptions(props: ResolvedParagraphProps): PrepareOptions {
@@ -1424,6 +1492,10 @@ export class BlockFlow {
 			const width = objects.widths[id] ?? 0
 			const height = objects.heights[id] ?? 0
 			const x = horizontalPosition(spec, area, width)
+
+			if (byParity(spec.horizontalAlign) || byParity(spec.verticalAlign) || marginByParity(spec.horizontalFrom))
+				this.engine.parityReads++
+
 			const layer = spec.behindDoc ? Layer.BEHIND : spec.wrap === "none" ? Layer.FRONT : Layer.TEXT
 			const exclusions = area.exclusions
 			const wraps = exclusions !== null && spec.wrap !== "none" && !spec.behindDoc && spec.wrap !== "unknown"
@@ -1552,6 +1624,9 @@ export class BlockFlow {
 		const given = frame.height ?? 0
 		const rule = given === 0 ? "auto" : (frame.hRule ?? "atLeast")
 		const height = rule === "exact" ? twips(given) : rule === "atLeast" ? Math.max(natural, twips(given)) : natural
+
+		if (byParity(frame.xAlign) || (vAnchor !== "text" && byParity(frame.yAlign))) this.engine.parityReads++
+
 		const x = alignWithin(frame.xAlign, hStart, hSize, width, pageFrame.odd) ?? hStart + twips(frame.x ?? 0)
 		const y =
 			(vAnchor === "text" ? undefined : alignWithin(frame.yAlign, vStart, vSize, height, pageFrame.odd)) ??
@@ -1590,7 +1665,7 @@ export class BlockFlow {
 		area.empty = false
 		this.areaPlaced++
 		this.index = end
-		this.chain = undefined
+		this.endChain()
 
 		return FlowStatus.DONE
 	}
@@ -1834,6 +1909,15 @@ function wrapSide(wrapText: string): Wrap {
 		default:
 			return Wrap.BOTH
 	}
+}
+
+// Whether alignment `align` places by the page's parity (inside and outside).
+export function byParity(align: string | undefined): boolean {
+	return align === "inside" || align === "outside"
+}
+
+function marginByParity(from: string | undefined): boolean {
+	return from === "insideMargin" || from === "outsideMargin"
 }
 
 function alignWithin(align: string | undefined, start: number, size: number, extent: number, odd: boolean): number | undefined {

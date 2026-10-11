@@ -92,12 +92,17 @@ export class PageIndex {
 	}
 
 	// The page layout restarts at for edits to `entries`, or -1 when no page shows them: the first page showing
-	// one, or the page before when one opens it (it may now fit, in part, at the end of that page).
-	restartPage(entries: readonly TopEntry[]): number {
+	// one, or the page before when one opens it (it may now fit, in part, at the end of that page), or the page
+	// a keep-with-next chain moved off that the first page may decide (`keepFrom`: the chain may fit there now).
+	restartPage(entries: readonly TopEntry[], keepFrom?: (page: number) => number): number {
 		const first = this.firstPage(entries)
-		const opening = first > 0 ? this.byPage[first]?.[0] : undefined
 
-		return opening !== undefined && entries.includes(opening) ? first - 1 : first
+		if (first < 0) return -1
+
+		const opening = first > 0 ? this.byPage[first]?.[0] : undefined
+		const page = opening !== undefined && entries.includes(opening) ? first - 1 : first
+
+		return Math.min(page, keepFrom?.(first) ?? page)
 	}
 }
 
