@@ -1,0 +1,86 @@
+name: Office corpus
+
+# The office engines against the real-world corpus (packages/filen-office/corpus/manifest.json) and the full
+# Unicode conformance files. Neither is committed: both are downloaded, verified against their pinned SHA-256
+# and cached, so a warm run fetches nothing. Kept apart from tests.yml so the unit jobs stay fast.
+
+on:
+  workflow_dispatch:
+
+  # Also nightly, with --check-remote: a warm cache never downloads, so this is what notices a source that has
+  # gone away (GOV.UK attachments can) before the cache is ever rebuilt.
+  schedule:
+    - cron: '41 3 * * *'
+
+  push:
+    paths:
+      - 'packages/filen-office/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - 'package.json'
+      - '.github/workflows/office-corpus.yml'
+
+  pull_request:
+    paths:
+      - 'packages/filen-office/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - 'package.json'
+      - '.github/workflows/office-corpus.yml'
+
+jobs:
+  test-office-corpus:
+    concurrency:
+      group: filen-office-corpus-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        working-directory: packages/filen-office
+        run: pnpm install --frozen-lockfile --filter @filen/office...
+      - name: Cache the corpus
+        uses: actions/cache@v4
+        with:
+          path: packages/filen-office/.corpus
+          key: office-corpus-${{ hashFiles('packages/filen-office/corpus/manifest.json') }}
+          # A manifest change restores the previous corpus: the fetch then downloads only what is new and
+          # removes what is gone.
+          restore-keys: office-corpus-
+      - name: Cache the Unicode data
+        uses: actions/cache@v4
+        with:
+          path: packages/filen-office/node_modules/.cache/filen-office-unicode
+          key: office-unicode-${{ hashFiles('packages/filen-office/src/scripts/unicodeTables.ts') }}
+      - name: Fetch the corpus
+        working-directory: packages/filen-office
+        env:
+          CHECK_REMOTE: ${{ github.event_name == 'schedule' }}
+        run: |
+          if [ "$CHECK_REMOTE" = "true" ]; then
+            pnpm run corpus:fetch --check-remote
+          else
+            pnpm run corpus:fetch
+          fi
+      # Downloads the pinned UCD files and regenerates the tables from them; they must match what is committed,
+      # or the tests below would run against tables nobody committed.
+      - name: Fetch the Unicode data
+        working-directory: packages/filen-office
+        run: pnpm exec tsx src/scripts/unicodeTables.ts && git diff --exit-code -- src
+      - name: Test
+        working-directory: packages/filen-office
+        env:
+          FILEN_OFFICE_CORPUS: ${{ github.workspace }}/packages/filen-office/.corpus
+          FILEN_OFFICE_UNICODE_FULL: '1'
+        run: pnpm test

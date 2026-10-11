@@ -3,11 +3,10 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { bytesSource } from "@filen/office/core/opc"
 import { buildDocxModel, modelStats, openDocxPackage } from "@filen/office/core/docx"
+import { CORPUS_DIR as CORPUS } from "./corpusDir"
 import { modelProblems } from "./docxIntegrity"
 
-// The licensed real-world corpus is kept out of the repository; this sweep runs only where it exists
-// (OFFICE_CORPUS overrides its location).
-const CORPUS = process.env["OFFICE_CORPUS"] ?? join(import.meta.dirname, "..", "..", "..", "filen-web", "docs", "office", "corpus")
+// The licensed real-world corpus is kept out of the repository (pnpm run corpus:fetch); this sweep runs only where it exists.
 const EXTENSIONS = ["docx", "docm", "dotx", "dotm"]
 
 function corpusFiles(): string[] {

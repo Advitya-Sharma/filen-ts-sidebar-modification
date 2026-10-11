@@ -1,0 +1,2 @@
+# The real-world test corpus, downloaded by `pnpm run corpus:fetch` (see corpus/README.md).
+.corpus/

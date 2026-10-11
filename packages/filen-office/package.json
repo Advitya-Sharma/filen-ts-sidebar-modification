@@ -27,6 +27,8 @@
 		"bench:text": "node --expose-gc --import tsx src/bench/textBench.ts",
 		"generate:fonts": "tsx src/scripts/fontTables.ts",
 		"generate:unicode": "tsx src/scripts/unicodeTables.ts",
+		"corpus:manifest": "tsx src/scripts/corpusManifest.ts",
+		"corpus:fetch": "tsx src/scripts/fetchCorpus.ts",
 		"lint": "eslint src/ && prettier --check \"src/**/*.ts\""
 	},
 	"engines": {
