@@ -1,8 +1,10 @@
 import * as Comlink from "comlink"
 import { createSHA256 } from "hash-wasm"
 import { LogLevel, Wllama, WllamaAbortError, WllamaError, type ChatCompletionTool, type WllamaLogger } from "@wllama/wllama/esm/index.js"
-// Emitted by Vite as a hashed asset of this build: the engine is self-hosted, never fetched from a CDN.
-import wllamaWasmUrl from "@wllama/wllama/esm/wasm/wllama.wasm?url"
+// Emitted by Vite as a hashed asset of this build: the engine is self-hosted, never fetched from a CDN. It is
+// wllama's engine rebuilt with a settable prompt cache limit (scripts/wllama/build-wllama.sh), which the
+// package's JavaScript, patched to match, drives.
+import wllamaWasmUrl from "@/vendor/wllama/wllama.wasm?url"
 import type { AssistantGenerateRequest, AssistantGenerateResult } from "@filen/shared/assistant"
 import type { AssistantModelFile, AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import {
@@ -123,9 +125,18 @@ const BATCH_TOKENS: Readonly<Record<AssistantBackend, number>> = { webgpu: 512, 
 // turn resumed far back. With fewer copies, a turn of several tool steps with long results pushes out the
 // one the next turn resumes from, and that turn reads its whole prompt again (4 copies on the GPU path
 // did). The CPU build keeps the weights in its 4 GiB of wasm memory too, and 6 copies ran out of it on the
-// second turn; 4 got through the turns measured, yet long sessions still run out on both paths.
+// second turn; 4 got through the turns measured.
 const CONTEXT_CHECKPOINTS: Readonly<Record<AssistantBackend, number>> = { webgpu: 6, cpu: 4 }
 const CHECKPOINT_MIN_STEP = 256
+
+// The engine's host-memory prompt cache, where a slot's prompt goes when another prompt takes the slot (a
+// return to an earlier prompt family resumes from it). At the engine's default, 8 GiB, twice what the wasm
+// heap can grow to, it filled the heap and a long session ended in std::bad_alloc; 2 GiB held through 219
+// turns on the GPU path at no cost in speed or memory. On the CPU path the heap also holds the weights, the
+// KV cache and the slots' checkpoints (the tab used 3.6 GiB once loaded): a slot's prompt, 160-320 MiB with
+// its checkpoints, failed to allocate on the fourth turn, and the engine's copy of the checkpoints is not
+// guarded against that. There the cache is off and the slots alone keep their prompts.
+const PROMPT_CACHE_MIB: Readonly<Record<AssistantBackend, number>> = { webgpu: 2048, cpu: 0 }
 
 // Read through a call: TypeScript would keep `download` narrowed across the awaits before it.
 function clearDownload(controller: AbortController): void {
@@ -564,6 +575,7 @@ const api = {
 					cache_idle_slots: false,
 					n_ctx_checkpoints: CONTEXT_CHECKPOINTS[options.backend],
 					checkpoint_min_step: CHECKPOINT_MIN_STEP,
+					cache_ram_mib: PROMPT_CACHE_MIB[options.backend],
 					log_level: LogLevel.ERROR
 				})
 

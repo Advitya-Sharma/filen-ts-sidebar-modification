@@ -38,7 +38,7 @@ vi.mock("comlink", () => ({
 	releaseProxy: Symbol("releaseProxy")
 }))
 
-vi.mock("@wllama/wllama/esm/wasm/wllama.wasm?url", () => ({ default: "/assets/wllama-hash.wasm" }))
+vi.mock("@/vendor/wllama/wllama.wasm?url", () => ({ default: "/assets/wllama-hash.wasm" }))
 
 vi.mock("@wllama/wllama/esm/index.js", () => ({
 	LogLevel: { DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 },
@@ -228,7 +228,9 @@ describe("assistant worker API", () => {
 			n_ubatch: 128,
 			// The CPU build's 4 GiB of wasm memory also holds the weights: more copies ran out of it.
 			n_ctx_checkpoints: 4,
-			checkpoint_min_step: 256
+			checkpoint_min_step: 256,
+			// The weights fill most of the heap: a cached prompt did not fit beside them, so the cache is off.
+			cache_ram_mib: 0
 		})
 	})
 
@@ -241,7 +243,9 @@ describe("assistant worker API", () => {
 			n_batch: 512,
 			n_ubatch: 512,
 			n_ctx_checkpoints: 6,
-			checkpoint_min_step: 256
+			checkpoint_min_step: 256,
+			// At the engine's 8 GiB default the prompt cache outgrew the 4 GiB wasm heap in long sessions.
+			cache_ram_mib: 2048
 		})
 	})
 
