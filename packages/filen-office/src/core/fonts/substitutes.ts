@@ -22,9 +22,14 @@ export interface Substitution {
 }
 
 // Size factors for setting Aptos text in Carlito. No free font matches Aptos, and nothing derived from
-// Microsoft's font files may ship, so these stay 1 until measured from page breaks recorded in publicly
-// available Word documents.
-export const UNCALIBRATED_APTOS_SCALE = 1
+// Microsoft's font files may ship, so the body scale comes only from page breaks Word recorded
+// (w:lastRenderedPageBreak) in the 15 public Word documents of the test corpus with an Aptos theme. Metric,
+// fixed before the sweep: the share of those 139 breaks the layout breaks at on exactly the same line; ties
+// go to the factor closer to 1.
+//   scale   1      1.01   1.015  1.02   1.025  1.03   1.04   1.05   1.06   1.07
+//   exact   4.3 %  5.1 %  7.2 %  7.2 %  7.2 %  7.2 %  5.8 %  4.3 %  4.3 %  4.3 %
+// Display and Narrow faces have too few recorded breaks to measure and stay 1.
+export const UNCALIBRATED_APTOS_SCALE = 1.015
 export const UNCALIBRATED_APTOS_DISPLAY_SCALE = 1
 export const UNCALIBRATED_APTOS_NARROW_SCALE = 1
 
