@@ -5,16 +5,27 @@
 # licenses of what it contains to src/vendor/wllama/. All of it is committed; the worker loads that
 # wllama.wasm instead of the one in the npm package, whose JavaScript (patched through pnpm) it keeps.
 #
-# glue.patch lets a load set llama.cpp's host-memory prompt cache limit (cache_ram_mib). The engine's
-# default, 8 GiB, is twice the 4 GiB a wasm heap can grow to, so a long session ended in std::bad_alloc.
-# The field is appended to the load request, whose fields are read in order: the JavaScript side's
-# prototype for it (patches/@wllama__wllama@<version>.patch) must list the same fields in the same order.
+# glue.patch changes wllama's glue and llama.cpp:
+#
+# - A load can set llama.cpp's host-memory prompt cache limit (cache_ram_mib). The engine's default, 8 GiB,
+#   is twice the 4 GiB a wasm heap can grow to, so a long session ended in std::bad_alloc. The field is
+#   appended to the load request, whose fields are read in order: the JavaScript side's prototype for it
+#   (patches/@wllama__wllama@<version>.patch) must list the same fields in the same order.
+# - Loading the weights passes no whole tensor (up to ~500 MiB) through one buffer: llama.cpp stages a tensor
+#   bound for the GPU in 16 MiB pieces, since a wasm heap keeps its largest size until the page closes and
+#   Chrome keeps the shared memory it copies a GPU buffer write of 4 MiB or more through, in the page's
+#   process and in the GPU process; and reads of the file are requested in 16 MiB pieces, since each arrives
+#   as a JavaScript buffer that stays in memory until a garbage collection.
+#
+# This took the page's process from ~2.5 to ~1.0 GiB and the GPU process from ~3.9 to ~3.3 GiB right after
+# loading Qwen3.5-4B on WebGPU, with the same output and loads and turns as fast (the assistant's README has
+# the measurements).
 #
 # The recipe is the one wllama publishes with (its scripts/build_wasm.sh, run in the emscripten/emsdk
 # image), minus the compat build, which the app never loads; the prefix map gives the source tree the path
 # it has there. Every run first builds the release unpatched and requires it to be byte for byte the npm
 # package's wllama.wasm, which proves the toolchain and recipe; then it applies the patch, which recompiles
-# only cpp/wllama.cpp, and relinks.
+# only the files it changes, and relinks.
 #
 # Emscripten 4.0.20's LLVM orders the try blocks of a function in llama-kv-cache.cpp by memory address
 # (https://github.com/llvm/llvm-project/issues/204883, fixed after that release), so about one compile of

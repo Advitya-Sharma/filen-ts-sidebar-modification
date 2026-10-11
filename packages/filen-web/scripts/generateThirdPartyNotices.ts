@@ -436,9 +436,9 @@ function ffmpegModuleNotices(): Collected[] {
 
 /**
  * The assistant's inference engine, wllama's WebAssembly build of llama.cpp, rebuilt by
- * scripts/wllama/build-wllama.sh with a patch to its glue code. wllama itself (MIT) is described with its
- * npm package, whose JavaScript runs the engine. What the module compiles in, read from the manifest the
- * build writes, each with the license file the build copied:
+ * scripts/wllama/build-wllama.sh with a patch to its glue code and to llama.cpp. wllama itself (MIT) is
+ * described with its npm package, whose JavaScript runs the engine. What the module compiles in, read from
+ * the manifest the build writes, each with the license file the build copied:
  *
  * - llama.cpp and ggml (MIT), including the YaRN rope code (MIT, Jeffrey Quesnelle and Bowen Peng), whose
  *   copyright line sits in its source file.
@@ -481,7 +481,7 @@ function wllamaEngineNotices(): Collected[] {
 				terms: [
 					[
 						`llama.cpp and ggml at commit ${commit}, as the wllama ${stringField(wllama, "version", WLLAMA_MANIFEST)} release (${stringField(wllama, "repository", WLLAMA_MANIFEST)}, commit ${stringField(wllama, "commit", WLLAMA_MANIFEST)}) builds them, with its WebGPU backend. ${linkedInto}`,
-						`The build recipe and the patch applied to wllama's glue code, in the filen-ts repository (${FILEN_TS_REPOSITORY}): ${sourceList}.`
+						`The build recipe and the patch applied to wllama's glue code and to llama.cpp, in the filen-ts repository (${FILEN_TS_REPOSITORY}): ${sourceList}.`
 					].join(" "),
 					license("llama.cpp-LICENSE")
 				]

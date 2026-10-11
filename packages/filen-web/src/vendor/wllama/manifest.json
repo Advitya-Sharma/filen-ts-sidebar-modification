@@ -23,8 +23,8 @@
 	},
 	"cmake": ["-DGGML_WEBGPU=ON", "-DGGML_WEBGPU_JSPI=ON", "-DWLLAMA_TEST_BACKEND=OFF", "-DCMAKE_C_FLAGS=-ffile-prefix-map=<wllama source>=/source", "-DCMAKE_CXX_FLAGS=-ffile-prefix-map=<wllama source>=/source"],
 	"sources": {
-		"build-wllama.sh": "777685fd2770c16708f294c3f864a2dccfbd0393cd6209688cfc27c94989c65d",
-		"glue.patch": "7a42e98848f8d517f1ae036bb4751b73912a95dddb74cbe8b632351054e0db32"
+		"build-wllama.sh": "4ea525eadc2f4943cfd446b92e613e293baf4897f4a18625f44f4c1777dd7b1f",
+		"glue.patch": "93e28bbfa38f4350db8547b40590a60bafa8a803d02b8bfafbc2f01f05e6ee6d"
 	},
 	"licenses": {
 		"dawn-LICENSE": "7e1efc85a78732a13d7ddfc8b52912da7c8f8d3c6d334624b20e3f3a96297de0",
@@ -38,8 +38,8 @@
 	},
 	"output": {
 		"wllama.wasm": {
-			"bytes": 8764090,
-			"sha256": "eca341d60d62c12654b0e637db6e42e02a3fd07ea4c61fa1d5ec8149dda0db4e"
+			"bytes": 8764236,
+			"sha256": "7a15dfb5c6d9ce7ec3a9af2e51c456ab80b4363e7eb94c2490fcd26cf5267590"
 		}
 	}
 }
