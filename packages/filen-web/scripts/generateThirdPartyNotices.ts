@@ -433,6 +433,113 @@ function ffmpegModuleNotices(): Collected[] {
 }
 
 /**
+ * The assistant's inference engine, wllama's WebAssembly build of llama.cpp, rebuilt by
+ * scripts/wllama/build-wllama.sh with a patch to its glue code. wllama itself (MIT) is described with its
+ * npm package, whose JavaScript runs the engine. What the module compiles in, read from the manifest the
+ * build writes, each with the license file the build copied:
+ *
+ * - llama.cpp and ggml (MIT), including the YaRN rope code (MIT, Jeffrey Quesnelle and Bowen Peng), whose
+ *   copyright line sits in its source file.
+ * - nlohmann/json (MIT), the one library llama.cpp vendors on terms that ask for attribution; stb_image,
+ *   miniaudio, the base64 and the sha256 code are dedicated to the public domain.
+ * - Dawn's C++ WebGPU headers (BSD-3-Clause).
+ * - Emscripten's runtime and the C WebGPU implementation Dawn's package carries (both MIT OR NCSA), and
+ *   musl (MIT). libc++, libc++abi and compiler-rt are linked too, under LLVM's exception to Apache-2.0,
+ *   which asks no attribution of an object form.
+ */
+const WLLAMA_DIR = "src/vendor/wllama"
+const WLLAMA_MANIFEST = `${WLLAMA_DIR}/manifest.json`
+const WLLAMA_SOURCE = "packages/filen-web/scripts/wllama"
+
+function wllamaEngineNotices(): Collected[] {
+	const manifest = requireJson(WLLAMA_MANIFEST)
+	const wllama = objectField(manifest, "wllama", WLLAMA_MANIFEST)
+	const llamaCpp = objectField(manifest, "llama.cpp", WLLAMA_MANIFEST)
+	const json = objectField(manifest, "nlohmann/json", WLLAMA_MANIFEST)
+	const dawn = objectField(manifest, "dawn", WLLAMA_MANIFEST)
+	const emscripten = objectField(manifest, "emscripten", WLLAMA_MANIFEST)
+	const sources = objectField(manifest, "sources", WLLAMA_MANIFEST)
+	const commit = stringField(llamaCpp, "commit", WLLAMA_MANIFEST)
+	const emcc = stringField(manifest, "emcc", WLLAMA_MANIFEST)
+	const emscriptenVersion = emcc.split(" ")[0] ?? emcc
+	const license = (file: string) => readFileSync(`${WLLAMA_DIR}/licenses/${file}`, "utf8")
+	const linkedInto = `Compiled into the assistant's inference engine (${WLLAMA_DIR}/wllama.wasm), built with Emscripten ${emcc}.`
+	const sourceList = Object.keys(sources)
+		.map(name => `${WLLAMA_SOURCE}/${name} (SHA-256 ${stringField(sources, name, WLLAMA_MANIFEST)})`)
+		.join(", ")
+
+	return [
+		vendoredNotice(
+			{
+				name: "llama.cpp",
+				version: commit.slice(0, 7),
+				license: "MIT",
+				copyright: ["Copyright (c) 2023-2026 The ggml authors", "Copyright (c) 2023 Jeffrey Quesnelle and Bowen Peng"],
+				repository: stringField(llamaCpp, "repository", WLLAMA_MANIFEST),
+				terms: [
+					[
+						`llama.cpp and ggml at commit ${commit}, as the wllama ${stringField(wllama, "version", WLLAMA_MANIFEST)} release (${stringField(wllama, "repository", WLLAMA_MANIFEST)}, commit ${stringField(wllama, "commit", WLLAMA_MANIFEST)}) builds them, with its WebGPU backend. ${linkedInto}`,
+						`The build recipe and the patch applied to wllama's glue code, in the filen-ts repository (${FILEN_TS_REPOSITORY}): ${sourceList}.`
+					].join(" "),
+					license("llama.cpp-LICENSE")
+				]
+			},
+			"vendored"
+		),
+		vendoredNotice(
+			{
+				name: "nlohmann/json",
+				version: stringField(json, "version", WLLAMA_MANIFEST),
+				license: "MIT",
+				copyright: ["Copyright (c) 2013-2025 Niels Lohmann"],
+				repository: "https://github.com/nlohmann/json",
+				terms: [`JSON for Modern C++, as vendored by llama.cpp. ${linkedInto}`, license("nlohmann-json-LICENSE")]
+			},
+			"vendored"
+		),
+		vendoredNotice(
+			{
+				name: "Dawn",
+				version: stringField(dawn, "tag", WLLAMA_MANIFEST),
+				license: "BSD-3-Clause",
+				copyright: ["Copyright 2017-2025 The Dawn & Tint Authors"],
+				repository: "https://dawn.googlesource.com/dawn",
+				terms: [
+					`Dawn's C++ WebGPU headers, from its Emscripten package (${stringField(dawn, "package", WLLAMA_MANIFEST)}). ${linkedInto}`,
+					license("dawn-LICENSE")
+				]
+			},
+			"vendored"
+		),
+		vendoredNotice(
+			{
+				name: "Emscripten",
+				version: emscriptenVersion,
+				license: "MIT OR NCSA",
+				copyright: ["Copyright (c) 2010-2014 Emscripten authors"],
+				repository: "https://github.com/emscripten-core/emscripten",
+				terms: [
+					`The Emscripten runtime, and the C WebGPU implementation in Dawn's package. ${linkedInto}`,
+					license("emscripten-LICENSE")
+				]
+			},
+			"vendored"
+		),
+		vendoredNotice(
+			{
+				name: "musl",
+				version: stringField(emscripten, "musl", WLLAMA_MANIFEST),
+				license: "MIT",
+				copyright: ["Copyright © 2005-2020 Rich Felker, et al."],
+				repository: "https://git.musl-libc.org/cgit/musl",
+				terms: [`The musl C library, as bundled with Emscripten. ${linkedInto}`, license("musl-COPYRIGHT")]
+			},
+			"vendored"
+		)
+	]
+}
+
+/**
  * The third-party material @filen/office brings into the app, read from the records that package keeps:
  *
  * - The document fonts the app serves at /office/fonts/ (vite/office-fonts-plugin.ts), from
@@ -622,8 +729,9 @@ function officeDerivedNotices(): Collected[] {
 const npm = collectNpm(installed)
 const rust = collectRust(expectedSdk)
 const ffmpeg = ffmpegModuleNotices()
+const engine = wllamaEngineNotices()
 const office = [...officeFontNotices(), ...officeDerivedNotices()]
-const vendored = [...ffmpeg, ...office]
+const vendored = [...ffmpeg, ...engine, ...office]
 const collected = [...npm, ...rust.entries, ...vendored]
 
 const { texts, notices } = finalizeNotices(collected)
@@ -643,6 +751,7 @@ const output = `// AUTO-GENERATED by scripts/generateThirdPartyNotices.ts — do
 // npm:  pnpm licenses list --json --prod --no-optional --filter @filen/web... (${String(npm.length)} name@version packages)
 // rust: filen-rs @ ${rust.ref} (${String(rust.crates)} crates)  [resolved via: ${rust.source}]
 // vendored: ${ffmpeg.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${FFMPEG_MANIFEST})
+//   ${engine.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${WLLAMA_MANIFEST})
 //   @filen/office: ${office.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${OFFICE_REPO_DIR}/assets/fonts/manifest.json, ${OFFICE_REPO_DIR}/THIRD_PARTY_NOTICES.md)
 //
 // Cannot run in CI: needs a filen-rs checkout and the local cargo caches. Re-run after any SDK bump.

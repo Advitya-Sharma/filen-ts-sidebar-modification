@@ -11,6 +11,7 @@ import {
 } from "@/features/settings/lib/thirdPartyNotices"
 import { noticeRepositoryHref } from "@/features/settings/components/advanced/thirdPartyNoticesDialog.logic"
 import ffmpegManifest from "@/vendor/ffmpeg-decoders/manifest.json"
+import wllamaManifest from "@/vendor/wllama/manifest.json"
 import officeFontsManifest from "@filen/office/assets/fonts/manifest.json"
 
 const { notices: THIRD_PARTY_NOTICES, texts: LICENSE_TEXTS } = thirdPartyNoticesPayload()
@@ -225,9 +226,12 @@ describe("third-party notices payload integrity", () => {
 	})
 
 	it("describes what Emscripten links into the decoders module, with the license files the build copied", () => {
-		const vendored = (name: string) => THIRD_PARTY_NOTICES.find(notice => notice.ecosystem === "vendored" && notice.name === name)
-		const emscripten = vendored("Emscripten")
-		const musl = vendored("musl")
+		// The assistant's engine is built with another Emscripten release, listed beside this one.
+		const vendored = (name: string, version: string) =>
+			THIRD_PARTY_NOTICES.find(notice => notice.ecosystem === "vendored" && notice.name === name && notice.version === version)
+		const emscripten = vendored("Emscripten", ffmpegManifest.emcc)
+		const musl = vendored("musl", ffmpegManifest.emscripten.musl)
+
 
 		expect(emscripten).toMatchObject({ version: ffmpegManifest.emcc, license: "MIT OR NCSA" })
 		expect(musl).toMatchObject({ version: ffmpegManifest.emscripten.musl, license: "MIT" })
@@ -237,6 +241,46 @@ describe("third-party notices payload integrity", () => {
 		expect(musl === undefined ? [] : thirdPartyLicenseTexts(musl)).toContain(
 			readFileSync(new URL("../vendor/ffmpeg-decoders/licenses/musl-COPYRIGHT", import.meta.url), "utf8")
 		)
+	})
+
+	it("describes what the assistant's engine compiles in, as its manifest records it, with the license files the build copied", () => {
+		// The manifest is rewritten by every engine build; a rebuild that skips the generator fails here.
+		const license = (file: string) => readFileSync(new URL(`../vendor/wllama/licenses/${file}`, import.meta.url), "utf8")
+		const expected = [
+			{ name: "llama.cpp", version: wllamaManifest["llama.cpp"].commit.slice(0, 7), license: "MIT", file: "llama.cpp-LICENSE" },
+			{ name: "nlohmann/json", version: wllamaManifest["nlohmann/json"].version, license: "MIT", file: "nlohmann-json-LICENSE" },
+			{ name: "Dawn", version: wllamaManifest.dawn.tag, license: "BSD-3-Clause", file: "dawn-LICENSE" },
+			{ name: "Emscripten", version: wllamaManifest.emcc.split(" ")[0] ?? "", license: "MIT OR NCSA", file: "emscripten-LICENSE" },
+			{ name: "musl", version: wllamaManifest.emscripten.musl, license: "MIT", file: "musl-COPYRIGHT" }
+		]
+
+		// Every license file the build copied is cited.
+		expect(expected.map(entry => entry.file).sort()).toEqual(Object.keys(wllamaManifest.licenses).sort())
+
+		for (const { name, version, license: spdx, file } of expected) {
+			const notice = THIRD_PARTY_NOTICES.find(
+				entry => entry.ecosystem === "vendored" && entry.name === name && entry.version === version
+			)
+			const terms = notice === undefined ? [] : thirdPartyLicenseTexts(notice)
+
+			expect(notice?.license, `${name} ${version}`).toBe(spdx)
+			expect(terms, `${name} ${version}`).toContain(license(file))
+			expect(
+				terms.some(text => text.includes("src/vendor/wllama/wllama.wasm")),
+				`${name} ${version}`
+			).toBe(true)
+		}
+
+		const llama = THIRD_PARTY_NOTICES.find(entry => entry.ecosystem === "vendored" && entry.name === "llama.cpp")
+		const build =
+			(llama === undefined ? [] : thirdPartyLicenseTexts(llama)).find(text => text.includes(wllamaManifest["llama.cpp"].commit)) ?? ""
+
+		// Where the source is, pinned by commit and by content.
+		expect(build).toContain(wllamaManifest.wllama.commit)
+
+		for (const [name, hash] of Object.entries(wllamaManifest.sources)) {
+			expect(build).toContain(`packages/filen-web/scripts/wllama/${name} (SHA-256 ${hash})`)
+		}
 	})
 
 	it("describes every font @filen/office ships, as its manifest records it", () => {
