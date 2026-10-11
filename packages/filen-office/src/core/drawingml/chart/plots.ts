@@ -1,0 +1,683 @@
+import { ItemFlag } from "../displayList"
+import { D } from "../reader"
+import { plainParagraph } from "../text"
+import { categoryBand, categoryPosition, crossingValue, valuePosition, axisPosition, type AxisState } from "./axes"
+import { estimateHeight, estimateWidth, labelBody, type ChartBuilder, type Rect } from "./builder"
+import { cacheLabels, type SeriesData } from "./data"
+import { formatNumber } from "./format"
+import { labelText, placeLabel, pointConfig, seriesLabels, type PendingLabel } from "./labels"
+import type { Plot } from "./model"
+import { mutedText } from "./palette"
+import { scaleFraction, scaleTicks } from "./scale"
+import { appendMarker, pointFill, pointOverridden, pointStroke, seriesName, type SeriesStyle } from "./series"
+
+// Drawing of each plot kind into the builder's list. Every series becomes one path item (plus one per
+// point painted differently), so a long series costs one paint and one item, not one per point.
+
+export type Blanks = "gap" | "zero" | "span"
+
+export interface PlotFrame {
+	readonly builder: ChartBuilder
+	readonly plot: Plot
+	readonly styles: ReadonlyMap<number, SeriesStyle>
+	readonly inner: Rect
+	// Category (or x) and value (or y) axes; undefined for pies.
+	readonly categoryAxis: AxisState | undefined
+	readonly valueAxis: AxisState | undefined
+	readonly labels: PendingLabel[]
+	readonly blanks: Blanks
+	// Category names shared by the plot (from the first series with categories).
+	readonly categories: readonly string[]
+}
+
+function clamp(value: number, low: number, high: number): number {
+	return value < low ? low : value > high ? high : value
+}
+
+function axisClamp(state: AxisState, position: number): number {
+	return clamp(position, Math.min(state.from, state.to), Math.max(state.from, state.to))
+}
+
+function seriesValue(series: SeriesData, index: number, blanks: Blanks): number {
+	const value = series.values.numbers?.[index] ?? Number.NaN
+
+	return Number.isNaN(value) && blanks === "zero" ? 0 : value
+}
+
+function valueFormat(series: SeriesData): string {
+	return series.values.formatCode
+}
+
+// Per-category sums for stacking: positive and negative totals, and the absolute total for percent.
+function categoryTotals(plot: Plot, count: number, blanks: Blanks): Float64Array {
+	const totals = new Float64Array(count)
+
+	for (const series of plot.series) {
+		for (let k = 0; k < count; k++) {
+			const value = seriesValue(series, k, blanks)
+
+			if (Number.isFinite(value)) totals[k] = (totals[k] ?? 0) + Math.abs(value)
+		}
+	}
+
+	return totals
+}
+
+export function drawBars(frame: PlotFrame): void {
+	const { builder, plot, inner, styles } = frame
+	const category = frame.categoryAxis
+	const value = frame.valueAxis
+
+	if (category === undefined || value === undefined) return
+
+	const stacked = plot.grouping === "stacked" || plot.grouping === "percentStacked"
+	const percent = plot.grouping === "percentStacked"
+	const n = stacked ? 1 : Math.max(1, plot.series.length)
+	const overlap = stacked ? 1 : clamp(plot.overlap, -100, 100) / 100
+	const gap = clamp(plot.gapWidth, 0, 500) / 100
+	const band = categoryBand(category)
+	const width = band / (n - (n - 1) * overlap + gap)
+	const start = (-(n - (n - 1) * overlap) * width) / 2
+	const count = category.count
+	const base = crossingValue(value, category.axis)
+	const positive = new Float64Array(count)
+	const negative = new Float64Array(count)
+	const totals = percent ? categoryTotals(plot, count, frame.blanks) : null
+	const vertical = !plot.horizontal
+	const position = { x: 0, y: 0, w: 0, h: 0, end: 0, origin: 0, along: 0 }
+	const place = (k: number, offset: number, low: number, high: number): void => {
+		const c0 = categoryPosition(category, k) + start + offset
+		const p0 = axisClamp(value, valuePosition(value, low))
+		const p1 = axisClamp(value, valuePosition(value, high))
+
+		position.origin = p0
+		position.end = p1
+		position.along = c0 + width / 2
+
+		if (vertical) {
+			position.x = Math.min(c0, c0 + width)
+			position.w = Math.abs(width)
+			position.y = Math.min(p0, p1)
+			position.h = Math.abs(p1 - p0)
+		} else {
+			position.y = Math.min(c0, c0 + width)
+			position.h = Math.abs(width)
+			position.x = Math.min(p0, p1)
+			position.w = Math.abs(p1 - p0)
+		}
+	}
+
+	plot.series.forEach((series, order) => {
+		const style = styles.get(series.node)
+
+		if (style === undefined) return
+
+		const offset = stacked ? 0 : order * width * (1 - overlap)
+		const labels = seriesLabels(builder, plot.dataLabels, series.node)
+		const special: number[] = []
+		const points = Math.min(count, series.values.count)
+		const lows = new Float64Array(points)
+		const highs = new Float64Array(points).fill(Number.NaN)
+
+		for (let k = 0; k < points; k++) {
+			let v = seriesValue(series, k, frame.blanks)
+
+			if (!Number.isFinite(v)) continue
+			if (totals !== null) v = (totals[k] ?? 0) === 0 ? 0 : v / (totals[k] ?? 1)
+
+			let low = base
+			let high = v
+
+			if (stacked) {
+				low = v >= 0 ? (positive[k] ?? 0) : (negative[k] ?? 0)
+				high = low + v
+
+				if (v >= 0) positive[k] = high
+				else negative[k] = high
+			}
+
+			lows[k] = low
+			highs[k] = high
+		}
+
+		builder.begin()
+
+		for (let k = 0; k < points; k++) {
+			if (Number.isNaN(highs[k] ?? Number.NaN)) continue
+			if (pointOverridden(style, k)) {
+				special.push(k)
+
+				continue
+			}
+
+			place(k, offset, lows[k] ?? 0, highs[k] ?? 0)
+			builder.rect(position.x, position.y, position.w, position.h)
+		}
+
+		builder.end(style.fill, style.stroke, inner, 0, series.node)
+
+		for (const k of special) {
+			place(k, offset, lows[k] ?? 0, highs[k] ?? 0)
+			builder.begin()
+			builder.rect(position.x, position.y, position.w, position.h)
+			builder.end(pointFill(builder, style, k), pointStroke(style, k), inner, 0, series.node)
+		}
+
+		if (labels === undefined) return
+
+		for (let k = 0; k < points; k++) {
+			const config = pointConfig(labels, k, frame.labels)
+			const raw = seriesValue(series, k, frame.blanks)
+
+			if (config === undefined || Number.isNaN(highs[k] ?? Number.NaN)) continue
+
+			place(k, offset, lows[k] ?? 0, highs[k] ?? 0)
+
+			const share = totals === null ? Number.NaN : raw / ((totals[k] ?? 0) || 1)
+			const text = labelText(config, seriesName(series, order), frame.categories[k] ?? "", raw, valueFormat(series), share)
+
+			if (text === "") continue
+
+			const where = config.position || (stacked ? "ctr" : "outEnd")
+			// Direction the bar grows in, in pixels along the value axis.
+			const grows = position.end - position.origin >= 0 ? 1 : -1
+			const tip = where === "inBase" ? position.origin : where === "ctr" ? (position.origin + position.end) / 2 : position.end
+			const outward = where === "outEnd" || where === "inBase" ? grows : -grows
+			const side = where === "ctr" ? "ctr" : vertical ? (outward > 0 ? "b" : "t") : outward > 0 ? "r" : "l"
+
+			frame.labels.push(placeLabel(text, config, vertical ? position.along : tip, vertical ? tip : position.along, side, series.node))
+		}
+	})
+}
+
+// Catmull-Rom through the points [from, to) of xs/ys as cubic segments, from the current point.
+function smoothRun(builder: ChartBuilder, xs: Float64Array, ys: Float64Array, run: readonly number[]): void {
+	for (let r = 0; r + 1 < run.length; r++) {
+		const p0 = run[Math.max(0, r - 1)] ?? 0
+		const p1 = run[r] ?? 0
+		const p2 = run[r + 1] ?? 0
+		const p3 = run[Math.min(run.length - 1, r + 2)] ?? 0
+		const x1 = xs[p1] ?? 0
+		const y1 = ys[p1] ?? 0
+		const x2 = xs[p2] ?? 0
+		const y2 = ys[p2] ?? 0
+
+		builder.list.cubicTo(
+			x1 + ((xs[p2] ?? 0) - (xs[p0] ?? 0)) / 6,
+			y1 + ((ys[p2] ?? 0) - (ys[p0] ?? 0)) / 6,
+			x2 - ((xs[p3] ?? 0) - (xs[p1] ?? 0)) / 6,
+			y2 - ((ys[p3] ?? 0) - (ys[p1] ?? 0)) / 6,
+			x2,
+			y2
+		)
+	}
+}
+
+// A polyline through finite points; NaN breaks the line (gaps) unless blanks span them.
+function polyline(builder: ChartBuilder, xs: Float64Array, ys: Float64Array, smooth: boolean, span: boolean, closed: boolean): void {
+	let run: number[] = []
+	const flush = (): void => {
+		if (run.length === 0) return
+
+		builder.list.moveTo(xs[run[0] ?? 0] ?? 0, ys[run[0] ?? 0] ?? 0)
+
+		if (smooth && run.length > 2) {
+			smoothRun(builder, xs, ys, run)
+		} else {
+			for (let r = 1; r < run.length; r++) builder.list.lineTo(xs[run[r] ?? 0] ?? 0, ys[run[r] ?? 0] ?? 0)
+		}
+
+		if (closed) builder.list.close()
+
+		run = []
+	}
+
+	for (let k = 0; k < xs.length; k++) {
+		if (Number.isFinite(xs[k] ?? Number.NaN) && Number.isFinite(ys[k] ?? Number.NaN)) run.push(k)
+		else if (!span) flush()
+	}
+
+	flush()
+}
+
+function drawMarkers(builder: ChartBuilder, style: SeriesStyle, xs: Float64Array, ys: Float64Array, inner: Rect, source: number): void {
+	const marker = style.marker
+
+	if (marker === undefined) return
+
+	builder.begin()
+
+	for (let k = 0; k < xs.length; k++) {
+		const x = xs[k] ?? Number.NaN
+		const y = ys[k] ?? Number.NaN
+
+		if (Number.isFinite(x) && Number.isFinite(y)) appendMarker(builder, marker.symbol, x, y, marker.radius)
+	}
+
+	builder.end(marker.fill, marker.stroke, inner, 0, source)
+}
+
+function pointLabels(
+	frame: PlotFrame,
+	series: SeriesData,
+	order: number,
+	xs: Float64Array,
+	ys: Float64Array,
+	shares: Float64Array | null,
+	fallback: "r" | "ctr" | "t"
+): void {
+	const labels = seriesLabels(frame.builder, frame.plot.dataLabels, series.node)
+
+	if (labels === undefined) return
+
+	for (let k = 0; k < xs.length; k++) {
+		const config = pointConfig(labels, k, frame.labels)
+		const x = xs[k] ?? Number.NaN
+		const y = ys[k] ?? Number.NaN
+		const raw = series.values.numbers?.[k] ?? Number.NaN
+
+		if (config === undefined || !Number.isFinite(x) || !Number.isFinite(y)) continue
+
+		const text = labelText(
+			config,
+			seriesName(series, order),
+			frame.categories[k] ?? "",
+			raw,
+			valueFormat(series),
+			shares?.[k] ?? Number.NaN
+		)
+		const where = config.position
+		const side = where === "t" || where === "b" || where === "l" || where === "r" || where === "ctr" ? where : fallback
+
+		if (text !== "") frame.labels.push(placeLabel(text, config, x, y, side, series.node))
+	}
+}
+
+function smoothFlag(frame: PlotFrame, series: SeriesData): boolean {
+	const node = frame.builder.reader.child(series.node, D.C, "smooth")
+
+	return node < 0 ? frame.plot.smooth : frame.builder.reader.bool(node, "val", true)
+}
+
+export function drawLinesOrAreas(frame: PlotFrame): void {
+	const { builder, plot, inner, styles } = frame
+	const category = frame.categoryAxis
+	const value = frame.valueAxis
+
+	if (category === undefined || value === undefined) return
+
+	const count = category.count
+	const stacked = plot.grouping === "stacked" || plot.grouping === "percentStacked"
+	const percent = plot.grouping === "percentStacked"
+	const area = plot.kind === "area"
+	// Areas treat blanks as zero; lines follow c:dispBlanksAs.
+	const blanks: Blanks = area ? "zero" : frame.blanks
+	const totals = percent ? categoryTotals(plot, count, blanks) : null
+	const cumulative = new Float64Array(count)
+	const base = crossingValue(value, category.axis)
+	const baseY = axisClamp(value, valuePosition(value, base))
+	const xs = new Float64Array(count)
+
+	for (let k = 0; k < count; k++) xs[k] = categoryPosition(category, k)
+
+	plot.series.forEach((series, order) => {
+		const style = styles.get(series.node)
+
+		if (style === undefined) return
+
+		const ys = new Float64Array(count).fill(Number.NaN)
+		const previous = area && stacked ? cumulative.slice() : null
+
+		for (let k = 0; k < Math.min(count, series.values.count); k++) {
+			let v = seriesValue(series, k, blanks)
+
+			if (!Number.isFinite(v)) continue
+			if (totals !== null) v = (totals[k] ?? 0) === 0 ? 0 : v / (totals[k] ?? 1)
+			if (stacked) {
+				v += cumulative[k] ?? 0
+				cumulative[k] = v
+			}
+
+			ys[k] = axisClamp(value, valuePosition(value, v))
+		}
+
+		if (area) {
+			builder.begin()
+
+			let first = -1
+			let last = -1
+
+			for (let k = 0; k < count; k++) {
+				if (!Number.isFinite(ys[k] ?? Number.NaN)) continue
+				if (first < 0) {
+					first = k
+					builder.list.moveTo(xs[k] ?? 0, previous === null ? baseY : axisClamp(value, valuePosition(value, previous[k] ?? 0)))
+				}
+
+				builder.list.lineTo(xs[k] ?? 0, ys[k] ?? 0)
+				last = k
+			}
+
+			if (first >= 0) {
+				for (let k = last; k >= first; k--)
+					builder.list.lineTo(xs[k] ?? 0, previous === null ? baseY : axisClamp(value, valuePosition(value, previous[k] ?? 0)))
+
+				builder.list.close()
+			}
+
+			builder.end(style.fill, style.stroke, inner, ItemFlag.EVEN_ODD, series.node)
+			pointLabels(frame, series, order, xs, ys, null, "ctr")
+
+			return
+		}
+
+		builder.begin()
+		polyline(builder, xs, ys, smoothFlag(frame, series), blanks === "span", false)
+		builder.end(-1, style.stroke, inner, 0, series.node)
+		drawMarkers(builder, style, xs, ys, inner, series.node)
+		pointLabels(frame, series, order, xs, ys, null, "r")
+	})
+}
+
+export function drawScatter(frame: PlotFrame): void {
+	const { builder, plot, inner, styles } = frame
+	const xAxis = frame.categoryAxis
+	const yAxis = frame.valueAxis
+
+	if (xAxis === undefined || yAxis === undefined) return
+
+	plot.series.forEach((series, order) => {
+		const style = styles.get(series.node)
+
+		if (style === undefined) return
+
+		const count = series.values.count
+		const xs = new Float64Array(count)
+		const ys = new Float64Array(count)
+		const xNumbers = series.categories.numbers
+
+		for (let k = 0; k < count; k++) {
+			// String x values plot at 1, 2, 3... as Office does.
+			const x = xNumbers === null ? k + 1 : (xNumbers[k] ?? Number.NaN)
+			const y = seriesValue(series, k, frame.blanks)
+
+			xs[k] = Number.isFinite(x) ? axisPosition(xAxis, xAxis.scale === undefined ? x - 1 : x) : Number.NaN
+			ys[k] = Number.isFinite(y) ? valuePosition(yAxis, y) : Number.NaN
+		}
+
+		builder.begin()
+		polyline(builder, xs, ys, smoothFlag(frame, series), frame.blanks === "span", false)
+		builder.end(-1, style.stroke, inner, 0, series.node)
+		drawMarkers(builder, style, xs, ys, inner, series.node)
+		pointLabels(frame, series, order, xs, ys, null, "r")
+	})
+}
+
+export function drawPie(frame: PlotFrame): void {
+	const { builder, plot, inner, styles } = frame
+	const rings = plot.kind === "doughnut" ? plot.series : plot.series.slice(0, 1)
+
+	if (rings.length === 0) return
+
+	let maxExplosion = 0
+
+	for (const series of rings) {
+		const style = styles.get(series.node)
+
+		if (style === undefined) continue
+
+		maxExplosion = Math.max(maxExplosion, style.explosion)
+
+		for (const point of style.points.values())
+			if (Number.isFinite(point.explosion)) maxExplosion = Math.max(maxExplosion, point.explosion)
+	}
+
+	const cx = inner.x + inner.w / 2
+	const cy = inner.y + inner.h / 2
+	const outer = Math.max(1, Math.min(inner.w, inner.h) / 2 / (1 + Math.min(400, maxExplosion) / 100))
+	const hole = plot.kind === "doughnut" ? (outer * plot.holeSize) / 100 : 0
+	const thickness = (outer - hole) / rings.length
+	const startAngle = ((plot.firstSliceAngle - 90) * Math.PI) / 180
+
+	rings.forEach((series, ring) => {
+		const style = styles.get(series.node)
+
+		if (style === undefined) return
+
+		const count = series.values.count
+		const values = series.values.numbers
+		let total = 0
+
+		for (let k = 0; k < count; k++) {
+			const v = Math.abs(values?.[k] ?? Number.NaN)
+
+			if (Number.isFinite(v)) total += v
+		}
+
+		if (total <= 0) return
+
+		const r1 = hole + thickness * (ring + 1)
+		const r0 = plot.kind === "doughnut" ? hole + thickness * ring : 0
+		const labels = seriesLabels(builder, plot.dataLabels, series.node)
+		let angle = startAngle
+
+		for (let k = 0; k < count; k++) {
+			const v = Math.abs(values?.[k] ?? Number.NaN)
+
+			if (!Number.isFinite(v) || v === 0) continue
+
+			const sweep = (v / total) * Math.PI * 2
+			const a0 = angle
+			const a1 = angle + sweep
+			const middle = (a0 + a1) / 2
+			const point = style.points.get(k)
+			const explosion = point !== undefined && Number.isFinite(point.explosion) ? point.explosion : style.explosion
+			const shift = plot.kind === "doughnut" ? 0 : (outer * explosion) / 100
+			const x = cx + shift * Math.cos(middle)
+			const y = cy + shift * Math.sin(middle)
+
+			angle = a1
+			builder.begin()
+
+			if (sweep >= Math.PI * 2 - 1e-9) {
+				builder.list.moveTo(x + r1, y)
+				builder.arc(x, y, r1, 0, Math.PI * 2)
+				builder.list.close()
+
+				if (r0 > 0) {
+					builder.list.moveTo(x + r0, y)
+					builder.arc(x, y, r0, 0, -Math.PI * 2)
+					builder.list.close()
+				}
+			} else if (r0 > 0) {
+				builder.list.moveTo(x + r1 * Math.cos(a0), y + r1 * Math.sin(a0))
+				builder.arc(x, y, r1, a0, a1)
+				builder.list.lineTo(x + r0 * Math.cos(a1), y + r0 * Math.sin(a1))
+				builder.arc(x, y, r0, a1, a0)
+				builder.list.close()
+			} else {
+				builder.list.moveTo(x, y)
+				builder.list.lineTo(x + r1 * Math.cos(a0), y + r1 * Math.sin(a0))
+				builder.arc(x, y, r1, a0, a1)
+				builder.list.close()
+			}
+
+			builder.end(pointFill(builder, style, k), pointStroke(style, k), inner, ItemFlag.EVEN_ODD, series.node)
+
+			const config = labels === undefined ? undefined : pointConfig(labels, k, frame.labels)
+
+			if (config === undefined) continue
+
+			const text = labelText(
+				config,
+				seriesName(series, ring),
+				frame.categories[k] ?? "",
+				values?.[k] ?? 0,
+				valueFormat(series),
+				v / total
+			)
+
+			if (text === "") continue
+
+			const where = config.position || "bestFit"
+			const outside = where === "outEnd" || (where === "bestFit" && sweep < 0.35)
+			const radius = outside ? r1 + 6 : where === "inEnd" ? r1 * 0.8 : where === "ctr" ? (r0 + r1) / 2 : r0 + (r1 - r0) * 0.65
+			const lx = x + radius * Math.cos(middle)
+			const ly = y + radius * Math.sin(middle)
+			const side = !outside
+				? "ctr"
+				: Math.abs(Math.cos(middle)) < 0.3
+					? Math.sin(middle) < 0
+						? "t"
+						: "b"
+					: Math.cos(middle) > 0
+						? "r"
+						: "l"
+
+			frame.labels.push(placeLabel(text, config, lx, ly, side, series.node))
+		}
+	})
+}
+
+// Radar: categories on spokes clockwise from the top, values outward from the centre. The axes are drawn
+// here (a web of gridlines, spokes and labels), not by the cartesian axis code.
+export function drawRadar(frame: PlotFrame): void {
+	const { builder, plot, inner, styles } = frame
+	const category = frame.categoryAxis
+	const value = frame.valueAxis
+	const scale = value?.scale
+
+	if (category === undefined || value === undefined || scale === undefined) return
+
+	const count = Math.max(1, category.count)
+	const text = category.text
+	const labelSpace = category.axis.deleted || category.axis.labelPosition === "none" ? 4 : estimateHeight(text.size) * 1.5
+	const cx = inner.x + inner.w / 2
+	const cy = inner.y + inner.h / 2
+	const radius = Math.max(1, Math.min(inner.w, inner.h) / 2 - labelSpace)
+	const angles = new Float64Array(count)
+	const box: Rect = { x: cx - radius, y: cy - radius, w: radius * 2, h: radius * 2 }
+
+	for (let k = 0; k < count; k++) angles[k] = -Math.PI / 2 + (k * Math.PI * 2) / count
+
+	const reach = (v: number): number => radius * clamp(scaleFraction(scale, v), 0, 1)
+	const ticks = scaleTicks(scale)
+	const gridStroke =
+		value.axis.majorGridlines < 0
+			? -1
+			: builder.line(builder.reader.child(value.axis.majorGridlines, D.C, "spPr"), {
+					color: mutedText(builder.theme, 0.15),
+					width: 1,
+					round: false
+				})
+
+	if (gridStroke >= 0) {
+		builder.begin()
+
+		for (const tick of ticks) {
+			const r = reach(tick)
+
+			if (r <= 0) continue
+
+			for (let k = 0; k <= count; k++) {
+				const angle = angles[k % count] ?? 0
+				const x = cx + r * Math.cos(angle)
+				const y = cy + r * Math.sin(angle)
+
+				if (k === 0) builder.list.moveTo(x, y)
+				else builder.list.lineTo(x, y)
+			}
+		}
+
+		builder.end(-1, gridStroke, box, 0, value.axis.node)
+	}
+
+	const spokeStroke = category.axis.deleted
+		? -1
+		: builder.line(category.axis.spPr, { color: mutedText(builder.theme, 0.15), width: 1, round: false })
+
+	if (spokeStroke >= 0) {
+		builder.begin()
+
+		for (let k = 0; k < count; k++)
+			builder.segment(cx, cy, cx + radius * Math.cos(angles[k] ?? 0), cy + radius * Math.sin(angles[k] ?? 0))
+
+		builder.end(-1, spokeStroke, box, 0, category.axis.node)
+	}
+
+	plot.series.forEach((series, order) => {
+		const style = styles.get(series.node)
+
+		if (style === undefined) return
+
+		const xs = new Float64Array(count).fill(Number.NaN)
+		const ys = new Float64Array(count).fill(Number.NaN)
+
+		for (let k = 0; k < Math.min(count, series.values.count); k++) {
+			const v = seriesValue(series, k, plot.filled ? "zero" : frame.blanks)
+
+			if (!Number.isFinite(v)) continue
+
+			xs[k] = cx + reach(v) * Math.cos(angles[k] ?? 0)
+			ys[k] = cy + reach(v) * Math.sin(angles[k] ?? 0)
+		}
+
+		builder.begin()
+		polyline(builder, xs, ys, false, false, true)
+		builder.end(plot.filled ? style.fill : -1, style.stroke, box, ItemFlag.EVEN_ODD, series.node)
+		drawMarkers(builder, style, xs, ys, box, series.node)
+		pointLabels(frame, series, order, xs, ys, null, "t")
+	})
+
+	if (!value.axis.deleted && value.axis.labelPosition !== "none") {
+		const valueText = value.text
+
+		for (const tick of ticks) {
+			const label = formatNumber(tick, value.format)
+			const width = estimateWidth(label, valueText.size) + 4
+			const height = estimateHeight(valueText.size)
+			const y = cy - reach(tick)
+
+			builder.label(
+				[plainParagraph(label, valueText, "r")],
+				{ x: cx - 4 - width, y: y - height / 2, w: width, h: height },
+				labelBody("ctr"),
+				value.axis.node
+			)
+		}
+	}
+
+	if (!category.axis.deleted && category.axis.labelPosition !== "none") {
+		for (let k = 0; k < count; k++) {
+			const label = category.categories[k] ?? ""
+
+			if (label === "") continue
+
+			const angle = angles[k] ?? 0
+			const x = cx + (radius + 4) * Math.cos(angle)
+			const y = cy + (radius + 4) * Math.sin(angle)
+			const width = estimateWidth(label, text.size) + 4
+			const height = estimateHeight(text.size)
+			const cos = Math.cos(angle)
+			const sin = Math.sin(angle)
+			const left = Math.abs(cos) < 0.2 ? x - width / 2 : cos > 0 ? x : x - width
+			const top = Math.abs(sin) < 0.2 ? y - height / 2 : sin > 0 ? y : y - height
+
+			builder.label(
+				[plainParagraph(label, text, Math.abs(cos) < 0.2 ? "ctr" : cos > 0 ? "l" : "r")],
+				{ x: left, y: top, w: width, h: height },
+				labelBody("ctr"),
+				category.axis.node
+			)
+		}
+	}
+}
+
+// The category names of a plot: the first series' categories, formatted with `format` when numeric.
+export function plotCategories(plot: Plot, date1904: boolean, format: string | undefined): string[] {
+	for (const series of plot.series) {
+		if (series.categories.count > 0) return cacheLabels(series.categories, date1904, format)
+	}
+
+	return []
+}

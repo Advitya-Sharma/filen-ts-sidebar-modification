@@ -15,6 +15,9 @@
 		"./core/xml": "./src/core/xml/index.ts",
 		"./core/fonts": "./src/core/fonts/index.ts",
 		"./core/docx": "./src/core/docx/index.ts",
+		"./core/drawingml": "./src/core/drawingml/index.ts",
+		"./core/vml": "./src/core/vml/index.ts",
+		"./core/math": "./src/core/math/index.ts",
 		"./core/text": "./src/core/text/index.ts",
 		"./dom": "./src/dom/index.ts",
 		"./assets/fonts/*": "./assets/fonts/*"
@@ -27,6 +30,7 @@
 		"bench:text": "node --expose-gc --import tsx src/bench/textBench.ts",
 		"generate:fonts": "tsx src/scripts/fontTables.ts",
 		"generate:unicode": "tsx src/scripts/unicodeTables.ts",
+		"generate:geometry": "tsx src/scripts/presetGeometry.ts",
 		"corpus:manifest": "tsx src/scripts/corpusManifest.ts",
 		"corpus:fetch": "tsx src/scripts/fetchCorpus.ts",
 		"lint": "eslint src/ && prettier --check \"src/**/*.ts\""
