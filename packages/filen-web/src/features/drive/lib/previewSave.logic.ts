@@ -5,10 +5,12 @@ import { asDirectoryOrFile, narrowItem, upsertDriveItem, type DriveItem } from "
 import { extensionOf, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
 import { type DriveVariant } from "@/features/drive/lib/preferences"
 import { isEditableSpreadsheetExtension } from "@/features/spreadsheet/lib/fileKind"
+import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 import { runOp, type ActionOutcome } from "@/lib/actions/outcome"
+import type { PreviewKey } from "@/lib/i18n"
 import { asErrorDTO, plainErrorDTO, PARENT_NOT_FOUND_PREFIX, type ErrorDTO } from "@/lib/sdk/errors"
 
-// Editable-preview eligibility gate (mobile parity): only a decryptable text/code/markdown file or spreadsheet
+// Editable-preview eligibility gate (mobile parity): only a decryptable text/code/markdown file, spreadsheet or Word document
 // inside the navigable "drive" variant — never trash/recents/favorites/sharedIn/sharedOut (no
 // writable parent context, or a variant this app never lets a write reach), never an undecryptable
 // row (nothing to encode a diff against). Markdown is edited through the viewer's own source mode,
@@ -21,6 +23,28 @@ export function canSaveCopyBeside(item: DriveItem, variant: DriveVariant): boole
 
 	return variant === "drive" && base.type === "file" && !base.data.undecryptable
 }
+
+// A save an editor refused before anything was uploaded (its own check of the file it wrote failed); the
+// edits stay unsaved and the message key says why. `action` is what the user can do about it (keep the
+// edits some other way), shown with the message; `silent`: the editor shows it itself (an autosave).
+export class SaveRefusedError extends Error {
+	readonly messageKey: PreviewKey
+	readonly action: { readonly labelKey: PreviewKey; readonly run: () => void } | undefined
+	readonly silent: boolean
+
+	constructor(
+		messageKey: PreviewKey,
+		options: { action?: { readonly labelKey: PreviewKey; readonly run: () => void }; silent?: boolean } = {}
+	) {
+		super(messageKey)
+		this.name = "SaveRefusedError"
+		this.messageKey = messageKey
+		this.action = options.action
+		this.silent = options.silent === true
+	}
+}
+
+const DOCX_EDITABLE_EXTENSIONS: ReadonlySet<string> = new Set(["docx", "docm", "dotx", "dotm"])
 
 export function isEditable(item: DriveItem, variant: DriveVariant): boolean {
 	if (variant !== "drive") {
@@ -39,6 +63,13 @@ export function isEditable(item: DriveItem, variant: DriveVariant): boolean {
 	// known only by its mime type, only opens to be looked at.
 	if (category === "spreadsheet") {
 		return isEditableSpreadsheetExtension(extensionOf(driveItemName(base)))
+	}
+
+	// A Word document edits on its pages once editing is complete (until then only in internal builds): a
+	// document or template, macro-enabled or not (macros are kept byte for byte and never run; the writer
+	// keeps the file's content type).
+	if (category === "docx") {
+		return DOCX_EDITING && DOCX_EDITABLE_EXTENSIONS.has(extensionOf(driveItemName(base)))
 	}
 
 	return isTextCategory(category)

@@ -1,5 +1,6 @@
 import type { Node } from "prosemirror-model"
 import {
+	FRAGMENT_FLOATS,
 	FRAGMENT_INTS,
 	FRAGMENT_LEVEL_SHIFT,
 	LINE_FLOATS,
@@ -72,6 +73,8 @@ export interface ColumnBox {
 
 // Room drawn for a selected paragraph mark at a line's end.
 const MARK_WIDTH = 5
+// Lines whose mark boxes are remembered before starting over.
+const LINE_BOXES_LIMIT = 8192
 
 export class PagedGeometry {
 	readonly story: StoryEdits
@@ -79,9 +82,18 @@ export class PagedGeometry {
 	readonly pages: PageSource
 	readonly tester: HitTester
 	readonly region: Region
-	private readonly maps = new WeakMap<Node, { pool: Int32Array; start: number; text: string; shadow: Node; result: OffsetMap }>()
+	private readonly maps = new WeakMap<
+		Node,
+		{ pool: Int32Array; start: number; end: number; text: string; shadow: Node; result: OffsetMap }
+	>()
 	private readonly columns = new WeakMap<PageDisplayList, { group: Int32Array; boxes: ColumnBox[] }>()
 	private readonly ranges = new WeakMap<PageDisplayList, { doc: Node; range: { from: number; to: number } | undefined }>()
+	// Each page's sources located in the document as it is (null: none), filled as asked for.
+	private readonly locatedOn = new WeakMap<PageDisplayList, { doc: Node; values: (Located | null)[] }>()
+	// Boxes rangesRects() measured (left, width), by what their line shows (lineSignature, wherever it is and
+	// whichever page holds it) and the marked part of it: a line laid out again as it was (an edit in another
+	// line or on another page) is not measured again; measuring is most of the cost.
+	private readonly lineBoxes = new Map<string, Map<number, readonly number[]>>()
 	// A story shown on many pages (a header) is located on this page first.
 	private preferred = -1
 
@@ -115,9 +127,24 @@ export class PagedGeometry {
 	}
 
 	private located(page: PageDisplayList, source: number): Located | undefined {
-		const found = this.story.paragraphOf(page.sourceParts[source] ?? -1, page.sourceInts[source * SOURCE_INTS + SourceInt.ITEM] ?? -1)
+		const doc = this.story.document
+		let cache = this.locatedOn.get(page)
 
-		return found === undefined ? undefined : { pos: found.pos, node: found.node, shadow: found.shadow, part: found.layoutPart }
+		if (cache?.doc !== doc) {
+			cache = { doc, values: [] }
+			this.locatedOn.set(page, cache)
+		}
+
+		const cached = cache.values[source]
+
+		if (cached !== undefined) return cached ?? undefined
+
+		const found = this.story.paragraphOf(page.sourceParts[source] ?? -1, page.sourceInts[source * SOURCE_INTS + SourceInt.ITEM] ?? -1)
+		const located = found === undefined ? undefined : { pos: found.pos, node: found.node, shadow: found.shadow, part: found.layoutPart }
+
+		cache.values[source] = located ?? null
+
+		return located
 	}
 
 	private mapOf(page: PageDisplayList, source: number, located: Located): OffsetMap {
@@ -127,14 +154,18 @@ export class PagedGeometry {
 		const text = page.sourceTexts[source] ?? ""
 		const cached = this.maps.get(located.node)
 
-		if (
-			cached !== undefined &&
-			cached.pool === pool &&
-			cached.start === start &&
-			cached.text === text &&
-			cached.shadow === located.shadow
-		)
-			return cached.result
+		if (cached !== undefined && cached.text === text && cached.shadow === located.shadow) {
+			if (cached.pool === pool && cached.start === start) return cached.result
+
+			// A page laid out again holds its paragraphs' maps in a new pool: one equal to the old is the same map.
+			if (sameRange(cached.pool, cached.start, cached.end, pool, start, end)) {
+				cached.pool = pool
+				cached.start = start
+				cached.end = end
+
+				return cached.result
+			}
+		}
 
 		const item = located.shadow.attrs["src"]
 		const result = offsetMap(located.node, located.shadow, located.part, typeof item === "number" ? item : -1, text, {
@@ -143,7 +174,7 @@ export class PagedGeometry {
 			end
 		})
 
-		this.maps.set(located.node, { pool, start, text, shadow: located.shadow, result })
+		this.maps.set(located.node, { pool, start, end, text, shadow: located.shadow, result })
 
 		return result
 	}
@@ -731,6 +762,124 @@ export class PagedGeometry {
 		return out
 	}
 
+	// rects() of many ranges at once (marks), in one pass over the page's lines: `ranges` sorted by `from`,
+	// none longer than `longest`. Each box goes to `out`, the index of its range to `owners`.
+	rangesRects(
+		ranges: readonly { readonly from: number; readonly to: number }[],
+		longest: number,
+		pageIndex: number,
+		out: PageRect[] = [],
+		owners: number[] = []
+	): PageRect[] {
+		const boxes: number[] = []
+
+		this.rangesBoxes(ranges, longest, pageIndex, boxes, owners)
+
+		for (let b = 0; b + 3 < boxes.length; b += 4) {
+			out.push({ page: pageIndex, x: boxes[b + 2] ?? 0, y: boxes[b] ?? 0, width: boxes[b + 3] ?? 0, height: boxes[b + 1] ?? 0 })
+		}
+
+		return out
+	}
+
+	// rangesRects() as numbers, four per box (top, height, left, width), line by line in the page's order:
+	// for drawing many marks on each keystroke without an object per box.
+	rangesBoxes(
+		ranges: readonly { readonly from: number; readonly to: number }[],
+		longest: number,
+		pageIndex: number,
+		out: number[],
+		owners: number[]
+	): void {
+		const page = this.pages.page(pageIndex)
+
+		if (page === undefined || ranges.length === 0) return
+
+		const text = page.text
+
+		if (this.lineBoxes.size > LINE_BOXES_LIMIT) this.lineBoxes.clear()
+
+		for (let line = 0; line < text.lineCount; line++) {
+			const source = this.storyLine(page, line)
+
+			if (source < 0) continue
+
+			const located = this.located(page, source)
+
+			if (located === undefined) continue
+
+			const content = located.pos + 1
+			const size = located.node.content.size
+			let k = firstFrom(ranges, content - longest)
+
+			// Cheap reject before mapping: no range reaches the paragraph.
+			if (k >= ranges.length || (ranges[k]?.from ?? 0) > content + size) continue
+
+			const map = this.mapOf(page, source, located)
+			const start = text.lineInts[line * LINE_INTS + LineInt.TEXT_START] ?? 0
+			const end = text.lineInts[line * LINE_INTS + LineInt.TEXT_END] ?? 0
+			const flags = text.lineInts[line * LINE_INTS + LineInt.FLAGS] ?? 0
+			const last = (flags & LineFlag.LAST) !== 0
+			const lineFrom = content + (map.toPm[start] ?? 0)
+			const lineTo = last ? content + size : content + (map.toPm[end] ?? 0)
+			const top = text.lineFloats[line * LINE_FLOATS + LineFloat.TOP] ?? 0
+			const height = text.lineFloats[line * LINE_FLOATS + LineFloat.HEIGHT] ?? 0
+			let memo: Map<number, readonly number[]> | undefined
+
+			for (k = firstFrom(ranges, lineFrom - longest); k < ranges.length; k++) {
+				const range = ranges[k]
+
+				if (range === undefined) continue
+
+				const { from, to } = range
+
+				if (from > lineTo) break
+				// As rects() decides for one range.
+				if (to < from || content + size < from || content > to) continue
+				if (lineTo < from || lineFrom > to || (lineTo === from && from !== to && !last) || (from === to && from !== lineFrom))
+					continue
+
+				const a = Math.max(from, lineFrom)
+				const b = Math.min(to, lineTo)
+				const la = map.toLayout[a - content] ?? start
+				const lb = map.toLayout[b - content] ?? end
+				const past = to > lineTo || (last && to > content + size)
+
+				if (memo === undefined) {
+					const signature = lineSignature(page, line)
+
+					memo = this.lineBoxes.get(signature)
+
+					if (memo === undefined) {
+						memo = new Map()
+						this.lineBoxes.set(signature, memo)
+					}
+				}
+
+				// Offsets in the line (far below 2^20) and `past`, as one number.
+				const key = ((la - start) * 1_048_576 + (lb - start)) * 2 + (past ? 1 : 0)
+				let boxes = memo.get(key)
+
+				if (boxes === undefined) {
+					const drawn: PageRect[] = []
+					const measured: number[] = []
+
+					this.lineRects(page, line, la, lb, past, last, drawn)
+
+					for (const box of drawn) measured.push(box.x, box.width)
+
+					boxes = measured
+					memo.set(key, boxes)
+				}
+
+				for (let b = 0; b + 1 < boxes.length; b += 2) {
+					out.push(top, height, boxes[b] ?? 0, boxes[b + 1] ?? 0)
+					owners.push(k)
+				}
+			}
+		}
+	}
+
 	private lineRects(page: PageDisplayList, line: number, la: number, lb: number, past: boolean, last: boolean, out: PageRect[]): void {
 		const text = page.text
 		const source = text.lineInts[line * LINE_INTS + LineInt.SOURCE] ?? -1
@@ -819,6 +968,46 @@ export class PagedGeometry {
 	}
 }
 
+function sameRange(a: Int32Array, aStart: number, aEnd: number, b: Int32Array, bStart: number, bEnd: number): boolean {
+	if (aEnd - aStart !== bEnd - bStart) return false
+
+	for (let k = 0; k < aEnd - aStart; k++) if (a[aStart + k] !== b[bStart + k]) return false
+
+	return true
+}
+
+// What decides where marks on `line` are drawn across it: its box, flags and fragments (offsets relative to its
+// text start) and its text. Lines with equal signatures measure alike, wherever they are.
+function lineSignature(page: PageDisplayList, line: number): string {
+	const text = page.text
+	const ints = line * LINE_INTS
+	const floats = line * LINE_FLOATS
+	const first = text.lineInts[ints + LineInt.FIRST_FRAGMENT] ?? 0
+	const count = text.lineInts[ints + LineInt.FRAGMENT_COUNT] ?? 0
+	const start = text.lineInts[ints + LineInt.TEXT_START] ?? 0
+	let low = start
+	let high = text.lineInts[ints + LineInt.TEXT_END] ?? 0
+	let out = `${text.lineFloats[floats + LineFloat.X] ?? 0},${text.lineFloats[floats + LineFloat.WIDTH] ?? 0},${text.lineFloats[floats + LineFloat.HEIGHT] ?? 0},${text.lineInts[ints + LineInt.FLAGS] ?? 0},${high - start}`
+
+	for (let f = first; f < first + count; f++) {
+		const fi = f * FRAGMENT_INTS
+		const ff = f * FRAGMENT_FLOATS
+		const fragmentStart = text.fragmentInts[fi] ?? 0
+		const fragmentEnd = text.fragmentInts[fi + 1] ?? 0
+
+		low = Math.min(low, fragmentStart)
+		high = Math.max(high, fragmentEnd)
+		out += `|${fragmentStart - start},${fragmentEnd - start}`
+
+		for (let k = 2; k < FRAGMENT_INTS; k++) out += `,${text.fragmentInts[fi + k] ?? 0}`
+		for (let k = 0; k < FRAGMENT_FLOATS; k++) out += `,${text.fragmentFloats[ff + k] ?? 0}`
+	}
+
+	const source = text.lineInts[ints + LineInt.SOURCE] ?? -1
+
+	return `${out}|${low - start}|${(page.sourceTexts[source] ?? "").slice(low, high)}`
+}
+
 // Whether `line` is right to left or holds right-to-left text.
 function hasRightToLeft(text: TextLayout, line: number): boolean {
 	if (((text.lineInts[line * LINE_INTS + LineInt.FLAGS] ?? 0) & LineFlag.RTL) !== 0) return true
@@ -831,4 +1020,19 @@ function hasRightToLeft(text: TextLayout, line: number): boolean {
 	}
 
 	return false
+}
+
+// The first range whose `from` is at least `pos` (ranges sorted by `from`).
+function firstFrom(ranges: readonly { readonly from: number }[], pos: number): number {
+	let low = 0
+	let high = ranges.length
+
+	while (low < high) {
+		const middle = (low + high) >> 1
+
+		if ((ranges[middle]?.from ?? 0) < pos) low = middle + 1
+		else high = middle
+	}
+
+	return low
 }

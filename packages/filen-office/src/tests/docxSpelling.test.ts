@@ -310,6 +310,25 @@ describe("DocxSpelling", () => {
 		expect(seen.length).toBeGreaterThan(0)
 	})
 
+	it("moves marks through an edit without making them again, in a new list", async () => {
+		const { session, spelling, clock } = await open({ body: para(run("wrold hello")) + para(run("tow the teh")) })
+		const before = spelling.marks()
+
+		expect(marked(session, before)).toEqual(["spelling:wrold", "spelling:tow", "spelling:teh"])
+		session.dispatch(session.state.tr.insertText("hello ", find(session, "wrold")))
+
+		const after = spelling.marks()
+
+		// The same issues, moved; the list itself is new (its users see the change).
+		expect(after).not.toBe(before)
+		expect(after.map((mark, k) => mark === before[k])).toEqual([true, true, true])
+		expect(marked(session, after)).toEqual(["spelling:wrold", "spelling:tow", "spelling:teh"])
+
+		// A pass over the edited document keeps the issues it finds again.
+		await clock.advance(1000)
+		expect(spelling.marks().every((mark, k) => mark === before[k])).toBe(true)
+	})
+
 	it("re-checks only changed paragraphs", async () => {
 		const { session, checker, clock } = await open({ body: para(run("hello world")) + para(run("the end")) })
 

@@ -211,21 +211,383 @@ function clipboardSerializer(): DOMSerializer {
 	return new DOMSerializer(nodeSpecs, markSpecs)
 }
 
-// Pasted HTML becomes paragraphs with basic formatting; the session's invariants make it new content.
+// Pasted HTML (after safeClipboardHtml) becomes paragraphs with basic formatting, breaks and tabs; the session's
+// invariants make it new content.
 function clipboardParser(): DOMParser {
-	const block = (tag: string) => ({ tag, node: "paragraph" })
-
 	return new DOMParser(docxSchema, [
-		...["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "td", "th"].map(block),
+		{ tag: "p", node: "paragraph" },
+		// Spaces kept; safeClipboardHtml made each line a block of its own, so no newline reaches a text node.
+		{ tag: "pre", node: "paragraph", preserveWhitespace: true },
 		{ tag: "br", node: "break" },
-		{ tag: "strong", mark: "bold", attrs: { value: true, cs: null } },
+		{ tag: `span[${PASTE_TAB}]`, node: "tab" },
 		{ tag: "b", mark: "bold", attrs: { value: true, cs: null } },
-		{ tag: "em", mark: "italic", attrs: { value: true, cs: null } },
 		{ tag: "i", mark: "italic", attrs: { value: true, cs: null } },
 		{ tag: "u", mark: "underline" },
-		{ tag: "s", mark: "strike", attrs: { value: true } },
-		{ tag: "del", mark: "strike", attrs: { value: true } }
+		{ tag: "s", mark: "strike", attrs: { value: true } }
 	])
+}
+
+// Pasted HTML is rebuilt from its text and basic formatting before ProseMirror reads it: a flat list of <p>
+// (or <pre>) blocks holding text, <br>, tabs and b/i/u/s only, without attributes; text is escaped. Content
+// that is not text is dropped (scripts, styles, embedded and replaced content). A table becomes a paragraph
+// per row, its cells separated by tabs and a cell's paragraphs by line breaks, as Word pastes a table as text
+// (and as a copy's plain text has it): the editor cannot insert a table. Nesting is resolved here, never by
+// the HTML parser or ProseMirror's clipboard reader, which would treat a leading cell as a table fragment and
+// drop the rest. The source is parsed by DOMParser, which never runs scripts or loads anything, so what
+// ProseMirror parses next references nothing; ProseMirror's own slice data (data-pm-slice) goes too.
+const PASTE_TAB = "data-fo-tab"
+const PASTE_DROPPED = new Set([
+	"script",
+	"style",
+	"template",
+	"noscript",
+	"head",
+	"title",
+	"meta",
+	"link",
+	"base",
+	"iframe",
+	"frame",
+	"frameset",
+	"object",
+	"embed",
+	"applet",
+	"img",
+	"picture",
+	"source",
+	"track",
+	"video",
+	"audio",
+	"canvas",
+	"svg",
+	"math",
+	"map",
+	"area",
+	"form",
+	"input",
+	"button",
+	"select",
+	"textarea",
+	"option",
+	"dialog",
+	"portal",
+	"colgroup",
+	"col"
+])
+// Elements that end the paragraph before them and start a new one.
+const PASTE_BLOCKS = new Set([
+	"p",
+	"div",
+	"h1",
+	"h2",
+	"h3",
+	"h4",
+	"h5",
+	"h6",
+	"li",
+	"dt",
+	"dd",
+	"blockquote",
+	"pre",
+	"address",
+	"article",
+	"aside",
+	"section",
+	"header",
+	"footer",
+	"nav",
+	"main",
+	"figure",
+	"figcaption",
+	"center",
+	"ul",
+	"ol",
+	"dl",
+	"details",
+	"summary",
+	"hr",
+	"caption",
+	"table",
+	"thead",
+	"tbody",
+	"tfoot",
+	"tr",
+	"td",
+	"th"
+])
+// Blocks that are a paragraph of their own even when empty.
+const PASTE_PARAGRAPHS = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "pre"])
+const ESCAPED: Readonly<Record<string, string>> = { "&": "&amp;", "<": "&lt;", ">": "&gt;" }
+// Word's tab characters in its HTML (`<span style='mso-tab-count:2'>`).
+const MSO_TABS = /mso-tab-count\s*:\s*(\d+)/i
+const MARK_TAGS = ["b", "i", "u", "s"] as const
+
+interface ParsedHtml {
+	readonly body: ParsedNode | null
+}
+
+interface ParsedNode {
+	readonly nodeType: number
+	readonly nodeValue: string | null
+	readonly localName?: string
+	readonly childNodes: ArrayLike<ParsedNode>
+	readonly style?: { readonly fontWeight?: string; readonly fontStyle?: string; readonly textDecoration?: string }
+	getAttribute?(name: string): string | null
+}
+
+// Bold, italic, underline, strike: on, or off when unset.
+type PasteMarks = readonly [boolean, boolean, boolean, boolean]
+
+const NO_MARKS: PasteMarks = [false, false, false, false]
+
+function pasteMarks(node: ParsedNode, tag: string, marks: PasteMarks): PasteMarks {
+	let [bold, italic, underline, strike] = marks
+
+	if (tag === "b" || tag === "strong") bold = true
+	else if (tag === "i" || tag === "em") italic = true
+	else if (tag === "u" || tag === "ins") underline = true
+	else if (tag === "s" || tag === "del" || tag === "strike") strike = true
+
+	const style = node.style
+
+	if (style !== undefined) {
+		const weight = style.fontWeight ?? ""
+
+		// Google Docs wraps what it copies in <b style="font-weight:normal">.
+		if (/^(bold|bolder|[6-9]00)$/.test(weight)) bold = true
+		else if (/^(normal|lighter|[1-5]00)$/.test(weight)) bold = false
+
+		const fontStyle = style.fontStyle ?? ""
+
+		if (fontStyle === "italic" || fontStyle === "oblique") italic = true
+		else if (fontStyle === "normal") italic = false
+
+		const decoration = style.textDecoration ?? ""
+
+		if (decoration.includes("underline")) underline = true
+		if (decoration.includes("line-through")) strike = true
+	}
+
+	return bold === marks[0] && italic === marks[1] && underline === marks[2] && strike === marks[3]
+		? marks
+		: [bold, italic, underline, strike]
+}
+
+function marked(html: string, marks: PasteMarks): string {
+	let open = ""
+	let close = ""
+
+	for (let k = 0; k < MARK_TAGS.length; k++) {
+		if (!marks[k]) continue
+
+		open += `<${MARK_TAGS[k] ?? ""}>`
+		close = `</${MARK_TAGS[k] ?? ""}>` + close
+	}
+
+	return open + html + close
+}
+
+interface PasteBlock {
+	readonly inline: string
+	readonly pre: boolean
+}
+
+// Collects the paragraphs of a piece of HTML: inline content accumulates until a block boundary.
+class PasteBlocks {
+	readonly blocks: PasteBlock[] = []
+	private inline = ""
+	// The inline content holds more than collapsible white space.
+	private content = false
+	private pre = 0
+
+	add(parent: ParsedNode, marks: PasteMarks): void {
+		const children = parent.childNodes
+
+		for (let k = 0; k < children.length; k++) {
+			const child = children[k]
+
+			if (child === undefined) continue
+
+			if (child.nodeType === 3) {
+				this.text(child.nodeValue ?? "", marks)
+
+				continue
+			}
+
+			if (child.nodeType !== 1) continue
+
+			const tag = child.localName ?? ""
+
+			if (PASTE_DROPPED.has(tag)) continue
+
+			const inner = pasteMarks(child, tag, marks)
+
+			if (tag === "br") {
+				this.inline += marked("<br>", inner)
+				this.content = true
+			} else if (tag === "table") {
+				this.flush(false)
+				this.table(child, inner)
+			} else if (PASTE_BLOCKS.has(tag)) {
+				this.block(child, tag, inner)
+			} else {
+				const tabs = MSO_TABS.exec(child.getAttribute?.("style") ?? "")
+
+				if (tabs === null) {
+					this.add(child, inner)
+				} else {
+					this.inline += marked(`<span ${PASTE_TAB}></span>`.repeat(Math.min(Number(tabs[1]), 16)), inner)
+					this.content = true
+				}
+			}
+		}
+	}
+
+	// What is left once the source is read.
+	finish(): PasteBlock[] {
+		this.flush(false)
+
+		return this.blocks
+	}
+
+	private text(value: string, marks: PasteMarks): void {
+		if (value.length === 0) return
+
+		if (this.pre === 0 && !/[^ \t\r\n\f]/.test(value)) {
+			// White space only: a separator, never a paragraph of its own.
+			if (this.inline.length > 0) this.inline += " "
+
+			return
+		}
+
+		if (this.pre > 0) {
+			// Preformatted text keeps its lines (a paragraph each, as a plain-text paste makes them) and tabs.
+			const lines = value.split(/\r\n?|\n/)
+
+			lines.forEach((line, k) => {
+				if (k > 0) this.flush(true)
+
+				if (line.length === 0) return
+
+				this.inline += marked(
+					line
+						.split("\t")
+						.map(part => part.replace(/[&<>]/g, c => ESCAPED[c] ?? c))
+						.join(`<span ${PASTE_TAB}></span>`),
+					marks
+				)
+				this.content = true
+			})
+
+			return
+		}
+
+		this.inline += marked(
+			value.replace(/[&<>]/g, c => ESCAPED[c] ?? c),
+			marks
+		)
+		this.content = true
+	}
+
+	private block(node: ParsedNode, tag: string, marks: PasteMarks): void {
+		this.flush(false)
+
+		const before = this.blocks.length
+
+		if (tag === "pre") this.pre++
+
+		this.add(node, marks)
+
+		const paragraph = PASTE_PARAGRAPHS.has(tag)
+
+		this.flush(paragraph && this.blocks.length === before)
+
+		if (tag === "pre") this.pre--
+	}
+
+	// A paragraph per row, cells separated by tabs.
+	private table(node: ParsedNode, marks: PasteMarks): void {
+		const rows: { row: ParsedNode; marks: PasteMarks }[] = []
+		const findRows = (parent: ParsedNode, inherited: PasteMarks): void => {
+			const children = parent.childNodes
+
+			for (let k = 0; k < children.length; k++) {
+				const child = children[k]
+				const tag = child?.localName ?? ""
+
+				if (child === undefined || child.nodeType !== 1 || PASTE_DROPPED.has(tag)) continue
+
+				const inner = pasteMarks(child, tag, inherited)
+
+				if (tag === "tr") rows.push({ row: child, marks: inner })
+				else if (tag === "thead" || tag === "tbody" || tag === "tfoot") findRows(child, inner)
+				else if (tag === "caption") this.block(child, tag, inner)
+			}
+		}
+
+		findRows(node, marks)
+
+		for (const { row, marks: rowMarks } of rows) {
+			const cells: string[] = []
+			const children = row.childNodes
+
+			for (let k = 0; k < children.length; k++) {
+				const cell = children[k]
+				const tag = cell?.localName ?? ""
+
+				if (cell === undefined || (tag !== "td" && tag !== "th")) continue
+
+				const inner = new PasteBlocks()
+
+				inner.pre = this.pre
+				inner.add(cell, pasteMarks(cell, tag, rowMarks))
+				cells.push(
+					inner
+						.finish()
+						.map(block => block.inline)
+						.join("<br>")
+				)
+			}
+
+			this.blocks.push({ inline: cells.join(`<span ${PASTE_TAB}></span>`), pre: this.pre > 0 })
+		}
+	}
+
+	// Ends the paragraph being collected: kept when it has content (a lone line break or no-break space is an
+	// empty paragraph, as editors write one) or when `empty` asks for it.
+	private flush(empty: boolean): void {
+		if (this.content || empty) {
+			// A line break that ends a block adds no line (as HTML shows it).
+			const inline = this.inline.replace(/(?:<[bius]>)*<br>(?:<\/[bius]>)*\s*$/, "")
+
+			this.blocks.push({ inline: /^\s*$/.test(inline) ? "" : inline, pre: this.pre > 0 })
+		}
+
+		this.inline = ""
+		this.content = false
+	}
+}
+
+export function safeClipboardHtml(html: string): string {
+	const Parser: unknown = Reflect.get(globalThis, "DOMParser")
+
+	if (typeof Parser !== "function") return ""
+
+	const parsed = new (Parser as new () => { parseFromString(source: string, type: string): ParsedHtml })().parseFromString(
+		html,
+		"text/html"
+	)
+
+	if (parsed.body === null) return ""
+
+	const blocks = new PasteBlocks()
+
+	blocks.add(parsed.body, NO_MARKS)
+
+	return blocks
+		.finish()
+		.map(block => (block.pre ? `<pre>${block.inline}</pre>` : `<p>${block.inline}</p>`))
+		.join("")
 }
 
 const nodes = docxSchema.nodes
@@ -362,6 +724,7 @@ export class EditSink {
 			markViews: MARK_VIEWS,
 			clipboardSerializer: clipboardSerializer(),
 			clipboardParser: clipboardParser(),
+			transformPastedHTML: safeClipboardHtml,
 			clipboardTextSerializer: (_slice, view) => {
 				const { from, to } = view.state.selection
 
@@ -464,6 +827,40 @@ export class EditSink {
 
 	get focused(): boolean {
 		return this.view.hasFocus()
+	}
+
+	// The selection as a copy writes it (the same HTML and text as a copy event), or undefined when it is
+	// empty. For an app's own Cut and Copy commands (menus, touch), which write the system clipboard itself.
+	clipboardContent(): { readonly html: string; readonly text: string } | undefined {
+		const state = this.view.state
+
+		if (state.selection.empty) return undefined
+
+		const { dom, text } = this.view.serializeForClipboard(state.selection.content())
+
+		return { html: dom.innerHTML, text }
+	}
+
+	// Deletes the selection (the second half of an app's Cut); false when read-only or nothing is selected.
+	deleteSelection(): boolean {
+		if (this.readOnly || this.view.state.selection.empty) return false
+
+		return this.run(this.view.state.tr.deleteSelection())
+	}
+
+	// Pastes what an app read from the system clipboard, through the same parsers as a paste event: HTML
+	// keeps paragraphs and basic formatting only (parsed in an inert document; nothing it references loads),
+	// text is taken as typed. False when read-only or there is nothing to paste.
+	paste(content: { readonly html?: string; readonly text?: string }): boolean {
+		if (this.readOnly) return false
+		if (content.html !== undefined && content.html.length > 0) return this.view.pasteHTML(content.html)
+		if (content.text !== undefined && content.text.length > 0) return this.view.pasteText(content.text)
+
+		return false
+	}
+
+	selectAll(): boolean {
+		return this.run(selectAll(this.view.state))
 	}
 
 	get composing(): boolean {

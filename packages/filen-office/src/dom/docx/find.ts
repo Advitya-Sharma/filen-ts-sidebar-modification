@@ -1,4 +1,5 @@
-import { FIND_INTS, type DocxFindOptions } from "./protocol"
+import { nfcWithMap } from "../../core/text/nfc"
+import { DOCX_FIND_LIMIT, FIND_INTS, type DocxFindOptions } from "./protocol"
 
 // Find over laid-out pages. A match belongs to the page whose line holds its first character, so a paragraph
 // split over two pages (whose text both pages carry) reports each match once.
@@ -14,51 +15,6 @@ export interface FindablePage {
 
 const LINE_INTS = 7
 const SPECIAL = /[.*+?^${}()|[\]\\]/g
-const MARK = /\p{M}/u
-
-// `text` in NFC, with each normalised code unit's cluster in the original (start, end): a match maps back to
-// whole characters however the document composed them. Null maps when the text is already NFC.
-interface Normalised {
-	readonly text: string
-	readonly starts: Int32Array | null
-	readonly ends: Int32Array | null
-}
-
-function normalise(text: string): Normalised {
-	const nfc = text.normalize("NFC")
-
-	if (nfc === text) return { text, starts: null, ends: null }
-
-	const starts: number[] = []
-	const ends: number[] = []
-	let out = ""
-	let at = 0
-
-	while (at < text.length) {
-		// A cluster: one code point and the combining marks after it.
-		let end = at + ((text.codePointAt(at) ?? 0) > 0xffff ? 2 : 1)
-
-		while (end < text.length) {
-			const next = text.codePointAt(end) ?? 0
-
-			if (!MARK.test(String.fromCodePoint(next))) break
-
-			end += next > 0xffff ? 2 : 1
-		}
-
-		const piece = text.slice(at, end).normalize("NFC")
-
-		for (let k = 0; k < piece.length; k++) {
-			starts.push(at)
-			ends.push(end)
-		}
-
-		out += piece
-		at = end
-	}
-
-	return { text: out, starts: Int32Array.from(starts), ends: Int32Array.from(ends) }
-}
 
 // The page's line that holds offset `at` of `source`, or -1.
 export function lineOf(page: FindablePage, source: number, at: number): number {
@@ -76,14 +32,15 @@ export function findMatches(pages: Iterable<FindablePage | undefined>, query: st
 
 	if (query.length === 0) return new Int32Array(0)
 
-	const limit = options.limit ?? 10000
+	// One past the limit: whoever shows the matches can tell there are more.
+	const limit = (options.limit ?? DOCX_FIND_LIMIT) + 1
 	const pattern = new RegExp(query.normalize("NFC").replace(SPECIAL, "\\$&"), options.caseSensitive === true ? "gu" : "giu")
 
 	for (const page of pages) {
 		if (page === undefined) continue
 
 		for (let source = 0; source < page.sourceCount; source++) {
-			const { text, starts, ends } = normalise(page.sourceTexts[source] ?? "")
+			const { text, starts, ends } = nfcWithMap(page.sourceTexts[source] ?? "")
 
 			pattern.lastIndex = 0
 

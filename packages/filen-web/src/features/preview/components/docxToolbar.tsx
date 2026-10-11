@@ -8,6 +8,8 @@ import {
 	ChevronUpIcon,
 	EyeIcon,
 	MessageSquareTextIcon,
+	ReplaceAllIcon,
+	ReplaceIcon,
 	SearchIcon,
 	XIcon,
 	ZoomInIcon,
@@ -20,7 +22,14 @@ import {
 	type DocxViewerCommand,
 	type DocxViewerState
 } from "@filen/office/dom/docx"
-import { viewOnlyReasonKey, type DocxViewOnlyReason } from "@/features/preview/components/docxViewer.logic"
+import { cn } from "@filen/shared"
+import {
+	MARKUP_LABELS,
+	viewOnlyReasonKey,
+	viewerFindControls,
+	type DocxFindControls,
+	type DocxViewOnlyReason
+} from "@/features/preview/components/docxViewer.logic"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -37,7 +46,6 @@ import { TooltipIconButton } from "@/components/ui/tooltipIconButton"
 import { Kbd } from "@/lib/keymap/kbd"
 import { useAction } from "@/lib/keymap/useAction"
 import { isImeKeydown } from "@/lib/ime"
-import type { PreviewKey } from "@/lib/i18n"
 
 // The DOCX viewer's toolbar row, in the PDF viewer's style: page navigation and zoom in the centre (the
 // zoom percentage fits the page to the width again), swapped for an inline find field while finding; the
@@ -46,13 +54,8 @@ import type { PreviewKey } from "@/lib/i18n"
 
 // Typing waits this long before the document is searched (each search runs over every page).
 const FIND_DEBOUNCE_MS = 150
-
-const MARKUP_LABELS: Readonly<Record<DocxMarkupMode, PreviewKey>> = {
-	all: "previewDocxMarkupAll",
-	simple: "previewDocxMarkupSimple",
-	none: "previewDocxMarkupNone",
-	original: "previewDocxMarkupOriginal"
-}
+const FIELD_CLASS =
+	"h-7 w-40 min-w-0 rounded-xl bg-muted/60 pr-2 pl-7 text-xs leading-5 outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:opacity-50 max-sm:w-28 [&::-webkit-search-cancel-button]:appearance-none"
 
 export interface DocxToolbarProps {
 	state: DocxViewerState
@@ -67,7 +70,7 @@ export interface DocxToolbarProps {
 	onFindClosed: () => void
 }
 
-function ViewOnlyBadge({ reasons }: { reasons: readonly DocxViewOnlyReason[] }) {
+export function ViewOnlyBadge({ reasons }: { reasons: readonly DocxViewOnlyReason[] }) {
 	const { t } = useTranslation("preview")
 
 	return (
@@ -95,7 +98,16 @@ function ViewOnlyBadge({ reasons }: { reasons: readonly DocxViewOnlyReason[] }) 
 	)
 }
 
-function MarkupMenu({ mode, onChange }: { mode: DocxMarkupMode; onChange: (mode: DocxMarkupMode) => void }) {
+export function MarkupMenu({
+	mode,
+	onChange,
+	disabled
+}: {
+	mode: DocxMarkupMode
+	onChange: (mode: DocxMarkupMode) => void
+	// Modes that cannot be switched to now (another layout while edits are unsaved).
+	disabled?: (mode: DocxMarkupMode) => boolean
+}) {
 	const { t } = useTranslation("preview")
 
 	return (
@@ -135,6 +147,7 @@ function MarkupMenu({ mode, onChange }: { mode: DocxMarkupMode; onChange: (mode:
 						<DropdownMenuRadioItem
 							key={info.mode}
 							value={info.mode}
+							disabled={disabled?.(info.mode) === true}
 							closeOnClick
 						>
 							{t(MARKUP_LABELS[info.mode])}
@@ -146,24 +159,29 @@ function MarkupMenu({ mode, onChange }: { mode: DocxMarkupMode; onChange: (mode:
 	)
 }
 
-function FindField({
-	state,
-	dispatch,
+export function DocxFindField({
+	find,
 	focus,
-	onClosed
+	onClosed,
+	replaceOpen: replaceOpenProp
 }: {
-	state: DocxViewerState
-	dispatch: (command: DocxViewerCommand) => void
+	find: DocxFindControls
+	// Bumped to focus the find field (and select its text) again while it is open.
 	focus: number
 	onClosed: () => void
+	// Opened as "Find and replace": the replace field shows from the start.
+	replaceOpen?: boolean
 }) {
 	const { t } = useTranslation("preview")
-	const find = state.find
 	const [text, setText] = useState(find.query)
+	const [replacement, setReplacement] = useState("")
+	const [replaceOpen, setReplaceOpen] = useState(replaceOpenProp === true)
 	const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 	const inputRef = useRef<HTMLInputElement | null>(null)
 	const searched = text === find.query
 	const current = find.count === 0 ? 0 : find.active + 1
+	const counts = { current, total: find.count }
+	const replace = find.replace
 
 	// Mod+F again in the field selects what it holds, as in a browser's find bar.
 	const findAgain = useAction(
@@ -194,32 +212,27 @@ function FindField({
 			timer.current = null
 		}
 
-		dispatch({ type: "find.query", query, caseSensitive })
+		find.search(query, caseSensitive)
 	}
 
 	const close = (): void => {
-		dispatch({ type: "find.close" })
+		find.close()
 		onClosed()
 	}
 
-	const onKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
-		// Keys an input method is composing with are its own (Enter confirms the composition).
+	// Keys an input method is composing with are its own (Enter confirms the composition); Escape is taken
+	// here, as the preview overlay closes on an Escape nothing inside took.
+	const onFieldKeyDown = (event: KeyboardEvent<HTMLInputElement>, enter: (shift: boolean) => void): void => {
 		if (isImeKeydown(event.nativeEvent)) {
 			return
 		}
 
 		if (event.key === "Escape") {
-			// Taken here: the preview overlay closes on an Escape nothing inside took.
 			event.preventDefault()
 			close()
 		} else if (event.key === "Enter") {
 			event.preventDefault()
-
-			if (!searched) {
-				search(text, find.caseSensitive)
-			} else {
-				dispatch({ type: event.shiftKey ? "find.previous" : "find.next" })
-			}
+			enter(event.shiftKey)
 		}
 	}
 
@@ -239,7 +252,7 @@ function FindField({
 					aria-label={t("previewDocxFindPlaceholder")}
 					placeholder={t("previewDocxFindPlaceholder")}
 					value={text}
-					className="h-7 w-40 min-w-0 rounded-xl bg-muted/60 pr-2 pl-7 text-xs leading-5 outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30 max-sm:w-28 [&::-webkit-search-cancel-button]:appearance-none"
+					className={FIELD_CLASS}
 					onChange={event => {
 						const query = event.target.value
 
@@ -251,17 +264,25 @@ function FindField({
 
 						timer.current = setTimeout(() => {
 							timer.current = null
-							dispatch({ type: "find.query", query, caseSensitive: find.caseSensitive })
+							find.search(query, find.caseSensitive)
 						}, FIND_DEBOUNCE_MS)
 					}}
-					onKeyDown={onKeyDown}
+					onKeyDown={event => {
+						onFieldKeyDown(event, shift => {
+							if (!searched) {
+								search(text, find.caseSensitive)
+							} else {
+								find.step(shift ? -1 : 1)
+							}
+						})
+					}}
 				/>
 			</div>
 			<span
 				aria-hidden="true"
-				className="w-12 shrink-0 text-center text-xs text-muted-foreground tabular-nums"
+				className="min-w-12 shrink-0 text-center text-xs text-muted-foreground tabular-nums"
 			>
-				{text.length > 0 && searched ? t("previewDocxFindCount", { current, total: find.count }) : null}
+				{text.length > 0 && searched ? t(find.capped ? "previewDocxFindCountCapped" : "previewDocxFindCount", counts) : null}
 			</span>
 			<span
 				role="status"
@@ -270,23 +291,23 @@ function FindField({
 				{text.length > 0 && searched
 					? find.count === 0
 						? t("previewDocxFindNoMatches")
-						: t("previewDocxFindStatus", { current, total: find.count })
+						: t(find.capped ? "previewDocxFindStatusCapped" : "previewDocxFindStatus", counts)
 					: null}
 			</span>
 			<TooltipIconButton
 				label={t("previewDocxFindPrevious")}
-				disabled={!isDocxCommandEnabled(state, "find.previous")}
+				disabled={find.count === 0}
 				onClick={() => {
-					dispatch({ type: "find.previous" })
+					find.step(-1)
 				}}
 			>
 				<ChevronUpIcon />
 			</TooltipIconButton>
 			<TooltipIconButton
 				label={t("previewDocxFindNext")}
-				disabled={!isDocxCommandEnabled(state, "find.next")}
+				disabled={find.count === 0}
 				onClick={() => {
-					dispatch({ type: "find.next" })
+					find.step(1)
 				}}
 			>
 				<ChevronDownIcon />
@@ -301,6 +322,60 @@ function FindField({
 			>
 				<CaseSensitiveIcon />
 			</TooltipIconButton>
+			{replace === undefined ? null : (
+				<>
+					<TooltipIconButton
+						label={t("previewDocxShowReplace")}
+						pressed={replaceOpen}
+						className={replaceOpen ? "bg-accent text-foreground" : undefined}
+						onClick={() => {
+							setReplaceOpen(open => !open)
+						}}
+					>
+						<ReplaceIcon />
+					</TooltipIconButton>
+					{replaceOpen ? (
+						<>
+							<input
+								type="text"
+								aria-label={t("previewDocxReplacePlaceholder")}
+								placeholder={t("previewDocxReplacePlaceholder")}
+								value={replacement}
+								disabled={replace.disabled}
+								className={cn(FIELD_CLASS, "pl-2")}
+								onChange={event => {
+									setReplacement(event.target.value)
+								}}
+								onKeyDown={event => {
+									onFieldKeyDown(event, () => {
+										if (find.count > 0 && searched) {
+											replace.one(replacement)
+										}
+									})
+								}}
+							/>
+							<TooltipIconButton
+								label={t("previewDocxReplace")}
+								disabled={replace.disabled || find.count === 0 || !searched}
+								onClick={() => {
+									replace.one(replacement)
+								}}
+							>
+								<ReplaceIcon />
+							</TooltipIconButton>
+							<TooltipIconButton
+								label={t("previewDocxReplaceAll")}
+								disabled={replace.disabled || find.count === 0 || !searched}
+								onClick={() => {
+									replace.all(replacement)
+								}}
+							>
+								<ReplaceAllIcon />
+							</TooltipIconButton>
+						</>
+					) : null}
+				</>
+			)}
 			<TooltipIconButton
 				label={t("previewDocxFindClose")}
 				onClick={close}
@@ -397,9 +472,8 @@ export function DocxToolbar({ state, dispatch, markup, onMarkupChange, viewOnly,
 		<div className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 px-2">
 			<div className="flex min-w-0 items-center">{viewOnly.length > 0 ? <ViewOnlyBadge reasons={viewOnly} /> : null}</div>
 			{state.find.open ? (
-				<FindField
-					state={state}
-					dispatch={dispatch}
+				<DocxFindField
+					find={viewerFindControls(state, dispatch)}
 					focus={findFocus}
 					onClosed={onFindClosed}
 				/>

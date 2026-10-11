@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type RefObject } from "react"
 import { useTranslation } from "react-i18next"
 import { bytesSource } from "@filen/office/core/opc"
 import { DEFAULT_MARKUP_MODE, markupInfo, type DocxMarkupMode } from "@filen/office/dom/docx"
@@ -30,6 +30,8 @@ import {
 } from "@/features/preview/components/docxViewer.logic"
 import { DocxAnnotationLayer, type DocxBalloonKey } from "@/features/preview/components/docxAnnotations"
 import { DocxPreviewFallback } from "@/features/preview/components/docxPreviewFallback"
+import { DocxEditView, type DocxSaveSource } from "@/features/preview/components/docxEditor"
+import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 import { DocxToolbar } from "@/features/preview/components/docxToolbar"
 import { LoadingState } from "@/components/loadingState"
 import { PreviewErrorState, PreviewGate } from "@/features/preview/components/previewErrorState"
@@ -45,6 +47,18 @@ export interface DocxViewerProps {
 	alt: string
 	// The drive listing the file was opened from (a view-only reason outside the user's own drive).
 	variant?: DriveVariant
+	// The overlay's editing side for a file the user may edit (only with editing built in): the document
+	// opens in the editor when the file can be saved as it mounts.
+	editing?: DocxEditingProps
+}
+
+export interface DocxEditingProps {
+	// Saving is possible now (false after a rename to another format, or a save that failed for good).
+	writable: boolean
+	renamed: boolean
+	onDirtyChange: (dirty: boolean) => void
+	saveRef: RefObject<DocxSaveSource | null>
+	onAutosave: () => boolean
 }
 
 // Space around and between pages (px); fit-to-width leaves it on both sides.
@@ -68,28 +82,51 @@ function sourceFor(bytes: Uint8Array, mode: DocxMarkupMode): DocxSource {
 	return { host: docxHost, bytes: bytesSource(bytes), options: { fontUrls: DOCX_FONT_URLS, view: markupInfo(mode).view } }
 }
 
-export function DocxViewer({ item, alt, variant }: DocxViewerProps) {
-	const result = usePreviewBytes(item)
+export function DocxViewer({ item, alt, variant, editing }: DocxViewerProps) {
+	// Editing or viewing is decided as the file mounts. The editor keeps the document it opened across the
+	// user's own saves (each makes the file a new version under a new uuid): its bytes stay the ones it read.
+	const [edit] = useState(() => DOCX_EDITING && editing?.writable === true)
+	const [openedItem] = useState(item)
+	const result = usePreviewBytes(edit ? openedItem : item)
 	const downloading = result.status === "pending"
 	const anon = usePreviewAccessMode() === "anon"
 	const archive = usePreviewByteSource() !== null
 
 	// The worker starts while the file downloads; a buffer already cached, or a failed download, starts none.
+	// The editor lays out on this thread and needs no worker.
 	useEffect(() => {
-		if (downloading) {
+		if (downloading && !edit) {
 			prewarmDocxWorker()
 		}
-	}, [downloading])
+	}, [downloading, edit])
 
 	return (
 		<PreviewGate result={result}>
-			{ready => (
-				<DocxDocumentView
-					bytes={ready.bytes}
-					alt={alt}
-					context={{ anon, archive, linked: isLinkedEmbedItem(item), variant }}
-				/>
-			)}
+			{ready => {
+				const viewer = (
+					<DocxDocumentView
+						bytes={ready.bytes}
+						alt={alt}
+						context={{ anon, archive, linked: isLinkedEmbedItem(item), variant }}
+					/>
+				)
+
+				// DOCX_EDITING first: a build without editing drops the editor entirely.
+				return DOCX_EDITING && edit && editing !== undefined ? (
+					<DocxEditView
+						bytes={ready.bytes}
+						alt={alt}
+						writable={editing.writable}
+						renamed={editing.renamed}
+						onDirtyChange={editing.onDirtyChange}
+						saveRef={editing.saveRef}
+						onAutosave={editing.onAutosave}
+						viewer={() => viewer}
+					/>
+				) : (
+					viewer
+				)
+			}}
 		</PreviewGate>
 	)
 }

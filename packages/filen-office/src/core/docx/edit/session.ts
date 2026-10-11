@@ -1,6 +1,6 @@
 import type { Mark, MarkType, Node } from "prosemirror-model"
 import { EditorState, type Transaction } from "prosemirror-state"
-import { history, redo, redoDepth, undo, undoDepth } from "prosemirror-history"
+import { closeHistory, history, redo, redoDepth, undo, undoDepth } from "prosemirror-history"
 import { AddMarkStep, RemoveMarkStep } from "prosemirror-transform"
 import type { Story } from "../model/index"
 import type { DocxGateReason } from "../package"
@@ -16,9 +16,9 @@ import {
 } from "./commands"
 import type { DocxEditContext } from "./context"
 import { FormatResolver, RUN_TOGGLES, TOGGLE_ON, alignmentOf, type ListKind, type NewList, type RunToggle } from "./formats"
-import { docxInvariants, type ListNormalizer } from "./invariants"
+import { docxInvariants, markInternal, type ListNormalizer } from "./invariants"
 import { conservativeProof, lockBlocks, proveBlocks, type BlockProof } from "./proof"
-import { FORMATTING_MARKS, docxSchema, inlineLevel, type IndentAttrs, type LockReason } from "./schema"
+import { FORMATTING_MARKS, NO_SOURCE, docxSchema, inlineLevel, type IndentAttrs, type LockReason } from "./schema"
 
 export type FormatState = "on" | "off" | "mixed"
 
@@ -161,6 +161,7 @@ export class DocxEditorSession {
 	private blockTallies = new WeakMap<Node, Tally>()
 	private selectionTally: { doc: Node; from: number; to: number; tally: Tally } | null = null
 	private dirtyOf: { doc: Node; saved: Node; dirty: boolean } | null = null
+	private savedFormsOf: { saved: Node; forms: Map<number, Node> } | null = null
 
 	constructor(context: DocxEditContext, options: DocxEditorOptions = {}) {
 		const story = options.story ?? context.model.body
@@ -252,6 +253,154 @@ export class DocxEditorSession {
 		return requests.length
 	}
 
+	// The source blocks of the last-saved document (paragraphs, tables, content controls) by source id, where
+	// the id is that block's alone in it: what an edited block can go back to.
+	private savedForms(): Map<number, Node> {
+		const cached = this.savedFormsOf
+
+		if (cached?.saved === this.saved) return cached.forms
+
+		const forms = new Map<number, Node>()
+		const repeated = new Set<number>()
+
+		this.saved.descendants(node => {
+			if (node.isInline) return false
+
+			const src = node.attrs["src"]
+
+			if (typeof src === "number" && src !== NO_SOURCE && !node.isInline) {
+				if (forms.has(src)) repeated.add(src)
+				else forms.set(src, node)
+			}
+
+			return !node.isTextblock && node.type !== nodes.locked_block
+		})
+
+		for (const src of repeated) forms.delete(src)
+
+		this.savedFormsOf = { saved: this.saved, forms }
+
+		return forms
+	}
+
+	// Blocks changed since the last save (or since the document opened) that can go back to how they were
+	// saved: source paragraphs, and source tables or content controls changed other than in their source
+	// paragraphs (rows, new paragraphs), each with its own form in the last-saved document. Positions in
+	// state.doc, in document order. What a save that the writer refused falls back on.
+	editedBlocks(): number[] {
+		const forms = this.savedForms()
+		const seen = new Map<number, number>()
+
+		this.current.doc.descendants(node => {
+			if (node.isInline) return false
+
+			const src = node.attrs["src"]
+
+			if (typeof src === "number" && src !== NO_SOURCE) seen.set(src, (seen.get(src) ?? 0) + 1)
+
+			return !node.isTextblock && node.type !== nodes.locked_block
+		})
+
+		const revertible = (node: Node): boolean => {
+			const src = node.attrs["src"]
+
+			return typeof src === "number" && src !== NO_SOURCE && seen.get(src) === 1 && forms.has(src)
+		}
+		const out: number[] = []
+		const visit = (parent: Node, offset: number): boolean => {
+			let found = false
+
+			parent.forEach((node, at) => {
+				const pos = offset + at
+
+				if (node.isInline || node.type === nodes.locked_block || forms.get(node.attrs["src"] as number) === node) return
+
+				if (node.isTextblock) {
+					if (revertible(node)) {
+						out.push(pos)
+						found = true
+					}
+
+					return
+				}
+
+				if (visit(node, pos + 1)) {
+					found = true
+
+					return
+				}
+
+				// Changed, but not in a source paragraph of its own: the container is what goes back.
+				if ((node.type === nodes.table || node.type === nodes.sdt) && revertible(node)) {
+					out.push(pos)
+					found = true
+				}
+			})
+
+			return found
+		}
+
+		visit(this.current.doc, 0)
+
+		return out
+	}
+
+	// The step taking the blocks at `positions` of `state` back to their last-saved form: a block saved as the
+	// file has it is locked (kept as its bytes, decision 5); one saved with edits goes back to that edited
+	// form, which the writer accepted then.
+	private revertStep(state: EditorState, positions: readonly number[]): Transaction | null {
+		const forms = this.savedForms()
+		const tr = state.tr
+
+		for (const pos of [...positions].sort((a, b) => b - a)) {
+			const node = tr.doc.nodeAt(pos)
+			const form = node === null ? undefined : forms.get(node.attrs["src"] as number)
+
+			if (node === null || form === undefined) continue
+
+			const replacement =
+				this.story.pristine.has(form) && (form.type === nodes.paragraph || form.type === nodes.table)
+					? this.builder.lockedBlock(this.story, form, "proof")
+					: form
+
+			tr.replaceWith(pos, pos + node.nodeSize, replacement)
+		}
+
+		return tr.docChanged ? markInternal(tr) : null
+	}
+
+	// A read-only stand-in for this session whose document has the blocks at `positions` (from editedBlocks)
+	// back at their last-saved form: what a save would write (pass it to the writer). The session is unchanged.
+	withReverted(positions: readonly number[]): DocxEditorSession {
+		const tr = this.revertStep(this.current, positions)
+		const trial: DocxEditorSession = Object.create(this) as DocxEditorSession
+
+		Object.defineProperty(trial, "current", { value: tr === null ? this.current : this.current.apply(tr) })
+
+		return trial
+	}
+
+	// Takes these blocks (nodes of the document, found where they are now) back to their last-saved form, as
+	// withReverted() wrote them: one undoable step, so the edits come back with an undo (and a later save takes
+	// them back again). Blocks changed since are left. Returns the number taken back.
+	revert(blocks: readonly Node[]): number {
+		const wanted = new Set(blocks)
+		const positions: number[] = []
+
+		this.current.doc.descendants((node, pos) => {
+			if (wanted.has(node)) positions.push(pos)
+
+			return !node.isTextblock && wanted.size > positions.length
+		})
+
+		const tr = this.revertStep(this.current, positions)
+
+		// An undo step of its own (never merged with the typing before it).
+		if (tr === null || !this.apply(closeHistory(tr))) return 0
+
+		return positions.length
+	}
+
 	// Applies a transaction from a view or a command. False when the invariants or the read-only gate
 	// refused it.
 	dispatch(tr: Transaction): boolean {
@@ -273,9 +422,12 @@ export class DocxEditorSession {
 		return this.snapshot().enabled[type]
 	}
 
-	// Call after the document was written: it is no longer dirty.
-	markSaved(): void {
-		this.saved = this.current.doc
+	// Call after the document was written: it is no longer dirty. `doc` is the document as it was written
+	// (state.doc when the save read it), so edits made while the file was stored stay unsaved.
+	markSaved(doc: Node = this.current.doc): void {
+		if (doc === this.saved) return
+
+		this.saved = doc
 		this.changed()
 	}
 

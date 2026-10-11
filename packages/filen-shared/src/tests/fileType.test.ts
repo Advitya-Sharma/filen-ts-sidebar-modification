@@ -40,6 +40,12 @@ describe("extensionForMime", () => {
 		expect(extensionForMime("application/vnd.ms-excel.sheet.macroEnabled.12")).toBe("xlsm")
 	})
 
+	it("reads macro-enabled Word documents and Word templates by their own types", () => {
+		expect(extensionForMime("application/vnd.ms-word.document.macroEnabled.12")).toBe("docm")
+		expect(extensionForMime("application/vnd.openxmlformats-officedocument.wordprocessingml.template")).toBe("dotx")
+		expect(extensionForMime("application/vnd.ms-word.template.macroEnabled.12")).toBe("dotm")
+	})
+
 	it("reads a transport stream's type as m2ts, never TypeScript's .ts", () => {
 		expect(extensionForMime("video/mp2t")).toBe("m2ts")
 		expect(extensionForMime("video/vnd.dlna.mpeg-tts")).toBe("m2ts")

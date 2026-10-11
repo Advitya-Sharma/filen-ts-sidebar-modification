@@ -15,6 +15,17 @@ export {
 	type DocxParagraphStyleInfo
 } from "./commands"
 export { openDocxEditContext, type DocxEditContext, type EditContextParts } from "./context"
+export {
+	STORY_FIND_LIMIT,
+	findInStory,
+	findPattern,
+	matchHolds,
+	replaceAll,
+	replaceMatches,
+	selectMatch,
+	type StoryFindOptions,
+	type StoryMatch
+} from "./find"
 export { FormatResolver, alignmentOf, type ListKind, type RunToggle } from "./formats"
 export { RunBases, formattingMarks, type RunBase } from "./formatting"
 export {
@@ -54,4 +65,5 @@ export {
 	type MarkerKind,
 	type MarkerList
 } from "./schema"
+export { findUnsavableBlocks, type UnsavableBlocks } from "./unsavable"
 export { DocxEditorSession, type DocxEditorOptions, type DocxEditorSnapshot, type DocxReadOnlyReason, type FormatState } from "./session"

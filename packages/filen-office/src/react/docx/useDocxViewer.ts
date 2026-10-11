@@ -8,6 +8,7 @@ import {
 	type DocxViewerCommand,
 	type DocxViewerState
 } from "../../dom/docx/viewer"
+import { DOCX_FIND_LIMIT } from "../../dom/docx/protocol"
 import type { DocxPagesHandle, DocxPagesProps } from "./DocxPages"
 import { findMatchList, type DocxFindMatch } from "./find"
 import type { DocxDocument } from "./store"
@@ -37,11 +38,13 @@ interface FindState {
 	// Index into matches, or -1 until the first results pick one.
 	readonly active: number
 	readonly matches: readonly DocxFindMatch[]
+	// More matched than `matches` holds.
+	readonly capped: boolean
 	// The page in view when the query was entered: the first match from there becomes current.
 	readonly from: number
 }
 
-const CLOSED: FindState = { open: false, query: "", caseSensitive: false, active: -1, matches: [], from: 0 }
+const CLOSED: FindState = { open: false, query: "", caseSensitive: false, active: -1, matches: [], capped: false, from: 0 }
 
 export function useDocxViewer(document: DocxDocument, options: DocxViewerOptions = {}): DocxViewer {
 	const gap = options.gap ?? 16
@@ -72,7 +75,9 @@ export function useDocxViewer(document: DocxDocument, options: DocxViewerOptions
 			.then(found => {
 				if (!current) return
 
-				const matches = findMatchList(found)
+				const all = findMatchList(found)
+				const capped = all.length > DOCX_FIND_LIMIT
+				const matches = capped ? all.slice(0, DOCX_FIND_LIMIT) : all
 
 				setFind(previous => {
 					if (previous.query !== query || previous.caseSensitive !== caseSensitive || !previous.open) return previous
@@ -86,7 +91,7 @@ export function useDocxViewer(document: DocxDocument, options: DocxViewerOptions
 						pendingScroll.current = matches[active] ?? null
 					}
 
-					return { ...previous, matches, active: Math.min(active, matches.length - 1) }
+					return { ...previous, matches, capped, active: Math.min(active, matches.length - 1) }
 				})
 			})
 			.catch(() => undefined)
@@ -167,7 +172,7 @@ export function useDocxViewer(document: DocxDocument, options: DocxViewerOptions
 					// The same search again keeps its results: nothing would run it anew.
 					if (previous.open && previous.query === command.query && previous.caseSensitive === caseSensitive) return previous
 
-					return { open: true, query: command.query, caseSensitive, active: -1, matches: [], from: page }
+					return { open: true, query: command.query, caseSensitive, active: -1, matches: [], capped: false, from: page }
 				})
 
 				break
@@ -191,7 +196,7 @@ export function useDocxViewer(document: DocxDocument, options: DocxViewerOptions
 		pageCountFinal: status === "ready",
 		zoom,
 		zoomMode: zoomMode === "fitWidth" ? "fitWidth" : "custom",
-		find: { open, query, caseSensitive, count: find.matches.length, active }
+		find: { open, query, caseSensitive, count: find.matches.length, capped: find.capped, active }
 	}
 
 	return {

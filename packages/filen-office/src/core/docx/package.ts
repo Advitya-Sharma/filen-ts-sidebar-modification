@@ -46,8 +46,10 @@ export interface DocxFacts {
 }
 
 // Reasons a document opens view-only (gate 0 of the save proof). altChunk is not one of them: it is
-// preserved and never rendered. "malformed" also covers parts read later, passed after the facts.
-export type DocxGateReason = "strict" | "signed" | "protected" | "writeProtected" | "template" | "malformed"
+// preserved and never rendered; nor is a template (.dotx/.dotm), saved with the content type it has, or a
+// macro project, copied byte for byte and never run. "malformed" also covers parts read later, passed after
+// the facts.
+export type DocxGateReason = "strict" | "signed" | "protected" | "writeProtected" | "malformed"
 
 // `parts`: anything else read for the document that knows whether its markup was malformed (the model,
 // styles, numbering, theme).
@@ -60,7 +62,6 @@ export function gateReasons(facts: DocxFacts, ...parts: readonly ({ readonly mal
 	if (protection !== undefined && protection.enforced && protection.edit !== undefined && protection.edit !== "none")
 		reasons.push("protected")
 	if (facts.writeProtection?.hashed === true) reasons.push("writeProtected")
-	if (facts.template) reasons.push("template")
 	if (facts.malformed || parts.some(part => part?.malformed === true)) reasons.push("malformed")
 
 	return reasons

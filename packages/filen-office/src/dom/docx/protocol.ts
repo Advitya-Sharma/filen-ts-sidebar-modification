@@ -176,9 +176,12 @@ export interface DocxSessionApi {
 
 export interface DocxFindOptions {
 	readonly caseSensitive?: boolean
-	// Stops after this many matches (default 10000).
+	// Stops after this many matches and one more, which tells that there are more (default DOCX_FIND_LIMIT).
 	readonly limit?: number
 }
+
+// Matches a find shows at most (a counter shows "10,000+" beyond).
+export const DOCX_FIND_LIMIT = 10_000
 
 // Per match: page, source (the page's paragraph), start and end offsets in the source's text.
 export const FIND_INTS = 4

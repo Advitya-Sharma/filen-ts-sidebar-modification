@@ -10,6 +10,8 @@ import { registerDotFilenSocketHandlers } from "@/lib/dotFilen"
 import { registerLibraryConfigSocketHandlers } from "@/features/videos/lib/library"
 import { registerWatchStateSocketHandlers } from "@/features/videos/lib/watchState"
 import { registerUserDictionarySocketHandlers } from "@/features/spellcheck/lib/userDictionary"
+import { registerOfficeSettingsSocketHandlers } from "@/features/office/lib/officeSettings"
+import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 
 const REGISTRARS: readonly (() => () => void)[] = [
 	registerNoteSocketHandlers,
@@ -21,12 +23,14 @@ const REGISTRARS: readonly (() => () => void)[] = [
 	registerDotFilenSocketHandlers,
 	registerLibraryConfigSocketHandlers,
 	registerWatchStateSocketHandlers,
-	registerUserDictionarySocketHandlers
+	registerUserDictionarySocketHandlers,
+	// Only the DOCX editor and its settings read the document settings: builds without it leave them out.
+	...(DOCX_EDITING ? [registerOfficeSettingsSocketHandlers] : [])
 ]
 
 // The realtime socket driver, mounted ONCE in the authed shell (appShell) — NOT a route, because
 // realtime updates must land while the user is anywhere in the app. On mount it registers every domain's
-// handlers (note + chat + drive + contact + general + playlists + `.filen` + Videos library + watch state + spelling dictionary) and starts the single subscription; the bridge
+// handlers (note + chat + drive + contact + general + playlists + `.filen` + Videos library + watch state + spelling dictionary + document settings with DOCX editing) and starts the single subscription; the bridge
 // outlives route navigation. Teardown is on LOGOUT (performLogout stops the bridge before the local wipe,
 // mirroring notesSync.cancel), so the unmount cleanup only unregisters the handlers — the subscription
 // itself is not stopped here (a StrictMode remount must not tear the live socket down). Renders nothing.

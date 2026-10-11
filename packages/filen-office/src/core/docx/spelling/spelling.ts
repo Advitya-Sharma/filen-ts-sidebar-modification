@@ -41,6 +41,9 @@ const BUDGET_MS = 8
 export const MAX_SPELLING_ISSUES = 10_000
 const NO_MARKS: readonly SpellingMark[] = Object.freeze([])
 
+// An issue as kept here: its place moves with edits.
+type MovableIssue = Omit<SpellingIssue, "from" | "to"> & { from: number; to: number }
+
 function defaultNow(): () => number {
 	const performance: unknown = Reflect.get(globalThis, "performance")
 	const now: unknown = typeof performance === "object" && performance !== null ? Reflect.get(performance, "now") : undefined
@@ -106,7 +109,9 @@ export class DocxSpelling {
 	private requested = new Map<string, Set<string>>()
 	// Dictionaries whose check failed (not loadable): not asked again until the next edit or notice.
 	private readonly failed = new Set<string>()
-	private issues: readonly SpellingIssue[] = []
+	// In document order. Moved in place by edits (an issue keeps its identity while it stays), so a keystroke
+	// allocates no issue; marks() is a new array whenever they changed.
+	private issues: MovableIssue[] = []
 	private readonly ignored = new Set<string>()
 	private readonly ignoredRepeats = new Set<string>()
 	// The last edit and the issue it is typing (not marked while the caret is in it).
@@ -263,7 +268,7 @@ export class DocxSpelling {
 			if (!tr.docChanged) continue
 
 			changed = true
-			this.issues = this.mapIssues(this.issues, tr.mapping)
+			this.mapIssues(this.issues, tr.mapping)
 			this.lastEdit = changedRange(tr.mapping) ?? this.lastEdit
 		}
 
@@ -275,17 +280,28 @@ export class DocxSpelling {
 		this.emit(state, changed)
 	}
 
-	private mapIssues(issues: readonly SpellingIssue[], mapping: Mapping): SpellingIssue[] {
-		const out: SpellingIssue[] = []
+	// Moves the issues through an edit, in place; those it deleted go.
+	private mapIssues(issues: MovableIssue[], mapping: Mapping): void {
+		let kept = 0
+		const count = issues.length
 
-		for (const issue of issues) {
+		// Indexed: the array is compacted as it is read.
+		for (let k = 0; k < count; k++) {
+			const issue = issues[k]
+
+			if (issue === undefined) continue
+
 			const from = mapping.map(issue.from, 1)
 			const to = mapping.map(issue.to, -1)
 
-			if (to > from) out.push(from === issue.from && to === issue.to ? issue : { ...issue, from, to })
+			if (to <= from) continue
+
+			issue.from = from
+			issue.to = to
+			issues[kept++] = issue
 		}
 
-		return out
+		issues.length = kept
 	}
 
 	private invalidate(): void {
@@ -334,7 +350,34 @@ export class DocxSpelling {
 		const state = this.session.state
 		const deadline = this.now() + this.budget
 		const previous = this.issues
-		const next: SpellingIssue[] = []
+		const next: MovableIssue[] = []
+		// The previous issues are in document order: one equal to a new one (same place, word and verdict) is
+		// kept, so a pass over a document that barely changed allocates little.
+		let reused = 0
+		const issueAt = (issue: RelativeIssue, start: number): MovableIssue => {
+			const from = issue.from + start
+			const to = issue.to + start
+
+			while (reused < previous.length && (previous[reused]?.from ?? 0) < from) reused++
+
+			const old = previous[reused]
+
+			if (
+				old !== undefined &&
+				old.from === from &&
+				old.to === to &&
+				old.kind === issue.kind &&
+				old.word === issue.word &&
+				old.dictionary === issue.dictionary &&
+				old.language === issue.language
+			) {
+				reused++
+
+				return old
+			}
+
+			return { ...issue, from, to }
+		}
 		const unknown = new Map<string, Set<string>>()
 		let carried = 0
 		let scanned = 0
@@ -378,7 +421,7 @@ export class DocxSpelling {
 				for (const issue of issues) {
 					if (next.length >= MAX_SPELLING_ISSUES) break
 
-					next.push({ ...issue, from: issue.from + start, to: issue.to + start })
+					next.push(issueAt(issue, start))
 				}
 
 				return false
@@ -454,7 +497,11 @@ export class DocxSpelling {
 		if (!issuesChanged && suppressed === this.suppressed) return
 
 		this.suppressed = suppressed
-		this.marksValue = suppressed === undefined ? this.issues : this.issues.filter(issue => issue !== suppressed)
+
+		// A new array: the issues move in place.
+		const at = suppressed === undefined ? -1 : this.issues.indexOf(suppressed)
+
+		this.marksValue = at < 0 ? this.issues.slice() : this.issues.slice(0, at).concat(this.issues.slice(at + 1))
 
 		for (const listener of [...this.listeners]) listener(this.marksValue)
 	}

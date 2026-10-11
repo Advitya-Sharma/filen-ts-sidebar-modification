@@ -12,4 +12,7 @@ interface ImportMetaEnv {
 	// The directory the assistant's model files are served from; defaults to the Filen CDN
 	// (features/assistant/runtime/manifest.ts). vite.config.ts adds its origin to connect-src.
 	readonly VITE_ASSISTANT_MODEL_BASE_URL?: string
+	// "1" turns on DOCX editing (features/preview/lib/docxEditingFlag.ts) for internal and test builds; absent
+	// otherwise, which leaves the editor out of the build.
+	readonly VITE_DOCX_EDITING?: string
 }

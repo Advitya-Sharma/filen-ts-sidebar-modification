@@ -350,12 +350,25 @@ describe("docx writer", () => {
 
 		expect(await read(result.bytes, "[Content_Types].xml")).toBe(await read(docm.bytes, "[Content_Types].xml"))
 
+		// A template is saved as one.
 		const template = await opened({
 			body: p("template"),
 			mainContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
 		})
+		const templateEdit = session(template)
 
-		await expect(save(template, session(template))).rejects.toMatchObject({ reason: "readOnly" })
+		templateEdit.dispatch(templateEdit.state.tr.insertText("x", 2))
+		expect(await read((await save(template, templateEdit)).bytes, "[Content_Types].xml")).toBe(
+			await read(template.bytes, "[Content_Types].xml")
+		)
+
+		// A document protected against editing is not.
+		const protectedDocument = await opened({
+			body: p("protected"),
+			settings: '<w:documentProtection w:edit="readOnly" w:enforcement="1"/>'
+		})
+
+		await expect(save(protectedDocument, session(protectedDocument))).rejects.toMatchObject({ reason: "readOnly" })
 
 		// A read-only session is not written.
 		const host = await opened({ body: p("text") })
@@ -1091,5 +1104,39 @@ describe("docx paragraph signature", () => {
 
 		expect(paragraphSignature(paragraph("a\ud83db\ude00"), new Map())).toBe(paragraphSignature(paragraph("a\ufffdb\ufffd"), new Map()))
 		expect(paragraphSignature(paragraph("a\u{1F600}"), new Map())).not.toBe(paragraphSignature(paragraph("a\ufffd"), new Map()))
+	})
+})
+
+describe("docx writer: templates and macro-enabled documents", () => {
+	it("saves an edited .dotm with its content types and macro project as they were", async () => {
+		const vba = new Uint8Array(Array.from({ length: 512 }, (_, k) => (k * 37) & 0xff))
+		const document = await opened({
+			body: p("Template text"),
+			mainContentType: "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
+			relationships: [{ id: "rIdVba", type: "vbaProject", target: "vbaProject.bin" }],
+			parts: [{ name: "word/vbaProject.bin", contentType: "application/vnd.ms-office.vbaProject", data: vba }]
+		})
+
+		expect(document.pkg.facts).toMatchObject({ variant: "dotm", macros: true, template: true })
+		expect(document.context.gate).toEqual([])
+
+		const edit = session(document)
+		const unedited = await save(document, edit)
+
+		expect(unedited.changedParts).toEqual([])
+		expect(unedited.bytes).toEqual(document.bytes)
+
+		edit.dispatch(edit.state.tr.insertText("Edited ", 1))
+
+		const edited = await save(document, edit)
+		const original = await OpcPackage.open(bytesSource(document.bytes))
+		const written = await OpcPackage.open(bytesSource(edited.bytes))
+
+		expect(edited.changedParts).toEqual(["word/document.xml"])
+		expect(await read(edited.bytes, "[Content_Types].xml")).toBe(await read(document.bytes, "[Content_Types].xml"))
+		expect(await read(edited.bytes, "[Content_Types].xml")).toContain("application/vnd.ms-word.template.macroEnabledTemplate.main+xml")
+		expect(await written.read("word/vbaProject.bin")).toEqual(vba)
+		expect(written.entry("word/vbaProject.bin")?.crc32).toBe(original.entry("word/vbaProject.bin")?.crc32)
+		expect(await read(edited.bytes, "word/document.xml")).toContain("Edited Template text")
 	})
 })

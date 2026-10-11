@@ -26,7 +26,8 @@ import {
 	isEditable,
 	isTextCategory,
 	isUnresolvableParentError,
-	runPreviewSave
+	runPreviewSave,
+	SaveRefusedError
 } from "@/features/drive/lib/previewSave.logic"
 import { currentRootUuid, renameItem, trashItems, deleteItemsPermanently } from "@/features/drive/lib/actions"
 import { followClipboardItem } from "@/features/drive/lib/clipboardSync"
@@ -49,6 +50,7 @@ import { MediaViewer } from "@/features/preview/components/mediaViewer"
 import { TransportStreamGate } from "@/features/preview/components/transportStreamGate"
 import { fileKindVerdict, subscribeFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 import { DocxViewer } from "@/features/preview/components/docxViewer"
+import type { DocxSaveSource } from "@/features/preview/components/docxEditor"
 import { MarkdownViewer } from "@/features/preview/components/markdownViewer"
 import { PdfViewer } from "@/features/preview/components/pdfViewer"
 import { TextViewer } from "@/features/preview/components/textViewer"
@@ -215,11 +217,13 @@ export function PreviewOverlay({
 	const contentRef = useRef<(() => string) | null>(null)
 	// The spreadsheet editor's side channel: its bytes as edited, serialised when a save asks for them.
 	const spreadsheetRef = useRef<SpreadsheetSaveSource | null>(null)
+	// The Word document editor's, likewise (written by its lossless writer when a save asks).
+	const docxRef = useRef<DocxSaveSource | null>(null)
 	const cacheScope = usePreviewCacheScope()
 
 	// The open editor's unsaved edits, encoded.
 	async function readEdits(): Promise<Uint8Array | null> {
-		return (await readSaveEdits())?.bytes ?? null
+		return (await readSaveEdits(false))?.bytes ?? null
 	}
 
 	// Override for the currently-displayed item, accumulated per pager slot across the whole overlay
@@ -671,6 +675,33 @@ export function PreviewOverlay({
 		}
 	}, [saving, blocker])
 
+	// A sign-out waits for a save in flight to settle before anything is asked: a discard answered meanwhile
+	// could not stop the upload (the editor's writing, or the upload itself, is already under way). Saved
+	// and clean by then, it proceeds with nothing to lose; otherwise the prompt asks as usual.
+	const logoutAsks = logoutRequest !== null && !saving
+	// The sign-out waiting now waited for a save.
+	const waitedForSaveRef = useRef<object | null>(null)
+
+	useEffect(() => {
+		if (logoutRequest === null) {
+			return
+		}
+
+		if (saving) {
+			waitedForSaveRef.current = logoutRequest
+
+			return
+		}
+
+		if (waitedForSaveRef.current !== logoutRequest || dirty) {
+			return
+		}
+
+		logoutRequest.resolve(true)
+		usePreviewUnsavedGuardStore.getState().setLogoutRequest(null)
+		onClose()
+	}, [logoutRequest, saving, dirty, onClose])
+
 	// The one write path: encode -> upload -> patch listing -> re-key onto the rotated uuid (success), or
 	// a LABEL-FIRST toast (failure) — read-only lockdown is reserved for the ONE failure class retrying
 	// can never fix (isUnresolvableParentError, see previewSave.logic.ts's own comment on why); every
@@ -680,7 +711,10 @@ export function PreviewOverlay({
 	// otherwise never report the buffer clean. A FAILURE never remounts anything, so the buffer (and its
 	// dirty bit) simply survives untouched, which is what keeps the typed content visible and the
 	// close/nav prompt still armed.
-	async function performSave(): Promise<void> {
+	//
+	// True when a save started; false when one could not start now (nothing to save, one in flight, a dialog
+	// open...), which an idle autosave tries again later.
+	function performSave(auto = false): boolean {
 		// Locals, not the outer `driveItem`/`rawDriveItem` directly — this closure runs asynchronously, well
 		// after this render's narrowing; re-binding here gives the guard below its own, freshly-narrowable copy.
 		const targetItem = driveItem
@@ -698,22 +732,41 @@ export function PreviewOverlay({
 			unsavedPromptOpen(pendingIntent, blocker.status === "blocked", logoutRequest !== null) ||
 			menuDialogKind !== null
 		) {
-			return
+			return false
 		}
 
 		setSaving(true)
 		remote.saveStarted()
+		void saveNow(targetItem, targetRawItem, auto)
 
-		const edits = await readSaveEdits().catch((e: unknown) => {
+		return true
+	}
+
+	async function saveNow(targetItem: DriveItem, targetRawItem: DriveItem, auto: boolean): Promise<void> {
+		// An editor that refused to write its file (its own check failed) says why.
+		const edits = await readSaveEdits(auto).catch((e: unknown) => {
+			if (e instanceof SaveRefusedError) {
+				return e
+			}
+
 			log.error("preview", "reading the edits to save failed", e)
 
 			return null
 		})
 
-		if (edits === null) {
+		if (edits === null || edits instanceof SaveRefusedError) {
 			setSaving(false)
 			remote.saveSettled(null)
-			toast.error(t("previewSaveFailed"))
+
+			if (edits === null) {
+				toast.error(t("previewSaveFailed"))
+			} else if (!edits.silent) {
+				const action = edits.action
+
+				toast.error(t(edits.messageKey), {
+					...(action === undefined ? {} : { action: { label: t(action.labelKey), onClick: action.run }, duration: Infinity })
+				})
+			}
 
 			return
 		}
@@ -768,17 +821,22 @@ export function PreviewOverlay({
 	}
 
 	// What a save uploads, and for a spreadsheet the call that marks that version saved once it landed.
-	async function readSaveEdits(): Promise<{ bytes: Uint8Array; commit: (() => void) | null } | null> {
-		const source = spreadsheetRef.current
+	async function readSaveEdits(auto: boolean): Promise<{ bytes: Uint8Array; commit: (() => void) | null } | null> {
+		if (spreadsheetRef.current !== null) {
+			return await spreadsheetRef.current()
+		}
 
-		if (source !== null) {
-			return await source()
+		if (docxRef.current !== null) {
+			return await docxRef.current({ auto })
 		}
 
 		const text = contentRef.current?.()
 
 		return text === undefined ? null : { bytes: new TextEncoder().encode(text), commit: null }
 	}
+
+	// Idle autosave (the Word document editor's) runs the same save, with its guards, as it stands now.
+	const performSaveRef = useLatestRef(performSave)
 
 	useAction(
 		"preview.save",
@@ -795,7 +853,7 @@ export function PreviewOverlay({
 				return
 			}
 
-			void performSave()
+			performSave()
 		},
 		IN_EDITORS_AND_FIELDS,
 		[editable, dirty, saving, driveItem, rawDriveItem, remote.prompt, pendingIntent, blocker.status, logoutRequest, menuDialogKind]
@@ -907,7 +965,12 @@ export function PreviewOverlay({
 	}
 
 	function handleUnsavedConfirm(): void {
-		const actions = resolveUnsavedConfirm(pendingIntent, blocker.status === "blocked", logoutRequest !== null)
+		// Never while a save is in flight: what it writes would still be uploaded after the user discarded it.
+		if (saving) {
+			return
+		}
+
+		const actions = resolveUnsavedConfirm(pendingIntent, blocker.status === "blocked", logoutAsks)
 
 		setPendingIntent(null)
 		// The buffer is gone by the user's own choice: drop the dirty bit and the stale content with it.
@@ -975,7 +1038,7 @@ export function PreviewOverlay({
 								disabled={saving}
 								shortcut={<Kbd action="preview.save" />}
 								onClick={() => {
-									void performSave()
+									performSave()
 								}}
 							>
 								{saving ? <Spinner className="size-4" /> : <SaveIcon />}
@@ -1096,6 +1159,8 @@ export function PreviewOverlay({
 													onDirtyChange={setPreviewDirty}
 													contentRef={contentRef}
 													spreadsheetRef={spreadsheetRef}
+													docxRef={docxRef}
+													onAutosave={() => performSaveRef.current(true)}
 													canSaveCopy={canSaveCopyBeside(driveItem, variant)}
 													onOpenFile={opened => {
 														if (rawDriveItem !== undefined) {
@@ -1115,7 +1180,7 @@ export function PreviewOverlay({
 					Dialog, not a sibling rendered outside it, for the stacked focus-trap/backdrop behavior to
 					apply. Shared by close/prev/next — see PreviewDismissIntent — rather than one instance per trigger. */}
 					<ConfirmDialog
-						open={unsavedPromptOpen(pendingIntent, blocker.status === "blocked", logoutRequest !== null)}
+						open={unsavedPromptOpen(pendingIntent, blocker.status === "blocked", logoutAsks)}
 						pending={false}
 						title={t("previewUnsavedChangesTitle")}
 						body={t("previewUnsavedChangesBody")}
@@ -1220,12 +1285,18 @@ interface PinnedSlot {
 }
 
 // The format edits are written in: text for every text category, the file kind for a spreadsheet (its
-// writer follows the kind it opened as, the same judgement the grid's own rename note makes).
+// writer follows the kind it opened as, the same judgement the grid's own rename note makes), and for a Word
+// document its extension (the writer keeps the content type the file opened with: a document, a template,
+// macro-enabled or not; a rename to another of them would save one under a name that says another).
 function saveFormat(item: DriveItem): string {
 	const category = previewType(item)
 
 	if (isTextCategory(category)) {
 		return "text"
+	}
+
+	if (category === "docx") {
+		return `docx:${extensionOf(driveItemName(item))}`
 	}
 
 	if (category !== "spreadsheet") {
@@ -1246,11 +1317,15 @@ function slotPin(item: DriveItem, variant: DriveVariant, asText: boolean): SlotP
 	return { category: previewType(item), format: saveFormat(item), editable: isEditable(item, variant) }
 }
 
-// What remounts the body. A spreadsheet follows its document (see documentKeys), so the user's own save
-// keeps the grid; every other viewer follows the version shown, and a saved text file reopens on what was
-// uploaded. By the pinned renderer, so a rename never remounts.
+// What remounts the body. A spreadsheet, and a Word document opened for editing, follow their document (see
+// documentKeys), so the user's own save keeps the editor; every other viewer follows the version shown, and a
+// saved text file reopens on what was uploaded. By the pinned renderer, so a rename never remounts.
 function bodyKey(item: DriveItem, documentKey: string, pin: SlotPin | null): string {
-	return pin?.category === "spreadsheet" ? `spreadsheet:${documentKey}` : item.data.uuid
+	if (pin?.category === "spreadsheet") {
+		return `spreadsheet:${documentKey}`
+	}
+
+	return pin?.category === "docx" && pin.editable ? `docx:${documentKey}` : item.data.uuid
 }
 
 interface PreviewBodyProps {
@@ -1271,6 +1346,9 @@ interface PreviewBodyProps {
 	onDirtyChange: (dirty: boolean) => void
 	contentRef: RefObject<(() => string) | null>
 	spreadsheetRef: RefObject<SpreadsheetSaveSource | null>
+	docxRef: RefObject<DocxSaveSource | null>
+	// Idle autosave asks the overlay to save; true when a save started.
+	onAutosave: () => boolean
 	// Shows another file in this slot's place (the .xlsx an .xls was just saved as).
 	onOpenFile: (item: DriveItem) => void
 	// A converted copy may be written beside the file (its own drive, however read-only its format).
@@ -1302,6 +1380,8 @@ function PreviewBody({
 	onDirtyChange,
 	contentRef,
 	spreadsheetRef,
+	docxRef,
+	onAutosave,
 	onOpenFile,
 	canSaveCopy
 }: PreviewBodyProps): ReactNode {
@@ -1369,6 +1449,17 @@ function PreviewBody({
 					item={item}
 					alt={alt}
 					variant={variant}
+					{...(neverEditable
+						? {}
+						: {
+								editing: {
+									writable: editable,
+									renamed: renamedReadOnly,
+									onDirtyChange,
+									saveRef: docxRef,
+									onAutosave
+								}
+							})}
 				/>
 			)
 		case "text":

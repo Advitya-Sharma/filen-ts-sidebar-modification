@@ -1,5 +1,5 @@
 import type { Node } from "prosemirror-model"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { Region, SOURCE_INTS, SourceInt, type PageDisplayList } from "@filen/office/core/docx"
 import { docxSchema } from "@filen/office/core/docx/edit"
 import { PagedGeometry } from "@filen/office/core/docx/paged"
@@ -254,5 +254,78 @@ describe("paged geometry", () => {
 
 		expect(back?.page).toBe(0)
 		expect(geometry.wordRange(start.pos + 1).to).toBeGreaterThan(geometry.wordRange(start.pos + 1).from)
+	})
+
+	it("draws many ranges in one pass as rects() draws each, again after an edit", async () => {
+		const body =
+			Array.from({ length: 30 }, (_, k) => p(`Paragraph ${k} ${"lorem ipsum dolor sit amet ".repeat(8)}`)).join("") +
+			'<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' +
+			p("first cell with some words in it") +
+			"</w:tc><w:tc>" +
+			p("second cell") +
+			"</w:tc></w:tr></w:tbl>" +
+			p("after")
+		const edited = await editedLayout(buildDocx({ body }))
+		// Every word (as spelling marks are), plus ranges across lines and paragraphs, and an empty one.
+		const rangesOf = (doc: Node): { from: number; to: number }[] => {
+			const out: { from: number; to: number }[] = []
+
+			doc.descendants((node, pos) => {
+				if (!node.isText) return true
+
+				for (const match of (node.text ?? "").matchAll(/\S+/g))
+					out.push({ from: pos + match.index, to: pos + match.index + match[0].length })
+
+				return false
+			})
+			out.push({ from: 40, to: 400 }, { from: 7, to: 7 })
+
+			return out.sort((a, b) => a.from - b.from)
+		}
+		const compare = (geometry: PagedGeometry, ranges: readonly { from: number; to: number }[]): number => {
+			const longest = Math.max(...ranges.map(range => range.to - range.from))
+			let boxes = 0
+
+			for (let page = 0; page < edited.layout.pages.length; page++) {
+				const owners: number[] = []
+				const many = geometry.rangesRects(ranges, longest, page, [], owners)
+
+				boxes += many.length
+
+				for (let k = 0; k < ranges.length; k++) {
+					const range = ranges[k]
+
+					if (range === undefined) continue
+
+					expect(many.filter((_, index) => owners[index] === k)).toEqual(geometry.rects(range.from, range.to, page))
+				}
+			}
+
+			return boxes
+		}
+		const geometry = geometryOf(edited)
+
+		expect(compare(geometry, rangesOf(edited.session.state.doc))).toBeGreaterThan(200)
+		// Remembered boxes come back the same.
+		expect(compare(geometry, rangesOf(edited.session.state.doc))).toBeGreaterThan(200)
+
+		await edited.edit(edited.session.state.tr.insertText("typed words ", paragraphAt(edited.session.state.doc, 2).pos + 3))
+
+		expect(compare(geometryOf(edited), rangesOf(edited.session.state.doc))).toBeGreaterThan(200)
+		// The same geometry after the edit: what it located and measured before the edit is not reused wrongly.
+		expect(compare(geometry, rangesOf(edited.session.state.doc))).toBeGreaterThan(200)
+
+		// Another edit: only the lines it changed are measured again (lines laid out as before keep their boxes).
+		await edited.edit(edited.session.state.tr.insertText("x", paragraphAt(edited.session.state.doc, 5).pos + 3))
+
+		const ranges = rangesOf(edited.session.state.doc)
+		const longest = Math.max(...ranges.map(range => range.to - range.from))
+		const measured = vi.spyOn(geometry.tester, "xAtOffset")
+		let boxes = 0
+
+		for (let page = 0; page < edited.layout.pages.length; page++) boxes += geometry.rangesRects(ranges, longest, page).length
+
+		expect(boxes).toBeGreaterThan(200)
+		expect(measured.mock.calls.length).toBeLessThan(boxes / 4)
 	})
 })

@@ -189,7 +189,6 @@
 .fo-docx-dim,
 .fo-docx-selection,
 .fo-docx-composition,
-.fo-docx-mark,
 .fo-docx-caret {
 	position: absolute;
 }
@@ -212,25 +211,50 @@
 	box-sizing: border-box;
 }
 
+/* Marks (spelling, repeated words, find results): a drawing over each page, a path per line and kind. */
+.fo-docx-marks {
+	position: absolute;
+	left: 0;
+	top: 0;
+	overflow: visible;
+	pointer-events: none;
+}
+
+/* Find highlights multiply with the text under them (drawn apart from the other marks). */
+.fo-docx-marks[data-fo-blend] {
+	mix-blend-mode: multiply;
+}
+
 .fo-docx-mark {
-	border-bottom: var(--fo-mark-width, 2px) dotted var(--fo-mark, #dc2626);
-	box-sizing: border-box;
+	fill: none;
+	stroke: var(--fo-mark, #dc2626);
+	stroke-width: var(--fo-mark-width, 2px);
+	stroke-dasharray: 2 2;
 }
 
-/* A misspelt word: a wavy underline (alternating arcs). */
+/* A misspelt word: a wavy underline. */
 .fo-docx-mark[data-fo-mark="spelling"] {
-	border-bottom: 0;
-	background:
-		radial-gradient(circle at 1.5px 0, transparent 0.9px, var(--fo-spelling, #dc2626) 1px 1.9px, transparent 2px),
-		radial-gradient(circle at 4.5px 3px, transparent 0.9px, var(--fo-spelling, #dc2626) 1px 1.9px, transparent 2px);
-	background-position: left bottom;
-	background-repeat: repeat-x;
-	background-size: 6px 3px;
+	stroke: var(--fo-spelling, #dc2626);
+	stroke-width: var(--fo-spelling-width, 1px);
+	stroke-dasharray: none;
 }
 
-/* A word repeated (the same word twice in a row). */
+/* A word repeated (the same word twice in a row): a double underline. */
 .fo-docx-mark[data-fo-mark="repeated"] {
-	border-bottom: var(--fo-repeated-width, 3px) double var(--fo-repeated, #d97706);
+	stroke: var(--fo-repeated, #d97706);
+	stroke-width: 1px;
+	stroke-dasharray: none;
+}
+
+/* Find results while editing (the viewer's .fo-docx-find, as marks). */
+.fo-docx-mark[data-fo-mark="find"] {
+	fill: var(--fo-find-bg, rgb(250 204 21 / 0.45));
+	stroke: none;
+}
+
+.fo-docx-mark[data-fo-mark="find-active"] {
+	fill: var(--fo-find-active-bg, rgb(249 115 22 / 0.6));
+	stroke: none;
 }
 
 .fo-docx-caret {
@@ -243,11 +267,22 @@
 	visibility: hidden;
 }
 
-.fo-docx-caret[data-fo-blink] {
-	animation: fo-docx-blink 1.06s steps(1) infinite;
+/* Two equal animations: the caret switches between them to start its blink over when it moves. */
+.fo-docx-caret[data-fo-blink="a"] {
+	animation: fo-docx-blink-a 1.06s steps(1) infinite;
 }
 
-@keyframes fo-docx-blink {
+.fo-docx-caret[data-fo-blink="b"] {
+	animation: fo-docx-blink-b 1.06s steps(1) infinite;
+}
+
+@keyframes fo-docx-blink-a {
+	50% {
+		opacity: 0;
+	}
+}
+
+@keyframes fo-docx-blink-b {
 	50% {
 		opacity: 0;
 	}

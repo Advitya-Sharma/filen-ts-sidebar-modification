@@ -15,10 +15,17 @@ import { clusterStart, nextCluster } from "./layout"
 import { Caps, type StyleTable } from "./styles"
 
 // Caret positions on laid-out lines: text offset <-> x. Positions inside a fragment are measured on demand
-// per cluster prefix (measured uncached, bisected over cluster boundaries), so nothing is stored per
-// character.
+// per cluster prefix (bisected over cluster boundaries), so nothing is stored per character. Prefix widths
+// asked for are remembered in a small cache of their own (two generations, the layout's width cache is left
+// alone): marks and carets drawn again after an edit ask for the same prefixes.
+// Prefix widths per cache generation, and the longest prefix remembered (characters).
+const PREFIX_LIMIT = 2048
+const PREFIX_LONGEST = 256
+
 export class HitTester {
 	readonly styles: StyleTable
+	private prefixes = new Map<string, number>()
+	private olderPrefixes = new Map<string, number>()
 
 	constructor(styles: StyleTable) {
 		this.styles = styles
@@ -176,14 +183,28 @@ export class HitTester {
 
 		const small = (info & FragmentFlag.SMALL_CAPS) !== 0
 		const font = small ? (styles.smallFontKey[style] ?? 0) : (styles.fontKey[style] ?? 0)
+		const caps = (styles.caps[style] ?? Caps.NONE) !== Caps.NONE
+		const prefix = caps ? text.slice(start, end).toUpperCase() : text.slice(start, end)
 		let raw: number
 
-		if ((styles.caps[style] ?? Caps.NONE) === Caps.NONE) {
-			raw = styles.cache.measure(font, text, start, end)
+		if (prefix.length > PREFIX_LONGEST) {
+			raw = styles.cache.measure(font, prefix, 0, prefix.length)
 		} else {
-			const upper = text.slice(start, end).toUpperCase()
+			const key = `${String(font)}\u0000${prefix}`
+			const known = this.prefixes.get(key)
 
-			raw = styles.cache.measure(font, upper, 0, upper.length)
+			if (known === undefined) {
+				raw = this.olderPrefixes.get(key) ?? styles.cache.measure(font, prefix, 0, prefix.length)
+
+				if (this.prefixes.size >= PREFIX_LIMIT) {
+					this.olderPrefixes = this.prefixes
+					this.prefixes = new Map()
+				}
+
+				this.prefixes.set(key, raw)
+			} else {
+				raw = known
+			}
 		}
 
 		let clusters = 0

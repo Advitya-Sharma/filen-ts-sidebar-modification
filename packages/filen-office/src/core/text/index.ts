@@ -73,6 +73,7 @@ export {
 	type ExplicitTab,
 	type ParagraphText
 } from "./paragraph"
+export { nfcWithMap, type NfcText } from "./nfc"
 export { paragraphGap, type ParagraphSpacing } from "./spacing"
 export {
 	Caps,

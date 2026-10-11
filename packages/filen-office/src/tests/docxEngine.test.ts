@@ -4,6 +4,7 @@ import { bytesSource, type ByteSource } from "@filen/office/core/opc"
 import type { FontExtents, TextMeasurer } from "@filen/office/core/text"
 import {
 	DocxEngine,
+	FIND_INTS,
 	docxWorkerPool,
 	findMatches,
 	inThreadDocxHost,
@@ -398,6 +399,11 @@ describe("findMatches", () => {
 		// A match ending on a base letter takes its combining mark along.
 		expect(Array.from(findMatches([page(nfd)], "cafe", { caseSensitive: true }))).toEqual([])
 		expect(Array.from(findMatches([page("e\u0301x")], "é"))).toEqual([0, 0, 0, 2])
+	})
+
+	it("stops one match past the limit, which tells that there are more", () => {
+		expect(findMatches([page("a a a a a")], "a", { limit: 3 }).length / FIND_INTS).toBe(4)
+		expect(findMatches([page("a a a")], "a", { limit: 3 }).length / FIND_INTS).toBe(3)
 	})
 })
 

@@ -99,7 +99,8 @@ const EXTENSION_CATEGORIES: ReadonlyMap<string, PreviewCategory> = buildExtensio
 		"audio"
 	],
 	[["pdf"], "pdf"],
-	[["docx"], "docx"],
+	// Macro-enabled documents and templates open (and edit) as documents; macros are never run.
+	[["docx", "docm", "dotx", "dotm"], "docx"],
 	[SPREADSHEET_EXTENSIONS, "spreadsheet"],
 	[["md", "markdown"], "markdown"],
 	[["txt", "log"], "text"],

@@ -185,6 +185,16 @@ describe("previewType — extension category map", () => {
 		expect(previewType(fileNamed("doc.docx"))).toBe("docx")
 	})
 
+	it.each(["docm", "dotx", "dotm", "DOTM"])("%s -> docx (macro-enabled documents and templates)", ext => {
+		expect(previewType(fileNamed(`letter.${ext}`))).toBe("docx")
+	})
+
+	it("reads a Word type by its MIME type only without a known extension (the extension first)", () => {
+		expect(previewType(fileNamed("letter", { mime: "application/vnd.ms-word.template.macroEnabled.12" }))).toBe("docx")
+		expect(previewType(fileNamed("macro", { mime: "application/vnd.ms-word.document.macroEnabled.12" }))).toBe("docx")
+		expect(previewType(fileNamed("notes.txt", { mime: "application/vnd.ms-word.document.macroEnabled.12" }))).toBe("text")
+	})
+
 	it.each(["md", "markdown"])("%s -> markdown", ext => {
 		expect(previewType(fileNamed(`notes.${ext}`))).toBe("markdown")
 	})

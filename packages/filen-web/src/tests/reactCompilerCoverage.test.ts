@@ -112,7 +112,7 @@ describe("React Compiler coverage", () => {
 		for (const [file, fnName] of [
 			["src/features/preview/components/docxViewer.tsx", "DocxPageList"],
 			["src/features/preview/components/docxToolbar.tsx", "DocxToolbar"],
-			["src/features/preview/components/docxToolbar.tsx", "FindField"],
+			["src/features/preview/components/docxToolbar.tsx", "DocxFindField"],
 			["src/features/preview/components/docxAnnotations.tsx", "DocxAnnotationLayer"],
 			["src/features/preview/components/docxAnnotations.tsx", "Column"],
 			["../filen-office/src/react/docx/annotations/useDocxAnnotations.ts", "useDocxAnnotations"],
@@ -120,6 +120,23 @@ describe("React Compiler coverage", () => {
 			["../filen-office/src/react/docx/DocxPages.tsx", "DocxPageView"],
 			["../filen-office/src/react/docx/useDocxViewer.ts", "useDocxViewer"],
 			["../filen-office/src/react/docx/useDocxDocument.ts", "useDocxDocument"]
+		] as const) {
+			const events = compile(file)
+
+			expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
+			expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(
+				true
+			)
+		}
+	})
+
+	it("compiles the DOCX editor's view, toolbar and touch selection", () => {
+		for (const [file, fnName] of [
+			["src/features/preview/components/docxEditor.tsx", "DocxEditView"],
+			["src/features/preview/components/docxEditToolbar.tsx", "DocxEditToolbar"],
+			["src/features/preview/components/docxEditToolbar.tsx", "CommandButton"],
+			["src/features/preview/components/docxTouchSelection.tsx", "DocxTouchSelection"],
+			["src/features/settings/components/advanced/documentsRows.tsx", "DocumentsRows"]
 		] as const) {
 			const events = compile(file)
 

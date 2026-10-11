@@ -51,6 +51,8 @@ export interface DocxViewerState {
 		readonly query: string
 		readonly caseSensitive: boolean
 		readonly count: number
+		// There are more matches than `count` (DOCX_FIND_LIMIT).
+		readonly capped: boolean
 		// Index of the current match, or -1.
 		readonly active: number
 	}

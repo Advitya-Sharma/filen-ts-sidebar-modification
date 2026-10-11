@@ -309,9 +309,13 @@ export const preview = {
 	/** Docx viewer — placeholder and accessible label of the find field in the toolbar */
 	previewDocxFindPlaceholder: "Find",
 	/** Docx viewer — match counter beside the find field; {{current}} = the selected match, {{total}} = how many the document holds */
-	previewDocxFindCount: "{{current}}/{{total}}",
+	previewDocxFindCount: "{{current, number}}/{{total, number}}",
+	/** Docx viewer — as previewDocxFindCount when there are more matches than a find shows ({{total}}, the most it shows) */
+	previewDocxFindCountCapped: "{{current, number}}/{{total, number}}+",
 	/** Docx viewer — announced to screen readers as the find results change; {{current}} = the selected match, {{total}} = all matches */
-	previewDocxFindStatus: "Match {{current}} of {{total}}",
+	previewDocxFindStatus: "Match {{current, number}} of {{total, number}}",
+	/** Docx viewer — as previewDocxFindStatus when there are more matches than a find shows ({{total}}, the most it shows) */
+	previewDocxFindStatusCapped: "Match {{current, number}} of more than {{total, number}}",
 	/** Docx viewer — announced to screen readers when the search text is nowhere in the document */
 	previewDocxFindNoMatches: "No matches",
 	/** Docx viewer — find bar button selecting the previous match (also Shift+Enter in the field) */
@@ -404,8 +408,6 @@ export const preview = {
 	previewDocxViewOnlyWriteProtected: "It needs a password to be changed.",
 	/** Docx viewer — view-only reason: the document is digitally signed, and any change would break the signature */
 	previewDocxViewOnlySigned: "It's digitally signed; a change would break the signature.",
-	/** Docx viewer — view-only reason: the file is a Word template (.dotx/.dotm) */
-	previewDocxViewOnlyTemplate: "It's a Word template.",
 	/** Docx viewer — view-only reason: the document is saved in the "Strict Open XML" variant of the format */
 	previewDocxViewOnlyStrict: "It's saved as Strict Open XML.",
 	/** Docx viewer — view-only reason: parts of the file are damaged, so it is only shown, to keep it intact */
@@ -422,6 +424,146 @@ export const preview = {
 	previewDocxViewOnlySharedIn: "It was shared with you.",
 	/** Docx viewer — view-only reason: opened from Recents, Favorites, Links or Shared, not from its directory in the drive */
 	previewDocxViewOnlyNotInDrive: "Open it from its directory in your drive to edit it.",
+	/** Docx editor — view-only reason: a text box is being edited, which this editor can only show */
+	previewDocxViewOnlyTextbox: "Text boxes can't be edited here yet.",
+	/** Docx editor — view-only reason: the file was renamed to another format while open */
+	previewDocxViewOnlyRenamed: "It was renamed to another format while open, so changes can't be saved to it.",
+	/** Docx editor — view-only reason: changes can no longer be saved to this file (its directory is gone) */
+	previewDocxViewOnlyNotWritable: "Changes can't be saved to this file any more.",
+	/** Docx editor — accessible name of the formatting toolbar row */
+	previewDocxEditToolbar: "Formatting",
+	/** Docx editor — toolbar button: undo the last change */
+	previewDocxUndo: "Undo",
+	/** Docx editor — toolbar button: redo the change last undone */
+	previewDocxRedo: "Redo",
+	/** Docx editor — toolbar button: bold text */
+	previewDocxBold: "Bold",
+	/** Docx editor — toolbar button: italic text */
+	previewDocxItalic: "Italic",
+	/** Docx editor — toolbar button: underlined text */
+	previewDocxUnderline: "Underline",
+	/** Docx editor — toolbar button: struck-through text */
+	previewDocxStrikethrough: "Strikethrough",
+	/** Docx editor — toolbar button: remove direct character formatting */
+	previewDocxClearFormatting: "Clear formatting",
+	/** Docx editor — accessible name of the paragraph style picker */
+	previewDocxParagraphStyle: "Paragraph style",
+	/** Docx editor — paragraph style picker shows this when the selected paragraphs have different styles */
+	previewDocxStyleMixed: "Several styles",
+	/** Docx editor — paragraph style: Word's Normal style */
+	previewDocxStyleNormal: "Normal",
+	/** Docx editor — paragraph style: Word's Title style */
+	previewDocxStyleTitle: "Title",
+	/** Docx editor — paragraph style: Word's Subtitle style */
+	previewDocxStyleSubtitle: "Subtitle",
+	/** Docx editor — paragraph style: a heading level */
+	previewDocxStyleHeading: "Heading {{level}}",
+	/** Docx editor — paragraph style: Word's Quote style */
+	previewDocxStyleQuote: "Quote",
+	/** Docx editor — toolbar button: align paragraph to the start (left in left-to-right text) */
+	previewDocxAlignStart: "Align left",
+	/** Docx editor — toolbar button: center paragraph */
+	previewDocxAlignCenter: "Center",
+	/** Docx editor — toolbar button: align paragraph to the end (right in left-to-right text) */
+	previewDocxAlignEnd: "Align right",
+	/** Docx editor — toolbar button: justify paragraph */
+	previewDocxAlignJustify: "Justify",
+	/** Docx editor — toolbar button: bulleted list */
+	previewDocxBulletList: "Bulleted list",
+	/** Docx editor — toolbar button: numbered list */
+	previewDocxNumberedList: "Numbered list",
+	/** Docx editor — toolbar button: move list item one level in */
+	previewDocxIndent: "Increase indent",
+	/** Docx editor — toolbar button: move list item one level out */
+	previewDocxOutdent: "Decrease indent",
+	/** Docx editor — overflow menu trigger holding tools that don't fit and editor options */
+	previewDocxMoreTools: "More tools",
+	/** Docx editor — overflow menu: zoom submenu label */
+	previewDocxZoom: "Zoom",
+	/** Docx editor — overflow menu checkbox: save changes automatically after a pause in editing */
+	previewDocxAutosave: "Save automatically",
+	/** Docx editor — toolbar button opening find with the replace field */
+	previewDocxFindReplaceAction: "Find and replace",
+	/** Docx editor — find bar toggle showing or hiding the replace field */
+	previewDocxShowReplace: "Toggle replace",
+	/** Docx editor — find bar: placeholder and accessible name of the replacement field */
+	previewDocxReplacePlaceholder: "Replace with",
+	/** Docx editor — find bar button: replace the current match */
+	previewDocxReplace: "Replace",
+	/** Docx editor — find bar button: replace every match */
+	previewDocxReplaceAll: "Replace all",
+	/** Docx editor — toast after Replace all, for one replacement */
+	previewDocxReplacedCount_one: "Replaced {{count}} match",
+	/** Docx editor — as previewDocxReplacedCount_one, for several */
+	previewDocxReplacedCount_other: "Replaced {{count}} matches",
+	/** Docx editor — context and touch menu: cut the selection */
+	previewDocxCut: "Cut",
+	/** Docx editor — context and touch menu: copy the selection */
+	previewDocxCopy: "Copy",
+	/** Docx editor — context and touch menu: paste the clipboard */
+	previewDocxPaste: "Paste",
+	/** Docx editor — context and touch menu: select the whole document */
+	previewDocxSelectAll: "Select all",
+	/** Docx editor — toast when the browser refuses access to the clipboard; names the keyboard shortcut that still works */
+	previewDocxClipboardBlocked: "Your browser blocked access to the clipboard. Use {{shortcut}} instead.",
+	/** Docx editor — context menu while spelling suggestions load */
+	previewDocxSpellingLoading: "Looking for suggestions…",
+	/** Docx editor — context menu when a misspelled word has no suggestions */
+	previewDocxSpellingNone: "No suggestions",
+	/** Docx editor — context menu: stop marking this word in this document */
+	previewDocxSpellingIgnoreAll: "Ignore all",
+	/** Docx editor — context menu: add the word to the user's own dictionary (synced across devices) */
+	previewDocxSpellingAdd: "Add to dictionary",
+	/** Docx editor — context menu on a word repeated right after itself: delete the repetition */
+	previewDocxSpellingDeleteRepeated: "Delete repeated word",
+	/** Docx editor — context menu on a repeated word: stop flagging this repetition */
+	previewDocxSpellingIgnoreRepeated: "Ignore",
+	/** Docx editor — toast after opening: blocks the save check could not prove safe stay as they are, for one */
+	previewDocxLockedBlocks_one: "{{count}} paragraph or table can't be edited without changing how it is stored, so it stays as it is.",
+	/** Docx editor — as previewDocxLockedBlocks_one, for several */
+	previewDocxLockedBlocks_other:
+		"{{count}} paragraphs or tables can't be edited without changing how they are stored, so they stay as they are.",
+	/** Docx editor — toolbar badge while the cursor is in a part that can't be edited */
+	previewDocxLocked: "Can't edit here",
+	/** Docx editor — locked part popover title */
+	previewDocxLockedTitle: "This part stays as it is",
+	/** Docx editor — locked part reason: Word marks the content as locked */
+	previewDocxLockedContent: "It's locked in Word.",
+	/** Docx editor — locked part reason: editing it here could change how Word stores it */
+	previewDocxLockedProof: "Editing it here could change how it's stored, so it's left untouched.",
+	/** Docx editor — locked part reason: a structure the editor can't change yet (fields across paragraphs, unusual tables...) */
+	previewDocxLockedStructure: "It uses a structure this editor can't change yet.",
+	/** Docx editor — toast when saving refuses because the written file did not pass the check; the edits stay open and unsaved, with an action copying the document's text */
+	previewDocxSaveRefused:
+		"The document couldn't be saved without risking damage to it. It stays open with your changes, unsaved; copy its text to keep them.",
+	/** Docx editor — action on the save-refused toast: copies the document's text as edited */
+	previewDocxSaveRefusedCopy: "Copy text",
+	/** Docx editor — toast once a save is stored: edited parts the save check refused were saved as they were last saved, and went back to that in the editor (undo brings the edits back), for one */
+	previewDocxSaveLocked_one:
+		"{{count}} paragraph or table couldn't be saved with your latest changes, so it was saved as it was before them and is back to that here. Undo brings your changes back.",
+	/** Docx editor — as previewDocxSaveLocked_one, for several */
+	previewDocxSaveLocked_other:
+		"{{count}} paragraphs or tables couldn't be saved with your latest changes, so they were saved as they were before them and are back to that here. Undo brings your changes back.",
+	/** Docx editor — as previewDocxSaveLocked when the editor could not take all of them back (some were edited while the file was stored), for one */
+	previewDocxSaveLockedKept_one:
+		"{{count}} paragraph or table couldn't be saved with your latest changes, so the file has it as it was before those changes. If you changed it while it saved, your changes are still here, unsaved; otherwise undo brings them back.",
+	/** Docx editor — as previewDocxSaveLockedKept_one, for several */
+	previewDocxSaveLockedKept_other:
+		"{{count}} paragraphs or tables couldn't be saved with your latest changes, so the file has them as they were before those changes. Any you changed while it saved keep your changes here, unsaved; undo brings back the others.",
+	/** Docx editor — toast while a save looks for the changes the save check refuses (the editor waits meanwhile) */
+	previewDocxSaveSearching: "Checking which changes can be saved…",
+	/** Docx editor — notice under the toolbar while autosave is held because the save check refused the document; {{shortcut}} is the save shortcut, e.g. ⌘S */
+	previewDocxAutosaveHeld: "Changes aren't being saved automatically: this document needs a save by you. Press {{shortcut}} to save.",
+	/** Docx editor — action on the save-locked toast: copies the text the user had typed into those parts */
+	previewDocxSaveLockedCopy: "Copy my changes",
+	/** Docx editor — dialog title asking for the name comments and tracked changes are signed with */
+	previewDocxAuthorNameTitle: "Your name in documents",
+	/** Docx editor — dialog body asking for the author name; it is synced and can be changed in settings */
+	previewDocxAuthorNameBody: "Comments and tracked changes show this name. You can change it later in settings.",
+	/** Docx editor — author name field label */
+	previewDocxAuthorNameLabel: "Name",
+	/** Docx editor — author name dialog submit button */
+	previewDocxAuthorNameSave: "Save",
 
 	// ── Markdown ─────────────────────────────────────────────────────────────
 	/** Markdown viewer — toolbar button shown while viewing the rendered output; switches to the raw-text source view */

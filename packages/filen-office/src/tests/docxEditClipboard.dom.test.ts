@@ -1,0 +1,293 @@
+// @vitest-environment happy-dom
+import { TextSelection } from "prosemirror-state"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import type { PagedEditor } from "@filen/office/core/docx/paged"
+import { docxSchema } from "@filen/office/core/docx/edit"
+import { EditSink } from "@filen/office/react/docx/editor"
+import { safeClipboardHtml } from "../react/docx/edit/sink"
+import { buildDocx, p } from "./docxSynthetic"
+import { pagedEditor } from "./pagedDomFixtures"
+
+const DOC = buildDocx({ body: p("Alpha beta gamma") + p("Second paragraph") })
+const cell = (text: string): string => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p(text)}</w:tc>`
+const TABLE_DOC = buildDocx({
+	body:
+		p("Intro text") +
+		'<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+		`<w:tr>${cell("One")}${cell("Two")}</w:tr><w:tr>${cell("Three")}${cell("Four")}</w:tr></w:tbl>` +
+		p("Outro text")
+})
+
+// The top-level paragraphs' text, tabs and breaks as characters.
+function paragraphs(editor: PagedEditor): string[] {
+	const out: string[] = []
+
+	editor.state.doc.forEach(node => {
+		if (node.type.name !== "paragraph") return
+
+		out.push(
+			node.textBetween(0, node.content.size, undefined, leaf =>
+				leaf.type.name === "tab" ? "\t" : leaf.type.name === "break" ? "\n" : ""
+			)
+		)
+	})
+
+	return out
+}
+
+function paragraphStart(editor: PagedEditor, index: number): number {
+	let found = -1
+
+	editor.state.doc.forEach((_node, offset, k) => {
+		if (k === index) found = offset + 1
+	})
+
+	return found
+}
+
+function select(sink: EditSink, from: number, to: number): void {
+	sink.view.dispatch(sink.view.state.tr.setSelection(TextSelection.create(sink.view.state.doc, from, to)))
+}
+
+// Every node and mark type in a document, by name.
+function typesOf(editor: PagedEditor): Set<string> {
+	const out = new Set<string>()
+
+	editor.state.doc.descendants(node => {
+		out.add(node.type.name)
+
+		for (const mark of node.marks) out.add(`mark:${mark.type.name}`)
+	})
+
+	return out
+}
+
+describe("EditSink clipboard commands", () => {
+	let host: HTMLDivElement
+
+	beforeEach(() => {
+		host = document.createElement("div")
+		document.body.appendChild(host)
+	})
+
+	afterEach(() => host.remove())
+
+	it("gives the selection as a copy writes it, and nothing for an empty one", async () => {
+		const { editor } = await pagedEditor(DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+		const start = paragraphStart(editor, 0)
+
+		expect(sink.clipboardContent()).toBeUndefined()
+		select(sink, start, start + 5)
+
+		const content = sink.clipboardContent()
+
+		expect(content?.text).toBe("Alpha")
+		expect(content?.html).toContain("Alpha")
+		sink.destroy()
+	})
+
+	it("cuts and pastes through the editor's parsers, and refuses both read-only", async () => {
+		const { editor } = await pagedEditor(DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+		const start = paragraphStart(editor, 0)
+
+		select(sink, start, start + 6)
+
+		const content = sink.clipboardContent()
+
+		expect(sink.deleteSelection()).toBe(true)
+		expect(editor.state.doc.child(0).textContent).toBe("beta gamma")
+		expect(sink.paste({ text: content?.text ?? "" })).toBe(true)
+		expect(editor.state.doc.child(0).textContent).toBe("Alpha beta gamma")
+
+		sink.setReadOnly(true)
+		select(sink, start, start + 5)
+		expect(sink.deleteSelection()).toBe(false)
+		expect(sink.paste({ text: "nope" })).toBe(false)
+		expect(editor.state.doc.child(0).textContent).toBe("Alpha beta gamma")
+		sink.destroy()
+	})
+
+	it("pastes foreign HTML as paragraphs with basic formatting only", async () => {
+		const { editor } = await pagedEditor(DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+		const start = paragraphStart(editor, 1)
+		const before = typesOf(editor)
+
+		select(sink, start, start)
+		expect(
+			sink.paste({
+				html:
+					'<style>@import url("https://example.com/x.css"); p { color: red }</style>' +
+					'<p>Safe <b>bold</b> <a href="javascript:alert(1)">link</a><img src="https://example.com/x.png" onerror="alert(1)"></p>' +
+					"<script>alert(1)</script><p>End</p>"
+			})
+		).toBe(true)
+
+		const text = editor.state.doc.textBetween(0, editor.state.doc.content.size, "\n")
+
+		expect(text).toContain("Safe bold link")
+		expect(text).toContain("End")
+		expect(text).not.toContain("alert")
+
+		// Nothing new but paragraphs, text and basic formatting; no node carries a URL.
+		const added = [...typesOf(editor)].filter(type => !before.has(type))
+
+		expect(added.every(type => ["mark:bold", "mark:italic", "mark:underline", "mark:strike", "break"].includes(type))).toBe(true)
+		editor.state.doc.descendants(node => {
+			expect(JSON.stringify(node.attrs)).not.toMatch(/https?:|javascript:/)
+
+			for (const mark of node.marks) expect(JSON.stringify(mark.attrs)).not.toMatch(/https?:|javascript:/)
+		})
+		expect(document.querySelector("img, iframe, script[src]")).toBeNull()
+		expect(docxSchema.nodes.paragraph).toBeDefined()
+		sink.destroy()
+	})
+
+	it("keeps only the elements the parser reads, without attributes", () => {
+		expect(
+			safeClipboardHtml(
+				'<meta charset="utf-8"><div data-pm-slice=\'1 1 ["table",{"src":3}]\' style="x"><p class="a" style="background:url(https://e.x/a)">A &amp; <span>b</span>' +
+					'<a href="https://e.x">c</a><img src="https://e.x/i.png"><script>x()</script></p><table><tr><td>d</td></tr></table></div>'
+			)
+		).toBe("<p>A &amp; bc</p><p>d</p>")
+		expect(safeClipboardHtml("<b>x</b><br><svg><text>no</text></svg>&lt;tag&gt;")).toBe("<p><b>x</b><br>&lt;tag&gt;</p>")
+	})
+
+	it("flattens tables to a paragraph per row, never leaving a cell for the clipboard reader to wrap", () => {
+		expect(safeClipboardHtml("<p>A</p><table><tr><td>B</td><td><p>C</p><p>D</p></td></tr><tr><th>E</th></tr></table><p>F</p>")).toBe(
+			"<p>A</p><p>B<span data-fo-tab></span>C<br>D</p><p>E</p><p>F</p>"
+		)
+		// A leading cell (ProseMirror's reader would wrap the whole paste in a table and keep only the row).
+		expect(safeClipboardHtml("<td>X</td><p>Y</p>")).toBe("<p>X</p><p>Y</p>")
+		expect(safeClipboardHtml("<table><tr><td><table><tr><td>in</td><td>ner</td></tr></table></td><td>out</td></tr></table>")).toBe(
+			"<p>in<span data-fo-tab></span>ner<span data-fo-tab></span>out</p>"
+		)
+		expect(safeClipboardHtml("<p>x</p>\n\n<p>&nbsp;</p><div><br></div><p>y<br></p>")).toBe("<p>x</p><p></p><p></p><p>y</p>")
+	})
+
+	it("keeps formatting by element and by inline style, and Word's tabs", () => {
+		expect(
+			safeClipboardHtml(
+				'<b style="font-weight:normal"><span style="font-weight:700">B</span><span style="font-style:italic;text-decoration:underline line-through">I</span></b>'
+			)
+		).toBe("<p><b>B</b><i><u><s>I</s></u></i></p>")
+		expect(safeClipboardHtml("<p>a<span style='mso-tab-count:2'>&nbsp; </span>b</p>")).toBe(
+			"<p>a<span data-fo-tab></span><span data-fo-tab></span>b</p>"
+		)
+		expect(safeClipboardHtml("<pre>a  b</pre>")).toBe("<pre>a  b</pre>")
+		expect(safeClipboardHtml("<pre>line1\nline2\n\tindented\n</pre>")).toBe(
+			"<pre>line1</pre><pre>line2</pre><pre><span data-fo-tab></span>indented</pre>"
+		)
+	})
+
+	// A paste opens into the paragraph at the caret: its last paragraph ends with the text after the caret.
+	it("pastes paragraphs around a table, the table as a paragraph per row", async () => {
+		const { editor } = await pagedEditor(DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+		const start = paragraphStart(editor, 1)
+
+		select(sink, start, start)
+		expect(sink.paste({ html: "<p>AAA</p><table><tbody><tr><td>CCC</td><td>DDD</td></tr></tbody></table><p>BBB</p>" })).toBe(true)
+		expect(paragraphs(editor)).toEqual(["Alpha beta gamma", "AAA", "CCC\tDDD", "BBBSecond paragraph"])
+		sink.destroy()
+	})
+
+	it("pastes preformatted text line by line, keeping its spaces and tabs", async () => {
+		const { editor } = await pagedEditor(DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+
+		select(sink, paragraphStart(editor, 1), paragraphStart(editor, 1))
+		expect(sink.paste({ html: "<pre>line1\nline2  two\n\tindented\n</pre>" })).toBe(true)
+		expect(paragraphs(editor)).toEqual(["Alpha beta gamma", "line1", "line2  two", "\tindentedSecond paragraph"])
+		sink.destroy()
+	})
+
+	it("pastes Word's HTML", async () => {
+		const { editor } = await pagedEditor(DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+		const start = paragraphStart(editor, 1)
+
+		select(sink, start, start)
+		expect(
+			sink.paste({
+				html:
+					'<html xmlns:o="urn:schemas-microsoft-com:office:office"><head><meta charset=utf-8><style>p.MsoNormal{margin:0}</style></head>' +
+					"<body lang=EN-US><!--StartFragment--><div class=WordSection1><p class=MsoNormal><span>AAA <b>intro</b></span></p>\n" +
+					"<table class=MsoTableGrid border=1><tr><td><p class=MsoNormal><span>CCC cell</span></p></td>\n<td><p class=MsoNormal><b>DDD cell</b></p></td></tr></table>\n" +
+					"<p class=MsoNormal><o:p>&nbsp;</o:p></p><p class=MsoNormal>BBB<span style='mso-tab-count:1'>&nbsp;&nbsp; </span>after</p></div><!--EndFragment--></body></html>"
+			})
+		).toBe(true)
+		expect(paragraphs(editor)).toEqual(["Alpha beta gamma", "AAA intro", "CCC cell\tDDD cell", "", "BBB\tafterSecond paragraph"])
+
+		let bold = ""
+
+		editor.state.doc.descendants(node => {
+			if (node.isText && node.marks.some(mark => mark.type.name === "bold")) bold += `${node.text ?? ""}|`
+		})
+		expect(bold).toBe("intro|DDD cell|")
+		sink.destroy()
+	})
+
+	it("pastes Google Docs' HTML without making everything bold", async () => {
+		const { editor } = await pagedEditor(DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+		const start = paragraphStart(editor, 1)
+
+		select(sink, start, start)
+		expect(
+			sink.paste({
+				html:
+					'<meta charset="utf-8"><b style="font-weight:normal;" id="docs-internal-guid-1"><p dir="ltr"><span style="font-weight:400">AAA intro</span></p>' +
+					'<div dir="ltr"><table><colgroup><col width="100"></colgroup><tbody><tr><td><p dir="ltr"><span style="font-weight:700">CCC</span></p></td>' +
+					'<td><p dir="ltr"><span style="font-style:italic">DDD</span></p></td></tr></tbody></table></div><p dir="ltr"><span>BBB after</span></p></b>'
+			})
+		).toBe(true)
+		expect(paragraphs(editor)).toEqual(["Alpha beta gamma", "AAA intro", "CCC\tDDD", "BBB afterSecond paragraph"])
+
+		const marked: string[] = []
+
+		editor.state.doc.descendants(node => {
+			const names = node.marks.map(mark => mark.type.name).filter(name => name !== "run")
+
+			if (node.isText && names.length > 0) marked.push(`${node.text ?? ""}:${names.join(",")}`)
+		})
+		expect(marked).toEqual(["CCC:bold", "DDD:italic"])
+		sink.destroy()
+	})
+
+	it("copies a paragraph and a table and pastes them back as text in paragraphs", async () => {
+		const { editor } = await pagedEditor(TABLE_DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+		const doc = editor.state.doc
+		const intro = paragraphStart(editor, 0)
+		let lastCellEnd = -1
+
+		doc.descendants((node, pos) => {
+			if (node.type.name === "paragraph" && node.textContent === "Four") lastCellEnd = pos + 1 + node.content.size
+		})
+		select(sink, intro + 6, lastCellEnd)
+
+		const content = sink.clipboardContent()
+
+		expect(content?.text).toBe("text\nOne\tTwo\nThree\tFour")
+
+		const outro = paragraphStart(editor, 2)
+
+		select(sink, outro, outro)
+		expect(sink.paste({ html: content?.html ?? "" })).toBe(true)
+		expect(paragraphs(editor)).toEqual(["Intro text", "text", "One\tTwo", "Three\tFourOutro text"])
+		sink.destroy()
+	})
+
+	it("selects all", async () => {
+		const { editor } = await pagedEditor(DOC)
+		const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+
+		expect(sink.selectAll()).toBe(true)
+		expect(editor.selection().from).toBe(0)
+		expect(editor.selection().to).toBe(editor.state.doc.content.size)
+		sink.destroy()
+	})
+})

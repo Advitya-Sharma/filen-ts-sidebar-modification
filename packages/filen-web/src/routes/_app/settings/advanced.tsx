@@ -7,6 +7,8 @@ import { UploadsRow } from "@/features/settings/components/advanced/uploadsRow"
 import { LogsBlock } from "@/features/settings/components/advanced/logsBlock"
 import { AboutRows } from "@/features/settings/components/advanced/aboutRows"
 import { ThirdPartyNoticesRow } from "@/features/settings/components/advanced/thirdPartyNoticesRow"
+import { DocumentsRows } from "@/features/settings/components/advanced/documentsRows"
+import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 import { SettingsGroup, SettingsPage } from "@/features/settings/components/settingsLayout"
 import { routeHead } from "@/lib/head/routeHead"
 import { i18n } from "@/lib/i18n"
@@ -36,6 +38,14 @@ function AdvancedPage() {
 			>
 				<ArchiveMemoryRow />
 			</SettingsGroup>
+			{DOCX_EDITING ? (
+				<SettingsGroup
+					title={t("settingsAdvancedDocumentsTitle")}
+					description={t("settingsAdvancedDocumentsDescription")}
+				>
+					<DocumentsRows />
+				</SettingsGroup>
+			) : null}
 			<SettingsGroup
 				title={t("settingsAdvancedUploadsTitle")}
 				description={t("settingsAdvancedUploadsDescription")}

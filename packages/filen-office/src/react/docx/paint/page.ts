@@ -829,22 +829,43 @@ export function patchPage(
 	const { document, tables } = context
 	const parts = painted.parts
 	const links = linksBySource(page)
-	const reusable = new Map<string, PaintedLine[]>()
+	// Painted lines by how they look, each with its place on the page as painted.
+	const reusable = new Map<string, { line: PaintedLine; index: number }[]>()
 
-	for (const line of painted.lines) {
+	painted.lines.forEach((line, index) => {
 		const list = reusable.get(line.key)
 
-		if (list === undefined) reusable.set(line.key, [line])
-		else list.push(line)
+		if (list === undefined) reusable.set(line.key, [{ line, index }])
+		else list.push({ line, index })
+	})
+
+	// Of lines that look alike (repeated text, empty lines), the first after the last line kept: kept lines then
+	// keep their order and stay where they are.
+	let lastKept = -1
+	const reuse = (key: string): PaintedLine | undefined => {
+		const list = reusable.get(key)
+
+		if (list === undefined || list.length === 0) return undefined
+
+		const at = Math.max(
+			0,
+			list.findIndex(entry => entry.index > lastKept)
+		)
+		const entry = list.splice(at, 1)[0]
+
+		if (entry === undefined) return undefined
+
+		lastKept = Math.max(lastKept, entry.index)
+
+		return entry.line
 	}
 
 	const lines: PaintedLine[] = []
 	const texts: PaintedText[] = []
-	let previous: HTMLElement | null = null
 
 	for (let line = 0; line < page.lineCount; line++) {
 		const key = lineKey(page, line, links)
-		const kept = reusable.get(key)?.shift()
+		const kept = reuse(key)
 		const top = page.lineFloats[line * LINE_FLOATS] ?? 0
 		let next: PaintedLine
 
@@ -874,13 +895,6 @@ export function patchPage(
 			}
 		}
 
-		// Keep the text layer in reading order: insert where the line belongs.
-		const after: ChildNode | null = previous === null ? parts.textElements.firstChild : previous.nextSibling
-
-		if (next.text !== after) parts.textElements.insertBefore(next.text, after)
-
-		previous = next.text
-
 		if (next.under !== undefined && next.under.parentNode !== parts.fills) parts.fills.appendChild(next.under)
 		if (next.over !== undefined && next.over.parentNode !== parts.overLines) parts.overLines.appendChild(next.over)
 
@@ -889,13 +903,25 @@ export function patchPage(
 		for (const text of next.texts) texts.push(text)
 	}
 
-	// Lines that are gone.
+	// Lines that are gone, before the rest is put in order: kept lines then stay where they are (a line moved in
+	// the DOM is styled and laid out again as if new).
 	for (const list of reusable.values()) {
-		for (const line of list) {
+		for (const { line } of list) {
 			line.text.remove()
 			line.under?.remove()
 			line.over?.remove()
 		}
+	}
+
+	// Keep the text layer in reading order: new lines go where they belong.
+	let previous: HTMLElement | null = null
+
+	for (const line of lines) {
+		const after: ChildNode | null = previous === null ? parts.textElements.firstChild : previous.nextSibling
+
+		if (line.text !== after) parts.textElements.insertBefore(line.text, after)
+
+		previous = line.text
 	}
 
 	const graphicsKey = arraysKey(page.graphicFloats, page.graphicInts)

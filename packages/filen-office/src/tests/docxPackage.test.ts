@@ -94,7 +94,8 @@ describe("openDocxPackage", () => {
 		const pkg = await openSynthetic({ body: p("x"), mainContentType: contentType })
 
 		expect(pkg.facts).toMatchObject({ variant, macros, template })
-		expect(gateReasons(pkg.facts).includes("template")).toBe(template)
+		// Templates and macro-enabled documents are edited like documents (their content type is kept).
+		expect(gateReasons(pkg.facts)).toEqual([])
 	})
 
 	it("treats a macro project under a .docx content type as docm", async () => {

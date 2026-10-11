@@ -245,6 +245,26 @@ export const settings = {
 	/** Appended to the row description while the saved value awaits the next load; {{size}} is a whole number of mebibytes */
 	settingsAdvancedArchiveMemoryInEffect: "In effect now: {{size}} MiB.",
 
+	// ── Advanced: documents ──────────────────────────────────────────────────
+	/** Advanced settings — group title for document editing settings */
+	settingsAdvancedDocumentsTitle: "Documents",
+	/** Advanced settings — documents group description */
+	settingsAdvancedDocumentsDescription: "Editing Word documents, synced across your devices",
+	/** Advanced settings — row label: the name comments and tracked changes in documents are signed with */
+	settingsDocumentsAuthorName: "Author name",
+	/** Advanced settings — author name row description */
+	settingsDocumentsAuthorNameDescription: "Shown on your comments and tracked changes.",
+	/** Advanced settings — author name row value while none was given */
+	settingsDocumentsAuthorNameUnset: "Not set",
+	/** Advanced settings — button opening the author name dialog */
+	settingsDocumentsAuthorNameEdit: "Change",
+	/** Advanced settings — row label: save document edits automatically */
+	settingsDocumentsAutosave: "Save automatically",
+	/** Advanced settings — autosave row description */
+	settingsDocumentsAutosaveDescription: "Saves a new version about 30 seconds after you stop typing.",
+	/** Advanced settings — toast when a document setting could not be saved */
+	settingsDocumentsSaveFailed: "The setting couldn't be saved. Try again.",
+
 	// ── Advanced: uploads ────────────────────────────────────────────────────
 	settingsAdvancedUploadsTitle: "Uploads",
 	settingsAdvancedUploadsDescription: "How files are prepared before they are uploaded",

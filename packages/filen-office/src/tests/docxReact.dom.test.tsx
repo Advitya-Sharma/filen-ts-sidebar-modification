@@ -531,7 +531,7 @@ describe("find and viewer commands", () => {
 			pageCountFinal: true,
 			zoom: 1,
 			zoomMode: "custom",
-			find: { open: false, query: "", caseSensitive: false, count: 0, active: -1 }
+			find: { open: false, query: "", caseSensitive: false, count: 0, capped: false, active: -1 }
 		}
 
 		expect(state.capabilities.readOnly).toBe(true)

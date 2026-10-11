@@ -1,4 +1,13 @@
-import type { DocxAnnotations, DocxErrorReason, DocxMarkupInfo, DocxOpenInfo, DocxRevisionTarget } from "@filen/office/dom/docx"
+import type {
+	DocxAnnotations,
+	DocxErrorReason,
+	DocxMarkupInfo,
+	DocxMarkupMode,
+	DocxOpenInfo,
+	DocxRevisionTarget,
+	DocxViewerCommand,
+	DocxViewerState
+} from "@filen/office/dom/docx"
 import type { DocxDocument } from "@filen/office/react/docx"
 import type { DriveVariant } from "@/features/drive/lib/preferences"
 import type { PreviewKey } from "@/lib/i18n"
@@ -50,7 +59,10 @@ export function docxErrorKey(reason: DocxErrorReason | undefined): DocxErrorKey 
 // markup, damage) and where the file was opened from.
 export type DocxGateReason = DocxOpenInfo["gate"][number]
 export type DocxContextReason = "publicLink" | "archive" | "linkedFile" | "trash" | "sharedIn" | "notInDrive"
-export type DocxViewOnlyReason = DocxGateReason | DocxContextReason
+// Opened for editing, then read-only: renamed to another format, or no longer savable (its directory went),
+// or a text box being edited.
+export type DocxEditingReason = "renamed" | "notWritable" | "textbox"
+export type DocxViewOnlyReason = DocxGateReason | DocxContextReason | DocxEditingReason
 
 export interface DocxOpenContext {
 	// Opened from a public link (the anonymous surface).
@@ -105,8 +117,6 @@ export function viewOnlyReasonKey(reason: DocxViewOnlyReason): PreviewKey {
 			return "previewDocxViewOnlyWriteProtected"
 		case "signed":
 			return "previewDocxViewOnlySigned"
-		case "template":
-			return "previewDocxViewOnlyTemplate"
 		case "strict":
 			return "previewDocxViewOnlyStrict"
 		case "malformed":
@@ -123,6 +133,12 @@ export function viewOnlyReasonKey(reason: DocxViewOnlyReason): PreviewKey {
 			return "previewDocxViewOnlySharedIn"
 		case "notInDrive":
 			return "previewDocxViewOnlyNotInDrive"
+		case "renamed":
+			return "previewDocxViewOnlyRenamed"
+		case "notWritable":
+			return "previewDocxViewOnlyNotWritable"
+		case "textbox":
+			return "previewDocxViewOnlyTextbox"
 	}
 }
 
@@ -194,4 +210,53 @@ export function hasBalloons(annotations: DocxAnnotations, markup: DocxMarkupInfo
 		(markup.comments && annotations.comments.length > 0) ||
 		(markup.formatting && annotations.revisions.some(revision => revision.kind === "formatting" && revision.target !== "section"))
 	)
+}
+
+// The markup menu's label of each mode.
+export const MARKUP_LABELS: Readonly<Record<DocxMarkupMode, PreviewKey>> = {
+	all: "previewDocxMarkupAll",
+	simple: "previewDocxMarkupSimple",
+	none: "previewDocxMarkupNone",
+	original: "previewDocxMarkupOriginal"
+}
+
+// What the find field drives: the viewer's find over laid-out pages, or the editor's over the document it
+// edits (which can also replace).
+export interface DocxFindControls {
+	// The query last searched, and how.
+	query: string
+	caseSensitive: boolean
+	count: number
+	// There are more matches than `count` (a find shows so many at most).
+	capped: boolean
+	// The current match (0-based), -1 for none.
+	active: number
+	search: (query: string, caseSensitive: boolean) => void
+	step: (direction: 1 | -1) => void
+	close: () => void
+	// Editing: replace the current match or every match; absent while viewing.
+	replace?: {
+		disabled: boolean
+		one: (replacement: string) => void
+		all: (replacement: string) => void
+	}
+}
+
+export function viewerFindControls(state: DocxViewerState, dispatch: (command: DocxViewerCommand) => void): DocxFindControls {
+	return {
+		query: state.find.query,
+		caseSensitive: state.find.caseSensitive,
+		count: state.find.count,
+		capped: state.find.capped,
+		active: state.find.active,
+		search: (query, caseSensitive) => {
+			dispatch({ type: "find.query", query, caseSensitive })
+		},
+		step: direction => {
+			dispatch({ type: direction > 0 ? "find.next" : "find.previous" })
+		},
+		close: () => {
+			dispatch({ type: "find.close" })
+		}
+	}
 }

@@ -22,6 +22,16 @@ export interface DocxEditorHandle {
 	dragSelectionEnd(end: "start" | "end", clientX: number, clientY: number): void
 	// The handle was let go.
 	endSelectionDrag(): void
+	// The position under a point on screen in the story being edited (where a context menu was asked for).
+	hitTest(clientX: number, clientY: number): HitResult | undefined
+	// The selection as a copy writes it, for an app's own Cut and Copy (see EditSink.clipboardContent).
+	clipboardContent(): { readonly html: string; readonly text: string } | undefined
+	deleteSelection(): boolean
+	// Pastes what the app read from the system clipboard (see EditSink.paste).
+	paste(content: { readonly html?: string; readonly text?: string }): boolean
+	selectAll(): boolean
+	// The element that scrolls the pages (overlays an app places over them follow its scroll events).
+	scrollElement(): HTMLElement | null
 }
 
 export interface ClientPoint {
@@ -314,7 +324,13 @@ export function DocxEditor(props: DocxEditorProps) {
 		},
 		endSelectionDrag() {
 			handleDragRef.current = null
-		}
+		},
+		hitTest: hitAt,
+		clipboardContent: () => sinkRef.current?.clipboardContent(),
+		deleteSelection: () => sinkRef.current?.deleteSelection() ?? false,
+		paste: content => sinkRef.current?.paste(content) ?? false,
+		selectAll: () => sinkRef.current?.selectAll() ?? false,
+		scrollElement: () => containerRef.current
 	}))
 
 	// Handlers the input view calls back read the current render's layout.

@@ -66,3 +66,14 @@ export function Kbd({ action }: KbdProps) {
 		</span>
 	)
 }
+
+// A shortcut that is not a keymap action (an embedded editor's own, already in display labels).
+export function KbdKeys({ keys }: { keys: readonly string[] }) {
+	return (
+		<KbdGroup>
+			{keys.map((key, index) => (
+				<KbdPrimitive key={`${key}-${String(index)}`}>{key}</KbdPrimitive>
+			))}
+		</KbdGroup>
+	)
+}

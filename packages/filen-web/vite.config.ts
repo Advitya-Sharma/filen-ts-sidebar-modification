@@ -143,6 +143,15 @@ function assistantModelSources(mode: string): string[] {
 	return [url.origin]
 }
 
+// DOCX editing (src/features/preview/lib/docxEditingFlag.ts) stays out of builds without VITE_DOCX_EDITING=1: the
+// editor module resolves to a stub that renders nothing. A static import of the real one would keep the
+// module-level code of everything below it (ProseMirror, the in-thread engine, the writer) even unrendered.
+function docxEditingAlias(mode: string): { find: RegExp; replacement: string }[] {
+	return loadEnv(mode, process.cwd(), "VITE_DOCX_EDITING")["VITE_DOCX_EDITING"] === "1"
+		? []
+		: [{ find: /^@\/features\/preview\/components\/docxEditor$/, replacement: "/src/features/preview/components/docxEditor.off.tsx" }]
+}
+
 const contentSecurityPolicy = (connectExtra: readonly string[]) =>
 	[
 		"default-src 'none'",
@@ -213,7 +222,7 @@ export default defineConfig(({ mode }) => ({
 	// where pnpm links their own (dev) copies: @filen/office's react is not the app's. One copy of each
 	// singleton, resolved from this package; a package name covers its subpaths (react/jsx-runtime, and
 	// react/compiler-runtime that the React Compiler injects into those sources too).
-	resolve: { alias: { "@": "/src" }, dedupe: SINGLETONS },
+	resolve: { alias: [...docxEditingAlias(mode), { find: "@", replacement: "/src" }], dedupe: SINGLETONS },
 	// @sqlite.org/sqlite-wasm's own Vite guidance (README "Usage with vite"): it self-locates
 	// sqlite3.wasm and the OPFS async proxy via `new URL(..., import.meta.url)` (verified against
 	// the installed 3.53.0-build1 package) — esbuild's dev-time dep pre-bundling would rewrite/copy

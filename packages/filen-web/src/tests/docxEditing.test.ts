@@ -1,0 +1,229 @@
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { bytesSource } from "@filen/office/core/opc"
+import { buildDocxModel, openDocxPackage } from "@filen/office/core/docx"
+import { DocxEditorSession, openDocxEditContext } from "@filen/office/core/docx/edit"
+import type { DocxSaveInput } from "@filen/office/core/docx/write"
+import type { DocxEditingHost } from "@filen/office/dom/docx/editing"
+
+// Saving with the writer refusing some edited blocks: they are locked back to the file's own and the rest is
+// written (decision 5 at save time); a refusal no lock resolves leaves the document as it was.
+
+const writer = vi.hoisted(() => ({ refuse: "", always: false, runs: 0 }))
+
+type Doc = DocxEditorSession["state"]["doc"]
+
+// Whether `doc` still holds the refused text outside locked blocks.
+function holds(doc: Doc, text: string): boolean {
+	let found = false
+
+	doc.descendants(node => {
+		if (node.type.name === "locked_block") return false
+		if (node.isTextblock && node.textContent.includes(text)) found = true
+
+		return !found
+	})
+
+	return found
+}
+
+vi.mock("@filen/office/core/docx/write", async () => {
+	const actual = await vi.importActual<typeof import("@filen/office/core/docx/write")>("@filen/office/core/docx/write")
+	const refused = (input: DocxSaveInput): boolean => {
+		writer.runs++
+
+		return writer.always || (writer.refuse.length > 0 && input.sessions.some(session => holds(session.state.doc, writer.refuse)))
+	}
+
+	return {
+		...actual,
+		planDocxSave: (input: DocxSaveInput) =>
+			refused(input) ? Promise.reject(new actual.DocxSaveError("content", "refused")) : actual.planDocxSave(input),
+		saveDocx: (input: DocxSaveInput) =>
+			refused(input) ? Promise.reject(new actual.DocxSaveError("content", "refused")) : actual.saveDocx(input)
+	}
+})
+vi.mock("@/features/preview/lib/docxEngine", () => ({ DOCX_FONT_URLS: {} }))
+vi.mock("@/lib/log", () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }))
+
+const { writeDocx } = await import("@/features/preview/lib/docxEditing")
+const { DocxSaveError } = await import("@filen/office/core/docx/write")
+
+// Tests run from the package's directory.
+const BYTES = new Uint8Array(readFileSync(join(process.cwd(), "../filen-office/src/tests/fixtures/01-plain.docx")))
+
+async function openSession(bytes: Uint8Array): Promise<{ session: DocxEditorSession; host: DocxEditingHost }> {
+	const opened = await openDocxPackage(bytesSource(bytes))
+
+	if (!opened.ok) throw new Error(opened.reason)
+
+	const context = await openDocxEditContext(opened.package, await buildDocxModel(opened.package))
+	const session = new DocxEditorSession(context)
+	const host = { saveInput: () => ({ pkg: opened.package, context, sessions: [session] }) } as unknown as DocxEditingHost
+
+	return { session, host }
+}
+
+// Appends text to the first `count` non-empty top-level paragraphs, one string each.
+function editParagraphs(session: DocxEditorSession, texts: readonly string[]): void {
+	const ends: number[] = []
+
+	session.state.doc.forEach((node, offset) => {
+		if (ends.length < texts.length && node.type.name === "paragraph" && node.textContent.length > 0)
+			ends.push(offset + 1 + node.content.size)
+	})
+	ends.forEach((end, index) => {
+		const text = texts[index] ?? ""
+		const shift = texts.slice(0, index).reduce((sum, added) => sum + added.length, 0)
+
+		session.dispatch(session.state.tr.insertText(text, end + shift))
+	})
+}
+
+async function textOf(bytes: Uint8Array): Promise<string> {
+	const { session } = await openSession(bytes)
+
+	return session.state.doc.textBetween(0, session.state.doc.content.size, "\n", "")
+}
+
+// The top-level paragraphs' text, locked ones as "locked:".
+function texts(doc: Doc): string[] {
+	const out: string[] = []
+
+	doc.forEach(node => {
+		if (node.type.name === "locked_block") out.push(`locked:${String(node.attrs["text"])}`)
+		else if (node.textContent.length > 0) out.push(node.textContent)
+	})
+
+	return out
+}
+
+afterEach(() => {
+	writer.refuse = ""
+	writer.always = false
+	writer.runs = 0
+})
+
+describe("writeDocx", () => {
+	it("writes the refused blocks as last saved, and takes them back only once stored, as an undoable step", async () => {
+		const { session, host } = await openSession(BYTES)
+
+		editParagraphs(session, [" KEPT", " BAD", " ALSO"])
+
+		const edited = session.state.doc
+
+		writer.refuse = "BAD"
+
+		const written = await writeDocx(host)
+
+		expect(written.locked?.count).toBe(1)
+		expect(written.locked?.text).toContain("BAD")
+
+		const saved = await textOf(written.bytes)
+
+		expect(saved).toContain("KEPT")
+		expect(saved).toContain("ALSO")
+		expect(saved).not.toContain("BAD")
+		// Nothing changes in the editor before the file is stored.
+		expect(session.state.doc).toBe(edited)
+		written.commit()
+		expect(holds(session.state.doc, "BAD")).toBe(false)
+		expect(texts(session.state.doc).some(text => text.startsWith("locked:"))).toBe(true)
+		expect(session.snapshot().dirty).toBe(false)
+		// Undo brings the edit back (unsaved again).
+		session.execute({ type: "history.undo" })
+		expect(holds(session.state.doc, "BAD")).toBe(true)
+		expect(session.snapshot().dirty).toBe(true)
+	})
+
+	it("reports how many blocks it really took back: one edited while the file was stored keeps that edit", async () => {
+		const { session, host } = await openSession(BYTES)
+
+		editParagraphs(session, [" BAD", " ALSO BAD"])
+		writer.refuse = "BAD"
+
+		const written = await writeDocx(host)
+
+		expect(written.locked).toMatchObject({ count: 2, reverted: 0 })
+		// Typed into the first block during the upload.
+		editParagraphs(session, ["!"])
+		written.commit()
+		expect(written.locked?.reverted).toBe(1)
+		expect(holds(session.state.doc, "BAD!")).toBe(true)
+		expect(session.snapshot().dirty).toBe(true)
+	})
+
+	it("leaves the editor as it was when the upload fails (no commit)", async () => {
+		const { session, host } = await openSession(BYTES)
+
+		editParagraphs(session, [" BAD"])
+
+		const edited = session.state.doc
+
+		writer.refuse = "BAD"
+
+		const written = await writeDocx(host)
+
+		expect(written.locked?.count).toBe(1)
+		// The upload failed: commit() never runs.
+		expect(session.state.doc).toBe(edited)
+		expect(session.snapshot().dirty).toBe(true)
+	})
+
+	it("takes a block back to how it was last saved, not to how the file opened", async () => {
+		const { session, host } = await openSession(BYTES)
+
+		editParagraphs(session, [" SAVED"])
+		;(await writeDocx(host)).commit()
+		editParagraphs(session, [" BAD"])
+		writer.refuse = "BAD"
+
+		const written = await writeDocx(host)
+
+		expect(await textOf(written.bytes)).toContain("SAVED")
+		written.commit()
+		expect(texts(session.state.doc)[0]).toContain("SAVED")
+		expect(texts(session.state.doc)[0]).not.toContain("BAD")
+		expect(session.snapshot().dirty).toBe(false)
+	})
+
+	it("never searches for an autosave, and refuses a state it could not resolve at once", async () => {
+		const { session, host } = await openSession(BYTES)
+
+		editParagraphs(session, [" BAD"])
+		writer.refuse = "BAD"
+		await expect(writeDocx(host, { auto: true })).rejects.toBeInstanceOf(DocxSaveError)
+		expect(writer.runs).toBe(1)
+
+		writer.always = true
+		writer.runs = 0
+
+		const search = vi.fn()
+
+		await expect(writeDocx(host, { onSearch: search })).rejects.toBeInstanceOf(DocxSaveError)
+		expect(search).toHaveBeenCalledTimes(1)
+
+		const runs = writer.runs
+
+		// The same state again: refused without running the writer.
+		await expect(writeDocx(host)).rejects.toBeInstanceOf(DocxSaveError)
+		expect(writer.runs).toBe(runs)
+		// Changed: tried again.
+		editParagraphs(session, ["!"])
+		await expect(writeDocx(host)).rejects.toBeInstanceOf(DocxSaveError)
+		expect(writer.runs).toBeGreaterThan(runs)
+	})
+
+	it("refuses with the writer's error when nothing helps, leaving the document as it was", async () => {
+		const { session, host } = await openSession(BYTES)
+
+		editParagraphs(session, [" EDIT"])
+
+		const before = session.state.doc
+
+		writer.always = true
+		await expect(writeDocx(host)).rejects.toBeInstanceOf(DocxSaveError)
+		expect(session.state.doc).toBe(before)
+	})
+})

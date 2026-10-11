@@ -140,6 +140,7 @@ describe("line patching", () => {
 
 		if (after === undefined || after === before) throw new Error("page not laid out again")
 
+		const inserted = vi.spyOn(painted.parts.textElements, "insertBefore")
 		const patched = patchPage(painted, pageData(after), { document, tables: tablesOf(editor.layout) })
 		const fresh = paintPage(pageData(after), { document, tables: tablesOf(editor.layout) })
 
@@ -149,6 +150,9 @@ describe("line patching", () => {
 		const kept = patched.painted.lines.filter(line => painted.lines.some(old => old.text === line.text))
 
 		expect(kept.length).toBeGreaterThan(5)
+		// Only new lines were put in the DOM: kept ones stay where they are (a moved element is restyled and
+		// laid out again).
+		expect(inserted.mock.calls.length).toBe(patched.painted.lines.length - kept.length)
 		expect(patched.painted.lines[0]?.text).toBe(painted.lines[0]?.text)
 	})
 })
@@ -483,30 +487,108 @@ describe("DocxEditor input", () => {
 		expect(textbox.hasAttribute("aria-readonly")).toBe(false)
 	})
 
-	it("draws only the marks of the positions a page shows", async () => {
+	it("draws the marks of each page in one pass, keeping the boxes that did not move", async () => {
 		const { editor } = await pagedEditor(LONG)
 		const marks: DocxEditorMark[] = []
 
 		editor.state.doc.forEach((_node, offset) => marks.push({ from: offset + 1, to: offset + 10, kind: "spelling" }))
 
 		const rangeRects = vi.spyOn(editor, "rangeRects")
-
-		await mount(editor, { marks })
-
+		const rangesRects = vi.spyOn(editor.geometry, "rangesRects")
+		const { handle } = await mount(editor, { marks })
 		const mounted = Array.from(container.querySelectorAll<HTMLElement>("[data-fo-page]")).map(page => Number(page.dataset["foPage"]))
+		const drawn = (): Element[] => Array.from(container.querySelectorAll('.fo-docx-mark[data-fo-mark="spelling"]'))
+		// A box per mark on a line: a wave starting at each box.
+		const boxes = (): number => drawn().reduce((sum, path) => sum + (path.getAttribute("d")?.match(/M/g)?.length ?? 0), 0)
 		let expected = 0
 
-		for (const index of mounted) {
-			const range = editor.geometry.pageRange(index)
-
-			expected += marks.filter(mark => range !== undefined && mark.to >= range.from && mark.from <= range.to).length
-		}
+		for (const index of mounted) for (const mark of marks) expected += editor.rangeRects(mark.from, mark.to, index).length
 
 		expect(mounted.length).toBeGreaterThan(0)
-		expect(container.querySelectorAll('.fo-docx-mark[data-fo-mark="spelling"]').length).toBeGreaterThan(0)
-		// Each mounted page walked its own marks only (drawn when mounted and once per frame).
-		expect(rangeRects.mock.calls.length).toBeLessThanOrEqual(expected * 3)
-		expect(expected).toBeLessThan(marks.length)
+		expect(expected).toBeGreaterThan(0)
+		expect(boxes()).toBe(expected)
+		// One call per page drawn, never one per mark.
+		expect(rangeRects.mock.calls.length).toBe(mounted.length * marks.length)
+		expect(rangesRects.mock.calls.length).toBeLessThanOrEqual(mounted.length * 2)
+
+		const before = drawn()
+		const calls = rangesRects.mock.calls.length
+
+		// The caret moving redraws no mark.
+		await act(async () => {
+			editor.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, paragraphPos(editor, 3) + 2)))
+			handle.current?.focus()
+			await frame()
+		})
+		expect(rangesRects.mock.calls.length).toBe(calls)
+		expect(drawn()).toEqual(before)
+
+		const caret = container.querySelector(".fo-docx-caret")
+
+		expect(caret).not.toBeNull()
+
+		// Typing: paths of lines it did not touch are the same elements, and so is the caret.
+		await act(async () => {
+			editor.dispatch(editor.state.tr.insertText("x"))
+			await frame()
+		})
+
+		const after = drawn()
+
+		expect(after.filter(element => before.includes(element)).length).toBeGreaterThan(before.length / 2)
+		expect(container.querySelector(".fo-docx-caret")).toBe(caret)
+		expect(container.querySelectorAll(".fo-docx-caret").length).toBe(1)
+	})
+
+	it("draws a path of marks per line and touches only the path of the line typed in", async () => {
+		const { editor } = await pagedEditor(LONG)
+		let marks: DocxEditorMark[] = []
+
+		editor.state.doc.forEach((_node, offset) => marks.push({ from: offset + 1, to: offset + 10, kind: "spelling" }))
+		await mount(editor, { marks })
+
+		const rows = (): Map<Element, string> =>
+			new Map(Array.from(container.querySelectorAll(".fo-docx-mark"), path => [path, path.getAttribute("d") ?? ""]))
+		const before = rows()
+
+		// One path per line: every mark here sits on its paragraph's first line.
+		expect(before.size).toBeGreaterThan(5)
+		expect([...before.values()].every(d => d.match(/M/g)?.length === 1)).toBe(true)
+		expect(container.querySelectorAll("svg.fo-docx-marks").length).toBe(container.querySelectorAll("[data-fo-page]").length)
+
+		const tr = editor.state.tr.insertText("x", paragraphPos(editor, 3) + 3)
+
+		marks = marks.map(mark => ({ ...mark, from: tr.mapping.map(mark.from), to: tr.mapping.map(mark.to) }))
+		editor.dispatch(tr)
+		await mount(editor, { marks })
+
+		const after = rows()
+		const changed = [...after].filter(([row, content]) => before.get(row) !== content)
+
+		expect(after.size).toBe(before.size)
+		expect(changed.length).toBe(1)
+	})
+
+	it("draws find results in a drawing of their own, under no other kind", async () => {
+		const { editor } = await pagedEditor(LONG)
+		const start = paragraphPos(editor, 0) + 1
+
+		await mount(editor, {
+			marks: [
+				{ from: start, to: start + 9, kind: "find-active" },
+				{ from: start + 10, to: start + 15, kind: "repeated" },
+				{ from: start + 20, to: start + 25, kind: "find" }
+			]
+		})
+
+		const blended = container.querySelector("svg.fo-docx-marks[data-fo-blend]")
+		const plain = container.querySelector("svg.fo-docx-marks:not([data-fo-blend])")
+
+		expect(blended?.querySelectorAll('[data-fo-mark="find"], [data-fo-mark="find-active"]').length).toBe(2)
+		expect(plain?.querySelectorAll('[data-fo-mark="repeated"]').length).toBe(1)
+		expect(blended?.querySelector('[data-fo-mark="find-active"]')?.getAttribute("d")).toMatch(/^M[\d.]+ 0h[\d.]+v[\d.]+h-[\d.]+z$/)
+		// The plain drawing comes first: highlights blend over it.
+		expect(plain?.compareDocumentPosition(blended as Node)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
 	})
 })
 

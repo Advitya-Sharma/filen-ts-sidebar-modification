@@ -208,6 +208,74 @@ describe("UserDictionaryStore", () => {
 		expect(store.words()).toEqual(["Quux", "zorp"])
 	})
 
+	it("tries a failed read again with backoff while someone listens, sooner after a reconnect", async () => {
+		vi.useFakeTimers()
+
+		try {
+			const drive = fakeDrive(serializeUserDictionary(addUserWord(emptyUserDictionary(), "zorp", 5)))
+			const store = new UserDictionaryStore(drive.sdk, now)
+			const off = store.subscribe(() => undefined)
+
+			drive.sdk.listDirectory.mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline"))
+			await expect(store.load()).rejects.toThrow("offline")
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(1)
+
+			// 5 s, then 10 s.
+			await vi.advanceTimersByTimeAsync(4_999)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(1)
+			await vi.advanceTimersByTimeAsync(1)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(2)
+			await vi.advanceTimersByTimeAsync(9_999)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(2)
+			await vi.advanceTimersByTimeAsync(1)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(3)
+			expect(store.words()).toEqual(["zorp"])
+
+			// Read: nothing more is fetched on its own.
+			await vi.advanceTimersByTimeAsync(10 * 60_000)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(3)
+
+			// A reconnect after a failure: tried 5 s after the last attempt rather than at the backoff's end.
+			store.markStale()
+			drive.sdk.listDirectory.mockRejectedValueOnce(new Error("offline"))
+			await vi.advanceTimersByTimeAsync(500)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(4)
+			store.markStale()
+			await vi.advanceTimersByTimeAsync(4_999)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(4)
+			await vi.advanceTimersByTimeAsync(1)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(5)
+			off()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("does not try a failed read again while nobody listens, nor after a reset", async () => {
+		vi.useFakeTimers()
+
+		try {
+			const drive = fakeDrive(serializeUserDictionary(addUserWord(emptyUserDictionary(), "zorp", 5)))
+			const store = new UserDictionaryStore(drive.sdk, now)
+
+			drive.sdk.listDirectory.mockRejectedValueOnce(new Error("offline"))
+			await expect(store.load()).rejects.toThrow("offline")
+			await vi.advanceTimersByTimeAsync(60_000)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(1)
+
+			const off = store.subscribe(() => undefined)
+
+			drive.sdk.listDirectory.mockRejectedValueOnce(new Error("offline"))
+			await expect(store.load()).rejects.toThrow("offline")
+			store.reset()
+			await vi.advanceTimersByTimeAsync(10 * 60_000)
+			expect(drive.sdk.listDirectory).toHaveBeenCalledTimes(2)
+			off()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
 	it("does not download or overwrite an oversized file", async () => {
 		const drive = fakeDrive(serializeUserDictionary(addUserWord(emptyUserDictionary(), "zorp", 5)))
 		const store = new UserDictionaryStore(drive.sdk, now)

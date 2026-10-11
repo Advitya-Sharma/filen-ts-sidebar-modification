@@ -16,6 +16,8 @@ import { resetDriveKeyframes } from "@/features/drive/lib/thumbGenerators"
 import { resetFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 import { watchState } from "@/features/videos/lib/watchState"
 import { userDictionary } from "@/features/spellcheck/lib/userDictionary"
+import { officeSettings } from "@/features/office/lib/officeSettings"
+import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 import { disposeAudioEngine } from "@/features/audio/lib/audioEngine"
 import { cancelActiveTransfers } from "@/features/transfers/lib/control"
 import { allowNextUnload } from "@/lib/unloadGuard"
@@ -116,6 +118,10 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 	watchState.cancel()
 	// The spelling dictionary's words leave with the account (the spellchecker hears the empty list).
 	userDictionary.reset()
+	// The document author name and autosave choice likewise (only builds with DOCX editing read them).
+	if (DOCX_EDITING) {
+		officeSettings.reset()
+	}
 	// Uploads, downloads and copies abort before the worker drops its client; the confirm that leads
 	// here warned about them (useHasActiveTransfers).
 	cancelActiveTransfers()
