@@ -111,6 +111,11 @@ describe("React Compiler coverage", () => {
 	it("compiles the DOCX viewer and @filen/office's page list, so a scroll step re-renders only the pages that changed", () => {
 		for (const [file, fnName] of [
 			["src/features/preview/components/docxViewer.tsx", "DocxPageList"],
+			["src/features/preview/components/docxToolbar.tsx", "DocxToolbar"],
+			["src/features/preview/components/docxToolbar.tsx", "FindField"],
+			["src/features/preview/components/docxAnnotations.tsx", "DocxAnnotationLayer"],
+			["src/features/preview/components/docxAnnotations.tsx", "Column"],
+			["../filen-office/src/react/docx/annotations/useDocxAnnotations.ts", "useDocxAnnotations"],
 			["../filen-office/src/react/docx/DocxPages.tsx", "DocxPages"],
 			["../filen-office/src/react/docx/DocxPages.tsx", "DocxPageView"],
 			["../filen-office/src/react/docx/useDocxViewer.ts", "useDocxViewer"],
@@ -123,6 +128,15 @@ describe("React Compiler coverage", () => {
 				true
 			)
 		}
+	})
+
+	it("keeps DocxPages' page frames for the overlay while scrolling within the mounted pages", () => {
+		const { events, code } = compileWithCode("../filen-office/src/react/docx/DocxPages.tsx")
+
+		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === "PagesOverlay" && (event.memoSlots ?? 0) > 0)).toBe(
+			true
+		)
+		expect(unguardedCalls(code, "PagesOverlay", ["pageLayout(", "props.overlay("])).toEqual([])
 	})
 
 	it("compiles the archive browser, its rows and footer, so a listing notification re-renders only what changed", () => {

@@ -13,7 +13,7 @@ export const preview = {
 	previewDownloadAction: "Download",
 	/** Preview overlay header — accessible label for the button saving the editable text/code buffer; shown only while editable and dirty, also the Cmd/Ctrl+S keymap command's description */
 	previewSaveAction: "Save",
-	/** Shortcuts list — opens the text editor's search (file editor and note editors) */
+	/** Shortcuts list — opens the search of the text editors (file editor and note editors) and the find field of the Word document viewer */
 	previewEditorFind: "Find",
 	/** Shortcuts list — opens the text editor's search with its replace field */
 	previewEditorReplace: "Find and replace",
@@ -300,6 +300,128 @@ export const preview = {
 	previewDocxZoomInAction: "Zoom in",
 	/** Docx viewer — zoom-level indicator between the zoom out/in buttons; {{percent}} = zoom relative to the document's actual size */
 	previewDocxZoomIndicator: "{{percent}}%",
+	/** Docx viewer — tooltip of the zoom-level indicator, which is a button: clicking it fits the page to the window's width again */
+	previewDocxFitWidth: "Fit to width",
+	/** Docx viewer — accessible label of the zoom-level button; {{percent}} = the current zoom */
+	previewDocxFitWidthAction: "Zoom {{percent}}%, fit to width",
+	/** Docx viewer — toolbar button (and its tooltip) opening the find field in the toolbar; also the Cmd/Ctrl+F shortcut */
+	previewDocxFindAction: "Find in document",
+	/** Docx viewer — placeholder and accessible label of the find field in the toolbar */
+	previewDocxFindPlaceholder: "Find",
+	/** Docx viewer — match counter beside the find field; {{current}} = the selected match, {{total}} = how many the document holds */
+	previewDocxFindCount: "{{current}}/{{total}}",
+	/** Docx viewer — announced to screen readers as the find results change; {{current}} = the selected match, {{total}} = all matches */
+	previewDocxFindStatus: "Match {{current}} of {{total}}",
+	/** Docx viewer — announced to screen readers when the search text is nowhere in the document */
+	previewDocxFindNoMatches: "No matches",
+	/** Docx viewer — find bar button selecting the previous match (also Shift+Enter in the field) */
+	previewDocxFindPrevious: "Previous match",
+	/** Docx viewer — find bar button selecting the next match (also Enter in the field) */
+	previewDocxFindNext: "Next match",
+	/** Docx viewer — find bar toggle: only matches with the same upper and lower case */
+	previewDocxFindMatchCase: "Match case",
+	/** Docx viewer — find bar button closing the field (also Escape) */
+	previewDocxFindClose: "Close find",
+	/** Docx viewer — toolbar menu (and its tooltip) choosing how comments and tracked changes show, as Word's "Display for Review" */
+	previewDocxMarkup: "Markup",
+	/** Docx viewer — markup menu option: changes shown inline (insertions underlined, deletions struck through), comments and formatting changes in the margin */
+	previewDocxMarkupAll: "All markup",
+	/** Docx viewer — markup menu option: the document with every change accepted, changed lines marked by a bar, comments in the margin */
+	previewDocxMarkupSimple: "Simple markup",
+	/** Docx viewer — markup menu option: the document with every change accepted and nothing marked */
+	previewDocxMarkupNone: "No markup",
+	/** Docx viewer — markup menu option: the document as it was before any tracked change */
+	previewDocxMarkupOriginal: "Original",
+	/** Docx viewer — accessible name of the margin column holding the comment and change balloons */
+	previewDocxComments: "Comments and changes",
+	/** Docx viewer — a comment's author when the document records none */
+	previewDocxUnknownAuthor: "Unknown author",
+	/** Docx viewer — button in a comment or change balloon showing its whole text (the balloon is shortened otherwise) */
+	previewDocxBalloonExpand: "Show all",
+	/** Docx viewer — button in an expanded balloon shortening it again */
+	previewDocxBalloonCollapse: "Show less",
+	/** Docx viewer — control at the bottom of a page's balloon column standing for the balloons that do not fit beside the page; opens them in a popover; {{count}} = how many */
+	previewDocxMoreBalloons_one: "+{{count}} more",
+	/** Docx viewer — as previewDocxMoreBalloons_one, for several */
+	previewDocxMoreBalloons_other: "+{{count}} more",
+	/** Docx viewer — label on a resolved comment thread (marked done in Word) */
+	previewDocxCommentResolved: "Resolved",
+	/** Docx viewer — accessible label of the small comment marker shown at the page edge when there is no room for balloons; {{author}} = who wrote it */
+	previewDocxCommentMarker: "Comment by {{author}}",
+	/** Docx viewer — accessible label of a comment balloon; {{author}} = who wrote it */
+	previewDocxCommentLabel: "Comment by {{author}}",
+	/** Docx viewer — balloon of a formatting change whose changed properties are not named */
+	previewDocxFormatted: "Formatted",
+	/** Docx viewer — balloon of a formatting change; {{properties}} = the changed properties, comma-separated (e.g. "Bold, Font size") */
+	previewDocxFormattedProperties: "Formatted: {{properties}}",
+	/** Docx viewer — formatting change property: bold */
+	previewDocxPropertyBold: "Bold",
+	/** Docx viewer — formatting change property: italic */
+	previewDocxPropertyItalic: "Italic",
+	/** Docx viewer — formatting change property: underline */
+	previewDocxPropertyUnderline: "Underline",
+	/** Docx viewer — formatting change property: strikethrough (single or double) */
+	previewDocxPropertyStrikethrough: "Strikethrough",
+	/** Docx viewer — formatting change property: the font (typeface) */
+	previewDocxPropertyFont: "Font",
+	/** Docx viewer — formatting change property: font size */
+	previewDocxPropertyFontSize: "Font size",
+	/** Docx viewer — formatting change property: font colour */
+	previewDocxPropertyFontColor: "Font color",
+	/** Docx viewer — formatting change property: text highlight colour */
+	previewDocxPropertyHighlight: "Highlight",
+	/** Docx viewer — formatting change property: background shading */
+	previewDocxPropertyShading: "Shading",
+	/** Docx viewer — formatting change property: superscript or subscript */
+	previewDocxPropertyPosition: "Superscript/subscript",
+	/** Docx viewer — formatting change property: all caps or small caps */
+	previewDocxPropertyCaps: "Caps",
+	/** Docx viewer — formatting change property: the paragraph or character style */
+	previewDocxPropertyStyle: "Style",
+	/** Docx viewer — formatting change property: paragraph alignment */
+	previewDocxPropertyAlignment: "Alignment",
+	/** Docx viewer — formatting change property: paragraph indentation */
+	previewDocxPropertyIndent: "Indent",
+	/** Docx viewer — formatting change property: paragraph or character spacing */
+	previewDocxPropertySpacing: "Spacing",
+	/** Docx viewer — formatting change property: list numbering or bullets */
+	previewDocxPropertyNumbering: "Numbering",
+	/** Docx viewer — formatting change property: tab stops */
+	previewDocxPropertyTabs: "Tabs",
+	/** Docx viewer — formatting change property: borders */
+	previewDocxPropertyBorders: "Borders",
+	/** Docx viewer — formatting change property: keep with next / keep lines together / page break before */
+	previewDocxPropertyPagination: "Line and page breaks",
+	/** Docx viewer — formatting change property: anything about a table (width, borders, layout, rows, cells) */
+	previewDocxPropertyTable: "Table",
+	/** Docx viewer — toolbar badge shown when the document can only be viewed; opens a popover explaining why */
+	previewDocxViewOnly: "View only",
+	/** Docx viewer — heading of the popover opened from the "View only" badge */
+	previewDocxViewOnlyTitle: "This document can only be viewed",
+	/** Docx viewer — view-only reason: the document is restricted with Word's "Restrict Editing" */
+	previewDocxViewOnlyProtected: "It's protected against editing in Word.",
+	/** Docx viewer — view-only reason: the document asks for a password before it can be changed */
+	previewDocxViewOnlyWriteProtected: "It needs a password to be changed.",
+	/** Docx viewer — view-only reason: the document is digitally signed, and any change would break the signature */
+	previewDocxViewOnlySigned: "It's digitally signed; a change would break the signature.",
+	/** Docx viewer — view-only reason: the file is a Word template (.dotx/.dotm) */
+	previewDocxViewOnlyTemplate: "It's a Word template.",
+	/** Docx viewer — view-only reason: the document is saved in the "Strict Open XML" variant of the format */
+	previewDocxViewOnlyStrict: "It's saved as Strict Open XML.",
+	/** Docx viewer — view-only reason: parts of the file are damaged, so it is only shown, to keep it intact */
+	previewDocxViewOnlyMalformed: "Parts of it are damaged, so it's left as it is.",
+	/** Docx viewer — view-only reason: the file was opened from a public link */
+	previewDocxViewOnlyPublicLink: "It was opened from a public link.",
+	/** Docx viewer — view-only reason: someone else's file, opened through a link they sent (e.g. a link card in a chat) */
+	previewDocxViewOnlyLinkedFile: "It's someone else's file, opened through their link.",
+	/** Docx viewer — view-only reason: the file is inside an archive (zip and similar) */
+	previewDocxViewOnlyArchive: "It's inside an archive.",
+	/** Docx viewer — view-only reason: the file is in the trash */
+	previewDocxViewOnlyTrash: "It's in the trash.",
+	/** Docx viewer — view-only reason: someone else shared the file with you */
+	previewDocxViewOnlySharedIn: "It was shared with you.",
+	/** Docx viewer — view-only reason: opened from Recents, Favorites, Links or Shared, not from its directory in the drive */
+	previewDocxViewOnlyNotInDrive: "Open it from its directory in your drive to edit it.",
 
 	// ── Markdown ─────────────────────────────────────────────────────────────
 	/** Markdown viewer — toolbar button shown while viewing the rendered output; switches to the raw-text source view */

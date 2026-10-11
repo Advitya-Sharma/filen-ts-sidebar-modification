@@ -34,8 +34,9 @@ export const CO_MOUNTABLE: readonly (readonly [ActionScope, ActionScope])[] = [
 // guard, not by luck. `drive.download` and `preview.save` share mod+s; the listing's handler checks
 // its dialog host's `isDialogOpen`, which is true exactly while the preview overlay is the open
 // dialog, so only one of the two ever does real work. The listings' searches and `editor.find` share
-// mod+f: the listing handlers ignore editable content, and the editor binds its find inside CodeMirror
-// alone, so focus decides which one runs. `notes.saveNow` and `preview.save` share mod+s only at scope
+// mod+f: the listing handlers ignore editable content and stand down while a dialog is open, the editor
+// binds its find inside CodeMirror alone, and the Word document viewer only takes keys pressed in its own
+// layer, so focus decides which one runs. `notes.saveNow` and `preview.save` share mod+s only at scope
 // level: the preview overlay never mounts on the notes route, so the two never run together.
 //
 // The ONLY consumer is the defaults-level invariant test. `conflictingActions` deliberately does not

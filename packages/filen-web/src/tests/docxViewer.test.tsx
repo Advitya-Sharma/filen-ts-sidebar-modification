@@ -1,10 +1,20 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { ByteSource } from "@filen/office/core/opc"
-import type { DocxEvent, DocxListener, DocxPageData, DocxSessionApi, DrawingData } from "@filen/office/dom/docx"
+import type {
+	DocxAnnotations,
+	DocxEvent,
+	DocxListener,
+	DocxOpenOptions,
+	DocxPageData,
+	DocxSessionApi,
+	DrawingData
+} from "@filen/office/dom/docx"
 import "@/lib/i18n"
+import { registerAllActions } from "@/lib/keymap/actions"
+import type { DriveItem } from "@/features/drive/lib/item"
 import { linkedFileItem } from "@/tests/fixtures/sdk"
 
 // The new viewer: the engine reads ranges of the cached buffer (never a copy of the whole file), docx-preview
@@ -18,6 +28,7 @@ const { renderAsync, warn, host, prewarm } = vi.hoisted(() => ({
 		listener: null as DocxListener | null,
 		source: null as ByteSource | null,
 		session: null as DocxSessionApi | null,
+		options: [] as (DocxOpenOptions | undefined)[],
 		closed: 0
 	}
 }))
@@ -32,9 +43,10 @@ vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 vi.mock("@/features/preview/lib/docxEngine", () => ({
 	prewarmDocxWorker: prewarm,
 	DOCX_FONT_URLS: {},
-	docxHost: (source: ByteSource, listener: DocxListener) => {
+	docxHost: (source: ByteSource, listener: DocxListener, options?: DocxOpenOptions) => {
 		host.source = source
 		host.listener = listener
+		host.options.push(options)
 
 		const session = host.session ?? {
 			objects: () => Promise.resolve([]),
@@ -55,6 +67,8 @@ vi.mock("@/features/preview/lib/docxEngine", () => ({
 }))
 
 const { DocxViewer } = await import("@/features/preview/components/docxViewer")
+
+registerAllActions()
 
 const item = linkedFileItem("doc.docx", {
 	uuid: "aaaaaaaa-0000-0000-0000-000000000002",
@@ -118,6 +132,56 @@ function pages(objects = 0): DocxEvent {
 	return { type: "pages", pages: [page(objects)], styles: [STYLE], decorations: [], links: [], final: true, pageCount: 1 }
 }
 
+// The same file in the user's own drive (a linked file is its own parent).
+const ownItem: DriveItem = item.type === "file" ? { ...item, data: { ...item.data, parent: "bbbbbbbb-0000-0000-0000-000000000001" } } : item
+
+function opened(info: { gate?: ("protected" | "signed")[]; comments?: number; revisions?: number }): DocxEvent {
+	return {
+		type: "opened",
+		info: {
+			variant: "docx",
+			gate: info.gate ?? [],
+			estimatedPages: 1,
+			pageWidth: 816,
+			pageHeight: 1056,
+			mainPartBytes: 100,
+			...(info.comments === undefined ? {} : { comments: info.comments }),
+			...(info.revisions === undefined ? {} : { revisions: info.revisions })
+		}
+	}
+}
+
+function emptySession(): DocxSessionApi {
+	return {
+		objects: () => Promise.resolve([]),
+		media: () => Promise.resolve(null),
+		locate: () => Promise.resolve(null),
+		find: () => Promise.resolve(new Int32Array(0)),
+		close: () => undefined
+	}
+}
+
+// One comment by Alice on "Hello".
+const ANNOTATIONS: DocxAnnotations = {
+	authors: ["Alice"],
+	comments: [
+		{
+			id: "1",
+			author: 0,
+			initials: "A",
+			date: "2024-01-01T00:00:00Z",
+			paragraphs: [[{ text: "Looks good", bold: false, italic: false, underline: false, strike: false }]],
+			parent: -1,
+			done: false,
+			firstRect: 0,
+			rectCount: 1
+		}
+	],
+	revisions: [],
+	rectPages: Int32Array.from([0]),
+	rectFloats: Float32Array.from([96, 96, 40, 20])
+}
+
 // One image item filling the drawing.
 const DRAWING: DrawingData = {
 	width: 100,
@@ -153,6 +217,7 @@ beforeEach(() => {
 	host.listener = null
 	host.source = null
 	host.session = null
+	host.options = []
 	host.closed = 0
 })
 
@@ -292,5 +357,141 @@ describe("DocxViewer", () => {
 		await waitFor(() => {
 			expect(revokeObjectURL.mock.calls.map(([url]) => url)).toEqual(created)
 		})
+	})
+
+	it("explains why a document is view-only, from the file and from where it was opened", async () => {
+		render(
+			<DocxViewer
+				item={ownItem}
+				alt="doc.docx"
+				variant="trash"
+			/>
+		)
+
+		await emit(opened({ gate: ["protected"] }))
+		fireEvent.click(await screen.findByRole("button", { name: "View only" }))
+
+		expect(await screen.findByText("This document can only be viewed")).toBeTruthy()
+		expect(screen.getByText("It's in the trash.")).toBeTruthy()
+		expect(screen.getByText("It's protected against editing in Word.")).toBeTruthy()
+	})
+
+	it("says a file reached through someone's link is theirs", async () => {
+		render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+				variant="links"
+			/>
+		)
+
+		await emit(opened({}))
+		fireEvent.click(await screen.findByRole("button", { name: "View only" }))
+
+		expect(await screen.findByText("It's someone else's file, opened through their link.")).toBeTruthy()
+		expect(screen.queryByText("Open it from its directory in your drive to edit it.")).toBeNull()
+	})
+
+	it("shows no view-only badge for an editable place and file", async () => {
+		render(
+			<DocxViewer
+				item={ownItem}
+				alt="doc.docx"
+				variant="drive"
+			/>
+		)
+
+		await emit(opened({}))
+		await emit(pages())
+
+		expect(screen.queryByRole("button", { name: "View only" })).toBeNull()
+	})
+
+	it("finds in the toolbar on Mod+F, steps with Enter and closes on Escape without closing the preview", async () => {
+		const find = vi.fn(() => Promise.resolve(Int32Array.from([0, 0, 0, 4, 0, 0, 1, 3])))
+
+		// jsdom has neither the Highlight API nor range boxes: matches are drawn as (here empty) boxes.
+		Range.prototype.getClientRects = () => [] as unknown as DOMRectList
+
+		host.session = { ...emptySession(), find }
+
+		render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		await emit(opened({}))
+		await emit(pages())
+
+		fireEvent.keyDown(document.body, { key: "f", code: "KeyF", ctrlKey: true, metaKey: true })
+
+		const field = await screen.findByRole("searchbox", { name: "Find" })
+
+		fireEvent.change(field, { target: { value: "hel" } })
+		fireEvent.keyDown(field, { key: "Enter" })
+
+		await waitFor(() => {
+			expect(find).toHaveBeenCalledWith("hel", { caseSensitive: false })
+		})
+		expect(await screen.findByText("1/2")).toBeTruthy()
+
+		fireEvent.keyDown(field, { key: "Enter" })
+		expect(await screen.findByText("2/2")).toBeTruthy()
+
+		const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })
+
+		act(() => {
+			field.dispatchEvent(escape)
+		})
+
+		expect(escape.defaultPrevented).toBe(true)
+		expect(screen.queryByRole("searchbox")).toBeNull()
+	})
+
+	it("fits the page to the width again from the zoom percentage", async () => {
+		render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		await emit(opened({}))
+		await emit(pages())
+
+		fireEvent.click(screen.getByRole("button", { name: "Zoom in" }))
+		expect(screen.getByRole("button", { name: "Zoom 110%, fit to width" })).toBeTruthy()
+
+		fireEvent.click(screen.getByRole("button", { name: "Zoom 110%, fit to width" }))
+		expect(screen.getByRole("button", { name: "Zoom 100%, fit to width" })).toBeTruthy()
+	})
+
+	it("offers the markup modes for a reviewed document, lays out the chosen view and marks its comments", async () => {
+		host.session = { ...emptySession(), annotations: () => Promise.resolve(ANNOTATIONS) }
+
+		const view = render(
+			<DocxViewer
+				item={item}
+				alt="doc.docx"
+			/>
+		)
+
+		expect(host.options[0]?.view).toBe("final")
+
+		await emit(opened({ comments: 1, revisions: 0 }))
+		await emit(pages())
+
+		// Too narrow for balloons (jsdom lays nothing out): a marker at the page's edge.
+		expect(await screen.findByRole("button", { name: "Comment by Alice" })).toBeTruthy()
+
+		fireEvent.click(screen.getByRole("button", { name: "Markup: Simple markup" }))
+		fireEvent.click(await screen.findByRole("menuitemradio", { name: "All markup" }))
+
+		await waitFor(() => {
+			expect(host.options.at(-1)?.view).toBe("markup")
+		})
+		view.unmount()
 	})
 })

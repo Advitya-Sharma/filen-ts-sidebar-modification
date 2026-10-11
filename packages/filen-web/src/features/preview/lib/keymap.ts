@@ -7,7 +7,8 @@ import type { ActionDef } from "@/lib/keymap/registry"
 // mod+f with the listings' search: those handlers ignore editable content, where these live.
 // `preview.save` passes `enableOnContentEditable`: CodeMirror's content DOM sets contenteditable while
 // editable, and the library's default ignore-list would otherwise drop Cmd/Ctrl+S exactly when the
-// cursor is inside the editor. The markdown commands act in markdown editors only (.md files, markdown
+// cursor is inside the editor. The Word document viewer opens its find field on `editor.find` too, outside
+// CodeMirror, for the layer it is shown in only. The markdown commands act in markdown editors only (.md files, markdown
 // notes). The preview toggle is mod+shift+v, as in VS Code: mod+shift+p is audio's play/pause, and
 // Firefox keeps Ctrl+Shift+P for a private window.
 export const PREVIEW_ACTIONS: readonly ActionDef[] = [

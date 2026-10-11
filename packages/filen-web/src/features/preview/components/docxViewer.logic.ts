@@ -1,5 +1,7 @@
-import type { DocxErrorReason } from "@filen/office/dom/docx"
+import type { DocxAnnotations, DocxErrorReason, DocxMarkupInfo, DocxOpenInfo, DocxRevisionTarget } from "@filen/office/dom/docx"
 import type { DocxDocument } from "@filen/office/react/docx"
+import type { DriveVariant } from "@/features/drive/lib/preferences"
+import type { PreviewKey } from "@/lib/i18n"
 
 // Which engine failures fall back to docx-preview for this release: the engine throwing (a defect or a
 // limit it hit) or rejecting markup docx-preview may still read. Files that are not a readable Word
@@ -42,4 +44,154 @@ export function docxErrorKey(reason: DocxErrorReason | undefined): DocxErrorKey 
 		default:
 			return "previewDocxLoadFailed"
 	}
+}
+
+// Why a document opens view-only: the file's own gate reasons (protection, signature, template, Strict
+// markup, damage) and where the file was opened from.
+export type DocxGateReason = DocxOpenInfo["gate"][number]
+export type DocxContextReason = "publicLink" | "archive" | "linkedFile" | "trash" | "sharedIn" | "notInDrive"
+export type DocxViewOnlyReason = DocxGateReason | DocxContextReason
+
+export interface DocxOpenContext {
+	// Opened from a public link (the anonymous surface).
+	anon: boolean
+	// An archive's entry, read from the archive rather than the drive.
+	archive: boolean
+	// Someone else's file reached through their link (a chat's link card): its listing variant says nothing.
+	linked: boolean
+	// The drive listing it was opened from; undefined outside the drive.
+	variant: DriveVariant | undefined
+}
+
+export function docxContextReason(context: DocxOpenContext): DocxContextReason | null {
+	if (context.anon) {
+		return "publicLink"
+	}
+
+	if (context.archive) {
+		return "archive"
+	}
+
+	if (context.linked) {
+		return "linkedFile"
+	}
+
+	switch (context.variant) {
+		case "trash":
+			return "trash"
+		case "sharedIn":
+			return "sharedIn"
+		case "recents":
+		case "favorites":
+		case "links":
+		case "sharedOut":
+			return "notInDrive"
+		default:
+			return null
+	}
+}
+
+export function viewOnlyReasons(gate: readonly DocxGateReason[], context: DocxOpenContext): DocxViewOnlyReason[] {
+	const where = docxContextReason(context)
+
+	return where === null ? [...gate] : [where, ...gate]
+}
+
+export function viewOnlyReasonKey(reason: DocxViewOnlyReason): PreviewKey {
+	switch (reason) {
+		case "protected":
+			return "previewDocxViewOnlyProtected"
+		case "writeProtected":
+			return "previewDocxViewOnlyWriteProtected"
+		case "signed":
+			return "previewDocxViewOnlySigned"
+		case "template":
+			return "previewDocxViewOnlyTemplate"
+		case "strict":
+			return "previewDocxViewOnlyStrict"
+		case "malformed":
+			return "previewDocxViewOnlyMalformed"
+		case "publicLink":
+			return "previewDocxViewOnlyPublicLink"
+		case "archive":
+			return "previewDocxViewOnlyArchive"
+		case "linkedFile":
+			return "previewDocxViewOnlyLinkedFile"
+		case "trash":
+			return "previewDocxViewOnlyTrash"
+		case "sharedIn":
+			return "previewDocxViewOnlySharedIn"
+		case "notInDrive":
+			return "previewDocxViewOnlyNotInDrive"
+	}
+}
+
+// WordprocessingML property elements (local names) a formatting change names, by the label Word's balloon
+// gives them. Elements not listed (layout details such as kerning or rsids) are left out of the label.
+const PROPERTY_KEYS: Readonly<Record<string, PreviewKey>> = {
+	b: "previewDocxPropertyBold",
+	bCs: "previewDocxPropertyBold",
+	i: "previewDocxPropertyItalic",
+	iCs: "previewDocxPropertyItalic",
+	u: "previewDocxPropertyUnderline",
+	strike: "previewDocxPropertyStrikethrough",
+	dstrike: "previewDocxPropertyStrikethrough",
+	rFonts: "previewDocxPropertyFont",
+	sz: "previewDocxPropertyFontSize",
+	szCs: "previewDocxPropertyFontSize",
+	color: "previewDocxPropertyFontColor",
+	highlight: "previewDocxPropertyHighlight",
+	shd: "previewDocxPropertyShading",
+	vertAlign: "previewDocxPropertyPosition",
+	position: "previewDocxPropertyPosition",
+	caps: "previewDocxPropertyCaps",
+	smallCaps: "previewDocxPropertyCaps",
+	rStyle: "previewDocxPropertyStyle",
+	pStyle: "previewDocxPropertyStyle",
+	jc: "previewDocxPropertyAlignment",
+	ind: "previewDocxPropertyIndent",
+	spacing: "previewDocxPropertySpacing",
+	numPr: "previewDocxPropertyNumbering",
+	tabs: "previewDocxPropertyTabs",
+	pBdr: "previewDocxPropertyBorders",
+	bdr: "previewDocxPropertyBorders",
+	keepNext: "previewDocxPropertyPagination",
+	keepLines: "previewDocxPropertyPagination",
+	pageBreakBefore: "previewDocxPropertyPagination",
+	widowControl: "previewDocxPropertyPagination"
+}
+
+// The labels of a formatting change's properties, each once, in the order the change names them.
+export function formattingKeys(target: DocxRevisionTarget, properties: readonly string[]): PreviewKey[] {
+	if (target === "table") {
+		return ["previewDocxPropertyTable"]
+	}
+
+	const keys: PreviewKey[] = []
+
+	for (const property of properties) {
+		const key = PROPERTY_KEYS[property]
+
+		if (key !== undefined && !keys.includes(key)) {
+			keys.push(key)
+		}
+	}
+
+	return keys
+}
+
+// Balloons need this much width beside the page (screen px); a narrower viewer shows markers instead.
+export const BALLOON_COLUMN_WIDTH = 280
+export const BALLOONS_MIN_VIEWPORT = 720
+
+export function balloonsFit(viewportWidth: number): boolean {
+	return viewportWidth >= BALLOONS_MIN_VIEWPORT
+}
+
+// Whether a markup mode puts anything in the margin: comments, or (all markup) formatting changes.
+export function hasBalloons(annotations: DocxAnnotations, markup: DocxMarkupInfo): boolean {
+	return (
+		(markup.comments && annotations.comments.length > 0) ||
+		(markup.formatting && annotations.revisions.some(revision => revision.kind === "formatting" && revision.target !== "section"))
+	)
 }

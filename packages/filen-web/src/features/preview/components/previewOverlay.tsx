@@ -1368,6 +1368,7 @@ function PreviewBody({
 				<DocxViewer
 					item={item}
 					alt={alt}
+					variant={variant}
 				/>
 			)
 		case "text":
