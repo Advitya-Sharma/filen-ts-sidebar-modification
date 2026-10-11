@@ -144,6 +144,24 @@ describe("break opportunities", () => {
 		expect(kinsokuLists("de-DE", false)).toBeNull()
 	})
 
+	it("keeps Hangul words whole when asked, as Word's default word wrap does", () => {
+		const text = "한국어 문장은 띄어쓰기를"
+		const keep = (value: string): string => {
+			const out = new Uint8Array(value.length + 1)
+
+			new BreakFinder().find(value, 0, value.length, out, { strict: true, kinsoku: null, keepHangul: true })
+
+			return Array.from(value, (char, i) => (i > 0 && out[i] === BREAK_ALLOWED ? `|${char}` : char)).join("")
+		}
+
+		expect(breaksOf(text)).toBe("한|국|어 |문|장|은 |띄|어|쓰|기|를")
+		expect(keep(text)).toBe("한국어 |문장은 |띄어쓰기를")
+		// Conjoining and compatibility jamo, and punctuation rules, still apply.
+		expect(keep("\u1100\u1161\u11a8\u3131\u3131 (가)나")).toBe("\u1100\u1161\u11a8\u3131\u3131 |(가)나")
+		// Ideographs and kana keep their breaks.
+		expect(keep("한국 漢字かな")).toBe("한국 |漢|字|か|な")
+	})
+
 	it("reuses its scratch without allocating per code point", () => {
 		const finder = new BreakFinder()
 		const text = "lorem ipsum dolor sit amet ".repeat(40)

@@ -123,6 +123,20 @@ describe("greedy line breaking", () => {
 		expect(texts(layOut(h, b => b.append("日本語日本。語", h.base), {}, { kinsoku }))).toEqual(["日本語日", "本。語"])
 	})
 
+	it("wraps Korean at spaces by default and between syllables without word wrap", () => {
+		const h = harness()
+		const text = "한국어 문장은 띄어쓰기를 사용합니다"
+
+		// Syllables are 20 px, spaces 5 px.
+		expect(texts(layOut(h, b => b.append(text, h.base)))).toEqual(["한국어 ", "문장은 ", "띄어쓰기를 ", "사용합니다"])
+		expect(texts(layOut(h, b => b.append(text, h.base), {}, { wordWrap: false }))).toEqual([
+			"한국어 문",
+			"장은 띄어",
+			"쓰기를 사",
+			"용합니다"
+		])
+	})
+
 	it("lets East Asian full stops hang past the line end with overflowPunct", () => {
 		const h = harness()
 

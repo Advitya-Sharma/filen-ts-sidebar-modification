@@ -87,6 +87,10 @@ export interface PrepareOptions {
 	readonly rtl: boolean
 	// Small kana and the like as non-starters (Japanese strict breaking). Default false (Word's standard).
 	readonly strict?: boolean
+	// Word's w:wordWrap, which Word applies to Korean text only (MS-OI29500 §17.3.1.45): true keeps
+	// Hangul words whole and wraps Korean at spaces; false (w:wordWrap="0") breaks between Hangul
+	// syllables. Default true, Word's default.
+	readonly wordWrap?: boolean
 	readonly kinsoku?: Kinsoku | null
 	readonly hyphenator?: Hyphenator | null
 	// East Asian full stops and commas may hang past the line end (w:overflowPunct). Default false.
@@ -340,7 +344,11 @@ export class ParagraphLayouter {
 
 		const breaks = this.breaks
 
-		this.finder.find(text, 0, n, breaks, { strict: options.strict ?? false, kinsoku: options.kinsoku ?? null })
+		this.finder.find(text, 0, n, breaks, {
+			strict: options.strict ?? false,
+			kinsoku: options.kinsoku ?? null,
+			keepHangul: options.wordWrap ?? true
+		})
 
 		const classes = this.finder.classes
 

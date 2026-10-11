@@ -47,12 +47,23 @@ const AFFIXES = mask(C.PR, C.PO)
 const IDEOGRAPHIC = mask(C.ID, C.EB, C.EM)
 const JAMO = mask(C.JL, C.JV, C.JT, C.H2, C.H3)
 const AKSARA = mask(C.AK, C.AS)
+const HANGUL = mask(C.H2, C.H3, C.JL, C.JV, C.JT)
+
+// Hangul outside the syllable classes: compatibility jamo, jamo extensions and halfwidth forms are ID.
+function isHangul(cp: number): boolean {
+	return (
+		(cp >= 0x3130 && cp <= 0x318f) || (cp >= 0xa960 && cp <= 0xa97f) || (cp >= 0xd7b0 && cp <= 0xd7ff) || (cp >= 0xffa0 && cp <= 0xffdc)
+	)
+}
 
 export interface BreakOptions {
 	// CJ (small kana and the like) as non-starters (strict breaking) rather than ideographs (normal).
 	readonly strict: boolean
 	// Kinsoku lists applied on top of UAX #14, or null.
 	readonly kinsoku: Kinsoku | null
+	// Keep Hangul words whole, breaking Korean only at spaces and punctuation (CSS word-break: keep-all for
+	// Hangul): UAX #14 §8's tailoring of the Korean syllable classes to AL. Default false (plain UAX #14).
+	readonly keepHangul?: boolean
 }
 
 export const DEFAULT_BREAK_OPTIONS: BreakOptions = { strict: true, kinsoku: null }
@@ -102,7 +113,7 @@ export class BreakFinder {
 			return
 		}
 
-		const props = this.classify(text, start, end, options.strict)
+		const props = this.classify(text, start, end, options.strict, options.keepHangul === true)
 
 		this.resolve(text, start, n, props, out)
 
@@ -112,7 +123,7 @@ export class BreakFinder {
 	}
 
 	// Table values per code unit; the second unit of a surrogate pair repeats the first.
-	classify(text: string, start: number, end: number, strict: boolean): Uint8Array {
+	classify(text: string, start: number, end: number, strict: boolean, keepHangul = false): Uint8Array {
 		const n = end - start
 
 		// Grows by doubling; scratch from a huge paragraph is released once paragraphs are small again.
@@ -134,7 +145,10 @@ export class BreakFinder {
 
 			let value = table.get(cp)
 
-			if ((value & LINE_BREAK_CLASS_MASK) === C.CJ) value = (value & ~LINE_BREAK_CLASS_MASK) | (strict ? C.NS : C.ID)
+			const cls = value & LINE_BREAK_CLASS_MASK
+
+			if (cls === C.CJ) value = (value & ~LINE_BREAK_CLASS_MASK) | (strict ? C.NS : C.ID)
+			else if (keepHangul && (has(HANGUL, cls) || (cls === C.ID && isHangul(cp)))) value = (value & ~LINE_BREAK_CLASS_MASK) | C.AL
 
 			props[i] = value
 
