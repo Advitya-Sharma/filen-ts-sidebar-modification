@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer"
 import { readFileSync } from "node:fs"
 import { beforeAll, describe, expect, it } from "vitest"
 import { listInstalledNpm, type InstalledNpmPackage } from "@filen/shared/tooling"
@@ -13,6 +14,7 @@ import { noticeRepositoryHref } from "@/features/settings/components/advanced/th
 import ffmpegManifest from "@/vendor/ffmpeg-decoders/manifest.json"
 import wllamaManifest from "@/vendor/wllama/manifest.json"
 import officeFontsManifest from "@filen/office/assets/fonts/manifest.json"
+import spellcheckManifest from "@filen/spellcheck/dictionaries/manifest.json"
 
 const { notices: THIRD_PARTY_NOTICES, texts: LICENSE_TEXTS } = thirdPartyNoticesPayload()
 
@@ -232,7 +234,6 @@ describe("third-party notices payload integrity", () => {
 		const emscripten = vendored("Emscripten", ffmpegManifest.emcc)
 		const musl = vendored("musl", ffmpegManifest.emscripten.musl)
 
-
 		expect(emscripten).toMatchObject({ version: ffmpegManifest.emcc, license: "MIT OR NCSA" })
 		expect(musl).toMatchObject({ version: ffmpegManifest.emscripten.musl, license: "MIT" })
 		expect(emscripten === undefined ? [] : thirdPartyLicenseTexts(emscripten)).toContain(
@@ -319,6 +320,48 @@ describe("third-party notices payload integrity", () => {
 			expect(
 				vendoredTexts.some(text => text.includes(`- Source: ${source}\n`)),
 				source
+			).toBe(true)
+		}
+	})
+
+	it("describes every dictionary @filen/spellcheck ships, as its manifest records it, with its notice files verbatim", () => {
+		expect(spellcheckManifest.dictionaries.length).toBeGreaterThan(0)
+
+		for (const dictionary of spellcheckManifest.dictionaries) {
+			const notice = THIRD_PARTY_NOTICES.find(
+				entry => entry.ecosystem === "vendored" && entry.name === `Hunspell dictionary ${dictionary.name}`
+			)
+
+			expect(notice?.license).toBe(dictionary.license)
+			expect(notice?.copyright).toEqual(dictionary.copyright)
+
+			const texts = notice === undefined ? [] : thirdPartyLicenseTexts(notice)
+
+			for (const file of dictionary.notices) {
+				// Shipped byte for byte; some upstream notices are Latin-1.
+				const bytes = readFileSync(new URL(`../../node_modules/@filen/spellcheck/dictionaries/${file.file}`, import.meta.url))
+				const text = isUtf8(bytes) ? bytes.toString("utf8") : bytes.toString("latin1")
+
+				expect(
+					texts.some(shipped => shipped === text),
+					`${dictionary.id}: ${file.file}`
+				).toBe(true)
+			}
+		}
+	})
+
+	it("describes every crate the spellchecker's wasm compiles in", () => {
+		const lock = readFileSync(new URL("../../node_modules/@filen/spellcheck/crate/Cargo.lock", import.meta.url), "utf8")
+		const crates = [...lock.matchAll(/\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"\nsource = /g)].map(
+			match => `${match[1] ?? ""}@${match[2] ?? ""}`
+		)
+
+		expect(crates.length).toBeGreaterThan(0)
+
+		for (const crate of crates) {
+			expect(
+				THIRD_PARTY_NOTICES.some(entry => entry.ecosystem === "rust" && `${entry.name}@${entry.version}` === crate),
+				crate
 			).toBe(true)
 		}
 	})

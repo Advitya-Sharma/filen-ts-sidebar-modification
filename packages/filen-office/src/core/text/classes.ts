@@ -1,5 +1,5 @@
-// Numeric property values as the generated tables encode them (order of LINE_BREAK_CLASS_NAMES and
-// BIDI_CLASS_NAMES in packed.ts).
+// Numeric property values as the generated tables encode them (order of LINE_BREAK_CLASS_NAMES,
+// BIDI_CLASS_NAMES and WORD_BREAK_CLASS_NAMES in packed.ts).
 
 export const LineBreakClass = {
 	BK: 0,
@@ -85,3 +85,33 @@ export const BidiClass = {
 } as const
 
 export type BidiClass = (typeof BidiClass)[keyof typeof BidiClass]
+
+export const WordBreakClass = {
+	Other: 0,
+	CR: 1,
+	LF: 2,
+	Newline: 3,
+	Extend: 4,
+	ZWJ: 5,
+	Regional_Indicator: 6,
+	Format: 7,
+	Katakana: 8,
+	Hebrew_Letter: 9,
+	ALetter: 10,
+	Single_Quote: 11,
+	Double_Quote: 12,
+	MidNumLet: 13,
+	MidLetter: 14,
+	MidNum: 15,
+	Numeric: 16,
+	ExtendNumLet: 17,
+	WSegSpace: 18
+} as const
+
+export type WordBreakClass = (typeof WordBreakClass)[keyof typeof WordBreakClass]
+
+export const WORD_BREAK_CLASS_MASK = 0x1f
+// General_Category Lu or Lt, and Ll.
+export const UPPERCASE_FLAG = 0x20
+export const LOWERCASE_FLAG = 0x40
+export const PICTOGRAPHIC_FLAG = 0x80

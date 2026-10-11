@@ -1,11 +1,12 @@
 import { CodePointTable, unpackNumbers } from "./packed"
-import { BIDI_BRACKET_EQUIVALENTS, BIDI_BRACKET_PAIRS, BIDI_CLASS_RUNS, LINE_BREAK_RUNS } from "./unicode.generated"
+import { BIDI_BRACKET_EQUIVALENTS, BIDI_BRACKET_PAIRS, BIDI_CLASS_RUNS, LINE_BREAK_RUNS, WORD_BREAK_RUNS } from "./unicode.generated"
 
 // Lazily expanded Unicode property tables: nothing is decoded until text is first segmented.
 
 let lineBreak: CodePointTable | null = null
 let bidi: CodePointTable | null = null
 let pairs: Map<number, number> | null = null
+let wordBreak: CodePointTable | null = null
 
 // Per code point: resolved Line_Break class (bits 0-5, see LineBreakClass), East_Asian_Width F/W/H
 // (bit 6), unassigned Extended_Pictographic (bit 7).
@@ -16,6 +17,12 @@ export function lineBreakTable(): CodePointTable {
 // Per code point: Bidi_Class (see BidiClass).
 export function bidiClassTable(): CodePointTable {
 	return (bidi ??= new CodePointTable(BIDI_CLASS_RUNS))
+}
+
+// Per code point: Word_Break (bits 0-4, see WordBreakClass), uppercase (bit 5), lowercase (bit 6),
+// Extended_Pictographic (bit 7).
+export function wordBreakTable(): CodePointTable {
+	return (wordBreak ??= new CodePointTable(WORD_BREAK_RUNS))
 }
 
 // Bracket code point -> pair id * 4 + type (1 opening, 2 closing). The id is the opening bracket after

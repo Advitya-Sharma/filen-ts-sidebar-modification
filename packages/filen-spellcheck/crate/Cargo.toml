@@ -1,0 +1,27 @@
+[package]
+name = "filen-spellcheck"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98"
+description = "Hunspell-compatible spellchecking for the Filen apps (spellbook behind a C ABI for wasm)"
+license = "AGPL-3.0-only"
+repository = "https://github.com/FilenCloudDienste/filen-ts"
+publish = false
+
+[lib]
+# cdylib: the wasm module; rlib: tests and the native (uniffi) bindings.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+spellbook = "=0.4.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Tests parse the shipped dictionaries: an optimised spellbook keeps that to a fraction of a second.
+[profile.dev.package.spellbook]
+opt-level = 3

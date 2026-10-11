@@ -158,6 +158,17 @@ describe("poolLicenseTexts", () => {
 		expect([mit.texts, wrapped.texts, apache.texts, bareApache.texts, bareMit.texts]).toEqual([[0], [0], [1], [1], []])
 	})
 
+	it("shares only identical texts with an entry that keeps its texts verbatim", () => {
+		const mit = notice("MIT", ["Permission is  hereby\ngranted."])
+		const kept = notice("MIT", ["Permission is hereby\fgranted."])
+		const same = notice("MIT", ["Permission is hereby\fgranted."])
+		const apache = notice("Apache-2.0", [APACHE])
+		const texts = poolLicenseTexts([mit, kept, same, apache], entry => entry !== mit)
+
+		expect(texts).toEqual(["Permission is  hereby\ngranted.", "Permission is hereby\fgranted.", APACHE])
+		expect([mit.texts, kept.texts, same.texts]).toEqual([[0], [1], [1]])
+	})
+
 	it("throws when no canonical Apache text was pooled", () => {
 		expect(() => poolLicenseTexts([notice("MIT", ["Permission is hereby granted."])])).toThrow(/canonical Apache-2.0/)
 	})

@@ -37,6 +37,8 @@ export interface DocxSettings {
 	readonly autoHyphenation: boolean
 	readonly doNotHyphenateCaps: boolean
 	readonly displayBackgroundShape: boolean
+	// The document asks for spelling errors not to be marked (w:hideSpellingErrors).
+	readonly hideSpellingErrors: boolean
 	// Twips.
 	readonly defaultTabStop: number | undefined
 	readonly hyphenationZone: number | undefined
@@ -84,6 +86,7 @@ export const NO_SETTINGS: DocxSettings = {
 	autoHyphenation: false,
 	doNotHyphenateCaps: false,
 	displayBackgroundShape: false,
+	hideSpellingErrors: false,
 	defaultTabStop: undefined,
 	hyphenationZone: undefined,
 	consecutiveHyphenLimit: undefined,
@@ -176,6 +179,7 @@ export function readSettings(document: XmlDocument): DocxSettings {
 			case "autoHyphenation":
 			case "doNotHyphenateCaps":
 			case "displayBackgroundShape":
+			case "hideSpellingErrors":
 				flags.set(local, reader.onOff(child))
 
 				break
@@ -285,6 +289,7 @@ export function readSettings(document: XmlDocument): DocxSettings {
 		autoHyphenation: flags.get("autoHyphenation") ?? false,
 		doNotHyphenateCaps: flags.get("doNotHyphenateCaps") ?? false,
 		displayBackgroundShape: flags.get("displayBackgroundShape") ?? false,
+		hideSpellingErrors: flags.get("hideSpellingErrors") ?? false,
 		defaultTabStop,
 		hyphenationZone,
 		consecutiveHyphenLimit,

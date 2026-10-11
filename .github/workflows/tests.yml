@@ -21,6 +21,7 @@ on:
     paths:
       - 'packages/filen-shared/**'
       - 'packages/filen-office/**'
+      - 'packages/filen-spellcheck/**'
       - 'packages/filen-mobile/**'
       - 'packages/filen-web/**'
       - 'packages/filen-assistant-eval/**'
@@ -33,6 +34,7 @@ on:
     paths:
       - 'packages/filen-shared/**'
       - 'packages/filen-office/**'
+      - 'packages/filen-spellcheck/**'
       - 'packages/filen-mobile/**'
       - 'packages/filen-web/**'
       - 'packages/filen-assistant-eval/**'
@@ -49,6 +51,7 @@ jobs:
     outputs:
       filen-shared: ${{ steps.filter.outputs.filen-shared }}
       filen-office: ${{ steps.filter.outputs.filen-office }}
+      filen-spellcheck: ${{ steps.filter.outputs.filen-spellcheck }}
       filen-mobile: ${{ steps.filter.outputs.filen-mobile }}
       filen-web: ${{ steps.filter.outputs.filen-web }}
       filen-assistant-eval: ${{ steps.filter.outputs.filen-assistant-eval }}
@@ -70,6 +73,12 @@ jobs:
               - 'pnpm-workspace.yaml'
               - 'patches/**'
               - 'package.json'
+            filen-spellcheck:
+              - 'packages/filen-spellcheck/**'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'patches/**'
+              - 'package.json'
             filen-mobile:
               - 'packages/filen-mobile/**'
               - 'packages/filen-shared/**'
@@ -80,6 +89,7 @@ jobs:
             filen-web:
               - 'packages/filen-web/**'
               - 'packages/filen-shared/**'
+              - 'packages/filen-spellcheck/**'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'patches/**'
@@ -143,6 +153,61 @@ jobs:
         run: pnpm install --frozen-lockfile --filter @filen/office...
       - name: Test
         working-directory: packages/filen-office
+        run: pnpm test
+  # Rust (format, clippy, unit tests on the host) and the TypeScript side, whose tests run the built wasm.
+  test-spellcheck:
+    needs: changes
+    if: needs.changes.outputs.filen-spellcheck == 'true' || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: filen-spellcheck-tests-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      # The spellchecker's wasm engine is built from source (packages/filen-spellcheck): rustup installs the
+      # toolchain and wasm target that rust-toolchain.toml pins.
+      - name: Set up Rust
+        working-directory: packages/filen-spellcheck
+        run: rustup toolchain install
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            packages/filen-spellcheck/crate/target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/filen-spellcheck/rust-toolchain.toml', 'packages/filen-spellcheck/crate/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      # The dictionaries are built from pinned upstream sources (never committed) and verified against the
+      # manifest; a cache hit skips the download.
+      - name: Cache spellcheck dictionaries
+        uses: actions/cache@v4
+        with:
+          path: packages/filen-spellcheck/.dictionaries
+          key: spellcheck-dictionaries-${{ hashFiles('packages/filen-spellcheck/dictionaries/manifest.json') }}
+      - name: Install dependencies
+        working-directory: packages/filen-spellcheck
+        run: pnpm install --frozen-lockfile --filter @filen/spellcheck...
+      - name: Build dictionaries
+        working-directory: packages/filen-spellcheck
+        run: pnpm run build:dictionaries
+      - name: Rust format and clippy
+        working-directory: packages/filen-spellcheck
+        run: pnpm run lint:rust
+      - name: Rust tests
+        working-directory: packages/filen-spellcheck
+        run: pnpm run test:rust
+      - name: Test
+        working-directory: packages/filen-spellcheck
         run: pnpm test
   test-mobile:
     needs: changes
@@ -227,6 +292,28 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      # The spellchecker's wasm engine is built from source (packages/filen-spellcheck): rustup installs the
+      # toolchain and wasm target that rust-toolchain.toml pins.
+      - name: Set up Rust
+        working-directory: packages/filen-spellcheck
+        run: rustup toolchain install
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            packages/filen-spellcheck/crate/target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/filen-spellcheck/rust-toolchain.toml', 'packages/filen-spellcheck/crate/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      # The dictionaries are built from pinned upstream sources (never committed) and verified against the
+      # manifest; a cache hit skips the download.
+      - name: Cache spellcheck dictionaries
+        uses: actions/cache@v4
+        with:
+          path: packages/filen-spellcheck/.dictionaries
+          key: spellcheck-dictionaries-${{ hashFiles('packages/filen-spellcheck/dictionaries/manifest.json') }}
       - name: Install dependencies
         working-directory: packages/filen-web
         run: pnpm install --frozen-lockfile --filter @filen/web...
@@ -319,6 +406,28 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      # The spellchecker's wasm engine is built from source (packages/filen-spellcheck): rustup installs the
+      # toolchain and wasm target that rust-toolchain.toml pins.
+      - name: Set up Rust
+        working-directory: packages/filen-spellcheck
+        run: rustup toolchain install
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            packages/filen-spellcheck/crate/target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/filen-spellcheck/rust-toolchain.toml', 'packages/filen-spellcheck/crate/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      # The dictionaries are built from pinned upstream sources (never committed) and verified against the
+      # manifest; a cache hit skips the download.
+      - name: Cache spellcheck dictionaries
+        uses: actions/cache@v4
+        with:
+          path: packages/filen-spellcheck/.dictionaries
+          key: spellcheck-dictionaries-${{ hashFiles('packages/filen-spellcheck/dictionaries/manifest.json') }}
       - name: Install dependencies
         working-directory: packages/filen-web
         run: pnpm install --frozen-lockfile --filter @filen/web...

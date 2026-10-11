@@ -84,6 +84,29 @@ export const BIDI_CLASS_NAMES = [
 	"PDI"
 ] as const
 
+// Word_Break values, Other (the default) first.
+export const WORD_BREAK_CLASS_NAMES = [
+	"Other",
+	"CR",
+	"LF",
+	"Newline",
+	"Extend",
+	"ZWJ",
+	"Regional_Indicator",
+	"Format",
+	"Katakana",
+	"Hebrew_Letter",
+	"ALetter",
+	"Single_Quote",
+	"Double_Quote",
+	"MidNumLet",
+	"MidLetter",
+	"MidNum",
+	"Numeric",
+	"ExtendNumLet",
+	"WSegSpace"
+] as const
+
 function packNumber(value: number): string {
 	let out = FINAL[value & 31] ?? ""
 

@@ -1,5 +1,6 @@
 export { BIDI_REMOVED, BidiResolver, applyL1, hasRightToLeft, reorder, type BidiDirection } from "./bidi"
 export { BidiClass, EAST_ASIAN_FLAG, LINE_BREAK_CLASS_MASK, LineBreakClass, PICTOGRAPHIC_UNASSIGNED_FLAG } from "./classes"
+export { LOWERCASE_FLAG, PICTOGRAPHIC_FLAG, UPPERCASE_FLAG, WORD_BREAK_CLASS_MASK, WordBreakClass } from "./classes"
 export {
 	DECORATION_FLOATS,
 	DECORATION_INTS,
@@ -87,3 +88,4 @@ export {
 	type TextStyle
 } from "./styles"
 export { UNICODE_VERSION } from "./unicode.generated"
+export { WORD_KANA, WORD_LETTER, WORD_LOWER, WORD_NUMBER, WORD_UPPER, nextWordBoundary, wordSegments, type WordVisitor } from "./wordBreak"

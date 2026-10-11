@@ -1,0 +1,1155 @@
+{
+	"version": 1,
+	"transform": 1,
+	"upstream": {
+		"repository": "https://github.com/LibreOffice/dictionaries",
+		"commit": "32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4"
+	},
+	"dictionaries": [
+		{
+			"id": "en_US",
+			"name": "English (United States)",
+			"upstreamVersion": "2020.12.07",
+			"license": "SCOWL",
+			"copyright": [
+				"Copyright 2000-2018 by Kevin Atkinson",
+				"Copyright 2000-2016 by Kevin Atkinson",
+				"Copyright 2016 by Benjamin Titze",
+				"Copyright 1993, Geoff Kuenning, Granada Hills, CA",
+				"Copyright (c) J Ross Beresford 1993-1999. All Rights Reserved.",
+				"WordNet 1.6 Copyright 1997 by Princeton University. All rights reserved."
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/en_US.aff",
+					"sha256": "e746c882dd6f303c2c46e7452804b9201115a6942cfeb15f18f8edf774d2e24e"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/en_US.dic",
+					"sha256": "f0b1a234bd178bdd01875b2a392a9647f888b8fe879f79c52aae62c2759b3647"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/README_en_US.txt",
+					"sha256": "168b4c01cb841f766a72f310b065c04d09cff46376c37a81d799593ce751c371"
+				}
+			],
+			"aff": {
+				"file": "en_US/en_US.aff",
+				"bytes": 3481,
+				"sha256": "431be0ee53d364db1adb6a41f0d2b18be8d5a03fd945129dab0e8ea6554cbc5b"
+			},
+			"dic": {
+				"file": "en_US/en_US.dic",
+				"bytes": 551762,
+				"sha256": "f0b1a234bd178bdd01875b2a392a9647f888b8fe879f79c52aae62c2759b3647"
+			},
+			"notices": [
+				{
+					"file": "en_US/README.md",
+					"bytes": 1518,
+					"sha256": "b3d1786222b4a3babe5292b2a798cbd6e53606798a5eb92a0831f550fd37a04d"
+				},
+				{
+					"file": "en_US/README_en_US.txt",
+					"bytes": 15732,
+					"sha256": "168b4c01cb841f766a72f310b065c04d09cff46376c37a81d799593ce751c371"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "en_GB",
+			"name": "English (United Kingdom)",
+			"upstreamVersion": "4.0.1",
+			"license": "LGPL-2.1-only",
+			"copyright": [
+				"Kevin Atkinson (author of the original English wordlist)",
+				"David Bartlett, Brian Kelk, Andrew Brown and Marco A.G.Pinto (authors of the British English dictionary)",
+				"© 2000 Björn Jacke",
+				"© OpenStreetMap contributors",
+				"© The Clergy of the Church of England Database Project, 2005."
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/en_GB.aff",
+					"sha256": "0fd6ed120ef28957847d98ba5149b117e27116cf81b5aa36208453f6755a36fd"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/en_GB.dic",
+					"sha256": "04e90f34f5263bf26780e9c4a442e9ad16584e227af49ddd1b3b21b01df5b29c"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/README_en_GB.txt",
+					"sha256": "18b5833de60a52ffcb6e5b6b5048bb5a5d910acfecd5b096985b77058223880c"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_LGPL_v2.1.txt",
+					"sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+				}
+			],
+			"aff": {
+				"file": "en_GB/en_GB.aff",
+				"bytes": 44492,
+				"sha256": "01b1e5b8b5082dd1213026a1d4c6624f0d385425a280496c8a44702f7bc3de5f"
+			},
+			"dic": {
+				"file": "en_GB/en_GB.dic",
+				"bytes": 1230568,
+				"sha256": "1de4577bfc06ba5650fe9bd0af4563ae50e97a793a45216686bd769f9b285316"
+			},
+			"notices": [
+				{
+					"file": "en_GB/README.md",
+					"bytes": 1588,
+					"sha256": "d9d505a7ef8afa8e9054ca92a8e363fa80867081afe2060bf1ffb6fa26b17c6a"
+				},
+				{
+					"file": "en_GB/README_en_GB.txt",
+					"bytes": 10644,
+					"sha256": "18b5833de60a52ffcb6e5b6b5048bb5a5d910acfecd5b096985b77058223880c"
+				},
+				{
+					"file": "en_GB/COPYING_LGPL_v2.1.txt",
+					"bytes": 26530,
+					"sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+				}
+			],
+			"modifications": [
+				"Removed the UTF-8 byte order mark from the .aff and .dic",
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "en_CA",
+			"name": "English (Canada)",
+			"upstreamVersion": "2020.12.07",
+			"license": "SCOWL",
+			"copyright": [
+				"Copyright 2000-2018 by Kevin Atkinson",
+				"Copyright 2000-2016 by Kevin Atkinson",
+				"Copyright 2016 by Benjamin Titze",
+				"Copyright 1993, Geoff Kuenning, Granada Hills, CA",
+				"Copyright (c) J Ross Beresford 1993-1999. All Rights Reserved.",
+				"WordNet 1.6 Copyright 1997 by Princeton University. All rights reserved."
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/en_CA.aff",
+					"sha256": "e746c882dd6f303c2c46e7452804b9201115a6942cfeb15f18f8edf774d2e24e"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/en_CA.dic",
+					"sha256": "53096689870246a78fa408b1e7a8c49bc140bd466a84a384cfb509445fff7173"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/README_en_CA.txt",
+					"sha256": "86700e39b2307dda4c087ad3505a1e634a5b4d518ab808c398a16d21ebe957e2"
+				}
+			],
+			"aff": {
+				"file": "en_CA/en_CA.aff",
+				"bytes": 3481,
+				"sha256": "e79e6526de67abdb0b86dce4e83ca9ed05378b4af9fc51deaed0744ada326924"
+			},
+			"dic": {
+				"file": "en_CA/en_CA.dic",
+				"bytes": 551583,
+				"sha256": "53096689870246a78fa408b1e7a8c49bc140bd466a84a384cfb509445fff7173"
+			},
+			"notices": [
+				{
+					"file": "en_CA/README.md",
+					"bytes": 1511,
+					"sha256": "2fe0e67839fd35a6115ff49f05ee07d1e846d75295e7198435f7b5b7b8046cef"
+				},
+				{
+					"file": "en_CA/README_en_CA.txt",
+					"bytes": 15732,
+					"sha256": "86700e39b2307dda4c087ad3505a1e634a5b4d518ab808c398a16d21ebe957e2"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "en_AU",
+			"name": "English (Australia)",
+			"upstreamVersion": "2020.12.07",
+			"license": "SCOWL",
+			"copyright": [
+				"Copyright 2000-2018 by Kevin Atkinson",
+				"Copyright 2000-2016 by Kevin Atkinson",
+				"Copyright 2016 by Benjamin Titze",
+				"Copyright 1993, Geoff Kuenning, Granada Hills, CA",
+				"Copyright (c) J Ross Beresford 1993-1999. All Rights Reserved.",
+				"WordNet 1.6 Copyright 1997 by Princeton University. All rights reserved."
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/en_AU.aff",
+					"sha256": "e746c882dd6f303c2c46e7452804b9201115a6942cfeb15f18f8edf774d2e24e"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/en_AU.dic",
+					"sha256": "aa07c46571f306b79fc1bc534357ed357af15687381b26f891ba66e8a2caed89"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/en/README_en_AU.txt",
+					"sha256": "f0897dcfdf058bcfc93fbc8e7e1b5da4c27ae9e175ee3a9242e887f02eb84a8b"
+				}
+			],
+			"aff": {
+				"file": "en_AU/en_AU.aff",
+				"bytes": 3481,
+				"sha256": "e54230d87a76604871161330c528a45ac2db2a9f820d28e629054a7ab6e8350d"
+			},
+			"dic": {
+				"file": "en_AU/en_AU.dic",
+				"bytes": 554336,
+				"sha256": "aa07c46571f306b79fc1bc534357ed357af15687381b26f891ba66e8a2caed89"
+			},
+			"notices": [
+				{
+					"file": "en_AU/README.md",
+					"bytes": 1514,
+					"sha256": "63c0d3c8e252487ffe965719b9d4232d2dc36179e736d9e2070f2c9341da6e49"
+				},
+				{
+					"file": "en_AU/README_en_AU.txt",
+					"bytes": 15732,
+					"sha256": "f0897dcfdf058bcfc93fbc8e7e1b5da4c27ae9e175ee3a9242e887f02eb84a8b"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "de_DE",
+			"name": "German (Germany)",
+			"upstreamVersion": "20161207+frami20170109",
+			"license": "GPL-2.0-only OR GPL-3.0-only",
+			"copyright": [
+				"Bjoern Jacke (author of the igerman98 base dictionary)",
+				"Franz Michael Baumann (author of the frami extension)"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/de_DE_frami.aff",
+					"sha256": "646bf3333ac69c23e9d794533ee5241d6f755c359e8fe10a648f87613743d594"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/de_DE_frami.dic",
+					"sha256": "4ca3c958b0e5545910999bc246f668840bf8ede3df8e5e6790d05edd5a586c38"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/README_de_DE_frami.txt",
+					"sha256": "c141f4f79c428b7348b5012836f4ad3db4d124f288f15effc22696dc876512ae"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_GPLv2",
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_GPLv3",
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"aff": {
+				"file": "de_DE/de_DE.aff",
+				"bytes": 19660,
+				"sha256": "e0d167bd981fc5a0f776491bcea9781cbf893cc4f70f8610e386a9fac8726a5e"
+			},
+			"dic": {
+				"file": "de_DE/de_DE.dic",
+				"bytes": 4419978,
+				"sha256": "98ebd2e9ff49dcac16316acaa47763768b25c378e66e8f6e5843138fe1482843"
+			},
+			"notices": [
+				{
+					"file": "de_DE/README.md",
+					"bytes": 1415,
+					"sha256": "113ef3cb2675d04b9b9ac67b36e6189238b385c26213f59f1041e8de4ed300fb"
+				},
+				{
+					"file": "de_DE/README_de_DE_frami.txt",
+					"bytes": 752,
+					"sha256": "c141f4f79c428b7348b5012836f4ad3db4d124f288f15effc22696dc876512ae"
+				},
+				{
+					"file": "de_DE/COPYING_GPLv2",
+					"bytes": 17992,
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"file": "de_DE/COPYING_GPLv3",
+					"bytes": 35147,
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"modifications": [
+				"Converted from ISO-8859-1 to UTF-8 (SET line rewritten to \"SET UTF-8\")",
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "de_AT",
+			"name": "German (Austria)",
+			"upstreamVersion": "20161207+frami20170109",
+			"license": "GPL-2.0-only OR GPL-3.0-only",
+			"copyright": [
+				"Bjoern Jacke (author of the igerman98 base dictionary)",
+				"Franz Michael Baumann (author of the frami extension)"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/de_AT_frami.aff",
+					"sha256": "8b428f6215e36e145626e3d150cd0ffe273e1ad9a9ec0a1bbd31ee468ee39edc"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/de_AT_frami.dic",
+					"sha256": "d821e0a5a029b66df696c982a4cd55eb792139c33716ccbde364941db2448cbb"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/README_de_DE_frami.txt",
+					"sha256": "c141f4f79c428b7348b5012836f4ad3db4d124f288f15effc22696dc876512ae"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_GPLv2",
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_GPLv3",
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"aff": {
+				"file": "de_AT/de_AT.aff",
+				"bytes": 19661,
+				"sha256": "2942e9cf953ef6f7df237ff3177d8b930aa6985d165bb811e494dcb2ee82c6c9"
+			},
+			"dic": {
+				"file": "de_AT/de_AT.dic",
+				"bytes": 4422373,
+				"sha256": "967ce5c6ffc2f004d121396cd0a5627c742027b0450cc31171f163f887d33a99"
+			},
+			"notices": [
+				{
+					"file": "de_AT/README.md",
+					"bytes": 1415,
+					"sha256": "78a0562d191ed1fbdd177f8bc6449b85369ddcc77ba97097ba9312cb67aa19ac"
+				},
+				{
+					"file": "de_AT/README_de_DE_frami.txt",
+					"bytes": 752,
+					"sha256": "c141f4f79c428b7348b5012836f4ad3db4d124f288f15effc22696dc876512ae"
+				},
+				{
+					"file": "de_AT/COPYING_GPLv2",
+					"bytes": 17992,
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"file": "de_AT/COPYING_GPLv3",
+					"bytes": 35147,
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"modifications": [
+				"Converted from ISO-8859-1 to UTF-8 (SET line rewritten to \"SET UTF-8\")",
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "de_CH",
+			"name": "German (Switzerland)",
+			"upstreamVersion": "20161207+frami20170109",
+			"license": "GPL-2.0-only OR GPL-3.0-only",
+			"copyright": [
+				"Bjoern Jacke (author of the igerman98 base dictionary)",
+				"Franz Michael Baumann (author of the frami extension)"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/de_CH_frami.aff",
+					"sha256": "d86884be4c3f07e5e08057884856feabf2872b4e2f90a587a11376082bc4126b"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/de_CH_frami.dic",
+					"sha256": "80a4df38cdc3e16d2f042f8eba4a99668ab9c075662e4262c62f8bba46c7bd16"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/README_de_DE_frami.txt",
+					"sha256": "c141f4f79c428b7348b5012836f4ad3db4d124f288f15effc22696dc876512ae"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_GPLv2",
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_GPLv3",
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"aff": {
+				"file": "de_CH/de_CH.aff",
+				"bytes": 19661,
+				"sha256": "275947e2b4953d99b3ef40c95fd43ff9346cebaf08934eacacb8be004a821ce8"
+			},
+			"dic": {
+				"file": "de_CH/de_CH.dic",
+				"bytes": 4416507,
+				"sha256": "31c7e7696916bf7f0a163a3185df38887d6087883421241777f5704aaf542147"
+			},
+			"notices": [
+				{
+					"file": "de_CH/README.md",
+					"bytes": 1419,
+					"sha256": "e7fd0b16035e155f4cf6bdeb6cd683934b9df635650395b126c4ccb634adbd23"
+				},
+				{
+					"file": "de_CH/README_de_DE_frami.txt",
+					"bytes": 752,
+					"sha256": "c141f4f79c428b7348b5012836f4ad3db4d124f288f15effc22696dc876512ae"
+				},
+				{
+					"file": "de_CH/COPYING_GPLv2",
+					"bytes": 17992,
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"file": "de_CH/COPYING_GPLv3",
+					"bytes": 35147,
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"modifications": [
+				"Converted from ISO-8859-1 to UTF-8 (SET line rewritten to \"SET UTF-8\")",
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "fr",
+			"name": "French",
+			"upstreamVersion": "7.7",
+			"license": "MPL-2.0",
+			"copyright": [
+				"Olivier R. (author of the Grammalecte French dictionaries)"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/fr_FR/dictionaries/fr.aff",
+					"sha256": "c176610cd5dc4846806a65ddd029f422d87978bf58f224aa44222662a16a2de5"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/fr_FR/dictionaries/fr.dic",
+					"sha256": "b78a868e31dd6e373b6c3217969afb898a9acde828a5e7ef97308da42218c88c"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/fr_FR/dictionaries/README_dict_fr.txt",
+					"sha256": "4a25abf740ad6ba5e8d0cfc0d2ffadc3c13c303f8fe389f323b061a389350f83"
+				}
+			],
+			"aff": {
+				"file": "fr/fr.aff",
+				"bytes": 200172,
+				"sha256": "a260772876be0425d1c3ca4a8ec0405a4a7bdd3aa8c7094a507d5abe35469457"
+			},
+			"dic": {
+				"file": "fr/fr.dic",
+				"bytes": 1236490,
+				"sha256": "b78a868e31dd6e373b6c3217969afb898a9acde828a5e7ef97308da42218c88c"
+			},
+			"notices": [
+				{
+					"file": "fr/README.md",
+					"bytes": 1119,
+					"sha256": "3b23bd6b51343b58a1788c114444269372c7e4c37fc70eda1e8d951313406201"
+				},
+				{
+					"file": "fr/README_dict_fr.txt",
+					"bytes": 2758,
+					"sha256": "4a25abf740ad6ba5e8d0cfc0d2ffadc3c13c303f8fe389f323b061a389350f83"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "es_ES",
+			"name": "Spanish (Spain)",
+			"upstreamVersion": null,
+			"license": "GPL-3.0-or-later OR LGPL-3.0-or-later OR MPL-1.1+",
+			"copyright": [
+				"Santiago Bosio (author of the RLA-ES Spanish dictionary)"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/es_ES.aff",
+					"sha256": "e73a9bf8e1383f4986a5dc9e2fbed49371c0c61f511c626d15586bd433c1cad9"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/es_ES.dic",
+					"sha256": "6975dddec3d5d2c676069537bc67b4b5f786c65c5d4cf6703a82acf779ac9ec1"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/README_hunspell_es.txt",
+					"sha256": "0b5c39a863ecb61f5c5631ec1cd977667ef9bda6da6f90e80e9fc0edcbfadd97"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/LICENSE.md",
+					"sha256": "2b70fd5cb8d3b34cc6ae322c969557a2270b99017594addb2531ef5ffd9e1b17"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/GPLv3.txt",
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/LGPLv3.txt",
+					"sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/MPL-1.1.txt",
+					"sha256": "53692a2ed6c6a2c6ec9b32dd0b820dfae91e0a1fcdf625ca9ed0bdf8705fcc4f"
+				}
+			],
+			"aff": {
+				"file": "es_ES/es_ES.aff",
+				"bytes": 169478,
+				"sha256": "1ddd4fa5d88814cd119632b01c8f7de22dafaabf2ebe392a74fdc346ca9f65c2"
+			},
+			"dic": {
+				"file": "es_ES/es_ES.dic",
+				"bytes": 715989,
+				"sha256": "6975dddec3d5d2c676069537bc67b4b5f786c65c5d4cf6703a82acf779ac9ec1"
+			},
+			"notices": [
+				{
+					"file": "es_ES/README.md",
+					"bytes": 1298,
+					"sha256": "b6b49f00a5db48f2eedd760a65ba4f06615f4b7c644c0040bdd31d2dcfe19f99"
+				},
+				{
+					"file": "es_ES/README_hunspell_es.txt",
+					"bytes": 2615,
+					"sha256": "0b5c39a863ecb61f5c5631ec1cd977667ef9bda6da6f90e80e9fc0edcbfadd97"
+				},
+				{
+					"file": "es_ES/LICENSE.md",
+					"bytes": 991,
+					"sha256": "2b70fd5cb8d3b34cc6ae322c969557a2270b99017594addb2531ef5ffd9e1b17"
+				},
+				{
+					"file": "es_ES/GPLv3.txt",
+					"bytes": 35147,
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				},
+				{
+					"file": "es_ES/LGPLv3.txt",
+					"bytes": 7639,
+					"sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+				},
+				{
+					"file": "es_ES/MPL-1.1.txt",
+					"bytes": 25755,
+					"sha256": "53692a2ed6c6a2c6ec9b32dd0b820dfae91e0a1fcdf625ca9ed0bdf8705fcc4f"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "it_IT",
+			"name": "Italian (Italy)",
+			"upstreamVersion": "5.1.1",
+			"license": "GPL-3.0-only",
+			"copyright": [
+				"Copyright (C) 2020-2022, LibreItalia - Marina Latini",
+				"Copyright (C) 2001, 2002 Gianluca Turconi",
+				"Copyright (C) 2002, 2003, 2004 Gianluca Turconi and Davide Prina",
+				"Copyright (C) 2004, 2005, 2006, 2007 Davide Prina",
+				"Andrea Pescetti (previous maintainer of the Italian Writing Aids extension)"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/it_IT/it_IT.aff",
+					"sha256": "951afaa19272f13555b8823e8bcf9ccf78f8fe1a07835bdfb912ab3e4d537c2b"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/it_IT/it_IT.dic",
+					"sha256": "bae1e3501dcd2a923669592493b3fde6c02aae7c7aab83bf5e5b49077e73dd64"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/it_IT/README_it_IT.txt",
+					"sha256": "34c3e93595cf3cf5f3afc9bc0d98eea12593750383f1e82ed1d3ca29f9681283"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/it_IT/legacy/it_IT_license.txt",
+					"sha256": "4de624abc748506298e7be68f2213e422673b43e1674da4b376804096b87dcec"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/it_IT/legacy/it_IT_AUTHORS",
+					"sha256": "67cc91ed0bff69cb9b387e5a28e37503a2a4afadc282b6a29cf08be7440b38ef"
+				}
+			],
+			"aff": {
+				"file": "it_IT/it_IT.aff",
+				"bytes": 70336,
+				"sha256": "1268e2d1fba05b43f60717ae00840ec94344739496bf8ec33aa1106aceecbbab"
+			},
+			"dic": {
+				"file": "it_IT/it_IT.dic",
+				"bytes": 1295083,
+				"sha256": "bae1e3501dcd2a923669592493b3fde6c02aae7c7aab83bf5e5b49077e73dd64"
+			},
+			"notices": [
+				{
+					"file": "it_IT/README.md",
+					"bytes": 1519,
+					"sha256": "6b59b8000f98623c7e133b9d8c8dcac522fb57976efd83b647ad21101018b105"
+				},
+				{
+					"file": "it_IT/README_it_IT.txt",
+					"bytes": 38902,
+					"sha256": "34c3e93595cf3cf5f3afc9bc0d98eea12593750383f1e82ed1d3ca29f9681283"
+				},
+				{
+					"file": "it_IT/it_IT_license.txt",
+					"bytes": 1099,
+					"sha256": "4de624abc748506298e7be68f2213e422673b43e1674da4b376804096b87dcec"
+				},
+				{
+					"file": "it_IT/it_IT_AUTHORS",
+					"bytes": 5302,
+					"sha256": "67cc91ed0bff69cb9b387e5a28e37503a2a4afadc282b6a29cf08be7440b38ef"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "pt_BR",
+			"name": "Portuguese (Brazil)",
+			"upstreamVersion": "3.2",
+			"license": "LGPL-3.0-only",
+			"copyright": [
+				"Copyright (C) 2006 - 2013 by Raimundo Santos Moura"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pt_BR/pt_BR.aff",
+					"sha256": "21d8ad2a769a60e17e2b5ea4ef11d4d593a58b9e2a82d642ef82d6a4c5523865"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pt_BR/pt_BR.dic",
+					"sha256": "a38bfb26b68ece2834e79fe83e48d5792652970ace12db89d1b9674bf9933183"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pt_BR/README_pt_BR.txt",
+					"sha256": "9974ce691fdc1fe731717d7a2dc668244405fdc2bf9bf3367eb9b29e85177c88"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pt_BR/README_en.txt",
+					"sha256": "bb064f3db7ba5f5536da7d079773f692c5f928822e8aebc3d78259ff6cceb9e5"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/LGPLv3.txt",
+					"sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/GPLv3.txt",
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"aff": {
+				"file": "pt_BR/pt_BR.aff",
+				"bytes": 980132,
+				"sha256": "9d852d72da7fb795635c391da9b18e4a17ca1ceff07b1eb911f6f645e8e0ce35"
+			},
+			"dic": {
+				"file": "pt_BR/pt_BR.dic",
+				"bytes": 4477692,
+				"sha256": "32e2edd83541d58613bcc83ef731a79aadf85ed57e977a16c6b5f711a7a36cee"
+			},
+			"notices": [
+				{
+					"file": "pt_BR/README.md",
+					"bytes": 1366,
+					"sha256": "b4efa8d703719b5a415cfc0d00450f52ae8850a06ae05cfe7521f978c4b79473"
+				},
+				{
+					"file": "pt_BR/README_pt_BR.txt",
+					"bytes": 16348,
+					"sha256": "9974ce691fdc1fe731717d7a2dc668244405fdc2bf9bf3367eb9b29e85177c88"
+				},
+				{
+					"file": "pt_BR/README_en.txt",
+					"bytes": 1461,
+					"sha256": "bb064f3db7ba5f5536da7d079773f692c5f928822e8aebc3d78259ff6cceb9e5"
+				},
+				{
+					"file": "pt_BR/LGPLv3.txt",
+					"bytes": 7639,
+					"sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+				},
+				{
+					"file": "pt_BR/GPLv3.txt",
+					"bytes": 35147,
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"modifications": [
+				"Removed the UTF-8 byte order mark from the .aff and .dic",
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "pt_PT",
+			"name": "Portuguese (Portugal)",
+			"upstreamVersion": null,
+			"license": "GPL-2.0-only OR LGPL-2.1-only OR MPL-1.1",
+			"copyright": [
+				"Copyright (C) 2006-2012 José João de Almeida, Rui Vilela, Alberto Simões"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pt_PT/pt_PT.aff",
+					"sha256": "975a209fcc892cb382fa5f34a28c391a39668661ce373ae071287809c5fcae24"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pt_PT/pt_PT.dic",
+					"sha256": "e29ba2d7aa8a2ad43e9cb46ac6473064b661545c87002aea90e18899d98d3cc9"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pt_PT/README_pt_PT.txt",
+					"sha256": "36de7d88a406a4947bf646a64145f00827566808988632e3df969aa95776060c"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pt_PT/LICENSES.txt",
+					"sha256": "d2c1cfe2e2dd81c651aec3fda5d1b4b4e7679b9e04f8cdc37586e521837384d1"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_GPLv2",
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_LGPL_v2.1.txt",
+					"sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/MPL-1.1.txt",
+					"sha256": "53692a2ed6c6a2c6ec9b32dd0b820dfae91e0a1fcdf625ca9ed0bdf8705fcc4f"
+				}
+			],
+			"aff": {
+				"file": "pt_PT/pt_PT.aff",
+				"bytes": 95371,
+				"sha256": "87172ab642a81fec9f5c1371f89633f60288af8b95860574f884141699b5eb6e"
+			},
+			"dic": {
+				"file": "pt_PT/pt_PT.dic",
+				"bytes": 1485977,
+				"sha256": "e29ba2d7aa8a2ad43e9cb46ac6473064b661545c87002aea90e18899d98d3cc9"
+			},
+			"notices": [
+				{
+					"file": "pt_PT/README.md",
+					"bytes": 1391,
+					"sha256": "a7791d7bab9ab83e1cc66d405f6d02b464ad623e918f4bdc52d4bf2830a8bf0c"
+				},
+				{
+					"file": "pt_PT/README_pt_PT.txt",
+					"bytes": 1106,
+					"sha256": "36de7d88a406a4947bf646a64145f00827566808988632e3df969aa95776060c"
+				},
+				{
+					"file": "pt_PT/LICENSES.txt",
+					"bytes": 1830,
+					"sha256": "d2c1cfe2e2dd81c651aec3fda5d1b4b4e7679b9e04f8cdc37586e521837384d1"
+				},
+				{
+					"file": "pt_PT/COPYING_GPLv2",
+					"bytes": 17992,
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"file": "pt_PT/COPYING_LGPL_v2.1.txt",
+					"bytes": 26530,
+					"sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+				},
+				{
+					"file": "pt_PT/MPL-1.1.txt",
+					"bytes": 25755,
+					"sha256": "53692a2ed6c6a2c6ec9b32dd0b820dfae91e0a1fcdf625ca9ed0bdf8705fcc4f"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "nl_NL",
+			"name": "Dutch (Netherlands)",
+			"upstreamVersion": "2.20.21",
+			"license": "BSD-3-Clause OR CC-BY-3.0",
+			"copyright": [
+				"© 2020 OpenTaal (Simon Brouwer, Sander van Geloven)",
+				"© 2006 - 2011 OpenTaal (Ruud Baars, Simon Brouwer)",
+				"© 2001 - 2005 Simon Brouwer and others",
+				"© 1996 Nederlandstalige TeX Gebruikersgroep"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/nl_NL/nl_NL.aff",
+					"sha256": "f0233d4f721f4661cf5f4d05ed2739549322bf3b6b66764b55a38257e1e16e6f"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/nl_NL/nl_NL.dic",
+					"sha256": "bc28af45307700a9927ad5719184da44dfd7eed4f707b8c1477f6d8a21b586a6"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/nl_NL/LICENSE.txt",
+					"sha256": "2189c248cbc054445aeac6cd65b87eebd0a115efeb55ed498b0f2a73441805dd"
+				}
+			],
+			"aff": {
+				"file": "nl_NL/nl_NL.aff",
+				"bytes": 46839,
+				"sha256": "fe3a1dbfd5402778ed145a4145caa4ff3b9058040d4c012cf060e2875e046955"
+			},
+			"dic": {
+				"file": "nl_NL/nl_NL.dic",
+				"bytes": 2488246,
+				"sha256": "bc28af45307700a9927ad5719184da44dfd7eed4f707b8c1477f6d8a21b586a6"
+			},
+			"notices": [
+				{
+					"file": "nl_NL/README.md",
+					"bytes": 1293,
+					"sha256": "a6731492beb38603fc64bf696a203c6c64671aad8287ae9b3419452c54cfc2a6"
+				},
+				{
+					"file": "nl_NL/LICENSE.txt",
+					"bytes": 25820,
+					"sha256": "2189c248cbc054445aeac6cd65b87eebd0a115efeb55ed498b0f2a73441805dd"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "pl_PL",
+			"name": "Polish (Poland)",
+			"upstreamVersion": "2026-05-11",
+			"license": "GPL-2.0-only OR LGPL-2.1-only OR MPL-1.1 OR Apache-2.0 OR CC-BY-4.0",
+			"copyright": [
+				"sjp.pl (authors of the Polish dictionary)"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pl_PL/pl_PL.aff",
+					"sha256": "82973651651aa930335c865b339b98db376ca3dbf3a661b70b9eeb71fdf41dca"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pl_PL/pl_PL.dic",
+					"sha256": "c0848440599eb88e5aca500418d5f389e562ec2c157b63dbe39d354658ffba49"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/pl_PL/README_pl_PL.txt",
+					"sha256": "e691ed1e79934293b0cd6996a14af1520ff893c02f920c09ed0c90aa5f0a8abc"
+				}
+			],
+			"aff": {
+				"file": "pl_PL/pl_PL.aff",
+				"bytes": 282990,
+				"sha256": "98274f113b2f1cd72dac7aeed50beae7da5acd11cb6f05aa52de769e36a056a7"
+			},
+			"dic": {
+				"file": "pl_PL/pl_PL.dic",
+				"bytes": 5437537,
+				"sha256": "e85533bd3f4dc4d34f59aa34fb7279e29f1d74a73b65b430fb594883bfd8c0af"
+			},
+			"notices": [
+				{
+					"file": "pl_PL/README.md",
+					"bytes": 1201,
+					"sha256": "33b336d80626d37811b330396637fb12039dc2bc6cafdce6a7e25a08ded74e7c"
+				},
+				{
+					"file": "pl_PL/README_pl_PL.txt",
+					"bytes": 593,
+					"sha256": "e691ed1e79934293b0cd6996a14af1520ff893c02f920c09ed0c90aa5f0a8abc"
+				}
+			],
+			"modifications": [
+				"Converted from ISO-8859-2 to UTF-8 (SET line rewritten to \"SET UTF-8\")",
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "ru_RU",
+			"name": "Russian (Russia)",
+			"upstreamVersion": null,
+			"license": "BSD-style (Lebedev)",
+			"copyright": [
+				"Copyright (c) 1997-2008, Alexander I. Lebedev"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/ru_RU/ru_RU.aff",
+					"sha256": "38ce7d4af78e211e9bafe4bf7e3d6a2c420591136cb738ec6648f8fdf6524cd7"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/ru_RU/ru_RU.dic",
+					"sha256": "f6047416a0204adbecf3a451b874ec8a97ee37e2cbc714466ef04d8dbcc0d6fc"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/ru_RU/README_ru_RU.txt",
+					"sha256": "262af2f6ad70a61e5ee1332ff44fa8ee50edca819cf33207d8ad6ba6a0c9be52"
+				}
+			],
+			"aff": {
+				"file": "ru_RU/ru_RU.aff",
+				"bytes": 71518,
+				"sha256": "c2fcc8c9d5e5071f6e28fa93d3a34f5de229ea80c5416bbe95f41d905ba67d05"
+			},
+			"dic": {
+				"file": "ru_RU/ru_RU.dic",
+				"bytes": 3473191,
+				"sha256": "f6047416a0204adbecf3a451b874ec8a97ee37e2cbc714466ef04d8dbcc0d6fc"
+			},
+			"notices": [
+				{
+					"file": "ru_RU/README.md",
+					"bytes": 1084,
+					"sha256": "a53f08c7fee481a645ae598335b71159df28a4375e901763d3c9759b89f478ab"
+				},
+				{
+					"file": "ru_RU/README_ru_RU.txt",
+					"bytes": 1886,
+					"sha256": "262af2f6ad70a61e5ee1332ff44fa8ee50edca819cf33207d8ad6ba6a0c9be52"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "sv_SE",
+			"name": "Swedish (Sweden)",
+			"upstreamVersion": null,
+			"license": "LGPL-3.0-only",
+			"copyright": [
+				"Copyright © 2003-19 Göran Andersson"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/sv_SE/dictionaries/sv_SE.aff",
+					"sha256": "b721c9d44bee912feb182b601a1bc2ae3e7dffef660f4130cf2751867488a9dd"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/sv_SE/dictionaries/sv_SE.dic",
+					"sha256": "384a2126eff333f5f6f9790ae892554546f53948d2988c600397cb5ad6ce66e8"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/sv_SE/LICENSE_en_US.txt",
+					"sha256": "1314b6004bff32053ca25aca5fc419e905d75a6d49f9f9825baf4f02298af6d9"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/sv_SE/LICENSE_sv_SE.txt",
+					"sha256": "841736f210169ce2c9c6907c0d88495e6d41ff7d067a3033c56ae1179ce62127"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/LGPLv3.txt",
+					"sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/GPLv3.txt",
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"aff": {
+				"file": "sv_SE/sv_SE.aff",
+				"bytes": 18891,
+				"sha256": "fe13cf95021b4defae97e34c7afbdcaeaec547743bccbdbc43036ffb14762f49"
+			},
+			"dic": {
+				"file": "sv_SE/sv_SE.dic",
+				"bytes": 2344202,
+				"sha256": "384a2126eff333f5f6f9790ae892554546f53948d2988c600397cb5ad6ce66e8"
+			},
+			"notices": [
+				{
+					"file": "sv_SE/README.md",
+					"bytes": 1246,
+					"sha256": "8c614db274b00a693197ae9eb9c7c033b32881bd52c1f54cdae25aab4548af7d"
+				},
+				{
+					"file": "sv_SE/LICENSE_en_US.txt",
+					"bytes": 378,
+					"sha256": "1314b6004bff32053ca25aca5fc419e905d75a6d49f9f9825baf4f02298af6d9"
+				},
+				{
+					"file": "sv_SE/LICENSE_sv_SE.txt",
+					"bytes": 353,
+					"sha256": "841736f210169ce2c9c6907c0d88495e6d41ff7d067a3033c56ae1179ce62127"
+				},
+				{
+					"file": "sv_SE/LGPLv3.txt",
+					"bytes": 7639,
+					"sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+				},
+				{
+					"file": "sv_SE/GPLv3.txt",
+					"bytes": 35147,
+					"sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "da_DK",
+			"name": "Danish (Denmark)",
+			"upstreamVersion": "2.9.101",
+			"license": "GPL-2.0-only OR LGPL-2.1-only OR MPL-1.1",
+			"copyright": [
+				"© 2020 Foreningen for frit tilgængelige sprogværktøjer"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/da_DK/da_DK.aff",
+					"sha256": "ee4fe193d19b72aa64bc0d2b9bcdf44ee44f11d9b4e7dcf6da36fd0e91528561"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/da_DK/da_DK.dic",
+					"sha256": "298aabeca362ee2c71836c5c7748d22080a460bd7193e6fbd2471f27a70d0fd3"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/da_DK/README_da_DK.txt",
+					"sha256": "9508f4ec9e14a3d2a3360dd694881440d0d73fe1fe076e547639e5fe33c7b42d"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_GPLv2",
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/de/COPYING_LGPL_v2.1.txt",
+					"sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/es/MPL-1.1.txt",
+					"sha256": "53692a2ed6c6a2c6ec9b32dd0b820dfae91e0a1fcdf625ca9ed0bdf8705fcc4f"
+				}
+			],
+			"aff": {
+				"file": "da_DK/da_DK.aff",
+				"bytes": 83400,
+				"sha256": "c226d10c28990f45c72d9ae3892311fe16eab1a428a4438f50f3967d2361bcc8"
+			},
+			"dic": {
+				"file": "da_DK/da_DK.dic",
+				"bytes": 3894241,
+				"sha256": "7aa68794840b90b677c07d5ee89307f10c6d26fe938046fcd4d1a895e7f3f3af"
+			},
+			"notices": [
+				{
+					"file": "da_DK/README.md",
+					"bytes": 1538,
+					"sha256": "f14bf27b0229ab7cedbcd168ead328f9509167cce4017e9ae157eb4c1a7a0b68"
+				},
+				{
+					"file": "da_DK/README_da_DK.txt",
+					"bytes": 787,
+					"sha256": "9508f4ec9e14a3d2a3360dd694881440d0d73fe1fe076e547639e5fe33c7b42d"
+				},
+				{
+					"file": "da_DK/COPYING_GPLv2",
+					"bytes": 17992,
+					"sha256": "e7431ac20e815b6797369e802f9e4bb1b0082485060d8b096235f035d741bd89"
+				},
+				{
+					"file": "da_DK/COPYING_LGPL_v2.1.txt",
+					"bytes": 26530,
+					"sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+				},
+				{
+					"file": "da_DK/MPL-1.1.txt",
+					"bytes": 25755,
+					"sha256": "53692a2ed6c6a2c6ec9b32dd0b820dfae91e0a1fcdf625ca9ed0bdf8705fcc4f"
+				}
+			],
+			"modifications": [
+				"Added a final newline to the .aff",
+				"Rewrote the .dic lines `\"A/S\"`, `\"c/o\"`, `\"I/S\"` as `A\\/S`, `c\\/o`, `I\\/S`: the unescaped \"/\" is read as a flag separator, which FLAG num rejects, and the quotes would keep the entries from ever matching a word",
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		},
+		{
+			"id": "cs_CZ",
+			"name": "Czech (Czechia)",
+			"upstreamVersion": null,
+			"license": "GPL-1.0-or-later",
+			"copyright": [
+				"Petr Kolář and numerous contributors (authors of the original Czech ispell dictionary)",
+				"Miroslav Pošta (author of the 2021 update of the Czech dictionary)"
+			],
+			"sources": [
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/cs_CZ/cs_CZ.aff",
+					"sha256": "7ecb20620ecd46ebd9c36f3f33e69dd4eda385cba5b2bb4e6bc396d910e297f7"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/cs_CZ/cs_CZ.dic",
+					"sha256": "d8e8c88c006fdae72dac8c85df11b0c99a773e05a4ab0fcbe92244876668ca74"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/cs_CZ/README_en.txt",
+					"sha256": "0fe6d017aa91ffb58146d19160f8207900cc0c49d5fffef0b1a7d3a364cb29bd"
+				},
+				{
+					"url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4/cs_CZ/README_cs.txt",
+					"sha256": "24d1d07409b62e8e6f0ee114991d4749d3e97b05ea19feca835916af67312720"
+				}
+			],
+			"aff": {
+				"file": "cs_CZ/cs_CZ.aff",
+				"bytes": 111857,
+				"sha256": "0ee6a90045b8074460cb87ee2dc93985b96dc709086f47ceea4bcbb8e21e7ce4"
+			},
+			"dic": {
+				"file": "cs_CZ/cs_CZ.dic",
+				"bytes": 3656362,
+				"sha256": "d8e8c88c006fdae72dac8c85df11b0c99a773e05a4ab0fcbe92244876668ca74"
+			},
+			"notices": [
+				{
+					"file": "cs_CZ/README.md",
+					"bytes": 1259,
+					"sha256": "08fdd4cdf547b82b701643b5a9a461b7537324d5216c261abfee22788e151662"
+				},
+				{
+					"file": "cs_CZ/README_en.txt",
+					"bytes": 13105,
+					"sha256": "0fe6d017aa91ffb58146d19160f8207900cc0c49d5fffef0b1a7d3a364cb29bd"
+				},
+				{
+					"file": "cs_CZ/README_cs.txt",
+					"bytes": 59410,
+					"sha256": "24d1d07409b62e8e6f0ee114991d4749d3e97b05ea19feca835916af67312720"
+				}
+			],
+			"modifications": [
+				"Prepended this modification notice to the .aff as comment lines"
+			]
+		}
+	]
+}

@@ -15,6 +15,7 @@ import { resetVideoSession } from "@/features/videos/lib/session"
 import { resetDriveKeyframes } from "@/features/drive/lib/thumbGenerators"
 import { resetFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
 import { watchState } from "@/features/videos/lib/watchState"
+import { userDictionary } from "@/features/spellcheck/lib/userDictionary"
 import { disposeAudioEngine } from "@/features/audio/lib/audioEngine"
 import { cancelActiveTransfers } from "@/features/transfers/lib/control"
 import { allowNextUnload } from "@/lib/unloadGuard"
@@ -113,6 +114,8 @@ export async function performLogout(options?: PerformLogoutOptions): Promise<boo
 	// Videos watch state likewise: its upload aborts, and the progress it kept in localStorage (which the kv wipe
 	// doesn't reach) goes now.
 	watchState.cancel()
+	// The spelling dictionary's words leave with the account (the spellchecker hears the empty list).
+	userDictionary.reset()
 	// Uploads, downloads and copies abort before the worker drops its client; the confirm that leads
 	// here warned about them (useHasActiveTransfers).
 	cancelActiveTransfers()

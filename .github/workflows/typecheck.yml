@@ -9,6 +9,7 @@ on:
       - 'packages/filen-mobile/**'
       - 'packages/filen-shared/**'
       - 'packages/filen-office/**'
+      - 'packages/filen-spellcheck/**'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'patches/**'
@@ -20,6 +21,7 @@ on:
       - 'packages/filen-mobile/**'
       - 'packages/filen-shared/**'
       - 'packages/filen-office/**'
+      - 'packages/filen-spellcheck/**'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'patches/**'
@@ -37,6 +39,7 @@ jobs:
       filen-mobile: ${{ steps.filter.outputs.filen-mobile }}
       filen-shared: ${{ steps.filter.outputs.filen-shared }}
       filen-office: ${{ steps.filter.outputs.filen-office }}
+      filen-spellcheck: ${{ steps.filter.outputs.filen-spellcheck }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -46,6 +49,7 @@ jobs:
             filen-web:
               - 'packages/filen-web/**'
               - 'packages/filen-shared/**'
+              - 'packages/filen-spellcheck/**'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'patches/**'
@@ -65,6 +69,12 @@ jobs:
               - 'package.json'
             filen-office:
               - 'packages/filen-office/**'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'patches/**'
+              - 'package.json'
+            filen-spellcheck:
+              - 'packages/filen-spellcheck/**'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'patches/**'
@@ -149,4 +159,24 @@ jobs:
         run: pnpm install --frozen-lockfile --filter @filen/office...
       - name: Typecheck
         working-directory: packages/filen-office
+        run: pnpm run typecheck
+  typecheck-spellcheck:
+    needs: changes
+    if: needs.changes.outputs.filen-spellcheck == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        working-directory: packages/filen-spellcheck
+        run: pnpm install --frozen-lockfile --filter @filen/spellcheck...
+      - name: Typecheck
+        working-directory: packages/filen-spellcheck
         run: pnpm run typecheck

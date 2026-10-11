@@ -6,6 +6,7 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite"
 import babel from "@rolldown/plugin-babel"
 import { sdkArtifacts, COI_HEADERS, SDK_ARTIFACTS } from "./vite/sdk-artifacts-plugin"
 import { officeFonts, OFFICE_FONTS_BASE } from "./vite/office-fonts-plugin"
+import { spellcheckAssets, SPELLCHECK_BASE } from "./vite/spellcheck-assets-plugin"
 import { SINGLETONS } from "./vite/singletons"
 import { assistantModelDev } from "./vite/assistant-model"
 import { isAllowedModelOrigin } from "./src/features/assistant/runtime/manifest"
@@ -42,7 +43,8 @@ function responseHeaders(preview: OutgoingHttpHeaders): Plugin {
 // preview server sends. Rules apply in file order and a rule's removals run before its own values, so
 // the unhashed SDK artifacts can drop the immutable caching /assets/* grants: their names never change,
 // so they must be revalidated on every load or a client pairs new code with an old SDK. The office fonts'
-// licence files are unhashed too (the fonts themselves are content-hashed under /assets/).
+// licence files are unhashed too (the fonts themselves are content-hashed under /assets/), as are the
+// spellcheck dictionaries' (the engine and dictionaries are hashed under /assets/spellcheck/).
 // FILEN_WEB_NOINDEX keeps the staging deployment out of search indexes.
 function deployHeaders(headers: Record<string, string>): Plugin {
 	const rule = (path: string, lines: string[]) => [path, ...lines.map(line => `  ${line}`)].join("\n")
@@ -67,7 +69,8 @@ function deployHeaders(headers: Record<string, string>): Plugin {
 						rule("/assets/*", ["Cache-Control: public, max-age=31536000, immutable"]),
 						...SDK_ARTIFACTS.map(name => rule(`/assets/${name}`, revalidate)),
 						rule("/assets/snippets/*", revalidate),
-						rule(`${OFFICE_FONTS_BASE}*`, revalidate)
+						rule(`${OFFICE_FONTS_BASE}*`, revalidate),
+						rule(`${SPELLCHECK_BASE}*`, revalidate)
 					].join("\n") + "\n"
 			})
 		}
@@ -203,6 +206,7 @@ export default defineConfig(({ mode }) => ({
 		tailwindcss(),
 		sdkArtifacts(),
 		officeFonts(),
+		spellcheckAssets(),
 		assistantModelDev()
 	],
 	// Workspace packages are compiled from source, so their bare imports resolve from their own directory,

@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer"
 import { execFileSync } from "node:child_process"
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -33,11 +34,12 @@ import {
  * holder, which is worse than an honest gap.
  *
  * Three sources reach the browser: the npm tree (minus dev/optional entries, which are build tooling),
- * the Rust crates the SDK wasm is compiled from, and components vendored into this package as built
- * output, described from the manifest their build script writes. @filen/sdk-rs is a registry package and
- * is described here; @filen/shared and @filen/office are workspace members, so pnpm does not report them
- * and they are correctly absent — first-party code needs no attribution. The third-party material
- * @filen/office carries (fonts, derived code) is vendored and described from its own records.
+ * the Rust crates the SDK and spellchecker wasm modules are compiled from, and components vendored into
+ * this package as built output, described from the manifest their build script writes. @filen/sdk-rs is
+ * a registry package and is described here; @filen/shared, @filen/office and @filen/spellcheck are
+ * workspace members, so pnpm does not report them and they are correctly absent — first-party code needs
+ * no attribution. The third-party material @filen/office and @filen/spellcheck carry (fonts, derived
+ * code, crates, dictionaries) is vendored and described from their own records.
  *
  * The licensing core is shared with filen-mobile's generator through @filen/shared/tooling. Unlike
  * mobile, the npm dedup key here is `name@version` rather than the bare name (this tree ships 30
@@ -726,15 +728,120 @@ function officeDerivedNotices(): Collected[] {
 	})
 }
 
+/**
+ * The spellchecker @filen/spellcheck brings into the app:
+ *
+ * - The Rust crates its wasm engine is compiled from, read from that package's own Cargo.lock (its local
+ *   cargo cache supplies the sources; run cargo fetch there first). Crates the SDK already lists are left
+ *   to that entry.
+ * - The Hunspell dictionaries the app serves (vite/spellcheck-assets-plugin.ts), from
+ *   dictionaries/manifest.json: licence, holders, the modifications the build script made, and every
+ *   licence and readme file shipped with the dictionary, verbatim.
+ */
+const SPELLCHECK_DIR = "node_modules/@filen/spellcheck"
+const SPELLCHECK_LOCK = `${SPELLCHECK_DIR}/crate/Cargo.lock`
+const SPELLCHECK_DICTIONARIES = `${SPELLCHECK_DIR}/dictionaries`
+const SPELLCHECK_MANIFEST = `${SPELLCHECK_DICTIONARIES}/manifest.json`
+const SPELLCHECK_REPO_DIR = "packages/filen-spellcheck"
+
+function spellcheckCrateNotices(listed: readonly Collected[]): Collected[] {
+	const known = new Set(listed.map(entry => `${entry.name}@${entry.version}`))
+	const roots = crateSourceRoots()
+	const entries: Collected[] = []
+
+	for (const match of readFileSync(SPELLCHECK_LOCK, "utf8").matchAll(
+		/\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"(?:\nsource = "([^"]+)")?/g
+	)) {
+		const [, name, version, source] = match
+
+		if (!source || !name || !version || known.has(`${name}@${version}`)) {
+			continue
+		}
+
+		const dir = roots.map(root => join(root, `${name}-${version}`)).find(existsSync)
+
+		if (dir === undefined) {
+			throw new Error(`no local source for crate ${name}-${version} — run cargo fetch in ${SPELLCHECK_REPO_DIR}/crate`)
+		}
+
+		const entry = describeCargoCrate(name, version, dir)
+
+		entries.push({
+			...entry,
+			terms: [
+				`Compiled unmodified into the spellchecker's wasm module (${SPELLCHECK_REPO_DIR} in the filen-ts repository, ${FILEN_TS_REPOSITORY}); its source is the crates.io release ${name} ${version}.`,
+				...entry.terms
+			]
+		})
+	}
+
+	return entries
+}
+
+// Notice files ship byte for byte as upstream wrote them; some are Latin-1.
+function noticeText(path: string): string {
+	const bytes = readFileSync(path)
+
+	return isUtf8(bytes) ? bytes.toString("utf8") : bytes.toString("latin1")
+}
+
+function spellcheckDictionaryNotices(): Collected[] {
+	const manifest = requireJson(SPELLCHECK_MANIFEST)
+	const upstream = asRecord(manifest["upstream"], SPELLCHECK_MANIFEST)
+	const repository = stringField(upstream, "repository", SPELLCHECK_MANIFEST)
+	const commit = stringField(upstream, "commit", SPELLCHECK_MANIFEST)
+	const dictionaries = manifest["dictionaries"]
+
+	if (!Array.isArray(dictionaries) || dictionaries.length === 0) {
+		throw new Error(`${SPELLCHECK_MANIFEST}: "dictionaries" is missing`)
+	}
+
+	return dictionaries.map(value => {
+		const dictionary = asRecord(value, SPELLCHECK_MANIFEST)
+		const id = stringField(dictionary, "id", SPELLCHECK_MANIFEST)
+		const name = stringField(dictionary, "name", SPELLCHECK_MANIFEST)
+		const upstreamVersion = dictionary["upstreamVersion"]
+		const notices = dictionary["notices"]
+
+		if (!Array.isArray(notices) || notices.length === 0) {
+			throw new Error(`${SPELLCHECK_MANIFEST}: ${id} ships no notice files`)
+		}
+
+		const files = notices.map(notice => stringField(asRecord(notice, SPELLCHECK_MANIFEST), "file", SPELLCHECK_MANIFEST))
+
+		return vendoredNotice(
+			{
+				name: `Hunspell dictionary ${name}`,
+				version: typeof upstreamVersion === "string" ? upstreamVersion : `LibreOffice dictionaries ${commit.slice(0, 12)}`,
+				license: stringField(dictionary, "license", SPELLCHECK_MANIFEST),
+				copyright: stringsField(dictionary, "copyright", SPELLCHECK_MANIFEST),
+				repository,
+				terms: [
+					[
+						`The ${name} spelling dictionary (${id}) from ${repository} at commit ${commit}, as built by ${SPELLCHECK_REPO_DIR}/scripts/build-dictionaries.ts in the filen-ts repository (${FILEN_TS_REPOSITORY}), which publishes the modified files in ${SPELLCHECK_REPO_DIR}/dictionaries/${id}.`,
+						`Modifications: ${stringsField(dictionary, "modifications", SPELLCHECK_MANIFEST).join("; ")}.`,
+						`Served with the app under /assets/spellcheck/ and its notices under /spellcheck/dictionaries/${id}/.`
+					].join(" "),
+					...files.map(file => noticeText(`${SPELLCHECK_DICTIONARIES}/${file}`))
+				]
+			},
+			"vendored"
+		)
+	})
+}
+
 const npm = collectNpm(installed)
 const rust = collectRust(expectedSdk)
 const ffmpeg = ffmpegModuleNotices()
 const engine = wllamaEngineNotices()
 const office = [...officeFontNotices(), ...officeDerivedNotices()]
-const vendored = [...ffmpeg, ...engine, ...office]
-const collected = [...npm, ...rust.entries, ...vendored]
+const spellcheckCrates = spellcheckCrateNotices(rust.entries)
+const dictionaries = spellcheckDictionaryNotices()
+const vendored = [...ffmpeg, ...engine, ...office, ...dictionaries]
+const collected = [...npm, ...rust.entries, ...spellcheckCrates, ...vendored]
 
-const { texts, notices } = finalizeNotices(collected)
+// Vendored entries promise their files verbatim (dictionaries ship them byte for byte).
+const { texts, notices } = finalizeNotices(collected, entry => entry.ecosystem === "vendored")
 
 // No absolute path is ever written into the artifact: it is a committed source file, and a machine path
 // would make regeneration produce a spurious diff on the next machine. The repository, the ref it was
@@ -753,6 +860,7 @@ const output = `// AUTO-GENERATED by scripts/generateThirdPartyNotices.ts — do
 // vendored: ${ffmpeg.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${FFMPEG_MANIFEST})
 //   ${engine.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${WLLAMA_MANIFEST})
 //   @filen/office: ${office.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${OFFICE_REPO_DIR}/assets/fonts/manifest.json, ${OFFICE_REPO_DIR}/THIRD_PARTY_NOTICES.md)
+//   @filen/spellcheck: ${[...spellcheckCrates, ...dictionaries].map(entry => `${entry.name} ${entry.version}`).join(", ")} (${SPELLCHECK_REPO_DIR}/crate/Cargo.lock, ${SPELLCHECK_REPO_DIR}/dictionaries/manifest.json)
 //
 // Cannot run in CI: needs a filen-rs checkout and the local cargo caches. Re-run after any SDK bump.
 
@@ -782,6 +890,7 @@ console.log(
 		`third-party notices -> ${OUTPUT}`,
 		`  npm:            ${String(npm.length).padStart(4)}`,
 		`  rust:           ${String(rust.entries.length).padStart(4)}  (${rust.ref}, via ${rust.source})`,
+		`  spellcheck rust:${String(spellcheckCrates.length).padStart(4)}`,
 		`  vendored:       ${String(vendored.length).padStart(4)}`,
 		`  total:          ${String(notices.length)}`,
 		`  license texts:  ${String(texts.length)} unique (deduplicated)`,

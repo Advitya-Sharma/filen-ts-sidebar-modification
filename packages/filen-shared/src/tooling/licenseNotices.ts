@@ -419,9 +419,15 @@ export function vendoredNotice<E extends string>(component: VendoredComponent, e
 	}
 }
 
-/** Pools every entry's terms, then emits the payload entries without them, ordered by name then version. */
-export function finalizeNotices<E extends string>(collected: CollectedNotice<E>[]): { texts: string[]; notices: NoticeEntry<E>[] } {
-	const texts = poolLicenseTexts(collected)
+/**
+ * Pools every entry's terms, then emits the payload entries without them, ordered by name then version.
+ * Entries `verbatim` selects keep their texts byte for byte (they share only identical copies).
+ */
+export function finalizeNotices<E extends string>(
+	collected: CollectedNotice<E>[],
+	verbatim: (entry: CollectedNotice<E>) => boolean = () => false
+): { texts: string[]; notices: NoticeEntry<E>[] } {
+	const texts = poolLicenseTexts(collected, verbatim)
 	const notices = collected
 		.map(({ terms: _terms, ...entry }) => entry)
 		.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version))
@@ -545,17 +551,20 @@ export type PoolableNotice = {
  * backfills the canonical Apache-2.0 text. An MIT file is byte-identical everywhere once its copyright
  * line is lifted, so this is what makes the payload a reasonable size at all.
  */
-export function poolLicenseTexts(collected: PoolableNotice[]): string[] {
+export function poolLicenseTexts<T extends PoolableNotice>(collected: T[], verbatim: (entry: T) => boolean = () => false): string[] {
 	const texts: string[] = []
 	const textIndex = new Map<string, number>()
+	const exactIndex = new Map<string, number>()
 
 	for (const entry of collected) {
+		const exact = verbatim(entry)
+
 		for (const terms of entry.terms) {
 			// Keyed on whitespace-normalised text, but the FIRST occurrence is stored verbatim: two packages
 			// whose MIT terms differ only in line wrapping share one copy; any real difference in wording still
-			// separates them.
+			// separates them. An entry that promises its texts verbatim shares only an identical copy.
 			const key = terms.replace(/\s+/g, " ").trim().toLowerCase()
-			const existing = textIndex.get(key)
+			const existing = exact ? exactIndex.get(terms) : textIndex.get(key)
 
 			if (existing !== undefined) {
 				entry.texts.push(existing)
@@ -564,7 +573,10 @@ export function poolLicenseTexts(collected: PoolableNotice[]): string[] {
 			}
 
 			entry.texts.push(texts.length)
-			textIndex.set(key, texts.length)
+
+			if (!textIndex.has(key)) textIndex.set(key, texts.length)
+
+			exactIndex.set(terms, texts.length)
 			texts.push(terms)
 		}
 	}
