@@ -24,7 +24,8 @@
 		"./dom/docx": "./src/dom/docx/index.ts",
 		"./react/docx": "./src/react/docx/index.ts",
 		"./css/docx.css": "./src/css/docx.css",
-		"./core/docx/edit": "./src/core/docx/edit/index.ts"
+		"./core/docx/edit": "./src/core/docx/edit/index.ts",
+		"./core/docx/write": "./src/core/docx/write/index.ts"
 	},
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.react.json && tsc -p tsconfig.test.json && tsc -p tsconfig.dom-test.json",
@@ -36,6 +37,7 @@
 		"generate:unicode": "tsx src/scripts/unicodeTables.ts",
 		"generate:geometry": "tsx src/scripts/presetGeometry.ts",
 		"generate:symbols": "tsx src/scripts/symbolTables.ts",
+		"generate:wml-order": "tsx src/scripts/wmlOrder.ts",
 		"corpus:manifest": "tsx src/scripts/corpusManifest.ts",
 		"corpus:fetch": "tsx src/scripts/fetchCorpus.ts",
 		"lint": "eslint src/ && prettier --check \"src/**/*.{ts,tsx,css}\""

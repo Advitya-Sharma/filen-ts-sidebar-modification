@@ -460,6 +460,19 @@ for (const type of Object.values(docxSchema.nodes)) {
 
 runLevel.add(docxSchema.nodes.text)
 
+// Whether a container's effective last block (through content controls) is a table: Word wants a cell to
+// end with a paragraph.
+export function endsWithTable(container: Node): boolean {
+	let last = container.lastChild
+
+	while (last !== null && last.type === docxSchema.nodes.sdt) last = last.lastChild
+
+	return (
+		last !== null &&
+		(last.type === docxSchema.nodes.table || (last.type === docxSchema.nodes.locked_block && last.attrs["kind"] === "table"))
+	)
+}
+
 // Where an inline node sits in the XML (text included); undefined for blocks.
 export function inlineLevel(node: Node): InlineLevel | undefined {
 	return runLevel.has(node.type) ? "run" : paragraphLevel.has(node.type) ? "paragraph" : undefined

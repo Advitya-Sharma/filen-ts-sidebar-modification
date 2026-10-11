@@ -1,4 +1,4 @@
-import { Fragment, Slice, type Mark, type MarkType, type Node } from "prosemirror-model"
+import { Fragment, Slice, type Mark, type MarkType, type Node, type NodeType } from "prosemirror-model"
 import { Plugin, PluginKey, type EditorState, type Transaction } from "prosemirror-state"
 import {
 	AddMarkStep,
@@ -20,6 +20,7 @@ import {
 	REVISION_MARKS,
 	WRAPPER_MARKS,
 	docxSchema,
+	endsWithTable,
 	inlineLevel,
 	markerKey,
 	survivorsOf,
@@ -60,8 +61,10 @@ const PROTECTED_ATTRS = new Set([
 	"lock",
 	"revision"
 ])
+const CONTAINERS: ReadonlySet<NodeType> = new Set([nodes.table, nodes.table_row, nodes.table_cell, nodes.sdt])
 const SOURCE_BLOCKS = new Set(["paragraph", "table", "table_row", "table_cell", "sdt", "locked_block"])
-// Atoms that exist only as source bytes: a copy of one has nothing to be written from.
+// Atoms that exist only as source bytes: a copy of one has nothing to be written from. A note reference
+// is one too: a copy would point at the same note (Word's paste makes a new one; that waits for note editing).
 const BYTES_ONLY = new Set([
 	"drawing",
 	"run_object",
@@ -69,6 +72,7 @@ const BYTES_ONLY = new Set([
 	"opaque_inline",
 	"marker",
 	"comment_ref",
+	"note_ref",
 	"locked_block",
 	"proof_err",
 	"rendered_break"
@@ -95,11 +99,17 @@ function freshMarks(marks: readonly Mark[]): readonly Mark[] {
 	return out
 }
 
-function freshContent(fragment: Fragment): Fragment {
+// Markers a repair keeps through freshNode (by key); those held in left-out atoms' bytes go to `orphans`.
+interface KeptMarkers {
+	readonly keys: ReadonlySet<string>
+	readonly orphans: MarkerAttrs[]
+}
+
+function freshContent(fragment: Fragment, keep?: KeptMarkers): Fragment {
 	const out: Node[] = []
 
 	fragment.forEach(node => {
-		const fresh = freshNode(node)
+		const fresh = freshNode(node, keep)
 
 		if (fresh !== null) out.push(fresh)
 	})
@@ -107,12 +117,21 @@ function freshContent(fragment: Fragment): Fragment {
 	return Fragment.fromArray(out)
 }
 
-function freshNode(node: Node): Node | null {
+function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 	const type = node.type
 
 	if (node.isText) return node.mark(freshMarks(node.marks))
 
 	if (BYTES_ONLY.has(type.name)) {
+		if (keep !== undefined) {
+			const survivors = survivorsOf(node)
+
+			if ((type === nodes.marker || type === nodes.comment_ref) && survivors.every(marker => keep.keys.has(markerKey(marker))))
+				return node
+
+			for (const marker of survivors) if (keep.keys.has(markerKey(marker))) keep.orphans.push(marker)
+		}
+
 		// A locked paragraph comes back as its text; other byte-only content is left out.
 		if (type === nodes.locked_block && node.attrs["kind"] === "paragraph" && node.attrs["text"] !== "") {
 			return nodes.paragraph.create(null, docxSchema.text(node.attrs["text"] as string))
@@ -122,12 +141,21 @@ function freshNode(node: Node): Node | null {
 	}
 
 	const attrs: Record<string, unknown> = { ...node.attrs }
+	const kept = (list: unknown): MarkerList => {
+		if (keep === undefined || !Array.isArray(list)) return NO_MARKERS
+
+		const out = (list as MarkerList).filter(marker => keep.keys.has(markerKey(marker)))
+
+		return out.length === 0 ? NO_MARKERS : out
+	}
 
 	if ("src" in attrs) attrs["src"] = NO_SOURCE
 	if ("sectPr" in attrs) attrs["sectPr"] = NO_SOURCE
-	if ("before" in attrs) attrs["before"] = NO_MARKERS
-	if ("end" in attrs && type !== nodes.field) attrs["end"] = NO_MARKERS
+	if ("before" in attrs) attrs["before"] = kept(attrs["before"])
+	if ("end" in attrs && type !== nodes.field) attrs["end"] = kept(attrs["end"])
 	if (type === nodes.field) {
+		// A new field has no bytes to hold markers: they go next to it.
+		keep?.orphans.push(...kept(attrs["markers"]))
 		attrs["end"] = NO_SOURCE
 		attrs["markers"] = NO_MARKERS
 	}
@@ -135,7 +163,7 @@ function freshNode(node: Node): Node | null {
 
 	if (node.isLeaf) return type.create(attrs, null, freshMarks(node.marks))
 
-	const content = freshContent(node.content)
+	const content = freshContent(node.content, keep)
 
 	// Containers that lost all their content are left out rather than made invalid.
 	if (content.size === 0 && !type.validContent(content)) return type.createAndFill(attrs, null, freshMarks(node.marks))
@@ -388,7 +416,7 @@ function markerNode(marker: MarkerAttrs): Node {
 }
 
 // Puts lost markers back at `pos`: inline where the position is in a paragraph, otherwise in the
-// `before` list of the next block or the `end` list of the container.
+// `before` list of the next block, the end of a container's last paragraph or the story's `end` list.
 function reinsert(tr: Transaction, pos: number, markers: readonly MarkerAttrs[]): void {
 	const $pos = tr.doc.resolve(Math.max(0, Math.min(pos, tr.doc.content.size)))
 
@@ -396,6 +424,17 @@ function reinsert(tr: Transaction, pos: number, markers: readonly MarkerAttrs[])
 		tr.insert($pos.pos, markers.map(markerNode))
 
 		return
+	}
+
+	// A comment reference is run content: the markers go into the nearest paragraph, in their order.
+	if (markers.some(marker => marker.kind === "commentReference")) {
+		const at = textEnd(tr.doc, $pos.pos) ?? textStart(tr.doc, $pos.pos)
+
+		if (at !== undefined) {
+			tr.insert(at, markers.map(markerNode))
+
+			return
+		}
 	}
 
 	const after = $pos.nodeAfter
@@ -407,6 +446,14 @@ function reinsert(tr: Transaction, pos: number, markers: readonly MarkerAttrs[])
 	}
 
 	const parent = $pos.parent
+	const before = $pos.nodeBefore
+
+	// Word wants a cell (or a content control's blocks) to end with a paragraph: the markers go into it.
+	if ($pos.depth > 0 && after === null && before?.type === nodes.paragraph) {
+		tr.insert($pos.pos - 1, markers.map(markerNode))
+
+		return
+	}
 
 	if ($pos.depth === 0) {
 		tr.setDocAttribute("end", [...(parent.attrs["end"] as MarkerList), ...markers])
@@ -415,9 +462,220 @@ function reinsert(tr: Transaction, pos: number, markers: readonly MarkerAttrs[])
 	}
 }
 
-export interface InvariantOptions {
-	readonly readOnly?: () => boolean
-	readonly normalizeList?: ListNormalizer
+// The end of the content of the last paragraph before `pos`, and the start of the first after it (blocks
+// kept as bytes are passed over only at their own level).
+function textEnd(doc: Node, pos: number): number | undefined {
+	let $at = doc.resolve(pos)
+
+	for (;;) {
+		let node = $at.nodeBefore
+		let at = $at.pos
+
+		while (node !== null && !node.isTextblock && !node.isLeaf) {
+			at -= 1
+			node = node.lastChild
+		}
+
+		if (node?.isTextblock === true) return at - 1
+		if ($at.depth === 0) return undefined
+
+		$at = doc.resolve($at.before())
+	}
+}
+
+function textStart(doc: Node, pos: number): number | undefined {
+	let $at = doc.resolve(pos)
+
+	for (;;) {
+		let node = $at.nodeAfter
+		let at = $at.pos
+
+		while (node !== null && !node.isTextblock && !node.isLeaf) {
+			at += 1
+			node = node.firstChild
+		}
+
+		if (node?.isTextblock === true) return at + 1
+		if ($at.depth === 0) return undefined
+
+		$at = doc.resolve($at.after())
+	}
+}
+
+// Range ends (and comment references, which Word wants after their range's start) and the start each
+// follows.
+const RANGE_STARTS: ReadonlyMap<string, string> = new Map([
+	["bookmarkEnd", "bookmarkStart"],
+	["commentRangeEnd", "commentRangeStart"],
+	["commentReference", "commentRangeStart"],
+	["moveFromRangeEnd", "moveFromRangeStart"],
+	["moveToRangeEnd", "moveToRangeStart"],
+	["permissionEnd", "permissionStart"]
+])
+
+const RANGE_KINDS: ReadonlySet<string> = new Set([...RANGE_STARTS.keys(), ...RANGE_STARTS.values()])
+
+function isRangeMarker(marker: MarkerAttrs): boolean {
+	return RANGE_KINDS.has(marker.kind)
+}
+
+// Where a range marker sits: an inline marker node, inside an atom's bytes (its `markers`), or in a
+// block's (or the story's, pos -1) `before`/`end` list.
+interface MarkerPlace {
+	readonly marker: MarkerAttrs
+	readonly pos: number
+	readonly node: Node
+	readonly where: "inline" | "atom" | "before" | "end"
+}
+
+function rangePlaces(doc: Node): Map<string, MarkerPlace> {
+	const places = new Map<string, MarkerPlace>()
+	const add = (marker: MarkerAttrs, pos: number, node: Node, where: MarkerPlace["where"]): void => {
+		if (isRangeMarker(marker) && marker.id !== null) places.set(markerKey(marker), { marker, pos, node, where })
+	}
+	const visit = (node: Node, pos: number): void => {
+		if (node.isBlock && pos >= 0)
+			for (const marker of (node.attrs["before"] as MarkerList | undefined) ?? NO_MARKERS) add(marker, pos, node, "before")
+
+		if (node.isLeaf) {
+			for (const marker of survivorsOf(node)) add(marker, pos, node, node.type === nodes.marker ? "inline" : "atom")
+		} else {
+			const start = pos < 0 ? 0 : pos + 1
+
+			node.forEach((child, offset) => {
+				if (!child.isText) visit(child, start + offset)
+			})
+		}
+
+		if (node.isBlock) for (const marker of (node.attrs["end"] as MarkerList | undefined) ?? NO_MARKERS) add(marker, pos, node, "end")
+	}
+
+	visit(doc, -1)
+
+	return places
+}
+
+function setMarkerList(tr: Transaction, pos: number, name: string, list: MarkerList): void {
+	if (pos < 0) tr.setDocAttribute(name, list)
+	else tr.setNodeAttribute(pos, name, list)
+}
+
+// Moves `marker` out of its place (false when it is held in an atom's bytes).
+function takeMarker(tr: Transaction, place: MarkerPlace, at: (pos: number) => number): boolean {
+	if (place.where === "atom") return false
+
+	const pos = place.pos < 0 ? -1 : at(place.pos)
+	const key = markerKey(place.marker)
+
+	if (place.where === "inline") {
+		const node = tr.doc.nodeAt(pos)
+
+		if (node === null || node.type !== nodes.marker || markerKey(survivorsOf(node)[0] as MarkerAttrs) !== key) return false
+
+		tr.delete(pos, pos + 1)
+
+		return true
+	}
+
+	const holder = pos < 0 ? tr.doc : tr.doc.nodeAt(pos)
+	const list = (holder?.attrs[place.where] as MarkerList | undefined) ?? NO_MARKERS
+
+	setMarkerList(
+		tr,
+		pos,
+		place.where,
+		list.filter(marker => markerKey(marker) !== key)
+	)
+
+	return true
+}
+
+// Puts `marker` right after (or before) `place`.
+function placeMarker(
+	tr: Transaction,
+	marker: MarkerAttrs,
+	place: MarkerPlace,
+	after: boolean,
+	at: (pos: number, assoc: number) => number
+): void {
+	if (place.where === "before" || place.where === "end") {
+		const pos = place.pos < 0 ? -1 : at(place.pos, 1)
+		const holder = pos < 0 ? tr.doc : tr.doc.nodeAt(pos)
+		const list = [...((holder?.attrs[place.where] as MarkerList | undefined) ?? NO_MARKERS)]
+		const index = list.findIndex(other => markerKey(other) === markerKey(place.marker))
+
+		list.splice(index < 0 ? list.length : after ? index + 1 : index, 0, marker)
+		setMarkerList(tr, pos, place.where, list)
+
+		return
+	}
+
+	const pos = after ? at(place.pos + place.node.nodeSize, -1) : at(place.pos, 1)
+
+	if (place.node.isInline) tr.insert(pos, markerNode(marker))
+	else reinsert(tr, pos, [marker])
+}
+
+// A range whose end came before its start: when one side moved with inserted content the other follows it
+// to that content's edge; otherwise the range closes at its start (Word drops a reversed range). Where the
+// end cannot move (a comment reference, a marker in an atom's bytes) the start
+// moves to just before it.
+function orderRanges(tr: Transaction, moved: readonly [number, number][]): void {
+	const places = rangePlaces(tr.doc)
+	const order = new Map<string, number>()
+	let index = 0
+
+	for (const key of places.keys()) order.set(key, index++)
+
+	const fixes: [MarkerPlace, MarkerPlace][] = []
+
+	for (const [key, end] of places) {
+		const kind = RANGE_STARTS.get(end.marker.kind)
+
+		if (kind === undefined) continue
+
+		const startKey = `${kind}:${end.marker.id ?? ""}`
+		const start = places.get(startKey)
+
+		if (start !== undefined && (order.get(key) ?? 0) < (order.get(startKey) ?? 0)) fixes.push([start, end])
+	}
+
+	if (fixes.length === 0) return
+
+	const from = tr.steps.length
+	const at = (pos: number, assoc = 1): number => tr.mapping.slice(from).map(pos, assoc)
+
+	const spanOf = (pos: number): [number, number] | undefined => moved.find(([from, to]) => pos >= from && pos < to)
+	// Markers following moved content to its edge, by edge, in document order.
+	const follow = new Map<number, MarkerAttrs[]>()
+	const add = (edge: number, marker: MarkerAttrs): void => {
+		const list = follow.get(edge)
+
+		if (list === undefined) follow.set(edge, [marker])
+		else list.push(marker)
+	}
+
+	for (const [start, end] of fixes) {
+		const startSpan = spanOf(start.pos)
+		const endSpan = spanOf(end.pos)
+
+		// One side came with inserted content (a moved block): the other follows it to that content's edge,
+		// so the range keeps covering what moved instead of closing.
+		if (startSpan !== undefined && startSpan !== endSpan && takeMarker(tr, end, at)) {
+			add(startSpan[1], end.marker)
+		} else if (endSpan !== undefined && endSpan !== startSpan && takeMarker(tr, start, at)) {
+			add(endSpan[0], start.marker)
+		} else if (takeMarker(tr, end, at)) {
+			placeMarker(tr, end.marker, start, true, at)
+		} else if (takeMarker(tr, start, at)) {
+			placeMarker(tr, start.marker, end, false, at)
+		}
+	}
+
+	for (const [edge, markers] of [...follow].sort((a, b) => b[0] - a[0])) {
+		markers.sort((a, b) => (order.get(markerKey(a)) ?? 0) - (order.get(markerKey(b)) ?? 0))
+		reinsert(tr, at(edge, -1), markers)
+	}
 }
 
 // Keys of the source identities a node carries: its own (a source block or atom) and its markers'.
@@ -443,8 +701,13 @@ function identityKeys(node: Node, own: boolean, out: string[]): void {
 
 interface DuplicateFix {
 	readonly pos: number
-	// Replace the node with a fresh copy (or remove it), or only drop duplicate markers from its lists.
+	// Markers inside a node made fresh that exist nowhere else: they stay.
+	readonly keep?: ReadonlySet<string>
+	// Replace the node with a fresh copy (or remove it), make only the node itself new and drop duplicate
+	// markers from its lists (a block the insertion opened, whose rest is the document's), or only drop
+	// duplicate markers from its lists.
 	readonly fresh: boolean
+	readonly shallow?: boolean
 	readonly drop: ReadonlySet<string>
 }
 
@@ -453,21 +716,48 @@ interface DuplicateFix {
 function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] {
 	const inside: { node: Node; pos: number; keys: string[] }[] = []
 	const size = doc.content.size
-	const spans: [number, number][] = []
+	const pieces: [number, number][] = []
 
 	for (let k = 0; k < inserted.length; k += 2) {
 		const from = Math.max(0, Math.min(size, inserted[k] ?? 0))
 		const to = Math.max(from, Math.min(size, inserted[k + 1] ?? 0))
 
-		if (to > from) spans.push([from, to])
+		if (to > from) pieces.push([from, to])
 	}
 
-	spans.sort((a, b) => a[0] - b[0])
+	pieces.sort((a, b) => a[0] - b[0])
+
+	// Touching or overlapping insertions are one: a node inside their union is inserted content.
+	const spans: [number, number][] = []
+
+	for (const [from, to] of pieces) {
+		const last = spans.at(-1)
+
+		if (last !== undefined && from <= last[1]) last[1] = Math.max(last[1], to)
+		else spans.push([from, to])
+	}
 
 	const seenPos = new Set<number>()
 
+	// Containers that start in inserted content and end in the document's: their identity came with the
+	// insertion (an open slice end), their rest did not.
+	const opened: { pos: number; own: string | undefined; markers: string[] }[] = []
+
 	for (const [from, to] of spans) {
 		doc.nodesBetween(from, to, (node, pos) => {
+			if (pos >= from && pos < to && pos + node.nodeSize > to && !seenPos.has(pos)) {
+				const src: unknown = node.attrs["src"]
+				const markers: string[] = []
+
+				seenPos.add(pos)
+				identityKeys(node, false, markers)
+
+				// A paragraph may be repeated (its copies write its properties); a table structure may not.
+				const own = CONTAINERS.has(node.type) && typeof src === "number" && src !== NO_SOURCE ? `b${src}` : undefined
+
+				if (own !== undefined || markers.length > 0) opened.push({ pos, own, markers })
+			}
+
 			if (pos < from || pos + node.nodeSize > to) return !node.isLeaf
 
 			if (seenPos.has(pos)) return false
@@ -487,10 +777,11 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 		})
 	}
 
-	if (inside.length === 0) return []
+	if (inside.length === 0 && opened.length === 0) return []
 
 	// Identities outside the inserted content.
 	const outside = new Set<string>()
+	const openedAt = new Set(opened.map(entry => entry.pos))
 	let span = 0
 
 	doc.descendants((node, pos) => {
@@ -502,7 +793,7 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 
 		const keys: string[] = []
 
-		identityKeys(node, true, keys)
+		if (!openedAt.has(pos)) identityKeys(node, true, keys)
 
 		for (const key of keys) outside.add(key)
 
@@ -514,6 +805,16 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 	const fixes: DuplicateFix[] = []
 	const taken = new Set<string>()
 
+	for (const { pos, own, markers } of opened) {
+		const fresh = own !== undefined && (outside.has(own) || taken.has(own))
+		const drop = new Set(markers.filter(key => outside.has(key) || taken.has(key)).map(key => key.slice(1)))
+
+		if (own !== undefined) taken.add(own)
+		for (const key of markers) taken.add(key)
+
+		if (fresh || drop.size > 0) fixes.push({ pos, fresh, shallow: true, drop })
+	}
+
 	for (const { node, pos, keys } of inside) {
 		const ownKey = keys[0]
 		const ownIsSource = ownKey !== undefined && !ownKey.startsWith("m")
@@ -524,8 +825,30 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 
 		if (duplicate.length === 0) continue
 
-		if ((ownIsSource && duplicate.includes(ownKey)) || markerOnly) fixes.push({ pos, fresh: true, drop: new Set() })
-		else fixes.push({ pos, fresh: false, drop: new Set(duplicate.map(key => key.slice(1))) })
+		if ((ownIsSource && duplicate.includes(ownKey)) || markerOnly) {
+			// A source block is made new whole: what it holds that exists nowhere else stays with it.
+			const keep = new Set<string>()
+
+			if (!markerOnly) {
+				const visit = (child: Node): void => {
+					const held: string[] = []
+
+					identityKeys(child, false, held)
+
+					for (const key of held) {
+						if (!outside.has(key) && !taken.has(key)) keep.add(key.slice(1))
+
+						taken.add(key)
+					}
+				}
+
+				for (const key of keys) if (key.startsWith("m") && !duplicate.includes(key)) keep.add(key.slice(1))
+
+				node.descendants(child => (visit(child), true))
+			}
+
+			fixes.push({ pos, fresh: true, drop: new Set(), keep })
+		} else fixes.push({ pos, fresh: false, drop: new Set(duplicate.map(key => key.slice(1))) })
 	}
 
 	return fixes
@@ -555,7 +878,20 @@ function applyDuplicateFix(repair: Transaction, fix: DuplicateFix): void {
 		return
 	}
 
-	const fresh = freshNode(node)
+	if (fix.shallow === true) {
+		if (fix.fresh) repair.setNodeAttribute(pos, "src", NO_SOURCE)
+
+		for (const name of ["before", "end"]) {
+			const kept = filterMarkers(node.attrs[name], fix.drop)
+
+			if (kept !== undefined && kept.length !== (node.attrs[name] as MarkerList).length) repair.setNodeAttribute(pos, name, kept)
+		}
+
+		return
+	}
+
+	const keep: KeptMarkers = { keys: fix.keep ?? new Set(), orphans: [] }
+	const fresh = freshNode(node, keep)
 	const $pos = repair.doc.resolve(pos)
 
 	if (fresh !== null) {
@@ -565,6 +901,75 @@ function applyDuplicateFix(repair: Transaction, fix: DuplicateFix): void {
 	} else {
 		repair.replaceWith(pos, pos + node.nodeSize, nodes.paragraph.create())
 	}
+
+	if (keep.orphans.length > 0) reinsert(repair, pos, keep.orphans)
+}
+
+// Characters a text node may not carry into XML: C0 controls (a tab and line ends become a tab or a break,
+// the rest go), U+FFFE/U+FFFF (they go) and unpaired surrogates (left by deleting half a pair; U+FFFD).
+const Char = { Keep: 0, Pair: 1, Tab: 2, Break: 3, Drop: 4, Replace: 5 } as const
+
+function classify(text: string, index: number): number {
+	const code = text.charCodeAt(index)
+
+	if (code >= 0x20 && code < 0xd800) return Char.Keep
+	if (code === 0x09) return Char.Tab
+	if (code === 0x0a || code === 0x0b || code === 0x0d) return Char.Break
+	if (code < 0x20 || code === 0xfffe || code === 0xffff) return Char.Drop
+
+	if (code <= 0xdbff) {
+		const next = text.charCodeAt(index + 1)
+
+		return next >= 0xdc00 && next <= 0xdfff ? Char.Pair : Char.Replace
+	}
+
+	return code <= 0xdfff ? Char.Replace : Char.Keep
+}
+
+function unwritable(text: string): boolean {
+	for (let i = 0; i < text.length; i++) {
+		const kind = classify(text, i)
+
+		if (kind === Char.Pair) i++
+		else if (kind !== Char.Keep) return true
+	}
+
+	return false
+}
+
+function applyTextFix(repair: Transaction, at: number, node: Node): void {
+	const pos = repair.mapping.map(at, 1)
+	const current = repair.doc.nodeAt(pos)
+
+	if (current === null || !current.isText || current.text !== node.text) return
+
+	const text = node.text ?? ""
+	const out: Node[] = []
+	let piece = ""
+	const flush = (): void => {
+		if (piece !== "") out.push(docxSchema.text(piece, node.marks))
+
+		piece = ""
+	}
+
+	for (let i = 0; i < text.length; i++) {
+		const kind = classify(text, i)
+
+		if (kind === Char.Keep) {
+			piece += text[i]
+		} else if (kind === Char.Pair) {
+			piece += text.slice(i, i + 2)
+			i++
+		} else if (kind === Char.Replace) {
+			piece += "\ufffd"
+		} else if (kind === Char.Tab || kind === Char.Break) {
+			flush()
+			out.push((kind === Char.Tab ? nodes.tab : nodes.break).create(null, null, node.marks))
+		}
+	}
+
+	flush()
+	repair.replaceWith(pos, pos + node.nodeSize, out)
 }
 
 export interface InvariantOptions {
@@ -600,6 +1005,8 @@ export function repairTransaction(
 	const changed: number[] = []
 	const inserted: number[] = []
 	let insertsRevisions = false
+	// Source revisions in deleted content: inserted again (a move), they are not copies.
+	const moved = new Set<number>()
 
 	relevant.forEach((tr, index) => {
 		const ranges = changedRanges(tr)
@@ -625,6 +1032,9 @@ export function repairTransaction(
 			range.doc.nodesBetween(range.from, range.to, (node, pos) => {
 				const end = pos + node.nodeSize
 				const opens = pos >= range.from && pos < range.to
+
+				if (node.isInline)
+					for (const mark of node.marks) if (revisionTypes.includes(mark.type)) moved.add(mark.attrs["src"] as number)
 
 				if (node.isLeaf) {
 					if (pos >= range.from && end <= range.to) for (const marker of survivorsOf(node)) found.set(markerKey(marker), marker)
@@ -676,16 +1086,12 @@ export function repairTransaction(
 		}
 	})
 
-	// 1. Marks. New content never carries a source revision: text typed inside someone's tracked insertion
-	// is plain text (the insertion splits). Atoms at paragraph level carry wrapper marks only (a marker
-	// written inside a w:r also its run).
+	// 1. Marks. New content never carries a copy of a source revision: text typed inside someone's tracked
+	// insertion is plain text (the insertion splits). Content moved whole keeps its revisions: their
+	// originals are gone. Atoms at paragraph level carry wrapper marks only (a marker written inside a w:r
+	// also its run).
 	if (insertsRevisions) {
-		for (let k = 0; k < inserted.length; k += 2) {
-			const from = inserted[k] ?? 0
-			const to = inserted[k + 1] ?? 0
-
-			if (to > from) for (const type of revisionTypes) repair.removeMark(from, to, type)
-		}
+		for (const { from, to, mark } of copiedRevisions(state.doc, inserted, moved)) repair.removeMark(from, to, mark)
 	}
 
 	const spans: [number, number][] = []
@@ -702,16 +1108,43 @@ export function repairTransaction(
 	const listFixes: { pos: number; attrs: ListAttrs }[] = []
 	const markerFixes: { pos: number; name: string; list: MarkerList }[] = []
 	const strayMarks: { pos: number; mark: Mark }[] = []
+	const textFixes: { pos: number; node: Node }[] = []
+	const orphans: { pos: number; node: Node }[] = []
+	const cellEnds: number[] = []
+	const emptyLinks: { from: number; to: number; mark: Mark }[] = []
 	const listed = new Set<string>()
+	const startsInserted = (pos: number): boolean => {
+		for (let k = 0; k < inserted.length; k += 2) if (pos >= (inserted[k] ?? 0) && pos < (inserted[k + 1] ?? 0)) return true
+
+		return false
+	}
 	const seen = new Set<number>()
 
 	for (const [from, to] of spans) {
 		state.doc.nodesBetween(from, to, (node, pos) => {
-			if (seen.has(pos)) return !node.isTextblock && !node.isLeaf
+			if (seen.has(pos)) return !node.isLeaf && node.type !== nodes.locked_block
 
 			seen.add(pos)
 
 			if (node.isInline) {
+				if (node.isText && unwritable(node.text ?? "")) textFixes.push({ pos, node })
+
+				// A new link goes somewhere: one with neither a target nor an anchor is no link.
+				for (const mark of node.marks) {
+					if (
+						mark.type === docxSchema.marks.link &&
+						mark.attrs["src"] === NO_SOURCE &&
+						!mark.attrs["target"] &&
+						!mark.attrs["anchor"]
+					) {
+						emptyLinks.push({ from: pos, to: pos + node.nodeSize, mark })
+					}
+				}
+
+				// Content that exists only as source bytes cannot be new: nothing could write it.
+				if (BYTES_ONLY.has(node.type.name) && node.attrs["src"] === NO_SOURCE && node.type !== nodes.proof_err)
+					orphans.push({ pos, node })
+
 				if (inlineLevel(node) === "paragraph") {
 					for (const mark of node.marks) {
 						if (wrapperTypes.includes(mark.type)) continue
@@ -724,8 +1157,12 @@ export function repairTransaction(
 				return false
 			}
 
-			// A split copies a block's marker lists into both halves: the first keeps them.
-			for (const name of ["before", "end"]) {
+			// Word wants every cell to end with a paragraph.
+			if (node.type === nodes.table_cell && endsWithTable(node)) cellEnds.push(pos + node.nodeSize - 1)
+
+			// An edit that copies a block's marker lists into two blocks (a split): the first keeps them. Blocks
+			// that start in inserted content are left to the duplicate repair below.
+			for (const name of startsInserted(pos) ? [] : ["before", "end"]) {
 				const list: unknown = node.attrs[name]
 
 				if (!Array.isArray(list) || list.length === 0) continue
@@ -765,7 +1202,27 @@ export function repairTransaction(
 		})
 	}
 
+	// Text next to a change: a deletion can leave half a surrogate pair at the edge of a text node.
+	for (const [from, to] of spans) {
+		for (const at of [from, to]) {
+			const $at = state.doc.resolve(at)
+			const before = $at.nodeBefore
+			const after = $at.nodeAfter
+
+			if (before?.isText === true && !seen.has(at - before.nodeSize) && unwritable(before.text ?? "")) {
+				seen.add(at - before.nodeSize)
+				textFixes.push({ pos: at - before.nodeSize, node: before })
+			}
+
+			if (after?.isText === true && !seen.has(at) && unwritable(after.text ?? "")) {
+				seen.add(at)
+				textFixes.push({ pos: at, node: after })
+			}
+		}
+	}
+
 	for (const stray of strayMarks) repair.removeNodeMark(stray.pos, stray.mark)
+	for (const link of emptyLinks) repair.removeMark(link.from, link.to, link.mark)
 
 	// 2. Attributes (no position moves).
 	for (const fix of markerFixes) repair.setNodeAttribute(fix.pos, fix.name, fix.list)
@@ -784,15 +1241,132 @@ export function repairTransaction(
 		repair.setNodeAttribute(fix.pos, "ilvl", fix.attrs.ilvl)
 	}
 
-	// 3. Inserted copies of source identities become new content, from the end.
-	for (const fix of duplicateFixes(state.doc, inserted).reverse()) applyDuplicateFix(repair, fix)
+	// 3. Inserted copies of source identities become new content, and text XML cannot carry is made
+	// writable, from the end.
+	const structural: { pos: number; apply: () => void }[] = [
+		...duplicateFixes(state.doc, inserted).map(fix => ({ pos: fix.pos, apply: () => applyDuplicateFix(repair, fix) })),
+		...textFixes.map(fix => ({ pos: fix.pos, apply: () => applyTextFix(repair, fix.pos, fix.node) })),
+		...cellEnds.map(at => ({ pos: at, apply: () => void repair.insert(repair.mapping.map(at, -1), nodes.paragraph.create()) })),
+		...orphans.map(fix => ({
+			pos: fix.pos,
+			apply: () => {
+				const pos = repair.mapping.map(fix.pos, 1)
+
+				if (repair.doc.nodeAt(pos) === fix.node) repair.delete(pos, pos + fix.node.nodeSize)
+			}
+		}))
+	]
+
+	for (const fix of structural.sort((a, b) => b.pos - a.pos)) fix.apply()
 
 	// 4. Lost markers last, from the end so earlier positions stay valid.
 	for (const at of [...lost.keys()].sort((a, b) => b - a)) reinsert(repair, repair.mapping.map(at, -1), lost.get(at) ?? [])
 
+	// 5. Ranges whose markers moved past each other.
+	if ([...lost.values()].some(list => list.some(isRangeMarker)) || insertsRange(state.doc, inserted)) {
+		const moved: [number, number][] = []
+
+		for (let k = 0; k < inserted.length; k += 2) {
+			const from = repair.mapping.map(inserted[k] ?? 0, 1)
+			const to = repair.mapping.map(inserted[k + 1] ?? 0, -1)
+
+			if (to > from) moved.push([from, to])
+		}
+
+		orderRanges(repair, moved)
+	}
+
 	if (!repair.docChanged) return null
 
 	return markInternal(repair)
+}
+
+function insertsRange(doc: Node, inserted: readonly number[]): boolean {
+	let found = false
+
+	for (let k = 0; k < inserted.length && !found; k += 2) {
+		const from = inserted[k] ?? 0
+		const to = inserted[k + 1] ?? 0
+
+		if (to <= from) continue
+
+		doc.nodesBetween(from, to, node => {
+			if (found) return false
+			if (survivorsOf(node).some(isRangeMarker)) found = true
+			if (node.isBlock)
+				for (const name of ["before", "end"])
+					if (((node.attrs[name] as MarkerList | undefined) ?? NO_MARKERS).some(isRangeMarker)) found = true
+
+			return !found
+		})
+	}
+
+	return found
+}
+
+// Revision marks in inserted content that are copies: all but those of revisions the same edit deleted (a
+// move) and that are nowhere else in the document (next to it, as typing inherits them, or anywhere).
+function copiedRevisions(doc: Node, inserted: readonly number[], moved: ReadonlySet<number>): { from: number; to: number; mark: Mark }[] {
+	const found: { from: number; to: number; mark: Mark }[] = []
+	const size = doc.content.size
+	const spans: [number, number][] = []
+
+	for (let k = 0; k < inserted.length; k += 2) {
+		const from = Math.max(0, Math.min(size, inserted[k] ?? 0))
+		const to = Math.max(from, Math.min(size, inserted[k + 1] ?? 0))
+
+		if (to > from) spans.push([from, to])
+	}
+
+	const insideSpan = (pos: number): boolean => spans.some(([from, to]) => pos >= from && pos < to)
+	const adjacent = new Set<number>()
+
+	for (const [from, to] of spans) {
+		for (const node of [doc.resolve(from).nodeBefore, doc.resolve(to).nodeAfter]) {
+			for (const mark of node?.marks ?? []) if (revisionTypes.includes(mark.type)) adjacent.add(mark.attrs["src"] as number)
+		}
+
+		doc.nodesBetween(from, to, (node, pos) => {
+			if (!node.isInline) return true
+
+			for (const mark of node.marks) {
+				if (revisionTypes.includes(mark.type))
+					found.push({ from: Math.max(from, pos), to: Math.min(to, pos + node.nodeSize), mark })
+			}
+
+			return false
+		})
+	}
+
+	if (found.length === 0) return found
+
+	const pending = found.filter(entry => {
+		const own = entry.mark.attrs["src"] as number
+
+		return moved.has(own) && !adjacent.has(own)
+	})
+	let outside: Set<number> | undefined
+
+	if (pending.length > 0) {
+		outside = new Set()
+
+		const sources = outside
+
+		doc.descendants((node, pos) => {
+			if (!node.isInline) return true
+			if (insideSpan(pos)) return false
+
+			for (const mark of node.marks) if (revisionTypes.includes(mark.type)) sources.add(mark.attrs["src"] as number)
+
+			return false
+		})
+	}
+
+	return found.filter(entry => {
+		const own = entry.mark.attrs["src"] as number
+
+		return !moved.has(own) || adjacent.has(own) || outside?.has(own) === true
+	})
 }
 
 function carries(fragment: Fragment, test: (mark: Mark) => boolean): boolean {

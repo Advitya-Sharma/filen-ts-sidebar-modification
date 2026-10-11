@@ -6,6 +6,7 @@ import { gateReasons, type DocxGateReason, type DocxPackage } from "../package"
 import { PropsStore } from "../props/index"
 import { DocxStyles, PropertyResolver, parseStyles, styleSettings } from "../styles/index"
 import { parseTheme } from "../theme/index"
+import type { NewList } from "./formats"
 import { RunBases } from "./formatting"
 
 // What editing one document needs besides the model: the shared property store (so run bases intern
@@ -19,6 +20,10 @@ export interface DocxEditContext {
 	readonly bases: RunBases
 	// Gate 0: why the document opens view-only (empty when it may be edited).
 	readonly gate: readonly DocxGateReason[]
+	// Lists commands started, by their (negative) id, shared by every session of the document.
+	readonly newLists: Map<number, NewList>
+	// Built-in paragraph styles commands used that the document lacks: id -> built-in name.
+	readonly newStyles: Map<string, string>
 }
 
 function isDocumentError(error: unknown): boolean {
@@ -85,6 +90,8 @@ export async function openDocxEditContext(pkg: DocxPackage, model: DocxModel, re
 		numbering: resolver.numbering,
 		resolver,
 		bases: new RunBases(store),
-		gate
+		gate,
+		newLists: new Map(),
+		newStyles: new Map()
 	}
 }

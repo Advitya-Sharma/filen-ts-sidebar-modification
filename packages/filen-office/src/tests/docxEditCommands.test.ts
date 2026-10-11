@@ -341,6 +341,23 @@ describe("docx editor commands", () => {
 		})
 	})
 
+	it("undoes formatting commands to exactly what each run had", async () => {
+		const session = await sessionOf({
+			body:
+				"<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>aa</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>bb</w:t></w:r>" +
+				'<w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>cc</w:t></w:r><w:r><w:t>dd</w:t></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t>ee</w:t></w:r></w:p>',
+			...PARTS
+		})
+		const before = session.state.doc
+
+		for (const command of ["format.clear", "format.bold", "format.italic"] as const) {
+			selectAll(session)
+			expect(session.execute({ type: command })).toBe(true)
+			expect(session.execute({ type: "history.undo" })).toBe(true)
+			expect(session.state.doc.eq(before), command).toBe(true)
+		}
+	})
+
 	it("clears direct formatting but the language, like Ctrl+Space", async () => {
 		const session = await sessionOf({
 			body: '<w:p><w:r><w:rPr><w:b/><w:vanish/><w:position w:val="6"/><w:w w:val="200"/><w:lang w:val="de-DE"/></w:rPr><w:t>hidden</w:t></w:r></w:p>',

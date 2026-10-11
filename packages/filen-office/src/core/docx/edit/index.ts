@@ -37,6 +37,7 @@ export {
 	REVISION_MARKS,
 	docxSchema,
 	hasSource,
+	endsWithTable,
 	inlineLevel,
 	markerKey,
 	sourceOf,

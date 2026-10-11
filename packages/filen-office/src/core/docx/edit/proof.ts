@@ -1,6 +1,5 @@
 import type { Node } from "prosemirror-model"
 import type { EditorState, Transaction } from "prosemirror-state"
-import type { StoryPart } from "../model/index"
 import type { DocxDocBuilder, StoryDoc } from "./build"
 import { markInternal } from "./invariants"
 import { NO_SOURCE, docxSchema, type LockReason } from "./schema"
@@ -9,8 +8,8 @@ import { NO_SOURCE, docxSchema, type LockReason } from "./schema"
 // the writer and compares the result with the block's source at XML-meaning level; a block that fails is
 // locked (kept as its bytes, read-only) and the rest of the document stays editable.
 export interface BlockProof {
-	// Undefined when `node` (a source paragraph or table of `part`) round-trips; otherwise why it cannot.
-	check(node: Node, part: StoryPart): LockReason | undefined
+	// Undefined when `node` (a source paragraph or table of `story`) round-trips; otherwise why it cannot.
+	check(node: Node, story: StoryDoc): LockReason | undefined
 }
 
 export interface LockRequest {
@@ -55,7 +54,7 @@ export function proveBlocks(story: StoryDoc, doc: Node, proof: BlockProof, from:
 		if (node.type === nodes.paragraph || node.type === nodes.table) {
 			if (source === NO_SOURCE || (node.type === nodes.paragraph && !story.pristine.has(node))) return false
 
-			const reason = proof.check(node, story.part)
+			const reason = proof.check(node, story)
 
 			if (reason !== undefined) {
 				out.push({ pos, reason })

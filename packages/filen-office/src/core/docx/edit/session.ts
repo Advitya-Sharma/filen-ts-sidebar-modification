@@ -22,7 +22,9 @@ import { FORMATTING_MARKS, docxSchema, inlineLevel, type IndentAttrs, type LockR
 
 export type FormatState = "on" | "off" | "mixed"
 
-export type DocxReadOnlyReason = DocxGateReason | "host"
+// "textbox": text box stories are view-only until editing them also updates the VML fallback Word keeps
+// of each text box (mc:Fallback), which would otherwise show the old text.
+export type DocxReadOnlyReason = DocxGateReason | "host" | "textbox"
 
 // Everything a toolbar needs, as plain data (it crosses a worker or WebView bridge as is).
 export interface DocxEditorSnapshot {
@@ -146,12 +148,10 @@ export class DocxEditorSession {
 	private readonly formats: FormatResolver
 	private readonly hostReadOnly: boolean
 	private readonly listeners = new Set<(snapshot: DocxEditorSnapshot) => void>()
-	private readonly newStyles = new Map<string, string>()
 	private current: EditorState
 	private saved: Node
 	private version = 0
 	private cached: DocxEditorSnapshot | null = null
-	private nextListId = -1
 	private disposed = false
 	private notifying = false
 	private facts = new WeakMap<object, ParagraphFacts>()
@@ -192,7 +192,7 @@ export class DocxEditorSession {
 	}
 
 	get readOnly(): boolean {
-		return this.hostReadOnly || this.context.gate.length > 0
+		return this.hostReadOnly || this.context.gate.length > 0 || this.story.story.kind === "textbox"
 	}
 
 	// Ids of paragraph styles the document lacks that paragraphs use, with their built-in names: the writer
@@ -200,7 +200,7 @@ export class DocxEditorSession {
 	get missingStyles(): ReadonlyMap<string, string> {
 		const used = this.usedParagraphValues("styleId")
 
-		return new Map([...this.newStyles].filter(([id]) => used.has(id)))
+		return new Map([...this.context.newStyles].filter(([id]) => used.has(id)))
 	}
 
 	// Lists commands started (negative numIds) that paragraphs use: the writer adds a w:num for each.
@@ -453,29 +453,39 @@ export class DocxEditorSession {
 		const desired = !resolved.every(value => value.on)
 		const mark = this.toggleMark(toggle, desired)
 		const tr = state.tr
-		let group: { from: number; to: number; direct: boolean; existing: Mark[] } | null = null
+		let group: { from: number; to: number; add: boolean; removed: Mark | undefined } | null = null
 		const flush = (): void => {
 			if (group === null) return
 
-			if (group.direct) tr.step(new AddMarkStep(group.from, group.to, mark))
-			else for (const existing of group.existing) tr.step(new RemoveMarkStep(group.from, group.to, existing))
+			if (group.removed !== undefined) tr.step(new RemoveMarkStep(group.from, group.to, group.removed))
+			if (group.add) tr.step(new AddMarkStep(group.from, group.to, mark))
+
+			group = null
 		}
 
 		// Direct formatting only where the styles do not already give the result. One step covers a run of
-		// pieces across paragraphs (a step per piece would copy the document's block list each time); a
-		// marker or field in between ends the run, as does a piece needing the other change.
+		// pieces across paragraphs (a step per piece would copy the document's block list each time) that
+		// change alike: undo applies each step's inverse to its whole range, so a range holds only pieces
+		// that had the same mark of this type (or none) and get the same change. A marker or field in
+		// between ends the run.
 		pieces.forEach((piece, index) => {
 			const direct = desired !== (resolved[index]?.style ?? false)
 			const existing = type.isInSet(piece.node.marks)
+			const add = direct && existing?.eq(mark) !== true
+			const removed = existing !== undefined && (add || !direct) ? existing : undefined
 
-			if (group !== null && !piece.barrier && group.direct === direct) {
+			if (!add && removed === undefined) {
+				flush()
+
+				return
+			}
+
+			if (group !== null && !piece.barrier && group.add === add && sameMark(group.removed, removed)) {
 				group.to = piece.to
 			} else {
 				flush()
-				group = { from: piece.from, to: piece.to, direct, existing: [] }
+				group = { from: piece.from, to: piece.to, add, removed }
 			}
-
-			if (existing !== undefined && !group.existing.some(known => known.eq(existing))) group.existing.push(existing)
 		})
 		flush()
 
@@ -501,8 +511,8 @@ export class DocxEditorSession {
 
 		if (pieces.length === 0) return null
 
-		// One step per distinct mark over the whole selection (only run content carries them), and one per
-		// stretch of run content for the plain mark.
+		// Each step covers a run of pieces across paragraphs that all had the mark it removes (or all lack
+		// the plain mark it adds): undo applies each step's inverse to its whole range.
 		const found: Mark[] = []
 
 		for (const piece of pieces) {
@@ -512,28 +522,37 @@ export class DocxEditorSession {
 		}
 
 		const tr = state.tr
+		const steps = (has: (piece: RunPiece) => boolean, step: (from: number, to: number) => void): void => {
+			let start = -1
+			let end = -1
 
-		for (const range of state.selection.ranges) {
-			for (const mark of found) tr.step(new RemoveMarkStep(range.$from.pos, range.$to.pos, mark))
-		}
+			for (const piece of pieces) {
+				if (start >= 0 && !piece.barrier && has(piece)) {
+					end = piece.to
 
-		let start = -1
-		let end = -1
+					continue
+				}
 
-		for (const piece of pieces) {
-			if (start >= 0 && !piece.barrier) {
+				if (start >= 0) step(start, end)
+
+				start = has(piece) ? piece.from : -1
 				end = piece.to
-
-				continue
 			}
 
-			if (start >= 0) tr.step(new AddMarkStep(start, end, plain))
-
-			start = piece.from
-			end = piece.to
+			if (start >= 0) step(start, end)
 		}
 
-		if (start >= 0) tr.step(new AddMarkStep(start, end, plain))
+		for (const mark of found) {
+			steps(
+				piece => mark.isInSet(piece.node.marks),
+				(from, to) => tr.step(new RemoveMarkStep(from, to, mark))
+			)
+		}
+
+		steps(
+			piece => !plain.isInSet(piece.node.marks),
+			(from, to) => tr.step(new AddMarkStep(from, to, plain))
+		)
 
 		return tr.docChanged ? tr : null
 	}
@@ -559,15 +578,15 @@ export class DocxEditorSession {
 
 		if (existing !== undefined) return existing.id
 
-		for (const [id, missing] of this.newStyles) if (missing === name) return id
+		for (const [id, missing] of this.context.newStyles) if (missing === name) return id
 
 		// Word's own id for the built-in style, made unique against the document's.
 		const base = name.replace(/(^|\s)(\S)/g, (_match, _space: string, letter: string) => letter.toUpperCase())
 		let id = base
 
-		for (let n = 1; styles.byId(id) !== undefined || this.newStyles.has(id); n++) id = `${base}${n}`
+		for (let n = 1; styles.byId(id) !== undefined || this.context.newStyles.has(id); n++) id = `${base}${n}`
 
-		this.newStyles.set(id, name)
+		this.context.newStyles.set(id, name)
 		this.facts = new WeakMap()
 		this.blockTallies = new WeakMap()
 
@@ -659,7 +678,8 @@ export class DocxEditorSession {
 	}
 
 	private newList(kind: ListKind, basedOn: number | null): number {
-		const id = this.nextListId--
+		// One numbering for every session of the document: lists of different stories never share an id.
+		const id = -(this.formats.newLists.size + 1)
 
 		this.formats.newLists.set(id, { kind, basedOn })
 		this.facts = new WeakMap()
@@ -949,7 +969,11 @@ export class DocxEditorSession {
 		return {
 			version: this.version,
 			readOnly,
-			readOnlyReasons: [...this.context.gate, ...(this.hostReadOnly ? (["host"] as const) : [])],
+			readOnlyReasons: [
+				...this.context.gate,
+				...(this.hostReadOnly ? (["host"] as const) : []),
+				...(this.story.story.kind === "textbox" ? (["textbox"] as const) : [])
+			],
 			dirty: this.dirty(state.doc),
 			canUndo: undoable,
 			canRedo: redoable,
@@ -978,7 +1002,7 @@ export class DocxEditorSession {
 		id: string | undefined
 	): { style: DocxParagraphStyle | "custom"; name: string | null } {
 		const styleId = node.attrs["styleId"] as string | null
-		const missing = styleId === null ? undefined : this.newStyles.get(styleId)
+		const missing = styleId === null ? undefined : this.context.newStyles.get(styleId)
 		const name = missing ?? (id === this.context.styles.defaultOf("paragraph")?.id ? "normal" : canonical)
 
 		for (const [style, builtIn] of Object.entries(PARAGRAPH_STYLE_NAMES))
@@ -986,4 +1010,8 @@ export class DocxEditorSession {
 
 		return { style: "custom", name: (id === undefined ? undefined : this.context.styles.byId(id)?.name) ?? null }
 	}
+}
+
+function sameMark(a: Mark | undefined, b: Mark | undefined): boolean {
+	return a === undefined ? b === undefined : b !== undefined && a.eq(b)
 }

@@ -1,8 +1,8 @@
 name: Office corpus
 
-# The office engines against the real-world corpus (packages/filen-office/corpus/manifest.json) and the full
-# Unicode conformance files. Neither is committed: both are downloaded, verified against their pinned SHA-256
-# and cached, so a warm run fetches nothing. Kept apart from tests.yml so the unit jobs stay fast.
+# The office engines against the real-world corpus (packages/filen-office/corpus/manifest.json), the full
+# Unicode conformance files and the ECMA-376 schemas. None is committed: each is downloaded, verified against
+# its pinned SHA-256 and cached, so a warm run fetches nothing. Kept apart from tests.yml so the unit jobs stay fast.
 
 on:
   workflow_dispatch:
@@ -78,6 +78,17 @@ jobs:
       - name: Fetch the Unicode data
         working-directory: packages/filen-office
         run: pnpm exec tsx src/scripts/unicodeTables.ts && git diff --exit-code -- src
+      # xmllint and the pinned ECMA-376 schemas, for the schema validation of written WordprocessingML.
+      - name: Install xmllint
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils
+      - name: Cache the WordprocessingML schemas
+        uses: actions/cache@v4
+        with:
+          path: packages/filen-office/node_modules/.cache/filen-office-wml
+          key: office-wml-${{ hashFiles('packages/filen-office/src/scripts/wmlOrder.ts') }}
+      - name: Fetch the WordprocessingML schemas
+        working-directory: packages/filen-office
+        run: pnpm run generate:wml-order --fetch
       - name: Test
         working-directory: packages/filen-office
         env:

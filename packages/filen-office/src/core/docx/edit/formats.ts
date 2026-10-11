@@ -35,11 +35,12 @@ export class FormatResolver {
 	private readonly overrides = new WeakMap<ParagraphProps, Map<string, ParagraphProps>>()
 	private readonly toggleCache = new WeakMap<readonly Mark[], { paragraph: ParagraphFormat; bits: number }>()
 	// Lists created in this session (negative numIds) and their kind.
-	readonly newLists = new Map<number, NewList>()
+	readonly newLists: Map<number, NewList>
 
 	constructor(context: DocxEditContext, part: StoryPart) {
 		this.context = context
 		this.part = part
+		this.newLists = context.newLists
 	}
 
 	private sourceProps(node: Node): ParagraphProps {

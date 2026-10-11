@@ -83,6 +83,9 @@ const WRAPPER_KINDS: Partial<Record<number, string>> = {
 const BREAK_TYPES = ["textWrapping", "page", "column"] as const
 const BREAK_CLEARS = ["none", "left", "right", "all"] as const
 
+const EDGE_WHITESPACE = /^[ \t\r\n]|[ \t\r\n]$/
+const TRIM = /^[ \t\r\n]+|[ \t\r\n]+$/g
+
 // Longest preview text kept on a locked block.
 const PREVIEW_LIMIT = 2000
 
@@ -997,7 +1000,7 @@ export class DocxDocBuilder {
 			switch (kind) {
 				case Item.Text:
 				case Item.DeletedText:
-					sink.addText(part.text(child), marks)
+					sink.addText(this.runText(child), marks)
 
 					break
 				case Item.LastRenderedPageBreak:
@@ -1086,6 +1089,30 @@ export class DocxDocBuilder {
 				}
 			}
 		}
+	}
+
+	// Text as Word reads it: without xml:space="preserve" (on the element or inherited), whitespace at the
+	// edges is dropped (ECMA-376 §17.3.3.31 by way of XML 1.0 §2.10; XML whitespace only).
+	private runText(item: number): string {
+		const part = this.part
+		const text = part.text(item)
+
+		if (!EDGE_WHITESPACE.test(text) || part.preservesSpace(item) || this.inheritsPreserve(part.node(item))) return text
+
+		return text.replace(TRIM, "")
+	}
+
+	private inheritsPreserve(node: number): boolean {
+		const document = this.part.document
+		const reader = this.part.reader
+
+		for (let at = document.parent(node); at > 0; at = document.parent(at)) {
+			const space = reader.attr(at, Ns.Xml, "space")
+
+			if (space !== undefined) return space === "preserve"
+		}
+
+		return false
 	}
 
 	private drawing(item: number, marks: readonly Mark[]): Node {
