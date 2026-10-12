@@ -7,12 +7,14 @@ import {
 	type DocxEditorOptions
 } from "../../core/docx/edit/index"
 import { DocumentEdits, PagedEditor, type PagedEditorOptions } from "../../core/docx/paged/index"
-import type { DocxSaveInput } from "../../core/docx/write/index"
+import type { DocxPrepareOptions, DocxPreparedSave, DocxSaveInput, DocxSaveTimings } from "../../core/docx/write/save"
+import type { Slicing } from "../../core/slicing"
 import { HitTester } from "../../core/text/index"
 import type { XmlDocument } from "../../core/xml/index"
 import { DocxEngine, type DocxEngineOpen, type DocxEngineServices } from "./engine"
 import type { DocxHost } from "./host"
 import type { DocxOpenOptions } from "./protocol"
+import { DocxClosedError, inThreadDocxZipper, type DocxZipper, type DocxZipperFactory } from "./save"
 
 // Editing runs on the thread that shows the pages (web main thread, mobile WebView), with the model, the
 // layout and the editing session in one realm: no model copy, no mirroring protocol, one code path for
@@ -26,8 +28,23 @@ export interface DocxEditingHost {
 	readonly editor: Promise<PagedEditor>
 	// What saveDocx / planDocxSave write (every story's session) once the editor is open, else undefined.
 	saveInput(): DocxSaveInput | undefined
+	// Writes the document as `sessions` hold it (default every story's session; stand-ins from withReverted to
+	// write some blocks as last saved): the lossless writer and the part half of gate 2 in slices on this
+	// thread, then the zip and its half of gate 2 in the zipper (DocxEditingOptions.writer). The editor must
+	// not change the documents meanwhile (they are read once, as the save starts). Rejects with a
+	// DocxSaveError when the writer refuses, with a DocxClosedError when the document closed first.
+	save(sessions?: readonly DocxEditorSession[]): Promise<DocxWritten>
+	// The writer and the part half of gate 2 alone, in slices (nothing zipped or stored): whether, and what,
+	// a save of `sessions` would write.
+	prepare(sessions?: readonly DocxEditorSession[]): Promise<DocxPreparedSave>
 	// Body blocks the proof locked as the document opened (0 before then, or without a proof).
 	proofLocked(): number
+}
+
+export interface DocxWritten {
+	readonly bytes: Uint8Array
+	readonly changedParts: readonly string[]
+	readonly timings: DocxSaveTimings
 }
 
 export interface DocxEditingOptions {
@@ -36,12 +53,14 @@ export interface DocxEditingOptions {
 	// Gate 1 for the document, made from its editing context (writerProof, injected: the writer is not part
 	// of this entry). The body is proved in slices before the editor opens; other stories when entered.
 	readonly proof?: (context: DocxEditContext) => BlockProof
+	// The writer for save() and prepare() (prepareDocxSave, injected like the proof), and where saves zip the
+	// file (default: on this thread; web passes a worker's, docxZipWorker). Without it the host cannot save.
+	readonly writer?: DocxEditingWriter
 }
 
-interface Slicing {
-	readonly pause: () => Promise<void>
-	readonly sliceMs: number
-	readonly now: () => number
+export interface DocxEditingWriter {
+	readonly prepare: (input: DocxSaveInput, options: DocxPrepareOptions) => Promise<DocxPreparedSave>
+	readonly zipper?: DocxZipperFactory
 }
 
 // Top-level blocks proved per step between checks of the clock.
@@ -110,6 +129,38 @@ export function inThreadEditingHost(
 	let opened = false
 	let saveInput: DocxSaveInput | undefined
 	let proofLocked = 0
+	// Set once the editor is open: how saves slice their work here, and the zipper.
+	let writing: { readonly slicing: Slicing; readonly zipper: DocxZipper } | undefined
+	// `checksums`: a trial (nothing zipped) skips the parts' CRCs.
+	const prepare = (sessions: readonly DocxEditorSession[] | undefined, checksums: boolean): Promise<DocxPreparedSave> => {
+		const input = saveInput
+
+		if (editing.writer === undefined) return Promise.reject(new Error("This editing host has no writer"))
+		if (input === undefined || writing === undefined) return Promise.reject(new DocxClosedError())
+
+		return editing.writer.prepare(
+			{ pkg: input.pkg, context: input.context, sessions: sessions ?? input.sessions },
+			{ slicing: writing.slicing, checksums }
+		)
+	}
+	const save = async (sessions?: readonly DocxEditorSession[]): Promise<DocxWritten> => {
+		const prepared = await prepare(sessions, true)
+
+		if (writing === undefined) throw new DocxClosedError()
+
+		const zipped = await writing.zipper.zip(prepared)
+
+		return {
+			bytes: zipped.bytes,
+			changedParts: zipped.changedParts,
+			timings: {
+				serializeMs: prepared.serializeMs,
+				verifyPartsMs: prepared.verifyPartsMs,
+				zipMs: zipped.zipMs,
+				verifyZipMs: zipped.verifyZipMs
+			}
+		}
+	}
 
 	const host: DocxHost = (source, listener, options = {}) => {
 		if (opened) throw new Error("An editing host opens one document")
@@ -184,6 +235,19 @@ export function inThreadEditingHost(
 			})
 
 			paged = editor
+			writing = {
+				// A save under way when the document closes stops at its next turn.
+				slicing: {
+					sliceMs: slicing.sliceMs,
+					now: slicing.now,
+					pause: async () => {
+						await slicing.pause()
+
+						if (closed) throw new DocxClosedError()
+					}
+				},
+				zipper: (editing.writer?.zipper ?? inThreadDocxZipper)(open.pkg.opc)
+			}
 			saveInput = {
 				pkg: open.pkg,
 				context,
@@ -209,6 +273,8 @@ export function inThreadEditingHost(
 			close() {
 				closed = true
 				saveInput = undefined
+				writing?.zipper.dispose()
+				writing = undefined
 				paged?.dispose()
 				paged?.session.dispose()
 				engine.close()
@@ -217,5 +283,12 @@ export function inThreadEditingHost(
 		}
 	}
 
-	return { host, editor, saveInput: () => saveInput, proofLocked: () => proofLocked }
+	return {
+		host,
+		editor,
+		saveInput: () => saveInput,
+		save,
+		prepare: sessions => prepare(sessions, false),
+		proofLocked: () => proofLocked
+	}
 }

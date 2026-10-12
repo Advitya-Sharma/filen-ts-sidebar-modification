@@ -4,8 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { bytesSource } from "@filen/office/core/opc"
 import { buildDocxModel, openDocxPackage } from "@filen/office/core/docx"
 import { DocxEditorSession, openDocxEditContext } from "@filen/office/core/docx/edit"
-import type { DocxSaveInput } from "@filen/office/core/docx/write"
+import type { DocxPrepareOptions, DocxSaveInput } from "@filen/office/core/docx/write"
 import type { DocxEditingHost } from "@filen/office/dom/docx/editing"
+import { inThreadDocxZipper } from "@filen/office/dom/docx/save"
 
 // Saving with the writer refusing some edited blocks: they are locked back to the file's own and the rest is
 // written (decision 5 at save time); a refusal no lock resolves leaves the document as it was.
@@ -38,17 +39,15 @@ vi.mock("@filen/office/core/docx/write", async () => {
 
 	return {
 		...actual,
-		planDocxSave: (input: DocxSaveInput) =>
-			refused(input) ? Promise.reject(new actual.DocxSaveError("content", "refused")) : actual.planDocxSave(input),
-		saveDocx: (input: DocxSaveInput) =>
-			refused(input) ? Promise.reject(new actual.DocxSaveError("content", "refused")) : actual.saveDocx(input)
+		prepareDocxSave: (input: DocxSaveInput, options?: DocxPrepareOptions) =>
+			refused(input) ? Promise.reject(new actual.DocxSaveError("content", "refused")) : actual.prepareDocxSave(input, options)
 	}
 })
 vi.mock("@/features/preview/lib/docxEngine", () => ({ DOCX_FONT_URLS: {} }))
 vi.mock("@/lib/log", () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }))
 
 const { writeDocx } = await import("@/features/preview/lib/docxEditing")
-const { DocxSaveError } = await import("@filen/office/core/docx/write")
+const { DocxSaveError, prepareDocxSave } = await import("@filen/office/core/docx/write")
 
 // Tests run from the package's directory.
 const BYTES = new Uint8Array(readFileSync(join(process.cwd(), "../filen-office/src/tests/fixtures/01-plain.docx")))
@@ -60,7 +59,20 @@ async function openSession(bytes: Uint8Array): Promise<{ session: DocxEditorSess
 
 	const context = await openDocxEditContext(opened.package, await buildDocxModel(opened.package))
 	const session = new DocxEditorSession(context)
-	const host = { saveInput: () => ({ pkg: opened.package, context, sessions: [session] }) } as unknown as DocxEditingHost
+	const pkg = opened.package
+	const zipper = inThreadDocxZipper(pkg.opc)
+	// The editing host's save path (DocxEditingHost.save / prepare) on this document, without the editor.
+	const prepare = (sessions: readonly DocxEditorSession[] = [session]) => prepareDocxSave({ pkg, context, sessions }, {})
+	const host = {
+		saveInput: () => ({ pkg, context, sessions: [session] }),
+		prepare,
+		save: async (sessions?: readonly DocxEditorSession[]) => {
+			const prepared = await prepare(sessions)
+			const zipped = await zipper.zip(prepared)
+
+			return { bytes: zipped.bytes, changedParts: zipped.changedParts, timings: { ...prepared, ...zipped } }
+		}
+	} as unknown as DocxEditingHost
 
 	return { session, host }
 }

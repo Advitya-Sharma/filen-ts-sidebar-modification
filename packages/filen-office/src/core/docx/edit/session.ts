@@ -218,6 +218,8 @@ export class DocxEditorSession {
 	// Ids of paragraph styles the document lacks that paragraphs use, with their built-in names: the writer
 	// adds their definitions. Styles a command added that nothing uses any more are left out.
 	get missingStyles(): ReadonlyMap<string, string> {
+		if (this.context.newStyles.size === 0) return new Map()
+
 		const used = this.usedParagraphValues("styleId")
 
 		return new Map([...this.context.newStyles].filter(([id]) => used.has(id)))
@@ -225,6 +227,8 @@ export class DocxEditorSession {
 
 	// Lists commands started (negative numIds) that paragraphs use: the writer adds a w:num for each.
 	get newLists(): ReadonlyMap<number, NewList> {
+		if (this.formats.newLists.size === 0) return new Map()
+
 		const used = this.usedParagraphValues("numId")
 
 		return new Map([...this.formats.newLists].filter(([id]) => used.has(id)))

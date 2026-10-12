@@ -29,6 +29,7 @@
 		"./core/docx/paged": "./src/core/docx/paged/index.ts",
 		"./core/docx/spelling": "./src/core/docx/spelling/index.ts",
 		"./dom/docx/editing": "./src/dom/docx/editing.ts",
+		"./dom/docx/save": "./src/dom/docx/save.ts",
 		"./react/docx/editor": "./src/react/docx/editor.ts"
 	},
 	"scripts": {

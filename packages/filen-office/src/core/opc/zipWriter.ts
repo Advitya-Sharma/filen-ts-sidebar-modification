@@ -1,8 +1,9 @@
-import { deflateSync } from "fflate"
+import { Deflate, deflateSync } from "fflate"
 import { encodeUtf8 } from "../xml/utf8"
 import { crc32 } from "./crc32"
 import { ZipError } from "./errors"
 import type { ByteSink, ByteSource } from "./io"
+import type { PartBytes } from "./pieces"
 import {
 	CENTRAL_SIGNATURE,
 	EOCD_SIGNATURE,
@@ -29,9 +30,11 @@ export type ZipPlanItem =
 	| {
 			readonly kind: "data"
 			readonly name: string
-			readonly bytes: Uint8Array
+			readonly bytes: PartBytes
 			readonly compress: boolean
 			readonly template?: ZipEntry
+			// The CRC-32 the content must have (see PartChange.crc32).
+			readonly crc32?: number
 	  }
 
 export interface ZipPlan {
@@ -46,6 +49,9 @@ export interface WriteZipOptions {
 	// Raw deflate for new content in place of fflate's, e.g. a native CompressionStream("deflate-raw")
 	// where the host has one: several times faster on large parts. `level` does not apply to it.
 	readonly deflate?: (data: Uint8Array) => Promise<Uint8Array>
+	// The same for content given as pieces (ByteChunks), streamed through without joining it. Without it,
+	// fflate's streaming deflate.
+	readonly deflateChunks?: (chunks: AsyncIterable<Uint8Array>) => Promise<Uint8Array>
 	// ZIP64 fields and end records on everything, as some writers always emit.
 	readonly forceZip64?: boolean
 	readonly copyChunkSize?: number
@@ -54,6 +60,12 @@ export interface WriteZipOptions {
 export interface WriteZipReport {
 	readonly size: number
 	readonly entries: number
+	// Entry name -> CRC-32 of each new entry's content as it was fed to the writer.
+	readonly crcs: ReadonlyMap<string, number>
+	// Entry name -> CRC-32 and length of each copied entry's raw bytes (local header to the end of its data,
+	// descriptor included) as the source checksummed them (ByteSource.readChecked; none without it): the copy
+	// can be checked against them without reading the original again.
+	readonly copies: ReadonlyMap<string, { readonly crc: number; readonly length: number }>
 }
 
 const MAX_32 = 0xffffffff
@@ -264,6 +276,104 @@ function isAscii(bytes: Uint8Array): boolean {
 	return true
 }
 
+interface EntryContent {
+	// The CRC the archive records.
+	readonly crc: number
+	// Bytes stored in the archive (compressed or not).
+	readonly size: number
+	data(): AsyncIterable<Uint8Array>
+	// The CRC of what was fed, once data() was read through.
+	fed(): number
+}
+
+async function* once(bytes: Uint8Array): AsyncIterable<Uint8Array> {
+	yield bytes
+}
+
+// fflate's streaming deflate over pieces.
+async function deflateStream(chunks: AsyncIterable<Uint8Array>, level: WriteZipOptions["level"]): Promise<Uint8Array> {
+	const parts: Uint8Array[] = []
+	const deflate = new Deflate({ level: level ?? 6 }, chunk => {
+		parts.push(chunk)
+	})
+
+	for await (const chunk of chunks) deflate.push(chunk)
+
+	deflate.push(new Uint8Array(0), true)
+
+	return parts.length === 1 && parts[0] !== undefined ? parts[0] : joinChunks(parts)
+}
+
+function joinChunks(parts: readonly Uint8Array[]): Uint8Array {
+	let size = 0
+
+	for (const part of parts) size += part.length
+
+	const out = new Uint8Array(size)
+	let at = 0
+
+	for (const part of parts) {
+		out.set(part, at)
+		at += part.length
+	}
+
+	return out
+}
+
+// A new entry's content as the archive stores it, with the CRC of what it holds. Pieces are streamed: read
+// once to checksum and deflate (twice when stored: the CRC goes before the data).
+async function dataOf(item: Extract<ZipPlanItem, { kind: "data" }>, options: WriteZipOptions): Promise<EntryContent> {
+	const bytes = item.bytes
+
+	if (bytes instanceof Uint8Array) {
+		const data = !item.compress
+			? bytes
+			: options.deflate !== undefined
+				? await options.deflate(bytes)
+				: deflateSync(bytes, { level: options.level ?? 6 })
+
+		const crc = crc32(bytes)
+
+		return { crc, size: data.length, data: () => once(data), fed: () => crc }
+	}
+
+	let crc = 0
+
+	if (!item.compress) {
+		const known = item.crc32
+
+		// The CRC goes before the data: with the CRC the content must have, the pieces are read once (what
+		// they turn out to hold is checked against it after); without it, twice.
+		if (known !== undefined) {
+			const data = async function* (): AsyncIterable<Uint8Array> {
+				for await (const chunk of bytes.chunks()) {
+					crc = crc32(chunk, crc)
+
+					yield chunk
+				}
+			}
+
+			return { crc: known, size: bytes.length, data, fed: () => crc }
+		}
+
+		for await (const chunk of bytes.chunks()) crc = crc32(chunk, crc)
+
+		return { crc, size: bytes.length, data: () => bytes.chunks(), fed: () => crc }
+	}
+
+	const checked = async function* (): AsyncIterable<Uint8Array> {
+		for await (const chunk of bytes.chunks()) {
+			crc = crc32(chunk, crc)
+
+			yield chunk
+		}
+	}
+	const data =
+		options.deflateChunks !== undefined ? await options.deflateChunks(checked()) : await deflateStream(checked(), options.level)
+
+	return { crc, size: data.length, data: () => once(data), fed: () => crc }
+}
+
 // Executes a zip plan: copied entries stream from the original unchanged (in copyChunkSize reads), new
 // content is deflated here, and a fresh central directory follows. Only DataView, the CRC table and fflate's
 // deflate are used, so the same code runs in a worker, a WebView or Hermes next to the file on disk. Given
@@ -282,6 +392,8 @@ export async function writeZip(
 	const out = new BatchingSink(sink)
 	const records: CentralRecord[] = []
 	const names = new Set<string>()
+	const crcs = new Map<string, number>()
+	const copies = new Map<string, { crc: number; length: number }>()
 
 	for (const item of plan.items) {
 		const name = item.kind === "copy" ? item.entry.name : item.name
@@ -299,10 +411,24 @@ export async function writeZip(
 			const layout = archive !== null ? await archive.layout(entry) : await readEntryLayout(source, entry)
 			const end = layout.dataOffset + entry.compressedSize + layout.descriptorLength
 
+			// With a source that checksums where its bytes live, the CRC of what it sent: the copy is checked
+			// against it in the written file (what arrived damaged is caught there).
+			let raw = 0
+
 			for (let offset = entry.localHeaderOffset; offset < end; offset += copyChunkSize) {
-				await out.write(await source.read(offset, Math.min(copyChunkSize, end - offset)))
+				const length = Math.min(copyChunkSize, end - offset)
+
+				if (source.readChecked !== undefined) {
+					const read = await source.readChecked(offset, length, raw)
+
+					raw = read.crc
+					await out.write(read.bytes)
+				} else {
+					await out.write(await source.read(offset, length))
+				}
 			}
 
+			if (source.readChecked !== undefined) copies.set(entry.name, { crc: raw, length: end - entry.localHeaderOffset })
 			records.push({ ...entry, localHeaderOffset, order: entry.index })
 
 			continue
@@ -312,11 +438,7 @@ export async function writeZip(
 		// A replaced entry keeps its stored name bytes and their UTF-8 flag, whatever code page they are in.
 		const sameName = template !== undefined && template.name === item.name
 		const nameBytes = sameName ? template.nameBytes : encodeUtf8(item.name)
-		const data = !item.compress
-			? item.bytes
-			: options.deflate !== undefined
-				? await options.deflate(item.bytes)
-				: deflateSync(item.bytes, { level: options.level ?? 6 })
+		const content = await dataOf(item, options)
 		// Keep the template's deflate-option and UTF-8 bits; sizes are known up front, so no descriptor.
 		let flags = (template?.flags ?? 0) & (item.compress ? 0x0806 : 0x0800)
 
@@ -329,8 +451,8 @@ export async function writeZip(
 			method: item.compress ? METHOD_DEFLATE : METHOD_STORED,
 			modTime: template?.modTime ?? 0,
 			modDate: template?.modDate ?? DOS_EPOCH_DATE,
-			crc32: crc32(item.bytes),
-			compressedSize: data.length,
+			crc32: content.crc,
+			compressedSize: content.size,
 			uncompressedSize: item.bytes.length,
 			localHeaderOffset,
 			internalAttributes: template?.internalAttributes ?? 0,
@@ -343,7 +465,10 @@ export async function writeZip(
 		}
 
 		await out.write(localBytes(record, forceZip64))
-		await out.write(data)
+
+		for await (const chunk of content.data()) await out.write(chunk)
+
+		crcs.set(item.name, content.fed())
 		records.push(record)
 	}
 
@@ -366,14 +491,17 @@ export async function writeZip(
 	await out.flush()
 	await sink.close()
 
-	return { size: out.written, entries: records.length }
+	return { size: out.written, entries: records.length, crcs, copies }
 }
 
 export interface PartChange {
 	readonly name: string
-	readonly bytes: Uint8Array
+	readonly bytes: PartBytes
 	// Compress a new entry (default true). A replaced entry keeps its original method.
 	readonly compress?: boolean
+	// The CRC-32 `bytes` must have, when the caller checked them already: a stored entry given as pieces then
+	// reads them once (the writer reports what they turned out to hold, WriteZipReport.crcs).
+	readonly crc32?: number
 }
 
 export interface ZipChanges {
@@ -412,7 +540,14 @@ export function planZip(archive: PlannedArchive, changes: ZipChanges = {}): ZipP
 
 		replace.delete(entry.name)
 		// Stored stays stored: ODF requires its "mimetype" entry uncompressed.
-		items.push({ kind: "data", name: entry.name, bytes: change.bytes, compress: entry.method !== METHOD_STORED, template: entry })
+		items.push({
+			kind: "data",
+			name: entry.name,
+			bytes: change.bytes,
+			compress: entry.method !== METHOD_STORED,
+			template: entry,
+			...(change.crc32 === undefined ? {} : { crc32: change.crc32 })
+		})
 	}
 
 	const missing = replace.keys().next()
@@ -420,7 +555,13 @@ export function planZip(archive: PlannedArchive, changes: ZipChanges = {}): ZipP
 	if (!missing.done) throw new ZipError("corrupt", `No entry ${missing.value} to replace`)
 
 	for (const change of changes.add ?? []) {
-		items.push({ kind: "data", name: change.name, bytes: change.bytes, compress: change.compress ?? true })
+		items.push({
+			kind: "data",
+			name: change.name,
+			bytes: change.bytes,
+			compress: change.compress ?? true,
+			...(change.crc32 === undefined ? {} : { crc32: change.crc32 })
+		})
 	}
 
 	return { items, comment: archive.comment, zip64End: archive.zip64 }

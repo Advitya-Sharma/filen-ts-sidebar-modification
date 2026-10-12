@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { DocxEditorSession } from "@filen/office/core/docx/edit"
-import { saveDocx, writerProof } from "@filen/office/core/docx/write"
+import { prepareDocxSave, saveDocx, writerProof, zipDocxSave } from "@filen/office/core/docx/write"
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 import { runEditScript } from "./docxWriteFixtures"
@@ -37,7 +37,109 @@ async function measure(path: string): Promise<string> {
 	)
 }
 
+// Stretches are measured in this thread's CPU time where the runtime can tell it (reported, not asserted:
+// GC and JIT make any time on a shared machine noisy); the assertions are structural.
+function busy(): number {
+	const usage: unknown = Reflect.get(process, "threadCpuUsage")
+
+	if (typeof usage !== "function") return performance.now()
+
+	const { user, system } = Reflect.apply(usage, process, []) as { user: number; system: number }
+
+	return (user + system) / 1000
+}
+
+// A save in slices, as the page runs it: the writer and the part checks give the host a turn every 12 ms;
+// the longest stretch between two turns is what a user could feel.
+async function sliced(path: string): Promise<{ report: string }> {
+	const opened = await openBytes(new Uint8Array(readFileSync(path)))
+	const script = runEditScript(opened)
+	const input = { pkg: opened.pkg, context: opened.context, sessions: [script.session] }
+	const stretches: number[] = []
+	let last = busy()
+	const slicing = {
+		sliceMs: 12,
+		now: () => performance.now(),
+		pause: () => {
+			stretches.push(busy() - last)
+
+			return new Promise<void>(resolve =>
+				setImmediate(() => {
+					last = busy()
+					resolve()
+				})
+			)
+		}
+	}
+	const rounds: string[] = []
+
+	// The first save also reads what later saves reuse (the source's facts and first blocks).
+	for (const round of ["first", "next"]) {
+		stretches.length = 0
+		last = busy()
+
+		const prepared = await prepareDocxSave(input, { slicing })
+
+		stretches.push(busy() - last)
+
+		const zipped = await zipDocxSave(opened.pkg.opc, prepared)
+		const max = Math.max(...stretches)
+
+		rounds.push(
+			`${round}: serialise ${prepared.serializeMs} ms + gate 2 parts ${prepared.verifyPartsMs} ms in ${stretches.length} slices ` +
+				`(longest ${max.toFixed(0)} ms), zip + gate 2 zip ${zipped.zipMs + zipped.verifyZipMs} ms`
+		)
+	}
+
+	return { report: rounds.join("; ") }
+}
+
+// How often a save can give the host a turn: with a slice budget of 0 every point that checks the clock
+// pauses, so the count is the number of yield points the save went through (machine-independent).
+async function yieldPoints(path: string): Promise<{ points: number; blocks: number }> {
+	const opened = await openBytes(new Uint8Array(readFileSync(path)))
+	const script = runEditScript(opened)
+	let points = 0
+
+	await prepareDocxSave(
+		{ pkg: opened.pkg, context: opened.context, sessions: [script.session] },
+		{
+			slicing: {
+				sliceMs: 0,
+				now: () => performance.now(),
+				pause: () => {
+					points++
+
+					return Promise.resolve()
+				}
+			}
+		}
+	)
+
+	return { points, blocks: script.session.state.doc.childCount }
+}
+
 describe("docx writer performance", () => {
+	it("yields at every top-level block while writing and checking the 300-page fixture", { timeout: 120_000 }, async () => {
+		const { report } = await sliced(FIXTURE)
+
+		console.log(`300p sliced: ${report}`)
+
+		const { points, blocks } = await yieldPoints(FIXTURE)
+
+		console.log(`300p: ${points} yield points for ${blocks} top-level blocks`)
+
+		// The writer (owners, copies, write) and gate 2 (paragraph checks) each pass every top-level block
+		// at a yield point; none of their steps is longer than one block.
+		expect(points).toBeGreaterThanOrEqual(blocks * 3)
+	})
+
+	it.skipIf(!existsSync(TARIFF))("saves the Tariff document in short slices", { timeout: 600_000 }, async () => {
+		const { report } = await sliced(TARIFF)
+
+		console.log(`Tariff sliced: ${report}`)
+	})
+
 	it("proves and saves the 300-page fixture", { timeout: 120_000 }, async () => {
 		console.log(`300p: ${await measure(FIXTURE)}`)
 	})

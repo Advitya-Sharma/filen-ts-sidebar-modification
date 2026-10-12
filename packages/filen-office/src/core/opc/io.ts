@@ -2,6 +2,9 @@
 export interface ByteSource {
 	readonly size: number
 	read(offset: number, length: number): Promise<Uint8Array>
+	// The bytes with their CRC-32 continued from `crc`, computed where the bytes live (a source on another
+	// thread checksums its own copy before sending it, so what arrives can be checked against it).
+	readChecked?(offset: number, length: number, crc: number): Promise<{ readonly bytes: Uint8Array; readonly crc: number }>
 }
 
 // Streamed output. The writer never touches a chunk again once it is written, so a sink may keep it.

@@ -2,6 +2,7 @@ import { NodeKind, type XmlDocument } from "./document"
 import { decodeCharacterData } from "./entities"
 import { XmlError } from "./errors"
 import { Namespaces, XML_NAMESPACE, XMLNS_NAMESPACE } from "./namespaces"
+import { sliceClock, type Slicing } from "../slicing"
 import { decodeUtf8 } from "./utf8"
 
 // XML 1.0 (fifth edition) NameStartChar, without ":" (namespaces give it its own role).
@@ -61,12 +62,22 @@ function isQualifiedName(name: string): boolean {
 	return !partStart
 }
 
+// Bytes and nodes checked between looks at the clock.
+const CHARACTER_STEP = 1 << 18
+const NODE_STEP = 1 << 12
+
 // Every byte of the part is valid UTF-8 and every character an XML Char: no C0 controls other than tab and
 // line ends, no surrogates, no U+FFFE or U+FFFF.
-function assertCharacters(bytes: Uint8Array): void {
+function* assertCharacters(bytes: Uint8Array, due: () => boolean): Generator<void, void> {
 	const length = bytes.length
 
-	for (let i = 0; i < length;) {
+	for (let i = 0, check = CHARACTER_STEP; i < length;) {
+		if (i >= check) {
+			check = i + CHARACTER_STEP
+
+			if (due()) yield
+		}
+
 		const b0 = bytes[i] ?? 0
 
 		if (b0 < 0x80) {
@@ -200,13 +211,31 @@ function hasReference(bytes: Uint8Array, start: number, end: number): boolean {
 // markup the next reader rejects: UTF-8 and characters, names, attribute syntax and duplicates (also by
 // expanded name), references, "--" in comments, "]]>" in text, and that every prefix is declared.
 export function assertWellFormed(document: XmlDocument): void {
+	const steps = wellFormed(document, () => false)
+
+	while (steps.next().done !== true);
+}
+
+// assertWellFormed in slices, giving the host a turn whenever the slice is used up.
+export async function assertWellFormedSliced(document: XmlDocument, slicing: Slicing): Promise<void> {
+	const clock = sliceClock(slicing)
+	const steps = wellFormed(document, () => clock.due, await Namespaces.sliced(document, {}, clock))
+
+	while (steps.next().done !== true) await clock.pause()
+}
+
+function* wellFormed(document: XmlDocument, due: () => boolean, scanned?: Namespaces): Generator<void, void> {
 	const { bytes, kinds, starts, ends, nameIds, count } = document
 
-	assertCharacters(bytes)
+	if (due()) yield
+
+	yield* assertCharacters(bytes, due)
 
 	for (const name of document.names) assertName(name, -1)
 
-	const namespaces = new Namespaces(document)
+	if (due()) yield
+
+	const namespaces = scanned ?? new Namespaces(document)
 	const attributeNames = new AttributeNames(bytes)
 	const elementPrefixes: (string | undefined)[] = []
 	// Expanded names of one element's prefixed attributes, reused across elements.
@@ -216,6 +245,8 @@ export function assertWellFormed(document: XmlDocument): void {
 	assertDeclarations(namespaces)
 
 	for (let node = 1; node < count; node++) {
+		if ((node & (NODE_STEP - 1)) === 0 && due()) yield
+
 		const kind = kinds[node]
 		const start = starts[node] ?? 0
 		const end = ends[node] ?? 0

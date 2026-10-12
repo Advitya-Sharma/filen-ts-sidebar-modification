@@ -3,6 +3,7 @@ import { parseXml, parseXmlSliced, type XmlDocument } from "../xml/index"
 import { CONTENT_TYPES_PART, parseContentTypes, type ContentTypes } from "./contentTypes"
 import { OpcError } from "./errors"
 import type { ByteSource } from "./io"
+import { joinBytes } from "./pieces"
 import { isValidPartName, partKey, relationshipsPartName } from "./partNames"
 import { Relationships, parseRelationships } from "./relationships"
 import { ZipArchive, type ZipEntry, type ZipOpenOptions } from "./zipReader"
@@ -114,7 +115,7 @@ export class OpcPackage {
 
 		const contentTypesKey = partKey(CONTENT_TYPES_PART)
 		const newTypes = [...(changes.replace ?? []), ...(changes.add ?? [])].find(change => partKey(change.name) === contentTypesKey)
-		const types = newTypes !== undefined ? parseContentTypes(newTypes.bytes) : await this.contentTypes()
+		const types = newTypes !== undefined ? parseContentTypes(await joinBytes(newTypes.bytes)) : await this.contentTypes()
 
 		for (const change of changes.add ?? []) {
 			if (types.typeOf(change.name) === undefined) {

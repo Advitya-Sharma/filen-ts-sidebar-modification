@@ -150,6 +150,14 @@ export class Out {
 		return true
 	}
 
+	// What was written as pieces, never joined: views of the source for copies, the new markup in chunks of
+	// its own (see BytePieces). Nothing may be written after.
+	views(): readonly Uint8Array[] {
+		this.flush()
+
+		return this.chunks
+	}
+
 	finish(): Uint8Array {
 		if (this.chunks.length === 0) return this.scratch.slice(0, this.used)
 		if (this.chunks.length === 1 && this.used === 0 && this.chunks[0] !== undefined) return this.chunks[0].slice()

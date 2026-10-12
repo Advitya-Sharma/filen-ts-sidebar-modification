@@ -31,6 +31,16 @@ export {
 } from "./host"
 export { parseHyperlinkField } from "./links"
 export * from "./protocol"
+export {
+	DocxClosedError,
+	DocxZipWorkerError,
+	docxZipWorker,
+	inThreadDocxZipper,
+	serveDocxZipWorker,
+	type DocxZipped,
+	type DocxZipper,
+	type DocxZipperFactory
+} from "./save"
 export { fetchFontAssets, windowServices, workerServices, type FontLocation } from "./services"
 export {
 	DOCX_MAX_ZOOM,

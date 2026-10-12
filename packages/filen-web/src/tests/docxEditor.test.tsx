@@ -48,7 +48,8 @@ vi.mock("@/features/preview/lib/docxEngine", () => ({ DOCX_FONT_URLS: {} }))
 vi.mock("@/features/preview/lib/docxEditing", async () => {
 	const actual = await vi.importActual<typeof import("@/features/preview/lib/docxEditing")>("@/features/preview/lib/docxEditing")
 	const { inThreadEditingHost } = await vi.importActual<typeof import("@filen/office/dom/docx/editing")>("@filen/office/dom/docx/editing")
-	const { writerProof } = await vi.importActual<typeof import("@filen/office/core/docx/write")>("@filen/office/core/docx/write")
+	const { prepareDocxSave, writerProof } =
+		await vi.importActual<typeof import("@filen/office/core/docx/write")>("@filen/office/core/docx/write")
 
 	return {
 		...actual,
@@ -64,7 +65,7 @@ vi.mock("@/features/preview/lib/docxEditing", async () => {
 					yield: () => new Promise<void>(resolve => setTimeout(resolve, 0)),
 					sliceMs: 8
 				}),
-				{ proof: writerProof }
+				{ proof: writerProof, writer: { prepare: prepareDocxSave } }
 			)
 
 			hooks.hosts.push(host)

@@ -2,7 +2,18 @@ import { Fragment } from "prosemirror-model"
 import { TextSelection } from "prosemirror-state"
 import { unzipSync, zipSync } from "fflate"
 import { describe, expect, it, vi } from "vitest"
-import { bytesSource, crc32, memorySink, OpcPackage, partKey, planZip, writeZip, type PartChange } from "@filen/office/core/opc"
+import {
+	bytesSource,
+	crc32,
+	joinBytes,
+	memorySink,
+	OpcPackage,
+	partKey,
+	planZip,
+	writeZip,
+	type PartBytes,
+	type PartChange
+} from "@filen/office/core/opc"
 import { encodeUtf8, parseXml } from "@filen/office/core/xml"
 import { parseRunProps, PropsReader } from "@filen/office/core/docx"
 import { DocxEditorSession, docxSchema, formattingMarks, proveBlocks } from "@filen/office/core/docx/edit"
@@ -411,11 +422,7 @@ describe("docx save verifier", () => {
 		try {
 			await verifyDocxParts({ original: document.pkg, context: document.context, changes })
 			await verifyDocxZip(document.pkg, bytesSource(sink.bytes()), {
-				plan,
-				changedParts: parts.map(part => part.name),
-				crcs: new Map(parts.map(part => [partKey(part.name), crc32(part.bytes)])),
-				serializeMs: 0,
-				verifyPartsMs: 0
+				crcs: new Map(await Promise.all(parts.map(async part => [partKey(part.name), crc32(await joinBytes(part.bytes))] as const)))
 			})
 
 			return undefined
@@ -469,11 +476,14 @@ describe("docx save verifier", () => {
 		if (story === undefined) throw new Error("No story change")
 
 		// Same length, so the written paragraph offsets still hold.
-		const tamper = (bytes: Uint8Array): Uint8Array => encodeUtf8(decoder.decode(bytes).replace(">more text<", ">mode text<"))
+		const tamper = async (bytes: PartBytes): Promise<Uint8Array> =>
+			encodeUtf8(decoder.decode(await joinBytes(bytes)).replace(">more text<", ">mode text<"))
 		const tampered = {
 			...changes,
-			replace: changes.replace.map(part => (part.name === "word/document.xml" ? { ...part, bytes: tamper(part.bytes) } : part)),
-			stories: [{ ...story, output: { ...story.output, bytes: tamper(story.output.bytes) } }]
+			replace: await Promise.all(
+				changes.replace.map(async part => (part.name === "word/document.xml" ? { ...part, bytes: await tamper(part.bytes) } : part))
+			),
+			stories: [{ ...story, output: { ...story.output, bytes: await tamper(story.output.bytes) } }]
 		}
 
 		await expect(verifyDocxParts({ original: document.pkg, context: document.context, changes })).resolves.toBeUndefined()

@@ -1,19 +1,49 @@
 import { findUnsavableBlocks, type DocxEditorSession } from "@filen/office/core/docx/edit"
-import { DocxSaveError, planDocxSave, saveDocx, writerProof, type DocxSaveInput } from "@filen/office/core/docx/write"
+import { DocxSaveError, prepareDocxSave, writerProof } from "@filen/office/core/docx/write"
 import { fetchFontAssets, windowServices } from "@filen/office/dom/docx"
 import { inThreadEditingHost, type DocxEditingHost } from "@filen/office/dom/docx/editing"
+import { docxZipWorker } from "@filen/office/dom/docx/save"
 import { plainText } from "@filen/office/react/docx/editor"
 import { DOCX_FONT_URLS } from "@/features/preview/lib/docxEngine"
+import DocxZipWorker from "@/features/preview/workers/docxZip.worker.ts?worker"
+import { recoverIfNewerBuild } from "@/lib/appUpdate"
 import { log } from "@/lib/log"
 
 // Editing a Word document on the page's own thread (the viewer stays in its worker): model, layout and the
 // editing session in one realm, laid out again as far as the pages in view on each keystroke. Every block is
 // proved to save as it was opened (the writer's Gate 1) while the document opens; a block that would not
-// is locked and the rest stays editable.
+// is locked and the rest stays editable. A save writes and checks the edited parts here in slices (the page
+// stays responsive), then deflates them into the file and checks that in a worker of the document's own.
+
+const zipper = docxZipWorker(() => {
+	const worker = new DocxZipWorker()
+
+	return {
+		post(message, transfer) {
+			worker.postMessage(message, [...transfer])
+		},
+		listen(onMessage, onError) {
+			worker.addEventListener("message", event => {
+				onMessage(event.data)
+			})
+			worker.addEventListener("error", () => {
+				// A deploy that changed this worker removes its old file (appUpdate.ts).
+				recoverIfNewerBuild()
+				onError()
+			})
+			// A message that could not be read leaves its zip waiting for ever: end the worker.
+			worker.addEventListener("messageerror", onError)
+		},
+		terminate() {
+			worker.terminate()
+		}
+	}
+})
 
 export function docxEditingHost(): DocxEditingHost {
 	return inThreadEditingHost(options => windowServices(window, fetchFontAssets(options.fontUrls ?? DOCX_FONT_URLS)), {
-		proof: writerProof
+		proof: writerProof,
+		writer: { prepare: prepareDocxSave, zipper }
 	})
 }
 
@@ -51,17 +81,13 @@ function sameDocs(a: readonly unknown[], b: readonly unknown[]): boolean {
 
 // Writes `write` (the sessions to write: `live`, or stand-ins for them) and returns the file with its commit.
 async function writeOnce(
-	input: DocxSaveInput,
+	host: DocxEditingHost,
 	live: readonly DocxEditorSession[],
 	write: readonly DocxEditorSession[],
 	started: number
 ): Promise<DocxSaveSnapshot> {
 	const written = write.map(session => session.state.doc)
-	const result = await saveDocx({ pkg: input.pkg, context: input.context, sessions: write })
-
-	if (result.bytes === undefined) {
-		throw new Error("The writer returned no file")
-	}
+	const result = await host.save(write)
 
 	return {
 		bytes: result.bytes,
@@ -78,9 +104,10 @@ async function writeOnce(
 	}
 }
 
-// Whether the writer accepts the document as these sessions hold it (its own checks, nothing stored).
-function writerAccepts(input: DocxSaveInput, sessions: readonly DocxEditorSession[]): Promise<boolean> {
-	return planDocxSave({ pkg: input.pkg, context: input.context, sessions }).then(
+// Whether the writer accepts the document as these sessions hold it (its own checks, in slices; nothing zipped
+// or stored).
+function writerAccepts(host: DocxEditingHost, sessions: readonly DocxEditorSession[]): Promise<boolean> {
+	return host.prepare(sessions).then(
 		() => true,
 		(error: unknown) => {
 			if (error instanceof DocxSaveError) {
@@ -93,8 +120,8 @@ function writerAccepts(input: DocxSaveInput, sessions: readonly DocxEditorSessio
 }
 
 // Writes the edited document: the lossless writer (every untouched part copied byte for byte, the edited
-// stories written from their sessions), the browser's own deflate for the rewritten parts, then the written
-// file read back and checked (Gate 2). When the writer refuses an explicit save, the edited blocks it cannot
+// stories written from their sessions) and the part checks in slices on this thread, then the browser's own
+// deflate for the rewritten parts and the written file read back and checked in the zip worker (Gate 2). When the writer refuses an explicit save, the edited blocks it cannot
 // write are found and the file is written with them as they were last saved; the editor takes them back only
 // in commit(), once the file is stored (an undoable step). A refusal no block resolves (remembered for that
 // state), or any refusal of an autosave, throws the writer's DocxSaveError, the document left as it was.
@@ -115,7 +142,7 @@ export async function writeDocx(host: DocxEditingHost, options: WriteDocxOptions
 	}
 
 	try {
-		return await writeOnce(input, sessions, sessions, started)
+		return await writeOnce(host, sessions, sessions, started)
 	} catch (error) {
 		if (!(error instanceof DocxSaveError) || error.reason === "readOnly" || options.auto === true) {
 			throw error
@@ -123,7 +150,7 @@ export async function writeDocx(host: DocxEditingHost, options: WriteDocxOptions
 
 		options.onSearch?.()
 
-		const found = await findUnsavableBlocks(sessions, trial => writerAccepts(input, trial), {
+		const found = await findUnsavableBlocks(sessions, trial => writerAccepts(host, trial), {
 			maxAttempts: SEARCH_RUNS,
 			budgetMs: SEARCH_BUDGET_MS,
 			refused: !ZIP_REASONS.has(error.reason),
@@ -147,7 +174,7 @@ export async function writeDocx(host: DocxEditingHost, options: WriteDocxOptions
 
 			return positions === undefined ? session : session.withReverted(positions)
 		})
-		const written = await writeOnce(input, sessions, write, started)
+		const written = await writeOnce(host, sessions, write, started)
 		const count = found.reduce((sum, { positions }) => sum + positions.length, 0)
 
 		log.warn("docx", "edited blocks written as last saved", { count, reason: error.reason, message: error.message })

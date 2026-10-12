@@ -5,6 +5,8 @@ import type { StoryDoc } from "../edit/build"
 import type { RunBase } from "../edit/formatting"
 import { NO_SOURCE, WRAPPER_MARKS, docxSchema, endsWithTable, inlineLevel, type IndentAttrs, type MarkerList } from "../edit/schema"
 import { Item, type StoryPart } from "../model/index"
+import type { BytePieces } from "../../opc/index"
+import type { SliceClock } from "../../slicing"
 import { closeTag, copyNode, freshContainer, Names, openTag, openTagWithout, Out, spliceChildren, startTagWith } from "./markup"
 import { JUSTIFICATION, NUMBERING_PROPERTIES, PARAGRAPH_MARK_PROPERTIES, PARAGRAPH_PROPERTIES } from "./order.generated"
 import { sameFormatting, writeRunProperties } from "./runs"
@@ -109,7 +111,8 @@ function src(node: Node | Mark): number {
 // the paragraphs rebuilt through the edit path and the property elements of containers written as copies,
 // each as a byte range of `bytes`.
 export interface StoryOutput {
-	readonly bytes: Uint8Array
+	// Joined (writeStory), or the pieces a save assembles a part from.
+	readonly bytes: Uint8Array | BytePieces
 	readonly trusted: readonly number[]
 	readonly paragraphs: readonly WrittenParagraph[]
 	readonly containers: readonly WrittenContainer[]
@@ -139,6 +142,75 @@ interface Unit {
 	copy: boolean
 }
 
+// A story written but not yet joined into one byte array: the caller can compare it with its source cheaply
+// (Out.equals) and assemble it with the rest of its part (Out.pieces).
+export interface StoryDraft {
+	readonly out: Out
+	readonly paragraphs: readonly WrittenParagraph[]
+	readonly containers: readonly WrittenContainer[]
+}
+
+// A source container's children in order, and each one's index.
+interface Siblings {
+	readonly items: readonly number[]
+	readonly index: ReadonlyMap<number, number>
+}
+
+const NO_SIBLINGS: Siblings = { items: [], index: new Map() }
+
+// Runs a write to its end (without a clock nothing yields).
+function complete<T>(steps: Generator<void, T>): T {
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+	}
+}
+
+async function drive<T>(steps: Generator<void, T>, clock: SliceClock): Promise<T> {
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+
+		await clock.pause()
+	}
+}
+
+// The first block of each source item as the story was built, per story (built once: the story is never
+// changed).
+const originalsCache = new WeakMap<StoryDoc, Map<number, Node>>()
+
+function originalBlocks(story: StoryDoc): Map<number, Node> {
+	return originalsCache.get(story) ?? complete(findOriginals(story, () => false))
+}
+
+function* findOriginals(story: StoryDoc, due: () => boolean): Generator<void, Map<number, Node>> {
+	const found = new Map<number, Node>()
+	const visit = (child: Node): boolean => {
+		if (child.isInline) return false
+
+		const own = src(child)
+
+		if (own !== NO_SOURCE && !found.has(own)) found.set(own, child)
+
+		return !child.isTextblock
+	}
+	const doc = story.doc
+
+	for (let index = 0; index < doc.childCount; index++) {
+		const child = doc.child(index)
+
+		if (visit(child)) child.descendants(visit)
+
+		if (due()) yield
+	}
+
+	originalsCache.set(story, found)
+
+	return found
+}
+
 // Writes one story (body, header, footer, note, comment) of an editing document back into its part:
 // everything that can still be copied as source bytes is, the rest goes through the edit path described in
 // StoryDoc. The output keeps the story container element and replaces only its content.
@@ -156,12 +228,15 @@ export class StoryWriter {
 	// depth of later occurrences being written.
 	private readonly shared = new Set<number>()
 	private readonly claimed = new Set<number>()
+	// Some source item stands on two different nodes (a copy).
+	private duplicated = false
 	private repeating = 0
 	// Whether a block can be written as its source bytes, outside table cells and inside one.
 	private readonly copyable = new Map<Node, boolean>()
 	private readonly copyableInCell = new Map<Node, boolean>()
-	private readonly siblings = new Map<number, number[]>()
-	private originalsBySrc: Map<number, Node> | null = null
+	private readonly siblings = new Map<number, Siblings>()
+	// Set while writing in slices.
+	private clock: SliceClock | undefined
 	private readonly copiedRuns = new Set<number>()
 	private readonly startedRuns = new Set<number>()
 	private readonly openedWrappers = new Set<number>()
@@ -189,16 +264,47 @@ export class StoryWriter {
 
 	// The story container element (w:body, w:hdr, w:footnote...) written from `doc`, with what gate 2 needs
 	// to check it without parsing it whole.
-	writeStory(doc: Node): StoryOutput {
+	writeStory(doc: Node): StoryOutput & { readonly bytes: Uint8Array } {
+		const draft = complete(this.draft(doc))
+
+		return { bytes: draft.out.finish(), trusted: draft.out.trusted, paragraphs: draft.paragraphs, containers: draft.containers }
+	}
+
+	// writeStory without joining the output (see StoryDraft).
+	draftStorySync(doc: Node): StoryDraft {
+		return complete(this.draft(doc))
+	}
+
+	// writeStory in slices: the clock's pause runs between them (a rejecting pause abandons the write). The
+	// output is not joined yet (see StoryDraft).
+	async draftStory(doc: Node, clock: SliceClock): Promise<StoryDraft> {
+		this.clock = clock
+
+		try {
+			return await drive(this.draft(doc), clock)
+		} finally {
+			this.clock = undefined
+		}
+	}
+
+	private *draft(doc: Node): Generator<void, StoryDraft> {
 		this.owners.clear()
 		this.copyable.clear()
 		this.copyableInCell.clear()
 		this.shared.clear()
 		this.claimed.clear()
-		this.findOwners(doc)
+
+		if (!originalsCache.has(this.story)) yield* findOriginals(this.story, () => this.due())
+
+		yield* this.findOwners(doc)
 		this.paragraphs.length = 0
 		this.containers.length = 0
 		this.cells = 0
+
+		// In slices, what can be copied is known before writing starts, children first: deciding it for a
+		// large table while writing would be one long step. Nodes standing at two places are decided as they
+		// are written (a claim changes the answer).
+		if (this.clock !== undefined && this.shared.size === 0) yield* this.decideCopies(doc)
 
 		const out = new Out()
 		const document = this.part.document
@@ -208,7 +314,7 @@ export class StoryWriter {
 
 		openTag(out, document, container)
 
-		const tail = this.writeChildren(out, doc, this.story.story.item, (child, at) => this.writeBlock(at, child), {
+		const tail = yield* this.writeChildren(out, doc, this.story.story.item, (child, at) => this.writeBlock(at, child), {
 			from: document.openEnd(container),
 			to: document.contentEnd(container),
 			tail: sectPr === NO_SOURCE ? [] : [sectPr]
@@ -218,7 +324,7 @@ export class StoryWriter {
 
 		closeTag(out, document, container)
 
-		return { bytes: out.finish(), trusted: out.trusted, paragraphs: [...this.paragraphs], containers: [...this.containers] }
+		return { out, paragraphs: [...this.paragraphs], containers: [...this.containers] }
 	}
 
 	// One block through the edit path, for gate 1: runs rebuilt from their bases, properties spliced,
@@ -237,7 +343,7 @@ export class StoryWriter {
 		this.owners.set(src(node), node)
 		this.shared.clear()
 		this.claimed.clear()
-		this.findOwners(node)
+		complete(this.findOwners(node))
 		this.cells = (cell ?? (node.type === nodes.paragraph && src(node) !== NO_SOURCE && inCell(this.part, src(node)))) ? 1 : 0
 
 		// The earlier block owns the sources and wrote its runs first: this one is written as a copy.
@@ -261,7 +367,7 @@ export class StoryWriter {
 
 		const out = new Out()
 
-		this.writeBlock(out, node)
+		complete(this.writeBlock(out, node))
 
 		return out
 	}
@@ -270,8 +376,8 @@ export class StoryWriter {
 
 	// The first node of each source item owns it. ProseMirror shares unchanged nodes, so one node object can
 	// stand at two places (an unsanitised copy): its first occurrence owns, the later ones are copies.
-	private findOwners(doc: Node): void {
-		doc.descendants(node => {
+	private *findOwners(doc: Node): Generator<void, void> {
+		const visit = (node: Node): boolean => {
 			if (node.isInline) return false
 
 			const own = src(node)
@@ -281,10 +387,60 @@ export class StoryWriter {
 
 				if (owner === undefined) this.owners.set(own, node)
 				else if (owner === node) this.shared.add(own)
+				else this.duplicated = true
 			}
 
 			return !node.isTextblock && node.type !== nodes.locked_block
-		})
+		}
+
+		this.duplicated = false
+
+		for (let index = 0; index < doc.childCount; index++) {
+			const child = doc.child(index)
+
+			if (visit(child)) child.descendants(visit)
+
+			if (this.due()) yield
+		}
+	}
+
+	// Whether the write in progress should give the host a turn (only in slices).
+	private due(): boolean {
+		return this.clock !== undefined && this.clock.due
+	}
+
+	// canCopy for every block, children before their container (each container then looks only at its
+	// children's answers), in the cell context writing uses. A container still the very node the story was
+	// built with, where its source was, is decided at once (see unchangedContainer).
+	private *decideCopies(doc: Node): Generator<void, void> {
+		const stack: { node: Node; cell: boolean; index: number }[] = []
+
+		for (let top = 0; top < doc.childCount; top++) {
+			stack.push({ node: doc.child(top), cell: this.cells > 0, index: 0 })
+
+			while (stack.length > 0) {
+				const frame = stack[stack.length - 1] as { node: Node; cell: boolean; index: number }
+				const node = frame.node
+
+				if (frame.index === 0 && this.unchangedContainer(node, frame.cell)) {
+					stack.pop()
+					this.canCopy(node, frame.cell)
+
+					continue
+				}
+
+				if (!node.isTextblock && node.type !== nodes.locked_block && frame.index < node.childCount) {
+					stack.push({ node: node.child(frame.index++), cell: frame.cell || node.type === nodes.table_cell, index: 0 })
+
+					continue
+				}
+
+				stack.pop()
+				this.canCopy(node, frame.cell)
+
+				if (this.due()) yield
+			}
+		}
 	}
 
 	private owns(node: Node): boolean {
@@ -307,22 +463,7 @@ export class StoryWriter {
 	}
 
 	private original(node: Node): Node | undefined {
-		if (this.originalsBySrc === null) {
-			const map = new Map<number, Node>()
-
-			this.story.doc.descendants(child => {
-				if (child.isInline) return false
-
-				const own = src(child)
-
-				if (own !== NO_SOURCE && !map.has(own)) map.set(own, child)
-
-				return !child.isTextblock
-			})
-			this.originalsBySrc = map
-		}
-
-		return this.originalsBySrc.get(src(node))
+		return originalBlocks(this.story).get(src(node))
 	}
 
 	// Whether a block can be written as its source bytes (see StoryDoc), in a table cell (`cell`) or not.
@@ -350,6 +491,8 @@ export class StoryWriter {
 		} else if (this.force !== undefined && this.force.type !== nodes.paragraph) {
 			// A table under proof is rebuilt down to its paragraphs.
 			result = false
+		} else if (this.unchangedContainer(node, cell)) {
+			result = true
 		} else {
 			const original = this.original(node)
 
@@ -368,6 +511,19 @@ export class StoryWriter {
 		return result
 	}
 
+	// A container (table, row, cell, content control) that is still the very node the story was built with, so
+	// is everything in it, written where its source was (in a table cell or not, as it was): its source bytes,
+	// as canCopy would find child by child. Only while each source item stands at one place in the document
+	// (then every node owns its source) and no block is forced through the edit path.
+	private unchangedContainer(node: Node, cell: boolean): boolean {
+		if (this.duplicated || this.shared.size > 0 || this.force !== undefined || this.repeating > 0) return false
+		if (node.isInline || node.isTextblock || node.type === nodes.locked_block) return false
+
+		const own = src(node)
+
+		return own !== NO_SOURCE && this.owners.get(own) === node && this.original(node) === node && inCell(this.part, own) === cell
+	}
+
 	// Whether locked block `node`, in a table cell (`cell`) or not, has a section break that moved into or out
 	// of one: a break in a cell of the block moves with it, one of the block itself only when the block did.
 	private lockedBreakMoved(node: Node, cell: boolean): boolean {
@@ -379,18 +535,23 @@ export class StoryWriter {
 
 	// ---- containers --------------------------------------------------------------------------------------
 
-	private siblingsOf(container: number): number[] {
-		let list = this.siblings.get(container)
+	private siblingsOf(container: number): Siblings {
+		let siblings = this.siblings.get(container)
 
-		if (list === undefined) {
-			list = []
+		if (siblings === undefined) {
+			const items: number[] = []
+			const index = new Map<number, number>()
 
-			for (let item = container + 1; item < this.part.end(container); item = this.part.end(item)) list.push(item)
+			for (let item = container + 1; item < this.part.end(container); item = this.part.end(item)) {
+				index.set(item, items.length)
+				items.push(item)
+			}
 
-			this.siblings.set(container, list)
+			siblings = { items, index }
+			this.siblings.set(container, siblings)
 		}
 
-		return list
+		return siblings
 	}
 
 	// The children of a container: blocks that can be copied keep the bytes around them (whitespace,
@@ -398,29 +559,32 @@ export class StoryWriter {
 	// container's content in the source and what must follow the last child there (the body's final
 	// section properties); when everything after the last child is as it was, it is copied whole and true
 	// returned.
-	private writeChildren(
+	private *writeChildren(
 		out: Out,
 		container: Node,
 		sourceContainer: number,
-		write: (child: Node, out: Out) => void,
+		write: (child: Node, out: Out) => Generator<void, void>,
 		region?: { readonly from: number; readonly to: number; readonly tail: readonly number[] }
-	): boolean {
-		const siblings = sourceContainer === NO_SOURCE ? [] : this.siblingsOf(sourceContainer)
+	): Generator<void, boolean> {
+		const { items: siblings, index: positions } = sourceContainer === NO_SOURCE ? NO_SIBLINGS : this.siblingsOf(sourceContainer)
 		let previous = -1
 
-		container.forEach(child => {
+		for (let at = 0; at < container.childCount; at++) {
+			const child = container.child(at)
 			const before = (child.attrs["before"] as MarkerList | undefined) ?? []
+
+			if (this.due()) yield
 
 			if (this.canCopy(child)) {
 				const own = src(child)
-				const index = siblings.indexOf(own)
+				const index = positions.get(own) ?? -1
 				const leading = index < 0 ? [] : this.leadingMarkers(siblings, index)
 				const together = leading.length === before.length && leading.every((item, k) => before[k]?.src === item)
 				const first = together && leading.length > 0 ? (leading[0] ?? own) : own
 
 				if (!together) for (const marker of before) this.writeMarker(out, marker.src)
 
-				const firstIndex = siblings.indexOf(first)
+				const firstIndex = positions.get(first) ?? -1
 
 				if (previous >= 0 && firstIndex > 0 && siblings[firstIndex - 1] === previous) {
 					out.copy(this.bytes, this.part.byteEnd(previous), this.part.start(first))
@@ -432,7 +596,7 @@ export class StoryWriter {
 				this.claim(child)
 				previous = own
 
-				return
+				continue
 			}
 
 			for (const marker of before) this.writeMarker(out, marker.src)
@@ -442,18 +606,18 @@ export class StoryWriter {
 
 			if (repeat) this.repeating++
 
-			write(child, out)
+			yield* write(child, out)
 
 			if (repeat) this.repeating--
 			else this.claim(child)
 
 			previous = -2
-		})
+		}
 
 		const end = (container.attrs["end"] as MarkerList | undefined) ?? []
 
 		if (region !== undefined && previous >= 0) {
-			const rest = siblings.slice(siblings.indexOf(previous) + 1)
+			const rest = siblings.slice((positions.get(previous) ?? -1) + 1)
 			const expected = [...end.map(marker => marker.src), ...region.tail]
 
 			if (rest.length === expected.length && rest.every((item, k) => item === expected[k])) {
@@ -482,18 +646,18 @@ export class StoryWriter {
 		this.copyWhole(out, this.part.node(item))
 	}
 
-	private writeBlock(out: Out, node: Node): void {
+	private *writeBlock(out: Out, node: Node): Generator<void, void> {
 		switch (node.type) {
 			case nodes.paragraph:
 				this.writeParagraph(out, node)
 
 				return
 			case nodes.table:
-				this.writeTable(out, node)
+				yield* this.writeTable(out, node)
 
 				return
 			case nodes.sdt:
-				this.writeSdt(out, node)
+				yield* this.writeSdt(out, node)
 
 				return
 			case nodes.locked_block:
@@ -512,7 +676,7 @@ export class StoryWriter {
 		}
 	}
 
-	private writeTable(out: Out, node: Node): void {
+	private *writeTable(out: Out, node: Node): Generator<void, void> {
 		const document = this.part.document
 		const names = this.names
 
@@ -526,7 +690,7 @@ export class StoryWriter {
 
 			out.text(`<${names.el("tbl")}>`)
 			this.copyProperties(out, [this.part.tables.tblPr[row] ?? -1, this.part.tables.tblGrid[row] ?? -1], TRACKED_TABLE)
-			this.writeChildren(out, node, NO_SOURCE, (child, rowOut) => this.writeRow(rowOut, child))
+			yield* this.writeChildren(out, node, NO_SOURCE, (child, rowOut) => this.writeRow(rowOut, child))
 			out.text(`</${names.el("tbl")}>`)
 
 			return
@@ -556,7 +720,7 @@ export class StoryWriter {
 					["type", "auto"]
 				])}</${names.el("tblPr")}><${names.el("tblGrid")}>${grid.map(width => names.empty("gridCol", [["w", String(width)]])).join("")}</${names.el("tblGrid")}>`
 			)
-			this.writeChildren(out, node, NO_SOURCE, (row, rowOut) => this.writeRow(rowOut, row))
+			yield* this.writeChildren(out, node, NO_SOURCE, (row, rowOut) => this.writeRow(rowOut, row))
 			out.text(`</${names.el("tbl")}>`)
 
 			return
@@ -579,7 +743,7 @@ export class StoryWriter {
 			from = document.end(property)
 		}
 
-		this.writeChildren(out, node, item, (child, rowOut) => this.writeRow(rowOut, child), {
+		yield* this.writeChildren(out, node, item, (child, rowOut) => this.writeRow(rowOut, child), {
 			from,
 			to: document.contentEnd(element),
 			tail: []
@@ -587,7 +751,7 @@ export class StoryWriter {
 		closeTag(out, document, element)
 	}
 
-	private writeRow(out: Out, node: Node): void {
+	private *writeRow(out: Out, node: Node): Generator<void, void> {
 		const document = this.part.document
 		const own = src(node)
 
@@ -596,7 +760,7 @@ export class StoryWriter {
 
 			out.text(`<${this.names.el("tr")}>`)
 			this.copyProperties(out, [this.part.rows.trPr[row] ?? -1, this.part.rows.tblPrEx[row] ?? -1], TRACKED_ROW)
-			this.writeChildren(out, node, NO_SOURCE, (cell, cellOut) => this.writeCell(cellOut, cell))
+			yield* this.writeChildren(out, node, NO_SOURCE, (cell, cellOut) => this.writeCell(cellOut, cell))
 			out.text(`</${this.names.el("tr")}>`)
 
 			return
@@ -604,7 +768,7 @@ export class StoryWriter {
 
 		if (!this.owns(node)) {
 			out.text(`<${this.names.el("tr")}>`)
-			this.writeChildren(out, node, NO_SOURCE, (cell, cellOut) => this.writeCell(cellOut, cell))
+			yield* this.writeChildren(out, node, NO_SOURCE, (cell, cellOut) => this.writeCell(cellOut, cell))
 			out.text(`</${this.names.el("tr")}>`)
 
 			return
@@ -626,7 +790,7 @@ export class StoryWriter {
 			from = document.end(property)
 		}
 
-		this.writeChildren(out, node, item, (cell, cellOut) => this.writeCell(cellOut, cell), {
+		yield* this.writeChildren(out, node, item, (cell, cellOut) => this.writeCell(cellOut, cell), {
 			from,
 			to: document.contentEnd(element),
 			tail: []
@@ -634,17 +798,17 @@ export class StoryWriter {
 		closeTag(out, document, element)
 	}
 
-	private writeCell(out: Out, node: Node): void {
+	private *writeCell(out: Out, node: Node): Generator<void, void> {
 		this.cells++
 
 		try {
-			this.writeCellContent(out, node)
+			yield* this.writeCellContent(out, node)
 		} finally {
 			this.cells--
 		}
 	}
 
-	private writeCellContent(out: Out, node: Node): void {
+	private *writeCellContent(out: Out, node: Node): Generator<void, void> {
 		const document = this.part.document
 		const names = this.names
 		// Word wants a cell to end with a paragraph, which a table as its last block would not.
@@ -656,7 +820,7 @@ export class StoryWriter {
 			this.checkUnchanged(node, ["colspan", "vMerge"], "Changed cell merging")
 			out.text(`<${names.el("tc")}>`)
 			this.copyProperties(out, [this.part.cells.tcPr[this.part.aux[own] ?? -1] ?? -1], TRACKED_CELL)
-			this.writeChildren(out, node, NO_SOURCE, (child, blockOut) => this.writeBlock(blockOut, child))
+			yield* this.writeChildren(out, node, NO_SOURCE, (child, blockOut) => this.writeBlock(blockOut, child))
 
 			if (!endsWithParagraph) out.text(`<${names.el("p")}/>`)
 
@@ -671,7 +835,7 @@ export class StoryWriter {
 			const tcPr = `${span > 1 ? names.val("gridSpan", String(span)) : ""}${vMerge === null ? "" : vMerge === "continue" ? names.empty("vMerge") : names.val("vMerge", vMerge)}`
 
 			out.text(`<${names.el("tc")}>${tcPr === "" ? "" : `<${names.el("tcPr")}>${tcPr}</${names.el("tcPr")}>`}`)
-			this.writeChildren(out, node, NO_SOURCE, (child, blockOut) => this.writeBlock(blockOut, child))
+			yield* this.writeChildren(out, node, NO_SOURCE, (child, blockOut) => this.writeBlock(blockOut, child))
 
 			if (!endsWithParagraph) out.text(`<${names.el("p")}/>`)
 
@@ -692,7 +856,7 @@ export class StoryWriter {
 
 		if (tcPr >= 0) this.copyWhole(out, tcPr)
 
-		this.writeChildren(out, node, item, (child, blockOut) => this.writeBlock(blockOut, child), {
+		yield* this.writeChildren(out, node, item, (child, blockOut) => this.writeBlock(blockOut, child), {
 			from: tcPr >= 0 ? document.end(tcPr) : document.openEnd(element),
 			to: document.contentEnd(element),
 			tail: []
@@ -703,7 +867,7 @@ export class StoryWriter {
 		closeTag(out, document, element)
 	}
 
-	private writeSdt(out: Out, node: Node): void {
+	private *writeSdt(out: Out, node: Node): Generator<void, void> {
 		const document = this.part.document
 		const names = this.names
 
@@ -715,7 +879,7 @@ export class StoryWriter {
 			out.text(`<${names.el("sdt")}>`)
 			this.copyProperties(out, [this.part.sdts.sdtPr[row] ?? -1, this.part.sdts.sdtEndPr[row] ?? -1], ["id"])
 			out.text(`<${names.el("sdtContent")}>`)
-			this.writeChildren(out, node, NO_SOURCE, (child, blockOut) => this.writeBlock(blockOut, child))
+			yield* this.writeChildren(out, node, NO_SOURCE, (child, blockOut) => this.writeBlock(blockOut, child))
 			out.text(`</${names.el("sdtContent")}></${names.el("sdt")}>`)
 
 			return
@@ -723,7 +887,7 @@ export class StoryWriter {
 
 		if (!this.owns(node)) {
 			out.text(`<${names.el("sdt")}><${names.el("sdtPr")}/><${names.el("sdtContent")}>`)
-			this.writeChildren(out, node, NO_SOURCE, (child, blockOut) => this.writeBlock(blockOut, child))
+			yield* this.writeChildren(out, node, NO_SOURCE, (child, blockOut) => this.writeBlock(blockOut, child))
 			out.text(`</${names.el("sdtContent")}></${names.el("sdt")}>`)
 
 			return
@@ -737,7 +901,7 @@ export class StoryWriter {
 		const element = this.part.node(item)
 
 		out.bytes(this.bytes, document.start(element), document.openEnd(content))
-		this.writeChildren(out, node, item, (child, blockOut) => this.writeBlock(blockOut, child), {
+		yield* this.writeChildren(out, node, item, (child, blockOut) => this.writeBlock(blockOut, child), {
 			from: document.openEnd(content),
 			to: document.contentEnd(content),
 			tail: []
