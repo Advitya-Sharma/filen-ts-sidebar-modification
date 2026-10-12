@@ -106,9 +106,10 @@ function strictWords(value: string): string[] {
 }
 
 // The words of a lookup's text that narrow what it returns: a lone Latin letter or digit ("m" of "I'm") or
-// punctuation alone ("/") matches nearly everything, so a lookup by those grounds nothing it returns.
+// punctuation alone ("/") matches nearly everything, so a lookup by those grounds nothing it returns. Unsplit,
+// so a short identifier ("F1", "3D") stays one word.
 function selectiveWords(value: string): string[] {
-	return strictWords(value).filter(word => word.length >= 2 || CJK.test(word))
+	return words(value).filter(word => word.length >= 2 || CJK.test(word))
 }
 
 function extensionOf(value: string): string | undefined {

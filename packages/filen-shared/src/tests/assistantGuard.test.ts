@@ -424,6 +424,19 @@ describe("AssistantTurnGuard", () => {
 		expect(short.check({ tool: draftChatMessage, args: { chat: "c2", text: "late" } }).allowed).toBe(true)
 	})
 
+	it("grounds what a lookup by a short letter-and-digit name returns", () => {
+		for (const [message, query, name] of [
+			["Draft 'see you at 5' to the F1 chat", "F1", "F1 fans"],
+			["Draft 'see you at 5' to the 3D chat", "3D", "3D printing crew"],
+			["Draft 'see you at 5' to the Q4 chat", "Q4", "Q4 sync"]
+		] as const) {
+			const turn = guard(message, {}, [])
+
+			turn.record({ tool: listChats, args: { query }, returned: [{ handle: "c3", name }] })
+			expect(turn.check({ tool: draftChatMessage, args: { chat: "c3", text: "see you at 5" } }).allowed).toBe(true)
+		}
+	})
+
 	it("refuses a draft whose link is split by invisible characters, written defanged or part of a typed host", () => {
 		const turn = guard("Tell Maria I'm running late", {}, ["c2"])
 		const allowed = (text: string) => turn.check({ tool: draftChatMessage, args: { chat: "c2", text } }).allowed
