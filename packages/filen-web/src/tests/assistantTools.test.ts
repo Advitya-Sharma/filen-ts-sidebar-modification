@@ -671,8 +671,13 @@ describe("list_directory", () => {
 		)
 		queryClient.removeQueries({ queryKey: driveListingQueryKey({ variant: "drive", uuid: null }) })
 
-		// Found; what the model reads back is sanitized the same way again.
-		expect(json(await call("list_directory", { path: "/میخواهم" }))).toMatchObject({ directory: { handle: "d1", path: "/میخواهم" } })
+		// Found either way; what the model reads back keeps the name as written.
+		expect(json(await call("list_directory", { path: "/میخواهم" }))).toMatchObject({
+			directory: { handle: "d1", path: "/می\u200Cخواهم" }
+		})
+		expect(json(await call("list_directory", { path: "/می\u200Cخواهم" }))).toMatchObject({
+			directory: { handle: "d1", path: "/می\u200Cخواهم" }
+		})
 	})
 
 	it("refuses a file handle as an invalid call", async () => {
@@ -844,6 +849,18 @@ describe("read_text_file", () => {
 		expect(sdk.downloadFileBytes).toHaveBeenCalledTimes(1)
 	})
 
+	it("keeps the joiners a word is spelled with, and drops hidden characters", async () => {
+		// Its own file: the preview cache keeps what another test read.
+		const letters = rawFile(testUuid("letters"), "letters.txt", ROOT, "text/plain")
+
+		sdk.listDirectory.mockResolvedValue({ dirs: [], files: [letters] })
+		queryClient.removeQueries({ queryKey: driveListingQueryKey({ variant: "drive", uuid: null }) })
+		sdk.downloadFileBytes.mockResolvedValue(new Uint8Array(new TextEncoder().encode("نامه\u200Cها را می\u200Cخواهم\u202E\u200B")))
+		await call("list_directory", {})
+
+		expect(json(await call("read_text_file", { handle: "f1" }))["content"]).toBe("نامه\u200Cها را می\u200Cخواهم")
+	})
+
 	it("refuses anything but text, code and markdown without downloading it", async () => {
 		await call("list_directory", { path: "/Docs" })
 
@@ -896,6 +913,24 @@ describe("notes", () => {
 		expect(result).toMatchObject({ ok: true })
 		expect(json(result)).toEqual({ handle: "n2", title: "Recipe", content: "Flour\nSugar & salt" })
 		expect(queryClient.getQueryData(noteContentQueryKey(recipe.uuid))).toBe("<p>Flour</p><p>Sugar &amp; salt</p>")
+	})
+
+	it("keeps the joiners a note's title and text are spelled with, in the result and the context line", async () => {
+		const persian = note(testUuid("persian-note"), "یادداشت\u200Cها\u200B")
+
+		sdk.listNotes.mockResolvedValue([persian])
+		sdk.getNoteContent.mockResolvedValue("نامه\u200Cها را می\u200Cخواهم\u202E")
+		await call("list_notes", {})
+
+		expect(json(await call("read_note", { handle: "n1" }))).toEqual({
+			handle: "n1",
+			title: "یادداشت\u200Cها",
+			content: "نامه\u200Cها را می\u200Cخواهم"
+		})
+
+		at(`/notes/${persian.uuid}`)
+
+		expect((await executor.context()).description).toContain('open note: "یادداشت\u200Cها" (handle n1)')
 	})
 
 	it("reads the note open in the editor from the editor's own state, without fetching", async () => {

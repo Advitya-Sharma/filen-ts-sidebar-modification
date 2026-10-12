@@ -91,14 +91,14 @@ const CONTEXT_PATH_MAX_CHARS = 512
 // template tokens nor pose as another field of the line. The loop sanitizes the whole line again with the
 // model's own tokens.
 function contextName(name: string): string {
-	const flat = Array.from(sanitizeUntrustedText(name).replace(/\s+/g, " ").trim())
+	const flat = Array.from(sanitizeUntrustedText(name, [], { keepJoiners: true }).replace(/\s+/g, " ").trim())
 
 	return JSON.stringify(flat.length > CONTEXT_NAME_MAX_CHARS ? `${flat.slice(0, CONTEXT_NAME_MAX_CHARS - 1).join("")}…` : flat.join(""))
 }
 
 // A path to list a directory by: whole, on one line, quoted; null when too long to offer.
 function contextPath(path: string): string | null {
-	const flat = sanitizeUntrustedText(path).replace(/\s+/g, " ").trim()
+	const flat = sanitizeUntrustedText(path, [], { keepJoiners: true }).replace(/\s+/g, " ").trim()
 
 	return Array.from(flat).length > CONTEXT_PATH_MAX_CHARS ? null : JSON.stringify(flat)
 }
@@ -235,7 +235,7 @@ function failureOf(error: AssistantToolError): AssistantToolFailure {
 		ok: false,
 		invalid: error.invalid,
 		error: error.message,
-		result: sanitizeStrings({ error: error.message, ...(error.candidates.length > 0 ? { candidates: error.candidates } : {}) }, []),
+		result: sanitizeStrings({ error: error.message, ...(error.candidates.length > 0 ? { candidates: error.candidates } : {}) }),
 		...(error.candidates.length > 0 ? { candidates: error.candidates } : {})
 	}
 }
@@ -463,7 +463,7 @@ export function createAssistantToolExecutor(): ToolExecutor {
 				// Every result, whatever its tool declares: a mis-declared one can never pass raw text through.
 				return {
 					ok: true,
-					result: sanitizeStrings(output.value, []),
+					result: sanitizeStrings(output.value),
 					returned: [...shown.values()]
 				}
 			} catch (e) {

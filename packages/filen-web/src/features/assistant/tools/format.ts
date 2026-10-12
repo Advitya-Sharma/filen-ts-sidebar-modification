@@ -46,18 +46,19 @@ export function throwIfStopped(scope: { signal: { readonly aborted: boolean } | 
 }
 
 // Every string in a result, sanitized: values mix the app's own words with names and text other people
-// wrote, and sanitizing the app's own words changes nothing.
-export function sanitizeStrings(value: unknown, specialTokens: readonly string[]): unknown {
+// wrote, and sanitizing the app's own words changes nothing. The joiners a word is spelled with stay, so
+// the model reads and quotes Persian or Indic text as written; the loop adds the model's own tokens.
+export function sanitizeStrings(value: unknown): unknown {
 	if (typeof value === "string") {
-		return sanitizeUntrustedText(value, specialTokens)
+		return sanitizeUntrustedText(value, [], { keepJoiners: true })
 	}
 
 	if (Array.isArray(value)) {
-		return value.map(entry => sanitizeStrings(entry, specialTokens))
+		return value.map(entry => sanitizeStrings(entry))
 	}
 
 	if (typeof value === "object" && value !== null) {
-		return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, sanitizeStrings(entry, specialTokens)]))
+		return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, sanitizeStrings(entry)]))
 	}
 
 	return value
@@ -87,8 +88,8 @@ export function isoDate(timestamp: bigint | number): string {
 	return `${String(date.getFullYear()).padStart(4, "0")}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
-// Accents, marks and invisible characters go: the model sees names sanitized (a Persian name without its
-// zero-width non-joiner), and copies them back that way.
+// Accents, marks and invisible characters go: a name the model copies back matches with or without a
+// Persian name's zero-width non-joiner.
 export function normalizeText(value: string): string {
 	return value
 		.normalize("NFKD")
