@@ -1134,6 +1134,26 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		expect(user.indexOf("Budget is 5k")).toBeLessThan(user.indexOf("User's request:"))
 	})
 
+	it("keeps the joiners Persian content is spelled with, for the extraction and the main loop", async () => {
+		const persian = "نامه\u200Cها را می\u200Cخواهم"
+		const executor = new FakeExecutor({
+			items: [],
+			results: {
+				list_notes: () => ({ notes: [{ handle: "n1", title: "یادداشت\u200Cها" }] }),
+				read_note: () => ({ handle: "n1", title: "x", content: persian })
+			}
+		})
+		const model = new ScriptedModel({
+			route: "notes read",
+			steps: [call("list_notes", { query: "x" }), call("read_note", { handle: "n1" }), persian]
+		})
+		const { result } = await turn({ model, executor, message: "یادداشتم را خلاصه کن" })
+
+		expect(model.quarantineRequests[0]?.messages[1]?.content).toContain(persian)
+		expect(model.requests.at(-1)?.messages.some(message => message.role === "tool" && message.content.includes("یادداشت\u200Cها"))).toBe(true)
+		expect(result.reply).toBe(persian)
+	})
+
 	it("lets a draft's step write as long as the user's message, and other steps only the usual length", async () => {
 		const long = "word ".repeat(400)
 		const executor = new FakeExecutor({ items: [], results: { list_chats: () => ({ chats: [{ handle: "c2", name: "Maria" }] }) } })

@@ -36,10 +36,10 @@ const INVISIBLE_RANGES: readonly (readonly [number, number])[] = [
 	[0xe0100, 0xe01ef]
 ]
 
-function isInvisible(char: string): boolean {
-	const code = char.codePointAt(0) ?? 0
+const INVISIBLE = new RegExp(`[${INVISIBLE_RANGES.map(([from, to]) => `\\u{${from.toString(16)}}-\\u{${to.toString(16)}}`).join("")}]`, "u")
 
-	return INVISIBLE_RANGES.some(([from, to]) => code >= from && code <= to)
+function isInvisible(char: string): boolean {
+	return INVISIBLE.test(char)
 }
 
 const NEUTRAL: Record<string, string> = {
@@ -77,10 +77,7 @@ export function sanitizeUntrustedText(
 	specialTokens: readonly string[] = [],
 	{ keepJoiners = false }: { keepJoiners?: boolean } = {}
 ): string {
-	const chars = Array.from(text)
-	let result = chars
-		.filter((char, index) => !isInvisible(char) || (keepJoiners && (wordJoiner(chars, index) || emojiJoiner(chars, index))))
-		.join("")
+	let result = withoutInvisible(text, { keepJoiners })
 
 	for (const pattern of CONTROL_PATTERNS) {
 		result = result.replace(pattern, neutralize)
@@ -362,10 +359,17 @@ function emojiJoiner(chars: readonly string[], index: number): boolean {
 	return chars[index] === "\u200D" && PICTOGRAPHIC.test(before ?? "") && PICTOGRAPHIC.test(chars[index + 1] ?? "")
 }
 
-function withoutInvisible(text: string, { keepEmoji = false }: { keepEmoji?: boolean } = {}): string {
+// `keepJoiners`: the joiners that shape a word or draw one emoji stay, for text shown as written.
+function withoutInvisible(text: string, { keepJoiners = false }: { keepJoiners?: boolean } = {}): string {
+	if (!INVISIBLE.test(text)) {
+		return text
+	}
+
 	const chars = Array.from(text)
 
-	return chars.filter((char, index) => !isInvisible(char) || (keepEmoji && emojiJoiner(chars, index))).join("")
+	return chars
+		.filter((char, index) => !isInvisible(char) || (keepJoiners && (wordJoiner(chars, index) || emojiJoiner(chars, index))))
+		.join("")
 }
 
 // Defanged spellings ("hxxps://evil[.]com", "a[@]b.c", this module's own) read as the links they stand for:
@@ -416,37 +420,45 @@ function foldLetter(char: string): string {
 	return char
 }
 
-// The text as a browser's host parsing reads it, one character for each of the text's, so a match in it
-// maps back to the same characters of the text: look-alike letters and digits folded to ASCII, and a
-// full-width or ideographic dot or hyphen between them to "." or "-". Everything else stays, so a sentence in
-// a script with its own full stop reads as written.
+// What foldHosts would change: a look-alike letter or digit, a full-width or ideographic dot or hyphen after an
+// ASCII letter or digit and before one, or a joiner inside a word. Nearly every text has none, and a streamed
+// reply is screened on every update.
+const FOLDABLE =
+	/[\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A\u2460-\u24EA\u{1F130}-\u{1F189}]|[A-Za-z0-9][\u3002\uFF0E\uFF61\u2024\uFE52\uFF0D][A-Za-z0-9]|[\p{L}\p{M}][\u200C\u200D][\p{L}\p{M}]/u
+
+// The text as a browser's host parsing reads it, one entry for each of the text's characters, so a match in
+// it maps back to the same characters of the text: look-alike letters and digits folded to ASCII, a
+// full-width or ideographic dot or hyphen between them to "." or "-", and a joiner inside a word (kept in what
+// is shown) to nothing. Everything else stays, so a sentence in a script with its own full stop reads as written.
 function foldHosts(text: string): string[] {
-	const letters = Array.from(text, foldLetter)
+	const chars = Array.from(text)
+	const letters = chars.map(foldLetter)
 
 	return letters.map((char, index) => {
 		const between = ASCII_ALNUM.test(letters[index - 1] ?? "") && ASCII_ALNUM.test(letters[index + 1] ?? "")
 
-		return between && HOST_DOTS.has(char) ? "." : between && char === "\uFF0D" ? "-" : char
+		return between && HOST_DOTS.has(char) ? "." : between && char === "\uFF0D" ? "-" : wordJoiner(chars, index) ? "" : char
 	})
 }
 
 // What a link check reads: decoded, without characters that split a link invisibly, re-fanged, look-alike
 // letters and dots folded.
 function linkView(text: string): string {
-	return refang(foldHosts(withoutInvisible(decodeForLinks(text))).join(""))
+	const visible = withoutInvisible(decodeForLinks(text))
+
+	return refang(FOLDABLE.test(visible) ? foldHosts(visible).join("") : visible)
 }
 
 // `pattern`'s matches as a browser would read them (foldHosts), replaced in `text` itself: what `replace`
 // returns for the folded match takes the place of the characters it came from. The rest of the text stays
 // as written.
 function replaceFolded(text: string, pattern: RegExp, replace: (folded: string) => string): string {
-	const folded = foldHosts(text)
-	const view = folded.join("")
-
-	if (view === text) {
+	if (!FOLDABLE.test(text)) {
 		return text.replace(pattern, match => replace(match))
 	}
 
+	const folded = foldHosts(text)
+	const view = folded.join("")
 	const original = Array.from(text)
 	// The character index at each UTF-16 offset of the folded view.
 	const charAt: number[] = []
@@ -540,8 +552,9 @@ export function screenAssistantReply({
 	}
 
 	const typed = linkView(userMessage).toLowerCase()
-	// Characters that split a link invisibly go: what is shown is what the patterns read.
-	const text = withoutInvisible(decodeForLinks(reply), { keepEmoji: true })
+	// Characters that split a link invisibly go, except the joiners a word's or an emoji's spelling needs, which
+	// the patterns read past (foldHosts).
+	const text = withoutInvisible(decodeForLinks(reply), { keepJoiners: true })
 
 	let shown = replaceFolded(text, LINK, link => (typedWhole(typed, link) ? link : defangLink(link)))
 

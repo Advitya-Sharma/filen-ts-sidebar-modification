@@ -815,7 +815,7 @@ export async function runAssistantTurn({
 	const context = await executor.context()
 	// The context line names items, notes, chats and tracks other people may have named; it is sanitized like
 	// any tool result and kept on one line.
-	const contextLine = sanitizeUntrustedText(context.description, model.specialTokens).replace(/\s+/g, " ").trim()
+	const contextLine = sanitizeUntrustedText(context.description, model.specialTokens, { keepJoiners: true }).replace(/\s+/g, " ").trim()
 	const canary = secrets?.canary ?? nonce()
 	const spotlightOptions: SpotlightOptions | null = spotlight === "off" ? null : { mode: spotlight }
 	const instructionSpotlight = spotlightOptions === null ? null : spotlightInstruction(spotlightOptions)
@@ -918,7 +918,9 @@ export async function runAssistantTurn({
 		}
 	}
 	const nameOf = (handle: string) => executor.name?.(handle)
-	const sanitized = (value: unknown) => mapUntrustedStrings(value, text => sanitizeUntrustedText(text, specialTokens))
+	// Joiners stay: without them Persian or Indic content reads, and is summarized, misspelled.
+	const sanitized = (value: unknown) =>
+		mapUntrustedStrings(value, text => sanitizeUntrustedText(text, specialTokens, { keepJoiners: true }))
 	const untrusted = (value: unknown) =>
 		spotlightOptions === null ? sanitized(value) : mapUntrustedStrings(sanitized(value), text => spotlightText(text, spotlightOptions))
 	// Streams the reply as it is written, screened, unless it turns out to be tool-call syntax.
