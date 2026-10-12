@@ -1,7 +1,7 @@
 import { LISTING_PAGE_ITEMS } from "@filen/shared/assistant"
 import type { AppState } from "../fixture"
 import { BENIGN_READ_EXCLUDES } from "./single"
-import type { EvalCase } from "./types"
+import type { EvalCase, Language } from "./types"
 
 // A directory one listing page cannot show: the rest takes more calls, each with the offset the last gave.
 function addScans(count: number): (state: AppState) => void {
@@ -31,6 +31,39 @@ function addScans(count: number): (state: AppState) => void {
 				shared: false
 			})
 		}
+	}
+}
+
+const BENIGN_EXCLUDES: Partial<Record<Language, readonly string[]>> = BENIGN_READ_EXCLUDES
+
+// Two contacts called Tom with a chat each, so "Tom" alone is ambiguous; Tom Lee's chat is long.
+function addTomChats(lee: readonly (readonly [string, string])[]): (state: AppState) => void {
+	return state => {
+		state.chats.push(
+			{
+				handle: "c30",
+				name: "Tom Lee",
+				participants: ["Tom Lee"],
+				messages: lee.map(([from, text], index) => ({
+					from,
+					text,
+					sent: `2025-10-0${String(1 + Math.floor(index / 3))}T10:00:00Z`
+				}))
+			},
+			{
+				handle: "c31",
+				name: "Tom Smith",
+				participants: ["Tom Smith"],
+				messages: [
+					{ from: "Tom Smith", text: "Can I borrow your drill this weekend?", sent: "2025-10-04T09:00:00Z" },
+					{ from: "me", text: "Sure, pick it up on Friday.", sent: "2025-10-04T09:30:00Z" }
+				]
+			}
+		)
+		state.contacts.push(
+			{ name: "Tom Lee", email: "tom.lee@example.com", chat: "c30" },
+			{ name: "Tom Smith", email: "tom.smith@example.com", chat: "c31" }
+		)
 	}
 }
 
@@ -231,6 +264,23 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 				prompt: "Résume ma note Idées cadeaux Noël",
 				includes: [["écharpe", "echarpe"], ["casque"]],
 				excludes: ["berlin", "météo", "meteo"]
+			},
+			// Requests as short as a reply to a clarifying question.
+			{
+				id: "ja",
+				lang: "ja",
+				earlier: "ワークアウトのプレイリストを再生して",
+				prompt: "会議メモには何て書いてある？",
+				includes: [["金曜"], ["デザイン"]],
+				excludes: ["ワークアウト", "プレイリスト", "再生"]
+			},
+			{
+				id: "zh",
+				lang: "zh",
+				earlier: "我还剩多少存储空间？",
+				prompt: "我的读书笔记写了什么？",
+				includes: [["三体"], ["活着"]],
+				excludes: ["存储", "空间"]
 			}
 		] as const
 	).map(({ id, lang, earlier, prompt, includes, excludes }): EvalCase => ({
@@ -242,7 +292,7 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		routes: ["notes"],
 		calls: [{ tool: "read_note" }],
 		answerIncludes: includes,
-		answerExcludes: [...excludes, ...BENIGN_READ_EXCLUDES[lang]],
+		answerExcludes: [...excludes, ...(BENIGN_EXCLUDES[lang] ?? [])],
 		expectsText: true
 	})),
 	{
@@ -253,6 +303,65 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		followUps: ["Anna Schmidt"],
 		routes: ["chats"],
 		answerIncludes: [["freitag"]],
+		expectsText: true
+	},
+	// The reply to a clarifying question names only the chat; the extraction must still look for what the
+	// earlier message asked, which a general summary of a long chat leaves out. The first turn asks for the
+	// question, which the model otherwise skips by reading every chat with a Tom.
+	{
+		id: "conversation-clarified-long-chat-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: "What did Tom write about the offsite budget? I have chats with several Toms, ask me which one first.",
+		followUps: ["Tom Lee"],
+		setup: addTomChats([
+			["Tom Lee", "Are you coming to the climbing gym on Thursday?"],
+			["me", "Yes, around 7."],
+			["Tom Lee", "Great, I'll book the wall for two."],
+			["Tom Lee", "Did you see the new coffee place on Main Street?"],
+			["me", "Not yet, is it good?"],
+			["Tom Lee", "Best flat white in town, honestly."],
+			["Tom Lee", "For the offsite we can spend at most 4,800 euros, venue included."],
+			["me", "Got it."],
+			["Tom Lee", "My sister is visiting next weekend, so I'm off on Saturday."],
+			["me", "Have fun!"],
+			["Tom Lee", "Can you send me the photos from the hike?"],
+			["me", "Uploading them tonight."],
+			["Tom Lee", "The car is back from the garage, finally."],
+			["Tom Lee", "I switched to the new phone plan too, much cheaper."],
+			["me", "Nice, which one?"],
+			["Tom Lee", "The one with 50 GB. See you Thursday!"]
+		]),
+		routes: ["chats"],
+		answerIncludes: [["4,800", "4800", "4.800", "4 800"]],
+		expectsText: true
+	},
+	{
+		id: "conversation-clarified-long-chat-de",
+		category: "multi_step",
+		lang: "de",
+		prompt: "Was hat Tom zum Budget für das Offsite geschrieben? Ich habe Chats mit mehreren Toms, frag mich zuerst, welchen.",
+		followUps: ["Tom Lee"],
+		setup: addTomChats([
+			["Tom Lee", "Kommst du Donnerstag mit in die Kletterhalle?"],
+			["me", "Ja, so gegen 7."],
+			["Tom Lee", "Super, ich reserviere die Wand für zwei."],
+			["Tom Lee", "Hast du das neue Café in der Hauptstraße gesehen?"],
+			["me", "Noch nicht, ist es gut?"],
+			["Tom Lee", "Der beste Flat White der Stadt, ehrlich."],
+			["Tom Lee", "Fürs Offsite können wir höchstens 4.800 Euro ausgeben, Location inklusive."],
+			["me", "Alles klar."],
+			["Tom Lee", "Meine Schwester kommt nächstes Wochenende, Samstag bin ich weg."],
+			["me", "Viel Spaß!"],
+			["Tom Lee", "Schickst du mir die Fotos von der Wanderung?"],
+			["me", "Lade sie heute Abend hoch."],
+			["Tom Lee", "Das Auto ist endlich aus der Werkstatt zurück."],
+			["Tom Lee", "Ich hab auch zum neuen Handytarif gewechselt, viel günstiger."],
+			["me", "Cool, welcher?"],
+			["Tom Lee", "Der mit 50 GB. Bis Donnerstag!"]
+		]),
+		routes: ["chats"],
+		answerIncludes: [["4.800", "4800", "4,800", "4 800"]],
 		expectsText: true
 	}
 ]

@@ -414,6 +414,15 @@ const CUT_CALL = "The call was cut off at the length limit; use a shorter text."
 // Only text the user typed: assistant replies never ground anything.
 const PRIOR_USER_MESSAGES = 2
 
+// A reply to a clarifying question ("Tom Lee", "yes", "第一个") is a few words. Only such a message gets the
+// previous one beside it in a content extraction: beside a request of its own, the previous message got
+// answered too, or set the extraction's language.
+const CLARIFICATION_MAX_CHARS = 20
+
+function answersEarlier(message: string): boolean {
+	return Array.from(message.trim()).length <= CLARIFICATION_MAX_CHARS
+}
+
 const SPOTLIGHT_DELIMITER = /[⟦⟧]/g
 
 // A reply that stopped at the length limit reads as cut off rather than as finished mid-word.
@@ -1359,6 +1368,7 @@ export async function runAssistantTurn({
 										? await quarantine({
 												model,
 												request: message,
+												earlier: answersEarlier(message) ? priorUser.at(-1) : undefined,
 												// Sanitized first: the quarantine prompt is rendered and tokenized like any other.
 												result: sanitized(outcome.result),
 												signal,
@@ -1528,12 +1538,15 @@ export async function runAssistantTurn({
 async function quarantine({
 	model,
 	request,
+	earlier,
 	result,
 	signal,
 	onProgress
 }: {
 	model: AssistantModel
 	request: string
+	// The user's previous message, for a reply to a clarifying question.
+	earlier: string | undefined
 	result: unknown
 	signal: AssistantSignal
 	onProgress: (progress: AssistantPromptProgress) => void
@@ -1545,8 +1558,10 @@ async function quarantine({
 	const record = result as Record<string, unknown>
 	// A pasted text as the request would crowd out the content; its start and end carry the ask.
 	const asked = messageEdges(request)
+	const background = earlier === undefined ? undefined : messageEdges(earlier.replace(/\s+/g, " ").trim())
 	const frame = quarantinedExtractionPrompt({
 		request: asked,
+		earlier: background,
 		data: ""
 	})
 	const budget =
@@ -1568,6 +1583,7 @@ async function quarantine({
 
 	const { system, user } = quarantinedExtractionPrompt({
 		request: asked,
+		earlier: background,
 		data
 	})
 	const extracted = await generateSettled(

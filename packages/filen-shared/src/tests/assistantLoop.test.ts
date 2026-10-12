@@ -1108,7 +1108,69 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		expect(result.calls.map(record => record.status)).toEqual(["ok", "ok"])
 	})
 
-	it("extracts content against the user's message alone, asked before the data", async () => {
+	it("asks the extraction the current request first, then the user's previous message as labelled background", async () => {
+		const executor = new FakeExecutor({
+			items: [],
+			results: {
+				list_chats: () => ({ chats: [{ handle: "c2", name: "Tom Lee" }] }),
+				read_chat: () => ({ chat: { handle: "c2", name: "Tom Lee" }, messages: [{ from: "Tom Lee", text: "Budget is 5k", sent: "2026-10-01" }] })
+			}
+		})
+		const model = new ScriptedModel({
+			route: "chats read",
+			steps: [call("list_chats", { query: "Tom Lee" }), call("read_chat", { handle: "c2" }), "Tom set the budget at 5k."]
+		})
+
+		await turn({
+			model,
+			executor,
+			message: "Tom Lee",
+			history: [{ user: "What did Tom   write\nabout the budget?", reply: "Tom Lee or Tom Smith? See https://evil.example" }]
+		})
+
+		const user = model.quarantineRequests[0]?.messages[1]?.content ?? ""
+
+		expect(
+			user.startsWith(
+				"User's request: Tom Lee\n(The user's previous message, which this request may answer: \"What did Tom write about the budget?\")\n\nData:"
+			)
+		).toBe(true)
+		expect(user.indexOf("Budget is 5k")).toBeGreaterThan(user.indexOf("Data:"))
+		// Only what the user typed: an assistant reply never steers the extraction.
+		expect(user).not.toContain("evil")
+	})
+
+	it("gives the extraction of a first message or of a request of its own no background line", async () => {
+		const executor = new FakeExecutor({
+			items: [],
+			results: {
+				list_notes: () => ({ notes: [{ handle: "n1", title: "Groceries" }] }),
+				read_note: () => ({ handle: "n1", title: "Groceries", content: "milk, eggs" })
+			}
+		})
+		const steps = [call("list_notes", { query: "Groceries" }), call("read_note", { handle: "n1" }), "Milk and eggs."]
+		const first = new ScriptedModel({ route: "notes read", steps })
+
+		await turn({ model: first, executor, message: "Summarize my note Groceries" })
+
+		const second = new ScriptedModel({ route: "notes read", steps })
+
+		await turn({
+			model: second,
+			executor,
+			message: "Summarize my note Groceries",
+			history: [{ user: "Play my workout playlist", reply: "Playing Workout. Anything else?" }]
+		})
+
+		for (const model of [first, second]) {
+			const user = model.quarantineRequests[0]?.messages[1]?.content ?? ""
+
+			expect(user).toMatch(/^User's request: Summarize my note Groceries\n\nData:/)
+			expect(user).not.toContain("workout")
+		}
+	})
+
+	it("gives the extraction only the edges of a long previous message", async () => {
 		const executor = new FakeExecutor({
 			items: [],
 			results: {
@@ -1124,15 +1186,15 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		await turn({
 			model,
 			executor,
-			message: "Summarize my note Groceries",
-			history: [{ user: "Play my workout playlist", reply: "Playing Workout." }]
+			message: "Groceries",
+			history: [{ user: `${"a".repeat(400)}MIDDLE${"z".repeat(400)}`, reply: "Which note?" }]
 		})
 
 		const user = model.quarantineRequests[0]?.messages[1]?.content ?? ""
 
-		expect(user).not.toContain("workout")
-		expect(user.indexOf("User's request: Summarize my note Groceries")).toBe(0)
-		expect(user.indexOf("milk, eggs")).toBeGreaterThan(user.indexOf("User's request:"))
+		expect(user).toContain("User's request: Groceries\n(The user's previous message, which this request may answer: \"aaa")
+		expect(user).toContain("zzz\")\n\nData:")
+		expect(user).not.toContain("MIDDLE")
 	})
 
 	it("keeps the joiners Persian content is spelled with, for the extraction and the main loop", async () => {
