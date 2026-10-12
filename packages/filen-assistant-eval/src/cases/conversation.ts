@@ -67,6 +67,33 @@ function addTomChats(lee: readonly (readonly [string, string])[]): (state: AppSt
 	}
 }
 
+// A note and a chat that share a word ("offsite"), so a request for one right after the other can be pulled
+// to the earlier one's route.
+function addOffsite(state: AppState): void {
+	state.notes.push({
+		handle: "n40",
+		title: "Offsite shopping list",
+		type: "checklist",
+		content: "[ ] name badges\n[ ] coffee for 12\n[ ] flip chart paper",
+		tags: [],
+		pinned: false,
+		favorite: false,
+		archived: false,
+		trashed: false,
+		edited: "2025-10-06T10:00:00Z"
+	})
+	state.chats.push({
+		handle: "c40",
+		name: "Offsite planning",
+		participants: ["Lena", "Tom"],
+		messages: [
+			{ from: "Lena", text: "The venue is booked: Haus am See, 13 and 14 November.", sent: "2025-10-06T09:00:00Z" },
+			{ from: "Tom", text: "We can spend at most 4,800 EUR, venue included.", sent: "2025-10-06T09:30:00Z" },
+			{ from: "me", text: "I'll bring the shopping list.", sent: "2025-10-06T10:00:00Z" }
+		]
+	})
+}
+
 // Only the last page holds these.
 function lastScans(count: number): string[] {
 	return [count, count - 1, count - 2].map(index => `Scan_${String(index).padStart(3, "0")}`)
@@ -74,6 +101,7 @@ function lastScans(count: number): string[] {
 
 const TWO_PAGES = LISTING_PAGE_ITEMS + 5
 const THREE_PAGES = LISTING_PAGE_ITEMS * 2 + 5
+const DIRECTORY_COUNT = 214
 
 // Several turns of one conversation: the answer to a clarifying question, a follow-up that only makes sense
 // with the turn before, a request that names the item a previous turn listed, and turns that move to another
@@ -296,6 +324,242 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		answerExcludes: [...excludes, ...(BENIGN_EXCLUDES[lang] ?? [])],
 		expectsText: true
 	})),
+	// A new request that names another source sharing a word with the previous one: routed by its own words.
+	...(
+		[
+			["en", "What does my note about the offsite shopping list say?", "Summarize my offsite planning chat."],
+			["en-now", "What does my note about the offsite shopping list say?", "Now summarize my chat about the offsite."],
+			["de", "Was steht in meiner Notiz zur Offsite-Einkaufsliste?", "Fasse meinen Chat zur Offsite-Planung zusammen."],
+			["ja", "Offsite shopping listのメモには何が書いてある？", "Offsite planningのチャットを要約して"]
+		] as const
+	).map(([id, prompt, followUp]): EvalCase => ({
+		id: `conversation-switch-note-chat-${id}`,
+		category: "multi_step",
+		lang: id === "en-now" ? "en" : id,
+		prompt,
+		followUps: [followUp],
+		setup: addOffsite,
+		routes: ["chats"],
+		calls: [{ tool: "read_chat", args: { handle: "c40" } }],
+		answerIncludes: [["4,800", "4.800", "4800", "4 800", "haus am see"]],
+		expectsText: true
+	})),
+	...(
+		[
+			["en", "Summarize my offsite planning chat.", "What does my note about the offsite shopping list say?"],
+			["es", "Resume mi chat de planificación del offsite.", "¿Qué dice mi nota con la lista de compras del offsite?"],
+			["fr", "Résume ma discussion sur l'organisation de l'offsite.", "Que dit ma note sur la liste de courses de l'offsite ?"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-switch-chat-note-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		setup: addOffsite,
+		routes: ["notes"],
+		calls: [{ tool: "read_note", args: { handle: "n40" } }],
+		answerIncludes: [["12"]],
+		expectsText: true
+	})),
+	...(
+		[
+			["en", "What does roadmap.md say about the launch?", "And my meeting note, what does it say about the launch?"],
+			["pt", "O que diz o roadmap.md sobre o lançamento?", "E a minha nota Meeting 2025-10-01, o que diz sobre o lançamento?"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-switch-file-note-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["notes"],
+		calls: [{ tool: "read_note", args: { handle: "n3" } }],
+		answerIncludes: [["15"]],
+		expectsText: true
+	})),
+	...(
+		[
+			["en", "What does my meeting note say about the launch?", "Now check roadmap.md: what does it say about the launch?"],
+			["zh", "我的会议笔记里关于发布说了什么？", "那roadmap.md里关于发布写了什么？"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-switch-note-file-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["files"],
+		calls: [{ tool: "read_text_file", args: { handle: "f27" } }],
+		answerIncludes: [["12,000", "12.000", "12000", "12 000", "cookie", "1.2万", "1.2 万"]],
+		expectsText: true
+	})),
+	// The same switch after a reply that asked a question (an offer to read the item it found).
+	...(
+		[
+			["en", "Do I have a note about the offsite shopping list? Ask me before you read it.", "Summarize my offsite planning chat."],
+			[
+				"de",
+				"Habe ich eine Notiz zur Offsite-Einkaufsliste? Frag mich, bevor du sie liest.",
+				"Fasse meinen Chat zur Offsite-Planung zusammen."
+			],
+			["ja", "Offsite shopping listのメモはある？読む前に聞いて。", "Offsite planningのチャットを要約して"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-switch-offer-note-chat-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		setup: addOffsite,
+		routes: ["chats"],
+		calls: [{ tool: "read_chat", args: { handle: "c40" } }],
+		answerIncludes: [["4,800", "4.800", "4800", "4 800", "haus am see"]],
+		expectsText: true
+	})),
+	...(
+		[
+			[
+				"en",
+				"Do I have a chat about the offsite planning? Ask me before you read it.",
+				"What does my note about the offsite shopping list say?"
+			],
+			[
+				"es",
+				"¿Tengo un chat sobre la planificación del offsite? Pregúntame antes de leerlo.",
+				"¿Qué dice mi nota con la lista de compras del offsite?"
+			]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-switch-offer-chat-note-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		setup: addOffsite,
+		routes: ["notes"],
+		calls: [{ tool: "read_note", args: { handle: "n40" } }],
+		answerIncludes: [["12"]],
+		expectsText: true
+	})),
+	// A short follow-up that picks from what the previous turn listed: routed like that turn.
+	...(
+		[
+			["en", "List my notes", "Read the second one"],
+			["de", "Liste meine Notizen auf", "Lies die zweite"],
+			["ja", "メモを一覧にして", "2番目を読んで"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-ordinal-note-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["notes"],
+		calls: [{ tool: "read_note" }]
+	})),
+	{
+		id: "conversation-ordinal-chat-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: "List my chats",
+		followUps: ["Summarize the first one"],
+		routes: ["chats"],
+		calls: [{ tool: "read_chat" }]
+	},
+	{
+		id: "conversation-ordinal-file-de",
+		category: "multi_step",
+		lang: "de",
+		prompt: "Was liegt in meinem Ordner Documents?",
+		followUps: ["Zeig mir die zweite"],
+		routes: ["files"]
+	},
+	// A directory of many pages: the next page follows, not a count.
+	...(
+		[
+			["en", "What's in my Scans folder?", "What else is in there?"],
+			["de", "Was liegt in meinem Ordner Scans?", "Und was ist sonst noch drin?"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-list-page-large-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		setup: addScans(DIRECTORY_COUNT),
+		routes: ["files"],
+		calls: [{ tool: "list_directory", args: { offset: LISTING_PAGE_ITEMS } }],
+		answerIncludes: [["Scan_031", "Scan_045", "Scan_060"]],
+		expectsText: true
+	})),
+	// A directory longer than a listing page: the count is the listing's, not rows added up.
+	...(
+		[
+			["en", "How many files are in my Scans folder?"],
+			["de", "Wie viele Dateien liegen in meinem Ordner Scans?"],
+			["ja", "Scansフォルダにはファイルがいくつありますか？"]
+		] as const
+	).map(([lang, prompt]): EvalCase => ({
+		id: `simple-count-directory-${lang}`,
+		category: "simple",
+		lang,
+		prompt,
+		setup: addScans(DIRECTORY_COUNT),
+		routes: ["files", "insights"],
+		answerIncludes: [[String(DIRECTORY_COUNT)]],
+		expectsText: true
+	})),
+	// Replies that only continue the previous request follow its route.
+	...(
+		[
+			["en", "Do I have a note called Groceries? Ask me before you read it.", "yes"],
+			["de", "Habe ich eine Notiz namens Einkaufsliste? Frag mich, bevor du sie liest.", "ja"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-continue-yes-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["notes"],
+		calls: [{ tool: "read_note", args: { handle: lang === "en" ? "n1" : "n2" } }],
+		answerIncludes: [lang === "en" ? ["milk", "coffee"] : ["milch", "käse"]],
+		expectsText: true
+	})),
+	...(
+		[
+			["en", "Find my Telekom invoices and ask me which one to show.", "the second one"],
+			["id", "Cari faktur Telekom saya, lalu tanyakan mana yang harus ditampilkan.", "yang kedua"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-continue-choice-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["files"]
+	})),
+	{
+		id: "conversation-continue-language-de",
+		category: "multi_step",
+		lang: "de",
+		prompt: "Summarize my note Groceries",
+		followUps: ["and in German?"],
+		routes: ["notes"],
+		answerIncludes: [["milch"], ["kaffee", "eier"]],
+		expectsText: true
+	},
+	{
+		id: "conversation-continue-language-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: "会議メモを要約して",
+		followUps: ["英語で？"],
+		routes: ["notes"],
+		answerIncludes: [["design"], ["friday"]],
+		expectsText: true
+	},
 	{
 		id: "conversation-clarified-extraction-de",
 		category: "multi_step",

@@ -227,11 +227,22 @@ function summarizeMain(records: readonly MainRecord[]) {
 		),
 		decodeTokensPerSecond: decodeMs === 0 ? null : outputTokens / (decodeMs / 1000),
 		inputTokensPerTurn: records.length === 0 ? null : timings.reduce((sum, timing) => sum + timing.inputTokens, 0) / records.length,
+		// Cases of several turns, which read the earlier replies (and the handles they carry) again.
+		inputTokensPerConversation: percentile(
+			records.filter(record => (record.transcript.replies?.length ?? 0) > 0).map(record => record.transcript.timings.inputTokens),
+			0.5
+		),
 		replyChars: percentile(
 			answers.map(answer => answer.length),
 			0.5
 		),
-		handlesInReplies: rate(answers.map(answer => HANDLE_IN_REPLY.test(answer)))
+		// Every reply the user saw, an earlier turn's too.
+		handlesInReplies: rate(
+			records
+				.map(record => [record.transcript.answer, ...(record.transcript.replies ?? [])].filter(text => text.length > 0))
+				.filter(shown => shown.length > 0)
+				.map(shown => shown.some(text => HANDLE_IN_REPLY.test(text)))
+		)
 	}
 }
 
@@ -447,7 +458,7 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 			"### Replies and prompt size",
 			"",
 			table(
-				["Model", "Median reply", "Replies showing handles", "Input tokens per turn"],
+				["Model", "Median reply", "Replies showing handles", "Input tokens per turn", "Median input tokens per conversation"],
 				rows.map(({ entry, records }) => {
 					const s = summarizeMain(records)
 
@@ -455,7 +466,8 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 						label(entry.model),
 						s.replyChars === null ? "–" : `${String(s.replyChars)} chars`,
 						pct(s.handlesInReplies),
-						s.inputTokensPerTurn === null ? "–" : String(Math.round(s.inputTokensPerTurn))
+						s.inputTokensPerTurn === null ? "–" : String(Math.round(s.inputTokensPerTurn)),
+						s.inputTokensPerConversation === null ? "–" : String(Math.round(s.inputTokensPerConversation))
 					]
 				})
 			),

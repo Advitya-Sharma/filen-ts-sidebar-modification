@@ -8,6 +8,7 @@ import {
 	DIRECTORIES_BY_SIZE_NOTE,
 	inDayRange,
 	listingPage,
+	listRest,
 	MAX_ARRAY_ITEMS,
 	resolveDateFilter,
 	type AssistantPeriodFilter
@@ -851,11 +852,7 @@ export class FakeApp {
 					size: false
 				})
 			})),
-			...(pool.length > SEARCH_LIMIT
-				? {
-						more: pool.length - SEARCH_LIMIT
-					}
-				: {}),
+			...listRest(pool.length, SEARCH_LIMIT),
 			...(selection.range === null
 				? {}
 				: {
@@ -965,6 +962,11 @@ export class FakeApp {
 							})
 						}
 					}),
+					...(page.shown === undefined
+						? {}
+						: {
+								shown: page.shown
+							}),
 					...(page.more > 0
 						? {
 								more: page.more,
@@ -1030,11 +1032,7 @@ export class FakeApp {
 							})
 						}
 					}),
-					...(kept.length > RECENT_LIMIT
-						? {
-								more: kept.length - RECENT_LIMIT
-							}
-						: {}),
+					...listRest(kept.length, RECENT_LIMIT),
 					...(selection.range === null
 						? {}
 						: {
@@ -1076,11 +1074,7 @@ export class FakeApp {
 							taken: evalLocalDay(item.modified)
 						}
 					}),
-					...(ordered.length > PHOTOS_LIMIT
-						? {
-								more: ordered.length - PHOTOS_LIMIT
-							}
-						: {}),
+					...listRest(ordered.length, PHOTOS_LIMIT),
 					...(selection.range === null
 						? {}
 						: {
@@ -1335,11 +1329,7 @@ export class FakeApp {
 
 				return {
 					notes: ordered.slice(0, NOTES_LIMIT).map(item => this.noteSummary(item)),
-					...(ordered.length > NOTES_LIMIT
-						? {
-								more: ordered.length - NOTES_LIMIT
-							}
-						: {}),
+					...listRest(ordered.length, NOTES_LIMIT),
 					...(selection.range === null || undated
 						? {}
 						: {
@@ -1723,11 +1713,7 @@ export class FakeApp {
 								: {})
 						}
 					}),
-					...(kept.length > MAX_ARRAY_ITEMS
-						? {
-								more: kept.length - MAX_ARRAY_ITEMS
-							}
-						: {}),
+					...listRest(kept.length, MAX_ARRAY_ITEMS),
 					...(section === "trash" && kept.length > 0
 						? {
 								note: "Only the user can restore or delete these, in the app. Do not offer to."

@@ -44,7 +44,7 @@ Language fidelity uses the script of the reply for non-Latin languages and funct
 
 ## Report
 
-`summary.md` (the same data in `summary.json`) has, per main-suite preset: pass rate, routing, tool name, exact and normalized arguments, multi-step end state, irrelevance, missing-parameter questions, safety, language fidelity and invalid calls before/after the retry; latency (median and p90 turn, router and first-step time to first token, decode speed), peak RSS, GPU memory and load time; reply and prompt sizes; pass rate per category and per language; and each model's worst failures. Per injection preset: attempted, executed, leaked, decided on the card, attack success, navigation hijacks, in-scope misactions, utility and median turn.
+`summary.md` (the same data in `summary.json`) has, per main-suite preset: pass rate, routing, tool name, exact and normalized arguments, multi-step end state, irrelevance, missing-parameter questions, safety, language fidelity and invalid calls before/after the retry; latency (median and p90 turn, router and first-step time to first token, decode speed), peak RSS, GPU memory and load time; reply and prompt sizes (replies showing handles, input tokens per turn and per multi-turn case); pass rate per category and per language; and each model's worst failures. Per injection preset: attempted, executed, leaked, decided on the card, attack success, navigation hijacks, in-scope misactions, utility and median turn.
 
 ## Gate for model-facing changes
 

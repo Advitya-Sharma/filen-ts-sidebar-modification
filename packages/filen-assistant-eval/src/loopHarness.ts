@@ -408,7 +408,7 @@ export async function runLoopTurns({
 			answers.push(result.reply)
 			// As the web session keeps it: a turn that replied, windowed to the history budget.
 			if (result.withheld || result.reply.trim().length > 0) {
-				history = windowHistory([...history, { user: message, reply: result.withheld ? "" : result.reply, prompt: result.prompt }])
+				history = windowHistory([...history, { user: message, reply: result.historyReply, prompt: result.prompt }])
 			}
 
 			last = result
