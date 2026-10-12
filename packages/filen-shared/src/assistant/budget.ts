@@ -132,8 +132,18 @@ export function capToolResult(value: unknown): unknown {
 	return value
 }
 
+// What a list cut to `limit` rows adds: how many there are in all and how many it left out. A small model asked
+// for a count adds the rows it sees to `more` and gets it wrong, so it is given the total to copy. Not for a
+// listing a model pages through (listingPage): it passes a total there as the next page's offset.
+export function listRest(count: number, limit: number = MAX_ARRAY_ITEMS): { total: number; more: number } | Record<never, never> {
+	return count > limit ? { total: count, more: count - limit } : {}
+}
+
 // How many rows a long directory listing shows at a time; the model pages on with an offset.
 export const LISTING_PAGE_ITEMS = 30
+
+// Listings longer than this many pages say how many items they hold.
+const LISTING_COUNTED_PAGES = 3
 
 // The row an `offset` argument starts a listing page at.
 export function listingOffset(offset: unknown): number {
@@ -143,11 +153,15 @@ export function listingOffset(offset: unknown): number {
 // The page of a listing an `offset` argument asks for: how many rows follow it and the offset of the next
 // page (the model would otherwise pass the count of rows left as one), and, for an offset past the end, a
 // note saying so (an empty page reads as an empty directory). A filtered listing's count is no directory's.
+// A listing of many pages also says which rows it shows of how many ("1–30 of 214 items"): asked for a count,
+// a model adds `more` to the rows it saw and gets it wrong. Not for a few pages, where that sum is easy and a
+// count made the model answer a follow-up from it instead of reading the next page; never as a bare number,
+// which beside `next` it passed as the next page's offset.
 export function listingPage<T>(
 	items: readonly T[],
 	offset: unknown,
 	{ filtered }: { filtered: boolean }
-): { rows: T[]; offset: number; more: number; next: number; note?: string } {
+): { rows: T[]; offset: number; more: number; next: number; note?: string; shown?: string } {
 	const start = listingOffset(offset)
 	const end = start + LISTING_PAGE_ITEMS
 	const count = items.length === 1 ? "1 item" : `${String(items.length)} items`
@@ -157,6 +171,11 @@ export function listingPage<T>(
 		offset: start,
 		more: Math.max(0, items.length - end),
 		next: end,
+		...(items.length > LISTING_PAGE_ITEMS * LISTING_COUNTED_PAGES && start < items.length
+			? {
+					shown: `${String(start + 1)}–${String(Math.min(end, items.length))} of ${String(items.length)}${filtered ? " matching" : ""} items`
+				}
+			: {}),
 		...(start > 0 && start >= items.length
 			? {
 					note: filtered

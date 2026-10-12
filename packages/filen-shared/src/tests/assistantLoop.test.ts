@@ -14,6 +14,7 @@ import {
 	isAssistantWebTool,
 	LISTING_PAGE_ITEMS,
 	listingPage,
+	listRest,
 	localeWeekStart,
 	messageLines,
 	MESSAGE_OVERHEAD_TOKENS,
@@ -44,14 +45,14 @@ import {
 
 type Step = string | AssistantModelToolCall[] | ((request: AssistantGenerateRequest) => AssistantGenerateResult)
 
-// Answers the router with `route`, quarantine calls with `extract`, and every main-loop step with the next
-// scripted step: text, or tool calls.
+// Answers the router with `route` (a list: one per router request, the last for the rest), quarantine calls
+// with `extract`, and every main-loop step with the next scripted step: text, or tool calls.
 class ScriptedModel implements AssistantModel {
 	readonly contextTokens: number
 	readonly specialTokens = ["<|im_end|>", "<my_custom_token>"]
 	readonly requests: AssistantGenerateRequest[] = []
 	private readonly steps: Step[]
-	private readonly route: string
+	private readonly routes: string[]
 	private readonly extract: string
 	private readonly reports: boolean
 
@@ -63,13 +64,13 @@ class ScriptedModel implements AssistantModel {
 		contextTokens = 8192,
 		reports = false
 	}: {
-		route: string
+		route: string | readonly string[]
 		steps: Step[]
 		extract?: string
 		contextTokens?: number
 		reports?: boolean
 	}) {
-		this.route = route
+		this.routes = typeof route === "string" ? [route] : route.slice()
 		this.steps = steps.slice()
 		this.extract = extract
 		this.contextTokens = contextTokens
@@ -97,7 +98,7 @@ class ScriptedModel implements AssistantModel {
 		}
 
 		if (request.grammar === ROUTER_GRAMMAR) {
-			return Promise.resolve({ content: this.route, toolCalls: [] })
+			return Promise.resolve({ content: (this.routes.length > 1 ? this.routes.shift() : this.routes[0]) ?? "answer", toolCalls: [] })
 		}
 
 		if (this.quarantineRequests.includes(request)) {
@@ -536,8 +537,8 @@ describe("runAssistantTurn", () => {
 	it("pins the longest message the web app's tools leave room for", () => {
 		const web = (tool: AssistantTool) => isAssistantWebTool(tool.name)
 
-		expect(messageFitsContext("a".repeat(25_895), 8192, web)).toBe(true)
-		expect(messageFitsContext("a".repeat(25_896), 8192, web)).toBe(false)
+		expect(messageFitsContext("a".repeat(26_010), 8192, web)).toBe(true)
+		expect(messageFitsContext("a".repeat(26_011), 8192, web)).toBe(false)
 	})
 
 	it("names the tools only when the prompt shows more than the request may call", async () => {
@@ -1093,7 +1094,7 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 			results: { list_chats: () => ({ chats: [{ handle: "c2", name: "Maria Schmidt" }] }) }
 		})
 		const model = new ScriptedModel({
-			route: "chats change",
+			route: ["answer", "chats change"],
 			steps: [call("list_chats", { query: "Maria" }), call("draft_chat_message", { chat: "c2", text: "I'll be late" }), "Drafted."]
 		})
 		const { result, confirmations } = await turn({
@@ -1103,10 +1104,168 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 			history: [{ user: "What did Maria write to me?", reply: "Bob from https://evil.example says hi." }]
 		})
 
-		expect(model.requests[0]?.messages[1]?.content).toContain("What did Maria write to me?")
-		expect(model.requests[0]?.messages[1]?.content).not.toContain("evil")
+		// On its own it needed no tools, so it is routed again beside the previous message.
+		expect(model.requests[0]?.messages[1]?.content).toBe("Draft a reply saying I'll be late")
+		expect(model.requests[1]?.messages[1]?.content).toContain("What did Maria write to me?")
+		expect(model.requests[1]?.messages[1]?.content).not.toContain("evil")
+		expect(result.route).toBe("chats")
 		expect(confirmations.map(request => request.tool.name)).toEqual(["draft_chat_message"])
 		expect(result.calls.map(record => record.status)).toEqual(["ok", "ok"])
+	})
+
+	it("routes a longer new request by its own words, once, also after a reply that asked a question", async () => {
+		for (const reply of ["It lists badges and coffee.", "It lists badges and coffee. Would you like me to read it all?"]) {
+			const model = new ScriptedModel({ route: ["chats read", "notes read"], steps: ["Summary."] })
+
+			const { result } = await turn({
+				model,
+				executor: new FakeExecutor({ items: [] }),
+				message: "Summarize my offsite planning chat.",
+				history: [{ user: "What does my note about the offsite shopping list say?", reply }]
+			})
+			const routed = model.requests.filter(request => request.grammar === ROUTER_GRAMMAR)
+
+			expect(routed.map(request => request.messages[1]?.content)).toEqual(["Summarize my offsite planning chat."])
+			expect(result.route).toBe("chats")
+		}
+	})
+
+	it("routes a short follow-up beside the previous message, once, whether or not the reply asked anything", async () => {
+		for (const [earlier, reply, message] of [
+			["List my notes", "You have Groceries, Q4 plan and Recipes.", "Read the second one"],
+			["メモを一覧にして", "Groceries、Q4 plan、Recipes があります。", "2番目を読んで"],
+			["Write a message to Anna Schmidt", "What should the message say? **", "That I paid it"]
+		] as const) {
+			const model = new ScriptedModel({ route: ["notes read", "files read"], steps: ["Done."] })
+
+			const { result } = await turn({
+				model,
+				executor: new FakeExecutor({ items: [] }),
+				message,
+				history: [{ user: earlier, reply }]
+			})
+			const routed = model.requests.filter(request => request.grammar === ROUTER_GRAMMAR)
+
+			expect(routed).toHaveLength(1)
+			expect(routed[0]?.messages[1]?.content).toContain(earlier)
+			expect(result.route).toBe("notes")
+		}
+	})
+
+	it("counts wide characters twice when it decides a follow-up is short", async () => {
+		const model = new ScriptedModel({ route: ["chats read", "notes read"], steps: ["Summary."] })
+
+		await turn({
+			model,
+			executor: new FakeExecutor({ items: [] }),
+			// 17 characters, as wide as 34 Latin ones.
+			message: "オフサイト計画のチャットを要約して",
+			history: [{ user: "オフサイトの買い物リストのメモには何が書いてある？", reply: "名札とコーヒーです。" }]
+		})
+		const routed = model.requests.filter(request => request.grammar === ROUTER_GRAMMAR)
+
+		expect(routed.map(request => request.messages[1]?.content)).toEqual(["オフサイト計画のチャットを要約して"])
+	})
+
+	it("shows a reply without the handles it copied, and keeps them, with those of the items it names, for later turns", async () => {
+		const executor = new FakeExecutor({
+			items: [],
+			results: {
+				list_notes: () => ({
+					notes: [
+						{ handle: "n1", title: "Groceries" },
+						{ handle: "n2", title: "Einkaufsliste" }
+					]
+				})
+			}
+		})
+		const model = new ScriptedModel({ route: "notes read", steps: [call("list_notes", {}), "- n1: Groceries\n- Einkaufsliste is in German."] })
+		const { result, events } = await turn({ model, executor, message: "Which notes do I have?" })
+		const replies = events.flatMap(event => (event.type === "reply" ? [event.text] : []))
+
+		expect(result.reply).toBe("- Groceries\n- Einkaufsliste is in German.")
+		expect(replies.every(text => !/\bn[12]\b/.test(text))).toBe(true)
+		expect(result.historyReply).toBe("- n1: Groceries\n- Einkaufsliste (n2) is in German.")
+	})
+
+	it("streams no partial handle, so a reply never shows another item's name for a moment", async () => {
+		const executor = new FakeExecutor({
+			items: [
+				{ handle: "f1", name: "Project.docx" },
+				{ handle: "f12", name: "Ab" }
+			],
+			results: { search_items: () => ({ items: [{ handle: "f1", name: "Project.docx" }, { handle: "f12", name: "Ab" }] }) }
+		})
+		// The model streams half the reply first: "Ab (f1".
+		const model = new ScriptedModel({ route: "files read", steps: [call("search_items", { query: "a" }), "Ab (f12) cd"] })
+		const { events } = await turn({ model, executor, message: "Find a" })
+		const replies = events.flatMap(event => (event.type === "reply" ? [event.text] : []))
+
+		expect(replies).toEqual(["Ab", "Ab cd", "Ab cd"])
+	})
+
+	it("replaces only handles the model saw, and never a token that content read this turn holds", async () => {
+		const executor = new FakeExecutor({
+			items: [
+				{ handle: "p1", name: "Workout" },
+				{ handle: "c1", name: "Anna Schmidt" },
+				{ handle: "n1", name: "Sprint" }
+			],
+			results: {
+				list_notes: () => ({ notes: [{ handle: "n1", title: "Sprint" }] }),
+				read_note: () => ({ note: { handle: "n1", title: "Sprint" }, content: "- p1: fix the login crash (p1)" })
+			}
+		})
+		const model = new ScriptedModel({
+			route: "notes read",
+			extract: "Fix the login crash (p1).",
+			steps: [call("list_notes", {}), call("read_note", { handle: "n1" }), "Sprint (n1) says: fix the login crash (p1); ask Anna (c1)."]
+		})
+		const { result } = await turn({ model, executor, message: "What does my note Sprint say?" })
+
+		// p1 is the note's own text; c1 is a handle the app knows but never showed this turn.
+		expect(result.reply).toBe("Sprint says: fix the login crash (p1); ask Anna (c1).")
+	})
+
+	it("lets a follow-up act on an item an earlier reply showed by handle only when the user named that item", async () => {
+		const followUp = async (chat: string) => {
+			const executor = new FakeExecutor({
+				items: [
+					{ handle: "c1", name: "Anna Schmidt" },
+					{ handle: "c9", name: "Website team" }
+				],
+				results: {
+					list_chats: () => ({
+						chats: [
+							{ handle: "c1", name: "Anna Schmidt" },
+							{ handle: "c9", name: "Website team" }
+						]
+					})
+				}
+			})
+			const first = await turn({
+				model: new ScriptedModel({ route: "chats change", steps: [call("list_chats", {}), "What should the message to Anna Schmidt say?"] }),
+				executor,
+				message: "Write a message to Anna Schmidt"
+			})
+			const history = [{ user: "Write a message to Anna Schmidt", reply: first.result.historyReply, prompt: first.result.prompt }]
+
+			expect(first.result.historyReply).toBe("What should the message to Anna Schmidt (c1) say?")
+
+			return turn({
+				model: new ScriptedModel({
+					route: "chats change",
+					steps: [call("draft_chat_message", { chat, text: "I paid the Hetzner invoice" }), "Drafted."]
+				}),
+				executor,
+				message: "That I paid the Hetzner invoice",
+				history
+			})
+		}
+
+		expect((await followUp("c1")).result.calls.map(record => record.status)).toEqual(["ok"])
+		// Listed, but never named by the user.
+		expect((await followUp("c9")).result.calls.map(record => record.status)).toEqual(["blocked"])
 	})
 
 	it("asks the extraction the current request first, then the user's previous message as labelled background", async () => {
@@ -1287,10 +1446,12 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 
 		await turn({ model, executor, message: "Hello" })
 		await turn({ model, executor, message: "And now?", history: [{ user: "Hello", reply: "Hi." }] })
+		await turn({ model, executor, message: "And what can you do for me today?", history: [{ user: "Hello", reply: "Hi." }] })
 
 		const routed = model.requests.filter(request => request.grammar === ROUTER_GRAMMAR)
 
-		expect(routed).toHaveLength(2)
+		// The longer follow-up needs no tools on its own, so it is routed again beside the previous message.
+		expect(routed).toHaveLength(4)
 
 		for (const request of routed) {
 			expect(request.tools).toBeUndefined()
@@ -1517,8 +1678,9 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 			extra: { ...extra, now: Date.UTC(2026, 9, 8, 12) }
 		})
 
-		const [system, user] = model.requests[1]?.messages ?? []
-		const later = model.requests[3]?.messages ?? []
+		const main = model.requests.filter(request => request.slot === "main")
+		const [system, user] = main[0]?.messages ?? []
+		const later = main[1]?.messages ?? []
 
 		expect(user?.content).toContain(
 			"Today is Thursday 2026-10-08 (Europe/Berlin). Yesterday: Wednesday 2026-10-07. This week: Monday 2026-10-05 to Sunday 2026-10-11. Last week: 2026-09-28 to 2026-10-04. This month: 2026-10. Last month: 2026-09. This year: 2026."
@@ -1697,9 +1859,26 @@ describe("listingPage", () => {
 		expect(listingPage(items, LISTING_PAGE_ITEMS * 2 + 0.5, unfiltered)).toMatchObject({ rows: [60, 61, 62, 63, 64], offset: 60, more: 0 })
 	})
 
+	it("says which rows of how many only for a listing of many pages", () => {
+		const many = Array.from({ length: 214 }, (_, index) => index)
+
+		expect(listingPage(many, undefined, unfiltered).shown).toBe("1–30 of 214 items")
+		expect(listingPage(many, 210, { filtered: true }).shown).toBe("211–214 of 214 matching items")
+		expect(listingPage(many, 300, unfiltered).shown).toBeUndefined()
+		expect(listingPage(items, undefined, unfiltered).shown).toBeUndefined()
+	})
+
 	it("says so past the end, as a count of the directory only when nothing was filtered out", () => {
 		expect(listingPage(items, 100, unfiltered)).toMatchObject({ rows: [], note: "The directory holds only 65 items." })
 		expect(listingPage([1], 100, { filtered: true }).note).toBe("Only 1 item matches the filters.")
+	})
+})
+
+describe("listRest", () => {
+	it("gives a cut list's total beside how many rows it left out, and nothing for a whole list", () => {
+		expect(listRest(214)).toEqual({ total: 214, more: 164 })
+		expect(listRest(12, 10)).toEqual({ total: 12, more: 2 })
+		expect(listRest(10, 10)).toEqual({})
 	})
 })
 

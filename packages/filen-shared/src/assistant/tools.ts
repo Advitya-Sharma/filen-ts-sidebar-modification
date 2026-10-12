@@ -3,8 +3,9 @@ import { ASSISTANT_PERIOD_FILTERS } from "./dates"
 import { defineTool, type AssistantRoute, type AssistantTool, type AssistantToolGroup } from "./tool"
 
 // Items are addressed by short handles ("f3", "d1", "n2", "c4", "p1") that read tools hand out.
-// A model reliably copies a handle it has seen and reliably mangles a UUID, so UUIDs never reach it.
-const handle = (what: string) => z.string().describe(`Handle of ${what}, as returned by an earlier tool result (e.g. "f3")`)
+// A model reliably copies a handle it has seen and reliably mangles a UUID, so UUIDs never reach it. No example
+// handle: one it lacks, it would copy from the example, whatever the item's kind.
+const handle = (what: string) => z.string().describe(`Handle of ${what}, as returned by an earlier tool result`)
 
 const handles = (what: string) => z.array(z.string()).min(1).describe(`Handles of ${what}, as returned by earlier tool results`)
 

@@ -1,6 +1,7 @@
 import { resultItemCount, toolCallSubject } from "./activity"
 import { clipData, estimateTokens, MESSAGE_OVERHEAD_TOKENS, messageLines, serializeToolResult } from "./budget"
 import { AssistantTurnGuard } from "./guard"
+import { foreignTokens, replyHandles, replyWithHandles, replyWithoutHandles, settledReply } from "./handles"
 import {
 	ASSISTANT_CLOSING_NUDGE,
 	ASSISTANT_MALFORMED_RETRY,
@@ -328,6 +329,9 @@ export function windowHistory(history: readonly AssistantHistoryTurn[]): Assista
 
 export type AssistantTurnResult = {
 	reply: string
+	// The reply as later turns read it, for AssistantHistoryTurn.reply: with the handles of the items it names,
+	// which the shown reply leaves out.
+	historyReply: string
 	// The user's turn as the model read it, for AssistantHistoryTurn.prompt.
 	prompt: string
 	withheld: boolean
@@ -421,6 +425,28 @@ const CLARIFICATION_MAX_CHARS = 20
 
 function answersEarlier(message: string): boolean {
 	return Array.from(message.trim()).length <= CLARIFICATION_MAX_CHARS
+}
+
+// A follow-up this short ("yes", "the second one", "Lies die zweite", "2番目を読んで") rarely names what it is
+// about: it is routed beside the user's previous message. A longer one says what it wants, and beside a
+// previous request that shares a word with it ("my offsite note", then "my offsite chat") it is pulled to
+// that request's route, so it is routed on its own. Wide (CJK) characters count twice: they say about as
+// much as two Latin ones.
+const FOLLOW_UP_MAX_WIDTH = 30
+const WIDE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\uff01-\uff60]/u
+
+function routesBesideEarlier(message: string): boolean {
+	let width = 0
+
+	for (const char of message.trim()) {
+		width += WIDE.test(char) ? 2 : 1
+
+		if (width > FOLLOW_UP_MAX_WIDTH) {
+			return false
+		}
+	}
+
+	return true
 }
 
 const SPOTLIGHT_DELIMITER = /[⟦⟧]/g
@@ -787,31 +813,44 @@ export async function runAssistantTurn({
 			progress
 		})
 	}
-	const routed = await generateSettled(
-		model,
-		{
-			messages: [
-				{
-					role: "system",
-					content: ROUTER_SYSTEM_PROMPT
-				},
-				{
-					role: "user",
-					content: routerRequest({
-						message,
-						earlier: priorUser.at(-1)
-					})
-				}
-			],
-			grammar: ROUTER_GRAMMAR,
-			slot: "router",
-			maxTokens: ROUTER_MAX_TOKENS
-		},
-		{
-			signal,
-			onProgress
-		}
-	)
+	const routeBy = (earlier: string | undefined) =>
+		generateSettled(
+			model,
+			{
+				messages: [
+					{
+						role: "system",
+						content: ROUTER_SYSTEM_PROMPT
+					},
+					{
+						role: "user",
+						content: routerRequest({
+							message,
+							earlier
+						})
+					}
+				],
+				grammar: ROUTER_GRAMMAR,
+				slot: "router",
+				maxTokens: ROUTER_MAX_TOKENS
+			},
+			{
+				signal,
+				onProgress
+			}
+		)
+	const previous = priorUser.at(-1)
+	const beside = previous !== undefined && routesBesideEarlier(message)
+	let routed = await routeBy(beside ? previous : undefined)
+
+	// A longer follow-up that on its own needs no tools may still continue the previous request ("That I paid
+	// the Hetzner invoice", answering "What should it say?"): it is routed again beside it.
+	if (previous !== undefined && !beside && parseRoute(routed.content).route === "answer") {
+		checkAborted(signal)
+
+		routed = await routeBy(previous)
+	}
+
 	const { route, intent } = parseRoute(routed.content)
 
 	onEvent({
@@ -840,6 +879,18 @@ export async function runAssistantTurn({
 		userMessage: userText,
 		contextHandles: context.handles
 	})
+
+	// Items earlier replies show by handle can be named again without a new lookup; like a lookup's results,
+	// they ground a change only by the item's own name in the user's words.
+	const historyHandles = [...new Set(history.flatMap(entry => replyHandles(entry.reply)))]
+
+	guard.recordCandidates(
+		historyHandles.flatMap(handle => {
+			const name = executor.name?.(handle)
+
+			return name === undefined ? [] : [{ handle, name }]
+		})
+	)
 	const family = familyTools(route)
 	const rendered = family.filter(supports)
 	// The same for every route of the family (and so the same prompt prefix), never narrowed per turn: what
@@ -904,16 +955,38 @@ export async function runAssistantTurn({
 	]
 	const calls: AssistantToolCallRecord[] = []
 	const specialTokens = model.specialTokens
-	const screen = (reply: string) =>
-		screenReply({
-			// The model copies spotlight delimiters it saw around item names into its reply.
-			reply: reply.replace(SPOTLIGHT_DELIMITER, ""),
+	const nameOf = (handle: string) => executor.name?.(handle)
+	// Items this turn's results handed out, by handle: the next turns read their handles beside the names the
+	// reply repeats.
+	const handedOut = new Map<string, string>()
+	const handOut = (items: readonly AssistantToolCandidate[]) => {
+		for (const { handle, name } of items) {
+			handedOut.set(handle, name)
+		}
+	}
+	// The handles the model saw: in the context, earlier replies and this turn's results. A reply's other
+	// tokens that look like one are left as written.
+	const seen = new Set([...context.handles, ...historyHandles])
+	// Tokens like a handle that the user typed or content read this turn holds ("room c12", "p1: fix login").
+	const foreign = new Set(replyHandles(userText))
+	const shownName = (handle: string) => {
+		const name = seen.has(handle) || handedOut.has(handle) ? (nameOf(handle) ?? handedOut.get(handle)) : undefined
+
+		return name === undefined ? undefined : sanitizeUntrustedText(name, specialTokens, { keepJoiners: true })
+	}
+	const screen = (reply: string, { handles = false }: { handles?: boolean } = {}) => {
+		// The model copies spotlight delimiters it saw around item names into its reply.
+		const text = reply.replace(SPOTLIGHT_DELIMITER, "")
+
+		return screenReply({
+			reply: handles ? text : replyWithoutHandles(text, shownName, { foreign }),
 			userMessage: userText,
 			canary,
 			instructions
 		})
+	}
 	const replyEvent = (text: string, final: boolean): AssistantTurnEvent => {
-		const screened = screen(text)
+		const screened = screen(final ? text : settledReply(text))
 
 		return {
 			type: "reply",
@@ -926,10 +999,12 @@ export async function runAssistantTurn({
 				: {})
 		}
 	}
-	const nameOf = (handle: string) => executor.name?.(handle)
 	// Joiners stay: without them Persian or Indic content reads, and is summarized, misspelled.
-	const sanitized = (value: unknown) =>
-		mapUntrustedStrings(value, text => sanitizeUntrustedText(text, specialTokens, { keepJoiners: true }))
+	const sanitized = (value: unknown) => {
+		foreignTokens(value, foreign)
+
+		return mapUntrustedStrings(value, text => sanitizeUntrustedText(text, specialTokens, { keepJoiners: true }))
+	}
 	const untrusted = (value: unknown) =>
 		spotlightOptions === null ? sanitized(value) : mapUntrustedStrings(sanitized(value), text => spotlightText(text, spotlightOptions))
 	// Streams the reply as it is written, screened, unless it turns out to be tool-call syntax.
@@ -1234,6 +1309,7 @@ export async function runAssistantTurn({
 					// Only names came back: nothing was read, so the turn is not tainted.
 					if (checked.candidates !== undefined) {
 						guard.recordCandidates(checked.candidates)
+						handOut(checked.candidates)
 					}
 				} else {
 					const args = checked.args
@@ -1351,17 +1427,20 @@ export async function runAssistantTurn({
 								})
 
 							if (outcome.ok) {
+								const returned =
+									outcome.returned ??
+									[...handlesIn(outcome.result)].map(([handle, name]) => ({
+										handle,
+										name
+									}))
+
 								guard.record({
 									tool,
 									args,
-									returned:
-										outcome.returned ??
-										[...handlesIn(outcome.result)].map(([handle, name]) => ({
-											handle,
-											name
-										})),
+									returned,
 									created: outcome.created ?? []
 								})
+								handOut(returned)
 								// The call reads as running until its content is extracted, which is a generation of its own.
 								result =
 									tool.untrustedOutput === "content"
@@ -1399,6 +1478,7 @@ export async function runAssistantTurn({
 
 								if (outcome.candidates !== undefined) {
 									guard.recordCandidates(outcome.candidates)
+									handOut(outcome.candidates)
 								}
 							}
 						}
@@ -1519,13 +1599,15 @@ export async function runAssistantTurn({
 	}
 
 	const final = replyEvent(answer, true)
+	const withheld = final.type === "reply" && final.withheld === true
 
 	onEvent(final)
 
 	return {
 		reply: final.type === "reply" ? final.text : "",
+		historyReply: withheld ? "" : replyWithHandles(screen(answer, { handles: true }).text, handedOut),
 		prompt,
-		withheld: final.type === "reply" && final.withheld === true,
+		withheld,
 		route,
 		intent,
 		calls,

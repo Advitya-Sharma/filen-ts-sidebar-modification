@@ -149,7 +149,8 @@ const TRUSTED_KEYS = new Set([
 	"overall",
 	"expirySetting",
 	"section",
-	"sharing"
+	"sharing",
+	"shown"
 ])
 
 export function isAppResultKey(key: string): boolean {
