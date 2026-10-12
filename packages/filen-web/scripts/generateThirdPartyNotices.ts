@@ -16,6 +16,8 @@ import {
 	type CollectedNotice,
 	type InstalledNpmPackage
 } from "@filen/shared/tooling"
+import type { AssistantModelManifest } from "../src/features/assistant/runtime/manifest"
+import { QWEN35_4B } from "../src/features/assistant/runtime/models"
 
 /**
  * Emits the third-party attribution payload the Open source licenses dialog renders.
@@ -33,9 +35,10 @@ import {
  * text. Substituting another package's text of the same license would attribute the wrong copyright
  * holder, which is worse than an honest gap.
  *
- * Three sources reach the browser: the npm tree (minus dev/optional entries, which are build tooling),
- * the Rust crates the SDK and spellchecker wasm modules are compiled from, and components vendored into
- * this package as built output, described from the manifest their build script writes. @filen/sdk-rs is
+ * Four sources reach the browser: the npm tree (minus dev/optional entries, which are build tooling),
+ * the Rust crates the SDK and spellchecker wasm modules are compiled from, components vendored into
+ * this package as built output, described from the manifest their build script writes, and the
+ * assistant's model weights, which Filen serves from its own host. @filen/sdk-rs is
  * a registry package and is described here; @filen/shared, @filen/office and @filen/spellcheck are
  * workspace members, so pnpm does not report them and they are correctly absent — first-party code needs
  * no attribution. The third-party material @filen/office and @filen/spellcheck carry (fonts, derived
@@ -49,7 +52,8 @@ import {
  * @filen/sdk-rs bump; the payload's exported SDK version is checked against the installed tree by
  * src/tests/thirdPartyNotices.test.ts, so a stale payload fails there rather than shipping quietly.
  *
- * Run from the package root: node --experimental-strip-types scripts/generateThirdPartyNotices.ts
+ * Run from the package root (tsx, for the app's path alias the model manifest imports with):
+ *   pnpm exec tsx scripts/generateThirdPartyNotices.ts
  *   --filen-rs=<path>   filen-rs checkout to read the crate lockfile from
  *   --allow-untagged    read the checkout's working tree instead of the release tag (local experiment
  *                       only — the payload is then stamped worktree@<sha> and fails the payload test)
@@ -542,6 +546,45 @@ function wllamaEngineNotices(): Collected[] {
 }
 
 /**
+ * The assistant's language model. Filen redistributes the weights from its model host, so their license
+ * travels with them (Apache-2.0 §4(a)). What ships is read from the pinned manifest; the license file
+ * is kept verbatim beside this script under the manifest's id, so pinning another model fails here until
+ * its license is added.
+ */
+const MODEL_MANIFEST_SOURCE = "src/features/assistant/runtime/models.ts"
+
+function assistantModelNotice(manifest: AssistantModelManifest): Collected {
+	const text = readFileSync(`scripts/licenses/${manifest.id}-LICENSE`, "utf8")
+	// The holder sits in the appendix of an Apache-2.0 file, which splitCopyright rightly leaves in the terms.
+	const copyright = [...text.matchAll(/^\s*(Copyright \d{4}\b.*\S)\s*$/gm)].flatMap(match => (match[1] === undefined ? [] : [match[1]]))
+	const { repo, revision } = manifest.source
+	const repository = `https://huggingface.co/${repo}`
+	const pieces = manifest.shards.map(shard => `${shard.file} (SHA-256 ${shard.sha256})`).join(", ")
+	const origin =
+		manifest.whole === undefined
+			? `Its weights are the GGUF files from ${repository} at revision ${revision}, served unmodified from Filen's model host: ${pieces}.`
+			: `Its weights are the GGUF file from ${repository} at revision ${revision} (SHA-256 ${manifest.whole.sha256}), served unmodified from Filen's model host as ${manifest.whole.file}, and split by llama-gguf-split, without changing any tensor, into the pieces the app downloads: ${pieces}.`
+
+	return vendoredNotice(
+		{
+			name: manifest.label,
+			version: revision.slice(0, 7),
+			license: manifest.license.name,
+			copyright,
+			repository,
+			terms: [
+				[
+					`The language model the assistant runs on the device, licensed under ${manifest.license.name}; the license text below is the one published at ${manifest.license.url}.`,
+					origin
+				].join(" "),
+				text
+			]
+		},
+		"vendored"
+	)
+}
+
+/**
  * The third-party material @filen/office brings into the app, read from the records that package keeps:
  *
  * - The document fonts the app serves at /office/fonts/ (vite/office-fonts-plugin.ts), from
@@ -834,10 +877,11 @@ const npm = collectNpm(installed)
 const rust = collectRust(expectedSdk)
 const ffmpeg = ffmpegModuleNotices()
 const engine = wllamaEngineNotices()
+const model = assistantModelNotice(QWEN35_4B)
 const office = [...officeFontNotices(), ...officeDerivedNotices()]
 const spellcheckCrates = spellcheckCrateNotices(rust.entries)
 const dictionaries = spellcheckDictionaryNotices()
-const vendored = [...ffmpeg, ...engine, ...office, ...dictionaries]
+const vendored = [...ffmpeg, ...engine, model, ...office, ...dictionaries]
 const collected = [...npm, ...rust.entries, ...spellcheckCrates, ...vendored]
 
 // Vendored entries promise their files verbatim (dictionaries ship them byte for byte).
@@ -849,9 +893,9 @@ const { texts, notices } = finalizeNotices(collected, entry => entry.ecosystem =
 const output = `// AUTO-GENERATED by scripts/generateThirdPartyNotices.ts — do not edit.
 //
 // Attribution for everything bundled into the app: the npm tree minus dev/optional entries, the Rust
-// crates the SDK wasm is built from, and the components vendored as built output. License terms are
-// deduplicated across packages and the copyright lines kept per package, so a rendered notice is that
-// package's copyright followed by the verbatim terms. An empty \`texts\` means no license file shipped
+// crates the SDK wasm is built from, the components vendored as built output, and the assistant's model.
+// License terms are deduplicated across packages and the copyright lines kept per package, so a rendered
+// notice is that package's copyright followed by the verbatim terms. An empty \`texts\` means no license file shipped
 // with the package; its SPDX id and repository are given instead rather than borrowing another package's
 // copyright. More than one entry means the declared license is a conjunction — every text applies.
 //
@@ -859,6 +903,7 @@ const output = `// AUTO-GENERATED by scripts/generateThirdPartyNotices.ts — do
 // rust: filen-rs @ ${rust.ref} (${String(rust.crates)} crates)  [resolved via: ${rust.source}]
 // vendored: ${ffmpeg.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${FFMPEG_MANIFEST})
 //   ${engine.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${WLLAMA_MANIFEST})
+//   assistant model: ${model.name} ${model.version} (${MODEL_MANIFEST_SOURCE})
 //   @filen/office: ${office.map(entry => `${entry.name} ${entry.version}`).join(", ")} (${OFFICE_REPO_DIR}/assets/fonts/manifest.json, ${OFFICE_REPO_DIR}/THIRD_PARTY_NOTICES.md)
 //   @filen/spellcheck: ${[...spellcheckCrates, ...dictionaries].map(entry => `${entry.name} ${entry.version}`).join(", ")} (${SPELLCHECK_REPO_DIR}/crate/Cargo.lock, ${SPELLCHECK_REPO_DIR}/dictionaries/manifest.json)
 //
