@@ -7,11 +7,13 @@ import type { AssistantModelState } from "@/features/assistant/types"
 
 // The page side of the runtime against a scripted worker: the states the panel sees across a download, an
 // explicit load, a start that finds a damaged shard, and the idle unload that frees the worker again.
-const { remote, inspections, releaseProxy, workers, locks, prune, device, storage, stale, order } = vi.hoisted(() => ({
+const { remote, inspections, releaseProxy, workers, locks, prune, device, storage, stale, order, appUpdate } = vi.hoisted(() => ({
 	releaseProxy: Symbol("releaseProxy"),
 	remote: {
 		download: vi.fn<(manifest: unknown, baseUrl: string, onProgress: (progress: ModelDownloadProgress) => void) => Promise<void>>(),
-		load: vi.fn<(manifest: unknown, options: unknown, onVerifying: () => void) => Promise<{ specialTokens: string[] }>>(),
+		load: vi.fn<
+			(manifest: unknown, options: unknown, onVerifying: () => void) => Promise<{ specialTokens: string[]; promptBatchMs?: number }>
+		>(),
 		cancelDownload: vi.fn(),
 		cancel: vi.fn(() => Promise.resolve()),
 		unload: vi.fn<() => Promise<void>>(),
@@ -30,12 +32,14 @@ const { remote, inspections, releaseProxy, workers, locks, prune, device, storag
 	prune: { pending: null as Promise<void> | null },
 	// Whether WebGPU is offered, and whether the CPU path is.
 	device: { gpu: true, cpu: true },
-	// Whether the origin's storage is persistent, whether the rest of the model fits, and localStorage.
-	storage: { persisted: true, fits: true, local: new Map<string, string>() },
+	// Whether the origin's storage is persistent, whether the rest of the model fits, the usage the room was
+	// judged on, and localStorage.
+	storage: { persisted: true, fits: true, judgedUsage: null as number | null, local: new Map<string, string>() },
 	// Bytes of another model version on disk.
 	stale: { bytes: 0 },
-	// The order pruning and the storage estimate ran in.
-	order: [] as string[]
+	// The order pruning, removal and the storage estimate ran in.
+	order: [] as string[],
+	appUpdate: { recover: vi.fn(), prompt: vi.fn() }
 }))
 
 vi.mock("@/workers/assistant.worker.ts?worker", () => ({
@@ -69,7 +73,7 @@ vi.mock("comlink", () => ({
 	releaseProxy
 }))
 
-vi.mock("@/lib/appUpdate", () => ({ recoverIfNewerBuild: () => undefined }))
+vi.mock("@/lib/appUpdate", () => ({ recoverIfNewerBuild: appUpdate.recover, showUpdateReadyToast: appUpdate.prompt }))
 
 // The signed-in account a download's opt-in is recorded for.
 const account = vi.hoisted((): { id: bigint | undefined } => ({ id: 7n }))
@@ -92,7 +96,11 @@ vi.mock("@/features/assistant/runtime/deviceCheck", () => ({
 			: device.cpu
 				? { supported: true, backend: "cpu", threads: 4, estimatedSpeed: "moderate" }
 				: { supported: false, reason: "unsupported-browser", detail: "", gpuCouldHelp: true },
-	storageVerdict: () => (storage.fits ? { ok: true } : { ok: false, missingBytes: 1 })
+	storageVerdict: ({ usage }: { usage: number }) => {
+		storage.judgedUsage = usage
+
+		return storage.fits ? { ok: true } : { ok: false, missingBytes: 1 }
+	}
 }))
 
 vi.mock("@/features/assistant/runtime/modelStore", () => ({
@@ -107,6 +115,11 @@ vi.mock("@/features/assistant/runtime/modelStore", () => ({
 
 		return prune.pending ?? Promise.resolve()
 	},
+	deleteModelDirectory: (id: string) => {
+		order.push(`remove ${id}`)
+
+		return Promise.resolve()
+	},
 	otherModels: () => Promise.resolve({ present: stale.bytes > 0, bytes: stale.bytes })
 }))
 
@@ -120,6 +133,25 @@ type Runtime = InstanceType<typeof AssistantRuntime>
 const TOTAL = manifestBytes(QWEN35_4B)
 const COMPLETE: ModelInspection = { presentBytes: TOTAL, verifiedBytes: TOTAL, complete: true }
 const MINUTE = 60_000
+
+// The bundle this build runs from, as the deployed index.html names it: the runtime module itself under test.
+const RUNNING_BUNDLE = new URL("../features/assistant/runtime/client.ts", import.meta.url).pathname
+
+// A production build, and whether the server still deploys it ("unknown": unreachable).
+function deployment(kind: "deployed" | "replaced" | "unknown"): void {
+	vi.stubEnv("PROD", true)
+	vi.stubEnv("DEV", false)
+	vi.stubGlobal(
+		"fetch",
+		vi.fn((url: string) =>
+			url === "/" && kind !== "unknown"
+				? Promise.resolve(
+						new Response(`<script src="${kind === "deployed" ? RUNNING_BUNDLE : "/assets/index-newer.js"}"></script>`)
+					)
+				: Promise.reject(new TypeError("Failed to fetch"))
+		)
+	)
+}
 
 function stubBrowser(): void {
 	vi.stubGlobal("navigator", {
@@ -202,7 +234,10 @@ beforeEach(() => {
 	order.length = 0
 	storage.persisted = true
 	storage.fits = true
+	storage.judgedUsage = null
 	storage.local.clear()
+	appUpdate.recover.mockClear()
+	appUpdate.prompt.mockClear()
 	account.id = 7n
 	device.gpu = true
 	device.cpu = true
@@ -214,6 +249,8 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.useRealTimers()
+	vi.unstubAllEnvs()
+	vi.unstubAllGlobals()
 })
 
 describe("AssistantRuntime download", () => {
@@ -308,16 +345,18 @@ describe("AssistantRuntime download", () => {
 				})
 		)
 		remote.load.mockResolvedValue({ specialTokens: [] })
+		deployment("deployed")
+		stale.bytes = 2_700_000_000
 
 		const runtime = new AssistantRuntime()
 
 		runtime.download()
 		await vi.waitFor(() => {
-			expect(order).toEqual(["prune"])
+			expect(order).toEqual(["estimate", "prune"])
 		})
 		await new Promise(resolve => setTimeout(resolve, 10))
 
-		// Older versions are removed before the room is checked and anything is fetched.
+		// An earlier version is removed before anything is fetched.
 		expect(remote.download).not.toHaveBeenCalled()
 
 		finishPrune()
@@ -903,7 +942,8 @@ describe("AssistantRuntime failures", () => {
 		expect((remote.load.mock.lastCall?.[1] as { backend: string }).backend).toBe("cpu")
 	})
 
-	it("offers an earlier model version's files for removal, and prunes them before checking the room for this one", async () => {
+	it("offers an earlier model version's files for removal, counts them as room for this one, and prunes them as the download starts", async () => {
+		deployment("deployed")
 		stale.bytes = 2_700_000_000
 
 		const runtime = new AssistantRuntime()
@@ -917,7 +957,87 @@ describe("AssistantRuntime failures", () => {
 		runtime.download()
 		await settled(runtime, "downloaded")
 
-		expect(order).toEqual(["prune", "estimate"])
+		expect(order).toEqual(["estimate", "prune"])
+		// The estimate's usage (none here) less the earlier version's bytes, never below zero.
+		expect(storage.judgedUsage).toBe(0)
+		expect(appUpdate.recover).not.toHaveBeenCalled()
+	})
+
+	it("keeps an earlier model version when the download does not start for want of room", async () => {
+		deployment("deployed")
+		stale.bytes = 2_700_000_000
+		storage.fits = false
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		runtime.download()
+		await vi.waitFor(() => {
+			expect(runtime.getState()).toMatchObject({ kind: "unavailable", reason: "insufficient-storage" })
+		})
+
+		expect(order).toEqual(["estimate"])
+		expect(stale.bytes).toBe(2_700_000_000)
+		expect(workers).toHaveLength(0)
+	})
+
+	it("from a replaced build, neither offers nor removes the newer build's model, and asks to update instead of downloading", async () => {
+		deployment("replaced")
+		stale.bytes = 2_700_000_000
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+
+		expect(runtime.getState()).toEqual({ kind: "not-downloaded", model: expect.anything() as unknown })
+		expect(appUpdate.recover).toHaveBeenCalledTimes(1)
+
+		runtime.download()
+		await vi.waitFor(() => {
+			expect(appUpdate.prompt).toHaveBeenCalledTimes(1)
+		})
+
+		expect(runtime.getState().kind).toBe("not-downloaded")
+		expect(remote.download).not.toHaveBeenCalled()
+		expect(workers).toHaveLength(0)
+		expect(locks.held).toBe(0)
+
+		await runtime.deleteModel()
+
+		expect(order).toEqual([`remove ${QWEN35_4B.id}`])
+		expect(stale.bytes).toBe(2_700_000_000)
+	})
+
+	it("keeps another model on disk while this build's deployment cannot be known", async () => {
+		deployment("unknown")
+		stale.bytes = 2_700_000_000
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+
+		expect(runtime.getState()).not.toHaveProperty("staleBytes")
+
+		remote.download.mockResolvedValue(undefined)
+		runtime.download()
+		await settled(runtime, "downloaded")
+
+		expect(order).toEqual(["estimate"])
+		expect(stale.bytes).toBe(2_700_000_000)
+		expect(storage.judgedUsage).toBe(0)
+	})
+
+	it("removes every model from a deployed build, its own and earlier versions", async () => {
+		deployment("deployed")
+		stale.bytes = 2_700_000_000
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		await runtime.deleteModel()
+
+		expect(order).toEqual(["prune"])
+		expect(runtime.getState().kind).toBe("not-downloaded")
 	})
 
 	it("tries WebGPU again on the next load when the CPU path failed too, as it was not shown to be the GPU's fault", async () => {

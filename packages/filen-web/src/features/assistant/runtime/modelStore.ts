@@ -93,7 +93,7 @@ async function directorySize(directory: FileSystemDirectoryHandle): Promise<numb
 }
 
 // The models other than `id` on disk (one a newer build downloaded, or the one an update replaced), and the
-// bytes they take. Sizes only; reads no file content.
+// bytes they take. Sizes only; reads no file content. Which of the two they are, only the client can tell.
 export async function otherModels(id: string): Promise<{ present: boolean; bytes: number }> {
 	let models: FileSystemDirectoryHandle
 
@@ -118,6 +118,19 @@ export async function otherModels(id: string): Promise<{ present: boolean; bytes
 	}
 
 	return { present, bytes }
+}
+
+// Removes one model's directory, whatever of it is on disk.
+export async function deleteModelDirectory(id: string): Promise<void> {
+	try {
+		const models = await (await navigator.storage.getDirectory()).getDirectoryHandle(MODELS_DIRECTORY)
+
+		await models.removeEntry(id, { recursive: true })
+	} catch (e) {
+		if (!isNotFoundError(e)) {
+			throw e
+		}
+	}
 }
 
 // Removes every downloaded model except `keep` (an older model version after an update, or all of them).

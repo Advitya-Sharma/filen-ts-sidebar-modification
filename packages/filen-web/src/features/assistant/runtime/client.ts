@@ -22,11 +22,12 @@ import {
 	type AssistantBackend,
 	type RuntimeRecommendation
 } from "@/features/assistant/runtime/deviceCheck"
-import { deleteModels, inspectModel, otherModels } from "@/features/assistant/runtime/modelStore"
+import { deleteModelDirectory, deleteModels, inspectModel, otherModels } from "@/features/assistant/runtime/modelStore"
 import { autoStartIntent, readDownloadIntent, writeDownloadIntent } from "@/features/assistant/runtime/downloadIntent"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
 import { ENGINE_CRASHED, type GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
-import { recoverIfNewerBuild } from "@/lib/appUpdate"
+import { recoverIfNewerBuild, showUpdateReadyToast } from "@/lib/appUpdate"
+import { isBuildStillDeployed } from "@/lib/appUpdate.logic"
 import { ACCOUNT_QUERY_KEY, accountQueryGet, fetchAccount } from "@/queries/account"
 import { queryClient } from "@/queries/client"
 import { log } from "@/lib/log"
@@ -133,6 +134,29 @@ async function signedInAccount(): Promise<string | null> {
 		(await queryClient.query({ queryKey: ACCOUNT_QUERY_KEY, queryFn: fetchAccount, staleTime: "static" }).catch(() => undefined))
 
 	return account === undefined ? null : String(account.id)
+}
+
+// The page is one bundle, so the file this module was loaded from names the running build.
+const RUNNING_BUNDLE = new URL(import.meta.url).pathname
+
+// Whether the server still deploys this build: the only sign of whether another model on disk is an
+// earlier version or a newer build's. Not known in dev (source modules, no bundle) or without the server.
+async function buildDeployment(): Promise<"deployed" | "replaced" | "unknown"> {
+	if (!import.meta.env.PROD) {
+		return "unknown"
+	}
+
+	try {
+		const response = await fetch("/", { cache: "no-cache" })
+
+		if (!response.ok) {
+			return "unknown"
+		}
+
+		return isBuildStillDeployed(await response.text(), RUNNING_BUNDLE) ? "deployed" : "replaced"
+	} catch {
+		return "unknown"
+	}
 }
 
 // A dev build without a configured host serves the GGUF named by FILEN_ASSISTANT_DEV_GGUF (vite/assistant-model.ts).
@@ -314,18 +338,32 @@ export class AssistantRuntime implements AssistantModel {
 		}
 	}
 
-	// None of this build's model is on disk but another model is: either a newer build in another tab replaced
-	// it, and downloading the old one again would remove that tab's model in turn, so this tab updates instead;
-	// or this build is the deployed one and the other is an earlier version, whose bytes Remove can free.
-	// Returns those bytes.
+	// None of this build's model is on disk but another model is: either this build was replaced, and a newer
+	// build in another tab downloaded its own model, so this tab updates; or this build is the deployed one
+	// and the other is an earlier version, whose bytes Remove can free. Returns those bytes.
 	private async checkOutdated(): Promise<number> {
-		const other = await otherModels(this.manifest.id).catch(() => ({ present: false, bytes: 0 }))
+		const other = await this.otherModel()
 
-		if (other.present) {
+		if (other.replaced) {
 			recoverIfNewerBuild()
 		}
 
-		return other.bytes
+		return other.stale ? other.bytes : 0
+	}
+
+	// The models on disk other than this build's. They are an earlier version (`stale`), which this build may
+	// free, only while the server deploys this build: from a replaced one (`replaced`) they may be the newer
+	// build's, which another tab runs. The server is asked only when there are any.
+	private async otherModel(): Promise<{ bytes: number; stale: boolean; replaced: boolean }> {
+		const other = await otherModels(this.manifest.id).catch(() => ({ present: false, bytes: 0 }))
+
+		if (!other.present) {
+			return { bytes: 0, stale: false, replaced: false }
+		}
+
+		const deployment = await buildDeployment()
+
+		return { bytes: other.bytes, stale: deployment === "deployed", replaced: deployment === "replaced" }
 	}
 
 	private async lockHeldElsewhere(): Promise<boolean> {
@@ -659,12 +697,25 @@ export class AssistantRuntime implements AssistantModel {
 			const before = await inspectModel(this.manifest)
 
 			if (!before.complete) {
-				// An older model version is dead weight this build never loads, and counts against the room for
-				// this one. Under the lock, so no tab is running it; a tab of an older build updates on its own.
-				await this.pruneOtherModels()
+				// An earlier model version is dead weight this build never loads: its bytes count as room for this
+				// one, and it goes (under the lock, so no tab runs it) only once this download starts. A replaced
+				// build fetches nothing the deployed one no longer uses, and leaves that build's model alone.
+				const other = await this.otherModel()
+
+				if (other.replaced) {
+					this.unlock()
+					this.settleNotDownloaded(before.presentBytes)
+					showUpdateReadyToast()
+
+					return
+				}
 
 				const { quota = 0, usage = 0 } = await navigator.storage.estimate()
-				const verdict = storageVerdict({ quota, usage, neededBytes: manifestBytes(this.manifest) - before.presentBytes })
+				const verdict = storageVerdict({
+					quota,
+					usage: Math.max(0, usage - (other.stale ? other.bytes : 0)),
+					neededBytes: manifestBytes(this.manifest) - before.presentBytes
+				})
 
 				const account = await signedInAccount()
 				const intent = resumed
@@ -692,6 +743,10 @@ export class AssistantRuntime implements AssistantModel {
 					this.unlock()
 
 					return
+				}
+
+				if (other.stale) {
+					await this.pruneOtherModels()
 				}
 
 				const sizeBytes = manifestBytes(this.manifest)
@@ -973,7 +1028,8 @@ export class AssistantRuntime implements AssistantModel {
 		}
 	}
 
-	// Cancels a download, unloads, and removes every downloaded model from OPFS.
+	// Cancels a download, unloads, and removes this build's model from OPFS, and every other one that is an
+	// earlier version.
 	async deleteModel(): Promise<void> {
 		writeDownloadIntent(null)
 		this.cancelDownload()
@@ -987,7 +1043,11 @@ export class AssistantRuntime implements AssistantModel {
 		}
 
 		try {
-			await deleteModels()
+			if ((await this.otherModel()).stale) {
+				await deleteModels()
+			} else {
+				await deleteModelDirectory(this.manifest.id)
+			}
 		} finally {
 			this.stopWorker()
 			this.unlock()
