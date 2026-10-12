@@ -150,13 +150,24 @@ export interface StoryDraft {
 	readonly containers: readonly WrittenContainer[]
 }
 
-// A source container's children in order, and each one's index.
-interface Siblings {
-	readonly items: readonly number[]
-	readonly index: ReadonlyMap<number, number>
-}
+const NO_SIBLINGS: readonly number[] = []
 
-const NO_SIBLINGS: Siblings = { items: [], index: new Map() }
+// Where source item `item` is among a container's children (items ascend in source order), or -1.
+function indexOf(siblings: readonly number[], item: number): number {
+	let low = 0
+	let high = siblings.length - 1
+
+	while (low <= high) {
+		const middle = (low + high) >> 1
+		const at = siblings[middle] ?? 0
+
+		if (at === item) return middle
+		if (at < item) low = middle + 1
+		else high = middle - 1
+	}
+
+	return -1
+}
 
 // Runs a write to its end (without a clock nothing yields).
 function complete<T>(steps: Generator<void, T>): T {
@@ -234,7 +245,7 @@ export class StoryWriter {
 	// Whether a block can be written as its source bytes, outside table cells and inside one.
 	private readonly copyable = new Map<Node, boolean>()
 	private readonly copyableInCell = new Map<Node, boolean>()
-	private readonly siblings = new Map<number, Siblings>()
+	private readonly siblings = new Map<number, number[]>()
 	// Set while writing in slices.
 	private clock: SliceClock | undefined
 	private readonly copiedRuns = new Set<number>()
@@ -333,6 +344,8 @@ export class StoryWriter {
 	// `cell`: whether the block is in a table cell (by default, where its source is).
 	writeBlockAlone(node: Node, copy = false, cell?: boolean): Out {
 		this.force = node
+		// Each block is written alone once (a proof keeps its writer): nothing of one is kept for the next.
+		this.siblings.clear()
 		this.owners.clear()
 		this.copyable.clear()
 		this.copyableInCell.clear()
@@ -535,19 +548,14 @@ export class StoryWriter {
 
 	// ---- containers --------------------------------------------------------------------------------------
 
-	private siblingsOf(container: number): Siblings {
+	private siblingsOf(container: number): number[] {
 		let siblings = this.siblings.get(container)
 
 		if (siblings === undefined) {
-			const items: number[] = []
-			const index = new Map<number, number>()
+			siblings = []
 
-			for (let item = container + 1; item < this.part.end(container); item = this.part.end(item)) {
-				index.set(item, items.length)
-				items.push(item)
-			}
+			for (let item = container + 1; item < this.part.end(container); item = this.part.end(item)) siblings.push(item)
 
-			siblings = { items, index }
 			this.siblings.set(container, siblings)
 		}
 
@@ -566,7 +574,7 @@ export class StoryWriter {
 		write: (child: Node, out: Out) => Generator<void, void>,
 		region?: { readonly from: number; readonly to: number; readonly tail: readonly number[] }
 	): Generator<void, boolean> {
-		const { items: siblings, index: positions } = sourceContainer === NO_SOURCE ? NO_SIBLINGS : this.siblingsOf(sourceContainer)
+		const siblings = sourceContainer === NO_SOURCE ? NO_SIBLINGS : this.siblingsOf(sourceContainer)
 		let previous = -1
 
 		for (let at = 0; at < container.childCount; at++) {
@@ -577,14 +585,14 @@ export class StoryWriter {
 
 			if (this.canCopy(child)) {
 				const own = src(child)
-				const index = positions.get(own) ?? -1
+				const index = indexOf(siblings, own)
 				const leading = index < 0 ? [] : this.leadingMarkers(siblings, index)
 				const together = leading.length === before.length && leading.every((item, k) => before[k]?.src === item)
 				const first = together && leading.length > 0 ? (leading[0] ?? own) : own
 
 				if (!together) for (const marker of before) this.writeMarker(out, marker.src)
 
-				const firstIndex = positions.get(first) ?? -1
+				const firstIndex = indexOf(siblings, first)
 
 				if (previous >= 0 && firstIndex > 0 && siblings[firstIndex - 1] === previous) {
 					out.copy(this.bytes, this.part.byteEnd(previous), this.part.start(first))
@@ -617,7 +625,7 @@ export class StoryWriter {
 		const end = (container.attrs["end"] as MarkerList | undefined) ?? []
 
 		if (region !== undefined && previous >= 0) {
-			const rest = siblings.slice((positions.get(previous) ?? -1) + 1)
+			const rest = siblings.slice(indexOf(siblings, previous) + 1)
 			const expected = [...end.map(marker => marker.src), ...region.tail]
 
 			if (rest.length === expected.length && rest.every((item, k) => item === expected[k])) {
