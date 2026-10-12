@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react"
+import { useCallback, useLayoutEffect, useRef } from "react"
 import { useTranslation } from "react-i18next"
 import { useVirtualizer, type VirtualizerOptions } from "@tanstack/react-virtual"
 import { cn } from "@filen/shared"
@@ -107,13 +107,27 @@ function TranscriptRowContent({ row }: { row: TranscriptRow }) {
 	}
 }
 
+// A new one means the user just sent a message, or a saved conversation replaced the one on screen.
+function newestUserRowId(rows: readonly TranscriptRow[]): string | null {
+	for (let index = rows.length - 1; index >= 0; index--) {
+		const row = rows[index]
+
+		if (row?.kind === "user") {
+			return row.id
+		}
+	}
+
+	return null
+}
+
 type TranscriptVirtualizerOptions = VirtualizerOptions<HTMLDivElement, HTMLDivElement>
 
 const observeOffset: TranscriptVirtualizerOptions["observeElementOffset"] = observeElementOffsetFromAttach
 
 // Virtualized like the chat thread, but top-origin: the virtualizer's own end anchoring keeps a reader who
 // sits at the bottom pinned there as rows append and as the streaming reply grows, and leaves a reader
-// who scrolled up where they are. Not rendered off screen: a hidden list would measure every row at zero.
+// who scrolled up where they are, until they send: their own message brings the view back to the end.
+// Not rendered off screen: a hidden list would measure every row at zero.
 export function AssistantTranscript({ rows }: { rows: readonly TranscriptRow[] }) {
 	// Kept out of the React Compiler: the virtualizer is one mutable instance, so row JSX memoized on it
 	// would go stale on scroll. Its two callbacks are memoized by hand instead.
@@ -149,6 +163,20 @@ export function AssistantTranscript({ rows }: { rows: readonly TranscriptRow[] }
 		paddingStart: 8,
 		paddingEnd: 8
 	})
+
+	// Runs after the virtualizer's own layout effect, so it aims at the rows this commit laid out; the
+	// virtualizer's scroll reconcile then follows the measurements that land after.
+	const newestUserId = newestUserRowId(rows)
+	const followedUserIdRef = useRef(newestUserId)
+
+	useLayoutEffect(() => {
+		if (!visible || followedUserIdRef.current === newestUserId) {
+			return
+		}
+
+		followedUserIdRef.current = newestUserId
+		virtualizer.scrollToEnd()
+	}, [visible, newestUserId, virtualizer])
 
 	// Focusable, so the keyboard can scroll it once it is clicked or tabbed into.
 	return (

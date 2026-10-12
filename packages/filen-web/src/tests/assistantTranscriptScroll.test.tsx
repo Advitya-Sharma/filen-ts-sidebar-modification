@@ -88,3 +88,74 @@ describe("AssistantTranscript pinned to the end", () => {
 		}
 	})
 })
+
+describe("AssistantTranscript scrolled up", () => {
+	const reply: TranscriptRow = { kind: "reply", id: "r4", turnId: "t4", text: "", final: false }
+	let scroller: HTMLElement
+
+	// jsdom has no Element.scrollTo, and a scroll offset nothing clamps: both as a browser does them.
+	beforeAll(() => {
+		Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+			configurable: true,
+			value(this: HTMLElement, options: ScrollToOptions) {
+				this.scrollTop = Math.min(Math.max(options.top ?? 0, 0), this.scrollHeight - this.clientHeight)
+				this.dispatchEvent(new Event("scroll"))
+			}
+		})
+	})
+
+	afterAll(() => {
+		Reflect.deleteProperty(HTMLElement.prototype, "scrollTo")
+	})
+
+	function renderScrolledUp(initial: TranscriptRow[]) {
+		geometry.scrollHeight = 16 + initial.length * ROW_HEIGHT
+		const view = render(<AssistantTranscript rows={initial} />)
+		const region = view.container.querySelector<HTMLElement>("[role=region]")
+
+		if (region === null) {
+			throw new Error("no scroller")
+		}
+
+		scroller = region
+		act(() => {
+			scroller.scrollTop = 0
+			scroller.dispatchEvent(new Event("scroll"))
+		})
+
+		return view
+	}
+
+	function update(view: ReturnType<typeof render>, next: TranscriptRow[]) {
+		geometry.scrollHeight = 16 + next.length * ROW_HEIGHT
+		act(() => {
+			view.rerender(<AssistantTranscript rows={next} />)
+		})
+	}
+
+	it("stays put while the reply streams in", () => {
+		const view = renderScrolledUp(rows(5))
+
+		update(view, [...rows(5), reply])
+
+		expect(scroller.scrollTop).toBe(0)
+	})
+
+	it("goes to the end when the user sends a message", () => {
+		const view = renderScrolledUp([...rows(5), reply])
+
+		update(view, [...rows(5), reply, { kind: "user", id: "u5", turnId: "t5", text: "next" }])
+
+		expect(scroller.scrollTop).toBe(geometry.scrollHeight - CLIENT_HEIGHT)
+	})
+
+	it("goes to the end when a saved conversation replaces the one on screen", () => {
+		const view = renderScrolledUp(rows(5))
+		update(
+			view,
+			Array.from({ length: 6 }, (_, i) => ({ kind: "user", id: `saved:u${String(i)}`, turnId: `s${String(i)}`, text: "" }))
+		)
+
+		expect(scroller.scrollTop).toBe(geometry.scrollHeight - CLIENT_HEIGHT)
+	})
+})
