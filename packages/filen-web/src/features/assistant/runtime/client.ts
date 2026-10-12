@@ -216,8 +216,8 @@ export class AssistantRuntime implements AssistantModel {
 	private nextGeneration = 1
 	// WebGPU failed to load the model on this page while the CPU path loaded it: later loads go straight there.
 	private gpuFailed = false
-	// The longest the loaded engine took between two prompt-reading updates (one per batch), for the Stop
-	// watchdog.
+	// The longest the loaded engine took for one prompt batch, for the Stop watchdog: its pace at the load's
+	// priming, then the longest gap between two prompt-reading updates (one per batch).
 	private slowestBatchMs = 0
 	// Signed out: nothing starts again on this page.
 	private shutDown = false
@@ -848,7 +848,7 @@ export class AssistantRuntime implements AssistantModel {
 
 	private async loadIn(recommendation: Extract<RuntimeRecommendation, { supported: true }>): Promise<readonly string[]> {
 		const handle = this.worker()
-		const { specialTokens } = await untilClosed(
+		const { specialTokens, promptBatchMs = 0 } = await untilClosed(
 			handle,
 			handle.remote.load(
 				this.manifest,
@@ -867,7 +867,9 @@ export class AssistantRuntime implements AssistantModel {
 		)
 
 		this.backend = recommendation.backend
-		this.slowestBatchMs = 0
+		// A turn's first batch is never timed (a gap needs two updates), and the first turn after a load reads
+		// a long prompt: without the priming's pace a slower GPU would wait only the floor there.
+		this.slowestBatchMs = promptBatchMs
 
 		return specialTokens
 	}

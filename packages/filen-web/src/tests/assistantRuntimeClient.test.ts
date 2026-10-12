@@ -869,6 +869,30 @@ describe("AssistantRuntime idle unload", () => {
 		vi.restoreAllMocks()
 	})
 
+	it("waits for a stop in the first prompt after a load as long as the load's priming showed a batch takes", async () => {
+		const runtime = await loaded()
+
+		await runtime.unload()
+		// A slow GPU: the priming read its prompt at 12 s per batch, beyond the plain 10 s wait.
+		remote.load.mockResolvedValue({ specialTokens: [], promptBatchMs: 12_000 })
+		void runtime.load()
+		await until(() => runtime.getState().kind === "ready")
+		remote.generate.mockImplementationOnce(() => new Promise(() => undefined))
+
+		const controller = new AbortController()
+		const stopped = runtime.generate({ messages: [], slot: "main", maxTokens: 1 }, { signal: controller.signal })
+
+		controller.abort()
+		await expect(stopped).rejects.toMatchObject({ name: "AbortError" })
+		await vi.advanceTimersByTimeAsync(35_000)
+
+		expect(runtime.getState().kind).toBe("ready")
+
+		await vi.advanceTimersByTimeAsync(1_000)
+
+		expect(runtime.getState().kind).toBe("downloaded")
+	})
+
 	it("rejects a generation in flight when its worker is stopped, so no turn waits forever", async () => {
 		const runtime = await loaded()
 

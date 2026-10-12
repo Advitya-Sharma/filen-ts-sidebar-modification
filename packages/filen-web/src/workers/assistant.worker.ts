@@ -39,6 +39,9 @@ export interface AssistantLoadOptions {
 export interface AssistantLoadResult {
 	// The model's own special-token strings, for sanitizeUntrustedText.
 	specialTokens: string[]
+	// How long one full prompt batch took while priming, so the page's Stop watchdog knows this engine's pace
+	// before a turn has shown it. Absent when nothing was primed or the engine gave no timings.
+	promptBatchMs?: number
 }
 
 // Errors cross Comlink as { name, message }; the client reads the kind from the name.
@@ -469,22 +472,32 @@ function primePrompt(current: Wllama, system: string): string | null {
 }
 
 // Part of the load, so its time shows as loading and a crash here fails the load (on the GPU: the CPU path
-// is tried next). Any other failure only costs the reuse.
-async function prime(current: Wllama, system: string, signal?: AbortSignal): Promise<void> {
+// is tried next). Any other failure only costs the reuse. The engine's milliseconds per prompt token, when
+// it read any and said.
+async function prime(current: Wllama, system: string, signal?: AbortSignal): Promise<number | null> {
 	const prompt = primePrompt(current, system)
 
 	if (prompt === null) {
-		return
+		return null
 	}
 
 	try {
-		await current.createCompletion({ prompt, max_tokens: 1, temperature: 0, ...(signal === undefined ? {} : { abortSignal: signal }) })
+		const { timings } = await current.createCompletion({
+			prompt,
+			max_tokens: 1,
+			temperature: 0,
+			...(signal === undefined ? {} : { abortSignal: signal })
+		})
+
+		return timings !== undefined && timings.prompt_n > 0 && timings.prompt_ms > 0 ? timings.prompt_ms / timings.prompt_n : null
 	} catch (e) {
 		if (isEngineCrash(e, false)) {
 			throw e
 		}
 
 		log.warn("assistant.engine", "priming the prompt cache failed", e)
+
+		return null
 	}
 }
 
@@ -550,6 +563,7 @@ const api = {
 			}
 
 			const lines: string[] = []
+			let promptBatchMs: number | null = null
 			const instance = new Wllama({ default: wllamaWasmUrl }, { suppressNativeLog: false, logger: engineLogger(lines) })
 			// Independent of the engine start, so it runs while the engine reads the weights.
 			const specialTokens = readGgufSpecialTokens({ read: blobGgufRead(first), size: first.size })
@@ -590,7 +604,11 @@ const api = {
 				}
 
 				if (options.primeSystem !== undefined) {
-					await prime(instance, options.primeSystem)
+					const msPerToken = await prime(instance, options.primeSystem)
+
+					if (msPerToken !== null) {
+						promptBatchMs = msPerToken * BATCH_TOKENS[options.backend]
+					}
 				}
 			} catch (e) {
 				await instance.exit().catch(() => undefined)
@@ -621,7 +639,7 @@ const api = {
 			primeLost = false
 			extractionsSinceRouting = 0
 
-			return { specialTokens: await specialTokens }
+			return { specialTokens: await specialTokens, ...(promptBatchMs === null ? {} : { promptBatchMs }) }
 		} finally {
 			releaseCallback(onVerifying)
 		}

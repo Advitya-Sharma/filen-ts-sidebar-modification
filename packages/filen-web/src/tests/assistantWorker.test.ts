@@ -526,6 +526,21 @@ describe("assistant worker API", () => {
 		expect(routerPrompt.startsWith(prompt.slice(0, -"Hi".length))).toBe(true)
 	})
 
+	it("reports the pace of one prompt batch from the priming's timings, and none without them", async () => {
+		raw.run = () => Promise.resolve({ choices: [], timings: { prompt_n: 700, prompt_ms: 7000 } })
+
+		await expect(api.load(MANIFEST, { ...OPTIONS, backend: "webgpu", primeSystem: ROUTER_SYSTEM_PROMPT })).resolves.toEqual({
+			specialTokens: ["<|im_start|>", "<tool_call>"],
+			promptBatchMs: 5120
+		})
+		await api.unload()
+		await expect(api.load(MANIFEST, { ...OPTIONS, primeSystem: ROUTER_SYSTEM_PROMPT })).resolves.toMatchObject({ promptBatchMs: 1280 })
+		await api.unload()
+		raw.run = () => Promise.resolve({ choices: [] })
+
+		await expect(api.load(MANIFEST, { ...OPTIONS, primeSystem: ROUTER_SYSTEM_PROMPT })).resolves.not.toHaveProperty("promptBatchMs")
+	})
+
 	it("settles a generation stopped while it waits, and runs the next one only after the one in front", async () => {
 		const order: string[] = []
 		let release: () => void = () => undefined
