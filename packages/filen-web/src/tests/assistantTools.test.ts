@@ -452,6 +452,14 @@ describe("search_items", () => {
 		expect(json(result)["note"]).toContain("still being built")
 	})
 
+	it("adds the loaded listings when a settled index found nothing, without calling the result partial", async () => {
+		sdk.searchQuery.mockResolvedValue(engineResult([], 0n, "song"))
+
+		expect(json(await call("search_items", { query: "song" }))).toEqual({
+			results: [{ handle: "f1", name: "song.mp3", kind: "file", path: "/Docs/song.mp3" }]
+		})
+	})
+
 	it("sends the engine names as written: accents, voiced kana and Devanagari vowel signs stay", async () => {
 		sdk.searchQuery.mockResolvedValue(engineResult([], 0n, "x"))
 

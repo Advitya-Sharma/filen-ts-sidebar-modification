@@ -365,7 +365,8 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 		pool.set(item.data.uuid, { item, path: hitPath(engine?.parentPaths.get(item.data.uuid), driveItemName(item)) })
 	}
 
-	if (engine?.settled !== true) {
+	// An index that found nothing while a loaded listing holds a match is behind, not right.
+	if (engine?.settled !== true || engine.items.length === 0) {
 		for (const row of cachedDriveRows(item => matchScore(driveItemName(item), tokens) > 0)) {
 			if (!pool.has(row.item.data.uuid)) {
 				pool.set(row.item.data.uuid, row)
