@@ -1108,30 +1108,31 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		expect(result.calls.map(record => record.status)).toEqual(["ok", "ok"])
 	})
 
-	it("extracts a follow-up's content against the user's previous message too, and reads the data before the request", async () => {
+	it("extracts content against the user's message alone, asked before the data", async () => {
 		const executor = new FakeExecutor({
 			items: [],
 			results: {
-				list_chats: () => ({ chats: [{ handle: "c2", name: "Tom Lee" }] }),
-				read_chat: () => ({ chat: { handle: "c2", name: "Tom Lee" }, messages: [{ from: "Tom Lee", text: "Budget is 5k", sent: "2026-10-01" }] })
+				list_notes: () => ({ notes: [{ handle: "n1", title: "Groceries" }] }),
+				read_note: () => ({ handle: "n1", title: "Groceries", content: "milk, eggs" })
 			}
 		})
 		const model = new ScriptedModel({
-			route: "chats read",
-			steps: [call("list_chats", { query: "Tom Lee" }), call("read_chat", { handle: "c2" }), "Tom set the budget at 5k."]
+			route: "notes read",
+			steps: [call("list_notes", { query: "Groceries" }), call("read_note", { handle: "n1" }), "Milk and eggs."]
 		})
 
 		await turn({
 			model,
 			executor,
-			message: "Tom Lee",
-			history: [{ user: "What did Tom write about the budget?", reply: "Tom Lee or Tom Smith?" }]
+			message: "Summarize my note Groceries",
+			history: [{ user: "Play my workout playlist", reply: "Playing Workout." }]
 		})
 
 		const user = model.quarantineRequests[0]?.messages[1]?.content ?? ""
 
-		expect(user).toContain("What did Tom write about the budget?\nTom Lee")
-		expect(user.indexOf("Budget is 5k")).toBeLessThan(user.indexOf("User's request:"))
+		expect(user).not.toContain("workout")
+		expect(user.indexOf("User's request: Summarize my note Groceries")).toBe(0)
+		expect(user.indexOf("milk, eggs")).toBeGreaterThan(user.indexOf("User's request:"))
 	})
 
 	it("keeps the joiners Persian content is spelled with, for the extraction and the main loop", async () => {

@@ -1358,9 +1358,7 @@ export async function runAssistantTurn({
 									tool.untrustedOutput === "content"
 										? await quarantine({
 												model,
-												// With the user's previous message, as the router read it: a follow-up ("the first one", "yes")
-												// asks for what that one did.
-												request: [priorUser.at(-1), message].filter(text => text !== undefined).join("\n"),
+												request: message,
 												// Sanitized first: the quarantine prompt is rendered and tokenized like any other.
 												result: sanitized(outcome.result),
 												signal,

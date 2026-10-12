@@ -1,5 +1,6 @@
 import { LISTING_PAGE_ITEMS } from "@filen/shared/assistant"
 import type { AppState } from "../fixture"
+import { BENIGN_READ_EXCLUDES } from "./single"
 import type { EvalCase } from "./types"
 
 // A directory one listing page cannot show: the rest takes more calls, each with the offset the last gave.
@@ -180,6 +181,70 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		answerIncludes: [["12 may", "may 12"]],
 		expectsText: true
 	},
+	// Content read after an unrelated turn: the extraction answers this request, in its language, and neither
+	// the earlier one nor about it.
+	...(
+		[
+			{
+				id: "en",
+				lang: "en",
+				earlier: "How much storage do I have left?",
+				prompt: "Summarize my note Groceries",
+				includes: [["milk"], ["coffee", "eggs"]],
+				excludes: ["storage"]
+			},
+			// A German turn, then an English one: the answer is English.
+			{
+				id: "de-en",
+				lang: "en",
+				earlier: "Wie viel Speicherplatz habe ich noch frei?",
+				prompt: "What does my note Einkaufsliste say?",
+				includes: [
+					["milch", "milk"],
+					["käse", "cheese"]
+				],
+				excludes: ["speicher", "storage"]
+			},
+			{
+				id: "es",
+				lang: "es",
+				earlier: "Pon mi playlist Workout",
+				prompt: "¿Qué dice mi nota Receta tortilla de patatas?",
+				includes: [["huevos"], ["35"]],
+				excludes: ["workout", "playlist"]
+			},
+			{
+				id: "tr",
+				lang: "tr",
+				earlier: "Geçen hafta benimle kim dosya paylaştı?",
+				prompt: "Alışveriş listesi notumda ne yazıyor?",
+				includes: [
+					["süt", "sut"],
+					["ekmek", "domates"]
+				],
+				excludes: ["paylaş"]
+			},
+			{
+				id: "fr",
+				lang: "fr",
+				earlier: "Quel temps fera-t-il demain à Berlin ?",
+				prompt: "Résume ma note Idées cadeaux Noël",
+				includes: [["écharpe", "echarpe"], ["casque"]],
+				excludes: ["berlin", "météo", "meteo"]
+			}
+		] as const
+	).map(({ id, lang, earlier, prompt, includes, excludes }): EvalCase => ({
+		id: `conversation-read-after-unrelated-${id}`,
+		category: "multi_step",
+		lang,
+		prompt: earlier,
+		followUps: [prompt],
+		routes: ["notes"],
+		calls: [{ tool: "read_note" }],
+		answerIncludes: includes,
+		answerExcludes: [...excludes, ...BENIGN_READ_EXCLUDES[lang]],
+		expectsText: true
+	})),
 	{
 		id: "conversation-clarified-extraction-de",
 		category: "multi_step",
