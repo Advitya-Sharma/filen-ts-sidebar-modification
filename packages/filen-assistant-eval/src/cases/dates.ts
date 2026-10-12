@@ -312,5 +312,106 @@ export const DATE_CASES: EvalCase[] = [
 			"oma_geburtstag"
 		],
 		expectsText: true
+	},
+	// Rolling windows ending today, which no calendar period matches: the last 7 days are 2025-10-02 to
+	// 2025-10-08 (uploads f14, f36), the last 30 days 2025-09-09 to 2025-10-08.
+	{
+		id: "dates-drive-last-7-days-en",
+		category: "dates",
+		lang: "en",
+		prompt: "What did I upload in the last 7 days?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma_geburtstag"], ["報告書"]],
+		answerExcludes: ["report_q3", "roadmap", "meeting_notes", "setup_installer"],
+		expectsText: true
+	},
+	{
+		id: "dates-drive-last-7-days-ja",
+		category: "dates",
+		lang: "ja",
+		prompt: "過去7日間にアップロードしたファイルは？",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma_geburtstag"], ["報告書"]],
+		answerExcludes: ["report_q3", "roadmap", "meeting_notes", "setup_installer"],
+		expectsText: true
+	},
+	{
+		// Modified in the past week: only f36 (f14 was uploaded then but changed in 2024).
+		id: "dates-drive-past-week-en",
+		category: "dates",
+		lang: "en",
+		prompt: "Which files did I change in the past week?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["報告書"]],
+		answerExcludes: ["report_q3", "roadmap", "meeting_notes", "setup_installer"],
+		expectsText: true
+	},
+	{
+		id: "dates-drive-last-30-days-es",
+		category: "dates",
+		lang: "es",
+		prompt: "¿Qué archivos subí en los últimos 30 días?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma_geburtstag"], ["setup_installer"], ["tugas_kuliah"]],
+		// Uploaded 2025-08-30 to 2025-09-05, which last month would bring in.
+		answerExcludes: ["فاتورة", "किराया", "trabalho_de_historia"],
+		expectsText: true
+	},
+	{
+		id: "dates-drive-last-30-days-ru",
+		category: "dates",
+		lang: "ru",
+		prompt: "Какие файлы я загрузил за последние 30 дней?",
+		routes: ["insights"],
+		calls: [
+			{
+				tool: "recent_items"
+			}
+		],
+		answerIncludes: [["oma_geburtstag"], ["setup_installer"], ["tugas_kuliah"]],
+		answerExcludes: ["فاتورة", "किराया", "trabalho_de_historia"],
+		expectsText: true
+	},
+	{
+		id: "dates-notes-last-7-days-fr",
+		category: "dates",
+		lang: "fr",
+		prompt: "Quelles notes ai-je modifiées ces 7 derniers jours ?",
+		// This week holds only n2, last week n1 and n3, this month all three.
+		setup: state =>
+			editNotes(state, {
+				n1: "2025-10-03T09:00:00Z",
+				n2: "2025-10-07T18:00:00Z",
+				n3: "2025-10-01T10:00:00Z"
+			}),
+		routes: ["notes"],
+		calls: [
+			{
+				tool: "list_notes"
+			}
+		],
+		answerIncludes: [["groceries"], ["einkaufsliste"]],
+		answerExcludes: ["meeting", "tortilla", "Важное"],
+		expectsText: true
 	}
 ]

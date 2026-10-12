@@ -5,6 +5,9 @@
 export const ASSISTANT_PERIODS = [
 	"today",
 	"yesterday",
+	// Rolling, ending today: no calendar period covers "the last 7 days".
+	"last_7_days",
+	"last_30_days",
 	"this_week",
 	"last_week",
 	"this_month",
@@ -108,7 +111,11 @@ export function localDayStartMs(day: string, timeZone?: string): number {
 		instant = target - (wallClockMs(instant, timeZone) - instant)
 	}
 
-	return instant
+	const wall = wallClockMs(instant, timeZone)
+
+	// Where DST starts at midnight, the day has no midnight and the passes land in the previous day's last
+	// hour: the day begins where that hour ends.
+	return wall < target ? instant + (target - wall) : instant
 }
 
 // The ends of a range given only one explicit day.
@@ -165,6 +172,10 @@ export function periodRange(period: AssistantPeriod, calendar: AssistantCalendar
 			return { from: day(0), to: day(0) }
 		case "yesterday":
 			return { from: day(-1), to: day(-1) }
+		case "last_7_days":
+			return { from: day(-6), to: day(0) }
+		case "last_30_days":
+			return { from: day(-29), to: day(0) }
 		case "this_week":
 			return { from: day(weekFirst), to: day(weekFirst + 6) }
 		case "last_week":

@@ -18,6 +18,8 @@ describe("periodRange", () => {
 	it.each([
 		["today", "2025-10-08", "2025-10-08"],
 		["yesterday", "2025-10-07", "2025-10-07"],
+		["last_7_days", "2025-10-02", "2025-10-08"],
+		["last_30_days", "2025-09-09", "2025-10-08"],
 		["this_week", "2025-10-06", "2025-10-12"],
 		["last_week", "2025-09-29", "2025-10-05"],
 		["this_month", "2025-10-01", "2025-10-31"],
@@ -35,6 +37,8 @@ describe("periodRange", () => {
 		expect(periodRange("today", nyc)).toEqual({ from: "2025-12-31", to: "2025-12-31" })
 		expect(periodRange("last_month", { now: Date.UTC(2026, 0, 15), timeZone: "UTC" })).toEqual({ from: "2025-12-01", to: "2025-12-31" })
 		expect(periodRange("last_month", { now: Date.UTC(2024, 2, 10), timeZone: "UTC" })).toEqual({ from: "2024-02-01", to: "2024-02-29" })
+		expect(periodRange("last_7_days", { now: Date.UTC(2024, 2, 3), timeZone: "UTC" })).toEqual({ from: "2024-02-26", to: "2024-03-03" })
+		expect(periodRange("last_30_days", nyc)).toEqual({ from: "2025-12-02", to: "2025-12-31" })
 	})
 
 	it("starts weeks on the given weekday", () => {
@@ -104,6 +108,20 @@ describe("day bounds", () => {
 		expect(inDayRange(Date.UTC(2025, 9, 26, 22, 59), bounds)).toBe(true)
 		expect(inDayRange(Date.UTC(2025, 9, 26, 23), bounds)).toBe(false)
 		expect(localDayStartMs("2025-03-30", "Europe/Berlin")).toBe(Date.UTC(2025, 2, 29, 23))
+	})
+
+	it("starts a day whose midnight DST skips at its first hour", () => {
+		// Santiago and Havana move from 00:00 straight to 01:00.
+		expect(localDayStartMs("2025-09-07", "America/Santiago")).toBe(Date.UTC(2025, 8, 7, 4))
+		expect(localDayStartMs("2025-03-09", "America/Havana")).toBe(Date.UTC(2025, 2, 9, 5))
+
+		// 23:30 local on the evening before.
+		const lateEvening = Date.UTC(2025, 8, 7, 3, 30)
+
+		expect(inDayRange(lateEvening, dayRangeBounds({ from: "2025-09-06", to: "2025-09-06" }, "America/Santiago"))).toBe(true)
+		expect(inDayRange(lateEvening, dayRangeBounds({ from: "2025-09-07", to: "2025-09-07" }, "America/Santiago"))).toBe(false)
+		// Santiago leaves summer time at midnight too, repeating the previous day's last hour.
+		expect(localDayStartMs("2025-04-06", "America/Santiago")).toBe(Date.UTC(2025, 3, 6, 4))
 	})
 
 	it("leaves an open end unbounded", () => {
