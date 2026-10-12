@@ -42,10 +42,48 @@ function writeReloadAt(now: number): void {
 	}
 }
 
+// Long enough for index.html on a slow link; a hung request must not hold up what waits on the answer.
+const PROBE_TIMEOUT_MS = 5000
+
+export type BuildDeployment = "deployed" | "replaced" | "unknown"
+
+// Whether the server still deploys this tab's build. Not known in dev (source modules, no bundle) or
+// without the server.
+export async function buildDeployment(): Promise<BuildDeployment> {
+	if (!import.meta.env.PROD) {
+		return "unknown"
+	}
+
+	try {
+		const response = await fetch("/", { cache: "no-cache", signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) })
+
+		if (!response.ok) {
+			return "unknown"
+		}
+
+		return isBuildStillDeployed(await response.text(), RUNNING_BUNDLE) ? "deployed" : "replaced"
+	} catch {
+		// Unreachable server: nothing to compare against, and a reload could not load either.
+		return "unknown"
+	}
+}
+
+// A newer build is deployed: reload into it, or ask first while something holds the tab.
+export function updateToNewerBuild(): void {
+	const now = Date.now()
+	const action = staleBuildAction({ busy: hasUnloadHold(), lastReloadAt: readReloadAt(), now })
+
+	if (action === "prompt") {
+		showUpdateReadyToast()
+	} else if (action === "reload") {
+		writeReloadAt(now)
+		location.reload()
+	}
+}
+
 // Called when a worker the page starts after boot (PDF, spreadsheet, HEIC) fails. If index.html no longer
-// loads this tab's bundle, a newer build replaced the worker's file: reload into it, or ask first while
-// something holds the tab. Any other failure (a broken file, no network) leaves the tab as it is. Dev
-// serves source modules rather than one bundle, so only a production build checks.
+// loads this tab's bundle, a newer build replaced the worker's file and the tab updates. Any other failure
+// (a broken file, no network) leaves the tab as it is.
 export function recoverIfNewerBuild(): void {
 	const now = Date.now()
 
@@ -55,24 +93,9 @@ export function recoverIfNewerBuild(): void {
 
 	lastCheckAt = now
 
-	void fetch("/", { cache: "no-cache" })
-		.then(async response => (response.ok ? await response.text() : null))
-		.then(html => {
-			if (html === null || isBuildStillDeployed(html, RUNNING_BUNDLE)) {
-				return
-			}
-
-			const at = Date.now()
-			const action = staleBuildAction({ busy: hasUnloadHold(), lastReloadAt: readReloadAt(), now: at })
-
-			if (action === "prompt") {
-				showUpdateReadyToast()
-			} else if (action === "reload") {
-				writeReloadAt(at)
-				location.reload()
-			}
-		})
-		.catch(() => {
-			// Unreachable server: nothing to compare against, and a reload could not load either.
-		})
+	void buildDeployment().then(deployment => {
+		if (deployment === "replaced") {
+			updateToNewerBuild()
+		}
+	})
 }

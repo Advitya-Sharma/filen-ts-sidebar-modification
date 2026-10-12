@@ -39,7 +39,14 @@ const { remote, inspections, releaseProxy, workers, locks, prune, device, storag
 	stale: { bytes: 0 },
 	// The order pruning, removal and the storage estimate ran in.
 	order: [] as string[],
-	appUpdate: { recover: vi.fn(), prompt: vi.fn() }
+	// Whether the server still deploys this build, and how often it was asked.
+	appUpdate: {
+		recover: vi.fn(),
+		prompt: vi.fn(),
+		update: vi.fn(),
+		deployment: "unknown",
+		probes: 0
+	}
 }))
 
 vi.mock("@/workers/assistant.worker.ts?worker", () => ({
@@ -73,7 +80,16 @@ vi.mock("comlink", () => ({
 	releaseProxy
 }))
 
-vi.mock("@/lib/appUpdate", () => ({ recoverIfNewerBuild: appUpdate.recover, showUpdateReadyToast: appUpdate.prompt }))
+vi.mock("@/lib/appUpdate", () => ({
+	recoverIfNewerBuild: appUpdate.recover,
+	showUpdateReadyToast: appUpdate.prompt,
+	updateToNewerBuild: appUpdate.update,
+	buildDeployment: () => {
+		appUpdate.probes++
+
+		return Promise.resolve(appUpdate.deployment)
+	}
+}))
 
 // The signed-in account a download's opt-in is recorded for.
 const account = vi.hoisted((): { id: bigint | undefined } => ({ id: 7n }))
@@ -134,23 +150,9 @@ const TOTAL = manifestBytes(QWEN35_4B)
 const COMPLETE: ModelInspection = { presentBytes: TOTAL, verifiedBytes: TOTAL, complete: true }
 const MINUTE = 60_000
 
-// The bundle this build runs from, as the deployed index.html names it: the runtime module itself under test.
-const RUNNING_BUNDLE = new URL("../features/assistant/runtime/client.ts", import.meta.url).pathname
-
-// A production build, and whether the server still deploys it ("unknown": unreachable).
+// Whether the server still deploys this build ("unknown": unreachable).
 function deployment(kind: "deployed" | "replaced" | "unknown"): void {
-	vi.stubEnv("PROD", true)
-	vi.stubEnv("DEV", false)
-	vi.stubGlobal(
-		"fetch",
-		vi.fn((url: string) =>
-			url === "/" && kind !== "unknown"
-				? Promise.resolve(
-						new Response(`<script src="${kind === "deployed" ? RUNNING_BUNDLE : "/assets/index-newer.js"}"></script>`)
-					)
-				: Promise.reject(new TypeError("Failed to fetch"))
-		)
-	)
+	appUpdate.deployment = kind
 }
 
 function stubBrowser(): void {
@@ -238,6 +240,9 @@ beforeEach(() => {
 	storage.local.clear()
 	appUpdate.recover.mockClear()
 	appUpdate.prompt.mockClear()
+	appUpdate.update.mockClear()
+	appUpdate.deployment = "unknown"
+	appUpdate.probes = 0
 	account.id = 7n
 	device.gpu = true
 	device.cpu = true
@@ -984,7 +989,7 @@ describe("AssistantRuntime failures", () => {
 		expect(order).toEqual(["estimate", "prune"])
 		// The estimate's usage (none here) less the earlier version's bytes, never below zero.
 		expect(storage.judgedUsage).toBe(0)
-		expect(appUpdate.recover).not.toHaveBeenCalled()
+		expect(appUpdate.update).not.toHaveBeenCalled()
 	})
 
 	it("keeps an earlier model version when the download does not start for want of room", async () => {
@@ -1014,7 +1019,9 @@ describe("AssistantRuntime failures", () => {
 		await runtime.init()
 
 		expect(runtime.getState()).toEqual({ kind: "not-downloaded", model: expect.anything() as unknown })
-		expect(appUpdate.recover).toHaveBeenCalledTimes(1)
+		// The server was asked once, and the tab updates on that answer.
+		expect(appUpdate.update).toHaveBeenCalledTimes(1)
+		expect(appUpdate.probes).toBe(1)
 
 		runtime.download()
 		await vi.waitFor(() => {
@@ -1049,6 +1056,105 @@ describe("AssistantRuntime failures", () => {
 		expect(order).toEqual(["estimate"])
 		expect(stale.bytes).toBe(2_700_000_000)
 		expect(storage.judgedUsage).toBe(0)
+	})
+
+	it("removes an earlier version kept at the download's start once the server answers as the download ends", async () => {
+		stale.bytes = 2_700_000_000
+		remote.download.mockImplementation(() => {
+			deployment("deployed")
+
+			return Promise.resolve()
+		})
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		runtime.download()
+		await settled(runtime, "downloaded")
+
+		expect(order).toEqual(["estimate", "prune"])
+		expect(stale.bytes).toBe(0)
+		expect(locks.held).toBe(0)
+	})
+
+	it("removes an earlier version left beside a complete model at the next start, under the lock", async () => {
+		deployment("deployed")
+		stale.bytes = 2_700_000_000
+		inspections.push(COMPLETE)
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+
+		expect(runtime.getState().kind).toBe("downloaded")
+		expect(order).toEqual(["prune"])
+		expect(locks.granted).toBe(1)
+		expect(locks.held).toBe(0)
+	})
+
+	it("keeps another model beside a complete one unless the server deploys this build, and asks nothing without one", async () => {
+		inspections.push(COMPLETE)
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+
+		expect(appUpdate.probes).toBe(0)
+
+		for (const kind of ["unknown", "replaced"] as const) {
+			deployment(kind)
+			stale.bytes = 2_700_000_000
+			inspections.push(COMPLETE)
+
+			const other = new AssistantRuntime()
+
+			await other.init()
+
+			expect(other.getState().kind).toBe("downloaded")
+			expect(stale.bytes).toBe(2_700_000_000)
+		}
+
+		expect(order).toEqual([])
+		expect(appUpdate.update).not.toHaveBeenCalled()
+	})
+
+	it("from a replaced build with no model on disk, asks to update instead of downloading the model it would use", async () => {
+		deployment("replaced")
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+
+		// Nothing on disk at all: the startup check asks the server nothing.
+		expect(appUpdate.probes).toBe(0)
+
+		runtime.download()
+		await vi.waitFor(() => {
+			expect(appUpdate.prompt).toHaveBeenCalledTimes(1)
+		})
+
+		expect(runtime.getState()).toEqual({ kind: "not-downloaded", model: expect.anything() as unknown })
+		expect(remote.download).not.toHaveBeenCalled()
+		expect(workers).toHaveLength(0)
+		expect(locks.held).toBe(0)
+	})
+
+	it("continues a part on disk without asking the server when no other model is there", async () => {
+		deployment("replaced")
+		inspections.push(
+			{ presentBytes: 1000, verifiedBytes: 1000, complete: false },
+			{ presentBytes: 1000, verifiedBytes: 1000, complete: false }
+		)
+		remote.download.mockResolvedValue(undefined)
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		runtime.download()
+		await settled(runtime, "downloaded")
+
+		expect(appUpdate.probes).toBe(0)
+		expect(remote.download).toHaveBeenCalledTimes(1)
 	})
 
 	it("removes every model from a deployed build, its own and earlier versions", async () => {

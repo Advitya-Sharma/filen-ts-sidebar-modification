@@ -26,8 +26,7 @@ import { deleteModelDirectory, deleteModels, inspectModel, otherModels } from "@
 import { autoStartIntent, readDownloadIntent, writeDownloadIntent } from "@/features/assistant/runtime/downloadIntent"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
 import { ENGINE_CRASHED, type GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
-import { recoverIfNewerBuild, showUpdateReadyToast } from "@/lib/appUpdate"
-import { isBuildStillDeployed } from "@/lib/appUpdate.logic"
+import { buildDeployment, recoverIfNewerBuild, showUpdateReadyToast, updateToNewerBuild, type BuildDeployment } from "@/lib/appUpdate"
 import { ACCOUNT_QUERY_KEY, accountQueryGet, fetchAccount } from "@/queries/account"
 import { queryClient } from "@/queries/client"
 import { log } from "@/lib/log"
@@ -134,29 +133,6 @@ async function signedInAccount(): Promise<string | null> {
 		(await queryClient.query({ queryKey: ACCOUNT_QUERY_KEY, queryFn: fetchAccount, staleTime: "static" }).catch(() => undefined))
 
 	return account === undefined ? null : String(account.id)
-}
-
-// The page is one bundle, so the file this module was loaded from names the running build.
-const RUNNING_BUNDLE = new URL(import.meta.url).pathname
-
-// Whether the server still deploys this build: the only sign of whether another model on disk is an
-// earlier version or a newer build's. Not known in dev (source modules, no bundle) or without the server.
-async function buildDeployment(): Promise<"deployed" | "replaced" | "unknown"> {
-	if (!import.meta.env.PROD) {
-		return "unknown"
-	}
-
-	try {
-		const response = await fetch("/", { cache: "no-cache" })
-
-		if (!response.ok) {
-			return "unknown"
-		}
-
-		return isBuildStillDeployed(await response.text(), RUNNING_BUNDLE) ? "deployed" : "replaced"
-	} catch {
-		return "unknown"
-	}
 }
 
 // A dev build without a configured host serves the GGUF named by FILEN_ASSISTANT_DEV_GGUF (vite/assistant-model.ts).
@@ -330,6 +306,7 @@ export class AssistantRuntime implements AssistantModel {
 				writeDownloadIntent(null)
 			}
 
+			await this.pruneEarlierVersions()
 			this.settleDownloaded()
 		} else if (inspection.presentBytes > 0) {
 			this.settleNotDownloaded(inspection.presentBytes)
@@ -344,26 +321,45 @@ export class AssistantRuntime implements AssistantModel {
 	private async checkOutdated(): Promise<number> {
 		const other = await this.otherModel()
 
-		if (other.replaced) {
-			recoverIfNewerBuild()
+		if (other.deployment === "replaced") {
+			updateToNewerBuild()
 		}
 
 		return other.stale ? other.bytes : 0
 	}
 
+	// With this build's model complete, another model left beside it (its download started while the server
+	// could not be asked) is freed once the server says this build is deployed. Never while a tab runs it.
+	private async pruneEarlierVersions(): Promise<void> {
+		const owned = this.releaseLock !== null
+
+		if (!(await this.otherModel()).stale || !(owned || (await this.tryLock()))) {
+			return
+		}
+
+		try {
+			await this.pruneOtherModels()
+		} finally {
+			if (!owned) {
+				this.unlock()
+			}
+		}
+	}
+
 	// The models on disk other than this build's. They are an earlier version (`stale`), which this build may
-	// free, only while the server deploys this build: from a replaced one (`replaced`) they may be the newer
-	// build's, which another tab runs. The server is asked only when there are any.
-	private async otherModel(): Promise<{ bytes: number; stale: boolean; replaced: boolean }> {
+	// free, only while the server deploys this build: from a replaced one they may be the newer build's, which
+	// another tab runs. The server is asked only when there are any, or when `always` (a download from nothing,
+	// which a replaced build must not start).
+	private async otherModel(always = false): Promise<{ present: boolean; bytes: number; stale: boolean; deployment: BuildDeployment }> {
 		const other = await otherModels(this.manifest.id).catch(() => ({ present: false, bytes: 0 }))
 
-		if (!other.present) {
-			return { bytes: 0, stale: false, replaced: false }
+		if (!other.present && !always) {
+			return { present: false, bytes: 0, stale: false, deployment: "unknown" }
 		}
 
 		const deployment = await buildDeployment()
 
-		return { bytes: other.bytes, stale: deployment === "deployed", replaced: deployment === "replaced" }
+		return { present: other.present, bytes: other.bytes, stale: other.present && deployment === "deployed", deployment }
 	}
 
 	private async lockHeldElsewhere(): Promise<boolean> {
@@ -693,16 +689,23 @@ export class AssistantRuntime implements AssistantModel {
 			return
 		}
 
+		// Another model kept because the server could not be asked as the download started: asked again at its end.
+		let undecided = false
+
 		try {
 			const before = await inspectModel(this.manifest)
 
 			if (!before.complete) {
 				// An earlier model version is dead weight this build never loads: its bytes count as room for this
 				// one, and it goes (under the lock, so no tab runs it) only once this download starts. A replaced
-				// build fetches nothing the deployed one no longer uses, and leaves that build's model alone.
-				const other = await this.otherModel()
+				// build fetches nothing the deployed one no longer uses, and leaves that build's model alone. A click
+				// that would download from nothing asks even with no other model on disk: one small request against
+				// gigabytes of a model the deployed build may no longer use.
+				const other = await this.otherModel(before.presentBytes === 0 && !resumed)
 
-				if (other.replaced) {
+				undecided = other.present && other.deployment === "unknown"
+
+				if (other.deployment === "replaced") {
 					this.unlock()
 					this.settleNotDownloaded(before.presentBytes)
 					showUpdateReadyToast()
@@ -807,6 +810,11 @@ export class AssistantRuntime implements AssistantModel {
 		// never start in this worker and be cut off with it.
 		writeDownloadIntent(null)
 		this.stopWorker()
+
+		if (undecided) {
+			await this.pruneEarlierVersions()
+		}
+
 		this.unlock()
 		this.settleDownloaded()
 	}
