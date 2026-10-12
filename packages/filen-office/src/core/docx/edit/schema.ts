@@ -41,6 +41,11 @@ export interface MarkerAttrs {
 	readonly id: string | null
 }
 
+// A marker node's attributes: a new bookmark also has its name (a source one keeps it in its bytes).
+export interface MarkerNodeAttrs extends MarkerAttrs {
+	readonly name: string | null
+}
+
 export type MarkerList = readonly MarkerAttrs[]
 
 export const NO_MARKERS: MarkerList = Object.freeze([])
@@ -89,6 +94,13 @@ export interface ColorAttrs {
 	readonly themeShade: number | null
 }
 
+// Node marks of paragraphs (and of locked blocks standing for them) in block containers.
+const BLOCK_MARKS = "para_id paragraph_change section_change"
+// What text and inline atoms may carry: every mark but the node marks of blocks.
+const INLINE_MARKS =
+	"link insertion deletion move_from move_to content_control wrapper run plain char_style bold italic underline strike " +
+	"double_strike caps small_caps vert_align color highlight shading font size spacing lang format_change"
+
 const src = { default: NO_SOURCE }
 const before = { default: NO_MARKERS }
 const end = { default: NO_MARKERS }
@@ -96,18 +108,24 @@ const nil = { default: null }
 
 const nodes = {
 	// A story: the body, a header or footer, a note or a comment. `sectPr` is the body's final section
-	// properties item; `end` the markers after the last block.
+	// properties item; `end` the markers after the last block. Changed only through DocAttrStep by feature
+	// commands (so they undo with the story): `comments`, overrides of the document's comments by id
+	// (resolved, parent, author...; null: none), and `sectionChanges`, edits to the final section's
+	// properties (null: none).
 	doc: {
 		content: "block+",
-		attrs: { story: { default: -1 }, sectPr: src, end }
+		marks: BLOCK_MARKS,
+		attrs: { story: { default: -1 }, sectPr: src, end, comments: nil, sectionChanges: nil }
 	},
 	// w:p. Direct paragraph properties that commands edit are attributes; everything else in w:pPr stays in
 	// the source bytes. `sectPr` is the item of the paragraph whose w:pPr holds the section break this
 	// paragraph ends (it moves with the paragraph mark when the paragraph splits). `revision` holds the
-	// mark's RevisionFlag bits.
+	// mark's RevisionFlag bits. What feature commands record on a paragraph are node marks (para_id,
+	// paragraph_change, section_change), which cost nothing on the paragraphs without them.
 	paragraph: {
 		group: "block",
 		content: "inline*",
+		marks: INLINE_MARKS,
 		attrs: {
 			src,
 			before,
@@ -122,22 +140,28 @@ const nodes = {
 	},
 	// w:tbl, w:tr, w:tc, one node per element. Merged cells keep their w:vMerge continuation cells, so the
 	// grid stays the file's; colspan is w:gridSpan and rowspan is always 1. colwidth comes from w:tblGrid.
+	// Properties table commands change (alignment, widths, header row, shading, vertical alignment...): the
+	// table's `props` (null: as the source has them), and on rows and cells the node marks row_props and
+	// cell_props (none on most of the many rows and cells).
 	table: {
 		group: "block",
 		content: "table_row+",
 		isolating: true,
 		tableRole: "table",
-		attrs: { src, before, end, styleId: nil, grid: { default: [] } }
+		marks: "row_props",
+		attrs: { src, before, end, styleId: nil, grid: { default: [] }, props: nil }
 	},
 	table_row: {
 		content: "table_cell+",
 		tableRole: "row",
+		marks: "cell_props",
 		attrs: { src, before, end, revision: { default: 0 } }
 	},
 	table_cell: {
 		content: "block+",
 		isolating: true,
 		tableRole: "cell",
+		marks: BLOCK_MARKS,
 		attrs: {
 			src,
 			before,
@@ -150,12 +174,14 @@ const nodes = {
 		}
 	},
 	// Block-level w:sdt (content control). `lock` is w:lock as written ("sdtLocked" keeps the control from
-	// being deleted; content-locked controls are locked blocks instead).
+	// being deleted; content-locked controls are locked blocks instead). `state`: what form commands changed
+	// (checked, chosen value, date, placeholder shown); null: as the source has it.
 	sdt: {
 		group: "block",
 		content: "block+",
 		isolating: true,
-		attrs: { src, before, end, type: { default: "richText" }, lock: nil }
+		marks: BLOCK_MARKS,
+		attrs: { src, before, end, type: { default: "richText" }, lock: nil, state: nil }
 	},
 	// A block kept as its source bytes: unmodelled block-level elements and locked islands. `markers` are
 	// the range markers and comment references inside it, which outlive its deletion; `deletable` is false
@@ -208,13 +234,21 @@ const nodes = {
 		attrs: { src, id: nil }
 	},
 	// w:drawing, w:pict, w:object, or the mc:AlternateContent around one (`src`); `index` is the model's
-	// DrawingInfo (kind "drawing") or VmlInfo index, -1 when none was read.
+	// DrawingInfo (kind "drawing") or VmlInfo index, -1 when none was read. `overrides`: what drawing
+	// commands set (DrawingOverrides), null when the drawing is as the source has it.
 	drawing: {
 		group: "inline",
 		inline: true,
 		atom: true,
 		docxLevel: "run",
-		attrs: { src, kind: { default: "drawing" }, index: { default: -1 }, anchored: { default: false }, markers: { default: NO_MARKERS } }
+		attrs: {
+			src,
+			kind: { default: "drawing" },
+			index: { default: -1 },
+			anchored: { default: false },
+			markers: { default: NO_MARKERS },
+			overrides: nil
+		}
 	},
 	// Any other run content (positional tab, ruby, page number, note marks, stray field characters, unknown
 	// run children), kept as its bytes. `kind` is the model item name.
@@ -242,22 +276,32 @@ const nodes = {
 			markers: { default: NO_MARKERS }
 		}
 	},
-	// A range marker inside a paragraph (see MarkerKind).
+	// A range marker inside a paragraph (see MarkerKind); `name` is a new bookmark's w:name.
 	marker: {
 		group: "inline",
 		inline: true,
 		atom: true,
 		selectable: false,
 		docxLevel: "paragraph",
-		attrs: { src, kind: { default: "bookmarkStart" }, id: nil }
+		attrs: { src, kind: { default: "bookmarkStart" }, id: nil, name: nil }
 	},
-	// m:oMath / m:oMathPara inside a paragraph.
+	// m:oMath / m:oMathPara inside a paragraph; `omml` the equation's new XML (null: as the source has it).
 	math: {
 		group: "inline",
 		inline: true,
 		atom: true,
 		docxLevel: "paragraph",
-		attrs: { src, display: { default: false }, markers: { default: NO_MARKERS } }
+		attrs: { src, display: { default: false }, markers: { default: NO_MARKERS }, omml: nil }
+	},
+	// A new w:fldChar of a field spanning paragraphs (a table of contents the editor made): `kind` begin,
+	// separate or end; the begin holds the instruction and whether Word should update it (w:dirty).
+	field_char: {
+		group: "inline",
+		inline: true,
+		atom: true,
+		selectable: false,
+		docxLevel: "run",
+		attrs: { src, kind: { default: "begin" }, instruction: { default: "" }, dirty: { default: false } }
 	},
 	// Word's bookkeeping marks, zero width: w:proofErr (paragraph level; `node` is its XML node, it is no
 	// model item) and w:lastRenderedPageBreak (inside a run). Kept so stretches of unchanged runs in an
@@ -302,8 +346,8 @@ const marks = {
 	deletion: wrapper({ id: nil, author: nil, date: nil }),
 	move_from: wrapper({ id: nil, author: nil, date: nil }),
 	move_to: wrapper({ id: nil, author: nil, date: nil }),
-	// Run-level w:sdt.
-	content_control: wrapper({ type: { default: "richText" } }),
+	// Run-level w:sdt; `state` as the block control's.
+	content_control: wrapper({ type: { default: "richText" }, state: nil }),
 	// w:smartTag, w:customXml, w:dir, w:bdo.
 	wrapper: wrapper({ kind: { default: "customXml" }, rtl: { default: false } }),
 	// The source w:r (`src`, so adjacent runs never merge and an unchanged run is written as its bytes) and
@@ -346,12 +390,42 @@ const marks = {
 	// Character spacing, twips.
 	spacing: { attrs: value },
 	lang: { attrs: { latin: nil, eastAsia: nil, bidi: nil } },
-	// w:rPrChange in the base (a tracked formatting change), for display; read-only until tracked changes
-	// can be edited.
-	format_change: { attrs: { id: nil, author: nil, date: nil } }
+	// w:rPrChange: in the base (a tracked formatting change read from the file, `base` null), or recorded by
+	// the editor with the run properties before it (`base`, an id in the session's RunBases).
+	format_change: { attrs: { id: nil, author: nil, date: nil, base: nil } },
+	// Node marks feature commands set on blocks (never on inline content): a paragraph's new w14:paraId
+	// (`id`, eight hex digits); and, each `value` an object of the changed properties, a paragraph's
+	// properties before a tracked change (w:pPrChange), edits to the section properties a paragraph carries
+	// (`value` names its section: equal marks on two paragraphs are a split's halves), a row's or a cell's
+	// property overrides. Copies of a paragraph (a paste, a split's new half) do not keep them.
+	para_id: { attrs: { id: { default: "" } } },
+	paragraph_change: { attrs: value },
+	section_change: { attrs: value },
+	row_props: { attrs: value },
+	cell_props: { attrs: value }
 } satisfies Record<string, MarkSpec>
 
 export const docxSchema = new Schema({ nodes, marks })
+
+// Node marks of blocks (see BLOCK_MARKS): only feature commands set them.
+export const BLOCK_NODE_MARKS: readonly DocxMarkName[] = ["para_id", "paragraph_change", "section_change", "row_props", "cell_props"]
+
+// What drawing commands override on a drawing (EMUs for sizes and offsets); absent: as the source has it.
+export interface DrawingOverrides {
+	readonly cx?: number
+	readonly cy?: number
+	readonly posX?: number
+	readonly posY?: number
+	readonly relH?: string
+	readonly relV?: string
+	readonly wrap?: string
+	readonly descr?: string
+	// The handle (DocxMediaStore) of a new picture's bytes.
+	readonly media?: number
+}
+
+// The marks inline content may carry (for a check that every mark is either inline or a block's).
+export const INLINE_MARK_NAMES: readonly string[] = INLINE_MARKS.split(" ")
 
 export type DocxSchema = typeof docxSchema
 

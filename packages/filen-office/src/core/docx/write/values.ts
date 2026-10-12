@@ -87,3 +87,10 @@ export function indent(value: IndentAttrs | null): void {
 	optionalInteger("w:ind hangingChars", value.hangingChars)
 	optionalInteger("w:ind firstLineChars", value.firstLineChars)
 }
+
+// w14:paraId (ST_LongHexNumber as Word uses it): eight hex digits, above 0 and below 0x80000000.
+const PARA_ID = /^[0-7][0-9A-Fa-f]{7}$/
+
+export function paraId(value: unknown): void {
+	if (typeof value !== "string" || !PARA_ID.test(value) || value === "00000000") invalid("w14:paraId", value)
+}

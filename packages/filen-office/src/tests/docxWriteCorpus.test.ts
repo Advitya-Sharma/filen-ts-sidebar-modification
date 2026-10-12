@@ -8,6 +8,7 @@ import { DocxSaveError, saveDocx } from "@filen/office/core/docx/write"
 import { CORPUS_DIR as CORPUS } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 import { runEditScript } from "./docxWriteFixtures"
+import { scriptOps } from "./fuzz/ops/index"
 
 // The licensed real-world corpus is kept out of the repository (pnpm run corpus:fetch); this sweep runs only where it exists.
 const EXTENSIONS = ["docx", "docm", "dotx", "dotm"]
@@ -124,10 +125,11 @@ describe.skipIf(!existsSync(CORPUS))("docx writer over the real-world corpus", (
 
 				for (const edit of script.done) edits[edit] = (edits[edit] ?? 0) + 1
 
-				const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [script.session] })
+				const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: script.sessions })
 				if (result.bytes === undefined) throw new Error("No bytes")
 
 				const written = await OpcPackage.open(bytesSource(result.bytes))
+				const types = await written.contentTypes()
 				const allowed = new Set([
 					"word/document.xml",
 					"word/numbering.xml",
@@ -135,8 +137,14 @@ describe.skipIf(!existsSync(CORPUS))("docx writer over the real-world corpus", (
 					"word/_rels/document.xml.rels",
 					"[Content_Types].xml"
 				])
+				const writes = new Set(scriptOps().flatMap(op => (script.done.includes(op.name) ? (op.writes ?? []) : [])))
+				const declared = (part: string): boolean => {
+					const type = types.typeOf(part) ?? ""
+
+					return writes.has(type) || writes.has(type.replace(/^.*[./]([\w-]+)\+xml$/, "$1"))
+				}
 				const unexpected = result.changedParts.filter(
-					part => !allowed.has(part) && part !== opened.pkg.mainPart && !part.endsWith(".rels")
+					part => !allowed.has(part) && part !== opened.pkg.mainPart && !part.endsWith(".rels") && !declared(part)
 				)
 
 				if (unexpected.length > 0) failures.push(`${name}: unexpected changed parts ${unexpected.join(", ")}`)

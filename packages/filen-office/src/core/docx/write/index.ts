@@ -43,4 +43,8 @@ export {
 } from "./story"
 export { DocxVerifyError, paragraphSignature, textblocks, verifyDocxParts, type VerifyFailure, type VerifyPartsInput } from "./verify"
 export { Names, Out } from "./markup"
+export { PART_CONTRIBUTORS, type PartContributor, type SaveParts, type WrittenStories } from "./parts/index"
+export { DOCX_CHECKS, type CheckInput, type CheckedPart, type DocxCheck } from "./checks/index"
+export type { NewStoryContainer } from "./newStory"
+export type { NestedSplice, NestedStories } from "./nested"
 export * from "./order.generated"

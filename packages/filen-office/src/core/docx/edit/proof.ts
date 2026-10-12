@@ -1,7 +1,7 @@
 import type { Node } from "prosemirror-model"
 import type { EditorState, Transaction } from "prosemirror-state"
 import type { DocxDocBuilder, StoryDoc } from "./build"
-import { markInternal } from "./invariants"
+import { markInternal } from "./invariants/index"
 import { NO_SOURCE, docxSchema, type LockReason } from "./schema"
 
 // Gate 1: every source block must come out of the edit path as it went in. A proof forces a block through

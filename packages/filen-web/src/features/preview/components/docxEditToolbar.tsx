@@ -22,11 +22,9 @@ import {
 	type LucideIcon
 } from "lucide-react"
 import {
-	DOCX_EDITOR_COMMANDS,
 	DOCX_PARAGRAPH_STYLE_MENU,
 	parseDocxEditorCommand,
 	type DocxEditorCommand,
-	type DocxEditorCommandGroup,
 	type DocxEditorCommandInfo,
 	type DocxEditorSnapshot,
 	type DocxParagraphStyle,
@@ -35,13 +33,21 @@ import {
 import { DOCX_MARKUP_MODES, type DocxMarkupMode } from "@filen/office/dom/docx"
 import { cn } from "@filen/shared"
 import {
-	COMMAND_LABELS,
 	commandActive,
 	lockReasonKey,
+	rowCommands,
 	shortcutKeys,
+	slotCommands,
 	styleLabel,
-	toolbarFit
+	toolbarFit,
+	type DocxToolbarCommand,
+	type DocxToolbarSlotProps
 } from "@/features/preview/components/docxEditor.logic"
+import { DocxFormatControls } from "@/features/preview/components/docxFormatControls"
+import { DocxInsertMenu } from "@/features/preview/components/docxInsertMenu"
+import { DocxReflowToggle } from "@/features/preview/components/docxReflowSurface"
+import { DocxReviewMenu } from "@/features/preview/components/docxReviewMenu"
+import { DocxTableMenu } from "@/features/preview/components/docxTableMenu"
 import { MARKUP_LABELS, type DocxFindControls, type DocxViewOnlyReason } from "@/features/preview/components/docxViewer.logic"
 import { DocxFindField, MarkupMenu, ViewOnlyBadge } from "@/features/preview/components/docxToolbar"
 import { Badge } from "@/components/ui/badge"
@@ -69,7 +75,8 @@ import { useElementSize } from "@/lib/useElementSize"
 // The DOCX editor's toolbar: one compact row in the spreadsheet toolbar's style (undo and redo, paragraph
 // style, character formatting, alignment, lists), groups that do not fit moved into the ⋯ menu with the
 // editor's options (find and replace, markup, zoom, autosave). Mod+F swaps the row for the find field.
-// Everything shown comes from the editing session's snapshot; everything done is one of its commands.
+// Everything shown comes from the editing session's snapshot; everything done is one of its commands. A
+// feature's commands appear through its slot (insert, format, table, review, view) once they are labelled.
 
 const ICONS: Readonly<Record<string, LucideIcon>> = {
 	bold: BoldIcon,
@@ -89,16 +96,17 @@ const ICONS: Readonly<Record<string, LucideIcon>> = {
 	redo: Redo2Icon
 }
 
-function commandsOf(group: DocxEditorCommandGroup): DocxEditorCommandInfo[] {
-	return DOCX_EDITOR_COMMANDS.filter(command => command.group === group && command.type !== "style.set")
-}
-
-const HISTORY = commandsOf("history")
+const HISTORY = rowCommands("history")
 // Character formatting without "clear", which has a place of its own (it goes to the menu first).
-const FORMAT = commandsOf("format").filter(command => command.type !== "format.clear")
-const CLEAR = commandsOf("format").filter(command => command.type === "format.clear")
-const ALIGN = commandsOf("align")
-const LISTS = commandsOf("list")
+const FORMAT = rowCommands("format").filter(command => command.info.type !== "format.clear")
+const CLEAR = rowCommands("format").filter(command => command.info.type === "format.clear")
+const ALIGN = rowCommands("align")
+const LISTS = rowCommands("list")
+const INSERT_SLOT = slotCommands("insert")
+const FORMAT_SLOT = slotCommands("format")
+const TABLE_SLOT = slotCommands("table")
+const REVIEW_SLOT = slotCommands("review")
+const VIEW_SLOT = slotCommands("view")
 
 export interface DocxEditToolbarProps {
 	snapshot: DocxEditorSnapshot | undefined
@@ -112,11 +120,13 @@ export interface DocxEditToolbarProps {
 	onFindClosed: () => void
 	markup: DocxMarkupMode | null
 	onMarkupChange: (mode: DocxMarkupMode) => void
-	markupDisabled: (mode: DocxMarkupMode) => boolean
 	zoom: number
 	onZoom: (change: "in" | "out" | "fit") => void
 	autosave: boolean
 	onAutosaveChange: (autosave: boolean) => void
+	// The reflowed (mobile) view instead of pages.
+	reflow: boolean
+	onReflowChange: (reflow: boolean) => void
 }
 
 function Divider() {
@@ -150,25 +160,26 @@ function commandDisabled(info: DocxEditorCommandInfo, snapshot: DocxEditorSnapsh
 // Takes what it shows as plain values (never the snapshot, new on every keystroke), so a keystroke that
 // changes neither re-renders nothing below it.
 function CommandButton({
-	info,
+	command,
 	active,
 	disabled,
 	apple,
 	execute
 }: {
-	info: DocxEditorCommandInfo
+	command: DocxToolbarCommand
 	active: boolean
 	disabled: boolean
 	apple: boolean
 	execute: (command: DocxEditorCommand) => void
 }) {
 	const { t } = useTranslation("preview")
+	const { info, label } = command
 	const Icon = ICONS[info.icon ?? ""] ?? BoldIcon
 	const toggle = info.group === "format" && info.type !== "format.clear"
 
 	return (
 		<TooltipIconButton
-			label={t(COMMAND_LABELS[info.type])}
+			label={t(label)}
 			disabled={disabled}
 			pressed={toggle || info.group === "align" || info.type === "list.bullet" || info.type === "list.numbered" ? active : undefined}
 			className={cn(active && "bg-accent text-foreground")}
@@ -279,7 +290,7 @@ function OverflowCommands({
 	readOnly,
 	execute
 }: {
-	commands: readonly DocxEditorCommandInfo[]
+	commands: readonly DocxToolbarCommand[]
 	snapshot: DocxEditorSnapshot | undefined
 	readOnly: boolean
 	execute: (command: DocxEditorCommand) => void
@@ -288,7 +299,7 @@ function OverflowCommands({
 
 	return (
 		<>
-			{commands.map(info => {
+			{commands.map(({ info, label }) => {
 				const Icon = ICONS[info.icon ?? ""] ?? BoldIcon
 				const disabled = commandDisabled(info, snapshot, readOnly)
 				const active = snapshot !== undefined && commandActive(snapshot, info.type)
@@ -303,7 +314,7 @@ function OverflowCommands({
 						}}
 					>
 						<Icon />
-						{t(COMMAND_LABELS[info.type])}
+						{t(label)}
 					</DropdownMenuCheckboxItem>
 				) : (
 					<DropdownMenuItem
@@ -314,7 +325,7 @@ function OverflowCommands({
 						}}
 					>
 						<Icon />
-						{t(COMMAND_LABELS[info.type])}
+						{t(label)}
 					</DropdownMenuItem>
 				)
 			})}
@@ -332,12 +343,13 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 	const fit = toolbarFit(width, (props.viewOnly.length > 0 ? 100 : 0) + (locked === null ? 0 : 120) + (props.markup === null ? 0 : 40))
 	const percent = Math.round(props.zoom * 100)
 	const commandProps = { snapshot, readOnly, execute }
-	const button = (info: DocxEditorCommandInfo): ReactNode => (
+	const slotProps = (commands: readonly DocxToolbarCommand[]): DocxToolbarSlotProps => ({ commands, snapshot, readOnly, apple, execute })
+	const button = (command: DocxToolbarCommand): ReactNode => (
 		<CommandButton
-			key={info.type}
-			info={info}
-			active={snapshot !== undefined && commandActive(snapshot, info.type)}
-			disabled={commandDisabled(info, snapshot, readOnly)}
+			key={command.info.type}
+			command={command}
+			active={snapshot !== undefined && commandActive(snapshot, command.info.type)}
+			disabled={commandDisabled(command.info, snapshot, readOnly)}
 			apple={apple}
 			execute={execute}
 		/>
@@ -402,13 +414,29 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 							{LISTS.map(button)}
 						</>
 					) : null}
+					{FORMAT_SLOT.length > 0 ? <DocxFormatControls {...slotProps(FORMAT_SLOT)} /> : null}
+					{INSERT_SLOT.length > 0 ? <DocxInsertMenu {...slotProps(INSERT_SLOT)} /> : null}
+					{TABLE_SLOT.length > 0 && snapshot?.context.table != null ? <DocxTableMenu {...slotProps(TABLE_SLOT)} /> : null}
 					<div className="min-w-0 flex-1" />
 					{badges}
-					{props.markup === null ? null : (
+					{REVIEW_SLOT.length > 0 ? (
+						<DocxReviewMenu
+							{...slotProps(REVIEW_SLOT)}
+							markup={props.markup}
+							onMarkupChange={props.onMarkupChange}
+						/>
+					) : null}
+					{VIEW_SLOT.length > 0 ? (
+						<DocxReflowToggle
+							{...slotProps(VIEW_SLOT)}
+							reflow={props.reflow}
+							onReflowChange={props.onReflowChange}
+						/>
+					) : null}
+					{props.markup === null || REVIEW_SLOT.length > 0 ? null : (
 						<MarkupMenu
 							mode={props.markup}
 							onChange={props.onMarkupChange}
-							disabled={props.markupDisabled}
 						/>
 					)}
 					<TooltipIconButton
@@ -518,7 +546,6 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 										<DropdownMenuRadioItem
 											key={info.mode}
 											value={info.mode}
-											disabled={props.markupDisabled(info.mode)}
 											closeOnClick
 										>
 											{t(MARKUP_LABELS[info.mode])}

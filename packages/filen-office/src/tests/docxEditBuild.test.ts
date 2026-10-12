@@ -186,7 +186,7 @@ describe("docx editing documents", () => {
 		})
 		expect(text.marks.find(mark => mark.type.name === "underline")?.attrs).toMatchObject({ style: "double", value: "FF0000" })
 		expect(text.marks.find(mark => mark.type.name === "strike")?.attrs).toEqual({ value: false })
-		expect(text.marks.find(mark => mark.type.name === "format_change")?.attrs).toEqual({ id: 9, author: "Cy", date: null })
+		expect(text.marks.find(mark => mark.type.name === "format_change")?.attrs).toEqual({ id: 9, author: "Cy", date: null, base: null })
 		expect(formattingMarks({ bold: true, boldCs: false }).map(mark => mark.attrs)).toEqual([{ value: true, cs: false }])
 	})
 

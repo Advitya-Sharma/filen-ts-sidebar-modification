@@ -32,3 +32,22 @@ pnpm test               # the corpus tests now run instead of skipping
 - `pnpm run corpus:manifest --from <MANIFEST.json>` regenerates `corpus/` when the corpus is rebuilt.
 
 CI runs all of it in `.github/workflows/office-corpus.yml`, on changes to this package and nightly.
+
+### DOCX editing fuzzers and digests (`src/tests/fuzz`)
+
+Skipped unless turned on; each job runs in its own Node process.
+
+```sh
+FILEN_OFFICE_FUZZ=3 FILEN_OFFICE_FUZZ_SEED=21 pnpm exec vitest run src/tests/fuzz/paged.fuzz.test.ts   # 3 seeds × sync, race per file
+FILEN_OFFICE_FUZZ=8 FILEN_OFFICE_FUZZ_SEED=8 pnpm exec vitest run src/tests/fuzz/damage.fuzz.test.ts   # 8 sequences per file
+FILEN_OFFICE_DIGEST=/tmp/viewer.json pnpm exec vitest run src/tests/fuzz/viewer.fuzz.test.ts         # writes, then compares
+```
+
+- Paged fuzz: random user edits through the paged editor; after every settled step the pages shown must equal a fresh layout of the saved file. Damage fuzz: raw transactions saved through Gates 1 and 2 and read back by an independent zip/XML reader; gate refusals are counted, anything else fails. Viewer digest: the unedited layout of every document against a baseline written by the first run.
+- `FILEN_OFFICE_FUZZ_FILTER` (file name part), `_STEPS`, `_OPS` (op names), `_MODES` (paged: `sync,race,proof`; damage: `stories,undo,blockmove,undoall,xsd,selftest`), `_VIEW` (`final`, `markup`, `original`), `_JOBS` and `_OUT` (JSON lines) tune a run. One job: `FILEN_OFFICE_FUZZ=1 node --import tsx src/tests/fuzz/run.ts paged <file> <seed> <mode>` or `run.ts damage <file>`.
+- Edits live in `src/tests/fuzz/ops/`, one file per feature; ops with a `script` also form the scripted edit suite of `docxWriteCorpus.test.ts`.
+
+Known failures the fuzz finds (they predate the fuzz; run from this package):
+
+- Tracked changes: pasting a range that holds tracked insertions duplicates their revision ids, so the save is refused (`revision:132 appears 2 times`): `FILEN_OFFICE_FUZZ=1 FILEN_OFFICE_FUZZ_OPS=paste node --import tsx src/tests/fuzz/run.ts paged .corpus/docx/lo__tdf123054.docx 8 sync`. The same document shows a paste whose pages differ from the saved file's (seed 23).
+- Tracked changes: edits racing layout leave a page laid out differently from the saved file: `FILEN_OFFICE_FUZZ=1 FILEN_OFFICE_FUZZ_OPS=type,typeEnd,delete,enter,join,format,style,list,link,cell,paste node --import tsx src/tests/fuzz/run.ts paged .corpus/docx/oxpt__RA001-Tracked-Revisions-01.docx 47 race` (also seed 60).

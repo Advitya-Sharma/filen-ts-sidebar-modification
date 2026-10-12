@@ -313,7 +313,7 @@ describe("docx zip worker", () => {
 		zipper.dispose()
 	})
 
-	it("passes other errors on by name and message", async () => {
+	it("passes a change the archive cannot take on as a refusal", async () => {
 		const { pkg } = await edited(FIXTURE)
 		const { factory } = workerFactory()
 		const zipper = docxZipWorker(factory)(pkg.opc)
@@ -322,9 +322,8 @@ describe("docx zip worker", () => {
 			(failure: unknown) => failure
 		)
 
-		expect(error).toBeInstanceOf(Error)
-		expect(error).not.toBeInstanceOf(DocxSaveError)
-		expect((error as Error).name).toBe("OpcError")
+		expect(error).toBeInstanceOf(DocxSaveError)
+		expect(error).toMatchObject({ reason: "invalidPackage", message: "No part word/missing.xml to replace" })
 		zipper.dispose()
 	})
 

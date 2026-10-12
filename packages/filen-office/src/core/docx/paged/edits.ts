@@ -13,7 +13,7 @@ import { Relationships } from "../../opc/index"
 import { encodeUtf8, parseXml, XmlError, type XmlDocument } from "../../xml/index"
 import { parseNumbering, type Numbering } from "../numbering/index"
 import { parseStyles, type DocxStyles } from "../styles/index"
-import { DocxDocBuilder, docxSchema, type DocxEditContext, type StoryDoc } from "../edit/index"
+import { DocxDocBuilder, docxSchema, type DocxEditContext, type NewStoryKind, type StoryDoc } from "../edit/index"
 import type { NewList } from "../edit/formats"
 import { ref, refItem, refPart, type BodyBlocks, type DirtyBlock, type LayoutEdits } from "../layout/index"
 import {
@@ -29,6 +29,7 @@ import {
 	type StoryPart
 } from "../model/index"
 import { inheritHeaders, NO_HEADERS } from "../model/document"
+import { STRICT_WORDPROCESSINGML } from "../model/namespaces"
 import { DocxWriteError, StoryWriter, planNumbering, stylesWithDefinitions, type WriteEnvironment } from "../write/index"
 import { inCell, sectionWritten } from "../write/story"
 
@@ -39,6 +40,18 @@ import { inCell, sectionWritten } from "../write/story"
 
 const nodes = docxSchema.nodes
 const HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+const WORDPROCESSINGML = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+const MARKUP_COMPATIBILITY_URI = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+// Roots of parts whose stories are elements of their own.
+const NOTE_ROOTS = new Set(["footnotes", "endnotes", "comments"])
+// The root and story elements of a new story's part.
+const NEW_STORY_ELEMENTS: Readonly<Record<NewStoryKind, readonly [string, string | undefined]>> = {
+	footnote: ["w:footnotes", "w:footnote"],
+	endnote: ["w:endnotes", "w:endnote"],
+	comment: ["w:comments", "w:comment"],
+	header: ["w:hdr", undefined],
+	footer: ["w:ftr", undefined]
+}
 
 // The styles and numbering parts as opened (the planned definitions are added to them as a save adds them).
 export interface EditDefinitions {
@@ -229,7 +242,7 @@ export class DocumentEdits implements LayoutEdits {
 	readonly model: DocxModel
 	readonly extension: ModelExtension
 	readonly substitutes = new Map<number, number>()
-	readonly view: RevisionView
+	private viewValue: RevisionView
 	body: BodyBlocks | undefined = undefined
 	// Stories other than the body whose block structure changed: their blocks (refs).
 	readonly stories = new Map<number, Float64Array>()
@@ -253,16 +266,132 @@ export class DocumentEdits implements LayoutEdits {
 	// Relationship ids of hyperlinks commands inserted, per source part, and the parts' relationships with them.
 	private readonly links = new Map<string, Map<string, string>>()
 	private readonly relationships = new Map<string, Relationships>()
+	// The edits of every story (a revision view switch lays them out again).
+	private readonly storyEdits = new Set<StoryEdits>()
+	// Stories the editor added (they are entered like the document's own).
+	private readonly added = new Set<number>()
 
 	constructor(model: DocxModel, view: RevisionView = RevisionView.Final) {
 		const derived = model.derive()
 
 		this.model = derived.model
 		this.extension = derived.extension
-		this.view = view
+		this.viewValue = view
 		this.storyCount = model.stories.length
 		this.openedSections = model.sections
 		this.bodyIndex = model.body?.part ?? -1
+	}
+
+	// Which tracked changes the layout shows.
+	get view(): RevisionView {
+		return this.viewValue
+	}
+
+	// Shows the document in another revision view: every story's blocks are read again as that view lays
+	// them out (wrappers of deleted or inserted blocks entered or not). The layout must then be laid out again
+	// from the start in the same view (DocumentLayout.setView).
+	setView(view: RevisionView): boolean {
+		if (view === this.viewValue) return false
+
+		this.viewValue = view
+
+		for (const story of this.storyEdits) story.reread()
+
+		return true
+	}
+
+	register(story: StoryEdits): void {
+		this.storyEdits.add(story)
+	}
+
+	// Whether `story` is one the editor added.
+	addedStory(story: number): boolean {
+		return this.added.has(story)
+	}
+
+	// Adds a story the editor made (a new note, comment, header or footer), with no source of its own (item
+	// -1, every block of it new): on the part of the document that holds stories of its kind when `partName`
+	// is one, else on a part made from a template of that part (empty, notes' separators included), which the
+	// save adds. Layout and an editing session use it like any other story (its blocks are laid out from the
+	// edits); a note goes into the note map layout finds references in. Undefined when no part could be made.
+	addStory(kind: NewStoryKind, id: string | undefined, partName: string): Story | undefined {
+		const extension = this.extension
+		const existing = extension.parts.find(part => part !== undefined && part.name === partName && !this.overlays.has(part.index))
+
+		// A part the package has that the model could not read is no place for a story.
+		if (existing === undefined && this.model.package.has(partName)) return undefined
+
+		const part = existing ?? this.templatePart(kind, partName)
+
+		if (part === undefined) return undefined
+
+		const story: Story = {
+			index: extension.stories.length,
+			kind,
+			part: part.index,
+			item: -1,
+			id,
+			noteType: kind === "footnote" || kind === "endnote" ? "normal" : undefined,
+			parent: -1,
+			owner: -1
+		}
+
+		extension.stories.push(story)
+		this.added.add(story.index)
+
+		if (kind === "footnote" && id !== undefined) extension.footnotes.set(id, story)
+		if (kind === "endnote" && id !== undefined) extension.endnotes.set(id, story)
+
+		return story
+	}
+
+	// A part of `kind` the document does not have, as the save will make it before adding the story: the
+	// main document's namespaces, no story (a notes part has its separator notes). Its stories are not the
+	// document's.
+	private templatePart(kind: NewStoryKind, partName: string): StoryPart | undefined {
+		const [root, element] = NEW_STORY_ELEMENTS[kind]
+		const body = this.model.body === undefined ? undefined : this.model.parts[this.model.body.part]
+		const declared =
+			body === undefined ? undefined : partReader(body.document).namespaces.declarations().get(body.document.documentElement())
+		const escape = (value: string): string => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")
+		const w = declared?.get("w") ?? (this.model.strict ? STRICT_WORDPROCESSINGML : WORDPROCESSINGML)
+		let open = `<${root} xmlns:w="${escape(w)}"`
+
+		for (const [prefix, uri] of declared ?? [])
+			if (prefix !== "w") open += ` ${prefix === "" ? "xmlns" : `xmlns:${prefix}`}="${escape(uri)}"`
+
+		// The prefixes the main document marks ignorable (w14, w15...) are ignorable here too.
+		const mc = [...(declared ?? [])].find(([, uri]) => uri === MARKUP_COMPATIBILITY_URI)?.[0]
+		const ignorable =
+			mc === undefined || mc === "" || body === undefined
+				? undefined
+				: body.document.attribute(body.document.documentElement(), `${mc}:Ignorable`)
+		const kept = (ignorable ?? "").split(/\s+/).filter(prefix => prefix !== "" && declared?.has(prefix) === true)
+
+		if (mc !== undefined && kept.length > 0) open += ` ${mc}:Ignorable="${escape(kept.join(" "))}"`
+
+		const content =
+			element === undefined || kind === "comment"
+				? ""
+				: `<${element} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></${element}>` +
+					`<${element} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></${element}>`
+		let parsed: XmlDocument
+
+		try {
+			parsed = parseXml(encodeUtf8(`${open}>${content}</${root}>`))
+		} catch (error) {
+			if (error instanceof XmlError) return undefined
+
+			throw error
+		}
+
+		const extension = this.extension
+		// Its own tables: what the template holds is no story of the document.
+		const part = buildPart(partReader(parsed), new ModelTables(), extension.parts.length, partName, new Relationships([]))
+
+		extension.parts.push(part)
+
+		return part
 	}
 
 	// The parts a save rewrites when commands added lists or styles: the overlays and the layout use what
@@ -461,10 +590,18 @@ export class DocumentEdits implements LayoutEdits {
 		const root = document.documentElement()
 		const node = source.node(container)
 		const open = this.rootTag(document, bytes, node)
+		const rootName = document.name(root)
+		// A story the editor added to a notes or comments part (no element of its own yet) goes into one.
+		const element =
+			node !== root && node >= 0
+				? document.name(node)
+				: container < 0 && NOTE_ROOTS.has(document.localName(root))
+					? rootName.slice(0, -1)
+					: undefined
 		// A body block goes into a w:body; the content of a header or footer sits in the root itself.
 		const inner =
-			node !== root && node >= 0
-				? { open: encodeUtf8(`<${document.name(node)}>`), close: encodeUtf8(`</${document.name(node)}>`) }
+			element !== undefined
+				? { open: encodeUtf8(`<${element}>`), close: encodeUtf8(`</${element}>`) }
 				: { open: new Uint8Array(0), close: new Uint8Array(0) }
 		const close = encodeUtf8(`</${document.name(root)}>`)
 		const wrapped = new Uint8Array(open.length + inner.open.length + bytes.length + inner.close.length + close.length)
@@ -666,6 +803,7 @@ export class StoryEdits {
 			},
 			story
 		)
+		edits.register(this)
 		this.doc = doc
 		doc.descendants(node => {
 			if (node.type === nodes.table) this.openedTables.add(node)
@@ -677,6 +815,15 @@ export class StoryEdits {
 
 	get part(): StoryPart {
 		return this.story.part
+	}
+
+	// Reads every block again (the revision view changed what the layout makes of the source).
+	reread(): StoryChange {
+		const replaced = this.entries.slice()
+
+		this.rebuildAll(this.doc)
+
+		return { dirty: this.dirtyOf(0, this.entries.length - 1), replaced, around: [], whole: true }
 	}
 
 	get document(): Node {

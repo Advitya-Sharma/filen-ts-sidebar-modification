@@ -662,13 +662,19 @@ class PartBuilder {
 				const id = reader.int(node, Ns.W, "id", -1)
 
 				this.leaf(Item.FootnoteReference, node, parent, id)
+				// A new note never takes an id a reference uses, even one whose note is missing.
+				this.shared.maxIds.footnote = Math.max(this.shared.maxIds.footnote, id)
 
 				return true
 			}
-			case El.EndnoteReference:
-				this.leaf(Item.EndnoteReference, node, parent, reader.int(node, Ns.W, "id", -1))
+			case El.EndnoteReference: {
+				const id = reader.int(node, Ns.W, "id", -1)
+
+				this.leaf(Item.EndnoteReference, node, parent, id)
+				this.shared.maxIds.endnote = Math.max(this.shared.maxIds.endnote, id)
 
 				return true
+			}
 			case El.FootnoteRef:
 				this.leaf(Item.FootnoteMark, node, parent, 0)
 
@@ -688,6 +694,9 @@ class PartBuilder {
 			case El.CommentReference: {
 				const item = this.leaf(Item.CommentReference, node, parent, -1)
 				const id = reader.attr(node, Ns.W, "id")
+
+				// A new comment never takes an id an anchor or reference uses, even one whose comment is missing.
+				this.shared.maxIds.comment = Math.max(this.shared.maxIds.comment, reader.int(node, Ns.W, "id", -1))
 
 				if (id !== undefined) {
 					const anchors = this.shared.anchors
@@ -885,6 +894,8 @@ class PartBuilder {
 				const start = code === El.CommentRangeStart
 				const item = this.leaf(start ? Item.CommentRangeStart : Item.CommentRangeEnd, node, parent, -1)
 				const id = reader.attr(node, Ns.W, "id")
+
+				this.shared.maxIds.comment = Math.max(this.shared.maxIds.comment, reader.int(node, Ns.W, "id", -1))
 
 				if (id === undefined) return
 

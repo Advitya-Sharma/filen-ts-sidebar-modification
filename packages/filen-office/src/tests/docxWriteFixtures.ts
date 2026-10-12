@@ -1,121 +1,44 @@
-import type { Node } from "prosemirror-model"
-import { TextSelection } from "prosemirror-state"
-import { DocxEditorSession, docxSchema } from "@filen/office/core/docx/edit"
+import type { StoryKind } from "@filen/office/core/docx"
+import { DocxEditorSession } from "@filen/office/core/docx/edit"
 import { writerProof } from "@filen/office/core/docx/write"
 import type { Opened } from "./docxEditFixtures"
+import { scriptOps, type ScriptTarget } from "./fuzz/ops/index"
 
-// Scripted edits for writer tests: each picks its own paragraph and reports what it did.
+// Scripted edits for writer tests: the deterministic edit of every op that has one (fuzz/ops), each on its
+// own paragraph, in script order. Edits that find no suitable paragraph are skipped.
 
 export interface EditScript {
+	// The body's session.
 	readonly session: DocxEditorSession
+	// Every session the script edited, the body's first: what a save writes.
+	readonly sessions: readonly DocxEditorSession[]
+	// Names of the ops that applied.
 	readonly done: string[]
 }
 
-function paragraphs(doc: Node, inTables: boolean): { node: Node; pos: number }[] {
-	const out: { node: Node; pos: number }[] = []
-
-	doc.descendants((node, pos, parent) => {
-		if (node.type === docxSchema.nodes.paragraph) {
-			const inCell = parent?.type === docxSchema.nodes.table_cell
-
-			if (inCell === inTables && node.textContent.length >= 8 && node.firstChild?.isText === true) out.push({ node, pos })
-
-			return false
-		}
-
-		return !node.isInline
-	})
-
-	return out
-}
-
-function select(session: DocxEditorSession, from: number, to: number = from): void {
-	session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, from, to)))
-}
-
-// The edit suite: type a word, delete a range, toggle bold, apply a heading, make a list, split and join
-// paragraphs, edit a table cell, insert a link. Edits that find no suitable paragraph are skipped.
 export function runEditScript(opened: Opened): EditScript {
-	const session = new DocxEditorSession(opened.context, { proof: writerProof(opened.context) })
-	const done: string[] = []
-	const pick = (index: number, inTables = false): { node: Node; pos: number } | undefined => {
-		const list = paragraphs(session.state.doc, inTables)
+	const proof = writerProof(opened.context)
+	const session = new DocxEditorSession(opened.context, { proof })
+	const stories = new Map<StoryKind, DocxEditorSession | undefined>()
+	const target: ScriptTarget = {
+		session,
+		story(kind) {
+			if (!stories.has(kind)) {
+				const story = opened.model.stories.find(candidate => candidate.kind === kind)
 
-		return list[Math.min(list.length - 1, index)]
-	}
-	const step = (name: string, run: () => boolean): void => {
-		if (run()) done.push(name)
-	}
+				stories.set(kind, story === undefined ? undefined : new DocxEditorSession(opened.context, { story, proof }))
+			}
 
-	step("type", () => {
-		const target = pick(0)
-
-		return target !== undefined && session.dispatch(session.state.tr.insertText("Filen ", target.pos + 1))
-	})
-	step("delete", () => {
-		const target = pick(1)
-
-		return target !== undefined && session.dispatch(session.state.tr.delete(target.pos + 2, target.pos + 5))
-	})
-	step("bold", () => {
-		const target = pick(2)
-
-		if (target === undefined) return false
-
-		select(session, target.pos + 1, target.pos + 5)
-
-		return session.execute({ type: "format.bold" })
-	})
-	step("heading", () => {
-		const target = pick(3)
-
-		if (target === undefined) return false
-
-		select(session, target.pos + 1)
-
-		return session.execute({ type: "style.set", style: "heading2" })
-	})
-	step("list", () => {
-		const target = pick(4)
-
-		if (target === undefined) return false
-
-		select(session, target.pos + 1)
-
-		return session.execute({ type: "list.bullet" })
-	})
-	step("split", () => {
-		const target = pick(5)
-
-		return target !== undefined && session.dispatch(session.state.tr.split(target.pos + 4))
-	})
-	step("join", () => {
-		const list = paragraphs(session.state.doc, false)
-
-		for (let k = 6; k + 1 < list.length; k++) {
-			const first = list[k]
-			const second = list[k + 1]
-
-			if (first === undefined || second === undefined || first.pos + first.node.nodeSize !== second.pos) continue
-			if (session.dispatch(session.state.tr.join(second.pos))) return true
+			return stories.get(kind)
 		}
+	}
+	const done: string[] = []
 
-		return false
-	})
-	step("cell", () => {
-		const target = pick(0, true)
+	for (const op of scriptOps()) if (op.script?.run(target) === true) done.push(op.name)
 
-		return target !== undefined && session.dispatch(session.state.tr.insertText("cell ", target.pos + 1))
-	})
-	step("link", () => {
-		const target = pick(7)
+	const sessions = [session]
 
-		if (target === undefined) return false
+	for (const other of stories.values()) if (other !== undefined) sessions.push(other)
 
-		const link = docxSchema.marks.link.create({ target: "https://filen.io/" })
-
-		return session.dispatch(session.state.tr.addMark(target.pos + 1, target.pos + 4, link))
-	})
-
-	return { session, done }
+	return { session, sessions, done }
 }

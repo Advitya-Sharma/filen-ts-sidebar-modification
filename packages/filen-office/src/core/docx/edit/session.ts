@@ -1,30 +1,40 @@
 import type { Mark, MarkType, Node } from "prosemirror-model"
 import { EditorState, type Transaction } from "prosemirror-state"
-import { closeHistory, history, redo, redoDepth, undo, undoDepth } from "prosemirror-history"
+import { closeHistory, history, isHistoryTransaction, redo, redoDepth, undo, undoDepth } from "prosemirror-history"
 import { AddMarkStep, RemoveMarkStep } from "prosemirror-transform"
 import type { Story } from "../model/index"
-import type { DocxGateReason } from "../package"
+import { ReviewIndex } from "../review/index"
 import { DocxDocBuilder, type StoryDoc } from "./build"
 import {
 	PARAGRAPH_STYLE_NAMES,
+	commandInfo,
 	isWriteCommand,
 	type DocxAlignment,
 	type DocxEditorCommand,
+	type DocxEditorCommandInfo,
 	type DocxEditorCommandType,
 	type DocxParagraphStyle,
 	DOCX_EDITOR_COMMANDS
 } from "./commands"
+import { BASE_COMMANDS } from "./commands/base"
 import type { DocxEditContext } from "./context"
 import { FormatResolver, RUN_TOGGLES, TOGGLE_ON, alignmentOf, type ListKind, type NewList, type RunToggle } from "./formats"
-import { docxInvariants, markInternal, type ListNormalizer } from "./invariants"
+import { docxInvariantPlugins, isInternal, markInternal, type ListNormalizer } from "./invariants/index"
 import { conservativeProof, lockBlocks, proveBlocks, type BlockProof } from "./proof"
+import { readOnlyReasons, type DocxReadOnlyReason } from "./readOnly"
+import { registeredTransformer, storyHandler, type DocxTransactionTransformer, type StoryCommandContext } from "./registry"
 import { FORMATTING_MARKS, NO_SOURCE, docxSchema, inlineLevel, type IndentAttrs, type LockReason } from "./schema"
+import {
+	providedSnapshot,
+	type DocxContextSnapshot,
+	type DocxProvidedSnapshot,
+	type DocxReviewSnapshot,
+	type DocxValuesSnapshot
+} from "./snapshot/index"
 
 export type FormatState = "on" | "off" | "mixed"
 
-// "textbox": text box stories are view-only until editing them also updates the VML fallback Word keeps
-// of each text box (mc:Fallback), which would otherwise show the old text.
-export type DocxReadOnlyReason = DocxGateReason | "host" | "textbox"
+export type { DocxReadOnlyReason } from "./readOnly"
 
 // Everything a toolbar needs, as plain data (it crosses a worker or WebView bridge as is).
 export interface DocxEditorSnapshot {
@@ -55,6 +65,11 @@ export interface DocxEditorSnapshot {
 		// List level (0-based) when every paragraph is at the same one.
 		readonly level: number | null
 	}
+	// Formatting values of the selection (font, size, colours, spacing).
+	readonly values: DocxValuesSnapshot
+	// Where the selection is: the story, and the table, object, control, field, link or comment it is in.
+	readonly context: DocxContextSnapshot
+	readonly review: DocxReviewSnapshot
 	readonly enabled: Readonly<Record<DocxEditorCommandType, boolean>>
 }
 
@@ -70,10 +85,14 @@ export interface DocxEditorOptions {
 	readonly historyDepth?: number
 	// The story's editing document built ahead (DocxEditorSession.open builds it in slices).
 	readonly built?: StoryDoc
+	// Turns each user transaction into what is applied (default: the features' registered transformers;
+	// null: none).
+	readonly transformer?: DocxTransactionTransformer | null
 }
 
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
+const BASE_TYPES: ReadonlySet<string> = new Set(BASE_COMMANDS.map(info => info.type))
 const FORMATTING_TYPES: readonly MarkType[] = FORMATTING_MARKS.map(name => marks[name])
 // What clearing direct formatting removes: everything but the language (Word's Ctrl+Space).
 const CLEARED_TYPES: readonly MarkType[] = FORMATTING_TYPES.filter(type => type !== marks.lang && type !== marks.plain)
@@ -149,6 +168,8 @@ export class DocxEditorSession {
 	private readonly builder: DocxDocBuilder
 	private readonly formats: FormatResolver
 	private readonly hostReadOnly: boolean
+	private readonly reasons: readonly DocxReadOnlyReason[]
+	private readonly transformer: DocxTransactionTransformer | undefined
 	private readonly listeners = new Set<(snapshot: DocxEditorSnapshot) => void>()
 	private readonly appliedListeners = new Set<(transactions: readonly Transaction[], state: EditorState) => void>()
 	private current: EditorState
@@ -162,6 +183,9 @@ export class DocxEditorSession {
 	private selectionTally: { doc: Node; from: number; to: number; tally: Tally } | null = null
 	private dirtyOf: { doc: Node; saved: Node; dirty: boolean } | null = null
 	private savedFormsOf: { saved: Node; forms: Map<number, Node> } | null = null
+	private provided: DocxProvidedSnapshot | undefined = undefined
+	private enabledOf: Readonly<Record<DocxEditorCommandType, boolean>> | undefined = undefined
+	private reviewIndexOf: ReviewIndex | undefined = undefined
 
 	constructor(context: DocxEditContext, options: DocxEditorOptions = {}) {
 		const story = options.story ?? context.model.body
@@ -170,6 +194,9 @@ export class DocxEditorSession {
 
 		this.context = context
 		this.hostReadOnly = options.readOnly ?? false
+		this.reasons = readOnlyReasons(context, story, this.hostReadOnly)
+		this.transformer = options.transformer === null ? undefined : (options.transformer ?? registeredTransformer())
+
 		this.builder = new DocxDocBuilder(context)
 		this.story = options.built !== undefined && options.built.story === story ? options.built : this.builder.build(story)
 		this.formats = new FormatResolver(context, this.story.part)
@@ -177,7 +204,7 @@ export class DocxEditorSession {
 			doc: this.story.doc,
 			plugins: [
 				history({ depth: options.historyDepth ?? 100 }),
-				docxInvariants({
+				...docxInvariantPlugins({
 					readOnly: () => this.readOnly,
 					...(options.normalizeList !== undefined ? { normalizeList: options.normalizeList } : {})
 				})
@@ -212,7 +239,19 @@ export class DocxEditorSession {
 	}
 
 	get readOnly(): boolean {
-		return this.hostReadOnly || this.context.gate.length > 0 || this.story.story.kind === "textbox"
+		return this.reasons.length > 0
+	}
+
+	// The document author name (undefined until the app gave one).
+	get author(): string | undefined {
+		return this.context.identity.author
+	}
+
+	// Comments and tracked changes of this story, kept up to date edit by edit (made on first use).
+	get reviewIndex(): ReviewIndex {
+		this.reviewIndexOf ??= new ReviewIndex(this.current.doc)
+
+		return this.reviewIndexOf
 	}
 
 	// Ids of paragraph styles the document lacks that paragraphs use, with their built-in names: the writer
@@ -411,6 +450,8 @@ export class DocxEditorSession {
 		return this.apply(tr)
 	}
 
+	// Runs a base command or a feature's story command; document commands (scope "document") run on the
+	// paged editor, except undo and redo, which here undo this story's own edits.
 	execute(command: DocxEditorCommand): boolean {
 		if (this.disposed || (this.readOnly && isWriteCommand(command.type))) return false
 
@@ -470,11 +511,16 @@ export class DocxEditorSession {
 	private apply(tr: Transaction): boolean {
 		if (this.disposed) return false
 
-		const result = this.current.applyTransaction(tr)
+		const transformed =
+			this.transformer !== undefined && tr.docChanged && !isInternal(tr) && !isHistoryTransaction(tr)
+				? this.transformer(tr, this)
+				: tr
+		const result = this.current.applyTransaction(transformed)
 
 		if (result.transactions.length === 0) return false
 
 		this.current = result.state
+		this.reviewIndexOf?.applyAll(result.transactions)
 
 		for (const listener of this.appliedListeners) listener(result.transactions, result.state)
 
@@ -539,7 +585,16 @@ export class DocxEditorSession {
 				return undo(state, tr => this.apply(tr)) ? true : null
 			case "history.redo":
 				return redo(state, tr => this.apply(tr)) ? true : null
+			default: {
+				const handler = commandInfo(command.type)?.scope === "story" ? storyHandler(command.type) : undefined
+
+				return handler === undefined ? null : handler.run(this.commandContext(), command as never)
+			}
 		}
+	}
+
+	private commandContext(): StoryCommandContext {
+		return { session: this, state: this.current, context: this.context }
 	}
 
 	private paragraphs(state: EditorState = this.current): ParagraphAt[] {
@@ -1146,23 +1201,54 @@ export class DocxEditorSession {
 		const writable = !readOnly && tally.paragraphs > 0
 		const undoable = !readOnly && undoDepth(state) > 0
 		const redoable = !readOnly && redoDepth(state) > 0
-		const enabled = Object.fromEntries(DOCX_EDITOR_COMMANDS.map(command => [command.type, writable])) as Record<
-			DocxEditorCommandType,
-			boolean
-		>
+		const provided = providedSnapshot({ session: this, state, context: this.context, readOnly }, this.provided)
+		const commandContext = this.commandContext()
+		const enabledOf = (info: DocxEditorCommandInfo): boolean => {
+			switch (info.type) {
+				case "history.undo":
+					return undoable
+				case "history.redo":
+					return redoable
+				case "list.outdent":
+					return writable && tally.outdentable > 0
+			}
 
-		enabled["history.undo"] = undoable
-		enabled["history.redo"] = redoable
-		enabled["list.outdent"] = writable && tally.outdentable > 0
+			if (BASE_TYPES.has(info.type)) return writable
+			if (info.scope !== "story" || (readOnly && info.write)) return false
+
+			return storyHandler(info.type)?.enabled(commandContext) === true
+		}
+		const previous = this.enabledOf
+		let same = previous !== undefined
+		const values: boolean[] = []
+
+		// One pass; the same record while every command's state is (a toolbar compares it by identity).
+		for (const info of DOCX_EDITOR_COMMANDS) {
+			const value = enabledOf(info)
+
+			values.push(value)
+
+			if (same && previous?.[info.type] !== value) same = false
+		}
+
+		let enabled = previous
+
+		if (!same || enabled === undefined) {
+			const record: Record<string, boolean> = {}
+
+			DOCX_EDITOR_COMMANDS.forEach((info, k) => {
+				record[info.type] = values[k] ?? false
+			})
+			enabled = record as Record<DocxEditorCommandType, boolean>
+			this.enabledOf = enabled
+		}
+
+		this.provided = provided
 
 		return {
 			version: this.version,
 			readOnly,
-			readOnlyReasons: [
-				...this.context.gate,
-				...(this.hostReadOnly ? (["host"] as const) : []),
-				...(this.story.story.kind === "textbox" ? (["textbox"] as const) : [])
-			],
+			readOnlyReasons: this.reasons,
 			dirty: this.dirty(state.doc),
 			canUndo: undoable,
 			canRedo: redoable,
@@ -1181,6 +1267,9 @@ export class DocxEditorSession {
 				list,
 				level: list !== null && list !== "none" && list !== "mixed" ? (only(tally.levels) ?? null) : null
 			},
+			values: provided.values,
+			context: provided.context,
+			review: provided.review,
 			enabled
 		}
 	}

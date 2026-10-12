@@ -734,7 +734,8 @@ export class EditSink {
 			handleDOMEvents: {
 				// Read-only, the view is not editable and ProseMirror's own key handling is off: selection keys only.
 				keydown: (view, event) => (view.editable ? false : this.readOnlyKeyDown(view, event)),
-				// Undo and redo from outside the keyboard (Edit menu, shake, a soft keyboard's key): the session's.
+				// Undo and redo from outside the keyboard (Edit menu, shake, a soft keyboard's key): the editor's,
+				// in its order across stories.
 				beforeinput: (_view, event) => this.historyInput(event),
 				// The document's selection, not the view's (whose gaps hold no content).
 				copy: (_view, event) => this.copyEvent(event, false),
@@ -988,7 +989,8 @@ export class EditSink {
 		return true
 	}
 
-	// beforeinput historyUndo / historyRedo: the session undoes or redoes (the browser's own never runs).
+	// beforeinput historyUndo / historyRedo: the editor undoes or redoes in its order across stories (the
+	// browser's own never runs).
 	private historyInput(event: InputEvent): boolean {
 		const type = event.inputType === "historyUndo" ? "history.undo" : event.inputType === "historyRedo" ? "history.redo" : undefined
 
@@ -996,7 +998,7 @@ export class EditSink {
 
 		event.preventDefault()
 
-		if (!this.readOnly) this.editor.session.execute({ type })
+		if (!this.readOnly) void this.editor.execute({ type })
 
 		return true
 	}
@@ -1209,7 +1211,13 @@ export class EditSink {
 				// Shift+Delete cuts.
 				return readOnly || extend ? false : this.run(joinForward(state))
 			case "Escape":
-				// Out of a header, footer or note, back to the body.
+				// The format painter goes first; then out of a header, footer or note, back to the body.
+				if (editor.painter !== undefined) {
+					editor.setPainter(undefined)
+
+					return true
+				}
+
 				if (editor.activeStory === editor.body.session.story.story.index) return false
 
 				editor.exitStory()
@@ -1232,7 +1240,8 @@ export class EditSink {
 		const command = readOnly ? undefined : commandForKey(event, apple)
 
 		if (command !== undefined) {
-			editor.session.execute(command)
+			// Undo and redo follow the order across stories; story commands go to the story being edited.
+			void editor.execute(command)
 
 			return true
 		}

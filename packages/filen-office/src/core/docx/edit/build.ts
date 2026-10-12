@@ -13,7 +13,8 @@ import {
 	type LockedKind,
 	type MarkerAttrs,
 	type MarkerKind,
-	type MarkerList
+	type MarkerList,
+	type MarkerNodeAttrs
 } from "./schema"
 
 // One story as an editing document. What a writer may copy as source bytes (only the first node in
@@ -386,7 +387,7 @@ export class DocxDocBuilder {
 		// A story with no block at all still needs a place for the cursor; the empty paragraph is new content.
 		if (blocks.length === 0) blocks.push(docxSchema.nodes.paragraph.create())
 
-		const doc = makeNode(docxSchema.nodes.doc, { story: story.index, sectPr, end }, blocks)
+		const doc = makeNode(docxSchema.nodes.doc, { story: story.index, sectPr, end, comments: null, sectionChanges: null }, blocks)
 
 		return {
 			doc,
@@ -414,6 +415,19 @@ export class DocxDocBuilder {
 		}
 
 		return this.block(item, pending ?? NO_MARKERS)
+	}
+
+	// The editing document of a story the editor made (a new note, comment or header): one empty paragraph,
+	// new content throughout, so the writer writes the story whole. `part` is the story's own part (made for
+	// layout; it is not in the package).
+	buildNew(story: Story, part: StoryPart): StoryDoc {
+		const doc = makeNode(
+			docxSchema.nodes.doc,
+			{ story: story.index, sectPr: NO_SOURCE, end: NO_MARKERS, comments: null, sectionChanges: null },
+			[docxSchema.nodes.paragraph.create()]
+		)
+
+		return { doc, story, part, pristine: new WeakSet(), stats: { paragraphs: 0, tables: 0, lockedBlocks: 0, lockReasons: {} } }
 	}
 
 	// A locked block standing for `node` (a source paragraph, table or content control of `story`), for a
@@ -588,12 +602,13 @@ export class DocxDocBuilder {
 		return out ?? NO_MARKERS
 	}
 
-	private marker(item: number): MarkerAttrs | undefined {
+	// A marker's attributes, the same object in marker lists and as a marker node's attributes.
+	private marker(item: number): MarkerNodeAttrs | undefined {
 		const part = this.part
 		const itemKind = part.kinds[item] ?? 0
 		const kind = itemKind === Item.Opaque ? MARKER_ELEMENTS[part.reader.code(part.node(item))] : MARKER_KINDS[itemKind]
 
-		return kind === undefined ? undefined : { src: item, kind, id: part.id(item) ?? null }
+		return kind === undefined ? undefined : { src: item, kind, id: part.id(item) ?? null, name: null }
 	}
 
 	private commentReference(item: number): MarkerAttrs | undefined {
@@ -658,7 +673,7 @@ export class DocxDocBuilder {
 
 		if (content.length === 0) return this.locked(item, before, "sdt", "opaque")
 
-		return makeNode(docxSchema.nodes.sdt, { src: item, before, end, type: part.sdtType(row), lock }, content)
+		return makeNode(docxSchema.nodes.sdt, { src: item, before, end, type: part.sdtType(row), lock, state: null }, content)
 	}
 
 	private table(item: number, before: MarkerList): Node {
@@ -715,7 +730,8 @@ export class DocxDocBuilder {
 				before,
 				end: pending ?? NO_MARKERS,
 				styleId: props.styleId ?? null,
-				grid: this.grid(part.tables.tblGrid[tableRow] ?? -1)
+				grid: this.grid(part.tables.tblGrid[tableRow] ?? -1),
+				props: null
 			},
 			rows
 		)
@@ -924,7 +940,12 @@ export class DocxDocBuilder {
 					sink.add(
 						makeNode(
 							nodes.math,
-							{ src: item, display: kind === Item.MathParagraph, markers: this.survivors(item + 1, part.end(item)) },
+							{
+								src: item,
+								display: kind === Item.MathParagraph,
+								markers: this.survivors(item + 1, part.end(item)),
+								omml: null
+							},
 							null,
 							wrappers
 						)
@@ -1219,7 +1240,14 @@ export class DocxDocBuilder {
 
 		return makeNode(
 			docxSchema.nodes.drawing,
-			{ src: item, kind: kind === Item.Drawing ? "drawing" : kind === Item.VmlPicture ? "vml" : "object", index, anchored, markers },
+			{
+				src: item,
+				kind: kind === Item.Drawing ? "drawing" : kind === Item.VmlPicture ? "vml" : "object",
+				index,
+				anchored,
+				markers,
+				overrides: null
+			},
 			null,
 			marks
 		)

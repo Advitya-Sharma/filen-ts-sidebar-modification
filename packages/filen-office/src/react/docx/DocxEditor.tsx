@@ -1,6 +1,16 @@
-import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type MouseEvent, type PointerEvent, type Ref } from "react"
+import {
+	useEffect,
+	useImperativeHandle,
+	useLayoutEffect,
+	useRef,
+	useState,
+	type MouseEvent,
+	type PointerEvent,
+	type ReactNode,
+	type Ref
+} from "react"
 import { Region } from "../../core/docx/layout/index"
-import type { HitResult, PagedEditor } from "../../core/docx/paged/index"
+import type { HitResult, ObjectHit, ObjectHitKind, PagedEditor } from "../../core/docx/paged/index"
 import { EditSink } from "./edit/sink"
 import { EditSurface, type DocxEditorMark } from "./edit/surface"
 import type { DocxDocument } from "./store"
@@ -40,6 +50,34 @@ export interface ClientPoint {
 	readonly height: number
 }
 
+// A press on an object the features find on the pages (DocxEditorProps.interactions).
+export interface DocxObjectPress {
+	readonly hit: ObjectHit
+	readonly page: number
+	// The press in page coordinates and on screen.
+	readonly x: number
+	readonly y: number
+	readonly clientX: number
+	readonly clientY: number
+	readonly pointerType: string
+	readonly pointerId: number
+	// 1 for a click, 2 for a double click...
+	readonly clicks: number
+	readonly shiftKey: boolean
+}
+
+// Per kind of object, what a press on one does; true when it handled it (no caret is placed then).
+export type DocxEditorInteractions = { readonly [K in ObjectHitKind]?: (press: DocxObjectPress) => boolean }
+
+// What an app draws over one page (selection frames, handles, balloons' anchors), in page coordinates: the
+// layer is scaled with the page.
+export interface DocxPageOverlay {
+	readonly index: number
+	readonly width: number
+	readonly height: number
+	readonly zoom: number
+}
+
 export interface DocxEditorProps {
 	readonly editor: PagedEditor
 	// The renderer's side of the same document (pages, tables, objects, media).
@@ -60,6 +98,10 @@ export interface DocxEditorProps {
 	readonly marks?: readonly DocxEditorMark[]
 	// Top-level blocks the input view renders on each side of the selection.
 	readonly window?: number
+	// Presses on objects on the pages, by kind (features find them: PagedEditor.hitObject).
+	readonly interactions?: DocxEditorInteractions
+	// Drawn over each page in view, above the caret and selection.
+	readonly overlays?: (page: DocxPageOverlay) => ReactNode
 	readonly ref?: Ref<DocxEditorHandle>
 }
 
@@ -287,6 +329,32 @@ export function DocxEditor(props: DocxEditorProps) {
 		const point = pointAt(clientX, clientY)
 
 		return point === undefined ? undefined : editor.hitTest(point.index, point.x, point.y)
+	}
+
+	// A press an app's interaction for the object under it took; false when there is none or it declined.
+	const pressObject = (event: PointerEvent<HTMLDivElement>, clicks: number): boolean => {
+		const interactions = props.interactions
+
+		if (interactions === undefined) return false
+
+		const point = pointAt(event.clientX, event.clientY)
+		const hit = point === undefined ? undefined : editor.hitObject(point.index, point.x, point.y)
+		const handler = hit === undefined ? undefined : interactions[hit.kind]
+
+		if (point === undefined || hit === undefined || handler === undefined) return false
+
+		return handler({
+			hit,
+			page: point.index,
+			x: point.x,
+			y: point.y,
+			clientX: event.clientX,
+			clientY: event.clientY,
+			pointerType: event.pointerType,
+			pointerId: event.pointerId,
+			clicks,
+			shiftKey: event.shiftKey
+		})
 	}
 
 	// Double-clicking a header or footer edits it; double-clicking the body goes back to it (as Word does).
@@ -636,6 +704,12 @@ export function DocxEditor(props: DocxEditorProps) {
 		const clicks = click.count
 		const onPage = event.target instanceof Element && event.target.closest("[data-fo-page]") !== null
 
+		if (onPage && pressObject(event, clicks)) {
+			sinkRef.current?.focus()
+
+			return
+		}
+
 		if (clicks === 2 && onPage) switchStory(event.clientX, event.clientY)
 		else if (editor.activeStory !== editor.body.session.story.story.index) {
 			// Clicking another page's copy of the header being edited moves the caret there.
@@ -721,7 +795,7 @@ export function DocxEditor(props: DocxEditorProps) {
 			touchRef.current = null
 
 			if (!touch.handled) {
-				const hit = hitAt(event.clientX, event.clientY)
+				const hit = pressObject(event, 1) ? undefined : hitAt(event.clientX, event.clientY)
 
 				if (hit !== undefined) editor.select(hit)
 
@@ -738,6 +812,9 @@ export function DocxEditor(props: DocxEditorProps) {
 	const pages = []
 
 	for (let index = visible.first; index <= visible.last; index++) {
+		const width = layout.widths[index] ?? 0
+		const height = layout.heights[index] ?? 0
+
 		pages.push(
 			<EditorPage
 				key={index}
@@ -746,9 +823,10 @@ export function DocxEditor(props: DocxEditorProps) {
 				zoom={zoom}
 				top={layout.tops[index] ?? 0}
 				left={leftOf(index)}
-				width={layout.widths[index] ?? 0}
-				height={layout.heights[index] ?? 0}
+				width={width}
+				height={height}
 				pending={document.pages[index] === undefined}
+				overlay={props.overlays?.({ index, width: width / zoom, height: height / zoom, zoom })}
 			/>
 		)
 	}
@@ -799,9 +877,10 @@ interface EditorPageProps {
 	readonly width: number
 	readonly height: number
 	readonly pending: boolean
+	readonly overlay: ReactNode
 }
 
-function EditorPage({ index, surface, zoom, top, left, width, height, pending }: EditorPageProps) {
+function EditorPage({ index, surface, zoom, top, left, width, height, pending, overlay }: EditorPageProps) {
 	const hostRef = useRef<HTMLDivElement | null>(null)
 	const layerRef = useRef<HTMLDivElement | null>(null)
 
@@ -832,6 +911,15 @@ function EditorPage({ index, surface, zoom, top, left, width, height, pending }:
 					ref={layerRef}
 					className="fo-docx-edit-layer"
 				/>
+				{overlay === undefined || overlay === null ? null : (
+					// In page coordinates; what is drawn takes pointer events back where it needs them.
+					<div
+						className="fo-docx-page-overlay"
+						style={{ position: "absolute", left: 0, top: 0, width: width / zoom, height: height / zoom, pointerEvents: "none" }}
+					>
+						{overlay}
+					</div>
+				)}
 			</div>
 		</div>
 	)

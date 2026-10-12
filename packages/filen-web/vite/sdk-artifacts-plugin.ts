@@ -122,7 +122,8 @@ export function sdkArtifacts(): Plugin {
 			}
 
 			// Prod worker resolves against `<assetsDir>` — copy the artifacts + snippets there.
-			const out = join(config.root, config.build.outDir, config.build.assetsDir)
+			// resolve, not join: an absolute outDir must not land inside the root.
+			const out = resolve(config.root, config.build.outDir, config.build.assetsDir)
 			const pkg = packageRoot()
 			for (const a of SDK_ARTIFACTS) {
 				cpSync(join(pkg, a), join(out, a))

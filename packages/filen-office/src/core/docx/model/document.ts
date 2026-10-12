@@ -100,6 +100,9 @@ export interface ModelExtension {
 	readonly vml: (VmlInfo | undefined)[]
 	// The body's sections as edited (a section break pasted or removed changes them).
 	readonly sections: Section[]
+	// Notes by w:id, with those the editor added.
+	readonly footnotes: Map<string, Story>
+	readonly endnotes: Map<string, Story>
 }
 
 // The read model of one document: story parts as item streams, stories, sections, notes and comments.
@@ -176,16 +179,18 @@ export class DocxModel {
 		return this.counts.malformed > 0 || this.malformedParts.length > 0
 	}
 
-	// A model sharing this one's parts and tables whose part, story, drawing and VML lists can grow (and
+	// A model sharing this one's parts and tables whose part, story, drawing, VML and note lists can grow (and
 	// drop what was added): layout of unsaved edits adds a part for every edited block and drops it when the
-	// block changes again. This model is left as it is.
+	// block changes again, and a story for every note the editor adds. This model is left as it is.
 	derive(): { readonly model: DocxModel; readonly extension: ModelExtension } {
 		const extension: ModelExtension = {
 			parts: this.parts.slice(),
 			stories: this.stories.slice(),
 			drawings: this.drawings.slice(),
 			vml: this.vml.slice(),
-			sections: this.sections.slice()
+			sections: this.sections.slice(),
+			footnotes: new Map(this.footnotes),
+			endnotes: new Map(this.endnotes)
 		}
 		const model = Object.assign(Object.create(DocxModel.prototype) as DocxModel, this, extension)
 

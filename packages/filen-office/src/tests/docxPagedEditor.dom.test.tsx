@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { act } from "react"
 import { createRoot, type Root } from "react-dom/client"
+import { closeHistory } from "prosemirror-history"
 import { TextSelection } from "prosemirror-state"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { SOURCE_INTS, type DocumentLayout, type PageDisplayList } from "@filen/office/core/docx"
@@ -778,6 +779,52 @@ describe("EditSink", () => {
 		expect(editor.state.doc.eq(typed)).toBe(true)
 		// Other input is left to the view.
 		expect(input("insertText").prevented).toBe(0)
+		sink.destroy()
+	})
+
+	it("undoes from the keyboard in the order of edits across stories, and Esc clears the format painter first", async () => {
+		const para = (text: string): string => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`
+		const { editor } = await pagedEditor(
+			buildDocx({
+				body:
+					para("Body text") +
+					'<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>',
+				headers: { rIdH1: para("Header") }
+			})
+		)
+		const header = editor.edits.model.stories.find(story => story.kind === "header")?.index ?? -1
+		const body = editor.activeStory
+		const sink = sinkOf(editor)
+		// Each edit an event of its own.
+		const typeAtStart = (text: string): void => {
+			editor.dispatch(closeHistory(editor.state.tr.insertText(text, TextSelection.atStart(editor.state.doc).from)))
+		}
+		const undoKey = (): void => {
+			key(sink.view.dom, { key: "z", code: "KeyZ", ctrlKey: true })
+		}
+		const text = (story: number): string => editor.storySession(story)?.state.doc.textContent ?? ""
+
+		typeAtStart("A")
+		expect(editor.enterStory(header, 0)).toBe(true)
+		typeAtStart("H")
+		editor.exitStory()
+		typeAtStart("B")
+		expect(text(body)).toBe("BABody text")
+		expect(text(header)).toBe("HHeader")
+
+		undoKey()
+		expect(text(body)).toBe("ABody text")
+		undoKey()
+		expect(editor.activeStory).toBe(header)
+		expect(text(header)).toBe("Header")
+		undoKey()
+		expect(editor.activeStory).toBe(body)
+		expect(text(body)).toBe("Body text")
+		expect(editor.snapshot().canUndo).toBe(false)
+
+		editor.setPainter({ marks: [], paragraph: null, sticky: false })
+		key(sink.view.dom, { key: "Escape", code: "Escape" })
+		expect(editor.painter).toBeUndefined()
 		sink.destroy()
 	})
 

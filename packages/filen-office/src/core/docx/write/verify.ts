@@ -38,7 +38,9 @@ import { PropsStore } from "../props/index"
 import { parseStyles, type DocxStyles } from "../styles/index"
 import { equalBytes } from "./bytes"
 import { canonicalElement, canonicalFragment } from "./canonical"
+import { DOCX_CHECKS, checkDone, checkPart, type CheckInput, type DocxCheck, type DocxFact } from "./checks/index"
 import { DocxVerifyError, type VerifyFailure } from "./failure"
+import { isInsertionPoint } from "./newStory"
 
 export { DocxVerifyError, type VerifyFailure } from "./failure"
 import type { DocxChanges, StoryChange } from "./save"
@@ -121,9 +123,14 @@ function addFacts(into: Facts, from: Facts, sign: number): void {
 	for (const [key, count] of from.lists) bump(into.lists, key, sign * count)
 }
 
+// Ids the checks add to the facts (DocxCheck.fact), by the WordprocessingML child of a part's root they look
+// at.
+type FactHooks = ReadonlyMap<string, readonly DocxFact[]>
+
 // Facts of the elements starting in nodes [first, end) of a part.
-function collectFacts(document: XmlDocument, first: number, end: number, into: Facts, sign: number = 1): void {
+function collectFacts(document: XmlDocument, first: number, end: number, into: Facts, sign: number, hooks: FactHooks): void {
 	const reader = partReader(document)
+	const root = document.documentElement()
 
 	for (let node = first; node < end; node++) {
 		if (document.kinds[node] !== NodeKind.Element) continue
@@ -144,6 +151,16 @@ function collectFacts(document: XmlDocument, first: number, end: number, into: F
 
 		const local = document.localName(node)
 
+		const facts = hooks.size === 0 || document.parent(node) !== root ? undefined : hooks.get(local)
+
+		if (facts !== undefined) {
+			for (const fact of facts) {
+				const id = fact.id(reader, node)
+
+				if (id !== undefined) bump(into.ids, id, sign)
+			}
+		}
+
 		switch (local) {
 			case "p":
 			case "tr": {
@@ -155,7 +172,12 @@ function collectFacts(document: XmlDocument, first: number, end: number, into: F
 			}
 			case "bookmarkStart":
 			case "commentRangeStart":
-			case "commentReference": {
+			case "commentReference":
+			case "comment":
+			case "footnote":
+			case "endnote":
+			case "footnoteReference":
+			case "endnoteReference": {
 				const id = reader.attr(node, Ns.W, "id")
 
 				if (id !== undefined) bump(into.ids, `${local}:${id}`, sign)
@@ -192,6 +214,14 @@ function collectFacts(document: XmlDocument, first: number, end: number, into: F
 const NODE_STEP = 4096
 const TAG_STEP = 4096
 
+// How a check collects facts: the checks' own ids, with caches of the source's facts when they are the
+// registry's.
+interface FactScope {
+	readonly hooks: FactHooks
+	readonly cached: boolean
+	readonly clock: SliceClock | undefined
+}
+
 // collectFacts in steps, a turn given between them when the clock says so.
 async function collectFactsSliced(
 	document: XmlDocument,
@@ -199,16 +229,18 @@ async function collectFactsSliced(
 	end: number,
 	into: Facts,
 	sign: number,
-	clock: SliceClock | undefined
+	scope: FactScope
 ): Promise<void> {
+	const clock = scope.clock
+
 	if (clock === undefined) {
-		collectFacts(document, first, end, into, sign)
+		collectFacts(document, first, end, into, sign, scope.hooks)
 
 		return
 	}
 
 	for (let from = first; from < end; from += NODE_STEP) {
-		collectFacts(document, from, Math.min(end, from + NODE_STEP), into, sign)
+		collectFacts(document, from, Math.min(end, from + NODE_STEP), into, sign, scope.hooks)
 
 		if (clock.due) await clock.pause()
 	}
@@ -217,13 +249,14 @@ async function collectFactsSliced(
 // A source part's facts are read once per document (saves repeat).
 const factsCache = new WeakMap<XmlDocument, Facts>()
 
-async function partFacts(document: XmlDocument, clock: SliceClock | undefined): Promise<Facts> {
-	let facts = factsCache.get(document)
+async function partFacts(document: XmlDocument, scope: FactScope): Promise<Facts> {
+	let facts = scope.cached ? factsCache.get(document) : undefined
 
 	if (facts === undefined) {
 		facts = emptyFacts()
-		await collectFactsSliced(document, 0, document.count, facts, 1, clock)
-		factsCache.set(document, facts)
+		await collectFactsSliced(document, 0, document.count, facts, 1, scope)
+
+		if (scope.cached) factsCache.set(document, facts)
 	}
 
 	return facts
@@ -232,15 +265,16 @@ async function partFacts(document: XmlDocument, clock: SliceClock | undefined): 
 // The facts of every story part of a model, read once.
 const modelCache = new WeakMap<object, Facts>()
 
-async function modelFacts(model: { readonly parts: readonly StoryPart[] }, clock: SliceClock | undefined): Promise<Facts> {
-	let facts = modelCache.get(model)
+async function modelFacts(model: { readonly parts: readonly StoryPart[] }, scope: FactScope): Promise<Facts> {
+	let facts = scope.cached ? modelCache.get(model) : undefined
 
 	if (facts === undefined) {
 		const collected = emptyFacts()
 
-		for (const part of model.parts) await collectFactsSliced(part.document, 0, part.document.count, collected, 1, clock)
+		for (const part of model.parts) await collectFactsSliced(part.document, 0, part.document.count, collected, 1, scope)
 
-		modelCache.set(model, collected)
+		if (scope.cached) modelCache.set(model, collected)
+
 		facts = collected
 	}
 
@@ -263,15 +297,8 @@ function nodeAt(document: XmlDocument, offset: number): number {
 	return low
 }
 
-function rangeFacts(
-	document: XmlDocument,
-	from: number,
-	to: number,
-	into: Facts,
-	sign: number,
-	clock: SliceClock | undefined
-): Promise<void> {
-	return collectFactsSliced(document, nodeAt(document, from), nodeAt(document, to), into, sign, clock)
+function rangeFacts(document: XmlDocument, from: number, to: number, into: Facts, sign: number, scope: FactScope): Promise<void> {
+	return collectFactsSliced(document, nodeAt(document, from), nodeAt(document, to), into, sign, scope)
 }
 
 // Takes out of `into` the facts of the source container [from, to) that its output does not copy: the gaps
@@ -282,7 +309,7 @@ async function replacedFacts(
 	to: number,
 	trusted: readonly number[],
 	into: Facts,
-	clock: SliceClock | undefined
+	scope: FactScope
 ): Promise<void> {
 	const ranges: [number, number][] = []
 
@@ -295,16 +322,16 @@ async function replacedFacts(
 	for (const [start, end] of ranges) {
 		if (start < at) {
 			// Copied before: it counts once more.
-			await rangeFacts(document, start, end, into, 1, clock)
+			await rangeFacts(document, start, end, into, 1, scope)
 
 			continue
 		}
 
-		await rangeFacts(document, at, start, into, -1, clock)
+		await rangeFacts(document, at, start, into, -1, scope)
 		at = end
 	}
 
-	await rangeFacts(document, at, to, into, -1, clock)
+	await rangeFacts(document, at, to, into, -1, scope)
 }
 
 // ---- relationships ------------------------------------------------------------------------------------------
@@ -517,12 +544,66 @@ export interface VerifyPartsInput {
 	readonly original: DocxPackage
 	readonly context: DocxEditContext
 	readonly changes: DocxChanges
+	// The features' checks (default: the registry, see checks/index.ts).
+	readonly checks?: readonly DocxCheck[]
+}
+
+const FACT_HOOKS: FactHooks = factHooks(DOCX_CHECKS)
+
+function factHooks(checks: readonly DocxCheck[]): FactHooks {
+	const hooks = new Map<string, DocxFact[]>()
+
+	for (const check of checks) {
+		const fact = check.fact
+
+		if (fact === undefined) continue
+
+		for (const local of fact.elements) {
+			const list = hooks.get(local)
+
+			if (list === undefined) hooks.set(local, [fact])
+			else list.push(fact)
+		}
+	}
+
+	return hooks
+}
+
+// The source bytes a rewritten story replaced: its container, or none where a new container went in.
+// `inPackage`: whether the original package has the part.
+function storyRange(name: string, part: StoryPart, story: StoryChange, inPackage: boolean): { readonly from: number; readonly to: number } {
+	const document = part.document
+	const item = story.session.story.story.item
+
+	if (item >= 0) {
+		const container = part.node(item)
+
+		return { from: document.start(container), to: document.end(container) }
+	}
+
+	const range = story.range
+	const root = document.documentElement()
+
+	if (range === undefined) return fail("content", `${name}: a new story has no place in its part`)
+
+	// Inserted between elements, or the root of a part the save creates (a header).
+	const placed =
+		range.from === range.to
+			? isInsertionPoint(document, range.from)
+			: !inPackage && range.from === document.start(root) && range.to === document.end(root)
+
+	if (!placed) fail("content", `${name}: a new story is not between elements of its part`)
+
+	return range
 }
 
 // In slices with `slicing` (a pause that rejects abandons the check with that error).
 export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing): Promise<void> {
 	const { original, context, changes } = input
 	const clock = slicing === undefined ? undefined : sliceClock(slicing)
+	const checks = input.checks ?? DOCX_CHECKS
+	const scope: FactScope =
+		checks === DOCX_CHECKS ? { hooks: FACT_HOOKS, cached: true, clock } : { hooks: factHooks(checks), cached: false, clock }
 	const model = context.model
 	const changed = [...changes.replace, ...changes.add]
 	const byKey = new Map(changed.map(change => [partKey(change.name), change]))
@@ -537,14 +618,23 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 		types = parseContentTypes(typesBytes)
 
 		for (const entry of original.opc.zip.entries) {
-			if (originalTypes.typeOf(entry.name) !== undefined && types.typeOf(entry.name) === undefined)
-				fail("contentType", `${entry.name} lost its content type`)
+			const was = originalTypes.typeOf(entry.name)
+
+			if (was !== undefined && types.typeOf(entry.name) !== was) fail("contentType", `${entry.name} is no longer typed ${was}`)
 		}
 	}
 
+	for (const change of changes.replace) {
+		if (!original.has(change.name) && partKey(change.name) !== partKey("[Content_Types].xml"))
+			fail("invalidPackage", `${change.name} is replaced but not in the package`)
+	}
+
 	for (const change of changes.add) {
+		if (original.has(change.name)) fail("invalidPackage", `${change.name} is added but already in the package`)
 		if (types.typeOf(change.name) === undefined) fail("contentType", `${change.name} has no content type`)
 	}
+
+	if (byKey.size !== changed.length) fail("invalidPackage", "A part is written twice")
 
 	const relationshipsOf = async (part: string): Promise<Relationships> => {
 		const rels = byKey.get(partKey(relationshipsPartName(part)))
@@ -554,9 +644,16 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 	const exists = (part: string): boolean => original.has(part) || byKey.has(partKey(part))
 	const storyParts = new Map<string, StoryPart>(model.parts.map(part => [partKey(part.name), part]))
 	const storiesByPart = new Map<string, StoryChange[]>()
+	const added = new Set(changes.add.map(change => partKey(change.name)))
 
 	for (const story of changes.stories) {
 		const key = partKey(story.part.name)
+		const part = storyParts.get(key)
+
+		// A part the save creates holds its stories; any other story is on its package part.
+		if (part === undefined && added.has(key)) storyParts.set(key, story.part)
+		else if (part !== story.part) fail("content", `${story.part.name}: a story is not on its part`)
+
 		const list = storiesByPart.get(key)
 
 		if (list === undefined) storiesByPart.set(key, [story])
@@ -566,10 +663,28 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 	const rewritten: Rewritten[] = []
 
 	// Facts of every story part: the source's, adjusted below for what changed.
-	const before = await modelFacts(model, clock)
+	const before = await modelFacts(model, scope)
 	// What the changes add (positive) and take away (negative).
 	const after = emptyFacts()
 
+	const checkInput: CheckInput = {
+		original,
+		context,
+		changes,
+		types,
+		clock,
+		relationshipsOf,
+		exists,
+		ids: key => (before.ids.get(key) ?? 0) + (after.ids.get(key) ?? 0),
+		source: key => before.ids.get(key) ?? 0,
+		added(space) {
+			const out: string[] = []
+
+			for (const [key, change] of after.ids) if (change > 0 && key.startsWith(`${space}:`)) out.push(key.slice(space.length + 1))
+
+			return out
+		}
+	}
 	let stylesDocument: XmlDocument | undefined
 	let numberingDocument: XmlDocument | undefined
 	let numberingName: string | undefined
@@ -603,31 +718,24 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 		let skeletonDocument: XmlDocument | undefined
 
 		if (part !== undefined && stories !== undefined && outputs !== undefined) {
-			await checkAssembly(name, part, stories, change.bytes, clock)
+			await checkAssembly(name, part, stories, change.bytes, original.has(name), clock)
 			skeletonDocument = await parseCheckedSliced(name, await skeleton(part.document, outputs, clock), clock)
 			await checkParagraphs(name, part, stories, skeletonDocument, rewritten, clock)
 		}
 
-		if (part !== undefined && outputs !== undefined && skeletonDocument !== undefined && flat(part.document)) {
+		if (part !== undefined && outputs !== undefined && skeletonDocument !== undefined && flat(part.document) && original.has(name)) {
 			// The new markup of the rewritten stories; the rest of the part is the source's.
 			const document = skeletonDocument
 			const relationships = await relationshipsOf(name)
 
-			addFacts(after, await partFacts(document, clock), 1)
+			addFacts(after, await partFacts(document, scope), 1)
 
 			for (const story of changes.stories) {
 				if (story.part !== part) continue
 
-				const container = part.node(story.session.story.story.item)
+				const { from, to } = storyRange(name, part, story, true)
 
-				await replacedFacts(
-					part.document,
-					part.document.start(container),
-					part.document.end(container),
-					story.output.trusted,
-					after,
-					clock
-				)
+				await replacedFacts(part.document, from, to, story.output.trusted, after, scope)
 
 				checkContainers(part, story.output)
 			}
@@ -639,13 +747,16 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 				part.document,
 				clock
 			)
+			await checkPart(checks, checkInput, { name, part, document, skeleton: true })
 		} else {
-			// Joined only here: a part that is not a story part, or one with namespaces declared below its root.
+			// Joined only here: a part that is not a story part, one with namespaces declared below its root, or
+			// a story part the save creates.
 			const document = await parseCheckedSliced(name, await joinBytes(change.bytes), clock)
 
 			if (part !== undefined) {
-				addFacts(after, await partFacts(part.document, clock), -1)
-				addFacts(after, await partFacts(document, clock), 1)
+				if (original.has(name)) addFacts(after, await partFacts(part.document, scope), -1)
+
+				addFacts(after, await partFacts(document, scope), 1)
 				await checkRelationships(
 					name,
 					await danglingRelationships(await relationshipsOf(name), document, clock),
@@ -654,6 +765,8 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 					clock
 				)
 			}
+
+			await checkPart(checks, checkInput, { name, part, document, skeleton: false })
 
 			const type = types.typeOf(name)
 
@@ -695,6 +808,7 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 	}
 
 	await readBack(input, rewritten, relationshipsOf, clock)
+	await checkDone(checks, checkInput)
 }
 
 // Relationship ids the new markup uses must exist, unless the source used them without defining them too.
@@ -813,14 +927,16 @@ async function checkAssembly(
 	part: StoryPart,
 	stories: readonly StoryChange[],
 	written: PartBytes,
+	inPackage: boolean,
 	clock: SliceClock | undefined
 ): Promise<void> {
 	const bytes = written instanceof Uint8Array || written instanceof BytePieces ? written : await joinBytes(written)
 	const document = part.document
 	const source = document.bytes
+	// As the writer assembles them: a new container before one replaced at the same place.
 	const ordered = stories
-		.map(story => ({ story, container: part.node(story.session.story.story.item) }))
-		.sort((a, b) => document.start(a.container) - document.start(b.container))
+		.map(story => ({ story, ...storyRange(name, part, story, inPackage) }))
+		.sort((a, b) => a.from - b.from || a.to - b.to)
 	let from = 0
 	let at = 0
 	const same = async (length: number, other: Uint8Array | BytePieces, otherFrom: number): Promise<void> => {
@@ -836,9 +952,9 @@ async function checkAssembly(
 		at += length
 	}
 
-	for (const { story, container } of ordered) {
-		const start = document.start(container)
-		const end = document.end(container)
+	for (const { story, from: start, to: end } of ordered) {
+		if (start < from) fail("content", `${name}: rewritten stories overlap`)
+
 		const output = story.output
 		const trusted = output.trusted
 		let written = 0

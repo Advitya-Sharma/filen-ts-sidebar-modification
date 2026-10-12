@@ -4,7 +4,9 @@ import {
 	openDocxEditContext,
 	type BlockProof,
 	type DocxEditContext,
-	type DocxEditorOptions
+	type DocxEditorOptions,
+	type DocxMediaInfo,
+	authorInitials
 } from "../../core/docx/edit/index"
 import { DocumentEdits, PagedEditor, type PagedEditorOptions } from "../../core/docx/paged/index"
 import type { DocxPrepareOptions, DocxPreparedSave, DocxSaveInput, DocxSaveTimings } from "../../core/docx/write/save"
@@ -39,6 +41,15 @@ export interface DocxEditingHost {
 	prepare(sessions?: readonly DocxEditorSession[]): Promise<DocxPreparedSave>
 	// Body blocks the proof locked as the document opened (0 before then, or without a proof).
 	proofLocked(): number
+	// The document author name for comments and tracked changes (the app asked the user; never filled in for
+	// them); undefined clears it. Holds for the document from now on, also before it opened.
+	setAuthor(name: string | undefined): void
+	// Shows tracked changes another way (DocxOpenOptions.view), laid out again in place: no reopen. False
+	// before the editor opened or when the document already shows that view.
+	setView(view: "final" | "markup" | "original"): boolean
+	// Registers bytes a command will use (a picture to insert): their handle, or undefined when over the size
+	// limit or before the editor opened.
+	addMedia(chunks: Uint8Array | readonly Uint8Array[], info?: DocxMediaInfo): number | undefined
 }
 
 export interface DocxWritten {
@@ -49,6 +60,9 @@ export interface DocxWritten {
 
 export interface DocxEditingOptions {
 	readonly session?: Omit<DocxEditorOptions, "story">
+	// The document author name (see DocxEditingHost.setAuthor) and the clock dates written into the file read.
+	readonly author?: string
+	readonly clock?: () => number
 	readonly paged?: PagedEditorOptions
 	// Gate 1 for the document, made from its editing context (writerProof, injected: the writer is not part
 	// of this entry). The body is proved in slices before the editor opens; other stories when entered.
@@ -129,6 +143,8 @@ export function inThreadEditingHost(
 	let opened = false
 	let saveInput: DocxSaveInput | undefined
 	let proofLocked = 0
+	let author = editing.author
+	let current: PagedEditor | undefined
 	// Set once the editor is open: how saves slice their work here, and the zipper.
 	let writing: { readonly slicing: Slicing; readonly zipper: DocxZipper } | undefined
 	// `checksums`: a trial (nothing zipped) skips the parts' CRCs.
@@ -200,8 +216,13 @@ export function inThreadEditingHost(
 				store: open.store,
 				...(open.styles === undefined ? {} : { styles: open.styles }),
 				...(open.numbering === undefined ? {} : { numbering: open.numbering }),
-				resolver: open.resolver
+				resolver: open.resolver,
+				...(editing.clock === undefined ? {} : { clock: editing.clock })
 			})
+
+			// The name as it is now (setAuthor may have changed it since the host was made).
+			context.identity.author = author
+			context.identity.initials = author === undefined ? undefined : authorInitials(author)
 
 			if (closed || edits === undefined) return
 
@@ -235,6 +256,7 @@ export function inThreadEditingHost(
 			})
 
 			paged = editor
+			current = editor
 			writing = {
 				// A save under way when the document closes stops at its next turn.
 				slicing: {
@@ -272,6 +294,7 @@ export function inThreadEditingHost(
 			annotations: () => engine.annotations(),
 			close() {
 				closed = true
+				current = undefined
 				saveInput = undefined
 				writing?.zipper.dispose()
 				writing = undefined
@@ -289,6 +312,24 @@ export function inThreadEditingHost(
 		saveInput: () => saveInput,
 		save,
 		prepare: sessions => prepare(sessions, false),
-		proofLocked: () => proofLocked
+		proofLocked: () => proofLocked,
+		setAuthor(name) {
+			author = name
+
+			if (current !== undefined) {
+				const identity = current.body.session.context.identity
+
+				identity.author = name
+				identity.initials = name === undefined ? undefined : authorInitials(name)
+			}
+		},
+		setView(view) {
+			return (
+				current?.setView(
+					view === "original" ? RevisionView.Original : view === "markup" ? RevisionView.Markup : RevisionView.Final
+				) ?? false
+			)
+		},
+		addMedia: (chunks, info) => current?.addMedia(chunks, info)
 	}
 }

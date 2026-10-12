@@ -1,4 +1,4 @@
-import { NodeKind, decodeUtf8, encodeUtf8, escapeAttribute, type XmlDocument } from "../../xml/index"
+import { NodeKind, decodeUtf8, encodeUtf8, escapeAttribute, escapeText, type XmlDocument } from "../../xml/index"
 import { Ns } from "../model/namespaces"
 import type { PartReader } from "../model/reader"
 
@@ -212,6 +212,18 @@ export class Names {
 	val(local: string, value: string): string {
 		return this.empty(local, [["val", value]])
 	}
+}
+
+// Word marks text xml:space="preserve" exactly when it starts or ends with whitespace (inner runs of spaces
+// it writes as they are, and reads them so).
+const PRESERVE = /^[ \t\r\n]|[ \t\r\n]$/
+
+// A w:t (or w:delText) holding `text`.
+export function textElement(names: Names, text: string, deleted: boolean): string {
+	const local = names.el(deleted ? "delText" : "t")
+	const space = PRESERVE.test(text) ? ' xml:space="preserve"' : ""
+
+	return `<${local}${space}>${escapeText(text)}</${local}>`
 }
 
 // The start tag of an element, as an opening tag even when it closes itself ("<w:p/>" -> "<w:p>").

@@ -6,6 +6,10 @@ name: Office corpus
 
 on:
   workflow_dispatch:
+    inputs:
+      fuzz-seed:
+        description: 'First fuzz seed (default: the run number, so each night tries new sequences)'
+        required: false
 
   # Also nightly, with --check-remote: a warm cache never downloads, so this is what notices a source that has
   # gone away (GOV.UK attachments can) before the cache is ever rebuilt.
@@ -95,3 +99,61 @@ jobs:
           FILEN_OFFICE_CORPUS: ${{ github.workspace }}/packages/filen-office/.corpus
           FILEN_OFFICE_UNICODE_FULL: '1'
         run: pnpm test
+
+  # Nightly and on demand: the paged-editing fuzz (edited layout = fresh layout of the saved file) and the writer
+  # damage fuzz (Gate 2 against an independent reader) over the cached corpus, one new seed per run. Findings
+  # name file, seed and mode; FILEN_OFFICE_FUZZ_SEED, _FILTER and _MODES replay one locally (src/tests/fuzz).
+  fuzz-office-corpus:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: test-office-corpus
+    concurrency:
+      group: filen-office-fuzz-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FILEN_OFFICE_CORPUS: ${{ github.workspace }}/packages/filen-office/.corpus
+      FILEN_OFFICE_FUZZ_SEED: ${{ inputs.fuzz-seed || github.run_number }}
+      FILEN_OFFICE_FUZZ_OUT: ${{ github.workspace }}/office-fuzz.jsonl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        working-directory: packages/filen-office
+        run: pnpm install --frozen-lockfile --filter @filen/office...
+      # The job above has just saved (or restored) it; the fetch only verifies it.
+      - name: Restore the corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: packages/filen-office/.corpus
+          key: office-corpus-${{ hashFiles('packages/filen-office/corpus/manifest.json') }}
+          restore-keys: office-corpus-
+      - name: Fetch the corpus
+        working-directory: packages/filen-office
+        run: pnpm run corpus:fetch
+      - name: Paged editing fuzz
+        working-directory: packages/filen-office
+        env:
+          FILEN_OFFICE_FUZZ: '1'
+        run: pnpm exec vitest run --reporter=verbose src/tests/fuzz/paged.fuzz.test.ts
+      # The first sequence of a file saves unedited; three edited ones follow.
+      - name: Writer damage fuzz
+        if: ${{ !cancelled() }}
+        working-directory: packages/filen-office
+        env:
+          FILEN_OFFICE_FUZZ: '4'
+        run: pnpm exec vitest run --reporter=verbose src/tests/fuzz/damage.fuzz.test.ts
+      - name: Upload the fuzz results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-fuzz-${{ github.run_number }}
+          path: ${{ github.workspace }}/office-fuzz.jsonl
+          retention-days: 14

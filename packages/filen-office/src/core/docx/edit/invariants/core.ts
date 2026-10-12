@@ -13,8 +13,9 @@ import {
 	type Step
 } from "prosemirror-transform"
 import { isHistoryTransaction } from "prosemirror-history"
-import { MAX_LEVEL } from "../numbering/index"
+import { MAX_LEVEL } from "../../numbering/index"
 import {
+	BLOCK_NODE_MARKS,
 	NO_MARKERS,
 	NO_SOURCE,
 	REVISION_MARKS,
@@ -26,18 +27,35 @@ import {
 	survivorsOf,
 	type MarkerAttrs,
 	type MarkerList
-} from "./schema"
+} from "../schema"
 
 // Transactions the session makes itself (locking blocks, the repairs appended here) skip the invariants
-// and the read-only gate. The key is private to the package's own modules, so no host can claim it.
-const internalKey = new PluginKey("docxInternal")
+// and the read-only gate. They are recorded by identity in a set private to this module (a meta key is a
+// string any host could set), so no host can claim it.
+const internal = new WeakSet<Transaction>()
+// Transactions a feature's command handler (or the change tracker) made: they may set protected attributes
+// and add identity marks (new comments, tracked changes), and every other rule still holds. Recorded the
+// same way.
+const commands = new WeakSet<Transaction>()
 
 export function markInternal(tr: Transaction): Transaction {
-	return tr.setMeta(internalKey, true)
+	internal.add(tr)
+
+	return tr
 }
 
-function isInternal(tr: Transaction): boolean {
-	return tr.getMeta(internalKey) === true
+export function isInternal(tr: Transaction): boolean {
+	return internal.has(tr)
+}
+
+export function markCommand(tr: Transaction): Transaction {
+	commands.add(tr)
+
+	return tr
+}
+
+export function isCommand(tr: Transaction): boolean {
+	return commands.has(tr)
 }
 
 const nodes = docxSchema.nodes
@@ -45,6 +63,8 @@ const revisionTypes: readonly MarkType[] = REVISION_MARKS.map(name => docxSchema
 // Marks that tie content to a source element whose identity must not be duplicated.
 const identityTypes: readonly MarkType[] = [...revisionTypes, docxSchema.marks.content_control, docxSchema.marks.wrapper]
 const wrapperTypes: readonly MarkType[] = WRAPPER_MARKS.map(name => docxSchema.marks[name])
+// Node marks of blocks that feature commands set (like protected attributes).
+const blockMarkTypes: readonly MarkType[] = BLOCK_NODE_MARKS.map(name => docxSchema.marks[name])
 // Attributes that tie a node to its source or hold structure; only the session's own transactions change them.
 const PROTECTED_ATTRS = new Set([
 	"src",
@@ -59,7 +79,16 @@ const PROTECTED_ATTRS = new Set([
 	"story",
 	"simple",
 	"lock",
-	"revision"
+	"revision",
+	// What feature commands set (see markCommand).
+	"sectionChanges",
+	"props",
+	"state",
+	"overrides",
+	"omml",
+	"name",
+	"instruction",
+	"dirty"
 ])
 const CONTAINERS: ReadonlySet<NodeType> = new Set([nodes.table, nodes.table_row, nodes.table_cell, nodes.sdt])
 const SOURCE_BLOCKS = new Set(["paragraph", "table", "table_row", "table_cell", "sdt", "locked_block"])
@@ -78,6 +107,33 @@ const BYTES_ONLY = new Set([
 	"rendered_break"
 ])
 
+// A byte-only atom the editor made (src -1) that carries what the writer needs to write it new: a comment
+// range, bookmark, comment or note reference with its id, a picture with its media, an equation with its
+// OMML. Anything else new of these kinds has nothing to be written from.
+export function writableNew(node: Node): boolean {
+	const attrs = node.attrs
+
+	switch (node.type) {
+		case nodes.marker: {
+			const kind = attrs["kind"] as string
+
+			if (attrs["id"] === null) return false
+			if (kind === "bookmarkStart") return typeof attrs["name"] === "string"
+
+			return kind === "bookmarkEnd" || kind === "commentRangeStart" || kind === "commentRangeEnd"
+		}
+		case nodes.comment_ref:
+		case nodes.note_ref:
+			return attrs["id"] !== null
+		case nodes.drawing:
+			return typeof (attrs["overrides"] as { media?: unknown } | null)?.media === "number"
+		case nodes.math:
+			return attrs["omml"] !== null
+		default:
+			return false
+	}
+}
+
 // ---- paste ------------------------------------------------------------------------------------------------
 
 function freshMarks(marks: readonly Mark[]): readonly Mark[] {
@@ -89,7 +145,12 @@ function freshMarks(marks: readonly Mark[]): readonly Mark[] {
 	for (const mark of marks) {
 		const type = mark.type
 
-		if (identityTypes.includes(type) || type === docxSchema.marks.format_change || (tracked && type === docxSchema.marks.run)) {
+		if (
+			identityTypes.includes(type) ||
+			blockMarkTypes.includes(type) ||
+			type === docxSchema.marks.format_change ||
+			(tracked && type === docxSchema.marks.run)
+		) {
 			out = mark.removeFromSet(out)
 		} else if ((type === docxSchema.marks.link || type === docxSchema.marks.run) && (mark.attrs["src"] as number) !== NO_SOURCE) {
 			out = type.create({ ...mark.attrs, src: NO_SOURCE }).addToSet(mark.removeFromSet(out))
@@ -283,6 +344,7 @@ function identityMark(mark: Mark): boolean {
 function protectedChange(step: Step, doc: Node): boolean {
 	if (step instanceof AttrStep) return PROTECTED_ATTRS.has(step.attr)
 	if (step instanceof DocAttrStep) return true
+	if (step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) return blockMarkTypes.includes(step.mark.type)
 
 	// setNodeMarkup: the same node around the same content with other attributes.
 	if (step instanceof ReplaceAroundStep && step.insert === 1 && step.gapFrom === step.from + 1 && step.gapTo === step.to - 1) {
@@ -293,6 +355,13 @@ function protectedChange(step: Step, doc: Node): boolean {
 
 		for (const name of PROTECTED_ATTRS) {
 			if (name in before.attrs && before.attrs[name] !== after.attrs[name]) return true
+		}
+
+		for (const type of blockMarkTypes) {
+			const was = type.isInSet(before.marks)
+			const is = type.isInSet(after.marks)
+
+			if (was === undefined ? is !== undefined : is === undefined || !was.eq(is)) return true
 		}
 	}
 
@@ -305,11 +374,14 @@ function protectedChange(step: Step, doc: Node): boolean {
 export function invariantViolation(tr: Transaction): string | undefined {
 	if (skips(tr)) return undefined
 
+	const command = isCommand(tr)
+
 	for (let index = 0; index < tr.steps.length; index++) {
 		const step = tr.steps[index]
 		const doc = tr.docs[index]
 
 		if (step === undefined || doc === undefined) continue
+		if (command) continue
 		if (protectedChange(step, doc)) return "protectedAttribute"
 		if ((step instanceof AddMarkStep || step instanceof AddNodeMarkStep) && identityMark(step.mark)) return "identityMark"
 	}
@@ -1004,24 +1076,39 @@ export function repairTransaction(
 	const lost = new Map<number, MarkerAttrs[]>()
 	const changed: number[] = []
 	const inserted: number[] = []
+	// Inserted by transactions other than commands: revision marks there are copies (commands add their own).
+	const insertedCopies: number[] = []
 	let insertsRevisions = false
 	// Source revisions in deleted content: inserted again (a move), they are not copies.
 	const moved = new Set<number>()
+	// Block node marks (paragraph ids...) in content non-command transactions deleted: inserted again by the
+	// same edit (a move), they are no copies.
+	const movedBlockMarks: Mark[] = []
 
 	relevant.forEach((tr, index) => {
 		const ranges = changedRanges(tr)
 		const insertions = insertedRanges(tr)
 
 		for (let k = 0; k < ranges.length; k += 2) changed.push(toState(index, ranges[k] ?? 0, -1), toState(index, ranges[k + 1] ?? 0, 1))
-		for (let k = 0; k < insertions.length; k += 2)
-			inserted.push(toState(index, insertions[k] ?? 0, 1), toState(index, insertions[k + 1] ?? 0, -1))
+		const command = isCommand(tr)
 
-		insertsRevisions ||= tr.steps.some(
-			step =>
-				(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) &&
-				step.slice.size > 0 &&
-				carries(step.slice.content, mark => revisionTypes.includes(mark.type))
-		)
+		for (let k = 0; k < insertions.length; k += 2) {
+			const from = toState(index, insertions[k] ?? 0, 1)
+			const to = toState(index, insertions[k + 1] ?? 0, -1)
+
+			inserted.push(from, to)
+
+			if (!command) insertedCopies.push(from, to)
+		}
+
+		insertsRevisions ||=
+			!command &&
+			tr.steps.some(
+				step =>
+					(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) &&
+					step.slice.size > 0 &&
+					carries(step.slice.content, mark => revisionTypes.includes(mark.type))
+			)
 
 		// Markers a deletion took out, by key, with where the deletion ended up.
 		const candidates = new Map<string, { marker: MarkerAttrs; pos: number }>()
@@ -1035,6 +1122,9 @@ export function repairTransaction(
 
 				if (node.isInline)
 					for (const mark of node.marks) if (revisionTypes.includes(mark.type)) moved.add(mark.attrs["src"] as number)
+
+				if (!command && node.isBlock && opens)
+					for (const mark of node.marks) if (blockMarkTypes.includes(mark.type)) movedBlockMarks.push(mark)
 
 				if (node.isLeaf) {
 					if (pos >= range.from && end <= range.to) for (const marker of survivorsOf(node)) found.set(markerKey(marker), marker)
@@ -1091,7 +1181,7 @@ export function repairTransaction(
 	// originals are gone. Atoms at paragraph level carry wrapper marks only (a marker written inside a w:r
 	// also its run).
 	if (insertsRevisions) {
-		for (const { from, to, mark } of copiedRevisions(state.doc, inserted, moved)) repair.removeMark(from, to, mark)
+		for (const { from, to, mark } of copiedRevisions(state.doc, insertedCopies, moved)) repair.removeMark(from, to, mark)
 	}
 
 	const spans: [number, number][] = []
@@ -1142,7 +1232,12 @@ export function repairTransaction(
 				}
 
 				// Content that exists only as source bytes cannot be new: nothing could write it.
-				if (BYTES_ONLY.has(node.type.name) && node.attrs["src"] === NO_SOURCE && node.type !== nodes.proof_err)
+				if (
+					BYTES_ONLY.has(node.type.name) &&
+					node.attrs["src"] === NO_SOURCE &&
+					node.type !== nodes.proof_err &&
+					!writableNew(node)
+				)
 					orphans.push({ pos, node })
 
 				if (inlineLevel(node) === "paragraph") {
@@ -1224,6 +1319,20 @@ export function repairTransaction(
 	for (const stray of strayMarks) repair.removeNodeMark(stray.pos, stray.mark)
 	for (const link of emptyLinks) repair.removeMark(link.from, link.to, link.mark)
 
+	// Blocks a non-command edit inserted (a pasted copy, the half a split made) carry no block node mark of
+	// the block they came from (a paragraph id, a tracked property change): those belong to the original,
+	// once. A section change goes with the paragraph mark, as the section break does: a split's later half
+	// keeps it.
+	const copyFixes = new Set<string>()
+
+	for (const fix of blockCopies(state.doc, insertedCopies, movedBlockMarks)) {
+		const key = `${String(fix.pos)}:${fix.mark.type.name}`
+
+		if (!copyFixes.has(key)) repair.removeNodeMark(fix.pos, fix.mark)
+
+		copyFixes.add(key)
+	}
+
 	// 2. Attributes (no position moves).
 	for (const fix of markerFixes) repair.setNodeAttribute(fix.pos, fix.name, fix.list)
 
@@ -1279,6 +1388,52 @@ export function repairTransaction(
 	if (!repair.docChanged) return null
 
 	return markInternal(repair)
+}
+
+interface CopyFix {
+	readonly pos: number
+	readonly mark: Mark
+}
+
+function blockCopies(doc: Node, inserted: readonly number[], movedMarks: readonly Mark[]): CopyFix[] {
+	const out: CopyFix[] = []
+	const size = doc.content.size
+	const sectionChange = docxSchema.marks.section_change
+
+	for (let k = 0; k < inserted.length; k += 2) {
+		const from = Math.max(0, Math.min(size, inserted[k] ?? 0))
+		const to = Math.max(from, Math.min(size, inserted[k + 1] ?? 0))
+
+		if (to <= from) continue
+
+		// Text inside one paragraph (typing) inserts no block: nothing to look at.
+		const $from = doc.resolve(from)
+
+		if ($from.parent.isTextblock && to <= $from.end()) continue
+
+		doc.nodesBetween(from, to, (node, pos) => {
+			if (node.isInline) return false
+			// Only blocks whose start the edit inserted.
+			if (pos < from) return !node.isTextblock
+
+			for (const mark of node.marks) {
+				if (!blockMarkTypes.includes(mark.type) || movedMarks.some(moved => moved.eq(mark))) continue
+
+				// A split: the half before it had the same section change and gives it up.
+				const before = doc.resolve(pos).nodeBefore
+
+				if (mark.type === sectionChange && before !== null && mark.isInSet(before.marks) !== undefined) {
+					out.push({ pos: pos - before.nodeSize, mark })
+				} else {
+					out.push({ pos, mark })
+				}
+			}
+
+			return !node.isTextblock
+		})
+	}
+
+	return out
 }
 
 function insertsRange(doc: Node, inserted: readonly number[]): boolean {

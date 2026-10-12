@@ -10,7 +10,10 @@ import {
 	type PartBytes,
 	type PartChange,
 	type WriteZipOptions,
-	type ZipEntry
+	type ZipEntry,
+	type ZipPlan,
+	OpcError,
+	ZipError
 } from "../../opc/index"
 import { equalBytes } from "./bytes"
 import { DocxSaveError, DocxVerifyError } from "./failure"
@@ -261,11 +264,22 @@ export function nativeDeflateChunks(): ((chunks: AsyncIterable<Uint8Array>) => P
 	}
 }
 
+// The zip plan of `changes` (untouched entries copied raw); a change the archive cannot take refuses the save.
+export async function planChanges(original: OpcPackage, changes: DocxPartChanges): Promise<ZipPlan> {
+	try {
+		return await original.plan({ replace: changes.replace, add: changes.add })
+	} catch (error) {
+		if (error instanceof OpcError || error instanceof ZipError) throw new DocxSaveError("invalidPackage", error.message)
+
+		throw error
+	}
+}
+
 // Writes `changes` into the original archive and checks the result (the zip half of gate 2). Refusals are
 // DocxSaveErrors with gate 2's reasons.
 export async function zipDocxSave(original: OpcPackage, changes: DocxPartChanges, options: DocxZipOptions = {}): Promise<DocxZipResult> {
 	let started = Date.now()
-	const plan = await original.plan({ replace: changes.replace, add: changes.add })
+	const plan = await planChanges(original, changes)
 	const memory = options.sink === undefined ? memorySink() : undefined
 	const sink = options.sink ?? memory
 

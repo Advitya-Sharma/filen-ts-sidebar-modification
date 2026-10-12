@@ -117,11 +117,12 @@ const DRY_RUN = process.env["DRY_RUN"] === "1"
 // English source files as translator context (JSDoc-rich)
 // ---------------------------------------------------------------------------
 
-// Concatenate the raw `src/locales/en/*.ts` files as text. Their JSDoc comments describe what
-// each key means and where it's used — invaluable context for the translator, and a stable
-// prefix that prompt caching reuses across every target language.
+// Concatenate the raw `src/locales/en/**/*.ts` files as text (a namespace may spread sub-catalogs kept
+// in a subdirectory). Their JSDoc comments describe what each key means and where it's used —
+// invaluable context for the translator, and a stable prefix that prompt caching reuses across
+// every target language.
 function readEnglishSourceFiles(): string {
-	const files = readdirSync(EN_SOURCE_DIR)
+	const files = readdirSync(EN_SOURCE_DIR, { recursive: true, encoding: "utf8" })
 		.filter(name => name.endsWith(".ts"))
 		.sort()
 

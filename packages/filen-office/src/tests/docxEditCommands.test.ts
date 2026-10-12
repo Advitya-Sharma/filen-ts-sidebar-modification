@@ -2,6 +2,7 @@ import type { Node } from "prosemirror-model"
 import { AllSelection, NodeSelection, TextSelection } from "prosemirror-state"
 import { describe, expect, it } from "vitest"
 import {
+	DOCX_COMMAND_FEATURES,
 	DOCX_EDITOR_COMMANDS,
 	DOCX_PARAGRAPH_STYLES,
 	DOCX_PARAGRAPH_STYLE_MENU,
@@ -76,7 +77,8 @@ describe("docx editor commands", () => {
 		expect(DOCX_PARAGRAPH_STYLE_MENU.map(entry => entry.style)).toEqual([...DOCX_PARAGRAPH_STYLES])
 		expect(DOCX_PARAGRAPH_STYLE_MENU.find(entry => entry.style === "heading2")?.shortcut).toBe("mod+alt+2")
 
-		for (const type of types) {
+		// Feature commands with arguments: docxEditRegistry.test.ts.
+		for (const type of DOCX_COMMAND_FEATURES.base.map(command => command.type)) {
 			const command = type === "style.set" ? { type, style: "heading1" } : { type }
 
 			expect(parseDocxEditorCommand(JSON.parse(JSON.stringify(command)))).toEqual(command)

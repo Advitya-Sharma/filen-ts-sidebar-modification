@@ -1,12 +1,21 @@
 export { DocxDocBuilder, type StoryBuildStats, type StoryDoc } from "./build"
 export {
+	DOCX_COMMAND_FEATURES,
 	DOCX_EDITOR_COMMANDS,
 	DOCX_PARAGRAPH_STYLES,
 	DOCX_PARAGRAPH_STYLE_MENU,
 	PARAGRAPH_STYLE_NAMES,
+	commandInfo,
 	isWriteCommand,
 	parseDocxEditorCommand,
+	type BaseCommand,
 	type DocxAlignment,
+	type DocxCommandContext,
+	type DocxCommandFeature,
+	type DocxCommandInfo,
+	type DocxCommandInput,
+	type DocxCommandOf,
+	type DocxCommandScope,
 	type DocxEditorCommand,
 	type DocxEditorCommandGroup,
 	type DocxEditorCommandInfo,
@@ -14,7 +23,81 @@ export {
 	type DocxParagraphStyle,
 	type DocxParagraphStyleInfo
 } from "./commands"
-export { openDocxEditContext, type DocxEditContext, type EditContextParts } from "./context"
+export type { CommentCommand } from "./commands/comments"
+export type { DocxRelativeH, DocxRelativeV, DocxWrapMode, DrawingCommand } from "./commands/drawings"
+export type { FieldCommand } from "./commands/fields"
+export type { FormCommand } from "./commands/forms"
+export {
+	DOCX_HIGHLIGHT_COLORS,
+	DOCX_THEME_COLORS,
+	type DocxHighlightColor,
+	type DocxLineSpacingRule,
+	type DocxTextColor,
+	type DocxThemeColor,
+	type FormattingCommand
+} from "./commands/formatting"
+export type { InsertCommand } from "./commands/insert"
+export type { MathCommand } from "./commands/math"
+export type { NoteCommand } from "./commands/notes"
+export { DOCX_MARKUP_VIEWS, type DocxMarkupView, type ReviewCommand } from "./commands/review"
+export {
+	DOCX_PAGE_NUMBER_FORMATS,
+	type DocxOrientation,
+	type DocxPageNumberFormat,
+	type DocxPageSetup,
+	type DocxSectionBreak,
+	type SectionCommand
+} from "./commands/sections"
+export type { DocxCellVAlign, DocxTableAlign, TableCommand } from "./commands/tables"
+export type { ViewCommand } from "./commands/view"
+export {
+	DocxIds,
+	DocxMediaStore,
+	authorInitials,
+	openDocxEditContext,
+	type DocxEditContext,
+	type DocxIdSpace,
+	type DocxIdentity,
+	type DocxMediaEntry,
+	type DocxMediaInfo,
+	type DocxReviewState,
+	type EditContextParts,
+	type NewStory,
+	type NewStoryKind
+} from "./context"
+export {
+	documentHandler,
+	registeredTransformer,
+	storyHandler,
+	type DocumentCommandContext,
+	type DocumentCommandHandler,
+	type DocumentHandlers,
+	type DocxTransactionTransformer,
+	type FeatureHandlers,
+	type StoryCommandContext,
+	type StoryCommandHandler,
+	type StoryCommandResult,
+	type StoryHandlers
+} from "./registry"
+export { readOnlyReasons } from "./readOnly"
+export { NO_PROTECTION, protectionOf, type DocxProtection, type DocxProtectionMode } from "./protection"
+export { NO_VALUES } from "./snapshot/formats"
+export { NO_REVIEW } from "./snapshot/review"
+export type {
+	DocxCommentContext,
+	DocxContextSnapshot,
+	DocxControlContext,
+	DocxDrawingContext,
+	DocxEquationContext,
+	DocxFieldContext,
+	DocxLinkContext,
+	DocxProvidedSnapshot,
+	DocxReviewSnapshot,
+	DocxStoryContext,
+	DocxTableContext,
+	DocxValuesSnapshot,
+	SnapshotInput
+} from "./snapshot/index"
 export {
 	STORY_FIND_LIMIT,
 	findInStory,
@@ -29,20 +112,27 @@ export {
 export { FormatResolver, alignmentOf, type ListKind, type RunToggle } from "./formats"
 export { RunBases, formattingMarks, type RunBase } from "./formatting"
 export {
+	INVARIANT_STAGES,
 	changedRanges,
+	docxInvariantPlugins,
 	docxInvariants,
 	docxInvariantsKey,
 	freshSlice,
 	invariantViolation,
+	isCommand,
 	normalizeListAttrs,
 	repairTransaction,
+	writableNew,
 	type InvariantOptions,
+	type InvariantStage,
 	type ListAttrs,
 	type ListNormalizer
-} from "./invariants"
+} from "./invariants/index"
 export { conservativeProof, lockBlocks, proveBlocks, type BlockProof, type LockRequest } from "./proof"
 export {
+	BLOCK_NODE_MARKS,
 	FORMATTING_MARKS,
+	INLINE_MARK_NAMES,
 	NO_MARKERS,
 	NO_SOURCE,
 	REVISION_MARKS,
@@ -54,6 +144,7 @@ export {
 	sourceOf,
 	survivorsOf,
 	type ColorAttrs,
+	type DrawingOverrides,
 	type DocxMarkName,
 	type DocxNodeName,
 	type DocxSchema,
@@ -63,7 +154,16 @@ export {
 	type LockedKind,
 	type MarkerAttrs,
 	type MarkerKind,
-	type MarkerList
+	type MarkerList,
+	type MarkerNodeAttrs
 } from "./schema"
-export { findUnsavableBlocks, type UnsavableBlocks } from "./unsavable"
+export {
+	REVERTIBLE_UNITS,
+	findUnsavableBlocks,
+	type RevertibleUnit,
+	type RevertibleUnits,
+	type UnsavableBlocks,
+	type UnsavableSearchOptions,
+	withRevertedUnits
+} from "./unsavable"
 export { DocxEditorSession, type DocxEditorOptions, type DocxEditorSnapshot, type DocxReadOnlyReason, type FormatState } from "./session"

@@ -3,6 +3,16 @@
 // close) and per-category viewer copy. Same typed-catalog rules as the other namespaces: flat `as
 // const` object, camelCase keys, no literal '.' or ':' (real i18next namespaces, keySeparator/
 // nsSeparator both ON).
+import { previewDocxReview } from "@/locales/en/previewDocx/review"
+import { previewDocxInsert } from "@/locales/en/previewDocx/insert"
+import { previewDocxTable } from "@/locales/en/previewDocx/table"
+import { previewDocxFormat } from "@/locales/en/previewDocx/format"
+import { previewDocxForms } from "@/locales/en/previewDocx/forms"
+import { previewDocxFields } from "@/locales/en/previewDocx/fields"
+import { previewDocxSections } from "@/locales/en/previewDocx/sections"
+import { previewDocxMath } from "@/locales/en/previewDocx/math"
+import { previewDocxReflow } from "@/locales/en/previewDocx/reflow"
+
 export const preview = {
 	// ── Header ───────────────────────────────────────────────────────────────
 	/** Preview overlay header — accessible label for the button stepping to the previous previewable sibling; disabled at the first item */
@@ -797,5 +807,16 @@ export const preview = {
 	/** Solid 7z cost dialog — saves the file anyway */
 	previewArchiveEntryCostDownload: "Download",
 	/** Toast when a browser can't stream one file of an archive to disk (no File System Access and no transferable streams) */
-	previewArchiveEntryDownloadUnsupported: "This browser can't save a single file from an archive. Extract it to your drive instead."
+	previewArchiveEntryDownloadUnsupported: "This browser can't save a single file from an archive. Extract it to your drive instead.",
+
+	// ── Word document editor features (locales/en/previewDocx/*) ─────────────
+	...previewDocxReview,
+	...previewDocxInsert,
+	...previewDocxTable,
+	...previewDocxFormat,
+	...previewDocxForms,
+	...previewDocxFields,
+	...previewDocxSections,
+	...previewDocxMath,
+	...previewDocxReflow
 } as const

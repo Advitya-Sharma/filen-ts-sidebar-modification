@@ -21,7 +21,9 @@ export interface DocxEditorState {
 
 export interface DocxEditorControls {
 	readonly state: DocxEditorState | undefined
-	execute(command: DocxEditorCommand): boolean
+	// Story commands go to the story being edited, document commands to the editor (undo and redo across
+	// stories); async commands (DocxCommandInfo.async) return a promise.
+	execute(command: DocxEditorCommand): boolean | Promise<boolean>
 	canExecute(type: DocxEditorCommandType): boolean
 }
 
@@ -40,7 +42,7 @@ class EditorStateStore {
 			listener()
 		}
 		const stopEditor = this.editor.subscribe(bump)
-		const stopSession = this.editor.session.subscribe(bump)
+		const stopSession = this.editor.subscribeSession(bump)
 
 		return () => {
 			stopEditor()
@@ -56,7 +58,7 @@ class EditorStateStore {
 		const editor = this.editor
 		const selection = editor.selection()
 		const state: DocxEditorState = {
-			snapshot: editor.session.snapshot(),
+			snapshot: editor.snapshot(),
 			selection,
 			caret: selection.empty ? editor.caret() : undefined,
 			ends: editor.ends(),
@@ -97,7 +99,7 @@ export function useDocxEditor(editor: PagedEditor | undefined): DocxEditorContro
 
 	return {
 		state,
-		execute: command => editor?.session.execute(command) ?? false,
-		canExecute: type => editor?.session.canExecute(type) ?? false
+		execute: command => editor?.execute(command) ?? false,
+		canExecute: type => editor?.canExecute(type) ?? false
 	}
 }

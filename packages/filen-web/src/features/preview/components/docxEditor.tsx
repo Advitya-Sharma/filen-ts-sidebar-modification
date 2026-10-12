@@ -6,6 +6,7 @@ import { bytesSource } from "@filen/office/core/opc"
 import {
 	STORY_FIND_LIMIT,
 	findInStory,
+	isWriteCommand,
 	replaceAll,
 	replaceMatches,
 	selectMatch,
@@ -16,37 +17,52 @@ import type { PagedEditor } from "@filen/office/core/docx/paged"
 import type { SpellingIssue, SpellingMark } from "@filen/office/core/docx/spelling"
 import { DocxSpelling } from "@filen/office/core/docx/spelling"
 import { DocxSaveError } from "@filen/office/core/docx/write"
-import {
-	DEFAULT_MARKUP_MODE,
-	clampZoom,
-	fitWidthZoom,
-	markupInfo,
-	stepZoom,
-	type DocxMarkupInfo,
-	type DocxMarkupMode
-} from "@filen/office/dom/docx"
+import { DEFAULT_MARKUP_MODE, clampZoom, fitWidthZoom, markupInfo, stepZoom, type DocxMarkupMode } from "@filen/office/dom/docx"
 import type { DocxEditingHost } from "@filen/office/dom/docx/editing"
 import { useDocxDocument, type DocxSource } from "@filen/office/react/docx"
-import { DocxEditor, plainText, useDocxEditor, type DocxEditorHandle } from "@filen/office/react/docx/editor"
+import {
+	DocxEditor,
+	plainText,
+	useDocxEditor,
+	type DocxEditorHandle,
+	type DocxObjectPress,
+	type DocxPageOverlay
+} from "@filen/office/react/docx/editor"
 import "@filen/office/css/docx.css"
+import "@filen/office/css/docx-review.css"
+import "@filen/office/css/docx-objects.css"
+import "@filen/office/css/docx-reflow.css"
 import { DOCX_FONT_URLS } from "@/features/preview/lib/docxEngine"
 import { readEditorClipboard, writeEditorClipboard } from "@/features/preview/lib/docxClipboard"
 import { docxEditingHost, writeDocx, type DocxSaveSnapshot } from "@/features/preview/lib/docxEditing"
 import {
 	AUTOSAVE_IDLE_MS,
+	commandRecordsAuthor,
+	editorMarkupView,
+	featureEditable,
 	editorMarks,
+	featureLanded,
 	editorViewOnlyReasons,
 	firstMatchFrom,
-	markupSwitch,
+	markupRelayout,
+	objectInteractions,
+	shownMarkup,
 	sameToolbarSnapshot,
-	stepMatch
+	stepMatch,
+	type DocxAuthorGate
 } from "@/features/preview/components/docxEditor.logic"
 import { DocxEditToolbar } from "@/features/preview/components/docxEditToolbar"
+import { DocxEquationPopover } from "@/features/preview/components/docxEquationPopover"
+import { DocxFormControls } from "@/features/preview/components/docxFormControls"
+import { DocxReflowSurface } from "@/features/preview/components/docxReflowSurface"
+import { DocxObjectHandles } from "@/features/preview/components/docxObjectHandles"
+import { DocxReviewLayer, DocxReviewPageOverlay } from "@/features/preview/components/docxReviewLayer"
 import type { DocxFindControls } from "@/features/preview/components/docxViewer.logic"
 import { DocxTouchSelection } from "@/features/preview/components/docxTouchSelection"
 import { SaveRefusedError } from "@/features/drive/lib/previewSave.logic"
 import { defaultSpellingLanguage, documentSpellingChecker } from "@/features/spellcheck/lib/spellcheck"
-import { loadOfficeSettings, saveOfficeAutosave, useOfficeSettings } from "@/features/office/lib/officeSettings"
+import { ensureAuthorName, loadOfficeSettings, saveOfficeAutosave, useOfficeSettings } from "@/features/office/lib/officeSettings"
+import { AuthorNameDialog } from "@/features/office/components/authorNameDialog"
 import { LoadingState } from "@/components/loadingState"
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/context-menu"
 import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"
@@ -79,19 +95,20 @@ const SEARCH_TOAST = "docx-save-search"
 // Suggestions a context menu offers.
 const MAX_SUGGESTIONS = 6
 
-// The document open for editing, laid out as a markup mode's view shows revisions (modes with the same view
-// share it: switching between them keeps the document open).
+// The document open for editing, laid out first as a markup mode's view shows revisions (another view is laid
+// out in place once it is open).
 interface Opened {
-	view: DocxMarkupInfo["view"]
 	editing: DocxEditingHost
 	source: DocxSource
 }
 
 function openEditing(bytes: Uint8Array, mode: DocxMarkupMode): Opened {
 	const editing = docxEditingHost()
-	const view = markupInfo(mode).view
 
-	return { view, editing, source: { host: editing.host, bytes: bytesSource(bytes), options: { fontUrls: DOCX_FONT_URLS, view } } }
+	return {
+		editing,
+		source: { host: editing.host, bytes: bytesSource(bytes), options: { fontUrls: DOCX_FONT_URLS, view: markupInfo(mode).view } }
+	}
 }
 
 interface Ready {
@@ -120,6 +137,10 @@ interface MenuTarget {
 	issue: SpellingIssue | undefined
 	suggestions: readonly string[] | undefined
 }
+
+// What features draw over each page once offered.
+const REVIEW_OVERLAY = featureLanded("comments") || featureLanded("review")
+const OBJECT_OVERLAY = featureLanded("drawings")
 
 function subscribeNothing(): () => void {
 	return () => undefined
@@ -231,6 +252,56 @@ function docxSaveSource({ host, editor, setWriting, onSaved, onRefused, onLocked
 	}
 }
 
+// The author name gate for commands that record one: asks through the dialog it returns when no name is set.
+function useAuthorGate(authorName: string | null): { withAuthor: DocxAuthorGate; dialog: ReactNode } {
+	const [answer, setAnswer] = useState<((name: string | null) => void) | null>(null)
+	const [withAuthor] = useState(() => (run: (author: string) => void): void => {
+		void ensureAuthorName(
+			() =>
+				new Promise<string | null>(resolve => {
+					setAnswer(() => resolve)
+				})
+		).then(author => {
+			if (author !== null) {
+				run(author)
+			}
+		})
+	})
+
+	useEffect(() => {
+		if (answer === null) {
+			return
+		}
+
+		// An ask still open when the editor closes is declined (after an answer this does nothing).
+		return () => {
+			answer(null)
+		}
+	}, [answer])
+
+	const reply = (name: string | null): void => {
+		answer?.(name)
+		setAnswer(null)
+	}
+
+	return {
+		withAuthor,
+		dialog: (
+			<AuthorNameDialog
+				open={answer !== null}
+				pending={false}
+				initialValue={authorName}
+				onOpenChange={open => {
+					if (!open) {
+						reply(null)
+					}
+				}}
+				onSubmit={reply}
+			/>
+		)
+	}
+}
+
 export interface DocxEditViewProps {
 	bytes: Uint8Array
 	alt: string
@@ -269,8 +340,6 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const rootRef = useRef<HTMLDivElement | null>(null)
 	const { width } = useElementSize(wrapper)
 	const [writing, setWriting] = useState(false)
-	// A save landed since the document opened: the bytes it opened from are no longer the file.
-	const [savedSinceOpen, setSavedSinceOpen] = useState(false)
 	// The writer refused the document: autosave waits for an explicit save (which can resolve it).
 	const [autosaveHeld, setAutosaveHeld] = useState(false)
 	const [zoomMode, setZoomMode] = useState<"fit" | number>("fit")
@@ -278,7 +347,12 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const [menu, setMenu] = useState<MenuTarget | null>(null)
 	// The last press on the pages was a touch: selections get handles and the touch menu.
 	const [touch, setTouch] = useState(false)
+	// The reflowed view in place of the pages.
+	const [reflow, setReflow] = useState(false)
 	const settings = useOfficeSettings()
+	const { withAuthor, dialog: authorDialog } = useAuthorGate(settings.authorName)
+	// The object a press on the pages hit, for the feature that acts on it (handles, pickers, popovers).
+	const [press, setPress] = useState<DocxObjectPress | null>(null)
 	const online = useIsOnline()
 	const onAutosaveRef = useLatestRef(onAutosave)
 	const readOnly = writing || !writable
@@ -293,6 +367,9 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		setAutosaveHeld(false)
 	}
 	const doc = editor?.state.doc
+	// The editor's layout is what the pages show; the menu's mode follows it.
+	const pagesView = editor === undefined ? markupInfo(markupMode).view : editorMarkupView(editor.view)
+	const shownMode = shownMarkup(markupMode, pagesView)
 	const bodyActive = editor !== undefined && editor.activeStory === editor.body.session.story.story.index
 	const spellingMarks = useSyncExternalStore(
 		spelling === undefined ? subscribeNothing : listener => spelling.subscribe(listener),
@@ -356,6 +433,24 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		void loadOfficeSettings()
 	}, [])
 
+	// Paged layout rests while the reflowed view shows the document; it catches up from the first changed page.
+	useEffect(() => {
+		if (!reflow || editor === undefined) {
+			return
+		}
+
+		editor.suspend()
+
+		return () => {
+			editor.resume()
+		}
+	}, [reflow, editor])
+
+	// Comments and tracked changes carry the user's own author name (none until given).
+	useEffect(() => {
+		opened.editing.setAuthor(settings.authorName ?? undefined)
+	}, [opened, settings.authorName])
+
 	useEffect(() => {
 		onDirtyChange(dirty)
 	}, [dirty, onDirtyChange])
@@ -371,7 +466,6 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 			editor,
 			setWriting,
 			onSaved: () => {
-				setSavedSinceOpen(true)
 				setAutosaveHeld(false)
 			},
 			onRefused: () => {
@@ -511,17 +605,64 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		handleRef.current?.focus()
 	}
 
-	// One function for the editor's lifetime: the toolbar's buttons take no new props on a keystroke.
-	const executeRef = useLatestRef((command: DocxEditorCommand): void => {
+	const runRef = useLatestRef((command: DocxEditorCommand, author?: string): void => {
+		if (author !== undefined) {
+			opened.editing.setAuthor(author)
+		}
+
 		if (!readOnly) {
-			controls.execute(command)
+			const done = controls.execute(command)
+
+			// An async command (a field update, a picture) reports its own outcome; a failure is only logged.
+			if (typeof done !== "boolean") {
+				done.catch((error: unknown) => {
+					log.error("docx", "command failed", { type: command.type, error })
+				})
+			}
 		}
 
 		focusEditor()
 	})
+	// A command the session refuses now asks for nothing; one that records the author asks for the name first.
+	const executeRef = useLatestRef((command: DocxEditorCommand): void => {
+		if (snapshot === undefined || (readOnly && isWriteCommand(command.type)) || !snapshot.enabled[command.type]) {
+			focusEditor()
+
+			return
+		}
+
+		if (commandRecordsAuthor(command, snapshot.review.tracking)) {
+			withAuthor(author => {
+				runRef.current(command, author)
+			})
+		} else {
+			runRef.current(command)
+		}
+	})
+	// One function for the editor's lifetime: the toolbar's buttons take no new props on a keystroke.
 	const [execute] = useState(() => (command: DocxEditorCommand): void => {
 		executeRef.current(command)
 	})
+
+	// Another markup mode: the open document is laid out again in place (its edits kept); one still opening
+	// (nothing edited yet) opens again laid out for it.
+	const changeMarkup = (mode: DocxMarkupMode): void => {
+		if (editor === undefined) {
+			if (markupInfo(mode).view !== markupInfo(markupMode).view) {
+				setOpened(openEditing(bytes, mode))
+				setPress(null)
+			}
+		} else {
+			const view = markupRelayout(pagesView, mode)
+
+			if (view !== null) {
+				opened.editing.setView(view)
+			}
+		}
+
+		setMarkupMode(mode)
+		focusEditor()
+	}
 
 	const canReplace = !readOnly && snapshot !== undefined && !snapshot.readOnly
 	const findControls: DocxFindControls = {
@@ -653,6 +794,36 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		focusEditor()
 	}
 
+	// Presses on objects go to their feature while it can change the document (the toolbar's snapshot: it
+	// changes only with what that depends on).
+	const interactions = objectInteractions(setPress, feature => featureEditable(toolbarSnapshot, readOnly, feature))
+	const onPressDone = (): void => {
+		setPress(null)
+	}
+	const overlays =
+		editor === undefined || !(REVIEW_OVERLAY || OBJECT_OVERLAY)
+			? undefined
+			: (page: DocxPageOverlay): ReactNode => (
+					<>
+						{REVIEW_OVERLAY ? (
+							<DocxReviewPageOverlay
+								page={page}
+								editor={editor}
+								markup={shownMode}
+							/>
+						) : null}
+						{OBJECT_OVERLAY ? (
+							<DocxObjectHandles
+								page={page}
+								editor={editor}
+								press={press}
+								readOnly={readOnly}
+								execute={execute}
+							/>
+						) : null}
+					</>
+				)
+
 	const hasSelection = selection !== undefined && !selection.empty
 	const editable = !readOnly && snapshot !== undefined && !snapshot.readOnly
 	const menuIssue = menu?.issue
@@ -675,21 +846,8 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 				find={{ open: find.open, replace: find.replace, focus: find.focus, controls: findControls }}
 				onFindOpen={openFind}
 				onFindClosed={focusEditor}
-				markup={annotated > 0 ? markupMode : null}
-				markupDisabled={mode => markupSwitch(opened.view, mode, !dirty && !savedSinceOpen) === null}
-				onMarkupChange={mode => {
-					const change = markupSwitch(opened.view, mode, !dirty && !savedSinceOpen)
-
-					if (change === null) {
-						return
-					}
-
-					if (change.reopen) {
-						setOpened(openEditing(bytes, mode))
-					}
-
-					setMarkupMode(mode)
-				}}
+				markup={annotated > 0 ? shownMode : null}
+				onMarkupChange={changeMarkup}
 				zoom={zoom}
 				onZoom={change => {
 					setZoomMode(change === "fit" ? "fit" : stepZoom(zoom, change === "in" ? 1 : -1))
@@ -700,6 +858,8 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 						log.warn("office", "autosave setting not saved", { error })
 					})
 				}}
+				reflow={reflow}
+				onReflowChange={setReflow}
 			/>
 			{autosaveHeld && settings.autosave ? (
 				<p
@@ -764,22 +924,73 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 						}
 					}}
 				>
-					{editor === undefined ? null : (
-						<DocxEditor
-							ref={handleRef}
+					{editor === undefined ? null : reflow ? (
+						<DocxReflowSurface
 							editor={editor}
-							document={document}
-							zoom={zoom}
-							gap={PAGE_GAP}
-							className="size-full"
+							handleRef={handleRef}
 							label={alt}
 							readOnly={readOnly}
 							apple={APPLE}
+							marks={marks}
 							onFind={() => {
 								openFind(false)
 							}}
-							marks={marks}
 						/>
+					) : (
+						<>
+							<DocxEditor
+								ref={handleRef}
+								editor={editor}
+								document={document}
+								zoom={zoom}
+								gap={PAGE_GAP}
+								className="size-full"
+								label={alt}
+								readOnly={readOnly}
+								apple={APPLE}
+								onFind={() => {
+									openFind(false)
+								}}
+								marks={marks}
+								{...(interactions === undefined ? {} : { interactions })}
+								{...(overlays === undefined ? {} : { overlays })}
+							/>
+							<DocxReviewLayer
+								editor={editor}
+								document={document}
+								markup={shownMode}
+								zoom={zoom}
+								gap={PAGE_GAP}
+								container={wrapper}
+								readOnly={readOnly}
+								execute={execute}
+								withAuthor={withAuthor}
+								press={press?.hit.kind === "commentMarker" ? press : null}
+								onPressDone={onPressDone}
+							/>
+						</>
+					)}
+					{editor === undefined ? null : (
+						<>
+							<DocxFormControls
+								editor={editor}
+								container={wrapper}
+								zoom={zoom}
+								readOnly={readOnly}
+								execute={execute}
+								press={press?.hit.kind === "control" ? press : null}
+								onPressDone={onPressDone}
+							/>
+							<DocxEquationPopover
+								editor={editor}
+								container={wrapper}
+								zoom={zoom}
+								readOnly={readOnly}
+								execute={execute}
+								press={press?.hit.kind === "equation" ? press : null}
+								onPressDone={onPressDone}
+							/>
+						</>
 					)}
 					<DocxTouchSelection
 						handleRef={handleRef}
@@ -898,6 +1109,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 					<ContextMenuItem onClick={selectAll}>{t("previewDocxSelectAll")}</ContextMenuItem>
 				</ContextMenuContent>
 			</ContextMenu>
+			{authorDialog}
 		</div>
 	)
 }

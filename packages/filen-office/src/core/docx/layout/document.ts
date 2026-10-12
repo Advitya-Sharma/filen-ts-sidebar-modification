@@ -162,17 +162,69 @@ export class DocumentLayout {
 
 	cancel(): void {
 		this.cancelled = true
+		this.wakeResumed()
 	}
 
 	private relayout: ((page: number) => Promise<number>) | undefined = undefined
 	private running: () => boolean = () => false
 	private driver: LayoutDriver | undefined = undefined
+	private viewSwitch: ((view: RevisionView) => void) | undefined = undefined
+	private suspendedValue = false
+	private readonly resumeWaiters: (() => void)[] = []
 
-	attach(relayout: (page: number) => Promise<number>, running?: () => boolean, driver?: LayoutDriver): void {
+	attach(
+		relayout: (page: number) => Promise<number>,
+		running?: () => boolean,
+		driver?: LayoutDriver,
+		viewSwitch?: (view: RevisionView) => void
+	): void {
 		this.relayout = relayout
 
 		if (running !== undefined) this.running = running
 		if (driver !== undefined) this.driver = driver
+		if (viewSwitch !== undefined) this.viewSwitch = viewSwitch
+	}
+
+	// Editing: lays the document out again in revision view `view`, from the first page (the pages laid out
+	// so far stay until replaced); call advance() or continue() as after beginEdit. The edits' view must be
+	// switched first (DocumentEdits.setView). Returns the first page laid out again.
+	setView(view: RevisionView): number {
+		if (this.driver === undefined || this.viewSwitch === undefined) throw new Error("No layout to edit")
+
+		this.viewSwitch(view)
+		this.cancelled = false
+
+		return this.driver.begin(0, undefined)
+	}
+
+	// Background layout stops at its next slice (another surface shows the document meanwhile); edits may
+	// still restart it (beginEdit), and it carries on with resume().
+	suspend(): void {
+		this.suspendedValue = true
+	}
+
+	resume(): Promise<void> {
+		this.suspendedValue = false
+		this.wakeResumed()
+
+		return this.continue()
+	}
+
+	// Resolves when the layout is resumed (or cancelled).
+	whenResumed(): Promise<void> {
+		if (!this.suspendedValue || this.cancelled) return Promise.resolve()
+
+		return new Promise(resolve => {
+			this.resumeWaiters.push(resolve)
+		})
+	}
+
+	private wakeResumed(): void {
+		for (const resolve of this.resumeWaiters.splice(0)) resolve()
+	}
+
+	get suspended(): boolean {
+		return this.suspendedValue
 	}
 
 	// Editing: starts laying the document out again for edits that change what pages from `page` on show
@@ -334,6 +386,9 @@ interface PageRecord {
 	readonly header: number
 	readonly footer: number
 	readonly geometry: PageGeometry
+	// The geometry the header and footer were laid out with: the section the page opened in (a continuous
+	// section starting further down the page changes `geometry`, not them).
+	readonly headerGeometry: PageGeometry
 	readonly values: PageValues
 	readonly frame: PageFrame
 	// Something on it was placed by whether the page is odd or even.
@@ -389,6 +444,8 @@ class Paginator {
 	// The open page is its section's first.
 	private firstOfSection = true
 	private geometry: PageGeometry | undefined = undefined
+	// The geometry the open page's header and footer were laid out with.
+	private openGeometry: PageGeometry | undefined = undefined
 	private column = 0
 	// Where the section's part of the open page began (undefined until its first step there; null when it
 	// cannot be laid out again: it began inside a table): to balance its columns.
@@ -652,6 +709,7 @@ class Paginator {
 		this.resyncs =
 			dirty === undefined ? undefined : this.previousLayout(own ? page : layout.pages.length, dirty, snapshot?.renderedBreaks ?? 0)
 		this.missedFonts = this.missedFonts >= page ? -1 : this.missedFonts
+		this.pageMissedFonts = false
 		this.resyncedAt = -1
 		this.pageOpen = false
 		this.finished = false
@@ -938,7 +996,11 @@ class Paginator {
 				breaksAsLines: true
 			}
 
-			flows.push(new BlockFlow(engine, context, Region.ENDNOTE, true).setContainer(part, story.item))
+			const flow = new BlockFlow(engine, context, Region.ENDNOTE, true)
+			// An edited note's blocks as edited (a note the editor added has no source container).
+			const edited = engine.edits?.stories?.get(index)
+
+			flows.push(edited === undefined ? flow.setContainer(part, story.item) : flow.setRefs(part, edited, 0, edited.length))
 		}
 
 		if (flows.length === 0) return false
@@ -1138,6 +1200,7 @@ class Paginator {
 		const geometry = pageGeometry(section, this.compat, odd)
 
 		this.geometry = geometry
+		this.openGeometry = geometry
 		this.engine.gridPitch = geometry.gridPitch
 		this.page.reset()
 		this.header.reset()
@@ -1193,6 +1256,10 @@ class Paginator {
 			footerTop = geometry.height - geometry.footer - height
 			this.footer.move(new OutputMark(), null, 0, footerTop)
 		}
+
+		// The header and footer cannot wait for fonts: when they needed one still loading, the page is laid out
+		// again once it has loaded, even if it arrived before the page closes (between slices).
+		if (this.engine.styles.hasMissing) this.pageMissedFonts = true
 
 		this.headerBottom = headerBottom
 		this.footerTop = footerTop
@@ -1257,8 +1324,11 @@ class Paginator {
 
 		this.renderedBreaks(page, index)
 
-		// Drawn with stand-in metrics where a header, footer, note or number needed a font still loading.
-		if (this.missedFonts < 0 && this.engine.styles.hasMissing) this.missedFonts = index
+		// Drawn with stand-in metrics where a header, footer, note or number needed a font still loading (now, or
+		// when the page opened: the font may have arrived between slices since).
+		if (this.missedFonts < 0 && (this.engine.styles.hasMissing || this.pageMissedFonts)) this.missedFonts = index
+
+		this.pageMissedFonts = false
 
 		this.put(this.bodyTotals, inPlace?.bodyTotals, index, this.usesTotals(page) ? this.values : undefined)
 		this.put(this.bodyNumbers, inPlace?.bodyNumbers, index, usesFlag(page, SourceFlag.PAGE_FIELDS))
@@ -1276,6 +1346,7 @@ class Paginator {
 			header: this.headerStory,
 			footer: this.footerStory,
 			geometry,
+			headerGeometry: this.openGeometry ?? geometry,
 			values: this.values,
 			frame: this.frame,
 			parity: this.engine.parityReads !== this.parityAtOpen || this.pageParity,
@@ -1542,7 +1613,7 @@ class Paginator {
 			return "numbers"
 
 		const page = this.page
-		const geometry = entry.geometry
+		const geometry = entry.headerGeometry
 		const info = { ...entry.info, index: entry.index, number: list.number, numberText: list.numberText }
 
 		this.values = values
@@ -1588,6 +1659,9 @@ class Paginator {
 
 		const entry = this.records[index]
 		const result = entry === undefined ? "numbers" : this.redoHeaderFooter(entry)
+
+		// A font the header or footer needs is still loading: a run lays the page out again, waiting for it.
+		if (result === "done" && this.engine.styles.hasMissing) return "numbers"
 
 		if (result === "done") layout.stale.delete(index)
 
@@ -1643,6 +1717,8 @@ class Paginator {
 
 	// The first page closed while fonts it may have used were loading (-1: none).
 	missedFonts = -1
+	// The open page's header or footer needed a font still loading.
+	private pageMissedFonts = false
 
 	// The layout as it stands, from `page` on, for a relayout to meet again: the pages laid out so far and,
 	// while an earlier relayout is still under way, the earlier layout's pages from the one starting where
@@ -2369,7 +2445,7 @@ const MAX_TOTALS_ROUNDS = 3
 // Steps a document's paginator: synchronously within a time budget (editing lays out the pages in view in
 // the keystroke's task), or in slices from layoutDocument's loop.
 export class LayoutDriver {
-	private readonly paginator: Paginator
+	private paginator: Paginator
 	private readonly layout: DocumentLayout
 	private readonly styles: RunStyles
 	private readonly now: () => number
@@ -2509,6 +2585,12 @@ export class LayoutDriver {
 	get resyncedAt(): number {
 		return this.paginator.resyncedAt
 	}
+
+	// Lays out with `paginator` from now on (a revision view switch: a new engine, laid out from the start).
+	use(paginator: Paginator): void {
+		this.paginator = paginator
+		this.rounds = 0
+	}
 }
 
 function defaultYield(): Promise<void> {
@@ -2532,23 +2614,26 @@ export function layoutDocument(
 	const runStyles = new RunStyles(table, fonts, decorations)
 	const objects = new ObjectTable()
 	const layout = new DocumentLayout(model, table, runStyles, objects)
-	const engine = new Engine({
-		model,
-		resolver,
-		store: options.store ?? new PropsStore(),
-		styles: runStyles,
-		decorations,
-		objects,
-		sizer: options.sizer,
-		notes: new NoteNumbering(model),
-		view: options.view ?? RevisionView.Final,
-		showHidden: options.showHidden ?? false,
-		compat: layoutCompat(model.settings),
-		tuning: { ...DEFAULT_TUNING, ...options.tuning },
-		recordMaps: options.recordMaps ?? false,
-		...(options.edits === undefined ? {} : { edits: options.edits })
-	})
-	const paginator = new Paginator(engine, layout, options.estimatedPages, options.maxPages ?? 100000)
+	const store = options.store ?? new PropsStore()
+	const tuning = { ...DEFAULT_TUNING, ...options.tuning }
+	const engineOf = (view: RevisionView): Engine =>
+		new Engine({
+			model,
+			resolver,
+			store,
+			styles: runStyles,
+			decorations,
+			objects,
+			sizer: options.sizer,
+			notes: new NoteNumbering(model),
+			view,
+			showHidden: options.showHidden ?? false,
+			compat: layoutCompat(model.settings),
+			tuning,
+			recordMaps: options.recordMaps ?? false,
+			...(options.edits === undefined ? {} : { edits: options.edits })
+		})
+	let paginator = new Paginator(engineOf(options.view ?? RevisionView.Final), layout, options.estimatedPages, options.maxPages ?? 100000)
 	const slice = options.sliceMs ?? 8
 	const now = options.now ?? Date.now
 	const pause = options.yield ?? defaultYield
@@ -2574,6 +2659,13 @@ export function layoutDocument(
 					layout.cancelled = true
 
 					return
+				}
+
+				// Suspended: the run waits (done stays pending) until resumed or cancelled.
+				if (layout.suspended) {
+					await layout.whenResumed()
+
+					continue
 				}
 
 				const result = driver.advance(now() + slice, -1)
@@ -2607,7 +2699,12 @@ export function layoutDocument(
 			return from
 		},
 		() => running,
-		driver
+		driver,
+		view => {
+			paginator = new Paginator(engineOf(view), layout, options.estimatedPages, options.maxPages ?? 100000)
+			paginator.scanStories()
+			driver.use(paginator)
+		}
 	)
 	layout.done = drive(true)
 

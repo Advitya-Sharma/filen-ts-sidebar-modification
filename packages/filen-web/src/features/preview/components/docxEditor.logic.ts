@@ -1,38 +1,303 @@
-import type {
-	DocxEditorCommandType,
-	DocxEditorSnapshot,
-	DocxParagraphStyle,
-	DocxReadOnlyReason,
-	LockReason,
-	StoryMatch
+import {
+	DOCX_EDITOR_COMMANDS,
+	type DocxEditorCommand,
+	type DocxEditorCommandGroup,
+	type DocxEditorCommandInfo,
+	type DocxEditorCommandType,
+	type DocxEditorSnapshot,
+	type DocxParagraphStyle,
+	type DocxReadOnlyReason,
+	type LockReason,
+	type StoryMatch
 } from "@filen/office/core/docx/edit"
-import { markupInfo, type DocxMarkupInfo, type DocxMarkupMode } from "@filen/office/dom/docx"
-import type { DocxEditorMark } from "@filen/office/react/docx/editor"
+import { RevisionView } from "@filen/office/core/docx"
+import { DEFAULT_MARKUP_MODE, markupInfo, type DocxMarkupInfo, type DocxMarkupMode } from "@filen/office/dom/docx"
+import type { DocxEditorInteractions, DocxEditorMark, DocxObjectPress } from "@filen/office/react/docx/editor"
+import type { ObjectHitKind } from "@filen/office/core/docx/paged"
 import type { SpellingMark } from "@filen/office/core/docx/spelling"
 import type { DocxViewOnlyReason } from "@/features/preview/components/docxViewer.logic"
 import type { PreviewKey } from "@/lib/i18n"
+import { BASE_LABELS } from "@/features/preview/components/docxCommandLabels/base"
+import { FORMATTING_LABELS } from "@/features/preview/components/docxCommandLabels/formatting"
+import { INSERT_LABELS } from "@/features/preview/components/docxCommandLabels/insert"
+import { COMMENTS_LABELS } from "@/features/preview/components/docxCommandLabels/comments"
+import { REVIEW_LABELS } from "@/features/preview/components/docxCommandLabels/review"
+import { TABLES_LABELS } from "@/features/preview/components/docxCommandLabels/tables"
+import { SECTIONS_LABELS } from "@/features/preview/components/docxCommandLabels/sections"
+import { NOTES_LABELS } from "@/features/preview/components/docxCommandLabels/notes"
+import { FIELDS_LABELS } from "@/features/preview/components/docxCommandLabels/fields"
+import { FORMS_LABELS } from "@/features/preview/components/docxCommandLabels/forms"
+import { DRAWINGS_LABELS } from "@/features/preview/components/docxCommandLabels/drawings"
+import { MATH_LABELS } from "@/features/preview/components/docxCommandLabels/math"
+import { VIEW_LABELS } from "@/features/preview/components/docxCommandLabels/view"
 
 // Idle autosave: this long after the last edit while there are unsaved changes (one version per pause).
 export const AUTOSAVE_IDLE_MS = 30_000
 
-// The toolbar's label for each editor command (the package's labelKey is a neutral id an app maps).
-export const COMMAND_LABELS: Readonly<Record<DocxEditorCommandType, PreviewKey>> = {
-	"format.bold": "previewDocxBold",
-	"format.italic": "previewDocxItalic",
-	"format.underline": "previewDocxUnderline",
-	"format.strike": "previewDocxStrikethrough",
-	"format.clear": "previewDocxClearFormatting",
-	"style.set": "previewDocxParagraphStyle",
-	"align.start": "previewDocxAlignStart",
-	"align.center": "previewDocxAlignCenter",
-	"align.end": "previewDocxAlignEnd",
-	"align.justify": "previewDocxAlignJustify",
-	"list.bullet": "previewDocxBulletList",
-	"list.numbered": "previewDocxNumberedList",
-	"list.indent": "previewDocxIndent",
-	"list.outdent": "previewDocxOutdent",
-	"history.undo": "previewDocxUndo",
-	"history.redo": "previewDocxRedo"
+// The package's commands by feature: each feature labels its own in docxCommandLabels/<feature>.ts and fills
+// its toolbar slot. An id the package lacks fails `satisfies`, a package id missing here the test's type check.
+export const DOCX_COMMAND_CATALOGUE = {
+	base: [
+		"format.bold",
+		"format.italic",
+		"format.underline",
+		"format.strike",
+		"format.clear",
+		"style.set",
+		"align.start",
+		"align.center",
+		"align.end",
+		"align.justify",
+		"list.bullet",
+		"list.numbered",
+		"list.indent",
+		"list.outdent",
+		"history.undo",
+		"history.redo"
+	],
+	formatting: [
+		"format.superscript",
+		"format.subscript",
+		"font.family",
+		"font.size",
+		"font.grow",
+		"font.shrink",
+		"color.text",
+		"color.highlight",
+		"paragraph.lineSpacing",
+		"paragraph.spacing",
+		"paragraph.indent",
+		"format.copy",
+		"format.paste"
+	],
+	insert: ["link.set", "link.remove", "insert.pageBreak"],
+	comments: [
+		"comment.add",
+		"comment.reply",
+		"comment.edit",
+		"comment.resolve",
+		"comment.reopen",
+		"comment.delete",
+		"comment.next",
+		"comment.prev"
+	],
+	review: [
+		"review.track",
+		"review.accept",
+		"review.reject",
+		"review.acceptAll",
+		"review.rejectAll",
+		"review.next",
+		"review.prev",
+		"view.markup"
+	],
+	tables: [
+		"table.insert",
+		"table.delete",
+		"table.row.insertAbove",
+		"table.row.insertBelow",
+		"table.row.delete",
+		"table.column.insertLeft",
+		"table.column.insertRight",
+		"table.column.delete",
+		"table.cells.merge",
+		"table.cell.split",
+		"table.row.header",
+		"table.style",
+		"table.align",
+		"table.column.width",
+		"table.cell.shading",
+		"table.cell.vAlign",
+		"table.distributeColumns"
+	],
+	sections: [
+		"insert.sectionBreak",
+		"header.edit",
+		"footer.edit",
+		"header.differentFirst",
+		"header.differentOddEven",
+		"header.linkToPrevious",
+		"page.setup"
+	],
+	notes: ["note.insertFootnote", "note.insertEndnote", "note.goto"],
+	fields: [
+		"field.update",
+		"field.updateAll",
+		"toc.insert",
+		"toc.update",
+		"insert.pageNumber",
+		"insert.pageCount",
+		"insert.date",
+		"bookmark.add"
+	],
+	forms: ["control.check", "control.choose", "control.date", "control.clear"],
+	drawings: ["image.insert", "drawing.resize", "drawing.position", "drawing.wrap", "drawing.altText"],
+	math: ["equation.insert", "equation.edit"],
+	view: ["view.reflow"]
+} as const satisfies Record<string, readonly DocxEditorCommandType[]>
+
+export type DocxCommandFeature = keyof typeof DOCX_COMMAND_CATALOGUE
+
+type CatalogueCommand<F extends DocxCommandFeature> = (typeof DOCX_COMMAND_CATALOGUE)[F][number]
+
+// Package commands the catalogue does not place: must stay never.
+export type DocxUncataloguedCommand = Exclude<DocxEditorCommandType, CatalogueCommand<DocxCommandFeature>>
+
+// A feature's labels: a command is offered once it has one.
+export type DocxCommandLabels<F extends DocxCommandFeature> = Readonly<Partial<Record<CatalogueCommand<F>, PreviewKey>>>
+
+export const COMMAND_LABELS: Readonly<Partial<Record<DocxEditorCommandType, PreviewKey>>> = {
+	...BASE_LABELS,
+	...FORMATTING_LABELS,
+	...INSERT_LABELS,
+	...COMMENTS_LABELS,
+	...REVIEW_LABELS,
+	...TABLES_LABELS,
+	...SECTIONS_LABELS,
+	...NOTES_LABELS,
+	...FIELDS_LABELS,
+	...FORMS_LABELS,
+	...DRAWINGS_LABELS,
+	...MATH_LABELS,
+	...VIEW_LABELS
+}
+
+const FEATURES: ReadonlyMap<string, DocxCommandFeature> = new Map(
+	(Object.keys(DOCX_COMMAND_CATALOGUE) as DocxCommandFeature[]).flatMap(feature =>
+		DOCX_COMMAND_CATALOGUE[feature].map(type => [type, feature] as const)
+	)
+)
+
+export function commandFeature(type: DocxEditorCommandType): DocxCommandFeature | undefined {
+	return FEATURES.get(type)
+}
+
+// Where the toolbar offers a feature's commands: the row's own groups (base), a slot component, or no
+// toolbar place (form controls are used where they are, in the document).
+export type DocxToolbarSlot = "insert" | "review" | "table" | "format" | "view"
+
+const FEATURE_SLOTS: Readonly<Record<DocxCommandFeature, DocxToolbarSlot | null>> = {
+	base: null,
+	formatting: "format",
+	insert: "insert",
+	comments: "review",
+	review: "review",
+	tables: "table",
+	sections: "insert",
+	notes: "insert",
+	fields: "insert",
+	forms: null,
+	drawings: "insert",
+	math: "insert",
+	view: "view"
+}
+
+export interface DocxToolbarCommand {
+	readonly info: DocxEditorCommandInfo
+	readonly label: PreviewKey
+}
+
+function toolbarCommands(keep: (info: DocxEditorCommandInfo, feature: DocxCommandFeature) => boolean): DocxToolbarCommand[] {
+	const out: DocxToolbarCommand[] = []
+
+	for (const info of DOCX_EDITOR_COMMANDS) {
+		const feature = commandFeature(info.type)
+		const label = COMMAND_LABELS[info.type]
+
+		if (feature !== undefined && label !== undefined && keep(info, feature)) {
+			out.push({ info, label })
+		}
+	}
+
+	return out
+}
+
+// The row's buttons of a base group (style.set has its own picker).
+export function rowCommands(group: DocxEditorCommandGroup): DocxToolbarCommand[] {
+	return toolbarCommands((info, feature) => feature === "base" && info.group === group && info.type !== "style.set")
+}
+
+// The labelled commands a toolbar slot offers, in catalogue order.
+export function slotCommands(slot: DocxToolbarSlot): DocxToolbarCommand[] {
+	return toolbarCommands((_info, feature) => FEATURE_SLOTS[feature] === slot)
+}
+
+// What a toolbar slot component gets (docxInsertMenu, docxReviewMenu, docxTableMenu, docxFormatControls, the
+// reflow toggle): mounted only once it has commands.
+export interface DocxToolbarSlotProps {
+	commands: readonly DocxToolbarCommand[]
+	snapshot: DocxEditorSnapshot | undefined
+	readOnly: boolean
+	apple: boolean
+	execute: (command: DocxEditorCommand) => void
+}
+
+// Commands that can record an author: the host has the user's name before running one that will.
+const AUTHOR_COMMANDS: ReadonlySet<string> = new Set(DOCX_EDITOR_COMMANDS.filter(info => info.author === true).map(info => info.type))
+
+// Whether running `command` records the author: turning tracking off never does (it must stay possible without
+// a name).
+export function commandRecordsAuthor(command: DocxEditorCommand, tracking: boolean): boolean {
+	if (!AUTHOR_COMMANDS.has(command.type)) {
+		return false
+	}
+
+	return command.type === "review.track" ? (command.on ?? !tracking) : true
+}
+
+// Runs `run` with the user's author name, asking for it first when none is set; never when the user declines.
+export type DocxAuthorGate = (run: (author: string) => void) => void
+
+// The feature whose commands act on each kind of object a press on the pages can hit; links keep the pages'
+// own handling.
+const OBJECT_FEATURES: Readonly<Record<ObjectHitKind, DocxCommandFeature | null>> = {
+	drawing: "drawings",
+	control: "forms",
+	commentMarker: "comments",
+	field: "fields",
+	link: null,
+	noteRef: "notes",
+	equation: "math"
+}
+
+// A feature is offered once any of its commands is labelled.
+export function featureLanded(feature: DocxCommandFeature): boolean {
+	return DOCX_COMMAND_CATALOGUE[feature].some(type => COMMAND_LABELS[type] !== undefined)
+}
+
+// Whether a feature can change the document now: writable, and one of its commands enabled.
+export function featureEditable(snapshot: DocxEditorSnapshot | undefined, readOnly: boolean, feature: DocxCommandFeature): boolean {
+	return !readOnly && snapshot !== undefined && !snapshot.readOnly && DOCX_COMMAND_CATALOGUE[feature].some(type => snapshot.enabled[type])
+}
+
+// Presses on objects of the features offered go to `onPress` (no caret is placed) while `editable` says the
+// feature can act; others reach the pages as before. Undefined while no feature is offered.
+export function objectInteractions(
+	onPress: (press: DocxObjectPress) => void,
+	editable: (feature: DocxCommandFeature) => boolean
+): DocxEditorInteractions | undefined {
+	const entries: [ObjectHitKind, (press: DocxObjectPress) => boolean][] = []
+
+	for (const kind of Object.keys(OBJECT_FEATURES) as ObjectHitKind[]) {
+		const feature = OBJECT_FEATURES[kind]
+
+		if (feature !== null && featureLanded(feature)) {
+			entries.push([
+				kind,
+				press => {
+					if (!editable(feature)) {
+						return false
+					}
+
+					onPress(press)
+
+					return true
+				}
+			])
+		}
+	}
+
+	return entries.length === 0 ? undefined : Object.fromEntries(entries)
 }
 
 export type StyleLabel =
@@ -178,7 +443,8 @@ export function stepMatch(active: number, count: number, direction: 1 | -1): num
 const NO_MARKS: readonly DocxEditorMark[] = []
 
 // Whether two snapshots show the same in the toolbar (formatting, enablement, undo, read-only, the lock at
-// the selection): the version, the selection's place and the dirty flag are not shown there.
+// the selection, the values, context and review state slots show): the version, the selection's place and the
+// dirty flag are not shown there.
 export function sameToolbarSnapshot(a: DocxEditorSnapshot | undefined, b: DocxEditorSnapshot | undefined): boolean {
 	if (a === b) {
 		return true
@@ -197,7 +463,11 @@ export function sameToolbarSnapshot(a: DocxEditorSnapshot | undefined, b: DocxEd
 		a.readOnlyReasons.every((reason, index) => b.readOnlyReasons[index] === reason) &&
 		sameRecord(a.formats, b.formats) &&
 		sameRecord(a.paragraph, b.paragraph) &&
-		sameRecord(a.enabled, b.enabled)
+		sameRecord(a.enabled, b.enabled) &&
+		// The session keeps these objects while their answer is the same.
+		a.values === b.values &&
+		a.context === b.context &&
+		a.review === b.review
 	)
 }
 
@@ -291,13 +561,27 @@ export function toolbarFit(width: number, extra: number): ToolbarFit {
 	return { style, lists, align, clear }
 }
 
-// Switching the markup menu to `next` while the document is open laid out as `view`: a mode with the same view
-// keeps the open document (only what is drawn over it changes); another view opens it again, which only an
-// unchanged document can. Null when it cannot switch now.
-export function markupSwitch(view: DocxMarkupInfo["view"], next: DocxMarkupMode, unchanged: boolean): { reopen: boolean } | null {
-	if (markupInfo(next).view === view) {
-		return { reopen: false }
+type MarkupView = DocxMarkupInfo["view"]
+
+// How the open document is laid out (the editor's view is what the pages show).
+export function editorMarkupView(view: RevisionView): MarkupView {
+	return view === RevisionView.Markup ? "markup" : view === RevisionView.Original ? "original" : "final"
+}
+
+// The mode the markup menu shows: the user's, while the pages are laid out as it needs; else the default mode of
+// the layout the editor shows (a view another surface or command chose).
+export function shownMarkup(mode: DocxMarkupMode, view: MarkupView): DocxMarkupMode {
+	if (markupInfo(mode).view === view) {
+		return mode
 	}
 
-	return unchanged ? { reopen: true } : null
+	return view === "markup" ? "all" : view === "original" ? "original" : DEFAULT_MARKUP_MODE
+}
+
+// The layout switching to `next` needs while the pages show `view`: null when they already do (only what is
+// drawn over them changes).
+export function markupRelayout(view: MarkupView, next: DocxMarkupMode): MarkupView | null {
+	const needed = markupInfo(next).view
+
+	return needed === view ? null : needed
 }

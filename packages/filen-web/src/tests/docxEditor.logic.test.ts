@@ -1,13 +1,25 @@
-import { describe, expect, it } from "vitest"
-import { DOCX_EDITOR_COMMANDS, DOCX_PARAGRAPH_STYLES, type DocxEditorSnapshot } from "@filen/office/core/docx/edit"
+import { describe, expect, expectTypeOf, it } from "vitest"
+import { RevisionView } from "@filen/office/core/docx"
+import { DOCX_EDITOR_COMMANDS, DOCX_PARAGRAPH_STYLES, NO_REVIEW, NO_VALUES, type DocxEditorSnapshot } from "@filen/office/core/docx/edit"
 import {
 	COMMAND_LABELS,
+	DOCX_COMMAND_CATALOGUE,
 	commandActive,
+	commandFeature,
+	commandRecordsAuthor,
+	editorMarkupView,
+	featureEditable,
+	rowCommands,
+	slotCommands,
+	type DocxUncataloguedCommand,
 	editorMarks,
 	editorViewOnlyReasons,
 	firstMatchFrom,
 	lockReasonKey,
-	markupSwitch,
+	featureLanded,
+	markupRelayout,
+	objectInteractions,
+	shownMarkup,
 	sameToolbarSnapshot,
 	shortcutKeys,
 	stepMatch,
@@ -16,6 +28,19 @@ import {
 } from "@/features/preview/components/docxEditor.logic"
 import { viewOnlyReasonKey, viewOnlyReasons } from "@/features/preview/components/docxViewer.logic"
 import { preview as en } from "@/locales/en/preview"
+
+const VALUES = NO_VALUES
+const CONTEXT: DocxEditorSnapshot["context"] = {
+	story: { kind: "body", index: 0 },
+	table: null,
+	drawing: null,
+	control: null,
+	field: null,
+	link: null,
+	comment: null,
+	equation: null
+}
+const REVIEW = NO_REVIEW
 
 function snapshot(overrides: Partial<DocxEditorSnapshot> = {}): DocxEditorSnapshot {
 	const enabled = Object.fromEntries(DOCX_EDITOR_COMMANDS.map(command => [command.type, true])) as DocxEditorSnapshot["enabled"]
@@ -30,6 +55,9 @@ function snapshot(overrides: Partial<DocxEditorSnapshot> = {}): DocxEditorSnapsh
 		selection: { empty: true, from: 1, to: 1, locked: null, paragraphs: 1 },
 		formats: { bold: "on", italic: "mixed", underline: "off", strike: "off" },
 		paragraph: { style: "normal", styleName: null, align: "center", list: "bullet", level: 0 },
+		values: VALUES,
+		context: CONTEXT,
+		review: REVIEW,
 		enabled,
 		...overrides
 	}
@@ -50,6 +78,8 @@ describe("docx editor toolbar logic", () => {
 		expect(sameToolbarSnapshot(shown, snapshot({ paragraph: { ...shown.paragraph, list: "none" } }))).toBe(false)
 		expect(sameToolbarSnapshot(shown, snapshot({ enabled: { ...shown.enabled, "history.undo": false } }))).toBe(false)
 		expect(sameToolbarSnapshot(shown, snapshot({ canUndo: true }))).toBe(false)
+		expect(sameToolbarSnapshot(shown, snapshot({ values: { ...VALUES, size: 24 } }))).toBe(false)
+		expect(sameToolbarSnapshot(shown, snapshot({ review: { ...REVIEW, tracking: true } }))).toBe(false)
 		expect(sameToolbarSnapshot(shown, snapshot({ readOnly: true, readOnlyReasons: ["host"] }))).toBe(false)
 		expect(sameToolbarSnapshot(shown, snapshot({ selection: { empty: false, from: 1, to: 5, locked: "proof", paragraphs: 1 } }))).toBe(
 			false
@@ -58,9 +88,17 @@ describe("docx editor toolbar logic", () => {
 		expect(sameToolbarSnapshot(undefined, undefined)).toBe(true)
 	})
 
-	it("labels every command and every paragraph style with a real key", () => {
+	it("labels every base command and every paragraph style with a real key", () => {
 		for (const command of DOCX_EDITOR_COMMANDS) {
-			expect(en).toHaveProperty(COMMAND_LABELS[command.type])
+			const label = COMMAND_LABELS[command.type]
+
+			if (commandFeature(command.type) === "base") {
+				expect(label, command.type).toBeDefined()
+			}
+
+			if (label !== undefined) {
+				expect(en).toHaveProperty(label)
+			}
 		}
 
 		for (const style of DOCX_PARAGRAPH_STYLES) {
@@ -116,6 +154,57 @@ describe("docx editor toolbar logic", () => {
 	})
 })
 
+describe("docx command catalogue", () => {
+	it("places every package command in exactly one feature, and lists only package commands", () => {
+		expectTypeOf<DocxUncataloguedCommand>().toEqualTypeOf<never>()
+
+		for (const command of DOCX_EDITOR_COMMANDS) {
+			expect(commandFeature(command.type), command.type).toBeDefined()
+		}
+
+		const ids: string[] = Object.values(DOCX_COMMAND_CATALOGUE).flat()
+
+		expect(new Set(ids).size).toBe(ids.length)
+		expect(ids.toSorted()).toEqual(DOCX_EDITOR_COMMANDS.map(command => command.type).toSorted())
+	})
+
+	it("shows the row's groups from base commands only, and a slot only its labelled commands", () => {
+		expect(rowCommands("history").map(command => command.info.type)).toEqual(["history.undo", "history.redo"])
+		expect(rowCommands("style")).toEqual([])
+		expect(rowCommands("align").map(command => command.label)).toEqual([
+			"previewDocxAlignStart",
+			"previewDocxAlignCenter",
+			"previewDocxAlignEnd",
+			"previewDocxAlignJustify"
+		])
+
+		for (const slot of ["insert", "review", "table", "format", "view"] as const) {
+			for (const command of slotCommands(slot)) {
+				expect(commandFeature(command.info.type)).not.toBe("base")
+				expect(COMMAND_LABELS[command.info.type]).toBe(command.label)
+			}
+		}
+	})
+
+	it("asks for the author only for commands that will record one", () => {
+		for (const command of DOCX_EDITOR_COMMANDS) {
+			if (command.author !== true) {
+				expect(commandRecordsAuthor({ type: command.type } as never, false), command.type).toBe(false)
+			}
+		}
+
+		expect(commandRecordsAuthor({ type: "comment.add", text: "x" }, false)).toBe(true)
+		expect(commandRecordsAuthor({ type: "comment.reply", id: "1", text: "x" }, true)).toBe(true)
+		expect(commandRecordsAuthor({ type: "comment.edit", id: "1", text: "x" }, true)).toBe(true)
+		expect(commandRecordsAuthor({ type: "comment.delete", id: "1" }, true)).toBe(false)
+		// Tracking can always be turned off without a name.
+		expect(commandRecordsAuthor({ type: "review.track", on: true }, false)).toBe(true)
+		expect(commandRecordsAuthor({ type: "review.track", on: false }, true)).toBe(false)
+		expect(commandRecordsAuthor({ type: "review.track" }, false)).toBe(true)
+		expect(commandRecordsAuthor({ type: "review.track" }, true)).toBe(false)
+	})
+})
+
 describe("docx editor find logic", () => {
 	const matches = [
 		{ from: 5, to: 8 },
@@ -160,13 +249,73 @@ describe("docx editor find logic", () => {
 	})
 })
 
-describe("markupSwitch", () => {
-	it("keeps the open document between modes laid out the same, reopens for another only while unchanged", () => {
-		expect(markupSwitch("final", "none", false)).toEqual({ reopen: false })
-		expect(markupSwitch("final", "simple", true)).toEqual({ reopen: false })
-		expect(markupSwitch("final", "all", true)).toEqual({ reopen: true })
-		expect(markupSwitch("final", "original", false)).toBeNull()
-		expect(markupSwitch("markup", "all", false)).toEqual({ reopen: false })
+describe("markup modes while editing", () => {
+	it("lays the document out again only when the pages show another view", () => {
+		expect(markupRelayout("final", "none")).toBeNull()
+		expect(markupRelayout("final", "all")).toBe("markup")
+		expect(markupRelayout("markup", "original")).toBe("original")
+		expect(markupRelayout("original", "simple")).toBe("final")
+	})
+
+	it("shows the mode the editor's layout has, the user's where it fits", () => {
+		expect(editorMarkupView(RevisionView.Markup)).toBe("markup")
+		expect(editorMarkupView(RevisionView.Final)).toBe("final")
+		expect(editorMarkupView(RevisionView.Original)).toBe("original")
+		expect(shownMarkup("none", "final")).toBe("none")
+		expect(shownMarkup("simple", "final")).toBe("simple")
+		// Another view chosen elsewhere (a command): the menu follows the pages.
+		expect(shownMarkup("simple", "markup")).toBe("all")
+		expect(shownMarkup("all", "original")).toBe("original")
+		expect(shownMarkup("original", "final")).toBe("simple")
+	})
+})
+
+describe("object presses", () => {
+	const press = { hit: { kind: "control", story: 0, pos: 1 } } as never
+
+	it("takes presses only for objects of features offered", () => {
+		const landed = (["drawings", "forms", "comments", "fields", "notes", "math"] as const).some(featureLanded)
+
+		expect(
+			objectInteractions(
+				() => undefined,
+				() => true
+			) === undefined
+		).toBe(!landed)
+	})
+
+	it("claims a press only while its feature can change the document", () => {
+		const state = snapshot()
+
+		expect(featureEditable(state, false, "base")).toBe(true)
+		expect(featureEditable(state, true, "base")).toBe(false)
+		expect(featureEditable({ ...state, readOnly: true }, false, "base")).toBe(false)
+		expect(featureEditable(undefined, false, "base")).toBe(false)
+		expect(
+			featureEditable(
+				snapshot({
+					enabled: {
+						...state.enabled,
+						"control.check": false,
+						"control.choose": false,
+						"control.date": false,
+						"control.clear": false
+					}
+				}),
+				false,
+				"forms"
+			)
+		).toBe(false)
+
+		const pressed: unknown[] = []
+		const interactions = objectInteractions(
+			found => pressed.push(found),
+			() => false
+		)
+
+		expect(interactions?.control?.(press) ?? false).toBe(false)
+		expect(interactions?.link).toBeUndefined()
+		expect(pressed).toEqual([])
 	})
 })
 

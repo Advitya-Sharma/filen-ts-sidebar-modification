@@ -1,14 +1,61 @@
+import { FEATURE_HANDLERS } from "./handlers/index"
 import type { DocxEditorSession } from "./session"
 
 // Decision 5 at save time: when the writer refuses an edited document (its own checks failed), the edited
-// blocks it cannot write are found, and the save writes them as they were last saved (DocxEditorSession
+// units it cannot write are found, and the save writes them as they were last saved (DocxEditorSession
 // .withReverted; .revert once the file is stored). `writes` tries the writer on stand-in sessions without
-// storing anything.
+// storing anything. A unit is a block of a story, or what a feature registers (a comment, a note, a
+// section's properties): only the failing unit goes back, the rest saves.
+
+// One kind of revertible unit. Keys are the kind's own (block positions in the session's document).
+export interface RevertibleUnits {
+	readonly kind: string
+	// Units of `session` changed since the last save that can go back to their last-saved form.
+	edited(session: DocxEditorSession): readonly number[]
+	// A read-only stand-in for `session` with `keys` back at their last-saved form.
+	withReverted(session: DocxEditorSession, keys: readonly number[]): DocxEditorSession
+	// Takes them back in `session` itself, as one undoable step; the number taken back.
+	revert(session: DocxEditorSession, keys: readonly number[]): number
+}
+
+export interface RevertibleUnit {
+	readonly kind: string
+	readonly key: number
+}
+
+const BLOCKS: RevertibleUnits = {
+	kind: "block",
+	edited: session => session.editedBlocks(),
+	withReverted: (session, keys) => session.withReverted(keys),
+	revert: (session, keys) => {
+		const doc = session.state.doc
+
+		return session.revert(keys.map(pos => doc.nodeAt(pos)).filter(node => node !== null))
+	}
+}
+
+// Blocks first, then each feature's units.
+export const REVERTIBLE_UNITS: readonly RevertibleUnits[] = [BLOCKS, ...FEATURE_HANDLERS.flatMap(feature => feature.units ?? [])]
 
 export interface UnsavableBlocks {
 	readonly session: DocxEditorSession
-	// Positions in session.state.doc (from editedBlocks).
+	// Block positions in session.state.doc (from editedBlocks).
 	readonly positions: readonly number[]
+	// Every unit to take back, blocks included.
+	readonly units: readonly RevertibleUnit[]
+}
+
+// A stand-in for `session` with `units` back at their last-saved form.
+export function withRevertedUnits(session: DocxEditorSession, units: readonly RevertibleUnit[]): DocxEditorSession {
+	let out = session
+
+	for (const kind of REVERTIBLE_UNITS) {
+		const keys = units.filter(unit => unit.kind === kind.kind).map(unit => unit.key)
+
+		if (keys.length > 0) out = kind.withReverted(out, keys)
+	}
+
+	return out
 }
 
 export interface UnsavableSearchOptions {
@@ -27,7 +74,7 @@ export interface UnsavableSearchOptions {
 
 interface Candidate {
 	readonly session: number
-	readonly pos: number
+	readonly unit: RevertibleUnit
 }
 
 class SearchExhausted extends Error {}
@@ -44,8 +91,11 @@ export async function findUnsavableBlocks(
 	const budget = options.budgetMs ?? 20_000
 	const now = options.now ?? (() => Date.now())
 	const started = now()
-	const editable = sessions.map(session => (session.readOnly ? [] : session.editedBlocks()))
-	const all: Candidate[] = editable.flatMap((positions, session) => positions.map(pos => ({ session, pos })))
+	const all: Candidate[] = sessions.flatMap((session, index) =>
+		session.readOnly
+			? []
+			: REVERTIBLE_UNITS.flatMap(units => units.edited(session).map(key => ({ session: index, unit: { kind: units.kind, key } })))
+	)
 	let attempts = 0
 
 	if (all.length === 0) return null
@@ -60,9 +110,9 @@ export async function findUnsavableBlocks(
 
 		return writes(
 			sessions.map((session, index) => {
-				const positions = reverted.filter(candidate => candidate.session === index).map(candidate => candidate.pos)
+				const units = reverted.filter(candidate => candidate.session === index).map(candidate => candidate.unit)
 
-				return positions.length === 0 ? session : session.withReverted(positions)
+				return units.length === 0 ? session : withRevertedUnits(session, units)
 			})
 		)
 	}
@@ -91,11 +141,12 @@ export async function findUnsavableBlocks(
 		const found = await search(all, [])
 
 		return sessions
-			.map((session, index) => ({
-				session,
-				positions: found.filter(candidate => candidate.session === index).map(candidate => candidate.pos)
-			}))
-			.filter(entry => entry.positions.length > 0)
+			.map((session, index) => {
+				const units = found.filter(candidate => candidate.session === index).map(candidate => candidate.unit)
+
+				return { session, positions: units.filter(unit => unit.kind === BLOCKS.kind).map(unit => unit.key), units }
+			})
+			.filter(entry => entry.units.length > 0)
 	} catch (error) {
 		if (error instanceof SearchExhausted) return null
 
