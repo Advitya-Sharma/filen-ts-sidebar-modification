@@ -11,8 +11,9 @@ import {
 	StepMap
 } from "prosemirror-transform"
 import { Relationships } from "../../opc/index"
-import { encodeUtf8, parseXml, XmlError, type XmlDocument } from "../../xml/index"
+import { decodeUtf8, encodeUtf8, parseXml, XmlError, type XmlDocument } from "../../xml/index"
 import { parseNumbering, type Numbering } from "../numbering/index"
+import { PropsStore } from "../props/index"
 import { parseStyles, type DocxStyles } from "../styles/index"
 import { DocxDocBuilder, docxSchema, type DocxEditContext, type NewStoryKind, type StoryDoc } from "../edit/index"
 import { SetAttrsStep } from "../edit/attrs"
@@ -30,10 +31,12 @@ import {
 	type Story,
 	type StoryPart
 } from "../model/index"
-import { inheritHeaders, NO_HEADERS } from "../model/document"
 import { STRICT_WORDPROCESSINGML } from "../model/namespaces"
 import { DocxWriteError, StoryWriter, planNumbering, stylesWithDefinitions, type WriteEnvironment } from "../write/index"
 import { inCell, sectionWritten } from "../write/story"
+import { EditedSections, finalSectionEnd, inheritedSections, sameSection, sectionEndOf, type SectionEnd } from "../stories/sections"
+import { sniffImage } from "../objects/images"
+import type { NestedSplice } from "../write/nested"
 
 // What the layout lays out while a document is edited, kept in step with the editing sessions: every
 // edited block is written as it will be saved (StoryWriter), parsed again into a small overlay part and laid
@@ -42,6 +45,9 @@ import { inCell, sectionWritten } from "../write/story"
 
 const nodes = docxSchema.nodes
 const HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+const IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+const PENDING_PICTURE = "filenMedia"
+
 const WORDPROCESSINGML = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 const MARKUP_COMPATIBILITY_URI = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 // Roots of parts whose stories are elements of their own.
@@ -53,6 +59,21 @@ const NEW_STORY_ELEMENTS: Readonly<Record<NewStoryKind, readonly [string, string
 	comment: ["w:comments", "w:comment"],
 	header: ["w:hdr", undefined],
 	footer: ["w:ftr", undefined]
+}
+
+// Whether `bytes` contain ASCII `text`.
+function containsAscii(bytes: Uint8Array, text: string): boolean {
+	const first = text.charCodeAt(0)
+
+	for (let at = bytes.indexOf(first); at >= 0 && at + text.length <= bytes.length; at = bytes.indexOf(first, at + 1)) {
+		let k = 1
+
+		while (k < text.length && bytes[at + k] === text.charCodeAt(k)) k++
+
+		if (k === text.length) return true
+	}
+
+	return false
 }
 
 // The styles and numbering parts as opened (the planned definitions are added to them as a save adds them).
@@ -262,8 +283,12 @@ export class DocumentEdits implements LayoutEdits {
 		XmlDocument,
 		{ readonly declarations: ReadonlyMap<string, string> | undefined; readonly tags: Map<string, Uint8Array> }
 	>()
-	// The sections as opened, by their w:sectPr.
+	// The sections as opened, by their w:sectPr, and those edits gave other properties.
 	private readonly openedSections: readonly Section[]
+	private readonly editedSections: EditedSections
+	// The document-wide switch for even pages' headers and footers as edited (LayoutEdits).
+	evenAndOddHeaders: boolean | undefined = undefined
+	private ownStore: PropsStore | undefined = undefined
 	// The w:numId each list a command started will get when saved (the overlays write them).
 	numIds: ReadonlyMap<number, number> = new Map()
 	private definitions: EditDefinitions | undefined = undefined
@@ -285,6 +310,13 @@ export class DocumentEdits implements LayoutEdits {
 		this.storyCount = model.stories.length
 		this.openedSections = model.sections
 		this.bodyIndex = model.body?.part ?? -1
+
+		const body = model.body === undefined ? undefined : model.parts[model.body.part]
+
+		// The document's property store once defined (edited sections' properties intern with the rest).
+		this.editedSections = new EditedSections(model.sections, body, (document, node) =>
+			(this.definitions?.context.store ?? (this.ownStore ??= new PropsStore())).section(document, node)
+		)
 	}
 
 	// Which tracked changes the layout shows.
@@ -391,10 +423,23 @@ export class DocumentEdits implements LayoutEdits {
 		}
 
 		const extension = this.extension
-		// Its own tables: what the template holds is no story of the document.
-		const part = buildPart(partReader(parsed), new ModelTables(), extension.parts.length, partName, new Relationships([]))
+		const tables = new ModelTables()
+		// Its own tables: what the template holds is no story of the document...
+		const part = buildPart(partReader(parsed), tables, extension.parts.length, partName, new Relationships([]))
 
 		extension.parts.push(part)
+
+		// ...but its separator notes are notes of the derived model, laid out where the saved part has them.
+		for (const story of tables.stories) {
+			const index = extension.stories.length
+			const registered: Story = { ...story, index, part: part.index }
+
+			part.aux[story.item] = index
+			extension.stories.push(registered)
+
+			if (story.kind === "footnote" && story.id !== undefined) extension.footnotes.set(story.id, registered)
+			if (story.kind === "endnote" && story.id !== undefined) extension.endnotes.set(story.id, registered)
+		}
 
 		return part
 	}
@@ -403,6 +448,21 @@ export class DocumentEdits implements LayoutEdits {
 	// the save will write.
 	define(definitions: EditDefinitions): void {
 		this.definitions = definitions
+
+		const store = definitions.context.media
+
+		// New pictures are laid out from the editor's media store (see pendingMedia).
+		this.model.pendingMedia = {
+			media(partName) {
+				const handle = /\/media\/filen-media-(\d+)$/.exec(partName)?.[1]
+				const bytes = handle === undefined ? undefined : store.bytes(Number(handle))
+				const image = bytes === undefined ? undefined : sniffImage(bytes)
+
+				return bytes === undefined || image === undefined || typeof image === "string"
+					? undefined
+					: { bytes, contentType: image.contentType }
+			}
+		}
 	}
 
 	// Plans the definitions for `lists` and `missing` (the sessions' new lists and styles); the styles and
@@ -457,6 +517,26 @@ export class DocumentEdits implements LayoutEdits {
 		return id
 	}
 
+	// A part's relationships for blocks written for layout (`bytes`): with the new pictures they show
+	// (r:embed="filenMediaN", see write/atoms/drawings.ts), to the editor's media store (pendingMedia).
+	private withPictures(source: StoryPart, bytes: Uint8Array): Relationships {
+		const relationships = this.relationshipsOf(source)
+
+		if (!containsAscii(bytes, PENDING_PICTURE)) return relationships
+
+		const handles = new Set(decodeUtf8(bytes).match(/filenMedia\d+/g) ?? [])
+		const folder = source.name.slice(0, source.name.lastIndexOf("/") + 1)
+		const added = [...handles].map(id => ({
+			id,
+			type: IMAGE,
+			target: `media/filen-media-${id.slice(PENDING_PICTURE.length)}`,
+			external: false,
+			partName: `${folder}media/filen-media-${id.slice(PENDING_PICTURE.length)}`
+		}))
+
+		return new Relationships([...relationships.all, ...added])
+	}
+
 	// A part's relationships with the hyperlinks commands added.
 	private relationshipsOf(source: StoryPart): Relationships {
 		const ids = this.links.get(source.name)
@@ -481,6 +561,10 @@ export class DocumentEdits implements LayoutEdits {
 		return record !== undefined && record.base >= 0 && record.item === item ? record.base : ref(part, item)
 	}
 
+	sourceBlock(part: number, item: number): number {
+		return this.recordAt(part, item)?.base ?? -1
+	}
+
 	bodyPart(part: number): boolean {
 		return part === this.bodyIndex || this.bodyParts.has(part)
 	}
@@ -489,49 +573,44 @@ export class DocumentEdits implements LayoutEdits {
 		return this.extension.parts[index]
 	}
 
-	// The body's sections become those ending at the blocks carrying the section properties of source
-	// paragraphs `ends` (items, in order) and the body's own (`last`, an item): a section break copied or
-	// removed adds or drops one. Without the body's own, a last section of default properties follows when
-	// blocks or markup come after the last break (`trailing`), as when a document is opened. The first section
-	// whose properties changed, or -1.
-	resection(ends: readonly number[], last: number, trailing: boolean): number {
+	// The body's sections become those ending at the blocks carrying section breaks `ends` (each a source
+	// paragraph's or one an edit made, with what edits changed of its properties) and the body's own (`last`): a
+	// section break copied or removed adds or drops one, an edit of its properties gives it others. Without the
+	// body's own, a last section of default properties follows when blocks or markup come after the last break
+	// (`trailing`), as when a document is opened. The first section that changed, or -1.
+	resection(ends: readonly SectionEnd[], last: SectionEnd, trailing: boolean): number {
 		const sections = this.extension.sections
-		const opened = this.openedSections
 		const bases: Section[] = []
 
-		for (const item of ends) {
-			const base = opened.find(section => section.item === item)
+		for (const end of ends) {
+			if (end.key < 0 && end.edit === undefined) continue
+			if (end.key >= 0 && end.edit === undefined && !this.openedSections.some(section => section.item === end.key)) continue
 
-			if (base !== undefined) bases.push(base)
+			bases.push(this.editedSections.base(end))
 		}
 
-		if (last >= 0 || trailing || bases.length === 0)
-			bases.push(opened.find(section => section.item === (last >= 0 ? last : -1)) ?? defaultSection(opened))
+		if (last.key >= 0 || trailing || bases.length === 0) bases.push(this.editedSections.base(last))
 
 		let changed = 0
 
-		while (changed < bases.length && sections[changed]?.item === bases[changed]?.item) changed++
+		while (changed < bases.length && sameSection(sections[changed], bases[changed])) changed++
 
 		if (changed === bases.length && sections.length === bases.length) return -1
 
 		const previous = sections[changed - 1]
-		let headers = previous?.effectiveHeaders ?? NO_HEADERS
-		let footers = previous?.effectiveFooters ?? NO_HEADERS
 
 		sections.length = changed
-
-		for (let k = changed; k < bases.length; k++) {
-			const base = bases[k]
-
-			if (base === undefined) continue
-
-			// References a section leaves out come from the section before it as the document now stands.
-			headers = inheritHeaders(base.headers, headers)
-			footers = inheritHeaders(base.footers, footers)
-			sections.push({ ...base, index: k, effectiveHeaders: headers, effectiveFooters: footers })
-		}
+		sections.push(...inheritedSections(bases, changed, previous))
 
 		return changed
+	}
+
+	// Whether the body's sections end where they did when the document was opened (their properties aside).
+	sectionsAsOpened(): boolean {
+		const sections = this.extension.sections
+		const opened = this.openedSections
+
+		return sections.length === opened.length && sections.every((section, k) => section.item === opened[k]?.item)
 	}
 
 	// The start tag of the root `bytes` (blocks written by StoryWriter, to go inside `container`) are parsed in:
@@ -583,6 +662,73 @@ export class DocumentEdits implements LayoutEdits {
 		return tag
 	}
 
+	// The model's text boxes per source part: their w:txbxContent start offsets (ascending), nodes and stories.
+	private readonly textboxNodes = new Map<
+		number,
+		{ readonly starts: Int32Array; readonly nodes: Int32Array; readonly stories: Int32Array }
+	>()
+
+	// Written for layout, a source text box carries its story (data-filen-story on its w:txbxContent): an
+	// overlay part laid out in place of the block holding it lays the text box out as that story, edits
+	// included, not as the copy the block's bytes hold (see addPart).
+	readonly textboxMarkers = (part: StoryPart, from: number, to: number): readonly NestedSplice[] | undefined => {
+		let found = this.textboxNodes.get(part.index)
+
+		if (found === undefined) {
+			const entries: [number, number, number][] = []
+
+			for (let index = 0; index < this.storyCount; index++) {
+				const story = this.model.stories[index]
+
+				if (story?.kind !== "textbox" || story.part !== part.index) continue
+
+				const node = part.node(story.item)
+
+				entries.push([part.document.start(node), node, index])
+			}
+
+			entries.sort((a, b) => a[0] - b[0])
+			found = {
+				starts: Int32Array.from(entries.map(entry => entry[0])),
+				nodes: Int32Array.from(entries.map(entry => entry[1])),
+				stories: Int32Array.from(entries.map(entry => entry[2]))
+			}
+			this.textboxNodes.set(part.index, found)
+		}
+
+		const starts = found.starts
+
+		if (starts.length === 0) return undefined
+
+		let low = 0
+		let high = starts.length
+
+		while (low < high) {
+			const middle = (low + high) >> 1
+
+			if ((starts[middle] ?? 0) < from) low = middle + 1
+			else high = middle
+		}
+
+		let out: NestedSplice[] | undefined
+		const document = part.document
+
+		for (let k = low; k < starts.length && (starts[k] ?? 0) < to; k++) {
+			const node = found.nodes[k] ?? -1
+			const openEnd = document.openEnd(node)
+			const close = document.isSelfClosing(node) ? openEnd - 2 : openEnd - 1
+			const head = decodeUtf8(document.bytes, document.start(node), close)
+
+			;(out ??= []).push({
+				from: document.start(node),
+				to: close,
+				bytes: encodeUtf8(`${head} data-filen-story="${String(found.stories[k] ?? -1)}"`)
+			})
+		}
+
+		return out
+	}
+
 	// Parses `bytes` (blocks written by StoryWriter) inside the root of `source` into a new overlay part, and
 	// its top-level paragraphs and tables in order; undefined when it does not parse.
 	addPart(
@@ -596,9 +742,19 @@ export class DocumentEdits implements LayoutEdits {
 		const node = source.node(container)
 		const open = this.rootTag(document, bytes, node)
 		const rootName = document.name(root)
+		// A text box's blocks are parsed as the part's own story (w:txbxContent alone is no story to the model).
+		const textbox = node !== root && node >= 0 && document.localName(node) === "txbxContent"
+		const rootPrefix = document.prefix(root)
 		// A story the editor added to a notes or comments part (no element of its own yet) goes into one.
-		const element =
-			node !== root && node >= 0
+		const element = textbox
+			? document.localName(root) === "document"
+				? rootPrefix === ""
+					? "body"
+					: `${rootPrefix}:body`
+				: NOTE_ROOTS.has(document.localName(root))
+					? rootName.slice(0, -1)
+					: undefined
+			: node !== root && node >= 0
 				? document.name(node)
 				: container < 0 && NOTE_ROOTS.has(document.localName(root))
 					? rootName.slice(0, -1)
@@ -633,9 +789,21 @@ export class DocumentEdits implements LayoutEdits {
 		const drawings = extension.drawings.length
 		const vml = extension.vml.length
 		const tables = Object.assign(new ModelTables(), { stories: extension.stories, drawings: extension.drawings, vml: extension.vml })
-		const part = buildPart(partReader(parsed), tables as ModelTables, index, source.name, this.relationshipsOf(source))
+		const part = buildPart(partReader(parsed), tables as ModelTables, index, source.name, this.withPictures(source, bytes))
 
 		extension.parts.push(part)
+
+		// Text boxes written from the source (see textboxMarkers) are laid out as their source stories.
+		for (let k = stories; k < extension.stories.length; k++) {
+			const story = extension.stories[k]
+
+			if (story?.kind !== "textbox") continue
+
+			const source = Number(parsed.attribute(part.node(story.item), "data-filen-story") ?? Number.NaN)
+
+			if (Number.isInteger(source) && source >= 0 && source < this.storyCount && this.model.stories[source]?.kind === "textbox")
+				part.aux[story.item] = source
+		}
 
 		if (body) this.bodyParts.add(index)
 
@@ -825,7 +993,8 @@ export class StoryEdits {
 
 					return numId
 				},
-				hyperlink: (part, target) => edits.linkId(part, target)
+				hyperlink: (part, target) => edits.linkId(part, target),
+				nested: edits.textboxMarkers
 			},
 			story
 		)
@@ -1002,6 +1171,7 @@ export class StoryEdits {
 
 		const delta = after.content.size - before.content.size
 		const sectionStart: TopEntry[] = []
+		let sectionsChanged = false
 		// Section boundaries move only when a block carrying section properties came or went (or gained or
 		// lost them).
 		const sections =
@@ -1023,6 +1193,10 @@ export class StoryEdits {
 
 			if (sections) {
 				const changed = this.renumberSections()
+
+				// Sections that changed may show other headers and footers on pages a relayout would keep: laid out
+				// again whole, as an edit of the document's attributes is.
+				if (changed >= 0) sectionsChanged = true
 
 				// A section whose properties changed is laid out again from its start, with the block before it: the
 				// page before then closes the section before (page numbering and notes start anew after it).
@@ -1069,7 +1243,7 @@ export class StoryEdits {
 
 		for (const [, entry] of moved) dirtyBlocks(entry, dirty)
 
-		return { dirty, replaced: moved.length === 0 ? removed : removed.concat(moved.map(([old]) => old)), around, whole: false }
+		return { dirty, replaced: moved.length === 0 ? removed : removed.concat(moved.map(([old]) => old)), around, whole: sectionsChanged }
 	}
 
 	// Gives each source among those `changed` entries hold to its first holder in document order; the entries
@@ -1188,14 +1362,23 @@ export class StoryEdits {
 	private renumberSections(): number {
 		if (!this.body) return -1
 
-		const ends: number[] = []
+		const ends: SectionEnd[] = []
 
 		for (const entry of this.entries) sectionEnds(this.part, entry.node, ends)
 
 		const last = this.entries[this.entries.length - 1]
 		const end = this.doc.attrs["end"]
 		const trailing = last === undefined || !endsLast(this.part, last.node) || (Array.isArray(end) && end.length > 0)
-		const changed = this.edits.resection(ends, this.doc.attrs["sectPr"] as number, trailing)
+		const changes: unknown = this.doc.attrs["sectionChanges"]
+		const evenAndOdd = (changes as { evenAndOddHeaders?: unknown } | null)?.evenAndOddHeaders
+
+		this.edits.evenAndOddHeaders = typeof evenAndOdd === "boolean" ? evenAndOdd : undefined
+
+		const changed = this.edits.resection(ends, finalSectionEnd(this.doc), trailing)
+
+		// A break an edit took away (or added) leaves the opened sections' item ranges behind: the layout reads the
+		// body's blocks from here.
+		if (!this.structured && !this.edits.sectionsAsOpened()) this.structured = true
 		const sections = this.edits.model.sections
 		let section = 0
 
@@ -1337,6 +1520,9 @@ export class StoryEdits {
 		switch (node.type) {
 			case nodes.paragraph:
 			case nodes.table: {
+				// The empty paragraph of a story without blocks, untouched: no block, as the save writes it.
+				if (src < 0 && this.story.pristine.has(node)) return
+
 				// A copy of a block from inside a table cell stays a copy: the table lays its source out.
 				const own = src >= 0 && !inCell(part, src) ? src : -1
 
@@ -1992,29 +2178,10 @@ function endsLast(part: StoryPart, node: Node): boolean {
 	return endsSection(part, node)
 }
 
-// A last section of default properties after the sections `opened`, for a body without w:sectPr of its own.
-function defaultSection(opened: readonly Section[]): Section {
-	const end = opened[opened.length - 1]?.end ?? 0
-
-	return {
-		index: opened.length,
-		item: -1,
-		sectPr: -1,
-		start: end,
-		end,
-		openWrappers: [],
-		headers: NO_HEADERS,
-		footers: NO_HEADERS,
-		effectiveHeaders: NO_HEADERS,
-		effectiveFooters: NO_HEADERS
-	}
-}
-
-// The source paragraphs (items) whose section properties a top-level block ends sections with, added to
-// `out`.
-function sectionEnds(part: StoryPart, node: Node, out: number[]): void {
+// The section breaks a top-level block ends sections with, added to `out`.
+function sectionEnds(part: StoryPart, node: Node, out: SectionEnd[]): void {
 	if (node.type === nodes.sdt) node.forEach(child => sectionEnds(part, child, out))
-	else if (endsSection(part, node)) out.push(node.attrs["sectPr"] as number)
+	else if (endsSection(part, node)) out.push(sectionEndOf(node))
 }
 
 // Whether a block other than a content control ends a section: the break of a paragraph from a table cell

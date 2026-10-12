@@ -10,6 +10,7 @@ import {
 	authorInitials
 } from "../../core/docx/edit/index"
 import { DocumentEdits, PagedEditor, type PagedEditorOptions } from "../../core/docx/paged/index"
+import { releaseUnusedMedia } from "../../core/docx/objects/edit"
 import { compositionMarked, flushComposition } from "../../core/docx/review/track"
 import type { DocxPrepareOptions, DocxPreparedSave, DocxSaveInput, DocxSaveTimings } from "../../core/docx/write/save"
 import type { Slicing } from "../../core/slicing"
@@ -189,11 +190,22 @@ export function inThreadEditingHost(
 		)
 	}
 	const save = async (sessions?: readonly DocxEditorSession[]): Promise<DocxWritten> => {
+		// Handles added after this may be on their way into a command: the release below keeps them.
+		const through = saveInput?.context.media.lastHandle ?? 0
 		const prepared = await prepare(sessions, true)
 
 		if (writing === undefined) throw new DocxClosedError()
 
 		const zipped = await writing.zipper.zip(prepared)
+		const live = saveInput
+
+		// Pictures no story (nor its undo history) can bring back are dropped from memory.
+		if (live !== undefined)
+			releaseUnusedMedia(
+				live.context,
+				live.sessions.map(session => session.state),
+				through
+			)
 
 		return {
 			bytes: zipped.bytes,

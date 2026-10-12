@@ -10,6 +10,7 @@ import { MARKER_ITEMS, writeListMarker } from "./markers"
 import { copySource, type NestedStories } from "./nested"
 import { writeNewStory, type NewStoryContainer } from "./newStory"
 import { writeParagraph } from "./paragraph"
+import { finalSectionMarkup } from "./sections"
 import type { SaveParts } from "./parts/index"
 import { writeSdt } from "./sdt"
 import { R_NAMESPACE, W14_NAMESPACE, W_NAMESPACE, cellWithin, inCell, refuseBlockMarks, src } from "./source"
@@ -303,16 +304,26 @@ export class StoryWriting {
 		const container = this.part.node(this.story.story.item)
 
 		const sectPr = doc.attrs["sectPr"] as number
+		// The body's own section properties as an edit changed them (sections.ts), else the source's.
+		const final = finalSectionMarkup(this, doc)
+
+		// A story without blocks, its empty paragraph untouched: as its source.
+		if (final === undefined && untouchedEmpty(this.story, doc)) {
+			this.copyWhole(out, container)
+
+			return { out, paragraphs: [], containers: [] }
+		}
 
 		openTag(out, document, container)
 
 		const tail = yield* this.writeChildren(out, doc, this.story.story.item, (child, at) => this.writeBlock(at, child), {
 			from: document.openEnd(container),
 			to: document.contentEnd(container),
-			tail: sectPr === NO_SOURCE ? [] : [sectPr]
+			tail: sectPr === NO_SOURCE || final !== undefined ? [] : [sectPr]
 		})
 
-		if (!tail && sectPr !== NO_SOURCE) this.copyWhole(out, this.part.node(sectPr))
+		if (final !== undefined) out.text(final)
+		else if (!tail && sectPr !== NO_SOURCE) this.copyWhole(out, this.part.node(sectPr))
 
 		closeTag(out, document, container)
 
@@ -717,4 +728,17 @@ function copyOwner(): Node {
 	copyOwnerNode ??= docxSchema.nodes.paragraph.create()
 
 	return copyOwnerNode
+}
+
+// Whether `doc` is a story the source has no block in, holding only the builder's empty paragraph untouched (see
+// StoryDoc.pristine) and nothing an edit added around it.
+export function untouchedEmpty(story: StoryDoc, doc: Node): boolean {
+	const only = doc.childCount === 1 ? doc.firstChild : null
+
+	return (
+		only !== null &&
+		src(only) === NO_SOURCE &&
+		story.pristine.has(only) &&
+		((doc.attrs["end"] as MarkerList | undefined)?.length ?? 0) === 0
+	)
 }

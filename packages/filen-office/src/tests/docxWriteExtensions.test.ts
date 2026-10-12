@@ -274,6 +274,7 @@ describe("docx writer extension points: new elements", () => {
 				)
 			)
 		).toEqual({ reason: "unsupported", message: "A table change the writer does not know: float" })
+		// A source control's state is spliced into its w:sdtPr (write/sdt.ts); a new one needs its definition.
 		expect(
 			write(
 				changeFirst(
@@ -282,7 +283,16 @@ describe("docx writer extension points: new elements", () => {
 					node => node.type.create({ ...node.attrs, state: { checked: true } }, node.content)
 				)
 			)
-		).toEqual({ reason: "missingSource", message: "A changed content control" })
+		).toBeUndefined()
+		expect(
+			write(
+				changeFirst(
+					doc,
+					node => node.type === nodes.sdt,
+					node => node.type.create({ ...node.attrs, src: -1, state: { checked: true } }, node.content)
+				)
+			)
+		).toEqual({ reason: "missingSource", message: "A changed content control without its source" })
 		// A formatting change tracked changes recorded is written (w:rPrChange).
 		expect(
 			write(
@@ -293,13 +303,13 @@ describe("docx writer extension points: new elements", () => {
 				)
 			)
 		).toBeUndefined()
-		expect(write(withFirst(doc, [nodes.field_char.create({ kind: "begin" })]))).toEqual({
-			reason: "missingSource",
-			message: "A new field_char"
+		expect(write(withFirst(doc, [nodes.field_char.create({ kind: "middle" })]))).toEqual({
+			reason: "unsupported",
+			message: 'A field character "middle"'
 		})
 	})
 
-	it("refuses source drawings and equations a command changed", async () => {
+	it("refuses changes to drawings that cannot have them, and source equations a command changed", async () => {
 		const document = await openSpec({
 			body:
 				'<w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="100"/><wp:docPr w:id="1" id="1" name="x"/></wp:inline></w:drawing></w:r></w:p>' +
@@ -318,7 +328,7 @@ describe("docx writer extension points: new elements", () => {
 					node => node.type.create({ ...node.attrs, overrides: { cx: 200 } }, null, node.marks)
 				)
 			)
-		).toEqual({ reason: "missingSource", message: "A changed drawing" })
+		).toEqual({ reason: "unsupported", message: "A resized drawing that cannot be resized" })
 		expect(
 			write(
 				changeFirst(

@@ -645,17 +645,20 @@ describe("docx tracked changes: paragraph marks, large edits and moves", () => {
 	})
 
 	it.skipIf(!existsSync(join(CORPUS_DIR, "docx", "oxpt__RP027-Change-Section.docx")))(
-		"counts section property changes and leaves them to the section writer",
+		"accepts and rejects section property changes as section edits",
 		async () => {
-			const opened = await openBytes(new Uint8Array(readFileSync(join(CORPUS_DIR, "docx", "oxpt__RP027-Change-Section.docx"))))
-			const session = new DocxEditorSession(opened.context)
-			const outcome = resolveChanges(session, storyReviewIndex(session), { all: true }, true)
+			for (const accept of [true, false]) {
+				const opened = await openBytes(new Uint8Array(readFileSync(join(CORPUS_DIR, "docx", "oxpt__RP027-Change-Section.docx"))))
+				const session = new DocxEditorSession(opened.context)
+				const outcome = resolveChanges(session, storyReviewIndex(session), { all: true }, accept)
 
-			expect(outcome.skipped).toBeGreaterThan(0)
+				expect(outcome.skipped).toBe(0)
+				expect(outcome.resolved).toBeGreaterThan(0)
 
-			if (outcome.tr !== null) session.dispatch(outcome.tr)
+				if (outcome.tr !== null) session.dispatch(outcome.tr)
 
-			await expect(save(opened, [session])).resolves.toBeDefined()
+				expect((await save(opened, [session])).xml).not.toContain("sectPrChange")
+			}
 		}
 	)
 

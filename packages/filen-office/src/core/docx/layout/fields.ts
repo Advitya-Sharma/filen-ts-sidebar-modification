@@ -32,6 +32,12 @@ const NUMBER_SWITCHES: Readonly<Record<string, string>> = {
 	HEX: "hexUpper"
 }
 
+// The ST_NumberFormat a \* switch argument asks for, or undefined for one that formats no number. Hex
+// switches are case-sensitive (\* hex lower case digits, \* HEX upper case); the others are not.
+export function numberSwitchFormat(name: string): string | undefined {
+	return NUMBER_SWITCHES[name] ?? (name.toLowerCase() === "hex" ? undefined : NUMBER_SWITCHES[name.toLowerCase()])
+}
+
 const FIELD = /^\s*([A-Za-z]+)/
 const SWITCH = /\\\*\s*([A-Za-z]+)/g
 
@@ -50,13 +56,7 @@ export function fieldInfo(instruction: string): FieldInfo {
 
 	let format: string | undefined
 
-	for (const match of instruction.matchAll(SWITCH)) {
-		const name = match[1] ?? ""
-		// Hex switches are case-sensitive (\* hex lower case digits, \* HEX upper case); the others are not.
-		const mapped = NUMBER_SWITCHES[name] ?? (name.toLowerCase() === "hex" ? undefined : NUMBER_SWITCHES[name.toLowerCase()])
-
-		if (mapped !== undefined) format = mapped
-	}
+	for (const match of instruction.matchAll(SWITCH)) format = numberSwitchFormat(match[1] ?? "") ?? format
 
 	return { kind, format }
 }

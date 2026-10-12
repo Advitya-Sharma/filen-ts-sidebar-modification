@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync } from "node:fs"
 import { describe, expect, it } from "vitest"
-import { CORPUS, corpusFiles, expectedRefusal, fuzzConfig, runJobs, summarize } from "./config"
+import { CORPUS, corpusFiles, expectedRefusal, fuzzConfig, limitedProtection, runJobs, summarize } from "./config"
 
 // Raw edit sequences over every editable corpus document (body and, at random, its other stories), saved
 // through Gates 1 and 2 and read back by the independent reader: a save Gate 2 lets through must open,
@@ -20,6 +20,7 @@ describe.skipIf(config === undefined || !existsSync(CORPUS))("writer damage fuzz
 		if (config === undefined) return
 
 		const jobs = corpusFiles(["docx", "docm"], config.filter).map(file => ["damage", file])
+		const blockMoves = config.modes?.includes("blockmove") === true
 
 		expect(jobs.length, "no corpus file matches").toBeGreaterThan(0)
 		const stats: Record<string, number> = {}
@@ -66,8 +67,14 @@ describe.skipIf(config === undefined || !existsSync(CORPUS))("writer damage fuzz
 
 			const fileStats = (summary["stats"] ?? {}) as Record<string, number>
 
-			// An editable document no op managed to change was not fuzzed at all.
-			if ((fileStats["seq"] ?? 0) > 1 && (fileStats["applied"] ?? 0) === 0)
+			// An editable document no op managed to change was not fuzzed at all (unless its protection left nothing, or
+			// moving blocks found one alone).
+			if (
+				(fileStats["seq"] ?? 0) > 1 &&
+				(fileStats["applied"] ?? 0) === 0 &&
+				!limitedProtection(summary["protection"]) &&
+				!(blockMoves && Number(summary["blocks"]) < 2)
+			)
 				failures.push(`${String(summary["file"])}: no edit applied`)
 
 			for (const [key, value] of Object.entries(fileStats)) stats[key] = (stats[key] ?? 0) + value

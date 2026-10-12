@@ -47,11 +47,14 @@ export function textPositions(doc: Node, inCells?: boolean): number[] {
 		if (!node.isTextblock) return true
 
 		if (inCells === undefined || inCells === (parent?.type === nodes.table_cell)) {
+			const before = out.length
+
 			node.forEach((child, offset) => {
 				if (child.isText) for (let k = 0; k <= child.nodeSize; k++) out.push(pos + 1 + offset + k)
 			})
 
-			if (node.content.size === 0) out.push(pos + 1)
+			// A paragraph without text (empty, or only a picture or a break) is typed into at its start and end.
+			if (out.length === before) out.push(...(node.content.size === 0 ? [pos + 1] : [pos + 1, pos + node.nodeSize - 1]))
 		}
 
 		return false
@@ -229,11 +232,21 @@ function blockMove(context: OpContext): string {
 	const doc = context.session.state.doc
 	const count = doc.childCount
 
-	if (count < 4) return "noop"
+	// A paragraph ending a section moves only with a section command (an edit taking it out is refused).
+	const movable = (k: number): boolean => ((doc.child(k).attrs["sectPr"] as number | undefined) ?? -1) < 0
+	const firsts: number[] = []
 
-	const first = Math.floor(rand() * (count - 1))
-	const last = Math.min(count - 2, first + Math.floor(rand() * 3))
-	const target = Math.floor(rand() * count)
+	for (let k = 0; k < count - 1; k++) if (movable(k)) firsts.push(k)
+
+	if (firsts.length === 0) return "noop"
+
+	const first = firsts[Math.floor(rand() * firsts.length)] ?? 0
+	let last = first
+
+	for (let more = Math.floor(rand() * 3); more > 0 && last < count - 2 && movable(last + 1); more--) last++
+
+	// Before any block, or after the last.
+	const target = Math.floor(rand() * (count + 1))
 
 	if (target >= first && target <= last + 1) return "noop"
 
@@ -251,6 +264,11 @@ function blockMove(context: OpContext): string {
 
 	const slice = doc.slice(from, to)
 	const label = `blockMove(${first}..${last} -> ${target})`
+	const review = context.session.context.review
+
+	// Moves are checked as blocks kept byte for byte: untracked (a tracked move records a deletion and an
+	// insertion instead), as after switching tracking off in a document that tracks changes.
+	if (review.tracking) review.tracking = false
 
 	return `${label} -> ${context.transact(label, tr => {
 		tr.delete(from, to)

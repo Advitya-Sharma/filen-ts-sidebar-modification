@@ -134,10 +134,10 @@ export function paragraphAttrs(node: Node): ParagraphAttrs {
 
 // Run-level content a tracked change marks: text and run atoms, not Word's bookkeeping, comment references,
 // field characters or run children kept as bytes.
-const UNMARKED: ReadonlySet<unknown> = new Set([nodes.rendered_break, nodes.comment_ref, nodes.field_char, nodes.run_object])
+const UNMARKED: ReadonlySet<unknown> = new Set([nodes.rendered_break, nodes.comment_ref, nodes.run_object])
 
 export function markable(node: Node): boolean {
-	return node.isInline && inlineLevel(node) === "run" && !UNMARKED.has(node.type)
+	return node.isInline && (inlineLevel(node) === "run" || node.type === nodes.field) && !UNMARKED.has(node.type)
 }
 
 export function isDeleted(node: Node): boolean {

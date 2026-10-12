@@ -29,7 +29,8 @@ import {
 	markerKey,
 	survivorsOf,
 	type MarkerAttrs,
-	type MarkerList
+	type MarkerList,
+	type MarkerNodeAttrs
 } from "../schema"
 
 // Transactions the session makes itself (locking blocks, the repairs appended here) skip the invariants
@@ -111,8 +112,8 @@ const BYTES_ONLY = new Set([
 ])
 
 // A byte-only atom the editor made (src -1) that carries what the writer needs to write it new: a comment
-// range, bookmark, comment or note reference with its id, a picture with its media, an equation with its
-// OMML. Anything else new of these kinds has nothing to be written from.
+// range, bookmark, comment or note reference with its id, a note's number mark, a picture with its media, an
+// equation with its OMML. Anything else new of these kinds has nothing to be written from.
 export function writableNew(node: Node): boolean {
 	const attrs = node.attrs
 
@@ -132,6 +133,9 @@ export function writableNew(node: Node): boolean {
 			return typeof (attrs["overrides"] as { media?: unknown } | null)?.media === "number"
 		case nodes.math:
 			return attrs["omml"] !== null
+		// The number mark of a note the editor made (w:footnoteRef / w:endnoteRef).
+		case nodes.run_object:
+			return attrs["kind"] === "FootnoteMark" || attrs["kind"] === "EndnoteMark"
 		default:
 			return false
 	}
@@ -234,6 +238,12 @@ function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 		attrs["markers"] = NO_MARKERS
 	}
 	if ("revision" in attrs) attrs["revision"] = 0
+	// A copy of a table holds no change record of its own (the original keeps it).
+	if (type === nodes.table && typeof attrs["props"] === "object" && attrs["props"] !== null) {
+		const { change: _change, gridChange: _grid, source: _source, ...props } = attrs["props"] as Record<string, unknown>
+
+		attrs["props"] = Object.keys(props).length === 0 ? null : props
+	}
 
 	if (node.isLeaf) return type.create(attrs, null, freshMarks(node.marks, keep?.fits))
 
@@ -261,7 +271,7 @@ function modelledOn(node: Node): readonly Mark[] | undefined {
 	if (type === undefined || src === undefined) return undefined
 
 	const value = (type.isInSet(node.marks)?.attrs["value"] ?? {}) as Record<string, unknown>
-	const { ins: _ins, del: _del, ...rest } = value
+	const { ins: _ins, del: _del, change: _change, ...rest } = value
 	const from = typeof rest["from"] === "number" ? rest["from"] : src
 
 	if (from === NO_SOURCE && Object.keys(rest).length === 0) return freshMarks(node.marks)
@@ -531,7 +541,12 @@ function markersOf(node: Node, names: readonly string[], out: Map<string, Marker
 function markerNode(marker: MarkerAttrs): Node {
 	return marker.kind === "commentReference"
 		? nodes.comment_ref.create({ src: marker.src, id: marker.id })
-		: nodes.marker.create({ src: marker.src, kind: marker.kind, id: marker.id })
+		: nodes.marker.create({
+				src: marker.src,
+				kind: marker.kind,
+				id: marker.id,
+				name: (marker as Partial<MarkerNodeAttrs>).name ?? null
+			})
 }
 
 // Puts lost markers back at `pos`: inline where the position is in a paragraph, otherwise in the

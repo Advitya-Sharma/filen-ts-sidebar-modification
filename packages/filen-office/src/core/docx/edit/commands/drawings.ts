@@ -9,7 +9,9 @@ export type DocxRelativeH = "margin" | "page" | "column" | "character" | "leftMa
 export type DocxRelativeV = "margin" | "page" | "paragraph" | "line" | "topMargin" | "bottomMargin" | "insideMargin" | "outsideMargin"
 
 export type DrawingCommand =
-	| { readonly type: "image.insert"; readonly media: number }
+	// `fallback`: the PNG Word shows where it cannot draw an SVG picture (required with one); `altText`: its
+	// description.
+	| { readonly type: "image.insert"; readonly media: number; readonly fallback?: number; readonly altText?: string }
 	// EMUs.
 	| { readonly type: "drawing.resize"; readonly cx: number; readonly cy: number; readonly keepRatio?: boolean }
 	| {
@@ -21,6 +23,9 @@ export type DrawingCommand =
 	  }
 	| { readonly type: "drawing.wrap"; readonly mode: DocxWrapMode }
 	| { readonly type: "drawing.altText"; readonly text: string }
+	// Clockwise, in quarter turns.
+	| { readonly type: "drawing.rotate"; readonly by: 90 | 180 | 270 }
+	| { readonly type: "drawing.delete" }
 
 const object = { write: true, scope: "document", group: "drawing", context: "drawing" } as const
 
@@ -38,7 +43,9 @@ export const DRAWING_COMMANDS: readonly DocxCommandInfo<DrawingCommand["type"]>[
 	{ type: "drawing.resize", labelKey: "docx.drawing.resize", icon: "resize", ...object },
 	{ type: "drawing.position", labelKey: "docx.drawing.position", icon: "move", ...object },
 	{ type: "drawing.wrap", labelKey: "docx.drawing.wrap", icon: "wrap", input: "choice", ...object },
-	{ type: "drawing.altText", labelKey: "docx.drawing.altText", icon: "alt-text", input: "text", ...object }
+	{ type: "drawing.altText", labelKey: "docx.drawing.altText", icon: "alt-text", input: "text", ...object },
+	{ type: "drawing.rotate", labelKey: "docx.drawing.rotate", icon: "rotate", ...object },
+	{ type: "drawing.delete", labelKey: "docx.drawing.delete", icon: "delete", ...object }
 ]
 
 const WRAPS = new Set<string>(["inline", "square", "tight", "through", "topAndBottom", "behind", "inFront"])
@@ -48,12 +55,36 @@ const RELATIVE_V = new Set<string>(["margin", "page", "paragraph", "line", "topM
 const MAX_EMU = 2147483647
 const MAX_ALT_TEXT = 10_000
 
+// Alt text XML can hold: no C0 controls but tab and line breaks.
+function altTextArg(value: object, key: string): string | undefined {
+	const text = stringArg(value, key, MAX_ALT_TEXT)
+
+	if (text === undefined) return undefined
+
+	for (let k = 0; k < text.length; k++) {
+		const code = text.charCodeAt(k)
+
+		if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0xfffe || code === 0xffff) return undefined
+	}
+
+	return text
+}
+
 export const parseDrawingCommand: DocxCommandParser<DrawingCommand> = (type, value) => {
 	switch (type) {
 		case "image.insert": {
 			const media = intArg(value, "media", 1, Number.MAX_SAFE_INTEGER)
+			const fallback = optional(value, "fallback", (holder, key) => intArg(holder, key, 1, Number.MAX_SAFE_INTEGER))
+			const altText = optional(value, "altText", altTextArg)
 
-			return media === undefined ? undefined : { type, media }
+			if (media === undefined || !fallback.ok || !altText.ok || fallback.value === media) return undefined
+
+			return {
+				type,
+				media,
+				...(fallback.value === undefined ? {} : { fallback: fallback.value }),
+				...(altText.value === undefined ? {} : { altText: altText.value })
+			}
 		}
 		case "drawing.resize": {
 			const cx = intArg(value, "cx", 1, MAX_EMU)
@@ -86,9 +117,16 @@ export const parseDrawingCommand: DocxCommandParser<DrawingCommand> = (type, val
 			return mode === undefined ? undefined : { type, mode }
 		}
 		case "drawing.altText": {
-			const text = field(value, "text") === undefined ? undefined : stringArg(value, "text", MAX_ALT_TEXT)
+			const text = altTextArg(value, "text")
 
 			return text === undefined ? undefined : { type, text }
 		}
+		case "drawing.rotate": {
+			const by = field(value, "by")
+
+			return by === 90 || by === 180 || by === 270 ? { type, by } : undefined
+		}
+		case "drawing.delete":
+			return { type }
 	}
 }

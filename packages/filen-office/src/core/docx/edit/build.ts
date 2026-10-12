@@ -180,6 +180,13 @@ interface FieldPlan {
 	readonly locked: Map<number, LockReason>
 }
 
+// Whether a note reference is followed by a custom mark (w:customMarkFollows).
+function customMark(part: StoryPart, item: number): boolean {
+	const value = part.reader.attr(part.node(item), Ns.W, "customMarkFollows")
+
+	return value === "1" || value === "true" || value === "on"
+}
+
 function paragraphOf(part: StoryPart, item: number): number {
 	for (let at = item; at >= 0; at = part.parent(at)) {
 		const kind = part.kinds[at] ?? 0
@@ -388,8 +395,14 @@ export class DocxDocBuilder {
 
 		const end = pending ?? NO_MARKERS
 
-		// A story with no block at all still needs a place for the cursor; the empty paragraph is new content.
-		if (blocks.length === 0) blocks.push(docxSchema.nodes.paragraph.create())
+		// A story with no block at all still needs a place for the cursor: an empty paragraph, new content, that
+		// while untouched (pristine) stands for no block (the story is written and laid out as its source).
+		if (blocks.length === 0) {
+			const empty = docxSchema.nodes.paragraph.create()
+
+			this.pristine.add(empty)
+			blocks.push(empty)
+		}
 
 		const doc = makeNode(docxSchema.nodes.doc, { story: story.index, sectPr, end, comments: null, sectionChanges: null }, blocks)
 
@@ -660,6 +673,7 @@ export class DocxDocBuilder {
 					indent: props.indent ?? null,
 					spacing: props.spacing ?? null,
 					borders: props.borders ?? null,
+					tabs: null,
 					sectPr: sectPr >= 0 ? item : NO_SOURCE,
 					revision: part.paragraphs.markRevision[row] ?? 0
 				},
@@ -1032,7 +1046,8 @@ export class DocxDocBuilder {
 				type: field < 0 ? "" : part.fieldType(field),
 				instruction: field < 0 ? "" : part.fieldInstruction(field),
 				result: this.fieldResult(first, last, simple, field),
-				markers: this.survivors(first, part.end(last))
+				markers: this.survivors(first, part.end(last)),
+				state: null
 			},
 			null,
 			wrappers
@@ -1154,7 +1169,12 @@ export class DocxDocBuilder {
 					sink.add(
 						makeNode(
 							nodes.note_ref,
-							{ src: child, kind: kind === Item.FootnoteReference ? "footnote" : "endnote", id: part.id(child) ?? null },
+							{
+								src: child,
+								kind: kind === Item.FootnoteReference ? "footnote" : "endnote",
+								id: part.id(child) ?? null,
+								custom: customMark(part, child)
+							},
 							null,
 							marks
 						)

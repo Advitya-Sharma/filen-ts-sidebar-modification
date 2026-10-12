@@ -1,7 +1,8 @@
 import { Fragment, type ContentMatch, type Mark, type Node, type NodeType } from "prosemirror-model"
 import { closeHistory } from "prosemirror-history"
 import { TextSelection, type EditorState, type Transaction } from "prosemirror-state"
-import { Item, RevisionFlag, type StoryPart } from "../../model/index"
+import { Item, Revision, RevisionFlag, type StoryPart } from "../../model/index"
+import { Ns } from "../../model/namespaces"
 import type { PropsStore } from "../../props/index"
 import { minuteDate, paragraphChange, type ParagraphChange } from "../../review/track"
 import { MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, type DocxCellVAlign, type DocxTableAlign } from "../commands/tables"
@@ -9,12 +10,22 @@ import type { DocxEditContext } from "../context"
 import { markCommand } from "../invariants/core"
 import { NO_MARKERS, NO_SOURCE, docxSchema, type MarkerList } from "../schema"
 import {
+	RECORD_KEYS,
 	cellOverrides,
+	ownItem,
+	previousGrid,
 	propertySource,
+	rowGrid,
 	rowOverrides,
+	sourceCellProps,
+	sourceChanges,
+	sourceRowProps,
+	sourceTableProps,
 	tableMap,
 	tableOverrides,
+	unresolvedChange,
 	type CellOverrides,
+	type GridChange,
 	type MapRow,
 	type RowOverrides,
 	type TableMap,
@@ -29,7 +40,10 @@ import {
 // and cells an edit adds are new (no source), modelled on a neighbour whose properties they copy (their
 // row_props / cell_props `from`). A cell's width in twips (w:tcW) is its `colwidth` once an edit changed it.
 // While changes are tracked, inserted and deleted rows and cells are recorded (revision bits with a stamp)
-// instead of being removed; merges, splits and property changes apply untracked.
+// instead of being removed, and property changes (style, alignment, widths, header rows, shading, vertical
+// alignment) as w:tblPrChange / w:tblGridChange / w:trPrChange / w:tcPrChange records holding the properties
+// before them. Merges and splits apply untracked, as in Word, which never tracks them (it warns "This action
+// will not be marked as a change"; w:cellMerge comes only from its document compare).
 
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
@@ -157,6 +171,116 @@ export function trackStamp(context: DocxEditContext): TrackStamp | null | undefi
 	return { author, date: minuteDate(context.identity.now()), id: context.ids.next("revision") }
 }
 
+// The properties a row's, cell's or table's overrides hold (what a change record keeps as "before").
+function ownOverrides<T extends object>(value: T): Partial<T> {
+	return withoutKeys(value, RECORD_KEYS)
+}
+
+function inserted(node: Node): boolean {
+	return ((node.attrs["revision"] as number) & RevisionFlag.Inserted) !== 0
+}
+
+// Whether a tracked edit of a row's or cell's properties records a change: not on one inserted as a tracked
+// change, or in a row that is (its properties are part of the insertion), nor over the source's own change
+// still unresolved (one change per property element: the first stays).
+function recordsOn(part: StoryPart, node: Node, row?: Node): boolean {
+	if (inserted(node) || (row !== undefined && inserted(row))) return false
+
+	return node.type === nodes.table_row
+		? !unresolvedChange(part, node, Revision.RowProperties)
+		: !unresolvedChange(part, node, Revision.CellProperties) && !unresolvedChange(part, node, Revision.CellMerge)
+}
+
+// `next`, a row's new overrides, with what a tracked edit records: the change before it (the record the row
+// has stays; one an edit undid goes).
+function trackedRow(part: StoryPart, row: Node, next: RowOverrides, stamp: TrackStamp | undefined): RowOverrides {
+	if (stamp === undefined) return next
+
+	const current = rowOverrides(row)
+	const change = current.change ?? (recordsOn(part, row) ? { ...stamp, props: ownOverrides(current) } : undefined)
+
+	if (change === undefined || sameValue(ownOverrides(next), change.props)) return withoutKeys(next, ["change"])
+
+	return { ...next, change }
+}
+
+// The same for a cell of `row`, `colwidth` its new width.
+function trackedCell(
+	part: StoryPart,
+	row: Node,
+	cell: Node,
+	next: CellOverrides,
+	colwidth: number | null,
+	stamp: TrackStamp | undefined
+): CellOverrides {
+	if (stamp === undefined) return next
+
+	const current = cellOverrides(cell)
+	const change =
+		current.change ??
+		(recordsOn(part, cell, row)
+			? { ...stamp, props: ownOverrides(current), colwidth: cell.attrs["colwidth"] as number | null }
+			: undefined)
+
+	if (change === undefined || (sameValue(ownOverrides(next), change.props) && colwidth === change.colwidth))
+		return withoutKeys(next, ["change"])
+
+	return { ...next, change }
+}
+
+// A table inserted as a tracked change (every row of it): its properties are part of the insertion.
+function insertedTable(table: Node): boolean {
+	for (let r = 0; r < table.childCount; r++) if (!inserted(table.child(r))) return false
+
+	return table.childCount > 0
+}
+
+// A table's new props (`props`, as the edit leaves them, with style `styleId` and grid `grid`) with what a
+// tracked edit records: w:tblPrChange for its properties and w:tblGridChange for its grid, each the first.
+function trackedTable(
+	part: StoryPart,
+	table: Node,
+	next: { readonly props?: TableOverrides; readonly styleId?: string | null; readonly grid?: readonly number[] },
+	stamp: TrackStamp | undefined
+): TableOverrides {
+	const current = tableOverrides(table)
+	let props: TableOverrides = next.props ?? current
+
+	if (stamp === undefined || insertedTable(table)) return props
+
+	const styleId = next.styleId === undefined ? (table.attrs["styleId"] as string | null) : next.styleId
+
+	if (styleId !== table.attrs["styleId"] || !sameValue(ownOverrides(props), ownOverrides(current))) {
+		const change =
+			current.change ??
+			(unresolvedChange(part, table, Revision.TableProperties)
+				? undefined
+				: { ...stamp, styleId: table.attrs["styleId"] as string | null, props: ownOverrides(current) })
+
+		props =
+			change === undefined || (change.styleId === styleId && sameValue(ownOverrides(props), change.props))
+				? withoutKeys(props, ["change"])
+				: { ...props, change }
+	}
+
+	const grid = table.attrs["grid"] as readonly number[]
+
+	if (next.grid !== undefined && !sameNumbers(next.grid, grid)) {
+		const change = current.gridChange ?? (unresolvedChange(part, table, Revision.TableGrid) ? undefined : { ...stamp, grid })
+
+		props =
+			change === undefined || sameNumbers(change.grid, next.grid)
+				? withoutKeys(props, ["gridChange"])
+				: { ...props, gridChange: change }
+	}
+
+	return props
+}
+
+function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
+	return a === b || (a.length === b.length && a.every((value, k) => value === b[k]))
+}
+
 // ---- building blocks ------------------------------------------------------------------------------------
 
 function withoutKeys<T extends object>(value: T, drop: readonly string[]): Partial<T> {
@@ -225,7 +349,9 @@ function newCell(
 	colwidth: number | null,
 	stamp: TrackStamp | undefined
 ): Node {
-	const overrides: Record<string, unknown> = model === undefined ? {} : withoutKeys(cellOverrides(model), ["from", "ins", "del"])
+	// Its own: no tracked change of the model's.
+	const overrides: Record<string, unknown> =
+		model === undefined ? {} : withoutKeys(cellOverrides(model), ["from", "ins", "del", "change"])
 	const source = model === undefined ? NO_SOURCE : propertySource(part, model, Item.Cell)
 
 	if (source !== NO_SOURCE) overrides["from"] = source
@@ -240,7 +366,7 @@ function newCell(
 
 // A new row modelled on `model` (properties copied) holding `cells`.
 function newRow(part: StoryPart, model: Node | undefined, cells: readonly Node[], stamp: TrackStamp | undefined): Node {
-	const overrides: Record<string, unknown> = model === undefined ? {} : withoutKeys(rowOverrides(model), ["from", "ins", "del"])
+	const overrides: Record<string, unknown> = model === undefined ? {} : withoutKeys(rowOverrides(model), ["from", "ins", "del", "change"])
 	const source = model === undefined ? NO_SOURCE : propertySource(part, model, Item.Row)
 
 	if (source !== NO_SOURCE) overrides["from"] = source
@@ -741,9 +867,9 @@ export function insertColumns(
 		let overrides: RowOverrides = rowOverrides(node)
 		let insertAt = -1
 
-		if (boundary < row.before) overrides = { ...overrides, gridBefore: row.before + count }
+		if (boundary < row.before) overrides = trackedRow(part, node, { ...overrides, gridBefore: row.before + count }, stamp)
 		else if (boundary > row.end) {
-			if (boundary <= row.end + row.after) overrides = { ...overrides, gridAfter: row.after + count }
+			if (boundary <= row.end + row.after) overrides = trackedRow(part, node, { ...overrides, gridAfter: row.after + count }, stamp)
 		} else {
 			const covering = map.cellAt(r, boundary)
 
@@ -769,14 +895,16 @@ export function insertColumns(
 
 			if (grows && r === at.anchor.row) caret = cells.length
 
-			cells.push(cellWith(map.cell(r, index), { colspan: newSpan, colwidth: widthOf(grid, moved(start), newSpan) }))
+			cells.push(
+				trackedWidth(part, node, map.cell(r, index), { colspan: newSpan, colwidth: widthOf(grid, moved(start), newSpan) }, stamp)
+			)
 		}
 
 		rows.push(rowWith(node.copy(Fragment.fromArray(cells)), overrides))
 	}
 
 	const tr = state.tr
-	const cellPos = replaceTable(tr, at, rows, { grid })
+	const cellPos = replaceTable(tr, at, rows, { grid, props: propsAttr(at.table, trackedTable(part, at.table, { grid }, stamp)) })
 
 	return finish(caretIn(tr, cellPos(at.anchor.row, Math.max(0, caret)) + 2))
 }
@@ -1175,7 +1303,11 @@ export function splitCell(state: EditorState, part: StoryPart, at: TableAt, rows
 
 // Repeats rows [0, bottom of the selection) at the top of each page, or stops the selected header rows and
 // those below them from repeating. The header rows end where no vertical merge runs on.
-export function toggleHeaderRows(state: EditorState, at: TableAt): Transaction | null {
+export function toggleHeaderRows(state: EditorState, context: DocxEditContext, part: StoryPart, at: TableAt): Transaction | null {
+	const stamp = trackStamp(context)
+
+	if (stamp === null) return null
+
 	const { map, pos } = at
 	const on = !map.row(at.cells.top).header
 	const whole = map.normalize({
@@ -1193,30 +1325,88 @@ export function toggleHeaderRows(state: EditorState, at: TableAt): Transaction |
 
 		if (row.header === on) continue
 
-		setOverrides(tr, map.rowPos(pos, r), row.node, { ...rowOverrides(row.node), header: on })
+		setOverrides(tr, map.rowPos(pos, r), row.node, trackedRow(part, row.node, { ...rowOverrides(row.node), header: on }, stamp))
 	}
 
 	return tr.docChanged ? finish(tr) : null
 }
 
-export function setTableStyle(state: EditorState, context: DocxEditContext, at: TableAt, styleId: string): Transaction | null {
+export function setTableStyle(
+	state: EditorState,
+	context: DocxEditContext,
+	part: StoryPart,
+	at: TableAt,
+	styleId: string
+): Transaction | null {
 	const style = context.styles.byId(styleId)
+	const stamp = trackStamp(context)
 
-	if (style === undefined || style.type !== "table" || style.id === at.table.attrs["styleId"]) return null
+	if (style === undefined || style.type !== "table" || style.id === at.table.attrs["styleId"] || stamp === null) return null
 
-	return finish(state.tr.setNodeAttribute(at.pos, "styleId", style.id))
+	return finish(
+		setTableProps(state.tr, at, trackedTable(part, at.table, { styleId: style.id }, stamp)).setNodeAttribute(
+			at.pos,
+			"styleId",
+			style.id
+		)
+	)
 }
 
-export function alignTable(state: EditorState, at: TableAt, align: DocxTableAlign): Transaction | null {
+export function alignTable(
+	state: EditorState,
+	context: DocxEditContext,
+	part: StoryPart,
+	at: TableAt,
+	align: DocxTableAlign
+): Transaction | null {
 	const current = tableOverrides(at.table)
+	const stamp = trackStamp(context)
 
-	if (current.align === align) return null
+	if (current.align === align || stamp === null) return null
 
-	return finish(state.tr.setNodeAttribute(at.pos, "props", { ...current, align }))
+	return finish(setTableProps(state.tr, at, trackedTable(part, at.table, { props: { ...current, align } }, stamp)))
 }
 
-// The table with grid `grid` (and `attrs`): the cells whose columns changed width take their new width.
-function regrid(state: EditorState, at: TableAt, grid: readonly number[], attrs: object = {}): Transaction | null {
+// The table's props set to `props`.
+function setTableProps(tr: Transaction, at: TableAt, props: TableOverrides): Transaction {
+	return sameValue(props, tableOverrides(at.table)) ? tr : tr.setNodeAttribute(at.pos, "props", propsAttr(at.table, props))
+}
+
+// The `props` attribute holding `props`: the table's own while they are its, null when they override nothing.
+function propsAttr(table: Node, props: TableOverrides): TableOverrides | null {
+	if (props === tableOverrides(table)) return table.attrs["props"] as TableOverrides | null
+
+	return Object.keys(withoutKeys(props, [])).length === 0 ? null : props
+}
+
+// A cell with another span or width, its width change recorded while tracking (as a node).
+function trackedWidth(
+	part: StoryPart,
+	row: Node,
+	cell: Node,
+	attrs: { readonly colspan?: number; readonly colwidth: number | null },
+	stamp: TrackStamp | undefined
+): Node {
+	const next = cellWith(cell, attrs)
+
+	if (stamp === undefined || next.attrs["colwidth"] === cell.attrs["colwidth"]) return next
+
+	const current = cellOverrides(cell)
+	const overrides = trackedCell(part, row, cell, current, attrs.colwidth, stamp)
+
+	return sameValue(overrides, current) ? next : next.mark(withValue(marks.cell_props, next.marks, overrides))
+}
+
+// The table with grid `grid` (and table props `props`): the cells whose columns changed width take their new
+// width, recorded while tracking.
+function regrid(
+	state: EditorState,
+	part: StoryPart,
+	at: TableAt,
+	grid: readonly number[],
+	stamp: TrackStamp | undefined,
+	props?: TableOverrides
+): Transaction | null {
 	const { map } = at
 
 	if (grid.length === map.grid.length && grid.every((value, k) => value === map.grid[k])) return null
@@ -1234,29 +1424,34 @@ function regrid(state: EditorState, at: TableAt, grid: readonly number[], attrs:
 			const cell = map.cell(r, index)
 			const width = widthOf(grid, start, span)
 
-			cells.push(width === widthOf(old, start, span) && cell.attrs["colwidth"] === null ? cell : cellWith(cell, { colwidth: width }))
+			cells.push(
+				width === widthOf(old, start, span) && cell.attrs["colwidth"] === null
+					? cell
+					: trackedWidth(part, row.node, cell, { colwidth: width }, stamp)
+			)
 		}
 
 		rows.push(cells.every((cell, index) => cell === row.node.child(index)) ? row.node : row.node.copy(Fragment.fromArray(cells)))
 	}
 
 	const tr = state.tr
-	const cellPos = replaceTable(tr, at, rows, { ...attrs, grid })
+	const next = trackedTable(part, at.table, props === undefined ? { grid } : { grid, props }, stamp)
+	const cellPos = replaceTable(tr, at, rows, { grid, props: propsAttr(at.table, next) })
 
 	return finish(caretIn(tr, cellPos(at.anchor.row, at.anchor.index) + 2))
 }
 
 // The table's preferred width (w:tblW) as an edit left it or the source has it.
 function tableWidth(part: StoryPart, store: PropsStore, table: Node): { readonly value: number; readonly type: string } | undefined {
-	const own = tableOverrides(table).width
+	const overrides = tableOverrides(table)
 
-	if (own !== undefined) return own
+	if (overrides.width !== undefined) return overrides.width
 
 	const src = table.attrs["src"] as number
 
 	if (src === NO_SOURCE || part.kinds[src] !== Item.Table) return undefined
 
-	return store.table(part.document, part.tables.tblPr[part.aux[src] ?? -1] ?? -1).width
+	return sourceTableProps(part, store, src, overrides.source === "rejected").width
 }
 
 // Grid column `index` to `twips`, the column right of it giving or taking the difference (a border drag);
@@ -1264,12 +1459,17 @@ function tableWidth(part: StoryPart, store: PropsStore, table: Node): { readonly
 // it, which would move every border; Word sets the percentage the drag gives).
 export function setColumnWidth(
 	state: EditorState,
+	context: DocxEditContext,
 	part: StoryPart,
-	store: PropsStore,
 	at: TableAt,
 	index: number,
 	twips: number
 ): Transaction | null {
+	const stamp = trackStamp(context)
+
+	if (stamp === null) return null
+
+	const store = context.store
 	const grid = paddedGrid(at.map, at.map.width)
 	const before = grid.reduce((sum, value) => sum + value, 0)
 
@@ -1291,16 +1491,20 @@ export function setColumnWidth(
 
 	const preferred = index + 1 < grid.length ? undefined : tableWidth(part, store, at.table)
 
-	if (preferred?.type !== "pct" || !(preferred.value > 0) || before <= 0) return regrid(state, at, grid)
+	if (preferred?.type !== "pct" || !(preferred.value > 0) || before <= 0) return regrid(state, part, at, grid, stamp)
 
 	const after = grid.reduce((sum, value) => sum + value, 0)
 	const value = Math.max(1, Math.round((preferred.value * after) / before))
 
-	return regrid(state, at, grid, { props: { ...tableOverrides(at.table), width: { value, type: "pct" } } })
+	return regrid(state, part, at, grid, stamp, { ...tableOverrides(at.table), width: { value, type: "pct" } })
 }
 
 // The selected grid columns (all of them when the selection is in one cell) made equally wide.
-export function distributeColumns(state: EditorState, at: TableAt): Transaction | null {
+export function distributeColumns(state: EditorState, context: DocxEditContext, part: StoryPart, at: TableAt): Transaction | null {
+	const stamp = trackStamp(context)
+
+	if (stamp === null) return null
+
 	const grid = paddedGrid(at.map, at.map.width)
 	const whole = at.map.areasIn(at.rect) <= 1
 	const left = whole ? 0 : at.rect.left
@@ -1314,11 +1518,15 @@ export function distributeColumns(state: EditorState, at: TableAt): Transaction 
 
 	for (let c = left; c < right; c++) grid[c] = c === right - 1 ? total - each * (count - 1) : each
 
-	return regrid(state, at, grid)
+	return regrid(state, part, at, grid, stamp)
 }
 
 // Sets `patch` on every cell the selection touches.
-function patchCells(state: EditorState, at: TableAt, patch: CellOverrides): Transaction | null {
+function patchCells(state: EditorState, context: DocxEditContext, part: StoryPart, at: TableAt, patch: CellOverrides): Transaction | null {
+	const stamp = trackStamp(context)
+
+	if (stamp === null) return null
+
 	const { map, pos } = at
 	const { top, bottom, left, right } = at.cells
 	const tr = state.tr
@@ -1333,21 +1541,40 @@ function patchCells(state: EditorState, at: TableAt, patch: CellOverrides): Tran
 
 			const cell = map.cell(r, index)
 			const current = cellOverrides(cell)
-			const next = { ...current, ...patch }
+			const patched = { ...current, ...patch }
 
-			if (!sameValue(next, current)) setOverrides(tr, map.cellPos(pos, r, index), cell, next)
+			if (sameValue(patched, current)) continue
+
+			setOverrides(
+				tr,
+				map.cellPos(pos, r, index),
+				cell,
+				trackedCell(part, row.node, cell, patched, cell.attrs["colwidth"] as number | null, stamp)
+			)
 		}
 	}
 
 	return tr.docChanged ? finish(tr) : null
 }
 
-export function shadeCells(state: EditorState, at: TableAt, fill: string | null): Transaction | null {
-	return patchCells(state, at, { shading: fill === null ? null : fill.toUpperCase() })
+export function shadeCells(
+	state: EditorState,
+	context: DocxEditContext,
+	part: StoryPart,
+	at: TableAt,
+	fill: string | null
+): Transaction | null {
+	return patchCells(state, context, part, at, { shading: fill === null ? null : fill.toUpperCase() })
 }
 
-export function alignCells(state: EditorState, at: TableAt, align: DocxCellVAlign): Transaction | null {
-	return patchCells(state, at, { vAlign: align })
+export function alignCells(
+	state: EditorState,
+	context: DocxEditContext,
+	part: StoryPart,
+	at: TableAt,
+	align: DocxCellVAlign
+): Transaction | null {
+	return patchCells(state, context, part, at, { vAlign: align })
 }
 
 // ---- for accepting and rejecting tracked changes --------------------------------------------------------
@@ -1445,4 +1672,445 @@ export function clearRowRevision(tr: Transaction, pos: number, r: number, flag: 
 
 	tr.setNodeAttribute(rowPos, "revision", (row.attrs["revision"] as number) & ~flag)
 	setOverrides(tr, rowPos, row, withoutKeys(rowOverrides(row), [flag === RevisionFlag.Inserted ? "ins" : "del"]))
+}
+
+// ---- accepting and rejecting tracked property changes ---------------------------------------------------
+
+// A tracked property change to accept or reject: of the table (row -1), of row `row` (cell -1) or of its cell
+// `cell`; the editor's record of its properties ("change") or of the table's grid ("grid"), or the source's
+// own changes the node holds ("source": its w:tblPrChange and w:tblGridChange, w:trPrChange and
+// w:tblPrExChange, or w:tcPrChange and w:cellMerge; one change, as the review index counts them).
+export interface TableChangeItem {
+	readonly row: number
+	readonly cell: number
+	readonly what: "change" | "grid" | "source"
+}
+
+// Rows and cells (by index, cells as removeCells takes them: rows counted before any row goes) the same
+// resolution takes out of the table.
+export interface TableRemoval {
+	readonly rows: readonly number[]
+	readonly cells: readonly { readonly row: number; readonly index: number }[]
+}
+
+// What resolving the items of one table changes.
+class TableEdit {
+	readonly table: Node
+	props: TableOverrides
+	readonly attrs: Record<string, unknown> = {}
+	readonly rows = new Map<number, RowOverrides>()
+	readonly cells = new Map<string, { overrides: CellOverrides; attrs: Record<string, unknown> }>()
+
+	constructor(table: Node) {
+		this.table = table
+		this.props = tableOverrides(table)
+	}
+
+	get changed(): boolean {
+		return this.props !== tableOverrides(this.table) || Object.keys(this.attrs).length > 0 || this.rows.size > 0 || this.cells.size > 0
+	}
+
+	row(r: number): RowOverrides {
+		return this.rows.get(r) ?? rowOverrides(this.table.child(r))
+	}
+
+	cell(r: number, index: number): { overrides: CellOverrides; attrs: Record<string, unknown> } {
+		const key = `${String(r)}:${String(index)}`
+		let entry = this.cells.get(key)
+
+		if (entry === undefined) {
+			entry = { overrides: cellOverrides(this.table.child(r).child(index)), attrs: {} }
+			this.cells.set(key, entry)
+		}
+
+		return entry
+	}
+
+	// The table with what the edit changed.
+	build(): Node {
+		const rows: Node[] = []
+
+		this.table.forEach((row, _offset, r) => {
+			let cells: Node[] | undefined
+
+			row.forEach((cell, _cellOffset, index) => {
+				const entry = this.cells.get(`${String(r)}:${String(index)}`)
+
+				if (entry === undefined) return
+
+				cells ??= []
+
+				for (let k = cells.length; k < index; k++) cells.push(row.child(k))
+
+				cells.push(
+					cell.type.create(
+						{ ...cell.attrs, ...entry.attrs },
+						cell.content,
+						withValue(marks.cell_props, cell.marks, entry.overrides)
+					)
+				)
+			})
+
+			let next = row
+
+			if (cells !== undefined) {
+				for (let k = cells.length; k < row.childCount; k++) cells.push(row.child(k))
+
+				next = row.copy(Fragment.fromArray(cells))
+			}
+
+			const overrides = this.rows.get(r)
+
+			if (overrides !== undefined) next = next.mark(withValue(marks.row_props, next.marks, overrides))
+
+			rows.push(next)
+		})
+
+		const props = Object.keys(withoutKeys(this.props, [])).length === 0 ? null : this.props
+
+		return this.table.type.create({ ...this.table.attrs, ...this.attrs, props }, Fragment.fromArray(rows), this.table.marks)
+	}
+}
+
+// `value` without the keys it leaves undefined.
+function defined<T extends object>(value: { readonly [K in keyof T]?: T[K] | undefined }): T {
+	return withoutKeys(value, []) as T
+}
+
+// A w:cellMerge state (ST_AnnotationVMerge: "cont", merged with the cell above; "rest", split from it) as the
+// cell's vMerge, the cell's being `current`.
+function mergeState(state: string, current: string | null, continuedBelow: boolean): string | null {
+	if (state === "cont") return "continue"
+
+	return current === "continue" ? (continuedBelow ? "restart" : null) : current
+}
+
+// Rows wider than the grid and merges continuing under none, of `table` with the removal made.
+function tableFaults(table: Node, part: StoryPart, store: PropsStore, removal: TableRemoval | undefined): number {
+	const grid = (table.attrs["grid"] as readonly number[]).length
+	const goneRows = new Set(removal?.rows ?? [])
+	const goneCells = new Set((removal?.cells ?? []).map(cell => `${String(cell.row)}:${String(cell.index)}`))
+	let faults = 0
+	let above = new Map<number, { span: number; merged: boolean }>()
+
+	table.forEach((row, _offset, r) => {
+		if (goneRows.has(r)) return
+
+		const offsets = rowGrid(part, store, row)
+		const here = new Map<number, { span: number; merged: boolean }>()
+		let column = offsets.before
+
+		row.forEach((cell, _cellOffset, index) => {
+			if (goneCells.has(`${String(r)}:${String(index)}`)) return
+
+			const span = Math.max(1, cell.attrs["colspan"] as number)
+			const vMerge = cell.attrs["vMerge"] as string | null
+			const up = above.get(column)
+
+			if (vMerge === "continue" && (up === undefined || up.span !== span || !up.merged)) faults++
+
+			here.set(column, { span, merged: vMerge !== null })
+			column += span
+		})
+
+		if (grid > 0 && column + offsets.after > grid) faults++
+
+		above = here
+	})
+
+	return faults
+}
+
+// Accepts or rejects `items` of the table at `pos` (in tr's document) as one step that moves no position. An
+// accepted change keeps the properties and drops its record; a rejected one restores the properties before it.
+// What would change the table's structure (its grid, a row's grid columns before or after its cells, a cell's
+// span or vertical merge) is made only when the table, with `removal` made, has no more rows wider than its grid
+// and merges continuing under none than before: otherwise the items doing it stay as they are, returned.
+export function resolveTableChanges(
+	tr: Transaction,
+	pos: number,
+	items: readonly TableChangeItem[],
+	accept: boolean,
+	part: StoryPart,
+	store: PropsStore,
+	removal?: TableRemoval
+): TableChangeItem[] {
+	const table = tr.doc.nodeAt(pos)
+
+	if (table === null || table.type !== nodes.table || items.length === 0) return []
+
+	const run = (structure: boolean): { edit: TableEdit; structural: TableChangeItem[] } => {
+		const edit = new TableEdit(table)
+		const structural: TableChangeItem[] = []
+
+		for (const item of items) {
+			if (item.row >= table.childCount || (item.cell >= 0 && item.cell >= table.child(Math.max(0, item.row)).childCount)) continue
+
+			const changes =
+				item.row < 0
+					? resolveTable(edit, item, accept, part, store)
+					: item.cell < 0
+						? resolveRow(edit, item, accept, part, store)
+						: resolveCell(edit, item, accept, part, store)
+
+			if (changes === null) continue
+			if (changes.structural) structural.push(item)
+			if (!changes.structural || structure) changes.apply()
+		}
+
+		return { edit, structural }
+	}
+
+	const first = run(true)
+	const place = (edit: TableEdit): void => {
+		if (edit.changed) tr.replaceWith(pos, pos + table.nodeSize, edit.build())
+	}
+
+	if (first.structural.length > 0 && tableFaults(first.edit.build(), part, store, removal) > tableFaults(table, part, store, removal)) {
+		place(run(false).edit)
+
+		return first.structural
+	}
+
+	place(first.edit)
+
+	return []
+}
+
+// What resolving one item does (`apply`), and whether that changes the table's structure; null: nothing.
+type Resolution = { readonly structural: boolean; readonly apply: () => void } | null
+
+function resolveTable(edit: TableEdit, item: TableChangeItem, accept: boolean, part: StoryPart, store: PropsStore): Resolution {
+	const props = (): TableOverrides => edit.props
+	const grid = edit.table.attrs["grid"] as readonly number[]
+
+	if (item.what === "change") {
+		const change = props().change
+
+		if (change === undefined) return null
+
+		return {
+			structural: false,
+			apply: () => {
+				const current = props()
+
+				if (accept) {
+					edit.props = withoutKeys(current, ["change"])
+
+					return
+				}
+
+				edit.attrs["styleId"] = change.styleId
+				edit.props = defined<TableOverrides>({ ...change.props, gridChange: current.gridChange, source: current.source })
+			}
+		}
+	}
+
+	if (item.what === "grid") {
+		const change: GridChange | undefined = props().gridChange
+
+		if (change === undefined) return null
+
+		return {
+			structural: !accept && !sameNumbers(change.grid, grid),
+			apply: () => {
+				edit.props = withoutKeys(props(), ["gridChange"])
+
+				if (!accept) edit.attrs["grid"] = change.grid
+			}
+		}
+	}
+
+	const src = ownItem(part, edit.table, Item.Table)
+	const changes = sourceChanges(part, src)
+
+	if (src === NO_SOURCE || props().source !== undefined || changes.size === 0) return null
+
+	const before = changes.has(Revision.TableGrid) ? previousGrid(part, changes.get(Revision.TableGrid)) : undefined
+	const restore = !accept && before !== undefined && !sameNumbers(before, grid)
+
+	return {
+		structural: restore,
+		apply: () => {
+			const current = props()
+
+			if (accept) {
+				edit.props = { ...current, source: "accepted" }
+
+				return
+			}
+
+			edit.props = defined<TableOverrides>({ change: current.change, gridChange: current.gridChange, source: "rejected" as const })
+
+			if (changes.has(Revision.TableProperties)) edit.attrs["styleId"] = sourceTableProps(part, store, src, true).styleId ?? null
+			if (restore) edit.attrs["grid"] = before
+		}
+	}
+}
+
+function resolveRow(edit: TableEdit, item: TableChangeItem, accept: boolean, part: StoryPart, store: PropsStore): Resolution {
+	const row = edit.table.child(item.row)
+	const current = edit.row(item.row)
+
+	if (item.what === "change") {
+		const change = current.change
+
+		if (change === undefined) return null
+
+		const grid = rowGrid(part, store, row)
+		const moves =
+			!accept && ((change.props.gridBefore ?? grid.before) !== grid.before || (change.props.gridAfter ?? grid.after) !== grid.after)
+
+		return {
+			structural: moves,
+			apply: () => {
+				const now = edit.row(item.row)
+
+				edit.rows.set(
+					item.row,
+					accept
+						? withoutKeys(now, ["change"])
+						: defined({ ...change.props, from: now.from, ins: now.ins, del: now.del, source: now.source })
+				)
+			}
+		}
+	}
+
+	const src = ownItem(part, row, Item.Row)
+
+	if (src === NO_SOURCE || current.source !== undefined || sourceChanges(part, src).size === 0) return null
+
+	const now = rowGrid(part, store, row)
+	const before = sourceRowProps(part, store, src, true)
+	const moves = !accept && ((before.gridBefore ?? 0) !== now.before || (before.gridAfter ?? 0) !== now.after)
+
+	return {
+		structural: moves,
+		apply: () => {
+			const value = edit.row(item.row)
+
+			edit.rows.set(
+				item.row,
+				accept
+					? { ...value, source: "accepted" }
+					: defined<RowOverrides>({
+							from: value.from,
+							ins: value.ins,
+							del: value.del,
+							change: value.change,
+							source: "rejected" as const
+						})
+			)
+		}
+	}
+}
+
+function resolveCell(edit: TableEdit, item: TableChangeItem, accept: boolean, part: StoryPart, store: PropsStore): Resolution {
+	const row = edit.table.child(item.row)
+	const cell = row.child(item.cell)
+	const current = cellOverrides(cell)
+
+	if (item.what === "change") {
+		const change = current.change
+
+		if (change === undefined) return null
+
+		return {
+			structural: false,
+			apply: () => {
+				const entry = edit.cell(item.row, item.cell)
+				const now = entry.overrides
+
+				if (accept) {
+					entry.overrides = withoutKeys(now, ["change"])
+
+					return
+				}
+
+				entry.overrides = defined<CellOverrides>({
+					...change.props,
+					from: now.from,
+					ins: now.ins,
+					del: now.del,
+					source: now.source
+				})
+				entry.attrs["colwidth"] = change.colwidth
+			}
+		}
+	}
+
+	const src = ownItem(part, cell, Item.Cell)
+	const changes = sourceChanges(part, src)
+
+	if (src === NO_SOURCE || current.source !== undefined || changes.size === 0) return null
+
+	const span = cell.attrs["colspan"] as number
+	const vMerge = cell.attrs["vMerge"] as string | null
+	let nextSpan = span
+	let nextMerge = vMerge
+
+	if (!accept && changes.has(Revision.CellProperties)) {
+		const before = sourceCellProps(part, store, src, true)
+
+		nextSpan = Math.max(1, before.gridSpan ?? 1)
+		nextMerge = before.vMerge ?? null
+	}
+
+	const merge = changes.get(Revision.CellMerge)
+
+	if (merge !== undefined) {
+		const reader = part.reader
+		const revised = reader.attr(merge, Ns.W, "vMerge")
+		const original = reader.attr(merge, Ns.W, "vMergeOrig") ?? (revised === "cont" ? "rest" : "cont")
+		const state = accept ? revised : original
+		const below = item.row + 1 < edit.table.childCount ? edit.table.child(item.row + 1) : null
+		let continued = false
+
+		if (below !== null) {
+			// The cell below in the same grid columns.
+			const offsets = (node: Node): number[] => {
+				const out: number[] = []
+				let column = rowGrid(part, store, node).before
+
+				node.forEach(child => {
+					out.push(column)
+					column += Math.max(1, child.attrs["colspan"] as number)
+				})
+
+				return out
+			}
+			const start = offsets(row)[item.cell] ?? 0
+			const index = offsets(below).indexOf(start)
+
+			continued = index >= 0 && below.child(index).attrs["vMerge"] === "continue"
+		}
+
+		if (state !== undefined) nextMerge = mergeState(state, nextMerge, continued)
+	}
+
+	return {
+		structural: nextSpan !== span || nextMerge !== vMerge,
+		apply: () => {
+			const entry = edit.cell(item.row, item.cell)
+			const now = entry.overrides
+
+			entry.attrs["revision"] = (cell.attrs["revision"] as number) & ~RevisionFlag.Merged
+
+			if (accept) {
+				entry.overrides = { ...now, source: "accepted" }
+			} else {
+				entry.overrides = defined<CellOverrides>({
+					from: now.from,
+					ins: now.ins,
+					del: now.del,
+					change: now.change,
+					source: "rejected" as const
+				})
+				entry.attrs["colwidth"] = null
+			}
+
+			if (nextSpan !== span) entry.attrs["colspan"] = nextSpan
+			if (nextMerge !== vMerge) entry.attrs["vMerge"] = nextMerge
+		}
+	}
 }

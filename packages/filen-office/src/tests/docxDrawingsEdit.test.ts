@@ -1,0 +1,630 @@
+import type { Node } from "prosemirror-model"
+import { NodeSelection, TextSelection } from "prosemirror-state"
+import { describe, expect, it } from "vitest"
+import { Item, type DrawingInfo } from "@filen/office/core/docx"
+import { docxSchema, type DocxEditorCommand } from "@filen/office/core/docx/edit"
+import type { PagedEditor } from "@filen/office/core/docx/paged"
+import { saveDocx } from "@filen/office/core/docx/write"
+import { parseXml } from "@filen/office/core/xml"
+import { drawingState, mediaInUse } from "../core/docx/objects/edit"
+import { MAX_IMAGE_PIXELS, naturalExtent, sniffImage, type DocxImageInfo } from "../core/docx/objects/images"
+import { editStyle } from "../core/docx/write/atoms/drawings"
+import { openBytes } from "./docxEditFixtures"
+import { buildDocx, p } from "./docxSynthetic"
+import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
+import { DrawingDrag, handlePoints, moveCommand, resizedBox } from "../react/docx/edit/objects"
+
+const nodes = docxSchema.nodes
+const decoder = new TextDecoder()
+
+// ---- pictures --------------------------------------------------------------------------------------------
+
+function u32(value: number): number[] {
+	return [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255]
+}
+
+function chunk(type: string, data: readonly number[]): number[] {
+	return [...u32(data.length), ...[...type].map(c => c.charCodeAt(0)), ...data, 0, 0, 0, 0]
+}
+
+// A PNG header of a width x height picture (pHYs for `dpi`); the pixels are not needed to place it.
+export function png(width: number, height: number, dpi?: number): Uint8Array {
+	const ppm = dpi === undefined ? 0 : Math.round(dpi / 0.0254)
+
+	return new Uint8Array([
+		0x89,
+		0x50,
+		0x4e,
+		0x47,
+		0x0d,
+		0x0a,
+		0x1a,
+		0x0a,
+		...chunk("IHDR", [...u32(width), ...u32(height), 8, 6, 0, 0, 0]),
+		...(dpi === undefined ? [] : chunk("pHYs", [...u32(ppm), ...u32(ppm), 1])),
+		...chunk("IEND", [])
+	])
+}
+
+function jpeg(width: number, height: number, dpi: number): Uint8Array {
+	return new Uint8Array([
+		0xff,
+		0xd8,
+		0xff,
+		0xe0,
+		0,
+		16,
+		0x4a,
+		0x46,
+		0x49,
+		0x46,
+		0,
+		1,
+		1,
+		1,
+		dpi >> 8,
+		dpi & 255,
+		dpi >> 8,
+		dpi & 255,
+		0,
+		0,
+		0xff,
+		0xc0,
+		0,
+		11,
+		8,
+		height >> 8,
+		height & 255,
+		width >> 8,
+		width & 255,
+		1,
+		1,
+		0x11,
+		0,
+		0xff,
+		0xd9
+	])
+}
+
+const SVG = new TextEncoder().encode(
+	'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="2in" height="1in" viewBox="0 0 200 100"/>'
+)
+
+function inlinePicture(cx: number, cy: number, id = 1, rel = "rIdImg", descr?: string): string {
+	return (
+		`<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0" wp14:anchorId="1A2B3C4D"><wp:extent cx="${cx}" cy="${cy}"/>` +
+		`<wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="${id}" name="Picture ${id}"${descr === undefined ? "" : ` descr="${descr}"`}/>` +
+		'<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+		'<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr>' +
+		`<pic:cNvPr id="0" name="a.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+		`<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+		"</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+	)
+}
+
+function anchoredShape(cx: number, cy: number): string {
+	const choice =
+		'<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+		'<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>12700</wp:posOffset></wp:positionH>' +
+		'<wp:positionV relativeFrom="paragraph"><wp:posOffset>25400</wp:posOffset></wp:positionV>' +
+		`<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+		'<wp:wrapTight wrapText="bothSides"><wp:wrapPolygon edited="1"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21000"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>' +
+		'<wp:docPr id="7" name="Rectangle 7"/><wp:cNvGraphicFramePr/>' +
+		'<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/>' +
+		`<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>` +
+		"<wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"
+	const fallback =
+		'<w:pict><v:rect id="Rectangle 7" o:spid="_x0000_s1026" style="position:absolute;margin-left:1pt;margin-top:2pt;width:150pt;height:75pt;z-index:251659264;mso-position-horizontal-relative:text;mso-position-vertical-relative:text">' +
+		'<w10:wrap type="tight"/></v:rect></w:pict>'
+
+	return `<w:r><mc:AlternateContent><mc:Choice Requires="wps">${choice}</mc:Choice><mc:Fallback>${fallback}</mc:Fallback></mc:AlternateContent></w:r>`
+}
+
+const W10 = 'xmlns:w10="urn:schemas-microsoft-com:office:word"'
+
+function docx(body: string, media = true): Uint8Array {
+	return buildDocx({
+		document:
+			'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+			'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+			'xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+			'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" ' +
+			'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" ' +
+			`${W10} mc:Ignorable="wp14"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`,
+		...(media
+			? {
+					relationships: [{ id: "rIdImg", type: "image", target: "media/a.png" }],
+					parts: [{ name: "word/media/a.png", data: png(200, 100) }]
+				}
+			: {})
+	})
+}
+
+const INLINE = docx(
+	p("Before") + `<w:p>${'<w:r><w:t xml:space="preserve">Picture </w:t></w:r>'}${inlinePicture(1905000, 952500)}</w:p>` + p("After")
+)
+const ANCHORED = docx(
+	`<w:p>${anchoredShape(1905000, 952500)}<w:r><w:t>Text beside a shape that wraps tightly.</w:t></w:r></w:p>` + p("After")
+)
+
+// ---- helpers ---------------------------------------------------------------------------------------------
+
+function drawingPos(doc: Node, index = 0): number {
+	let found = -1
+	let count = 0
+
+	doc.descendants((node, pos) => {
+		if (found >= 0) return false
+		if (node.type === nodes.drawing) {
+			if (count++ === index) found = pos
+		}
+
+		return true
+	})
+
+	if (found < 0) throw new Error("no drawing")
+
+	return found
+}
+
+function select(editor: PagedEditor, index = 0): void {
+	const doc = editor.session.state.doc
+
+	editor.dispatch(editor.session.state.tr.setSelection(NodeSelection.create(doc, drawingPos(doc, index))))
+}
+
+async function run(editor: PagedEditor, command: DocxEditorCommand): Promise<boolean> {
+	const result = await editor.execute(command)
+
+	await settleAll(editor)
+
+	return result
+}
+
+interface Saved {
+	readonly bytes: Uint8Array
+	readonly drawings: readonly DrawingInfo[]
+}
+
+async function saved(
+	editor: PagedEditor,
+	pkg: Parameters<typeof saveDocx>[0]["pkg"],
+	context: Parameters<typeof saveDocx>[0]["context"]
+): Promise<Saved> {
+	const result = await saveDocx({ pkg, context, sessions: editor.sessions })
+	const bytes = result.bytes as Uint8Array
+	const opened = await openBytes(bytes)
+
+	return {
+		bytes,
+		drawings: opened.model.drawings.filter((drawing): drawing is DrawingInfo => drawing !== undefined)
+	}
+}
+
+async function partText(bytes: Uint8Array, name: string): Promise<string | undefined> {
+	const opened = await openBytes(bytes)
+
+	return opened.pkg.has(name) ? decoder.decode(await opened.pkg.opc.read(name)) : undefined
+}
+
+async function sameLayout(editor: PagedEditor, bytes: Uint8Array): Promise<void> {
+	await settleAll(editor)
+	expect(pageDigest(editor.layout)).toEqual(await savedDigest(bytes))
+}
+
+// ---- tests -----------------------------------------------------------------------------------------------
+
+describe("docx picture sniffing", () => {
+	it("reads format, pixel size and resolution from headers only", () => {
+		expect(sniffImage(png(300, 150, 300))).toMatchObject({ format: "png", width: 300, height: 150, contentType: "image/png" })
+		expect((sniffImage(png(300, 150, 300)) as DocxImageInfo).dpiX).toBeCloseTo(300, 0)
+		expect(sniffImage(jpeg(640, 480, 72))).toMatchObject({ format: "jpeg", width: 640, height: 480, dpiX: 72, extension: "jpeg" })
+		expect(sniffImage(SVG)).toMatchObject({ format: "svg", width: 192, height: 96 })
+		expect(naturalExtent(sniffImage(png(96, 48)) as DocxImageInfo)).toEqual({ cx: 914400, cy: 457200 })
+		expect(naturalExtent(sniffImage(png(300, 150, 300)) as DocxImageInfo).cx).toBeCloseTo(914400, -3)
+	})
+
+	it("refuses what Word does not read, and pictures past the limits", () => {
+		expect(sniffImage(new TextEncoder().encode("RIFF\0\0\0\0WEBPVP8 "))).toBe("webp")
+		expect(sniffImage(new Uint8Array([1, 2, 3, 4]))).toBe("format")
+		expect(sniffImage(png(5000, 5000))).toBe("pixels")
+		expect(5000 * 5000).toBeGreaterThan(MAX_IMAGE_PIXELS)
+		expect(sniffImage(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe("corrupt")
+	})
+
+	it("edits VML styles property by property", () => {
+		expect(
+			editStyle(
+				"position:absolute;width:10pt;height:5pt",
+				new Map([
+					["width", "20pt"],
+					["rotation", "90"]
+				])
+			)
+		).toBe("position:absolute;width:20pt;height:5pt;rotation:90")
+		expect(editStyle("width:1pt;Margin-Left:3pt", new Map([["margin-left", null]]))).toBe("width:1pt")
+	})
+})
+
+describe("docx drawing commands", () => {
+	it("resizes an inline picture keeping its proportions, writes extent and transform, and undoes to the source", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+
+		select(editor)
+		expect(editor.snapshot().context.drawing).toMatchObject({
+			kind: "picture",
+			wrap: "inline",
+			cx: 1905000,
+			cy: 952500,
+			resizable: true
+		})
+		expect(editor.canExecute("drawing.resize")).toBe(true)
+		expect(editor.canExecute("drawing.position")).toBe(false)
+
+		expect(await run(editor, { type: "drawing.resize", cx: 3810000, cy: 100, keepRatio: true })).toBe(true)
+		expect(editor.snapshot().context.drawing).toMatchObject({ cx: 3810000, cy: 1905000 })
+
+		const after = await saved(editor, pkg, context)
+
+		expect(after.drawings[0]).toMatchObject({ width: 3810000, height: 1905000, placement: "inline" })
+
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain('<a:ext cx="3810000" cy="1905000"/>')
+		expect(xml).toContain('wp14:anchorId="1A2B3C4D"')
+		await sameLayout(editor, after.bytes)
+
+		expect(await run(editor, { type: "history.undo" })).toBe(true)
+
+		const back = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		expect(await partText(back.bytes as Uint8Array, "word/document.xml")).toBe(await partText(INLINE, "word/document.xml"))
+	})
+
+	it("sets and clears alt text on wp:docPr and the picture", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.altText", text: 'A "bar" chart & <more>' })).toBe(true)
+
+		const xml = (await partText((await saved(editor, pkg, context)).bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain('descr="A &quot;bar&quot; chart &amp; &lt;more>"')
+		expect(xml.match(/descr=/g)).toHaveLength(2)
+		expect(editor.snapshot().context.drawing?.altText).toBe('A "bar" chart & <more>')
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.altText", text: "" })).toBe(true)
+		expect(editor.snapshot().context.drawing?.altText).toBe("")
+	})
+
+	it("rotates in quarter turns, the inline effect extent covering the turned box", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.rotate", by: 90 })).toBe(true)
+
+		const after = await saved(editor, pkg, context)
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain('<a:xfrm rot="5400000">')
+		expect(xml).toContain('<wp:effectExtent l="-476250" t="476250" r="-476250" b="476250"/>')
+		expect(after.drawings[0]).toMatchObject({ effectLeft: -476250, effectTop: 476250 })
+		await sameLayout(editor, after.bytes)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.rotate", by: 270 })).toBe(true)
+		expect(editor.snapshot().context.drawing?.rotation).toBe(0)
+		expect(editor.session.state.selection instanceof NodeSelection).toBe(true)
+	})
+
+	it("turns an inline picture into a floating one and back, wrapping and moving it", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.wrap", mode: "square" })).toBe(true)
+		expect(editor.snapshot().context.drawing).toMatchObject({ wrap: "square", anchored: true, relH: "column", relV: "paragraph" })
+
+		let after = await saved(editor, pkg, context)
+
+		expect(after.drawings[0]).toMatchObject({ placement: "anchor", anchor: { wrap: "square", behindDoc: false } })
+		await sameLayout(editor, after.bytes)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.position", x: 914400, y: 457200, relH: "page", relV: "page" })).toBe(true)
+		after = await saved(editor, pkg, context)
+		expect(after.drawings[0]?.anchor).toMatchObject({
+			horizontal: { relativeFrom: "page", offset: 914400 },
+			vertical: { relativeFrom: "page", offset: 457200 }
+		})
+		await sameLayout(editor, after.bytes)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.wrap", mode: "behind" })).toBe(true)
+		after = await saved(editor, pkg, context)
+		expect(after.drawings[0]?.anchor).toMatchObject({ wrap: "none", behindDoc: true })
+		await sameLayout(editor, after.bytes)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.wrap", mode: "inline" })).toBe(true)
+		after = await saved(editor, pkg, context)
+		expect(after.drawings[0]).toMatchObject({ placement: "inline", width: 1905000 })
+
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain('wp14:anchorId="1A2B3C4D"')
+		expect(xml).not.toContain("positionH")
+		await sameLayout(editor, after.bytes)
+	})
+
+	// A picture taller than the page above and below which nothing wraps leaves pages showing none of the body
+	// before its paragraph: made small again, the paragraph comes back to the first of them.
+	it("lays a paragraph out again from empty pages before it that a picture too tall for them left", async () => {
+		const { editor, pkg, context } = await pagedEditor(
+			docx(`<w:p>${inlinePicture(1905000, 952500)}<w:r><w:t xml:space="preserve"> Picture</w:t></w:r></w:p>` + p("After"))
+		)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.wrap", mode: "topAndBottom" })).toBe(true)
+		select(editor)
+		expect(await run(editor, { type: "drawing.resize", cx: 1905000, cy: 24000000, keepRatio: false })).toBe(true)
+		await sameLayout(editor, (await saved(editor, pkg, context)).bytes)
+		select(editor)
+		expect(await run(editor, { type: "drawing.resize", cx: 1905000, cy: 952500, keepRatio: false })).toBe(true)
+		await sameLayout(editor, (await saved(editor, pkg, context)).bytes)
+		expect(editor.pageCount).toBe(1)
+	})
+
+	it("keeps a tight wrap's polygon and brings the VML fallback in line", async () => {
+		const { editor, pkg, context } = await pagedEditor(ANCHORED)
+
+		select(editor)
+		expect(editor.snapshot().context.drawing).toMatchObject({ kind: "shape", wrap: "tight", x: 12700, y: 25400 })
+		expect(await run(editor, { type: "drawing.resize", cx: 3810000, cy: 1905000 })).toBe(true)
+		select(editor)
+		expect(await run(editor, { type: "drawing.wrap", mode: "through" })).toBe(true)
+		select(editor)
+		expect(await run(editor, { type: "drawing.position", x: 63500, y: 127000 })).toBe(true)
+
+		const after = await saved(editor, pkg, context)
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain(
+			'<wp:wrapThrough wrapText="bothSides"><wp:wrapPolygon edited="1"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21000"/>'
+		)
+		expect(xml).toContain("width:300pt;height:150pt")
+		expect(xml).toContain("margin-left:5pt;margin-top:10pt")
+		expect(xml).toContain('<w10:wrap type="through"/>')
+		expect(xml).toContain("<mc:Fallback>")
+		expect(after.drawings[0]).toMatchObject({ width: 3810000, anchor: { wrap: "through", horizontal: { offset: 63500 } } })
+		await sameLayout(editor, after.bytes)
+	})
+
+	it("deletes the selected drawing", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.delete" })).toBe(true)
+		expect((await saved(editor, pkg, context)).drawings).toHaveLength(0)
+	})
+})
+
+describe("docx picture insertion", () => {
+	it("inserts a picture as Word does: media part, relationship, Default content type, unique docPr id, its own size", async () => {
+		const bytes = docx(p("One") + p("Two"), false)
+		const { editor, pkg, context } = await pagedEditor(bytes)
+		const media = editor.addMedia(png(96, 48))
+
+		expect(media).toBeDefined()
+		editor.dispatch(editor.session.state.tr.setSelection(TextSelection.create(editor.session.state.doc, 4)))
+		expect(editor.canExecute("image.insert")).toBe(true)
+		expect(await run(editor, { type: "image.insert", media: media as number, altText: "Logo" })).toBe(true)
+
+		const after = await saved(editor, pkg, context)
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+		const rels = (await partText(after.bytes, "word/_rels/document.xml.rels")) ?? ""
+		const types = (await partText(after.bytes, "[Content_Types].xml")) ?? ""
+
+		expect(after.drawings).toHaveLength(1)
+		expect(after.drawings[0]).toMatchObject({ placement: "inline", graphic: "picture", width: 914400, height: 457200, docPrId: 1 })
+		expect(rels).toMatch(/Target="media\/image1\.png"/)
+		expect(types).toContain('Extension="png"')
+		expect(xml).toContain('descr="Logo"')
+		expect(parseXml(new TextEncoder().encode(xml)).count).toBeGreaterThan(0)
+
+		const reopened = await openBytes(after.bytes)
+		const ref = reopened.model.mediaRef(after.drawings[0]?.part ?? -1, after.drawings[0]?.embedId ?? "")
+
+		expect(ref).toMatchObject({ partName: "word/media/image1.png", contentType: "image/png" })
+		expect(await reopened.model.media(ref as NonNullable<typeof ref>)).toEqual(png(96, 48))
+		await sameLayout(editor, after.bytes)
+
+		// Laid out while edited, it is drawn from the editor's media store.
+		const shown = editor.edits.model.drawings.find(drawing => drawing?.embedId?.startsWith("filenMedia") === true)
+		const pending = shown === undefined ? undefined : editor.edits.model.mediaRef(shown.part, shown.embedId ?? "")
+
+		expect(pending).toMatchObject({ contentType: "image/png", external: false })
+		expect(await editor.edits.model.media(pending as NonNullable<typeof pending>)).toEqual(png(96, 48))
+
+		// Undone, nothing of it is written.
+		expect(await run(editor, { type: "history.undo" })).toBe(true)
+
+		const undone = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		expect(await partText(undone.bytes as Uint8Array, "word/media/image1.png")).toBeUndefined()
+		// The undo history can bring it back: its bytes stay.
+		expect(mediaInUse(editor.sessions.map(session => session.state)).has(media as number)).toBe(true)
+	})
+
+	it("fits a large picture to the text width and gives each new drawing its own id", async () => {
+		const bytes = docx(`<w:p>${inlinePicture(1905000, 952500, 5)}</w:p>${p("Two")}`)
+		const { editor, pkg, context } = await pagedEditor(bytes)
+		const media = editor.addMedia(png(1600, 800)) as number
+
+		editor.dispatch(editor.session.state.tr.setSelection(TextSelection.atEnd(editor.session.state.doc)))
+		expect(await run(editor, { type: "image.insert", media })).toBe(true)
+
+		const after = await saved(editor, pkg, context)
+		const added = after.drawings.find(drawing => drawing.docPrId !== 5)
+
+		// 6.5 in of text width.
+		expect(added).toMatchObject({ width: 5943600, height: 2971800, docPrId: 6 })
+		expect(await partText(after.bytes, "word/media/image1.png")).toBeDefined()
+		expect(await partText(after.bytes, "word/media/a.png")).toBeDefined()
+	})
+
+	it("writes an SVG picture with its PNG fallback (asvg:svgBlip), and refuses one without", async () => {
+		const { editor, pkg, context } = await pagedEditor(docx(p("One"), false))
+		const svg = editor.addMedia(SVG) as number
+		const fallback = editor.addMedia(png(192, 96)) as number
+
+		editor.dispatch(editor.session.state.tr.setSelection(TextSelection.create(editor.session.state.doc, 2)))
+		expect(await run(editor, { type: "image.insert", media: svg })).toBe(false)
+		expect(await run(editor, { type: "image.insert", media: svg, fallback })).toBe(true)
+
+		const after = await saved(editor, pkg, context)
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+		const types = (await partText(after.bytes, "[Content_Types].xml")) ?? ""
+
+		expect(xml).toMatch(/<a:blip r:embed="rId\d+"><a:extLst><a:ext uri="\{96DAC541-7B7A-43D3-8B79-37D633B846F1\}"><asvg:svgBlip/)
+		expect(types).toContain('Extension="svg" ContentType="image/svg+xml"')
+		expect(await partText(after.bytes, "word/media/image1.svg")).toBeDefined()
+		expect(await partText(after.bytes, "word/media/image1.png")).toBeDefined()
+		expect(after.drawings[0]).toMatchObject({ width: 1828800, height: 914400 })
+	})
+
+	it("replaces a selected drawing in place, the new picture fitting its box with its marks", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+
+		select(editor)
+
+		const marks = editor.session.state.doc.nodeAt(drawingPos(editor.session.state.doc))?.marks
+
+		expect(await run(editor, { type: "image.insert", media: editor.addMedia(png(400, 400)) as number })).toBe(true)
+
+		const node = editor.session.state.doc.nodeAt(drawingPos(editor.session.state.doc))
+
+		expect(node?.attrs["src"]).toBe(-1)
+		expect(node?.marks).toEqual(marks)
+
+		const after = await saved(editor, pkg, context)
+
+		expect(after.drawings).toHaveLength(1)
+		expect(after.drawings[0]).toMatchObject({ width: 952500, height: 952500 })
+		await sameLayout(editor, after.bytes)
+	})
+
+	it("refuses WebP and pictures over the limits without changing the document", async () => {
+		const { editor } = await pagedEditor(docx(p("One"), false))
+		const doc = editor.session.state.doc
+		const webp = editor.addMedia(new TextEncoder().encode("RIFF\0\0\0\0WEBPVP8 ")) as number
+		const huge = editor.addMedia(png(6000, 4000)) as number
+
+		expect(await editor.execute({ type: "image.insert", media: webp })).toBe(false)
+		expect(await editor.execute({ type: "image.insert", media: huge })).toBe(false)
+		expect(await editor.execute({ type: "image.insert", media: 999 })).toBe(false)
+		expect(editor.session.state.doc).toBe(doc)
+		expect(editor.addMedia(new Uint8Array(26 * 1024 * 1024))).toBeUndefined()
+	})
+
+	it("records a picture inserted while tracking as an insertion", async () => {
+		const { editor, pkg, context } = await pagedEditor(docx(p("One"), false))
+
+		context.review.tracking = true
+		context.identity.author = "Ada"
+		editor.dispatch(editor.session.state.tr.setSelection(TextSelection.create(editor.session.state.doc, 2)))
+		expect(await run(editor, { type: "image.insert", media: editor.addMedia(png(96, 96)) as number })).toBe(true)
+
+		const xml = (await partText((await saved(editor, pkg, context)).bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toMatch(/<w:ins [^>]*w:author="Ada"[^>]*><w:r>(<w:rPr>.*?<\/w:rPr>)?<w:drawing>/)
+	})
+})
+
+describe("docx drawings on the pages", () => {
+	it("finds a picture under a point, and its handles once selected", async () => {
+		const { editor } = await pagedEditor(INLINE)
+		const pos = drawingPos(editor.session.state.doc)
+		const caret = editor.geometry.locate(pos)
+
+		if (caret === undefined) throw new Error("not laid out")
+
+		// 1905000 x 952500 EMU: 200 x 100 px.
+		const hit = editor.hitObject(caret.page, caret.x + 100, caret.top + caret.height - 20)
+
+		expect(hit).toMatchObject({ kind: "drawing", pos, box: { x: caret.x, width: 200, height: 100 } })
+		expect(hit?.part).toBeUndefined()
+
+		const box = hit?.box ?? { x: 0, y: 0, width: 0, height: 0 }
+
+		expect(editor.hitObject(caret.page, box.x - 50, box.y - 50)).toBeUndefined()
+		select(editor)
+		expect(editor.hitObject(caret.page, box.x + box.width + 2, box.y + box.height + 2)).toMatchObject({
+			kind: "drawing",
+			pos,
+			part: "handle:se"
+		})
+		expect(editor.hitObject(caret.page, box.x + box.width / 2, box.y - 3, 2)?.part).toBe("handle:n")
+	})
+
+	it("works out a drag's box and the one command it ends with", () => {
+		const box = { x: 10, y: 20, width: 100, height: 50 }
+
+		expect(handlePoints(box).find(point => point.handle === "se")).toMatchObject({ x: 110, y: 70 })
+		expect(resizedBox(box, "se", 50, 0, true)).toEqual({ x: 10, y: 20, width: 150, height: 75 })
+		expect(resizedBox(box, "nw", 10, 10, false)).toEqual({ x: 20, y: 30, width: 90, height: 40 })
+		expect(resizedBox(box, "e", -500, 0, false).width).toBe(4)
+
+		const drawing = {
+			kind: "picture",
+			anchored: true,
+			wrap: "square",
+			cx: 952500,
+			cy: 476250,
+			x: 0,
+			y: 0,
+			relH: "column",
+			relV: "paragraph",
+			rotation: 0,
+			altText: "",
+			resizable: true,
+			rotatable: true,
+			placeable: true,
+			lockAspect: true,
+			pos: 3
+		} as const
+		const resize = new DrawingDrag(drawing, box, "se")
+
+		resize.move(100, 10)
+		expect(resize.transform).toBe("translate(0px, 0px) scale(2, 2)")
+		expect(resize.end()).toEqual({ type: "drawing.resize", cx: 1905000, cy: 952500 })
+
+		const free = new DrawingDrag(drawing, box, "se")
+
+		free.move(100, 10, true)
+		expect(free.end()).toEqual({ type: "drawing.resize", cx: 1905000, cy: 571500 })
+
+		const move = new DrawingDrag(drawing, box, undefined)
+
+		move.move(96, -48)
+		expect(move.end()).toEqual({ type: "drawing.position", x: 914400, y: -457200 })
+		expect(moveCommand({ ...drawing, anchored: false }, 5, 5)).toBeUndefined()
+	})
+})
+
+describe("docx drawing state", () => {
+	it("reads what a source drawing is without overrides", async () => {
+		const opened = await openBytes(ANCHORED)
+		const session = new (await import("@filen/office/core/docx/edit")).DocxEditorSession(opened.context)
+		const node = session.state.doc.nodeAt(drawingPos(session.state.doc)) as Node
+
+		expect(drawingState(opened.context, node)).toMatchObject({
+			kind: "shape",
+			wrap: "tight",
+			posX: 12700,
+			posY: 25400,
+			rotatable: true
+		})
+		expect(opened.model.parts[0]?.kinds.includes(Item.AlternateContent)).toBe(true)
+	})
+})

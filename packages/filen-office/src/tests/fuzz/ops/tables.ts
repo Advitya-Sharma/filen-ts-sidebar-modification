@@ -1,11 +1,14 @@
 import type { Node } from "prosemirror-model"
 import { TextSelection } from "prosemirror-state"
+import { resolveChanges, reviewIndexWanted, storyReviewIndex } from "../../../core/docx/review/accept"
+import { ReviewKind } from "../../../core/docx/review/index"
 import { docxSchema, type DocxEditorCommand, type DocxEditorSession } from "../harness"
 import { textPositions, textblocks } from "./base"
 import type { EditOp, OpContext, Rand, ScriptEdit } from "./index"
 
 // Table structure and properties: rows, columns, merges and splits, widths, header rows, shading and
-// vertical alignment, new and deleted tables, through the table commands (also while changes are tracked).
+// vertical alignment, new and deleted tables, through the table commands (also while changes are tracked), and
+// accepting and rejecting the property changes tracked on tables, rows and cells.
 
 const nodes = docxSchema.nodes
 
@@ -118,6 +121,55 @@ function tableCommand(
 			identity.author = author
 		}
 	}
+}
+
+// Runs `run` with changes tracked (by the fuzz's author when the document has none), as before after it.
+function tracked(session: DocxEditorSession, run: () => boolean): boolean {
+	const review = session.context.review
+	const identity = session.context.identity
+	const was = review.tracking
+	const author = identity.author
+
+	review.tracking = true
+
+	if ((author ?? "") === "") identity.author = "Fuzz Author"
+
+	try {
+		return run()
+	} finally {
+		review.tracking = was
+		identity.author = author
+	}
+}
+
+// The ids of the property changes of tables, rows and cells (the review index's entries at their ends).
+function tableChangeIds(session: DocxEditorSession): string[] {
+	if (!reviewIndexWanted(session)) return []
+
+	const doc = session.state.doc
+	const ids = new Set<string>()
+
+	for (const entry of storyReviewIndex(session).entries()) {
+		if (entry.kind !== ReviewKind.PROPERTIES) continue
+
+		const type = doc.resolve(entry.from).parent.type
+
+		if (type === nodes.table || type === nodes.table_row || type === nodes.table_cell) ids.add(entry.id)
+	}
+
+	return [...ids]
+}
+
+// Accepts or rejects one property change of a table, row or cell by its id.
+function resolveTableChange(context: OpContext): string {
+	const ids = tableChangeIds(context.session)
+
+	if (ids.length === 0) return "noop"
+
+	const id = pick(context.rand, ids)
+	const type = context.rand() < 0.5 ? "review.accept" : "review.reject"
+
+	return `${type} #${id} ${context.execute(type, { type, id })}`
 }
 
 // A new table at the start of a random paragraph (in a cell sometimes).
@@ -291,6 +343,39 @@ export const tableOps: readonly EditOp[] = [
 		run: context => tableCommand(context, STRUCTURE, true)
 	},
 	{
+		name: "tableTrackedProps",
+		harness: "paged",
+		weight: 2,
+		run: context => tableCommand(context, [...PROPERTIES, ...MERGES], true),
+		// Last of the table edits: tracked property changes of the first table, its first cell's rejected again.
+		script: script(395, session => {
+			const done = tracked(
+				session,
+				() =>
+					onScriptTable(session, { type: "table.cell.shading", fill: "FFEE00" }, 0, 0) &&
+					onScriptTable(session, { type: "table.column.width", index: 0, twips: 1700 }, 0, 0) &&
+					onScriptTable(session, { type: "table.align", align: "center" }, 0, 0)
+			)
+			const table = scriptTable(session)
+			const cell = table?.node.firstChild?.firstChild
+			const value = cell?.marks.find(mark => mark.type === docxSchema.marks.cell_props)?.attrs["value"] as
+				{ readonly change?: { readonly id?: number } } | undefined
+			const id = value?.change?.id
+
+			if (!done || id === undefined) return done
+
+			const outcome = resolveChanges(session, storyReviewIndex(session), { id: String(id) }, false)
+
+			return outcome.tr !== null && session.dispatch(outcome.tr)
+		})
+	},
+	{
+		name: "tableResolve",
+		harness: "paged",
+		weight: 2,
+		run: resolveTableChange
+	},
+	{
 		name: "tableInsert",
 		harness: "paged",
 		weight: 1,
@@ -314,6 +399,12 @@ export const tableOps: readonly EditOp[] = [
 		run: context =>
 			context.rand() < 0.15
 				? newTable(context)
-				: tableCommand(context, [...STRUCTURE, ...MERGES, ...PROPERTIES, () => ({ type: "table.delete" })], context.rand() < 0.2)
+				: context.rand() < 0.1
+					? resolveTableChange(context)
+					: tableCommand(
+							context,
+							[...STRUCTURE, ...MERGES, ...PROPERTIES, () => ({ type: "table.delete" })],
+							context.rand() < 0.3
+						)
 	}
 ]

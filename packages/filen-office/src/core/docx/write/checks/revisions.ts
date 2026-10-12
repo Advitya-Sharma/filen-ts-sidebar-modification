@@ -71,7 +71,9 @@ function storyPart(input: CheckInput, part: CheckedPart): void {
 		// What the source has is checked where it came from.
 		if (id === undefined || input.source(`revision:${id}`) > 0) continue
 
-		if ((reader.attr(node, Ns.W, "author") ?? "") === "") fail(`${part.name}: a new w:${local} has no author`)
+		// w:tblGridChange is CT_Markup: an id, no author.
+		if (local !== "tblGridChange" && (reader.attr(node, Ns.W, "author") ?? "") === "")
+			fail(`${part.name}: a new w:${local} has no author`)
 
 		const date = reader.attr(node, Ns.W, "date")
 

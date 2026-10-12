@@ -300,9 +300,45 @@ export class Engine {
 	scan(story: StoryContext, container: number, values: PageValues): void {
 		const part = story.part
 		const end = part.end(container)
+		const edited = this.edits?.stories?.get(story.story)
+		const substitutes = this.edits?.substitutes
+
+		// The story's blocks as laid out: its edited blocks from the parts they were written to.
+		if (edited === undefined && (substitutes === undefined || substitutes.size === 0)) {
+			this.scanItems(story, part, container + 1, end, values)
+
+			return
+		}
+
+		const blocks: number[] = []
+
+		if (edited !== undefined) {
+			for (const value of edited) blocks.push(value)
+		} else {
+			for (let item = container + 1; item < end;) {
+				const kind = part.kinds[item] ?? 0
+
+				if (kind === Item.Paragraph || kind === Item.Table) {
+					blocks.push(part.index * REF_SPAN + item)
+					item = part.end(item)
+				} else {
+					item++
+				}
+			}
+		}
+
+		for (const block of blocks) {
+			const laid = substitutes?.get(block) ?? block
+			const from = this.model.parts[refPart(laid)]
+
+			if (from !== undefined) this.scanItems(story, from, refItem(laid), from.end(refItem(laid)), values)
+		}
+	}
+
+	private scanItems(story: StoryContext, part: StoryPart, start: number, end: number, values: PageValues): void {
 		const content = this.content
 
-		for (let item = container + 1; item < end; item++) {
+		for (let item = start; item < end; item++) {
 			if (part.kinds[item] !== Item.Paragraph) continue
 
 			const format = content.formatOf(part, item, undefined)
@@ -1450,7 +1486,7 @@ export class BlockFlow {
 			if (part === undefined) continue
 
 			top += engine.layoutBox(
-				{ part, story: index, counters: this.story.counters, noteMark: "", breaksAsLines: true },
+				{ part, story: index, counters: this.story.counters, noteMark: "", breaksAsLines: true, recount: this.story.recount },
 				Region.TEXTBOX,
 				area.page,
 				area.values,
@@ -1476,7 +1512,11 @@ export class BlockFlow {
 
 					if (story === undefined || part === undefined) continue
 
-					engine.scan({ part, story: index, counters: undefined, noteMark: "", breaksAsLines: true }, story.item, area.values)
+					engine.scan(
+						{ part, story: index, counters: undefined, noteMark: "", breaksAsLines: true, recount: false },
+						story.item,
+						area.values
+					)
 				}
 			}
 		}

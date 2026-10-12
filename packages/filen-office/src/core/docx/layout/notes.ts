@@ -213,8 +213,13 @@ export class FootnoteArea implements FootnoteSink {
 
 	constructor(engine: Engine) {
 		this.engine = engine
+		this.findSeparators()
+	}
 
-		const model = engine.model
+	// The separator notes: those settings name, else the first of each type. A notes part the editor made
+	// brings its own (looked for again at each page while none is known).
+	private findSeparators(): void {
+		const model = this.engine.model
 
 		for (const id of model.settings.footnoteSeparators) {
 			const story = model.footnotes.get(id)
@@ -264,6 +269,9 @@ export class FootnoteArea implements FootnoteSink {
 		this.width = width
 		this.values = values
 		this.frame = frame
+
+		if (this.separatorStory < 0 && this.continuationStory < 0) this.findSeparators()
+
 		this.separatorHeight = this.separatorStory < 0 ? points(12) : this.laid(this.separatorStory).height
 		this.continuationHeight = this.continuationStory < 0 ? points(12) : this.laid(this.continuationStory).height
 		this.startColumn(left, width)
@@ -379,7 +387,8 @@ export class FootnoteArea implements FootnoteSink {
 					story,
 					counters: undefined,
 					noteMark: engine.notes.marks.get(story) ?? "",
-					breaksAsLines: true
+					breaksAsLines: true,
+					recount: false
 				}
 
 				const trailing = engine.tuning.noteTrailingSpace
@@ -400,6 +409,10 @@ export class FootnoteArea implements FootnoteSink {
 
 			laid = { output, height }
 			this.cache.set(story, laid)
+
+			// Laid out with stand-ins for fonts still loading: the page is laid out again once they loaded (they
+			// may arrive before it closes).
+			if (engine.styles.hasMissing) engine.standIns = true
 		}
 
 		return laid

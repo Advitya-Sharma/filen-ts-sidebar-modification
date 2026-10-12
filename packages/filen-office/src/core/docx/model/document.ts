@@ -54,6 +54,8 @@ export interface Section {
 	// With references a section leaves out inherited from the previous section (ECMA-376 §17.10.5).
 	readonly effectiveHeaders: HeaderFooterSet
 	readonly effectiveFooters: HeaderFooterSet
+	// The document `sectPr` is a node of when it is not the main part's: properties an edit gave the section.
+	readonly document?: XmlDocument
 }
 
 export interface CommentAnchorTable {
@@ -90,6 +92,12 @@ export interface ModelInit {
 	readonly missingParts: readonly string[]
 	readonly malformedParts: readonly string[]
 	readonly rejectedParts: readonly string[]
+}
+
+// Pictures an editor holds that its package does not have yet (new pictures), by the part name the layout of
+// edits gives them (see DocumentEdits).
+export interface PendingMedia {
+	media(partName: string): { readonly bytes: Uint8Array; readonly contentType: string } | undefined
 }
 
 // The growable lists of a derived model (DocxModel.derive): entries added at the end, removed as undefined.
@@ -133,6 +141,8 @@ export class DocxModel {
 	readonly malformedParts: readonly string[]
 	// Parts referenced in a role their root element does not fit (a header that is the main document).
 	readonly rejectedParts: readonly string[]
+	// A derived model's pictures not in the package yet (DocumentEdits sets it).
+	pendingMedia: PendingMedia | undefined = undefined
 
 	constructor(init: ModelInit) {
 		const tables = init.tables
@@ -228,6 +238,17 @@ export class DocxModel {
 		}
 
 		const entry = this.package.opc.entry(relationship.partName)
+		const pending = entry === undefined ? this.pendingMedia?.media(relationship.partName) : undefined
+
+		if (pending !== undefined)
+			return {
+				relationshipId,
+				target: relationship.target,
+				external: false,
+				partName: relationship.partName,
+				contentType: pending.contentType,
+				size: pending.bytes.length
+			}
 
 		return {
 			relationshipId,
@@ -242,9 +263,15 @@ export class DocxModel {
 	// The bytes of an internal media part, inflated on each call (callers cache); undefined for external
 	// or missing targets, which are never fetched.
 	async media(ref: MediaRef): Promise<Uint8Array | undefined> {
-		if (ref.external || ref.partName === undefined || !this.package.has(ref.partName)) return undefined
+		if (ref.external || ref.partName === undefined) return undefined
+		if (!this.package.has(ref.partName)) return this.pendingMedia?.media(ref.partName)?.bytes
 
 		return this.package.opc.read(ref.partName)
+	}
+
+	// Whether `partName` is a picture the package or the editor's new pictures hold.
+	hasMedia(partName: string): boolean {
+		return this.package.has(partName) || this.pendingMedia?.media(partName) !== undefined
 	}
 
 	chartPart(drawing: DrawingInfo): string | undefined {

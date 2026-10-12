@@ -108,10 +108,17 @@ const EXAMPLES: Readonly<Record<DocxEditorCommandType, object>> = {
 	"header.differentFirst": {},
 	"header.differentOddEven": {},
 	"header.linkToPrevious": {},
+	"header.remove": {},
+	"footer.remove": {},
+	"section.deleteBreak": {},
 	"page.setup": { orientation: "landscape", margins: { top: 1440, left: 1080 }, columns: { count: 2, space: 720 } },
 	"note.insertFootnote": {},
 	"note.insertEndnote": {},
 	"note.goto": {},
+	"note.delete": {},
+	"note.convert": {},
+	"note.convertAll": { to: "endnote" },
+	"note.options": { kind: "footnote", format: "lowerRoman", restart: "eachPage", scope: "document" },
 	"field.update": {},
 	"field.updateAll": {},
 	"toc.insert": { levels: 3, hyperlinks: true },
@@ -120,15 +127,30 @@ const EXAMPLES: Readonly<Record<DocxEditorCommandType, object>> = {
 	"insert.pageCount": {},
 	"insert.date": { format: "d MMMM yyyy" },
 	"bookmark.add": { name: "Results2026" },
+	"insert.field": { instruction: "SEQ Figure \\* ARABIC" },
+	"bookmark.delete": { name: "_Toc123" },
+	"bookmark.rename": { name: "Results2026", to: "Results2027" },
 	"control.check": {},
 	"control.choose": { value: "Option B" },
 	"control.date": { iso: "2026-10-12" },
 	"control.clear": {},
+	"control.text": { text: "Jane Doe" },
+	"control.insert": {
+		kind: "dropDownList",
+		items: [
+			{ text: "Yes", value: "Y" },
+			{ text: "No", value: "N" }
+		]
+	},
+	"control.item.add": {},
+	"control.item.remove": {},
 	"image.insert": { media: 1 },
 	"drawing.resize": { cx: 914400, cy: 457200, keepRatio: true },
 	"drawing.position": { x: 0, y: -12700, relH: "page", relV: "paragraph" },
 	"drawing.wrap": { mode: "square" },
 	"drawing.altText": { text: "A chart of results" },
+	"drawing.rotate": { by: 90 },
+	"drawing.delete": {},
 	"equation.insert": { latex: "\\frac{a}{b}", display: true },
 	"equation.edit": { latex: "x^2" },
 	"view.reflow": { on: true }
@@ -167,11 +189,28 @@ const INVALID: readonly object[] = [
 	{ type: "toc.insert", levels: 10, hyperlinks: true },
 	{ type: "insert.date", format: "<script>" },
 	{ type: "bookmark.add", name: "_Toc123" },
+	{ type: "insert.field", instruction: "MERGEFIELD Name" },
+	{ type: "insert.field", instruction: "PAGE\u0000" },
+	{ type: "bookmark.rename", name: "Results", to: "_Toc1" },
 	{ type: "control.date", iso: "2026-02-30" },
+	{ type: "control.text", text: "a\u0007b" },
+	{ type: "control.insert", kind: "button" },
+	{ type: "control.insert", kind: "checkbox", items: [{ text: "a", value: "a" }] },
+	{
+		type: "control.insert",
+		kind: "comboBox",
+		items: [
+			{ text: "a", value: "a" },
+			{ text: "b", value: "a" }
+		]
+	},
 	{ type: "image.insert", media: 0 },
 	{ type: "image.insert", media: "1" },
 	{ type: "drawing.resize", cx: 0, cy: 10 },
 	{ type: "drawing.wrap", mode: "around" },
+	{ type: "drawing.rotate", by: 45 },
+	{ type: "drawing.altText", text: "bell\u0007" },
+	{ type: "image.insert", media: 2, fallback: 2 },
 	{ type: "equation.insert", latex: "x" },
 	{ type: "view.reflow" }
 ]
@@ -284,7 +323,7 @@ describe("docx editor command registry", () => {
 		const session = await sessionOf({ body: p("one two three") + p("four") })
 		const first = session.snapshot()
 
-		expect(first.context.story).toEqual({ kind: "body", index: session.story.story.index })
+		expect(first.context.story).toEqual({ kind: "body", index: session.story.story.index, header: null, note: null })
 		expect(first.context.table).toBeNull()
 		// The caret's formatting (a synthetic document without styles: Word's default font).
 		expect(first.values.font).toBe("Times New Roman")

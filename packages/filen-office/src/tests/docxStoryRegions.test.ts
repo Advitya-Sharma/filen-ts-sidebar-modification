@@ -206,19 +206,19 @@ describe("docx stories by region", () => {
 		editor.dispose()
 	})
 
-	it("passes over text boxes until editing one also updates its fallback", async () => {
-		const { editor } = await pagedEditor(fixture("06-textbox-shape.docx"))
+	it("finds text boxes where their lines are and edits them", async () => {
+		const { editor, pkg } = await pagedEditor(fixture("06-textbox-shape.docx"))
 		const line = lineOf(editor, Region.TEXTBOX)
 
 		if (line === undefined) throw new Error("no text box line")
 
-		expect(editor.storyAt(line.page, line.x, line.y)).toBe(-1)
-		// Entered on purpose, it is read-only.
+		expect(editor.storyAt(line.page, line.x, line.y)).toBe(line.story)
 		expect(editor.enterStory(line.story, line.page)).toBe(true)
 		expect(editor.activeRegion).toBe(Region.TEXTBOX)
-		expect(editor.session.readOnly).toBe(true)
-		expect(editor.snapshot().readOnlyReasons).toContain("textbox")
+		expect(editor.session.readOnly).toBe(false)
 		expect(editor.snapshot().context.story.kind).toBe("textbox")
+		editor.dispatch(editor.state.tr.insertText("Boxed: ", 1))
+		await expectSaved(editor, pkg)
 		editor.exitStory()
 		expect(editor.session.readOnly).toBe(false)
 		editor.dispose()
@@ -284,7 +284,8 @@ describe("docx stories by region", () => {
 		expect(notes.context.newStories.get(header)?.kind).toBe("header")
 		notes.editor.dispose()
 
-		// Without notes: a notes part made from a template, its separators no story of the document.
+		// Without notes: a notes part made from a template; its separators are notes of the derived model (laid out
+		// as the saved part has them), no stories of the document.
 		const plain = await pagedEditor(buildDocx({ body: "<w:p><w:r><w:t>Plain</w:t></w:r></w:p>" }))
 		const endnote = plain.editor.addStory("endnote")?.story.story
 
@@ -295,7 +296,14 @@ describe("docx stories by region", () => {
 		expect(endnote.item).toBe(-1)
 		expect(part?.name).toBe("word/endnotes.xml")
 		expect(new TextDecoder().decode(part?.document.bytes)).toContain('w:type="continuationSeparator"')
-		expect(plain.editor.edits.model.stories.filter(story => story?.part === endnote.part)).toEqual([endnote])
+		expect(
+			plain.editor.edits.model.stories.filter(story => story?.part === endnote.part).map(story => [story?.id, story?.noteType])
+		).toEqual([
+			["-1", "separator"],
+			["0", "continuationSeparator"],
+			[endnote.id, "normal"]
+		])
+		expect(plain.context.model.stories.some(story => story.part === endnote.part)).toBe(false)
 		expect(plain.context.newStories.get(endnote)).toMatchObject({ kind: "endnote", target: "word/endnotes.xml" })
 		plain.editor.dispose()
 	})

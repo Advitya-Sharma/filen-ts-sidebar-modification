@@ -148,6 +148,8 @@ const nodes = {
 			indent: nil,
 			spacing: nil,
 			borders: nil,
+			// Tab stops a command set (TabStop[]: a table of contents' right tab); null: as the source has them.
+			tabs: nil,
 			sectPr: src,
 			revision: { default: 0 }
 		}
@@ -230,13 +232,14 @@ const nodes = {
 	hyphen: { group: "inline", inline: true, atom: true, docxLevel: "run", attrs: { src, soft: { default: true } } },
 	// w:sym: a code point (often in the private use area) in a symbol font.
 	symbol: { group: "inline", inline: true, atom: true, docxLevel: "run", attrs: { src, char: { default: 0 }, font: nil } },
-	// w:footnoteReference / w:endnoteReference.
+	// w:footnoteReference / w:endnoteReference; `custom`: a new one followed by the custom mark Word shows
+	// instead of the number (w:customMarkFollows).
 	note_ref: {
 		group: "inline",
 		inline: true,
 		atom: true,
 		docxLevel: "run",
-		attrs: { src, kind: { default: "footnote" }, id: nil }
+		attrs: { src, kind: { default: "footnote" }, id: nil, custom: { default: false } }
 	},
 	// w:commentReference: zero-width, survives deletion like a range marker.
 	comment_ref: {
@@ -274,7 +277,9 @@ const nodes = {
 		attrs: { src, kind: { default: "Opaque" }, text: { default: "" }, markers: { default: NO_MARKERS } }
 	},
 	// A complex field (fldChar begin … end, `src` the begin run and `end` the end run, siblings) or a
-	// w:fldSimple (`src` = `end`), kept as its bytes and shown as its cached result. Deleted whole.
+	// w:fldSimple (`src` = `end`), kept as its bytes and shown as its cached result. Deleted whole. `state`: the
+	// value form commands set on a legacy form field (forms/controls.ts LegacyFieldState); null: as the source
+	// has it.
 	field: {
 		group: "inline",
 		inline: true,
@@ -287,7 +292,8 @@ const nodes = {
 			type: { default: "" },
 			instruction: { default: "" },
 			result: { default: "" },
-			markers: { default: NO_MARKERS }
+			markers: { default: NO_MARKERS },
+			state: nil
 		}
 	},
 	// A range marker inside a paragraph (see MarkerKind); `name` is a new bookmark's w:name.
@@ -442,6 +448,12 @@ export interface DrawingOverrides {
 	readonly descr?: string
 	// The handle (DocxMediaStore) of a new picture's bytes.
 	readonly media?: number
+	// Degrees clockwise (0, 90, 180, 270).
+	readonly rot?: number
+	// A new picture's wp:docPr id (allocated when inserted, so every write of it agrees).
+	readonly docPr?: number
+	// A new SVG picture's PNG (media handle), what Word shows where it cannot draw SVG.
+	readonly fallback?: number
 }
 
 // The marks inline content may carry (for a check that every mark is either inline or a block's).
@@ -576,8 +588,17 @@ export function inlineLevel(node: Node): InlineLevel | undefined {
 export function survivorsOf(node: Node): MarkerList {
 	const type = node.type.name
 
-	if (type === "marker")
-		return [{ src: node.attrs["src"] as number, kind: node.attrs["kind"] as MarkerKind, id: node.attrs["id"] as string | null }]
+	if (type === "marker") {
+		const marker: MarkerAttrs = {
+			src: node.attrs["src"] as number,
+			kind: node.attrs["kind"] as MarkerKind,
+			id: node.attrs["id"] as string | null
+		}
+		const name = node.attrs["name"] as string | null
+
+		// A new bookmark's name (a source one has it in its bytes).
+		return [name === null ? marker : ({ ...marker, name } as MarkerNodeAttrs)]
+	}
 	if (type === "comment_ref")
 		return [{ src: node.attrs["src"] as number, kind: "commentReference", id: node.attrs["id"] as string | null }]
 

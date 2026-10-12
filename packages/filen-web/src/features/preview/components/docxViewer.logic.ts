@@ -60,8 +60,9 @@ export function docxErrorKey(reason: DocxErrorReason | undefined): DocxErrorKey 
 export type DocxGateReason = DocxOpenInfo["gate"][number]
 export type DocxContextReason = "publicLink" | "archive" | "linkedFile" | "trash" | "sharedIn" | "notInDrive"
 // Opened for editing, then read-only: renamed to another format, or no longer savable (its directory went),
-// or a text box being edited.
-export type DocxEditingReason = "renamed" | "notWritable" | "textbox"
+// or a text box that cannot be edited (its text flows on into another box, its copy for older readers does not
+// match it, or the block holding it is locked).
+export type DocxEditingReason = "renamed" | "notWritable" | "linkedTextbox" | "textboxFallback" | "lockedTextbox"
 export type DocxViewOnlyReason = DocxGateReason | DocxContextReason | DocxEditingReason
 
 export interface DocxOpenContext {
@@ -137,8 +138,12 @@ export function viewOnlyReasonKey(reason: DocxViewOnlyReason): PreviewKey {
 			return "previewDocxViewOnlyRenamed"
 		case "notWritable":
 			return "previewDocxViewOnlyNotWritable"
-		case "textbox":
-			return "previewDocxViewOnlyTextbox"
+		case "linkedTextbox":
+			return "previewDocxViewOnlyLinkedTextbox"
+		case "textboxFallback":
+			return "previewDocxViewOnlyTextboxFallback"
+		case "lockedTextbox":
+			return "previewDocxViewOnlyLockedTextbox"
 	}
 }
 

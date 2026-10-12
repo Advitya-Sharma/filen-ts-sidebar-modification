@@ -34,6 +34,7 @@ import { MarkChanges, MarkSetChanges } from "./marks"
 import { AttrChanges } from "./attrs"
 import { baseFits } from "./formatting"
 import { knowOrigins } from "./origin"
+import { commandAllowed } from "./protection"
 import { readOnlyReasons, type DocxReadOnlyReason } from "./readOnly"
 import { registeredTransformer, storyHandler, type DocxTransactionTransformer, type StoryCommandContext } from "./registry"
 import { FORMATTING_MARKS, NO_SOURCE, docxSchema, inlineLevel, type IndentAttrs, type LockReason } from "./schema"
@@ -558,7 +559,7 @@ export class DocxEditorSession {
 	// Runs a base command or a feature's story command; document commands (scope "document") run on the
 	// paged editor, except undo and redo, which here undo this story's own edits.
 	execute(command: DocxEditorCommand): boolean {
-		if (this.disposed || (this.readOnly && isWriteCommand(command.type))) return false
+		if (this.disposed || (isWriteCommand(command.type) && (this.readOnly || !commandAllowed(this, command.type)))) return false
 
 		const tr = this.transactionFor(command)
 
@@ -1280,6 +1281,8 @@ export class DocxEditorSession {
 					return writable && tally.outdentable > 0
 			}
 
+			// Document protection that allows edits within limits (forms, comments, tracked changes).
+			if (info.write && !commandAllowed(this, info.type)) return false
 			if (BASE_TYPES.has(info.type)) return writable
 			if (info.scope !== "story" || (readOnly && info.write)) return false
 

@@ -3,6 +3,7 @@ import { XmlError, type XmlDocument } from "../../xml/index"
 import type { DocxModel, MaxIds, Story } from "../model/index"
 import { parseNumbering, type Numbering } from "../numbering/index"
 import { gateReasons, type DocxGateReason, type DocxPackage } from "../package"
+import { protectionMode } from "./protection"
 import { PropsStore } from "../props/index"
 import { DocxStyles, PropertyResolver, parseStyles, styleSettings } from "../styles/index"
 import { parseTheme } from "../theme/index"
@@ -171,11 +172,17 @@ export class DocxMediaStore {
 		this.entries.delete(handle)
 	}
 
+	// The last handle given out (handles ascend).
+	get lastHandle(): number {
+		return this.last
+	}
+
 	// Drops every entry the documents no longer use (a save knows which they are).
 	// `used` must hold every handle the sessions can still bring back: those in their documents and those in
-	// their undo history (an undo restores the picture).
-	releaseUnused(used: ReadonlySet<number>): void {
-		for (const handle of [...this.entries.keys()]) if (!used.has(handle)) this.release(handle)
+	// their undo history (an undo restores the picture). `through`: only handles given out up to it (later
+	// ones may be on their way into a command).
+	releaseUnused(used: ReadonlySet<number>, through = Infinity): void {
+		for (const handle of [...this.entries.keys()]) if (handle <= through && !used.has(handle)) this.release(handle)
 	}
 
 	clear(): void {
@@ -281,7 +288,13 @@ export async function openDocxEditContext(pkg: DocxPackage, model: DocxModel, re
 			now: reuse.clock ?? (() => Date.now())
 		},
 		media: new DocxMediaStore(),
-		review: { tracking: model.settings.trackRevisions, persist: true },
+		// Protection for tracked changes records every edit (ECMA-376 Part 1 §17.15.1.29).
+		review: {
+			tracking:
+				model.settings.trackRevisions ||
+				protectionMode(pkg.facts.documentProtection?.edit, pkg.facts.documentProtection?.enforced ?? false) === "trackedChanges",
+			persist: true
+		},
 		newStories: new Map()
 	}
 }

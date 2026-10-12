@@ -10,7 +10,7 @@ import type { Numbering } from "../numbering/numbering"
 import type { DocxStyles } from "../styles/styles"
 import { resolveSection, type PropertyResolver } from "../styles/resolve"
 import type { PageValues, StoryContext } from "./content"
-import { REF_SPAN, type LayoutEdits } from "./edits"
+import { REF_SPAN, refItem, refPart, type LayoutEdits } from "./edits"
 import { numberText } from "./fields"
 import {
 	Area,
@@ -422,7 +422,6 @@ class Paginator {
 	private readonly exclusions = new Exclusions()
 	private readonly footnotes: FootnoteArea
 	private readonly area = new Area()
-	private readonly storyCounters = new Map<number, NumberingCounters | undefined>()
 	// By page index.
 	private records: (PageRecord | undefined)[] = []
 	private readonly sectionPageCounts: number[] = []
@@ -494,7 +493,7 @@ class Paginator {
 		this.bodyStory =
 			body === undefined || story === undefined
 				? undefined
-				: { part: body, story: story.index, counters: this.counters(), noteMark: "", breaksAsLines: false }
+				: { part: body, story: story.index, counters: this.counters(), noteMark: "", breaksAsLines: false, recount: false }
 
 		let total = 0
 
@@ -518,11 +517,6 @@ class Paginator {
 
 		if (body?.counters !== undefined) body.counters.use(numbering)
 		else if (body !== undefined) this.bodyStory = { ...body, counters: new NumberingCounters(numbering) }
-
-		for (const [story, counters] of this.storyCounters) {
-			if (counters !== undefined) counters.use(numbering)
-			else this.storyCounters.delete(story)
-		}
 	}
 
 	private counters(): NumberingCounters | undefined {
@@ -531,20 +525,15 @@ class Paginator {
 		return numbering === undefined ? undefined : new NumberingCounters(numbering)
 	}
 
-	private storyContext(story: number): StoryContext | undefined {
+	// A header's or footer's (`counted`: its lists numbered), counted from its start each time (see
+	// StoryContext.recount).
+	private storyContext(story: number, counted: boolean): StoryContext | undefined {
 		const root = this.model.stories[story]
 		const part = root === undefined ? undefined : this.model.parts[root.part]
 
 		if (root === undefined || part === undefined) return undefined
 
-		let counters = this.storyCounters.get(story)
-
-		if (!this.storyCounters.has(story)) {
-			counters = this.counters()
-			this.storyCounters.set(story, counters)
-		}
-
-		return { part, story, counters, noteMark: "", breaksAsLines: true }
+		return { part, story, counters: counted ? this.counters() : undefined, noteMark: "", breaksAsLines: true, recount: true }
 	}
 
 	// Lays out every header, footer and note once off-page, so the fonts they need (tables and text boxes
@@ -559,13 +548,13 @@ class Paginator {
 			if (story === undefined) continue
 			if (story.kind !== "header" && story.kind !== "footer" && story.kind !== "footnote" && story.kind !== "endnote") continue
 
-			const context = this.storyContext(story.index)
+			const context = this.storyContext(story.index, false)
 
 			if (context === undefined) continue
 
 			const region = story.kind === "header" ? Region.HEADER : story.kind === "footer" ? Region.FOOTER : Region.FOOTNOTE
 
-			this.engine.layoutBox({ ...context, counters: undefined }, region, scratch, this.values, this.frame, 0, 0, 600)
+			this.engine.layoutBox(context, region, scratch, this.values, this.frame, 0, 0, 600)
 			scratch.reset()
 		}
 	}
@@ -576,7 +565,7 @@ class Paginator {
 
 		if (section === undefined || body === undefined || section.sectPr < 0) return resolveSection({})
 
-		return this.engine.resolver.section(this.engine.store.section(body.document, section.sectPr))
+		return this.engine.resolver.section(this.engine.store.section(section.document ?? body.document, section.sectPr))
 	}
 
 	step(): Step {
@@ -822,11 +811,18 @@ class Paginator {
 	// ahead of it (keep chains, frames, joined paragraphs).
 	private ahead(flow: BlockFlow, part: number, item: number): boolean {
 		const last = Math.max(flow.index, flow.furthest)
+		// An edited paragraph inside a block (a table cell's) is laid out from an overlay of its own: it is where
+		// its source is.
+		const source = this.engine.edits?.sourceBlock?.(part, item) ?? -1
+		const sourcePart = source < 0 ? -1 : refPart(source)
+		const sourceItem = source < 0 ? -1 : refItem(source)
 
 		for (let k = flow.index; k <= last && k < flow.count; k++) {
 			const block = flow.blocks[k] ?? -1
+			const end = flow.partAt(k)?.end(block) ?? block + 1
 
-			if (flow.parts[k] === part && item >= block && item < (flow.partAt(k)?.end(block) ?? block + 1)) return true
+			if (flow.parts[k] === part && item >= block && item < end) return true
+			if (flow.parts[k] === sourcePart && sourceItem >= block && sourceItem < end) return true
 
 			// An edited paragraph counts under its source's key.
 			const key = this.engine.memoKey(flow.parts[k] ?? -1, block)
@@ -998,7 +994,8 @@ class Paginator {
 				story: index,
 				counters: undefined,
 				noteMark: engine.notes.marks.get(index) ?? "",
-				breaksAsLines: true
+				breaksAsLines: true,
+				recount: false
 			}
 
 			const flow = new BlockFlow(engine, context, Region.ENDNOTE, true)
@@ -1148,7 +1145,7 @@ class Paginator {
 
 	// Lays out a header or footer story at `top`; its height.
 	private layoutStory(story: number, output: PageOutput, region: Region, top: number): number {
-		const context = this.storyContext(story)
+		const context = this.storyContext(story, true)
 		const geometry = this.geometry
 
 		if (context === undefined || geometry === undefined) return 0
@@ -1186,7 +1183,7 @@ class Paginator {
 
 	private headerFooter(set: Section["effectiveHeaders"], odd: boolean): number {
 		if (this.sectionFirstPage && this.section.titlePage) return set.first
-		if (this.compat.evenAndOddHeaders && !odd) return set.even
+		if ((this.engine.edits?.evenAndOddHeaders ?? this.compat.evenAndOddHeaders) && !odd) return set.even
 
 		return set.default
 	}
@@ -1475,7 +1472,8 @@ class Paginator {
 		const text = page.text
 		const engine = this.engine
 		const style = this.lineNumberStyle()
-		const start = numbering.start ?? 1
+		// Word numbers from w:start + 1 (MS-OI29500 2.1.215: the value is how many numbers to skip).
+		const start = (numbering.start ?? 0) + 1
 		let n =
 			numbering.restart === "continuous" || (numbering.restart === "newSection" && this.lineSection === this.pageSection)
 				? this.bodyLines
@@ -2120,12 +2118,13 @@ class Paginator {
 	resyncedAt = -1
 
 	private formatOf(section: number): string | undefined {
-		const sectPr = this.model.sections[section]?.sectPr ?? -1
+		const info = this.model.sections[section]
+		const sectPr = info?.sectPr ?? -1
 		const body = this.body
 
 		return body === undefined || sectPr < 0
 			? undefined
-			: this.engine.resolver.section(this.engine.store.section(body.document, sectPr)).pageNumbering.format
+			: this.engine.resolver.section(this.engine.store.section(info?.document ?? body.document, sectPr)).pageNumbering.format
 	}
 }
 

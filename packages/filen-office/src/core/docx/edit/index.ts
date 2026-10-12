@@ -25,8 +25,20 @@ export {
 } from "./commands"
 export type { CommentCommand } from "./commands/comments"
 export type { DocxRelativeH, DocxRelativeV, DocxWrapMode, DrawingCommand } from "./commands/drawings"
-export type { FieldCommand } from "./commands/fields"
-export type { FormCommand } from "./commands/forms"
+export { FIELD_CATALOGUE, fieldCodeType, type FieldCommand } from "./commands/fields"
+export { MAX_BOOKMARK_NAME, sessionBookmarks, validBookmarkName, type BookmarkIndex, type DocxBookmark } from "../fields/bookmarks"
+export {
+	DEFAULT_DATE_PICTURE,
+	DEFAULT_TIME_PICTURE,
+	UPDATABLE_FIELDS,
+	datePicture,
+	numericPicture,
+	parseFieldCode,
+	type FieldCode,
+	type FieldSwitch
+} from "../fields/evaluate"
+export { NO_ENTRIES, tocInstruction, tocOptions, tocRegions, type TocOptions, type TocRegion } from "../fields/toc"
+export { DOCX_CONTROL_KINDS, type DocxControlItemInput, type DocxControlKind, type FormCommand } from "./commands/forms"
 export {
 	DOCX_HIGHLIGHT_COLORS,
 	DOCX_THEME_COLORS,
@@ -82,8 +94,16 @@ export {
 	type StoryCommandResult,
 	type StoryHandlers
 } from "./registry"
-export { readOnlyReasons } from "./readOnly"
-export { NO_PROTECTION, protectionOf, type DocxProtection, type DocxProtectionMode } from "./protection"
+export { readOnlyReasons, textboxHolderLocked } from "./readOnly"
+export {
+	MAX_IMAGE_BYTES,
+	MAX_IMAGE_PIXELS,
+	sniffImage,
+	type DocxImageFormat,
+	type DocxImageInfo,
+	type DocxImageRefusal
+} from "../objects/images"
+export { NO_PROTECTION, commandAllowed, protectionMode, protectionOf, type DocxProtection, type DocxProtectionMode } from "./protection"
 export { NO_VALUES } from "./snapshot/formats"
 export { DOCX_COMMON_FONTS, docxFontList, type DocxFontChoice, type DocxFontKind } from "./fontList"
 export type { DocxFormatValue, DocxIndentValue, DocxLineSpacingValue, DocxParagraphSpacingValue } from "./snapshot/formats"

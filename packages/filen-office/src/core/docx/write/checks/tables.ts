@@ -7,7 +7,8 @@ import type { CheckedPart, CheckInput, DocxCheck } from "./index"
 // The tables a save wrote keep their grid: no row (w:gridBefore, its cells' spans, w:gridAfter) wider than
 // the w:tblGrid, every w:vMerge "continue" under a cell of the same columns that takes part in a merge, every
 // cell ending with a paragraph, gridCol widths that are twips, and tracked row and cell changes with an id
-// and an author. In a rewritten story only the tables with new markup are read, the source copies inside them
+// and an author: insertions and deletions, merges, and property changes holding the properties before them
+// (w:tblGridChange, CT_Markup, has an id only). In a rewritten story only the tables with new markup are read, the source copies inside them
 // (placeholders in the checked skeleton) from the source part. A table as broken as its source was is let
 // through: the save refuses only more of a kind of fault than the stories it rewrote had.
 
@@ -19,7 +20,7 @@ const MESSAGES: Readonly<Record<Fault, string>> = {
 	orphan: "a vertical merge continues under no merge",
 	unended: "a table cell does not end with a paragraph",
 	grid: "a grid column has no width in twips",
-	record: "a tracked row or cell change has no id or author"
+	record: "a tracked table, row or cell change has no id, author or previous properties"
 }
 const TWIPS = /^\d+$/
 
@@ -129,22 +130,60 @@ function noCounts(): Counts {
 	return { wide: 0, orphan: 0, unended: 0, grid: 0, record: 0 }
 }
 
-// A tracked change element of new markup with what Word needs of it.
-function recorded(view: View): boolean {
+// A tracked change element of new markup with what Word needs of it: an id, and an author (`author`).
+function recorded(view: View, author = true): boolean {
 	const id = view.reader.attr(view.node, Ns.W, "id")
-	const author = view.reader.attr(view.node, Ns.W, "author")
+	const name = view.reader.attr(view.node, Ns.W, "author")
 
-	return id !== undefined && TWIPS.test(id) && author !== undefined && author !== ""
+	return id !== undefined && TWIPS.test(id) && (!author || (name !== undefined && name !== ""))
+}
+
+// Property change elements (w:tblPrChange...) by the local name of the element before them they hold.
+const PROPERTY_CHANGES: Readonly<Record<string, string>> = {
+	tblPrChange: "tblPr",
+	tblGridChange: "tblGrid",
+	trPrChange: "trPr",
+	tblPrExChange: "tblPrEx",
+	tcPrChange: "tcPr"
+}
+const MARKS = new Set(["ins", "del", "cellIns", "cellDel", "cellMerge"])
+
+// Faults of the tracked change records among the children of a property element (new markup only).
+function recordFaults(children: readonly View[], resolver: Resolver, skeleton: XmlDocument | undefined): number {
+	let faults = 0
+
+	for (const child of children) {
+		if (skeleton !== undefined && child.doc !== skeleton) continue
+		if (child.reader.group(child.node) !== Ns.W) continue
+
+		const local = child.doc.localName(child.node)
+		const inner = PROPERTY_CHANGES[local]
+
+		if (MARKS.has(local)) {
+			if (!recorded(child)) faults++
+		} else if (inner !== undefined) {
+			if (!recorded(child, local !== "tblGridChange") || first(resolver.children(child), inner) === undefined) faults++
+		}
+	}
+
+	return faults
 }
 
 // Faults of one table; nested tables are found on their own.
 function tableFaults(table: View, resolver: Resolver, skeleton: XmlDocument | undefined, counts: Counts): void {
 	const children = resolver.children(table)
+	const tblPr = first(children, "tblPr")
 	const tblGrid = first(children, "tblGrid")
 	let columns = 0
 
+	if (tblPr !== undefined) counts.record += recordFaults(resolver.children(tblPr), resolver, skeleton)
+
 	if (tblGrid !== undefined) {
-		for (const col of resolver.children(tblGrid)) {
+		const cols = resolver.children(tblGrid)
+
+		counts.record += recordFaults(cols, resolver, skeleton)
+
+		for (const col of cols) {
 			if (!isW(col, "gridCol")) continue
 
 			columns++
@@ -166,9 +205,11 @@ function tableFaults(table: View, resolver: Resolver, skeleton: XmlDocument | un
 		const here = new Map<number, { span: number; merged: boolean }>()
 		let judged = true
 
-		for (const change of trChildren)
-			if ((skeleton === undefined || change.doc === skeleton) && (isW(change, "ins") || isW(change, "del")) && !recorded(change))
-				counts.record++
+		counts.record += recordFaults(trChildren, resolver, skeleton)
+
+		const tblPrEx = first(parts, "tblPrEx")
+
+		if (tblPrEx !== undefined) counts.record += recordFaults(resolver.children(tblPrEx), resolver, skeleton)
 
 		for (const part of parts) {
 			if (isW(part, "trPr") || isW(part, "tblPrEx")) continue
@@ -192,14 +233,7 @@ function tableFaults(table: View, resolver: Resolver, skeleton: XmlDocument | un
 				if (cell === undefined || cell.span !== span || !cell.merged) counts.orphan++
 			}
 
-			for (const change of props) {
-				if (
-					(skeleton === undefined || change.doc === skeleton) &&
-					(isW(change, "cellIns") || isW(change, "cellDel")) &&
-					!recorded(change)
-				)
-					counts.record++
-			}
+			counts.record += recordFaults(props, resolver, skeleton)
 
 			const blocks = content.filter(view => !isW(view, "tcPr"))
 			const last = blocks.at(-1)

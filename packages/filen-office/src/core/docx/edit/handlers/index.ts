@@ -2,7 +2,7 @@ import type { DocxTransactionTransformer, FeatureHandlers } from "../registry"
 import { COMMENT_HANDLERS } from "./comments"
 import { DRAWING_HANDLERS } from "./drawings"
 import { FIELD_HANDLERS } from "./fields"
-import { FORM_HANDLERS } from "./forms"
+import { FORMS_AFTER, FORMS_BEFORE, FORM_HANDLERS } from "./forms"
 import { FORMATTING_HANDLERS } from "./formatting"
 import { INSERT_HANDLERS } from "./insert"
 import { MATH_HANDLERS } from "./math"
@@ -26,6 +26,8 @@ export const FEATURE_HANDLERS: readonly FeatureHandlers[] = [
 	MATH_HANDLERS
 ]
 
-export const FEATURE_TRANSFORMERS: readonly DocxTransactionTransformer[] = [REVIEW_TRANSFORMER].filter(
+// Forms around tracked changes: before (a protection that forces tracking turns it on), after (protection,
+// content control locks and placeholders, on what tracking made of the transaction).
+export const FEATURE_TRANSFORMERS: readonly DocxTransactionTransformer[] = [FORMS_BEFORE, REVIEW_TRANSFORMER, FORMS_AFTER].filter(
 	(transform): transform is DocxTransactionTransformer => transform !== null
 )

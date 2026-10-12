@@ -32,6 +32,7 @@ import { docxSchema } from "../edit/schema"
 import { Item, buildDocxModel, type StoryPart } from "../model/index"
 import { partReader } from "../model/reader"
 import { Ns } from "../model/namespaces"
+import { drawingSignature } from "../objects/edit"
 import { parseNumbering, type Numbering } from "../numbering/index"
 import { openDocxPackage, type DocxPackage } from "../package"
 import { PropsStore } from "../props/index"
@@ -86,6 +87,11 @@ const REVISION_ELEMENTS = new Set([
 ])
 const PLACEHOLDER = encodeUtf8("<_/>")
 const STYLES_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
+
+// Whether a part typed `type` is XML (a picture is not, an SVG picture included: it is checked as media).
+function isXmlType(type: string | undefined): boolean {
+	return type === undefined || (!type.toLowerCase().startsWith("image/") && /[/+]xml$/i.test(type))
+}
 const NUMBERING_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
 
 function fail(reason: VerifyFailure, message: string): never {
@@ -766,6 +772,9 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 
 		if (key === partKey("[Content_Types].xml")) continue
 
+		// Media (a new picture's bytes) are not XML: their checks look at them (checks/drawings.ts).
+		if (!isXmlType(types.typeOf(name))) continue
+
 		if (name.endsWith(".rels")) {
 			const relsBytes = await joinBytes(change.bytes)
 
@@ -1339,7 +1348,12 @@ async function readBack(
 			let last = first
 			let size = 0
 
-			while (last < story.nodes.length && (last === first || size < READ_BACK_BYTES)) size += story.markup[last++]?.length ?? 0
+			let open = 0
+
+			while (last < story.nodes.length && (last === first || size < READ_BACK_BYTES || open > 0)) {
+				open += fieldCharDepth(story.nodes[last])
+				size += story.markup[last++]?.length ?? 0
+			}
 
 			await readBackBatch(input, story, first, last, input.changes.roots.get(story.part), relationshipsOf, clock)
 			first = last
@@ -1347,6 +1361,17 @@ async function readBack(
 			if (clock?.due === true) await clock.pause()
 		}
 	}
+}
+
+// How many fields spanning paragraphs a paragraph opens (begins less ends of its field characters).
+function fieldCharDepth(paragraph: Node | undefined): number {
+	let depth = 0
+
+	paragraph?.forEach(child => {
+		if (child.type === nodes.field_char) depth += child.attrs["kind"] === "begin" ? 1 : child.attrs["kind"] === "end" ? -1 : 0
+	})
+
+	return depth
 }
 
 // Paragraphs [first, last) of a rewritten story, read back by the model in a document of their own.
@@ -1421,8 +1446,8 @@ async function readBackBatch(
 
 		if (other === undefined || other.type !== nodes.paragraph) return
 
-		const expected = paragraphSignature(paragraph, input.changes.numIds, story.sections[first + index])
-		const actual = paragraphSignature(other, input.changes.numIds)
+		const expected = paragraphSignature(paragraph, input.changes.numIds, story.sections[first + index], input.context)
+		const actual = paragraphSignature(other, input.changes.numIds, undefined, context)
 
 		if (expected !== actual)
 			fail("content", `A rewritten paragraph of ${story.part.name} reads back differently:\n${actual}\n!=\n${expected}`)
@@ -1503,11 +1528,14 @@ function xmlText(text: string): string {
 	return out ?? text
 }
 
-// `section`: whether the paragraph is a section break as written (its own w:sectPr by default).
+// `section`: whether the paragraph is a section break as written (its own w:sectPr by default). With the
+// `context` the paragraph was built in, a drawing is what its markup and a command's overrides make it (its
+// size, placement, rotation and alt text), not its node's attributes.
 export function paragraphSignature(
 	node: Node,
 	numIds: ReadonlyMap<number, number>,
-	section = (node.attrs["sectPr"] as number) >= 0
+	section = (node.attrs["sectPr"] as number) >= 0,
+	context?: DocxEditContext
 ): string {
 	const numId = node.attrs["numId"] as number | null
 	const parts: string[] = [
@@ -1546,9 +1574,20 @@ export function paragraphSignature(
 			return
 		}
 
+		if (child.type === nodes.drawing && context !== undefined) {
+			parts.push(`drawing${drawingSignature(context, child)}[${markPart}]`)
+
+			return
+		}
+
 		const attributes = { ...child.attrs }
 
-		for (const name of ["src", "end", "node", "markers", "index", "simple"]) delete attributes[name]
+		// A legacy form field's `state` is what its w:ffData now says (write/sdt.ts), which this reading does not
+		// take back into the attribute.
+		for (const name of ["src", "end", "node", "markers", "index", "simple", "state"]) delete attributes[name]
+
+		// A bookmark's name is in its start's bytes, a new one's on its marker (checks/fields.ts checks them).
+		if (child.type === nodes.marker) delete attributes["name"]
 
 		parts.push(`${child.type.name}${JSON.stringify(sorted(attributes))}[${markPart}]`)
 	})

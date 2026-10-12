@@ -8,6 +8,20 @@ export {
 	type DocxObjectPress,
 	type DocxPageOverlay
 } from "./DocxEditor"
+export {
+	DRAWING_HANDLES,
+	DrawingDrag,
+	EMU_PER_PAGE_PX,
+	MIN_DRAWING_PX,
+	handleCursor,
+	handlePoints,
+	moveCommand,
+	previewTransform,
+	resizeCommand,
+	resizedBox,
+	type DrawingHandle,
+	type PageBox
+} from "./edit/objects"
 export { EditSink, plainText, type EditSinkOptions } from "./edit/sink"
 export { EditSurface, type DocxEditorMark } from "./edit/surface"
 export { useDocxEditor, type DocxEditorControls, type DocxEditorState } from "./useDocxEditor"

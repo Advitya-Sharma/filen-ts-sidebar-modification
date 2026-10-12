@@ -991,7 +991,7 @@ describe("docx writer: structure and values", () => {
 		expect(await read(result.bytes, "word/header1.xml")).toMatch(/<w:numId w:val="1[01]"\/>/)
 	})
 
-	it("keeps text boxes read-only", async () => {
+	it("edits a text box that has no fallback copy", async () => {
 		const document = await opened({
 			body:
 				'<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="5" name="Box"/><a:graphic>' +
@@ -1005,8 +1005,8 @@ describe("docx writer: structure and values", () => {
 
 		const edit = new DocxEditorSession(document.context, { story: box })
 
-		expect(edit.readOnly).toBe(true)
-		expect(edit.snapshot().readOnlyReasons).toContain("textbox")
+		expect(edit.readOnly).toBe(false)
+		expect(edit.snapshot().readOnlyReasons).toEqual([])
 	})
 
 	it("types a new relationships part the package has no type for", async () => {

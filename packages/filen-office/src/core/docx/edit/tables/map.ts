@@ -1,6 +1,7 @@
 import type { Mark, Node } from "prosemirror-model"
-import { Item, type StoryPart } from "../../model/index"
-import type { PropsStore } from "../../props/index"
+import { Item, Revision, type StoryPart } from "../../model/index"
+import { Ns } from "../../model/namespaces"
+import type { PropsStore, TableCellProps, TableProps, TableRowProps } from "../../props/index"
 import type { DocxCellVAlign, DocxTableAlign } from "../commands/tables"
 import { NO_SOURCE, docxSchema } from "../schema"
 
@@ -21,6 +22,10 @@ export interface TrackStamp {
 	readonly id?: number
 }
 
+// A source's own tracked property changes (w:tblPrChange, w:tblGridChange, w:trPrChange, w:tblPrExChange,
+// w:tcPrChange, w:cellMerge) once accepted (the records go) or rejected (the properties before them are back).
+export type SourceResolution = "accepted" | "rejected"
+
 // What table commands set on a table (its `props`): absent keys are as the source has them.
 export interface TableOverrides {
 	readonly align?: DocxTableAlign
@@ -29,6 +34,32 @@ export interface TableOverrides {
 	// A table the editor made: single borders (when no grid style applies) and Word's look of a new table.
 	readonly borders?: boolean
 	readonly look?: boolean
+	// Changes recorded while tracking: of the table's properties (w:tblPrChange) and of its grid
+	// (w:tblGridChange).
+	readonly change?: TableChange
+	readonly gridChange?: GridChange
+	readonly source?: SourceResolution
+}
+
+// A property change recorded while tracking: its stamp (the id is the change's, shared by everything one
+// command changed) and what the properties were before it. One per property element, the first: a later
+// tracked edit of the same element adds to it.
+export interface TableChange extends TrackStamp {
+	readonly styleId: string | null
+	readonly props: TableOverrides
+}
+
+export interface GridChange extends TrackStamp {
+	readonly grid: readonly number[]
+}
+
+export interface RowChange extends TrackStamp {
+	readonly props: RowOverrides
+}
+
+export interface CellChange extends TrackStamp {
+	readonly props: CellOverrides
+	readonly colwidth: number | null
 }
 
 // What table commands record on a row (its row_props mark value).
@@ -41,6 +72,8 @@ export interface RowOverrides {
 	// The stamps of the row's tracked insertion or deletion (its revision bits say which applies).
 	readonly ins?: TrackStamp
 	readonly del?: TrackStamp
+	readonly change?: RowChange
+	readonly source?: SourceResolution
 }
 
 // What table commands record on a cell (its cell_props mark value).
@@ -51,7 +84,12 @@ export interface CellOverrides {
 	readonly vAlign?: DocxCellVAlign
 	readonly ins?: TrackStamp
 	readonly del?: TrackStamp
+	readonly change?: CellChange
+	readonly source?: SourceResolution
 }
+
+// Overrides keys that are no property: the model, tracked insertions and deletions, change records.
+export const RECORD_KEYS: readonly string[] = ["from", "ins", "del", "change", "gridChange", "source"]
 
 const NONE: Readonly<Record<string, never>> = Object.freeze({})
 
@@ -81,6 +119,115 @@ export function propertySource(part: StoryPart, node: Node, kind: number): numbe
 
 	return NO_SOURCE
 }
+
+// ---- the source's own tracked property changes ---------------------------------------------------------
+
+// Revision kinds a table, row or cell holds in its property elements.
+const PROPERTY_KINDS: ReadonlySet<number> = new Set([
+	Revision.TableProperties,
+	Revision.TableGrid,
+	Revision.RowProperties,
+	Revision.TablePropertiesException,
+	Revision.CellProperties,
+	Revision.CellMerge
+])
+const NO_CHANGES: ReadonlyMap<number, number> = new Map()
+const changesByPart = new WeakMap<StoryPart, Map<number, Map<number, number>>>()
+
+// The tracked property changes of source item `item`: their change elements (w:tblPrChange...) by Revision
+// kind. Read once per part.
+export function sourceChanges(part: StoryPart, item: number): ReadonlyMap<number, number> {
+	let byItem = changesByPart.get(part)
+
+	if (byItem === undefined) {
+		byItem = new Map()
+
+		const revisions = part.revisions
+
+		for (let k = 0; k < revisions.count; k++) {
+			const kind = revisions.kind[k] ?? 0
+
+			if (!PROPERTY_KINDS.has(kind)) continue
+
+			const of = revisions.item[k] ?? -1
+			let kinds = byItem.get(of)
+
+			if (kinds === undefined) {
+				kinds = new Map()
+				byItem.set(of, kinds)
+			}
+
+			if (!kinds.has(kind)) kinds.set(kind, revisions.node[k] ?? -1)
+		}
+
+		changesByPart.set(part, byItem)
+	}
+
+	return item === NO_SOURCE ? NO_CHANGES : (byItem.get(item) ?? NO_CHANGES)
+}
+
+// The source item of a table, row or cell of `kind` (an Item) that holds its tracked property changes: its
+// own (a copy of one holds none), or -1.
+export function ownItem(part: StoryPart, node: Node, kind: number): number {
+	const src = node.attrs["src"] as number
+
+	return src !== NO_SOURCE && part.kinds[src] === kind ? src : NO_SOURCE
+}
+
+// Whether `node` (a table, row or cell) holds the source's tracked change of `kind` (a Revision), unresolved.
+export function unresolvedChange(part: StoryPart, node: Node, kind: number): boolean {
+	const item = ownItem(part, node, node.type === nodes.table ? Item.Table : node.type === nodes.table_row ? Item.Row : Item.Cell)
+
+	if (item === NO_SOURCE || !sourceChanges(part, item).has(kind)) return false
+
+	const overrides =
+		node.type === nodes.table ? tableOverrides(node) : node.type === nodes.table_row ? rowOverrides(node) : cellOverrides(node)
+
+	return overrides.source === undefined
+}
+
+// The source properties of a table, row or cell (`item` of the part) as the editor holds them: its own, or
+// with its tracked change rejected, those before it.
+export function sourceTableProps(part: StoryPart, store: PropsStore, item: number, rejected: boolean): TableProps {
+	const props = store.table(part.document, part.tables.tblPr[part.aux[item] ?? -1] ?? -1)
+
+	return rejected ? (props.change?.previous ?? props) : props
+}
+
+export function sourceRowProps(part: StoryPart, store: PropsStore, item: number, rejected: boolean): TableRowProps {
+	const props = store.row(part.document, part.rows.trPr[part.aux[item] ?? -1] ?? -1)
+
+	return rejected ? (props.change?.previous ?? props) : props
+}
+
+export function sourceCellProps(part: StoryPart, store: PropsStore, item: number, rejected: boolean): TableCellProps {
+	const props = store.cell(part.document, part.cells.tcPr[part.aux[item] ?? -1] ?? -1)
+
+	return rejected ? (props.change?.previous ?? props) : props
+}
+
+// The grid a source w:tblGridChange holds (the grid before it), or undefined.
+export function previousGrid(part: StoryPart, change: number | undefined): number[] | undefined {
+	if (change === undefined || change < 0) return undefined
+
+	const reader = part.reader
+	const document = part.document
+
+	for (let child = document.firstChildElement(change); child >= 0; child = document.nextSiblingElement(child)) {
+		if (!reader.is(child, Ns.W, "tblGrid")) continue
+
+		const out: number[] = []
+
+		for (let col = document.firstChildElement(child); col >= 0; col = document.nextSiblingElement(col))
+			if (reader.is(col, Ns.W, "gridCol")) out.push(reader.int(col, Ns.W, "w", 0))
+
+		return out
+	}
+
+	return undefined
+}
+
+// ---- grids ----------------------------------------------------------------------------------------------
 
 export interface RowGrid {
 	readonly before: number
@@ -124,11 +271,18 @@ export function rowGrid(part: StoryPart, store: PropsStore, row: Node): RowGrid 
 	if (grid !== undefined) return grid
 
 	const source = propertySource(part, row, Item.Row)
-	const base = source === NO_SOURCE ? PLAIN_ROW : sourceGrid(part, store, source)
+	const overrides = rowOverrides(row)
+	let base = PLAIN_ROW
+
+	if (source !== NO_SOURCE && overrides.source === "rejected") {
+		const props = sourceRowProps(part, store, source, true)
+
+		base = gridOf(props.gridBefore ?? 0, props.gridAfter ?? 0, props.header ?? false)
+	} else if (source !== NO_SOURCE) {
+		base = sourceGrid(part, store, source)
+	}
 
 	if (marks.row_props.isInSet(row.marks) === undefined) return base
-
-	const overrides = rowOverrides(row)
 
 	grid = gridOf(overrides.gridBefore ?? base.before, overrides.gridAfter ?? base.after, overrides.header ?? base.header)
 	rowGrids.set(row, grid)

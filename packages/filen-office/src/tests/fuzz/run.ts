@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import { basename } from "node:path"
 import type { Transaction } from "prosemirror-state"
+import { protectionOf } from "../../core/docx/edit/protection"
 import { CORPUS, fuzzConfig, nameHash, rng, type FuzzConfig, type Rand } from "./config"
 import { firstDifference, viewerDigest } from "./digest"
 import {
@@ -138,7 +139,9 @@ async function paged(config: FuzzConfig, file: string, seed: number, mode: Paged
 
 		try {
 			log.push(await op.run(contextOf(stream)))
-			await Promise.all(pending.splice(0))
+
+			// A command waiting for layout (a field update) waits while the editor is suspended, until it resumes.
+			if (!isSuspended(editor)) await Promise.all(pending.splice(0))
 		} catch (error) {
 			return result({ step, crash: errorText(error, 800), log })
 		}
@@ -166,11 +169,17 @@ async function paged(config: FuzzConfig, file: string, seed: number, mode: Paged
 		log.push("resume")
 	}
 
+	try {
+		await Promise.all(pending.splice(0))
+	} catch (error) {
+		return result({ step: "end", crash: errorText(error, 800), log })
+	}
+
 	const failure = await check("end")
 
 	if (failure !== undefined) return result(failure)
 
-	result({ ok: true, steps, applied, pages: editor.pageCount })
+	result({ ok: true, steps, applied, pages: editor.pageCount, protection: protectionOf(editor.body.session.context).mode })
 }
 
 // ---- damage ----
@@ -635,6 +644,8 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 	// sequence starts from the file's.
 	const { review, identity } = editable.context
 	const opened = { tracking: review.tracking, persist: review.persist, author: identity.author, initials: identity.initials }
+	// The body's top-level blocks (blockmove mode has nothing to move with fewer than two).
+	let blocks = 0
 
 	for (let q = 0; q < config.runs; q++) {
 		const seed = (base + q) >>> 0
@@ -657,6 +668,7 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 
 		try {
 			sessions = [bodySession(editable, proof)]
+			blocks = sessions[0]?.state.doc.childCount ?? 0
 
 			if (modes.has("stories")) {
 				for (const story of otherStories(editable)) {
@@ -777,7 +789,7 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 		}
 	}
 
-	print({ file: name, stats, ms: Math.round(performance.now() - started) })
+	print({ file: name, stats, blocks, protection: protectionOf(editable.context).mode, ms: Math.round(performance.now() - started) })
 }
 
 function damageContext(editable: Editable, session: DocxEditorSession, rand: Rand, report: Damage): OpContext {

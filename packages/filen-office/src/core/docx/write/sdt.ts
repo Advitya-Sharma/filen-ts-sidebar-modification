@@ -1,26 +1,46 @@
 import type { Mark, Node } from "prosemirror-model"
-import { NO_SOURCE } from "../edit/schema"
-import { Item } from "../model/index"
-import { copyNode, openTag, spliceChildren, type Out } from "./markup"
+import { NodeKind, decodeUtf8, escapeAttribute } from "../../xml/index"
+import { controlState, formFieldData, type ControlState, type LegacyFieldState, type MadeControl } from "../forms/controls"
+import { NO_SOURCE, docxSchema } from "../edit/schema"
+import { Item, type StoryPart } from "../model/index"
+import { Ns } from "../model/namespaces"
+import { copyNode, openTag, spliceChildren, textElement, type Names, type Out } from "./markup"
 import { src } from "./source"
 import type { StoryWriting } from "./story"
 import { DocxWriteError } from "./values"
+import type { WrapperWriter } from "./wrappers"
 
-// A block-level content control: its w:sdtPr and w:sdtEndPr as they were, its content written as blocks.
+// Content controls (ECMA-376 Part 1 §17.5.2 w:sdt) and legacy form fields (§17.16.17 w:ffData). A control as
+// the source has it is written as its bytes; one a form command changed gets its w:sdtPr spliced (the checkbox
+// state, the chosen list value, the date, the placeholder flag) with everything else kept; one the editor made
+// is written new.
+
+const W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+const W15 = "http://schemas.microsoft.com/office/word/2012/wordml"
+// CT_SdtPr's sequence (§17.5.2.38): w:showingPlcHdr comes after these; a type element or an extension after it.
+const BEFORE_PLACEHOLDER_FLAG = new Set(["rPr", "alias", "tag", "id", "lock", "placeholder", "temporary"])
+const LEGACY_FIELD_TYPES = new Set(["FORMTEXT", "FORMCHECKBOX", "FORMDROPDOWN"])
+
+// A block-level content control: its w:sdtPr and w:sdtEndPr as they were (spliced for a state a form command
+// set), its content written as blocks.
 export function* writeSdt(w: StoryWriting, out: Out, node: Node): Generator<void, void> {
-	refuseState(node)
-
 	const part = w.part
 	const document = part.document
 	const names = w.names
-
+	const state = controlState(node)
 	const own = src(node)
 
 	if (!w.owns(node) && own !== NO_SOURCE && part.kinds[own] === Item.Sdt) {
 		const row = part.aux[own] ?? -1
 
 		out.text(`<${names.el("sdt")}>`)
-		w.copyProperties(out, [part.sdts.sdtPr[row] ?? -1, part.sdts.sdtEndPr[row] ?? -1], ["id"])
+
+		if (state === null) w.copyProperties(out, [part.sdts.sdtPr[row] ?? -1, part.sdts.sdtEndPr[row] ?? -1], ["id"])
+		else {
+			writeSdtPr(w, out, part.sdts.sdtPr[row] ?? -1, state, true)
+			w.copyProperties(out, [part.sdts.sdtEndPr[row] ?? -1], [])
+		}
+
 		out.text(`<${names.el("sdtContent")}>`)
 		yield* w.writeChildren(out, node, NO_SOURCE, (child, blockOut) => w.writeBlock(blockOut, child))
 		out.text(`</${names.el("sdtContent")}></${names.el("sdt")}>`)
@@ -29,7 +49,16 @@ export function* writeSdt(w: StoryWriting, out: Out, node: Node): Generator<void
 	}
 
 	if (!w.owns(node)) {
-		out.text(`<${names.el("sdt")}><${names.el("sdtPr")}/><${names.el("sdtContent")}>`)
+		if (state !== null && state.made === undefined && state.copy === undefined)
+			throw new DocxWriteError("missingSource", "A changed content control without its source")
+
+		out.text(`<${names.el("sdt")}>`)
+
+		if (state?.made !== undefined) writeNewSdtPr(w, out, state.made, state)
+		else if (state?.copy !== undefined) writeCopiedSdtPr(w, out, state.copy, state)
+		else out.text(`<${names.el("sdtPr")}/>`)
+
+		out.text(`<${names.el("sdtContent")}>`)
 		yield* w.writeChildren(out, node, NO_SOURCE, (child, blockOut) => w.writeBlock(blockOut, child))
 		out.text(`</${names.el("sdtContent")}></${names.el("sdt")}>`)
 
@@ -37,13 +66,16 @@ export function* writeSdt(w: StoryWriting, out: Out, node: Node): Generator<void
 	}
 
 	const item = src(node)
-	const content = part.sdts.content[part.aux[item] ?? -1] ?? -1
+	const row = part.aux[item] ?? -1
+	const content = part.sdts.content[row] ?? -1
 
 	if (content < 0) throw new DocxWriteError("missingSource", "A content control without content")
 
 	const element = part.node(item)
 
-	out.bytes(w.bytes, document.start(element), document.openEnd(content))
+	if (state === null) out.bytes(w.bytes, document.start(element), document.openEnd(content))
+	else spliceSdtStart(w, out, element, part.sdts.sdtPr[row] ?? -1, content, state, false)
+
 	yield* w.writeChildren(out, node, item, (child, blockOut) => w.writeBlock(blockOut, child), {
 		from: document.openEnd(content),
 		to: document.contentEnd(content),
@@ -52,39 +84,290 @@ export function* writeSdt(w: StoryWriting, out: Out, node: Node): Generator<void
 	out.bytes(w.bytes, document.contentEnd(content), document.end(element))
 }
 
-// Whether a command set a control's state (checked, chosen, dated): not written yet.
+// Whether a form command set a control's state (checked, chosen, dated, placeholder): its runs are written
+// through the edit path.
 export function changedControl(holder: Node | Mark): boolean {
 	return (holder.attrs["state"] ?? null) !== null
 }
 
-function refuseState(holder: Node | Mark): void {
-	if (changedControl(holder)) throw new DocxWriteError("missingSource", "A changed content control")
+// The source element's bytes up to its w:sdtContent start tag with w:sdtPr spliced for `state` (a w:sdtPr the
+// source lacks is added first).
+function spliceSdtStart(
+	w: StoryWriting,
+	out: Out,
+	element: number,
+	sdtPr: number,
+	content: number,
+	state: ControlState,
+	dropId: boolean
+): void {
+	const document = w.part.document
+
+	if (sdtPr < 0) {
+		out.bytes(w.bytes, document.start(element), document.openEnd(element))
+		writeSdtPr(w, out, -1, state, dropId)
+		out.bytes(w.bytes, document.openEnd(element), document.openEnd(content))
+
+		return
+	}
+
+	out.bytes(w.bytes, document.start(element), document.start(sdtPr))
+	writeSdtPr(w, out, sdtPr, state, dropId)
+	out.bytes(w.bytes, document.end(sdtPr), document.openEnd(content))
+}
+
+// A source w:sdtPr with `state` applied: w14:checked, w:lastValue, w:fullDate and w:showingPlcHdr set, w:id
+// left out (`dropId`: a second part of a split control, or a copy).
+function writeSdtPr(w: StoryWriting, out: Out, sdtPr: number, state: ControlState, dropId: boolean): void {
+	const names = w.names
+
+	if (sdtPr < 0) {
+		out.text(
+			state.placeholder === true
+				? `<${names.el("sdtPr")}>${names.empty("showingPlcHdr")}</${names.el("sdtPr")}>`
+				: `<${names.el("sdtPr")}/>`
+		)
+
+		return
+	}
+
+	const part = w.part
+	const document = part.document
+	const reader = part.reader
+	let flagDone = state.placeholder !== true
+	const flag = (): void => {
+		if (!flagDone) out.text(names.empty("showingPlcHdr"))
+
+		flagDone = true
+	}
+
+	openTag(out, document, sdtPr)
+
+	for (let child = document.firstChild(sdtPr); child >= 0; child = document.nextSibling(child)) {
+		if (document.kinds[child] !== NodeKind.Element) {
+			copyNode(out, document, child)
+
+			continue
+		}
+
+		const group = reader.group(child)
+		const local = document.localName(child)
+		const ordered = group === Ns.W && BEFORE_PLACEHOLDER_FLAG.has(local)
+
+		if (!ordered && !(group === Ns.W && local === "showingPlcHdr")) flag()
+
+		if (group === Ns.W) {
+			switch (local) {
+				case "id":
+					if (!dropId) copyNode(out, document, child)
+
+					continue
+				case "showingPlcHdr":
+					if (state.placeholder === undefined) copyNode(out, document, child)
+					else flag()
+
+					flagDone = true
+
+					continue
+				case "dropDownList":
+				case "comboBox":
+					if (state.value === undefined) copyNode(out, document, child)
+					else withAttribute(out, part, child, names.attr("lastValue"), state.value)
+
+					continue
+				case "date":
+					if (state.date === undefined) copyNode(out, document, child)
+					else withAttribute(out, part, child, names.attr("fullDate"), state.date === null ? null : `${state.date}T00:00:00Z`)
+
+					continue
+			}
+		} else if (group === Ns.W14 && local === "checkbox" && state.checked !== undefined) {
+			checkboxWith(out, part, child, state.checked)
+
+			continue
+		}
+
+		copyNode(out, document, child)
+	}
+
+	flag()
+	closeElement(out, part, sdtPr)
+}
+
+function closeElement(out: Out, part: StoryPart, node: number): void {
+	const document = part.document
+
+	if (document.isSelfClosing(node)) out.text(`</${document.name(node)}>`)
+	else out.bytes(document.bytes, document.contentEnd(node), document.end(node))
+}
+
+// An element with one attribute set (null: removed), its content as it was.
+function withAttribute(out: Out, part: StoryPart, node: number, qualifiedName: string, value: string | null): void {
+	const document = part.document
+	const bytes = document.bytes
+	const self = document.isSelfClosing(node)
+	let tag = `<${document.name(node)}`
+
+	for (const attribute of document.attributes(node)) {
+		if (attribute.name !== qualifiedName) tag += ` ${attribute.name}="${escapeAttribute(attribute.value)}"`
+	}
+
+	if (value !== null) tag += ` ${qualifiedName}="${escapeAttribute(value)}"`
+
+	out.text(self ? `${tag}/>` : `${tag}>`)
+
+	if (!self) out.bytes(bytes, document.openEnd(node), document.end(node))
+}
+
+// w14:checkbox with w14:checked set (MS-DOCX §2.6.1.2), in the element's own prefix.
+function checkboxWith(out: Out, part: StoryPart, node: number, checked: boolean): void {
+	const document = part.document
+	const reader = part.reader
+	const name = document.name(node)
+	const prefix = name.includes(":") ? `${name.slice(0, name.indexOf(":"))}:` : ""
+	const value = `<${prefix}checked ${prefix}val="${checked ? "1" : "0"}"/>`
+	let written = false
+
+	openTag(out, document, node)
+
+	for (let child = document.firstChild(node); child >= 0; child = document.nextSibling(child)) {
+		if (document.kinds[child] === NodeKind.Element && reader.is(child, Ns.W14, "checked")) {
+			if (!written) out.text(value)
+
+			written = true
+
+			continue
+		}
+
+		if (!written && document.kinds[child] === NodeKind.Element) {
+			out.text(value)
+			written = true
+		}
+
+		copyNode(out, document, child)
+	}
+
+	if (!written) out.text(value)
+
+	closeElement(out, part, node)
+}
+
+// The prefix the part's root binds `uri` to, with a declaration for an element when it binds none.
+function prefixFor(part: StoryPart, uri: string, fallback: string): { prefix: string; declare: string } {
+	const root = part.document.documentElement()
+	const bound = root < 0 ? undefined : part.reader.namespaces.prefixFor(root, uri)
+
+	return bound === undefined || bound === ""
+		? { prefix: fallback, declare: ` xmlns:${fallback}="${uri}"` }
+		: { prefix: bound, declare: "" }
+}
+
+function attr(name: string, value: string): string {
+	return ` ${name}="${escapeAttribute(value)}"`
+}
+
+// The w:sdtPr of a control the editor made.
+export function newSdtPr(names: Names, part: StoryPart, made: MadeControl, state: ControlState): string {
+	let out = `<${names.el("sdtPr")}>${names.val("id", made.id)}`
+
+	if (state.placeholder === true) out += names.empty("showingPlcHdr")
+
+	switch (made.type) {
+		case "plainText":
+			out += names.empty("text")
+			break
+		case "picture":
+			out += names.empty("picture")
+			break
+		case "checkbox": {
+			const { prefix, declare } = prefixFor(part, W14, "w14")
+			const el = (local: string): string => `${prefix}:${local}`
+
+			out +=
+				`<${el("checkbox")}${declare}><${el("checked")}${attr(el("val"), state.checked === true ? "1" : "0")}/>` +
+				`<${el("checkedState")}${attr(el("val"), "2612")}${attr(el("font"), "MS Gothic")}/>` +
+				`<${el("uncheckedState")}${attr(el("val"), "2610")}${attr(el("font"), "MS Gothic")}/></${el("checkbox")}>`
+			break
+		}
+		case "dropDownList":
+		case "comboBox": {
+			const value = state.value ?? null
+
+			out += `<${names.el(made.type)}${value === null ? "" : attr(names.attr("lastValue"), value)}>`
+
+			for (const item of made.items ?? [])
+				out += names.empty("listItem", [
+					["displayText", item.text],
+					["value", item.value]
+				])
+
+			out += `</${names.el(made.type)}>`
+			break
+		}
+		case "date": {
+			const iso = state.date ?? null
+
+			out +=
+				`<${names.el("date")}${iso === null ? "" : attr(names.attr("fullDate"), `${iso}T00:00:00Z`)}>` +
+				`${names.val("dateFormat", made.dateFormat ?? "M/d/yyyy")}${names.val("lid", made.lid ?? "en-US")}` +
+				`${names.val("storeMappedDataAs", "dateTime")}${names.val("calendar", "gregorian")}</${names.el("date")}>`
+			break
+		}
+		case "repeatingSection":
+		case "repeatingSectionItem": {
+			const { prefix, declare } = prefixFor(part, W15, "w15")
+
+			out += `<${prefix}:${made.type}${declare}/>`
+			break
+		}
+		case "richText":
+			break
+	}
+
+	return `${out}</${names.el("sdtPr")}>`
+}
+
+function writeNewSdtPr(w: StoryWriting, out: Out, made: MadeControl, state: ControlState): void {
+	out.text(newSdtPr(w.names, w.part, made, state))
+}
+
+// The w:sdtPr of a copy of source control `copy`: the source's without its w:id, with `state` applied.
+function writeCopiedSdtPr(w: StoryWriting, out: Out, copy: number, state: ControlState): void {
+	const part = w.part
+
+	if (copy < 0 || copy >= part.count || part.kinds[copy] !== Item.Sdt)
+		throw new DocxWriteError("missingSource", "A copied content control without its source")
+
+	writeSdtPr(w, out, part.sdts.sdtPr[part.aux[copy] ?? -1] ?? -1, state, true)
 }
 
 // The start of source content control `own` (`mark`) around inline content, up to its w:sdtContent start
 // tag. `again`: a content control split in two, whose second part has no w:id of its own.
 export function openSdtWrapper(w: StoryWriting, out: Out, mark: Mark, own: number, again: boolean): void {
-	refuseState(mark)
-
 	const part = w.part
 	const document = part.document
 	const element = part.node(own)
 	const row = part.aux[own] ?? -1
 	const content = part.sdts.content[row] ?? -1
 	const sdtPr = part.sdts.sdtPr[row] ?? -1
+	const state = controlState(mark)
 
 	if (content < 0) throw new DocxWriteError("missingSource", "A content control without content")
 
 	if (!again) {
-		out.bytes(w.bytes, document.start(element), document.openEnd(content))
+		if (state === null) out.bytes(w.bytes, document.start(element), document.openEnd(content))
+		else spliceSdtStart(w, out, element, sdtPr, content, state, false)
 
 		return
 	}
 
 	openTag(out, document, element)
 
+	if (state !== null && sdtPr < 0) writeSdtPr(w, out, -1, state, true)
+
 	for (let child = document.firstChildElement(element); child >= 0 && child !== content; child = document.nextSiblingElement(child)) {
-		if (child === sdtPr) spliceChildren(out, part.reader, sdtPr, new Map([["id", ""]]), [])
+		if (child === sdtPr && state !== null) writeSdtPr(w, out, sdtPr, state, true)
+		else if (child === sdtPr) spliceChildren(out, part.reader, sdtPr, new Map([["id", ""]]), [])
 		else copyNode(out, document, child)
 	}
 
@@ -98,4 +381,156 @@ export function closeSdtWrapper(w: StoryWriting, out: Out, own: number): void {
 	const content = part.sdts.content[part.aux[own] ?? -1] ?? -1
 
 	out.bytes(w.bytes, document.contentEnd(content), document.end(part.node(own)))
+}
+
+// A run-level control the editor made (writers of new wrappers by mark type, write/wrappers.ts).
+export const NEW_CONTROL_WRAPPER: WrapperWriter = {
+	type: docxSchema.marks.content_control,
+	open(w, out, mark) {
+		const state = controlState(mark)
+
+		out.text(`<${w.names.el("sdt")}>`)
+
+		if (state?.made !== undefined) writeNewSdtPr(w, out, state.made, state)
+		else if (state?.copy !== undefined) writeCopiedSdtPr(w, out, state.copy, state)
+		else throw new DocxWriteError("missingSource", "A new content control without its definition")
+
+		out.text(`<${w.names.el("sdtContent")}>`)
+	},
+	close(w, out) {
+		out.text(`</${w.names.el("sdtContent")}></${w.names.el("sdt")}>`)
+	}
+}
+
+// ---- legacy form fields ---------------------------------------------------------------------------------
+
+// Whether a field node is a legacy form field whose value a form command set.
+export function legacyFieldEdited(node: Node): boolean {
+	return (
+		LEGACY_FIELD_TYPES.has(node.attrs["type"] as string) &&
+		(node.attrs["state"] ?? null) !== null &&
+		src(node) !== NO_SOURCE &&
+		(node.attrs["end"] as number) !== NO_SOURCE
+	)
+}
+
+// A legacy form field whose value a form command set: its runs from w:fldChar begin to end as the source has
+// them, with w:ffData's w:checkBox/w:checked or w:ddList/w:result set and, for a text field, its result runs
+// replaced by one run of the new text (in the first result run's properties).
+export function writeLegacyFormField(w: StoryWriting, out: Out, node: Node): void {
+	const part = w.part
+	const document = part.document
+	const reader = part.reader
+	const names = w.names
+	const begin = src(node)
+	const end = node.attrs["end"] as number
+	const state = (node.attrs["state"] ?? {}) as LegacyFieldState
+	const ffData = formFieldData(part, begin)
+
+	if (begin === NO_SOURCE || end === NO_SOURCE || ffData < 0) throw new DocxWriteError("missingSource", "A form field without its source")
+
+	const field = part.fieldOf(begin + 1)
+	const separate = field < 0 ? -1 : (part.fields.separate[field] ?? -1)
+	const from = part.start(begin)
+	const to = part.byteEnd(end)
+
+	w.copySource(out, from, document.start(ffData), false)
+	writeFfData(out, part, ffData, names, state)
+
+	if (state.text === undefined || separate < 0) {
+		w.copySource(out, document.end(ffData), to, false)
+
+		return
+	}
+
+	// The result: between the separate run and the end run.
+	const separateRun = part.parent(separate)
+	const endRun = end
+	const resultFrom = part.byteEnd(separateRun)
+	const resultTo = part.start(endRun)
+
+	w.copySource(out, document.end(ffData), resultFrom, false)
+
+	let written = false
+	const resultRun = (properties: number): void => {
+		const rPr = properties < 0 ? "" : decodeUtf8(document.bytes, document.start(properties), document.end(properties))
+
+		out.text(`<${names.el("r")}>${rPr}${resultMarkup(names, state.text ?? "")}</${names.el("r")}>`)
+		written = true
+	}
+
+	for (
+		let child = document.nextSibling(part.node(separateRun));
+		child >= 0 && document.start(child) < resultTo;
+		child = document.nextSibling(child)
+	) {
+		if (document.kinds[child] === NodeKind.Element && reader.is(child, Ns.W, "r")) {
+			if (!written) resultRun(reader.child(child, Ns.W, "rPr"))
+
+			continue
+		}
+
+		copyNode(out, document, child)
+	}
+
+	if (!written) resultRun(reader.child(part.node(separateRun), Ns.W, "rPr"))
+
+	w.copySource(out, resultTo, to, false)
+}
+
+// A text field's result: Word's five en spaces for an empty one, line feeds as w:br.
+function resultMarkup(names: Names, text: string): string {
+	if (text === "") return textElement(names, "     ", false)
+
+	return text
+		.split("\n")
+		.map(line => (line === "" ? "" : textElement(names, line, false)))
+		.join(names.empty("br"))
+}
+
+// w:ffData with the state set: w:checked in w:checkBox (after w:size/w:sizeAuto and w:default), w:result in
+// w:ddList (first).
+function writeFfData(out: Out, part: StoryPart, ffData: number, names: Names, state: LegacyFieldState): void {
+	const document = part.document
+	const reader = part.reader
+
+	openTag(out, document, ffData)
+
+	for (let child = document.firstChild(ffData); child >= 0; child = document.nextSibling(child)) {
+		const element = document.kinds[child] === NodeKind.Element
+
+		if (element && reader.is(child, Ns.W, "checkBox") && state.checked !== undefined) {
+			openTag(out, document, child)
+
+			for (let inner = document.firstChild(child); inner >= 0; inner = document.nextSibling(inner)) {
+				if (document.kinds[inner] === NodeKind.Element && reader.is(inner, Ns.W, "checked")) continue
+
+				copyNode(out, document, inner)
+			}
+
+			out.text(names.val("checked", state.checked ? "1" : "0"))
+			closeElement(out, part, child)
+
+			continue
+		}
+
+		if (element && reader.is(child, Ns.W, "ddList") && state.result !== undefined) {
+			openTag(out, document, child)
+			out.text(names.val("result", String(state.result)))
+
+			for (let inner = document.firstChild(child); inner >= 0; inner = document.nextSibling(inner)) {
+				if (document.kinds[inner] === NodeKind.Element && reader.is(inner, Ns.W, "result")) continue
+
+				copyNode(out, document, inner)
+			}
+
+			closeElement(out, part, child)
+
+			continue
+		}
+
+		copyNode(out, document, child)
+	}
+
+	closeElement(out, part, ffData)
 }

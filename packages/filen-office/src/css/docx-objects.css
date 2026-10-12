@@ -1,2 +1,54 @@
-/* Objects on the pages: selection frames and resize handles (data-fo-handle). Variables: --fo-handle-size,
-   --fo-handle-fill, --fo-handle-stroke, --fo-object-frame, --fo-object-hover. */
+/* Objects on the pages: the selection frame of a drawing and its resize handles (react/docx/edit/objects.ts
+   gives their places), drawn by the app in a page overlay, page px. Structure only; the look is the
+   variables --fo-handle-size, --fo-handle-fill, --fo-handle-stroke, --fo-object-frame, --fo-object-hover. */
+
+[data-fo-object-frame] {
+	position: absolute;
+	box-sizing: border-box;
+	border: 1px solid var(--fo-object-frame, currentColor);
+	pointer-events: none;
+}
+
+/* A drawing the pointer is over, before it is selected. */
+[data-fo-object-frame="hover"] {
+	border-color: var(--fo-object-hover, currentColor);
+}
+
+/* A handle is centred on the point it stands for (left/top set to it). */
+[data-fo-handle] {
+	position: absolute;
+	box-sizing: border-box;
+	width: var(--fo-handle-size, 8px);
+	height: var(--fo-handle-size, 8px);
+	margin: calc(var(--fo-handle-size, 8px) / -2) 0 0 calc(var(--fo-handle-size, 8px) / -2);
+	background: var(--fo-handle-fill, white);
+	border: 1px solid var(--fo-handle-stroke, currentColor);
+	pointer-events: auto;
+	touch-action: none;
+}
+
+[data-fo-handle="nw"],
+[data-fo-handle="se"] {
+	cursor: nwse-resize;
+}
+
+[data-fo-handle="ne"],
+[data-fo-handle="sw"] {
+	cursor: nesw-resize;
+}
+
+[data-fo-handle="n"],
+[data-fo-handle="s"] {
+	cursor: ns-resize;
+}
+
+[data-fo-handle="e"],
+[data-fo-handle="w"] {
+	cursor: ew-resize;
+}
+
+/* A drawing being dragged: shown where the drag puts it (a transform), laid out again only on release. */
+[data-fo-object-dragging] {
+	transform-origin: 0 0;
+	will-change: transform;
+}

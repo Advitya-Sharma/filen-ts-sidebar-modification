@@ -243,15 +243,27 @@ export const TABLE_HANDLERS: FeatureHandlers = {
 			(context, table, command) => splitCell(context.state, context.session.story.part, table, command.rows, command.cols),
 			canSplit
 		),
-		"table.row.header": onTable((context, table) => toggleHeaderRows(context.state, table)),
-		"table.style": onTable((context, table, command) => setTableStyle(context.state, context.context, table, command.styleId)),
-		"table.align": onTable((context, table, command) => alignTable(context.state, table, command.align)),
-		"table.column.width": onTable((context, table, command) =>
-			setColumnWidth(context.state, context.session.story.part, context.context.store, table, command.index, command.twips)
+		"table.row.header": onTable((context, table) =>
+			toggleHeaderRows(context.state, context.context, context.session.story.part, table)
 		),
-		"table.cell.shading": onTable((context, table, command) => shadeCells(context.state, table, command.fill)),
-		"table.cell.vAlign": onTable((context, table, command) => alignCells(context.state, table, command.align)),
-		"table.distributeColumns": onTable((context, table) => distributeColumns(context.state, table))
+		"table.style": onTable((context, table, command) =>
+			setTableStyle(context.state, context.context, context.session.story.part, table, command.styleId)
+		),
+		"table.align": onTable((context, table, command) =>
+			alignTable(context.state, context.context, context.session.story.part, table, command.align)
+		),
+		"table.column.width": onTable((context, table, command) =>
+			setColumnWidth(context.state, context.context, context.session.story.part, table, command.index, command.twips)
+		),
+		"table.cell.shading": onTable((context, table, command) =>
+			shadeCells(context.state, context.context, context.session.story.part, table, command.fill)
+		),
+		"table.cell.vAlign": onTable((context, table, command) =>
+			alignCells(context.state, context.context, context.session.story.part, table, command.align)
+		),
+		"table.distributeColumns": onTable((context, table) =>
+			distributeColumns(context.state, context.context, context.session.story.part, table)
+		)
 	},
 	units: TABLE_UNITS
 }

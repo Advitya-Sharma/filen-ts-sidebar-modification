@@ -126,6 +126,12 @@ export function expectedRefusal(reason: string): boolean {
 	return reasons !== undefined && reasons.split(", ").every(item => VIEW_ONLY.has(item))
 }
 
+// Protection modes that may leave a document nothing an op can change (forms with no field, comments only):
+// a run there may apply no edit. A document protected for tracked changes can always be edited.
+export function limitedProtection(mode: unknown): boolean {
+	return mode === "forms" || mode === "comments"
+}
+
 // Prints a run's summary, and adds it to the GitHub Actions job summary when there is one.
 export function summarize(line: string): void {
 	console.log(line)

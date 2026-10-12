@@ -9,6 +9,8 @@ export class PageIndex {
 	private readonly region: Region
 	private readonly byEntry = new Map<TopEntry, number[]>()
 	private readonly byPage: (readonly TopEntry[] | undefined)[] = []
+	// Per page: whether it shows any line of the region (of any story).
+	private readonly occupied: boolean[] = []
 
 	constructor(story: StoryEdits, region: Region = Region.BODY) {
 		this.story = story
@@ -22,11 +24,16 @@ export class PageIndex {
 		const story = this.story.story.story.index
 		const seen: TopEntry[] = []
 		let last: TopEntry | undefined
+		let occupied = false
 
 		for (let source = 0; source < page.sourceCount; source++) {
 			const at = source * SOURCE_INTS
 
-			if (page.sourceInts[at + SourceInt.REGION] !== this.region || page.sourceInts[at + SourceInt.STORY] !== story) continue
+			if (page.sourceInts[at + SourceInt.REGION] !== this.region) continue
+
+			occupied = true
+
+			if (page.sourceInts[at + SourceInt.STORY] !== story) continue
 
 			const entry = this.story.entryOf(page.sourceParts[source] ?? -1, page.sourceInts[at + SourceInt.ITEM] ?? -1)
 
@@ -42,6 +49,7 @@ export class PageIndex {
 		}
 
 		this.byPage[page.index] = seen
+		this.occupied[page.index] = occupied
 	}
 
 	// Forgets pages from `count` on (the layout has fewer pages now).
@@ -49,6 +57,7 @@ export class PageIndex {
 		for (let index = count; index < this.byPage.length; index++) this.forget(index)
 
 		this.byPage.length = Math.min(this.byPage.length, count)
+		this.occupied.length = Math.min(this.occupied.length, count)
 	}
 
 	private forget(index: number): void {
@@ -92,8 +101,9 @@ export class PageIndex {
 	}
 
 	// The page layout restarts at for edits to `entries`, or -1 when no page shows them: the first page showing
-	// one, or the page before when one opens it (it may now fit, in part, at the end of that page), or the page
-	// a keep-with-next chain moved off that the first page may decide (`keepFrom`: the chain may fit there now).
+	// one, or the page before when one opens it (it may now fit, in part, at the end of that page; pages before
+	// showing nothing of the region, left empty by an object too tall for them, may take it too), or the page a
+	// keep-with-next chain moved off that the first page may decide (`keepFrom`: the chain may fit there now).
 	restartPage(entries: readonly TopEntry[], keepFrom?: (page: number) => number): number {
 		const shown = this.shownFor(entries)
 		const first = this.firstPage(shown)
@@ -101,7 +111,9 @@ export class PageIndex {
 		if (first < 0) return -1
 
 		const opening = first > 0 ? this.byPage[first]?.[0] : undefined
-		const page = opening !== undefined && shown.includes(opening) ? first - 1 : first
+		let page = opening !== undefined && shown.includes(opening) ? first - 1 : first
+
+		while (page > 0 && page < first && this.occupied[page] === false) page--
 
 		return Math.min(page, keepFrom?.(first) ?? page)
 	}

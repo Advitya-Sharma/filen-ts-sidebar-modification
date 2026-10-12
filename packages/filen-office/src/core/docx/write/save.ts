@@ -389,7 +389,34 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		async loadRelationships(part) {
 			await relationshipsOf(part)
 		},
-		storyRelationship: target => created.get(partKey(target))?.relationship,
+		storyRelationship(target) {
+			const key = partKey(target)
+			const made = created.get(key)
+
+			if (made !== undefined) return made.relationship
+
+			// A section of a story written before the header or footer it refers to: the part is placed now.
+			const session = sessions.find(candidate => {
+				const story = added.get(candidate.story.story)
+
+				return story !== undefined && (story.kind === "header" || story.kind === "footer") && partKey(story.target) === key
+			})
+			const story = session === undefined ? undefined : added.get(session.story.story)
+			const plan = relationships.get(partKey(pkg.mainPart))
+
+			if (session === undefined || story === undefined || plan === undefined || pkg.has(story.target)) return undefined
+			if (partKey(session.story.part.name) !== key) return undefined
+
+			const relationship = plan.add({
+				type: NEW_STORY_PARTS[story.kind].relationship,
+				target: relativeTarget(pkg.mainPart, story.target)
+			})
+
+			created.set(key, { part: session.story.part, story, relationship })
+			taken.add(key)
+
+			return relationship
+		},
 		freeName: name => freeName(pkg, taken, name),
 		xml: name => optionalXml(pkg, name, clock),
 		replace(name, bytes) {
@@ -412,7 +439,12 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 			defaults.push({ extension, contentType })
 		}
 	}
-	const nested = planNested(sessions.map(session => session.story))
+	// Revision ids are this save's own (nextRevisionId below), so a text box's fallback copy takes them from the
+	// same count; the other ids are the editor's.
+	const nested = planNested(
+		sessions.map(session => session.story),
+		{ next: space => (space === "revision" ? ++revision : context.ids.next(space)) }
+	)
 	const env: WriteEnvironment = {
 		context,
 		nextRevisionId: () => ++revision,

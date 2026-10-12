@@ -2,6 +2,7 @@ import type { Node } from "prosemirror-model"
 import { describe, expect, it } from "vitest"
 import {
 	DocxEditorSession,
+	NO_SOURCE,
 	conservativeProof,
 	docxSchema,
 	formattingMarks,
@@ -244,7 +245,9 @@ describe("docx editing documents", () => {
 		const story = await bodyOf({ body: "<w:sectPr/>" })
 
 		expect(types(story.doc)).toEqual(["paragraph"])
-		expect(story.pristine.has(story.doc.child(0))).toBe(false)
+		// New content, which while untouched stands for no block (the body is written as its source).
+		expect(story.doc.child(0).attrs["src"]).toBe(NO_SOURCE)
+		expect(story.pristine.has(story.doc.child(0))).toBe(true)
 	})
 
 	it("locks the blocks a proof rejects, leaving their containers as built", async () => {

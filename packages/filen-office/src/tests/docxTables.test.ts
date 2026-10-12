@@ -1114,7 +1114,7 @@ describe("gate 2 table checks", () => {
 		})
 		expect(await check(GRID3, tbl([2000], [tr([tc("a")], '<w:ins w:id="5"/>')]))).toEqual({
 			reason: "content",
-			message: "word/document.xml: a tracked row or cell change has no id or author"
+			message: "word/document.xml: a tracked table, row or cell change has no id, author or previous properties"
 		})
 	})
 

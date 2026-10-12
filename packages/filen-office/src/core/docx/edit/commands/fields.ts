@@ -1,6 +1,7 @@
 import { boolArg, intArg, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
 
-// Fields and tables of contents. Updates wait for layout (page numbers), so they run asynchronously.
+// Fields, bookmarks and tables of contents. Updates are explicit, as in Word (Update Field, F9, Update Table):
+// they wait for layout (page numbers), so they run asynchronously.
 
 export type FieldCommand =
 	| { readonly type: "field.update" }
@@ -11,7 +12,11 @@ export type FieldCommand =
 	| { readonly type: "insert.pageCount" }
 	// A Word date picture ("d MMMM yyyy").
 	| { readonly type: "insert.date"; readonly format: string }
+	// A field of FIELD_CATALOGUE by its code (` SEQ Figure \* ARABIC `, ` PAGEREF _Ref1 \h `).
+	| { readonly type: "insert.field"; readonly instruction: string }
 	| { readonly type: "bookmark.add"; readonly name: string }
+	| { readonly type: "bookmark.delete"; readonly name: string }
+	| { readonly type: "bookmark.rename"; readonly name: string; readonly to: string }
 
 const document = { write: true, scope: "document", group: "field" } as const
 
@@ -23,12 +28,40 @@ export const FIELD_COMMANDS: readonly DocxCommandInfo<FieldCommand["type"]>[] = 
 	{ type: "insert.pageNumber", labelKey: "docx.insert.pageNumber", icon: "page-number", ...document },
 	{ type: "insert.pageCount", labelKey: "docx.insert.pageCount", icon: "page-count", ...document },
 	{ type: "insert.date", labelKey: "docx.insert.date", icon: "date", input: "date", ...document },
-	{ type: "bookmark.add", labelKey: "docx.bookmark.add", icon: "bookmark", input: "text", ...document }
+	{ type: "insert.field", labelKey: "docx.insert.field", icon: "field", input: "text", ...document },
+	{ type: "bookmark.add", labelKey: "docx.bookmark.add", icon: "bookmark", input: "text", ...document },
+	{ type: "bookmark.delete", labelKey: "docx.bookmark.delete", icon: "bookmark-delete", input: "choice", ...document },
+	{ type: "bookmark.rename", labelKey: "docx.bookmark.rename", icon: "bookmark-rename", input: "text", ...document }
 ]
 
-// Word's bookmark names: a letter, then letters, digits and underscores, 40 at most.
-const BOOKMARK_NAME = /^[A-Za-z][A-Za-z0-9_]{0,39}$/
-const DATE_PICTURE = /^[A-Za-z0-9 .,:/\\\-'"]{1,64}$/
+// The fields insert.field makes (those an update computes), with an example code each for a picker.
+export const FIELD_CATALOGUE: readonly { readonly type: string; readonly example: string }[] = [
+	{ type: "PAGE", example: " PAGE \\* MERGEFORMAT " },
+	{ type: "NUMPAGES", example: " NUMPAGES \\* MERGEFORMAT " },
+	{ type: "SECTIONPAGES", example: " SECTIONPAGES \\* MERGEFORMAT " },
+	{ type: "SECTION", example: " SECTION " },
+	{ type: "DATE", example: ' DATE \\@ "M/d/yyyy" ' },
+	{ type: "TIME", example: ' TIME \\@ "h:mm am/pm" ' },
+	{ type: "REF", example: " REF _Ref1 \\h " },
+	{ type: "PAGEREF", example: " PAGEREF _Ref1 \\h " },
+	{ type: "SEQ", example: " SEQ Figure \\* ARABIC " }
+]
+
+// Word's bookmark names: a letter, then letters, digits and underscores, 40 at most (hidden ones, starting
+// with "_", are Word's own).
+const BOOKMARK_NAME = /^\p{L}[\p{L}\p{N}_]{0,39}$/u
+// An existing bookmark: Word's hidden ones included.
+const ANY_BOOKMARK_NAME = /^[\p{L}_][\p{L}\p{N}_]{0,39}$/u
+// A date picture: no quotes or backslashes (it is written inside a quoted switch argument).
+const DATE_PICTURE = /^[\p{L}\p{N} .,:/\-']{1,64}$/u
+// A field code: printable, at most what Word's field dialog takes.
+const INSTRUCTION = /^\P{Cc}{1,255}$/u
+const CATALOGUE_TYPES: ReadonlySet<string> = new Set(FIELD_CATALOGUE.map(entry => entry.type))
+
+// The type of a field code (its first word, upper case).
+export function fieldCodeType(instruction: string): string {
+	return (/^\s*([^\s\\"]+)/.exec(instruction)?.[1] ?? "").toUpperCase()
+}
 
 export const parseFieldCommand: DocxCommandParser<FieldCommand> = (type, value) => {
 	switch (type) {
@@ -48,10 +81,28 @@ export const parseFieldCommand: DocxCommandParser<FieldCommand> = (type, value) 
 
 			return format === undefined || !DATE_PICTURE.test(format) ? undefined : { type, format }
 		}
-		case "bookmark.add": {
+		case "insert.field": {
+			const instruction = stringArg(value, "instruction", 255, 1)
+
+			return instruction === undefined || !INSTRUCTION.test(instruction) || !CATALOGUE_TYPES.has(fieldCodeType(instruction))
+				? undefined
+				: { type, instruction }
+		}
+		case "bookmark.add":
+		case "bookmark.delete": {
 			const name = stringArg(value, "name", 40, 1)
 
-			return name === undefined || !BOOKMARK_NAME.test(name) ? undefined : { type, name }
+			return name === undefined || !(type === "bookmark.add" ? BOOKMARK_NAME : ANY_BOOKMARK_NAME).test(name)
+				? undefined
+				: { type, name }
+		}
+		case "bookmark.rename": {
+			const name = stringArg(value, "name", 40, 1)
+			const to = stringArg(value, "to", 40, 1)
+
+			return name === undefined || to === undefined || !ANY_BOOKMARK_NAME.test(name) || !BOOKMARK_NAME.test(to)
+				? undefined
+				: { type, name, to }
 		}
 		default:
 			return { type }

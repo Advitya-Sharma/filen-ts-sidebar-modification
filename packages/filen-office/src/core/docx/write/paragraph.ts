@@ -2,10 +2,11 @@ import type { Mark, Node } from "prosemirror-model"
 import { decodeUtf8 } from "../../xml/index"
 import type { RunBase } from "../edit/formatting"
 import { NO_SOURCE, docxSchema, inlineLevel } from "../edit/schema"
-import type { BorderProps, ParagraphProps } from "../props/index"
+import type { BorderProps, ParagraphProps, TabStop } from "../props/index"
 import { paragraphAttrs, paragraphChange, type ParagraphAttrs, type ParagraphChange, type RevisionStamp } from "../review/track"
 import { Item, RevisionFlag } from "../model/index"
 import { Ns } from "../model/namespaces"
+import { sectionEditOf } from "../stories/sections"
 import { atomEdited, writeAtom, writeRunAtom } from "./atoms/index"
 import {
 	closeTag,
@@ -22,6 +23,7 @@ import {
 import { newParagraphTag, paragraphId, sameParagraphId, writeParagraphIdTag } from "./newStory"
 import { JUSTIFICATION, NUMBERING_PROPERTIES, PARAGRAPH_MARK_PROPERTIES, PARAGRAPH_PROPERTIES } from "./order.generated"
 import { baseWithoutChange, sameFormatting, writeRunProperties, type RunChange } from "./runs"
+import { sectionEditMarkup } from "./sections"
 import { sectionWritten, src } from "./source"
 import { changedControl } from "./sdt"
 import type { StoryWriting } from "./story"
@@ -31,6 +33,7 @@ import {
 	integer,
 	name as checkName,
 	oneOf,
+	optionalOneOf,
 	paragraphBorders as checkBorders,
 	spacing as checkSpacing
 } from "./values"
@@ -68,7 +71,11 @@ export function writeParagraph(w: StoryWriting, out: Out, node: Node): void {
 	const id = paragraphId(node)
 
 	for (const mark of node.marks)
-		if (mark.type !== marks.para_id && !(mark.type === marks.paragraph_change && writableChange(mark.attrs["value"])))
+		if (
+			mark.type !== marks.para_id &&
+			!(mark.type === marks.paragraph_change && writableChange(mark.attrs["value"])) &&
+			!(mark.type === marks.section_change && sectionEditOf(node) !== undefined)
+		)
 			throw new DocxWriteError("missingSource", `A ${mark.type.name} mark on a ${node.type.name}`)
 
 	// Word's w14:textId hashes the paragraph's text: an edited paragraph drops it (Word writes a new one);
@@ -216,6 +223,26 @@ function attributeChanges(
 	return changes
 }
 
+// w:tabs from the editor's tab stops (ST_TabJc, ST_TabTlc, twips), checked.
+function tabsElement(names: Names, tabs: readonly TabStop[]): string {
+	const out = tabs.map(tab => {
+		oneOf("w:tab/@w:val", TAB_ALIGNMENTS, tab.alignment)
+		optionalOneOf("w:tab/@w:leader", TAB_LEADERS, tab.leader)
+		integer("w:tab/@w:pos", tab.position, -31680, 31680)
+
+		return names.empty("tab", [
+			["val", tab.alignment],
+			["leader", tab.leader],
+			["pos", String(tab.position)]
+		])
+	})
+
+	return out.length === 0 ? "" : `<${names.el("tabs")}>${out.join("")}</${names.el("tabs")}>`
+}
+
+const TAB_ALIGNMENTS: ReadonlySet<string> = new Set(["clear", "start", "left", "center", "end", "right", "decimal", "bar", "num"])
+const TAB_LEADERS: ReadonlySet<string> = new Set(["none", "dot", "hyphen", "underscore", "heavy", "middleDot"])
+
 function onOff(value: boolean | undefined): string | undefined {
 	return value === undefined ? undefined : value ? "1" : "0"
 }
@@ -349,11 +376,18 @@ function writeParagraphProperties(w: StoryWriting, out: Out, node: Node, source:
 	const container = change?.source === "reject" && sourceChange >= 0 ? rejected : pPr
 	const props = w.env.context.store.paragraph(document, container)
 	const changes = attributeChanges(w, paragraphAttrs(node), props, owner, sourceNumPr)
+	// Tab stops a command set (a table of contents' right tab; absent from schemas without the attribute).
+	const tabs = node.attrs["tabs"] as readonly TabStop[] | null | undefined
+
+	if (tabs !== null && tabs !== undefined) changes.set("tabs", tabsElement(names, tabs))
 
 	const hasSection = row >= 0 && (part.paragraphs.sectPr[row] ?? -1) >= 0
+	const sectionEdit = sectionEditOf(node)
 
 	if (!sectionWritten(part, sectPr, w.cells > 0)) {
 		if (hasSection) changes.set("sectPr", "")
+	} else if (sectionEdit !== undefined) {
+		changes.set("sectPr", sectionEditMarkup(w, sectionEdit))
 	} else if (sectPr !== source || !hasSection || container !== pPr) {
 		const from = part.paragraphs.sectPr[part.aux[sectPr] ?? -1] ?? -1
 

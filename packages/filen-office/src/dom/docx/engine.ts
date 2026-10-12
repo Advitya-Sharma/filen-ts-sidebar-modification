@@ -786,6 +786,12 @@ export class DocxEngine implements DocxSessionApi {
 
 		if (pkg === undefined || this.closed) return null
 
+		// A new picture of the document being edited, not in the package yet.
+		const pending = pkg.opc.entry(partName) !== undefined ? undefined : this.layoutModel?.pendingMedia?.media(partName)
+
+		if (pending !== undefined)
+			return { bytes: pending.bytes.slice(), type: IMAGE_TYPES.has(pending.contentType) ? pending.contentType : "" }
+
 		const entry = pkg.opc.entry(partName)
 
 		if (entry === undefined || entry.uncompressedSize > MAX_MEDIA_BYTES) return null

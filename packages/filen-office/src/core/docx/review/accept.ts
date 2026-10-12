@@ -2,8 +2,8 @@ import { Fragment, type Mark, type MarkType, type Node } from "prosemirror-model
 import { closeHistory } from "prosemirror-history"
 import type { EditorState, Transaction } from "prosemirror-state"
 import type { DocxEditContext } from "../edit/context"
-import { tableMap } from "../edit/tables/map"
-import { clearCellRevision, clearRowRevision, removeCells, removeRows } from "../edit/tables/ops"
+import { cellOverrides, ownItem, rowOverrides, sourceChanges, tableMap, tableOverrides } from "../edit/tables/map"
+import { clearCellRevision, clearRowRevision, removeCells, removeRows, resolveTableChanges, type TableChangeItem } from "../edit/tables/ops"
 import type { PropsStore } from "../props/index"
 import { formattingMarks } from "../edit/formatting"
 import { markInternal, reinsert } from "../edit/invariants/core"
@@ -12,8 +12,9 @@ import type { DocxEditorSession } from "../edit/session"
 import { Ns } from "../model/namespaces"
 import { partReader } from "../model/reader"
 import type { XmlDocument } from "../../xml/index"
-import { Revision, RevisionFlag, type StoryPart } from "../model/index"
+import { Item, Revision, RevisionFlag, type StoryPart } from "../model/index"
 import { ReviewKind, revisionMarkId, type ReviewEntry, type ReviewIndex } from "./index"
+import { resolveSectionChanges } from "../stories/sections"
 import { paragraphChange, propertyMarks, setParagraphChange, withParagraphChange, type ParagraphAttrs, type ParagraphChange } from "./track"
 
 // Accepting and rejecting tracked changes, as one internal transaction of the story (one undo step): an
@@ -21,9 +22,11 @@ import { paragraphChange, propertyMarks, setParagraphChange, withParagraphChange
 // rejected insertion removes its content (range markers and comment anchors in it stay), a formatting or
 // paragraph property change keeps (accept) or restores (reject) the properties, an inserted or deleted
 // paragraph mark stays or joins its paragraph with the next one. Moves go as pairs with their range markers.
-// Rows and cells inserted or deleted go or stay the same way. Changes inside locked blocks, property changes of
-// tables, rows, cells and sections, and paragraph marks that cannot join (a section break, no paragraph after)
-// are skipped and counted.
+// Rows and cells inserted or deleted go or stay the same way; a property change of a table, row or cell (the
+// editor's record, or the source's w:tblPrChange, w:tblGridChange, w:trPrChange, w:tblPrExChange, w:tcPrChange
+// and w:cellMerge) keeps or restores the properties. Changes inside locked blocks, property changes of sections
+// and numbering, structure a rejection cannot restore (a grid the rows no longer fit) and paragraph marks that
+// cannot join (a section break, no paragraph after) are skipped and counted.
 
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
@@ -34,8 +37,8 @@ export type ReviewScope = { readonly all: true } | { readonly from: number; read
 
 export interface ReviewOutcome {
 	readonly tr: Transaction | null
-	// Changes resolved, and those left as they are (inside locked blocks, property changes of tables and sections,
-	// cells a vertical merge holds, marks that cannot join).
+	// Changes resolved, and those left as they are (inside locked blocks, property changes of sections, cells a
+	// vertical merge holds, table structure a rejection cannot restore, marks that cannot join).
 	readonly resolved: number
 	readonly skipped: number
 }
@@ -60,6 +63,8 @@ interface Plan {
 	readonly rows: { table: number; row: number; flag: number; remove: boolean }[]
 	// The same for cells (by their index in the row).
 	readonly cells: { table: number; row: number; index: number; flag: number; remove: boolean; key: string }[]
+	// Property changes of tables, rows and cells (by the table's position).
+	readonly tables: { table: number; item: TableChangeItem; key: string }[]
 	// What outlives the content it is in (range markers, comment anchors), and the markers before paragraphs
 	// joined to the one before them: comments all of whose anchors are among them go (accepting a deletion).
 	readonly outliving: { from: number; to: number; markers: MarkerList }[]
@@ -185,6 +190,7 @@ export function resolveChanges(session: DocxEditorSession, index: ReviewIndex, s
 		lists: [],
 		rows: [],
 		cells: [],
+		tables: [],
 		outliving: [],
 		joined: [],
 		dropped: new Set(),
@@ -192,6 +198,7 @@ export function resolveChanges(session: DocxEditorSession, index: ReviewIndex, s
 		skipped: new Set()
 	}
 	const moves = "all" in scope ? [] : movePairs(session, state.doc, target.ranges)
+	const body = session.story.story.kind === "body"
 	const seen = new Set<number>()
 
 	for (const [from, to] of target.ranges) collect(session, state.doc, from, to, target.id, false, accept, plan, seen)
@@ -199,8 +206,8 @@ export function resolveChanges(session: DocxEditorSession, index: ReviewIndex, s
 	// The other side of each move the scope touches goes with it, and the range markers of both.
 	for (const [from, to] of moves) collect(session, state.doc, from, to, undefined, true, accept, plan, seen)
 
-	// The story's final section properties (w:sectPrChange) are the section writer's.
-	if ("all" in scope && sourcePropertyChanges(session.story.part).others.has(state.doc.attrs["sectPr"] as number))
+	// The story's final section properties (w:sectPrChange): the body's are section edits (below).
+	if ("all" in scope && !body && sourcePropertyChanges(session.story.part).others.has(state.doc.attrs["sectPr"] as number))
 		plan.skipped.add("props:story")
 
 	if ("all" in scope) collectMoveMarkers(state.doc, 0, state.doc.content.size, plan)
@@ -208,11 +215,29 @@ export function resolveChanges(session: DocxEditorSession, index: ReviewIndex, s
 
 	dropComments(plan)
 
-	const tr = apply(state, plan, session.story.part, session.context.store)
+	let tr = apply(state, plan, accept, session.story.part, session.context.store)
+	// The body's section property changes (w:sectPrChange) are resolved as section edits (stories/sections.ts).
+	const sections = body ? state.tr : null
+	const sectionCount =
+		sections === null
+			? 0
+			: resolveSectionChanges(
+					sections,
+					session.context,
+					session.story.part,
+					state.doc,
+					accept,
+					"all" in scope ? undefined : "id" in scope ? { id: scope.id } : target.id !== undefined ? { id: target.id } : scope
+				)
+
+	if (sections !== null && sectionCount > 0) {
+		if (tr === null) tr = markInternal(sections)
+		else for (const step of sections.steps) tr.step(step.map(tr.mapping) ?? step)
+	}
 
 	skippedBy.set(session, plan.skipped.size)
 
-	return { tr, resolved: plan.resolved.size, skipped: plan.skipped.size }
+	return { tr, resolved: plan.resolved.size + sectionCount, skipped: plan.skipped.size }
 }
 
 // Whether a mark is one the scope resolves: any, the one with `id`, or (`moves`) a move's.
@@ -287,8 +312,16 @@ function collect(
 
 		seen.add(pos)
 
-		// Property changes of tables, rows, cells, sections and numbering: left to their writers.
-		if (ends && !moves && (id === undefined || id === `#${String(node.attrs["src"])}`) && others.has(node.attrs["src"] as number))
+		if (!moves && (node.type === nodes.table || node.type === nodes.table_row || node.type === nodes.table_cell))
+			collectTableChange(session.story.part, node, pos, index, stack, id, plan)
+		// Property changes of numbering, and of sections outside the body: left to their writers (the body's
+		// section breaks are section edits, resolved after the walk).
+		else if (
+			!moves &&
+			(id === undefined || id === `#${String(node.attrs["src"])}`) &&
+			others.has(node.attrs["src"] as number) &&
+			!(session.story.story.kind === "body" && node.type === nodes.paragraph && (node.attrs["sectPr"] as number) !== NO_SOURCE)
+		)
 			plan.skipped.add(`props:${String(pos)}`)
 
 		if ((node.type === nodes.table_row || node.type === nodes.table_cell) && (node.attrs["revision"] as number) !== 0) {
@@ -644,6 +677,93 @@ function tableChangeId(node: Node): string {
 	return id === undefined ? `#${String(node.attrs["src"])}` : String(id)
 }
 
+const TABLE_KINDS = new Map<unknown, number>([
+	[nodes.table, Item.Table],
+	[nodes.table_row, Item.Row],
+	[nodes.table_cell, Item.Cell]
+])
+
+// The property changes of a table, row or cell (`node` at `pos`, `index` in its parent; `stack` the blocks
+// around it) the scope resolves: the editor's records (by their ids) and the source's own changes (by the
+// node's item, as the review index counts them).
+function collectTableChange(
+	part: StoryPart,
+	node: Node,
+	pos: number,
+	index: number,
+	stack: readonly { pos: number; index: number }[],
+	id: string | undefined,
+	plan: Plan
+): void {
+	const isTable = node.type === nodes.table
+	const isRow = node.type === nodes.table_row
+	const table = isTable ? pos : (stack[stack.length - (isRow ? 2 : 3)]?.pos ?? -1)
+	const row = isTable ? -1 : isRow ? index : (stack[stack.length - 2]?.index ?? -1)
+	const cell = isTable || isRow ? -1 : index
+	const value = isTable ? tableOverrides(node) : isRow ? rowOverrides(node) : cellOverrides(node)
+	const src = node.attrs["src"] as number
+	const own = `#${String(src)}`
+	const add = (what: TableChangeItem["what"], changeId: string): void => {
+		if (table < 0 || (id !== undefined && id !== changeId)) return
+
+		const key = `t:${String(table)}:${String(row)}:${String(cell)}:${what}`
+
+		plan.resolved.add(key)
+		plan.tables.push({ table, item: { row, cell, what }, key })
+	}
+
+	if (value.change !== undefined) add("change", value.change.id === undefined ? own : String(value.change.id))
+	if (isTable) {
+		const grid = tableOverrides(node).gridChange
+
+		if (grid !== undefined) add("grid", grid.id === undefined ? own : String(grid.id))
+	}
+
+	if (value.source === undefined && sourceChanges(part, ownItem(part, node, TABLE_KINDS.get(node.type) ?? Item.Table)).size > 0)
+		add("source", own)
+}
+
+// Resolves the property changes of tables (one step each, moving no position), before what removes content.
+function resolveTables(
+	tr: Transaction,
+	plan: Plan,
+	accept: boolean,
+	part: StoryPart,
+	store: PropsStore,
+	removals: Map<number, { rows: number[]; cells: Plan["cells"] }>
+): void {
+	const byTable = new Map<number, { item: TableChangeItem; key: string }[]>()
+
+	for (const entry of plan.tables) {
+		const list = byTable.get(entry.table)
+
+		if (list === undefined) byTable.set(entry.table, [entry])
+		else list.push(entry)
+	}
+
+	for (const [table, entries] of byTable) {
+		const removal = removals.get(table)
+		const skipped = resolveTableChanges(
+			tr,
+			table,
+			entries.map(entry => entry.item),
+			accept,
+			part,
+			store,
+			removal === undefined ? undefined : { rows: removal.rows, cells: removal.cells }
+		)
+
+		for (const item of skipped) {
+			const entry = entries.find(candidate => candidate.item === item)
+
+			if (entry === undefined) continue
+
+			plan.resolved.delete(entry.key)
+			plan.skipped.add(entry.key)
+		}
+	}
+}
+
 // A row's tracked insertion (or deletion) accepted keeps the row, rejected takes it out (and the reverse).
 function collectRow(node: Node, table: number, row: number, accept: boolean, plan: Plan): void {
 	const revision = node.attrs["revision"] as number
@@ -735,26 +855,25 @@ function lockedChanges(part: StoryPart, node: Node): boolean {
 
 // ---- the index ----------------------------------------------------------------------------------------------
 
-// Source items of a part whose properties hold a tracked change: paragraphs with a w:pPrChange (resolved
-// here), and what is left to the table and section writers (w:tblPrChange, w:tblGridChange, w:trPrChange,
-// w:tblPrExChange, w:tcPrChange, w:cellMerge, w:sectPrChange, w:numberingChange): counted, and skipped when
-// resolving.
+// Source items of a part whose properties hold a tracked change: paragraphs with a w:pPrChange and tables,
+// rows and cells with w:tblPrChange, w:tblGridChange, w:trPrChange, w:tblPrExChange, w:tcPrChange or
+// w:cellMerge (resolved here), and what is left to the section writer (w:sectPrChange, w:numberingChange):
+// counted, and skipped when resolving.
 interface SourceChanges {
 	readonly paragraphs: ReadonlySet<number>
 	readonly others: ReadonlySet<number>
 	readonly all: ReadonlySet<number>
 }
 
-const UNRESOLVED: ReadonlySet<number> = new Set([
+const TABLE_CHANGES: ReadonlySet<number> = new Set([
 	Revision.TableProperties,
 	Revision.TableGrid,
 	Revision.RowProperties,
 	Revision.TablePropertiesException,
 	Revision.CellProperties,
-	Revision.CellMerge,
-	Revision.SectionProperties,
-	Revision.Numbering
+	Revision.CellMerge
 ])
+const UNRESOLVED: ReadonlySet<number> = new Set([Revision.SectionProperties, Revision.Numbering])
 
 const sourceChangesOf = new WeakMap<StoryPart, SourceChanges>()
 
@@ -763,6 +882,7 @@ function sourcePropertyChanges(part: StoryPart): SourceChanges {
 
 	if (found === undefined) {
 		const paragraphs = new Set<number>()
+		const tables = new Set<number>()
 		const others = new Set<number>()
 		const revisions = part.revisions
 
@@ -770,10 +890,11 @@ function sourcePropertyChanges(part: StoryPart): SourceChanges {
 			const kind = revisions.kind[k] ?? 0
 
 			if (kind === Revision.ParagraphProperties) paragraphs.add(revisions.item[k] ?? -1)
+			else if (TABLE_CHANGES.has(kind)) tables.add(revisions.item[k] ?? -1)
 			else if (UNRESOLVED.has(kind)) others.add(revisions.item[k] ?? -1)
 		}
 
-		found = { paragraphs, others, all: new Set([...paragraphs, ...others]) }
+		found = { paragraphs, others, all: new Set([...paragraphs, ...tables, ...others]) }
 		sourceChangesOf.set(part, found)
 	}
 
@@ -1020,7 +1141,7 @@ function removeTableRows(tr: Transaction, pos: number, table: Node, rows: readon
 // out of memory).
 const BULK = 64
 
-function apply(state: EditorState, plan: Plan, part: StoryPart, store: PropsStore): Transaction | null {
+function apply(state: EditorState, plan: Plan, accept: boolean, part: StoryPart, store: PropsStore): Transaction | null {
 	const count =
 		plan.removeMarks.length +
 		plan.addMarks.length +
@@ -1033,9 +1154,13 @@ function apply(state: EditorState, plan: Plan, part: StoryPart, store: PropsStor
 		plan.rows.length +
 		plan.cells.length
 
-	if (count > BULK) return keepRanges(state.doc, applyBulk(state, plan, part, store), plan)
+	const removals = tableRemovals(plan)
+
+	if (count > BULK) return keepRanges(state.doc, applyBulk(state, plan, accept, part, store, removals), plan)
 
 	const tr = state.tr
+
+	resolveTables(tr, plan, accept, part, store, removals)
 
 	// What moves nothing first: marks and attributes.
 	for (const { from, to, mark } of plan.removeMarks) tr.removeMark(from, to, mark)
@@ -1070,8 +1195,8 @@ function apply(state: EditorState, plan: Plan, part: StoryPart, store: PropsStor
 	}
 
 	// Then what removes content, from the end.
-	const removals: { pos: number; run: () => void }[] = [
-		...[...tableRemovals(plan)].map(([table, removal]) => ({
+	const steps: { pos: number; run: () => void }[] = [
+		...[...removals].map(([table, removal]) => ({
 			pos: table,
 			run: () => removeFromTable(tr, table, removal, part, store, plan)
 		})),
@@ -1089,9 +1214,9 @@ function apply(state: EditorState, plan: Plan, part: StoryPart, store: PropsStor
 	]
 
 	// A join at a paragraph's end comes before deletions inside it (higher position first).
-	removals.sort((a, b) => b.pos - a.pos)
+	steps.sort((a, b) => b.pos - a.pos)
 
-	for (const removal of removals) removal.run()
+	for (const step of steps) step.run()
 
 	return keepRanges(state.doc, tr.docChanged ? closeHistory(markInternal(tr)) : null, plan)
 }
@@ -1503,10 +1628,20 @@ function rebuildNode(
 	)
 }
 
-function applyBulk(state: EditorState, plan: Plan, part: StoryPart, store: PropsStore): Transaction | null {
+function applyBulk(
+	state: EditorState,
+	plan: Plan,
+	accept: boolean,
+	part: StoryPart,
+	store: PropsStore,
+	removals: Map<number, { rows: number[]; cells: Plan["cells"] }>
+): Transaction | null {
 	const tr = state.tr
-	const doc = state.doc
-	const removals = tableRemovals(plan)
+
+	// Positions stay: the rebuild reads the document they left.
+	resolveTables(tr, plan, accept, part, store, removals)
+
+	const doc = tr.doc
 	const rebuild = rebuildOf(state, plan, removals)
 	const low = rebuild.positions[0]
 	const high = rebuild.positions[rebuild.positions.length - 1]

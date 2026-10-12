@@ -51,16 +51,29 @@ export interface DocxFacts {
 // the facts.
 export type DocxGateReason = "strict" | "signed" | "protected" | "writeProtected" | "malformed"
 
+// Document protection modes the editor opens editable within their limits (edit/protection.ts: form fields
+// only, comments only, every edit tracked); "readOnly" (and any mode it does not know) stays view-only.
+const LIMITED_PROTECTION: ReadonlySet<string> = new Set(["forms", "comments", "trackedChanges"])
+
+// Whether enforced document protection makes the document view-only (ECMA-376 Part 1 §17.15.1.29).
+export function viewOnlyProtection(protection: DocumentProtection | undefined): boolean {
+	return (
+		protection !== undefined &&
+		protection.enforced &&
+		protection.edit !== undefined &&
+		protection.edit !== "none" &&
+		!LIMITED_PROTECTION.has(protection.edit)
+	)
+}
+
 // `parts`: anything else read for the document that knows whether its markup was malformed (the model,
 // styles, numbering, theme).
 export function gateReasons(facts: DocxFacts, ...parts: readonly ({ readonly malformed: boolean } | undefined)[]): DocxGateReason[] {
 	const reasons: DocxGateReason[] = []
-	const protection = facts.documentProtection
 
 	if (facts.strict) reasons.push("strict")
 	if (facts.signatures > 0) reasons.push("signed")
-	if (protection !== undefined && protection.enforced && protection.edit !== undefined && protection.edit !== "none")
-		reasons.push("protected")
+	if (viewOnlyProtection(facts.documentProtection)) reasons.push("protected")
 	if (facts.writeProtection?.hashed === true) reasons.push("writeProtected")
 	if (facts.malformed || parts.some(part => part?.malformed === true)) reasons.push("malformed")
 

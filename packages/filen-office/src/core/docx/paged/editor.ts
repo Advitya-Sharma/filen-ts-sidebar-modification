@@ -10,6 +10,7 @@ import {
 	docxSchema,
 	documentHandler,
 	readOnlyReasons,
+	textboxHolderLocked,
 	type DocumentCommandContext,
 	type DocxEditorCommand,
 	type DocxEditorCommandType,
@@ -18,6 +19,7 @@ import {
 	type DocxMediaInfo,
 	type NewStoryKind
 } from "../edit/index"
+import { commandAllowed } from "../edit/protection"
 import { Region, SOURCE_INTS, SourceInt, type DocumentLayout, type LayoutEvent, type PageDisplayList } from "../layout/index"
 import { RevisionView, type Story } from "../model/index"
 import { flushComposition } from "../review/track"
@@ -253,6 +255,16 @@ export class PagedEditor {
 		const target = story < this.edits.storyCount || this.edits.addedStory(story) ? this.edits.model.stories[story] : undefined
 
 		if (target === undefined) return undefined
+
+		// A text box is saved with the story holding it (write/nested.ts): that story gets its session first,
+		// and a text box in a block of it that is locked stays view-only.
+		if (target.kind === "textbox" && target.parent >= 0) {
+			const holder = this.storyOf(target.parent)
+
+			if (holder === undefined) return undefined
+
+			textboxHolderLocked(holder.session.state.doc, holder.session.story.part, target)
+		}
 
 		return this.edited(new DocxEditorSession(this.body.session.context, { ...this.sessionOptions, story: target }))
 	}
@@ -496,7 +508,7 @@ export class PagedEditor {
 		if (this.disposed || info === undefined) return false
 		if (command.type === "history.undo" || command.type === "history.redo") return this.step(command.type === "history.undo")
 		if (info.scope === "story") return this.session.execute(command)
-		if (info.write && this.body.session.readOnly) return false
+		if (info.write && (this.body.session.readOnly || !commandAllowed(this.session, command.type))) return false
 
 		const handler = documentHandler(command.type)
 		const context = this.commandContext()
@@ -539,7 +551,8 @@ export class PagedEditor {
 					? canUndo
 					: info.type === "history.redo"
 						? canRedo
-						: !(info.write && readOnly) && documentHandler(info.type)?.enabled(context) === true
+						: !(info.write && (readOnly || !commandAllowed(this.session, info.type))) &&
+							documentHandler(info.type)?.enabled(context) === true
 
 			values.push(value)
 
@@ -848,8 +861,19 @@ export class PagedEditor {
 
 		const page = story.index.restartPage([...change.replaced, ...change.around])
 
-		// A story the editor added that no page shows yet (nothing refers to it): nothing to lay out.
-		if (page < 0 && this.edits.addedStory(story.session.story.story.index)) return
+		// A story the editor added that no page shows (nothing refers to it): nothing to lay out. While layout is
+		// still under way it may have laid out pages showing it that are not indexed yet: from the last page laid.
+		if (page < 0 && this.edits.addedStory(story.session.story.story.index)) {
+			if (layout.final) return
+
+			const restart = layout.beginEdit(Math.max(0, layout.pages.length - 1), undefined)
+
+			if (layout.advance(this.now() + this.budget, Math.max(restart, this.visible.last)) !== "done") void layout.continue()
+
+			this.flush()
+
+			return
+		}
 
 		const restart = layout.beginEdit(page < 0 ? 0 : page, undefined)
 		const result = layout.advance(this.now() + this.budget, Math.max(restart, this.visible.last))

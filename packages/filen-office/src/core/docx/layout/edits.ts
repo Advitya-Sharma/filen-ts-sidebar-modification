@@ -37,4 +37,8 @@ export interface LayoutEdits {
 	// The key what layout counts for a paragraph (list markers, note numbers) is kept under: an edited
 	// paragraph keeps its source's, whichever overlay it is laid out from now.
 	memoKey?(part: number, item: number): number
+	// The source block (a ref) an edited block holding item `item` of overlay part `part` stands for, or -1.
+	sourceBlock?(part: number, item: number): number
+	// The document-wide switch for even pages' headers and footers as edited (undefined: the settings').
+	readonly evenAndOddHeaders?: boolean | undefined
 }

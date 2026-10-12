@@ -51,6 +51,7 @@ const MARK_KINDS = new Map<unknown, ReviewKind>([
 	[marks.format_change, ReviewKind.FORMAT]
 ])
 const PROPERTIES_MARK = marks.paragraph_change
+const SECTION_MARK = marks.section_change
 const TABLE_MARKS = [marks.row_props, marks.cell_props]
 const MARKER_KINDS: Readonly<Record<string, ReviewKind | undefined>> = {
 	commentRangeStart: ReviewKind.COMMENT_START,
@@ -544,6 +545,19 @@ interface ChangeIds {
 	readonly deleted?: { readonly id?: number }
 }
 
+// What a table's props, a row's row_props or a cell's cell_props hold of tracked changes (edit/tables/map.ts).
+interface TableIds {
+	readonly ins?: { readonly id?: number }
+	readonly del?: { readonly id?: number }
+	readonly change?: { readonly id?: number }
+	readonly gridChange?: { readonly id?: number }
+	// The source's own property changes, accepted or rejected: no change any more.
+	readonly source?: string
+}
+
+// RevisionFlag.Merged.
+const MERGED = 16
+
 function changeId(stamp: { readonly id?: number } | undefined): string | undefined {
 	return stamp?.id === undefined ? undefined : String(stamp.id)
 }
@@ -599,18 +613,36 @@ function scan(doc: Node, from: number, to: number, found: Found, sources?: Reado
 
 		const own = `#${String(node.attrs["src"])}`
 		const change = PROPERTIES_MARK.isInSet(node.marks)?.attrs["value"] as ChangeIds | undefined
-		// Rows and cells the table commands tracked carry their stamps in row_props / cell_props.
-		const table = TABLE_MARKS.find(type => type.isInSet(node.marks) !== undefined)?.isInSet(node.marks)?.attrs["value"] as
-			{ readonly ins?: { readonly id?: number }; readonly del?: { readonly id?: number } } | undefined
+		// Rows and cells the table commands tracked carry their stamps in row_props / cell_props, tables in props.
+		const table = (
+			node.type === nodes.table
+				? node.attrs["props"]
+				: TABLE_MARKS.find(type => type.isInSet(node.marks) !== undefined)?.isInSet(node.marks)?.attrs["value"]
+		) as TableIds | null | undefined
+		// A cell's w:cellMerge is a property change (below), no insertion or deletion of the cell.
+		const flags = typeof revision === "number" ? (node.type === nodes.table_cell ? revision & ~MERGED : revision) : 0
 
-		if (kind !== undefined && typeof revision === "number" && revision !== 0)
+		if (kind !== undefined && flags !== 0)
 			found.add(end, end + 1, kind, changeId(change?.inserted ?? change?.deleted ?? table?.ins ?? table?.del) ?? own)
+
+		const section = node.type === nodes.paragraph ? sectionChange(SECTION_MARK.isInSet(node.marks)?.attrs["value"]) : undefined
+
 		if (
 			node.type === nodes.paragraph
-				? propertyChange(node, sources)
-				: node.type !== nodes.locked_block && sources?.has(node.attrs["src"] as number) === true
+				? section !== null && propertyChange(node, sources)
+				: node.type !== nodes.locked_block && sources?.has(node.attrs["src"] as number) === true && table?.source === undefined
 		)
 			found.add(end, end + 1, ReviewKind.PROPERTIES, changeId(change?.props) ?? own)
+
+		// A section property change the editor recorded (w:sectPrChange, stories/sections.ts).
+		if (section !== undefined && section !== null) found.add(end, end + 1, ReviewKind.PROPERTIES, section)
+
+		// Table, row and cell property changes the editor recorded (a table's grid change can be another).
+		const recorded = changeId(table?.change)
+		const grid = changeId(table?.gridChange)
+
+		if (recorded !== undefined) found.add(end, end + 1, ReviewKind.PROPERTIES, recorded)
+		if (grid !== undefined && grid !== recorded) found.add(end, end + 1, ReviewKind.PROPERTIES, grid)
 
 		markers(node.attrs["end"], end, found)
 	}
@@ -624,5 +656,29 @@ function scan(doc: Node, from: number, to: number, found: Found, sources?: Reado
 
 	children(doc, 0)
 
-	if (to >= doc.content.size) markers(doc.attrs["end"], doc.content.size, found)
+	const size = doc.content.size
+
+	// The body's own section properties: their change counts at the story's end (as its end markers).
+	if (to >= size) {
+		const final = sectionChange((doc.attrs["sectionChanges"] as { readonly final?: unknown } | null)?.final)
+		const sourced = sources?.has(doc.attrs["sectPr"] as number) === true
+
+		if (final !== undefined && final !== null) found.add(size, size + 1, ReviewKind.PROPERTIES, final)
+		else if (final === undefined && sourced) found.add(size, size + 1, ReviewKind.PROPERTIES, `#${String(doc.attrs["sectPr"])}`)
+	}
+
+	if (to >= size) markers(doc.attrs["end"], size, found)
+}
+
+// What a section edit (a section_change value, or the doc's final one) says of the section's tracked change: the
+// id of a change the editor recorded, null when the source's was accepted or rejected, undefined otherwise.
+function sectionChange(value: unknown): string | null | undefined {
+	if (typeof value !== "object" || value === null) return undefined
+
+	const change = (value as { readonly change?: { readonly id?: number } | null; readonly rejected?: boolean }).change
+
+	if (change === null) return null
+	if (change === undefined) return (value as { readonly rejected?: boolean }).rejected === true ? null : undefined
+
+	return change.id === undefined ? ANONYMOUS : String(change.id)
 }

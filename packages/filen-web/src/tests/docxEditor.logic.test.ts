@@ -140,11 +140,11 @@ describe("docx editor toolbar logic", () => {
 	})
 
 	it("explains read-only editing with keys that exist", () => {
-		expect(editorViewOnlyReasons(["host", "protected", "textbox"], true, false)).toEqual(["protected", "textbox"])
+		expect(editorViewOnlyReasons(["host", "protected", "linkedTextbox"], true, false)).toEqual(["protected", "linkedTextbox"])
 		expect(editorViewOnlyReasons([], false, false)).toEqual(["notWritable"])
 		expect(editorViewOnlyReasons([], false, true)).toEqual(["renamed"])
 
-		for (const reason of ["renamed", "notWritable", "textbox", "protected"] as const) {
+		for (const reason of ["renamed", "notWritable", "linkedTextbox", "textboxFallback", "lockedTextbox", "protected"] as const) {
 			expect(en).toHaveProperty(viewOnlyReasonKey(reason))
 		}
 
@@ -294,13 +294,7 @@ describe("object presses", () => {
 		expect(
 			featureEditable(
 				snapshot({
-					enabled: {
-						...state.enabled,
-						"control.check": false,
-						"control.choose": false,
-						"control.date": false,
-						"control.clear": false
-					}
+					enabled: { ...state.enabled, ...Object.fromEntries(DOCX_COMMAND_CATALOGUE.forms.map(type => [type, false])) }
 				}),
 				false,
 				"forms"

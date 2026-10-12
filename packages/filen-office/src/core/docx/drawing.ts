@@ -80,7 +80,7 @@ function resolver(model: DocxModel, part: number): ImageResolver {
 	return relationshipId => {
 		const ref = model.mediaRef(part, relationshipId)
 
-		return ref === undefined || ref.external || ref.partName === undefined || !model.package.has(ref.partName)
+		return ref === undefined || ref.external || ref.partName === undefined || !model.hasMedia(ref.partName)
 			? undefined
 			: { partName: ref.partName, contentType: ref.contentType }
 	}

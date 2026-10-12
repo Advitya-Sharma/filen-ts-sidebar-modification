@@ -3,7 +3,7 @@ import { escapeAttribute } from "../../xml/index"
 import { NO_SOURCE, WRAPPER_MARKS, docxSchema } from "../edit/schema"
 import { Item } from "../model/index"
 import { closeTag, copyNode, openTag, startTagWith, type Out } from "./markup"
-import { closeSdtWrapper, openSdtWrapper } from "./sdt"
+import { NEW_CONTROL_WRAPPER, closeSdtWrapper, openSdtWrapper } from "./sdt"
 import { R_NAMESPACE, src } from "./source"
 import type { StoryWriting } from "./story"
 import { DocxWriteError } from "./values"
@@ -110,7 +110,10 @@ function revisionWriter(type: MarkType, local: string): WrapperWriter {
 
 // Writers of new wrappers by mark type; a new wrapper of any other type is refused.
 const NEW_WRAPPERS: ReadonlyMap<MarkType, WrapperWriter> = new Map(
-	[LINK, revisionWriter(marks.insertion, "ins"), revisionWriter(marks.deletion, "del")].map(writer => [writer.type, writer])
+	[LINK, revisionWriter(marks.insertion, "ins"), revisionWriter(marks.deletion, "del"), NEW_CONTROL_WRAPPER].map(writer => [
+		writer.type,
+		writer
+	])
 )
 
 export function isRevisionWrapper(mark: Mark): boolean {

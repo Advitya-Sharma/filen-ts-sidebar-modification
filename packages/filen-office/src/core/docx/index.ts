@@ -4,6 +4,7 @@ export {
 	gateReasons,
 	openDocxPackage,
 	relationshipKind,
+	viewOnlyProtection,
 	type DocxFacts,
 	type DocxGateReason,
 	type DocxOpenFailure,

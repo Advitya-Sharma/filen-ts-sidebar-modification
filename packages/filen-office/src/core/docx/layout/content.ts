@@ -43,6 +43,9 @@ export interface StoryContext {
 	readonly noteMark: string
 	// Page and column breaks do not apply (headers, footers, notes, cells, text boxes).
 	readonly breaksAsLines: boolean
+	// Counted from its start each time it is laid out, its list markers not kept between layouts: a header or
+	// footer shows the same numbers on every page, whichever of its blocks an edit changed.
+	readonly recount: boolean
 }
 
 export const FieldFlag = { PAGE: 1, TOTALS: 2 } as const
@@ -275,11 +278,12 @@ export class ContentBuilder {
 		if (numbering === undefined || format.level === undefined || story.counters === undefined) return
 
 		const key = services.memoKey(part.index, item)
-		let marker = services.markers.get(key)
+		let marker = story.recount ? undefined : services.markers.get(key)
 
 		if (marker === undefined) {
 			marker = story.counters.next(numbering.numId, numbering.ilvl) ?? null
-			services.markers.set(key, marker)
+
+			if (!story.recount) services.markers.set(key, marker)
 		}
 
 		if (marker === null) return

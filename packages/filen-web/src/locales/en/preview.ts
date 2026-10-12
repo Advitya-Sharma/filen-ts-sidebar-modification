@@ -434,8 +434,12 @@ export const preview = {
 	previewDocxViewOnlySharedIn: "It was shared with you.",
 	/** Docx viewer — view-only reason: opened from Recents, Favorites, Links or Shared, not from its directory in the drive */
 	previewDocxViewOnlyNotInDrive: "Open it from its directory in your drive to edit it.",
-	/** Docx editor — view-only reason: a text box is being edited, which this editor can only show */
-	previewDocxViewOnlyTextbox: "Text boxes can't be edited here yet.",
+	/** Docx editor — view-only reason: the text box being edited continues its text in another text box */
+	previewDocxViewOnlyLinkedTextbox: "Its text continues in another text box, so it can't be edited here.",
+	/** Docx editor — view-only reason: the text box's copy kept for older versions of Word doesn't match it */
+	previewDocxViewOnlyTextboxFallback: "Its copy for older versions of Word doesn't match it, so it's left as it is.",
+	/** Docx editor — view-only reason: the text box sits in a part of the document that's kept exactly as it is */
+	previewDocxViewOnlyLockedTextbox: "It's in a part of the document that's kept as it is.",
 	/** Docx editor — view-only reason: the file was renamed to another format while open */
 	previewDocxViewOnlyRenamed: "It was renamed to another format while open, so changes can't be saved to it.",
 	/** Docx editor — view-only reason: changes can no longer be saved to this file (its directory is gone) */

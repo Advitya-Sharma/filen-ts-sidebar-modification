@@ -69,6 +69,29 @@ function random(seed: number): () => number {
 }
 
 describe("docx editing invariants", () => {
+	// The builder makes nodes from complete attribute objects (schema.ts makeNode): one missing an attribute
+	// differs from the same node made by create(), so an undo back to it is not equal.
+	it("builds every node and mark with each attribute its schema declares", async () => {
+		const session = await sessionOf(RICH)
+		const missing = new Set<string>()
+		const check = (name: string, attrs: object, declared: object | undefined): void => {
+			const have = Object.keys(attrs).sort().join()
+			const want = Object.keys(declared ?? {})
+				.sort()
+				.join()
+
+			if (have !== want) missing.add(`${name}: ${have} != ${want}`)
+		}
+
+		session.state.doc.descendants(node => {
+			check(node.type.name, node.attrs, node.type.spec.attrs)
+
+			for (const mark of node.marks) check(mark.type.name, mark.attrs, mark.type.spec.attrs)
+		})
+		check("doc", session.state.doc.attrs, docxSchema.nodes.doc.spec.attrs)
+		expect([...missing]).toEqual([])
+	})
+
 	it("puts back range markers a deletion took out, except a comment's taken whole with its reference", async () => {
 		const session = await sessionOf(RICH)
 		const before = markerKeys(session.state.doc)

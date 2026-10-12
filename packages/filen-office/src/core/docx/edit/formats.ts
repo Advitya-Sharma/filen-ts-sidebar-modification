@@ -92,7 +92,12 @@ export function colorKey(attrs: ColorAttrs): string {
 // Built-in styles commands add whose type is not paragraph, or whose id Word does not make from the name.
 const BUILT_IN_STYLES: Readonly<Record<string, { readonly type: "paragraph" | "character"; readonly id: string }>> = {
 	"annotation text": { type: "paragraph", id: "CommentText" },
-	"annotation reference": { type: "character", id: "CommentReference" }
+	"annotation reference": { type: "character", id: "CommentReference" },
+	"footnote reference": { type: "character", id: "FootnoteReference" },
+	"endnote reference": { type: "character", id: "EndnoteReference" },
+	...Object.fromEntries(
+		[1, 2, 3, 4, 5, 6, 7, 8, 9].map(level => [`toc ${String(level)}`, { type: "paragraph", id: `TOC${String(level)}` } as const])
+	)
 }
 
 export function builtInStyleType(name: string): "paragraph" | "character" {

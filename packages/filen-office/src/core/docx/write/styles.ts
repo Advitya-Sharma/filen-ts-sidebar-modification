@@ -56,7 +56,52 @@ const DEFINITIONS: Readonly<Record<string, Definition>> = {
 		qFormat: false,
 		ownNext: true
 	},
-	"annotation reference": { priority: 99, pPr: "", rPr: '<w:sz w:val="16"/><w:szCs w:val="16"/>', qFormat: false, hidden: true }
+	"annotation reference": { priority: 99, pPr: "", rPr: '<w:sz w:val="16"/><w:szCs w:val="16"/>', qFormat: false, hidden: true },
+	header: headerFooter(),
+	footer: headerFooter(),
+	"footnote text": noteText(),
+	"endnote text": noteText(),
+	"footnote reference": noteReference(),
+	"endnote reference": noteReference(),
+	...Object.fromEntries(
+		[1, 2, 3, 4, 5, 6, 7, 8, 9].map(level => [
+			`toc ${String(level)}`,
+			{
+				priority: 39,
+				pPr: `<w:spacing w:after="100"/>${level > 1 ? `<w:ind w:left="${String(220 * (level - 1))}"/>` : ""}`,
+				rPr: "",
+				qFormat: false
+			}
+		])
+	)
+}
+
+// Header and footer (center and right tabs of a US Letter page with 1" margins), notes' text and number
+// marks: as Word 16 defines them in docx4j__loadAndSave.docx (SHA-256
+// 122f53311702e32affbc0ec99ced129990e6728a9b4b6df30f5684f73a20247f).
+function headerFooter(): Definition {
+	return {
+		priority: 99,
+		pPr: '<w:tabs><w:tab w:val="center" w:pos="4680"/><w:tab w:val="right" w:pos="9360"/></w:tabs><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>',
+		rPr: "",
+		qFormat: false,
+		ownNext: true
+	}
+}
+
+function noteText(): Definition {
+	return {
+		priority: 99,
+		pPr: '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>',
+		rPr: '<w:sz w:val="20"/><w:szCs w:val="20"/>',
+		qFormat: false,
+		hidden: true,
+		ownNext: true
+	}
+}
+
+function noteReference(): Definition {
+	return { priority: 99, pPr: "", rPr: '<w:vertAlign w:val="superscript"/>', qFormat: false, hidden: true }
 }
 
 function heading(level: number, spacing: string, fonts: "major" | "", toggles: string, color: string, size: number): Definition {

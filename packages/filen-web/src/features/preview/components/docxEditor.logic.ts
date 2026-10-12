@@ -122,9 +122,12 @@ export const DOCX_COMMAND_CATALOGUE = {
 		"header.differentFirst",
 		"header.differentOddEven",
 		"header.linkToPrevious",
+		"header.remove",
+		"footer.remove",
+		"section.deleteBreak",
 		"page.setup"
 	],
-	notes: ["note.insertFootnote", "note.insertEndnote", "note.goto"],
+	notes: ["note.insertFootnote", "note.insertEndnote", "note.goto", "note.delete", "note.convert", "note.convertAll", "note.options"],
 	fields: [
 		"field.update",
 		"field.updateAll",
@@ -133,10 +136,22 @@ export const DOCX_COMMAND_CATALOGUE = {
 		"insert.pageNumber",
 		"insert.pageCount",
 		"insert.date",
-		"bookmark.add"
+		"bookmark.add",
+		"insert.field",
+		"bookmark.delete",
+		"bookmark.rename"
 	],
-	forms: ["control.check", "control.choose", "control.date", "control.clear"],
-	drawings: ["image.insert", "drawing.resize", "drawing.position", "drawing.wrap", "drawing.altText"],
+	forms: [
+		"control.check",
+		"control.choose",
+		"control.date",
+		"control.clear",
+		"control.text",
+		"control.insert",
+		"control.item.add",
+		"control.item.remove"
+	],
+	drawings: ["image.insert", "drawing.resize", "drawing.position", "drawing.wrap", "drawing.altText", "drawing.rotate", "drawing.delete"],
 	math: ["equation.insert", "equation.edit"],
 	view: ["view.reflow"]
 } as const satisfies Record<string, readonly DocxEditorCommandType[]>

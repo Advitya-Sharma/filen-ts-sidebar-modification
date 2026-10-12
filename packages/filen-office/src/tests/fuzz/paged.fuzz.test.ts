@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync } from "node:fs"
 import { describe, expect, it } from "vitest"
-import { CORPUS, corpusFiles, expectedRefusal, fuzzConfig, runJobs, summarize } from "./config"
+import { CORPUS, corpusFiles, expectedRefusal, fuzzConfig, limitedProtection, runJobs, summarize } from "./config"
 
 // Random edit sequences through the paged editor over every corpus document: after each settled step the
 // pages the editor shows (laid out incrementally) must equal a fresh layout of the file it saves.
@@ -54,8 +54,9 @@ describe.skipIf(config === undefined || !existsSync(CORPUS))("paged editing fuzz
 
 			if (typeof result["ms"] === "number" && result["ms"] > slowest.ms) slowest = { run, ms: result["ms"] }
 			if (kind !== "ok" && !expectedRefusal(kind)) failures.push(line.slice(0, 3000))
-			// An editable document no op managed to change was not fuzzed at all.
-			if (kind === "ok" && result["applied"] === 0) failures.push(`${run}: no edit applied`)
+			// An editable document no op managed to change was not fuzzed at all (unless its protection left nothing).
+			if (kind === "ok" && result["applied"] === 0 && !limitedProtection(result["protection"]))
+				failures.push(`${run}: no edit applied`)
 		})
 
 		summarize(
