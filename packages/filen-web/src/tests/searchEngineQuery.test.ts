@@ -17,9 +17,18 @@ function fakeHandle(results: (name: string) => CacheSearchSnapshot = () => snaps
 	let opening = current
 	const listeners: SnapshotListener[] = []
 	const windows: { free: ReturnType<typeof vi.fn>; initialSnapshot: ReturnType<typeof vi.fn> }[] = []
+	let filter: string | undefined
 	const configure = (config: CacheSearchConfig) => {
 		const name = config.name ?? ""
 
+		// A refilter to the same name re-reads what the engine already holds.
+		if (name === filter) {
+			opening = current
+
+			return
+		}
+
+		filter = name
 		opening = lagging.has(name) ? current : results(name)
 		current = results(name)
 	}
@@ -188,6 +197,77 @@ describe("createSearchEngine — query", () => {
 		})
 		expect(own.windows[0]?.free).toHaveBeenCalledTimes(1)
 		expect(own.search.close).not.toHaveBeenCalled()
+	})
+
+	it("re-reads the hits once its resync finished instead of taking a batch the engine has not re-read yet for no match", async () => {
+		const own = fakeHandle()
+		const { client, resync } = fakeClient([own])
+		const engine = createSearchEngine()
+		const result = engine.query(client, { rootUuid: null, names: ["probe"] }, OPTIONS)
+
+		await vi.advanceTimersByTimeAsync(0)
+		resync({ type: "started", roots: [ROOT] })
+		await vi.advanceTimersByTimeAsync(1_000)
+		// The resync's last batch is committed before its finish message; the engine's own re-read is still
+		// debounced, so only a refilter delivers it.
+		own.search.setConfig.mockImplementationOnce(() => {
+			own.deliver(one())
+
+			return Promise.resolve(undefined)
+		})
+		resync({ type: "finished", converged: true })
+		await vi.advanceTimersByTimeAsync(100)
+
+		await expect(result).resolves.toMatchObject({ settled: true, name: "probe", snapshot: { total: 1n } })
+		expect(own.search.setConfig).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name: "probe" }))
+	})
+
+	it("waits for the re-read's delivery when it trails the refilter", async () => {
+		const own = fakeHandle()
+		const { client, resync } = fakeClient([own])
+		const engine = createSearchEngine()
+		const result = engine.query(client, { rootUuid: null, names: ["probe"] }, OPTIONS)
+
+		await vi.advanceTimersByTimeAsync(0)
+		resync({ type: "started", roots: [ROOT] })
+		await vi.advanceTimersByTimeAsync(1_000)
+		// The re-read's total is stored before its delivery reaches the window.
+		own.search.setConfig.mockImplementationOnce(() => {
+			own.search.total.mockImplementationOnce(() => Promise.resolve(1n))
+			setTimeout(() => {
+				own.deliver(one())
+			}, 50)
+
+			return Promise.resolve(undefined)
+		})
+		let done = false
+
+		void result.then(() => {
+			done = true
+		})
+		resync({ type: "finished", converged: true })
+		await vi.advanceTimersByTimeAsync(100)
+		expect(own.search.setConfig).toHaveBeenCalledOnce()
+		// The delivery lands 50 ms after the refilter; the hits must then be still for settleMs.
+		await vi.advanceTimersByTimeAsync(149)
+		expect(done).toBe(false)
+		await vi.advanceTimersByTimeAsync(1)
+		await expect(result).resolves.toMatchObject({ settled: true, snapshot: { total: 1n } })
+	})
+
+	it("leaves the hits unconfirmed when the re-read after its resync fails", async () => {
+		const own = fakeHandle()
+		const { client, resync } = fakeClient([own])
+		const engine = createSearchEngine()
+		const result = engine.query(client, { rootUuid: null, names: ["probe"] }, OPTIONS)
+
+		await vi.advanceTimersByTimeAsync(0)
+		resync({ type: "started", roots: [ROOT] })
+		own.search.setConfig.mockImplementationOnce(() => Promise.reject(new Error("engine gone")))
+		resync({ type: "finished", converged: true })
+		await vi.advanceTimersByTimeAsync(100)
+
+		await expect(result).resolves.toMatchObject({ settled: false, snapshot: { total: 0n } })
 	})
 
 	it("waits out a long first index build, reporting how far it got, and settles once it finishes", async () => {

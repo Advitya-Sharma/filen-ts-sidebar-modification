@@ -696,6 +696,7 @@ export function createSearchEngine() {
 
 				const seen = await look(
 					current.search,
+					buildConfig(name, itemType),
 					timing,
 					deadline,
 					token,
@@ -743,12 +744,14 @@ export function createSearchEngine() {
 	// taken for this one's. Null when the window yielded nothing usable for this word.
 	async function look(
 		search: CacheSearch,
+		config: CacheSearchConfig,
 		{ settleMs, stallMs }: QueryTiming,
 		deadline: number,
 		token: OpenToken,
 		cold: { since: number; epoch: number } | null,
 		onProgress: ((progress: SearchQueryProgress) => void) | undefined
 	): Promise<{ snapshot: CacheSearchSnapshot; settled: boolean } | null> {
+		const endedAt = resyncEndedAt
 		let latest: CacheSearchSnapshot | null = null
 		// The window's listener assigns `latest` from outside this flow.
 		const seen = (): CacheSearchSnapshot | null => latest
@@ -857,6 +860,16 @@ export function createSearchEngine() {
 
 			report.flush()
 
+			// A resync commits its last batch before its finish message, and the engine re-reads the hits and its
+			// total only after a debounce of up to seconds, so both may still predate that batch (an empty first
+			// index taken for "no match"). A refilter re-reads them at once.
+			let readAt = endedAt
+
+			if (settled && resyncEndedAt !== readAt) {
+				readAt = resyncEndedAt
+				settled = (await run(() => search.setConfig(config))).success
+			}
+
 			// The handle's own total says whether a delivery for this word is still due: one more is waited
 			// for, and a word whose hits still disagree with it is left unconfirmed.
 			const agrees = async () => {
@@ -870,7 +883,7 @@ export function createSearchEngine() {
 				settled = (await still()) && (await agrees())
 			}
 
-			return latest === null ? null : { snapshot: latest, settled }
+			return latest === null ? null : { snapshot: latest, settled: settled && resyncEndedAt === readAt }
 		} finally {
 			open = false
 			freeWindow(searchWindow)
