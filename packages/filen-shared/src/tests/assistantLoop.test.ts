@@ -511,6 +511,7 @@ describe("runAssistantTurn", () => {
 			"list_notes",
 			"trash_items",
 			"list_section",
+			"open_route",
 			"get_sharing"
 		])
 		expect(shared.requests[1]?.tools).toEqual(shown?.tools)
@@ -521,7 +522,7 @@ describe("runAssistantTurn", () => {
 		expect(names(notes.requests[1])?.slice(0, notesGroup.length)).toEqual(notesGroup)
 		expect(shown?.messages[0]?.content).toContain("Not available in this version of the app: Add or remove favorites.")
 		expect(first.result.prompt).toContain("Tools for this request: search_items, list_directory, get_item_info, read_text_file, reveal_item.")
-		expect(second.result.prompt).toContain("Tools for this request: list_section, get_sharing, search_items, list_directory.")
+		expect(second.result.prompt).toContain("Tools for this request: list_section, get_sharing, search_items, list_directory, open_route.")
 		expect(third.result.prompt).toContain("Tools for this request: list_notes, read_note, open_note.")
 		// Rendered, but not in the files group: refused without spending the retry.
 		expect(first.result.calls.map(record => `${record.tool}:${record.status}`)).toEqual(["list_section:blocked"])

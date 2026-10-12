@@ -725,7 +725,9 @@ export type AssistantGroupDefinition = {
 
 // Small models pick tools reliably from about six, so a request is first routed to one group and may call
 // only that group's tools. The prompt shows those of the group's family (ASSISTANT_PROMPT_FAMILIES) and,
-// when that is more, names the group's. Lookup tools appear in every group that needs their handles.
+// when that is more, names the group's. Lookup tools appear in every group that needs their handles, and
+// open_route in the trash and sharing groups too: the router sends "open the trash" or "take me to my
+// favorites" there.
 export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, AssistantGroupDefinition>> = {
 	files: {
 		description: "find files and directories (folders) by name or location, list, read, summarize or show them",
@@ -737,7 +739,7 @@ export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, Assistan
 	},
 	trash: {
 		description: "delete, remove or trash files, directories or notes, including requests to delete permanently",
-		tools: [searchItemsByName, listDirectoryPlain, listNotes, trashItems, listSection]
+		tools: [searchItemsByName, listDirectoryPlain, listNotes, trashItems, listSection, openRoute]
 	},
 	notes: {
 		description: "anything about notes: find, read, summarize, open, create, pin, favorite or archive",
@@ -763,7 +765,7 @@ export const ASSISTANT_TOOL_GROUPS: Readonly<Record<AssistantToolGroup, Assistan
 	shared: {
 		description:
 			"sharing: whether an item is shared or has a public link, items shared with or by the user, public links; favorites (list, add or remove); also requests to share, stop sharing or make something public, which only the user can do",
-		tools: [listSection, getSharing, searchItemsByName, listDirectoryPlain, setFavorite]
+		tools: [listSection, getSharing, searchItemsByName, listDirectoryPlain, setFavorite, openRoute]
 	}
 }
 

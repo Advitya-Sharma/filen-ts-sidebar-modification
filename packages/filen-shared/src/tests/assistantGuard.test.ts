@@ -549,7 +549,8 @@ describe("AssistantTurnGuard", () => {
 			"search_items",
 			"list_directory",
 			"list_notes",
-			"list_section"
+			"list_section",
+			"open_route"
 		])
 		expect(turn.check({ tool: listSection, args: { section: "trash" } }).allowed).toBe(true)
 	})

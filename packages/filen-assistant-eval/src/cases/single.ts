@@ -81,7 +81,7 @@ export const SIMPLE_CASES: EvalCase[] = [
 		category: "simple",
 		lang: "pt",
 		prompt: "Abre a lixeira pra mim",
-		routes: ["navigation"],
+		routes: ["navigation", "trash"],
 		calls: [
 			{
 				tool: "open_route",
@@ -1047,7 +1047,7 @@ export const MULTIPLE_CASES: EvalCase[] = [
 		category: "multiple",
 		lang: "en",
 		prompt: "Take me to my favorites",
-		routes: ["navigation"],
+		routes: ["navigation", "shared"],
 		calls: [
 			{
 				tool: "open_route",

@@ -605,6 +605,168 @@ export const SOURCES_CASES: EvalCase[] = [
 			}
 		]
 	},
+	// Opening one of the drive's own lists or another section opens its screen, the trash and the sharing lists
+	// also from their own groups.
+	{
+		id: "sources-open-trash-en",
+		category: "sources",
+		lang: "en",
+		prompt: "Open my trash",
+		routes: ["navigation", "trash"],
+		calls: [
+			{
+				tool: "open_route",
+				args: {
+					route: "trash"
+				}
+			}
+		],
+		state: [
+			{
+				screen: "trash"
+			}
+		]
+	},
+	{
+		id: "sources-open-favorites-de",
+		category: "sources",
+		lang: "de",
+		prompt: "Bring mich zu meinen Favoriten",
+		routes: ["navigation", "shared"],
+		calls: [
+			{
+				tool: "open_route",
+				args: {
+					route: "favorites"
+				}
+			}
+		],
+		state: [
+			{
+				screen: "favorites"
+			}
+		]
+	},
+	{
+		id: "sources-open-shared-with-me-es",
+		category: "sources",
+		lang: "es",
+		prompt: "Llévame a los archivos que otros compartieron conmigo",
+		routes: ["navigation", "shared"],
+		calls: [
+			{
+				tool: "open_route",
+				args: {
+					route: "shared_with_me"
+				}
+			}
+		],
+		state: [
+			{
+				screen: "shared_with_me"
+			}
+		]
+	},
+	{
+		id: "sources-open-recents-zh",
+		category: "sources",
+		lang: "zh",
+		prompt: "转到最近文件页面",
+		routes: ["navigation"],
+		calls: [
+			{
+				tool: "open_route",
+				args: {
+					route: "recents"
+				}
+			}
+		],
+		state: [
+			{
+				screen: "recents"
+			}
+		]
+	},
+	{
+		id: "sources-open-links-ru",
+		category: "sources",
+		lang: "ru",
+		prompt: "Перейди к моим публичным ссылкам",
+		routes: ["navigation", "shared"],
+		calls: [
+			{
+				tool: "open_route",
+				args: {
+					route: "public_links"
+				}
+			}
+		],
+		state: [
+			{
+				screen: "public_links"
+			}
+		]
+	},
+	{
+		id: "sources-open-photos-fr",
+		category: "sources",
+		lang: "fr",
+		prompt: "Ouvre la section Photos",
+		routes: ["navigation"],
+		calls: [
+			{
+				tool: "open_route",
+				args: {
+					route: "photos"
+				}
+			}
+		],
+		state: [
+			{
+				screen: "photos"
+			}
+		]
+	},
+	{
+		id: "sources-open-contacts-ja",
+		category: "sources",
+		lang: "ja",
+		prompt: "連絡先の画面を開いて",
+		routes: ["navigation"],
+		calls: [
+			{
+				tool: "open_route",
+				args: {
+					route: "contacts"
+				}
+			}
+		],
+		state: [
+			{
+				screen: "contacts"
+			}
+		]
+	},
+	{
+		id: "sources-open-shared-by-me-hi",
+		category: "sources",
+		lang: "hi",
+		prompt: "मुझे उन फ़ाइलों के पेज पर ले चलो जो मैंने शेयर की हैं",
+		routes: ["navigation", "shared"],
+		calls: [
+			{
+				tool: "open_route",
+				args: {
+					route: "shared_by_me"
+				}
+			}
+		],
+		state: [
+			{
+				screen: "shared_by_me"
+			}
+		]
+	},
 	// The trash and settings are read-only to the assistant.
 	{
 		id: "safety-restore-trash-en",
