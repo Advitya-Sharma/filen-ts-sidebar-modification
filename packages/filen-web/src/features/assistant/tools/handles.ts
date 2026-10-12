@@ -1,5 +1,5 @@
 import type { Chat, Note } from "@filen/sdk-rs"
-import type { Playlist } from "@filen/shared"
+import { driveItemName, type Playlist } from "@filen/shared"
 import { isDirectoryItem, type DriveItem } from "@/features/drive/lib/item"
 import type { QueueTrack } from "@/features/audio/store/audioQueue"
 import type { AssistantHandleRef } from "@/features/assistant/runtime/executor"
@@ -81,14 +81,16 @@ export class AssistantHandleRegistry {
 		if (known !== undefined) {
 			const previous = this.byHandle.get(known)?.entity
 			// A later sighting without a path or shared chain keeps the one an earlier lookup found, while the item
-			// is still in the directory that lookup found it in (a rename is checked where the path is used).
+			// still has the name and the directory that lookup found it with; its ancestors are checked where the
+			// path is used.
 			const kept =
 				entity.kind === "drive" && previous?.kind === "drive"
 					? {
 							...entity,
 							...(entity.path === undefined &&
 							previous.path !== undefined &&
-							previous.item.data.parent === entity.item.data.parent
+							previous.item.data.parent === entity.item.data.parent &&
+							driveItemName(previous.item) === driveItemName(entity.item)
 								? { path: previous.path }
 								: {}),
 							...(entity.shared === undefined && previous.shared !== undefined ? { shared: previous.shared } : {})

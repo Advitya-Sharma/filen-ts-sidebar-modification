@@ -37,6 +37,7 @@ import { assistantRouter, navigateChecked } from "@/features/assistant/tools/nav
 import { navigateToRoute } from "@/features/assistant/tools/routes"
 import {
 	abortSignalOf,
+	ancestorsStillAt,
 	cachedDriveRows,
 	driveKind,
 	driveName,
@@ -419,8 +420,8 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 const infoReadThisPage = new Set<string>()
 
 // The path the info dialog's Location row reads, from the same item-info query: read again once a page, as
-// the dialog does (its staleTime is 0), then from the cache while its nearest ancestor is still the item's
-// parent (nothing updates the entry on a move).
+// the dialog does (its staleTime is 0), then from the cache while the cached listings still show the item
+// under the directories the entry names (nothing updates the entry on a rename or a move).
 async function itemInfo(item: DriveItem): Promise<ItemInfoResult> {
 	const base = asDirectoryOrFile(item)
 	const queryKey = itemInfoQueryKey(base.data.uuid)
@@ -428,7 +429,8 @@ async function itemInfo(item: DriveItem): Promise<ItemInfoResult> {
 	const current =
 		infoReadThisPage.has(base.data.uuid) &&
 		cached !== undefined &&
-		(cached.ancestors.at(-1)?.uuid ?? rootDirUuid()) === base.data.parent
+		(cached.ancestors.at(-1)?.uuid ?? rootDirUuid()) === base.data.parent &&
+		(cached.path === null || ancestorsStillAt(infoPath(cached, item), base.data.parent))
 	const info = await queryClient.query({
 		queryKey,
 		queryFn: () => fetchItemInfo(base.data),
@@ -440,17 +442,17 @@ async function itemInfo(item: DriveItem): Promise<ItemInfoResult> {
 	return info
 }
 
-async function itemPath(item: DriveItem): Promise<string | undefined> {
-	const info = await itemInfo(item)
-
-	if (info.path === null) {
-		return undefined
-	}
-
+function infoPath(info: ItemInfoResult, item: DriveItem): string {
 	return joinPath(
 		info.ancestors.reduce((path, ancestor) => joinPath(path, driveItemName(narrowItem(ancestor))), "/"),
 		driveItemName(item)
 	)
+}
+
+async function itemPath(item: DriveItem): Promise<string | undefined> {
+	const info = await itemInfo(item)
+
+	return info.path === null ? undefined : infoPath(info, item)
 }
 
 // An item's parent directories below the root, nearest first, from the same item-info entry; undefined when

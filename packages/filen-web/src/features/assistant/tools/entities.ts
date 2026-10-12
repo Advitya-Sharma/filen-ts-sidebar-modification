@@ -160,9 +160,42 @@ export function freshEntity(entity: AssistantEntity): AssistantEntity {
 }
 
 // The path a drive handle was found at, while it still describes `live` (its fresh row): a move or a rename
-// since then leaves it naming where the item used to be.
+// since then, of the item or of a directory above it, leaves it naming where the item used to be.
 export function livePath(entity: { item: DriveItem; path?: string }, live: DriveItem): string | undefined {
-	return live.data.parent === entity.item.data.parent && driveItemName(live) === driveItemName(entity.item) ? entity.path : undefined
+	return entity.path !== undefined &&
+		live.data.parent === entity.item.data.parent &&
+		driveItemName(live) === driveItemName(entity.item) &&
+		ancestorsStillAt(entity.path, live.data.parent)
+		? entity.path
+		: undefined
+}
+
+// Whether the directories above `parent` (the item's own, included) still carry the names `path` gives them,
+// as far as the cached listings hold them: a rename or a move of one patches its cached row. What is not
+// cached cannot be checked without a request and counts as unchanged.
+export function ancestorsStillAt(path: string, parent: string): boolean {
+	const segments = path.split("/").filter(segment => segment.length > 0)
+	const root = rootDirUuid()
+	// The segment naming `uuid`: the item's own name is the last one.
+	let index = segments.length - 2
+	let uuid = parent
+
+	while (uuid !== root) {
+		const row = findOwnedListingItem(uuid)?.item
+
+		if (row === undefined) {
+			return true
+		}
+
+		if (index < 0 || driveItemName(row) !== segments[index]) {
+			return false
+		}
+
+		index--
+		uuid = row.data.parent
+	}
+
+	return index === -1
 }
 
 export function rootDirUuid(): string | undefined {
@@ -225,7 +258,8 @@ function exactName(a: string, b: string): boolean {
 }
 
 // The one item in `items` named `segment`: written exactly so first, else by the accent-folded name when only
-// one item matches that way.
+// one item matches that way, else, for a name the reply screen defanged ("Photos[.]old") and the model copied
+// back from its earlier reply, written exactly so once re-fanged.
 function itemNamed(items: readonly DriveItem[], segment: string): DriveItem | undefined {
 	const exact = items.find(item => exactName(driveItemName(item), segment))
 
@@ -235,7 +269,13 @@ function itemNamed(items: readonly DriveItem[], segment: string): DriveItem | un
 
 	const folded = items.filter(item => sameName(driveItemName(item), segment))
 
-	return folded.length === 1 ? folded[0] : undefined
+	if (folded.length === 1) {
+		return folded[0]
+	}
+
+	const refanged = segment.replace(/\[\.\]/g, ".").replace(/\[@\]/g, "@")
+
+	return refanged === segment ? undefined : items.find(item => exactName(driveItemName(item), refanged))
 }
 
 // An absolute path ("/Documents/Invoices") walked through the listings the drive screen would read. With

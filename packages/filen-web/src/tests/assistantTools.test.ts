@@ -746,6 +746,82 @@ describe("an item moved between turns", () => {
 
 		expect(json(await call("get_item_info", { handle: "f1" }))).toMatchObject({ path: "/Invoice_2024.pdf" })
 	})
+
+	it("drops a found path once a directory above the item was renamed", async () => {
+		await call("list_directory", { handle: "d0" })
+		await call("list_directory", { handle: "d1" })
+
+		const papersRaw = rawDir(docs.data.uuid, "Papers", ROOT)
+
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: null }), [narrowItem(papersRaw), readme])
+		sdk.getItemInfo.mockResolvedValue({ path: "/Papers/Invoice_2024.pdf", ancestors: [papersRaw] })
+
+		expect(json(await call("get_item_info", { handle: "f2" }))).toMatchObject({ path: "/Papers/Invoice_2024.pdf" })
+		expect(json(await call("reveal_item", { handle: "f2" }))).not.toHaveProperty("path", "/Docs/Invoice_2024.pdf")
+	})
+
+	it("reads the location again once a directory above the item moved, though the item-info entry was read this page", async () => {
+		const archiveRaw = rawDir(testUuid("archive"), "Archive", ROOT)
+
+		useDriveStore.setState({ selectedItems: [invoice] })
+		at(`/drive/${docs.data.uuid}`)
+		queryClient.removeQueries({ queryKey: driveListingQueryKey({ variant: "drive", uuid: null }) })
+		await executor.context()
+		expect(json(await call("get_item_info", { handle: "f1" }))).toMatchObject({ path: "/Docs/Invoice_2024.pdf" })
+
+		const movedDocsRaw = rawDir(docs.data.uuid, "Docs", archiveRaw.uuid)
+
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: null }), [narrowItem(archiveRaw), readme])
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: archiveRaw.uuid }), [narrowItem(movedDocsRaw)])
+		sdk.getItemInfo.mockResolvedValue({ path: "/Archive/Docs/Invoice_2024.pdf", ancestors: [archiveRaw, movedDocsRaw] })
+
+		expect(json(await call("get_item_info", { handle: "f1" }))).toMatchObject({ path: "/Archive/Docs/Invoice_2024.pdf" })
+		expect(sdk.getItemInfo).toHaveBeenCalledTimes(2)
+	})
+
+	it("keeps reading the cached location while the directories above the item are unchanged", async () => {
+		useDriveStore.setState({ selectedItems: [invoice] })
+		at(`/drive/${docs.data.uuid}`)
+		queryClient.removeQueries({ queryKey: driveListingQueryKey({ variant: "drive", uuid: null }) })
+		await executor.context()
+		await call("get_item_info", { handle: "f1" })
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: null }), [docs, readme])
+
+		expect(json(await call("get_item_info", { handle: "f1" }))).toMatchObject({ path: "/Docs/Invoice_2024.pdf" })
+		expect(sdk.getItemInfo).toHaveBeenCalledTimes(1)
+	})
+
+	it("drops a found path once the item was renamed, also when a later sighting brings no path", async () => {
+		await call("list_directory", { handle: "d0" })
+		await call("list_directory", { handle: "d1" })
+
+		const renamed = narrowItem(rawFile(invoice.data.uuid, "Invoice-final.pdf", docs.data.uuid, "application/pdf"))
+
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: docs.data.uuid }), [renamed, narrowItem(songRaw)])
+		useDriveStore.setState({ selectedItems: [renamed] })
+		at(`/drive/${docs.data.uuid}`)
+		await executor.context()
+		sdk.getItemInfo.mockResolvedValue({ path: "/Docs/Invoice-final.pdf", ancestors: [docsRaw] })
+
+		expect(json(await call("get_item_info", { handle: "f2" }))).toMatchObject({
+			name: "Invoice-final.pdf",
+			path: "/Docs/Invoice-final.pdf"
+		})
+	})
+})
+
+describe("a path the reply screen defanged", () => {
+	it("resolves a directory whose name the model copied back as written in its screened reply", async () => {
+		const photosRaw = rawDir(testUuid("photos-old"), "Photos.old", ROOT)
+		const beachRaw = rawFile(testUuid("beach"), "beach.jpg", photosRaw.uuid, "image/jpeg")
+
+		sdk.listDirectory.mockImplementation((target: { kind: string; uuid?: string }) =>
+			Promise.resolve(target.kind === "root" ? { dirs: [docsRaw, photosRaw], files: [readmeRaw] } : { dirs: [], files: [beachRaw] })
+		)
+
+		expect(json(await call("list_directory", { path: "/Photos[.]old" }))).toMatchObject({ items: [{ name: "beach.jpg" }] })
+		expect(await call("list_directory", { path: "/Docs[.]old" })).toMatchObject({ ok: false })
+	})
 })
 
 describe("read_text_file", () => {
