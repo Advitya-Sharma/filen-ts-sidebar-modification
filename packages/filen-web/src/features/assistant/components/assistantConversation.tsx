@@ -3,6 +3,7 @@ import { SparklesIcon } from "lucide-react"
 import type { AssistantKey } from "@/lib/i18n"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
 import { sendAssistantMessage } from "@/features/assistant/store/assistantSession"
+import { assistantInitialFocusTarget } from "@/features/assistant/components/assistantFocus"
 import type { TranscriptEntry } from "@/features/assistant/store/transcript"
 import { AssistantTranscript } from "@/features/assistant/components/assistantTranscript"
 import { TURN_END_KEYS, currentStep, spokenText, transcriptRows } from "@/features/assistant/components/assistant.logic"
@@ -41,7 +42,10 @@ function EmptyConversation() {
 							type="button"
 							className="w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-left text-sm focus-ring transition-colors outline-none hover:bg-muted"
 							onClick={() => {
-								sendAssistantMessage(t(key))
+								// The transcript replaces this screen on the next render; the composer stays.
+								if (sendAssistantMessage(t(key))) {
+									assistantInitialFocusTarget()?.focus()
+								}
 							}}
 						>
 							{t(key)}
@@ -99,7 +103,8 @@ function Announcer({ entries }: { entries: readonly TranscriptEntry[] }) {
 			}
 
 			if (entry.kind === "reply") {
-				parts.push(spokenText(entry.text))
+				// A withheld reply has no text; it reads as the message the transcript shows in its place.
+				parts.push(entry.withheld === true ? t("assistantReplyWithheld") : spokenText(entry.text))
 			} else if (entry.kind === "turnEnd") {
 				parts.push(t(TURN_END_KEYS[entry.outcome]))
 			}

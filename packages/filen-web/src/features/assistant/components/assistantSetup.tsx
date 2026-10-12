@@ -64,6 +64,7 @@ function FirstRun({ model, unavailable }: { model: AssistantModelInfo | null; un
 					</p>
 					{/* Free space can change: every click checks the storage again, so only the device's own limits disable it. */}
 					<Button
+						ref={keepAssistantFocus}
 						disabled={unavailable !== "insufficient-storage"}
 						aria-describedby={UNAVAILABLE_REASON_ID}
 						onClick={downloadAssistantModel}
@@ -75,6 +76,7 @@ function FirstRun({ model, unavailable }: { model: AssistantModelInfo | null; un
 				<>
 					<p className="text-xs text-muted-foreground">{t("assistantSetupStorageNote")}</p>
 					<Button
+						ref={keepAssistantFocus}
 						data-assistant-autofocus=""
 						onClick={downloadAssistantModel}
 					>
@@ -86,21 +88,48 @@ function FirstRun({ model, unavailable }: { model: AssistantModelInfo | null; un
 	)
 }
 
-// Leaving the check: the panel held focus for want of a control, so the screen that replaces this one hands
-// it to its own (the composer, the download button). After the commit, once that screen is in the DOM.
+// After the commit, once the next screen is in the DOM: the panel holds focus for want of a control, so the
+// screen that replaced the old one hands it to its own (the composer, the download button).
+function focusNextScreen(panel: HTMLElement): void {
+	queueMicrotask(() => {
+		if (document.activeElement === panel) {
+			assistantInitialFocusTarget(panel)?.focus()
+		}
+	})
+}
+
+// Leaving the check: the panel held focus since it opened, there being no control to give it to.
 function checkingSpinner(element: Element | null): (() => void) | undefined {
 	if (element === null) {
 		return undefined
 	}
 
 	return () => {
-		queueMicrotask(() => {
-			const panel = document.getElementById(ASSISTANT_PANEL_ID)
+		const panel = document.getElementById(ASSISTANT_PANEL_ID)
 
-			if (panel !== null && document.activeElement === panel) {
-				assistantInitialFocusTarget(panel)?.focus()
-			}
-		})
+		if (panel !== null) {
+			focusNextScreen(panel)
+		}
+	}
+}
+
+// A ref for a button the next model state replaces while it holds focus (Download, Cancel, Try again): focus
+// would drop to the page, so it passes through the panel to the next screen's control. React runs the
+// cleanup while the element is still in the document.
+function keepAssistantFocus(element: HTMLElement | null): (() => void) | undefined {
+	if (element === null) {
+		return undefined
+	}
+
+	return () => {
+		const panel = document.getElementById(ASSISTANT_PANEL_ID)
+
+		if (panel === null || document.activeElement !== element) {
+			return
+		}
+
+		panel.focus()
+		focusNextScreen(panel)
 	}
 }
 
@@ -158,6 +187,7 @@ function SetupBody({ state }: { state: AssistantSetupState }) {
 					</p>
 					{state.resumed ? <p className="text-xs text-muted-foreground">{t("assistantDownloadResumed")}</p> : null}
 					<Button
+						ref={keepAssistantFocus}
 						variant="outline"
 						data-assistant-autofocus=""
 						onClick={cancelAssistantDownload}
@@ -172,6 +202,7 @@ function SetupBody({ state }: { state: AssistantSetupState }) {
 					<h3 className="text-base font-semibold">{t("assistantErrorTitle")}</h3>
 					<p className="text-sm text-muted-foreground">{t(ERROR_KEYS[state.error])}</p>
 					<Button
+						ref={keepAssistantFocus}
 						data-assistant-autofocus=""
 						onClick={downloadAssistantModel}
 					>

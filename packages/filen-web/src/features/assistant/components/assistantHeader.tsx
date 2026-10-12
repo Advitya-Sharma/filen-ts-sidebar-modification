@@ -16,7 +16,7 @@ import {
 	startNewAssistantConversation
 } from "@/features/assistant/store/assistantSession"
 import { useAssistantHistoryStore } from "@/features/assistant/store/conversationHistory"
-import { ASSISTANT_TITLE_ID } from "@/features/assistant/components/assistantFocus"
+import { ASSISTANT_TITLE_ID, assistantInitialFocusTarget } from "@/features/assistant/components/assistantFocus"
 import { canRemoveModel, downloadPercent, modelShowsLoading } from "@/features/assistant/components/assistant.logic"
 import type { AssistantModelState } from "@/features/assistant/types"
 
@@ -66,6 +66,20 @@ function ModelMenu({ state }: { state: AssistantModelState }) {
 	const [confirmOpen, setConfirmOpen] = useState(false)
 	const [pending, setPending] = useState(false)
 	const model = state.model
+
+	// Removing the model takes this menu, the dialog's way back, with it: focus goes to the screen that
+	// replaced the conversation instead, once it is in the DOM.
+	function focusAfterClose(): boolean {
+		if (canRemoveModel(useAssistantStore.getState().modelState)) {
+			return true
+		}
+
+		queueMicrotask(() => {
+			assistantInitialFocusTarget()?.focus()
+		})
+
+		return false
+	}
 
 	// No `finally`: the React Compiler cannot lower one yet and would skip this whole component.
 	async function remove(): Promise<void> {
@@ -119,6 +133,7 @@ function ModelMenu({ state }: { state: AssistantModelState }) {
 				confirmLabel={t("assistant:assistantRemoveModelConfirm")}
 				cancelLabel={t("common:cancel")}
 				destructive
+				finalFocus={focusAfterClose}
 				onOpenChange={setConfirmOpen}
 				onConfirm={() => {
 					void remove()
@@ -166,7 +181,11 @@ export function AssistantHeader({ onClose }: { onClose: () => void }) {
 					<TooltipIconButton
 						label={t("assistantNewConversation")}
 						className="app-region-no-drag"
-						onClick={startNewAssistantConversation}
+						onClick={() => {
+							// This button goes with the conversation; the composer stays.
+							assistantInitialFocusTarget()?.focus()
+							startNewAssistantConversation()
+						}}
 					>
 						<SquarePenIcon />
 					</TooltipIconButton>

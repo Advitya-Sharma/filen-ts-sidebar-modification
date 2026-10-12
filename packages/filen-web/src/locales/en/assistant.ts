@@ -139,6 +139,22 @@ export const assistant = {
 	assistantDownloadResumedToastBody: "{{received}} of {{total}} is already on this device.",
 	/** Assistant button in the icon rail — accessible name while the model downloads; stays the same throughout, the percentage is in the tooltip */
 	assistantToggleDownloading: "Assistant, downloading the model",
+	/** Assistant button in the icon rail — accessible name while the panel is hidden and the assistant works on a request */
+	assistantToggleWorking: "Assistant, working",
+	/** Assistant button in the icon rail — accessible name while the panel is hidden and an action waits for the user to confirm or decline it */
+	assistantToggleWaiting: "Assistant, waiting for your confirmation",
+	/** Assistant button in the icon rail — accessible name after the assistant finished a request while the panel was hidden */
+	assistantToggleFinished: "Assistant, new reply",
+	/** Assistant button's tooltip in the icon rail — after its name, while the assistant works on a request */
+	assistantRailWorking: "Working…",
+	/** Assistant button's tooltip in the icon rail — after its name, while an action waits for the user */
+	assistantRailWaiting: "Waiting for your confirmation",
+	/** Assistant button's tooltip in the icon rail — after its name, once a request finished while the panel was hidden */
+	assistantRailFinished: "New reply",
+	/** Toast — the assistant proposed an action (e.g. a chat draft) while its panel was hidden; it does nothing until the user confirms it there */
+	assistantConfirmationToast: "The assistant is waiting for your confirmation",
+	/** Toast action — shows the assistant panel */
+	assistantConfirmationToastShow: "Show",
 	/** The downloaded model is being loaded into memory */
 	assistantLoadingTitle: "Loading model…",
 	/** Before starting, the downloaded model's files are checked because a record of them was lost or the last start failed */

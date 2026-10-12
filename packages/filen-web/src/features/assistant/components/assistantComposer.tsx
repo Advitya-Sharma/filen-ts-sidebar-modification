@@ -4,6 +4,7 @@ import { ArrowUpIcon, SquareIcon } from "lucide-react"
 import { cn } from "@filen/shared"
 import { Button } from "@/components/ui/button"
 import { GLASS_SURFACE_CLASS } from "@/components/ui/surface"
+import { isImeKeydown } from "@/lib/ime"
 import { enterIntent } from "@/features/chats/lib/composer.logic"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
 import { awaitingConfirmation } from "@/features/assistant/store/transcript"
@@ -19,10 +20,21 @@ function fitHeight(element: HTMLTextAreaElement): void {
 	element.style.height = `${String(Math.min(element.scrollHeight, MAX_TEXTAREA_HEIGHT))}px`
 }
 
+// The draft outlives the composer (panel closed, history shown, drawer closed), so a restored one is sized
+// as it mounts.
+function sizeRestoredDraft(element: HTMLDivElement | null): void {
+	const textarea = element?.querySelector("textarea")
+
+	if (textarea !== null && textarea !== undefined && textarea.value.length > 0) {
+		fitHeight(textarea)
+	}
+}
+
 // The chat composer's pill, minus attachments. Enter sends, Shift+Enter breaks the line, and an IME
-// composition's own Enter (confirming a candidate) is left to the IME. While a reply streams, Stop replaces
-// Send; the draft stays editable so the next question can be typed meanwhile. While the turn only waits for
-// its card, Send is back: a new message answers the card with no.
+// composition's own Enter (confirming a candidate, which Safari delivers after the composition ended) is
+// left to the IME. While a reply streams, Stop replaces Send; the draft stays editable so the next question
+// can be typed meanwhile. While the turn only waits for its card, Send is back: a new message answers the
+// card with no.
 export function AssistantComposer() {
 	const { t } = useTranslation("assistant")
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -50,7 +62,7 @@ export function AssistantComposer() {
 	}
 
 	function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-		if (event.nativeEvent.isComposing || enterIntent(event) !== "send") {
+		if (isImeKeydown(event.nativeEvent) || enterIntent(event) !== "send") {
 			return
 		}
 
@@ -59,7 +71,10 @@ export function AssistantComposer() {
 	}
 
 	return (
-		<div className="shrink-0 px-3 pt-2 pb-3">
+		<div
+			ref={sizeRestoredDraft}
+			className="shrink-0 px-3 pt-2 pb-3"
+		>
 			<div
 				className={cn(
 					"flex items-end gap-2 rounded-[20px] py-1 pr-1 pl-4 transition-shadow focus-within:ring-3 focus-within:ring-ring/30",

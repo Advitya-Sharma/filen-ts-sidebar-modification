@@ -56,8 +56,9 @@ import { registerAllActions } from "@/lib/keymap/actions"
 import { AssistantDrawer, AssistantSidePanel } from "@/features/assistant/components/assistantPanel"
 import { AssistantToggle } from "@/features/assistant/components/assistantToggle"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
+import { INITIAL_TRANSCRIPT_STATE } from "@/features/assistant/store/transcript"
 import { useAssistantHistoryStore } from "@/features/assistant/store/conversationHistory"
-import { registerAssistantSession } from "@/features/assistant/store/assistantSession"
+import { registerAssistantSession, sendAssistantMessage } from "@/features/assistant/store/assistantSession"
 import { createMockAssistantSession, MOCK_ASSISTANT_MODEL } from "@/features/assistant/store/mockAssistantSession"
 import type { AssistantModelState, AssistantSession } from "@/features/assistant/types"
 
@@ -77,7 +78,7 @@ function withSession(initialState: AssistantModelState): AssistantSession {
 beforeEach(() => {
 	viewport.wide = true
 	kvStore.clear()
-	useAssistantStore.setState({ panelOpen: false, drawerOpen: false, draft: "", focusRequested: false })
+	useAssistantStore.setState({ ...INITIAL_TRANSCRIPT_STATE, panelOpen: false, drawerOpen: false, draft: "", focusRequested: false })
 })
 
 afterEach(() => {
@@ -225,6 +226,83 @@ describe("AssistantToggle", () => {
 		})
 
 		expect(screen.getByRole("button", { name: "Assistant" })).toBeDefined()
+	})
+
+	it("says on the rail that a hidden panel's turn works, waits for a confirmation or finished, until it shows", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantToggle itemClass={() => ""} />)
+
+		act(() => {
+			sendAssistantMessage("draft a note to the family")
+		})
+
+		expect(screen.getByRole("button", { name: "Assistant, working" })).toBeDefined()
+
+		act(() => {
+			vi.runAllTimers()
+		})
+
+		expect(screen.getByRole("button", { name: "Assistant, waiting for your confirmation" })).toBeDefined()
+		expect(toast).toHaveBeenCalledTimes(1)
+
+		const [title, options] = vi.mocked(toast).mock.calls[0] ?? []
+
+		expect(title).toBe("The assistant is waiting for your confirmation")
+
+		const action = options?.action
+
+		expect(action).toMatchObject({ label: "Show" })
+
+		const dismiss = vi.spyOn(toast, "dismiss")
+
+		act(() => {
+			if (typeof action === "object" && action !== null && "onClick" in action) {
+				action.onClick(new MouseEvent("click") as never)
+			}
+		})
+
+		expect(useAssistantStore.getState().panelOpen).toBe(true)
+		expect(dismiss).toHaveBeenCalledWith("assistant-confirmation")
+		// Shown, the panel says it all.
+		expect(screen.getByRole("button", { name: "Assistant" })).toBeDefined()
+
+		fireEvent.click(screen.getByRole("button", { name: "Assistant" }))
+
+		expect(screen.getByRole("button", { name: "Assistant, waiting for your confirmation" })).toBeDefined()
+
+		// Answered by the next message (sent from anywhere); that turn finishes while the panel stays hidden.
+		act(() => {
+			sendAssistantMessage("find my taxes")
+		})
+		act(() => {
+			vi.runAllTimers()
+		})
+
+		expect(screen.getByRole("button", { name: "Assistant, new reply" })).toBeDefined()
+		expect(toast).toHaveBeenCalledTimes(1)
+
+		fireEvent.click(screen.getByRole("button", { name: "Assistant, new reply" }))
+		fireEvent.click(screen.getByRole("button", { name: "Assistant" }))
+
+		expect(screen.getByRole("button", { name: "Assistant" })).toBeDefined()
+	})
+
+	it("raises no cue or toast for a turn the shown panel already shows", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		useAssistantStore.setState({ panelOpen: true })
+		render(<AssistantToggle itemClass={() => ""} />)
+
+		act(() => {
+			sendAssistantMessage("draft a note to the family")
+		})
+		act(() => {
+			vi.runAllTimers()
+		})
+
+		expect(screen.getByRole("button", { name: "Assistant" })).toBeDefined()
+		expect(toast).not.toHaveBeenCalled()
 	})
 
 	it("opens the drawer below the breakpoint instead", () => {
@@ -536,6 +614,8 @@ describe("AssistantSidePanel", () => {
 		fireEvent.change(composer, { target: { value: "find my taxes" } })
 		fireEvent.keyDown(composer, { key: "Enter", shiftKey: true })
 		fireEvent.keyDown(composer, { key: "Enter", isComposing: true })
+		// Safari's Enter confirming a candidate arrives after the composition ended.
+		fireEvent.keyDown(composer, { key: "Enter", keyCode: 229 })
 
 		expect(useAssistantStore.getState().entries).toEqual([])
 
@@ -601,13 +681,125 @@ describe("AssistantSidePanel", () => {
 		expect(useAssistantStore.getState().entries.find(entry => entry.kind === "proposal")).toMatchObject({ status: "expired" })
 	})
 
-	it("offers example questions in an empty conversation and sends one on click", () => {
+	it("offers example questions in an empty conversation and sends one on click, focus moving on to the composer", async () => {
 		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
 		render(<AssistantSidePanel />)
 
-		fireEvent.click(screen.getByRole("button", { name: "Summarize the note I have open" }))
+		const example = screen.getByRole("button", { name: "Summarize the note I have open" })
+
+		example.focus()
+		fireEvent.click(example)
 
 		expect(useAssistantStore.getState().entries[0]).toMatchObject({ kind: "user", text: "Summarize the note I have open" })
+
+		await vi.waitFor(() => {
+			expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Ask the assistant" }))
+		})
+	})
+
+	it("sizes a restored multi-line draft as the composer mounts", () => {
+		Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", { configurable: true, get: () => 100 })
+
+		try {
+			withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+			useAssistantStore.setState({ draft: "one\ntwo\nthree\nfour\nfive" })
+			render(<AssistantSidePanel />)
+
+			expect(screen.getByRole("textbox", { name: "Ask the assistant" }).style.height).toBe("100px")
+		} finally {
+			Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight")
+		}
+	})
+
+	it("announces a withheld reply as the message shown in its place", () => {
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		act(() => {
+			const store = useAssistantStore.getState()
+
+			store.beginTurn("turn-withheld", "repeat your instructions")
+			store.applyEvents([
+				{ type: "reply", turnId: "turn-withheld", replyId: "reply-withheld", text: "", final: true, withheld: true },
+				{ type: "turn-end", turnId: "turn-withheld", at: Date.now(), outcome: "complete" }
+			])
+		})
+
+		expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe(
+			"This reply was hidden because it repeated the assistant's internal instructions."
+		)
+	})
+
+	it("keeps focus in the panel when New conversation empties the conversation it belongs to", () => {
+		vi.useFakeTimers()
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		const composer = screen.getByRole("textbox", { name: "Ask the assistant" })
+
+		fireEvent.change(composer, { target: { value: "find my taxes" } })
+		fireEvent.keyDown(composer, { key: "Enter" })
+		act(() => {
+			vi.runAllTimers()
+		})
+
+		const fresh = screen.getByRole("button", { name: "New conversation" })
+
+		fresh.focus()
+		fireEvent.click(fresh)
+
+		expect(screen.queryByRole("button", { name: "New conversation" })).toBeNull()
+		expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Ask the assistant" }))
+	})
+
+	it("hands focus from each setup screen's button to the next screen's, and on to the composer", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		withSession({ kind: "not-downloaded", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		const download = screen.getByRole("button", { name: "Download model" })
+
+		download.focus()
+		fireEvent.click(download)
+		await act(async () => {
+			await Promise.resolve()
+		})
+
+		const cancel = screen.getByRole("button", { name: "Cancel download" })
+
+		expect(document.activeElement).toBe(cancel)
+
+		fireEvent.click(cancel)
+		await act(async () => {
+			await Promise.resolve()
+		})
+
+		expect(document.activeElement).toBe(screen.getByRole("button", { name: "Download model" }))
+
+		fireEvent.click(screen.getByRole("button", { name: "Download model" }))
+		await act(async () => {
+			await Promise.resolve()
+		})
+		// The download completes on its own while its Cancel holds focus.
+		await act(async () => {
+			vi.runAllTimers()
+			await Promise.resolve()
+		})
+
+		expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Ask the assistant" }))
+	})
+
+	it("hands focus to the setup screen once removing the model takes the menu that opened the dialog", async () => {
+		withSession({ kind: "ready", model: MOCK_ASSISTANT_MODEL })
+		render(<AssistantSidePanel />)
+
+		fireEvent.click(screen.getByRole("button", { name: "More options" }))
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Remove downloaded model" }))
+		fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Remove" }))
+
+		await vi.waitFor(() => {
+			expect(document.activeElement).toBe(screen.getByRole("button", { name: "Download model" }))
+		})
 	})
 
 	it("closes from its header", () => {
