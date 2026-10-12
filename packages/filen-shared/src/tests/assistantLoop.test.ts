@@ -1826,10 +1826,29 @@ describe("fitMessages", () => {
 	["Korean", "톰이 다음 분기 예산에 대해 쓴 내용을 요약해 주세요.", 15],
 	["emoji", "Party 🎉🎉 at 8 👍 ok 🏳️‍🌈", 22],
 	["whitespace", "a\n\n\n   b\t\tc     d", 8],
+	["identifiers", "getItemInfoQueryKey useDriveListingQuery XMLHttpRequest", 9],
+	["code with identifiers", "const driveListing = await queryClient.fetchQuery(driveListingQueryOptions(parentUuid)); if (!isDirectoryItem(item)) return null;", 27],
+	["German compounds", "Rechnungsbetrag Kraftfahrzeughaftpflichtversicherung", 11],
+	["Hungarian", "Holnap délelőtt tíz órakor találkozunk a tárgyalóban, kérlek hozzátok a laptopokat és a jegyzeteiteket.", 34],
 	]
 
 	it.each(MEASURED)("never estimates %s below the model's own token count", (_name, text, tokens) => {
 		expect(estimateTokens(text)).toBeGreaterThanOrEqual(tokens)
 		expect(estimateTokens(text)).toBeLessThanOrEqual(Math.ceil(tokens * (/\P{ASCII}/u.test(text) ? 4 : 2)))
+	})
+
+	// Letters that form no words, which only the tokenizer tells from words: low, but by at most a third.
+	const BASE64 = btoa(String.fromCharCode(...Array.from({ length: 1500 }, (_, index) => (index * 7919 + 13) % 256))).slice(0, 400)
+	const LOW: readonly (readonly [string, string, number])[] = [
+		["base64", BASE64, 313],
+		["API keys", "sk_live_4eC39HqLyjWDarjtT1zdp7dc AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", 49],
+		["random identifiers", "Xk9Lm2Qp7Rz aB3dE5fG7hJ kQwErTyUiOp", 29],
+		["hex", "deadbeefcafebabe 3f2a9c1e7b4d4e8a9f120a1b2c3d4e5f", 39],
+		["Finnish", "Moi kaikki, huomenna kello kymmenen tapaamme neuvotteluhuoneessa, joten tuokaa kannettavat tietokoneet mukaan.", 35]
+	]
+
+	it.each(LOW)("estimates %s at no less than two thirds of the model's own token count", (_name, text, tokens) => {
+		expect(estimateTokens(text)).toBeGreaterThanOrEqual(Math.ceil((tokens * 2) / 3))
+		expect(estimateTokens(text)).toBeLessThanOrEqual(tokens * 2)
 	})
 })

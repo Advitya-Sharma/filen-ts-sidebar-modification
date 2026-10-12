@@ -32,13 +32,15 @@ function charClass(code: number): number {
 	return code === 0x09 || code === 0x0a || code === 0x0d ? BREAK : code < 0x20 ? OTHER : PUNCT
 }
 
-// The engines expose no tokenizer, so prompt size is estimated from characters, never below what Qwen's
-// vocabulary (Qwen3.5, measured) makes of a rendered prompt: a digit is a token, a run of ASCII punctuation
-// one per two marks (what listings, dates, sizes and CSV are made of), an ASCII word one per five letters
-// (per three in capitals) with the space before it nearly free, a run of line breaks or of spaces one. Any
-// other character counts as a token (CJK, Cyrillic, Arabic or Devanagari text takes two to four), the
-// spotlight delimiters as two and characters outside the basic plane (emoji) as four. Prose comes out about
-// a third high, which only drops history a little early.
+// The engines expose no tokenizer, so prompt size is estimated from characters against what Qwen's vocabulary
+// (Qwen3.5, measured) makes of a rendered prompt: a digit is a token, a run of ASCII punctuation one per two
+// marks (what listings, dates, sizes and CSV are made of), an ASCII word one per five letters (per three in
+// capitals) with the space before it nearly free, a run of line breaks or of spaces one. Mixed case (base64,
+// keys, identifiers) splits into short runs. Any other character counts as a token (CJK, Cyrillic, Arabic or
+// Devanagari text takes two to four), the spotlight delimiters as two and characters outside the basic plane
+// (emoji) as four. Prose comes out about a third high, which only drops history a little early. Letters
+// that form no words come out low: base64 and random keys by up to a third, long runs of random small letters
+// by half or more; nothing short of the tokenizer tells them from words.
 export function estimateTokens(text: string): number {
 	let tokens = 0
 	let index = 0
@@ -53,8 +55,16 @@ export function estimateTokens(text: string): number {
 
 			while (end < text.length) {
 				const next = charClass(text.charCodeAt(end))
+				const previous = charClass(text.charCodeAt(end - 1))
 
-				if (next !== UPPER && next !== LOWER) {
+				// A run ends where a capital follows a small letter, and before the last of several capitals a small
+				// letter follows ("XMLHttp" is "XML" "Http").
+				if ((next !== UPPER && next !== LOWER) || (previous === LOWER && next === UPPER)) {
+					break
+				}
+
+				if (next === LOWER && upper && end - index > 1) {
+					end--
 					break
 				}
 
