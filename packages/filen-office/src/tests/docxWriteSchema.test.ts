@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { bytesSource, OpcPackage } from "@filen/office/core/opc"
 import { saveDocx } from "@filen/office/core/docx/write"
+import { decodeUtf8 } from "@filen/office/core/xml"
 import { CORPUS_DIR as CORPUS } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 import { runEditScript } from "./docxWriteFixtures"
@@ -73,9 +74,9 @@ describe.skipIf(!XMLLINT || !existsSync(SCHEMA_ARCHIVE) || !existsSync(CORPUS))(
 
 					validated[kind] = (validated[kind] ?? 0) + 1
 
-					const before = opened.pkg.has(part)
-						? validityErrors(schema, await opened.pkg.opc.read(part))
-						: new Map<string, number>()
+					const source = opened.pkg.has(part) ? await opened.pkg.opc.read(part) : undefined
+					const before = source === undefined ? new Map<string, number>() : validityErrors(schema, source)
+					const nilText = source !== undefined && decodeUtf8(source).includes('xsi:nil="true"')
 					const after = validityErrors(schema, await written.read(part))
 
 					for (const [message, count] of after) {
@@ -83,6 +84,8 @@ describe.skipIf(!XMLLINT || !existsSync(SCHEMA_ARCHIVE) || !existsSync(CORPUS))(
 
 						// A value the source already had wrong is copied with the run it is in (a split repeats it).
 						if (was > 0 && message.includes("[facet ")) continue
+						// The source's own xsi:nil on copied text, reported once an earlier error no longer hides it.
+						if (nilText && message.includes("is not 'nillable'")) continue
 						if (count > was) failures.push(`${name} ${part}: ${message} (${was} -> ${count})`)
 					}
 				}

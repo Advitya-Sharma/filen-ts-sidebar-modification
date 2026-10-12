@@ -250,13 +250,11 @@ describe("docx writer extension points: new elements", () => {
 			reason: "missingSource",
 			message: "A section_change mark on a paragraph"
 		})
-		expect(marked("table_row", "row_props", { header: true })).toEqual({
-			reason: "missingSource",
-			message: "A row_props mark on a table_row"
-		})
+		// Table commands' records are written (write/tables.ts); keys the writer does not know are refused.
+		expect(marked("table_row", "row_props", { header: true })).toBeUndefined()
 		expect(marked("table_cell", "cell_props", { fill: "FF0000" })).toEqual({
-			reason: "missingSource",
-			message: "A cell_props mark on a table_cell"
+			reason: "unsupported",
+			message: "A cell change the writer does not know: fill"
 		})
 		expect(
 			write(
@@ -266,7 +264,16 @@ describe("docx writer extension points: new elements", () => {
 					node => node.type.create({ ...node.attrs, props: { align: "center" } }, node.content)
 				)
 			)
-		).toEqual({ reason: "unsupported", message: "Changed table properties" })
+		).toBeUndefined()
+		expect(
+			write(
+				changeFirst(
+					doc,
+					node => node.type === nodes.table,
+					node => node.type.create({ ...node.attrs, props: { float: true } }, node.content)
+				)
+			)
+		).toEqual({ reason: "unsupported", message: "A table change the writer does not know: float" })
 		expect(
 			write(
 				changeFirst(
@@ -276,6 +283,7 @@ describe("docx writer extension points: new elements", () => {
 				)
 			)
 		).toEqual({ reason: "missingSource", message: "A changed content control" })
+		// A formatting change tracked changes recorded is written (w:rPrChange).
 		expect(
 			write(
 				changeFirst(
@@ -284,7 +292,7 @@ describe("docx writer extension points: new elements", () => {
 					node => node.mark([...node.marks, marks.format_change.create({ author: "Bo", base: 0 })])
 				)
 			)
-		).toEqual({ reason: "missingSource", message: "A new formatting change" })
+		).toBeUndefined()
 		expect(write(withFirst(doc, [nodes.field_char.create({ kind: "begin" })]))).toEqual({
 			reason: "missingSource",
 			message: "A new field_char"
@@ -744,7 +752,7 @@ describe("docx writer extension points: new stories and parts", () => {
 		const changed = doc.type.create({ ...doc.attrs, comments: { "0": { done: true } } }, doc.content)
 		const body = storySession(edit.story, changed)
 
-		expect(await refusal(saveDocx({ pkg: document.pkg, context: document.context, sessions: [body] }))).toEqual({
+		expect(await refusal(saveDocx({ pkg: document.pkg, context: document.context, sessions: [body], parts: [] }))).toEqual({
 			reason: "write",
 			message: "A document comments change"
 		})

@@ -2,7 +2,7 @@ import { DOMParser, DOMSerializer, Fragment, Slice, type DOMOutputSpec, type Mar
 import { EditorState, Plugin, type Transaction } from "prosemirror-state"
 import { Mapping } from "prosemirror-transform"
 import { EditorView, type NodeView, type NodeViewConstructor } from "prosemirror-view"
-import { docxSchema } from "../../../core/docx/edit/index"
+import { docxSchema, type DocxEditorSession, type MarkerList } from "../../../core/docx/edit/index"
 import {
 	besideNode,
 	commandForKey,
@@ -13,6 +13,8 @@ import {
 	splitParagraph,
 	type PagedEditor
 } from "../../../core/docx/paged/index"
+import { COMMENT_MOVE_META, freshSliceKeeping } from "../../../core/docx/edit/invariants/index"
+import { docxComments } from "../../../core/docx/review/comments"
 
 // The input sink of paged editing: a real ProseMirror view that holds focus and receives all input (keys,
 // beforeinput, IME composition, clipboard, drag and drop) while the pages show the document. It is invisible
@@ -672,6 +674,37 @@ export function plainSlice(text: string, $context: ResolvedPos): Slice {
 	return new Slice(Fragment.from(paragraphs), 1, 1)
 }
 
+const COMMENT_MARKERS: ReadonlySet<unknown> = new Set(["commentRangeStart", "commentRangeEnd"])
+
+// Ids of the comments anchored in `fragment` (ranges, references, marker lists of blocks).
+function commentIds(fragment: Fragment): string[] {
+	const out = new Set<string>()
+	const list = (value: unknown): void => {
+		if (!Array.isArray(value)) return
+
+		for (const marker of value as MarkerList)
+			if (COMMENT_MARKERS.has(marker.kind) || marker.kind === "commentReference") if (marker.id !== null) out.add(marker.id)
+	}
+
+	fragment.descendants(node => {
+		const id: unknown = node.attrs["id"]
+
+		if (
+			node.type === docxSchema.nodes.comment_ref ||
+			(node.type === docxSchema.nodes.marker && COMMENT_MARKERS.has(node.attrs["kind"]))
+		) {
+			if (typeof id === "string") out.add(id)
+		}
+
+		list(node.attrs["before"])
+		list(node.attrs["end"])
+
+		return true
+	})
+
+	return [...out]
+}
+
 export class EditSink {
 	readonly element: HTMLDivElement
 	readonly view: EditorView
@@ -695,6 +728,10 @@ export class EditSink {
 	private lineHeight = 0
 	private width = 0
 	private readonly stopListening: () => void
+	// What the last cut took out with comment anchors in it: pasted back as text of the same clipboard, it moves
+	// the comments (as in Word) rather than leaving them out.
+	private cut:
+		{ readonly session: DocxEditorSession; readonly text: string; readonly slice: Slice; readonly ids: readonly string[] } | undefined
 
 	constructor(editor: PagedEditor, parent: HTMLElement, options: EditSinkOptions) {
 		this.editor = editor
@@ -728,6 +765,7 @@ export class EditSink {
 				return plainText(state.doc, from, to, pos => this.editor.geometry.markerText(pos))
 			},
 			clipboardTextParser: (text, $context) => plainSlice(text, $context),
+			handlePaste: (_view, event) => this.pasteCut(event.clipboardData?.getData("text/plain")),
 			// The pages scroll to the painted caret; the sink never scrolls anything.
 			handleScrollToSelection: () => true,
 			handleKeyDown: (view, event) => this.keyDown(view, event),
@@ -848,6 +886,8 @@ export class EditSink {
 	deleteSelection(): boolean {
 		if (this.readOnly || this.editor.state.selection.empty) return false
 
+		this.rememberCut()
+
 		return this.run(this.editor.state.tr.deleteSelection())
 	}
 
@@ -856,6 +896,7 @@ export class EditSink {
 	// text is taken as typed. False when read-only or there is nothing to paste.
 	paste(content: { readonly html?: string; readonly text?: string }): boolean {
 		if (this.readOnly) return false
+		if (this.pasteCut(content.text)) return true
 		if (content.html !== undefined && content.html.length > 0) return this.view.pasteHTML(content.html)
 		if (content.text !== undefined && content.text.length > 0) return this.view.pasteText(content.text)
 
@@ -1014,10 +1055,56 @@ export class EditSink {
 		data.clearData()
 		data.setData("text/html", content.html)
 		data.setData("text/plain", content.text)
+		this.cut = undefined
 
-		if (cut && !this.readOnly) this.apply(this.editor.state.tr.deleteSelection().scrollIntoView().setMeta("uiEvent", "cut"))
+		if (cut && !this.readOnly) {
+			this.rememberCut(content.text)
+			this.apply(this.editor.state.tr.deleteSelection().scrollIntoView().setMeta("uiEvent", "cut"))
+		}
 
 		return true
+	}
+
+	// Keeps the selection as it is about to be cut when it holds comment anchors (see pasteCut).
+	private rememberCut(text?: string): void {
+		const slice = this.editor.state.selection.content()
+		const ids = commentIds(slice.content)
+
+		this.cut =
+			ids.length === 0
+				? undefined
+				: { session: this.editor.session, text: text ?? this.view.serializeForClipboard(slice).text, slice, ids }
+	}
+
+	// Pastes the last cut as it was, comment anchors included, when `text` is what it wrote and its comments are
+	// anchored nowhere now (the cut took them out, untracked, and no paste put them back): the comments move, also
+	// into another story (as in Word). Once only; a copy, or anything else, pastes as usual.
+	private pasteCut(text: string | undefined): boolean {
+		const cut = this.cut
+
+		if (cut === undefined || text === undefined || this.readOnly) return false
+
+		this.cut = undefined
+
+		const comments = docxComments(this.editor)
+
+		if (text.replace(/\r\n?/g, "\n") !== cut.text.replace(/\r\n?/g, "\n") || cut.ids.some(id => comments.comment(id) !== undefined))
+			return false
+
+		// Into another part, the cut's source identities are not that part's: new content, the anchors kept.
+		const slice =
+			this.editor.session.story.part === cut.session.story.part
+				? cut.slice
+				: freshSliceKeeping(
+						cut.slice,
+						new Set(
+							cut.ids.flatMap(id => ["commentRangeStart", "commentRangeEnd", "commentReference"].map(kind => `${kind}:${id}`))
+						)
+					)
+
+		return this.run(
+			this.editor.state.tr.replaceSelection(slice).scrollIntoView().setMeta("uiEvent", "paste").setMeta(COMMENT_MOVE_META, cut.ids)
+		)
 	}
 
 	// Brings the view to the session's state; `force`: also when that did not change (the view's DOM may

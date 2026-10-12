@@ -422,8 +422,8 @@ function rank(order: readonly string[], local: string): number {
 	return index < 0 ? order.length : index
 }
 
-// A start tag with one attribute set to a new value (added when absent).
-export function startTagWith(out: Out, document: XmlDocument, node: number, qualifiedName: string, value: string): void {
+// A start tag with one attribute set to a new value (added when absent); `close` keeps a self-closing tag so.
+export function startTagWith(out: Out, document: XmlDocument, node: number, qualifiedName: string, value: string, close = false): void {
 	const bytes = document.bytes
 	const spans = document.attributeSpans(node)
 	const name = encodeUtf8(qualifiedName)
@@ -451,7 +451,7 @@ export function startTagWith(out: Out, document: XmlDocument, node: number, qual
 			while (end > start && isSpace(bytes[end - 1])) end--
 
 			out.bytes(bytes, spans[k + 3] ?? 0, end)
-			out.text(">")
+			out.text(close ? "/>" : ">")
 		} else {
 			out.bytes(bytes, spans[k + 3] ?? 0, openEnd)
 		}
@@ -464,5 +464,5 @@ export function startTagWith(out: Out, document: XmlDocument, node: number, qual
 	while (end > start && isSpace(bytes[end - 1])) end--
 
 	out.bytes(bytes, start, end)
-	out.text(` ${qualifiedName}="${escapeAttribute(value)}">`)
+	out.text(` ${qualifiedName}="${escapeAttribute(value)}"${close && document.isSelfClosing(node) ? "/>" : ">"}`)
 }

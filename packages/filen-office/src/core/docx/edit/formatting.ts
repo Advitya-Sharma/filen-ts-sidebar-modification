@@ -1,6 +1,15 @@
 import type { Mark } from "prosemirror-model"
-import type { XmlDocument } from "../../xml/index"
-import { EMPTY_RUN, type ColorProps, type PropsStore, type RunProps } from "../props/index"
+import { decodeUtf8, type XmlDocument } from "../../xml/index"
+import { partReader } from "../model/reader"
+import {
+	EMPTY_RUN,
+	type ColorProps,
+	type FontsProps,
+	type LanguageProps,
+	type PropsStore,
+	type RunProps,
+	type ThemeColorName
+} from "../props/index"
 import { docxSchema, type ColorAttrs } from "./schema"
 
 // The source run formatting of one session. Each distinct w:rPr (by its bytes: the props store interns
@@ -136,4 +145,152 @@ export function formattingMarks(props: RunProps): Mark[] {
 	}
 
 	return out
+}
+
+function colorProps(attrs: ColorAttrs | null): ColorProps | undefined {
+	if (attrs === null) return undefined
+
+	return {
+		...(attrs.value !== null ? { val: attrs.value } : {}),
+		...(attrs.themeColor !== null ? { themeColor: attrs.themeColor as ThemeColorName } : {}),
+		...(attrs.themeTint !== null ? { themeTint: attrs.themeTint } : {}),
+		...(attrs.themeShade !== null ? { themeShade: attrs.themeShade } : {})
+	}
+}
+
+function defined<T extends object>(value: { [K in keyof T]: T[K] | null }): T {
+	const out: Record<string, unknown> = {}
+
+	for (const [key, entry] of Object.entries(value)) if (entry !== null) out[key] = entry
+
+	return out as T
+}
+
+// The direct run properties the formatting marks of a node stand for (formattingMarks backwards). Properties
+// without a mark (kerning, position, effects) are not among them.
+export function runPropsOf(marksOf: readonly Mark[]): RunProps {
+	const m = docxSchema.marks
+	const out: Record<string, unknown> = {}
+
+	for (const mark of marksOf) {
+		const a = mark.attrs
+
+		switch (mark.type) {
+			case m.char_style:
+				out["styleId"] = a["styleId"]
+
+				break
+			case m.bold:
+			case m.italic: {
+				const name = mark.type === m.bold ? "bold" : "italic"
+
+				if (a["value"] !== null) out[name] = a["value"]
+				if (a["cs"] !== null) out[`${name}Cs`] = a["cs"]
+
+				break
+			}
+			case m.underline:
+				out["underline"] = { style: a["style"], ...colorProps(a as unknown as ColorAttrs) }
+
+				break
+			case m.strike:
+				out["strike"] = a["value"]
+
+				break
+			case m.double_strike:
+				out["doubleStrike"] = a["value"]
+
+				break
+			case m.caps:
+				out["caps"] = a["value"]
+
+				break
+			case m.small_caps:
+				out["smallCaps"] = a["value"]
+
+				break
+			case m.vert_align:
+				out["vertAlign"] = a["value"]
+
+				break
+			case m.color:
+				out["color"] = colorProps(a as unknown as ColorAttrs)
+
+				break
+			case m.highlight:
+				out["highlight"] = a["value"]
+
+				break
+			case m.shading:
+				out["shading"] = {
+					pattern: a["pattern"],
+					...(a["color"] !== null ? { color: colorProps(a["color"] as ColorAttrs) } : {}),
+					...(a["fill"] !== null ? { fill: colorProps(a["fill"] as ColorAttrs) } : {})
+				}
+
+				break
+			case m.font:
+				out["fonts"] = defined<FontsProps>(a as unknown as { [K in keyof FontsProps]: FontsProps[K] | null })
+
+				break
+			case m.size:
+				if (a["value"] !== null) out["size"] = a["value"]
+				if (a["cs"] !== null) out["sizeCs"] = a["cs"]
+
+				break
+			case m.spacing:
+				out["spacing"] = a["value"]
+
+				break
+			case m.lang:
+				out["lang"] = defined<LanguageProps>({
+					latin: a["latin"] as string | null,
+					eastAsia: a["eastAsia"] as string | null,
+					bidi: a["bidi"] as string | null
+				})
+
+				break
+		}
+	}
+
+	return out as RunProps
+}
+
+// Whether the w:rPr bytes of `base` keep their meaning written into `document`: the writer copies them as they
+// are, so every prefix in them must be bound there (on its root, where Word declares them) to the same
+// namespace.
+export function baseFits(base: RunBase, document: XmlDocument): boolean {
+	if (base.document === document) return true
+
+	const from = partReader(base.document).namespaces
+	const to = partReader(document).namespaces
+	const root = document.documentElement()
+	const source = base.document
+	const fits = (node: number, prefix: string): boolean =>
+		prefix === "xml" || (prefix !== "" && from.uri(node, prefix) === to.uri(root, prefix))
+	const visit = (node: number): boolean => {
+		if (!fits(node, source.prefix(node))) return false
+
+		const spans = source.attributeSpans(node)
+
+		for (let k = 0; k < spans.length; k += 4) {
+			const name = decodeUtf8(source.bytes, spans[k] ?? 0, spans[k + 1] ?? 0)
+			const colon = name.indexOf(":")
+
+			// Unprefixed attributes are in no namespace; a declaration in the bytes is not carried by scope.
+			if (name === "xmlns" || name.startsWith("xmlns:")) return false
+			if (colon >= 0 && !fits(node, name.slice(0, colon))) return false
+		}
+
+		for (let child = source.firstChildElement(node); child >= 0; child = source.nextSiblingElement(child))
+			if (!visit(child)) return false
+
+		return true
+	}
+
+	try {
+		return visit(base.node)
+	} catch {
+		return false
+	}
 }

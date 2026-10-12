@@ -37,9 +37,26 @@ function expectFresh(session: DocxEditorSession): void {
 	const index = session.reviewIndex
 	const fresh = new ReviewIndex(session.state.doc)
 
-	expect(index.entries()).toEqual(fresh.entries())
+	const entries = index.entries()
+
+	expect(entries).toEqual(fresh.entries())
 	expect(index.commentCount).toBe(fresh.commentCount)
 	expect(index.revisionCount).toBe(fresh.revisionCount)
+
+	// The comment-only view and the binary-searched range lookup agree with the entries.
+	expect([...index.commentEntries()].map(k => [index.fromOf(k), index.kindOf(k), index.idOf(k)])).toEqual(
+		entries.filter(entry => entry.kind <= ReviewKind.COMMENT_REFERENCE).map(entry => [entry.from, entry.kind, entry.id])
+	)
+
+	const size = session.state.doc.content.size
+
+	for (const from of [0, Math.floor(size / 3), Math.floor(size / 2), size - 3]) {
+		for (const to of [from, from + 4]) {
+			const end = Math.max(to, from + 1)
+
+			expect(index.between(from, to)).toEqual(entries.filter(entry => entry.from < end && Math.max(entry.to, entry.from + 1) > from))
+		}
+	}
 }
 
 // Positions inside paragraphs' text.

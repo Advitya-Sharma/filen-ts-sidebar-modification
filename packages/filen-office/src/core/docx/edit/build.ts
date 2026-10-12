@@ -3,6 +3,7 @@ import { NodeKind } from "../../xml/index"
 import { FieldCharType, ITEM_NAMES, Item, type Story, type StoryPart } from "../model/index"
 import { El, Ns } from "../model/namespaces"
 import type { DocxEditContext } from "./context"
+import { builtFrom } from "./origin"
 import {
 	NO_MARKERS,
 	NO_SOURCE,
@@ -371,7 +372,10 @@ export class DocxDocBuilder {
 				continue
 			}
 
-			blocks.push(this.block(item, pending ?? NO_MARKERS))
+			const block = this.block(item, pending ?? NO_MARKERS)
+
+			builtFrom(this.context, block, part.index)
+			blocks.push(block)
 			pending = null
 
 			yield
@@ -414,7 +418,11 @@ export class DocxDocBuilder {
 			else if (part.kinds[at] !== Item.SectionProperties) pending = null
 		}
 
-		return this.block(item, pending ?? NO_MARKERS)
+		const block = this.block(item, pending ?? NO_MARKERS)
+
+		builtFrom(this.context, block, part.index)
+
+		return block
 	}
 
 	// The editing document of a story the editor made (a new note, comment or header): one empty paragraph,
@@ -650,6 +658,8 @@ export class DocxDocBuilder {
 					ilvl: props.numbering?.ilvl ?? null,
 					align: props.alignment ?? null,
 					indent: props.indent ?? null,
+					spacing: props.spacing ?? null,
+					borders: props.borders ?? null,
 					sectPr: sectPr >= 0 ? item : NO_SOURCE,
 					revision: part.paragraphs.markRevision[row] ?? 0
 				},
@@ -968,7 +978,8 @@ export class DocxDocBuilder {
 
 			const wrapper = this.wrapperMark(item)
 
-			if (wrapper !== undefined) {
+			// An empty hyperlink holds nothing a mark could stand on: kept as its bytes.
+			if (wrapper !== undefined && !(kind === Item.Hyperlink && part.end(item) === item + 1)) {
 				this.inline(item, wrapper.addToSet(wrappers), sink)
 
 				continue

@@ -34,7 +34,8 @@ const BLOCKS: RevertibleUnits = {
 	}
 }
 
-// Blocks first, then each feature's units.
+// Blocks first, then each feature's units: the order stand-ins apply them in (block keys are positions in the
+// session's own document; a feature's keys are found again in whatever document it is given).
 export const REVERTIBLE_UNITS: readonly RevertibleUnits[] = [BLOCKS, ...FEATURE_HANDLERS.flatMap(feature => feature.units ?? [])]
 
 export interface UnsavableBlocks {
@@ -94,7 +95,11 @@ export async function findUnsavableBlocks(
 	const all: Candidate[] = sessions.flatMap((session, index) =>
 		session.readOnly
 			? []
-			: REVERTIBLE_UNITS.flatMap(units => units.edited(session).map(key => ({ session: index, unit: { kind: units.kind, key } })))
+			: // Feature units listed first: the search prefers the finer units (one comment rather than the block
+				// holding its anchor), so only the failing unit goes back.
+				[...REVERTIBLE_UNITS.slice(1), BLOCKS].flatMap(units =>
+					units.edited(session).map(key => ({ session: index, unit: { kind: units.kind, key } }))
+				)
 	)
 	let attempts = 0
 

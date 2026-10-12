@@ -41,6 +41,8 @@ export interface StoryWriteOptions {
 	readonly force?: Node
 	// A story the source does not have (its item is -1): the container it is written in.
 	readonly container?: NewStoryContainer
+	// Prefixes of namespaces the save declares on the part's root (by URI), where the source's root lacks them.
+	readonly prefixes?: ReadonlyMap<string, string>
 }
 
 const nodes = docxSchema.nodes
@@ -198,6 +200,20 @@ export class StoryWriter {
 	writeBlockAlone(node: Node, copy = false, cell?: boolean): Out {
 		return this.writing.writeBlockAlone(node, copy, cell)
 	}
+
+	// Whether a paragraph is again the one the story was built with (an undo): its source bytes stand for it.
+	isSource(node: Node): boolean {
+		return (
+			node.type === docxSchema.nodes.paragraph &&
+			src(node) !== NO_SOURCE &&
+			node.marks.length === 0 &&
+			(this.story.pristine.has(node) || sameParagraph(this.original(node), node))
+		)
+	}
+
+	private original(node: Node): Node | undefined {
+		return originalBlocks(this.story).get(src(node))
+	}
 }
 
 // The state of one story's write, shared by the modules that write its parts (paragraph.ts, tables.ts,
@@ -251,7 +267,7 @@ export class StoryWriting {
 
 		const w14 = reader.namespaces.prefixFor(root, W14_NAMESPACE)
 
-		this.w14 = w14 ?? ""
+		this.w14 = w14 ?? options.prefixes?.get(W14_NAMESPACE) ?? ""
 		this.textId = w14 === undefined || w14 === "" ? undefined : new Set([`${w14}:textId`])
 		this.names = new Names(reader.namespaces.prefixFor(root, W_NAMESPACE) ?? "", reader.namespaces.prefixFor(root, R_NAMESPACE) ?? "")
 	}

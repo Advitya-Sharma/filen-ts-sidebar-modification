@@ -28,8 +28,25 @@ export interface MarkerWriter {
 	write(w: StoryWriting, out: Out, marker: MarkerAttrs, node: Node | undefined): void
 }
 
+// A new comment range's start or end: the id is checked; Gate 2 checks that a comment has it.
+function commentRange(kind: "commentRangeStart" | "commentRangeEnd"): MarkerWriter {
+	return {
+		kind,
+		write(w, out, marker) {
+			const id = marker.id
+
+			if (id === null || !/^-?\d{1,10}$/.test(id) || Math.abs(Number(id)) >= 2 ** 31)
+				throw new DocxWriteError("missingSource", `A new ${kind} without an id`)
+
+			out.text(w.names.empty(kind, [["id", id]]))
+		}
+	}
+}
+
 // Writers of new markers by kind; a new marker of any other kind is refused.
-const NEW_MARKERS: ReadonlyMap<MarkerKind, MarkerWriter> = new Map()
+const NEW_MARKERS: ReadonlyMap<MarkerKind, MarkerWriter> = new Map(
+	[commentRange("commentRangeStart"), commentRange("commentRangeEnd")].map(writer => [writer.kind, writer])
+)
 
 // A marker standing before or after blocks (MarkerList).
 export function writeListMarker(w: StoryWriting, out: Out, marker: MarkerAttrs): void {

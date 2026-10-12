@@ -30,6 +30,9 @@ export type { FormCommand } from "./commands/forms"
 export {
 	DOCX_HIGHLIGHT_COLORS,
 	DOCX_THEME_COLORS,
+	DOCX_FONT_SIZES,
+	DOCX_THEME_BODY_FONT,
+	DOCX_THEME_HEADINGS_FONT,
 	type DocxHighlightColor,
 	type DocxLineSpacingRule,
 	type DocxTextColor,
@@ -82,6 +85,8 @@ export {
 export { readOnlyReasons } from "./readOnly"
 export { NO_PROTECTION, protectionOf, type DocxProtection, type DocxProtectionMode } from "./protection"
 export { NO_VALUES } from "./snapshot/formats"
+export { DOCX_COMMON_FONTS, docxFontList, type DocxFontChoice, type DocxFontKind } from "./fontList"
+export type { DocxFormatValue, DocxIndentValue, DocxLineSpacingValue, DocxParagraphSpacingValue } from "./snapshot/formats"
 export { NO_REVIEW } from "./snapshot/review"
 export type {
 	DocxCommentContext,
@@ -149,6 +154,7 @@ export {
 	type DocxNodeName,
 	type DocxSchema,
 	type IndentAttrs,
+	type SpacingAttrs,
 	type InlineLevel,
 	type LockReason,
 	type LockedKind,
@@ -166,4 +172,24 @@ export {
 	type UnsavableSearchOptions,
 	withRevertedUnits
 } from "./unsavable"
+export { ReviewIndex, ReviewKind, revisionMarkId, type ReviewEntry } from "../review/index"
+export {
+	resolveChanges,
+	reviewIndexWanted,
+	storyReviewIndex,
+	wantReviewIndex,
+	type ReviewOutcome,
+	type ReviewScope
+} from "../review/accept"
+export {
+	flushComposition,
+	minuteDate,
+	paragraphChange,
+	revisionStamp,
+	setTrackingPersisted,
+	trackingPersisted,
+	type ParagraphAttrs,
+	type ParagraphChange,
+	type RevisionStamp
+} from "../review/track"
 export { DocxEditorSession, type DocxEditorOptions, type DocxEditorSnapshot, type DocxReadOnlyReason, type FormatState } from "./session"

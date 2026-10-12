@@ -186,6 +186,9 @@ export class Engine {
 	readonly content: ContentBuilder
 	readonly layouter: ParagraphLayouter
 	readonly markers = new Map<number, ListMarker | null>()
+	// Body content went onto the page drawn with stand-ins for fonts still loading (a table row that could not
+	// wait for them): the page is laid out again once they loaded. The paginator reads and clears it.
+	standIns = false
 	// Placements read so far that depend on whether the page is odd or even (inside/outside alignment): a page
 	// that read one is laid out again rather than kept when its number changes parity.
 	parityReads = 0

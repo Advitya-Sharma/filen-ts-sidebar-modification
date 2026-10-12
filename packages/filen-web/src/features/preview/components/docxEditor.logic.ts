@@ -58,10 +58,15 @@ export const DOCX_COMMAND_CATALOGUE = {
 	formatting: [
 		"format.superscript",
 		"format.subscript",
+		"format.doubleStrike",
+		"format.smallCaps",
+		"format.allCaps",
+		"format.clearAll",
 		"font.family",
 		"font.size",
 		"font.grow",
 		"font.shrink",
+		"font.spacing",
 		"color.text",
 		"color.highlight",
 		"paragraph.lineSpacing",
@@ -70,7 +75,7 @@ export const DOCX_COMMAND_CATALOGUE = {
 		"format.copy",
 		"format.paste"
 	],
-	insert: ["link.set", "link.remove", "insert.pageBreak"],
+	insert: ["link.set", "link.remove", "insert.pageBreak", "insert.lineBreak", "insert.horizontalLine", "insert.symbol"],
 	comments: [
 		"comment.add",
 		"comment.reply",
@@ -257,7 +262,8 @@ const OBJECT_FEATURES: Readonly<Record<ObjectHitKind, DocxCommandFeature | null>
 	field: "fields",
 	link: null,
 	noteRef: "notes",
-	equation: "math"
+	equation: "math",
+	tableBorder: "tables"
 }
 
 // A feature is offered once any of its commands is labelled.

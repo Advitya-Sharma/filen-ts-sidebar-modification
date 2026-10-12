@@ -243,29 +243,48 @@ export function sameFormatting(nodeMarks: readonly Mark[], base: RunBase | undef
 	return true
 }
 
+// What becomes of a tracked formatting change (w:rPrChange) where content with a run base is written: the base's
+// own kept (with a new w:id when `id` is given: a source run written as several runs must not repeat one),
+// left out (accepted, rejected, or a copy without it), or one the editor recorded (`markup`) instead.
+export type RunChange =
+	{ readonly kind: "keep"; readonly id?: number } | { readonly kind: "strip" } | { readonly kind: "new"; readonly markup: string }
+
+const KEEP: RunChange = { kind: "keep" }
+
 // The w:rPr for content with `nodeMarks`: the base's bytes with only the differing properties spliced in;
 // with the plain mark (or no base) new markup from the marks alone, keeping the base's w:rtl, w:cs and a
 // tracked w:rPrChange. Nothing when there are no properties at all.
-// `changeId`, when given, is a new w:id for the base's tracked formatting change (w:rPrChange): a source
-// run written as several runs must not repeat a revision id.
-export function writeRunProperties(out: Out, names: Names, nodeMarks: readonly Mark[], base: RunBase | undefined, changeId?: number): void {
+export function writeRunProperties(
+	out: Out,
+	names: Names,
+	nodeMarks: readonly Mark[],
+	base: RunBase | undefined,
+	change: RunChange = KEEP
+): void {
 	const plain = marks.plain.isInSet(nodeMarks) !== undefined
 	const reader = base === undefined ? undefined : partReader(base.document)
-	const change = base === undefined || changeId === undefined ? -1 : childOf(base, "rPrChange")
+	const own = base === undefined ? -1 : childOf(base, "rPrChange")
 	const changeMarkup = (): string => {
-		const sub = new Out()
+		if (change.kind === "new") return change.markup
+		if (change.kind === "strip" || own < 0) return ""
+
 		const document = (base as RunBase).document
 
-		startTagWith(sub, document, change, names.attr("id"), String(changeId))
-		sub.bytes(document.bytes, document.openEnd(change), document.end(change))
+		if (change.id === undefined) return decodeUtf8(document.bytes, document.start(own), document.end(own))
 
-		if (document.isSelfClosing(change)) sub.text(`</${document.name(change)}>`)
+		const sub = new Out()
+
+		startTagWith(sub, document, own, names.attr("id"), String(change.id))
+		sub.bytes(document.bytes, document.openEnd(own), document.end(own))
+
+		if (document.isSelfClosing(own)) sub.text(`</${document.name(own)}>`)
 
 		return decodeUtf8(sub.finish())
 	}
+	const changed = change.kind !== "keep" || change.id !== undefined
 
 	if (base !== undefined && reader !== undefined && !plain) {
-		if (change < 0 && sameFormatting(nodeMarks, base)) {
+		if (!changed && sameFormatting(nodeMarks, base)) {
 			out.bytes(base.document.bytes, base.document.start(base.node), base.document.end(base.node))
 
 			return
@@ -273,7 +292,7 @@ export function writeRunProperties(out: Out, names: Names, nodeMarks: readonly M
 
 		const changes = new Map<string, string>()
 
-		if (change >= 0) changes.set("rPrChange", changeMarkup())
+		if (changed && (own >= 0 || change.kind === "new")) changes.set("rPrChange", changeMarkup())
 
 		for (const type of PROPERTY_MARKS) {
 			const ownMark = type.isInSet(nodeMarks)
@@ -282,10 +301,10 @@ export function writeRunProperties(out: Out, names: Names, nodeMarks: readonly M
 			if (ownMark === undefined ? fromMark === undefined : fromMark !== undefined && ownMark.eq(fromMark)) continue
 			if (ownMark !== undefined) checkMark(ownMark)
 
-			const own = elementsOf(names, type, ownMark)
+			const mine = elementsOf(names, type, ownMark)
 			const from = elementsOf(names, type, fromMark)
 
-			for (const [local, markup] of own) if (markup !== from.get(local)) changes.set(local, markup)
+			for (const [local, markup] of mine) if (markup !== from.get(local)) changes.set(local, markup)
 		}
 
 		if (changes.size === 0) {
@@ -312,23 +331,43 @@ export function writeRunProperties(out: Out, names: Names, nodeMarks: readonly M
 	}
 
 	if (base !== undefined) {
-		// What clearing keeps from the source formatting: the run's direction and script, and a tracked change.
+		// What clearing keeps from the source formatting: the run's direction and script.
 		const document = base.document
-		const keep = new Set(["rtl", "cs", ...(marks.format_change.isInSet(nodeMarks) !== undefined ? ["rPrChange"] : [])])
 
 		for (let child = document.firstChildElement(base.node); child >= 0; child = document.nextSiblingElement(child)) {
 			const local = document.localName(child)
 
-			if (keep.has(local) && reader?.group(child) === Ns.W) {
-				children.set(
-					local,
-					child === change ? changeMarkup() : decodeUtf8(document.bytes, document.start(child), document.end(child))
-				)
-			}
+			if ((local === "rtl" || local === "cs") && reader?.group(child) === Ns.W)
+				children.set(local, decodeUtf8(document.bytes, document.start(child), document.end(child)))
 		}
 	}
 
+	const tracked = change.kind === "new" || (change.kind === "keep" && marks.format_change.isInSet(nodeMarks) !== undefined)
+
+	if (tracked) {
+		const markup = changeMarkup()
+
+		if (markup !== "") children.set("rPrChange", markup)
+	}
+
 	out.text(freshContainer(names, "rPr", children, RUN_PROPERTIES))
+}
+
+// The w:rPr bytes of a run base without its own tracked change (what a recorded w:rPrChange holds as the
+// formatting before); an empty w:rPr for none.
+export function baseWithoutChange(names: Names, base: RunBase | undefined): string {
+	if (base === undefined) return names.empty("rPr")
+
+	const own = childOf(base, "rPrChange")
+	const document = base.document
+
+	if (own < 0) return decodeUtf8(document.bytes, document.start(base.node), document.end(base.node))
+
+	const out = new Out()
+
+	spliceChildren(out, partReader(document), base.node, new Map([["rPrChange", ""]]), RUN_PROPERTIES)
+
+	return decodeUtf8(out.finish())
 }
 
 function childOf(base: RunBase, local: string): number {

@@ -1,7 +1,7 @@
 import type { Mark, Node } from "prosemirror-model"
 import type { Transaction } from "prosemirror-state"
 import { DocAttrStep, ReplaceAroundStep, ReplaceStep } from "prosemirror-transform"
-import { changedRanges } from "../edit/invariants/index"
+import { changedRanges } from "../edit/invariants/core"
 import { docxSchema, survivorsOf, type MarkerList } from "../edit/schema"
 
 // Where a story's comments and tracked changes are, kept up to date edit by edit: positions are mapped
@@ -23,7 +23,8 @@ export const ReviewKind = {
 	PARAGRAPH: 8,
 	ROW: 9,
 	CELL: 10,
-	// A paragraph's properties changed while tracking (the paragraph_change node mark).
+	// Properties changed while tracking: a paragraph's (recorded by the editor, or its source's w:pPrChange),
+	// or a source table's, row's, cell's or section's.
 	PROPERTIES: 11
 } as const
 
@@ -34,8 +35,9 @@ export interface ReviewEntry {
 	readonly from: number
 	readonly to: number
 	readonly kind: ReviewKind
-	// The comment's w:id; a revision's w:id, "#" and its source item when it has none, or for one the editor
-	// recorded (no id until saved) "new:" and its author and date.
+	// The comment's w:id; for a tracked change the id naming exactly that change: the source's w:id, the id the
+	// editor gave a change it recorded (above every id of the file; kept through edits), or "#" and the source
+	// paragraph or row item for the revisions of a source paragraph mark, row or properties.
 	readonly id: string
 }
 
@@ -49,6 +51,7 @@ const MARK_KINDS = new Map<unknown, ReviewKind>([
 	[marks.format_change, ReviewKind.FORMAT]
 ])
 const PROPERTIES_MARK = marks.paragraph_change
+const TABLE_MARKS = [marks.row_props, marks.cell_props]
 const MARKER_KINDS: Readonly<Record<string, ReviewKind | undefined>> = {
 	commentRangeStart: ReviewKind.COMMENT_START,
 	commentRangeEnd: ReviewKind.COMMENT_END,
@@ -64,7 +67,8 @@ function isComment(kind: number): boolean {
 	return kind <= ReviewKind.COMMENT_REFERENCE
 }
 
-function markId(mark: Mark): string {
+// The id a revision mark counts under (see ReviewEntry.id).
+export function revisionMarkId(mark: Mark): string {
 	const id: unknown = mark.attrs["id"]
 	const src: unknown = mark.attrs["src"]
 
@@ -115,12 +119,46 @@ export class ReviewIndex {
 	private readonly comments = new Map<string, number>()
 	private readonly revisions = new Map<string, number>()
 	private versionValue = 0
+	private doc: Node
+	// Source paragraphs whose properties hold a tracked change (see attachSources).
+	private sources: ReadonlySet<number> | undefined = undefined
+	private commentList: { readonly version: number; readonly count: number; readonly list: Int32Array } = {
+		version: -1,
+		count: 0,
+		list: new Int32Array(0)
+	}
 
 	constructor(doc: Node) {
 		const found = new Found()
 
+		this.doc = doc
 		scan(doc, 0, doc.content.size, found)
 		this.insert(0, found)
+	}
+
+	get sourcesAttached(): boolean {
+		return this.sources !== undefined
+	}
+
+	// Counts the source paragraphs whose own w:pPrChange (item ids in `sources`) is a change too: the
+	// document is read once more.
+	attachSources(sources: ReadonlySet<number>): void {
+		if (this.sources !== undefined) return
+
+		this.sources = sources
+
+		if (sources.size === 0) return
+
+		const found = new Found()
+
+		for (let index = 0; index < this.count; index++) this.forget(index)
+
+		this.count = 0
+		this.ids.length = 0
+		this.keys.length = 0
+		scan(this.doc, 0, this.doc.content.size, found, sources)
+		this.insert(0, found)
+		this.versionValue++
 	}
 
 	// Changes with every transaction that changed an entry.
@@ -153,17 +191,100 @@ export class ReviewIndex {
 		}
 	}
 
-	// Entries overlapping [from, to) (an anchor at `from` included), in document order.
+	// The tracked change at `pos`: of the entries starting there or covering it, the narrowest (a change inside
+	// another's span, as a paragraph's property change inside a deletion across paragraphs), the first of equal
+	// ones. Without a scan: entries before it that could still cover it sit in the same paragraph, a few back.
+	changeAt(pos: number): ReviewEntry | undefined {
+		let found: number | undefined
+		let width = Infinity
+
+		for (let index = this.lowerBound(pos + 1) - 1, seen = 0; index >= 0 && seen < 64; index--, seen++) {
+			if ((this.kinds[index] ?? 0) <= ReviewKind.COMMENT_REFERENCE) continue
+
+			const from = this.from[index] ?? 0
+			const to = Math.max(this.to[index] ?? 0, from + 1)
+
+			if (from <= pos && to >= pos && to - from <= width) {
+				found = index
+				width = to - from
+			}
+
+			if (from < pos && to < pos && found !== undefined) break
+		}
+
+		return found === undefined ? undefined : this.entry(found)
+	}
+
+	// Entries overlapping [from, to) (an anchor at `from` included), in document order. By binary search: an
+	// entry starting before `from` and reaching past it is text of the paragraph holding `from` (block entries
+	// take one position, text entries end in their paragraph).
 	between(from: number, to: number): ReviewEntry[] {
 		const out: ReviewEntry[] = []
 		const end = Math.max(to, from + 1)
+		const size = this.doc.content.size
+		const $from = this.doc.resolve(Math.max(0, Math.min(size, from)))
+		const first = $from.parent.inlineContent ? Math.min(from, $from.start()) : from
 
-		for (let index = 0; index < this.count && (this.from[index] ?? 0) < end; index++) {
+		for (let index = this.lowerBound(first); index < this.count && (this.from[index] ?? 0) < end; index++) {
 			if (Math.max(this.to[index] ?? 0, (this.from[index] ?? 0) + 1) > from) {
 				const entry = this.entry(index)
 
 				if (entry !== undefined) out.push(entry)
 			}
+		}
+
+		return out
+	}
+
+	// Allocation-free reads: the first entry starting at or after `pos`, and an entry's fields.
+	firstAt(pos: number): number {
+		return this.lowerBound(pos)
+	}
+
+	fromOf(index: number): number {
+		return this.from[index] ?? 0
+	}
+
+	toOf(index: number): number {
+		return this.to[index] ?? 0
+	}
+
+	kindOf(index: number): ReviewKind {
+		return (this.kinds[index] ?? 0) as ReviewKind
+	}
+
+	idOf(index: number): string {
+		return this.ids[index] ?? ""
+	}
+
+	// The comment entries (anchors and references), as entry indices in document order; made again (a pass over
+	// the kinds) only after entries changed.
+	commentEntries(): Int32Array {
+		if (this.commentList.version === this.versionValue && this.commentList.count === this.count) return this.commentList.list
+
+		let found = 0
+
+		if (this.comments.size > 0) for (let index = 0; index < this.count; index++) if (isComment(this.kinds[index] ?? 0)) found++
+
+		const list = new Int32Array(found)
+
+		if (found > 0) for (let index = 0, k = 0; index < this.count; index++) if (isComment(this.kinds[index] ?? 0)) list[k++] = index
+
+		this.commentList = { version: this.versionValue, count: this.count, list }
+
+		return list
+	}
+
+	// The ranges of the tracked change `id` (all its pieces), in document order.
+	changeRanges(id: string): [number, number][] {
+		const out: [number, number][] = []
+
+		for (let index = 0; index < this.count; index++) {
+			if ((this.kinds[index] ?? 0) <= ReviewKind.COMMENT_REFERENCE || this.ids[index] !== id) continue
+
+			const from = this.from[index] ?? 0
+
+			out.push([from, Math.max(this.to[index] ?? 0, from + 1)])
 		}
 
 		return out
@@ -186,23 +307,43 @@ export class ReviewIndex {
 	}
 
 	apply(tr: Transaction): void {
+		this.doc = tr.doc
+
 		if (!tr.docChanged) return
 
 		const doc = tr.doc
 		const mapping = tr.mapping
 		const regions = changedRegions(doc, tr)
+		// Entries wholly before the first change neither move nor are read again: the first one that may, by
+		// binary search (entries before a changed paragraph end before it; see changedRegions).
+		let first = regions[0] ?? doc.content.size + 1
 
-		// Entries outside the changed paragraphs move with the edit; those inside are read again.
-		let kept = 0
+		for (const map of mapping.maps) {
+			map.forEach(oldStart => {
+				first = Math.min(first, oldStart)
+			})
+		}
+
+		let kept = this.lowerBound(first)
+
+		while (kept > 0 && Math.max(this.to[kept - 1] ?? 0, (this.from[kept - 1] ?? 0) + 1) > first) kept--
+
+		const start = kept
+
+		// Entries outside the changed paragraphs move with the edit; those inside are read again. Entries and
+		// regions are both in document order: one walk.
 		let changed = false
+		let region = 0
 
-		for (let index = 0; index < this.count; index++) {
+		for (let index = start; index < this.count; index++) {
 			const from = mapping.map(this.from[index] ?? 0, 1)
 			const to = Math.max(from, mapping.map(this.to[index] ?? 0, -1))
 			const end = Math.max(to, from + 1)
 			let inside = false
 
-			for (let k = 0; k < regions.length && !inside; k += 2) inside = from < (regions[k + 1] ?? 0) && end > (regions[k] ?? 0)
+			while (region < regions.length && (regions[region + 1] ?? 0) <= from) region += 2
+
+			for (let k = region; k < regions.length && (regions[k] ?? 0) < end && !inside; k += 2) inside = from < (regions[k + 1] ?? 0)
 
 			if (inside) {
 				this.forget(index)
@@ -228,7 +369,7 @@ export class ReviewIndex {
 			const end = regions[k + 1] ?? 0
 			const found = new Found()
 
-			scan(doc, start, end, found)
+			scan(doc, start, end, found, this.sources)
 
 			if (found.from.length === 0) continue
 
@@ -287,7 +428,8 @@ export class ReviewIndex {
 		this.from.copyWithin(at + added, at, this.count)
 		this.to.copyWithin(at + added, at, this.count)
 		this.kinds.copyWithin(at + added, at, this.count)
-		this.ids.splice(at, 0, ...found.ids)
+		// Not splice(at, 0, ...list): a long list overflows the call stack as arguments.
+		this.ids = at === this.count ? this.ids.concat(found.ids) : this.ids.slice(0, at).concat(found.ids, this.ids.slice(at))
 
 		const keys: string[] = []
 
@@ -297,7 +439,7 @@ export class ReviewIndex {
 			const map = isComment(kind) ? this.comments : this.revisions
 			const key = isComment(kind)
 				? id
-				: id === ANONYMOUS
+				: id === ANONYMOUS || id.startsWith("new:")
 					? `${String(kind)}:anonymous${String(++this.serial)}`
 					: `${String(kind)}:${id}`
 
@@ -309,7 +451,7 @@ export class ReviewIndex {
 			map.set(key, (map.get(key) ?? 0) + 1)
 		}
 
-		this.keys.splice(at, 0, ...keys)
+		this.keys = at === this.count ? this.keys.concat(keys) : this.keys.slice(0, at).concat(keys, this.keys.slice(at))
 		this.count = size
 	}
 }
@@ -317,9 +459,26 @@ export class ReviewIndex {
 // What a transaction changed, widened to what is read again, merged, as [from, to) pairs: the paragraphs
 // (textblocks) it touched, every block it made or changed whole, and the story's end (its markers) when a range
 // reaches it or the document's attributes changed.
+// Past this many ranges (a command over a long selection), the span from the first to the last is read again
+// as one: resolving each would cost more than the scan.
+const MAX_RANGES = 64
+
 function changedRegions(doc: Node, tr: Transaction): number[] {
 	const size = doc.content.size
-	const ranges = changedRanges(tr)
+	let ranges = changedRanges(tr)
+
+	if (ranges.length > MAX_RANGES * 2) {
+		let low = Infinity
+		let high = -Infinity
+
+		for (let k = 0; k < ranges.length; k += 2) {
+			low = Math.min(low, ranges[k] ?? 0)
+			high = Math.max(high, ranges[k + 1] ?? 0)
+		}
+
+		ranges = [low, high]
+	}
+
 	const pieces: [number, number][] = []
 
 	for (let k = 0; k < ranges.length; k += 2) {
@@ -376,8 +535,36 @@ function markers(list: unknown, pos: number, found: Found): void {
 	}
 }
 
+// Whether a paragraph has a property change: one recorded by the editor, or its source's own w:pPrChange
+// (`sources`: the source paragraphs holding one) unless accepted or rejected since.
+// The ids a paragraph's recorded changes carry (review/track.ts ParagraphChange).
+interface ChangeIds {
+	readonly props?: { readonly id?: number }
+	readonly inserted?: { readonly id?: number }
+	readonly deleted?: { readonly id?: number }
+}
+
+function changeId(stamp: { readonly id?: number } | undefined): string | undefined {
+	return stamp?.id === undefined ? undefined : String(stamp.id)
+}
+
+// Keys of a paragraph change that are no property change (the mark's own revisions, a resolved source change).
+const NOT_PROPERTIES: ReadonlySet<string> = new Set(["inserted", "deleted", "source"])
+
+function propertyChange(node: Node, sources: ReadonlySet<number> | undefined): boolean {
+	const value: unknown = PROPERTIES_MARK.isInSet(node.marks)?.attrs["value"]
+
+	if (typeof value === "object" && value !== null && Object.keys(value).some(key => !NOT_PROPERTIES.has(key))) return true
+
+	return (
+		sources !== undefined &&
+		(value as { readonly source?: unknown } | null | undefined)?.source === undefined &&
+		sources.has(node.attrs["src"] as number)
+	)
+}
+
 // Entries in [from, to) of `doc`, in document order (block-level ones only where they sit inside it).
-function scan(doc: Node, from: number, to: number, found: Found): void {
+function scan(doc: Node, from: number, to: number, found: Found, sources?: ReadonlySet<number>): void {
 	const within = (pos: number): boolean => pos >= from && pos < to
 	const visit = (node: Node, pos: number): void => {
 		if (node.isInline) {
@@ -388,7 +575,7 @@ function scan(doc: Node, from: number, to: number, found: Found): void {
 			for (const mark of node.marks) {
 				const kind = MARK_KINDS.get(mark.type)
 
-				if (kind !== undefined) found.add(pos, pos + node.nodeSize, kind, markId(mark))
+				if (kind !== undefined) found.add(pos, pos + node.nodeSize, kind, revisionMarkId(mark))
 			}
 
 			return
@@ -409,10 +596,21 @@ function scan(doc: Node, from: number, to: number, found: Found): void {
 		const revision: unknown = node.attrs["revision"]
 
 		if (!within(end)) return
+
+		const own = `#${String(node.attrs["src"])}`
+		const change = PROPERTIES_MARK.isInSet(node.marks)?.attrs["value"] as ChangeIds | undefined
+		// Rows and cells the table commands tracked carry their stamps in row_props / cell_props.
+		const table = TABLE_MARKS.find(type => type.isInSet(node.marks) !== undefined)?.isInSet(node.marks)?.attrs["value"] as
+			{ readonly ins?: { readonly id?: number }; readonly del?: { readonly id?: number } } | undefined
+
 		if (kind !== undefined && typeof revision === "number" && revision !== 0)
-			found.add(end, end + 1, kind, `#${String(node.attrs["src"])}`)
-		if (PROPERTIES_MARK.isInSet(node.marks) !== undefined)
-			found.add(end, end + 1, ReviewKind.PROPERTIES, `#${String(node.attrs["src"])}`)
+			found.add(end, end + 1, kind, changeId(change?.inserted ?? change?.deleted ?? table?.ins ?? table?.del) ?? own)
+		if (
+			node.type === nodes.paragraph
+				? propertyChange(node, sources)
+				: node.type !== nodes.locked_block && sources?.has(node.attrs["src"] as number) === true
+		)
+			found.add(end, end + 1, ReviewKind.PROPERTIES, changeId(change?.props) ?? own)
 
 		markers(node.attrs["end"], end, found)
 	}

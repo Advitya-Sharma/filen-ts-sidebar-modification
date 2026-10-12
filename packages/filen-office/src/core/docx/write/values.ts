@@ -1,4 +1,6 @@
-import type { ColorAttrs, IndentAttrs } from "../edit/schema"
+import type { ColorAttrs, IndentAttrs, SpacingAttrs } from "../edit/schema"
+import type { ParagraphBordersProps } from "../props/index"
+import { THEME_COLOR } from "./order.generated"
 
 export type WriteFailure =
 	// An edit the writer cannot express yet (a changed table grid, a new relationship without an r prefix).
@@ -86,6 +88,47 @@ export function indent(value: IndentAttrs | null): void {
 	optionalInteger("w:ind endChars", value.endChars)
 	optionalInteger("w:ind hangingChars", value.hangingChars)
 	optionalInteger("w:ind firstLineChars", value.firstLineChars)
+}
+
+const BORDER_SIDES = ["top", "start", "bottom", "end", "between", "bar"] as const
+
+// CT_PBdr: each side a CT_Border (ST_Border style, eighths of a point, 0-31 points of space, a colour).
+export function paragraphBorders(value: ParagraphBordersProps | null): void {
+	if (value === null) return
+
+	for (const side of BORDER_SIDES) {
+		const border = value[side]
+
+		if (border === undefined) continue
+
+		name(`w:pBdr ${side}`, border.style)
+		optionalInteger(`w:pBdr ${side} sz`, border.size, 0)
+		optionalInteger(`w:pBdr ${side} space`, border.space, 0, 31)
+		color(
+			`w:pBdr ${side} color`,
+			{
+				value: border.val ?? null,
+				themeColor: border.themeColor ?? null,
+				themeTint: border.themeTint ?? null,
+				themeShade: border.themeShade ?? null
+			},
+			THEME_COLOR
+		)
+	}
+}
+
+const LINE_RULES: ReadonlySet<string> = new Set(["auto", "exact", "atLeast"])
+
+// CT_Spacing: before/after unsigned twips, line signed twips (240ths of a line for auto), *Lines decimal numbers.
+export function spacing(value: SpacingAttrs | null): void {
+	if (value === null) return
+
+	optionalInteger("w:spacing before", value.before, 0)
+	optionalInteger("w:spacing after", value.after, 0)
+	optionalInteger("w:spacing beforeLines", value.beforeLines)
+	optionalInteger("w:spacing afterLines", value.afterLines)
+	optionalInteger("w:spacing line", value.line)
+	optionalOneOf("w:spacing lineRule", LINE_RULES, value.lineRule)
 }
 
 // w14:paraId (ST_LongHexNumber as Word uses it): eight hex digits, above 0 and below 0x80000000.

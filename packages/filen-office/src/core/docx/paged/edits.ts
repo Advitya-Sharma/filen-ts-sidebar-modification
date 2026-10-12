@@ -7,13 +7,15 @@ import {
 	RemoveMarkStep,
 	RemoveNodeMarkStep,
 	ReplaceAroundStep,
-	ReplaceStep
+	ReplaceStep,
+	StepMap
 } from "prosemirror-transform"
 import { Relationships } from "../../opc/index"
 import { encodeUtf8, parseXml, XmlError, type XmlDocument } from "../../xml/index"
 import { parseNumbering, type Numbering } from "../numbering/index"
 import { parseStyles, type DocxStyles } from "../styles/index"
 import { DocxDocBuilder, docxSchema, type DocxEditContext, type NewStoryKind, type StoryDoc } from "../edit/index"
+import { SetAttrsStep } from "../edit/attrs"
 import type { NewList } from "../edit/formats"
 import { ref, refItem, refPart, type BodyBlocks, type DirtyBlock, type LayoutEdits } from "../layout/index"
 import {
@@ -78,8 +80,11 @@ export interface OverlayRecord {
 
 // An overlay part: the blocks one edit wrote, parsed together. It lives while a block of it is laid out.
 interface OverlayPart {
-	// By item, ascending.
-	readonly records: OverlayRecord[]
+	// By item, ascending. Dropped records leave it at the next read (a large undo drops thousands).
+	records: OverlayRecord[]
+	readonly dropped: Set<OverlayRecord>
+	// The live records by their first item.
+	readonly byItem: Map<number, OverlayRecord>
 	// What the part's build added to the model's lists, dropped with it.
 	readonly stories: readonly [number, number]
 	readonly drawings: readonly [number, number]
@@ -636,6 +641,8 @@ export class DocumentEdits implements LayoutEdits {
 
 		this.overlays.set(index, {
 			records: [],
+			dropped: new Set(),
+			byItem: new Map(),
 			stories: [stories, extension.stories.length],
 			drawings: [drawings, extension.drawings.length],
 			vml: [vml, extension.vml.length]
@@ -657,24 +664,38 @@ export class DocumentEdits implements LayoutEdits {
 
 	// The record of the overlay block holding item `item` of part `part`, or undefined.
 	recordAt(part: number, item: number): OverlayRecord | undefined {
-		const records = this.overlays.get(part)?.records
+		const overlay = this.overlays.get(part)
 
-		if (records === undefined || records.length === 0) return undefined
+		if (overlay === undefined) return undefined
 
+		const exact = overlay.byItem.get(item)
+
+		if (exact !== undefined) return exact
+
+		const records = compacted(overlay)
+
+		if (records.length === 0) return undefined
+
+		// A part's records are sibling blocks: the last starting at or before `item` is the only one that can hold
+		// it (none when it was dropped).
 		const record = records[recordIndex(records, item)]
 
-		return record !== undefined && record.item <= item && item < record.part.end(record.item) ? record : undefined
+		return record !== undefined && !overlay.dropped.has(record) && record.item <= item && item < record.part.end(record.item)
+			? record
+			: undefined
 	}
 
 	// Every block laid out from an overlay part.
 	*overlayRecords(): Generator<OverlayRecord> {
-		for (const overlay of this.overlays.values()) yield* overlay.records
+		for (const overlay of this.overlays.values()) for (const record of overlay.records) if (!overlay.dropped.has(record)) yield record
 	}
 
 	addRecord(record: OverlayRecord): void {
-		const records = this.overlays.get(record.part.index)?.records
+		const overlay = this.overlays.get(record.part.index)
 
-		if (records === undefined) return
+		if (overlay === undefined) return
+
+		const records = compacted(overlay)
 
 		// A part's blocks are added in item order: this finds the end at once.
 		let at = records.length
@@ -682,6 +703,7 @@ export class DocumentEdits implements LayoutEdits {
 		while (at > 0 && (records[at - 1]?.item ?? 0) > record.item) at--
 
 		records.splice(at, 0, record)
+		overlay.byItem.set(record.item, record)
 	}
 
 	// Drops a block laid out from an overlay part, and the part with its last block.
@@ -694,7 +716,11 @@ export class DocumentEdits implements LayoutEdits {
 		const records = overlay.records
 		const at = recordIndex(records, record.item)
 
-		if (records[at] === record) records.splice(at, 1)
+		if (records[at] === record) {
+			overlay.dropped.add(record)
+
+			if (overlay.byItem.get(record.item) === record) overlay.byItem.delete(record.item)
+		}
 
 		this.dropUnused(record.part)
 	}
@@ -704,7 +730,7 @@ export class DocumentEdits implements LayoutEdits {
 		const index = part.index
 		const overlay = this.overlays.get(index)
 
-		if (overlay === undefined || overlay.records.length > 0) return
+		if (overlay === undefined || overlay.records.length > overlay.dropped.size) return
 
 		const extension = this.extension
 
@@ -832,36 +858,52 @@ export class StoryEdits {
 
 	// ---- keeping up with the editing document -------------------------------------------------------------
 
-	// Brings the layout's view of the story up to date with transactions the session applied, in order;
-	// undefined when nothing the layout shows changed.
+	// Brings the layout's view of the story up to date with transactions the session applied (the one applied
+	// and those the invariants appended), as one change to the last one's document: blocks are written and laid
+	// out only as the session holds them, never in a state between two repairs. Undefined when nothing the
+	// layout shows changed.
 	applyAll(transactions: readonly Transaction[]): StoryChange | undefined {
-		let out: StoryChange | undefined
+		const first = transactions[0]
+		const last = transactions[transactions.length - 1]
+
+		if (first === undefined || last === undefined) return undefined
+
+		let span: { from: number; to: number; whole: boolean } | undefined
+		let chained = first.before === this.doc
 
 		for (const tr of transactions) {
-			const change = this.apply(tr)
+			if (tr.steps.length === 0) continue
+			if (span !== undefined && !span.whole) {
+				span = { from: tr.mapping.map(span.from, -1), to: tr.mapping.map(span.to, 1), whole: false }
+			}
 
-			if (change === undefined) continue
+			const own = changedSpan(tr)
 
-			out =
-				out === undefined
-					? change
-					: {
-							dirty: out.dirty.concat(change.dirty),
-							replaced: out.replaced.concat(change.replaced),
-							around: out.around.concat(change.around),
-							whole: out.whole || change.whole
-						}
+			if (own !== undefined)
+				span =
+					span === undefined
+						? own
+						: { from: Math.min(span.from, own.from), to: Math.max(span.to, own.to), whole: span.whole || own.whole }
 		}
 
-		return out
+		for (let k = 1; k < transactions.length; k++) if (transactions[k]?.before !== transactions[k - 1]?.doc) chained = false
+
+		if (!transactions.some(tr => tr.steps.length > 0)) return undefined
+
+		const after = last.doc
+
+		return this.change(after, chained ? span : { from: 0, to: after.content.size, whole: true })
 	}
 
 	apply(tr: Transaction): StoryChange | undefined {
 		if (tr.steps.length === 0) return undefined
 
+		return this.change(tr.doc, this.doc === tr.before ? changedSpan(tr) : { from: 0, to: tr.doc.content.size, whole: true })
+	}
+
+	// The layout's view taken from this.doc to `after`, which differs from it in `span` (of `after`).
+	private change(after: Node, span: { from: number; to: number; whole: boolean } | undefined): StoryChange | undefined {
 		const before = this.doc
-		const after = tr.doc
-		const span = before === tr.before ? changedSpan(tr) : { from: 0, to: after.content.size, whole: true }
 
 		this.doc = after
 
@@ -1207,7 +1249,12 @@ export class StoryEdits {
 
 			const ends = (previous !== undefined && "sectionEnds" in previous ? previous.sectionEnds : new Int32Array(1)).slice()
 
-			for (let k = 0; k < ends.length; k++) if ((ends[k] ?? 0) > at) ends[k] = (ends[k] ?? 0) - gone + added
+			// Blocks at a section's end belong to the next section; at the end of the last, to the last.
+			for (let k = 0; k < ends.length; k++) {
+				const end = ends[k] ?? 0
+
+				if (end > at || (k === ends.length - 1 && end === at)) ends[k] = end - gone + added
+			}
 
 			this.edits.body = { refs, count: refs.length, sectionEnds: ends }
 
@@ -1283,7 +1330,9 @@ export class StoryEdits {
 	private blockRefs(entry: TopEntry, node: Node, offset: number, old: TopEntry | undefined): void {
 		const part = this.part
 		const src = (node.attrs["src"] as number | undefined) ?? -1
-		const pristine = this.story.pristine.has(node) || this.openedTables.has(node)
+		// A paragraph an undo made its source again counts too.
+		const pristine =
+			this.story.pristine.has(node) || this.openedTables.has(node) || (node.type === nodes.paragraph && this.writer.isSource(node))
 
 		switch (node.type) {
 			case nodes.paragraph:
@@ -1411,16 +1460,32 @@ export class StoryEdits {
 
 		for (const record of entry.records) record.entry = entry
 
+		const replaced = new Set<OverlayRecord>()
+
 		for (const paragraph of changed) {
 			const value = paragraph.base >= 0 ? paragraph.base : ref(part.index, paragraph.node.attrs["src"] as number)
 			const existing = this.edits.substitutes.get(value)
+
+			// A paragraph of a table laid out from its source that is its source again (an undo): no overlay.
+			if (table === undefined && this.writer.isSource(paragraph.node)) {
+				const record = existing === undefined ? undefined : this.edits.recordAt(refPart(existing), refItem(existing))
+
+				if (record !== undefined) {
+					this.edits.dropRecord(record)
+					replaced.add(record)
+				}
+
+				this.edits.substitutes.delete(value)
+
+				continue
+			}
 
 			if (existing !== undefined) {
 				const record = this.edits.recordAt(refPart(existing), refItem(existing))
 
 				if (record !== undefined) {
 					this.edits.dropRecord(record)
-					entry.records.splice(entry.records.indexOf(record), 1)
+					replaced.add(record)
 				}
 			} else {
 				entry.substituted.push(value)
@@ -1430,6 +1495,13 @@ export class StoryEdits {
 
 			if (bytes === undefined) this.edits.substitutes.delete(value)
 			else this.queued.push({ entry, node: paragraph.node, offset: paragraph.offset, base: value, bytes, slot: -1 })
+		}
+
+		if (replaced.size > 0) {
+			const kept = entry.records.filter(record => !replaced.has(record))
+
+			entry.records.length = 0
+			for (const record of kept) entry.records.push(record)
 		}
 
 		for (const record of entry.records) {
@@ -1854,6 +1926,17 @@ export class StoryEdits {
 }
 
 // Index of the last record whose item is at or before `item` (0 when none is).
+// An overlay part's records, those dropped taken out once they are half of them (linear over any number of
+// drops); the rest are skipped by readers.
+function compacted(overlay: OverlayPart): OverlayRecord[] {
+	if (overlay.dropped.size * 2 > overlay.records.length) {
+		overlay.records = overlay.records.filter(record => !overlay.dropped.has(record))
+		overlay.dropped.clear()
+	}
+
+	return overlay.records
+}
+
 function recordIndex(records: readonly OverlayRecord[], item: number): number {
 	let low = 0
 	let high = records.length - 1
@@ -2146,9 +2229,16 @@ function changedSpan(tr: Transaction): { from: number; to: number; whole: boolea
 	let to = -Infinity
 	let whole = false
 
+	// Carried forward step by step through the maps that move positions (marks and attributes move none).
 	tr.steps.forEach((step, index) => {
+		const map = tr.mapping.maps[index]
 		let a: number
 		let b: number
+
+		if (from !== Infinity && map !== undefined && map !== StepMap.empty) {
+			from = map.map(from, -1)
+			to = map.map(to, 1)
+		}
 
 		if (step instanceof ReplaceStep) {
 			a = step.from
@@ -2157,6 +2247,9 @@ function changedSpan(tr: Transaction): { from: number; to: number; whole: boolea
 			a = step.from
 			b = step.getMap().map(step.to, 1)
 		} else if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) {
+			a = step.from
+			b = step.to
+		} else if (step instanceof SetAttrsStep) {
 			a = step.from
 			b = step.to
 		} else if (step instanceof AttrStep || step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) {
@@ -2168,10 +2261,8 @@ function changedSpan(tr: Transaction): { from: number; to: number; whole: boolea
 			return
 		}
 
-		const rest = tr.mapping.slice(index + 1)
-
-		from = Math.min(from, rest.map(a, -1))
-		to = Math.max(to, rest.map(b, 1))
+		from = Math.min(from, a)
+		to = Math.max(to, b)
 	})
 
 	if (whole) return { from: 0, to: tr.doc.content.size, whole: true }

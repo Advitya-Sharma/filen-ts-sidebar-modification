@@ -199,6 +199,12 @@ export class TableLayout {
 	private tableX = 0
 	private tableWidth = 0
 	private headerRows = 0
+	// Areas in a row where no row went (none placed, none split): after two, the next row goes in however it
+	// fits. Header rows repeated in an area that then left no room for a body row are not repeated in the next
+	// one, where the row goes in at the top; the areas after it repeat them again (Word decides per page). So a
+	// table always ends, whatever its rows.
+	private stalled = 0
+	private repeatedOn = -1
 	private row = 0
 	private continuing = false
 	private token = -1
@@ -210,12 +216,16 @@ export class TableLayout {
 	private readonly cellArea = new Area()
 	private readonly mark = new OutputMark()
 	// Per grid column: where the content of a vertical merge ends, and the area (token) it ends in.
-	private readonly mergeBottoms: number[] = []
-	private readonly mergeTokens: number[] = []
+	private mergeBottoms: number[] = []
+	private mergeTokens: number[] = []
 	// Per grid column, a vertical merge whose content did not fit its page: it continues in the rows the
 	// merge spans on the next page, and the area (token) it last ran in.
-	private readonly mergeFlows: (BlockFlow | undefined)[] = []
-	private readonly mergeAreas: number[] = []
+	private mergeFlows: (BlockFlow | undefined)[] = []
+	private mergeAreas: number[] = []
+	// Set while header rows are repeated on a page: their merges are their own and end at the last header row.
+	// `cut`: a repeated header row did not fit (or a merge in them ran out of page).
+	private repeating = false
+	private cut = false
 	private readonly cells = new Map<number, TableCellProps>()
 
 	constructor(flow: BlockFlow, part: StoryPart, item: number, area: Area) {
@@ -502,6 +512,51 @@ export class TableLayout {
 		return this.row
 	}
 
+	// The header rows again at the top of a page, unless they do not fit it (as Word). A merge in them ends
+	// with them (one running on into the body is drawn to the last header row), and the merges the body rows
+	// continue are set aside meanwhile: the repeat neither runs them nor starts them over (which would never let
+	// them end).
+	private repeatHeaders(area: Area): void {
+		const bottoms = this.mergeBottoms
+		const tokens = this.mergeTokens
+		const flows = this.mergeFlows
+		const areas = this.mergeAreas
+		const top = this.y
+		const mark = area.page.mark(new OutputMark())
+		const footnotes = area.footnotes?.mark() ?? 0
+		const exclusions = area.exclusions?.count ?? 0
+
+		this.mergeBottoms = []
+		this.mergeTokens = []
+		this.mergeFlows = []
+		this.mergeAreas = []
+		this.repeating = true
+		this.cut = false
+
+		try {
+			for (let r = 0; r < this.headerRows; r++) this.layoutRow(area, r, this.headerPool, true, false)
+		} finally {
+			this.repeating = false
+			this.mergeBottoms = bottoms
+			this.mergeTokens = tokens
+			this.mergeFlows = flows
+			this.mergeAreas = areas
+		}
+
+		if (!this.cut && this.y <= area.bottom + EPSILON) {
+			this.repeatedOn = area.token
+
+			return
+		}
+
+		area.page.rollback(mark)
+		area.footnotes?.rollback(footnotes)
+
+		if (area.exclusions !== null) area.exclusions.count = exclusions
+
+		this.y = top
+	}
+
 	// Lays out rows from `top` until the table ends or the area is full.
 	run(area: Area, top: number): FlowStatus {
 		const page = area.page
@@ -509,14 +564,16 @@ export class TableLayout {
 		if (this.token !== area.token) {
 			const fresh = !this.started
 
+			if (!fresh) this.stalled = this.rowsPlaced === 0 ? this.stalled + 1 : 0
+
+			const crowded = this.stalled > 0 && this.repeatedOn === this.token
+
 			this.token = area.token
 			this.rowsPlaced = 0
 			this.y = top
 			this.started = true
 
-			if (!fresh && this.headerRows > 0 && this.row >= this.headerRows && area.breaks) {
-				for (let r = 0; r < this.headerRows; r++) this.layoutRow(area, r, this.headerPool, true, false)
-			}
+			if (!fresh && !crowded && this.headerRows > 0 && this.row >= this.headerRows && area.breaks) this.repeatHeaders(area)
 		}
 
 		if (this.row === 0 && !this.continuing && !this.breakChecked) {
@@ -582,7 +639,7 @@ export class TableLayout {
 		const props = info.props
 		const exact = props.height?.rule === "exact"
 		const rowMark = page.mark(new OutputMark())
-		const atTop = this.rowsPlaced === 0 && (area.empty || header)
+		const atTop = this.rowsPlaced === 0 && (area.empty || header || this.stalled > 1)
 
 		const footnoteMark = area.footnotes?.mark() ?? 0
 		const exclusionMark = area.exclusions?.count ?? 0
@@ -669,7 +726,8 @@ export class TableLayout {
 
 			cellArea.top = top + (continuing ? 0 : margins.top)
 
-			const merged = this.spanOf(index, slot) > 1
+			const span = this.spanOf(index, slot)
+			const merged = (this.repeating ? Math.min(span, this.headerRows - index) : span) > 1
 
 			// A merge's content fills the rows it spans; what does not fit the page continues on the next.
 			cellArea.bottom = exact ? Infinity : area.bottom - margins.bottom
@@ -739,7 +797,12 @@ export class TableLayout {
 			return FlowStatus.SUSPEND
 		}
 
+		// Kept with stand-ins for fonts still loading (it could not wait for them): its page is laid out again.
+		if (this.flow.suspendable && engine.styles.hasMissing) engine.standIns = true
+
 		const fits = !overflow && top + height <= area.bottom + EPSILON
+
+		if (this.repeating && (!fits || started.length > 0)) this.cut = true
 
 		if (!fits && !header) {
 			const splittable = !props.cantSplit && !exact
@@ -856,6 +919,8 @@ export class TableLayout {
 	}
 
 	private lastOfMerge(index: number, column: number): boolean {
+		if (this.repeating && index >= this.headerRows - 1) return true
+
 		const next = this.info(index + 1)
 		const slot = next?.slots.find(candidate => candidate.column === column)
 
@@ -893,6 +958,7 @@ export class TableLayout {
 		const last = index === this.rows.length - 1 || split
 		const next = last ? undefined : this.info(index + 1)
 		const tableShading = decorations.shading(info.table.props.shading)
+		const bidi = this.direct.props.bidiVisual
 		const line = (border: ResolvedBorder | undefined, x: number, y: number, horizontal: boolean, length: number): void => {
 			if (border === undefined || border.style === "nil" || length <= 0) return
 
@@ -939,9 +1005,10 @@ export class TableLayout {
 					? (borders.start ?? tableBorders.start)
 					: heavier(borders.start ?? tableBorders.insideV, previous?.format.props.borders.end ?? tableBorders.insideV)
 
-			line(start, slot.x, top, false, height)
+			// The start edge is the right one in a right-to-left table (w:bidiVisual).
+			line(start, bidi ? slot.x + slot.width : slot.x, top, false, height)
 
-			if (k === info.slots.length - 1) line(borders.end ?? tableBorders.end, slot.x + slot.width, top, false, height)
+			if (k === info.slots.length - 1) line(borders.end ?? tableBorders.end, bidi ? slot.x : slot.x + slot.width, top, false, height)
 		})
 	}
 }

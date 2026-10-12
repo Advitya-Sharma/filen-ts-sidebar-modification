@@ -2,7 +2,7 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process"
 import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import type { Node } from "prosemirror-model"
+import type { Node, NodeType } from "prosemirror-model"
 import type { XmlDocument } from "@filen/office/core/xml"
 import { bytesSource } from "@filen/office/core/opc"
 import {
@@ -18,9 +18,11 @@ import {
 	DocxEditorSession,
 	docxSchema,
 	openDocxEditContext,
+	survivorsOf,
 	type BlockProof,
 	type DocxEditContext,
 	type DocxEditorCommand,
+	type MarkerList,
 	type NewStoryKind,
 	type DocxEditorOptions
 } from "@filen/office/core/docx/edit"
@@ -399,6 +401,78 @@ function toggleValue(mark: { readonly attrs: Readonly<Record<string, unknown>> }
 	const value = mark.attrs["value"]
 
 	return value === true ? "1" : value === false ? "0" : ""
+}
+
+// The file's names of the marker kinds the editor names otherwise.
+const FILE_MARKER_NAMES: Readonly<Record<string, string>> = { permissionStart: "permStart", permissionEnd: "permEnd" }
+
+const MARKERS =
+	/<w:(bookmarkStart|bookmarkEnd|commentRangeStart|commentRangeEnd|commentReference|permStart|permEnd|moveFromRangeStart|moveToRangeStart)\b[^>]*?w:id="([^"]*)"/g
+
+// Range markers and comment references in written bytes, keyed "<element name>:<w:id>", added to `out`.
+export function markerCounts(bytes: Uint8Array, out = new Map<string, number>()): Map<string, number> {
+	for (const match of new TextDecoder().decode(bytes).matchAll(MARKERS)) {
+		const key = `${match[1]}:${match[2]}`
+
+		out.set(key, (out.get(key) ?? 0) + 1)
+	}
+
+	return out
+}
+
+// Blocks and atoms the writer copies as their source bytes, whatever stories sit in them (text boxes, the
+// mc:Fallback copy of one): their markers are counted in those bytes.
+const BYTE_COPIES: ReadonlySet<NodeType> = new Set([
+	docxSchema.nodes.locked_block,
+	docxSchema.nodes.drawing,
+	docxSchema.nodes.run_object,
+	docxSchema.nodes.opaque_inline
+])
+
+// Range markers and comment references a session's story is written with (inline, in block and story lists,
+// in atoms and locked blocks kept as bytes), keyed "<file element name>:<w:id>" as the damage fuzz counts a
+// written file's.
+export function editorMarkers(session: DocxEditorSession): Map<string, number> {
+	const out = new Map<string, number>()
+	const part = session.context.model.parts[session.story.story.part]
+	const add = (list: unknown): void => {
+		if (!Array.isArray(list)) return
+
+		for (const marker of list as MarkerList) {
+			if (marker.id === null) continue
+
+			const key = `${FILE_MARKER_NAMES[marker.kind] ?? marker.kind}:${marker.id}`
+
+			out.set(key, (out.get(key) ?? 0) + 1)
+		}
+	}
+	// Counts a byte copy's markers in its source bytes; false when it has none.
+	const copied = (node: Node): boolean => {
+		const item = node.attrs["src"] as number | null
+
+		if (part === undefined || item === null || item < 0) return false
+
+		markerCounts(part.document.bytes.subarray(part.start(item), part.byteEnd(item)), out)
+
+		return true
+	}
+	const doc = session.state.doc
+
+	add(doc.attrs["end"])
+	doc.descendants(node => {
+		if (node.isInline) {
+			if (!BYTE_COPIES.has(node.type) || !copied(node)) add(survivorsOf(node))
+		} else {
+			add(node.attrs["before"])
+			add(node.attrs["end"])
+
+			if (node.isLeaf && !(BYTE_COPIES.has(node.type) && copied(node))) add(node.attrs["markers"])
+		}
+
+		return true
+	})
+
+	return out
 }
 
 // The editor's paragraphs as the independent reader signs a written paragraph: style, list, alignment, text

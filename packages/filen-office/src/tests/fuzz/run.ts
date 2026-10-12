@@ -8,10 +8,12 @@ import {
 	documents,
 	duplicateSources,
 	editorExecute,
+	editorMarkers,
 	editorSignatures,
 	freshPages,
 	isSaveRefusal,
 	isSuspended,
+	markerCounts,
 	memoisedProof,
 	openEditable,
 	openPaged,
@@ -187,20 +189,19 @@ interface SourceFacts {
 }
 
 const BIG = 40e6
-const MARKERS =
-	/<w:(bookmarkStart|bookmarkEnd|commentRangeStart|commentRangeEnd|commentReference|permStart|permEnd|moveFromRangeStart|moveToRangeStart)\b[^>]*?w:id="([^"]*)"/g
-
-function markerCounts(bytes: Uint8Array): Map<string, number> {
-	const out = new Map<string, number>()
-
-	for (const match of new TextDecoder().decode(bytes).matchAll(MARKERS)) {
-		const key = `${match[1]}:${match[2]}`
-
-		out.set(key, (out.get(key) ?? 0) + 1)
-	}
-
-	return out
-}
+// The kinds harness.markerCounts counts, and those no edit takes out.
+const MARKER_KINDS: ReadonlySet<string> = new Set([
+	"bookmarkStart",
+	"bookmarkEnd",
+	"commentRangeStart",
+	"commentRangeEnd",
+	"commentReference",
+	"permStart",
+	"permEnd",
+	"moveFromRangeStart",
+	"moveToRangeStart"
+])
+const KEPT_KINDS: ReadonlySet<string> = new Set(["bookmarkStart", "bookmarkEnd", "permStart", "permEnd"])
 
 function read(entries: Map<string, Reader.ZipEntry>, name: string): Uint8Array | undefined {
 	const entry = entries.get(name)
@@ -273,10 +274,35 @@ function sourceFacts(input: Uint8Array, mainPart: string): SourceFacts {
 	}
 }
 
+// Values of the relationships-namespace attributes of a part.
+function relationshipIdsUsed(bytes: Uint8Array): Set<string> {
+	const out = new Set<string>()
+	const root = Reader.parseXml(bytes).root
+
+	if (root === undefined) return out
+
+	for (const element of [root, ...Reader.descendants(root)])
+		for (const attribute of element.attributes) if (attribute.ns === Reader.R) out.add(attribute.value)
+
+	return out
+}
+
 interface Damage {
 	readonly log: string[]
 	finding(kind: string, data: Record<string, unknown>): void
 	bump(key: string): void
+}
+
+// `document` without its first bookmark start in a text box, else its first one (selftest).
+function withoutMarker(document: Uint8Array): Uint8Array {
+	const text = new TextDecoder().decode(document)
+	const box = text.indexOf("<w:txbxContent")
+	const find = (from: number): number => (from < 0 ? -1 : text.indexOf("<w:bookmarkStart ", from))
+	const start = find(box) >= 0 ? find(box) : find(0)
+
+	if (start < 0) return document
+
+	return new TextEncoder().encode(text.slice(0, start) + text.slice(text.indexOf(">", start) + 1))
 }
 
 // What the independent reader finds wrong with a saved file that Gate 2 let through.
@@ -285,7 +311,8 @@ async function verifySaved(
 	source: SourceFacts,
 	saved: { bytes: Uint8Array; changedParts: readonly string[] },
 	session: DocxEditorSession,
-	schema: ((bytes: Uint8Array) => Map<string, number>) | undefined
+	schema: ((bytes: Uint8Array) => Map<string, number>) | undefined,
+	selftest = false
 ): Promise<void> {
 	const log = damage.log
 	const output = Reader.zipEntries(saved.bytes)
@@ -338,10 +365,20 @@ async function verifySaved(
 	for (const id of relationshipsOut.keys())
 		if (id.endsWith("#DUP") && !source.relationships.has(id)) damage.finding("relsDuplicateId", { id })
 
+	// An external hyperlink relationship goes when the save no longer uses one the source used (Word drops them).
+	let used: { before: Set<string>; after: Set<string> } | undefined
+	const dropped = (id: string, relationship: Reader.Relationship): boolean => {
+		if (!relationship.external || !relationship.type.endsWith("/hyperlink")) return false
+
+		used ??= { before: relationshipIdsUsed(source.document), after: relationshipIdsUsed(document) }
+
+		return used.before.has(id) && !used.after.has(id)
+	}
+
 	for (const [id, relationship] of source.relationships) {
 		const after = relationshipsOut.get(id)
 
-		if (after === undefined || after.target !== relationship.target || after.type !== relationship.type)
+		if (after === undefined ? !dropped(id, relationship) : after.target !== relationship.target || after.type !== relationship.type)
 			damage.finding("relChanged", { id })
 	}
 
@@ -386,10 +423,19 @@ async function verifySaved(
 		}
 	}
 
-	const markers = markerCounts(document)
+	// The file holds the markers the editor holds: comment commands add and take out comment ranges and
+	// references, resolving a tracked move takes its ranges out. Bookmarks and permission ranges survive every
+	// edit, so those are also checked against the source.
+	const markers = markerCounts(selftest ? withoutMarker(document) : document)
+	const held = source.document.length > BIG ? source.markers : editorMarkers(session)
+	const expected = new Map([...held].filter(([key]) => MARKER_KINDS.has(key.slice(0, key.indexOf(":")))))
 
-	for (const [key, times] of source.markers) if ((markers.get(key) ?? 0) < times) damage.finding("markerLost", { key, log })
-	for (const [key, times] of markers) if (times > (source.markers.get(key) ?? 0)) damage.finding("markerGained", { key, log })
+	for (const [key, times] of source.markers) {
+		if (KEPT_KINDS.has(key.slice(0, key.indexOf(":"))) && (expected.get(key) ?? 0) < times) damage.finding("markerLost", { key, log })
+	}
+
+	for (const [key, times] of expected) if ((markers.get(key) ?? 0) < times) damage.finding("markerLost", { key, log })
+	for (const [key, times] of markers) if (times > (expected.get(key) ?? 0)) damage.finding("markerGained", { key, log })
 
 	// The editor's paragraphs appear in order in the output; every other output paragraph is a source paragraph.
 	const editor = editorSignatures(session.state.doc)
@@ -443,20 +489,127 @@ async function verifySaved(
 	}
 }
 
-function blockHashes(bytes: Uint8Array, main: string): Map<string, number> {
+const RANGE_MARKERS = new Set([
+	"bookmarkStart",
+	"bookmarkEnd",
+	"commentRangeStart",
+	"commentRangeEnd",
+	"moveFromRangeStart",
+	"moveFromRangeEnd",
+	"moveToRangeStart",
+	"moveToRangeEnd",
+	"permStart",
+	"permEnd"
+])
+
+interface BodyBlock {
+	// Its bytes.
+	readonly key: string
+	readonly start: number
+	// Range markers in it (itself included): name and id, and where.
+	readonly markers: readonly { readonly marker: string; readonly start: number; readonly end: number }[]
+}
+
+// The body's top-level elements.
+function bodyBlocks(bytes: Uint8Array, main: string): BodyBlock[] {
 	const document = Reader.parseXml(read(Reader.zipEntries(bytes), main) ?? new Uint8Array())
 	const body = Reader.bodyOf(document)
-	const out = new Map<string, number>()
 
-	if (body === undefined) return out
+	if (body === undefined) return []
 
-	for (const child of Reader.childElements(body)) {
-		const key = document.source.slice(child.start, child.end)
+	return Reader.childElements(body).map(child => ({
+		key: document.source.slice(child.start, child.end),
+		start: child.start,
+		markers: [child, ...Reader.descendants(child)]
+			.filter(element => element.ns === Reader.W && RANGE_MARKERS.has(element.local))
+			.map(element => ({
+				marker: `${element.local}:${Reader.attributeNS(element, Reader.W, "id") ?? ""}`,
+				start: element.start,
+				end: element.end
+			}))
+	}))
+}
 
-		out.set(key, (out.get(key) ?? 0) + 1)
+// What the writer drops when it rewrites a paragraph: w14:textId (Word's hash of the text) and the layout hints
+// w:lastRenderedPageBreak and w:proofErr.
+function rewritten(key: string): string {
+	return key.replace(/\s[\w.-]+:textId="[^"]*"/g, "").replace(/<w:(?:lastRenderedPageBreak|proofErr)\b[^>]*\/>/g, "")
+}
+
+// Top-level elements of the body that differ between `input` and `saved` though block moves keep every block's
+// bytes. A range a move turned around (its end above its start) is put back in order by the editor, collapsed
+// where its end went: the markers of ranges the save holds in other blocks than the source are left out of the
+// comparison, and a block that held one, or holds one now, may come back rewritten.
+function blockMoveDifferences(input: Uint8Array, saved: Uint8Array, main: string): number {
+	const before = bodyBlocks(input, main)
+	const after = bodyBlocks(saved, main)
+	const holders = (blocks: readonly BodyBlock[]): Map<string, string[]> => {
+		const out = new Map<string, string[]>()
+
+		for (const block of blocks) {
+			for (const { marker } of block.markers) {
+				const list = out.get(marker)
+
+				if (list === undefined) out.set(marker, [block.key])
+				else list.push(block.key)
+			}
+		}
+
+		return out
+	}
+	const was = holders(before)
+	const is = holders(after)
+	const moved = new Set<string>()
+
+	for (const marker of new Set([...was.keys(), ...is.keys()])) {
+		if ([...(was.get(marker) ?? [])].sort().join("\u0000") !== [...(is.get(marker) ?? [])].sort().join("\u0000")) moved.add(marker)
 	}
 
-	return out
+	// A block's bytes without the markers of moved ranges ("" for a block that was only such a marker), and
+	// whether it held one.
+	const stripped = (block: BodyBlock): { key: string; held: boolean } => {
+		let key = block.key
+		let held = false
+
+		for (const { marker, start, end } of [...block.markers].reverse()) {
+			if (!moved.has(marker)) continue
+
+			key = key.slice(0, start - block.start) + key.slice(end - block.start)
+			held = true
+		}
+
+		return { key, held }
+	}
+	const a = new Map<string, number>()
+	const b = new Map<string, number>()
+	const add = (counts: Map<string, number>, key: string): void => {
+		if (key !== "") counts.set(key, (counts.get(key) ?? 0) + 1)
+	}
+	// Stripped bytes of the source's blocks, kept as they were or (`held`) as the writer rewrites them: a block
+	// that held such a marker, or that holds one now (one came into it).
+	const kept = new Set<string>()
+	const held = new Set<string>()
+	const strippedAfter = after.map(stripped)
+	const receivers = new Set(strippedAfter.filter(block => block.held).map(block => rewritten(block.key)))
+
+	for (const block of before) {
+		const stripping = stripped(block)
+		const loose = stripping.held || receivers.has(rewritten(stripping.key))
+
+		if (loose) held.add(stripping.key)
+		else kept.add(stripping.key)
+
+		add(a, loose ? rewritten(stripping.key) : stripping.key)
+	}
+
+	for (const { key, held: holds } of strippedAfter) add(b, !holds && kept.has(key) && !held.has(key) ? key : rewritten(key))
+
+	let differences = 0
+
+	for (const [key, times] of a) if ((b.get(key) ?? 0) !== times) differences++
+	for (const key of b.keys()) if (!a.has(key)) differences++
+
+	return differences
 }
 
 async function damage(config: FuzzConfig, file: string): Promise<void> {
@@ -478,9 +631,19 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 	const source = sourceFacts(input, editable.mainPart)
 	const schema = modes.has("xsd") ? schemaOracle() : undefined
 	const base = (Math.imul(config.seed, 100_003) ^ nameHash(name)) >>> 0
+	// What ops change in the edit context the sequences share (tracking switched on, an author named): each
+	// sequence starts from the file's.
+	const { review, identity } = editable.context
+	const opened = { tracking: review.tracking, persist: review.persist, author: identity.author, initials: identity.initials }
 
 	for (let q = 0; q < config.runs; q++) {
 		const seed = (base + q) >>> 0
+
+		review.tracking = opened.tracking
+		review.persist = opened.persist
+		identity.author = opened.author
+		identity.initials = opened.initials
+
 		const rand = rng(seed)
 		const log: string[] = []
 		const report: Damage = {
@@ -570,13 +733,7 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 		bump("saved")
 
 		if (modes.has("blockmove")) {
-			const main = source.mainPart
-			const before = blockHashes(input, main)
-			const after = blockHashes(saved.bytes, main)
-			let differences = 0
-
-			for (const [key, times] of before) if ((after.get(key) ?? 0) !== times) differences++
-			for (const key of after.keys()) if (!before.has(key)) differences++
+			const differences = blockMoveDifferences(input, saved.bytes, source.mainPart)
 
 			if (differences > 0) report.finding("blockMoveChangedBytes", { differences, log })
 		}
@@ -590,8 +747,8 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 
 		const body = sessions[0] as DocxEditorSession
 
-		// Checks the checker: text typed after the save is in the editor but not the file, so every
-		// verified sequence must report it.
+		// Checks the checker: text typed after the save is in the editor but not the file, and a bookmark the
+		// file loses (one in a text box first), so every verified sequence must report them.
 		if (modes.has("selftest")) {
 			const position = inlinePosition(rand, body.state.doc)
 
@@ -599,7 +756,7 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 		}
 
 		try {
-			await verifySaved(report, source, saved, body, schema)
+			await verifySaved(report, source, saved, body, schema, modes.has("selftest"))
 		} catch (error) {
 			report.finding("verifierThrew", { error: errorText(error, 800) })
 		}

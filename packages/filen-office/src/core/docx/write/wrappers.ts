@@ -37,6 +37,12 @@ export interface WrapperWriter {
 	close(w: StoryWriting, out: Out, mark: Mark): void
 }
 
+const LINK_EXTRAS: readonly (readonly [string, string])[] = [
+	["targetFrame", "tgtFrame"],
+	["history", "history"],
+	["docLocation", "docLocation"]
+]
+
 // A new link: an external target is a relationship, a bookmark is w:anchor; a link may have both.
 const LINK: WrapperWriter = {
 	type: marks.link,
@@ -59,6 +65,14 @@ const LINK: WrapperWriter = {
 
 		if (tooltip !== null) attributes += ` ${names.attr("tooltip")}="${escapeAttribute(tooltip)}"`
 
+		// What a link of the file a command replaced said besides its target (CT_Hyperlink, ECMA-376 Part 1
+		// 17.16.22); absent on a new link.
+		for (const [attr, local] of LINK_EXTRAS) {
+			const value: unknown = mark.attrs[attr]
+
+			if (typeof value === "string") attributes += ` ${names.attr(local)}="${escapeAttribute(value)}"`
+		}
+
 		out.text(`<${names.el("hyperlink")}${attributes}>`)
 	},
 	close(w, out) {
@@ -66,8 +80,42 @@ const LINK: WrapperWriter = {
 	}
 }
 
+// A tracked change the editor recorded: w:ins or w:del with a new id, its author and date. (The editor never
+// records moves: a new move wrapper is refused.)
+function revisionWriter(type: MarkType, local: string): WrapperWriter {
+	return {
+		type,
+		open(w, out, mark) {
+			const author = mark.attrs["author"] as string | null
+			const date = mark.attrs["date"] as string | null
+
+			// Without its author it is no change Word can show: refused like any wrapper it cannot write.
+			if (author === null || author === "") throw new DocxWriteError("missingSource", `A new ${mark.type.name} wrapper`)
+
+			out.text(
+				w.names
+					.empty(local, [
+						["id", String(w.env.nextRevisionId())],
+						["author", author],
+						["date", date]
+					])
+					.replace(/\/>$/, ">")
+			)
+		},
+		close(w, out) {
+			out.text(`</${w.names.el(local)}>`)
+		}
+	}
+}
+
 // Writers of new wrappers by mark type; a new wrapper of any other type is refused.
-const NEW_WRAPPERS: ReadonlyMap<MarkType, WrapperWriter> = new Map([LINK].map(writer => [writer.type, writer]))
+const NEW_WRAPPERS: ReadonlyMap<MarkType, WrapperWriter> = new Map(
+	[LINK, revisionWriter(marks.insertion, "ins"), revisionWriter(marks.deletion, "del")].map(writer => [writer.type, writer])
+)
+
+export function isRevisionWrapper(mark: Mark): boolean {
+	return REVISION_WRAPPERS.has(mark.type)
+}
 
 // The node's wrapper marks, outermost first: source wrappers by their item (an outer element comes
 // first in document order), new ones innermost.
@@ -100,8 +148,10 @@ export function sourceWrappers(w: StoryWriting, run: number): number[] {
 	return out.reverse()
 }
 
-// Closes the open wrappers `stack` holds down to what it shares with `wanted`, then opens the rest.
-export function transition(w: StoryWriting, out: Out, stack: Mark[], wanted: readonly Mark[]): void {
+// Closes the open wrappers `stack` holds down to what it shares with `wanted`, then opens the rest. `owned`:
+// the source paragraph the paragraph being written owns; a source tracked change opened away from its own
+// paragraph (a copy) gets a new id.
+export function transition(w: StoryWriting, out: Out, stack: Mark[], wanted: readonly Mark[], owned: number): void {
 	let common = 0
 
 	while (common < stack.length && common < wanted.length && stack[common]?.eq(wanted[common] as Mark) === true) common++
@@ -115,12 +165,12 @@ export function transition(w: StoryWriting, out: Out, stack: Mark[], wanted: rea
 	for (let k = common; k < wanted.length; k++) {
 		const mark = wanted[k] as Mark
 
-		openWrapper(w, out, mark)
+		openWrapper(w, out, mark, owned)
 		stack.push(mark)
 	}
 }
 
-function openWrapper(w: StoryWriting, out: Out, mark: Mark): void {
+function openWrapper(w: StoryWriting, out: Out, mark: Mark, owned: number): void {
 	const own = src(mark)
 
 	if (own === NO_SOURCE) {
@@ -159,13 +209,23 @@ function openWrapper(w: StoryWriting, out: Out, mark: Mark): void {
 		case Item.Deletion:
 		case Item.MoveFrom:
 		case Item.MoveTo:
-			if (again) startTagWith(out, document, element, w.names.attr("id"), String(w.env.nextRevisionId()))
+			if (again || paragraphOf(w, own) !== owned)
+				startTagWith(out, document, element, w.names.attr("id"), String(w.env.nextRevisionId()))
 			else openTag(out, document, element)
 
 			return
 		default:
 			openTag(out, document, element)
 	}
+}
+
+// The source paragraph a source item (a run, a wrapper) lies in, or NO_SOURCE.
+export function paragraphOf(w: StoryWriting, item: number): number {
+	const part = w.part
+
+	for (let at = part.parent(item); at >= 0; at = part.parent(at)) if (part.kinds[at] === Item.Paragraph) return at
+
+	return NO_SOURCE
 }
 
 function closeWrapper(w: StoryWriting, out: Out, mark: Mark): void {

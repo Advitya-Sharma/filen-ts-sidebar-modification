@@ -20,7 +20,7 @@ import {
 	OpcError,
 	ZipError
 } from "../../opc/index"
-import { XmlError, decodeUtf8, type XmlDocument } from "../../xml/index"
+import { XmlError, decodeUtf8, encodeUtf8, type XmlDocument } from "../../xml/index"
 import type { Node } from "prosemirror-model"
 import type { DocxEditContext, NewStory } from "../edit/context"
 import type { NewList } from "../edit/formats"
@@ -31,7 +31,8 @@ import { DocxSaveError, DocxVerifyError } from "./failure"
 import { planNested } from "./nested"
 import { NEW_STORY_PARTS, WRITTEN_REFERENCES, isInsertionPoint, referenceKey, type NewStoryContainer } from "./newStory"
 import { NUMBERING_CONTENT_TYPE, planNumbering } from "./numbering"
-import { PART_CONTRIBUTORS, type PartContributor, type SaveParts } from "./parts/index"
+import { orphanedHyperlinks } from "./orphans"
+import { PART_CONTRIBUTORS, type PartContributor, type RootDeclarations, type SaveParts } from "./parts/index"
 import { DocxWriteError, StoryWriter, type StoryDraft, type StoryOutput, type WriteEnvironment } from "./story"
 import { STYLES_CONTENT_TYPE, stylesWithDefinitions } from "./styles"
 import { verifyDocxParts } from "./verify"
@@ -45,6 +46,9 @@ export interface DocxSaveInput {
 	readonly context: DocxEditContext
 	// One session per story (the body, headers, notes...). Read-only sessions are not written.
 	readonly sessions: readonly DocxEditorSession[]
+	// What to write for a session instead of its current document (an IME composition's text marked tracked
+	// while the composition goes on).
+	readonly docs?: ReadonlyMap<DocxEditorSession, Node>
 	// What writes the parts beyond story content (default: every feature's, see parts/index.ts).
 	readonly parts?: readonly PartContributor[]
 }
@@ -73,6 +77,10 @@ export interface StoryChange {
 export interface DocxChanges extends DocxPartChanges {
 	readonly numIds: ReadonlyMap<number, number>
 	readonly stories: readonly StoryChange[]
+	// Source story containers taken out of their part (a deleted comment): their bytes.
+	readonly removed: readonly { readonly part: StoryPart; readonly from: number; readonly to: number }[]
+	// A story part's root start tag as written, where it declares namespaces the source's does not.
+	readonly roots: ReadonlyMap<StoryPart, string>
 }
 
 export interface DocxPrepareOptions {
@@ -120,6 +128,8 @@ class RelationshipPlan {
 	private highest = 0
 	readonly additions: NewRelationship[] = []
 	readonly ids: string[] = []
+	// Existing relationships the part no longer uses, to take out.
+	readonly removals = new Set<string>()
 
 	constructor(existing: readonly string[]) {
 		for (const id of existing) {
@@ -178,48 +188,73 @@ interface DraftedStory {
 // Pieces gathered between looks at the clock.
 const GATHER_STEP = 16_384
 
+// A source range a part is written without (a removed container), or its root start tag written anew.
+interface Replaced {
+	readonly from: number
+	readonly to: number
+	readonly bytes: Uint8Array
+}
+
 // A story part's new content: the source with each rewritten container replaced by its story as written,
-// as pieces (views of the source and the new markup), never joined: a one-word edit in a long document
-// costs the edit, not a copy of the part. Each story's output is a window of it.
+// each removed container left out and the root start tag as declared (`open`), as pieces (views of the
+// source and the new markup), never joined: a one-word edit in a long document costs the edit, not a copy of
+// the part. Each story's output is a window of it.
 async function assemble(
 	part: StoryPart,
 	drafted: readonly DraftedStory[],
+	cuts: readonly { readonly from: number; readonly to: number }[],
+	open: string | undefined,
 	clock: SliceClock | undefined
 ): Promise<{ bytes: BytePieces; stories: StoryChange[] }> {
-	const source = part.document.bytes
+	const document = part.document
+	const source = document.bytes
+	const root = document.documentElement()
+	const replaced: Replaced[] = cuts.map(cut => ({ ...cut, bytes: new Uint8Array() }))
+
+	if (open !== undefined) replaced.push({ from: document.start(root), to: document.openEnd(root), bytes: encodeUtf8(open) })
+
 	// A new container goes before a container replaced at the same place.
-	const ordered = [...drafted].sort((a, b) => a.from - b.from || a.to - b.to)
+	const ordered = [...drafted, ...replaced].sort((a, b) => a.from - b.from || a.to - b.to)
 	const pieces: Uint8Array[] = []
-	const windows: { readonly at: number; readonly size: number }[] = []
+	const windows = new Map<DraftedStory, { readonly at: number; readonly size: number }>()
 	const due = (): boolean => clock?.due === true
 	let from = 0
 	let at = 0
 
-	for (const { from: start, to: end, draft } of ordered) {
-		if (start < from) throw new DocxWriteError("unsupported", `Rewritten stories of ${part.name} overlap`)
+	for (const entry of ordered) {
+		if (entry.from < from) throw new DocxWriteError("unsupported", `Rewritten stories of ${part.name} overlap`)
 
-		pieces.push(source.subarray(from, start))
-		at += start - from
+		pieces.push(source.subarray(from, entry.from))
+		at += entry.from - from
 
-		const views = draft.out.views()
+		if ("draft" in entry) {
+			const views = entry.draft.out.views()
 
-		// One at a time: a story rewritten throughout has more pieces than a call takes arguments.
-		for (let index = 0; index < views.length; index++) {
-			pieces.push(views[index] as Uint8Array)
+			// One at a time: a story rewritten throughout has more pieces than a call takes arguments.
+			for (let index = 0; index < views.length; index++) {
+				pieces.push(views[index] as Uint8Array)
 
-			if (clock !== undefined && index % GATHER_STEP === GATHER_STEP - 1 && due()) await clock.pause()
+				if (clock !== undefined && index % GATHER_STEP === GATHER_STEP - 1 && due()) await clock.pause()
+			}
+
+			windows.set(entry, { at, size: entry.draft.out.size })
+			at += entry.draft.out.size
+		} else {
+			pieces.push(entry.bytes)
+			at += entry.bytes.length
 		}
 
-		windows.push({ at, size: draft.out.size })
-		at += draft.out.size
-		from = end
+		from = entry.to
 	}
 
 	pieces.push(source.subarray(from))
 
 	const bytes = clock === undefined ? BytePieces.of(pieces) : await BytePieces.build(pieces, due, clock.pause)
-	const stories = ordered.map(({ session, doc, draft, from: start, to: end, added }, index): StoryChange => {
-		const window = windows[index] ?? { at: 0, size: 0 }
+	const stories = ordered.flatMap((entry): StoryChange[] => {
+		if (!("draft" in entry)) return []
+
+		const { session, doc, draft, from: start, to: end, added } = entry
+		const window = windows.get(entry) ?? { at: 0, size: 0 }
 		const output = {
 			bytes: bytes.window(window.at, window.size),
 			trusted: draft.out.trusted,
@@ -227,7 +262,7 @@ async function assemble(
 			containers: draft.containers
 		}
 
-		return added ? { session, doc, part, output, range: { from: start, to: end } } : { session, doc, part, output }
+		return [added ? { session, doc, part, output, range: { from: start, to: end } } : { session, doc, part, output }]
 	})
 
 	return { bytes, stories }
@@ -243,7 +278,7 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 	const clock = slicing === undefined ? undefined : sliceClock(slicing)
 	const writable = input.sessions.filter(session => !session.readOnly)
 	// What the save writes is the documents as they are now, whatever happens between slices.
-	const current = writable.map(session => session.state.doc)
+	const current = writable.map(session => input.docs?.get(session) ?? session.state.doc)
 	const added = context.newStories
 	const sessions = writable
 	const docs = current
@@ -271,12 +306,8 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		return plan
 	}
 	const lists = new Map<number, NewList>()
-	const missingStyles = new Map<string, string>()
 
-	for (const session of sessions) {
-		for (const [id, list] of session.newLists) lists.set(id, list)
-		for (const [id, name] of session.missingStyles) missingStyles.set(id, name)
-	}
+	for (const session of sessions) for (const [id, list] of session.newLists) lists.set(id, list)
 
 	const numberingPart = pkg.part("numbering")
 	const numbering = planNumbering(await optionalXml(pkg, numberingPart, clock), context.numbering, lists)
@@ -444,6 +475,28 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 	// Story containers per part, replaced in the part's own bytes; a story written exactly as its source is
 	// left out (compared without joining it: its copies are views of the source).
 	const drafted = new Map<StoryPart, DraftedStory[]>()
+	// Root start tags with namespaces a part's stories now need, asked once per part before its stories are
+	// written (with every session the save writes).
+	const declared = new Map<StoryPart, RootDeclarations | undefined>()
+	const declarationsOf = (part: StoryPart): RootDeclarations | undefined => {
+		if (declared.has(part)) return declared.get(part)
+
+		let found: RootDeclarations | undefined
+
+		for (const contributor of contributors) {
+			const answer = contributor.declarations?.(part, { sessions, docs, stories: [] })
+
+			if (answer === undefined) continue
+			if (found !== undefined && found.open !== answer.open)
+				throw new DocxWriteError("unsupported", `Two features declare the root of ${part.name} differently`)
+
+			found = answer
+		}
+
+		declared.set(part, found)
+
+		return found
+	}
 
 	// Sessions written, and their documents.
 	const kept: DocxEditorSession[] = []
@@ -462,7 +515,11 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		const document = part.document
 		const doc = docs[index] ?? session.state.doc
 		const container = story.story.item < 0 ? containerOf(session, doc) : undefined
-		const writer = new StoryWriter(env, story, container === undefined ? {} : { container })
+		const prefixes = declarationsOf(part)?.prefixes
+		const writer = new StoryWriter(env, story, {
+			...(container === undefined ? {} : { container }),
+			...(prefixes === undefined ? {} : { prefixes })
+		})
 		const draft = clock === undefined ? writer.draftStorySync(doc) : await writer.draftStory(doc, clock)
 
 		kept.push(session)
@@ -516,16 +573,60 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		for (const index of due) await write(index)
 	}
 
-	const stories: StoryChange[] = []
+	// Source containers taken out of their part: a story of theirs is not written.
+	const cuts = new Map<StoryPart, { from: number; to: number }[]>()
+	const removed: { part: StoryPart; from: number; to: number }[] = []
 
-	for (const [part, list] of drafted) {
-		const result = await assemble(part, list, clock)
+	for (const contributor of contributors) {
+		for (const [part, items] of contributor.removed?.(parts, { sessions: kept, docs: keptDocs }) ?? []) {
+			const document = part.document
+			const root = document.documentElement()
+
+			for (const item of items) {
+				const node = part.node(item)
+
+				if (document.parent(node) !== root)
+					throw new DocxWriteError("unsupported", `A removed story of ${part.name} is not a child of its root`)
+
+				const cut = { from: document.start(node), to: document.end(node) }
+				const list = cuts.get(part)
+				const stories = drafted.get(part)
+
+				if (list?.some(other => other.from === cut.from) === true) continue
+				if (list === undefined) cuts.set(part, [cut])
+				else list.push(cut)
+
+				removed.push({ part, ...cut })
+
+				if (stories !== undefined) {
+					drafted.set(
+						part,
+						stories.filter(entry => entry.session.story.story.item !== item)
+					)
+				}
+			}
+		}
+	}
+
+	const stories: StoryChange[] = []
+	const roots = new Map<StoryPart, string>()
+
+	for (const part of new Set([...drafted.keys(), ...cuts.keys()])) {
+		const list = drafted.get(part) ?? []
+		const open = list.length === 0 ? undefined : declared.get(part)?.open
+		const result = await assemble(part, list, cuts.get(part) ?? [], open, clock)
 		const made = created.get(partKey(part.name))
+
+		if (open !== undefined) roots.set(part, open)
 
 		storyParts.add(partKey(part.name))
 
 		if (made === undefined) {
 			put(replace, { name: part.name, bytes: result.bytes })
+
+			const plan = await relationshipsOf(part.name)
+
+			for (const id of await orphanedHyperlinks(pkg, part, result.bytes, clock)) plan.removals.add(id)
 		} else {
 			put(add, { name: part.name, bytes: result.bytes })
 			overrides.push({ partName: part.name, contentType: NEW_STORY_PARTS[made.story.kind].contentType })
@@ -553,6 +654,11 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 			})
 		}
 	}
+
+	// Styles the written stories use (an added story the save leaves out asks for none).
+	const missingStyles = new Map<string, string>()
+
+	for (const session of kept) for (const [id, name] of session.missingStyles) missingStyles.set(id, name)
 
 	const stylesPart = pkg.part("styles")
 	const stylesBytes = stylesWithDefinitions(await optionalXml(pkg, stylesPart, clock), context.styles, missingStyles)
@@ -604,12 +710,12 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 	}
 
 	for (const [key, plan] of relationships) {
-		if (plan.additions.length === 0) continue
+		if (plan.additions.length === 0 && plan.removals.size === 0) continue
 
 		const source = pkg.opc.entry(key)?.name ?? key
 		const relsName = relationshipsPartName(source)
 		const existing = pkg.has(relsName) ? await pkg.opc.read(relsName) : null
-		const result = addRelationships(existing, plan.additions)
+		const result = addRelationships(existing, plan.additions, plan.removals)
 
 		if (result.ids.join() !== plan.ids.join())
 			throw new DocxWriteError("unsupported", `Relationship ids of ${source} did not come out as planned`)
@@ -631,7 +737,7 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		})
 	}
 
-	return { replace, add, numIds: numbering.numIds, stories }
+	return { replace, add, numIds: numbering.numIds, stories, removed, roots }
 }
 
 // The parts a save writes, checked by the part-level half of gate 2, with the time each step took (ms, slices

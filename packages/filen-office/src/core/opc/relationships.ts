@@ -84,8 +84,13 @@ export interface NewRelationship {
 const EMPTY_RELATIONSHIPS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<Relationships xmlns="${RELATIONSHIPS_NAMESPACE}"></Relationships>`
 
 // A .rels part (`bytes`, or a new one when null) with relationships appended. Each gets the next free
-// "rId<n>" above every existing numeric id, which `ids` returns in order. Existing bytes are kept.
-export function addRelationships(bytes: Uint8Array | null, additions: readonly NewRelationship[]): { bytes: Uint8Array; ids: string[] } {
+// "rId<n>" above every existing numeric id (`removals` included), which `ids` returns in order. Existing bytes
+// are kept, but for the relationships whose ids `removals` holds.
+export function addRelationships(
+	bytes: Uint8Array | null,
+	additions: readonly NewRelationship[],
+	removals: ReadonlySet<string> = new Set()
+): { bytes: Uint8Array; ids: string[] } {
 	const { document, namespaces, root } = relationshipsRoot(bytes ?? encodeUtf8(EMPTY_RELATIONSHIPS), "")
 	const editor = new XmlEditor(document)
 	const taken = new Set<string>()
@@ -101,6 +106,7 @@ export function addRelationships(bytes: Uint8Array | null, additions: readonly N
 		const numbered = /^rId(\d+)$/.exec(id)
 
 		if (numbered !== null) highest = Math.max(highest, Number(numbered[1]))
+		if (removals.has(id)) editor.remove(node)
 	}
 
 	const prefix = namespaces.prefixFor(root, RELATIONSHIPS_NAMESPACE) ?? ""

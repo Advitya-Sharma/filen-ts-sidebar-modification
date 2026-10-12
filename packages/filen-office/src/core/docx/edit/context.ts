@@ -187,6 +187,9 @@ export class DocxMediaStore {
 export interface DocxReviewState {
 	// Edits are recorded as tracked changes.
 	tracking: boolean
+	// A save writes the switch into settings.xml (w:trackRevisions), as Word does; a host may keep it to the
+	// session instead.
+	persist: boolean
 }
 
 export type NewStoryKind = "footnote" | "endnote" | "comment" | "header" | "footer"
@@ -278,7 +281,7 @@ export async function openDocxEditContext(pkg: DocxPackage, model: DocxModel, re
 			now: reuse.clock ?? (() => Date.now())
 		},
 		media: new DocxMediaStore(),
-		review: { tracking: model.settings.trackRevisions },
+		review: { tracking: model.settings.trackRevisions, persist: true },
 		newStories: new Map()
 	}
 }

@@ -1,18 +1,40 @@
 import type { Mark, Node } from "prosemirror-model"
 import { decodeUtf8 } from "../../xml/index"
 import type { RunBase } from "../edit/formatting"
-import { NO_SOURCE, docxSchema, inlineLevel, type IndentAttrs } from "../edit/schema"
-import { Item } from "../model/index"
+import { NO_SOURCE, docxSchema, inlineLevel } from "../edit/schema"
+import type { BorderProps, ParagraphProps } from "../props/index"
+import { paragraphAttrs, paragraphChange, type ParagraphAttrs, type ParagraphChange, type RevisionStamp } from "../review/track"
+import { Item, RevisionFlag } from "../model/index"
+import { Ns } from "../model/namespaces"
 import { atomEdited, writeAtom, writeRunAtom } from "./atoms/index"
-import { closeTag, copyNode, freshContainer, openTag, openTagWithout, Out, spliceChildren, textElement } from "./markup"
+import {
+	closeTag,
+	copyNode,
+	freshContainer,
+	openTag,
+	openTagWithout,
+	Out,
+	spliceChildren,
+	startTagWith,
+	textElement,
+	type Names
+} from "./markup"
 import { newParagraphTag, paragraphId, sameParagraphId, writeParagraphIdTag } from "./newStory"
 import { JUSTIFICATION, NUMBERING_PROPERTIES, PARAGRAPH_MARK_PROPERTIES, PARAGRAPH_PROPERTIES } from "./order.generated"
-import { sameFormatting, writeRunProperties } from "./runs"
-import { refuseBlockMarks, sectionWritten, src } from "./source"
+import { baseWithoutChange, sameFormatting, writeRunProperties, type RunChange } from "./runs"
+import { sectionWritten, src } from "./source"
 import { changedControl } from "./sdt"
 import type { StoryWriting } from "./story"
-import { DocxWriteError, indent as checkIndent, integer, name as checkName, oneOf } from "./values"
-import { sourceWrappers, transition, wrappersOf } from "./wrappers"
+import {
+	DocxWriteError,
+	indent as checkIndent,
+	integer,
+	name as checkName,
+	oneOf,
+	paragraphBorders as checkBorders,
+	spacing as checkSpacing
+} from "./values"
+import { isRevisionWrapper, paragraphOf, sourceWrappers, transition, wrappersOf } from "./wrappers"
 
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
@@ -45,7 +67,9 @@ export function writeParagraph(w: StoryWriting, out: Out, node: Node): void {
 	const from = out.size
 	const id = paragraphId(node)
 
-	refuseBlockMarks(node, marks.para_id)
+	for (const mark of node.marks)
+		if (mark.type !== marks.para_id && !(mark.type === marks.paragraph_change && writableChange(mark.attrs["value"])))
+			throw new DocxWriteError("missingSource", `A ${mark.type.name} mark on a ${node.type.name}`)
 
 	// Word's w14:textId hashes the paragraph's text: an edited paragraph drops it (Word writes a new one);
 	// the paragraph keeps its w14:paraId unless a feature gave it a new one.
@@ -55,12 +79,28 @@ export function writeParagraph(w: StoryWriting, out: Out, node: Node): void {
 	else out.text(newParagraphTag(w, source, id))
 
 	writeParagraphProperties(w, out, node, source, owner)
-	writeInline(w, out, node)
+	writeInline(w, out, node, owner ? source : NO_SOURCE)
 
 	if (owner) closeTag(out, document, part.node(source))
 	else out.text(`</${w.names.el("p")}>`)
 
 	w.paragraphs.push({ node, from, to: out.size })
+}
+
+const CHANGE_KEYS: ReadonlySet<string> = new Set(["props", "inserted", "deleted", "source"])
+
+// Whether a paragraph_change value is what tracked changes record (see ParagraphChange): anything else on it
+// has no writer.
+function writableChange(value: unknown): boolean {
+	if (typeof value !== "object" || value === null) return false
+
+	const change = value as ParagraphChange
+
+	return (
+		Object.keys(value).every(key => CHANGE_KEYS.has(key)) &&
+		(change.source === undefined || change.source === "accept" || change.source === "reject") &&
+		(change.props === undefined || (typeof change.props.author === "string" && typeof change.props.before === "object"))
+	)
 }
 
 function markup(write: (out: Out) => void): string {
@@ -71,22 +111,19 @@ function markup(write: (out: Out) => void): string {
 	return decodeUtf8(out.finish())
 }
 
-function writeParagraphProperties(w: StoryWriting, out: Out, node: Node, source: number, owner: boolean): void {
+// The pPr children the paragraph's attributes stand for (style, numbering, alignment, indent), where `attrs`
+// differ from `props` (the properties of the container they are spliced into).
+function attributeChanges(
+	w: StoryWriting,
+	attrs: ParagraphAttrs,
+	props: ParagraphProps,
+	owner: boolean,
+	sourceNumPr: number
+): Map<string, string> {
 	const names = w.names
-	const part = w.part
-	const reader = part.reader
-	const document = part.document
-	const row = source === NO_SOURCE ? -1 : (part.aux[source] ?? -1)
-	const pPr = row < 0 ? -1 : (part.paragraphs.pPr[row] ?? -1)
-	const props = w.env.context.store.paragraph(document, pPr)
+	const reader = w.part.reader
 	const changes = new Map<string, string>()
-	const styleId = node.attrs["styleId"] as string | null
-	const numId = node.attrs["numId"] as number | null
-	const ilvl = node.attrs["ilvl"] as number | null
-	const align = node.attrs["align"] as string | null
-	const indent = node.attrs["indent"] as IndentAttrs | null
-	const sectPr = node.attrs["sectPr"] as number
-	const sourceNumPr = row < 0 ? -1 : (part.paragraphs.numPr[row] ?? -1)
+	const { styleId, numId, ilvl, align, indent, spacing, borders } = attrs
 
 	if (styleId !== (props.styleId ?? null)) {
 		if (styleId !== null) checkName("w:pStyle", styleId)
@@ -126,6 +163,37 @@ function writeParagraphProperties(w: StoryWriting, out: Out, node: Node, source:
 		changes.set("jc", align === null ? "" : names.val("jc", align))
 	}
 
+	if (spacing !== (props.spacing ?? null)) {
+		checkSpacing(spacing)
+		changes.set(
+			"spacing",
+			spacing === null
+				? ""
+				: names.empty("spacing", [
+						["before", spacing.before?.toString()],
+						["beforeLines", spacing.beforeLines?.toString()],
+						["beforeAutospacing", onOff(spacing.beforeAutospacing)],
+						["after", spacing.after?.toString()],
+						["afterLines", spacing.afterLines?.toString()],
+						["afterAutospacing", onOff(spacing.afterAutospacing)],
+						["line", spacing.line?.toString()],
+						["lineRule", spacing.lineRule]
+					])
+		)
+	}
+
+	if (borders !== (props.borders ?? null)) {
+		checkBorders(borders)
+
+		const sides = BORDER_ELEMENTS.flatMap(([side, local]) => {
+			const border = borders?.[side]
+
+			return border === undefined ? [] : [borderElement(names, local, border)]
+		})
+
+		changes.set("pBdr", sides.length === 0 ? "" : `<${names.el("pBdr")}>${sides.join("")}</${names.el("pBdr")}>`)
+	}
+
 	if (indent !== (props.indent ?? null)) {
 		checkIndent(indent)
 		changes.set(
@@ -145,11 +213,148 @@ function writeParagraphProperties(w: StoryWriting, out: Out, node: Node, source:
 		)
 	}
 
+	return changes
+}
+
+function onOff(value: boolean | undefined): string | undefined {
+	return value === undefined ? undefined : value ? "1" : "0"
+}
+
+// CT_PBdr's sides in schema order, with their Transitional element names (start/end as left/right, like w:ind).
+const BORDER_ELEMENTS = [
+	["top", "top"],
+	["start", "left"],
+	["bottom", "bottom"],
+	["end", "right"],
+	["between", "between"],
+	["bar", "bar"]
+] as const
+
+function hex2(value: number | undefined): string | undefined {
+	return value === undefined ? undefined : value.toString(16).toUpperCase().padStart(2, "0")
+}
+
+function borderElement(names: Names, local: string, border: BorderProps): string {
+	return names.empty(local, [
+		["val", border.style],
+		["sz", border.size?.toString()],
+		["space", border.space?.toString()],
+		["color", border.val ?? (border.themeColor === undefined ? undefined : "auto")],
+		["themeColor", border.themeColor],
+		["themeTint", hex2(border.themeTint)],
+		["themeShade", hex2(border.themeShade)],
+		["shadow", onOff(border.shadow)],
+		["frame", onOff(border.frame)]
+	])
+}
+
+// A revision element (w:ins, w:del, w:pPrChange...) the editor recorded: a new w:id, its author and date.
+export function revisionTag(w: StoryWriting, local: string, stamp: RevisionStamp, close: boolean): string {
+	const names = w.names
+	const attributes = names.empty(local, [
+		["id", String(w.env.nextRevisionId())],
+		["author", stamp.author],
+		["date", stamp.date === "" ? undefined : stamp.date]
+	])
+
+	return close ? attributes : attributes.replace(/\/>$/, ">")
+}
+
+// The child of a WordprocessingML container named `local`, or -1.
+function childNamed(w: StoryWriting, container: number, local: string): number {
+	const document = w.part.document
+
+	if (container < 0) return -1
+
+	for (let child = document.firstChildElement(container); child >= 0; child = document.nextSiblingElement(child)) {
+		if (w.part.reader.group(child) === Ns.W && document.localName(child) === local) return child
+	}
+
+	return -1
+}
+
+// A source element with a new w:id (written where the paragraph owning it is not).
+function withNewId(w: StoryWriting, element: number): string {
+	const document = w.part.document
+
+	return markup(sub => {
+		startTagWith(sub, document, element, w.names.attr("id"), String(w.env.nextRevisionId()), true)
+		sub.bytes(document.bytes, document.openEnd(element), document.end(element))
+	})
+}
+
+const MARK_KINDS: readonly (readonly [string, number])[] = [
+	["ins", RevisionFlag.Inserted],
+	["del", RevisionFlag.Deleted],
+	["moveFrom", RevisionFlag.MovedFrom],
+	["moveTo", RevisionFlag.MovedTo]
+]
+
+// The paragraph mark's run properties where its revisions differ from the source's, as markup; undefined when
+// the source's stand. What is written follows the paragraph's flags, whichever occurrence of a repeated source
+// paragraph owns its bytes: a flag with a stamp is a new element; one without, the source's element (a new id
+// where this paragraph does not own it); a source element without the flag goes.
+function markProperties(w: StoryWriting, node: Node, change: ParagraphChange | undefined, row: number, owner: boolean): string | undefined {
+	const part = w.part
+	const markRPr = row < 0 ? -1 : (part.paragraphs.markRPr[row] ?? -1)
+	const source = row >= 0 ? (part.paragraphs.markRevision[row] ?? 0) : 0
+	const flags = node.attrs["revision"] as number
+	const changes = new Map<string, string>()
+
+	if (!owner) for (const local of MARK_REVISIONS.keys()) changes.set(local, "")
+
+	for (const [local, flag] of MARK_KINDS) {
+		const stamp = flag === RevisionFlag.Inserted ? change?.inserted : flag === RevisionFlag.Deleted ? change?.deleted : undefined
+		const wanted = (flags & flag) !== 0
+		const had = (source & flag) !== 0
+
+		if (stamp !== undefined && wanted) {
+			// The source's own element moved here with the mark, with a new id: a copy of the paragraph (a paste)
+			// may hold the same element where it was.
+			const element = stamp.element ?? -1
+
+			changes.set(local, element >= 0 ? withNewId(w, element) : revisionTag(w, local, stamp, true))
+		} else if (had && !wanted) {
+			changes.set(local, "")
+		} else if (had && wanted && !owner) {
+			const element = childNamed(w, markRPr, local)
+
+			if (element >= 0) changes.set(local, withNewId(w, element))
+		}
+	}
+
+	if (changes.size === 0 || (owner && [...changes.values()].every(value => value === "") && markRPr < 0)) return undefined
+	if (markRPr >= 0) return markup(sub => spliceChildren(sub, part.reader, markRPr, changes, PARAGRAPH_MARK_PROPERTIES))
+
+	const fresh = freshContainer(w.names, "rPr", changes, PARAGRAPH_MARK_PROPERTIES)
+
+	return fresh === "" ? undefined : fresh
+}
+
+function writeParagraphProperties(w: StoryWriting, out: Out, node: Node, source: number, owner: boolean): void {
+	const names = w.names
+	const part = w.part
+	const reader = part.reader
+	const document = part.document
+	const row = source === NO_SOURCE ? -1 : (part.aux[source] ?? -1)
+	const pPr = row < 0 ? -1 : (part.paragraphs.pPr[row] ?? -1)
+	const sectPr = node.attrs["sectPr"] as number
+	const sourceNumPr = row < 0 ? -1 : (part.paragraphs.numPr[row] ?? -1)
+	const change = paragraphChange(node)
+	// The source's own w:pPrChange: kept where the paragraph is (a new id where it does not own the bytes)
+	// unless accepted or rejected since; a copy pasted in had it taken back (see review/track.ts).
+	const sourceChange = pPr >= 0 ? childNamed(w, pPr, "pPrChange") : -1
+	// A rejected source change writes the properties it recorded, under the paragraph's mark and section break.
+	const rejected = sourceChange >= 0 && change?.source === "reject" ? childNamed(w, sourceChange, "pPr") : -1
+	const container = change?.source === "reject" && sourceChange >= 0 ? rejected : pPr
+	const props = w.env.context.store.paragraph(document, container)
+	const changes = attributeChanges(w, paragraphAttrs(node), props, owner, sourceNumPr)
+
 	const hasSection = row >= 0 && (part.paragraphs.sectPr[row] ?? -1) >= 0
 
 	if (!sectionWritten(part, sectPr, w.cells > 0)) {
 		if (hasSection) changes.set("sectPr", "")
-	} else if (sectPr !== source || !hasSection) {
+	} else if (sectPr !== source || !hasSection || container !== pPr) {
 		const from = part.paragraphs.sectPr[part.aux[sectPr] ?? -1] ?? -1
 
 		if (from < 0) throw new DocxWriteError("missingSource", "A section break without its properties")
@@ -157,28 +362,43 @@ function writeParagraphProperties(w: StoryWriting, out: Out, node: Node, source:
 		changes.set("sectPr", decodeUtf8(w.bytes, document.start(from), document.end(from)))
 	}
 
-	if (!owner && pPr >= 0) {
-		// A copy of the paragraph's properties is a new paragraph mark: tracked changes stay with the original.
-		changes.set("pPrChange", "")
+	if (!owner && pPr >= 0) changes.set("pPrChange", sourceChange >= 0 && change?.source === undefined ? withNewId(w, sourceChange) : "")
 
+	const mark = markProperties(w, node, change, row, owner)
+
+	if (mark !== undefined) {
+		changes.set("rPr", mark)
+	} else if (container !== pPr && row >= 0) {
 		const markRPr = part.paragraphs.markRPr[row] ?? -1
 
-		if (markRPr >= 0)
-			changes.set(
-				"rPr",
-				markup(sub => spliceChildren(sub, reader, markRPr, MARK_REVISIONS, PARAGRAPH_MARK_PROPERTIES))
-			)
+		if (markRPr >= 0) changes.set("rPr", decodeUtf8(w.bytes, document.start(markRPr), document.end(markRPr)))
 	}
 
-	if (pPr >= 0) {
+	if (sourceChange >= 0 && change?.source !== undefined) changes.set("pPrChange", "")
+
+	if (change?.props !== undefined && !(sourceChange >= 0 && change.source === undefined)) {
+		// What the editor recorded: the properties before, as this paragraph's pPr would have been.
+		const before = attributeChanges(w, change.props.before, props, owner, sourceNumPr)
+
+		for (const local of ["rPr", "sectPr", "pPrChange"]) before.set(local, "")
+
+		const inner =
+			container >= 0
+				? markup(sub => spliceChildren(sub, reader, container, before, PARAGRAPH_PROPERTIES))
+				: freshContainer(names, "pPr", before, PARAGRAPH_PROPERTIES) || names.empty("pPr")
+
+		changes.set("pPrChange", `${revisionTag(w, "pPrChange", change.props, false)}${inner}</${names.el("pPrChange")}>`)
+	}
+
+	if (container >= 0) {
 		if (changes.size === 0) {
-			copyNode(out, document, pPr)
+			copyNode(out, document, container)
 
 			return
 		}
 
 		// Properties that lost their last child are left out rather than written empty.
-		const spliced = markup(sub => spliceChildren(sub, reader, pPr, changes, PARAGRAPH_PROPERTIES))
+		const spliced = markup(sub => spliceChildren(sub, reader, container, changes, PARAGRAPH_PROPERTIES))
 
 		if (!/^<[^>]*>\s*<\/[^>]*>$/.test(spliced)) out.text(spliced)
 	} else {
@@ -236,7 +456,33 @@ function base(w: StoryWriting, run: Mark | undefined): RunBase | undefined {
 	return id === undefined || id < 0 ? undefined : w.env.context.bases.get(id)
 }
 
-function canCopyUnit(w: StoryWriting, unit: Unit, forced: boolean): boolean {
+// What becomes of a node's tracked formatting change (see RunChange). `owned`: the source paragraph this
+// paragraph owns (its runs' changes keep their ids there), or NO_SOURCE.
+function runChange(w: StoryWriting, node: Node, run: number, runBase: RunBase | undefined, owned: number): RunChange {
+	const change = marks.format_change.isInSet(node.marks)
+	const recorded = change?.attrs["base"] as number | null | undefined
+	const sourceChange = runBase?.props.change !== undefined
+
+	if (change !== undefined && recorded !== null && recorded !== undefined) {
+		const before = baseWithoutChange(w.names, recorded < 0 ? undefined : w.env.context.bases.get(recorded))
+		const stamp = { author: String(change.attrs["author"] ?? ""), date: String(change.attrs["date"] ?? "") }
+
+		return { kind: "new", markup: `${revisionTag(w, "rPrChange", stamp, false)}${before}</${w.names.el("rPrChange")}>` }
+	}
+
+	if (change === undefined) return sourceChange ? { kind: "strip" } : { kind: "keep" }
+
+	// A formatting change read from the file lives in the run's base.
+	if (!sourceChange) throw new DocxWriteError("missingSource", "A formatting change without its source")
+
+	// Written a second time, or away from its own paragraph (a copy): a new id.
+	if ((runBase !== undefined && w.writtenChanges.has(runBase.id)) || run === NO_SOURCE || paragraphOf(w, run) !== owned)
+		return { kind: "keep", id: w.env.nextRevisionId() }
+
+	return { kind: "keep" }
+}
+
+function canCopyUnit(w: StoryWriting, unit: Unit, forced: boolean, owned: number): boolean {
 	if (forced || unit.atom || unit.run === undefined) return false
 
 	const run = src(unit.run)
@@ -244,10 +490,17 @@ function canCopyUnit(w: StoryWriting, unit: Unit, forced: boolean): boolean {
 	if (run === NO_SOURCE || w.copiedRuns.has(run) || w.part.kinds[run] !== Item.Run) return false
 
 	const runBase = base(w, unit.run)
+	const sourceChange = runBase?.props.change !== undefined
+	// Away from its own paragraph (a copy, or a joined paragraph's), a run whose bytes hold revision ids is
+	// rebuilt with new ones.
+	const away = paragraphOf(w, run) !== owned
+
+	if (away && (sourceChange || unit.wrappers.some(isRevisionWrapper))) return false
 
 	for (const node of unit.nodes) {
 		if (node.type !== nodes.marker && !sameFormatting(node.marks, runBase)) return false
 		if (node.isText ? newFormatChange(node.marks) : atomEdited(node)) return false
+		if (node.type !== nodes.marker && (marks.format_change.isInSet(node.marks) !== undefined) !== sourceChange) return false
 	}
 
 	const wrappers = sourceWrappers(w, run)
@@ -258,12 +511,12 @@ function canCopyUnit(w: StoryWriting, unit: Unit, forced: boolean): boolean {
 	return unitTokens(unit) === sourceTokens(w, run)
 }
 
-function writeInline(w: StoryWriting, out: Out, paragraph: Node): void {
+function writeInline(w: StoryWriting, out: Out, paragraph: Node, owned: number): void {
 	const forced = paragraph === w.force
 	const list = units(paragraph)
 
 	for (const unit of list) {
-		unit.copy = canCopyUnit(w, unit, forced)
+		unit.copy = canCopyUnit(w, unit, forced, owned)
 
 		if (unit.copy && unit.run !== undefined) {
 			w.copiedRuns.add(src(unit.run))
@@ -300,7 +553,7 @@ function writeInline(w: StoryWriting, out: Out, paragraph: Node): void {
 			}
 		}
 
-		transition(w, out, stack, unit.wrappers)
+		transition(w, out, stack, unit.wrappers, owned)
 
 		if (unit.atom) {
 			writeAtom(w, out, node)
@@ -314,15 +567,15 @@ function writeInline(w: StoryWriting, out: Out, paragraph: Node): void {
 			return
 		}
 
-		writeRuns(w, out, unit, forced)
+		writeRuns(w, out, unit, forced, owned)
 	})
 
-	transition(w, out, stack, [])
+	transition(w, out, stack, [], owned)
 }
 
 // A unit rebuilt: consecutive nodes with the same marks become one w:r with the base's properties and
 // their changes; markers Word had put inside the run go between the runs.
-function writeRuns(w: StoryWriting, out: Out, unit: Unit, forced: boolean): void {
+function writeRuns(w: StoryWriting, out: Out, unit: Unit, forced: boolean, owned: number): void {
 	const names = w.names
 	const part = w.part
 	const document = part.document
@@ -350,9 +603,6 @@ function writeRuns(w: StoryWriting, out: Out, unit: Unit, forced: boolean): void
 		if (node.type === nodes.rendered_break && !forced) continue
 
 		if (open === null || !sameMarks(open, node.marks)) {
-			// A formatting change recorded by a command is not written yet.
-			if (newFormatChange(node.marks)) throw new DocxWriteError("missingSource", "A new formatting change")
-
 			close()
 			raw = run !== NO_SOURCE && part.kinds[run] === Item.Run && !w.startedRuns.has(run)
 
@@ -363,18 +613,11 @@ function writeRuns(w: StoryWriting, out: Out, unit: Unit, forced: boolean): void
 				out.text(`<${names.el("r")}>`)
 			}
 
-			// A tracked formatting change written a second time needs an id of its own.
-			const changed = runBase?.props.change !== undefined
+			const change = runChange(w, node, run, runBase, owned)
 
-			writeRunProperties(
-				out,
-				names,
-				node.marks,
-				runBase,
-				changed && w.writtenChanges.has(runBase.id) ? w.env.nextRevisionId() : undefined
-			)
+			writeRunProperties(out, names, node.marks, runBase, change)
 
-			if (changed) w.writtenChanges.add(runBase.id)
+			if (change.kind === "keep" && runBase?.props.change !== undefined) w.writtenChanges.add(runBase.id)
 			open = node.marks
 		}
 

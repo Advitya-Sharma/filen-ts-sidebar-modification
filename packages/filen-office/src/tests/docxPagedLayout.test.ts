@@ -84,6 +84,22 @@ function longDocument(paragraphCount: number): Uint8Array {
 	return buildDocx({ body })
 }
 
+// Paragraphs with a footnote each, notes of a few lengths.
+function notedDocument(): Uint8Array {
+	const noted = (k: number): string =>
+		`<w:p><w:r><w:t xml:space="preserve">${words(25 + (k % 4) * 11, k)} </w:t></w:r><w:r><w:footnoteReference w:id="${String(k + 1)}"/></w:r><w:r><w:t xml:space="preserve"> ${words(12, k + 2)}</w:t></w:r></w:p>`
+	const note = (k: number): string =>
+		`<w:footnote w:id="${String(k + 1)}"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> ${words(8 + (k % 3) * 20, k)}</w:t></w:r></w:p></w:footnote>`
+
+	return buildDocx({
+		body: Array.from({ length: 40 }, (_, k) => noted(k)).join("") + `<w:sectPr>${PAGE}</w:sectPr>`,
+		footnotes:
+			'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
+			Array.from({ length: 40 }, (_, k) => note(k)).join(""),
+		settings: '<w:footnotePr><w:footnote w:id="-1"/></w:footnotePr>'
+	})
+}
+
 describe("paged layout of edits", { timeout: 60_000 }, () => {
 	it("lays out typing, deletion and formatting like the saved file, stopping at the next page", async () => {
 		const edited = await editedLayout(longDocument(160))
@@ -109,6 +125,20 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		await edited.edit(edited.session.state.tr.delete(other.pos + 2, other.pos + 9))
 		select(edited.session, other.pos + 2, other.pos + 8)
 		await edited.edit(session => session.execute({ type: "format.bold" }))
+		await expectSaved(edited)
+	})
+
+	it("lays out a paragraph command from the paragraph's page, not the whole document", async () => {
+		const edited = await editedLayout(longDocument(160))
+		const target = paragraphs(edited.session.state.doc, false)[100]
+
+		if (target === undefined) throw new Error("no paragraph")
+
+		select(edited.session, target.pos + 2)
+		await edited.edit(session => session.execute({ type: "align.center" }))
+
+		expect(edited.last.restart).toBeGreaterThan(5)
+		expect(edited.last.laidOut).toBeLessThanOrEqual(3)
 		await expectSaved(edited)
 	})
 
@@ -231,6 +261,22 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		await edited.edit(session => session.execute({ type: "history.undo" }))
 
 		expect(pageDigest(edited.layout)).toEqual(before)
+	})
+
+	it("lays table paragraphs out from their source again when a paragraph command over them is undone", async () => {
+		const edited = await editedLayout(longDocument(60))
+		const session = edited.session
+		const before = pageDigest(edited.layout)
+
+		select(session, 1, session.state.doc.content.size - 1)
+		await edited.edit(s => s.execute({ type: "align.center" }))
+		expect([...edited.edits.overlayRecords()].length).toBeGreaterThan(40)
+		await edited.edit(s => s.execute({ type: "history.undo" }))
+
+		// No overlay left: every paragraph, those in table cells too, is its source again.
+		expect([...edited.edits.overlayRecords()]).toEqual([])
+		expect(pageDigest(edited.layout)).toEqual(before)
+		await expectSaved(edited)
 	})
 
 	it("keeps later pages when an edit adds a page before a page break, renumbered", async () => {
@@ -1025,6 +1071,90 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		editor.dispose()
 	})
 
+	it("numbers a note anew that the run meeting the earlier layout laid out last", async () => {
+		const bytes = notedDocument()
+		const { editor, pkg, context } = await pagedEditor(bytes)
+		const session = editor.session
+		const blocks = paragraphs(session.state.doc, false)
+		const later = blocks[4]
+		const first = blocks[1]
+
+		if (later === undefined || first === undefined) throw new Error("no paragraph")
+
+		// Laid out again to where it meets the earlier layout; then a note before goes: the notes after it are
+		// numbered one less, those that run laid out last included.
+		editor.dispatch(session.state.tr.insertText("x", later.pos + 2))
+		await settleAll(editor)
+		editor.dispatch(session.state.tr.delete(first.pos, first.pos + first.node.nodeSize))
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		if (saved.bytes === undefined) throw new Error("no bytes")
+
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes))
+		editor.dispose()
+	})
+
+	it("lays a note edited out as it now reads, though the run before laid it out without placing it", async () => {
+		const bytes = notedDocument()
+		const { editor, pkg, context } = await pagedEditor(bytes)
+		const session = editor.session
+		const later = paragraphs(session.state.doc, false)[4]
+		const note = context.model.footnotes.get("11")
+
+		if (later === undefined || note === undefined) throw new Error("no paragraph")
+
+		// The run meets the earlier layout again after laying out a note it then left for the next page; that
+		// note is edited.
+		editor.dispatch(session.state.tr.insertText("x", later.pos + 2))
+		await settleAll(editor)
+		editor.enterStory(note.index, 0)
+		editor.session.dispatch(editor.session.state.tr.insertText(`${words(60)} `, 3))
+		editor.exitStory()
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		if (saved.bytes === undefined) throw new Error("no bytes")
+
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes))
+		editor.dispose()
+	})
+
+	it("lays pages drawn while a font loaded out again once, when the run under way meets the earlier layout first", async () => {
+		const body =
+			Array.from(
+				{ length: 20 },
+				(_, chapter) => para(`Chapter ${String(chapter)}`, chapter === 0 ? "" : "<w:pageBreakBefore/>") + para(words(150, chapter))
+			).join("") + `<w:sectPr>${PAGE}</w:sectPr>`
+		const { editor, pkg, context } = await pagedEditor(buildDocx({ body }), 0)
+		const session = editor.session
+		const second = paragraphs(session.state.doc, false)[3]
+
+		if (second === undefined) throw new Error("no paragraph")
+
+		editor.setVisible(1, 1)
+		// A page more in the second chapter; the run stops between pages before meeting the third chapter's.
+		editor.dispatch(session.state.tr.insertText(`${words(900, 3)} `, second.pos + 2))
+		editor.layout.advance(-Infinity, 2)
+		expect(editor.layout.final).toBe(false)
+
+		// A page it laid out drew stand-ins for a font loading meanwhile (a header, note or split row): the run
+		// lays out again from there, meeting the earlier layout where it stands first.
+		const paginator = (editor.layout as unknown as { driver: { paginator: { missedFonts: number } } }).driver.paginator
+
+		paginator.missedFonts = 1
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		if (saved.bytes === undefined) throw new Error("no bytes")
+
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes))
+		editor.dispose()
+	})
+
 	it("ends the sections a content control holds after the blocks that end them", async () => {
 		for (const inner of [
 			para(words(20, 1), `<w:sectPr>${LANDSCAPE}</w:sectPr>`) + para(words(40, 2)),
@@ -1432,6 +1562,50 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 			await edited.edit(edited.session.state.tr.insertText(`${words(1500, 1)} `, target.pos + 2))
 			await expectSaved(edited)
 		}
+	})
+
+	it("lays a page out again when a row that could not wait for a font drew stand-ins", async () => {
+		const run = (text: string, font: string): string =>
+			`<w:p><w:r><w:rPr><w:rFonts w:ascii="${font}" w:hAnsi="${font}"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`
+		const table = (widths: readonly number[], rows: string): string =>
+			`<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid>${widths.map(w => `<w:gridCol w:w="${w}"/>`).join("")}</w:tblGrid>${rows}</w:tbl>`
+		const inner = (count: number, font: string, name: string): string =>
+			Array.from({ length: count }, (_, k) => `<w:tr><w:tc>${run(`${name} ${k}`, font)}</w:tc></w:tr>`).join("")
+		// A merge running out of its page inside a nested table cannot be laid out again later: its row continues
+		// on the next page with stand-ins for a font first needed there.
+		const merged = `<w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>${table([3000], inner(40, "Arial", "arial") + inner(20, "Courier New", "mono"))}</w:tc>`
+		const rows =
+			`<w:tr>${merged}<w:tc>${run("b", "Arial")}</w:tc></w:tr>` +
+			`<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc>${run("c", "Arial")}</w:tc></w:tr>`
+		const body = Array.from({ length: 40 }, (_, k) => run(`line ${k}`, "Arial")).join("") + table([4000, 2000], rows)
+		const pages = await savedDigest(buildDocx({ body }))
+
+		expect(pages.join("\n")).toMatch(/"mono 0" \[[^\]]* fotest-cousine:/)
+		expect(pages.join("\n")).not.toContain("null:")
+	})
+
+	it("lays out blocks put back after the body's last block, before its final section properties", async () => {
+		const cell = (text: string): string => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${para(text)}</w:tc>`
+		const rows = Array.from({ length: 60 }, (_, k) => `<w:tr>${cell(`a${k}`)}${cell(`b${k}`)}</w:tr>`).join("")
+		const table = `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>${rows}</w:tbl>`
+		const sectPr =
+			'<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+		const edited = await editedLayout(buildDocx({ body: para("first") + table + sectPr }))
+		const session = edited.session
+		const last = (): { pos: number; node: Node } => {
+			const node = session.state.doc.lastChild as Node
+
+			return { pos: session.state.doc.content.size - node.nodeSize, node }
+		}
+		const { pos, node } = last()
+
+		await edited.edit(session.state.tr.delete(pos, pos + node.nodeSize))
+		await expectSaved(edited)
+		// The undo puts the table back after the last block: the last section grows with it.
+		await edited.edit(each => each.execute({ type: "history.undo" }))
+		await expectSaved(edited)
+		await edited.edit(session.state.tr.insert(session.state.doc.content.size, docxSchema.nodes.paragraph.create()))
+		await expectSaved(edited)
 	})
 
 	it("saves a locked table holding a section break in a cell, and refuses a locked section break moved into one", async () => {

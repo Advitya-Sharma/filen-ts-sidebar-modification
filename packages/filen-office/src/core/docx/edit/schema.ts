@@ -87,6 +87,18 @@ export interface IndentAttrs {
 	readonly firstLineChars?: number
 }
 
+// w:spacing as written (twips; *Lines in hundredths of a line; line in 240ths of a line when lineRule is auto).
+export interface SpacingAttrs {
+	readonly before?: number
+	readonly beforeLines?: number
+	readonly beforeAutospacing?: boolean
+	readonly after?: number
+	readonly afterLines?: number
+	readonly afterAutospacing?: boolean
+	readonly line?: number
+	readonly lineRule?: "auto" | "exact" | "atLeast"
+}
+
 export interface ColorAttrs {
 	readonly value: string | null
 	readonly themeColor: string | null
@@ -134,6 +146,8 @@ const nodes = {
 			ilvl: nil,
 			align: nil,
 			indent: nil,
+			spacing: nil,
+			borders: nil,
 			sectPr: src,
 			revision: { default: 0 }
 		}
@@ -339,8 +353,12 @@ const colorAttrs = { value: nil, themeColor: nil, themeTint: nil, themeShade: ni
 // Mark order is nesting rank: wrappers first, then the run's source formatting, then its direct
 // properties. A writer recovers the source nesting of wrapper elements from the model's item parents.
 const marks = {
-	// w:hyperlink; `target` is the relationship target as written (never fetched).
-	link: { inclusive: false, attrs: { src, anchor: nil, target: nil, tooltip: nil } },
+	// w:hyperlink; `target` is the relationship target as written (never fetched). targetFrame, history and
+	// docLocation are carried over from a link of the file a command replaced.
+	link: {
+		inclusive: false,
+		attrs: { src, anchor: nil, target: nil, tooltip: nil, targetFrame: nil, history: nil, docLocation: nil }
+	},
 	// w:ins / w:del / w:moveFrom / w:moveTo wrappers. Text under deletion or moveFrom is w:delText.
 	insertion: wrapper({ id: nil, author: nil, date: nil }),
 	deletion: wrapper({ id: nil, author: nil, date: nil }),
@@ -391,8 +409,10 @@ const marks = {
 	spacing: { attrs: value },
 	lang: { attrs: { latin: nil, eastAsia: nil, bidi: nil } },
 	// w:rPrChange: in the base (a tracked formatting change read from the file, `base` null), or recorded by
-	// the editor with the run properties before it (`base`, an id in the session's RunBases).
-	format_change: { attrs: { id: nil, author: nil, date: nil, base: nil } },
+	// the editor with the run properties before it (`base`, an id in the session's RunBases) and, when the
+	// change replaced the run itself (the format painter), the run before (`run`: its attributes, or false for
+	// none).
+	format_change: { attrs: { id: nil, author: nil, date: nil, base: nil, run: nil } },
 	// Node marks feature commands set on blocks (never on inline content): a paragraph's new w14:paraId
 	// (`id`, eight hex digits); and, each `value` an object of the changed properties, a paragraph's
 	// properties before a tracked change (w:pPrChange), edits to the section properties a paragraph carries

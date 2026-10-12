@@ -47,10 +47,15 @@ const EXAMPLES: Readonly<Record<DocxEditorCommandType, object>> = {
 	"history.redo": {},
 	"format.superscript": {},
 	"format.subscript": {},
+	"format.doubleStrike": {},
+	"format.smallCaps": {},
+	"format.allCaps": {},
+	"format.clearAll": {},
 	"font.family": { family: "Calibri" },
 	"font.size": { halfPoints: 24 },
 	"font.grow": {},
 	"font.shrink": {},
+	"font.spacing": { twips: -10 },
 	"color.text": { color: { kind: "theme", theme: "accent1", tint: 153 } },
 	"color.highlight": { name: "yellow" },
 	"paragraph.lineSpacing": { rule: "auto", value: 276 },
@@ -61,6 +66,9 @@ const EXAMPLES: Readonly<Record<DocxEditorCommandType, object>> = {
 	"link.set": { target: "https://filen.io/", text: "Filen" },
 	"link.remove": {},
 	"insert.pageBreak": {},
+	"insert.lineBreak": {},
+	"insert.horizontalLine": {},
+	"insert.symbol": { text: "\u00a9" },
 	"comment.add": { text: "Looks good\nSecond paragraph" },
 	"comment.reply": { id: "3", text: "Agreed" },
 	"comment.edit": { id: "3", text: "Edited" },
@@ -168,8 +176,12 @@ const INVALID: readonly object[] = [
 	{ type: "view.reflow" }
 ]
 
+// Commands of features whose handlers have not landed (those that have are covered by their own tests).
 const FEATURE_TYPES = DOCX_EDITOR_COMMANDS.map(info => info.type).filter(
-	type => !DOCX_COMMAND_FEATURES.base.some(info => info.type === type)
+	type =>
+		!DOCX_COMMAND_FEATURES.base.some(info => info.type === type) &&
+		storyHandler(type) === undefined &&
+		documentHandler(type) === undefined
 )
 
 function command(type: DocxEditorCommandType): DocxEditorCommand {
@@ -243,16 +255,17 @@ describe("docx editor command registry", () => {
 
 		const snapshot = session.snapshot()
 
+		expect(FEATURE_TYPES.length).toBeGreaterThan(0)
+
 		for (const type of FEATURE_TYPES) {
-			expect(storyHandler(type), type).toBeUndefined()
-			expect(documentHandler(type), type).toBeUndefined()
 			expect(snapshot.enabled[type], type).toBe(false)
 			expect(session.execute(command(type)), type).toBe(false)
 		}
 
 		expect(session.state.doc).toBe(doc)
 		expect(snapshot.enabled["format.bold"]).toBe(true)
-		expect(registeredTransformer()).toBeUndefined()
+		// Tracked changes record through the transformer; it passes edits through while tracking is off.
+		expect(registeredTransformer()).toBeDefined()
 
 		// The paged editor routes them and refuses them the same way.
 		const { editor } = await pagedEditor(buildDocx({ body: p("one two three") + p("four") }))
@@ -273,8 +286,10 @@ describe("docx editor command registry", () => {
 
 		expect(first.context.story).toEqual({ kind: "body", index: session.story.story.index })
 		expect(first.context.table).toBeNull()
-		expect(first.values.font).toBeNull()
-		expect(first.review).toEqual({ tracking: false, authorNeeded: false, revisionCount: 0, commentCount: 0 })
+		// The caret's formatting (a synthetic document without styles: Word's default font).
+		expect(first.values.font).toBe("Times New Roman")
+		expect(first.values.size).toBe(20)
+		expect(first.review).toEqual({ tracking: false, authorNeeded: false, revisionCount: 0, commentCount: 0, skipped: 0, current: null })
 
 		session.dispatch(session.state.tr.insertText("x", 2))
 		session.snapshot()

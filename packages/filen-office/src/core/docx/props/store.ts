@@ -26,6 +26,9 @@ interface Entry<T> {
 // times, so a document holds one object per distinct container and resolution caches can key on identity.
 class InternTable<T extends object> {
 	private readonly buckets = new Map<number, Entry<T>[]>()
+	// Containers whose sampled hash a full bucket holds (many that differ only where sampling skips: tracked
+	// property changes differing in their w:id), by a hash of every byte.
+	private readonly crowded = new Map<number, Entry<T>[]>()
 	private readonly parse: (reader: PropsReader, node: number) => T
 	private readonly empty: T
 	private readonly malformed: XmlNodeRef[]
@@ -55,6 +58,21 @@ class InternTable<T extends object> {
 		if (bucket !== undefined) {
 			for (const entry of bucket) {
 				if (entry.signature === signature && sameBytes(entry.bytes, bytes, start, end)) return entry.value
+			}
+
+			if (bucket.length >= BUCKET_LIMIT) {
+				const full = fullHash(bytes, start, end, hash)
+
+				bucket = this.crowded.get(full)
+
+				if (bucket !== undefined) {
+					for (const entry of bucket) {
+						if (entry.signature === signature && sameBytes(entry.bytes, bytes, start, end)) return entry.value
+					}
+				} else {
+					bucket = []
+					this.crowded.set(full, bucket)
+				}
 			}
 		} else {
 			bucket = []
@@ -129,6 +147,23 @@ function sampledHash(bytes: Uint8Array, start: number, end: number): number {
 	let i = end - 64
 
 	for (; i + 4 <= end; i += 4) hash = Math.imul(hash ^ word(i), 0x01000193)
+	for (; i < end; i++) hash = Math.imul(hash ^ (bytes[i] ?? 0), 0x01000193)
+
+	return hash
+}
+
+// Entries a sampled-hash bucket takes before later ones go by a hash of every byte.
+const BUCKET_LIMIT = 8
+
+function fullHash(bytes: Uint8Array, start: number, end: number, seed: number): number {
+	let hash = seed
+	let i = start
+
+	for (; i + 4 <= end; i += 4)
+		hash = Math.imul(
+			hash ^ ((bytes[i] ?? 0) | ((bytes[i + 1] ?? 0) << 8) | ((bytes[i + 2] ?? 0) << 16) | ((bytes[i + 3] ?? 0) << 24)),
+			0x01000193
+		)
 	for (; i < end; i++) hash = Math.imul(hash ^ (bytes[i] ?? 0), 0x01000193)
 
 	return hash

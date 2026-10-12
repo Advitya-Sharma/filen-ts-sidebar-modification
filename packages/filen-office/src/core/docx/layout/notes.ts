@@ -162,8 +162,10 @@ export class NoteNumbering implements NoteNumbers {
 
 			text = numberText(value, endnote ? this.endnotes.format : this.footnotes.format)
 			this.assigned.set(key, text)
-			this.marks.set(story, text)
 		}
+
+		// Kept from a snapshot, the number may differ from the one a later run gave the note.
+		this.marks.set(story, text)
 
 		return text
 	}
@@ -247,6 +249,12 @@ export class FootnoteArea implements FootnoteSink {
 		for (const note of this.notes) if (note.from === 0) count++
 
 		return count
+	}
+
+	// Layout restarts: notes are laid out again as they now read and are numbered (one laid out and left for the
+	// next page, or continued there, stays in the cache meanwhile).
+	restart(): void {
+		this.cache.clear()
 	}
 
 	// A new page: the area spans [left, left + width); notes continued from the last page come first.

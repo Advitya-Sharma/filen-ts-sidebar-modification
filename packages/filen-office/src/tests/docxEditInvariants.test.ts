@@ -3,7 +3,10 @@ import { NodeSelection, TextSelection, type EditorState, type Transaction } from
 import { canJoin, canSplit } from "prosemirror-transform"
 import { describe, expect, it } from "vitest"
 import { DocxEditorSession, NO_SOURCE, docxSchema, freshSlice, normalizeListAttrs } from "@filen/office/core/docx/edit"
-import { RICH, markerKeys, sessionOf } from "./docxEditFixtures"
+import { unzipSync } from "fflate"
+import { saveDocx } from "@filen/office/core/docx/write"
+import { survivorsOf, type MarkerList } from "../core/docx/edit/schema"
+import { RICH, markerKeys, openSpec, sessionOf } from "./docxEditFixtures"
 import { p } from "./docxSynthetic"
 
 function sectionHolders(doc: Node): number[] {
@@ -66,16 +69,17 @@ function random(seed: number): () => number {
 }
 
 describe("docx editing invariants", () => {
-	it("puts back range markers a deletion took out", async () => {
+	it("puts back range markers a deletion took out, except a comment's taken whole with its reference", async () => {
 		const session = await sessionOf(RICH)
 		const before = markerKeys(session.state.doc)
 		const doc = session.state.doc
-		// From inside "Bold" to after the comment range: bookmark 0, comment range 3 and its reference go.
+		// From inside "Bold" to after the comment range: bookmark 0, comment range 3 and its reference go; the
+		// bookmark's markers come back, the comment goes with them (as in Word).
 		const from = find(doc, "Bold", 1)
 		const to = find(doc, "c", 1) + 2
 
 		expect(run(session, state => state.tr.delete(from, to))).toBe(true)
-		expect(markerKeys(session.state.doc)).toEqual(before)
+		expect(markerKeys(session.state.doc)).toEqual(before.filter(key => !key.startsWith("comment")))
 		// They sit where the deletion was.
 		const paragraph = session.state.doc.child(0)
 
@@ -105,6 +109,62 @@ describe("docx editing invariants", () => {
 		expect(session.state.doc.childCount).toBe(2)
 		expect(markerKeys(session.state.doc)).toEqual(before)
 		expect(session.state.doc.child(0).textContent).toBe("onetwo")
+	})
+
+	it("keeps a range over a paragraph when blocks after it move, and when it moves away and back", async () => {
+		const body =
+			'<w:p><w:bookmarkStart w:id="0" w:name="_GoBack"/><w:r><w:t>zero</w:t></w:r></w:p><w:bookmarkEnd w:id="0"/>' +
+			p("one") +
+			p("two") +
+			p("three")
+		// Moves top-level blocks first..last to before block `target`, as a drop does.
+		const move = (session: DocxEditorSession, first: number, last: number, target: number): boolean =>
+			run(session, state => {
+				const doc = state.doc
+				let from = 0
+				let at = 0
+
+				for (let k = 0; k < first; k++) from += doc.child(k).nodeSize
+				for (let k = 0; k < target; k++) at += doc.child(k).nodeSize
+
+				let to = from
+
+				for (let k = first; k <= last; k++) to += doc.child(k).nodeSize
+
+				const tr = state.tr.delete(from, to)
+				const mapped = tr.mapping.map(at)
+
+				return tr.replaceRange(mapped, mapped, doc.slice(from, to))
+			})
+		// Each top-level block's text with the range's markers around it.
+		const shown = (session: DocxEditorSession): string[] => {
+			const out: string[] = []
+
+			session.state.doc.forEach(node => {
+				const before = (node.attrs["before"] as MarkerList).map(marker => `<${marker.kind}>`).join("")
+				let text = ""
+
+				node.forEach(child => (text += child.isText ? (child.text ?? "") : `<${String(child.attrs["kind"])}>`))
+				out.push(before + text)
+			})
+
+			return out
+		}
+
+		// What follows it moves before it: the range keeps to the paragraph.
+		const after = await sessionOf({ body })
+
+		expect(move(after, 2, 2, 1)).toBe(true)
+		expect(move(after, 1, 2, 0)).toBe(true)
+		expect(shown(after)).toEqual(["two", "one", "<bookmarkStart>zero", "<bookmarkEnd>three"])
+
+		// The paragraph moves past the next one and back: the document is as it was.
+		const back = await sessionOf({ body })
+		const original = back.state.doc
+
+		expect(move(back, 0, 0, 2)).toBe(true)
+		expect(move(back, 1, 1, 0)).toBe(true)
+		expect(back.state.doc.eq(original)).toBe(true)
 	})
 
 	it("refuses to join across a section break and moves the break with a split", async () => {
@@ -320,7 +380,13 @@ describe("docx editing invariants", () => {
 				const doc = session.state.doc
 
 				doc.check()
-				expect(markerKeys(doc), `seed ${seed} round ${round}`).toEqual(markers)
+				// Every marker stays, except comments taken whole (start, end and reference together).
+				const keys = markerKeys(doc)
+				const comments = new Set(keys.filter(key => key.startsWith("comment")).map(key => key.slice(key.indexOf(":"))))
+
+				expect(keys, `seed ${seed} round ${round}`).toEqual(
+					markers.filter(key => !key.startsWith("comment") || comments.has(key.slice(key.indexOf(":"))))
+				)
 				expect(sectionHolders(doc), `seed ${seed} round ${round}`).toEqual(sections)
 
 				let lockedDeletable = 0
@@ -344,5 +410,59 @@ describe("docx editing invariants", () => {
 			expect(session.state.doc.eq(opened)).toBe(true)
 			expect(session.snapshot().dirty).toBe(false)
 		}
+	})
+
+	it("puts a comment range a block move turned around back in order, collapsed where its end went", async () => {
+		const opened = await openSpec({
+			body:
+				'<w:p><w:commentRangeStart w:id="9"/><w:r><w:t>Start</w:t></w:r></w:p>' +
+				p("Middle") +
+				'<w:commentRangeEnd w:id="9"/><w:p><w:r><w:commentReference w:id="9"/></w:r><w:r><w:t>End</w:t></w:r></w:p>' +
+				p("After"),
+			comments: '<w:comment w:id="9" w:author="Bo"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment>'
+		})
+		const session = new DocxEditorSession(opened.context)
+		const doc = session.state.doc
+		const from = doc.child(0).nodeSize + doc.child(1).nodeSize
+		const to = from + doc.child(2).nodeSize
+		const tr = session.state.tr.delete(from, to)
+
+		// The paragraph holding the end (in its marker list) and the reference dragged to the top.
+		tr.replaceRange(0, 0, doc.slice(from, to))
+		expect(session.dispatch(tr)).toBe(true)
+
+		const order: string[] = []
+
+		session.state.doc.descendants(node => {
+			for (const marker of survivorsOf(node)) if (marker.id === "9") order.push(marker.kind)
+			if (node.isBlock)
+				for (const marker of (node.attrs["before"] ?? []) as MarkerList) if (marker.id === "9") order.push(marker.kind)
+
+			return true
+		})
+		expect(order).toEqual(["commentRangeStart", "commentRangeEnd", "commentReference"])
+		await expect(saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [session] })).resolves.toBeDefined()
+	})
+
+	it("keeps the row and cell properties of a pasted copy of a source row", async () => {
+		const cell = (text: string): string => `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${p(text)}</w:tc>`
+		const opened = await openSpec({
+			body:
+				'<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="3000"/></w:tblGrid>' +
+				`<w:tr><w:trPr><w:gridBefore w:val="1"/><w:wBefore w:w="1000" w:type="dxa"/></w:trPr>${cell("one")}</w:tr></w:tbl>` +
+				p("after")
+		})
+		const session = new DocxEditorSession(opened.context)
+		const table = session.state.doc.child(0)
+		const row = table.child(0)
+
+		// The row pasted again below itself.
+		expect(session.dispatch(session.state.tr.insert(1 + row.nodeSize, row))).toBe(true)
+
+		const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [session] })
+		const xml = new TextDecoder().decode(unzipSync(result.bytes as Uint8Array)["word/document.xml"])
+
+		expect(xml.match(/<w:gridBefore w:val="1"\/>/g)).toHaveLength(2)
+		expect(xml.match(/<w:tcW w:w="3000" w:type="dxa"\/>/g)).toHaveLength(2)
 	})
 })

@@ -6,10 +6,12 @@ import { TABLES_STAGE } from "./tables"
 import { TRACKING_STAGE } from "./tracking"
 
 export {
+	COMMENT_MOVE_META,
 	changedRanges,
 	docxInvariants,
 	docxInvariantsKey,
 	freshSlice,
+	freshSliceKeeping,
 	invariantViolation,
 	isCommand,
 	isInternal,

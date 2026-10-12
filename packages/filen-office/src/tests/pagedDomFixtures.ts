@@ -8,9 +8,10 @@ import {
 	parseStyles,
 	styleSettings,
 	type DocumentLayout,
+	type DocxPackage,
 	type FontSource
 } from "@filen/office/core/docx"
-import { DocxEditorSession, openDocxEditContext } from "@filen/office/core/docx/edit"
+import { DocxEditorSession, openDocxEditContext, type DocxEditContext } from "@filen/office/core/docx/edit"
 import { DocumentEdits, PagedEditor } from "@filen/office/core/docx/paged"
 import type { ResolvedFont } from "@filen/office/core/fonts"
 import { HitTester, type TextMeasurer } from "@filen/office/core/text"
@@ -60,7 +61,9 @@ const MEASURER: TextMeasurer = {
 	fontExtents: font => ({ ascent: sizeOf(font) * 0.8, descent: sizeOf(font) * 0.2 })
 }
 
-export async function pagedEditor(bytes: Uint8Array): Promise<{ editor: PagedEditor; layout: DocumentLayout }> {
+export async function pagedEditor(
+	bytes: Uint8Array
+): Promise<{ editor: PagedEditor; layout: DocumentLayout; pkg: DocxPackage; context: DocxEditContext }> {
 	const opened = await openDocxPackage(bytesSource(bytes))
 
 	if (!opened.ok) throw new Error(opened.message)
@@ -85,7 +88,7 @@ export async function pagedEditor(bytes: Uint8Array): Promise<{ editor: PagedEdi
 		options: { budgetMs: Infinity }
 	})
 
-	return { editor, layout }
+	return { editor, layout, pkg, context }
 }
 
 // Lays out what an edit left for later, synchronously.

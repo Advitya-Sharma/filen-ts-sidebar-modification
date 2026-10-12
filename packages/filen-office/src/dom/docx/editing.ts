@@ -1,3 +1,4 @@
+import type { Node } from "prosemirror-model"
 import { RevisionView } from "../../core/docx/index"
 import {
 	DocxEditorSession,
@@ -9,6 +10,7 @@ import {
 	authorInitials
 } from "../../core/docx/edit/index"
 import { DocumentEdits, PagedEditor, type PagedEditorOptions } from "../../core/docx/paged/index"
+import { compositionMarked, flushComposition } from "../../core/docx/review/track"
 import type { DocxPrepareOptions, DocxPreparedSave, DocxSaveInput, DocxSaveTimings } from "../../core/docx/write/save"
 import type { Slicing } from "../../core/slicing"
 import { HitTester } from "../../core/text/index"
@@ -148,14 +150,41 @@ export function inThreadEditingHost(
 	// Set once the editor is open: how saves slice their work here, and the zipper.
 	let writing: { readonly slicing: Slicing; readonly zipper: DocxZipper } | undefined
 	// `checksums`: a trial (nothing zipped) skips the parts' CRCs.
+	// What an IME composition typed is marked as tracked before anything is written (it would be written as
+	// untracked text). A composition still going on is written marked as it stands, the session left as it is
+	// (a transaction now would end the composition in the view); it is marked when the composition ends.
+	const flushed = (): DocxSaveInput | undefined => {
+		if (saveInput === undefined) return undefined
+
+		if (current?.composition === undefined) {
+			for (const session of saveInput.sessions) flushComposition(session)
+
+			return saveInput
+		}
+
+		const docs = new Map<DocxEditorSession, Node>()
+
+		for (const session of saveInput.sessions) {
+			const doc = compositionMarked(session)
+
+			if (doc !== undefined) docs.set(session, doc)
+		}
+
+		return docs.size === 0 ? saveInput : { ...saveInput, docs }
+	}
 	const prepare = (sessions: readonly DocxEditorSession[] | undefined, checksums: boolean): Promise<DocxPreparedSave> => {
-		const input = saveInput
+		const input = flushed()
 
 		if (editing.writer === undefined) return Promise.reject(new Error("This editing host has no writer"))
 		if (input === undefined || writing === undefined) return Promise.reject(new DocxClosedError())
 
 		return editing.writer.prepare(
-			{ pkg: input.pkg, context: input.context, sessions: sessions ?? input.sessions },
+			{
+				pkg: input.pkg,
+				context: input.context,
+				sessions: sessions ?? input.sessions,
+				...(input.docs === undefined ? {} : { docs: input.docs })
+			},
 			{ slicing: writing.slicing, checksums }
 		)
 	}
@@ -309,7 +338,7 @@ export function inThreadEditingHost(
 	return {
 		host,
 		editor,
-		saveInput: () => saveInput,
+		saveInput: flushed,
 		save,
 		prepare: sessions => prepare(sessions, false),
 		proofLocked: () => proofLocked,
@@ -321,6 +350,8 @@ export function inThreadEditingHost(
 
 				identity.author = name
 				identity.initials = name === undefined ? undefined : authorInitials(name)
+
+				for (const session of current.sessions) session.invalidate()
 			}
 		},
 		setView(view) {

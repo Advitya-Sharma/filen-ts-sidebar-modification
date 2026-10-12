@@ -692,6 +692,30 @@ describe("tables", () => {
 		expect([...first, ...second].filter(text => /^line \d+$/.test(text)).length).toBe(90)
 	})
 
+	it("ends a table whose header rows hold a merge running on into the body", async () => {
+		const header = "<w:trPr><w:tblHeader/></w:trPr>"
+		const merged = (count: number): string =>
+			`<w:tr>${header}<w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>${lines(count)}</w:tc>${cell("h0")}</w:tr>` +
+			`<w:tr>${header}<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>${cell("h1")}</w:tr>` +
+			`<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>${cell("b2")}</w:tr>`
+		const plain = (count: number): string =>
+			Array.from({ length: count }, (_, k) => `<w:tr>${cell(`r${k}`)}${cell("")}</w:tr>`).join("")
+		// Header rows taller than a page are not repeated: the merge continues on the next pages, the table ends
+		// (each page repeating them started the merge over, so it never did).
+		const tall = await layout({ body: table(merged(300) + plain(5)) + p("after") })
+		const all = tall.pages.flatMap((_, k) => texts(body(tall, k)))
+
+		expect(tall.pages.length).toBeLessThan(10)
+		expect(all.filter(text => /^line \d+$/.test(text)).length).toBe(300)
+		expect(all[all.length - 1]).toBe("after")
+
+		// Header rows that fit are repeated, their merge drawn to the last of them.
+		const short = await layout({ body: table(merged(2) + plain(80)) })
+
+		expect(short.pages.length).toBe(2)
+		expect(texts(body(short, 1)).slice(0, 4)).toEqual(["line 1", "line 2", "h0", "h1"])
+	})
+
 	it("lays out thousands of vertically merged rows", async () => {
 		const rows = Array.from(
 			{ length: 4000 },

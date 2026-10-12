@@ -4,6 +4,7 @@ import type { XmlDocument } from "../../../xml/index"
 import type { StoryDoc } from "../../edit/build"
 import type { DocxEditContext, NewStory } from "../../edit/context"
 import type { DocxEditorSession } from "../../edit/session"
+import type { StoryPart } from "../../model/index"
 import type { DocxPackage } from "../../package"
 import type { NewStoryContainer } from "../newStory"
 import type { StoryChange } from "../save"
@@ -52,6 +53,12 @@ export interface WrittenStories {
 	readonly stories: readonly StoryChange[]
 }
 
+// A story part's root start tag rewritten to declare more namespaces, and the prefix each gets.
+export interface RootDeclarations {
+	readonly open: string
+	readonly prefixes: ReadonlyMap<string, string>
+}
+
 // A feature's share of a save beyond story content: the parts it keeps (comments, notes, media, settings,
 // custom XML) and where its new stories go.
 export interface PartContributor {
@@ -63,6 +70,13 @@ export interface PartContributor {
 	// Where a new story (its item is -1) is written, when it is this contributor's: a new comment's
 	// w:comment in the comments part.
 	container?(story: StoryDoc, doc: Node): NewStoryContainer | undefined
+	// Source story containers (items of their part) the save takes out of their part: a deleted comment. Each
+	// must be a child of its part's root.
+	removed?(parts: SaveParts, written: Omit<WrittenStories, "stories">): ReadonlyMap<StoryPart, readonly number[]>
+	// `part`'s root start tag rewritten with namespaces its stories now need (a paragraph id in a part that does
+	// not declare w14), with the prefix of each; undefined when none. Asked before the part's stories are
+	// written (`stories` is empty then).
+	declarations?(part: StoryPart, written: WrittenStories): RootDeclarations | undefined
 	// Writes this contributor's parts once every story is written.
 	contribute?(parts: SaveParts, written: WrittenStories): Promise<void>
 }

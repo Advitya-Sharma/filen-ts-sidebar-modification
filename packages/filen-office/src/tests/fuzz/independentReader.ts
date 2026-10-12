@@ -843,8 +843,21 @@ export function violations(document: XDocument, context: ViolationContext): { co
 			}
 			case "tc": {
 				const children = childElements(element).filter(child => isW(child))
+				let last = children[children.length - 1]
 
-				if (children[children.length - 1]?.local !== "p") note("tc-notEndingInP", sample(document, element).slice(0, 200))
+				// A block-level content control or custom XML element may hold the cell's last paragraph (Word writes
+				// cells ending in a content control).
+				while (last !== undefined && (last.local === "sdt" || last.local === "customXml")) {
+					const holder = last.local === "sdt" ? childElements(last).find(child => isW(child, "sdtContent")) : last
+					const inner =
+						holder === undefined
+							? []
+							: childElements(holder).filter(child => isW(child) && child.local !== "sdtPr" && child.local !== "customXmlPr")
+
+					last = inner[inner.length - 1]
+				}
+
+				if (last?.local !== "p") note("tc-notEndingInP", sample(document, element).slice(0, 200))
 				if (children.findIndex(child => child.local === "tcPr") > 0) note("tc-tcPrNotFirst", "")
 				break
 			}

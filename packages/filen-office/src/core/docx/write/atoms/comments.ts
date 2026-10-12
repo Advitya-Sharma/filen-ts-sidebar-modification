@@ -4,8 +4,18 @@ import type { StoryWriting } from "../story"
 import { DocxWriteError } from "../values"
 import type { AtomWriter } from "./index"
 
-// A new comment reference: w:commentReference with the comment's id, in the run written for it.
+// A new comment reference: w:commentReference with the comment's id, in the run written for it; and the
+// annotation mark Word puts at the start of a comment's text (a run_object of kind AnnotationMark, the only
+// run_object the editor makes: any other new one has nothing to be written from).
 export const commentAtoms: readonly AtomWriter[] = [
+	{
+		type: docxSchema.nodes.run_object,
+		write(w, out, node) {
+			if (node.attrs["kind"] !== "AnnotationMark") throw new DocxWriteError("missingSource", "A new run_object")
+
+			out.text(w.names.empty("annotationRef"))
+		}
+	},
 	{
 		type: docxSchema.nodes.comment_ref,
 		write(w, out, node) {

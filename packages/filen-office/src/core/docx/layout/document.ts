@@ -628,6 +628,11 @@ class Paginator {
 
 		const status = flow.run(this.area)
 
+		if (this.engine.standIns) {
+			this.engine.standIns = false
+			this.pageMissedFonts = true
+		}
+
 		this.contentBottom = Math.max(this.contentBottom, flow.y)
 		this.columnBottom = Math.max(this.columnBottom, flow.y)
 
@@ -706,8 +711,7 @@ class Paginator {
 
 		const snapshot = page > 0 ? this.snapshots[page] : undefined
 
-		this.resyncs =
-			dirty === undefined ? undefined : this.previousLayout(own ? page : layout.pages.length, dirty, snapshot?.renderedBreaks ?? 0)
+		this.resyncs = dirty === undefined ? undefined : this.previousLayout(page, own, dirty, snapshot?.renderedBreaks ?? 0)
 		this.missedFonts = this.missedFonts >= page ? -1 : this.missedFonts
 		this.pageMissedFonts = false
 		this.resyncedAt = -1
@@ -726,6 +730,7 @@ class Paginator {
 		}
 
 		layout.final = false
+		this.footnotes.restart()
 
 		for (const index of [...layout.dirty]) if (index >= page) layout.dirty.delete(index)
 		for (const index of [...layout.stale]) if (index >= page) layout.stale.delete(index)
@@ -1723,7 +1728,8 @@ class Paginator {
 	// The layout as it stands, from `page` on, for a relayout to meet again: the pages laid out so far and,
 	// while an earlier relayout is still under way, the earlier layout's pages from the one starting where
 	// that run stands (none to meet again when no such page is found: the run then lays out to the end).
-	private previousLayout(page: number, dirty: readonly DirtyBlock[], breaks: number): Resync | undefined {
+	// Not `own`: none of the pages laid out so far (the earlier layout's met now included) are met again.
+	private previousLayout(page: number, own: boolean, dirty: readonly DirtyBlock[], breaks: number): Resync | undefined {
 		const layout = this.layout
 		let previous = this.resyncs
 		let deliver = false
@@ -1739,9 +1745,11 @@ class Paginator {
 		if (this.finished) previous = undefined
 
 		const progress = layout.pages.length
+		// Meeting the earlier layout above may have added its pages: read after it.
+		const floor = own ? page : progress
 
 		if (previous === undefined) {
-			if (page >= progress) return undefined
+			if (floor >= progress) return undefined
 
 			// Laid out again in place: nothing is copied; what the run writes over is kept aside (Tail).
 			const inPlace: InPlace = {
@@ -1803,7 +1811,7 @@ class Paginator {
 
 		return {
 			from: progress,
-			floor: page,
+			floor,
 			// Shown at other indices, or behind the run's pages.
 			deliver: true,
 			pages: Tail.copied(previous.pages.values().slice(cut), progress),

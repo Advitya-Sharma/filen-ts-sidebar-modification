@@ -20,6 +20,7 @@ import {
 } from "../edit/index"
 import { Region, SOURCE_INTS, SourceInt, type DocumentLayout, type LayoutEvent, type PageDisplayList } from "../layout/index"
 import { RevisionView, type Story } from "../model/index"
+import { flushComposition } from "../review/track"
 import { DocumentEdits, StoryEdits, type StoryChange } from "./edits"
 import { PagedGeometry, type Affinity, type CaretBox, type HitResult, type PageRect } from "./geometry"
 import { DocumentHistory } from "./history"
@@ -136,6 +137,7 @@ export class PagedEditor {
 	private goal: number | undefined = undefined
 	// The range of text being composed (an IME preedit), shown underlined.
 	private compositionRange: { from: number; to: number } | undefined = undefined
+	private compositionFlushQueued = false
 	// The pages in view (the view tells), laid out within an edit's task.
 	private visible: { first: number; last: number } = { first: 0, last: 0 }
 	// Set while a transaction from geometry (a vertical move, a click) is applied: its affinity and goal stay.
@@ -414,9 +416,10 @@ export class PagedEditor {
 		return -1
 	}
 
-	// The object (a picture, a content control...) at page point (x, y), as the features find them.
-	hitObject(page: number, x: number, y: number): ObjectHit | undefined {
-		return hitObject(this, page, x, y)
+	// The object (a picture, a content control...) at page point (x, y), as the features find them. `zoom`:
+	// screen px per page px (providers whose grab distance is a screen distance use it).
+	hitObject(page: number, x: number, y: number, zoom = 1): ObjectHit | undefined {
+		return hitObject(this, page, x, y, zoom)
 	}
 
 	subscribe(listener: (event: PagedEditorEvent) => void): () => void {
@@ -716,6 +719,10 @@ export class PagedEditor {
 		if (current?.from === range?.from && current?.to === range?.to) return
 
 		this.compositionRange = range
+
+		// What a composition typed is marked as a tracked insertion once it ends (never during it).
+		if (range === undefined && current !== undefined) flushComposition(this.active.session)
+
 		this.emit({ type: "selection" })
 	}
 
@@ -748,6 +755,17 @@ export class PagedEditor {
 		}
 
 		this.emit({ type: "selection" })
+
+		// ProseMirror applies what a composition typed last after compositionend (a microtask or its timer
+		// later), still as composition: once the composition has ended, that is marked next.
+		if (!this.compositionFlushQueued && transactions.some(tr => tr.getMeta("composition") !== undefined)) {
+			this.compositionFlushQueued = true
+			void Promise.resolve().then(() => {
+				this.compositionFlushQueued = false
+
+				if (!this.disposed && this.compositionRange === undefined) flushComposition(story.session)
+			})
+		}
 
 		// After every listener heard this change (never from inside their loop), and never while composing.
 		if (story !== this.active) return

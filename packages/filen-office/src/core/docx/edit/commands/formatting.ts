@@ -1,4 +1,17 @@
-import { MAX_TWIPS, choiceArg, field, hexArg, intArg, optional, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
+import {
+	MAX_TWIPS,
+	boolArg,
+	choiceArg,
+	field,
+	hasControl,
+	hexArg,
+	intArg,
+	optional,
+	stringArg,
+	type DocxCommandInfo,
+	type DocxCommandParser
+} from "./base"
+import { insertable } from "./insert"
 
 // Character and paragraph formatting beyond the base toggles, and the format painter.
 
@@ -10,6 +23,7 @@ export const DOCX_HIGHLIGHT_COLORS = [
 	"cyan",
 	"magenta",
 	"blue",
+	"white",
 	"red",
 	"darkBlue",
 	"darkCyan",
@@ -54,14 +68,30 @@ export type DocxTextColor =
 
 export type DocxLineSpacingRule = "auto" | "exact" | "atLeast"
 
+// The sizes Word's font size list offers (half-points); font.grow and font.shrink step through them.
+export const DOCX_FONT_SIZES: readonly number[] = [16, 18, 20, 21, 22, 24, 28, 32, 36, 40, 44, 48, 52, 56, 72, 96, 144]
+
+// font.family values standing for the theme's fonts (Word's "+Body" and "+Headings").
+export const DOCX_THEME_BODY_FONT = "+body"
+export const DOCX_THEME_HEADINGS_FONT = "+headings"
+
 export type FormattingCommand =
 	| { readonly type: "format.superscript" }
 	| { readonly type: "format.subscript" }
+	| { readonly type: "format.doubleStrike" }
+	| { readonly type: "format.smallCaps" }
+	| { readonly type: "format.allCaps" }
+	// Character formatting cleared (as format.clear) and the paragraphs reset to Normal: Word's Clear All
+	// Formatting.
+	| { readonly type: "format.clearAll" }
+	// A font name, or DOCX_THEME_BODY_FONT / DOCX_THEME_HEADINGS_FONT.
 	| { readonly type: "font.family"; readonly family: string }
 	// Half-points.
 	| { readonly type: "font.size"; readonly halfPoints: number }
 	| { readonly type: "font.grow" }
 	| { readonly type: "font.shrink" }
+	// Character spacing in twips: positive expands, negative condenses, 0 is normal.
+	| { readonly type: "font.spacing"; readonly twips: number }
 	| { readonly type: "color.text"; readonly color: DocxTextColor }
 	| { readonly type: "color.highlight"; readonly name: DocxHighlightColor }
 	// "auto": `value` in 240ths of a line; "exact" and "atLeast": twips.
@@ -75,7 +105,8 @@ export type FormattingCommand =
 			readonly firstLine?: number
 			readonly hanging?: number
 	  }
-	| { readonly type: "format.copy" }
+	// `sticky`: the painter stays on after a paste (a double click on it) until cancelled.
+	| { readonly type: "format.copy"; readonly sticky?: boolean }
 	| { readonly type: "format.paste" }
 
 const story = { write: true, scope: "story" } as const
@@ -83,10 +114,15 @@ const story = { write: true, scope: "story" } as const
 export const FORMATTING_COMMANDS: readonly DocxCommandInfo<FormattingCommand["type"]>[] = [
 	{ type: "format.superscript", labelKey: "docx.format.superscript", icon: "superscript", group: "format", ...story },
 	{ type: "format.subscript", labelKey: "docx.format.subscript", icon: "subscript", group: "format", ...story },
+	{ type: "format.doubleStrike", labelKey: "docx.format.doubleStrike", icon: "double-strikethrough", group: "format", ...story },
+	{ type: "format.smallCaps", labelKey: "docx.format.smallCaps", icon: "small-caps", group: "format", ...story },
+	{ type: "format.allCaps", labelKey: "docx.format.allCaps", icon: "all-caps", group: "format", ...story },
+	{ type: "format.clearAll", labelKey: "docx.format.clearAll", icon: "clear-all-formatting", group: "format", ...story },
 	{ type: "font.family", labelKey: "docx.font.family", icon: "font-family", group: "font", input: "font", ...story },
 	{ type: "font.size", labelKey: "docx.font.size", icon: "font-size", group: "font", input: "size", ...story },
 	{ type: "font.grow", labelKey: "docx.font.grow", icon: "font-grow", group: "font", ...story },
 	{ type: "font.shrink", labelKey: "docx.font.shrink", icon: "font-shrink", group: "font", ...story },
+	{ type: "font.spacing", labelKey: "docx.font.spacing", icon: "character-spacing", group: "font", ...story },
 	{ type: "color.text", labelKey: "docx.color.text", icon: "text-color", group: "color", input: "color", ...story },
 	{ type: "color.highlight", labelKey: "docx.color.highlight", icon: "highlight", group: "color", input: "highlight", ...story },
 	{ type: "paragraph.lineSpacing", labelKey: "docx.paragraph.lineSpacing", icon: "line-spacing", group: "paragraph", ...story },
@@ -102,7 +138,14 @@ const HIGHLIGHTS = new Set<string>(DOCX_HIGHLIGHT_COLORS)
 const THEMES = new Set<string>(DOCX_THEME_COLORS)
 const RULES = new Set<string>(["auto", "exact", "atLeast"])
 // Font sizes Word accepts: 1 to 1638 points.
-const MAX_HALF_POINTS = 3276
+export const MAX_HALF_POINTS = 3276
+
+// A name to write as an attribute: no controls, noncharacters or lone surrogates.
+function nameArg(value: object, key: string, max: number): string | undefined {
+	const name = stringArg(value, key, max, 1)
+
+	return name === undefined || hasControl(name) || name.trim() === "" || !insertable(name) ? undefined : name
+}
 
 function textColor(value: object): DocxTextColor | undefined {
 	const color = field(value, "color")
@@ -141,7 +184,7 @@ export const parseFormattingCommand: DocxCommandParser<FormattingCommand> = (typ
 	switch (type) {
 		case "font.family": {
 			// w:rFonts names: Word keeps at most 31 characters.
-			const family = stringArg(value, "family", 31, 1)
+			const family = nameArg(value, "family", 31)
 
 			return family === undefined ? undefined : { type, family }
 		}
@@ -149,6 +192,18 @@ export const parseFormattingCommand: DocxCommandParser<FormattingCommand> = (typ
 			const halfPoints = intArg(value, "halfPoints", 2, MAX_HALF_POINTS)
 
 			return halfPoints === undefined ? undefined : { type, halfPoints }
+		}
+		case "font.spacing": {
+			const amount = intArg(value, "twips", -MAX_TWIPS, MAX_TWIPS)
+
+			return amount === undefined ? undefined : { type, twips: amount }
+		}
+		case "format.copy": {
+			const sticky = optional(value, "sticky", boolArg)
+
+			if (!sticky.ok) return undefined
+
+			return sticky.value === undefined ? { type } : { type, sticky: sticky.value }
 		}
 		case "color.text": {
 			const color = textColor(value)

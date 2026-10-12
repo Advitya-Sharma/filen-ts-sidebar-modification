@@ -9,11 +9,14 @@ import {
 	RemoveNodeMarkStep,
 	ReplaceAroundStep,
 	ReplaceStep,
+	StepMap,
 	dropPoint,
 	type Step
 } from "prosemirror-transform"
 import { isHistoryTransaction } from "prosemirror-history"
 import { MAX_LEVEL } from "../../numbering/index"
+import { SetAttrsStep } from "../attrs"
+import { claimOrigin, originOf } from "../origin"
 import {
 	BLOCK_NODE_MARKS,
 	NO_MARKERS,
@@ -136,7 +139,9 @@ export function writableNew(node: Node): boolean {
 
 // ---- paste ------------------------------------------------------------------------------------------------
 
-function freshMarks(marks: readonly Mark[]): readonly Mark[] {
+// `fits`: whether a run base may stay (content from another part keeps one only when its bytes read the same
+// there).
+function freshMarks(marks: readonly Mark[], fits?: (base: number) => boolean): readonly Mark[] {
 	let out = marks
 	// A base holding a tracked formatting change carries its revision id: such text keeps only its
 	// editable properties.
@@ -153,7 +158,10 @@ function freshMarks(marks: readonly Mark[]): readonly Mark[] {
 		) {
 			out = mark.removeFromSet(out)
 		} else if ((type === docxSchema.marks.link || type === docxSchema.marks.run) && (mark.attrs["src"] as number) !== NO_SOURCE) {
-			out = type.create({ ...mark.attrs, src: NO_SOURCE }).addToSet(mark.removeFromSet(out))
+			const base = mark.attrs["base"]
+			const kept = type !== docxSchema.marks.run || fits === undefined || typeof base !== "number" || base < 0 || fits(base)
+
+			out = type.create({ ...mark.attrs, src: NO_SOURCE, ...(kept ? {} : { base: -1 }) }).addToSet(mark.removeFromSet(out))
 		}
 	}
 
@@ -164,6 +172,9 @@ function freshMarks(marks: readonly Mark[]): readonly Mark[] {
 interface KeptMarkers {
 	readonly keys: ReadonlySet<string>
 	readonly orphans: MarkerAttrs[]
+	// Kept markers are made new too (content from another part: their source items are not this part's).
+	readonly renew?: boolean
+	readonly fits?: (base: number) => boolean
 }
 
 function freshContent(fragment: Fragment, keep?: KeptMarkers): Fragment {
@@ -181,14 +192,14 @@ function freshContent(fragment: Fragment, keep?: KeptMarkers): Fragment {
 function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 	const type = node.type
 
-	if (node.isText) return node.mark(freshMarks(node.marks))
+	if (node.isText) return node.mark(freshMarks(node.marks, keep?.fits))
 
 	if (BYTES_ONLY.has(type.name)) {
 		if (keep !== undefined) {
 			const survivors = survivorsOf(node)
 
 			if ((type === nodes.marker || type === nodes.comment_ref) && survivors.every(marker => keep.keys.has(markerKey(marker))))
-				return node
+				return keep.renew === true ? type.create({ ...node.attrs, src: NO_SOURCE }, null, freshMarks(node.marks, keep.fits)) : node
 
 			for (const marker of survivors) if (keep.keys.has(markerKey(marker))) keep.orphans.push(marker)
 		}
@@ -205,7 +216,9 @@ function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 	const kept = (list: unknown): MarkerList => {
 		if (keep === undefined || !Array.isArray(list)) return NO_MARKERS
 
-		const out = (list as MarkerList).filter(marker => keep.keys.has(markerKey(marker)))
+		const out = (list as MarkerList)
+			.filter(marker => keep.keys.has(markerKey(marker)))
+			.map(marker => (keep.renew === true ? { ...marker, src: NO_SOURCE } : marker))
 
 		return out.length === 0 ? NO_MARKERS : out
 	}
@@ -222,14 +235,38 @@ function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 	}
 	if ("revision" in attrs) attrs["revision"] = 0
 
-	if (node.isLeaf) return type.create(attrs, null, freshMarks(node.marks))
+	if (node.isLeaf) return type.create(attrs, null, freshMarks(node.marks, keep?.fits))
 
 	const content = freshContent(node.content, keep)
+	const nodeMarks = modelledOn(node) ?? freshMarks(node.marks, keep?.fits)
 
 	// Containers that lost all their content are left out rather than made invalid.
-	if (content.size === 0 && !type.validContent(content)) return type.createAndFill(attrs, null, freshMarks(node.marks))
+	if (content.size === 0 && !type.validContent(content)) return type.createAndFill(attrs, null, nodeMarks)
 
-	return type.create(attrs, content, freshMarks(node.marks))
+	return type.create(attrs, content, nodeMarks)
+}
+
+// A copy of a source row or cell keeps its properties (w:trPr, w:tcPr: grid offsets, widths, heights) as a new
+// row or cell modelled on the source one (its overrides' `from`, which the writer and the table map read), with
+// no tracked insertion or deletion of its own: its marks, or undefined for other nodes.
+function modelledOn(node: Node): readonly Mark[] | undefined {
+	const type =
+		node.type === nodes.table_row
+			? docxSchema.marks.row_props
+			: node.type === nodes.table_cell
+				? docxSchema.marks.cell_props
+				: undefined
+	const src = node.attrs["src"] as number | undefined
+
+	if (type === undefined || src === undefined) return undefined
+
+	const value = (type.isInSet(node.marks)?.attrs["value"] ?? {}) as Record<string, unknown>
+	const { ins: _ins, del: _del, ...rest } = value
+	const from = typeof rest["from"] === "number" ? rest["from"] : src
+
+	if (from === NO_SOURCE && Object.keys(rest).length === 0) return freshMarks(node.marks)
+
+	return type.create({ value: from === NO_SOURCE ? rest : { ...rest, from } }).addToSet(freshMarks(node.marks))
 }
 
 // Content pasted or dropped into a story carries no source identity: blocks and fields become new
@@ -239,36 +276,42 @@ export function freshSlice(slice: Slice): Slice {
 	return new Slice(freshContent(slice.content), slice.openStart, slice.openEnd)
 }
 
+// freshSlice keeping the range markers and comment references of `keys` (markerKey), made new (a cut moved into
+// another part).
+export function freshSliceKeeping(slice: Slice, keys: ReadonlySet<string>): Slice {
+	return new Slice(freshContent(slice.content, { keys, orphans: [], renew: true }), slice.openStart, slice.openEnd)
+}
+
 // ---- helpers ----------------------------------------------------------------------------------------------
 
 // Ranges of the final document that a transaction's steps touched, as [from, to] pairs (a node whose
-// attributes changed counts as touched).
-export function changedRanges(tr: Transaction): number[] {
-	const maps = tr.mapping.maps
+// attributes changed counts as touched); without `marks`, steps that only set inline marks are left out; with
+// `attrs`, a node counts only when one of those attributes changed.
+export function changedRanges(tr: Transaction, marks = true, attrs?: ReadonlySet<string>): number[] {
 	const out: number[] = []
-	const push = (index: number, start: number, end: number): void => {
-		let from = start
-		let to = end
 
-		for (let later = index + 1; later < maps.length; later++) {
-			const next = maps[later]
+	// Each step's range, carried through the steps after it that move positions (a step that only sets marks or
+	// attributes moves none: a long transaction of them is one pass).
+	tr.steps.forEach((step, index) => {
+		const map = tr.mapping.maps[index] ?? StepMap.empty
 
-			if (next === undefined) continue
-
-			from = next.map(from, -1)
-			to = next.map(to, 1)
+		if (map !== StepMap.empty) {
+			for (let k = 0; k < out.length; k += 2) {
+				out[k] = map.map(out[k] ?? 0, -1)
+				out[k + 1] = map.map(out[k + 1] ?? 0, 1)
+			}
 		}
 
-		out.push(from, to)
-	}
-
-	maps.forEach((map, index) => {
-		const step = tr.steps[index]
-
-		if (step instanceof AttrStep || step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep)
-			push(index, step.pos, step.pos + 1)
-		else if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) push(index, step.from, step.to)
-		else map.forEach((_oldStart, _oldEnd, newStart, newEnd) => push(index, newStart, newEnd))
+		if (step instanceof SetAttrsStep) {
+			for (const entry of step.entries) {
+				if (attrs === undefined || Object.keys(entry.attrs).some(name => attrs.has(name))) out.push(entry.pos, entry.pos + 1)
+			}
+		} else if (step instanceof AttrStep) {
+			if (attrs === undefined || attrs.has(step.attr)) out.push(step.pos, step.pos + 1)
+		} else if (step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) out.push(step.pos, step.pos + 1)
+		else if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) {
+			if (marks) out.push(step.from, step.to)
+		} else map.forEach((_oldStart, _oldEnd, newStart, newEnd) => out.push(newStart, newEnd))
 	})
 
 	return out
@@ -343,6 +386,7 @@ function identityMark(mark: Mark): boolean {
 
 function protectedChange(step: Step, doc: Node): boolean {
 	if (step instanceof AttrStep) return PROTECTED_ATTRS.has(step.attr)
+	if (step instanceof SetAttrsStep) return step.entries.some(entry => Object.keys(entry.attrs).some(name => PROTECTED_ATTRS.has(name)))
 	if (step instanceof DocAttrStep) return true
 	if (step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) return blockMarkTypes.includes(step.mark.type)
 
@@ -367,6 +411,9 @@ function protectedChange(step: Step, doc: Node): boolean {
 
 	return false
 }
+
+// Attributes whose change the repair reads: marker lists, the section break, list numbering.
+const REPAIRED_ATTRS: ReadonlySet<string> = new Set(["before", "end", "sectPr", "numId", "ilvl"])
 
 // ---- filter -----------------------------------------------------------------------------------------------
 
@@ -489,7 +536,7 @@ function markerNode(marker: MarkerAttrs): Node {
 
 // Puts lost markers back at `pos`: inline where the position is in a paragraph, otherwise in the
 // `before` list of the next block, the end of a container's last paragraph or the story's `end` list.
-function reinsert(tr: Transaction, pos: number, markers: readonly MarkerAttrs[]): void {
+export function reinsert(tr: Transaction, pos: number, markers: readonly MarkerAttrs[]): void {
 	const $pos = tr.doc.resolve(Math.max(0, Math.min(pos, tr.doc.content.size)))
 
 	if ($pos.parent.inlineContent) {
@@ -600,31 +647,85 @@ interface MarkerPlace {
 	readonly where: "inline" | "atom" | "before" | "end"
 }
 
+// Range markers by key, in document order. Loops, not a closure per node: on a long document of tables (a
+// column deletion losing markers) this walk is most of the repair.
 function rangePlaces(doc: Node): Map<string, MarkerPlace> {
 	const places = new Map<string, MarkerPlace>()
-	const add = (marker: MarkerAttrs, pos: number, node: Node, where: MarkerPlace["where"]): void => {
-		if (isRangeMarker(marker) && marker.id !== null) places.set(markerKey(marker), { marker, pos, node, where })
+	const add = (list: MarkerList, pos: number, node: Node, where: MarkerPlace["where"]): void => {
+		for (const marker of list)
+			if (isRangeMarker(marker) && marker.id !== null) places.set(markerKey(marker), { marker, pos, node, where })
 	}
 	const visit = (node: Node, pos: number): void => {
-		if (node.isBlock && pos >= 0)
-			for (const marker of (node.attrs["before"] as MarkerList | undefined) ?? NO_MARKERS) add(marker, pos, node, "before")
+		const block = node.isBlock
 
-		if (node.isLeaf) {
-			for (const marker of survivorsOf(node)) add(marker, pos, node, node.type === nodes.marker ? "inline" : "atom")
-		} else {
-			const start = pos < 0 ? 0 : pos + 1
+		if (block && pos >= 0) {
+			const before = node.attrs["before"] as MarkerList | undefined
 
-			node.forEach((child, offset) => {
-				if (!child.isText) visit(child, start + offset)
-			})
+			if (before !== undefined && before.length > 0) add(before, pos, node, "before")
 		}
 
-		if (node.isBlock) for (const marker of (node.attrs["end"] as MarkerList | undefined) ?? NO_MARKERS) add(marker, pos, node, "end")
+		if (node.isLeaf) {
+			const survivors = survivorsOf(node)
+
+			if (survivors.length > 0) add(survivors, pos, node, node.type === nodes.marker ? "inline" : "atom")
+		} else {
+			let at = pos < 0 ? 0 : pos + 1
+
+			for (let index = 0, count = node.childCount; index < count; index++) {
+				const child = node.child(index)
+
+				if (!child.isText) visit(child, at)
+
+				at += child.nodeSize
+			}
+		}
+
+		if (block) {
+			const end = node.attrs["end"] as MarkerList | undefined
+
+			if (end !== undefined && end.length > 0) add(end, pos, node, "end")
+		}
 	}
 
 	visit(doc, -1)
 
 	return places
+}
+
+// Adds to `carried` the range ends in the `before` list of the block right after a deleted range whose starts
+// the range held (`found`, its markers by key).
+function carriedEnds(range: DeletedRange, found: ReadonlyMap<string, MarkerAttrs>, carried: Set<string>): void {
+	const next = range.to < range.doc.content.size ? range.doc.nodeAt(range.to) : null
+	const before = next?.isBlock === true ? (next.attrs["before"] as MarkerList | undefined) : undefined
+
+	if (before === undefined) return
+
+	for (const marker of before) {
+		const start = RANGE_STARTS.get(marker.kind)
+
+		if (start !== undefined && marker.id !== null && found.has(`${start}:${marker.id}`)) carried.add(markerKey(marker))
+	}
+}
+
+// The keys of range ends in the `before` lists of blocks a deleted range takes whole whose starts it does not
+// hold (`found`, its markers by key). A comment's range end goes with the block (its reference follows it).
+function endsLeftBehind(range: DeletedRange, found: ReadonlyMap<string, MarkerAttrs>): string[] {
+	const out: string[] = []
+
+	range.doc.nodesBetween(range.from, range.to, (node, pos) => {
+		if (node.isInline || pos < range.from || pos + node.nodeSize > range.to) return !node.isInline
+
+		for (const marker of (node.attrs["before"] as MarkerList | undefined) ?? NO_MARKERS) {
+			const start = RANGE_STARTS.get(marker.kind)
+
+			if (start !== undefined && marker.kind !== "commentRangeEnd" && marker.id !== null && !found.has(`${start}:${marker.id}`))
+				out.push(markerKey(marker))
+		}
+
+		return !node.isTextblock
+	})
+
+	return out
 }
 
 function setMarkerList(tr: Transaction, pos: number, name: string, list: MarkerList): void {
@@ -692,7 +793,12 @@ function placeMarker(
 // to that content's edge; otherwise the range closes at its start (Word drops a reversed range). Where the
 // end cannot move (a comment reference, a marker in an atom's bytes) the start
 // moves to just before it.
-function orderRanges(tr: Transaction, moved: readonly [number, number][]): void {
+function orderRanges(
+	tr: Transaction,
+	moved: readonly [number, number][],
+	carried: ReadonlySet<string> = new Set(),
+	behind: ReadonlyMap<string, number> = new Map()
+): void {
 	const places = rangePlaces(tr.doc)
 	const order = new Map<string, number>()
 	let index = 0
@@ -700,6 +806,36 @@ function orderRanges(tr: Transaction, moved: readonly [number, number][]): void 
 	for (const key of places.keys()) order.set(key, index++)
 
 	const fixes: [MarkerPlace, MarkerPlace][] = []
+	const spanAt = (pos: number): [number, number] | undefined => moved.find(([from, to]) => pos >= from && pos < to)
+	// Ends left where the block that held them was (see repairTransaction), their places taken first.
+	const back: [MarkerPlace, number][] = []
+	const handled = new Set<string>()
+
+	for (const [key, pos] of behind) {
+		const end = places.get(key)
+		const kind = end === undefined ? undefined : RANGE_STARTS.get(end.marker.kind)
+		const start = kind === undefined ? undefined : places.get(`${kind}:${end?.marker.id ?? ""}`)
+
+		if (end === undefined || start === undefined || end.where !== "before" || spanAt(end.pos) === undefined) continue
+		if (spanAt(start.pos) !== undefined || pos <= start.pos) continue
+
+		back.push([end, pos])
+		handled.add(key)
+	}
+
+	// Ends a move carries (see repairTransaction) whose start is in moved content they are not with: to its edge.
+	for (const key of carried) {
+		const end = places.get(key)
+		const kind = end === undefined ? undefined : RANGE_STARTS.get(end.marker.kind)
+		const start = kind === undefined ? undefined : places.get(`${kind}:${end?.marker.id ?? ""}`)
+
+		if (end === undefined || start === undefined || (order.get(key) ?? 0) < (order.get(markerKey(start.marker)) ?? 0)) continue
+
+		const span = spanAt(start.pos)
+
+		if (span !== undefined && spanAt(end.pos) === undefined && !(end.where === "before" && end.pos === span[1]))
+			fixes.push([start, end])
+	}
 
 	for (const [key, end] of places) {
 		const kind = RANGE_STARTS.get(end.marker.kind)
@@ -709,15 +845,29 @@ function orderRanges(tr: Transaction, moved: readonly [number, number][]): void 
 		const startKey = `${kind}:${end.marker.id ?? ""}`
 		const start = places.get(startKey)
 
-		if (start !== undefined && (order.get(key) ?? 0) < (order.get(startKey) ?? 0)) fixes.push([start, end])
+		if (start !== undefined && !handled.has(key) && (order.get(key) ?? 0) < (order.get(startKey) ?? 0)) fixes.push([start, end])
 	}
 
-	if (fixes.length === 0) return
+	if (fixes.length === 0 && back.length === 0) return
 
 	const from = tr.steps.length
 	const at = (pos: number, assoc = 1): number => tr.mapping.slice(from).map(pos, assoc)
+	const left = new Map<number, MarkerAttrs[]>()
 
-	const spanOf = (pos: number): [number, number] | undefined => moved.find(([from, to]) => pos >= from && pos < to)
+	for (const [end, pos] of back) {
+		if (!takeMarker(tr, end, at)) continue
+
+		const list = left.get(pos)
+
+		if (list === undefined) left.set(pos, [end.marker])
+		else list.push(end.marker)
+	}
+
+	for (const [pos, markers] of [...left].sort((a, b) => b[0] - a[0])) {
+		markers.sort((a, b) => (order.get(markerKey(a)) ?? 0) - (order.get(markerKey(b)) ?? 0))
+		reinsert(tr, at(pos, -1), markers)
+	}
+
 	// Markers following moved content to its edge, by edge, in document order.
 	const follow = new Map<number, MarkerAttrs[]>()
 	const add = (edge: number, marker: MarkerAttrs): void => {
@@ -728,8 +878,8 @@ function orderRanges(tr: Transaction, moved: readonly [number, number][]): void 
 	}
 
 	for (const [start, end] of fixes) {
-		const startSpan = spanOf(start.pos)
-		const endSpan = spanOf(end.pos)
+		const startSpan = spanAt(start.pos)
+		const endSpan = spanAt(end.pos)
 
 		// One side came with inserted content (a moved block): the other follows it to that content's edge,
 		// so the range keeps covering what moved instead of closing.
@@ -748,6 +898,69 @@ function orderRanges(tr: Transaction, moved: readonly [number, number][]): void 
 		markers.sort((a, b) => (order.get(markerKey(a)) ?? 0) - (order.get(markerKey(b)) ?? 0))
 		reinsert(tr, at(edge, -1), markers)
 	}
+}
+
+// `for (const [from, to] of spans) doc.nodesBetween(from, to, f)` with `f` deciding descent from the node
+// alone: one walk in document order over the spans' union (spans sorted by from), each node once. A long
+// transaction of mark steps (formatting a whole long document) has tens of thousands of spans; walking from
+// the top for each would cost the document's top-level length each time.
+function nodesInSpans(doc: Node, spans: readonly (readonly [number, number])[], f: (node: Node, pos: number) => boolean): void {
+	const union: [number, number][] = []
+
+	for (const [from, to] of spans) {
+		const last = union.at(-1)
+
+		if (last !== undefined && from <= last[1]) last[1] = Math.max(last[1], to)
+		else union.push([from, to])
+	}
+
+	const end = union.at(-1)?.[1]
+
+	if (end === undefined) return
+
+	// Positions only grow along the walk: spans ending at or before one are done with. Children before the
+	// next span are passed by their sizes alone (a keystroke's span is after most of a long document).
+	let first = 0
+	let next = union[0]?.[0] ?? 0
+	const walk = (node: Node, start: number): void => {
+		const count = node.childCount
+
+		for (let index = 0, pos = start; index < count && pos < end; index++) {
+			const child = node.child(index)
+			const childEnd = pos + child.nodeSize
+
+			if (childEnd > next) {
+				while (first < union.length && (union[first]?.[1] ?? 0) <= pos) first++
+
+				if (first >= union.length) return
+
+				next = union[first]?.[0] ?? 0
+
+				if (next < childEnd && f(child, pos) && child.content.size > 0) walk(child, pos + 1)
+			}
+
+			pos = childEnd
+		}
+	}
+
+	walk(doc, 0)
+}
+
+// The textblock (of those walked, in document order) whose content holds `pos`.
+function textblockAt(textblocks: readonly { node: Node; pos: number }[], pos: number): { node: Node; pos: number } | undefined {
+	let low = 0
+	let high = textblocks.length
+
+	while (low < high) {
+		const middle = (low + high) >> 1
+
+		if ((textblocks[middle]?.pos ?? 0) < pos) low = middle + 1
+		else high = middle
+	}
+
+	const found = textblocks[low - 1]
+
+	return found !== undefined && pos < found.pos + found.node.nodeSize ? found : undefined
 }
 
 // Keys of the source identities a node carries: its own (a source block or atom) and its markers'.
@@ -781,11 +994,19 @@ interface DuplicateFix {
 	readonly fresh: boolean
 	readonly shallow?: boolean
 	readonly drop: ReadonlySet<string>
+	// Content of another part: what stays is made new (no source item) and keeps a run base only where it fits.
+	readonly renew?: boolean
 }
 
 // Content inserted by a transaction that duplicates a source identity present elsewhere (a copy made
 // without the paste sanitiser: a drag-copy, a host's own transaction): the copy becomes new content.
-function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] {
+function duplicateFixes(
+	doc: Node,
+	inserted: readonly number[],
+	removed: ReadonlyMap<string, number>,
+	foreign: (key: string) => boolean = () => false,
+	alien: (node: Node) => boolean = () => false
+): DuplicateFix[] {
 	const inside: { node: Node; pos: number; keys: string[] }[] = []
 	const size = doc.content.size
 	const pieces: [number, number][] = []
@@ -813,7 +1034,7 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 
 	// Containers that start in inserted content and end in the document's: their identity came with the
 	// insertion (an open slice end), their rest did not.
-	const opened: { pos: number; own: string | undefined; markers: string[] }[] = []
+	const opened: { pos: number; own: string | undefined; markers: string[]; alien: boolean }[] = []
 
 	for (const [from, to] of spans) {
 		doc.nodesBetween(from, to, (node, pos) => {
@@ -827,7 +1048,7 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 				// A paragraph may be repeated (its copies write its properties); a table structure may not.
 				const own = CONTAINERS.has(node.type) && typeof src === "number" && src !== NO_SOURCE ? `b${src}` : undefined
 
-				if (own !== undefined || markers.length > 0) opened.push({ pos, own, markers })
+				if (own !== undefined || markers.length > 0) opened.push({ pos, own, markers, alien: alien(node) })
 			}
 
 			if (pos < from || pos + node.nodeSize > to) return !node.isLeaf
@@ -851,53 +1072,75 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 
 	if (inside.length === 0 && opened.length === 0) return []
 
-	// Identities outside the inserted content.
+	// Identities outside the inserted content. When the same edit took out every identity it inserts (a
+	// rebuilt or moved block), none of them can be outside: only repeats within the insertion remain (`taken`
+	// below), and the document is not walked.
 	const outside = new Set<string>()
 	const openedAt = new Set(opened.map(entry => entry.pos))
-	let span = 0
+	const counts = new Map<string, number>()
 
-	doc.descendants((node, pos) => {
-		while (span < spans.length && (spans[span]?.[1] ?? 0) <= pos) span++
+	for (const entry of inside) for (const key of entry.keys) counts.set(key, (counts.get(key) ?? 0) + 1)
+	for (const entry of opened) {
+		for (const key of entry.own === undefined ? entry.markers : [entry.own, ...entry.markers])
+			counts.set(key, (counts.get(key) ?? 0) + 1)
+	}
 
-		const current = spans[span]
+	if (![...counts].every(([key, count]) => (removed.get(key) ?? 0) >= count)) {
+		let span = 0
 
-		if (current !== undefined && pos >= current[0] && pos + node.nodeSize <= current[1]) return false
+		doc.descendants((node, pos) => {
+			while (span < spans.length && (spans[span]?.[1] ?? 0) <= pos) span++
 
-		const keys: string[] = []
+			const current = spans[span]
 
-		if (!openedAt.has(pos)) identityKeys(node, true, keys)
+			if (current !== undefined && pos >= current[0] && pos + node.nodeSize <= current[1]) return false
 
-		for (const key of keys) outside.add(key)
+			const keys: string[] = []
 
-		return !node.isLeaf
-	})
+			if (!openedAt.has(pos)) identityKeys(node, true, keys)
 
-	for (const key of doc.attrs["end"] as MarkerList) outside.add(`m${markerKey(key)}`)
+			for (const key of keys) outside.add(key)
+
+			return !node.isLeaf
+		})
+
+		for (const key of doc.attrs["end"] as MarkerList) outside.add(`m${markerKey(key)}`)
+	}
 
 	const fixes: DuplicateFix[] = []
 	const taken = new Set<string>()
 
-	for (const { pos, own, markers } of opened) {
-		const fresh = own !== undefined && (outside.has(own) || taken.has(own))
-		const drop = new Set(markers.filter(key => outside.has(key) || taken.has(key)).map(key => key.slice(1)))
+	for (const { pos, own, markers, alien: renew } of opened) {
+		const fresh = own !== undefined && (renew || outside.has(own) || taken.has(own))
+		const drop = new Set(markers.filter(key => outside.has(key) || taken.has(key) || foreign(key)).map(key => key.slice(1)))
 
 		if (own !== undefined) taken.add(own)
 		for (const key of markers) taken.add(key)
 
-		if (fresh || drop.size > 0) fixes.push({ pos, fresh, shallow: true, drop })
+		if (fresh || drop.size > 0 || renew) fixes.push({ pos, fresh, shallow: true, drop, renew })
 	}
 
 	for (const { node, pos, keys } of inside) {
 		const ownKey = keys[0]
 		const ownIsSource = ownKey !== undefined && !ownKey.startsWith("m")
 		const markerOnly = node.type === nodes.marker || node.type === nodes.comment_ref
-		const duplicate = keys.filter(key => outside.has(key) || taken.has(key))
+		const duplicate = keys.filter(key => outside.has(key) || taken.has(key) || foreign(key))
+		const renew = alien(node)
 
 		for (const key of keys) taken.add(key)
 
-		if (duplicate.length === 0) continue
+		// Of another part: a marker stays as new content unless it is a copy; a source block or atom is made new.
+		if (renew && markerOnly) {
+			const copy = duplicate.length > 0 || survivorsOf(node).some(marker => marker.id === null)
 
-		if ((ownIsSource && duplicate.includes(ownKey)) || markerOnly) {
+			fixes.push(copy ? { pos, fresh: true, drop: new Set() } : { pos, fresh: false, drop: new Set(), renew })
+
+			continue
+		}
+
+		if (duplicate.length === 0 && !(renew && ownIsSource)) continue
+
+		if ((ownIsSource && (renew || duplicate.includes(ownKey))) || markerOnly) {
 			// A source block is made new whole: what it holds that exists nowhere else stays with it.
 			const keep = new Set<string>()
 
@@ -908,7 +1151,7 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 					identityKeys(child, false, held)
 
 					for (const key of held) {
-						if (!outside.has(key) && !taken.has(key)) keep.add(key.slice(1))
+						if (!outside.has(key) && !taken.has(key) && !foreign(key)) keep.add(key.slice(1))
 
 						taken.add(key)
 					}
@@ -919,7 +1162,7 @@ function duplicateFixes(doc: Node, inserted: readonly number[]): DuplicateFix[] 
 				node.descendants(child => (visit(child), true))
 			}
 
-			fixes.push({ pos, fresh: true, drop: new Set(), keep })
+			fixes.push({ pos, fresh: true, drop: new Set(), keep, renew })
 		} else fixes.push({ pos, fresh: false, drop: new Set(duplicate.map(key => key.slice(1))) })
 	}
 
@@ -934,13 +1177,15 @@ function filterMarkers(list: unknown, drop: ReadonlySet<string>): MarkerList | u
 	return kept.length === list.length ? undefined : kept.length === 0 ? NO_MARKERS : kept
 }
 
-function applyDuplicateFix(repair: Transaction, fix: DuplicateFix): void {
+function applyDuplicateFix(repair: Transaction, fix: DuplicateFix, baseFits?: (base: number) => boolean): void {
 	const pos = repair.mapping.map(fix.pos, 1)
 	const node = repair.doc.nodeAt(pos)
 
 	if (node === null) return
 
 	if (!fix.fresh) {
+		if (fix.renew === true && "src" in node.attrs) repair.setNodeAttribute(pos, "src", NO_SOURCE)
+
 		for (const name of ["before", "end", "markers"]) {
 			const kept = filterMarkers(node.attrs[name], fix.drop)
 
@@ -951,18 +1196,35 @@ function applyDuplicateFix(repair: Transaction, fix: DuplicateFix): void {
 	}
 
 	if (fix.shallow === true) {
-		if (fix.fresh) repair.setNodeAttribute(pos, "src", NO_SOURCE)
+		if (fix.fresh) {
+			repair.setNodeAttribute(pos, "src", NO_SOURCE)
+
+			const model = modelledOn(node)
+
+			if (model !== undefined) for (const mark of model) if (blockMarkTypes.includes(mark.type)) repair.addNodeMark(pos, mark)
+		}
 
 		for (const name of ["before", "end"]) {
-			const kept = filterMarkers(node.attrs[name], fix.drop)
+			const list = node.attrs[name]
+			const kept = filterMarkers(list, fix.drop) ?? (Array.isArray(list) ? (list as MarkerList) : undefined)
 
-			if (kept !== undefined && kept.length !== (node.attrs[name] as MarkerList).length) repair.setNodeAttribute(pos, name, kept)
+			if (kept === undefined) continue
+
+			const renewed =
+				fix.renew === true ? kept.map(marker => (marker.src === NO_SOURCE ? marker : { ...marker, src: NO_SOURCE })) : kept
+
+			if (renewed.length !== (list as MarkerList).length || renewed.some((marker, k) => marker !== (list as MarkerList)[k]))
+				repair.setNodeAttribute(pos, name, renewed)
 		}
 
 		return
 	}
 
-	const keep: KeptMarkers = { keys: fix.keep ?? new Set(), orphans: [] }
+	const keep: KeptMarkers = {
+		keys: fix.keep ?? new Set(),
+		orphans: [],
+		...(fix.renew === true ? { renew: true, ...(baseFits === undefined ? {} : { fits: baseFits }) } : {})
+	}
 	const fresh = freshNode(node, keep)
 	const $pos = repair.doc.resolve(pos)
 
@@ -1047,6 +1309,53 @@ function applyTextFix(repair: Transaction, at: number, node: Node): void {
 export interface InvariantOptions {
 	readonly readOnly?: () => boolean
 	readonly normalizeList?: ListNormalizer
+	// Whether the story may hold anchors of comment `id` (a comment lives in one story): pasted anchors of others
+	// are left out.
+	readonly commentAnchor?: (id: string) => boolean
+	// The story's part (model part index): content holding source identities of another part, pasted in, is made
+	// new (its item numbers are not this part's). `knowOrigins` records where built content came from (asked
+	// before the first such check), `baseFits` whether a run base reads the same in this part.
+	readonly part?: number
+	readonly knowOrigins?: () => void
+	readonly baseFits?: (base: number) => boolean
+}
+
+const COMMENT_ANCHOR_KEY = /^m(?:commentRangeStart|commentRangeEnd|commentReference):(.*)$/s
+
+// An identity key of a comment anchor the story may not hold.
+// A transaction moving comments (a cut pasted back, checked by its maker: the comments are anchored nowhere
+// else): their ids. Their anchors may go into any story.
+export const COMMENT_MOVE_META = "docxCommentMove"
+
+// `moving`: comments whose anchors the transactions took out (a move) or that a paste moves.
+function foreignAnchor(options: InvariantOptions, moving: ReadonlySet<string>): ((key: string) => boolean) | undefined {
+	const allowed = options.commentAnchor
+
+	if (allowed === undefined) return undefined
+
+	return key => {
+		const id = COMMENT_ANCHOR_KEY.exec(key)?.[1]
+
+		return id !== undefined && !moving.has(id) && !allowed(id)
+	}
+}
+
+function movingComments(transactions: readonly Transaction[], removed: ReadonlyMap<string, number>): Set<string> {
+	const out = new Set<string>()
+
+	for (const key of removed.keys()) {
+		const id = COMMENT_ANCHOR_KEY.exec(key)?.[1]
+
+		if (id !== undefined) out.add(id)
+	}
+
+	for (const tr of transactions) {
+		const ids: unknown = tr.getMeta(COMMENT_MOVE_META)
+
+		if (Array.isArray(ids)) for (const id of ids) if (typeof id === "string") out.add(id)
+	}
+
+	return out
 }
 
 // What appendTransaction adds after `transactions`: revision and stray marks off new or re-marked
@@ -1084,10 +1393,39 @@ export function repairTransaction(
 	// Block node marks (paragraph ids...) in content non-command transactions deleted: inserted again by the
 	// same edit (a move), they are no copies.
 	const movedBlockMarks: Mark[] = []
+	// Identities the transactions took out, counted (a rebuilt or moved block carries them back in).
+	const removed = new Map<string, number>()
+
+	// Whether some step put range markers back in another order or place than it took them out (a move): only
+	// then can a range's markers have passed each other.
+	let reorders = false
+	// Whether some step inserted a block carrying node marks (typing, a split of a paragraph without them: no
+	// block copy to look at).
+	let insertsBlocks = false
+	// Range ends standing right after content a move took (in the `before` list of the block after it) whose
+	// start went with it: they go with it too (a paragraph moved away and back keeps its bookmark).
+	const carried = new Set<string>()
+	// Range ends a move took along in the `before` list of a block it moved while their start stayed: they stay
+	// where the block was (by key, that place in `state.doc`), as a range does not grow or turn around by a move
+	// of what follows it.
+	const behind = new Map<string, number>()
+	// Content pasted from elsewhere holding source identities: where built content came from is asked for now.
+	const part = options.part
+
+	if (part !== undefined && options.knowOrigins !== undefined && relevant.some(tr => !isCommand(tr) && insertsSources(tr)))
+		options.knowOrigins()
 
 	relevant.forEach((tr, index) => {
-		const ranges = changedRanges(tr)
+		// A node's other attributes break nothing the walk below repairs (a paragraph command over a long
+		// selection changes thousands).
+		const ranges = changedRanges(tr, true, REPAIRED_ATTRS)
 		const insertions = insertedRanges(tr)
+
+		insertsBlocks ||= tr.steps.some(
+			step => (step instanceof ReplaceStep || step instanceof ReplaceAroundStep) && holdsMarkedBlocks(step.slice)
+		)
+
+		if (!reorders && insertions.length > 0) reorders = movesRangeMarkers(tr)
 
 		for (let k = 0; k < ranges.length; k += 2) changed.push(toState(index, ranges[k] ?? 0, -1), toState(index, ranges[k + 1] ?? 0, 1))
 		const command = isCommand(tr)
@@ -1120,6 +1458,13 @@ export function repairTransaction(
 				const end = pos + node.nodeSize
 				const opens = pos >= range.from && pos < range.to
 
+				if (insertions.length > 0 && opens && end <= range.to) {
+					const keys: string[] = []
+
+					identityKeys(node, node.isInline || SOURCE_BLOCKS.has(node.type.name), keys)
+					for (const key of keys) removed.set(key, (removed.get(key) ?? 0) + 1)
+				}
+
 				if (node.isInline)
 					for (const mark of node.marks) if (revisionTypes.includes(mark.type)) moved.add(mark.attrs["src"] as number)
 
@@ -1138,13 +1483,34 @@ export function repairTransaction(
 				return true
 			})
 
-			if (found.size === 0) continue
-
 			let pos = range.from
 
 			for (let later = range.step; later < tr.steps.length; later++) pos = tr.mapping.maps[later]?.map(pos, -1) ?? pos
 
+			if (insertions.length > 0) {
+				carriedEnds(range, found, carried)
+
+				for (const key of endsLeftBehind(range, found)) behind.set(key, toState(index, pos, -1))
+			}
+
+			if (found.size === 0) continue
+
 			for (const [key, marker] of found) candidates.set(key, { marker, pos })
+		}
+
+		// A comment whose range and reference the deletion took whole goes with them, as in Word (the save leaves
+		// the comment out); one that keeps any of them keeps all.
+		for (const [key, { marker }] of candidates) {
+			if (marker.kind !== "commentReference" || marker.id === null) continue
+
+			const start = `commentRangeStart:${marker.id}`
+			const end = `commentRangeEnd:${marker.id}`
+
+			if (candidates.has(start) && candidates.has(end)) {
+				candidates.delete(key)
+				candidates.delete(start)
+				candidates.delete(end)
+			}
 		}
 
 		if (candidates.size === 0) return
@@ -1203,104 +1569,115 @@ export function repairTransaction(
 	const cellEnds: number[] = []
 	const emptyLinks: { from: number; to: number; mark: Mark }[] = []
 	const listed = new Set<string>()
+	const copied = (pos: number): boolean => {
+		for (let k = 0; k < insertedCopies.length; k += 2)
+			if (pos >= (insertedCopies[k] ?? 0) && pos < (insertedCopies[k + 1] ?? 0)) return true
+
+		return false
+	}
 	const startsInserted = (pos: number): boolean => {
 		for (let k = 0; k < inserted.length; k += 2) if (pos >= (inserted[k] ?? 0) && pos < (inserted[k + 1] ?? 0)) return true
 
 		return false
 	}
 	const seen = new Set<number>()
+	// Textblocks the walk visits, in document order: the text next to the spans' ends is in them.
+	const textblocks: { node: Node; pos: number }[] = []
 
-	for (const [from, to] of spans) {
-		state.doc.nodesBetween(from, to, (node, pos) => {
-			if (seen.has(pos)) return !node.isLeaf && node.type !== nodes.locked_block
+	nodesInSpans(state.doc, spans, (node, pos) => {
+		if (seen.has(pos)) return !node.isLeaf && node.type !== nodes.locked_block
 
-			seen.add(pos)
+		seen.add(pos)
 
-			if (node.isInline) {
-				if (node.isText && unwritable(node.text ?? "")) textFixes.push({ pos, node })
+		// What an edit made here is this part's (a later paste into another part tells it by this); pasted
+		// content is judged below.
+		if (part !== undefined && !copied(pos)) claimOrigin(node, part)
 
-				// A new link goes somewhere: one with neither a target nor an anchor is no link.
-				for (const mark of node.marks) {
-					if (
-						mark.type === docxSchema.marks.link &&
-						mark.attrs["src"] === NO_SOURCE &&
-						!mark.attrs["target"] &&
-						!mark.attrs["anchor"]
-					) {
-						emptyLinks.push({ from: pos, to: pos + node.nodeSize, mark })
-					}
-				}
+		if (node.isTextblock) textblocks.push({ node, pos })
 
-				// Content that exists only as source bytes cannot be new: nothing could write it.
+		if (node.isInline) {
+			if (node.isText && unwritable(node.text ?? "")) textFixes.push({ pos, node })
+
+			// A new link goes somewhere: one with neither a target nor an anchor is no link.
+			for (const mark of node.marks) {
 				if (
-					BYTES_ONLY.has(node.type.name) &&
-					node.attrs["src"] === NO_SOURCE &&
-					node.type !== nodes.proof_err &&
-					!writableNew(node)
-				)
-					orphans.push({ pos, node })
-
-				if (inlineLevel(node) === "paragraph") {
-					for (const mark of node.marks) {
-						if (wrapperTypes.includes(mark.type)) continue
-						if (mark.type === docxSchema.marks.run && node.type === nodes.marker) continue
-
-						strayMarks.push({ pos, mark })
-					}
+					mark.type === docxSchema.marks.link &&
+					mark.attrs["src"] === NO_SOURCE &&
+					!mark.attrs["target"] &&
+					!mark.attrs["anchor"]
+				) {
+					emptyLinks.push({ from: pos, to: pos + node.nodeSize, mark })
 				}
-
-				return false
 			}
 
-			// Word wants every cell to end with a paragraph.
-			if (node.type === nodes.table_cell && endsWithTable(node)) cellEnds.push(pos + node.nodeSize - 1)
+			// Content that exists only as source bytes cannot be new: nothing could write it.
+			if (BYTES_ONLY.has(node.type.name) && node.attrs["src"] === NO_SOURCE && node.type !== nodes.proof_err && !writableNew(node))
+				orphans.push({ pos, node })
 
-			// An edit that copies a block's marker lists into two blocks (a split): the first keeps them. Blocks
-			// that start in inserted content are left to the duplicate repair below.
-			for (const name of startsInserted(pos) ? [] : ["before", "end"]) {
-				const list: unknown = node.attrs[name]
+			if (inlineLevel(node) === "paragraph") {
+				for (const mark of node.marks) {
+					if (wrapperTypes.includes(mark.type)) continue
+					if (mark.type === docxSchema.marks.run && node.type === nodes.marker) continue
 
-				if (!Array.isArray(list) || list.length === 0) continue
-
-				const kept = (list as MarkerList).filter(marker => {
-					const key = markerKey(marker)
-
-					if (listed.has(key)) return false
-
-					listed.add(key)
-
-					return true
-				})
-
-				if (kept.length !== list.length) markerFixes.push({ pos, name, list: kept.length === 0 ? NO_MARKERS : kept })
+					strayMarks.push({ pos, mark })
+				}
 			}
 
-			const sectPr = node.attrs["sectPr"]
+			return false
+		}
 
-			if ((node.type === nodes.paragraph || node.type === nodes.locked_block) && typeof sectPr === "number" && sectPr !== NO_SOURCE) {
-				const list = holders.get(sectPr)
+		// Word wants every cell to end with a paragraph.
+		if (node.type === nodes.table_cell && endsWithTable(node)) cellEnds.push(pos + node.nodeSize - 1)
 
-				if (list === undefined) holders.set(sectPr, [pos])
-				else list.push(pos)
-			}
+		// An edit that copies a block's marker lists into two blocks (a split): the first keeps them. Blocks
+		// that start in inserted content are left to the duplicate repair below.
+		for (const name of startsInserted(pos) ? [] : ["before", "end"]) {
+			const list: unknown = node.attrs[name]
 
-			if (node.type === nodes.paragraph) {
-				const attrs: ListAttrs = { numId: node.attrs["numId"] as number | null, ilvl: node.attrs["ilvl"] as number | null }
-				const fixed = normalizeListAttrs(attrs)
-				const hooked = options.normalizeList?.(fixed ?? attrs, node) ?? fixed
+			if (!Array.isArray(list) || list.length === 0) continue
 
-				if (hooked !== undefined && (hooked.numId !== attrs.numId || hooked.ilvl !== attrs.ilvl))
-					listFixes.push({ pos, attrs: hooked })
-			}
+			const kept = (list as MarkerList).filter(marker => {
+				const key = markerKey(marker)
 
-			return node.type !== nodes.locked_block
-		})
-	}
+				if (listed.has(key)) return false
 
-	// Text next to a change: a deletion can leave half a surrogate pair at the edge of a text node.
+				listed.add(key)
+
+				return true
+			})
+
+			if (kept.length !== list.length) markerFixes.push({ pos, name, list: kept.length === 0 ? NO_MARKERS : kept })
+		}
+
+		const sectPr = node.attrs["sectPr"]
+
+		if ((node.type === nodes.paragraph || node.type === nodes.locked_block) && typeof sectPr === "number" && sectPr !== NO_SOURCE) {
+			const list = holders.get(sectPr)
+
+			if (list === undefined) holders.set(sectPr, [pos])
+			else list.push(pos)
+		}
+
+		if (node.type === nodes.paragraph) {
+			const attrs: ListAttrs = { numId: node.attrs["numId"] as number | null, ilvl: node.attrs["ilvl"] as number | null }
+			const fixed = normalizeListAttrs(attrs)
+			const hooked = options.normalizeList?.(fixed ?? attrs, node) ?? fixed
+
+			if (hooked !== undefined && (hooked.numId !== attrs.numId || hooked.ilvl !== attrs.ilvl)) listFixes.push({ pos, attrs: hooked })
+		}
+
+		return node.type !== nodes.locked_block
+	})
+
+	// Text next to a change: a deletion can leave half a surrogate pair at the edge of a text node. Text is in
+	// textblocks, and one holding a span's end was walked: resolved there, not from the top of the document.
 	for (const [from, to] of spans) {
 		for (const at of [from, to]) {
-			const $at = state.doc.resolve(at)
+			const holder = textblockAt(textblocks, at)
+
+			if (holder === undefined) continue
+
+			const $at = holder.node.resolve(at - holder.pos - 1)
 			const before = $at.nodeBefore
 			const after = $at.nodeAfter
 
@@ -1325,7 +1702,7 @@ export function repairTransaction(
 	// keeps it.
 	const copyFixes = new Set<string>()
 
-	for (const fix of blockCopies(state.doc, insertedCopies, movedBlockMarks)) {
+	for (const fix of insertsBlocks ? blockCopies(state.doc, insertedCopies, movedBlockMarks) : []) {
 		const key = `${String(fix.pos)}:${fix.mark.type.name}`
 
 		if (!copyFixes.has(key)) repair.removeNodeMark(fix.pos, fix.mark)
@@ -1352,8 +1729,31 @@ export function repairTransaction(
 
 	// 3. Inserted copies of source identities become new content, and text XML cannot carry is made
 	// writable, from the end.
+	// Of another part than this story's (see InvariantOptions.part).
+	const alien = (value: Node | Mark): boolean => {
+		const origin = part === undefined ? undefined : originOf(value)
+
+		return origin !== undefined && origin !== part
+	}
 	const structural: { pos: number; apply: () => void }[] = [
-		...duplicateFixes(state.doc, inserted).map(fix => ({ pos: fix.pos, apply: () => applyDuplicateFix(repair, fix) })),
+		...duplicateFixes(state.doc, inserted, removed, foreignAnchor(options, movingComments(relevant, removed)), alien).map(fix => ({
+			pos: fix.pos,
+			apply: () => applyDuplicateFix(repair, fix, options.baseFits)
+		})),
+		...alienRuns(state.doc, insertedCopies, alien).map(at => ({
+			pos: at,
+			apply: () => {
+				const pos = repair.mapping.map(at, 1)
+				const node = repair.doc.nodeAt(pos)
+
+				if (node === null || !node.isInline) return
+
+				const fresh = freshMarks(node.marks, options.baseFits)
+
+				for (const mark of node.marks) if (!mark.isInSet(fresh)) repair.removeMark(pos, pos + node.nodeSize, mark)
+				for (const mark of fresh) if (!mark.isInSet(node.marks)) repair.addMark(pos, pos + node.nodeSize, mark)
+			}
+		})),
 		...textFixes.map(fix => ({ pos: fix.pos, apply: () => applyTextFix(repair, fix.pos, fix.node) })),
 		...cellEnds.map(at => ({ pos: at, apply: () => void repair.insert(repair.mapping.map(at, -1), nodes.paragraph.create()) })),
 		...orphans.map(fix => ({
@@ -1372,7 +1772,7 @@ export function repairTransaction(
 	for (const at of [...lost.keys()].sort((a, b) => b - a)) reinsert(repair, repair.mapping.map(at, -1), lost.get(at) ?? [])
 
 	// 5. Ranges whose markers moved past each other.
-	if ([...lost.values()].some(list => list.some(isRangeMarker)) || insertsRange(state.doc, inserted)) {
+	if ([...lost.values()].some(list => list.some(isRangeMarker)) || (reorders && insertsRange(state.doc, inserted))) {
 		const moved: [number, number][] = []
 
 		for (let k = 0; k < inserted.length; k += 2) {
@@ -1382,7 +1782,11 @@ export function repairTransaction(
 			if (to > from) moved.push([from, to])
 		}
 
-		orderRanges(repair, moved)
+		const places = new Map<string, number>()
+
+		for (const [key, pos] of behind) places.set(key, repair.mapping.map(pos, -1))
+
+		orderRanges(repair, moved, carried, places)
 	}
 
 	if (!repair.docChanged) return null
@@ -1393,6 +1797,69 @@ export function repairTransaction(
 interface CopyFix {
 	readonly pos: number
 	readonly mark: Mark
+}
+
+// Whether a transaction inserts content holding source identities (items, marks or markers with a source).
+function insertsSources(tr: Transaction): boolean {
+	return tr.steps.some(step => {
+		if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0) return false
+
+		let found = false
+
+		step.slice.content.descendants(node => {
+			if (found) return false
+
+			const src = node.attrs["src"]
+
+			found =
+				(typeof src === "number" && src !== NO_SOURCE) ||
+				node.marks.some(mark => typeof mark.attrs["src"] === "number" && mark.attrs["src"] !== NO_SOURCE)
+
+			return !found
+		})
+
+		return found
+	})
+}
+
+// Inline content inserted (by `inserted`, pairs) whose marks name a source of another part, outside blocks of
+// another part (made new whole): their positions.
+function alienRuns(doc: Node, inserted: readonly number[], alien: (value: Node | Mark) => boolean): number[] {
+	const out: number[] = []
+	const size = doc.content.size
+
+	for (let k = 0; k < inserted.length; k += 2) {
+		const from = Math.max(0, Math.min(size, inserted[k] ?? 0))
+		const to = Math.max(from, Math.min(size, inserted[k + 1] ?? 0))
+
+		if (to <= from) continue
+
+		doc.nodesBetween(from, to, (node, pos) => {
+			if (node.isInline) {
+				if (pos >= from && node.marks.some(mark => alien(mark))) out.push(pos)
+
+				return false
+			}
+
+			return !(pos >= from && alien(node))
+		})
+	}
+
+	return out
+}
+
+// Whether a slice holds a block with node marks (blockCopies looks at nothing else).
+function holdsMarkedBlocks(slice: Slice): boolean {
+	let found = false
+
+	slice.content.descendants(node => {
+		if (found || node.isInline) return false
+		if (node.marks.some(mark => blockMarkTypes.includes(mark.type))) found = true
+
+		return !found && !node.isTextblock
+	})
+
+	return found
 }
 
 function blockCopies(doc: Node, inserted: readonly number[], movedMarks: readonly Mark[]): CopyFix[] {
@@ -1434,6 +1901,62 @@ function blockCopies(doc: Node, inserted: readonly number[], movedMarks: readonl
 	}
 
 	return out
+}
+
+// The range markers of `fragment` (block lists and inline markers) as keys, in document order. A table cell's
+// content keeps its keys (fragments do not change): a table rebuilt column by column keeps its cells' content.
+const CELL_RANGE_KEYS = new WeakMap<Fragment, readonly string[]>()
+const NO_KEYS: readonly string[] = Object.freeze([])
+
+function rangeMarkerKeys(fragment: Fragment, out: string[]): string[] {
+	const add = (list: unknown): void => {
+		if (Array.isArray(list)) for (const marker of list as MarkerList) if (isRangeMarker(marker)) out.push(markerKey(marker))
+	}
+
+	fragment.forEach(node => {
+		if (node.isBlock) add(node.attrs["before"])
+
+		if (node.isLeaf) {
+			for (const marker of survivorsOf(node)) if (isRangeMarker(marker)) out.push(markerKey(marker))
+		} else if (node.type === nodes.table_cell) {
+			let keys = CELL_RANGE_KEYS.get(node.content)
+
+			if (keys === undefined) {
+				const own = rangeMarkerKeys(node.content, [])
+
+				keys = own.length === 0 ? NO_KEYS : own
+				CELL_RANGE_KEYS.set(node.content, keys)
+			}
+
+			for (const key of keys) out.push(key)
+		} else if (node.content.size > 0) {
+			rangeMarkerKeys(node.content, out)
+		}
+
+		if (node.isBlock) add(node.attrs["end"])
+	})
+
+	return out
+}
+
+// Whether a step of `tr` inserts range markers other than the very ones it replaced, in their order, at their
+// place (a block rebuilt where it stands keeps every range as it was; a move or a paste may not).
+function movesRangeMarkers(tr: Transaction): boolean {
+	return tr.steps.some((step, index) => {
+		if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0) return false
+
+		const inserted = rangeMarkerKeys(step.slice.content, [])
+
+		if (inserted.length === 0) return false
+
+		const doc = tr.docs[index]
+
+		if (step instanceof ReplaceAroundStep || doc === undefined) return true
+
+		const removed = rangeMarkerKeys(doc.slice(step.from, step.to).content, [])
+
+		return removed.length !== inserted.length || removed.some((key, k) => key !== inserted[k])
+	})
 }
 
 function insertsRange(doc: Node, inserted: readonly number[]): boolean {

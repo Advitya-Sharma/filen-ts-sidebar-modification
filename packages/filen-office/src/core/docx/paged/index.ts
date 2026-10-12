@@ -5,6 +5,26 @@ export { offsetMap, type OffsetMap, type SourceMap } from "./maps"
 export { OBJECT_HIT_PROVIDERS, hitObject, type ObjectHit, type ObjectHitKind, type ObjectHitProvider } from "./objects"
 export { PageIndex } from "./pages"
 export {
+	countSession,
+	docxOutline,
+	docxWordCount,
+	goToOutlineEntry,
+	type DocxOutline,
+	type DocxOutlineEntry,
+	type DocxQuerySlicing,
+	type DocxTextCount,
+	type DocxWordCount,
+	type DocxWordCountOptions
+} from "./queries"
+export {
+	docxComments,
+	type CommentHost,
+	type DocxComment,
+	type DocxCommentAnchor,
+	type DocxComments,
+	type DocxCommentThread
+} from "../review/comments"
+export {
 	PagedEditor,
 	type DocxFormatPainter,
 	type EditedStory,

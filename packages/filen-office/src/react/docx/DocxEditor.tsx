@@ -338,7 +338,7 @@ export function DocxEditor(props: DocxEditorProps) {
 		if (interactions === undefined) return false
 
 		const point = pointAt(event.clientX, event.clientY)
-		const hit = point === undefined ? undefined : editor.hitObject(point.index, point.x, point.y)
+		const hit = point === undefined ? undefined : editor.hitObject(point.index, point.x, point.y, zoom)
 		const handler = hit === undefined ? undefined : interactions[hit.kind]
 
 		if (point === undefined || hit === undefined || handler === undefined) return false

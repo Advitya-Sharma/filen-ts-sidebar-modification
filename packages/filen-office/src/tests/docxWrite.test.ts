@@ -408,7 +408,9 @@ describe("docx save verifier", () => {
 			replace: parts.filter(part => document.pkg.has(part.name)),
 			add: parts.filter(part => !document.pkg.has(part.name)),
 			numIds: new Map<number, number>(),
-			stories: []
+			stories: [],
+			removed: [],
+			roots: new Map()
 		}
 		// The zip may hold more than was declared (an entry changed behind the writer's back).
 		const plan = planZip(document.pkg.opc.zip, {
@@ -813,10 +815,12 @@ describe("docx writer: structure and values", () => {
 	})
 
 	it("puts back a deleted cell's comment reference into a paragraph", async () => {
+		// The comment starts in the cell that stays: its end and reference come back (a comment the deletion took
+		// whole would go with it).
 		const document = await opened({
 			body:
-				"<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:tc>" +
-				'<w:tc><w:p><w:commentRangeStart w:id="1"/><w:r><w:t>gone</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p></w:tc></w:tr></w:tbl>' +
+				'<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:commentRangeStart w:id="1"/><w:r><w:t>kept</w:t></w:r></w:p></w:tc>' +
+				'<w:tc><w:p><w:r><w:t>gone</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p></w:tc></w:tr></w:tbl>' +
 				p("after"),
 			comments: '<w:comment w:id="1" w:author="Ann"><w:p><w:r><w:t>remark</w:t></w:r></w:p></w:comment>',
 			...PARTS
@@ -829,8 +833,9 @@ describe("docx writer: structure and values", () => {
 
 		const xml = body(await read((await save(document, edit)).bytes, "word/document.xml"))
 
+		expect(xml).toMatch(/<w:commentRangeStart w:id="1"\/><w:r><w:t>kept<\/w:t>/)
 		expect(xml).toMatch(
-			/<w:commentRangeStart w:id="1"\/><w:commentRangeEnd w:id="1"\/><w:r>(<w:rPr>.*?<\/w:rPr>)?<w:commentReference w:id="1"\/><\/w:r><\/w:p><\/w:tc><\/w:tr>/
+			/<w:commentRangeEnd w:id="1"\/><w:r>(<w:rPr>.*?<\/w:rPr>)?<w:commentReference w:id="1"\/><\/w:r><\/w:p><\/w:tc><\/w:tr>/
 		)
 	})
 

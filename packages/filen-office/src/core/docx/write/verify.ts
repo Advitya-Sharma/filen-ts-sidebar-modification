@@ -337,13 +337,29 @@ async function replacedFacts(
 // ---- relationships ------------------------------------------------------------------------------------------
 
 // Relationship ids `document` uses in attributes of the relationships namespace that `relationships` does
-// not define. Start tags are searched for the bound prefixes first; only the few that hold one have their
-// attributes read.
+// not define.
 async function danglingRelationships(
 	relationships: Relationships,
 	document: XmlDocument,
 	clock: SliceClock | undefined
 ): Promise<string[]> {
+	const out: string[] = []
+
+	await eachRelationshipUse(document, clock, (_node, id) => {
+		if (relationships.byId(id) === undefined) out.push(id)
+	})
+
+	return out
+}
+
+// Calls `visit` with each element of `document` and the relationship id of each attribute of the relationships
+// namespace it has (the value decoded). Start tags are searched for the bound prefixes first; only the few that
+// hold one have their attributes read.
+async function eachRelationshipUse(
+	document: XmlDocument,
+	clock: SliceClock | undefined,
+	visit: (node: number, id: string) => void
+): Promise<void> {
 	const reader = partReader(document)
 	const prefixes: Uint8Array[] = []
 
@@ -353,10 +369,9 @@ async function danglingRelationships(
 		}
 	}
 
-	if (prefixes.length === 0) return []
+	if (prefixes.length === 0) return
 
 	const bytes = document.bytes
-	const out: string[] = []
 
 	for (let node = 0; node < document.count; node++) {
 		if (clock !== undefined && (node & (TAG_STEP - 1)) === 0 && clock.due) await clock.pause()
@@ -384,17 +399,39 @@ async function danglingRelationships(
 			const colon = attribute.name.indexOf(":")
 			const prefix = colon < 0 ? "" : attribute.name.slice(0, colon)
 
-			if (
-				prefix !== "" &&
-				R_URIS.includes(reader.namespaces.uri(node, prefix) ?? "") &&
-				relationships.byId(attribute.value) === undefined
-			) {
-				out.push(attribute.value)
-			}
+			if (prefix !== "" && R_URIS.includes(reader.namespaces.uri(node, prefix) ?? "")) visit(node, attribute.value)
 		}
 	}
+}
 
-	return out
+// A relationship the save removed (the source defined it, the new relationships do not) that the source content
+// the new part keeps as it was still uses: `rewritten` are the source ranges the save wrote anew, `copied` the
+// source ranges their new content copies.
+async function checkRemovedRelationships(
+	name: string,
+	source: XmlDocument,
+	sourceRelationships: Relationships,
+	relationships: Relationships,
+	rewritten: readonly (readonly [number, number])[],
+	copied: readonly (readonly [number, number])[],
+	clock: SliceClock | undefined
+): Promise<void> {
+	const removed = new Set(
+		sourceRelationships.all.filter(relationship => relationships.byId(relationship.id) === undefined).map(r => r.id)
+	)
+
+	if (removed.size === 0) return
+
+	const within = (ranges: readonly (readonly [number, number])[], pos: number): boolean =>
+		ranges.some(([from, to]) => pos >= from && pos < to)
+
+	await eachRelationshipUse(source, clock, (node, id) => {
+		if (!removed.has(id)) return
+
+		const pos = source.start(node)
+
+		if (!within(rewritten, pos) || within(copied, pos)) fail("relationship", `${name}: relationship ${id} is removed but still used`)
+	})
 }
 
 // ---- parts --------------------------------------------------------------------------------------------------
@@ -408,10 +445,14 @@ function flat(document: XmlDocument): boolean {
 	return true
 }
 
-function rootTags(document: XmlDocument): { open: Uint8Array; close: Uint8Array } {
+// The root's tags; `open` is the start tag as written where the save declared more namespaces on it.
+function rootTags(document: XmlDocument, open: string | undefined): { open: Uint8Array; close: Uint8Array } {
 	const root = document.documentElement()
 
-	return { open: document.bytes.subarray(document.start(root), document.openEnd(root)), close: encodeUtf8(`</${document.name(root)}>`) }
+	return {
+		open: open === undefined ? document.bytes.subarray(document.start(root), document.openEnd(root)) : encodeUtf8(open),
+		close: encodeUtf8(`</${document.name(root)}>`)
+	}
 }
 
 function join(chunks: readonly Uint8Array[]): Uint8Array {
@@ -431,8 +472,13 @@ function join(chunks: readonly Uint8Array[]): Uint8Array {
 }
 
 // The new markup of rewritten stories, each source copy replaced by a placeholder, inside the part's root.
-async function skeleton(document: XmlDocument, outputs: readonly StoryOutput[], clock: SliceClock | undefined): Promise<Uint8Array> {
-	const { open, close } = rootTags(document)
+async function skeleton(
+	document: XmlDocument,
+	root: string | undefined,
+	outputs: readonly StoryOutput[],
+	clock: SliceClock | undefined
+): Promise<Uint8Array> {
+	const { open, close } = rootTags(document, root)
 	const chunks: Uint8Array[] = [open]
 
 	for (const output of outputs) {
@@ -644,7 +690,29 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 	const exists = (part: string): boolean => original.has(part) || byKey.has(partKey(part))
 	const storyParts = new Map<string, StoryPart>(model.parts.map(part => [partKey(part.name), part]))
 	const storiesByPart = new Map<string, StoryChange[]>()
+	const cutsByPart = new Map<string, { from: number; to: number }[]>()
 	const added = new Set(changes.add.map(change => partKey(change.name)))
+
+	for (const cut of changes.removed) {
+		const key = partKey(cut.part.name)
+		const document = cut.part.document
+		const node = nodeAt(document, cut.from)
+
+		// A whole child of the root.
+		if (
+			storyParts.get(key) !== cut.part ||
+			node >= document.count ||
+			document.start(node) !== cut.from ||
+			document.end(node) !== cut.to ||
+			document.parent(node) !== document.documentElement()
+		)
+			fail("content", `${cut.part.name}: a removed story is not a container of its part`)
+
+		const list = cutsByPart.get(key)
+
+		if (list === undefined) cutsByPart.set(key, [{ from: cut.from, to: cut.to }])
+		else list.push({ from: cut.from, to: cut.to })
+	}
 
 	for (const story of changes.stories) {
 		const key = partKey(story.part.name)
@@ -659,6 +727,9 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 		if (list === undefined) storiesByPart.set(key, [story])
 		else list.push(story)
 	}
+
+	for (const part of changes.roots.keys())
+		if (!storiesByPart.has(partKey(part.name))) fail("content", `${part.name}: its root is written anew but none of its stories is`)
 
 	const rewritten: Rewritten[] = []
 
@@ -714,12 +785,16 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 
 		const part = storyParts.get(key)
 		const stories = storiesByPart.get(key)
+		const cuts = cutsByPart.get(key) ?? []
 		const outputs = stories?.map(story => story.output)
+		const root = part === undefined ? undefined : changes.roots.get(part)
 		let skeletonDocument: XmlDocument | undefined
 
+		if (part !== undefined && (stories !== undefined || cuts.length > 0))
+			await checkAssembly(name, part, stories ?? [], cuts, root, change.bytes, original.has(name), clock)
+
 		if (part !== undefined && stories !== undefined && outputs !== undefined) {
-			await checkAssembly(name, part, stories, change.bytes, original.has(name), clock)
-			skeletonDocument = await parseCheckedSliced(name, await skeleton(part.document, outputs, clock), clock)
+			skeletonDocument = await parseCheckedSliced(name, await skeleton(part.document, root, outputs, clock), clock)
 			await checkParagraphs(name, part, stories, skeletonDocument, rewritten, clock)
 		}
 
@@ -737,8 +812,10 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 
 				await replacedFacts(part.document, from, to, story.output.trusted, after, scope)
 
-				checkContainers(part, story.output)
+				checkContainers(part, root, story.output)
 			}
+
+			for (const cut of cuts) await replacedFacts(part.document, cut.from, cut.to, [], after, scope)
 
 			await checkRelationships(
 				name,
@@ -747,10 +824,35 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 				part.document,
 				clock
 			)
+
+			// The source the new part keeps is trusted as it was: no relationship it uses may have gone.
+			const rewritten: [number, number][] = cuts.map(cut => [cut.from, cut.to])
+			const copied: [number, number][] = []
+
+			for (const story of changes.stories) {
+				if (story.part !== part) continue
+
+				const { from, to } = storyRange(name, part, story, true)
+				const trusted = story.output.trusted
+
+				rewritten.push([from, to])
+
+				for (let k = 0; k < trusted.length; k += 4) copied.push([trusted[k + 2] ?? 0, trusted[k + 3] ?? 0])
+			}
+
+			await checkRemovedRelationships(
+				name,
+				part.document,
+				await original.relationships(name),
+				relationships,
+				rewritten,
+				copied,
+				clock
+			)
 			await checkPart(checks, checkInput, { name, part, document, skeleton: true })
 		} else {
-			// Joined only here: a part that is not a story part, one with namespaces declared below its root, or
-			// a story part the save creates.
+			// Joined only here: a part that is not a story part, one with namespaces declared below its root, a
+			// story part the save creates, or one the save only takes containers out of.
 			const document = await parseCheckedSliced(name, await joinBytes(change.bytes), clock)
 
 			if (part !== undefined) {
@@ -857,8 +959,8 @@ function numberingDuplicates(document: XmlDocument): Set<string> {
 }
 
 // A container written as a copy keeps its source's properties, without the children carrying ids.
-function checkContainers(part: StoryPart, output: StoryOutput): void {
-	const { open, close } = rootTags(part.document)
+function checkContainers(part: StoryPart, root: string | undefined, output: StoryOutput): void {
+	const { open, close } = rootTags(part.document, root)
 
 	for (const container of output.containers) {
 		const expected = container.properties.map(node => canonicalElement(part.document, node, false, new Set(container.strip))).join("\n")
@@ -926,6 +1028,8 @@ async function checkAssembly(
 	name: string,
 	part: StoryPart,
 	stories: readonly StoryChange[],
+	cuts: readonly { readonly from: number; readonly to: number }[],
+	root: string | undefined,
 	written: PartBytes,
 	inPackage: boolean,
 	clock: SliceClock | undefined
@@ -933,10 +1037,35 @@ async function checkAssembly(
 	const bytes = written instanceof Uint8Array || written instanceof BytePieces ? written : await joinBytes(written)
 	const document = part.document
 	const source = document.bytes
+	const rootNode = document.documentElement()
+	// A removed container is written as nothing, a root start tag declared anew as that tag.
+	const replaced: {
+		story: StoryChange | undefined
+		from: number
+		to: number
+		output: Uint8Array | BytePieces
+		trusted: readonly number[]
+	}[] = cuts.map(cut => ({ story: undefined, ...cut, output: new Uint8Array(), trusted: [] }))
+
+	if (root !== undefined)
+		replaced.push({
+			story: undefined,
+			from: document.start(rootNode),
+			to: document.openEnd(rootNode),
+			output: encodeUtf8(root),
+			trusted: []
+		})
+
 	// As the writer assembles them: a new container before one replaced at the same place.
-	const ordered = stories
-		.map(story => ({ story, ...storyRange(name, part, story, inPackage) }))
-		.sort((a, b) => a.from - b.from || a.to - b.to)
+	const ordered = [
+		...stories.map(story => ({
+			story,
+			...storyRange(name, part, story, inPackage),
+			output: story.output.bytes,
+			trusted: story.output.trusted
+		})),
+		...replaced
+	].sort((a, b) => a.from - b.from || a.to - b.to)
 	let from = 0
 	let at = 0
 	const same = async (length: number, other: Uint8Array | BytePieces, otherFrom: number): Promise<void> => {
@@ -952,11 +1081,9 @@ async function checkAssembly(
 		at += length
 	}
 
-	for (const { story, from: start, to: end } of ordered) {
+	for (const { from: start, to: end, output, trusted } of ordered) {
 		if (start < from) fail("content", `${name}: rewritten stories overlap`)
 
-		const output = story.output
-		const trusted = output.trusted
 		let written = 0
 
 		await same(start - from, source, from)
@@ -976,12 +1103,12 @@ async function checkAssembly(
 				fail("content", `${name}: a copy is not whole source nodes of its story`)
 			}
 
-			await same(outFrom - written, output.bytes, written)
+			await same(outFrom - written, output, written)
 			await same(outTo - outFrom, source, sourceFrom)
 			written = outTo
 		}
 
-		await same(output.bytes.length - written, output.bytes, written)
+		await same(output.length - written, output, written)
 		from = end
 	}
 
@@ -1214,7 +1341,7 @@ async function readBack(
 
 			while (last < story.nodes.length && (last === first || size < READ_BACK_BYTES)) size += story.markup[last++]?.length ?? 0
 
-			await readBackBatch(input, story, first, last, relationshipsOf, clock)
+			await readBackBatch(input, story, first, last, input.changes.roots.get(story.part), relationshipsOf, clock)
 			first = last
 
 			if (clock?.due === true) await clock.pause()
@@ -1228,6 +1355,7 @@ async function readBackBatch(
 	story: Rewritten,
 	first: number,
 	last: number,
+	rootTag: string | undefined,
 	relationshipsOf: (part: string) => Promise<Relationships>,
 	clock: SliceClock | undefined
 ): Promise<void> {
@@ -1237,7 +1365,10 @@ async function readBackBatch(
 	const root = document.documentElement()
 	const prefix = W_URIS.map(uri => reader.namespaces.prefixFor(root, uri)).find(found => found !== undefined) ?? ""
 	const qualify = (local: string): string => (prefix === "" ? local : `${prefix}:${local}`)
-	const open = decodeUtf8(document.bytes, document.start(root), document.openEnd(root)).replace(/^<[^\s>/]+/, `<${qualify("document")}`)
+	const open = (rootTag ?? decodeUtf8(document.bytes, document.start(root), document.openEnd(root))).replace(
+		/^<[^\s>/]+/,
+		`<${qualify("document")}`
+	)
 	const body = join([
 		encodeUtf8(
 			`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${open.endsWith("/>") ? open.slice(0, -2) + ">" : open}<${qualify("body")}>`
@@ -1386,6 +1517,8 @@ export function paragraphSignature(
 			node.attrs["ilvl"],
 			node.attrs["align"],
 			sorted(node.attrs["indent"]),
+			sorted(node.attrs["spacing"]),
+			sorted(node.attrs["borders"]),
 			section
 		])
 	]
