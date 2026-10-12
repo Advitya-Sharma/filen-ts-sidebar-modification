@@ -102,7 +102,8 @@ function enqueue(task: () => Promise<void>): Promise<void> {
 }
 
 // Opened by the first save or list in this tab: a tab showing the list reloads it when another tab changed
-// the history; an open conversation finds out on its next save.
+// the history (a closed list reads it fresh on its next open); an open conversation finds out on its next
+// save.
 function historyChannel(): BroadcastChannel | null {
 	if (closed) {
 		return null
@@ -119,7 +120,7 @@ function historyChannel(): BroadcastChannel | null {
 	}
 
 	channel.onmessage = () => {
-		if (useAssistantHistoryStore.getState().conversations !== null) {
+		if (useAssistantHistoryStore.getState().open) {
 			void loadConversationIndex()
 		}
 	}
