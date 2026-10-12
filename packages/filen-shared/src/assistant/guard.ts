@@ -112,6 +112,30 @@ function selectiveWords(value: string): string[] {
 	return words(value).filter(word => word.length >= 2 || CJK.test(word))
 }
 
+// Words mixing letters and digits ("F1", "M5") ground only as written, whole: strictWords splits them, and
+// "I'm 5 min" holds both halves as words of their own.
+function mixedWords(value: string): string[] {
+	return words(value).filter(word => /\p{L}/u.test(word) && /\p{N}/u.test(word))
+}
+
+// A short query word ("the", "F1") matches inside other names ("Theo", "Mathematics"), so a search by short
+// words only grounds the results that hold each of them as a word of their own.
+function nameHoldsWords({ name, queryWords }: { name: string; queryWords: readonly string[] }): boolean {
+	const nameWords = words(name)
+
+	return queryWords.every(word => (CJK.test(word) ? normalize(name).includes(word) : nameWords.includes(word)))
+}
+
+// Whether a query holds a word long enough to name something by itself, counted with its marks: normalize
+// drops a Devanagari word's vowel signs, which would make most Hindi words short.
+function hasNameWord(value: string): boolean {
+	return value
+		.normalize("NFC")
+		.toLowerCase()
+		.split(/[^\p{L}\p{M}\p{N}]+/u)
+		.some(word => nameWord(word))
+}
+
 function extensionOf(value: string): string | undefined {
 	return EXTENSION.exec(value.trim())?.[0].toLowerCase()
 }
@@ -181,6 +205,10 @@ export class AssistantTurnGuard {
 
 		if (all.length === 0) {
 			return normalize(text.trim()).length > 0 && this.message.includes(normalize(text.trim()))
+		}
+
+		if (mixedWords(text).some(word => !this.messageWords.includes(word))) {
+			return false
 		}
 
 		const everyWord = all.every(word =>
@@ -395,8 +423,9 @@ export class AssistantTurnGuard {
 			this.grounded.add(handle)
 		}
 
+		const handleKeyed = (tool.grounded.handles ?? []).some(key => args[key] !== undefined)
 		const keyed =
-			(tool.grounded.handles ?? []).some(key => args[key] !== undefined) ||
+			handleKeyed ||
 			(tool.grounded.text ?? []).some(key => {
 				const value = args[key]
 
@@ -404,15 +433,24 @@ export class AssistantTurnGuard {
 			})
 
 		if (
-			tool.effect === "read" &&
-			keyed &&
-			this.argumentsGrounded({
+			tool.effect !== "read" ||
+			!keyed ||
+			!this.argumentsGrounded({
 				tool,
 				args,
 				lookup: true
 			}).allowed
 		) {
-			for (const { handle } of returned) {
+			return
+		}
+
+		// A path names its directory exactly and grounds all it lists; a query matches names by their words.
+		const query = args["query"]
+		const queryWords = !handleKeyed && typeof query === "string" ? selectiveWords(query) : []
+		const shortOnly = queryWords.length > 0 && typeof query === "string" && !hasNameWord(query)
+
+		for (const { handle, name } of returned) {
+			if (!shortOnly || nameHoldsWords({ name, queryWords })) {
 				this.lookupGrounded.add(handle)
 			}
 		}

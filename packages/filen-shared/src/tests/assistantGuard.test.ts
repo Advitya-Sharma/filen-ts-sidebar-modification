@@ -437,6 +437,49 @@ describe("AssistantTurnGuard", () => {
 		}
 	})
 
+	it("does not ground a lookup by a letter-and-digit name the user never wrote whole", () => {
+		const turn = guard("Tell Bob I'm 5 min late", {}, [])
+
+		turn.record({ tool: listChats, args: { query: "M5" }, returned: [{ handle: "c6", name: "M5" }] })
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c6", text: "5 min late" } }).allowed).toBe(false)
+		expect(guard("Create the directory I'm 5").check({ tool: createDirectory, args: { parent: "d0", name: "M5" } }).allowed).toBe(false)
+	})
+
+	it("grounds what a search by short words returns only when its name holds them as words of their own", () => {
+		const turn = guard("Tell the team I'm late", {}, [])
+
+		turn.record({
+			tool: listChats,
+			args: { query: "the" },
+			returned: [
+				{ handle: "c1", name: "Theo" },
+				{ handle: "c2", name: "Mathematics" },
+				{ handle: "c3", name: "Other" }
+			]
+		})
+
+		for (const chat of ["c1", "c2", "c3"]) {
+			expect(turn.check({ tool: draftChatMessage, args: { chat, text: "I'm late" } }).allowed).toBe(false)
+		}
+
+		const al = guard("Tell Al I'm late", {}, [])
+
+		al.record({ tool: findContacts, args: { query: "Al" }, returned: [{ handle: "c4", name: "Alice Mallory" }] })
+		expect(al.check({ tool: draftChatMessage, args: { chat: "c4", text: "late" } }).allowed).toBe(false)
+
+		// Word length counts vowel signs, so a Hindi search grounds an inflected result as a Latin one would.
+		const hindi = guard("यात्रा वाली फ़ाइल ट्रैश करो", {}, [])
+
+		hindi.record({ tool: searchItems, args: { query: "यात्रा" }, returned: [{ handle: "f2", name: "यात्राएँ.pdf" }] })
+		expect(hindi.check({ tool: trashItems, args: { handles: ["f2"] } }).allowed).toBe(true)
+
+		// A path names the directory it lists, so what it lists is grounded whatever the names.
+		const path = guard("Trash everything in the F1 directory", {}, [])
+
+		path.record({ tool: listDirectory, args: { path: "F1" }, returned: [{ handle: "f3", name: "race.mp4" }] })
+		expect(path.check({ tool: trashItems, args: { handles: ["f3"] } }).allowed).toBe(true)
+	})
+
 	it("refuses a draft whose link is split by invisible characters, written defanged or part of a typed host", () => {
 		const turn = guard("Tell Maria I'm running late", {}, ["c2"])
 		const allowed = (text: string) => turn.check({ tool: draftChatMessage, args: { chat: "c2", text } }).allowed
