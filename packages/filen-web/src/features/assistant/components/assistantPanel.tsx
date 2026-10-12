@@ -1,4 +1,4 @@
-import { type CSSProperties, type Ref } from "react"
+import { useSyncExternalStore, type CSSProperties, type Ref } from "react"
 import { useTranslation } from "react-i18next"
 import { Drawer as DrawerPrimitive } from "@base-ui/react/drawer"
 import { cn } from "@filen/shared"
@@ -6,6 +6,7 @@ import { SCRIM_CLASS } from "@/components/ui/surface"
 import { toastSideObstructionRef } from "@/lib/toastClearance"
 import { useResizableSidebar } from "@/features/shell/hooks/useResizableSidebar"
 import { SidebarResizeHandle } from "@/features/shell/components/sidebarResizeHandle"
+import { SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN } from "@/features/shell/lib/sidebarWidth"
 import { SidebarPanelVisibilityProvider } from "@/features/shell/lib/sidebarPanelVisibility"
 import { useAssistantStore } from "@/features/assistant/store/useAssistantStore"
 import { modelAcceptsMessages, trackAssistantPanelShown } from "@/features/assistant/store/assistantSession"
@@ -92,19 +93,40 @@ function closeInlinePanel(): void {
 	useAssistantStore.getState().setPanelOpen(false)
 }
 
+// At most 40% of the viewport, so a wide persisted width cannot squeeze the content card away on a laptop
+// screen with the module sidebar open too. Clamped in JS rather than by a CSS max-width so the resize
+// handle's drag and key bases and its reported value match the width on screen.
+function assistantPanelMaxWidth(viewportWidth: number): number {
+	return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.floor(viewportWidth * 0.4)))
+}
+
+function subscribeToViewportWidth(listener: () => void): () => void {
+	window.addEventListener("resize", listener)
+
+	return () => {
+		window.removeEventListener("resize", listener)
+	}
+}
+
+// The derived cap, not the raw width, is the snapshot: it only changes between the breakpoint and about
+// 1300px, so a window resize re-renders the panel only when the cap itself moves.
+function viewportMaxWidthSnapshot(): number {
+	return assistantPanelMaxWidth(window.innerWidth)
+}
+
 // Desktop widths: a resizable panel after the content card, mounted only while open. The drag handle sits
 // on its LEFT edge (a leading-edge SidebarResizeHandle) in the row's gap, positioned against the shell's
-// wrapper exactly like the left sidebars' trailing handles. Capped at 40vw so a wide persisted width cannot
-// squeeze the content card away on a laptop screen with the module sidebar open too.
+// wrapper exactly like the left sidebars' trailing handles.
 export function AssistantSidePanel() {
 	const { t } = useTranslation("assistant")
-	const resize = useResizableSidebar("assistant")
+	const maxWidth = useSyncExternalStore(subscribeToViewportWidth, viewportMaxWidthSnapshot)
+	const resize = useResizableSidebar("assistant", maxWidth)
 
 	return (
 		<SidebarPanelVisibilityProvider visible={true}>
 			<AssistantSurface
 				ref={attachInlinePanel}
-				className="max-w-[40vw] shrink-0"
+				className="shrink-0"
 				style={{ width: resize.width }}
 				onClose={closeInlinePanel}
 			/>
