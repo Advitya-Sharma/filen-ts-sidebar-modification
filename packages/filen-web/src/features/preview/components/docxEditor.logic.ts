@@ -177,6 +177,40 @@ export function stepMatch(active: number, count: number, direction: 1 | -1): num
 
 const NO_MARKS: readonly DocxEditorMark[] = []
 
+// Whether two snapshots show the same in the toolbar (formatting, enablement, undo, read-only, the lock at
+// the selection): the version, the selection's place and the dirty flag are not shown there.
+export function sameToolbarSnapshot(a: DocxEditorSnapshot | undefined, b: DocxEditorSnapshot | undefined): boolean {
+	if (a === b) {
+		return true
+	}
+
+	if (a === undefined || b === undefined) {
+		return false
+	}
+
+	return (
+		a.readOnly === b.readOnly &&
+		a.canUndo === b.canUndo &&
+		a.canRedo === b.canRedo &&
+		a.selection.locked === b.selection.locked &&
+		a.readOnlyReasons.length === b.readOnlyReasons.length &&
+		a.readOnlyReasons.every((reason, index) => b.readOnlyReasons[index] === reason) &&
+		sameRecord(a.formats, b.formats) &&
+		sameRecord(a.paragraph, b.paragraph) &&
+		sameRecord(a.enabled, b.enabled)
+	)
+}
+
+function sameRecord<T extends object>(a: T, b: T): boolean {
+	if (a === b) {
+		return true
+	}
+
+	const keys = Object.keys(a) as (keyof T)[]
+
+	return keys.length === Object.keys(b).length && keys.every(key => a[key] === b[key])
+}
+
 // Spelling marks and find results as one list sorted by `from` (both come sorted), the current match marked
 // apart. Find results draw over spelling.
 export function editorMarks(spelling: readonly SpellingMark[], matches: readonly StoryMatch[], active: number): readonly DocxEditorMark[] {

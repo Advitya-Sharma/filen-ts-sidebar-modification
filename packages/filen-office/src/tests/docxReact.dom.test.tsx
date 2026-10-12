@@ -19,6 +19,7 @@ import {
 	type DocxViewerState
 } from "@filen/office/dom/docx"
 import {
+	DocxDocumentStore,
 	DocxMediaCache,
 	DocxPages,
 	findInDocument,
@@ -500,6 +501,46 @@ describe("useDocxDocument and DocxPages", () => {
 		await flush()
 		expect(removed).toEqual(["fo1a2b-carlito"])
 		expect(manual.closed()).toBe(true)
+	})
+})
+
+describe("DocxDocumentStore", () => {
+	it("applies events at once while nothing waits and every face is loaded, else in order once the faces are", async () => {
+		const manual = manualHost()
+		let release: () => void = () => undefined
+		const fontHost: FontHost = {
+			addBytes: () =>
+				new Promise(resolve => {
+					release = () => resolve(true)
+				}),
+			addLocal: () => Promise.resolve(false),
+			remove: () => undefined
+		}
+		const store = new DocxDocumentStore({ host: manual.host, bytes: bytesSource(new Uint8Array(1)), fontHost })
+		const stop = store.subscribe(() => undefined)
+		const shown = (): (number | undefined)[] => store.getSnapshot().pages.map(page => page.index)
+
+		// In the task that sent it (an edit's pages reach the view in the edit's render).
+		manual.emit(pagesEvent([page(0, ["a"])], false))
+		expect(shown()).toEqual([0])
+
+		// A face on its way: pages wait for it, and later events wait behind them.
+		manual.emit({
+			type: "fonts",
+			faces: [{ kind: "bytes", face: { family: "fo1a2b-carlito", weight: 400, italic: false }, bytes: new Uint8Array(4) }]
+		})
+		manual.emit(pagesEvent([page(1, ["b"])], false))
+		manual.emit(pagesEvent([page(2, ["c"])], false))
+		expect(shown()).toEqual([0])
+
+		release()
+		await flush()
+		expect(shown()).toEqual([0, 1, 2])
+
+		// Everything in again: at once.
+		manual.emit(pagesEvent([page(3, ["d"])], true))
+		expect(shown()).toEqual([0, 1, 2, 3])
+		stop()
 	})
 })
 

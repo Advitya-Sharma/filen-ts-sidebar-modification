@@ -229,6 +229,10 @@ export class LayoutCursor {
 }
 
 // Why a segment's fill stopped.
+const PEN_X = 0
+const PEN_CONTENT = 1
+const PEN_TABS = 2
+
 const Fill = {
 	// Broke at an opportunity or inside a word; more items follow.
 	WRAP: 0,
@@ -314,6 +318,8 @@ export class ParagraphLayouter {
 	private foundDefault = false
 	// fitPrefix() result.
 	private fitWidth = 0
+	// fill()'s and resolveTabs()' pens (see there).
+	private readonly pen = new Float64Array(3)
 
 	constructor(styles: StyleTable) {
 		this.styles = styles
@@ -811,8 +817,12 @@ export class ParagraphLayouter {
 		const savedPieces = this.pieceCount
 		let item = this.nextItem
 		let offset = this.nextOffset
-		let x = segStart
-		let content = segStart
+		// The pen and where content ends, in a typed array: kept in locals, their sums would be allocated item by
+		// item.
+		const pen = this.pen
+
+		pen[PEN_X] = segStart
+		pen[PEN_CONTENT] = segStart
 		let placed = false
 		let candidatePieces = -1
 		let candidateItem = 0
@@ -833,13 +843,17 @@ export class ParagraphLayouter {
 				const space = partial ? trailing * (styles.spaceWidth[style] ?? 0) : (p.space[item] ?? 0)
 				// The rest of a word broken on an earlier line is fitted from its start instead of measured
 				// whole, so a long unbreakable run costs about its line length per line.
-				const split = partial && start < contentEnd ? this.fitPrefix(p, item, start, contentEnd, x, segEnd) : -1
+				const split = partial && start < contentEnd ? this.fitPrefix(p, item, start, contentEnd, pen[PEN_X] ?? 0, segEnd) : -1
 				const width = !partial ? (p.width[item] ?? 0) : split === contentEnd ? this.fitWidth : 0
 				// Space-only items never overflow: line-end spaces hang.
 				const overflows =
 					split >= 0
 						? split < contentEnd
-						: (width > 0 || kind === ItemKind.OBJECT) && this.extent(x + width - (p.hang[item] ?? 0)) > segEnd + EPSILON
+						: (width > 0 || kind === ItemKind.OBJECT) &&
+							(this.tabPending
+								? this.extent((pen[PEN_X] ?? 0) + width - (p.hang[item] ?? 0))
+								: (pen[PEN_X] ?? 0) + width - (p.hang[item] ?? 0)) >
+								segEnd + EPSILON
 
 				if (overflows) {
 					if (placed && candidatePieces >= 0) {
@@ -863,7 +877,12 @@ export class ParagraphLayouter {
 
 					// No opportunity: break inside the word, as Word does, keeping at least one character
 					// on an otherwise empty line.
-					let fit = kind !== ItemKind.TEXT ? start : split >= 0 ? split : this.fitPrefix(p, item, start, contentEnd, x, segEnd)
+					let fit =
+						kind !== ItemKind.TEXT
+							? start
+							: split >= 0
+								? split
+								: this.fitPrefix(p, item, start, contentEnd, pen[PEN_X] ?? 0, segEnd)
 					let fitWidth = this.fitWidth
 
 					if (fit === start && !placed && kind === ItemKind.TEXT) {
@@ -872,7 +891,10 @@ export class ParagraphLayouter {
 					}
 
 					if (fit > start && fit < contentEnd) {
-						this.addPiece(p, item, start, fit, fit, fitWidth, 0)
+						// The index first: adding a piece may replace pWidth (growing it).
+						const piece = this.addPiece(p, item, start, fit, fit)
+
+						this.pWidth[piece] = fitWidth
 						this.pClusters[this.pieceCount - 1] = this.countClusters(p.text, start, fit)
 						this.pInner[this.pieceCount - 1] = countSpaces(p.text, start, fit)
 						this.nextItem = item
@@ -889,7 +911,10 @@ export class ParagraphLayouter {
 					}
 				}
 
-				this.addPiece(p, item, start, p.end[item] ?? 0, contentEnd, width, space)
+				const piece = this.addPiece(p, item, start, p.end[item] ?? 0, contentEnd)
+
+				this.pWidth[piece] = width
+				this.pSpace[piece] = space
 				this.pInner[this.pieceCount - 1] = partial ? countSpaces(p.text, start, contentEnd) : (p.innerSpaces[item] ?? 0)
 				this.pTrailing[this.pieceCount - 1] = trailing
 				this.pClusters[this.pieceCount - 1] = partial ? this.countClusters(p.text, start, contentEnd) : (p.clusters[item] ?? 0)
@@ -897,14 +922,14 @@ export class ParagraphLayouter {
 				if (this.tabPending && this.tabAlign === TabAlignment.DECIMAL && Number.isNaN(this.tabDecimal) && kind === ItemKind.TEXT) {
 					const at = indexIn(p.text, g.decimalSeparator ?? 0x2e, start, contentEnd)
 
-					if (at >= 0) this.tabDecimal = x - this.tabStart + this.measurePart(p, item, start, at)
+					if (at >= 0) this.tabDecimal = (pen[PEN_X] ?? 0) - this.tabStart + this.measurePart(p, item, start, at)
 				}
 
 				placed = true
 
-				if (width > 0 || kind === ItemKind.OBJECT) content = x + width
+				if (width > 0 || kind === ItemKind.OBJECT) pen[PEN_CONTENT] = (pen[PEN_X] ?? 0) + width
 
-				x += width + space
+				pen[PEN_X] += width + space
 
 				const after = p.breakAfter[item] ?? BREAK_NONE
 
@@ -920,7 +945,9 @@ export class ParagraphLayouter {
 
 				if (
 					after === BREAK_ALLOWED ||
-					(after === BREAK_HYPHEN && this.extent(content) + styles.hyphenWidth(style) <= segEnd + EPSILON)
+					(after === BREAK_HYPHEN &&
+						(this.tabPending ? this.extent(pen[PEN_CONTENT] ?? 0) : (pen[PEN_CONTENT] ?? 0)) + styles.hyphenWidth(style) <=
+							segEnd + EPSILON)
 				) {
 					candidatePieces = this.pieceCount
 					candidateItem = item
@@ -931,7 +958,7 @@ export class ParagraphLayouter {
 			}
 
 			if (kind === ItemKind.BREAK) {
-				this.addPiece(p, item, p.start[item] ?? 0, p.end[item] ?? 0, p.end[item] ?? 0, 0, 0)
+				this.addPiece(p, item, p.start[item] ?? 0, p.end[item] ?? 0, p.end[item] ?? 0)
 				this.nextItem = item + 1
 				this.nextOffset = -1
 
@@ -944,8 +971,8 @@ export class ParagraphLayouter {
 
 			// A tab: earlier right, centre or decimal content takes its place first.
 			if (this.tabPending) {
-				x = this.extent(x)
-				content = this.extent(content)
+				pen[PEN_X] = this.extent(pen[PEN_X] ?? 0)
+				pen[PEN_CONTENT] = this.extent(pen[PEN_CONTENT] ?? 0)
 				this.tabPending = false
 			}
 
@@ -960,17 +987,20 @@ export class ParagraphLayouter {
 				align = p.tabAlignment[tab] ?? TabAlignment.START
 				leader = p.tabLeader[tab] ?? TabLeader.NONE
 			} else {
-				const found = this.nextStop(g, x, firstLine)
+				const found = this.nextStop(g, pen[PEN_X] ?? 0, firstLine)
 
-				stop = found ? this.foundStop : x
+				stop = found ? this.foundStop : (pen[PEN_X] ?? 0)
 				align = found ? this.foundAlign : TabAlignment.START
 				leader = found ? this.foundLeader : TabLeader.NONE
 
 				// Past the last stop that fits (custom stops may reach into the end indent): the tab runs to
 				// the line end and the text continues on the next line.
 				if (stop > segEnd + EPSILON && (this.foundDefault || stop > g.width + EPSILON)) {
-					this.addPiece(p, item, p.start[item] ?? 0, p.end[item] ?? 0, p.end[item] ?? 0, Math.max(0, segEnd - x), 0)
-					this.pStop[this.pieceCount - 1] = Math.max(x, segEnd)
+					// The index first: adding a piece may replace pWidth (growing it).
+					const piece = this.addPiece(p, item, p.start[item] ?? 0, p.end[item] ?? 0, p.end[item] ?? 0)
+
+					this.pWidth[piece] = Math.max(0, segEnd - (pen[PEN_X] ?? 0))
+					this.pStop[this.pieceCount - 1] = Math.max(pen[PEN_X] ?? 0, segEnd)
 					this.pAlign[this.pieceCount - 1] = TabAlignment.START
 					this.pLeader[this.pieceCount - 1] = leader
 					this.nextItem = item + 1
@@ -980,23 +1010,23 @@ export class ParagraphLayouter {
 				}
 			}
 
-			this.addPiece(p, item, p.start[item] ?? 0, p.end[item] ?? 0, p.end[item] ?? 0, 0, 0)
+			this.addPiece(p, item, p.start[item] ?? 0, p.end[item] ?? 0, p.end[item] ?? 0)
 			this.pStop[this.pieceCount - 1] = stop
 			this.pAlign[this.pieceCount - 1] = align
 			this.pLeader[this.pieceCount - 1] = leader
 			placed = true
 
 			if (align === TabAlignment.START) {
-				x = Math.max(x, stop)
+				pen[PEN_X] = Math.max(pen[PEN_X] ?? 0, stop)
 			} else {
 				this.tabPending = true
-				this.tabStart = x
+				this.tabStart = pen[PEN_X] ?? 0
 				this.tabStop = stop
 				this.tabAlign = align
 				this.tabDecimal = Number.NaN
 			}
 
-			content = x
+			pen[PEN_CONTENT] = pen[PEN_X] ?? 0
 			item++
 			offset = -1
 
@@ -1162,15 +1192,9 @@ export class ParagraphLayouter {
 		return clusters
 	}
 
-	private addPiece(
-		p: PreparedParagraph,
-		item: number,
-		start: number,
-		end: number,
-		contentEnd: number,
-		width: number,
-		space: number
-	): void {
+	// Adds a piece and returns its index; the caller writes its width and space (pWidth, pSpace) itself: a
+	// fractional number passed to a call is allocated, one written to a typed array is not.
+	private addPiece(p: PreparedParagraph, item: number, start: number, end: number, contentEnd: number): number {
 		if (this.pieceCount === this.pItem.length) this.growPieces()
 
 		const k = this.pieceCount++
@@ -1179,8 +1203,8 @@ export class ParagraphLayouter {
 		this.pStart[k] = start
 		this.pEnd[k] = end
 		this.pContentEnd[k] = contentEnd
-		this.pWidth[k] = width
-		this.pSpace[k] = space
+		this.pWidth[k] = 0
+		this.pSpace[k] = 0
 		this.pInner[k] = 0
 		this.pTrailing[k] = 0
 		this.pClusters[k] = 0
@@ -1191,6 +1215,8 @@ export class ParagraphLayouter {
 		this.pWord[k] = 0
 		this.pLetter[k] = 0
 		this.pLevel[k] = p.kind[item] === ItemKind.TAB || p.kind[item] === ItemKind.BREAK ? p.level : (p.levels[item] ?? 0)
+
+		return k
 	}
 
 	// Row height and baseline from everything on it (and the paragraph mark on the last row).
@@ -1394,11 +1420,14 @@ export class ParagraphLayouter {
 	// Tab widths: left stops reach their position; right, centre and decimal stops pull the following
 	// group (up to the next tab) back so it ends, centres or has its decimal at the stop.
 	private resolveTabs(p: PreparedParagraph, g: ParagraphGeometry, from: number, to: number, segStart: number): void {
-		let u = segStart
+		// In a typed array, as fill()'s pen.
+		const pen = this.pen
+
+		pen[PEN_TABS] = segStart
 
 		for (let k = from; k < to; k++) {
 			if (p.kind[this.pItem[k] ?? 0] !== ItemKind.TAB) {
-				u += this.pW[k] ?? 0
+				pen[PEN_TABS] += this.pW[k] ?? 0
 
 				continue
 			}
@@ -1407,7 +1436,7 @@ export class ParagraphLayouter {
 			const align = this.pAlign[k] ?? TabAlignment.START
 
 			if (align === TabAlignment.START) {
-				this.pW[k] = Math.max(this.pW[k] ?? 0, stop - u)
+				this.pW[k] = Math.max(this.pW[k] ?? 0, stop - (pen[PEN_TABS] ?? 0))
 			} else {
 				let group = 0
 				let before = Number.NaN
@@ -1427,10 +1456,10 @@ export class ParagraphLayouter {
 				const anchor =
 					align === TabAlignment.CENTER ? group / 2 : align === TabAlignment.DECIMAL && !Number.isNaN(before) ? before : group
 
-				this.pW[k] = Math.max(0, stop - anchor - u)
+				this.pW[k] = Math.max(0, stop - anchor - (pen[PEN_TABS] ?? 0))
 			}
 
-			u += this.pW[k] ?? 0
+			pen[PEN_TABS] += this.pW[k] ?? 0
 		}
 	}
 

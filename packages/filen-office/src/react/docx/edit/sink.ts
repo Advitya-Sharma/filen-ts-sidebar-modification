@@ -1,6 +1,7 @@
 import { DOMParser, DOMSerializer, Fragment, Slice, type DOMOutputSpec, type Mark, type Node, type ResolvedPos } from "prosemirror-model"
-import type { EditorState, Transaction } from "prosemirror-state"
-import { Decoration, DecorationSet, EditorView, type NodeView, type NodeViewConstructor } from "prosemirror-view"
+import { EditorState, Plugin, type Transaction } from "prosemirror-state"
+import { Mapping } from "prosemirror-transform"
+import { EditorView, type NodeView, type NodeViewConstructor } from "prosemirror-view"
 import { docxSchema } from "../../../core/docx/edit/index"
 import {
 	besideNode,
@@ -13,11 +14,12 @@ import {
 	type PagedEditor
 } from "../../../core/docx/paged/index"
 
-// The input sink of paged editing: a real ProseMirror view over the session's state that holds focus and
-// receives all input (keys, beforeinput, IME composition, clipboard, drag and drop) while the pages show the
-// document. It is invisible and renders only the blocks around the selection (every other top-level block is
-// an empty placeholder), so it costs little however long the document; it is moved so its own caret sits
-// where the caret is painted, which is where IME candidate windows and magnifiers anchor.
+// The input sink of paged editing: a real ProseMirror view that holds focus and receives all input (keys,
+// beforeinput, IME composition, clipboard, drag and drop) while the pages show the document. It is invisible
+// and holds only the top-level blocks around the selection: each run of other blocks is one gap paragraph of
+// the same size (never rendered), so positions are the document's, a transaction from the view applies to the
+// session's state step for step, and a keystroke costs the same however long the document. It is moved so its
+// own caret sits where the caret is painted, which is where IME candidate windows and magnifiers anchor.
 
 export interface EditSinkOptions {
 	// The accessible name of the editing area.
@@ -25,7 +27,7 @@ export interface EditSinkOptions {
 	readonly readOnly?: boolean
 	// Cmd (Apple platforms) or Ctrl as the shortcut modifier.
 	readonly apple?: boolean
-	// Top-level blocks rendered on each side of the selection's ends (default 20).
+	// Top-level blocks held on each side of the selection's ends (default 20).
 	readonly window?: number
 	// The painted caret on screen (client px) and the width of its column, or undefined when it is not drawn.
 	readonly caretClientRect: () =>
@@ -37,43 +39,30 @@ export interface EditSinkOptions {
 }
 
 const DEFAULT_WINDOW = 20
+// The window is moved once the selection comes this close to its edge (so moving through the document moves
+// it every few blocks, not on every block).
+const WINDOW_MARGIN = 5
+const IDENTITY = new Mapping()
 
-interface WindowSpec {
-	readonly window: true
-}
+// Gap paragraphs stand for runs of blocks outside the window: their text only gives them their size (a
+// slice of one string, so a gap costs no copy of it).
+const GAPS = new WeakSet<Node>()
+let gapText = "-"
 
-function inWindow(decorations: readonly Decoration[]): boolean {
-	return decorations.some(decoration => (decoration.spec as Partial<WindowSpec> | undefined)?.window === true)
+function gapParagraph(size: number): Node {
+	const length = Math.max(0, size - 2)
+
+	while (gapText.length < length) gapText += gapText
+
+	const gap = nodes.paragraph.create(null, length === 0 ? null : docxSchema.text(gapText.slice(0, length)))
+
+	GAPS.add(gap)
+
+	return gap
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K): HTMLElementTagNameMap[K] {
 	return document.createElement(tag)
-}
-
-// A block node's view: its real DOM inside the window (or nested in a block that is), an empty placeholder
-// otherwise. Crossing the window's edge recreates the view.
-function windowed(make: () => { dom: HTMLElement; contentDOM?: HTMLElement }, placeholder: () => HTMLElement): NodeViewConstructor {
-	return (node, view, getPos, decorations) => {
-		const pos = getPos()
-		const top = pos === undefined || view.state.doc.resolve(pos).depth === 0
-
-		if (!top || inWindow(decorations)) {
-			const made = make()
-
-			return {
-				dom: made.dom,
-				...(made.contentDOM === undefined ? {} : { contentDOM: made.contentDOM }),
-				update: (next: Node, nextDecorations: readonly Decoration[]) =>
-					next.type === node.type && (!top || inWindow(nextDecorations))
-			} satisfies NodeView
-		}
-
-		return {
-			dom: placeholder(),
-			update: (next: Node, nextDecorations: readonly Decoration[]) => next.type === node.type && !inWindow(nextDecorations),
-			ignoreMutation: () => true
-		} satisfies NodeView
-	}
 }
 
 // Inline atoms as text a screen reader or a keyboard's text context can use.
@@ -104,28 +93,30 @@ function attrText(name: string): (node: Node) => string {
 }
 
 const NODE_VIEWS: Record<string, NodeViewConstructor> = {
-	paragraph: windowed(
-		() => {
-			const dom = element("p")
+	paragraph: node => {
+		if (GAPS.has(node)) {
+			return {
+				dom: element("p"),
+				update: (next: Node) => GAPS.has(next),
+				ignoreMutation: () => true
+			} satisfies NodeView
+		}
 
-			// Right-to-left paragraphs: the browser's own caret motion and IME follow the text's direction.
-			dom.dir = "auto"
+		const dom = element("p")
 
-			return { dom, contentDOM: dom }
-		},
-		() => element("p")
-	),
-	table: windowed(
-		() => {
-			const dom = element("table")
-			const contentDOM = element("tbody")
+		// Right-to-left paragraphs: the browser's own caret motion and IME follow the text's direction.
+		dom.dir = "auto"
 
-			dom.appendChild(contentDOM)
+		return { dom, contentDOM: dom, update: (next: Node) => next.type === node.type && !GAPS.has(next) } satisfies NodeView
+	},
+	table: () => {
+		const dom = element("table")
+		const contentDOM = element("tbody")
 
-			return { dom, contentDOM }
-		},
-		() => element("div")
-	),
+		dom.appendChild(contentDOM)
+
+		return { dom, contentDOM }
+	},
 	table_row: () => {
 		const dom = element("tr")
 
@@ -136,14 +127,11 @@ const NODE_VIEWS: Record<string, NodeViewConstructor> = {
 
 		return { dom, contentDOM: dom }
 	},
-	sdt: windowed(
-		() => {
-			const dom = element("div")
+	sdt: () => {
+		const dom = element("div")
 
-			return { dom, contentDOM: dom }
-		},
-		() => element("div")
-	),
+		return { dom, contentDOM: dom }
+	},
 	locked_block: node => {
 		const dom = element("div")
 
@@ -690,7 +678,11 @@ export class EditSink {
 	private readonly editor: PagedEditor
 	private readonly options: EditSinkOptions
 	private readonly windowSize: number
-	private windowCache: { doc: Node; key: string; set: DecorationSet } | undefined = undefined
+	// The session's state the view's was made from, the top-level blocks the view holds ([from, to) index
+	// ranges, ascending) and its gap paragraphs (kept while their size does not change).
+	private real: EditorState
+	private windows: number[] = []
+	private gaps: Node[] = []
 	private offsetX = 0
 	private offsetY = 0
 	private compositionStart = -1
@@ -714,21 +706,26 @@ export class EditSink {
 
 		this.readOnlyOption = options.readOnly === true
 		this.readOnlyShown = this.readOnly
-
+		this.real = editor.state
 		this.view = new EditorView(this.element, {
-			state: editor.state,
+			state: this.viewState(editor.state),
 			editable: () => !this.readOnly,
 			dispatchTransaction: tr => this.dispatch(tr),
-			decorations: state => this.windowDecorations(state),
+			// The session's plugins act on its own state; what stateless ones do in a view (paste, drop) acts here.
+			// A stateful plugin's props read its state from the view's, which has none (history's undo is below).
+			plugins: editor.state.plugins.flatMap(plugin =>
+				plugin.spec.props === undefined || plugin.spec.state !== undefined ? [] : [new Plugin({ props: plugin.spec.props })]
+			),
 			nodeViews: NODE_VIEWS,
 			markViews: MARK_VIEWS,
 			clipboardSerializer: clipboardSerializer(),
 			clipboardParser: clipboardParser(),
 			transformPastedHTML: safeClipboardHtml,
-			clipboardTextSerializer: (_slice, view) => {
-				const { from, to } = view.state.selection
+			clipboardTextSerializer: () => {
+				const state = this.editor.state
+				const { from, to } = state.selection
 
-				return plainText(view.state.doc, from, to, pos => this.editor.geometry.markerText(pos))
+				return plainText(state.doc, from, to, pos => this.editor.geometry.markerText(pos))
 			},
 			clipboardTextParser: (text, $context) => plainSlice(text, $context),
 			// The pages scroll to the painted caret; the sink never scrolls anything.
@@ -737,6 +734,11 @@ export class EditSink {
 			handleDOMEvents: {
 				// Read-only, the view is not editable and ProseMirror's own key handling is off: selection keys only.
 				keydown: (view, event) => (view.editable ? false : this.readOnlyKeyDown(view, event)),
+				// Undo and redo from outside the keyboard (Edit menu, shake, a soft keyboard's key): the session's.
+				beforeinput: (_view, event) => this.historyInput(event),
+				// The document's selection, not the view's (whose gaps hold no content).
+				copy: (_view, event) => this.copyEvent(event, false),
+				cut: (_view, event) => this.copyEvent(event, true),
 				compositionstart: view => {
 					this.compositionStart = view.state.selection.from
 					this.compositionText = ""
@@ -772,12 +774,10 @@ export class EditSink {
 		this.stopListening = editor.subscribe(event => {
 			if (event.type === "pages" || this.dispatching) return
 
-			const state = editor.state
+			if (this.real !== editor.state) {
+				if (event.type === "story") this.windows = []
 
-			if (this.view.state !== state) {
-				if (event.type === "story") this.windowCache = undefined
-
-				this.view.updateState(state)
+				this.sync()
 			}
 
 			this.refreshReadOnly()
@@ -808,6 +808,8 @@ export class EditSink {
 		this.stopListening()
 		this.view.destroy()
 		this.element.remove()
+		// The gaps' text grows to a document's size: a closed document does not keep it.
+		gapText = "-"
 	}
 
 	focus(): void {
@@ -832,7 +834,7 @@ export class EditSink {
 	// The selection as a copy writes it (the same HTML and text as a copy event), or undefined when it is
 	// empty. For an app's own Cut and Copy commands (menus, touch), which write the system clipboard itself.
 	clipboardContent(): { readonly html: string; readonly text: string } | undefined {
-		const state = this.view.state
+		const state = this.editor.state
 
 		if (state.selection.empty) return undefined
 
@@ -843,9 +845,9 @@ export class EditSink {
 
 	// Deletes the selection (the second half of an app's Cut); false when read-only or nothing is selected.
 	deleteSelection(): boolean {
-		if (this.readOnly || this.view.state.selection.empty) return false
+		if (this.readOnly || this.editor.state.selection.empty) return false
 
-		return this.run(this.view.state.tr.deleteSelection())
+		return this.run(this.editor.state.tr.deleteSelection())
 	}
 
 	// Pastes what an app read from the system clipboard, through the same parsers as a paste event: HTML
@@ -860,7 +862,7 @@ export class EditSink {
 	}
 
 	selectAll(): boolean {
-		return this.run(selectAll(this.view.state))
+		return this.run(selectAll(this.editor.state))
 	}
 
 	get composing(): boolean {
@@ -908,10 +910,48 @@ export class EditSink {
 		this.element.style.transform = `translate(${Math.round(this.offsetX * 10) / 10}px,${Math.round(this.offsetY * 10) / 10}px)`
 	}
 
-	private dispatch(tr: Transaction): void {
+	// A transaction of the view: applied to the session's state (positions are the same), and the view brought
+	// to the result (whatever the browser changed that the session did not take is put back).
+	private dispatch(viewTr: Transaction): void {
+		const tr = viewTr.docChanged && this.readOnly ? undefined : this.sessionTransaction(viewTr)
+
+		if (tr === undefined) {
+			this.sync(true)
+
+			return
+		}
+
+		this.apply(tr, true)
+	}
+
+	// `tr` (on the view's state) as a transaction on the session's: its steps, selection, stored marks, time
+	// and metadata; undefined when a step does not apply there.
+	private sessionTransaction(tr: Transaction): Transaction | undefined {
+		const real = this.editor.state
+
+		// The view holds the whole document: the transaction is the session's as it is.
+		if (this.view.state.doc === real.doc) return tr
+
+		const out = real.tr
+
+		for (const step of tr.steps) if (out.maybeStep(step).failed !== null) return undefined
+
+		if (tr.selectionSet) out.setSelection(tr.selection.map(out.doc, IDENTITY))
+		if (tr.storedMarksSet) out.setStoredMarks(tr.storedMarks)
+		if (tr.scrolledIntoView) out.scrollIntoView()
+
+		const meta: unknown = Reflect.get(tr, "meta")
+
+		if (typeof meta === "object" && meta !== null) for (const key in meta) out.setMeta(key, Reflect.get(meta, key))
+
+		return out.setTime(tr.time)
+	}
+
+	// Applies a transaction on the session's state; `fromView`: it came from the view, which is brought up to
+	// date even when the session refused it.
+	private apply(tr: Transaction, fromView = false): void {
 		if (tr.docChanged && this.readOnly) {
-			// Whatever the browser changed in the view is put back.
-			this.view.updateState(this.editor.state)
+			this.sync(fromView)
 
 			return
 		}
@@ -926,7 +966,7 @@ export class EditSink {
 			this.dispatching = false
 		}
 
-		this.view.updateState(this.editor.state)
+		this.sync(fromView)
 
 		if (this.view.composing && this.compositionStart >= 0) {
 			const state = this.editor.state
@@ -940,11 +980,127 @@ export class EditSink {
 		}
 	}
 
+	// A command's transaction on the session's state.
 	private run(tr: Transaction | null | false): boolean {
 		if (tr === null) return false
-		if (tr !== false) this.dispatch(tr)
+		if (tr !== false) this.apply(tr)
 
 		return true
+	}
+
+	// beforeinput historyUndo / historyRedo: the session undoes or redoes (the browser's own never runs).
+	private historyInput(event: InputEvent): boolean {
+		const type = event.inputType === "historyUndo" ? "history.undo" : event.inputType === "historyRedo" ? "history.redo" : undefined
+
+		if (type === undefined) return false
+
+		event.preventDefault()
+
+		if (!this.readOnly) this.editor.session.execute({ type })
+
+		return true
+	}
+
+	// A copy or cut writes the document's selection, as ProseMirror's own would write the view's.
+	private copyEvent(event: ClipboardEvent, cut: boolean): boolean {
+		const data = event.clipboardData
+		const content = data === null ? undefined : this.clipboardContent()
+
+		if (data === null || content === undefined) return false
+
+		event.preventDefault()
+		data.clearData()
+		data.setData("text/html", content.html)
+		data.setData("text/plain", content.text)
+
+		if (cut && !this.readOnly) this.apply(this.editor.state.tr.deleteSelection().scrollIntoView().setMeta("uiEvent", "cut"))
+
+		return true
+	}
+
+	// Brings the view to the session's state; `force`: also when that did not change (the view's DOM may
+	// differ from its state after a refused change).
+	private sync(force = false): void {
+		const real = this.editor.state
+
+		if (real === this.real && !force) return
+
+		const state = real === this.real ? this.view.state : this.viewState(real)
+
+		this.real = real
+		this.view.updateState(state)
+	}
+
+	// The view's state for the session's `real`: its document's top-level blocks around the selection's ends,
+	// each run of other blocks one gap paragraph of the run's size, and the selection there.
+	private viewState(real: EditorState): EditorState {
+		const doc = real.doc
+		const count = doc.childCount
+		const story = this.editor.story
+		const starts = story.document === doc ? story.starts : undefined
+		const indexOf = (pos: number): number => (starts === undefined ? doc.resolve(pos).index(0) : story.entryAt(pos))
+		const { from, to } = real.selection
+		const a = Math.max(0, Math.min(count - 1, indexOf(from)))
+		const b = Math.max(a, Math.min(count - 1, indexOf(to)))
+		const n = this.windowSize
+		const margin = Math.min(WINDOW_MARGIN, n >> 1)
+		const [lo = 0, hi = 0] = this.windows
+		// The window stays while the selection is well inside it (or it reaches the document's edge).
+		const kept =
+			this.windows.length === 2 &&
+			hi <= count &&
+			a >= lo &&
+			b < hi &&
+			(lo === 0 || a - lo >= margin) &&
+			(hi === count || hi - 1 - b >= margin)
+
+		if (!kept) {
+			// A selection spanning many blocks: the blocks around each end.
+			this.windows =
+				b - a > 2 * n
+					? [Math.max(0, a - n), Math.min(count, a + n + 1), Math.max(0, b - n), Math.min(count, b + n + 1)]
+					: [Math.max(0, a - n), Math.min(count, b + n + 1)]
+		}
+
+		const windows = this.windows
+
+		if (windows.length === 2 && windows[0] === 0 && windows[1] === count) {
+			this.gaps = []
+
+			return EditorState.create({ doc, selection: real.selection, storedMarks: real.storedMarks })
+		}
+
+		const children: Node[] = []
+		const gaps: Node[] = []
+		const positionOfChild = (index: number): number =>
+			index >= count ? doc.content.size : starts === undefined ? positionOf(doc, index) : (starts[index] ?? 0)
+		const gap = (start: number, end: number): void => {
+			const size = positionOfChild(end) - positionOfChild(start)
+			const node = this.gaps.find(other => other.nodeSize === size && !gaps.includes(other)) ?? gapParagraph(size)
+
+			gaps.push(node)
+			children.push(node)
+		}
+		let at = 0
+
+		for (let w = 0; w + 1 < windows.length; w += 2) {
+			const start = Math.max(at, windows[w] ?? 0)
+			const end = Math.min(count, windows[w + 1] ?? 0)
+
+			if (start > at) gap(at, start)
+
+			for (let k = start; k < end; k++) children.push(doc.child(k))
+
+			at = Math.max(at, end)
+		}
+
+		if (at < count) gap(at, count)
+
+		this.gaps = gaps
+
+		const viewDoc = doc.copy(Fragment.from(children))
+
+		return EditorState.create({ doc: viewDoc, selection: real.selection.map(viewDoc, IDENTITY), storedMarks: real.storedMarks })
 	}
 
 	// Keys of a read-only view: what moves the selection; character and word steps through the document's
@@ -987,7 +1143,7 @@ export class EditSink {
 		const apple = this.options.apple === true
 		const mod = apple ? event.metaKey : event.ctrlKey
 		const extend = event.shiftKey
-		const state = view.state
+		const state = editor.state
 
 		switch (event.key) {
 			case "ArrowUp":
@@ -1082,48 +1238,6 @@ export class EditSink {
 		}
 
 		return false
-	}
-
-	private windowDecorations(state: EditorState): DecorationSet {
-		const doc = state.doc
-		const { from, to } = state.selection
-		const count = doc.childCount
-		const n = this.windowSize
-		const a = doc.resolve(from).index(0)
-		const b = Math.min(count - 1, doc.resolve(to).index(0))
-		// A selection spanning many blocks renders around both ends only.
-		const ranges: [number, number][] =
-			b - a > 2 * n
-				? [
-						[Math.max(0, a - n), Math.min(count, a + n + 1)],
-						[Math.max(0, b - n), Math.min(count, b + n + 1)]
-					]
-				: [[Math.max(0, a - n), Math.min(count, b + n + 1)]]
-		const key = ranges.map(range => range.join("-")).join(",")
-		const cached = this.windowCache
-
-		if (cached !== undefined && cached.doc === doc && cached.key === key) return cached.set
-
-		const story = this.editor.story
-		const starts = story.document === doc ? story.starts : undefined
-		const decorations: Decoration[] = []
-
-		for (const [lo, hi] of ranges) {
-			let pos = starts === undefined ? positionOf(doc, lo) : (starts[lo] ?? 0)
-
-			for (let k = lo; k < hi; k++) {
-				const child = doc.child(k)
-
-				decorations.push(Decoration.node(pos, pos + child.nodeSize, {}, { window: true } satisfies WindowSpec))
-				pos += child.nodeSize
-			}
-		}
-
-		const set = DecorationSet.create(doc, decorations)
-
-		this.windowCache = { doc, key, set }
-
-		return set
 	}
 }
 

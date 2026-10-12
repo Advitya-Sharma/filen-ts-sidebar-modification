@@ -76,6 +76,51 @@ const MARK_WIDTH = 5
 // Lines whose mark boxes are remembered before starting over.
 const LINE_BOXES_LIMIT = 8192
 
+// Boxes of many ranges (marks), four numbers per box (top, height, left, width) line by line in the page's
+// order, and the index of each box's range. Grown as needed and reused draw after draw: drawing a page's
+// marks on each keystroke allocates nothing.
+export class MarkBoxes {
+	values = new Float64Array(256)
+	owners = new Int32Array(64)
+	count = 0
+
+	clear(): void {
+		this.count = 0
+	}
+
+	// Room for one more box, of range `owner`: its index (its numbers are values[4 * index...]).
+	add(owner: number): number {
+		const count = this.count
+
+		if (count === this.owners.length) {
+			const owners = new Int32Array(count * 2)
+			const values = new Float64Array(count * 8)
+
+			owners.set(this.owners)
+			values.set(this.values)
+			this.owners = owners
+			this.values = values
+		}
+
+		this.owners[count] = owner
+		this.count = count + 1
+
+		return count
+	}
+}
+
+// What one line's marks measured: the line's identity (see lineIdentity) and text, the boxes (left, width
+// pairs) of each part of it measured, and the next remembered line with the same hash.
+interface LineMemo {
+	readonly identity: Float64Array
+	readonly text: string
+	readonly parts: { readonly from: number; readonly to: number; readonly past: boolean; readonly boxes: Float64Array }[]
+	next: LineMemo | undefined
+}
+
+const HASH_BITS = new Float64Array(1)
+const HASH_WORDS = new Uint32Array(HASH_BITS.buffer)
+
 export class PagedGeometry {
 	readonly story: StoryEdits
 	readonly index: PageIndex
@@ -90,10 +135,16 @@ export class PagedGeometry {
 	private readonly ranges = new WeakMap<PageDisplayList, { doc: Node; range: { from: number; to: number } | undefined }>()
 	// Each page's sources located in the document as it is (null: none), filled as asked for.
 	private readonly locatedOn = new WeakMap<PageDisplayList, { doc: Node; values: (Located | null)[] }>()
-	// Boxes rangesRects() measured (left, width), by what their line shows (lineSignature, wherever it is and
-	// whichever page holds it) and the marked part of it: a line laid out again as it was (an edit in another
-	// line or on another page) is not measured again; measuring is most of the cost.
-	private readonly lineBoxes = new Map<string, Map<number, readonly number[]>>()
+	// Boxes rangesBoxes() measured, by what their line shows (lineIdentity and text, wherever it is and
+	// whichever page holds it; keyed by their hash) and the marked part of it: a line laid out again as it was
+	// (an edit in another line or on another page) is not measured again; measuring is most of the cost.
+	private readonly lineBoxes = new Map<number, LineMemo>()
+	private lineBoxesCount = 0
+	// lineIdentity()'s scratch, and the part of the line's source text it covers.
+	private identity = new Float64Array(64)
+	private identityLow = 0
+	private identityHigh = 0
+	private readonly rectsScratch: PageRect[] = []
 	// A story shown on many pages (a header) is located on this page first.
 	private preferred = -1
 
@@ -771,25 +822,33 @@ export class PagedGeometry {
 		out: PageRect[] = [],
 		owners: number[] = []
 	): PageRect[] {
-		const boxes: number[] = []
+		const boxes = new MarkBoxes()
 
-		this.rangesBoxes(ranges, longest, pageIndex, boxes, owners)
+		this.rangesBoxes(ranges, longest, pageIndex, boxes)
 
-		for (let b = 0; b + 3 < boxes.length; b += 4) {
-			out.push({ page: pageIndex, x: boxes[b + 2] ?? 0, y: boxes[b] ?? 0, width: boxes[b + 3] ?? 0, height: boxes[b + 1] ?? 0 })
+		for (let b = 0; b < boxes.count; b++) {
+			const at = b * 4
+
+			out.push({
+				page: pageIndex,
+				x: boxes.values[at + 2] ?? 0,
+				y: boxes.values[at] ?? 0,
+				width: boxes.values[at + 3] ?? 0,
+				height: boxes.values[at + 1] ?? 0
+			})
+			owners.push(boxes.owners[b] ?? -1)
 		}
 
 		return out
 	}
 
-	// rangesRects() as numbers, four per box (top, height, left, width), line by line in the page's order:
-	// for drawing many marks on each keystroke without an object per box.
+	// rangesRects() as numbers (see MarkBoxes), added to `out`: for drawing many marks on each keystroke
+	// without an object per box.
 	rangesBoxes(
 		ranges: readonly { readonly from: number; readonly to: number }[],
 		longest: number,
 		pageIndex: number,
-		out: number[],
-		owners: number[]
+		out: MarkBoxes
 	): void {
 		const page = this.pages.page(pageIndex)
 
@@ -797,7 +856,10 @@ export class PagedGeometry {
 
 		const text = page.text
 
-		if (this.lineBoxes.size > LINE_BOXES_LIMIT) this.lineBoxes.clear()
+		if (this.lineBoxesCount > LINE_BOXES_LIMIT) {
+			this.lineBoxes.clear()
+			this.lineBoxesCount = 0
+		}
 
 		for (let line = 0; line < text.lineCount; line++) {
 			const source = this.storyLine(page, line)
@@ -824,7 +886,7 @@ export class PagedGeometry {
 			const lineTo = last ? content + size : content + (map.toPm[end] ?? 0)
 			const top = text.lineFloats[line * LINE_FLOATS + LineFloat.TOP] ?? 0
 			const height = text.lineFloats[line * LINE_FLOATS + LineFloat.HEIGHT] ?? 0
-			let memo: Map<number, readonly number[]> | undefined
+			let memo: LineMemo | undefined
 
 			for (k = firstFrom(ranges, lineFrom - longest); k < ranges.length; k++) {
 				const range = ranges[k]
@@ -841,43 +903,137 @@ export class PagedGeometry {
 
 				const a = Math.max(from, lineFrom)
 				const b = Math.min(to, lineTo)
-				const la = map.toLayout[a - content] ?? start
-				const lb = map.toLayout[b - content] ?? end
+				const la = (map.toLayout[a - content] ?? start) - start
+				const lb = (map.toLayout[b - content] ?? end) - start
 				const past = to > lineTo || (last && to > content + size)
 
-				if (memo === undefined) {
-					const signature = lineSignature(page, line)
+				memo ??= this.lineMemo(page, line)
 
-					memo = this.lineBoxes.get(signature)
+				let boxes: Float64Array | undefined
 
-					if (memo === undefined) {
-						memo = new Map()
-						this.lineBoxes.set(signature, memo)
-					}
+				for (let p = 0; p < memo.parts.length && boxes === undefined; p++) {
+					const part = memo.parts[p]
+
+					if (part?.from === la && part.to === lb && part.past === past) boxes = part.boxes
 				}
-
-				// Offsets in the line (far below 2^20) and `past`, as one number.
-				const key = ((la - start) * 1_048_576 + (lb - start)) * 2 + (past ? 1 : 0)
-				let boxes = memo.get(key)
 
 				if (boxes === undefined) {
-					const drawn: PageRect[] = []
-					const measured: number[] = []
+					const drawn = this.rectsScratch
 
-					this.lineRects(page, line, la, lb, past, last, drawn)
+					drawn.length = 0
+					this.lineRects(page, line, la + start, lb + start, past, last, drawn)
+					boxes = new Float64Array(drawn.length * 2)
 
-					for (const box of drawn) measured.push(box.x, box.width)
+					for (let at = 0; at < drawn.length; at++) {
+						boxes[at * 2] = drawn[at]?.x ?? 0
+						boxes[at * 2 + 1] = drawn[at]?.width ?? 0
+					}
 
-					boxes = measured
-					memo.set(key, boxes)
+					memo.parts.push({ from: la, to: lb, past, boxes })
 				}
 
-				for (let b = 0; b + 1 < boxes.length; b += 2) {
-					out.push(top, height, boxes[b] ?? 0, boxes[b + 1] ?? 0)
-					owners.push(k)
+				for (let at = 0; at + 1 < boxes.length; at += 2) {
+					// Written in place: numbers passed to a call would each be allocated.
+					const box = 4 * out.add(k)
+					const values = out.values
+
+					values[box] = top
+					values[box + 1] = height
+					values[box + 2] = boxes[at] ?? 0
+					values[box + 3] = boxes[at + 1] ?? 0
 				}
 			}
 		}
+	}
+
+	// What `line` measured before (or a new record): found by its identity and text.
+	private lineMemo(page: PageDisplayList, line: number): LineMemo {
+		const count = this.lineIdentity(page, line)
+		const identity = this.identity
+		const source = page.text.lineInts[line * LINE_INTS + LineInt.SOURCE] ?? -1
+		const text = page.sourceTexts[source] ?? ""
+		const low = this.identityLow
+		const high = this.identityHigh
+		let hash = 2166136261
+
+		// FNV-1a over the numbers' bits and the text.
+		for (let k = 0; k < count; k++) {
+			HASH_BITS[0] = identity[k] ?? 0
+			hash = Math.imul(Math.imul(hash ^ (HASH_WORDS[0] ?? 0), 16777619) ^ (HASH_WORDS[1] ?? 0), 16777619)
+		}
+
+		for (let k = low; k < high; k++) hash = Math.imul(hash ^ text.charCodeAt(k), 16777619)
+
+		// A small integer: a key that allocates nothing.
+		hash &= 0x3fffffff
+
+		const first = this.lineBoxes.get(hash)
+
+		for (let memo = first; memo !== undefined; memo = memo.next) {
+			if (memo.identity.length !== count || memo.text.length !== high - low) continue
+
+			let same = true
+
+			for (let k = 0; k < count && same; k++) same = memo.identity[k] === identity[k]
+			for (let k = 0; k < high - low && same; k++) same = memo.text.charCodeAt(k) === text.charCodeAt(low + k)
+
+			if (same) return memo
+		}
+
+		const memo: LineMemo = { identity: identity.slice(0, count), text: text.slice(low, high), parts: [], next: first }
+
+		this.lineBoxes.set(hash, memo)
+		this.lineBoxesCount++
+
+		return memo
+	}
+
+	// Writes what decides where marks on `line` are drawn across it into `identity` (its box, flags and
+	// fragments, offsets relative to its text start) and returns how many numbers; the text it covers is
+	// [identityLow, identityHigh) of its source's text. Lines with equal identities and text measure alike,
+	// wherever they are.
+	private lineIdentity(page: PageDisplayList, line: number): number {
+		const text = page.text
+		const ints = line * LINE_INTS
+		const floats = line * LINE_FLOATS
+		const first = text.lineInts[ints + LineInt.FIRST_FRAGMENT] ?? 0
+		const count = text.lineInts[ints + LineInt.FRAGMENT_COUNT] ?? 0
+		const start = text.lineInts[ints + LineInt.TEXT_START] ?? 0
+		const size = 6 + count * (FRAGMENT_INTS + FRAGMENT_FLOATS)
+		let low = start
+		let high = text.lineInts[ints + LineInt.TEXT_END] ?? 0
+
+		if (this.identity.length < size) this.identity = new Float64Array(Math.max(size, this.identity.length * 2))
+
+		const out = this.identity
+		let n = 0
+
+		out[n++] = text.lineFloats[floats + LineFloat.X] ?? 0
+		out[n++] = text.lineFloats[floats + LineFloat.WIDTH] ?? 0
+		out[n++] = text.lineFloats[floats + LineFloat.HEIGHT] ?? 0
+		out[n++] = text.lineInts[ints + LineInt.FLAGS] ?? 0
+		out[n++] = high - start
+
+		for (let f = first; f < first + count; f++) {
+			const fi = f * FRAGMENT_INTS
+			const ff = f * FRAGMENT_FLOATS
+			const fragmentStart = text.fragmentInts[fi] ?? 0
+			const fragmentEnd = text.fragmentInts[fi + 1] ?? 0
+
+			low = Math.min(low, fragmentStart)
+			high = Math.max(high, fragmentEnd)
+			out[n++] = fragmentStart - start
+			out[n++] = fragmentEnd - start
+
+			for (let k = 2; k < FRAGMENT_INTS; k++) out[n++] = text.fragmentInts[fi + k] ?? 0
+			for (let k = 0; k < FRAGMENT_FLOATS; k++) out[n++] = text.fragmentFloats[ff + k] ?? 0
+		}
+
+		out[n++] = low - start
+		this.identityLow = low
+		this.identityHigh = high
+
+		return n
 	}
 
 	private lineRects(page: PageDisplayList, line: number, la: number, lb: number, past: boolean, last: boolean, out: PageRect[]): void {
@@ -974,38 +1130,6 @@ function sameRange(a: Int32Array, aStart: number, aEnd: number, b: Int32Array, b
 	for (let k = 0; k < aEnd - aStart; k++) if (a[aStart + k] !== b[bStart + k]) return false
 
 	return true
-}
-
-// What decides where marks on `line` are drawn across it: its box, flags and fragments (offsets relative to its
-// text start) and its text. Lines with equal signatures measure alike, wherever they are.
-function lineSignature(page: PageDisplayList, line: number): string {
-	const text = page.text
-	const ints = line * LINE_INTS
-	const floats = line * LINE_FLOATS
-	const first = text.lineInts[ints + LineInt.FIRST_FRAGMENT] ?? 0
-	const count = text.lineInts[ints + LineInt.FRAGMENT_COUNT] ?? 0
-	const start = text.lineInts[ints + LineInt.TEXT_START] ?? 0
-	let low = start
-	let high = text.lineInts[ints + LineInt.TEXT_END] ?? 0
-	let out = `${text.lineFloats[floats + LineFloat.X] ?? 0},${text.lineFloats[floats + LineFloat.WIDTH] ?? 0},${text.lineFloats[floats + LineFloat.HEIGHT] ?? 0},${text.lineInts[ints + LineInt.FLAGS] ?? 0},${high - start}`
-
-	for (let f = first; f < first + count; f++) {
-		const fi = f * FRAGMENT_INTS
-		const ff = f * FRAGMENT_FLOATS
-		const fragmentStart = text.fragmentInts[fi] ?? 0
-		const fragmentEnd = text.fragmentInts[fi + 1] ?? 0
-
-		low = Math.min(low, fragmentStart)
-		high = Math.max(high, fragmentEnd)
-		out += `|${fragmentStart - start},${fragmentEnd - start}`
-
-		for (let k = 2; k < FRAGMENT_INTS; k++) out += `,${text.fragmentInts[fi + k] ?? 0}`
-		for (let k = 0; k < FRAGMENT_FLOATS; k++) out += `,${text.fragmentFloats[ff + k] ?? 0}`
-	}
-
-	const source = text.lineInts[ints + LineInt.SOURCE] ?? -1
-
-	return `${out}|${low - start}|${(page.sourceTexts[source] ?? "").slice(low, high)}`
 }
 
 // Whether `line` is right to left or holds right-to-left text.

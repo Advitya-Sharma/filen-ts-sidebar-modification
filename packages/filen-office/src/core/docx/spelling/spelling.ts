@@ -4,14 +4,14 @@ import type { Mapping } from "prosemirror-transform"
 import type { DocxEditorSession } from "../edit/session"
 import { docxSchema } from "../edit/schema"
 import type { SpellingChecker, SpellingIssue, SpellingMark, SpellingSuggestOptions } from "./checker"
-import { ParagraphScanner, inWordStyle, spellingQuery, type RelativeIssue } from "./scan"
+import { ParagraphScanner, inWordStyle, spellingQuery } from "./scan"
 
 // Spelling of one editing session, headless: the issues of the document (misspelled and repeated words)
 // as ranges for a view to mark, kept in step with every edit, and the actions on them (suggestions,
-// replace, ignore all, add to dictionary). Edits map the existing marks at once; the edited paragraphs
-// are checked again after a short pause, and each paragraph's result is kept until its node changes, so a
-// pass over an edited document only scans what changed. The word being typed is not marked until the
-// caret leaves it. Nothing here touches the DOM.
+// replace, ignore all, add to dictionary). Edits move the existing marks at once, in place, and leave the
+// ranges they changed to check (moved through later edits); after a short pause a pass checks those ranges
+// within a time budget and nothing else. Once nothing is left to check no pass runs. The word being typed is
+// not marked until the caret leaves it. Nothing here touches the DOM.
 
 export interface DocxSpellingOptions {
 	// Language for text whose runs and styles name none (the app's editing language).
@@ -63,6 +63,82 @@ function defaultTimers(): SpellingTimers {
 	}
 }
 
+// Ranges ([from, to) pairs, ascending, apart) moved through an edit; those it emptied go.
+function mapRanges(ranges: readonly number[], mapping: Mapping): number[] {
+	const out: number[] = []
+
+	for (let k = 0; k + 1 < ranges.length; k += 2) {
+		const from = mapping.map(ranges[k] ?? 0, -1)
+		const to = mapping.map(ranges[k + 1] ?? 0, 1)
+
+		if (to > from) out.push(from, to)
+	}
+
+	return out
+}
+
+// Ranges closer than this are kept as one (the paragraphs of a table, a few positions apart, are one range).
+const RANGE_SLACK = 8
+
+// Two lists of ranges as one (ranges overlapping or closer than RANGE_SLACK merged), in one pass.
+function mergeRanges(a: readonly number[], b: readonly number[]): number[] {
+	const out: number[] = []
+	let i = 0
+	let j = 0
+
+	while (i + 1 < a.length || j + 1 < b.length) {
+		const fromA = i + 1 < a.length && (j + 1 >= b.length || (a[i] ?? 0) <= (b[j] ?? 0))
+		const from = (fromA ? a[i] : b[j]) ?? 0
+		const to = (fromA ? a[i + 1] : b[j + 1]) ?? 0
+
+		if (fromA) i += 2
+		else j += 2
+
+		if (to <= from) continue
+
+		if (out.length > 0 && from <= (out[out.length - 1] ?? 0) + RANGE_SLACK) out[out.length - 1] = Math.max(out[out.length - 1] ?? 0, to)
+		else out.push(from, to)
+	}
+
+	return out
+}
+
+// `ranges` with [from, to) added.
+function addRange(ranges: readonly number[], from: number, to: number): number[] {
+	return mergeRanges(ranges, [from, to])
+}
+
+// The one replaced range of a mapping of one step (typing, a deletion): its start and end before the edit
+// and how far it moved what followed; undefined for any other mapping.
+function singleEdit(mapping: Mapping): { start: number; end: number; shift: number } | undefined {
+	if (mapping.maps.length !== 1) return undefined
+
+	let edit: { start: number; end: number; shift: number } | undefined
+	let ranges = 0
+
+	mapping.maps[0]?.forEach((oldStart, oldEnd, newStart, newEnd) => {
+		ranges++
+		edit = { start: oldStart, end: oldEnd, shift: newEnd - newStart - (oldEnd - oldStart) }
+	})
+
+	return ranges === 1 ? edit : undefined
+}
+
+// The first issue (in document order) whose end is at or after `pos`.
+function firstEndingFrom(issues: readonly SpellingIssue[], pos: number): number {
+	let low = 0
+	let high = issues.length
+
+	while (low < high) {
+		const middle = (low + high) >> 1
+
+		if ((issues[middle]?.to ?? 0) < pos) low = middle + 1
+		else high = middle
+	}
+
+	return low
+}
+
 // The range [from, to] of the document `mapping` produced that its steps changed, or undefined.
 function changedRange(mapping: Mapping): { from: number; to: number } | undefined {
 	let from = Number.POSITIVE_INFINITY
@@ -99,18 +175,20 @@ export class DocxSpelling {
 	private readonly timers: SpellingTimers
 	private readonly listeners = new Set<(marks: readonly SpellingMark[]) => void>()
 	private readonly unsubscribe: (() => void)[] = []
-	// Complete results by paragraph node (nodes are immutable: a changed paragraph is a new node).
-	private results = new WeakMap<Node, readonly RelativeIssue[]>()
-	// Results of paragraphs with words still unchecked: shown as they are and not scanned again until a check
-	// answers, an edit or a notice from the checker.
-	private pending = new WeakMap<Node, readonly RelativeIssue[]>()
+	// Ranges still to check ([from, to) pairs, ascending, apart), and those of paragraphs waiting for verdicts:
+	// both moved through edits.
+	private dirty: number[] = []
+	private waiting: number[] = []
+	// Issues past MAX_SPELLING_ISSUES were dropped: the rest of the document is checked again once there is room.
+	private capped = false
 	// Words asked for since the last edit or notice, by dictionary: never asked twice, so a checker that
 	// answers without a verdict cannot start a loop.
 	private requested = new Map<string, Set<string>>()
 	// Dictionaries whose check failed (not loadable): not asked again until the next edit or notice.
 	private readonly failed = new Set<string>()
 	// In document order. Moved in place by edits (an issue keeps its identity while it stays), so a keystroke
-	// allocates no issue; marks() is a new array whenever they changed.
+	// allocates no issue; marks() is a new array whenever marks came, went or changed length, and the same
+	// array (its marks moved) when an edit only moved them.
 	private issues: MovableIssue[] = []
 	private readonly ignored = new Set<string>()
 	private readonly ignoredRepeats = new Set<string>()
@@ -144,15 +222,17 @@ export class DocxSpelling {
 			session.onApplied((transactions, state) => this.onApplied(transactions, state)),
 			checker.subscribe(() => this.invalidate())
 		)
+		this.dirty = [0, session.state.doc.content.size]
 		this.schedule(0)
 	}
 
-	// Ranges to mark now, in document order (empty while the document hides spelling errors).
+	// Ranges to mark now, in document order (empty while the document hides spelling errors). An edit that
+	// only moves marks moves them in this array: a view redraws them with the document it shows.
 	marks(): readonly SpellingMark[] {
 		return this.marksValue
 	}
 
-	// Hears every change of marks() (synchronously after the edit that moved them).
+	// Hears every new marks() (synchronously after the edit or pass that made it).
 	subscribe(listener: (marks: readonly SpellingMark[]) => void): () => void {
 		this.listeners.add(listener)
 
@@ -263,13 +343,22 @@ export class DocxSpelling {
 
 	private onApplied(transactions: readonly Transaction[], state: EditorState): void {
 		let changed = false
+		let marksChanged = false
 
 		for (const tr of transactions) {
 			if (!tr.docChanged) continue
 
+			const range = changedRange(tr.mapping)
+
 			changed = true
-			this.mapIssues(this.issues, tr.mapping)
-			this.lastEdit = changedRange(tr.mapping) ?? this.lastEdit
+			marksChanged = this.mapIssues(this.issues, tr.mapping, this.suppressed) || marksChanged
+			this.dirty = mapRanges(this.dirty, tr.mapping)
+			this.waiting = mapRanges(this.waiting, tr.mapping)
+			this.lastEdit = range ?? this.lastEdit
+
+			// The paragraphs around it too: an edit at a paragraph's edge joins or splits paragraphs.
+			if (range !== undefined)
+				this.dirty = addRange(this.dirty, Math.max(0, range.from - 1), Math.min(tr.doc.content.size, range.to + 1))
 		}
 
 		if (changed) {
@@ -277,24 +366,44 @@ export class DocxSpelling {
 			this.schedule(this.delay)
 		}
 
-		this.emit(state, changed)
+		this.emit(state, marksChanged)
 	}
 
-	// Moves the issues through an edit, in place; those it deleted go.
-	private mapIssues(issues: MovableIssue[], mapping: Mapping): void {
-		let kept = 0
+	// Moves the issues through an edit, in place; those it deleted go. Whether any marked one went or changed
+	// length (a view needs a new list then; moved marks only need drawing again); the issue being typed is not
+	// marked (`unmarked`).
+	private mapIssues(issues: MovableIssue[], mapping: Mapping, unmarked: SpellingIssue | undefined): boolean {
 		const count = issues.length
+		const edit = singleEdit(mapping)
+		// Issues ending before the edit stay; those starting after it move by its size (most of a document,
+		// mapped without a lookup each).
+		let kept = edit === undefined ? 0 : firstEndingFrom(issues, edit.start + 1)
+		let changed = false
 
 		// Indexed: the array is compacted as it is read.
-		for (let k = 0; k < count; k++) {
+		for (let k = kept; k < count; k++) {
 			const issue = issues[k]
 
 			if (issue === undefined) continue
 
+			if (edit !== undefined && issue.from > edit.end) {
+				issue.from += edit.shift
+				issue.to += edit.shift
+				issues[kept++] = issue
+
+				continue
+			}
+
 			const from = mapping.map(issue.from, 1)
 			const to = mapping.map(issue.to, -1)
 
-			if (to <= from) continue
+			if (to <= from) {
+				changed ||= issue !== unmarked
+
+				continue
+			}
+
+			if (to - from !== issue.to - issue.from && issue !== unmarked) changed = true
 
 			issue.from = from
 			issue.to = to
@@ -302,19 +411,30 @@ export class DocxSpelling {
 		}
 
 		issues.length = kept
+
+		return changed
 	}
 
+	// Verdicts may have changed (the user's words, words ignored): the whole document is checked again.
 	private invalidate(): void {
-		this.results = new WeakMap()
+		this.waiting = []
+		this.dirty = [0, this.session.state.doc.content.size]
 		this.retry()
 		this.schedule(0)
 	}
 
-	// Unchecked words and failed dictionaries get asked for again.
+	// Unchecked words and failed dictionaries get asked for again: paragraphs waiting for verdicts are checked
+	// again (none are once every word has one).
 	private retry(): void {
-		this.pending = new WeakMap()
 		this.requested = new Map()
 		this.failed.clear()
+		this.recheckWaiting()
+	}
+
+	// Paragraphs waiting for verdicts are checked again (verdicts came, or their dictionary is tried again).
+	private recheckWaiting(): void {
+		this.dirty = mergeRanges(this.dirty, this.waiting)
+		this.waiting = []
 	}
 
 	private schedule(ms: number): void {
@@ -341,97 +461,152 @@ export class DocxSpelling {
 		this.timerDue = Number.POSITIVE_INFINITY
 	}
 
-	// One pass over the document: cached and pending paragraphs cost a lookup, new ones are scanned within the
-	// time budget (the rest keep their mapped issues and the next pass continues), words never asked for go to
-	// the checker, whose answer starts another pass.
+	// One pass over what is left to check, in document order: its paragraphs are scanned within the time budget
+	// (the rest stays to check, and the next pass continues there); words never asked for go to the checker,
+	// whose answer checks the paragraphs waiting for it again. Nothing is kept per paragraph: an edit leaves
+	// only its own paragraphs to check.
 	private pass(): void {
 		if (this.disposed) return
 
 		const state = this.session.state
+		const doc = state.doc
+		const size = doc.content.size
 		const deadline = this.now() + this.budget
-		const previous = this.issues
-		const next: MovableIssue[] = []
-		// The previous issues are in document order: one equal to a new one (same place, word and verdict) is
-		// kept, so a pass over a document that barely changed allocates little.
-		let reused = 0
-		const issueAt = (issue: RelativeIssue, start: number): MovableIssue => {
-			const from = issue.from + start
-			const to = issue.to + start
+		const unknown = new Map<string, Set<string>>()
+		// Paragraphs found waiting for verdicts, in order (runs of them as one range).
+		const waiting: number[] = []
+		let scanned = 0
+		let changed = false
+		let stopped = false
 
-			while (reused < previous.length && (previous[reused]?.from ?? 0) < from) reused++
+		while (this.dirty.length >= 2 && !stopped) {
+			const from = Math.min(this.dirty[0] ?? 0, size)
+			const to = Math.min(this.dirty[1] ?? 0, size)
 
-			const old = previous[reused]
+			// Issues before the range stay: from it on, issues are taken up to the limit only (the rest is checked
+			// once there is room).
+			const room = MAX_SPELLING_ISSUES - firstEndingFrom(this.issues, from + 1)
+			let full = false
+			// The paragraphs checked ([start, end) of the first and last) and their issues, in order.
+			let start = -1
+			let end = from
+			const found: MovableIssue[] = []
+			const visit = (node: Node, pos: number): boolean => {
+				if (stopped || full) return false
+
+				if (found.length >= room) {
+					full = true
+
+					return false
+				}
+
+				if (node.type !== docxSchema.nodes.paragraph) return node.type !== docxSchema.nodes.locked_block
+
+				// At least one paragraph per pass, so a pass always makes progress.
+				if (scanned > 0 && this.now() > deadline) {
+					stopped = true
+
+					return false
+				}
+
+				const scan = this.scanner.scan(node, this.ignored, this.ignoredRepeats, unknown)
+
+				scanned++
+
+				if (start < 0) start = pos
+
+				end = pos + node.nodeSize
+
+				// Words without verdicts: checked again once they come (shown as they are meanwhile).
+				if (!scan.complete) {
+					if (waiting.length > 0 && pos <= (waiting[waiting.length - 1] ?? 0) + RANGE_SLACK) waiting[waiting.length - 1] = end
+					else waiting.push(pos, end)
+				}
+
+				for (const issue of scan.issues) found.push({ ...issue, from: issue.from + pos + 1, to: issue.to + pos + 1 })
+
+				return false
+			}
+
+			doc.nodesBetween(from, Math.max(from, to), visit)
+
+			if (start >= 0) changed = this.replaceIssues(start, end, found) || changed
+
+			if (full) {
+				// What follows is past the limit too (ranges are in order).
+				this.capped = true
+				this.dirty = []
+
+				break
+			}
+
+			// What is left of the range: past the last paragraph checked when the budget ran out.
+			this.dirty = stopped ? [Math.max(from, end), ...this.dirty.slice(1)] : this.dirty.slice(2)
+
+			if (stopped && (this.dirty[0] ?? 0) >= (this.dirty[1] ?? 0)) this.dirty = this.dirty.slice(2)
+		}
+
+		// Room again below the limit: the rest of the document is checked for the issues dropped.
+		if (this.capped && this.issues.length < MAX_SPELLING_ISSUES) {
+			this.capped = false
+			this.dirty = addRange(this.dirty, this.issues[this.issues.length - 1]?.to ?? 0, size)
+		}
+
+		this.waiting = mergeRanges(this.waiting, waiting)
+		this.ask(unknown)
+
+		if (this.dirty.length > 0) this.schedule(0)
+
+		this.emit(state, changed)
+	}
+
+	// Replaces the issues of the paragraphs in [start, end) with `found` (in order), keeping each that is the
+	// same as before (place, word and verdict): a pass that finds what was there allocates nothing for it.
+	// Whether anything changed.
+	private replaceIssues(start: number, end: number, found: MovableIssue[]): boolean {
+		const issues = this.issues
+		const low = firstEndingFrom(issues, start + 1)
+		let high = low
+
+		while (high < issues.length && (issues[high]?.from ?? 0) < end) high++
+
+		let same = high - low === found.length
+
+		for (let k = 0; k < found.length; k++) {
+			const old = issues[low + k]
+			const issue = found[k]
 
 			if (
 				old !== undefined &&
-				old.from === from &&
-				old.to === to &&
+				low + k < high &&
+				issue !== undefined &&
+				old.from === issue.from &&
+				old.to === issue.to &&
 				old.kind === issue.kind &&
 				old.word === issue.word &&
 				old.dictionary === issue.dictionary &&
 				old.language === issue.language
 			) {
-				reused++
-
-				return old
-			}
-
-			return { ...issue, from, to }
-		}
-		const unknown = new Map<string, Set<string>>()
-		let carried = 0
-		let scanned = 0
-		let more = false
-
-		const carry = (from: number, to: number): void => {
-			while (carried < previous.length && (previous[carried]?.from ?? 0) < from) carried++
-
-			while (carried < previous.length && (previous[carried]?.to ?? 0) <= to) {
-				const issue = previous[carried++]
-
-				if (issue !== undefined && next.length < MAX_SPELLING_ISSUES) next.push(issue)
+				found[k] = old
+			} else {
+				same = false
 			}
 		}
 
-		state.doc.descendants((node, pos) => {
-			if (node.type === docxSchema.nodes.paragraph) {
-				let issues = this.results.get(node) ?? this.pending.get(node)
+		if (same) return false
 
-				if (issues === undefined) {
-					// At least one paragraph per pass, so a pass always makes progress.
-					if (scanned > 0 && this.now() > deadline) {
-						more = true
-						carry(pos, pos + node.nodeSize)
+		issues.splice(low, high - low, ...found)
 
-						return false
-					}
+		if (issues.length > MAX_SPELLING_ISSUES) {
+			issues.length = MAX_SPELLING_ISSUES
+			this.capped = true
+		}
 
-					const scan = this.scanner.scan(node, this.ignored, this.ignoredRepeats, unknown)
+		return true
+	}
 
-					scanned++
-
-					if (scan.complete) this.results.set(node, scan.issues)
-					else this.pending.set(node, scan.issues)
-
-					issues = scan.issues
-				}
-
-				const start = pos + 1
-
-				for (const issue of issues) {
-					if (next.length >= MAX_SPELLING_ISSUES) break
-
-					next.push(issueAt(issue, start))
-				}
-
-				return false
-			}
-
-			return node.type !== docxSchema.nodes.locked_block
-		})
-
-		this.issues = next
-
+	// Sends the words without a verdict to the checker, each once until the next edit or notice.
+	private ask(unknown: Map<string, Set<string>>): void {
 		for (const [dictionary, words] of unknown) {
 			if (this.failed.has(dictionary)) continue
 
@@ -457,10 +632,9 @@ export class DocxSpelling {
 
 			this.checker.check(dictionary, fresh).then(
 				() => {
-					// Stale: an edit or notice since asked again already.
-					if (requested !== this.requested) return
+					if (this.disposed) return
 
-					this.pending = new WeakMap()
+					this.recheckWaiting()
 					this.schedule(0)
 				},
 				() => {
@@ -468,10 +642,6 @@ export class DocxSpelling {
 				}
 			)
 		}
-
-		if (more) this.schedule(0)
-
-		this.emit(state, true)
 	}
 
 	// Recomputes the issue being typed and publishes marks when they changed.
@@ -488,7 +658,14 @@ export class DocxSpelling {
 			const typed = (issue: SpellingIssue): boolean =>
 				edit.from === edit.to ? issue.from <= edit.from && edit.from <= issue.to : edit.from < issue.to && issue.from < edit.to
 
-			suppressed = this.issues.find(issue => issue.from <= caret && caret <= issue.to && typed(issue))
+			// The first issue ending at or after the caret, and the one after it (both may touch the caret).
+			const first = firstEndingFrom(this.issues, caret)
+
+			for (let k = first; k < first + 2 && suppressed === undefined; k++) {
+				const issue = this.issues[k]
+
+				if (issue !== undefined && issue.from <= caret && caret <= issue.to && typed(issue)) suppressed = issue
+			}
 
 			// The caret left the edited word: later visits to it are not typing.
 			if (suppressed === undefined && (caret < edit.from - 1 || caret > edit.to + 1)) this.lastEdit = undefined

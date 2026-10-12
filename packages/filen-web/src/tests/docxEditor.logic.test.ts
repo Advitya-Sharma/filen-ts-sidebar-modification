@@ -8,6 +8,7 @@ import {
 	firstMatchFrom,
 	lockReasonKey,
 	markupSwitch,
+	sameToolbarSnapshot,
 	shortcutKeys,
 	stepMatch,
 	styleLabel,
@@ -35,6 +36,28 @@ function snapshot(overrides: Partial<DocxEditorSnapshot> = {}): DocxEditorSnapsh
 }
 
 describe("docx editor toolbar logic", () => {
+	it("keeps the toolbar's snapshot across keystrokes and changes it when anything it shows changes", () => {
+		const shown = snapshot()
+
+		// Typing moves the selection and bumps the version: nothing the toolbar shows.
+		expect(
+			sameToolbarSnapshot(
+				shown,
+				snapshot({ version: 2, dirty: true, selection: { empty: true, from: 9, to: 9, locked: null, paragraphs: 1 } })
+			)
+		).toBe(true)
+		expect(sameToolbarSnapshot(shown, snapshot({ formats: { ...shown.formats, bold: "off" } }))).toBe(false)
+		expect(sameToolbarSnapshot(shown, snapshot({ paragraph: { ...shown.paragraph, list: "none" } }))).toBe(false)
+		expect(sameToolbarSnapshot(shown, snapshot({ enabled: { ...shown.enabled, "history.undo": false } }))).toBe(false)
+		expect(sameToolbarSnapshot(shown, snapshot({ canUndo: true }))).toBe(false)
+		expect(sameToolbarSnapshot(shown, snapshot({ readOnly: true, readOnlyReasons: ["host"] }))).toBe(false)
+		expect(sameToolbarSnapshot(shown, snapshot({ selection: { empty: false, from: 1, to: 5, locked: "proof", paragraphs: 1 } }))).toBe(
+			false
+		)
+		expect(sameToolbarSnapshot(undefined, shown)).toBe(false)
+		expect(sameToolbarSnapshot(undefined, undefined)).toBe(true)
+	})
+
 	it("labels every command and every paragraph style with a real key", () => {
 		for (const command of DOCX_EDITOR_COMMANDS) {
 			expect(en).toHaveProperty(COMMAND_LABELS[command.type])

@@ -9,6 +9,8 @@ import type { PagedEditor } from "@filen/office/core/docx/paged"
 import { saveDocx, StoryWriter } from "@filen/office/core/docx/write"
 import { MeasureCache, StyleTable } from "@filen/office/core/text"
 import { DecorationTable, RunStyles } from "../core/docx/layout/styles"
+import { Item } from "../core/docx/model/index"
+import { namePrefixes } from "../core/docx/paged/edits"
 import { buildDocx } from "./docxSynthetic"
 import { layOut, readBytes } from "./layoutFixtures"
 import { editedLayout, finishLayout, pageDigest, pagedEditor, savedDigest, settleAll, type EditedLayout } from "./pagedFixtures"
@@ -1494,5 +1496,53 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 
 		expect(() => writer.writeStory(moved)).toThrow("A locked section break moved into or out of a table cell")
 		expect(() => writer.writeStory(doc)).not.toThrow()
+	})
+})
+
+describe("overlay parts", () => {
+	const prefixesOf = (xml: string): string[] | undefined => {
+		const out = new Set<string>()
+
+		return namePrefixes(new TextEncoder().encode(xml), out) ? [...out].sort() : undefined
+	}
+
+	it("declare only the prefixes their names use, and fall back where names alone do not tell", () => {
+		// `xml` is bound without a declaration; attributes without a prefix are in no namespace.
+		expect(prefixesOf('<w:p w14:paraId="1"><w:r><w:t xml:space="preserve">a: b &lt; c</w:t></w:r></w:p>')).toEqual(["w", "w14"])
+		expect(prefixesOf('<w:r><w:drawing><wp:inline><wp:extent cx="1" cy="2"/></wp:inline></w:drawing></w:r>')).toEqual(["w", "wp"])
+		expect(prefixesOf('<w:p><mc:AlternateContent><mc:Choice Requires="wps"/></mc:AlternateContent></w:p>')).toBeUndefined()
+		expect(prefixesOf('<w:p xmlns:x="urn:x"><x:y/></w:p>')).toBeUndefined()
+		expect(prefixesOf("<w:p><!-- note --></w:p>")).toBeUndefined()
+		expect(prefixesOf("<w:p a=\"1\" b='>'/>")).toEqual(["w"])
+		expect(prefixesOf("<p/>")).toEqual([""])
+	})
+
+	it("parse an edited block in the minimal root as in the source's own", async () => {
+		const edited = await editedLayout(buildDocx({ body: para("one") }))
+		const source = edited.story.part
+		const container = edited.story.story.story.item
+		const block =
+			'<w:p><w:r><w:t xml:space="preserve">a </w:t></w:r>' +
+			'<w:r><w:drawing><wp:inline><wp:extent cx="1" cy="2"/></wp:inline></w:drawing></w:r></w:p>'
+		const encode = (xml: string): Uint8Array => new TextEncoder().encode(xml)
+		const minimal = edited.edits.addPart(source, container, encode(block), true)
+		// A comment: the names alone do not tell, so the source's own root tag is used.
+		const full = edited.edits.addPart(source, container, encode(`${block}<!-- full -->`), true)
+
+		if (minimal === undefined || full === undefined) throw new Error("not parsed")
+
+		expect(minimal.offset).toBeLessThan(full.offset)
+		expect(minimal.items.length).toBe(1)
+
+		const items = (part: typeof minimal.part, first: number): string[] => {
+			const out: string[] = []
+
+			for (let item = first; item < part.end(first); item++)
+				out.push(`${String(part.kinds[item])}:${part.kinds[item] === Item.Text ? part.text(item) : ""}`)
+
+			return out
+		}
+
+		expect(items(minimal.part, minimal.items[0] ?? -1)).toEqual(items(full.part, full.items[0] ?? -1))
 	})
 })

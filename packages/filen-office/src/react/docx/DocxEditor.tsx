@@ -92,29 +92,61 @@ interface Layout {
 	readonly widths: Float64Array
 	readonly total: number
 	readonly contentWidth: number
+	readonly zoom: number
+	readonly gap: number
 }
 
-function pageLayout(document: DocxDocument, count: number, zoom: number, gap: number): Layout {
-	const tops = new Float64Array(count)
-	const heights = new Float64Array(count)
-	const widths = new Float64Array(count)
-	const fallback = document.pages[document.pages.length - 1]
-	let y = gap
-	let widest = 0
+// A page's size on screen; one not laid out yet is sized like the last that is.
+function pageWidth(document: DocxDocument, index: number, zoom: number): number {
+	const page = document.pages[index] ?? document.pages[document.pages.length - 1]
 
-	for (let i = 0; i < count; i++) {
-		const page = document.pages[i]
-		const width = (page?.width ?? fallback?.width ?? document.info?.pageWidth ?? DEFAULT_PAGE_WIDTH) * zoom
-		const height = (page?.height ?? fallback?.height ?? document.info?.pageHeight ?? DEFAULT_PAGE_HEIGHT) * zoom
+	return (page?.width ?? document.info?.pageWidth ?? DEFAULT_PAGE_WIDTH) * zoom
+}
 
-		tops[i] = y
-		heights[i] = height
-		widths[i] = width
-		widest = Math.max(widest, width)
-		y += height + gap
+function pageHeight(document: DocxDocument, index: number, zoom: number): number {
+	const page = document.pages[index] ?? document.pages[document.pages.length - 1]
+
+	return (page?.height ?? document.info?.pageHeight ?? DEFAULT_PAGE_HEIGHT) * zoom
+}
+
+// The pages' places, the same object while they do not change (pages laid out again keep their size as a
+// rule): what is drawn from it is not drawn again on a keystroke.
+class PageLayouts {
+	private last: Layout | undefined = undefined
+
+	layout(document: DocxDocument, count: number, zoom: number, gap: number): Layout {
+		const last = this.last
+
+		if (last !== undefined && last.tops.length === count && last.zoom === zoom && last.gap === gap) {
+			let same = true
+
+			for (let i = 0; i < count && same; i++)
+				same = pageWidth(document, i, zoom) === last.widths[i] && pageHeight(document, i, zoom) === last.heights[i]
+
+			if (same) return last
+		}
+
+		const tops = new Float64Array(count)
+		const heights = new Float64Array(count)
+		const widths = new Float64Array(count)
+		let y = gap
+		let widest = 0
+
+		for (let i = 0; i < count; i++) {
+			const width = pageWidth(document, i, zoom)
+			const height = pageHeight(document, i, zoom)
+
+			tops[i] = y
+			heights[i] = height
+			widths[i] = width
+			widest = Math.max(widest, width)
+			y += height + gap
+		}
+
+		this.last = { tops, heights, widths, total: y, contentWidth: widest + 2 * gap, zoom, gap }
+
+		return this.last
 	}
-
-	return { tops, heights, widths, total: y, contentWidth: widest + 2 * gap }
 }
 
 // The first page whose bottom is below `y`.
@@ -171,13 +203,14 @@ export function DocxEditor(props: DocxEditorProps) {
 	// The end a touch handle drag keeps fixed.
 	const handleDragRef = useRef<{ end: "start" | "end"; fixed: number } | null>(null)
 	const [surface] = useState(() => new EditSurface(editor))
+	const [layouts] = useState(() => new PageLayouts())
 	const [viewport, setViewport] = useState({ top: 0, height: 0, width: 0 })
 	const [count, setCount] = useState(() => Math.max(editor.pageCount, document.pages.length))
 	const [focused, setFocused] = useState(false)
 	const [composing, setComposing] = useState(false)
 	const [region, setRegion] = useState(() => editor.activeRegion)
 	const readOnly = props.readOnly === true || editor.session.readOnly
-	const layout = pageLayout(document, count, zoom, gap)
+	const layout = layouts.layout(document, count, zoom, gap)
 	const visible =
 		count === 0
 			? { first: 0, last: -1 }
@@ -430,9 +463,10 @@ export function DocxEditor(props: DocxEditorProps) {
 	const requestFrame = (work: { draw?: boolean; scroll?: boolean; align?: boolean }): void => {
 		const frame = frameRef.current
 
-		frame.draw ||= work.draw === true
-		frame.scroll ||= work.scroll === true
-		frame.align ||= work.align === true
+		// Plain assignments: the React Compiler does not lower `||=` (it would skip this component).
+		if (work.draw === true) frame.draw = true
+		if (work.scroll === true) frame.scroll = true
+		if (work.align === true) frame.align = true
 
 		if (frame.id !== 0) return
 

@@ -103,8 +103,9 @@ function documentOf(editor: PagedEditor): DocxDocument {
 }
 
 const p = (text: string): string => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`
+const LONG_PARAGRAPHS = 60
 const LONG = buildDocx({
-	body: Array.from({ length: 60 }, (_, k) => p(`Paragraph ${k} ${"lorem ipsum dolor sit amet ".repeat(12)}`)).join("")
+	body: Array.from({ length: LONG_PARAGRAPHS }, (_, k) => p(`Paragraph ${k} ${"lorem ipsum dolor sit amet ".repeat(12)}`)).join("")
 })
 
 function paragraphPos(editor: PagedEditor, index: number): number {
@@ -154,6 +155,13 @@ describe("line patching", () => {
 		// laid out again).
 		expect(inserted.mock.calls.length).toBe(patched.painted.lines.length - kept.length)
 		expect(patched.painted.lines[0]?.text).toBe(painted.lines[0]?.text)
+		// A line where it was, showing the same text of the same paragraph, is kept as painted (nothing made).
+		expect(patched.painted.lines[0]).toBe(painted.lines[0])
+
+		// Patching to the page as it was brings back what it looked like.
+		const back = patchPage(patched.painted, pageData(before), { document, tables })
+
+		expect(back.painted.root.innerHTML).toBe(paintPage(pageData(before), { document, tables }).root.innerHTML)
 	})
 })
 
@@ -197,11 +205,12 @@ describe("DocxEditor", () => {
 
 		expect(textbox?.getAttribute("aria-label")).toBe("Document")
 		expect(container.querySelector(".fo-docx-pages")?.getAttribute("aria-hidden")).toBe("true")
-		// Only the blocks near the selection have content in the input view.
+		// Only the blocks near the selection are in the input view; the rest is one empty gap after them.
 		const filled = Array.from(textbox?.children ?? []).filter(child => child.childNodes.length > 0)
 
-		expect(textbox?.children.length).toBe(editor.state.doc.childCount)
+		expect(textbox?.children.length).toBeLessThanOrEqual(8)
 		expect(filled.length).toBeLessThanOrEqual(7)
+		expect(textbox?.lastElementChild?.childNodes.length).toBe(0)
 		expect(container.querySelectorAll(".fo-docx-page").length).toBeGreaterThan(0)
 
 		// A caret in paragraph 2, drawn on its page.
@@ -222,8 +231,11 @@ describe("DocxEditor", () => {
 
 		const blocks = Array.from(textbox?.children ?? [])
 
-		expect(blocks[40]?.childNodes.length).toBeGreaterThan(0)
-		expect(blocks[2]?.childNodes.length).toBe(0)
+		// A gap, the blocks around paragraph 40, a gap.
+		expect(blocks.length).toBeLessThanOrEqual(9)
+		expect(blocks[0]?.childNodes.length).toBe(0)
+		expect(textbox?.textContent).toContain("Paragraph 40 ")
+		expect(textbox?.textContent).not.toContain("Paragraph 2 ")
 
 		// A range: selection boxes on the mounted page that shows it, no caret.
 		const ends = editor.ends()
@@ -325,7 +337,7 @@ describe("DocxEditor input", () => {
 		container.remove()
 	})
 
-	const mount = async (editor: PagedEditor, props: { readOnly?: boolean; marks?: readonly DocxEditorMark[] } = {}) => {
+	const mount = async (editor: PagedEditor, props: { readOnly?: boolean; marks?: readonly DocxEditorMark[]; zoom?: number } = {}) => {
 		const handle = { current: null as DocxEditorHandle | null }
 
 		act(() =>
@@ -352,6 +364,29 @@ describe("DocxEditor input", () => {
 
 		return { handle, content, textbox }
 	}
+
+	it("places the pages anew when the zoom or a page's size changes, as when nothing did", async () => {
+		const { editor } = await pagedEditor(LONG)
+		const places = (): string[] =>
+			Array.from(container.querySelectorAll<HTMLElement>("[data-fo-page]"), page => `${page.style.top}|${page.style.height}`)
+
+		const { content } = await mount(editor)
+		const first = places()
+		const height = content.style.height
+
+		await mount(editor, { zoom: 2 })
+		expect(places()).not.toEqual(first)
+		expect(Number.parseFloat(content.style.height)).toBeGreaterThan(1.9 * Number.parseFloat(height))
+
+		// Typing lays pages out again at their size: the places stay.
+		await mount(editor)
+		await act(async () => {
+			editor.dispatch(editor.state.tr.insertText("typed ", paragraphPos(editor, 2) + 1))
+			await frame()
+		})
+		expect(places()).toEqual(first)
+		expect(content.style.height).toBe(height)
+	})
 
 	it("counts clicks itself: a double click selects the word, a triple click the paragraph", async () => {
 		const { editor } = await pagedEditor(LONG)
@@ -557,6 +592,7 @@ describe("DocxEditor input", () => {
 		expect(container.querySelectorAll("svg.fo-docx-marks").length).toBe(container.querySelectorAll("[data-fo-page]").length)
 
 		const tr = editor.state.tr.insertText("x", paragraphPos(editor, 3) + 3)
+		const original = marks
 
 		marks = marks.map(mark => ({ ...mark, from: tr.mapping.map(mark.from), to: tr.mapping.map(mark.to) }))
 		editor.dispatch(tr)
@@ -567,6 +603,35 @@ describe("DocxEditor input", () => {
 
 		expect(after.size).toBe(before.size)
 		expect(changed.length).toBe(1)
+
+		// Undone: the paths drawn are the ones drawn before the edit.
+		expect(editor.session.execute({ type: "history.undo" })).toBe(true)
+		await mount(editor, { marks: original })
+		expect([...rows().values()].sort()).toEqual([...before.values()].sort())
+	})
+
+	it("orders marks moved in place again for each document drawn", async () => {
+		const { editor } = await pagedEditor(LONG)
+		const start = paragraphPos(editor, 1) + 1
+		// Marks a checker moves in place through edits (the list stays the same).
+		const first = { from: start, to: start + 5, kind: "spelling" }
+		const second = { from: start + 20, to: start + 25, kind: "repeated" }
+		const marks: DocxEditorMark[] = [first, second]
+		const count = (kind: string): number => container.querySelectorAll(`.fo-docx-mark[data-fo-mark="${kind}"]`).length
+
+		await mount(editor, { marks })
+		expect([count("spelling"), count("repeated")]).toEqual([1, 1])
+
+		// The first now lies after the second, in another paragraph: the list is out of order.
+		const later = paragraphPos(editor, 2) + 1
+
+		first.from = later
+		first.to = later + 5
+		await act(async () => {
+			editor.dispatch(editor.state.tr.insertText("x", paragraphPos(editor, 5) + 1))
+			await frame()
+		})
+		expect([count("spelling"), count("repeated")]).toEqual([1, 1])
 	})
 
 	it("draws find results in a drawing of their own, under no other kind", async () => {
@@ -602,8 +667,119 @@ describe("EditSink", () => {
 
 	afterEach(() => host.remove())
 
-	const sinkOf = (editor: PagedEditor, options: { readOnly?: boolean; apple?: boolean } = {}): EditSink =>
+	const sinkOf = (editor: PagedEditor, options: { readOnly?: boolean; apple?: boolean; window?: number } = {}): EditSink =>
 		new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined, ...options })
+
+	it("holds the blocks around the selection at the document's positions, each run of the rest one gap", async () => {
+		const { editor } = await pagedEditor(LONG)
+
+		caretAt(editor, paragraphPos(editor, 30) + 3)
+
+		const sink = sinkOf(editor, { window: 3 })
+		const view = (): typeof sink.view.state.doc => sink.view.state.doc
+
+		// Gap, seven blocks, gap: the document's size, its blocks where they are in it.
+		expect(view().childCount).toBe(9)
+		expect(view().content.size).toBe(editor.state.doc.content.size)
+		expect(view().nodeAt(paragraphPos(editor, 30))).toBe(editor.state.doc.child(30))
+		expect(view().nodeAt(paragraphPos(editor, 27))).toBe(editor.state.doc.child(27))
+		expect(sink.view.dom.children[0]?.childNodes.length).toBe(0)
+		expect(sink.view.state.selection.head).toBe(paragraphPos(editor, 30) + 3)
+
+		// Typing through the view edits the document at the same position.
+		const pos = paragraphPos(editor, 31) + 2
+
+		sink.view.dispatch(sink.view.state.tr.insertText("typed", pos))
+		expect(editor.state.doc.textBetween(pos, pos + 5)).toBe("typed")
+		expect(view().content.size).toBe(editor.state.doc.content.size)
+		expect(view().nodeAt(paragraphPos(editor, 31))).toBe(editor.state.doc.child(31))
+		expect(sink.view.state.selection.head).toBe(editor.selection().head)
+
+		// A step to the next block keeps the window (and its gaps); far away it moves.
+		const gap = view().child(0)
+
+		caretAt(editor, paragraphPos(editor, 32) + 1)
+		expect(view().child(0)).toBe(gap)
+		caretAt(editor, paragraphPos(editor, 50) + 1)
+		expect(view().nodeAt(paragraphPos(editor, 50))).toBe(editor.state.doc.child(50))
+		expect(view().content.size).toBe(editor.state.doc.content.size)
+		expect(sink.view.dom.textContent).not.toContain("Paragraph 30 ")
+
+		// Undo from the toolbar: the view follows.
+		editor.session.execute({ type: "history.undo" })
+		expect(editor.state.doc.textBetween(pos, pos + 5)).not.toBe("typed")
+		expect(view().content.size).toBe(editor.state.doc.content.size)
+		sink.destroy()
+	})
+
+	it("takes a selection across its gaps: copy writes the document's text, typing replaces the document's range", async () => {
+		const { editor } = await pagedEditor(LONG)
+		const sink = sinkOf(editor, { window: 2 })
+		const from = paragraphPos(editor, 2) + 4
+		const to = paragraphPos(editor, 50) + 6
+
+		sink.view.dispatch(sink.view.state.tr.setSelection(TextSelection.create(sink.view.state.doc, from, to)))
+		expect(editor.selection()).toMatchObject({ from, to })
+		// Blocks around each end, the rest in gaps.
+		expect(sink.view.state.doc.childCount).toBeLessThan(15)
+
+		const written = new Map<string, string>()
+		const copy = Object.assign(new Event("copy", { bubbles: true, cancelable: true }), {
+			clipboardData: {
+				clearData: () => written.clear(),
+				setData: (type: string, value: string) => written.set(type, value),
+				getData: (type: string) => written.get(type) ?? ""
+			}
+		})
+
+		sink.view.dom.dispatchEvent(copy)
+		expect(copy.defaultPrevented).toBe(true)
+		expect(written.get("text/plain")).toBe(plainText(editor.state.doc, from, to, () => ""))
+		expect(written.get("text/plain")).toContain("Paragraph 30 ")
+
+		// Typing over it: the same document as typing over the session's own selection.
+		const expected = editor.state.tr.insertText("X").doc
+
+		sink.view.dispatch(sink.view.state.tr.insertText("X"))
+		expect(editor.state.doc.eq(expected)).toBe(true)
+		expect(sink.view.state.doc.content.size).toBe(editor.state.doc.content.size)
+		expect(editor.state.doc.childCount).toBe(LONG_PARAGRAPHS - 48)
+		sink.destroy()
+	})
+
+	it("undoes and redoes from beforeinput (Edit menu, shake, a soft keyboard) in the session, once", async () => {
+		const { editor } = await pagedEditor(LONG)
+		const sink = sinkOf(editor)
+		const doc = editor.state.doc
+		const pos = paragraphPos(editor, 1) + 2
+		const input = (inputType: string): { prevented: number; handled: boolean } => {
+			const event = new InputEvent("beforeinput", { inputType, bubbles: true, cancelable: true })
+			let prevented = 0
+			const prevent = event.preventDefault.bind(event)
+
+			event.preventDefault = () => {
+				prevented++
+				prevent()
+			}
+			sink.view.dom.dispatchEvent(event)
+
+			return { prevented, handled: event.defaultPrevented }
+		}
+
+		sink.view.dispatch(sink.view.state.tr.insertText("typed", pos))
+
+		const typed = editor.state.doc
+
+		expect(typed).not.toBe(doc)
+		expect(input("historyUndo")).toEqual({ prevented: 1, handled: true })
+		expect(editor.state.doc.eq(doc)).toBe(true)
+		expect(sink.view.state.doc.content.size).toBe(doc.content.size)
+		expect(input("historyRedo")).toEqual({ prevented: 1, handled: true })
+		expect(editor.state.doc.eq(typed)).toBe(true)
+		// Other input is left to the view.
+		expect(input("insertText").prevented).toBe(0)
+		sink.destroy()
+	})
 
 	it("refuses edits read-only and allows them once writable", async () => {
 		const { editor } = await pagedEditor(LONG)

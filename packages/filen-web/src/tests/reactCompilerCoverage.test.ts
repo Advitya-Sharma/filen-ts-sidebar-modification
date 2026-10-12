@@ -133,6 +133,8 @@ describe("React Compiler coverage", () => {
 	it("compiles the DOCX editor's view, toolbar and touch selection", () => {
 		for (const [file, fnName] of [
 			["src/features/preview/components/docxEditor.tsx", "DocxEditView"],
+			["../filen-office/src/react/docx/DocxEditor.tsx", "DocxEditor"],
+			["../filen-office/src/react/docx/DocxEditor.tsx", "EditorPage"],
 			["src/features/preview/components/docxEditToolbar.tsx", "DocxEditToolbar"],
 			["src/features/preview/components/docxEditToolbar.tsx", "CommandButton"],
 			["src/features/preview/components/docxTouchSelection.tsx", "DocxTouchSelection"],

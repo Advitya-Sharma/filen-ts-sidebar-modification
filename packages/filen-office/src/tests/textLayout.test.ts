@@ -58,6 +58,26 @@ describe("greedy line breaking", () => {
 		expect(texts(layOut(h, b => b.append("aaaaaaaaaaaaaaaaaaaaaaa", h.base)))).toEqual(["aaaaaaaaaa", "aaaaaaaaaa", "aaa"])
 	})
 
+	it("keeps the width of a piece added as the piece arrays grow (a word broken inside, a tab past the last stop)", () => {
+		const h = harness()
+		const other = h.style({ letterSpacing: 0 })
+		// 64 one-character runs fill the first 64 pieces; the 65th grows the arrays.
+		const runs = (b: ParagraphBuilder): ParagraphBuilder => {
+			for (let k = 0; k < 64; k++) b.append("a", k % 2 === 0 ? h.base : other)
+
+			return b
+		}
+		const broken = layOut(h, b => runs(b).append("aaaa", h.base), { width: 665 })
+
+		expect(texts(broken)).toEqual(["a".repeat(66), "aa"])
+		expect(broken[0]?.width).toBe(660)
+		expect(broken[0]?.fragments.at(-1)).toMatchObject({ text: "aa", width: 20 })
+
+		const tab = layOut(h, b => runs(b).tab(h.base).append("a", h.base), { width: 665 })
+
+		expect(tab[0]?.fragments.at(-1)).toMatchObject({ text: "\t", width: 25 })
+	})
+
 	it("places at least one character on a line narrower than it", () => {
 		const h = harness()
 

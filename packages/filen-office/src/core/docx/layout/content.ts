@@ -135,6 +135,38 @@ export interface ContentServices {
 	readonly authors: (name: string | undefined) => number
 }
 
+// Decoded text of text items by part, while editing: a relayout lays the paragraphs around an edit out again
+// keystroke after keystroke, and their text is decoded once. Bounded by characters (cleared when full); a part
+// that goes (an edited block's earlier overlay) takes its entries with it.
+const TEXT_CACHE_CHARS = 1 << 18
+let textCache = new WeakMap<StoryPart, Map<number, string>>()
+let textCacheChars = 0
+
+function cachedText(part: StoryPart, item: number): string {
+	let texts = textCache.get(part)
+	let text = texts?.get(item)
+
+	if (text !== undefined) return text
+
+	text = part.text(item)
+
+	if (textCacheChars + text.length > TEXT_CACHE_CHARS) {
+		textCache = new WeakMap()
+		textCacheChars = 0
+		texts = undefined
+	}
+
+	if (texts === undefined) {
+		texts = new Map()
+		textCache.set(part, texts)
+	}
+
+	texts.set(item, text)
+	textCacheChars += text.length
+
+	return text
+}
+
 export class ContentBuilder {
 	readonly builder = new ParagraphBuilder()
 	private readonly services: ContentServices
@@ -154,6 +186,11 @@ export class ContentBuilder {
 	constructor(services: ContentServices) {
 		this.services = services
 		this.table = services.styles.table
+	}
+
+	// A text item's decoded text (remembered while editing, see cachedText).
+	private textOf(part: StoryPart, item: number): string {
+		return this.services.recordMaps ? cachedText(part, item) : part.text(item)
 	}
 
 	// The paragraph format of an item (the paragraph's direct properties in its cell context).
@@ -367,7 +404,7 @@ export class ContentBuilder {
 				}
 				case Item.Text:
 				case Item.DeletedText:
-					if (this.hidden === 0 && !runHidden) this.text(part.text(item), run, revision)
+					if (this.hidden === 0 && !runHidden) this.text(this.textOf(part, item), run, revision)
 
 					break
 				case Item.Tab:
@@ -703,7 +740,7 @@ export class ContentBuilder {
 			if (part.kinds[child] !== Item.RubyBase) continue
 
 			for (let inner = child + 1; inner < part.end(child); inner++) {
-				if (part.kinds[inner] === Item.Text) this.text(part.text(inner), run, revision)
+				if (part.kinds[inner] === Item.Text) this.text(this.textOf(part, inner), run, revision)
 			}
 		}
 	}

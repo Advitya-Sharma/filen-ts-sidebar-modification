@@ -90,6 +90,10 @@ export class DocxDocumentStore {
 	private pages: DocxPageData[] = []
 	// Pages wait for the faces sent before them, so text never paints in a fallback face first.
 	private fontsReady: Promise<unknown> = Promise.resolve()
+	// Every face sent so far is loaded.
+	private fontsLoaded = true
+	// Events waiting in the queue.
+	private queued = 0
 	private fontHost: FontHost | undefined = undefined
 	private readonly families = new Set<string>()
 	// Events are applied in order, each after the fonts before it are loaded.
@@ -154,10 +158,21 @@ export class DocxDocumentStore {
 			return
 		}
 
+		// Nothing waiting and every face loaded (the session open): applied at once, in the task that sent it
+		// (pages an edit laid out reach a view in the same render as the edit).
+		if (this.queued === 0 && this.fontsLoaded && this.session !== undefined) {
+			this.apply(event)
+
+			return
+		}
+
 		const fonts = this.fontsReady
 
+		this.queued++
 		this.queue = this.queue.then(async () => {
 			if (event.type === "pages") await fonts
+
+			this.queued--
 
 			if (!this.disposed) this.apply(event)
 		})
@@ -177,7 +192,13 @@ export class DocxDocumentStore {
 			loads.push(face.kind === "bytes" ? host.addBytes(face.face, face.bytes) : host.addLocal(face.face, face.name))
 		}
 
-		this.fontsReady = Promise.all([this.fontsReady, ...loads]).catch(() => undefined)
+		const ready = Promise.all([this.fontsReady, ...loads]).catch(() => undefined)
+
+		this.fontsReady = ready
+		this.fontsLoaded = false
+		void ready.then(() => {
+			if (this.fontsReady === ready) this.fontsLoaded = true
+		})
 	}
 
 	private apply(event: Exclude<DocxEvent, { type: "fonts" }>): void {

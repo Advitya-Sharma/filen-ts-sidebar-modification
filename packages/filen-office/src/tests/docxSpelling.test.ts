@@ -1,5 +1,6 @@
+import { Node } from "prosemirror-model"
 import { TextSelection } from "prosemirror-state"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { DocxEditorSession } from "@filen/office/core/docx/edit"
 import {
 	DocxSpelling,
@@ -8,7 +9,7 @@ import {
 	type SpellingChecker,
 	type SpellingMark
 } from "@filen/office/core/docx/spelling"
-import { addressSpans } from "../core/docx/spelling/scan"
+import { ParagraphScanner, addressSpans } from "../core/docx/spelling/scan"
 import { STYLES_PART, sessionOf } from "./docxEditFixtures"
 import type { SyntheticDocx } from "./docxSynthetic"
 
@@ -310,23 +311,84 @@ describe("DocxSpelling", () => {
 		expect(seen.length).toBeGreaterThan(0)
 	})
 
-	it("moves marks through an edit without making them again, in a new list", async () => {
+	it("moves marks through an edit in place, without making them or their list again", async () => {
 		const { session, spelling, clock } = await open({ body: para(run("wrold hello")) + para(run("tow the teh")) })
 		const before = spelling.marks()
+		const heard: (readonly SpellingMark[])[] = []
 
+		spelling.subscribe(marks => heard.push(marks))
 		expect(marked(session, before)).toEqual(["spelling:wrold", "spelling:tow", "spelling:teh"])
 		session.dispatch(session.state.tr.insertText("hello ", find(session, "wrold")))
 
 		const after = spelling.marks()
 
-		// The same issues, moved; the list itself is new (its users see the change).
-		expect(after).not.toBe(before)
-		expect(after.map((mark, k) => mark === before[k])).toEqual([true, true, true])
+		// The same issues in the same list, moved (a keystroke allocates nothing per mark); nothing announced.
+		expect(after).toBe(before)
+		expect(heard).toEqual([])
 		expect(marked(session, after)).toEqual(["spelling:wrold", "spelling:tow", "spelling:teh"])
+
+		// An edit that changes a mark's length or removes one makes a new list.
+		session.dispatch(session.state.tr.delete(find(session, "tow"), find(session, "tow") + 3))
+		expect(spelling.marks()).not.toBe(before)
+		expect(heard.length).toBe(1)
+		const kept = spelling.marks()
+
+		expect(marked(session, kept)).toEqual(["spelling:wrold", "spelling:teh"])
 
 		// A pass over the edited document keeps the issues it finds again.
 		await clock.advance(1000)
-		expect(spelling.marks().every((mark, k) => mark === before[k])).toBe(true)
+		expect(spelling.marks().length).toBe(2)
+		expect(spelling.marks().every((mark, k) => mark === kept[k])).toBe(true)
+	})
+
+	it("walks only what changed, and runs no pass once the document is checked", async () => {
+		const body = Array.from({ length: 300 }, (_, i) => para(run(`hello wrold number ${String(i)} the end`))).join("")
+		let ticks = 0
+		const { session, spelling, clock, checker } = await open({ body }, { now: () => ticks++ })
+
+		// "wrold" and "number" in each paragraph.
+		expect(spelling.marks()).toHaveLength(600)
+
+		checker.checked.length = 0
+		session.dispatch(session.state.tr.insertText("x", find(session, "number 150")))
+
+		const spy = vi.spyOn(Node.prototype, "nodesBetween")
+		const descendants = vi.spyOn(Node.prototype, "descendants")
+		const scanned = vi.spyOn(ParagraphScanner.prototype, "scan")
+
+		await clock.advance(1000)
+
+		// The pass after it walks the edited paragraph's range only, never the whole document.
+		const ranges = spy.mock.calls.map(([from, to]) => to - from)
+
+		expect(ranges.length).toBeGreaterThan(0)
+		expect(Math.max(...ranges)).toBeLessThanOrEqual(session.state.doc.child(150).nodeSize + 2)
+		expect(descendants).not.toHaveBeenCalled()
+		// The edited paragraph and, at most, the ones it touches.
+		expect(scanned.mock.calls.length).toBeLessThanOrEqual(3)
+		expect(spelling.marks()).toHaveLength(600)
+
+		// Checked: nothing scheduled, nothing walked while idle.
+		spy.mockClear()
+		await clock.advance(60_000)
+		expect(spy).not.toHaveBeenCalled()
+		expect(checker.checked).toEqual(["xnumber"])
+	})
+
+	it("keeps the marks' list while the word being typed grows", async () => {
+		const { session, spelling } = await open({ body: para(run("wrold hello")) + para(run("tow the teh")) })
+		const at = find(session, "wrold") + 2
+
+		session.dispatch(session.state.tr.insertText("x", at))
+
+		// The word typed in is not marked: a new list without it.
+		const typing = spelling.marks()
+
+		expect(marked(session, typing)).toEqual(["spelling:tow", "spelling:teh"])
+
+		session.dispatch(session.state.tr.insertText("y", at + 1))
+		expect(spelling.marks()).toBe(typing)
+		expect(marked(session, spelling.marks())).toEqual(["spelling:tow", "spelling:teh"])
 	})
 
 	it("re-checks only changed paragraphs", async () => {
@@ -394,6 +456,49 @@ describe("DocxSpelling", () => {
 		const { spelling } = await open({ body })
 
 		expect(spelling.marks()).toHaveLength(MAX_SPELLING_ISSUES)
+	})
+
+	it("fills up to MAX_SPELLING_ISSUES again when marks before the limit go", async () => {
+		const many = Array.from({ length: MAX_SPELLING_ISSUES }, () => "zq").join(" ")
+		const { session, spelling, clock } = await open({ body: para(run("zq zq zq")) + para(run(many)) })
+
+		expect(spelling.marks()).toHaveLength(MAX_SPELLING_ISSUES)
+
+		const first = find(session, "zq zq zq")
+
+		session.dispatch(session.state.tr.delete(first, first + 8))
+		expect(spelling.marks()).toHaveLength(MAX_SPELLING_ISSUES - 3)
+		await clock.advance(1000)
+		expect(spelling.marks()).toHaveLength(MAX_SPELLING_ISSUES)
+	})
+
+	it("moves many marks through edits as each edit's mapping does", async () => {
+		const body = Array.from({ length: 50 }, (_, i) => para(run(`wrold ${String(i)} zorp`))).join("")
+		const { session, spelling } = await open({ body })
+		const edits = [
+			() => session.state.tr.insertText("ab", find(session, "wrold 10")),
+			() => session.state.tr.insertText("cd", find(session, "zorp", 12) + 2),
+			() => session.state.tr.delete(find(session, "zorp", 20) + 1, find(session, "wrold 22") + 3),
+			() => session.state.tr.insertText("tail", session.state.doc.content.size - 1)
+		]
+
+		expect(spelling.marks()).toHaveLength(100)
+
+		for (const edit of edits) {
+			const before = spelling.marks().map(mark => ({ from: mark.from, to: mark.to }))
+			const tr = edit()
+
+			session.dispatch(tr)
+
+			const expected = before
+				.map(mark => ({ from: tr.mapping.map(mark.from, 1), to: tr.mapping.map(mark.to, -1) }))
+				.filter(mark => mark.to > mark.from)
+			const after = spelling.marks().map(mark => ({ from: mark.from, to: mark.to }))
+
+			// Each mark where the mapping puts it (the word being typed may be left out).
+			expect(after.every(mark => expected.some(other => other.from === mark.from && other.to === mark.to))).toBe(true)
+			expect(after.length).toBeGreaterThanOrEqual(expected.length - 1)
+		}
 	})
 
 	it("does not loop when checks fail or answer without verdicts", async () => {

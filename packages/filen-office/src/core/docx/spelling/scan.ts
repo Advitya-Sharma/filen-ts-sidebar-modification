@@ -155,12 +155,16 @@ function spacesOnly(text: string, from: number, to: number): boolean {
 	return from < to
 }
 
+const FACTS_LIMIT = 512
+
 export class ParagraphScanner {
 	private readonly context: DocxEditContext
 	private readonly formats: FormatResolver
 	private readonly checker: SpellingChecker
 	private readonly options: ScanOptions
-	private readonly facts = new WeakMap<readonly Mark[], { readonly paragraph: ParagraphFormat; readonly facts: RunFacts }>()
+	// Run facts by marks (a text node's mark set), the last few hundred: a plain map (no weak references to
+	// trace), emptied when full.
+	private readonly facts = new Map<readonly Mark[], { readonly paragraph: ParagraphFormat; readonly facts: RunFacts }>()
 	private readonly dictionaries = new Map<string, string | undefined>()
 
 	constructor(context: DocxEditContext, part: StoryPart, checker: SpellingChecker, options: ScanOptions) {
@@ -206,6 +210,8 @@ export class ParagraphScanner {
 				bidi: lang?.bidi ?? style.lang.bidi
 			}
 		}
+
+		if (this.facts.size >= FACTS_LIMIT) this.facts.clear()
 
 		this.facts.set(marksOf, { paragraph, facts })
 

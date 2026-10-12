@@ -39,6 +39,9 @@ class ItemSpans {
 	readonly ends: number[] = []
 	// The offset where the paragraph's own content starts (after a list marker).
 	readonly contentStart: number
+	// What range() found.
+	rangeStart = 0
+	rangeEnd = 0
 
 	constructor(part: StoryPart, item: number, map: SourceMap, textLength: number) {
 		const end = part.end(item)
@@ -79,17 +82,20 @@ class ItemSpans {
 		return found
 	}
 
-	// The text range items [from, to) laid out, or undefined when they laid out nothing.
-	range(from: number, to: number): [number, number] | undefined {
+	// Whether items [from, to) laid out text, and the range they laid out ([rangeStart, rangeEnd), set here:
+	// no pair is made per character).
+	range(from: number, to: number): boolean {
 		let k = this.at(to - 1)
 
-		if (k < 0 || (this.items[k] ?? 0) < from) return undefined
+		if (k < 0 || (this.items[k] ?? 0) < from) return false
 
-		const last = this.ends[k] ?? 0
+		this.rangeEnd = this.ends[k] ?? 0
 
 		while (k > 0 && (this.items[k - 1] ?? 0) >= from) k--
 
-		return [this.starts[k] ?? 0, last]
+		this.rangeStart = this.starts[k] ?? 0
+
+		return true
 	}
 
 	// Where an item that laid out nothing stands: after what the items before it laid out.
@@ -174,12 +180,12 @@ function layoutOffsets(paragraph: Node, part: StoryPart, item: number, map: Sour
 					continue
 				}
 
-				const range = spans.range(textItem, textItem + 1)
+				const found = spans.range(textItem, textItem + 1)
 				const lead = cursor.texts.leads[cursor.index] ?? 0
-				const gap = range === undefined ? spans.position(textItem) : Math.min(range[0] + lead + cursor.used, range[1])
+				const gap = found ? Math.min(spans.rangeStart + lead + cursor.used, spans.rangeEnd) : spans.position(textItem)
 
 				out[offset + c] = gap
-				at = range === undefined ? gap : Math.min(gap + 1, range[1])
+				at = found ? Math.min(gap + 1, spans.rangeEnd) : gap
 				cursor.used++
 			}
 
@@ -196,14 +202,12 @@ function layoutOffsets(paragraph: Node, part: StoryPart, item: number, map: Sour
 
 		// A field covers its items up to its end run; any other atom its element.
 		const last = child.type === nodes.field ? ((child.attrs["end"] as number | undefined) ?? src) : src
-		const range = spans.range(src, part.end(last))
-
-		if (range === undefined) {
+		if (spans.range(src, part.end(last))) {
+			out[offset] = spans.rangeStart
+			at = spans.rangeEnd
+		} else {
 			out[offset] = Math.max(at, spans.position(src))
 			at = out[offset] ?? at
-		} else {
-			out[offset] = range[0]
-			at = range[1]
 		}
 	})
 

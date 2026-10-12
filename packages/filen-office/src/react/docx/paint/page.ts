@@ -57,11 +57,18 @@ export interface PaintedObject {
 	readonly height: number
 }
 
+// What a line looks like, wherever it is (see lineLook): numbers, the text it shows, and their hash.
+export interface LineLook {
+	readonly values: Float64Array
+	readonly text: string
+	readonly hash: number
+}
+
 // One painted line: its group in the text layer (spans and the copy separator) and the groups of its fills
 // (under the text) and lines (over it), each positioned at the line's top so a line that only moved is
-// moved by one style change. `key` is what the line looks like, wherever it is.
+// moved by one style change.
 export interface PaintedLine {
-	readonly key: string
+	readonly look: LineLook
 	readonly top: number
 	readonly text: HTMLElement
 	readonly under: HTMLElement | undefined
@@ -489,9 +496,43 @@ function lineSeparator(page: DocxPageData, line: number, flags: number, text: st
 	return SPACES.test(gap) ? gap : " "
 }
 
+// lineLook()'s output, reused line after line: its numbers, and the text it shows as [start, end) ranges of
+// the line's source text.
+let lookValues = new Float64Array(128)
+let lookRanges = new Int32Array(32)
+let lookRangeCount = 0
+const HASH_BITS = new Float64Array(1)
+const HASH_WORDS = new Uint32Array(HASH_BITS.buffer)
+
+function lookValue(at: number, value: number): void {
+	if (at >= lookValues.length) {
+		const grown = new Float64Array(lookValues.length * 2)
+
+		grown.set(lookValues)
+		lookValues = grown
+	}
+
+	lookValues[at] = value
+}
+
+function lookRange(start: number, end: number): void {
+	if (2 * lookRangeCount + 2 > lookRanges.length) {
+		const grown = new Int32Array(lookRanges.length * 2)
+
+		grown.set(lookRanges)
+		lookRanges = grown
+	}
+
+	lookRanges[2 * lookRangeCount] = start
+	lookRanges[2 * lookRangeCount + 1] = end
+	lookRangeCount++
+}
+
 // What a line looks like, independent of where it is and of its text offsets: geometry relative to its top,
-// fragments with their text, styles and links, decorations, and the separator copying adds after it.
-function lineKey(page: DocxPageData, line: number, links: Map<number, number[]>): string {
+// fragments with their text, styles and links, decorations, and the separator copying adds after it. Written
+// to lookValues (the count is returned) and lookRanges, so comparing a laid-out line with a painted one
+// allocates nothing.
+function lineLook(page: DocxPageData, line: number, links: Map<number, number[]>): number {
 	const lf = line * LINE_FLOATS
 	const li = line * LINE_INTS
 	const top = page.lineFloats[lf] ?? 0
@@ -501,15 +542,16 @@ function lineKey(page: DocxPageData, line: number, links: Map<number, number[]>)
 	const source = page.lineInts[li + 5] ?? -1
 	const text = page.sourceTexts[source] ?? ""
 	const sourceLinks = links.get(source)
-	const parts: (string | number)[] = [
-		round(page.lineFloats[lf + 1]),
-		round((page.lineFloats[lf + 2] ?? 0) - top),
-		round(page.lineFloats[lf + 3]),
-		round(page.lineFloats[lf + 4]),
-		flags,
-		count
-	]
+	let n = 0
 	let lastEnd = 0
+
+	lookRangeCount = 0
+	lookValue(n++, round(page.lineFloats[lf + 1]))
+	lookValue(n++, round((page.lineFloats[lf + 2] ?? 0) - top))
+	lookValue(n++, round(page.lineFloats[lf + 3]))
+	lookValue(n++, round(page.lineFloats[lf + 4]))
+	lookValue(n++, flags)
+	lookValue(n++, count)
 
 	for (let k = first; k < first + count; k++) {
 		const ff = k * FRAGMENT_FLOATS
@@ -518,43 +560,165 @@ function lineKey(page: DocxPageData, line: number, links: Map<number, number[]>)
 		const end = page.fragmentInts[fi + 1] ?? 0
 
 		lastEnd = Math.max(lastEnd, end)
-		parts.push(
-			round(page.fragmentFloats[ff]),
-			round(page.fragmentFloats[ff + 1]),
-			round(page.fragmentFloats[ff + 2]),
-			round(page.fragmentFloats[ff + 3]),
-			page.fragmentInts[fi + 2] ?? 0,
-			page.fragmentInts[fi + 3] ?? 0,
-			page.fragmentInts[fi + 4] ?? 0,
-			text.slice(start, end)
-		)
 
-		if (sourceLinks !== undefined) {
-			for (const [from, to, link] of linkPieces(page, sourceLinks, start, end))
-				if (link >= 0) parts.push(`l${link}:${from - start}-${to - start}`)
+		for (let f = 0; f < 4; f++) lookValue(n++, round(page.fragmentFloats[ff + f]))
+		for (let f = 2; f < 5; f++) lookValue(n++, page.fragmentInts[fi + f] ?? 0)
+
+		lookValue(n++, Math.max(0, end - start))
+		lookRange(start, end)
+
+		// The linked pieces of the fragment (as linkPieces() splits it), as offsets in it.
+		const counted = n++
+		let pieces = 0
+		let at = start
+
+		for (const range of sourceLinks ?? NO_LINKS) {
+			const from = Math.max(start, page.linkInts[range * LINK_INTS + 1] ?? 0)
+			const to = Math.min(end, page.linkInts[range * LINK_INTS + 2] ?? 0)
+			const link = page.linkInts[range * LINK_INTS + 3] ?? -1
+
+			if (to <= from || from < at) continue
+
+			at = to
+
+			if (link < 0) continue
+
+			lookValue(n++, link)
+			lookValue(n++, from - start)
+			lookValue(n++, to - start)
+			pieces++
 		}
+
+		lookValue(counted, pieces)
 	}
 
 	const firstDecoration = page.lineInts[li + 6] ?? 0
 	const lastDecoration = line + 1 < page.lineCount ? (page.lineInts[(line + 1) * LINE_INTS + 6] ?? 0) : page.decorationCount
 
+	lookValue(n++, Math.max(0, lastDecoration - firstDecoration))
+
 	for (let d = firstDecoration; d < lastDecoration; d++) {
 		const df = d * DECORATION_FLOATS
 		const di = d * DECORATION_INTS
 
-		parts.push(
-			`d${page.decorationInts[di] ?? 0}`,
-			page.decorationInts[di + 1] ?? 0,
-			round(page.decorationFloats[df]),
-			round((page.decorationFloats[df + 1] ?? 0) - top),
-			round(page.decorationFloats[df + 2]),
-			round(page.decorationFloats[df + 3])
-		)
+		lookValue(n++, page.decorationInts[di] ?? 0)
+		lookValue(n++, page.decorationInts[di + 1] ?? 0)
+		lookValue(n++, round(page.decorationFloats[df]))
+		lookValue(n++, round((page.decorationFloats[df + 1] ?? 0) - top))
+		lookValue(n++, round(page.decorationFloats[df + 2]))
+		lookValue(n++, round(page.decorationFloats[df + 3]))
 	}
 
-	parts.push(lineSeparator(page, line, flags, text, lastEnd))
+	// The separator (lineSeparator): a newline, nothing, the spaces after the line, or a space.
+	const separator = separatorOf(page, line, flags, text, lastEnd)
 
-	return parts.join("\u0001")
+	lookValue(n++, separator.kind)
+
+	if (separator.kind === SEPARATOR_SPACES) lookRange(separator.start, separator.end)
+
+	return n
+}
+
+const NO_LINKS: readonly number[] = []
+const SEPARATOR_NEWLINE = 0
+const SEPARATOR_NONE = 1
+const SEPARATOR_SPACES = 2
+const SEPARATOR_SPACE = 3
+const SEPARATOR_SCRATCH = { kind: SEPARATOR_SPACE, start: 0, end: 0 }
+
+// lineSeparator() as a kind and, for the spaces after the line, their range in the source text (one reused
+// object: no string per line).
+function separatorOf(page: DocxPageData, line: number, flags: number, text: string, end: number): typeof SEPARATOR_SCRATCH {
+	const out = SEPARATOR_SCRATCH
+
+	if ((flags & (LineFlag.LAST | LineFlag.LINE_BREAK | LineFlag.PAGE_BREAK | LineFlag.COLUMN_BREAK)) !== 0) {
+		out.kind = SEPARATOR_NEWLINE
+	} else if ((flags & LineFlag.HYPHENATED) !== 0) {
+		out.kind = SEPARATOR_NONE
+	} else {
+		const source = page.lineInts[line * LINE_INTS + 5]
+		let next = page.lineInts[line * LINE_INTS + 3] ?? end
+
+		for (let other = line + 1; other < page.lineCount; other++) {
+			if (page.lineInts[other * LINE_INTS + 5] === source) {
+				next = page.lineInts[other * LINE_INTS + 2] ?? next
+
+				break
+			}
+		}
+
+		let spaces = next > end
+
+		for (let k = end; k < next && spaces; k++) spaces = isSpace(text.charCodeAt(k))
+
+		out.kind = spaces ? SEPARATOR_SPACES : SEPARATOR_SPACE
+		out.start = end
+		out.end = next
+	}
+
+	return out
+}
+
+// What SPACES matches (\s, as JavaScript defines it).
+function isSpace(code: number): boolean {
+	return (
+		(code >= 0x09 && code <= 0x0d) ||
+		code === 0x20 ||
+		code === 0xa0 ||
+		code === 0x1680 ||
+		(code >= 0x2000 && code <= 0x200a) ||
+		code === 0x2028 ||
+		code === 0x2029 ||
+		code === 0x202f ||
+		code === 0x205f ||
+		code === 0x3000 ||
+		code === 0xfeff
+	)
+}
+
+// The hash of lineLook()'s output for `line`, whose source text is `text` (FNV-1a over the numbers' bits and
+// the text; a small integer).
+function lookHash(count: number, text: string): number {
+	let hash = 2166136261
+
+	for (let k = 0; k < count; k++) {
+		HASH_BITS[0] = lookValues[k] ?? 0
+		hash = Math.imul(Math.imul(hash ^ (HASH_WORDS[0] ?? 0), 16777619) ^ (HASH_WORDS[1] ?? 0), 16777619)
+	}
+
+	for (let r = 0; r < lookRangeCount; r++) {
+		const end = lookRanges[2 * r + 1] ?? 0
+
+		for (let k = lookRanges[2 * r] ?? 0; k < end; k++) hash = Math.imul(hash ^ text.charCodeAt(k), 16777619)
+	}
+
+	return hash & 0x3fffffff
+}
+
+// Whether a painted line looks like lineLook()'s output (count numbers, text from `text`).
+function sameLook(look: LineLook, hash: number, count: number, text: string): boolean {
+	if (look.hash !== hash || look.values.length !== count) return false
+
+	for (let k = 0; k < count; k++) if (look.values[k] !== lookValues[k]) return false
+
+	let at = 0
+
+	for (let r = 0; r < lookRangeCount; r++) {
+		const end = lookRanges[2 * r + 1] ?? 0
+
+		for (let k = lookRanges[2 * r] ?? 0; k < end; k++) if (look.text.charCodeAt(at++) !== text.charCodeAt(k)) return false
+	}
+
+	return at === look.text.length
+}
+
+// lineLook()'s output kept with a painted line.
+function keptLook(hash: number, count: number, text: string): LineLook {
+	let shown = ""
+
+	for (let r = 0; r < lookRangeCount; r++) shown += text.slice(lookRanges[2 * r] ?? 0, lookRanges[2 * r + 1] ?? 0)
+
+	return { values: lookValues.slice(0, count), text: shown, hash }
 }
 
 function round(value: number | undefined): number {
@@ -585,7 +749,7 @@ function paintLine(
 	tables: DocxTables,
 	line: number,
 	links: Map<number, number[]>,
-	key: string
+	look: LineLook
 ): PaintedLine {
 	const lf = line * LINE_FLOATS
 	const li = line * LINE_INTS
@@ -700,7 +864,7 @@ function paintLine(
 		paintDecoration(document, target, page, tables, d, fill, lineTop)
 	}
 
-	return { key, top: lineTop, text: textGroup, under, over, texts: lineTexts }
+	return { look, top: lineTop, text: textGroup, under, over, texts: lineTexts }
 }
 
 function isFill(page: DocxPageData, decoration: number): boolean {
@@ -781,7 +945,9 @@ export function paintPage(page: DocxPageData, context: PagePaintContext): Painte
 	const texts: PaintedText[] = []
 
 	for (let line = 0; line < page.lineCount; line++) {
-		const painted = paintLine(document, page, tables, line, links, lineKey(page, line, links))
+		const count = lineLook(page, line, links)
+		const text = page.sourceTexts[page.lineInts[line * LINE_INTS + 5] ?? -1] ?? ""
+		const painted = paintLine(document, page, tables, line, links, keptLook(lookHash(count, text), count, text))
 
 		lines.push(painted)
 		textElements.appendChild(painted.text)
@@ -829,50 +995,62 @@ export function patchPage(
 	const { document, tables } = context
 	const parts = painted.parts
 	const links = linksBySource(page)
-	// Painted lines by how they look, each with its place on the page as painted.
-	const reusable = new Map<string, { line: PaintedLine; index: number }[]>()
+	const old = painted.lines
+	// Painted lines by how they look (the hash of it): the first of each, and the next with the same hash.
+	const firstByHash = new Map<number, number>()
+	const nextSame = new Int32Array(old.length)
+	const used = new Uint8Array(old.length)
 
-	painted.lines.forEach((line, index) => {
-		const list = reusable.get(line.key)
+	for (let index = old.length - 1; index >= 0; index--) {
+		const hash = old[index]?.look.hash ?? 0
 
-		if (list === undefined) reusable.set(line.key, [{ line, index }])
-		else list.push({ line, index })
-	})
+		nextSame[index] = firstByHash.get(hash) ?? -1
+		firstByHash.set(hash, index)
+	}
 
 	// Of lines that look alike (repeated text, empty lines), the first after the last line kept: kept lines then
 	// keep their order and stay where they are.
 	let lastKept = -1
-	const reuse = (key: string): PaintedLine | undefined => {
-		const list = reusable.get(key)
+	const reuse = (hash: number, count: number, text: string): PaintedLine | undefined => {
+		let first = -1
 
-		if (list === undefined || list.length === 0) return undefined
+		for (let index = firstByHash.get(hash) ?? -1; index >= 0; index = nextSame[index] ?? -1) {
+			const line = old[index]
 
-		const at = Math.max(
-			0,
-			list.findIndex(entry => entry.index > lastKept)
-		)
-		const entry = list.splice(at, 1)[0]
+			if (used[index] === 1 || line === undefined || !sameLook(line.look, hash, count, text)) continue
 
-		if (entry === undefined) return undefined
+			if (first < 0) first = index
 
-		lastKept = Math.max(lastKept, entry.index)
+			if (index > lastKept) {
+				first = index
 
-		return entry.line
+				break
+			}
+		}
+
+		if (first < 0) return undefined
+
+		used[first] = 1
+		lastKept = Math.max(lastKept, first)
+
+		return old[first]
 	}
 
 	const lines: PaintedLine[] = []
 	const texts: PaintedText[] = []
 
 	for (let line = 0; line < page.lineCount; line++) {
-		const key = lineKey(page, line, links)
-		const kept = reuse(key)
+		const count = lineLook(page, line, links)
+		const source = page.lineInts[line * LINE_INTS + 5] ?? -1
+		const text = page.sourceTexts[source] ?? ""
+		const hash = lookHash(count, text)
+		const kept = reuse(hash, count, text)
 		const top = page.lineFloats[line * LINE_FLOATS] ?? 0
 		let next: PaintedLine
 
 		if (kept === undefined) {
-			next = paintLine(document, page, tables, line, links, key)
+			next = paintLine(document, page, tables, line, links, keptLook(hash, count, text))
 		} else {
-			const source = page.lineInts[line * LINE_INTS + 5] ?? -1
 			const start = page.lineInts[line * LINE_INTS + 2] ?? 0
 			const shift = start - (kept.texts[0]?.start ?? start)
 
@@ -885,14 +1063,23 @@ export function patchPage(
 				if (kept.over !== undefined) kept.over.style.top = value
 			}
 
-			next = {
-				key,
-				top,
-				text: kept.text,
-				under: kept.under,
-				over: kept.over,
-				texts: kept.texts.map(text => ({ element: text.element, source, start: text.start + shift, end: text.end + shift }))
-			}
+			// Where it was, showing the same offsets of the same source: as it was painted.
+			next =
+				kept.top === top && shift === 0 && kept.texts.every(painted => painted.source === source)
+					? kept
+					: {
+							look: kept.look,
+							top,
+							text: kept.text,
+							under: kept.under,
+							over: kept.over,
+							texts: kept.texts.map(text => ({
+								element: text.element,
+								source,
+								start: text.start + shift,
+								end: text.end + shift
+							}))
+						}
 		}
 
 		if (next.under !== undefined && next.under.parentNode !== parts.fills) parts.fills.appendChild(next.under)
@@ -905,12 +1092,14 @@ export function patchPage(
 
 	// Lines that are gone, before the rest is put in order: kept lines then stay where they are (a line moved in
 	// the DOM is styled and laid out again as if new).
-	for (const list of reusable.values()) {
-		for (const { line } of list) {
-			line.text.remove()
-			line.under?.remove()
-			line.over?.remove()
-		}
+	for (let index = 0; index < old.length; index++) {
+		const line = old[index]
+
+		if (used[index] === 1 || line === undefined) continue
+
+		line.text.remove()
+		line.under?.remove()
+		line.over?.remove()
 	}
 
 	// Keep the text layer in reading order: new lines go where they belong.

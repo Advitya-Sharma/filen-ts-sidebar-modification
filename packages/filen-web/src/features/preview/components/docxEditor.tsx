@@ -38,6 +38,7 @@ import {
 	editorViewOnlyReasons,
 	firstMatchFrom,
 	markupSwitch,
+	sameToolbarSnapshot,
 	stepMatch
 } from "@/features/preview/components/docxEditor.logic"
 import { DocxEditToolbar } from "@/features/preview/components/docxEditToolbar"
@@ -255,6 +256,14 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const spelling = current?.spelling
 	const controls = useDocxEditor(editor)
 	const snapshot = controls.state?.snapshot
+	// What the toolbar shows: the snapshot it was last given while nothing it shows changed (a keystroke
+	// changes the selection and the version only), so typing re-renders no toolbar.
+	const [toolbarSnapshot, setToolbarSnapshot] = useState(snapshot)
+
+	if (toolbarSnapshot !== snapshot && !sameToolbarSnapshot(toolbarSnapshot, snapshot)) {
+		setToolbarSnapshot(snapshot)
+	}
+
 	const handleRef = useRef<DocxEditorHandle | null>(null)
 	const [wrapper, setWrapper] = useState<HTMLDivElement | null>(null)
 	const rootRef = useRef<HTMLDivElement | null>(null)
@@ -290,9 +299,9 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		spelling === undefined ? noSpelling : () => spelling.marks(),
 		noSpelling
 	)
-	// Find runs on the document as it stands once typing pauses, never inside a keystroke. One match past the
-	// limit tells that there are more.
-	const searchedDoc = useDeferredValue(doc)
+	// Find runs on the document as it stands once typing pauses, never inside a keystroke (and nothing is
+	// deferred while it is closed: a keystroke renders once). One match past the limit tells that there are more.
+	const searchedDoc = useDeferredValue(find.open && find.query.length > 0 ? doc : undefined)
 	const found =
 		find.open && find.query.length > 0 && searchedDoc !== undefined
 			? findInStory(searchedDoc, find.query, { caseSensitive: find.caseSensitive }, STORY_FIND_LIMIT + 1)
@@ -307,7 +316,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 				: firstMatchFrom(matches, editor?.selection().from ?? 0)
 	const marks = editorMarks(bodyActive ? spellingMarks : NO_SPELLING, matches, active)
 	const selection = controls.state?.selection
-	const viewOnly = editorViewOnlyReasons(snapshot?.readOnlyReasons ?? [], writable, renamed)
+	const viewOnly = editorViewOnlyReasons(toolbarSnapshot?.readOnlyReasons ?? [], writable, renamed)
 	// Comments and tracked changes in the document: the markup menu is offered.
 	const annotated = (document.info?.comments ?? 0) + (document.info?.revisions ?? 0)
 
@@ -658,7 +667,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 			className="flex size-full flex-col"
 		>
 			<DocxEditToolbar
-				snapshot={snapshot}
+				snapshot={toolbarSnapshot}
 				readOnly={readOnly}
 				apple={APPLE}
 				execute={execute}
@@ -777,7 +786,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 						container={wrapper}
 						shown={touch && hasSelection}
 						selectionKey={
-							selection === undefined ? "" : `${String(selection.anchor)}:${String(selection.head)}:${String(zoom)}`
+							selection === undefined || !touch ? "" : `${String(selection.anchor)}:${String(selection.head)}:${String(zoom)}`
 						}
 						actions={{
 							cut: editable

@@ -1,6 +1,6 @@
 import type { Node } from "prosemirror-model"
 import type { PageDisplayList } from "../../../core/docx/layout/index"
-import type { CaretBox, PagedEditor, PageRect } from "../../../core/docx/paged/index"
+import { MarkBoxes, type CaretBox, type PagedEditor, type PageRect } from "../../../core/docx/paged/index"
 import type { DocxPageData, DocxSessionApi } from "../../../dom/docx/protocol"
 import type { DocxMediaCache } from "../media"
 import { paintObjects } from "../paint/objects"
@@ -27,14 +27,16 @@ interface MountedPage {
 	readonly over: HTMLElement
 	readonly caret: HTMLElement
 	// What the marks were last drawn from (redrawn only when one of these changed), the drawings that hold
-	// them (made when first needed) and the rows drawn, by what they show: a redraw keeps the rows that did not
-	// change (typing changes the line typed in) and moves those that only moved.
+	// them (made when first needed) and the rows drawn, found by what they show: a redraw keeps the rows that
+	// did not change (typing changes the line typed in) and moves those that only moved.
 	drawn: { page: PageDisplayList | undefined; doc: Node | undefined; marks: readonly DocxEditorMark[]; story: number }
-	// The marks drawn on the page, relative to its first position (from, to per mark) and their kinds: an edit
-	// elsewhere moves them all alike and changes nothing drawn.
-	shown: { offsets: number[]; kinds: string[] }
+	// The marks drawn on the page, relative to its first position, and their kinds (from, to, kind id per
+	// mark): an edit elsewhere moves them all alike and changes nothing drawn.
+	shown: { values: Int32Array; count: number }
 	drawings: { plain: SVGSVGElement | undefined; blend: SVGSVGElement | undefined }
-	rows: Map<string, MarkRow[]>
+	rows: MarkRow[]
+	// Rows by the hash of what they show (rows with the same hash are chained).
+	rowsByHash: Map<number, MarkRow>
 	painted: PaintedPage | undefined
 	release: () => void
 	signal: { aborted: boolean }
@@ -45,17 +47,14 @@ interface MountedPage {
 // path of the line typed in.
 interface MarkRow {
 	readonly element: SVGPathElement
-	// Its kind, line height and boxes: equal content draws the same.
-	content: string
+	// Its kind (id), line height and boxes (left, width pairs), and their hash: equal content draws the same.
+	content: Float64Array
+	hash: number
 	top: number
-}
-
-interface MarkLine {
-	readonly kind: string
-	readonly top: number
-	readonly height: number
-	// Left and width of each box.
-	readonly boxes: number[]
+	// The redraw that last drew it.
+	drawn: number
+	// The next row with the same hash.
+	next: MarkRow | undefined
 }
 
 const SVG = "http://www.w3.org/2000/svg"
@@ -66,12 +65,29 @@ const WAVE = 3
 const WAVE_TOP = 2.25
 const WAVE_BOTTOM = 0.25
 
-// The path of a line's marks of `kind` (line coordinates: 0 is the line's top): a wave under a misspelling, a
-// double line under a repeated word, a box over a find result, a dotted line under anything else.
-function markPath(kind: string, height: number, boxes: readonly number[]): string {
+// Small numbers for mark kinds, as they are first seen (row contents hold them).
+const KIND_IDS = new Map<string, number>()
+const KIND_NAMES: string[] = [""]
+
+function kindId(kind: string): number {
+	let id = KIND_IDS.get(kind)
+
+	if (id === undefined) {
+		id = KIND_NAMES.length
+		KIND_IDS.set(kind, id)
+		KIND_NAMES.push(kind)
+	}
+
+	return id
+}
+
+// The path of a line's marks of `kind` (line coordinates: 0 is the line's top), its boxes the (left, width)
+// pairs of `boxes` from `start`: a wave under a misspelling, a double line under a repeated word, a box over
+// a find result, a dotted line under anything else.
+function markPath(kind: string, height: number, boxes: Float64Array, start: number, end: number): string {
 	let d = ""
 
-	for (let b = 0; b + 1 < boxes.length; b += 2) {
+	for (let b = start; b + 1 < end; b += 2) {
 		const x = boxes[b] ?? 0
 		const width = boxes[b + 1] ?? 0
 
@@ -105,8 +121,11 @@ export class EditSurface {
 	private readonly mounted = new Map<number, MountedPage>()
 	private sources: SurfaceSources | undefined = undefined
 	private pages: readonly (DocxPageData | undefined)[] = []
-	// Sorted by `from`; the longest's length bounds where a line's marks start.
+	// As given, and sorted by `from` (the longest's length bounds where a line's marks start), for the
+	// document `orderedFor`.
+	private given: readonly DocxEditorMark[] = []
 	private marks: readonly DocxEditorMark[] = []
+	private orderedFor: Node | undefined = undefined
 	private longestMark = 0
 	private focused = false
 	private caretPage: { index: number; box: CaretBox } | undefined = undefined
@@ -114,8 +133,13 @@ export class EditSurface {
 	// keystroke would change the page's layers (a costly commit on a page with many marks).
 	private caretElement: HTMLElement | undefined = undefined
 	private caretStyle = ""
-	private readonly boxesScratch: number[] = []
-	private readonly ownersScratch: number[] = []
+	// Reused from page to page and keystroke to keystroke (thousands of numbers each).
+	private readonly boxes = new MarkBoxes()
+	// The content of a row being matched (kind id, height, then left and width per box).
+	private content = new Float64Array(64)
+	// Rows to draw anew in this redraw: first box, end and kind id of each.
+	private added = new Int32Array(48)
+	private redraws = 0
 	private blinkPhase = false
 
 	constructor(editor: PagedEditor) {
@@ -140,9 +164,10 @@ export class EditSurface {
 			over,
 			caret,
 			drawn: { page: undefined, doc: undefined, marks: [], story: -1 },
-			shown: { offsets: [], kinds: [] },
+			shown: { values: new Int32Array(0), count: 0 },
 			drawings: { plain: undefined, blend: undefined },
-			rows: new Map(),
+			rows: [],
+			rowsByHash: new Map(),
 			painted: undefined,
 			release: () => undefined,
 			signal: { aborted: false }
@@ -181,10 +206,22 @@ export class EditSurface {
 
 	// Whether the marks changed (draw() shows them).
 	setMarks(marks: readonly DocxEditorMark[]): boolean {
-		if (this.marks === marks) return false
+		if (this.given === marks) return false
 
+		this.given = marks
+		this.order()
+
+		return true
+	}
+
+	// The marks given, in order of `from`, and the longest's length. Marks may be moved in place by edits (a
+	// spelling checker's are): ordered again for each document drawn.
+	private order(): void {
+		const marks = this.given
 		let sorted = true
 		let longest = 0
+
+		this.orderedFor = this.editor.geometry.story.document
 
 		for (let k = 0; k < marks.length; k++) {
 			const mark = marks[k]
@@ -198,8 +235,6 @@ export class EditSurface {
 
 		this.marks = sorted ? marks : [...marks].sort((a, b) => a.from - b.from)
 		this.longestMark = longest
-
-		return true
 	}
 
 	setFocused(focused: boolean): boolean {
@@ -254,6 +289,8 @@ export class EditSurface {
 
 	// Redraws caret, selection, composition and marks on every mounted page.
 	draw(): void {
+		if (this.orderedFor !== this.editor.geometry.story.document) this.order()
+
 		this.caretPage = undefined
 
 		const caret = this.editor.selection().empty ? this.editor.caret() : undefined
@@ -361,105 +398,173 @@ export class EditSurface {
 		if (samePage && this.sameMarksShown(index, mounted.shown)) return
 
 		const marks = this.marks
-		// Reused from page to page and keystroke to keystroke (thousands of numbers each).
-		const boxes = this.boxesScratch
-		const owners = this.ownersScratch
+		const boxes = this.boxes
 
-		boxes.length = 0
-		owners.length = 0
-		geometry.rangesBoxes(marks, this.longestMark, index, boxes, owners)
+		boxes.clear()
+		geometry.rangesBoxes(marks, this.longestMark, index, boxes)
 		this.recordMarksShown(index, mounted.shown)
 
-		// Boxes come line by line: the lines of one top, one per kind.
-		const lines: MarkLine[] = []
-		let firstOfTop = 0
+		// Boxes come line by line: the boxes of one top, one row per kind. Rows showing what they showed are kept
+		// (moved when their line moved); the rest are drawn anew below.
+		const redraw = ++this.redraws
+		const values = boxes.values
+		const owners = boxes.owners
+		const count = boxes.count
+		let added = 0
 
-		for (let k = 0; k < owners.length; k++) {
-			const kind = marks[owners[k] ?? -1]?.kind
-			const top = boxes[4 * k] ?? 0
-			const height = boxes[4 * k + 1] ?? 0
+		for (let first = 0; first < count;) {
+			const top = values[4 * first] ?? 0
+			const height = values[4 * first + 1] ?? 0
+			let end = first + 1
 
-			if (kind === undefined) continue
+			while (end < count && values[4 * end] === top && values[4 * end + 1] === height) end++
 
-			const last = lines[lines.length - 1]
+			for (let k = first; k < end; k++) {
+				const kind = kindId(marks[owners[k] ?? -1]?.kind ?? "")
+				let seen = false
 
-			if (last === undefined || last.top !== top || last.height !== height) firstOfTop = lines.length
+				for (let other = first; other < k && !seen; other++) seen = kindId(marks[owners[other] ?? -1]?.kind ?? "") === kind
 
-			let line: MarkLine | undefined
+				if (seen) continue
 
-			for (let l = firstOfTop; l < lines.length && line === undefined; l++) if (lines[l]?.kind === kind) line = lines[l]
+				const size = this.rowContent(first, end, kind, height)
+				const row = this.keptRow(mounted, hashOf(this.content, size), size, top, redraw)
 
-			if (line === undefined) {
-				line = { kind, top, height, boxes: [] }
-				lines.push(line)
+				if (row !== undefined) {
+					if (row.top !== top) {
+						row.top = top
+						row.element.setAttribute("transform", `translate(0 ${round(top)})`)
+					}
+
+					continue
+				}
+
+				if (3 * added + 3 > this.added.length) {
+					const grown = new Int32Array(this.added.length * 2)
+
+					grown.set(this.added)
+					this.added = grown
+				}
+
+				this.added[3 * added] = first
+				this.added[3 * added + 1] = end
+				this.added[3 * added + 2] = kind
+				added++
 			}
 
-			line.boxes.push(boxes[4 * k + 2] ?? 0, boxes[4 * k + 3] ?? 0)
+			first = end
 		}
 
-		const previous = mounted.rows
-		const next = new Map<string, MarkRow[]>()
-		const added: { line: MarkLine; content: string }[] = []
-		const keep = (content: string, row: MarkRow): void => {
-			const list = next.get(content)
+		// Rows not kept are drawn again for the new ones (in the drawing of their kind), the rest removed.
+		const rows = mounted.rows
+		let spare = 0
 
-			if (list === undefined) next.set(content, [row])
-			else list.push(row)
-		}
+		for (let k = 0; k < rows.length; k++) {
+			const row = rows[k]
 
-		for (const line of lines) {
-			let content = `${line.kind}|${round(line.height)}`
+			if (row === undefined) continue
 
-			for (let b = 0; b + 1 < line.boxes.length; b += 2) content += `|${round(line.boxes[b] ?? 0)}:${round(line.boxes[b + 1] ?? 0)}`
-
-			const kept = takeNearest(previous.get(content), line.top)
-
-			if (kept === undefined) {
-				added.push({ line, content })
-
-				continue
+			if (row.drawn === redraw) {
+				rows[k] = rows[spare] as MarkRow
+				rows[spare++] = row
 			}
-
-			if (kept.top !== line.top) {
-				kept.top = line.top
-				kept.element.setAttribute("transform", `translate(0 ${round(line.top)})`)
-			}
-
-			keep(content, kept)
 		}
 
-		// Paths no longer drawn are drawn again for the new rows (in the drawing of their kind), the rest removed.
-		const spare: MarkRow[] = []
+		// rows[0, spare) are kept, rows[spare, ...) are free.
+		let free = spare
 
-		for (const list of previous.values()) spare.push(...list)
-
-		for (const { line, content } of added) {
-			const blend = BLENDED.has(line.kind)
-			const drawing = this.drawing(index, mounted, blend)
-			let row = spare.pop()
+		for (let a = 0; a < added; a++) {
+			const first = this.added[3 * a] ?? 0
+			const end = this.added[3 * a + 1] ?? 0
+			const kind = this.added[3 * a + 2] ?? 0
+			const top = values[4 * first] ?? 0
+			const height = values[4 * first + 1] ?? 0
+			const size = this.rowContent(first, end, kind, height)
+			const name = KIND_NAMES[kind] ?? ""
+			const drawing = this.drawing(index, mounted, BLENDED.has(name))
+			let row = rows[free]
 
 			if (row === undefined) {
 				const element = drawing.ownerDocument.createElementNS(SVG, "path")
 
 				element.setAttribute("class", "fo-docx-mark")
-				row = { element, content, top: Number.NaN }
+				row = { element, content: new Float64Array(0), hash: 0, top: Number.NaN, drawn: 0, next: undefined }
+				rows.push(row)
+			} else {
+				unlinkRow(mounted.rowsByHash, row)
 			}
 
+			free++
+			row.content = this.content.slice(0, size)
+			row.hash = hashOf(row.content, size)
+			row.drawn = redraw
+			row.next = mounted.rowsByHash.get(row.hash)
+			mounted.rowsByHash.set(row.hash, row)
+
 			if (row.element.parentNode !== drawing) drawing.appendChild(row.element)
-			if (row.element.getAttribute("data-fo-mark") !== line.kind) row.element.setAttribute("data-fo-mark", line.kind)
+			if (row.element.getAttribute("data-fo-mark") !== name) row.element.setAttribute("data-fo-mark", name)
 
-			row.element.setAttribute("d", markPath(line.kind, line.height, line.boxes))
+			row.element.setAttribute("d", markPath(name, height, row.content, 2, size))
 
-			if (row.top !== line.top) row.element.setAttribute("transform", `translate(0 ${round(line.top)})`)
+			if (row.top !== top) row.element.setAttribute("transform", `translate(0 ${round(top)})`)
 
-			row.content = content
-			row.top = line.top
-			keep(content, row)
+			row.top = top
 		}
 
-		for (const row of spare) row.element.remove()
+		for (let k = free; k < rows.length; k++) {
+			const row = rows[k]
 
-		mounted.rows = next
+			if (row === undefined) continue
+
+			unlinkRow(mounted.rowsByHash, row)
+			row.element.remove()
+		}
+
+		rows.length = free
+	}
+
+	// Writes the content of the row of kind `kind` on the line whose boxes are [first, end) of this.boxes into
+	// this.content: kind id, line height, then left and width of each box of the kind. Returns its size.
+	private rowContent(first: number, end: number, kind: number, height: number): number {
+		const values = this.boxes.values
+		const owners = this.boxes.owners
+		const marks = this.marks
+		const needed = 2 + 2 * (end - first)
+
+		if (this.content.length < needed) this.content = new Float64Array(Math.max(needed, this.content.length * 2))
+
+		const content = this.content
+		let size = 0
+
+		content[size++] = kind
+		content[size++] = round(height)
+
+		for (let k = first; k < end; k++) {
+			if (kindId(marks[owners[k] ?? -1]?.kind ?? "") !== kind) continue
+
+			content[size++] = round(values[4 * k + 2] ?? 0)
+			content[size++] = round(values[4 * k + 3] ?? 0)
+		}
+
+		return size
+	}
+
+	// A row of the page drawn before showing the first `size` numbers of this.content and not kept yet in
+	// this redraw (the one at `top`, else any), now kept; undefined when there is none.
+	private keptRow(mounted: MountedPage, hash: number, size: number, top: number, redraw: number): MarkRow | undefined {
+		let found: MarkRow | undefined
+
+		for (let row = mounted.rowsByHash.get(hash); row !== undefined; row = row.next) {
+			if (row.drawn === redraw || !sameContent(row.content, this.content, size)) continue
+
+			if (found === undefined || Math.abs(row.top - top) < Math.abs(found.top - top)) found = row
+
+			if (row.top === top) break
+		}
+
+		if (found !== undefined) found.drawn = redraw
+
+		return found
 	}
 
 	// The marks that may show on page `index` (those within its positions), each from and to relative to its
@@ -489,26 +594,38 @@ export class EditSurface {
 		}
 	}
 
-	private sameMarksShown(index: number, shown: { readonly offsets: readonly number[]; readonly kinds: readonly string[] }): boolean {
+	private sameMarksShown(index: number, shown: { readonly values: Int32Array; readonly count: number }): boolean {
 		let k = 0
 		let same = true
 
 		this.eachMarkShown(index, (from, to, kind) => {
-			same = shown.offsets[2 * k] === from && shown.offsets[2 * k + 1] === to && shown.kinds[k] === kind
+			same =
+				k < shown.count &&
+				shown.values[3 * k] === from &&
+				shown.values[3 * k + 1] === to &&
+				shown.values[3 * k + 2] === kindId(kind)
 			k++
 
 			return same
 		})
 
-		return same && k === shown.kinds.length
+		return same && k === shown.count
 	}
 
-	private recordMarksShown(index: number, shown: { offsets: number[]; kinds: string[] }): void {
-		shown.offsets.length = 0
-		shown.kinds.length = 0
+	private recordMarksShown(index: number, shown: { values: Int32Array; count: number }): void {
+		shown.count = 0
 		this.eachMarkShown(index, (from, to, kind) => {
-			shown.offsets.push(from, to)
-			shown.kinds.push(kind)
+			if (3 * shown.count + 3 > shown.values.length) {
+				const grown = new Int32Array(Math.max(48, shown.values.length * 2))
+
+				grown.set(shown.values)
+				shown.values = grown
+			}
+
+			shown.values[3 * shown.count] = from
+			shown.values[3 * shown.count + 1] = to
+			shown.values[3 * shown.count + 2] = kindId(kind)
+			shown.count++
 
 			return true
 		})
@@ -556,18 +673,40 @@ export class EditSurface {
 	}
 }
 
-// Of rows that show the same (repeated text has the same marks), the one nearest `top`: one that did not move
-// stays untouched.
-function takeNearest(rows: MarkRow[] | undefined, top: number): MarkRow | undefined {
-	if (rows === undefined || rows.length === 0) return undefined
+function hashOf(content: Float64Array, size: number): number {
+	let hash = 2166136261
 
-	let best = 0
+	for (let k = 0; k < size; k++) hash = Math.imul(hash ^ ((content[k] ?? 0) * 100), 16777619)
 
-	for (let k = 1; k < rows.length && rows[best]?.top !== top; k++) {
-		if (Math.abs((rows[k]?.top ?? 0) - top) < Math.abs((rows[best]?.top ?? 0) - top)) best = k
+	// A small integer: a key that allocates nothing.
+	return hash & 0x3fffffff
+}
+
+function sameContent(a: Float64Array, b: Float64Array, size: number): boolean {
+	if (a.length !== size) return false
+
+	for (let k = 0; k < size; k++) if (a[k] !== b[k]) return false
+
+	return true
+}
+
+function unlinkRow(rows: Map<number, MarkRow>, row: MarkRow): void {
+	const head = rows.get(row.hash)
+
+	if (head === row) {
+		if (row.next === undefined) rows.delete(row.hash)
+		else rows.set(row.hash, row.next)
+	} else {
+		for (let other = head; other !== undefined; other = other.next) {
+			if (other.next === row) {
+				other.next = row.next
+
+				break
+			}
+		}
 	}
 
-	return rows.splice(best, 1)[0]
+	row.next = undefined
 }
 
 function round(value: number): number {

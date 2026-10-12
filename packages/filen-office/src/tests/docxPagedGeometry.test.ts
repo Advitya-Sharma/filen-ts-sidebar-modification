@@ -315,6 +315,12 @@ describe("paged geometry", () => {
 		// The same geometry after the edit: what it located and measured before the edit is not reused wrongly.
 		expect(compare(geometry, rangesOf(edited.session.state.doc))).toBeGreaterThan(200)
 
+		// And after undoing it: lines laid out as they were before measure as they did.
+		await edited.edit(session => session.execute({ type: "history.undo" }))
+		expect(compare(geometry, rangesOf(edited.session.state.doc))).toBeGreaterThan(200)
+		await edited.edit(session => session.execute({ type: "history.redo" }))
+		expect(compare(geometry, rangesOf(edited.session.state.doc))).toBeGreaterThan(200)
+
 		// Another edit: only the lines it changed are measured again (lines laid out as before keep their boxes).
 		await edited.edit(edited.session.state.tr.insertText("x", paragraphAt(edited.session.state.doc, 5).pos + 3))
 

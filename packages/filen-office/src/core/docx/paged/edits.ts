@@ -107,6 +107,124 @@ export interface StoryChange {
 
 // One document's edits for layout: the derived model the layout reads (overlay parts added), the
 // substitutions and block lists of every edited story.
+// The prefixes the element and attribute names in `bytes` (XML the writer made) need declared, added to `out`
+// ("" for an element without one); false when the names alone do not tell which namespaces it needs: an
+// attribute that names prefixes in its value (Markup Compatibility's Requires, Ignorable...), a namespace
+// declaration, or markup other than elements (comments, processing instructions, CDATA). One pass; a string
+// only for each new prefix.
+export function namePrefixes(bytes: Uint8Array, out: Set<string>): boolean {
+	const length = bytes.length
+	let at = 0
+	// The last prefix added, as bytes of `bytes` ([lastStart, lastEnd)).
+	let lastStart = 0
+	let lastEnd = -1
+	// Reads a name at `at`; whether it may stand (not a declaration or a Markup Compatibility attribute).
+	const name = (attribute: boolean): boolean => {
+		const start = at
+		let colon = -1
+
+		while (at < length) {
+			const byte = bytes[at] ?? 0
+
+			if (byte === 0x3a && colon < 0) colon = at
+			else if (byte <= 0x20 || byte === 0x3e || byte === 0x2f || byte === 0x3d) break
+
+			at++
+		}
+
+		const prefixEnd = colon < 0 ? start : colon
+		// An attribute without a prefix is in no namespace, and `xml` is bound without a declaration.
+		const declared = colon < 0 ? !attribute : !equalsAscii(bytes, start, colon, "xml")
+
+		if (declared && !sameBytes(bytes, start, prefixEnd, lastStart, lastEnd)) {
+			out.add(colon < 0 ? "" : String.fromCharCode(...bytes.subarray(start, colon)))
+			lastStart = start
+			lastEnd = prefixEnd
+		}
+
+		if (!attribute) return true
+
+		const local = colon < 0 ? start : colon + 1
+
+		return (
+			!(colon < 0 ? equalsAscii(bytes, local, at, "xmlns") : equalsAscii(bytes, start, colon, "xmlns")) &&
+			!isCompatibility(bytes, local, at)
+		)
+	}
+
+	while (at < length) {
+		if (bytes[at] !== 0x3c) {
+			at++
+
+			continue
+		}
+
+		at++
+
+		const first = bytes[at]
+
+		if (first === 0x21 || first === 0x3f) return false
+		if (first === 0x2f) at++
+
+		name(false)
+
+		for (;;) {
+			while (at < length && (bytes[at] ?? 0) <= 0x20) at++
+
+			const byte = bytes[at]
+
+			if (byte === undefined) return false
+			if (byte === 0x3e) break
+			if (byte === 0x2f) {
+				at++
+
+				continue
+			}
+
+			if (!name(true)) return false
+
+			while (at < length && bytes[at] !== 0x22 && bytes[at] !== 0x27) at++
+
+			const quote = bytes[at]
+
+			at++
+
+			while (at < length && bytes[at] !== quote) at++
+
+			at++
+		}
+
+		at++
+	}
+
+	return true
+}
+
+function sameBytes(bytes: Uint8Array, start: number, end: number, otherStart: number, otherEnd: number): boolean {
+	if (end - start !== otherEnd - otherStart) return false
+
+	for (let k = 0; k < end - start; k++) if (bytes[start + k] !== bytes[otherStart + k]) return false
+
+	return true
+}
+
+function equalsAscii(bytes: Uint8Array, start: number, end: number, text: string): boolean {
+	if (end - start !== text.length) return false
+
+	for (let k = 0; k < text.length; k++) if (bytes[start + k] !== text.charCodeAt(k)) return false
+
+	return true
+}
+
+// Attributes whose values name namespace prefixes.
+const MARKUP_COMPATIBILITY = ["Requires", "Ignorable", "ProcessContent", "PreserveElements", "PreserveAttributes", "MustUnderstand"]
+
+function isCompatibility(bytes: Uint8Array, start: number, end: number): boolean {
+	for (const name of MARKUP_COMPATIBILITY) if (equalsAscii(bytes, start, end, name)) return true
+
+	return false
+}
+
 export class DocumentEdits implements LayoutEdits {
 	readonly model: DocxModel
 	readonly extension: ModelExtension
@@ -120,6 +238,12 @@ export class DocumentEdits implements LayoutEdits {
 	readonly storyCount: number
 	private readonly bodyIndex: number
 	private readonly bodyParts = new Set<number>()
+	// Per source document: its root's declarations (undefined when elements below the root declare
+	// namespaces too) and root start tags made from them, by the prefixes they declare.
+	private readonly roots = new WeakMap<
+		XmlDocument,
+		{ readonly declarations: ReadonlyMap<string, string> | undefined; readonly tags: Map<string, Uint8Array> }
+	>()
 	// The sections as opened, by their w:sectPr.
 	private readonly openedSections: readonly Section[]
 	// The w:numId each list a command started will get when saved (the overlays write them).
@@ -276,6 +400,55 @@ export class DocumentEdits implements LayoutEdits {
 		return changed
 	}
 
+	// The start tag of the root `bytes` (blocks written by StoryWriter, to go inside `container`) are parsed in:
+	// the source's root declaring only the namespaces their element and attribute names use, so a keystroke
+	// does not parse the document's every declaration again; the source's own start tag when that cannot be
+	// told (names in attribute values, declarations of their own, markup other than elements) or the source
+	// declares namespaces below its root.
+	private rootTag(document: XmlDocument, bytes: Uint8Array, container: number): Uint8Array {
+		const root = document.documentElement()
+		const full = document.bytes.subarray(document.start(root), document.openEnd(root))
+		let roots = this.roots.get(document)
+
+		if (roots === undefined) {
+			const declarations = partReader(document).namespaces.declarations()
+			const own = declarations.get(root)
+
+			roots = { declarations: declarations.size === (own === undefined ? 0 : 1) ? own : undefined, tags: new Map() }
+			this.roots.set(document, roots)
+		}
+
+		const declared = roots.declarations
+		const prefixes = new Set<string>()
+
+		if (declared === undefined || !namePrefixes(bytes, prefixes)) return full
+
+		prefixes.add(document.prefix(root))
+
+		if (container >= 0) prefixes.add(document.prefix(container))
+
+		const key = [...prefixes].sort().join(" ")
+		let tag = roots.tags.get(key)
+
+		if (tag === undefined) {
+			let text = `<${document.name(root)}`
+
+			for (const prefix of [...prefixes].sort()) {
+				const uri = declared.get(prefix)
+
+				// A prefix the root does not declare: as the source has it (the parse reports what it reports).
+				if (uri === undefined) return full
+
+				text += ` ${prefix === "" ? "xmlns" : `xmlns:${prefix}`}="${uri.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")}"`
+			}
+
+			tag = encodeUtf8(`${text}>`)
+			roots.tags.set(key, tag)
+		}
+
+		return tag
+	}
+
 	// Parses `bytes` (blocks written by StoryWriter) inside the root of `source` into a new overlay part, and
 	// its top-level paragraphs and tables in order; undefined when it does not parse.
 	addPart(
@@ -287,7 +460,7 @@ export class DocumentEdits implements LayoutEdits {
 		const document = source.document
 		const root = document.documentElement()
 		const node = source.node(container)
-		const open = document.bytes.subarray(document.start(root), document.openEnd(root))
+		const open = this.rootTag(document, bytes, node)
 		// A body block goes into a w:body; the content of a header or footer sits in the root itself.
 		const inner =
 			node !== root && node >= 0
