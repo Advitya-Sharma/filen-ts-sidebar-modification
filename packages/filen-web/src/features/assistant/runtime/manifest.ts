@@ -1,5 +1,9 @@
 import * as z from "zod"
 
+// zod probes `new Function` when it builds its first object schema; the app's CSP blocks that and reports a
+// violation on every page load. Under that CSP the interpreted parser runs anyway. Must run before any schema exists.
+z.config({ jitless: true })
+
 // Import-free of the app (no "@/" imports): scripts/assistant-model-manifest.ts and the dev server plugin
 // read it under Node too.
 

@@ -1,5 +1,9 @@
 import * as z from "zod"
 
+// zod probes `new Function` when it builds its first object schema; the app's CSP blocks that and reports a
+// violation on every page load. Under that CSP the interpreted parser runs anyway. Must run before any schema exists.
+z.config({ jitless: true })
+
 // What a call does to the user's data. "navigate" only changes what the app shows; "additive" and
 // "modifying" change stored data and are executed only after the user confirms.
 export type AssistantToolEffect = "read" | "navigate" | "additive" | "modifying"
