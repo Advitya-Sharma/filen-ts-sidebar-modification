@@ -214,8 +214,8 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		answerIncludes: [["12 may", "may 12"]],
 		expectsText: true
 	},
-	// Content read after an unrelated turn: the extraction answers this request, in its language, and neither
-	// the earlier one nor about it.
+	// Content read after an unrelated turn: the extraction answers this request, and the reply is in its
+	// language (graded as a language case), neither answering the earlier turn nor in the earlier turn's language.
 	...(
 		[
 			{
@@ -226,7 +226,8 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 				includes: [["milk"], ["coffee", "eggs"]],
 				excludes: ["storage"]
 			},
-			// A German turn, then an English one: the answer is English.
+			// A German turn, then an English one: the answer is English. The excluded German words also catch a
+			// reply too short for the language detector.
 			{
 				id: "de-en",
 				lang: "en",
@@ -236,7 +237,7 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 					["milch", "milk"],
 					["käse", "cheese"]
 				],
-				excludes: ["speicher", "storage"]
+				excludes: ["speicher", "storage", "deine", "enthält", " und "]
 			},
 			{
 				id: "es",
@@ -285,7 +286,7 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		] as const
 	).map(({ id, lang, earlier, prompt, includes, excludes }): EvalCase => ({
 		id: `conversation-read-after-unrelated-${id}`,
-		category: "multi_step",
+		category: "language",
 		lang,
 		prompt: earlier,
 		followUps: [prompt],
