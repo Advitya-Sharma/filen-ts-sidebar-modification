@@ -817,6 +817,52 @@ describe("assistant session", () => {
 		expect(session.getHistory()).toEqual([{ user: "Hi", reply: "Hello.", prompt: expect.stringMatching(/\n\nHi$/) as unknown }])
 	})
 
+	it("lets the model read the handles of the items a reply named, and saves and resumes only what the user saw", async () => {
+		const seen: string[][] = []
+
+		class RecordingModel extends ScriptedModel {
+			override generate(request: AssistantGenerateRequest, options: GenerateOptions): Promise<AssistantGenerateResult> {
+				seen.push(request.messages.map(message => message.content))
+
+				return super.generate(request, options)
+			}
+		}
+
+		const model = new RecordingModel({
+			route: "chats read",
+			steps: [call("list_chats", {}), "Tom Lee wrote about the budget.", "Sure.", "Sure."]
+		})
+		const executor = fakeExecutor({ list_chats: { chats: [{ handle: "c30", name: "Tom Lee" }] } })
+		const session = createAssistantSession({ runtime: fakeRuntime(model), executor })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+
+		const first = session.send("Who wrote about the budget?")
+
+		await waitFor(events, event => event.type === "turn-end" && event.turnId === first)
+
+		const second = session.send("Thanks")
+
+		await waitFor(events, event => event.type === "turn-end" && event.turnId === second)
+
+		expect(seen.some(messages => messages.includes("Tom Lee (c30) wrote about the budget."))).toBe(true)
+
+		const saved = session.getHistory()
+
+		expect(saved.map(exchange => exchange.reply)).toEqual(["Tom Lee wrote about the budget.", "Sure."])
+
+		session.reset(saved)
+		seen.length = 0
+
+		const resumed = session.send("Summarize that chat")
+
+		await waitFor(events, event => event.type === "turn-end" && event.turnId === resumed)
+
+		expect(seen.flat().some(text => text.includes("c30"))).toBe(false)
+		expect(seen.flat()).toContain("Tom Lee wrote about the budget.")
+	})
+
 	it("keeps a turn stopped by a reset out of the next conversation's history", async () => {
 		let started = false
 		const model: AssistantModel = {

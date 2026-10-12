@@ -84,7 +84,10 @@ export const getTransfersTool: ToolAdapter = (_input, scope) => {
 				}))
 			],
 			...(active.length > ACTIVE_LIMIT || finished.length > FINISHED_LIMIT
-				? { more: Math.max(0, active.length - ACTIVE_LIMIT) + Math.max(0, finished.length - FINISHED_LIMIT) }
+				? {
+						total: active.length + finished.length,
+						more: Math.max(0, active.length - ACTIVE_LIMIT) + Math.max(0, finished.length - FINISHED_LIMIT)
+					}
 				: {}),
 			...(transfers.length === 0 ? { note: "No uploads or downloads in this tab since it was opened." } : {})
 		}

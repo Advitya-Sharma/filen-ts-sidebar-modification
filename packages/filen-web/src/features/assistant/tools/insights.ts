@@ -1,3 +1,4 @@
+import { listRest } from "@filen/shared/assistant"
 import { storageSummary } from "@filen/shared"
 import { queryClient } from "@/queries/client"
 import { ACCOUNT_QUERY_KEY, ACCOUNT_STALE_TIME, fetchAccount } from "@/queries/account"
@@ -80,7 +81,7 @@ export const recentItemsTool: ToolAdapter = async (input, scope) => {
 					...listingFields(item, { date: selection.field, size: bySize, directorySizes: sizes.sizes })
 				}
 			}),
-			...(items.length > RECENT_LIMIT ? { more: items.length - RECENT_LIMIT } : {}),
+			...listRest(items.length, RECENT_LIMIT),
 			...datesField(selection),
 			...joinNotes(emptyDatesNote(selection, items.length, ofKind.length), reach, unknownSizesNote(sizes.unknown))
 		}
@@ -116,7 +117,7 @@ export const listPhotosTool: ToolAdapter = async (input, scope) => {
 				name: driveName(photo),
 				taken: isoDate(captureTimestamp(photo))
 			})),
-			...(ordered.length > PHOTOS_LIMIT ? { more: ordered.length - PHOTOS_LIMIT } : {}),
+			...listRest(ordered.length, PHOTOS_LIMIT),
 			...datesField(selection),
 			...emptyDatesNote(selection, kept.length, ofKind.length)
 		}

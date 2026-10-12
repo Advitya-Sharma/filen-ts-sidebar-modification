@@ -4,6 +4,7 @@ import {
 	DIRECTORIES_BY_SIZE_NOTE,
 	listingOffset,
 	listingPage,
+	listRest,
 	type AssistantSignal
 } from "@filen/shared/assistant"
 import type { DirSizeResponse } from "@filen/sdk-rs"
@@ -406,7 +407,7 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 			})),
 			// Incomplete (a failed search, an index still building, too many names to check): cut off at an
 			// unknown length, which is what `more: true` says.
-			...(note !== null ? { more: true } : shown > SEARCH_LIMIT ? { more: shown - SEARCH_LIMIT } : {}),
+			...(note !== null ? { more: true } : listRest(shown, SEARCH_LIMIT)),
 			...datesField(selection),
 			...joinNotes(
 				note === null ? emptyDatesNote(selection, scored.length, matching.length) : { note },
@@ -562,6 +563,7 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 				kind: driveKind(item),
 				...listingFields(item, { date: byDate ? selection.field : null, size: bySize, directorySizes: sizes.sizes })
 			})),
+			...(page.shown === undefined ? {} : { shown: page.shown }),
 			...(page.more > 0 ? { more: page.more, next: page.next } : {}),
 			...datesField(selection),
 			...joinNotes(

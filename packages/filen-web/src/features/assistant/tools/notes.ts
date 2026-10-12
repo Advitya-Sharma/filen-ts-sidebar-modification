@@ -1,3 +1,4 @@
+import { listRest } from "@filen/shared/assistant"
 import type { Note } from "@filen/sdk-rs"
 import { notesQueryRead } from "@/features/notes/queries/notes"
 import { noteContentQueryRead } from "@/features/notes/queries/noteContent"
@@ -108,7 +109,7 @@ export const listNotesTool: ToolAdapter = async (input, scope) => {
 					...(note.archive ? { archived: true } : {})
 				}
 			}),
-			...(notes.length > LIST_LIMIT ? { more: notes.length - LIST_LIMIT } : {}),
+			...listRest(notes.length, LIST_LIMIT),
 			...(undated ? {} : datesField(selection)),
 			...(undated && selection.range !== null
 				? { note: `None of these is dated ${selection.range}; they match the words at other dates.` }

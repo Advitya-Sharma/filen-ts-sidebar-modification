@@ -622,6 +622,8 @@ describe("list_directory", () => {
 
 		expect(first["items"]).toHaveLength(LISTING_PAGE_ITEMS)
 		expect(first).toMatchObject({ more: 7, next: LISTING_PAGE_ITEMS })
+		// No total: the model would pass it as the next page's offset.
+		expect(first["total"]).toBeUndefined()
 		expect(second).toMatchObject({ offset: LISTING_PAGE_ITEMS, items: expect.any(Array) as unknown })
 		// The directory and readme.md sort first.
 		expect((second["items"] as { name: string }[]).map(item => item.name)).toEqual(
@@ -909,7 +911,7 @@ describe("notes", () => {
 		expect(json(await call("list_notes", { only: "favorite" }))["notes"]).toEqual([expect.objectContaining({ title: "Starred" })])
 		expect(json(await call("list_notes", { only: "archived" }))["notes"]).toEqual([expect.objectContaining({ title: "Old" })])
 		expect(json(await call("list_notes", { only: "pinned" }))["notes"]).toEqual([expect.objectContaining({ title: "Trip plan" })])
-		expect(json(await call("list_notes", { only: "any" }))["more"]).toBe(13)
+		expect(json(await call("list_notes", { only: "any" }))).toMatchObject({ total: 53, more: 13 })
 	})
 
 	it("reads a note through the editor's content query, as plain text", async () => {

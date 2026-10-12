@@ -307,6 +307,9 @@ export function createAssistantSession({
 	const listeners = new Set<(event: AssistantEvent) => void>()
 	const proposals = new Map<string, PendingProposal>()
 	let history: AssistantHistoryTurn[] = []
+	// What the user saw of each reply in `history`, which the model reads with handles. A saved conversation
+	// keeps this: its handles mean nothing once the page reloads, and copied back they would be guessed at.
+	const shownReplies = new WeakMap<AssistantHistoryTurn, string>()
 	let secrets = conversationSecrets()
 	let shutDown = false
 	// Bumped by reset: a turn of the previous conversation that still completes must not add its exchange to
@@ -483,7 +486,10 @@ export function createAssistantSession({
 
 			if (turnConversation === conversation && replied) {
 				// A withheld reply is not shown, so the model does not read it back either.
-				history = windowHistory([...history, { user: message, reply: result.withheld ? "" : result.reply, prompt: result.prompt }])
+				const exchange = { user: message, reply: result.historyReply, prompt: result.prompt }
+
+				shownReplies.set(exchange, result.withheld ? "" : result.reply)
+				history = windowHistory([...history, exchange])
 			}
 
 			steps.close("done")
@@ -637,7 +643,7 @@ export function createAssistantSession({
 			executor.reset(history)
 		},
 
-		getHistory: () => history,
+		getHistory: () => history.map(exchange => ({ ...exchange, reply: shownReplies.get(exchange) ?? exchange.reply })),
 
 		shutdown: () => {
 			shutDown = true

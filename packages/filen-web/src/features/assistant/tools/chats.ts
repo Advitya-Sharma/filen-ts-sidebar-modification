@@ -1,6 +1,6 @@
 import type { Chat } from "@filen/sdk-rs"
 import { isBlocked } from "@filen/shared"
-import { sanitizeUntrustedText } from "@filen/shared/assistant"
+import { listRest, sanitizeUntrustedText } from "@filen/shared/assistant"
 import { contactsQueryRead } from "@/features/contacts/queries/contacts"
 import { chatsQueryRead } from "@/features/chats/queries/chats"
 import { chatMessagesQueryGet, chatMessagesQueryRead } from "@/features/chats/queries/chatMessages"
@@ -94,7 +94,7 @@ export const listChatsTool: ToolAdapter = async (input, scope) => {
 					...(chatHasUnread(chat, userId, blocked, chatMessagesQueryGet) ? { unread: true } : {})
 				}
 			}),
-			...(chats.length > LIST_LIMIT ? { more: chats.length - LIST_LIMIT } : {})
+			...listRest(chats.length, LIST_LIMIT)
 		}
 	}
 }
@@ -150,7 +150,7 @@ export const findContactsTool: ToolAdapter = async (input, scope) => {
 	return {
 		value: {
 			contacts: rows,
-			...(matches.length > CONTACT_LIMIT ? { more: matches.length - CONTACT_LIMIT } : {}),
+			...listRest(matches.length, CONTACT_LIMIT),
 			...(rows.length === 0
 				? { note: "No contact matches. Ask the user for the contact's name or exact email address." }
 				: rows.some(row => row.chat === undefined)

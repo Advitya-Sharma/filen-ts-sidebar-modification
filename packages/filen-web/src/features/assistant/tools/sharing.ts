@@ -1,4 +1,4 @@
-import { MAX_ARRAY_ITEMS, type ASSISTANT_DRIVE_SECTIONS } from "@filen/shared/assistant"
+import { listRest, MAX_ARRAY_ITEMS, type ASSISTANT_DRIVE_SECTIONS } from "@filen/shared/assistant"
 import { queryClient } from "@/queries/client"
 import type { QueryKey } from "@tanstack/react-query"
 import {
@@ -112,7 +112,7 @@ export const listSectionTool: ToolAdapter = async (input, scope) => {
 					...(recipients.length > 0 ? { sharedWith: recipients } : {})
 				}
 			}),
-			...(sorted.length > MAX_ARRAY_ITEMS ? { more: sorted.length - MAX_ARRAY_ITEMS } : {}),
+			...listRest(sorted.length),
 			...(section === "trash" && sorted.length > 0
 				? { note: "Only the user can restore or delete these, in the app. Do not offer to." }
 				: {})

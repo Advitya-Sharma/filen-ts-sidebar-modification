@@ -1,6 +1,6 @@
 import { toast } from "sonner"
 import type { Playlist } from "@filen/shared"
-import { MAX_ARRAY_ITEMS } from "@filen/shared/assistant"
+import { listRest, MAX_ARRAY_ITEMS } from "@filen/shared/assistant"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 import { playlistsQueryRead } from "@/features/audio/queries/playlists"
 import { playlistFileTrack } from "@/features/audio/lib/playlists"
@@ -38,7 +38,7 @@ export const listPlaylistsTool: ToolAdapter = async (_input, scope) => {
 				name: playlist.name,
 				tracks: playlist.files.length
 			})),
-			...(playlists.length > MAX_ARRAY_ITEMS ? { more: playlists.length - MAX_ARRAY_ITEMS } : {})
+			...listRest(playlists.length)
 		}
 	}
 }
@@ -73,7 +73,7 @@ export const openPlaylistTool: ToolAdapter = async (input, scope) => {
 
 				return { handle: scope.show({ kind: "track", track, playlist }, track.name), name: track.name }
 			}),
-			...(playlist.files.length > TRACK_LIMIT ? { more: playlist.files.length - TRACK_LIMIT } : {})
+			...listRest(playlist.files.length, TRACK_LIMIT)
 		}
 	}
 }
