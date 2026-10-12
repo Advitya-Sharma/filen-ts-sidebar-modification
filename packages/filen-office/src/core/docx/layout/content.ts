@@ -703,8 +703,15 @@ export class ContentBuilder {
 		const services = this.services
 		const style = services.styles.style(run, "ascii", revision)
 		const size = halfPoints(run.size)
-		const placed = objectAt(services.model, services.objects, services.sizer, part, item, size, text =>
-			this.width(style, text, 0, text.length)
+		const placed = objectAt(
+			services.model,
+			services.objects,
+			services.sizer,
+			part,
+			item,
+			size,
+			text => this.width(style, text, 0, text.length),
+			services.styles.hasMissing
 		)
 
 		if (placed === undefined) return

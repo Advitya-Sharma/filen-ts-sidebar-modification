@@ -998,6 +998,36 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		await expectSaved(edited)
 	})
 
+	it("lays a joined paragraph out again from its first page when the paragraph whose mark it ends with changes", async () => {
+		// The seventh paragraph's mark is a tracked deletion: it and the eighth lay out as one paragraph, recorded
+		// under the seventh and formatted as the eighth, from the first page onto the second.
+		const deleted = '<w:rPr><w:del w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>'
+		const body =
+			Array.from({ length: 6 }, (_, k) => para(words(60, k))).join("") +
+			para(words(900, 7), deleted) +
+			para(words(20, 8)) +
+			para(words(20, 9)) +
+			`<w:sectPr>${PAGE}</w:sectPr>`
+		const edited = await editedLayout(buildDocx({ body }))
+		const [joined, last, after] = edited.story.entries.slice(6)
+		const all = paragraphs(edited.session.state.doc, false)
+		const from = all[7]
+		const to = all[8]
+
+		if (joined === undefined || last === undefined || after === undefined || from === undefined || to === undefined)
+			throw new Error("no paragraph")
+
+		expect(edited.index.pagesOf(joined)).toEqual([0, 1])
+		expect(edited.index.pagesOf(last)).toEqual([])
+		expect(edited.index.pagesOf(after)).toEqual([1])
+
+		// One command over the end of the joined paragraph and the one after it.
+		select(edited.session, from.pos + 2, to.pos + 2)
+		await edited.edit(session => session.execute({ type: "align.center" }))
+		expect(edited.last.restart).toBe(0)
+		await expectSaved(edited)
+	})
+
 	it("numbers pages right when an edit comes while a run laying out pages of the other parity is under way", async () => {
 		// Chapters starting pages of their own: pages after an edit start where pages before it did.
 		const body =

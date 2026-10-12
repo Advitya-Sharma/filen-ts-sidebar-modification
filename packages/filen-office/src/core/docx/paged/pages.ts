@@ -95,14 +95,40 @@ export class PageIndex {
 	// one, or the page before when one opens it (it may now fit, in part, at the end of that page), or the page
 	// a keep-with-next chain moved off that the first page may decide (`keepFrom`: the chain may fit there now).
 	restartPage(entries: readonly TopEntry[], keepFrom?: (page: number) => number): number {
-		const first = this.firstPage(entries)
+		const shown = this.shownFor(entries)
+		const first = this.firstPage(shown)
 
 		if (first < 0) return -1
 
 		const opening = first > 0 ? this.byPage[first]?.[0] : undefined
-		const page = opening !== undefined && entries.includes(opening) ? first - 1 : first
+		const page = opening !== undefined && shown.includes(opening) ? first - 1 : first
 
 		return Math.min(page, keepFrom?.(first) ?? page)
+	}
+
+	// `entries`, plus the nearest entry before the first one no page records (before where it stood, for one an
+	// edit replaced) that one does: a paragraph joined to those before it (their marks hidden in the view) is laid
+	// out under the first of them, with its own format when it ends them. Pages follow entry order, so the first
+	// such entry decides; one walk back.
+	private shownFor(entries: readonly TopEntry[]): readonly TopEntry[] {
+		const live = this.story.entries
+		let from = -1
+
+		for (const entry of entries) {
+			if (this.byEntry.has(entry)) continue
+
+			const at = Math.min(entry.index, live.length)
+
+			if (from < 0 || at < from) from = at
+		}
+
+		for (let k = from - 1; k >= 0; k--) {
+			const before = live[k]
+
+			if (before !== undefined && this.byEntry.has(before)) return [...entries, before]
+		}
+
+		return entries
 	}
 }
 

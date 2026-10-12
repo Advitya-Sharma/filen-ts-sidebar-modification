@@ -15,6 +15,7 @@ import {
 	type LayoutEvent,
 	type LayoutOptions
 } from "@filen/office/core/docx"
+import { STYLES_PART } from "./docxEditFixtures"
 import { buildDocx, type SyntheticDocx } from "./docxSynthetic"
 import { HmtxMeasurer, layOut, layoutDigest, loadDocx, pageLines, type LineInfo } from "./layoutFixtures"
 import { wordLikeDocument } from "./wordLike"
@@ -1048,6 +1049,24 @@ describe("objects", () => {
 		expect(height(inlineFraction)).toBeGreaterThan(LINE * 1.2)
 		expect(height(displayFraction)).toBeGreaterThan(height(inlineFraction))
 		expect(inline.objects.widths[1] ?? 0).toBeLessThan(display.objects.widths[0] ?? 0)
+	})
+
+	it("sizes an equation in its font when it is the first thing to need that font", async () => {
+		// Calibri's stand-in has other metrics than the fallback a style without its font loaded measures with.
+		const styles = {
+			parts: [
+				STYLES_PART(
+					'<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr></w:rPrDefault></w:docDefaults>'
+				)
+			],
+			relationships: [{ id: "rIdS", type: "styles", target: "styles.xml" }]
+		}
+		const equation = "<w:p><m:oMathPara><m:oMath><m:r><m:t>sin α + cos β</m:t></m:r></m:oMath></m:oMathPara></w:p>"
+		const first = await layout({ ...styles, body: equation })
+		const after = await layout({ ...styles, body: p("text first") + equation })
+
+		expect(first.objects.widths[0]).toBe(after.objects.widths[0])
+		expect(body(first, 0)[0]?.width).toBe(body(after, 0)[1]?.width)
 	})
 
 	it("sizes VML pictures from their style", async () => {

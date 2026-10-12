@@ -85,6 +85,8 @@ export class ObjectTable {
 	readonly textboxes: (readonly number[] | undefined)[] = []
 	// Insets of a text box (left, top, right, bottom px).
 	readonly insets: (readonly number[] | undefined)[] = []
+	// Equations measured while a font was still loading: measured again once fonts are in.
+	readonly provisional = new Set<number>()
 	private readonly byItem = new Map<number, number>()
 
 	idOf(part: number, item: number): number {
@@ -320,7 +322,8 @@ export interface PlacedObject {
 	readonly anchored: boolean
 }
 
-// Registers (once) and sizes the drawing, VML or equation at `item`.
+// Registers (once) and sizes the drawing, VML or equation at `item`. `fontsMissing`: fonts are still loading,
+// so an equation measured now is measured again later.
 export function objectAt(
 	model: DocxModel,
 	table: ObjectTable,
@@ -328,11 +331,12 @@ export function objectAt(
 	part: StoryPart,
 	item: number,
 	fontSize: number,
-	measureText: (text: string) => number
+	measureText: (text: string) => number,
+	fontsMissing: boolean
 ): PlacedObject | undefined {
 	const existing = table.idOf(part.index, item)
 
-	if (existing >= 0) {
+	if (existing >= 0 && (fontsMissing || !table.provisional.has(existing))) {
 		return {
 			id: existing,
 			width: table.widths[existing] ?? 0,
@@ -435,7 +439,19 @@ export function objectAt(
 		const width = custom?.width ?? estimated?.width ?? 0
 		const height = custom?.height ?? estimated?.height ?? 0
 		const ascent = custom?.ascent ?? estimated?.ascent ?? height
+
+		if (existing >= 0) {
+			table.widths[existing] = width
+			table.heights[existing] = height
+			table.ascents[existing] = ascent
+			table.provisional.delete(existing)
+
+			return { id: existing, width, height, ascent, anchored: false }
+		}
+
 		const id = table.add(ObjectKind.MATH, part.index, item, -1, width, height, ascent, undefined, undefined, undefined)
+
+		if (fontsMissing) table.provisional.add(id)
 
 		return { id, width, height, ascent, anchored: false }
 	}
