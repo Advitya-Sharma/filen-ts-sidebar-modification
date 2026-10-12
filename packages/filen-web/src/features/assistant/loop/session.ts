@@ -486,7 +486,7 @@ export function createAssistantSession({
 
 			if (turnConversation === conversation && replied) {
 				// A withheld reply is not shown, so the model does not read it back either.
-				const exchange = { user: message, reply: result.historyReply, prompt: result.prompt }
+				const exchange = { user: message, reply: result.historyReply, prompt: result.prompt, calls: result.historyCalls }
 
 				shownReplies.set(exchange, result.withheld ? "" : result.reply)
 				history = windowHistory([...history, exchange])

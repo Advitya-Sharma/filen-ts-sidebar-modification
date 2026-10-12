@@ -1268,6 +1268,68 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		expect((await followUp("c9")).result.calls.map(record => record.status)).toEqual(["blocked"])
 	})
 
+	it("keeps the navigation a reply came from, and shows it to later turns ahead of that reply", async () => {
+		const executor = new FakeExecutor({
+			items: [{ handle: "n2", name: "Launch meeting" }],
+			results: { list_notes: () => ({ notes: [{ handle: "n2", title: "Launch meeting" }] }), open_note: () => ({ opened: "n2" }) }
+		})
+		const first = await turn({
+			model: new ScriptedModel({
+				route: "notes read",
+				steps: [call("list_notes", { query: "launch" }), call("open_note", { handle: "n2" }), call("open_note", { handle: "n2" }), "Opened."]
+			}),
+			executor,
+			message: "Open my launch note"
+		})
+
+		// The lookup is a read and the repeated call did not run: later turns read neither.
+		expect(first.result.historyCalls).toEqual([{ name: "open_note", arguments: JSON.stringify({ handle: "n2" }) }])
+
+		const model = new ScriptedModel({ route: "trash read", steps: ["Done."] })
+
+		await turn({
+			model,
+			executor,
+			message: "Open my trash",
+			history: [{ user: "Open my launch note", reply: first.result.historyReply, prompt: first.result.prompt, calls: first.result.historyCalls }]
+		})
+
+		const step = model.requests.find(request => request.slot === "main")?.messages ?? []
+		const replayed = step[2]
+
+		expect(step.map(message => message.role)).toEqual(["system", "user", "assistant", "tool", "assistant", "user"])
+		expect(replayed).toMatchObject({ content: "", toolCalls: [{ name: "open_note" }] })
+		expect(step[3]).toMatchObject({ toolCallId: replayed?.role === "assistant" ? replayed.toolCalls?.[0]?.id : undefined })
+		expect(step[4]?.content).toBe("Opened.")
+	})
+
+	it("lets a follow-up act on an item an earlier call took only when the user named that item", async () => {
+		const followUp = async (message: string) => {
+			const executor = new FakeExecutor({
+				items: [{ handle: "c4", name: "Offsite planning" }],
+				results: { list_chats: () => ({ chats: [{ handle: "c4", name: "Offsite planning" }] }) }
+			})
+
+			await turn({ model: new ScriptedModel({ route: "chats read", steps: [call("list_chats", { query: "offsite" })] }), executor, message: "x" })
+
+			return turn({
+				model: new ScriptedModel({ route: "chats change", steps: [call("draft_chat_message", { chat: "c4", text: "I'll bring it" }), "Drafted."] }),
+				executor,
+				message,
+				history: [
+					{
+						user: "Open my latest chat",
+						reply: "Opened.",
+						calls: [{ name: "open_chat", arguments: JSON.stringify({ handle: "c4" }) }]
+					}
+				]
+			})
+		}
+
+		expect((await followUp("Tell the offsite planning chat that I'll bring it")).result.calls.map(record => record.status)).toEqual(["ok"])
+		expect((await followUp("Tell them that I'll bring it")).result.calls.map(record => record.status)).toEqual(["blocked"])
+	})
+
 	it("asks the extraction the current request first, then the user's previous message as labelled background", async () => {
 		const executor = new FakeExecutor({
 			items: [],
@@ -2009,6 +2071,26 @@ describe("fitMessages", () => {
 		const fitted = fitMessages({
 			system,
 			history,
+			turn: [{ role: "user", content: "now" }],
+			tools: [],
+			maxTokens: 100,
+			contextTokens: 400
+		})
+
+		expect(fitted.map(message => message.content)).toEqual(["s", "short", "reply", "now"])
+	})
+
+	it("drops an exchange with its calls and results whole", () => {
+		const fitted = fitMessages({
+			system,
+			history: [
+				{ role: "user", content: "a".repeat(3000) },
+				{ role: "assistant", content: "", toolCalls: [{ id: "h", name: "list_notes", arguments: "{}" }] },
+				{ role: "tool", toolCallId: "h", content: "{}" },
+				{ role: "assistant", content: "b" },
+				{ role: "user", content: "short" },
+				{ role: "assistant", content: "reply" }
+			],
 			turn: [{ role: "user", content: "now" }],
 			tools: [],
 			maxTokens: 100,

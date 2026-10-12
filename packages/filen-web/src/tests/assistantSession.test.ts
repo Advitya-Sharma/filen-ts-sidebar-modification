@@ -802,7 +802,8 @@ describe("assistant session", () => {
 			{
 				user: "And the receipts?",
 				reply: "The receipts are in Scans.",
-				prompt: expect.stringMatching(/\n\nAnd the receipts\?$/) as unknown
+				prompt: expect.stringMatching(/\n\nAnd the receipts\?$/) as unknown,
+				calls: []
 			}
 		])
 
@@ -814,7 +815,9 @@ describe("assistant session", () => {
 		await waitFor(events, event => event.type === "turn-end" && event.turnId === second)
 
 		expect(seen.flat()).not.toContain("Where is my tax file?")
-		expect(session.getHistory()).toEqual([{ user: "Hi", reply: "Hello.", prompt: expect.stringMatching(/\n\nHi$/) as unknown }])
+		expect(session.getHistory()).toEqual([
+			{ user: "Hi", reply: "Hello.", prompt: expect.stringMatching(/\n\nHi$/) as unknown, calls: [] }
+		])
 	})
 
 	it("lets the model read the handles of the items a reply named, and saves and resumes only what the user saw", async () => {
@@ -830,7 +833,7 @@ describe("assistant session", () => {
 
 		const model = new RecordingModel({
 			route: "chats read",
-			steps: [call("list_chats", {}), "Tom Lee wrote about the budget.", "Sure.", "Sure."]
+			steps: [call("list_chats", {}), call("open_chat", { handle: "c30" }), "Tom Lee wrote about the budget.", "Sure.", "Sure."]
 		})
 		const executor = fakeExecutor({ list_chats: { chats: [{ handle: "c30", name: "Tom Lee" }] } })
 		const session = createAssistantSession({ runtime: fakeRuntime(model), executor })
@@ -847,6 +850,8 @@ describe("assistant session", () => {
 		await waitFor(events, event => event.type === "turn-end" && event.turnId === second)
 
 		expect(seen.some(messages => messages.includes("Tom Lee (c30) wrote about the budget."))).toBe(true)
+		// The navigation the reply came from, which the next turn reads ahead of it; a resumed conversation drops it.
+		expect(session.getHistory()[0]).toMatchObject({ calls: [{ name: "open_chat" }] })
 
 		const saved = session.getHistory()
 
@@ -854,6 +859,8 @@ describe("assistant session", () => {
 
 		session.reset(saved)
 		seen.length = 0
+
+		expect(session.getHistory().some(exchange => "calls" in exchange)).toBe(false)
 
 		const resumed = session.send("Summarize that chat")
 

@@ -103,6 +103,19 @@ const TWO_PAGES = LISTING_PAGE_ITEMS + 5
 const THREE_PAGES = LISTING_PAGE_ITEMS * 2 + 5
 const DIRECTORY_COUNT = 214
 
+// A long conversation of requests each answered from a tool, as people use the assistant: later requests still
+// call their tools rather than answering from what earlier replies said about a similar item or action.
+const LONG_CONVERSATION = [
+	"What's in my Cloud Drive root directory?",
+	"Find my tax documents.",
+	"Which files did I change most recently?",
+	"What's my largest file?",
+	"What does my note about the offsite shopping list say?",
+	"Summarize my offsite planning chat.",
+	"Tell the offsite planning chat that I'll bring the shopping list.",
+	"What does my note about the launch meeting say?"
+]
+
 // Several turns of one conversation: the answer to a clarifying question, a follow-up that only makes sense
 // with the turn before, a request that names the item a previous turn listed, and turns that move to another
 // tool group, to one whose tools the prompt shows for another family, or to no tools at all.
@@ -628,5 +641,51 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		routes: ["chats"],
 		answerIncludes: [["4.800", "4800", "4,800", "4 800"]],
 		expectsText: true
+	},
+	{
+		id: "conversation-long-chat-after-note-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: LONG_CONVERSATION[0] ?? "",
+		followUps: [...LONG_CONVERSATION.slice(1), "Summarize my website team chat about the launch."],
+		setup: addOffsite,
+		routes: ["chats"],
+		calls: [{ tool: "read_chat", args: { handle: "c4" } }],
+		answerIncludes: [["review", "draft"]],
+		// What the launch note says, not the chat.
+		answerExcludes: ["8 october", "october 8", "owns", "responsible"],
+		// The draft turn's.
+		state: [{ draft: "c40" }],
+		expectsText: true
+	},
+	// The same with reads only: a storage question in place of the draft.
+	{
+		id: "conversation-long-reads-chat-after-note-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: LONG_CONVERSATION[0] ?? "",
+		followUps: [
+			...LONG_CONVERSATION.slice(1, 6),
+			"How much storage am I using?",
+			LONG_CONVERSATION[7] ?? "",
+			"Summarize my website team chat about the launch."
+		],
+		setup: addOffsite,
+		routes: ["chats"],
+		calls: [{ tool: "read_chat", args: { handle: "c4" } }],
+		answerIncludes: [["review", "draft"]],
+		answerExcludes: ["8 october", "october 8", "owns", "responsible"],
+		expectsText: true
+	},
+	{
+		id: "conversation-long-open-after-open-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: LONG_CONVERSATION[0] ?? "",
+		followUps: [...LONG_CONVERSATION.slice(1), "Take me to my favorites", "Open my trash"],
+		setup: addOffsite,
+		routes: ["navigation", "trash"],
+		calls: [{ tool: "open_route", args: { route: "trash" } }],
+		state: [{ screen: "trash" }, { draft: "c40" }]
 	}
 ]

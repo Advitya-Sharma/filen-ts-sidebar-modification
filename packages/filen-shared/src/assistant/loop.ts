@@ -276,12 +276,23 @@ export type AssistantTurnEvent =
 			progress: AssistantToolProgress
 	  }
 
+// A call an earlier turn made, as the model wrote it.
+export type AssistantHistoryCall = {
+	name: string
+	arguments: string
+}
+
 export type AssistantHistoryTurn = {
 	user: string
 	reply: string
 	// The user's turn as the model read it (assistantUserPrompt): given back unchanged, the conversation reads
 	// the same on the next turn and the engine reuses it.
 	prompt?: string
+	// The navigation and changes that ran for this reply (historyCalls). Read back without the calls that did
+	// them, replies that say something was opened or drafted teach the model to claim actions without calling,
+	// and over a long conversation to answer new requests from earlier replies. Reads stay out: shown a read
+	// whose result is gone, the model made up what it held (a link to pass on, the next page).
+	calls?: readonly AssistantHistoryCall[]
 }
 
 // Prior exchanges kept for context, at most this many and about this many tokens: an exchange from long ago
@@ -289,8 +300,56 @@ export type AssistantHistoryTurn = {
 const HISTORY_MAX = 12
 const HISTORY_MAX_TOKENS = 1800
 
+// What an earlier call's result reads as: the reply after it says what came of it.
+const HISTORY_RESULT = serializeToolResult({ omitted: "Earlier result; call the tool again if it is still needed." })
+
+function historyMessages(exchange: AssistantHistoryTurn, index: number): AssistantChatMessage[] {
+	const calls = (exchange.calls ?? []).map((call, position) => ({ ...call, id: `history_${String(index)}_${String(position)}` }))
+
+	return [
+		{
+			role: "user",
+			content: exchange.prompt ?? exchange.user
+		},
+		...(calls.length === 0
+			? []
+			: [
+					{
+						role: "assistant" as const,
+						content: "",
+						toolCalls: calls
+					},
+					...calls.map(call => ({
+						role: "tool" as const,
+						toolCallId: call.id,
+						content: HISTORY_RESULT
+					}))
+				]),
+		{
+			role: "assistant",
+			content: exchange.reply
+		}
+	]
+}
+
+// The handles an earlier turn's calls took.
+function callHandles(calls: readonly AssistantHistoryCall[] = []): string[] {
+	return calls.flatMap(call => {
+		const tool = assistantToolByName(call.name)
+		const args = tool === undefined ? null : parseArguments(call.arguments)
+
+		return tool === undefined || args === null
+			? []
+			: (tool.grounded.handles ?? []).flatMap(key => {
+					const value = args[key]
+
+					return typeof value === "string" ? [value] : Array.isArray(value) ? value.filter(item => typeof item === "string") : []
+				})
+	})
+}
+
 function exchangeTokens(exchange: AssistantHistoryTurn): number {
-	return estimateTokens(exchange.prompt ?? exchange.user) + estimateTokens(exchange.reply)
+	return historyMessages(exchange, 0).reduce((sum, message) => sum + messageTokens(message), 0)
 }
 
 // The exchanges the next turns read, after one was added; the apps' sessions and the eval keep a conversation
@@ -332,6 +391,8 @@ export type AssistantTurnResult = {
 	// The reply as later turns read it, for AssistantHistoryTurn.reply: with the handles of the items it names,
 	// which the shown reply leaves out.
 	historyReply: string
+	// For AssistantHistoryTurn.calls.
+	historyCalls: AssistantHistoryCall[]
 	// The user's turn as the model read it, for AssistantHistoryTurn.prompt.
 	prompt: string
 	withheld: boolean
@@ -615,8 +676,10 @@ export function fitMessages({
 	const first = current[0]
 
 	while (total() > budget && kept.length > 0) {
-		// History alternates user / assistant; drop whole exchanges.
-		kept = kept.slice(2)
+		// Whole exchanges go, each from its user message to the next.
+		const next = kept.findIndex((message, index) => index > 0 && message.role === "user")
+
+		kept = next === -1 ? [] : kept.slice(next)
 
 		if (fullPrompt !== undefined && first?.role === "user") {
 			current[0] = { ...first, content: fullPrompt }
@@ -880,9 +943,9 @@ export async function runAssistantTurn({
 		contextHandles: context.handles
 	})
 
-	// Items earlier replies show by handle can be named again without a new lookup; like a lookup's results,
-	// they ground a change only by the item's own name in the user's words.
-	const historyHandles = [...new Set(history.flatMap(entry => replyHandles(entry.reply)))]
+	// Items earlier replies show by handle, or earlier calls took, can be named again without a new lookup; like
+	// a lookup's results, they ground a change only by the item's own name in the user's words.
+	const historyHandles = [...new Set(history.flatMap(entry => [...replyHandles(entry.reply), ...callHandles(entry.calls)]))]
 
 	guard.recordCandidates(
 		historyHandles.flatMap(handle => {
@@ -937,16 +1000,7 @@ export async function runAssistantTurn({
 				)
 			)
 		: STEP_MAX_TOKENS
-	const past: AssistantChatMessage[] = history.flatMap(entry => [
-		{
-			role: "user" as const,
-			content: entry.prompt ?? entry.user
-		},
-		{
-			role: "assistant" as const,
-			content: entry.reply
-		}
-	])
+	const past: AssistantChatMessage[] = history.flatMap(historyMessages)
 	const turn: AssistantChatMessage[] = [
 		{
 			role: "user",
@@ -954,6 +1008,7 @@ export async function runAssistantTurn({
 		}
 	]
 	const calls: AssistantToolCallRecord[] = []
+	const ran: AssistantHistoryCall[] = []
 	const specialTokens = model.specialTokens
 	const nameOf = (handle: string) => executor.name?.(handle)
 	// Items this turn's results handed out, by handle: the next turns read their handles beside the names the
@@ -1455,6 +1510,10 @@ export async function runAssistantTurn({
 											})
 										: outcome.result
 
+								if (tool.effect !== "read") {
+									ran.push({ name: call.name, arguments: call.arguments })
+								}
+
 								const listed = resultItemCount({
 									tool,
 									result: outcome.result
@@ -1606,6 +1665,7 @@ export async function runAssistantTurn({
 	return {
 		reply: final.type === "reply" ? final.text : "",
 		historyReply: withheld ? "" : replyWithHandles(screen(answer, { handles: true }).text, handedOut),
+		historyCalls: withheld ? [] : ran,
 		prompt,
 		withheld,
 		route,
