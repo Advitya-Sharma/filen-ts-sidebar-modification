@@ -3,7 +3,8 @@ import { isBlocked } from "@filen/shared"
 import { sanitizeUntrustedText } from "@filen/shared/assistant"
 import { contactsQueryRead } from "@/features/contacts/queries/contacts"
 import { chatsQueryRead } from "@/features/chats/queries/chats"
-import { chatMessagesQueryRead } from "@/features/chats/queries/chatMessages"
+import { chatMessagesQueryGet, chatMessagesQueryRead } from "@/features/chats/queries/chatMessages"
+import { chatHasUnread } from "@/features/chats/lib/unread.logic"
 import { chatsWithoutBlockedOneOnOne, filterChats } from "@/features/chats/components/chatsSidebar.logic"
 import { isChatUndecryptable, messageSenderName, otherParticipants } from "@/features/chats/lib/sort"
 import { isOwnMessage, isSenderBlocked } from "@/features/chats/lib/sender"
@@ -25,12 +26,14 @@ import {
 	type ToolAdapter,
 	type ToolScope
 } from "@/features/assistant/tools/entities"
-import { AssistantToolError, clipText, isoDate, matchScore, searchTokens } from "@/features/assistant/tools/format"
+import { AssistantToolError, clipText, isoDate, matchScore, searchTokens, throwIfStopped } from "@/features/assistant/tools/format"
 
 const LIST_LIMIT = 30
 const DEFAULT_MESSAGES = 20
 const MAX_MESSAGES = 50
 const MESSAGE_MAX_CHARS = 600
+// Less room than this left, an older message is left out rather than cut to a fragment.
+const MESSAGE_MIN_CHARS = 80
 export const CHAT_MAX_CHARS = 6_000
 
 async function resolveChat(scope: ToolScope, handle: string): Promise<Chat> {
@@ -54,7 +57,9 @@ async function resolveChat(scope: ToolScope, handle: string): Promise<Chat> {
 }
 
 // The sidebar's own list, in its order; a query matches the chat's name and its participants' names word by
-// word, both sides folded the same way ("joao" finds "João"), the chats matching every word first.
+// word, both sides folded the same way ("joao" finds "João"), the chats matching every word first. A row says
+// whether it has unread messages, as the sidebar's dot does (from the cached rows, no request), and when the
+// last message is the user's own.
 export const listChatsTool: ToolAdapter = async (input, scope) => {
 	const userId = currentUserId()
 	const blocked = blockedUsers()
@@ -84,7 +89,9 @@ export const listChatsTool: ToolAdapter = async (input, scope) => {
 					name,
 					// A one-on-one chat is named after the other person, so the list would only repeat the name.
 					...(participants.length === 1 && participants[0] === name ? {} : { participants }),
-					...(chat.lastMessage === undefined ? {} : { lastActivity: isoDate(chat.lastMessage.sentTimestamp) })
+					...(chat.lastMessage === undefined ? {} : { lastActivity: isoDate(chat.lastMessage.sentTimestamp) }),
+					...(chat.lastMessage !== undefined && isOwnMessage(chat.lastMessage, userId) ? { lastFrom: "you" } : {}),
+					...(chatHasUnread(chat, userId, blocked, chatMessagesQueryGet) ? { unread: true } : {})
 				}
 			}),
 			...(chats.length > LIST_LIMIT ? { more: chats.length - LIST_LIMIT } : {})
@@ -167,18 +174,18 @@ export const readChatTool: ToolAdapter = async (input, scope) => {
 	let truncated = false
 	const rows: { from: string; text: string; sent: string }[] = []
 
-	// Newest first against the budget, so a long backlog drops its oldest messages.
+	// Newest first against the budget, so a long backlog drops its oldest messages. A message cut to fit ends
+	// in "…", so a summary does not read half a sentence as all that was said.
 	for (const message of [...messages].reverse()) {
-		const text = isSenderBlocked(message, blocked)
-			? "(hidden: blocked sender)"
-			: message.message === undefined
-				? "(cannot decrypt)"
-				: clipText(message.message, Math.min(MESSAGE_MAX_CHARS, budget)).text
+		const full = isSenderBlocked(message, blocked) ? "(hidden: blocked sender)" : (message.message ?? "(cannot decrypt)")
 
-		if (budget <= 0) {
+		if (full.length > budget && budget < MESSAGE_MIN_CHARS) {
 			truncated = true
 			break
 		}
+
+		const clipped = clipText(full, Math.min(MESSAGE_MAX_CHARS, budget))
+		const text = clipped.truncated ? `${clipped.text}…` : clipped.text
 
 		budget -= text.length
 		rows.unshift({
@@ -217,8 +224,9 @@ export const openChatTool: ToolAdapter = async (input, scope) => {
 
 // The text a draft puts into the composer: what the card shows and what lands, with invisible and bidi
 // characters and template control tokens removed, so the card cannot show one message and send another.
+// Joiners that shape a word (Persian, Indic scripts) or draw an emoji stay: they change what the card shows.
 export function draftText(text: string): string {
-	return sanitizeUntrustedText(text)
+	return sanitizeUntrustedText(text, [], { keepJoiners: true })
 }
 
 // Why a draft cannot land, checked before the card shows (and again after the click, for a race): the
@@ -279,6 +287,8 @@ export const draftChatMessageTool: ToolAdapter = async (input, scope) => {
 		throw new AssistantToolError(raced)
 	}
 
+	// Signed out meanwhile: the call already reads as failed, so nothing may land.
+	throwIfStopped(scope)
 	useChatComposerStore.getState().setDraft(chat.uuid, text)
 
 	return {

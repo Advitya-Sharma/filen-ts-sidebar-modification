@@ -14,6 +14,7 @@ import {
 	driveKind,
 	driveName,
 	freshDriveItem,
+	livePath,
 	optionalString,
 	readSharedInListing,
 	readUnsyncedListing,
@@ -224,7 +225,7 @@ export const getSharingTool: ToolAdapter = async (input, scope) => {
 		throw new AssistantToolError("This item cannot be decrypted")
 	}
 
-	const handle = showDrive(scope, item, entity.path)
+	const handle = showDrive(scope, item, livePath(entity, item))
 	const name = driveName(item)
 
 	if (shareDirection(item) === "in") {

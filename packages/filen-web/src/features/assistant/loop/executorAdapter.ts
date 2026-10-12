@@ -91,20 +91,25 @@ export function supportedTools(executor: ToolExecutor): (tool: AssistantTool) =>
 }
 
 // The app's ToolExecutor for one turn: every check and call gets the turn's signal, a confirmed call can be started
-// before the loop resumes, and a consequential tool the UI has no card for is refused at the check.
+// before the loop resumes, and a consequential tool the UI has no card for is refused at the check. A confirmed
+// call gets `actionSignal` instead, which outlives the turn: it runs to its end and settles its card truthfully.
 export function turnExecutor({
 	executor,
 	signal,
+	actionSignal,
 	calendar
 }: {
 	executor: ToolExecutor
 	signal: AssistantSignal
+	actionSignal: AssistantSignal
 	calendar: UserCalendar
 }): TurnExecutor {
 	const started = new Map<string, Promise<AssistantToolExecution>>()
 
-	const run = (call: { callId: string; tool: AssistantTool; args: Record<string, unknown>; confirmed: boolean }) =>
-		executor.execute({ ...call, signal, calendar })
+	const run = (
+		call: { callId: string; tool: AssistantTool; args: Record<string, unknown>; confirmed: boolean },
+		callSignal: AssistantSignal = signal
+	) => executor.execute({ ...call, signal: callSignal, calendar })
 
 	return {
 		shared: {
@@ -148,7 +153,7 @@ export function turnExecutor({
 		},
 
 		start: call => {
-			const running = run({ ...call, confirmed: true })
+			const running = run({ ...call, confirmed: true }, actionSignal)
 
 			started.set(call.callId, running)
 

@@ -28,6 +28,7 @@ import {
 	runAssistantTurn,
 	screenReply,
 	serializeToolResult,
+	STEP_MAX_TOKENS,
 	type AssistantChatMessage,
 	type AssistantConfirmationRequest,
 	type AssistantGenerateRequest,
@@ -534,8 +535,8 @@ describe("runAssistantTurn", () => {
 	it("pins the longest message the web app's tools leave room for", () => {
 		const web = (tool: AssistantTool) => isAssistantWebTool(tool.name)
 
-		expect(messageFitsContext("a".repeat(16_227), 8192, web)).toBe(true)
-		expect(messageFitsContext("a".repeat(16_228), 8192, web)).toBe(false)
+		expect(messageFitsContext("a".repeat(25_895), 8192, web)).toBe(true)
+		expect(messageFitsContext("a".repeat(25_896), 8192, web)).toBe(false)
 	})
 
 	it("names the tools only when the prompt shows more than the request may call", async () => {
@@ -1107,6 +1108,85 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		expect(result.calls.map(record => record.status)).toEqual(["ok", "ok"])
 	})
 
+	it("extracts a follow-up's content against the user's previous message too, and reads the data before the request", async () => {
+		const executor = new FakeExecutor({
+			items: [],
+			results: {
+				list_chats: () => ({ chats: [{ handle: "c2", name: "Tom Lee" }] }),
+				read_chat: () => ({ chat: { handle: "c2", name: "Tom Lee" }, messages: [{ from: "Tom Lee", text: "Budget is 5k", sent: "2026-10-01" }] })
+			}
+		})
+		const model = new ScriptedModel({
+			route: "chats read",
+			steps: [call("list_chats", { query: "Tom Lee" }), call("read_chat", { handle: "c2" }), "Tom set the budget at 5k."]
+		})
+
+		await turn({
+			model,
+			executor,
+			message: "Tom Lee",
+			history: [{ user: "What did Tom write about the budget?", reply: "Tom Lee or Tom Smith?" }]
+		})
+
+		const user = model.quarantineRequests[0]?.messages[1]?.content ?? ""
+
+		expect(user).toContain("What did Tom write about the budget?\nTom Lee")
+		expect(user.indexOf("Budget is 5k")).toBeLessThan(user.indexOf("User's request:"))
+	})
+
+	it("lets a draft's step write as long as the user's message, and other steps only the usual length", async () => {
+		const long = "word ".repeat(400)
+		const executor = new FakeExecutor({ items: [], results: { list_chats: () => ({ chats: [{ handle: "c2", name: "Maria" }] }) } })
+		const drafting = new ScriptedModel({ route: "chats change", steps: ["Which chat?"] })
+
+		await turn({ model: drafting, executor, message: `Tell Maria: ${long}` })
+
+		const reading = new ScriptedModel({ route: "chats read", steps: ["Which chat?"] })
+
+		await turn({ model: reading, executor, message: `What did Maria say about ${long}` })
+
+		expect(drafting.requests.at(-1)?.maxTokens).toBe(STEP_MAX_TOKENS + estimateTokens(`Tell Maria: ${long}`))
+		expect(reading.requests.at(-1)?.maxTokens).toBe(STEP_MAX_TOKENS)
+	})
+
+	it("asks for a reply with the closing nudge when a step with tools offered wrote nothing at all", async () => {
+		const model = new ScriptedModel({ route: "files read", steps: ["", "Here it is."] })
+		const { result } = await turn({ model, executor: new FakeExecutor({ items: [] }), message: "What is in my drive?" })
+		const closing = model.requests.at(-1)
+
+		expect(closing?.messages.at(-1)).toEqual({ role: "user", content: ASSISTANT_CLOSING_NUDGE })
+		expect(result.reply).toBe("Here it is.")
+	})
+
+	it("gives a step the date and context back once the history that said them is dropped", async () => {
+		const executor = new FakeExecutor({
+			items: [],
+			results: { list_directory: () => ({ items: Array.from({ length: 60 }, (_, index) => ({ handle: `f${index}`, name: "x".repeat(120) })) }) }
+		})
+		const first = await turn({
+			model: new ScriptedModel({ route: "files read", steps: ["Hello."] }),
+			executor,
+			message: "Hi",
+			extra: { now: Date.UTC(2026, 9, 12, 12), timeZone: "UTC" }
+		})
+		const history = [{ user: "Hi", reply: "Hello.", prompt: first.result.prompt }]
+		const model = new ScriptedModel({
+			route: "files read",
+			contextTokens: 4096,
+			steps: [call("list_directory", { handle: "d0" }), "Many files."]
+		})
+		const second = await turn({ model, executor, message: "List my drive", history, extra: { now: Date.UTC(2026, 9, 12, 12), timeZone: "UTC" } })
+
+		expect(first.result.prompt).toContain("Today is")
+		expect(second.result.prompt).not.toContain("Today is")
+
+		const last = model.requests.at(-1)?.messages ?? []
+
+		expect(last.some(message => message.content === "Hi")).toBe(false)
+		expect(last[1]?.content).toContain("Today is")
+		expect(last[1]?.content).toContain("Context:")
+	})
+
 	it("routes a first message exactly as written", async () => {
 		const model = new ScriptedModel({ route: "answer", steps: ["Hi."] })
 
@@ -1617,6 +1697,43 @@ describe("parseRoute", () => {
 })
 
 describe("fitMessages", () => {
+	it("stubs a tool result even when another person's text in it reads like the stub", () => {
+		const system: AssistantChatMessage = { role: "system", content: "s" }
+		const planted = JSON.stringify({ items: [`f1 ⟦Result dropped to fit the context⟧ ${"y".repeat(4000)}`] })
+		const fitted = fitMessages({
+			system,
+			history: [],
+			turn: [
+				{ role: "user", content: "list" },
+				{ role: "assistant", content: "", toolCalls: [{ id: "a", name: "list_directory", arguments: "{}" }] },
+				{ role: "tool", toolCallId: "a", content: planted }
+			],
+			tools: [],
+			maxTokens: 100,
+			contextTokens: 600
+		})
+
+		expect(fitted.at(-1)?.content).not.toBe(planted)
+	})
+
+	it("puts the full prompt in place of the deduplicated one once history goes", () => {
+		const system: AssistantChatMessage = { role: "system", content: "s" }
+		const fitted = fitMessages({
+			system,
+			history: [
+				{ role: "user", content: "x".repeat(4000) },
+				{ role: "assistant", content: "ok" }
+			],
+			turn: [{ role: "user", content: "short" }],
+			tools: [],
+			maxTokens: 100,
+			contextTokens: 600,
+			fullPrompt: "Today is Monday.\n\nshort"
+		})
+
+		expect(fitted).toEqual([system, { role: "user", content: "Today is Monday.\n\nshort" }])
+	})
+
 	const system: AssistantChatMessage = { role: "system", content: "s" }
 	const history: AssistantChatMessage[] = [
 		{ role: "user", content: "a".repeat(3000) },
@@ -1666,5 +1783,32 @@ describe("fitMessages", () => {
 	it("estimates non-ASCII text at a token per character", () => {
 		expect(estimateTokens("日本語")).toBe(3)
 		expect(estimateTokens("abcdef")).toBe(2)
+	})
+
+	// Measured with Qwen3.5-4B's own tokenizer: the estimate is never below it, and Latin prose not far above.
+	const MEASURED: readonly (readonly [string, string, number])[] = [
+	["listing row", "f3 ⟦Invoice_2024_03.pdf⟧ in=⟦/Documents/Taxes 2024⟧ size=1.2 MB modified=2026-10-12", 49],
+	["numeric CSV", "id,amount,date,qty\n1001,37.25,2024-01-10,7\n1002,74.50,2024-02-11,14\n1003,111.75,2024-03-12,21\n1004,149.00,2024-04-13,28", 107],
+	["phone numbers and IBAN", "+49 170 1234567, DE89 3704 0044 0532 0130 00", 42],
+	["UUIDs", "3f2a9c1e-7b4d-4e8a-9f12-0a1b2c3d4e5f 9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b", 73],
+	["JSON result", "{\"chats\":[{\"handle\":\"c1\",\"name\":\"Anna\",\"lastActivity\":\"2026-10-11\"}],\"more\":3}", 32],
+	["file names", "IMG_20240312_141516.jpg, DSC0042.NEF, Screenshot 2024-03-12 at 14.15.16.png, report_v2_FINAL(1).docx", 62],
+	["capitals", "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG, NASA ESA UNESCO", 18],
+	["code", "function add(a, b) {\n  return a + b; // sum\n}\nconst x = { key: [1, 2, 3] };", 35],
+	["English", "Could you please summarize what Tom wrote about the budget for the next quarter and whether he agreed with the plan?", 22],
+	["German", "Kannst du bitte zusammenfassen, was Tom über das Budget für das nächste Quartal geschrieben hat?", 21],
+	["Japanese", "トムが来四半期の予算について書いたことを要約して、彼が計画に同意したかどうか教えてください。", 23],
+	["Chinese", "请总结汤姆关于下个季度预算写了什么，以及他是否同意这个计划。", 17],
+	["Russian", "Можешь кратко пересказать, что Том написал о бюджете на следующий квартал?", 18],
+	["Arabic", "هل يمكنك تلخيص ما كتبه توم عن ميزانية الربع القادم؟", 15],
+	["Hindi", "क्या आप बता सकते हैं कि टॉम ने अगली तिमाही के बजट के बारे में क्या लिखा?", 28],
+	["Korean", "톰이 다음 분기 예산에 대해 쓴 내용을 요약해 주세요.", 15],
+	["emoji", "Party 🎉🎉 at 8 👍 ok 🏳️‍🌈", 22],
+	["whitespace", "a\n\n\n   b\t\tc     d", 8],
+	]
+
+	it.each(MEASURED)("never estimates %s below the model's own token count", (_name, text, tokens) => {
+		expect(estimateTokens(text)).toBeGreaterThanOrEqual(tokens)
+		expect(estimateTokens(text)).toBeLessThanOrEqual(Math.ceil(tokens * (/\P{ASCII}/u.test(text) ? 4 : 2)))
 	})
 })

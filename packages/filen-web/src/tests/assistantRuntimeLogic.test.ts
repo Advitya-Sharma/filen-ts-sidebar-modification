@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { probeDevice, recommendRuntime, storageVerdict, type DeviceProbe } from "@/features/assistant/runtime/deviceCheck"
+import { canRemoveModel } from "@/features/assistant/components/assistant.logic"
 import { manifestBytes, modelFileUrl, parseManifest, type AssistantModelManifest } from "@/features/assistant/runtime/manifest"
 import { QWEN35_4B } from "@/features/assistant/runtime/models"
 import { readGgufSpecialTokens } from "@/features/assistant/runtime/gguf"
@@ -11,6 +12,9 @@ const CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 const FIREFOX_WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0"
 const SAFARI_IPHONE =
 	"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"
+// iPadOS Safari's default: it asks for the desktop site.
+const SAFARI_IPAD_DESKTOP =
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 const GIB = 1024 ** 3
 
 function probe(overrides: Partial<DeviceProbe> = {}): DeviceProbe {
@@ -20,6 +24,7 @@ function probe(overrides: Partial<DeviceProbe> = {}): DeviceProbe {
 		wasm: { simd: true, exceptions: true, memory64: true, jspi: true },
 		opfs: true,
 		hardwareConcurrency: 10,
+		maxTouchPoints: 0,
 		deviceMemoryGiB: 8,
 		webgpu: { fallback: false, maxBufferSize: 4 * GIB, maxStorageBufferBindingSize: 2 * GIB },
 		...overrides
@@ -100,6 +105,29 @@ describe("recommendRuntime", () => {
 	})
 })
 
+describe("recommendRuntime on an iPad", () => {
+	it("refuses an iPad that sends a Mac's user agent, by its touch points, and still runs on a Mac", () => {
+		expect(recommendRuntime(probe({ userAgent: SAFARI_IPAD_DESKTOP, maxTouchPoints: 5, deviceMemoryGiB: null }))).toEqual({
+			supported: false,
+			reason: "insufficient-memory",
+			detail: "iPadOS tab memory limits",
+			gpuCouldHelp: false
+		})
+		expect(recommendRuntime(probe({ userAgent: SAFARI_IPAD_DESKTOP, maxTouchPoints: 0, deviceMemoryGiB: null }))).toMatchObject({
+			supported: true
+		})
+	})
+})
+
+describe("canRemoveModel", () => {
+	it("offers removal of an earlier model version's files while this one is not downloaded", () => {
+		const model = { id: "m", name: "M", sizeBytes: 10 }
+
+		expect(canRemoveModel({ kind: "not-downloaded", model, staleBytes: 2_700_000_000 })).toBe(true)
+		expect(canRemoveModel({ kind: "not-downloaded", model })).toBe(false)
+	})
+})
+
 describe("probeDevice", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals()
@@ -132,6 +160,14 @@ describe("probeDevice", () => {
 			maxStorageBufferBindingSize: 2 * GIB
 		})
 		expect(requestAdapter).toHaveBeenCalledOnce()
+	})
+
+	it("reads the touch points, as 0 where the browser does not expose them", async () => {
+		stubBrowser(CHROME_MAC)
+		expect((await probeDevice({ gpu: false })).maxTouchPoints).toBe(0)
+
+		Object.assign(navigator, { maxTouchPoints: 5 })
+		expect((await probeDevice({ gpu: false })).maxTouchPoints).toBe(5)
 	})
 
 	// Firefox runs on the CPU path either way; asking would only start its GPU process (and log a blocklist warning).

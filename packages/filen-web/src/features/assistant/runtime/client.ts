@@ -22,7 +22,7 @@ import {
 	type AssistantBackend,
 	type RuntimeRecommendation
 } from "@/features/assistant/runtime/deviceCheck"
-import { deleteModels, inspectModel, otherModelPresent } from "@/features/assistant/runtime/modelStore"
+import { deleteModels, inspectModel, otherModels } from "@/features/assistant/runtime/modelStore"
 import { autoStartIntent, readDownloadIntent, writeDownloadIntent } from "@/features/assistant/runtime/downloadIntent"
 import type { ModelDownloadProgress } from "@/features/assistant/runtime/download"
 import { ENGINE_CRASHED, type GenerationUpdate } from "@/features/assistant/runtime/engineMessages"
@@ -53,10 +53,14 @@ export const IDLE_UNLOAD_MS = 10 * 60_000
 const EXIT_GRACE_MS = 1000
 
 // After Stop, how long a generation may take to wind down before its engine counts as stuck and the worker
-// is replaced: a stop lands between prompt batches, a fraction of a second on the GPU and up to several
-// seconds on the CPU path even at its smaller batch (two threads), where replacing a worker that would have
-// settled costs a full reload.
+// is replaced: a stop lands only between prompt batches, which take seconds on either backend (~4 s for 512
+// tokens on an M1 Max's GPU), and replacing a worker that would have settled costs a full reload. At least
+// this long, and at least STOP_BATCH_FACTOR times the slowest batch this engine took, so a slower GPU waits
+// for its own batches.
 const STOP_WATCHDOG_MS: Readonly<Record<AssistantBackend, number>> = { webgpu: 10_000, cpu: 60_000 }
+const STOP_BATCH_FACTOR = 3
+// A gap a sleeping machine or a throttled tab put between two updates is no batch time.
+const STOP_WATCHDOG_MAX_MS = 180_000
 
 type Settled = AssistantModelState["kind"]
 
@@ -186,8 +190,11 @@ export class AssistantRuntime implements AssistantModel {
 	// Whether an interrupted download continues is decided once, at this page's start.
 	private resumeDecided = false
 	private nextGeneration = 1
-	// WebGPU failed to load the model on this page: later loads go straight to the CPU path.
+	// WebGPU failed to load the model on this page while the CPU path loaded it: later loads go straight there.
 	private gpuFailed = false
+	// The longest the loaded engine took between two prompt-reading updates (one per batch), for the Stop
+	// watchdog.
+	private slowestBatchMs = 0
 	// Signed out: nothing starts again on this page.
 	private shutDown = false
 
@@ -232,9 +239,15 @@ export class AssistantRuntime implements AssistantModel {
 		this.setState({ kind, model: this.info() })
 	}
 
-	// Not on disk, or only part of it: what a stopped or failed download left, which Remove can still free.
-	private settleNotDownloaded(presentBytes = 0): void {
-		this.setState({ kind: "not-downloaded", model: this.info(), ...(presentBytes > 0 ? { partialBytes: presentBytes } : {}) })
+	// Not on disk, or only part of it: what a stopped or failed download left, which Remove can still free, as
+	// it can an earlier model version's files (`staleBytes`).
+	private settleNotDownloaded(presentBytes = 0, staleBytes = 0): void {
+		this.setState({
+			kind: "not-downloaded",
+			model: this.info(),
+			...(presentBytes > 0 ? { partialBytes: presentBytes } : {}),
+			...(staleBytes > 0 ? { staleBytes } : {})
+		})
 	}
 
 	private async presentBytes(): Promise<number> {
@@ -294,22 +307,25 @@ export class AssistantRuntime implements AssistantModel {
 			}
 
 			this.settleDownloaded()
-		} else {
+		} else if (inspection.presentBytes > 0) {
 			this.settleNotDownloaded(inspection.presentBytes)
-
-			if (inspection.presentBytes === 0) {
-				await this.checkOutdated()
-			}
+		} else {
+			this.settleNotDownloaded(0, await this.checkOutdated())
 		}
 	}
 
-	// None of this build's model is on disk but another model is: a newer build in another tab replaced it.
-	// Downloading the old one again would remove that tab's model in turn, so this tab updates instead (a no-op
-	// while this build is still the deployed one).
-	private async checkOutdated(): Promise<void> {
-		if (await otherModelPresent(this.manifest.id).catch(() => false)) {
+	// None of this build's model is on disk but another model is: either a newer build in another tab replaced
+	// it, and downloading the old one again would remove that tab's model in turn, so this tab updates instead;
+	// or this build is the deployed one and the other is an earlier version, whose bytes Remove can free.
+	// Returns those bytes.
+	private async checkOutdated(): Promise<number> {
+		const other = await otherModels(this.manifest.id).catch(() => ({ present: false, bytes: 0 }))
+
+		if (other.present) {
 			recoverIfNewerBuild()
 		}
+
+		return other.bytes
 	}
 
 	private async lockHeldElsewhere(): Promise<boolean> {
@@ -474,30 +490,46 @@ export class AssistantRuntime implements AssistantModel {
 	}
 
 	// Turns (including one waiting on a confirmation card) and confirmed actions keep the model; the idle
-	// countdown starts once the last one ends.
-	hold(): () => void {
+	// countdown starts once the last one ends. A release that follows no user activity (a card that expired
+	// unanswered) leaves the deadline where the user last was, so the model unloads on time, and primes
+	// nothing for a model about to go.
+	hold(): (options?: { activity?: boolean }) => void {
 		this.busy++
 		clearTimeout(this.idleTimer)
 		this.idleTimer = undefined
 
 		let released = false
 
-		return () => {
+		return ({ activity = true } = {}) => {
 			if (released) {
 				return
 			}
 
 			released = true
 			this.busy--
-			this.touch()
+
+			if (activity) {
+				this.touch()
+			}
 
 			// Between turns: the router's cached prompt is read again if a request found it gone.
-			if (this.busy === 0 && this.state.kind === "ready") {
-				void this.handle?.remote.reprime().catch(() => undefined)
+			if (activity && this.busy === 0 && this.state.kind === "ready" && this.handle !== null) {
+				this.reprime(this.handle)
 			}
 
 			this.armIdle()
 		}
+	}
+
+	// An engine that crashed while priming is gone: the model reads as unloaded at once and the lock goes,
+	// instead of a "ready" whose next message fails.
+	private reprime(handle: WorkerHandle): void {
+		void handle.remote.reprime().catch((e: unknown) => {
+			if (errorName(e) === ENGINE_CRASHED) {
+				log.error("assistant", "the engine crashed while priming", e)
+				this.workerLost(handle)
+			}
+		})
 	}
 
 	// Hidden tabs fire timers late (at most once a minute in Chrome) and a sleeping machine not at all, so the
@@ -627,6 +659,10 @@ export class AssistantRuntime implements AssistantModel {
 			const before = await inspectModel(this.manifest)
 
 			if (!before.complete) {
+				// An older model version is dead weight this build never loads, and counts against the room for
+				// this one. Under the lock, so no tab is running it; a tab of an older build updates on its own.
+				await this.pruneOtherModels()
+
 				const { quota = 0, usage = 0 } = await navigator.storage.estimate()
 				const verdict = storageVerdict({ quota, usage, neededBytes: manifestBytes(this.manifest) - before.presentBytes })
 
@@ -685,11 +721,6 @@ export class AssistantRuntime implements AssistantModel {
 				if (this.state.kind === "downloading" && (this.state.receivedBytes < sizeBytes || this.state.waiting)) {
 					this.setState({ kind: "downloading", model: this.info(), receivedBytes: sizeBytes, waiting: false, resumed })
 				}
-
-				// An older model version is dead weight once its successor is complete.
-				await deleteModels(this.manifest.id).catch((e: unknown) => {
-					log.warn("assistant", "pruning old models failed", e)
-				})
 			}
 		} catch (e) {
 			// Stopped or failed, it is over: only a download the page died under continues by itself.
@@ -723,6 +754,12 @@ export class AssistantRuntime implements AssistantModel {
 		this.stopWorker()
 		this.unlock()
 		this.settleDownloaded()
+	}
+
+	private async pruneOtherModels(): Promise<void> {
+		await deleteModels(this.manifest.id).catch((e: unknown) => {
+			log.warn("assistant", "pruning old models failed", e)
+		})
 	}
 
 	cancelDownload(): void {
@@ -775,6 +812,7 @@ export class AssistantRuntime implements AssistantModel {
 		)
 
 		this.backend = recommendation.backend
+		this.slowestBatchMs = 0
 
 		return specialTokens
 	}
@@ -798,10 +836,15 @@ export class AssistantRuntime implements AssistantModel {
 			}
 
 			log.warn("assistant", "WebGPU load failed, trying the CPU path", e)
-			this.gpuFailed = true
 			this.stopWorker()
 
-			return this.loadIn(cpu)
+			const tokens = await this.loadIn(cpu)
+
+			// Only now was it the GPU's fault; a CPU path that failed too (a damaged shard, memory) leaves the next
+			// load to try WebGPU again.
+			this.gpuFailed = true
+
+			return tokens
 		}
 	}
 
@@ -846,17 +889,15 @@ export class AssistantRuntime implements AssistantModel {
 
 				if (inspection.complete) {
 					this.settleDownloaded()
-				} else {
+				} else if (inspection.presentBytes > 0) {
 					this.settleNotDownloaded(inspection.presentBytes)
+				} else {
+					this.settleNotDownloaded(0, await this.checkOutdated())
 				}
 
 				// Some shards are gone or were damaged, the rest are still verified: the user opted in already, so
 				// only the missing ones are fetched again, right after this load has wound down.
 				this.redownload = !inspection.complete && inspection.verifiedBytes > 0
-
-				if (inspection.presentBytes === 0) {
-					await this.checkOutdated()
-				}
 			} else {
 				this.setState({
 					kind: "error",
@@ -984,15 +1025,19 @@ export class AssistantRuntime implements AssistantModel {
 		const cancel = () => {
 			void handle.remote.cancel(id).catch(() => undefined)
 			// The worker answers a stop only between engine steps; one that never answers is replaced.
-			stuck = setTimeout(() => {
-				log.warn("assistant", "a stopped generation did not wind down")
-				this.workerLost(handle)
-			}, STOP_WATCHDOG_MS[this.backend])
+			stuck = setTimeout(
+				() => {
+					log.warn("assistant", "a stopped generation did not wind down")
+					this.workerLost(handle)
+				},
+				Math.max(STOP_WATCHDOG_MS[this.backend], Math.min(STOP_WATCHDOG_MAX_MS, STOP_BATCH_FACTOR * this.slowestBatchMs))
+			)
 		}
 
 		// One port for every kind of update, opened only when someone listens. Updates travel on that port and
 		// the result on the worker's own, in no guaranteed order: one that lands after the result is stale.
 		let settled = false
+		let lastProgressAt: number | null = null
 		const onUpdate =
 			onText === undefined && onProgress === undefined && onToolCall === undefined
 				? undefined
@@ -1005,9 +1050,17 @@ export class AssistantRuntime implements AssistantModel {
 							case "text":
 								onText?.(update.text)
 								break
-							case "progress":
+							case "progress": {
+								const at = performance.now()
+
+								if (lastProgressAt !== null && handle === this.handle) {
+									this.slowestBatchMs = Math.max(this.slowestBatchMs, at - lastProgressAt)
+								}
+
+								lastProgressAt = at
 								onProgress?.({ processed: update.processed, total: update.total })
 								break
+							}
 							case "call":
 								onToolCall?.({ index: update.index, name: update.name })
 								break

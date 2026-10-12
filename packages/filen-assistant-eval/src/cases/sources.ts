@@ -622,5 +622,74 @@ export const SOURCES_CASES: EvalCase[] = [
 		prompt: "Active le mode sombre",
 		routes: ["navigation", "answer"],
 		expectsText: true
+	},
+	// Unread state comes with the chat list (Anna Schmidt and Website team have unread messages; the user wrote
+	// last to Carlos Ruiz, Yuki Tanaka and Мария Иванова).
+	{
+		id: "sources-unread-chats-en",
+		category: "sources",
+		lang: "en",
+		prompt: "Do I have unread messages?",
+		routes: ["chats"],
+		calls: [{ tool: "list_chats" }],
+		answerIncludes: [["anna"], ["website"]],
+		answerExcludes: ["carlos", "yuki"],
+		expectsText: true
+	},
+	{
+		id: "sources-unread-chats-de",
+		category: "sources",
+		lang: "de",
+		prompt: "Habe ich ungelesene Nachrichten?",
+		routes: ["chats"],
+		calls: [{ tool: "list_chats" }],
+		answerIncludes: [["anna"], ["website"]],
+		answerExcludes: ["carlos", "yuki"],
+		expectsText: true
+	},
+	{
+		id: "sources-unread-chats-ja",
+		category: "sources",
+		lang: "ja",
+		prompt: "未読のメッセージはある？",
+		routes: ["chats"],
+		calls: [{ tool: "list_chats" }],
+		answerIncludes: [["anna"], ["website"]],
+		expectsText: true
+	},
+	// Notes by flag: n15 Old ideas is the only archived note, n1 Groceries the only pinned one.
+	{
+		id: "sources-archived-notes-en",
+		category: "sources",
+		lang: "en",
+		prompt: "Show my archived notes",
+		routes: ["notes"],
+		calls: [{ tool: "list_notes", args: { only: "archived" } }],
+		answerIncludes: [["old ideas"]],
+		answerExcludes: ["groceries", "einkaufsliste"],
+		expectsText: true
+	},
+	{
+		id: "sources-pinned-notes-es",
+		category: "sources",
+		lang: "es",
+		prompt: "¿Qué notas tengo fijadas?",
+		routes: ["notes"],
+		calls: [{ tool: "list_notes", args: { only: "pinned" } }],
+		answerIncludes: [["groceries"]],
+		answerExcludes: ["einkaufsliste", "old ideas"],
+		expectsText: true
+	},
+	// Office files no viewer opens are documents too: f46 Presentacion_kickoff.pptx and f47 Carta_hotel.doc in
+	// Proyecto Barcelona.
+	{
+		id: "sources-office-documents-en",
+		category: "sources",
+		lang: "en",
+		prompt: "Which documents are in my Proyecto Barcelona directory?",
+		routes: ["files", "insights"],
+		calls: [{ tool: "list_directory" }],
+		answerIncludes: [["kickoff"], ["carta_hotel", "carta hotel"]],
+		expectsText: true
 	}
 ]

@@ -1,6 +1,6 @@
 import type { Chat, Note } from "@filen/sdk-rs"
 import { splatToUuids } from "@/features/drive/lib/navigate"
-import { driveNamesQueryKey, findCachedListingItem } from "@/features/drive/queries/drive"
+import { driveNamesQueryKey, findCachedListingItem, type DirectoryNameScope } from "@/features/drive/queries/drive"
 import { queryClient } from "@/queries/client"
 import { useDriveStore } from "@/features/drive/store/useDriveStore"
 import type { DriveItem } from "@/features/drive/lib/item"
@@ -18,9 +18,18 @@ import { driveName, joinPath } from "@/features/assistant/tools/entities"
 export interface AssistantAppContext {
 	pathname: string
 	screen: AssistantRouteName | "other"
-	// The open My Drive directory: null uuid is the root. Unresolved names (an ancestor not in any
-	// cached listing) leave `path` undefined.
-	directory: { uuid: string | null; item: DriveItem | undefined; path: string | undefined } | null
+	// The open directory: on My Drive (null uuid is the root), or one opened on Shared with me or Shared by me,
+	// whose `chain` is the route's uuid chain from that screen's root (Shared with me lists by it). `path` is a
+	// My Drive path only; unresolved names (an ancestor not in any cached listing) leave it undefined, and
+	// `name` is the directory's own name where only the breadcrumb resolved it.
+	directory: {
+		variant: DirectoryNameScope
+		uuid: string | null
+		chain: readonly string[]
+		item: DriveItem | undefined
+		path: string | undefined
+		name: string | undefined
+	} | null
 	selection: DriveItem[]
 	note: Note | undefined
 	chat: Chat | undefined
@@ -38,30 +47,73 @@ const SELECTION_SCREENS: ReadonlySet<string> = new Set([
 	"trash"
 ])
 
-function myDriveDirectory(pathname: string): AssistantAppContext["directory"] {
+// The router has decoded the path already; a stray "%" it left in place must not throw.
+function decodedSplat(splat: string): string {
+	try {
+		return decodeURIComponent(splat)
+	} catch {
+		return splat
+	}
+}
+
+function cachedName(scope: DirectoryNameScope, uuid: string): string | undefined {
+	const item = findCachedListingItem(uuid)
+
+	return item === undefined ? (queryClient.getQueryData<string | null>(driveNamesQueryKey(scope, uuid)) ?? undefined) : driveName(item)
+}
+
+const SHARED_SCREENS: readonly (readonly [RegExp, DirectoryNameScope])[] = [
+	[/^\/shared-in(?:\/(.*))?$/, "sharedIn"],
+	[/^\/shared-out(?:\/(.*))?$/, "sharedOut"]
+]
+
+// A directory opened on Shared with me or Shared by me; the screen's root lists shares, not a directory.
+function sharedDirectory(pathname: string): AssistantAppContext["directory"] {
+	for (const [pattern, variant] of SHARED_SCREENS) {
+		const match = pattern.exec(pathname)
+
+		if (match === null) {
+			continue
+		}
+
+		const chain = splatToUuids(decodedSplat(match[1] ?? "").replace(/\/+$/, ""))
+		const uuid = chain.at(-1)
+
+		return uuid === undefined
+			? null
+			: { variant, uuid, chain, item: findCachedListingItem(uuid), path: undefined, name: cachedName(variant, uuid) }
+	}
+
+	return null
+}
+
+function openDirectory(pathname: string): AssistantAppContext["directory"] {
 	const match = /^\/drive(?:\/(.*))?$/.exec(pathname)
 
 	if (match === null) {
-		return null
+		return sharedDirectory(pathname)
 	}
 
-	const uuids = splatToUuids(decodeURIComponent(match[1] ?? "").replace(/\/+$/, ""))
+	const uuids = splatToUuids(decodedSplat(match[1] ?? "").replace(/\/+$/, ""))
 	const uuid = uuids.at(-1) ?? null
 	let path: string | undefined = "/"
 
 	// A directory opened by a link or a reveal often has no cached parent listing; the breadcrumb has
 	// already resolved its name.
 	for (const segment of uuids) {
-		const ancestor = findCachedListingItem(segment)
-		const name =
-			ancestor === undefined
-				? (queryClient.getQueryData<string | null>(driveNamesQueryKey("drive", segment)) ?? undefined)
-				: driveName(ancestor)
+		const name = cachedName("drive", segment)
 
 		path = name === undefined || path === undefined ? undefined : joinPath(path, name)
 	}
 
-	return { uuid, item: uuid === null ? undefined : findCachedListingItem(uuid), path }
+	return {
+		variant: "drive",
+		uuid,
+		chain: uuids,
+		item: uuid === null ? undefined : findCachedListingItem(uuid),
+		path,
+		name: uuid === null ? "/" : cachedName("drive", uuid)
+	}
 }
 
 export function readAssistantContext(): AssistantAppContext {
@@ -75,7 +127,7 @@ export function readAssistantContext(): AssistantAppContext {
 	return {
 		pathname,
 		screen,
-		directory: myDriveDirectory(pathname),
+		directory: openDirectory(pathname),
 		selection: SELECTION_SCREENS.has(screen) ? useDriveStore.getState().selectedItems : [],
 		note: noteUuid === "" ? undefined : notesQueryFind(noteUuid),
 		chat: chatUuid === "" ? undefined : chatsQueryGet()?.find(chat => chat.uuid === chatUuid),

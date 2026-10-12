@@ -1,4 +1,4 @@
-import { inDirectory, PLAYING, selected } from "./contexts"
+import { inDirectory, openChat, openNote, PLAYING, selected } from "./contexts"
 import type { EvalCase } from "./types"
 
 // One call does the job; the arguments come from the prompt or the context.
@@ -583,6 +583,99 @@ export const SIMPLE_CASES: EvalCase[] = [
 				}
 			}
 		]
+	},
+	// A directory plays its audio files in name order: Music (d7) starts with Bella Ciao (f25).
+	{
+		id: "simple-play-directory-en",
+		category: "simple",
+		lang: "en",
+		prompt: "Play my Music folder",
+		routes: ["audio"],
+		calls: [{ tool: "play", args: { handle: "d7" } }],
+		state: [{ playing: "f25" }]
+	},
+	{
+		id: "simple-play-directory-de",
+		category: "simple",
+		lang: "de",
+		prompt: "Spiel die Lieder aus dem Ordner Music ab",
+		routes: ["audio"],
+		calls: [{ tool: "play", args: { handle: "d7" } }],
+		state: [{ playing: "f25" }]
+	},
+	{
+		id: "simple-play-directory-pt",
+		category: "simple",
+		lang: "pt",
+		prompt: "Toca as músicas da pasta Music",
+		routes: ["audio"],
+		calls: [{ tool: "play", args: { handle: "d7" } }],
+		state: [{ playing: "f25" }]
+	},
+	// A descriptive word the name lacks ("return"), or a name typed without its accent: the other words still
+	// find tax_notes_2024.txt and Steuererklärung_2024.pdf.
+	{
+		id: "simple-search-descriptive-en",
+		category: "simple",
+		lang: "en",
+		prompt: "Search my drive for my tax return",
+		routes: ["files", "insights"],
+		calls: [{ tool: "search_items" }],
+		answerIncludes: [["tax_notes"]],
+		expectsText: true
+	},
+	{
+		id: "simple-search-unaccented-de",
+		category: "simple",
+		lang: "de",
+		prompt: "Finde meine Steuererklarung 2024",
+		routes: ["files", "insights"],
+		calls: [{ tool: "search_items" }],
+		answerIncludes: [["steuererklärung", "steuererklarung"]],
+		expectsText: true
+	},
+	// The note or chat open on screen is "this one": n3 Meeting 2025-10-01, c2 Family.
+	{
+		id: "simple-summarize-open-note-en",
+		category: "simple",
+		lang: "en",
+		prompt: "Summarize this note",
+		context: openNote("n3"),
+		routes: ["notes"],
+		calls: [{ tool: "read_note", args: { handle: "n3" } }],
+		answerIncludes: [["15 november", "november 15"]],
+		expectsText: true
+	},
+	{
+		id: "simple-summarize-open-note-de",
+		category: "simple",
+		lang: "de",
+		prompt: "Fass diese Notiz zusammen",
+		context: openNote("n3"),
+		routes: ["notes"],
+		calls: [{ tool: "read_note", args: { handle: "n3" } }],
+		answerIncludes: [["15. november", "15 november"]],
+		expectsText: true
+	},
+	{
+		id: "simple-summarize-open-chat-es",
+		category: "simple",
+		lang: "es",
+		prompt: "¿De qué se habla en este chat?",
+		context: openChat("c2"),
+		routes: ["chats"],
+		calls: [{ tool: "read_chat", args: { handle: "c2" } }],
+		answerIncludes: [["lisbon", "lisboa", "fotos"]],
+		expectsText: true
+	},
+	{
+		id: "simple-reply-open-chat-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: "Reply in this chat that I'll bring the salad",
+		context: openChat("c2"),
+		routes: ["chats"],
+		state: [{ draft: "c2", textIncludes: ["salad"] }]
 	}
 ]
 

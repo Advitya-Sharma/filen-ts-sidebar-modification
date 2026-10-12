@@ -2,9 +2,9 @@ import {
 	AssistantAbortError,
 	AssistantContextError,
 	AssistantMessageTooLongError,
-	estimateTokens,
 	messageFitsContext,
 	runAssistantTurn,
+	windowHistory,
 	type AssistantConfirmationRequest,
 	type AssistantHistoryTurn,
 	type AssistantModel,
@@ -41,58 +41,16 @@ export interface AssistantRuntimeLike {
 	resumeInterruptedDownload(): void
 	cancelDownload(): void
 	deleteModel(): Promise<void>
-	// Keeps the model loaded until the returned release runs.
-	hold(): () => void
+	// Keeps the model loaded until the returned release runs; `activity: false` when nothing the user did ended
+	// the hold (an expired card), so the idle unload still counts from the user's last activity.
+	hold(): (options?: { activity?: boolean }) => void
 	// Signing out: the model's worker goes at once and nothing starts again.
 	shutdown(): void
 }
 
-// Prior exchanges kept for context, at most this many and about this many tokens: an exchange from long ago
-// rarely matters to the next request.
-const HISTORY_MAX = 12
-const HISTORY_MAX_TOKENS = 1800
-
 // A card left unanswered this long ends its turn (it expires) so the idle unload can free the model: the
 // card is the user's to answer, not a reason to hold ~4 GB indefinitely.
 export const CARD_EXPIRY_MS = 10 * 60_000
-
-function exchangeTokens(exchange: AssistantHistoryTurn): number {
-	return estimateTokens(exchange.prompt ?? exchange.user) + estimateTokens(exchange.reply)
-}
-
-// The exchanges the next turns read, after one was added. Within the budget they only ever grow, so each
-// turn's prompt continues the last one and the engine reads just the new exchange: it reuses a cached prompt
-// only up to the first difference, and dropping the oldest exchange would put that difference at the start.
-// Over the budget they are cut at once to the newest that fit half of it (always the last), so a full
-// re-read comes every few turns instead of on each.
-export function windowHistory(history: readonly AssistantHistoryTurn[]): AssistantHistoryTurn[] {
-	const total = history.reduce((sum, exchange) => sum + exchangeTokens(exchange), 0)
-
-	if (history.length <= HISTORY_MAX && total <= HISTORY_MAX_TOKENS) {
-		return history.slice()
-	}
-
-	const kept: AssistantHistoryTurn[] = []
-	let tokens = 0
-
-	for (let index = history.length - 1; index >= 0 && kept.length < HISTORY_MAX / 2; index--) {
-		const exchange = history[index]
-
-		if (exchange === undefined) {
-			break
-		}
-
-		tokens += exchangeTokens(exchange)
-
-		if (kept.length > 0 && tokens > HISTORY_MAX_TOKENS / 2) {
-			break
-		}
-
-		kept.unshift(exchange)
-	}
-
-	return kept
-}
 
 const STEP_STATUS: Record<AssistantToolCallStatus, AssistantStepStatus> = {
 	preparing: "active",
@@ -356,6 +314,10 @@ export function createAssistantSession({
 	let conversation = 0
 	let turnCount = 0
 	let active: AbortController | null = null
+	// A confirmed action runs to its end even when its turn stops (Stop, a new conversation, removing the
+	// model): the user clicked it, and one stopped halfway would read as failed with its effect still landing.
+	// Only signing out stops it.
+	const actions = new AbortController()
 
 	function emit(event: AssistantEvent): void {
 		for (const listener of listeners) {
@@ -391,7 +353,7 @@ export function createAssistantSession({
 		const turnConversation = conversation
 		// One calendar per turn: the prompt's date line and every date filter its tools resolve.
 		const calendar = userCalendar()
-		const turn = turnExecutor({ executor, signal: controller.signal, calendar })
+		const turn = turnExecutor({ executor, signal: controller.signal, actionSignal: actions.signal, calendar })
 		let segment = 0
 		let segmentHasText = false
 		const steps = turnSteps({ turnId, emit, now })
@@ -566,7 +528,11 @@ export function createAssistantSession({
 			}
 
 			// The model stays held until the loop has actually wound down, not just until the turn ended.
-			void winding.catch(() => undefined).finally(release)
+			void winding
+				.catch(() => undefined)
+				.finally(() => {
+					release({ activity: !card.expired })
+				})
 		}
 	}
 
@@ -676,6 +642,7 @@ export function createAssistantSession({
 		shutdown: () => {
 			shutDown = true
 			active?.abort()
+			actions.abort()
 
 			for (const pending of proposals.values()) {
 				pending.decide(false)

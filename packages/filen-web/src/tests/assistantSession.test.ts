@@ -8,9 +8,12 @@ import {
 	type AssistantGenerateResult,
 	type AssistantModel
 } from "@filen/shared/assistant"
-import { CARD_EXPIRY_MS, createAssistantSession, turnSteps, windowHistory } from "@/features/assistant/loop/session"
+import { windowHistory } from "@filen/shared/assistant"
+import { CARD_EXPIRY_MS, createAssistantSession, turnSteps } from "@/features/assistant/loop/session"
 import { buildProposal } from "@/features/assistant/loop/executorAdapter"
 import type { AssistantEvent } from "@/features/assistant/types"
+import type { AssistantToolExecution } from "@/features/assistant/runtime/executor"
+import { unlessStopped } from "@/features/assistant/tools/format"
 import { call, fakeExecutor, fakeRuntime, INFO, NAMES, ScriptedModel, waitFor, type GenerateOptions } from "@/tests/support/assistantFakes"
 
 // Each step event as one line: kind, status, then what it shows.
@@ -329,6 +332,56 @@ describe("assistant session", () => {
 
 		expect(await waitFor(events, event => event.type === "turn-end")).toMatchObject({ type: "turn-end", turnId, outcome: "cancelled" })
 		expect(runtime.holds).toBe(0)
+	})
+
+	it("runs a confirmed action to its end after Stop, and settles its card as done", async () => {
+		const model = new ScriptedModel({
+			route: "chats change",
+			steps: [call("list_chats", { query: "Maria" }), call("draft_chat_message", { chat: "c1", text: "late" }), "Drafted."]
+		})
+		const executor = fakeExecutor({ list_chats: { chats: [{ handle: "c1", name: "Maria" }] } })
+		let finishDraft: () => void = () => undefined
+
+		executor.execute = ({ tool, args, confirmed, signal }) => {
+			executor.executed.push({ call: { name: tool.name, args }, confirmed })
+
+			if (tool.name !== "draft_chat_message") {
+				return Promise.resolve({ ok: true, result: { chats: [{ handle: "c1", name: "Maria" }] } })
+			}
+
+			// Stopped by its signal, as the app's executor is.
+			return unlessStopped(
+				new Promise<AssistantToolExecution>(resolve => {
+					finishDraft = () => {
+						resolve({ ok: true, result: { done: true } })
+					}
+				}),
+				signal
+			)
+		}
+
+		const runtime = fakeRuntime(model)
+		const session = createAssistantSession({ runtime, executor })
+		const events: AssistantEvent[] = []
+
+		session.subscribe(event => events.push(event))
+		session.send("Tell Maria late")
+
+		const proposal = await waitFor(events, event => event.type === "proposal")
+
+		if (proposal.type !== "proposal") {
+			throw new Error("no proposal")
+		}
+
+		session.confirm(proposal.proposal.id)
+		session.cancel()
+		await waitFor(events, event => event.type === "turn-end")
+		finishDraft()
+
+		expect(await waitFor(events, event => event.type === "proposal-settled")).toMatchObject({ outcome: "done" })
+		await vi.waitFor(() => {
+			expect(runtime.holds).toBe(0)
+		})
 	})
 
 	it("keeps the model held while a card waits and while the confirmed action runs", async () => {
@@ -871,8 +924,9 @@ describe("assistant session", () => {
 				expect(runtime.holds).toBe(0)
 			})
 
-			// Not the user's Stop: the turn says the confirmation timed out.
+			// Not the user's Stop: the turn says the confirmation timed out, and the user did nothing to keep the model.
 			expect(events.find(event => event.type === "turn-end")).toMatchObject({ outcome: "error", error: "expired" })
+			expect(runtime.releases).toEqual([false])
 			expect(executor.executed.map(entry => entry.call.name)).toEqual(["list_chats"])
 		} finally {
 			vi.useRealTimers()

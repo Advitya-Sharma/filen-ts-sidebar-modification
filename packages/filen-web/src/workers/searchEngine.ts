@@ -663,8 +663,16 @@ export function createSearchEngine() {
 
 			let best: SearchQueryResult | null = null
 
+			// The next word is asked for while the words so far matched nothing (a descriptive word the name lacks:
+			// "tax return" for "Tax 2023.pdf") or more names than the window holds; refiltering is the engine's own
+			// work, no request.
 			for (const [index, name] of names.entries()) {
-				if (index > 0 && (best === null || !best.settled || best.snapshot.total <= BigInt(best.snapshot.hits.length))) {
+				if (
+					index > 0 &&
+					(best === null ||
+						!best.settled ||
+						(best.snapshot.total > 0n && best.snapshot.total <= BigInt(best.snapshot.hits.length)))
+				) {
 					break
 				}
 
@@ -704,7 +712,11 @@ export function createSearchEngine() {
 					break
 				}
 
-				if (best === null || (seen.settled && seen.snapshot.total < best.snapshot.total)) {
+				// A word with hits beats one without; among those with hits, the fewest (the most selective).
+				if (
+					best === null ||
+					(seen.settled && seen.snapshot.total > 0n && (best.snapshot.total === 0n || seen.snapshot.total < best.snapshot.total))
+				) {
 					best = { snapshot: toSnapshotDTO(seen.snapshot), settled: seen.settled, name }
 				}
 			}

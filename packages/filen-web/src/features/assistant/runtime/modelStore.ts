@@ -82,27 +82,42 @@ export async function inspectModel(manifest: AssistantModelManifest): Promise<Mo
 	}
 }
 
-// Whether a model other than `id` has files on disk (one a newer build downloaded).
-export async function otherModelPresent(id: string): Promise<boolean> {
+async function directorySize(directory: FileSystemDirectoryHandle): Promise<number> {
+	let bytes = 0
+
+	for await (const entry of directory.values()) {
+		bytes += entry.kind === "file" ? (await entry.getFile()).size : await directorySize(entry)
+	}
+
+	return bytes
+}
+
+// The models other than `id` on disk (one a newer build downloaded, or the one an update replaced), and the
+// bytes they take. Sizes only; reads no file content.
+export async function otherModels(id: string): Promise<{ present: boolean; bytes: number }> {
 	let models: FileSystemDirectoryHandle
 
 	try {
 		models = await (await navigator.storage.getDirectory()).getDirectoryHandle(MODELS_DIRECTORY)
 	} catch (e) {
 		if (isNotFoundError(e)) {
-			return false
+			return { present: false, bytes: 0 }
 		}
 
 		throw e
 	}
 
-	for await (const name of models.keys()) {
+	let present = false
+	let bytes = 0
+
+	for await (const [name, entry] of models.entries()) {
 		if (name !== id) {
-			return true
+			present = true
+			bytes += entry.kind === "file" ? (await entry.getFile()).size : await directorySize(entry)
 		}
 	}
 
-	return false
+	return { present, bytes }
 }
 
 // Removes every downloaded model except `keep` (an older model version after an update, or all of them).

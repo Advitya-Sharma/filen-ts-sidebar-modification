@@ -80,12 +80,17 @@ export class AssistantHandleRegistry {
 
 		if (known !== undefined) {
 			const previous = this.byHandle.get(known)?.entity
-			// A later sighting without a path or shared chain keeps the one an earlier lookup found.
+			// A later sighting without a path or shared chain keeps the one an earlier lookup found, while the item
+			// is still in the directory that lookup found it in (a rename is checked where the path is used).
 			const kept =
 				entity.kind === "drive" && previous?.kind === "drive"
 					? {
 							...entity,
-							...(entity.path === undefined && previous.path !== undefined ? { path: previous.path } : {}),
+							...(entity.path === undefined &&
+							previous.path !== undefined &&
+							previous.item.data.parent === entity.item.data.parent
+								? { path: previous.path }
+								: {}),
 							...(entity.shared === undefined && previous.shared !== undefined ? { shared: previous.shared } : {})
 						}
 					: entity

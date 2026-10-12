@@ -31,12 +31,13 @@ export type AssistantModelError = "download-failed" | "load-failed" | "out-of-me
 // "loading": `verifying` while shards are hashed before the start, which happens only when the record of
 // verified shards was lost or a start failed and the files are checked for damage.
 // `partialBytes` on not-downloaded and error: part of the model is on disk (a stopped or failed download,
-// kept so it can resume), which the user can still remove.
+// kept so it can resume), which the user can still remove. `staleBytes` on not-downloaded: an earlier model
+// version's files, which this build never loads and the user can still remove.
 // "checking": before the startup check (device, other tabs, what is on disk) has answered; nothing to offer yet.
 export type AssistantModelState =
 	| { kind: "checking"; model: AssistantModelInfo | null }
 	| { kind: "unavailable"; reason: AssistantUnavailableReason; model: AssistantModelInfo | null }
-	| { kind: "not-downloaded"; model: AssistantModelInfo; partialBytes?: number }
+	| { kind: "not-downloaded"; model: AssistantModelInfo; partialBytes?: number; staleBytes?: number }
 	| { kind: "downloading"; model: AssistantModelInfo; receivedBytes: number; waiting: boolean; resumed: boolean }
 	| { kind: "downloaded"; model: AssistantModelInfo; idleUnloaded: boolean }
 	| { kind: "loading"; model: AssistantModelInfo; verifying: boolean }

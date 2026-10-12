@@ -10,6 +10,26 @@ const handles = (what: string) => z.array(z.string()).min(1).describe(`Handles o
 
 const DRIVE_KINDS = ["file", "directory", "image", "video", "audio", "document"] as const
 
+// Office, presentation and e-book files a "document" kind covers besides what an app previews as one (PDF,
+// Word, spreadsheets, text, markdown), which an app has no viewer for. One list, so the eval's fake app
+// counts the same files as documents as the apps do.
+export const ASSISTANT_OFFICE_DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([
+	"doc",
+	"dot",
+	"odt",
+	"ott",
+	"rtf",
+	"pptx",
+	"ppt",
+	"pps",
+	"ppsx",
+	"odp",
+	"key",
+	"pages",
+	"numbers",
+	"epub"
+])
+
 // Small models fill every optional argument they are offered, so a new filter's first value changes nothing.
 const anyKind = z
 	.enum(["any", ...DRIVE_KINDS])
@@ -362,7 +382,7 @@ export const listNotes = defineTool({
 	name: "list_notes",
 	title: "List notes",
 	description:
-		"List the user's notes, optionally filtered by words in the title or tags, or by when they were last edited. Returns handles and titles.",
+		"List the user's notes, optionally filtered by words in the title or tags, by pinned, favorite or archived, or by when they were last edited. Returns handles and titles.",
 	group: "notes",
 	effect: "read",
 	untrustedOutput: "names",
@@ -372,6 +392,7 @@ export const listNotes = defineTool({
 	},
 	input: z.strictObject({
 		query: z.string().optional().describe("Words from the note title or tags"),
+		only: z.enum(["any", "pinned", "favorite", "archived"]).optional().describe("Only pinned, favorite or archived notes; any for all"),
 		...periodFilter()
 	})
 })
@@ -448,7 +469,8 @@ export const setNoteFlags = defineTool({
 export const listChats = defineTool({
 	name: "list_chats",
 	title: "List chats",
-	description: "List the user's chats with their participants and last activity, optionally filtered by name.",
+	description:
+		"List the user's chats with their participants, last activity, unread messages and whether the last message is the user's own, optionally filtered by name.",
 	group: "chats",
 	effect: "read",
 	untrustedOutput: "names",
@@ -561,7 +583,7 @@ export const openPlaylist = defineTool({
 export const play = defineTool({
 	name: "play",
 	title: "Play",
-	description: "Start playing an audio file or a playlist.",
+	description: "Start playing an audio file, the audio files of a directory, or a playlist.",
 	group: "audio",
 	effect: "navigate",
 	untrustedOutput: "names",
@@ -570,7 +592,7 @@ export const play = defineTool({
 		handles: ["handle"]
 	},
 	input: z.strictObject({
-		handle: handle("an audio file or a playlist")
+		handle: handle("an audio file, a directory of audio files or a playlist")
 	})
 })
 

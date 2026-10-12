@@ -9,15 +9,19 @@ import { audioEngine } from "@/features/audio/lib/audioEngine"
 import { deriveAudioHandoff, isAudioItem } from "@/features/audio/lib/handoff"
 import { useAudioStore } from "@/features/audio/store/useAudioStore"
 import { cachedListing } from "@/features/drive/queries/drive"
-import type { DriveItem } from "@/features/drive/lib/item"
+import { isDirectoryItem, type DriveItem } from "@/features/drive/lib/item"
+import { sortListing } from "@/features/assistant/tools/drive"
 import { assistantRouter, navigateChecked } from "@/features/assistant/tools/navigation"
 import {
 	driveName,
 	freshDriveItem,
 	freshPlaylist,
+	readDriveListing,
+	readSharedInListing,
 	requiredString,
 	resolveHandle,
 	rootDirUuid,
+	shareDirection,
 	type ToolAdapter
 } from "@/features/assistant/tools/entities"
 import { AssistantToolError, throwIfStopped } from "@/features/assistant/tools/format"
@@ -84,6 +88,19 @@ function driveQueue(item: DriveItem): ReturnType<typeof deriveAudioHandoff> {
 	return deriveAudioHandoff(listing, item.data.uuid, false)
 }
 
+// A directory's audio files in name order, from its own listing (the drive screen's query, cached when the
+// user browsed it): the queue a click on its first track would build.
+async function directoryQueue(item: DriveItem, shared: readonly string[] | undefined): Promise<ReturnType<typeof deriveAudioHandoff>> {
+	const listing =
+		shareDirection(item) === "in"
+			? await readSharedInListing(item.data.uuid, shared ?? [item.data.uuid])
+			: await readDriveListing(item.data.uuid)
+	const ordered = sortListing(listing, "name", "modified")
+	const first = ordered.find(entry => isAudioItem(entry) && !entry.data.undecryptable)
+
+	return first === undefined ? null : deriveAudioHandoff(ordered, first.data.uuid, false)
+}
+
 // The playlist screen's Play: the toast on failure is the one startPlaylist shows.
 async function playPlaylist(playlist: Playlist): Promise<void> {
 	if (playlist.files.length === 0) {
@@ -129,6 +146,27 @@ export const playTool: ToolAdapter = async (input, scope) => {
 
 		case "drive": {
 			const item = freshDriveItem(entity.item)
+
+			if (isDirectoryItem(item)) {
+				if (item.data.undecryptable) {
+					throw new AssistantToolError("This directory cannot be decrypted")
+				}
+
+				const queue = await directoryQueue(item, entity.shared)
+
+				throwIfStopped(scope)
+
+				if (queue === null) {
+					throw new AssistantToolError(`"${driveName(item)}" holds no audio files`)
+				}
+
+				await audioEngine.enqueueAndPlay(queue.tracks, queue.startIndex)
+
+				return {
+					value: { playing: queue.tracks[queue.startIndex]?.name ?? "", directory: driveName(item), tracks: queue.tracks.length }
+				}
+			}
+
 			const handoff = isAudioItem(item) ? driveQueue(item) : null
 
 			if (handoff === null) {

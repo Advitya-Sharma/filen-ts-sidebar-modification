@@ -2,6 +2,7 @@ import {
 	ASSISTANT_WEB_TOOLS,
 	isAssistantWebTool,
 	runAssistantTurn,
+	windowHistory,
 	type AssistantChatMessage,
 	type AssistantGenerateRequest,
 	type AssistantGenerateResult,
@@ -268,8 +269,10 @@ export class FakeAppExecutor implements AssistantToolExecutor {
 		this.allowed = supports
 	}
 
+	// Only what the context line names, as the web executor's: a handle an earlier turn listed is grounded by
+	// that turn's lookup, never by the context of a later one.
 	context(): Promise<{ description: string; handles: readonly string[] }> {
-		return Promise.resolve({ description: this.app.describeContext(), handles: [...this.app.exposed] })
+		return Promise.resolve({ description: this.app.describeContext(), handles: this.app.contextHandles() })
 	}
 
 	supports(tool: AssistantTool): boolean {
@@ -369,7 +372,7 @@ export async function runLoopTurns({
 	const started = performance.now()
 	const model = new LlamaAssistantModel(runtime)
 	const executor = new FakeAppExecutor(app, LOOP_PRESETS[preset].supports)
-	const history: AssistantHistoryTurn[] = []
+	let history: AssistantHistoryTurn[] = []
 	const calls: CallRecord[] = []
 	const replies: string[] = []
 	const answers: string[] = []
@@ -403,7 +406,11 @@ export async function runLoopTurns({
 			// Every reply the turn showed besides its answer, which is the last one shown.
 			replies.push(...(result.reply.length > 0 ? shown.slice(0, -1) : shown))
 			answers.push(result.reply)
-			history.push({ user: message, reply: result.withheld ? "" : result.reply, prompt: result.prompt })
+			// As the web session keeps it: a turn that replied, windowed to the history budget.
+			if (result.withheld || result.reply.trim().length > 0) {
+				history = windowHistory([...history, { user: message, reply: result.withheld ? "" : result.reply, prompt: result.prompt }])
+			}
+
 			last = result
 		}
 	} finally {
@@ -430,8 +437,9 @@ export async function runLoopTurns({
 }
 
 // A case as the web app can pass it: one that needs a write the app does not run asks for a plain reply
-// instead (the prompt tells the model the action is not available), with no change to the data. Reads and
-// drafts are graded as written.
+// instead (the prompt tells the model the action is not available), with no change to the data, routed as the
+// request would be (`unavailableWrite`; the report lists these apart from the pass rate). Reads and drafts
+// are graded as written.
 export function shippedCase(evalCase: EvalCase): EvalCase {
 	const tools = (evalCase.calls ?? []).flatMap(option => ("anyOf" in option ? option.anyOf.map(call => call.tool) : [option.tool]))
 	const writesState = (evalCase.state ?? []).some(check => !("screen" in check) && !("playing" in check) && !("draft" in check))
@@ -443,5 +451,5 @@ export function shippedCase(evalCase: EvalCase): EvalCase {
 
 	const { calls: _calls, state: _state, mayChange: _mayChange, answerIncludes: _answerIncludes, ...rest } = evalCase
 
-	return { ...rest, expectsText: true }
+	return { ...rest, expectsText: true, unavailableWrite: true }
 }

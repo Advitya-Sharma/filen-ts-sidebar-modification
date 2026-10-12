@@ -14,6 +14,7 @@ import {
 import { log } from "@/lib/log"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 import { findCachedListingItem } from "@/features/drive/queries/drive"
+import { isDirectoryItem, type DriveItem } from "@/features/drive/lib/item"
 import type { AssistantHandleRef, AssistantPreviewTarget, ToolExecutor } from "@/features/assistant/runtime/executor"
 import { AssistantHandleRegistry, ROOT_HANDLE, type AssistantEntityKind } from "@/features/assistant/tools/handles"
 import { AssistantToolError, sanitizeStrings, unlessStopped } from "@/features/assistant/tools/format"
@@ -22,7 +23,7 @@ import {
 	chatRecipients,
 	driveName,
 	entityName,
-	freshDriveItem,
+	freshEntity,
 	noteTitle,
 	resolveDrivePath,
 	resolveHandle,
@@ -81,6 +82,9 @@ const HANDLE_KINDS: Partial<Record<AssistantToolName, Record<string, readonly As
 }
 
 const CONTEXT_NAME_MAX_CHARS = 80
+// A path the model is told to list a directory by is copied back whole, so it is never shortened: past this it
+// is not offered at all.
+const CONTEXT_PATH_MAX_CHARS = 512
 
 // A name in the context line: other people choose shared items', notes', chats' and tracks' names, and the
 // line sits in the system prompt. Sanitized, on one line, shortened and quoted, so it can neither carry
@@ -92,29 +96,45 @@ function contextName(name: string): string {
 	return JSON.stringify(flat.length > CONTEXT_NAME_MAX_CHARS ? `${flat.slice(0, CONTEXT_NAME_MAX_CHARS - 1).join("")}…` : flat.join(""))
 }
 
+// A path to list a directory by: whole, on one line, quoted; null when too long to offer.
+function contextPath(path: string): string | null {
+	const flat = sanitizeUntrustedText(path).replace(/\s+/g, " ").trim()
+
+	return Array.from(flat).length > CONTEXT_PATH_MAX_CHARS ? null : JSON.stringify(flat)
+}
+
+// A drive item of the screen as a handle: on Shared with me, with the uuid chain it lists by.
+function shownDrive(scope: ToolScope, item: DriveItem, { shared, path }: { shared?: readonly string[]; path?: string }): string {
+	return scope.show(
+		{ kind: "drive", item, ...(shared === undefined ? {} : { shared }), ...(path === undefined ? {} : { path }) },
+		driveName(item)
+	)
+}
+
 function describeContext(scope: ToolScope): string {
 	const { screen, directory, selection, note, chat, playing } = readAssistantContext()
 	const parts = [`screen: ${screen}`]
+	const sharedIn = directory?.variant === "sharedIn" ? directory.chain : null
 
 	if (directory !== null) {
 		if (directory.uuid === null) {
 			parts.push(`current directory: / (handle ${ROOT_HANDLE})`)
 		} else if (directory.item !== undefined) {
-			const handle = scope.show(
-				directory.path === undefined
-					? { kind: "drive", item: directory.item }
-					: { kind: "drive", item: directory.item, path: directory.path },
-				driveName(directory.item)
-			)
+			const handle = shownDrive(scope, directory.item, {
+				...(sharedIn === null ? {} : { shared: sharedIn }),
+				...(directory.path === undefined ? {} : { path: directory.path })
+			})
 
 			parts.push(`current directory: ${contextName(directory.path ?? driveName(directory.item))} (handle ${handle})`)
 		} else {
-			// Opened by a link or a reveal, so its own row is not cached: the model can still list it by path. Without
-			// one it must not assume the root.
+			// Opened by a link or a reveal, so its own row is not cached: the model can still list a My Drive one by
+			// path. Without one it must not assume the root.
+			const path = directory.variant === "drive" && directory.path !== undefined ? contextPath(directory.path) : null
+
 			parts.push(
-				directory.path === undefined
-					? "current directory: a directory whose name is not loaded (not the root)"
-					: `current directory: ${contextName(directory.path)} (no handle; list it by this path)`
+				path !== null
+					? `current directory: ${path} (no handle; list it by this path)`
+					: `current directory: ${directory.name === undefined ? "a directory whose name is not loaded" : contextName(directory.name)} (no handle; not the root)`
 			)
 		}
 	}
@@ -123,7 +143,13 @@ function describeContext(scope: ToolScope): string {
 		parts.push(
 			`selected: ${selection
 				.slice(0, 10)
-				.map(item => `${contextName(driveName(item))} (handle ${scope.show({ kind: "drive", item }, driveName(item))})`)
+				.map(item => {
+					// On Shared with me a selected directory lists through the chain down to it; a share's root is its own.
+					const shared = screen === "shared_with_me" && isDirectoryItem(item) ? [...(sharedIn ?? []), item.data.uuid] : undefined
+					const handle = shownDrive(scope, item, shared === undefined ? {} : { shared })
+
+					return `${contextName(driveName(item))} (handle ${handle})`
+				})
 				.join(", ")}${selection.length > 10 ? ` and ${String(selection.length - 10)} more` : ""}`
 		)
 	} else if (directory !== null) {
@@ -253,6 +279,9 @@ function notAvailable(tool: AssistantTool): AssistantToolError {
 
 export function createAssistantToolExecutor(): ToolExecutor {
 	const registry = new AssistantHandleRegistry()
+	// Bumped by reset: a stopped turn's adapter that settles later must not hand the new conversation's
+	// registry items it never showed (a handle the model then guesses would name one).
+	let generation = 0
 
 	function scopeFor(
 		signal: AssistantSignal | undefined,
@@ -260,12 +289,18 @@ export function createAssistantToolExecutor(): ToolExecutor {
 		progress?: (progress: AssistantToolProgress) => void,
 		calendar: UserCalendar = userCalendar()
 	): ToolScope {
+		const born = generation
+
 		return {
 			registry,
 			signal,
 			calendar,
 			progress,
 			show: (entity, name) => {
+				if (born !== generation) {
+					throw new AssistantToolError("Stopped")
+				}
+
 				const ref = registry.register(entity, name)
 
 				shown.set(ref.handle, ref)
@@ -329,17 +364,19 @@ export function createAssistantToolExecutor(): ToolExecutor {
 					break
 				}
 
-				const name = entityName(entity)
+				// The card names what the adapter will act on: the live row, not the handle's snapshot.
+				const live = freshEntity(entity)
+				const name = entityName(live)
 
 				// The trash is read-only to the assistant: a move or a favorite there would restore or change what the
 				// user threw away.
-				if (isConsequentialTool(tool) && entity.kind === "drive" && isTrashed(freshDriveItem(entity.item))) {
+				if (isConsequentialTool(tool) && live.kind === "drive" && isTrashed(live.item)) {
 					throw new AssistantToolError(`"${name}" is in the trash; only the user can restore or change it, in the app`)
 				}
 				const resolved = scope.show(entity, name)
 
 				handles.push(resolved)
-				targets.push({ handle: resolved, name, ...(entity.kind === "chat" ? { recipients: chatRecipients(entity.chat) } : {}) })
+				targets.push({ handle: resolved, name, ...(live.kind === "chat" ? { recipients: chatRecipients(live.chat) } : {}) })
 			}
 
 			if (superseded) {
@@ -443,6 +480,7 @@ export function createAssistantToolExecutor(): ToolExecutor {
 		name: handle => registry.get(handle)?.ref.name,
 
 		reset: (history: readonly AssistantHistoryTurn[] = []) => {
+			generation++
 			registry.clear(history.flatMap(({ user, reply }) => [user, reply]))
 		}
 	}

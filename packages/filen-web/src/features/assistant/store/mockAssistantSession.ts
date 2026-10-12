@@ -328,7 +328,7 @@ export function createMockAssistantSession({
 		proposals.delete(proposalId)
 		emit({ type: "step", turnId, step: { ...call, status: "active" }, at: Date.now() })
 
-		// Apart from the turn's timers: like the session's, a confirmed action carries on when its turn stops.
+		// Apart from the turn's timers: like the session's, a confirmed action runs to its end when its turn stops.
 		setTimeout(() => {
 			emit({ type: "proposal-settled", proposalId, outcome: "done" })
 

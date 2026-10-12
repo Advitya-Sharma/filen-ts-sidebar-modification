@@ -1,21 +1,98 @@
 import { isAppResultKey, isSpotlightSpan, spotlightText } from "./untrusted"
 
-// The engines expose no tokenizer, so prompt size is estimated from characters, on the high side: ASCII
-// runs at about four characters per token on Qwen-family vocabularies, everything else (CJK, Cyrillic,
-// Arabic, emoji) at one to two. Overestimating only drops history a little early.
-export function estimateTokens(text: string): number {
-	let ascii = 0
-	let other = 0
+const UPPER = 0
+const LOWER = 1
+const DIGIT = 2
+const SPACE = 3
+const BREAK = 4
+const PUNCT = 5
+const OTHER = 6
 
-	for (const char of text) {
-		if (char.charCodeAt(0) < 0x80) {
-			ascii++
-		} else {
-			other++
-		}
+function charClass(code: number): number {
+	if (code >= 0x80) {
+		return OTHER
 	}
 
-	return Math.ceil(ascii / 3 + other)
+	if (code >= 0x41 && code <= 0x5a) {
+		return UPPER
+	}
+
+	if (code >= 0x61 && code <= 0x7a) {
+		return LOWER
+	}
+
+	if (code >= 0x30 && code <= 0x39) {
+		return DIGIT
+	}
+
+	if (code === 0x20) {
+		return SPACE
+	}
+
+	return code === 0x09 || code === 0x0a || code === 0x0d ? BREAK : code < 0x20 ? OTHER : PUNCT
+}
+
+// The engines expose no tokenizer, so prompt size is estimated from characters, never below what Qwen's
+// vocabulary (Qwen3.5, measured) makes of a rendered prompt: a digit is a token, a run of ASCII punctuation
+// one per two marks (what listings, dates, sizes and CSV are made of), an ASCII word one per five letters
+// (per three in capitals) with the space before it nearly free, a run of line breaks or of spaces one. Any
+// other character counts as a token (CJK, Cyrillic, Arabic or Devanagari text takes two to four), the
+// spotlight delimiters as two and characters outside the basic plane (emoji) as four. Prose comes out about
+// a third high, which only drops history a little early.
+export function estimateTokens(text: string): number {
+	let tokens = 0
+	let index = 0
+
+	while (index < text.length) {
+		const code = text.codePointAt(index) ?? 0
+		const kind = charClass(code)
+		let end = index + 1
+
+		if (kind === UPPER || kind === LOWER) {
+			let upper = kind === UPPER
+
+			while (end < text.length) {
+				const next = charClass(text.charCodeAt(end))
+
+				if (next !== UPPER && next !== LOWER) {
+					break
+				}
+
+				upper &&= next === UPPER
+				end++
+			}
+
+			const length = end - index
+
+			tokens += Math.ceil(length / (upper && length > 1 ? 3 : 5))
+		} else if (kind === SPACE) {
+			while (end < text.length && text.charCodeAt(end) === 0x20) {
+				end++
+			}
+
+			const next = end < text.length ? charClass(text.charCodeAt(end)) : PUNCT
+			const word = next === UPPER || next === LOWER || next === OTHER
+
+			tokens += end - index === 1 && word ? 0.25 : 1
+		} else if (kind === BREAK || kind === PUNCT) {
+			while (end < text.length && charClass(text.charCodeAt(end)) === kind) {
+				end++
+			}
+
+			tokens += kind === BREAK ? 1 : Math.ceil((end - index) / 2)
+		} else if (kind === DIGIT) {
+			tokens += 1
+		} else if (code > 0xffff) {
+			tokens += 4
+			end = index + 2
+		} else {
+			tokens += code === 0x27e6 || code === 0x27e7 ? 2 : 1
+		}
+
+		index = end
+	}
+
+	return Math.ceil(tokens)
 }
 
 // Template tokens around every message (role markers, separators).

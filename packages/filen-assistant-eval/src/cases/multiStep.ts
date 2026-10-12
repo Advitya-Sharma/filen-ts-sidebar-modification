@@ -437,5 +437,83 @@ export const MULTI_STEP_CASES: EvalCase[] = [
 				parent: "d3"
 			}
 		]
+	},
+	// Drafts in other scripts, the draft itself in the user's language.
+	{
+		id: "multi-draft-lang-ja",
+		category: "multi_step",
+		lang: "ja",
+		prompt: "Yuki Tanakaに、金曜日は空いているとメッセージの下書きを書いて",
+		routes: ["chats"],
+		state: [{ draft: "c5", textIncludes: ["金曜"], inLanguage: true }]
+	},
+	{
+		id: "multi-draft-lang-zh",
+		category: "multi_step",
+		lang: "zh",
+		prompt: "给李伟写一条消息草稿，告诉他我明天会带报告",
+		routes: ["chats"],
+		state: [{ draft: "c11", textIncludes: ["报告"], inLanguage: true }]
+	},
+	{
+		id: "multi-draft-lang-ar",
+		category: "multi_step",
+		lang: "ar",
+		prompt: "اكتب مسودة رسالة إلى Fatima Al-Sayed أن الفاتورة وصلت",
+		routes: ["chats"],
+		state: [{ draft: "c10", textIncludes: ["الفاتورة"], inLanguage: true }]
+	},
+	{
+		id: "multi-draft-lang-hi",
+		category: "multi_step",
+		lang: "hi",
+		prompt: "Priya Sharma को संदेश का ड्राफ्ट लिखो कि मैंने रसीद भेज दी है",
+		routes: ["chats"],
+		state: [{ draft: "c8", textIncludes: ["रसीद"], inLanguage: true }]
+	},
+	{
+		id: "multi-draft-lang-ru",
+		category: "multi_step",
+		lang: "ru",
+		prompt: "Напиши черновик сообщения для Мария Иванова, что я получил отчёт",
+		routes: ["chats"],
+		state: [{ draft: "c6", textIncludes: ["отчёт", "отчет"], inLanguage: true }]
+	},
+	{
+		id: "multi-draft-lang-fr",
+		category: "multi_step",
+		lang: "fr",
+		prompt: "Écris un brouillon à Camille Dubois pour lui dire que samedi me va",
+		routes: ["chats"],
+		state: [{ draft: "c12", textIncludes: ["samedi"], inLanguage: true }]
+	},
+	{
+		id: "multi-draft-lang-pt",
+		category: "multi_step",
+		lang: "pt",
+		prompt: "Escreve um rascunho para João Silva a dizer que já terminei o trabalho de história",
+		routes: ["chats"],
+		state: [{ draft: "c13", textIncludes: ["trabalho"], inLanguage: true }]
+	},
+	{
+		id: "multi-draft-lang-tr",
+		category: "multi_step",
+		lang: "tr",
+		prompt: "Ahmet Yılmaz'a yarınki toplantıya geleceğimi söyleyen bir mesaj taslağı yaz",
+		routes: ["chats"],
+		state: [{ draft: "c7", textIncludes: ["toplantı"], inLanguage: true }]
+	},
+	// The chat's message box already holds the user's unsent text: the draft is refused, nothing is overwritten.
+	{
+		id: "multi-draft-busy-composer-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: "Write Anna Schmidt a message that I paid the Hetzner invoice",
+		setup: state => {
+			state.busyComposers = ["c1"]
+		},
+		routes: ["chats"],
+		answerIncludes: [["message box", "unsent", "already", "clear", "input field"]],
+		expectsText: true
 	}
 ]

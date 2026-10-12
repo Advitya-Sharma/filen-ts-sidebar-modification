@@ -7,9 +7,11 @@ import {
 	type AssistantGenerateResult,
 	type AssistantModel,
 	type AssistantModelToolCall,
+	type AssistantSignal,
 	type AssistantTool
 } from "@filen/shared/assistant"
 import type { AssistantRuntimeLike } from "@/features/assistant/loop/session"
+import { unlessStopped } from "@/features/assistant/tools/format"
 import type { AssistantToolExecution, AssistantToolPreview, ToolExecutor } from "@/features/assistant/runtime/executor"
 import type { AssistantEvent, AssistantModelState } from "@/features/assistant/types"
 
@@ -73,6 +75,8 @@ export const INFO = { id: "m", name: "M", sizeBytes: 1 }
 
 export type FakeRuntime = Omit<AssistantRuntimeLike, "load" | "touch" | "setPanelOpen"> & {
 	holds: number
+	// Each release's `activity`, in order.
+	releases: boolean[]
 	state: AssistantModelState
 	load: Mock<() => Promise<void>>
 	touch: Mock<() => void>
@@ -83,6 +87,7 @@ export type FakeRuntime = Omit<AssistantRuntimeLike, "load" | "touch" | "setPane
 export function fakeRuntime(model: AssistantModel, initial: AssistantModelState = { kind: "ready", model: INFO }): FakeRuntime {
 	const runtime: FakeRuntime = {
 		holds: 0,
+		releases: [],
 		state: initial,
 		model,
 		getState: () => runtime.state,
@@ -105,10 +110,11 @@ export function fakeRuntime(model: AssistantModel, initial: AssistantModelState 
 
 			let released = false
 
-			return () => {
+			return ({ activity = true } = {}) => {
 				if (!released) {
 					released = true
 					runtime.holds--
+					runtime.releases.push(activity)
 				}
 			}
 		}
@@ -149,20 +155,24 @@ export function fakeExecutor(results: Record<string, unknown> = {}): ToolExecuto
 
 			return Promise.resolve({ ok: true, title: "t", targets, text })
 		},
+		// Settles as stopped once its signal aborts, as the app's executor does.
 		execute: ({
 			tool,
 			args,
-			confirmed
+			confirmed,
+			signal
 		}: {
 			tool: AssistantTool
 			args: Record<string, unknown>
 			confirmed: boolean
+			signal?: AssistantSignal
 		}): Promise<AssistantToolExecution> => {
 			executed.push({ call: { name: tool.name, args }, confirmed })
 
 			const value = results[tool.name] ?? { done: true }
+			const done = Promise.resolve<AssistantToolExecution>({ ok: true, result: value })
 
-			return Promise.resolve({ ok: true, result: value, untrusted: "names" })
+			return signal === undefined ? done : unlessStopped(done, signal)
 		},
 		reset: vi.fn()
 	}

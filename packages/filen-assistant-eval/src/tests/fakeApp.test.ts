@@ -227,7 +227,7 @@ describe("FakeApp", () => {
 		})
 
 		expect(app.describeContext()).toBe(
-			"screen: drive; current directory: /Documents/Invoices (handle d2); selected: Invoice_2024-11_Hetzner.pdf (handle f3); nothing playing"
+			`screen: drive; current directory: ${JSON.stringify("/Documents/Invoices")} (handle d2); selected: ${JSON.stringify("Invoice_2024-11_Hetzner.pdf")} (handle f3); nothing playing`
 		)
 		expect([...app.exposed].sort()).toEqual(["d0", "d2", "f3"])
 	})

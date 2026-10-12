@@ -105,6 +105,8 @@ export type StateCheck =
 	| {
 			draft: string
 			textIncludes?: readonly string[]
+			// The draft is written in the case's language.
+			inLanguage?: boolean
 	  }
 	| {
 			playing: string | null
@@ -140,5 +142,8 @@ export type EvalCase = {
 	answerExcludes?: readonly string[]
 	// The case expects a text reply whose language is graded.
 	expectsText?: boolean
+	// Set by the shipped preset on a case whose write the app does not run: graded on its route and on changing
+	// nothing, and reported apart from the pass rate.
+	unavailableWrite?: boolean
 	note?: string
 }

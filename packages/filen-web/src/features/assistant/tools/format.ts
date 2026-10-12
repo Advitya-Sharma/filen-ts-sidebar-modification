@@ -87,8 +87,13 @@ export function isoDate(timestamp: bigint | number): string {
 	return `${String(date.getFullYear()).padStart(4, "0")}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
+// Accents, marks and invisible characters go: the model sees names sanitized (a Persian name without its
+// zero-width non-joiner), and copies them back that way.
 export function normalizeText(value: string): string {
-	return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()
+	return value
+		.normalize("NFKD")
+		.replace(/[\p{M}\p{Default_Ignorable_Code_Point}]/gu, "")
+		.toLowerCase()
 }
 
 const UNSPACED =

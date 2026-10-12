@@ -22,7 +22,7 @@ Commands:
 Options:
   --models <ids>       Comma-separated model ids (default: every enabled model)
   --suite <name>       main | injection | all (default: all)
-  --presets <names>    Presets for the injection suite (default: every one)
+  --presets <names>    Presets for the injection suite (default: shipped,loop)
   --main-presets <n>   Presets for the main suite (default: shipped)
 
 Presets: shipped (the shipping loop with the tools the web app runs), loop (the shipping loop with every
@@ -204,7 +204,8 @@ async function main(): Promise<void> {
 				caseIds: mainCases.map(item => item.id)
 			},
 			injection: {
-				presets: presets(values.presets, ALL_PRESETS),
+				// The two loops that ship; the legacy presets only when named, as research.
+				presets: presets(values.presets, ["shipped", "loop"]),
 				caseIds: injectionCases.map(item => item.id)
 			}
 		})

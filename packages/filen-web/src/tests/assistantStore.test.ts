@@ -45,6 +45,7 @@ import { awaitingConfirmation, type TranscriptEntry } from "@/features/assistant
 import type { AssistantToolExecution } from "@/features/assistant/runtime/executor"
 import type { AssistantEvent, AssistantSession, AssistantStep } from "@/features/assistant/types"
 import { call, fakeExecutor, fakeRuntime, ScriptedModel } from "@/tests/support/assistantFakes"
+import { unlessStopped } from "@/features/assistant/tools/format"
 
 const STEP_MS = 10
 
@@ -602,11 +603,15 @@ describe("with the real session", () => {
 
 			executor.executed.push({ call: { name: request.tool.name, args: request.args }, confirmed: request.confirmed })
 
-			return new Promise<AssistantToolExecution>(resolve => {
-				finishDraft = () => {
-					resolve({ ok: true, result: { done: true } })
-				}
-			})
+			// Stopped by its signal, as the app's executor is.
+			return unlessStopped(
+				new Promise<AssistantToolExecution>(resolve => {
+					finishDraft = () => {
+						resolve({ ok: true, result: { done: true } })
+					}
+				}),
+				request.signal
+			)
 		}
 
 		const { session } = draftSession(executor)
@@ -628,6 +633,8 @@ describe("with the real session", () => {
 			expect(events.some(event => event.type === "proposal-settled")).toBe(true)
 		})
 
+		// It ran to its end: the draft landed and its card settled as done.
+		expect(events.find(event => event.type === "proposal-settled")).toMatchObject({ outcome: "done" })
 		expect(state().entries).toEqual([])
 		expect(state().activeTurnId).toBeNull()
 		expect(drafts(executor)).toBe(1)

@@ -68,14 +68,19 @@ function plainContent(note: Note, content: string): string {
 	}
 }
 
-// A date filter applies before the cut, so a period past the first rows (archived notes sort last) is
-// still found. Small models add a period nobody asked for, so one that alone empties a search by words gives
+// A date filter and `only` (pinned, favorite, archived) apply before the cut, so notes past the first rows
+// (archived notes sort last, favorites are not lifted) are still found. Small models add a period nobody asked for, so one that alone empties a search by words gives
 // way: the notes matching the words come back, with a note that none is dated in the period.
 export const listNotesTool: ToolAdapter = async (input, scope) => {
 	const tokens = searchTokens(optionalString(input, "query") ?? "")
 	const selection = dateSelection(input, ["edited"], scope.calendar)
+	const only = optionalString(input, "only") ?? "any"
 	const matching = sortNotes(filterNotesByBlockedOwner(await notesQueryRead(), blockedUsers()))
-		.filter(note => !note.trash)
+		.filter(
+			note =>
+				!note.trash &&
+				(only === "pinned" ? note.pinned : only === "favorite" ? note.favorite : only === "archived" ? note.archive : true)
+		)
 		.map(note => ({
 			note,
 			score: tokens.length === 0 ? 0 : matchScore(`${noteTitle(note)} ${note.tags.map(tagDisplayName).join(" ")}`, tokens)

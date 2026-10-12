@@ -143,6 +143,28 @@ export function freshPlaylist(playlist: Playlist): Playlist {
 	return entry?.status === "ok" ? entry.playlist : playlist
 }
 
+// A handle's live entity: names, recipients and flags as they are now, which a card must show.
+export function freshEntity(entity: AssistantEntity): AssistantEntity {
+	switch (entity.kind) {
+		case "drive":
+			return { ...entity, item: freshDriveItem(entity.item) }
+		case "note":
+			return { ...entity, note: freshNote(entity.note) }
+		case "chat":
+			return { ...entity, chat: freshChat(entity.chat) }
+		case "playlist":
+			return { ...entity, playlist: freshPlaylist(entity.playlist) }
+		default:
+			return entity
+	}
+}
+
+// The path a drive handle was found at, while it still describes `live` (its fresh row): a move or a rename
+// since then leaves it naming where the item used to be.
+export function livePath(entity: { item: DriveItem; path?: string }, live: DriveItem): string | undefined {
+	return live.data.parent === entity.item.data.parent && driveItemName(live) === driveItemName(entity.item) ? entity.path : undefined
+}
+
 export function rootDirUuid(): string | undefined {
 	return accountQueryGet()?.rootDirUuid
 }

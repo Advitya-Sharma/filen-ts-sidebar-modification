@@ -7,7 +7,7 @@ import type { AssistantModelState } from "@/features/assistant/types"
 
 // The page side of the runtime against a scripted worker: the states the panel sees across a download, an
 // explicit load, a start that finds a damaged shard, and the idle unload that frees the worker again.
-const { remote, inspections, releaseProxy, workers, locks, prune, device, storage } = vi.hoisted(() => ({
+const { remote, inspections, releaseProxy, workers, locks, prune, device, storage, stale, order } = vi.hoisted(() => ({
 	releaseProxy: Symbol("releaseProxy"),
 	remote: {
 		download: vi.fn<(manifest: unknown, baseUrl: string, onProgress: (progress: ModelDownloadProgress) => void) => Promise<void>>(),
@@ -31,7 +31,11 @@ const { remote, inspections, releaseProxy, workers, locks, prune, device, storag
 	// Whether WebGPU is offered, and whether the CPU path is.
 	device: { gpu: true, cpu: true },
 	// Whether the origin's storage is persistent, whether the rest of the model fits, and localStorage.
-	storage: { persisted: true, fits: true, local: new Map<string, string>() }
+	storage: { persisted: true, fits: true, local: new Map<string, string>() },
+	// Bytes of another model version on disk.
+	stale: { bytes: 0 },
+	// The order pruning and the storage estimate ran in.
+	order: [] as string[]
 }))
 
 vi.mock("@/workers/assistant.worker.ts?worker", () => ({
@@ -97,8 +101,13 @@ vi.mock("@/features/assistant/runtime/modelStore", () => ({
 
 		return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
 	},
-	deleteModels: () => prune.pending ?? Promise.resolve(),
-	otherModelPresent: () => Promise.resolve(false)
+	deleteModels: () => {
+		order.push("prune")
+		stale.bytes = 0
+
+		return prune.pending ?? Promise.resolve()
+	},
+	otherModels: () => Promise.resolve({ present: stale.bytes > 0, bytes: stale.bytes })
 }))
 
 const { ASSISTANT_CONTEXT_TOKENS, AssistantRuntime, IDLE_UNLOAD_MS } = await import("@/features/assistant/runtime/client")
@@ -151,7 +160,11 @@ function stubBrowser(): void {
 		storage: {
 			persist: () => Promise.resolve(true),
 			persisted: () => Promise.resolve(storage.persisted),
-			estimate: () => Promise.resolve({ quota: 100 * TOTAL, usage: 0 })
+			estimate: () => {
+				order.push("estimate")
+
+				return Promise.resolve({ quota: 100 * TOTAL, usage: 0 })
+			}
 		}
 	})
 	vi.stubGlobal("localStorage", {
@@ -185,6 +198,8 @@ beforeEach(() => {
 	locks.elsewhere = false
 	locks.queued.length = 0
 	prune.pending = null
+	stale.bytes = 0
+	order.length = 0
 	storage.persisted = true
 	storage.fits = true
 	storage.local.clear()
@@ -276,35 +291,44 @@ describe("AssistantRuntime download", () => {
 
 	it("shows downloaded only once its worker and lock are gone, so a load right after starts a fresh worker", async () => {
 		let finishPrune: () => void = () => undefined
+		let finishDownload: () => void = () => undefined
 
 		prune.pending = new Promise(resolve => {
 			finishPrune = () => {
 				resolve()
 			}
 		})
-		remote.download.mockImplementation((_manifest, _baseUrl, onProgress) => {
-			onProgress({ receivedBytes: TOTAL - 1, waiting: true })
-
-			return Promise.resolve()
-		})
+		remote.download.mockImplementation(
+			(_manifest, _baseUrl, onProgress) =>
+				new Promise(resolve => {
+					onProgress({ receivedBytes: TOTAL - 1, waiting: true })
+					finishDownload = () => {
+						resolve()
+					}
+				})
+		)
 		remote.load.mockResolvedValue({ specialTokens: [] })
 
 		const runtime = new AssistantRuntime()
 
 		runtime.download()
 		await vi.waitFor(() => {
-			expect(remote.download).toHaveBeenCalledTimes(1)
+			expect(order).toEqual(["prune"])
 		})
 		await new Promise(resolve => setTimeout(resolve, 10))
 
-		// Older versions are still being removed: the bytes are in, so it reads as finishing, not waiting.
-		expect(runtime.getState()).toMatchObject({ kind: "downloading", receivedBytes: TOTAL, waiting: false })
+		// Older versions are removed before the room is checked and anything is fetched.
+		expect(remote.download).not.toHaveBeenCalled()
 
+		finishPrune()
+		await vi.waitFor(() => {
+			expect(remote.download).toHaveBeenCalledTimes(1)
+		})
 		await runtime.load()
 
 		expect(remote.load).not.toHaveBeenCalled()
 
-		finishPrune()
+		finishDownload()
 		await settled(runtime, "downloaded")
 
 		expect(workers[0]?.terminate).toHaveBeenCalled()
@@ -547,6 +571,19 @@ describe("AssistantRuntime idle unload", () => {
 		expect(runtime.getState().kind).toBe("downloaded")
 	})
 
+	it("unloads on time after a release no user activity caused, without priming the router for it", async () => {
+		const runtime = await loaded()
+		const turn = runtime.hold()
+
+		remote.reprime.mockClear()
+		await vi.advanceTimersByTimeAsync(IDLE_UNLOAD_MS + 1)
+		turn({ activity: false })
+		await vi.advanceTimersByTimeAsync(0)
+
+		expect(remote.reprime).not.toHaveBeenCalled()
+		expect(runtime.getState()).toMatchObject({ kind: "downloaded", idleUnloaded: true })
+	})
+
 	it("has no countdown during a download, so a long one is never cut off", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
 		remote.download.mockReturnValue(new Promise(() => undefined))
@@ -741,6 +778,58 @@ describe("AssistantRuntime idle unload", () => {
 		expect(remote.reprime).toHaveBeenCalledTimes(1)
 	})
 
+	it("leaves ready when the engine crashed while priming the router between turns", async () => {
+		const runtime = await loaded()
+
+		remote.reprime.mockRejectedValueOnce(Object.assign(new Error("crashed"), { name: "ModelRuntimeError:crashed" }))
+		runtime.hold()()
+		await until(() => runtime.getState().kind === "downloaded")
+
+		expect(workers[0]?.terminate).toHaveBeenCalled()
+		expect(locks.held).toBe(0)
+	})
+
+	it("waits for a stop as long as this engine's slowest prompt batch took, three times over", async () => {
+		const runtime = await loaded()
+		let gate: () => void = () => undefined
+
+		vi.spyOn(performance, "now").mockImplementation(() => Date.now())
+		remote.generate.mockImplementationOnce(
+			(_id, _request, onUpdate) =>
+				new Promise(resolve => {
+					onUpdate?.({ type: "progress", processed: 0, total: 2048 })
+					gate = () => {
+						onUpdate?.({ type: "progress", processed: 512, total: 2048 })
+						resolve({ content: "", toolCalls: [] })
+					}
+				})
+		)
+		const first = runtime.generate(
+			{ messages: [], slot: "main", maxTokens: 1 },
+			{ signal: new AbortController().signal, onProgress: () => undefined }
+		)
+
+		await vi.advanceTimersByTimeAsync(6_000)
+		gate()
+		await first
+
+		remote.generate.mockImplementationOnce(() => new Promise(() => undefined))
+
+		const controller = new AbortController()
+		const stopped = runtime.generate({ messages: [], slot: "main", maxTokens: 1 }, { signal: controller.signal })
+
+		controller.abort()
+		await expect(stopped).rejects.toMatchObject({ name: "AbortError" })
+		await vi.advanceTimersByTimeAsync(17_000)
+
+		expect(runtime.getState().kind).toBe("ready")
+
+		await vi.advanceTimersByTimeAsync(1_000)
+
+		expect(runtime.getState().kind).toBe("downloaded")
+		vi.restoreAllMocks()
+	})
+
 	it("rejects a generation in flight when its worker is stopped, so no turn waits forever", async () => {
 		const runtime = await loaded()
 
@@ -812,6 +901,42 @@ describe("AssistantRuntime failures", () => {
 		await runtime.load()
 
 		expect((remote.load.mock.lastCall?.[1] as { backend: string }).backend).toBe("cpu")
+	})
+
+	it("offers an earlier model version's files for removal, and prunes them before checking the room for this one", async () => {
+		stale.bytes = 2_700_000_000
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+
+		expect(runtime.getState()).toMatchObject({ kind: "not-downloaded", staleBytes: 2_700_000_000 })
+		expect(runtime.getState()).not.toHaveProperty("partialBytes")
+
+		remote.download.mockResolvedValue(undefined)
+		runtime.download()
+		await settled(runtime, "downloaded")
+
+		expect(order).toEqual(["prune", "estimate"])
+	})
+
+	it("tries WebGPU again on the next load when the CPU path failed too, as it was not shown to be the GPU's fault", async () => {
+		inspections.push(COMPLETE)
+		remote.load.mockRejectedValueOnce(Object.assign(new Error("gpu"), { name: "ModelLoadError:load-failed" }))
+		remote.load.mockRejectedValueOnce(Object.assign(new Error("cpu"), { name: "ModelLoadError:out-of-memory" }))
+		remote.load.mockResolvedValue({ specialTokens: [] })
+
+		const runtime = new AssistantRuntime()
+
+		await runtime.init()
+		await runtime.load()
+
+		expect(runtime.getState()).toMatchObject({ kind: "error", error: "out-of-memory" })
+
+		await runtime.load()
+
+		expect(remote.load.mock.calls.map(([, options]) => (options as { backend: string }).backend)).toEqual(["webgpu", "cpu", "webgpu"])
+		expect(runtime.getState().kind).toBe("ready")
 	})
 
 	it("says how much a stopped download left on disk, so it can be removed", async () => {

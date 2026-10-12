@@ -46,7 +46,8 @@ export function modelShowsLoading(state: AssistantModelState, turnActive: boolea
 }
 
 // Files on disk: what "Remove downloaded model" can delete. A failed load still left them there, and a
-// stopped, failed or full download leaves the part it fetched (kept so it can resume).
+// stopped, failed or full download leaves the part it fetched (kept so it can resume), and an update leaves
+// the earlier model version until the new one downloads.
 export function canRemoveModel(state: AssistantModelState): boolean {
 	switch (state.kind) {
 		case "downloaded":
@@ -55,7 +56,7 @@ export function canRemoveModel(state: AssistantModelState): boolean {
 		case "error":
 			return state.error === "load-failed" || state.error === "out-of-memory" || (state.partialBytes ?? 0) > 0
 		case "not-downloaded":
-			return (state.partialBytes ?? 0) > 0
+			return (state.partialBytes ?? 0) > 0 || (state.staleBytes ?? 0) > 0
 		default:
 			return false
 	}

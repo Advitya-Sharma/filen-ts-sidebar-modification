@@ -115,7 +115,7 @@ const PRIME_REUSED_MIN = 64
 
 // Tokens per decoded batch. wllama checks a stop only between batches, so on the CPU path, where a batch
 // of a 4B model takes seconds, a smaller one keeps Stop prompt at little cost to throughput; on the GPU a
-// batch is a fraction of a second either way, and the progress steps stay readable.
+// batch takes seconds too (~4 s at 512 on an M1 Max), but a smaller one costs throughput there.
 const BATCH_TOKENS: Readonly<Record<AssistantBackend, number>> = { webgpu: 512, cpu: 128 }
 
 // Copies of the recurrent state kept per slot, ~50 MiB each in host memory, from which a hybrid model
@@ -353,7 +353,9 @@ function releaseCallback(callback: unknown): void {
 const TEXT_THROTTLE_MS = 50
 
 function isOutOfMemory(text: string): boolean {
-	return /out of memory|cannot allocate|allocation failed|failed to allocate|unable to allocate|reserve memory|\boom\b/i.test(text)
+	return /out of memory|cannot allocate|allocation failed|failed to allocate|unable to allocate|reserve memory|bad_alloc|\boom\b/i.test(
+		text
+	)
 }
 
 // A generation failure that leaves the engine unusable, as opposed to a stop or a request it refused: wllama
@@ -734,6 +736,11 @@ const api = {
 		try {
 			await serialized({ id: -1, controller, run: current => prime(current, system, controller.signal) })
 		} catch (e) {
+			// A crash released the engine: the page has to know, or it keeps reading "ready" with no engine.
+			if (e instanceof Error && e.name === ENGINE_CRASHED) {
+				throw e
+			}
+
 			log.warn("assistant.engine", "priming the prompt cache again failed", e)
 		}
 	},

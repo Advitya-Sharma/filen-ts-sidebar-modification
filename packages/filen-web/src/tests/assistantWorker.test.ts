@@ -422,6 +422,13 @@ describe("assistant worker API", () => {
 		loadOutcome.log = "llama_kv_cache: failed to allocate buffer for kv cache"
 		await expect(api.load(MANIFEST, OPTIONS)).rejects.toMatchObject({ name: "ModelLoadError:out-of-memory" })
 
+		// The CPU path's heap limit, without hashing every shard for damage first.
+		const onVerifying = vi.fn()
+
+		loadOutcome.log = "llama_model_load: error loading model: std::bad_alloc"
+		await expect(api.load(MANIFEST, OPTIONS, onVerifying)).rejects.toMatchObject({ name: "ModelLoadError:out-of-memory" })
+		expect(onVerifying).not.toHaveBeenCalled()
+
 		// Nothing stays loaded: a later load starts clean.
 		loadOutcome.vocab = 10
 		loadOutcome.log = null
@@ -607,6 +614,35 @@ describe("assistant worker API", () => {
 		await api.generate(5, { messages: [], slot: "extraction", maxTokens: 8 })
 		await api.reprime()
 		expect(engine?.createCompletion).toHaveBeenCalledTimes(3)
+	})
+
+	it("tells the page when the engine crashed while priming the router again, and only then fails", async () => {
+		const routerRequest = {
+			messages: [
+				{ role: "system" as const, content: "Route." },
+				{ role: "user" as const, content: "x" }
+			],
+			grammar: "g",
+			slot: "router" as const,
+			maxTokens: 8
+		}
+
+		completion.run = ({ onData }) => {
+			onData({
+				choices: [{ index: 0, delta: { content: "files read" }, finish_reason: null, logprobs: null }],
+				prompt_progress: { total: 620, cache: 0, processed: 620, time_ms: 0 }
+			})
+
+			return Promise.resolve()
+		}
+
+		await api.load(MANIFEST, { ...OPTIONS, primeSystem: "Route." })
+		await api.generate(1, routerRequest)
+		raw.run = () => Promise.reject(Object.assign(new Error("memory access out of bounds"), { name: "RuntimeError" }))
+
+		await expect(api.reprime()).rejects.toMatchObject({ name: "ModelRuntimeError:crashed" })
+		expect(engines[0]?.exit).toHaveBeenCalled()
+		raw.run = null
 	})
 
 	it("reads prompts in smaller batches on the CPU path, so a stop lands sooner", async () => {

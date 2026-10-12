@@ -105,6 +105,12 @@ function strictWords(value: string): string[] {
 	return words(value.replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2").replace(/(\p{L})(\p{N})|(\p{N})(\p{L})/gu, "$1$3 $2$4"))
 }
 
+// The words of a lookup's text that narrow what it returns: a lone Latin letter or digit ("m" of "I'm") or
+// punctuation alone ("/") matches nearly everything, so a lookup by those grounds nothing it returns.
+function selectiveWords(value: string): string[] {
+	return strictWords(value).filter(word => word.length >= 2 || CJK.test(word))
+}
+
 function extensionOf(value: string): string | undefined {
 	return EXTENSION.exec(value.trim())?.[0].toLowerCase()
 }
@@ -390,7 +396,11 @@ export class AssistantTurnGuard {
 
 		const keyed =
 			(tool.grounded.handles ?? []).some(key => args[key] !== undefined) ||
-			(tool.grounded.text ?? []).some(key => args[key] !== undefined)
+			(tool.grounded.text ?? []).some(key => {
+				const value = args[key]
+
+				return typeof value === "string" ? selectiveWords(value).length > 0 : value !== undefined
+			})
 
 		if (
 			tool.effect === "read" &&

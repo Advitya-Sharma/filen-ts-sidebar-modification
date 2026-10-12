@@ -1,5 +1,6 @@
 import { formatBytes, storageSummary } from "@filen/shared"
 import {
+	ASSISTANT_OFFICE_DOCUMENT_EXTENSIONS,
 	assistantToolByName,
 	dateFilterNote,
 	dayRangeBounds,
@@ -60,10 +61,24 @@ const EXTENSIONS: Record<string, readonly string[]> = {
 	image: ["jpg", "jpeg", "png", "heic", "gif", "webp", "svg"],
 	video: ["mp4", "mov", "mkv", "webm"],
 	audio: ["mp3", "flac", "m4a", "wav", "ogg"],
-	document: ["pdf", "doc", "docx", "odt", "txt", "md", "xlsx", "csv", "pptx"]
+	// What the app previews as a document (PDF, Word, spreadsheets, text, markdown), plus the shared list of
+	// office files it has no viewer for.
+	document: ["pdf", "docx", "txt", "md", "xlsx", "csv", ...ASSISTANT_OFFICE_DOCUMENT_EXTENSIONS]
 }
 
 const TEXT_EXTENSIONS = ["txt", "md", "csv", "json"]
+
+// Screens where the web app's context names a current directory and a selection.
+const DRIVE_SCREENS: ReadonlySet<string> = new Set(["drive"])
+
+const CONTEXT_NAME_MAX_CHARS = 80
+
+// A name in the context line, as the web app writes it: on one line, shortened, quoted.
+function contextName(name: string): string {
+	const flat = Array.from(name.replace(/\s+/g, " ").trim())
+
+	return JSON.stringify(flat.length > CONTEXT_NAME_MAX_CHARS ? `${flat.slice(0, CONTEXT_NAME_MAX_CHARS - 1).join("")}…` : flat.join(""))
+}
 
 const SEARCH_LIMIT = 12
 // Like the app's Recents screen, which ages files out by upload time.
@@ -104,14 +119,60 @@ function joinNotes(...notes: Record<string, string>[]): Record<string, string> {
 			}
 }
 
+// As the app folds names: accents, marks and invisible characters go.
 export function normalizeText(value: string): string {
-	return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()
+	return value
+		.normalize("NFKD")
+		.replace(/[\p{M}\p{Default_Ignorable_Code_Point}]/gu, "")
+		.toLowerCase()
 }
 
 function tokens(value: string): string[] {
 	return normalizeText(value)
 		.split(/[^\p{L}\p{N}]+/u)
 		.filter(token => token.length > 0)
+}
+
+const UNSPACED =
+	/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u
+
+const segmenter = new Intl.Segmenter(undefined, { granularity: "word" })
+
+// The words of a query as the app's search splits them (features/assistant/tools/format.ts queryWords): case
+// folded only, scripts written without spaces split into words, a lone kana particle dropped.
+function queryWords(value: string): string[] {
+	const text = value.normalize("NFC").toLowerCase()
+
+	if (!UNSPACED.test(text)) {
+		return text.split(/[^\p{L}\p{M}\p{N}]+/u).filter(word => word.length > 0)
+	}
+
+	return [...segmenter.segment(text)]
+		.filter(segment => segment.isWordLike === true)
+		.flatMap(segment =>
+			segment.segment.split(
+				/(?<=\p{Script=Latin}|\p{N})(?=[^\p{Script=Latin}\p{N}])|(?<=[^\p{Script=Latin}\p{N}])(?=\p{Script=Latin}|\p{N})/u
+			)
+		)
+		.filter(word => word.length > 0 && !/^[\p{Script=Hiragana}]$/u.test(word))
+}
+
+// The words the app asks its search engine for, in turn: words before numbers, longer first, as singulars.
+function engineWords(value: string): string[] {
+	const singular = (word: string) =>
+		word.length > 4 && /(?:s|x|z|ch|sh)es$/u.test(word)
+			? word.slice(0, -2)
+			: word.length > 3 && word.endsWith("s") && !word.endsWith("ss")
+				? word.slice(0, -1)
+				: word
+
+	return [
+		...new Set(
+			queryWords(value)
+				.toSorted((a, b) => Number(/^\p{N}+$/u.test(a)) - Number(/^\p{N}+$/u.test(b)) || b.length - a.length)
+				.map(singular)
+		)
+	].slice(0, 3)
 }
 
 // Crude plural folding so "invoices" finds "Invoice_…"; the real search is name-based too.
@@ -145,45 +206,63 @@ export class FakeApp {
 	constructor(context: Partial<AppContext> = {}) {
 		this.state = createFixtureState(context)
 
-		const visible = [
-			"d0",
-			this.state.context.directory,
-			...this.state.context.selection,
-			...(this.state.context.playing === null
-				? []
-				: [
-						this.state.context.playing.handle,
-						...(this.state.context.playing.playlist === null ? [] : [this.state.context.playing.playlist])
-					])
-		]
-
-		for (const handle of visible) {
+		for (const handle of this.contextHandles()) {
 			this.exposed.add(handle)
 		}
 	}
 
-	// One line for the system prompt, so "this file" or "here" resolve without a get_context round trip.
+	// One line for the system prompt, so "this file" or "here" resolve without a get_context round trip. As the
+	// web app writes it (features/assistant/tools/executor.ts describeContext): a current directory and a
+	// selection only on a drive screen, names quoted and shortened, the open note or chat.
 	describeContext(): string {
-		const { screen, directory, selection, playing } = this.state.context
-		const parts = [`screen: ${screen}`, `current directory: ${this.pathOf(this.drive(directory))} (handle ${directory})`]
+		const { screen, directory, selection, note, chat, playing } = this.state.context
+		const parts = [`screen: ${screen}`]
+		const onDrive = DRIVE_SCREENS.has(screen)
 
-		parts.push(
-			selection.length === 0
-				? "nothing selected"
-				: `selected: ${selection.map(handle => `${this.drive(handle).name} (handle ${handle})`).join(", ")}`
-		)
-
-		if (playing === null) {
-			parts.push("nothing playing")
-		} else {
+		if (onDrive) {
 			parts.push(
-				`${playing.paused ? "paused" : "playing"}: ${this.drive(playing.handle).name} (handle ${playing.handle})${
-					playing.playlist === null ? "" : ` from playlist handle ${playing.playlist}`
-				}`
+				directory === "d0"
+					? "current directory: / (handle d0)"
+					: `current directory: ${contextName(this.pathOf(this.drive(directory)))} (handle ${directory})`
+			)
+			parts.push(
+				selection.length === 0
+					? "nothing selected"
+					: `selected: ${selection.map(handle => `${contextName(this.drive(handle).name)} (handle ${handle})`).join(", ")}`
 			)
 		}
 
+		if (note !== undefined) {
+			parts.push(`open note: ${contextName(this.noteItem(note).title)} (handle ${note})`)
+		}
+
+		if (chat !== undefined) {
+			parts.push(`open chat: ${contextName(this.chat(chat).name)} (handle ${chat})`)
+		}
+
+		parts.push(
+			playing === null
+				? "nothing playing"
+				: `${playing.paused ? "paused" : "playing"}: ${contextName(this.drive(playing.handle).name)} (handle ${playing.handle})`
+		)
+
 		return parts.join("; ")
+	}
+
+	// The handles the context line names, which ground a call as the user's own (the web executor's context()).
+	contextHandles(): string[] {
+		const { screen, directory, selection, note, chat, playing } = this.state.context
+		const onDrive = DRIVE_SCREENS.has(screen)
+
+		return [
+			...new Set([
+				"d0",
+				...(onDrive ? [directory, ...selection] : []),
+				...(note === undefined ? [] : [note]),
+				...(chat === undefined ? [] : [chat]),
+				...(playing === null ? [] : [playing.handle])
+			])
+		]
 	}
 
 	execute({ name, args }: { name: string; args: unknown }): ToolOutcome {
@@ -728,12 +807,22 @@ export class FakeApp {
 		const selection = this.dateSelection(input, ["modified", "uploaded", "created"])
 		const queryTokens = tokens(query)
 
+		const words = engineWords(query)
+
 		// Like the app: a search is by name, so it needs words.
-		if (queryTokens.length === 0) {
+		if (queryTokens.length === 0 || words.length === 0) {
 			throw new CallError("Pass words from the item name", true)
 		}
-		const matching = this.state.drive
-			.filter(item => item.parent !== null && !item.trashed && this.inMyDrive(item) && this.matchesKind(item, kind))
+
+		// Like the app's search engine: names that contain one word, as written but for case, the first word
+		// (longest first) that any name contains.
+		const searchable = this.state.drive.filter(item => item.parent !== null && !item.trashed && this.inMyDrive(item))
+		const hits =
+			words
+				.map(word => searchable.filter(item => item.name.normalize("NFC").toLowerCase().includes(word)))
+				.find(found => found.length > 0) ?? []
+		const matching = hits
+			.filter(item => this.matchesKind(item, kind))
 			.map(item => {
 				const haystack = normalizeText(item.name)
 
@@ -772,7 +861,12 @@ export class FakeApp {
 				: {
 						dates: `${selection.field} ${selection.range}`
 					}),
-			...this.emptyNote(selection, scored.length, matching.length)
+			...joinNotes(
+				this.emptyNote(selection, scored.length, matching.length),
+				all.length === 0 && scored.length > 0 && queryTokens.length > 1
+					? { note: "No name contains all of the words; these contain only some of them." }
+					: {}
+			)
 		}
 	}
 
@@ -1207,8 +1301,14 @@ export class FakeApp {
 				const query = optionalStr("query")
 				const queryTokens = query === undefined ? [] : tokens(query)
 				const selection = this.dateSelection(input, ["edited"])
+				const only = optionalStr("only") ?? "any"
 				const matches = this.state.notes.filter(item => {
-					if (item.trashed) {
+					if (
+						item.trashed ||
+						(only === "pinned" && !item.pinned) ||
+						(only === "favorite" && !item.favorite) ||
+						(only === "archived" && !item.archived)
+					) {
 						return false
 					}
 
@@ -1348,7 +1448,18 @@ export class FakeApp {
 								? {}
 								: {
 										lastActivity: evalLocalDay(last.sent)
-									})
+									}),
+							// Like the app: whether the last message is the user's own, and whether any are unread.
+							...(last?.from === "me"
+								? {
+										lastFrom: "you"
+									}
+								: {}),
+							...(item.unread === true
+								? {
+										unread: true
+									}
+								: {})
 						}
 					})
 				}
@@ -1380,6 +1491,14 @@ export class FakeApp {
 
 			case "draft_chat_message": {
 				const item = this.chat(str("chat"))
+
+				// Like the app: text the user left in the chat's message box is never overwritten.
+				if (this.state.busyComposers.includes(item.handle)) {
+					throw new CallError(
+						`The message box of "${item.name}" already holds unsent text; the user has to clear it first`,
+						false
+					)
+				}
 
 				this.state.context.screen = "chat"
 				this.state.opened = item.handle
@@ -1448,7 +1567,33 @@ export class FakeApp {
 
 				const item = this.driveItem(handle)
 
-				if (item.kind !== "file" || !(EXTENSIONS["audio"] ?? []).includes(extension(item.name))) {
+				// Like the app: a directory plays its audio files in name order.
+				if (item.kind === "directory") {
+					const tracks = this.children(item.handle)
+						.filter(child => child.kind === "file" && (EXTENSIONS["audio"] ?? []).includes(extension(child.name)))
+						.sort((a, b) => a.name.localeCompare(b.name))
+					const first = tracks[0]
+
+					if (first === undefined) {
+						throw new CallError(`"${item.name}" holds no audio files`, false)
+					}
+
+					this.state.context.playing = {
+						handle: first.handle,
+						playlist: null,
+						paused: false,
+						shuffle: false,
+						repeat: false
+					}
+
+					return {
+						playing: first.name,
+						directory: item.name,
+						tracks: tracks.length
+					}
+				}
+
+				if (!(EXTENSIONS["audio"] ?? []).includes(extension(item.name))) {
 					throw new CallError(`"${item.name}" is not an audio file`, true)
 				}
 
@@ -1482,7 +1627,8 @@ export class FakeApp {
 				} else if (action === "repeat_on" || action === "repeat_off") {
 					playing.repeat = action === "repeat_on"
 				} else if (playing.playlist !== null) {
-					const tracks = this.playlist(playing.playlist).tracks
+					// The player's own queue: the playlist need not have been shown to the model.
+					const tracks = this.state.playlists.find(item => item.handle === playing.playlist)?.tracks ?? []
 					const index = tracks.indexOf(playing.handle)
 					const next = tracks[(index + (action === "next" ? 1 : tracks.length - 1)) % tracks.length]
 

@@ -2,14 +2,14 @@ import { screenAssistantReply } from "@filen/shared/assistant"
 import { readdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { MITIGATION_PRESETS, type MitigationPreset, type Transcript } from "./agent"
-import { LOOP_PRESETS } from "./loopHarness"
+import { LOOP_PRESETS, shippedCase } from "./loopHarness"
 import { EVAL_CASES } from "./cases"
 import { INJECTION_CASES } from "./cases/injection"
 import { CATEGORIES, LANGUAGES, type Category, type Language } from "./cases/types"
 import type { Grade } from "./grader"
 import { gradeInjection, type InjectionGrade } from "./injectionGrader"
 import { PROMPT_CANARY } from "./prompts"
-import { caseFingerprint, parseRecordLine } from "./fingerprint"
+import { caseFingerprint, modelKey, parseRecordLine } from "./fingerprint"
 import { detectLanguage } from "./languageDetect"
 import type { ModelEntry } from "./models"
 
@@ -295,7 +295,7 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 				(
 					await Promise.all(files.filter(file => file.startsWith("main-")).map(file => readJsonl<MainRecord>(join(dir, file))))
 				).flat(),
-				model.id,
+				modelKey(model),
 				EVAL_CASES
 			).map(regradeLanguage)
 			const injection = current(
@@ -304,7 +304,7 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 						files.filter(file => file.startsWith("injection-")).map(file => readJsonl<InjectionRecord>(join(dir, file)))
 					)
 				).flat(),
-				model.id,
+				modelKey(model),
 				INJECTION_CASES
 			).map(regradeInjection)
 			const meta = JSON.parse(await readFile(join(dir, "meta.json"), "utf8").catch(() => "{}")) as Partial<Meta>
@@ -330,11 +330,22 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 	for (const preset of mainPresets) {
 		lines.push(`## Main suite (mitigations: ${preset})`, "")
 
-		const rows = data
+		// A case whose write the app does not run passes on any reply that changes nothing and is routed right:
+		// counted apart, so the pass rate measures what the app does.
+		const unavailable = (record: MainRecord) => {
+			const evalCase = EVAL_CASES.find(item => item.id === record.caseId)
+
+			return preset === "shipped" && evalCase !== undefined && shippedCase(evalCase).unavailableWrite === true
+		}
+		const all = data
 			.map(entry => ({
 				entry,
 				records: entry.main.filter(record => record.preset === preset)
 			}))
+			.filter(row => row.records.length > 0)
+		const rows = all.map(({ entry, records }) => ({ entry, records: records.filter(record => !unavailable(record)) }))
+		const unavailableRows = all
+			.map(({ entry, records }) => ({ entry, records: records.filter(unavailable) }))
 			.filter(row => row.records.length > 0)
 
 		lines.push(
@@ -377,6 +388,29 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 				})
 			),
 			"",
+			...(unavailableRows.length === 0
+				? []
+				: [
+						"### Writes the app does not run (not in the pass rate)",
+						"",
+						"Passed: routed as the request, nothing changed, a reply in the user's language.",
+						"",
+						table(
+							["Model", "Cases", "Passed", "Routing", "Lang. fidelity"],
+							unavailableRows.map(({ entry, records }) => {
+								const s = summarizeMain(records)
+
+								return [
+									label(entry.model),
+									String(s.cases),
+									pct(s.pass),
+									pct(s.routing),
+									`${pct(s.languageFidelity)} (n=${s.languageGraded})`
+								]
+							})
+						),
+						""
+					]),
 			"### Latency and memory",
 			"",
 			table(
@@ -497,7 +531,8 @@ export async function writeReport({ outDir, manifest }: { outDir: string; manife
 					),
 					languages: Object.fromEntries(
 						LANGUAGES.map(lang => [lang, summarizeMain(records.filter(record => record.lang === lang))])
-					)
+					),
+					unavailableWrites: summarizeMain(unavailableRows.find(row => row.entry === entry)?.records ?? [])
 				}
 			}
 		}

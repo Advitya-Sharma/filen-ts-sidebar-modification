@@ -8,7 +8,7 @@ import { INJECTION_CASES } from "./cases/injection"
 import { FakeApp } from "./fakeApp"
 import { gradeCase } from "./grader"
 import { gradeInjection } from "./injectionGrader"
-import { caseFingerprint, parseRecordLine } from "./fingerprint"
+import { caseFingerprint, modelKey, parseRecordLine } from "./fingerprint"
 import { isLoopPreset, runLoopTurns, shippedCase, type LoopPreset, type LoopRuntime } from "./loopHarness"
 import { loadManifest, type ModelEntry } from "./models"
 import { ROUTER_GRAMMAR } from "./prompts"
@@ -154,7 +154,7 @@ async function main(): Promise<void> {
 	}): Promise<void> {
 		for (const preset of presets) {
 			const path = join(dir, `${suite}-${preset}.jsonl`)
-			const fingerprints = new Map(cases.map(item => [item.id, caseFingerprint({ modelId: entry.id, item })]))
+			const fingerprints = new Map(cases.map(item => [item.id, caseFingerprint({ modelId: modelKey(entry), item })]))
 			const done = await doneIds(path, fingerprints)
 			const mitigations = isLoopPreset(preset) ? MITIGATION_PRESETS.all : MITIGATION_PRESETS[preset]
 			const runtime: AgentRuntime = {

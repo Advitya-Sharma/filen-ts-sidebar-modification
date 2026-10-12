@@ -148,5 +148,46 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		calls: [{ tool: "list_directory", args: { offset: LISTING_PAGE_ITEMS * 2 } }],
 		answerIncludes: [lastScans(THREE_PAGES)],
 		expectsText: true
+	},
+	// A follow-up about content the previous turn read: the extraction answers the new question, not the old one.
+	{
+		id: "conversation-note-followup-fr",
+		category: "multi_step",
+		lang: "fr",
+		prompt: "Résume ma note Idées cadeaux Noël",
+		followUps: ["Et pour Léa, j'avais noté quoi ?"],
+		routes: ["notes"],
+		answerIncludes: [["casque"]],
+		expectsText: true
+	},
+	{
+		id: "conversation-chat-followup-es",
+		category: "multi_step",
+		lang: "es",
+		prompt: "Lee mi chat con Carlos Ruiz",
+		followUps: ["¿Qué me preguntó?"],
+		routes: ["chats"],
+		answerIncludes: [["presupuesto"]],
+		expectsText: true
+	},
+	{
+		id: "conversation-file-followup-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: "What's in tax_notes_2024.txt?",
+		followUps: ["When is the appointment with the advisor?"],
+		routes: ["files"],
+		answerIncludes: [["12 may", "may 12"]],
+		expectsText: true
+	},
+	{
+		id: "conversation-clarified-extraction-de",
+		category: "multi_step",
+		lang: "de",
+		prompt: "Was schreibt Anna über den Termin?",
+		followUps: ["Anna Schmidt"],
+		routes: ["chats"],
+		answerIncludes: [["freitag"]],
+		expectsText: true
 	}
 ]

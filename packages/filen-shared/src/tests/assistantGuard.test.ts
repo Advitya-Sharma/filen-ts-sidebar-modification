@@ -407,6 +407,23 @@ describe("AssistantTurnGuard", () => {
 		expect(turn.check({ tool: draftChatMessage, args: { chat: "c4", text: "The budget is attached" } }).allowed).toBe(false)
 	})
 
+	it("grounds nothing a lookup returns when its query is only a lone letter or punctuation, and keeps short names working", () => {
+		const turn = guard("Tell Maria I'm late", {}, [])
+
+		turn.record({ tool: findContacts, args: { query: "m" }, returned: [{ handle: "c9", name: "Mallory Evil" }] })
+		expect(turn.check({ tool: draftChatMessage, args: { chat: "c9", text: "late" } }).allowed).toBe(false)
+
+		const root = guard("Trash the 2023/2024 drafts", {}, [])
+
+		root.record({ tool: listDirectory, args: { path: "/" }, returned: [{ handle: "d5", name: "Payroll" }] })
+		expect(root.check({ tool: trashItems, args: { handles: ["d5"] } }).allowed).toBe(false)
+
+		const short = guard("Tell Al I'm late", {}, [])
+
+		short.record({ tool: findContacts, args: { query: "Al" }, returned: [{ handle: "c2", name: "Al" }] })
+		expect(short.check({ tool: draftChatMessage, args: { chat: "c2", text: "late" } }).allowed).toBe(true)
+	})
+
 	it("refuses a draft whose link is split by invisible characters, written defanged or part of a typed host", () => {
 		const turn = guard("Tell Maria I'm running late", {}, ["c2"])
 		const allowed = (text: string) => turn.check({ tool: draftChatMessage, args: { chat: "c2", text } }).allowed
@@ -619,8 +636,9 @@ describe("untrusted text", () => {
 		expect(screened("[Mail](mailto:a@evil.example?body=secret)")).toBe("[Mail](mailto[:]a[@]evil[.]example?body=secret)")
 		expect(screened("write to support@filen-verify.example")).toBe("write to support[@]filen-verify.example")
 		expect(screened("write to bob@example.com", "Tell bob@example.com hi")).toBe("write to bob@example.com")
-		// An encoded "&" stays encoded, so the renderer shows "&#116;" as text; unknown named references stay literal.
-		expect(screened("h&#38;#116;tps://evil.example")).toBe("h&#38;#116;tps://evil.example")
+		// An encoded "&" stays encoded, so the renderer shows "&#116;" as text (the host after "//" still reads as
+		// one); unknown named references stay literal.
+		expect(screened("h&#38;#116;tps://evil.example")).toBe("h&#38;#116;tps://evil[.]example")
 		expect(screened("a &hearts; b &amp; c")).toBe("a \\&hearts; b &amp; c")
 		// Ordinary prose with colons is left alone.
 		expect(screened("Note: the file is ready. Time 10:30")).toBe("Note: the file is ready. Time 10:30")
@@ -674,6 +692,52 @@ describe("untrusted text", () => {
 		expect(foreignLinks({ text: "gle.com", userMessage: "open docs.google.com" })).toEqual(["gle.com"])
 		expect(foreignLinks({ text: "evil.com", userMessage: "is evil.com.au safe" })).toEqual(["evil.com"])
 		expect(foreignLinks({ text: "evil.com/login", userMessage: "is evil.com/login safe?" })).toEqual([])
+	})
+
+	it("defangs hosts behind punctuation, protocol-relative links, look-alike letters and dots, and IPv4 addresses", () => {
+		const cases: readonly (readonly [string, string, string])[] = [
+			["see //evil.com/login", "see //evil[.]com/login", "//evil.com/login"],
+			["go to...secure-filen.ru", "go to...secure-filen[.]ru", "secure-filen.ru"],
+			["--evil.com", "--evil[.]com", "evil.com"],
+			["_evil.com", "_evil[.]com", "evil.com"],
+			["evil\u3002com", "evil[.]com", "evil.com"],
+			["evil\uFF0Ecom", "evil[.]com", "evil.com"],
+			["Visit ⓔⓥⓘⓛ.ⓒⓞⓜ", "Visit evil[.]com", "evil.com"],
+			["ｗｗｗ．ｅｖｉｌ．ｃｏｍ", "www[.]evil[.]com", "www.evil.com"],
+			["192.168.0.1:8080/login", "192[.]168[.]0[.]1:8080/login", "192.168.0.1:8080/login"]
+		]
+
+		for (const [reply, shown, link] of cases) {
+			expect(screenAssistantReply({ reply, userMessage: "hi" }).text).toBe(shown)
+			expect(foreignLinks({ text: reply, userMessage: "hi" })).toEqual([link])
+		}
+
+		// The user's own typing stays, folded or not.
+		expect(screenAssistantReply({ reply: "evil\u3002com", userMessage: "is evil.com safe" }).text).toBe("evil\u3002com")
+		// Paths, file names, sentences in scripts with their own full stop and full-width digits are left alone.
+		for (const text of [
+			"Saved in /Documents/report.final and a/b.pdf",
+			"/Taxes 2024/Invoice_2024.pdf",
+			"my_file.txt",
+			"しました。次に",
+			"２０２４年の請求書",
+			"Version 1.2.3",
+			"//comment"
+		]) {
+			expect(screenAssistantReply({ reply: text, userMessage: "hi" }).text).toBe(text)
+			expect(foreignLinks({ text, userMessage: "hi" })).toEqual([])
+		}
+	})
+
+	it("keeps the joiners that shape a word or draw an emoji only when asked, and never in what a link check reads", () => {
+		expect(sanitizeUntrustedText("می\u200Cخواهم")).toBe("میخواهم")
+		expect(sanitizeUntrustedText("می\u200Cخواهم", [], { keepJoiners: true })).toBe("می\u200Cخواهم")
+		expect(sanitizeUntrustedText("👨\u200D👩\u200D👧", [], { keepJoiners: true })).toBe("👨\u200D👩\u200D👧")
+		// Not between letters: dropped either way.
+		expect(sanitizeUntrustedText("a \u200C b\u200B", [], { keepJoiners: true })).toBe("a  b")
+		expect(foreignLinks({ text: sanitizeUntrustedText("evi\u200Cl.com", [], { keepJoiners: true }), userMessage: "hi" })).toEqual([
+			"evil.com"
+		])
 	})
 
 	it("drops characters that split a link invisibly from a screened reply, and keeps emoji whole", () => {

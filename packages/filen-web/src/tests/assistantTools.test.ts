@@ -87,6 +87,7 @@ import { useChatComposerStore } from "@/features/chats/store/useChatComposer"
 import { useNotesInflightStore } from "@/features/notes/store/useNotesInflight"
 import { forgetTabEditor, seedTabEditor, tabEditorChanged } from "@/features/notes/lib/tabEditors"
 import { setAssistantRouter } from "@/features/assistant/tools/navigation"
+import { CHATS_QUERY_KEY } from "@/features/chats/queries/chats"
 import { createAssistantToolExecutor } from "@/features/assistant/tools/executor"
 import { DIRECTORY_SIZE_READS, SEARCH_CAP_MS } from "@/features/assistant/tools/drive"
 import { userCalendar } from "@/features/assistant/tools/dates"
@@ -342,6 +343,51 @@ describe("get_context", () => {
 		expect(description).toContain('current directory: "/Docs" (no handle; list it by this path)')
 	})
 
+	it("survives a malformed directory address", async () => {
+		at("/drive/abc%")
+
+		expect((await executor.context()).description).toContain("screen: drive")
+	})
+
+	it("offers a long path to list by whole, and none at all past what can be copied back", async () => {
+		const names = ["Clients", "2024", "Acme Corporation", "Contracts", "Signed", "Final versions", "Scans"]
+		const uuids = names.map(name => testUuid(`deep-${name}`))
+
+		queryClient.removeQueries({ queryKey: driveListingQueryKey({ variant: "drive", uuid: null }) })
+		names.forEach((name, index) => queryClient.setQueryData(driveNamesQueryKey("drive", uuids[index] ?? ""), name))
+		at(`/drive/${uuids.join("/")}`)
+
+		expect((await executor.context()).description).toContain(
+			'current directory: "/Clients/2024/Acme Corporation/Contracts/Signed/Final versions/Scans" (no handle; list it by this path)'
+		)
+
+		queryClient.setQueryData(driveNamesQueryKey("drive", uuids[0] ?? ""), "x".repeat(600))
+
+		expect((await executor.context()).description).toContain('current directory: "Scans" (no handle; not the root)')
+	})
+
+	it("forgets what a stopped turn's tool finds after a reset: its handles stay unknown", async () => {
+		let resolve: (notes: Note[]) => void = () => undefined
+
+		sdk.listNotes.mockImplementationOnce(
+			() =>
+				new Promise<Note[]>(done => {
+					resolve = done
+				})
+		)
+
+		const pending = call("list_notes", {})
+
+		await vi.waitFor(() => {
+			expect(sdk.listNotes).toHaveBeenCalled()
+		})
+		executor.reset()
+		resolve([plan, recipe])
+
+		await expect(pending).resolves.toMatchObject({ ok: false, error: "Stopped" })
+		expect(executor.name?.("n1")).toBeUndefined()
+	})
+
 	it("returns the same line as a tool result", async () => {
 		const result = await call("get_context", {})
 
@@ -372,6 +418,15 @@ describe("search_items", () => {
 		expect(result).toMatchObject({ ok: true, returned: [{ handle: "f1", name: "Invoice_2024.pdf" }] })
 		expect(json(result)).toEqual({
 			results: [{ handle: "f1", name: "Invoice_2024.pdf", kind: "file", path: "/Docs/Invoice_2024.pdf" }]
+		})
+	})
+
+	it("says when no name holds every word, so a partial match is not presented as the item asked for", async () => {
+		sdk.searchQuery.mockResolvedValue(engineResult([{ parentPath: "Docs", item: invoiceRaw }], 1n, "invoice"))
+
+		expect(json(await call("search_items", { query: "invoice return" }))).toMatchObject({
+			results: [{ name: "Invoice_2024.pdf" }],
+			note: "No name contains all of the words; these contain only some of them."
 		})
 	})
 
@@ -594,6 +649,32 @@ describe("list_directory", () => {
 		expect(new Set([...first, ...second]).size).toBe(dirs.length + 1)
 	})
 
+	it("counts office and presentation files the app cannot preview as documents", async () => {
+		const deck = rawFile(testUuid("deck"), "Q3.pptx", ROOT, "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+		const legacy = rawFile(testUuid("legacy"), "Letter.doc", ROOT, "application/msword")
+
+		sdk.listDirectory.mockResolvedValue({ dirs: [docsRaw], files: [readmeRaw, deck, legacy] })
+		queryClient.removeQueries({ queryKey: driveListingQueryKey({ variant: "drive", uuid: null }) })
+
+		const names = (json(await call("list_directory", { path: "/", kind: "document" }))["items"] as { name: string }[]).map(
+			item => item.name
+		)
+
+		expect(names).toEqual(expect.arrayContaining(["Q3.pptx", "Letter.doc", "readme.md"]))
+	})
+
+	it("resolves a path the model copied without a name's zero-width non-joiner", async () => {
+		const persian = rawDir(testUuid("persian"), "می\u200Cخواهم", ROOT)
+
+		sdk.listDirectory.mockImplementation((target: { kind: string }) =>
+			Promise.resolve(target.kind === "root" ? { dirs: [docsRaw, persian], files: [readmeRaw] } : { dirs: [], files: [] })
+		)
+		queryClient.removeQueries({ queryKey: driveListingQueryKey({ variant: "drive", uuid: null }) })
+
+		// Found; what the model reads back is sanitized the same way again.
+		expect(json(await call("list_directory", { path: "/میخواهم" }))).toMatchObject({ directory: { handle: "d1", path: "/میخواهم" } })
+	})
+
 	it("refuses a file handle as an invalid call", async () => {
 		await call("list_directory", {})
 
@@ -649,6 +730,24 @@ describe("get_item_info", () => {
 	})
 })
 
+describe("an item moved between turns", () => {
+	it("reports where it is now, not where an earlier lookup or a cached location found it", async () => {
+		useDriveStore.setState({ selectedItems: [invoice] })
+		at(`/drive/${docs.data.uuid}`)
+		await executor.context()
+		expect(json(await call("get_item_info", { handle: "f1" }))).toMatchObject({ path: "/Docs/Invoice_2024.pdf" })
+		await call("list_directory", { path: "/Docs" })
+
+		const moved = narrowItem(rawFile(invoice.data.uuid, "Invoice_2024.pdf", ROOT, "application/pdf"))
+
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: null }), [docs, readme, moved])
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: docs.data.uuid }), [narrowItem(songRaw)])
+		sdk.getItemInfo.mockResolvedValue({ path: "/Invoice_2024.pdf", ancestors: [] })
+
+		expect(json(await call("get_item_info", { handle: "f1" }))).toMatchObject({ path: "/Invoice_2024.pdf" })
+	})
+})
+
 describe("read_text_file", () => {
 	it("loads the bytes through the preview's cache and caps what the model sees", async () => {
 		// Copied into this realm's Uint8Array: jsdom's TextEncoder answers with another realm's.
@@ -697,6 +796,19 @@ describe("notes", () => {
 		const result = await call("list_notes", { query: "trips" })
 
 		expect(json(result)).toEqual({ notes: [{ handle: "n1", title: "Trip plan", type: "text", edited: "2023-11-14", pinned: true }] })
+	})
+
+	it("lists only pinned, favorite or archived notes when asked, past the first rows", async () => {
+		const many = Array.from({ length: 50 }, (_, index) => note(testUuid(`many${String(index)}`), `Note ${String(index)}`))
+		const starred = note(testUuid("starred"), "Starred", { favorite: true, editedTimestamp: 1n })
+		const old = note(testUuid("old"), "Old", { archive: true })
+
+		sdk.listNotes.mockResolvedValue([...many, starred, old, plan])
+
+		expect(json(await call("list_notes", { only: "favorite" }))["notes"]).toEqual([expect.objectContaining({ title: "Starred" })])
+		expect(json(await call("list_notes", { only: "archived" }))["notes"]).toEqual([expect.objectContaining({ title: "Old" })])
+		expect(json(await call("list_notes", { only: "pinned" }))["notes"]).toEqual([expect.objectContaining({ title: "Trip plan" })])
+		expect(json(await call("list_notes", { only: "any" }))["more"]).toBe(13)
 	})
 
 	it("reads a note through the editor's content query, as plain text", async () => {
@@ -764,6 +876,89 @@ describe("chats", () => {
 		expect(json(await call("list_chats", {}))).toEqual({ chats: [{ handle: "c1", name: "Anna" }] })
 	})
 
+	it("says which chats have unread messages and where the user wrote last, from the chats it holds", async () => {
+		const lastFrom = (from: { userId: bigint; email: string; nickName: string | undefined }, sent: bigint) =>
+			message(testUuid(`last-${from.email}`), from, "x", sent)
+
+		sdk.listChats.mockResolvedValue([
+			{ ...chat, lastFocus: 5n, lastMessage: lastFrom(anna, 9n) },
+			{ ...chat, uuid: testUuid("mine"), name: "Mine", lastFocus: 5n, lastMessage: lastFrom(self, 9n) }
+		])
+
+		expect(json(await call("list_chats", {}))["chats"]).toEqual([
+			expect.objectContaining({ name: "Team", unread: true }),
+			expect.objectContaining({ name: "Mine", lastFrom: "you" })
+		])
+	})
+
+	it("marks a message it had to cut, and leaves out an older one rather than keep a fragment of it", async () => {
+		sdk.listMessagesBefore.mockResolvedValue([
+			message(testUuid("old"), anna, "o".repeat(500), 1n),
+			...Array.from({ length: 10 }, (_, index) => message(testUuid(`long${String(index)}`), anna, "l".repeat(700), 2n))
+		])
+		await call("list_chats", {})
+
+		const rows = json(await call("read_chat", { handle: "c1", limit: 50 }))["messages"] as { text: string }[]
+
+		expect(rows.every(row => row.text.endsWith("…"))).toBe(true)
+		expect(rows.every(row => row.text.length > 80)).toBe(true)
+		expect(rows.some(row => row.text.startsWith("o"))).toBe(false)
+	})
+
+	it("keeps the joiners a Persian draft and an emoji need", async () => {
+		await call("list_chats", {})
+
+		const result = await call("draft_chat_message", { chat: "c1", text: "می\u200Cخواهم 👨\u200D👩\u200D👧" }, true)
+
+		expect(result.ok).toBe(true)
+		expect(useChatComposerStore.getState().entries[chat.uuid]?.draft).toBe("می\u200Cخواهم 👨\u200D👩\u200D👧")
+	})
+
+	it("writes no draft when the chat did not open: a blocked navigation, or a Stop during it", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+
+		try {
+			await call("list_chats", {})
+
+			const stuck = vi.fn(() => new Promise<void>(() => undefined))
+			const unsubscribe = vi.fn()
+
+			setAssistantRouter({ ...router, navigate: stuck, subscribe: vi.fn(() => unsubscribe) } as unknown as RegisteredRouter)
+
+			const blocked = call("draft_chat_message", { chat: "c1", text: "Hi" }, true)
+
+			await vi.advanceTimersByTimeAsync(60_000)
+
+			await expect(blocked).resolves.toMatchObject({ ok: false })
+			expect(useChatComposerStore.getState().entries[chat.uuid]).toBeUndefined()
+			expect(unsubscribe).toHaveBeenCalled()
+
+			const tool = assistantToolByName("draft_chat_message")
+			const controller = new AbortController()
+
+			if (tool === undefined) {
+				throw new Error("no tool")
+			}
+
+			const stopped = executor.execute({
+				callId: "call",
+				tool,
+				args: { chat: "c1", text: "Hi" },
+				confirmed: true,
+				signal: controller.signal
+			})
+
+			await vi.advanceTimersByTimeAsync(0)
+			controller.abort()
+
+			await expect(stopped).resolves.toMatchObject({ ok: false, error: "Stopped" })
+			await vi.advanceTimersByTimeAsync(60_000)
+			expect(useChatComposerStore.getState().entries[chat.uuid]).toBeUndefined()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
 	it("reads the newest messages from the thread's own query and hides blocked senders", async () => {
 		await call("list_chats", {})
 
@@ -822,6 +1017,20 @@ describe("audio", () => {
 		await call("play", { handle: "f2" })
 
 		expect(audioEngine.enqueueAndPlay).toHaveBeenCalledWith([expect.objectContaining({ uuid: testUuid("song") })], 0)
+	})
+
+	it("plays a directory's audio files in name order, and says so when it holds none", async () => {
+		await call("list_directory", { path: "/" })
+
+		const result = await call("play", { handle: "d1" })
+
+		expect(result).toMatchObject({ ok: true, result: { playing: "song.mp3", directory: "Docs", tracks: 1 } })
+		expect(audioEngine.enqueueAndPlay).toHaveBeenCalledWith([expect.objectContaining({ uuid: testUuid("song") })], 0)
+
+		queryClient.setQueryData(driveListingQueryKey({ variant: "drive", uuid: docs.data.uuid }), [invoice])
+		sdk.listDirectory.mockResolvedValue({ dirs: [], files: [invoiceRaw] })
+
+		expect(await call("play", { handle: "d1" })).toMatchObject({ ok: false, invalid: false, error: '"Docs" holds no audio files' })
 	})
 
 	it("controls the player with the transport's own engine calls", async () => {
@@ -1174,6 +1383,29 @@ describe("drive lists, sharing, contacts and transfers", () => {
 		})
 	})
 
+	it("gives a directory open on Shared with me a handle that lists through its chain", async () => {
+		const taxes = testUuid("taxes")
+		const quarter = testUuid("quarter")
+
+		sdk.listSharedInRoot.mockResolvedValue({ dirs: [sharedRoot(taxes, "Taxes 2025", annaRole)], files: [] })
+		const nested = { inner: rawDir(quarter, "Q1", taxes), sharedTag: true }
+
+		sdk.listSharedDirectory.mockResolvedValue({ dirs: [nested], files: [], role: annaRole })
+		await call("list_section", { section: "shared_with_me" })
+		await call("list_directory", { handle: "d1" })
+		at(`/shared-in/${taxes}/${quarter}`)
+		sdk.listSharedDirectory.mockClear()
+
+		const { description, handles } = await executor.context()
+
+		expect(description).toContain('screen: shared_with_me; current directory: "Q1" (handle d2)')
+		expect(handles).toContain("d2")
+
+		await call("list_directory", { handle: "d2" })
+
+		expect(sdk.listSharedDirectory).toHaveBeenCalledWith(quarter, { variant: "sharedIn", path: [taxes, quarter] })
+	})
+
 	it("lists the trash read-only and keeps every change away from what is in it", async () => {
 		sdk.listDirectory.mockImplementation((target: { kind: string }) =>
 			Promise.resolve(
@@ -1401,6 +1633,24 @@ describe("check and preview", () => {
 			title: "Draft message",
 			targets: [{ handle: "c1", name: "Team", recipients: ["anna@example.com", "mallory@example.com"] }],
 			text: { text: "Hi" }
+		})
+	})
+
+	it("names the chat on the card as it is now, with whoever joined since the model listed it", async () => {
+		const tool = assistantToolByName("draft_chat_message")
+
+		if (tool === undefined) {
+			throw new Error("no tool")
+		}
+
+		await call("list_chats", {})
+
+		const carol = { ...anna, userId: 4n, email: "carol@example.com", nickName: "Carol" }
+
+		queryClient.setQueryData(CHATS_QUERY_KEY, [{ ...chat, name: "Team 2", participants: [...chat.participants, carol] }])
+
+		await expect(executor.preview({ tool, args: { chat: "c1", text: "Hi" } })).resolves.toMatchObject({
+			targets: [{ handle: "c1", name: "Team 2", recipients: ["anna@example.com", "mallory@example.com", "carol@example.com"] }]
 		})
 	})
 

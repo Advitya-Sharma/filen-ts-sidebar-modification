@@ -163,7 +163,7 @@ function storedStep(step: TranscriptStep): StoredStep {
 }
 
 // A card can only be confirmed by the live turn that proposed it, so a saved one is never actionable: one
-// still waiting is stored as expired. One confirmed and still running keeps running after a switch, but
+// still waiting is stored as expired. One confirmed and still running runs to its end after a switch, but
 // its outcome reaches only the live transcript, so it is stored as interrupted, never as undone.
 function storedProposalStatus(status: ProposalStatus): Exclude<ProposalStatus, "pending" | "running"> {
 	switch (status) {

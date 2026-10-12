@@ -18,6 +18,8 @@ export interface DeviceProbe {
 	// which only a worker can see.
 	opfs: boolean
 	hardwareConcurrency: number
+	// navigator.maxTouchPoints, 0 where not exposed (workers).
+	maxTouchPoints: number
 	// navigator.deviceMemory: GiB rounded down to a power of two, capped at 8; null where not exposed.
 	deviceMemoryGiB: number | null
 	webgpu: {
@@ -74,9 +76,12 @@ export function recommendRuntime(probe: DeviceProbe): RuntimeRecommendation {
 		}
 	}
 
+	// iPadOS browsers send a Mac's user agent by default; no Mac reports touch points.
+	const os = agent.os === "macOS" && probe.maxTouchPoints > 1 ? "iPadOS" : agent.os
+
 	// Mobile tabs are killed far below what the model needs (iOS caps a tab well under 2 GB).
-	if (agent.os === "iOS" || agent.os === "iPadOS" || agent.os === "Android") {
-		return { supported: false, reason: "insufficient-memory", detail: `${agent.os} tab memory limits`, gpuCouldHelp: false }
+	if (os === "iOS" || os === "iPadOS" || os === "Android") {
+		return { supported: false, reason: "insufficient-memory", detail: `${os} tab memory limits`, gpuCouldHelp: false }
 	}
 
 	if (probe.deviceMemoryGiB !== null && probe.deviceMemoryGiB < MIN_DEVICE_MEMORY_GIB) {
@@ -183,6 +188,7 @@ export async function probeDevice({ gpu }: { gpu: boolean }): Promise<DeviceProb
 		},
 		opfs: typeof navigator.storage.getDirectory === "function",
 		hardwareConcurrency: navigator.hardwareConcurrency,
+		maxTouchPoints: (navigator as Partial<Navigator>).maxTouchPoints ?? 0,
 		deviceMemoryGiB: typeof memory === "number" ? memory : null,
 		webgpu: gpu && gpuConsidered(navigator.userAgent) ? await probeWebGpu() : null
 	}

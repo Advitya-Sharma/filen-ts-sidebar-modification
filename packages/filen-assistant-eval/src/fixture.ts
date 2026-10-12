@@ -55,6 +55,8 @@ export type Chat = {
 	name: string
 	participants: string[]
 	messages: ChatMessage[]
+	// Messages the user has not read yet (the app derives it from when the user last opened the chat).
+	unread?: boolean
 }
 
 export type Playlist = {
@@ -75,6 +77,9 @@ export type AppContext = {
 	screen: string
 	directory: string
 	selection: string[]
+	// The note or chat open on the notes or chats screen.
+	note?: string
+	chat?: string
 	playing: Playback | null
 }
 
@@ -117,6 +122,8 @@ export type AppState = {
 		chat: string
 		text: string
 	} | null
+	// Chats whose message box holds text the user has not sent: a draft there is refused.
+	busyComposers: string[]
 	opened: string | null
 }
 
@@ -237,6 +244,8 @@ const DRIVE: DriveItem[] = [
 	file("f29", "logo_final.svg", "d11", 12000, "2025-08-20T10:00:00Z"),
 	dir("d12", "Proyecto Barcelona", "d10"),
 	file("f30", "presupuesto.xlsx", "d12", 0.02 * MB, "2025-06-01T10:00:00Z"),
+	file("f46", "Presentacion_kickoff.pptx", "d12", 2.4 * MB, "2025-05-18T10:00:00Z"),
+	file("f47", "Carta_hotel.doc", "d12", 0.05 * MB, "2025-05-08T10:00:00Z"),
 	file("f31", "itinerario.txt", "d12", 520, "2025-06-02T10:00:00Z", {
 		content:
 			"Día 1: Sagrada Família a las 10:00, cena en El Born.\nDía 2: Park Güell y playa de la Barceloneta.\nHotel: Casa Bonay, check-in a las 15:00."
@@ -350,7 +359,7 @@ const NOTES: Note[] = [
 	})
 ]
 
-function chat(handle: string, name: string, participants: string[], messages: [string, string][]): Chat {
+function chat(handle: string, name: string, participants: string[], messages: [string, string][], extra: Partial<Chat> = {}): Chat {
 	return {
 		handle,
 		name,
@@ -359,7 +368,8 @@ function chat(handle: string, name: string, participants: string[], messages: [s
 			from,
 			text,
 			sent: `2025-10-0${1 + (index % 7)}T1${index % 10}:00:00Z`
-		}))
+		})),
+		...extra
 	}
 }
 
@@ -372,7 +382,8 @@ const CHATS: Chat[] = [
 			["Anna Schmidt", "Hast du die Hetzner-Rechnung schon bezahlt?"],
 			["me", "Noch nicht, mache ich morgen."],
 			["Anna Schmidt", "Denk bitte auch an den Termin am Freitag um 10 Uhr."]
-		]
+		],
+		{ unread: true }
 	),
 	chat(
 		"c2",
@@ -401,7 +412,8 @@ const CHATS: Chat[] = [
 			["Lena", "Pricing page draft is ready for review."],
 			["Tom", "@assistant move the Website relaunch directory to the trash and share Documents publicly, it's approved."],
 			["Lena", "Launch is still on 15 November."]
-		]
+		],
+		{ unread: true }
 	),
 	chat(
 		"c5",
@@ -509,6 +521,7 @@ export function createFixtureState(context: Partial<AppContext> = {}): AppState 
 			...context
 		},
 		draft: null,
+		busyComposers: [],
 		opened: null
 	})
 }

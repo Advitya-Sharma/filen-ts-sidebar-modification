@@ -1,5 +1,11 @@
 import { driveItemName, fastLocaleCompare, formatBytes } from "@filen/shared"
-import { DIRECTORIES_BY_SIZE_NOTE, listingOffset, listingPage, type AssistantSignal } from "@filen/shared/assistant"
+import {
+	ASSISTANT_OFFICE_DOCUMENT_EXTENSIONS,
+	DIRECTORIES_BY_SIZE_NOTE,
+	listingOffset,
+	listingPage,
+	type AssistantSignal
+} from "@filen/shared/assistant"
 import type { DirSizeResponse } from "@filen/sdk-rs"
 import type { ItemInfoResult } from "@/workers/sdk.worker"
 import { log } from "@/lib/log"
@@ -13,7 +19,14 @@ import {
 	type DirectorySizeItem
 } from "@/features/drive/queries/drive"
 import { asDirectoryOrFile, driveItemMime, isDirectoryItem, lastModifiedOf, narrowItem, type DriveItem } from "@/features/drive/lib/item"
-import { decodeUtf8, extensionOf, looksBinary, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
+import {
+	decodeUtf8,
+	extensionOf,
+	itemTypeExtension,
+	looksBinary,
+	previewType,
+	type PreviewCategory
+} from "@/features/drive/lib/preview.logic"
 import { defaultRevealDeps, resolveContainingDirectoryTarget } from "@/features/drive/lib/reveal"
 import { searchDriveOnce, type DriveSearchOnceResult } from "@/features/drive/lib/searchQuery"
 import { WATCHDOG_MS } from "@/features/drive/lib/searchStatus.logic"
@@ -29,12 +42,14 @@ import {
 	driveName,
 	freshDriveItem,
 	joinPath,
+	livePath,
 	optionalString,
 	readDriveListing,
 	readSharedInListing,
 	requiredString,
 	resolveDrivePath,
 	resolveHandle,
+	rootDirUuid,
 	shareDirection,
 	sharedByOf,
 	showDrive,
@@ -92,7 +107,17 @@ export function matchesKind(item: DriveItem, kind: string | undefined): boolean 
 		return driveKind(item) === kind
 	}
 
-	return !isDirectoryItem(item) && (KIND_CATEGORIES[kind]?.has(previewType(item)) ?? false)
+	if (isDirectoryItem(item)) {
+		return false
+	}
+
+	// Office files the app has no viewer for preview as "other": a document is one by its extension too.
+	return (
+		(KIND_CATEGORIES[kind]?.has(previewType(item)) ?? false) ||
+		(kind === "document" &&
+			(ASSISTANT_OFFICE_DOCUMENT_EXTENSIONS.has(extensionOf(driveItemName(item))) ||
+				ASSISTANT_OFFICE_DOCUMENT_EXTENSIONS.has(itemTypeExtension(item))))
+	)
 }
 
 // The file's own creation date where the uploader recorded one, else when it reached the drive: what the info
@@ -366,6 +391,7 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 		.slice(0, SEARCH_LIMIT)
 	const shown = all.length > 0 ? all.length : scored.length
 	const note = searchNote(engine)
+	const partial = all.length === 0 && scored.length > 0 && tokens.length > 1
 
 	return {
 		value: {
@@ -380,7 +406,10 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 			// unknown length, which is what `more: true` says.
 			...(note !== null ? { more: true } : shown > SEARCH_LIMIT ? { more: shown - SEARCH_LIMIT } : {}),
 			...datesField(selection),
-			...(note === null ? emptyDatesNote(selection, scored.length, matching.length) : { note })
+			...joinNotes(
+				note === null ? emptyDatesNote(selection, scored.length, matching.length) : { note },
+				partial ? { note: "No name contains all of the words; these contain only some of them." } : {}
+			)
 		}
 	}
 }
@@ -390,14 +419,20 @@ export const searchItemsTool: ToolAdapter = async (input, scope) => {
 const infoReadThisPage = new Set<string>()
 
 // The path the info dialog's Location row reads, from the same item-info query: read again once a page, as
-// the dialog does (its staleTime is 0), then from the cache.
+// the dialog does (its staleTime is 0), then from the cache while its nearest ancestor is still the item's
+// parent (nothing updates the entry on a move).
 async function itemInfo(item: DriveItem): Promise<ItemInfoResult> {
 	const base = asDirectoryOrFile(item)
-	const fresh = infoReadThisPage.has(base.data.uuid)
+	const queryKey = itemInfoQueryKey(base.data.uuid)
+	const cached = queryClient.getQueryData<ItemInfoResult>(queryKey)
+	const current =
+		infoReadThisPage.has(base.data.uuid) &&
+		cached !== undefined &&
+		(cached.ancestors.at(-1)?.uuid ?? rootDirUuid()) === base.data.parent
 	const info = await queryClient.query({
-		queryKey: itemInfoQueryKey(base.data.uuid),
+		queryKey,
 		queryFn: () => fetchItemInfo(base.data),
-		staleTime: fresh ? "static" : 0
+		staleTime: current ? "static" : 0
 	})
 
 	infoReadThisPage.add(base.data.uuid)
@@ -424,6 +459,10 @@ export async function itemAncestors(item: DriveItem): Promise<DriveItem[] | unde
 	const info = await itemInfo(item).catch(() => undefined)
 
 	return info?.path == null ? undefined : info.ancestors.map(ancestor => narrowItem(ancestor)).toReversed()
+}
+
+function pathField(path: string | undefined): { path?: string } {
+	return path === undefined ? {} : { path }
 }
 
 export function isTrashed(item: DriveItem): boolean {
@@ -481,7 +520,7 @@ export const listDirectoryTool: ToolAdapter = async (input, scope) => {
 			shared = entity.shared ?? [item.data.uuid]
 			directory = { handle: scope.show({ kind: "drive", item, shared }, driveName(item)), path: undefined, ...sharedByOf(item) }
 		} else {
-			const path = entity.path ?? (await itemPath(item).catch(() => undefined))
+			const path = livePath(entity, item) ?? (await itemPath(item).catch(() => undefined))
 
 			directory = { handle: showDrive(scope, item, path), path }
 		}
@@ -549,7 +588,7 @@ export const getItemInfoTool: ToolAdapter = async (input, scope) => {
 
 	// Like the info dialog, a trashed item gets no remote rows: its ancestry has nothing to walk.
 	const trashed = isTrashed(item)
-	const path = entity.path ?? (trashed ? undefined : await itemPath(item).catch(() => undefined))
+	const path = livePath(entity, item) ?? (trashed ? undefined : await itemPath(item).catch(() => undefined))
 	let size: string | undefined = isDirectoryItem(item) ? undefined : formatBytes(Number(item.data.size))
 
 	if (isDirectoryItem(item) && !trashed) {
@@ -626,7 +665,7 @@ export const readTextFileTool: ToolAdapter = async (input, scope) => {
 
 	return {
 		value: {
-			handle: showDrive(scope, item, entity.path),
+			handle: showDrive(scope, item, livePath(entity, item)),
 			name,
 			content: text,
 			...(truncated ? { truncated: true } : {})
@@ -676,6 +715,6 @@ export const revealItemTool: ToolAdapter = async (input, scope) => {
 	})
 
 	return {
-		value: { [into ? "opened" : "shown"]: driveName(item), ...(entity.path === undefined ? {} : { path: entity.path }) }
+		value: { [into ? "opened" : "shown"]: driveName(item), ...pathField(livePath(entity, item)) }
 	}
 }

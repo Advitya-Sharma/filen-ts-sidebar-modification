@@ -283,6 +283,49 @@ export type AssistantHistoryTurn = {
 	prompt?: string
 }
 
+// Prior exchanges kept for context, at most this many and about this many tokens: an exchange from long ago
+// rarely matters to the next request.
+const HISTORY_MAX = 12
+const HISTORY_MAX_TOKENS = 1800
+
+function exchangeTokens(exchange: AssistantHistoryTurn): number {
+	return estimateTokens(exchange.prompt ?? exchange.user) + estimateTokens(exchange.reply)
+}
+
+// The exchanges the next turns read, after one was added; the apps' sessions and the eval keep a conversation
+// through this. Within the budget they only ever grow, so each turn's prompt continues the last one and the
+// engine reads just the new exchange: it reuses a cached prompt only up to the first difference, and dropping
+// the oldest exchange would put that difference at the start. Over the budget they are cut at once to the
+// newest that fit half of it (always the last), so a full re-read comes every few turns instead of on each.
+export function windowHistory(history: readonly AssistantHistoryTurn[]): AssistantHistoryTurn[] {
+	const total = history.reduce((sum, exchange) => sum + exchangeTokens(exchange), 0)
+
+	if (history.length <= HISTORY_MAX && total <= HISTORY_MAX_TOKENS) {
+		return history.slice()
+	}
+
+	const kept: AssistantHistoryTurn[] = []
+	let tokens = 0
+
+	for (let index = history.length - 1; index >= 0 && kept.length < HISTORY_MAX / 2; index--) {
+		const exchange = history[index]
+
+		if (exchange === undefined) {
+			break
+		}
+
+		tokens += exchangeTokens(exchange)
+
+		if (kept.length > 0 && tokens > HISTORY_MAX_TOKENS / 2) {
+			break
+		}
+
+		kept.unshift(exchange)
+	}
+
+	return kept
+}
+
 export type AssistantTurnResult = {
 	reply: string
 	// The user's turn as the model read it, for AssistantHistoryTurn.prompt.
@@ -314,6 +357,8 @@ export class AssistantMessageTooLongError extends AssistantContextError {}
 
 export const MAX_STEPS = 5
 export const STEP_MAX_TOKENS = 384
+// The most a step that writes the user's own text may generate.
+export const STEP_TEXT_MAX_TOKENS = 1536
 export const QUARANTINE_MAX_TOKENS = 200
 const ROUTER_MAX_TOKENS = 8
 
@@ -360,9 +405,7 @@ function stripCallSyntax(text: string, toolNames: readonly string[]): string {
 
 const CONTENT_FIELDS = ["content", "messages"]
 
-const STUB_MARK = "Result dropped to fit the context"
-
-const STUB_TEXT = `${STUB_MARK}; call the tool again if it is still needed.`
+const STUB_TEXT = "Result dropped to fit the context; call the tool again if it is still needed."
 
 const CUT_CALL = "The call was cut off at the length limit; use a shorter text."
 
@@ -507,7 +550,9 @@ function messageTokens(message: AssistantChatMessage): number {
 }
 
 // Keeps the prompt inside the context: older conversation turns go first, then the oldest tool results
-// of this turn are replaced by a stub. The system prompt and the user's message always stay.
+// of this turn are replaced by a stub. The system prompt and the user's message always stay. Once any
+// history goes, the turn's first message becomes `fullPrompt` (the date and screen context it left out as
+// said by the earlier turns), since those turns may be the ones dropped.
 export function fitMessages({
 	system,
 	history,
@@ -515,6 +560,7 @@ export function fitMessages({
 	tools,
 	maxTokens,
 	contextTokens,
+	fullPrompt,
 	onStub
 }: {
 	system: AssistantChatMessage
@@ -523,6 +569,7 @@ export function fitMessages({
 	tools: readonly AssistantModelTool[]
 	maxTokens: number
 	contextTokens: number
+	fullPrompt?: string
 	// Told which tool results were replaced by the stub, so the call may run again.
 	onStub?: (toolCallId: string) => void
 }): AssistantChatMessage[] {
@@ -530,16 +577,21 @@ export function fitMessages({
 	let kept = history.slice()
 	const current = turn.slice()
 	const total = () => [...kept, ...current].reduce((sum, message) => sum + messageTokens(message), 0)
+	const first = current[0]
 
 	while (total() > budget && kept.length > 0) {
 		// History alternates user / assistant; drop whole exchanges.
 		kept = kept.slice(2)
+
+		if (fullPrompt !== undefined && first?.role === "user") {
+			current[0] = { ...first, content: fullPrompt }
+		}
 	}
 
 	for (let index = 0; index < current.length && total() > budget; index++) {
 		const message = current[index]
 
-		if (message?.role === "tool" && !message.content.includes(STUB_MARK)) {
+		if (message?.role === "tool") {
 			onStub?.(message.toolCallId)
 			current[index] = {
 				...message,
@@ -555,6 +607,11 @@ export function fitMessages({
 	}
 
 	return [system, ...kept, ...current]
+}
+
+// A consequential tool that writes free text the user dictates, which reaches other people (a draft).
+function writesText(tool: AssistantTool): boolean {
+	return isConsequentialTool(tool) && (tool.grounded.links ?? []).length > 0
 }
 
 function toModelTools(tools: readonly AssistantTool[]): AssistantModelTool[] {
@@ -794,13 +851,32 @@ export async function runAssistantTurn({
 			canTrash
 		})
 	}
-	const prompt = assistantUserPrompt({
+	const promptParts = {
 		message,
 		context: contextLine,
 		date: now === undefined ? null : assistantDateLine({ now, timeZone, weekStart }),
-		tools: callable.length === rendered.length ? null : callable.map(tool => tool.name),
+		tools: callable.length === rendered.length ? null : callable.map(tool => tool.name)
+	}
+	const prompt = assistantUserPrompt({
+		...promptParts,
 		earlier: history.flatMap(entry => (entry.prompt === undefined ? [] : [entry.prompt]))
 	})
+	// What the step reads once fitMessages drops the history that said the date and context already.
+	const fullPrompt = assistantUserPrompt({ ...promptParts, earlier: [] })
+	// A call that writes the user's text (a draft) may take as long as that text: dictated, it must arrive
+	// whole, not shortened to fit. Only within what the context leaves; decoding costs nothing more unless
+	// the model writes it.
+	const stepTokens = callable.some(writesText)
+		? STEP_MAX_TOKENS +
+			Math.max(
+				0,
+				Math.min(
+					STEP_TEXT_MAX_TOKENS - STEP_MAX_TOKENS,
+					estimateTokens(message),
+					model.contextTokens - fixedStepTokens(supports) - estimateTokens(message) - MESSAGE_OVERHEAD_TOKENS
+				)
+			)
+		: STEP_MAX_TOKENS
 	const past: AssistantChatMessage[] = history.flatMap(entry => [
 		{
 			role: "user" as const,
@@ -962,8 +1038,9 @@ export async function runAssistantTurn({
 					history: past,
 					turn,
 					tools,
-					maxTokens: STEP_MAX_TOKENS,
+					maxTokens: stepTokens,
 					contextTokens: model.contextTokens,
+					...(fullPrompt === prompt ? {} : { fullPrompt }),
 					onStub: forgetStubbed
 				}),
 				...(tools.length > 0
@@ -973,7 +1050,7 @@ export async function runAssistantTurn({
 						}
 					: {}),
 				slot: "main",
-				maxTokens: STEP_MAX_TOKENS
+				maxTokens: stepTokens
 			},
 			{
 				signal,
@@ -999,6 +1076,11 @@ export async function runAssistantTurn({
 
 					break
 				}
+			} else if (text.length === 0) {
+				// Nothing at all: the same request again gets the same nothing back, so the closing reply asks for text.
+				callOnly = true
+
+				break
 			} else if (malformed.test(text)) {
 				if (!retryUsed && step < MAX_STEPS) {
 					retryUsed = true
@@ -1274,7 +1356,9 @@ export async function runAssistantTurn({
 									tool.untrustedOutput === "content"
 										? await quarantine({
 												model,
-												request: message,
+												// With the user's previous message, as the router read it: a follow-up ("the first one", "yes")
+												// asks for what that one did.
+												request: [priorUser.at(-1), message].filter(text => text !== undefined).join("\n"),
 												// Sanitized first: the quarantine prompt is rendered and tokenized like any other.
 												result: sanitized(outcome.result),
 												signal,
@@ -1397,8 +1481,9 @@ export async function runAssistantTurn({
 								]
 							: turn,
 					tools,
-					maxTokens: STEP_MAX_TOKENS,
+					maxTokens: stepTokens,
 					contextTokens: model.contextTokens,
+					...(fullPrompt === prompt ? {} : { fullPrompt }),
 					onStub: forgetStubbed
 				}),
 				// Rendered, never called: the prompt then continues the last step's, which the engine has read.
@@ -1409,7 +1494,7 @@ export async function runAssistantTurn({
 						}
 					: {}),
 				slot: "main",
-				maxTokens: STEP_MAX_TOKENS
+				maxTokens: stepTokens
 			},
 			{
 				signal,
