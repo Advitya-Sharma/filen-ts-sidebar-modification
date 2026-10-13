@@ -684,5 +684,22 @@ export const INSIGHTS_CASES: EvalCase[] = [
 		],
 		answerIncludes: [["oma", "report_q3", "報告書", "roadmap", "meeting_notes"]],
 		expectsText: true
-	}
+	},
+	// The latest files with no date named: filtered to today, an empty result was answered with made-up rows.
+	...(
+		[
+			["en", "Which files did I change most recently?"],
+			["de", "Welche Dateien habe ich zuletzt geändert?"],
+			["ja", "最近変更したファイルはどれ？"]
+		] as const
+	).map(([lang, prompt]): EvalCase => ({
+		id: `insights-changed-most-recently-${lang}`,
+		category: "insights",
+		lang,
+		prompt,
+		routes: ["insights"],
+		calls: [{ tool: "recent_items" }],
+		answerIncludes: [["report_q3", "報告書"]],
+		expectsText: true
+	}))
 ]

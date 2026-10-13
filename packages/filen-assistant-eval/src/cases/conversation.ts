@@ -1,5 +1,6 @@
 import { LISTING_PAGE_ITEMS } from "@filen/shared/assistant"
 import type { AppState } from "../fixture"
+import { PLAYING } from "./contexts"
 import { BENIGN_READ_EXCLUDES } from "./single"
 import type { EvalCase, Language } from "./types"
 
@@ -559,7 +560,8 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		lang: "de",
 		prompt: "Summarize my note Groceries",
 		followUps: ["and in German?"],
-		routes: ["notes"],
+		// The last reply again in another language needs no tool.
+		routes: ["notes", "answer"],
 		answerIncludes: [["milch"], ["kaffee", "eier"]],
 		expectsText: true
 	},
@@ -569,10 +571,122 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		lang: "en",
 		prompt: "会議メモを要約して",
 		followUps: ["英語で？"],
-		routes: ["notes"],
+		routes: ["notes", "answer"],
 		answerIncludes: [["design"], ["friday"]],
 		expectsText: true
 	},
+	// Thanks, or a question about the reply just given, needs no tool: it is answered from the conversation.
+	...(
+		[
+			["en", "Summarize my note Groceries", "Thanks!"],
+			["de", "Fasse meine Notiz Einkaufsliste zusammen", "Danke!"],
+			["es", "Resume mi nota Groceries", "¡Gracias!"],
+			["fr", "Résume ma note Groceries", "Merci beaucoup !"],
+			["tr", "Groceries notumu özetle", "Teşekkürler!"],
+			["zh", "总结一下我的笔记 Groceries", "谢谢！"],
+			["ja", "Groceriesのメモを要約して", "ありがとう！"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-thanks-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["answer"],
+		lastTurnCallsNothing: true,
+		expectsText: true
+	})),
+	...(
+		[
+			["en", "Summarize my note Groceries", "What did you just say?", ["milk"]],
+			["de", "Fasse meine Notiz Einkaufsliste zusammen", "Was hast du gerade gesagt?", ["milch"]],
+			["es", "Resume mi nota Groceries", "¿Qué acabas de decir?", ["leche", "milk"]],
+			["fr", "Résume ma note Groceries", "Tu peux répéter ?", ["lait", "milk"]],
+			["zh", "总结一下我的笔记 Groceries", "你刚才说什么？", ["牛奶", "milk"]],
+			["ja", "Groceriesのメモを要約して", "今なんて言った？", ["牛乳", "ミルク", "milk"]]
+		] as const
+	).map(([lang, prompt, followUp, facts]): EvalCase => ({
+		id: `conversation-repeat-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["answer"],
+		lastTurnCallsNothing: true,
+		answerIncludes: [facts],
+		expectsText: true
+	})),
+	// Thanks after an action: nothing is called, and the music or screen stays as the action left it.
+	...(
+		[
+			["en", "Play my Workout playlist", "Thanks!"],
+			["de", "Spiel meine Workout-Playlist", "Super, danke dir!"],
+			["es", "Pon mi lista Workout", "¡Genial, gracias!"],
+			["ja", "Workoutのプレイリストを再生して", "ありがとう！"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-ack-play-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["answer"],
+		lastTurnCallsNothing: true,
+		state: [{ playing: "f18", paused: false }]
+	})),
+	...(
+		[
+			["en", "Pause the music", "cool"],
+			["fr", "Mets la musique en pause", "Parfait, merci"],
+			["zh", "暂停音乐", "好的，谢谢"],
+			["tr", "Müziği duraklat", "Tamam, sağ ol"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-ack-pause-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		context: PLAYING,
+		routes: ["answer"],
+		lastTurnCallsNothing: true,
+		state: [{ playing: "f17", paused: true }]
+	})),
+	...(
+		[
+			["en", "Open my trash", "ok thanks"],
+			["de", "Öffne meinen Papierkorb", "Okay, danke"],
+			["pt", "Abre a minha lixeira", "Valeu!"],
+			["ja", "ゴミ箱を開いて", "了解、ありがとう"]
+		] as const
+	).map(([lang, prompt, followUp]): EvalCase => ({
+		id: `conversation-ack-open-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		routes: ["answer"],
+		lastTurnCallsNothing: true,
+		state: [{ screen: "trash" }]
+	})),
+	// "Once more?" after a note summary, with music playing: about the reply, never the playback.
+	...(
+		[
+			["fr", "Résume ma note Groceries", "Encore une fois ?", ["lait", "milk"]],
+			["de", "Fasse meine Notiz Einkaufsliste zusammen", "Nochmal bitte", ["milch"]]
+		] as const
+	).map(([lang, prompt, followUp, facts]): EvalCase => ({
+		id: `conversation-once-more-${lang}`,
+		category: "multi_step",
+		lang,
+		prompt,
+		followUps: [followUp],
+		context: PLAYING,
+		routes: ["answer", "notes"],
+		answerIncludes: [facts],
+		expectsText: true,
+		state: [{ playing: "f17", paused: false }]
+	})),
 	{
 		id: "conversation-clarified-extraction-de",
 		category: "multi_step",
@@ -686,6 +800,8 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		setup: addOffsite,
 		routes: ["navigation", "trash"],
 		calls: [{ tool: "open_route", args: { route: "trash" } }],
+		// Items earlier turns named, or the trash's own, passed off as what the opened screen shows: nothing read it.
+		answerExcludes: ["setup_installer", "tax_notes", "readme", "shopping list", "old_draft", "bewerbung_alt", "screenshots 2023"],
 		state: [{ screen: "trash" }, { draft: "c40" }]
 	}
 ]

@@ -183,6 +183,8 @@ export type Transcript = {
 	answer: string
 	// Text written alongside tool calls: the app shows each as a reply of its own. Absent in older records.
 	replies?: string[]
+	// Calls the last turn of a conversation made. Absent in older records and for one-turn runs.
+	lastTurnCalls?: number
 	invalidOutputs: number
 	unrecovered: boolean
 	steps: number

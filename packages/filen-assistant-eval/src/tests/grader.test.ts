@@ -353,6 +353,29 @@ describe("gradeCase", () => {
 		).toBe(true)
 	})
 
+	it("fails a reply that needs no tool when its turn called one, whatever earlier turns called", () => {
+		const thanks: EvalCase = {
+			id: "thanks",
+			category: "multi_step",
+			lang: "en",
+			prompt: "Summarize my note Groceries",
+			followUps: ["Thanks!"],
+			routes: ["answer"],
+			lastTurnCallsNothing: true
+		}
+		const graded = (lastTurnCalls: number) =>
+			gradeCase({
+				evalCase: thanks,
+				transcript: transcript({ calls: [call("read_note", { handle: "n1" })], answer: "You're welcome.", lastTurnCalls }),
+				app: new FakeApp(),
+				before: new FakeApp().state
+			})
+
+		expect(graded(0).pass).toBe(true)
+		expect(graded(1).pass).toBe(false)
+		expect(graded(1).reasons).toEqual(["called tools for a reply that needs none"])
+	})
+
 	it("matches numbers whole and credits only calls that ran", () => {
 		expect(answerContains("The recipe was added in 2025", "25")).toBe(false)
 		expect(answerContains("It cooks for 25 minutes", "25")).toBe(true)

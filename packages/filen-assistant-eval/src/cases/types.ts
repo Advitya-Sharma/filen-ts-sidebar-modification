@@ -142,6 +142,8 @@ export type EvalCase = {
 	answerExcludes?: readonly string[]
 	// The case expects a text reply whose language is graded.
 	expectsText?: boolean
+	// The last message needs no tool (thanks, "what did you just say?"): its turn may call none.
+	lastTurnCallsNothing?: boolean
 	// Set by the shipped preset on a case whose write the app does not run: graded on its route and on changing
 	// nothing, and reported apart from the pass rate.
 	unavailableWrite?: boolean

@@ -10,7 +10,9 @@ import {
 	listingPage,
 	listRest,
 	MAX_ARRAY_ITEMS,
+	OUTSIDE_DATES_ITEMS,
 	resolveDateFilter,
+	screenOpened,
 	type AssistantPeriodFilter
 } from "@filen/shared/assistant"
 import { createFixtureState, type AppContext, type AppState, type DriveItem, type Note, type NoteType } from "./fixture"
@@ -1011,27 +1013,38 @@ export class FakeApp {
 					selection.field
 				)
 				const reachesBack = recents.length > 0 && selection.bounds !== null && selection.bounds.start < oldest
+				// Like the app: the latest files, when the dates left none.
+				const newest =
+					selection.range !== null && kept.length === 0 && sort === "newest"
+						? this.sortListing(ofKind, "newest", selection.field).slice(0, OUTSIDE_DATES_ITEMS)
+						: []
+				// Like the app: Recents rows carry no location; a path only where a listing the app holds has the
+				// item's directory (here: one listed earlier in the conversation).
+				const row = (item: DriveItem) => {
+					const listed = item.parent !== null && this.exposed.has(item.parent)
+					const { path, ...summary } = this.summary(item)
+
+					return {
+						...summary,
+						...(listed
+							? {
+									path
+								}
+							: {}),
+						...this.listingFields(item, {
+							date: selection.field,
+							size: sort === "largest" || sort === "smallest"
+						})
+					}
+				}
 
 				return {
-					// Like the app: Recents rows carry no location; a path only where a listing the app holds has the
-					// item's directory (here: one listed earlier in the conversation).
-					items: kept.slice(0, RECENT_LIMIT).map(item => {
-						const listed = item.parent !== null && this.exposed.has(item.parent)
-						const { path, ...summary } = this.summary(item)
-
-						return {
-							...summary,
-							...(listed
-								? {
-										path
-									}
-								: {}),
-							...this.listingFields(item, {
-								date: selection.field,
-								size: sort === "largest" || sort === "smallest"
-							})
-						}
-					}),
+					items: kept.slice(0, RECENT_LIMIT).map(row),
+					...(newest.length === 0
+						? {}
+						: {
+								newest: newest.map(row)
+							}),
 					...listRest(kept.length, RECENT_LIMIT),
 					...(selection.range === null
 						? {}
@@ -1903,9 +1916,7 @@ export class FakeApp {
 				this.state.context.screen = str("route")
 				this.state.opened = null
 
-				return {
-					opened: str("route")
-				}
+				return screenOpened(str("route"))
 			}
 
 			default: {

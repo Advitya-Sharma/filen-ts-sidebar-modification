@@ -16,6 +16,8 @@ import {
 } from "@filen/shared/assistant"
 import {
 	LlamaChat,
+	LlamaText,
+	TokenBias,
 	type ChatHistoryItem,
 	type ChatModelFunctionCall,
 	type ChatModelFunctions,
@@ -23,7 +25,8 @@ import {
 	type ChatWrapper,
 	type Llama,
 	type LlamaContextSequence,
-	type LlamaGrammar
+	type LlamaGrammar,
+	type LlamaModel
 } from "node-llama-cpp"
 import type { CallRecord, CallStatus, Timings, Transcript } from "./agent"
 import type { EvalCase } from "./cases/types"
@@ -118,6 +121,23 @@ export function toHistory(messages: readonly AssistantChatMessage[], parallel: b
 	return history
 }
 
+// A request that must call: the web worker's engine opens the reply with the template's call opener and
+// constrains the rest to a call (tool_choice "required"). node-llama-cpp has neither, so the opener is made
+// the first token and the model writes the call itself, in the tokens it would have chosen ("=list" is one
+// token; an injected "<function=" would split it and change which tool the model picks).
+const OPENER_LOGIT = 100
+
+function openerBias(model: LlamaModel, wrapper: ChatWrapper): TokenBias {
+	const opener = LlamaText(wrapper.settings.functions.call.prefix).tokenize(model.tokenizer, "trimLeadingSpace")[0]
+
+	// A token of its own, as Qwen's "<tool_call>": a plain first character would open far more than calls.
+	if (opener === undefined || model.detokenize([opener], true).length < 2) {
+		throw new Error(`${wrapper.wrapperName} opens calls without a token of their own; a required call needs its own handling`)
+	}
+
+	return new TokenBias(model.tokenizer).set(opener, { logit: OPENER_LOGIT })
+}
+
 // AssistantModel over node-llama-cpp: one sequence per kind of request, as the web worker keeps one slot
 // per kind, and the same measurements agent.ts takes.
 export class LlamaAssistantModel implements AssistantModel {
@@ -138,6 +158,7 @@ export class LlamaAssistantModel implements AssistantModel {
 	private readonly runtime: LoopRuntime
 	private readonly wrapper: ChatWrapper
 	private readonly chats: Record<AssistantGenerateRequest["slot"], LlamaChat>
+	private opener: TokenBias | undefined
 	private readonly grammars = new Map<string, Promise<LlamaGrammar>>()
 
 	constructor(runtime: LoopRuntime) {
@@ -177,12 +198,18 @@ export class LlamaAssistantModel implements AssistantModel {
 		request: AssistantGenerateRequest,
 		{ signal, onText }: { signal: AssistantSignal; onText?: (text: string) => void }
 	): Promise<AssistantGenerateResult> {
-		const chat = this.chats[request.slot]
-		const sequence = chat.sequence
 		const functions: ChatModelFunctions | undefined =
 			request.tools === undefined || request.tools.length === 0
 				? undefined
 				: Object.fromEntries(request.tools.map(tool => [tool.name, { description: tool.description, params: tool.parameters }]))
+		const chat = this.chats[request.slot]
+		const sequence = chat.sequence
+		// Only the first token is the opener's; the rest is sampled as usual.
+		let opening =
+			request.toolChoice === "required" && functions !== undefined
+				? (this.opener ??= openerBias(sequence.model, this.wrapper))
+				: undefined
+		const unbiased = new TokenBias(sequence.model.tokenizer)
 		const grammar = request.grammar === undefined ? undefined : await this.grammar(request.grammar)
 		const inputBefore = sequence.tokenMeter.usedInputTokens
 		const outputBefore = sequence.tokenMeter.usedOutputTokens
@@ -198,6 +225,17 @@ export class LlamaAssistantModel implements AssistantModel {
 			maxTokens: request.maxTokens,
 			budgets: { thoughtTokens: 0 },
 			...(signal instanceof AbortSignal ? { signal } : {}),
+			...(opening === undefined
+				? {}
+				: {
+						tokenBias: () => {
+							const bias = opening ?? unbiased
+
+							opening = undefined
+
+							return bias
+						}
+					}),
 			onToken: onFirst,
 			onTextChunk: (chunk: string) => {
 				text += chunk
@@ -430,6 +468,7 @@ export async function runLoopTurns({
 		answer: last?.reply ?? "",
 		// An earlier turn's answer was shown to the user as well.
 		replies: [...replies, ...answers.slice(0, -1).filter(answer => answer.length > 0)],
+		lastTurnCalls: last?.calls.length ?? 0,
 		invalidOutputs: calls.filter(call => call.status === "invalid").length,
 		unrecovered: last?.unrecovered ?? false,
 		steps: model.mainGenerations,

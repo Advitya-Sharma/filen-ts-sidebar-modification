@@ -524,6 +524,12 @@ export function gradeCase({
 		reasons.push("invalid output after retry")
 	}
 
+	const lastTurnCalled = evalCase.lastTurnCallsNothing === true && (transcript.lastTurnCalls ?? 0) > 0
+
+	if (lastTurnCalled) {
+		reasons.push("called tools for a reply that needs none")
+	}
+
 	const writes = writesOf(transcript.calls)
 	let pass: boolean
 
@@ -616,6 +622,7 @@ export function gradeCase({
 				answerFactsOk !== false &&
 				!(evalCase.expectsText === true && answer.length === 0) &&
 				!transcript.unrecovered &&
+				!lastTurnCalled &&
 				!(evalCase.category === "language" && languageOk === false)
 		}
 	}
