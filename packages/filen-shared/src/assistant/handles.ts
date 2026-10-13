@@ -30,6 +30,16 @@ const IN_BRACKET_AFTER = /^[^()（）[\]\n]*[)）\]]/u
 // Where a list row starts: "- ", "1. ", "* ".
 const ROW_START = /(?:^|\n)[ \t]*(?:[-*•+]|\d{1,3}[.)])?[ \t]*$/u
 
+// LABEL_GAP within one line.
+const ROW_LABEL_GAP = /^[ \t]*(?:[:：.=]|[-–—](?=[ \t]))?[ \t]*/u
+
+// A list row: its marker, then what it lists.
+const ROW = /^[ \t]*(?:[-*•+]|\d{1,3}[.)])[ \t]+(.*)$/u
+
+// What a row holds besides made-up handles when it lists nothing: brackets, markdown, punctuation and
+// bracketed placeholders ("- [file] (f1)").
+const EMPTY_ROW = /^(?:[\s()（）*_\x60:：,;.-]|\[[^\]\n]*\])*$/u
+
 // Marks a dropped handle until the brackets and separators around it are tidied.
 const DROPPED = "\uE000"
 
@@ -63,15 +73,41 @@ function endsWithName(text: string, name: string): boolean {
 // (f3)", "- f3: CV.pdf", "(handle: f3)"); bracketed, labelled, as a list row's label, in markdown or as a
 // link target it becomes the name. A handle in running prose stays: there a letter and a number are as
 // likely a room, a priority or a key ("c12", "p1", "F1") as a reference. So does a `foreign` token, one the
-// user typed or content read this turn holds, unless its item's name stands right beside it.
+// user typed or content read this turn holds, unless its item's name stands right beside it. An `invented`
+// token, one no result gave out, names nothing: where a handle stands as a reference it goes, and a list row
+// it alone filled goes with it.
 export function replyWithoutHandles(
 	reply: string,
 	name: (handle: string) => string | undefined,
-	{ foreign = new Set<string>() }: { foreign?: ReadonlySet<string> } = {}
+	{ foreign = new Set<string>(), invented = () => false }: { foreign?: ReadonlySet<string>; invented?: (handle: string) => boolean } = {}
 ): string {
-	const text = reply.replace(HANDLE_LINK, (whole, label: string, handle: string) =>
-		foreign.has(handle) || usable(name(handle)) === undefined ? whole : label
-	)
+	const madeUp = (handle: string) => !foreign.has(handle) && usable(name(handle)) === undefined && invented(handle)
+	const text = reply
+		.replace(HANDLE_LINK, (whole, label: string, handle: string) =>
+			foreign.has(handle) || (usable(name(handle)) === undefined && !madeUp(handle)) ? whole : label
+		)
+		.split("\n")
+		.filter(line => {
+			const row = ROW.exec(line)
+
+			if (row === null) {
+				return true
+			}
+
+			let dropped = false
+			const rest = (row[1] ?? "").replace(TOKEN, (whole, _label, _open, handle: string) => {
+				if (!madeUp(handle)) {
+					return whole
+				}
+
+				dropped = true
+
+				return ""
+			})
+
+			return !dropped || !EMPTY_ROW.test(rest)
+		})
+		.join("\n")
 	let shown = ""
 	let cursor = 0
 
@@ -84,14 +120,28 @@ export function replyWithoutHandles(
 		}
 
 		const item = usable(name(handle))
-
-		if (item === undefined) {
-			continue
-		}
-
 		const end = start + whole.length
 		const before = shown + text.slice(cursor, start)
 		const after = text.slice(end)
+		const inBracket = IN_BRACKET_BEFORE.exec(before)
+		const enclosed = inBracket !== null && IN_BRACKET_AFTER.test(after)
+		const reference = enclosed || label !== undefined || (open !== "" && open === close) || ROW_START.test(before)
+
+		if (item === undefined) {
+			if (reference && madeUp(handle)) {
+				if (ROW_START.test(before)) {
+					// "- f1: 2 MB" keeps "- 2 MB".
+					shown = before
+					cursor = end + (ROW_LABEL_GAP.exec(after)?.[0].length ?? 0)
+				} else {
+					shown = before + DROPPED
+					cursor = end
+				}
+			}
+
+			continue
+		}
+
 		const named = escape(item)
 		const wrapped = open === close ? `${open}${item}${close}` : item
 		const gap = LABEL_GAP.exec(after)?.[0] ?? ""
@@ -99,11 +149,8 @@ export function replyWithoutHandles(
 		const described = new RegExp(String.raw`^\s*([(（][^()（）\n]{1,24}[)）])\s*[:：]?\s*(${QUOTES}${named}${QUOTES})`, "iu").exec(
 			after
 		)
-		const inBracket = IN_BRACKET_BEFORE.exec(before)
-		const enclosed = inBracket !== null && IN_BRACKET_AFTER.test(after)
 		// The name before the handle, or before the brackets it stands in.
 		const nameBefore = endsWithName(inBracket !== null && enclosed ? before.slice(0, inBracket.index) : before, item)
-		const reference = enclosed || label !== undefined || (open !== "" && open === close) || ROW_START.test(before)
 		let replacement: string | null = null
 
 		if (new RegExp(String.raw`^${QUOTES}${named}`, "iu").test(after.slice(gap.length))) {

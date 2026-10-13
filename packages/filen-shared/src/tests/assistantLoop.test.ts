@@ -105,16 +105,27 @@ class ScriptedModel implements AssistantModel {
 			return Promise.resolve({ content: this.extract, toolCalls: [] })
 		}
 
+		const next = this.steps[0]
 		const step = this.steps.shift() ?? "Done."
+		const result =
+			typeof step === "string"
+				? { content: step, toolCalls: [] }
+				: typeof step === "function"
+					? step(request)
+					: { content: "", toolCalls: step }
+
+		// No call where one was required is what an engine that could not force one writes: the same as unforced,
+		// so the step is not used up.
+		if (request.toolChoice === "required" && result.toolCalls.length === 0 && next !== undefined) {
+			this.steps.unshift(next)
+		}
 
 		if (typeof step === "string") {
 			options.onText?.(step.slice(0, Math.ceil(step.length / 2)))
 			options.onText?.(step)
 
-			return Promise.resolve({ content: step, toolCalls: [] })
+			return Promise.resolve(result)
 		}
-
-		const result = typeof step === "function" ? step(request) : { content: "", toolCalls: step }
 
 		if (this.reports) {
 			for (const [index, toolCall] of result.toolCalls.entries()) {
@@ -436,6 +447,119 @@ describe("runAssistantTurn", () => {
 		expect(result.reply).toBe("Knead the dough.")
 	})
 
+	it("makes a lookup's first step call, and drops what it wrote before the call unseen", async () => {
+		const executor = new FakeExecutor({
+			items: [],
+			results: { get_storage: () => ({ used: "3.2 GiB", total: "10 GiB" }) }
+		})
+		const model = new ScriptedModel({
+			route: "insights read",
+			steps: [
+				() => ({ content: "You are using 1.2 GB of 10 GB.", toolCalls: call("get_storage", {}) }),
+				"You are using 3.2 GiB of 10 GiB."
+			]
+		})
+		const { result, events } = await turn({ model, executor, message: "How much storage am I using?" })
+
+		expect(model.requests[1]?.toolChoice).toBe("required")
+		// Later steps stay free.
+		expect(model.requests[2]?.toolChoice).toBeUndefined()
+		expect(executor.executed.map(entry => entry.tool)).toEqual(["get_storage"])
+		expect(events.some(event => event.type === "reply" && event.text.includes("1.2 GB"))).toBe(false)
+		expect(JSON.stringify(model.requests[2]?.messages)).not.toContain("1.2 GB")
+		expect(result.reply).toBe("You are using 3.2 GiB of 10 GiB.")
+	})
+
+	it("leaves a change request and the answer route free to reply without calling", async () => {
+		const executor = new FakeExecutor({ items: [] })
+		const change = new ScriptedModel({ route: "chats change", steps: ["What should the message say?"] })
+		const answer = new ScriptedModel({ route: "answer", steps: ["You're welcome."] })
+
+		await turn({ model: change, executor, message: "Write to Anna" })
+		await turn({ model: answer, executor, message: "Thanks!" })
+
+		expect(change.requests[1]?.tools?.length).toBeGreaterThan(0)
+		expect(change.requests[1]?.toolChoice).toBeUndefined()
+		expect(answer.requests[1]?.toolChoice).toBeUndefined()
+	})
+
+	it("forces no call when a lookup has nothing it may call", async () => {
+		const executor = new FakeExecutor({ items: [] })
+		// Read intent on a group whose remaining tools all change data.
+		executor.supports = tool => tool.name !== "search_items" && tool.name !== "list_directory"
+		const model = new ScriptedModel({ route: "organize read", steps: ["I can't move files here."] })
+
+		await turn({ model, executor, message: "Where would my reports go?" })
+
+		expect(model.requests[1]?.toolChoice).toBe("none")
+	})
+
+	it("forces no call on music and navigation, whose read requests act", async () => {
+		const executor = new FakeExecutor({ items: [] })
+		const audio = new ScriptedModel({ route: "audio read", steps: ["You're welcome!"] })
+		const navigation = new ScriptedModel({ route: "navigation read", steps: ["Glad to help."] })
+		const thanks = await turn({ model: audio, executor, message: "Thanks, that is exactly the playlist I wanted to hear!" })
+
+		await turn({ model: navigation, executor, message: "ok thanks" })
+
+		expect(audio.requests[1]?.toolChoice).toBeUndefined()
+		expect(navigation.requests[1]?.toolChoice).toBeUndefined()
+		expect(thanks.result.reply).toBe("You're welcome!")
+		expect(executor.executed).toHaveLength(0)
+	})
+
+	it("writes a forced step again unforced when it opens or changes instead of reading, and runs only what the guard allows", async () => {
+		const executor = new FakeExecutor({ items: [] })
+		const opening = new ScriptedModel({
+			route: "files read",
+			steps: [call("reveal_item", { handle: "d0" }), call("reveal_item", { handle: "d0" }), "Shown."],
+			reports: true
+		})
+		const opened = await turn({ model: opening, executor, message: "Show me this directory" })
+
+		expect(opening.requests[1]?.toolChoice).toBe("required")
+		expect(opening.requests[2]?.toolChoice).toBeUndefined()
+		expect(executor.executed.map(entry => entry.tool)).toEqual(["reveal_item"])
+		// The forced call never showed on the step list.
+		expect(opened.events.filter(event => event.type === "call" && event.call.status === "preparing")).toHaveLength(1)
+		expect(opened.events.some(event => event.type === "call" && event.call.status === "discarded")).toBe(false)
+
+		const changing = new ScriptedModel({
+			route: "notes read",
+			steps: [call("create_note", { title: "plan" }), call("create_note", { title: "plan" }), "I can't create notes here."]
+		})
+		const { result, confirmations } = await turn({ model: changing, executor, message: "What does my plan note say?" })
+
+		expect(result.calls.map(record => `${record.tool}:${record.status}`)).toEqual(["create_note:blocked"])
+		expect(executor.executed.map(entry => entry.tool)).toEqual(["reveal_item"])
+		expect(confirmations).toHaveLength(0)
+	})
+
+	it("forces no call on a follow-up routed beside the previous message, and does on one routed alone", async () => {
+		const executor = new FakeExecutor({ items: [], results: { list_section: () => ({ items: [] }) } })
+		const history = [{ user: "Open my trash", reply: "I've opened your trash." }]
+		const thanks = new ScriptedModel({ route: "trash read", steps: ["You're welcome!"] })
+		const lookup = new ScriptedModel({ route: "trash read", steps: [call("list_section", { section: "trash" }), "It is empty."] })
+
+		await turn({ model: thanks, executor, message: "ok thanks", history })
+		await turn({ model: lookup, executor, message: "Which files are in my trash right now?", history })
+
+		expect(thanks.requests[0]?.messages[1]?.content).toContain("Open my trash")
+		expect(thanks.requests[1]?.toolChoice).toBeUndefined()
+		expect(lookup.requests[0]?.messages[1]?.content).not.toContain("Open my trash")
+		expect(lookup.requests[1]?.toolChoice).toBe("required")
+	})
+
+	it("writes a forced step that called nothing again unforced, streaming its reply", async () => {
+		const executor = new FakeExecutor({ items: [] })
+		const model = new ScriptedModel({ route: "notes read", steps: ["You have no notes about that."] })
+		const { result, events } = await turn({ model, executor, message: "What does my plan note say?" })
+
+		expect(model.requests.map(request => request.toolChoice)).toEqual([undefined, "required", undefined])
+		expect(events.filter(event => event.type === "reply" && !event.final).length).toBeGreaterThan(0)
+		expect(result.reply).toBe("You have no notes about that.")
+	})
+
 	// An engine parses no calls where none may be made: they come back as text, or as nothing.
 	it.each([
 		["call markup", "<tool_call>\n{\"name\": \"search_items\", \"arguments\": {\"query\": \"bread\"}}\n</tool_call>"],
@@ -484,7 +608,8 @@ describe("runAssistantTurn", () => {
 		})
 		const { result, events } = await turn({ model, executor, message: "What's in Documents?" })
 
-		expect(model.requests[2]?.messages.at(-1)?.content).toBe(ASSISTANT_MALFORMED_RETRY)
+		// The forced first step wrote the same text, and was written again unforced.
+		expect(model.requests[3]?.messages.at(-1)?.content).toBe(ASSISTANT_MALFORMED_RETRY)
 		expect(events.some(event => event.type === "reply" && event.text.includes("list_section"))).toBe(false)
 		expect(result.reply).toBe("No favorites.")
 	})
@@ -492,7 +617,11 @@ describe("runAssistantTurn", () => {
 	it("renders the same tools within a route family and names the ones the request may call", async () => {
 		const executor = new FakeExecutor({ items: [], results: { search_items: () => ({ items: [] }) } })
 		executor.supports = tool => tool.name !== "set_favorite"
-		const files = new ScriptedModel({ route: "files read", steps: [call("list_section", { section: "favorites" }), "Nothing."] })
+		// The forced first step is written again for a call outside the lookups; the same call then is refused.
+		const files = new ScriptedModel({
+			route: "files read",
+			steps: [call("list_section", { section: "favorites" }), call("list_section", { section: "favorites" }), "Nothing."]
+		})
 		const shared = new ScriptedModel({ route: "shared read", steps: ["None."] })
 		const notes = new ScriptedModel({ route: "notes read", steps: ["None."] })
 		const first = await turn({ model: files, executor, message: "What's in Documents?" })

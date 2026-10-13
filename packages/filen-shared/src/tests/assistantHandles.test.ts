@@ -81,6 +81,31 @@ describe("replyWithoutHandles", () => {
 		// A one-character name says nothing in place of the handle.
 		expect(shown("It is in d0.")).toBe("It is in d0.")
 	})
+
+	// What the model wrote with handles no result gave out: "f" handles were, so "f7" is one made up.
+	const invented = (reply: string, foreign: readonly string[] = []) =>
+		replyWithoutHandles(reply, handle => NAMES[handle], {
+			foreign: new Set(foreign),
+			invented: handle => handle.startsWith("f")
+		})
+
+	it("drops the list rows only a made-up handle filled, and keeps the rows that name something", () => {
+		expect(
+			invented("Here are the most recently changed files:\n\n- [file] (f7)\n- [file] (f8)\n- [file] (f3)\n- **f9**\n\nAnything else?")
+		).toBe("Here are the most recently changed files:\n\n- [file] (CV.pdf)\n\nAnything else?")
+		expect(invented("1. Report.pdf (f7)\n2. `f8`: 2 MB\n3. [Budget](f9)")).toBe("1. Report.pdf\n2. 2 MB\n3. Budget")
+	})
+
+	it("drops a made-up handle where a handle stands as a reference, and leaves it in prose", () => {
+		expect(invented("The newest is (f7), then CV.pdf (handle: f8).")).toBe("The newest is, then CV.pdf.")
+		expect(invented("Press f7 for help.")).toBe("Press f7 for help.")
+		// Of a kind no result gave out.
+		expect(invented("- [note] (n9)")).toBe("- [note] (n9)")
+	})
+
+	it("keeps a made-up-looking token the user typed or read content holds", () => {
+		expect(invented("- [file] (f7)\n- f8: fix login", ["f7", "f8"])).toBe("- [file] (f7)\n- f8: fix login")
+	})
 })
 
 describe("settledReply", () => {

@@ -1180,7 +1180,8 @@ describe("open_route", () => {
 		const result = await call("open_route", { route: "contacts" })
 
 		expect(router.navigate).toHaveBeenCalledWith({ to: "/contacts", search: { section: "all" } })
-		expect(result).toMatchObject({ ok: true })
+		// Says it read nothing there, or the model lists what it imagines the screen shows.
+		expect(result).toMatchObject({ ok: true, result: { opened: "contacts", contentsRead: false } })
 	})
 
 	it("says so when a section does not exist on the web", async () => {
@@ -1355,12 +1356,19 @@ describe("date filters and insights", () => {
 		const lastYear = await call("recent_items", { period: "last_year" })
 
 		// Recents' window is not known, so a period reaching past its oldest upload says what the list holds, and
-		// the empty-filter note stays.
+		// the empty-filter note stays. The latest files stand in for the ones the dates left out.
 		expect(json(lastYear)).toEqual({
 			items: [],
+			newest: [
+				{ handle: "f3", name: "memo.txt", kind: "file", path: "/Docs/memo.txt", uploaded: "2025-10-07" },
+				{ handle: "f1", name: "photo.jpg", kind: "file", path: "/Docs/photo.jpg", uploaded: "2025-10-06" },
+				{ handle: "f2", name: "report.pdf", kind: "file", path: "/Docs/report.pdf", uploaded: "2025-10-01" }
+			],
 			dates: "uploaded 2024-01-01 to 2024-12-31",
 			note: "Nothing is dated 2024-01-01 to 2024-12-31; 3 items are outside those dates. Recents reaches back to uploads of 2025-10-01; a file uploaded earlier would not be listed here."
 		})
+		// Only a newest-first listing shows the latest instead.
+		expect(json(await call("recent_items", { period: "last_year", sort: "largest" }))["newest"]).toBeUndefined()
 		// A period inside what Recents holds gets no such note.
 		expect(json(await call("recent_items", { period: "this_week" }))["note"]).toBeUndefined()
 		// One read serves the turn's calls.

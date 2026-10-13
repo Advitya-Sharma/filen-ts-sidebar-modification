@@ -1,4 +1,4 @@
-import { listRest } from "@filen/shared/assistant"
+import { listRest, OUTSIDE_DATES_ITEMS } from "@filen/shared/assistant"
 import { storageSummary } from "@filen/shared"
 import { queryClient } from "@/queries/client"
 import { ACCOUNT_QUERY_KEY, ACCOUNT_STALE_TIME, fetchAccount } from "@/queries/account"
@@ -51,7 +51,12 @@ export const recentItemsTool: ToolAdapter = async (input, scope) => {
 
 	const items = sortListing(kept, sort, selection.field, sizes.sizes)
 	const shown = items.slice(0, RECENT_LIMIT)
-	const wanted = new Set(shown.map(item => item.data.uuid))
+	// The latest files, when the dates left none (OUTSIDE_DATES_ITEMS).
+	const newest =
+		selection.range !== null && items.length === 0 && sort === "newest"
+			? sortListing(ofKind, "newest", selection.field).slice(0, OUTSIDE_DATES_ITEMS)
+			: []
+	const wanted = new Set([...shown, ...newest].map(item => item.data.uuid))
 	const paths = new Map<string, string | undefined>()
 
 	if (wanted.size > 0) {
@@ -68,19 +73,22 @@ export const recentItemsTool: ToolAdapter = async (input, scope) => {
 			? { note: `Recents reaches back to uploads of ${isoDate(oldest)}; a file uploaded earlier would not be listed here.` }
 			: {}
 
+	const row = (item: (typeof recents)[number]) => {
+		const path = paths.get(item.data.uuid)
+
+		return {
+			handle: showDrive(scope, item, path),
+			name: driveName(item),
+			kind: driveKind(item),
+			...(path === undefined ? {} : { path }),
+			...listingFields(item, { date: selection.field, size: bySize, directorySizes: sizes.sizes })
+		}
+	}
+
 	return {
 		value: {
-			items: shown.map(item => {
-				const path = paths.get(item.data.uuid)
-
-				return {
-					handle: showDrive(scope, item, path),
-					name: driveName(item),
-					kind: driveKind(item),
-					...(path === undefined ? {} : { path }),
-					...listingFields(item, { date: selection.field, size: bySize, directorySizes: sizes.sizes })
-				}
-			}),
+			items: shown.map(row),
+			...(newest.length === 0 ? {} : { newest: newest.map(row) }),
 			...listRest(items.length, RECENT_LIMIT),
 			...datesField(selection),
 			...joinNotes(emptyDatesNote(selection, items.length, ofKind.length), reach, unknownSizesNote(sizes.unknown))

@@ -139,6 +139,13 @@ export function listRest(count: number, limit: number = MAX_ARRAY_ITEMS): { tota
 	return count > limit ? { total: count, more: count - limit } : {}
 }
 
+// What opening a screen (open_route) returns. Told only that it opened, a small model went on to list what the
+// screen shows, made up from earlier results (drive files as the trash's contents). Said without words, which
+// pulled replies in other languages into English.
+export function screenOpened(route: string): { opened: string; contentsRead: false } {
+	return { opened: route, contentsRead: false }
+}
+
 // How many rows a long directory listing shows at a time; the model pages on with an offset.
 export const LISTING_PAGE_ITEMS = 30
 

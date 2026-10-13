@@ -1,6 +1,14 @@
 import * as Comlink from "comlink"
 import { createSHA256 } from "hash-wasm"
-import { LogLevel, Wllama, WllamaAbortError, WllamaError, type ChatCompletionTool, type WllamaLogger } from "@wllama/wllama/esm/index.js"
+import {
+	LogLevel,
+	Wllama,
+	WllamaAbortError,
+	WllamaError,
+	type ChatCompletionMessage,
+	type ChatCompletionTool,
+	type WllamaLogger
+} from "@wllama/wllama/esm/index.js"
 // Emitted by Vite as a hashed asset of this build: the engine is self-hosted, never fetched from a CDN. It is
 // wllama's engine rebuilt with a settable prompt cache limit (scripts/wllama/build-wllama.sh), which the
 // package's JavaScript, patched to match, drives.
@@ -457,6 +465,21 @@ async function serialized<T>({
 	}
 }
 
+// What a Qwen (Hermes-style) template opens a tool call with.
+const CALL_OPENER = "<tool_call>"
+
+// A request that must call starts the reply with the template's call opener, which the engine continues
+// (llama.cpp prefills a trailing assistant message, and tool_choice "required" constrains what follows to a
+// call): "required" alone lets the model write its made-up answer first and call after it. Templates without
+// a known opener get "required" alone.
+function withCallOpener(current: Wllama, request: AssistantGenerateRequest, messages: ChatCompletionMessage[]): ChatCompletionMessage[] {
+	return request.toolChoice === "required" &&
+		(request.tools?.length ?? 0) > 0 &&
+		current.getChatTemplate()?.includes(CALL_OPENER) === true
+		? [...messages, { role: "assistant", content: `${CALL_OPENER}\n` }]
+		: messages
+}
+
 const PRIME_USER = "Hi"
 
 // The ChatML rendering (the model's own template) of `system` followed by a one-token user message. Qwen3.5
@@ -681,7 +704,7 @@ const api = {
 				controller,
 				run: current =>
 					current.createChatCompletion({
-						messages: request.messages.map(toEngineMessage),
+						messages: withCallOpener(current, request, request.messages.map(toEngineMessage)),
 						...(tools === undefined || tools.length === 0
 							? {}
 							: { tools, tool_choice: request.toolChoice ?? ("auto" as const) }),

@@ -47,7 +47,8 @@ import {
 //    route in it, so the engine reuses the prompt when the route changes within a family; when that is more
 //    than the request may call, the user's turn names what it may. A call outside them is refused here.
 //    Every call is schema-validated, checked by the app (unknown handles, names where handles belong) and
-//    by the guard; one malformed step is retried with the error, a second ends the loop.
+//    by the guard; one malformed step is retried with the error, a second ends the loop. A lookup's first
+//    step must call one of the tools that read.
 // 3. Content other people wrote (note bodies, file text, chat messages) is summarized by a tool-less
 //    quarantine call before the main loop sees it, and every untrusted string is sanitized and
 //    spotlighted. The executor's context line carries other people's names too and is sanitized as well.
@@ -97,8 +98,9 @@ export type AssistantGenerateRequest = {
 	// GBNF; never combined with tools.
 	grammar?: string
 	// "none": the tools are rendered into the prompt as on the steps before, so the engine reuses what it read
-	// of them, but no call is parsed or constrained.
-	toolChoice?: "none"
+	// of them, but no call is parsed or constrained. "required": the reply must be a call; text an engine lets
+	// come before it is dropped unseen.
+	toolChoice?: "none" | "required"
 	// Which kind of request this is, for an engine that keeps one cached prompt per kind: each kind continues
 	// its own, so none of them pushes another's out.
 	slot: "router" | "main" | "extraction"
@@ -426,6 +428,10 @@ export const STEP_MAX_TOKENS = 384
 export const STEP_TEXT_MAX_TOKENS = 1536
 export const QUARANTINE_MAX_TOKENS = 200
 const ROUTER_MAX_TOKENS = 8
+
+// Routes whose read requests mostly act (play, pause, open a screen): a call forced there is an action the
+// user may not have asked for ("Thanks!" after a song skipped the next one).
+const ACTING_ROUTES: ReadonlySet<AssistantRoute> = new Set(["audio", "navigation"])
 
 // What the router and the content extraction may fill of an engine's context besides the main loop's
 // `contextTokens`. An engine that keeps the three in one cache sizes it to the sum: when they overflow it,
@@ -903,7 +909,8 @@ export async function runAssistantTurn({
 			}
 		)
 	const previous = priorUser.at(-1)
-	const beside = previous !== undefined && routesBesideEarlier(message)
+	// Routed beside the previous message: it continues that request, or only answers or thanks.
+	let beside = previous !== undefined && routesBesideEarlier(message)
 	let routed = await routeBy(beside ? previous : undefined)
 
 	// A longer follow-up that on its own needs no tools may still continue the previous request ("That I paid
@@ -911,6 +918,7 @@ export async function runAssistantTurn({
 	if (previous !== undefined && !beside && parseRoute(routed.content).route === "answer") {
 		checkAborted(signal)
 
+		beside = true
 		routed = await routeBy(previous)
 	}
 
@@ -963,6 +971,9 @@ export async function runAssistantTurn({
 	const groupTools = route === null || route === "answer" ? [] : ASSISTANT_TOOL_GROUPS[route].tools.filter(supports)
 	// What this request may call at its start; only a request that renders more is told which.
 	const callable = guard.offered(groupTools)
+	// A request that looks something up: a change may need to ask for a missing detail instead of calling, and
+	// a follow-up routed beside the previous message ("ok thanks", "the second one") takes its route from it.
+	const lookup = intent === "read" && route !== null && route !== "answer" && !ACTING_ROUTES.has(route) && !beside
 	// Any tool the model was shown: a call to one written as text is a call, not a reply.
 	const malformed = callPattern(renderedNames)
 	const system: AssistantChatMessage = {
@@ -1029,12 +1040,16 @@ export async function runAssistantTurn({
 
 		return name === undefined ? undefined : sanitizeUntrustedText(name, specialTokens, { keepJoiners: true })
 	}
+	// A token no result or earlier reply gave out, of a kind they did ("f7" beside a listing's f9): one the
+	// model made up, which names nothing.
+	const invented = (handle: string) =>
+		!seen.has(handle) && !handedOut.has(handle) && [...seen, ...handedOut.keys()].some(known => known.charAt(0) === handle.charAt(0))
 	const screen = (reply: string, { handles = false }: { handles?: boolean } = {}) => {
 		// The model copies spotlight delimiters it saw around item names into its reply.
 		const text = reply.replace(SPOTLIGHT_DELIMITER, "")
 
 		return screenReply({
-			reply: handles ? text : replyWithoutHandles(text, shownName, { foreign }),
+			reply: handles ? text : replyWithoutHandles(text, shownName, { foreign, invented }),
 			userMessage: userText,
 			canary,
 			instructions
@@ -1171,35 +1186,62 @@ export async function runAssistantTurn({
 				}
 			}
 		}
-		const generated = await generateSettled(
-			model,
-			{
-				messages: fitMessages({
-					system,
-					history: past,
-					turn,
-					tools,
-					maxTokens: stepTokens,
-					contextTokens: model.contextTokens,
-					...(fullPrompt === prompt ? {} : { fullPrompt }),
-					onStub: forgetStubbed
-				}),
-				...(tools.length > 0
-					? {
-							tools,
-							...(offered.length === 0 ? { toolChoice: "none" as const } : {})
-						}
-					: {}),
-				slot: "main",
-				maxTokens: stepTokens
-			},
-			{
-				signal,
-				onText: streamReply,
-				onProgress,
-				onToolCall: announce
-			}
-		)
+		// A lookup's first step must call a tool that reads: over a long conversation the model came to answer
+		// new lookups from its earlier replies, making up what a call would have read. The engine enforces a call
+		// and the guard still judges it; text written before it is dropped unseen, as it was written without the
+		// result.
+		const lookups = step === 1 && lookup ? offered.filter(tool => tool.effect === "read") : []
+		const generate = (forced: boolean) =>
+			generateSettled(
+				model,
+				{
+					messages: fitMessages({
+						system,
+						history: past,
+						turn,
+						tools,
+						maxTokens: stepTokens,
+						contextTokens: model.contextTokens,
+						...(fullPrompt === prompt ? {} : { fullPrompt }),
+						onStub: forgetStubbed
+					}),
+					...(tools.length > 0
+						? {
+								tools,
+								...(offered.length === 0 ? { toolChoice: "none" as const } : forced ? { toolChoice: "required" as const } : {})
+							}
+						: {}),
+					slot: "main",
+					maxTokens: stepTokens
+				},
+				{
+					signal,
+					...(forced ? {} : { onText: streamReply }),
+					onProgress,
+					// A forced call that is no lookup is written again: it never shows.
+					onToolCall: forced
+						? call => {
+								if (lookups.some(tool => tool.name === call.name)) {
+									announce(call)
+								}
+							}
+						: announce
+				}
+			)
+		let forced = lookups.length > 0
+		let generated = await generate(forced)
+		// Anything but reads (an engine that could not force a call, or the model opening or acting) makes it no
+		// lookup: the step is written again unforced, and the request decides between acting and replying.
+		const looksUp = generated.toolCalls.length > 0 && generated.toolCalls.every(call => lookups.some(tool => tool.name === call.name))
+
+		if (forced && !looksUp) {
+			discardUnfinished(new Set())
+			announced.clear()
+			forced = false
+			generated = await generate(false)
+		}
+
+		const preamble = forced ? "" : generated.content.trim()
 
 		if (generated.toolCalls.length === 0) {
 			discardUnfinished(new Set())
@@ -1253,8 +1295,8 @@ export async function runAssistantTurn({
 		queueAnnounced(`call_${step}_0`)
 
 		// Text written before the calls ("Let me look that up") stays as a reply of its own.
-		if (generated.content.trim().length > 0) {
-			onEvent(replyEvent(generated.content.trim(), true))
+		if (preamble.length > 0) {
+			onEvent(replyEvent(preamble, true))
 		}
 
 		const stepCalls = generated.toolCalls.map((call, index) => ({
@@ -1570,7 +1612,7 @@ export async function runAssistantTurn({
 		turn.push(
 			{
 				role: "assistant",
-				content: generated.content.trim(),
+				content: preamble,
 				toolCalls: processed
 			},
 			...results

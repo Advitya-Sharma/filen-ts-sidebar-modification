@@ -274,6 +274,11 @@ export function dateFilterNote(range: string, outside: number): string {
 	return `Nothing is dated ${range}; ${String(outside)} ${outside === 1 ? "item is" : "items are"} outside those dates.`
 }
 
+// How many of the newest items outside the dates a newest-first listing the filter emptied shows instead.
+// Asked for the latest files, the model set "today" and, told only how many lay outside, listed that many
+// made-up rows; shown them, it answers from them in the same step.
+export const OUTSIDE_DATES_ITEMS = 5
+
 // The range as a result shows it: open ends left out.
 export function describeDayRange(range: AssistantDayRange): string {
 	const from = range.from === OPEN_FROM ? null : range.from

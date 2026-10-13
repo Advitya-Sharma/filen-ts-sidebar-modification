@@ -684,6 +684,42 @@ describe("assistant worker API", () => {
 		expect(engines[0]?.createChatCompletion.mock.calls[0]?.[0]).toMatchObject({ tool_choice: "none" })
 	})
 
+	it("opens the reply of a request that must call with the template's call opener", async () => {
+		const tools = [
+			{
+				name: "search_items",
+				description: "Search",
+				parameters: { type: "object" as const, properties: {}, additionalProperties: false as const }
+			}
+		]
+		const unforced = { messages: [{ role: "user" as const, content: "x" }], tools, slot: "main" as const, maxTokens: 8 }
+		const request = { ...unforced, toolChoice: "required" as const }
+
+		raw.template = "{{- '<|im_start|>' }}{%- if tools %}<tool_call>{% endif %}"
+		await api.load(MANIFEST, OPTIONS)
+		await api.generate(1, request)
+		await api.generate(2, unforced)
+		await api.unload()
+		// A template whose call syntax is not known gets the constraint alone.
+		raw.template = "{{ bos_token }}[INST]"
+		await api.load(MANIFEST, OPTIONS)
+		await api.generate(3, request)
+
+		const sent = engines.flatMap(engine => engine.createChatCompletion.mock.calls.map(call => call[0] as Record<string, unknown>))
+
+		expect(sent[0]).toMatchObject({
+			tool_choice: "required",
+			messages: [
+				{ role: "user", content: "x" },
+				{ role: "assistant", content: "<tool_call>\n" }
+			]
+		})
+		expect(sent[1]).toMatchObject({ tool_choice: "auto", messages: [{ role: "user", content: "x" }] })
+		expect(sent[1]?.["messages"]).toHaveLength(1)
+		expect(sent[2]).toMatchObject({ tool_choice: "required" })
+		expect(sent[2]?.["messages"]).toHaveLength(1)
+	})
+
 	it("does not prime a model whose template is not ChatML, nor when no system turn is given", async () => {
 		raw.template = "{{ bos_token }}[INST]"
 		await api.load(MANIFEST, { ...OPTIONS, primeSystem: "Route requests." })

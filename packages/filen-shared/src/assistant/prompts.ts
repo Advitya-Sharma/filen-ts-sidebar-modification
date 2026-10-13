@@ -82,7 +82,7 @@ export const ASSISTANT_CLOSING_NUDGE = "(No more tools are available in this req
 // The router's input: the user's message, and for a follow-up the user's earlier message, after it, so a
 // first message reads exactly as the eval measured it. A long message (a pasted text) is routed by its start
 // and its end, where people put the request: the router's prompt then always fits its share of the context.
-const EARLIER_MAX_CHARS = 300
+const EARLIER_MAX_CHARS = 240
 const MESSAGE_EDGE_CHARS = 300
 
 // A message's start and end only, when it is long; also what a content extraction reads as the request.
@@ -104,7 +104,7 @@ export function routerRequest({ message, earlier }: { message: string; earlier?:
 	const chars = Array.from(earlier.replace(/\s+/g, " ").trim())
 	const quoted = chars.length > EARLIER_MAX_CHARS ? `${chars.slice(0, EARLIER_MAX_CHARS).join("")}…` : chars.join("")
 
-	return `${routed}\n\n(The user's previous message was: "${quoted}". If this message only answers or continues it, route it like the previous one.)`
+	return `${routed}\n\n(The user's previous message was: "${quoted}". If this message only answers or continues it (yes, a choice, a name), route it like the previous one. If it only thanks you, or asks you to repeat or explain what you replied, it is answer.)`
 }
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]

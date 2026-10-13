@@ -2,6 +2,7 @@ import {
 	isAssistantWebTool,
 	isConsequentialTool,
 	sanitizeUntrustedText,
+	screenOpened,
 	toolInputJsonSchema,
 	type AssistantHistoryTurn,
 	type AssistantSignal,
@@ -191,7 +192,7 @@ const openRouteTool: ToolAdapter = async (input, scope) => {
 		throw new AssistantToolError(`"${route}" is not available in the web app`)
 	}
 
-	return { value: { opened: route } }
+	return { value: screenOpened(route) }
 }
 
 // Exactly the tools @filen/shared lists as the web app's (ASSISTANT_WEB_TOOLS, which the eval measures). Any
