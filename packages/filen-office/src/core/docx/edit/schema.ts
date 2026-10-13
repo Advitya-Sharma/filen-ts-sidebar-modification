@@ -279,7 +279,8 @@ const nodes = {
 	// A complex field (fldChar begin … end, `src` the begin run and `end` the end run, siblings) or a
 	// w:fldSimple (`src` = `end`), kept as its bytes and shown as its cached result. Deleted whole. `state`: the
 	// value form commands set on a legacy form field (forms/controls.ts LegacyFieldState); null: as the source
-	// has it.
+	// has it. `update`: an update of its result made while tracking changes (fields/result.ts FieldUpdate: the
+	// result before, who and when, written as w:del and w:ins), null without one.
 	field: {
 		group: "inline",
 		inline: true,
@@ -293,7 +294,8 @@ const nodes = {
 			instruction: { default: "" },
 			result: { default: "" },
 			markers: { default: NO_MARKERS },
-			state: nil
+			state: nil,
+			update: nil
 		}
 	},
 	// A range marker inside a paragraph (see MarkerKind); `name` is a new bookmark's w:name.
@@ -313,8 +315,10 @@ const nodes = {
 		docxLevel: "paragraph",
 		attrs: { src, display: { default: false }, markers: { default: NO_MARKERS }, omml: nil }
 	},
-	// A new w:fldChar of a field spanning paragraphs (a table of contents the editor made): `kind` begin,
-	// separate or end; the begin holds the instruction and whether Word should update it (w:dirty).
+	// A w:fldChar of a field spanning paragraphs (a table of contents) or one without partners: `kind` begin,
+	// separate or end, or "instruction" ("deletedInstruction") for a w:instrText (w:delInstrText) of a table of
+	// contents of the file; the begin holds the field's instruction and whether Word should update it (w:dirty),
+	// an instruction text its own text. One of the file's (`src`) is written as its bytes.
 	field_char: {
 		group: "inline",
 		inline: true,

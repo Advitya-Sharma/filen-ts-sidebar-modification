@@ -150,10 +150,13 @@ const EXAMPLES: Readonly<Record<DocxEditorCommandType, object>> = {
 	"drawing.wrap": { mode: "square" },
 	"drawing.altText": { text: "A chart of results" },
 	"drawing.rotate": { by: 90 },
+	"drawing.crop": { left: 10000, top: 0, right: 5000, bottom: -2000 },
 	"drawing.delete": {},
 	"equation.insert": { latex: "\\frac{a}{b}", display: true },
 	"equation.edit": { latex: "x^2" },
-	"view.reflow": { on: true }
+	"view.reflow": { on: true },
+	"view.fieldCodes": {},
+	"view.fieldCode": {}
 }
 
 // Arguments each command must refuse.
@@ -210,6 +213,8 @@ const INVALID: readonly object[] = [
 	{ type: "drawing.wrap", mode: "around" },
 	{ type: "drawing.rotate", by: 45 },
 	{ type: "drawing.altText", text: "bell\u0007" },
+	{ type: "drawing.crop", left: 60000, top: 0, right: 40000, bottom: 0 },
+	{ type: "drawing.crop", left: 0, top: 0, right: 0 },
 	{ type: "image.insert", media: 2, fallback: 2 },
 	{ type: "equation.insert", latex: "x" },
 	{ type: "view.reflow" }

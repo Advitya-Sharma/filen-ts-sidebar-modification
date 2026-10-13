@@ -1,8 +1,8 @@
 import type { Mark, Node } from "prosemirror-model"
 import { closeHistory } from "prosemirror-history"
 import type { Transaction } from "prosemirror-state"
-import { AddMarkStep, RemoveMarkStep, ReplaceAroundStep, ReplaceStep, StepMap } from "prosemirror-transform"
-import { blockText, boundValue, inlineText, sharedBindings } from "../../forms/binding"
+import { AddMarkStep, AttrStep, RemoveMarkStep, ReplaceAroundStep, ReplaceStep, StepMap } from "prosemirror-transform"
+import { blockText, boundValue, inlineText, partHasBindings, sharedBindings } from "../../forms/binding"
 import {
 	blockControlAround,
 	checkboxGlyph,
@@ -22,8 +22,9 @@ import {
 import { formatControlDate } from "../../forms/dates"
 import type { StoryPart } from "../../model/index"
 import type { DocxEditContext } from "../context"
+import { builtInStyleId } from "../formats"
 import { protectionOf, protectionViolation } from "../protection"
-import { docxSchema } from "../schema"
+import { NO_SOURCE, docxSchema } from "../schema"
 import type { DocxEditorSession } from "../session"
 import { invariantViolation, isCommand, isInternal, markCommand, markInternal } from "./core"
 import type { InvariantStage } from "./index"
@@ -51,6 +52,7 @@ const commandOf = new WeakSet<DocxEditorSession>()
 const madeIn = new WeakSet<DocxEditorSession>()
 // What placeholder text keeps of the content it stands in for.
 const DROPPED_MARKS = new Set<string>(["insertion", "deletion", "move_from", "move_to", "format_change", "link"])
+const PLACEHOLDER_STYLE = "Placeholder Text"
 
 export const FORMS_STAGE: InvariantStage | null = {
 	name: "forms",
@@ -59,7 +61,12 @@ export const FORMS_STAGE: InvariantStage | null = {
 	repair: (transactions, state) => {
 		const session = transactions.map(tr => sessionOf.get(tr)).find(found => found !== undefined)
 
-		if (session === undefined || sharedBindings(session.story.part).size === 0) return null
+		if (session === undefined) return null
+
+		const pasted = notePasted(session, transactions)
+		const shared = sharedKeys(session)
+
+		if (shared.size === 0) return null
 
 		const points: number[] = []
 
@@ -77,8 +84,104 @@ export const FORMS_STAGE: InvariantStage | null = {
 
 		const tr = state.tr
 
-		return mirrorBindings(tr, session, points) ? markInternal(tr) : null
+		return mirrorBindings(tr, session, points, shared, pasted) ? markInternal(tr) : null
 	}
+}
+
+// Binding keys of controls pasted into a session's story (a copy shares its original's node).
+const pastedKeys = new WeakMap<DocxEditorSession, Set<string>>()
+
+// The binding keys several controls of a session's story share: the source's, and those of pasted copies.
+function sharedKeys(session: DocxEditorSession): ReadonlySet<string> {
+	const source = sharedBindings(session.story.part)
+	const pasted = pastedKeys.get(session)
+
+	return pasted === undefined ? source : new Set([...source, ...pasted])
+}
+
+// Whether a control holder is a copy of a source control (a paste made it one, invariants/core.ts).
+function isCopy(holder: Node | Mark): boolean {
+	return (holder.attrs["src"] as number) === NO_SOURCE && controlState(holder)?.copy !== undefined
+}
+
+// Records the copies of bound controls the transactions made (only a part holding bindings has any to copy):
+// their keys, and the ranges of the final document holding them.
+function notePasted(
+	session: DocxEditorSession,
+	transactions: readonly Transaction[]
+): { readonly ranges: readonly number[]; readonly keys: ReadonlySet<string> } {
+	const part = session.story.part
+	const out: number[] = []
+	const keys = new Set<string>()
+
+	if (!partHasBindings(part)) return { ranges: out, keys }
+
+	let found = false
+	const add = (holder: Node | Mark): void => {
+		const info = isCopy(holder) ? controlOf(part, holder) : undefined
+		const binding = info?.binding === null || info === undefined || info.richBinding ? undefined : simpleBinding(info.binding)
+
+		if (binding === undefined) return
+
+		found = true
+		keys.add(binding.key)
+
+		let known = pastedKeys.get(session)
+
+		if (known === undefined) {
+			known = new Set()
+			pastedKeys.set(session, known)
+		}
+
+		known.add(binding.key)
+	}
+	// [from, to] of step `at` of transaction `index`, in the final document.
+	const record = (index: number, at: number, from: number, to: number): void => {
+		const tr = transactions[index] as Transaction
+
+		for (let later = at + 1; later < tr.steps.length; later++) {
+			const map = tr.mapping.maps[later] ?? StepMap.empty
+
+			from = map.map(from, 1)
+			to = map.map(to, -1)
+		}
+
+		for (let next = index + 1; next < transactions.length; next++) {
+			const mapping = (transactions[next] as Transaction).mapping
+
+			from = mapping.map(from, 1)
+			to = mapping.map(to, -1)
+		}
+
+		if (to > from) out.push(from, to)
+	}
+
+	transactions.forEach((tr, index) => {
+		tr.steps.forEach((step, at) => {
+			found = false
+
+			if (step instanceof AttrStep) {
+				const node = step.attr === "state" ? (tr.docs[at + 1] ?? tr.doc).nodeAt(step.pos) : null
+
+				if (node?.type === nodes.sdt) add(node)
+				if (found && node !== null) record(index, at, step.pos, step.pos + node.nodeSize)
+
+				return
+			}
+
+			if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0) return
+
+			step.slice.content.descendants(node => {
+				if (node.type === nodes.sdt) add(node)
+
+				for (const mark of node.marks) if (mark.type === marks.content_control) add(mark)
+			})
+
+			if (found) tr.mapping.maps[at]?.forEach((_oldStart, _oldEnd, newStart, newEnd) => record(index, at, newStart, newEnd))
+		})
+	})
+
+	return { ranges: out, keys }
 }
 
 // The session a transformed transaction belongs to (for the repair after it).
@@ -98,6 +201,18 @@ export function formCommand(tr: Transaction, session: DocxEditorSession, made = 
 // Whether a session's story may hold content controls (source ones, or ones the editor made).
 export function mayHoldControls(session: DocxEditorSession): boolean {
 	return session.story.part.sdts.count > 0 || madeIn.has(session)
+}
+
+// Documents holding copies of legacy form fields (pasted: a part without source fields may hold them).
+const fieldCopiesIn = new WeakSet<DocxEditContext>()
+
+export function noteFieldCopy(context: DocxEditContext): void {
+	fieldCopiesIn.add(context)
+}
+
+// Whether a session's story may hold legacy form fields.
+export function mayHoldFields(session: DocxEditorSession): boolean {
+	return session.story.part.fields.count > 0 || fieldCopiesIn.has(session.context)
 }
 
 export function refusedForForms(tr: Transaction): string | undefined {
@@ -167,7 +282,7 @@ function checked(tr: Transaction, session: DocxEditorSession): Transaction {
 // ---- controls bound to one node -------------------------------------------------------------------------
 
 // Positions of the final document a transaction touched.
-function touchedPoints(tr: Transaction): number[] {
+export function touchedPoints(tr: Transaction): number[] {
 	const out: number[] = []
 
 	tr.steps.forEach((step, index) => {
@@ -184,7 +299,7 @@ function touchedPoints(tr: Transaction): number[] {
 
 // The controls around `pos` (inline ones touching it, block ones holding it) bound by a path the editor
 // updates to a node other controls of the part are bound to too.
-function boundAt(part: StoryPart, doc: Node, pos: number, shared: ReadonlySet<string>): { around: ControlAround; key: string }[] {
+export function boundAt(part: StoryPart, doc: Node, pos: number, shared: ReadonlySet<string>): { around: ControlAround; key: string }[] {
 	const out: { around: ControlAround; key: string }[] = []
 	const add = (around: ControlAround): void => {
 		const binding = around.info.binding === null || around.info.richBinding ? undefined : simpleBinding(around.info.binding)
@@ -223,7 +338,7 @@ function pieceKey(around: ControlAround): string {
 	return `${controlKey(around.holder)}@${String(around.from)}`
 }
 
-function controlText(doc: Node, around: ControlAround): string {
+export function controlText(doc: Node, around: ControlAround): string {
 	if (around.kind === "block") return blockText(around.holder as Node)
 
 	let text = ""
@@ -237,38 +352,53 @@ function controlText(doc: Node, around: ControlAround): string {
 
 // Word shows a node's value in every control bound to it: after an edit of one, the others of the story that
 // share its binding (forms/binding.ts sharedBindings) show its value too. Whether it changed any.
-function mirrorBindings(tr: Transaction, session: DocxEditorSession, points: readonly number[]): boolean {
+// `pasted`: ranges of the final document holding pasted copies of bound controls (of `keys`): a copy takes its
+// node's value from the controls already there (as Word shows a pasted bound control the node's value), never
+// the other way.
+function mirrorBindings(
+	tr: Transaction,
+	session: DocxEditorSession,
+	points: readonly number[],
+	shared: ReadonlySet<string>,
+	pasted: { readonly ranges: readonly number[]; readonly keys: ReadonlySet<string> }
+): boolean {
 	const part = session.story.part
-	const shared = sharedBindings(part)
 
 	if (shared.size === 0) return false
 
 	const doc = tr.doc
 	const values = new Map<string, { value: string; source: string }>()
 	const head = tr.selection.head
+	const ranges = pasted.ranges
+	const inPasted = (around: ControlAround): boolean => {
+		for (let k = 0; k < ranges.length; k += 2) if (around.from >= (ranges[k] ?? 0) && around.to <= (ranges[k + 1] ?? 0)) return true
+
+		return false
+	}
+	// Keys of pasted copies no edit outside the paste touched: their value comes from a control outside it.
+	const fromExisting = new Set(pasted.keys)
 
 	for (const point of points) {
 		for (const found of boundAt(part, doc, Math.min(point, doc.content.size), shared)) {
+			if (inPasted(found.around)) continue
+
 			const info = found.around.info
 			const value = info.showingPlaceholder ? "" : boundValue(info, controlText(doc, found.around))
 			const holds = head >= found.around.from && head <= found.around.to
+
+			fromExisting.delete(found.key)
 
 			if (!values.has(found.key) || holds) values.set(found.key, { value, source: pieceKey(found.around) })
 		}
 	}
 
-	if (values.size === 0) return false
+	if (values.size === 0 && fromExisting.size === 0) return false
 
-	const targets: { around: ControlAround; value: string }[] = []
+	const controls: { around: ControlAround; key: string }[] = []
 	const consider = (around: ControlAround): void => {
 		const binding = around.info.binding === null || around.info.richBinding ? undefined : simpleBinding(around.info.binding)
-		const wanted = binding === undefined ? undefined : values.get(binding.key)
 
-		if (wanted === undefined || wanted.source === pieceKey(around)) return
-
-		const value = around.info.showingPlaceholder ? "" : boundValue(around.info, controlText(doc, around))
-
-		if (value !== wanted.value) targets.push({ around, value: wanted.value })
+		if (binding !== undefined && (values.has(binding.key) || fromExisting.has(binding.key))) controls.push({ around, key: binding.key })
 	}
 
 	doc.descendants((node, pos) => {
@@ -289,6 +419,26 @@ function mirrorBindings(tr: Transaction, session: DocxEditorSession, points: rea
 		return false
 	})
 
+	const shown = (around: ControlAround): string =>
+		around.info.showingPlaceholder ? "" : boundValue(around.info, controlText(doc, around))
+
+	for (const { around, key } of controls) {
+		if (!values.has(key) && fromExisting.has(key) && !inPasted(around))
+			values.set(key, { value: shown(around), source: pieceKey(around) })
+	}
+
+	const targets: { around: ControlAround; value: string }[] = []
+
+	for (const { around, key } of controls) {
+		const wanted = values.get(key)
+
+		if (wanted === undefined || wanted.source === pieceKey(around)) continue
+
+		const value = shown(around)
+
+		if (value !== wanted.value) targets.push({ around, value: wanted.value })
+	}
+
 	for (const { around, value } of targets.sort((a, b) => b.around.from - a.around.from))
 		showValue(tr, session.context, part, around, value)
 
@@ -296,7 +446,7 @@ function mirrorBindings(tr: Transaction, session: DocxEditorSession, points: rea
 }
 
 // Shows a bound node's `value` in a control as its type shows it (an empty value: the placeholder).
-function showValue(tr: Transaction, context: DocxEditContext, part: StoryPart, around: ControlAround, value: string): void {
+export function showValue(tr: Transaction, context: DocxEditContext, part: StoryPart, around: ControlAround, value: string): void {
 	const info = around.info
 	const state = controlState(around.holder) ?? {}
 
@@ -608,8 +758,9 @@ export function contentMarks(doc: Node, around: ControlAround): readonly Mark[] 
 	return found ?? []
 }
 
-// Replaces a control's content: an inline control's span, or the first paragraph's content of a block one
-// (its other paragraphs are emptied).
+// Replaces a control's content: an inline control's span, or a block one's content with its first paragraph
+// holding `content` (what a control shows is one paragraph's content, line breaks for lines; a control holding
+// other blocks, a table, becomes that paragraph, as Word refreshes a bound control).
 export function replaceContent(tr: Transaction, around: ControlAround, content: readonly Node[]): void {
 	if (around.kind === "inline") {
 		tr.replaceWith(around.from, around.to, content)
@@ -617,20 +768,37 @@ export function replaceContent(tr: Transaction, around: ControlAround, content: 
 		return
 	}
 
-	const ranges: [number, number][] = []
+	const holder = tr.doc.nodeAt(around.pos)
+	let first: Node | undefined
+	let at = -1
+	let paragraphs = true
 
+	holder?.forEach(child => {
+		if (!child.isTextblock) paragraphs = false
+	})
 	tr.doc.nodesBetween(around.from, around.to, (child, pos) => {
+		if (first !== undefined) return false
 		if (!child.inlineContent) return !child.isInline
 
-		ranges.push([pos + 1, pos + child.nodeSize - 1])
+		first = child
+		at = pos
 
 		return false
 	})
 
-	const [first, ...rest] = ranges
+	if (first === undefined) return
 
-	for (const [from, to] of rest.reverse()) if (to > from) tr.delete(from, to)
-	if (first !== undefined) tr.replaceWith(first[0], first[1], content)
+	if (!paragraphs) {
+		tr.replaceWith(around.from, around.to, first.type.create(first.attrs, content, first.marks))
+
+		return
+	}
+
+	const end = at + first.nodeSize
+
+	if (around.to > end) tr.delete(end, around.to)
+
+	tr.replaceWith(at + 1, end - 1, content)
 }
 
 // Marks for new content of a control: its first content's, with the control mark (inline) holding `state`,
@@ -696,16 +864,17 @@ export function writeControl(
 
 // The character style Word gives placeholder text ("Placeholder Text"), when the document has it.
 export function placeholderStyle(context: DocxEditContext): string | undefined {
-	return context.styles.byName("Placeholder Text", "character")?.id ?? context.styles.byId("PlaceholderText")?.id
+	return context.styles.byName(PLACEHOLDER_STYLE, "character")?.id ?? context.styles.byId("PlaceholderText")?.id
 }
 
-// Whether a character style mark is the placeholder style (the document's, or Word's id for it).
+// Whether a character style mark is the placeholder style (the document's, Word's id for it, or the one the
+// writer adds).
 export function placeholderStyled(context: DocxEditContext, mark: Mark): boolean {
 	if (mark.type !== marks.char_style) return false
 
 	const id = mark.attrs["styleId"] as string
 
-	return id === "PlaceholderText" || id === placeholderStyle(context)
+	return id === "PlaceholderText" || id === placeholderStyle(context) || context.newStyles.get(id) === PLACEHOLDER_STYLE
 }
 
 // The state of a control whose placeholder shows (`showing`) or no longer does.
@@ -749,12 +918,12 @@ export function placeholderContent(text: string, markSet: readonly Mark[]): Node
 }
 
 // The marks of placeholder text standing for content that had `markSet`: no revision, link or recorded
-// formatting change, the placeholder style (no character style when the document lacks it).
+// formatting change, the placeholder style (Word's built-in one, added to a document that lacks it).
 export function placeholderMarks(context: DocxEditContext, markSet: readonly Mark[]): readonly Mark[] {
-	const style = placeholderStyle(context)
+	const style = placeholderStyle(context) ?? builtInStyleId(context, PLACEHOLDER_STYLE)
 	const kept = markSet.filter(mark => mark.type !== marks.char_style && !DROPPED_MARKS.has(mark.type.name))
 
-	return style === undefined ? kept : marks.char_style.create({ styleId: style }).addToSet(kept)
+	return marks.char_style.create({ styleId: style }).addToSet(kept)
 }
 
 // Ranges each replace step inserted, in the final document.

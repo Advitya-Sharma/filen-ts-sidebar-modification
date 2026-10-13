@@ -5,7 +5,8 @@ import { NO_SOURCE, docxSchema } from "../../edit/schema"
 import type { DrawingInfo } from "../../model/drawings"
 import { Item, type StoryPart } from "../../model/index"
 import { Ns } from "../../model/namespaces"
-import { drawingEdit, drawingState, graphicTransform, sourceDrawing, type DrawingState } from "../../objects/edit"
+import type { DocxCrop } from "../../edit/commands/drawings"
+import { drawingEdit, drawingState, graphicTransform, pictureFill, sameCrop, sourceDrawing, type DrawingState } from "../../objects/edit"
 import { sniffImage } from "../../objects/images"
 import type { Out } from "../markup"
 import { mediaRelationship } from "../parts/media"
@@ -16,10 +17,10 @@ import type { AtomWriter } from "./index"
 
 // Drawings a command changed and pictures a command inserted. A changed drawing is its source bytes with
 // exactly the markup the change touches rewritten in place (extents, the shape's transform, the alt text,
-// the anchor's position and wrapping, an inline frame turned into an anchor or back), so everything the
-// editor does not model stays as it was. A drawing inside mc:AlternateContent also has its VML fallback (the
-// copy Word keeps for older readers) brought in line: its style's size, rotation, position and wrapping and
-// its alt text. A new picture is a DrawingML inline (or anchored) picture as Word writes one, its bytes a
+// the picture's crop, the anchor's position and wrapping, an inline frame turned into an anchor or back), so
+// everything the editor does not model stays as it was. A drawing inside mc:AlternateContent also has its VML
+// fallback (the copy Word keeps for older readers) brought in line: its style's size, rotation, position and
+// wrapping, its picture's crop and its alt text. A new picture is a DrawingML inline (or anchored) picture as Word writes one, its bytes a
 // media part of the save (parts/media.ts).
 
 const nodes = docxSchema.nodes
@@ -158,6 +159,27 @@ function int(value: number): string {
 	return String(Math.round(value))
 }
 
+// A blip fill's a:srcRect for `crop` (sides of 0 left out, their default), as Word writes it.
+function srcRectMarkup(a: string, crop: DocxCrop): string {
+	const sides: [string, number][] = [
+		["l", crop.left],
+		["t", crop.top],
+		["r", crop.right],
+		["b", crop.bottom]
+	]
+	const attributes = sides
+		.filter(([, value]) => value !== 0)
+		.map(([name, value]) => ` ${name}="${int(value)}"`)
+		.join("")
+
+	return `<${a === "" ? "" : `${a}:`}srcRect${attributes}/>`
+}
+
+// A VML crop side (v:imagedata cropleft...): a fraction in 1/65536ths, as Word writes it; null when none.
+function vmlCrop(value: number): string | null {
+	return value === 0 ? null : `${int((value / 100000) * 65536)}f`
+}
+
 function points(emu: number): string {
 	return `${String(Math.round((emu / EMU_PER_POINT) * 100) / 100)}pt`
 }
@@ -294,6 +316,20 @@ function frameEdits(w: StoryWriting, part: StoryPart, drawing: DrawingInfo, base
 		const picture = drawing.graphicData < 0 ? -1 : reader.descendant(drawing.graphicData, Ns.Pic, "cNvPr")
 
 		if (picture >= 0) setAttribute(document, picture, "descr", value, edits)
+	}
+
+	if (!sameCrop(state.crop, base.crop)) {
+		const fill = pictureFill(part, drawing)
+		const blip = fill < 0 ? -1 : reader.child(fill, Ns.A, "blip")
+
+		if (blip < 0) throw new DocxWriteError("unsupported", "A cropped drawing without a picture fill")
+
+		const rect = reader.child(fill, Ns.A, "srcRect")
+		const markup = srcRectMarkup(document.prefix(blip), state.crop)
+
+		// CT_BlipFillProperties: blip, srcRect, then the fill mode.
+		if (rect >= 0) edits.push({ from: document.start(rect), to: document.end(rect), text: markup })
+		else edits.push({ from: document.end(blip), to: document.end(blip), text: markup })
 	}
 
 	placementEdits(w, part, drawing, base, state, edits)
@@ -509,6 +545,19 @@ function fallbackEdits(part: StoryPart, alternate: number, base: DrawingState, s
 	}
 
 	if (changes.size > 0) setAttribute(document, shape, "style", editStyle(attributeOf(document, shape, "style") ?? "", changes), edits)
+
+	if (!sameCrop(state.crop, base.crop)) {
+		const imageData =
+			children(document, shape).find(child => reader.group(child) === Ns.V && document.localName(child) === "imagedata") ?? -1
+
+		if (imageData >= 0) {
+			setAttribute(document, imageData, "cropleft", vmlCrop(state.crop.left), edits)
+			setAttribute(document, imageData, "croptop", vmlCrop(state.crop.top), edits)
+			setAttribute(document, imageData, "cropright", vmlCrop(state.crop.right), edits)
+			setAttribute(document, imageData, "cropbottom", vmlCrop(state.crop.bottom), edits)
+		}
+	}
+
 	if (state.descr !== base.descr) setAttribute(document, shape, "alt", state.descr === "" ? null : state.descr, edits)
 
 	// Its wrapping: w10:wrap for text that flows around it, none for inline, behind and in front.
@@ -557,6 +606,8 @@ function writeChangedDrawing(w: StoryWriting, out: Out, node: Node): void {
 	if (!base.resizable && (state.cx !== base.cx || state.cy !== base.cy))
 		throw new DocxWriteError("unsupported", "A resized drawing that cannot be resized")
 	if (!base.rotatable && state.rot !== base.rot) throw new DocxWriteError("unsupported", "A rotated drawing that cannot be rotated")
+	if (!base.croppable && !sameCrop(state.crop, base.crop))
+		throw new DocxWriteError("unsupported", "A cropped drawing that cannot be cropped")
 
 	const document = part.document
 	const element = part.node(own)
@@ -623,7 +674,7 @@ function writeNewPicture(w: StoryWriting, out: Out, node: Node): void {
 		`<${q("cNvGraphicFramePr")}><a:graphicFrameLocks xmlns:a="${A_URI}" noChangeAspect="1"/></${q("cNvGraphicFramePr")}>` +
 		`<a:graphic xmlns:a="${A_URI}"><a:graphicData uri="${PIC_URI}"><pic:pic xmlns:pic="${PIC_URI}">` +
 		`<pic:nvPicPr><pic:cNvPr id="0" name="${name}"${descr}/><pic:cNvPicPr><a:picLocks noChangeAspect="1" noChangeArrowheads="1"/></pic:cNvPicPr></pic:nvPicPr>` +
-		`<pic:blipFill>${blip}<a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+		`<pic:blipFill>${blip}${state.crop.left === 0 && state.crop.top === 0 && state.crop.right === 0 && state.crop.bottom === 0 ? "" : srcRectMarkup("a", state.crop)}<a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
 		`<pic:spPr bwMode="auto"><a:xfrm${state.rot === 0 ? "" : ` rot="${int(state.rot * 60000)}"`}><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
 		"</pic:pic></a:graphicData></a:graphic>"
 	const frame =

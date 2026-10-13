@@ -119,6 +119,30 @@
 	border-top: 1px solid var(--fo-auto-text, #000);
 }
 
+/* A legacy check box as Word draws it: a thin square, an X across it when checked. */
+.fo-docx-checkbox {
+	box-sizing: border-box;
+	border: 1px solid var(--fo-auto-text, #000);
+}
+
+.fo-docx-checkbox[data-fo-checked] {
+	background:
+		linear-gradient(
+			to top right,
+			transparent calc(50% - 0.5px),
+			var(--fo-auto-text, #000) calc(50% - 0.5px),
+			var(--fo-auto-text, #000) calc(50% + 0.5px),
+			transparent calc(50% + 0.5px)
+		),
+		linear-gradient(
+			to bottom right,
+			transparent calc(50% - 0.5px),
+			var(--fo-auto-text, #000) calc(50% - 0.5px),
+			var(--fo-auto-text, #000) calc(50% + 0.5px),
+			transparent calc(50% + 0.5px)
+		);
+}
+
 .fo-docx-placeholder {
 	background: var(--fo-placeholder-fill, #f1f1f1);
 	outline: 1px solid var(--fo-placeholder-stroke, #c8c8c8);

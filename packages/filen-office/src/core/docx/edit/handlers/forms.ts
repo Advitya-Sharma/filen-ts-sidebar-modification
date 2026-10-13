@@ -21,6 +21,7 @@ import {
 	type MadeControl
 } from "../../forms/controls"
 import { formatControlDate } from "../../forms/dates"
+import { watchBoundStories } from "../../forms/sync"
 import type { StoryPart } from "../../model/index"
 import type { DocxControlKind } from "../commands/forms"
 import {
@@ -28,6 +29,7 @@ import {
 	formsAfter,
 	formsBefore,
 	mayHoldControls,
+	mayHoldFields,
 	placeholderContent,
 	placeholderMarks,
 	placeholderState,
@@ -45,8 +47,13 @@ import { docxSchema, NO_SOURCE } from "../schema"
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
 
-// The transformers around tracked changes recording a transaction (registered in handlers/index.ts).
-export const FORMS_BEFORE: DocxTransactionTransformer = formsBefore
+// The transformers around tracked changes recording a transaction (registered in handlers/index.ts). A session
+// editing a story whose controls share a binding with another story's passes their values on (forms/sync.ts).
+export const FORMS_BEFORE: DocxTransactionTransformer = (tr, session) => {
+	watchBoundStories(session)
+
+	return formsBefore(tr, session)
+}
 export const FORMS_AFTER: DocxTransactionTransformer = formsAfter
 
 interface FieldAt {
@@ -111,7 +118,7 @@ function controlAt(context: StoryCommandContext): ControlAround | undefined {
 }
 
 function legacyOf(context: StoryCommandContext, type: LegacyField["type"]): FieldAt | undefined {
-	if (partOf(context).fields.count === 0) return undefined
+	if (!mayHoldFields(context.session)) return undefined
 
 	const at = selectedField(partOf(context), context.state)
 

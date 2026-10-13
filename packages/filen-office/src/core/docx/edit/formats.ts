@@ -95,6 +95,7 @@ const BUILT_IN_STYLES: Readonly<Record<string, { readonly type: "paragraph" | "c
 	"annotation reference": { type: "character", id: "CommentReference" },
 	"footnote reference": { type: "character", id: "FootnoteReference" },
 	"endnote reference": { type: "character", id: "EndnoteReference" },
+	"Placeholder Text": { type: "character", id: "PlaceholderText" },
 	...Object.fromEntries(
 		[1, 2, 3, 4, 5, 6, 7, 8, 9].map(level => [`toc ${String(level)}`, { type: "paragraph", id: `TOC${String(level)}` } as const])
 	)

@@ -774,15 +774,29 @@ export interface LegacyField {
 	readonly maxLength: number
 }
 
-// What form commands set on a legacy field (its `state`).
+// A w:ffData element as data: WordprocessingML local names and attributes, what a copy of a legacy form field
+// carries (its source's part holds the element).
+export interface FormFieldData {
+	readonly name: string
+	readonly attrs: readonly (readonly [string, string])[]
+	readonly children: readonly FormFieldData[]
+}
+
+// What form commands set on a legacy field (its `state`); a copy of a source field (src -1) carries its w:ffData.
 export interface LegacyFieldState {
 	readonly checked?: boolean
 	readonly result?: number
 	readonly text?: string
+	readonly data?: FormFieldData
 }
 
 const LEGACY_TYPES = new Set<string>(["FORMTEXT", "FORMCHECKBOX", "FORMDROPDOWN"])
 const legacy = new WeakMap<StoryPart, Map<number, LegacyField | null>>()
+const copied = new WeakMap<FormFieldData, LegacyField>()
+
+export function isLegacyFieldType(type: string): type is LegacyFieldType {
+	return LEGACY_TYPES.has(type)
+}
 
 // The w:ffData element of the field whose begin run is `item`, or -1.
 export function formFieldData(part: StoryPart, item: number): number {
@@ -792,32 +806,58 @@ export function formFieldData(part: StoryPart, item: number): number {
 	return begin < 0 ? -1 : part.reader.child(part.node(begin), Ns.W, "ffData")
 }
 
-function readLegacy(part: StoryPart, item: number, type: LegacyFieldType): LegacyField | null {
+// The WordprocessingML content of XML element `node` of `part` as data (anything else is left out).
+function elementData(part: StoryPart, node: number): FormFieldData {
+	const document = part.document
+	const reader = part.reader
+	const attrs: [string, string][] = []
+	const children: FormFieldData[] = []
+
+	for (const { name, value } of document.attributes(node)) {
+		const local = name.slice(name.indexOf(":") + 1)
+
+		if (reader.attr(node, Ns.W, local) === value) attrs.push([local, value])
+	}
+
+	for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
+		if (reader.group(child) === Ns.W) children.push(elementData(part, child))
+	}
+
+	return { name: document.localName(node), attrs, children }
+}
+
+// The w:ffData of the legacy form field whose begin run is `item`, as data.
+export function legacyFieldData(part: StoryPart, item: number): FormFieldData | undefined {
 	const ffData = formFieldData(part, item)
 
-	if (ffData < 0) return null
+	return ffData < 0 ? undefined : elementData(part, ffData)
+}
 
-	const reader = part.reader
-	const document = part.document
-	const val = (node: number, local: string): string | undefined => {
-		const child = node < 0 ? -1 : reader.child(node, Ns.W, local)
+function dataChild(data: FormFieldData | undefined, name: string): FormFieldData | undefined {
+	return data?.children.find(child => child.name === name)
+}
 
-		return child < 0 ? undefined : (reader.attr(child, Ns.W, "val") ?? "")
+function dataAttr(data: FormFieldData | undefined, name: string): string | undefined {
+	return data?.attrs.find(([key]) => key === name)?.[1]
+}
+
+function readLegacy(type: LegacyFieldType, ffData: FormFieldData): LegacyField {
+	const val = (data: FormFieldData | undefined, name: string): string | undefined => {
+		const child = dataChild(data, name)
+
+		return child === undefined ? undefined : (dataAttr(child, "val") ?? "")
 	}
-	const on = (node: number, local: string): boolean | undefined => {
-		const child = node < 0 ? -1 : reader.child(node, Ns.W, local)
+	// ST_OnOff: no w:val is on.
+	const on = (data: FormFieldData | undefined, name: string): boolean | undefined => {
+		const child = dataChild(data, name)
+		const value = child === undefined ? undefined : dataAttr(child, "val")
 
-		return child < 0 ? undefined : reader.onOff(child)
+		return child === undefined ? undefined : value === undefined || !(value === "0" || value === "false" || value === "off")
 	}
-	const checkBox = reader.child(ffData, Ns.W, "checkBox")
-	const ddList = reader.child(ffData, Ns.W, "ddList")
-	const textInput = reader.child(ffData, Ns.W, "textInput")
-	const entries: string[] = []
-
-	for (let child = ddList < 0 ? -1 : document.firstChildElement(ddList); child >= 0; child = document.nextSiblingElement(child)) {
-		if (reader.is(child, Ns.W, "listEntry")) entries.push(reader.attr(child, Ns.W, "val") ?? "")
-	}
-
+	const checkBox = dataChild(ffData, "checkBox")
+	const ddList = dataChild(ffData, "ddList")
+	const textInput = dataChild(ffData, "textInput")
+	const entries = (ddList?.children ?? []).filter(child => child.name === "listEntry").map(child => dataAttr(child, "val") ?? "")
 	const result = Number.parseInt(val(ddList, "result") ?? val(ddList, "default") ?? "0", 10)
 
 	return {
@@ -827,7 +867,7 @@ function readLegacy(part: StoryPart, item: number, type: LegacyFieldType): Legac
 		checked: on(checkBox, "checked") ?? on(checkBox, "default") ?? false,
 		entries,
 		result: Number.isInteger(result) && result >= 0 && result < entries.length ? result : 0,
-		textType: textInput < 0 ? "regular" : (val(textInput, "type") ?? "regular"),
+		textType: textInput === undefined ? "regular" : (val(textInput, "type") ?? "regular"),
 		maxLength: Math.max(0, Number.parseInt(val(textInput, "maxLength") ?? "0", 10) || 0)
 	}
 }
@@ -837,27 +877,61 @@ export function legacyFieldOf(part: StoryPart, node: Node): LegacyField | undefi
 	const type = node.attrs["type"] as string
 	const own = node.attrs["src"] as number
 
-	if (!LEGACY_TYPES.has(type) || own === NO_SOURCE || own >= part.count) return undefined
+	if (!isLegacyFieldType(type)) return undefined
 
-	let cache = legacy.get(part)
+	const state = (node.attrs["state"] as LegacyFieldState | null | undefined) ?? null
+	let field: LegacyField | null | undefined
 
-	if (cache === undefined) {
-		cache = new Map()
-		legacy.set(part, cache)
-	}
+	if (own === NO_SOURCE) {
+		const data = state?.data
 
-	let field = cache.get(own)
+		if (data === undefined) return undefined
 
-	if (field === undefined) {
-		field = readLegacy(part, own, type as LegacyFieldType)
-		cache.set(own, field)
+		field = copied.get(data)
+
+		if (field === undefined) {
+			field = readLegacy(type, data)
+			copied.set(data, field)
+		}
+	} else {
+		if (own >= part.count) return undefined
+
+		let cache = legacy.get(part)
+
+		if (cache === undefined) {
+			cache = new Map()
+			legacy.set(part, cache)
+		}
+
+		field = cache.get(own)
+
+		if (field === undefined) {
+			const data = legacyFieldData(part, own)
+
+			field = data === undefined ? null : readLegacy(type, data)
+			cache.set(own, field)
+		}
 	}
 
 	if (field === null) return undefined
 
-	const state = (node.attrs["state"] as LegacyFieldState | null | undefined) ?? null
-
 	return state === null ? field : { ...field, checked: state.checked ?? field.checked, result: state.result ?? field.result }
+}
+
+// The state a copy of legacy form field `node` (built from `part`) carries: its own with the source's w:ffData,
+// so the copy is the same form field. Word keeps a pasted copy's w:ffData, its w:name too, and leaves the bookmark
+// of that name with the original (Word 16 output in the public corpus, SHA-256
+// 69503abc2caecf0a854a1151a3f3e30bf7cfd1de7af88e33313ff9eced7e47d4: ten fields named Check4, one bookmark).
+// Undefined for other fields.
+export function legacyCopyState(part: StoryPart, node: Node): LegacyFieldState | undefined {
+	const own = node.attrs["src"] as number
+	const state = (node.attrs["state"] as LegacyFieldState | null | undefined) ?? {}
+
+	if (!isLegacyFieldType(node.attrs["type"] as string) || own === NO_SOURCE || own >= part.count) return undefined
+
+	const data = legacyFieldData(part, own)
+
+	return data === undefined ? undefined : { ...state, data }
 }
 
 // What Word shows for an empty text form field: five en spaces (U+2002).

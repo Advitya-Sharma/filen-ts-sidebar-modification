@@ -1,11 +1,12 @@
 import type { Node } from "prosemirror-model"
 import { escapeText } from "../../../xml/index"
 import { NO_SOURCE, docxSchema } from "../../edit/schema"
-import { mergeFormat, parseFieldCode, rewritableSource, type SourceField } from "../../fields/evaluate"
-import { FieldCharType, Item, type StoryPart } from "../../model/index"
+import { fieldUpdateOf, mergeFormat, parseFieldCode, rewritableSource, type SourceField } from "../../fields/evaluate"
+import { storedResult, type FieldUpdate } from "../../fields/result"
+import { Item, type StoryPart } from "../../model/index"
 import { MARKER_ITEMS } from "../markers"
 import { spliceChildren, textElement, type Names, type Out } from "../markup"
-import { legacyFieldEdited, writeLegacyFormField } from "../sdt"
+import { legacyFieldCopyData, legacyFieldEdited, writeLegacyFormField } from "../sdt"
 import { RUN_PROPERTIES } from "../order.generated"
 import { src } from "../source"
 import type { StoryWriting } from "../story"
@@ -15,9 +16,10 @@ import type { AtomWriter } from "./index"
 // Fields. A source field whose result an update changed keeps its bytes up to its separator (instruction,
 // w:dirty, w:fldLock, revisions), gets the new result in runs formatted as \* MERGEFORMAT asks (the previous
 // result's first run, else the field code's: ECMA-376 Part 1 §17.16.4.3), keeps the range markers and comment
-// references its old result held, and ends with its own end character. A new field is complex (begin,
+// references its old result held, and ends with its own end character. An update made while tracking changes
+// is written as Word records it: the result before in w:del, the new one in w:ins. A new field is complex (begin,
 // instruction, separate, result, end) as Word writes them, or a w:fldSimple when it is simple. A field_char is
-// one character of a field spanning paragraphs (a table of contents the editor made).
+// one character of a field spanning paragraphs (a table of contents).
 
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
@@ -52,75 +54,39 @@ function fieldChar(names: Names, type: "begin" | "separate" | "end", dirty = fal
 	])
 }
 
-// The cached result of a source field as the editor reads it (what follows the separator, nested field codes
-// left out): the document builder's reading, so a result no update changed is told apart.
-function storedResult(part: StoryPart, first: number, last: number, simple: boolean): string {
-	const field = simple ? (part.aux[first] ?? -1) : part.fieldOf(first + 1)
-	const separate = simple || field < 0 ? first : (part.fields.separate[field] ?? -1)
+const DELETED_KINDS: ReadonlySet<number> = new Set([Item.DeletedText, Item.DeletedInstrText])
 
-	if (separate < 0) return ""
+// Whether a tracked change inside `container` (a field's) deletes source item `item`.
+function deletedWithin(part: StoryPart, item: number, container: number): boolean {
+	for (let at = part.parent(item); at > container; at = part.parent(at))
+		if (part.kinds[at] === Item.Deletion || part.kinds[at] === Item.MoveFrom) return true
 
-	const end = part.end(last)
-	const codes: boolean[] = []
-	let out = ""
-	let depth = 0
-	let code = false
-
-	for (let item = separate + 1; item < end; item++) {
-		switch (part.kinds[item]) {
-			case Item.FieldChar: {
-				const type = part.fieldCharType(item)
-
-				if (type === FieldCharType.Begin) {
-					codes.push(code)
-					depth++
-					code = true
-				} else if (type === FieldCharType.Separate && depth > 0) {
-					code = codes[codes.length - 1] ?? false
-				} else if (type === FieldCharType.End && depth > 0) {
-					depth--
-					code = codes.pop() ?? false
-				}
-
-				break
-			}
-			case Item.Text:
-			case Item.DeletedText:
-				if (!code) out += part.text(item)
-
-				break
-			case Item.Tab:
-				if (!code) out += "\t"
-
-				break
-			case Item.Break:
-			case Item.CarriageReturn:
-				if (!code) out += "\n"
-
-				break
-		}
-	}
-
-	return out
+	return false
 }
 
-// Source items `first` to `last` (siblings) as their bytes, their text and field codes as deleted text
-// (w:delText, w:delInstrText): a field a tracked change deleted.
-function copyDeleted(w: StoryWriting, out: Out, first: number, last: number): void {
+// Source items `first` to `last` (siblings, of `container`) as their bytes up to byte `to`, their text and
+// field codes as deleted text (w:delText, w:delInstrText) where the field is deleted (`removed`) or a tracked
+// change inside it deletes them, else as text (a deletion of the field rejected).
+function copyItems(w: StoryWriting, out: Out, first: number, last: number, to: number, container: number, removed: boolean): void {
 	const part = w.part
 	let at = part.start(first)
 
-	for (let item = first; item < part.end(last); item++) {
-		const kind = part.kinds[item]
+	for (let item = first; item < part.end(last) && part.start(item) < to; item++) {
+		const kind = part.kinds[item] ?? 0
+		const code = kind === Item.InstrText || kind === Item.DeletedInstrText
 
-		if (kind !== Item.Text && kind !== Item.InstrText) continue
+		if (!code && kind !== Item.Text && kind !== Item.DeletedText) continue
+
+		const gone = removed || deletedWithin(part, item, container)
+
+		if (gone === DELETED_KINDS.has(kind)) continue
 
 		w.copySource(out, at, part.start(item), false)
-		out.text(kind === Item.Text ? textElement(w.names, part.text(item), true) : instructionElement(w.names, part.text(item), true))
+		out.text(code ? instructionElement(w.names, part.text(item), gone) : textElement(w.names, part.text(item), gone))
 		at = part.byteEnd(item)
 	}
 
-	w.copySource(out, at, part.byteEnd(last), false)
+	w.copySource(out, at, to, false)
 }
 
 // A source run's properties without its tracked formatting change (whose id is the source run's).
@@ -173,6 +139,48 @@ function resultRun(w: StoryWriting, out: Out, run: number, text: string, removed
 	out.text(`${resultContent(w.names, text, removed)}</${w.names.el("r")}>`)
 }
 
+// A w:del or w:ins start tag for a field's tracked update (a new w:id: the save's own, as every revision's).
+function revisionStart(w: StoryWriting, local: "del" | "ins", update: FieldUpdate): string {
+	return w.names
+		.empty(local, [
+			["id", String(w.env.nextRevisionId())],
+			["author", update.author],
+			["date", update.date === "" ? undefined : update.date]
+		])
+		.replace(/\/>$/, ">")
+}
+
+// A field's result in runs formatted as `run`'s: with its tracked update, the result before deleted and the
+// new one inserted. A field a tracked change deleted has its result as deleted text (an update inside it too:
+// inserted by one change, deleted by another, as Word nests them).
+function resultRuns(w: StoryWriting, out: Out, run: number, node: Node): void {
+	const result = node.attrs["result"] as string
+	const update = fieldUpdateOf(node)
+	const removed = deleted(node)
+
+	if (update === null) {
+		resultRun(w, out, run, result, removed)
+
+		return
+	}
+
+	if (update.result !== "") {
+		out.text(revisionStart(w, "del", update))
+		resultRun(w, out, run, update.result, true)
+		out.text(`</${w.names.el("del")}>`)
+	}
+
+	if (result !== "") {
+		out.text(revisionStart(w, "ins", update))
+		resultRun(w, out, run, result, removed)
+		out.text(`</${w.names.el("ins")}>`)
+	}
+}
+
+function sameUpdate(a: FieldUpdate | null, b: FieldUpdate | null): boolean {
+	return a === b || (a !== null && b !== null && a.result === b.result && a.author === b.author && a.date === b.date && a.id === b.id)
+}
+
 // A source field with a new result (see the top).
 function rewrite(w: StoryWriting, out: Out, node: Node): void {
 	const part = w.part
@@ -182,8 +190,6 @@ function rewrite(w: StoryWriting, out: Out, node: Node): void {
 	if (field === undefined) throw new DocxWriteError("unsupported", "A field whose result cannot be written anew")
 
 	const names = w.names
-	const result = node.attrs["result"] as string
-	const removed = deleted(node)
 	const run = formattingRun(part, field, node)
 
 	if (field.simple) {
@@ -203,7 +209,7 @@ function rewrite(w: StoryWriting, out: Out, node: Node): void {
 		}
 
 		keepMarkers(w, out, field.begin + 1, part.end(field.begin))
-		resultRun(w, out, run, result, removed)
+		resultRuns(w, out, run, node)
 		out.text(`</${document.name(xml)}>`)
 
 		return
@@ -214,47 +220,58 @@ function rewrite(w: StoryWriting, out: Out, node: Node): void {
 
 	if (field.separate >= 0) {
 		// Up to the separator, then its run closed.
-		w.copySource(out, part.start(beginRun), part.byteEnd(field.separate), false)
+		copyItems(w, out, beginRun, endRun, part.byteEnd(field.separate), part.parent(beginRun), deleted(node))
 		out.text(`</${document.name(part.node(part.parent(field.separate)))}>`)
 		keepMarkers(w, out, field.separate + 1, field.end)
 	} else {
 		// No result yet: the code up to the end character, its run closed, and a separator.
-		w.copySource(out, part.start(beginRun), part.start(field.end), false)
+		copyItems(w, out, beginRun, endRun, part.start(field.end), part.parent(beginRun), deleted(node))
 		out.text(`</${document.name(part.node(endRun))}><${names.el("r")}>`)
 		runProperties(w, out, endRun)
 		out.text(`${fieldChar(names, "separate")}</${names.el("r")}>`)
 	}
 
-	resultRun(w, out, run, result, removed)
+	resultRuns(w, out, run, node)
 	out.text(`<${names.el("r")}>`)
 	runProperties(w, out, endRun)
 	w.copyNode(out, part.node(field.end))
 	out.text(`</${names.el("r")}>`)
 }
 
-// A field the editor made.
-function writeNew(w: StoryWriting, out: Out, node: Node): void {
+// A field the editor made (`ffData`: a copy of a legacy form field's, in its begin character).
+function writeNew(w: StoryWriting, out: Out, node: Node, ffData: string): void {
 	const names = w.names
 	const instruction = node.attrs["instruction"] as string
 	const result = node.attrs["result"] as string
 	const removed = deleted(node)
 	const run = (inner: string): string => `<${names.el("r")}>${inner}</${names.el("r")}>`
+	const tracked = fieldUpdateOf(node) !== null
 
 	if (node.attrs["simple"] === true) {
 		const tag = names.empty("fldSimple", [["instr", instruction]])
 
-		out.text(result === "" ? tag : `${tag.slice(0, -2)}>${run(resultContent(names, result, removed))}</${names.el("fldSimple")}>`)
+		if (result === "" && !tracked) {
+			out.text(tag)
+
+			return
+		}
+
+		out.text(`${tag.slice(0, -2)}>`)
+		resultRuns(w, out, NO_SOURCE, node)
+		out.text(`</${names.el("fldSimple")}>`)
 
 		return
 	}
 
+	const begin = fieldChar(names, "begin")
+
 	out.text(
-		run(fieldChar(names, "begin")) +
+		run(ffData === "" ? begin : `${begin.slice(0, -2)}>${ffData}</${names.el("fldChar")}>`) +
 			run(instructionElement(names, instruction, removed)) +
-			run(fieldChar(names, "separate")) +
-			(result === "" ? "" : run(resultContent(names, result, removed))) +
-			run(fieldChar(names, "end"))
+			run(fieldChar(names, "separate"))
 	)
+	resultRuns(w, out, NO_SOURCE, node)
+	out.text(run(fieldChar(names, "end")))
 }
 
 const FIELD: AtomWriter = {
@@ -265,7 +282,7 @@ const FIELD: AtomWriter = {
 		const own = src(node)
 
 		if (own === NO_SOURCE) {
-			writeNew(w, out, node)
+			writeNew(w, out, node, legacyFieldCopyData(w.names, node))
 
 			return
 		}
@@ -279,10 +296,12 @@ const FIELD: AtomWriter = {
 
 		const part = w.part
 		const end = node.attrs["end"] as number
+		const stored = storedResult(part, own, end, part.kinds[own] === Item.FieldSimple)
 
-		if ((node.attrs["result"] as string) === storedResult(part, own, end, part.kinds[own] === Item.FieldSimple)) {
-			if (deleted(node)) copyDeleted(w, out, own, end)
-			else w.copySource(out, part.start(own), part.byteEnd(end), false)
+		if ((node.attrs["result"] as string) === stored.result && sameUpdate(fieldUpdateOf(node), stored.update)) {
+			const simple = part.kinds[own] === Item.FieldSimple
+
+			copyItems(w, out, own, end, part.byteEnd(end), simple ? own : part.parent(own), deleted(node))
 
 			return
 		}
@@ -291,18 +310,28 @@ const FIELD: AtomWriter = {
 	}
 }
 
-// A character of a field spanning paragraphs, inside the run opened for it; the begin holds the instruction.
+// A character of a field spanning paragraphs (begin, separate, end) or an instruction text of one
+// ("instruction", "deletedInstruction" for a w:delInstrText of the file), inside the run opened for it. One of
+// the file's is its bytes, an instruction text written anew when a tracked change deleted it or a deletion of
+// it was rejected.
 const FIELD_CHAR: AtomWriter = {
 	type: nodes.field_char,
+	// An instruction text deleted, or one the file has deleted no longer (a deletion rejected).
+	edited: node =>
+		(node.attrs["kind"] === "instruction" && deleted(node)) || (node.attrs["kind"] === "deletedInstruction" && !deleted(node)),
 	write(w, out, node) {
 		const kind = node.attrs["kind"] as string
+
+		if (kind === "instruction" || kind === "deletedInstruction") {
+			out.text(instructionElement(w.names, node.attrs["instruction"] as string, deleted(node)))
+
+			return
+		}
 
 		if (kind !== "begin" && kind !== "separate" && kind !== "end")
 			throw new DocxWriteError("unsupported", `A field character "${kind}"`)
 
 		out.text(fieldChar(w.names, kind, kind === "begin" && node.attrs["dirty"] === true))
-
-		if (kind === "begin") out.text(instructionElement(w.names, node.attrs["instruction"] as string, deleted(node)))
 	}
 }
 

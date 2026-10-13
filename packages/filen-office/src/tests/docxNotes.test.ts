@@ -110,6 +110,30 @@ describe("docx footnotes and endnotes", () => {
 		editor.dispose()
 	})
 
+	it("leaves out a pasted copy of the reference to a note it made, as copies of the file's references", async () => {
+		const opened = await pagedEditor(buildDocx({ body: p("Alpha beta") + p("Second") }))
+		const { editor } = opened
+
+		caret(editor, 6)
+		expect(await run(editor, { type: "note.insertFootnote" })).toBe(true)
+		type(editor, "the note")
+		editor.exitStory()
+
+		// The first paragraph's text, reference and all, copied into the second as a drag-copy without the sanitiser does.
+		const body = editor.body.session
+		const first = body.state.doc.child(0)
+
+		body.dispatch(body.state.tr.setSelection(TextSelection.create(body.state.doc, first.nodeSize + 2)))
+		expect(body.dispatch(body.state.tr.replaceSelection(body.state.doc.slice(1, first.nodeSize - 1)))).toBe(true)
+		expect(body.state.doc.textContent.match(/Alpha beta/g)).toHaveLength(2)
+		expect(noteReferences(body.state.doc)).toHaveLength(1)
+
+		const bytes = await saved(opened)
+
+		expect((await read(bytes, "word/document.xml")).match(/<w:footnoteReference /g)).toHaveLength(1)
+		editor.dispose()
+	})
+
 	it("inserts an endnote with a custom mark after the selection, numbered after the document's own", async () => {
 		const opened = await pagedEditor(WITH_NOTES)
 		const { editor } = opened

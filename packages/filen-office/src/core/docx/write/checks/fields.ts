@@ -33,8 +33,34 @@ interface Markup {
 	readonly spanning: number
 }
 
-// What the markup of `document` holds (placeholders of a skeleton are passed over).
-function readMarkup(document: XmlDocument): Markup {
+// The field characters of a source part, by item (read once per part).
+const SOURCE_CHARS = new WeakMap<StoryPart, Int32Array>()
+
+function sourceChars(part: StoryPart): Int32Array {
+	let found = SOURCE_CHARS.get(part)
+
+	if (found === undefined) {
+		const out: number[] = []
+
+		for (let item = 0; item < part.count; item++) if (part.kinds[item] === Item.FieldChar) out.push(item)
+
+		found = Int32Array.from(out)
+		SOURCE_CHARS.set(part, found)
+	}
+
+	return found
+}
+
+// The source copies a skeleton's placeholders stand for, in order: `trusted` entries of the stories written
+// (four numbers each, the source byte range at 2 and 3).
+interface Copies {
+	readonly part: StoryPart
+	readonly trusted: readonly number[]
+}
+
+// What the markup of `document` holds. A skeleton's placeholders count the field characters of the source
+// they copy (a field spanning paragraphs may be partly rewritten), nothing else of theirs.
+function readMarkup(document: XmlDocument, copies?: Copies): Markup {
 	const reader = partReader(document)
 	// Per field open, its begin's paragraph while its code is still being read (no separate yet), else -1.
 	const open: number[] = []
@@ -51,29 +77,77 @@ function readMarkup(document: XmlDocument): Markup {
 		return at
 	}
 
+	// A field character in paragraph `paragraph` (a copied source paragraph's is told apart by its negative id).
+	const fieldChar = (type: string | undefined, paragraph: number): void => {
+		const last = open.length - 1
+
+		if (type === "begin") {
+			open.push(paragraph)
+		} else if (type === "separate" && last >= 0 && (open[last] ?? -1) !== -1) {
+			if (paragraph !== open[last]) spanning++
+
+			open[last] = -1
+		} else if (type === "end" && last >= 0) {
+			if ((open[last] ?? -1) !== -1 && paragraph !== open[last]) spanning++
+
+			open.pop()
+		} else {
+			unmatched++
+		}
+	}
+	const chars = copies === undefined ? undefined : sourceChars(copies.part)
+	let copy = 0
+
 	for (let node = 0; node < document.count; node++) {
-		if (document.kinds[node] !== NodeKind.Element || reader.group(node) !== Ns.W) continue
+		if (document.kinds[node] !== NodeKind.Element) continue
+
+		if (copies !== undefined && chars !== undefined && document.name(node) === "_") {
+			const part = copies.part
+			const from = copies.trusted[copy * 4 + 2] ?? 0
+			const to = copies.trusted[copy * 4 + 3] ?? 0
+			let low = 0
+			let high = chars.length
+
+			copy++
+
+			while (low < high) {
+				const mid = (low + high) >> 1
+
+				if (part.start(chars[mid] ?? 0) < from) low = mid + 1
+				else high = mid
+			}
+
+			for (let k = low; k < chars.length && part.start(chars[k] ?? 0) < to; k++) {
+				const item = chars[k] ?? 0
+				const type = part.fieldCharType(item)
+				let paragraph = item
+
+				while (paragraph >= 0 && part.kinds[paragraph] !== Item.Paragraph) paragraph = part.parent(paragraph)
+
+				fieldChar(
+					type === FieldCharType.Begin
+						? "begin"
+						: type === FieldCharType.Separate
+							? "separate"
+							: type === FieldCharType.End
+								? "end"
+								: undefined,
+					-2 - paragraph
+				)
+			}
+
+			continue
+		}
+
+		if (reader.group(node) !== Ns.W) continue
 
 		switch (document.localName(node)) {
 			case "fldChar": {
 				const type = reader.attr(node, Ns.W, "fldCharType")
-				const last = open.length - 1
 
-				if (type === "begin") {
-					open.push(paragraphOf(node))
+				fieldChar(type, paragraphOf(node))
 
-					if (DIRTY.has(reader.attr(node, Ns.W, "dirty") ?? "")) dirty++
-				} else if (type === "separate" && last >= 0 && (open[last] ?? -1) >= 0) {
-					if (paragraphOf(node) !== open[last]) spanning++
-
-					open[last] = -1
-				} else if (type === "end" && last >= 0) {
-					if ((open[last] ?? -1) >= 0 && paragraphOf(node) !== open[last]) spanning++
-
-					open.pop()
-				} else {
-					unmatched++
-				}
+				if (type === "begin" && DIRTY.has(reader.attr(node, Ns.W, "dirty") ?? "")) dirty++
 
 				break
 			}
@@ -305,7 +379,13 @@ const FIELD_CHECK: DocxCheck = {
 			STATES.set(input, written)
 		}
 
-		const markup = readMarkup(part.document)
+		const trusted: number[] = []
+
+		if (part.skeleton)
+			for (const story of input.changes.stories)
+				if (story.part === part.part) for (const value of story.output.trusted) trusted.push(value)
+
+		const markup = readMarkup(part.document, part.skeleton ? { part: part.part, trusted } : undefined)
 
 		if (markup.unmatched > 0 && markup.unmatched > (input.original.has(part.name) ? sourceUnmatched(part.part) : 0))
 			fail("content", `${part.name}: field characters without their partners`)

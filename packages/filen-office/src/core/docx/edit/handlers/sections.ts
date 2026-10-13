@@ -31,7 +31,7 @@ const document: DocumentHandlers = {
 	},
 	"section.deleteBreak": {
 		// Exact at run time (the break of the caret's section): here, whether there is a break at all.
-		enabled: context => writable(context) && !context.context.review.tracking && context.editor.edits.model.sections.length > 1,
+		enabled: context => writable(context) && context.editor.edits.model.sections.length > 1,
 		run: context => deleteSectionBreak(bound(context).editor)
 	},
 	"page.setup": {

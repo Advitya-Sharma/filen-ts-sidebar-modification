@@ -3,6 +3,7 @@ import type { Transaction } from "prosemirror-state"
 import { DocAttrStep, ReplaceAroundStep, ReplaceStep } from "prosemirror-transform"
 import { changedRanges } from "../edit/invariants/core"
 import { docxSchema, survivorsOf, type MarkerList } from "../edit/schema"
+import { fieldUpdateOf } from "../fields/evaluate"
 
 // Where a story's comments and tracked changes are, kept up to date edit by edit: positions are mapped
 // through each transaction and only the paragraphs it changed are read again (as spelling does), so no
@@ -25,7 +26,10 @@ export const ReviewKind = {
 	CELL: 10,
 	// Properties changed while tracking: a paragraph's (recorded by the editor, or its source's w:pPrChange),
 	// or a source table's, row's, cell's or section's.
-	PROPERTIES: 11
+	PROPERTIES: 11,
+	// A field's result updated while tracking (Word's deletion of the old result and insertion of the new one;
+	// fields/result.ts FieldUpdate), one change.
+	FIELD_UPDATE: 12
 } as const
 
 export type ReviewKind = (typeof ReviewKind)[keyof typeof ReviewKind]
@@ -591,6 +595,10 @@ function scan(doc: Node, from: number, to: number, found: Found, sources?: Reado
 
 				if (kind !== undefined) found.add(pos, pos + node.nodeSize, kind, revisionMarkId(mark))
 			}
+
+			const update = node.type === nodes.field ? fieldUpdateOf(node) : null
+
+			if (update !== null) found.add(pos, pos + node.nodeSize, ReviewKind.FIELD_UPDATE, update.id)
 
 			return
 		}

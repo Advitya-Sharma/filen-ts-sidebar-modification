@@ -151,9 +151,18 @@ export const DOCX_COMMAND_CATALOGUE = {
 		"control.item.add",
 		"control.item.remove"
 	],
-	drawings: ["image.insert", "drawing.resize", "drawing.position", "drawing.wrap", "drawing.altText", "drawing.rotate", "drawing.delete"],
+	drawings: [
+		"image.insert",
+		"drawing.resize",
+		"drawing.position",
+		"drawing.wrap",
+		"drawing.altText",
+		"drawing.rotate",
+		"drawing.crop",
+		"drawing.delete"
+	],
 	math: ["equation.insert", "equation.edit"],
-	view: ["view.reflow"]
+	view: ["view.reflow", "view.fieldCodes", "view.fieldCode"]
 } as const satisfies Record<string, readonly DocxEditorCommandType[]>
 
 export type DocxCommandFeature = keyof typeof DOCX_COMMAND_CATALOGUE

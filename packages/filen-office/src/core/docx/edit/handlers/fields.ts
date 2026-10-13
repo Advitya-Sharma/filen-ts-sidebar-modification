@@ -2,13 +2,15 @@ import { closeHistory } from "prosemirror-history"
 import type { Node } from "prosemirror-model"
 import { NodeSelection, type EditorState, type Transaction } from "prosemirror-state"
 import { addBookmark, bookmarkIndex, canAddBookmark, deleteBookmark, renameBookmark } from "../../fields/bookmarks"
-import { FieldEvaluation, pagedFieldHost, parseFieldCode, updatableField, type FieldHost } from "../../fields/evaluate"
+import { FieldEvaluation, fieldUpdateOf, pagedFieldHost, parseFieldCode, updatableField, type FieldHost } from "../../fields/evaluate"
+import type { FieldUpdate } from "../../fields/result"
 import {
 	addTocBookmarks,
 	buildToc,
-	partHasToc,
+	mayHoldToc,
 	takenElsewhere,
 	tocAt,
+	tocInserted,
 	tocEntries,
 	tocInstruction,
 	tocOptions,
@@ -16,7 +18,7 @@ import {
 	type TocRegion
 } from "../../fields/toc"
 import type { PagedEditor } from "../../paged/editor"
-import { markable } from "../../review/track"
+import { isDeleted, revisionStamp, type RevisionStamp } from "../../review/track"
 import { AttrChanges } from "../attrs"
 import { markCommand, markInternal } from "../invariants/index"
 import type { DocumentCommandContext, DocumentHandlers, FeatureHandlers } from "../registry"
@@ -25,10 +27,12 @@ import type { DocxEditorSession } from "../session"
 
 // Fields, bookmarks and tables of contents (document commands: an update reads the laid-out pages). Updates
 // are Word's manual ones: Update Field (F9) on the selection or the field at the caret, Update All on the
-// story, Update Table on a table of contents. Each waits for layout to settle once, computes every result
-// from the pages as they are and applies them as one step (no layout per field); a table rebuilt or inserted
-// lays out once more and gets its page numbers in a second step that undoes with the first. Updates are
-// not recorded as revisions (a result is the field's bookkeeping); an insertion is, while tracking.
+// story, Update Table on a table of contents (its page numbers alone, or the table rebuilt). Each waits for
+// layout to settle once, computes every result from the pages as they are and applies them as one step (no
+// layout per field); a table rebuilt or inserted lays out once more and gets its page numbers in a second step
+// that undoes with the first. While tracking changes an update is recorded as Word records it: a field's old
+// result deleted and the new one inserted (its tracked update), a table rebuilt as the old table deleted and
+// the new one inserted; results of fields inserted while tracking are part of their insertion.
 
 const nodes = docxSchema.nodes
 
@@ -68,7 +72,7 @@ function fieldAtCaret(state: EditorState): { node: Node; pos: number } | undefin
 }
 
 // Whether the selection is on a table of contents: a locked block of one of the file's selected, or a paragraph
-// holding field characters of one the editor made.
+// holding field characters of one built as paragraphs.
 function onToc(state: EditorState): boolean {
 	const { $from } = state.selection
 	const selected = $from.nodeAfter
@@ -84,19 +88,60 @@ function onToc(state: EditorState): boolean {
 	return found
 }
 
-// Fields are recorded as tracked insertions where tracked changes mark field characters and field atoms (see
-// review/track.ts markable); until then an insertion of one is applied untracked rather than half recorded.
-const FIELDS_TRACKED = markable(nodes.field_char.create({ kind: "end" })) && markable(nodes.field.create())
+// The fields Shift+F9 switches: those of the selection (field atoms and the begin characters of fields
+// spanning paragraphs), else the field at the caret, else the table of contents the caret is in; with the
+// range of the document they are in (a table of contents whole).
+function fieldsToSwitch(session: DocxEditorSession): { readonly fields: Node[]; readonly from: number; readonly to: number } {
+	const state = session.state
+	const { from, to, empty } = state.selection
+	const out: Node[] = []
+	let spans = false
 
-function inserting(session: DocxEditorSession, tr: Transaction): Transaction {
-	return session.context.review.tracking && !FIELDS_TRACKED ? markCommand(tr) : tr
+	if (!empty)
+		state.doc.nodesBetween(from, to, node => {
+			if (node.type === nodes.field) out.push(node)
+			else if (node.type === nodes.field_char && node.attrs["kind"] === "begin") {
+				out.push(node)
+				spans = true
+			}
+
+			return !node.isLeaf
+		})
+
+	if (out.length > 0) {
+		if (!spans) return { fields: out, from, to }
+
+		// A field spanning paragraphs changes how all of them are shown.
+		let start = from
+		let end = to
+
+		for (const region of tocRegions(session)) {
+			if (region.from >= to || region.to <= from) continue
+
+			start = Math.min(start, region.from)
+			end = Math.max(end, region.to)
+		}
+
+		return { fields: out, from: start, to: end }
+	}
+
+	const caret = fieldAtCaret(state)
+
+	if (caret !== undefined) return { fields: [caret.node], from: caret.pos, to: caret.pos + caret.node.nodeSize }
+
+	const region = onToc(state) ? tocAt(session) : undefined
+	const first = region === undefined || region.source ? undefined : state.doc.nodeAt(region.from)
+
+	first?.forEach(child => {
+		if (out.length === 0 && child.type === nodes.field_char && child.attrs["kind"] === "begin") out.push(child)
+	})
+
+	return { fields: out, from: region?.from ?? from, to: region?.to ?? to }
 }
 
-// Stories a table of contents was inserted into this session (Update Table stays offered there).
-const INSERTED = new WeakSet<DocxEditorSession>()
-
+// Update Table stays offered in a story a table was inserted into.
 function hasToc(session: DocxEditorSession): boolean {
-	return INSERTED.has(session) || partHasToc(session.story.part) || onToc(session.state)
+	return mayHoldToc(session) || onToc(session.state)
 }
 
 // Applies `tr` to `session` as part of the undo step `joined` began, when nothing changed the document since.
@@ -107,18 +152,45 @@ function dispatchJoined(session: DocxEditorSession, tr: Transaction, joined: Joi
 	return session.dispatch(tr) ? { doc: session.state.doc, tr: session.state.tr } : undefined
 }
 
-// New results for the fields of [from, to) of the session's document.
-function fieldChanges(host: FieldHost, session: DocxEditorSession, from: number, to: number): AttrChanges {
+// Who records the session's updates: undefined while not tracking, null while tracking without an author name
+// (nothing can be recorded then).
+function updateStamp(session: DocxEditorSession): RevisionStamp | null | undefined {
+	return session.context.review.tracking ? (revisionStamp(session.context.identity) ?? null) : undefined
+}
+
+// A field's attributes for a new result: while tracking (`stamp`), with its tracked update (the result before
+// its first tracked update, the latest stamp; none when the result is back to that), except for a field
+// inserted while tracking, whose result is part of its insertion.
+function updated(session: DocxEditorSession, node: Node, result: string, stamp: RevisionStamp | undefined): Record<string, unknown> {
+	if (stamp === undefined || docxSchema.marks.insertion.isInSet(node.marks) !== undefined) return { result }
+
+	const update = fieldUpdateOf(node)
+	const before = update?.result ?? (node.attrs["result"] as string)
+	const next: FieldUpdate | null =
+		before === result
+			? null
+			: Object.freeze({
+					result: before,
+					author: stamp.author,
+					date: stamp.date,
+					id: update?.id ?? String(session.context.ids.next("revision"))
+				})
+
+	return { result, update: next }
+}
+
+// New results for the fields of [from, to) of the session's document (deleted fields stay as they are).
+function fieldChanges(host: FieldHost, session: DocxEditorSession, from: number, to: number, stamp?: RevisionStamp): AttrChanges {
 	const evaluation = new FieldEvaluation(host, session, session.context.identity.now())
 	const changes = new AttrChanges()
 
 	session.state.doc.nodesBetween(from, to, (node, pos) => {
 		if (node.type !== nodes.field) return !node.isLeaf
-		if (!updatableField(session, node)) return false
+		if (!updatableField(session, node) || isDeleted(node)) return false
 
 		const result = evaluation.result(node, pos)
 
-		if (result !== undefined && result !== node.attrs["result"]) changes.set(node, pos, { result })
+		if (result !== undefined && result !== node.attrs["result"]) changes.set(node, pos, updated(session, node, result, stamp))
 
 		return false
 	})
@@ -160,15 +232,17 @@ function insertionPoint(tr: Transaction): number | undefined {
 	return pos + 1
 }
 
-// The page numbers of the table at `pos`, once layout caught up with it.
+// The page numbers of the table at `pos` (or the first after it: a table rebuilt while tracking follows the
+// old one, deleted), once layout caught up with it.
 async function refreshToc(editor: PagedEditor, session: DocxEditorSession, pos: number, joined: Joined): Promise<Joined> {
 	await editor.whenSettled()
 
-	const region = tocRegions(session).find(candidate => candidate.from <= pos && pos < candidate.to)
+	const region = tocRegions(session).find(candidate => pos < candidate.to)
+	const stamp = updateStamp(session)
 
-	if (region === undefined || session.readOnly) return joined
+	if (region === undefined || session.readOnly || stamp === null) return joined
 
-	return applyChanges(session, fieldChanges(pagedFieldHost(editor), session, region.from, region.to), joined) ?? joined
+	return applyChanges(session, fieldChanges(pagedFieldHost(editor), session, region.from, region.to, stamp), joined) ?? joined
 }
 
 // A table of contents with `instruction` in place of `region` (else at the selection), its entries' page
@@ -181,8 +255,11 @@ async function placeToc(
 	joined: Joined | undefined
 ): Promise<Joined | undefined> {
 	const options = tocOptions(parseFieldCode(instruction))
+	// Rebuilt while tracking: the old table stays, deleted, with its markers and section break.
+	const tracked = region !== undefined && session.context.review.tracking
 
-	if (!options.supported) return undefined
+	// A table of the file kept as locked blocks cannot be recorded deleted.
+	if (!options.supported || (tracked && region.source)) return undefined
 
 	const host = pagedFieldHost(editor)
 	const entries = tocEntries(host, session, options, region?.from ?? -1, region?.to ?? -1)
@@ -204,8 +281,8 @@ async function placeToc(
 		entries,
 		pos: at,
 		templates: region?.templates ?? new Map<number, number>(),
-		markers: region?.markers ?? NO_MARKERS,
-		sectPr: region?.sectPr ?? NO_SOURCE,
+		markers: tracked ? NO_MARKERS : (region?.markers ?? NO_MARKERS),
+		sectPr: tracked ? NO_SOURCE : (region?.sectPr ?? NO_SOURCE),
 		taken: takenElsewhere(host.sessions, session),
 		page: entry => headingPage(host, session, entry.pos)
 	})
@@ -217,11 +294,13 @@ async function placeToc(
 
 	addTocBookmarks(tr, build)
 
-	// A table of the file is locked blocks no edit may delete: replaced by the session's own step.
-	const first = dispatchJoined(session, region === undefined ? inserting(session, tr.scrollIntoView()) : markInternal(tr), joined)
+	// Inserted as the user's edit (a tracked insertion while tracking); replaced by the session's own step (a
+	// table of the file may be locked blocks no edit may delete), or, while tracking, as the user's edit:
+	// recorded deleted and inserted.
+	const first = dispatchJoined(session, region === undefined ? tr.scrollIntoView() : tracked ? tr : markInternal(tr), joined)
 
 	if (first === undefined) return undefined
-	if (region === undefined) INSERTED.add(session)
+	if (region === undefined) tocInserted(session)
 
 	return refreshToc(editor, session, tr.mapping.slice(steps).map(at, -1), first)
 }
@@ -233,18 +312,21 @@ async function update(editor: PagedEditor, all: boolean): Promise<boolean> {
 
 	await editor.whenSettled()
 
-	if (session.readOnly || editor.session !== session) return false
+	const stamp = updateStamp(session)
+
+	if (session.readOnly || editor.session !== session || stamp === null) return false
 
 	const state = session.state
 	const caret = all ? undefined : fieldAtCaret(state)
 	const from = all ? 0 : (caret?.pos ?? state.selection.from)
 	const to = all ? state.doc.content.size : caret === undefined ? state.selection.to : caret.pos + caret.node.nodeSize
 	const tables = tocRegions(session).filter(
-		region => region.source && region.updatable && region.from < Math.max(to, from + 1) && region.to > from
+		region => region.source && region.updatable && stamp === undefined && region.from < Math.max(to, from + 1) && region.to > from
 	)
-	let joined = applyChanges(session, fieldChanges(pagedFieldHost(editor), session, from, to), undefined)
+	let joined = applyChanges(session, fieldChanges(pagedFieldHost(editor), session, from, to, stamp), undefined)
 
-	// The file's tables are rebuilt (their entries are bytes); the last first, so earlier ones keep their places.
+	// The file's tables kept as locked blocks are rebuilt (their entries are bytes; not while tracking, which
+	// could not record them deleted); the last first, so earlier ones keep their places.
 	for (const table of tables.reverse()) {
 		await editor.whenSettled()
 
@@ -261,15 +343,18 @@ async function updateToc(editor: PagedEditor, pagesOnly: boolean): Promise<boole
 
 	await editor.whenSettled()
 
-	if (session.readOnly || editor.session !== session) return false
+	const stamp = updateStamp(session)
+
+	if (session.readOnly || editor.session !== session || stamp === null) return false
 
 	const region = tocAt(session)
 
 	if (region === undefined || !region.updatable) return false
 
-	// Page numbers alone are fields of the editor's tables; the file's is rebuilt whole (its entries are bytes).
+	// Page numbers alone are the table's PAGEREF fields, updated in place; a table kept as locked blocks is
+	// rebuilt whole (its entries are bytes).
 	if (pagesOnly && !region.source) {
-		applyChanges(session, fieldChanges(pagedFieldHost(editor), session, region.from, region.to), undefined)
+		applyChanges(session, fieldChanges(pagedFieldHost(editor), session, region.from, region.to, stamp), undefined)
 
 		return true
 	}
@@ -322,12 +407,28 @@ function insertField(editor: PagedEditor, instruction: string): boolean {
 
 	if (result !== undefined && result !== "") tr.setNodeAttribute(pos, "result", result)
 
-	return session.dispatch(inserting(session, tr.scrollIntoView()))
+	return session.dispatch(tr.scrollIntoView())
 }
 
 const insertable = (context: DocumentCommandContext): boolean => writable(context) && inParagraph(context.session.state)
 
 const document: DocumentHandlers = {
+	"view.fieldCodes": {
+		enabled: () => true,
+		run: context => context.editor.setFieldCodes(!context.editor.fieldCodes)
+	},
+	"view.fieldCode": {
+		enabled: context => {
+			const state = context.session.state
+
+			return !state.selection.empty || fieldAtCaret(state) !== undefined || onToc(state)
+		},
+		run: context => {
+			const { fields, from, to } = fieldsToSwitch(context.session)
+
+			return context.editor.toggleFieldCodes(fields, { from, to })
+		}
+	},
 	"field.update": {
 		enabled: context => {
 			const state = context.session.state

@@ -7,6 +7,7 @@ import {
 	GRAPHIC_INTS,
 	OBJECT_FLOATS,
 	OBJECT_INTS,
+	ObjectKind,
 	PageGraphic,
 	Region,
 	RevisionView,
@@ -475,6 +476,43 @@ describe("sections", () => {
 		expect(result.pages[1]?.numberText).toBe("iv")
 		// The footer sits above its distance from the page bottom.
 		expect(pageLines(result, 0).find(line => line.region === Region.FOOTER)?.bottom).toBeCloseTo(1056 - 48, 1)
+	})
+
+	it("draws legacy check boxes and drop-down lists from their form field data, as Word does", async () => {
+		const form = (data: string, instr: string, result = ""): string =>
+			`<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="F"/><w:enabled/>${data}</w:ffData></w:fldChar></w:r>` +
+			`<w:r><w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r>` +
+			(result === "" ? "" : `<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">${result}</w:t></w:r>`) +
+			'<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		const run = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`
+		const result = await layout({
+			body:
+				`<w:p>${run("a ")}${form('<w:checkBox><w:sizeAuto/><w:default w:val="0"/></w:checkBox>', "FORMCHECKBOX")}${run(" b ")}` +
+				`${form('<w:checkBox><w:size w:val="40"/><w:default w:val="0"/><w:checked/></w:checkBox>', "FORMCHECKBOX", " ")}${run(" c ")}` +
+				`${form('<w:checkBox><w:sizeAuto/><w:default w:val="1"/></w:checkBox>', "FORMCHECKBOX")}</w:p>` +
+				`<w:p>${run("pick ")}${form('<w:ddList><w:result w:val="1"/><w:listEntry w:val="One"/><w:listEntry w:val="Two"/></w:ddList>', "FORMDROPDOWN")}${run(" or ")}` +
+				`${form('<w:ddList><w:listEntry w:val="First"/><w:listEntry w:val="Second"/></w:ddList>', "FORMDROPDOWN")}</w:p>`
+		})
+		const [boxes, lists] = body(result, 0)
+
+		// The stored result (" ") gives way to the box, drawn as Word draws it (a square, crossed when checked); checked
+		// as w:checked says, else w:default; as tall as its begin run's text (12 pt) or its own size (w:size, 20 pt).
+		expect(boxes?.text).toBe("a \ufffc b \ufffc c \ufffc")
+		expect(lists?.text).toBe("pick Two or First")
+
+		const objects = result.objects
+		const drawn = [...objects.kinds.keys()]
+			.filter(id => objects.kinds[id] === ObjectKind.CHECKBOX)
+			.map(id => ({ checked: objects.indices[id], width: objects.widths[id], height: objects.heights[id] }))
+
+		expect(drawn).toEqual([
+			{ checked: 0, width: 16, height: 16 },
+			{ checked: 1, width: 80 / 3, height: 80 / 3 },
+			{ checked: 1, width: 16, height: 16 }
+		])
+
+		// The second box at its own size (w:size, 20 pt) makes its line taller than the others.
+		expect((boxes?.bottom ?? 0) - (boxes?.top ?? 0)).toBeGreaterThan((lists?.bottom ?? 0) - (lists?.top ?? 0) + 10)
 	})
 
 	it("numbers pages in body fields where the text is, also in a paragraph split across pages", async () => {

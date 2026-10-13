@@ -2,12 +2,18 @@ import { NodeKind, type XmlDocument } from "../../../xml/index"
 import { Ns } from "../../model/namespaces"
 import { partReader, type PartReader } from "../../model/reader"
 import { DocxVerifyError } from "../failure"
+import { ownedByCopy } from "../newStory"
+import { joinBytes, type Relationship } from "../../../opc/index"
 import type { CheckInput, CheckedPart, DocxCheck } from "./index"
 
 // The section properties a save wrote (new or spliced w:sectPr; copies of the source's are not looked at
 // again): each header and footer reference resolves to a part of its content type that the package has, a
 // section refers to at most one of each type, page size and margins leave room for text, columns fit in it,
 // line numbering counts from no negative value, and a recorded change has an author and holds no references.
+// A header or footer part the save creates as a copy of another (stories/clone.ts) relates what it holds as
+// the original does: each relationship it keeps, by id, of the same type to the same target, or for a part a
+// copy owns (a chart, an embedded object: write/newStory.ts ownedByCopy) to a part the save added holding the
+// same bytes of the same content type, whose own relationships read so in turn.
 
 const WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 const CONTENT_TYPES: Readonly<Record<string, string>> = { headerReference: `${WML}.header+xml`, footerReference: `${WML}.footer+xml` }
@@ -103,7 +109,74 @@ async function checkSection(input: CheckInput, part: string, reader: PartReader,
 	}
 }
 
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+	if (a.length !== b.length) return false
+
+	for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) return false
+
+	return true
+}
+
+// Whether part `copy` the save added is a copy of the original's part `source` (see above).
+async function copiedPart(input: CheckInput, source: string, copy: string, seen: Set<string>): Promise<boolean> {
+	const added = input.changes.add.find(change => change.name === copy)
+
+	if (
+		added === undefined ||
+		input.original.has(copy) ||
+		input.types.typeOf(copy) !== (await input.original.opc.contentTypes()).typeOf(source)
+	)
+		return false
+	if (!sameBytes(await joinBytes(added.bytes), await input.original.opc.read(source))) return false
+	if (seen.has(copy)) return true
+
+	seen.add(copy)
+
+	return await sameRelationships(input, (await input.original.relationships(source)).all, copy, seen)
+}
+
+// Whether part `name` as written relates as `kept` does (see above).
+async function sameRelationships(input: CheckInput, kept: readonly Relationship[], name: string, seen: Set<string>): Promise<boolean> {
+	const written = await input.relationshipsOf(name)
+
+	for (const relationship of kept) {
+		const now = written.byId(relationship.id)
+
+		if (now === undefined || now.type !== relationship.type || now.external !== relationship.external) return false
+		if (relationship.external) {
+			if (now.target !== relationship.target) return false
+
+			continue
+		}
+
+		if (relationship.partName === undefined) {
+			if (now.target !== relationship.target) return false
+
+			continue
+		}
+
+		const target = now.partName
+
+		if (target === undefined || !input.exists(target)) return false
+		if (target === relationship.partName) continue
+		if (!ownedByCopy(relationship, input.original) || !(await copiedPart(input, relationship.partName, target, seen))) return false
+	}
+
+	return true
+}
+
+async function copiedRelationships(input: CheckInput, checked: CheckedPart): Promise<void> {
+	const kept = checked.part?.relationships.all ?? []
+
+	if (kept.length === 0 || input.original.has(checked.name)) return
+
+	if (!(await sameRelationships(input, kept, checked.name, new Set())))
+		fail("danglingReference", `${checked.name}: a relationship reads otherwise than in the part it was copied from`)
+}
+
 async function part(input: CheckInput, checked: CheckedPart): Promise<void> {
+	await copiedRelationships(input, checked)
+
 	if (checked.part === undefined || checked.part.name !== input.original.mainPart) return
 
 	const document = checked.document

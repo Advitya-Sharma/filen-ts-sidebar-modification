@@ -14,19 +14,21 @@ import { partReader } from "../model/reader"
 import type { XmlDocument } from "../../xml/index"
 import { Item, Revision, RevisionFlag, type StoryPart } from "../model/index"
 import { ReviewKind, revisionMarkId, type ReviewEntry, type ReviewIndex } from "./index"
-import { resolveSectionChanges } from "../stories/sections"
+import { bodySections, keepShown, resolveSectionChanges, sectionStates } from "../stories/sections"
+import { fieldUpdateOf, resolvedFieldUpdate } from "../fields/evaluate"
 import { paragraphChange, propertyMarks, setParagraphChange, withParagraphChange, type ParagraphAttrs, type ParagraphChange } from "./track"
 
 // Accepting and rejecting tracked changes, as one internal transaction of the story (one undo step): an
 // accepted insertion or rejected deletion keeps its content and loses the mark, an accepted deletion or
 // rejected insertion removes its content (range markers and comment anchors in it stay), a formatting or
 // paragraph property change keeps (accept) or restores (reject) the properties, an inserted or deleted
-// paragraph mark stays or joins its paragraph with the next one. Moves go as pairs with their range markers.
+// paragraph mark stays or joins its paragraph with the next one (a body section break goes with its mark: the
+// sections combine as when it is deleted). Moves go as pairs with their range markers.
 // Rows and cells inserted or deleted go or stay the same way; a property change of a table, row or cell (the
 // editor's record, or the source's w:tblPrChange, w:tblGridChange, w:trPrChange, w:tblPrExChange, w:tcPrChange
-// and w:cellMerge) keeps or restores the properties. Changes inside locked blocks, property changes of sections
-// and numbering, structure a rejection cannot restore (a grid the rows no longer fit) and paragraph marks that
-// cannot join (a section break, no paragraph after) are skipped and counted.
+// and w:cellMerge) keeps or restores the properties. Changes inside locked blocks, property changes of numbering
+// and of sections outside the body, structure a rejection cannot restore (a grid the rows no longer fit) and
+// paragraph marks that cannot join (no paragraph after) are skipped and counted.
 
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
@@ -70,6 +72,10 @@ interface Plan {
 	readonly outliving: { from: number; to: number; markers: MarkerList }[]
 	readonly joined: MarkerAttrs[]
 	readonly dropped: Set<string>
+	// The body's section breaks by their paragraph's position (and the index of the section each ends), and
+	// those whose paragraph mark goes, which take the break with them.
+	readonly sectionEnds: ReadonlyMap<number, number>
+	readonly breaks: Map<number, number>
 	resolved: Set<string>
 	skipped: Set<string>
 }
@@ -86,7 +92,11 @@ function targetOf(state: EditorState, index: ReviewIndex, scope: ReviewScope): T
 	if ("all" in scope) return { ranges: [[0, size]], id: undefined }
 
 	const byId = (id: string): Target | undefined => {
-		const ranges = bridged(state.doc, index.changeRanges(id))
+		// The body's own section properties count at the story's end, past its content (resolved as section edits).
+		const ranges = bridged(
+			state.doc,
+			index.changeRanges(id).map(([from, to]): [number, number] => [Math.min(from, size), Math.min(to, size)])
+		)
 
 		return ranges.length === 0 ? undefined : { ranges, id }
 	}
@@ -108,7 +118,7 @@ function targetOf(state: EditorState, index: ReviewIndex, scope: ReviewScope): T
 
 	// A change without an id of its own (neither the file's nor the editor's) is the range itself.
 	return entry.id === "#-1" || entry.id.startsWith("new:")
-		? { ranges: [[entry.from, Math.max(entry.to, entry.from + 1)]], id: entry.id }
+		? { ranges: [[Math.min(entry.from, size), Math.min(Math.max(entry.to, entry.from + 1), size)]], id: entry.id }
 		: byId(entry.id)
 }
 
@@ -179,6 +189,7 @@ export function resolveChanges(session: DocxEditorSession, index: ReviewIndex, s
 
 	if (target === undefined) return { tr: null, resolved: 0, skipped: 0 }
 
+	const body = session.story.story.kind === "body"
 	const plan: Plan = {
 		removeMarks: [],
 		addMarks: [],
@@ -194,11 +205,12 @@ export function resolveChanges(session: DocxEditorSession, index: ReviewIndex, s
 		outliving: [],
 		joined: [],
 		dropped: new Set(),
+		sectionEnds: body ? sectionEndsOf(state.doc, session.story.part) : new Map(),
+		breaks: new Map(),
 		resolved: new Set(),
 		skipped: new Set()
 	}
 	const moves = "all" in scope ? [] : movePairs(session, state.doc, target.ranges)
-	const body = session.story.story.kind === "body"
 	const seen = new Set<number>()
 
 	for (const [from, to] of target.ranges) collect(session, state.doc, from, to, target.id, false, accept, plan, seen)
@@ -216,28 +228,54 @@ export function resolveChanges(session: DocxEditorSession, index: ReviewIndex, s
 	dropComments(plan)
 
 	let tr = apply(state, plan, accept, session.story.part, session.context.store)
-	// The body's section property changes (w:sectPrChange) are resolved as section edits (stories/sections.ts).
-	const sections = body ? state.tr : null
-	const sectionCount =
-		sections === null
-			? 0
-			: resolveSectionChanges(
-					sections,
-					session.context,
-					session.story.part,
-					state.doc,
-					accept,
-					"all" in scope ? undefined : "id" in scope ? { id: scope.id } : target.id !== undefined ? { id: target.id } : scope
-				)
+	let sectionCount = 0
 
-	if (sections !== null && sectionCount > 0) {
-		if (tr === null) tr = markInternal(sections)
-		else for (const step of sections.steps) tr.step(step.map(tr.mapping) ?? step)
+	// The body's section property changes (w:sectPrChange) are resolved as section edits (stories/sections.ts),
+	// on the document the rest left; the sections that took in a removed break's text keep what they showed.
+	if (body) {
+		const sections = tr ?? state.tr
+		const range =
+			"all" in scope || "id" in scope || target.id !== undefined
+				? undefined
+				: { from: sections.mapping.map(scope.from, -1), to: sections.mapping.map(scope.to, 1) }
+
+		sectionCount = resolveSectionChanges(
+			sections,
+			session.context,
+			session.story.part,
+			accept,
+			"all" in scope ? undefined : "id" in scope ? { id: scope.id } : target.id !== undefined ? { id: target.id } : range
+		)
+
+		const removed = new Set<number>()
+
+		for (const [index, pos] of plan.breaks) if (!plan.skipped.has(`p:${String(pos)}`)) removed.add(index)
+
+		keepShown(
+			sections,
+			session.context,
+			session.story.part,
+			sectionStates(session.context.model.sections, state.doc, session.story.part),
+			removed
+		)
+
+		if (tr === null && sections.docChanged) tr = markInternal(sections)
 	}
 
 	skippedBy.set(session, plan.skipped.size)
 
 	return { tr, resolved: plan.resolved.size + sectionCount, skipped: plan.skipped.size }
+}
+
+// The body's section breaks: the position of each paragraph ending a section, and the section's index.
+function sectionEndsOf(doc: Node, part: StoryPart): Map<number, number> {
+	const out = new Map<number, number>()
+
+	bodySections(doc, part).forEach((section, index) => {
+		if (section.pos >= 0 && section.node?.type === nodes.paragraph) out.set(section.pos, index)
+	})
+
+	return out
 }
 
 // Whether a mark is one the scope resolves: any, the one with `id`, or (`moves`) a move's.
@@ -391,6 +429,14 @@ function collectInline(
 		}
 	}
 
+	const update = node.type === nodes.field && !moves ? fieldUpdateOf(node) : null
+
+	if (update !== null && (id === undefined || id === update.id)) {
+		plan.resolved.add(update.id)
+
+		for (const [name, value] of Object.entries(resolvedFieldUpdate(node, accept))) plan.attrs.push({ pos, name, value })
+	}
+
 	// What outlives deletion (range markers, comment anchors) only loses the marks.
 	if (remove && survivorsOf(node).length === 0) {
 		const last = plan.deletes[plan.deletes.length - 1]
@@ -540,9 +586,20 @@ function collectParagraph(
 		}
 	}
 
-	if (join) {
-		// A mark holding a section break stays as it was; one with no paragraph after it goes with its paragraph
-		// when that is left empty (see joinWithNext).
+	const ends = join ? plan.sectionEnds.get(pos) : undefined
+
+	if (ends !== undefined) {
+		// A body section break goes with its mark: the paragraph joins the one after it (whose section takes its
+		// text, as when the break is deleted), or without one after it, the break leaves the paragraph.
+		plan.breaks.set(ends, pos)
+
+		if (next?.type === nodes.paragraph) {
+			plan.joins.push(pos)
+			plan.joined.push(...(next.attrs["before"] as MarkerList))
+		} else plan.attrs.push({ pos, name: "sectPr", value: NO_SOURCE })
+	} else if (join) {
+		// A mark holding a section break (in a table cell) stays as it was; one with no paragraph after it goes
+		// with its paragraph when that is left empty (see joinWithNext).
 		const blocked =
 			(node.attrs["sectPr"] as number) !== NO_SOURCE ||
 			next === null ||
@@ -1165,7 +1222,14 @@ function apply(state: EditorState, plan: Plan, accept: boolean, part: StoryPart,
 	// What moves nothing first: marks and attributes.
 	for (const { from, to, mark } of plan.removeMarks) tr.removeMark(from, to, mark)
 	for (const { from, to, mark } of plan.addMarks) tr.addMark(from, to, mark)
-	for (const { pos, name, value } of plan.attrs) tr.setNodeAttribute(pos, name, value)
+	for (const { pos, name, value } of plan.attrs) {
+		tr.setNodeAttribute(pos, name, value)
+
+		// A break taken off its paragraph takes its section edit with it.
+		const edit = name === "sectPr" ? marks.section_change.isInSet(tr.doc.nodeAt(pos)?.marks ?? []) : undefined
+
+		if (edit !== undefined) tr.removeNodeMark(pos, edit)
+	}
 
 	for (const { pos, change } of plan.changes) {
 		const node = tr.doc.nodeAt(pos)
@@ -1621,10 +1685,13 @@ function rebuildNode(
 
 	if (attrs === undefined && lists === undefined && change === undefined) return content === node.content ? node : node.copy(content)
 
+	const nodeMarks = change === undefined ? node.marks : withParagraphChange(node.marks, change)
+
 	return node.type.create(
 		{ ...node.attrs, ...attrs, ...lists },
 		content,
-		change === undefined ? node.marks : withParagraphChange(node.marks, change)
+		// A break taken off its paragraph takes its section edit with it.
+		attrs?.["sectPr"] === NO_SOURCE ? marks.section_change.removeFromSet(nodeMarks) : nodeMarks
 	)
 }
 

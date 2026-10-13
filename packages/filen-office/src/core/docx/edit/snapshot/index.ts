@@ -3,7 +3,7 @@ import type { DocxEditContext } from "../context"
 import type { DocxEditorSession } from "../session"
 import { commentOf, type DocxCommentContext } from "./comments"
 import { drawingOf, type DocxDrawingContext } from "./drawing"
-import { fieldOf, type DocxFieldContext } from "./field"
+import { fieldOf, type DocxFieldContext, type DocxFieldRefusal } from "./field"
 import { linkOf, valuesOf, type DocxLinkContext, type DocxValuesSnapshot } from "./formats"
 import { equationOf, type DocxEquationContext } from "./math"
 import { reviewOf, type DocxReviewSnapshot } from "./review"
@@ -69,6 +69,7 @@ export type {
 	DocxDrawingContext,
 	DocxEquationContext,
 	DocxFieldContext,
+	DocxFieldRefusal,
 	DocxLinkContext,
 	DocxReviewSnapshot,
 	DocxStoryContext,

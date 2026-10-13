@@ -1,7 +1,7 @@
 import type { Mark, Node } from "prosemirror-model"
 import type { Transaction } from "prosemirror-state"
 import type { DocxEditContext } from "../edit/context"
-import { NO_MARKERS, NO_SOURCE, docxSchema, type MarkerList, type MarkerNodeAttrs, type SpacingAttrs } from "../edit/schema"
+import { NO_MARKERS, NO_SOURCE, docxSchema, survivorsOf, type MarkerList, type MarkerNodeAttrs, type SpacingAttrs } from "../edit/schema"
 import type { DocxEditorSession } from "../edit/session"
 import { FieldCharType, Item, type StoryPart } from "../model/index"
 import { Ns } from "../model/namespaces"
@@ -14,9 +14,9 @@ import { hasSwitch, outlineLevels, parseFieldCode, rangeText, switchOf, type Fie
 // levels, \t styles, \c captions of a SEQ identifier, \b a bookmark's range, \h links, \n levels without page
 // numbers, \p the separator before the number, \w and \x tabs and line breaks kept), the headings collected,
 // and the entry paragraphs built as Word builds them: styled "toc N", the heading's list number and text in a
-// link to a hidden _Toc bookmark at the heading, then a tab and a PAGEREF field. A table the file has spans
-// paragraphs and is kept as locked blocks; one the editor made is a field_char begin in its first entry and an
-// end in its last, until a save makes it the file's.
+// link to a hidden _Toc bookmark at the heading, then a tab and a PAGEREF field. A table spans paragraphs: a
+// field_char begin in its first entry and an end in its last (the file's keep their items: edited in place,
+// their page numbers updated alone), or, for a table of the file whose structure does not fit, locked blocks.
 
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
@@ -111,7 +111,7 @@ export interface TocRegion {
 	readonly from: number
 	readonly to: number
 	readonly instruction: string
-	// Kept as the file's locked blocks (else the editor's field_char paragraphs).
+	// Kept as the file's locked blocks (else field_char paragraphs).
 	readonly source: boolean
 	// Whether an update can rebuild it: its blocks hold nothing but the table.
 	readonly updatable: boolean
@@ -270,7 +270,7 @@ function partStyle(part: StoryPart, item: number): string | undefined {
 	return style < 0 ? undefined : part.reader.attr(style, Ns.W, "val")
 }
 
-// The begin field_char of a table the editor made, at the start of `paragraph`.
+// The begin field_char of a table of contents in `paragraph`.
 function newBegin(paragraph: Node): Node | undefined {
 	let found: Node | undefined
 
@@ -278,11 +278,19 @@ function newBegin(paragraph: Node): Node | undefined {
 		if (found === undefined && child.type === nodes.field_char && child.attrs["kind"] === "begin") found = child
 	})
 
-	return found !== undefined && parseFieldCode(found.attrs["instruction"] as string).type === "TOC" ? found : undefined
+	// One a tracked change deleted (the old table of one rebuilt while tracking) is no table any more.
+	return found !== undefined &&
+		marks.deletion.isInSet(found.marks) === undefined &&
+		marks.move_from.isInSet(found.marks) === undefined &&
+		parseFieldCode(found.attrs["instruction"] as string).type === "TOC"
+		? found
+		: undefined
 }
 
-// A table the editor made starting in `parent`'s child `index`: up to the paragraph holding its end.
-function newRegion(parent: Node, index: number, pos: number): TocRegion | undefined {
+// A table of field_char paragraphs starting in `parent`'s child `index`: up to the paragraph holding its end.
+// Its range markers and comment references outlive a rebuild; its paragraphs of the file give their properties
+// to the rebuilt entries of their levels.
+function newRegion(context: DocxEditContext, part: StoryPart, parent: Node, index: number, pos: number): TocRegion | undefined {
 	const begin = newBegin(parent.child(index))
 
 	if (begin === undefined) return undefined
@@ -290,12 +298,29 @@ function newRegion(parent: Node, index: number, pos: number): TocRegion | undefi
 	let depth = 0
 	let at = pos
 	let sectPr = NO_SOURCE
+	const lists: MarkerList[] = []
+	const templates = new Map<number, number>()
 
 	for (let k = index; k < parent.childCount; k++) {
 		const block = parent.child(k)
 
 		if (block.type !== nodes.paragraph) return undefined
 		if ((block.attrs["sectPr"] as number) !== NO_SOURCE) sectPr = block.attrs["sectPr"] as number
+
+		const item = block.attrs["src"] as number
+
+		blockMarkers(block, lists)
+		block.forEach(child => {
+			const markers = survivorsOf(child)
+
+			if (markers.length > 0) lists.push(markers)
+		})
+
+		if (item !== NO_SOURCE && part.kinds[item] === Item.Paragraph) {
+			const level = tocLevel(context, partStyle(part, item))
+
+			if (level !== undefined && !templates.has(level)) templates.set(level, item)
+		}
 
 		let closed = false
 
@@ -314,10 +339,10 @@ function newRegion(parent: Node, index: number, pos: number): TocRegion | undefi
 				to: at,
 				instruction: begin.attrs["instruction"] as string,
 				source: false,
-				updatable: true,
+				updatable: tocOptions(parseFieldCode(begin.attrs["instruction"] as string)).supported,
 				sectPr,
-				markers: NO_MARKERS,
-				templates: new Map()
+				markers: lists.length === 0 ? NO_MARKERS : lists.flat(),
+				templates
 			}
 	}
 
@@ -338,7 +363,7 @@ export function tocRegions(session: DocxEditorSession): TocRegion[] {
 				child.type === nodes.locked_block
 					? sourceRegion(context, part, parent, index, pos)
 					: child.type === nodes.paragraph
-						? newRegion(parent, index, pos)
+						? newRegion(context, part, parent, index, pos)
 						: undefined
 
 			if (region !== undefined) {
@@ -629,6 +654,7 @@ export function buildToc(input: TocBuildInput): TocBuild {
 					})
 		),
 		nodes.field_char.create({ kind: "begin", instruction, dirty: false }),
+		nodes.field_char.create({ kind: "instruction", instruction }),
 		nodes.field_char.create({ kind: "separate" })
 	)
 	// The end in the last entry; a table of one paragraph ends in one of its own after it (a field within one
@@ -713,11 +739,33 @@ export function partHasToc(part: StoryPart): boolean {
 	return sourceTocs(part).size > 0
 }
 
+// Stories a table of contents was inserted into this session.
+const INSERTED = new WeakSet<DocxEditorSession>()
+
+export function tocInserted(session: DocxEditorSession): void {
+	INSERTED.add(session)
+}
+
+// Whether a story may hold a table of contents (without looking at its document): its part has one, or one
+// was inserted.
+export function mayHoldToc(session: DocxEditorSession): boolean {
+	return INSERTED.has(session) || partHasToc(session.story.part)
+}
+
 // Whether nothing shows before a table's begin in its first paragraph or after its end in its last (a rebuild
 // writes neither, so it keeps all there is).
 function rebuildable(part: StoryPart, toc: SourceToc): boolean {
 	const beginRun = part.parent(toc.begin)
 	const endRun = part.parent(toc.end)
+
+	if (part.parent(toc.first) !== part.parent(toc.last)) return false
+
+	// Paragraphs only (a rebuild writes paragraphs), range markers between them.
+	for (let block = toc.first; block <= toc.last; block = part.end(block)) {
+		const kind = part.kinds[block] ?? 0
+
+		if (kind !== Item.Paragraph && !BLANK_KINDS.has(kind)) return false
+	}
 
 	return (
 		part.kinds[beginRun] === Item.Run &&
@@ -728,20 +776,33 @@ function rebuildable(part: StoryPart, toc: SourceToc): boolean {
 	)
 }
 
-const TOC_PARAGRAPHS = new WeakMap<StoryPart, ReadonlyMap<number, { readonly instruction: string; readonly updatable: boolean }>>()
+// Why an update cannot rebuild a table of contents: its switches ask for what the editor does not build, or its
+// paragraphs hold more than the table.
+export type TocRefusal = "unsupportedTable" | "tableWithOtherContent"
 
-// The table of contents of the file a source paragraph is part of, if any: its instruction and whether an update
-// can rebuild it (read once per part).
-export function sourceTocOf(part: StoryPart, paragraph: number): { readonly instruction: string; readonly updatable: boolean } | undefined {
+export interface SourceTocInfo {
+	readonly instruction: string
+	readonly refusal: TocRefusal | null
+}
+
+const TOC_PARAGRAPHS = new WeakMap<StoryPart, ReadonlyMap<number, SourceTocInfo>>()
+
+// The table of contents of the file a source paragraph is part of, if any: its instruction and why an update
+// cannot rebuild it (null: it can), read once per part.
+export function sourceTocOf(part: StoryPart, paragraph: number): SourceTocInfo | undefined {
 	let map = TOC_PARAGRAPHS.get(part)
 
 	if (map === undefined) {
-		const out = new Map<number, { readonly instruction: string; readonly updatable: boolean }>()
+		const out = new Map<number, SourceTocInfo>()
 
 		for (const toc of sourceTocs(part).values()) {
 			const value = Object.freeze({
 				instruction: toc.instruction,
-				updatable: rebuildable(part, toc) && tocOptions(parseFieldCode(toc.instruction)).supported
+				refusal: !tocOptions(parseFieldCode(toc.instruction)).supported
+					? "unsupportedTable"
+					: rebuildable(part, toc)
+						? null
+						: "tableWithOtherContent"
 			})
 
 			for (let item = toc.first; item <= toc.last; item++) if (part.kinds[item] === Item.Paragraph) out.set(item, value)

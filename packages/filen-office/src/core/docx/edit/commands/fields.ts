@@ -21,7 +21,7 @@ export type FieldCommand =
 const document = { write: true, scope: "document", group: "field" } as const
 
 export const FIELD_COMMANDS: readonly DocxCommandInfo<FieldCommand["type"]>[] = [
-	{ type: "field.update", labelKey: "docx.field.update", icon: "field-update", async: true, ...document },
+	{ type: "field.update", labelKey: "docx.field.update", icon: "field-update", shortcut: "F9", async: true, ...document },
 	{ type: "field.updateAll", labelKey: "docx.field.updateAll", icon: "field-update-all", async: true, ...document },
 	{ type: "toc.insert", labelKey: "docx.toc.insert", icon: "toc", async: true, ...document },
 	{ type: "toc.update", labelKey: "docx.toc.update", icon: "toc-update", async: true, ...document },

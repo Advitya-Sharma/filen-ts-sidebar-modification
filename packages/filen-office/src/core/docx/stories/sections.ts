@@ -8,11 +8,19 @@ import { markInternal } from "../edit/invariants/index"
 import { NO_MARKERS, NO_SOURCE, docxSchema } from "../edit/schema"
 import { NO_HEADERS, inheritHeaders } from "../model/document"
 import { Ns } from "../model/namespaces"
-import { Item, partReader, type HeaderFooterSet, type Section, type Story, type StoryPart } from "../model/index"
+import { Item, RevisionFlag, partReader, type HeaderFooterSet, type Section, type Story, type StoryPart } from "../model/index"
 import type { NotePositionProps, PageMargins, SectionProps } from "../props/index"
 import type { DocxEditorSession } from "../edit/session"
 import type { PagedEditor } from "../paged/editor"
-import { revisionStamp, type RevisionStamp } from "../review/track"
+import { resolveChanges, storyReviewIndex } from "../review/accept"
+import {
+	paragraphChange,
+	revisionStamp,
+	setParagraphChange,
+	splitParagraphMark,
+	withParagraphChange,
+	type RevisionStamp
+} from "../review/track"
 import { resolveSection } from "../styles/index"
 import { Names, Out, freshContainer, spliceChildren } from "../write/markup"
 import { R_NAMESPACE, W_NAMESPACE, sectionWritten } from "../write/source"
@@ -766,6 +774,12 @@ export function trackedEdit(
 	}
 }
 
+// Whether a section's properties can be edited: it ends with a paragraph or the body's own properties, not a
+// locked block (written as its bytes, break included).
+export function editableSection(section: BodySection): boolean {
+	return section.node === undefined || section.node.type === nodes.paragraph
+}
+
 // Sets the edit of section `section` in `tr` (the body's transaction): the section_change mark of its
 // paragraph, or the doc's sectionChanges.
 export function setSectionEdit(tr: Transaction, section: BodySection, edit: SectionEdit): void {
@@ -853,7 +867,7 @@ export function editSections(
 	for (const index of indices) {
 		const state = states[index]
 
-		if (state === undefined) continue
+		if (state === undefined || !editableSection(state)) continue
 
 		const previous = editOf(state)
 		const next = update(state, previous)
@@ -899,20 +913,24 @@ export function canBreak(editor: PagedEditor): boolean {
 
 	for (let depth = $from.depth; depth > 0; depth--) if ($from.node(depth).type === nodes.table_cell) return false
 
-	// Not while tracking: Word records the break's paragraph mark as inserted, which rejecting cannot take out
-	// across a section break (review/accept.ts keeps such marks).
-	return !session.context.review.tracking
+	return true
 }
 
 // A section break of `kind` at the caret: the paragraph splits there and its first half ends a new section
 // with the properties (and header and footer references) of the one it was in, as Word makes it; the section
 // after it starts with `kind`, shows the same headers and footers (linked to the new one) and continues the
-// page numbers.
+// page numbers. While tracking, Word's record: the first half's paragraph mark (holding the new w:sectPr) is
+// inserted, and what the section after it changed is a property change of that section, one change with it.
 export function insertSectionBreak(editor: PagedEditor, kind: string): boolean {
 	if (!canBreak(editor)) return false
 
 	const { session, part, states } = bodySectionsOf(editor)
 	const context = session.context
+	const stamp = sectionStamp(context)
+
+	if (stamp === null) return false
+
+	const recorded = stamp === undefined ? undefined : { ...stamp, id: context.ids.next("revision") }
 	const state = session.state
 	const tr = state.tr.deleteSelection()
 	const $pos = tr.selection.$from
@@ -921,13 +939,14 @@ export function insertSectionBreak(editor: PagedEditor, kind: string): boolean {
 	const index = sectionIndexAt(state.doc, part, state.selection.head)
 	const section = states[index]
 
-	if (section === undefined || paragraph.type !== nodes.paragraph) return false
+	if (section === undefined || paragraph.type !== nodes.paragraph || !editableSection(section)) return false
 
 	const key = newSectionKey(context)
 	const current = editOf(section)
 	const base = current.base
-	// The later half is the paragraph as it was (its mark, its break); the first half is new.
-	const firstMarks = paragraph.marks.filter(mark => mark.type !== marks.section_change)
+	// The later half is the paragraph as it was (its mark, its break); the first half ends with a new mark.
+	const split = splitParagraphMark(paragraph, session, recorded)
+	const firstMarks = paragraph.marks.filter(mark => mark.type !== marks.section_change && mark.type !== marks.paragraph_change)
 	const laterMarks = paragraph.marks.filter(mark => mark.type !== marks.para_id && mark.type !== marks.paragraph_change)
 	const fresh: SectionEdit = {
 		...current,
@@ -946,9 +965,10 @@ export function insertSectionBreak(editor: PagedEditor, kind: string): boolean {
 		footers: { default: null, first: null, even: null },
 		...(pageStart === undefined ? {} : { pageNumbering: { format: props.pageNumbering?.format ?? null, start: null } })
 	}
+
 	tr.split($pos.pos)
-	tr.setNodeMarkup(start, undefined, { ...paragraph.attrs, sectPr: key }, [
-		...firstMarks,
+	tr.setNodeMarkup(start, undefined, { ...paragraph.attrs, sectPr: key, revision: split.first.revision }, [
+		...withParagraphChange(firstMarks, split.first.change),
 		marks.section_change.create({ value: Object.freeze(fresh) })
 	])
 
@@ -958,9 +978,14 @@ export function insertSectionBreak(editor: PagedEditor, kind: string): boolean {
 
 	if (laterNode === null) return false
 
-	tr.setNodeMarkup(later, undefined, { ...laterNode.attrs, before: NO_MARKERS }, laterMarks)
+	tr.setNodeMarkup(
+		later,
+		undefined,
+		{ ...laterNode.attrs, before: NO_MARKERS, revision: split.later.revision },
+		withParagraphChange(laterMarks, split.later.change)
+	)
 
-	const next = linked
+	const next = recorded === undefined ? linked : trackedEdit(current, linked, recorded, sourceChanged(context, part, current))
 
 	if (section.pos < 0) {
 		setSectionEdit(tr, section, next)
@@ -979,33 +1004,59 @@ export function insertSectionBreak(editor: PagedEditor, kind: string): boolean {
 	return session.dispatch(markInternal(tr).scrollIntoView())
 }
 
-// Whether the caret's section ends with a break the command can remove (not while tracking: Word records it as
-// a deleted paragraph mark, which accepting cannot join across a section break).
+// Whether the caret's section ends with a break the command can remove (while tracking, one not deleted yet).
 export function canDeleteBreak(editor: PagedEditor): boolean {
 	const { session, states } = bodySectionsOf(editor)
 
-	if (session.readOnly || session.context.review.tracking) return false
+	if (session.readOnly) return false
 
 	const index = caretSection(editor)
+	const node = states[index]?.node
 
-	return index < states.length - 1 && states[index]?.node?.type === nodes.paragraph
+	return (
+		index < states.length - 1 &&
+		node?.type === nodes.paragraph &&
+		!(session.context.review.tracking && ((node.attrs["revision"] as number) & RevisionFlag.Deleted) !== 0)
+	)
 }
 
 // Removes the break ending the caret's section: its text joins the section after it, which keeps its own
 // properties, as Word combines them ("the new combined section will use the formatting of the second
-// section"), and the headers and footers it showed.
+// section"), and the headers and footers it showed. While tracking, Word's record: the break's paragraph mark
+// is deleted (accepted, the sections combine so); a break the author inserted while tracking goes for real,
+// as rejecting it takes it out.
 export function deleteSectionBreak(editor: PagedEditor): boolean {
 	if (!canDeleteBreak(editor)) return false
 
-	const { session, states } = bodySectionsOf(editor)
+	const { session, part, states } = bodySectionsOf(editor)
+	const context = session.context
 	const index = caretSection(editor)
 	const section = states[index]
-	const after = states[index + 1]
 
-	if (section === undefined || after === undefined || section.node === undefined) return false
+	if (section === undefined || section.node === undefined) return false
 
 	const tr = session.state.tr
 	const node = section.node
+
+	if (context.review.tracking) {
+		const stamp = sectionStamp(context)
+
+		if (stamp === null || stamp === undefined) return false
+
+		const change = paragraphChange(node)
+		const inserted = ((node.attrs["revision"] as number) & RevisionFlag.Inserted) !== 0 ? change?.inserted : undefined
+
+		if (inserted?.id !== undefined && inserted.author === stamp.author) {
+			const outcome = resolveChanges(session, storyReviewIndex(session), { id: String(inserted.id) }, false)
+
+			return outcome.tr !== null && session.dispatch(outcome.tr)
+		}
+
+		tr.setNodeAttribute(section.pos, "revision", (node.attrs["revision"] as number) | RevisionFlag.Deleted)
+		setParagraphChange(tr, section.pos, node, { ...change, deleted: { ...stamp, id: context.ids.next("revision") } })
+
+		return session.dispatch(markInternal(tr))
+	}
 
 	tr.setNodeMarkup(
 		section.pos,
@@ -1013,35 +1064,59 @@ export function deleteSectionBreak(editor: PagedEditor): boolean {
 		{ ...node.attrs, sectPr: NO_SOURCE },
 		node.marks.filter(mark => mark.type !== marks.section_change)
 	)
+	keepShown(tr, context, part, states, new Set([index]))
 
-	// What the later section showed through its link to this one stays shown.
+	return session.dispatch(markInternal(tr))
+}
+
+// After the breaks of sections `removed` (indices of `before`, the body's sections as they were) went, each
+// section their text joined keeps showing what it showed through its link to them: their own header and footer
+// references, nearest first, where it has none of a type. `tr`'s document has the breaks taken out.
+export function keepShown(
+	tr: Transaction,
+	context: DocxEditContext,
+	part: StoryPart,
+	before: readonly SectionState[],
+	removed: ReadonlySet<number>
+): void {
+	if (removed.size === 0) return
+
 	const inherited = (own: HeaderFooterSet, from: HeaderFooterSet): HeaderReferenceEdits | undefined => {
 		let out: Record<string, number> | undefined
 
-		for (const type of HEADER_TYPES) {
-			if (own[type] < 0 && from[type] >= 0) (out ??= {})[type] = from[type]
-		}
+		for (const type of HEADER_TYPES) if (own[type] < 0 && from[type] >= 0) (out ??= {})[type] = from[type]
 
 		return out
 	}
-	const headers = inherited(after.headers, section.headers)
-	const footers = inherited(after.footers, section.footers)
+	let shift = 0
 
-	if (headers !== undefined || footers !== undefined) {
-		const edit = editOf(after)
+	for (let index = 0; index < before.length; index++) {
+		if (removed.has(index)) {
+			shift++
 
-		setSectionEdit(
-			tr,
-			{ ...after, pos: after.pos < 0 ? -1 : tr.mapping.map(after.pos) },
-			{
+			continue
+		}
+
+		for (let gone = index - 1; gone >= 0 && removed.has(gone); gone--) {
+			const now = sectionStates(context.model.sections, tr.doc, part)[index - shift]
+			const was = before[gone] as SectionState
+
+			if (now === undefined || now.key !== before[index]?.key || !editableSection(now)) break
+
+			const headers = inherited(now.headers, was.headers)
+			const footers = inherited(now.footers, was.footers)
+
+			if (headers === undefined && footers === undefined) continue
+
+			const edit = editOf(now)
+
+			setSectionEdit(tr, now, {
 				...edit,
 				...(headers === undefined ? {} : { headers: { ...edit.headers, ...headers } }),
 				...(footers === undefined ? {} : { footers: { ...edit.footers, ...footers } })
-			}
-		)
+			})
+		}
 	}
-
-	return session.dispatch(markInternal(tr))
 }
 
 // The twips in a measure parsed from a w:sectPr.
@@ -1226,23 +1301,23 @@ export function sectionChangeId(state: BodySection, context: DocxEditContext, pa
 }
 
 // Accepts (or rejects) the tracked property changes of the body's sections whose break lies in [from, to)
-// (the whole body when undefined) or whose change is `id`, in `tr`. Accepted, a change's properties stay and
-// its record goes; rejected, the properties it recorded come back (references stay, as Word records none).
-// The number resolved.
+// (the whole body when undefined) or whose change is `id`, in `tr` (positions of its document, which the steps
+// added here do not move). Accepted, a change's properties stay and its record goes; rejected, the properties
+// it recorded come back (references stay, as Word records none). The number resolved.
 export function resolveSectionChanges(
 	tr: Transaction,
 	context: DocxEditContext,
 	part: StoryPart,
-	doc: Node,
 	accept: boolean,
 	scope: { readonly from: number; readonly to: number } | { readonly id: string } | undefined
 ): number {
+	const doc = tr.doc
 	let resolved = 0
 
 	for (const state of bodySections(doc, part)) {
 		const id = sectionChangeId(state, context, part)
 
-		if (id === undefined) continue
+		if (id === undefined || !editableSection(state)) continue
 		if (scope !== undefined && "id" in scope && scope.id !== id) continue
 		if (scope !== undefined && "from" in scope) {
 			const end = state.pos < 0 ? doc.content.size : state.pos + (state.node?.nodeSize ?? 1) - 1
@@ -1269,7 +1344,7 @@ export function resolveSectionChanges(
 			next = accept ? { ...edit, change: null } : { ...edit, rejected: true, change: null }
 		}
 
-		setSectionEdit(tr, state.pos < 0 ? state : { ...state, pos: tr.mapping.map(state.pos) }, next)
+		setSectionEdit(tr, state, next)
 		resolved++
 	}
 

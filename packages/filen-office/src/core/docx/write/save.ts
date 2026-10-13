@@ -5,6 +5,7 @@ import {
 	relationshipsPartName,
 	relativeTarget,
 	sliceClock,
+	RELATIONSHIPS_NAMESPACE,
 	crc32,
 	BytePieces,
 	type SliceClock,
@@ -12,15 +13,17 @@ import {
 	type ByteSink,
 	type ByteSource,
 	type NewRelationship,
+	type Relationship,
 	type PartBytes,
 	type PartChange,
+	Relationships,
 	type Slicing,
 	type WriteZipOptions,
 	type ZipPlan,
 	OpcError,
 	ZipError
 } from "../../opc/index"
-import { XmlError, decodeUtf8, encodeUtf8, type XmlDocument } from "../../xml/index"
+import { XmlError, decodeUtf8, encodeUtf8, escapeAttribute, type XmlDocument } from "../../xml/index"
 import type { Node } from "prosemirror-model"
 import type { DocxEditContext, NewStory } from "../edit/context"
 import type { NewList } from "../edit/formats"
@@ -29,7 +32,16 @@ import type { StoryPart } from "../model/index"
 import type { DocxPackage } from "../package"
 import { DocxSaveError, DocxVerifyError } from "./failure"
 import { planNested } from "./nested"
-import { NEW_STORY_PARTS, WRITTEN_REFERENCES, isInsertionPoint, referenceKey, type NewStoryContainer } from "./newStory"
+import {
+	NEW_STORY_PARTS,
+	WRITTEN_REFERENCES,
+	clonedRevisions,
+	copiedPartName,
+	ownedByCopy,
+	isInsertionPoint,
+	referenceKey,
+	type NewStoryContainer
+} from "./newStory"
 import { NUMBERING_CONTENT_TYPE, planNumbering } from "./numbering"
 import { orphanedHyperlinks } from "./orphans"
 import { PART_CONTRIBUTORS, type PartContributor, type RootDeclarations, type SaveParts } from "./parts/index"
@@ -152,6 +164,24 @@ class RelationshipPlan {
 
 		return id
 	}
+}
+
+// A relationships part holding `relationships` (their ids) for part `source`: internal targets relative to it.
+function relationshipsBytes(source: string, relationships: Relationships): Uint8Array {
+	let xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<Relationships xmlns="${RELATIONSHIPS_NAMESPACE}">`
+
+	for (const relationship of relationships.all) {
+		const target =
+			relationship.external || relationship.partName === undefined
+				? relationship.target
+				: relativeTarget(source, relationship.partName)
+
+		xml +=
+			`<Relationship Id="${escapeAttribute(relationship.id)}" Type="${escapeAttribute(relationship.type)}" ` +
+			`Target="${escapeAttribute(target)}"${relationship.external ? ' TargetMode="External"' : ""}/>`
+	}
+
+	return encodeUtf8(`${xml}</Relationships>`)
 }
 
 async function optionalXml(pkg: DocxPackage, name: string | undefined, slicing: Slicing | undefined): Promise<XmlDocument | undefined> {
@@ -292,14 +322,16 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 	}
 
 	const model = context.model
-	let revision = model.maxIds.revision
+	// Above the ids copies of stories took (stories/clone.ts).
+	let revision = Math.max(model.maxIds.revision, clonedRevisions(context))
 	const relationships = new Map<string, RelationshipPlan>()
-	const relationshipsOf = async (part: string): Promise<RelationshipPlan> => {
+	// `seed`: the relationships a part the save creates starts with (a copy of another part keeps its ids).
+	const relationshipsOf = async (part: string, seed?: Relationships): Promise<RelationshipPlan> => {
 		const key = partKey(part)
 		let plan = relationships.get(key)
 
 		if (plan === undefined) {
-			plan = new RelationshipPlan((await pkg.relationships(part)).all.map(relationship => relationship.id))
+			plan = new RelationshipPlan((seed ?? (await pkg.relationships(part))).all.map(relationship => relationship.id))
 			relationships.set(key, plan)
 		}
 
@@ -313,7 +345,11 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 	const numbering = planNumbering(await optionalXml(pkg, numberingPart, clock), context.numbering, lists)
 
 	// Relationship plans exist for every story part up front, so hyperlinks get their ids in order.
-	for (const session of sessions) await relationshipsOf(session.story.part.name)
+	for (const session of sessions) {
+		const part = session.story.part
+
+		await relationshipsOf(part.name, pkg.has(part.name) ? undefined : part.relationships)
+	}
 
 	const replace: PartChange[] = []
 	const add: PartChange[] = []
@@ -336,6 +372,8 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		list.push(change)
 	}
 	const own = (name: string): boolean => partKey(name) === partKey(CONTENT_TYPES_PART) || partKey(name).endsWith(".rels")
+	// The relationships of a copy of a story part, those to parts it owns pointing at their copies.
+	const copiedRelationships = new Map<string, Relationships>()
 	// Parts the save creates for stories the editor added, by part key, and the main part's relationship
 	// to each.
 	const created = new Map<string, { readonly part: StoryPart; readonly story: NewStory; readonly relationship: string }>()
@@ -368,6 +406,55 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 
 		created.set(key, { part, story, relationship })
 		taken.add(key)
+	}
+
+	// A copy of each part `relationships` point at that a copy of their part owns (Word copies a header's chart
+	// or embedded object with it), with the relationships pointing at the copies. `copies`: the parts copied for
+	// one copy of a story part, by the source's part key (each copy owns its own).
+	const retargeted = async (relationships: Relationships, copies: Map<string, string> = new Map()): Promise<Relationships> => {
+		const all: Relationship[] = []
+
+		for (const relationship of relationships.all) {
+			const source = relationship.partName
+
+			if (source === undefined || !ownedByCopy(relationship, pkg)) {
+				all.push(relationship)
+
+				continue
+			}
+
+			const copy = await copyPart(source, copies)
+
+			all.push({ ...relationship, partName: copy, target: copy })
+		}
+
+		return new Relationships(all)
+	}
+	const copyPart = async (source: string, copies: Map<string, string>): Promise<string> => {
+		const known = copies.get(partKey(source))
+
+		if (known !== undefined) return known
+
+		const name = copiedPartName(source, candidate => !pkg.has(candidate) && !taken.has(partKey(candidate)))
+		const contentType = (await pkg.opc.contentTypes()).typeOf(source)
+
+		if (contentType === undefined) throw new DocxWriteError("unsupported", `${source} has no content type to copy`)
+
+		copies.set(partKey(source), name)
+		parts.add(name, await pkg.opc.read(source), contentType)
+
+		const relsName = relationshipsPartName(source)
+
+		if (pkg.has(relsName)) {
+			const relationships = await retargeted(await pkg.relationships(source), copies)
+			const copyRels = relationshipsPartName(name)
+
+			put(add, { name: copyRels, bytes: relationshipsBytes(name, relationships) })
+			taken.add(partKey(copyRels))
+			typed.push({ name: copyRels, contentType: RELATIONSHIPS_CONTENT_TYPE })
+		}
+
+		return name
 	}
 
 	const parts: SaveParts = {
@@ -662,6 +749,9 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		} else {
 			put(add, { name: part.name, bytes: result.bytes })
 			overrides.push({ partName: part.name, contentType: NEW_STORY_PARTS[made.story.kind].contentType })
+
+			if (part.relationships.all.some(relationship => ownedByCopy(relationship, pkg)))
+				copiedRelationships.set(partKey(part.name), await retargeted(part.relationships))
 		}
 
 		stories.push(...result.stories)
@@ -742,17 +832,25 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 	}
 
 	for (const [key, plan] of relationships) {
-		if (plan.additions.length === 0 && plan.removals.size === 0) continue
+		// A part the save creates as a copy of another has that part's relationships (stories/clone.ts).
+		const made = created.get(key)
+		const kept =
+			made !== undefined && made.part.relationships.all.length > 0
+				? (copiedRelationships.get(key) ?? made.part.relationships)
+				: undefined
+
+		if (plan.additions.length === 0 && plan.removals.size === 0 && kept === undefined) continue
 
 		const source = pkg.opc.entry(key)?.name ?? key
 		const relsName = relationshipsPartName(source)
-		const existing = pkg.has(relsName) ? await pkg.opc.read(relsName) : null
+		const inPackage = pkg.has(relsName)
+		const existing = inPackage ? await pkg.opc.read(relsName) : kept === undefined ? null : relationshipsBytes(source, kept)
 		const result = addRelationships(existing, plan.additions, plan.removals)
 
 		if (result.ids.join() !== plan.ids.join())
 			throw new DocxWriteError("unsupported", `Relationship ids of ${source} did not come out as planned`)
 
-		if (existing === null) {
+		if (!inPackage) {
 			put(add, { name: relsName, bytes: result.bytes })
 
 			// A package with no relationships part typed by extension (malformed but readable) types the new one.

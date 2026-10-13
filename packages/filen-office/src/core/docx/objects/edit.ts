@@ -1,7 +1,15 @@
 import type { Node } from "prosemirror-model"
 import { NodeSelection, type EditorState, type Transaction } from "prosemirror-state"
 import { AttrStep, ReplaceAroundStep, ReplaceStep, type Step } from "prosemirror-transform"
-import type { DocxRelativeH, DocxRelativeV, DocxWrapMode } from "../edit/commands/drawings"
+import {
+	CROP_MAX_PAD,
+	CROP_WHOLE,
+	sensibleCrop,
+	type DocxCrop,
+	type DocxRelativeH,
+	type DocxRelativeV,
+	type DocxWrapMode
+} from "../edit/commands/drawings"
 import type { DocxEditContext } from "../edit/context"
 import { markCommand } from "../edit/invariants/index"
 import type { DocumentCommandContext } from "../edit/registry"
@@ -20,11 +28,16 @@ import { EMU_PER_INCH, naturalExtent, sniffImage, type DocxImageInfo, type DocxI
 const nodes = docxSchema.nodes
 
 // What drawing commands set on a drawing node (`overrides`), beyond the schema's: a quarter-turn rotation,
-// a new picture's drawing id and the PNG Word shows in place of a new SVG picture.
+// a new picture's drawing id, the PNG Word shows in place of a new SVG picture and a picture's crop (its
+// a:srcRect sides, DocxCrop units).
 export interface DrawingEdit extends DrawingOverrides {
 	readonly wrap?: DocxWrapMode
 	readonly relH?: DocxRelativeH
 	readonly relV?: DocxRelativeV
+	readonly cropLeft?: number
+	readonly cropTop?: number
+	readonly cropRight?: number
+	readonly cropBottom?: number
 }
 
 export type DrawingKind = "picture" | "shape" | "chart" | "group" | "textbox" | "object"
@@ -51,7 +64,20 @@ export interface DrawingState {
 	readonly lockAspect: boolean
 	// Rotated (0..359) as the source has it, which the inline extent effect accounts for.
 	readonly sourceRot: number
+	// A picture's crop (a:srcRect), and whether drawing.crop may change it: a picture whose blip fill the
+	// editor reads (a crop it cannot read, or one leaving nothing, stays as it is).
+	readonly crop: DocxCrop
+	readonly croppable: boolean
+	// Mirrored (a:xfrm flipH / flipV): which side of the page a crop's side shows on.
+	readonly flipH: boolean
+	readonly flipV: boolean
 }
+
+export const NO_CROP: DocxCrop = Object.freeze({ left: 0, top: 0, right: 0, bottom: 0 })
+const INTEGER = /^-?\d+$/
+
+// ST_PositiveCoordinate as commands bound it.
+const MAX_EXTENT = 2147483647
 
 const RELATIVE_H = new Set(["margin", "page", "column", "character", "leftMargin", "rightMargin", "insideMargin", "outsideMargin"])
 const RELATIVE_V = new Set(["margin", "page", "paragraph", "line", "topMargin", "bottomMargin", "insideMargin", "outsideMargin"])
@@ -97,6 +123,40 @@ export function graphicTransform(part: StoryPart, drawing: DrawingInfo): number 
 	}
 
 	return -1
+}
+
+// A picture's own blip fill (pic:pic/pic:blipFill holding an a:blip), or -1.
+export function pictureFill(part: StoryPart, drawing: DrawingInfo): number {
+	if (drawing.graphic !== "picture" || drawing.graphicData < 0) return -1
+
+	const reader = part.reader
+	const picture = reader.child(drawing.graphicData, Ns.Pic, "pic")
+	const fill = picture < 0 ? -1 : reader.child(picture, Ns.Pic, "blipFill")
+
+	return fill >= 0 && reader.child(fill, Ns.A, "blip") >= 0 ? fill : -1
+}
+
+// The crop of blip fill `fill` (undefined: one the editor does not read, a side not a whole number).
+function cropOf(part: StoryPart, fill: number): DocxCrop | undefined {
+	const reader = part.reader
+	const rect = reader.child(fill, Ns.A, "srcRect")
+
+	if (rect < 0) return NO_CROP
+
+	const side = (name: string): number | undefined => {
+		const value = reader.attr(rect, Ns.None, name)
+
+		if (value === undefined) return 0
+
+		const number = INTEGER.test(value.trim()) ? Number(value.trim()) : Number.NaN
+
+		return number >= -CROP_MAX_PAD && number <= CROP_WHOLE ? number + 0 : undefined
+	}
+	const [left, top, right, bottom] = [side("l"), side("t"), side("r"), side("b")]
+
+	if (left === undefined || top === undefined || right === undefined || bottom === undefined) return undefined
+
+	return left === 0 && top === 0 && right === 0 && bottom === 0 ? NO_CROP : Object.freeze({ left, top, right, bottom })
 }
 
 function locksAspect(part: StoryPart, drawing: DrawingInfo): boolean {
@@ -151,6 +211,10 @@ function sourceFacts(context: DocxEditContext, drawing: DrawingInfo): SourceFact
 	const xfrm = part === undefined ? -1 : graphicTransform(part, drawing)
 	const sourceRot = part === undefined || xfrm < 0 ? 0 : normalizeDegrees(part.reader.int(xfrm, Ns.None, "rot", 0) / 60000)
 	const anchor = drawing.anchor
+	const fill = part === undefined ? -1 : pictureFill(part, drawing)
+	const crop = fill < 0 || part === undefined ? undefined : cropOf(part, fill)
+	const flipped = (name: string): boolean =>
+		part !== undefined && xfrm >= 0 && /^(1|true)$/.test(part.reader.attr(xfrm, Ns.None, name) ?? "")
 	// Charts and diagrams have no shape of their own: only their frame's size changes.
 	const known =
 		drawing.graphic !== "ink" &&
@@ -178,7 +242,11 @@ function sourceFacts(context: DocxEditContext, drawing: DrawingInfo): SourceFact
 			rotatable: known && xfrm >= 0 && kind !== "chart" && kind !== "object",
 			placeable: known && drawing.frame >= 0 && drawing.docPr >= 0,
 			lockAspect: part !== undefined && locksAspect(part, drawing),
-			sourceRot
+			sourceRot,
+			crop: crop ?? NO_CROP,
+			croppable: known && drawing.frame >= 0 && drawing.width > 0 && drawing.height > 0 && crop !== undefined && sensibleCrop(crop),
+			flipH: flipped("flipH"),
+			flipV: flipped("flipV")
 		}
 	}
 	facts.set(drawing, found)
@@ -201,7 +269,11 @@ const NONE: DrawingState = {
 	rotatable: false,
 	placeable: false,
 	lockAspect: false,
-	sourceRot: 0
+	sourceRot: 0,
+	crop: NO_CROP,
+	croppable: false,
+	flipH: false,
+	flipV: false
 }
 
 // What a drawing is to a reader, for comparing a written drawing read back with the editor's (gate 2): the
@@ -220,7 +292,11 @@ export function drawingSignature(context: DocxEditContext, node: Node): string {
 		state.wrap === "inline" ? null : state.relH,
 		state.wrap === "inline" ? null : state.relV,
 		state.descr,
-		state.rot
+		state.rot,
+		state.crop.left,
+		state.crop.top,
+		state.crop.right,
+		state.crop.bottom
 	])
 }
 
@@ -234,7 +310,17 @@ export function sourceDrawing(context: DocxEditContext, node: Node): DrawingInfo
 
 	const index = node.attrs["index"] as number
 
-	return index < 0 ? undefined : context.model.drawings[index]
+	if (index < 0) return undefined
+
+	return index < context.model.drawings.length ? context.model.drawings[index] : ADDED_DRAWINGS.get(context)?.()[index]
+}
+
+// Drawings of parts an editor added after the document was read (a header copied from another part, see
+// paged/edits.ts): the editor's list (the model's own at the same indices, then those).
+const ADDED_DRAWINGS = new WeakMap<DocxEditContext, () => readonly (DrawingInfo | undefined)[]>()
+
+export function bindAddedDrawings(context: DocxEditContext, drawings: () => readonly (DrawingInfo | undefined)[]): void {
+	ADDED_DRAWINGS.set(context, drawings)
 }
 
 // Whether the node is a picture a command inserted.
@@ -248,7 +334,7 @@ export function drawingState(context: DocxEditContext, node: Node): DrawingState
 	let base: DrawingState
 
 	if (isNewPicture(node)) {
-		base = { ...NONE, kind: "picture", resizable: true, rotatable: true, placeable: true, lockAspect: true }
+		base = { ...NONE, kind: "picture", resizable: true, rotatable: true, placeable: true, lockAspect: true, croppable: true }
 	} else {
 		const drawing = sourceDrawing(context, node)
 
@@ -261,6 +347,15 @@ export function drawingState(context: DocxEditContext, node: Node): DrawingState
 
 	const wrap = edit.wrap ?? base.wrap
 	const floating = wrap !== "inline"
+	const cropped =
+		edit.cropLeft === undefined && edit.cropTop === undefined && edit.cropRight === undefined && edit.cropBottom === undefined
+			? base.crop
+			: Object.freeze({
+					left: edit.cropLeft ?? base.crop.left,
+					top: edit.cropTop ?? base.crop.top,
+					right: edit.cropRight ?? base.crop.right,
+					bottom: edit.cropBottom ?? base.crop.bottom
+				})
 
 	return {
 		...base,
@@ -272,7 +367,8 @@ export function drawingState(context: DocxEditContext, node: Node): DrawingState
 		relH: edit.relH ?? base.relH,
 		relV: edit.relV ?? base.relV,
 		descr: edit.descr ?? base.descr,
-		rot: edit.rot ?? base.rot
+		rot: edit.rot ?? base.rot,
+		crop: cropped
 	}
 }
 
@@ -319,7 +415,11 @@ export function changeDrawing(
 				relH: base.relH,
 				relV: base.relV,
 				posX: base.posX,
-				posY: base.posY
+				posY: base.posY,
+				cropLeft: base.crop.left,
+				cropTop: base.crop.top,
+				cropRight: base.crop.right,
+				cropBottom: base.crop.bottom
 			}
 
 			for (const key of Object.keys(next)) if (next[key] === same[key]) delete next[key]
@@ -361,6 +461,45 @@ export function resizedExtent(state: DrawingState, cx: number, cy: number, keepR
 	const scale = Math.max(cx / state.cx, cy / state.cy)
 
 	return { cx: Math.max(1, Math.round(state.cx * scale)), cy: Math.max(1, Math.round(state.cy * scale)) }
+}
+
+// The extent cropping a picture as `state` is to `crop` gives, its scale kept (the part of the picture shown
+// grows or shrinks, as Word's crop does), or undefined when it would be out of range. An extent back within
+// rounding of the source's at the source's crop is the source's (so cropping back undoes exactly).
+export function croppedExtent(
+	state: DrawingState,
+	source: DrawingState | undefined,
+	crop: DocxCrop
+): { readonly cx: number; readonly cy: number } | undefined {
+	const was = state.crop
+	const fromX = CROP_WHOLE - was.left - was.right
+	const fromY = CROP_WHOLE - was.top - was.bottom
+
+	if (fromX <= 0 || fromY <= 0 || !sensibleCrop(crop)) return undefined
+
+	let cx = Math.round((state.cx * (CROP_WHOLE - crop.left - crop.right)) / fromX)
+	let cy = Math.round((state.cy * (CROP_WHOLE - crop.top - crop.bottom)) / fromY)
+	const near = (value: number, to: number): boolean => Math.abs(value - to) <= Math.max(2, to * 1e-4)
+
+	if (source !== undefined && sameCrop(crop, source.crop) && near(cx, source.cx) && near(cy, source.cy)) {
+		cx = source.cx
+		cy = source.cy
+	}
+
+	return cx >= 1 && cy >= 1 && cx <= MAX_EXTENT && cy <= MAX_EXTENT ? { cx, cy } : undefined
+}
+
+export function sameCrop(a: DocxCrop, b: DocxCrop): boolean {
+	return a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom
+}
+
+// The source state of a drawing node (its overrides aside), or undefined for a new picture.
+export function sourceState(context: DocxEditContext, node: Node): DrawingState | undefined {
+	if (isNewPicture(node)) return undefined
+
+	const drawing = sourceDrawing(context, node)
+
+	return drawing === undefined ? undefined : sourceFacts(context, drawing).state
 }
 
 // ---- media in use --------------------------------------------------------------------------------------

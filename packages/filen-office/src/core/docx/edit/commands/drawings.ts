@@ -8,6 +8,25 @@ export type DocxWrapMode = "inline" | "square" | "tight" | "through" | "topAndBo
 export type DocxRelativeH = "margin" | "page" | "column" | "character" | "leftMargin" | "rightMargin" | "insideMargin" | "outsideMargin"
 export type DocxRelativeV = "margin" | "page" | "paragraph" | "line" | "topMargin" | "bottomMargin" | "insideMargin" | "outsideMargin"
 
+// What a picture's a:srcRect cuts off each side of it, in thousandths of a percent of its size (ST_Percentage,
+// as Word writes it: 25000 is 25%); negative pads. What is left is more than nothing on each axis.
+export interface DocxCrop {
+	readonly left: number
+	readonly top: number
+	readonly right: number
+	readonly bottom: number
+}
+
+// The whole of a picture's side, in srcRect units.
+export const CROP_WHOLE = 100_000
+// The most a crop pads a side (a hundred times the picture).
+export const CROP_MAX_PAD = 10_000_000
+
+// Whether a crop leaves something of the picture on each axis.
+export function sensibleCrop(crop: DocxCrop): boolean {
+	return crop.left + crop.right < CROP_WHOLE && crop.top + crop.bottom < CROP_WHOLE
+}
+
 export type DrawingCommand =
 	// `fallback`: the PNG Word shows where it cannot draw an SVG picture (required with one); `altText`: its
 	// description.
@@ -25,6 +44,8 @@ export type DrawingCommand =
 	| { readonly type: "drawing.altText"; readonly text: string }
 	// Clockwise, in quarter turns.
 	| { readonly type: "drawing.rotate"; readonly by: 90 | 180 | 270 }
+	// A picture cropped to `crop` (all zero: uncropped), its scale kept: the visible part grows or shrinks.
+	| ({ readonly type: "drawing.crop" } & DocxCrop)
 	| { readonly type: "drawing.delete" }
 
 const object = { write: true, scope: "document", group: "drawing", context: "drawing" } as const
@@ -45,6 +66,7 @@ export const DRAWING_COMMANDS: readonly DocxCommandInfo<DrawingCommand["type"]>[
 	{ type: "drawing.wrap", labelKey: "docx.drawing.wrap", icon: "wrap", input: "choice", ...object },
 	{ type: "drawing.altText", labelKey: "docx.drawing.altText", icon: "alt-text", input: "text", ...object },
 	{ type: "drawing.rotate", labelKey: "docx.drawing.rotate", icon: "rotate", ...object },
+	{ type: "drawing.crop", labelKey: "docx.drawing.crop", icon: "crop", ...object },
 	{ type: "drawing.delete", labelKey: "docx.drawing.delete", icon: "delete", ...object }
 ]
 
@@ -125,6 +147,16 @@ export const parseDrawingCommand: DocxCommandParser<DrawingCommand> = (type, val
 			const by = field(value, "by")
 
 			return by === 90 || by === 180 || by === 270 ? { type, by } : undefined
+		}
+		case "drawing.crop": {
+			const sides = ["left", "top", "right", "bottom"].map(key => intArg(value, key, -CROP_MAX_PAD, CROP_WHOLE - 1))
+			const [left, top, right, bottom] = sides
+
+			if (left === undefined || top === undefined || right === undefined || bottom === undefined) return undefined
+
+			const crop = { left, top, right, bottom }
+
+			return sensibleCrop(crop) ? { type, ...crop } : undefined
 		}
 		case "drawing.delete":
 			return { type }

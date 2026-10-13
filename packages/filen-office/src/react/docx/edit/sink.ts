@@ -14,6 +14,7 @@ import {
 	type PagedEditor
 } from "../../../core/docx/paged/index"
 import { COMMENT_MOVE_META, freshSliceKeeping } from "../../../core/docx/edit/invariants/index"
+import { sourceCopies } from "../../../core/docx/edit/session"
 import { docxComments } from "../../../core/docx/review/comments"
 
 // The input sink of paged editing: a real ProseMirror view that holds focus and receives all input (keys,
@@ -1099,7 +1100,10 @@ export class EditSink {
 						cut.slice,
 						new Set(
 							cut.ids.flatMap(id => ["commentRangeStart", "commentRangeEnd", "commentReference"].map(kind => `${kind}:${id}`))
-						)
+						),
+						sourceCopies(cut.session.context),
+						cut.session.story.part.index,
+						this.editor.session.story.part.index
 					)
 
 		return this.run(

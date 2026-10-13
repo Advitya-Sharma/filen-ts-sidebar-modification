@@ -353,7 +353,7 @@ function trackChanges(
 
 // What a command recorded must be what the writer knows: anything else refuses the save rather than being
 // left out.
-const TABLE_KEYS = new Set(["align", "width", "borders", "look", "change", "gridChange", "source"])
+const TABLE_KEYS = new Set(["from", "align", "width", "borders", "look", "change", "gridChange", "source"])
 const ROW_KEYS = new Set(["from", "header", "gridBefore", "gridAfter", "ins", "del", "change", "source"])
 const CELL_KEYS = new Set(["from", "shading", "vAlign", "ins", "del", "change", "source"])
 // What a change record keeps of the properties before it.
@@ -581,11 +581,38 @@ export function* writeTable(w: StoryWriting, out: Out, node: Node): Generator<vo
 
 	if (item === NO_SOURCE || part.kinds[item] !== Item.Table) {
 		const grid = fittedGrid(tableMap(node, part, store), undefined)
-		const changes = tableProperties(w, node, -1, new Map(), null, store.table(document, -1), [], grid, true)
+		const model = propertySource(part, node, Item.Table)
 
-		out.text(
-			`<${names.el("tbl")}>${freshContainer(names, "tblPr", changes, TABLE_PROPERTIES)}${gridMarkup(w, grid, overrides.gridChange)}`
-		)
+		if (model === NO_SOURCE) {
+			const changes = tableProperties(w, node, -1, new Map(), null, store.table(document, -1), [], grid, true)
+
+			out.text(
+				`<${names.el("tbl")}>${freshContainer(names, "tblPr", changes, TABLE_PROPERTIES)}${gridMarkup(w, grid, overrides.gridChange)}`
+			)
+		} else {
+			// A new table modelled on a source one (a copy): that table's properties without its tracked change.
+			const modelRow = part.aux[model] ?? -1
+			const modelPr = part.tables.tblPr[modelRow] ?? -1
+			const props = sourceTableProps(part, store, model, false)
+			const modelGrid = sourceGrid(w, part.tables.tblGrid[modelRow] ?? -1)
+			const changes = tableProperties(w, node, modelPr, new Map(), props.styleId ?? null, props, modelGrid, grid, false)
+
+			out.text(`<${names.el("tbl")}>`)
+
+			if (changes.size === 0 && modelPr >= 0) {
+				w.copyProperties(out, [modelPr], TRACKED_TABLE)
+			} else {
+				strip(changes, ["tblPrChange"])
+				out.text(
+					modelPr >= 0
+						? markup(sub => spliceChildren(sub, part.reader, modelPr, changes, TABLE_PROPERTIES))
+						: freshContainer(names, "tblPr", new Map([["tblW", autoWidth(w)], ...changes]), TABLE_PROPERTIES)
+				)
+			}
+
+			out.text(gridMarkup(w, grid, overrides.gridChange))
+		}
+
 		yield* w.writeChildren(out, node, NO_SOURCE, (row, rowOut) => writeRow(w, rowOut, row))
 		out.text(`</${names.el("tbl")}>`)
 

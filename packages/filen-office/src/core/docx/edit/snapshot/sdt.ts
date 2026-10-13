@@ -7,9 +7,11 @@ import {
 	type ControlType,
 	type LegacyField
 } from "../../forms/controls"
+import { enclosingBookmark } from "../../fields/bookmarks"
 import { selectedField } from "../handlers/forms"
-import { mayHoldControls } from "../invariants/forms"
+import { mayHoldControls, mayHoldFields } from "../invariants/forms"
 import { protectionOf, type DocxProtectionMode } from "../protection"
+import { NO_SOURCE } from "../schema"
 import type { DocxEditorSession } from "../session"
 import type { SnapshotInput } from "./index"
 
@@ -66,12 +68,14 @@ function contextOfControl(info: ControlInfo, protection: DocxProtectionMode): Do
 
 const LEGACY_TYPES = { FORMTEXT: "textInput", FORMCHECKBOX: "checkbox", FORMDROPDOWN: "dropDownList" } as const
 
-function contextOfField(field: LegacyField, result: string, protection: DocxProtectionMode): DocxControlContext {
+// `tag`: the bookmark the field names (w:name) where it has one: a copy keeps the name but not the bookmark,
+// which stays with the original (Word shows a copy's bookmark empty).
+function contextOfField(field: LegacyField, result: string, tag: string | null, protection: DocxProtectionMode): DocxControlContext {
 	return Object.freeze({
 		kind: "field",
 		type: LEGACY_TYPES[field.type],
 		title: null,
-		tag: field.name,
+		tag,
 		checked: field.type === "FORMCHECKBOX" ? field.checked : null,
 		items: Object.freeze(field.entries.map(entry => Object.freeze({ text: entry, value: entry }))),
 		value: field.type === "FORMDROPDOWN" ? (field.entries[field.result] ?? null) : field.type === "FORMTEXT" ? result : null,
@@ -88,7 +92,7 @@ export function controlOf(input: SnapshotInput): DocxControlContext | null {
 	const session = input.session
 	const part = session.story.part
 
-	if (!mayHoldControls(session) && part.fields.count === 0) return null
+	if (!mayHoldControls(session) && !mayHoldFields(session)) return null
 
 	const state = input.state
 	const selection = state.selection
@@ -108,12 +112,14 @@ export function controlOf(input: SnapshotInput): DocxControlContext | null {
 		return context
 	}
 
-	const at = part.fields.count === 0 ? undefined : selectedField(part, state)
+	const at = mayHoldFields(session) ? selectedField(part, state) : undefined
 	const field = at === undefined ? undefined : legacyFieldOf(part, at.node)
 
 	if (at === undefined || field === undefined) return null
 
-	const key = `f${String(at.node.attrs["src"])}`
+	const own = at.node.attrs["src"] as number
+	// A copy (no source) by where it is.
+	const key = own === NO_SOURCE ? `c${String(at.pos)}` : `f${String(own)}`
 	const result = at.node.attrs["result"] as string
 
 	if (
@@ -123,7 +129,9 @@ export function controlOf(input: SnapshotInput): DocxControlContext | null {
 	)
 		return last.context
 
-	const context = contextOfField(field, result, protection)
+	const name = field.name
+	const tag = own !== NO_SOURCE && name !== null && enclosingBookmark(part, own, at.node.attrs["end"] as number, name) ? name : null
+	const context = contextOfField(field, result, tag, protection)
 
 	previous.set(session, { key, info: field, context })
 
@@ -131,5 +139,12 @@ export function controlOf(input: SnapshotInput): DocxControlContext | null {
 }
 
 function sameField(a: ControlInfo | LegacyField, b: LegacyField): boolean {
-	return "entries" in a && a.checked === b.checked && a.result === b.result && a.enabled === b.enabled
+	return (
+		"entries" in a &&
+		a.entries === b.entries &&
+		a.name === b.name &&
+		a.checked === b.checked &&
+		a.result === b.result &&
+		a.enabled === b.enabled
+	)
 }

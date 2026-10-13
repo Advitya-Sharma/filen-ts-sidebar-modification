@@ -1,7 +1,8 @@
 import { Mark, type Node } from "prosemirror-model"
 import { NodeKind } from "../../xml/index"
-import { FieldCharType, ITEM_NAMES, Item, type Story, type StoryPart } from "../model/index"
+import { FieldCharType, ITEM_NAMES, Item, RevisionView, type DrawingInfo, type Story, type StoryPart } from "../model/index"
 import { El, Ns } from "../model/namespaces"
+import { storedResult } from "../fields/result"
 import type { DocxEditContext } from "./context"
 import { builtFrom } from "./origin"
 import {
@@ -173,10 +174,12 @@ function findProofErrors(part: StoryPart): Map<number, ProofErrors> {
 	return out
 }
 
-// Complex fields of a part: those kept as one atom (begin run -> end run) and paragraphs that must be
-// locked because a field does not fit in one.
+// Complex fields of a part: those kept as one atom (begin run -> end run), the characters and instruction
+// texts of tables of contents built as paragraphs (field_char nodes), and paragraphs that must be locked
+// because a field does not fit in one.
 interface FieldPlan {
 	readonly atoms: Map<number, number>
+	readonly chars: Set<number>
 	readonly locked: Map<number, LockReason>
 }
 
@@ -198,16 +201,93 @@ function paragraphOf(part: StoryPart, item: number): number {
 	return -1
 }
 
+// A field's instruction as a field atom or a table of contents holds it: as shown, or for a field a tracked
+// change deleted whole (its code all w:delInstrText), the code it had.
+function instructionOf(part: StoryPart, field: number): string {
+	return part.fieldInstruction(field) || part.fieldInstruction(field, RevisionView.Original)
+}
+
+function fieldType(part: StoryPart, field: number): string {
+	return (/^\s*([^\s\\"]+)/.exec(instructionOf(part, field))?.[1] ?? "").toUpperCase()
+}
+
+// The field holding field `field`, or -1. A table of contents without its end (a part holding its first
+// paragraphs) holds only what is in its first paragraph: the model would nest all that follows in it.
+function parentOf(part: StoryPart, field: number): number {
+	const fields = part.fields
+	const parent = fields.parent[field] ?? -1
+
+	if (parent < 0 || (fields.end[parent] ?? -1) >= 0 || fieldType(part, parent) !== "TOC") return parent
+
+	return paragraphOf(part, fields.begin[field] ?? -1) === paragraphOf(part, fields.begin[parent] ?? -1) ? parent : -1
+}
+
+// Whether field `field` (complex) is a table of contents built as paragraphs: its characters and instruction
+// texts in runs, outside other fields, its paragraphs siblings of one container with nothing but range markers
+// between them, and every field inside it within one paragraph. One without its end (a part holding its first
+// paragraphs: a block an edit wrote, read back) has what the part holds of it so built too.
+function paragraphToc(part: StoryPart, field: number): boolean {
+	const fields = part.fields
+	const begin = fields.begin[field] ?? -1
+	const end = fields.end[field] ?? -1
+	const chars = [begin, fields.separate[field] ?? -1, end].filter(char => char >= 0)
+	const first = begin < 0 ? -1 : paragraphOf(part, begin)
+	const last = end < 0 ? first : paragraphOf(part, end)
+
+	if (fields.simple[field] === 1 || first < 0 || last < 0 || fieldType(part, field) !== "TOC" || parentOf(part, field) >= 0) return false
+	if ((end >= 0 && first === last) || part.parent(first) !== part.parent(last) || first > last) return false
+
+	for (let item = fields.instruction[field] ?? -1; item >= 0; item = part.nextInstruction(item))
+		if (part.kinds[item] !== Item.InstrText && part.kinds[item] !== Item.DeletedInstrText) return false
+
+	for (const char of chars) if (part.kinds[part.parent(char)] !== Item.Run) return false
+
+	for (let block = first; block <= last; block = part.end(block)) {
+		const kind = part.kinds[block] ?? 0
+
+		if (kind !== Item.Paragraph && !(kind >= Item.BookmarkStart && kind <= Item.CustomXmlRangeMarker)) return false
+	}
+
+	for (let inner = 0; inner < fields.count; inner++) {
+		if (parentOf(part, inner) !== field) continue
+
+		const innerBegin = fields.begin[inner] ?? -1
+		const innerEnd = fields.end[inner] ?? -1
+
+		if (fields.simple[inner] !== 1 && (innerBegin < 0 || innerEnd < 0 || paragraphOf(part, innerBegin) !== paragraphOf(part, innerEnd)))
+			return false
+	}
+
+	return true
+}
+
 function planFields(part: StoryPart): FieldPlan {
 	const fields = part.fields
 	const atoms = new Map<number, number>()
+	const chars = new Set<number>()
+	const tocs = new Set<number>()
 	const locked = new Map<number, LockReason>()
 	const lock = (paragraph: number, reason: LockReason): void => {
 		if (paragraph >= 0 && locked.get(paragraph) !== "fieldSpansBlocks") locked.set(paragraph, reason)
 	}
 
 	for (let field = 0; field < fields.count; field++) {
-		if (fields.simple[field] === 1) continue
+		if (!paragraphToc(part, field)) continue
+
+		tocs.add(field)
+
+		for (const char of [fields.begin[field] ?? -1, fields.separate[field] ?? -1, fields.end[field] ?? -1])
+			if (char >= 0) chars.add(char)
+		for (let item = fields.instruction[field] ?? -1; item >= 0; item = part.nextInstruction(item)) chars.add(item)
+	}
+
+	// Field characters without a field (the end of a table of contents whose begin the part does not hold) are
+	// field_char nodes too, kept as their bytes.
+	for (let item = 0; item < part.count; item++)
+		if (part.kinds[item] === Item.FieldChar && part.fieldOf(item) < 0 && part.kinds[part.parent(item)] === Item.Run) chars.add(item)
+
+	for (let field = 0; field < fields.count; field++) {
+		if (fields.simple[field] === 1 || tocs.has(field)) continue
 
 		const begin = fields.begin[field] ?? -1
 		const end = fields.end[field] ?? -1
@@ -241,8 +321,10 @@ function planFields(part: StoryPart): FieldPlan {
 			continue
 		}
 
-		// A nested field travels inside its parent's atom.
-		if ((fields.parent[field] ?? -1) >= 0) continue
+		// A nested field travels inside its parent's atom (a table of contents built as paragraphs has none).
+		const parent = parentOf(part, field)
+
+		if (parent >= 0 && !tocs.has(parent)) continue
 
 		const beginRun = part.parent(begin)
 		const endRun = part.parent(end)
@@ -258,7 +340,7 @@ function planFields(part: StoryPart): FieldPlan {
 		else lock(first, "fieldStructure")
 	}
 
-	return { atoms, locked }
+	return { atoms, chars, locked }
 }
 
 // Inline content collector: adjacent text with the same mark array (identity: arrays are cached per
@@ -308,13 +390,18 @@ export class DocxDocBuilder {
 	private lockReasons: Partial<Record<LockReason, number>> = {}
 	// Why the table being built cannot be edited, once something fails.
 	private tableFailure: LockReason | null = null
+	private drawings: readonly (DrawingInfo | undefined)[] | undefined = undefined
 
 	constructor(context: DocxEditContext) {
 		this.context = context
 	}
 
-	build(story: Story): StoryDoc {
-		const steps = this.steps(story)
+	// `part`: the story's part where the document's model does not have it (a story the editor added), with the
+	// drawings list its items index (`drawings`, the model's own at the same indices).
+	build(story: Story, part?: StoryPart, drawings?: readonly (DrawingInfo | undefined)[]): StoryDoc {
+		this.drawings = drawings
+
+		const steps = this.steps(story, part)
 
 		for (;;) {
 			const step = steps.next()
@@ -326,6 +413,8 @@ export class DocxDocBuilder {
 	// The same build in slices: the host gets a turn (`pause`) whenever `sliceMs` passed, between top-level
 	// blocks, so a long document builds without long tasks on a UI thread.
 	async buildSliced(story: Story, pause: () => Promise<void>, sliceMs: number, now: () => number): Promise<StoryDoc> {
+		this.drawings = undefined
+
 		const steps = this.steps(story)
 		let started = now()
 
@@ -342,9 +431,8 @@ export class DocxDocBuilder {
 	}
 
 	// The build, yielding after each top-level block.
-	private *steps(story: Story): Generator<void, StoryDoc> {
-		const model = this.context.model
-		const part = model.partOf(story)
+	private *steps(story: Story, own?: StoryPart): Generator<void, StoryDoc> {
+		const part = own ?? this.context.model.partOf(story)
 
 		this.part = part
 		this.plan = this.planOf(part)
@@ -1032,10 +1120,37 @@ export class DocxDocBuilder {
 		}
 	}
 
+	// A field_char node for a character (begin with the field's instruction, separate, end) or an instruction
+	// text ("instruction", "deletedInstruction" for w:delInstrText: its own text) of a table of contents built as
+	// paragraphs.
+	private fieldChar(item: number): { src: number; kind: string; instruction: string; dirty: boolean } {
+		const part = this.part
+
+		if (part.kinds[item] !== Item.FieldChar)
+			return {
+				src: item,
+				kind: part.kinds[item] === Item.DeletedInstrText ? "deletedInstruction" : "instruction",
+				instruction: part.text(item),
+				dirty: false
+			}
+
+		const type = part.fieldCharType(item)
+		const field = part.fieldOf(item)
+
+		return {
+			src: item,
+			kind: type === FieldCharType.Begin ? "begin" : type === FieldCharType.Separate ? "separate" : "end",
+			instruction: type === FieldCharType.Begin && field >= 0 ? instructionOf(part, field) : "",
+			dirty: part.fieldCharDirty(item)
+		}
+	}
+
 	private field(first: number, last: number, wrappers: readonly Mark[]): Node {
 		const part = this.part
 		const simple = part.kinds[first] === Item.FieldSimple
 		const field = simple ? (part.aux[first] ?? -1) : part.fieldOf(first + 1)
+
+		const stored = storedResult(part, first, last, simple)
 
 		return makeNode(
 			docxSchema.nodes.field,
@@ -1043,67 +1158,16 @@ export class DocxDocBuilder {
 				src: first,
 				end: last,
 				simple,
-				type: field < 0 ? "" : part.fieldType(field),
-				instruction: field < 0 ? "" : part.fieldInstruction(field),
-				result: this.fieldResult(first, last, simple, field),
+				type: field < 0 ? "" : fieldType(part, field),
+				instruction: field < 0 ? "" : instructionOf(part, field),
+				result: stored.result,
 				markers: this.survivors(first, part.end(last)),
-				state: null
+				state: null,
+				update: stored.update
 			},
 			null,
 			wrappers
 		)
-	}
-
-	// The cached result as text: what follows the separator (a simple field's content), field codes of
-	// nested fields left out.
-	private fieldResult(first: number, last: number, simple: boolean, field: number): string {
-		const part = this.part
-		const separate = simple || field < 0 ? first : (part.fields.separate[field] ?? -1)
-
-		if (separate < 0) return ""
-
-		const end = part.end(last)
-		let out = ""
-		let depth = 0
-		const codes: boolean[] = []
-		let code = false
-
-		for (let item = separate + 1; item < end; item++) {
-			switch (part.kinds[item]) {
-				case Item.FieldChar: {
-					const type = part.fieldCharType(item)
-
-					if (type === FieldCharType.Begin) {
-						codes.push(code)
-						depth++
-						code = true
-					} else if (type === FieldCharType.Separate && depth > 0) {
-						code = codes[codes.length - 1] ?? false
-					} else if (type === FieldCharType.End && depth > 0) {
-						depth--
-						code = codes.pop() ?? false
-					}
-
-					break
-				}
-				case Item.Text:
-				case Item.DeletedText:
-					if (!code) out += part.text(item)
-
-					break
-				case Item.Tab:
-					if (!code) out += "\t"
-
-					break
-				case Item.Break:
-				case Item.CarriageReturn:
-					if (!code) out += "\n"
-
-					break
-			}
-		}
-
-		return out
 	}
 
 	// A w:r: its content in order, each piece carrying the wrappers, the run's own mark and its base
@@ -1119,6 +1183,13 @@ export class DocxDocBuilder {
 
 		for (let child = item + 1; child < end; child = part.end(child)) {
 			const kind = part.kinds[child] ?? 0
+
+			// A character or instruction text of a table of contents built as paragraphs.
+			if (this.plan.chars.has(child)) {
+				sink.add(makeNode(nodes.field_char, this.fieldChar(child), null, marks))
+
+				continue
+			}
 
 			switch (kind) {
 				case Item.Text:
@@ -1267,7 +1338,7 @@ export class DocxDocBuilder {
 
 		const kind = part.kinds[inner]
 		const index = part.aux[inner] ?? -1
-		const anchored = kind === Item.Drawing && this.context.model.drawings[index]?.placement === "anchor"
+		const anchored = kind === Item.Drawing && (this.drawings ?? this.context.model.drawings)[index]?.placement === "anchor"
 
 		return makeNode(
 			docxSchema.nodes.drawing,

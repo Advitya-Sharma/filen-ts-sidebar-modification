@@ -17,6 +17,7 @@ import { isHistoryTransaction } from "prosemirror-history"
 import { MAX_LEVEL } from "../../numbering/index"
 import { SetAttrsStep } from "../attrs"
 import { claimOrigin, originOf } from "../origin"
+import { newControlId } from "../../forms/controls"
 import {
 	BLOCK_NODE_MARKS,
 	NO_MARKERS,
@@ -145,7 +146,8 @@ export function writableNew(node: Node): boolean {
 
 // `fits`: whether a run base may stay (content from another part keeps one only when its bytes read the same
 // there).
-function freshMarks(marks: readonly Mark[], fits?: (base: number) => boolean): readonly Mark[] {
+// `control`: what a run-level content control of a copy becomes (undefined: the control goes).
+function freshMarks(marks: readonly Mark[], fits?: (base: number) => boolean, control?: (mark: Mark) => Mark | undefined): readonly Mark[] {
 	let out = marks
 	// A base holding a tracked formatting change carries its revision id: such text keeps only its
 	// editable properties.
@@ -154,7 +156,11 @@ function freshMarks(marks: readonly Mark[], fits?: (base: number) => boolean): r
 	for (const mark of marks) {
 		const type = mark.type
 
-		if (
+		const copy = type === docxSchema.marks.content_control ? control?.(mark) : undefined
+
+		if (copy !== undefined) {
+			out = copy.addToSet(mark.removeFromSet(out))
+		} else if (
 			identityTypes.includes(type) ||
 			blockMarkTypes.includes(type) ||
 			type === docxSchema.marks.format_change ||
@@ -172,6 +178,17 @@ function freshMarks(marks: readonly Mark[], fits?: (base: number) => boolean): r
 	return out
 }
 
+// What a copy keeps of its source that only the source's part holds (`part`: the part the source node was built
+// from, when known).
+export interface SourceCopies {
+	// The `state` of a new copy of legacy form field `node` (its w:ffData), or undefined for other fields.
+	readonly field: (node: Node, part: number | undefined) => unknown
+	// The overrides standing for the properties of row or cell `node` of part `part` in a copy of another part,
+	// and a cell's width in twips (its `colwidth`).
+	readonly props: (node: Node, part: number) => Readonly<Record<string, unknown>> | undefined
+	readonly width: (node: Node, part: number) => number | undefined
+}
+
 // Markers a repair keeps through freshNode (by key); those held in left-out atoms' bytes go to `orphans`.
 interface KeptMarkers {
 	readonly keys: ReadonlySet<string>
@@ -179,6 +196,18 @@ interface KeptMarkers {
 	// Kept markers are made new too (content from another part: their source items are not this part's).
 	readonly renew?: boolean
 	readonly fits?: (base: number) => boolean
+	readonly copies?: SourceCopies
+	// The part the content was built from, where its nodes do not say (see origin.ts).
+	readonly origin?: number
+	// Only `copies`: no markers are kept (as a paste keeps none).
+	readonly none?: boolean
+	// The part the content goes into, when known.
+	readonly target?: number
+}
+
+// The part `node` was built from: recorded, else the one the copy says.
+function sourcePart(node: Node, keep: KeptMarkers | undefined): number | undefined {
+	return originOf(node.attrs) ?? keep?.origin
 }
 
 function freshContent(fragment: Fragment, keep?: KeptMarkers): Fragment {
@@ -195,17 +224,18 @@ function freshContent(fragment: Fragment, keep?: KeptMarkers): Fragment {
 
 function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 	const type = node.type
+	const held = keep?.none === true ? undefined : keep
 
-	if (node.isText) return node.mark(freshMarks(node.marks, keep?.fits))
+	if (node.isText) return node.mark(freshMarks(node.marks, keep?.fits, controlCopy(keep)))
 
 	if (BYTES_ONLY.has(type.name)) {
-		if (keep !== undefined) {
+		if (held !== undefined) {
 			const survivors = survivorsOf(node)
 
-			if ((type === nodes.marker || type === nodes.comment_ref) && survivors.every(marker => keep.keys.has(markerKey(marker))))
-				return keep.renew === true ? type.create({ ...node.attrs, src: NO_SOURCE }, null, freshMarks(node.marks, keep.fits)) : node
+			if ((type === nodes.marker || type === nodes.comment_ref) && survivors.every(marker => held.keys.has(markerKey(marker))))
+				return held.renew === true ? type.create({ ...node.attrs, src: NO_SOURCE }, null, freshMarks(node.marks, held.fits)) : node
 
-			for (const marker of survivors) if (keep.keys.has(markerKey(marker))) keep.orphans.push(marker)
+			for (const marker of survivors) if (held.keys.has(markerKey(marker))) held.orphans.push(marker)
 		}
 
 		// A locked paragraph comes back as its text; other byte-only content is left out.
@@ -218,11 +248,11 @@ function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 
 	const attrs: Record<string, unknown> = { ...node.attrs }
 	const kept = (list: unknown): MarkerList => {
-		if (keep === undefined || !Array.isArray(list)) return NO_MARKERS
+		if (held === undefined || !Array.isArray(list)) return NO_MARKERS
 
 		const out = (list as MarkerList)
-			.filter(marker => keep.keys.has(markerKey(marker)))
-			.map(marker => (keep.renew === true ? { ...marker, src: NO_SOURCE } : marker))
+			.filter(marker => held.keys.has(markerKey(marker)))
+			.map(marker => (held.renew === true ? { ...marker, src: NO_SOURCE } : marker))
 
 		return out.length === 0 ? NO_MARKERS : out
 	}
@@ -233,22 +263,29 @@ function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 	if ("end" in attrs && type !== nodes.field) attrs["end"] = kept(attrs["end"])
 	if (type === nodes.field) {
 		// A new field has no bytes to hold markers: they go next to it.
-		keep?.orphans.push(...kept(attrs["markers"]))
+		held?.orphans.push(...kept(attrs["markers"]))
 		attrs["end"] = NO_SOURCE
 		attrs["markers"] = NO_MARKERS
+
+		// A legacy form field keeps its w:ffData.
+		const state = node.attrs["src"] === NO_SOURCE ? undefined : keep?.copies?.field(node, sourcePart(node, keep))
+
+		if (state !== undefined) attrs["state"] = state
 	}
 	if ("revision" in attrs) attrs["revision"] = 0
-	// A copy of a table holds no change record of its own (the original keeps it).
-	if (type === nodes.table && typeof attrs["props"] === "object" && attrs["props"] !== null) {
-		const { change: _change, gridChange: _grid, source: _source, ...props } = attrs["props"] as Record<string, unknown>
+	if (type === nodes.sdt) attrs["state"] = copiedControl(node, keep)
+	if (type === nodes.table_cell && attrs["colwidth"] === null && keep?.renew === true) {
+		const part = sourcePart(node, keep)
+		const width = part === undefined || node.attrs["src"] === NO_SOURCE ? undefined : keep.copies?.width(node, part)
 
-		attrs["props"] = Object.keys(props).length === 0 ? null : props
+		if (width !== undefined) attrs["colwidth"] = width
 	}
+	if (type === nodes.table) attrs["props"] = copiedTableProps(node, keep?.renew === true)
 
-	if (node.isLeaf) return type.create(attrs, null, freshMarks(node.marks, keep?.fits))
+	if (node.isLeaf) return type.create(attrs, null, freshMarks(node.marks, keep?.fits, controlCopy(keep)))
 
 	const content = freshContent(node.content, keep)
-	const nodeMarks = modelledOn(node) ?? freshMarks(node.marks, keep?.fits)
+	const nodeMarks = modelledOn(node, keep?.renew === true ? keep : undefined) ?? freshMarks(node.marks, keep?.fits)
 
 	// Containers that lost all their content are left out rather than made invalid.
 	if (content.size === 0 && !type.validContent(content)) return type.createAndFill(attrs, null, nodeMarks)
@@ -256,23 +293,125 @@ function freshNode(node: Node, keep?: KeptMarkers): Node | null {
 	return type.create(attrs, content, nodeMarks)
 }
 
-// A copy of a source row or cell keeps its properties (w:trPr, w:tcPr: grid offsets, widths, heights) as a new
-// row or cell modelled on the source one (its overrides' `from`, which the writer and the table map read), with
-// no tracked insertion or deletion of its own: its marks, or undefined for other nodes.
-function modelledOn(node: Node): readonly Mark[] | undefined {
-	const type =
-		node.type === nodes.table_row
-			? docxSchema.marks.row_props
-			: node.type === nodes.table_cell
-				? docxSchema.marks.cell_props
-				: undefined
+// The `props` of a copy of a table: no change record of its own (the original keeps it); a copy of a table of
+// the same part (not `renew`) is modelled on it (its properties: w:tblBorders, w:tblLayout, ...), as rows and
+// cells are.
+function copiedTableProps(table: Node, renew: boolean): Record<string, unknown> | null {
+	const value = (table.attrs["props"] ?? {}) as Record<string, unknown>
+	const { change: _change, gridChange: _grid, source: _source, from, ...props } = value
+	const own = table.attrs["src"] as number
+	const model = renew ? NO_SOURCE : typeof from === "number" ? from : own
+	const next = model === NO_SOURCE ? props : { ...props, from: model }
+
+	return Object.keys(next).length === 0 ? null : next
+}
+
+const controlCopies = new WeakMap<KeptMarkers, (mark: Mark) => Mark | undefined>()
+
+// What the run-level content controls of a copy become: copies of the controls of the part it goes into (one
+// per control, with a new id: its properties are the source's), never another part's.
+function controlCopy(keep: KeptMarkers | undefined): ((mark: Mark) => Mark | undefined) | undefined {
+	if (keep?.target === undefined || keep.renew === true) return undefined
+
+	let copy = controlCopies.get(keep)
+
+	if (copy === undefined) {
+		const made = new Map<string, Mark>()
+		const target = keep.target
+
+		copy = mark => {
+			const own = mark.attrs["src"] as number
+			const state = (mark.attrs["state"] ?? null) as Readonly<Record<string, unknown>> | null
+			const key = own === NO_SOURCE ? `m${JSON.stringify(state?.["made"] ?? state?.["id"] ?? null)}` : `s${String(own)}`
+			const known = made.get(key)
+
+			if (known !== undefined) return known
+
+			let next: Readonly<Record<string, unknown>> | undefined
+
+			if (own !== NO_SOURCE) {
+				// A source control of the part the copy goes into.
+				next =
+					originOf(mark) === target || (originOf(mark) === undefined && keep.origin === target)
+						? { ...state, copy: own, id: newControlId() }
+						: undefined
+			} else if (state?.["made"] !== undefined) {
+				next = { ...state, made: { ...(state["made"] as object), id: newControlId() } }
+			} else if (state?.["copy"] !== undefined) {
+				next = { ...state, id: newControlId() }
+			}
+
+			const fresh = next === undefined ? undefined : mark.type.create({ ...mark.attrs, src: NO_SOURCE, state: next })
+
+			if (fresh !== undefined) made.set(key, fresh)
+
+			return fresh
+		}
+		controlCopies.set(keep, copy)
+	}
+
+	return copy
+}
+
+// The state of a copy of block content control `node`: a copy of a source control of the part it goes into (its
+// properties, a new id); of another part's, or into a part not known, a control without properties (its content
+// kept). A control the editor made carries its definition.
+function copiedControl(node: Node, keep: KeptMarkers | undefined): unknown {
+	const own = node.attrs["src"] as number
+	const state = (node.attrs["state"] ?? null) as Readonly<Record<string, unknown>> | null
+
+	if (own === NO_SOURCE) {
+		// A control the editor made, or a copy: another of it, with an id of its own.
+		if (state?.["made"] !== undefined) return { ...state, made: { ...(state["made"] as object), id: newControlId() } }
+		if (state?.["copy"] !== undefined)
+			return keep?.target !== undefined && keep.renew !== true ? { ...state, id: newControlId() } : null
+
+		return state
+	}
+
+	const part = sourcePart(node, keep)
+
+	return keep?.target !== undefined && part === keep.target && keep.renew !== true ? { ...state, copy: own, id: newControlId() } : null
+}
+
+function propsType(node: Node): MarkType | undefined {
+	return node.type === nodes.table_row
+		? docxSchema.marks.row_props
+		: node.type === nodes.table_cell
+			? docxSchema.marks.cell_props
+			: undefined
+}
+
+// A row's or cell's overrides without the tracked insertion, deletion and change record (the original's).
+function untracked(value: Readonly<Record<string, unknown>>): Record<string, unknown> {
+	const { ins: _ins, del: _del, change: _change, ...rest } = value
+
+	return rest
+}
+
+// A copy of a source row or cell keeps its properties (w:trPr, w:tcPr: grid offsets, widths, heights, fill) as a
+// new row or cell modelled on the source one (its overrides' `from`, which the writer and the table map read),
+// with no tracked insertion or deletion of its own: its marks, or undefined for other nodes. A copy of another
+// part's row or cell (`renew`) has no source in this part: what it keeps are its overrides and the editable
+// properties its source had (SourceCopies.props).
+function modelledOn(node: Node, renew?: KeptMarkers): readonly Mark[] | undefined {
+	const type = propsType(node)
 	const src = node.attrs["src"] as number | undefined
 
 	if (type === undefined || src === undefined) return undefined
 
-	const value = (type.isInSet(node.marks)?.attrs["value"] ?? {}) as Record<string, unknown>
-	const { ins: _ins, del: _del, change: _change, ...rest } = value
+	const rest = untracked((type.isInSet(node.marks)?.attrs["value"] ?? {}) as Record<string, unknown>)
 	const from = typeof rest["from"] === "number" ? rest["from"] : src
+
+	if (renew !== undefined) {
+		const part = from === NO_SOURCE ? undefined : sourcePart(node, renew)
+		const { from: _from, ...own } = rest
+		const value = { ...(part === undefined ? undefined : renew.copies?.props(node, part)), ...own }
+
+		return Object.keys(value).length === 0
+			? freshMarks(type.removeFromSet(node.marks))
+			: type.create({ value }).addToSet(freshMarks(node.marks))
+	}
 
 	if (from === NO_SOURCE && Object.keys(rest).length === 0) return freshMarks(node.marks)
 
@@ -282,14 +421,45 @@ function modelledOn(node: Node): readonly Mark[] | undefined {
 // Content pasted or dropped into a story carries no source identity: blocks and fields become new
 // elements, range markers, comment references and atoms that only exist as source bytes are left out,
 // and revision, content-control and wrapper marks are removed. Formatting (run bases, properties) stays.
-export function freshSlice(slice: Slice): Slice {
-	return new Slice(freshContent(slice.content), slice.openStart, slice.openEnd)
+// `copies` (with `origin`, the part the content was built from, and `target`, the one it goes into) keeps what
+// only the source's part holds.
+export function freshSlice(slice: Slice, copies?: SourceCopies, origin?: number, target?: number): Slice {
+	return new Slice(
+		freshContent(
+			slice.content,
+			copies === undefined
+				? undefined
+				: {
+						keys: NO_KEY_SET,
+						orphans: [],
+						none: true,
+						copies,
+						...(origin === undefined ? {} : { origin }),
+						...(target === undefined ? {} : { target })
+					}
+		),
+		slice.openStart,
+		slice.openEnd
+	)
 }
+
+const NO_KEY_SET: ReadonlySet<string> = new Set()
 
 // freshSlice keeping the range markers and comment references of `keys` (markerKey), made new (a cut moved into
 // another part).
-export function freshSliceKeeping(slice: Slice, keys: ReadonlySet<string>): Slice {
-	return new Slice(freshContent(slice.content, { keys, orphans: [], renew: true }), slice.openStart, slice.openEnd)
+export function freshSliceKeeping(slice: Slice, keys: ReadonlySet<string>, copies?: SourceCopies, origin?: number, target?: number): Slice {
+	return new Slice(
+		freshContent(slice.content, {
+			keys,
+			orphans: [],
+			renew: true,
+			...(copies === undefined ? {} : { copies }),
+			...(origin === undefined ? {} : { origin }),
+			...(target === undefined ? {} : { target })
+		}),
+		slice.openStart,
+		slice.openEnd
+	)
 }
 
 // ---- helpers ----------------------------------------------------------------------------------------------
@@ -512,7 +682,9 @@ export function normalizeListAttrs(attrs: ListAttrs): ListAttrs | undefined {
 	let next: ListAttrs | undefined
 
 	if (attrs.numId === null && ilvl !== null) next = { numId: null, ilvl: null }
-	else if (ilvl !== null && (ilvl < 0 || ilvl > MAX_LEVEL || !Number.isInteger(ilvl)))
+	// numId 0 takes the paragraph out of any list (ECMA-376 Part 1 §17.9.18): its level means nothing and stays
+	// as the file has it.
+	else if (ilvl !== null && attrs.numId !== 0 && (ilvl < 0 || ilvl > MAX_LEVEL || !Number.isInteger(ilvl)))
 		next = { numId: attrs.numId, ilvl: Math.min(MAX_LEVEL, Math.max(0, Math.trunc(ilvl) || 0)) }
 
 	return next
@@ -986,6 +1158,9 @@ function identityKeys(node: Node, own: boolean, out: string[]): void {
 		if (node.type === nodes.proof_err) out.push(`p${String(node.attrs["node"])}`)
 		else if (typeof src === "number" && src !== NO_SOURCE && node.type !== nodes.marker && node.type !== nodes.comment_ref)
 			out.push(`${node.isBlock ? "b" : "i"}${src}`)
+		// A reference to a note the editor made: one per note (a copy is left out, as copies of the file's are).
+		else if (node.type === nodes.note_ref && node.attrs["id"] !== null)
+			out.push(`n${String(node.attrs["kind"])}:${String(node.attrs["id"])}`)
 	}
 
 	for (const marker of survivorsOf(node)) out.push(`m${markerKey(marker)}`)
@@ -1192,7 +1367,7 @@ function filterMarkers(list: unknown, drop: ReadonlySet<string>): MarkerList | u
 	return kept.length === list.length ? undefined : kept.length === 0 ? NO_MARKERS : kept
 }
 
-function applyDuplicateFix(repair: Transaction, fix: DuplicateFix, baseFits?: (base: number) => boolean): void {
+function applyDuplicateFix(repair: Transaction, fix: DuplicateFix, options: InvariantOptions): void {
 	const pos = repair.mapping.map(fix.pos, 1)
 	const node = repair.doc.nodeAt(pos)
 
@@ -1210,13 +1385,40 @@ function applyDuplicateFix(repair: Transaction, fix: DuplicateFix, baseFits?: (b
 		return
 	}
 
+	const copied = {
+		...(options.copies === undefined ? {} : { copies: options.copies }),
+		...(options.part === undefined ? {} : { origin: options.part, target: options.part })
+	}
+
 	if (fix.shallow === true) {
 		if (fix.fresh) {
 			repair.setNodeAttribute(pos, "src", NO_SOURCE)
 
-			const model = modelledOn(node)
+			const renew: KeptMarkers | undefined =
+				fix.renew === true ? { keys: NO_KEY_SET, orphans: [], ...copied, renew: true } : undefined
 
-			if (model !== undefined) for (const mark of model) if (blockMarkTypes.includes(mark.type)) repair.addNodeMark(pos, mark)
+			if (node.type === nodes.sdt)
+				repair.setNodeAttribute(pos, "state", copiedControl(node, renew ?? { keys: NO_KEY_SET, orphans: [], ...copied }))
+			if (node.type === nodes.table) repair.setNodeAttribute(pos, "props", copiedTableProps(node, fix.renew === true))
+
+			const model = modelledOn(node, renew)
+			const part =
+				renew === undefined || node.type !== nodes.table_cell || node.attrs["colwidth"] !== null
+					? undefined
+					: sourcePart(node, renew)
+			const width = part === undefined ? undefined : options.copies?.width(node, part)
+
+			if (width !== undefined) repair.setNodeAttribute(pos, "colwidth", width)
+
+			if (model !== undefined) {
+				const type = propsType(node)
+
+				// Overrides of another part's row or cell that leave nothing: no model of this part either.
+				if (type !== undefined && type.isInSet(model) === undefined && type.isInSet(node.marks) !== undefined)
+					repair.removeNodeMark(pos, type)
+
+				for (const mark of model) if (blockMarkTypes.includes(mark.type)) repair.addNodeMark(pos, mark)
+			}
 		}
 
 		for (const name of ["before", "end"]) {
@@ -1238,7 +1440,8 @@ function applyDuplicateFix(repair: Transaction, fix: DuplicateFix, baseFits?: (b
 	const keep: KeptMarkers = {
 		keys: fix.keep ?? new Set(),
 		orphans: [],
-		...(fix.renew === true ? { renew: true, ...(baseFits === undefined ? {} : { fits: baseFits }) } : {})
+		...copied,
+		...(fix.renew === true ? { renew: true, ...(options.baseFits === undefined ? {} : { fits: options.baseFits }) } : {})
 	}
 	const fresh = freshNode(node, keep)
 	const $pos = repair.doc.resolve(pos)
@@ -1333,6 +1536,8 @@ export interface InvariantOptions {
 	readonly part?: number
 	readonly knowOrigins?: () => void
 	readonly baseFits?: (base: number) => boolean
+	// What copies keep that only their source's part holds (legacy form field data, rows' and cells' properties).
+	readonly copies?: SourceCopies
 }
 
 const COMMENT_ANCHOR_KEY = /^m(?:commentRangeStart|commentRangeEnd|commentReference):(.*)$/s
@@ -1720,7 +1925,11 @@ export function repairTransaction(
 	for (const fix of insertsBlocks ? blockCopies(state.doc, insertedCopies, movedBlockMarks) : []) {
 		const key = `${String(fix.pos)}:${fix.mark.type.name}`
 
-		if (!copyFixes.has(key)) repair.removeNodeMark(fix.pos, fix.mark)
+		if (!copyFixes.has(key)) {
+			repair.removeNodeMark(fix.pos, fix.mark)
+
+			if (fix.replacement !== undefined) repair.addNodeMark(fix.pos, fix.replacement)
+		}
 
 		copyFixes.add(key)
 	}
@@ -1753,7 +1962,7 @@ export function repairTransaction(
 	const structural: { pos: number; apply: () => void }[] = [
 		...duplicateFixes(state.doc, inserted, removed, foreignAnchor(options, movingComments(relevant, removed)), alien).map(fix => ({
 			pos: fix.pos,
-			apply: () => applyDuplicateFix(repair, fix, options.baseFits)
+			apply: () => applyDuplicateFix(repair, fix, options)
 		})),
 		...alienRuns(state.doc, insertedCopies, alien).map(at => ({
 			pos: at,
@@ -1812,6 +2021,8 @@ export function repairTransaction(
 interface CopyFix {
 	readonly pos: number
 	readonly mark: Mark
+	// What the copy keeps in its place.
+	readonly replacement?: Mark
 }
 
 // Whether a transaction inserts content holding source identities (items, marks or markers with a source).
@@ -1900,6 +2111,19 @@ function blockCopies(doc: Node, inserted: readonly number[], movedMarks: readonl
 
 			for (const mark of node.marks) {
 				if (!blockMarkTypes.includes(mark.type) || movedMarks.some(moved => moved.eq(mark))) continue
+
+				// A row's or cell's properties (fill, alignment, its model) are the copy's too; only its tracked
+				// insertion, deletion and change record stay with the original.
+				if (mark.type === propsType(node)) {
+					const value = mark.attrs["value"] as Readonly<Record<string, unknown>>
+					const rest = untracked(value)
+
+					if (Object.keys(rest).length === Object.keys(value).length) continue
+
+					out.push(Object.keys(rest).length === 0 ? { pos, mark } : { pos, mark, replacement: mark.type.create({ value: rest }) })
+
+					continue
+				}
 
 				// A split: the half before it had the same section change and gives it up.
 				const before = doc.resolve(pos).nodeBefore
@@ -2092,7 +2316,7 @@ export function docxInvariants(options: InvariantOptions = {}): Plugin {
 		props: {
 			transformPasted(slice, view) {
 				// A drag keeps its slice until the drop knows whether it moves (see handleDrop).
-				return view.dragging === null ? freshSlice(slice) : slice
+				return view.dragging === null ? freshSlice(slice, options.copies, options.part, options.part) : slice
 			},
 			handleDrop(view, event, slice, moved) {
 				// A move keeps identity (the original is deleted); a drop from outside was parsed from the
@@ -2103,7 +2327,7 @@ export function docxInvariants(options: InvariantOptions = {}): Plugin {
 
 				if (coords === null) return false
 
-				const fresh = freshSlice(slice)
+				const fresh = freshSlice(slice, options.copies, options.part, options.part)
 				const doc = view.state.doc
 				const at = dropPoint(doc, coords.pos, fresh) ?? coords.pos
 

@@ -317,7 +317,7 @@ describe("docx editing invariants", () => {
 		expect(seen).not.toContain("comment_ref")
 		expect(seen).not.toContain("math")
 		expect(seen).toContain("field")
-		// The TOC paragraph comes back as its text.
+		// The index paragraph comes back as its text.
 		expect(slice.content.lastChild?.textContent).toBe("Entry 1")
 		// Pasted content keeps formatting and goes in.
 		const end = session.state.doc.content.size
@@ -331,6 +331,8 @@ describe("docx editing invariants", () => {
 		expect(normalizeListAttrs({ numId: 4, ilvl: 12 })).toEqual({ numId: 4, ilvl: 8 })
 		expect(normalizeListAttrs({ numId: 4, ilvl: -1 })).toEqual({ numId: 4, ilvl: 0 })
 		expect(normalizeListAttrs({ numId: 4, ilvl: 2 })).toBeUndefined()
+		// Out of any list (numId 0): the level is left as the file has it.
+		expect(normalizeListAttrs({ numId: 0, ilvl: 12 })).toBeUndefined()
 	})
 
 	it("runs list normalisation hooks on changed paragraphs", async () => {
@@ -487,5 +489,120 @@ describe("docx editing invariants", () => {
 
 		expect(xml.match(/<w:gridBefore w:val="1"\/>/g)).toHaveLength(2)
 		expect(xml.match(/<w:tcW w:w="3000" w:type="dxa"\/>/g)).toHaveLength(2)
+	})
+
+	const SHADED = (fills: readonly string[]): string =>
+		'<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr>' +
+		fills
+			.map(
+				(fill, k) =>
+					`<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>${fill === "" ? "" : `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>`}` +
+					`<w:vAlign w:val="center"/></w:tcPr>${p(`c${String(k)}`)}</w:tc>`
+			)
+			.join("") +
+		"</w:tr></w:tbl>"
+
+	async function cellsOf(opened: Awaited<ReturnType<typeof openSpec>>, sessions: DocxEditorSession[], name: string): Promise<string[]> {
+		const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions })
+		const xml = new TextDecoder().decode(unzipSync(result.bytes as Uint8Array)[name])
+
+		return (xml.match(/<w:tcPr>.*?<\/w:tcPr>/g) ?? []) as string[]
+	}
+
+	for (const tracked of [false, true]) {
+		it(`keeps a cell's fill in a pasted copy of its table, its change record with the original (${tracked ? "tracked" : "untracked"})`, async () => {
+			const opened = await openSpec({ body: SHADED(["", "00FF00"]) + p("after") })
+			const session = new DocxEditorSession(opened.context)
+
+			session.context.review.tracking = tracked
+			session.context.identity.author = "Ann"
+			session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, find(session.state.doc, "c0"))))
+			expect(session.execute({ type: "table.cell.shading", fill: "123456" })).toBe(true)
+			session.context.review.tracking = false
+
+			const table = session.state.doc.child(0)
+
+			session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, find(session.state.doc, "after"))))
+			expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(0, table.nodeSize)))).toBe(true)
+
+			const cells = await cellsOf(opened, [session], "word/document.xml")
+
+			expect(cells).toHaveLength(4)
+			expect(cells.filter(cell => cell.includes('w:fill="123456"'))).toHaveLength(2)
+			expect(cells.filter(cell => cell.includes('w:fill="00FF00"'))).toHaveLength(2)
+			expect(cells.filter(cell => cell.includes('<w:vAlign w:val="center"/>'))).toHaveLength(4)
+			expect(cells.filter(cell => cell.includes("tcPrChange"))).toHaveLength(tracked ? 1 : 0)
+		})
+	}
+
+	it("keeps the cells' properties in a drag copy (the paste sanitiser)", async () => {
+		const opened = await openSpec({ body: SHADED(["FF0000", "00FF00"]) + p("after") })
+		const session = new DocxEditorSession(opened.context)
+		const table = session.state.doc.child(0)
+
+		session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, find(session.state.doc, "after"))))
+		expect(session.dispatch(session.state.tr.replaceSelection(freshSlice(session.state.doc.slice(0, table.nodeSize))))).toBe(true)
+
+		const cells = await cellsOf(opened, [session], "word/document.xml")
+
+		expect(cells.filter(cell => cell.includes('w:fill="FF0000"') && cell.includes('<w:tcW w:w="2000" w:type="dxa"/>'))).toHaveLength(2)
+	})
+
+	it("keeps a pasted table's own properties, its tracked change with the original", async () => {
+		const tblPr =
+			'<w:tblW w:w="4000" w:type="dxa"/><w:jc w:val="center"/><w:tblInd w:w="144" w:type="dxa"/>' +
+			'<w:tblBorders><w:top w:val="double" w:sz="4" w:space="0" w:color="FF0000"/></w:tblBorders><w:tblLayout w:type="fixed"/>' +
+			'<w:tblCellMar><w:left w:w="57" w:type="dxa"/></w:tblCellMar>'
+		const change =
+			'<w:tblPrChange w:id="5" w:author="Ann" w:date="2026-01-01T00:00:00Z"><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr></w:tblPrChange>'
+		const body =
+			SHADED(["", ""]).replace('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>', `<w:tblPr>${tblPr}${change}</w:tblPr>`) +
+			p("after")
+
+		for (const kind of ["raw", "fresh", "open"] as const) {
+			const opened = await openSpec({ body })
+			const session = new DocxEditorSession(opened.context)
+			const size = session.state.doc.child(0).nodeSize
+			// "open": the slice ends inside the table's last cell (the copy is a table the paste opened).
+			const slice = session.state.doc.slice(0, kind === "open" ? find(session.state.doc, "c1") + 1 : size)
+
+			session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, find(session.state.doc, "after"))))
+			expect(session.dispatch(session.state.tr.replaceSelection(kind === "fresh" ? freshSlice(slice) : slice))).toBe(true)
+
+			const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [session] })
+			const xml = new TextDecoder().decode(unzipSync(result.bytes as Uint8Array)["word/document.xml"])
+			const tables = xml.match(/<w:tblPr>.*?<\/w:tblPr>(?=<w:tblGrid>)/g) ?? []
+
+			expect(tables).toHaveLength(2)
+
+			for (const table of tables) expect(table).toContain(tblPr)
+
+			expect(tables.filter(table => table.includes("tblPrChange"))).toHaveLength(1)
+		}
+	})
+
+	it("keeps the fill, alignment and width of another part's cells pasted, not that part's items as models", async () => {
+		const opened = await openSpec({
+			body: SHADED(["FF0000", "00FF00"]) + p("after") + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>',
+			headers: { rIdH: SHADED(["111111", "222222"]) + p("tail") }
+		})
+		const story = opened.context.model.stories.find(entry => entry.kind === "header")
+
+		if (story === undefined) throw new Error("no header")
+
+		const body = new DocxEditorSession(opened.context)
+		const header = new DocxEditorSession(opened.context, { story })
+		const doc = body.state.doc
+		// Both cells of the body's row, pasted into the header's last cell.
+		const slice = doc.slice(find(doc, "c0") - 2, find(doc, "c1") + 4)
+
+		header.dispatch(header.state.tr.setSelection(TextSelection.create(header.state.doc, find(header.state.doc, "c1") + 2)))
+		expect(header.dispatch(header.state.tr.replaceSelection(slice))).toBe(true)
+
+		const cells = await cellsOf(opened, [body, header], "word/header1.xml")
+
+		expect(cells.filter(cell => cell.includes('w:fill="111111"'))).toHaveLength(1)
+		expect(cells.filter(cell => cell.includes('w:fill="FF0000"') && cell.includes('<w:tcW w:w="2000" w:type="dxa"/>'))).toHaveLength(1)
+		expect(cells.filter(cell => cell.includes('w:fill="00FF00"') && cell.includes('<w:vAlign w:val="center"/>'))).toHaveLength(1)
 	})
 })

@@ -1,6 +1,7 @@
 /* Objects on the pages: the selection frame of a drawing and its resize handles (react/docx/edit/objects.ts
    gives their places), drawn by the app in a page overlay, page px. Structure only; the look is the
-   variables --fo-handle-size, --fo-handle-fill, --fo-handle-stroke, --fo-object-frame, --fo-object-hover. */
+   variables --fo-handle-size, --fo-handle-fill, --fo-handle-stroke, --fo-object-frame, --fo-object-hover,
+   and for cropping --fo-crop-handle-size, --fo-crop-handle-fill, --fo-crop-shade. */
 
 [data-fo-object-frame] {
 	position: absolute;
@@ -51,4 +52,46 @@
 [data-fo-object-dragging] {
 	transform-origin: 0 0;
 	will-change: transform;
+}
+
+/* Crop mode (CropDrag): what shows of the picture framed by its crop handles, the whole picture (where it is
+   cut off) shaded around it. Corner handles are drawn by the app as an L, side handles as a bar. */
+[data-fo-crop-picture] {
+	position: absolute;
+	box-sizing: border-box;
+	background: var(--fo-crop-shade, transparent);
+	pointer-events: auto;
+	cursor: move;
+	touch-action: none;
+}
+
+[data-fo-crop-handle] {
+	position: absolute;
+	box-sizing: border-box;
+	width: var(--fo-crop-handle-size, 12px);
+	height: var(--fo-crop-handle-size, 12px);
+	margin: calc(var(--fo-crop-handle-size, 12px) / -2) 0 0 calc(var(--fo-crop-handle-size, 12px) / -2);
+	background: var(--fo-crop-handle-fill, currentColor);
+	pointer-events: auto;
+	touch-action: none;
+}
+
+[data-fo-crop-handle="nw"],
+[data-fo-crop-handle="se"] {
+	cursor: nwse-resize;
+}
+
+[data-fo-crop-handle="ne"],
+[data-fo-crop-handle="sw"] {
+	cursor: nesw-resize;
+}
+
+[data-fo-crop-handle="n"],
+[data-fo-crop-handle="s"] {
+	cursor: ns-resize;
+}
+
+[data-fo-crop-handle="e"],
+[data-fo-crop-handle="w"] {
+	cursor: ew-resize;
 }

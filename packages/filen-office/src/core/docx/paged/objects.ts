@@ -1,3 +1,4 @@
+import { FIELD_HITS } from "../fields/hits"
 import { DRAWING_HITS } from "../objects/hits"
 import { FORM_HITS } from "../forms/hits"
 import { TABLE_HITS } from "../edit/tables/hits"
@@ -29,7 +30,7 @@ export interface ObjectHitProvider {
 }
 
 // In the order they are asked: the first hit wins.
-export const OBJECT_HIT_PROVIDERS: readonly ObjectHitProvider[] = [...FORM_HITS, ...DRAWING_HITS, ...TABLE_HITS]
+export const OBJECT_HIT_PROVIDERS: readonly ObjectHitProvider[] = [...FORM_HITS, ...DRAWING_HITS, ...TABLE_HITS, ...FIELD_HITS]
 
 export function hitObject(editor: PagedEditor, page: number, x: number, y: number, zoom = 1): ObjectHit | undefined {
 	for (const provider of OBJECT_HIT_PROVIDERS) {

@@ -1,7 +1,11 @@
+import { Item } from "../model/kinds"
+import { Ns } from "../model/namespaces"
+import type { StoryPart } from "../model/part"
 import { formatNumber } from "../numbering/formats"
 
-// Fields whose result layout computes per page instead of showing the cached result Word stored.
-export const FieldKind = { OTHER: 0, PAGE: 1, NUMPAGES: 2, SECTIONPAGES: 3 } as const
+// Fields whose result layout computes instead of showing the cached result Word stored: page numbers per page,
+// and legacy check boxes and drop-down lists, which Word draws from their w:ffData (ECMA-376 Part 1 §17.16.17).
+export const FieldKind = { OTHER: 0, PAGE: 1, NUMPAGES: 2, SECTIONPAGES: 3, CHECKBOX: 4, DROPDOWN: 5 } as const
 
 export type FieldKind = (typeof FieldKind)[keyof typeof FieldKind]
 
@@ -12,6 +16,8 @@ export interface FieldInfo {
 }
 
 const OTHER: FieldInfo = { kind: FieldKind.OTHER, format: undefined }
+const CHECKBOX: FieldInfo = { kind: FieldKind.CHECKBOX, format: undefined }
+const DROPDOWN: FieldInfo = { kind: FieldKind.DROPDOWN, format: undefined }
 
 // \* general formatting switches that format numbers (ECMA-376 §17.16.4.3), as ST_NumberFormat values.
 const NUMBER_SWITCHES: Readonly<Record<string, string>> = {
@@ -50,9 +56,14 @@ export function fieldInfo(instruction: string): FieldInfo {
 				? FieldKind.NUMPAGES
 				: type === "SECTIONPAGES"
 					? FieldKind.SECTIONPAGES
-					: FieldKind.OTHER
+					: type === "FORMCHECKBOX"
+						? FieldKind.CHECKBOX
+						: type === "FORMDROPDOWN"
+							? FieldKind.DROPDOWN
+							: FieldKind.OTHER
 
 	if (kind === FieldKind.OTHER) return OTHER
+	if (kind === FieldKind.CHECKBOX || kind === FieldKind.DROPDOWN) return kind === FieldKind.CHECKBOX ? CHECKBOX : DROPDOWN
 
 	let format: string | undefined
 
@@ -67,4 +78,70 @@ export function numberText(value: number, format: string | undefined): string {
 	if (format === "hexUpper") return value.toString(16).toUpperCase()
 
 	return formatNumber(value, format ?? "decimal")
+}
+
+export interface FormFieldLook {
+	// A drop-down list's entry shown ("" for a check box).
+	readonly text: string
+	// Whether a check box is checked.
+	readonly checked: boolean
+	// The check box's own size (w:size, half-points), undefined when it takes its run's (w:sizeAuto).
+	readonly size: number | undefined
+}
+
+// What a legacy check box or drop-down list whose begin w:fldChar is `item` shows: the box (layout draws it as
+// Word does, see ObjectKind.CHECKBOX), checked as w:checked (else w:default) says, or the list entry w:result
+// (else w:default, else the first) names.
+export function formFieldLook(part: StoryPart, item: number, kind: FieldKind): FormFieldLook | undefined {
+	if (part.kinds[item] !== Item.FieldChar) return undefined
+
+	const reader = part.reader
+	const ffData = reader.child(part.node(item), Ns.W, "ffData")
+
+	if (ffData < 0) return undefined
+
+	const child = (node: number, local: string): number => (node < 0 ? -1 : reader.child(node, Ns.W, local))
+	const number = (node: number): number | undefined => {
+		const value = node < 0 ? undefined : Number.parseInt(reader.attr(node, Ns.W, "val") ?? "", 10)
+
+		return value !== undefined && Number.isInteger(value) && value >= 0 ? value : undefined
+	}
+
+	if (kind === FieldKind.CHECKBOX) {
+		const box = child(ffData, "checkBox")
+
+		if (box < 0) return undefined
+
+		const checked = child(box, "checked")
+		const fallback = child(box, "default")
+		const on = checked >= 0 ? reader.onOff(checked) : fallback >= 0 && reader.onOff(fallback)
+		const size = child(box, "sizeAuto") >= 0 ? undefined : number(child(box, "size"))
+
+		return { text: "", checked: on, size: size === undefined || size < 2 ? undefined : size }
+	}
+
+	const list = child(ffData, "ddList")
+
+	if (list < 0) return undefined
+
+	const document = part.document
+	const entries: string[] = []
+
+	for (let entry = document.firstChildElement(list); entry >= 0; entry = document.nextSiblingElement(entry))
+		if (reader.is(entry, Ns.W, "listEntry")) entries.push(reader.attr(entry, Ns.W, "val") ?? "")
+
+	const chosen = number(child(list, "result")) ?? number(child(list, "default")) ?? 0
+
+	return { text: entries[chosen] ?? entries[0] ?? "", checked: false, size: undefined }
+}
+
+// Which fields show their codes instead of their results: all of them (Word's "Field codes" view, Alt+F9) or
+// none, except those `toggled` says were switched the other way one by one (Shift+F9), a field named by its
+// part and its begin w:fldChar (or w:fldSimple) item. A view of the document, never saved.
+export interface FieldCodes {
+	readonly all: boolean
+	readonly toggled: ((part: StoryPart, item: number) => boolean) | undefined
+	// Whether paragraph `item` of `part`, laid out from an edit (a part of its own), lies inside a field spanning
+	// paragraphs shown as its code that does not end in it: its mark is hidden as the source's are there.
+	readonly within?: (part: StoryPart, item: number) => boolean
 }

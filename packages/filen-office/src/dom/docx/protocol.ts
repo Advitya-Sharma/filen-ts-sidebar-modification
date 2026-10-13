@@ -125,6 +125,7 @@ export type DocxObjectData =
 	// fontSize: px of the run holding the equation.
 	| { readonly kind: "math"; readonly id: number; readonly tree: MathElement; readonly fontSize: number }
 	| { readonly kind: "separator"; readonly id: number }
+	| { readonly kind: "checkbox"; readonly id: number; readonly checked: boolean }
 	| { readonly kind: "placeholder"; readonly id: number; readonly reason: string }
 
 export interface DocxMedia {

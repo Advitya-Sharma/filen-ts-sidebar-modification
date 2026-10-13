@@ -732,6 +732,7 @@ export class DocxEngine implements DocxSessionApi {
 		const index = table.indices[id] ?? -1
 
 		if (kind === ObjectKind.SEPARATOR || kind === ObjectKind.CONTINUATION_SEPARATOR) return { kind: "separator", id }
+		if (kind === ObjectKind.CHECKBOX) return { kind: "checkbox", id, checked: index === 1 }
 
 		if (kind === ObjectKind.MATH) {
 			const part = table.parts[id] ?? -1

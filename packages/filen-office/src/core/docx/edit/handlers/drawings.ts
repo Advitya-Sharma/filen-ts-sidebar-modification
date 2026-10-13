@@ -2,20 +2,29 @@ import type { Node } from "prosemirror-model"
 import {
 	canInsertPicture,
 	changeDrawing,
+	croppedExtent,
 	drawingState,
 	floatingPosition,
 	insertPicture,
 	pictureRefusal,
 	resizedExtent,
+	sameCrop,
 	selectedDrawing,
+	sourceState,
 	type DrawingChanges,
 	type DrawingState
 } from "../../objects/edit"
 import type { DocumentCommandContext, DocumentHandlers, FeatureHandlers } from "../registry"
 
-// Pictures, shapes, charts and text boxes as objects: insert a picture, and resize, move, wrap, rotate,
+// Pictures, shapes, charts and text boxes as objects: insert a picture, and resize, move, wrap, rotate, crop,
 // describe or delete the drawing the selection is (a node selection of it). Document commands: a drawing in
 // a header or text box changes in that story's session, one undo step each.
+//
+// Changes to a drawing's size, position, wrapping, rotation, crop and alt text are never tracked, as in Word:
+// WordprocessingML has no revision markup for them (ISO/IEC 29500-1 §17.13: the property revisions are
+// rPrChange, pPrChange, sectPrChange and the table ones; wp:inline and wp:anchor have no change element),
+// and Word's revision types (WdRevisionType) have none for a picture or shape. Inserting and deleting one is
+// a run's insertion or deletion and is tracked as such.
 
 interface Selected {
 	readonly pos: number
@@ -109,6 +118,31 @@ const document: DocumentHandlers = {
 			const found = selected(context)
 
 			return found?.state.rotatable === true && apply(context, found, { rot: (found.state.rot + command.by) % 360 })
+		}
+	},
+	"drawing.crop": {
+		enabled: context => selected(context)?.state.croppable === true,
+		run: (context, command) => {
+			const found = selected(context)
+
+			if (found?.state.croppable !== true) return false
+
+			const crop = { left: command.left, top: command.top, right: command.right, bottom: command.bottom }
+
+			if (sameCrop(crop, found.state.crop)) return false
+
+			const extent = croppedExtent(found.state, sourceState(context.context, found.node), crop)
+
+			return (
+				extent !== undefined &&
+				apply(context, found, {
+					...extent,
+					cropLeft: crop.left,
+					cropTop: crop.top,
+					cropRight: crop.right,
+					cropBottom: crop.bottom
+				})
+			)
 		}
 	},
 	"drawing.delete": {

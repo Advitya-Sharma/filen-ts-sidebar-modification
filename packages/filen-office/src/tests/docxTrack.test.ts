@@ -737,8 +737,8 @@ describe("docx tracked changes: commands and settings", () => {
 		const doc = await tracked({
 			body:
 				pr(run("one two")) +
-				`<w:p><w:pPr><w:rPr><w:del w:id="4" w:author="Bob" w:date="2026-01-01T00:00:00Z"/></w:rPr><w:sectPr/></w:pPr>${run("end")}</w:p>` +
-				p("last")
+				p("end") +
+				`<w:p><w:pPr><w:rPr><w:del w:id="4" w:author="Bob" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr>${run("last")}</w:p>`
 		})
 		const session = doc.session
 
@@ -750,7 +750,7 @@ describe("docx tracked changes: commands and settings", () => {
 		expect(session.snapshot().review).toBe(first)
 		expect(first).toMatchObject({ tracking: true, revisionCount: 2, skipped: 0 })
 
-		// A deleted mark holding a section break cannot join: accepting leaves it.
+		// A deleted mark with no paragraph after it cannot join: accepting leaves it.
 		session.dispatch(resolveChanges(session, storyReviewIndex(session), { all: true }, true).tr as never)
 		expect(session.snapshot().review).toMatchObject({ revisionCount: 1, skipped: 1 })
 		expect(texts(session)).toEqual(["oxyne two", "end", "last"])
@@ -1155,7 +1155,43 @@ describe("docx tracked changes: recording details", () => {
 		expect(storyReviewIndex(other.session).revisionCount).toBe(0)
 	})
 
-	it("deletes over a section break while tracking: everything stays, marked", async () => {
+	it("deletes a whole field while tracking: its code stays with it, saved and read back", async () => {
+		const field =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DOCPROPERTY  Company  \\* MERGEFORMAT </w:instrText></w:r>' +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Acme</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		const doc = await tracked({ body: pr(run("At ") + field + run(" today")) })
+		const session = doc.session
+		const fieldOf = (target: DocxEditorSession): Node | undefined => {
+			let found: Node | undefined
+
+			target.state.doc.descendants(node => {
+				if (node.type === docxSchema.nodes.field) found = node
+
+				return found === undefined
+			})
+
+			return found
+		}
+
+		select(session, 3, 5)
+		session.dispatch(session.state.tr.deleteSelection())
+		expect(fieldOf(session)?.marks.some(mark => mark.type === docxSchema.marks.deletion)).toBe(true)
+
+		const { bytes, xml } = await save(doc, [session])
+
+		expect(xml).toContain("<w:delInstrText")
+
+		const back = await reopened(bytes)
+
+		// Read back, the deleted field has the code it had (not the empty code of what the final view shows).
+		expect(fieldOf(back)?.attrs).toMatchObject({ type: "DOCPROPERTY", instruction: " DOCPROPERTY  Company  \\* MERGEFORMAT " })
+		session.dispatch(resolveChanges(session, storyReviewIndex(session), { all: true }, false).tr as never)
+		expect((await save(doc, [session])).xml).toContain(
+			'<w:instrText xml:space="preserve"> DOCPROPERTY  Company  \\* MERGEFORMAT </w:instrText>'
+		)
+	})
+
+	it("deletes over a section break while tracking: everything stays, marked, the break's mark too", async () => {
 		const sect =
 			'<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>'
 		const doc = await tracked({ body: p("one") + pr(run("two"), sect) + p("three") })
@@ -1165,10 +1201,10 @@ describe("docx tracked changes: recording details", () => {
 		session.dispatch(session.state.tr.setSelection(new AllSelection(session.state.doc)))
 		expect(session.dispatch(session.state.tr.deleteSelection())).toBe(true)
 		expect(texts(session)).toEqual(["[-one-]", "[-two-]", "[-three-]"])
-		// The mark holding the section break stays as it is.
+		// The mark holding the section break is deleted as Word records it (accepted, the sections combine).
 		expect(paragraphs(session.state.doc).map(node => ((node.attrs["revision"] as number) & RevisionFlag.Deleted) !== 0)).toEqual([
 			true,
-			false,
+			true,
 			false
 		])
 		await expect(save(doc, [session])).resolves.toBeDefined()

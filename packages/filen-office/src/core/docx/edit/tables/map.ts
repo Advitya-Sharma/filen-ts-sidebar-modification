@@ -28,6 +28,8 @@ export type SourceResolution = "accepted" | "rejected"
 
 // What table commands set on a table (its `props`): absent keys are as the source has them.
 export interface TableOverrides {
+	// A source table (item of the story's part) whose properties a new table starts from (a copy of it).
+	readonly from?: number
 	readonly align?: DocxTableAlign
 	// w:tblW: twips for "dxa", fiftieths of a percent for "pct".
 	readonly width?: { readonly value: number; readonly type: "dxa" | "pct" | "auto" }
@@ -60,6 +62,9 @@ export interface RowChange extends TrackStamp {
 export interface CellChange extends TrackStamp {
 	readonly props: CellOverrides
 	readonly colwidth: number | null
+	// The cell was merged or split (untracked, as Word does) after the record: the width before was another
+	// span's; rejected, the cell takes the width of the columns it spans now.
+	readonly reshaped?: boolean
 }
 
 // What table commands record on a row (its row_props mark value).
@@ -109,10 +114,12 @@ export function cellOverrides(cell: Node): CellOverrides {
 	return markValue<CellOverrides>(cell, marks.cell_props) ?? NONE
 }
 
-// The source item a row or cell takes its properties from: its own, or the one it was modelled on.
+// The source item a table, row or cell takes its properties from: its own, or the one it was modelled on.
 export function propertySource(part: StoryPart, node: Node, kind: number): number {
 	const own = node.attrs["src"] as number
-	const from = (node.type === nodes.table_row ? rowOverrides(node) : cellOverrides(node)).from
+	const from = (
+		node.type === nodes.table ? tableOverrides(node) : node.type === nodes.table_row ? rowOverrides(node) : cellOverrides(node)
+	).from
 
 	if (own !== NO_SOURCE && part.kinds[own] === kind) return own
 	if (from !== undefined && part.kinds[from] === kind) return from

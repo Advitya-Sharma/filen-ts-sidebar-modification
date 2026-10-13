@@ -5,7 +5,7 @@ import type { DocxEditContext } from "../edit/context"
 import { builtInStyleId } from "../edit/formats"
 import { freshSlice, markCommand, markInternal } from "../edit/invariants/index"
 import { NO_SOURCE, WRAPPER_MARKS, docxSchema } from "../edit/schema"
-import type { DocxEditorSession } from "../edit/session"
+import { sourceCopies, type DocxEditorSession } from "../edit/session"
 import type { Story } from "../model/index"
 import type { PagedEditor } from "../paged/editor"
 import { revisionStamp } from "../review/track"
@@ -312,13 +312,13 @@ export class DocxNotes {
 		return nodes.note_ref.create({ src: NO_SOURCE, kind, id, custom }, null, nodeMarks)
 	}
 
-	// A new note's story holding `content` (blocks; by default one paragraph of the note's text style with its
-	// mark and a space, as Word starts a note), outside the undo history: the reference that refers to it is
-	// what undoes.
+	// A new note's story holding `content` (blocks, or made for the part the note is on; by default one paragraph
+	// of the note's text style with its mark and a space, as Word starts a note), outside the undo history: the
+	// reference that refers to it is what undoes.
 	private newNote(
 		kind: DocxNoteKind,
 		mark: string | undefined,
-		content: Fragment | undefined
+		content: Fragment | ((part: number) => Fragment | undefined) | undefined
 	): { id: string; story: number } | undefined {
 		const context = this.context
 		const session = this.editor.addStory(kind)
@@ -326,7 +326,12 @@ export class DocxNotes {
 
 		if (session === undefined || id === undefined) return undefined
 
-		const blocks = content ?? Fragment.from(this.firstParagraph(kind, mark, Fragment.from(docxSchema.text(" "))))
+		const made = typeof content === "function" ? content(session.story.part.index) : content
+
+		// Nothing refers to the story: it is left out of the save.
+		if (typeof content === "function" && made === undefined) return undefined
+
+		const blocks = made ?? Fragment.from(this.firstParagraph(kind, mark, Fragment.from(docxSchema.text(" "))))
 		const tr = session.state.tr.replaceWith(0, session.state.doc.content.size, blocks)
 		const tracked = this.tracked(tr, 0, tr.doc.content.size, context)
 
@@ -350,15 +355,17 @@ export class DocxNotes {
 		)
 	}
 
-	// The blocks of note story `story` as content of a new note of `kind`: made new (as a paste into another
-	// part makes them), the note's mark of the new kind, the text style mapped from the old kind's.
+	// The blocks of note story `story` as content of a new note of `kind` on part `target`: made new (as a paste
+	// into another part makes them), the note's mark of the new kind, the text style mapped from the old kind's.
 	// A note with a custom mark keeps its content (the mark is its text) and its reference stays custom.
-	private convertedContent(story: Story, kind: DocxNoteKind, custom: boolean): Fragment | undefined {
+	private convertedContent(story: Story, kind: DocxNoteKind, custom: boolean, target: number): Fragment | undefined {
 		const session = this.editor.storySession(story.index)
 
 		if (session === undefined) return undefined
 
 		const context = this.context
+		// What only the note's part holds (fills of its cells, form fields' data) stays with the copy.
+		const copies = sourceCopies(context)
 		const from = otherKind(kind)
 		const fromStyle = textStyle(context, from)
 		const toStyle = textStyle(context, kind)
@@ -366,7 +373,7 @@ export class DocxNotes {
 		let marked = false
 
 		session.state.doc.forEach(block => {
-			const fresh = freshSlice(new Slice(Fragment.from(block), 0, 0)).content.firstChild
+			const fresh = freshSlice(new Slice(Fragment.from(block), 0, 0), copies, session.story.part.index, target).content.firstChild
 
 			if (fresh === null) return
 
@@ -390,7 +397,7 @@ export class DocxNotes {
 					rest.push(child)
 				})
 
-				const content = freshSlice(new Slice(Fragment.fromArray(rest), 0, 0)).content
+				const content = freshSlice(new Slice(Fragment.fromArray(rest), 0, 0), copies, session.story.part.index, target).content
 
 				blocks.push(this.firstParagraph(kind, undefined, content, attrs))
 
@@ -414,8 +421,10 @@ export class DocxNotes {
 			const pos = tr.mapping.map(note.pos)
 			const old = tr.doc.nodeAt(pos)
 			const custom = old?.attrs["custom"] === true
-			const content = story === undefined ? undefined : this.convertedContent(story, kind, custom)
-			const made = content === undefined || old?.type !== nodes.note_ref ? undefined : this.newNote(kind, undefined, content)
+			const made =
+				story === undefined || old?.type !== nodes.note_ref
+					? undefined
+					: this.newNote(kind, undefined, target => this.convertedContent(story, kind, custom, target))
 
 			if (made === undefined || old === null) continue
 

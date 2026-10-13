@@ -7,6 +7,7 @@ import { numberSwitchFormat, numberText } from "../layout/fields"
 import { FieldCharType, Item, type StoryPart } from "../model/index"
 import { Ns } from "../model/namespaces"
 import { bookmarkIndex, type DocxBookmark } from "./bookmarks"
+import type { FieldUpdate } from "./result"
 
 // Field codes and what updating a field computes (ECMA-376 Part 1 §17.16): the instruction parsed into its
 // type, arguments and switches (§17.16.1), the general formatting switches \* (§17.16.4.3), numeric pictures
@@ -689,6 +690,20 @@ export const MISSING_BOOKMARK = "Error! Bookmark not defined."
 
 export function needsPages(type: string): boolean {
 	return PAGE_FIELDS.has(type)
+}
+
+// The tracked update of a field atom (its result before an update made while tracking changes, who made it
+// and when: fields/result.ts), or null.
+export function fieldUpdateOf(node: Node): FieldUpdate | null {
+	return (node.attrs["update"] as FieldUpdate | null | undefined) ?? null
+}
+
+// What a field atom's attributes become when its tracked update is accepted (the result stays) or rejected
+// (the result before comes back).
+export function resolvedFieldUpdate(node: Node, accept: boolean): { readonly result: string; readonly update: null } {
+	const update = fieldUpdateOf(node)
+
+	return { result: accept || update === null ? (node.attrs["result"] as string) : update.result, update: null }
 }
 
 // Whether field atom `node` (of `session`'s story) is one an update recomputes.

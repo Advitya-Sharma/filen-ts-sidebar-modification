@@ -11,7 +11,7 @@ import type { DocxStyles } from "../styles/styles"
 import { resolveSection, type PropertyResolver } from "../styles/resolve"
 import type { PageValues, StoryContext } from "./content"
 import { REF_SPAN, refItem, refPart, type LayoutEdits } from "./edits"
-import { numberText } from "./fields"
+import { numberText, type FieldCodes } from "./fields"
 import {
 	Area,
 	AreaStart,
@@ -169,6 +169,7 @@ export class DocumentLayout {
 	private running: () => boolean = () => false
 	private driver: LayoutDriver | undefined = undefined
 	private viewSwitch: ((view: RevisionView) => void) | undefined = undefined
+	private codesSwitch: ((codes: FieldCodes | undefined, fresh: boolean) => void) | undefined = undefined
 	private suspendedValue = false
 	private readonly resumeWaiters: (() => void)[] = []
 
@@ -176,13 +177,15 @@ export class DocumentLayout {
 		relayout: (page: number) => Promise<number>,
 		running?: () => boolean,
 		driver?: LayoutDriver,
-		viewSwitch?: (view: RevisionView) => void
+		viewSwitch?: (view: RevisionView) => void,
+		codesSwitch?: (codes: FieldCodes | undefined, fresh: boolean) => void
 	): void {
 		this.relayout = relayout
 
 		if (running !== undefined) this.running = running
 		if (driver !== undefined) this.driver = driver
 		if (viewSwitch !== undefined) this.viewSwitch = viewSwitch
+		if (codesSwitch !== undefined) this.codesSwitch = codesSwitch
 	}
 
 	// Editing: lays the document out again in revision view `view`, from the first page (the pages laid out
@@ -195,6 +198,18 @@ export class DocumentLayout {
 		this.cancelled = false
 
 		return this.driver.begin(0, undefined)
+	}
+
+	// Editing: lays the document out again with fields shown as their codes (see FieldCodes; undefined: as their
+	// results), from the first page as setView does, or (`from`: fields of those blocks switched one by one) as
+	// an edit of them does (beginEdit). Returns the first page laid out again.
+	setFieldCodes(codes: FieldCodes | undefined, from?: { readonly page: number; readonly dirty: readonly DirtyBlock[] }): number {
+		if (this.driver === undefined || this.codesSwitch === undefined) throw new Error("No layout to edit")
+
+		this.codesSwitch(codes, from === undefined)
+		this.cancelled = false
+
+		return this.driver.begin(from?.page ?? 0, from?.dirty)
 	}
 
 	// Background layout stops at its next slice (another surface shows the document meanwhile); edits may
@@ -505,6 +520,11 @@ class Paginator {
 		}
 
 		this.estimate = estimate ?? Math.max(1, total + 1)
+	}
+
+	// Fields shown as their codes in what is built from now on (see ContentBuilder.setFieldCodes).
+	setFieldCodes(codes: FieldCodes | undefined): void {
+		this.engine.content.setFieldCodes(codes)
 	}
 
 	// The resolver's definitions changed (styles and lists an editor added): counting goes on with them.
@@ -2623,8 +2643,10 @@ export function layoutDocument(
 	const layout = new DocumentLayout(model, table, runStyles, objects)
 	const store = options.store ?? new PropsStore()
 	const tuning = { ...DEFAULT_TUNING, ...options.tuning }
-	const engineOf = (view: RevisionView): Engine =>
-		new Engine({
+	let view = options.view ?? RevisionView.Final
+	let codes: FieldCodes | undefined
+	const engineOf = (): Engine => {
+		const engine = new Engine({
 			model,
 			resolver,
 			store,
@@ -2640,7 +2662,12 @@ export function layoutDocument(
 			recordMaps: options.recordMaps ?? false,
 			...(options.edits === undefined ? {} : { edits: options.edits })
 		})
-	let paginator = new Paginator(engineOf(options.view ?? RevisionView.Final), layout, options.estimatedPages, options.maxPages ?? 100000)
+
+		if (codes !== undefined) engine.content.setFieldCodes(codes)
+
+		return engine
+	}
+	let paginator = new Paginator(engineOf(), layout, options.estimatedPages, options.maxPages ?? 100000)
 	const slice = options.sliceMs ?? 8
 	const now = options.now ?? Date.now
 	const pause = options.yield ?? defaultYield
@@ -2707,8 +2734,23 @@ export function layoutDocument(
 		},
 		() => running,
 		driver,
-		view => {
-			paginator = new Paginator(engineOf(view), layout, options.estimatedPages, options.maxPages ?? 100000)
+		next => {
+			view = next
+			paginator = new Paginator(engineOf(), layout, options.estimatedPages, options.maxPages ?? 100000)
+			paginator.scanStories()
+			driver.use(paginator)
+		},
+		(next, fresh) => {
+			codes = next
+
+			// Fields switched one by one: what the pages built from now on show; earlier ones stay.
+			if (!fresh) {
+				paginator.setFieldCodes(next)
+
+				return
+			}
+
+			paginator = new Paginator(engineOf(), layout, options.estimatedPages, options.maxPages ?? 100000)
 			paginator.scanStories()
 			driver.use(paginator)
 		}

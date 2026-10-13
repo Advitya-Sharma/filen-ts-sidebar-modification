@@ -1,14 +1,17 @@
 import { TextSelection } from "prosemirror-state"
 import { describe, expect, it } from "vitest"
-import { OpcPackage, bytesSource } from "@filen/office/core/opc"
+import { OpcPackage, Relationships, bytesSource, type Relationship } from "@filen/office/core/opc"
 import type { DocxPackage } from "@filen/office/core/docx"
 import { DocxEditorSession, type DocxEditContext, type DocxEditorCommand } from "@filen/office/core/docx/edit"
-import type { PagedEditor } from "@filen/office/core/docx/paged"
+import { PagedEditor } from "@filen/office/core/docx/paged"
 import { DocxSaveError, saveDocx } from "@filen/office/core/docx/write"
 import { markInternal } from "../core/docx/edit/invariants/index"
 import { docSectionChanges } from "../core/docx/stories/sections"
+import { DocxVerifyError } from "../core/docx/write/failure"
+import type { CheckInput } from "../core/docx/write/checks/index"
+import { sectionChecks } from "../core/docx/write/checks/sections"
 import { openBytes } from "./docxEditFixtures"
-import { buildDocx, p } from "./docxSynthetic"
+import { buildDocx, p, type ExtraPart } from "./docxSynthetic"
 import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
 
 const decoder = new TextDecoder()
@@ -20,6 +23,140 @@ const HEADER = (type: string, id: string): string => `<w:headerReference w:type=
 const TWO_SECTIONS = buildDocx({
 	body: p("First section") + `<w:p><w:pPr>${SECTION(HEADER("default", "rIdH"))}</w:pPr></w:p>` + p("Second section") + SECTION(""),
 	headers: { rIdH: p("Shared header") }
+})
+
+// A PNG of a width x height picture (its header: the pixels are not needed to place it).
+function png(width: number, height: number): Uint8Array {
+	const u32 = (value: number): number[] => [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255]
+	const chunk = (type: string, data: readonly number[]): number[] => [
+		...u32(data.length),
+		...[...type].map(c => c.charCodeAt(0)),
+		...data,
+		0,
+		0,
+		0,
+		0
+	]
+
+	return new Uint8Array([
+		0x89,
+		0x50,
+		0x4e,
+		0x47,
+		0x0d,
+		0x0a,
+		0x1a,
+		0x0a,
+		...chunk("IHDR", [...u32(width), ...u32(height), 8, 6, 0, 0, 0]),
+		...chunk("IEND", [])
+	])
+}
+
+const PICTURE =
+	'<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="914400" cy="457200"/>' +
+	'<wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="5" name="Logo"/>' +
+	'<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr>' +
+	'<pic:cNvPr id="0" name="a.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+	'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+	"</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+// A header holding what a paste copy leaves out: a picture with its relationship, a link, a field, a content
+// control, a tracked insertion, a bookmark and a comment anchor (these two stay with the original) and paragraph
+// ids.
+const RICH_HEADER =
+	`<w:p w14:paraId="1A2B3C4D" w14:textId="77777777"><w:bookmarkStart w:id="3" w:name="logo"/>${PICTURE}<w:bookmarkEnd w:id="3"/>` +
+	'<w:hyperlink r:id="rIdLink"><w:r><w:t>Site</w:t></w:r></w:hyperlink>' +
+	'<w:ins w:id="7" w:author="Ann" w:date="2026-01-01T00:00:00Z"><w:r><w:t xml:space="preserve"> new</w:t></w:r></w:ins></w:p>' +
+	'<w:p w14:paraId="2B3C4D5E"><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>' +
+	'<w:sdt><w:sdtPr><w:id w:val="99"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Control</w:t></w:r></w:p></w:sdtContent></w:sdt>'
+const RICH = buildDocx({
+	body: p("First section") + `<w:p><w:pPr>${SECTION(HEADER("default", "rIdH"))}</w:pPr></w:p>` + p("Second section") + SECTION(""),
+	headers: { rIdH: RICH_HEADER },
+	parts: [
+		{ name: "word/media/a.png", data: png(96, 48) },
+		{
+			name: "word/_rels/header1.xml.rels",
+			data:
+				'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+				'<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/a.png"/>' +
+				'<Relationship Id="rIdLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/>' +
+				"</Relationships>"
+		}
+	]
+})
+
+const CHART_TYPE = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+const RELATIONSHIPS = (entries: string): string =>
+	'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+	`${entries}</Relationships>`
+const RELATIONSHIP = (id: string, type: string, target: string): string =>
+	`<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}" Target="${target}"/>`
+// A header holding a chart (its data in an embedded workbook), an embedded object, a content control and a
+// text box as Word 16 writes one (wps in mc:Choice, the same content in the VML of mc:Fallback).
+const BOX_CONTENT = "<w:txbxContent><w:p><w:r><w:t>Inside the box</w:t></w:r></w:p></w:txbxContent>"
+const OWNING_HEADER =
+	'<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="1828800" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/>' +
+	'<wp:docPr id="6" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">' +
+	'<c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>' +
+	'<w:r><w:object w:dxaOrig="1440" w:dyaOrig="720"><v:shape id="_x0000_i1025" type="#_x0000_t75" style="width:72pt;height:36pt" o:ole="">' +
+	'<v:imagedata r:id="rIdImg" o:title=""/></v:shape><o:OLEObject Type="Embed" ProgID="Package" ShapeID="_x0000_i1025" DrawAspect="Content" ObjectID="_1" r:id="rIdOle"/></w:object></w:r></w:p>' +
+	'<w:sdt><w:sdtPr><w:id w:val="99"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Control</w:t></w:r></w:p></w:sdtContent></w:sdt>' +
+	'<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+	'<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>' +
+	'<wp:extent cx="2743200" cy="457200"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="7" name="Text Box 7"/><wp:cNvGraphicFramePr/>' +
+	'<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/>' +
+	'<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>' +
+	`<wps:txbx>${BOX_CONTENT}</wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>` +
+	'<mc:Fallback><w:pict><v:shape id="Text Box 7" o:spid="_x0000_s1026" type="#_x0000_t202" style="position:absolute;margin-left:0;margin-top:0;width:216pt;height:36pt;z-index:251659264">' +
+	`<v:textbox>${BOX_CONTENT}</v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r><w:r><w:t>Boxed</w:t></w:r></w:p>`
+const OWNING_PARTS = (): readonly ExtraPart[] => [
+	{ name: "word/media/a.png", data: png(96, 48) },
+	{
+		name: "word/charts/chart1.xml",
+		contentType: CHART_TYPE,
+		data:
+			'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+			'<c:chart><c:plotArea><c:layout/><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/>' +
+			'<c:val><c:numRef><c:f>Sheet1!$B$2:$B$3</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>2</c:v></c:pt><c:pt idx="1"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val>' +
+			'</c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart></c:plotArea></c:chart><c:externalData r:id="rIdData"/></c:chartSpace>'
+	},
+	{
+		name: "word/charts/_rels/chart1.xml.rels",
+		data: RELATIONSHIPS(RELATIONSHIP("rIdData", "package", "../embeddings/Microsoft_Excel_Worksheet.xlsx"))
+	},
+	{
+		name: "word/embeddings/Microsoft_Excel_Worksheet.xlsx",
+		contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		data: new Uint8Array([0x50, 0x4b, 5, 6, 1, 2, 3])
+	},
+	{
+		name: "word/embeddings/oleObject1.bin",
+		contentType: "application/vnd.openxmlformats-officedocument.oleObject",
+		data: new Uint8Array([7, 8, 9])
+	},
+	{
+		name: "word/_rels/header1.xml.rels",
+		data: RELATIONSHIPS(
+			RELATIONSHIP("rIdChart", "chart", "charts/chart1.xml") +
+				RELATIONSHIP("rIdOle", "oleObject", "embeddings/oleObject1.bin") +
+				RELATIONSHIP("rIdImg", "image", "media/a.png")
+		)
+	}
+]
+const OWNING = buildDocx({
+	body: p("First section") + `<w:p><w:pPr>${SECTION(HEADER("default", "rIdH"))}</w:pPr></w:p>` + p("Second section") + SECTION(""),
+	headers: { rIdH: OWNING_HEADER },
+	parts: OWNING_PARTS()
+})
+// Three sections showing the first's header.
+const OWNING_THREE = buildDocx({
+	body:
+		p("First section") +
+		`<w:p><w:pPr>${SECTION(HEADER("default", "rIdH"))}</w:pPr></w:p>` +
+		`<w:p><w:pPr>${SECTION("")}</w:pPr><w:r><w:t>Second section</w:t></w:r></w:p>` +
+		p("Third section") +
+		SECTION(""),
+	headers: { rIdH: OWNING_HEADER },
+	parts: OWNING_PARTS()
 })
 
 async function read(bytes: Uint8Array, name: string): Promise<string> {
@@ -204,6 +341,209 @@ describe("docx headers and footers", () => {
 		const linked = await saved(opened)
 
 		expect((await openBytes(linked)).pkg.has("word/header2.xml")).toBe(false)
+		editor.dispose()
+	})
+
+	it("unlinks a section's header with a copy of everything it shows, as Word copies it", async () => {
+		for (const edited of [false, true]) {
+			const opened = await pagedEditor(RICH)
+			const { editor } = opened
+
+			// Edited first: the copy is the header as it is now.
+			if (edited) {
+				caret(editor, 3)
+				expect(await run(editor, { type: "header.edit" })).toBe(true)
+				type(editor, "Now ")
+				editor.exitStory()
+				await settleAll(editor)
+			}
+
+			caret(editor, 20)
+			expect(await run(editor, { type: "header.edit" })).toBe(true)
+			expect(await run(editor, { type: "header.linkToPrevious" })).toBe(true)
+			expect(editor.snapshot().context.story.header).toMatchObject({ section: 1, linkedToPrevious: false })
+
+			// The same on both pages (the field numbering each).
+			const shown = (await headerTexts(editor)).map(text => text.replace(/Page \d+/, "Page #"))
+
+			expect(shown[1]).toBe(shown[0])
+			expect(shown[0]).toContain(edited ? "Now \ufffcSite new|Page #|Control" : "\ufffcSite new|Page #|Control")
+
+			const bytes = await saved(opened)
+			const original = await read(bytes, "word/header1.xml")
+			const copy = await read(bytes, "word/header2.xml")
+			const relationships = await read(bytes, "word/_rels/header2.xml.rels")
+
+			// The picture, link, field, content control and tracked insertion, with relationships of their own.
+			expect(copy).toContain('<a:blip r:embed="rIdImg"/>')
+			expect(copy).toContain('<w:hyperlink r:id="rIdLink">')
+			expect(copy).toContain('<w:fldSimple w:instr=" PAGE ">')
+			// A content control of its own: Word gives a copy a new w:id.
+			expect(copy).toMatch(/<w:sdt><w:sdtPr><w:id w:val="(-?\d+)"\/><w:text\/><\/w:sdtPr>/)
+			expect(copy).not.toContain('<w:id w:val="99"/>')
+			expect(copy).toMatch(/<w:ins w:id="(\d+)" w:author="Ann"/)
+			expect(relationships).toContain(
+				'Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/a.png"'
+			)
+			expect(relationships).toContain('Id="rIdLink"')
+			expect(relationships).toContain('TargetMode="External"')
+			// What must be unique stays the original's alone.
+			expect(copy).not.toMatch(/bookmarkStart|bookmarkEnd|w14:paraId|w14:textId/)
+			expect(copy).not.toContain('<wp:docPr id="5"')
+			expect(copy).not.toContain('<w:ins w:id="7"')
+			expect(original).toContain('<w:bookmarkStart w:id="3" w:name="logo"/>')
+			expect(original).toContain('<wp:docPr id="5" name="Logo"/>')
+
+			const reopened = await openBytes(bytes)
+
+			expect(reopened.model.sections.map(section => section.effectiveHeaders.default)).toHaveLength(2)
+			editor.dispose()
+		}
+	})
+
+	it("unlinks a copy owning its chart and embedded object, its controls renumbered, its text boxes as edited", async () => {
+		const opened = await pagedEditor(OWNING)
+		const { editor, pkg } = opened
+		const box = editor.edits.model.stories.find(story => story?.kind === "textbox")
+
+		// The text box is edited in its own session, not yet saved.
+		expect(box).toBeDefined()
+		expect(editor.enterStory(box?.index ?? -1, 0)).toBe(true)
+		caret(editor, 1)
+		type(editor, "Edited ")
+		editor.exitStory()
+
+		caret(editor, 20)
+		expect(await run(editor, { type: "header.edit" })).toBe(true)
+		expect(await run(editor, { type: "header.linkToPrevious" })).toBe(true)
+
+		const bytes = await saved(opened)
+		const reopened = await OpcPackage.open(bytesSource(bytes))
+		const original = await read(bytes, "word/header1.xml")
+		const copy = await read(bytes, "word/header2.xml")
+		const relationships = await reopened.relationships("word/header2.xml")
+
+		// The text box as edited, in both branches, in the original and the copy.
+		for (const xml of [original, copy]) {
+			expect(xml.match(/Edited Inside the box/g)).toHaveLength(2)
+			expect(xml).not.toMatch(/<w:t>Inside the box/)
+		}
+
+		// A new content control id.
+		expect(copy).not.toContain('<w:id w:val="99"/>')
+		expect(copy).toMatch(/<w:sdtPr><w:id w:val="-?\d+"\/>/)
+
+		// The chart, its workbook and the embedded object are the copy's own; the picture is shared.
+		expect(relationships.byId("rIdChart")?.partName).toBe("word/charts/chart2.xml")
+		expect(relationships.byId("rIdOle")?.partName).toBe("word/embeddings/oleObject2.bin")
+		expect(relationships.byId("rIdImg")?.partName).toBe("word/media/a.png")
+		expect((await reopened.relationships("word/header1.xml")).byId("rIdChart")?.partName).toBe("word/charts/chart1.xml")
+		expect((await reopened.relationships("word/charts/chart2.xml")).byId("rIdData")?.partName).toBe(
+			"word/embeddings/Microsoft_Excel_Worksheet1.xlsx"
+		)
+		expect(await reopened.read("word/charts/chart2.xml")).toEqual(await pkg.opc.read("word/charts/chart1.xml"))
+		expect(await reopened.read("word/embeddings/oleObject2.bin")).toEqual(new Uint8Array([7, 8, 9]))
+		expect(await reopened.read("word/embeddings/Microsoft_Excel_Worksheet1.xlsx")).toEqual(
+			await pkg.opc.read("word/embeddings/Microsoft_Excel_Worksheet.xlsx")
+		)
+		expect((await reopened.contentTypes()).typeOf("word/charts/chart2.xml")).toBe(CHART_TYPE)
+		editor.dispose()
+	})
+
+	it("gives each copy of a header its own chart and embedded object", async () => {
+		const opened = await pagedEditor(OWNING_THREE)
+		const { editor } = opened
+
+		for (const text of ["Second section", "Third section"]) {
+			const doc = editor.body.session.state.doc
+			let at = -1
+
+			doc.descendants((node, pos) => {
+				if (at < 0 && node.isText && node.text === text) at = pos + 1
+
+				return at < 0
+			})
+			editor.exitStory()
+			caret(editor, at)
+			expect(await run(editor, { type: "header.edit" })).toBe(true)
+			expect(await run(editor, { type: "header.linkToPrevious" })).toBe(true)
+		}
+
+		const bytes = await saved(opened)
+		const reopened = await OpcPackage.open(bytesSource(bytes))
+		const charts = await Promise.all(
+			["word/header1.xml", "word/header2.xml", "word/header3.xml"].map(
+				async name => (await reopened.relationships(name)).byId("rIdChart")?.partName
+			)
+		)
+
+		expect(new Set(charts).size).toBe(3)
+		expect(charts[0]).toBe("word/charts/chart1.xml")
+		editor.dispose()
+	})
+
+	it("edits the copy apart from the header it was made from, and drops it when linked again", async () => {
+		const opened = await pagedEditor(RICH)
+		const { editor } = opened
+
+		caret(editor, 20)
+		expect(await run(editor, { type: "header.edit" })).toBe(true)
+		expect(await run(editor, { type: "header.linkToPrevious" })).toBe(true)
+		type(editor, "Own ")
+
+		const [first, second] = (await headerTexts(editor)).map(text => text.replace(/Page \d+/, "Page #"))
+
+		expect(second).toBe(`Own ${first ?? ""}`)
+
+		const bytes = await saved(opened)
+
+		expect(await read(bytes, "word/header2.xml")).toContain('<a:blip r:embed="rIdImg"/>')
+		expect(await run(editor, { type: "header.linkToPrevious" })).toBe(true)
+
+		const linked = await saved(opened)
+		const reopened = await openBytes(linked)
+
+		expect(reopened.pkg.has("word/header2.xml")).toBe(false)
+		expect(reopened.pkg.has("word/_rels/header2.xml.rels")).toBe(false)
+		editor.dispose()
+	})
+
+	it("refuses a copy whose relationships do not read as those of the part it was copied from", async () => {
+		const opened = await pagedEditor(RICH)
+		const { editor } = opened
+
+		caret(editor, 20)
+		expect(await run(editor, { type: "header.edit" })).toBe(true)
+		expect(await run(editor, { type: "header.linkToPrevious" })).toBe(true)
+
+		const part = editor.session.story.part
+		const kept = part.relationships.all
+		const check = async (written: readonly Relationship[]): Promise<unknown> => {
+			const input = {
+				original: opened.pkg,
+				relationshipsOf: () => Promise.resolve(new Relationships(written)),
+				exists: () => true
+			} as unknown as CheckInput
+
+			for (const entry of sectionChecks) {
+				try {
+					await entry.part?.(input, { name: "word/header2.xml", part, document: part.document, skeleton: false })
+				} catch (error) {
+					return error
+				}
+			}
+
+			return undefined
+		}
+
+		expect(kept.map(relationship => relationship.id).sort()).toEqual(["rIdImg", "rIdLink"])
+		expect(await check(kept)).toBeUndefined()
+		expect(
+			await check(
+				kept.map(relationship => (relationship.id === "rIdImg" ? { ...relationship, partName: "word/media/b.png" } : relationship))
+			)
+		).toBeInstanceOf(DocxVerifyError)
+		expect(await check(kept.filter(relationship => relationship.id !== "rIdLink"))).toBeInstanceOf(DocxVerifyError)
 		editor.dispose()
 	})
 

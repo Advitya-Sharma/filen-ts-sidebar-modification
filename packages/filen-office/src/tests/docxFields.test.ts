@@ -8,14 +8,16 @@ import { parseXml } from "@filen/office/core/xml"
 import type { CheckInput } from "../core/docx/write/checks/index"
 import { fieldChecks } from "../core/docx/write/checks/fields"
 import type { DocxPackage } from "@filen/office/core/docx"
-import type { PagedEditor } from "@filen/office/core/docx/paged"
+import { hitObject, type PagedEditor } from "@filen/office/core/docx/paged"
 import { markInternal } from "../core/docx/edit/invariants/index"
 import { sessionBookmarks } from "../core/docx/fields/bookmarks"
 import { datePicture, numericPicture, parseFieldCode } from "../core/docx/fields/evaluate"
 import { NAMESPACES, buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
+import { pageLines } from "./layoutFixtures"
 import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
 
 const decoder = new TextDecoder()
+
 const encoder = new TextEncoder()
 const nodes = docxSchema.nodes
 
@@ -273,6 +275,251 @@ describe("inserting fields", () => {
 	})
 })
 
+describe("tracked updates", () => {
+	it("records an update while tracking as Word does (old result deleted, new inserted), accepted or rejected whole", async () => {
+		const body = `<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>${complex(" PAGE ", "9", "<w:rPr><w:b/></w:rPr>")}</w:p>`
+		const opened = await open({ body })
+		const editor = opened.editor
+		const session = editor.session
+
+		opened.context.identity.author = "Ann Lee"
+		opened.context.review.tracking = true
+		expect(await editor.execute({ type: "field.updateAll" })).toBe(true)
+
+		const [field] = fieldsOf(session.state.doc)
+
+		expect(field?.node.attrs["result"]).toBe("1")
+		expect(field?.node.attrs["update"]).toMatchObject({ result: "9", author: "Ann Lee" })
+		expect(session.snapshot().review.revisionCount).toBe(1)
+
+		// Updated again: still one change, from the result before the first.
+		expect(await editor.execute({ type: "field.updateAll" })).toBe(true)
+		expect(fieldsOf(session.state.doc)[0]?.node.attrs["update"]).toMatchObject({ result: "9" })
+
+		const bytes = await save(opened)
+		const xml = await read(bytes)
+
+		expect(xml).toMatch(
+			/<w:fldChar w:fldCharType="separate"\/><\/w:r><w:del w:id="\d+" w:author="Ann Lee" w:date="[^"]+"><w:r><w:rPr><w:b\/><\/w:rPr><w:delText>9<\/w:delText><\/w:r><\/w:del><w:ins w:id="\d+" w:author="Ann Lee" w:date="[^"]+"><w:r><w:rPr><w:b\/><\/w:rPr><w:t>1<\/w:t><\/w:r><\/w:ins><w:r><w:rPr><w:b\/><\/w:rPr><w:fldChar w:fldCharType="end"\/>/
+		)
+
+		// Reopened, the update is the field's again, and resolves as one.
+		const reopened = await open(bytes)
+		const again = reopened.editor.session
+
+		expect(pageDigest(reopened.editor.layout)).toEqual(await savedDigest(bytes))
+		expect(fieldsOf(again.state.doc)[0]?.node.attrs).toMatchObject({ result: "1", update: { result: "9", author: "Ann Lee" } })
+		expect(again.snapshot().review.revisionCount).toBe(1)
+		expect(await reopened.editor.execute({ type: "review.rejectAll" })).toBe(true)
+		expect(fieldsOf(again.state.doc)[0]?.node.attrs).toMatchObject({ result: "9", update: null })
+		// As the file had it before the update.
+		expect(await read(await save(reopened))).toContain(body)
+
+		expect(await reopened.editor.execute({ type: "history.undo" })).toBe(true)
+		expect(await reopened.editor.execute({ type: "review.acceptAll" })).toBe(true)
+		expect(fieldsOf(again.state.doc)[0]?.node.attrs).toMatchObject({ result: "1", update: null })
+
+		const accepted = await read(await save(reopened))
+
+		expect(accepted).not.toContain("<w:del ")
+		expect(accepted).toContain("<w:r><w:rPr><w:b/></w:rPr><w:t>1</w:t></w:r>")
+	})
+
+	it("leaves fields deleted while tracking as they are when every field is updated", async () => {
+		const figure = (result: string, text: string): string =>
+			`<w:p><w:r><w:t xml:space="preserve">Figure </w:t></w:r>${complex(" SEQ Figure ", result)}<w:r><w:t xml:space="preserve"> ${text}</w:t></w:r></w:p>`
+		const page = `<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>${complex(" PAGE ", "7")}</w:p>`
+		const opened = await open({ body: page + figure("2", "second") + figure("3", "third") })
+		const editor = opened.editor
+		const session = editor.session
+
+		opened.context.identity.author = "Ann Lee"
+		opened.context.review.tracking = true
+
+		const [first] = fieldsOf(session.state.doc)
+
+		select(editor, first?.pos ?? 0, (first?.pos ?? 0) + 1)
+		session.dispatch(session.state.tr.deleteSelection())
+		expect(await editor.execute({ type: "field.updateAll" })).toBe(true)
+
+		const fields = fieldsOf(session.state.doc)
+
+		// The deleted one keeps its result and records no update.
+		expect(fields.map(field => field.node.attrs["result"])).toEqual(["7", "1", "2"])
+		expect(fields[0]?.node.attrs["update"]).toBeNull()
+		expect(docxSchema.marks.deletion.isInSet(fields[0]?.node.marks ?? [])).toBeDefined()
+		expect(await refusal(opened)).toBeUndefined()
+
+		const bytes = await save(opened)
+		const reopened = await open(bytes)
+
+		expect(pageDigest(reopened.editor.layout)).toEqual(await savedDigest(bytes))
+		expect(fieldsOf(reopened.editor.session.state.doc).map(field => field.node.attrs["result"])).toEqual(["7", "1", "2"])
+	})
+
+	it("leaves a field inserted while tracking to its insertion, and needs the author's name", async () => {
+		const opened = await open({ body: p("Text") })
+		const editor = opened.editor
+
+		opened.context.review.tracking = true
+		select(editor, 3)
+		expect(await editor.execute({ type: "field.updateAll" })).toBe(false)
+
+		opened.context.identity.author = "Ann Lee"
+		expect(await editor.execute({ type: "insert.pageCount" })).toBe(true)
+		expect(await editor.execute({ type: "field.updateAll" })).toBe(true)
+		expect(fieldsOf(editor.session.state.doc)[0]?.node.attrs["update"]).toBeNull()
+		expect(await refusal(opened)).toBeUndefined()
+	})
+})
+
+describe("field codes view", () => {
+	const text = (editor: PagedEditor): string[] => pageLines(editor.layout, 0).map(line => line.text)
+
+	it("shows every field as its code (Alt+F9) and one field at a time (Shift+F9), a view the file never sees", async () => {
+		const opened = await open({
+			body:
+				`<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>${complex(" PAGE \\* MERGEFORMAT ", "1")}<w:r><w:t xml:space="preserve"> of </w:t></w:r>` +
+				'<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> see </w:t></w:r>' +
+				`${complex(" REF Target \\h ", "the target")}</w:p>` +
+				'<w:p><w:bookmarkStart w:id="1" w:name="Target"/><w:r><w:t>the target</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>'
+		})
+		const editor = opened.editor
+		const before = pageDigest(editor.layout)
+
+		expect(text(editor)[0]).toBe("Page 1 of 1 see the target")
+		expect(editor.canExecute("view.fieldCodes")).toBe(true)
+		expect(await editor.execute({ type: "view.fieldCodes" })).toBe(true)
+		await settleAll(editor)
+		expect(editor.fieldCodes).toBe(true)
+		expect(text(editor)[0]).toBe("Page { PAGE \\* MERGEFORMAT } of { NUMPAGES } see { REF Target \\h }")
+
+		// Typing after a field shown as its code lands after the field.
+		const [page, , ref] = fieldsOf(editor.session.state.doc)
+
+		select(editor, (ref?.pos ?? 0) + 1)
+		editor.session.dispatch(editor.session.state.tr.insertText("!"))
+		await settleAll(editor)
+		expect(text(editor)[0]).toBe("Page { PAGE \\* MERGEFORMAT } of { NUMPAGES } see { REF Target \\h }!")
+
+		// Shift+F9 on the page number shows its result again.
+		select(editor, page?.pos ?? 0)
+		expect(await editor.execute({ type: "view.fieldCode" })).toBe(true)
+		await settleAll(editor)
+		expect(text(editor)[0]).toBe("Page 1 of { NUMPAGES } see { REF Target \\h }!")
+
+		expect(await editor.execute({ type: "view.fieldCodes" })).toBe(true)
+		await settleAll(editor)
+		expect(editor.fieldCodes).toBe(false)
+		expect(text(editor)[0]).toBe("Page 1 of 1 see the target!")
+
+		// One field alone, in the results view.
+		select(editor, (fieldsOf(editor.session.state.doc)[2]?.pos ?? 0) + 1)
+		expect(await editor.execute({ type: "view.fieldCode" })).toBe(true)
+		await settleAll(editor)
+		expect(text(editor)[0]).toBe("Page 1 of 1 see { REF Target \\h }!")
+
+		// What a save writes and its fresh layout are the results view's.
+		expect(editor.setFieldCodes(false)).toBe(true)
+		await settleAll(editor)
+
+		const bytes = await save(opened)
+
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(bytes))
+		expect(before).not.toEqual(pageDigest(editor.layout))
+		expect(await read(bytes)).not.toContain("{")
+	})
+
+	it("lays out again from the page a field switched one by one is on, as switching every field would show it", async () => {
+		const pageBreak = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+		const body =
+			["One", "Two", "Three", "Four"].map(text => p(text) + pageBreak).join("") +
+			`<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>${complex(" PAGE ", "3")}<w:r><w:t xml:space="preserve"> of the text</w:t></w:r></w:p>`
+		const switched = async (whole: boolean): Promise<{ digest: string[]; kept: boolean[] }> => {
+			const opened = await open({ body })
+			const editor = opened.editor
+			const before = [...editor.layout.pages]
+			const [field] = fieldsOf(editor.session.state.doc)
+
+			select(editor, field?.pos ?? 0)
+
+			if (whole) expect(editor.toggleFieldCodes(field === undefined ? [] : [field.node])).toBe(true)
+			else expect(await editor.execute({ type: "view.fieldCode" })).toBe(true)
+
+			await settleAll(editor)
+
+			return { digest: pageDigest(editor.layout), kept: before.map((page, index) => editor.layout.pages[index] === page) }
+		}
+		const one = await switched(false)
+		const all = await switched(true)
+
+		expect(one.digest).toEqual(all.digest)
+		expect(one.digest[4]).toContain("{ PAGE }")
+		// Laid out again from the page the field is on (or the one before, which it might now fit at the end of).
+		expect(one.kept).toEqual([true, true, true, false, false])
+		expect(all.kept).toEqual([false, false, false, false, false])
+	})
+
+	it("shows a table of contents spanning paragraphs as its code alone", async () => {
+		const opened = await open({
+			body:
+				'<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>' +
+				'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>One</w:t></w:r></w:p>' +
+				'<w:p><w:r><w:t>Two</w:t></w:r></w:p><w:p><w:r><w:t>Three</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
+				p("After")
+		})
+		const editor = opened.editor
+
+		expect(text(editor)).toEqual(["One", "Two", "Three", "After"])
+		await editor.execute({ type: "view.fieldCodes" })
+		await settleAll(editor)
+		expect(text(editor)).toEqual(['{ TOC \\o "1-3" }', "After"])
+
+		// Its paragraphs edited (laid out from the edit) stay under the code, the first and last too.
+		for (const entry of ["Two", "One", "Three"]) {
+			select(editor, find(editor.session.state.doc, entry) + 1)
+			editor.session.dispatch(editor.session.state.tr.insertText("x"))
+			await settleAll(editor)
+			expect(text(editor)).toEqual(['{ TOC \\o "1-3" }', "After"])
+		}
+
+		await editor.execute({ type: "view.fieldCodes" })
+		await settleAll(editor)
+		expect(text(editor)).toEqual(["Oxne", "Txwo", "Txhree", "After"])
+	})
+})
+
+describe("field hits", () => {
+	it("finds a field under a press, and a table of contents whole for its Update Table control", async () => {
+		const opened = await open({
+			body:
+				'<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>' +
+				'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Entry one</w:t></w:r></w:p>' +
+				'<w:p><w:r><w:t>Entry two</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
+				`<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>${complex(" PAGE ", "1")}<w:r><w:t xml:space="preserve"> of the text</w:t></w:r></w:p>`
+		})
+		const editor = opened.editor
+		const doc = editor.session.state.doc
+		const center = (from: number, to: number): [number, number] => {
+			const rect = editor.rangeRects(from, to, 0)[0]
+
+			return [(rect?.x ?? 0) + (rect?.width ?? 0) / 2, (rect?.y ?? 0) + (rect?.height ?? 0) / 2]
+		}
+		const [field] = fieldsOf(doc)
+		const at = field?.pos ?? 0
+
+		expect(hitObject(editor, 0, ...center(at, at + 1))).toMatchObject({ kind: "field", pos: at, story: editor.activeStory })
+
+		const entry = find(doc, "Entry two")
+		const toc = hitObject(editor, 0, ...center(entry, entry + 5))
+
+		expect(toc).toMatchObject({ kind: "field", part: "toc", pos: 0 })
+		// The box holds both entries' lines.
+		expect(toc?.box?.height ?? 0).toBeGreaterThan(20)
+		expect(hitObject(editor, 0, ...center(find(doc, "of the text") + 3, find(doc, "of the text") + 6))).toBeUndefined()
+	})
+})
+
 describe("bookmarks", () => {
 	it("adds, moves, renames and deletes bookmarks, keeping names unique", async () => {
 		const opened = await open({
@@ -320,7 +567,7 @@ describe("snapshot", () => {
 
 		const first = editor.snapshot().context.field
 
-		expect(first).toEqual({ type: "PAGE", updatable: true, toc: false, instruction: " PAGE " })
+		expect(first).toEqual({ type: "PAGE", updatable: true, toc: false, instruction: " PAGE ", refusal: null })
 		select(editor, (field[0]?.pos ?? 0) + 1)
 		// Right after the field: the same one.
 		expect(editor.snapshot().context.field).toBe(first)
@@ -329,10 +576,51 @@ describe("snapshot", () => {
 			type: "HYPERLINK",
 			updatable: false,
 			toc: false,
-			instruction: " HYPERLINK \\l x "
+			instruction: " HYPERLINK \\l x ",
+			refusal: null
 		})
 		select(editor, 2)
 		expect(editor.snapshot().context.field).toBeNull()
+	})
+
+	it("tells why a table of contents kept as the file's locked blocks cannot be updated", async () => {
+		const begin =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+		const end = '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		// A field inside it spanning two of its paragraphs: the table stays locked blocks.
+		const spanning =
+			`<w:p>${begin}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> QUOTE "x" </w:instrText></w:r>` +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>One</w:t></w:r></w:p>' +
+			`<w:p><w:r><w:t>Two</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>${end}</w:p>`
+		const table =
+			`<w:p>${begin}<w:r><w:t>One</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>${p("Cell")}</w:tc></w:tr></w:tbl>` +
+			`<w:p><w:r><w:t>Two</w:t></w:r>${end}</w:p>`
+		const cases = [
+			{ body: spanning, untracked: null, tracked: "trackedLockedTable" },
+			{ body: spanning.replace('TOC \\o "1-3"', "TOC \\f"), untracked: "unsupportedTable", tracked: "unsupportedTable" },
+			{ body: table, untracked: "tableWithOtherContent", tracked: "tableWithOtherContent" }
+		] as const
+
+		for (const entry of cases) {
+			const opened = await open({ body: entry.body + p("Heading", '<w:outlineLvl w:val="0"/>') })
+			const editor = opened.editor
+
+			opened.context.identity.author = "Ann Lee"
+			select(editor, 0)
+			expect(editor.session.state.doc.child(0).type).toBe(nodes.locked_block)
+
+			const untracked = editor.snapshot().context.field
+
+			expect(untracked).toMatchObject({ type: "TOC", toc: true, updatable: entry.untracked === null, refusal: entry.untracked })
+			opened.context.review.tracking = true
+			editor.session.dispatch(editor.session.state.tr)
+			expect(editor.snapshot().context.field).toMatchObject({ updatable: false, refusal: entry.tracked })
+			expect(await editor.execute({ type: "toc.update", pagesOnly: false })).toBe(false)
+			opened.context.review.tracking = false
+			editor.session.dispatch(editor.session.state.tr)
+			expect(editor.snapshot().context.field).toBe(untracked)
+			expect(await editor.execute({ type: "toc.update", pagesOnly: false })).toBe(entry.untracked === null)
+		}
 	})
 })
 

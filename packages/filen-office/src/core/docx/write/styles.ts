@@ -15,12 +15,15 @@ interface Definition {
 	readonly qFormat: boolean
 	readonly hidden?: boolean
 	readonly ownNext?: boolean
+	// w:unhideWhenUsed on a style that is not quick-format (default true).
+	readonly unhide?: boolean
 }
 
 // The values are Word's built-in defaults (current Office theme) as observed in documents Word 16 wrote, in the
 // public test corpus (corpus/manifest.json): the paragraph styles from SHA-256
 // 599533082406a29a6238b5a1799c5395d884a8506feafd455fe91d4554218b62, the comment styles from
-// c27159ed00e2bcaf3d15f4ff3b3df2db55e8590869aad93303984fb652d1ce86; no third-party code is copied.
+// c27159ed00e2bcaf3d15f4ff3b3df2db55e8590869aad93303984fb652d1ce86, Placeholder Text from
+// 122f53311702e32affbc0ec99ced129990e6728a9b4b6df30f5684f73a20247f; no third-party code is copied.
 const DEFINITIONS: Readonly<Record<string, Definition>> = {
 	title: {
 		priority: 10,
@@ -57,6 +60,7 @@ const DEFINITIONS: Readonly<Record<string, Definition>> = {
 		ownNext: true
 	},
 	"annotation reference": { priority: 99, pPr: "", rPr: '<w:sz w:val="16"/><w:szCs w:val="16"/>', qFormat: false, hidden: true },
+	"Placeholder Text": { priority: 99, pPr: "", rPr: '<w:color w:val="666666"/>', qFormat: false, hidden: true, unhide: false },
 	header: headerFooter(),
 	footer: headerFooter(),
 	"footnote text": noteText(),
@@ -147,7 +151,7 @@ export function styleDefinition(
 	if (definition === undefined) throw new RangeError(`No definition for ${name}`)
 
 	const type = builtInStyleType(name)
-	const { priority, pPr, rPr, qFormat, hidden, ownNext } = definition
+	const { priority, pPr, rPr, qFormat, hidden, ownNext, unhide } = definition
 	const basedOn = type === "paragraph" ? based.paragraph : based.character
 	const pPrMarkup = type === "paragraph" && pPr !== "" ? `<${names.el("pPr")}>${withPrefix(pPr, names)}</${names.el("pPr")}>` : ""
 
@@ -157,7 +161,7 @@ export function styleDefinition(
 		(type === "paragraph" && based.paragraph !== undefined && ownNext !== true ? names.val("next", based.paragraph) : "") +
 		names.val("uiPriority", String(priority)) +
 		(hidden === true ? names.empty("semiHidden") : "") +
-		(qFormat ? names.empty("qFormat") : names.empty("unhideWhenUsed")) +
+		(qFormat ? names.empty("qFormat") : unhide === false ? "" : names.empty("unhideWhenUsed")) +
 		`${pPrMarkup}<${names.el("rPr")}>${withPrefix(rPr, names)}</${names.el("rPr")}></${names.el("style")}>`
 	)
 }

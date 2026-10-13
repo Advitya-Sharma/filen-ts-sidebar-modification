@@ -494,9 +494,19 @@ export function editorSignatures(doc: Node): ParagraphSignature[] {
 		])
 		let text = ""
 		let fmt = ""
+		// Text after a field's begin in this paragraph (a table of contents' first entry) is the field's, as the
+		// reader takes it.
+		let fields = 0
 
 		node.forEach(child => {
-			if (!child.isText) return
+			if (child.type === docxSchema.nodes.field_char) {
+				if (child.attrs["kind"] === "begin") fields++
+				else if (child.attrs["kind"] === "end" && fields > 0) fields--
+
+				return
+			}
+
+			if (!child.isText || fields > 0) return
 
 			const set = child.marks
 			const underline = marks.underline.isInSet(set)

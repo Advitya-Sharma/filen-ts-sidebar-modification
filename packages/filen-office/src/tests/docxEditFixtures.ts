@@ -259,7 +259,7 @@ export const RICH_BODY =
 	'<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p/></w:tc><w:tc><w:p/><w:bookmarkEnd w:id="1"/></w:tc></w:tr>' +
 	"</w:tbl>" +
 	'<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>end of section</w:t></w:r></w:p>' +
-	'<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Entry 1</w:t></w:r></w:p>' +
+	'<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> INDEX \\c "2" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Entry 1</w:t></w:r></w:p>' +
 	'<w:p><w:r><w:t>Entry 2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
 	'<w:sdt><w:sdtPr><w:lock w:val="sdtLocked"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>in control</w:t></w:r></w:p></w:sdtContent></w:sdt>' +
 	'<w:sdt><w:sdtPr><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>locked control</w:t></w:r></w:p></w:sdtContent></w:sdt>' +

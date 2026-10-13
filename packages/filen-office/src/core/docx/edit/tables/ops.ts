@@ -320,6 +320,16 @@ function rowWith(row: Node, value: RowOverrides): Node {
 }
 
 // A cell with another span or width (as a node).
+// A cell's marks with its recorded property change (if any) marked as made before a merge or split.
+function reshaped(cell: Node): readonly Mark[] {
+	const overrides = cellOverrides(cell)
+	const change = overrides.change
+
+	return change === undefined || change.reshaped === true
+		? cell.marks
+		: withValue(marks.cell_props, cell.marks, { ...overrides, change: { ...change, reshaped: true } })
+}
+
 function cellWith(
 	cell: Node,
 	attrs: { readonly colspan?: number; readonly colwidth?: number | null; readonly vMerge?: string | null }
@@ -1103,7 +1113,7 @@ export function mergeCells(state: EditorState, at: TableAt): Transaction | null 
 			keep.type.create(
 				{ ...keep.attrs, colspan: span, colwidth: width, vMerge: r === rect.top ? (tall ? "restart" : null) : "continue", end },
 				content,
-				keep.marks
+				reshaped(keep)
 			)
 		)
 
@@ -1212,7 +1222,8 @@ export function splitCell(state: EditorState, part: StoryPart, at: TableAt, rows
 	}
 	const subCells = (cell: Node, k: number): Node[] => {
 		const vMerge = vMergeAt(k)
-		const out = [cellWith(cell, { colspan: (bounds[1] ?? 0) - left, colwidth: widthOf(grid, left, (bounds[1] ?? 0) - left), vMerge })]
+		const first = cellWith(cell, { colspan: (bounds[1] ?? 0) - left, colwidth: widthOf(grid, left, (bounds[1] ?? 0) - left), vMerge })
+		const out = [first === cell ? cell : first.mark(reshaped(first))]
 
 		for (let c = 1; c < cols; c++) {
 			const from = bounds[c] ?? 0
@@ -1447,9 +1458,9 @@ function tableWidth(part: StoryPart, store: PropsStore, table: Node): { readonly
 
 	if (overrides.width !== undefined) return overrides.width
 
-	const src = table.attrs["src"] as number
+	const src = propertySource(part, table, Item.Table)
 
-	if (src === NO_SOURCE || part.kinds[src] !== Item.Table) return undefined
+	if (src === NO_SOURCE) return undefined
 
 	return sourceTableProps(part, store, src, overrides.source === "rejected").width
 }
@@ -1700,6 +1711,8 @@ class TableEdit {
 	readonly attrs: Record<string, unknown> = {}
 	readonly rows = new Map<number, RowOverrides>()
 	readonly cells = new Map<string, { overrides: CellOverrides; attrs: Record<string, unknown> }>()
+	// Cells whose width is that of the grid columns they span (start, span) in the grid the edit leaves.
+	readonly spanWidths = new Map<string, { readonly start: number; readonly span: number }>()
 
 	constructor(table: Node) {
 		this.table = table
@@ -1729,6 +1742,13 @@ class TableEdit {
 	// The table with what the edit changed.
 	build(): Node {
 		const rows: Node[] = []
+		const grid = (this.attrs["grid"] ?? this.table.attrs["grid"]) as readonly number[]
+
+		for (const [key, { start, span }] of this.spanWidths) {
+			const entry = this.cells.get(key)
+
+			if (entry !== undefined) entry.attrs["colwidth"] = widthOf(grid, start, span)
+		}
 
 		this.table.forEach((row, _offset, r) => {
 			let cells: Node[] | undefined
@@ -2034,7 +2054,22 @@ function resolveCell(edit: TableEdit, item: TableChangeItem, accept: boolean, pa
 					del: now.del,
 					source: now.source
 				})
-				entry.attrs["colwidth"] = change.colwidth
+
+				if (change.reshaped !== true) {
+					entry.attrs["colwidth"] = change.colwidth
+
+					return
+				}
+
+				// Merged or split since: the width of the columns it spans now, in the grid the resolution leaves.
+				let start = rowGrid(part, store, row).before
+
+				for (let k = 0; k < item.cell; k++) start += Math.max(1, row.child(k).attrs["colspan"] as number)
+
+				edit.spanWidths.set(`${String(item.row)}:${String(item.cell)}`, {
+					start,
+					span: Math.max(1, cell.attrs["colspan"] as number)
+				})
 			}
 		}
 	}
@@ -2060,8 +2095,11 @@ function resolveCell(edit: TableEdit, item: TableChangeItem, accept: boolean, pa
 
 	if (merge !== undefined) {
 		const reader = part.reader
+		// ECMA-376 17.13.5.3: w:vMerge is the setting the revision applied (none given when absent), w:vMergeOrig the
+		// one it removed ("rest", not merged, when absent); with neither the revision may be ignored.
 		const revised = reader.attr(merge, Ns.W, "vMerge")
-		const original = reader.attr(merge, Ns.W, "vMergeOrig") ?? (revised === "cont" ? "rest" : "cont")
+		const removed = reader.attr(merge, Ns.W, "vMergeOrig")
+		const original = removed ?? (revised === undefined ? undefined : "rest")
 		const state = accept ? revised : original
 		const below = item.row + 1 < edit.table.childCount ? edit.table.child(item.row + 1) : null
 		let continued = false

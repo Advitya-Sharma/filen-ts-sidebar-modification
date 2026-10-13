@@ -140,10 +140,9 @@ export function tableOf(input: SnapshotInput): DocxTableContext | null {
 
 	const table = at.table
 	const overrides = tableOverrides(table)
+	const model = propertySource(part, table, Item.Table)
 	const sourceAlign =
-		(table.attrs["src"] as number) !== NO_SOURCE && part.kinds[table.attrs["src"] as number] === Item.Table
-			? context.store.table(part.document, part.tables.tblPr[part.aux[table.attrs["src"] as number] ?? -1] ?? -1).alignment
-			: undefined
+		model !== NO_SOURCE ? context.store.table(part.document, part.tables.tblPr[part.aux[model] ?? -1] ?? -1).alignment : undefined
 	const widths = table.attrs["grid"] as readonly number[]
 	const next: DocxTableContext = {
 		rows: at.map.height,

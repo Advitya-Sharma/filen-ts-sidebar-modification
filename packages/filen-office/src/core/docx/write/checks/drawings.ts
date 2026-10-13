@@ -1,5 +1,5 @@
 import { joinBytes } from "../../../opc/index"
-import { NodeKind } from "../../../xml/index"
+import { NodeKind, decodeUtf8, type XmlDocument } from "../../../xml/index"
 import { partReader } from "../../model/reader"
 import { Ns } from "../../model/namespaces"
 import { sniffImage } from "../../objects/images"
@@ -7,14 +7,34 @@ import { DocxVerifyError } from "../failure"
 import type { CheckInput, DocxCheck } from "./index"
 
 // Drawings the save added (new drawing ids; gate 2 counts docPr ids for duplicates itself): extents and ids
-// in range. Every picture relationship the save added points at a part typed as a picture, and every picture
-// part it added holds the picture its content type says. Drawings copied from the source are left as they
-// were, whatever their values.
+// in range. Every crop (a:srcRect) the save wrote leaves something of its picture on each axis. Every
+// picture relationship the save added points at a part typed as a picture, and every picture part it added
+// holds the picture its content type says. Drawings copied from the source are left as they were, whatever
+// their values (a crop too, written again as the source has it).
 
 // ST_PositiveCoordinate, ST_DrawingElementId.
 const MAX_COORDINATE = 27273042316900
 const MAX_DRAWING_ID = 4294967295
 const INTEGER = /^\d+$/
+const SIGNED = /^-?\d+$/
+// ST_Percentage: 100000 is the whole side.
+const WHOLE = 100000
+
+// Whether a:srcRect `node` leaves part of its picture on both axes, its sides whole numbers.
+function sensibleSrcRect(reader: ReturnType<typeof partReader>, node: number): boolean {
+	const sides = ["l", "t", "r", "b"].map(name => reader.attr(node, Ns.None, name) ?? "0")
+
+	if (!sides.every(side => SIGNED.test(side))) return false
+
+	const [l, t, r, b] = sides.map(Number)
+
+	return (l ?? 0) + (r ?? 0) < WHOLE && (t ?? 0) + (b ?? 0) < WHOLE
+}
+
+// The markup of element `node` as written.
+function markupOf(document: XmlDocument, node: number): string {
+	return decodeUtf8(document.bytes, document.start(node), document.end(node))
+}
 
 function inRange(value: string | undefined, max: number): boolean {
 	return value !== undefined && INTEGER.test(value) && Number(value) <= max
@@ -33,6 +53,8 @@ export const drawingChecks: readonly DocxCheck[] = [
 			const document = checked.document
 			const reader = partReader(document)
 			const added = new Set<string>()
+			// The source part's markup, read only when a crop that leaves nothing is to be told from a copy.
+			let sourceText: string | undefined
 			const source = input.original.has(checked.name) ? await input.original.relationships(checked.name) : undefined
 			const written = await input.relationshipsOf(checked.name)
 
@@ -62,6 +84,15 @@ export const drawingChecks: readonly DocxCheck[] = [
 
 						found.add(id ?? "")
 					}
+				} else if (group === Ns.A && local === "srcRect") {
+					if (sensibleSrcRect(reader, node)) continue
+
+					const source = checked.part !== undefined && input.original.has(checked.name) ? checked.part.document : undefined
+
+					sourceText ??= source === undefined ? "" : decodeUtf8(source.bytes, 0, source.bytes.length)
+
+					if (!sourceText.includes(markupOf(document, node)))
+						throw new DocxVerifyError("content", `${checked.name}: a picture crop leaves nothing of it`)
 				} else if ((group === Ns.A && local === "blip") || local === "svgBlip") {
 					const id = reader.attr(node, Ns.R, "embed")
 

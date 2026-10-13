@@ -1589,6 +1589,13 @@ export function paragraphSignature(
 		// A bookmark's name is in its start's bytes, a new one's on its marker (checks/fields.ts checks them).
 		if (child.type === nodes.marker) delete attributes["name"]
 
+		// A field's tracked update gets the save's own revision ids.
+		if (child.type === nodes.field && attributes["update"] !== null && typeof attributes["update"] === "object")
+			attributes["update"] = { ...(attributes["update"] as Record<string, unknown>), id: null }
+
+		// An instruction text deleted reads back as the file's deleted one (w:delInstrText).
+		if (child.type === nodes.field_char && attributes["kind"] === "deletedInstruction") attributes["kind"] = "instruction"
+
 		parts.push(`${child.type.name}${JSON.stringify(sorted(attributes))}[${markPart}]`)
 	})
 

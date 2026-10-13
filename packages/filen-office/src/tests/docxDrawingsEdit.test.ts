@@ -6,13 +6,13 @@ import { docxSchema, type DocxEditorCommand } from "@filen/office/core/docx/edit
 import type { PagedEditor } from "@filen/office/core/docx/paged"
 import { saveDocx } from "@filen/office/core/docx/write"
 import { parseXml } from "@filen/office/core/xml"
-import { drawingState, mediaInUse } from "../core/docx/objects/edit"
+import { changeDrawing, drawingState, mediaInUse } from "../core/docx/objects/edit"
 import { MAX_IMAGE_PIXELS, naturalExtent, sniffImage, type DocxImageInfo } from "../core/docx/objects/images"
 import { editStyle } from "../core/docx/write/atoms/drawings"
 import { openBytes } from "./docxEditFixtures"
 import { buildDocx, p } from "./docxSynthetic"
 import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
-import { DrawingDrag, handlePoints, moveCommand, resizedBox } from "../react/docx/edit/objects"
+import { CropDrag, DrawingDrag, cropSides, handlePoints, moveCommand, resizedBox } from "../react/docx/edit/objects"
 
 const nodes = docxSchema.nodes
 const decoder = new TextDecoder()
@@ -138,6 +138,24 @@ function docx(body: string, media = true): Uint8Array {
 				}
 			: {})
 	})
+}
+
+// An inline picture with a:srcRect `rect` after its blip.
+function croppedPicture(cx: number, cy: number, rect: string): string {
+	return inlinePicture(cx, cy).replace('<a:blip r:embed="rIdImg"/>', `<a:blip r:embed="rIdImg"/>${rect}`)
+}
+
+// A picture in mc:AlternateContent with the VML copy Word keeps for older readers.
+function alternatePicture(cx: number, cy: number): string {
+	const fallback =
+		'<w:pict><v:shape id="Picture 1" o:spid="_x0000_i1025" type="#_x0000_t75" style="width:150pt;height:75pt">' +
+		'<v:imagedata r:id="rIdImg" o:title=""/></v:shape></w:pict>'
+
+	return inlinePicture(cx, cy).replace(
+		/<w:drawing>.*<\/w:drawing>/,
+		drawing =>
+			`<mc:AlternateContent><mc:Choice Requires="wps">${drawing}</mc:Choice><mc:Fallback>${fallback}</mc:Fallback></mc:AlternateContent>`
+	)
 }
 
 const INLINE = docx(
@@ -586,10 +604,14 @@ describe("docx drawings on the pages", () => {
 			relH: "column",
 			relV: "paragraph",
 			rotation: 0,
+			flipH: false,
+			flipV: false,
+			crop: { left: 0, top: 0, right: 0, bottom: 0 },
 			altText: "",
 			resizable: true,
 			rotatable: true,
 			placeable: true,
+			croppable: true,
 			lockAspect: true,
 			pos: 3
 		} as const
@@ -626,5 +648,228 @@ describe("docx drawing state", () => {
 			rotatable: true
 		})
 		expect(opened.model.parts[0]?.kinds.includes(Item.AlternateContent)).toBe(true)
+	})
+})
+
+describe("docx picture crop", () => {
+	it("crops as Word does: a:srcRect after the blip, the extent the part shown at the same scale, back to the source exactly", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+
+		select(editor)
+		expect(editor.snapshot().context.drawing).toMatchObject({ croppable: true, crop: { left: 0, top: 0, right: 0, bottom: 0 } })
+		expect(editor.canExecute("drawing.crop")).toBe(true)
+		expect(await run(editor, { type: "drawing.crop", left: 25000, top: 0, right: 0, bottom: 10000 })).toBe(true)
+		expect(editor.snapshot().context.drawing).toMatchObject({
+			cx: 1428750,
+			cy: 857250,
+			crop: { left: 25000, top: 0, right: 0, bottom: 10000 }
+		})
+		// The same crop again changes nothing.
+		expect(await run(editor, { type: "drawing.crop", left: 25000, top: 0, right: 0, bottom: 10000 })).toBe(false)
+
+		const after = await saved(editor, pkg, context)
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain('<a:blip r:embed="rIdImg"/><a:srcRect l="25000" b="10000"/><a:stretch>')
+		expect(xml).toContain('<wp:extent cx="1428750" cy="857250"/>')
+		expect(xml).toContain('<a:ext cx="1428750" cy="857250"/>')
+		expect(after.drawings[0]).toMatchObject({ width: 1428750, height: 857250 })
+
+		const reopened = await openBytes(after.bytes)
+		const session = new (await import("@filen/office/core/docx/edit")).DocxEditorSession(reopened.context)
+
+		expect(drawingState(reopened.context, session.state.doc.nodeAt(drawingPos(session.state.doc)) as Node).crop).toEqual({
+			left: 25000,
+			top: 0,
+			right: 0,
+			bottom: 10000
+		})
+		await sameLayout(editor, after.bytes)
+
+		// The editor lays the cropped picture out from the markup the save writes.
+		const shown = editor.edits.model.drawings.find(drawing => drawing !== undefined && drawing.part !== 0)
+		const part = shown === undefined ? undefined : editor.edits.model.parts[shown.part]
+
+		expect(part === undefined ? "" : decoder.decode(part.document.bytes)).toContain('<a:srcRect l="25000" b="10000"/>')
+
+		// Uncropped, it is the source again (its size too); so is it undone.
+		select(editor)
+		expect(await run(editor, { type: "drawing.crop", left: 0, top: 0, right: 0, bottom: 0 })).toBe(true)
+		expect(editor.snapshot().context.drawing).toMatchObject({ cx: 1905000, cy: 952500 })
+		expect(await partText((await saved(editor, pkg, context)).bytes, "word/document.xml")).toBe(
+			await partText(INLINE, "word/document.xml")
+		)
+		expect(await run(editor, { type: "history.undo" })).toBe(true)
+		expect(await run(editor, { type: "history.undo" })).toBe(true)
+		expect(await partText((await saved(editor, pkg, context)).bytes, "word/document.xml")).toBe(
+			await partText(INLINE, "word/document.xml")
+		)
+	})
+
+	it("reads a source crop, keeps it as it is through other changes and uncrops to the whole picture", async () => {
+		const rect = '<a:srcRect l="16417" t="24879" r="16294" b="22041"/>'
+		const bytes = docx(`<w:p>${croppedPicture(1717720, 900000, rect)}</w:p>`)
+		const { editor, pkg, context } = await pagedEditor(bytes)
+
+		select(editor)
+		expect(editor.snapshot().context.drawing?.crop).toEqual({ left: 16417, top: 24879, right: 16294, bottom: 22041 })
+		expect(await run(editor, { type: "drawing.altText", text: "Logo" })).toBe(true)
+		expect((await partText((await saved(editor, pkg, context)).bytes, "word/document.xml")) ?? "").toContain(rect)
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.crop", left: 0, top: 0, right: 0, bottom: 0 })).toBe(true)
+
+		const after = await saved(editor, pkg, context)
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+
+		// The whole picture at the scale it was shown at: 1717720 / (1 - 0.32711), 900000 / (1 - 0.4692).
+		expect(xml).toContain('<a:blip r:embed="rIdImg"/><a:srcRect/><a:stretch>')
+		expect(after.drawings[0]).toMatchObject({ width: 2552750, height: 1695554 })
+		await sameLayout(editor, after.bytes)
+	})
+
+	it("pads with a negative crop, crops new pictures and keeps the VML copy in line", async () => {
+		const { editor, pkg, context } = await pagedEditor(docx(`<w:p>${alternatePicture(1905000, 952500)}</w:p>`))
+
+		select(editor)
+		expect(await run(editor, { type: "drawing.crop", left: 25000, top: -10000, right: 0, bottom: 0 })).toBe(true)
+		editor.dispatch(editor.session.state.tr.setSelection(TextSelection.atEnd(editor.session.state.doc)))
+		expect(await run(editor, { type: "image.insert", media: editor.addMedia(png(96, 48)) as number })).toBe(true)
+		select(editor, 1)
+		expect(await run(editor, { type: "drawing.crop", left: 0, top: 0, right: 50000, bottom: 0 })).toBe(true)
+
+		const after = await saved(editor, pkg, context)
+		const xml = (await partText(after.bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain('<a:srcRect l="25000" t="-10000"/>')
+		expect(xml).toContain('<v:imagedata r:id="rIdImg" o:title="" cropleft="16384f" croptop="-6554f"/>')
+		expect(xml).toContain("width:112.5pt;height:82.5pt")
+		expect(xml).toMatch(/<a:blip r:embed="rId\d+"\/><a:srcRect r="50000"\/><a:stretch>/)
+		expect(after.drawings.map(drawing => [drawing.width, drawing.height])).toEqual([
+			[1428750, 1047750],
+			[457200, 457200]
+		])
+		await sameLayout(editor, after.bytes)
+	})
+
+	it("crops pictures only", async () => {
+		const { editor } = await pagedEditor(ANCHORED)
+
+		select(editor)
+		expect(editor.snapshot().context.drawing?.croppable).toBe(false)
+		expect(editor.canExecute("drawing.crop")).toBe(false)
+		expect(await run(editor, { type: "drawing.crop", left: 1000, top: 0, right: 0, bottom: 0 })).toBe(false)
+	})
+
+	it("refuses a written crop that leaves nothing, but not one copied from the source", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+		const session = editor.session
+		const pos = drawingPos(session.state.doc)
+		const tr = changeDrawing(session.state, session.context, pos, session.state.doc.nodeAt(pos) as Node, {
+			cropLeft: 60000,
+			cropRight: 50000
+		})
+
+		expect(tr !== null && session.dispatch(tr)).toBe(true)
+		await expect(saveDocx({ pkg, context, sessions: editor.sessions })).rejects.toMatchObject({
+			reason: "content",
+			message: expect.stringContaining("crop leaves nothing") as string
+		})
+
+		const copied = await pagedEditor(docx(`<w:p>${croppedPicture(1905000, 952500, '<a:srcRect l="60000" r="50000"/>')}</w:p>`))
+
+		select(copied.editor)
+		expect(copied.editor.snapshot().context.drawing?.croppable).toBe(false)
+		expect(await run(copied.editor, { type: "drawing.resize", cx: 952500, cy: 476250 })).toBe(true)
+
+		const xml = (await partText((await saved(copied.editor, copied.pkg, copied.context)).bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain('<a:srcRect l="60000" r="50000"/>')
+	})
+
+	// Word records no revision for a picture's size, place, wrapping or crop: there is no markup for one.
+	it("does not track changes to a drawing's size, place, wrapping or crop", async () => {
+		const { editor, pkg, context } = await pagedEditor(INLINE)
+
+		context.review.tracking = true
+		context.identity.author = "Ada"
+		select(editor)
+		expect(await run(editor, { type: "drawing.resize", cx: 3810000, cy: 1905000 })).toBe(true)
+		select(editor)
+		expect(await run(editor, { type: "drawing.crop", left: 10000, top: 0, right: 0, bottom: 0 })).toBe(true)
+		select(editor)
+		expect(await run(editor, { type: "drawing.wrap", mode: "square" })).toBe(true)
+		select(editor)
+		expect(await run(editor, { type: "drawing.position", x: 914400, y: 0 })).toBe(true)
+
+		const xml = (await partText((await saved(editor, pkg, context)).bytes, "word/document.xml")) ?? ""
+
+		expect(xml).toContain('<a:srcRect l="10000"/>')
+		expect(xml).not.toMatch(/<w:(ins|del|rPrChange|pPrChange)\b/)
+		expect(editor.snapshot().review.revisionCount).toBe(0)
+	})
+
+	it("works out a crop drag: edges, corners, moving the picture under it, turned and mirrored pictures", () => {
+		const base = {
+			kind: "picture",
+			anchored: false,
+			wrap: "inline",
+			cx: 952500,
+			cy: 476250,
+			x: null,
+			y: null,
+			relH: "column",
+			relV: "paragraph",
+			rotation: 0,
+			flipH: false,
+			flipV: false,
+			crop: { left: 0, top: 0, right: 0, bottom: 0 },
+			altText: "",
+			resizable: true,
+			rotatable: true,
+			placeable: true,
+			croppable: true,
+			lockAspect: true,
+			pos: 3
+		} as const
+		const box = { x: 10, y: 20, width: 100, height: 50 }
+		const edge = new CropDrag(base, box, "e")
+
+		expect(edge.move(-25, 7)).toEqual({ x: 10, y: 20, width: 75, height: 50 })
+		expect(edge.picture).toEqual(box)
+		expect(edge.end()).toEqual({ type: "drawing.crop", left: 0, top: 0, right: 25000, bottom: 0 })
+
+		const corner = new CropDrag(base, box, "nw")
+
+		expect(corner.move(10, 5)).toEqual({ x: 20, y: 25, width: 90, height: 45 })
+		expect(corner.end()).toEqual({ type: "drawing.crop", left: 10000, top: 10000, right: 0, bottom: 0 })
+
+		// Out past the picture: padded. Past the other edge: what shows keeps its smallest size.
+		const out = new CropDrag(base, box, "w")
+
+		out.move(-10, 0)
+		expect(out.end()).toEqual({ type: "drawing.crop", left: -10000, top: 0, right: 0, bottom: 0 })
+		expect(out.move(500, 0).width).toBeCloseTo(4, 6)
+		expect(out.end()).toEqual({ type: "drawing.crop", left: 96000, top: 0, right: 0, bottom: 0 })
+
+		// A quarter of the picture cut off its left: 75 px show of 100. Moved right by 10 px under the frame.
+		const cropped = { ...base, crop: { left: 25000, top: 0, right: 0, bottom: 0 } }
+		const pan = new CropDrag(cropped, { x: 10, y: 20, width: 75, height: 50 }, undefined)
+
+		expect(pan.picture).toEqual({ x: -15, y: 20, width: 100, height: 50 })
+		expect(pan.move(10, 0)).toEqual({ x: 10, y: 20, width: 75, height: 50 })
+		expect(pan.picture).toEqual({ x: -5, y: 20, width: 100, height: 50 })
+		expect(pan.end()).toEqual({ type: "drawing.crop", left: 15000, top: 0, right: 10000, bottom: 0 })
+
+		// Turned a quarter clockwise, the picture's top shows on the right; mirrored, its right on the left.
+		expect(cropSides({ ...base, rotation: 90 })).toEqual({ top: "left", right: "top", bottom: "right", left: "bottom" })
+		expect(cropSides({ ...base, flipH: true })).toEqual({ top: "top", right: "left", bottom: "bottom", left: "right" })
+
+		const turned = new CropDrag({ ...base, rotation: 90 }, { x: 0, y: 0, width: 50, height: 100 }, "e")
+
+		turned.move(-25, 0)
+		expect(turned.end()).toEqual({ type: "drawing.crop", left: 0, top: 50000, right: 0, bottom: 0 })
+		expect(new CropDrag({ ...base, rotation: 45 }, box, "e").active).toBe(false)
+		expect(new CropDrag({ ...base, croppable: false }, box, "e").end()).toBeUndefined()
 	})
 })

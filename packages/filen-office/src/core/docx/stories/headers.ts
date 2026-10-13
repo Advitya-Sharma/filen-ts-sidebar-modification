@@ -4,9 +4,10 @@ import type { DocxEditContext } from "../edit/context"
 import { builtInStyleId } from "../edit/formats"
 import { freshSlice, markInternal } from "../edit/invariants/index"
 import { docxSchema } from "../edit/schema"
-import type { DocxEditorSession } from "../edit/session"
+import { sourceCopies, type DocxEditorSession } from "../edit/session"
 import type { HeaderFooterSet, Section } from "../model/index"
 import type { PagedEditor } from "../paged/editor"
+import { cloneStory, type StoryTemplate } from "./clone"
 import { hasStyleDefinition } from "../write/styles"
 import {
 	bodySectionsOf,
@@ -138,33 +139,72 @@ export function canEditHeader(editor: PagedEditor): boolean {
 	return writable(editor)
 }
 
-// A new header or footer story holding `content` (one empty paragraph of the Header or Footer style by
-// default), outside the undo history: the section edit referring to it is what undoes.
-function newStory(editor: PagedEditor, kind: DocxHeaderKind, content: Fragment | undefined): number | undefined {
-	const session = editor.addStory(kind)
+type AddStory = (kind: DocxHeaderKind, id?: string, template?: StoryTemplate) => DocxEditorSession | undefined
+
+// A new header or footer story, outside the undo history (the section edit referring to it is what undoes):
+// a copy of story `copy` (the one an unlinked section showed, stories/clone.ts), else one empty paragraph of
+// the Header or Footer style.
+function newStory(editor: PagedEditor, kind: DocxHeaderKind, copy?: number): number | undefined {
+	const template = copy === undefined ? undefined : copyOf(editor, copy)
+	const add: AddStory = editor.addStory.bind(editor)
+	const session = add(kind, undefined, template)
 
 	if (session === undefined) return undefined
 
 	const context = session.context
-	const style = context.styles.byName(kind, "paragraph")?.id ?? (hasStyleDefinition(kind) ? builtInStyleId(context, kind) : null)
-	const blocks = content ?? Fragment.from(nodes.paragraph.create({ styleId: style }))
-	const tr = session.state.tr.replaceWith(0, session.state.doc.content.size, blocks)
 
-	if (!session.dispatch(markInternal(tr).setMeta("addToHistory", false))) return undefined
+	// Made from the template, the story holds the copy; else its content is set here.
+	if (session.story.story.item < 0) {
+		const style = context.styles.byName(kind, "paragraph")?.id ?? (hasStyleDefinition(kind) ? builtInStyleId(context, kind) : null)
+		const blocks =
+			(copy === undefined ? undefined : pastedContent(editor, copy, session.story.part.index)) ??
+			Fragment.from(nodes.paragraph.create({ styleId: style }))
+		const tr = session.state.tr.replaceWith(0, session.state.doc.content.size, blocks)
+
+		if (!session.dispatch(markInternal(tr).setMeta("addToHistory", false))) return undefined
+	}
 
 	registerSectionStory(context, session.story.story)
 
 	return session.story.story.index
 }
 
-// A story's content made new (as a paste into another part makes it): what an unlinked section gets.
-function copiedContent(editor: PagedEditor, story: number): Fragment | undefined {
+// The part a copy of story `story` makes, as it is now (its session's document, when it has one, with the
+// text boxes in it as their sessions have them).
+function copyOf(editor: PagedEditor, story: number): StoryTemplate | undefined {
+	const stories = editor.edits.model.stories
+	const target = stories[story]
+	const part = target === undefined ? undefined : editor.edits.model.parts[target.part]
+
+	if (target === undefined || part === undefined || target.item < 0 || (target.kind !== "header" && target.kind !== "footer"))
+		return undefined
+
+	const within = (candidate: number): boolean => {
+		for (let at = stories[candidate]?.parent ?? -1; at >= 0; at = stories[at]?.parent ?? -1) if (at === story) return true
+
+		return false
+	}
+	const textboxes = editor.sessions.filter(candidate => candidate.story.story.kind === "textbox" && within(candidate.story.story.index))
+	const edited = textboxes.some(candidate => candidate.state.doc !== candidate.story.doc)
+	// A text box edited is written into the story holding it: that story's session writes it.
+	const session = edited ? editor.storySession(story) : editor.sessions.find(candidate => candidate.story.story.index === story)
+
+	return cloneStory(editor.body.session.context, part, target.item, session, textboxes)
+}
+
+// A story's content made new (as a paste into part `target` makes it): what an unlinked section gets where the
+// story cannot be copied whole (stories/clone.ts says when).
+function pastedContent(editor: PagedEditor, story: number, target: number): Fragment | undefined {
 	const session: DocxEditorSession | undefined = editor.storySession(story)
-	const doc = session?.state.doc
 
-	if (doc === undefined) return undefined
+	if (session === undefined) return undefined
 
-	const fresh = freshSlice(new Slice(doc.content, 0, 0)).content
+	const fresh = freshSlice(
+		new Slice(session.state.doc.content, 0, 0),
+		sourceCopies(session.context),
+		session.story.part.index,
+		target
+	).content
 
 	return fresh.childCount === 0 ? undefined : fresh
 }
@@ -211,7 +251,7 @@ export function editHeader(editor: PagedEditor, kind: DocxHeaderKind, page: numb
 
 	while (first > 0 && setOf(states[first - 1] as SectionState, kind, false)[shown.type] < 0) first--
 
-	const story = newStory(editor, kind, undefined)
+	const story = newStory(editor, kind)
 
 	if (story === undefined) return false
 
@@ -240,7 +280,8 @@ export function canLink(editor: PagedEditor): boolean {
 }
 
 // Link to previous, toggled for the header or footer being edited: a section with its own loses it and shows
-// the previous section's; one showing the previous section's gets its own, a copy of it.
+// the previous section's; one showing the previous section's gets its own, a copy of it with everything it
+// holds (stories/clone.ts).
 export function toggleLink(editor: PagedEditor): boolean {
 	if (!canLink(editor)) return false
 
@@ -273,7 +314,7 @@ export function toggleLink(editor: PagedEditor): boolean {
 	}
 
 	const previous = setOf(state, kind, true)[shown.type]
-	const story = newStory(editor, kind, previous >= 0 ? copiedContent(editor, previous) : undefined)
+	const story = newStory(editor, kind, previous >= 0 ? previous : undefined)
 
 	if (story === undefined) return false
 

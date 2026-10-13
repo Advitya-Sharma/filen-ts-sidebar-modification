@@ -1,11 +1,11 @@
 import type { Node } from "prosemirror-model"
 import { NodeSelection, TextSelection } from "prosemirror-state"
-import { changeDrawing, drawingState, type DrawingChanges } from "../../../core/docx/objects/edit"
+import { changeDrawing, croppedExtent, drawingState, type DrawingChanges } from "../../../core/docx/objects/edit"
 import { docxSchema, type DocxEditorCommand, type DocxEditorSession } from "../harness"
 import { textblocks } from "./base"
 import type { EditOp, OpContext, Rand } from "./index"
 
-// Pictures, shapes, charts and text boxes as objects: resize, move, wrap, rotate, describe and delete the
+// Pictures, shapes, charts and text boxes as objects: resize, move, wrap, rotate, crop, describe and delete the
 // document's drawings and insert new pictures, through the drawing commands under the paged editor (whose
 // pages must stay those of the saved file); overrides set raw (extreme values included) and new pictures
 // inserted raw for the writer and Gate 2; a resize and a new picture in the scripted suite.
@@ -99,6 +99,16 @@ function resize(node: Node, rand: Rand, session: DocxEditorSession): DocxEditorC
 	}
 }
 
+// A crop of a picture: each side cut or padded, or none (uncropped).
+function crop(node: Node, rand: Rand, session: DocxEditorSession): DocxEditorCommand | undefined {
+	if (!drawingState(session.context, node).croppable) return undefined
+	if (rand() < 0.2) return { type: "drawing.crop", left: 0, top: 0, right: 0, bottom: 0 }
+
+	const side = (): number => (rand() < 0.4 ? 0 : Math.round((rand() * 0.65 - 0.2) * 100000))
+
+	return { type: "drawing.crop", left: side(), top: side(), right: side(), bottom: side() }
+}
+
 function paged(name: string, weight: number, run: (context: OpContext) => string): EditOp {
 	return {
 		name,
@@ -152,7 +162,10 @@ function rawOverrides(context: OpContext): string {
 		...(rand() < 0.3 ? { posX: Math.round((rand() - 0.5) * 4 * EMU_PER_INCH), relH: pick(rand, RELATIVE_H) } : {}),
 		...(rand() < 0.3 ? { posY: Math.round((rand() - 0.5) * 4 * EMU_PER_INCH), relV: pick(rand, RELATIVE_V) } : {}),
 		...(rand() < 0.3 ? { descr: pick(rand, TEXTS) } : {}),
-		...(rand() < 0.3 ? { rot: pick(rand, [0, 90, 180, 270]) } : {})
+		...(rand() < 0.3 ? { rot: pick(rand, [0, 90, 180, 270]) } : {}),
+		...(rand() < 0.2 && drawingState(session.context, target.node).croppable
+			? { cropLeft: Math.round((rand() * 0.6 - 0.1) * 100000), cropBottom: Math.round((rand() * 0.6 - 0.1) * 100000) }
+			: {})
 	}
 	const tr = changeDrawing(session.state, session.context, target.pos, target.node, changes)
 
@@ -211,6 +224,7 @@ export const drawingOps: readonly EditOp[] = [
 	paged("drawingRotate", 1, context =>
 		onDrawing(context, (_node, rand) => ({ type: "drawing.rotate", by: pick(rand, [90, 180, 270] as const) }))
 	),
+	paged("drawingCrop", 2, context => onDrawing(context, (node, rand) => crop(node, rand, context.session))),
 	paged("drawingAltText", 1, context => onDrawing(context, (_node, rand) => ({ type: "drawing.altText", text: pick(rand, TEXTS) }))),
 	paged("drawingDelete", 1, context => onDrawing(context, () => ({ type: "drawing.delete" }))),
 	paged("imageInsert", 2, insertPicture),
@@ -230,10 +244,15 @@ export const drawingOps: readonly EditOp[] = [
 				if (found === undefined) return false
 
 				const state = drawingState(session.context, found.node)
+				// A picture is cropped a little off its left as well.
+				const cropped = state.croppable
+					? croppedExtent(state, undefined, { ...state.crop, left: state.crop.left + 5000 })
+					: undefined
 				const tr = changeDrawing(session.state, session.context, found.pos, found.node, {
-					cx: Math.max(1, Math.round(state.cx * 0.9)),
-					cy: Math.max(1, Math.round(state.cy * 0.9)),
-					descr: "Resized by the edit suite"
+					cx: Math.max(1, Math.round((cropped?.cx ?? state.cx) * 0.9)),
+					cy: Math.max(1, Math.round((cropped?.cy ?? state.cy) * 0.9)),
+					descr: "Resized by the edit suite",
+					...(cropped === undefined ? {} : { cropLeft: state.crop.left + 5000 })
 				})
 
 				return tr !== null && session.dispatch(tr)

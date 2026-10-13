@@ -6,16 +6,17 @@ import type { StoryPart } from "../model/part"
 import type { ListMarker, NumberingCounters } from "../numbering/counter"
 import { EMPTY_RUN } from "../props/parse"
 import type { PropsStore } from "../props/store"
-import type { ResolvedRunProps } from "../props/types"
+import type { ResolvedRunProps, RunProps } from "../props/types"
 import type { CellFormat, ParagraphFormat, PropertyResolver } from "../styles/resolve"
-import { FieldKind, fieldInfo, numberText } from "./fields"
+import { FieldKind, fieldInfo, formFieldLook, numberText, type FieldCodes } from "./fields"
 import { objectAt, ObjectKind, type ObjectSizer, type ObjectTable } from "./objects"
 import { TrackedLook, revisionLook, type RunStyles } from "./styles"
 import { halfPoints, twips } from "./units"
 
 // Builds the text a paragraph lays out from the model: runs resolved to styles, fields shown as their
-// results (page fields computed), hidden text and tracked changes per view, list markers, note references,
-// symbols, positional tabs and objects.
+// results (page fields and legacy form fields computed) or, in the field codes view, as their codes between
+// braces, hidden text and tracked changes per view, list markers, note references, symbols, positional tabs
+// and objects.
 
 // Field values for the page being laid out.
 export interface PageValues {
@@ -107,6 +108,9 @@ const FIELD_CODE = 0
 const FIELD_RESULT = 1
 // A computed field: its stored result is replaced.
 const FIELD_REPLACED = 2
+// Shown as its code (the field codes view): the code laid out, the result after it hidden.
+const FIELD_SHOWN = 3
+const FIELD_SHOWN_RESULT = 4
 
 const LEADERS: Readonly<Record<string, TabLeader>> = {
 	dot: TabLeader.DOT,
@@ -137,6 +141,40 @@ export interface ContentServices {
 	// The index of a tracked change's author (-1 for none), numbered as reviewers are.
 	readonly authors: (name: string | undefined) => number
 }
+
+// A legacy check box's run properties at its own size (w:size), one object per run properties and size so
+// resolved runs (and their styles) are shared.
+const SIZED_RUNS = new WeakMap<RunProps, Map<number, RunProps>>()
+
+function sizedRun(direct: RunProps, size: number): RunProps {
+	let sizes = SIZED_RUNS.get(direct)
+	let sized = sizes?.get(size)
+
+	if (sized !== undefined) return sized
+
+	sized = Object.freeze({ ...direct, size, sizeCs: size })
+
+	if (sizes === undefined) {
+		sizes = new Map()
+		SIZED_RUNS.set(direct, sizes)
+	}
+
+	sizes.set(size, sized)
+
+	return sized
+}
+
+// A computed field's value: a page field's \* format, or a legacy form field's look and the run it is
+// drawn in.
+interface FieldValue {
+	readonly format: string | undefined
+	readonly text: string | undefined
+	readonly run: ResolvedRunProps | undefined
+	// A legacy check box: whether it is checked.
+	readonly checked?: boolean
+}
+
+const NO_VALUE: FieldValue = { format: undefined, text: undefined, run: undefined }
 
 // Decoded text of text items by part, while editing: a relayout lays the paragraphs around an edit out again
 // keystroke after keystroke, and their text is decoded once. Bounded by characters (cleared when full); a part
@@ -176,19 +214,67 @@ export class ContentBuilder {
 	private readonly table: StyleTable
 	private readonly fieldKinds: number[] = []
 	private readonly fieldModes: number[] = []
-	private readonly fieldFormats: (string | undefined)[] = []
+	private readonly fieldValues: FieldValue[] = []
 	private hidden = 0
+	// The field codes view (undefined: results shown), and per part the paragraphs whose marks lie inside a
+	// field shown as its code (hidden there, as Word hides them).
+	private codes: FieldCodes | undefined = undefined
+	private codeMarks = new WeakMap<StoryPart, ReadonlySet<number>>()
 	private out: BuiltParagraph = new BuiltParagraph()
 	private page: PageValues = { page: 1, pageFormat: undefined, numPages: 1, sectionPages: 1 }
 	private story: StoryContext | undefined = undefined
 	private format: ParagraphFormat | undefined = undefined
 	private columnWidth = 0
 	private readonly separators = new Map<number, number>()
+	// Check box objects by size and state.
+	private readonly boxes = new Map<number, number>()
 	private readonly map: number[] = []
 
 	constructor(services: ContentServices) {
 		this.services = services
 		this.table = services.styles.table
+	}
+
+	// Shows fields as their codes (see FieldCodes), or as their results when undefined. Takes effect for the
+	// paragraphs built from now on: the layout lays out again.
+	setFieldCodes(codes: FieldCodes | undefined): void {
+		this.codes = codes
+		this.codeMarks = new WeakMap()
+	}
+
+	// Whether the field whose begin (or w:fldSimple) is `item` shows its code.
+	private codeShown(part: StoryPart, item: number): boolean {
+		const codes = this.codes
+
+		return codes !== undefined && codes.all !== (codes.toggled?.(part, item) ?? false)
+	}
+
+	// The paragraphs of `part` whose marks lie inside a field shown as its code: from the paragraph of its
+	// begin to the one before its end's.
+	private codeMarksOf(part: StoryPart): ReadonlySet<number> {
+		let found = this.codeMarks.get(part)
+
+		if (found !== undefined) return found
+
+		const out = new Set<number>()
+		const fields = part.fields
+
+		for (let field = 0; field < fields.count; field++) {
+			const begin = fields.begin[field] ?? -1
+			const end = fields.end[field] ?? -1
+
+			if (fields.simple[field] === 1 || begin < 0 || end < 0 || !this.codeShown(part, begin)) continue
+
+			const last = paragraphOf(part, end)
+
+			for (let item = paragraphOf(part, begin); item >= 0 && item < last; item++)
+				if (part.kinds[item] === Item.Paragraph) out.add(item)
+		}
+
+		found = out
+		this.codeMarks.set(part, found)
+
+		return found
 	}
 
 	// A text item's decoded text (remembered while editing, see cachedText).
@@ -207,6 +293,8 @@ export class ContentBuilder {
 	// Whether the paragraph's mark is absent in the view, joining it to the next paragraph.
 	markHidden(part: StoryPart, item: number, format: ParagraphFormat): boolean {
 		if (part.paragraphMarkHidden(item, this.services.view)) return true
+		if (this.codes !== undefined && part.fields.count > 0 && this.codeMarksOf(part).has(item)) return true
+		if (this.codes?.within?.(part, item) === true) return true
 
 		if (this.services.showHidden) return false
 
@@ -255,6 +343,7 @@ export class ContentBuilder {
 		services.notes.beginParagraph()
 
 		this.marker(story, firstPart, first, formats[0] ?? lastFormat)
+		this.resetFields()
 
 		for (let k = 0; k < items.length; k++) {
 			const format = formats[k] ?? lastFormat
@@ -340,10 +429,9 @@ export class ContentBuilder {
 		let runHidden = false
 		const map = services.recordMaps ? this.map : undefined
 
-		this.fieldKinds.length = 0
-		this.fieldModes.length = 0
-		this.fieldFormats.length = 0
-		this.hidden = 0
+		// Fields stop at each paragraph's end; shown as codes, a field spanning paragraphs joins them (their marks
+		// are hidden) and goes on.
+		if (this.codes === undefined) this.resetFields()
 
 		for (let item = paragraph + 1; item < end;) {
 			const kind = kinds[item] ?? 0
@@ -390,9 +478,14 @@ export class ContentBuilder {
 
 					break
 				case Item.FieldSimple: {
-					const info = fieldInfo(part.fieldInstruction(part.aux[item] ?? -1, view))
+					const instruction = part.fieldInstruction(part.aux[item] ?? -1, view)
+					const info = fieldInfo(instruction)
 
-					if (info.kind === FieldKind.OTHER) {
+					if (this.codes !== undefined && this.codeShown(part, item)) {
+						if (this.hidden === 0) this.text(`{${instruction}}`, run, revision)
+
+						next = part.end(item)
+					} else if (info.kind === FieldKind.OTHER || info.kind === FieldKind.CHECKBOX || info.kind === FieldKind.DROPDOWN) {
 						next = item + 1
 					} else if (this.hidden === 0) {
 						const firstRun = this.firstRun(part, item)
@@ -401,11 +494,22 @@ export class ContentBuilder {
 								? run
 								: resolver.run(format, store.run(part.document, part.runs.rPr[part.aux[firstRun] ?? -1] ?? -1))
 
-						this.computedField(info.kind, info.format, fieldRun, revision)
+						this.computedField(
+							info.kind,
+							info.format === undefined ? NO_VALUE : { format: info.format, text: undefined, run: undefined },
+							fieldRun,
+							revision
+						)
 					}
 
 					break
 				}
+				case Item.InstrText:
+				case Item.DeletedInstrText:
+					if (this.hidden === 0 && !runHidden && this.fieldModes[this.fieldModes.length - 1] === FIELD_SHOWN)
+						this.text(this.textOf(part, item), run, revision)
+
+					break
 				case Item.Text:
 				case Item.DeletedText:
 					if (this.hidden === 0 && !runHidden) this.text(this.textOf(part, item), run, revision)
@@ -456,7 +560,7 @@ export class ContentBuilder {
 
 					break
 				case Item.FieldChar:
-					this.fieldChar(part, item, view, run, revision)
+					this.fieldChar(part, item, view, run, revision, runHidden)
 
 					break
 				case Item.FootnoteReference:
@@ -475,7 +579,7 @@ export class ContentBuilder {
 
 					break
 				case Item.PageNumber:
-					if (this.hidden === 0 && !runHidden) this.computedField(FieldKind.PAGE, undefined, run, revision)
+					if (this.hidden === 0 && !runHidden) this.computedField(FieldKind.PAGE, NO_VALUE, run, revision)
 
 					break
 				case Item.Drawing:
@@ -596,17 +700,48 @@ export class ContentBuilder {
 		this.out.empty = false
 	}
 
-	private fieldChar(part: StoryPart, item: number, view: RevisionView, run: ResolvedRunProps, revision: TrackedLook): void {
+	private resetFields(): void {
+		this.fieldKinds.length = 0
+		this.fieldModes.length = 0
+		this.fieldValues.length = 0
+		this.hidden = 0
+	}
+
+	private fieldChar(
+		part: StoryPart,
+		item: number,
+		view: RevisionView,
+		run: ResolvedRunProps,
+		revision: TrackedLook,
+		runHidden: boolean
+	): void {
 		const type = part.fieldCharType(item)
 		const kinds = this.fieldKinds
 		const modes = this.fieldModes
 
 		if (type === FieldCharType.Begin) {
+			if (this.codes !== undefined && this.codeShown(part, item)) {
+				kinds.push(FieldKind.OTHER)
+				this.fieldValues.push(NO_VALUE)
+				modes.push(FIELD_SHOWN)
+
+				if (this.hidden === 0 && !runHidden) this.text("{", run, revision)
+
+				return
+			}
+
 			const field = part.fieldOf(item)
 			const info = field < 0 ? undefined : fieldInfo(part.fieldInstruction(field, view))
+			const kind = info?.kind ?? FieldKind.OTHER
 
-			kinds.push(info?.kind ?? FieldKind.OTHER)
-			this.fieldFormats.push(info?.format)
+			kinds.push(kind)
+			this.fieldValues.push(
+				kind === FieldKind.CHECKBOX || kind === FieldKind.DROPDOWN
+					? this.formValue(part, item, kind)
+					: info?.format === undefined
+						? NO_VALUE
+						: { format: info.format, text: undefined, run: undefined }
+			)
 			modes.push(FIELD_CODE)
 			this.hidden++
 
@@ -621,6 +756,13 @@ export class ContentBuilder {
 		const kind = (kinds[depth - 1] ?? FieldKind.OTHER) as FieldKind
 
 		if (type === FieldCharType.Separate) {
+			if (mode === FIELD_SHOWN) {
+				modes[depth - 1] = FIELD_SHOWN_RESULT
+				this.hidden++
+
+				return
+			}
+
 			if (mode !== FIELD_CODE) return
 
 			if (kind === FieldKind.OTHER) {
@@ -629,7 +771,7 @@ export class ContentBuilder {
 			} else {
 				modes[depth - 1] = FIELD_REPLACED
 
-				if (this.hidden === 1) this.computedField(kind, this.fieldFormats[depth - 1], run, revision)
+				if (this.hidden === 1) this.computedField(kind, this.fieldValues[depth - 1] ?? NO_VALUE, run, revision)
 			}
 
 			return
@@ -639,19 +781,66 @@ export class ContentBuilder {
 			kinds.pop()
 			modes.pop()
 
-			const format = this.fieldFormats.pop()
+			const value = this.fieldValues.pop() ?? NO_VALUE
+
+			if (mode === FIELD_SHOWN || mode === FIELD_SHOWN_RESULT) {
+				if (mode === FIELD_SHOWN_RESULT) this.hidden--
+				if (this.hidden === 0 && !runHidden) this.text("}", run, revision)
+
+				return
+			}
 
 			if (mode === FIELD_RESULT) return
 
 			this.hidden--
 
 			// A computed field without a stored result still shows its value.
-			if (mode === FIELD_CODE && kind !== FieldKind.OTHER && this.hidden === 0) this.computedField(kind, format, run, revision)
+			if (mode === FIELD_CODE && kind !== FieldKind.OTHER && this.hidden === 0) this.computedField(kind, value, run, revision)
 		}
 	}
 
-	private computedField(kind: FieldKind, format: string | undefined, run: ResolvedRunProps, revision: TrackedLook): void {
+	// What a legacy check box or drop-down list shows, in its begin run's formatting (a check box at its own
+	// size when it has one).
+	private formValue(part: StoryPart, item: number, kind: FieldKind): FieldValue {
+		const look = formFieldLook(part, item, kind)
+
+		if (look === undefined) return { format: undefined, text: "", run: undefined }
+
+		const checkbox = kind === FieldKind.CHECKBOX
+
+		// A drop-down list shows its entry where its result is, in that formatting.
+		if (this.format === undefined || (!checkbox && look.size === undefined))
+			return { format: undefined, text: look.text, run: undefined, checked: look.checked }
+
+		// A check box is drawn in its begin run's formatting (w:sizeAuto: that run's size).
+		const runItem = part.parent(item)
+		const row = part.kinds[runItem] === Item.Run ? (part.runs.rPr[part.aux[runItem] ?? -1] ?? -1) : -1
+		const services = this.services
+		const props = services.store.run(part.document, row)
+
+		return {
+			format: undefined,
+			text: look.text,
+			run: services.resolver.run(this.format, look.size === undefined ? props : sizedRun(props, look.size)),
+			checked: look.checked
+		}
+	}
+
+	private computedField(kind: FieldKind, value: FieldValue, run: ResolvedRunProps, revision: TrackedLook): void {
 		const page = this.page
+		const format = value.format
+
+		if (kind === FieldKind.CHECKBOX) {
+			if (value.checked !== undefined) this.checkbox(value.checked, value.run ?? run, revision)
+
+			return
+		}
+
+		if (kind === FieldKind.DROPDOWN) {
+			this.text(value.text ?? "", value.run ?? run, revision)
+
+			return
+		}
 
 		if (kind === FieldKind.PAGE) {
 			const start = this.builder.length
@@ -683,6 +872,23 @@ export class ContentBuilder {
 		this.out.noteOffsets.push(offset)
 		this.out.noteStories.push(story.index)
 		this.out.noteEndnote.push(endnote ? 1 : 0)
+		this.out.empty = false
+	}
+
+	// A legacy check box: a square as tall as its run's font size (w:size or, with w:sizeAuto, the run's;
+	// ECMA-376 Part 1 §17.16.20, §17.16.24), standing on the baseline.
+	private checkbox(checked: boolean, run: ResolvedRunProps, revision: TrackedLook): void {
+		const services = this.services
+		const side = halfPoints(run.size)
+		const key = Math.round(side * 8) * 2 + (checked ? 1 : 0)
+		let id = this.boxes.get(key)
+
+		if (id === undefined) {
+			id = services.objects.add(ObjectKind.CHECKBOX, -1, -1, checked ? 1 : 0, side, side, side, undefined, undefined, undefined)
+			this.boxes.set(key, id)
+		}
+
+		this.builder.object(services.styles.style(run, "ascii", revision), side, side, 0, id)
 		this.out.empty = false
 	}
 
@@ -755,4 +961,10 @@ export class ContentBuilder {
 			}
 		}
 	}
+}
+
+function paragraphOf(part: StoryPart, item: number): number {
+	for (let at = item; at >= 0; at = part.parent(at)) if (part.kinds[at] === Item.Paragraph) return at
+
+	return -1
 }

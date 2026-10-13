@@ -413,6 +413,51 @@ describe("tracked table property changes", () => {
 		expect(xml.match(/<w:tblPrChange /g)?.length).toBe(1)
 	})
 
+	it("rejects a tracked change of a cell merged or split since: the width of the columns it spans then", async () => {
+		const widths = (layout: EditedLayout): string[] =>
+			[...firstTable(layout.session.state.doc).content.content].map(row =>
+				[...row.content.content].map(cell => `${String(cell.attrs["colspan"])}/${String(cell.attrs["colwidth"])}`).join(" ")
+			)
+		// The second column 3000 wide (tracked: b1..b3 record 2000 and the grid before), then b2 merged with c2.
+		const merged = await edited(docx(GRID3), [
+			track,
+			session => select(session, "b2"),
+			{ type: "table.column.width", index: 1, twips: 3000 },
+			session => select(session, "b2", "c2"),
+			{ type: "table.cells.merge" }
+		])
+
+		// (null: the source's width.)
+		expect(widths(merged.layout)).toEqual(["1/null 1/3000 1/1000", "1/null 2/4000", "1/null 1/3000 1/1000"])
+		expect(await resolve(merged.layout, { all: true }, false)).toBe(0)
+		// The grid as it was, the other cells their source widths; b2 the width of columns b and c in that grid.
+		expect(widths(merged.layout)).toEqual(["1/null 1/null 1/null", "1/null 2/4000", "1/null 1/null 1/null"])
+
+		const bytes = await merged.layout.save()
+
+		expect(pageDigest(merged.layout.layout)).toEqual(await savedDigest(bytes))
+		expect(await documentXml(bytes)).toMatch(/<w:tcW w:w="4000" w:type="dxa"\/><w:gridSpan w:val="2"\/>/)
+		expect(await documentXml(bytes)).not.toMatch(/PrChange/)
+
+		// b3's fill (tracked: its width 2000 recorded), then b3 split in two: rejected, the half keeps its own width.
+		const split = await edited(docx(GRID3), [
+			track,
+			session => select(session, "b3"),
+			{ type: "table.cell.shading", fill: "FFEE00" },
+			session => select(session, "b3"),
+			{ type: "table.cell.split", rows: 1, cols: 2 }
+		])
+		const before = widths(split.layout)[2]
+
+		expect(before).toBe("1/null 1/1000 1/1000 1/null")
+		expect(await resolve(split.layout, { all: true }, false)).toBe(0)
+		expect(widths(split.layout)[2]).toBe(before)
+		// b3 without the fill (the half split off keeps it, untracked, as a new cell copies its model's).
+		expect(await documentXml(await split.layout.save())).toContain(
+			'<w:tcPr><w:tcW w:w="1000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">b3</w:t>'
+		)
+	})
+
 	it("merges and splits untracked while tracking, as Word does", async () => {
 		const { bytes, layout } = await edited(docx(GRID3), [
 			track,
@@ -487,6 +532,43 @@ describe("the source's tracked table property changes", () => {
 		// The cell merged into the one above as a tracked change is on its own again.
 		expect(shape(await reopened(bytes))).toEqual(["One:1 Two:1:r", "Three:1 Four:1"])
 		expect(shape(firstTable(layout.session.state.doc))).toEqual(["One:1 Two:1:r", "Three:1 Four:1"])
+	})
+
+	it("reads w:cellMerge as ECMA-376 defines it: w:vMerge applied, w:vMergeOrig removed (not merged when absent)", async () => {
+		// The cell's merge as the file has it (the revised state) with its record; what accepting and rejecting leave.
+		const cases: readonly [string, string, string, string][] = [
+			// A merge recorded: rejected, the cell is on its own.
+			['<w:vMerge/><w:cellMerge w:id="13" w:author="Bob" w:vMerge="cont"/>', "Four:1:c", "Four:1:c", "Four:1"],
+			// A split recorded (the standard's example): rejected, the cell is merged again.
+			['<w:cellMerge w:id="13" w:author="Bob" w:vMergeOrig="cont"/>', "Four:1", "Four:1", "Four:1:c"],
+			// A split with no merge removed named: none was (the default is "rest"), both ways it stays split.
+			['<w:cellMerge w:id="13" w:author="Bob" w:vMerge="rest"/>', "Four:1", "Four:1", "Four:1"],
+			// Neither setting: nothing to apply or take back.
+			['<w:vMerge/><w:cellMerge w:id="13" w:author="Bob"/>', "Four:1:c", "Four:1:c", "Four:1:c"]
+		]
+
+		for (const [tcPr, opened, accepted, rejected] of cases) {
+			const table = tbl(
+				[3000, 3000],
+				[
+					tr([tc("One", W(3000)), tc("Two", `${W(3000)}<w:vMerge w:val="restart"/>`)]),
+					tr([tc("Three", W(3000)), tc("Four", `${W(3000)}${tcPr}`)])
+				]
+			)
+
+			for (const accept of [true, false]) {
+				const { layout } = await edited(docx(table), [])
+
+				expect(shape(firstTable(layout.session.state.doc))[1], tcPr).toBe(`Three:1 ${opened}`)
+				expect(await resolve(layout, { all: true }, accept)).toBe(0)
+
+				const bytes = await layout.save()
+
+				expect(pageDigest(layout.layout)).toEqual(await savedDigest(bytes))
+				expect(await documentXml(bytes)).not.toContain("cellMerge")
+				expect(shape(await reopened(bytes))[1], `${tcPr} ${String(accept)}`).toBe(`Three:1 ${accept ? accepted : rejected}`)
+			}
+		}
 	})
 
 	it("resolves one node's changes by the id the index gives them", async () => {

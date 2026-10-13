@@ -17,7 +17,9 @@ export const ObjectKind = {
 	MATH: 3,
 	// The footnote separator line and the continuation separator line.
 	SEPARATOR: 4,
-	CONTINUATION_SEPARATOR: 5
+	CONTINUATION_SEPARATOR: 5,
+	// A legacy form check box (FORMCHECKBOX) as Word draws it: a square, crossed when checked (index 1).
+	CHECKBOX: 6
 } as const
 
 export type ObjectKind = (typeof ObjectKind)[keyof typeof ObjectKind]

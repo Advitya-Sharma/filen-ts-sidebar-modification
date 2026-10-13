@@ -1,6 +1,6 @@
 import type { Node } from "prosemirror-model"
 import { drawingState, selectedDrawing } from "../../objects/edit"
-import type { DocxWrapMode } from "../commands/drawings"
+import type { DocxCrop, DocxWrapMode } from "../commands/drawings"
 import type { DocxEditorSession } from "../session"
 import type { SnapshotInput } from "./index"
 
@@ -19,13 +19,19 @@ export interface DocxDrawingContext {
 	readonly y: number | null
 	readonly relH: string
 	readonly relV: string
-	// Degrees, clockwise.
+	// Degrees, clockwise; mirrored (applied before the rotation).
 	readonly rotation: number
+	readonly flipH: boolean
+	readonly flipV: boolean
+	// A picture's crop (drawing.crop), what each side of the picture has cut off (negative: padded).
+	readonly crop: DocxCrop
 	readonly altText: string
-	// What drawing commands can change (drawing.resize; drawing.rotate; drawing.wrap, .position, .altText).
+	// What drawing commands can change (drawing.resize; drawing.rotate; drawing.wrap, .position, .altText;
+	// drawing.crop).
 	readonly resizable: boolean
 	readonly rotatable: boolean
 	readonly placeable: boolean
+	readonly croppable: boolean
 	// Resizing keeps the proportions unless asked otherwise (Word's lock for pictures).
 	readonly lockAspect: boolean
 	// The drawing's position in the story's document.
@@ -59,10 +65,14 @@ export function drawingOf(input: SnapshotInput): DocxDrawingContext | null {
 		relH: state.relH,
 		relV: state.relV,
 		rotation: state.rot,
+		flipH: state.flipH,
+		flipV: state.flipV,
+		crop: state.crop,
 		altText: state.descr,
 		resizable: writable && state.resizable,
 		rotatable: writable && state.rotatable,
 		placeable: writable && state.placeable,
+		croppable: writable && state.croppable,
 		lockAspect: state.lockAspect,
 		pos: found.pos
 	})

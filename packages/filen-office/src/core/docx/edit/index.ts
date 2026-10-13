@@ -24,7 +24,8 @@ export {
 	type DocxParagraphStyleInfo
 } from "./commands"
 export type { CommentCommand } from "./commands/comments"
-export type { DocxRelativeH, DocxRelativeV, DocxWrapMode, DrawingCommand } from "./commands/drawings"
+export { CROP_WHOLE } from "./commands/drawings"
+export type { DocxCrop, DocxRelativeH, DocxRelativeV, DocxWrapMode, DrawingCommand } from "./commands/drawings"
 export { FIELD_CATALOGUE, fieldCodeType, type FieldCommand } from "./commands/fields"
 export { MAX_BOOKMARK_NAME, sessionBookmarks, validBookmarkName, type BookmarkIndex, type DocxBookmark } from "../fields/bookmarks"
 export {
@@ -115,6 +116,7 @@ export type {
 	DocxDrawingContext,
 	DocxEquationContext,
 	DocxFieldContext,
+	DocxFieldRefusal,
 	DocxLinkContext,
 	DocxProvidedSnapshot,
 	DocxReviewSnapshot,

@@ -1,6 +1,7 @@
 import type { Node } from "prosemirror-model"
 import { NodeKind, decodeUtf8, type XmlDocument } from "../../xml/index"
-import type { NewStoryKind } from "../edit/context"
+import type { Relationship } from "../../opc/index"
+import type { DocxEditContext, NewStoryKind } from "../edit/context"
 import { NO_SOURCE, docxSchema } from "../edit/schema"
 import { Ns } from "../model/namespaces"
 import { openTagWithout, Out } from "./markup"
@@ -37,6 +38,69 @@ export const WRITTEN_REFERENCES: object = {}
 
 export function referenceKey(kind: string, id: string): string {
 	return `${kind}:${id}`
+}
+
+// Parts a copy of a story part gets copies of, by relationship type (its last segment), as Word copies them
+// with a header or footer: a chart (and what it holds), an embedded or linked object, an ActiveX control, a
+// diagram. Pictures and other media stay shared.
+const OWNED_BY_COPY: ReadonlySet<string> = new Set([
+	"chart",
+	"chartUserShapes",
+	"chartStyle",
+	"chartColorStyle",
+	"themeOverride",
+	"oleObject",
+	"package",
+	"control",
+	"activeXControlBinary",
+	"diagramData",
+	"diagramLayout",
+	"diagramQuickStyle",
+	"diagramColors",
+	"diagramDrawing"
+])
+
+export function ownedByCopy(relationship: Relationship, pkg: { has(name: string): boolean }): boolean {
+	const type = relationship.type
+
+	return (
+		!relationship.external &&
+		relationship.partName !== undefined &&
+		OWNED_BY_COPY.has(type.slice(type.lastIndexOf("/") + 1)) &&
+		pkg.has(relationship.partName)
+	)
+}
+
+// A name for a copy of part `name` next to it, numbered as Word numbers its parts (chart1.xml -> chart2.xml).
+export function copiedPartName(name: string, free: (candidate: string) => boolean): string {
+	const slash = name.lastIndexOf("/")
+	const dot = name.lastIndexOf(".")
+	const end = dot > slash ? dot : name.length
+	const stem = /^(.*?)(\d*)$/.exec(name.slice(0, end))?.[1] ?? name.slice(0, end)
+
+	for (let n = 1; ; n++) {
+		const candidate = `${stem}${n}${name.slice(end)}`
+
+		if (free(candidate)) return candidate
+	}
+}
+
+// Revision ids copies of stories took (stories/clone.ts): above the source's, so a save numbering its own
+// revisions from the highest (save.ts) never repeats one.
+const CLONED_REVISIONS = new WeakMap<DocxEditContext, number>()
+
+// `count` new revision ids for a copy; the first of them.
+export function cloneRevisionIds(context: DocxEditContext, count: number): number {
+	const last = Math.max(context.model.maxIds.revision, CLONED_REVISIONS.get(context) ?? -1)
+
+	CLONED_REVISIONS.set(context, last + count)
+
+	return last + 1
+}
+
+// The highest revision id a copy took, or -1.
+export function clonedRevisions(context: DocxEditContext): number {
+	return CLONED_REVISIONS.get(context) ?? -1
 }
 
 // Whether byte `at` of a part is where a new child of its root can go: the start of a child element, or the

@@ -210,13 +210,18 @@ export const headerOps: readonly EditOp[] = [
 		if (at === undefined) return "noop"
 
 		const kind = pick(context.rand, ["nextPage", "continuous", "evenPage", "oddPage"] as const)
+		const run = (): string => execute(context, { type: "insert.sectionBreak", kind })
 
-		return `insert.sectionBreak ${kind}@${at} -> ${execute(context, { type: "insert.sectionBreak", kind })}`
+		return `insert.sectionBreak ${kind}@${at} -> ${context.rand() < 0.3 ? `tracked ${tracked(editor.body.session, run)}` : run()}`
 	}),
 	headerOp("sectionBreakDelete", 1, (context, editor) => {
 		const at = bodyCaret(editor, context.rand)
 
-		return at === undefined ? "noop" : `section.deleteBreak@${at} -> ${execute(context, { type: "section.deleteBreak" })}`
+		if (at === undefined) return "noop"
+
+		const run = (): string => execute(context, { type: "section.deleteBreak" })
+
+		return `section.deleteBreak@${at} -> ${context.rand() < 0.3 ? `tracked ${tracked(editor.body.session, run)}` : run()}`
 	}),
 	headerOp("pageSetup", 2, (context, editor) => {
 		const at = bodyCaret(editor, context.rand)

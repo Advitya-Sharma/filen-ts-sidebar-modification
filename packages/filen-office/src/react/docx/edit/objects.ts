@@ -1,3 +1,4 @@
+import { CROP_MAX_PAD, CROP_WHOLE, type DocxCrop } from "../../../core/docx/edit/commands/drawings"
 import type { DocxDrawingContext } from "../../../core/docx/edit/snapshot/drawing"
 import type { DocxEditorCommand } from "../../../core/docx/edit/index"
 import { DRAWING_HANDLES, HANDLE_PLACES, type DrawingHandle, type PageBox } from "../../../core/docx/objects/hits"
@@ -6,7 +7,8 @@ import { DRAWING_HANDLES, HANDLE_PLACES, type DrawingHandle, type PageBox } from
 // (shown meanwhile as a CSS transform of the painted object, so nothing is laid out until the pointer is
 // released) and the one command the drag ends with. Page px throughout (a view divides pointer deltas by its
 // zoom); EMUs only in the commands. The frame and handles are drawn by the app (data-fo-handle, --fo-*
-// variables in docx-objects.css).
+// variables in docx-objects.css). Cropping a picture works the same way (CropDrag): its crop handles sit where
+// the resize handles do, and a drag of one moves that edge over the picture, which stays where it is.
 
 export { DRAWING_HANDLES, type DrawingHandle, type PageBox }
 
@@ -138,5 +140,198 @@ export class DrawingDrag {
 		if (!this.active) return undefined
 
 		return this.handle === undefined ? moveCommand(this.drawing, this.dx, this.dy) : resizeCommand(this.drawing, this.from, this.box)
+	}
+}
+
+// ---- cropping ------------------------------------------------------------------------------------------
+
+export type CropSide = keyof DocxCrop
+
+type ScreenSide = "left" | "top" | "right" | "bottom"
+
+const TURN: Readonly<Record<ScreenSide, ScreenSide>> = { top: "right", right: "bottom", bottom: "left", left: "top" }
+
+// Which side of the picture each side of its box on the page shows: mirrored first, then turned clockwise (as
+// DrawingML draws a shape). Undefined while it is turned by other than quarter turns.
+export function cropSides(drawing: DocxDrawingContext): Readonly<Record<ScreenSide, CropSide>> | undefined {
+	const rotation = ((drawing.rotation % 360) + 360) % 360
+
+	if (rotation % 90 !== 0) return undefined
+
+	const out: Partial<Record<ScreenSide, CropSide>> = {}
+
+	for (const side of ["left", "top", "right", "bottom"] as const) {
+		let at: ScreenSide = side
+
+		if (drawing.flipH && (at === "left" || at === "right")) at = at === "left" ? "right" : "left"
+		if (drawing.flipV && (at === "top" || at === "bottom")) at = at === "top" ? "bottom" : "top"
+
+		for (let turn = 0; turn < rotation / 90; turn++) at = TURN[at]
+
+		out[at] = side
+	}
+
+	return out as Record<ScreenSide, CropSide>
+}
+
+function horizontal(side: ScreenSide | CropSide): boolean {
+	return side === "left" || side === "right"
+}
+
+// How much of the picture's side `side` axis shows (1: all of it), in fractions.
+function shown(crop: DocxCrop, side: CropSide): number {
+	return horizontal(side) ? (CROP_WHOLE - crop.left - crop.right) / CROP_WHOLE : (CROP_WHOLE - crop.top - crop.bottom) / CROP_WHOLE
+}
+
+// One pointer drag in crop mode on a selected picture: from the press on a crop handle (an edge or corner of
+// what shows) or on the picture itself (moving the picture under what shows) to the release. move() gives
+// the box what shows takes (`box`) and where the whole picture is (`picture`, for showing what is cropped
+// off); end() the drawing.crop to run (undefined: nothing changed, or the picture cannot be cropped so).
+// Dragging an edge out past the picture pads it, as Word's crop does.
+export class CropDrag {
+	readonly drawing: DocxDrawingContext
+	readonly from: PageBox
+	readonly handle: DrawingHandle | undefined
+	private readonly sides: Readonly<Record<ScreenSide, CropSide>> | undefined
+	private crop: DocxCrop
+	private frame: PageBox
+	private whole: PageBox
+
+	constructor(drawing: DocxDrawingContext, from: PageBox, handle: DrawingHandle | undefined) {
+		this.drawing = drawing
+		this.from = from
+		this.handle = handle
+		this.sides = drawing.croppable && from.width > 0 && from.height > 0 ? cropSides(drawing) : undefined
+		this.crop = drawing.crop
+		this.frame = from
+		this.whole = this.pictureBox(from, drawing.crop)
+	}
+
+	get active(): boolean {
+		return this.sides !== undefined
+	}
+
+	get box(): PageBox {
+		return this.frame
+	}
+
+	get picture(): PageBox {
+		return this.whole
+	}
+
+	// The whole picture's length (page px) along the page axis of `side`, at the drag's start.
+	private full(side: ScreenSide): number {
+		const sides = this.sides as Record<ScreenSide, CropSide>
+		const length = horizontal(side) ? this.from.width : this.from.height
+
+		return length / shown(this.drawing.crop, sides[side])
+	}
+
+	// The whole picture's box when `frame` shows it cropped by `crop`.
+	private pictureBox(frame: PageBox, crop: DocxCrop): PageBox {
+		const sides = this.sides
+
+		if (sides === undefined) return frame
+
+		const reach = (side: ScreenSide): number => (crop[sides[side]] / CROP_WHOLE) * this.full(side)
+		const left = reach("left")
+		const top = reach("top")
+
+		return {
+			x: frame.x - left,
+			y: frame.y - top,
+			width: frame.width + left + reach("right"),
+			height: frame.height + top + reach("bottom")
+		}
+	}
+
+	// The pointer moved by (dx, dy) page px from the press.
+	move(dx: number, dy: number): PageBox {
+		const sides = this.sides
+
+		if (sides === undefined) return this.frame
+
+		const start = this.drawing.crop
+		const next: Record<CropSide, number> = { ...start }
+		// Crop units per page px along each page axis.
+		const unitsX = CROP_WHOLE / this.full("left")
+		const unitsY = CROP_WHOLE / this.full("top")
+
+		if (this.handle === undefined) {
+			// The picture moves under what shows: as much more cut off one side as less off the other.
+			next[sides.left] -= dx * unitsX
+			next[sides.right] += dx * unitsX
+			next[sides.top] -= dy * unitsY
+			next[sides.bottom] += dy * unitsY
+		} else {
+			const [fx, fy] = HANDLE_PLACES[this.handle]
+
+			if (fx === 0) next[sides.left] += dx * unitsX
+			if (fx === 1) next[sides.right] -= dx * unitsX
+			if (fy === 0) next[sides.top] += dy * unitsY
+			if (fy === 1) next[sides.bottom] -= dy * unitsY
+		}
+
+		// What shows stays at least MIN_DRAWING_PX each way; a side pads at most CROP_MAX_PAD.
+		const fit = (moved: ScreenSide, other: ScreenSide, units: number): void => {
+			const keep = CROP_WHOLE - Math.max(1, MIN_DRAWING_PX * units)
+			const a = sides[moved]
+			const b = sides[other]
+
+			next[a] = Math.max(-CROP_MAX_PAD, next[a])
+			next[b] = Math.max(-CROP_MAX_PAD, next[b])
+
+			if (next[a] + next[b] <= keep) return
+
+			// The side the drag moved gives way (both alike when the picture is moved).
+			if (this.handle === undefined) {
+				const over = (next[a] + next[b] - keep) / 2
+
+				next[a] -= over
+				next[b] -= over
+			} else if (next[a] !== start[a]) {
+				next[a] = keep - next[b]
+			} else {
+				next[b] = keep - next[a]
+			}
+		}
+
+		fit("left", "right", unitsX)
+		fit("top", "bottom", unitsY)
+
+		this.crop = next
+
+		if (this.handle === undefined) {
+			this.frame = this.from
+		} else {
+			const moved = (side: ScreenSide): number => ((next[sides[side]] - start[sides[side]]) / CROP_WHOLE) * this.full(side)
+			const left = moved("left")
+			const top = moved("top")
+
+			this.frame = {
+				x: this.from.x + left,
+				y: this.from.y + top,
+				width: this.from.width - left - moved("right"),
+				height: this.from.height - top - moved("bottom")
+			}
+		}
+
+		this.whole = this.pictureBox(this.frame, next)
+
+		return this.frame
+	}
+
+	end(): DocxEditorCommand | undefined {
+		if (this.sides === undefined) return undefined
+
+		const round = (side: CropSide): number => Math.round(this.crop[side])
+		const crop = { left: round("left"), top: round("top"), right: round("right"), bottom: round("bottom") }
+		const start = this.drawing.crop
+
+		if (crop.left === start.left && crop.top === start.top && crop.right === start.right && crop.bottom === start.bottom)
+			return undefined
+		if (crop.left + crop.right >= CROP_WHOLE || crop.top + crop.bottom >= CROP_WHOLE) return undefined
+
+		return { type: "drawing.crop", ...crop }
 	}
 }

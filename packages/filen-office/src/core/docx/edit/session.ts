@@ -1,7 +1,7 @@
 import type { Mark, MarkType, Node } from "prosemirror-model"
 import { EditorState, type Transaction } from "prosemirror-state"
 import { closeHistory, history, isHistoryTransaction, redo, redoDepth, undo, undoDepth } from "prosemirror-history"
-import type { Story } from "../model/index"
+import { Item, type Story } from "../model/index"
 import { ReviewIndex } from "../review/index"
 import { DocxDocBuilder, type StoryDoc } from "./build"
 import {
@@ -29,6 +29,11 @@ import {
 	type RunToggle
 } from "./formats"
 import { docxInvariantPlugins, isInternal, markInternal, type ListNormalizer } from "./invariants/index"
+import type { SourceCopies } from "./invariants/core"
+import { noteFieldCopy } from "./invariants/forms"
+import { legacyCopyState } from "../forms/controls"
+import { sessionGone, sessionMade } from "../forms/sessions"
+import { sourceCellProps, sourceRowProps } from "./tables/map"
 import { conservativeProof, lockBlocks, proveBlocks, type BlockProof } from "./proof"
 import { MarkChanges, MarkSetChanges } from "./marks"
 import { AttrChanges } from "./attrs"
@@ -169,6 +174,74 @@ function commentStory(context: DocxEditContext, story: Story, id: string): boole
 	return source === undefined || story.item < 0 || item < 0 || (item >= story.item && item < source.end(story.item))
 }
 
+const copiesOf = new WeakMap<DocxEditContext, SourceCopies>()
+
+// What copies pasted into a document's stories keep that only their source's part holds (freshSlice, the
+// invariants): a legacy form field's w:ffData, and of another part's row or cell the properties its overrides can
+// carry (fill, vertical alignment, header repeat, grid offsets, width).
+export function sourceCopies(context: DocxEditContext): SourceCopies {
+	const known = copiesOf.get(context)
+
+	if (known !== undefined) return known
+
+	const partOf = (index: number | undefined) => (index === undefined ? undefined : context.model.parts[index])
+	const copies: SourceCopies = {
+		field(node, index) {
+			const part = partOf(index)
+			const state = part === undefined ? undefined : legacyCopyState(part, node)
+
+			if (state !== undefined) noteFieldCopy(context)
+
+			return state
+		},
+		props(node, index) {
+			const part = partOf(index)
+			const own = node.attrs["src"] as number
+
+			if (part === undefined || own < 0 || own >= part.count) return undefined
+
+			if (node.type === nodes.table_cell) {
+				if (part.kinds[own] !== Item.Cell) return undefined
+
+				const props = sourceCellProps(part, context.store, own, false)
+				const fill = props.shading?.fill?.val
+				const vAlign = props.vAlign === "both" ? undefined : props.vAlign
+
+				return {
+					...(fill !== undefined && /^[0-9A-Fa-f]{6}$/.test(fill) && props.shading?.pattern !== "nil"
+						? { shading: fill.toUpperCase() }
+						: {}),
+					...(vAlign === undefined ? {} : { vAlign })
+				}
+			}
+
+			if (part.kinds[own] !== Item.Row) return undefined
+
+			const props = sourceRowProps(part, context.store, own, false)
+
+			return {
+				...(props.header === true ? { header: true } : {}),
+				...(props.gridBefore === undefined || props.gridBefore === 0 ? {} : { gridBefore: props.gridBefore }),
+				...(props.gridAfter === undefined || props.gridAfter === 0 ? {} : { gridAfter: props.gridAfter })
+			}
+		},
+		width(node, index) {
+			const part = partOf(index)
+			const own = node.attrs["src"] as number
+
+			if (part === undefined || own < 0 || own >= part.count || part.kinds[own] !== Item.Cell) return undefined
+
+			const width = sourceCellProps(part, context.store, own, false).width
+
+			return width?.type === "dxa" && width.value > 0 ? width.value : undefined
+		}
+	}
+
+	copiesOf.set(context, copies)
+
+	return copies
+}
+
 function emptyTally(): Tally {
 	return {
 		chars: 0,
@@ -265,6 +338,7 @@ export class DocxEditorSession {
 
 						return base !== undefined && baseFits(base, this.story.part.document)
 					},
+					copies: sourceCopies(context),
 					...(options.normalizeList !== undefined ? { normalizeList: options.normalizeList } : {})
 				})
 			]
@@ -276,6 +350,8 @@ export class DocxEditorSession {
 
 		this.saved = this.current.doc
 		this.savedTracking = context.review.tracking
+
+		sessionMade(context, this)
 	}
 
 	// Opens a session building the story's document in slices (`pause` gives the host a turn whenever
@@ -613,6 +689,7 @@ export class DocxEditorSession {
 		this.disposed = true
 		this.listeners.clear()
 		this.appliedListeners.clear()
+		sessionGone(this.context, this)
 	}
 
 	snapshot(): DocxEditorSnapshot {

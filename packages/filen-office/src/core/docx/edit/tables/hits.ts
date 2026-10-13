@@ -6,7 +6,7 @@ import { GRAPHIC_FLOATS, GRAPHIC_INTS, PageGraphic, SOURCE_INTS, SourceFlag, Sou
 import type { ObjectHit, ObjectHitProvider } from "../../paged/objects"
 import type { PagedEditor } from "../../paged/editor"
 import { docxSchema } from "../schema"
-import { tableMap, type TableMap } from "./map"
+import { propertySource, tableMap, type TableMap } from "./map"
 import { paddedGrid } from "./ops"
 
 // Column borders of the active story's tables, for dragging a column's width: the vertical border line a
@@ -90,11 +90,8 @@ function placedLines(editor: PagedEditor, page: PageDisplayList): PlacedLine[] {
 export function rightToLeft(editor: PagedEditor, table: Node): boolean {
 	const part = editor.session.story.part
 	const context = editor.session.context
-	const src = table.attrs["src"] as number
-	const direct =
-		src >= 0 && part.kinds[src] === Item.Table
-			? context.store.table(part.document, part.tables.tblPr[part.aux[src] ?? -1] ?? -1)
-			: EMPTY_TABLE
+	const src = propertySource(part, table, Item.Table)
+	const direct = src >= 0 ? context.store.table(part.document, part.tables.tblPr[part.aux[src] ?? -1] ?? -1) : EMPTY_TABLE
 
 	if (direct.bidiVisual !== undefined) return direct.bidiVisual
 

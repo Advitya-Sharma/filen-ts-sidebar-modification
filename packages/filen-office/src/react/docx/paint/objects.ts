@@ -374,6 +374,12 @@ export function paintObjects(objects: readonly PaintedObject[], options: ObjectP
 								object.element.classList.add("fo-docx-separator")
 
 								break
+							case "checkbox":
+								object.element.classList.add("fo-docx-checkbox")
+
+								if (result.checked) object.element.dataset["foChecked"] = ""
+
+								break
 							case "math":
 								try {
 									const math = paintMath(result.tree, options.document)

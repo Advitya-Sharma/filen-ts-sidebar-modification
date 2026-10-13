@@ -162,6 +162,36 @@ export function sessionBookmarks(session: DocxEditorSession): BookmarkIndex {
 	return bookmarkIndex(session.state.doc, session.story.part)
 }
 
+// The bookmark rows of a source part by name (lower case), read once per part.
+const PART_NAMES = new WeakMap<StoryPart, ReadonlyMap<string, readonly number[]>>()
+
+// Whether a source bookmark named `name` encloses items `first` to `last` of `part` (a legacy form field's
+// own bookmark: Word's around the field, which a copy of the field does not get).
+export function enclosingBookmark(part: StoryPart, first: number, last: number, name: string): boolean {
+	let names = PART_NAMES.get(part)
+	const table = part.bookmarks
+
+	if (names === undefined) {
+		const out = new Map<string, number[]>()
+
+		for (let row = 0; row < table.count; row++) {
+			const key = sourceName(part, table.start[row] ?? -1)?.toLowerCase()
+
+			if (key === undefined) continue
+
+			const rows = out.get(key)
+
+			if (rows === undefined) out.set(key, [row])
+			else rows.push(row)
+		}
+
+		names = out
+		PART_NAMES.set(part, names)
+	}
+
+	return (names.get(name.toLowerCase()) ?? []).some(row => (table.start[row] ?? -1) < first && (table.end[row] ?? -1) > last)
+}
+
 // Names of the bookmarks every part of the source has (lower case), read once per document.
 const SOURCE_NAMES = new WeakMap<object, ReadonlySet<string>>()
 

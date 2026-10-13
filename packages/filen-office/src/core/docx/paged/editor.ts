@@ -20,10 +20,22 @@ import {
 	type NewStoryKind
 } from "../edit/index"
 import { commandAllowed } from "../edit/protection"
-import { Region, SOURCE_INTS, SourceInt, type DocumentLayout, type LayoutEvent, type PageDisplayList } from "../layout/index"
-import { RevisionView, type Story } from "../model/index"
+import { hostStories } from "../forms/sessions"
+import type { FieldCodes } from "../layout/fields"
+import {
+	Region,
+	SOURCE_INTS,
+	SourceInt,
+	type DirtyBlock,
+	type DocumentLayout,
+	type LayoutEvent,
+	type PageDisplayList
+} from "../layout/index"
+import { Item, RevisionView, type Story, type StoryPart } from "../model/index"
 import { flushComposition } from "../review/track"
-import { DocumentEdits, StoryEdits, type StoryChange } from "./edits"
+import { bindAddedDrawings } from "../objects/edit"
+import type { StoryTemplate } from "../stories/clone"
+import { DocumentEdits, StoryEdits, type StoryChange, type TopEntry } from "./edits"
 import { PagedGeometry, type Affinity, type CaretBox, type HitResult, type PageRect } from "./geometry"
 import { DocumentHistory } from "./history"
 import { hitObject, type ObjectHit } from "./objects"
@@ -156,6 +168,10 @@ export class PagedEditor {
 	// only on resume, from the first page they changed.
 	private suspendedValue = false
 	private pendingPage: number | undefined = undefined
+	// Fields shown as their codes (Word's Alt+F9), and the fields switched the other way one by one (Shift+F9,
+	// by their nodes): a view, never saved.
+	private fieldCodesAll = false
+	private readonly codeToggles = new Set<Node>()
 	private readonly pendingStories = new Set<number>()
 	private readonly settledWaiters: (() => void)[] = []
 	private snapshotOf: { session: DocxEditorSnapshot; history: number; state: number; snapshot: DocxEditorSnapshot } | undefined =
@@ -186,6 +202,8 @@ export class PagedEditor {
 
 		this.body = this.edited(init.session)
 		this.active = this.body
+		// Features changing other stories with an edit (controls bound to one node) get their sessions here.
+		this.unsubscribe.push(hostStories(init.session.context, story => this.storySession(story)))
 		this.finalSeen = init.layout.final
 		this.unsubscribe.push(init.layout.subscribe(event => this.onLayout(event)))
 	}
@@ -271,9 +289,10 @@ export class PagedEditor {
 
 	// Adds a story of `kind` (a new note, comment, header or footer) with one empty paragraph and returns its
 	// session (undefined when it could not be made). Notes and comments get the next id of their kind unless
-	// `id` is given. Nothing refers to it yet: a feature inserts the reference (and undoing that leaves the
-	// story out of the save).
-	addStory(kind: NewStoryKind, id?: string): DocxEditorSession | undefined {
+	// `id` is given. A header or footer made from `template` (a copy of another one's part, stories/clone.ts)
+	// holds what the template does. Nothing refers to it yet: a feature inserts the reference (and undoing that
+	// leaves the story out of the save).
+	addStory(kind: NewStoryKind, id?: string, template?: StoryTemplate): DocxEditorSession | undefined {
 		const context = this.body.session.context
 		const space = kind === "footnote" || kind === "endnote" || kind === "comment" ? kind : undefined
 
@@ -284,17 +303,23 @@ export class PagedEditor {
 		// An id given is never handed out again.
 		if (space !== undefined && id !== undefined && Number.isInteger(Number(id))) context.ids.reserve(space, Number(id))
 		const target = this.newPartName(kind)
-		const story = this.edits.addStory(kind, storyId, target)
+		const story = this.edits.addStory(kind, storyId, target, template)
 		const part = story === undefined ? undefined : this.edits.model.parts[story.part]
 
 		if (story === undefined || part === undefined) return undefined
 
-		const { proof: _proof, ...options } = this.sessionOptions
+		const { proof, ...options } = this.sessionOptions
+		const builder = new DocxDocBuilder(context)
+
+		// A copy's drawings are the derived model's (commands and the save read them through the context).
+		if (template !== undefined) bindAddedDrawings(context, () => this.edits.model.drawings)
+
+		// A copy is source content: proved as the document's own stories are.
 		const session = new DocxEditorSession(context, {
 			...options,
 			story,
-			proof: null,
-			built: new DocxDocBuilder(context).buildNew(story, part)
+			...(template === undefined ? { proof: null } : proof === undefined ? {} : { proof }),
+			built: template === undefined ? builder.buildNew(story, part) : builder.build(story, part, this.edits.model.drawings)
 		})
 
 		context.newStories.set(story, { kind, id: storyId, target })
@@ -654,6 +679,132 @@ export class PagedEditor {
 
 	get view(): RevisionView {
 		return this.edits.view
+	}
+
+	// Shows every field as its code (Word's Alt+F9) or as its result, laid out again from the first page as
+	// setView does; fields switched one by one follow. False when it already is so.
+	setFieldCodes(on: boolean): boolean {
+		if (on === this.fieldCodesAll && this.codeToggles.size === 0) return false
+
+		this.fieldCodesAll = on
+		this.codeToggles.clear()
+		this.layOutCodes()
+
+		return true
+	}
+
+	get fieldCodes(): boolean {
+		return this.fieldCodesAll
+	}
+
+	// Switches fields (nodes of the story being edited: field atoms, or the begin character of a field spanning
+	// paragraphs) between code and result (Word's Shift+F9). Laid out again from the first page showing `range`
+	// of the story's document (where the fields are, whole) when the story is the body and layout knows it as
+	// it is, as an edit of those blocks is; else from the first page.
+	toggleFieldCodes(fields: readonly Node[], range?: { readonly from: number; readonly to: number }): boolean {
+		if (fields.length === 0) return false
+
+		for (const field of fields) if (!this.codeToggles.delete(field)) this.codeToggles.add(field)
+
+		const body = this.body
+		const blocks =
+			range === undefined || this.active !== body || body.edits.document !== body.session.state.doc
+				? undefined
+				: body.edits.blocksOf(range.from, range.to)
+
+		this.layOutCodes(blocks)
+
+		return true
+	}
+
+	// Whether a field (see toggleFieldCodes) shows its code.
+	fieldCodeShown(field: Node): boolean {
+		return this.fieldCodesAll !== this.codeToggles.has(field)
+	}
+
+	private layOutCodes(blocks?: { readonly entries: readonly TopEntry[]; readonly dirty: readonly DirtyBlock[] }): void {
+		const codes: FieldCodes | undefined =
+			!this.fieldCodesAll && this.codeToggles.size === 0
+				? undefined
+				: {
+						all: this.fieldCodesAll,
+						toggled: this.codeToggles.size === 0 ? undefined : (part, item) => this.toggledAt(part, item),
+						within: (part, item) => this.withinCode(part, item)
+					}
+
+		const layout = this.layout
+		const found = blocks === undefined ? -1 : this.body.index.restartPage(blocks.entries, page => layout.keepFrom(page))
+
+		// Only those blocks change: laid out again from the first page showing them, as an edit of them is.
+		if (blocks !== undefined && found >= 0) {
+			const laid = layout.pages.length
+			const first = !layout.final && found >= laid ? Math.max(0, laid - 1) : found
+			const restart = layout.setFieldCodes(codes, { page: first, dirty: blocks.dirty })
+
+			if (this.suspendedValue) this.pendingPage = Math.min(this.pendingPage ?? restart, restart)
+			else this.advanceFrom(restart)
+
+			this.changedState()
+
+			return
+		}
+
+		for (const story of this.stories.values()) if (story.region !== undefined) story.index.truncate(0)
+
+		this.changed.clear()
+
+		const restart = layout.setFieldCodes(codes)
+
+		if (this.suspendedValue) this.pendingPage = 0
+		else this.advanceFrom(restart)
+
+		this.heads.delete(this.active)
+		this.keepVisible(this.active, this.session.state)
+		this.changedState()
+	}
+
+	// Whether the field whose begin (or w:fldSimple) is item `item` of `part`, as laid out, is a field switched
+	// one by one: the field of the editing document at the same place among its paragraph's fields.
+	private toggledAt(part: StoryPart, item: number): boolean {
+		let paragraph = item
+
+		while (paragraph >= 0 && part.kinds[paragraph] !== Item.Paragraph) paragraph = part.parent(paragraph)
+
+		if (paragraph < 0) return false
+
+		const run = part.parent(item)
+
+		for (const story of this.stories.values()) {
+			const found = story.edits.paragraphOf(part.index, paragraph)
+
+			if (found === undefined) continue
+
+			const laid = fieldsOf(found.shadow)
+			const index = laid.findIndex(node => {
+				const own = node.attrs["src"] as number
+
+				return own === item || (own === run && node.type === docxSchema.nodes.field)
+			})
+			const edited = index < 0 ? undefined : fieldsOf(found.node)
+
+			return edited !== undefined && edited.length === laid.length && this.codeToggles.has(edited[index] as Node)
+		}
+
+		return false
+	}
+
+	// Whether paragraph `item` of `part`, laid out from an edit (never a source part: the layout reads those),
+	// lies inside a field spanning paragraphs shown as its code that does not end in it.
+	private withinCode(part: StoryPart, item: number): boolean {
+		if (this.body.session.context.model.parts[part.index] === part) return false
+
+		for (const story of this.stories.values()) {
+			const found = story.edits.paragraphOf(part.index, item)
+
+			if (found !== undefined) return insideCode(story.edits.document, found.pos, node => this.fieldCodeShown(node))
+		}
+
+		return false
 	}
 
 	// Stops laying out and painting pages (another surface shows the document): edits are kept up with and
@@ -1281,4 +1432,44 @@ function visibleFrom(doc: Node, pos: number, dir: 1 | -1, hidden: readonly MarkT
 
 		at += dir * next.nodeSize
 	}
+}
+
+// A paragraph's fields in order: field atoms and the begin characters of fields spanning paragraphs.
+// Whether the paragraph at `pos` of `doc` lies inside a field spanning paragraphs that shows its code (`shown`,
+// asked of its begin character) and does not end in it: the field characters from where its container starts
+// to its end leave one open. Such fields are paragraphs of one container (tables of contents), so the walk
+// stops at the first sibling that is no paragraph.
+function insideCode(doc: Node, pos: number, shown: (begin: Node) => boolean): boolean {
+	const $pos = doc.resolve(pos)
+	const parent = $pos.parent
+	let pending = 0
+
+	for (let index = $pos.index(); index >= 0; index--) {
+		const block = parent.child(index)
+
+		if (block.type !== docxSchema.nodes.paragraph) return false
+
+		for (let k = block.childCount - 1; k >= 0; k--) {
+			const child = block.child(k)
+
+			if (child.type !== docxSchema.nodes.field_char) continue
+
+			if (child.attrs["kind"] === "end") pending++
+			else if (child.attrs["kind"] === "begin" && pending > 0) pending--
+			else if (child.attrs["kind"] === "begin" && shown(child)) return true
+		}
+	}
+
+	return false
+}
+
+function fieldsOf(paragraph: Node): Node[] {
+	const out: Node[] = []
+
+	paragraph.forEach(child => {
+		if (child.type === docxSchema.nodes.field || (child.type === docxSchema.nodes.field_char && child.attrs["kind"] === "begin"))
+			out.push(child)
+	})
+
+	return out
 }

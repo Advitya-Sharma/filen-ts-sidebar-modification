@@ -31,9 +31,11 @@ import {
 	type Story,
 	type StoryPart
 } from "../model/index"
-import { STRICT_WORDPROCESSINGML } from "../model/namespaces"
+import { StringTable } from "../model/columns"
+import { Ns, STRICT_WORDPROCESSINGML } from "../model/namespaces"
 import { DocxWriteError, StoryWriter, planNumbering, stylesWithDefinitions, type WriteEnvironment } from "../write/index"
 import { inCell, sectionWritten } from "../write/story"
+import type { StoryTemplate } from "../stories/clone"
 import { EditedSections, finalSectionEnd, inheritedSections, sameSection, sectionEndOf, type SectionEnd } from "../stories/sections"
 import { sniffImage } from "../objects/images"
 import type { NestedSplice } from "../write/nested"
@@ -351,7 +353,11 @@ export class DocumentEdits implements LayoutEdits {
 	// is one, else on a part made from a template of that part (empty, notes' separators included), which the
 	// save adds. Layout and an editing session use it like any other story (its blocks are laid out from the
 	// edits); a note goes into the note map layout finds references in. Undefined when no part could be made.
-	addStory(kind: NewStoryKind, id: string | undefined, partName: string): Story | undefined {
+	// With `template` (a header or footer copied from another part, stories/clone.ts), the story is that part's,
+	// built from its bytes.
+	addStory(kind: NewStoryKind, id: string | undefined, partName: string, template?: StoryTemplate): Story | undefined {
+		if (template !== undefined) return this.copiedStory(kind, partName, template)
+
 		const extension = this.extension
 		const existing = extension.parts.find(part => part !== undefined && part.name === partName && !this.overlays.has(part.index))
 
@@ -378,6 +384,50 @@ export class DocumentEdits implements LayoutEdits {
 
 		if (kind === "footnote" && id !== undefined) extension.footnotes.set(id, story)
 		if (kind === "endnote" && id !== undefined) extension.endnotes.set(id, story)
+
+		return story
+	}
+
+	// A header or footer on a part of its own made from `template`, as the save writes it: the part's story (with
+	// its text boxes, stories of the derived model too), its pictures and drawings in the derived model's lists.
+	private copiedStory(kind: NewStoryKind, partName: string, template: StoryTemplate): Story | undefined {
+		if ((kind !== "header" && kind !== "footer") || this.model.package.has(partName)) return undefined
+
+		let parsed: XmlDocument
+
+		try {
+			parsed = parseXml(template.bytes)
+		} catch (error) {
+			if (error instanceof XmlError) return undefined
+
+			throw error
+		}
+
+		const reader = partReader(parsed)
+
+		if (!reader.is(parsed.documentElement(), Ns.W, kind === "header" ? "hdr" : "ftr")) return undefined
+
+		const extension = this.extension
+		const first = extension.stories.length
+		// Strings the document has keep their ids (revision authors read through the model).
+		const strings = new StringTable()
+
+		for (const value of this.model.strings) strings.intern(value)
+
+		const tables = Object.assign(new ModelTables(), {
+			strings,
+			stories: extension.stories,
+			drawings: extension.drawings,
+			vml: extension.vml
+		})
+		const part = buildPart(reader, tables as ModelTables, extension.parts.length, partName, template.relationships)
+		const story = extension.stories[first]
+
+		if (story === undefined) return undefined
+
+		extension.parts.push(part)
+
+		for (let index = first; index < extension.stories.length; index++) this.added.add(index)
 
 		return story
 	}
@@ -1023,6 +1073,19 @@ export class StoryEdits {
 
 	get document(): Node {
 		return this.doc
+	}
+
+	// The top-level entries holding [from, to) of the document as laid out (see document), with their blocks
+	// as layout knows them; undefined for a range outside it.
+	blocksOf(from: number, to: number): { readonly entries: readonly TopEntry[]; readonly dirty: DirtyBlock[] } | undefined {
+		const doc = this.doc
+
+		if (from < 0 || to < from || to > doc.content.size || doc.childCount === 0) return undefined
+
+		const first = doc.resolve(from).index(0)
+		const last = Math.max(first, doc.resolve(Math.max(from, to - 1)).index(0))
+
+		return { entries: this.entries.slice(first, last + 1), dirty: this.dirtyOf(first, last) }
 	}
 
 	// ---- keeping up with the editing document -------------------------------------------------------------

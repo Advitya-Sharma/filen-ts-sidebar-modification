@@ -15,7 +15,7 @@ import { Revision, RevisionFlag, type StoryPart } from "../model/index"
 import type { ParagraphBordersProps } from "../props/index"
 import { Names, Out } from "../write/markup"
 import { sameFormatting, writeRunProperties } from "../write/runs"
-import { W_NAMESPACE } from "../write/source"
+import { W_NAMESPACE, sectionWritten } from "../write/source"
 
 // Recording tracked changes. While a document's review.tracking is on, every user transaction is rewritten
 // before it applies (trackTransaction, the session's transformer): text the author inserted earlier is really
@@ -430,18 +430,22 @@ function classify(doc: Node, from: number, to: number, author: string, session: 
 		if (node.type === nodes.paragraph) {
 			if (!closes) return true
 
+			const sectPr = node.attrs["sectPr"] as number
+			// A body section break's mark is flagged as any (accepted, the sections combine), never deleted for real.
+			const breaks = sectPr !== NO_SOURCE && bodyBreak(session, doc, pos, sectPr)
+
 			// The author's own inserted mark goes for real (with the rest, when nothing else stays).
-			if (ownParagraphMark(node, author)) return true
+			if (!breaks && ownParagraphMark(node, author)) return true
 
 			result.kept = true
 
 			const next = parent !== null && index + 1 < parent.childCount ? parent.child(index + 1) : null
 
 			// Only a mark followed by a paragraph or a table (accepted, it joins the paragraph after, or goes with
-			// its paragraph emptied) and holding no section break can be deleted.
+			// its paragraph emptied) and holding no section break in a table cell can be deleted.
 			if (
 				(next?.type === nodes.paragraph || next?.type === nodes.table) &&
-				(node.attrs["sectPr"] as number) === NO_SOURCE &&
+				(sectPr === NO_SOURCE || breaks) &&
 				((node.attrs["revision"] as number) & RevisionFlag.Deleted) === 0
 			)
 				result.paragraphs.push(pos)
@@ -500,6 +504,17 @@ function classify(doc: Node, from: number, to: number, author: string, session: 
 		result.kept = true
 
 	return result
+}
+
+// Whether the paragraph at `pos` ends a section of the body (its break written outside table cells).
+function bodyBreak(session: DocxEditorSession, doc: Node, pos: number, sectPr: number): boolean {
+	if (session.story.story.kind !== "body" || !sectionWritten(session.story.part, sectPr, false)) return false
+
+	const $pos = doc.resolve(pos)
+
+	for (let depth = $pos.depth; depth > 0; depth--) if ($pos.node(depth).type !== nodes.sdt) return false
+
+	return true
 }
 
 // A comment anchor (range start or end, reference): its kind and comment id.
@@ -1990,6 +2005,39 @@ function sourceStamp(session: DocxEditorSession, src: number, kind: number): Rev
 	}
 
 	return undefined
+}
+
+// A paragraph split by a command (a section break): the half before it ends with a new mark (inserted while
+// tracking: `stamp`), the half after keeps the paragraph's own mark, its revision stamps made explicit (as a
+// moved mark's are). The revision attribute and paragraph change of each.
+export interface SplitMark {
+	readonly revision: number
+	readonly change: ParagraphChange
+}
+
+export function splitParagraphMark(
+	node: Node,
+	session: DocxEditorSession,
+	stamp: RevisionStamp | undefined
+): { readonly first: SplitMark; readonly later: SplitMark } {
+	const revision = node.attrs["revision"] as number
+	const state = markState(node, session)
+	const rest = withoutStamps(paragraphChange(node))
+
+	return {
+		first: {
+			revision: (revision & ~MARK_FLAGS) | (stamp === undefined ? 0 : RevisionFlag.Inserted),
+			change: stamp === undefined ? rest : { ...rest, inserted: stamp }
+		},
+		later: {
+			revision,
+			change: {
+				...rest,
+				...(state.inserted === undefined ? {} : { inserted: state.inserted }),
+				...(state.deleted === undefined ? {} : { deleted: state.deleted })
+			}
+		}
+	}
 }
 
 function markState(node: Node, session: DocxEditorSession | undefined): MarkState {

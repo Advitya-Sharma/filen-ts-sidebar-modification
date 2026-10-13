@@ -1,6 +1,13 @@
 import type { Mark, Node } from "prosemirror-model"
 import { NodeKind, decodeUtf8, escapeAttribute } from "../../xml/index"
-import { controlState, formFieldData, type ControlState, type LegacyFieldState, type MadeControl } from "../forms/controls"
+import {
+	controlState,
+	formFieldData,
+	type ControlState,
+	type FormFieldData,
+	type LegacyFieldState,
+	type MadeControl
+} from "../forms/controls"
 import { NO_SOURCE, docxSchema } from "../edit/schema"
 import { Item, type StoryPart } from "../model/index"
 import { Ns } from "../model/namespaces"
@@ -412,6 +419,58 @@ export function legacyFieldEdited(node: Node): boolean {
 		src(node) !== NO_SOURCE &&
 		(node.attrs["end"] as number) !== NO_SOURCE
 	)
+}
+
+// The w:ffData a copy of a legacy form field writes in its begin w:fldChar (with its state set), or "" for any
+// other field.
+export function legacyFieldCopyData(names: Names, node: Node): string {
+	const state = (node.attrs["state"] ?? null) as LegacyFieldState | null
+	const data = state?.data
+
+	if (data === undefined || src(node) !== NO_SOURCE || !LEGACY_FIELD_TYPES.has(node.attrs["type"] as string)) return ""
+
+	return dataMarkup(names, withState(data, state ?? {}))
+}
+
+// w:checked last in w:checkBox, w:result first in w:ddList (CT_FFCheckBox, CT_FFDDList).
+function withState(data: FormFieldData, state: LegacyFieldState): FormFieldData {
+	if (state.checked === undefined && state.result === undefined) return data
+
+	return {
+		...data,
+		children: data.children.map(child => {
+			if (child.name === "checkBox" && state.checked !== undefined)
+				return {
+					...child,
+					children: [...child.children.filter(inner => inner.name !== "checked"), leaf("checked", state.checked ? "1" : "0")]
+				}
+
+			if (child.name === "ddList" && state.result !== undefined)
+				return {
+					...child,
+					children: [leaf("result", String(state.result)), ...child.children.filter(inner => inner.name !== "result")]
+				}
+
+			return child
+		})
+	}
+}
+
+function leaf(name: string, val: string): FormFieldData {
+	return { name, attrs: [["val", val]], children: [] }
+}
+
+const XML_NAME = /^[A-Za-z_][\w.-]*$/
+
+function dataMarkup(names: Names, data: FormFieldData): string {
+	if (!XML_NAME.test(data.name) || data.attrs.some(([name]) => !XML_NAME.test(name)))
+		throw new DocxWriteError("invalidValue", `A form field's w:ffData: ${JSON.stringify(data.name)}`)
+
+	const open = `<${names.el(data.name)}${data.attrs.map(([name, value]) => ` ${names.attr(name)}="${escapeAttribute(value)}"`).join("")}`
+
+	return data.children.length === 0
+		? `${open}/>`
+		: `${open}>${data.children.map(child => dataMarkup(names, child)).join("")}</${names.el(data.name)}>`
 }
 
 // A legacy form field whose value a form command set: its runs from w:fldChar begin to end as the source has

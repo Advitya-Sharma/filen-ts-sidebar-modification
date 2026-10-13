@@ -16,7 +16,11 @@ import { controlOf, prefixMappings, simpleBinding, sourceControl, type ControlSt
 import { formatControlDate } from "../core/docx/forms/dates"
 import { FORMS_AFTER, FORMS_BEFORE } from "../core/docx/edit/handlers/forms"
 import { REVIEW_TRANSFORMER } from "../core/docx/edit/handlers/review"
+import { resolveChanges, storyReviewIndex } from "../core/docx/review/accept"
 import { markCommand } from "../core/docx/edit/invariants/index"
+import { NO_SOURCE } from "../core/docx/edit/schema"
+import { storySessionOf } from "../core/docx/forms/sessions"
+import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
 import { formOps } from "./fuzz/ops/forms"
 import { buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
 
@@ -71,6 +75,19 @@ function find(session: DocxEditorSession, text: string): number {
 		if (at < 0 && node.isText && node.text?.includes(text) === true) at = pos + (node.text?.indexOf(text) ?? 0)
 
 		return at < 0
+	})
+
+	if (at < 0) throw new Error(`no "${text}"`)
+
+	return at
+}
+
+// Where the last text node holding `text` has it.
+function findLast(session: DocxEditorSession, text: string): number {
+	let at = -1
+
+	session.state.doc.descendants((node, pos) => {
+		if (node.isText && node.text?.includes(text) === true) at = pos + node.text.lastIndexOf(text)
 	})
 
 	if (at < 0) throw new Error(`no "${text}"`)
@@ -376,6 +393,57 @@ describe("content controls: placeholders", () => {
 		expect(session.state.doc.textContent).toBe("xTypedy")
 		expect(part(await save(opened), "word/document.xml")).not.toContain("<w:sdt>")
 	})
+
+	it("adds Word's Placeholder Text style to a document without it, for new controls and placeholders brought back", async () => {
+		const opened = await open({
+			body: p("Name ") + inParagraph(TEXT_PLACEHOLDER().replace('<w:rPr><w:rStyle w:val="PlaceholderText"/></w:rPr>', ""))
+		})
+		const session = opened.session
+
+		expect(opened.context.styles.byName("Placeholder Text", "character")).toBeUndefined()
+
+		// Typed over and emptied: the placeholder comes back in Word's style.
+		const at = find(session, "Click or tap")
+
+		expect(session.dispatch(session.state.tr.insertText("Ada", at, at + 32))).toBe(true)
+		expect(session.dispatch(session.state.tr.delete(find(session, "Ada"), find(session, "Ada") + 3))).toBe(true)
+		expect(
+			session.state.doc.nodeAt(find(session, "Click or tap"))?.marks.find(mark => mark.type.name === "char_style")?.attrs["styleId"]
+		).toBe("PlaceholderText")
+
+		// A new control shows its placeholder in it too.
+		select(session, find(session, "Name") + 5)
+		expect(run({ type: "control.insert", kind: "plainText" }, session)).toBe(true)
+
+		const bytes = await save(opened)
+		const styles = part(bytes, "word/styles.xml")
+
+		// docx4j__loadAndSave.docx (Word 16): basedOn the default character style, priority 99, semi-hidden.
+		expect(styles).toContain(
+			'<w:style w:type="character" w:styleId="PlaceholderText"><w:name w:val="Placeholder Text"/><w:uiPriority w:val="99"/>' +
+				'<w:semiHidden/><w:rPr><w:color w:val="666666"/></w:rPr></w:style>'
+		)
+		expect(part(bytes, "word/document.xml").match(/<w:rStyle w:val="PlaceholderText"\/>/g)).toHaveLength(2)
+
+		// Typed over again: the style goes from the content, and from the save once nothing uses it.
+		const back = find(session, "Click or tap")
+
+		expect(session.dispatch(session.state.tr.insertText("Bo", back, back + 32))).toBe(true)
+		expect(session.state.doc.nodeAt(find(session, "Bo"))?.marks.some(mark => mark.type.name === "char_style")).toBe(false)
+	})
+
+	it("keeps a document's own placeholder style", async () => {
+		const opened = await open({ body: p("Name "), ...STYLED })
+		const session = opened.session
+
+		select(session, find(session, "Name") + 5)
+		expect(run({ type: "control.insert", kind: "plainText" }, session)).toBe(true)
+
+		const bytes = await save(opened)
+
+		expect(part(bytes, "word/styles.xml").match(/w:styleId="PlaceholderText"/g)).toHaveLength(1)
+		expect(part(bytes, "word/styles.xml")).toContain('<w:color w:val="808080"/>')
+	})
 })
 
 describe("content controls: data binding", () => {
@@ -453,33 +521,227 @@ describe("content controls: data binding", () => {
 		expect(session.state.doc.textContent).toBe("Before Old afterBefore Old after")
 	})
 
-	it("refuses a save where controls bound to one node in two stories disagree", async () => {
-		const source = spec(
-			inParagraph(BOUND("/ns0:root[1]/ns0:name[1]", "Old", "7")) +
-				'<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>'
+	const withHeader = (body: string, header: string): SyntheticDocx => ({
+		...spec(body + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>'),
+		headers: { rIdH: header }
+	})
+
+	it("keeps controls bound to one node in different stories alike as either is edited, undo included", async () => {
+		const opened = await open(
+			withHeader(inParagraph(BOUND("/ns0:root[1]/ns0:name[1]", "Old", "7")), inParagraph(BOUND("/ns0:root/ns0:name", "Old", "8")))
 		)
-		const opened = await open({ ...source, headers: { rIdH: inParagraph(BOUND("/ns0:root/ns0:name", "Old", "8")) } })
 		const story = opened.context.model.stories.find(entry => entry.kind === "header")
 
 		if (story === undefined) throw new Error("no header")
 
+		const body = opened.session
 		const header = new DocxEditorSession(opened.context, { transformer, story })
+		const at = find(body, "Old")
 
-		for (const [session, text] of [
-			[opened.session, "One"],
-			[header, "Two"]
-		] as const) {
-			const at = find(session, "Old")
+		select(body, at, at + 3)
+		expect(body.dispatch(body.state.tr.insertText("One"))).toBe(true)
+		expect(header.state.doc.textContent).toBe("Before One after")
+		// The header's change is no undo step of its own.
+		expect(run({ type: "history.undo" }, header)).toBe(false)
 
-			select(session, at, at + 3)
-			expect(session.dispatch(session.state.tr.insertText(text))).toBe(true)
-		}
+		const there = find(header, "One")
 
-		await expect(
-			prepareDocxSave({ pkg: opened.pkg, context: opened.context, sessions: [opened.session, header] })
-		).rejects.toMatchObject({
-			reason: "write"
+		select(header, there, there + 3)
+		expect(header.dispatch(header.state.tr.insertText("Two"))).toBe(true)
+		expect(body.state.doc.textContent).toBe("Before Two after")
+
+		const bytes = (await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [body, header] })).bytes as Uint8Array
+
+		expect(part(bytes, "customXml/item1.xml")).toContain("<name>Two</name>")
+		expect(part(bytes, "word/document.xml")).toContain("<w:t>Two</w:t>")
+		expect(part(bytes, "word/header1.xml")).toContain("<w:t>Two</w:t>")
+
+		// Undoing the header's edit takes the body back with it; the body's own undo then takes both to the start.
+		expect(run({ type: "history.undo" }, header)).toBe(true)
+		expect(body.state.doc.textContent).toBe("Before One after")
+		expect(run({ type: "history.undo" }, body)).toBe(true)
+		expect(header.state.doc.textContent).toBe("Before Old after")
+		expect(body.state.doc.textContent).toBe("Before Old after")
+		expect(run({ type: "history.redo" }, body)).toBe(true)
+		expect(header.state.doc.textContent).toBe("Before One after")
+
+		// Emptied: the placeholder in both.
+		const one = find(body, "One")
+
+		expect(body.dispatch(body.state.tr.delete(one, one + 3))).toBe(true)
+		expect(header.state.doc.textContent).toBe(body.state.doc.textContent)
+	})
+
+	it("keeps a pasted copy of a bound control showing the node's value, and in step with the original", async () => {
+		const opened = await open(spec(inParagraph(BOUND("/ns0:root[1]/ns0:name[1]", "Old", "7")) + p("End")))
+		const session = opened.session
+		const first = session.state.doc.child(0)
+
+		// Typed over first, then the paragraph pasted (with the control in it) after the last one.
+		const at = find(session, "Old")
+
+		select(session, at, at + 3)
+		expect(session.dispatch(session.state.tr.insertText("Ann"))).toBe(true)
+
+		const copy = session.state.doc.child(0)
+
+		select(session, find(session, "End") + 3)
+		expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(0, copy.nodeSize)))).toBe(true)
+		expect(first.textContent).toBe("Before Old after")
+		expect(session.state.doc.textContent).toBe("Before Ann afterEndBefore Ann after")
+
+		// Either one edited: the other follows.
+		const pos = findLast(session, "Ann")
+
+		expect(pos).toBeGreaterThan(find(session, "Ann"))
+		select(session, pos, pos + 3)
+		expect(session.dispatch(session.state.tr.insertText("Bob"))).toBe(true)
+		expect(session.state.doc.textContent).toBe("Before Bob afterEndBefore Bob after")
+		expect(part(await save(opened), "customXml/item1.xml")).toContain("<name>Bob</name>")
+	})
+
+	it("shows a bound value in a block control holding a table as one paragraph, as Word refreshes it", async () => {
+		const table =
+			'<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' +
+			'<w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' +
+			p("Old") +
+			"</w:tc></w:tr></w:tbl>"
+		const block = (id: string, content: string): string =>
+			`<w:sdt><w:sdtPr><w:id w:val="${id}"/><w:dataBinding w:prefixMappings="xmlns:ns0='urn:x'" w:xpath="/ns0:root[1]/ns0:name[1]" ` +
+			`w:storeItemID="{11111111-2222-3333-4444-555555555555}"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`
+		const opened = await open(spec(block("11", table) + p("x") + block("12", p("Old"))))
+		const session = opened.session
+		const at = find(session, "Old")
+
+		select(session, at, at + 3)
+		expect(session.dispatch(session.state.tr.insertText("New"))).toBe(true)
+
+		const last = session.state.doc.child(2)
+
+		expect(last.textContent).toBe("New")
+		expect(last.childCount).toBe(1)
+
+		// Typed in the plain one: the table holder becomes one paragraph showing it.
+		const there = findLast(session, "New")
+
+		select(session, there, there + 3)
+		expect(session.dispatch(session.state.tr.insertText("Two"))).toBe(true)
+		expect(session.state.doc.child(0).firstChild?.type.name).toBe("paragraph")
+		expect(session.state.doc.textContent).toBe("TwoxTwo")
+
+		const saved = await save(opened)
+
+		expect(part(saved, "word/document.xml")).not.toContain("<w:tbl>")
+		expect(part(saved, "customXml/item1.xml")).toContain("<name>Two</name>")
+	})
+
+	it("passes on a tracked edit's value untracked, and the value its rejection leaves", async () => {
+		const opened = await open(
+			withHeader(inParagraph(BOUND("/ns0:root[1]/ns0:name[1]", "Old", "7")), inParagraph(BOUND("/ns0:root/ns0:name", "Old", "8"))),
+			"Ann Author"
+		)
+		const story = opened.context.model.stories.find(entry => entry.kind === "header")
+
+		if (story === undefined) throw new Error("no header")
+
+		const body = opened.session
+		const header = new DocxEditorSession(opened.context, { transformer, story })
+		const at = find(body, "Old")
+
+		opened.context.review.tracking = true
+		select(body, at, at + 3)
+		expect(body.dispatch(body.state.tr.insertText("New"))).toBe(true)
+		expect(header.state.doc.textContent).toBe("Before New after")
+
+		let revisions = 0
+
+		header.state.doc.descendants(node => {
+			if (node.marks.some(mark => mark.type.name === "insertion" || mark.type.name === "deletion")) revisions++
 		})
+		expect(revisions).toBe(0)
+
+		const outcome = resolveChanges(body, storyReviewIndex(body), { all: true }, false)
+
+		expect(outcome.tr).not.toBeNull()
+		body.dispatch(outcome.tr as Transaction)
+		expect(body.state.doc.textContent).toBe("Before Old after")
+		expect(header.state.doc.textContent).toBe("Before Old after")
+	})
+
+	it("passes a bound value to the stories a paged editor has not opened yet", async ({ skip }) => {
+		const bytes = buildDocx(
+			withHeader(inParagraph(BOUND("/ns0:root[1]/ns0:name[1]", "Old", "7")), inParagraph(BOUND("/ns0:root/ns0:name", "Old", "8")))
+		)
+		const { editor, context, pkg } = await pagedEditor(bytes)
+		const story = context.model.stories.find(entry => entry.kind === "header")
+
+		if (story === undefined) throw new Error("no header")
+		// The editor hosts its stories' sessions (paged/editor.ts hostStories) once integrated.
+		if (storySessionOf(context, story.index) === undefined) skip()
+
+		const session = editor.session
+		const at = find(session, "Old")
+
+		select(session, at, at + 3)
+		expect(session.dispatch(session.state.tr.insertText("One"))).toBe(true)
+		expect(editor.storySession(story.index)?.state.doc.textContent).toBe("Before One after")
+		expect(editor.execute({ type: "history.undo" })).toBe(true)
+		expect(editor.storySession(story.index)?.state.doc.textContent).toBe("Before Old after")
+		expect(editor.execute({ type: "history.redo" })).toBe(true)
+		await settleAll(editor)
+
+		const saved = (await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array
+
+		expect(part(saved, "word/header1.xml")).toContain("<w:t>One</w:t>")
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved))
+		editor.dispose()
+	})
+})
+
+describe("content controls: pasted copies", () => {
+	it("keeps a pasted copy of a block control a control with its properties and state, under no id of its own", async () => {
+		const opened = await open({ body: DATE_BLOCK + p("End"), ...STYLED })
+		const session = opened.session
+
+		select(session, find(session, "Click") + 2)
+		expect(run({ type: "control.date", iso: "2026-10-12" }, session)).toBe(true)
+
+		const block = session.state.doc.child(0)
+
+		select(session, find(session, "End") + 3)
+		expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(0, block.nodeSize)))).toBe(true)
+		select(session, findLast(session, "October") + 1)
+		expect(control(session)).toMatchObject({ type: "date", date: "2026-10-12", placeholder: false })
+		expect(run({ type: "control.date", iso: "2026-11-01" }, session)).toBe(true)
+		expect(session.state.doc.textContent).toBe("12 October 2026End1 November 2026")
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		expect(xml.match(/<w:sdt>/g)).toHaveLength(2)
+		expect(xml.match(/<w:id w:val="103"\/>/g)).toHaveLength(1)
+		expect(xml).toContain('<w:date w:fullDate="2026-10-12T00:00:00Z">')
+		expect(xml).toContain('<w:date w:fullDate="2026-11-01T00:00:00Z">')
+	})
+
+	it("keeps a pasted copy of a run-level control one control of its own", async () => {
+		const opened = await open({ body: inParagraph(LIST("dropDownList", "Apple")) })
+		const session = opened.session
+		const paragraph = session.state.doc.child(0)
+
+		select(session, paragraph.nodeSize - 1)
+		expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(0, paragraph.nodeSize)))).toBe(true)
+
+		const copy = findLast(session, "Apple")
+
+		select(session, copy + 1)
+		expect(control(session)).toMatchObject({ type: "dropDownList" })
+		expect(run({ type: "control.choose", value: "P" }, session)).toBe(true)
+		expect(session.state.doc.textContent).toBe("Before Apple afterBefore Pear after")
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		expect(xml.match(/<w:dropDownList/g)).toHaveLength(2)
+		expect(xml.match(/<w:id w:val="102"\/>/g)).toHaveLength(1)
 	})
 })
 
@@ -695,6 +957,82 @@ describe("content controls: new controls", () => {
 		expect(xml).toContain('<w:ddList><w:result w:val="1"/><w:listEntry w:val="Red"/>')
 		expect(xml).toContain("<w:t>new value</w:t>")
 		expect(xml).not.toContain("<w:t>old</w:t>")
+	})
+
+	const LEGACY_CHECKBOX =
+		'<w:p><w:bookmarkStart w:id="0" w:name="Check1"/><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Check1"/><w:enabled/>' +
+		'<w:calcOnExit w:val="0"/><w:helpText w:type="text" w:val="Tick &amp; go"/><w:checkBox><w:sizeAuto/><w:default w:val="0"/></w:checkBox></w:ffData></w:fldChar></w:r>' +
+		'<w:r><w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+		'<w:r><w:fldChar w:fldCharType="end"/></w:r><w:bookmarkEnd w:id="0"/><w:r><w:t xml:space="preserve"> Agree</w:t></w:r></w:p>'
+
+	function legacyFields(session: DocxEditorSession): number[] {
+		const out: number[] = []
+
+		session.state.doc.descendants((node, pos) => {
+			if (node.type === nodes.field) out.push(pos)
+		})
+
+		return out
+	}
+
+	it("keeps a pasted copy of a legacy form field a form field, its w:ffData with it", async () => {
+		const opened = await open({ body: LEGACY_CHECKBOX + p("End") })
+		const session = opened.session
+		const paragraph = session.state.doc.child(0)
+
+		// The paragraph copied into the last one, as a host's paste or a drag-copy without the sanitiser does.
+		select(session, find(session, "End") + 3)
+		expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(0, paragraph.nodeSize)))).toBe(true)
+
+		const [original, copy] = legacyFields(session)
+
+		if (original === undefined || copy === undefined) throw new Error("no copy")
+
+		expect(session.state.doc.nodeAt(copy)?.attrs["src"]).toBe(NO_SOURCE)
+		session.dispatch(session.state.tr.setSelection(NodeSelection.create(session.state.doc, copy)))
+		// Its bookmark stays with the original: Word shows a copy's empty.
+		expect(control(session)).toMatchObject({ kind: "field", type: "checkbox", checked: false, tag: null })
+		expect(run({ type: "control.check" }, session)).toBe(true)
+		expect(control(session)).toMatchObject({ kind: "field", checked: true })
+		session.dispatch(session.state.tr.setSelection(NodeSelection.create(session.state.doc, original)))
+		expect(control(session)).toMatchObject({ kind: "field", checked: false, tag: "Check1" })
+	})
+
+	it("writes a pasted legacy form field with its w:ffData, the bookmark staying with the original", async () => {
+		const opened = await open({ body: LEGACY_CHECKBOX + p("End") })
+		const session = opened.session
+		const paragraph = session.state.doc.child(0)
+
+		select(session, find(session, "End") + 3)
+		expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(0, paragraph.nodeSize)))).toBe(true)
+
+		const copy = legacyFields(session)[1]
+
+		if (copy === undefined) throw new Error("no copy")
+
+		session.dispatch(session.state.tr.setSelection(NodeSelection.create(session.state.doc, copy)))
+		expect(run({ type: "control.check" }, session)).toBe(true)
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		// As Word writes pasted copies (govuk__S62A_Questionnaire, poi__form_footnotes): the same w:name, one bookmark.
+		expect(xml.match(/<w:name w:val="Check1"\/>/g)).toHaveLength(2)
+		expect(xml.match(/<w:bookmarkStart [^>]*w:name="Check1"/g)).toHaveLength(1)
+		expect(xml).toContain(
+			'<w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Check1"/><w:enabled/><w:calcOnExit w:val="0"/>' +
+				'<w:helpText w:type="text" w:val="Tick &amp; go"/><w:checkBox><w:sizeAuto/><w:default w:val="0"/><w:checked w:val="1"/></w:checkBox></w:ffData></w:fldChar>'
+		)
+
+		const reopened = await open(await save(opened))
+		const fields = legacyFields(reopened.session)
+		const tags = fields.map(at => {
+			reopened.session.dispatch(reopened.session.state.tr.setSelection(NodeSelection.create(reopened.session.state.doc, at)))
+
+			return control(reopened.session)?.tag
+		})
+
+		// Reopened, the copy (no bookmark of its name) shows none either.
+		expect(tags).toEqual(["Check1", null])
 	})
 })
 
