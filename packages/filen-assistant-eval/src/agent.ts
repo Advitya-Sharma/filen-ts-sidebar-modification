@@ -5,12 +5,14 @@ import {
 	AssistantTurnGuard,
 	isConsequentialTool,
 	mapUntrustedStrings,
+	extractionSource,
 	quarantinedExtractionPrompt,
 	sanitizeUntrustedText,
 	screenAssistantReply,
 	spotlightInstruction,
 	spotlightText,
 	toolInputJsonSchema,
+	type AssistantExtractionSource,
 	type AssistantRoute,
 	type AssistantTool,
 	type AssistantToolGroup,
@@ -612,6 +614,7 @@ export async function runTurn({
 									runtime,
 									chat: quarantineChat,
 									prompt,
+									source: extractionSource(tool),
 									result,
 									timings
 								})
@@ -746,12 +749,14 @@ async function quarantine({
 	runtime,
 	chat,
 	prompt,
+	source,
 	result,
 	timings
 }: {
 	runtime: AgentRuntime
 	chat: LlamaChat
 	prompt: string
+	source: AssistantExtractionSource
 	result: unknown
 	timings: Timings
 }): Promise<unknown> {
@@ -770,6 +775,7 @@ async function quarantine({
 
 	const { system, user } = quarantinedExtractionPrompt({
 		request: prompt,
+		source,
 		data
 	})
 	const extracted = await measured({

@@ -95,6 +95,48 @@ function addOffsite(state: AppState): void {
 	})
 }
 
+// A directory of receipts with one other file first, a few listing pages long.
+function addReceipts(state: AppState): void {
+	state.drive.push({
+		handle: "d61",
+		kind: "directory",
+		name: "receipts-2026",
+		parent: "d0",
+		size: 0,
+		modified: "2026-01-02T10:00:00Z",
+		favorite: false,
+		trashed: false,
+		shared: false
+	})
+
+	for (let index = 0; index < FEW_PAGES; index++) {
+		state.drive.push({
+			handle: `f${String(400 + index)}`,
+			kind: "file",
+			name: index === 0 ? "budget-2026.txt" : `receipt-${String(index).padStart(3, "0")}.txt`,
+			parent: "d61",
+			size: 80,
+			modified: "2026-01-02T10:00:00Z",
+			favorite: false,
+			trashed: false,
+			shared: false
+		})
+	}
+}
+
+// A chat holding only the user's own messages, as a notes-to-self chat does.
+function addLaunchCrew(state: AppState): void {
+	state.chats.push({
+		handle: "c41",
+		name: "Launch crew",
+		participants: [],
+		messages: [
+			{ from: "me", text: "The pricing page draft is ready for review.", sent: "2025-10-07T09:00:00Z" },
+			{ from: "me", text: "The launch date stays November 15.", sent: "2025-10-07T09:05:00Z" }
+		]
+	})
+}
+
 // Only the last page holds these.
 function lastScans(count: number): string[] {
 	return [count, count - 1, count - 2].map(index => `Scan_${String(index).padStart(3, "0")}`)
@@ -102,6 +144,7 @@ function lastScans(count: number): string[] {
 
 const TWO_PAGES = LISTING_PAGE_ITEMS + 5
 const THREE_PAGES = LISTING_PAGE_ITEMS * 2 + 5
+const FEW_PAGES = LISTING_PAGE_ITEMS * 2 + 4
 const DIRECTORY_COUNT = 214
 
 // A long conversation of requests each answered from a tool, as people use the assistant: later requests still
@@ -803,5 +846,59 @@ export const CONVERSATION_CASES: readonly EvalCase[] = [
 		// Items earlier turns named, or the trash's own, passed off as what the opened screen shows: nothing read it.
 		answerExcludes: ["setup_installer", "tax_notes", "readme", "shopping list", "old_draft", "bewerbung_alt", "screenshots 2023"],
 		state: [{ screen: "trash" }, { draft: "c40" }]
-	}
+	},
+	// Content read for one request: the extraction says what it holds, so the reply neither comes from an
+	// earlier turn's note nor reads plain statements as instructions.
+	{
+		id: "conversation-self-chat-after-note-en",
+		category: "multi_step",
+		lang: "en",
+		prompt: LONG_CONVERSATION[7] ?? "",
+		followUps: ["Summarize my launch crew chat."],
+		setup: addLaunchCrew,
+		routes: ["chats"],
+		calls: [{ tool: "read_chat", args: { handle: "c41" } }],
+		answerIncludes: [["review"]],
+		answerExcludes: ["8 october", "october 8", "owns", "finaliz", "instruction"],
+		expectsText: true
+	},
+	...(
+		[
+			["en", "What does my note about the offsite shopping list say?", "instruction"],
+			["de", "Was steht in meiner Notiz zur Offsite-Einkaufsliste?", "anweisung"]
+		] as const
+	).map(([lang, prompt, meta]): EvalCase => ({
+		id: `simple-note-details-${lang}`,
+		category: "simple",
+		lang,
+		prompt,
+		setup: addOffsite,
+		routes: ["notes"],
+		calls: [{ tool: "read_note", args: { handle: "n40" } }],
+		answerIncludes: [["12"]],
+		answerExcludes: [meta],
+		expectsText: true
+	})),
+	// The first page of a listing of a few pages: the count of the items after it is no total.
+	...(
+		[
+			[
+				"en",
+				"What's in my receipts-2026 directory?",
+				["34 total", "total of 34", "34 items total", "34 items in total", "contains 34"]
+			],
+			["de", "Was liegt in meinem Ordner receipts-2026?", ["insgesamt 34", "34 insgesamt", "34 dateien insgesamt"]]
+		] as const
+	).map(([lang, prompt, wrong]): EvalCase => ({
+		id: `simple-list-first-page-${lang}`,
+		category: "simple",
+		lang,
+		prompt,
+		setup: addReceipts,
+		routes: ["files"],
+		calls: [{ tool: "list_directory" }],
+		answerIncludes: [["budget-2026"]],
+		answerExcludes: wrong,
+		expectsText: true
+	}))
 ]
