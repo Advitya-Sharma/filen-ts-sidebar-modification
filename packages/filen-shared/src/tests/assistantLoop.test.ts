@@ -1483,7 +1483,7 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 
 		expect(
 			user.startsWith(
-				"User's request: Tom Lee\n(The user's previous message, which this request may answer: \"What did Tom write about the budget?\")\n\nData:"
+				"User's request: Tom Lee\n(The user's previous message, which this request may answer: \"What did Tom write about the budget?\")\n\nData (the chat's messages, oldest first; \"me\" is the user):"
 			)
 		).toBe(true)
 		expect(user.indexOf("Budget is 5k")).toBeGreaterThan(user.indexOf("Data:"))
@@ -1516,7 +1516,7 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		for (const model of [first, second]) {
 			const user = model.quarantineRequests[0]?.messages[1]?.content ?? ""
 
-			expect(user).toMatch(/^User's request: Summarize my note Groceries\n\nData:/)
+			expect(user).toMatch(/^User's request: Summarize my note Groceries\n\nData \(the note's text\):/)
 			expect(user).not.toContain("workout")
 		}
 	})
@@ -1544,7 +1544,7 @@ describe("runAssistantTurn follow-ups, context and limits", () => {
 		const user = model.quarantineRequests[0]?.messages[1]?.content ?? ""
 
 		expect(user).toContain("User's request: Groceries\n(The user's previous message, which this request may answer: \"aaa")
-		expect(user).toContain("zzz\")\n\nData:")
+		expect(user).toContain("zzz\")\n\nData (the note's text):")
 		expect(user).not.toContain("MIDDLE")
 	})
 

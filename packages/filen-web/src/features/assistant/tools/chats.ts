@@ -189,7 +189,8 @@ export const readChatTool: ToolAdapter = async (input, scope) => {
 
 		budget -= text.length
 		rows.unshift({
-			from: isOwnMessage(message, userId) ? "you" : messageSenderName(message),
+			// As the extraction prompt names the user's own messages.
+			from: isOwnMessage(message, userId) ? "me" : messageSenderName(message),
 			text,
 			sent: isoDate(message.sentTimestamp)
 		})

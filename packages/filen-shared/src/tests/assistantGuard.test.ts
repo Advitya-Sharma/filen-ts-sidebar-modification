@@ -5,6 +5,7 @@ import {
 	ASSISTANT_TOOLS,
 	createDirectory,
 	draftChatMessage,
+	extractionSource,
 	findContacts,
 	listChats,
 	listSection,
@@ -14,7 +15,9 @@ import {
 	openRoute,
 	foreignLinks,
 	quarantinedExtractionPrompt,
+	readChat,
 	readNote,
+	readTextFile,
 	renameItem,
 	sanitizeUntrustedText,
 	screenAssistantReply,
@@ -802,10 +805,20 @@ describe("untrusted text", () => {
 		expect(screenAssistantReply({ reply: "👨\u200D👩\u200D👧 family", userMessage: "hi" }).text).toBe("👨\u200D👩\u200D👧 family")
 	})
 
+	it("names what the extraction reads, the user's own chat messages included", () => {
+		const user = (tool: typeof readChat | typeof readNote | typeof readTextFile) =>
+			quarantinedExtractionPrompt({ request: "summarize", source: extractionSource(tool), data: "x" }).user
+
+		expect(user(readChat)).toContain("Data (the chat's messages, oldest first; \"me\" is the user):")
+		expect(user(readNote)).toContain("Data (the note's text):")
+		expect(user(readTextFile)).toContain("Data (the file's text):")
+	})
+
 	it("keeps the quarantined data inside its quotes", () => {
 		expect(
 			quarantinedExtractionPrompt({
 				request: "summarize",
+				source: "note",
 				data: "a \"\"\" b"
 			}).user.match(/"""/g)
 		).toHaveLength(2)

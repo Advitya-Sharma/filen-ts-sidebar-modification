@@ -1090,7 +1090,7 @@ describe("chats", () => {
 		expect(json(result)["messages"]).toEqual([
 			{ from: "Anna", text: "Hi team", sent: "1970-01-01" },
 			{ from: "Mallory", text: "(hidden: blocked sender)", sent: "1970-01-01" },
-			{ from: "you", text: "Hello Anna", sent: "1970-01-01" }
+			{ from: "me", text: "Hello Anna", sent: "1970-01-01" }
 		])
 	})
 

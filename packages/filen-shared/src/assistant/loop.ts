@@ -25,6 +25,8 @@ import {
 } from "./tool"
 import { ASSISTANT_TOOL_GROUPS, ASSISTANT_TOOLS, assistantToolByName } from "./tools"
 import {
+	type AssistantExtractionSource,
+	extractionSource,
 	mapUntrustedStrings,
 	quarantinedExtractionPrompt,
 	sanitizeUntrustedText,
@@ -1545,6 +1547,7 @@ export async function runAssistantTurn({
 												model,
 												request: message,
 												earlier: answersEarlier(message) ? priorUser.at(-1) : undefined,
+												source: extractionSource(tool),
 												// Sanitized first: the quarantine prompt is rendered and tokenized like any other.
 												result: sanitized(outcome.result),
 												signal,
@@ -1723,6 +1726,7 @@ async function quarantine({
 	model,
 	request,
 	earlier,
+	source,
 	result,
 	signal,
 	onProgress
@@ -1731,6 +1735,7 @@ async function quarantine({
 	request: string
 	// The user's previous message, for a reply to a clarifying question.
 	earlier: string | undefined
+	source: AssistantExtractionSource
 	result: unknown
 	signal: AssistantSignal
 	onProgress: (progress: AssistantPromptProgress) => void
@@ -1746,6 +1751,7 @@ async function quarantine({
 	const frame = quarantinedExtractionPrompt({
 		request: asked,
 		earlier: background,
+		source,
 		data: ""
 	})
 	const budget =
@@ -1768,6 +1774,7 @@ async function quarantine({
 	const { system, user } = quarantinedExtractionPrompt({
 		request: asked,
 		earlier: background,
+		source,
 		data
 	})
 	const extracted = await generateSettled(
