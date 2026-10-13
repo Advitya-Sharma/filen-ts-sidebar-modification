@@ -1613,26 +1613,55 @@ export function clearCellRevision(tr: Transaction, pos: number, r: number, index
 	setOverrides(tr, cellPos, cell, withoutKeys(cellOverrides(cell), [flag === RevisionFlag.Inserted ? "ins" : "del"]))
 }
 
-// Takes cells (row, index) out of the table at `pos` (accept a cell deletion, reject a cell insertion), as
-// steps from the end: the row's later cells move left, a row losing every cell goes. False, with nothing done,
-// when that would leave no row, or move a cell a vertical merge runs through (in the row, or in the rows
-// next to it from the first cell taken out on).
-export function removeCells(
-	tr: Transaction,
-	map: TableMap,
-	pos: number,
-	cells: readonly { readonly row: number; readonly index: number }[]
-): boolean {
+type CellRef = { readonly row: number; readonly index: number }
+
+// `cells` by row, indices ascending; null when one is no cell of `map`.
+function cellsByRow(map: TableMap, cells: readonly CellRef[]): Map<number, number[]> | null {
 	const byRow = new Map<number, number[]>()
 
 	for (const { row, index } of cells) {
-		if (row < 0 || row >= map.height || index < 0 || index >= map.row(row).starts.length) return false
+		if (row < 0 || row >= map.height || index < 0 || index >= map.row(row).starts.length) return null
 
 		byRow.set(
 			row,
 			[...new Set([...(byRow.get(row) ?? []), index])].sort((a, b) => a - b)
 		)
 	}
+
+	return byRow
+}
+
+// The grid columns [from, to) when every row loses exactly the cells covering them and keeps others: the cells
+// after them move left alike, so a vertical merge keeps its column. Null otherwise.
+function uniformColumns(map: TableMap, byRow: ReadonlyMap<number, readonly number[]>): { from: number; to: number } | null {
+	if (byRow.size !== map.height) return null
+
+	let range: { from: number; to: number } | null = null
+
+	for (let r = 0; r < map.height; r++) {
+		const row = map.row(r)
+		const indices = byRow.get(r) ?? []
+		const first = indices[0] ?? 0
+		const last = indices[indices.length - 1] ?? 0
+
+		if (indices.length === 0 || indices.length === row.starts.length || last - first + 1 !== indices.length) return null
+
+		const from = row.starts[first] ?? 0
+		const to = (row.starts[last] ?? 0) + (row.spans[last] ?? 1)
+
+		if (range === null) range = { from, to }
+		else if (range.from !== from || range.to !== to) return null
+	}
+
+	return range
+}
+
+// Whether removeCells can take `cells` out of the table of `map` (a dry run).
+export function canRemoveCells(map: TableMap, cells: readonly CellRef[]): boolean {
+	const byRow = cellsByRow(map, cells)
+
+	if (byRow === null) return false
+	if (uniformColumns(map, byRow) !== null) return true
 
 	let emptied = 0
 
@@ -1651,7 +1680,20 @@ export function removeCells(
 		if (indices.length === row.starts.length) emptied++
 	}
 
-	if (emptied === map.height) return false
+	return emptied < map.height
+}
+
+// Takes cells (row, index) out of the table at `pos` (accept a cell deletion, reject a cell insertion), as
+// steps from the end: the row's later cells move left, a row losing every cell goes. False, with nothing done,
+// when that would leave no row, or move a cell a vertical merge runs through (in the row, or in the rows
+// next to it from the first cell taken out on) unless every row loses the same grid columns. Those columns
+// leave a grid no row is wider than (a column deletion accepted, as deleting it untracked does).
+export function removeCells(tr: Transaction, map: TableMap, pos: number, cells: readonly CellRef[]): boolean {
+	const byRow = cellsByRow(map, cells)
+
+	if (byRow === null || !canRemoveCells(map, cells)) return false
+
+	const columns = uniformColumns(map, byRow)
 
 	for (const r of [...byRow.keys()].sort((a, b) => b - a)) {
 		const indices = byRow.get(r) ?? []
@@ -1663,6 +1705,13 @@ export function removeCells(
 		}
 
 		for (const index of [...indices].reverse()) tr.delete(map.cellPos(pos, r, index), cellEnd(map, pos, r, index))
+	}
+
+	if (columns !== null && map.grid.length >= map.width) {
+		const grid = [...map.grid]
+
+		grid.splice(columns.from, columns.to - columns.from)
+		tr.setNodeAttribute(pos, "grid", grid)
 	}
 
 	return true

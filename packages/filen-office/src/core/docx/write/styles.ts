@@ -23,7 +23,8 @@ interface Definition {
 // public test corpus (corpus/manifest.json): the paragraph styles from SHA-256
 // 599533082406a29a6238b5a1799c5395d884a8506feafd455fe91d4554218b62, the comment styles from
 // c27159ed00e2bcaf3d15f4ff3b3df2db55e8590869aad93303984fb652d1ce86, Placeholder Text from
-// 122f53311702e32affbc0ec99ced129990e6728a9b4b6df30f5684f73a20247f; no third-party code is copied.
+// 122f53311702e32affbc0ec99ced129990e6728a9b4b6df30f5684f73a20247f, table of figures from
+// 0926dc45f45b7c427b8be7f7eb08956e1b9c793b394a4730f340f2bcdcb91bdd; no third-party code is copied.
 const DEFINITIONS: Readonly<Record<string, Definition>> = {
 	title: {
 		priority: 10,
@@ -61,6 +62,7 @@ const DEFINITIONS: Readonly<Record<string, Definition>> = {
 	},
 	"annotation reference": { priority: 99, pPr: "", rPr: '<w:sz w:val="16"/><w:szCs w:val="16"/>', qFormat: false, hidden: true },
 	"Placeholder Text": { priority: 99, pPr: "", rPr: '<w:color w:val="666666"/>', qFormat: false, hidden: true, unhide: false },
+	"table of figures": { priority: 99, pPr: '<w:spacing w:after="0"/>', rPr: "", qFormat: false, hidden: true },
 	header: headerFooter(),
 	footer: headerFooter(),
 	"footnote text": noteText(),

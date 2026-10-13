@@ -429,6 +429,16 @@ describe("docx headers and footers", () => {
 			expect(xml).not.toMatch(/<w:t>Inside the box/)
 		}
 
+		// New VML shape and embedded object ids, the object naming its shape's new id.
+		const shape = /<v:shape id="([^"]+)" type="#_x0000_t75"/.exec(copy)?.[1]
+
+		expect(shape).toBeDefined()
+		expect(shape).not.toBe("_x0000_i1025")
+		expect(copy).toContain(`ShapeID="${shape ?? ""}"`)
+		expect(copy).not.toContain('ObjectID="_1"')
+		expect(copy).not.toContain('o:spid="_x0000_s1026"')
+		expect(original).toContain('ShapeID="_x0000_i1025"')
+
 		// A new content control id.
 		expect(copy).not.toContain('<w:id w:val="99"/>')
 		expect(copy).toMatch(/<w:sdtPr><w:id w:val="-?\d+"\/>/)
@@ -591,6 +601,22 @@ describe("docx headers and footers", () => {
 		const bytes = await saved(opened)
 
 		expect(await read(bytes, "word/document.xml")).not.toContain("headerReference")
+		editor.dispose()
+	})
+
+	it("removes the header of a section unlinked from the previous one: it shows none, the previous keeps its own", async () => {
+		const opened = await pagedEditor(TWO_SECTIONS)
+		const { editor } = opened
+
+		caret(editor, 20)
+		expect(await run(editor, { type: "header.edit" })).toBe(true)
+		expect(await run(editor, { type: "header.linkToPrevious" })).toBe(true)
+		expect(await run(editor, { type: "header.remove" })).toBe(true)
+		expect(await headerTexts(editor)).toEqual(["Shared header", ""])
+
+		const xml = await read(await saved(opened), "word/document.xml")
+
+		expect(xml.match(/<w:headerReference /g)).toHaveLength(2)
 		editor.dispose()
 	})
 

@@ -3,7 +3,7 @@ import { TextSelection } from "prosemirror-state"
 import { markCommand, markInternal } from "../../../core/docx/edit/invariants/index"
 import { addBookmark, sessionBookmarks } from "../../../core/docx/fields/bookmarks"
 import { rewritableSource } from "../../../core/docx/fields/evaluate"
-import { docxSchema, type DocxEditorSession } from "../harness"
+import { docxSchema, settle, type DocxEditorCommand, type DocxEditorSession } from "../harness"
 import { inlinePosition, nearPosition, textblocks } from "./base"
 import type { EditOp, OpContext, Rand } from "./index"
 
@@ -61,6 +61,125 @@ function caret(context: OpContext): number | undefined {
 	if (at !== undefined) select(session, at)
 
 	return at
+}
+
+// Field codes shown (Alt+F9 on every field, or Shift+F9 on a field or a table of contents) while a few edits
+// land, some changing two paragraphs in one transaction, laid out in that view; then results shown again (what
+// the harness compares with the saved file). Layout settles in between unless the stream says to race.
+async function fieldCodes(context: OpContext): Promise<string> {
+	const editor = context.editor
+
+	if (editor === undefined) return "noop"
+
+	const session = context.session
+	const rand = context.rand
+	const log: string[] = []
+	const fields: number[] = []
+
+	session.state.doc.descendants((node, pos) => {
+		if (node.type === nodes.field || (node.type === nodes.field_char && node.attrs["kind"] === "begin")) fields.push(pos)
+
+		return !node.isLeaf
+	})
+
+	if (fields.length > 0 && rand() < 0.6) {
+		const at = pick(rand, fields)
+
+		select(session, at)
+		log.push(`code@${String(at)} ${context.execute("view.fieldCode", { type: "view.fieldCode" })}`)
+	} else {
+		log.push(`codes ${context.execute("view.fieldCodes", { type: "view.fieldCodes" })}`)
+	}
+
+	const race = rand() < 0.3
+
+	if (!race) await settle(editor)
+
+	for (let k = 0, edits = 1 + Math.floor(rand() * 3); k < edits; k++) {
+		const doc = session.state.doc
+		const at = inlinePosition(rand, doc)
+
+		if (at === undefined) break
+
+		const choice = rand()
+		const tr = session.state.tr.setSelection(TextSelection.create(doc, at))
+		let kind: string
+
+		if (choice < 0.35) {
+			kind = "type"
+			tr.insertText("xy ")
+		} else if (choice < 0.6) {
+			kind = "split"
+			tr.split(at)
+		} else if (choice < 0.8) {
+			kind = "delete"
+			tr.delete(at, Math.min(at + 3, doc.resolve(at).end()))
+		} else {
+			// Two paragraphs resized by one transaction.
+			const other = nearPosition(rand, doc, at) ?? at
+			kind = `type2@${String(other)}`
+			tr.insertText("q", Math.max(at, other))
+			tr.insertText("q", Math.min(at, other))
+		}
+
+		log.push(`${kind}@${String(at)} ${String(session.dispatch(tr))}`)
+
+		if (!race) await settle(editor)
+	}
+
+	log.push(`results ${String(editor.setFieldCodes(false))}`)
+
+	return `fieldCodes ${log.join("; ")}`
+}
+
+// Formatting reaching a field: a selection from a little before a field to a little after it formatted by a
+// command (Ctrl+B and the like, the font, colours, Clear) or by the format painter from text elsewhere. Its
+// runs take it (§17.16.4.3); while tracking, each records it.
+const FIELD_FORMATS: readonly DocxEditorCommand[] = [
+	{ type: "format.bold" },
+	{ type: "format.italic" },
+	{ type: "format.underline" },
+	{ type: "format.clear" },
+	{ type: "format.allCaps" },
+	{ type: "format.smallCaps" },
+	{ type: "font.size", halfPoints: 28 },
+	{ type: "font.grow" },
+	{ type: "color.text", color: { kind: "rgb", value: "C00000" } },
+	{ type: "color.highlight", name: "yellow" },
+	{ type: "font.family", family: "Courier New" }
+]
+
+function fieldFormat(context: OpContext): string {
+	const session = context.session
+	const fields = fieldsOf(session.state.doc)
+
+	if (fields.length === 0) return "noop"
+
+	const rand = context.rand
+	const { node, pos } = pick(rand, fields)
+	const $pos = session.state.doc.resolve(pos)
+	const from = Math.max($pos.start(), pos - Math.floor(rand() * 4))
+	const to = Math.min($pos.end(), pos + node.nodeSize + Math.floor(rand() * 4))
+
+	if (rand() < 0.2) {
+		const source = inlinePosition(rand, session.state.doc)
+
+		if (source === undefined) return "noop"
+
+		select(session, source, Math.min(session.state.doc.resolve(source).end(), source + 2))
+
+		const copied = context.execute("format.copy", { type: "format.copy" })
+
+		select(session, from, to)
+
+		return `fieldFormat painter@${String(source)} ${copied} -> ${String(from)}-${String(to)} ${context.execute("format.paste", { type: "format.paste" })}`
+	}
+
+	const command = pick(rand, FIELD_FORMATS)
+
+	select(session, from, to)
+
+	return `fieldFormat ${command.type} ${String(from)}-${String(to)} -> ${context.execute(command.type, command)}`
 }
 
 // ---- damage: raw results, characters, bookmarks and references ----
@@ -186,6 +305,8 @@ export const fieldOps: readonly EditOp[] = [
 
 		return `field.update@${String(at)} -> ${context.execute("field.update", { type: "field.update" })}`
 	}),
+	{ name: "fieldCodes", harness: "paged", weight: 2, run: fieldCodes },
+	paged("fieldFormat", 2, fieldFormat),
 	paged("tocInsert", 1, context => {
 		const at = context.session === context.editor?.body.session ? caret(context) : undefined
 

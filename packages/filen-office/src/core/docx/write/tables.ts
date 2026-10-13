@@ -5,6 +5,7 @@ import {
 	cellOverrides,
 	previousGrid,
 	propertySource,
+	rowGrid,
 	rowOverrides,
 	sourceCellProps,
 	sourceChanges,
@@ -19,6 +20,7 @@ import {
 	type TableOverrides,
 	type TrackStamp
 } from "../edit/tables/map"
+import { dataAttr, dataChildren, type ElementData } from "../edit/copies"
 import { Item, Revision, RevisionFlag } from "../model/index"
 import { Ns } from "../model/namespaces"
 import type { TableCellProps, TableProps, TableRowProps } from "../props/index"
@@ -126,6 +128,11 @@ function markup(write: (out: Out) => void): string {
 	write(out)
 
 	return decodeUtf8(out.finish())
+}
+
+// A row's or cell's property element left with no child is left out (both optional: CT_Row, CT_Tc).
+function unlessEmpty(element: string): string {
+	return /^<([^\s/>]+)>\s*<\/\1>$/.test(element) ? "" : element
 }
 
 function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
@@ -353,9 +360,9 @@ function trackChanges(
 
 // What a command recorded must be what the writer knows: anything else refuses the save rather than being
 // left out.
-const TABLE_KEYS = new Set(["from", "align", "width", "borders", "look", "change", "gridChange", "source"])
-const ROW_KEYS = new Set(["from", "header", "gridBefore", "gridAfter", "ins", "del", "change", "source"])
-const CELL_KEYS = new Set(["from", "shading", "vAlign", "ins", "del", "change", "source"])
+const TABLE_KEYS = new Set(["from", "copy", "align", "width", "borders", "look", "change", "gridChange", "source"])
+const ROW_KEYS = new Set(["from", "copy", "header", "gridBefore", "gridAfter", "ins", "del", "change", "source"])
+const CELL_KEYS = new Set(["from", "copy", "shading", "vAlign", "ins", "del", "change", "source"])
 // What a change record keeps of the properties before it.
 const TABLE_PROPS = new Set(["align", "width", "borders", "look"])
 const ROW_PROPS = new Set(["header", "gridBefore", "gridAfter"])
@@ -390,6 +397,12 @@ function checkRecord(
 		throw new DocxWriteError("invalidValue", `A tracked ${what} change without the properties before it`)
 
 	checkKeys(value.change.props, known, `${what} property`)
+}
+
+// The children of the properties of another part's table, row or cell a copy keeps (its overrides' `copy`), as
+// markup of this part by local name.
+function copiedProperties(w: StoryWriting, data: ElementData | undefined): Map<string, string> {
+	return data === undefined ? new Map() : dataChildren(w.part, w.names.w, data)
 }
 
 // Children a copy leaves out, unless a change sets them.
@@ -538,6 +551,13 @@ function tableProperties(
 	return changes
 }
 
+// The style of copied w:tblPr `data`.
+function dataStyle(data: ElementData): string | undefined {
+	const style = data.children.find(child => child.name === "tblStyle" && child.uri === "w")
+
+	return style === undefined ? undefined : dataAttr(style, "val")
+}
+
 // The w:tblW Word gives a table without one.
 function autoWidth(w: StoryWriting): string {
 	return w.names.empty("tblW", [
@@ -584,7 +604,21 @@ export function* writeTable(w: StoryWriting, out: Out, node: Node): Generator<vo
 		const model = propertySource(part, node, Item.Table)
 
 		if (model === NO_SOURCE) {
-			const changes = tableProperties(w, node, -1, new Map(), null, store.table(document, -1), [], grid, true)
+			// A copy of another part's table starts from its properties.
+			const copied = overrides.copy
+			const changes = tableProperties(
+				w,
+				node,
+				-1,
+				copiedProperties(w, copied),
+				copied === undefined ? null : (dataStyle(copied) ?? null),
+				store.table(document, -1),
+				[],
+				grid,
+				copied === undefined
+			)
+
+			if (copied !== undefined && !changes.has("tblW")) changes.set("tblW", autoWidth(w))
 
 			out.text(
 				`<${names.el("tbl")}>${freshContainer(names, "tblPr", changes, TABLE_PROPERTIES)}${gridMarkup(w, grid, overrides.gridChange)}`
@@ -613,7 +647,7 @@ export function* writeTable(w: StoryWriting, out: Out, node: Node): Generator<vo
 			out.text(gridMarkup(w, grid, overrides.gridChange))
 		}
 
-		yield* w.writeChildren(out, node, NO_SOURCE, (row, rowOut) => writeRow(w, rowOut, row))
+		yield* w.writeChildren(out, node, NO_SOURCE, (row, rowOut) => writeRow(w, rowOut, row, gridBefore(node)))
 		out.text(`</${names.el("tbl")}>`)
 
 		return
@@ -656,7 +690,7 @@ export function* writeTable(w: StoryWriting, out: Out, node: Node): Generator<vo
 		if (!gridWritten && tblGrid >= 0) w.copyProperties(out, [tblGrid], TRACKED_TABLE)
 		else out.text(gridMarkup(w, written, overrides.gridChange))
 
-		yield* w.writeChildren(out, node, NO_SOURCE, (child, rowOut) => writeRow(w, rowOut, child))
+		yield* w.writeChildren(out, node, NO_SOURCE, (child, rowOut) => writeRow(w, rowOut, child, gridBefore(node)))
 		out.text(`</${names.el("tbl")}>`)
 
 		return
@@ -682,12 +716,17 @@ export function* writeTable(w: StoryWriting, out: Out, node: Node): Generator<vo
 
 	if (tblGrid < 0 && gridWritten) out.text(gridMarkup(w, written, overrides.gridChange))
 
-	yield* w.writeChildren(out, node, item, (child, rowOut) => writeRow(w, rowOut, child), {
+	yield* w.writeChildren(out, node, item, (child, rowOut) => writeRow(w, rowOut, child, gridBefore(node)), {
 		from,
 		to: document.contentEnd(element),
 		tail: []
 	})
 	closeTag(out, document, element)
+}
+
+// The grid a table's recorded changes were made against: the one before its recorded grid change.
+function gridBefore(table: Node): readonly number[] {
+	return tableOverrides(table).gridChange?.grid ?? (table.attrs["grid"] as readonly number[])
 }
 
 // ---- rows -----------------------------------------------------------------------------------------------
@@ -718,7 +757,7 @@ function rowChanges(w: StoryWriting, overrides: RowOverrides, props: TableRowPro
 	return changes
 }
 
-function* writeRow(w: StoryWriting, out: Out, node: Node): Generator<void, void> {
+function* writeRow(w: StoryWriting, out: Out, node: Node, grid: readonly number[]): Generator<void, void> {
 	refuseBlockMarks(node, marks.row_props)
 
 	const part = w.part
@@ -742,7 +781,8 @@ function* writeRow(w: StoryWriting, out: Out, node: Node): Generator<void, void>
 	checkStamp(overrides.del)
 	checkRecord(overrides, ROW_PROPS, "row")
 
-	const base = resolvedChanges(w, trPr, "trPrChange", "trPr", resolution, TRACKED_ROW)
+	const base =
+		model === NO_SOURCE ? copiedProperties(w, overrides.copy) : resolvedChanges(w, trPr, "trPrChange", "trPr", resolution, TRACKED_ROW)
 	const changes = new Map([...base, ...rowChanges(w, overrides, props)])
 
 	trackChanges(
@@ -765,7 +805,8 @@ function* writeRow(w: StoryWriting, out: Out, node: Node): Generator<void, void>
 	}
 
 	const exceptions = resolvedChanges(w, tblPrEx, "tblPrExChange", "tblPrEx", resolution, [])
-	const cell = (child: Node, cellOut: Out): Generator<void, void> => writeCell(w, cellOut, child)
+	const spans = reshapedSpans(w, node, grid)
+	const cell = (child: Node, cellOut: Out): Generator<void, void> => writeCell(w, cellOut, child, spans?.get(child)?.shift())
 
 	if (owned) {
 		const element = part.node(own)
@@ -779,7 +820,7 @@ function* writeRow(w: StoryWriting, out: Out, node: Node): Generator<void, void>
 			if (property < 0) continue
 
 			if (property === trPr && changes.size > 0)
-				out.text(markup(sub => spliceChildren(sub, part.reader, trPr, changes, ROW_PROPERTIES)))
+				out.text(unlessEmpty(markup(sub => spliceChildren(sub, part.reader, trPr, changes, ROW_PROPERTIES))))
 			else if (property === tblPrEx && exceptions.size > 0)
 				out.text(markup(sub => spliceChildren(sub, part.reader, tblPrEx, exceptions, EXCEPTION_PROPERTIES)))
 			else w.copyWhole(out, property)
@@ -807,7 +848,7 @@ function* writeRow(w: StoryWriting, out: Out, node: Node): Generator<void, void>
 		strip(changes, TRACKED_ROW)
 		out.text(
 			trPr >= 0
-				? markup(sub => spliceChildren(sub, part.reader, trPr, changes, ROW_PROPERTIES))
+				? unlessEmpty(markup(sub => spliceChildren(sub, part.reader, trPr, changes, ROW_PROPERTIES)))
 				: freshContainer(names, "trPr", changes, ROW_PROPERTIES)
 		)
 	} else {
@@ -820,11 +861,36 @@ function* writeRow(w: StoryWriting, out: Out, node: Node): Generator<void, void>
 
 // ---- cells ----------------------------------------------------------------------------------------------
 
-function* writeCell(w: StoryWriting, out: Out, node: Node): Generator<void, void> {
+// For the cells of `row` merged or split since their recorded change: the width of the grid columns each spans
+// in `grid` (the grid before), what rejecting the change gives it (in a queue per node: a row may hold one
+// node twice). Undefined without such a cell.
+function reshapedSpans(w: StoryWriting, row: Node, grid: readonly number[]): Map<Node, number[]> | undefined {
+	let out: Map<Node, number[]> | undefined
+	let column = rowGrid(w.part, w.env.context.store, row).before
+
+	row.forEach(cell => {
+		const span = Math.max(1, cell.attrs["colspan"] as number)
+
+		if (cellOverrides(cell).change?.reshaped === true) {
+			let width = 0
+
+			for (let c = column; c < column + span; c++) width += grid[c] ?? 0
+
+			out ??= new Map()
+			out.set(cell, [...(out.get(cell) ?? []), width])
+		}
+
+		column += span
+	})
+
+	return out
+}
+
+function* writeCell(w: StoryWriting, out: Out, node: Node, spanned: number | undefined): Generator<void, void> {
 	w.cells++
 
 	try {
-		yield* writeCellContent(w, out, node)
+		yield* writeCellContent(w, out, node, spanned)
 	} finally {
 		w.cells--
 	}
@@ -888,7 +954,7 @@ function cellChanges(
 	return changes
 }
 
-function* writeCellContent(w: StoryWriting, out: Out, node: Node): Generator<void, void> {
+function* writeCellContent(w: StoryWriting, out: Out, node: Node, spanned: number | undefined): Generator<void, void> {
 	refuseBlockMarks(node, marks.cell_props)
 
 	const part = w.part
@@ -928,7 +994,10 @@ function* writeCellContent(w: StoryWriting, out: Out, node: Node): Generator<voi
 	)
 		throw new DocxWriteError("unsupported", "A table cell both inserted and deleted as tracked changes")
 
-	const base = resolvedChanges(w, tcPr, "tcPrChange", "tcPr", resolution, ["cellIns", "cellDel"], ["cellMerge"])
+	const base =
+		model === NO_SOURCE
+			? copiedProperties(w, overrides.copy)
+			: resolvedChanges(w, tcPr, "tcPrChange", "tcPr", resolution, ["cellIns", "cellDel"], ["cellMerge"])
 	const changes = new Map([
 		...base,
 		...cellChanges(w, node, overrides, node.attrs["colwidth"] as number | null, props, baseSpan, baseVMerge, modelled)
@@ -947,7 +1016,9 @@ function* writeCellContent(w: StoryWriting, out: Out, node: Node): Generator<voi
 	const change = overrides.change
 
 	if (change !== undefined) {
-		const previous = new Map([...base, ...cellChanges(w, node, change.props, change.colwidth, props, baseSpan, baseVMerge, modelled)])
+		// Merged or split since: the width of the columns it spans, as rejecting it in the editor gives it.
+		const colwidth = change.reshaped === true && spanned !== undefined ? spanned : change.colwidth
+		const previous = new Map([...base, ...cellChanges(w, node, change.props, colwidth, props, baseSpan, baseVMerge, modelled)])
 
 		changes.set(
 			"tcPrChange",
@@ -970,7 +1041,7 @@ function* writeCellContent(w: StoryWriting, out: Out, node: Node): Generator<voi
 		openTag(out, document, element)
 
 		if (tcPr >= 0 && changes.size === 0) w.copyWhole(out, tcPr)
-		else if (tcPr >= 0) out.text(markup(sub => spliceChildren(sub, part.reader, tcPr, changes, CELL_PROPERTIES)))
+		else if (tcPr >= 0) out.text(unlessEmpty(markup(sub => spliceChildren(sub, part.reader, tcPr, changes, CELL_PROPERTIES))))
 		else out.text(freshContainer(names, "tcPr", changes, CELL_PROPERTIES))
 
 		yield* content({ from: tcPr >= 0 ? document.end(tcPr) : document.openEnd(element), to: document.contentEnd(element) })
@@ -988,7 +1059,7 @@ function* writeCellContent(w: StoryWriting, out: Out, node: Node): Generator<voi
 		w.copyProperties(out, [tcPr], TRACKED_CELL)
 	} else if (model !== NO_SOURCE && tcPr >= 0) {
 		strip(changes, TRACKED_CELL)
-		out.text(markup(sub => spliceChildren(sub, part.reader, tcPr, changes, CELL_PROPERTIES)))
+		out.text(unlessEmpty(markup(sub => spliceChildren(sub, part.reader, tcPr, changes, CELL_PROPERTIES))))
 	} else {
 		out.text(freshContainer(names, "tcPr", changes, CELL_PROPERTIES))
 	}

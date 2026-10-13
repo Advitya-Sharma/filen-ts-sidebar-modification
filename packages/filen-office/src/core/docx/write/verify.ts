@@ -217,8 +217,14 @@ function collectFacts(document: XmlDocument, first: number, end: number, into: F
 }
 
 // Nodes looked at between checks of the clock, and start tags searched.
-const NODE_STEP = 4096
+const NODE_STEP = 2048
+// Nodes whose facts are collected between looks at the clock (a node's facts cost more than a look at it).
+const FACT_STEP = 512
+// Positions of a block walked in one go (a longer one is walked child by child).
+const LONG_BLOCK = 16384
 const TAG_STEP = 4096
+// Paragraphs compared between looks at the clock.
+const PARAGRAPH_STEP = 256
 
 // How a check collects facts: the checks' own ids, with caches of the source's facts when they are the
 // registry's.
@@ -245,8 +251,8 @@ async function collectFactsSliced(
 		return
 	}
 
-	for (let from = first; from < end; from += NODE_STEP) {
-		collectFacts(document, from, Math.min(end, from + NODE_STEP), into, sign, scope.hooks)
+	for (let from = first; from < end; from += FACT_STEP) {
+		collectFacts(document, from, Math.min(end, from + FACT_STEP), into, sign, scope.hooks)
 
 		if (clock.due) await clock.pause()
 	}
@@ -627,7 +633,8 @@ function storyRange(name: string, part: StoryPart, story: StoryChange, inPackage
 	const document = part.document
 	const item = story.session.story.story.item
 
-	if (item >= 0) {
+	// A copied note is a story of a part of its own written into its notes part as a new one.
+	if (item >= 0 && story.session.story.part === part) {
 		const container = part.node(item)
 
 		return { from: document.start(container), to: document.end(container) }
@@ -659,6 +666,7 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 	const model = context.model
 	const changed = [...changes.replace, ...changes.add]
 	const byKey = new Map(changed.map(change => [partKey(change.name), change]))
+	const removedParts = new Set((changes.remove ?? []).map(partKey))
 	const typesChange = byKey.get(partKey("[Content_Types].xml"))
 	const originalTypes = await original.opc.contentTypes()
 	let types: ContentTypes = originalTypes
@@ -670,6 +678,8 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 		types = parseContentTypes(typesBytes)
 
 		for (const entry of original.opc.zip.entries) {
+			if (removedParts.has(partKey(entry.name))) continue
+
 			const was = originalTypes.typeOf(entry.name)
 
 			if (was !== undefined && types.typeOf(entry.name) !== was) fail("contentType", `${entry.name} is no longer typed ${was}`)
@@ -693,7 +703,37 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 
 		return rels === undefined ? original.relationships(part) : parseRelationships(await joinBytes(rels.bytes), part)
 	}
-	const exists = (part: string): boolean => original.has(part) || byKey.has(partKey(part))
+	const exists = (part: string): boolean => (original.has(part) && !removedParts.has(partKey(part))) || byKey.has(partKey(part))
+
+	// A removed part is one of the package's that nothing relates to any more.
+	if (removedParts.size > 0) {
+		for (const key of removedParts) {
+			const owner = /^(.*?)_rels\/([^/]*)\.rels$/.exec(key)
+
+			if (!original.has(key) || byKey.has(key)) fail("invalidPackage", `${key} is removed but not an unwritten part of the package`)
+			if (key === partKey("[Content_Types].xml")) fail("invalidPackage", "The content types are removed")
+			// Relationships go only with their part.
+			if (owner !== null && !removedParts.has(partKey(`${owner[1] ?? ""}${owner[2] ?? ""}`)))
+				fail("relationship", `${key}: the relationships of a part kept are removed`)
+			if (byKey.has(partKey(relationshipsPartName(key)))) fail("relationship", `${key}: a removed part's relationships are written`)
+		}
+
+		for (const entry of original.opc.zip.entries) {
+			const match = /^(.*?)_rels\/([^/]*)\.rels$/.exec(entry.name)
+			const key = partKey(entry.name)
+
+			if (match === null || removedParts.has(key) || byKey.has(key)) continue
+
+			const source = `${match[1] ?? ""}${match[2] ?? ""}`
+
+			if (removedParts.has(partKey(source))) fail("relationship", `${entry.name}: its part is removed`)
+
+			for (const relationship of (await original.relationships(source)).all) {
+				if (!relationship.external && relationship.partName !== undefined && !exists(relationship.partName))
+					fail("relationship", `${entry.name}: ${relationship.id} points at a removed part`)
+			}
+		}
+	}
 	const storyParts = new Map<string, StoryPart>(model.parts.map(part => [partKey(part.name), part]))
 	const storiesByPart = new Map<string, StoryChange[]>()
 	const cutsByPart = new Map<string, { from: number; to: number }[]>()
@@ -826,6 +866,8 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 
 			for (const cut of cuts) await replacedFacts(part.document, cut.from, cut.to, [], after, scope)
 
+			if (clock?.due === true) await clock.pause()
+
 			await checkRelationships(
 				name,
 				await danglingRelationships(relationships, document, clock),
@@ -858,6 +900,8 @@ export async function verifyDocxParts(input: VerifyPartsInput, slicing?: Slicing
 				copied,
 				clock
 			)
+			if (clock?.due === true) await clock.pause()
+
 			await checkPart(checks, checkInput, { name, part, document, skeleton: true })
 		} else {
 			// Joined only here: a part that is not a story part, one with namespaces declared below its root, a
@@ -1129,6 +1173,29 @@ async function checkAssembly(
 // Paragraph items starting in source bytes [from, to), outside other paragraphs (text boxes are stories of
 // their own).
 function sourceParagraphs(part: StoryPart, from: number, to: number, out: number[]): void {
+	paragraphsFrom(part, firstItemAt(part, from), to, out, part.count)
+}
+
+// sourceParagraphs in slices of `clock` (a copy can hold most of a long story).
+async function sourceParagraphsSliced(
+	part: StoryPart,
+	from: number,
+	to: number,
+	out: number[],
+	clock: SliceClock | undefined
+): Promise<void> {
+	for (let item = firstItemAt(part, from); item >= 0;) {
+		item = paragraphsFrom(part, item, to, out, ITEM_STEP)
+
+		if (clock?.due === true) await clock.pause()
+	}
+}
+
+// Source items looked at between looks at the clock.
+const ITEM_STEP = 16384
+
+// The first item starting at or after byte `from`.
+function firstItemAt(part: StoryPart, from: number): number {
 	let low = 0
 	let high = part.count
 
@@ -1139,7 +1206,16 @@ function sourceParagraphs(part: StoryPart, from: number, to: number, out: number
 		else high = middle
 	}
 
-	for (let item = low; item < part.count && part.start(item) < to;) {
+	return low
+}
+
+// Pushes the paragraphs from item `first` on that start before byte `to`, looking at up to `limit` items: the
+// item to go on from, or -1 when done.
+function paragraphsFrom(part: StoryPart, first: number, to: number, out: number[], limit: number): number {
+	const stop = Math.min(part.count, first + limit)
+	let item = first
+
+	while (item < stop && part.start(item) < to) {
 		if (part.kinds[item] === Item.Paragraph) {
 			out.push(item)
 			item = part.end(item)
@@ -1147,6 +1223,8 @@ function sourceParagraphs(part: StoryPart, from: number, to: number, out: number
 			item++
 		}
 	}
+
+	return item < part.count && item >= stop && part.start(item) < to ? item : -1
 }
 
 // A paragraph the writer copied must be its source as the editor first built it (markers before it are
@@ -1178,15 +1256,20 @@ async function originals(story: StoryDoc, clock: SliceClock | undefined): Promis
 
 			return !node.isInline
 		}
-		const doc = story.doc
+		// In document order; a block too long for one slice (a long table) by its children.
+		const walk = async (parent: Node): Promise<void> => {
+			for (let index = 0; index < parent.childCount; index++) {
+				const child = parent.child(index)
 
-		for (let index = 0; index < doc.childCount; index++) {
-			const child = doc.child(index)
+				if (child.nodeSize <= LONG_BLOCK) {
+					if (visit(child)) child.descendants(visit)
+				} else if (visit(child)) await walk(child)
 
-			if (visit(child)) child.descendants(visit)
-
-			if (clock?.due === true) await clock.pause()
+				if (clock?.due === true) await clock.pause()
+			}
 		}
+
+		await walk(story.doc)
 
 		map = found
 		originalsCache.set(story, map)
@@ -1251,17 +1334,22 @@ async function checkParagraphs(
 
 			return !node.isInline
 		}
-		const doc = story.doc
+		// In document order (as nodesBetween visits); a block too long for one slice (a long table) by its children.
+		const walk = async (parent: Node, start: number): Promise<void> => {
+			for (let index = 0, pos = start; index < parent.childCount; index++) {
+				const child = parent.child(index)
 
-		for (let index = 0, pos = 0; index < doc.childCount; index++) {
-			const child = doc.child(index)
+				if (child.nodeSize <= LONG_BLOCK) {
+					if (visit(child, pos)) child.nodesBetween(0, child.content.size, visit, pos + 1)
+				} else if (visit(child, pos)) await walk(child, pos + 1)
 
-			if (visit(child, pos)) child.nodesBetween(0, child.content.size, visit, pos + 1)
+				pos += child.nodeSize
 
-			pos += child.nodeSize
-
-			if (clock?.due === true) await clock.pause()
+				if (clock?.due === true) await clock.pause()
+			}
 		}
+
+		await walk(story.doc, 0)
 
 		const actual: { readonly element: number; readonly item: number }[] = []
 		const trusted = story.output.trusted
@@ -1284,7 +1372,7 @@ async function checkParagraphs(
 			if (placeholder) {
 				const items: number[] = []
 
-				sourceParagraphs(part, trusted[copy * 4 + 2] ?? 0, trusted[copy * 4 + 3] ?? 0, items)
+				await sourceParagraphsSliced(part, trusted[copy * 4 + 2] ?? 0, trusted[copy * 4 + 3] ?? 0, items, clock)
 
 				for (const item of items) actual.push({ element: -1, item })
 
@@ -1300,13 +1388,15 @@ async function checkParagraphs(
 			fail("content", `${name}: a story was written with ${actual.length} paragraphs, the editor has ${expected.length}`)
 		}
 
+		if (clock?.due === true) await clock.pause()
+
 		const sources = await originals(story.session.story, clock)
 
 		for (let index = 0; index < actual.length; index++) {
 			const paragraph = actual[index]
 			const editor = expected[index]
 
-			if (clock !== undefined && (index & (NODE_STEP - 1)) === 0 && clock.due) await clock.pause()
+			if (clock !== undefined && (index & (PARAGRAPH_STEP - 1)) === 0 && clock.due) await clock.pause()
 			if (paragraph === undefined || editor === undefined) continue
 
 			if (paragraph.item >= 0) {

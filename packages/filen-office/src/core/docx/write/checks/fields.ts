@@ -1,4 +1,5 @@
 import type { Node } from "prosemirror-model"
+import { runSliced, type SliceClock } from "../../../slicing"
 import { NodeKind, type XmlDocument } from "../../../xml/index"
 import { NO_SOURCE, docxSchema } from "../../edit/schema"
 import { MAX_BOOKMARK_NAME } from "../../fields/bookmarks"
@@ -36,13 +37,19 @@ interface Markup {
 // The field characters of a source part, by item (read once per part).
 const SOURCE_CHARS = new WeakMap<StoryPart, Int32Array>()
 
-function sourceChars(part: StoryPart): Int32Array {
+// Items looked at between yields.
+const ITEM_STEP = 65536
+
+function* sourceChars(part: StoryPart): Generator<void, Int32Array> {
 	let found = SOURCE_CHARS.get(part)
 
 	if (found === undefined) {
 		const out: number[] = []
 
-		for (let item = 0; item < part.count; item++) if (part.kinds[item] === Item.FieldChar) out.push(item)
+		for (let item = 0; item < part.count; item++) {
+			if (part.kinds[item] === Item.FieldChar) out.push(item)
+			if (item % ITEM_STEP === ITEM_STEP - 1) yield
+		}
 
 		found = Int32Array.from(out)
 		SOURCE_CHARS.set(part, found)
@@ -61,6 +68,20 @@ interface Copies {
 // What the markup of `document` holds. A skeleton's placeholders count the field characters of the source
 // they copy (a field spanning paragraphs may be partly rewritten), nothing else of theirs.
 function readMarkup(document: XmlDocument, copies?: Copies): Markup {
+	const steps = readMarkupSteps(document, copies)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+	}
+}
+
+// Nodes read between looks at the clock.
+const MARKUP_STEP = 1024
+
+// readMarkup a step at a time (a whole source part, read once, is long).
+function* readMarkupSteps(document: XmlDocument, copies?: Copies): Generator<void, Markup> {
 	const reader = partReader(document)
 	// Per field open, its begin's paragraph while its code is still being read (no separate yet), else -1.
 	const open: number[] = []
@@ -95,10 +116,12 @@ function readMarkup(document: XmlDocument, copies?: Copies): Markup {
 			unmatched++
 		}
 	}
-	const chars = copies === undefined ? undefined : sourceChars(copies.part)
+	const chars = copies === undefined ? undefined : yield* sourceChars(copies.part)
 	let copy = 0
 
 	for (let node = 0; node < document.count; node++) {
+		if (node % MARKUP_STEP === MARKUP_STEP - 1) yield
+
 		if (document.kinds[node] !== NodeKind.Element) continue
 
 		if (copies !== undefined && chars !== undefined && document.name(node) === "_") {
@@ -171,6 +194,11 @@ function readMarkup(document: XmlDocument, copies?: Copies): Markup {
 // Every bookmark a source part's markup has (mc:Fallback branches included, which its bookmark table leaves
 // out), read only when a written bookmark is in none of the tables.
 const SOURCE_MARKUP = new WeakMap<XmlDocument, Markup>()
+
+// sourceMarkup read in slices of `clock` (gate 2 reads it before it is needed).
+async function sourceMarkupSliced(document: XmlDocument, clock: SliceClock | undefined): Promise<void> {
+	if (!SOURCE_MARKUP.has(document)) SOURCE_MARKUP.set(document, await runSliced(readMarkupSteps(document), clock))
+}
 
 function sourceMarkup(document: XmlDocument): Markup {
 	let markup = SOURCE_MARKUP.get(document)
@@ -369,7 +397,7 @@ function copiedDirty(part: StoryPart, begins: readonly number[], trusted: readon
 }
 
 const FIELD_CHECK: DocxCheck = {
-	part(input: CheckInput, part: CheckedPart) {
+	async part(input: CheckInput, part: CheckedPart) {
 		if (part.part === undefined) return
 
 		let written = STATES.get(input)
@@ -385,7 +413,10 @@ const FIELD_CHECK: DocxCheck = {
 			for (const story of input.changes.stories)
 				if (story.part === part.part) for (const value of story.output.trusted) trusted.push(value)
 
-		const markup = readMarkup(part.document, part.skeleton ? { part: part.part, trusted } : undefined)
+		const markup = await runSliced(
+			readMarkupSteps(part.document, part.skeleton ? { part: part.part, trusted } : undefined),
+			input.clock
+		)
 
 		if (markup.unmatched > 0 && markup.unmatched > (input.original.has(part.name) ? sourceUnmatched(part.part) : 0))
 			fail("content", `${part.name}: field characters without their partners`)
@@ -396,13 +427,23 @@ const FIELD_CHECK: DocxCheck = {
 
 		written.push({ part: part.part, markup, skeleton: part.skeleton })
 	},
-	done(input: CheckInput) {
+	async done(input: CheckInput) {
 		const written = STATES.get(input)
 
 		if (written === undefined || written.length === 0) return
 
 		const source = sourceBookmarks(input)
 		const seen = new Map<string, string>()
+
+		// The source markup of a part whose written bookmarks the tables do not all know, read in slices first.
+		for (const { part, markup } of written)
+			if (
+				part !== undefined &&
+				input.original.has(part.name) &&
+				(markup.starts.some(([name, id]) => !source.pairs.has(`${name}\u0000${id}`)) ||
+					markup.ends.some(id => !source.ends.has(id) && input.ids(`bookmarkStart:${id}`) === 0))
+			)
+				await sourceMarkupSliced(part.document, input.clock)
 
 		for (const { part, markup } of written) {
 			const sourcePart = part !== undefined && input.original.has(part.name) ? part : undefined

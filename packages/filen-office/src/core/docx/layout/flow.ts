@@ -32,7 +32,7 @@ import { ObjectKind, type FloatSpec, type ObjectSizer, type ObjectTable } from "
 import { PageGraphic, Layer, OBJECT_FLOATS, OBJECT_INTS, OutputMark, PageOutput, Region, SourceFlag } from "./output"
 import { REF_SPAN, refItem, refPart, type LayoutEdits } from "./edits"
 import { borderWidth, revisionAuthors, type DecorationTable, type RunStyles } from "./styles"
-import { TableLayout } from "./table"
+import { TableLayout, type TableSnapshot } from "./table"
 import { EPSILON, twips } from "./units"
 
 export const FlowStatus = {
@@ -406,6 +406,8 @@ export interface FlowSnapshot {
 	readonly chained: boolean
 	// BlockFlow.moves, each block relative to `index`.
 	readonly moves: readonly number[]
+	// The table block `index` is under way (between two of its rows).
+	readonly table: TableSnapshot | undefined
 }
 
 // A run of consecutive paragraphs with identical borders, drawn as one box.
@@ -643,34 +645,57 @@ export class BlockFlow {
 		this.box.open = false
 	}
 
+	// The table under way: whether item `item` of it is laid out from here on (see TableLayout.ahead); true
+	// outside a table.
+	tableAhead(item: number): boolean {
+		return this.table === undefined || this.table.ahead(item)
+	}
+
+	// The row of the table under way holding item `item` (see TableLayout.rowOf), the row it continues at and
+	// its header rows; undefined outside a table.
+	tableRow(item: number): { readonly row: number; readonly current: number; readonly headers: number } | undefined {
+		const table = this.table
+
+		return table === undefined ? undefined : { row: table.rowOf(item), current: table.currentRow, headers: table.headerCount }
+	}
+
 	get done(): boolean {
 		return this.index >= this.count && !this.inParagraph && this.table === undefined
 	}
 
-	// The flow's state, to continue from it later; undefined inside a table (layout restarts before it).
-	snapshot(): FlowSnapshot | undefined {
-		if (this.table !== undefined || this.part === undefined) return undefined
+	// The flow's state, to continue from it later; undefined inside a table (layout restarts before it) unless
+	// `tables` and it stands between two rows (see TableLayout.snapshot).
+	snapshot(tables = false): FlowSnapshot | undefined {
+		if (this.part === undefined) return undefined
+
+		const table = this.table === undefined ? undefined : tables ? this.table.snapshot() : undefined
+
+		if (this.table !== undefined && table === undefined) return undefined
 
 		const cursor = this.cursor
 		const first = this.blocks[this.index] ?? -1
+		// Between paragraphs the cursor and the values it was built with are what the last paragraph left (restore
+		// reads them only inside one): the same whatever came before.
+		const inside = this.inParagraph
 
 		return {
 			index: this.index,
-			inParagraph: this.inParagraph,
-			item: cursor.item,
-			offset: cursor.offset,
-			rows: cursor.rows,
-			pendingMark: cursor.pendingMark,
+			inParagraph: inside,
+			item: inside ? cursor.item : 0,
+			offset: inside ? cursor.offset : -1,
+			rows: inside ? cursor.rows : 0,
+			pendingMark: inside && cursor.pendingMark,
 			after: this.after,
 			contextual: this.contextual,
 			styleId: this.styleId,
 			hasPrevious: this.hasPrevious,
 			breakBeforeDone: this.breakBeforeDone,
 			noRoom: this.noRoom,
-			values: this.builtValues,
+			values: inside ? this.builtValues : undefined,
 			marker: this.engine.markers.get(this.engine.memoKey(this.parts[this.index] ?? 0, first)),
 			chained: this.chain !== undefined,
-			moves: this.moves.length === 0 ? NO_MOVES : this.moves.map((value, k) => (k % 2 === 0 ? value : value - this.index))
+			moves: this.moves.length === 0 ? NO_MOVES : this.moves.map((value, k) => (k % 2 === 0 ? value : value - this.index)),
+			table
 		}
 	}
 
@@ -692,6 +717,14 @@ export class BlockFlow {
 
 		if (snapshot.chained) this.chain = STALE_CHAIN
 
+		if (snapshot.table !== undefined) {
+			const from = this.partAt(this.index)
+
+			if (from !== undefined) this.table = new TableLayout(this, from, this.blocks[this.index] ?? -1, area, snapshot.table)
+
+			return
+		}
+
 		if (!snapshot.inParagraph || part === undefined) return
 
 		const first = this.blocks[this.index] ?? -1
@@ -699,7 +732,15 @@ export class BlockFlow {
 		if (snapshot.marker !== undefined) engine.markers.set(engine.memoKey(this.parts[this.index] ?? 0, first), snapshot.marker)
 
 		const { items, parts, formats } = this.group()
-		const values = snapshot.values ?? area.values
+		// Built on the page it began on, with the page counts layout has now: a run restarted because they changed
+		// (or an edit since) shows the new counts, as a run from the start would.
+		const began = snapshot.values
+		const values =
+			began === undefined
+				? area.values
+				: began.numPages === area.values.numPages && began.sectionPages === area.values.sectionPages
+					? began
+					: { ...began, numPages: area.values.numPages, sectionPages: area.values.sectionPages }
 
 		engine.content.build(this.story, parts, items, formats, area.width, values, this.built)
 		this.builtValues = values

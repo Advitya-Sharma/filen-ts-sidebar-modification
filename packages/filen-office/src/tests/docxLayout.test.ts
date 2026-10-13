@@ -515,6 +515,25 @@ describe("sections", () => {
 		expect((boxes?.bottom ?? 0) - (boxes?.top ?? 0)).toBeGreaterThan((lists?.bottom ?? 0) - (lists?.top ?? 0) + 10)
 	})
 
+	it("counts pages in a paragraph a page break before moved to the next page once the count is known", async () => {
+		const field =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		// Laid out first with the estimate (no rendered page breaks: one page); counted again from the page the
+		// paragraph opens, where it waited built since the page before.
+		const result = await layout({
+			body:
+				lines(70) +
+				`<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t xml:space="preserve">Count </w:t></w:r>${field}</w:p>` +
+				lines(70)
+		})
+		const counts: string[] = []
+
+		for (let page = 0; page < result.pages.length; page++)
+			for (const line of body(result, page)) if (line.text.startsWith("Count")) counts.push(line.text.trim())
+
+		expect(counts).toEqual([`Count ${result.pages.length}`])
+	})
+
 	it("numbers pages in body fields where the text is, also in a paragraph split across pages", async () => {
 		const field = (instr: string): string =>
 			`<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`
@@ -883,6 +902,46 @@ describe("tables", () => {
 })
 
 describe("notes", () => {
+	it("numbers a footnote pushed whole onto a later page with that page's number", async () => {
+		const run = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`
+		const page =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		// A note longer than pages: the notes referenced on the pages it fills wait for its end.
+		const result = await layout({
+			body:
+				`<w:p>${run("long ")}<w:r><w:footnoteReference w:id="1"/></w:r></w:p>` +
+				Array.from(
+					{ length: 30 },
+					(_, k) =>
+						`<w:p><w:r><w:footnoteReference w:id="${String(k + 2)}"/></w:r>${run(` paragraph ${String(k)} ${words(25)}`)}</w:p>`
+				).join(""),
+			footnotes:
+				'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
+				`<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>${run(` ${words(4000)}`)}</w:p></w:footnote>` +
+				Array.from(
+					{ length: 30 },
+					(_, k) =>
+						`<w:footnote w:id="${String(k + 2)}"><w:p><w:r><w:footnoteRef/></w:r>${run(` note ${String(k)} on `)}${page}</w:p></w:footnote>`
+				).join(""),
+			settings: '<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>'
+		})
+		const shown: string[] = []
+		const expected: string[] = []
+
+		for (let index = 0; index < result.pages.length; index++)
+			for (const line of pageLines(result, index)) {
+				const match = / note (\d+) on (\d+)/.exec(line.text)
+
+				if (match === null) continue
+
+				shown.push(`${match[1] ?? ""}:${match[2] ?? ""}`)
+				expected.push(`${match[1] ?? ""}:${String(index + 1)}`)
+			}
+
+		expect(shown.length).toBe(30)
+		expect(shown).toEqual(expected)
+	})
+
 	const footnotes =
 		'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
 		'<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +

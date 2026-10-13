@@ -9,10 +9,10 @@ import { NO_MARKERS, NO_SOURCE, docxSchema } from "../edit/schema"
 import { NO_HEADERS, inheritHeaders } from "../model/document"
 import { Ns } from "../model/namespaces"
 import { Item, RevisionFlag, partReader, type HeaderFooterSet, type Section, type Story, type StoryPart } from "../model/index"
-import type { NotePositionProps, PageMargins, SectionProps } from "../props/index"
+import type { ColumnsProps, NotePositionProps, PageMargins, SectionProps } from "../props/index"
 import type { DocxEditorSession } from "../edit/session"
 import type { PagedEditor } from "../paged/editor"
-import { resolveChanges, storyReviewIndex } from "../review/accept"
+import { joinWithNext, resolveChanges, sourceSectionLinks, storyReviewIndex } from "../review/accept"
 import {
 	paragraphChange,
 	revisionStamp,
@@ -22,8 +22,11 @@ import {
 	type RevisionStamp
 } from "../review/track"
 import { resolveSection } from "../styles/index"
+import { wantReviewIndex } from "../review/index"
+import { documentNotePosition } from "../layout/notes"
 import { Names, Out, freshContainer, spliceChildren } from "../write/markup"
 import { R_NAMESPACE, W_NAMESPACE, sectionWritten } from "../write/source"
+import { sectionFault } from "../write/checks/sections"
 
 // Section properties as edited. A section is ended by a paragraph carrying a section break (its `sectPr`
 // attribute: the source paragraph item whose w:sectPr it writes, or a key below NO_SOURCE for a break the
@@ -59,7 +62,13 @@ export interface SectionEdit {
 	readonly type?: string | null
 	readonly pageSize?: { readonly width: number; readonly height: number; readonly landscape: boolean }
 	readonly pageMargins?: Required<PageMargins>
-	readonly columns?: { readonly count: number; readonly space: number; readonly separator: boolean }
+	// `widths`: unequal columns (w:equalWidth off), each as wide as it says and spaced from the next.
+	readonly columns?: {
+		readonly count: number
+		readonly space: number
+		readonly separator: boolean
+		readonly widths?: readonly { readonly width: number; readonly space: number }[]
+	}
 	// `start` null: numbering continues.
 	readonly pageNumbering?: { readonly format: string | null; readonly start: number | null }
 	// null: none. `start` is the first number shown (written as Word writes it: one less).
@@ -78,12 +87,43 @@ export interface SectionEdit {
 	readonly change?: SectionChangeRecord | null
 	// The source's own w:sectPrChange was rejected: the properties it recorded stand (references stay).
 	readonly rejected?: boolean
+	// Properties tracking changed on top of the source's own w:sectPrChange (one change with it, as Word keeps
+	// the earliest), with what they were before where that was not the source's: written into its record where
+	// it records them not (so a reject, ours or Word's, takes them back).
+	readonly folded?: FoldedChange
+}
+
+// The section properties a change records, by SectionEdit field, with their element.
+export type FoldedField =
+	"type" | "pageSize" | "pageMargins" | "columns" | "pageNumbering" | "lineNumbering" | "titlePage" | "footnotes" | "endnotes"
+
+const FIELD_ELEMENTS: Readonly<Record<FoldedField, string>> = {
+	type: "type",
+	pageSize: "pgSz",
+	pageMargins: "pgMar",
+	columns: "cols",
+	pageNumbering: "pgNumType",
+	lineNumbering: "lnNumType",
+	titlePage: "titlePg",
+	footnotes: "footnotePr",
+	endnotes: "endnotePr"
+}
+
+const FOLDED_FIELDS = Object.keys(FIELD_ELEMENTS) as FoldedField[]
+
+export interface FoldedChange {
+	readonly fields: readonly FoldedField[]
+	// Values before (absent: the source's own).
+	readonly before: Partial<SectionEdit>
 }
 
 // The doc's sectionChanges attribute.
 export interface DocSectionChanges {
 	readonly final?: SectionEdit
 	readonly evenAndOddHeaders?: boolean
+	// Where notes go, document-wide (w:pos of w:footnotePr / w:endnotePr in settings: Word ignores a section's).
+	readonly footnotePosition?: string
+	readonly endnotePosition?: string
 }
 
 const nodes = docxSchema.nodes
@@ -362,12 +402,21 @@ export interface SectionMarkupInput {
 
 // The children a section edit replaces, removes ("") or adds, by local name.
 // `previous`: as a w:sectPrChange records the properties before (no references, no change of its own).
-function changedChildren(input: SectionMarkupInput, edit: SectionEdit, previous: boolean): Map<string, string> {
+// `after`, with `previous`: the properties the section has after the change.
+function changedChildren(
+	input: SectionMarkupInput,
+	edit: SectionEdit,
+	previous: boolean,
+	after: ReadonlySet<string> = NO_LOCALS
+): Map<string, string> {
 	const { names, part } = input
 	const changes = new Map<string, string>()
 	const node = sectionNode(part, edit.base)
 	const source = node < 0 ? undefined : input.props(node)
 
+	// The properties a rejected change recorded replace those it holds, the others stay: Word records only what
+	// changed (a margin change records w:pgMar alone). What stands for the absence of an element (DEFAULTS) takes it
+	// out.
 	if (edit.rejected === true && node >= 0) {
 		const document = part.document
 		const recorded = children(part, node, "sectPrChange").flatMap(change => children(part, change, "sectPr"))[0]
@@ -375,11 +424,15 @@ function changedChildren(input: SectionMarkupInput, edit: SectionEdit, previous:
 		for (const local of SECTION_PROPERTIES) {
 			if (local === "headerReference" || local === "footerReference" || local === "sectPrChange" || recorded === undefined) continue
 
+			const found = children(part, recorded, local)
+
+			if (found.length === 0) continue
+
 			changes.set(
 				local,
-				children(part, recorded, local)
-					.map(child => decodeUtf8(document.bytes, document.start(child), document.end(child)))
-					.join("")
+				found.every(child => absent(part, child))
+					? ""
+					: found.map(child => decodeUtf8(document.bytes, document.start(child), document.end(child))).join("")
 			)
 		}
 	}
@@ -399,8 +452,12 @@ function changedChildren(input: SectionMarkupInput, edit: SectionEdit, previous:
 	if (edit.pageSize !== undefined) {
 		const { width, height, landscape } = edit.pageSize
 		const size = source?.pageSize
-		// Word's paper code stays with the size it names.
-		const code = size?.code !== undefined && size.width === width && size.height === height ? String(size.code) : undefined
+		// Word's paper code stays with the paper it names, turned or not.
+		const code =
+			size?.code !== undefined &&
+			((size.width === width && size.height === height) || (size.width === height && size.height === width))
+				? String(size.code)
+				: undefined
 
 		changes.set(
 			"pgSz",
@@ -456,15 +513,26 @@ function changedChildren(input: SectionMarkupInput, edit: SectionEdit, previous:
 	}
 
 	if (edit.columns !== undefined) {
-		const { count, space, separator } = edit.columns
+		const { count, space, separator, widths } = edit.columns
+		const tag = names.empty("cols", [
+			["num", count > 1 ? String(count) : undefined],
+			["space", String(space)],
+			["equalWidth", widths === undefined ? undefined : "0"],
+			["sep", separator && count > 1 ? "1" : undefined]
+		])
 
 		changes.set(
 			"cols",
-			names.empty("cols", [
-				["num", count > 1 ? String(count) : undefined],
-				["space", String(space)],
-				["sep", separator && count > 1 ? "1" : undefined]
-			])
+			widths === undefined
+				? tag
+				: `${tag.slice(0, -2)}>${widths
+						.map((column, k) =>
+							names.empty("col", [
+								["w", String(column.width)],
+								["space", k < widths.length - 1 ? String(column.space) : undefined]
+							])
+						)
+						.join("")}</${names.el("cols")}>`
 		)
 	}
 
@@ -472,6 +540,10 @@ function changedChildren(input: SectionMarkupInput, edit: SectionEdit, previous:
 
 	if (previous) {
 		changes.set("sectPrChange", "")
+
+		// What the section lacked before and has after stands as its default, so that a reader taking the recorded
+		// properties as those the change replaced (as Word records them) takes back exactly these.
+		for (const [local, made] of DEFAULTS) if (after.has(local) && !holds(part, node, changes, local)) changes.set(local, made(names))
 	} else if (edit.change !== undefined) {
 		const change = edit.change
 
@@ -479,7 +551,8 @@ function changedChildren(input: SectionMarkupInput, edit: SectionEdit, previous:
 			changes.set("sectPrChange", "")
 		} else {
 			// The properties before, without references (ECMA-376 17.13.5.32).
-			const before = sectionMarkupOf(input, change.before ?? { section: edit.section, base: edit.base }, true)
+			const now = new Set(DEFAULTS.map(([local]) => local).filter(local => holds(part, node, changes, local)))
+			const before = sectionMarkupOf(input, change.before ?? { section: edit.section, base: edit.base }, true, now)
 			const tag = names.empty("sectPrChange", [
 				["id", String(input.revisionId())],
 				["author", change.author],
@@ -488,9 +561,142 @@ function changedChildren(input: SectionMarkupInput, edit: SectionEdit, previous:
 
 			changes.set("sectPrChange", `${tag.slice(0, -2)}>${before}</${names.el("sectPrChange")}>`)
 		}
+	} else if (edit.folded !== undefined && node >= 0) {
+		const record = foldedRecord(input, edit, node)
+
+		if (record !== undefined) changes.set("sectPrChange", record)
 	}
 
 	return changes
+}
+
+// The source's own w:sectPrChange of section node `node` (its id, author and date kept) recording too what
+// tracking changed since (`edit.folded`) where it records that not: each property as it was before, its
+// default where the section had none.
+function foldedRecord(input: SectionMarkupInput, edit: SectionEdit, node: number): string | undefined {
+	const { part } = input
+	const document = part.document
+	const change = children(part, node, "sectPrChange")[0]
+	const recorded = change === undefined ? undefined : children(part, change, "sectPr")[0]
+	const fold = edit.folded
+
+	if (change === undefined || recorded === undefined || fold === undefined) return undefined
+
+	const has = recordedElements(part, node)
+	const added = new Map<string, string>()
+
+	for (const field of fold.fields) {
+		const local = FIELD_ELEMENTS[field]
+
+		if (has.includes(local)) continue
+
+		// The property as it was: the value before, else the source's own, else its default (a previous record
+		// adds the default of what the section has after and lacked).
+		const before: SectionEdit = {
+			section: edit.section,
+			base: edit.base,
+			...(fold.before[field] === undefined ? {} : { [field]: fold.before[field] })
+		}
+		const made = changedChildren(input, before, true, new Set([local])).get(local)
+		const own = children(part, node, local)
+			.map(child => decodeUtf8(document.bytes, document.start(child), document.end(child)))
+			.join("")
+
+		// (A value before that reads as none is its default, added for the property it has after.)
+		added.set(local, made ?? own)
+	}
+
+	if (added.size === 0) return undefined
+
+	return markup(out => {
+		out.bytes(document.bytes, document.start(change), document.start(recorded))
+		spliceChildren(out, part.reader, recorded, added, SECTION_PROPERTIES)
+		out.bytes(document.bytes, document.end(recorded), document.end(change))
+	})
+}
+
+// The properties the source's own w:sectPrChange of section node `node` records (local names).
+function recordedElements(part: StoryPart, node: number): string[] {
+	const recorded = children(part, node, "sectPrChange").flatMap(change => children(part, change, "sectPr"))[0]
+	const document = part.document
+	const out: string[] = []
+
+	if (recorded === undefined) return out
+
+	for (let child = document.firstChildElement(recorded); child >= 0; child = document.nextSiblingElement(child))
+		if (part.reader.group(child) === Ns.W) out.push(document.localName(child))
+
+	return out
+}
+
+// The section properties a command edits, as their absence reads (ECMA-376 17.6; a page as layout takes it, no
+// line numbers: Word shows none for w:countBy 0, LibreOffice bug 131594), for the properties a recorded change
+// says a section had before.
+const DEFAULTS: readonly (readonly [string, (names: Names) => string])[] = [
+	["footnotePr", names => names.empty("footnotePr")],
+	["endnotePr", names => names.empty("endnotePr")],
+	["type", names => names.val("type", "nextPage")],
+	[
+		"pgSz",
+		names =>
+			names.empty("pgSz", [
+				["w", "12240"],
+				["h", "15840"]
+			])
+	],
+	[
+		"pgMar",
+		names =>
+			names.empty("pgMar", [
+				["top", "1440"],
+				["right", "1440"],
+				["bottom", "1440"],
+				["left", "1440"],
+				["header", "720"],
+				["footer", "720"],
+				["gutter", "0"]
+			])
+	],
+	["lnNumType", names => names.empty("lnNumType", [["countBy", "0"]])],
+	["pgNumType", names => names.empty("pgNumType")],
+	["cols", names => names.empty("cols", [["space", "720"]])],
+	["titlePg", names => names.empty("titlePg", [["val", "0"]])]
+]
+
+const NO_LOCALS: ReadonlySet<string> = new Set()
+
+// Whether the section property `local` is written: changed by `changes`, else as source node `node` has it.
+function holds(part: StoryPart, node: number, changes: ReadonlyMap<string, string>, local: string): boolean {
+	const changed = changes.get(local)
+
+	return changed !== undefined ? changed !== "" : node >= 0 && children(part, node, local).length > 0
+}
+
+// Whether a recorded property stands for its absence (DEFAULTS): no line numbers, no title page, a section
+// starting on a new page in one column, no note or page number properties.
+function absent(part: StoryPart, node: number): boolean {
+	const reader = part.reader
+	const document = part.document
+
+	switch (document.localName(node)) {
+		case "lnNumType":
+			return reader.attr(node, Ns.W, "countBy") === "0"
+		case "titlePg":
+			return /^(0|false|off)$/.test(reader.attr(node, Ns.W, "val") ?? "")
+		case "type":
+			return reader.attr(node, Ns.W, "val") === "nextPage"
+		case "cols":
+			return (
+				document.firstChildElement(node) < 0 &&
+				document.attributes(node).every(attribute => /:space$/.test(attribute.name) && attribute.value === "720")
+			)
+		case "footnotePr":
+		case "endnotePr":
+		case "pgNumType":
+			return document.firstChildElement(node) < 0 && document.attributes(node).length === 0
+		default:
+			return false
+	}
 }
 
 // The WordprocessingML children of `node` named `local`.
@@ -504,8 +710,8 @@ function children(part: StoryPart, node: number, local: string): number[] {
 	return out
 }
 
-function sectionMarkupOf(input: SectionMarkupInput, edit: SectionEdit, previous: boolean): string {
-	const changes = changedChildren(input, edit, previous)
+function sectionMarkupOf(input: SectionMarkupInput, edit: SectionEdit, previous: boolean, after?: ReadonlySet<string>): string {
+	const changes = changedChildren(input, edit, previous, after)
 	const node = sectionNode(input.part, edit.base)
 
 	if (node >= 0) return markup(out => spliceChildren(out, input.part.reader, node, changes, SECTION_PROPERTIES))
@@ -727,6 +933,13 @@ export function sectionProps(context: DocxEditContext, part: StoryPart, end: Sec
 		return node < 0 ? {} : context.store.section(part.document, node)
 	}
 
+	const document = editedSection(context, part, edit)
+
+	return context.store.section(document, document.firstChildElement(document.documentElement()))
+}
+
+// The w:sectPr an edit makes, parsed: the first child of the document's root.
+function editedSection(context: DocxEditContext, part: StoryPart, edit: SectionEdit): XmlDocument {
 	const root = partRoot(part)
 	const markup = sectionMarkup(
 		{
@@ -739,9 +952,15 @@ export function sectionProps(context: DocxEditContext, part: StoryPart, end: Sec
 		},
 		edit
 	)
-	const document = parseXml(encodeUtf8(`${root.open}${markup}${root.close}`))
 
-	return context.store.section(document, document.firstChildElement(document.documentElement()))
+	return parseXml(encodeUtf8(`${root.open}${markup}${root.close}`))
+}
+
+// Whether the properties an edit gives a section are ones gate 2 lets a save write.
+function savableSection(context: DocxEditContext, part: StoryPart, edit: SectionEdit): boolean {
+	const document = editedSection(context, part, edit)
+
+	return sectionFault(partReader(document), document.firstChildElement(document.documentElement())) === undefined
 }
 
 // The edit a section has, or the one standing for its source as it is.
@@ -759,7 +978,7 @@ export function trackedEdit(
 ): SectionEdit {
 	if (stamp === undefined) return next
 	if (previous.change !== undefined && previous.change !== null) return { ...next, change: previous.change }
-	if (sourceChange && previous.change === undefined) return next
+	if (sourceChange && previous.change === undefined) return folded(previous, next)
 
 	const { change: _change, headers: _headers, footers: _footers, ...before } = previous
 
@@ -772,6 +991,23 @@ export function trackedEdit(
 			before: Object.keys(before).length > 2 ? before : null
 		}
 	}
+}
+
+// `next` folded into the source's own record: each property it changes for the first time while tracking is
+// recorded with its value before.
+function folded(previous: SectionEdit, next: SectionEdit): SectionEdit {
+	const fields = [...(previous.folded?.fields ?? [])]
+	const before: Record<string, unknown> = { ...previous.folded?.before }
+
+	for (const field of FOLDED_FIELDS) {
+		if (fields.includes(field) || JSON.stringify(previous[field]) === JSON.stringify(next[field])) continue
+
+		fields.push(field)
+
+		if (previous[field] !== undefined) before[field] = previous[field]
+	}
+
+	return fields.length === 0 ? next : { ...next, folded: { fields, before: before as Partial<SectionEdit> } }
 }
 
 // Whether a section's properties can be edited: it ends with a paragraph or the body's own properties, not a
@@ -847,13 +1083,15 @@ function sourceChanged(context: DocxEditContext, part: StoryPart, edit: SectionE
 	return node >= 0 && context.store.section(part.document, node).change !== undefined
 }
 
-// Applies `update` to sections `indices` (one body step); property changes are tracked while tracking is on
-// (`tracked`), references never are. False when nothing changed or the body cannot be edited.
+// Applies `update` to sections `indices` (one body step, with what `more` adds to it); property changes are
+// tracked while tracking is on (`tracked`), references never are. False when nothing changed, the body cannot be
+// edited or `update` refuses a section (null).
 export function editSections(
 	editor: PagedEditor,
 	indices: readonly number[],
-	update: (state: SectionState, edit: SectionEdit) => SectionEdit | undefined,
-	tracked: boolean
+	update: (state: SectionState, edit: SectionEdit) => SectionEdit | undefined | null,
+	tracked: boolean,
+	more?: (tr: Transaction) => boolean
 ): boolean {
 	const { session, part, states } = bodySectionsOf(editor)
 	const context = session.context
@@ -872,6 +1110,7 @@ export function editSections(
 		const previous = editOf(state)
 		const next = update(state, previous)
 
+		if (next === null) return false
 		if (next === undefined) continue
 
 		const recorded = tracked && stamp !== undefined ? { ...stamp, id: context.ids.next("revision") } : undefined
@@ -884,15 +1123,27 @@ export function editSections(
 		changed = true
 	}
 
+	if (more !== undefined && more(tr)) changed = true
+
 	return changed && dispatchBody(editor, tr)
 }
 
 // A section change made in the body while another story is edited (a header's chip): that story's snapshot
 // (its story context) is made again.
 function dispatchBody(editor: PagedEditor, tr: Transaction): boolean {
-	const done = editor.body.session.dispatch(markInternal(tr))
+	const done = dispatchTracked(editor.body.session, tr)
 
 	if (done && editor.session !== editor.body.session) editor.session.invalidate()
+
+	return done
+}
+
+// Dispatches a section command's (internal) transaction; what tracking recorded is counted from now on (an
+// internal step passes no transformer).
+function dispatchTracked(session: DocxEditorSession, tr: Transaction): boolean {
+	const done = session.dispatch(markInternal(tr))
+
+	if (done && session.context.review.tracking) wantReviewIndex(session)
 
 	return done
 }
@@ -901,7 +1152,9 @@ function allSections(states: readonly SectionState[]): number[] {
 	return states.map((_state, index) => index)
 }
 
-// Whether the caret is where Word inserts a section break: body text outside tables, frames and locked blocks.
+// Whether the caret is where Word inserts a section break: body text outside tables, frames, content controls
+// and locked blocks (Word offers no break in a text box, table or content control: Microsoft Q&A "Page Break
+// Grayed Out In MS Word").
 export function canBreak(editor: PagedEditor): boolean {
 	const session = editor.session
 
@@ -911,9 +1164,19 @@ export function canBreak(editor: PagedEditor): boolean {
 
 	if (!$from.parent.isTextblock || $from.parent.type !== nodes.paragraph || !$from.sameParent($to)) return false
 
-	for (let depth = $from.depth; depth > 0; depth--) if ($from.node(depth).type === nodes.table_cell) return false
+	for (let depth = $from.depth; depth > 0; depth--) {
+		const type = $from.node(depth).type
 
-	return true
+		if (type === nodes.table_cell || type === nodes.sdt) return false
+	}
+
+	// Inside an inline content control (the split would cut it), or a framed paragraph.
+	const before = marks.content_control.isInSet($from.nodeBefore?.marks ?? [])
+	const after = marks.content_control.isInSet($from.nodeAfter?.marks ?? [])
+
+	if (before !== undefined && after !== undefined && before.eq(after)) return false
+
+	return session.formats.paragraph($from.parent).props.frame === undefined
 }
 
 // A section break of `kind` at the caret: the paragraph splits there and its first half ends a new section
@@ -1001,7 +1264,7 @@ export function insertSectionBreak(editor: PagedEditor, kind: string): boolean {
 
 	tr.setSelection(TextSelection.create(tr.doc, later + 1))
 
-	return session.dispatch(markInternal(tr).scrollIntoView())
+	return dispatchTracked(session, tr.scrollIntoView())
 }
 
 // Whether the caret's section ends with a break the command can remove (while tracking, one not deleted yet).
@@ -1018,6 +1281,22 @@ export function canDeleteBreak(editor: PagedEditor): boolean {
 		node?.type === nodes.paragraph &&
 		!(session.context.review.tracking && ((node.attrs["revision"] as number) & RevisionFlag.Deleted) !== 0)
 	)
+}
+
+// Whether Delete at the caret deletes the caret's section break: an empty selection at the end of the body
+// paragraph ending a section that is not the last, as Word's Delete before a section break deletes it (the
+// sections merge, the text taking the following section's formatting: deleteSectionBreak).
+export function deletesBreakAtCaret(editor: PagedEditor): boolean {
+	const session = editor.session
+
+	if (session !== editor.body.session) return false
+
+	const { $from, empty } = session.state.selection
+
+	if (!empty || $from.parent.type !== nodes.paragraph || $from.parentOffset < $from.parent.content.size) return false
+	if (!endsSection(session.story.part, $from.parent)) return false
+
+	return canDeleteBreak(editor)
 }
 
 // Removes the break ending the caret's section: its text joins the section after it, which keeps its own
@@ -1055,16 +1334,41 @@ export function deleteSectionBreak(editor: PagedEditor): boolean {
 		tr.setNodeAttribute(section.pos, "revision", (node.attrs["revision"] as number) | RevisionFlag.Deleted)
 		setParagraphChange(tr, section.pos, node, { ...change, deleted: { ...stamp, id: context.ids.next("revision") } })
 
-		return session.dispatch(markInternal(tr))
+		return dispatchTracked(session, tr)
 	}
 
-	tr.setNodeMarkup(
-		section.pos,
-		undefined,
-		{ ...node.attrs, sectPr: NO_SOURCE },
-		node.marks.filter(mark => mark.type !== marks.section_change)
-	)
+	// The break goes with its paragraph mark, as Word deletes it and as accepting its tracked deletion does: the
+	// paragraph joins the next one (review/accept.ts); before a table, the break leaves the paragraph.
+	const next = tr.doc.nodeAt(section.pos + node.nodeSize)
+	const joined = next?.type === nodes.paragraph && joinWithNext(tr, section.pos)
+
+	if (!joined)
+		tr.setNodeMarkup(
+			section.pos,
+			undefined,
+			{ ...node.attrs, sectPr: NO_SOURCE },
+			node.marks.filter(mark => mark.type !== marks.section_change)
+		)
+
+	// The join replaced both paragraphs: a caret in either keeps its place in the text, at the join from either
+	// side of it (Delete at the end of the first, Backspace at the start of the second).
+	const { selection } = session.state
+	const steps = tr.steps.length
+	const firstEnd = section.pos + node.nodeSize - 1
+	const nextStart = firstEnd + 2
+	const nextEnd = nextStart + (next?.content.size ?? 0)
+	// Markers that stood between the two, inline at the join now.
+	const between = (tr.doc.nodeAt(section.pos)?.content.size ?? 0) - node.content.size - (next?.content.size ?? 0)
+	const place = (pos: number): number =>
+		pos <= section.pos || pos > nextEnd ? tr.mapping.map(pos) : pos <= firstEnd ? pos : pos <= nextStart ? firstEnd : pos - 2 + between
+
 	keepShown(tr, context, part, states, new Set([index]))
+
+	if (joined && selection instanceof TextSelection) {
+		const later = tr.mapping.slice(steps)
+
+		tr.setSelection(TextSelection.create(tr.doc, later.map(place(selection.anchor)), later.map(place(selection.head))))
+	}
 
 	return session.dispatch(markInternal(tr))
 }
@@ -1124,7 +1428,11 @@ function twips(value: number | undefined, fallback: number): number {
 	return Math.round(value ?? fallback)
 }
 
-// Page setup of the caret's section (or every section): what `setup` names changes, the rest stays.
+// Page setup of the caret's section (or every section): what `setup` names changes, the rest stays. Turning the
+// page turns its margins with it, as Word's Page Setup does (and Microsoft's Open XML sample "Change the print
+// orientation of a word processing document": 90 degrees to landscape, back to portrait); unequal columns keep
+// their spacing and share the text width as they did. Refused (false) where a section would have properties a
+// save refuses (write/checks/sections.ts).
 export function pageSetup(editor: PagedEditor, setup: DocxPageSetup): boolean {
 	const { states } = bodySectionsOf(editor)
 	const context = editor.body.session.context
@@ -1136,35 +1444,56 @@ export function pageSetup(editor: PagedEditor, setup: DocxPageSetup): boolean {
 		indices,
 		(state, edit) => {
 			const current = resolveSection(sectionProps(context, part, state))
+			const was = current.margins
+			let margins: Required<PageMargins> = {
+				top: twips(was.top, 1440),
+				right: twips(was.right, 1440),
+				bottom: twips(was.bottom, 1440),
+				left: twips(was.left, 1440),
+				header: twips(was.header, 720),
+				footer: twips(was.footer, 720),
+				gutter: twips(was.gutter, 0)
+			}
 			let next: SectionEdit = edit
+			let marginsChanged = false
 
 			if (setup.size !== undefined || setup.orientation !== undefined) {
 				let width = setup.size?.width ?? current.pageWidth
 				let height = setup.size?.height ?? current.pageHeight
+				const wasLandscape = current.pageWidth > current.pageHeight
 				const landscape = setup.orientation === undefined ? width > height : setup.orientation === "landscape"
 
 				// w:orient does not turn the page: its width and height do (ECMA-376 17.6.13).
 				if (landscape !== width > height) [width, height] = [height, width]
 
+				if (setup.orientation !== undefined && landscape !== wasLandscape) {
+					const { top, right, bottom, left } = margins
+
+					margins = landscape
+						? { ...margins, top: left, bottom: right, left: Math.max(0, bottom), right: Math.max(0, top) }
+						: { ...margins, top: right, bottom: left, left: Math.max(0, top), right: Math.max(0, bottom) }
+					marginsChanged = margins.top !== top || margins.right !== right || margins.bottom !== bottom || margins.left !== left
+				}
+
 				next = { ...next, pageSize: { width: Math.round(width), height: Math.round(height), landscape } }
 			}
 
 			if (setup.margins !== undefined) {
-				const margins = current.margins
+				const given = setup.margins
 
-				next = {
-					...next,
-					pageMargins: {
-						top: setup.margins.top ?? twips(margins.top, 1440),
-						right: setup.margins.right ?? twips(margins.right, 1440),
-						bottom: setup.margins.bottom ?? twips(margins.bottom, 1440),
-						left: setup.margins.left ?? twips(margins.left, 1440),
-						header: setup.margins.header ?? twips(margins.header, 720),
-						footer: setup.margins.footer ?? twips(margins.footer, 720),
-						gutter: setup.margins.gutter ?? twips(margins.gutter, 0)
-					}
+				margins = {
+					top: given.top ?? margins.top,
+					right: given.right ?? margins.right,
+					bottom: given.bottom ?? margins.bottom,
+					left: given.left ?? margins.left,
+					header: given.header ?? margins.header,
+					footer: given.footer ?? margins.footer,
+					gutter: given.gutter ?? margins.gutter
 				}
+				marginsChanged = true
 			}
+
+			if (marginsChanged) next = { ...next, pageMargins: margins }
 
 			if (setup.columns !== undefined) {
 				next = {
@@ -1175,6 +1504,20 @@ export function pageSetup(editor: PagedEditor, setup: DocxPageSetup): boolean {
 						separator: setup.columns.separator ?? current.columns.separator
 					}
 				}
+			} else {
+				const now = (next.pageSize?.width ?? twips(current.pageWidth, 12240)) - margins.left - margins.right - margins.gutter
+				const widths = unequalColumns(current.columns, twips(current.pageWidth, 12240) - textWidthLoss(was), now)
+
+				if (widths !== undefined)
+					next = {
+						...next,
+						columns: {
+							count: widths.length,
+							space: twips(current.columns.space, 720),
+							separator: current.columns.separator,
+							widths
+						}
+					}
 			}
 
 			if (setup.pageNumbers !== undefined) {
@@ -1206,20 +1549,61 @@ export function pageSetup(editor: PagedEditor, setup: DocxPageSetup): boolean {
 				}
 			}
 
-			return next === edit ? undefined : next
+			if (next === edit) return undefined
+
+			return savableSection(context, part, next) ? next : null
 		},
 		true
 	)
 }
 
-// Note numbering and placement of the caret's section (or every section): w:footnotePr / w:endnotePr in its
-// properties, as Word's Footnote and Endnote dialog writes them.
+// The twips of page width margins and gutter take.
+function textWidthLoss(margins: PageMargins): number {
+	return twips(margins.left, 1440) + twips(margins.right, 1440) + twips(margins.gutter, 0)
+}
+
+// Unequal columns that shared text `was` wide sharing text `now` wide: spacing kept, widths scaled (the last
+// takes what rounding leaves). Undefined for equal columns or a text width that did not change.
+function unequalColumns(columns: ColumnsProps, was: number, now: number): { readonly width: number; readonly space: number }[] | undefined {
+	const own = columns.columns
+
+	if (columns.equalWidth !== false || own === undefined || own.length === 0 || was === now || was <= 0) return undefined
+
+	const spaces = own.map((column, k) => (k < own.length - 1 ? twips(column.space, 0) : 0))
+	const spacing = spaces.reduce((sum, space) => sum + space, 0)
+	const widths = own.map(column => twips(column.width, 0))
+	const total = widths.reduce((sum, width) => sum + width, 0)
+	const room = now - spacing
+
+	if (total <= 0 || room <= 0) return undefined
+
+	let left = room
+
+	return widths.map((width, k) => {
+		const scaled = k === widths.length - 1 ? left : Math.round((width * room) / total)
+
+		left -= scaled
+
+		return { width: scaled, space: spaces[k] ?? 0 }
+	})
+}
+
+// Note numbering of the caret's section (or every section), as Word's Footnote and Endnote dialog writes it:
+// w:footnotePr / w:endnotePr in its properties. Where notes go is the document's (in settings): a section's
+// w:pos "shall be ignored" (ECMA-376 17.11.21, 17.11.22).
 export function noteOptions(editor: PagedEditor, options: DocxNoteOptions): boolean {
 	const { states } = bodySectionsOf(editor)
 	const context = editor.body.session.context
 	const part = editor.body.session.story.part
-	const indices = options.scope === "document" ? allSections(states) : [caretSection(editor)]
+	const indices =
+		options.format === undefined && options.start === undefined && options.restart === undefined
+			? []
+			: options.scope === "document"
+				? allSections(states)
+				: [caretSection(editor)]
 	const key = options.kind === "footnote" ? "footnotes" : "endnotes"
+	const position = options.position
+	const setting = options.kind === "footnote" ? "footnotePosition" : "endnotePosition"
 
 	return editSections(
 		editor,
@@ -1228,7 +1612,6 @@ export function noteOptions(editor: PagedEditor, options: DocxNoteOptions): bool
 			const current = sectionProps(context, part, state)[key] ?? {}
 			const next: NotePositionProps = {
 				...current,
-				...(options.position === undefined ? {} : { position: options.position }),
 				...(options.format === undefined ? {} : { numFormat: options.format }),
 				...(options.start === undefined ? {} : { numStart: options.start }),
 				...(options.restart === undefined ? {} : { numRestart: options.restart })
@@ -1236,7 +1619,20 @@ export function noteOptions(editor: PagedEditor, options: DocxNoteOptions): bool
 
 			return { ...edit, [key]: next }
 		},
-		true
+		true,
+		tr => {
+			const changes = docSectionChanges(tr.doc)
+
+			if (
+				position === undefined ||
+				position === (changes[setting] ?? documentNotePosition(context.model, options.kind === "endnote"))
+			)
+				return false
+
+			tr.setDocAttribute("sectionChanges", Object.freeze({ ...changes, [setting]: position }))
+
+			return true
+		}
 	)
 }
 
@@ -1297,7 +1693,11 @@ export function sectionChangeId(state: BodySection, context: DocxEditContext, pa
 	if (change !== undefined && change !== null) return change.id === undefined ? `#${String(state.key)}` : String(change.id)
 	if (change === null || edit?.rejected === true) return undefined
 
-	return sourceChanged(context, part, editOf(state)) ? `#${String(edit?.base ?? state.key)}` : undefined
+	if (!sourceChanged(context, part, editOf(state))) return undefined
+
+	const item = edit?.base ?? state.key
+
+	return sourceSectionLinks(part, context.model.sections).get(item) ?? `#${String(item)}`
 }
 
 // Accepts (or rejects) the tracked property changes of the body's sections whose break lies in [from, to)
@@ -1340,8 +1740,28 @@ export function resolveSectionChanges(
 						...(edit.footers === undefined ? {} : { footers: edit.footers }),
 						change: null
 					}
+		} else if (accept) {
+			const { folded: _folded, ...kept } = edit
+
+			next = { ...kept, change: null }
 		} else {
-			next = accept ? { ...edit, change: null } : { ...edit, rejected: true, change: null }
+			// The properties the source's change records come back (ECMA-376 17.13.5.32; Word records only those
+			// that changed), those tracking changed since among them; the others stay as they are, as do the
+			// references (it records none). As a reject after a save reads the record written for it.
+			const node = sectionNode(part, edit.base)
+			const recorded = node < 0 ? [] : recordedElements(part, node)
+			const { folded: fold, change: _change, ...kept } = edit
+			const out: Record<string, unknown> = { ...kept, rejected: true, change: null }
+
+			for (const field of FOLDED_FIELDS) {
+				if (recorded.includes(FIELD_ELEMENTS[field])) delete out[field]
+				else if (fold?.fields.includes(field) === true) {
+					if (fold.before[field] === undefined) delete out[field]
+					else out[field] = fold.before[field]
+				}
+			}
+
+			next = out as unknown as SectionEdit
 		}
 
 		setSectionEdit(tr, state, next)

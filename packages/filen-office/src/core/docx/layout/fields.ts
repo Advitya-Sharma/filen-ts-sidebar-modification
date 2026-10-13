@@ -1,7 +1,7 @@
 import { Item } from "../model/kinds"
 import { Ns } from "../model/namespaces"
 import type { StoryPart } from "../model/part"
-import { formatNumber } from "../numbering/formats"
+import { englishCardinal, englishOrdinal, formatNumber } from "../numbering/formats"
 
 // Fields whose result layout computes instead of showing the cached result Word stored: page numbers per page,
 // and legacy check boxes and drop-down lists, which Word draws from their w:ffData (ECMA-376 Part 1 §17.16.17).
@@ -19,29 +19,32 @@ const OTHER: FieldInfo = { kind: FieldKind.OTHER, format: undefined }
 const CHECKBOX: FieldInfo = { kind: FieldKind.CHECKBOX, format: undefined }
 const DROPDOWN: FieldInfo = { kind: FieldKind.DROPDOWN, format: undefined }
 
-// \* general formatting switches that format numbers (ECMA-376 §17.16.4.3), as ST_NumberFormat values.
-const NUMBER_SWITCHES: Readonly<Record<string, string>> = {
-	arabic: "decimal",
+// \* general formatting switches that format numbers (ECMA-376 §17.16.4.3, Microsoft's "Format field results"),
+// as ST_NumberFormat values, or the switch's own name for text a field writes lower case (cardText, ordText,
+// dollarText: the formats of lists and sections capitalize). Roman and Alphabetic give their case by their
+// own (\* roman lower case, \* ROMAN or \* Roman upper case); the others match in any case (\* Hex upper case
+// digits whichever).
+const CASED_SWITCHES: Readonly<Record<string, string>> = {
 	roman: "lowerRoman",
 	Roman: "upperRoman",
 	ROMAN: "upperRoman",
 	alphabetic: "lowerLetter",
 	ALPHABETIC: "upperLetter",
-	Alphabetic: "upperLetter",
+	Alphabetic: "upperLetter"
+}
+const NUMBER_SWITCHES: Readonly<Record<string, string>> = {
+	arabic: "decimal",
+	arabicdash: "numberInDash",
 	ordinal: "ordinal",
-	Ordinal: "ordinal",
-	cardtext: "cardinalText",
-	CardText: "cardinalText",
-	ordtext: "ordinalText",
-	OrdText: "ordinalText",
-	hex: "hexLower",
-	HEX: "hexUpper"
+	cardtext: "cardText",
+	ordtext: "ordText",
+	dollartext: "dollarText",
+	hex: "hex"
 }
 
-// The ST_NumberFormat a \* switch argument asks for, or undefined for one that formats no number. Hex
-// switches are case-sensitive (\* hex lower case digits, \* HEX upper case); the others are not.
+// The ST_NumberFormat a \* switch argument asks for, or undefined for one that formats no number.
 export function numberSwitchFormat(name: string): string | undefined {
-	return NUMBER_SWITCHES[name] ?? (name.toLowerCase() === "hex" ? undefined : NUMBER_SWITCHES[name.toLowerCase()])
+	return CASED_SWITCHES[name] ?? (/^(roman|alphabetic)$/i.test(name) ? undefined : NUMBER_SWITCHES[name.toLowerCase()])
 }
 
 const FIELD = /^\s*([A-Za-z]+)/
@@ -74,10 +77,19 @@ export function fieldInfo(instruction: string): FieldInfo {
 
 // A page number as a field shows it: the switch's format, else (PAGE) the section's w:pgNumType format.
 export function numberText(value: number, format: string | undefined): string {
-	if (format === "hexLower") return value.toString(16)
-	if (format === "hexUpper") return value.toString(16).toUpperCase()
+	switch (format) {
+		case "cardText":
+			return englishCardinal(value)
+		case "ordText":
+			return englishOrdinal(value)
+		case "dollarText": {
+			const cents = Math.round(Math.abs(value) * 100)
 
-	return formatNumber(value, format ?? "decimal")
+			return `${englishCardinal(Math.trunc(cents / 100) * Math.sign(value))} and ${String(cents % 100).padStart(2, "0")}/100`
+		}
+		default:
+			return formatNumber(value, format ?? "decimal")
+	}
 }
 
 export interface FormFieldLook {

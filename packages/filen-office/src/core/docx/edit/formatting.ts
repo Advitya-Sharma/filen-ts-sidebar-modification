@@ -140,6 +140,9 @@ export function formattingMarks(props: RunProps): Mark[] {
 		push(m.lang.create({ latin: props.lang.latin ?? null, eastAsia: props.lang.eastAsia ?? null, bidi: props.lang.bidi ?? null }))
 	}
 
+	if (props.noProof !== undefined) push(m.no_proof.create({ value: props.noProof }))
+	if (props.webHidden !== undefined) push(m.web_hidden.create({ value: props.webHidden }))
+
 	if (props.change !== undefined) {
 		push(m.format_change.create({ id: props.change.id ?? null, author: props.change.author ?? null, date: props.change.date ?? null }))
 	}
@@ -248,6 +251,14 @@ export function runPropsOf(marksOf: readonly Mark[]): RunProps {
 					eastAsia: a["eastAsia"] as string | null,
 					bidi: a["bidi"] as string | null
 				})
+
+				break
+			case m.no_proof:
+				out["noProof"] = a["value"]
+
+				break
+			case m.web_hidden:
+				out["webHidden"] = a["value"]
 
 				break
 		}

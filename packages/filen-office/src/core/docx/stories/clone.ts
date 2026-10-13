@@ -1,25 +1,30 @@
 import { NodeKind, XmlError, decodeUtf8, encodeUtf8, parseXml, type XmlDocument } from "../../xml/index"
-import type { Relationships } from "../../opc/index"
+import { Relationships, type Relationship } from "../../opc/index"
 import type { DocxEditContext } from "../edit/context"
 import type { DocxEditorSession } from "../edit/session"
+import type { PagedEditor } from "../paged/editor"
 import { Ns } from "../model/namespaces"
 import { partReader, type PartReader } from "../model/reader"
 import type { StoryPart } from "../model/index"
 import { newControlId } from "../forms/controls"
 import { planNested } from "../write/nested"
-import { cloneRevisionIds } from "../write/newStory"
+import { COPIED_RELATIONSHIP, cloneRevisionIds, ownedByCopy } from "../write/newStory"
 import { DocxWriteError, StoryWriter, type WriteEnvironment } from "../write/story"
 
 // A header or footer copied into a part of its own, as Word copies the one a section showed when the section
 // is unlinked from the previous one: everything it holds (pictures, drawings, fields, content controls,
 // content kept as bytes) with the relationships they use. What must be unique in a document is made new
-// (drawing ids, revision ids, content control ids) or left out (paragraph ids, which Word makes again; bookmarks, comment anchors
-// and permission ranges, which stay with the original).
+// (drawing ids, revision ids, content control ids, VML shape ids with the embedded objects naming them and
+// their object ids, as Word renumbers a pasted object) or left out (paragraph ids, which Word makes again;
+// bookmarks, comment anchors and permission ranges, which stay with the original).
 
 // What a part made from another holds: its bytes and the relationships (ids as in the bytes) it keeps.
 export interface StoryTemplate {
 	readonly bytes: Uint8Array
 	readonly relationships: Relationships
+	// A copied note: the notes part it was copied from (the save asks whether that part still uses what the copy
+	// owns, write/save.ts).
+	readonly from?: StoryPart
 }
 
 // Left out of a copy (the original keeps them).
@@ -57,6 +62,71 @@ const RANGES = /^(moveFrom|moveTo|customXmlInsRange|customXmlDelRange|customXmlM
 // Placeholders the writer leaves where a save still has to place something (stories/sections.ts, the layout's
 // pictures and links): a story holding them cannot be written alone.
 const PLACEHOLDERS = /filenStory\d|filenMedia\d|filenPlannedLink\d/
+
+// VML elements that are shapes (a v:shapetype's id is what shapes name in their type: it stays).
+const VML_SHAPES: ReadonlySet<string> = new Set([
+	"shape",
+	"rect",
+	"roundrect",
+	"oval",
+	"line",
+	"polyline",
+	"curve",
+	"arc",
+	"image",
+	"group"
+])
+
+// The largest numbers ending the VML shape ids (id, o:spid) and embedded object ids (o:OLEObject ObjectID) of a
+// document, read once, then counted on as copies take new ones.
+const VML_COUNTERS = new WeakMap<DocxEditContext, { shape: number; object: number }>()
+
+function trailingNumber(value: string): number {
+	const digits = /\d+$/.exec(value)?.[0]
+
+	return digits === undefined || digits.length > 12 ? 0 : Number(digits)
+}
+
+function vmlCounters(context: DocxEditContext): { shape: number; object: number } {
+	let found = VML_COUNTERS.get(context)
+
+	if (found !== undefined) return found
+
+	found = { shape: 0, object: 0 }
+
+	for (const part of context.model.parts) {
+		const document = part?.document
+
+		if (document === undefined) continue
+
+		const reader = part?.reader ?? partReader(document)
+
+		for (let node = 0; node < document.count; node++) {
+			if (document.kinds[node] !== NodeKind.Element) continue
+
+			const group = reader.group(node)
+
+			if (group === Ns.V && VML_SHAPES.has(document.localName(node))) {
+				found.shape = Math.max(
+					found.shape,
+					trailingNumber(reader.attr(node, Ns.None, "id") ?? ""),
+					trailingNumber(reader.attr(node, Ns.O, "spid") ?? "")
+				)
+			} else if (group === Ns.O && document.localName(node) === "OLEObject") {
+				found.object = Math.max(found.object, trailingNumber(reader.attr(node, Ns.None, "ObjectID") ?? ""))
+			}
+		}
+	}
+
+	VML_COUNTERS.set(context, found)
+
+	return found
+}
+
+// `value` with the number ending it (or a number added) made `next`.
+function renumbered(value: string, next: number): string {
+	return `${value.replace(/\d+$/, "")}${String(next)}`
+}
 
 interface Edit {
 	readonly from: number
@@ -150,11 +220,24 @@ function attributeSpan(
 }
 
 // What a copy changes in the story's markup, in document order.
-function cloneEdits(context: DocxEditContext, document: XmlDocument): Edit[] {
+// Attributes in the relationships namespace that name a relationship (c:chart r:id, o:OLEObject r:id, the
+// diagram parts of dgm:relIds, a picture's r:embed and r:link).
+const RELATIONSHIP_ATTRIBUTES: readonly string[] = ["id", "embed", "link", "pict", "href", "dm", "lo", "qs", "cs"]
+
+// `relink`: relationship ids the copy names otherwise (a part it owns, copied with it).
+function cloneEdits(context: DocxEditContext, document: XmlDocument, relink?: ReadonlyMap<string, string>): Edit[] {
 	const reader = partReader(document)
 	const edits: Edit[] = []
 	const ranges = new Map<string, number>()
+	// VML shape ids made new, old to new: an embedded object names its shape by them.
+	const shapes = new Map<string, string>()
 	let skipTo = -1
+	const replace = (node: number, group: Ns, local: string, text: (value: string) => string | undefined): void => {
+		const span = attributeSpan(reader, document, node, group, local)
+		const made = span === undefined ? undefined : text(decodeUtf8(document.bytes, span.value[0], span.value[1]))
+
+		if (span !== undefined && made !== undefined) edits.push({ from: span.value[0], to: span.value[1], text: made })
+	}
 
 	for (let node = 0; node < document.count; node++) {
 		if (document.kinds[node] !== NodeKind.Element || document.start(node) < skipTo) continue
@@ -162,10 +245,40 @@ function cloneEdits(context: DocxEditContext, document: XmlDocument): Edit[] {
 		const group = reader.group(node)
 		const local = document.localName(node)
 
+		if (relink !== undefined && relink.size > 0)
+			for (const name of RELATIONSHIP_ATTRIBUTES) replace(node, Ns.R, name, value => relink.get(value))
+
 		if (group === Ns.WP && local === "docPr") {
 			const id = attributeSpan(reader, document, node, Ns.None, "id")
 
 			if (id !== undefined) edits.push({ from: id.value[0], to: id.value[1], text: String(context.ids.next("docPr")) })
+
+			continue
+		}
+
+		if (group === Ns.V && VML_SHAPES.has(local)) {
+			const counters = vmlCounters(context)
+
+			for (const [space, name] of [
+				[Ns.None, "id"],
+				[Ns.O, "spid"]
+			] as const)
+				replace(node, space, name, value => {
+					const made = renumbered(value, ++counters.shape)
+
+					shapes.set(value, made)
+
+					return made
+				})
+
+			continue
+		}
+
+		if (group === Ns.O && local === "OLEObject") {
+			const counters = vmlCounters(context)
+
+			replace(node, Ns.None, "ShapeID", value => shapes.get(value))
+			replace(node, Ns.None, "ObjectID", value => renumbered(value === "" ? "_" : value, ++counters.object))
 
 			continue
 		}
@@ -291,4 +404,169 @@ export function cloneStory(
 	}
 
 	return { bytes: spliced(whole, cloneEdits(context, document)), relationships: part.relationships }
+}
+
+const COPIED_RELATIONSHIPS = new WeakMap<DocxEditContext, number>()
+
+// A copy of note story `item` of notes part `part`, as Word copies a pasted note's content: the part's root
+// around the note (now note `id`), made new where a document needs it unique as cloneStory makes a header,
+// what it holds as bytes kept; the parts it owns (charts, embedded objects) named by relationships of their own,
+// which the save makes copies of. With `into` (another notes part: a note converted to `kind`), its root around
+// the note, the note element of that kind, and every relationship named so (the save relates `into` to the same
+// targets). Undefined where the note cannot be written alone (see storyBytes) or `into` binds a prefix it uses
+// otherwise.
+export function cloneNote(
+	context: DocxEditContext,
+	part: StoryPart,
+	item: number,
+	id: string,
+	session: DocxEditorSession | undefined,
+	textboxes: readonly DocxEditorSession[] = [],
+	into?: { readonly part: StoryPart; readonly kind: "footnote" | "endnote" }
+): StoryTemplate | undefined {
+	const story = storyBytes(context, part, item, session, textboxes)
+
+	if (story === undefined) return undefined
+
+	const own = wrapped(part, story)
+
+	if (own === undefined) return undefined
+
+	const target = into === undefined || into.part === part ? undefined : into
+	const document = target === undefined ? own : wrapped(target.part, story)
+
+	if (document === undefined || (target !== undefined && !sameBindings(own, document))) return undefined
+
+	const pkg = context.model.package
+	const relink = new Map<string, string>()
+	const added: Relationship[] = []
+	let counter = COPIED_RELATIONSHIPS.get(context) ?? 0
+
+	for (const relationship of part.relationships.all) {
+		if (target === undefined && !ownedByCopy(relationship, pkg)) continue
+
+		const copy = `${COPIED_RELATIONSHIP}${String(++counter)}`
+
+		relink.set(relationship.id, copy)
+		added.push({ ...relationship, id: copy })
+	}
+
+	COPIED_RELATIONSHIPS.set(context, counter)
+
+	const note = document.firstChildElement(document.documentElement())
+	const reader = partReader(document)
+	const ownId = note < 0 ? undefined : attributeSpan(reader, document, note, Ns.W, "id")
+
+	if (ownId === undefined) return undefined
+
+	const edits: Edit[] = [{ from: ownId.value[0], to: ownId.value[1], text: id }, ...cloneEdits(context, document, relink)]
+
+	// A note converted: its element of the other kind.
+	if (target !== undefined && document.localName(note) !== target.kind) {
+		const name = document.name(note)
+		const renamed = `${name.slice(0, name.length - document.localName(note).length)}${target.kind}`
+
+		edits.push({ from: document.start(note) + 1, to: document.start(note) + 1 + name.length, text: renamed })
+
+		if (!document.isSelfClosing(note)) edits.push({ from: document.contentEnd(note) + 2, to: document.end(note) - 1, text: renamed })
+	}
+
+	return {
+		bytes: spliced(
+			document.bytes,
+			edits.sort((a, b) => a.from - b.from)
+		),
+		relationships: added.length === 0 ? part.relationships : new Relationships([...part.relationships.all, ...added]),
+		from: part
+	}
+}
+
+// Story markup `story` inside the root of `part` (its prolog and start tag), parsed; undefined where it does not
+// read.
+function wrapped(part: StoryPart, story: Uint8Array): XmlDocument | undefined {
+	const source = part.document
+	const root = source.documentElement()
+	const open = source.bytes.subarray(0, source.openEnd(root))
+	const close = encodeUtf8(`</${source.name(root)}>`)
+	const whole = new Uint8Array(open.length + story.length + close.length)
+
+	whole.set(open, 0)
+	whole.set(story, open.length)
+	whole.set(close, open.length + story.length)
+
+	try {
+		return parseXml(whole)
+	} catch (error) {
+		if (error instanceof XmlError) return undefined
+
+		throw error
+	}
+}
+
+// Whether the story under the root of `other` reads every prefix it uses as under the root of `own`.
+function sameBindings(own: XmlDocument, other: XmlDocument): boolean {
+	const a = partReader(own).namespaces
+	const b = partReader(other).namespaces
+	const ownNote = own.firstChildElement(own.documentElement())
+	const otherNote = other.firstChildElement(other.documentElement())
+
+	if (ownNote < 0 || otherNote < 0) return false
+
+	// The two parse alike: the note's nodes are at the same offsets from its start.
+	const shift = own.start(ownNote) - other.start(otherNote)
+
+	for (let node = otherNote; node < other.count && other.start(node) < other.end(otherNote); node++) {
+		if (other.kinds[node] !== NodeKind.Element) continue
+
+		const mirror = nodeAtStart(own, other.start(node) + shift)
+
+		if (mirror < 0) return false
+
+		const prefixes = [other.prefix(node)]
+
+		for (const attribute of other.attributes(node)) {
+			const colon = attribute.name.indexOf(":")
+
+			if (colon > 0) prefixes.push(attribute.name.slice(0, colon))
+		}
+
+		for (const prefix of prefixes)
+			if (prefix !== "xmlns" && prefix !== "xml" && a.uri(mirror, prefix) !== b.uri(node, prefix)) return false
+	}
+
+	return true
+}
+
+// The element of `document` starting at byte `at`, or -1.
+function nodeAtStart(document: XmlDocument, at: number): number {
+	let low = 0
+	let high = document.count
+
+	while (low < high) {
+		const middle = (low + high) >> 1
+
+		if (document.start(middle) < at) low = middle + 1
+		else high = middle
+	}
+
+	return low < document.count && document.start(low) === at ? low : -1
+}
+
+// The sessions a copy of story `story` is written from as it is now: its own (where it has one) and those of the
+// text boxes in it; a text box edited is written into the story holding it, so that story's session writes it.
+export function copySessions(
+	editor: PagedEditor,
+	story: number
+): { readonly session: DocxEditorSession | undefined; readonly textboxes: readonly DocxEditorSession[] } {
+	const stories = editor.edits.model.stories
+	const within = (candidate: number): boolean => {
+		for (let at = stories[candidate]?.parent ?? -1; at >= 0; at = stories[at]?.parent ?? -1) if (at === story) return true
+
+		return false
+	}
+	const textboxes = editor.sessions.filter(candidate => candidate.story.story.kind === "textbox" && within(candidate.story.story.index))
+	const edited = textboxes.some(candidate => candidate.state.doc !== candidate.story.doc)
+	const session = edited ? editor.storySession(story) : editor.sessions.find(candidate => candidate.story.story.index === story)
+
+	return { session, textboxes }
 }

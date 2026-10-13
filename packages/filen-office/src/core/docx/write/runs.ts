@@ -27,7 +27,9 @@ const ELEMENTS: ReadonlyMap<MarkType, readonly string[]> = new Map<MarkType, rea
 	[marks.font, ["rFonts"]],
 	[marks.size, ["sz", "szCs"]],
 	[marks.spacing, ["spacing"]],
-	[marks.lang, ["lang"]]
+	[marks.lang, ["lang"]],
+	[marks.no_proof, ["noProof"]],
+	[marks.web_hidden, ["webHidden"]]
 ])
 
 export const PROPERTY_MARKS: readonly MarkType[] = [...ELEMENTS.keys()]
@@ -102,7 +104,9 @@ export function elementsOf(names: Names, type: MarkType, mark: Mark | undefined)
 		case marks.strike:
 		case marks.double_strike:
 		case marks.caps:
-		case marks.small_caps: {
+		case marks.small_caps:
+		case marks.no_proof:
+		case marks.web_hidden: {
 			const local = locals[0] ?? ""
 
 			out.set(local, onOff(names, local, a["value"]))

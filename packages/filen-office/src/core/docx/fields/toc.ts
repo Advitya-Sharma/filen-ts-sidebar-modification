@@ -22,6 +22,8 @@ const nodes = docxSchema.nodes
 const marks = docxSchema.marks
 // Word's text for a table without entries (en-US).
 export const NO_ENTRIES = "No table of contents entries found."
+// Word's paragraph style of a table of figures' entries.
+const FIGURES_STYLE = "table of figures"
 // Word's default table: heading levels 1 to 3, links, no tab leaders in Web view, outline levels.
 export function tocInstruction(levels: number, hyperlinks: boolean): string {
 	return ` TOC \\o "1-${String(levels)}"${hyperlinks ? " \\h" : ""} \\z \\u `
@@ -45,6 +47,10 @@ export interface TocOptions {
 	readonly keepBreaks: boolean
 	// Entries this editor cannot collect (TC fields alone, \a): the table is kept as it is.
 	readonly supported: boolean
+	// A table of figures (\c or \a): its entries take Word's "table of figures" style.
+	readonly figures: boolean
+	// \z: tab leaders and page numbers hidden in Web layout.
+	readonly webHidden: boolean
 }
 
 function levelRange(value: string | undefined, fallback: readonly [number, number]): readonly [number, number] {
@@ -100,7 +106,9 @@ export function tocOptions(code: FieldCode): TocOptions {
 		bookmark: switchOf(code, "b")?.arg,
 		keepTabs: hasSwitch(code, "w"),
 		keepBreaks: hasSwitch(code, "x"),
-		supported: code.type === "TOC" && (collects || (!hasSwitch(code, "f") && !hasSwitch(code, "l") && !hasSwitch(code, "a")))
+		supported: code.type === "TOC" && (collects || (!hasSwitch(code, "f") && !hasSwitch(code, "l") && !hasSwitch(code, "a"))),
+		figures: caption !== undefined || hasSwitch(code, "a"),
+		webHidden: hasSwitch(code, "z")
 	}
 }
 
@@ -122,6 +130,19 @@ export interface TocRegion {
 	// Per entry level, a source paragraph of the table whose properties a rebuilt entry of that level takes
 	// (its style, direct tabs and paragraph mark formatting, as Word keeps them).
 	readonly templates: ReadonlyMap<number, number>
+	// What a rebuild replaces, [replaceFrom, replaceTo) (else from and to): from after the separate when the first
+	// paragraph shows something before the begin (a title, kept with the code in its paragraph, the entries after
+	// it), to the end character's paragraph when nothing shows before the end in it (kept whole, as Word keeps
+	// the paragraph after the last entry), or to the end character when something shows after it there.
+	readonly replaceFrom: number
+	readonly replaceTo: number
+	// Whether the rebuilt table keeps the begin (and its code) or the end character of the table where they are.
+	readonly head: boolean
+	readonly tail: "whole" | "open" | undefined
+	// Where the separate ends and where the end character is (a table rebuilt while tracking keeps both, its old
+	// result recorded deleted between them); -1 for the file's locked blocks.
+	readonly codeEnd: number
+	readonly endAt: number
 }
 
 interface SourceToc {
@@ -206,6 +227,7 @@ function sourceRegion(context: DocxEditContext, part: StoryPart, parent: Node, i
 
 	const lists: MarkerList[] = []
 	const templates = new Map<number, number>()
+	const figures = tocOptions(parseFieldCode(toc.instruction)).figures
 	let at = pos
 	let sectPr = NO_SOURCE
 	let breaks = 0
@@ -224,7 +246,7 @@ function sourceRegion(context: DocxEditContext, part: StoryPart, parent: Node, i
 			breaks++
 		}
 
-		const level = tocLevel(context, partStyle(part, item))
+		const level = tocLevel(context, partStyle(part, item), figures)
 
 		if (level !== undefined && !templates.has(level)) templates.set(level, item)
 
@@ -241,7 +263,13 @@ function sourceRegion(context: DocxEditContext, part: StoryPart, parent: Node, i
 				updatable,
 				sectPr,
 				markers: lists.length === 0 ? NO_MARKERS : lists.flat(),
-				templates
+				templates,
+				replaceFrom: pos,
+				replaceTo: at,
+				head: false,
+				tail: undefined,
+				codeEnd: -1,
+				endAt: -1
 			}
 		}
 	}
@@ -249,11 +277,16 @@ function sourceRegion(context: DocxEditContext, part: StoryPart, parent: Node, i
 	return undefined
 }
 
-// The level of a "toc N" paragraph style (by its name, else Word's id "TOCN").
-function tocLevel(context: DocxEditContext, styleId: string | undefined): number | undefined {
+// The level of a "toc N" paragraph style (by its name, else Word's id "TOCN"); in a table of figures, 1 for its
+// "table of figures" style.
+function tocLevel(context: DocxEditContext, styleId: string | undefined, figures: boolean): number | undefined {
 	if (styleId === undefined) return undefined
 
-	const match = /^toc ([1-9])$/.exec(context.styles.byId(styleId)?.canonicalName ?? "") ?? /^toc([1-9])$/i.exec(styleId)
+	const name = context.styles.byId(styleId)?.canonicalName ?? ""
+
+	if (figures) return name === FIGURES_STYLE || /^tableoffigures$/i.test(styleId) ? 1 : undefined
+
+	const match = /^toc ([1-9])$/.exec(name) ?? /^toc([1-9])$/i.exec(styleId)
 
 	return match === null ? undefined : Number(match[1])
 }
@@ -287,66 +320,146 @@ function newBegin(paragraph: Node): Node | undefined {
 		: undefined
 }
 
+// Inline nodes that show nothing (range markers, comment references, Word's bookkeeping).
+const UNSEEN = new Set([nodes.marker, nodes.comment_ref, nodes.proof_err, nodes.rendered_break])
+
+function shows(node: Node): boolean {
+	return !UNSEEN.has(node.type)
+}
+
+// Where the first paragraph of a table built as paragraphs has its begin, and the separate after it in that
+// paragraph (-1 without), as child indexes; whether something shows before the begin.
+export function tocHead(paragraph: Node): { readonly begin: number; readonly separate: number; readonly titled: boolean } {
+	let begin = -1
+	let separate = -1
+	let titled = false
+
+	paragraph.forEach((child, _, index) => {
+		if (begin < 0) {
+			if (child.type === nodes.field_char && child.attrs["kind"] === "begin") begin = index
+			else if (shows(child)) titled = true
+		} else if (separate < 0 && child.type === nodes.field_char && child.attrs["kind"] === "separate") {
+			separate = index
+		}
+	})
+
+	return { begin, separate, titled }
+}
+
 // A table of field_char paragraphs starting in `parent`'s child `index`: up to the paragraph holding its end.
-// Its range markers and comment references outlive a rebuild; its paragraphs of the file give their properties
-// to the rebuilt entries of their levels.
+// Its range markers and comment references outlive a rebuild (those of what it replaces); its paragraphs of the
+// file give their properties to the rebuilt entries of their levels.
 function newRegion(context: DocxEditContext, part: StoryPart, parent: Node, index: number, pos: number): TocRegion | undefined {
-	const begin = newBegin(parent.child(index))
+	const first = parent.child(index)
+	const begin = newBegin(first)
 
 	if (begin === undefined) return undefined
 
+	const head = tocHead(first)
 	let depth = 0
 	let at = pos
-	let sectPr = NO_SOURCE
-	const lists: MarkerList[] = []
-	const templates = new Map<number, number>()
+	const blocks: { node: Node; pos: number; end: number }[] = []
 
 	for (let k = index; k < parent.childCount; k++) {
 		const block = parent.child(k)
 
 		if (block.type !== nodes.paragraph) return undefined
-		if ((block.attrs["sectPr"] as number) !== NO_SOURCE) sectPr = block.attrs["sectPr"] as number
 
-		const item = block.attrs["src"] as number
+		let end = -1
 
-		blockMarkers(block, lists)
-		block.forEach(child => {
-			const markers = survivorsOf(child)
+		block.forEach((child, _, offset) => {
+			if (end >= 0 || child.type !== nodes.field_char) return
 
-			if (markers.length > 0) lists.push(markers)
+			if (child.attrs["kind"] === "begin") depth++
+			else if (child.attrs["kind"] === "end" && --depth === 0) end = offset
 		})
 
+		blocks.push({ node: block, pos: at, end })
+		at += block.nodeSize
+
+		if (end >= 0) break
+	}
+
+	const last = blocks[blocks.length - 1]
+
+	if (last === undefined || last.end < 0) return undefined
+
+	const instruction = begin.attrs["instruction"] as string
+	const options = tocOptions(parseFieldCode(instruction))
+	const spans = blocks.length > 1
+	// A title before the begin stays in its paragraph with the code (the code would run over a paragraph mark
+	// otherwise: the separate must be there).
+	const titled = spans && head.titled
+	let tail: "whole" | "open" | undefined
+
+	if (spans) {
+		let before = false
+		let after = false
+
+		last.node.forEach((child, _, offset) => {
+			if (offset < last.end) before ||= shows(child)
+			else if (offset > last.end) after ||= shows(child)
+		})
+
+		tail = !before ? "whole" : after ? "open" : undefined
+	}
+
+	let sectPr = NO_SOURCE
+	const lists: MarkerList[] = []
+	const templates = new Map<number, number>()
+	const offsetOf = (node: Node, child: number): number => {
+		let offset = 0
+
+		for (let k = 0; k < child; k++) offset += node.child(k).nodeSize
+
+		return offset
+	}
+
+	for (const [k, { node: block, end }] of blocks.entries()) {
+		const kept = (k === 0 && titled) || (k === blocks.length - 1 && tail === "whole")
+		const item = block.attrs["src"] as number
+
 		if (item !== NO_SOURCE && part.kinds[item] === Item.Paragraph) {
-			const level = tocLevel(context, partStyle(part, item))
+			const level = tocLevel(context, partStyle(part, item), options.figures)
 
 			if (level !== undefined && !templates.has(level)) templates.set(level, item)
 		}
 
-		let closed = false
+		if (k === blocks.length - 1 && tail === "whole") continue
+		if (!kept && (block.attrs["sectPr"] as number) !== NO_SOURCE) sectPr = block.attrs["sectPr"] as number
+		if (!kept) blockMarkers(block, lists)
 
-		block.forEach(child => {
-			if (closed || child.type !== nodes.field_char) return
+		// Of the first paragraph kept, what follows its separate; of the last joined, what precedes its end.
+		const from = k === 0 && titled ? head.separate + 1 : 0
+		const to = k === blocks.length - 1 && tail === "open" ? end : block.childCount
 
-			if (child.attrs["kind"] === "begin") depth++
-			else if (child.attrs["kind"] === "end" && --depth === 0) closed = true
-		})
+		for (let child = from; child < to; child++) {
+			const markers = survivorsOf(block.child(child))
 
-		at += block.nodeSize
-
-		if (closed)
-			return {
-				from: pos,
-				to: at,
-				instruction: begin.attrs["instruction"] as string,
-				source: false,
-				updatable: tocOptions(parseFieldCode(begin.attrs["instruction"] as string)).supported,
-				sectPr,
-				markers: lists.length === 0 ? NO_MARKERS : lists.flat(),
-				templates
-			}
+			if (markers.length > 0) lists.push(markers)
+		}
 	}
 
-	return undefined
+	const firstBlock = blocks[0] as { node: Node; pos: number }
+	const codeEnd = head.separate < 0 ? -1 : firstBlock.pos + 1 + offsetOf(firstBlock.node, head.separate + 1)
+	const endAt = last.pos + 1 + offsetOf(last.node, last.end)
+
+	return {
+		from: pos,
+		to: at,
+		instruction,
+		source: false,
+		updatable: options.supported && (!titled || head.separate >= 0),
+		sectPr,
+		markers: lists.length === 0 ? NO_MARKERS : lists.flat(),
+		templates,
+		replaceFrom: titled ? codeEnd : pos,
+		replaceTo: tail === "whole" ? last.pos : tail === "open" ? endAt : at,
+		head: titled,
+		tail,
+		codeEnd,
+		endAt
+	}
 }
 
 // Every table of contents of the story, in document order (one walk; for commands, never per keystroke).
@@ -512,10 +625,11 @@ export interface TocBuild {
 	readonly bookmarks: readonly { readonly entry: TocEntry; readonly name: string; readonly id: string }[]
 }
 
-// The id of paragraph style "toc N" (the document's, or a built-in one the save adds), or null when it can be
-// neither (its look is then given directly).
-function tocStyle(context: DocxEditContext, level: number): string | null {
-	const name = `toc ${String(level)}`
+// The id of paragraph style "toc N" ("table of figures" for a table of figures: Word's style for \c and \a
+// tables) as the document has it, or a built-in one the save adds, or null when it can be neither (its look is
+// then given directly).
+function tocStyle(context: DocxEditContext, level: number, figures: boolean): string | null {
+	const name = figures ? FIGURES_STYLE : `toc ${String(level)}`
 	const existing = context.styles.byName(name, "paragraph")
 
 	if (existing !== undefined) return existing.id
@@ -523,7 +637,7 @@ function tocStyle(context: DocxEditContext, level: number): string | null {
 
 	for (const [id, missing] of context.newStyles) if (missing === name) return id
 
-	const base = `TOC${String(level)}`
+	const base = figures ? "TableofFigures" : `TOC${String(level)}`
 	let id = base
 
 	for (let n = 1; context.styles.byId(id) !== undefined || context.newStyles.has(id); n++) id = `${base}${String(n)}`
@@ -535,6 +649,8 @@ function tocStyle(context: DocxEditContext, level: number): string | null {
 
 // Word's "toc N" without a definition (spacing after 5 points, 11 points of indent per level).
 const TOC_SPACING: SpacingAttrs = Object.freeze({ after: 100 })
+// Word's "table of figures" without a definition: no spacing after.
+const FIGURES_SPACING: SpacingAttrs = Object.freeze({ after: 0 })
 
 function tocIndent(level: number): { start: number } | null {
 	return level <= 1 ? null : Object.freeze({ start: 220 * (level - 1) })
@@ -577,6 +693,11 @@ export interface TocBuildInput {
 	readonly taken: (name: string) => boolean
 	// The page number an entry shows now ("" when not laid out).
 	readonly page: (entry: TocEntry) => string
+	// The table keeps its begin and code where they are (see TocRegion): in a title's paragraph before the entries,
+	// or in the paragraph the first entry joins. It keeps its end character in a paragraph of its own after the
+	// entries, or in the paragraph the last entry joins. The entries hold neither then.
+	readonly head?: "title" | "join" | undefined
+	readonly tail?: "whole" | "open" | undefined
 }
 
 export function buildToc(input: TocBuildInput): TocBuild {
@@ -587,6 +708,8 @@ export function buildToc(input: TocBuildInput): TocBuild {
 	const names = new Set(bookmarkIndex(session.state.doc, session.story.part).list.map(bookmark => bookmark.name.toLowerCase()))
 	const bookmarks: { entry: TocEntry; name: string; id: string }[] = []
 	const width = textWidth(session, input.host, input.pos)
+	const noProof = marks.no_proof.create({ value: true })
+	const webHidden = options.webHidden ? marks.web_hidden.create({ value: true }) : undefined
 	const specs: { level: number; content: Node[]; tab: boolean }[] = []
 
 	for (const entry of entries) {
@@ -598,9 +721,11 @@ export function buildToc(input: TocBuildInput): TocBuild {
 			bookmarks.push({ entry, name, id: String(context.ids.next("bookmark")) })
 		}
 
-		const link: readonly Mark[] = options.hyperlinks
-			? [marks.link.create({ src: NO_SOURCE, anchor: name, target: null, tooltip: null, history: "1" })]
-			: []
+		// Word's runs: no proofing throughout, the tab and page number hidden in Web layout under \z.
+		const link: readonly Mark[] = noProof.addToSet(
+			options.hyperlinks ? [marks.link.create({ src: NO_SOURCE, anchor: name, target: null, tooltip: null, history: "1" })] : []
+		)
+		const page: readonly Mark[] = webHidden === undefined ? link : webHidden.addToSet(link)
 		const textMarks: readonly Mark[] =
 			hyperlinkStyle === undefined ? link : marks.char_style.create({ styleId: hyperlinkStyle }).addToSet(link)
 		const content: Node[] = []
@@ -618,8 +743,8 @@ export function buildToc(input: TocBuildInput): TocBuild {
 		const numbered = options.omit === undefined || entry.level < options.omit[0] || entry.level > options.omit[1]
 
 		if (numbered) {
-			if (options.separator !== undefined) text(options.separator, link)
-			else content.push(nodes.tab.create(null, null, link))
+			if (options.separator !== undefined) text(options.separator, page)
+			else content.push(nodes.tab.create(null, null, page))
 
 			content.push(
 				nodes.field.create(
@@ -632,7 +757,7 @@ export function buildToc(input: TocBuildInput): TocBuild {
 						result: input.page(entry)
 					},
 					null,
-					link
+					page
 				)
 			)
 		}
@@ -641,6 +766,15 @@ export function buildToc(input: TocBuildInput): TocBuild {
 	}
 
 	if (specs.length === 0) specs.push({ level: 1, content: [docxSchema.text(NO_ENTRIES)], tab: false })
+
+	const code =
+		input.head !== undefined
+			? []
+			: [
+					nodes.field_char.create({ kind: "begin", instruction, dirty: false }),
+					nodes.field_char.create({ kind: "instruction", instruction }),
+					nodes.field_char.create({ kind: "separate" })
+				]
 
 	;(specs[0] as { content: Node[] }).content.unshift(
 		...input.markers.map(marker =>
@@ -653,18 +787,24 @@ export function buildToc(input: TocBuildInput): TocBuild {
 						name: (marker as Partial<MarkerNodeAttrs>).name ?? null
 					})
 		),
-		nodes.field_char.create({ kind: "begin", instruction, dirty: false }),
-		nodes.field_char.create({ kind: "instruction", instruction }),
-		nodes.field_char.create({ kind: "separate" })
+		...code
 	)
 	// The end in the last entry; a table of one paragraph ends in one of its own after it (a field within one
 	// paragraph is no table: it would read back as a field of that paragraph).
-	if (specs.length === 1) specs.push({ level: 1, content: [], tab: false })
-
-	;(specs[specs.length - 1] as { content: Node[] }).content.push(nodes.field_char.create({ kind: "end" }))
+	if (specs.length === 1 && input.head !== "title" && input.tail !== "whole") specs.push({ level: 1, content: [], tab: false })
+	if (input.tail === undefined) (specs[specs.length - 1] as { content: Node[] }).content.push(nodes.field_char.create({ kind: "end" }))
 
 	const paragraphs = specs.map((spec, index) =>
-		entryParagraph(session, input, spec.level, width, spec.content, spec.tab, index === specs.length - 1 ? input.sectPr : NO_SOURCE)
+		entryParagraph(
+			session,
+			input,
+			options.figures,
+			spec.level,
+			width,
+			spec.content,
+			spec.tab,
+			index === specs.length - 1 ? input.sectPr : NO_SOURCE
+		)
 	)
 
 	return { paragraphs, bookmarks }
@@ -676,6 +816,7 @@ export function buildToc(input: TocBuildInput): TocBuild {
 function entryParagraph(
 	session: DocxEditorSession,
 	input: TocBuildInput,
+	figures: boolean,
 	level: number,
 	width: number,
 	content: readonly Node[],
@@ -685,7 +826,7 @@ function entryParagraph(
 	const context = session.context
 	const part = session.story.part
 	const template = input.templates.get(level)
-	const styleId = template === undefined ? tocStyle(context, level) : null
+	const styleId = template === undefined ? tocStyle(context, level, figures) : null
 	const attrs: Record<string, unknown> = { styleId, sectPr }
 
 	if (template !== undefined) {
@@ -703,7 +844,7 @@ function entryParagraph(
 			borders: props.borders ?? null
 		})
 	} else if (styleId === null) {
-		Object.assign(attrs, { spacing: TOC_SPACING, indent: tocIndent(level) })
+		Object.assign(attrs, figures ? { spacing: FIGURES_SPACING } : { spacing: TOC_SPACING, indent: tocIndent(level) })
 	}
 
 	if (tab && template === undefined && SUPPORTS_TABS) {

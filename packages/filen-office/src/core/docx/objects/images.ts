@@ -1,8 +1,10 @@
+import { svgRootStart } from "@filen/shared/svgProlog"
 import { decodeUtf8 } from "../../xml/index"
 
 // What a picture's bytes are, read from their header only (nothing is decoded): the format, the pixel size
 // and the resolution a new picture is sized by. Only formats Word reads as pictures are taken; WebP and
-// anything unknown are refused rather than written into a file Word may not show.
+// anything unknown are refused rather than written into a file Word may not show. TIFF is taken (Word shows it)
+// though most browsers cannot draw it: the pages show it as they show a source TIFF.
 
 export type DocxImageFormat = "png" | "jpeg" | "gif" | "bmp" | "tiff" | "svg" | "emf" | "wmf"
 
@@ -27,6 +29,8 @@ export type DocxImageRefusal = "format" | "webp" | "corrupt" | "tooLarge" | "pix
 // Limits of a new picture: larger ones are refused, never downscaled (that would lose detail).
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024
 export const MAX_IMAGE_PIXELS = 20_000_000
+
+const VECTOR: ReadonlySet<DocxImageFormat> = new Set(["svg", "emf", "wmf"])
 
 const DEFAULT_DPI = 96
 export const EMU_PER_INCH = 914400
@@ -109,9 +113,36 @@ function png(b: Uint8Array): DocxImageInfo | undefined {
 	return info("png", width, height, dpiX, dpiY)
 }
 
+// The EXIF orientation (1-8) of an APP1 segment's TIFF header at `at` (`length` bytes), or 1.
+function exifOrientation(b: Uint8Array, at: number, length: number): number {
+	const end = Math.min(b.length, at + length)
+	const little = b[at] === 0x49
+	const u16 = (offset: number): number => (little ? u16le(b, at + offset) : u16be(b, at + offset))
+	const u32 = (offset: number): number => (little ? u32le(b, at + offset) : u32be(b, at + offset))
+	const ifd = u32(4)
+
+	if (at + ifd + 2 > end) return 1
+
+	for (let k = 0, count = u16(ifd); k < count; k++) {
+		const entry = ifd + 2 + k * 12
+
+		if (at + entry + 12 > end) return 1
+		if (u16(entry) === 0x0112) {
+			const value = u16(entry + 8)
+
+			return value >= 1 && value <= 8 ? value : 1
+		}
+	}
+
+	return 1
+}
+
+// JPEG: the frame's size, turned as its EXIF orientation shows it (5-8 a quarter turn: readers draw it so, the
+// browsers' image-orientation from-image included, and Word sizes it so).
 function jpeg(b: Uint8Array): DocxImageInfo | undefined {
 	let dpiX = DEFAULT_DPI
 	let dpiY = DEFAULT_DPI
+	let orientation = 1
 
 	for (let at = 2; at + 4 <= b.length;) {
 		if (b[at] !== 0xff) return undefined
@@ -150,11 +181,16 @@ function jpeg(b: Uint8Array): DocxImageInfo | undefined {
 			}
 		}
 
+		if (marker === 0xe1 && starts(b, at + 4, "Exif\0\0") && length >= 16) orientation = exifOrientation(b, at + 10, length - 8)
+
 		// Start of frame (any but DHT, JPG and DAC): height, then width.
 		if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
 			if (at + 9 > b.length) return undefined
 
-			return info("jpeg", u16be(b, at + 7), u16be(b, at + 5), dpiX, dpiY)
+			const width = u16be(b, at + 7)
+			const height = u16be(b, at + 5)
+
+			return orientation >= 5 ? info("jpeg", height, width, dpiY, dpiX) : info("jpeg", width, height, dpiX, dpiY)
 		}
 
 		if (marker === 0xda || marker === 0xd9) return undefined
@@ -280,15 +316,17 @@ function svgLength(tag: string, name: string): number | undefined {
 	return Number.isFinite(px) && px > 0 ? px : undefined
 }
 
-// SVG: its width and height (in CSS units), else its view box, else 300 x 150 (a browser's default).
-function svg(b: Uint8Array): DocxImageInfo | undefined {
+// SVG: its width and height (in CSS units), else its view box, else 300 x 150 (a browser's default). Refused
+// with a DOCTYPE that could expand (svgRootStart).
+function svg(b: Uint8Array): DocxImageInfo | "format" | undefined {
 	const head = decodeUtf8(b, 0, Math.min(b.length, 64 * 1024))
-	const open = /<svg[\s>]/.exec(head)
+	const start = svgRootStart(head)
 
-	if (open === null || /<(?!\?|!|svg)[A-Za-z]/.test(head.slice(0, open.index))) return undefined
+	if (start === "unsafe") return "format"
+	if (start === "corrupt" || !/^<svg[\s>/]/.test(head.slice(start, start + 5))) return undefined
 
-	const end = head.indexOf(">", open.index)
-	const tag = end < 0 ? head.slice(open.index) : head.slice(open.index, end)
+	const end = head.indexOf(">", start)
+	const tag = end < 0 ? head.slice(start) : head.slice(start, end)
 	const box = /\sviewBox\s*=\s*["']\s*[-0-9.e]+[\s,]+[-0-9.e]+[\s,]+([0-9.e]+)[\s,]+([0-9.e]+)\s*["']/i.exec(tag)
 	const boxWidth = box === null ? undefined : Number(box[1])
 	const boxHeight = box === null ? undefined : Number(box[2])
@@ -310,7 +348,7 @@ function svg(b: Uint8Array): DocxImageInfo | undefined {
 export function sniffImage(bytes: Uint8Array): DocxImageInfo | DocxImageRefusal {
 	if (bytes.length > MAX_IMAGE_BYTES) return "tooLarge"
 
-	let found: DocxImageInfo | undefined
+	let found: DocxImageInfo | "format" | undefined
 
 	if (starts(bytes, 0, "\x89PNG\r\n\x1a\n")) found = png(bytes)
 	else if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) found = jpeg(bytes)
@@ -324,9 +362,11 @@ export function sniffImage(bytes: Uint8Array): DocxImageInfo | DocxImageRefusal 
 		found = svg(bytes)
 	else return "format"
 
+	if (typeof found === "string") return found
 	if (found === undefined) return "corrupt"
 	if (found.width < 1 || found.height < 1) return "corrupt"
-	if (found.width * found.height > MAX_IMAGE_PIXELS) return "pixels"
+	// Vector pictures are drawn at the size shown, never decoded at the size they declare.
+	if (found.width * found.height > MAX_IMAGE_PIXELS && !VECTOR.has(found.format)) return "pixels"
 
 	return found
 }

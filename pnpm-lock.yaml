@@ -704,6 +704,9 @@ importers:
 
   packages/filen-office:
     dependencies:
+      '@filen/shared':
+        specifier: workspace:*
+        version: link:../filen-shared
       fflate:
         specifier: 0.8.3
         version: 0.8.3

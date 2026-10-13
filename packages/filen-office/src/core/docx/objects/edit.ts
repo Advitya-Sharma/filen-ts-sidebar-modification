@@ -206,7 +206,7 @@ function sourceFacts(context: DocxEditContext, drawing: DrawingInfo): SourceFact
 
 	if (found !== undefined) return found
 
-	const part = context.model.parts[drawing.part]
+	const part = drawingPart(context, drawing)
 	const kind = kindOf(drawing)
 	const xfrm = part === undefined ? -1 : graphicTransform(part, drawing)
 	const sourceRot = part === undefined || xfrm < 0 ? 0 : normalizeDegrees(part.reader.int(xfrm, Ns.None, "rot", 0) / 60000)
@@ -312,15 +312,27 @@ export function sourceDrawing(context: DocxEditContext, node: Node): DrawingInfo
 
 	if (index < 0) return undefined
 
-	return index < context.model.drawings.length ? context.model.drawings[index] : ADDED_DRAWINGS.get(context)?.()[index]
+	return index < context.model.drawings.length ? context.model.drawings[index] : ADDED_DRAWINGS.get(context)?.drawings()[index]
 }
 
 // Drawings of parts an editor added after the document was read (a header copied from another part, see
-// paged/edits.ts): the editor's list (the model's own at the same indices, then those).
-const ADDED_DRAWINGS = new WeakMap<DocxEditContext, () => readonly (DrawingInfo | undefined)[]>()
+// paged/edits.ts) and those parts: the editor's lists (the model's own at the same indices, then those).
+const ADDED_DRAWINGS = new WeakMap<
+	DocxEditContext,
+	{ readonly drawings: () => readonly (DrawingInfo | undefined)[]; readonly parts?: () => readonly (StoryPart | undefined)[] }
+>()
 
-export function bindAddedDrawings(context: DocxEditContext, drawings: () => readonly (DrawingInfo | undefined)[]): void {
-	ADDED_DRAWINGS.set(context, drawings)
+export function bindAddedDrawings(
+	context: DocxEditContext,
+	drawings: () => readonly (DrawingInfo | undefined)[],
+	parts?: () => readonly (StoryPart | undefined)[]
+): void {
+	ADDED_DRAWINGS.set(context, parts === undefined ? { drawings } : { drawings, parts })
+}
+
+// The part a source drawing is in: the document's, or one an editor added.
+function drawingPart(context: DocxEditContext, drawing: DrawingInfo): StoryPart | undefined {
+	return context.model.parts[drawing.part] ?? ADDED_DRAWINGS.get(context)?.parts?.()[drawing.part]
 }
 
 // Whether the node is a picture a command inserted.
@@ -362,8 +374,9 @@ export function drawingState(context: DocxEditContext, node: Node): DrawingState
 		wrap,
 		cx: edit.cx ?? base.cx,
 		cy: edit.cy ?? base.cy,
-		posX: floating ? (edit.posX ?? base.posX ?? 0) : undefined,
-		posY: floating ? (edit.posY ?? base.posY ?? 0) : undefined,
+		// A floating drawing aligned stays aligned (no offsets) until moved; one floating anew starts at 0.
+		posX: floating ? (edit.posX ?? base.posX ?? (base.wrap === "inline" ? 0 : undefined)) : undefined,
+		posY: floating ? (edit.posY ?? base.posY ?? (base.wrap === "inline" ? 0 : undefined)) : undefined,
 		relH: edit.relH ?? base.relH,
 		relV: edit.relV ?? base.relV,
 		descr: edit.descr ?? base.descr,
@@ -580,9 +593,34 @@ export function mediaInUse(states: readonly EditorState[]): Set<number> {
 	return out
 }
 
-// Releases the media no state can bring back (after a save, say), of the handles given out up to `through`.
+// Handles a picture insertion named (it ran, whatever came of it) or a host gave up. Until then a handle is on
+// its way into a command (a host registers a picture, then asks for its alt text, say): no save releases it.
+const settledMedia = new WeakMap<DocxEditContext["media"], Set<number>>()
+
+export function settleMedia(context: DocxEditContext, handles: readonly (number | undefined)[]): void {
+	let settled = settledMedia.get(context.media)
+
+	if (settled === undefined) {
+		settled = new Set()
+		settledMedia.set(context.media, settled)
+	}
+
+	for (const handle of handles) if (handle !== undefined) settled.add(handle)
+}
+
+// Releases the media no state can bring back (after a save, say), of the settled handles given out up to
+// `through`.
 export function releaseUnusedMedia(context: DocxEditContext, states: readonly EditorState[], through = Infinity): void {
-	context.media.releaseUnused(mediaInUse(states), through)
+	const keep = mediaInUse(states)
+	const settled = settledMedia.get(context.media)
+	const last = Math.min(through, context.media.lastHandle)
+
+	for (let handle = 1; handle <= last; handle++) {
+		if (settled?.has(handle) !== true) keep.add(handle)
+		else if (!keep.has(handle)) settled.delete(handle)
+	}
+
+	context.media.releaseUnused(keep, through)
 }
 
 // ---- inserting pictures ---------------------------------------------------------------------------------
@@ -620,11 +658,24 @@ export function canInsertPicture(state: EditorState): boolean {
 	return $from.parent.type === nodes.paragraph && $to.parent.type === nodes.paragraph
 }
 
-// The width (EMUs) a new picture may take: its table cell's, else its section's text column.
-function availableWidth(context: DocumentCommandContext, state: EditorState): number {
+// The box (EMUs) a new picture may take, as Word fits one: its section's text column, as wide as its table cell
+// in a table, and as high as the page's text.
+function availableBox(context: DocumentCommandContext, state: EditorState): { readonly width: number; readonly height: number } {
 	const session = context.session
 	const store = context.context.store
 	const $from = state.selection.$from
+	const model = context.context.model
+	const editor = context.editor
+	const caret = editor.geometry.locate(state.selection.head)
+	const page = caret === undefined ? undefined : editor.page(caret.page)
+	const section = model.sections[page?.section ?? -1] ?? model.sections[model.sections.length - 1]
+	const body = model.body === undefined ? undefined : model.parts[model.body.part]
+	const props =
+		section === undefined || body === undefined || section.sectPr < 0 ? undefined : store.section(body.document, section.sectPr)
+	const margins = props?.pageMargins
+	// A negative top or bottom margin is a fixed one: its size all the same.
+	const textHeight = (props?.pageSize?.height ?? 15840) - Math.abs(margins?.top ?? 1440) - Math.abs(margins?.bottom ?? 1440)
+	const height = Math.max(1, Math.round(Math.max(textHeight, 288) * EMU_PER_TWIP))
 
 	for (let d = $from.depth - 1; d >= 2; d--) {
 		if ($from.node(d).type !== nodes.table_cell) continue
@@ -640,31 +691,36 @@ function availableWidth(context: DocumentCommandContext, state: EditorState): nu
 		for (let c = start; c < start + span; c++) width += grid[c] ?? 0
 
 		// Less Word's default cell margins (0.08 in each side).
-		return Math.max(1, Math.round(Math.max(width - 230, 288) * EMU_PER_TWIP))
+		return { width: Math.max(1, Math.round(Math.max(width - 230, 288) * EMU_PER_TWIP)), height }
 	}
 
-	const model = context.context.model
-	const editor = context.editor
-	const caret = editor.geometry.locate(state.selection.head)
-	const page = caret === undefined ? undefined : editor.page(caret.page)
-	const section = model.sections[page?.section ?? -1] ?? model.sections[model.sections.length - 1]
-	const body = model.body === undefined ? undefined : model.parts[model.body.part]
+	if (props === undefined) return { width: Math.round(DEFAULT_TEXT_WIDTH * EMU_PER_TWIP), height }
 
-	if (section === undefined || body === undefined || section.sectPr < 0) return Math.round(DEFAULT_TEXT_WIDTH * EMU_PER_TWIP)
-
-	const props = store.section(body.document, section.sectPr)
 	const pageWidth = props.pageSize?.width ?? 12240
-	const margins = props.pageMargins
 	const columns = Math.max(1, props.columns?.count ?? 1)
 	const text = pageWidth - (margins?.left ?? 1440) - (margins?.right ?? 1440) - (margins?.gutter ?? 0)
 	const column = (text - (props.columns?.space ?? 720) * (columns - 1)) / columns
 
-	return Math.max(1, Math.round(Math.max(column, 288) * EMU_PER_TWIP))
+	return { width: Math.max(1, Math.round(Math.max(column, 288) * EMU_PER_TWIP)), height }
+}
+
+// Whether drawing `node` (selected) is a picture whose picture Change Picture can swap in place: one a command
+// inserted, or a source picture with a blip fill and a crop the editor reads.
+function swappable(context: DocxEditContext, node: Node): boolean {
+	if (isNewPicture(node)) return true
+
+	const drawing = sourceDrawing(context, node)
+	const part = drawing === undefined ? undefined : drawingPart(context, drawing)
+	const state = drawingState(context, node)
+
+	return drawing !== undefined && part !== undefined && state.kind === "picture" && state.croppable && pictureFill(part, drawing) >= 0
 }
 
 // The transaction inserting the picture of `command` where the selection is, sized as Word sizes it (its
-// own size at its resolution, at most the width it goes into), or null when it cannot go there (or is
-// refused: see pictureRefusal).
+// own size at its resolution, at most the box it goes into), or null when it cannot go there (or is
+// refused: see pictureRefusal). A selected picture takes the new one in place (Word's Change Picture): placed,
+// turned, formatted and described as it was, its crop reset and the new picture fitted into its box with its own
+// proportions. While changes are tracked, or for what is no picture, the selection is replaced as by typing.
 export function insertPicture(
 	context: DocumentCommandContext,
 	command: { readonly media: number; readonly fallback?: number; readonly altText?: string }
@@ -675,19 +731,49 @@ export function insertPicture(
 	if (!canInsertPicture(state) || pictureRefusal(edit, command.media, command.fallback) !== undefined) return null
 	const image = pictureOf(edit, command.media) as DocxImageInfo
 	let { cx, cy } = naturalExtent(image)
-	// A selected drawing is replaced in place (Word's Change Picture): the new picture fits its box, keeping its
-	// own proportions, placed and wrapped as it was, with its marks (a picture content control's included).
 	const replaced = selectedDrawing(state)
 	const old = replaced === undefined ? undefined : drawingState(edit, replaced.node)
-	const width = old !== undefined && old.cx > 0 && old.cy > 0 ? old.cx : availableWidth(context, state)
-	const height = old !== undefined && old.cx > 0 && old.cy > 0 ? old.cy : Number.POSITIVE_INFINITY
-	const scale = Math.min(1, width / cx, height / cy)
+
+	if (
+		replaced !== undefined &&
+		old !== undefined &&
+		old.cx > 0 &&
+		old.cy > 0 &&
+		!edit.review.tracking &&
+		swappable(edit, replaced.node)
+	) {
+		const scale = Math.min(old.cx / cx, old.cy / cy)
+		const current: Record<string, unknown> = { ...(drawingEdit(replaced.node) ?? {}) }
+
+		delete current["fallback"]
+
+		const overrides: DrawingEdit = Object.freeze({
+			...current,
+			media: command.media,
+			cx: Math.max(1, Math.round(cx * scale)),
+			cy: Math.max(1, Math.round(cy * scale)),
+			cropLeft: 0,
+			cropTop: 0,
+			cropRight: 0,
+			cropBottom: 0,
+			...(command.fallback === undefined ? {} : { fallback: command.fallback }),
+			...(command.altText === undefined || command.altText === "" ? {} : { descr: command.altText })
+		})
+		const tr = state.tr.setNodeAttribute(replaced.pos, "overrides", overrides)
+
+		return markCommand(tr.setSelection(NodeSelection.create(tr.doc, replaced.pos)).scrollIntoView())
+	}
+
+	// What is no picture is replaced by the new one where it was, sized as a new picture.
+	const picture = old?.kind === "picture"
+	const box = picture && old.cx > 0 && old.cy > 0 ? { width: old.cx, height: old.cy } : availableBox(context, state)
+	const scale = Math.min(1, box.width / cx, box.height / cy)
 
 	cx = Math.max(1, Math.round(cx * scale))
 	cy = Math.max(1, Math.round(cy * scale))
 
 	const placed: DrawingEdit =
-		old === undefined || old.wrap === "inline" || !old.placeable
+		!picture || old.wrap === "inline" || !old.placeable
 			? {}
 			: { wrap: old.wrap, posX: old.posX ?? 0, posY: old.posY ?? 0, relH: old.relH, relV: old.relV }
 	const overrides: DrawingEdit = Object.freeze({

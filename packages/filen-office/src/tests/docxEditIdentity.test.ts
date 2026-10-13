@@ -110,7 +110,7 @@ describe("docx editing: source identity", () => {
 		expect(session.state.doc.child(0).attrs["src"]).toBe(doc.child(1).attrs["src"])
 	})
 
-	it("drops formatting marks from paragraph-level atoms and refuses identity marks", async () => {
+	it("drops formatting marks from paragraph-level atoms but fields and refuses identity marks", async () => {
 		const session = await sessionOf(RICH)
 		const paragraph = session.state.doc.child(0)
 
@@ -121,7 +121,7 @@ describe("docx editing: source identity", () => {
 		session.state.doc.child(0).forEach(child => {
 			const formatted = child.marks.some(mark => mark.type.name === "bold")
 
-			expect(formatted, child.type.name).toBe(edit.inlineLevel(child) === "run")
+			expect(formatted, child.type.name).toBe(edit.inlineLevel(child) === "run" || child.type.name === "field")
 		})
 
 		expect(run(session, state => state.tr.addMark(1, 4, docxSchema.marks.deletion.create({ src: 99, id: 1, author: "X" })))).toBe(false)

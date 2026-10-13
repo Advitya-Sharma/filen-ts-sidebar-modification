@@ -4,8 +4,10 @@ import type { DocxEditorSession } from "../edit/session"
 import type { PagedEditor } from "../paged/editor"
 import type { PagedGeometry } from "../paged/geometry"
 import { numberSwitchFormat, numberText } from "../layout/fields"
-import { FieldCharType, Item, type StoryPart } from "../model/index"
+import { BreakType, FieldCharType, Item, RevisionView, TRANSPARENT, type StoryPart } from "../model/index"
 import { Ns } from "../model/namespaces"
+import { NumberingCounters, formatNumber, type Numbering } from "../numbering/index"
+import { dayName, monthName, picturesDay } from "../forms/dates"
 import { bookmarkIndex, type DocxBookmark } from "./bookmarks"
 import type { FieldUpdate } from "./result"
 
@@ -212,9 +214,11 @@ function numberFormatOf(code: FieldCode): string | undefined {
 	return format
 }
 
-// A number under a \# numeric picture (§17.16.4.2): 0 a digit (zero when none), # a digit (nothing when
-// none), x drops the digits to its left, "." the decimal point, "," digit grouping, "-" and "+" signs, text
-// in single quotes and any other character as written; up to three sections (positive;negative;zero).
+// A number under a \# numeric picture (§17.16.4.2, as Microsoft's "Format field results" describes it): 0 a
+// digit (zero when none), # a digit (a space when none), x a digit that drops the digits to its left (rounding
+// to its right), "." the decimal point, "," digit grouping, "-" a minus for a negative number (else a space),
+// "+" a plus or minus (a space for zero), text in single quotes and any other character as written; up to three
+// sections (positive;negative;zero).
 export function numericPicture(value: number, picture: string): string {
 	const sections = splitUnquoted(picture, ";")
 	const section =
@@ -225,15 +229,41 @@ export function numericPicture(value: number, picture: string): string {
 				: (sections[0] ?? "")
 	const negativeSection = value < 0 && sections.length > 1
 	const magnitude = Math.abs(value)
-	// The digit placeholders before and after the decimal point.
-	const plain = section.replace(/'[^']*'/g, "")
-	const point = plain.indexOf(".")
-	const integerPart = point < 0 ? plain : plain.slice(0, point)
-	const fractionPart = point < 0 ? "" : plain.slice(point + 1)
-	const decimals = (fractionPart.match(/[0#x]/g) ?? []).length
-	const zeros = (integerPart.match(/0/g) ?? []).length
-	const grouping = integerPart.includes(",")
-	const truncate = integerPart.lastIndexOf("x")
+	// The section's characters outside quotes (quoted text is no placeholder), and its decimal point there.
+	const quoted: boolean[] = []
+
+	for (let at = 0, inside = false; at < section.length; at++) {
+		if (section[at] === "'") inside = !inside
+
+		quoted.push(inside || section[at] === "'")
+	}
+
+	const isCode = (at: number, chars: string): boolean => quoted[at] !== true && chars.includes(section[at] ?? "")
+	let point = -1
+
+	for (let at = 0; at < section.length && point < 0; at++) if (isCode(at, ".")) point = at
+
+	let places = 0
+	let zeros = 0
+	let decimals = 0
+	let optional = 0
+	let truncate = -1
+	let grouping = false
+
+	for (let at = 0; at < section.length; at++) {
+		if (point >= 0 && at > point) {
+			if (isCode(at, "0#x")) decimals++
+			if (isCode(at, "#")) optional++
+
+			continue
+		}
+
+		if (isCode(at, "0#x")) places++
+		if (isCode(at, "0")) zeros++
+		if (isCode(at, "x")) truncate = places
+		if (isCode(at, ",")) grouping = true
+	}
+
 	const [whole = "0", fraction = ""] = magnitude.toFixed(decimals).split(".")
 	let digits = whole.replace(/^0+(?=\d)/, "")
 
@@ -241,18 +271,15 @@ export function numericPicture(value: number, picture: string): string {
 
 	digits = digits.padStart(zeros, "0")
 
-	if (truncate >= 0) {
-		const kept = (integerPart.slice(truncate + 1).match(/[0#]/g) ?? []).length
-
-		digits = digits.slice(Math.max(0, digits.length - kept))
-	}
-
+	// An x keeps itself and the places after it.
+	if (truncate > 0) digits = digits.slice(Math.max(0, digits.length - (places - truncate + 1)))
 	if (grouping) digits = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",")
 
-	// Optional trailing fraction digits (#) are dropped when zero.
+	// Places no digit fills show as spaces.
+	const integer = " ".repeat(Math.max(0, places - digits.replace(/,/g, "").length)) + digits
 	let fractionDigits = fraction
-	const optional = (fractionPart.match(/#/g) ?? []).length
 
+	// Optional trailing fraction digits (#) are dropped when zero.
 	for (let k = 0; k < optional && fractionDigits.endsWith("0"); k++) fractionDigits = fractionDigits.slice(0, -1)
 
 	let out = ""
@@ -272,22 +299,22 @@ export function numericPicture(value: number, picture: string): string {
 			continue
 		}
 
-		if ((char === "0" || char === "#" || char === "x" || char === ",") && (point < 0 || at < section.indexOf("."))) {
+		if ("0#x,".includes(char) && (point < 0 || at < point)) {
 			if (!integerDone) {
-				out += digits
+				out += integer
 				integerDone = true
 			}
 
 			continue
 		}
 
-		if (char === "." && point >= 0) {
+		if (at === point) {
 			if (fractionDigits !== "") out += "."
 
 			continue
 		}
 
-		if (char === "0" || char === "#" || char === "x") {
+		if ("0#x".includes(char)) {
 			if (!fractionDone) {
 				out += fractionDigits
 				fractionDone = true
@@ -297,7 +324,7 @@ export function numericPicture(value: number, picture: string): string {
 		}
 
 		if (char === "-" || char === "+") {
-			if (!signDone && !negativeSection) out += value < 0 ? "-" : char === "+" && value > 0 ? "+" : ""
+			if (!signDone && !negativeSection) out += value < 0 ? "-" : char === "+" && value > 0 ? "+" : " "
 
 			signDone = true
 
@@ -333,15 +360,16 @@ function splitUnquoted(text: string, separator: string): string[] {
 	return out
 }
 
-const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 // Word's defaults when no \@ is given: the en-US short date and time.
 export const DEFAULT_DATE_PICTURE = "M/d/yyyy"
 export const DEFAULT_TIME_PICTURE = "h:mm am/pm"
 
 // A date under a \@ date-time picture (§17.16.4.1): M months, d days, y years, h (12-hour) and H (24-hour)
-// hours, m minutes, s seconds, am/pm and AM/PM, text in single quotes and other characters as written.
-export function datePicture(date: Date, picture: string): string {
+// hours, m minutes, s seconds, am/pm and AM/PM (both upper case, as Word shows them: Microsoft's "Format field
+// results"), text in single quotes and other characters as written; month and day names in `language` (the
+// field's w:lang, with a day in the picture the form a date gives a month: forms/dates.ts, as date controls).
+export function datePicture(date: Date, picture: string, language?: string): string {
+	const dated = picturesDay(picture)
 	let out = ""
 	let at = 0
 	const run = (char: string): number => {
@@ -369,9 +397,8 @@ export function datePicture(date: Date, picture: string): string {
 		if (ampm !== null) {
 			const pm = date.getHours() >= 12
 			const token = ampm[1] as string
-			const text = token.length === 3 ? (pm ? "p" : "a") : pm ? "pm" : "am"
 
-			out += token === token.toUpperCase() ? text.toUpperCase() : text
+			out += token.length === 3 ? (token === token.toUpperCase() ? (pm ? "P" : "A") : pm ? "p" : "a") : pm ? "PM" : "AM"
 			at += token.length
 
 			continue
@@ -383,9 +410,9 @@ export function datePicture(date: Date, picture: string): string {
 			case "M":
 				out +=
 					count >= 4
-						? MONTHS[date.getMonth()]
+						? monthName(date.getMonth() + 1, language, "long", dated)
 						: count === 3
-							? MONTHS[date.getMonth()]?.slice(0, 3)
+							? monthName(date.getMonth() + 1, language, "short", dated)
 							: String(date.getMonth() + 1).padStart(count, "0")
 
 				break
@@ -393,9 +420,9 @@ export function datePicture(date: Date, picture: string): string {
 			case "D":
 				out +=
 					count >= 4
-						? DAYS[date.getDay()]
+						? dayName(date.getDay(), language, "long")
 						: count === 3
-							? DAYS[date.getDay()]?.slice(0, 3)
+							? dayName(date.getDay(), language, "short")
 							: String(date.getDate()).padStart(count, "0")
 
 				break
@@ -517,17 +544,114 @@ function deleted(marks: readonly Mark[]): boolean {
 	return DELETED.some(type => type.isInSet(marks) !== undefined)
 }
 
+// What source items [first, last) of `part` read as in the final view, as rangeText reads the document (content
+// kept as its bytes: a locked block).
+export function sourceText(part: StoryPart, first: number, last: number): string {
+	let out = ""
+	// From inside a paragraph, the next one starts a new line.
+	let paragraphs = part.kinds[first] === Item.Paragraph || part.kinds[first] === Item.Table ? 0 : 1
+	let depth = 0
+	let code = 0
+	const codes: number[] = []
+
+	for (let item = first; item < last;) {
+		const kind = part.kinds[item] ?? 0
+
+		if (part.hidden(item, RevisionView.Final)) {
+			item = part.end(item)
+
+			continue
+		}
+
+		switch (kind) {
+			case Item.FieldChar: {
+				const type = part.fieldCharType(item)
+
+				if (type === FieldCharType.Begin) {
+					codes.push(code)
+					code = ++depth
+				} else if (type === FieldCharType.Separate) code = codes[codes.length - 1] ?? 0
+				else if (type === FieldCharType.End && depth > 0) {
+					depth--
+					code = codes.pop() ?? 0
+				}
+
+				break
+			}
+			case Item.Text:
+				if (code === 0) out += part.text(item)
+
+				break
+			case Item.Tab:
+			case Item.PositionalTab:
+				if (code === 0) out += "\t"
+
+				break
+			case Item.Break:
+				if (code === 0 && part.breakType(item) === BreakType.TextWrapping) out += "\n"
+
+				break
+			case Item.CarriageReturn:
+				if (code === 0) out += "\n"
+
+				break
+			case Item.NoBreakHyphen:
+				if (code === 0) out += "‑"
+
+				break
+			case Item.Symbol: {
+				const char = part.aux[item] ?? -1
+
+				if (code === 0 && char > 0 && char <= 0x10ffff) out += String.fromCodePoint(char)
+
+				break
+			}
+			case Item.Paragraph:
+				if (paragraphs++ > 0) out += "\n"
+
+				break
+		}
+
+		item =
+			TRANSPARENT[kind] === 1 || kind === Item.Paragraph || kind === Item.Table || kind === Item.Row || kind === Item.Cell
+				? item + 1
+				: part.end(item)
+	}
+
+	return out
+}
+
+// A bookmark's start and end as source items (NO_SOURCE: not in a locked block's bytes) of `part`, for the text
+// of locked blocks it starts, ends or runs through.
+export interface RangeSource {
+	readonly part: StoryPart
+	readonly start: number
+	readonly end: number
+}
+
 // What [from, to) of `doc` reads as in the final view: text, tabs, breaks and field results, paragraphs
-// joined by line breaks (a field result is inline content).
-export function rangeText(doc: Node, from: number, to: number): string {
+// joined by line breaks (a field result is inline content); with `source`, locked blocks too, as their bytes
+// read (from the bookmark's start to its end where they are inside).
+export function rangeText(doc: Node, from: number, to: number, source?: RangeSource): string {
 	let out = ""
 	let paragraphs = 0
 
 	doc.nodesBetween(Math.max(0, from), Math.min(to, doc.content.size), (node, pos) => {
-		if (node.isTextblock) {
+		if (node.isTextblock || (source !== undefined && node.type === nodes.locked_block)) {
 			if (paragraphs++ > 0 && pos >= from) out += "\n"
 
-			return true
+			if (node.isTextblock) return true
+
+			const part = (source as RangeSource).part
+			const first = node.attrs["src"] as number
+			const last = first >= 0 && first < part.count ? part.end(first) : first
+			const start = (source as RangeSource).start
+			const end = (source as RangeSource).end
+
+			if (first >= 0 && first < part.count)
+				out += sourceText(part, start > first && start < last ? start : first, end > first && end < last ? end : last)
+
+			return false
 		}
 
 		if (!node.isInline) return !node.isAtom
@@ -628,9 +752,11 @@ function nestingFields(part: StoryPart): ReadonlySet<number> {
 // holds the field), it is not locked (w:fldLock), holds no other field and its result holds only what a
 // rewrite may drop.
 export function rewritableSource(part: StoryPart, node: Node): SourceField | undefined {
-	const first = node.attrs["src"] as number
-	const last = node.attrs["end"] as number
+	return rewritableSourceAt(part, node.attrs["src"] as number, node.attrs["end"] as number)
+}
 
+// The same for the source field of items `first` to `last`.
+export function rewritableSourceAt(part: StoryPart, first: number, last: number): SourceField | undefined {
 	if (first === NO_SOURCE || first < 0 || first >= part.count) return undefined
 
 	const simple = part.kinds[first] === Item.FieldSimple
@@ -682,11 +808,16 @@ export const UPDATABLE_FIELDS: ReadonlySet<string> = new Set([
 	"SEQ"
 ])
 
+// Fields numbering by a list of their own (§17.16.5.37, §17.16.5.4-6), which an update does not count.
+const LIST_NUMBERS: ReadonlySet<string> = new Set(["LISTNUM", "AUTONUM", "AUTONUMLGL", "AUTONUMOUT"])
+
 // Fields whose result depends on page numbers.
 const PAGE_FIELDS: ReadonlySet<string> = new Set(["PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "PAGEREF"])
 
-// What Word writes for a cross-reference to a bookmark the document lacks (en-US).
+// What Word writes for a page reference (PAGEREF, a table of contents' entry) to a bookmark the document lacks,
+// and for a REF to one (en-US).
 export const MISSING_BOOKMARK = "Error! Bookmark not defined."
+export const MISSING_REFERENCE = "Error! Reference source not found."
 
 export function needsPages(type: string): boolean {
 	return PAGE_FIELDS.has(type)
@@ -699,11 +830,21 @@ export function fieldUpdateOf(node: Node): FieldUpdate | null {
 }
 
 // What a field atom's attributes become when its tracked update is accepted (the result stays) or rejected
-// (the result before comes back).
-export function resolvedFieldUpdate(node: Node, accept: boolean): { readonly result: string; readonly update: null } {
+// (the result before comes back); with tracked changes in its code, the code after or before them.
+export function resolvedFieldUpdate(node: Node, accept: boolean): Readonly<Record<string, unknown>> {
 	const update = fieldUpdateOf(node)
+	const result = accept || update === null ? (node.attrs["result"] as string) : update.result
 
-	return { result: accept || update === null ? (node.attrs["result"] as string) : update.result, update: null }
+	if (update?.code === undefined) return { result, update: null }
+
+	const instruction = accept ? update.code.after : update.code.before
+
+	return { result, update: null, instruction, type: fieldCodeType(instruction) }
+}
+
+// A field atom's type for its code: the code's first word, upper case.
+export function fieldCodeType(instruction: string): string {
+	return (/^\s*([^\s\\"]+)/.exec(instruction)?.[1] ?? "").toUpperCase()
 }
 
 // Whether field atom `node` (of `session`'s story) is one an update recomputes.
@@ -721,6 +862,7 @@ export class FieldEvaluation {
 	readonly doc: Node
 	private readonly now: Date
 	private sequences: Map<number, number> | undefined = undefined
+	private readonly lists = new Map<DocxEditorSession, ListNumbers>()
 
 	constructor(host: FieldHost, session: DocxEditorSession, now: number, doc: Node = session.state.doc) {
 		this.host = host
@@ -784,7 +926,11 @@ export class FieldEvaluation {
 			case "DATE":
 			case "TIME":
 				return caseFormat(
-					datePicture(this.now, switchOf(code, "@")?.arg ?? (code.type === "DATE" ? DEFAULT_DATE_PICTURE : DEFAULT_TIME_PICTURE)),
+					datePicture(
+						this.now,
+						switchOf(code, "@")?.arg ?? (code.type === "DATE" ? DEFAULT_DATE_PICTURE : DEFAULT_TIME_PICTURE),
+						this.language(node, pos)
+					),
 					code
 				)
 			case "REF":
@@ -798,32 +944,152 @@ export class FieldEvaluation {
 		}
 	}
 
+	// The list number of the paragraph a bookmark starts in (see reference), "" when it has none.
+	private paragraphNumber(code: FieldCode, context: "none" | "full" | "relative", bookmark: DocxBookmark, pos: number): string {
+		const holder = this.holder(bookmark)
+		const lists = this.listsOf(holder)
+		const target = lists.at(paragraphAt(this.docOf(holder), bookmark.from))
+
+		if (target === undefined || target.bullet) return ""
+
+		const numbering = holder.context.numbering as Numbering
+		const segments: NumberSegment[] = []
+		const covered = new Set<number>([target.ilvl])
+		const own = levelSegments(numbering, target, target.ilvl)
+
+		for (const segment of own) covered.add(segment.level)
+
+		// Higher levels the level's own text leaves out, nearest last: each with its own text.
+		if (context !== "none")
+			for (let level = target.ilvl - 1; level >= 0; level--) {
+				if (covered.has(level)) continue
+
+				const outer = levelSegments(numbering, target, level)
+
+				for (const segment of outer) covered.add(segment.level)
+
+				segments.unshift(...outer)
+			}
+
+		segments.push(...own)
+
+		// Relative: the leading levels the REF's own paragraph shares, when it is numbered in the same list.
+		if (context === "relative") {
+			const own = holder === this.session ? lists.at(paragraphAt(this.doc, pos)) : undefined
+			const here = own?.abstractId === target.abstractId ? own : undefined
+
+			while (
+				here !== undefined &&
+				segments.length > 1 &&
+				(segments[0]?.level ?? 0) < target.ilvl &&
+				here.values[segments[0]?.level ?? 0] === target.values[segments[0]?.level ?? 0]
+			)
+				segments.shift()
+		}
+
+		const separator = switchOf(code, "d")?.arg
+		const plain = hasSwitch(code, "t")
+		let out = ""
+
+		for (const [index, segment] of segments.entries()) {
+			const last = index === segments.length - 1
+			const lead = plain ? delimiters(segment.lead) : segment.lead
+			const after = separator !== undefined && !last ? separator : plain ? delimiters(segment.after) : segment.after
+
+			out += (index === 0 ? lead : "") + segment.number + after
+		}
+
+		return out.replace(/[.\s]+$/u, "")
+	}
+
+	private listsOf(session: DocxEditorSession): ListNumbers {
+		let lists = this.lists.get(session)
+
+		if (lists === undefined) {
+			lists = new ListNumbers(session, this.docOf(session))
+			this.lists.set(session, lists)
+		}
+
+		return lists
+	}
+
+	private holdsListNumbers(bookmark: DocxBookmark): boolean {
+		const doc = this.docOf(this.holder(bookmark))
+		let found = false
+
+		doc.nodesBetween(Math.max(0, bookmark.from), Math.min(bookmark.to, doc.content.size), node => {
+			if (node.type === nodes.field && LIST_NUMBERS.has(node.attrs["type"] as string)) found = true
+
+			return !found && !node.isLeaf
+		})
+
+		return found
+	}
+
+	// The bookmarked text, locked blocks it starts, ends or runs through read from their bytes.
+	private bookmarkText(bookmark: DocxBookmark): string {
+		const holder = this.holder(bookmark)
+		const doc = this.docOf(holder)
+		const locked = (place: string | undefined, pos: number): Node | null =>
+			place === "kept" && pos >= 0 && pos < doc.content.size && doc.nodeAt(pos)?.type === nodes.locked_block ? doc.nodeAt(pos) : null
+		const first = locked(bookmark.start, bookmark.startPos)
+		const last = locked(bookmark.end, bookmark.endPos)
+		const from = first === null ? bookmark.from : bookmark.startPos
+		const to = last === null ? bookmark.to : bookmark.endPos + last.nodeSize
+
+		return rangeText(doc, from, to, { part: holder.story.part, start: bookmark.startItem, end: bookmark.endItem })
+	}
+
+	// The language of a field atom's runs (w:lang, its Latin script value; a field of the file's, its first run's),
+	// if any.
+	private language(node: Node, pos: number): string | undefined {
+		const $pos = this.doc.resolve(pos)
+
+		if ($pos.parent.type !== nodes.paragraph) return undefined
+
+		const session = this.session
+		const part = session.story.part
+		const own = node.attrs["src"] as number
+		let props = session.formats.runProps(node.marks)
+
+		if (own !== NO_SOURCE && own >= 0 && own < part.count) {
+			let run = own
+
+			while (run < part.end(own) && part.kinds[run] !== Item.Run) run++
+
+			const rPr = run < part.end(own) ? (part.runs.rPr[part.aux[run] ?? -1] ?? -1) : -1
+
+			if (rPr >= 0) props = session.context.store.run(part.document, rPr)
+		}
+
+		return session.context.resolver.run(session.formats.paragraph($pos.parent), props).lang.latin
+	}
+
 	// "above" or "below": where a bookmark is from `pos` (§17.16.5.51 \p).
 	private relative(bookmark: DocxBookmark, pos: number): string {
 		return this.holder(bookmark) !== this.session || bookmark.from <= pos ? "above" : "below"
 	}
 
-	// REF (§17.16.5.51): the bookmarked text, or with \n, \r or \w the list number of its paragraph as drawn
-	// (the number in full whichever of the three: the layout draws it so), \d its separator, \p "above"/"below".
+	// REF (§17.16.5.51, MS-OI29500 2.1.495): the bookmarked text, or the list number of its paragraph without
+	// trailing periods: \n as drawn (its level's text), \w in full context (the higher levels its text leaves out
+	// before it), \r relative to the REF's own place in the list (the higher levels both share left out); \t keeps
+	// only numbers and delimiters, \d replaces the delimiters between numbers, \p adds "above"/"below".
 	private reference(code: FieldCode, pos: number): string | undefined {
 		const bookmark = this.bookmark(code.args[0])
 
-		if (bookmark === undefined) return MISSING_BOOKMARK
+		if (bookmark === undefined) return MISSING_REFERENCE
 
-		const numbered = hasSwitch(code, "n") || hasSwitch(code, "r") || hasSwitch(code, "w")
+		const context = hasSwitch(code, "w") ? "full" : hasSwitch(code, "r") ? "relative" : hasSwitch(code, "n") ? "none" : undefined
+		const numbered = context !== undefined
 		let text: string
 
-		if (numbered) {
-			const session = this.holder(bookmark)
-			const marker = this.host.pages?.markerAt(session, bookmark.from) ?? ""
+		if (context !== undefined) text = this.paragraphNumber(code, context, bookmark, pos)
+		else {
+			// A list number field there (LISTNUM, AUTONUM) is drawn by Word from its list, which this editor does not
+			// count: the result Word stored stays.
+			if (this.holdsListNumbers(bookmark)) return undefined
 
-			text = marker.replace(/[\t\s]+$/, "")
-
-			if (hasSwitch(code, "d")) text = text.replace(/[.]/g, switchOf(code, "d")?.arg ?? ".")
-		} else {
-			const holder = this.holder(bookmark)
-
-			text = rangeText(this.docOf(holder), bookmark.from, bookmark.to)
+			text = this.bookmarkText(bookmark)
 		}
 
 		if (hasSwitch(code, "p")) text = numbered ? `${text} ${this.relative(bookmark, pos)}` : this.relative(bookmark, pos)
@@ -873,11 +1139,30 @@ export class FieldEvaluation {
 		const fields: { pos: number; code: FieldCode }[] = []
 		const resets = new Map<string, number>()
 
+		const part = this.session.story.part
+		const kept = keptSequences(part)
+		// Fields kept in a locked block's bytes count where the block is; their results stay.
+		const counted = new Set<{ pos: number; code: FieldCode }>()
+
 		doc.descendants((node, pos) => {
 			if (node.type === nodes.field) {
 				const code = parseFieldCode(node.attrs["instruction"] as string)
 
 				if (code.type === "SEQ" && !deleted(node.marks)) fields.push({ pos, code })
+
+				return false
+			}
+
+			if (node.type === nodes.locked_block && kept.length > 0 && !deleted(node.marks)) {
+				const first = node.attrs["src"] as number
+
+				if (first >= 0 && first < part.count)
+					for (let k = lowerBound(kept, first); k < kept.length && (kept[k]?.item ?? 0) < part.end(first); k++) {
+						const entry = { pos, code: (kept[k] as { code: FieldCode }).code }
+
+						counted.add(entry)
+						fields.push(entry)
+					}
 
 				return false
 			}
@@ -912,7 +1197,7 @@ export class FieldEvaluation {
 		let heading = 0
 		const lastHeading = new Map<string, number>()
 
-		for (const { pos, code } of fields) {
+		for (const [index, { pos, code }] of fields.entries()) {
 			const id = (code.args[0] ?? "").toLowerCase()
 
 			while (heading < headings.length && (headings[heading]?.pos ?? 0) < pos) {
@@ -931,13 +1216,196 @@ export class FieldEvaluation {
 			else if (!hasSwitch(code, "c")) counter++
 
 			counters.set(resetAt, counter)
-			values.set(pos, counter)
+
+			if (!counted.has(fields[index] as { pos: number; code: FieldCode })) values.set(pos, counter)
 		}
 
 		this.sequences = values
 
 		return values
 	}
+}
+
+// ---- list numbers ----------------------------------------------------------------------------------------
+
+interface ListEntry {
+	readonly pos: number
+	readonly numId: number
+	readonly ilvl: number
+	readonly abstractId: number
+	// The counter of each level up to its own as its paragraph was numbered (a level not counted yet: its start).
+	readonly values: readonly number[]
+	readonly bullet: boolean
+}
+
+// The numbered paragraphs of a story's document (outside locked blocks), counted once per update as layout
+// counts them.
+class ListNumbers {
+	private readonly byPos = new Map<number, ListEntry>()
+
+	constructor(session: DocxEditorSession, doc: Node) {
+		const numbering = session.context.numbering
+
+		if (numbering === undefined) return
+
+		const counters = new NumberingCounters(numbering)
+		const formats = session.formats
+		// Per abstract definition, the last value of each level and whether it counted since a higher one did.
+		const state = new Map<number, { values: number[]; active: boolean[] }>()
+
+		doc.descendants((node, pos) => {
+			if (!node.isTextblock) return node.type !== nodes.locked_block && !node.isInline
+			if (node.type !== nodes.paragraph) return false
+
+			const ref = formats.paragraph(node).props.numbering
+
+			if (ref === undefined || ref.numId <= 0) return false
+
+			const marker = counters.next(ref.numId, ref.ilvl)
+			const effective = numbering.level(ref.numId, ref.ilvl)
+
+			if (marker === undefined || effective === undefined) return false
+
+			let levels = state.get(effective.abstractId)
+
+			if (levels === undefined) {
+				levels = { values: [], active: [] }
+				state.set(effective.abstractId, levels)
+			}
+
+			levels.values[marker.ilvl] = marker.value
+			levels.active[marker.ilvl] = true
+			levels.active.fill(false, marker.ilvl + 1)
+
+			const values: number[] = []
+
+			for (let level = 0; level <= marker.ilvl; level++)
+				values.push(levels.active[level] === true ? (levels.values[level] ?? 0) : (numbering.level(ref.numId, level)?.start ?? 0))
+
+			const entry: ListEntry = {
+				pos,
+				numId: ref.numId,
+				ilvl: marker.ilvl,
+				abstractId: effective.abstractId,
+				values,
+				bullet: marker.bullet
+			}
+
+			this.byPos.set(pos, entry)
+
+			return false
+		})
+	}
+
+	at(pos: number): ListEntry | undefined {
+		return this.byPos.get(pos)
+	}
+}
+
+// The paragraph holding (or starting at) `pos` of `doc`: its position, or -1.
+function paragraphAt(doc: Node, pos: number): number {
+	const $pos = doc.resolve(Math.max(0, Math.min(pos, doc.content.size)))
+
+	if ($pos.parent.isTextblock) return $pos.before()
+
+	return $pos.nodeAfter?.isTextblock === true ? $pos.pos : -1
+}
+
+// One number of a list number: the text before it (the level text's own, for the first), the number and the
+// text up to the next number (or the end).
+interface NumberSegment {
+	readonly level: number
+	readonly lead: string
+	readonly number: string
+	readonly after: string
+}
+
+// Level `level`'s text (w:lvlText) of the list `entry` is in, as segments with `entry`'s counters.
+function levelSegments(numbering: Numbering, entry: ListEntry, level: number): NumberSegment[] {
+	const definition = numbering.level(entry.numId, level)?.level
+	const template = definition?.text ?? ""
+	const out: { level: number; lead: string; number: string; after: string }[] = []
+	let from = 0
+	let lead = ""
+
+	for (let at = template.indexOf("%"); at >= 0; at = template.indexOf("%", at + 1)) {
+		const target = template.charCodeAt(at + 1) - 49
+
+		if (target < 0 || target > 8) continue
+
+		const text = template.slice(from, at)
+		const previous = out[out.length - 1]
+
+		if (previous === undefined) lead = text
+		else previous.after = text
+
+		from = at + 2
+
+		if (target > level) continue
+
+		const own = numbering.level(entry.numId, target)?.level
+		let format = own?.format ?? "decimal"
+
+		if (definition?.legal === true && format !== "none" && format !== "bullet") format = "decimal"
+
+		out.push({
+			level: target,
+			lead: out.length === 0 ? lead : "",
+			number: formatNumber(entry.values[target] ?? 0, format, own?.customFormat),
+			after: ""
+		})
+		at = from - 1
+	}
+
+	const previous = out[out.length - 1]
+
+	if (previous !== undefined) previous.after = template.slice(from)
+
+	return out
+}
+
+// What delimits numbers in `text`: what is neither a letter nor a space (\t).
+function delimiters(text: string): string {
+	return text.replace(/[\p{L}\s]/gu, "")
+}
+
+const KEPT_SEQUENCES = new WeakMap<StoryPart, readonly { readonly item: number; readonly code: FieldCode }[]>()
+
+// The SEQ fields of a part (their first items, in order, deleted ones left out), read once per part.
+function keptSequences(part: StoryPart): readonly { readonly item: number; readonly code: FieldCode }[] {
+	let list = KEPT_SEQUENCES.get(part)
+
+	if (list === undefined) {
+		const out: { item: number; code: FieldCode }[] = []
+
+		for (let field = 0; field < part.fields.count; field++) {
+			const item = part.fields.begin[field] ?? -1
+
+			if (item < 0 || part.fieldType(field) !== "SEQ" || part.hidden(item, RevisionView.Final)) continue
+
+			out.push({ item, code: parseFieldCode(part.fieldInstruction(field)) })
+		}
+
+		list = out.sort((a, b) => a.item - b.item)
+		KEPT_SEQUENCES.set(part, list)
+	}
+
+	return list
+}
+
+// The first index of `list` whose item is at or after `item`.
+function lowerBound(list: readonly { readonly item: number }[], item: number): number {
+	let low = 0
+	let high = list.length
+
+	while (low < high) {
+		const middle = (low + high) >> 1
+
+		if ((list[middle]?.item ?? 0) < item) low = middle + 1
+		else high = middle
+	}
+
+	return low
 }
 
 // ---- the paged editor as a host ----------------------------------------------------------------------------

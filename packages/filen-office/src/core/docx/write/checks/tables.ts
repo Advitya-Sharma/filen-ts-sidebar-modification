@@ -1,3 +1,4 @@
+import { runSliced } from "../../../slicing"
 import { NodeKind, type XmlDocument } from "../../../xml/index"
 import { Ns } from "../../model/namespaces"
 import { partReader, type PartReader } from "../../model/reader"
@@ -169,8 +170,9 @@ function recordFaults(children: readonly View[], resolver: Resolver, skeleton: X
 	return faults
 }
 
-// Faults of one table; nested tables are found on their own.
-function tableFaults(table: View, resolver: Resolver, skeleton: XmlDocument | undefined, counts: Counts): void {
+// Faults of one table, some rows at a time (a long table of copied rows is long to read); nested tables are
+// found on their own.
+function* tableFaults(table: View, resolver: Resolver, skeleton: XmlDocument | undefined, counts: Counts): Generator<void, void> {
 	const children = resolver.children(table)
 	const tblPr = first(children, "tblPr")
 	const tblGrid = first(children, "tblGrid")
@@ -193,85 +195,131 @@ function tableFaults(table: View, resolver: Resolver, skeleton: XmlDocument | un
 	}
 
 	// Per row: the cells' first columns and spans, and whether each takes part in a merge.
-	let above: Map<number, { span: number; merged: boolean }> | undefined
+	let above: Cells | undefined
+	let rows = 0
 
 	for (const row of children) {
 		if (!isW(row, "tr")) continue
 
-		const parts = resolver.children(row)
-		const trPr = first(parts, "trPr")
-		const trChildren = trPr === undefined ? [] : resolver.children(trPr)
-		let column = intVal(first(trChildren, "gridBefore"), 0)
-		const here = new Map<number, { span: number; merged: boolean }>()
-		let judged = true
+		above = rowFaults(row, above, tblGrid === undefined ? undefined : columns, resolver, skeleton, counts)
 
-		counts.record += recordFaults(trChildren, resolver, skeleton)
-
-		const tblPrEx = first(parts, "tblPrEx")
-
-		if (tblPrEx !== undefined) counts.record += recordFaults(resolver.children(tblPrEx), resolver, skeleton)
-
-		for (const part of parts) {
-			if (isW(part, "trPr") || isW(part, "tblPrEx")) continue
-			// Cells inside content controls or custom XML: not judged.
-			if (!isW(part, "tc")) {
-				if (isW(part, "sdt") || isW(part, "customXml")) judged = false
-
-				continue
-			}
-
-			const content = resolver.children(part)
-			const tcPr = first(content, "tcPr")
-			const props = tcPr === undefined ? [] : resolver.children(tcPr)
-			const span = Math.max(1, intVal(first(props, "gridSpan"), 1))
-			const vMerge = first(props, "vMerge")
-			const value = vMerge === undefined ? null : (vMerge.reader.attr(vMerge.node, Ns.W, "val") ?? "continue")
-
-			if (value === "continue") {
-				const cell = above?.get(column)
-
-				if (cell === undefined || cell.span !== span || !cell.merged) counts.orphan++
-			}
-
-			counts.record += recordFaults(props, resolver, skeleton)
-
-			const blocks = content.filter(view => !isW(view, "tcPr"))
-			const last = blocks.at(-1)
-
-			if (last === undefined || isW(last, "tbl")) counts.unended++
-
-			here.set(column, { span, merged: value !== null })
-			column += span
-		}
-
-		column += intVal(first(trChildren, "gridAfter"), 0)
-
-		if (judged && tblGrid !== undefined && column > columns) counts.wide++
-
-		above = judged ? here : undefined
+		if (++rows % ROW_STEP === 0) yield
 	}
 }
 
-// Faults of every table in `doc` under `root` (nested ones included).
-function faultsUnder(doc: XmlDocument, root: number, resolver: Resolver, skeleton: XmlDocument | undefined, counts: Counts): boolean {
+// Rows of a table read between yields.
+const ROW_STEP = 32
+
+// A row's cells by first column: their spans, and whether each takes part in a merge.
+type Cells = Map<number, { span: number; merged: boolean }>
+
+// Faults of one row under the row `above` (when judged), against a grid of `columns` (when it has one); the
+// row's cells, when it is judged.
+function rowFaults(
+	row: View,
+	above: Cells | undefined,
+	columns: number | undefined,
+	resolver: Resolver,
+	skeleton: XmlDocument | undefined,
+	counts: Counts
+): Cells | undefined {
+	const parts = resolver.children(row)
+	const trPr = first(parts, "trPr")
+	const trChildren = trPr === undefined ? [] : resolver.children(trPr)
+	let column = intVal(first(trChildren, "gridBefore"), 0)
+	const here: Cells = new Map()
+	let judged = true
+
+	counts.record += recordFaults(trChildren, resolver, skeleton)
+
+	const tblPrEx = first(parts, "tblPrEx")
+
+	if (tblPrEx !== undefined) counts.record += recordFaults(resolver.children(tblPrEx), resolver, skeleton)
+
+	for (const part of parts) {
+		if (isW(part, "trPr") || isW(part, "tblPrEx")) continue
+		// Cells inside content controls or custom XML: not judged.
+		if (!isW(part, "tc")) {
+			if (isW(part, "sdt") || isW(part, "customXml")) judged = false
+
+			continue
+		}
+
+		const content = resolver.children(part)
+		const tcPr = first(content, "tcPr")
+		const props = tcPr === undefined ? [] : resolver.children(tcPr)
+		const span = Math.max(1, intVal(first(props, "gridSpan"), 1))
+		const vMerge = first(props, "vMerge")
+		const value = vMerge === undefined ? null : (vMerge.reader.attr(vMerge.node, Ns.W, "val") ?? "continue")
+
+		if (value === "continue") {
+			const cell = above?.get(column)
+
+			if (cell === undefined || cell.span !== span || !cell.merged) counts.orphan++
+		}
+
+		counts.record += recordFaults(props, resolver, skeleton)
+
+		const blocks = content.filter(view => !isW(view, "tcPr"))
+		const last = blocks.at(-1)
+
+		if (last === undefined || isW(last, "tbl")) counts.unended++
+
+		here.set(column, { span, merged: value !== null })
+		column += span
+	}
+
+	column += intVal(first(trChildren, "gridAfter"), 0)
+
+	if (judged && columns !== undefined && column > columns) counts.wide++
+
+	return judged ? here : undefined
+}
+
+// Faults of every table in `doc` under `root` (nested ones included), a step at a time.
+function* faultsUnder(
+	doc: XmlDocument,
+	root: number,
+	resolver: Resolver,
+	skeleton: XmlDocument | undefined,
+	counts: Counts
+): Generator<void, void> {
 	const reader = partReader(doc)
 	const end = root < 0 ? doc.count : nodeEnd(doc, root)
-	let found = false
 
-	for (let node = Math.max(0, root); node < end; node++) {
-		if (doc.kinds[node] !== NodeKind.Element || reader.group(node) !== Ns.W || doc.localName(node) !== "tbl") continue
+	for (let from = Math.max(0, root); from < end;) {
+		const to = Math.min(end, from + NODE_STEP)
+		const node = nextTable(doc, reader, from, to)
 
-		found = true
+		if (node < 0) {
+			from = to
+
+			yield
+
+			continue
+		}
+
 		resolver.unknown = false
 
 		const table = noCounts()
 
-		tableFaults({ doc, reader, node }, resolver, skeleton, table)
+		yield* tableFaults({ doc, reader, node }, resolver, skeleton, table)
 
 		if (!resolver.unknown) for (const fault of FAULTS) counts[fault] += table[fault]
-	}
 
-	return found
+		from = node + 1
+	}
+}
+
+// Nodes looked at between yields.
+const NODE_STEP = 8192
+
+// The first w:tbl among nodes [from, to), or -1.
+function nextTable(doc: XmlDocument, reader: PartReader, from: number, to: number): number {
+	for (let node = from; node < to; node++)
+		if (doc.kinds[node] === NodeKind.Element && reader.group(node) === Ns.W && doc.localName(node) === "tbl") return node
+
+	return -1
 }
 
 // The node after `node`'s last descendant.
@@ -299,7 +347,7 @@ async function sourceFaults(input: CheckInput, part: CheckedPart): Promise<Count
 
 			const item = change.session.story.story.item
 
-			if (item >= 0) faultsUnder(story.document, story.node(item), resolver, undefined, counts)
+			if (item >= 0) await runSliced(faultsUnder(story.document, story.node(item), resolver, undefined, counts), input.clock)
 		}
 
 		return counts
@@ -309,7 +357,7 @@ async function sourceFaults(input: CheckInput, part: CheckedPart): Promise<Count
 
 	const original = story?.document ?? (await input.original.xml(part.name))
 
-	faultsUnder(original, -1, new Resolver(undefined, undefined, [], []), undefined, counts)
+	await runSliced(faultsUnder(original, -1, new Resolver(undefined, undefined, [], []), undefined, counts), input.clock)
 
 	return counts
 }
@@ -345,7 +393,7 @@ async function checkTables(input: CheckInput, part: CheckedPart): Promise<void> 
 	const resolver = new Resolver(skeleton, part.part?.document, holders, spans)
 	const counts = noCounts()
 
-	faultsUnder(doc, -1, resolver, skeleton, counts)
+	await runSliced(faultsUnder(doc, -1, resolver, skeleton, counts), input.clock)
 
 	if (FAULTS.every(fault => counts[fault] === 0)) return
 

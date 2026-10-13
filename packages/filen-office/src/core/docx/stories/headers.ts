@@ -7,7 +7,7 @@ import { docxSchema } from "../edit/schema"
 import { sourceCopies, type DocxEditorSession } from "../edit/session"
 import type { HeaderFooterSet, Section } from "../model/index"
 import type { PagedEditor } from "../paged/editor"
-import { cloneStory, type StoryTemplate } from "./clone"
+import { cloneStory, copySessions, type StoryTemplate } from "./clone"
 import { hasStyleDefinition } from "../write/styles"
 import {
 	bodySectionsOf,
@@ -179,15 +179,7 @@ function copyOf(editor: PagedEditor, story: number): StoryTemplate | undefined {
 	if (target === undefined || part === undefined || target.item < 0 || (target.kind !== "header" && target.kind !== "footer"))
 		return undefined
 
-	const within = (candidate: number): boolean => {
-		for (let at = stories[candidate]?.parent ?? -1; at >= 0; at = stories[at]?.parent ?? -1) if (at === story) return true
-
-		return false
-	}
-	const textboxes = editor.sessions.filter(candidate => candidate.story.story.kind === "textbox" && within(candidate.story.story.index))
-	const edited = textboxes.some(candidate => candidate.state.doc !== candidate.story.doc)
-	// A text box edited is written into the story holding it: that story's session writes it.
-	const session = edited ? editor.storySession(story) : editor.sessions.find(candidate => candidate.story.story.index === story)
+	const { session, textboxes } = copySessions(editor, story)
 
 	return cloneStory(editor.body.session.context, part, target.item, session, textboxes)
 }
@@ -339,7 +331,9 @@ export function canRemove(editor: PagedEditor, kind: DocxHeaderKind): boolean {
 }
 
 // Removes the header (footer) the caret's page shows: every section referring to it loses the reference, so the
-// sections linked to it lose it too.
+// sections linked to it lose it too. Where a section would then show the previous section's instead, it gets
+// an empty one of its own: the page shows none, as Word's Remove Header leaves an unlinked section (Microsoft
+// support, "Delete a header or footer from a single page").
 export function removeHeader(editor: PagedEditor, kind: DocxHeaderKind): boolean {
 	if (!canRemove(editor, kind)) return false
 
@@ -351,10 +345,41 @@ export function removeHeader(editor: PagedEditor, kind: DocxHeaderKind): boolean
 	if (shown === undefined || state === undefined) return false
 
 	const story = setOf(state, kind, true)[shown.type]
-	const holders = states.filter(candidate => setOf(candidate, kind, false)[shown.type] === story).map(candidate => candidate.index)
+	const holders = new Set(
+		states.filter(candidate => setOf(candidate, kind, false)[shown.type] === story).map(candidate => candidate.index)
+	)
+	// Those that would show a header of the previous sections' without their reference.
+	const covered = new Set<number>()
+	let showing = -1
+
+	for (const candidate of states) {
+		const own = setOf(candidate, kind, false)[shown.type]
+
+		if (!holders.has(candidate.index)) {
+			if (own >= 0) showing = own
+		} else if (showing >= 0) {
+			covered.add(candidate.index)
+		}
+	}
+
+	const empty = covered.size === 0 ? undefined : newStory(editor, kind)
+
+	if (covered.size > 0 && empty === undefined) return false
+
 	const leaving = editor.session.story.story.index === story
 
-	if (!editSections(editor, holders, (_state, edit) => ({ ...edit, ...withReference(edit, kind, shown.type, null) }), false)) return false
+	if (
+		!editSections(
+			editor,
+			[...holders],
+			(candidate, edit) => ({
+				...edit,
+				...withReference(edit, kind, shown.type, covered.has(candidate.index) ? (empty ?? null) : null)
+			}),
+			false
+		)
+	)
+		return false
 	if (leaving) editor.exitStory()
 
 	return true

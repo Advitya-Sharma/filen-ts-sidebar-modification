@@ -13,7 +13,7 @@ const HYPERLINK_TYPES = new Set([
 	"http://purl.oclc.org/ooxml/officeDocument/relationships/hyperlink"
 ])
 // Bytes scanned between looks at the clock.
-const SCAN_STEP = 4 * 1024 * 1024
+const SCAN_STEP = 1024 * 1024
 // Bytes of markup scanned again at the start of the next window (an attribute split by a window's end).
 const SEAM = 512
 
@@ -22,8 +22,8 @@ function isSpace(byte: number | undefined): boolean {
 }
 
 // Calls `visit` with the decoded value of every attribute of the relationships namespace (one of `prefixes`,
-// each "prefix:" as bytes) whose name starts in `bytes` [from, to). Raw bytes, no parse: one tight pass finds
-// a whitespace byte followed by a prefix, and a false match only keeps a relationship.
+// each "prefix:" as bytes) whose name starts in `bytes` [from, to). Raw bytes, no parse: the native search finds
+// a prefix after a whitespace byte, and a false match only keeps a relationship.
 function eachRelationshipValue(
 	bytes: Uint8Array,
 	from: number,
@@ -31,50 +31,55 @@ function eachRelationshipValue(
 	prefixes: readonly Uint8Array[],
 	visit: (value: string, pos: number) => void
 ): void {
-	const firsts = new Uint8Array(256)
-
-	for (const prefix of prefixes) firsts[prefix[0] ?? 0] = 1
-
 	const limit = Math.min(to, bytes.length)
+	const byFirst = new Map<number, Uint8Array[]>()
 
-	for (let start = from; start < limit; start++) {
-		if (firsts[bytes[start] ?? 0] === 0 || (start > 0 && !isSpace(bytes[start - 1]))) continue
+	for (const prefix of prefixes) {
+		const first = prefix[0] ?? 0
 
-		let prefix: Uint8Array | undefined
+		byFirst.set(first, [...(byFirst.get(first) ?? []), prefix])
+	}
 
-		for (const candidate of prefixes) {
-			let k = 0
+	// Each prefix's first byte found by the native search, a pass per distinct one (uses are not ordered).
+	for (const [first, candidates] of byFirst) {
+		for (let start = bytes.indexOf(first, from); start >= 0 && start < limit; start = bytes.indexOf(first, start + 1)) {
+			if (start > 0 && !isSpace(bytes[start - 1])) continue
 
-			while (k < candidate.length && bytes[start + k] === candidate[k]) k++
+			for (const candidate of candidates) {
+				let k = 1
 
-			if (k === candidate.length) {
-				prefix = candidate
+				while (k < candidate.length && bytes[start + k] === candidate[k]) k++
 
-				break
+				if (k === candidate.length) {
+					relationshipValue(bytes, start, candidate, visit)
+
+					break
+				}
 			}
 		}
-
-		if (prefix === undefined) continue
-
-		let i = start + prefix.length
-
-		while (i < bytes.length && bytes[i] !== 0x3d && !isSpace(bytes[i]) && bytes[i] !== 0x3e && bytes[i] !== 0x2f) i++
-		while (isSpace(bytes[i])) i++
-
-		if (bytes[i] !== 0x3d) continue
-
-		i++
-
-		while (isSpace(bytes[i])) i++
-
-		const quote = bytes[i]
-
-		if (quote !== 0x22 && quote !== 0x27) continue
-
-		const end = bytes.indexOf(quote, i + 1)
-
-		if (end >= 0) visit(decodeCharacterData(bytes, i + 1, end, true), start)
 	}
+}
+
+// The value of the attribute at `start` named with `prefix`, to `visit`.
+function relationshipValue(bytes: Uint8Array, start: number, prefix: Uint8Array, visit: (value: string, pos: number) => void): void {
+	let i = start + prefix.length
+
+	while (i < bytes.length && bytes[i] !== 0x3d && !isSpace(bytes[i]) && bytes[i] !== 0x3e && bytes[i] !== 0x2f) i++
+	while (isSpace(bytes[i])) i++
+
+	if (bytes[i] !== 0x3d) return
+
+	i++
+
+	while (isSpace(bytes[i])) i++
+
+	const quote = bytes[i]
+
+	if (quote !== 0x22 && quote !== 0x27) return
+
+	const end = bytes.indexOf(quote, i + 1)
+
+	if (end >= 0) visit(decodeCharacterData(bytes, i + 1, end, true), start)
 }
 
 interface Use {
@@ -180,8 +185,24 @@ export async function orphanedHyperlinks(
 	const missing = new Set<string>()
 	const kept = new Set<string>()
 
-	for (const use of await sourceUses(document, prefixes, pause))
-		if (candidates.has(use.value)) (inView(use.pos) ? kept : missing).add(use.value)
+	// Only uses in what the save rewrote (the source between the views) can go: those first, a short scan; the
+	// whole source is looked at only when one of them is a candidate.
+	let at = 0
+
+	for (const [from, to] of [...merged, [source.length, source.length] as [number, number]]) {
+		for (let start = at; start < from; start += SCAN_STEP) {
+			eachRelationshipValue(source, start, Math.min(from, start + SCAN_STEP), prefixes, value => {
+				if (candidates.has(value)) missing.add(value)
+			})
+			await pause()
+		}
+
+		at = Math.max(at, to)
+	}
+
+	if (missing.size === 0) return missing
+
+	for (const use of await sourceUses(document, prefixes, pause)) if (missing.has(use.value) && inView(use.pos)) kept.add(use.value)
 
 	for (const id of kept) missing.delete(id)
 

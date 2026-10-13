@@ -68,11 +68,32 @@ export function previewTransform(from: PageBox, to: PageBox): string {
 }
 
 // The resize a box drag ends with: the drawing's extent scaled as its box was (the box may include effects).
+// A turned drawing's box is the bounds of its turned extent (w|cos| + h|sin| wide, w|sin| + h|cos| high): the
+// extent is the one whose bounds scale so (a quarter turn swaps the axes); near 45 degrees, where that has no
+// stable answer, it scales alike along both axes by the side that changed most.
 export function resizeCommand(drawing: DocxDrawingContext, from: PageBox, to: PageBox): DocxEditorCommand | undefined {
 	if (!drawing.resizable || from.width <= 0 || from.height <= 0) return undefined
 
-	const cx = Math.max(1, Math.round((drawing.cx * to.width) / from.width))
-	const cy = Math.max(1, Math.round((drawing.cy * to.height) / from.height))
+	const sx = to.width / from.width
+	const sy = to.height / from.height
+	const angle = (drawing.rotation * Math.PI) / 180
+	const cos = Math.abs(Math.cos(angle))
+	const sin = Math.abs(Math.sin(angle))
+	const bx = drawing.cx * cos + drawing.cy * sin
+	const by = drawing.cx * sin + drawing.cy * cos
+	const det = cos * cos - sin * sin
+	let width = (cos * bx * sx - sin * by * sy) / det
+	let height = (cos * by * sy - sin * bx * sx) / det
+
+	if (Math.abs(det) < 0.5 || !(width > 0) || !(height > 0)) {
+		const scale = Math.abs(sx - 1) >= Math.abs(sy - 1) ? sx : sy
+
+		width = drawing.cx * scale
+		height = drawing.cy * scale
+	}
+
+	const cx = Math.max(1, Math.round(width))
+	const cy = Math.max(1, Math.round(height))
 
 	return cx === drawing.cx && cy === drawing.cy ? undefined : { type: "drawing.resize", cx, cy }
 }

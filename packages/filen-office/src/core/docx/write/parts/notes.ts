@@ -4,6 +4,9 @@ import type { DocxEditContext } from "../../edit/context"
 import { NO_SOURCE, docxSchema } from "../../edit/schema"
 import type { DocxEditorSession } from "../../edit/session"
 import { Item, type StoryPart } from "../../model/index"
+import type { SliceClock } from "../../../opc/index"
+import { NodeKind, decodeUtf8, encodeUtf8, parseXml } from "../../../xml/index"
+import { partReader } from "../../model/reader"
 import { W_NAMESPACE } from "../source"
 import { DocxWriteError } from "../values"
 import type { PartContributor, SaveParts, WrittenStories } from "./index"
@@ -16,6 +19,24 @@ import type { PartContributor, SaveParts, WrittenStories } from "./index"
 const nodes = docxSchema.nodes
 
 type NoteKind = "footnote" | "endnote"
+
+// Parts holding a copied note (stories/clone.ts cloneNote, laid out from a part of its own): the notes part the
+// save writes the copy into, and the one it was copied from.
+const NOTE_COPIES = new WeakMap<StoryPart, { readonly into: StoryPart; readonly from: StoryPart | undefined }>()
+
+export function registerNoteCopy(copy: StoryPart, into: StoryPart, from: StoryPart | undefined): void {
+	NOTE_COPIES.set(copy, { into, from })
+}
+
+// The notes part a copied note's part is written into, if `part` holds one.
+export function noteCopyTarget(part: StoryPart): StoryPart | undefined {
+	return NOTE_COPIES.get(part)?.into
+}
+
+// The notes part a copied note's part was copied from, if `part` holds one.
+export function noteCopySource(part: StoryPart): StoryPart | undefined {
+	return NOTE_COPIES.get(part)?.from
+}
 
 function prefixOf(part: StoryPart): string {
 	const prefix = part.reader.namespaces.prefixFor(part.document.documentElement(), W_NAMESPACE)
@@ -34,11 +55,15 @@ function container(story: StoryDoc) {
 	const own = story.story
 	const kind = own.kind
 
-	if ((kind !== "footnote" && kind !== "endnote") || own.item >= 0 || own.id === undefined) return undefined
+	// A copied note is a story of a part of its own (noteCopyTarget): new to the notes part it goes into.
+	const target = noteCopyTarget(story.part)
+
+	if ((kind !== "footnote" && kind !== "endnote") || (own.item >= 0 && target === undefined) || own.id === undefined) return undefined
 	if (!/^\d{1,10}$/.test(own.id) || Number(own.id) < 1) throw new DocxWriteError("missingSource", `A new ${kind} without an id`)
 
-	const document = story.part.document
-	const prefix = prefixOf(story.part)
+	const part = target ?? story.part
+	const document = part.document
+	const prefix = prefixOf(part)
 	const tag = qualified(prefix, kind)
 
 	return {
@@ -48,34 +73,123 @@ function container(story: StoryDoc) {
 	}
 }
 
+const R_URIS: ReadonlySet<string> = new Set([
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+	"http://purl.oclc.org/ooxml/officeDocument/relationships"
+])
+
+// The values of attributes in the relationships namespace in markup `bytes` written for `part` (whose root
+// declares what it uses), each a relationship id, with the byte span of the value: [from, to] by id.
+export function relationshipUses(part: StoryPart, bytes: Uint8Array): Map<string, number[]> {
+	const document = part.document
+	const root = document.documentElement()
+	const open = document.bytes.subarray(document.start(root), document.openEnd(root))
+	const close = encodeUtf8(`</${document.name(root)}>`)
+	const whole = new Uint8Array(open.length + bytes.length + close.length)
+
+	whole.set(open, 0)
+	whole.set(bytes, open.length)
+	whole.set(close, open.length + bytes.length)
+
+	const parsed = parseXml(whole)
+	const namespaces = partReader(parsed).namespaces
+	const out = new Map<string, number[]>()
+
+	for (let node = 0; node < parsed.count; node++) {
+		if (parsed.kinds[node] !== NodeKind.Element) continue
+
+		const spans = parsed.attributeSpans(node)
+
+		for (let k = 0; k < spans.length; k += 4) {
+			const name = decodeUtf8(whole, spans[k] ?? 0, spans[k + 1] ?? 0)
+			const colon = name.indexOf(":")
+
+			if (colon < 0 || name.startsWith("xmlns") || !R_URIS.has(namespaces.uri(node, name.slice(0, colon)) ?? "")) continue
+
+			const from = (spans[k + 2] ?? 0) - open.length
+			const to = (spans[k + 3] ?? 0) - open.length
+
+			if (from < 0 || to > bytes.length) continue
+
+			const id = decodeUtf8(bytes, from, to)
+			const list = out.get(id)
+
+			if (list === undefined) out.set(id, [from, to])
+			else list.push(from, to)
+		}
+	}
+
+	return out
+}
+
+// The relationship ids a whole part's markup `bytes` names in the relationships namespace.
+export function relationshipIdsOf(bytes: Uint8Array): Set<string> {
+	const parsed = parseXml(bytes)
+	const namespaces = partReader(parsed).namespaces
+	const out = new Set<string>()
+
+	for (let node = 0; node < parsed.count; node++) {
+		if (parsed.kinds[node] !== NodeKind.Element) continue
+
+		const spans = parsed.attributeSpans(node)
+
+		for (let k = 0; k < spans.length; k += 4) {
+			const name = decodeUtf8(bytes, spans[k] ?? 0, spans[k + 1] ?? 0)
+			const colon = name.indexOf(":")
+
+			if (colon > 0 && !name.startsWith("xmlns") && R_URIS.has(namespaces.uri(node, name.slice(0, colon)) ?? ""))
+				out.add(decodeUtf8(bytes, spans[k + 2] ?? 0, spans[k + 3] ?? 0))
+		}
+	}
+
+	return out
+}
+
 type References = Readonly<Record<NoteKind, ReadonlyMap<string, readonly number[]>>>
 
 // The note references among a story part's items, by kind and note id (read once per part).
 const REFERENCES = new WeakMap<StoryPart, References>()
 
 function referencesOf(part: StoryPart): References {
-	let found = REFERENCES.get(part)
+	const steps = referenceSteps(part)
 
-	if (found === undefined) {
-		const footnote = new Map<string, number[]>()
-		const endnote = new Map<string, number[]>()
+	for (;;) {
+		const step = steps.next()
 
-		for (let item = 0; item < part.count; item++) {
-			const kind = part.kinds[item]
-			const map = kind === Item.FootnoteReference ? footnote : kind === Item.EndnoteReference ? endnote : undefined
-			const id = map === undefined ? undefined : part.id(item)
-
-			if (map === undefined || id === undefined) continue
-
-			const list = map.get(id)
-
-			if (list === undefined) map.set(id, [item])
-			else list.push(item)
-		}
-
-		found = { footnote, endnote }
-		REFERENCES.set(part, found)
+		if (step.done === true) return step.value
 	}
+}
+
+// Items looked at between looks at the clock.
+const ITEM_STEP = 16_384
+
+// referencesOf a step at a time.
+function* referenceSteps(part: StoryPart): Generator<void, References> {
+	const known = REFERENCES.get(part)
+
+	if (known !== undefined) return known
+
+	const footnote = new Map<string, number[]>()
+	const endnote = new Map<string, number[]>()
+
+	for (let item = 0; item < part.count; item++) {
+		if (item % ITEM_STEP === ITEM_STEP - 1) yield
+
+		const kind = part.kinds[item]
+		const map = kind === Item.FootnoteReference ? footnote : kind === Item.EndnoteReference ? endnote : undefined
+		const id = map === undefined ? undefined : part.id(item)
+
+		if (map === undefined || id === undefined) continue
+
+		const list = map.get(id)
+
+		if (list === undefined) map.set(id, [item])
+		else list.push(item)
+	}
+
+	const found = { footnote, endnote }
+
+	REFERENCES.set(part, found)
 
 	return found
 }
@@ -90,17 +204,39 @@ interface HeldReferences {
 const HELD = new WeakMap<Node, HeldReferences>()
 
 function heldBy(doc: Node, part: StoryPart): HeldReferences {
-	let held = HELD.get(doc)
+	const steps = heldSteps(doc, part)
 
-	if (held === undefined) {
-		const ids = new Set<string>()
-		const ranges: number[] = []
+	for (;;) {
+		const step = steps.next()
 
-		doc.descendants(node => {
+		if (step.done === true) return step.value
+	}
+}
+
+// Nodes looked at between looks at the clock.
+const HELD_STEP = 2048
+
+// heldBy a step at a time (a long document's body is long to walk).
+function* heldSteps(doc: Node, part: StoryPart): Generator<void, HeldReferences> {
+	const known = HELD.get(doc)
+
+	if (known !== undefined) return known
+
+	const ids = new Set<string>()
+	const ranges: number[] = []
+	const stack: Node[] = [doc]
+	let seen = 0
+
+	while (stack.length > 0) {
+		const parent = stack.pop() as Node
+
+		for (let k = 0; k < parent.childCount; k++) {
+			const node = parent.child(k)
+
 			if (node.type === nodes.note_ref) {
 				ids.add(`${String(node.attrs["kind"])}:${String(node.attrs["id"])}`)
 
-				return false
+				continue
 			}
 
 			const own: unknown = node.attrs["src"]
@@ -108,17 +244,49 @@ function heldBy(doc: Node, part: StoryPart): HeldReferences {
 			if ((node.isAtom || node.type === nodes.locked_block) && typeof own === "number" && own !== NO_SOURCE) {
 				ranges.push(own, part.end(own))
 
-				return false
+				continue
 			}
 
-			return true
-		})
+			if (!node.isLeaf) stack.push(node)
+		}
 
-		held = { ids, ranges }
-		HELD.set(doc, held)
+		if (++seen % HELD_STEP === 0) yield
 	}
 
+	const held = { ids, ranges }
+
+	HELD.set(doc, held)
+
 	return held
+}
+
+// The written stories' note references read ahead in slices of `clock`, as orphanedNotes reads them.
+export async function readNoteReferences(
+	context: DocxEditContext,
+	sessions: readonly DocxEditorSession[],
+	docs: readonly Node[],
+	clock: SliceClock
+): Promise<void> {
+	if (context.model.footnotes.size === 0 && context.model.endnotes.size === 0) return
+
+	const drive = async (steps: Generator<void, unknown>): Promise<void> => {
+		for (;;) {
+			const step = steps.next()
+
+			if (step.done === true) return
+			if (clock.due) await clock.pause()
+		}
+	}
+
+	for (const part of context.model.parts) if (part !== undefined) await drive(referenceSteps(part))
+
+	for (const [k, session] of sessions.entries()) {
+		const story = session.story.story
+
+		if (story.kind === "footnote" || story.kind === "endnote" || story.kind === "comment" || story.item < 0) continue
+
+		await drive(heldSteps(docs[k] ?? session.state.doc, session.story.part))
+	}
 }
 
 function holds(held: HeldReferences, items: readonly number[]): boolean {

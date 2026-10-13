@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { TextSelection } from "prosemirror-state"
 import { describe, expect, it } from "vitest"
 import { OpcPackage, bytesSource } from "@filen/office/core/opc"
@@ -7,7 +9,8 @@ import type { PagedEditor } from "@filen/office/core/docx/paged"
 import { DocxSaveError, saveDocx } from "@filen/office/core/docx/write"
 import { markInternal } from "../core/docx/edit/invariants/index"
 import { storyReviewIndex } from "../core/docx/review/accept"
-import { bodySections, docSectionChanges } from "../core/docx/stories/sections"
+import { bodySections, deletesBreakAtCaret, docSectionChanges } from "../core/docx/stories/sections"
+import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 import { buildDocx, p } from "./docxSynthetic"
 import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
@@ -117,6 +120,36 @@ describe("docx sections and page setup", () => {
 		expect(editor.snapshot().enabled["insert.sectionBreak"]).toBe(false)
 		expect(await run(editor, { type: "insert.sectionBreak", kind: "nextPage" })).toBe(false)
 		editor.dispose()
+	})
+
+	it("never breaks a section inside a content control or a frame, as Word offers no break there", async () => {
+		for (const [body, text] of [
+			[`<w:sdt><w:sdtPr><w:id w:val="5"/></w:sdtPr><w:sdtContent>${p("block control")}</w:sdtContent></w:sdt>`, "block control"],
+			[
+				'<w:p><w:r><w:t xml:space="preserve">Before </w:t></w:r><w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent><w:r><w:t>inline control</w:t></w:r></w:sdtContent></w:sdt></w:p>',
+				"inline control"
+			],
+			[
+				'<w:p><w:pPr><w:framePr w:w="3000" w:hSpace="180" w:wrap="around" w:vAnchor="text" w:hAnchor="page" w:x="2000" w:y="1"/></w:pPr><w:r><w:t>framed text</w:t></w:r></w:p>',
+				"framed text"
+			]
+		] as const) {
+			const opened = await pagedEditor(buildDocx({ body: body + p("after") }))
+			const { editor } = opened
+			let at = -1
+
+			editor.body.session.state.doc.descendants((node, pos) => {
+				if (at < 0 && node.isText && node.text === text) at = pos + 3
+
+				return at < 0
+			})
+			caret(editor, at)
+			expect(editor.snapshot().enabled["insert.sectionBreak"], text).toBe(false)
+			expect(await run(editor, { type: "insert.sectionBreak", kind: "nextPage" })).toBe(false)
+			caret(editor, editor.body.session.state.doc.content.size - 2)
+			expect(editor.snapshot().enabled["insert.sectionBreak"]).toBe(true)
+			editor.dispose()
+		}
 	})
 
 	it("deletes a break: the text before joins the section after, which keeps its properties and what it showed", async () => {
@@ -292,7 +325,7 @@ describe("docx sections and page setup", () => {
 			expect(xml).toMatch(/<w:p><w:pPr><w:rPr><w:ins w:id="\d+" w:author="Tester" w:date="[^"]+"\/><\/w:rPr><w:sectPr>/)
 			expect(first).toBe(plain[0])
 			expect(last).toMatch(
-				/^<w:sectPr><w:type w:val="continuous"\/><w:pgSz w:w="12240" w:h="15840"\/>.*<w:sectPrChange w:id="\d+" w:author="Tester" w:date="[^"]+"><w:sectPr><w:pgSz w:w="12240" w:h="15840"\/>.*<w:pgNumType w:start="4"\/><\/w:sectPr><\/w:sectPrChange><\/w:sectPr>$/
+				/^<w:sectPr><w:type w:val="continuous"\/><w:pgSz w:w="12240" w:h="15840"\/>.*<w:sectPrChange w:id="\d+" w:author="Tester" w:date="[^"]+"><w:sectPr><w:type w:val="nextPage"\/><w:pgSz w:w="12240" w:h="15840"\/>.*<w:pgNumType w:start="4"\/><\/w:sectPr><\/w:sectPrChange><\/w:sectPr>$/
 			)
 
 			const reopened = await openBytes(recorded)
@@ -491,5 +524,388 @@ describe("docx sections and page setup", () => {
 		).toBe("write")
 		expect(marks.section_change.isInSet(doc.child(0).marks)).toBeUndefined()
 		editor.dispose()
+	})
+})
+
+describe("docx sections: page setup Word's way", () => {
+	it("refuses page setup a save would refuse, before changing anything", async () => {
+		for (const setup of [
+			{ margins: { left: 6000, right: 6500 } },
+			{ margins: { top: 8000, bottom: 8000 } },
+			{ columns: { count: 40 } },
+			{ size: { width: 31681, height: 15840 } },
+			{ size: { width: 2000, height: 2000 } }
+		]) {
+			const opened = await pagedEditor(
+				buildDocx({ body: p("Text here") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}</w:sectPr>` })
+			)
+			const { editor } = opened
+
+			caret(editor, 2)
+			expect(await run(editor, { type: "page.setup", ...setup }), JSON.stringify(setup)).toBe(false)
+			expect(editor.body.session.state.doc.attrs["sectionChanges"] ?? null).toBeNull()
+			await saved(opened)
+			editor.dispose()
+		}
+	})
+
+	it("saves an edit of a paragraph holding a source break whose properties gate 2 would refuse were they new", async () => {
+		for (const sect of [
+			`<w:sectPr><w:pgSz w:w="40000" w:h="15840"/>${MARGINS}</w:sectPr>`,
+			`<w:sectPr><w:headerReference w:type="default" r:id="rIdMissing"/><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}</w:sectPr>`
+		]) {
+			const opened = await pagedEditor(
+				buildDocx({ body: p("Alpha") + `<w:p><w:pPr>${sect}</w:pPr><w:r><w:t>Gamma</w:t></w:r></w:p>` + p("Delta") })
+			)
+			const { editor } = opened
+
+			caret(editor, 9)
+			editor.session.dispatch(editor.session.state.tr.insertText("X"))
+
+			const xml = await read(await saved(opened), "word/document.xml")
+
+			expect(xml).toContain(`${sect}</w:pPr><w:r><w:t>GXamma`)
+			editor.dispose()
+		}
+	})
+
+	it("turns the margins with the page and keeps the paper code, as Word does", async () => {
+		const opened = await pagedEditor(
+			buildDocx({
+				body:
+					p("Alpha") +
+					'<w:sectPr><w:pgSz w:w="11906" w:h="16838" w:code="9"/><w:pgMar w:top="1000" w:right="2000" w:bottom="1500" w:left="2500" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+			})
+		)
+		const { editor } = opened
+
+		caret(editor, 2)
+		expect(await run(editor, { type: "page.setup", orientation: "landscape" })).toBe(true)
+		expect(await sections(await saved(opened))).toEqual([
+			'<w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape" w:code="9"/><w:pgMar w:top="2500" w:right="1000" w:bottom="2000" w:left="1500" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+		])
+		expect(await run(editor, { type: "page.setup", orientation: "portrait" })).toBe(true)
+		expect(await sections(await saved(opened))).toEqual([
+			'<w:sectPr><w:pgSz w:w="11906" w:h="16838" w:code="9"/><w:pgMar w:top="1000" w:right="2000" w:bottom="1500" w:left="2500" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+		])
+		editor.dispose()
+	})
+
+	it("shares a changed text width among unequal columns, spacing kept; gate 2 sums their widths", async () => {
+		const cols = '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="6000" w:space="720"/><w:col w:w="2640"/></w:cols>'
+		const opened = await pagedEditor(
+			buildDocx({ body: p("Alpha") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}${cols}</w:sectPr>` })
+		)
+		const { editor, pkg, context } = opened
+		const body = editor.body.session
+
+		caret(editor, 2)
+		expect(await run(editor, { type: "page.setup", margins: { left: 3000, right: 3000 } })).toBe(true)
+		expect((await sections(await saved(opened)))[0]).toContain(
+			'<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="3833" w:space="720"/><w:col w:w="1687"/></w:cols>'
+		)
+
+		const key = body.state.doc.attrs["sectPr"] as number
+
+		body.dispatch(
+			markInternal(
+				body.state.tr.setDocAttribute("sectionChanges", {
+					final: {
+						section: key,
+						base: key,
+						columns: {
+							count: 2,
+							space: 720,
+							separator: false,
+							widths: [
+								{ width: 6000, space: 720 },
+								{ width: 6000, space: 0 }
+							]
+						}
+					}
+				})
+			)
+		)
+		expect(await saveDocx({ pkg, context, sessions: editor.sessions }).catch((caught: unknown) => caught)).toBeInstanceOf(DocxSaveError)
+		editor.dispose()
+	})
+
+	it("deletes a break with its paragraph mark: the paragraph joins the next one; inserting and deleting it round-trips", async () => {
+		const bytes = buildDocx({
+			body: p("Alpha beta") + p("Second") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}</w:sectPr>`
+		})
+		const opened = await pagedEditor(bytes)
+		const { editor } = opened
+		const before = JSON.stringify(editor.body.session.state.doc.content.toJSON())
+
+		caret(editor, 6)
+		expect(await run(editor, { type: "insert.sectionBreak", kind: "nextPage" })).toBe(true)
+		caret(editor, 2)
+		expect(await run(editor, { type: "section.deleteBreak" })).toBe(true)
+
+		const doc = editor.body.session.state.doc
+
+		expect(doc.childCount).toBe(2)
+		expect(doc.child(0).textContent).toBe("Alpha beta")
+		expect(JSON.stringify(doc.content.toJSON())).toBe(before)
+		await saved(opened)
+		editor.dispose()
+
+		// An empty paragraph holding a break goes with it.
+		const empty = await pagedEditor(
+			buildDocx({
+				body:
+					p("One") +
+					`<w:p><w:pPr>${SECTION()}</w:pPr></w:p>` +
+					p("Two") +
+					`<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}</w:sectPr>`,
+				headers: { rIdH: p("Head") }
+			})
+		)
+
+		caret(empty.editor, 7)
+		expect(await run(empty.editor, { type: "section.deleteBreak" })).toBe(true)
+		expect(empty.editor.body.session.state.doc.childCount).toBe(2)
+		expect(await sections(await saved(empty))).toHaveLength(1)
+		empty.editor.dispose()
+	})
+
+	it("rejecting a section change the file recorded brings back what it recorded, whatever came after", async () => {
+		const bytes = buildDocx({
+			body:
+				p("Alpha beta") +
+				`<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}<w:sectPrChange w:id="9" w:author="Ann" w:date="2020-01-01T00:00:00Z"><w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr></w:sectPrChange></w:sectPr>`,
+			headers: { rIdH: p("Head") }
+		})
+
+		for (const tracked of [false, true]) {
+			const opened = await pagedEditor(bytes)
+			const { editor, context } = opened
+
+			context.identity.author = "T"
+			context.review.tracking = tracked
+			caret(editor, 3)
+			expect(await run(editor, { type: "page.setup", margins: { left: 3000 } })).toBe(true)
+			expect(await run(editor, { type: "page.setup", orientation: "landscape" })).toBe(true)
+			expect(await run(editor, { type: "review.rejectAll" })).toBe(true)
+			expect(await sections(await saved(opened))).toEqual([
+				`<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr>`
+			])
+			editor.dispose()
+		}
+	})
+})
+
+describe("docx sections: a tracked break read back", () => {
+	it("counts a break inserted while tracking as one change after a save, as in the session, and resolves it by its id", async () => {
+		const bytes = buildDocx({
+			body: p("Alpha beta") + p("Second") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}</w:sectPr>`
+		})
+
+		for (const accept of [true, false]) {
+			const opened = await pagedEditor(bytes)
+			const { editor, context } = opened
+
+			context.identity.author = "Tester"
+			context.review.tracking = true
+			caret(editor, 6)
+			expect(await run(editor, { type: "insert.sectionBreak", kind: "nextPage" })).toBe(true)
+
+			const ids = (session: PagedEditor["body"]["session"]): string[] => [
+				...new Set(
+					storyReviewIndex(session)
+						.entries()
+						.map(entry => entry.id)
+				)
+			]
+
+			expect(ids(editor.body.session)).toHaveLength(1)
+
+			const again = await pagedEditor(await saved(opened))
+			const session = again.editor.body.session
+			const [id] = ids(session)
+
+			expect(ids(session)).toHaveLength(1)
+			expect(await run(again.editor, { type: accept ? "review.accept" : "review.reject", id: id as string })).toBe(true)
+			expect(storyReviewIndex(session).revisionCount).toBe(0)
+
+			const list = await sections(await saved(again))
+
+			expect(list).toHaveLength(accept ? 2 : 1)
+			expect(list.join("")).not.toContain("sectPrChange")
+			editor.dispose()
+			again.editor.dispose()
+		}
+	})
+})
+
+describe("docx sections: a recorded change takes back what it records", () => {
+	it("rejects a change Word recorded partly (margins alone): the page size, columns and grid stay", async () => {
+		const file = join(CORPUS_DIR, "docx", "oxpt__RP027-Change-Section.docx")
+
+		if (!existsSync(file)) return
+
+		const opened = await pagedEditor(new Uint8Array(readFileSync(file)))
+		const { editor } = opened
+
+		expect(await run(editor, { type: "review.rejectAll" })).toBe(true)
+
+		const xml = await read(await saved(opened), "word/document.xml")
+		const first = /<w:sectPr\b[^>]*>(?:(?!<\/w:sectPr>).)*<\/w:sectPr>/.exec(xml)?.[0] ?? ""
+
+		expect(first).toContain('<w:pgSz w:w="11906" w:h="16838"/>')
+		expect(first).toContain(
+			'<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+		)
+		expect(first).toContain('<w:cols w:space="720"/>')
+		expect(first).toContain('<w:docGrid w:linePitch="360"/>')
+		expect(first).not.toContain("sectPrChange")
+		editor.dispose()
+	})
+
+	it("records what a section lacked before as its default, so a reject after reopening gives the section back", async () => {
+		const bytes = buildDocx({ body: p("Alpha") + `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr>` })
+		const opened = await pagedEditor(bytes)
+		const { editor, context } = opened
+
+		context.identity.author = "Tester"
+		context.review.tracking = true
+		caret(editor, 2)
+		expect(await run(editor, { type: "page.setup", columns: { count: 2 } })).toBe(true)
+		expect(await run(editor, { type: "page.setup", lineNumbers: { countBy: 1 } })).toBe(true)
+		expect(await run(editor, { type: "insert.sectionBreak", kind: "continuous" })).toBe(true)
+
+		const written = await saved(opened)
+		// The last section's record: the type, columns and line numbering it lacked, as their defaults.
+		const last = (await sections(written)).at(-1) ?? ""
+
+		expect(last).toMatch(
+			/<w:sectPrChange [^>]*><w:sectPr><w:type w:val="nextPage"\/><w:pgSz w:w="11906" w:h="16838"\/><w:pgMar [^>]*\/><w:lnNumType w:countBy="0"\/><w:cols w:space="720"\/><\/w:sectPr><\/w:sectPrChange>/
+		)
+
+		const again = await pagedEditor(written)
+
+		expect(await run(again.editor, { type: "review.rejectAll" })).toBe(true)
+		expect(await sections(await saved(again))).toEqual([`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr>`])
+		editor.dispose()
+		again.editor.dispose()
+	})
+})
+
+describe("docx sections: Delete before a section break", () => {
+	it("deletes the break, as Word's Delete at the end of the paragraph before it does, untracked and tracked", async () => {
+		const bytes = buildDocx({
+			body:
+				p("One") +
+				`<w:p><w:pPr>${SECTION('<w:cols w:num="2" w:space="720"/>')}</w:pPr><w:r><w:t>Breaker</w:t></w:r></w:p>` +
+				p("Two") +
+				`<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>${MARGINS}</w:sectPr>`,
+			headers: { rIdH: p("Head") }
+		})
+
+		for (const tracked of [false, true]) {
+			const opened = await pagedEditor(bytes)
+			const { editor, context } = opened
+
+			context.identity.author = "Tester"
+			context.review.tracking = tracked
+			// Mid-paragraph and in the last section, Delete is a plain deletion.
+			caret(editor, 8)
+			expect(deletesBreakAtCaret(editor)).toBe(false)
+			caret(editor, editor.body.session.state.doc.content.size - 1)
+			expect(deletesBreakAtCaret(editor)).toBe(false)
+			caret(editor, 13)
+			expect(deletesBreakAtCaret(editor)).toBe(true)
+			expect(await run(editor, { type: "section.deleteBreak" })).toBe(true)
+			// The caret stays at the join, where Delete (or Backspace from the paragraph after) found the break.
+			expect(editor.body.session.state.selection.head).toBe(13)
+			expect(editor.body.session.state.doc.textBetween(6, editor.body.session.state.selection.head)).toBe("Breaker")
+
+			const list = await sections(await saved(opened))
+
+			if (tracked) {
+				expect(list).toHaveLength(2)
+				expect(await read(await saved(opened), "word/document.xml")).toMatch(
+					/<w:del w:id="\d+" w:author="Tester"[^>]*\/><\/w:rPr><w:sectPr>/
+				)
+			} else {
+				// One section: the text before takes the following section's properties.
+				expect(list).toEqual([
+					`<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>${MARGINS}</w:sectPr>`
+				])
+				expect(editor.body.session.state.doc.child(1).textContent).toBe("BreakerTwo")
+			}
+
+			editor.dispose()
+		}
+	})
+})
+
+describe("docx sections: tracked edits folded into a section change the file recorded", () => {
+	it("records what they changed in that record, so a reject in the session and after a save agree", async () => {
+		const live = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="2000" w:header="720" w:footer="720" w:gutter="0"/>'
+		const bytes = buildDocx({
+			body:
+				p("Alpha") +
+				`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${live}<w:sectPrChange w:id="9" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:sectPr>${MARGINS}</w:sectPr></w:sectPrChange></w:sectPr>`
+		})
+		const rejected: string[][] = []
+
+		for (const reopen of [false, true]) {
+			const opened = await pagedEditor(bytes)
+			const { editor, context } = opened
+
+			context.identity.author = "Tester"
+			context.review.tracking = true
+			caret(editor, 2)
+			expect(await run(editor, { type: "page.setup", orientation: "landscape" })).toBe(true)
+			expect(await run(editor, { type: "page.setup", columns: { count: 2 } })).toBe(true)
+
+			const target = reopen ? await pagedEditor(await saved(opened)) : opened
+
+			if (reopen) {
+				const [recorded] = await sections(await saved(opened))
+
+				// One change, Bob's, now recording the page and columns before too.
+				expect(recorded).toMatch(
+					/<w:sectPrChange w:id="9" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:sectPr><w:pgSz w:w="11906" w:h="16838"\/><w:pgMar w:top="1440" [^>]*\/><w:cols w:space="720"\/><\/w:sectPr><\/w:sectPrChange>/
+				)
+			}
+
+			expect(await run(target.editor, { type: "review.rejectAll" })).toBe(true)
+			rejected.push(await sections(await saved(target)))
+			editor.dispose()
+			if (reopen) target.editor.dispose()
+		}
+
+		expect(rejected[0]).toEqual([`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr>`])
+		expect(rejected[1]).toEqual(rejected[0])
+	})
+
+	it("adds its default for a property the section lacked, through two saves by two authors", async () => {
+		const bytes = buildDocx({ body: p("Alpha") + "<w:sectPr/>" })
+		const first = await pagedEditor(bytes)
+
+		first.context.identity.author = "Tester"
+		first.context.review.tracking = true
+		caret(first.editor, 2)
+		expect(await run(first.editor, { type: "page.setup", margins: { left: 720 } })).toBe(true)
+
+		const second = await pagedEditor(await saved(first))
+
+		second.context.identity.author = "Other"
+		second.context.review.tracking = true
+		caret(second.editor, 2)
+		expect(await run(second.editor, { type: "page.setup", size: { width: 11906, height: 16838 }, columns: { count: 2 } })).toBe(true)
+
+		const third = await pagedEditor(await saved(second))
+
+		expect(await run(third.editor, { type: "review.rejectAll" })).toBe(true)
+
+		const back = await saved(third)
+
+		expect(await savedDigest(back)).toEqual(await savedDigest(bytes))
+		expect(await sections(back)).toEqual([`<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}</w:sectPr>`])
+		for (const opened of [first, second, third]) opened.editor.dispose()
 	})
 })

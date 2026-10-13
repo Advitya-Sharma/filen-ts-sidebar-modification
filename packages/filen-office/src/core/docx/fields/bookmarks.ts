@@ -36,6 +36,10 @@ export interface DocxBookmark {
 	readonly endPos: number
 	readonly end: BookmarkPlace | undefined
 	readonly hidden: boolean
+	// The source items of its start and end markers (NO_SOURCE for new ones or none): where in the bytes of a
+	// locked block it starts or ends.
+	readonly startItem: number
+	readonly endItem: number
 }
 
 export interface BookmarkIndex {
@@ -54,6 +58,8 @@ interface Found {
 	endPos: number
 	to: number
 	end: BookmarkPlace | undefined
+	startItem: number
+	endItem: number
 }
 
 const INDEXES = new WeakMap<Node, BookmarkIndex>()
@@ -83,7 +89,18 @@ export function bookmarkIndex(doc: Node, part: StoryPart): BookmarkIndex {
 		let found = byId.get(marker.id)
 
 		if (found === undefined) {
-			found = { name: undefined, id: marker.id, startPos: -1, from: -1, start: "kept", endPos: -1, to: -1, end: undefined }
+			found = {
+				name: undefined,
+				id: marker.id,
+				startPos: -1,
+				from: -1,
+				start: "kept",
+				endPos: -1,
+				to: -1,
+				end: undefined,
+				startItem: NO_SOURCE,
+				endItem: NO_SOURCE
+			}
 			byId.set(marker.id, found)
 		}
 
@@ -94,11 +111,13 @@ export function bookmarkIndex(doc: Node, part: StoryPart): BookmarkIndex {
 			found.startPos = pos
 			found.from = after
 			found.start = place
+			found.startItem = marker.src
 			order.push(found)
 		} else if (found.endPos < 0) {
 			found.endPos = pos
 			found.to = pos
 			found.end = place
+			found.endItem = marker.src
 		}
 	}
 	const list = (markers: unknown, pos: number, after: number): void => {
@@ -141,7 +160,9 @@ export function bookmarkIndex(doc: Node, part: StoryPart): BookmarkIndex {
 			start: found.start,
 			endPos: found.endPos,
 			end: found.end,
-			hidden: found.name.startsWith("_")
+			hidden: found.name.startsWith("_"),
+			startItem: found.startItem,
+			endItem: found.endItem
 		})
 
 		bookmarks.push(bookmark)

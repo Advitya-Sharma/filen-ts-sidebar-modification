@@ -8,6 +8,7 @@ import { parseXml } from "@filen/office/core/xml"
 import { textboxChecks } from "../core/docx/write/checks/textbox"
 import { textboxCopies } from "../core/docx/write/nested"
 import { openBytes } from "./docxEditFixtures"
+import { pngHeader } from "./fuzz/ops/drawings"
 import { buildDocx, p } from "./docxSynthetic"
 import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
 
@@ -170,6 +171,21 @@ describe("docx text box editing", () => {
 		// Undone, the document is its source again.
 		expect(await editor.execute({ type: "history.undo" })).toBe(true)
 		expect(await documentXml(await save(editor, pkg))).toBe(await documentXml(BOXED))
+	})
+
+	it("writes the same fallback copy at every save of a session", async () => {
+		const { editor, pkg } = await pagedEditor(BOXED)
+
+		enterBox(editor)
+		editor.dispatch(editor.session.state.tr.setSelection(TextSelection.create(editor.session.state.doc, 1)))
+		// A picture in the box: its drawing id is renumbered in the copy.
+		expect(await editor.execute({ type: "image.insert", media: editor.addMedia(pngHeader(96, 48)) as number })).toBe(true)
+		editor.exitStory()
+
+		const first = await documentXml(await save(editor, pkg))
+
+		expect(boxes(first)).toHaveLength(2)
+		expect(await documentXml(await save(editor, pkg))).toBe(first)
 	})
 
 	// The fallback copy's revisions are renumbered from the save's own count, which the other revisions it writes

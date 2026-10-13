@@ -1,3 +1,4 @@
+import type { SliceClock } from "../../../opc/index"
 import { NodeKind, decodeUtf8, encodeUtf8, parseXml, XmlError, type XmlDocument } from "../../../xml/index"
 import type { StoryPart } from "../../model/index"
 import { partReader, type PartReader } from "../../model/reader"
@@ -29,17 +30,46 @@ function fallbackless(reader: PartReader, node: number): boolean {
 	return true
 }
 
+// Name ids whose local part is AlternateContent (names are interned: a few), so elements are compared by id.
+function alternateContentNames(document: XmlDocument): Uint8Array {
+	const names = new Uint8Array(document.names.length)
+
+	document.names.forEach((name, id) => {
+		if (name === "AlternateContent" || name.endsWith(":AlternateContent")) names[id] = 1
+	})
+
+	return names
+}
+
+// Pushes the byte offsets of the mc:AlternateContent elements without a fallback among nodes [from, to). A
+// plain loop, so that it stays optimised whether or not its caller slices.
+function pushFallbackless(reader: PartReader, names: Uint8Array, from: number, to: number, into: number[]): void {
+	const document = reader.document
+	const ids = document.nameIds
+
+	for (let node = from; node < to; node++) if (names[ids[node] ?? -1] === 1 && fallbackless(reader, node)) into.push(document.start(node))
+}
+
 // Byte offsets of the source's mc:AlternateContent elements without a fallback, ascending (read once).
 const sourceFallbackless = new WeakMap<XmlDocument, Int32Array>()
 
-function fallbacklessOffsets(reader: PartReader): Int32Array {
+// Nodes looked at between looks at the clock.
+const NODE_STEP = 8192
+
+// Read in slices of `clock` the first time (a whole source part is long).
+async function fallbacklessOffsets(reader: PartReader, clock: SliceClock | undefined): Promise<Int32Array> {
 	const document = reader.document
 	let found = sourceFallbackless.get(document)
 
 	if (found === undefined) {
 		const offsets: number[] = []
+		const names = alternateContentNames(document)
 
-		for (let node = 0; node < document.count; node++) if (fallbackless(reader, node)) offsets.push(document.start(node))
+		for (let from = 0; from < document.count; from += NODE_STEP) {
+			pushFallbackless(reader, names, from, Math.min(document.count, from + NODE_STEP), offsets)
+
+			if (clock?.due === true) await clock.pause()
+		}
 
 		found = Int32Array.from(offsets)
 		sourceFallbackless.set(document, found)
@@ -68,15 +98,15 @@ function countIn(offsets: Int32Array, from: number, to: number): number {
 }
 
 function countWritten(reader: PartReader): number {
-	let count = 0
+	const offsets: number[] = []
 
-	for (let node = 0; node < reader.document.count; node++) if (fallbackless(reader, node)) count++
+	pushFallbackless(reader, alternateContentNames(reader.document), 0, reader.document.count, offsets)
 
-	return count
+	return offsets.length
 }
 
-function checkFallbacks(input: CheckInput, checked: CheckedPart, part: StoryPart, written: PartReader): void {
-	const source = fallbacklessOffsets(part.reader)
+async function checkFallbacks(input: CheckInput, checked: CheckedPart, part: StoryPart, written: PartReader): Promise<void> {
+	const source = await fallbacklessOffsets(part.reader, input.clock)
 	let allowed: number
 
 	if (checked.skeleton) {
@@ -217,14 +247,14 @@ function checkTextboxes(checked: CheckedPart, part: StoryPart, reader: PartReade
 
 export const textboxChecks: readonly DocxCheck[] = [
 	{
-		part(input, checked) {
+		async part(input, checked) {
 			const part = checked.part
 
 			if (part === undefined) return
 
 			const reader = partReader(checked.document)
 
-			checkFallbacks(input, checked, part, reader)
+			await checkFallbacks(input, checked, part, reader)
 			checkTextboxes(checked, part, reader)
 		}
 	}

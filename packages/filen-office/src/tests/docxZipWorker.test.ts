@@ -327,6 +327,21 @@ describe("docx zip worker", () => {
 		zipper.dispose()
 	})
 
+	it("takes out the parts a save removes, as the in-thread zipper does", async () => {
+		const bytes = buildDocx({ body: p("Text"), parts: [{ name: "word/media/unused.png", data: new Uint8Array([1, 2, 3]) }] })
+		const original = await OpcPackage.open(bytesSource(bytes))
+		const { factory } = workerFactory()
+		const zipper = docxZipWorker(factory)(original)
+		const changes = { replace: [], add: [], remove: ["word/media/unused.png"] }
+		const zipped = await zipper.zip(changes)
+		const local = await inThreadDocxZipper(original).zip(changes)
+
+		expect(zipped.bytes).toEqual(local.bytes)
+		expect(Object.keys(unzipSync(zipped.bytes)).filter(name => name.includes("unused"))).toEqual([])
+		expect(Object.keys(unzipSync(zipped.bytes))).toEqual(Object.keys(unzipSync(bytes)).filter(name => !name.includes("unused")))
+		zipper.dispose()
+	})
+
 	it("rejects a zip under way when disposed, and every later one", async () => {
 		const { pkg, input } = await edited(FIXTURE)
 		const prepared = await prepareDocxSave(input)

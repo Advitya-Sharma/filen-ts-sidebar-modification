@@ -131,7 +131,9 @@ describe("docx writer: run properties", () => {
 			sizeCs: 30,
 			spacing: -10,
 			lang: { latin: "de-DE", bidi: "ar-SA" },
-			underline: { style: "double", val: "FF0000" }
+			underline: { style: "double", val: "FF0000" },
+			noProof: true,
+			webHidden: false
 		}
 		const marks = formattingMarks(props)
 		const out = new Out()
@@ -154,7 +156,7 @@ describe("docx writer: run properties", () => {
 		}
 
 		expect(locals).toEqual([...locals].sort((a, b) => RUN_PROPERTIES.indexOf(a) - RUN_PROPERTIES.indexOf(b)))
-		expect(PROPERTY_MARKS.length).toBe(16)
+		expect(PROPERTY_MARKS.length).toBe(18)
 		expect(elementsOf(names, docxSchema.marks.bold, undefined)).toEqual(
 			new Map([
 				["b", ""],

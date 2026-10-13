@@ -2,6 +2,8 @@ import { Mark, type Node } from "prosemirror-model"
 import { NodeKind } from "../../xml/index"
 import { FieldCharType, ITEM_NAMES, Item, RevisionView, type DrawingInfo, type Story, type StoryPart } from "../model/index"
 import { El, Ns } from "../model/namespaces"
+import { fieldCodeType } from "../fields/evaluate"
+import { fieldFormatting, unformattableFields } from "../fields/format"
 import { storedResult } from "../fields/result"
 import type { DocxEditContext } from "./context"
 import { builtFrom } from "./origin"
@@ -202,13 +204,17 @@ function paragraphOf(part: StoryPart, item: number): number {
 }
 
 // A field's instruction as a field atom or a table of contents holds it: as shown, or for a field a tracked
-// change deleted whole (its code all w:delInstrText), the code it had.
+// change deleted whole (its code all w:delInstrText), the code it had; for one inserted and deleted, both.
 function instructionOf(part: StoryPart, field: number): string {
-	return part.fieldInstruction(field) || part.fieldInstruction(field, RevisionView.Original)
+	return (
+		part.fieldInstruction(field) ||
+		part.fieldInstruction(field, RevisionView.Original) ||
+		part.fieldInstruction(field, RevisionView.Markup)
+	)
 }
 
 function fieldType(part: StoryPart, field: number): string {
-	return (/^\s*([^\s\\"]+)/.exec(instructionOf(part, field))?.[1] ?? "").toUpperCase()
+	return fieldCodeType(instructionOf(part, field))
 }
 
 // The field holding field `field`, or -1. A table of contents without its end (a part holding its first
@@ -384,6 +390,9 @@ export class DocxDocBuilder {
 	private plan!: FieldPlan
 	private info!: PartInfo
 	private pristine!: WeakSet<Node>
+	// Whether the story built holds a field no run can format (fields/format.ts unformattableFields), and the
+	// block built.
+	private unformattable = { found: false }
 	private paragraphs = 0
 	private tables = 0
 	private lockedBlocks = 0
@@ -437,6 +446,7 @@ export class DocxDocBuilder {
 		this.part = part
 		this.plan = this.planOf(part)
 		this.pristine = new WeakSet()
+		this.unformattable = { found: false }
 		this.paragraphs = 0
 		this.tables = 0
 		this.lockedBlocks = 0
@@ -445,6 +455,7 @@ export class DocxDocBuilder {
 		const blocks: Node[] = []
 		let sectPr = NO_SOURCE
 		const pristine = this.pristine
+		const unformattable = this.unformattable
 		const plan = this.plan
 		const info = this.info
 		let pending: MarkerAttrs[] | null = null
@@ -467,9 +478,15 @@ export class DocxDocBuilder {
 				continue
 			}
 
+			const found = unformattable.found
+
+			unformattable.found = false
+
 			const block = this.block(item, pending ?? NO_MARKERS)
 
 			builtFrom(this.context, block, part.index)
+			unformattableFields.set(block, unformattable.found)
+			unformattable.found ||= found
 			blocks.push(block)
 			pending = null
 
@@ -479,6 +496,7 @@ export class DocxDocBuilder {
 			this.plan = plan
 			this.info = info
 			this.pristine = pristine
+			this.unformattable = unformattable
 		}
 
 		const end = pending ?? NO_MARKERS
@@ -493,6 +511,8 @@ export class DocxDocBuilder {
 		}
 
 		const doc = makeNode(docxSchema.nodes.doc, { story: story.index, sectPr, end, comments: null, sectionChanges: null }, blocks)
+
+		unformattableFields.set(doc, unformattable.found)
 
 		return {
 			doc,
@@ -1151,6 +1171,10 @@ export class DocxDocBuilder {
 		const field = simple ? (part.aux[first] ?? -1) : part.fieldOf(first + 1)
 
 		const stored = storedResult(part, first, last, simple)
+		// Tracked changes inside the code: the code after them (an update evaluates what the file shows).
+		const code = stored.update?.code?.after
+
+		if (simple && stored.result === "") this.unformattable.found = true
 
 		return makeNode(
 			docxSchema.nodes.field,
@@ -1158,15 +1182,15 @@ export class DocxDocBuilder {
 				src: first,
 				end: last,
 				simple,
-				type: field < 0 ? "" : fieldType(part, field),
-				instruction: field < 0 ? "" : instructionOf(part, field),
+				type: field < 0 ? "" : code === undefined ? fieldType(part, field) : fieldCodeType(code),
+				instruction: field < 0 ? "" : (code ?? instructionOf(part, field)),
 				result: stored.result,
 				markers: this.survivors(first, part.end(last)),
 				state: null,
 				update: stored.update
 			},
 			null,
-			wrappers
+			fieldFormatting(this.context, part, first, last, simple).reduce<readonly Mark[]>((set, mark) => mark.addToSet(set), wrappers)
 		)
 	}
 

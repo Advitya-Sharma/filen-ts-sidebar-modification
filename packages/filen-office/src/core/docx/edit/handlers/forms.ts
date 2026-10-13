@@ -9,9 +9,11 @@ import {
 	controlState,
 	EMPTY_FORM_TEXT,
 	legacyFieldOf,
+	legacyText,
 	listItem,
 	newControlId,
 	placeholderText,
+	typableField,
 	typeable,
 	type ControlAround,
 	type ControlInfo,
@@ -278,15 +280,17 @@ const clear: StoryCommandHandler<"control.clear"> = {
 
 const text: StoryCommandHandler<"control.text"> = {
 	enabled(context) {
-		return legacyOf(context, "FORMTEXT") !== undefined || editable(controlAt(context), isPlainText)
+		const field = legacyOf(context, "FORMTEXT")
+
+		return field !== undefined ? typableField(field.field) : editable(controlAt(context), isPlainText)
 	},
 	run(context, command) {
 		const field = legacyOf(context, "FORMTEXT")
 
 		if (field !== undefined) {
-			const limited = field.field.maxLength > 0 ? command.text.slice(0, field.field.maxLength) : command.text
+			const value = legacyText(field.field, command.text)
 
-			return setLegacy(context, field, { text: limited }, limited === "" ? EMPTY_FORM_TEXT : limited)
+			return value === null ? null : setLegacy(context, field, { text: value }, value === "" ? EMPTY_FORM_TEXT : value)
 		}
 
 		const around = controlAt(context)

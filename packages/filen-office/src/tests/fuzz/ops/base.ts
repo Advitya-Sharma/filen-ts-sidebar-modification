@@ -226,6 +226,26 @@ function undoRedo(context: OpContext, most: number): string {
 	return `${type} x${count}`
 }
 
+// Types `text` at a random inline position, as an author (where changes are tracked typing needs one), trying
+// others where typing is refused (a locked block, a control); whether it typed.
+export function typeSomewhere(session: DocxEditorSession, rand: Rand, text: string): boolean {
+	if (!session.context.identity.author) session.context.identity.author = "Fuzz"
+
+	for (let attempt = 0; attempt < 16; attempt++) {
+		const position = inlinePosition(rand, session.state.doc)
+
+		if (position === undefined) return false
+
+		const before = session.state.doc
+
+		session.dispatch(session.state.tr.insertText(text, position))
+
+		if (session.state.doc !== before) return true
+	}
+
+	return false
+}
+
 // Drops whole top-level blocks somewhere else, as a drag and drop does.
 function blockMove(context: OpContext): string {
 	const rand = context.rand
@@ -267,16 +287,22 @@ function blockMove(context: OpContext): string {
 	const review = context.session.context.review
 
 	// Moves are checked as blocks kept byte for byte: untracked (a tracked move records a deletion and an
-	// insertion instead), as after switching tracking off in a document that tracks changes.
-	if (review.tracking) review.tracking = false
+	// insertion instead), as with tracking switched off for the move; the document's setting stays as it was.
+	const tracking = review.tracking
 
-	return `${label} -> ${context.transact(label, tr => {
-		tr.delete(from, to)
+	review.tracking = false
 
-		const mapped = tr.mapping.map(at)
+	try {
+		return `${label} -> ${context.transact(label, tr => {
+			tr.delete(from, to)
 
-		return tr.replaceRange(mapped, mapped, slice).setMeta("uiEvent", "drop")
-	})}`
+			const mapped = tr.mapping.map(at)
+
+			return tr.replaceRange(mapped, mapped, slice).setMeta("uiEvent", "drop")
+		})}`
+	} finally {
+		review.tracking = tracking
+	}
 }
 
 function range(context: OpContext): { doc: Node; a: number; b: number } | undefined {
@@ -291,6 +317,14 @@ function range(context: OpContext): { doc: Node; a: number; b: number } | undefi
 function damage(name: string, weight: number, run: (context: OpContext) => string): EditOp {
 	return { name, harness: "damage", weight, run }
 }
+
+// What typing into a bound content control may write besides the main part: the custom XML item or properties part
+// the control stores its value in.
+export const BOUND_WRITES = [
+	"application/xml",
+	"application/vnd.openxmlformats-officedocument.extended-properties+xml",
+	"application/vnd.openxmlformats-package.core-properties+xml"
+]
 
 export const baseOps: readonly EditOp[] = [
 	{
@@ -320,7 +354,8 @@ export const baseOps: readonly EditOp[] = [
 
 				return target !== undefined && session.dispatch(session.state.tr.insertText("Filen ", target.pos + 1))
 			}
-		}
+		},
+		writes: BOUND_WRITES
 	},
 	{
 		name: "typeEnd",

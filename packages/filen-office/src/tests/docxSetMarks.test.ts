@@ -2,7 +2,7 @@ import { TextSelection } from "prosemirror-state"
 import { AddMarkStep, Step } from "prosemirror-transform"
 import { describe, expect, it } from "vitest"
 import { docxSchema } from "@filen/office/core/docx/edit"
-import { SetMarkSetsStep, SetMarksStep } from "../core/docx/edit/marks"
+import { SetMarkSetsStep, SetMarksStep, isAddMarkLike } from "../core/docx/edit/marks"
 import { sessionOf } from "./docxEditFixtures"
 import { p } from "./docxSynthetic"
 
@@ -81,7 +81,9 @@ describe("setting marks piece by piece", () => {
 
 		expect(applied).not.toBeNull()
 		expect(inverted.apply(applied as typeof doc).doc?.eq(doc)).toBe(true)
-		expect(step.merge()).toBeNull()
+		// It merges with nothing, and no plain mark step takes it for one of its own (history merges inverses).
+		expect(step.merge(step)).toBeNull()
+		expect(new AddMarkStep(step.from, step.to, step.mark).merge(step)).toBeNull()
 
 		// Text inserted before the pieces moves them.
 		const moved = session.state.tr.insertText("xx", 1)
@@ -118,7 +120,7 @@ describe("setting marks piece by piece", () => {
 
 		expect(session.execute({ type: "format.clearAll" })).toBe(true)
 		stop()
-		expect(steps.filter(step => step instanceof AddMarkStep)).toHaveLength(1)
+		expect(steps.filter(isAddMarkLike)).toHaveLength(1)
 		expect(steps.find(step => step instanceof SetMarkSetsStep)).toBeDefined()
 
 		const after = session.state.doc
@@ -154,7 +156,9 @@ describe("setting marks piece by piece", () => {
 				.apply(applied as typeof doc)
 				.doc?.eq(doc)
 		).toBe(true)
-		expect(step.merge()).toBeNull()
+		// It merges with nothing, and no plain mark step takes it for one of its own (history merges inverses).
+		expect(step.merge(step)).toBeNull()
+		expect(new AddMarkStep(step.from, step.to, step.mark).merge(step)).toBeNull()
 		expect(
 			(step.map(session.state.tr.insertText("xx", 1).mapping) as SetMarkSetsStep).pieces.map(piece => [piece.from, piece.to])
 		).toEqual([

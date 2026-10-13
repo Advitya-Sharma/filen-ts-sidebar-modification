@@ -77,10 +77,23 @@ export const DOCX_CHECKS: readonly DocxCheck[] = [
 	...mathChecks
 ]
 
+// Each check gives the host a turn after it when its slice is up (a part's checks together are long).
 export async function checkPart(checks: readonly DocxCheck[], input: CheckInput, part: CheckedPart): Promise<void> {
-	for (const check of checks) if (check.part !== undefined) await check.part(input, part)
+	for (const check of checks) {
+		if (check.part === undefined) continue
+
+		await check.part(input, part)
+
+		if (input.clock?.due === true) await input.clock.pause()
+	}
 }
 
 export async function checkDone(checks: readonly DocxCheck[], input: CheckInput): Promise<void> {
-	for (const check of checks) if (check.done !== undefined) await check.done(input)
+	for (const check of checks) {
+		if (check.done === undefined) continue
+
+		await check.done(input)
+
+		if (input.clock?.due === true) await input.clock.pause()
+	}
 }

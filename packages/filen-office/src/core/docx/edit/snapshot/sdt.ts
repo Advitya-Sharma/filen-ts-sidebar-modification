@@ -2,12 +2,14 @@ import {
 	controlAround,
 	controlKey,
 	legacyFieldOf,
+	typableField,
 	typeable,
 	type ControlInfo,
 	type ControlType,
 	type LegacyField
 } from "../../forms/controls"
 import { enclosingBookmark } from "../../fields/bookmarks"
+import { partHasBindings, unmappedKeys } from "../../forms/binding"
 import { selectedField } from "../handlers/forms"
 import { mayHoldControls, mayHoldFields } from "../invariants/forms"
 import { protectionOf, type DocxProtectionMode } from "../protection"
@@ -42,6 +44,9 @@ export interface DocxControlContext {
 	readonly undeletable: boolean
 	// The document's protection mode (forms: only controls and fields change).
 	readonly protection: DocxProtectionMode
+	// A legacy text field's w:textInput w:type ("regular", "number", "date"...) and w:maxLength (null: none).
+	readonly textType: string | null
+	readonly maxLength: number | null
 }
 
 const previous = new WeakMap<DocxEditorSession, { key: string; info: ControlInfo | LegacyField; context: DocxControlContext }>()
@@ -62,7 +67,9 @@ function contextOfControl(info: ControlInfo, protection: DocxProtectionMode): Do
 		placeholder: info.showingPlaceholder,
 		locked: blocker === "contentLocked" || blocker === "bound" ? blocker : null,
 		undeletable: info.lock === "sdtLocked" || info.lock === "sdtContentLocked",
-		protection
+		protection,
+		textType: null,
+		maxLength: null
 	})
 }
 
@@ -82,9 +89,12 @@ function contextOfField(field: LegacyField, result: string, tag: string | null, 
 		date: null,
 		dateFormat: null,
 		placeholder: false,
-		locked: field.enabled ? null : "disabled",
+		// A text field Word fills in itself (a date, a calculation) is not typed into.
+		locked: field.enabled && (field.type !== "FORMTEXT" || typableField(field)) ? null : "disabled",
 		undeletable: false,
-		protection
+		protection,
+		textType: field.type === "FORMTEXT" ? field.textType : null,
+		maxLength: field.type === "FORMTEXT" && field.maxLength > 0 ? field.maxLength : null
 	})
 }
 
@@ -93,6 +103,9 @@ export function controlOf(input: SnapshotInput): DocxControlContext | null {
 	const part = session.story.part
 
 	if (!mayHoldControls(session) && !mayHoldFields(session)) return null
+
+	// Which bindings map to a node is read in the background from the first look at a story with controls.
+	if (partHasBindings(part)) unmappedKeys(input.context)
 
 	const state = input.state
 	const selection = state.selection

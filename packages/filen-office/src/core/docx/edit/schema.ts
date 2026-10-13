@@ -111,7 +111,7 @@ const BLOCK_MARKS = "para_id paragraph_change section_change"
 // What text and inline atoms may carry: every mark but the node marks of blocks.
 const INLINE_MARKS =
 	"link insertion deletion move_from move_to content_control wrapper run plain char_style bold italic underline strike " +
-	"double_strike caps small_caps vert_align color highlight shading font size spacing lang format_change"
+	"double_strike caps small_caps vert_align color highlight shading font size spacing lang no_proof web_hidden format_change"
 
 const src = { default: NO_SOURCE }
 const before = { default: NO_MARKERS }
@@ -418,6 +418,10 @@ const marks = {
 	// Character spacing, twips.
 	spacing: { attrs: value },
 	lang: { attrs: { latin: nil, eastAsia: nil, bidi: nil } },
+	// w:noProof (no spelling or grammar checks) and w:webHidden (hidden in Web layout: a table of contents' tabs
+	// and page numbers under \z), true/false as written.
+	no_proof: { attrs: value },
+	web_hidden: { attrs: value },
 	// w:rPrChange: in the base (a tracked formatting change read from the file, `base` null), or recorded by
 	// the editor with the run properties before it (`base`, an id in the session's RunBases) and, when the
 	// change replaced the run itself (the format painter), the run before (`run`: its attributes, or false for
@@ -486,7 +490,9 @@ export const FORMATTING_MARKS: readonly DocxMarkName[] = [
 	"font",
 	"size",
 	"spacing",
-	"lang"
+	"lang",
+	"no_proof",
+	"web_hidden"
 ]
 
 // Source revision wrappers.

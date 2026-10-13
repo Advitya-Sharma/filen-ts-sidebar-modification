@@ -211,6 +211,20 @@ const RENUMBERED: Readonly<Record<string, "bookmark" | "revision">> = {
 // References to a comment or note: one per anchor, so the copy has none (the mc:Choice keeps them).
 const DROPPED = new Set(["commentRangeStart", "commentRangeEnd", "commentReference", "footnoteReference", "endnoteReference"])
 
+// Whether run `run` holds references the copy leaves out and nothing else but its properties.
+function onlyDropped(document: XmlDocument, reader: ReturnType<typeof partReader>, run: number): boolean {
+	let dropped = false
+
+	for (let child = document.firstChildElement(run); child >= 0; child = document.nextSiblingElement(child)) {
+		const local = document.localName(child)
+
+		if (reader.group(child) === Ns.W && DROPPED.has(local)) dropped = true
+		else if (!(reader.group(child) === Ns.W && local === "rPr")) return false
+	}
+
+	return dropped
+}
+
 // The ids the copy `node` of a text box gives its bookmarks (by name) and permission ranges (in order), for the
 // rewritten copy to keep.
 function copyIds(part: StoryPart, node: number): { readonly bookmarks: Map<string, string>; readonly permissions: string[] } {
@@ -238,6 +252,10 @@ function copyIds(part: StoryPart, node: number): { readonly bookmarks: Map<strin
 
 	return { bookmarks, permissions }
 }
+
+// The ids fallback copies were given (per part: copy, id space and the id they replace), so every save of a
+// session writes a copy alike.
+const givenIds = new WeakMap<StoryPart, Map<string, number>>()
 
 // What a text box's content is written as in the other branches of its mc:AlternateContent: the same markup
 // with the ids that must be unique renumbered (bookmarks, permission ranges, revisions, drawings; a bookmark or
@@ -272,16 +290,29 @@ export function fallbackCopy(part: StoryPart, bytes: Uint8Array, ids: NestedIds 
 	const paragraphIds = w14 === undefined || w14 === "" ? undefined : new Set([`${w14}:paraId`, `${w14}:textId`])
 	const edits: { from: number; to: number; text: string }[] = []
 	const renamed = new Map<string, number>()
+	let given = givenIds.get(part)
+
+	if (given === undefined) {
+		given = new Map()
+		givenIds.set(part, given)
+	}
+
 	const fresh = (space: "bookmark" | "permission" | "revision" | "docPr", old: string, keep?: string): string => {
 		const key = `${space}:${old}`
+		// Revision ids are each save's own count; the others the copy keeps from one save to the next.
+		// Kept per copy it replaces (an item of the part); one replacing none keeps nothing (it shares no key).
+		const lasting = space === "revision" || copy === undefined ? undefined : `${String(copy)}:${key}`
 		let id = renamed.get(key)
 
 		if (id === undefined && keep !== undefined && /^-?\d+$/.test(keep)) id = Number(keep)
+		if (id === undefined && lasting !== undefined) id = given.get(lasting)
 
 		if (id === undefined) {
 			if (ids === undefined) throw new DocxWriteError("unsupported", `A text box of ${part.name} has ids its copy cannot renumber`)
 
 			id = ids.next(space)
+
+			if (lasting !== undefined) given.set(lasting, id)
 		}
 
 		renamed.set(key, id)
@@ -316,7 +347,8 @@ export function fallbackCopy(part: StoryPart, bytes: Uint8Array, ids: NestedIds 
 		const group = reader.group(node)
 		const local = document.localName(node)
 
-		if (group === Ns.W && DROPPED.has(local)) {
+		// A run holding nothing but such references goes with them: a run without content is no run.
+		if ((group === Ns.W && DROPPED.has(local)) || (group === Ns.W && local === "r" && onlyDropped(document, reader, node))) {
 			edits.push({ from: document.start(node), to: document.end(node), text: "" })
 
 			const after = document.end(node)

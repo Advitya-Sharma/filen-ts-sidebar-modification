@@ -4,6 +4,7 @@ import type { PropsStore } from "../../props/index"
 import type { DocxStyles } from "../../styles/index"
 import type { DocxCellVAlign, DocxTableAlign } from "../commands/tables"
 import type { DocxEditorSession } from "../session"
+import { MAIN, dataAttr } from "../copies"
 import { NO_SOURCE } from "../schema"
 import { cellOverrides, propertySource, tableOverrides, type TableRect } from "../tables/map"
 import { canMerge, canSplit, tableAt, type TableAt } from "../tables/ops"
@@ -84,15 +85,21 @@ function vAlignOf(value: string | undefined): DocxCellVAlign | null {
 	return value === "top" || value === "center" || value === "bottom" ? value : null
 }
 
-// A cell's vertical alignment and fill: what commands set, else its (or its model's) w:tcPr.
+// A cell's vertical alignment and fill: what commands set, else its (or its model's) w:tcPr, or the w:tcPr of
+// another part's cell it is a copy of (its `copy`).
 function cellValues(part: StoryPart, store: PropsStore, cell: Node): { vAlign: DocxCellVAlign | null; shading: string | null } {
 	const overrides = cellOverrides(cell)
 	const source = propertySource(part, cell, Item.Cell)
 	const props = source === NO_SOURCE ? undefined : store.cell(part.document, part.cells.tcPr[part.aux[source] ?? -1] ?? -1)
-	const fill = props?.shading?.fill?.val
+	const copied = (name: string, attribute: string): string | undefined => {
+		const child = overrides.copy?.children.find(entry => entry.uri === MAIN && entry.name === name)
+
+		return child === undefined ? undefined : dataAttr(child, attribute)
+	}
+	const fill = props?.shading?.fill?.val ?? copied("shd", "fill")
 
 	return {
-		vAlign: overrides.vAlign ?? vAlignOf(props?.vAlign),
+		vAlign: overrides.vAlign ?? vAlignOf(props?.vAlign ?? copied("vAlign", "val")),
 		shading:
 			overrides.shading !== undefined
 				? overrides.shading
@@ -141,8 +148,13 @@ export function tableOf(input: SnapshotInput): DocxTableContext | null {
 	const table = at.table
 	const overrides = tableOverrides(table)
 	const model = propertySource(part, table, Item.Table)
+	const copiedJc = overrides.copy?.children.find(entry => entry.uri === MAIN && entry.name === "jc")
 	const sourceAlign =
-		model !== NO_SOURCE ? context.store.table(part.document, part.tables.tblPr[part.aux[model] ?? -1] ?? -1).alignment : undefined
+		model !== NO_SOURCE
+			? context.store.table(part.document, part.tables.tblPr[part.aux[model] ?? -1] ?? -1).alignment
+			: copiedJc === undefined
+				? undefined
+				: dataAttr(copiedJc, "val")
 	const widths = table.attrs["grid"] as readonly number[]
 	const next: DocxTableContext = {
 		rows: at.map.height,

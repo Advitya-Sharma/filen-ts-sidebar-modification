@@ -29,6 +29,8 @@ const CHUNK = 4 * 1024 * 1024
 export interface DocxPartChanges {
 	readonly replace: readonly PartChange[]
 	readonly add: readonly PartChange[]
+	// Parts taken out (nothing relates to them any more).
+	readonly remove?: readonly string[]
 }
 
 export interface DocxZipOptions {
@@ -152,12 +154,13 @@ async function sameAsRead(
 
 // The zip half of gate 2: `written` (random access to the produced file) holds every original entry as its
 // original compressed bytes, every changed part with the CRC of its planned bytes (`crcs`, by partKey), and
-// nothing else.
+// nothing else; a removed entry (`removed`, by partKey) is not there.
 export async function verifyDocxZip(
 	original: { readonly opc: OpcPackage },
 	written: ByteSource,
 	save: {
 		readonly crcs: ReadonlyMap<string, number>
+		readonly removed?: ReadonlySet<string>
 		// What the writer read of each copied entry (WriteZipReport.copies): the copy is checked against it in
 		// the written file, with the original's directory record, instead of reading the original again.
 		readonly copies?: ReadonlyMap<string, { readonly crc: number; readonly length: number }>
@@ -181,6 +184,12 @@ export async function verifyDocxZip(
 		const copy = entries.get(entry.name)
 
 		seen.add(entry.name)
+
+		if (save.removed?.has(key) === true) {
+			if (copy !== undefined) fail("untouchedChanged", `${entry.name} is still there`)
+
+			continue
+		}
 
 		if (copy === undefined) fail("untouchedChanged", `${entry.name} is missing`)
 
@@ -267,7 +276,7 @@ export function nativeDeflateChunks(): ((chunks: AsyncIterable<Uint8Array>) => P
 // The zip plan of `changes` (untouched entries copied raw); a change the archive cannot take refuses the save.
 export async function planChanges(original: OpcPackage, changes: DocxPartChanges): Promise<ZipPlan> {
 	try {
-		return await original.plan({ replace: changes.replace, add: changes.add })
+		return await original.plan({ replace: changes.replace, add: changes.add, remove: changes.remove ?? [] })
 	} catch (error) {
 		if (error instanceof OpcError || error instanceof ZipError) throw new DocxSaveError("invalidPackage", error.message)
 
@@ -295,6 +304,7 @@ export async function zipDocxSave(original: OpcPackage, changes: DocxPartChanges
 	// What the archive must hold: each changed part's CRC as checked (PartChange.crc32, computed where the
 	// part checks ran), else as the writer was fed it. What the writer was fed must be what was checked.
 	const crcs = new Map<string, number>()
+	const removed = new Set((changes.remove ?? []).map(partKey))
 
 	for (const change of [...changes.replace, ...changes.add]) {
 		const entry = plan.items.find(item => item.kind === "data" && partKey(item.name) === partKey(change.name))
@@ -323,7 +333,9 @@ export async function zipDocxSave(original: OpcPackage, changes: DocxPartChanges
 		await verifyDocxZip(
 			{ opc: original },
 			source,
-			options.progress === undefined ? { crcs, copies: report.copies } : { crcs, copies: report.copies, progress: options.progress }
+			options.progress === undefined
+				? { crcs, removed, copies: report.copies }
+				: { crcs, removed, copies: report.copies, progress: options.progress }
 		)
 	} catch (error) {
 		if (error instanceof DocxVerifyError) throw new DocxSaveError(error.reason, error.message)

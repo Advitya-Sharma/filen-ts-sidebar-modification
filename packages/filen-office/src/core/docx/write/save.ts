@@ -1,6 +1,8 @@
 import {
 	addRelationships,
 	editContentTypes,
+	joinBytes,
+	parseRelationships,
 	partKey,
 	relationshipsPartName,
 	relativeTarget,
@@ -35,6 +37,7 @@ import { planNested } from "./nested"
 import {
 	NEW_STORY_PARTS,
 	WRITTEN_REFERENCES,
+	COPIED_RELATIONSHIP,
 	clonedRevisions,
 	copiedPartName,
 	ownedByCopy,
@@ -44,6 +47,8 @@ import {
 } from "./newStory"
 import { NUMBERING_CONTENT_TYPE, planNumbering } from "./numbering"
 import { orphanedHyperlinks } from "./orphans"
+import { noteCopySource, noteCopyTarget, orphanedNotes, readNoteReferences, relationshipIdsOf, relationshipUses } from "./parts/notes"
+import { Out } from "./markup"
 import { PART_CONTRIBUTORS, type PartContributor, type RootDeclarations, type SaveParts } from "./parts/index"
 import { DocxWriteError, StoryWriter, type StoryDraft, type StoryOutput, type WriteEnvironment } from "./story"
 import { STYLES_CONTENT_TYPE, stylesWithDefinitions } from "./styles"
@@ -52,6 +57,9 @@ import { changedCrcs, planChanges, zipDocxSave, type DocxPartChanges } from "./z
 
 const RELATIONSHIP_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 const RELATIONSHIPS_CONTENT_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
+
+// Items of a document whose one-pass reads are short enough to run without slices.
+const SMALL_ITEMS = 200_000
 
 export interface DocxSaveInput {
 	readonly pkg: DocxPackage
@@ -213,6 +221,82 @@ interface DraftedStory {
 	readonly to: number
 	readonly added: boolean
 	readonly draft: StoryDraft
+}
+
+// The part a story is written into: its own, or for a copied note the notes part it goes into.
+function writtenPart(part: StoryPart): StoryPart {
+	return noteCopyTarget(part) ?? part
+}
+
+// Package parts left with no relationship pointing at them once `dropped` (part keys, targets of relationships
+// the save removes) lose theirs: each with its relationships part, and what only those pointed at. Word drops
+// such parts on save; a part the save writes stays.
+async function unreferencedParts(pkg: DocxPackage, dropped: ReadonlySet<string>, changes: readonly PartChange[]): Promise<string[]> {
+	if (dropped.size === 0) return []
+
+	const changed = new Map(changes.map(change => [partKey(change.name), change]))
+	// Part key -> keys of the parts relating to it (the package: "").
+	const sources = new Map<string, Set<string>>()
+	const owned = new Map<string, Relationships>()
+	const names = new Set(pkg.opc.zip.entries.map(entry => entry.name))
+
+	for (const change of changes) names.add(change.name)
+
+	for (const name of names) {
+		const match = /^(.*?)_rels\/([^/]*)\.rels$/.exec(name)
+
+		if (match === null) continue
+
+		const source = `${match[1] ?? ""}${match[2] ?? ""}`
+		const change = changed.get(partKey(name))
+		const relationships =
+			change === undefined ? await pkg.relationships(source) : parseRelationships(await joinBytes(change.bytes), source)
+
+		owned.set(partKey(source), relationships)
+
+		for (const relationship of relationships.all) {
+			if (relationship.external || relationship.partName === undefined) continue
+
+			const key = partKey(relationship.partName)
+			const set = sources.get(key)
+
+			if (set === undefined) sources.set(key, new Set([partKey(source)]))
+			else set.add(partKey(source))
+		}
+	}
+
+	const removed = new Set<string>()
+	const out: string[] = []
+	let queue = [...dropped]
+
+	while (queue.length > 0) {
+		const next: string[] = []
+
+		for (const key of queue) {
+			const entry = pkg.opc.entry(key)
+
+			if (entry === undefined || removed.has(key) || changed.has(key) || key === partKey(CONTENT_TYPES_PART)) continue
+			if ([...(sources.get(key) ?? [])].some(source => !removed.has(source))) continue
+
+			const rels = partKey(relationshipsPartName(entry.name))
+
+			if (changed.has(rels)) continue
+
+			removed.add(key)
+			out.push(entry.name)
+
+			const relsEntry = pkg.opc.entry(rels)
+
+			if (relsEntry !== undefined) out.push(relsEntry.name)
+
+			for (const relationship of owned.get(key)?.all ?? [])
+				if (!relationship.external && relationship.partName !== undefined) next.push(partKey(relationship.partName))
+		}
+
+		queue = next
+	}
+
+	return out
 }
 
 // Pieces gathered between looks at the clock.
@@ -379,13 +463,14 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 	const created = new Map<string, { readonly part: StoryPart; readonly story: NewStory; readonly relationship: string }>()
 	// Checks where an added story goes; the first story of a part the save creates relates it to the main part.
 	const place = async (session: DocxEditorSession, story: NewStory): Promise<void> => {
-		const part = session.story.part
+		const part = writtenPart(session.story.part)
 		const key = partKey(story.target)
 
 		if (partKey(part.name) !== key) throw new DocxWriteError("unsupported", `A new ${story.kind} story is not on ${story.target}`)
 
 		if (pkg.has(story.target)) {
-			if (!model.parts.includes(part) || session.story.story.item >= 0)
+			// A copied note is a story of its own part, written into the notes part as a new one.
+			if (!model.parts.includes(part) || (session.story.story.item >= 0 && part === session.story.part))
 				throw new DocxWriteError("unsupported", `A new ${story.kind} story is not on ${story.target} as the package has it`)
 
 			return
@@ -455,6 +540,212 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		}
 
 		return name
+	}
+
+	// Parts of the original a copied note owns a copy of that this save gave the copy instead (nothing else uses
+	// them any more), by part key.
+	const reused = new Set<string>()
+	// What relationships the source of a notes part uses, read once.
+	const sourceUses = new Map<StoryPart, Map<string, number[]>>()
+	// Whether a relationship of `into` of ids `ids` is still used by what the save writes of it outside the copy:
+	// the stories drafted so far (every story of the source's own goes first), the source bytes no story replaces
+	// and no note leaves.
+	// Notes that lost every reference (read once), and what each drafted story uses (read once per draft).
+	let orphans: ReadonlyMap<StoryPart, readonly number[]> | undefined
+	const draftUses = new WeakMap<StoryDraft, Map<string, number[]>>()
+	const usesOf = (part: StoryPart): Map<string, number[]> => {
+		let uses = sourceUses.get(part)
+
+		if (uses === undefined) {
+			const document = part.document
+			const root = document.documentElement()
+
+			uses = relationshipUses(part, document.bytes.subarray(document.contentStart(root), document.contentEnd(root)))
+			sourceUses.set(part, uses)
+		}
+
+		return uses
+	}
+	const stillUsed = (into: StoryPart, ids: ReadonlySet<string>): boolean => {
+		const replaced: number[] = []
+
+		orphans ??= orphanedNotes(context, sessions, docs)
+
+		const gone = new Set(orphans.get(into) ?? [])
+
+		for (const entry of drafted.get(into) ?? []) {
+			replaced.push(entry.from, entry.to)
+
+			// A note that lost every reference goes with what it uses.
+			if (gone.has(entry.session.story.story.item)) continue
+
+			let uses = draftUses.get(entry.draft)
+
+			if (uses === undefined) {
+				uses = relationshipUses(into, entry.draft.out.finish())
+				draftUses.set(entry.draft, uses)
+			}
+
+			for (const id of uses.keys()) if (ids.has(id)) return true
+		}
+
+		const document = into.document
+		const base = document.contentStart(document.documentElement())
+
+		for (const item of gone) replaced.push(document.start(into.node(item)), document.end(into.node(item)))
+
+		const uses = usesOf(into)
+
+		for (const [id, spans] of uses) {
+			if (!ids.has(id)) continue
+
+			for (let k = 0; k < spans.length; k += 2) {
+				const at = (spans[k] ?? 0) + base
+				let kept = true
+
+				for (let r = 0; r < replaced.length; r += 2) if (at >= (replaced[r] ?? 0) && at < (replaced[r + 1] ?? 0)) kept = false
+
+				if (kept) return true
+			}
+		}
+
+		return false
+	}
+	// The relationship of notes part `into` a copied note (copied from part `origin`) names in place of
+	// `relationship` (a placeholder, write/newStory.ts COPIED_RELATIONSHIP): to a part the copy owns, one to a copy
+	// of it, or to the part itself where nothing else uses it any more; to any other target, one to the same
+	// target (the part's own where it has one).
+	const copiedRelationship = async (
+		relationship: Relationship,
+		origin: StoryPart,
+		into: StoryPart,
+		copies: Map<string, string>
+	): Promise<string> => {
+		const source = relationship.partName
+		const plan = await relationshipsOf(into.name)
+		const same = (candidate: Relationship): boolean =>
+			!candidate.id.startsWith(COPIED_RELATIONSHIP) &&
+			candidate.type === relationship.type &&
+			candidate.external === relationship.external &&
+			(relationship.external || source === undefined ? candidate.target === relationship.target : candidate.partName === source)
+		const existing = (): string | undefined => into.relationships.all.find(same)?.id
+		const related = (): string =>
+			existing() ??
+			plan.add({
+				type: relationship.type,
+				target: relationship.external || source === undefined ? relationship.target : relativeTarget(into.name, source),
+				...(relationship.external ? { external: true } : {})
+			})
+
+		if (source === undefined || relationship.external || !ownedByCopy(relationship, pkg)) return related()
+
+		const originals = origin.relationships.all.filter(
+			candidate => !candidate.external && candidate.partName === source && !candidate.id.startsWith(COPIED_RELATIONSHIP)
+		)
+
+		if (originals.length > 0 && !reused.has(partKey(source)) && !stillUsed(origin, new Set(originals.map(r => r.id)))) {
+			reused.add(partKey(source))
+
+			return related()
+		}
+
+		const copy = await copyPart(source, copies)
+
+		return plan.add({ type: relationship.type, target: relativeTarget(into.name, copy) })
+	}
+	// The notes part a copied note was first copied from (a copy of a copy names its copy's part).
+	const rootSource = (part: StoryPart): StoryPart | undefined => {
+		let source = noteCopySource(part)
+
+		for (let next = source === undefined ? undefined : noteCopySource(source); next !== undefined; next = noteCopySource(next))
+			source = next
+
+		return source
+	}
+	// Relationships of notes part `part` its source used and its writing (`written`, the part as assembled) no
+	// longer does: a note that went, its picture or object moved with a note converted (hyperlinks apart:
+	// orphanedHyperlinks).
+	const unusedNoteRelationships = async (part: StoryPart, written: BytePieces): Promise<string[]> => {
+		const local = part.document.localName(part.document.documentElement())
+
+		if (local !== "footnotes" && local !== "endnotes") return []
+
+		const before = usesOf(part)
+
+		if (before.size === 0) return []
+
+		const after = relationshipIdsOf(await joinBytes(written))
+		const out: string[] = []
+
+		for (const id of before.keys()) {
+			const relationship = part.relationships.byId(id)
+
+			if (relationship !== undefined && !relationship.type.endsWith("/hyperlink") && !after.has(id)) out.push(id)
+		}
+
+		return out
+	}
+	// A copied note's draft (write/parts/notes.ts noteCopyTarget) with the parts it owns: each relationship id it
+	// names one by (COPIED_RELATIONSHIP, in the relationships namespace only) becomes that of a relationship of
+	// the notes part `into` to a copy of the part, or to the part itself where nothing else uses it any more.
+	const withCopiedParts = async (draft: StoryDraft, from: StoryPart, into: StoryPart): Promise<StoryDraft> => {
+		const placeholders = new Map(from.relationships.all.filter(r => r.id.startsWith(COPIED_RELATIONSHIP)).map(r => [r.id, r]))
+
+		if (placeholders.size === 0) return draft
+		if (draft.out.trusted.length > 0) throw new DocxWriteError("unsupported", `A copied note of ${into.name} copies source nodes`)
+
+		const bytes = draft.out.finish()
+		const edits: { from: number; to: number; text: string }[] = []
+		const copies = new Map<string, string>()
+		const ids = new Map<string, string>()
+
+		for (const [placeholder, spans] of relationshipUses(from, bytes)) {
+			const relationship = placeholders.get(placeholder)
+
+			if (relationship === undefined) continue
+
+			let id = ids.get(placeholder)
+
+			if (id === undefined) {
+				id = await copiedRelationship(relationship, rootSource(from) ?? into, into, copies)
+				ids.set(placeholder, id)
+			}
+
+			for (let k = 0; k < spans.length; k += 2) edits.push({ from: spans[k] ?? 0, to: spans[k + 1] ?? 0, text: id })
+		}
+
+		if (edits.length === 0) return draft
+
+		edits.sort((a, b) => a.from - b.from)
+
+		const out = new Out()
+		const shifts: { at: number; by: number }[] = []
+		let at = 0
+		let shift = 0
+
+		for (const edit of edits) {
+			out.bytes(bytes, at, edit.from)
+			out.text(edit.text)
+			shift += edit.text.length - (edit.to - edit.from)
+			shifts.push({ at: edit.to, by: shift })
+			at = edit.to
+		}
+
+		out.bytes(bytes, at, bytes.length)
+
+		const moved = (pos: number): number => {
+			let by = 0
+
+			for (const entry of shifts) if (entry.at <= pos) by = entry.by
+
+			return pos + by
+		}
+
+		return {
+			out,
+			paragraphs: draft.paragraphs.map(paragraph => ({ ...paragraph, from: moved(paragraph.from), to: moved(paragraph.to) })),
+			containers: draft.containers.map(container => ({ ...container, from: moved(container.from), to: moved(container.to) }))
+		}
 	}
 
 	const parts: SaveParts = {
@@ -559,9 +850,10 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 
 		if (story === undefined) throw new DocxWriteError("unsupported", `A ${session.story.story.kind} story without a container`)
 
-		const document = session.story.part.document
+		const target = writtenPart(session.story.part)
+		const document = target.document
 		const root = document.documentElement()
-		const fresh = !pkg.has(session.story.part.name)
+		const fresh = !pkg.has(target.name)
 		const wholeRoot = (at: number, to: number): boolean => fresh && at === document.start(root) && to === document.end(root)
 
 		for (const contributor of contributors) {
@@ -572,7 +864,7 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 			const to = container.to ?? container.at
 
 			if (to === container.at ? !isInsertionPoint(document, container.at) : !wholeRoot(container.at, to))
-				throw new DocxWriteError("unsupported", `A new story of ${session.story.part.name} goes inside another element`)
+				throw new DocxWriteError("unsupported", `A new story of ${target.name} goes inside another element`)
 
 			return container
 		}
@@ -630,16 +922,18 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 
 		if (made !== undefined) await place(session, made)
 
-		const part = story.part
+		const part = writtenPart(story.part)
 		const document = part.document
 		const doc = docs[index] ?? session.state.doc
-		const container = story.story.item < 0 ? containerOf(session, doc) : undefined
+		// A new story, or a copied note (a story of a part of its own) going into its notes part.
+		const container = story.story.item < 0 || part !== story.part ? containerOf(session, doc) : undefined
 		const prefixes = declarationsOf(part)?.prefixes
 		const writer = new StoryWriter(env, story, {
 			...(container === undefined ? {} : { container }),
 			...(prefixes === undefined ? {} : { prefixes })
 		})
-		const draft = clock === undefined ? writer.draftStorySync(doc) : await writer.draftStory(doc, clock)
+		const written = clock === undefined ? writer.draftStorySync(doc) : await writer.draftStory(doc, clock)
+		const draft = part === story.part ? written : await withCopiedParts(written, story.part, part)
 
 		kept.push(session)
 		keptDocs.push(doc)
@@ -696,6 +990,11 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 	const cuts = new Map<StoryPart, { from: number; to: number }[]>()
 	const removed: { part: StoryPart; from: number; to: number }[] = []
 
+	// What the stories hold of note references, read in slices before notes that lost every reference go (a
+	// small document reads them at once, where they are needed: slicing would only add to it).
+	if (clock !== undefined && context.model.parts.reduce((sum, part) => sum + (part?.count ?? 0), 0) > SMALL_ITEMS)
+		await readNoteReferences(context, kept, keptDocs, clock)
+
 	for (const contributor of contributors) {
 		for (const [part, items] of contributor.removed?.(parts, { sessions: kept, docs: keptDocs }) ?? []) {
 			const document = part.document
@@ -746,6 +1045,7 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 			const plan = await relationshipsOf(part.name)
 
 			for (const id of await orphanedHyperlinks(pkg, part, result.bytes, clock)) plan.removals.add(id)
+			for (const id of await unusedNoteRelationships(part, result.bytes)) plan.removals.add(id)
 		} else {
 			put(add, { name: part.name, bytes: result.bytes })
 			overrides.push({ partName: part.name, contentType: NEW_STORY_PARTS[made.story.kind].contentType })
@@ -831,6 +1131,9 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		if (type !== contentType) overrides.push({ partName: name, contentType })
 	}
 
+	// Parts relationships the save removes pointed at.
+	const dropped = new Set<string>()
+
 	for (const [key, plan] of relationships) {
 		// A part the save creates as a copy of another has that part's relationships (stories/clone.ts).
 		const made = created.get(key)
@@ -847,6 +1150,16 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		const existing = inPackage ? await pkg.opc.read(relsName) : kept === undefined ? null : relationshipsBytes(source, kept)
 		const result = addRelationships(existing, plan.additions, plan.removals)
 
+		if (inPackage && plan.removals.size > 0) {
+			const before = await pkg.relationships(source)
+
+			for (const id of plan.removals) {
+				const target = before.byId(id)
+
+				if (target !== undefined && !target.external && target.partName !== undefined) dropped.add(partKey(target.partName))
+			}
+		}
+
 		if (result.ids.join() !== plan.ids.join())
 			throw new DocxWriteError("unsupported", `Relationship ids of ${source} did not come out as planned`)
 
@@ -860,14 +1173,18 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 		}
 	}
 
-	if (overrides.length > 0 || defaults.length > 0) {
+	// What only those relationships pointed at goes with them, as Word saves it.
+	const remove = await unreferencedParts(pkg, dropped, [...replace, ...add])
+	const removeOverrides = remove.filter(name => types.overrides.has(partKey(name)))
+
+	if (overrides.length > 0 || defaults.length > 0 || removeOverrides.length > 0) {
 		put(replace, {
 			name: CONTENT_TYPES_PART,
-			bytes: editContentTypes(await pkg.opc.read(CONTENT_TYPES_PART), { overrides, defaults })
+			bytes: editContentTypes(await pkg.opc.read(CONTENT_TYPES_PART), { overrides, defaults, removeOverrides })
 		})
 	}
 
-	return { replace, add, numIds: numbering.numIds, stories, removed, roots }
+	return { replace, add, remove, numIds: numbering.numIds, stories, removed, roots }
 }
 
 // The parts a save writes, checked by the part-level half of gate 2, with the time each step took (ms, slices
@@ -923,6 +1240,7 @@ export async function prepareDocxSave(input: DocxSaveInput, options: DocxPrepare
 	return {
 		replace,
 		add,
+		...(changes.remove === undefined || changes.remove.length === 0 ? {} : { remove: changes.remove }),
 		changedParts: [...changes.replace, ...changes.add].map(change => change.name),
 		serializeMs,
 		verifyPartsMs: Date.now() - started

@@ -3,12 +3,13 @@ import { join } from "node:path"
 import { unzipSync } from "fflate"
 import type { Node } from "prosemirror-model"
 import { AllSelection, TextSelection } from "prosemirror-state"
+import { ReplaceStep, type Step } from "prosemirror-transform"
 import { describe, expect, it } from "vitest"
 import { Revision, RevisionFlag, type StoryPart } from "@filen/office/core/docx"
 import { DocxEditorSession, docxSchema, type DocxEditContext } from "@filen/office/core/docx/edit"
 import { DocxSaveError, prepareDocxSave, saveDocx } from "@filen/office/core/docx/write"
 import { parseXml } from "@filen/office/core/xml"
-import { markCommand, markInternal } from "../core/docx/edit/invariants/core"
+import { isRemarking, markCommand, markInternal } from "../core/docx/edit/invariants/core"
 import { DocxVerifyError } from "../core/docx/write/failure"
 import type { CheckInput } from "../core/docx/write/checks/index"
 import { revisionChecks } from "../core/docx/write/checks/revisions"
@@ -756,6 +757,30 @@ describe("docx tracked changes: commands and settings", () => {
 		expect(texts(session)).toEqual(["oxyne two", "end", "last"])
 	})
 
+	it("accepts and rejects what tracking recorded with no snapshot made, after tracking went off", async () => {
+		const bytes = buildDocx({ body: p("Alpha beta") + p("Second") })
+
+		for (const what of ["typing", "pageSetup", "break"] as const) {
+			for (const accept of [true, false]) {
+				const { editor, context } = await pagedEditor(bytes)
+				const session = editor.body.session
+
+				context.identity.author = "Ann"
+				context.review.tracking = true
+				session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, 6)))
+
+				if (what === "typing") session.dispatch(session.state.tr.insertText("XYZ"))
+				else if (what === "pageSetup") expect(await editor.execute({ type: "page.setup", margins: { left: 3000 } })).toBe(true)
+				else expect(await editor.execute({ type: "insert.sectionBreak", kind: "nextPage" })).toBe(true)
+
+				context.review.tracking = false
+				expect(await editor.execute({ type: accept ? "review.acceptAll" : "review.rejectAll" }), what).toBe(true)
+				expect(storyReviewIndex(session).revisionCount).toBe(0)
+				editor.dispose()
+			}
+		}
+	})
+
 	it("switches the markup view in place", async () => {
 		const { editor } = await pagedEditor(buildDocx({ body: p("one") }))
 
@@ -1217,6 +1242,34 @@ describe("docx tracked changes: recording details", () => {
 		expect(session.dispatch(session.state.tr.deleteSelection())).toBe(false)
 	})
 
+	it("marks a large deletion in one rebuilt step that brings nothing new, a large format change in one that may", async () => {
+		const doc = await tracked({ body: Array.from({ length: 60 }, (_, k) => p(`para ${k}`)).join("") })
+		const session = doc.session
+		const steps: Step[] = []
+		const stop = session.onApplied(transactions => {
+			for (const tr of transactions) steps.push(...tr.steps)
+		})
+
+		session.dispatch(session.state.tr.setSelection(new AllSelection(session.state.doc)))
+		session.dispatch(session.state.tr.addMark(0, session.state.doc.content.size, marks.bold.create()))
+
+		const formatted = steps.filter(step => step instanceof ReplaceStep)
+
+		steps.length = 0
+		session.dispatch(session.state.tr.setSelection(new AllSelection(session.state.doc)))
+		session.dispatch(session.state.tr.deleteSelection())
+		stop()
+
+		const deleted = steps.filter(step => step instanceof ReplaceStep)
+
+		expect(texts(session)[59]).toBe("[-para 59-]")
+		expect(formatted).toHaveLength(1)
+		expect(deleted).toHaveLength(1)
+		// Tracking marks and records only: the fields and forms invariants need not read the blocks again.
+		expect(formatted.map(isRemarking)).toEqual([false])
+		expect(deleted.map(isRemarking)).toEqual([true])
+	})
+
 	it("marks the rows of a table deleted whole, adds no paragraph, and accept all leaves one empty paragraph", async () => {
 		const table =
 			'<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
@@ -1599,5 +1652,44 @@ describe("docx tracked changes: recording details", () => {
 			session.execute({ type: "history.undo" })
 			expect(session.state.doc.eq(deleted), String(many)).toBe(true)
 		}
+	})
+})
+
+describe("docx tracked changes: what a resolved change leaves", () => {
+	it("writes no empty paragraph mark properties when a deleted mark is rejected after reopening", async () => {
+		const tocPr = '<w:pPr><w:pStyle w:val="TOC1"/></w:pPr>'
+		const body =
+			`<w:p>${tocPr}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Intro</w:t></w:r></w:p>` +
+			`<w:p>${tocPr}<w:r><w:t>Results</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>` +
+			p("After")
+		const opened = await pagedEditor(buildDocx({ body }))
+		const session = opened.editor.body.session
+
+		opened.context.identity.author = "Ann"
+		opened.context.review.tracking = true
+		session.dispatch(
+			session.state.tr.setSelection(
+				TextSelection.create(session.state.doc, 1, session.state.doc.child(0).nodeSize + session.state.doc.child(1).nodeSize - 1)
+			)
+		)
+		session.dispatch(session.state.tr.deleteSelection())
+		await settleAll(opened.editor)
+
+		const tracked = (await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: opened.editor.sessions })).bytes as Uint8Array
+		const again = await pagedEditor(tracked)
+
+		expect(await again.editor.execute({ type: "review.rejectAll" })).toBe(true)
+		await settleAll(again.editor)
+
+		const xml = new TextDecoder().decode(
+			unzipSync((await saveDocx({ pkg: again.pkg, context: again.context, sessions: again.editor.sessions })).bytes as Uint8Array)[
+				"word/document.xml"
+			]
+		)
+
+		expect(xml).toContain('<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/>')
+		expect(xml).not.toMatch(/<w:rPr><\/w:rPr>|<w:pPr><\/w:pPr>/)
+		opened.editor.dispose()
+		again.editor.dispose()
 	})
 })

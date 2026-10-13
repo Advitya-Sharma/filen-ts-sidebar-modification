@@ -1,9 +1,10 @@
 import type { Mark, Node } from "prosemirror-model"
 import { relationshipKind, type DocxPackage } from "../package"
 import type { StoryPart } from "../model/index"
+import type { DocxEditContext } from "../edit/context"
 import { Namespaces, type XmlDocument } from "../../xml/index"
 import { controlKey, controlOf, simpleBinding, sourceControl, storeId, type ControlInfo, type SimpleBinding } from "./controls"
-import { storedDate } from "./dates"
+import { formatControlDate, parseControlDate, storedDate } from "./dates"
 
 // Content controls bound to custom XML (ECMA-376 Part 1 §17.5.2.6 w:dataBinding): Word replaces a bound
 // control's content with the bound node's text when it opens the file, so an edit is only kept when the
@@ -55,17 +56,27 @@ export function boundNode(document: XmlDocument, namespaces: Namespaces, binding
 	return node
 }
 
-// The text a control stores in its bound node: a checkbox "true"/"false", a list its entry's value, a date
-// as w:storeMappedDataAs says, anything else its text.
+// The text a control stores in its bound node: a checkbox "true"/"false", a list the value of the entry it shows
+// (text typed into a combo box that is no entry's: the text), the date it shows as w:storeMappedDataAs says (text
+// that is no date: the text), anything else its text.
 export function boundValue(info: ControlInfo, text: string): string {
 	if (info.checkbox !== null) return info.checkbox.checked ? "true" : "false"
 	if (info.type === "dropDownList" || info.type === "comboBox") {
 		const item = info.lastValue === null ? undefined : info.items.find(entry => entry.value === info.lastValue)
 
-		return item?.value ?? text
+		return item !== undefined && item.text === text ? item.value : text
 	}
 
-	if (info.date !== null) return info.date.iso === null ? "" : storedDate(info.date.iso, info.date.storeAs, text)
+	if (info.date !== null) {
+		// w:fullDate is the last date the control held; what it shows may be text typed since.
+		const date = info.date
+		const iso =
+			date.iso !== null && formatControlDate(date.iso, date.format, date.lid, date.calendar) === text
+				? date.iso
+				: parseControlDate(text, date.format, date.lid, date.calendar)
+
+		return iso === null ? text : storedDate(iso, date.storeAs, text)
+	}
 
 	return text
 }
@@ -302,11 +313,83 @@ export function sharedBindings(part: StoryPart): ReadonlySet<string> {
 	return found
 }
 
+// The value the latest edit of a document gave each bound node (by binding key): what a save stores when the
+// node's controls still disagree (one cannot show it), as Word re-maps every control from the node on open.
+const edited = new WeakMap<object, Map<string, string>>()
+
+export function noteBoundEdit(context: object, key: string, value: string): void {
+	let values = edited.get(context)
+
+	if (values === undefined) {
+		values = new Map()
+		edited.set(context, values)
+	}
+
+	values.set(key, value)
+}
+
+export function editedValue(context: object, key: string): string | undefined {
+	return edited.get(context)?.get(key)
+}
+
+// Binding keys of a document whose path finds no node, or one with child elements: Word maps no control to them
+// (§17.5.2.6; "Content controls in Word": leaf nodes or attributes only), so the controls are not kept alike. Read
+// once per document, in the background from the first ask (empty until known).
+const unmapped = new WeakMap<DocxEditContext, { keys: Set<string>; done: Promise<void> }>()
+
+export function unmappedKeys(context: DocxEditContext): ReadonlySet<string> {
+	return unmappedEntry(context).keys
+}
+
+// Settles once the document's unmapped keys are known.
+export function bindingsKnown(context: DocxEditContext): Promise<void> {
+	return unmappedEntry(context).done
+}
+
+function unmappedEntry(context: DocxEditContext): { keys: Set<string>; done: Promise<void> } {
+	let entry = unmapped.get(context)
+
+	if (entry === undefined) {
+		const keys = new Set<string>()
+
+		entry = { keys, done: findUnmapped(context, keys).catch(() => undefined) }
+		unmapped.set(context, entry)
+	}
+
+	return entry
+}
+
+async function findUnmapped(context: DocxEditContext, out: Set<string>): Promise<void> {
+	const pkg = context.model.package
+	const stores = new BindingStores(pkg)
+	const seen = new Set<string>()
+
+	for (const part of context.model.parts) {
+		if (!partHasBindings(part)) continue
+
+		for (let row = 0; row < part.sdts.count; row++) {
+			const info = sourceControl(part, part.sdts.item[row] ?? -1)
+			const binding = info.binding === null || info.richBinding ? undefined : simpleBinding(info.binding)
+
+			if (binding === undefined || seen.has(binding.key)) continue
+
+			seen.add(binding.key)
+
+			const name = await stores.part(binding.store)
+			const document = name === undefined ? undefined : await pkg.xml(name)
+			const node = document === undefined ? -1 : boundNode(document, new Namespaces(document, { lenient: true }), binding)
+
+			if (document === undefined || node < 0 || document.firstChildElement(node) >= 0) out.add(binding.key)
+		}
+	}
+}
+
 // Bound controls whose value changed from `original` (the story as built) to `doc`, by bound node.
 export function changedBindings(part: StoryPart, original: Node, doc: Node): Map<string, BoundControl[]> {
 	const out = new Map<string, BoundControl[]>()
 
-	if (original === doc || !partHasBindings(part)) return out
+	// A story whose part binds nothing may hold bound copies of another part's controls: looked at whole.
+	if (original === doc) return out
 
 	const before = boundControls(part, original)
 

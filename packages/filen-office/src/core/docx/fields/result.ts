@@ -1,5 +1,6 @@
 import { FieldCharType, Item, type StoryPart } from "../model/index"
 import { Ns } from "../model/namespaces"
+import { rewritableSourceAt } from "./evaluate"
 
 // The cached result of a source field as the editor reads it: what follows the separator (a simple field's
 // content), nested field codes left out. A result Word updated while tracking changes holds the old result in
@@ -8,12 +9,14 @@ import { Ns } from "../model/namespaces"
 // builder and the writer, so a result no command changed is told apart.
 
 // A tracked update of a field's result: the result before it, who updated it and when, and the change's id
-// (w:id of its deletion, else insertion).
+// (w:id of its deletion, else insertion). Tracked changes inside a field's code are read as one too, resolved
+// with it: the code before and after them (`code`; the result before is the result when only the code changed).
 export interface FieldUpdate {
 	readonly result: string
 	readonly author: string
 	readonly date: string
 	readonly id: string
+	readonly code?: { readonly before: string; readonly after: string }
 }
 
 export interface StoredResult {
@@ -27,9 +30,6 @@ const NOT_INSERTED = 2
 export function storedResult(part: StoryPart, first: number, last: number, simple: boolean): StoredResult {
 	const field = simple ? (part.aux[first] ?? -1) : part.fieldOf(first + 1)
 	const separate = simple || field < 0 ? first : (part.fields.separate[field] ?? -1)
-
-	if (separate < 0) return { result: "", update: null }
-
 	// What holds the field's runs: tracked changes outside it (a field inserted or deleted whole) are not its.
 	const container = simple ? first : part.parent(first)
 	const end = part.end(last)
@@ -62,7 +62,28 @@ export function storedResult(part: StoryPart, first: number, last: number, simpl
 		if ((visible & NOT_INSERTED) !== 0) before += text
 	}
 
-	for (let item = separate + 1; item < end; item++) {
+	// The field's own code (nested fields' left out), when a tracked change inside it changed it.
+	let ownCode: { before: string; after: string } | undefined
+
+	// (Only where the field can be written anew once they are resolved.)
+	if (!simple && field >= 0 && rewritableSourceAt(part, first, last) !== undefined) {
+		let codeAfter = ""
+		let codeBefore = ""
+		let changed = false
+
+		for (let item = part.fields.instruction[field] ?? -1; item >= 0; item = part.nextInstruction(item)) {
+			const visible = shows(item)
+			const text = part.text(item)
+
+			if ((visible & NOT_DELETED) !== 0) codeAfter += text
+			if ((visible & NOT_INSERTED) !== 0) codeBefore += text
+			if (visible !== (NOT_DELETED | NOT_INSERTED)) changed = true
+		}
+
+		if (changed) ownCode = { before: codeBefore, after: codeAfter }
+	}
+
+	for (let item = separate < 0 ? end : separate + 1; item < end; item++) {
 		switch (part.kinds[item]) {
 			case Item.FieldChar: {
 				const type = part.fieldCharType(item)
@@ -108,7 +129,8 @@ export function storedResult(part: StoryPart, first: number, last: number, simpl
 			result: before,
 			author: reader.attr(node, Ns.W, "author") ?? "",
 			date: reader.attr(node, Ns.W, "date") ?? "",
-			id: reader.attr(node, Ns.W, "id") ?? ""
+			id: reader.attr(node, Ns.W, "id") ?? "",
+			...(ownCode === undefined ? {} : { code: ownCode })
 		}
 	}
 }

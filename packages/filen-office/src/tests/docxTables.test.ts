@@ -3,10 +3,11 @@ import { join } from "node:path"
 import type { Node } from "prosemirror-model"
 import { EditorState, TextSelection } from "prosemirror-state"
 import { describe, expect, it } from "vitest"
-import { bytesSource, OpcPackage } from "@filen/office/core/opc"
+import { bytesSource, OpcPackage, SliceClock } from "@filen/office/core/opc"
 import { encodeUtf8, parseXml } from "@filen/office/core/xml"
 import { RevisionFlag } from "@filen/office/core/docx"
-import { DocxDocBuilder, DocxEditorSession, docxSchema, type DocxEditorCommand } from "@filen/office/core/docx/edit"
+import { DocxDocBuilder, DocxEditorSession, docxSchema, freshSlice, type DocxEditorCommand } from "@filen/office/core/docx/edit"
+import { sourceCopies } from "../core/docx/edit/session"
 import { DocxVerifyError, saveDocx, writerProof, type CheckInput } from "@filen/office/core/docx/write"
 import { SetAttrsStep } from "../core/docx/edit/attrs"
 import { TABLE_UNITS } from "../core/docx/edit/handlers/tables"
@@ -20,7 +21,7 @@ import { tableChecks } from "../core/docx/write/checks/tables"
 import { CORPUS_DIR } from "./corpusDir"
 import { W as W_NAMESPACE, parseXml as parseIndependent, violations } from "./fuzz/independentReader"
 import { tableOps } from "./fuzz/ops/tables"
-import { openBytes, type Opened } from "./docxEditFixtures"
+import { openBytes, openSpec, type Opened } from "./docxEditFixtures"
 import { buildDocx, p } from "./docxSynthetic"
 import { layOut } from "./layoutFixtures"
 import { editedLayout, pageDigest, pagedEditor, savedDigest, type EditedLayout } from "./pagedFixtures"
@@ -876,6 +877,189 @@ describe("table commands", () => {
 		expect((await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [session] })).bytes).toBeDefined()
 	})
 
+	it("resolves a tracked column insertion or deletion next to a vertical merge as the untracked edit leaves the table", async () => {
+		// b1 merged down over b2.
+		const merged = docx(
+			tbl(
+				[2000, 2000, 2000],
+				[
+					tr([tc("a1", W(2000)), tc("b1", `${W(2000)}<w:vMerge w:val="restart"/>`), tc("c1", W(2000))]),
+					tr([tc("a2", W(2000)), tc("", `${W(2000)}<w:vMerge/>`), tc("c2", W(2000))]),
+					tr([tc("a3", W(2000)), tc("b3", W(2000)), tc("c3", W(2000))])
+				]
+			)
+		)
+		const tracking = (session: DocxEditorSession): void => {
+			session.context.review.tracking = true
+			session.context.identity.author = "Ann Author"
+			select(session, "a1")
+		}
+		const resolved = async (layout: EditedLayout, accept: boolean): Promise<Uint8Array> => {
+			const outcome = resolveChanges(layout.session, storyReviewIndex(layout.session), { all: true }, accept)
+
+			expect(outcome.skipped).toBe(0)
+			expect(outcome.tr === null || (await layout.edit(outcome.tr))).toBe(true)
+
+			const saved = await layout.save()
+
+			expect(pageDigest(layout.layout)).toEqual(await savedDigest(saved))
+
+			return saved
+		}
+		const untracked = await partXml((await edited(merged, session => select(session, "a1"), [{ type: "table.column.delete" }])).bytes)
+
+		for (const reopened of [false, true]) {
+			const inserted = await edited(merged, tracking, [{ type: "table.column.insertLeft" }])
+
+			expect(await partXml(await resolved(reopened ? await editedLayout(inserted.bytes) : inserted.layout, false))).toBe(
+				await partXml(merged)
+			)
+
+			const deleted = await edited(merged, tracking, [{ type: "table.column.delete" }])
+			const accepted = await partXml(await resolved(reopened ? await editedLayout(deleted.bytes) : deleted.layout, true))
+
+			// The deleted column's grid column goes too.
+			expect(accepted).toBe(untracked)
+			expect(accepted).toMatch(/<w:tblGrid><w:gridCol w:w="2000"\/><w:gridCol w:w="2000"\/><\/w:tblGrid>/)
+		}
+	})
+
+	it("saves a tracked cell change of a cell merged or split since with the width rejecting it gives", async () => {
+		const tracking = (session: DocxEditorSession): void => {
+			session.context.review.tracking = true
+			session.context.identity.author = "Ann Author"
+			select(session, "b2")
+		}
+		const scripts: (DocxEditorCommand | ((session: DocxEditorSession) => void))[][] = [
+			[
+				{ type: "table.cell.shading", fill: "00FF00" },
+				{ type: "table.cell.split", rows: 1, cols: 2 }
+			],
+			[{ type: "table.column.width", index: 0, twips: 3000 }, session => select(session, "a2", "b2"), { type: "table.cells.merge" }]
+		]
+
+		for (const script of scripts) {
+			const inSession = await edited(docx(GRID3), tracking, script)
+			const reopened = await editedLayout(inSession.bytes)
+
+			for (const layout of [inSession.layout, reopened]) {
+				const outcome = resolveChanges(layout.session, storyReviewIndex(layout.session), { all: true }, false)
+
+				expect(outcome.tr === null || (await layout.edit(outcome.tr))).toBe(true)
+			}
+
+			expect(await partXml(await reopened.save())).toBe(await partXml(await inSession.layout.save()))
+		}
+	})
+
+	it("leaves out a row's property element its resolved insertion leaves empty", async () => {
+		const { bytes } = await edited(
+			docx(GRID3),
+			session => {
+				session.context.review.tracking = true
+				session.context.identity.author = "Ann Author"
+				select(session, "b2")
+			},
+			[{ type: "table.row.insertBelow" }]
+		)
+
+		for (const accept of [true, false]) {
+			const layout = await editedLayout(bytes)
+			const outcome = resolveChanges(layout.session, storyReviewIndex(layout.session), { all: true }, accept)
+
+			expect(outcome.tr !== null && (await layout.edit(outcome.tr))).toBe(true)
+
+			const xml = await partXml(await layout.save())
+
+			expect(xml).not.toMatch(/<w:trPr><\/w:trPr>/)
+			if (!accept) expect(xml).toBe(await partXml(docx(GRID3)))
+		}
+	})
+
+	it("models new rows and cells on a copy of another part's, and reports a copied cell's fill and alignment", async () => {
+		const copiedTable = tbl(
+			[3000],
+			[
+				tr(
+					[
+						tc(
+							"x1",
+							`${W(3000)}<w:shd w:val="clear" w:color="auto" w:fill="DDDDDD" w:themeFill="accent1" w:themeFillTint="33"/><w:vAlign w:val="center"/>`
+						)
+					],
+					'<w:cantSplit/><w:trHeight w:val="700"/>'
+				)
+			]
+		)
+		const opened = await openSpec({
+			body: copiedTable + p("End") + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>',
+			headers: { rIdH: p("Head") }
+		})
+		const story = opened.context.model.stories.find(entry => entry.kind === "header")
+
+		if (story === undefined) throw new Error("no header")
+
+		const body = new DocxEditorSession(opened.context)
+		const header = new DocxEditorSession(opened.context, { story })
+		const copied = body.state.doc.slice(0, body.state.doc.child(0).nodeSize)
+
+		header.dispatch(header.state.tr.setSelection(TextSelection.create(header.state.doc, textPos(header.state.doc, "Head"))))
+		expect(
+			header.dispatch(
+				header.state.tr.replaceSelection(
+					freshSlice(copied, sourceCopies(opened.context), body.story.part.index, header.story.part.index)
+				)
+			)
+		).toBe(true)
+		select(header, "x1")
+		expect(header.snapshot().context.table).toMatchObject({ shading: "DDDDDD", vAlign: "center" })
+
+		expect(header.execute({ type: "table.row.insertBelow" })).toBe(true)
+		select(header, "x1")
+		expect(header.execute({ type: "table.column.insertRight" })).toBe(true)
+		// While tracking too, and split.
+		header.context.review.tracking = true
+		header.context.identity.author = "Ann Author"
+		select(header, "x1")
+		expect(header.execute({ type: "table.row.insertAbove" })).toBe(true)
+		header.context.review.tracking = false
+		select(header, "x1")
+		expect(header.execute({ type: "table.cell.split", rows: 1, cols: 2 })).toBe(true)
+
+		const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [body, header] })
+		const xml = await partXml(result.bytes as Uint8Array, "word/header1.xml")
+
+		// Three rows, each with the copied row's properties; seven cells, each with the copied cell's fill.
+		expect(xml.match(/<w:trPr><w:cantSplit\/><w:trHeight w:val="700"\/>(?:<w:ins [^>]*\/>)?<\/w:trPr>/g)).toHaveLength(3)
+		expect(xml.match(/w:fill="DDDDDD" w:themeFill="accent1" w:themeFillTint="33"\/><w:vAlign w:val="center"\/>/g)).toHaveLength(7)
+	})
+
+	it("has the fuzz's tracked table commands leave the track switch as it was", async () => {
+		const session = new DocxEditorSession((await openBytes(docx(GRID3))).context)
+		const op = tableOps.find(entry => entry.name === "tableTracked")
+
+		if (op === undefined) throw new Error("no op")
+
+		for (const on of [true, false]) {
+			session.context.review.tracking = on
+
+			for (let seed = 0; seed < 4; seed++) {
+				let state = seed + 1
+
+				await op.run({
+					rand: () => (state = (state * 16807) % 2147483647) / 2147483647,
+					session,
+					editor: undefined,
+					numIds: [],
+					styleIds: [],
+					transact: () => "noop",
+					execute: (_label, command) => String(session.execute(command))
+				})
+				expect(session.context.review.tracking).toBe(on)
+			}
+		}
+	})
+
 	it("drops the tracked state of a pasted copy of a tracked row", async () => {
 		const opened = await openBytes(docx(GRID3))
 		const session = new DocxEditorSession(opened.context)
@@ -1088,6 +1272,48 @@ describe("gate 2 table checks", () => {
 
 	const orphan = tbl([2000, 2000], [tr([tc("a"), tc("b")]), tr([tc("", "<w:vMerge/>"), tc("d")])])
 	const wide = tbl([2000], [tr([tc("a"), tc("b")])])
+
+	it("reads a long table a few rows at a time in a sliced save, merges carried across", async () => {
+		const opened = await openBytes(docx(GRID3))
+		const part = opened.model.parts[opened.model.body?.part ?? 0]
+		// A merge from row 30 to row 34, across a slice; `orphanAt` continues one under no merge.
+		const long = (orphanAt: number): string =>
+			tbl(
+				[2000, 2000],
+				Array.from({ length: 200 }, (_, row) =>
+					tr([
+						tc(
+							"",
+							row === 30 ? '<w:vMerge w:val="restart"/>' : (row > 30 && row <= 34) || row === orphanAt ? "<w:vMerge/>" : ""
+						),
+						tc("b")
+					])
+				)
+			)
+		const run = async (orphanAt: number): Promise<{ pauses: number; refused: boolean }> => {
+			let pauses = 0
+			const clock = new SliceClock({ sliceMs: 0, now: () => 0, pause: () => Promise.resolve(void pauses++) })
+			const document = parseXml(encodeUtf8(await partXml(docx(long(orphanAt)))))
+			const input = { original: opened.pkg, changes: { stories: [] }, clock } as unknown as CheckInput
+
+			try {
+				await tableChecks[0]?.part?.(input, { name: "word/document.xml", part, document, skeleton: false })
+
+				return { pauses, refused: false }
+			} catch (error) {
+				if (!(error instanceof DocxVerifyError)) throw error
+
+				return { pauses, refused: true }
+			}
+		}
+
+		const whole = await run(-1)
+
+		expect(whole.refused).toBe(false)
+		// 200 rows checked 32 at a time.
+		expect(whole.pauses).toBeGreaterThanOrEqual(6)
+		expect((await run(100)).refused).toBe(true)
+	})
 
 	it("refuses rows wider than the grid and merges continuing under no merge", async () => {
 		expect(await check(GRID3, GRID3)).toBeUndefined()

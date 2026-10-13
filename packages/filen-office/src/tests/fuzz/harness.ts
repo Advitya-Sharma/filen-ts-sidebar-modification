@@ -2,6 +2,7 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process"
 import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { unzipSync } from "fflate"
 import type { Node, NodeType } from "prosemirror-model"
 import type { XmlDocument } from "@filen/office/core/xml"
 import { bytesSource } from "@filen/office/core/opc"
@@ -148,14 +149,22 @@ export async function settle(editor: PagedEditor): Promise<void> {
 	await turn()
 }
 
-// The pages the editor shows.
-export function shownPages(editor: PagedEditor): string[] {
+// A package's parts by name, read once (pictures are told by their bytes, see digestPage).
+function partsOf(bytes: Uint8Array): (name: string) => Uint8Array | undefined {
+	let entries: Record<string, Uint8Array> | undefined
+
+	return name => (entries ??= unzipSync(bytes))[name]
+}
+
+// The pages the editor shows; `source`: the document as opened (new pictures come from the editor's media).
+export function shownPages(editor: PagedEditor, source: Uint8Array): string[] {
 	const out: string[] = []
+	const media = partsOf(source)
 
 	for (let i = 0; i < editor.pageCount; i++) {
 		const page = editor.page(i)
 
-		out.push(page === undefined ? "<missing>" : digestPage(editor.layout.styles, page))
+		out.push(page === undefined ? "<missing>" : digestPage(editor.layout, page, media))
 	}
 
 	return out
@@ -173,7 +182,9 @@ export async function freshPages(bytes: Uint8Array, editor: PagedEditor): Promis
 
 	await layout.done
 
-	return layout.pages.map(page => digestPage(layout.styles, page))
+	const media = partsOf(bytes)
+
+	return layout.pages.map(page => digestPage(layout, page, media))
 }
 
 export async function savePaged(run: PagedRun): Promise<Uint8Array> {

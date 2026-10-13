@@ -121,18 +121,23 @@ function paged(name: string, weight: number, run: (context: OpContext) => string
 }
 
 // A new picture where the caret goes: on a random paragraph, the caret anywhere in it.
+// A picture inserted at a random place, or over a selected drawing (Change Picture for a picture).
 function insertPicture(context: OpContext): string {
 	const editor = context.editor
 	const session = context.session
 	const blocks = textblocks(session.state.doc)
+	const found = drawings(session.state.doc)
 
 	if (editor === undefined || blocks.length === 0) return "noop"
 
 	const block = pick(context.rand, blocks)
-	const at = block.pos + 1 + Math.floor(context.rand() * (block.node.content.size + 1))
+	const over = found.length > 0 && context.rand() < 0.3 ? pick(context.rand, found) : undefined
+	const at = over?.pos ?? block.pos + 1 + Math.floor(context.rand() * (block.node.content.size + 1))
 
 	try {
-		session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, at)))
+		const doc = session.state.doc
+
+		session.dispatch(session.state.tr.setSelection(over === undefined ? TextSelection.create(doc, at) : NodeSelection.create(doc, at)))
 	} catch {
 		return "noop"
 	}

@@ -1,4 +1,5 @@
 import { unzipSync } from "fflate"
+import { Fragment } from "prosemirror-model"
 import { NodeSelection, TextSelection, type Transaction } from "prosemirror-state"
 import { describe, expect, it } from "vitest"
 import { bytesSource } from "@filen/office/core/opc"
@@ -8,12 +9,17 @@ import {
 	docxSchema,
 	openDocxEditContext,
 	parseDocxEditorCommand,
+	replaceAll,
 	type DocxEditContext
 } from "@filen/office/core/docx/edit"
 import { prepareDocxSave, saveDocx } from "@filen/office/core/docx/write"
 import { boundControls } from "../core/docx/forms/binding"
 import { controlOf, prefixMappings, simpleBinding, sourceControl, type ControlState } from "../core/docx/forms/controls"
-import { formatControlDate } from "../core/docx/forms/dates"
+import { formatControlDate, parseControlDate } from "../core/docx/forms/dates"
+import { datePicture } from "../core/docx/fields/evaluate"
+import { boundIndex } from "../core/docx/forms/positions"
+import { formChecks } from "../core/docx/write/checks/forms"
+import { parseXml } from "@filen/office/core/xml"
 import { FORMS_AFTER, FORMS_BEFORE } from "../core/docx/edit/handlers/forms"
 import { REVIEW_TRANSFORMER } from "../core/docx/edit/handlers/review"
 import { resolveChanges, storyReviewIndex } from "../core/docx/review/accept"
@@ -320,7 +326,7 @@ describe("content controls: commands", () => {
 		expect(control(session)).toMatchObject({ placeholder: true, value: null })
 	})
 
-	it("sets a block date control's date, formatted as its picture says, and clears it", async () => {
+	it("sets a block date control's date, formatted as its picture says, and clears it, keeping the last date", async () => {
 		const opened = await open({ body: DATE_BLOCK, ...STYLED })
 		const session = opened.session
 
@@ -338,8 +344,13 @@ describe("content controls: commands", () => {
 		select(session, 3)
 		expect(run({ type: "control.clear" }, session)).toBe(true)
 		expect(session.state.doc.textContent).toBe("Click or tap to enter a date.")
-		expect(control(session)).toMatchObject({ date: null, placeholder: true })
-		expect(part(await save(opened), "word/document.xml")).toContain("<w:date><w:dateFormat")
+		// The last date stays as w:fullDate under the placeholder.
+		expect(control(session)).toMatchObject({ date: "2026-10-12", placeholder: true })
+
+		const cleared = part(await save(opened), "word/document.xml")
+
+		expect(cleared).toContain('<w:date w:fullDate="2026-10-12T00:00:00Z">')
+		expect(cleared).toContain("showingPlcHdr")
 	})
 })
 
@@ -1040,5 +1051,504 @@ describe("forms fuzz ops", () => {
 	it("registers ops for both harnesses", () => {
 		expect(formOps.some(op => op.harness === "paged")).toBe(true)
 		expect(formOps.some(op => op.harness === "damage")).toBe(true)
+	})
+})
+
+describe("content controls: review fixes", () => {
+	const ITEM = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><root xmlns="urn:x"><name>Old</name><other>keep</other></root>'
+	const STORE = "{11111111-2222-3333-4444-555555555555}"
+	const bound = (xpath: string, text: string, id: string, kind = "<w:text/>"): string =>
+		`<w:sdt><w:sdtPr><w:id w:val="${id}"/><w:dataBinding w:prefixMappings="xmlns:ns0='urn:x'" w:xpath="${xpath}" w:storeItemID="${STORE}"/>${kind}` +
+		`</w:sdtPr><w:sdtContent><w:r><w:t>${text}</w:t></w:r></w:sdtContent></w:sdt>`
+	const NAME = "/ns0:root[1]/ns0:name[1]"
+	const withItem = (body: string, item = ITEM): SyntheticDocx => ({
+		body,
+		relationships: [{ id: "rIdX", type: "customXml", target: "../customXml/item1.xml" }],
+		parts: [
+			{ name: "customXml/item1.xml", data: item },
+			{
+				name: "customXml/itemProps1.xml",
+				contentType: "application/vnd.openxmlformats-officedocument.customXmlProperties+xml",
+				data: `<?xml version="1.0" encoding="UTF-8" standalone="no"?><ds:datastoreItem ds:itemID="${STORE}" xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml"><ds:schemaRefs/></ds:datastoreItem>`
+			},
+			{
+				name: "customXml/_rels/item1.xml.rels",
+				data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps1.xml"/></Relationships>'
+			}
+		]
+	})
+	const text = (session: DocxEditorSession): string => session.state.doc.textContent
+
+	it("pastes into a plain text control as plain text, so controls bound to one node keep one value", async () => {
+		const opened = await open(withItem(inParagraph(bound(NAME, "Old", "7")) + p("End")))
+		const session = opened.session
+		const paragraph = session.state.doc.child(0)
+
+		select(session, find(session, "Old") + 1)
+		expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(0, paragraph.nodeSize)))).toBe(true)
+
+		let controls = 0
+
+		session.state.doc.descendants(node => {
+			if (node.marks.some(mark => mark.type.name === "content_control" && mark.attrs["src"] === NO_SOURCE)) controls++
+		})
+		expect(controls).toBe(0)
+		expect(text(session)).toBe("Before OBefore Old afterld afterEnd")
+		expect(part(await save(opened), "customXml/item1.xml")).toContain("<name>OBefore Old afterld</name>")
+	})
+
+	it("takes a line break into a one-line plain text control as a space, and refuses a break alone", async () => {
+		const line =
+			'<w:sdt><w:sdtPr><w:id w:val="9"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>Ada Lovelace</w:t></w:r></w:sdtContent></w:sdt>'
+		const { session } = await open({ body: inParagraph(line) })
+		const at = find(session, "Lovelace")
+
+		expect(session.dispatch(session.state.tr.replaceWith(at, at, nodes.break.create({ type: "textWrapping" })))).toBe(false)
+		expect(
+			session.dispatch(
+				session.state.tr.replaceWith(at, at, [
+					docxSchema.text("x"),
+					nodes.break.create({ type: "textWrapping" }),
+					docxSchema.text("y")
+				])
+			)
+		).toBe(true)
+		expect(session.state.doc.textContent).toBe("Before Ada x yLovelace after")
+	})
+
+	it("leaves a copy pasted into a rich text control bound to its node no control of its own", async () => {
+		const opened = await open(withItem(inParagraph(bound(NAME, "Old", "7", "")) + p("End")))
+		const session = opened.session
+		const paragraph = session.state.doc.child(0)
+
+		select(session, find(session, "Old") + 1)
+		expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(1, paragraph.nodeSize - 1)))).toBe(true)
+
+		const keys = new Set<string>()
+
+		session.state.doc.descendants(node => {
+			for (const mark of node.marks) if (mark.type.name === "content_control") keys.add(`${String(mark.attrs["src"])}`)
+		})
+		expect(keys.size).toBe(1)
+		expect(text(session)).toBe("Before OBefore Old afterld afterEnd")
+		expect(part(await save(opened), "customXml/item1.xml")).toContain("<name>OBefore Old afterld</name>")
+	})
+
+	it("turns Enter into a line break in a multi-line plain text control and ignores it in a one-line one", async () => {
+		const line = (multi: boolean): string =>
+			`<w:sdt><w:sdtPr><w:id w:val="9"/><w:text${multi ? ' w:multiLine="1"' : ""}/></w:sdtPr><w:sdtContent><w:r><w:t>Ada Lovelace</w:t></w:r></w:sdtContent></w:sdt>`
+
+		for (const multi of [true, false]) {
+			const { session } = await open({ body: inParagraph(line(multi)) })
+
+			expect(session.dispatch(session.state.tr.split(find(session, "Lovelace")))).toBe(multi)
+			expect(session.state.doc.childCount).toBe(1)
+
+			if (multi) expect(session.state.doc.child(0).child(2).type).toBe(nodes.break)
+		}
+	})
+
+	it("stores the latest edit's value in a node whose changed controls cannot agree, never a stale one", async () => {
+		const checkbox =
+			`<w:sdt><w:sdtPr><w:id w:val="5"/><w:dataBinding w:prefixMappings="xmlns:ns0='urn:x'" w:xpath="${NAME}" w:storeItemID="${STORE}"/>` +
+			'<w14:checkbox><w14:checked w14:val="1"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>☒</w:t></w:r></w:sdtContent></w:sdt>'
+		const opened = await open(
+			withItem(inParagraph(bound(NAME, "true", "6")) + inParagraph(checkbox) + p("Free"), ITEM.replace("Old", "true"))
+		)
+		const session = opened.session
+		const at = find(session, "true")
+
+		select(session, at, at + 4)
+		expect(session.dispatch(session.state.tr.insertText("Banana"))).toBe(true)
+		expect(session.dispatch(session.state.tr.insertText("!", find(session, "Free")))).toBe(true)
+
+		const bytes = await save(opened)
+
+		expect(part(bytes, "customXml/item1.xml")).toContain("<name>Banana</name>")
+		expect(part(bytes, "word/document.xml")).toContain("!Free")
+	})
+
+	it("syncs controls bound to one node after a review resolution in their story", async () => {
+		const opened = await open(
+			withItem(inParagraph(bound(NAME, "Old", "7")) + p("mid") + inParagraph(bound("/ns0:root/ns0:name", "Old", "8"))),
+			"Ann Lee"
+		)
+		const session = opened.session
+
+		opened.context.review.tracking = true
+
+		const at = find(session, "Old")
+
+		select(session, at, at + 3)
+		expect(session.dispatch(session.state.tr.insertText("New"))).toBe(true)
+
+		const outcome = resolveChanges(session, storyReviewIndex(session), { all: true }, false)
+
+		expect(outcome.tr === null ? false : session.dispatch(outcome.tr as Transaction)).toBe(true)
+		expect(text(session)).toBe("Before Old aftermidBefore Old after")
+		expect(part(await save(opened), "customXml/item1.xml")).toContain("<name>Old</name>")
+	})
+
+	it("stores text typed into a combo box as text unless it is an entry's, and a typed date as Word reads it", async () => {
+		const combo =
+			`<w:sdt><w:sdtPr><w:id w:val="30"/><w:dataBinding w:prefixMappings="xmlns:ns0='urn:x'" w:xpath="${NAME}" w:storeItemID="${STORE}"/>` +
+			'<w:comboBox w:lastValue="A"><w:listItem w:displayText="Apple" w:value="A"/><w:listItem w:displayText="Pear" w:value="P"/></w:comboBox>' +
+			"</w:sdtPr><w:sdtContent><w:r><w:t>Apple</w:t></w:r></w:sdtContent></w:sdt>"
+
+		for (const [typed, stored] of [
+			["Banana", "Banana"],
+			["Pear", "P"]
+		]) {
+			const opened = await open(withItem(inParagraph(combo), ITEM.replace("Old", "A")))
+			const at = find(opened.session, "Apple")
+
+			select(opened.session, at, at + 5)
+			expect(opened.session.dispatch(opened.session.state.tr.insertText(typed ?? ""))).toBe(true)
+			expect(part(await save(opened), "customXml/item1.xml")).toContain(`<name>${stored ?? ""}</name>`)
+		}
+
+		const date =
+			`<w:sdt><w:sdtPr><w:id w:val="12"/><w:dataBinding w:prefixMappings="xmlns:ns0='urn:x'" w:xpath="${NAME}" w:storeItemID="${STORE}"/>` +
+			'<w:date w:fullDate="2026-01-02T00:00:00Z"><w:dateFormat w:val="d MMMM yyyy"/><w:lid w:val="en-GB"/><w:storeMappedDataAs w:val="dateTime"/>' +
+			'<w:calendar w:val="gregorian"/></w:date></w:sdtPr><w:sdtContent><w:r><w:t>2 January 2026</w:t></w:r></w:sdtContent></w:sdt>'
+
+		for (const [typed, stored, fullDate] of [
+			["tomorrow", "tomorrow", "2026-01-02T00:00:00Z"],
+			["5 March 2026", "2026-03-05T00:00:00", "2026-03-05T00:00:00Z"]
+		]) {
+			const opened = await open(withItem(inParagraph(date), ITEM.replace("Old", "2026-01-02T00:00:00")))
+			const at = find(opened.session, "2 January")
+
+			select(opened.session, at, at + 14)
+			expect(opened.session.dispatch(opened.session.state.tr.insertText(typed ?? ""))).toBe(true)
+
+			const bytes = await save(opened)
+
+			expect(part(bytes, "customXml/item1.xml")).toContain(`<name>${stored ?? ""}</name>`)
+			expect(/<w:date(?: w:fullDate="([^"]*)")?>/.exec(part(bytes, "word/document.xml"))?.[1] ?? null).toBe(fullDate)
+		}
+	})
+
+	it("keeps a custom XML node with child elements whole (Word maps only leaf nodes)", async () => {
+		const opened = await open(withItem(inParagraph(bound("/ns0:root[1]", "OldKeep", "7"))))
+		const at = find(opened.session, "OldKeep")
+
+		select(opened.session, at, at + 7)
+		expect(opened.session.dispatch(opened.session.state.tr.insertText("New"))).toBe(true)
+
+		const bytes = await save(opened)
+
+		expect(part(bytes, "customXml/item1.xml")).toBe(ITEM)
+		expect(part(bytes, "word/document.xml")).toContain("<w:t>New</w:t>")
+	})
+
+	it("keeps controls bound to a node with child elements or to none apart from the first edit, as Word maps neither", async () => {
+		for (const xpath of ["/ns0:root[1]", "/ns0:root[1]/ns0:missing[1]"]) {
+			const opened = await open(withItem(inParagraph(bound(xpath, "One", "7")) + inParagraph(bound(xpath, "Two", "8"))))
+			const session = opened.session
+			// Edited right after open: what maps is known by then.
+			const at = find(session, "One")
+
+			select(session, at, at + 3)
+			expect(session.dispatch(session.state.tr.insertText("New"))).toBe(true)
+			expect(text(session)).toBe("Before New afterBefore Two after")
+		}
+	})
+
+	it("wraps only text typed over a selected control into it, not a change elsewhere", async () => {
+		const plain =
+			'<w:sdt><w:sdtPr><w:id w:val="45"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>Value</w:t></w:r></w:sdtContent></w:sdt>'
+		const opened = await open({ body: inParagraph(plain) + p("Other with teh typo") })
+		const session = opened.session
+		const at = find(session, "Value")
+
+		select(session, at, at + 5)
+
+		const replaced = replaceAll(session.state, "teh", "the")
+
+		expect(replaced === null ? false : session.dispatch(replaced.tr)).toBe(true)
+		expect(part(await save(opened), "word/document.xml")).toContain("<w:t>Other with the typo</w:t>")
+	})
+
+	it("appends text typed at the end of an inline control to it", async () => {
+		const plain =
+			'<w:sdt><w:sdtPr><w:id w:val="45"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>Value</w:t></w:r></w:sdtContent></w:sdt>'
+		const opened = await open({ body: inParagraph(plain) })
+		const session = opened.session
+
+		select(session, find(session, "Value") + 5)
+		expect(session.dispatch(session.state.tr.insertText("X"))).toBe(true)
+		expect(part(await save(opened), "word/document.xml")).toContain("<w:sdtContent><w:r><w:t>ValueX</w:t></w:r></w:sdtContent>")
+	})
+
+	it("replaces all outside locked controls and refuses changing a locked control by putting it back", async () => {
+		const locked = (value: string): string =>
+			`<w:sdt><w:sdtPr><w:id w:val="61"/><w:lock w:val="contentLocked"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>${value}</w:t></w:r></w:sdtContent></w:sdt>`
+		const { session } = await open({
+			body:
+				'<w:p><w:r><w:t xml:space="preserve">foo </w:t></w:r>' +
+				locked("foo") +
+				'<w:r><w:t xml:space="preserve"> foo</w:t></w:r></w:p>' +
+				inParagraph(CHECKBOX(false))
+		})
+		const replaced = replaceAll(session.state, "foo", "bar")
+
+		expect(replaced === null ? false : session.dispatch(replaced.tr)).toBe(true)
+		expect(text(session)).toBe("bar foo barBefore ☐ after")
+		expect(replaceAll(session.state, "☐", "☒")).toBeNull()
+
+		const from = find(session, "bar")
+		const to = findLast(session, "bar") + 3
+		let changed = Fragment.empty
+
+		session.state.doc.slice(from, to).content.forEach(node => {
+			changed = changed.addToEnd(node.isText ? docxSchema.text((node.text ?? "").replace("foo", "XXX"), node.marks) : node)
+		})
+		expect(session.dispatch(session.state.tr.replaceWith(from, to, changed))).toBe(false)
+	})
+
+	it("formats everything around a control whose content is locked", async () => {
+		const locked =
+			'<w:sdt><w:sdtPr><w:id w:val="10"/><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent><w:r><w:t>Locked</w:t></w:r></w:sdtContent></w:sdt>'
+		const opened = await open({ body: inParagraph(locked) + p("x") })
+		const session = opened.session
+
+		select(session, 1, session.state.doc.content.size - 1)
+		expect(run({ type: "format.bold" }, session)).toBe(true)
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		expect(xml).toContain("<w:sdtContent><w:r><w:t>Locked</w:t></w:r></w:sdtContent>")
+		expect(xml).toContain('<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">Before </w:t></w:r>')
+	})
+
+	it("pastes a partial copy of a control showing its placeholder with the whole placeholder", async () => {
+		const opened = await open({ body: inParagraph(TEXT_PLACEHOLDER("", "<w:text/>")) + p("End") })
+		const session = opened.session
+		const at = find(session, "Click")
+
+		select(session, find(session, "End") + 3)
+		expect(session.dispatch(session.state.tr.replaceSelection(session.state.doc.slice(at + 2, at + 9)))).toBe(true)
+		expect(session.state.doc.child(1).textContent).toBe("EndClick or tap here to enter text.")
+	})
+
+	it("keeps the positions of bound controls through edits as a fresh walk finds them", async () => {
+		const opened = await open(
+			withItem(inParagraph(bound(NAME, "Old", "7")) + p("mid") + inParagraph(bound("/ns0:root/ns0:name", "Old", "8")))
+		)
+		const session = opened.session
+		const part = session.story.part
+
+		boundIndex(part, session.state.doc)
+		select(session, find(session, "mid") + 1)
+		expect(session.dispatch(session.state.tr.split(find(session, "mid") + 1))).toBe(true)
+		expect(session.dispatch(session.state.tr.insertText("Z", find(session, "Old") + 1))).toBe(true)
+		expect(session.dispatch(session.state.tr.delete(1, 3))).toBe(true)
+
+		const followed = boundIndex(part, session.state.doc)
+		const fresh = boundIndex(part, session.state.doc.copy(session.state.doc.content))
+
+		expect([...followed]).toEqual([...fresh])
+		expect(text(session)).toBe("fore OZld aftermidBefore OZld after")
+	})
+})
+
+describe("content controls: dates and legacy text fields", () => {
+	it("names months as a date has them, eras and Buddhist years, and reads typed dates with the picture", () => {
+		expect(formatControlDate("2026-10-13", "d MMMM yyyy", "ru-RU")).toBe("13 октября 2026")
+		expect(formatControlDate("2026-10-13", "MMMM yyyy", "ru-RU")).toBe("октябрь 2026")
+		expect(formatControlDate("2026-10-13", "ggge年M月d日", "ja-JP", "japan")).toBe("令和8年10月13日")
+		expect(formatControlDate("2026-10-13", "d MMMM BBBB", "th-TH", "thai")).toBe("13 ตุลาคม 2569")
+		expect(parseControlDate("Donnerstag, 5 März 2026", "dddd, d MMMM yyyy", "de-DE")).toBe("2026-03-05")
+		expect(parseControlDate("13 октября 2026", "d MMMM yyyy", "ru-RU")).toBe("2026-10-13")
+		expect(parseControlDate("31/2/2026", "d/M/yyyy", "en-GB")).toBeNull()
+		expect(parseControlDate("tomorrow", "M/d/yyyy", "en-US")).toBeNull()
+	})
+
+	it("names months as date fields do, English as Word writes it, and shows AM/PM upper case", () => {
+		expect(formatControlDate("2026-09-13", "d MMM yyyy", "en-GB")).toBe("13 Sep 2026")
+		expect(formatControlDate("2026-10-13", "h:mm am/pm", "en-US")).toBe("12:00 AM")
+		expect(datePicture(new Date(2026, 9, 13, 12), "d MMMM yyyy", "ru-RU")).toBe("13 октября 2026")
+		expect(datePicture(new Date(2026, 9, 13, 12), "MMMM yyyy", "ru-RU")).toBe(formatControlDate("2026-10-13", "MMMM yyyy", "ru-RU"))
+	})
+
+	it("fills in legacy text fields as their type and format say", async () => {
+		const field = (input: string): string =>
+			'<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Text1"/><w:enabled/><w:calcOnExit w:val="0"/>' +
+			`<w:textInput>${input}</w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> FORMTEXT </w:instrText></w:r>` +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>12</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+		const cases: [string, string, string | null][] = [
+			['<w:type w:val="number"/><w:format w:val="#,##0.00"/>', "1234.5", "1,234.50"],
+			['<w:type w:val="number"/>', "abc", null],
+			['<w:type w:val="calculated"/>', "7", null],
+			['<w:type w:val="currentDate"/>', "7", null],
+			['<w:maxLength w:val="3"/><w:format w:val="UPPERCASE"/>', "a😀bc", "A😀B"],
+			['<w:type w:val="date"/><w:format w:val="dd/MM/yyyy"/>', "5/3/2026", "05/03/2026"]
+		]
+
+		for (const [input, typed, result] of cases) {
+			const { session } = await open({ body: p("x") + field(input) })
+			let pos = -1
+
+			session.state.doc.descendants((node, at) => {
+				if (node.type === nodes.field) pos = at
+			})
+			select(session, pos)
+			expect(run({ type: "control.text", text: typed }, session)).toBe(result !== null)
+
+			let shown = ""
+
+			session.state.doc.descendants(node => {
+				if (node.type === nodes.field) shown = String(node.attrs["result"])
+			})
+			expect(shown).toBe(result ?? "12")
+		}
+	})
+})
+
+describe("content controls: Gate 2 ids", () => {
+	it("refuses a control id a part holds twice unless the source already did", async () => {
+		const sdt = (id: string): string =>
+			`<w:p><w:sdt><w:sdtPr><w:id w:val="${id}"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>v</w:t></w:r></w:sdtContent></w:sdt></w:p>`
+		const check = formChecks[0]
+		const root = (body: string): string =>
+			`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`
+
+		for (const [source, written, ok] of [
+			[sdt("7") + sdt("8"), sdt("7") + sdt("7") + sdt("8"), false],
+			[sdt("7") + sdt("7"), sdt("7") + sdt("7"), true],
+			[sdt("7"), sdt("7") + sdt("9"), true]
+		] as const) {
+			const { session, context } = await open({ body: source })
+			const checked = {
+				name: "word/document.xml",
+				part: session.story.part,
+				document: parseXml(new TextEncoder().encode(root(written))),
+				skeleton: false
+			}
+			const run = (): unknown => check?.part?.({ context } as never, checked)
+
+			if (ok) expect(run).not.toThrow()
+			else expect(run).toThrow(/content control id 7 appears 2 times/)
+		}
+	})
+})
+
+describe("content controls: made controls under tracking", () => {
+	it("writes a made control split around a tracked change with its w:id once", async () => {
+		const opened = await open({ body: p("Hello world") }, "Ann Lee")
+		const session = opened.session
+
+		select(session, 3)
+		expect(run({ type: "control.insert", kind: "dropDownList", items: [{ text: "Apple", value: "A" }] }, session)).toBe(true)
+		opened.context.review.tracking = true
+		select(session, find(session, "Choose") + 2)
+		expect(run({ type: "control.choose", value: "A" }, session)).toBe(true)
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		expect(xml.match(/<w:sdt>/g)?.length).toBe(2)
+		expect(xml.match(/<w:id w:val=/g)?.length).toBe(1)
+	})
+})
+
+describe("content controls: copies in another part", () => {
+	it("keeps a checkbox copied into the header a checkbox there", async () => {
+		const opened = await open({
+			body: inParagraph(CHECKBOX(false)) + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>',
+			headers: { rIdH: p("Head") }
+		})
+		const story = opened.context.model.stories.find(candidate => candidate.kind === "header")
+		const header = new DocxEditorSession(opened.context, { transformer, ...(story === undefined ? {} : { story }) })
+
+		select(header, find(header, "Head") + 4)
+		expect(
+			header.dispatch(header.state.tr.replaceSelection(opened.session.state.doc.slice(0, opened.session.state.doc.child(0).nodeSize)))
+		).toBe(true)
+		select(header, find(header, "☐"))
+		expect(control(header)?.type).toBe("checkbox")
+		expect(run({ type: "control.check" }, header)).toBe(true)
+
+		const xml = part(
+			(await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [opened.session, header] })).bytes as Uint8Array,
+			"word/header1.xml"
+		)
+
+		expect(xml).toContain('w14:checked w14:val="1"')
+		expect(xml).toContain("☒")
+	})
+
+	it("keeps a bound control copied into the header bound, both stories showing one value", async () => {
+		const item = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><root xmlns="urn:x"><name>Old</name></root>'
+		const store = "{11111111-2222-3333-4444-555555555555}"
+		const opened = await open({
+			body:
+				inParagraph(
+					`<w:sdt><w:sdtPr><w:id w:val="7"/><w:dataBinding w:prefixMappings="xmlns:ns0='urn:x'" w:xpath="/ns0:root[1]/ns0:name[1]" w:storeItemID="${store}"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>Old</w:t></w:r></w:sdtContent></w:sdt>`
+				) + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>',
+			headers: { rIdH: p("Head") },
+			relationships: [{ id: "rIdX", type: "customXml", target: "../customXml/item1.xml" }],
+			parts: [
+				{ name: "customXml/item1.xml", data: item },
+				{
+					name: "customXml/itemProps1.xml",
+					contentType: "application/vnd.openxmlformats-officedocument.customXmlProperties+xml",
+					data: `<?xml version="1.0" encoding="UTF-8" standalone="no"?><ds:datastoreItem ds:itemID="${store}" xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml"><ds:schemaRefs/></ds:datastoreItem>`
+				},
+				{
+					name: "customXml/_rels/item1.xml.rels",
+					data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps1.xml"/></Relationships>'
+				}
+			]
+		})
+		const body = opened.session
+		const story = opened.context.model.stories.find(candidate => candidate.kind === "header")
+		const header = new DocxEditorSession(opened.context, { transformer, ...(story === undefined ? {} : { story }) })
+
+		select(header, find(header, "Head") + 4)
+		expect(header.dispatch(header.state.tr.replaceSelection(body.state.doc.slice(0, body.state.doc.child(0).nodeSize)))).toBe(true)
+
+		const at = find(header, "Old")
+
+		select(header, at, at + 3)
+		expect(header.dispatch(header.state.tr.insertText("New"))).toBe(true)
+		expect(body.state.doc.textContent).toBe("Before New after")
+
+		const bytes = (await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [body, header] })).bytes as Uint8Array
+
+		expect(part(bytes, "customXml/item1.xml")).toContain("<name>New</name>")
+		expect(part(bytes, "word/header1.xml")).toContain('w:xpath="/ns0:root[1]/ns0:name[1]"')
+	})
+})
+
+describe("content controls: cost of undo", () => {
+	it("does not walk content an undo puts back for copies of another part's controls", async () => {
+		let body = ""
+
+		for (let k = 0; k < 200; k++) body += p(`Paragraph ${String(k)} lorem ipsum`)
+
+		const opened = await open({ body }, "Ann Lee")
+		const session = opened.session
+
+		opened.context.review.tracking = true
+		select(session, 1, session.state.doc.content.size - 1)
+		expect(session.dispatch(session.state.tr.deleteSelection())).toBe(true)
+
+		// Who walks a fragment's content during the undo.
+		const walks: string[] = []
+		const original = Fragment.prototype.descendants
+
+		Fragment.prototype.descendants = function (this: Fragment, f: Parameters<Fragment["descendants"]>[0]) {
+			walks.push(new Error().stack ?? "")
+			original.call(this, f)
+		}
+
+		try {
+			expect(run({ type: "history.undo" }, session)).toBe(true)
+		} finally {
+			Fragment.prototype.descendants = original
+		}
+
+		expect(walks.filter(stack => stack.includes("noteForeignCopies"))).toEqual([])
 	})
 })

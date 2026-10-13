@@ -15,6 +15,7 @@ import type { DocxHighlightColor } from "./commands/formatting"
 import type { DocxEditContext } from "./context"
 import { runPropsOf } from "./formatting"
 import { MarkChanges, MarkSetChanges, sameSet } from "./marks"
+import { holdsFormatting } from "../fields/format"
 import { FORMATTING_MARKS, NO_SOURCE, docxSchema, inlineLevel, type ColorAttrs, type IndentAttrs } from "./schema"
 
 export type ListKind = "bullet" | "numbered"
@@ -127,7 +128,7 @@ export function builtInStyleId(context: DocxEditContext, name: string): string {
 }
 
 // Run-level content of a selection as [from, to) pieces with their paragraph (what formatting changes: not
-// markers, fields or locked blocks); `cell` when the paragraph is in a table (a table style may format it,
+// markers or locked blocks); `cell` when the paragraph is in a table (a table style may format it,
 // which the resolver does not see).
 export interface RunPiece {
 	readonly from: number
@@ -155,7 +156,12 @@ export function runPiecesIn(doc: Node, ranges: readonly { readonly from: number;
 				return node.type !== nodes.locked_block
 			}
 
-			if (parent !== null && parent.type === nodes.paragraph && inlineLevel(node) === "run") {
+			// A field takes formatting as its runs do (§17.16.4.3; the writer gives them what changed).
+			if (
+				parent !== null &&
+				parent.type === nodes.paragraph &&
+				(inlineLevel(node) === "run" || (node.type === nodes.field && holdsFormatting(node)))
+			) {
 				const start = Math.max(from, pos)
 				const end = Math.min(to, pos + node.nodeSize)
 

@@ -3,7 +3,15 @@ import { closeHistory } from "prosemirror-history"
 import type { EditorState, Transaction } from "prosemirror-state"
 import type { DocxEditContext } from "../edit/context"
 import { cellOverrides, ownItem, rowOverrides, sourceChanges, tableMap, tableOverrides } from "../edit/tables/map"
-import { clearCellRevision, clearRowRevision, removeCells, removeRows, resolveTableChanges, type TableChangeItem } from "../edit/tables/ops"
+import {
+	canRemoveCells,
+	clearCellRevision,
+	clearRowRevision,
+	removeCells,
+	removeRows,
+	resolveTableChanges,
+	type TableChangeItem
+} from "../edit/tables/ops"
 import type { PropsStore } from "../props/index"
 import { formattingMarks } from "../edit/formatting"
 import { markInternal, reinsert } from "../edit/invariants/core"
@@ -12,8 +20,8 @@ import type { DocxEditorSession } from "../edit/session"
 import { Ns } from "../model/namespaces"
 import { partReader } from "../model/reader"
 import type { XmlDocument } from "../../xml/index"
-import { Item, Revision, RevisionFlag, type StoryPart } from "../model/index"
-import { ReviewKind, revisionMarkId, type ReviewEntry, type ReviewIndex } from "./index"
+import { Item, Revision, RevisionFlag, type Section, type StoryPart } from "../model/index"
+import { ReviewKind, reviewIndexKept, revisionMarkId, wantReviewIndex, type ReviewEntry, type ReviewIndex } from "./index"
 import { bodySections, keepShown, resolveSectionChanges, sectionStates } from "../stories/sections"
 import { fieldUpdateOf, resolvedFieldUpdate } from "../fields/evaluate"
 import { paragraphChange, propertyMarks, setParagraphChange, withParagraphChange, type ParagraphAttrs, type ParagraphChange } from "./track"
@@ -689,18 +697,18 @@ function dropComments(plan: Plan): void {
 	if (plan.dropped.size === 0) return
 
 	for (const { from, to, markers } of plan.outliving)
-		if (markers.every(marker => droppedAnchor(plan, marker))) plan.deletes.push([from, to])
+		if (markers.every(marker => droppedAnchor(plan.dropped, marker))) plan.deletes.push([from, to])
 }
 
-function droppedAnchor(plan: Plan, marker: MarkerAttrs): boolean {
-	return ANCHORS[marker.kind] !== undefined && marker.id !== null && plan.dropped.has(marker.id)
+function droppedAnchor(dropped: ReadonlySet<string>, marker: MarkerAttrs): boolean {
+	return ANCHORS[marker.kind] !== undefined && marker.id !== null && dropped.has(marker.id)
 }
 
 // The markers between two paragraphs joined, standing at the join inline (the comment anchors of comments
 // that go left out).
-function betweenNodes(plan: Plan, list: MarkerList): Node[] {
+function betweenNodes(dropped: ReadonlySet<string>, list: MarkerList): Node[] {
 	return list
-		.filter(marker => !droppedAnchor(plan, marker))
+		.filter(marker => !droppedAnchor(dropped, marker))
 		.map(marker =>
 			marker.kind === "commentReference"
 				? nodes.comment_ref.create({ src: marker.src, id: marker.id })
@@ -962,31 +970,80 @@ function sourcePropertyChanges(part: StoryPart): SourceChanges {
 export function storyReviewIndex(session: DocxEditorSession): ReviewIndex {
 	const index = session.reviewIndex
 
-	if (!index.sourcesAttached) index.attachSources(sourcePropertyChanges(session.story.part).all)
+	if (!index.sourcesAttached) {
+		const part = session.story.part
+
+		index.attachSources(
+			sourcePropertyChanges(part).all,
+			session.story.story.kind === "body" ? sourceSectionLinks(part, session.context.model.sections) : undefined
+		)
+	}
 
 	return index
 }
 
-const wanted = new WeakSet<DocxEditorSession>()
+const sectionLinksOf = new WeakMap<StoryPart, ReadonlyMap<number, string>>()
 
-// Whether keeping the session's review index pays: changes are or were recorded, the story's part has changes
-// or the document comments. Otherwise there is nothing to count (and no reason to read a long document).
+// Source section changes that are one change with the inserted break before them, as the editor records a break
+// inserted while tracking (stories/sections.ts insertSectionBreak) and reads it back from its save: the section's
+// own w:sectPrChange (no w:pPrChange beside it) by the author and of the date of the inserted paragraph mark
+// ending the section before it counts under that paragraph's id. By section item.
+export function sourceSectionLinks(part: StoryPart, sections: readonly Section[]): ReadonlyMap<number, string> {
+	let found = sectionLinksOf.get(part)
+
+	if (found !== undefined) return found
+
+	const out = new Map<number, string>()
+	const revisions = part.revisions
+	const marks = new Map<number, number>()
+	const changes = new Map<number, number>()
+
+	for (let k = 0; k < revisions.count; k++) {
+		const kind = revisions.kind[k]
+		const item = revisions.item[k] ?? -1
+
+		if (kind === Revision.ParagraphMarkInsertion) marks.set(item, k)
+		else if (kind === Revision.SectionProperties) changes.set(item, k)
+	}
+
+	if (marks.size > 0 && changes.size > 0) {
+		const paragraphs = sourcePropertyChanges(part).paragraphs
+
+		for (let index = 1; index < sections.length; index++) {
+			const item = (sections[index] as Section).item
+			const before = (sections[index - 1] as Section).item
+			const change = changes.get(item)
+			const mark = marks.get(before)
+
+			if (change === undefined || mark === undefined || paragraphs.has(item)) continue
+			if (revisions.author[change] !== revisions.author[mark] || revisions.date[change] !== revisions.date[mark]) continue
+
+			out.set(item, `#${String(before)}`)
+		}
+	}
+
+	found = out
+	sectionLinksOf.set(part, found)
+
+	return found
+}
+
+// Whether keeping the session's review index pays: changes are or were recorded (review/track.ts marks a session
+// a tracked edit reaches, read or not), the story's part has changes or the document comments. Otherwise there
+// is nothing to count (and no reason to read a long document).
 export function reviewIndexWanted(session: DocxEditorSession): boolean {
-	if (wanted.has(session)) return true
+	if (reviewIndexKept(session)) return true
 
 	const context = session.context
 
 	if (!context.review.tracking && session.story.part.revisions.count === 0 && context.model.commentAnchors.count === 0) return false
 
-	wanted.add(session)
+	wantReviewIndex(session)
 
 	return true
 }
 
-// Keeps the session's index from now on (tracking was on, a comment was added).
-export function wantReviewIndex(session: DocxEditorSession): void {
-	wanted.add(session)
-}
+export { wantReviewIndex }
 
 // ---- moves --------------------------------------------------------------------------------------------------
 
@@ -1137,6 +1194,47 @@ function tableRemovals(plan: Plan): Map<number, { rows: number[]; cells: Plan["c
 	return out
 }
 
+// Cells that cannot go (a vertical merge runs through what would move, or a structural record of their table
+// cannot resolve with them: a merge took one in), found by doing on a scratch transaction what apply does to
+// their table (its property records resolved, its rows taken out): they and the table's property records stay
+// as they are, counted skipped, so a resolution never half applies (widths back around cells that stay).
+function keepFeasibleRemovals(
+	state: EditorState,
+	plan: Plan,
+	accept: boolean,
+	part: StoryPart,
+	store: PropsStore,
+	removals: Map<number, { rows: number[]; cells: Plan["cells"] }>
+): void {
+	for (const [pos, removal] of removals) {
+		const table = state.doc.nodeAt(pos)
+
+		if (removal.cells.length === 0 || table?.type !== nodes.table || removal.rows.length >= table.childCount) continue
+
+		const tr = state.tr
+		const items = plan.tables.filter(entry => entry.table === pos).map(entry => entry.item)
+
+		const blocked = resolveTableChanges(tr, pos, items, accept, part, store, { rows: removal.rows, cells: removal.cells }).length > 0
+
+		if (removal.rows.length > 0) removeTableRows(tr, pos, tr.doc.nodeAt(pos) ?? table, removal.rows, part, store)
+
+		const now = tr.doc.nodeAt(pos)
+		const cells = removal.cells.map(cell => ({ row: cell.row - removal.rows.filter(row => row < cell.row).length, index: cell.index }))
+
+		if (!blocked && now?.type === nodes.table && canRemoveCells(tableMap(now, part, store), cells)) continue
+
+		for (const { key } of [...removal.cells, ...plan.tables.filter(entry => entry.table === pos)]) {
+			plan.resolved.delete(key)
+			plan.skipped.add(key)
+		}
+
+		removal.cells = []
+		plan.tables.splice(0, plan.tables.length, ...plan.tables.filter(entry => entry.table !== pos))
+
+		if (removal.rows.length === 0) removals.delete(pos)
+	}
+}
+
 // Takes rows, then cells, out of the table at `pos` (the whole table when every row goes). Cells that cannot go
 // (a vertical merge runs through what would move) stay, counted skipped.
 function removeFromTable(
@@ -1213,6 +1311,8 @@ function apply(state: EditorState, plan: Plan, accept: boolean, part: StoryPart,
 
 	const removals = tableRemovals(plan)
 
+	keepFeasibleRemovals(state, plan, accept, part, store, removals)
+
 	if (count > BULK) return keepRanges(state.doc, applyBulk(state, plan, accept, part, store, removals), plan)
 
 	const tr = state.tr
@@ -1272,7 +1372,7 @@ function apply(state: EditorState, plan: Plan, accept: boolean, part: StoryPart,
 		...plan.joins.map(pos => ({
 			pos,
 			run: () => {
-				if (!joinWithNext(tr, pos, plan)) plan.skipped.add(`p:${String(pos)}`)
+				if (!joinWithNext(tr, pos, plan.dropped)) plan.skipped.add(`p:${String(pos)}`)
 			}
 		}))
 	]
@@ -1592,7 +1692,7 @@ function rebuildChildren(
 		if (pending !== undefined) {
 			// The next paragraph keeps its properties; markers between the two stand at the join, inline.
 			const joined = pending
-			const between = betweenNodes(rebuild.plan, node.attrs["before"] as MarkerList)
+			const between = betweenNodes(rebuild.plan.dropped, node.attrs["before"] as MarkerList)
 
 			pending = undefined
 			node = node.type.create(
@@ -1656,7 +1756,15 @@ function rebuildNode(
 
 			if (set !== child.marks) changed = true
 
-			inline.push(set === child.marks ? child : child.mark(set))
+			// An atom's attributes (a field's tracked update resolved).
+			const attrs = child.isText ? undefined : rebuild.attrs.get(at)
+
+			if (attrs !== undefined) {
+				changed = true
+				inline.push(child.type.create({ ...child.attrs, ...attrs }, child.content, set))
+			} else {
+				inline.push(set === child.marks ? child : child.mark(set))
+			}
 		})
 
 		if (changed) content = Fragment.fromArray(inline)
@@ -1762,10 +1870,12 @@ function applyBulk(
 	return tr.docChanged ? closeHistory(markInternal(tr)) : null
 }
 
+const NO_DROPPED: ReadonlySet<string> = new Set()
+
 // Joins the paragraph at `pos` with the next one, which keeps its properties (the joined paragraph ends with
 // the next one's mark); markers before the first stay before the joined one. Without a paragraph after it,
 // a paragraph left empty goes (its markers to the block after it); otherwise it stays: false.
-function joinWithNext(tr: Transaction, pos: number, plan: Plan): boolean {
+export function joinWithNext(tr: Transaction, pos: number, dropped: ReadonlySet<string> = NO_DROPPED): boolean {
 	const node = tr.doc.nodeAt(pos)
 
 	if (node?.type !== nodes.paragraph) return false
@@ -1787,7 +1897,7 @@ function joinWithNext(tr: Transaction, pos: number, plan: Plan): boolean {
 	}
 
 	// Markers between the two (the next one's `before`) stand where they were: at the join, inline.
-	const between = betweenNodes(plan, next.attrs["before"] as MarkerList)
+	const between = betweenNodes(dropped, next.attrs["before"] as MarkerList)
 	const joined = next.type.create(
 		{ ...next.attrs, before: node.attrs["before"] },
 		node.content.append(Fragment.fromArray(between)).append(next.content),

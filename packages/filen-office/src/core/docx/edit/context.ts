@@ -3,7 +3,8 @@ import { XmlError, type XmlDocument } from "../../xml/index"
 import type { DocxModel, MaxIds, Story } from "../model/index"
 import { parseNumbering, type Numbering } from "../numbering/index"
 import { gateReasons, type DocxGateReason, type DocxPackage } from "../package"
-import { protectionMode } from "./protection"
+import { protectionMode, protectionOf, readOnlyExceptions } from "./protection"
+import { bindingsKnown, partHasBindings } from "../forms/binding"
 import { PropsStore } from "../props/index"
 import { DocxStyles, PropertyResolver, parseStyles, styleSettings } from "../styles/index"
 import { parseTheme } from "../theme/index"
@@ -77,6 +78,15 @@ export class DocxIds {
 		this.last[space] = Math.max(this.last[space], FIRST_IDS[space] - 1) + 1
 
 		return this.last[space]
+	}
+
+	// What `next` hands out from, to put back after work whose ids are thrown away (DocxEditorSession.warmUp).
+	saved(): Readonly<MaxIds> {
+		return { ...this.last }
+	}
+
+	restore(saved: Readonly<MaxIds>): void {
+		Object.assign(this.last, saved)
 	}
 
 	// An id a feature took over (it is never handed out).
@@ -269,9 +279,12 @@ export async function openDocxEditContext(pkg: DocxPackage, model: DocxModel, re
 
 	const gate = gateReasons(pkg.facts, model, resolver.styles, resolver.numbering, {
 		malformed: unreadable.length > 0 || store.malformed.length > 0
-	})
+	}).filter(
+		// A read-only document with ranges open to everyone opens editable within them (edit/protection.ts).
+		reason => reason !== "protected" || pkg.facts.documentProtection?.edit !== "readOnly" || !readOnlyExceptions(model)
+	)
 
-	return {
+	const context: DocxEditContext = {
 		model,
 		store,
 		styles: resolver.styles,
@@ -297,4 +310,15 @@ export async function openDocxEditContext(pkg: DocxPackage, model: DocxModel, re
 		},
 		newStories: new Map()
 	}
+
+	// Under protection the track switch is the session's: limited to ranges (or comments, or controls), Word tracks
+	// that user's own edits; forced on by tracked changes protection, it is the protection's, not the file's
+	// setting. The file's w:trackRevisions stays as it is.
+	if (protectionOf(context).mode !== "none") context.review.persist = false
+
+	// Which bindings map to a node is known before the first edit (a few small custom XML parts, only for a
+	// document with bindings): controls bound to none are never kept alike.
+	if (model.parts.some(partHasBindings)) await bindingsKnown(context)
+
+	return context
 }

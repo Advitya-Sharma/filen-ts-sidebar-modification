@@ -1,5 +1,5 @@
 import { DOMParser, DOMSerializer, Fragment, Slice, type DOMOutputSpec, type Mark, type Node, type ResolvedPos } from "prosemirror-model"
-import { EditorState, Plugin, type Transaction } from "prosemirror-state"
+import { EditorState, Plugin, TextSelection, type Transaction } from "prosemirror-state"
 import { Mapping } from "prosemirror-transform"
 import { EditorView, type NodeView, type NodeViewConstructor } from "prosemirror-view"
 import { docxSchema, type DocxEditorSession, type MarkerList } from "../../../core/docx/edit/index"
@@ -16,6 +16,8 @@ import {
 import { COMMENT_MOVE_META, freshSliceKeeping } from "../../../core/docx/edit/invariants/index"
 import { sourceCopies } from "../../../core/docx/edit/session"
 import { docxComments } from "../../../core/docx/review/comments"
+import { docxNotes } from "../../../core/docx/stories/notes"
+import { deletesBreakAtCaret, endsSection } from "../../../core/docx/stories/sections"
 
 // The input sink of paged editing: a real ProseMirror view that holds focus and receives all input (keys,
 // beforeinput, IME composition, clipboard, drag and drop) while the pages show the document. It is invisible
@@ -729,6 +731,8 @@ export class EditSink {
 	private lineHeight = 0
 	private width = 0
 	private readonly stopListening: () => void
+	private warmed = false
+	private destroyed = false
 	// What the last cut took out with comment anchors in it: pasted back as text of the same clipboard, it moves
 	// the comments (as in Word) rather than leaving them out.
 	private cut:
@@ -812,7 +816,13 @@ export class EditSink {
 		// Commands from a toolbar change the session without the view, and editing can move to another story
 		// (a header): the view follows.
 		this.stopListening = editor.subscribe(event => {
-			if (event.type === "pages" || this.dispatching) return
+			if (event.type === "pages") {
+				if (event.final) this.warmUp()
+
+				return
+			}
+
+			if (this.dispatching) return
 
 			if (this.real !== editor.state) {
 				if (event.type === "story") this.windows = []
@@ -822,6 +832,37 @@ export class EditSink {
 
 			this.refreshReadOnly()
 		})
+
+		if (editor.layout.final) this.warmUp()
+	}
+
+	// Backspace at the start of the paragraph after a section break: the caret goes to the end of the paragraph
+	// ending the section and section.deleteBreak deletes that break (the caret stays where it was otherwise).
+	private deletesBreakBefore(): boolean {
+		const editor = this.editor
+		const session = editor.session
+		const { $from, empty } = session.state.selection
+		const depth = $from.depth
+
+		if (session !== editor.body.session || !empty || depth < 1 || $from.parentOffset > 0 || $from.index(depth - 1) === 0) return false
+
+		const before = $from.node(depth - 1).child($from.index(depth - 1) - 1)
+
+		if (before.type !== docxSchema.nodes.paragraph || !endsSection(session.story.part, before)) return false
+
+		const selection = session.state.selection
+
+		session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, $from.before() - 1)))
+
+		if (deletesBreakAtCaret(editor)) {
+			void editor.execute({ type: "section.deleteBreak" })
+
+			return true
+		}
+
+		session.dispatch(session.state.tr.setSelection(selection.map(session.state.doc, IDENTITY)))
+
+		return false
 	}
 
 	// Read-only: the host's option or the story's session (a gate, a text box).
@@ -832,6 +873,23 @@ export class EditSink {
 	setReadOnly(readOnly: boolean): void {
 		this.readOnlyOption = readOnly
 		this.refreshReadOnly()
+
+		if (!readOnly) this.warmUp()
+	}
+
+	// Once laid out and editable, the code a first keystroke runs is compiled while the page is idle (see
+	// DocxEditorSession.warmUp): once.
+	private warmUp(): void {
+		if (this.warmed || this.readOnly) return
+
+		this.warmed = true
+
+		const run = (): void => {
+			if (!this.destroyed && !this.readOnly) this.editor.body.session.warmUp()
+		}
+
+		if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 2000 })
+		else setTimeout(run, 0)
 	}
 
 	// The view's editability and attributes follow read-only.
@@ -845,6 +903,7 @@ export class EditSink {
 	}
 
 	destroy(): void {
+		this.destroyed = true
 		this.stopListening()
 		this.view.destroy()
 		this.element.remove()
@@ -1001,6 +1060,16 @@ export class EditSink {
 
 		if (this.compositionStart >= 0 && tr.docChanged) this.compositionStart = tr.mapping.map(this.compositionStart, -1)
 
+		const event: unknown = tr.getMeta("uiEvent")
+
+		// A pasted reference to a note that stays referenced elsewhere refers to a copy of it; a paste whose note
+		// cannot be copied whole is refused.
+		if ((event === "paste" || event === "drop") && !docxNotes(this.editor).pasted(tr)) {
+			this.sync(fromView)
+
+			return
+		}
+
 		this.dispatching = true
 
 		try {
@@ -1103,7 +1172,8 @@ export class EditSink {
 						),
 						sourceCopies(cut.session.context),
 						cut.session.story.part.index,
-						this.editor.session.story.part.index
+						this.editor.session.story.part.index,
+						this.editor.session.story.story.kind === "body"
 					)
 
 		return this.run(
@@ -1297,10 +1367,22 @@ export class EditSink {
 				return this.run(extend ? lineBreak(state) : splitParagraph(state))
 			// At a paragraph's edge any deletion (a character, a word, to the line's start) joins paragraphs.
 			case "Backspace":
-				return readOnly ? false : this.run(joinBackward(state))
+				if (readOnly) return false
+				// After a section break: the break goes (the sections merge), as Word deletes it.
+				if (this.deletesBreakBefore()) return true
+
+				return this.run(joinBackward(state))
 			case "Delete":
 				// Shift+Delete cuts.
-				return readOnly || extend ? false : this.run(joinForward(state))
+				if (readOnly || extend) return false
+				// Before a section break: the break goes (the sections merge), as Word deletes it.
+				if (deletesBreakAtCaret(editor)) {
+					void editor.execute({ type: "section.deleteBreak" })
+
+					return true
+				}
+
+				return this.run(joinForward(state))
 			case "Escape":
 				// The format painter goes first; then out of a header, footer or note, back to the body.
 				if (editor.painter !== undefined) {

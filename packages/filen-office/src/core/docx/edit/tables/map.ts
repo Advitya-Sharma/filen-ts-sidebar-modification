@@ -3,6 +3,7 @@ import { Item, Revision, type StoryPart } from "../../model/index"
 import { Ns } from "../../model/namespaces"
 import type { PropsStore, TableCellProps, TableProps, TableRowProps } from "../../props/index"
 import type { DocxCellVAlign, DocxTableAlign } from "../commands/tables"
+import type { ElementData } from "../copies"
 import { NO_SOURCE, docxSchema } from "../schema"
 
 // The grid of a table as the editor holds it, and what table commands record on tables, rows and cells.
@@ -30,6 +31,8 @@ export type SourceResolution = "accepted" | "rejected"
 export interface TableOverrides {
 	// A source table (item of the story's part) whose properties a new table starts from (a copy of it).
 	readonly from?: number
+	// The w:tblPr of another part's table a copy of it starts from.
+	readonly copy?: ElementData
 	readonly align?: DocxTableAlign
 	// w:tblW: twips for "dxa", fiftieths of a percent for "pct".
 	readonly width?: { readonly value: number; readonly type: "dxa" | "pct" | "auto" }
@@ -71,6 +74,8 @@ export interface CellChange extends TrackStamp {
 export interface RowOverrides {
 	// A source row (item of the story's part) whose properties a new row starts from.
 	readonly from?: number
+	// The w:trPr of another part's row a copy of it starts from.
+	readonly copy?: ElementData
 	readonly header?: boolean
 	readonly gridBefore?: number
 	readonly gridAfter?: number
@@ -84,6 +89,8 @@ export interface RowOverrides {
 // What table commands record on a cell (its cell_props mark value).
 export interface CellOverrides {
 	readonly from?: number
+	// The w:tcPr of another part's cell a copy of it starts from.
+	readonly copy?: ElementData
 	// "RRGGBB", or null for no fill.
 	readonly shading?: string | null
 	readonly vAlign?: DocxCellVAlign
@@ -94,7 +101,7 @@ export interface CellOverrides {
 }
 
 // Overrides keys that are no property: the model, tracked insertions and deletions, change records.
-export const RECORD_KEYS: readonly string[] = ["from", "ins", "del", "change", "gridChange", "source"]
+export const RECORD_KEYS: readonly string[] = ["from", "copy", "ins", "del", "change", "gridChange", "source"]
 
 const NONE: Readonly<Record<string, never>> = Object.freeze({})
 

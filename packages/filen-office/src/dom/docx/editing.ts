@@ -10,7 +10,7 @@ import {
 	authorInitials
 } from "../../core/docx/edit/index"
 import { DocumentEdits, PagedEditor, type PagedEditorOptions } from "../../core/docx/paged/index"
-import { releaseUnusedMedia } from "../../core/docx/objects/edit"
+import { mediaInUse, releaseUnusedMedia, settleMedia } from "../../core/docx/objects/edit"
 import { compositionMarked, flushComposition } from "../../core/docx/review/track"
 import type { DocxPrepareOptions, DocxPreparedSave, DocxSaveInput, DocxSaveTimings } from "../../core/docx/write/save"
 import type { Slicing } from "../../core/slicing"
@@ -51,8 +51,10 @@ export interface DocxEditingHost {
 	// before the editor opened or when the document already shows that view.
 	setView(view: "final" | "markup" | "original"): boolean
 	// Registers bytes a command will use (a picture to insert): their handle, or undefined when over the size
-	// limit or before the editor opened.
+	// limit or before the editor opened. Kept through saves until an image.insert names it, or releaseMedia.
 	addMedia(chunks: Uint8Array | readonly Uint8Array[], info?: DocxMediaInfo): number | undefined
+	// Gives up a handle addMedia gave that no command will use (the user cancelled, say): its bytes go now.
+	releaseMedia(handle: number): void
 }
 
 export interface DocxWritten {
@@ -373,6 +375,15 @@ export function inThreadEditingHost(
 				) ?? false
 			)
 		},
-		addMedia: (chunks, info) => current?.addMedia(chunks, info)
+		addMedia: (chunks, info) => current?.addMedia(chunks, info),
+		releaseMedia(handle) {
+			const live = saveInput
+
+			if (live === undefined) return
+
+			settleMedia(live.context, [handle])
+
+			if (!mediaInUse(live.sessions.map(session => session.state)).has(handle)) live.context.media.release(handle)
+		}
 	}
 }

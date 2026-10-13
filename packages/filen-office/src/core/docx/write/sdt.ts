@@ -11,6 +11,7 @@ import {
 import { NO_SOURCE, docxSchema } from "../edit/schema"
 import { Item, type StoryPart } from "../model/index"
 import { Ns } from "../model/namespaces"
+import { MAIN, dataMarkup as elementMarkup, type ElementData } from "../edit/copies"
 import { copyNode, openTag, spliceChildren, textElement, type Names, type Out } from "./markup"
 import { src } from "./source"
 import type { StoryWriting } from "./story"
@@ -56,13 +57,14 @@ export function* writeSdt(w: StoryWriting, out: Out, node: Node): Generator<void
 	}
 
 	if (!w.owns(node)) {
-		if (state !== null && state.made === undefined && state.copy === undefined)
+		if (state !== null && state.made === undefined && state.copy === undefined && state.properties === undefined)
 			throw new DocxWriteError("missingSource", "A changed content control without its source")
 
 		out.text(`<${names.el("sdt")}>`)
 
 		if (state?.made !== undefined) writeNewSdtPr(w, out, state.made, state)
 		else if (state?.copy !== undefined) writeCopiedSdtPr(w, out, state.copy, state)
+		else if (state?.properties !== undefined) out.text(dataSdtPr(w, state.properties, state))
 		else out.text(`<${names.el("sdtPr")}/>`)
 
 		out.text(`<${names.el("sdtContent")}>`)
@@ -274,8 +276,8 @@ function attr(name: string, value: string): string {
 }
 
 // The w:sdtPr of a control the editor made.
-export function newSdtPr(names: Names, part: StoryPart, made: MadeControl, state: ControlState): string {
-	let out = `<${names.el("sdtPr")}>${names.val("id", made.id)}`
+export function newSdtPr(names: Names, part: StoryPart, made: MadeControl, state: ControlState, again = false): string {
+	let out = `<${names.el("sdtPr")}>${again ? "" : names.val("id", made.id)}`
 
 	if (state.placeholder === true) out += names.empty("showingPlcHdr")
 
@@ -334,8 +336,20 @@ export function newSdtPr(names: Names, part: StoryPart, made: MadeControl, state
 	return `${out}</${names.el("sdtPr")}>`
 }
 
+// Made controls of a story writing already written: a piece after the first (content an edit split, around a
+// tracked change in it) has no w:id of its own, as a split source control's (w:id is unique in a part).
+const madeWritten = new WeakMap<StoryWriting, Set<string>>()
+
 function writeNewSdtPr(w: StoryWriting, out: Out, made: MadeControl, state: ControlState): void {
-	out.text(newSdtPr(w.names, w.part, made, state))
+	let written = madeWritten.get(w)
+
+	if (written === undefined) {
+		written = new Set()
+		madeWritten.set(w, written)
+	}
+
+	out.text(newSdtPr(w.names, w.part, made, state, written.has(made.id)))
+	written.add(made.id)
 }
 
 // The w:sdtPr of a copy of source control `copy`: the source's without its w:id, with `state` applied.
@@ -346,6 +360,40 @@ function writeCopiedSdtPr(w: StoryWriting, out: Out, copy: number, state: Contro
 		throw new DocxWriteError("missingSource", "A copied content control without its source")
 
 	writeSdtPr(w, out, part.sdts.sdtPr[part.aux[copy] ?? -1] ?? -1, state, true)
+}
+
+// The w:sdtPr of a copy of another part's control (`data`: its w:sdtPr without w:id) with `state` applied.
+function dataSdtPr(w: StoryWriting, data: ElementData, state: ControlState): string {
+	const attr = (element: ElementData, name: string, value: string | null): ElementData => ({
+		...element,
+		attrs: [
+			...element.attrs.filter(([uri, local]) => !(uri === MAIN && local === name)),
+			...(value === null ? [] : [[MAIN, name, value] as const])
+		]
+	})
+	let children = data.children.flatMap((child): ElementData[] => {
+		if (child.uri === MAIN && child.name === "showingPlcHdr" && state.placeholder !== undefined) return []
+		if (child.uri === MAIN && (child.name === "dropDownList" || child.name === "comboBox") && state.value !== undefined)
+			return [attr(child, "lastValue", state.value)]
+		if (child.uri === MAIN && child.name === "date" && state.date !== undefined)
+			return [attr(child, "fullDate", state.date === null ? null : `${state.date}T00:00:00Z`)]
+		if (child.uri === W14 && child.name === "checkbox" && state.checked !== undefined) {
+			const checked: ElementData = { uri: W14, name: "checked", attrs: [[W14, "val", state.checked ? "1" : "0"]], children: [] }
+
+			return [{ ...child, children: [checked, ...child.children.filter(inner => !(inner.uri === W14 && inner.name === "checked"))] }]
+		}
+
+		return [child]
+	})
+
+	if (state.placeholder === true) {
+		const at = children.findIndex(child => !(child.uri === MAIN && BEFORE_PLACEHOLDER_FLAG.has(child.name)))
+		const flag: ElementData = { uri: MAIN, name: "showingPlcHdr", attrs: [], children: [] }
+
+		children = at < 0 ? [...children, flag] : [...children.slice(0, at), flag, ...children.slice(at)]
+	}
+
+	return elementMarkup(w.part, w.names.w, { ...data, children })
 }
 
 // The start of source content control `own` (`mark`) around inline content, up to its w:sdtContent start
@@ -400,6 +448,7 @@ export const NEW_CONTROL_WRAPPER: WrapperWriter = {
 
 		if (state?.made !== undefined) writeNewSdtPr(w, out, state.made, state)
 		else if (state?.copy !== undefined) writeCopiedSdtPr(w, out, state.copy, state)
+		else if (state?.properties !== undefined) out.text(dataSdtPr(w, state.properties, state))
 		else throw new DocxWriteError("missingSource", "A new content control without its definition")
 
 		out.text(`<${w.names.el("sdtContent")}>`)

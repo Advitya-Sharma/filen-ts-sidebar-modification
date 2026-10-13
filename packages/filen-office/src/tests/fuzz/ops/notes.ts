@@ -1,6 +1,7 @@
 import { TextSelection } from "prosemirror-state"
-import { markInternal } from "../../../core/docx/edit/invariants/index"
-import { noteReferences } from "../../../core/docx/stories/notes"
+import { freshSlice, markInternal } from "../../../core/docx/edit/invariants/index"
+import { sourceCopies } from "../../../core/docx/edit/session"
+import { docxNotes, noteReferences } from "../../../core/docx/stories/notes"
 import { docxSchema, type DocxEditorCommand, type DocxEditorSession, type PagedEditor } from "../harness"
 import { textPositions } from "./base"
 import type { EditOp, OpContext, Rand } from "./index"
@@ -170,7 +171,15 @@ export const noteOps: readonly EditOp[] = [
 			scope: rand() < 0.5 ? "section" : "document",
 			format: pick(rand, ["decimal", "lowerRoman", "upperLetter", "chicago"] as const),
 			...(rand() < 0.5 ? { start: 1 + Math.floor(rand() * 9) } : {}),
-			...(kind === "footnote" && rand() < 0.3 ? { restart: pick(rand, ["continuous", "eachSect", "eachPage"] as const) } : {})
+			...(kind === "footnote" && rand() < 0.3 ? { restart: pick(rand, ["continuous", "eachSect", "eachPage"] as const) } : {}),
+			...(rand() < 0.3
+				? {
+						position:
+							kind === "footnote"
+								? pick(rand, ["pageBottom", "beneathText"] as const)
+								: pick(rand, ["sectEnd", "docEnd"] as const)
+					}
+				: {})
 		}
 
 		return `note.options ${JSON.stringify(command)} -> ${execute(context, command)}`
@@ -179,6 +188,36 @@ export const noteOps: readonly EditOp[] = [
 		if (editor.session !== editor.body.session) editor.exitStory()
 
 		return `noteReferenceDelete -> ${String(deleteReference(editor.session, context.rand))}`
+	}),
+	// A paragraph's text with a note reference copied (or cut) and pasted into the body as the clipboard does:
+	// the pasted reference refers to a copy of its note (a cut keeps it), in the paste's one step.
+	noteOp("notePaste", 1, (context, editor) => {
+		const rand = context.rand
+
+		if (referenceCaret(editor, rand) === undefined) return "noop"
+
+		const session = editor.session
+		const $at = session.state.selection.$from
+		const from = $at.start()
+		const to = $at.end()
+		const slice = freshSlice(
+			session.state.doc.slice(from, to),
+			sourceCopies(session.context),
+			session.story.part.index,
+			session.story.part.index,
+			true
+		)
+		const cut = rand() < 0.3
+
+		if (cut && !session.dispatch(session.state.tr.delete(from, to).setMeta("uiEvent", "cut"))) return "cut refused"
+		if (bodyCaret(editor, rand) === undefined) return "noop"
+
+		const tr = session.state.tr.replaceSelection(slice).setMeta("uiEvent", "paste")
+
+		// Refused, as the clipboard refuses it, where a note cannot be copied whole.
+		if (!docxNotes(editor).pasted(tr)) return `notePaste ${cut ? "cut" : "copy"} ${from}-${to} -> refused`
+
+		return `notePaste ${cut ? "cut" : "copy"} ${from}-${to} -> ${String(session.dispatch(tr))}`
 	}),
 	{ name: "noteRefDamage", harness: "damage", run: referenceDamage },
 	{

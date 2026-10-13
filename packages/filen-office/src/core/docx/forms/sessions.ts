@@ -1,3 +1,4 @@
+import type { Node } from "prosemirror-model"
 import type { DocxEditContext } from "../edit/context"
 import type { DocxEditorSession } from "../edit/session"
 
@@ -7,6 +8,8 @@ import type { DocxEditorSession } from "../edit/session"
 
 const live = new WeakMap<DocxEditContext, Set<DocxEditorSession>>()
 const hosts = new WeakMap<DocxEditContext, (story: number) => DocxEditorSession | undefined>()
+// The session each state's document is the document of (a find and replace or a repair gets a state only).
+const ofDoc = new WeakMap<Node, DocxEditorSession>()
 
 export function sessionMade(context: DocxEditContext, session: DocxEditorSession): void {
 	let sessions = live.get(context)
@@ -17,6 +20,20 @@ export function sessionMade(context: DocxEditContext, session: DocxEditorSession
 	}
 
 	sessions.add(session)
+	ofDoc.set(session.state.doc, session)
+	session.onApplied((_transactions, state) => ofDoc.set(state.doc, session))
+}
+
+// The open editing sessions of a document.
+export function liveSessions(context: DocxEditContext): ReadonlySet<DocxEditorSession> {
+	return live.get(context) ?? NONE
+}
+
+const NONE: ReadonlySet<DocxEditorSession> = new Set()
+
+// The session whose state has `doc` (made or applied by it), or undefined.
+export function sessionOfDoc(doc: Node): DocxEditorSession | undefined {
+	return ofDoc.get(doc)
 }
 
 export function sessionGone(context: DocxEditContext, session: DocxEditorSession): void {

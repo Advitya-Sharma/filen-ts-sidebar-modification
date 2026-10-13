@@ -1,11 +1,11 @@
 import { joinBytes } from "../../../opc/index"
 import { NodeKind, Namespaces, parseXml, type XmlDocument } from "../../../xml/index"
-import { BindingStores, boundNode } from "../../forms/binding"
+import { BindingStores } from "../../forms/binding"
 import type { StoryPart } from "../../model/index"
 import { Ns } from "../../model/namespaces"
 import { partReader, type PartReader } from "../../model/reader"
 import { DocxVerifyError } from "../failure"
-import { changedStores } from "../parts/customXml"
+import { changedStores, updatedNode } from "../parts/customXml"
 import type { CheckedPart, CheckInput, DocxCheck } from "./index"
 
 // Content controls as written: a checkbox shows the glyph of its state (MS-DOCX §2.6.1.2: w14:checkedState and
@@ -116,16 +116,57 @@ function controlId(reader: PartReader, sdt: number): string | undefined {
 	return id < 0 ? undefined : reader.attr(id, Ns.W, "val")
 }
 
+// How many controls of a source part's bytes carry each w:id.
+const sourceIds = new WeakMap<StoryPart, ReadonlyMap<string, number>>()
+
+function idsInSource(part: StoryPart): ReadonlyMap<string, number> {
+	let found = sourceIds.get(part)
+
+	if (found === undefined) {
+		const out = new Map<string, number>()
+		const document = part.document
+		const reader = part.reader
+
+		// Every w:sdt of the bytes (a text box's fallback repeats its controls).
+		for (let node = 0; node < document.count; node++) {
+			if (document.kinds[node] !== NodeKind.Element || !reader.is(node, Ns.W, "sdt")) continue
+
+			const id = controlId(reader, node)
+
+			if (id !== undefined) out.set(id, (out.get(id) ?? 0) + 1)
+		}
+
+		found = out
+		sourceIds.set(part, found)
+	}
+
+	return found
+}
+
+// A control's w:id is unique within its part (ECMA-376 Part 1 §17.5.2.18): a copy carries an id of its own; ids
+// the source already repeats stay as they were.
 const controls: DocxCheck = {
 	part(_input: CheckInput, part: CheckedPart) {
 		if (part.part === undefined) return
 
 		const document = part.document
 		const reader = partReader(document)
+		const ids = new Map<string, number>()
 		let kept: ReadonlySet<string> | undefined
 
 		for (let node = 0; node < document.count; node++) {
 			if (document.kinds[node] !== NodeKind.Element || !reader.is(node, Ns.W, "sdt")) continue
+
+			const id = controlId(reader, node)
+
+			if (id !== undefined) {
+				const count = (ids.get(id) ?? 0) + 1
+
+				ids.set(id, count)
+
+				if (count > 1 && count > (idsInSource(part.part).get(id) ?? 0))
+					fail(`${part.name}: content control id ${id} appears ${String(count)} times`)
+			}
 
 			try {
 				checkControl(part.name, reader, node)
@@ -165,7 +206,7 @@ const bindings: DocxCheck = {
 			const reader = partReader(document)
 
 			for (const control of values.values()) {
-				const node = boundNode(document, namespaces, control.binding)
+				const node = updatedNode(document, namespaces, control)
 
 				if (node >= 0 && reader.text(node) !== control.value) fail(`${name}: a bound content control's node lost its new value`)
 			}

@@ -40,7 +40,7 @@ import {
 } from "./harness"
 import * as Reader from "./independentReader"
 import { OpPicker, type OpContext } from "./ops/index"
-import { inlinePosition, undoBurst } from "./ops/base"
+import { typeSomewhere, undoBurst } from "./ops/base"
 
 // One fuzz job in its own process; the fuzz tests run these through config.runJobs. Prints JSON lines.
 //   paged <file> <seed> <sync|race|proof>   one paged run: after each settled step the pages shown must
@@ -70,7 +70,8 @@ async function paged(config: FuzzConfig, file: string, seed: number, mode: Paged
 	const rand = rng(seed)
 	const result = (outcome: Record<string, unknown>): void =>
 		print({ file: name, seed, mode, ...outcome, ms: Math.round(performance.now() - started) })
-	const opened = await openPaged(new Uint8Array(readFileSync(file)), mode, config.view)
+	const source = new Uint8Array(readFileSync(file))
+	const opened = await openPaged(source, mode, config.view)
 
 	if ("refused" in opened) return result({ refused: opened.refused })
 
@@ -117,7 +118,7 @@ async function paged(config: FuzzConfig, file: string, seed: number, mode: Paged
 	const check = async (step: number | "end"): Promise<Record<string, unknown> | undefined> => {
 		await settle(editor)
 
-		const shown = shownPages(editor)
+		const shown = shownPages(editor, source)
 		let saved: Uint8Array
 
 		try {
@@ -761,11 +762,8 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 
 		// Checks the checker: text typed after the save is in the editor but not the file, and a bookmark the
 		// file loses (one in a text box first), so every verified sequence must report them.
-		if (modes.has("selftest")) {
-			const position = inlinePosition(rand, body.state.doc)
-
-			if (position !== undefined) body.dispatch(body.state.tr.insertText("SELFTEST", position))
-		}
+		// A sequence nothing could be typed into tests the text check with nothing: counted.
+		if (modes.has("selftest") && !typeSomewhere(body, rand, "SELFTEST")) bump("selftestUntested")
 
 		try {
 			await verifySaved(report, source, saved, body, schema, modes.has("selftest"))

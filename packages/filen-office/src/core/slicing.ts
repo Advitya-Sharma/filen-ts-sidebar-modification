@@ -47,3 +47,13 @@ export class SliceClock implements Slicing {
 export function sliceClock(slicing: Slicing): SliceClock {
 	return slicing instanceof SliceClock ? slicing : new SliceClock(slicing)
 }
+
+// Runs `steps` to its end, giving the host a turn at a yield once `clock`'s slice is up (without a clock, never).
+export async function runSliced<T>(steps: Generator<void, T>, clock: SliceClock | undefined): Promise<T> {
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+		if (clock?.due === true) await clock.pause()
+	}
+}

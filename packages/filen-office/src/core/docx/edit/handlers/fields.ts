@@ -1,5 +1,5 @@
 import { closeHistory } from "prosemirror-history"
-import type { Node } from "prosemirror-model"
+import { Fragment, Slice, type Node } from "prosemirror-model"
 import { NodeSelection, type EditorState, type Transaction } from "prosemirror-state"
 import { addBookmark, bookmarkIndex, canAddBookmark, deleteBookmark, renameBookmark } from "../../fields/bookmarks"
 import { FieldEvaluation, fieldUpdateOf, pagedFieldHost, parseFieldCode, updatableField, type FieldHost } from "../../fields/evaluate"
@@ -72,8 +72,9 @@ function fieldAtCaret(state: EditorState): { node: Node; pos: number } | undefin
 }
 
 // Whether the selection is on a table of contents: a locked block of one of the file's selected, or a paragraph
-// holding field characters of one built as paragraphs.
-function onToc(state: EditorState): boolean {
+// holding field characters of one built as paragraphs (`entries`: or a page number reference, as its entries
+// between the first and the last hold; looked at in the selection's paragraph alone).
+function onToc(state: EditorState, entries = false): boolean {
 	const { $from } = state.selection
 	const selected = $from.nodeAfter
 
@@ -82,7 +83,7 @@ function onToc(state: EditorState): boolean {
 	let found = false
 
 	$from.parent.forEach(child => {
-		if (child.type === nodes.field_char) found = true
+		if (child.type === nodes.field_char || (entries && child.type === nodes.field && child.attrs["type"] === "PAGEREF")) found = true
 	})
 
 	return found
@@ -159,13 +160,20 @@ function updateStamp(session: DocxEditorSession): RevisionStamp | null | undefin
 }
 
 // A field's attributes for a new result: while tracking (`stamp`), with its tracked update (the result before
-// its first tracked update, the latest stamp; none when the result is back to that), except for a field
-// inserted while tracking, whose result is part of its insertion.
+// its first tracked update, the latest stamp; none when the result is back to that and its code holds no tracked
+// change), except for a field inserted while tracking, whose result is part of its insertion. An update not
+// tracked leaves tracked changes in the code pending, its result not tracked.
 function updated(session: DocxEditorSession, node: Node, result: string, stamp: RevisionStamp | undefined): Record<string, unknown> {
-	if (stamp === undefined || docxSchema.marks.insertion.isInSet(node.marks) !== undefined) return { result }
-
 	const update = fieldUpdateOf(node)
+	const codeOnly = update?.code !== undefined && update.result === node.attrs["result"]
+
+	if (stamp === undefined || docxSchema.marks.insertion.isInSet(node.marks) !== undefined)
+		return codeOnly ? { result, update: Object.freeze({ ...update, result }) } : { result }
+
 	const before = update?.result ?? (node.attrs["result"] as string)
+
+	if (before === result && update?.code !== undefined) return { result, update: Object.freeze({ ...update, result }) }
+
 	const next: FieldUpdate | null =
 		before === result
 			? null
@@ -173,7 +181,8 @@ function updated(session: DocxEditorSession, node: Node, result: string, stamp: 
 					result: before,
 					author: stamp.author,
 					date: stamp.date,
-					id: update?.id ?? String(session.context.ids.next("revision"))
+					id: update?.id ?? String(session.context.ids.next("revision")),
+					...(update?.code === undefined ? {} : { code: update.code })
 				})
 
 	return { result, update: next }
@@ -255,11 +264,21 @@ async function placeToc(
 	joined: Joined | undefined
 ): Promise<Joined | undefined> {
 	const options = tocOptions(parseFieldCode(instruction))
-	// Rebuilt while tracking: the old table stays, deleted, with its markers and section break.
+	// Rebuilt while tracking: the old result stays, deleted, with its markers and section break, between the
+	// table's own code and end (as Word records an update of a field).
 	const tracked = region !== undefined && session.context.review.tracking
 
 	// A table of the file kept as locked blocks cannot be recorded deleted.
-	if (!options.supported || (tracked && region.source)) return undefined
+	if (!options.supported || (tracked && (region.source || region.codeEnd < 0))) return undefined
+
+	let range: { from: number; to: number; head: "title" | "join" | undefined; tail: "whole" | "open" | undefined } | undefined
+
+	if (region !== undefined) {
+		range = { from: region.replaceFrom, to: region.replaceTo, head: region.head ? "title" : undefined, tail: region.tail }
+
+		if (tracked && range.head === undefined) range = { ...range, from: region.codeEnd, head: "join" }
+		if (tracked && range.tail === undefined) range = { ...range, to: region.endAt, tail: "open" }
+	}
 
 	const host = pagedFieldHost(editor)
 	const entries = tocEntries(host, session, options, region?.from ?? -1, region?.to ?? -1)
@@ -284,13 +303,32 @@ async function placeToc(
 		markers: tracked ? NO_MARKERS : (region?.markers ?? NO_MARKERS),
 		sectPr: tracked ? NO_SOURCE : (region?.sectPr ?? NO_SOURCE),
 		taken: takenElsewhere(host.sessions, session),
-		page: entry => headingPage(host, session, entry.pos)
+		page: entry => headingPage(host, session, entry.pos),
+		head: range?.head,
+		tail: range?.tail
 	})
 
 	const steps = tr.steps.length
 
-	if (region === undefined) tr.insert(at, build.paragraphs)
-	else tr.replaceWith(region.from, region.to, build.paragraphs)
+	if (range === undefined) tr.insert(at, build.paragraphs)
+	else {
+		// What the table keeps in its first and last paragraphs joins the entries there (see TocRegion). While
+		// tracking, the last paragraph keeps its own properties (a rejection could not bring them back).
+		const paragraphs = range.head === "title" ? [nodes.paragraph.create(), ...build.paragraphs] : [...build.paragraphs]
+		const last = paragraphs[paragraphs.length - 1]
+
+		if (tracked && range.tail === "open" && last !== undefined) {
+			const kept = tr.doc.resolve(range.to).parent
+
+			paragraphs[paragraphs.length - 1] = last.type.create(kept.attrs, last.content, kept.marks)
+		}
+
+		tr.replace(
+			range.from,
+			range.to,
+			new Slice(Fragment.from(paragraphs), range.head === undefined ? 0 : 1, range.tail === "open" ? 1 : 0)
+		)
+	}
 
 	addTocBookmarks(tr, build)
 
@@ -305,8 +343,7 @@ async function placeToc(
 	return refreshToc(editor, session, tr.mapping.slice(steps).map(at, -1), first)
 }
 
-// Field results of the selection (or the field at the caret), or of the whole story, brought up to date, with
-// the tables of contents of the file there.
+// Field results of the selection (or the field at the caret), or of the whole story, brought up to date.
 async function update(editor: PagedEditor, all: boolean): Promise<boolean> {
 	const session = editor.session
 
@@ -318,22 +355,22 @@ async function update(editor: PagedEditor, all: boolean): Promise<boolean> {
 
 	const state = session.state
 	const caret = all ? undefined : fieldAtCaret(state)
-	const from = all ? 0 : (caret?.pos ?? state.selection.from)
-	const to = all ? state.doc.content.size : caret === undefined ? state.selection.to : caret.pos + caret.node.nodeSize
-	const tables = tocRegions(session).filter(
-		region => region.source && region.updatable && stamp === undefined && region.from < Math.max(to, from + 1) && region.to > from
-	)
-	let joined = applyChanges(session, fieldChanges(pagedFieldHost(editor), session, from, to, stamp), undefined)
+	const regions = tocRegions(session)
+	let from = all ? 0 : (caret?.pos ?? state.selection.from)
+	let to = all ? state.doc.content.size : caret === undefined ? state.selection.to : caret.pos + caret.node.nodeSize
 
-	// The file's tables kept as locked blocks are rebuilt (their entries are bytes; not while tracking, which
-	// could not record them deleted); the last first, so earlier ones keep their places.
-	for (const table of tables.reverse()) {
-		await editor.whenSettled()
+	// Anywhere in a table of contents (not on one of its fields), the table's page numbers, as Word's Update Table
+	// offers first.
+	if (caret === undefined)
+		for (const region of regions)
+			if (!region.source && region.from <= to && region.to >= from) {
+				from = Math.min(from, region.from)
+				to = Math.max(to, region.to)
+			}
 
-		const current = tocRegions(session).find(region => region.source && region.from === table.from && region.to === table.to)
-
-		if (current !== undefined) joined = (await placeToc(editor, session, current.instruction, current, joined)) ?? joined
-	}
+	// A table of the file kept as locked blocks stays as it is: Update Field updates page numbers only (Word's
+	// Update Table offers that first), and its entries are bytes; Update Table rebuilds it.
+	applyChanges(session, fieldChanges(pagedFieldHost(editor), session, from, to, stamp), undefined)
 
 	return true
 }
@@ -351,9 +388,9 @@ async function updateToc(editor: PagedEditor, pagesOnly: boolean): Promise<boole
 
 	if (region === undefined || !region.updatable) return false
 
-	// Page numbers alone are the table's PAGEREF fields, updated in place; a table kept as locked blocks is
-	// rebuilt whole (its entries are bytes).
-	if (pagesOnly && !region.source) {
+	// Page numbers alone are the table's PAGEREF fields, updated in place (a table kept as locked blocks has
+	// none the editor can reach: it stays as it is).
+	if (pagesOnly) {
 		applyChanges(session, fieldChanges(pagedFieldHost(editor), session, region.from, region.to, stamp), undefined)
 
 		return true
@@ -433,7 +470,7 @@ const document: DocumentHandlers = {
 		enabled: context => {
 			const state = context.session.state
 
-			return writable(context) && (!state.selection.empty || fieldAtCaret(state) !== undefined || onToc(state))
+			return writable(context) && (!state.selection.empty || fieldAtCaret(state) !== undefined || onToc(state, true))
 		},
 		run: context => update(context.editor, false)
 	},

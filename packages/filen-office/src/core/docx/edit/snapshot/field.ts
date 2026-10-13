@@ -1,7 +1,7 @@
 import type { Node } from "prosemirror-model"
 import { NodeSelection } from "prosemirror-state"
 import { parseFieldCode, updatableField } from "../../fields/evaluate"
-import { sourceTocOf, tocOptions, type TocRefusal } from "../../fields/toc"
+import { sourceTocOf, tocHead, tocOptions, type TocRefusal } from "../../fields/toc"
 import { docxSchema } from "../schema"
 import type { SnapshotInput } from "./index"
 
@@ -100,7 +100,21 @@ export function fieldOf(input: SnapshotInput): DocxFieldContext | null {
 	const type = parseFieldCode(instruction).type
 
 	const toc = type === "TOC"
-	const refusal = toc && !tocOptions(parseFieldCode(instruction)).supported ? "unsupportedTable" : null
+	const head = toc ? tocHead($from.parent) : undefined
+	// A title before the begin with the code running on past the paragraph: a rebuild would take the title.
+	const refusal =
+		toc && !tocOptions(parseFieldCode(instruction)).supported
+			? "unsupportedTable"
+			: head !== undefined && head.titled && head.separate < 0
+				? "tableWithOtherContent"
+				: null
 
-	return contextOf(node, false, () => ({ type, updatable: toc && refusal === null, toc, instruction, refusal }))
+	// A title's paragraph answers for itself (what is typed there may change the refusal).
+	return contextOf(head?.titled === true ? $from.parent : node, false, () => ({
+		type,
+		updatable: toc && refusal === null,
+		toc,
+		instruction,
+		refusal
+	}))
 }

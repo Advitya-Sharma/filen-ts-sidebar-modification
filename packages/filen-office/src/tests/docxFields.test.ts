@@ -1,5 +1,6 @@
 import type { Node as ProseMirrorNode } from "prosemirror-model"
 import { TextSelection } from "prosemirror-state"
+import { Mapping } from "prosemirror-transform"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { bytesSource, OpcPackage } from "@filen/office/core/opc"
 import { docxSchema, type DocxEditContext } from "@filen/office/core/docx/edit"
@@ -11,7 +12,10 @@ import type { DocxPackage } from "@filen/office/core/docx"
 import { hitObject, type PagedEditor } from "@filen/office/core/docx/paged"
 import { markInternal } from "../core/docx/edit/invariants/index"
 import { sessionBookmarks } from "../core/docx/fields/bookmarks"
+import * as fieldFormat from "../core/docx/fields/format"
 import { datePicture, numericPicture, parseFieldCode } from "../core/docx/fields/evaluate"
+import { numberSwitchFormat, numberText } from "../core/docx/layout/fields"
+import { NUMBERING_PART } from "./docxEditFixtures"
 import { NAMESPACES, buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
 import { pageLines } from "./layoutFixtures"
 import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
@@ -133,17 +137,67 @@ describe("field codes and pictures", () => {
 		])
 	})
 
+	it("formats numbers with \\* switches (§17.16.4.3)", async () => {
+		const page = (switches: string): string => `<w:p>${complex(` PAGE ${switches} `, "?")}</w:p>`
+		const opened = await open({
+			body:
+				page("\\* hex") +
+				page("\\* HEX") +
+				page("\\* ArabicDash") +
+				page("\\* CardText") +
+				page("\\* CardText \\* Caps") +
+				page("\\* OrdText") +
+				page("\\* DollarText \\* Upper") +
+				page("\\* roman") +
+				page("\\* ROMAN")
+		})
+
+		expect(await opened.editor.execute({ type: "field.updateAll" })).toBe(true)
+		expect(fields(opened.editor.session.state.doc)).toEqual(
+			["1", "1", "- 1 -", "one", "One", "first", "ONE AND 00/100", "i", "I"].map(result => `PAGE=${result}`)
+		)
+		// Hex digits upper case whichever the switch's case.
+		expect(numberText(458, numberSwitchFormat("hex"))).toBe("1CA")
+		expect(numberText(14.55, numberSwitchFormat("DollarText"))).toBe("fourteen and 55/100")
+	})
+
 	it("formats dates with \\@ pictures (§17.16.4.1)", () => {
 		const date = new Date(2026, 9, 2, 14, 5, 9)
 
 		expect(datePicture(date, "dddd, d MMMM yyyy")).toBe("Friday, 2 October 2026")
 		expect(datePicture(date, "dd/MM/yy")).toBe("02/10/26")
-		expect(datePicture(date, "h:mm am/pm")).toBe("2:05 pm")
+		// am/pm shows upper case too (Microsoft's "Format field results").
+		expect(datePicture(date, "h:mm am/pm")).toBe("2:05 PM")
 		expect(datePicture(date, "HH:mm:ss 'o''clock'")).toBe("14:05:09 oclock")
 		expect(datePicture(date, "MMM d, yyyy h:mm AM/PM")).toBe("Oct 2, 2026 2:05 PM")
+		// Names in the field's language.
+		expect(datePicture(date, "dddd, d. MMMM yyyy", "de-DE")).toBe("Freitag, 2. Oktober 2026")
+		expect(datePicture(date, "dddd d MMMM", "fr-FR")).toBe("vendredi 2 octobre")
+		expect(datePicture(date, "dddd", "en-GB")).toBe("Friday")
 	})
 
 	it("formats numbers with \\# pictures (§17.16.4.2)", () => {
+		// Microsoft's "Format field results" examples.
+		const examples: [number, string, string][] = [
+			[9, "00.00", "09.00"],
+			[15, "$###", "$ 15"],
+			[222492, "x##", "492"],
+			[0.125, "0.00x", "0.125"],
+			[0.75, ".x", ".8"],
+			[495.47, "$###.00", "$495.47"],
+			[2456800, "$#,###,###", "$2,456,800"],
+			[-80, "-##", "-80"],
+			[80, "-##", " 80"],
+			[10, "+##", "+10"],
+			[-10, "+##", "-10"],
+			[-345.56, "$#,##0.00;($#,##0.00);$0", "($ 345.56)"],
+			[0, "$#,##0.00;($#,##0.00);$0", "$0"],
+			[347.44, "$##0.00 'is sales tax'", "$347.44 is sales tax"],
+			// A quoted point is text, not the decimal point.
+			[5, "0 'a.b'", "5 a.b"]
+		]
+
+		expect(examples.map(([value, picture]) => numericPicture(value, picture))).toEqual(examples.map(example => example[2]))
 		expect(numericPicture(1234.5, "#,##0.00")).toBe("1,234.50")
 		expect(numericPicture(7, "00")).toBe("07")
 		expect(numericPicture(-3, "0;(0)")).toBe("(3)")
@@ -231,6 +285,108 @@ describe("updating fields", () => {
 		expect(xml).toContain('<w:fldChar w:fldCharType="begin" w:dirty="true"/>')
 		expect(xml).toContain('<w:bookmarkStart w:id="3" w:name="inside"/><w:bookmarkEnd w:id="3"/><w:r><w:t>1</w:t></w:r>')
 	})
+
+	it("gives a referenced paragraph's number without context, in full context or relative to the reference (\\n \\w \\r)", async () => {
+		const level = (ilvl: number, format: string, text: string): string =>
+			`<w:lvl w:ilvl="${String(ilvl)}"><w:start w:val="1"/><w:numFmt w:val="${format}"/><w:lvlText w:val="${text}"/></w:lvl>`
+		const numbering = (id: number, levels: string): string => `<w:abstractNum w:abstractNumId="${String(id)}">${levels}</w:abstractNum>`
+		const item = (numId: number, ilvl: number, text: string, bookmark = ""): string =>
+			`<w:p><w:pPr><w:numPr><w:ilvl w:val="${String(ilvl)}"/><w:numId w:val="${String(numId)}"/></w:numPr></w:pPr>` +
+			(bookmark === "" ? "" : `<w:bookmarkStart w:id="${String(bookmark.length)}" w:name="${bookmark}"/>`) +
+			`<w:r><w:t>${text}</w:t></w:r>${bookmark === "" ? "" : `<w:bookmarkEnd w:id="${String(bookmark.length)}"/>`}</w:p>`
+		const ref = (switches: string): string => `<w:p>${complex(` REF Target ${switches} \\h `, "?")}</w:p>`
+		const parts = [
+			NUMBERING_PART(
+				numbering(1, level(0, "decimal", "%1.") + level(1, "lowerLetter", "%2.") + level(2, "lowerRoman", "%3.")) +
+					numbering(2, level(0, "decimal", "%1.") + level(1, "decimal", "%1.%2.") + level(2, "decimal", "%1.%2.%3.")) +
+					'<w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>'
+			)
+		]
+		const relationships = [{ id: "rIdN", type: "numbering", target: "numbering.xml" }]
+		// An outline list (1. a. i.): the referenced item is 1.a.ii.
+		const outline = await open({
+			body:
+				item(1, 0, "One") +
+				item(1, 1, "A") +
+				item(1, 2, "First") +
+				item(1, 2, "Second", "Target") +
+				ref("\\n") +
+				ref("\\w") +
+				ref("\\w \\d -") +
+				ref("\\r"),
+			parts,
+			relationships
+		})
+
+		expect(await outline.editor.execute({ type: "field.updateAll" })).toBe(true)
+		expect(fields(outline.editor.session.state.doc)).toEqual(["REF=ii", "REF=1.a.ii", "REF=1-a-ii", "REF=1.a.ii"])
+
+		// A legal list (4.5.2), referenced from inside 4.3.1: relative leaves out the 4 both share.
+		const legal = await open({
+			body:
+				item(2, 0, "1") +
+				item(2, 0, "2") +
+				item(2, 0, "3") +
+				item(2, 0, "4") +
+				item(2, 1, "4.1") +
+				item(2, 1, "4.2") +
+				item(2, 1, "4.3") +
+				`<w:p><w:pPr><w:numPr><w:ilvl w:val="2"/><w:numId w:val="2"/></w:numPr></w:pPr>${complex(" REF Target \\r \\h ", "?")}</w:p>` +
+				item(2, 1, "4.4") +
+				item(2, 1, "4.5") +
+				item(2, 2, "4.5.1") +
+				item(2, 2, "4.5.2", "Target") +
+				ref("\\n") +
+				ref("\\w"),
+			parts,
+			relationships
+		})
+
+		expect(await legal.editor.execute({ type: "field.updateAll" })).toBe(true)
+		expect(fields(legal.editor.session.state.doc)).toEqual(["REF=5.2", "REF=4.5.2", "REF=4.5.2"])
+	})
+
+	it("writes a date in the language of the field's runs", async () => {
+		const opened = await open({
+			body: `<w:p>${complex(' DATE \\@ "dddd, d. MMMM yyyy" ', "x", '<w:rPr><w:lang w:val="de-DE"/></w:rPr>')}</w:p>`
+		})
+
+		expect(await opened.editor.execute({ type: "field.updateAll" })).toBe(true)
+		expect(fields(opened.editor.session.state.doc)).toEqual(["DATE=Montag, 12. Oktober 2026"])
+	})
+
+	it("keeps a reference's result when its bookmark holds a list number field it cannot count", async () => {
+		const opened = await open({
+			body:
+				'<w:p><w:bookmarkStart w:id="1" w:name="Annex"/><w:r><w:t xml:space="preserve">Annex </w:t></w:r>' +
+				'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> LISTNUM Appendix </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+				'<w:r><w:t xml:space="preserve"> Data</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>' +
+				`<w:p>${complex(" REF Annex \\h ", "Annex A Data")}</w:p>`
+		})
+
+		expect(await opened.editor.execute({ type: "field.updateAll" })).toBe(true)
+		expect(fields(opened.editor.session.state.doc)).toEqual(["LISTNUM=", "REF=Annex A Data"])
+	})
+
+	it("counts sequences and reads bookmarked text kept in locked paragraphs", async () => {
+		// A field character sharing a run with text: a paragraph kept as its bytes.
+		const lockedCaption =
+			'<w:p><w:bookmarkStart w:id="7" w:name="Target"/><w:r><w:t xml:space="preserve">Figure </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
+			'<w:r><w:instrText xml:space="preserve"> SEQ Figure \\* ARABIC </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+			'<w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>: kept</w:t></w:r><w:bookmarkEnd w:id="7"/></w:p>'
+		const opened = await open({
+			body:
+				p("Intro") +
+				lockedCaption +
+				`<w:p><w:r><w:t xml:space="preserve">Figure </w:t></w:r>${complex(" SEQ Figure \\* ARABIC ", "9")}</w:p>` +
+				`<w:p><w:r><w:t xml:space="preserve">See </w:t></w:r>${complex(" REF Target \\h ", "old")}</w:p>`
+		})
+		const doc = opened.editor.session.state.doc
+
+		expect(doc.child(1).type).toBe(nodes.locked_block)
+		expect(await opened.editor.execute({ type: "field.updateAll" })).toBe(true)
+		expect(fields(opened.editor.session.state.doc)).toEqual(["SEQ=2", "REF=Figure 1: kept"])
+	})
 })
 
 describe("inserting fields", () => {
@@ -271,7 +427,8 @@ describe("inserting fields", () => {
 		expect(editor.execute({ type: "bookmark.delete", name: "Figure1" })).toBe(true)
 		expect(await refusal(opened)).toBeUndefined()
 		expect(await editor.execute({ type: "field.updateAll" })).toBe(true)
-		expect(fields(editor.session.state.doc)).toEqual(["REF=Error! Bookmark not defined."])
+		// Word's error text for a reference (a page reference's is "Error! Bookmark not defined.").
+		expect(fields(editor.session.state.doc)).toEqual(["REF=Error! Reference source not found."])
 	})
 })
 
@@ -370,6 +527,26 @@ describe("tracked updates", () => {
 		expect(await editor.execute({ type: "field.updateAll" })).toBe(true)
 		expect(fieldsOf(editor.session.state.doc)[0]?.node.attrs["update"]).toBeNull()
 		expect(await refusal(opened)).toBeUndefined()
+	})
+
+	it("accepts or rejects every tracked update of many fields at once", async () => {
+		const body = Array.from({ length: 40 }, () => `<w:p>${complex(" PAGE ", "9")}</w:p>`).join("")
+
+		for (const accept of [true, false]) {
+			const opened = await open({ body })
+			const editor = opened.editor
+
+			opened.context.identity.author = "Ann Lee"
+			opened.context.review.tracking = true
+			expect(await editor.execute({ type: "field.updateAll" })).toBe(true)
+			expect(await editor.execute({ type: accept ? "review.acceptAll" : "review.rejectAll" })).toBe(true)
+
+			const fields = fieldsOf(editor.session.state.doc)
+
+			expect(fields.filter(field => field.node.attrs["update"] !== null)).toHaveLength(0)
+			expect(new Set(fields.map(field => field.node.attrs["result"]))).toEqual(new Set([accept ? "1" : "9"]))
+			expect(editor.session.snapshot().review.revisionCount).toBe(0)
+		}
 	})
 })
 
@@ -486,6 +663,483 @@ describe("field codes view", () => {
 		await editor.execute({ type: "view.fieldCodes" })
 		await settleAll(editor)
 		expect(text(editor)).toEqual(["Oxne", "Txwo", "Txhree", "After"])
+	})
+
+	it("shows codes after one edit changed two paragraphs (positions of the blocks between kept)", async () => {
+		const opened = await open({ body: p("Alpha one") + p("Beta two") + `<w:p>${complex(" PAGE ", "1")}</w:p>` })
+		const editor = opened.editor
+		const session = editor.session
+		const tr = session.state.tr
+
+		tr.insertText("x", find(session.state.doc, "two"))
+		tr.insertText("y", find(session.state.doc, "one"))
+		session.dispatch(tr)
+		await settleAll(editor)
+		expect(editor.setFieldCodes(true)).toBe(true)
+		await settleAll(editor)
+		expect(text(editor)).toEqual(["Alpha yone", "Beta xtwo", "{ PAGE }"])
+	})
+})
+
+describe("tracked changes in field codes", () => {
+	const codes = (doc: ProseMirrorNode): string[] => fieldsOf(doc).map(field => field.node.attrs["instruction"] as string)
+
+	it("accepts or rejects tracked changes inside a field's code with all others", async () => {
+		const ins = (id: number, inner: string): string =>
+			`<w:ins w:id="${String(id)}" w:author="Ann" w:date="2026-01-01T00:00:00Z">${inner}</w:ins>`
+		const del = (id: number, inner: string): string =>
+			`<w:del w:id="${String(id)}" w:author="Bob" w:date="2026-01-02T00:00:00Z">${inner}</w:del>`
+		const code = (text: string, rPr = ""): string => `<w:r>${rPr}<w:instrText xml:space="preserve">${text}</w:instrText></w:r>`
+		const gone = (text: string, rPr = ""): string => `<w:r>${rPr}<w:delInstrText xml:space="preserve">${text}</w:delInstrText></w:r>`
+		const field = (inner: string): string =>
+			`<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>${inner}` +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+		// The code: its tracked changes, the code after accepting and after rejecting them.
+		const cases = [
+			[ins(1, del(2, gone(" NUMPAGES "))) + code(" PAGE "), " PAGE ", " PAGE "],
+			[ins(1, code(" PAGE ")), " PAGE ", ""],
+			[ins(1, del(2, gone(" PAGE "))), "", ""],
+			[ins(1, del(2, gone(" PAGE ", "<w:rPr><w:b/></w:rPr>"))), "", ""],
+			// A switch inserted in a run of its own, its properties other than the code's.
+			[code(" PAGE ", "<w:rPr><w:b/></w:rPr>") + ins(1, code("\\* roman ", "<w:rPr><w:i/></w:rPr>")), " PAGE \\* roman ", " PAGE "],
+			[del(1, gone(" PAGE ")) + code(" NUMPAGES "), " NUMPAGES ", " PAGE  NUMPAGES "]
+		] as const
+
+		for (const [inner, accepted, rejected] of cases)
+			for (const accept of [true, false]) {
+				const source = buildDocx({ body: field(inner) })
+				const opened = await open(source)
+
+				expect(await read(await save(opened))).toBe(await read(source))
+				// The code an update evaluates: the code after its tracked changes.
+				expect(codes(opened.editor.session.state.doc)).toEqual([accepted])
+				expect(await opened.editor.execute({ type: accept ? "review.acceptAll" : "review.rejectAll" })).toBe(true)
+
+				const instruction = accept ? accepted : rejected
+				const bytes = await save(opened)
+				const xml = await read(bytes)
+
+				expect(codes(opened.editor.session.state.doc)).toEqual([instruction])
+				expect(xml).not.toMatch(/<w:(ins|del) /)
+				expect(xml).toContain(
+					`<w:instrText xml:space="preserve">${instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/>`
+				)
+				expect(xml).toContain("<w:t>9</w:t>")
+				expect(codes((await open(bytes)).editor.session.state.doc)).toEqual([instruction])
+				expect(pageDigest(opened.editor.layout)).toEqual(await savedDigest(bytes))
+			}
+	})
+})
+
+describe("formatting fields", () => {
+	const body = `<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>${complex(" PAGE ", "1", "<w:rPr><w:i/></w:rPr>")}<w:r><w:t xml:space="preserve"> end</w:t></w:r></w:p>`
+
+	it("gives every run of a field the formatting a selection takes, keeping each run's own, and undoes it", async () => {
+		const source = buildDocx({ body })
+		const opened = await open(source)
+		const editor = opened.editor
+		const session = editor.session
+
+		select(editor, 1, session.state.doc.content.size - 1)
+		expect(editor.execute({ type: "format.allCaps" })).toBe(true)
+		expect(docxSchema.marks.caps.isInSet(fieldsOf(session.state.doc)[0]?.node.marks ?? [])).toBeDefined()
+
+		const bytes = await save(opened)
+		const xml = await read(bytes)
+
+		// Code and result runs alike: caps added, italic kept.
+		expect(xml.match(/<w:r><w:rPr><w:i\/><w:caps\/><\/w:rPr><w:(fldChar|instrText|t)\b/g)).toHaveLength(5)
+		await settleAll(editor)
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(bytes))
+
+		// Read back, the field shows it, and an update keeps it (its code's first character has it).
+		const reopened = await open(bytes)
+
+		expect(docxSchema.marks.caps.isInSet(fieldsOf(reopened.editor.session.state.doc)[0]?.node.marks ?? [])).toBeDefined()
+		reopened.editor.session.dispatch(
+			markInternal(
+				reopened.editor.session.state.tr.setNodeAttribute(fieldsOf(reopened.editor.session.state.doc)[0]?.pos ?? 0, "result", "7")
+			)
+		)
+		expect(await read(await save(reopened))).toContain("<w:r><w:rPr><w:i/><w:caps/></w:rPr><w:t>7</w:t></w:r>")
+
+		expect(await editor.execute({ type: "history.undo" })).toBe(true)
+		expect(await read(await save(opened))).toBe(await read(source))
+	})
+
+	it("reads a field deleted while tracking with the formatting it had (its code deleted too)", async () => {
+		const merged =
+			'<w:p><w:r><w:t xml:space="preserve">Field: </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TIME \\* MERGEFORMAT </w:instrText></w:r>' +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:noProof/></w:rPr><w:t>6:25 PM</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+		const opened = await open({ body: merged })
+		const session = opened.editor.session
+
+		opened.context.identity.author = "Ann Lee"
+		opened.context.review.tracking = true
+		select(opened.editor, 1, session.state.doc.content.size - 1)
+		session.dispatch(session.state.tr.deleteSelection())
+		expect(await refusal(opened)).toBeUndefined()
+		expect(fieldsOf((await open(await save(opened))).editor.session.state.doc)[0]?.node.marks.map(mark => mark.type.name)).toEqual([
+			"deletion",
+			"no_proof"
+		])
+	})
+
+	it("bolds a field with the rest of a selection (Ctrl+B)", async () => {
+		const opened = await open({ body })
+		const session = opened.editor.session
+
+		select(opened.editor, 1, session.state.doc.content.size - 1)
+		expect(opened.editor.execute({ type: "format.bold" })).toBe(true)
+		expect(docxSchema.marks.bold.isInSet(fieldsOf(session.state.doc)[0]?.node.marks ?? [])).toBeDefined()
+	})
+
+	it("records the formatting of a field while tracking in each of its runs, accepted or rejected whole", async () => {
+		const source = buildDocx({ body })
+
+		for (const accept of [true, false]) {
+			const opened = await open(source)
+			const editor = opened.editor
+			const session = editor.session
+
+			opened.context.identity.author = "Ann Lee"
+			opened.context.review.tracking = true
+			select(editor, 1, session.state.doc.content.size - 1)
+			expect(editor.execute({ type: "format.allCaps" })).toBe(true)
+
+			const bytes = await save(opened)
+			const xml = await read(bytes)
+
+			expect(
+				xml.match(
+					/<w:r><w:rPr><w:i\/><w:caps\/><w:rPrChange w:id="\d+" w:author="Ann Lee" w:date="[^"]+"><w:rPr><w:i\/><\/w:rPr><\/w:rPrChange><\/w:rPr><w:(fldChar|instrText|t)\b/g
+				)
+			).toHaveLength(5)
+
+			const reopened = await open(bytes)
+
+			expect(pageDigest(reopened.editor.layout)).toEqual(await savedDigest(bytes))
+			expect(await reopened.editor.execute({ type: accept ? "review.acceptAll" : "review.rejectAll" })).toBe(true)
+
+			const resolved = await read(await save(reopened))
+
+			expect(resolved).not.toContain("rPrChange")
+			expect(resolved.match(/<w:rPr><w:i\/><w:caps\/><\/w:rPr>/g) ?? []).toHaveLength(accept ? 5 : 0)
+		}
+	})
+
+	// Only the field's runs, from its begin to its end.
+	const fieldXml = (xml: string): string => {
+		const from = xml.indexOf("Page </w:t></w:r>") + 17
+		const end = '<w:fldChar w:fldCharType="end"/></w:r>'
+
+		return xml.slice(from, xml.indexOf(end, from) + end.length)
+	}
+
+	it("resolves a tracked formatting of a field run by run: rejected, each run gets back what its own change recorded", async () => {
+		// Only the result italic, the code upright: italic given to the whole field while tracking (the result
+		// records it had it).
+		const mixed =
+			'<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve"> end</w:t></w:r></w:p>'
+		const source = buildDocx({ body: mixed })
+
+		for (const accept of [false, true]) {
+			const opened = await open(source)
+			const session = opened.editor.session
+
+			opened.context.identity.author = "Ann Lee"
+			opened.context.review.tracking = true
+			select(opened.editor, 1, session.state.doc.content.size - 1)
+			expect(opened.editor.execute({ type: "format.italic" })).toBe(true)
+
+			const reopened = await open(await save(opened))
+
+			expect(await reopened.editor.execute({ type: accept ? "review.acceptAll" : "review.rejectAll" })).toBe(true)
+
+			const field = fieldXml(await read(await save(reopened)))
+
+			expect(field).not.toContain("<w:rPr></w:rPr>")
+			expect(field).not.toContain("rPrChange")
+			if (accept) expect(field.match(/<w:r><w:rPr><w:i\/><w:iCs\/><\/w:rPr>/g)).toHaveLength(5)
+			else expect(field).toBe(fieldXml(mixed))
+		}
+	})
+
+	it("resolves a change of the file's some runs of a field record, and records tracked formatting over it in the others", async () => {
+		// Bob's change on the code's run alone.
+		const partial =
+			'<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr><w:i/><w:rPrChange w:id="90" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:rPr/></w:rPrChange></w:rPr><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve"> end</w:t></w:r></w:p>'
+
+		// The change shows and resolves: rejected, the code's run upright again; accepted, italic stays.
+		for (const accept of [false, true]) {
+			const opened = await open({ body: partial })
+
+			expect(fieldsOf(opened.editor.session.state.doc)[0]?.node.marks.map(mark => mark.type.name)).toEqual([
+				"italic",
+				"format_change"
+			])
+			expect(await opened.editor.execute({ type: accept ? "review.acceptAll" : "review.rejectAll" })).toBe(true)
+
+			const field = fieldXml(await read(await save(opened)))
+
+			expect(field).not.toContain("rPrChange")
+			expect(field.includes("<w:i/>")).toBe(accept)
+		}
+
+		// Tracked formatting over it: every run records a change, the code's run Bob's (the oldest), the rest Ann's.
+		const opened = await open({ body: partial })
+		const session = opened.editor.session
+
+		opened.context.identity.author = "Ann Lee"
+		opened.context.review.tracking = true
+		select(opened.editor, 1, session.state.doc.content.size - 1)
+		expect(opened.editor.execute({ type: "format.allCaps" })).toBe(true)
+
+		const bytes = await save(opened)
+		const field = fieldXml(await read(bytes))
+
+		expect(field.match(/<w:rPrChange w:id="\d+" w:author="Ann Lee"/g)).toHaveLength(4)
+		expect(field.match(/<w:rPrChange w:id="\d+" w:author="Bob"/g)).toHaveLength(1)
+
+		// Read back, rejected: the field as it was before both.
+		const reopened = await open(bytes)
+
+		expect(await reopened.editor.execute({ type: "review.rejectAll" })).toBe(true)
+		expect(fieldXml(await read(await save(reopened)))).not.toMatch(/rPrChange|<w:i\/>|<w:caps\/>/)
+	})
+
+	it("formats a field again after its tracked formatting change was accepted or rejected, and saves", async () => {
+		const run = (k: number, inner: string): string =>
+			`<w:r><w:rPr><w:b/><w:rPrChange w:id="${String(k)}" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:rPr/></w:rPrChange></w:rPr>${inner}</w:r>`
+		const whole =
+			'<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>' +
+			run(1, '<w:fldChar w:fldCharType="begin"/>') +
+			run(2, '<w:instrText xml:space="preserve"> PAGE </w:instrText>') +
+			run(3, '<w:fldChar w:fldCharType="separate"/>') +
+			run(4, "<w:t>1</w:t>") +
+			run(5, '<w:fldChar w:fldCharType="end"/>') +
+			'<w:r><w:t xml:space="preserve"> end</w:t></w:r></w:p>'
+
+		for (const accept of [true, false]) {
+			const opened = await open({ body: whole })
+			const session = opened.editor.session
+
+			expect(await opened.editor.execute({ type: accept ? "review.acceptAll" : "review.rejectAll" })).toBe(true)
+			select(opened.editor, 1, session.state.doc.content.size - 1)
+			expect(opened.editor.execute({ type: "format.italic" })).toBe(true)
+			expect(await refusal(opened)).toBeUndefined()
+
+			const field = fieldXml(await read(await save(opened)))
+
+			expect(field).not.toContain("rPrChange")
+			expect(field.match(/<w:r><w:rPr>(<w:b\/>)?<w:i\/><w:iCs\/><\/w:rPr>/g)).toHaveLength(5)
+			expect(field.includes("<w:b/>")).toBe(accept)
+		}
+	})
+
+	it("writes a w:fldSimple's new result without properties unless MERGEFORMAT keeps the previous (§17.16.4.3)", async () => {
+		for (const [instr, rPr] of [
+			[" PAGE ", ""],
+			[" PAGE \\* MERGEFORMAT ", '<w:rPr><w:sz w:val="28"/></w:rPr>']
+		] as const) {
+			const opened = await open({
+				body: `<w:p><w:fldSimple w:instr="${instr}"><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>9</w:t></w:r></w:fldSimple></w:p>`
+			})
+			const session = opened.editor.session
+
+			expect(await opened.editor.execute({ type: "field.updateAll" })).toBe(true)
+			expect(fields(session.state.doc)).toEqual(["PAGE=1"])
+			expect(await read(await save(opened))).toContain(`<w:r>${rPr}<w:t>1</w:t></w:r></w:fldSimple>`)
+		}
+	})
+
+	it("keeps a w:fldSimple's result properties while its tracked update is pending, and back when it is rejected", async () => {
+		const simple = (instr: string): string =>
+			`<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr="${instr}"><w:r><w:rPr><w:b/></w:rPr><w:t>9</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> end</w:t></w:r></w:p>`
+
+		for (const [instr, merge] of [
+			[" PAGE ", false],
+			[" PAGE \\* MERGEFORMAT ", true]
+		] as const)
+			for (const reopen of [false, true])
+				for (const accept of [false, true]) {
+					const opened = await open({ body: simple(instr) })
+
+					opened.context.identity.author = "Ann Lee"
+					opened.context.review.tracking = true
+					expect(await opened.editor.execute({ type: "field.updateAll" })).toBe(true)
+
+					const pending = await read(await save(opened))
+					const fresh = merge ? "<w:rPr><w:b/></w:rPr>" : ""
+
+					// The result before keeps its properties; the new one has them only under MERGEFORMAT.
+					expect(pending).toMatch(
+						new RegExp(
+							`<w:del [^>]*><w:r><w:rPr><w:b/></w:rPr><w:delText>9</w:delText></w:r></w:del><w:ins [^>]*><w:r>${fresh}<w:t>1</w:t></w:r></w:ins>`
+						)
+					)
+
+					const target = reopen ? await open(await save(opened)) : opened
+
+					expect(await target.editor.execute({ type: accept ? "review.acceptAll" : "review.rejectAll" })).toBe(true)
+					expect(await read(await save(target))).toContain(
+						accept
+							? `<w:r>${fresh}<w:t>1</w:t></w:r></w:fldSimple>`
+							: "<w:r><w:rPr><w:b/></w:rPr><w:t>9</w:t></w:r></w:fldSimple>"
+					)
+				}
+	})
+
+	it("types and formats without walking the document for fields no run can format", async () => {
+		const opened = await open({
+			body: Array.from(
+				{ length: 200 },
+				() =>
+					'<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> of text</w:t></w:r></w:p>'
+			).join("")
+		})
+		const editor = opened.editor
+		const session = editor.session
+		const word = (): number => session.state.doc.content.size - 1 - "text".length
+
+		select(editor, word(), word() + "text".length)
+		expect(editor.execute({ type: "format.bold" })).toBe(true)
+
+		const checked = vi.spyOn(fieldFormat, "holdsFormatting")
+
+		for (const char of "typed") session.dispatch(session.state.tr.insertText(char, 2))
+
+		select(editor, word(), word() + "text".length)
+		expect(editor.execute({ type: "format.italic" })).toBe(true)
+		expect(checked.mock.calls.length).toBeLessThan(10)
+		checked.mockRestore()
+	})
+
+	it("keeps a w:fldSimple without a result, or a copy of one, unformatted through undo, redo, raw marks and paste", async () => {
+		const opened = await open({
+			body: '<w:p><w:r><w:t xml:space="preserve">Alpha </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "/><w:r><w:t xml:space="preserve"> end</w:t></w:r></w:p>'
+		})
+		const editor = opened.editor
+		const session = editor.session
+		const original = session.state.doc
+		const marked = (): string[] => fieldsOf(session.state.doc).flatMap(field => field.node.marks.map(mark => mark.type.name))
+		const all = (): void => select(editor, 1, session.state.doc.content.size - 1)
+
+		// Bold, undone: the document as it was (the text unbolded too), redone: bold but the field.
+		all()
+		expect(editor.execute({ type: "format.bold" })).toBe(true)
+		expect(marked()).toEqual([])
+		expect(await editor.execute({ type: "history.undo" })).toBe(true)
+		expect(session.state.doc.eq(original)).toBe(true)
+		expect(await editor.execute({ type: "history.redo" })).toBe(true)
+		expect(marked()).toEqual([])
+		expect(await editor.execute({ type: "history.undo" })).toBe(true)
+		expect(session.state.doc.eq(original)).toBe(true)
+
+		// A raw mark, and a copy pasted at the end, formatted with what holds it.
+		session.dispatch(
+			session.state.tr.addMark(1, session.state.doc.content.size - 1, docxSchema.marks.italic.create({ value: true, cs: true }))
+		)
+		expect(marked()).toEqual([])
+
+		const at = session.state.doc.content.size - 1
+
+		session.dispatch(session.state.tr.insert(at, original.slice(6, 9).content))
+		expect(fieldsOf(session.state.doc)).toHaveLength(2)
+		all()
+		expect(editor.execute({ type: "format.underline" })).toBe(true)
+		expect(marked()).toEqual([])
+		expect(await refusal(opened)).toBeUndefined()
+	})
+
+	it("looks at no field on the first tracked keystrokes and Bold, nor follows formatting states over a tracked deletion of everything or its undo", async () => {
+		const opened = await open({
+			body: Array.from(
+				{ length: 200 },
+				() =>
+					'<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> of text</w:t></w:r></w:p>'
+			).join("")
+		})
+		const editor = opened.editor
+		const session = editor.session
+		const checked = vi.spyOn(fieldFormat, "holdsFormatting")
+
+		opened.context.identity.author = "Ann Lee"
+		opened.context.review.tracking = true
+
+		for (const char of "typed") session.dispatch(session.state.tr.insertText(char, 2))
+
+		const word = session.state.doc.content.size - 1 - "text".length
+
+		select(editor, word, word + "text".length)
+		expect(editor.execute({ type: "format.bold" })).toBe(true)
+		expect(checked.mock.calls.length).toBeLessThan(10)
+		select(editor, 1, session.state.doc.content.size - 1)
+
+		// (Following formatting states maps positions back through a transaction.)
+		const followed = vi.spyOn(Mapping.prototype, "invert")
+
+		session.dispatch(session.state.tr.deleteSelection())
+		expect(await editor.execute({ type: "history.undo" })).toBe(true)
+		expect(followed).not.toHaveBeenCalled()
+		followed.mockRestore()
+		checked.mockRestore()
+	})
+
+	it("formats the rest of a selection holding a w:fldSimple without a result", async () => {
+		const opened = await open({
+			body: '<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "/><w:r><w:t xml:space="preserve"> end</w:t></w:r></w:p>'
+		})
+		const session = opened.editor.session
+
+		for (const command of [{ type: "font.size", halfPoints: 28 }, { type: "format.bold" }] as const) {
+			select(opened.editor, 1, session.state.doc.content.size - 1)
+			expect(opened.editor.execute(command)).toBe(true)
+			expect(fieldsOf(session.state.doc)[0]?.node.marks).toEqual([])
+		}
+
+		expect(await refusal(opened)).toBeUndefined()
+	})
+
+	it("formats a w:fldSimple's result runs, until an update without MERGEFORMAT writes its result anew (§17.16.4.3)", async () => {
+		const simple = (instr: string, content: string): string =>
+			`<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr="${instr}">${content}</w:fldSimple><w:r><w:t xml:space="preserve"> end</w:t></w:r></w:p>`
+		const result = '<w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>9</w:t></w:r>'
+
+		for (const [instr, kept] of [
+			[" PAGE ", false],
+			[" PAGE \\* MERGEFORMAT ", true]
+		] as const) {
+			const opened = await open({ body: simple(instr, result) })
+			const editor = opened.editor
+			const session = editor.session
+
+			// The atom shows the result's formatting; bold reaches the result run.
+			expect(fieldsOf(session.state.doc)[0]?.node.marks.map(mark => mark.type.name)).toEqual(["size"])
+			select(editor, 1, session.state.doc.content.size - 1)
+			expect(editor.execute({ type: "format.bold" })).toBe(true)
+			expect(await read(await save(opened))).toContain(
+				'<w:r><w:rPr><w:b/><w:bCs/><w:sz w:val="28"/></w:rPr><w:t>9</w:t></w:r></w:fldSimple>'
+			)
+
+			// Updated: without MERGEFORMAT the new result has no properties, and the atom none either.
+			expect(await editor.execute({ type: "field.updateAll" })).toBe(true)
+			expect(fieldsOf(session.state.doc)[0]?.node.marks.length).toBe(kept ? 2 : 0)
+			expect(await read(await save(opened))).toContain(
+				kept
+					? '<w:r><w:rPr><w:b/><w:bCs/><w:sz w:val="28"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>'
+					: "<w:r><w:t>1</w:t></w:r></w:fldSimple>"
+			)
+		}
+
+		// A w:fldSimple without a result has no run to hold formatting: formatting given it goes.
+		const empty = await open({ body: simple(" PAGE ", "") })
+		const session = empty.editor.session
+		const at = fieldsOf(session.state.doc)[0]?.pos ?? 0
+
+		expect(session.dispatch(session.state.tr.addMark(at, at + 1, docxSchema.marks.bold.create({ value: true })))).toBe(true)
+		expect(fieldsOf(session.state.doc)[0]?.node.marks).toEqual([])
+		expect(await refusal(empty)).toBeUndefined()
 	})
 })
 
@@ -624,6 +1278,32 @@ describe("snapshot", () => {
 	})
 })
 
+describe("update field and tables of contents", () => {
+	it("updates page numbers only around a table of contents of the file kept as locked blocks, the table as it is", async () => {
+		const begin =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+		// A field inside it spanning two of its paragraphs: the table stays locked blocks.
+		const toc =
+			`<w:p>${begin}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> QUOTE "x" </w:instrText></w:r>` +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Stale entry</w:t></w:r></w:p>' +
+			'<w:p><w:r><w:t>Two</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+		const opened = await open({ body: toc + p("Heading", '<w:outlineLvl w:val="0"/>') + `<w:p>${complex(" PAGE ", "7")}</w:p>` })
+		const editor = opened.editor
+		const locked = editor.session.state.doc.child(0)
+
+		expect(locked.type).toBe(nodes.locked_block)
+
+		for (const command of [{ type: "field.updateAll" }, { type: "field.update" }, { type: "toc.update", pagesOnly: true }] as const) {
+			select(editor, command.type === "field.updateAll" ? 1 : 0)
+			expect(await editor.execute(command)).toBe(true)
+			expect(editor.session.state.doc.child(0)).toBe(locked)
+		}
+
+		expect(fields(editor.session.state.doc)).toEqual(["PAGE=1"])
+		expect(await read(await save(opened))).toContain("Stale entry")
+	})
+})
+
 describe("gate 2", () => {
 	it("refuses field characters without partners and duplicate bookmark names", async () => {
 		const cases: { readonly label: string; readonly node: () => ProseMirrorNode; readonly reason: string }[] = [
@@ -693,6 +1373,6 @@ describe("gate 2", () => {
 			document: parseXml(encoder.encode(`<w:body ${NAMESPACES}>${markup.replace(' w:dirty="true"', "")}</w:body>`)),
 			skeleton: true
 		})
-		expect(() => check.done?.(input)).toThrow("w:dirty")
+		await expect(Promise.resolve().then(() => check.done?.(input))).rejects.toThrow("w:dirty")
 	})
 })

@@ -1,15 +1,7 @@
 import type { Node } from "prosemirror-model"
 import type { Transaction } from "prosemirror-state"
-import {
-	AddMarkStep,
-	AddNodeMarkStep,
-	AttrStep,
-	RemoveMarkStep,
-	RemoveNodeMarkStep,
-	ReplaceAroundStep,
-	ReplaceStep,
-	StepMap
-} from "prosemirror-transform"
+import { AddNodeMarkStep, AttrStep, RemoveNodeMarkStep, ReplaceAroundStep, ReplaceStep, StepMap } from "prosemirror-transform"
+import { isMarkStep } from "../edit/marks"
 import { Relationships } from "../../opc/index"
 import { decodeUtf8, encodeUtf8, parseXml, XmlError, type XmlDocument } from "../../xml/index"
 import { parseNumbering, type Numbering } from "../numbering/index"
@@ -39,6 +31,7 @@ import type { StoryTemplate } from "../stories/clone"
 import { EditedSections, finalSectionEnd, inheritedSections, sameSection, sectionEndOf, type SectionEnd } from "../stories/sections"
 import { sniffImage } from "../objects/images"
 import type { NestedSplice } from "../write/nested"
+import { noteCopyTarget, registerNoteCopy } from "../write/parts/notes"
 
 // What the layout lays out while a document is edited, kept in step with the editing sessions: every
 // edited block is written as it will be saved (StoryWriter), parsed again into a small overlay part and laid
@@ -55,6 +48,13 @@ const MARKUP_COMPATIBILITY_URI = "http://schemas.openxmlformats.org/markup-compa
 // Roots of parts whose stories are elements of their own.
 const NOTE_ROOTS = new Set(["footnotes", "endnotes", "comments"])
 // The root and story elements of a new story's part.
+// The root of a part a copied story is laid out from.
+const COPIED_ROOTS: Readonly<Record<Exclude<NewStoryKind, "comment">, string>> = {
+	header: "hdr",
+	footer: "ftr",
+	footnote: "footnotes",
+	endnote: "endnotes"
+}
 const NEW_STORY_ELEMENTS: Readonly<Record<NewStoryKind, readonly [string, string | undefined]>> = {
 	footnote: ["w:footnotes", "w:footnote"],
 	endnote: ["w:endnotes", "w:endnote"],
@@ -132,6 +132,9 @@ export interface TopEntry {
 	// Where its blocks end sections: after how many of its refs, per block carrying a section break (none:
 	// undefined).
 	breaks: number[] | undefined
+	// Tables among its blocks whose cells' paragraphs alone the edit that built it changed: per laid ref, the
+	// items of those paragraphs in the table's part (see DirtyBlock.cells).
+	cells?: Map<number, number[]> | undefined
 }
 
 // The part of an edit the layout must redo: the changed top-level blocks as laid out now, the entries the
@@ -290,6 +293,9 @@ export class DocumentEdits implements LayoutEdits {
 	private readonly editedSections: EditedSections
 	// The document-wide switch for even pages' headers and footers as edited (LayoutEdits).
 	evenAndOddHeaders: boolean | undefined = undefined
+	// Where notes go as edited, document-wide (LayoutEdits).
+	footnotePosition: string | undefined = undefined
+	endnotePosition: string | undefined = undefined
 	private ownStore: PropsStore | undefined = undefined
 	// The w:numId each list a command started will get when saved (the overlays write them).
 	numIds: ReadonlyMap<number, number> = new Map()
@@ -390,8 +396,13 @@ export class DocumentEdits implements LayoutEdits {
 
 	// A header or footer on a part of its own made from `template`, as the save writes it: the part's story (with
 	// its text boxes, stories of the derived model too), its pictures and drawings in the derived model's lists.
+	// A copied note (stories/clone.ts cloneNote) is laid out from a part of its own too, the notes part's root
+	// around it; the save writes it into that notes part (write/parts/notes.ts).
 	private copiedStory(kind: NewStoryKind, partName: string, template: StoryTemplate): Story | undefined {
-		if ((kind !== "header" && kind !== "footer") || this.model.package.has(partName)) return undefined
+		const note = kind === "footnote" || kind === "endnote"
+		const into = note ? this.notesPart(kind, partName) : undefined
+
+		if (kind === "comment" || (note ? into === undefined : this.model.package.has(partName))) return undefined
 
 		let parsed: XmlDocument
 
@@ -405,7 +416,7 @@ export class DocumentEdits implements LayoutEdits {
 
 		const reader = partReader(parsed)
 
-		if (!reader.is(parsed.documentElement(), Ns.W, kind === "header" ? "hdr" : "ftr")) return undefined
+		if (!reader.is(parsed.documentElement(), Ns.W, COPIED_ROOTS[kind])) return undefined
 
 		const extension = this.extension
 		const first = extension.stories.length
@@ -429,7 +440,26 @@ export class DocumentEdits implements LayoutEdits {
 
 		for (let index = first; index < extension.stories.length; index++) this.added.add(index)
 
+		if (into !== undefined && story.id !== undefined && story.kind === kind) {
+			registerNoteCopy(part, into, template.from)
+
+			if (kind === "footnote") extension.footnotes.set(story.id, story)
+			else extension.endnotes.set(story.id, story)
+		}
+
 		return story
+	}
+
+	// The notes part new notes of `kind` go into (`partName`): the document's, or the one the save will make
+	// (made now where no new note made it yet).
+	notesPart(kind: "footnote" | "endnote", partName: string): StoryPart | undefined {
+		const existing = this.extension.parts.find(
+			part => part !== undefined && part.name === partName && !this.overlays.has(part.index) && noteCopyTarget(part) === undefined
+		)
+
+		if (existing !== undefined) return existing
+
+		return this.model.package.has(partName) ? undefined : this.templatePart(kind, partName)
 	}
 
 	// A part of `kind` the document does not have, as the save will make it before adding the story: the
@@ -1017,6 +1047,8 @@ export class StoryEdits {
 	private ordered = false
 	// Entries built by the edit being applied, not in `entries` yet.
 	private readonly building = new Set<TopEntry>()
+	// Page indexes over the story (see PageIndex.replace).
+	private readonly indexes = new Set<{ replace(pairs: readonly (readonly [TopEntry, TopEntry])[]): void }>()
 	// Tables of the document as opened (the builder records paragraphs only): written as their source.
 	private readonly openedTables = new WeakSet<Node>()
 	// Blocks the edit being applied wrote, parsed into one overlay part when it is done (place()).
@@ -1060,6 +1092,17 @@ export class StoryEdits {
 
 	get part(): StoryPart {
 		return this.story.part
+	}
+
+	// Its overlays are laid out with the body's counts (list numbers, note numbers): the body's, and the text
+	// boxes the body's part holds.
+	private get countsAsBody(): boolean {
+		return this.body || (this.story.story.kind === "textbox" && this.edits.bodyPart(this.part.index))
+	}
+
+	// Tells `index` of entries an edit replaced by others for the same blocks.
+	watch(index: { replace(pairs: readonly (readonly [TopEntry, TopEntry])[]): void }): void {
+		this.indexes.add(index)
 	}
 
 	// Reads every block again (the revision view changed what the layout makes of the source).
@@ -1192,6 +1235,8 @@ export class StoryEdits {
 				reuse.delete(node)
 				pending.delete(kept)
 				kept.index = k
+				// Unchanged by this edit: no cells of an earlier one.
+				kept.cells = undefined
 				fresh.push(kept)
 
 				if (removed[k - first] !== kept) structural = true
@@ -1286,6 +1331,8 @@ export class StoryEdits {
 			if (sections || moved.length > 0) this.publish()
 			else this.publish(first, removed, fresh)
 		} else {
+			// One transaction may have resized several of the blocks it changed.
+			for (let k = first + 1; k <= last; k++) this.starts[k] = (this.starts[k - 1] ?? 0) + after.child(k - 1).nodeSize
 			for (let k = last + 1; k < this.entries.length; k++) this.starts[k] = (this.starts[k] ?? 0) + delta
 		}
 
@@ -1302,7 +1349,17 @@ export class StoryEdits {
 			if (after !== undefined) around.push(after)
 		}
 
-		const dirty = this.dirtyOf(from, to)
+		// Only cells' paragraphs changed: layout restarts at the rows holding them and may stop after them, so
+		// pages showing the tables may stay: they show the new entries.
+		const cells =
+			!structural && !sections && moved.length === 0 && around.length === 0 && fresh.every(entry => entry.cells !== undefined)
+		const dirty = this.dirtyOf(from, to, cells)
+
+		if (cells) {
+			const pairs = removed.map((entry, k) => [entry, fresh[k] ?? entry] as const)
+
+			for (const index of this.indexes) index.replace(pairs)
+		}
 
 		for (const [, entry] of moved) dirtyBlocks(entry, dirty)
 
@@ -1357,13 +1414,14 @@ export class StoryEdits {
 		return rebuilt
 	}
 
-	private dirtyOf(from: number, to: number): DirtyBlock[] {
+	// `cells`: with the paragraphs changed in tables (see TopEntry.cells), when the change was only theirs.
+	private dirtyOf(from: number, to: number, cells = false): DirtyBlock[] {
 		const out: DirtyBlock[] = []
 
 		for (let k = Math.max(0, from); k <= to && k < this.entries.length; k++) {
 			const entry = this.entries[k]
 
-			if (entry !== undefined) dirtyBlocks(entry, out)
+			if (entry !== undefined) dirtyBlocks(entry, out, cells)
 		}
 
 		return out
@@ -1433,9 +1491,12 @@ export class StoryEdits {
 		const end = this.doc.attrs["end"]
 		const trailing = last === undefined || !endsLast(this.part, last.node) || (Array.isArray(end) && end.length > 0)
 		const changes: unknown = this.doc.attrs["sectionChanges"]
-		const evenAndOdd = (changes as { evenAndOddHeaders?: unknown } | null)?.evenAndOddHeaders
+		const settings = changes as { evenAndOddHeaders?: unknown; footnotePosition?: unknown; endnotePosition?: unknown } | null
+		const evenAndOdd = settings?.evenAndOddHeaders
 
 		this.edits.evenAndOddHeaders = typeof evenAndOdd === "boolean" ? evenAndOdd : undefined
+		this.edits.footnotePosition = typeof settings?.footnotePosition === "string" ? settings.footnotePosition : undefined
+		this.edits.endnotePosition = typeof settings?.endnotePosition === "string" ? settings.endnotePosition : undefined
 
 		const changed = this.edits.resection(ends, finalSectionEnd(this.doc), trailing)
 
@@ -1753,12 +1814,48 @@ export class StoryEdits {
 			for (const record of kept) entry.records.push(record)
 		}
 
+		// Paragraphs edited before move by what the changed ones before them grew (positions as they were).
+		const before = table === undefined ? (old.offsets[old.laid.indexOf(base)] ?? -1) : offset
+		const shifts: number[] = []
+		let grown = 0
+
+		for (const paragraph of changed) {
+			const size = atPath(previous, paragraph.path)?.nodeSize ?? 0
+
+			shifts.push(paragraph.offset - offset - grown, paragraph.node.nodeSize - size)
+			grown += paragraph.node.nodeSize - size
+		}
+
 		for (const record of entry.records) {
-			if (record !== table && !changed.some(paragraph => paragraph.node === record.node))
+			if (record === table || changed.some(paragraph => paragraph.node === record.node)) continue
+
+			if (before < 0) {
 				record.offset = offsetOf(node, offset, record.node) ?? record.offset
+
+				continue
+			}
+
+			const at = record.offset - before
+
+			// Outside this table (another block of the entry).
+			if (at <= 0 || at >= previous.nodeSize) continue
+
+			let shift = 0
+
+			for (let k = 0; k < shifts.length && (shifts[k] ?? 0) < at; k += 2) shift += shifts[k + 1] ?? 0
+
+			record.offset = offset + at + shift
 		}
 
 		const laid = table === undefined ? base : ref(table.part.index, table.item)
+
+		if (changed.length > 0)
+			(entry.cells ??= new Map()).set(
+				laid,
+				changed.map(paragraph =>
+					refItem(paragraph.base >= 0 ? paragraph.base : ref(part.index, paragraph.node.attrs["src"] as number))
+				)
+			)
 
 		entry.base.push(base >= 0 ? base : laid)
 		entry.laid.push(laid)
@@ -1821,7 +1918,7 @@ export class StoryEdits {
 			at += block.bytes.length
 		}
 
-		const added = this.edits.addPart(this.part, this.story.story.item, bytes, this.body)
+		const added = this.edits.addPart(this.part, this.story.story.item, bytes, this.countsAsBody)
 		const left: QueuedBlock[] = []
 
 		if (added === undefined) {
@@ -1851,7 +1948,7 @@ export class StoryEdits {
 		const unplaced = new Map<TopEntry, Set<number>>()
 
 		for (const block of left) {
-			const one = this.edits.addPart(this.part, this.story.story.item, block.bytes, this.body)
+			const one = this.edits.addPart(this.part, this.story.story.item, block.bytes, this.countsAsBody)
 			const item = one?.items[0]
 
 			if (one !== undefined && item !== undefined) {
@@ -2214,7 +2311,7 @@ const NO_ENTRIES: readonly TopEntry[] = []
 
 // The blocks `entry` lays out, dirty, each in its section: one after a section break inside a content
 // control is in the next.
-function dirtyBlocks(entry: TopEntry, out: DirtyBlock[]): void {
+function dirtyBlocks(entry: TopEntry, out: DirtyBlock[], cells = false): void {
 	const breaks = entry.breaks ?? NO_BREAKS
 	let section = entry.section
 	let next = 0
@@ -2225,7 +2322,9 @@ function dirtyBlocks(entry: TopEntry, out: DirtyBlock[]): void {
 			next++
 		}
 
-		out.push({ section, ref: laid })
+		const items = cells ? entry.cells?.get(laid) : undefined
+
+		out.push(items === undefined ? { section, ref: laid } : { section, ref: laid, cells: items })
 	})
 }
 
@@ -2476,7 +2575,7 @@ function changedSpan(tr: Transaction): { from: number; to: number; whole: boolea
 		} else if (step instanceof ReplaceAroundStep) {
 			a = step.from
 			b = step.getMap().map(step.to, 1)
-		} else if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) {
+		} else if (isMarkStep(step)) {
 			a = step.from
 			b = step.to
 		} else if (step instanceof SetAttrsStep) {

@@ -5,13 +5,14 @@ import { AddMarkStep, AttrStep, Mapping, RemoveMarkStep, ReplaceAroundStep, Repl
 import { decodeUtf8, encodeUtf8, parseXml } from "../../xml/index"
 import type { DocxEditContext, DocxIdentity } from "../edit/context"
 import type { RunBase } from "../edit/formatting"
-import { invariantViolation, isCommand, isInternal, markCommand, markInternal } from "../edit/invariants/core"
+import { invariantViolation, isCommand, isInternal, markCommand, markInternal, markRemarking } from "../edit/invariants/core"
 import { FORMATTING_MARKS, NO_SOURCE, docxSchema, inlineLevel, type IndentAttrs, type SpacingAttrs } from "../edit/schema"
 import { SetAttrsStep } from "../edit/attrs"
-import { MarkChanges, SetMarkSetsStep, SetMarksStep } from "../edit/marks"
+import { MarkChanges, SetMarkSetsStep, SetMarksStep, isMarkStep, type PieceStep } from "../edit/marks"
 import { rowOverrides, type RowOverrides, type TrackStamp } from "../edit/tables/map"
 import type { DocxEditorSession } from "../edit/session"
 import { Revision, RevisionFlag, type StoryPart } from "../model/index"
+import { wantReviewIndex } from "./index"
 import type { ParagraphBordersProps } from "../props/index"
 import { Names, Out } from "../write/markup"
 import { sameFormatting, writeRunProperties } from "../write/runs"
@@ -696,6 +697,9 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 
 	sessions.set(tr, session)
 
+	// What tracking records is counted from now on, whether a snapshot asked or not (commands record too).
+	if (context.review.tracking && tr.docChanged) wantReviewIndex(session)
+
 	if (!context.review.tracking && tr.docChanged && !isCommand(tr) && !isInternal(tr) && tr.before === session.state.doc) {
 		const closed = closedPaste(tr, session.state)
 
@@ -726,12 +730,7 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 
 	// Formatting and paragraph properties alone (a toolbar command over a selection): applied as they are, only
 	// recorded (a selection over a long document makes thousands of steps; nothing is copied for them).
-	if (
-		tr.steps.every(
-			step =>
-				step instanceof AddMarkStep || step instanceof RemoveMarkStep || step instanceof AttrStep || step instanceof SetAttrsStep
-		)
-	) {
+	if (tr.steps.every(step => isMarkStep(step) || step instanceof AttrStep || step instanceof SetAttrsStep)) {
 		const plan: TrackPlan = {
 			stamp,
 			session,
@@ -749,7 +748,7 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 		tr.steps.forEach((step, index) => {
 			const doc = tr.docs[index] as Node
 
-			if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) recordMarkStep(doc, step, plan, index)
+			if (isMarkStep(step)) recordMarkStep(doc, step, plan, index)
 			else if (step instanceof AttrStep && (PARAGRAPH_ATTRS as readonly string[]).includes(step.attr)) {
 				const node = doc.nodeAt(step.pos)
 
@@ -941,7 +940,7 @@ function rewriteStep(step: Step, out: Transaction, plan: TrackPlan, alone: Edito
 		return backward ? after.map(from, -1) : after.map(to, 1)
 	}
 
-	if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) {
+	if (isMarkStep(step)) {
 		recordMarkStep(out.doc, step, plan, out.steps.length)
 
 		return out.maybeStep(step).failed === null ? undefined : false
@@ -1194,7 +1193,7 @@ interface FormatRange {
 
 // A formatting mark step about to apply: what it changes is recorded (content it leaves as it is, inside a
 // SetMarksStep's range or under a mark it already has, is no change).
-function recordMarkStep(doc: Node, step: AddMarkStep | RemoveMarkStep, plan: TrackPlan, at: number): void {
+function recordMarkStep(doc: Node, step: AddMarkStep | RemoveMarkStep | PieceStep, plan: TrackPlan, at: number): void {
 	const mark = step.mark
 	const type = mark.type
 
@@ -1758,7 +1757,13 @@ function markBulk(tr: Transaction, marking: Marking): void {
 		children.push(rebuild(child, offset))
 	})
 
-	if (from >= 0) tr.replaceWith(from, to, children)
+	if (from < 0) return
+
+	const first = tr.steps.length
+
+	tr.replaceWith(from, to, children)
+
+	if (ops.every(op => op.kind !== "format")) for (let k = first; k < tr.steps.length; k++) markRemarking(tr.steps[k] as Step)
 }
 
 // Applies `marking`; true when it rebuilt blocks in one step (no invariant may see that step as a deletion).

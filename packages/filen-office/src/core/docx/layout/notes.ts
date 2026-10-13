@@ -5,11 +5,12 @@ import type { NotePositionProps } from "../props/types"
 import type { NoteNumbers, PageValues, StoryContext } from "./content"
 import { numberText } from "./fields"
 import type { Engine, FootnoteSink, PageFrame } from "./flow"
-import { PageGraphic, Layer, PageOutput, Region } from "./output"
+import { PageGraphic, Layer, PageOutput, Region, SourceFlag } from "./output"
 import { EPSILON, points } from "./units"
 
-// Note numbering (w:footnotePr / w:endnotePr in settings, overridden per section) and the footnote area at
-// the bottom of each page.
+// Note numbering (w:footnotePr / w:endnotePr in settings, overridden per section; where notes go is the
+// document's alone: a section's w:pos "shall be ignored", ECMA-376 17.11.21 and 17.11.22) and the footnote area
+// at the bottom of each page (or beneath its text).
 
 export interface NoteSettings {
 	readonly format: string
@@ -52,15 +53,26 @@ function readNotePr(model: DocxModel, node: number, endnote: boolean): NoteSetti
 	return out
 }
 
-function override(base: NoteSettings, section: NotePositionProps | undefined): NoteSettings {
-	if (section === undefined) return base
+// Where the document's notes of a kind go, as its settings say.
+export function documentNotePosition(model: DocxModel, endnote: boolean): string {
+	return readNotePr(model, endnote ? model.settings.endnotePr : model.settings.footnotePr, endnote).position
+}
+
+function override(base: NoteSettings, section: NotePositionProps | undefined, position: string | undefined): NoteSettings {
+	if (section === undefined && (position === undefined || position === base.position)) return base
 
 	return {
-		format: section.numFormat ?? base.format,
-		start: section.numStart ?? base.start,
-		restart: section.numRestart ?? base.restart,
-		position: section.position ?? base.position
+		format: section?.numFormat ?? base.format,
+		start: section?.numStart ?? base.start,
+		restart: section?.numRestart ?? base.restart,
+		position: position ?? base.position
 	}
+}
+
+// Where notes go as edited, document-wide (undefined: the settings').
+export interface NotePositions {
+	readonly footnotePosition?: string | undefined
+	readonly endnotePosition?: string | undefined
 }
 
 export interface NoteNumberingSnapshot {
@@ -94,9 +106,14 @@ export class NoteNumbering implements NoteNumbers {
 		this.endnoteNext = this.endnotes.start
 	}
 
-	startSection(footnotes: NotePositionProps | undefined, endnotes: NotePositionProps | undefined, first: boolean): void {
-		this.footnotes = override(this.documentFootnotes, footnotes)
-		this.endnotes = override(this.documentEndnotes, endnotes)
+	startSection(
+		footnotes: NotePositionProps | undefined,
+		endnotes: NotePositionProps | undefined,
+		first: boolean,
+		positions?: NotePositions
+	): void {
+		this.footnotes = override(this.documentFootnotes, footnotes, positions?.footnotePosition)
+		this.endnotes = override(this.documentEndnotes, endnotes, positions?.endnotePosition)
 
 		if (first || this.footnotes.restart === "eachSect") this.footnoteNext = this.footnotes.start
 		if (first || this.endnotes.restart === "eachSect") this.endnoteNext = this.endnotes.start
@@ -145,16 +162,25 @@ export class NoteNumbering implements NoteNumbers {
 	}
 
 	reference(endnote: boolean, part: number, item: number, story: number): string {
-		// Per-page numbering is decided where the paragraph is laid out: after the notes already on its page.
+		const key = (part * 0x4000000 + item) * 2 + (endnote ? 1 : 0)
+
+		// Per-page numbering is decided where the paragraph is first built: after the notes already on its page.
+		// Kept for the run like other numbers, so a paragraph built again (layout restarted at a page it waited
+		// built for) shows what it showed.
 		if (!endnote && this.footnotes.restart === "eachPage") {
-			const text = numberText(this.footnotes.start + this.pageNotes() + this.paragraphRefs++, this.footnotes.format)
+			const index = this.paragraphRefs++
+			let text = this.assigned.get(key)
+
+			if (text === undefined) {
+				text = numberText(this.footnotes.start + this.pageNotes() + index, this.footnotes.format)
+				this.assigned.set(key, text)
+			}
 
 			this.marks.set(story, text)
 
 			return text
 		}
 
-		const key = (part * 0x4000000 + item) * 2 + (endnote ? 1 : 0)
 		let text = this.assigned.get(key)
 
 		if (text === undefined) {
@@ -174,7 +200,18 @@ export class NoteNumbering implements NoteNumbers {
 interface LaidNote {
 	readonly output: PageOutput
 	readonly height: number
+	// The page values and frame it was laid out with (a note continued on later pages keeps its first page's).
+	readonly values: PageValues
+	readonly frame: PageFrame | undefined
+	// It shows the page number (a PAGE field).
+	readonly numbered: boolean
+	// The reference mark it shows.
+	readonly mark: string
 }
+
+const NO_STORIES: readonly number[] = []
+// mark() packs the references and the notes so far.
+const MARK_SPAN = 0x10000
 
 // A footnote area's state (FootnoteArea.save).
 export interface FootnoteState {
@@ -184,6 +221,7 @@ export interface FootnoteState {
 	readonly width: number
 	readonly reserved: number
 	readonly splitAt: number
+	readonly referenced: number
 }
 
 // A note to place on the page: its laid-out content from `from` (px into it; > 0 when continued).
@@ -191,6 +229,11 @@ export interface PlacedNote {
 	readonly story: number
 	readonly from: number
 	readonly height: number
+	// A note continued from an earlier page: the page values and frame it was laid out with there.
+	readonly values?: PageValues | undefined
+	readonly frame?: PageFrame | undefined
+	// Left for the next page: the reference mark it shows (numbered where its reference was built).
+	readonly mark?: string | undefined
 }
 
 // The footnote area of the page being laid out.
@@ -202,10 +245,15 @@ export class FootnoteArea implements FootnoteSink {
 	private readonly notes: PlacedNote[] = []
 	private readonly cache = new Map<number, LaidNote>()
 	private carry: PlacedNote[] = []
+	// The notes referenced on the page's lines so far (each where its reference is, wherever the note goes).
+	private readonly referencedStories: number[] = []
 	private separatorStory = -1
 	private continuationStory = -1
 	private width = 0
 	private left = 0
+	// The page's body area: no note line taller than it fits any page.
+	private areaTop = 0
+	private areaBottom = Infinity
 	private values: PageValues = { page: 1, pageFormat: undefined, numPages: 1, sectionPages: 1 }
 	private frame: PageFrame | undefined = undefined
 	private separatorHeight = 0
@@ -247,6 +295,11 @@ export class FootnoteArea implements FootnoteSink {
 		this.carry = notes.slice()
 	}
 
+	// The notes referenced on the page, once each.
+	get referenced(): readonly number[] {
+		return this.referencedStories.length === 0 ? NO_STORIES : [...new Set(this.referencedStories)]
+	}
+
 	// Notes that start on this page.
 	get count(): number {
 		let count = 0
@@ -263,12 +316,22 @@ export class FootnoteArea implements FootnoteSink {
 	}
 
 	// A new page: the area spans [left, left + width); notes continued from the last page come first.
-	startPage(left: number, width: number, values: PageValues, frame: PageFrame): void {
+	startPage(left: number, width: number, values: PageValues, frame: PageFrame, top = 0, bottom = Infinity): void {
+		this.areaTop = top
+		this.areaBottom = bottom
+
 		if (Math.abs(width - this.width) > EPSILON) this.cache.clear()
+
+		// A note laid out on the page before and left for this one (whole) shows this page's number; one continued
+		// here (part of it shown there) keeps the layout it began with.
+		if (values.page !== this.values.page)
+			for (const [story, laid] of this.cache)
+				if (laid.numbered && !this.carry.some(note => note.story === story && note.from > 0)) this.cache.delete(story)
 
 		this.width = width
 		this.values = values
 		this.frame = frame
+		this.referencedStories.length = 0
 
 		if (this.separatorStory < 0 && this.continuationStory < 0) this.findSeparators()
 
@@ -310,7 +373,8 @@ export class FootnoteArea implements FootnoteSink {
 			left: this.left,
 			width: this.width,
 			reserved: this.reserved,
-			splitAt: this.splitAt
+			splitAt: this.splitAt,
+			referenced: this.referencedStories.length
 		}
 	}
 
@@ -322,18 +386,24 @@ export class FootnoteArea implements FootnoteSink {
 		this.left = state.left
 		this.reserved = state.reserved
 		this.splitAt = state.splitAt
+		this.referencedStories.length = Math.min(this.referencedStories.length, state.referenced)
 	}
 
 	mark(): number {
-		return this.notes.length
+		return this.referencedStories.length * MARK_SPAN + this.notes.length
 	}
 
 	rollback(mark: number): void {
-		if (mark >= this.notes.length) return
+		const references = Math.floor(mark / MARK_SPAN)
+		const notes = mark - references * MARK_SPAN
 
-		this.notes.length = mark
+		if (references < this.referencedStories.length) this.referencedStories.length = references
 
-		if (this.splitAt >= mark) this.splitAt = -1
+		if (notes >= this.notes.length) return
+
+		this.notes.length = notes
+
+		if (this.splitAt >= notes) this.splitAt = -1
 
 		this.reserved = this.notes.length === 0 ? 0 : this.separator() + this.notes.reduce((sum, note) => sum + note.height, 0)
 	}
@@ -343,6 +413,8 @@ export class FootnoteArea implements FootnoteSink {
 	}
 
 	add(story: number, lineBottom: number, limit: number, force: boolean): boolean {
+		this.referencedStories.push(story)
+
 		if (this.notes.some(note => note.story === story && note.from === 0)) return true
 
 		if (this.splitAt >= 0) return force
@@ -371,22 +443,26 @@ export class FootnoteArea implements FootnoteSink {
 		return true
 	}
 
-	private laid(story: number): LaidNote {
+	// `from`: a note continued from an earlier page, laid out as it was there (layout restarted since).
+	private laid(story: number, from?: PlacedNote): LaidNote {
 		let laid = this.cache.get(story)
 
 		if (laid === undefined) {
+			const values = from?.values ?? this.values
+			const frame = from?.frame ?? this.frame
 			const engine = this.engine
 			const root = engine.model.stories[story]
 			const part = root === undefined ? undefined : engine.model.parts[root.part]
 			const output = new PageOutput()
+			const mark = engine.notes.marks.get(story) ?? ""
 			let height = 0
 
-			if (root !== undefined && part !== undefined && this.frame !== undefined) {
+			if (root !== undefined && part !== undefined && frame !== undefined) {
 				const context: StoryContext = {
 					part,
 					story,
 					counters: undefined,
-					noteMark: engine.notes.marks.get(story) ?? "",
+					noteMark: mark,
 					breaksAsLines: true,
 					recount: false
 				}
@@ -398,8 +474,8 @@ export class FootnoteArea implements FootnoteSink {
 					context,
 					Region.FOOTNOTE,
 					output,
-					this.values,
-					this.frame,
+					values,
+					frame,
 					0,
 					0,
 					this.width,
@@ -407,7 +483,12 @@ export class FootnoteArea implements FootnoteSink {
 				)
 			}
 
-			laid = { output, height }
+			let numbered = false
+
+			for (let source = 0; source < output.sourceCount && !numbered; source++)
+				numbered = (output.sourceFlags(source) & SourceFlag.PAGE_FIELDS) !== 0
+
+			laid = { output, height, values, frame, numbered, mark }
 			this.cache.set(story, laid)
 
 			// Laid out with stand-ins for fonts still loading: the page is laid out again once they loaded (they
@@ -423,7 +504,11 @@ export class FootnoteArea implements FootnoteSink {
 	close(page: PageOutput, bottom: number, contentBottom: number): number {
 		if (this.notes.length === 0) return bottom
 
-		let y = Math.max(bottom - this.reserved, Math.min(contentBottom, bottom))
+		// Beneath the text, the notes follow its last line (ST_FtnPos beneathText); else they end at the bottom.
+		let y =
+			this.engine.notes.footnotes.position === "beneathText"
+				? Math.min(contentBottom, bottom)
+				: Math.max(bottom - this.reserved, Math.min(contentBottom, bottom))
 		const top = y
 		const continued = (this.notes[0]?.from ?? 0) > 0
 		const separator = continued ? this.continuationStory : this.separatorStory
@@ -443,7 +528,7 @@ export class FootnoteArea implements FootnoteSink {
 		y += continued ? this.continuationHeight : this.separatorHeight
 
 		for (const note of this.notes) {
-			const laid = this.laid(note.story)
+			const laid = this.laid(note.story, note.from > 0 ? note : undefined)
 			const room = bottom - y
 			const rest = laid.height - note.from
 
@@ -456,15 +541,51 @@ export class FootnoteArea implements FootnoteSink {
 			}
 
 			// Split at a line boundary: lines starting above the area's bottom stay.
-			const cut = this.lineCut(laid.output, note.from, note.from + room)
+			const fits = this.lineCut(laid.output, note.from, note.from + room)
+			const cut =
+				fits <= note.from && note === this.notes[0] ? this.tallLineEnd(laid.output, note.from, laid.height, continued) : fits
 
 			if (cut > note.from) page.append(laid.output, this.left, y - note.from, note.from, cut)
 
-			this.carry.push({ story: note.story, from: cut, height: laid.height - cut })
 			y = bottom
+
+			if (cut >= laid.height - EPSILON) {
+				this.cache.delete(note.story)
+
+				continue
+			}
+
+			this.carry.push({
+				story: note.story,
+				from: cut,
+				height: laid.height - cut,
+				values: laid.values,
+				frame: laid.frame,
+				mark: laid.mark
+			})
 		}
 
 		return top
+	}
+
+	// A note's line from `from` on too tall for any page (with the separator above it, taller than the body
+	// area) is shown anyway, overflowing: no page would take it otherwise. Where it ends (in the note's own
+	// coordinates), or `from` when the line fits a page.
+	private tallLineEnd(output: PageOutput, from: number, height: number, continued: boolean): number {
+		const text = output.text
+
+		for (let line = 0; line < text.lineCount; line++) {
+			const top = text.lineTop(line)
+
+			if (top < from - EPSILON) continue
+
+			const separator = continued ? this.continuationHeight : this.separatorHeight
+			const tall = separator + text.lineHeight(line) > this.areaBottom - this.areaTop + EPSILON
+
+			return tall ? Math.max(from + EPSILON, Math.min(height, top + text.lineHeight(line))) : from
+		}
+
+		return from
 	}
 
 	// The top of the first line that does not end by `limit` (in the note's own coordinates).

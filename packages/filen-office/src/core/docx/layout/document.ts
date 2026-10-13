@@ -29,6 +29,7 @@ import { FootnoteArea, NoteNumbering, type FootnoteState, type NoteNumberingSnap
 import { ObjectTable, type ObjectSizer } from "./objects"
 import { PageGraphic, Layer, OutputMark, PageDisplayList, PageOutput, Region, SOURCE_INTS, SourceFlag, SourceInt } from "./output"
 import { DecorationTable, RunStyles, borderWidth, type DecorationValue, type FontSource, type RunStyleInfo } from "./styles"
+import { rowIndex, sameNumbers, tableRows, type TableSnapshot } from "./table"
 import { EPSILON, twips } from "./units"
 
 export interface LayoutOptions {
@@ -62,6 +63,9 @@ export interface LayoutOptions {
 export interface DirtyBlock {
 	readonly section: number
 	readonly ref: number
+	// A table whose cells' paragraphs alone changed: those paragraphs (items of the table's part). Laid out
+	// once the rows holding them are, unless one is a header row (repeated on every page).
+	readonly cells?: readonly number[]
 }
 
 export type AdvanceResult = "done" | "more" | "fonts"
@@ -248,13 +252,14 @@ export class DocumentLayout {
 	// layout and keeps the rest (renumbered when the page count changed). Call advance() until "done".
 	// Returns the first page laid out again.
 	// Without `dirty` layout runs to the end. A run under way (the first layout, or the background part of an
-	// earlier edit's) is taken over: layout carries on from the earlier restart page.
-	beginEdit(page: number, dirty: readonly DirtyBlock[] | undefined): number {
+	// earlier edit's) is taken over: layout carries on from the earlier restart page. `through`: pages up to it
+	// are laid out again whatever they start with (they show a note the edit changed).
+	beginEdit(page: number, dirty: readonly DirtyBlock[] | undefined, through = -1): number {
 		if (this.driver === undefined) throw new Error("No layout to edit")
 
 		this.cancelled = false
 
-		return this.driver.begin(page, dirty)
+		return this.driver.begin(page, dirty, through)
 	}
 
 	// Carries on laying out in slices (as the first layout does) until done; resolves then.
@@ -414,11 +419,64 @@ interface PageRecord {
 	readonly info: ConstructorParameters<typeof PageDisplayList>[1]
 }
 
-function countRenderedBreaks(part: StoryPart, start: number, end: number): number {
+// Word's recorded page breaks (lastRenderedPageBreak) in items [start, end) of `part`, blocks laid out from an
+// overlay counted there (as the saved document has them). A fresh layout's page count estimates.
+function countRenderedBreaks(
+	part: StoryPart,
+	start: number,
+	end: number,
+	edits?: LayoutEdits,
+	parts?: readonly (StoryPart | undefined)[]
+): number {
 	const kinds = part.kinds
+	const substitutes = edits?.substitutes.size === 0 ? undefined : edits?.substitutes
 	let count = 0
 
-	for (let item = start; item < end; item++) if (kinds[item] === Item.LastRenderedPageBreak) count++
+	for (let item = start; item < end;) {
+		const kind = kinds[item]
+		const laid =
+			substitutes !== undefined && (kind === Item.Paragraph || kind === Item.Table)
+				? substitutes.get(part.index * REF_SPAN + item)
+				: undefined
+		const overlay = laid === undefined ? undefined : parts?.[refPart(laid)]
+
+		if (laid !== undefined && overlay !== undefined && overlay !== part) {
+			const at = refItem(laid)
+
+			count += countRenderedBreaks(overlay, at, overlay.end(at), edits, parts)
+			item = part.end(item)
+
+			continue
+		}
+
+		if (kind === Item.LastRenderedPageBreak) count++
+
+		item++
+	}
+
+	return count
+}
+
+// The breaks countRenderedBreaks counts in section `index` of the body as edited.
+function sectionBreaks(model: DocxModel, body: StoryPart, index: number, edits: LayoutEdits | undefined): number {
+	const blocks = edits?.body
+
+	if (blocks === undefined) {
+		const section = model.sections[index]
+
+		return section === undefined ? 0 : countRenderedBreaks(body, section.start, section.end, edits, model.parts)
+	}
+
+	const end = blocks.sectionEnds[index] ?? 0
+	let count = 0
+
+	for (let k = index === 0 ? 0 : (blocks.sectionEnds[index - 1] ?? 0); k < end; k++) {
+		const value = blocks.refs[k] ?? 0
+		const part = model.parts[refPart(value)]
+		const item = refItem(value)
+
+		if (part !== undefined) count += countRenderedBreaks(part, item, part.end(item), edits, model.parts)
+	}
 
 	return count
 }
@@ -510,16 +568,19 @@ class Paginator {
 				? undefined
 				: { part: body, story: story.index, counters: this.counters(), noteMark: "", breaksAsLines: false, recount: false }
 
-		let total = 0
+		const counts = this.renderedBreakCounts()
 
-		for (const section of this.model.sections) {
-			const count = body === undefined ? 0 : countRenderedBreaks(body, section.start, section.end)
+		for (const count of counts) this.sectionEstimates.push(count + 1)
 
-			this.sectionEstimates.push(count + 1)
-			total += count
-		}
+		this.estimate = estimate ?? Math.max(1, counts.reduce((sum, count) => sum + count, 0) + 1)
+	}
 
-		this.estimate = estimate ?? Math.max(1, total + 1)
+	// Word's recorded page breaks in each section of the body as edited.
+	private renderedBreakCounts(): number[] {
+		const body = this.body
+		const edits = this.engine.edits
+
+		return this.model.sections.map((_, index) => (body === undefined ? 0 : sectionBreaks(this.model, body, index, edits)))
 	}
 
 	// Fields shown as their codes in what is built from now on (see ContentBuilder.setFieldCodes).
@@ -670,41 +731,57 @@ class Paginator {
 	private takeSnapshot(): void {
 		const index = this.progress
 		const flow = this.flows[this.flowIndex]
-		const state = this.flowIndex === 0 && flow?.region === Region.BODY ? flow.snapshot() : undefined
+		const state = this.flowIndex === 0 && flow?.region === Region.BODY ? flow.snapshot(true) : undefined
 
-		this.put(
-			this.snapshots,
-			this.inPlace?.snapshots,
-			index,
-			state === undefined
-				? undefined
-				: {
-						sectionIndex: this.sectionIndex,
-						flow: state,
-						pageNumber: this.pageNumber,
-						restart: this.restart,
-						sectionFirstPage: this.sectionFirstPage,
-						nextStart: this.nextStart,
-						bodyLines: this.bodyLines,
-						lineSection: this.lineSection,
-						endnotesDone: this.endnotesDone,
-						globalLine: this.globalLine,
-						sectionPageCounts: this.sectionPageCounts.slice(),
-						counters: this.bodyStory?.counters?.snapshot(),
-						notes: this.engine.notes.snapshot(),
-						carried: this.footnotes.carriedNotes,
-						endnotes: this.engine.endnotes.slice(),
-						renderedBreaks: this.breakCount,
-						markers: flow === undefined ? [] : this.markersAhead(flow),
-						assigned: flow === undefined ? [] : this.engine.notes.assignedWhere((part, item) => this.ahead(flow, part, item))
-					}
-		)
+		if (state === undefined || flow === undefined) {
+			this.put(this.snapshots, this.inPlace?.snapshots, index, undefined)
+
+			return
+		}
+
+		// What did not change since the page before is shared with its snapshot (most pages of a long table).
+		const previous = index > 0 ? this.snapshots[index - 1] : undefined
+		const counts = this.sectionPageCounts
+		const counters = this.bodyStory?.counters?.snapshot()
+		const endnotes = this.engine.endnotes
+		const markers = this.markersAhead(flow)
+		const assigned = this.engine.notes.assignedWhere((part, item) => this.ahead(flow, part, item, true))
+		const notes = this.engine.notes.snapshot()
+
+		this.put(this.snapshots, this.inPlace?.snapshots, index, {
+			sectionIndex: this.sectionIndex,
+			flow: state,
+			pageNumber: this.pageNumber,
+			restart: this.restart,
+			sectionFirstPage: this.sectionFirstPage,
+			nextStart: this.nextStart,
+			bodyLines: this.bodyLines,
+			lineSection: this.lineSection,
+			endnotesDone: this.endnotesDone,
+			globalLine: this.globalLine,
+			sectionPageCounts:
+				previous !== undefined && sameList(previous.sectionPageCounts, counts) ? previous.sectionPageCounts : counts.slice(),
+			counters: previous !== undefined && sameCounters(previous.counters, counters) ? previous.counters : counters,
+			notes: previous !== undefined && sameNotes(previous.notes, notes) ? previous.notes : notes,
+			carried: this.footnotes.carried ? this.footnotes.carriedNotes : NO_NOTES,
+			endnotes: previous !== undefined && sameList(previous.endnotes, endnotes) ? previous.endnotes : endnotes.slice(),
+			renderedBreaks: this.breakCount,
+			markers: markers.length === 0 ? NO_ENTRIES : markers,
+			assigned: assigned.length === 0 ? NO_ENTRIES : assigned
+		})
 	}
 
-	// The nearest page at or before `page` layout can restart at.
-	restartPage(page: number): number {
-		for (let index = Math.min(page, this.snapshots.length - 1); index > 0; index--)
-			if (this.snapshots[index] !== undefined) return index
+	// The nearest page at or before `page` layout can restart at; inside a table only with `tables`, for an edit
+	// that says what changed (the body's blocks, or none: page values to show anew). Other restarts (a note or
+	// header edited, page counts, fonts) still restart before the table.
+	restartPage(page: number, tables = false): number {
+		for (let index = Math.min(page, this.snapshots.length - 1); index > 0; index--) {
+			const snapshot = this.snapshots[index]
+
+			const table = snapshot?.flow.table
+
+			if (snapshot !== undefined && (table === undefined || (tables && table.cells === undefined))) return index
+		}
 
 		return 0
 	}
@@ -713,14 +790,18 @@ class Paginator {
 	// pages are kept aside: layout stops where it meets them again once every dirty block is laid out.
 	// `own`: the pages this run laid out from `page` on may be met again too (not when they are laid out again
 	// for being wrong).
-	restartAt(page: number, dirty?: readonly DirtyBlock[], own = true): void {
+	// `least`: the page asked for (layout restarts at the nearest page with a snapshot before it): the run lays it
+	// out again before it may meet the earlier layout (a page refreshed for its page values is not kept as it was).
+	// `through`: the earlier layout's pages up to it are not met again (see Resync.through).
+	restartAt(page: number, dirty?: readonly DirtyBlock[], own = true, least = page, through = -1): void {
 		const layout = this.layout
 
 		this.detach()
 
 		const snapshot = page > 0 ? this.snapshots[page] : undefined
 
-		this.resyncs = dirty === undefined ? undefined : this.previousLayout(page, own, dirty, snapshot?.renderedBreaks ?? 0)
+		this.resyncs =
+			dirty === undefined ? undefined : this.previousLayout(page, own, dirty, snapshot?.renderedBreaks ?? 0, least, through)
 		this.missedFonts = this.missedFonts >= page ? -1 : this.missedFonts
 		this.pageMissedFonts = false
 		this.resyncedAt = -1
@@ -783,6 +864,9 @@ class Paginator {
 		this.engine.notes.restore(snapshot.notes)
 		this.engine.notes.forgetAssigned(this.isBodyPart, snapshot.assigned)
 		this.footnotes.carriedNotes = snapshot.carried
+
+		for (const note of snapshot.carried) if (note.mark !== undefined) this.engine.notes.marks.set(note.story, note.mark)
+
 		this.engine.setEndnotes(snapshot.endnotes)
 		this.forgetMarkers()
 
@@ -829,7 +913,8 @@ class Paginator {
 
 	// Whether item `item` of `part` lies in a block of `flow` from the one being laid out to the last one built
 	// ahead of it (keep chains, frames, joined paragraphs).
-	private ahead(flow: BlockFlow, part: number, item: number): boolean {
+	// `rows`: inside the table under way, only what it lays out again (rows to come, repeated header rows).
+	private ahead(flow: BlockFlow, part: number, item: number, rows = false): boolean {
 		const last = Math.max(flow.index, flow.furthest)
 		// An edited paragraph inside a block (a table cell's) is laid out from an overlay of its own: it is where
 		// its source is.
@@ -841,14 +926,18 @@ class Paginator {
 			const block = flow.blocks[k] ?? -1
 			const end = flow.partAt(k)?.end(block) ?? block + 1
 
-			if (flow.parts[k] === part && item >= block && item < end) return true
-			if (flow.parts[k] === sourcePart && sourceItem >= block && sourceItem < end) return true
+			if (flow.parts[k] === part && item >= block && item < end) return !rows || k !== flow.index || flow.tableAhead(item)
+			if (flow.parts[k] === sourcePart && sourceItem >= block && sourceItem < end)
+				return !rows || k !== flow.index || flow.tableAhead(sourceItem)
 
-			// An edited paragraph counts under its source's key.
+			// An edited paragraph counts under its source's key, and so do the paragraphs of its text boxes.
 			const key = this.engine.memoKey(flow.parts[k] ?? -1, block)
 			const keyPart = Math.floor(key / REF_SPAN)
+			const keyItem = key - keyPart * REF_SPAN
 
-			if (keyPart === part && key - keyPart * REF_SPAN === item) return true
+			if (keyPart === part && keyItem === item) return true
+			if (keyPart === part && keyPart !== flow.parts[k] && item > keyItem && item < (this.model.parts[keyPart]?.end(keyItem) ?? 0))
+				return !rows || k !== flow.index || flow.tableAhead(item)
 		}
 
 		return false
@@ -861,7 +950,7 @@ class Paginator {
 		for (const [key, marker] of this.engine.markers) {
 			const part = Math.floor(key / REF_SPAN)
 
-			if (this.isBodyPart(part) && this.ahead(flow, part, key - part * REF_SPAN)) out.push([key, marker])
+			if (this.isBodyPart(part) && this.ahead(flow, part, key - part * REF_SPAN, true)) out.push([key, marker])
 		}
 
 		return out
@@ -899,7 +988,7 @@ class Paginator {
 		this.section = this.resolved(index)
 		this.flows = [flow]
 		this.flowIndex = 0
-		this.engine.notes.startSection(this.section.footnotes, this.section.endnotes, index === 0)
+		this.engine.notes.startSection(this.section.footnotes, this.section.endnotes, index === 0, this.engine.edits)
 
 		const start = this.section.pageNumbering.start
 
@@ -1296,7 +1385,9 @@ class Paginator {
 			geometry.left + (this.notesPerColumn ? (geometry.columnX[0] ?? 0) : 0),
 			this.notesPerColumn ? (geometry.columnWidths[0] ?? textWidth) : textWidth,
 			this.values,
-			this.frame
+			this.frame,
+			this.bodyTop,
+			this.bodyBottom
 		)
 		this.column = 0
 		this.balanceStart = undefined
@@ -1341,7 +1432,8 @@ class Paginator {
 			width: geometry.width,
 			height: geometry.height,
 			bodyFirst,
-			bodyLast: this.lastBodyItem(page)
+			bodyLast: this.lastBodyItem(page),
+			footnotes: this.footnotes.referenced
 		}
 
 		this.renderedBreaks(page, index)
@@ -1581,15 +1673,49 @@ class Paginator {
 		return -1
 	}
 
+	// The first page whose body shows page counts (NUMPAGES, SECTIONPAGES in the text), or -1.
+	firstBodyCounts(): number {
+		return this.bodyTotals.findIndex(values => values !== undefined)
+	}
+
+	// The estimates a fresh layout of the saved document starts from (Word's recorded page breaks plus one, as
+	// the constructor counts them); whether they differ from those in use (then they are in use from now on). Page counts in the body can settle on more than one count (a longer number taking
+	// a page more): an edit settles on the one a fresh layout settles on.
+	freshEstimates(): boolean {
+		const breaks = this.renderedBreakCounts()
+		const counts = breaks.map(count => count + 1)
+		const estimate = Math.max(1, breaks.reduce((sum, count) => sum + count, 0) + 1)
+		let same = estimate === this.estimate
+
+		for (let section = 0; section < counts.length && same; section++) same = counts[section] === this.sectionEstimates[section]
+
+		this.estimate = estimate
+
+		for (let section = 0; section < counts.length; section++) this.sectionEstimates[section] = counts[section] ?? 1
+
+		return !same
+	}
+
 	// Takes the page counts of the layout so far as the estimates fields show from now on.
 	adoptTotals(): void {
 		this.estimate = Math.max(1, this.layout.pages.length)
 
-		for (let section = 0; section < this.sectionEstimates.length; section++) {
+		// Sections an edit added have counts too.
+		for (let section = 0; section < this.sectionPageCounts.length; section++) {
 			const count = this.sectionPageCounts[section]
 
 			if (count !== undefined) this.sectionEstimates[section] = count
 		}
+	}
+
+	// Whether the page counts fields show (the estimates in use) are the layout's: nothing to count again.
+	countsHold(): boolean {
+		if (this.estimate !== this.layout.pages.length) return false
+
+		for (let section = 0; section < this.sectionPageCounts.length; section++)
+			if ((this.sectionPageCounts[section] ?? 1) !== (this.sectionEstimates[section] ?? 1)) return false
+
+		return true
 	}
 
 	// Page count fields: pages whose headers or footers used the estimate are laid out again, or with `lazy`
@@ -1738,6 +1864,71 @@ class Paginator {
 		return index - (this.records[index]?.keep ?? 0)
 	}
 
+	// For edits to paragraphs in table cells alone (every dirty block has cells), a later page to restart at
+	// than `page` (the first page showing a changed table, or the one before): the last page opening in the
+	// table before the first row holding a changed paragraph, or the one before the first page that row opens
+	// (it may now fit there). Rows before it lay out as they did. Undefined otherwise.
+	cellsRestart(page: number, dirty: readonly DirtyBlock[]): number | undefined {
+		const anchors = this.layout.anchors
+		let best = Infinity
+
+		if (dirty.length === 0) return undefined
+
+		for (const block of dirty) {
+			const cells = block.cells
+			const part = this.engine.model.parts[refPart(block.ref)]
+			const item = refItem(block.ref)
+
+			if (cells === undefined || cells.length === 0 || part === undefined) return undefined
+
+			const rows = tableRows(part, item, this.engine.view)
+			let first = Infinity
+
+			for (const cell of cells) {
+				const row = rowIndex(part, rows, cell)
+
+				if (row >= 0) first = Math.min(first, row)
+			}
+
+			// Nothing of it shows.
+			if (first === Infinity) continue
+
+			// The last page opening at a row before it, or the page before the first opening in it (a row split
+			// over pages opens each of them after the first).
+			let at = -1
+			let inTable = false
+			let headers = -1
+
+			for (let index = Math.max(0, page); index < anchors.length; index++) {
+				const anchor = anchors[index]
+				const inside = anchor !== undefined && anchor.part === part.index && anchor.block === item && anchor.row >= 0
+
+				if (!inside) {
+					if (inTable) break
+
+					continue
+				}
+
+				inTable = true
+				headers = this.snapshots[index]?.flow.table?.headerRows ?? headers
+
+				if (anchor.row >= first) {
+					if (anchor.row === first) at = index - 1
+
+					break
+				}
+
+				at = index
+			}
+
+			if (at < 0 || headers < 0 || first < headers) return undefined
+
+			best = Math.min(best, at, this.keepFrom(at))
+		}
+
+		return best === Infinity ? undefined : Math.max(page, best)
+	}
+
 	// The first page closed while fonts it may have used were loading (-1: none).
 	missedFonts = -1
 	// The open page's header or footer needed a font still loading.
@@ -1747,7 +1938,14 @@ class Paginator {
 	// while an earlier relayout is still under way, the earlier layout's pages from the one starting where
 	// that run stands (none to meet again when no such page is found: the run then lays out to the end).
 	// Not `own`: none of the pages laid out so far (the earlier layout's met now included) are met again.
-	private previousLayout(page: number, own: boolean, dirty: readonly DirtyBlock[], breaks: number): Resync | undefined {
+	private previousLayout(
+		page: number,
+		own: boolean,
+		dirty: readonly DirtyBlock[],
+		breaks: number,
+		least: number,
+		through: number
+	): Resync | undefined {
 		const layout = this.layout
 		let previous = this.resyncs
 		let deliver = false
@@ -1785,7 +1983,8 @@ class Paginator {
 
 			return {
 				from: page,
-				floor: page,
+				floor: Math.max(page, least),
+				through,
 				deliver,
 				pages: inPlace.pages,
 				anchors: inPlace.anchors,
@@ -1801,7 +2000,8 @@ class Paginator {
 				globalLine: this.globalLine,
 				dirty,
 				dirtyIndices: new Map(),
-				byAnchor: undefined
+				byAnchor: undefined,
+				bodyCounts: this.firstBodyCounts() >= 0
 			}
 		}
 
@@ -1829,7 +2029,9 @@ class Paginator {
 
 		return {
 			from: progress,
-			floor,
+			floor: Math.max(floor, least),
+			// Both in the earlier layout's indices, moved as its pages are.
+			through: Math.max(previous.through, through) < first ? -1 : Math.max(previous.through, through) - first + progress,
 			// Shown at other indices, or behind the run's pages.
 			deliver: true,
 			pages: Tail.copied(previous.pages.values().slice(cut), progress),
@@ -1846,7 +2048,8 @@ class Paginator {
 			globalLine: previous.globalLine,
 			dirty: previous.dirty.concat(dirty),
 			dirtyIndices: new Map(),
-			byAnchor: undefined
+			byAnchor: undefined,
+			bodyCounts: previous.bodyCounts || this.firstBodyCounts() >= 0
 		}
 	}
 
@@ -1927,11 +2130,14 @@ class Paginator {
 		const anchor = this.anchorHere()
 		const old = this.matchingPage(resync, anchor, index)
 
-		if (old < 0) return false
+		if (old <= resync.through) return false
 
 		const oldSnapshot = resync.snapshots.at(old)
 
 		if (oldSnapshot === undefined || !sameState(snapshot, oldSnapshot)) return false
+
+		// The page count changes and the body shows it: laid out to the end, where the counts settle.
+		if (index !== old && resync.bodyCounts) return false
 
 		// Pages placing things by whether they are odd or even cannot move to the other parity.
 		const shift = snapshot.restart === undefined ? snapshot.pageNumber - oldSnapshot.pageNumber : 0
@@ -1969,7 +2175,7 @@ class Paginator {
 				resync.dirtyIndices.set(block.ref, at)
 			}
 
-			if (at >= flow.index) return false
+			if (at > flow.index || (at === flow.index && !rowsBehind(block, flow))) return false
 		}
 
 		return true
@@ -2154,6 +2360,8 @@ interface Resync {
 	// before it).
 	readonly from: number
 	readonly floor: number
+	// Its pages up to this index are not kept: they show a note an edit changed (the page starting alike).
+	readonly through: number
 	// Its pages go out again when kept: they may not be the pages shown at their indices.
 	readonly deliver: boolean
 	readonly pages: Tail<PageDisplayList>
@@ -2174,6 +2382,8 @@ interface Resync {
 	// Index of each dirty block in its section's flow (-1 when absent), found once.
 	readonly dirtyIndices: Map<number, number>
 	byAnchor: Map<string, number> | undefined
+	// A page's body shows page counts (see resynchronise).
+	readonly bodyCounts: boolean
 }
 
 // The previous layout's entries of one array from index `from` to `end`, for a relayout to meet again. Laying
@@ -2256,6 +2466,25 @@ interface InPlace {
 	readonly breaks: Tail<RenderedBreak>
 }
 
+// A dirty table the body flow stands in, between two rows: whether every row its changed paragraphs are in
+// is behind it.
+function rowsBehind(block: DirtyBlock, flow: BlockFlow): boolean {
+	const cells = block.cells
+
+	if (cells === undefined || cells.length === 0) return false
+
+	for (const item of cells) {
+		const at = flow.tableRow(item)
+
+		if (at === undefined) return false
+		// In a row not laid out (hidden in the view): nothing of it shows.
+		if (at.row < 0) continue
+		if (at.row < at.headers || at.row >= at.current) return false
+	}
+
+	return true
+}
+
 // The members of `set` in [start, end).
 function within(set: ReadonlySet<number>, start: number, end: number): Set<number> {
 	const result = new Set<number>()
@@ -2297,6 +2526,17 @@ function sameValues(a: PageValues | undefined, b: PageValues | undefined, pageSh
 	if (a === undefined || b === undefined) return a === b
 
 	return a.page === b.page + pageShift && a.pageFormat === b.pageFormat && a.numPages === b.numPages && a.sectionPages === b.sectionPages
+}
+
+const NO_ENTRIES: readonly (readonly [number, never])[] = []
+const NO_NOTES: readonly PlacedNote[] = []
+
+function sameList(a: readonly number[], b: readonly number[]): boolean {
+	if (a.length !== b.length) return false
+
+	for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) return false
+
+	return true
 }
 
 function sameMarker(a: ListMarker | null | undefined, b: ListMarker | null | undefined): boolean {
@@ -2354,21 +2594,9 @@ function sameEntries<T>(
 	return true
 }
 
-// Whether a page opening now continues exactly as a page of the previous layout did (its anchor matched):
-// everything later pages depend on is the same, the page number apart.
-function sameState(a: PageSnapshot, b: PageSnapshot): boolean {
-	const fa = a.flow
-	const fb = b.flow
-	const pageShift = a.pageNumber - b.pageNumber
-
+// Two flows' states alike, but for the block index (the page's anchor compares where the body flow stands).
+function sameFlow(fa: FlowSnapshot, fb: FlowSnapshot, pageShift: number): boolean {
 	return (
-		a.sectionIndex === b.sectionIndex &&
-		a.restart === b.restart &&
-		a.sectionFirstPage === b.sectionFirstPage &&
-		a.nextStart === b.nextStart &&
-		a.bodyLines === b.bodyLines &&
-		a.lineSection === b.lineSection &&
-		a.endnotesDone === b.endnotesDone &&
 		fa.inParagraph === fb.inParagraph &&
 		fa.item === fb.item &&
 		fa.offset === fb.offset &&
@@ -2385,11 +2613,62 @@ function sameState(a: PageSnapshot, b: PageSnapshot): boolean {
 		fa.moves.every((value, k) => value === fb.moves[k]) &&
 		sameValues(fa.values, fb.values, pageShift) &&
 		sameMarker(fa.marker, fb.marker) &&
+		sameTable(fa.table, fb.table, pageShift)
+	)
+}
+
+// The cells' flows of a split row compare as flows in full (their block index too).
+function sameCell(a: FlowSnapshot | null | undefined, b: FlowSnapshot | null | undefined, pageShift: number): boolean {
+	if (a === null || a === undefined || b === null || b === undefined) return a === b
+
+	return a.index === b.index && sameFlow(a, b, pageShift)
+}
+
+function sameTable(a: TableSnapshot | undefined, b: TableSnapshot | undefined, pageShift: number): boolean {
+	if (a === undefined || b === undefined) return a === b
+
+	const cells = a.cells
+	const others = b.cells
+
+	return (
+		(cells === undefined || others === undefined
+			? cells === others
+			: cells.length === others.length && cells.every((cell, k) => sameCell(cell, others[k], pageShift))) &&
+		a.row === b.row &&
+		a.headerRows === b.headerRows &&
+		(a.placed ? 0 : a.stalled + 1) === (b.placed ? 0 : b.stalled + 1) &&
+		a.repeated === b.repeated &&
+		a.left === b.left &&
+		a.width === b.width &&
+		sameNumbers(a.grid, b.grid) &&
+		sameNumbers(a.gridX, b.gridX)
+	)
+}
+
+// Whether a page opening now continues exactly as a page of the previous layout did (its anchor matched):
+// everything later pages depend on is the same, the page number apart.
+function sameState(a: PageSnapshot, b: PageSnapshot): boolean {
+	const pageShift = a.pageNumber - b.pageNumber
+
+	return (
+		a.sectionIndex === b.sectionIndex &&
+		a.restart === b.restart &&
+		a.sectionFirstPage === b.sectionFirstPage &&
+		a.nextStart === b.nextStart &&
+		a.bodyLines === b.bodyLines &&
+		a.lineSection === b.lineSection &&
+		a.endnotesDone === b.endnotesDone &&
+		sameFlow(a.flow, b.flow, pageShift) &&
 		sameCounters(a.counters, b.counters) &&
 		sameNotes(a.notes, b.notes) &&
 		a.carried.length === b.carried.length &&
 		a.carried.every(
-			(note, k) => note.story === b.carried[k]?.story && note.from === b.carried[k]?.from && note.height === b.carried[k]?.height
+			(note, k) =>
+				note.story === b.carried[k]?.story &&
+				note.from === b.carried[k]?.from &&
+				note.height === b.carried[k]?.height &&
+				note.mark === b.carried[k]?.mark &&
+				sameValues(note.values, b.carried[k]?.values, pageShift)
 		) &&
 		a.endnotes.length === b.endnotes.length &&
 		a.endnotes.every((story, k) => story === b.endnotes[k]) &&
@@ -2437,6 +2716,14 @@ function rebased(
 				}
 			: kept.flow
 
+	// Notes continued onto the page show the page numbers they were laid out with, moved likewise.
+	const carried =
+		shifted && kept.carried.some(note => note.values !== undefined)
+			? kept.carried.map(note =>
+					note.values === undefined ? note : { ...note, values: { ...note.values, page: note.values.page + numberShift } }
+				)
+			: kept.carried
+
 	if (counts === undefined && !shifted && lineShift === 0 && breakShift === 0 && flow === kept.flow) return kept
 
 	return {
@@ -2445,6 +2732,7 @@ function rebased(
 		globalLine: kept.globalLine + lineShift,
 		renderedBreaks: kept.renderedBreaks + breakShift,
 		sectionPageCounts: counts ?? keptCounts,
+		carried,
 		flow
 	}
 }
@@ -2477,6 +2765,12 @@ export class LayoutDriver {
 	private readonly styles: RunStyles
 	private readonly now: () => number
 	private rounds = 0
+	// A run begin() started (an edit's, a view's): page counts in the body are derived as a fresh layout
+	// derives them.
+	private edited = false
+	// The run derived page counts in the body afresh (see advance), from page `from` on.
+	private fresh = false
+	private from = 0
 	// The run lays out again for edits: page count fields of earlier pages are refreshed when shown.
 	private lazy = false
 	// Starts the slice loop when it is not running (set by layoutDocument).
@@ -2491,17 +2785,21 @@ export class LayoutDriver {
 
 	// Restarts at the nearest page layout can restart at, at or before `page` (no later than where a run
 	// under way stands); with `dirty`, the run may stop where it meets the previous layout again.
-	begin(page: number, dirty: readonly DirtyBlock[] | undefined): number {
+	begin(page: number, dirty: readonly DirtyBlock[] | undefined, through = -1): number {
 		const paginator = this.paginator
 		const layout = this.layout
 		// A layout still under way without an earlier edit run cannot stop early: it has pages left to lay out.
 		const resync = dirty !== undefined && (layout.final || paginator.resyncing)
-		const target = layout.final ? page : Math.min(page, paginator.progress)
-		const from = paginator.restartPage(target)
+		const cells = layout.final && dirty !== undefined ? paginator.cellsRestart(page, dirty) : undefined
+		const target = cells ?? (layout.final ? page : Math.min(page, paginator.progress))
+		const from = paginator.restartPage(target, layout.final && dirty !== undefined)
 
 		this.rounds = 0
 		this.lazy = dirty !== undefined
-		paginator.restartAt(from, resync ? dirty : undefined)
+		this.edited = true
+		this.fresh = false
+		this.from = from
+		paginator.restartAt(from, resync ? dirty : undefined, true, target, through)
 		layout.notify(from, from, false)
 
 		return from
@@ -2524,6 +2822,23 @@ export class LayoutDriver {
 
 				if (this.styles.hasMissing) return "fonts"
 				if (this.redoMissed()) continue
+
+				// An edit with page counts in the body: they are derived as a fresh layout derives them, from its
+				// estimates, laying out again from the first page showing them (unless this run already did).
+				if (this.edited && !this.fresh && !paginator.countsHold()) {
+					this.fresh = true
+
+					const first = paginator.firstBodyCounts()
+
+					if (first >= 0 && (paginator.freshEstimates() || first < this.from)) {
+						const start = paginator.restartPage(first)
+
+						paginator.restartAt(start)
+						layout.notify(start, start, false)
+
+						continue
+					}
+				}
 
 				// Page count fields in the text showed estimates: laid out again from there with the counts found,
 				// a bounded number of times (the counts can change again).

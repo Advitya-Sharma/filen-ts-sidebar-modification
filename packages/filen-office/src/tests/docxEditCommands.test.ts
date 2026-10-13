@@ -330,7 +330,7 @@ describe("docx editor commands", () => {
 		expect(session.execute({ type: "align.center" })).toBe(false)
 	})
 
-	it("formats only run content: markers and fields stay as they are", async () => {
+	it("formats run content and fields (their runs take it, §17.16.4.3): markers stay as they are", async () => {
 		const session = await sessionOf(RICH)
 
 		selectAll(session)
@@ -339,7 +339,7 @@ describe("docx editor commands", () => {
 		session.state.doc.child(0).forEach(child => {
 			const italic = child.marks.some(mark => mark.type.name === "italic")
 
-			expect(italic, child.type.name).toBe(child.type.name !== "marker" && child.type.name !== "field" && child.type.name !== "math")
+			expect(italic, child.type.name).toBe(child.type.name !== "marker" && child.type.name !== "math")
 		})
 	})
 

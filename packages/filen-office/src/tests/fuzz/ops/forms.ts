@@ -12,7 +12,7 @@ import {
 import { markCommand } from "../../../core/docx/edit/invariants/index"
 import { DOCX_CONTROL_KINDS } from "../../../core/docx/edit/commands/forms"
 import { docxSchema, type DocxEditorCommand, type DocxEditorSession } from "../harness"
-import { inlinePosition } from "./base"
+import { BOUND_WRITES, inlinePosition } from "./base"
 import type { EditOp, OpContext, Rand, ScriptEdit } from "./index"
 
 // Content controls, legacy form fields and repeating sections through the form commands under the paged editor
@@ -276,14 +276,6 @@ function contentDamage(context: OpContext): string {
 }
 
 // ---- scripted suite ----
-
-// What a scripted form edit may write besides the main part: the custom XML item or properties part a bound
-// control stores its value in.
-const BOUND_WRITES = [
-	"application/xml",
-	"application/vnd.openxmlformats-officedocument.extended-properties+xml",
-	"application/vnd.openxmlformats-package.core-properties+xml"
-]
 
 function scripted(order: number, run: (session: DocxEditorSession) => boolean): ScriptEdit {
 	return { order, run: ({ session }) => run(session) }

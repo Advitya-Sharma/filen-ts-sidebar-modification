@@ -41,4 +41,7 @@ export interface LayoutEdits {
 	sourceBlock?(part: number, item: number): number
 	// The document-wide switch for even pages' headers and footers as edited (undefined: the settings').
 	readonly evenAndOddHeaders?: boolean | undefined
+	// Where notes go as edited, document-wide (undefined: the settings').
+	readonly footnotePosition?: string | undefined
+	readonly endnotePosition?: string | undefined
 }

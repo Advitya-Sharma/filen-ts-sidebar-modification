@@ -84,6 +84,7 @@ type ToWorker =
 			readonly size: number
 			readonly replace: readonly PartMessage[]
 			readonly add: readonly PartMessage[]
+			readonly remove?: readonly string[]
 	  }
 	// `crc`: when asked for (`seed`), the CRC-32 of the bytes as the page read them, continued from the seed.
 	| { readonly t: "read"; readonly id: number; readonly bytes?: Uint8Array; readonly crc?: number; readonly error?: string }
@@ -278,7 +279,15 @@ export function serveDocxZipWorker(scope: DocxWorkerScope): void {
 		const replace = parts(message.replace, streamed, 0)
 		const add = parts(message.add, streamed, Array.isArray(message.replace) ? message.replace.length : 0)
 
-		if (replace === null || add === null || typeof message.size !== "number") {
+		const remove: unknown = message.remove ?? []
+
+		if (
+			replace === null ||
+			add === null ||
+			typeof message.size !== "number" ||
+			!Array.isArray(remove) ||
+			!remove.every((name: unknown): name is string => typeof name === "string")
+		) {
 			post({ t: "failed", id, message: "Malformed zip request" })
 
 			return
@@ -305,7 +314,7 @@ export function serveDocxZipWorker(scope: DocxWorkerScope): void {
 				throw error
 			})
 			// The page computed every part's CRC from the bytes its part checks read; none may be missing here.
-			const result = await zipDocxSave(archive, { replace, add }, { requireChecksums: true, progress })
+			const result = await zipDocxSave(archive, { replace, add, remove }, { requireChecksums: true, progress })
 
 			if (result.bytes === undefined) throw new DocxSaveError("invalidPackage", "The written file is missing")
 
@@ -526,7 +535,8 @@ export function docxZipWorker(create: () => DocxWorkerLike, options: { readonly 
 					id,
 					size: source.size,
 					replace: changes.replace.map(message),
-					add: changes.add.map(message)
+					add: changes.add.map(message),
+					...(changes.remove === undefined || changes.remove.length === 0 ? {} : { remove: changes.remove })
 				}
 
 				return new Promise<DocxZipped>((resolve, reject) => {

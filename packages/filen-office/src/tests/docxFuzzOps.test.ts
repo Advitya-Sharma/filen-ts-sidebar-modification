@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest"
 import { sessionOf } from "./docxEditFixtures"
-import { p } from "./docxSynthetic"
-import { textPositions } from "./fuzz/ops/base"
+import { buildDocx, p } from "./docxSynthetic"
+import { rng } from "./fuzz/config"
+import { digestPage } from "./fuzz/digest"
+import { baseOps, textPositions, typeSomewhere } from "./fuzz/ops/base"
+import type { OpContext } from "./fuzz/ops/index"
+import { layOut } from "./layoutFixtures"
 
 // The fuzz harness's own choices: an op must find somewhere to act in every editable document.
 describe("docx fuzz ops", () => {
@@ -12,5 +16,55 @@ describe("docx fuzz ops", () => {
 
 		expect(first.textContent).toBe("")
 		expect(textPositions(doc)).toEqual([1, first.nodeSize - 1, first.nodeSize + 1])
+	})
+
+	it("moves blocks untracked and leaves the document's tracking as it was", async () => {
+		const session = await sessionOf({ body: [p("one"), p("two"), p("three"), p("four")].join("") })
+		const review = session.context.review
+		const move = baseOps.find(op => op.name === "blockMove")
+
+		if (move === undefined) throw new Error("no blockMove")
+
+		review.tracking = true
+		session.context.identity.author = "Fuzz"
+
+		const context: OpContext = {
+			rand: rng(3),
+			session,
+			editor: undefined,
+			numIds: [],
+			styleIds: [],
+			transact(_label, build) {
+				const tr = session.state.tr
+
+				return String(session.dispatch(build(tr) ?? tr))
+			},
+			execute: () => "false"
+		}
+
+		for (let k = 0; k < 8; k++) await move.run(context)
+
+		expect(review.tracking).toBe(true)
+	})
+
+	it("types the self-test text where changes are tracked, as an author", async () => {
+		const session = await sessionOf({ body: p("tracked text here"), settings: "<w:trackRevisions/>" })
+
+		session.context.review.tracking = true
+
+		expect(typeSomewhere(session, rng(5), "SELFTEST")).toBe(true)
+		expect(session.state.doc.textContent).toContain("SELFTEST")
+	})
+
+	it("digests fills and borders, so two layouts drawing them differently differ", async () => {
+		const cell = (fill: string): string =>
+			`<w:tbl><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:val="clear" w:fill="${fill}"/></w:tcPr>${p("cell")}</w:tc></w:tr></w:tbl>`
+		const digest = async (fill: string): Promise<string> => {
+			const layout = await layOut(buildDocx({ body: cell(fill) + p("") }))
+
+			return digestPage(layout, layout.pages[0] ?? (undefined as never))
+		}
+
+		expect(await digest("FF0000")).not.toEqual(await digest("00FF00"))
 	})
 })

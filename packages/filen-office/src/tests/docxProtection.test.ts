@@ -9,7 +9,15 @@ import { saveDocx } from "@filen/office/core/docx/write"
 import { FORMS_AFTER, FORMS_BEFORE } from "../core/docx/edit/handlers/forms"
 import { REVIEW_TRANSFORMER } from "../core/docx/edit/handlers/review"
 import { refusedForForms } from "../core/docx/edit/invariants/forms"
-import { commandAllowed, protectionMode, protectionOf } from "../core/docx/edit/protection"
+import {
+	commandAllowed,
+	internalViolation,
+	offeredParagraphStyles,
+	protectionMode,
+	protectionOf,
+	readOnlyExceptions
+} from "../core/docx/edit/protection"
+import { resolveChanges, storyReviewIndex } from "../core/docx/review/accept"
 import { buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
 import { pagedEditor } from "./pagedFixtures"
 
@@ -260,5 +268,251 @@ describe("document protection: commands", () => {
 			expect(await editor.execute({ type: "comment.add", text: "Why?" })).toBe(allowed)
 			editor.dispose()
 		}
+	})
+})
+
+describe("document protection: review fixes", () => {
+	it("opens only the columns a permission names (w:colFirst, w:colLast) and only to everyone", async () => {
+		const cell = (text: string): string => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p(text)}</w:tc>`
+		const table =
+			'<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+			`<w:tr>${cell("A1")}${cell("B1")}</w:tr><w:tr>${cell("A2")}${cell("B2").replace("B2</w:t></w:r></w:p>", 'B2</w:t></w:r><w:permEnd w:id="5"/></w:p>')}</w:tr></w:tbl>`
+		const { session } = await open({
+			body: p("Fixed") + '<w:permStart w:id="5" w:edGrp="everyone" w:colFirst="1" w:colLast="1"/>' + table + p("After"),
+			settings: protection("forms")
+		})
+
+		expect(type(session, "x", find(session, "A1") + 1).applied).toBe(false)
+		expect(type(session, "y", find(session, "B1") + 1).applied).toBe(true)
+		expect(type(session, "z", find(session, "A2") + 1).applied).toBe(false)
+		expect(type(session, "w", find(session, "B2") + 1).applied).toBe(true)
+
+		const editors = await open({ body: PERMITTED('w:edGrp="editors"'), settings: protection("forms") })
+
+		expect(type(editors.session, "Z", find(editors.session, "Open") + 1).applied).toBe(false)
+	})
+
+	it("keeps a protected paragraph whole: no paragraph comes into a run-level control", async () => {
+		const { session } = await open({ body: p("Fixed") + RICH.replace("<w:showingPlcHdr/>", ""), settings: protection("forms") })
+
+		expect(session.dispatch(session.state.tr.split(find(session, "tap")))).toBe(false)
+		expect(session.state.doc.childCount).toBe(2)
+	})
+
+	it("refuses formatting inside a control under forms protection as the format commands are", async () => {
+		const { session } = await open({ body: p("Fixed") + RICH, settings: protection("forms") })
+		const at = find(session, "Click")
+
+		expect(session.dispatch(session.state.tr.addMark(at, at + 5, docxSchema.marks.bold.create({ value: true })))).toBe(false)
+		expect(type(session, "Z", at + 1).applied).toBe(true)
+	})
+
+	it("leaves sections with form protection off editable", async () => {
+		const body =
+			p("Free section text") +
+			'<w:p><w:pPr><w:sectPr><w:formProt w:val="0"/><w:type w:val="continuous"/></w:sectPr></w:pPr></w:p>' +
+			p("Form section") +
+			"<w:sectPr><w:formProt/></w:sectPr>"
+		const { session } = await open({ body, settings: protection("forms") })
+
+		expect(type(session, "X", find(session, "Free") + 1).applied).toBe(true)
+		expect(type(session, "X", find(session, "Form") + 1).applied).toBe(false)
+	})
+
+	it("refuses direct formatting under enforced formatting restrictions", async () => {
+		const { session } = await open({ body: p("Some text"), settings: '<w:documentProtection w:formatting="1" w:enforcement="1"/>' })
+
+		select(session, 1, 5)
+		expect(commandAllowed(session, "format.bold")).toBe(false)
+		expect(commandAllowed(session, "align.center")).toBe(false)
+		expect(commandAllowed(session, "style.set")).toBe(true)
+	})
+
+	it("edits only the ranges a read-only document opens to everyone", async () => {
+		const { session, context } = await open({ body: p("Fixed") + PERMITTED('w:edGrp="everyone"'), settings: protection("readOnly") })
+
+		expect(context.gate).toEqual([])
+		expect(protectionOf(context).mode).toBe("readOnly")
+		expect(type(session, "Z", find(session, "Open") + 1).applied).toBe(true)
+		expect(type(session, "Z", find(session, "Fixed") + 1).applied).toBe(false)
+		select(session, find(session, "Fixed") + 1)
+		expect(commandAllowed(session, "comment.add")).toBe(false)
+	})
+
+	it("finds ranges open to everyone in a read-only document", async () => {
+		const opened = await open({ body: p("Fixed") + PERMITTED('w:edGrp="everyone"'), settings: protection("readOnly") })
+		const closed = await open({ body: p("Fixed") + PERMITTED('w:ed="someone@example.com"'), settings: protection("readOnly") })
+
+		expect(readOnlyExceptions(opened.context.model)).toBe(true)
+		expect(readOnlyExceptions(closed.context.model)).toBe(false)
+	})
+})
+
+describe("document protection: what reaches beyond the selection", () => {
+	const TRACKED =
+		'<w:p><w:r><w:t xml:space="preserve">Fixed </w:t></w:r><w:ins w:id="9" w:author="X" w:date="2026-01-01T00:00:00Z"><w:r><w:t>inserted</w:t></w:r></w:ins></w:p>'
+
+	it("refuses document-wide commands with the caret in an open range, in every limited mode", async () => {
+		for (const mode of ["readOnly", "forms", "comments"]) {
+			const { session } = await open({ body: p("Fixed") + PERMITTED('w:edGrp="everyone"') + TRACKED, settings: protection(mode) })
+
+			select(session, find(session, "Open") + 2)
+			expect(commandAllowed(session, "format.bold")).toBe(true)
+
+			for (const type of [
+				"review.acceptAll",
+				"review.rejectAll",
+				"review.accept",
+				"page.setup",
+				"insert.sectionBreak",
+				"field.updateAll",
+				"toc.insert",
+				"note.insertFootnote",
+				"header.edit"
+			] as const)
+				expect(commandAllowed(session, type)).toBe(false)
+		}
+	})
+
+	it("finds the session's own transactions that edit outside the open ranges", async () => {
+		const { session } = await open({ body: p("Fixed") + PERMITTED('w:edGrp="everyone"') + TRACKED, settings: protection("forms") })
+		const outcome = resolveChanges(session, storyReviewIndex(session), { all: true }, true)
+
+		expect(outcome.tr === null ? undefined : internalViolation(outcome.tr as Transaction, session)).toBe("protected")
+		expect(outcome.tr === null ? true : session.dispatch(outcome.tr as Transaction)).toBe(false)
+
+		const comments = await open({ body: p("Commented text"), settings: protection("comments") })
+		const anchor = comments.session.state.tr.insert(2, docxSchema.nodes.comment_ref.create({ id: "0" }))
+
+		expect(internalViolation(anchor, comments.session)).toBeUndefined()
+	})
+
+	it("enforces protection whose w:enforcement is missing, as Word does", async () => {
+		const { context } = await open({ body: p("Some text"), settings: '<w:documentProtection w:edit="forms"/>' })
+
+		expect(protectionOf(context).mode).toBe("forms")
+	})
+
+	it("refuses locked styles and table and picture formatting under formatting restrictions, offering the others", async () => {
+		const styles = {
+			name: "word/styles.xml",
+			contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+			data:
+				'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+				'<w:latentStyles w:defLockedState="0"><w:lsdException w:name="heading 2" w:locked="1"/></w:latentStyles>' +
+				'<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+				'<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:locked/></w:style></w:styles>'
+		}
+		const { session, context } = await open({
+			body: p("Some text"),
+			settings: '<w:documentProtection w:formatting="1" w:enforcement="1"/>',
+			parts: [styles],
+			relationships: [{ id: "rIdS", type: "styles", target: "styles.xml" }]
+		})
+
+		select(session, 2)
+		expect(commandAllowed(session, "table.align")).toBe(false)
+		expect(commandAllowed(session, "drawing.resize")).toBe(false)
+		expect(commandAllowed(session, "table.row.insertBelow")).toBe(true)
+		expect(session.execute({ type: "style.set", style: "heading1" })).toBe(false)
+		expect(session.execute({ type: "style.set", style: "heading2" })).toBe(false)
+		expect(session.execute({ type: "style.set", style: "heading3" })).toBe(true)
+		expect(offeredParagraphStyles(context)).not.toContain("heading1")
+		expect(offeredParagraphStyles(context)).not.toContain("heading2")
+		expect(offeredParagraphStyles(context)).toContain("heading3")
+	})
+})
+
+describe("document protection: comments mode and read-only ranges", () => {
+	it("lets comment anchors through in comments mode, not bookmarks or permissions", async () => {
+		const { session } = await open({
+			body: '<w:p><w:bookmarkStart w:id="1" w:name="bm"/><w:r><w:t>Commented text</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>',
+			settings: protection("comments")
+		})
+		const anchor = (kind: string): Transaction => session.state.tr.insert(2, docxSchema.nodes.marker.create({ kind, id: "7", src: -1 }))
+
+		expect(internalViolation(anchor("commentRangeStart"), session)).toBeUndefined()
+		expect(internalViolation(anchor("bookmarkStart"), session)).toBe("protected")
+		expect(internalViolation(anchor("permissionStart"), session)).toBe("protected")
+	})
+
+	it("refuses document-wide commands in a comment's story too, and lets the track switch run from an open range of a read-only document", async () => {
+		const comments = await open(
+			{
+				body: '<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Text</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>',
+				comments: '<w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment>',
+				settings: protection("comments")
+			},
+			stories => stories.find(story => story.kind === "comment")
+		)
+
+		expect(comments.session.story.story.kind).toBe("comment")
+		expect(commandAllowed(comments.session, "comment.edit")).toBe(true)
+		expect(commandAllowed(comments.session, "page.setup")).toBe(false)
+
+		const { session } = await open({ body: p("Fixed") + PERMITTED('w:edGrp="everyone"'), settings: protection("readOnly") })
+
+		select(session, find(session, "Open") + 2)
+		expect(commandAllowed(session, "review.track")).toBe(true)
+		select(session, find(session, "Fixed") + 2)
+		expect(commandAllowed(session, "review.track")).toBe(false)
+	})
+})
+
+describe("document protection: the track switch", () => {
+	it("turns tracking for the session only in a read-only document, keeping the file's w:trackRevisions", async () => {
+		for (const on of [false, true]) {
+			const bytes = buildDocx({
+				body: p("Fixed") + PERMITTED('w:edGrp="everyone"'),
+				settings: protection("readOnly") + (on ? "<w:trackRevisions/>" : "")
+			})
+			const { editor, pkg, context } = await pagedEditor(bytes)
+			const session = editor.body.session
+
+			context.identity.author = "Ann Lee"
+			select(session, find(session, "Open") + 2)
+			expect(await editor.execute({ type: "review.track" })).toBe(true)
+			expect(context.review.tracking).toBe(!on)
+			expect(type(session, "Z", find(session, "Open") + 1).applied).toBe(true)
+
+			const settings = decoder.decode(
+				unzipSync((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)["word/settings.xml"]
+			)
+
+			expect(settings.includes("<w:trackRevisions/>")).toBe(on)
+			editor.dispose()
+		}
+	})
+})
+
+describe("document protection: tracking forced on", () => {
+	it("saves a tracked-changes protected file without w:trackRevisions unedited byte for byte, and tracks its edits", async () => {
+		const bytes = buildDocx({ body: p("Some text"), settings: protection("trackedChanges") })
+		const opened = await openDocxPackage(bytesSource(bytes))
+
+		if (!opened.ok) throw new Error(opened.reason)
+
+		const model = await buildDocxModel(opened.package)
+		const context = await openDocxEditContext(opened.package, model, { author: "Ann Lee", clock: () => Date.UTC(2026, 9, 12) })
+		const session = new DocxEditorSession(context, { transformer })
+
+		expect(context.review.tracking).toBe(true)
+
+		const unedited = await saveDocx({ pkg: opened.package, context, sessions: [session] })
+
+		expect(unedited.changedParts).toEqual([])
+		expect(type(session, "Z", 2).applied).toBe(true)
+
+		const result = (await saveDocx({ pkg: opened.package, context, sessions: [session] })).bytes as Uint8Array
+		const saved = unzipSync(result)
+		const reopened = await openDocxPackage(bytesSource(result))
+
+		if (!reopened.ok) throw new Error(reopened.reason)
+
+		// Reopened, the protection forces tracking again.
+		expect((await openDocxEditContext(reopened.package, await buildDocxModel(reopened.package))).review.tracking).toBe(true)
+
+		expect(decoder.decode(saved["word/document.xml"])).toContain("<w:ins ")
+		expect(decoder.decode(saved["word/settings.xml"])).not.toContain("trackRevisions")
 	})
 })

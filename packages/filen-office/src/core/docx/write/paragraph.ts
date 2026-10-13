@@ -351,7 +351,12 @@ function markProperties(w: StoryWriting, node: Node, change: ParagraphChange | u
 	}
 
 	if (changes.size === 0 || (owner && [...changes.values()].every(value => value === "") && markRPr < 0)) return undefined
-	if (markRPr >= 0) return markup(sub => spliceChildren(sub, part.reader, markRPr, changes, PARAGRAPH_MARK_PROPERTIES))
+	if (markRPr >= 0) {
+		const spliced = markup(sub => spliceChildren(sub, part.reader, markRPr, changes, PARAGRAPH_MARK_PROPERTIES))
+
+		// A mark whose last property went (a revision resolved) has no w:rPr left to write.
+		return /^<[^\s>]+>\s*<\/[^>]+>$/.test(spliced) ? "" : spliced
+	}
 
 	const fresh = freshContainer(w.names, "rPr", changes, PARAGRAPH_MARK_PROPERTIES)
 

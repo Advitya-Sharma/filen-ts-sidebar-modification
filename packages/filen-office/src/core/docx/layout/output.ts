@@ -82,6 +82,8 @@ export const SourceFlag = {
 // these; the source's text is what the line's text offsets index.
 export const SOURCE_INTS = 4
 
+const NO_FOOTNOTES: readonly number[] = []
+
 export const SourceInt = { REGION: 0, STORY: 1, ITEM: 2, FLAGS: 3 } as const
 
 // What append() copies from: a growing output or a finished page.
@@ -627,6 +629,8 @@ export class PageDisplayList implements OutputView {
 	// Body blocks on the page: the first and last body item (paragraph or table) with content here.
 	readonly bodyFirst: number
 	readonly bodyLast: number
+	// Footnotes referenced on the page (by story), wherever they are placed.
+	readonly footnotes: readonly number[]
 
 	constructor(
 		output: OutputView,
@@ -639,6 +643,7 @@ export class PageDisplayList implements OutputView {
 			height: number
 			bodyFirst: number
 			bodyLast: number
+			footnotes?: readonly number[]
 		},
 		// Share the arrays of a finished page instead of copying them.
 		shared = false
@@ -651,6 +656,7 @@ export class PageDisplayList implements OutputView {
 		this.height = info.height
 		this.bodyFirst = info.bodyFirst
 		this.bodyLast = info.bodyLast
+		this.footnotes = info.footnotes ?? NO_FOOTNOTES
 		if (output instanceof PageDisplayList && shared) {
 			this.text = output.text
 			this.graphicCount = output.graphicCount
@@ -728,7 +734,8 @@ export class PageDisplayList implements OutputView {
 				width: this.width,
 				height: this.height,
 				bodyFirst: this.bodyFirst,
-				bodyLast: this.bodyLast
+				bodyLast: this.bodyLast,
+				footnotes: this.footnotes
 			},
 			true
 		)

@@ -119,38 +119,105 @@ async function drive<T>(steps: Generator<void, T>, clock: SliceClock): Promise<T
 	}
 }
 
-// The first block of each source item as the story was built, per story (built once: the story is never
-// changed).
-const originalsCache = new WeakMap<StoryDoc, Map<number, Node>>()
+// The first block of each source item as the story was built (the story is never changed), looked up by
+// descending through the blocks whose items enclose it (an item's descendants are the items up to its end), each
+// level by binary search over that container's children with an item (in document order, items growing; built
+// once per container of more than SCAN_CHILDREN children, 8 bytes a child; a smaller one, a table cell or row,
+// is scanned): a keystroke's write looks up a few, a whole story's every one, and no map of them all is held.
+const childItems = new WeakMap<Node, Int32Array>()
+const SCAN_CHILDREN = 16
 
-function originalBlocks(story: StoryDoc): Map<number, Node> {
-	return originalsCache.get(story) ?? complete(findOriginals(story, () => false))
+function originalBlock(story: StoryDoc, item: number): Node | undefined {
+	return item === NO_SOURCE ? undefined : descend(story, item)
 }
 
-function* findOriginals(story: StoryDoc, due: () => boolean): Generator<void, Map<number, Node>> {
-	const found = new Map<number, Node>()
-	const visit = (child: Node): boolean => {
-		if (child.isInline) return false
+// The top level of `story`'s index, ahead of the first write (DocxEditorSession.warmUp).
+export function indexOriginals(story: StoryDoc): void {
+	itemsOf(story.doc)
+}
 
+function itemsOf(container: Node): Int32Array {
+	let items = childItems.get(container)
+
+	if (items === undefined) {
+		let count = 0
+
+		for (let index = 0; index < container.childCount; index++) {
+			const child = container.child(index)
+
+			if (!child.isInline && src(child) !== NO_SOURCE) count++
+		}
+
+		items = new Int32Array(count * 2)
+
+		for (let index = 0, at = 0; index < container.childCount; index++) {
+			const child = container.child(index)
+			const own = child.isInline ? NO_SOURCE : src(child)
+
+			if (own === NO_SOURCE) continue
+
+			items[at++] = own
+			items[at++] = index
+		}
+
+		childItems.set(container, items)
+	}
+
+	return items
+}
+
+// The index among `container`'s children of the last one with an item of at most `item`, or -1.
+function enclosing(container: Node, item: number): number {
+	if (container.childCount <= SCAN_CHILDREN) {
+		let at = -1
+
+		for (let index = 0; index < container.childCount; index++) {
+			const child = container.child(index)
+			const own = child.isInline ? NO_SOURCE : src(child)
+
+			if (own === NO_SOURCE) continue
+			if (own > item) break
+
+			at = index
+		}
+
+		return at
+	}
+
+	const items = itemsOf(container)
+	let low = 0
+	let high = items.length / 2 - 1
+	let at = -1
+
+	while (low <= high) {
+		const middle = (low + high) >> 1
+
+		if ((items[middle * 2] ?? 0) <= item) {
+			at = middle
+			low = middle + 1
+		} else high = middle - 1
+	}
+
+	return at < 0 ? -1 : (items[at * 2 + 1] ?? -1)
+}
+
+function descend(story: StoryDoc, item: number): Node | undefined {
+	const part = story.part
+
+	for (let node = story.doc; ;) {
+		const index = enclosing(node, item)
+
+		if (index < 0) return undefined
+
+		const child = node.child(index)
 		const own = src(child)
 
-		if (own !== NO_SOURCE && !found.has(own)) found.set(own, child)
+		if (item >= part.end(own)) return undefined
+		if (own === item) return child
+		if (child.isTextblock || child.isLeaf) return undefined
 
-		return !child.isTextblock
+		node = child
 	}
-	const doc = story.doc
-
-	for (let index = 0; index < doc.childCount; index++) {
-		const child = doc.child(index)
-
-		if (visit(child)) child.descendants(visit)
-
-		if (due()) yield
-	}
-
-	originalsCache.set(story, found)
-
-	return found
 }
 
 // Writes one story (body, header, footer, note, comment) of an editing document back into its part:
@@ -213,7 +280,7 @@ export class StoryWriter {
 	}
 
 	private original(node: Node): Node | undefined {
-		return originalBlocks(this.story).get(src(node))
+		return originalBlock(this.story, src(node))
 	}
 }
 
@@ -279,8 +346,6 @@ export class StoryWriting {
 		this.copyableInCell.clear()
 		this.shared.clear()
 		this.claimed.clear()
-
-		if (!originalsCache.has(this.story)) yield* findOriginals(this.story, () => this.due())
 
 		yield* this.findOwners(doc)
 		this.paragraphs.length = 0
@@ -466,7 +531,7 @@ export class StoryWriting {
 
 	// The block the story was built with for `node`'s source item.
 	original(node: Node): Node | undefined {
-		return originalBlocks(this.story).get(src(node))
+		return originalBlock(this.story, src(node))
 	}
 
 	// Whether a block can be written as its source bytes (see StoryDoc), in a table cell (`cell`) or not.

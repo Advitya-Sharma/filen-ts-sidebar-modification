@@ -1,13 +1,21 @@
+import { setFlagsFromString } from "node:v8"
+import { runInNewContext } from "node:vm"
 import { Fragment, Slice, type Node } from "prosemirror-model"
 import { NodeSelection, TextSelection, type EditorState, type Transaction } from "prosemirror-state"
 import { canJoin, canSplit } from "prosemirror-transform"
 import { describe, expect, it } from "vitest"
 import { DocxEditorSession, NO_SOURCE, docxSchema, freshSlice, normalizeListAttrs } from "@filen/office/core/docx/edit"
-import { unzipSync } from "fflate"
+import { freshSliceKeeping } from "../core/docx/edit/invariants/index"
+import { originOf } from "../core/docx/edit/origin"
+import { sourceCopies } from "../core/docx/edit/session"
+import { unzipSync, zipSync } from "fflate"
 import { saveDocx } from "@filen/office/core/docx/write"
+import { fallbackCopy } from "../core/docx/write/nested"
 import { survivorsOf, type MarkerList } from "../core/docx/edit/schema"
-import { RICH, markerKeys, openSpec, sessionOf } from "./docxEditFixtures"
-import { p } from "./docxSynthetic"
+import { SetMarksStep } from "../core/docx/edit/marks"
+import { RICH, markerKeys, openBytes, openSpec, sessionOf } from "./docxEditFixtures"
+import { buildDocx, p } from "./docxSynthetic"
+import { pagedEditor, settleAll } from "./pagedFixtures"
 
 function sectionHolders(doc: Node): number[] {
 	const out: number[] = []
@@ -202,10 +210,8 @@ describe("docx editing invariants", () => {
 		const sectPr = doc.child(1).attrs["sectPr"] as number
 
 		expect(sectPr).toBe(doc.child(1).attrs["src"])
-		// Backspace at the start of the section's last paragraph, Delete at its end, a range across it.
-		expect(run(session, state => state.tr.join(section))).toBe(false)
+		// Delete at the end of the section's last paragraph and the paragraph deleted whole take its mark.
 		expect(run(session, state => state.tr.join(section + doc.child(1).nodeSize))).toBe(false)
-		expect(run(session, state => state.tr.delete(section - 2, section + 3))).toBe(false)
 		expect(run(session, state => state.tr.delete(section, section + doc.child(1).nodeSize))).toBe(false)
 		expect(session.state.doc).toBe(doc)
 		// Editing inside it is fine.
@@ -604,5 +610,485 @@ describe("docx editing invariants", () => {
 		expect(cells.filter(cell => cell.includes('w:fill="111111"'))).toHaveLength(1)
 		expect(cells.filter(cell => cell.includes('w:fill="FF0000"') && cell.includes('<w:tcW w:w="2000" w:type="dxa"/>'))).toHaveLength(1)
 		expect(cells.filter(cell => cell.includes('w:fill="00FF00"') && cell.includes('<w:vAlign w:val="center"/>'))).toHaveLength(1)
+	})
+
+	const PAGE =
+		'<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+
+	// The saved body's paragraphs as their text, a section-ending one followed by its left margin.
+	async function savedBody(opened: Awaited<ReturnType<typeof pagedEditor>>): Promise<string[]> {
+		await settleAll(opened.editor)
+
+		const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: opened.editor.sessions })
+		const xml = new TextDecoder().decode(unzipSync(result.bytes as Uint8Array)["word/document.xml"])
+
+		return (xml.match(/<w:p[ >].*?<\/w:p>/g) ?? []).map(
+			paragraph =>
+				[...paragraph.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]).join("") +
+				(paragraph.includes("<w:sectPr>") ? ` | ${paragraph.match(/<w:pgMar [^>]*w:left="(\d+)"/)?.[1] ?? ""}` : "")
+		)
+	}
+
+	for (const [tracked, kind] of [
+		[false, "fresh"],
+		[true, "fresh"],
+		[false, "raw"],
+		[true, "raw"]
+	] as const) {
+		it(`keeps a section's page setup with its break when paragraphs are pasted into the paragraph ending it (${tracked ? "tracked" : "untracked"}, ${kind})`, async () => {
+			const opened = await pagedEditor(
+				buildDocx({
+					body:
+						`<w:p><w:pPr><w:sectPr>${PAGE}</w:sectPr></w:pPr><w:r><w:t>Pag</w:t></w:r></w:p>` +
+						p("e 1") +
+						p("x") +
+						`<w:sectPr>${PAGE}</w:sectPr>`
+				})
+			)
+			const { editor, context } = opened
+			const session = editor.body.session
+
+			session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, 2)))
+			expect(await editor.execute({ type: "page.setup", margins: { left: 2000 } })).toBe(true)
+			context.identity.author = "T"
+			context.review.tracking = tracked
+
+			const doc = session.state.doc
+			// "raw": a slice ending after a whole paragraph (the half after it is a new paragraph like the one split).
+			const slice =
+				kind === "fresh"
+					? freshSlice(doc.slice(find(doc, "e 1", 1), find(doc, "x", 1)))
+					: doc.slice(find(doc, "e 1", 1), doc.content.size)
+
+			// Splits "Pag" after "Pa": the paragraph mark holding the break (and its page setup) ends the last half.
+			session.dispatch(session.state.tr.setSelection(TextSelection.create(doc, 3)).replaceSelection(slice))
+			expect(await savedBody(opened)).toEqual(
+				kind === "fresh" ? ["Pa 1", "xg | 2000", "e 1", "x"] : ["Pa 1", "x", "g | 2000", "e 1", "x"]
+			)
+			editor.dispose()
+		})
+	}
+
+	it("moves the break to the last paragraph when paragraphs are pasted into the paragraph ending a section", async () => {
+		const opened = await pagedEditor(
+			buildDocx({
+				body:
+					p("One two") +
+					p("Three four") +
+					`<w:p><w:pPr><w:sectPr>${PAGE}</w:sectPr></w:pPr><w:r><w:t>Break here</w:t></w:r></w:p>` +
+					p("After") +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		const session = opened.editor.body.session
+		const doc = session.state.doc
+
+		session.dispatch(
+			session.state.tr
+				.setSelection(TextSelection.create(doc, find(doc, "Break", 3)))
+				.replaceSelection(freshSlice(doc.slice(2, find(doc, "Three", 3))))
+		)
+		expect(await savedBody(opened)).toEqual(["One two", "Three four", "Brene two", "Thrak here | 1440", "After"])
+		opened.editor.dispose()
+	})
+
+	it("finds the copies a paste inserted when a later step of the same edit rebuilds them", async () => {
+		const opened = await openSpec({
+			body:
+				p("one") +
+				'<w:p><w:bookmarkStart w:id="3" w:name="mark"/><w:r><w:t>two</w:t></w:r><w:bookmarkEnd w:id="3"/></w:p>' +
+				'<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>' +
+				p("cell") +
+				"</w:tc></w:tr></w:tbl>" +
+				p("end")
+		})
+		const session = new DocxEditorSession(opened.context)
+		const doc = session.state.doc
+		const copied = doc.slice(doc.child(0).nodeSize, doc.content.size - doc.lastChild!.nodeSize)
+
+		// A transformer taking the pasted blocks out and putting them back (as a forms rebuild does).
+		const tr = session.state.tr.insert(doc.content.size, copied.content)
+		const from = doc.content.size
+
+		tr.replaceWith(from, tr.doc.content.size, tr.doc.slice(from).content)
+		expect(session.dispatch(tr)).toBe(true)
+
+		const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [session] })
+		const xml = new TextDecoder().decode(unzipSync(result.bytes as Uint8Array)["word/document.xml"])
+
+		expect(xml.match(/<w:bookmarkStart /g)).toHaveLength(1)
+		expect(xml.match(/<w:tbl>/g)).toHaveLength(2)
+	})
+
+	it("makes a copy of part of a content control a control of its own, and keeps the one typed into", async () => {
+		const control =
+			'<w:p><w:r><w:t xml:space="preserve">Before </w:t></w:r><w:sdt><w:sdtPr><w:id w:val="104"/><w:text/></w:sdtPr><w:sdtContent>' +
+			"<w:r><w:t>Click here</w:t></w:r></w:sdtContent></w:sdt></w:p>"
+
+		for (const edit of ["copy", "type"] as const) {
+			const opened = await openSpec({ body: control + p("End") })
+			const session = new DocxEditorSession(opened.context)
+			const doc = session.state.doc
+			const at = find(doc, "Click")
+
+			// Part of it copied after "End" (a drag copy: no paste sanitiser), or typed into.
+			const tr =
+				edit === "copy"
+					? session.state.tr.insert(find(doc, "End", 3), doc.slice(at + 1, at + 6).content)
+					: session.state.tr.insertText("!", at + 2)
+
+			expect(session.dispatch(tr)).toBe(true)
+
+			const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [session] })
+			const xml = new TextDecoder().decode(unzipSync(result.bytes as Uint8Array)["word/document.xml"])
+
+			expect(xml.match(/<w:sdt>/g)).toHaveLength(edit === "copy" ? 2 : 1)
+			expect(xml.match(/<w:id w:val="104"\/>/g)).toHaveLength(1)
+			expect(xml).toContain(edit === "copy" ? "Click here" : "Cl!ick here")
+		}
+	})
+
+	// Pasted, dropped, converted or cut and pasted from one part into another (here the body into a header).
+	const COPIED_TABLE =
+		'<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="6000" w:type="dxa"/><w:tblInd w:w="144" w:type="dxa"/>' +
+		'<w:tblBorders><w:top w:val="double" w:sz="4" w:space="0" w:color="FF0000"/></w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>' +
+		'<w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="700"/></w:trPr>' +
+		'<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/><w:tcBorders><w:left w:val="dotted" w:sz="8" w:space="0" w:color="00FF00"/></w:tcBorders>' +
+		'<w:shd w:val="clear" w:color="auto" w:fill="DDDDDD" w:themeFill="accent1" w:themeFillTint="33"/><w:tcMar><w:top w:w="72" w:type="dxa"/></w:tcMar></w:tcPr>' +
+		p("A1") +
+		'</w:tc><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>' +
+		p("B1") +
+		"</w:tc></w:tr></w:tbl>"
+	const COPIED_CONTROLS =
+		'<w:p><w:r><w:t xml:space="preserve">Agree </w:t></w:r><w:sdt><w:sdtPr><w:tag w:val="agree"/><w:id w:val="101"/><w14:checkbox>' +
+		'<w14:checked w14:val="1"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/>' +
+		"</w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>\u2612</w:t></w:r></w:sdtContent></w:sdt></w:p>" +
+		'<w:sdt><w:sdtPr><w:alias w:val="When"/><w:id w:val="103"/><w:date w:fullDate="2026-10-12T00:00:00Z"><w:dateFormat w:val="d MMMM yyyy"/>' +
+		'<w:lid w:val="en-GB"/></w:date></w:sdtPr><w:sdtContent>' +
+		p("12 October 2026") +
+		"</w:sdtContent></w:sdt>"
+
+	for (const how of ["raw", "fresh", "cut"] as const) {
+		it(`keeps the properties of tables and content controls copied into another part (${how})`, async () => {
+			const opened = await openSpec({
+				body: COPIED_TABLE + COPIED_CONTROLS + p("End") + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>',
+				headers: { rIdH: p("Head") }
+			})
+			const story = opened.context.model.stories.find(entry => entry.kind === "header")
+
+			if (story === undefined) throw new Error("no header")
+
+			const body = new DocxEditorSession(opened.context)
+			const header = new DocxEditorSession(opened.context, { story })
+			const doc = body.state.doc
+			const copied = doc.slice(0, doc.content.size - doc.child(doc.childCount - 1).nodeSize)
+			const from = body.story.part.index
+			const to = header.story.part.index
+			const slice =
+				how === "raw"
+					? copied
+					: how === "fresh"
+						? freshSlice(copied, sourceCopies(opened.context), from, to)
+						: freshSliceKeeping(copied, new Set(), sourceCopies(opened.context), from, to)
+
+			if (how === "cut") expect(body.dispatch(body.state.tr.delete(0, copied.size))).toBe(true)
+
+			header.dispatch(header.state.tr.setSelection(TextSelection.create(header.state.doc, find(header.state.doc, "Head", 4))))
+			expect(header.dispatch(header.state.tr.replaceSelection(slice))).toBe(true)
+
+			const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [body, header] })
+			const files = unzipSync(result.bytes as Uint8Array)
+			const xml = new TextDecoder().decode(files["word/header1.xml"])
+
+			expect(xml).toContain(
+				'<w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="6000" w:type="dxa"/><w:tblInd w:w="144" w:type="dxa"/>' +
+					'<w:tblBorders><w:top w:val="double" w:sz="4" w:space="0" w:color="FF0000"/></w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>'
+			)
+			expect(xml).toContain('<w:trPr><w:cantSplit/><w:trHeight w:val="700"/></w:trPr>')
+			expect(xml).toContain(
+				'<w:tcPr><w:tcW w:w="3000" w:type="dxa"/><w:tcBorders><w:left w:val="dotted" w:sz="8" w:space="0" w:color="00FF00"/></w:tcBorders>' +
+					'<w:shd w:val="clear" w:color="auto" w:fill="DDDDDD" w:themeFill="accent1" w:themeFillTint="33"/><w:tcMar><w:top w:w="72" w:type="dxa"/></w:tcMar></w:tcPr>'
+			)
+			// The controls, without the original's ids.
+			expect(xml).toContain(
+				'<w:sdt><w:sdtPr><w:tag w:val="agree"/><w14:checkbox><w14:checked w14:val="1"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/>'
+			)
+			expect(xml).toContain('<w:sdt><w:sdtPr><w:alias w:val="When"/><w:date w:fullDate="2026-10-12T00:00:00Z">')
+			expect(xml).not.toContain("w:id=")
+		})
+	}
+
+	it("models a table converted into a note of the other kind on its own properties, not on that part's table", async () => {
+		const table = (color: string, fill: string): string =>
+			`<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/><w:tblBorders><w:top w:val="double" w:sz="4" w:space="0" w:color="${color}"/></w:tblBorders></w:tblPr>` +
+			'<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/>' +
+			`<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/></w:tcPr>${p("A1")}</w:tc></w:tr></w:tbl>`
+		const separators = (kind: string): string =>
+			`<w:${kind} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${kind}>` +
+			`<w:${kind} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:${kind}>`
+		const note = (kind: string, mark: string, color: string, fill: string): string =>
+			`<w:${kind} w:id="1"><w:p><w:r><w:${mark}/></w:r><w:r><w:t xml:space="preserve"> note</w:t></w:r></w:p>${table(color, fill)}<w:p/></w:${kind}>`
+		const opened = await pagedEditor(
+			buildDocx({
+				body:
+					'<w:p><w:r><w:t>One</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>' +
+					'<w:p><w:r><w:t>Two</w:t></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p>',
+				footnotes: separators("footnote") + note("footnote", "footnoteRef", "FF0000", "FFFF00"),
+				endnotes: separators("endnote") + note("endnote", "endnoteRef", "00FF00", "0000FF")
+			})
+		)
+		const { editor, context } = opened
+		const body = editor.body.session
+
+		body.dispatch(body.state.tr.setSelection(TextSelection.create(body.state.doc, 4)))
+		expect(await editor.execute({ type: "note.convert" })).toBe(true)
+		await settleAll(editor)
+
+		const result = await saveDocx({ pkg: opened.pkg, context, sessions: editor.sessions })
+		const endnotes = new TextDecoder().decode(unzipSync(result.bytes as Uint8Array)["word/endnotes.xml"])
+		const converted = endnotes.slice(endnotes.indexOf('<w:endnote w:id="2"'))
+
+		expect(converted).toContain('w:color="FF0000"')
+		expect(converted).toContain('w:fill="FFFF00"')
+		expect(converted).not.toContain("00FF00")
+		editor.dispose()
+	})
+
+	it("does not look up where the document came from for typing or Enter, only for content pasted", async () => {
+		const opened = await openSpec({ body: p("one") + p("two") + p("three") })
+		const session = new DocxEditorSession(opened.context)
+		const last = session.state.doc.child(2)
+
+		// Typed text takes the caret's source run; Enter copies its paragraph's attributes.
+		expect(session.dispatch(session.state.tr.insertText("x", 2))).toBe(true)
+		expect(session.dispatch(session.state.tr.split(3))).toBe(true)
+		expect(originOf(last)).toBeUndefined()
+
+		expect(session.dispatch(session.state.tr.insert(session.state.doc.content.size, last.copy(last.content)))).toBe(true)
+		expect(originOf(last)).toBe(session.story.part.index)
+	})
+
+	it("writes a control copied into another part with that part's prefixes, markup compatibility tokens included", async () => {
+		const W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+		const MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+		const control =
+			'<w:p><w:sdt><w:sdtPr mc:Ignorable="w14"><w:id w:val="9"/><mc:AlternateContent><mc:Choice Requires="w14">' +
+			'<w14:checkbox><w14:checked w14:val="1"/></w14:checkbox></mc:Choice><mc:Fallback/></mc:AlternateContent>' +
+			'<w15:color w15:val="FF0000"/></w:sdtPr>' +
+			"<w:sdtContent><w:r><w:t>X</w:t></w:r></w:sdtContent></w:sdt></w:p>"
+		const files = unzipSync(
+			buildDocx({
+				body: control + p("End") + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>',
+				headers: { rIdH: p("Head") }
+			})
+		)
+		// The header binds w14 and mc to other prefixes and "ns1" to something else, and leaves w15 unbound.
+		const header = new TextDecoder()
+			.decode(files["word/header1.xml"])
+			.replace(`xmlns:w14="${W14}"`, `xmlns:x14="${W14}" xmlns:ns1="urn:other"`)
+			.replace(`xmlns:mc="${MC}"`, `xmlns:mx="${MC}"`)
+			.replace('mc:Ignorable="w14 w15 wp14"', 'mx:Ignorable="x14"')
+			.replace(' xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"', "")
+
+		files["word/header1.xml"] = Uint8Array.from(new TextEncoder().encode(header))
+
+		const opened = await openBytes(zipSync(files))
+		const story = opened.context.model.stories.find(entry => entry.kind === "header")
+
+		if (story === undefined) throw new Error("no header")
+
+		const body = new DocxEditorSession(opened.context)
+		const target = new DocxEditorSession(opened.context, { story })
+		const slice = freshSlice(
+			body.state.doc.slice(0, body.state.doc.child(0).nodeSize),
+			sourceCopies(opened.context),
+			body.story.part.index,
+			target.story.part.index
+		)
+
+		target.dispatch(target.state.tr.setSelection(TextSelection.create(target.state.doc, find(target.state.doc, "Head", 4))))
+		expect(target.dispatch(target.state.tr.replaceSelection(slice))).toBe(true)
+
+		const result = await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [body, target] })
+		const xml = new TextDecoder().decode(unzipSync(result.bytes as Uint8Array)["word/header1.xml"])
+
+		expect(xml).toContain(
+			// w15, ignorable in the body but not in the header, stays ignorable where it is used.
+			'<w:sdtPr mx:Ignorable="x14 ns2" xmlns:ns2="http://schemas.microsoft.com/office/word/2012/wordml"><mx:AlternateContent>' +
+				'<mx:Choice Requires="x14"><x14:checkbox><x14:checked x14:val="1"/>'
+		)
+		// w15, which the header does not bind, under a prefix it leaves free.
+		expect(xml).toContain('<ns2:color ns2:val="FF0000" xmlns:ns2="http://schemas.microsoft.com/office/word/2012/wordml"/>')
+	})
+
+	it("keeps a section break with its paragraph mark when an edit joins into, or moves, the paragraph ending the section", async () => {
+		const ending = `<w:p><w:pPr><w:sectPr>${PAGE}</w:sectPr></w:pPr><w:r><w:t>Break here</w:t></w:r></w:p>`
+		const edits = {
+			// Backspace at its start, a selection from the paragraph before into it typed over, its paragraph dragged
+			// before the first.
+			backspace: (state: EditorState): Transaction => state.tr.join(find(state.doc, "Break") - 1),
+			typeOver: (state: EditorState): Transaction =>
+				state.tr
+					.setSelection(TextSelection.create(state.doc, find(state.doc, "two", 1), find(state.doc, "here", 1)))
+					.insertText("X"),
+			drag: (state: EditorState): Transaction => {
+				const from = find(state.doc, "Break") - 1
+				const to = find(state.doc, "here", 4) + 1
+				const tr = state.tr.delete(from, to)
+
+				return tr.insert(0, state.doc.slice(from, to).content)
+			}
+		}
+		const expected = {
+			backspace: ["One twoBreak here | 2000", "After"],
+			typeOver: ["One tXere | 2000", "After"],
+			drag: ["Break here | 2000", "One two", "After"]
+		}
+
+		for (const [name, edit] of Object.entries(edits) as [keyof typeof edits, (state: EditorState) => Transaction][]) {
+			const opened = await pagedEditor(buildDocx({ body: p("One two") + ending + p("After") + `<w:sectPr>${PAGE}</w:sectPr>` }))
+			const session = opened.editor.body.session
+
+			session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, find(session.state.doc, "Break", 1))))
+			expect(await opened.editor.execute({ type: "page.setup", margins: { left: 2000 } })).toBe(true)
+			expect(session.dispatch(edit(session.state))).toBe(true)
+			expect(await savedBody(opened)).toEqual(expected[name])
+			opened.editor.dispose()
+		}
+	})
+
+	it("lets a closed session's document go", async () => {
+		setFlagsFromString("--expose-gc")
+
+		const gc = runInNewContext("gc") as () => void
+		const opened = await openSpec({ body: p("one") + p("two") })
+		const refs = (() => {
+			const session = new DocxEditorSession(opened.context)
+
+			session.dispatch(session.state.tr.insertText("x", 2))
+
+			const ref = new WeakRef(session.state.doc)
+
+			session.dispose()
+
+			return ref
+		})()
+
+		await new Promise(resolve => setTimeout(resolve, 0))
+		gc()
+		expect(refs.deref()).toBeUndefined()
+	})
+
+	it("warms up a keystroke's code without changing anything", async () => {
+		for (const tracking of [false, true]) {
+			const opened = await openSpec({ body: p("one") + p("two") })
+			const fresh = await openSpec({ body: p("one") + p("two") })
+
+			opened.context.identity.author = "T"
+			opened.context.review.tracking = tracking
+
+			const session = new DocxEditorSession(opened.context)
+			const state = session.state
+			let applied = 0
+
+			session.onApplied(() => applied++)
+			session.warmUp()
+			expect(session.state).toBe(state)
+			expect(applied).toBe(0)
+			expect(session.execute({ type: "history.undo" })).toBe(false)
+			// No id handed out: a tracked change made next has the id it would have had.
+			expect(opened.context.ids.next("revision")).toBe(fresh.context.ids.next("revision"))
+			session.dispose()
+		}
+	})
+
+	it("refuses to paste a copy of another part's control whose properties use a prefix that part does not bind", async () => {
+		const control =
+			'<w:p><w:sdt><w:sdtPr><w:id w:val="9"/><mc:AlternateContent><mc:Choice Requires="zz"><w:text/></mc:Choice>' +
+			"<mc:Fallback/></mc:AlternateContent></w:sdtPr><w:sdtContent><w:r><w:t>X</w:t></w:r></w:sdtContent></w:sdt></w:p>"
+		const opened = await openSpec({
+			body: control + p("End") + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>',
+			headers: { rIdH: p("Head") }
+		})
+		const story = opened.context.model.stories.find(entry => entry.kind === "header")
+
+		if (story === undefined) throw new Error("no header")
+
+		const body = new DocxEditorSession(opened.context)
+		const header = new DocxEditorSession(opened.context, { story })
+		const slice = freshSlice(
+			body.state.doc.slice(0, body.state.doc.child(0).nodeSize),
+			sourceCopies(opened.context),
+			body.story.part.index,
+			header.story.part.index
+		)
+		const before = header.state.doc
+
+		expect(header.dispatch(header.state.tr.insert(header.state.doc.content.size, slice.content))).toBe(false)
+		expect(header.state.doc).toBe(before)
+		// The document still saves.
+		await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [body, header] })
+	})
+
+	it("leaves a run holding only a comment or note reference out of a text box's fallback copy, and keeps the source's empty runs", async () => {
+		const opened = await openSpec({ body: p("x") })
+		const part = opened.context.model.parts[0]
+
+		if (part === undefined) throw new Error("no part")
+
+		const content =
+			'<w:txbxContent><w:p><w:r><w:t>a</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:commentReference w:id="1"/></w:r>' +
+			'<w:r><w:footnoteReference w:id="2"/></w:r><w:r><w:rPr><w:i/></w:rPr></w:r><w:r><w:commentReference w:id="1"/><w:t>b</w:t></w:r></w:p></w:txbxContent>'
+		const copy = new TextDecoder().decode(fallbackCopy(part, new TextEncoder().encode(content), { next: () => 1 }))
+
+		expect(copy).toBe(
+			"<w:txbxContent><w:p><w:r><w:t>a</w:t></w:r><w:r><w:rPr><w:i/></w:rPr></w:r><w:r><w:t>b</w:t></w:r></w:p></w:txbxContent>"
+		)
+	})
+
+	it("gives the bookmarks of two text box copies that replace no copy ids of their own", async () => {
+		const opened = await openSpec({ body: p("x") })
+		const part = opened.context.model.parts[0]
+
+		if (part === undefined) throw new Error("no part")
+
+		let next = 100
+		const ids = { next: () => next++ }
+		const content =
+			'<w:txbxContent><w:p><w:bookmarkStart w:id="5" w:name="a"/><w:r><w:t>a</w:t></w:r><w:bookmarkEnd w:id="5"/></w:p></w:txbxContent>'
+		const id = (copy: Uint8Array): string | undefined => /<w:bookmarkStart w:id="(\d+)"/.exec(new TextDecoder().decode(copy))?.[1]
+		const first = id(fallbackCopy(part, new TextEncoder().encode(content), ids))
+		const second = id(fallbackCopy(part, new TextEncoder().encode(content), ids))
+
+		expect(first).toBe("100")
+		expect(second).toBe("101")
+	})
+
+	it("undoes a piece mark step followed by a plain mark step of the same mark exactly", async () => {
+		for (const plain of ["remove", "add", "appended"] as const) {
+			const session = await sessionOf({ body: p("hello wonderful world") })
+			const doc = session.state.doc
+			const bold = docxSchema.marks.bold.create()
+			const at = find(doc, "hello")
+			// Bold on "ll" and "won", none on "o w" between them.
+			const pieces = [
+				{ from: at + 2, to: at + 4, mark: bold },
+				{ from: at + 4, to: at + 7, mark: null },
+				{ from: at + 7, to: at + 10, mark: bold }
+			]
+			const tr = session.state.tr.step(new SetMarksStep(pieces, bold))
+
+			if (plain === "remove") tr.removeMark(at + 3, at + 12, bold)
+			if (plain === "add") tr.addMark(at + 3, at + 12, bold)
+
+			expect(session.dispatch(tr)).toBe(true)
+
+			// A plain mark step in a transaction of its own (history may group it with the piece step's).
+			if (plain === "appended") expect(session.dispatch(session.state.tr.removeMark(at + 3, at + 12, bold))).toBe(true)
+
+			while (session.execute({ type: "history.undo" })) continue
+
+			expect(session.state.doc.eq(doc)).toBe(true)
+		}
 	})
 })

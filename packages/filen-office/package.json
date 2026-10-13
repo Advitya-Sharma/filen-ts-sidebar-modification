@@ -75,6 +75,7 @@
 		"vitest": "^4.1.11"
 	},
 	"dependencies": {
+		"@filen/shared": "workspace:*",
 		"fflate": "0.8.3"
 	},
 	"peerDependencies": {

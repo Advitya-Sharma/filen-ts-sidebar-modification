@@ -2,7 +2,8 @@
 import { TextSelection } from "prosemirror-state"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import type { PagedEditor } from "@filen/office/core/docx/paged"
-import { docxSchema } from "@filen/office/core/docx/edit"
+import { docxSchema, freshSlice } from "@filen/office/core/docx/edit"
+import { sourceCopies } from "../core/docx/edit/session"
 import { EditSink } from "@filen/office/react/docx/editor"
 import { safeClipboardHtml } from "../react/docx/edit/sink"
 import { buildDocx, p } from "./docxSynthetic"
@@ -289,5 +290,154 @@ describe("EditSink clipboard commands", () => {
 		expect(editor.selection().from).toBe(0)
 		expect(editor.selection().to).toBe(editor.state.doc.content.size)
 		sink.destroy()
+	})
+})
+
+describe("EditSink paste of note references and Delete before a section break", () => {
+	let host: HTMLDivElement
+
+	beforeEach(() => {
+		host = document.createElement("div")
+		document.body.appendChild(host)
+	})
+
+	afterEach(() => host.remove())
+
+	const SEPARATORS =
+		'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
+		'<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+	const NOTE_BODY = '<w:p><w:r><w:t>One</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>' + p("Two")
+	const noteRefs = (editor: PagedEditor): number => {
+		let count = 0
+
+		editor.state.doc.descendants(node => {
+			if (node.type === docxSchema.nodes.note_ref) count++
+
+			return !node.isInline
+		})
+
+		return count
+	}
+
+	// The first paragraph (its note reference) pasted at the end, through the sink's view as a paste lands there.
+	const pasteFirst = (editor: PagedEditor, sink: EditSink): void => {
+		const doc = sink.view.state.doc
+		const context = editor.body.session.context
+		const part = editor.body.session.story.part.index
+		const slice = freshSlice(doc.slice(1, doc.child(0).nodeSize - 1), sourceCopies(context), part, part, true)
+		const at = doc.content.size - 1
+
+		sink.view.dispatch(sink.view.state.tr.replaceRange(at, at, slice).setMeta("uiEvent", "paste"))
+	}
+
+	it("pastes a note reference as a copy of its note, and refuses one whose note cannot be copied whole", async () => {
+		const whole =
+			'<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Note</w:t></w:r></w:p></w:footnote>'
+		const locked =
+			'<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Note</w:t></w:r></w:p>' +
+			'<w:sdt><w:sdtPr><w:id w:val="5"/><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Locked</w:t></w:r></w:p></w:sdtContent></w:sdt></w:footnote>'
+
+		for (const note of [whole, locked]) {
+			const { editor } = await pagedEditor(buildDocx({ body: NOTE_BODY, footnotes: SEPARATORS + note }))
+			const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+			const before = editor.state.doc
+
+			pasteFirst(editor, sink)
+
+			if (note === whole) expect(noteRefs(editor)).toBe(2)
+			else expect(editor.state.doc).toBe(before)
+
+			sink.destroy()
+			editor.dispose()
+		}
+	})
+
+	it("deletes the section break with Delete at the end of the paragraph ending a section", async () => {
+		const page =
+			'<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+
+		for (const tracked of [false, true]) {
+			const { editor, context } = await pagedEditor(
+				buildDocx({
+					body:
+						p("One") +
+						`<w:p><w:pPr><w:sectPr>${page}</w:sectPr></w:pPr><w:r><w:t>Breaker</w:t></w:r></w:p>` +
+						p("Two") +
+						`<w:sectPr>${page}</w:sectPr>`
+				})
+			)
+			const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+			const end = paragraphStart(editor, 1) + "Breaker".length
+
+			context.identity.author = "T"
+			context.review.tracking = tracked
+			select(sink, end, end)
+			sink.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }))
+			await editor.whenSettled()
+
+			const breaks = (): number => {
+				let count = 0
+
+				editor.state.doc.forEach(node => {
+					if (node.attrs["sectPr"] !== -1) count++
+				})
+
+				return count
+			}
+
+			// Untracked the paragraphs join and the break goes; tracked its paragraph mark is recorded as deleted.
+			if (tracked) expect(editor.state.doc.child(1).attrs["revision"]).not.toBe(0)
+			else {
+				expect(breaks()).toBe(0)
+				expect(paragraphs(editor)).toEqual(["One", "BreakerTwo"])
+			}
+
+			sink.destroy()
+			editor.dispose()
+		}
+	})
+	it("deletes the section break with Backspace at the start of the paragraph after it", async () => {
+		const page =
+			'<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+
+		for (const tracked of [false, true]) {
+			const { editor, context } = await pagedEditor(
+				buildDocx({
+					body:
+						p("One") +
+						`<w:p><w:pPr><w:sectPr>${page}</w:sectPr></w:pPr><w:r><w:t>Breaker</w:t></w:r></w:p>` +
+						p("Two") +
+						`<w:sectPr>${page}</w:sectPr>`
+				})
+			)
+			const sink = new EditSink(editor, host, { label: "Document", caretClientRect: () => undefined })
+			const end = paragraphStart(editor, 2)
+
+			context.identity.author = "T"
+			context.review.tracking = tracked
+			select(sink, end, end)
+			sink.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }))
+			await editor.whenSettled()
+
+			const breaks = (): number => {
+				let count = 0
+
+				editor.state.doc.forEach(node => {
+					if (node.attrs["sectPr"] !== -1) count++
+				})
+
+				return count
+			}
+
+			// Untracked the paragraphs join and the break goes; tracked its paragraph mark is recorded as deleted.
+			if (tracked) expect(editor.state.doc.child(1).attrs["revision"]).not.toBe(0)
+			else {
+				expect(breaks()).toBe(0)
+				expect(paragraphs(editor)).toEqual(["One", "BreakerTwo"])
+			}
+
+			sink.destroy()
+			editor.dispose()
+		}
 	})
 })

@@ -1,5 +1,5 @@
 import type { Mark, MarkType, Node } from "prosemirror-model"
-import { EditorState, type Transaction } from "prosemirror-state"
+import { EditorState, TextSelection, type Transaction } from "prosemirror-state"
 import { closeHistory, history, isHistoryTransaction, redo, redoDepth, undo, undoDepth } from "prosemirror-history"
 import { Item, type Story } from "../model/index"
 import { ReviewIndex } from "../review/index"
@@ -29,7 +29,9 @@ import {
 	type RunToggle
 } from "./formats"
 import { docxInvariantPlugins, isInternal, markInternal, type ListNormalizer } from "./invariants/index"
-import type { SourceCopies } from "./invariants/core"
+import type { CopiedElement, SourceCopies } from "./invariants/core"
+import { elementData } from "./copies"
+import { indexOriginals } from "../write/story"
 import { noteFieldCopy } from "./invariants/forms"
 import { legacyCopyState } from "../forms/controls"
 import { sessionGone, sessionMade } from "../forms/sessions"
@@ -39,7 +41,7 @@ import { MarkChanges, MarkSetChanges } from "./marks"
 import { AttrChanges } from "./attrs"
 import { baseFits } from "./formatting"
 import { knowOrigins } from "./origin"
-import { commandAllowed } from "./protection"
+import { commandAllowed, internalViolation } from "./protection"
 import { readOnlyReasons, type DocxReadOnlyReason } from "./readOnly"
 import { registeredTransformer, storyHandler, type DocxTransactionTransformer, type StoryCommandContext } from "./registry"
 import { FORMATTING_MARKS, NO_SOURCE, docxSchema, inlineLevel, type IndentAttrs, type LockReason } from "./schema"
@@ -174,11 +176,32 @@ function commentStory(context: DocxEditContext, story: Story, id: string): boole
 	return source === undefined || story.item < 0 || item < 0 || (item >= story.item && item < source.end(story.item))
 }
 
+// prosemirror-history keeps the plugins of the last state it recorded a change of (its mustPreserveItems
+// cache), and a session's plugins hold the session, its document and context: a closed session hands it a
+// state of its own instead.
+let historyHolder: EditorState | undefined
+
+function releaseHistory(): void {
+	historyHolder ??= EditorState.create({ schema: docxSchema, plugins: [history()] })
+	historyHolder.apply(historyHolder.tr.insertText(" ", 1))
+}
+
 const copiesOf = new WeakMap<DocxEditContext, SourceCopies>()
 
+const COPIED_KINDS: Readonly<Record<CopiedElement, number>> = { table: Item.Table, row: Item.Row, cell: Item.Cell, control: Item.Sdt }
+// What a copy's properties leave out: tracked changes (the original's), what the copy writes of its own (grid
+// offsets, span and merge, width) and a control's id.
+const LEFT_OUT: Readonly<Record<CopiedElement, ReadonlySet<string>>> = {
+	table: new Set(["tblPrChange"]),
+	row: new Set(["ins", "del", "trPrChange", "gridBefore", "gridAfter", "wBefore", "wAfter"]),
+	cell: new Set(["cellIns", "cellDel", "cellMerge", "tcPrChange", "tcW", "gridSpan", "hMerge", "vMerge"]),
+	control: new Set(["id"])
+}
+
 // What copies pasted into a document's stories keep that only their source's part holds (freshSlice, the
-// invariants): a legacy form field's w:ffData, and of another part's row or cell the properties its overrides can
-// carry (fill, vertical alignment, header repeat, grid offsets, width).
+// invariants): a legacy form field's w:ffData; of another part's table, row, cell or content control its
+// property element as data, and of a row or cell the properties its overrides carry (fill, vertical alignment,
+// header repeat, grid offsets, width).
 export function sourceCopies(context: DocxEditContext): SourceCopies {
 	const known = copiesOf.get(context)
 
@@ -234,6 +257,26 @@ export function sourceCopies(context: DocxEditContext): SourceCopies {
 			const width = sourceCellProps(part, context.store, own, false).width
 
 			return width?.type === "dxa" && width.value > 0 ? width.value : undefined
+		},
+		properties(kind, item, index) {
+			const part = partOf(index)
+
+			if (part === undefined || item < 0 || item >= part.count || part.kinds[item] !== COPIED_KINDS[kind]) return undefined
+
+			const row = part.aux[item] ?? -1
+			const element =
+				kind === "table"
+					? part.tables.tblPr[row]
+					: kind === "row"
+						? part.rows.trPr[row]
+						: kind === "cell"
+							? part.cells.tcPr[row]
+							: part.sdts.sdtPr[row]
+
+			if (element === undefined || element < 0) return undefined
+
+			// A control's copy keeps its binding: Word keeps a mapped control mapped wherever it is pasted.
+			return elementData(part, element, LEFT_OUT[kind])
 		}
 	}
 
@@ -339,6 +382,7 @@ export class DocxEditorSession {
 						return base !== undefined && baseFits(base, this.story.part.document)
 					},
 					copies: sourceCopies(context),
+					notes: this.story.story.kind === "body",
 					...(options.normalizeList !== undefined ? { normalizeList: options.normalizeList } : {})
 				})
 			]
@@ -629,6 +673,9 @@ export class DocxEditorSession {
 	// Applies a transaction from a view or a command. False when the invariants or the read-only gate
 	// refused it.
 	dispatch(tr: Transaction): boolean {
+		// The session's own transactions skip the transformers: protection still limits what they change.
+		if (isInternal(tr) && internalViolation(tr, this) !== undefined) return false
+
 		return this.apply(tr)
 	}
 
@@ -690,6 +737,7 @@ export class DocxEditorSession {
 		this.listeners.clear()
 		this.appliedListeners.clear()
 		sessionGone(this.context, this)
+		releaseHistory()
 	}
 
 	snapshot(): DocxEditorSnapshot {
@@ -699,6 +747,29 @@ export class DocxEditorSession {
 	}
 
 	// ---- internals --------------------------------------------------------------------------------------
+
+	// Runs a keystroke through the transformers and plugins and drops it: the code a first edit runs is compiled
+	// before the user types (work for an idle host; nothing is kept). Not while read-only or after an edit.
+	warmUp(): void {
+		if (this.disposed || this.readOnly || this.current.doc !== this.story.doc) return
+
+		const state = this.current
+		const at = TextSelection.findFrom(state.selection.$head, 1, true) ?? TextSelection.findFrom(state.doc.resolve(0), 1, true)
+
+		if (at === null) return
+
+		const tr = state.tr.setSelection(at).insertText("a")
+		// A tracked keystroke takes a change id: the next real one takes it again.
+		const ids = this.context.ids.saved()
+
+		try {
+			state.applyTransaction(this.transformer === undefined ? tr : this.transformer(tr, this))
+		} finally {
+			this.context.ids.restore(ids)
+		}
+
+		indexOriginals(this.story)
+	}
 
 	private apply(tr: Transaction): boolean {
 		if (this.disposed) return false
@@ -812,7 +883,7 @@ export class DocxEditorSession {
 	}
 
 	// Run-level content in the selection as [from, to) pieces with their paragraph (what formatting changes:
-	// not markers, fields or locked blocks).
+	// not markers or locked blocks).
 	private runPieces(state: EditorState = this.current): RunPiece[] {
 		const out: RunPiece[] = []
 
@@ -823,7 +894,8 @@ export class DocxEditorSession {
 			state.doc.nodesBetween(from, to, (node, pos, parent) => {
 				if (!node.isInline) return node.type !== nodes.locked_block
 
-				if (parent !== null && parent.type === nodes.paragraph && inlineLevel(node) === "run") {
+				// A field takes formatting as its runs do (§17.16.4.3).
+				if (parent !== null && parent.type === nodes.paragraph && (inlineLevel(node) === "run" || node.type === nodes.field)) {
 					const start = Math.max(from, pos)
 					const end = Math.min(to, pos + node.nodeSize)
 
@@ -1230,7 +1302,7 @@ export class DocxEditorSession {
 				return node.type !== nodes.locked_block
 			}
 
-			if (parent !== null && parent.type === nodes.paragraph && inlineLevel(node) === "run") {
+			if (parent !== null && parent.type === nodes.paragraph && (inlineLevel(node) === "run" || node.type === nodes.field)) {
 				const size = Math.min(to, pos + node.nodeSize) - Math.max(from, pos)
 
 				if (size > 0) this.addInline(tally, parent, node, size, sign)

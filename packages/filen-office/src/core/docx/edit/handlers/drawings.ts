@@ -10,6 +10,7 @@ import {
 	resizedExtent,
 	sameCrop,
 	selectedDrawing,
+	settleMedia,
 	sourceState,
 	type DrawingChanges,
 	type DrawingState
@@ -53,6 +54,9 @@ const document: DocumentHandlers = {
 	"image.insert": {
 		enabled: context => !context.session.readOnly && canInsertPicture(context.session.state),
 		run: (context, command) => {
+			// Used or not, the pictures are no longer on their way in: the next save may release what nothing uses.
+			settleMedia(context.context, [command.media, command.fallback])
+
 			if (pictureRefusal(context.context, command.media, command.fallback) !== undefined) return Promise.resolve(false)
 
 			const tr = insertPicture(context, command)

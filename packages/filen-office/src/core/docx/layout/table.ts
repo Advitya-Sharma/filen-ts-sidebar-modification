@@ -181,6 +181,78 @@ function floatingPosition(position: TablePositionProps | undefined): FloatingTab
 	}
 }
 
+// A table's state where a page opens between two of its rows, no row split and no vertical merge running on
+// (see TableLayout.snapshot): layout can restart there. The grid stays as the table's first page set it.
+export interface TableSnapshot {
+	readonly row: number
+	readonly headerRows: number
+	readonly stalled: number
+	// Rows were placed in the area before, and its header rows were repeated there.
+	readonly placed: boolean
+	readonly repeated: boolean
+	readonly grid: readonly number[]
+	readonly gridX: readonly number[]
+	readonly left: number
+	readonly width: number
+	// The row split at the page before: its cells' flows (null for a cell it does not continue). Compared only,
+	// to meet an earlier layout again: layout never restarts at such a page.
+	readonly cells: readonly (FlowSnapshot | null)[] | undefined
+}
+
+// The rows of table `table` laid out in revision view `view`, appended to `out`.
+export function tableRows(part: StoryPart, table: number, view: RevisionView, out: number[] = []): number[] {
+	for (let item = table + 1; item < part.end(table);) {
+		const kind = part.kinds[item]
+
+		if (kind === Item.Row) {
+			if (view === RevisionView.Markup || !part.hidden(item, view)) out.push(item)
+
+			item = part.end(item)
+		} else if (
+			kind === Item.Sdt ||
+			kind === Item.CustomXml ||
+			kind === Item.AlternateContent ||
+			kind === Item.Insertion ||
+			kind === Item.Deletion
+		) {
+			item++
+		} else {
+			item = part.end(item)
+		}
+	}
+
+	return out
+}
+
+// Token of a table resumed from a snapshot until its first area (no area has it).
+const RESUMED = -2
+
+// The index in `rows` (items of a table's rows, ascending) of the row holding `item`, or -1.
+export function rowIndex(part: StoryPart, rows: readonly number[], item: number): number {
+	let low = 0
+	let high = rows.length - 1
+
+	while (low <= high) {
+		const mid = (low + high) >> 1
+
+		if ((rows[mid] ?? 0) <= item) low = mid + 1
+		else high = mid - 1
+	}
+
+	const row = rows[high]
+
+	return row !== undefined && item < part.end(row) ? high : -1
+}
+
+export function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
+	if (a === b) return true
+	if (a.length !== b.length) return false
+
+	for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) return false
+
+	return true
+}
+
 export class TableLayout {
 	readonly flow: BlockFlow
 	readonly engine: Engine
@@ -194,8 +266,8 @@ export class TableLayout {
 	private readonly rows: number[] = []
 	private readonly direct: TableFormat
 	private readonly floating: FloatingTablePosition | undefined
-	private readonly grid: number[] = []
-	private readonly gridX: number[] = []
+	private grid: number[] = []
+	private gridX: number[] = []
 	private tableX = 0
 	private tableWidth = 0
 	private headerRows = 0
@@ -228,7 +300,8 @@ export class TableLayout {
 	private cut = false
 	private readonly cells = new Map<number, TableCellProps>()
 
-	constructor(flow: BlockFlow, part: StoryPart, item: number, area: Area) {
+	// `resume`: continues from a snapshot (see snapshot()) in a page's first area.
+	constructor(flow: BlockFlow, part: StoryPart, item: number, area: Area, resume?: TableSnapshot) {
 		const engine = flow.engine
 
 		this.flow = flow
@@ -242,32 +315,86 @@ export class TableLayout {
 		this.direct = engine.resolver.table(engine.store.table(part.document, tblPr))
 		this.floating = floatingPosition(this.direct.props.position)
 		this.collectRows()
-		this.computeGrid(area)
+
+		if (resume === undefined) {
+			this.computeGrid(area)
+
+			return
+		}
+
+		this.grid = resume.grid as number[]
+		this.gridX = resume.gridX as number[]
+		this.tableX = resume.left
+		this.tableWidth = resume.width
+		this.row = resume.row
+		this.headerRows = resume.headerRows
+		this.stalled = resume.stalled
+		this.rowsPlaced = resume.placed ? 1 : 0
+		// The area before is gone: a token no area has, the header rows repeated there or not.
+		this.token = RESUMED
+		this.repeatedOn = resume.repeated ? RESUMED : -1
+		this.started = true
+		this.breakChecked = true
+	}
+
+	// The state to continue from in the next page's first area, when a page opens now: undefined unless the
+	// table flows with the text with no vertical merge running on (a split row's is for comparing only).
+	snapshot(): TableSnapshot | undefined {
+		if (!this.started || !this.breakChecked || this.repeating || this.floated || this.floating !== undefined) return undefined
+
+		for (const flow of this.mergeFlows) if (flow !== undefined) return undefined
+
+		let cells: (FlowSnapshot | null)[] | undefined
+
+		if (this.continuing) {
+			const info = this.info(this.row)
+
+			if (info === undefined) return undefined
+
+			cells = []
+
+			for (const [k, slot] of info.slots.entries()) {
+				const state = slot.continued ? null : this.pool[k]?.snapshot()
+
+				if (state === undefined) return undefined
+
+				cells.push(state)
+			}
+		}
+
+		return {
+			row: this.row,
+			headerRows: this.headerRows,
+			stalled: this.stalled,
+			placed: this.rowsPlaced > 0,
+			repeated: this.repeatedOn === this.token,
+			grid: this.grid,
+			gridX: this.gridX,
+			left: this.tableX,
+			width: this.tableWidth,
+			cells
+		}
+	}
+
+	// Whether item `item` (in a cell) is laid out from here on: in a row not laid out yet, or a header row the
+	// table repeats.
+	ahead(item: number): boolean {
+		const current = this.rows[this.row]
+
+		if (current !== undefined && item >= current) return true
+
+		const header = this.rows[this.headerRows - 1]
+
+		return header !== undefined && item < this.part.end(header)
+	}
+
+	// The index among the rows laid out of the row holding item `item`, or -1 (in no row laid out).
+	rowOf(item: number): number {
+		return rowIndex(this.part, this.rows, item)
 	}
 
 	private collectRows(): void {
-		const part = this.part
-		const view = this.engine.view
-
-		for (let item = this.item + 1; item < part.end(this.item);) {
-			const kind = part.kinds[item]
-
-			if (kind === Item.Row) {
-				if (view === RevisionView.Markup || !part.hidden(item, view)) this.rows.push(item)
-
-				item = part.end(item)
-			} else if (
-				kind === Item.Sdt ||
-				kind === Item.CustomXml ||
-				kind === Item.AlternateContent ||
-				kind === Item.Insertion ||
-				kind === Item.Deletion
-			) {
-				item++
-			} else {
-				item = part.end(item)
-			}
-		}
+		tableRows(this.part, this.item, this.engine.view, this.rows)
 	}
 
 	private cellItems(row: number): number[] {
@@ -505,6 +632,11 @@ export class TableLayout {
 		slot.rows = rows
 
 		return rows
+	}
+
+	// Rows repeated at the top of every page (counted once the table began).
+	get headerCount(): number {
+		return this.headerRows
 	}
 
 	// The row layout continues at.

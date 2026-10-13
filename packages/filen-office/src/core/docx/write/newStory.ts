@@ -71,6 +71,10 @@ export function ownedByCopy(relationship: Relationship, pkg: { has(name: string)
 	)
 }
 
+// Relationship ids a copied note names the parts it owns by (stories/clone.ts cloneNote): the save copies each
+// part and writes the id of the notes part's relationship to the copy in their place (write/save.ts).
+export const COPIED_RELATIONSHIP = "filenCopiedPart"
+
 // A name for a copy of part `name` next to it, numbered as Word numbers its parts (chart1.xml -> chart2.xml).
 export function copiedPartName(name: string, free: (candidate: string) => boolean): string {
 	const slash = name.lastIndexOf("/")

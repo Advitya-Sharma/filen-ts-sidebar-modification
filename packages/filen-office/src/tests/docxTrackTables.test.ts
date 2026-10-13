@@ -607,6 +607,38 @@ describe("the source's tracked table property changes", () => {
 		expect(await documentXml(await layout.save())).not.toContain("tcPrChange")
 	})
 
+	it("rejects a column insertion one of whose cells a merge took in not at all, rather than half", async () => {
+		const steps = [
+			track,
+			(session: DocxEditorSession) => select(session, "b2"),
+			{ type: "table.column.insertRight" } as const,
+			(session: DocxEditorSession) => {
+				const doc = session.state.doc
+
+				session.dispatch(session.state.tr.setSelection(TextSelection.create(doc, textPos(doc, "b2"), textPos(doc, "c2") + 1)))
+			},
+			{ type: "table.cells.merge" } as const
+		]
+
+		for (const reopen of [false, true]) {
+			const { bytes, layout } = await edited(docx(GRID3), steps)
+			const target = reopen ? await editedLayout(bytes) : layout
+			const before = shape(firstTable(target.session.state.doc))
+			const pending = storyReviewIndex(target.session).size
+
+			const xml = await documentXml(await target.save())
+
+			expect(await resolve(target, { all: true }, false)).toBeGreaterThan(0)
+			expect(await documentXml(await target.save())).toBe(xml)
+			expect(shape(firstTable(target.session.state.doc))).toEqual(before)
+			expect(storyReviewIndex(target.session).size).toBe(pending)
+
+			const saved = await target.save()
+
+			expect(pageDigest(target.layout)).toEqual(await savedDigest(saved))
+		}
+	})
+
 	it.skipIf(!existsSync(join(CORPUS_DIR, "docx", "oxpt__RA001-Tracked-Revisions-01.docx")))(
 		"resolves Word's own table property changes in RA001",
 		async () => {

@@ -1,6 +1,6 @@
 import { Fragment, type Mark, type MarkType, type Node, type Schema } from "prosemirror-model"
 import type { Transaction } from "prosemirror-state"
-import { AddMarkStep, Step, StepResult, type Mappable } from "prosemirror-transform"
+import { AddMarkStep, RemoveMarkStep, Step, StepResult, type Mappable } from "prosemirror-transform"
 
 // Run-level content of [from, to) and the mark of the step's type it gets (null: none of that type).
 export interface MarkPiece {
@@ -27,16 +27,24 @@ interface Range {
 // way takes seconds and gigabytes. This step changes the blocks the pieces touch once, keeping every other block
 // (identity included).
 //
-// It is an AddMarkStep over [first piece's from, last piece's to) with `mark` to whatever reads steps by kind
-// (changed ranges, layout, review index, tracked formatting); its inverse is a step of the same kind holding
-// what each piece had, so an undo restores exactly.
-abstract class PieceMarksStep<P extends Range> extends AddMarkStep {
+// It covers [first piece's from, last piece's to) with `mark` standing for what it sets, for whatever reads mark
+// steps by kind (isMarkStep: changed ranges, layout, review index, tracked formatting); its inverse is a step of
+// the same kind holding what each piece had, so an undo restores exactly. It is no AddMarkStep: AddMarkStep.merge
+// would take it for one (prosemirror-history merges an event's inverted steps) and set one mark over the whole
+// range; a Step merges with nothing.
+abstract class PieceMarksStep<P extends Range> extends Step {
 	readonly pieces: readonly P[]
+	readonly from: number
+	readonly to: number
+	readonly mark: Mark
 
 	constructor(pieces: readonly P[], mark: Mark) {
-		super(pieces[0]?.from ?? 0, pieces[pieces.length - 1]?.to ?? 0, mark)
+		super()
 
 		this.pieces = pieces
+		this.from = pieces[0]?.from ?? 0
+		this.to = pieces[pieces.length - 1]?.to ?? 0
+		this.mark = mark
 	}
 
 	// The marks of content with `marks` under `piece`.
@@ -125,10 +133,7 @@ abstract class PieceMarksStep<P extends Range> extends AddMarkStep {
 		else out.push(...parts)
 	}
 
-	// (`doc`, the document the step applies to, is always passed: AddMarkStep's own signature leaves it out.)
-	override invert(doc?: Node): Step {
-		if (doc === undefined) throw new RangeError("A mark step's invert needs the document")
-
+	override invert(doc: Node): Step {
 		const pieces: P[] = []
 		const cursor = new Cursor(this.pieces)
 		const add = (piece: P): void => {
@@ -183,10 +188,7 @@ abstract class PieceMarksStep<P extends Range> extends AddMarkStep {
 		return pieces.length === 0 ? null : this.withPieces(pieces)
 	}
 
-	// Never merged: a merged mark step would apply one mark to the whole range.
-	override merge(): Step | null {
-		return null
-	}
+	abstract override toJSON(): { stepType: string }
 }
 
 // Sets the mark of one type piece by piece (each piece's `mark`; null removes the type's).
@@ -306,6 +308,24 @@ export class SetMarkSetsStep extends PieceMarksStep<MarksPiece> {
 }
 
 Step.jsonID("docxSetMarkSets", SetMarkSetsStep)
+
+export type PieceStep = SetMarksStep | SetMarkSetsStep
+
+// A step setting inline marks over [from, to): an AddMarkStep, or a piece step (its covering range; `mark`
+// stands for what it sets).
+export function isAddMarkLike(step: Step): step is AddMarkStep | PieceStep {
+	return step instanceof AddMarkStep || step instanceof PieceMarksStep
+}
+
+// A step changing inline marks over [from, to): an AddMarkStep, a RemoveMarkStep or a piece step.
+export function isMarkStep(step: Step): step is AddMarkStep | RemoveMarkStep | PieceStep {
+	return step instanceof AddMarkStep || step instanceof RemoveMarkStep || step instanceof PieceMarksStep
+}
+
+// The mark types a mark step changes.
+export function markStepTypes(step: AddMarkStep | RemoveMarkStep | PieceStep): readonly MarkType[] {
+	return step instanceof SetMarkSetsStep ? step.types : [step.mark.type]
+}
 
 // The pieces of a SetMarksStep gathered in document order (pieces next to each other getting the same mark
 // join), made into the step at the end.

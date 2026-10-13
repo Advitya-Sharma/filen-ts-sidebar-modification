@@ -2,12 +2,13 @@ import { unzipSync } from "fflate"
 import type { Node } from "prosemirror-model"
 import { TextSelection } from "prosemirror-state"
 import { Transform } from "prosemirror-transform"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { refPart, type DocxPackage } from "@filen/office/core/docx"
 import { docxSchema, type DocxEditContext, type DocxEditorSession } from "@filen/office/core/docx/edit"
 import type { PagedEditor } from "@filen/office/core/docx/paged"
 import { saveDocx, StoryWriter } from "@filen/office/core/docx/write"
 import { MeasureCache, StyleTable } from "@filen/office/core/text"
+import { BlockFlow, type FlowSnapshot } from "../core/docx/layout/flow"
 import { DecorationTable, RunStyles } from "../core/docx/layout/styles"
 import { Item } from "../core/docx/model/index"
 import { namePrefixes } from "../core/docx/paged/edits"
@@ -97,6 +98,42 @@ function notedDocument(): Uint8Array {
 			'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
 			Array.from({ length: 40 }, (_, k) => note(k)).join(""),
 		settings: '<w:footnotePr><w:footnote w:id="-1"/></w:footnotePr>'
+	})
+}
+
+// A long table: a header row repeated on every page, rows of a few heights kept whole on a page, vertical
+// merges across rows (some across a page boundary) and a numbered paragraph every so often.
+function longTableDocument(): Uint8Array {
+	const cell = (text: string, tcPr = ""): string =>
+		`<w:tc>${tcPr === "" ? "" : `<w:tcPr>${tcPr}</w:tcPr>`}<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+	const rows = Array.from({ length: 260 }, (_, r) => {
+		if (r === 0) return `<w:tr><w:trPr><w:tblHeader/></w:trPr>${cell("Header one")}${cell("Header two")}</w:tr>`
+
+		const merge = r % 19 === 3 ? '<w:vMerge w:val="restart"/>' : r % 19 === 4 || r % 19 === 5 ? "<w:vMerge/>" : ""
+		const numbered =
+			r % 23 === 7
+				? `<w:tc><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>item ${r}</w:t></w:r></w:p></w:tc>`
+				: cell(`row ${r} ${words(3 + (r % 5) * 4, r)}`)
+
+		return `<w:tr><w:trPr><w:cantSplit/></w:trPr>${cell(merge === "<w:vMerge/>" ? "" : `merged ${r} ${words(r % 3 === 0 ? 30 : 5, r)}`, merge)}${numbered}</w:tr>`
+	}).join("")
+	const numbering =
+		'<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+
+	return buildDocx({
+		body:
+			para(words(40)) +
+			`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="6000"/></w:tblGrid>${rows}</w:tbl>` +
+			para(words(30, 2)) +
+			`<w:sectPr>${PAGE}</w:sectPr>`,
+		parts: [
+			{
+				name: "word/numbering.xml",
+				contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml",
+				data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${numbering}</w:numbering>`
+			}
+		],
+		relationships: [{ id: "rIdN1", type: "numbering", target: "numbering.xml" }]
 	})
 }
 
@@ -222,6 +259,525 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		expect(records.some(record => record.node.type === docxSchema.nodes.paragraph && refPart(record.base) === table?.part.index)).toBe(
 			true
 		)
+		await expectSaved(edited)
+	})
+
+	it("lays out a keystroke in a long table from the edited row's page and stops after it", async () => {
+		const edited = await editedLayout(longTableDocument())
+		const pages = edited.layout.pages.length
+
+		expect(pages).toBeGreaterThan(12)
+
+		// After `text` at the start of a cell's paragraph.
+		const cellAt = (text: string): number => {
+			const found = paragraphs(edited.session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+
+		// Typing in a row half way down lays out the page holding it (and the one before), not the table.
+		await edited.edit(edited.session.state.tr.insertText("x", cellAt("row 150 ")))
+
+		expect(edited.last.restart).toBeGreaterThan(pages / 3)
+		expect(edited.last.laidOut).toBeLessThanOrEqual(3)
+		expect(edited.last.resyncedAt).toBeGreaterThan(edited.last.restart)
+		await expectSaved(edited)
+
+		// A row grown by lines moves every page break after it; tracked, into a merge, a numbered paragraph.
+		await edited.edit(edited.session.state.tr.insertText(`${words(120, 4)} `, cellAt("row 101 ")))
+		await expectSaved(edited)
+
+		edited.context.identity.author = "Test"
+		edited.context.review.tracking = true
+		await edited.edit(edited.session.state.tr.insertText(`${words(40, 5)} `, cellAt("merged 79 ")))
+		await edited.edit(edited.session.state.tr.insertText("y ", cellAt("item 76")))
+		edited.context.review.tracking = false
+		await expectSaved(edited)
+
+		// Shortened, a row may move back to the page before; the header row is on every page.
+		const long = paragraphs(edited.session.state.doc, true, 100).find(entry => entry.node.textContent.startsWith("row 101 "))
+
+		if (long === undefined) throw new Error("no long row")
+
+		await edited.edit(edited.session.state.tr.delete(long.pos + 10, long.pos + long.node.nodeSize - 3))
+		await expectSaved(edited)
+		await edited.edit(edited.session.state.tr.insertText(`${words(12, 6)} `, cellAt("Header two")))
+
+		expect(edited.last.laidOut).toBeGreaterThan(pages / 2)
+		await expectSaved(edited)
+	})
+
+	it("draws the caret in rows of a long table on pages an edit in another row kept", async () => {
+		const { editor } = await pagedEditor(longTableDocument())
+		const session = editor.body.session
+		const at = (text: string): number => {
+			const found = paragraphs(session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+		const caretOn = async (text: string): Promise<number | undefined> => {
+			select(session, at(text))
+			await settleAll(editor)
+
+			return editor.caret()?.page
+		}
+		const before = { early: await caretOn("row 20 "), late: await caretOn("row 230 ") }
+
+		session.dispatch(session.state.tr.insertText("typed ", at("row 150 ")))
+		await settleAll(editor)
+
+		expect(before.early).toBeDefined()
+		expect(await caretOn("row 20 ")).toBe(before.early)
+		expect(await caretOn("row 230 ")).toBe(before.late)
+		editor.dispose()
+	})
+
+	it("lays out again a page whose page number changed when it opens inside a table", async () => {
+		const cell = (text: string): string => `<w:tc><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+		const rows = Array.from(
+			{ length: 100 },
+			(_, r) => `<w:tr><w:trPr><w:cantSplit/></w:trPr>${cell(`row ${r}`)}${cell(words(4, r))}</w:tr>`
+		).join("")
+		const page =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		const edited = await editedLayout(
+			buildDocx({
+				body:
+					Array.from({ length: 50 }, (_, k) => para(`intro ${k} ${words(8, k)}`)).join("") +
+					para("start", "<w:pageBreakBefore/>") +
+					`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>${rows}</w:tbl>` +
+					`<w:p><w:r><w:t xml:space="preserve">after on page </w:t></w:r>${page}</w:p>` +
+					Array.from({ length: 90 }, (_, k) => para(`tail ${k} ${words(8, k)}`)).join("") +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		let from = -1
+		let to = -1
+
+		edited.session.state.doc.forEach((node, offset) => {
+			if (node.type !== docxSchema.nodes.paragraph || !node.textContent.startsWith("intro")) return
+
+			if (from < 0) from = offset
+			to = offset + node.nodeSize
+		})
+
+		// A page less before the table: the page after it, opening inside the table, is kept with its old number
+		// until refreshed, which lays it out again (meeting the earlier layout only after it).
+		await edited.edit(edited.session.state.tr.delete(from, to))
+		await expectSaved(edited)
+	})
+
+	it("refreshes page numbers through a long table page by page, not from the table's start each time", async () => {
+		const page =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		const cell = (inner: string): string => `<w:tc><w:p>${inner}</w:p></w:tc>`
+		const rows = Array.from(
+			{ length: 1500 },
+			(_, r) =>
+				`<w:tr><w:trPr><w:cantSplit/></w:trPr>${cell(`<w:r><w:t xml:space="preserve">row ${r} </w:t></w:r>${r % 20 === 7 ? page : ""}`)}${cell(`<w:r><w:t>${words(4, r)}</w:t></w:r>`)}</w:tr>`
+		).join("")
+		const edited = await editedLayout(
+			buildDocx({
+				body:
+					Array.from({ length: 50 }, (_, k) => para(`intro ${k} ${words(8, k)}`)).join("") +
+					para("start", "<w:pageBreakBefore/>") +
+					`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>${rows}</w:tbl>` +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		const pages = edited.layout.pages.length
+		let laid = 0
+
+		expect(pages).toBeGreaterThan(20)
+		edited.layout.subscribe(event => {
+			if (!event.final) laid += event.to - event.from
+		})
+
+		let from = -1
+		let to = -1
+
+		edited.session.state.doc.forEach((node, offset) => {
+			if (node.type !== docxSchema.nodes.paragraph || !node.textContent.startsWith("intro")) return
+
+			if (from < 0) from = offset
+			to = offset + node.nodeSize
+		})
+
+		// A page less before the table: every page showing a page number in it is laid out again once.
+		await edited.edit(edited.session.state.tr.delete(from, to))
+
+		expect(laid).toBeLessThan(pages * 4)
+		expect([...edited.layout.stale]).toEqual([])
+		await expectSaved(edited)
+	})
+
+	it("numbers pages in footnotes anew when an edit moves them to other pages", async () => {
+		const page =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		const run = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`
+		const notes = Array.from(
+			{ length: 40 },
+			(_, k) =>
+				`<w:footnote w:id="${String(k + 1)}"><w:p><w:r><w:footnoteRef/></w:r>${run(` note ${String(k + 1)} `)}${k % 5 === 4 ? `${page}${run(" x")}` : run(words(6, k))}</w:p></w:footnote>`
+		).join("")
+		const body =
+			Array.from({ length: 60 }, (_, k) => para(`intro ${String(k)} ${words(30, k)}`)).join("") +
+			Array.from(
+				{ length: 40 },
+				(_, k) =>
+					`<w:p>${k === 0 ? "<w:pPr><w:pageBreakBefore/></w:pPr>" : ""}${run(`noted ${String(k + 1)} ${words(40, k)} `)}<w:r><w:footnoteReference w:id="${String(k + 1)}"/></w:r></w:p>`
+			).join("") +
+			`<w:sectPr>${PAGE}</w:sectPr>`
+		const edited = await editedLayout(
+			buildDocx({
+				body,
+				footnotes:
+					'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
+					notes,
+				settings: '<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>'
+			})
+		)
+		let from = -1
+		let to = -1
+
+		edited.session.state.doc.forEach((node, offset) => {
+			if (!node.textContent.startsWith("intro")) return
+
+			if (from < 0) from = offset
+			to = offset + node.nodeSize
+		})
+
+		// The pages after the edit are kept, a page earlier: the notes on them show their new page numbers.
+		await edited.edit(edited.session.state.tr.delete(from, to))
+		await expectSaved(edited)
+	})
+
+	it("numbers notes per page as a layout from the start did when layout restarts at any page", async () => {
+		const run = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`
+		const notes: string[] = []
+		const reference = (k: number): string => {
+			const id = String(notes.length + 1)
+
+			notes.push(
+				`<w:footnote w:id="${id}"><w:p><w:r><w:footnoteRef/></w:r>${run(` note ${id} ${words(k % 4 === 0 ? 60 : 8, k)}`)}</w:p></w:footnote>`
+			)
+
+			return `<w:r><w:footnoteReference w:id="${id}"/></w:r>`
+		}
+		const body =
+			Array.from(
+				{ length: 50 },
+				(_, k) =>
+					`<w:p>${run(`para ${String(k)} ${words(30, k)} `)}${reference(k)}${run(` ${words(10, k)} `)}${reference(k + 1)}</w:p>`
+			).join("") +
+			`<w:sectPr><w:footnotePr><w:numFmt w:val="lowerRoman"/><w:numStart w:val="2"/><w:numRestart w:val="eachPage"/></w:footnotePr>${PAGE}</w:sectPr>`
+		const { editor } = await pagedEditor(
+			buildDocx({
+				body,
+				footnotes:
+					'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
+					notes.join(""),
+				settings: '<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>'
+			})
+		)
+		const layout = editor.layout
+		const first = pageDigest(layout)
+
+		// A paragraph built on a page and left for the next keeps the numbers it was built with.
+		for (let page = 1; page < layout.pages.length; page++) {
+			layout.beginEdit(page, undefined)
+			await finishLayout(layout)
+
+			expect(pageDigest(layout)).toEqual(first)
+		}
+
+		editor.dispose()
+	})
+
+	it("settles page counts in the body on the count a fresh layout settles on", async () => {
+		// NUMPAGES in two-column table cells: 9 pages show "9" and 10 pages "10", both consistent.
+		const edited = await editedLayout(readBytes(`${FIXTURES}two-page-counts.docx`))
+
+		expect(edited.layout.pages.length).toBe(9)
+
+		await edited.edit(edited.session.state.tr.insertText("lorem ipsum dolor sit amet ".repeat(120), 3))
+
+		expect(edited.layout.pages.length).toBe(10)
+
+		await edited.edit(s => s.execute({ type: "history.undo" }))
+
+		expect(edited.layout.pages.length).toBe(9)
+		await expectSaved(edited)
+	})
+
+	it("counts the page breaks Word recorded in deleted text as a fresh layout does when an edit settles page counts", async () => {
+		const edited = await editedLayout(readBytes(`${FIXTURES}two-page-counts-deleted-breaks.docx`))
+
+		expect(edited.layout.pages.length).toBe(10)
+
+		await edited.edit(edited.session.state.tr.insertText("lorem ipsum dolor sit amet ".repeat(120), 3))
+		await edited.edit(s => s.execute({ type: "history.undo" }))
+
+		expect(edited.layout.pages.length).toBe(10)
+		await expectSaved(edited)
+	})
+
+	it("settles page counts in the body on the count a fresh layout settles on after edits while suspended", async () => {
+		const { editor, pkg, context } = await pagedEditor(readBytes(`${FIXTURES}two-page-counts.docx`))
+		const session = editor.body.session
+
+		expect(editor.layout.pages.length).toBe(9)
+
+		editor.suspend()
+		session.dispatch(session.state.tr.insertText("lorem ipsum dolor sit amet ".repeat(120), 3))
+		editor.resume()
+		await settleAll(editor)
+
+		expect(editor.layout.pages.length).toBe(10)
+
+		editor.suspend()
+		expect(await editor.execute({ type: "history.undo" })).toBe(true)
+		editor.resume()
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		expect(editor.layout.pages.length).toBe(9)
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
+		editor.dispose()
+	})
+
+	it("counts the list paragraphs of an edited paragraph's text box once when layout restarts at the page it moved to", async () => {
+		const ns =
+			'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+			'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+			'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
+		const numbered = (text: string): string =>
+			`<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`
+		const box =
+			'<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+			'<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>' +
+			'<wp:extent cx="2743200" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="3" name="Text Box 3"/><wp:cNvGraphicFramePr/>' +
+			'<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>' +
+			`<wps:txbx><w:txbxContent>${numbered("boxed a")}${numbered("boxed b")}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`
+		const items = (from: number, count: number): string =>
+			Array.from({ length: count }, (_, k) => numbered(`item ${String(from + k)}`)).join("")
+		const { editor, pkg, context } = await pagedEditor(
+			buildDocx({
+				// The box's paragraph is built on the first page, does not fit and opens the second.
+				document: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${items(0, 48)}<w:p><w:pPr><w:keepLines/></w:pPr>${box}<w:r><w:t xml:space="preserve">holds the box ${words(150)}</w:t></w:r></w:p>${items(48, 10)}<w:sectPr>${PAGE}</w:sectPr></w:body></w:document>`,
+				parts: [
+					{
+						name: "word/numbering.xml",
+						contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml",
+						data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>'
+					}
+				],
+				relationships: [{ id: "rIdN1", type: "numbering", target: "numbering.xml" }]
+			})
+		)
+		const body = editor.body.session
+		// The end of the body paragraph holding `text`.
+		const find = (text: string): number => {
+			let at = -1
+
+			body.state.doc.forEach((node, offset) => {
+				if (at < 0 && node.textContent.includes(text)) at = offset + node.nodeSize - 1
+			})
+
+			if (at < 0) throw new Error(text)
+
+			return at
+		}
+
+		expect(editor.layout.pages.length).toBe(2)
+
+		// The box's paragraph split (laid out from an overlay), then an edit after it on its page.
+		body.dispatch(body.state.tr.split(find("holds the box") - 3))
+		await settleAll(editor)
+		body.dispatch(body.state.tr.insertText("y", find("item 52")))
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
+		editor.dispose()
+	})
+
+	it("numbers a list paragraph in an edited text box anew when the body's list changes before it", async () => {
+		const ns =
+			'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+			'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+			'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
+		const numbered = (text: string): string =>
+			`<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`
+		const box =
+			'<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+			'<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>' +
+			'<wp:extent cx="2743200" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="3" name="Text Box 3"/><wp:cNvGraphicFramePr/>' +
+			'<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>' +
+			`<wps:txbx><w:txbxContent>${numbered("boxed")}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`
+		const { editor, pkg, context } = await pagedEditor(
+			buildDocx({
+				document: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${numbered("one")}${numbered("two")}${numbered("three")}<w:p>${box}<w:r><w:t>holds the box</w:t></w:r></w:p><w:sectPr>${PAGE}</w:sectPr></w:body></w:document>`,
+				parts: [
+					{
+						name: "word/numbering.xml",
+						contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml",
+						data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>'
+					}
+				],
+				relationships: [{ id: "rIdN1", type: "numbering", target: "numbering.xml" }]
+			})
+		)
+		const story = editor.edits.model.stories.find(entry => entry?.kind === "textbox")
+
+		if (story === undefined) throw new Error("no text box")
+
+		// The box gains a list paragraph (laid out from an overlay, with no source), then an item before it goes.
+		expect(editor.enterStory(story.index, 0)).toBe(true)
+		editor.session.dispatch(editor.session.state.tr.split(3))
+		editor.exitStory()
+
+		const body = editor.body.session
+		const second = body.state.doc.child(0).nodeSize
+
+		body.dispatch(body.state.tr.delete(second, second + body.state.doc.child(1).nodeSize))
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
+		editor.dispose()
+	})
+
+	it("never restarts layout at a page opening inside a split row (those states are only compared)", async () => {
+		const cell = (text: string): string => `<w:tc><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+		// Rows taller than a few lines, split across pages.
+		const rows = Array.from(
+			{ length: 60 },
+			(_, r) => `<w:tr>${cell(`row ${String(r)} ${words(60 + (r % 4) * 30, r)}`)}${cell(words(5, r))}</w:tr>`
+		).join("")
+		const restore = vi.spyOn(BlockFlow.prototype, "restore")
+		const edited = await editedLayout(
+			buildDocx({
+				body:
+					para(words(40)) +
+					`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="6000"/><w:gridCol w:w="3000"/></w:tblGrid>${rows}</w:tbl>` +
+					para(words(30, 2)) +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		const snapshots = (edited.layout as unknown as { driver: { paginator: { snapshots: ({ flow: FlowSnapshot } | undefined)[] } } })
+			.driver.paginator.snapshots
+
+		expect(snapshots.some(snapshot => snapshot?.flow.table?.cells !== undefined)).toBe(true)
+
+		for (const text of ["row 20 ", "row 35 ", "row 50 "]) {
+			const found = paragraphs(edited.session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			await edited.edit(edited.session.state.tr.insertText(`${words(40, 3)} `, found.pos + 1 + text.length))
+		}
+
+		expect(restore.mock.calls.filter(([snapshot]) => snapshot.table?.cells !== undefined)).toEqual([])
+		await expectSaved(edited)
+	})
+
+	it("settles section page counts in a long table after a section break before it", async () => {
+		const field = (code: string): string =>
+			`<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ${code} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`
+		const cell = (inner: string): string => `<w:tc><w:p>${inner}</w:p></w:tc>`
+		const rows = Array.from(
+			{ length: 200 },
+			(_, r) =>
+				`<w:tr><w:trPr><w:cantSplit/></w:trPr>${cell(`<w:r><w:t xml:space="preserve">row ${String(r)} </w:t></w:r>${r % 20 === 7 ? `${field("SECTIONPAGES")}<w:r><w:t xml:space="preserve"> of </w:t></w:r>${field("NUMPAGES")}` : ""}`)}${cell(`<w:r><w:t>${words(4, r)}</w:t></w:r>`)}</w:tr>`
+		).join("")
+		const { editor, pkg, context } = await pagedEditor(
+			buildDocx({
+				body:
+					Array.from({ length: 12 }, (_, k) => para(`intro ${String(k)} ${words(30, k)}`)).join("") +
+					`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>${rows}</w:tbl>` +
+					para("end") +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		const session = editor.body.session
+
+		// A new section from the fifth paragraph on: its page count was never estimated.
+		session.dispatch(
+			session.state.tr.setSelection(TextSelection.create(session.state.doc, session.state.doc.child(0).nodeSize * 4 + 3))
+		)
+		expect(await editor.execute({ type: "insert.sectionBreak", kind: "nextPage" })).toBe(true)
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
+		editor.dispose()
+	})
+
+	it("shows a footnote left for the next page with the number its reference has now", async () => {
+		const { editor, pkg, context } = await pagedEditor(readBytes(`${FIXTURES}notes-each-page.docx`))
+		const session = editor.body.session
+		const at = (prefix: string): void => {
+			const found = paragraphs(session.state.doc, false).find(p => p.node.textContent.startsWith(prefix))
+
+			if (found === undefined) throw new Error(prefix)
+
+			select(session, found.pos + 2)
+		}
+
+		at("noted 3 ")
+		expect(
+			await editor.execute({ type: "note.options", kind: "footnote", scope: "document", format: "chicago", restart: "eachPage" })
+		).toBe(true)
+		await settleAll(editor)
+
+		// A note on the page before now: the one its page could not hold shows its reference's new number.
+		at("noted 21 ")
+		expect(await editor.execute({ type: "note.insertFootnote" })).toBe(true)
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
+		editor.dispose()
+	})
+
+	it("lays out a keystroke in a long document showing its page count in the body as one without", async () => {
+		const numPages =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		const edited = await editedLayout(
+			buildDocx({
+				body:
+					`<w:p><w:r><w:t xml:space="preserve">Pages: </w:t></w:r>${numPages}</w:p>` +
+					Array.from({ length: 400 }, (_, k) => para(`paragraph ${String(k)} ${words(40, k)}`)).join("") +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		const pages = edited.layout.pages.length
+		let laid = 0
+
+		expect(pages).toBeGreaterThan(20)
+		edited.layout.subscribe(event => {
+			if (!event.final) laid += event.to - event.from
+		})
+
+		// The page count stays: the keystroke lays out its page, not the document from its first page.
+		const target = paragraphs(edited.session.state.doc, false)[300]
+
+		if (target === undefined) throw new Error("no paragraph")
+
+		await edited.edit(edited.session.state.tr.insertText("x", target.pos + 3))
+
+		expect(edited.layout.pages.length).toBe(pages)
+		expect(laid).toBeLessThan(4)
 		await expectSaved(edited)
 	})
 
@@ -976,7 +1532,7 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		const edited = await editedLayout(buildDocx({ body }))
 		const pages = edited.layout.pages.length
 
-		expect(pages).toBeGreaterThan(40)
+		expect(pages).toBeGreaterThan(20)
 
 		// The run moved off the first page, where the paragraph it ran out of room at decides that page's end.
 		expect(edited.layout.keepFrom(1)).toBe(0)

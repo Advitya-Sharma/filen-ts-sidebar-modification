@@ -312,7 +312,12 @@ export class PagedEditor {
 		const builder = new DocxDocBuilder(context)
 
 		// A copy's drawings are the derived model's (commands and the save read them through the context).
-		if (template !== undefined) bindAddedDrawings(context, () => this.edits.model.drawings)
+		if (template !== undefined)
+			bindAddedDrawings(
+				context,
+				() => this.edits.model.drawings,
+				() => this.edits.model.parts
+			)
 
 		// A copy is source content: proved as the document's own stories are.
 		const session = new DocxEditorSession(context, {
@@ -327,6 +332,11 @@ export class PagedEditor {
 		this.changedState()
 
 		return session
+	}
+
+	// The notes part new notes of `kind` go into (made where the document has none).
+	notePart(kind: "footnote" | "endnote"): StoryPart | undefined {
+		return this.edits.notesPart(kind, this.newPartName(kind))
 	}
 
 	private idTaken(space: "footnote" | "endnote" | "comment", id: string): boolean {
@@ -478,6 +488,9 @@ export class PagedEditor {
 		for (const resolve of this.settledWaiters.splice(0)) resolve()
 
 		this.body.session.context.media.clear()
+
+		// Their history and plugins hold their documents (see DocxEditorSession.dispose).
+		for (const story of this.stories.values()) story.session.dispose()
 	}
 
 	get state(): EditorState {
@@ -978,9 +991,12 @@ export class PagedEditor {
 
 		const page = change.whole
 			? 0
-			: story.index.restartPage(
-					[...change.replaced, ...change.around],
-					story === this.body ? at => this.layout.keepFrom(at) : undefined
+			: notePage(
+					story,
+					story.index.restartPage(
+						[...change.replaced, ...change.around],
+						story === this.body ? at => this.layout.keepFrom(at) : undefined
+					)
 				)
 		const first = page < 0 ? (story === this.body || !this.edits.addedStory(story.session.story.story.index) ? 0 : undefined) : page
 
@@ -1010,7 +1026,7 @@ export class PagedEditor {
 			return
 		}
 
-		const page = story.index.restartPage([...change.replaced, ...change.around])
+		const page = notePage(story, story.index.restartPage([...change.replaced, ...change.around]))
 
 		// A story the editor added that no page shows (nothing refers to it): nothing to lay out. While layout is
 		// still under way it may have laid out pages showing it that are not indexed yet: from the last page laid.
@@ -1026,7 +1042,12 @@ export class PagedEditor {
 			return
 		}
 
-		const restart = layout.beginEdit(page < 0 ? 0 : page, undefined)
+		// A footnote changes the pages showing it or its reference (and those it moves onto): layout stops once
+		// past them where it meets the earlier layout again.
+		const restart =
+			story.region === Region.FOOTNOTE && page >= 0
+				? layout.beginEdit(page, [], story.index.lastPage)
+				: layout.beginEdit(page < 0 ? 0 : page, undefined)
 		const result = layout.advance(this.now() + this.budget, Math.max(restart, this.visible.last))
 
 		if (result !== "done") void layout.continue()
@@ -1332,6 +1353,19 @@ export class PagedEditor {
 			this.keepMotion = false
 		}
 	}
+}
+
+// Where layout restarts for a note edit: from the page showing it, or from the page before its reference's
+// when that comes first. A note that did not fit takes the line referring to it to the next page, or is left
+// for the next page itself: edited, it may fit there now.
+function notePage(story: EditedStory, page: number): number {
+	const reference = story.index.referencePage
+
+	if (reference < 0) return page
+
+	const before = Math.max(0, reference - 1)
+
+	return page < 0 ? before : Math.min(page, before)
 }
 
 function defaultNow(): () => number {

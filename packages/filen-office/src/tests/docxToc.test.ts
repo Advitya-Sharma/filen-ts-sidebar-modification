@@ -150,6 +150,11 @@ describe("tables of contents", () => {
 		)
 		expect(xml).toContain(`<w:hyperlink w:anchor="${bookmarks[0]?.name ?? ""}" w:history="1">`)
 		expect(xml).toMatch(/<w:bookmarkStart w:id="\d+" w:name="_Toc\d{9}"\/>/)
+		// Word's runs: entry text not proofed; the tab and page number (every run of its field) hidden in Web
+		// layout too, as \z asks.
+		expect(xml.match(/<w:r><w:rPr><w:rStyle w:val="Hyperlink"\/><w:noProof\/><\/w:rPr><w:t>/g)).toHaveLength(3)
+		expect(xml.match(/<w:r><w:rPr><w:noProof\/><w:webHidden\/><\/w:rPr><w:tab\/>/g)).toHaveLength(3)
+		expect(xml.match(/<w:r><w:rPr><w:noProof\/><w:webHidden\/><\/w:rPr><w:(fldChar|instrText|t)\b/g)).toHaveLength(15)
 
 		// Reopened, the table is the file's: paragraphs whose field characters keep their items.
 		const reopened = await open(bytes)
@@ -297,6 +302,49 @@ describe("tables of contents", () => {
 		expect(pageDigest((await open(await save(opened))).editor.layout)).toEqual(await savedDigest(await save(opened)))
 	})
 
+	it("keeps a title before the begin, the end's own paragraph and what follows the end when it rebuilds a table", async () => {
+		const begin =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+		const end = '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		const tail = {
+			// Word's paragraph after the last entry, holding the end.
+			whole: `<w:p><w:r><w:t>Old entry</w:t></w:r></w:p><w:p>${end}<w:r><w:t xml:space="preserve"> After the end</w:t></w:r></w:p>`,
+			// Text after the end in the last entry's paragraph.
+			open: `<w:p><w:r><w:t>Old entry</w:t></w:r>${end}<w:r><w:t xml:space="preserve"> After the end</w:t></w:r></w:p>`
+		}
+
+		for (const [kind, last] of Object.entries(tail)) {
+			const body =
+				`<w:p><w:pPr><w:pStyle w:val="Heading4"/></w:pPr><w:r><w:t>Contents</w:t></w:r>${begin}</w:p>` + last + pageBreak + HEADINGS
+			const opened = await open(spec(body))
+			const editor = opened.editor
+			const session = editor.session
+			const [region] = tocRegions(session)
+
+			expect(region?.updatable).toBe(true)
+			caretAt(editor, find(session.state.doc, "Old entry"))
+			expect(await editor.execute({ type: "toc.update", pagesOnly: false })).toBe(true)
+			await settleAll(editor)
+
+			const [rebuilt] = tocRegions(session)
+			const shown = entries(session.state.doc, rebuilt?.from ?? 0, rebuilt?.to ?? 0)
+
+			// The title paragraph keeps its style and the code; the entries follow it.
+			expect(session.state.doc.firstChild?.attrs["styleId"]).toBe("Heading4")
+			expect(shown[0]).toBe("Contents")
+			expect(shown.slice(1)).toEqual(
+				kind === "whole"
+					? ["Introduction\t[2]", "Background\t[3]", "Results\t[4]", " After the end"]
+					: ["Introduction\t[2]", "Background\t[3]", "Results\t[4] After the end"]
+			)
+
+			const bytes = await save(opened)
+
+			expect(pageDigest(editor.layout)).toEqual(await savedDigest(bytes))
+			expect(tocRegions((await open(bytes)).editor.session)[0]?.updatable).toBe(true)
+		}
+	})
+
 	it("records an update while tracking: page numbers each a field's update, a rebuilt table the old deleted and the new inserted", async () => {
 		const entry = (name: string, text: string, page: string): string =>
 			`<w:hyperlink w:anchor="${name}" w:history="1"><w:r><w:t>${text}</w:t></w:r><w:r><w:tab/></w:r>` +
@@ -332,20 +380,27 @@ describe("tables of contents", () => {
 		expect(await editor.execute({ type: "review.rejectAll" })).toBe(true)
 		expect(tables()).toEqual([["Intro\t[7]", "Results\t[9]"]])
 
-		// The whole table: the old one stays, deleted, the new one follows it, inserted.
+		// The whole table: its old result deleted and the new one inserted, between its own code and end (as Word
+		// records an update of a field).
 		expect(await editor.execute({ type: "toc.update", pagesOnly: false })).toBe(true)
 		await settleAll(editor)
-		expect(tables()).toEqual([["Introduction\t[2]", "Results\t[3]"]])
+		expect(tocRegions(session)).toHaveLength(1)
 
 		let deleted = ""
+		let inserted = ""
+		let chars = 0
 
 		session.state.doc.descendants(node => {
 			if (node.isText && docxSchema.marks.deletion.isInSet(node.marks) !== undefined) deleted += node.text ?? ""
+			if (node.isText && docxSchema.marks.insertion.isInSet(node.marks) !== undefined) inserted += node.text ?? ""
+			if (node.type === nodes.field_char && !isDeleted(node)) chars++
 
 			return true
 		})
 
 		expect(deleted).toBe("IntroResults")
+		expect(inserted).toBe("IntroductionResults")
+		expect(chars).toBe(4)
 
 		const rebuilt = await save(opened)
 		const reopened = await open(rebuilt)
@@ -366,6 +421,55 @@ describe("tables of contents", () => {
 
 			expect(await read(resolved, "word/document.xml")).not.toMatch(/<w:(del|ins) /)
 			expect(pageDigest((await open(resolved)).editor.layout)).toEqual(await savedDigest(resolved))
+		}
+	})
+
+	it("rejects a table rebuilt while tracking inside a content control back to the table it was", async () => {
+		const entry = (name: string, text: string, code: string, after = ""): string =>
+			`<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>${code}<w:hyperlink w:anchor="${name}" w:history="1"><w:r><w:t>${text}</w:t></w:r><w:r><w:tab/></w:r>` +
+			`<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGEREF ${name} \\h </w:instrText></w:r>` +
+			`<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink>${after}</w:p>`
+		const code =
+			'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h \\z \\u </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+		const end = '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+		// The end in a paragraph of its own (Word's), or after the last entry with text after it.
+		const ends = [
+			entry("_Toc100000002", "Results", "") + `<w:p>${end}</w:p>`,
+			entry("_Toc100000002", "Results", "", `${end}<w:r><w:t xml:space="preserve"> after</w:t></w:r>`)
+		]
+		const body = (last: string): string =>
+			'<w:sdt><w:sdtPr><w:id w:val="7"/><w:docPartObj><w:docPartGallery w:val="Table of Contents"/><w:docPartUnique/></w:docPartObj></w:sdtPr><w:sdtContent>' +
+			p("Contents") +
+			entry("_Toc100000001", "Intro", code) +
+			last +
+			"</w:sdtContent></w:sdt>" +
+			pageBreak +
+			'<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="1" w:name="_Toc100000001"/><w:r><w:t>Introduction</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>' +
+			'<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="2" w:name="_Toc100000002"/><w:r><w:t>Method</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p>' +
+			heading(1, "Results")
+
+		for (const [last, reopen] of ends.flatMap(last => [false, true].map(reopen => [last, reopen] as const))) {
+			const source = buildDocx(spec(body(last)))
+			const original = await open(source)
+			const opened = await open(source)
+			const session = opened.editor.session
+
+			opened.context.identity.author = "Ann Lee"
+			opened.context.review.tracking = true
+			caretAt(opened.editor, find(session.state.doc, "Intro"))
+			expect(await opened.editor.execute({ type: "toc.update", pagesOnly: false })).toBe(true)
+			await settleAll(opened.editor)
+
+			const target = reopen ? await open(await save(opened)) : opened
+
+			expect(await target.editor.execute({ type: "review.rejectAll" })).toBe(true)
+			await settleAll(target.editor)
+			expect(target.editor.session.snapshot().review.revisionCount).toBe(0)
+			expect(pageDigest(target.editor.layout)).toEqual(pageDigest(original.editor.layout))
+
+			const bytes = await save(target)
+
+			expect(await read(bytes, "word/document.xml")).not.toMatch(/<w:(del|ins) /)
 		}
 	})
 
@@ -400,19 +504,86 @@ describe("tables of contents", () => {
 		expect(chars()).toEqual(["1:begin", "1:instruction", "1:separate", "2:end"])
 		expect(await editor.execute({ type: "history.undo" })).toBe(true)
 
-		// A tracked deletion of the instruction and the first entry: the field's characters stay, its text goes.
+		// A tracked deletion of the instruction and the first entry: the whole field is deleted, tracked, as an
+		// untracked deletion deletes it (its paragraph mark inside it too).
 		opened.context.identity.author = "Ann Lee"
 		opened.context.review.tracking = true
 		session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, 2, find(session.state.doc, " one"))))
 		session.dispatch(session.state.tr.deleteSelection())
-		expect(chars()).toEqual(["0:begin", "0:instruction", "0:separate", "1:end"])
-		expect(await editor.execute({ type: "review.acceptAll" })).toBe(true)
-		expect(entries(session.state.doc, 0, session.state.doc.content.size)[0]).toBe(" one")
-		expect(tocRegions(session)).toHaveLength(1)
+		expect(chars()).toEqual(["0:begin-", "0:instruction-", "0:separate-", "1:end-"])
 
 		const bytes = await save(opened)
+		const reopened = await open(bytes)
 
-		expect(pageDigest((await open(bytes)).editor.layout)).toEqual(await savedDigest(bytes))
+		expect(pageDigest(reopened.editor.layout)).toEqual(await savedDigest(bytes))
+
+		// Rejected, the table is back; accepted, it is gone and its paragraphs joined.
+		expect(await editor.execute({ type: "review.rejectAll" })).toBe(true)
+		expect(chars()).toEqual(["0:begin", "0:instruction", "0:separate", "1:end"])
+		expect(await reopened.editor.execute({ type: "review.acceptAll" })).toBe(true)
+		expect(tocRegions(reopened.editor.session)).toHaveLength(0)
+		expect(reopened.editor.session.state.doc.textContent).toBe("After")
+	})
+
+	it("deletes a table another author inserted whole while tracking, inserted and deleted, or for real when its own", async () => {
+		for (const own of [false, true]) {
+			const opened = await open(spec(HEADINGS))
+			const editor = opened.editor
+			const session = editor.session
+
+			opened.context.review.tracking = true
+			opened.context.identity.author = "Bob"
+			caretAt(editor, 1)
+			expect(await editor.execute({ type: "toc.insert", levels: 2, hyperlinks: true })).toBe(true)
+			await settleAll(editor)
+
+			if (!own) opened.context.identity.author = "Ann Lee"
+
+			// Its begin, code and first entry, tracked.
+			const [region] = tocRegions(session)
+			const from = region?.from ?? 0
+
+			session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, from + 1, from + 6)))
+			session.dispatch(session.state.tr.deleteSelection())
+
+			let chars = 0
+			let deleted = 0
+
+			session.state.doc.descendants(node => {
+				if (node.type === nodes.field_char) {
+					chars++
+
+					if (isDeleted(node)) deleted++
+				}
+
+				return true
+			})
+
+			expect(own ? chars : deleted).toBe(own ? 0 : chars)
+			expect(tocRegions(session)).toHaveLength(0)
+
+			const bytes = await save(opened)
+			const reopened = await open(bytes)
+			const codes = (doc: ProseMirrorNode): string[] => {
+				const out: string[] = []
+
+				doc.descendants(node => {
+					if (node.type === nodes.field) out.push(node.attrs["instruction"] as string)
+
+					return true
+				})
+
+				return out
+			}
+
+			// The entries' page references, inserted and deleted, read back with their codes.
+			expect(codes(reopened.editor.session.state.doc)).toEqual(codes(session.state.doc))
+
+			expect(pageDigest(reopened.editor.layout)).toEqual(await savedDigest(bytes))
+			// Accepted, no table.
+			await editor.execute({ type: "review.acceptAll" })
+			expect(tocRegions(session)).toHaveLength(0)
+		}
 	})
 
 	it("refuses a move that would take a table apart, and moves its paragraphs that keep it whole", async () => {
@@ -495,6 +666,50 @@ describe("tables of contents", () => {
 		expect(tocRegions(session)).toHaveLength(1)
 	})
 
+	it("deletes a table whole when an edit takes its separate or an instruction text, and saves", async () => {
+		const body =
+			p("Before") +
+			'<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>' +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>One</w:t></w:r></w:p>' +
+			'<w:p><w:r><w:t>Two</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
+			p("After")
+
+		for (const kind of ["separate", "instruction"]) {
+			const opened = await open(spec(body))
+			const session = opened.editor.session
+			let at = -1
+
+			session.state.doc.descendants((node, pos) => {
+				if (node.type === nodes.field_char && node.attrs["kind"] === kind) at = pos
+
+				return at < 0
+			})
+
+			// The character and a little of what follows it.
+			expect(session.dispatch(session.state.tr.delete(at, kind === "separate" ? at + 3 : at + 1))).toBe(true)
+			expect(tocRegions(session)).toHaveLength(0)
+
+			const texts: string[] = []
+			let chars = 0
+
+			session.state.doc.descendants(node => {
+				if (node.type === nodes.field_char) chars++
+				if (node.isTextblock) texts.push(node.textContent)
+
+				return true
+			})
+
+			expect(chars).toBe(0)
+			expect(texts).toEqual(["Before", "", "After"])
+
+			const bytes = await save(opened)
+
+			expect(await read(bytes, "word/document.xml")).not.toContain("fldChar")
+			await settleAll(opened.editor)
+			expect(pageDigest(opened.editor.layout)).toEqual(await savedDigest(bytes))
+		}
+	})
+
 	it("inserts a table as a tracked insertion while tracking, or untracked while tracked changes hold no fields", async () => {
 		const opened = await open(spec(HEADINGS))
 		const editor = opened.editor
@@ -538,6 +753,68 @@ describe("tables of contents", () => {
 		const bytes = await save(opened)
 
 		expect(entries((await open(bytes)).editor.session.state.doc, region?.from ?? 0, region?.to ?? 0)).toEqual(["Chapter\t[1]", ""])
+	})
+
+	it("updates a table's page numbers with Update Field anywhere in it", async () => {
+		const opened = await open(spec(HEADINGS))
+		const editor = opened.editor
+		const session = editor.session
+
+		caretAt(editor, 1)
+		expect(await editor.execute({ type: "toc.insert", levels: 3, hyperlinks: true })).toBe(true)
+		await settleAll(editor)
+
+		const [region] = tocRegions(session)
+
+		expect(entries(session.state.doc, region?.from ?? 0, region?.to ?? 0)).toEqual([
+			"Introduction\t[1]",
+			"Background\t[2]",
+			"Results\t[3]"
+		])
+
+		// Every heading a page further on.
+		const contents = session.state.doc.resolve(find(session.state.doc, "Contents")).after()
+
+		session.dispatch(session.state.tr.insert(contents, nodes.paragraph.create(null, nodes.break.create({ type: "page" }))))
+		await settleAll(editor)
+
+		// The caret in the middle entry's text, on no field.
+		caretAt(editor, find(session.state.doc, "Background") + 2)
+		expect(editor.canExecute("field.update")).toBe(true)
+		expect(await editor.execute({ type: "field.update" })).toBe(true)
+		expect(entries(session.state.doc, region?.from ?? 0, region?.to ?? 0)).toEqual([
+			"Introduction\t[2]",
+			"Background\t[3]",
+			"Results\t[4]"
+		])
+	})
+
+	it("rebuilds a table of figures (\\c) in Word's table of figures style", async () => {
+		const caption = (n: string, text: string): string =>
+			'<w:p><w:r><w:t xml:space="preserve">Figure </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> SEQ Figure \\* ARABIC </w:instrText></w:r>' +
+			`<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${n}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve">: ${text}</w:t></w:r></w:p>`
+		const body =
+			'<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\h \\z \\c "Figure" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+			'<w:r><w:t>Old</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
+			caption("1", "One") +
+			pageBreak +
+			caption("2", "Two")
+		const opened = await open(spec(body))
+		const editor = opened.editor
+
+		caretAt(editor, find(editor.session.state.doc, "Old"))
+		expect(await editor.execute({ type: "toc.update", pagesOnly: false })).toBe(true)
+		await settleAll(editor)
+
+		const bytes = await save(opened)
+		const xml = await read(bytes, "word/document.xml")
+
+		expect(xml.match(/<w:pStyle w:val="TableofFigures"\/>/g)).toHaveLength(2)
+		expect(xml).not.toContain("TOC1")
+		expect(await read(bytes, "word/styles.xml")).toMatch(
+			/<w:style w:type="paragraph" w:styleId="TableofFigures"><w:name w:val="table of figures"\/>/
+		)
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(bytes))
 	})
 
 	it("reads Word's switches", () => {

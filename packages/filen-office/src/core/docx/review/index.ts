@@ -111,6 +111,18 @@ class Found {
 	}
 }
 
+// Sessions whose review index is kept (see review/accept.ts reviewIndexWanted): tracking recorded in them, or
+// a comment was added.
+const WANTED = new WeakSet<object>()
+
+export function wantReviewIndex(session: object): void {
+	WANTED.add(session)
+}
+
+export function reviewIndexKept(session: object): boolean {
+	return WANTED.has(session)
+}
+
 export class ReviewIndex {
 	private from = new Int32Array(16)
 	private to = new Int32Array(16)
@@ -127,6 +139,8 @@ export class ReviewIndex {
 	private doc: Node
 	// Source paragraphs whose properties hold a tracked change (see attachSources).
 	private sources: ReadonlySet<number> | undefined = undefined
+	// Source section changes counted under another id (see attachSources).
+	private links: ReadonlyMap<number, string> | undefined = undefined
 	private commentList: { readonly version: number; readonly count: number; readonly list: Int32Array } = {
 		version: -1,
 		count: 0,
@@ -146,11 +160,12 @@ export class ReviewIndex {
 	}
 
 	// Counts the source paragraphs whose own w:pPrChange (item ids in `sources`) is a change too: the
-	// document is read once more.
-	attachSources(sources: ReadonlySet<number>): void {
+	// document is read once more. `links`: source section changes (by item) counted as part of another change.
+	attachSources(sources: ReadonlySet<number>, links?: ReadonlyMap<number, string>): void {
 		if (this.sources !== undefined) return
 
 		this.sources = sources
+		this.links = links
 
 		if (sources.size === 0) return
 
@@ -161,7 +176,7 @@ export class ReviewIndex {
 		this.count = 0
 		this.ids.length = 0
 		this.keys.length = 0
-		scan(this.doc, 0, this.doc.content.size, found, sources)
+		scan(this.doc, 0, this.doc.content.size, found, sources, links)
 		this.insert(0, found)
 		this.versionValue++
 	}
@@ -374,7 +389,7 @@ export class ReviewIndex {
 			const end = regions[k + 1] ?? 0
 			const found = new Found()
 
-			scan(doc, start, end, found, this.sources)
+			scan(doc, start, end, found, this.sources, this.links)
 
 			if (found.from.length === 0) continue
 
@@ -582,7 +597,7 @@ function propertyChange(node: Node, sources: ReadonlySet<number> | undefined): b
 }
 
 // Entries in [from, to) of `doc`, in document order (block-level ones only where they sit inside it).
-function scan(doc: Node, from: number, to: number, found: Found, sources?: ReadonlySet<number>): void {
+function scan(doc: Node, from: number, to: number, found: Found, sources?: ReadonlySet<number>, links?: ReadonlyMap<number, string>): void {
 	const within = (pos: number): boolean => pos >= from && pos < to
 	const visit = (node: Node, pos: number): void => {
 		if (node.isInline) {
@@ -640,7 +655,7 @@ function scan(doc: Node, from: number, to: number, found: Found, sources?: Reado
 				? section !== null && propertyChange(node, sources)
 				: node.type !== nodes.locked_block && sources?.has(node.attrs["src"] as number) === true && table?.source === undefined
 		)
-			found.add(end, end + 1, ReviewKind.PROPERTIES, changeId(change?.props) ?? own)
+			found.add(end, end + 1, ReviewKind.PROPERTIES, changeId(change?.props) ?? links?.get(node.attrs["src"] as number) ?? own)
 
 		// A section property change the editor recorded (w:sectPrChange, stories/sections.ts).
 		if (section !== undefined && section !== null) found.add(end, end + 1, ReviewKind.PROPERTIES, section)
@@ -672,7 +687,8 @@ function scan(doc: Node, from: number, to: number, found: Found, sources?: Reado
 		const sourced = sources?.has(doc.attrs["sectPr"] as number) === true
 
 		if (final !== undefined && final !== null) found.add(size, size + 1, ReviewKind.PROPERTIES, final)
-		else if (final === undefined && sourced) found.add(size, size + 1, ReviewKind.PROPERTIES, `#${String(doc.attrs["sectPr"])}`)
+		else if (final === undefined && sourced)
+			found.add(size, size + 1, ReviewKind.PROPERTIES, links?.get(doc.attrs["sectPr"] as number) ?? `#${String(doc.attrs["sectPr"])}`)
 	}
 
 	if (to >= size) markers(doc.attrs["end"], size, found)

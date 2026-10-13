@@ -1,4 +1,5 @@
-import { NodeKind, type XmlDocument } from "../../../xml/index"
+import { NodeKind, decodeUtf8, type XmlDocument } from "../../../xml/index"
+import type { StoryPart } from "../../model/index"
 import { Ns } from "../../model/namespaces"
 import { partReader, type PartReader } from "../../model/reader"
 import { DocxVerifyError } from "../failure"
@@ -6,8 +7,8 @@ import { ownedByCopy } from "../newStory"
 import { joinBytes, type Relationship } from "../../../opc/index"
 import type { CheckInput, CheckedPart, DocxCheck } from "./index"
 
-// The section properties a save wrote (new or spliced w:sectPr; copies of the source's are not looked at
-// again): each header and footer reference resolves to a part of its content type that the package has, a
+// The section properties a save wrote (new or spliced w:sectPr; the source's, copied or written again as they
+// were, are not looked at again): each header and footer reference resolves to a part of its content type that the package has, a
 // section refers to at most one of each type, page size and margins leave room for text, columns fit in it,
 // line numbering counts from no negative value, and a recorded change has an author and holds no references.
 // A header or footer part the save creates as a copy of another (stories/clone.ts) relates what it holds as
@@ -24,15 +25,6 @@ function fail(reason: "content" | "danglingReference" | "duplicateId", message: 
 	throw new DocxVerifyError(reason, message)
 }
 
-function number(reader: PartReader, node: number, local: string): number | undefined {
-	const value = reader.attr(node, Ns.W, local)
-
-	if (value === undefined) return undefined
-	if (!/^-?\d{1,10}$/.test(value)) fail("content", `w:${reader.document.localName(node)} w:${local}="${value}" is no whole number`)
-
-	return Number(value)
-}
-
 function children(document: XmlDocument, reader: PartReader, node: number, local: string): number[] {
 	const out: number[] = []
 
@@ -40,6 +32,66 @@ function children(document: XmlDocument, reader: PartReader, node: number, local
 		if (reader.is(child, Ns.W, local)) out.push(child)
 
 	return out
+}
+
+// The first of the rules above (bar references) a section's properties break, as text, or undefined: what gate 2
+// refuses and what a command must not make.
+export function sectionFault(reader: PartReader, node: number): string | undefined {
+	const document = reader.document
+	const number = (holder: number, local: string): number | undefined => {
+		const value = reader.attr(holder, Ns.W, local)
+
+		if (value === undefined) return undefined
+
+		return /^-?\d{1,10}$/.test(value) ? Number(value) : Number.NaN
+	}
+	const size = children(document, reader, node, "pgSz")[0]
+	const width = size === undefined ? 12240 : (number(size, "w") ?? 12240)
+	const height = size === undefined ? 15840 : (number(size, "h") ?? 15840)
+
+	if (!(width > 0 && height > 0 && width <= MAX_PAGE && height <= MAX_PAGE)) return `A section's page is ${width} x ${height} twips`
+
+	const margins = children(document, reader, node, "pgMar")[0]
+	const margin = (local: string, fallback: number): number => (margins === undefined ? fallback : (number(margins, local) ?? fallback))
+	const text = width - margin("left", 1440) - margin("right", 1440) - margin("gutter", 0)
+
+	if (!(text > 0 && height - Math.abs(margin("top", 1440)) - Math.abs(margin("bottom", 1440)) > 0))
+		return "A section's margins leave no room for text"
+
+	for (const columns of children(document, reader, node, "cols")) {
+		const count = number(columns, "num") ?? 1
+		const space = number(columns, "space") ?? 720
+		const own = children(document, reader, columns, "col")
+		const equal = reader.attr(columns, Ns.W, "equalWidth")
+
+		if (!(count >= 1 && count <= 45)) return `A section has ${count} columns`
+
+		// Unequal columns (w:equalWidth off, ECMA-376 17.6.4) are as wide as their w:col say, spaced as they say.
+		if (own.length > 0 && (equal === "0" || equal === "false" || equal === "off")) {
+			let total = 0
+
+			for (let k = 0; k < own.length; k++) {
+				const column = own[k] as number
+				const wide = number(column, "w") ?? 0
+
+				if (!(wide > 0)) return `A section has a column ${wide} twips wide`
+
+				total += wide + (k < own.length - 1 ? (number(column, "space") ?? 0) : 0)
+			}
+
+			if (!(total <= text)) return `Columns ${total} twips wide do not fit a ${text} twips wide text`
+		} else if (!((count - 1) * space < text)) {
+			return `${count} columns ${space} twips apart do not fit a ${text} twips wide text`
+		}
+	}
+
+	for (const lines of children(document, reader, node, "lnNumType")) {
+		// ST_DecimalNumber; what a command writes Word bounds further (MS-OI29500 2.1.215), files have 0 (LibreOffice).
+		if (!((number(lines, "countBy") ?? 0) >= 0 && (number(lines, "start") ?? 0) >= 0))
+			return "A section numbers lines from a negative value"
+	}
+
+	return undefined
 }
 
 async function checkSection(input: CheckInput, part: string, reader: PartReader, node: number, nested: boolean): Promise<void> {
@@ -72,35 +124,9 @@ async function checkSection(input: CheckInput, part: string, reader: PartReader,
 		}
 	}
 
-	const size = children(document, reader, node, "pgSz")[0]
-	const width = size === undefined ? 12240 : (number(reader, size, "w") ?? 12240)
-	const height = size === undefined ? 15840 : (number(reader, size, "h") ?? 15840)
+	const fault = sectionFault(reader, node)
 
-	if (width <= 0 || height <= 0 || width > MAX_PAGE || height > MAX_PAGE)
-		fail("content", `A section's page is ${width} x ${height} twips`)
-
-	const margins = children(document, reader, node, "pgMar")[0]
-	const margin = (local: string, fallback: number): number =>
-		margins === undefined ? fallback : (number(reader, margins, local) ?? fallback)
-	const text = width - margin("left", 1440) - margin("right", 1440) - margin("gutter", 0)
-
-	if (text <= 0 || height - Math.abs(margin("top", 1440)) - Math.abs(margin("bottom", 1440)) <= 0)
-		fail("content", "A section's margins leave no room for text")
-
-	for (const columns of children(document, reader, node, "cols")) {
-		const count = number(reader, columns, "num") ?? 1
-		const space = number(reader, columns, "space") ?? 720
-
-		if (count < 1 || count > 45) fail("content", `A section has ${count} columns`)
-		if (children(document, reader, columns, "col").length === 0 && (count - 1) * space >= text)
-			fail("content", `${count} columns ${space} twips apart do not fit a ${text} twips wide text`)
-	}
-
-	for (const lines of children(document, reader, node, "lnNumType")) {
-		// ST_DecimalNumber; what a command writes Word bounds further (MS-OI29500 2.1.215), files have 0 (LibreOffice).
-		if ((number(reader, lines, "countBy") ?? 0) < 0 || (number(reader, lines, "start") ?? 0) < 0)
-			fail("content", "A section numbers lines from a negative value")
-	}
+	if (fault !== undefined) fail("content", fault)
 
 	for (const change of children(document, reader, node, "sectPrChange")) {
 		if ((reader.attr(change, Ns.W, "author") ?? "") === "") fail("content", "A recorded section change has no author")
@@ -181,14 +207,32 @@ async function part(input: CheckInput, checked: CheckedPart): Promise<void> {
 
 	const document = checked.document
 	const reader = partReader(document)
+	let source: Set<string> | undefined
 
 	for (let node = 0; node < document.count; node++) {
 		if (document.kinds[node] !== NodeKind.Element || !reader.is(node, Ns.W, "sectPr")) continue
 		// Those inside a recorded change are checked with theirs.
 		if (reader.is(document.parent(node), Ns.W, "sectPrChange")) continue
 
+		// A source section's properties written again as they were (a rewritten paragraph keeps its break).
+		source ??= sourceSections(input, checked.part)
+
+		if (source.has(decodeUtf8(document.bytes, document.start(node), document.end(node)))) continue
+
 		await checkSection(input, checked.part.name, reader, node, false)
 	}
+}
+
+// The w:sectPr markup of the source's sections, as the main part has it.
+function sourceSections(input: CheckInput, part: StoryPart): Set<string> {
+	const out = new Set<string>()
+	const document = part.document
+
+	for (const section of input.context.model.sections)
+		if (section.document === undefined && section.sectPr >= 0)
+			out.add(decodeUtf8(document.bytes, document.start(section.sectPr), document.end(section.sectPr)))
+
+	return out
 }
 
 export const sectionChecks: readonly DocxCheck[] = [{ part }]

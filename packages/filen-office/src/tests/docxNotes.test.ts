@@ -317,6 +317,92 @@ describe("docx footnotes and endnotes", () => {
 		editor.dispose()
 	})
 
+	it("places notes document-wide, in settings, as Word reads w:pos; footnotes beneath the text follow its last line", async () => {
+		const opened = await pagedEditor(WITH_NOTES)
+		const { editor } = opened
+		const top = async (): Promise<number> => {
+			await settleAll(editor)
+
+			const line =
+				pageDigest(editor.layout)[0]
+					?.split("\n")
+					.find(entry => entry.includes('"1 first"')) ?? ""
+
+			return Number(/^(-?[\d.]+) /.exec(line)?.[1] ?? Number.NaN)
+		}
+		const bottom = await top()
+
+		caret(editor, 2)
+		expect(await run(editor, { type: "note.options", kind: "footnote", position: "beneathText", scope: "section" })).toBe(true)
+		expect(await top()).toBeLessThan(bottom - 200)
+
+		const bytes = await saved(opened)
+
+		expect(await read(bytes, "word/document.xml")).not.toContain("<w:pos ")
+		expect(await read(bytes, "word/settings.xml")).toContain('<w:footnotePr><w:pos w:val="beneathText"/></w:footnotePr>')
+		// Already so: nothing to change.
+		expect(await run(editor, { type: "note.options", kind: "footnote", position: "beneathText", scope: "document" })).toBe(false)
+		editor.dispose()
+
+		// Spliced into the settings' own w:footnotePr, before its separator note ids.
+		const listed = await pagedEditor(
+			buildDocx({
+				body: `<w:p><w:r><w:t>One</w:t></w:r>${REFERENCE("footnote", "1")}</w:p>`,
+				footnotes: SEPARATORS("footnote") + NOTE("footnote", "1", "first"),
+				settings: '<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>'
+			})
+		)
+
+		caret(listed.editor, 2)
+		expect(await run(listed.editor, { type: "note.options", kind: "footnote", position: "beneathText", scope: "document" })).toBe(true)
+		expect(await read(await saved(listed), "word/settings.xml")).toContain(
+			'<w:footnotePr><w:pos w:val="beneathText"/><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>'
+		)
+		listed.editor.dispose()
+
+		// A section's own w:pos is ignored.
+		const ignored = await pagedEditor(
+			buildDocx({
+				body: `<w:p><w:r><w:t>One</w:t></w:r>${REFERENCE("footnote", "1")}</w:p><w:sectPr><w:footnotePr><w:pos w:val="beneathText"/></w:footnotePr></w:sectPr>`,
+				footnotes: SEPARATORS("footnote") + NOTE("footnote", "1", "first")
+			})
+		)
+
+		await settleAll(ignored.editor)
+		expect(pageDigest(ignored.editor.layout)[0]).toBe(
+			pageDigest(
+				(
+					await pagedEditor(
+						buildDocx({
+							body: `<w:p><w:r><w:t>One</w:t></w:r>${REFERENCE("footnote", "1")}</w:p><w:sectPr/>`,
+							footnotes: SEPARATORS("footnote") + NOTE("footnote", "1", "first")
+						})
+					)
+				).editor.layout
+			)[0]
+		)
+		ignored.editor.dispose()
+	})
+
+	it("converts a note with a custom mark, its mark's text taking the new kind's reference style", async () => {
+		const opened = await pagedEditor(buildDocx({ body: p("Alpha beta") }))
+		const { editor } = opened
+
+		caret(editor, 3)
+		expect(await run(editor, { type: "note.insertFootnote", mark: "*" })).toBe(true)
+		editor.session.dispatch(editor.session.state.tr.insertText("star"))
+		editor.exitStory()
+		caret(editor, 3)
+		expect(await run(editor, { type: "note.convert" })).toBe(true)
+
+		const notes = await read(await saved(opened), "word/endnotes.xml")
+		const note = notes.slice(notes.lastIndexOf("<w:endnote "))
+
+		expect(note).toContain('<w:rStyle w:val="EndnoteReference"/></w:rPr><w:t>*</w:t>')
+		expect(note).not.toContain("FootnoteReference")
+		editor.dispose()
+	})
+
 	it("refuses a save with two references to one new note", async () => {
 		const opened = await pagedEditor(buildDocx({ body: p("Alpha beta") }))
 		const { editor, pkg, context } = opened
@@ -333,6 +419,91 @@ describe("docx footnotes and endnotes", () => {
 
 		expect(error).toBeInstanceOf(DocxSaveError)
 		expect((error as DocxSaveError).reason).toBe("duplicateId")
+		editor.dispose()
+	})
+
+	// Letter pages with one-inch margins.
+	const PAGE =
+		'<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+	const lines = (count: number, name: string): string => Array.from({ length: count }, (_, k) => p(`${name} ${String(k)}`)).join("")
+	const shows = (editor: PagedEditor, text: string): number => pageDigest(editor.layout).findIndex(page => page.includes(text))
+
+	it("shows a footnote with a line taller than the page, and lays out edits to it", async () => {
+		const opened = await pagedEditor(
+			buildDocx({
+				body: `<w:p><w:r><w:t>Giant</w:t></w:r>${REFERENCE("footnote", "1")}</w:p>${lines(5, "after")}${PAGE}`,
+				footnotes:
+					SEPARATORS("footnote") +
+					'<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:rPr><w:sz w:val="1400"/></w:rPr><w:t>i</w:t></w:r></w:p></w:footnote>'
+			})
+		)
+		const { editor } = opened
+
+		// Shown on the page of its reference, overflowing it, rather than left for a page that could hold it (the
+		// text after goes on the next page).
+		expect(shows(editor, '"1i"')).toBe(0)
+		expect(editor.layout.pages.length).toBe(2)
+
+		caret(editor, 6)
+		expect(await run(editor, { type: "note.goto" })).toBe(true)
+		type(editor, "j")
+		await saved(opened)
+		expect(shows(editor, '"1ij"')).toBe(0)
+		editor.dispose()
+	})
+
+	it("lays out the paragraph referring to a note again on the page before when the note shrinks", async () => {
+		const words = "alpha beta gamma delta epsilon zeta eta theta ".repeat(3)
+		const opened = await pagedEditor(
+			buildDocx({
+				// The note does not fit under the paragraph referring to it, and splits: the paragraph's last line goes
+				// to the next page, and with it (widow control) the paragraph, the note after it.
+				body: `${lines(48, "line")}<w:p><w:pPr><w:widowControl/></w:pPr><w:r><w:t xml:space="preserve">refers </w:t></w:r>${REFERENCE("footnote", "1")}<w:r><w:t xml:space="preserve"> ${words}</w:t></w:r></w:p>${lines(10, "after")}${PAGE}`,
+				footnotes:
+					SEPARATORS("footnote") +
+					'<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> small</w:t></w:r></w:p><w:p><w:r><w:rPr><w:sz w:val="96"/></w:rPr><w:t>big</w:t></w:r></w:p></w:footnote>'
+			})
+		)
+		const { editor } = opened
+		const story = editor.edits.model.stories.find(entry => entry?.kind === "footnote" && entry.id === "1")
+
+		if (story === undefined) throw new Error("no note")
+
+		expect(shows(editor, '"refers')).toBe(1)
+		expect(editor.enterStory(story.index, 1)).toBe(true)
+
+		// Its second paragraph emptied (not the one opening the page): the note fits under the paragraph now.
+		const note = editor.session
+		const second = note.state.doc.child(0).nodeSize
+
+		note.dispatch(note.state.tr.delete(second + 1, second + 4))
+		await saved(opened)
+		expect(shows(editor, '"refers')).toBe(0)
+		editor.dispose()
+	})
+
+	it("lays out a keystroke in a footnote on the pages near it, not to the end of the document", async () => {
+		const opened = await pagedEditor(
+			buildDocx({
+				body: `<w:p><w:r><w:t>Noted</w:t></w:r>${REFERENCE("footnote", "1")}</w:p>${lines(600, "after")}${PAGE}`,
+				footnotes: SEPARATORS("footnote") + NOTE("footnote", "1", "first")
+			})
+		)
+		const { editor } = opened
+		let laid = 0
+
+		expect(editor.layout.pages.length).toBeGreaterThan(10)
+		editor.layout.subscribe(event => {
+			if (!event.final) laid += event.to - event.from
+		})
+
+		caret(editor, 6)
+		expect(await run(editor, { type: "note.goto" })).toBe(true)
+		type(editor, " edited")
+		await settleAll(editor)
+
+		expect(laid).toBeLessThan(4)
+		await saved(opened)
 		editor.dispose()
 	})
 })

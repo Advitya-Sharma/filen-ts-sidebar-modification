@@ -215,7 +215,8 @@ export function readSettings(document: XmlDocument): DocxSettings {
 			case "documentProtection":
 				documentProtection = {
 					edit: reader.attr(child, Ns.W, "edit"),
-					enforced: reader.flag(child, Ns.W, "enforcement"),
+					// Word enforces protection whose w:enforcement is missing (MS-OI29500 §2.1.402 note c).
+					enforced: reader.attr(child, Ns.W, "enforcement") === undefined || reader.flag(child, Ns.W, "enforcement"),
 					formatting: reader.flag(child, Ns.W, "formatting"),
 					hashed: hashed(reader, child)
 				}

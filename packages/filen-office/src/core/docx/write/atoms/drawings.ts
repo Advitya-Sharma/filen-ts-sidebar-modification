@@ -1,5 +1,6 @@
 import type { Node } from "prosemirror-model"
-import { decodeUtf8, escapeAttribute, type XmlDocument } from "../../../xml/index"
+import { parseFraction } from "../../../drawingml/reader"
+import { NodeKind, decodeUtf8, escapeAttribute, type XmlDocument } from "../../../xml/index"
 import type { DocxEditContext } from "../../edit/context"
 import { NO_SOURCE, docxSchema } from "../../edit/schema"
 import type { DrawingInfo } from "../../model/drawings"
@@ -196,20 +197,29 @@ function rotationReach(cx: number, cy: number, degrees: number): [number, number
 	return [Math.round((cx * cos + cy * sin - cx) / 2), Math.round((cx * sin + cy * cos - cy) / 2)]
 }
 
-// The largest z order (wp:anchor relativeHeight) of the document's floating drawings, read once.
-const highestZ = new WeakMap<DocxEditContext, number>()
+// The z orders (wp:anchor relativeHeight) given to drawings made floating, by drawing (`key`), and the largest
+// of the document's, read once: a drawing gets one above every other once, the same at every write after.
+const zOrders = new WeakMap<DocxEditContext, { highest: number; readonly given: Map<string, number> }>()
 
-function nextZ(context: DocxEditContext): number {
-	let z = highestZ.get(context)
+function zOrder(context: DocxEditContext, key: string): number {
+	let orders = zOrders.get(context)
 
-	if (z === undefined) {
-		z = 251658240
+	if (orders === undefined) {
+		let highest = 251658240
 
-		for (const drawing of context.model.drawings) z = Math.max(z, drawing?.anchor?.relativeHeight ?? 0)
+		for (const drawing of context.model.drawings) highest = Math.max(highest, drawing?.anchor?.relativeHeight ?? 0)
+
+		orders = { highest, given: new Map() }
+		zOrders.set(context, orders)
 	}
 
-	z = Math.min(z + 1024, 0x7fffffff)
-	highestZ.set(context, z)
+	let z = orders.given.get(key)
+
+	if (z === undefined) {
+		z = Math.min(orders.highest + 1024, 0x7fffffff)
+		orders.highest = z
+		orders.given.set(key, z)
+	}
 
 	return z
 }
@@ -243,10 +253,36 @@ function positionMarkup(wp: string, axis: "H" | "V", relative: string, offset: n
 	return `<${qualify(`position${axis}`)} relativeFrom="${escapeAttribute(relative)}"><${qualify("posOffset")}>${int(offset)}</${qualify("posOffset")}></${qualify(`position${axis}`)}>`
 }
 
+// A size relative to the page or margins (wp14:sizeRelH / sizeRelV holding a positive percentage, MS-ODRAWXML
+// 2.18.1.3-4) is what Word lays that axis out by, not the extent: an axis a resize set turns absolute, written
+// as Word writes an absolute size there (0: Word reads only positive values as relative, MS-ODRAWXML note <125>).
+function absoluteSize(document: XmlDocument, frame: number, container: string, local: string, edits: Edit[]): void {
+	for (const relative of children(document, frame)) {
+		if (document.localName(relative) !== container) continue
+
+		for (const percent of children(document, relative)) {
+			if (document.localName(percent) !== local || document.isSelfClosing(percent)) continue
+
+			// ST_Percentage: thousandths of a percent, or "NN%" (Strict).
+			const value = parseFraction(decodeUtf8(document.bytes, document.openEnd(percent), document.contentEnd(percent)), Number.NaN)
+
+			if (value > 0) edits.push({ from: document.openEnd(percent), to: document.contentEnd(percent), text: "0" })
+		}
+	}
+}
+
 // ---- a changed source drawing ------------------------------------------------------------------------------
 
 // The edits a drawing's DrawingML frame needs to be `state` (as its source `drawing` is `base`).
-function frameEdits(w: StoryWriting, part: StoryPart, drawing: DrawingInfo, base: DrawingState, state: DrawingState, edits: Edit[]): void {
+function frameEdits(
+	w: StoryWriting,
+	part: StoryPart,
+	node: Node,
+	drawing: DrawingInfo,
+	base: DrawingState,
+	state: DrawingState,
+	edits: Edit[]
+): void {
 	const document = part.document
 	const reader = part.reader
 	const frame = drawing.frame
@@ -265,6 +301,9 @@ function frameEdits(w: StoryWriting, part: StoryPart, drawing: DrawingInfo, base
 
 		setAttribute(document, extent, "cx", int(state.cx), edits)
 		setAttribute(document, extent, "cy", int(state.cy), edits)
+
+		if (state.cx !== base.cx) absoluteSize(document, frame, "sizeRelH", "pctWidth", edits)
+		if (state.cy !== base.cy) absoluteSize(document, frame, "sizeRelV", "pctHeight", edits)
 	}
 
 	const xfrm = graphicTransform(part, drawing)
@@ -313,12 +352,27 @@ function frameEdits(w: StoryWriting, part: StoryPart, drawing: DrawingInfo, base
 
 		setAttribute(document, drawing.docPr, "descr", value, edits)
 
+		// A picture marked decorative has no alt text (Word disables it while marked): described, it is not.
+		if (value !== null) {
+			const end = document.end(drawing.docPr)
+
+			for (let at = drawing.docPr + 1; at < document.count && document.start(at) < end; at++) {
+				if (
+					document.kinds[at] === NodeKind.Element &&
+					document.localName(at) === "decorative" &&
+					/^(1|true|on)$/.test(attributeOf(document, at, "val") ?? "")
+				)
+					setAttribute(document, at, "val", "0", edits)
+			}
+		}
+
 		const picture = drawing.graphicData < 0 ? -1 : reader.descendant(drawing.graphicData, Ns.Pic, "cNvPr")
 
 		if (picture >= 0) setAttribute(document, picture, "descr", value, edits)
 	}
 
-	if (!sameCrop(state.crop, base.crop)) {
+	// A picture swapped in place (pictureEdits) loses its a:srcRect with its blip.
+	if (!sameCrop(state.crop, base.crop) && typeof drawingEdit(node)?.media !== "number") {
 		const fill = pictureFill(part, drawing)
 		const blip = fill < 0 ? -1 : reader.child(fill, Ns.A, "blip")
 
@@ -401,7 +455,7 @@ function placementEdits(
 		// Inline to floating: an anchor with Word's defaults, the inline's other attributes (wp14 ids) kept.
 		const kept = keptAttributes(document, frame, new Set(["distT", "distB", "distL", "distR"]))
 		const behind = state.wrap === "behind" ? "1" : "0"
-		const z = nextZ(w.env.context)
+		const z = zOrder(w.env.context, `source:${String(drawing.index)}`)
 
 		edits.push({
 			from: document.start(frame),
@@ -491,6 +545,17 @@ export function editStyle(style: string, changes: ReadonlyMap<string, string | n
 	return out.join(";")
 }
 
+// The value of property `key` of a VML style (the first, as editStyle changes it), or undefined.
+function styleValue(style: string, key: string): string | undefined {
+	for (const piece of style.split(";")) {
+		const colon = piece.indexOf(":")
+
+		if (colon >= 0 && piece.slice(0, colon).trim().toLowerCase() === key) return piece.slice(colon + 1).trim()
+	}
+
+	return undefined
+}
+
 // The VML shape of the mc:Fallback of AlternateContent `alternate`: the first v:* drawing element of its
 // w:pict (not a shape type), or -1.
 function fallbackShape(part: StoryPart, alternate: number): number {
@@ -508,7 +573,14 @@ function fallbackShape(part: StoryPart, alternate: number): number {
 	return -1
 }
 
-function fallbackEdits(part: StoryPart, alternate: number, base: DrawingState, state: DrawingState, edits: Edit[]): void {
+function fallbackEdits(
+	part: StoryPart,
+	alternate: number,
+	base: DrawingState,
+	state: DrawingState,
+	edits: Edit[],
+	swapped: string | undefined
+): void {
 	const shape = fallbackShape(part, alternate)
 
 	// No VML copy to keep in line: the fallback is something else (a picture of a chart, say), kept as it is.
@@ -519,8 +591,18 @@ function fallbackEdits(part: StoryPart, alternate: number, base: DrawingState, s
 	const changes = new Map<string, string | null>()
 
 	if (state.cx !== base.cx || state.cy !== base.cy) {
+		const style = attributeOf(document, shape, "style") ?? ""
+
 		changes.set("width", points(state.cx))
 		changes.set("height", points(state.cy))
+
+		// Relative sizes (tenths of a percent) turn absolute as the DrawingML's do.
+		for (const [key, changed] of [
+			["mso-width-percent", state.cx !== base.cx],
+			["mso-height-percent", state.cy !== base.cy]
+		] as const) {
+			if (changed && parseFraction(styleValue(style, key) ?? "", Number.NaN) > 0) changes.set(key, "0")
+		}
 	}
 
 	if (state.rot !== base.rot) changes.set("rotation", state.rot === 0 ? null : String(state.rot))
@@ -546,9 +628,13 @@ function fallbackEdits(part: StoryPart, alternate: number, base: DrawingState, s
 
 	if (changes.size > 0) setAttribute(document, shape, "style", editStyle(attributeOf(document, shape, "style") ?? "", changes), edits)
 
-	if (!sameCrop(state.crop, base.crop)) {
+	if (!sameCrop(state.crop, base.crop) || swapped !== undefined) {
 		const imageData =
 			children(document, shape).find(child => reader.group(child) === Ns.V && document.localName(child) === "imagedata") ?? -1
+		const r = imageData < 0 ? undefined : reader.namespaces.prefixFor(imageData, R_URI)
+
+		if (imageData >= 0 && swapped !== undefined && r !== undefined && r !== "")
+			setAttribute(document, imageData, `${r}:id`, swapped, edits)
 
 		if (imageData >= 0) {
 			setAttribute(document, imageData, "cropleft", vmlCrop(state.crop.left), edits)
@@ -613,11 +699,86 @@ function writeChangedDrawing(w: StoryWriting, out: Out, node: Node): void {
 	const element = part.node(own)
 	const edits: Edit[] = []
 
-	frameEdits(w, part, drawing, base, state, edits)
+	frameEdits(w, part, node, drawing, base, state, edits)
 
-	if (part.kinds[own] === Item.AlternateContent) fallbackEdits(part, element, base, state, edits)
+	const swapped = pictureEdits(w, part, node, drawing, edits)
+
+	if (part.kinds[own] === Item.AlternateContent) fallbackEdits(part, element, base, state, edits, swapped)
 
 	writeEdited(w, out, document.start(element), document.end(element), edits)
+}
+
+// The relationship id of the picture of media `handle` from the part being written (a placeholder the layout
+// resolves while laying out edits, when there is no save to add parts to).
+function pictureRelationship(w: StoryWriting, handle: number): string {
+	const parts = w.env.parts
+
+	return parts === undefined ? `filenMedia${String(handle)}` : mediaRelationship(parts, w.part.name, handle)
+}
+
+// Extensions of a blip about its picture, gone with it: the SVG it stands for, artistic effects of it.
+const PICTURE_EXTENSIONS = new Set([SVG_EXTENSION, "{BEBA8EAE-BF5A-486C-A8C5-ECC9F3942E4B}"])
+
+// A source picture whose picture Change Picture swapped (its overrides' media): its a:blip anew (the new
+// picture's relationship, an SVG's PNG with the SVG as Word writes it; the blip's own attributes, effects and
+// other extensions kept) and no a:srcRect. The relationship the VML copy shows, or undefined.
+function pictureEdits(w: StoryWriting, part: StoryPart, node: Node, drawing: DrawingInfo, edits: Edit[]): string | undefined {
+	const edit = drawingEdit(node)
+	const media = edit?.media
+
+	if (typeof media !== "number") return undefined
+
+	const document = part.document
+	const reader = part.reader
+	const fill = pictureFill(part, drawing)
+	const blip = fill < 0 ? -1 : reader.child(fill, Ns.A, "blip")
+	const bytes = w.env.context.media.bytes(media)
+	const image = bytes === undefined ? undefined : sniffImage(bytes)
+
+	if (blip < 0) throw new DocxWriteError("unsupported", "A swapped picture without a picture fill")
+	if (image === undefined || typeof image === "string") throw new DocxWriteError("missingSource", `The picture of media ${String(media)}`)
+	if (image.format === "svg" && typeof edit?.fallback !== "number")
+		throw new DocxWriteError("missingSource", "An SVG picture without its PNG")
+
+	const bound = reader.namespaces.prefixFor(blip, R_URI)
+	const r = bound === undefined || bound === "" ? "r" : bound
+	const declare = bound === undefined || bound === "" ? ` xmlns:r="${R_URI}"` : ""
+	const a = document.prefix(blip)
+	const qa = (local: string): string => (a === "" ? local : `${a}:${local}`)
+	const shown = pictureRelationship(w, image.format === "svg" ? (edit?.fallback as number) : media)
+	let inner = ""
+	let extensions = ""
+
+	for (const child of children(document, blip)) {
+		if (document.localName(child) !== "extLst") {
+			inner += decodeUtf8(document.bytes, document.start(child), document.end(child))
+
+			continue
+		}
+
+		for (const ext of children(document, child)) {
+			if (!PICTURE_EXTENSIONS.has(attributeOf(document, ext, "uri") ?? ""))
+				extensions += decodeUtf8(document.bytes, document.start(ext), document.end(ext))
+		}
+	}
+
+	if (image.format === "svg")
+		extensions += `<${qa("ext")} uri="${SVG_EXTENSION}"><asvg:svgBlip xmlns:asvg="${SVG_URI}" ${r}:embed="${pictureRelationship(w, media)}"/></${qa("ext")}>`
+
+	const kept = keptAttributes(document, blip, new Set(["r:embed", "r:link", `${r}:embed`, `${r}:link`]))
+	const content = inner + (extensions === "" ? "" : `<${qa("extLst")}>${extensions}</${qa("extLst")}>`)
+
+	edits.push({
+		from: document.start(blip),
+		to: document.end(blip),
+		text: `<${qa("blip")} ${r}:embed="${shown}"${declare}${kept}${content === "" ? "/>" : `>${content}</${qa("blip")}>`}`
+	})
+
+	const rect = reader.child(fill, Ns.A, "srcRect")
+
+	if (rect >= 0) edits.push({ from: document.start(rect), to: document.end(rect), text: "" })
+
+	return shown
 }
 
 // ---- a new picture ------------------------------------------------------------------------------------------
@@ -630,6 +791,44 @@ function prefixOf(part: StoryPart, uri: string, fallback: string): { prefix: str
 	return bound === undefined || bound === ""
 		? { prefix: fallback, declare: ` xmlns:${fallback}="${uri}"` }
 		: { prefix: bound, declare: "" }
+}
+
+// The wp:docPr ids new pictures were written with in a save (how often each), and the ids copies of one were
+// given (per id and copy, the same at every save of a session).
+const DOCPR_STATE = {}
+const copyIds = new WeakMap<DocxEditContext, Map<string, number>>()
+
+// The id a new picture is written with: its own, or for a copy of one written already in this save (pasted,
+// copied by a drag), one of its own (wp:docPr ids are unique in a document, ECMA-376 Part 1 20.4.2.5).
+function uniqueDocPr(w: StoryWriting, docPr: number): number {
+	const parts = w.env.parts
+
+	if (parts === undefined) return docPr
+
+	const written = parts.state(DOCPR_STATE, () => new Map<number, number>())
+	const copy = written.get(docPr) ?? 0
+
+	written.set(docPr, copy + 1)
+
+	if (copy === 0) return docPr
+
+	const context = w.env.context
+	let given = copyIds.get(context)
+
+	if (given === undefined) {
+		given = new Map()
+		copyIds.set(context, given)
+	}
+
+	const key = `${String(docPr)}#${String(copy)}`
+	let id = given.get(key)
+
+	if (id === undefined) {
+		id = context.ids.next("docPr")
+		given.set(key, id)
+	}
+
+	return id
 }
 
 function writeNewPicture(w: StoryWriting, out: Out, node: Node): void {
@@ -659,7 +858,9 @@ function writeNewPicture(w: StoryWriting, out: Out, node: Node): void {
 	const wp = prefixOf(part, WP_URI, "wp")
 	const r = prefixOf(part, R_URI, "r")
 	const q = (local: string): string => `${wp.prefix}:${local}`
-	const name = `Picture ${String(docPr)}`
+	// Copies keep the original's z order (layout writes, which see no save, give them its id).
+	const id = uniqueDocPr(w, docPr)
+	const name = `Picture ${String(id)}`
 	const descr = state.descr === "" ? "" : ` descr="${escapeAttribute(state.descr)}"`
 	const cx = int(state.cx)
 	const cy = int(state.cy)
@@ -670,7 +871,7 @@ function writeNewPicture(w: StoryWriting, out: Out, node: Node): void {
 	const graphic =
 		`<${q("extent")} cx="${cx}" cy="${cy}"/><${q("effectExtent")} l="${int(reachH)}" t="${int(reachV)}" r="${int(reachH)}" b="${int(reachV)}"/>` +
 		`${state.wrap === "inline" ? "" : wrapMarkup(part, wp.prefix, state.wrap, -1)}` +
-		`<${q("docPr")} id="${String(docPr)}" name="${name}"${descr}/>` +
+		`<${q("docPr")} id="${String(id)}" name="${name}"${descr}/>` +
 		`<${q("cNvGraphicFramePr")}><a:graphicFrameLocks xmlns:a="${A_URI}" noChangeAspect="1"/></${q("cNvGraphicFramePr")}>` +
 		`<a:graphic xmlns:a="${A_URI}"><a:graphicData uri="${PIC_URI}"><pic:pic xmlns:pic="${PIC_URI}">` +
 		`<pic:nvPicPr><pic:cNvPr id="0" name="${name}"${descr}/><pic:cNvPicPr><a:picLocks noChangeAspect="1" noChangeArrowheads="1"/></pic:cNvPicPr></pic:nvPicPr>` +
@@ -680,7 +881,7 @@ function writeNewPicture(w: StoryWriting, out: Out, node: Node): void {
 	const frame =
 		state.wrap === "inline"
 			? `<${q("inline")} distT="0" distB="0" distL="0" distR="0"${wp.declare}>${graphic}</${q("inline")}>`
-			: `<${q("anchor")} distT="0" distB="0" distL="${String(FLOAT_DISTANCE)}" distR="${String(FLOAT_DISTANCE)}" simplePos="0" relativeHeight="${String(nextZ(context))}" behindDoc="${state.wrap === "behind" ? "1" : "0"}" locked="0" layoutInCell="1" allowOverlap="1"${wp.declare}>` +
+			: `<${q("anchor")} distT="0" distB="0" distL="${String(FLOAT_DISTANCE)}" distR="${String(FLOAT_DISTANCE)}" simplePos="0" relativeHeight="${String(zOrder(context, `new:${String(docPr)}`))}" behindDoc="${state.wrap === "behind" ? "1" : "0"}" locked="0" layoutInCell="1" allowOverlap="1"${wp.declare}>` +
 				`<${q("simplePos")} x="0" y="0"/>${positionMarkup(wp.prefix, "H", state.relH, state.posX ?? 0)}${positionMarkup(wp.prefix, "V", state.relV, state.posY ?? 0)}` +
 				// The wrap element goes after the effect extent (CT_Anchor), which the graphic markup starts with.
 				graphic +

@@ -107,6 +107,7 @@ function tableCommand(
 	const review = context.session.context.review
 	const identity = context.session.context.identity
 	const author = identity.author
+	const was = review.tracking
 
 	if (tracked) {
 		review.tracking = true
@@ -116,8 +117,9 @@ function tableCommand(
 	try {
 		return `${command.type}@${where} -> ${context.execute(command.type, command)}`
 	} finally {
+		// The switch as it was (a document tracking changes keeps tracking them).
 		if (tracked) {
-			review.tracking = false
+			review.tracking = was
 			identity.author = author
 		}
 	}
