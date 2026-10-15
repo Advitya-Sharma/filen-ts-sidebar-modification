@@ -1,3 +1,11 @@
+import type {
+	EditAnnotationComment,
+	EditAnnotationRevision,
+	EditAnnotationRevisionKind,
+	EditAnnotationRevisionTarget,
+	EditAnnotationRun
+} from "../../core/docx/paged/annotations"
+
 // A document's comments and tracked changes as plain data, with where they sit on the laid-out pages: what
 // an app needs to draw margin balloons, change bars and highlighted ranges in its own UI. The geometry is
 // in the pages' px (unscaled) and belongs to the layout of the view the document was opened in.
@@ -5,51 +13,13 @@
 // Boxes of annotated text: RECT_FLOATS per box (x, y, width, height on its page), the page in rectPages.
 export const RECT_FLOATS = 4
 
-export interface DocxCommentRun {
-	readonly text: string
-	readonly bold: boolean
-	readonly italic: boolean
-	readonly underline: boolean
-	readonly strike: boolean
-}
-
-export interface DocxComment {
-	// w:id, as written.
-	readonly id: string
-	// Index into the authors, or -1 when the comment names none.
-	readonly author: number
-	readonly initials: string
-	// ISO 8601 as the document records it (UTC when commentsExtensible has it), or "".
-	readonly date: string
-	// The comment's paragraphs, each its runs.
-	readonly paragraphs: readonly (readonly DocxCommentRun[])[]
-	// The comment this one replies to (index into comments), or -1.
-	readonly parent: number
-	// Resolved (commentsExtended w15:done).
-	readonly done: boolean
-	// The commented text's boxes: rects [firstRect, firstRect + rectCount). None when it is not laid out.
-	readonly firstRect: number
-	readonly rectCount: number
-}
-
-export type DocxRevisionKind = "insertion" | "deletion" | "moveFrom" | "moveTo" | "formatting"
-
-// What a change applies to: text runs, a paragraph (its mark, properties or numbering), a table (rows,
-// cells, properties) or a section's properties.
-export type DocxRevisionTarget = "text" | "paragraph" | "table" | "section"
-
-export interface DocxRevision {
-	readonly kind: DocxRevisionKind
-	readonly target: DocxRevisionTarget
-	readonly author: number
-	readonly date: string
-	// The inserted, deleted or moved text (shortened), "" for formatting.
-	readonly text: string
-	// Formatting: the WordprocessingML properties that changed (local names: "b", "sz", "jc"...).
-	readonly properties: readonly string[]
-	readonly firstRect: number
-	readonly rectCount: number
-}
+// One definition with the editor's live annotations (core/docx/paged/annotations.ts): the viewer's are the
+// same, without a change's id, story and what a formatting change changed.
+export type DocxCommentRun = EditAnnotationRun
+export type DocxComment = EditAnnotationComment
+export type DocxRevisionKind = EditAnnotationRevisionKind
+export type DocxRevisionTarget = EditAnnotationRevisionTarget
+export type DocxRevision = Omit<EditAnnotationRevision, "id" | "story" | "format">
 
 export interface DocxAnnotations {
 	readonly authors: readonly string[]

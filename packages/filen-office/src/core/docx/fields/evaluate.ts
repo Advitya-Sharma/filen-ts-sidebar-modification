@@ -7,7 +7,7 @@ import { numberSwitchFormat, numberText } from "../layout/fields"
 import { BreakType, FieldCharType, Item, RevisionView, TRANSPARENT, type StoryPart } from "../model/index"
 import { Ns } from "../model/namespaces"
 import { NumberingCounters, formatNumber, type Numbering } from "../numbering/index"
-import { dayName, monthName, picturesDay } from "../forms/dates"
+import { languageTag, pictureDate } from "../forms/dates"
 import { bookmarkIndex, type DocxBookmark } from "./bookmarks"
 import type { FieldUpdate } from "./result"
 
@@ -364,98 +364,27 @@ function splitUnquoted(text: string, separator: string): string[] {
 export const DEFAULT_DATE_PICTURE = "M/d/yyyy"
 export const DEFAULT_TIME_PICTURE = "h:mm am/pm"
 
-// A date under a \@ date-time picture (§17.16.4.1): M months, d days, y years, h (12-hour) and H (24-hour)
-// hours, m minutes, s seconds, am/pm and AM/PM (both upper case, as Word shows them: Microsoft's "Format field
-// results"), text in single quotes and other characters as written; month and day names in `language` (the
-// field's w:lang, with a day in the picture the form a date gives a month: forms/dates.ts, as date controls).
-export function datePicture(date: Date, picture: string, language?: string): string {
-	const dated = picturesDay(picture)
-	let out = ""
-	let at = 0
-	const run = (char: string): number => {
-		let end = at
+// A date under a \@ date-time picture (§17.16.4.1), read as a date control's picture is (forms/dates.ts
+// pictureDate): `date`'s local day and time, month and day names in `language` (the field's w:lang), in `calendar`
+// (\h hijri, \s saka; Gregorian without), AM/PM as the user's regional settings have it. Era items (g, e, aaa) are
+// the Japanese imperial calendar's in a Japanese field (`eastAsia`, its w:lang/@w:eastAsia, else `language`, is
+// ja); in any other, they and B are literal characters.
+export function datePicture(date: Date, picture: string, language?: string, calendar?: string, eastAsia?: string): string {
+	const japanese = /^ja(?:-|$)/i.test(languageTag(eastAsia ?? language ?? "") ?? "")
 
-		while (end < picture.length && picture[end] === char) end++
+	return pictureDate(
+		new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())),
+		{ hours: date.getHours(), minutes: date.getMinutes(), seconds: date.getSeconds() },
+		picture,
+		language ?? null,
+		calendar ?? null,
+		japanese ? "japanese" : "literal"
+	)
+}
 
-		return end - at
-	}
-
-	while (at < picture.length) {
-		const char = picture[at] ?? ""
-
-		if (char === "'") {
-			const close = picture.indexOf("'", at + 1)
-
-			out += picture.slice(at + 1, close < 0 ? picture.length : close)
-			at = close < 0 ? picture.length : close + 1
-
-			continue
-		}
-
-		const ampm = /^(am\/pm|AM\/PM|a\/p|A\/P)/.exec(picture.slice(at))
-
-		if (ampm !== null) {
-			const pm = date.getHours() >= 12
-			const token = ampm[1] as string
-
-			out += token.length === 3 ? (token === token.toUpperCase() ? (pm ? "P" : "A") : pm ? "p" : "a") : pm ? "PM" : "AM"
-			at += token.length
-
-			continue
-		}
-
-		const count = run(char)
-
-		switch (char) {
-			case "M":
-				out +=
-					count >= 4
-						? monthName(date.getMonth() + 1, language, "long", dated)
-						: count === 3
-							? monthName(date.getMonth() + 1, language, "short", dated)
-							: String(date.getMonth() + 1).padStart(count, "0")
-
-				break
-			case "d":
-			case "D":
-				out +=
-					count >= 4
-						? dayName(date.getDay(), language, "long")
-						: count === 3
-							? dayName(date.getDay(), language, "short")
-							: String(date.getDate()).padStart(count, "0")
-
-				break
-			case "y":
-			case "Y":
-				out += count <= 2 ? String(date.getFullYear() % 100).padStart(2, "0") : String(date.getFullYear())
-
-				break
-			case "h":
-				out += String(date.getHours() % 12 === 0 ? 12 : date.getHours() % 12).padStart(Math.min(count, 2), "0")
-
-				break
-			case "H":
-				out += String(date.getHours()).padStart(Math.min(count, 2), "0")
-
-				break
-			case "m":
-				out += String(date.getMinutes()).padStart(Math.min(count, 2), "0")
-
-				break
-			case "s":
-			case "S":
-				out += String(date.getSeconds()).padStart(Math.min(count, 2), "0")
-
-				break
-			default:
-				out += char.repeat(count)
-		}
-
-		at += count
-	}
-
-	return out
+// The calendar a DATE or TIME field shows its date in: \h Hijri, \s Saka (§17.16.4.1), else Gregorian.
+function fieldCalendar(code: FieldCode): string | undefined {
+	return hasSwitch(code, "h") ? "hijri" : hasSwitch(code, "s") ? "saka" : undefined
 }
 
 // A number result: \# picture, else a \* number format, else `fallback` (the page's own format for pages).
@@ -924,15 +853,20 @@ export class FieldEvaluation {
 				return page === undefined ? undefined : numberResult(page.section + 1, code)
 			}
 			case "DATE":
-			case "TIME":
+			case "TIME": {
+				const lang = this.language(node, pos)
+
 				return caseFormat(
 					datePicture(
 						this.now,
 						switchOf(code, "@")?.arg ?? (code.type === "DATE" ? DEFAULT_DATE_PICTURE : DEFAULT_TIME_PICTURE),
-						this.language(node, pos)
+						lang?.latin,
+						fieldCalendar(code),
+						lang?.eastAsia
 					),
 					code
 				)
+			}
 			case "REF":
 				return this.reference(code, pos)
 			case "PAGEREF":
@@ -1042,7 +976,7 @@ export class FieldEvaluation {
 
 	// The language of a field atom's runs (w:lang, its Latin script value; a field of the file's, its first run's),
 	// if any.
-	private language(node: Node, pos: number): string | undefined {
+	private language(node: Node, pos: number): { readonly latin: string | undefined; readonly eastAsia: string | undefined } | undefined {
 		const $pos = this.doc.resolve(pos)
 
 		if ($pos.parent.type !== nodes.paragraph) return undefined
@@ -1062,7 +996,9 @@ export class FieldEvaluation {
 			if (rPr >= 0) props = session.context.store.run(part.document, rPr)
 		}
 
-		return session.context.resolver.run(session.formats.paragraph($pos.parent), props).lang.latin
+		const lang = session.context.resolver.run(session.formats.paragraph($pos.parent), props).lang
+
+		return { latin: lang.latin ?? undefined, eastAsia: lang.eastAsia ?? undefined }
 	}
 
 	// "above" or "below": where a bookmark is from `pos` (§17.16.5.51 \p).

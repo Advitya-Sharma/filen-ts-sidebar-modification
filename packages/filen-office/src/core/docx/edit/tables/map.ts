@@ -2,6 +2,7 @@ import type { Mark, Node } from "prosemirror-model"
 import { Item, Revision, type StoryPart } from "../../model/index"
 import { Ns } from "../../model/namespaces"
 import type { PropsStore, TableCellProps, TableProps, TableRowProps } from "../../props/index"
+import type { DocxThemeColor } from "../commands/formatting"
 import type { DocxCellVAlign, DocxTableAlign } from "../commands/tables"
 import type { ElementData } from "../copies"
 import { NO_SOURCE, docxSchema } from "../schema"
@@ -86,6 +87,13 @@ export interface RowOverrides {
 	readonly source?: SourceResolution
 }
 
+// A theme colour a cell's fill follows: tint or shade 0–255 (none: the colour itself).
+export interface ShadingTheme {
+	readonly theme: DocxThemeColor
+	readonly tint?: number
+	readonly shade?: number
+}
+
 // What table commands record on a cell (its cell_props mark value).
 export interface CellOverrides {
 	readonly from?: number
@@ -93,6 +101,8 @@ export interface CellOverrides {
 	readonly copy?: ElementData
 	// "RRGGBB", or null for no fill.
 	readonly shading?: string | null
+	// The theme colour the fill is (w:themeFill with w:themeFillTint or w:themeFillShade), set with `shading`.
+	readonly shadingTheme?: ShadingTheme
 	readonly vAlign?: DocxCellVAlign
 	readonly ins?: TrackStamp
 	readonly del?: TrackStamp

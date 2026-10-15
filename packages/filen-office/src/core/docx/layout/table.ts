@@ -1,8 +1,20 @@
 import { Item, RevisionView } from "../model/kinds"
 import { Ns } from "../model/namespaces"
 import type { StoryPart } from "../model/part"
-import type { ResolvedBorder, ResolvedTableRowProps, TableCellProps, TablePositionProps, WidthProps } from "../props/types"
-import type { CellFormat, TableFormat } from "../styles/resolve"
+import type {
+	ResolvedBorder,
+	ResolvedCellBorders,
+	ResolvedShading,
+	ResolvedTableBorders,
+	ResolvedTableRowProps,
+	TableCellProps,
+	TablePositionProps,
+	WidthProps
+} from "../props/types"
+import { shadingColor } from "../theme/color"
+import { marginTwips } from "../styles/cellMargins"
+import type { PropsStore } from "../props/store"
+import type { CellFormat, PropertyResolver, RowPosition, TableFormat } from "../styles/resolve"
 import { ref, refItem, refPart } from "./edits"
 import { Area, BlockFlow, byParity, FlowStatus, nextToken, type Engine, type FlowSnapshot } from "./flow"
 import { PageGraphic, Layer, OutputMark } from "./output"
@@ -120,7 +132,7 @@ function brightness(color: string | undefined, test: number): number {
 }
 
 // The border drawn where `a` (first in reading order) and `b` meet. A cell's "nil" hides both.
-function heavier(a: ResolvedBorder | undefined, b: ResolvedBorder | undefined): ResolvedBorder | undefined {
+export function heavier(a: ResolvedBorder | undefined, b: ResolvedBorder | undefined): ResolvedBorder | undefined {
 	if (a?.style === "nil" || b?.style === "nil") return undefined
 	if (a === undefined) return b
 	if (b === undefined || a === b) return a
@@ -140,6 +152,108 @@ function heavier(a: ResolvedBorder | undefined, b: ResolvedBorder | undefined): 
 	}
 
 	return a
+}
+
+// Where a table's cells meet the edges and each other, the border the pages draw (and the reflowed view): the top
+// of a cell first on its page (`first`: the table's first row), a cell's bottom (with the cell below it), its start
+// edge (with the cell before it) and the end edge of a row's last cell.
+export function topEdge(borders: ResolvedCellBorders, table: ResolvedTableBorders, first: boolean): ResolvedBorder | undefined {
+	return first ? (borders.top ?? table.top) : (borders.top ?? table.insideH ?? table.top)
+}
+
+export function bottomEdge(
+	borders: ResolvedCellBorders,
+	table: ResolvedTableBorders,
+	last: boolean,
+	below: ResolvedCellBorders | undefined
+): ResolvedBorder | undefined {
+	const own = last ? (borders.bottom ?? table.bottom) : (borders.bottom ?? table.insideH)
+
+	return below === undefined ? own : heavier(own, below.top)
+}
+
+export function startEdge(
+	borders: ResolvedCellBorders,
+	table: ResolvedTableBorders,
+	previous: ResolvedCellBorders | undefined,
+	first: boolean
+): ResolvedBorder | undefined {
+	return first ? (borders.start ?? table.start) : heavier(borders.start ?? table.insideV, previous?.end ?? table.insideV)
+}
+
+export function endEdge(borders: ResolvedCellBorders, table: ResolvedTableBorders): ResolvedBorder | undefined {
+	return borders.end ?? table.end
+}
+
+// What fills a cell: its own shading when that paints anything, else the table's.
+export function cellFill(cell: ResolvedShading | undefined, table: ResolvedShading | undefined): ResolvedShading | undefined {
+	return cell !== undefined && shadingColor(cell.pattern, cell.color, cell.fill) !== undefined ? cell : table
+}
+
+// The table row `row` of the table at `table` of `part` is laid out with (its w:tblPrEx over the table's
+// w:tblPr; `direct` the table's own), and the row's properties.
+export function rowFormat(
+	resolver: PropertyResolver,
+	store: PropsStore,
+	part: StoryPart,
+	table: number,
+	row: number,
+	direct: TableFormat,
+	position: RowPosition
+): { readonly table: TableFormat; readonly props: ResolvedTableRowProps } {
+	const document = part.document
+	const rowRow = part.aux[row] ?? -1
+	const tblPrEx = part.rows.tblPrEx[rowRow] ?? -1
+	const format =
+		tblPrEx < 0
+			? direct
+			: resolver.table(store.table(document, part.tables.tblPr[part.aux[table] ?? -1] ?? -1), store.table(document, tblPrEx))
+
+	return { table: format, props: resolver.row(format, store.row(document, part.rows.trPr[rowRow] ?? -1), position) }
+}
+
+// A cell's format in its row (`own` its w:tcPr) from grid column `column` of `columns`, and the columns it spans.
+export function cellFormat(
+	resolver: PropertyResolver,
+	table: TableFormat,
+	own: TableCellProps,
+	position: RowPosition,
+	column: number,
+	columns: number
+): { readonly format: CellFormat; readonly span: number } {
+	const span = Math.max(1, own.gridSpan ?? 1)
+
+	return {
+		format: resolver.cell(table, own, { ...position, gridColumn: column, gridSpan: span, gridColumnCount: columns }),
+		span
+	}
+}
+
+// The cells of row `row` of `part` the revision view shows (all of them in the Markup view).
+export function cellItems(part: StoryPart, row: number, view: RevisionView): number[] {
+	const out: number[] = []
+
+	for (let item = row + 1; item < part.end(row);) {
+		const kind = part.kinds[item]
+
+		if (kind === Item.Cell) {
+			if (view === RevisionView.Markup || !part.hidden(item, view)) out.push(item)
+
+			item = part.end(item)
+		} else if (
+			kind === Item.Sdt ||
+			kind === Item.CustomXml ||
+			kind === Item.AlternateContent ||
+			kind === Item.Insertion ||
+			kind === Item.Deletion
+		) {
+			item++
+		} else {
+			item = part.end(item)
+		}
+	}
+
+	return out
 }
 
 // w:tblpPr with Word's defaults and adjustments (MS-OI29500 §17.4.57).
@@ -398,31 +512,7 @@ export class TableLayout {
 	}
 
 	private cellItems(row: number): number[] {
-		const part = this.part
-		const view = this.engine.view
-		const out: number[] = []
-
-		for (let item = row + 1; item < part.end(row);) {
-			const kind = part.kinds[item]
-
-			if (kind === Item.Cell) {
-				if (view === RevisionView.Markup || !part.hidden(item, view)) out.push(item)
-
-				item = part.end(item)
-			} else if (
-				kind === Item.Sdt ||
-				kind === Item.CustomXml ||
-				kind === Item.AlternateContent ||
-				kind === Item.Insertion ||
-				kind === Item.Deletion
-			) {
-				item++
-			} else {
-				item = part.end(item)
-			}
-		}
-
-		return out
+		return cellItems(this.part, row, this.engine.view)
 	}
 
 	private computeGrid(area: Area): void {
@@ -480,7 +570,7 @@ export class TableLayout {
 
 		this.tableWidth = x
 
-		const firstMargin = twips(props.cellMargins.start.type === "dxa" ? props.cellMargins.start.value : 0)
+		const firstMargin = twips(marginTwips(props.cellMargins.start))
 		let left: number
 
 		if (props.physicalAlignment === "center") left = area.left + (area.width - x) / 2
@@ -559,21 +649,8 @@ export class TableLayout {
 		if (item === undefined) return undefined
 
 		const engine = this.engine
-		const part = this.part
-		const document = part.document
-		const rowRow = part.aux[item] ?? -1
-		const tblPrEx = part.rows.tblPrEx[rowRow] ?? -1
-		const table =
-			tblPrEx < 0
-				? this.direct
-				: engine.resolver.table(
-						engine.store.table(document, part.tables.tblPr[part.aux[this.item] ?? -1] ?? -1),
-						engine.store.table(document, tblPrEx)
-					)
-		const props = engine.resolver.row(table, engine.store.row(document, part.rows.trPr[rowRow] ?? -1), {
-			rowIndex: index,
-			rowCount: this.rows.length
-		})
+		const position = { rowIndex: index, rowCount: this.rows.length }
+		const { table, props } = rowFormat(engine.resolver, engine.store, this.part, this.item, item, this.direct, position)
 		const slots: Slot[] = []
 		let column = props.gridBefore
 		const bidi = this.direct.props.bidiVisual
@@ -583,14 +660,7 @@ export class TableLayout {
 
 			this.cells.delete(cell)
 
-			const span = Math.max(1, direct.gridSpan ?? 1)
-			const format = engine.resolver.cell(table, direct, {
-				rowIndex: index,
-				rowCount: this.rows.length,
-				gridColumn: column,
-				gridSpan: span,
-				gridColumnCount: this.grid.length
-			})
+			const { format, span } = cellFormat(engine.resolver, table, direct, position, column, this.grid.length)
 			const end = Math.min(this.grid.length, column + span)
 			const start = this.gridX[Math.min(column, this.gridX.length - 1)] ?? 0
 			const width = (this.gridX[end - 1] ?? start) + (this.grid[end - 1] ?? 0) - start
@@ -753,7 +823,7 @@ export class TableLayout {
 
 	private cellMargins(slot: Slot): { top: number; bottom: number; start: number; end: number } {
 		const margins = slot.format.props.margins
-		const px = (width: WidthProps): number => (width.type === "dxa" ? twips(width.value) : 0)
+		const px = (width: WidthProps): number => twips(marginTwips(width))
 
 		return { top: px(margins.top), bottom: px(margins.bottom), start: px(margins.start), end: px(margins.end) }
 	}
@@ -1089,7 +1159,6 @@ export class TableLayout {
 		const first = index === 0 || this.rowsPlaced === 0
 		const last = index === this.rows.length - 1 || split
 		const next = last ? undefined : this.info(index + 1)
-		const tableShading = decorations.shading(info.table.props.shading)
 		const bidi = this.direct.props.bidiVisual
 		const line = (border: ResolvedBorder | undefined, x: number, y: number, horizontal: boolean, length: number): void => {
 			if (border === undefined || border.style === "nil" || length <= 0) return
@@ -1109,38 +1178,27 @@ export class TableLayout {
 
 		info.slots.forEach((slot, k) => {
 			const borders = slot.format.props.borders
-			const shading = decorations.shading(slot.format.props.shading)
+			const fill = decorations.shading(cellFill(slot.format.props.shading, info.table.props.shading))
 
-			if (shading !== 0 || tableShading !== 0)
-				page.addGraphic(PageGraphic.SHADING, shading !== 0 ? shading : tableShading, Layer.BEHIND, slot.x, top, slot.width, height)
+			if (fill !== 0) page.addGraphic(PageGraphic.SHADING, fill, Layer.BEHIND, slot.x, top, slot.width, height)
 
-			if (first && !slot.continued)
-				line(
-					index === 0 ? (borders.top ?? tableBorders.top) : (borders.top ?? tableBorders.insideH ?? tableBorders.top),
-					slot.x,
-					top,
-					true,
-					slot.width
-				)
+			if (first && !slot.continued) line(topEdge(borders, tableBorders, index === 0), slot.x, top, true, slot.width)
 
 			const below = next?.slots.find(candidate => candidate.column === slot.column)
 
-			if (below === undefined || !below.continued) {
-				const own = last ? (borders.bottom ?? tableBorders.bottom) : (borders.bottom ?? tableBorders.insideH)
-
-				line(below === undefined ? own : heavier(own, below.format.props.borders.top), slot.x, top + height, true, slot.width)
-			}
-
-			const previous = info.slots[k - 1]
-			const start =
-				k === 0
-					? (borders.start ?? tableBorders.start)
-					: heavier(borders.start ?? tableBorders.insideV, previous?.format.props.borders.end ?? tableBorders.insideV)
+			if (below === undefined || !below.continued)
+				line(bottomEdge(borders, tableBorders, last, below?.format.props.borders), slot.x, top + height, true, slot.width)
 
 			// The start edge is the right one in a right-to-left table (w:bidiVisual).
-			line(start, bidi ? slot.x + slot.width : slot.x, top, false, height)
+			line(
+				startEdge(borders, tableBorders, info.slots[k - 1]?.format.props.borders, k === 0),
+				bidi ? slot.x + slot.width : slot.x,
+				top,
+				false,
+				height
+			)
 
-			if (k === info.slots.length - 1) line(borders.end ?? tableBorders.end, bidi ? slot.x : slot.x + slot.width, top, false, height)
+			if (k === info.slots.length - 1) line(endEdge(borders, tableBorders), bidi ? slot.x : slot.x + slot.width, top, false, height)
 		})
 	}
 }

@@ -131,6 +131,48 @@ describe("docx review index", () => {
 		expect(index.commentCount).toBe(2)
 	})
 
+	it("tells comment changes apart from changes of tracked changes only", async () => {
+		const session = await sessionOf({ body: BODY, comments: COMMENTS })
+		const index = session.reviewIndex
+		const insertion = index.entries().find(entry => entry.kind === ReviewKind.INSERTION)
+
+		if (insertion === undefined) throw new Error("no insertion")
+
+		const version = index.version
+		const comments = index.commentVersion
+
+		// Typing inside the insertion reads its paragraph again: its entry changed, no comment's did.
+		session.dispatch(session.state.tr.insertText("x", insertion.from + 2))
+		expect(index.version).toBeGreaterThan(version)
+		expect(index.commentVersion).toBe(comments)
+		expectFresh(session)
+
+		// Typing in the commented paragraph reads its comment's entries again.
+		session.dispatch(session.state.tr.insertText("y", 3))
+		expect(index.commentVersion).toBeGreaterThan(comments)
+		expectFresh(session)
+	})
+
+	it("inserts entries found in the middle and moves the ones after it by a keystroke's length", async () => {
+		const session = await sessionOf({ body: BODY, comments: COMMENTS })
+		const plain = textPositions(session).find(pos => session.state.doc.resolve(pos).parent.textContent.startsWith("Plain")) ?? 0
+
+		// A new comment's anchors in the plain paragraph go between the entries before it and after it.
+		session.dispatch(
+			session.state.tr.insert(plain + 1, [
+				docxSchema.nodes.marker.create({ kind: "commentRangeStart", id: "9" }),
+				docxSchema.text("new"),
+				docxSchema.nodes.marker.create({ kind: "commentRangeEnd", id: "9" })
+			])
+		)
+		expectFresh(session)
+
+		for (let k = 0; k < 5; k++) {
+			session.dispatch(session.state.tr.insertText("k", plain))
+			expectFresh(session)
+		}
+	})
+
 	it("equals a fresh scan after random edits", async () => {
 		for (let seed = 1; seed <= 6; seed++) {
 			const random = rng(seed)

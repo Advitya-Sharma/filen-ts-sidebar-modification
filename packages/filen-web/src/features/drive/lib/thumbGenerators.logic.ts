@@ -71,8 +71,9 @@ const JPEG_FALLBACK_QUALITY = 0.85
 // OffscreenCanvas.convertToBlob and HTMLCanvasElement.toBlob are different APIs (promise-returning
 // vs. callback-based) — convertToBlob's presence, which HTMLCanvasElement never has, is what
 // TypeScript narrows the union on below, so no runtime `instanceof OffscreenCanvas` (unavailable
-// outside a browser/worker realm, e.g. under a plain Node unit test) is ever needed here.
-async function attemptEncode(canvas: OffscreenCanvas | HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
+// outside a browser/worker realm, e.g. under a plain Node unit test) is ever needed here. A type the canvas
+// cannot encode comes back as PNG (see selectWebpOrFallback).
+export async function attemptEncode(canvas: OffscreenCanvas | HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
 	if ("convertToBlob" in canvas) {
 		// exactOptionalPropertyTypes forbids an explicit `quality: undefined` property, so the options
 		// object is built conditionally rather than always including the (possibly absent) key.

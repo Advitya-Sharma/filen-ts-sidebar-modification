@@ -36,6 +36,8 @@ export type FormCommand =
 	// A new control at the selection (around the selected paragraphs for a repeating section); list entries
 	// for a drop-down list or combo box.
 	| { readonly type: "control.insert"; readonly kind: DocxControlKind; readonly items?: readonly DocxControlItemInput[] }
+	// A drop-down list's or combo box's entries, as they become (Word's Properties dialog: Add, Remove).
+	| { readonly type: "control.items"; readonly items: readonly DocxControlItemInput[] }
 	// Adds an item after the repeating section item at the selection, or removes that item.
 	| { readonly type: "control.item.add" }
 	| { readonly type: "control.item.remove" }
@@ -49,6 +51,7 @@ export const FORM_COMMANDS: readonly DocxCommandInfo<FormCommand["type"]>[] = [
 	{ type: "control.clear", labelKey: "docx.control.clear", icon: "control-clear", ...story },
 	{ type: "control.text", labelKey: "docx.control.text", icon: "control-text", input: "text", ...story },
 	{ type: "control.insert", labelKey: "docx.control.insert", icon: "control-insert", input: "choice", ...story },
+	{ type: "control.items", labelKey: "docx.control.items", icon: "control-items", input: "choice", ...story },
 	{ type: "control.item.add", labelKey: "docx.control.item.add", icon: "control-item-add", ...story },
 	{ type: "control.item.remove", labelKey: "docx.control.item.remove", icon: "control-item-remove", ...story }
 ]
@@ -56,8 +59,8 @@ export const FORM_COMMANDS: readonly DocxCommandInfo<FormCommand["type"]>[] = [
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 const KINDS: ReadonlySet<string> = new Set(DOCX_CONTROL_KINDS)
 // Word caps list entries at 255 characters; a list holds at most this many entries here.
-const MAX_ITEM = 255
-const MAX_ITEMS = 1000
+export const MAX_CONTROL_ITEM = 255
+const MAX_CONTROL_ITEMS = 1000
 // A legacy text field's w:maxLength is an ST_DecimalNumber; Word stops at 255 by default.
 const MAX_TEXT = 32767
 
@@ -65,7 +68,7 @@ function items(value: object): readonly DocxControlItemInput[] | undefined | nul
 	const list = field(value, "items")
 
 	if (list === undefined) return undefined
-	if (!Array.isArray(list) || list.length > MAX_ITEMS) return null
+	if (!Array.isArray(list) || list.length > MAX_CONTROL_ITEMS) return null
 
 	const out: DocxControlItemInput[] = []
 	const seen = new Set<string>()
@@ -73,8 +76,8 @@ function items(value: object): readonly DocxControlItemInput[] | undefined | nul
 	for (const entry of list as unknown[]) {
 		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null
 
-		const text = stringArg(entry, "text", MAX_ITEM, 1)
-		const itemValue = stringArg(entry, "value", MAX_ITEM, 1)
+		const text = stringArg(entry, "text", MAX_CONTROL_ITEM, 1)
+		const itemValue = stringArg(entry, "value", MAX_CONTROL_ITEM, 1)
 
 		// Word refuses two entries with the same value or display text.
 		if (text === undefined || itemValue === undefined || hasControl(text) || hasControl(itemValue)) return null
@@ -91,7 +94,7 @@ function items(value: object): readonly DocxControlItemInput[] | undefined | nul
 export const parseFormCommand: DocxCommandParser<FormCommand> = (type, value) => {
 	switch (type) {
 		case "control.choose": {
-			const chosen = stringArg(value, "value", MAX_ITEM)
+			const chosen = stringArg(value, "value", MAX_CONTROL_ITEM)
 
 			return chosen === undefined ? undefined : { type, value: chosen }
 		}
@@ -109,6 +112,11 @@ export const parseFormCommand: DocxCommandParser<FormCommand> = (type, value) =>
 
 			// A text field is one run of text: line breaks become w:br, other control characters are refused.
 			return text === undefined || hasControl(text.replace(/\n/g, "")) ? undefined : { type, text }
+		}
+		case "control.items": {
+			const list = items(value)
+
+			return list === undefined || list === null ? undefined : { type, items: list }
 		}
 		case "control.insert": {
 			const kind = choiceArg<DocxControlKind>(value, "kind", KINDS)

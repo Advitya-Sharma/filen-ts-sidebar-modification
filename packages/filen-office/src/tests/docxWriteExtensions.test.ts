@@ -309,7 +309,7 @@ describe("docx writer extension points: new elements", () => {
 		})
 	})
 
-	it("refuses changes to drawings that cannot have them, and source equations a command changed", async () => {
+	it("refuses changes to drawings that cannot have them; writes a source equation a command changed", async () => {
 		const document = await openSpec({
 			body:
 				'<w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="100"/><wp:docPr w:id="1" id="1" name="x"/></wp:inline></w:drawing></w:r></w:p>' +
@@ -337,7 +337,7 @@ describe("docx writer extension points: new elements", () => {
 					node => node.type.create({ ...node.attrs, omml: "<m:oMath/>" }, null, node.marks)
 				)
 			)
-		).toEqual({ reason: "missingSource", message: "A changed math" })
+		).toBeUndefined()
 	})
 
 	it("gives a paragraph the w14:paraId a feature set, never a copy its source's", async () => {

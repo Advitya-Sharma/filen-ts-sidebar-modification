@@ -19,7 +19,9 @@ import { registerAllActions } from "@/lib/keymap/actions"
 
 const hooks = vi.hoisted(() => ({
 	hosts: [] as DocxEditingHost[],
-	settings: { authorName: null, autosave: true, loaded: true },
+	settings: { authorName: null as string | null, autosave: true, loaded: true },
+	// What the context menu's Paste reads.
+	clipboard: null as { html?: string; text?: string } | null,
 	// Replaces the writer when set.
 	write: undefined as
 		| ((
@@ -99,6 +101,10 @@ vi.mock("@/features/preview/components/docxEditor.logic", async () => ({
 	AUTOSAVE_IDLE_MS: 200
 }))
 vi.mock("@/lib/useIsOnline", () => ({ useIsOnline: () => true }))
+vi.mock("@/features/preview/lib/docxClipboard", async () => ({
+	...(await vi.importActual<typeof import("@/features/preview/lib/docxClipboard")>("@/features/preview/lib/docxClipboard")),
+	readEditorClipboard: () => Promise.resolve(hooks.clipboard)
+}))
 vi.mock("@/lib/log", () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }))
 
 const { DocxEditView } = await import("@/features/preview/components/docxEditor")
@@ -176,6 +182,7 @@ afterEach(() => {
 	hooks.hosts.length = 0
 	hooks.settings = { authorName: null, autosave: true, loaded: true }
 	hooks.write = undefined
+	hooks.clipboard = null
 	vi.clearAllMocks()
 })
 
@@ -420,6 +427,218 @@ describe("DocxEditView", () => {
 			expect(editor.state.doc.textContent).toContain("okapi okapi")
 		})
 		expect(editor.state.doc.textContent).not.toContain("zebra")
+	})
+
+	it("pastes text the context menu's Paste read into the document (no picture in it)", async () => {
+		const { editor } = await openEditor()
+
+		hooks.clipboard = { text: "pasted words" }
+		act(() => {
+			editor.selectParagraph(1)
+		})
+		fireEvent.contextMenu(screen.getByRole("textbox", { name: "report.docx" }))
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Paste" }))
+		await waitFor(() => {
+			expect(editor.state.doc.textContent).toContain("pasted words")
+		})
+	})
+
+	it("offers no Mobile view in the ⋯ menu until it is labelled", async () => {
+		await openEditor()
+
+		fireEvent.click(screen.getByRole("button", { name: "More tools" }))
+
+		const items = (await screen.findAllByRole("menuitem")).map(item => item.textContent)
+
+		expect(items).toContain("Find and replace")
+		expect(items.some(item => item.includes("Mobile"))).toBe(false)
+		expect(screen.getByRole("textbox", { name: "report.docx" })).toBeTruthy()
+	})
+
+	it("shows the Table group while the caret is in a table, and the context menu offers its rows and columns", async () => {
+		const { editor } = await openEditor()
+
+		expect(screen.queryByRole("button", { name: "Table" })).toBeNull()
+		act(() => {
+			editor.selectParagraph(1)
+			void editor.execute({ type: "table.insert", rows: 2, cols: 3 })
+		})
+		act(() => {
+			let inside = -1
+
+			editor.state.doc.descendants((node, pos) => {
+				if (inside < 0 && node.type.name === "table_cell") {
+					inside = pos + 2
+				}
+
+				return inside < 0
+			})
+			editor.select({ pos: inside, affinity: 1, page: 0, line: 0, atom: false })
+		})
+
+		fireEvent.click(await screen.findByRole("button", { name: "Table" }))
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Insert row below" }))
+		await waitFor(() => {
+			expect(editor.snapshot().context.table?.rows).toBe(3)
+		})
+
+		fireEvent.contextMenu(screen.getByRole("textbox", { name: "report.docx" }))
+		expect(await screen.findByRole("menuitem", { name: "Insert column right" })).toBeTruthy()
+		fireEvent.click(screen.getByRole("menuitem", { name: "Delete table" }))
+		await waitFor(() => {
+			expect(editor.snapshot().context.table).toBeNull()
+		})
+		expect(screen.queryByRole("button", { name: "Table" })).toBeNull()
+	})
+
+	it("edits a header with the chip's toggles, and Close goes back to the body", async () => {
+		const { editor } = await openEditor()
+
+		act(() => {
+			void editor.execute({ type: "header.edit" })
+		})
+
+		// One section: the chip says only which header it is.
+		const chip = await screen.findByRole("group", { name: "Header" })
+
+		expect(editor.snapshot().context.story.kind).toBe("header")
+		fireEvent.click(screen.getByRole("button", { name: "Header and footer options" }))
+		fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Different first page" }))
+		await waitFor(() => {
+			expect(editor.snapshot().context.story.header?.differentFirst).toBe(true)
+		})
+		fireEvent.click(screen.getByRole("button", { name: "Close header" }))
+		await waitFor(() => {
+			expect(chip.isConnected).toBe(false)
+		})
+		expect(editor.snapshot().context.story.kind).toBe("body")
+	})
+
+	it("sets up the pages from the ⋯ menu's dialog, prefilled with the section's", async () => {
+		const { editor } = await openEditor()
+		const execute = vi.spyOn(editor, "execute")
+
+		fireEvent.click(screen.getByRole("button", { name: "More tools" }))
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Page setup…" }))
+
+		const top = await screen.findByRole("textbox", { name: "Top (in)" })
+
+		expect((top as HTMLInputElement).value).toBe("1")
+		fireEvent.change(top, { target: { value: "0.5" } })
+		fireEvent.click(screen.getByRole("button", { name: "Apply" }))
+		await waitFor(() => {
+			expect(execute).toHaveBeenCalledWith({
+				type: "page.setup",
+				margins: { top: 720, bottom: 1440, left: 1440, right: 1440 },
+				scope: "section"
+			})
+		})
+		expect(screen.queryByRole("dialog")).toBeNull()
+	})
+
+	it("runs commands that change nothing while the file cannot be saved", async () => {
+		const { editor } = await openEditor({ writable: false })
+
+		fireEvent.click(screen.getByRole("button", { name: "More tools" }))
+		fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Show field codes" }))
+		await waitFor(() => {
+			expect(editor.fieldCodes).toBe(true)
+		})
+	})
+
+	it("tells when a command that settles later fails", async () => {
+		const { editor } = await openEditor()
+
+		vi.spyOn(editor, "execute").mockReturnValueOnce(Promise.reject(new Error("no")))
+		fireEvent.click(screen.getByRole("button", { name: "Bold" }))
+		await waitFor(() => {
+			expect(toasts.error).toHaveBeenCalledWith("That change couldn't be made.")
+		})
+	})
+
+	it("paints the next selection made in the document with the format painter, once", async () => {
+		const { editor } = await openEditor()
+		const execute = vi.spyOn(editor, "execute")
+
+		act(() => {
+			editor.selectParagraph(1)
+		})
+		fireEvent.click(screen.getByRole("button", { name: "Format painter" }), { detail: 1 })
+		await waitFor(() => {
+			expect(editor.painter).toBeDefined()
+		})
+		expect(screen.getByRole("button", { name: "Format painter" }).getAttribute("aria-pressed")).toBe("true")
+		// A right click's release opens the context menu: it paints nothing.
+		fireEvent.pointerUp(screen.getByRole("textbox", { name: "report.docx" }), { isPrimary: true, button: 2 })
+		await new Promise(resolve => setTimeout(resolve, 20))
+		expect(execute).not.toHaveBeenCalledWith({ type: "format.paste" })
+		fireEvent.pointerUp(screen.getByRole("textbox", { name: "report.docx" }), { isPrimary: true, button: 0 })
+		await waitFor(() => {
+			expect(execute).toHaveBeenCalledWith({ type: "format.paste" })
+		})
+		await waitFor(() => {
+			expect(editor.painter).toBeUndefined()
+		})
+	})
+
+	it("offers the markup modes once changes are tracked in a document that had none", async () => {
+		hooks.settings = { authorName: "Ann", autosave: true, loaded: true }
+
+		const { editor } = await openEditor()
+
+		fireEvent.click(await screen.findByRole("button", { name: /^Review/ }))
+		expect(await screen.findByRole("menuitemcheckbox", { name: "Track changes" })).toBeTruthy()
+		expect(screen.queryByRole("menuitemradio", { name: "All markup" })).toBeNull()
+		fireEvent.keyDown(screen.getByRole("menuitemcheckbox", { name: "Track changes" }), { key: "Escape" })
+		act(() => {
+			void editor.execute({ type: "review.track", on: true })
+		})
+		await waitFor(() => {
+			expect(editor.snapshot().review.tracking).toBe(true)
+		})
+		fireEvent.click(await screen.findByRole("button", { name: /^Review/ }))
+		expect(await screen.findByRole("menuitemradio", { name: "All markup" })).toBeTruthy()
+	})
+
+	it("opens a dropdown control's entries at the caret with Alt+Down and chooses one from the keyboard", async () => {
+		const { editor } = await openEditor()
+
+		act(() => {
+			editor.selectParagraph(1)
+			editor.select({ pos: editor.selection().to, affinity: 1, page: 0, line: 0, atom: false })
+			void editor.execute({ type: "control.insert", kind: "dropDownList", items: [{ text: "Plum", value: "plum" }] })
+		})
+		await waitFor(() => {
+			expect(editor.snapshot().context.control?.type).toBe("dropDownList")
+		})
+		fireEvent.keyDown(screen.getByRole("textbox", { name: "report.docx" }), { key: "ArrowDown", altKey: true })
+
+		const list = await screen.findByRole("listbox", { name: "Items" })
+
+		await waitFor(() => {
+			expect(document.activeElement).toBe(list)
+		})
+		fireEvent.keyDown(list, { key: "End" })
+		fireEvent.keyDown(list, { key: "Enter" })
+		await waitFor(() => {
+			expect(editor.snapshot().context.control?.value).toBe("plum")
+		})
+		expect(editor.state.doc.textContent).toContain("Plum")
+	})
+
+	it("keeps the split dialog open and says why when the table refuses the split", async () => {
+		const { editor } = await openEditor()
+
+		act(() => {
+			editor.selectParagraph(1)
+			void editor.execute({ type: "table.insert", rows: 1, cols: 1 })
+		})
+		vi.spyOn(editor, "execute").mockReturnValue(false)
+		fireEvent.contextMenu(screen.getByRole("textbox", { name: "report.docx" }))
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Split cells…" }))
+		fireEvent.click(await screen.findByRole("button", { name: "Split" }))
+		expect((await screen.findByRole("alert")).textContent).toBe("This cell can't be split into that many rows and columns.")
+		expect(screen.getByRole("dialog", { name: "Split cells" })).toBeTruthy()
 	})
 
 	it("counts matches in the locale's numbers, past the most a find shows", () => {

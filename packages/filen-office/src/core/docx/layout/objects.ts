@@ -1,9 +1,9 @@
 import type { DocxModel } from "../model/document"
 import type { AnchorPosition, DrawingInfo, VmlInfo, WrapType } from "../model/drawings"
-import { Item } from "../model/kinds"
+import { Item, RevisionView } from "../model/kinds"
 import { Ns } from "../model/namespaces"
 import type { StoryPart } from "../model/part"
-import { ommlToMathTree, type MathElement } from "../../math/index"
+import { ommlToMathTree, type MathElement, type OmmlRevisionView } from "../../math/index"
 import { mathBox } from "./math"
 import { emu, points } from "./units"
 
@@ -75,7 +75,7 @@ export class ObjectTable {
 	readonly kinds: ObjectKind[] = []
 	readonly parts: number[] = []
 	readonly items: number[] = []
-	// Index into model.drawings or model.vml, -1 otherwise.
+	// Index into model.drawings or model.vml; an equation holding tracked changes, the revision view it shows; -1 otherwise.
 	readonly indices: number[] = []
 	readonly widths: number[] = []
 	readonly heights: number[] = []
@@ -91,8 +91,20 @@ export class ObjectTable {
 	readonly provisional = new Set<number>()
 	private readonly byItem = new Map<number, number>()
 
+	// Equations holding tracked changes, by item and revision view: each view shows them otherwise.
+	private readonly byView = new Map<number, number>()
+
 	idOf(part: number, item: number): number {
 		return this.byItem.get(part * 0x4000000 + item) ?? -1
+	}
+
+	// The equation at `item` as revision view `view` shows it (its index is the view), or -1.
+	viewIdOf(part: number, item: number, view: RevisionView): number {
+		return this.byView.get((part * 0x4000000 + item) * 4 + view) ?? -1
+	}
+
+	setViewId(part: number, item: number, view: RevisionView, id: number): void {
+		this.byView.set((part * 0x4000000 + item) * 4 + view, id)
 	}
 
 	add(
@@ -264,7 +276,7 @@ const VML_WRAPS: Readonly<Record<string, WrapType>> = {
 	none: "none"
 }
 
-function textboxStories(model: DocxModel, part: StoryPart, item: number): number[] | undefined {
+export function textboxStories(model: DocxModel, part: StoryPart, item: number): number[] | undefined {
 	let out: number[] | undefined
 
 	for (let child = item + 1; child < part.end(item); child = part.end(child)) {
@@ -287,20 +299,120 @@ function drawingInsets(part: StoryPart, drawing: DrawingInfo): number[] {
 	return [inset("lIns", 91440), inset("tIns", 45720), inset("rIns", 91440), inset("bIns", 45720)]
 }
 
+const VIEW_NAMES: Readonly<Record<RevisionView, OmmlRevisionView["view"]>> = {
+	[RevisionView.Markup]: "markup",
+	[RevisionView.Final]: "final",
+	[RevisionView.Original]: "original"
+}
+
+// How revision view `view` shows tracked changes inside equations.
+export function equationView(view: RevisionView): OmmlRevisionView {
+	return { view: VIEW_NAMES[view] }
+}
+
+const W_CHANGES: ReadonlySet<string> = new Set(["ins", "del", "moveFrom", "moveTo"])
+const trackedEquations = new WeakMap<StoryPart, Map<number, boolean>>()
+
+// Whether the equation at `item` holds tracked changes (w:ins / w:del anywhere in it); read once per item.
+export function equationTracked(part: StoryPart, item: number): boolean {
+	let known = trackedEquations.get(part)
+
+	if (known === undefined) {
+		known = new Map()
+		trackedEquations.set(part, known)
+	}
+
+	let tracked = known.get(item)
+
+	if (tracked !== undefined) return tracked
+
+	const document = part.document
+	const reader = part.reader
+	// Iterative: an equation may nest deeper than the stack goes.
+	const visit = (root: number): boolean => {
+		const stack = [root]
+
+		for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+			for (let child = document.firstChildElement(next); child >= 0; child = document.nextSiblingElement(child)) {
+				if (reader.group(child) === Ns.W && W_CHANGES.has(document.localName(child))) return true
+
+				stack.push(child)
+			}
+		}
+
+		return false
+	}
+
+	tracked = visit(part.node(item))
+	known.set(item, tracked)
+
+	return tracked
+}
+
+const equationAuthorLists = new WeakMap<StoryPart, readonly string[]>()
+
+// The authors of the tracked changes inside a part's equations, in document order (read once per part): reviewers
+// are numbered from the model (styles.ts revisionAuthors), so the colour of one who changed only equations is the
+// same wherever it is drawn.
+export function equationAuthors(part: StoryPart): readonly string[] {
+	let found = equationAuthorLists.get(part)
+
+	if (found !== undefined) return found
+
+	const out: string[] = []
+	const document = part.document
+	const reader = part.reader
+	// In document order, iteratively: an equation may nest deeper than the stack goes.
+	const visit = (root: number): void => {
+		const stack = [root]
+
+		for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+			const children: number[] = []
+
+			for (let child = document.firstChildElement(next); child >= 0; child = document.nextSiblingElement(child)) {
+				if (reader.group(child) === Ns.W && W_CHANGES.has(document.localName(child))) {
+					const author = reader.attr(child, Ns.W, "author")
+
+					if (author !== undefined) out.push(author)
+				}
+
+				children.push(child)
+			}
+
+			for (let k = children.length - 1; k >= 0; k--) stack.push(children[k] ?? -1)
+		}
+	}
+
+	for (let item = 0; item < part.kinds.length; item++) {
+		const kind = part.kinds[item]
+
+		if ((kind === Item.Math || kind === Item.MathParagraph) && equationTracked(part, item)) visit(part.node(item))
+	}
+
+	found = out
+	equationAuthorLists.set(part, found)
+
+	return found
+}
+
 // An equation's size from its MathML tree, its text measured in the run's font; for a tree that cannot be
-// built, its text one and a half lines high.
+// built, its text one and a half lines high. `view`: how its tracked changes show.
 function equationSize(
 	part: StoryPart,
 	item: number,
 	display: boolean,
 	fontSize: number,
-	measureText: (text: string) => number
+	measureText: (text: string) => number,
+	view: OmmlRevisionView | undefined
 ): ObjectSize {
 	const node = part.node(item)
 	let tree: MathElement | undefined
 
 	try {
-		tree = ommlToMathTree(part.document, node, { namespaces: part.reader.namespaces })
+		tree = ommlToMathTree(part.document, node, {
+			namespaces: part.reader.namespaces,
+			...(view === undefined ? {} : { revisions: view })
+		})
 	} catch {
 		tree = undefined
 	}
@@ -325,7 +437,8 @@ export interface PlacedObject {
 }
 
 // Registers (once) and sizes the drawing, VML or equation at `item`. `fontsMissing`: fonts are still loading,
-// so an equation measured now is measured again later.
+// so an equation measured now is measured again later. An equation holding tracked changes is an object per
+// revision view `view` (each shows it otherwise; the object's index is the view).
 export function objectAt(
 	model: DocxModel,
 	table: ObjectTable,
@@ -334,9 +447,12 @@ export function objectAt(
 	item: number,
 	fontSize: number,
 	measureText: (text: string) => number,
-	fontsMissing: boolean
+	fontsMissing: boolean,
+	view: RevisionView = RevisionView.Final
 ): PlacedObject | undefined {
-	const existing = table.idOf(part.index, item)
+	const kind = part.kinds[item]
+	const tracked = (kind === Item.Math || kind === Item.MathParagraph) && equationTracked(part, item)
+	const existing = tracked ? table.viewIdOf(part.index, item, view) : table.idOf(part.index, item)
 
 	if (existing >= 0 && (fontsMissing || !table.provisional.has(existing))) {
 		return {
@@ -347,8 +463,6 @@ export function objectAt(
 			anchored: table.floats[existing] !== undefined
 		}
 	}
-
-	const kind = part.kinds[item]
 
 	if (kind === Item.Drawing) {
 		const drawing = model.drawings[part.aux[item] ?? -1]
@@ -437,7 +551,10 @@ export function objectAt(
 
 	if (kind === Item.Math || kind === Item.MathParagraph) {
 		const custom = sizer?.size({ kind: ObjectKind.MATH, part, item, drawing: undefined, vml: undefined, fontSize })
-		const estimated = custom === undefined ? equationSize(part, item, kind === Item.MathParagraph, fontSize, measureText) : undefined
+		const estimated =
+			custom === undefined
+				? equationSize(part, item, kind === Item.MathParagraph, fontSize, measureText, tracked ? equationView(view) : undefined)
+				: undefined
 		const width = custom?.width ?? estimated?.width ?? 0
 		const height = custom?.height ?? estimated?.height ?? 0
 		const ascent = custom?.ascent ?? estimated?.ascent ?? height
@@ -451,8 +568,9 @@ export function objectAt(
 			return { id: existing, width, height, ascent, anchored: false }
 		}
 
-		const id = table.add(ObjectKind.MATH, part.index, item, -1, width, height, ascent, undefined, undefined, undefined)
+		const id = table.add(ObjectKind.MATH, part.index, item, tracked ? view : -1, width, height, ascent, undefined, undefined, undefined)
 
+		if (tracked) table.setViewId(part.index, item, view, id)
 		if (fontsMissing) table.provisional.add(id)
 
 		return { id, width, height, ascent, anchored: false }

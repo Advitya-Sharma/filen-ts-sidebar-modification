@@ -17,6 +17,7 @@ import {
 	type DocxEditorOptions,
 	type DocxEditorSnapshot,
 	type DocxMediaInfo,
+	type DocxRefusalReason,
 	type NewStoryKind
 } from "../edit/index"
 import { commandAllowed } from "../edit/protection"
@@ -138,6 +139,7 @@ export class PagedEditor {
 	private readonly now: () => number
 	private readonly budget: number
 	private readonly listeners = new Set<(event: PagedEditorEvent) => void>()
+	private readonly refusedListeners = new Set<(reason: DocxRefusalReason) => void>()
 	// Pages as shown: the layout's, and while it lays out again in the background, earlier ones it has not
 	// reached yet.
 	private readonly shown: PageDisplayList[] = []
@@ -225,6 +227,11 @@ export class PagedEditor {
 		this.stories.set(session.story.story.index, story)
 		this.history.track(story, session.state)
 		this.unsubscribe.push(session.onApplied((transactions, state) => this.onApplied(story, transactions, state)))
+		this.unsubscribe.push(
+			session.onRefused(reason => {
+				for (const listener of this.refusedListeners) listener(reason)
+			})
+		)
 
 		return story
 	}
@@ -263,6 +270,14 @@ export class PagedEditor {
 	// use; undefined for any other index. Its edits join the undo order; it is not entered.
 	storySession(story: number): DocxEditorSession | undefined {
 		return this.storyOf(story)?.session
+	}
+
+	// Story `story` laid out on the pages (a header, footer, note or text box): its session and its geometry over
+	// the pages, made on first use as storySession makes them; undefined for a story not on the pages (a comment).
+	storyOnPages(story: number): { readonly session: DocxEditorSession; readonly geometry: PagedGeometry } | undefined {
+		const edited = this.storyOf(story)
+
+		return edited?.region === undefined ? undefined : edited
 	}
 
 	private storyOf(story: number): EditedStory | undefined {
@@ -469,6 +484,15 @@ export class PagedEditor {
 		return hitObject(this, page, x, y, zoom)
 	}
 
+	// Hears a user edit any story's session refused (DocxEditorSession.onRefused).
+	onRefused(listener: (reason: DocxRefusalReason) => void): () => void {
+		this.refusedListeners.add(listener)
+
+		return () => {
+			this.refusedListeners.delete(listener)
+		}
+	}
+
 	subscribe(listener: (event: PagedEditorEvent) => void): () => void {
 		this.listeners.add(listener)
 
@@ -484,6 +508,7 @@ export class PagedEditor {
 
 		this.unsubscribe.length = 0
 		this.listeners.clear()
+		this.refusedListeners.clear()
 
 		for (const resolve of this.settledWaiters.splice(0)) resolve()
 

@@ -146,6 +146,17 @@ export interface ContentServices {
 // resolved runs (and their styles) are shared.
 const SIZED_RUNS = new WeakMap<RunProps, Map<number, RunProps>>()
 
+// Whether a paragraph's mark is not shown (w:vanish, w:specVanish on the mark): the paragraph then joins the
+// next one (one paragraph built, one list marker counted), as Word lays it out.
+export function markVanishes(mark: ResolvedRunProps, showHidden: boolean): boolean {
+	return !showHidden && (mark.vanish || mark.specVanish)
+}
+
+// The text a list marker shows: a picture bullet without text of its own shows as a bullet character.
+export function listMarkerText(marker: ListMarker): string {
+	return marker.pictureBullet !== undefined && marker.text === "" ? "\u2022" : marker.text
+}
+
 function sizedRun(direct: RunProps, size: number): RunProps {
 	let sizes = SIZED_RUNS.get(direct)
 	let sized = sizes?.get(size)
@@ -296,11 +307,7 @@ export class ContentBuilder {
 		if (this.codes !== undefined && part.fields.count > 0 && this.codeMarksOf(part).has(item)) return true
 		if (this.codes?.within?.(part, item) === true) return true
 
-		if (this.services.showHidden) return false
-
-		const mark = this.services.resolver.paragraphMark(format)
-
-		return mark.vanish || mark.specVanish
+		return markVanishes(this.services.resolver.paragraphMark(format), this.services.showHidden)
 	}
 
 	// Builds paragraphs first..last (joined: every mark but the last hidden) into the paragraph builder;
@@ -382,7 +389,7 @@ export class ContentBuilder {
 		if (run === undefined || (run.vanish && !services.showHidden)) return
 
 		const builder = this.builder
-		const text = marker.pictureBullet !== undefined && marker.text === "" ? "•" : marker.text
+		const text = listMarkerText(marker)
 		const start = builder.length
 
 		if (text !== "") {
@@ -921,7 +928,8 @@ export class ContentBuilder {
 			item,
 			size,
 			text => this.width(style, text, 0, text.length),
-			services.styles.hasMissing
+			services.styles.hasMissing,
+			services.view
 		)
 
 		if (placed === undefined) return

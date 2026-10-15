@@ -6,14 +6,12 @@ import type { EffectiveLevel, Numbering } from "../numbering/numbering"
 import { EMPTY_PARAGRAPH, EMPTY_RUN, EMPTY_TABLE } from "../props/parse"
 import type {
 	BorderProps,
-	CellMarginsProps,
 	ColorProps,
 	FontsProps,
 	IndentProps,
 	ParagraphProps,
 	PhysicalAlignment,
 	ResolvedBorder,
-	ResolvedCellMargins,
 	ResolvedFonts,
 	ResolvedIndent,
 	ResolvedParagraphBorders,
@@ -38,6 +36,7 @@ import type {
 } from "../props/types"
 import { HIGHLIGHT_COLORS, applyThemeShade, applyThemeTint } from "../theme/color"
 import type { Theme } from "../theme/theme"
+import { resolveCellMargins } from "./cellMargins"
 import { mergeCell, mergeParagraph, mergeRow, mergeRun, mergeTable, type Mutable } from "./merge"
 import { DEFAULT_STYLE_SETTINGS, type StyleSettings } from "./settings"
 import { eastAsiaUsesAscii } from "../../fonts/slots"
@@ -861,7 +860,7 @@ export class PropertyResolver {
 			borders: this.tableBorders(acc.borders),
 			shading: this.shading(acc.shading),
 			layout: acc.layout ?? "autofit",
-			cellMargins: this.margins([acc.cellMargins]),
+			cellMargins: resolveCellMargins([acc.cellMargins]),
 			look: acc.look ?? DEFAULT_TABLE_LOOK,
 			bidiVisual: bidi,
 			overlap: acc.overlap ?? "overlap",
@@ -881,24 +880,6 @@ export class PropertyResolver {
 			cells: new Map(),
 			rows: new Map()
 		}
-	}
-
-	private margins(layers: readonly (CellMarginsProps | undefined)[]): ResolvedCellMargins {
-		let top = ZERO_DXA
-		let start = ZERO_DXA
-		let bottom = ZERO_DXA
-		let end = ZERO_DXA
-
-		for (const layer of layers) {
-			if (layer === undefined) continue
-
-			top = layer.top ?? top
-			start = layer.start ?? start
-			bottom = layer.bottom ?? bottom
-			end = layer.end ?? end
-		}
-
-		return { top, start, bottom, end }
 	}
 
 	row(table: TableFormat, direct: TableRowProps, position: RowPosition): ResolvedTableRowProps {
@@ -993,7 +974,7 @@ export class PropertyResolver {
 					tr2bl: this.border(borders?.tr2bl)
 				},
 				shading: this.shading(acc.shading),
-				margins: this.margins([
+				margins: resolveCellMargins([
 					internal.styleTable.cellMargins,
 					context?.cell.margins,
 					internal.direct.cellMargins,

@@ -146,10 +146,17 @@ function assistantModelSources(mode: string): string[] {
 // DOCX editing (src/features/preview/lib/docxEditingFlag.ts) stays out of builds without VITE_DOCX_EDITING=1: the
 // editor module resolves to a stub that renders nothing. A static import of the real one would keep the
 // module-level code of everything below it (ProseMirror, the in-thread engine, the writer) even unrendered.
+// The editor's strings (locales/en/previewDocx/*) resolve to empty catalogs the same way.
 function docxEditingAlias(mode: string): { find: RegExp; replacement: string }[] {
 	return loadEnv(mode, process.cwd(), "VITE_DOCX_EDITING")["VITE_DOCX_EDITING"] === "1"
 		? []
-		: [{ find: /^@\/features\/preview\/components\/docxEditor$/, replacement: "/src/features/preview/components/docxEditor.off.tsx" }]
+		: [
+				{
+					find: /^@\/features\/preview\/components\/docxEditor$/,
+					replacement: "/src/features/preview/components/docxEditor.off.tsx"
+				},
+				{ find: /^@\/locales\/en\/previewDocx\/[A-Za-z]+$/, replacement: "/src/locales/en/previewDocx/off.ts" }
+			]
 }
 
 const contentSecurityPolicy = (connectExtra: readonly string[]) =>

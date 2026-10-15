@@ -14,6 +14,7 @@ import type { DocxEditContext } from "../edit/context"
 import { markCommand } from "../edit/invariants/index"
 import type { DocumentCommandContext } from "../edit/registry"
 import { NO_SOURCE, docxSchema, type DrawingOverrides } from "../edit/schema"
+import { tableCellMargins } from "../edit/tables/margins"
 import { tableMap } from "../edit/tables/map"
 import { paddedGrid } from "../edit/tables/ops"
 import type { DrawingInfo } from "../model/drawings"
@@ -690,8 +691,10 @@ function availableBox(context: DocumentCommandContext, state: EditorState): { re
 
 		for (let c = start; c < start + span; c++) width += grid[c] ?? 0
 
-		// Less Word's default cell margins (0.08 in each side).
-		return { width: Math.max(1, Math.round(Math.max(width - 230, 288) * EMU_PER_TWIP)), height }
+		// Less the table's cell margins.
+		const margins = tableCellMargins(session.story.part, context.context, $from.node(d - 2))
+
+		return { width: Math.max(1, Math.round(Math.max(width - margins, 288) * EMU_PER_TWIP)), height }
 	}
 
 	if (props === undefined) return { width: Math.round(DEFAULT_TEXT_WIDTH * EMU_PER_TWIP), height }

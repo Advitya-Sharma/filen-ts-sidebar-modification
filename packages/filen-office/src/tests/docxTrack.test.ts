@@ -1692,4 +1692,36 @@ describe("docx tracked changes: what a resolved change leaves", () => {
 		opened.editor.dispose()
 		again.editor.dispose()
 	})
+
+	it("takes a hyperlink whose text an accepted deletion took out away, proofing marks inside it and all", async () => {
+		const link =
+			'<w:hyperlink r:id="rIdLink" w:history="1"><w:proofErr w:type="gramStart"/>' +
+			run("Working") +
+			'<w:proofErr w:type="gramEnd"/>' +
+			run(" with lists") +
+			"</w:hyperlink>"
+		const opened = await pagedEditor(
+			buildDocx({
+				body: pr(run("Before ") + link + run(" after")),
+				relationships: [{ id: "rIdLink", type: "hyperlink", target: "https://example.com/", external: true }]
+			})
+		)
+		const { editor, context } = opened
+		const session = editor.body.session
+
+		context.identity.author = "Ann"
+		context.review.tracking = true
+		session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, 8, 28)))
+		session.dispatch(session.state.tr.deleteSelection())
+		expect(await editor.execute({ type: "review.acceptAll" })).toBe(true)
+		await settleAll(editor)
+
+		const xml = new TextDecoder().decode(
+			unzipSync((await saveDocx({ pkg: opened.pkg, context, sessions: editor.sessions })).bytes as Uint8Array)["word/document.xml"]
+		)
+
+		expect(xml).not.toContain("<w:hyperlink")
+		expect(session.state.doc.textContent).toBe("Before  after")
+		editor.dispose()
+	})
 })

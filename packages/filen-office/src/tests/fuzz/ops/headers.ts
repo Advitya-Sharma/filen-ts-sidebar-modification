@@ -98,6 +98,12 @@ function pageSetup(rand: Rand): DocxEditorCommand {
 			type: "page.setup",
 			lineNumbers: rand() < 0.3 ? null : { countBy: 1 + Math.floor(rand() * 5), start: 1 + Math.floor(rand() * 3) }
 		},
+		// Mirror margins (document-wide), with Word's Mirrored margins and a gutter at times.
+		{
+			type: "page.setup",
+			mirrorMargins: rand() < 0.7,
+			...(rand() < 0.5 ? { margins: { left: 1800, right: 1440, gutter: Math.floor(rand() * 720) } } : {})
+		},
 		// Margins that may leave no room for text: the command refuses them as a save would.
 		{ type: "page.setup", margins: { left: 2000 + Math.floor(rand() * 5000), right: 2000 + Math.floor(rand() * 5000) } }
 	]

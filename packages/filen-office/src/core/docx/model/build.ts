@@ -25,6 +25,9 @@ export interface SectionSeed {
 	readonly node: number
 }
 
+// Tracked changes inside equations (see mathRevisionIds).
+const MATH_CHANGES: ReadonlySet<string> = new Set(["ins", "del", "moveFrom", "moveTo"])
+
 export interface MaxIds {
 	docPr: number
 	bookmark: number
@@ -512,10 +515,12 @@ class PartBuilder {
 				return
 			case El.OMathPara:
 				this.leaf(Item.MathParagraph, node, parent, 0)
+				this.mathRevisionIds(node)
 
 				return
 			case El.OMath:
 				this.leaf(Item.Math, node, parent, 0)
+				this.mathRevisionIds(node)
 
 				return
 		}
@@ -949,6 +954,24 @@ class PartBuilder {
 	// A style reference's id; a malformed one counts as absent.
 	private styleId(node: number): number {
 		return this.reader.malformedNodes.has(node) ? -1 : this.shared.strings.intern(this.reader.attr(node, Ns.W, "val"))
+	}
+
+	// An equation is one item: the ids of the tracked changes inside it (w:ins / w:del around its runs, in its
+	// objects' m:ctrlPr) count among the document's revision ids all the same, so new ones never repeat them.
+	private mathRevisionIds(node: number): void {
+		const reader = this.reader
+		const document = reader.document
+		// Iterative: an equation may nest deeper than the stack goes.
+		const stack = [node]
+
+		for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+			for (let child = document.firstChildElement(next); child >= 0; child = document.nextSiblingElement(child)) {
+				if (reader.group(child) === Ns.W && MATH_CHANGES.has(document.localName(child)))
+					this.shared.maxIds.revision = Math.max(this.shared.maxIds.revision, reader.int(child, Ns.W, "id", -1))
+
+				stack.push(child)
+			}
+		}
 	}
 
 	private addRevision(kind: Revision, item: number, node: number): number {

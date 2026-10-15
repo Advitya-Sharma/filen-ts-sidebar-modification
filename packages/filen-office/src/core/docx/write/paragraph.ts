@@ -567,15 +567,20 @@ function writeInline(w: StoryWriting, out: Out, paragraph: Node, owned: number):
 	}
 
 	const stack: Mark[] = []
+	// Rendered page breaks are Word's layout cache: rebuilt runs leave them out (and an otherwise empty
+	// wrapper with them).
+	const dropped = (unit: Unit): boolean => !forced && !unit.copy && unit.nodes.every(child => child.type === nodes.rendered_break)
+	// A proofing mark is no item of the model: a hyperlink holding nothing else (its text deleted) would read
+	// back as an empty hyperlink, kept as its bytes. Those marks go, and the hyperlink with them.
+	const holdsContent = (link: Mark): boolean =>
+		list.some(unit => unit.nodes.length > 0 && unit.nodes[0]?.type !== nodes.proof_err && !dropped(unit) && link.isInSet(unit.wrappers))
 
 	list.forEach((unit, index) => {
 		const node = unit.nodes[0]
 
-		if (node === undefined) return
+		if (node === undefined || dropped(unit)) return
 
-		// Rendered page breaks are Word's layout cache: rebuilt runs leave them out (and an otherwise
-		// empty wrapper with them).
-		if (!forced && !unit.copy && unit.nodes.every(child => child.type === nodes.rendered_break)) return
+		if (node.type === nodes.proof_err && unit.wrappers.some(mark => mark.type === marks.link && !holdsContent(mark))) return
 
 		// Bookkeeping marks stay only between content written as it was.
 		if (node.type === nodes.proof_err) {

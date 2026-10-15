@@ -256,7 +256,7 @@ export const TABLE_HANDLERS: FeatureHandlers = {
 			setColumnWidth(context.state, context.context, context.session.story.part, table, command.index, command.twips)
 		),
 		"table.cell.shading": onTable((context, table, command) =>
-			shadeCells(context.state, context.context, context.session.story.part, table, command.fill)
+			shadeCells(context.state, context.context, context.session.story.part, table, command)
 		),
 		"table.cell.vAlign": onTable((context, table, command) =>
 			alignCells(context.state, context.context, context.session.story.part, table, command.align)

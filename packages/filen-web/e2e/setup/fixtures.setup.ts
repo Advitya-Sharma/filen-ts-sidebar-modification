@@ -12,7 +12,8 @@ import {
 	setTallListingViewport,
 	waitForListingSettled
 } from "../helpers/listing"
-import { FIXTURE_FILES, type FixtureFileName, type FixtureScenario } from "../helpers/fixtures"
+import { BUILT_FIXTURE_SCENARIOS, FIXTURE_FILES, type FixtureFileName, type FixtureScenario } from "../helpers/fixtures"
+import { DOCX_MIME, docxFixtureBytes, largePictureBytes, svgPictureBytes, webpPictureBytes } from "../helpers/docxFixtures"
 import {
 	BMP_BYTES,
 	CODE_BYTES,
@@ -143,7 +144,19 @@ const PAYLOADS = {
 	"e2e-bulk-c.zip": { buffer: bulkZip("c"), mimeType: "application/zip" },
 	"dialog-a.txt": { buffer: Buffer.from("dialog probe a", "utf8"), mimeType: "text/plain" },
 	"dialog-b.txt": { buffer: Buffer.from("dialog probe b", "utf8"), mimeType: "text/plain" },
-	"dialog-c.zip": { buffer: dialogZip(), mimeType: "application/zip" }
+	"dialog-c.zip": { buffer: dialogZip(), mimeType: "application/zip" },
+	"w3-comments.docx": { buffer: docxFixtureBytes("w3-comments.docx"), mimeType: DOCX_MIME },
+	"w3-equations.docx": { buffer: docxFixtureBytes("w3-equations.docx"), mimeType: DOCX_MIME },
+	"w3-forms.docx": { buffer: docxFixtureBytes("w3-forms.docx"), mimeType: DOCX_MIME },
+	"w3-headers.docx": { buffer: docxFixtureBytes("w3-headers.docx"), mimeType: DOCX_MIME },
+	"w3-rtl-table.docx": { buffer: docxFixtureBytes("w3-rtl-table.docx"), mimeType: DOCX_MIME },
+	"w3-tables.docx": { buffer: docxFixtureBytes("w3-tables.docx"), mimeType: DOCX_MIME },
+	"w3-toc.docx": { buffer: docxFixtureBytes("w3-toc.docx"), mimeType: DOCX_MIME },
+	"w3-tracked.docx": { buffer: docxFixtureBytes("w3-tracked.docx"), mimeType: DOCX_MIME },
+	// ~27 MB: off disk, like download-cancel.bin (so the scenario's other pictures are too).
+	"w3-picture-large.png": { generate: largePictureBytes },
+	"w3-picture.svg": { generate: svgPictureBytes },
+	"w3-picture.webp": { generate: webpPictureBytes }
 } satisfies Record<FixtureFileName, FixturePayload>
 
 // ONE wall clock for the whole build, the shape cleanup-setup's SWEEP_BUDGET_MS already uses. Each row
@@ -303,7 +316,7 @@ setup("build the shared read-only fixture tree", async ({ page }) => {
 	const uploadDeadline = Date.now() + UPLOAD_BUDGET_MS
 
 	try {
-		for (const scenario of Object.keys(FIXTURE_FILES) as FixtureScenario[]) {
+		for (const scenario of BUILT_FIXTURE_SCENARIOS) {
 			await createDirectoryViaDialog(page, scenario, listbox)
 			await descendInto(page, listbox, scenario)
 			await uploadScenarioFiles(page, scenario, workDir, uploadDeadline)

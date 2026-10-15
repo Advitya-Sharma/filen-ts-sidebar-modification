@@ -4,13 +4,11 @@ import { toast } from "sonner"
 import { attachExistingDriveItem } from "@/features/chats/lib/attachments"
 import { type DriveItem } from "@/features/drive/lib/item"
 import { errorLabel } from "@/lib/i18n/errorLabel"
-import { driveItemName } from "@filen/shared"
 import { pendingGuardedOpenChange } from "@/components/dialogs/dismissal.logic"
-import { ItemIcon } from "@/features/drive/components/itemIcon"
-import { PICKER_ROW_CLASS, PickerBreadcrumb, PickerListShell } from "@/features/drive/components/directoryPicker"
+import { PickerBreadcrumb } from "@/features/drive/components/directoryPicker"
+import { DriveFilePickerList } from "@/features/drive/components/driveFilePickerDialog"
 import { useDirectoryPicker } from "@/features/drive/hooks/useDirectoryPicker"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Spinner } from "@/components/ui/spinner"
 import { LIST_DIALOG_CLASS } from "@/components/dialogs/listDialog"
 
 export interface AttachDriveDialogProps {
@@ -20,8 +18,8 @@ export interface AttachDriveDialogProps {
 	onAttached: (url: string) => void
 }
 
-// Drive-file picker for the composer's attach flow, built on directoryPicker.tsx — there is exactly
-// one directory-tree data source in this app and this is it. The SELECTION semantics differ from move on purpose: a directory row descends (browsing), a
+// Drive-file picker for the composer's attach flow, built on directoryPicker.tsx and the shared file list
+// (driveFilePickerDialog.tsx) — there is exactly one directory-tree data source in this app and this is it. The SELECTION semantics differ from move on purpose: a directory row descends (browsing), a
 // FILE row is clickable and immediately attaches (no separate confirm step — a picker with one purpose
 // per row needs no "select then confirm" ceremony move's multi-item flow does). An item that already
 // carries a public link reuses it (attachExistingDriveItem's own get-then-create) rather than erroring.
@@ -72,40 +70,15 @@ export function AttachDriveDialog({ onClose, onAttached }: AttachDriveDialogProp
 					onJump={goTo}
 				/>
 				<p className="text-xs text-muted-foreground">{t("chatAttachDriveDialogHint")}</p>
-				<PickerListShell
+				<DriveFilePickerList
 					listingQuery={listingQuery}
-					isEmpty={rows.length === 0}
-				>
-					{rows.map(item => {
-						const disabled = item.data.undecryptable || attachingUuid !== null
-						const isAttaching = attachingUuid === item.data.uuid
-
-						return (
-							<li key={item.data.uuid}>
-								<button
-									type="button"
-									disabled={disabled}
-									onClick={() => {
-										if (item.type === "directory") {
-											descend(item.data.uuid)
-											return
-										}
-
-										void handleAttach(item)
-									}}
-									className={PICKER_ROW_CLASS}
-								>
-									<ItemIcon
-										item={item}
-										className="size-4 shrink-0"
-									/>
-									<span className="min-w-0 flex-1 truncate">{driveItemName(item)}</span>
-									{isAttaching ? <Spinner className="size-3.5 shrink-0" /> : null}
-								</button>
-							</li>
-						)
-					})}
-				</PickerListShell>
+					rows={rows}
+					pending={attachingUuid}
+					onDescend={descend}
+					onPick={item => {
+						void handleAttach(item)
+					}}
+				/>
 			</DialogContent>
 		</Dialog>
 	)

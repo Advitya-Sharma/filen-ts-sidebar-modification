@@ -5,9 +5,11 @@ import { Item, Revision, RevisionFlag, type StoryPart } from "../../model/index"
 import { Ns } from "../../model/namespaces"
 import type { PropsStore } from "../../props/index"
 import { minuteDate, paragraphChange, type ParagraphChange } from "../../review/track"
+import type { DocxThemeColor } from "../commands/formatting"
 import { MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, type DocxCellVAlign, type DocxTableAlign } from "../commands/tables"
 import type { DocxEditContext } from "../context"
 import { markCommand } from "../invariants/core"
+import { minColumn, tableCellMargins } from "./margins"
 import { NO_MARKERS, NO_SOURCE, docxSchema, type MarkerList } from "../schema"
 import {
 	RECORD_KEYS,
@@ -28,6 +30,7 @@ import {
 	type GridChange,
 	type MapRow,
 	type RowOverrides,
+	type ShadingTheme,
 	type TableMap,
 	type TableOverrides,
 	type TableRect,
@@ -48,14 +51,10 @@ import {
 const nodes = docxSchema.nodes
 const marks = docxSchema.marks
 
-// The narrowest grid column an edit leaves (twips).
-export const MIN_COLUMN = 115
 // Grid column width when a table has no grid to go by (twips, 1").
 const DEFAULT_COLUMN = 1440
 // Text width when nothing says better (twips: Letter with 1" margins).
 const DEFAULT_TEXT_WIDTH = 9360
-// A cell's default left and right margins together (twips).
-const CELL_MARGINS = 216
 
 // A command's transaction (it records its own tracked changes), an undo step of its own.
 function finish(tr: Transaction): Transaction {
@@ -439,17 +438,17 @@ function widthOf(grid: readonly number[], start: number, span: number): number {
 	return width
 }
 
-// `widths` scaled to add up to `total`, as integers.
-function scaled(widths: readonly number[], total: number): number[] {
+// `widths` scaled to add up to `total`, as integers, none narrower than `min`.
+function scaled(widths: readonly number[], total: number, min: number): number[] {
 	const sum = widths.reduce((acc, value) => acc + value, 0)
 
-	if (sum <= 0) return widths.map(() => Math.max(MIN_COLUMN, Math.floor(total / Math.max(1, widths.length))))
+	if (sum <= 0) return widths.map(() => Math.max(min, Math.floor(total / Math.max(1, widths.length))))
 
-	const out = widths.map(value => Math.max(MIN_COLUMN, Math.round((value * total) / sum)))
+	const out = widths.map(value => Math.max(min, Math.round((value * total) / sum)))
 	const drift = total - out.reduce((acc, value) => acc + value, 0)
 	const last = out.length - 1
 
-	if (last >= 0) out[last] = Math.max(MIN_COLUMN, (out[last] ?? 0) + drift)
+	if (last >= 0) out[last] = Math.max(min, (out[last] ?? 0) + drift)
 
 	return out
 }
@@ -527,7 +526,8 @@ function tablesAnywhere(type: NodeType): boolean {
 	return known
 }
 
-// The width a new table fills: the enclosing cell's, else the section's text width (twips).
+// The width a new table fills: the enclosing cell's less its table's cell margins, else the section's text width
+// (twips).
 function availableWidth(state: EditorState, context: DocxEditContext, part: StoryPart, store: PropsStore): number {
 	const $from = state.selection.$from
 
@@ -542,7 +542,7 @@ function availableWidth(state: EditorState, context: DocxEditContext, part: Stor
 		const span = row.spans[index] ?? 1
 		const width = (cell.attrs["colwidth"] as number | null) ?? widthOf(paddedGrid(map, start + span), start, span)
 
-		return Math.max(MIN_COLUMN, width - CELL_MARGINS)
+		return Math.max(1, width - tableCellMargins(part, context, $from.node(d - 2)))
 	}
 
 	const model = context.model
@@ -561,7 +561,7 @@ function availableWidth(state: EditorState, context: DocxEditContext, part: Stor
 	const text = page - (margins?.left ?? 1440) - (margins?.right ?? 1440) - (margins?.gutter ?? 0)
 	const space = props.columns?.space ?? 720
 
-	return Math.max(MIN_COLUMN * 2, Math.round((text - space * (columns - 1)) / columns))
+	return Math.max(1, Math.round((text - space * (columns - 1)) / columns))
 }
 
 // `joined`: the transaction whose undo step it joins (the selection the table replaces, deleted just before).
@@ -579,8 +579,9 @@ export function insertTable(
 
 	if (stamp === null) return null
 
-	const column = Math.max(MIN_COLUMN, Math.floor(availableWidth(state, context, part, context.store) / cols))
 	const gridStyle = context.styles.byName("Table Grid", "table")
+	const min = minColumn(tableCellMargins(part, context, null, gridStyle?.id ?? null))
+	const column = Math.max(min, Math.floor(availableWidth(state, context, part, context.store) / cols))
 	const props: TableOverrides = gridStyle === undefined ? { borders: true, look: true } : { look: true }
 	const tableRows: Node[] = []
 
@@ -864,7 +865,11 @@ export function insertColumns(
 	const boundary = right ? selected.right : selected.left
 	const refColumn = right ? selected.right - 1 : selected.left
 	const total = old.reduce((sum, value) => sum + value, 0)
-	const grid = scaled([...old.slice(0, boundary), ...added, ...old.slice(boundary)], total)
+	const grid = scaled(
+		[...old.slice(0, boundary), ...added, ...old.slice(boundary)],
+		total,
+		minColumn(tableCellMargins(part, context, at.table))
+	)
 	// Old grid column -> new.
 	const moved = (column: number): number => (column < boundary ? column : column + count)
 	const rows: Node[] = []
@@ -1486,14 +1491,15 @@ export function setColumnWidth(
 
 	if (index >= grid.length) return null
 
-	let width = Math.max(MIN_COLUMN, twips)
+	const min = minColumn(tableCellMargins(part, context, at.table))
+	let width = Math.max(min, twips)
 
 	if (index + 1 < grid.length) {
 		const pair = (grid[index] ?? 0) + (grid[index + 1] ?? 0)
 
-		width = Math.min(width, pair - MIN_COLUMN)
+		width = Math.min(width, pair - min)
 
-		if (width < MIN_COLUMN) return null
+		if (width < min) return null
 
 		grid[index + 1] = pair - width
 	}
@@ -1533,7 +1539,14 @@ export function distributeColumns(state: EditorState, context: DocxEditContext, 
 }
 
 // Sets `patch` on every cell the selection touches.
-function patchCells(state: EditorState, context: DocxEditContext, part: StoryPart, at: TableAt, patch: CellOverrides): Transaction | null {
+// `patch`: a key given as undefined goes.
+function patchCells(
+	state: EditorState,
+	context: DocxEditContext,
+	part: StoryPart,
+	at: TableAt,
+	patch: { readonly [K in keyof CellOverrides]?: CellOverrides[K] | undefined }
+): Transaction | null {
 	const stamp = trackStamp(context)
 
 	if (stamp === null) return null
@@ -1552,7 +1565,7 @@ function patchCells(state: EditorState, context: DocxEditContext, part: StoryPar
 
 			const cell = map.cell(r, index)
 			const current = cellOverrides(cell)
-			const patched = { ...current, ...patch }
+			const patched = Object.fromEntries(Object.entries({ ...current, ...patch }).filter(([, value]) => value !== undefined))
 
 			if (sameValue(patched, current)) continue
 
@@ -1568,14 +1581,37 @@ function patchCells(state: EditorState, context: DocxEditContext, part: StoryPar
 	return tr.docChanged ? finish(tr) : null
 }
 
+// The selected cells' fill: an RGB colour, a theme colour (written as Word writes one: its reference and the colour
+// the document's theme gives, w:shd w:fill with w:themeFill and w:themeFillTint or w:themeFillShade, ECMA-376
+// Part 1 §17.3.5), or none.
 export function shadeCells(
 	state: EditorState,
 	context: DocxEditContext,
 	part: StoryPart,
 	at: TableAt,
-	fill: string | null
+	shading: { readonly fill: string | null; readonly theme?: DocxThemeColor; readonly tint?: number; readonly shade?: number }
 ): Transaction | null {
-	return patchCells(state, context, part, at, { shading: fill === null ? null : fill.toUpperCase() })
+	const theme: ShadingTheme | undefined =
+		shading.fill === null || shading.theme === undefined
+			? undefined
+			: {
+					theme: shading.theme,
+					...(shading.tint === undefined ? {} : { tint: shading.tint }),
+					...(shading.shade === undefined ? {} : { shade: shading.shade })
+				}
+	const fill =
+		shading.fill === null
+			? null
+			: theme === undefined
+				? shading.fill
+				: (context.resolver.color({
+						val: shading.fill,
+						themeColor: theme.theme,
+						...(theme.tint === undefined ? {} : { themeTint: theme.tint }),
+						...(theme.shade === undefined ? {} : { themeShade: theme.shade })
+					}) ?? shading.fill)
+
+	return patchCells(state, context, part, at, { shading: fill === null ? null : fill.toUpperCase(), shadingTheme: theme })
 }
 
 export function alignCells(

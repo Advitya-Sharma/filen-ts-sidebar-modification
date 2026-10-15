@@ -31,6 +31,8 @@ export interface ControlListItem {
 	// w:displayText (the value when absent) and w:value.
 	readonly text: string
 	readonly value: string
+	// Written without w:displayText (Word's "Choose an item." entry): the value is what shows.
+	readonly valueOnly?: true
 }
 
 // w14:checkbox (MS-DOCX §2.6.1.2): the state and the glyph of each state (a code point in a font).
@@ -92,6 +94,8 @@ export interface ControlState {
 	readonly date?: string | null
 	// Whether the content is the placeholder text (w:showingPlcHdr).
 	readonly placeholder?: boolean
+	// A list's entries as control.items set them (a source control's; a made control's are its definition's).
+	readonly items?: readonly ControlListItem[]
 	// A control the editor made (never a source one): its definition.
 	readonly made?: MadeControl
 	// A copy of source control `copy` (an item a repeating section added): its properties are the source's,
@@ -268,7 +272,9 @@ function readControl(part: StoryPart, sdtPr: number): ControlInfo {
 
 						const value = reader.attr(entry, Ns.W, "value") ?? ""
 
-						items.push({ text: reader.attr(entry, Ns.W, "displayText") ?? value, value })
+						const text = reader.attr(entry, Ns.W, "displayText")
+
+						items.push(text === undefined ? { text: value, value, valueOnly: true } : { text, value })
 					}
 
 					break
@@ -450,7 +456,9 @@ function dataControl(sdtPr: ElementData): ControlInfo {
 						.map(entry => {
 							const value = sdtValue(entry, MAIN_DATA, "value") ?? ""
 
-							return { text: sdtValue(entry, MAIN_DATA, "displayText") ?? value, value }
+							const text = sdtValue(entry, MAIN_DATA, "displayText")
+
+							return text === undefined ? { text: value, value, valueOnly: true as const } : { text, value }
 						})
 					break
 				case "date": {
@@ -593,6 +601,7 @@ function withState(base: ControlInfo, state: ControlState): ControlInfo {
 			showingPlaceholder: state.placeholder ?? base.showingPlaceholder,
 			checkbox: base.checkbox === null || state.checked === undefined ? base.checkbox : { ...base.checkbox, checked: state.checked },
 			lastValue: state.value === undefined ? base.lastValue : state.value,
+			items: state.items ?? base.items,
 			date: base.date === null || state.date === undefined ? base.date : { ...base.date, iso: state.date }
 		}
 		byState.set(state, info)

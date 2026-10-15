@@ -1,2 +1,270 @@
-/* Mobile view: the document reflowed to the screen width. Variables: --fo-reflow-bg, --fo-reflow-gutter,
-   --fo-reflow-rule, --fo-reflow-note. */
+/* Mobile view: the document reflowed to the screen width. Variables: --fo-reflow-bg, --fo-reflow-text,
+   --fo-reflow-gutter, --fo-reflow-rule, --fo-reflow-note, --fo-reflow-font, --fo-reflow-comment,
+   --fo-reflow-comment-ref, --fo-reflow-insert, --fo-reflow-delete. */
+.fo-docx-reflow {
+	position: relative;
+	overflow: auto;
+	/* The view keeps the first block on screen in place itself when blocks above it are measured. */
+	overflow-anchor: none;
+	background: var(--fo-reflow-bg, #fff);
+	color: var(--fo-reflow-text, var(--fo-auto-text, #000));
+	-webkit-text-size-adjust: 100%;
+	text-size-adjust: 100%;
+}
+
+.fo-docx-reflow-content {
+	padding: var(--fo-reflow-gutter, 16px);
+}
+
+.fo-docx-reflow-doc {
+	/* ProseMirror's own requirements for contenteditable text. */
+	white-space: pre-wrap;
+	word-wrap: break-word;
+	overflow-wrap: anywhere;
+	font-variant-ligatures: none;
+	font-feature-settings: "liga" 0;
+	tab-size: 4;
+	outline: none;
+	min-height: 1em;
+	font-family: var(--fo-reflow-font, sans-serif);
+	font-size: 11pt;
+	line-height: 1.15;
+	-webkit-user-select: text;
+	user-select: text;
+}
+
+.fo-docx-reflow-p {
+	/* Its own block formatting context: margins of what it holds (a note, a text box) stay inside its measured
+	   height. */
+	display: flow-root;
+	margin: 0;
+}
+
+/* Contextual spacing between paragraphs of one style (the space their own properties give is dropped). */
+.fo-docx-reflow-p[data-fo-contextual~="top"] {
+	padding-top: 0 !important;
+}
+
+.fo-docx-reflow-p[data-fo-contextual~="bottom"] {
+	padding-bottom: 0 !important;
+}
+
+.fo-docx-reflow-gap {
+	display: block;
+	overflow: hidden;
+	color: transparent;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.fo-docx-reflow-marker {
+	display: inline-block;
+	/* A hanging first line's room. */
+	min-width: var(--fo-reflow-hang, 0);
+	text-indent: 0;
+	padding-inline-end: 0.25em;
+	box-sizing: border-box;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+/* Tables keep their columns and scroll sideways when wider than the screen. */
+.fo-docx-reflow-table {
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
+	/* Padding, not margins: a block's measured height (its border box) is all the room it takes. */
+	padding: 0.25em 0;
+}
+
+.fo-docx-reflow-table > table {
+	border-collapse: collapse;
+	table-layout: fixed;
+}
+
+/* Rows of a long table the view does not hold: one empty row of their height. */
+.fo-docx-reflow-gap-row > td {
+	padding: 0;
+	border: none;
+}
+
+/* Cells take their borders, shading and margins from the table as the pages resolve it; a table the view
+   cannot place gets a plain grid. */
+.fo-docx-reflow-table td:not([style]) {
+	border: 1px solid var(--fo-reflow-rule, #c8c8c8);
+	padding: 2px 6px;
+	vertical-align: top;
+}
+
+.fo-docx-reflow-table td[data-fo-merged]:not([style]) {
+	border-top-color: transparent;
+}
+
+.fo-docx-reflow-break[data-fo-break] {
+	display: block;
+	border-top: 1px dashed var(--fo-reflow-rule, #c8c8c8);
+	margin: 0.5em 0;
+}
+
+.fo-docx-reflow-locked {
+	opacity: 0.7;
+}
+
+/* Pictures, shapes and equations as on the pages, scaled down to the width. */
+.fo-docx-reflow-drawing {
+	display: inline-block;
+	max-width: 100%;
+	vertical-align: bottom;
+	text-indent: 0;
+}
+
+.fo-docx-reflow-drawing[data-fo-anchored] {
+	display: block;
+	margin: 0.25em auto;
+}
+
+.fo-docx-reflow-drawing > svg,
+.fo-docx-reflow-drawing > img {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.fo-docx-reflow-drawing.fo-docx-placeholder {
+	min-width: 1em;
+	min-height: 1em;
+}
+
+/* A text box's text as a block of its own. */
+.fo-docx-reflow-textbox {
+	display: block;
+	width: auto;
+	margin: 0.25em 0;
+	padding: 0.25em 0.5em;
+	border: 1px solid var(--fo-reflow-rule, #c8c8c8);
+}
+
+.fo-docx-reflow-textbox-story {
+	display: block;
+}
+
+.fo-docx-reflow-math {
+	display: inline-block;
+	max-width: 100%;
+	overflow-x: auto;
+	vertical-align: middle;
+	text-indent: 0;
+}
+
+.fo-docx-reflow-math.fo-docx-reflow-display {
+	display: block;
+	text-align: center;
+}
+
+/* A note at its reference: the mark, then the note's text. */
+.fo-docx-reflow-note-ref::before {
+	content: attr(data-fo-note);
+	vertical-align: super;
+	font-size: 0.7em;
+}
+
+.fo-docx-reflow-note {
+	display: block;
+	margin: 0.25em 0 0.5em;
+	padding-inline-start: 0.75em;
+	border-inline-start: 2px solid var(--fo-reflow-note, #c8c8c8);
+	font-size: 0.9em;
+	text-indent: 0;
+	white-space: normal;
+}
+
+.fo-docx-reflow-nested {
+	white-space: pre-wrap;
+}
+
+.fo-docx-reflow-field {
+	text-indent: 0;
+}
+
+/* Fields shown as their codes (as on the pages): the code in braces, the result hidden. */
+.fo-docx-reflow-field[data-fo-code] > .fo-docx-reflow-result,
+.fo-docx-reflow-code-result {
+	display: none;
+}
+
+.fo-docx-reflow-field[data-fo-code]::before,
+.fo-docx-reflow-field-char[data-fo-code]::before {
+	content: attr(data-fo-code);
+}
+
+/* A block's node mark (a row's or a cell's properties): its rows and cells laid out as the table's own. */
+.fo-docx-reflow-node-mark {
+	display: contents;
+}
+
+.fo-docx-reflow-link {
+	text-decoration: underline;
+}
+
+/* Tracked changes inline, by revision view: Markup shows both, Final the text as it will be, Original as it
+   was. */
+.fo-docx-reflow-ins,
+.fo-docx-reflow-del {
+	text-decoration: none;
+}
+
+.fo-docx-reflow[data-fo-revisions="markup"] .fo-docx-reflow-ins {
+	color: var(--fo-reflow-insert, #b91c1c);
+	text-decoration: underline;
+}
+
+.fo-docx-reflow[data-fo-revisions="markup"] .fo-docx-reflow-del {
+	color: var(--fo-reflow-delete, #b91c1c);
+	text-decoration: line-through;
+}
+
+.fo-docx-reflow[data-fo-revisions="final"] .fo-docx-reflow-del,
+.fo-docx-reflow[data-fo-revisions="original"] .fo-docx-reflow-ins {
+	display: none;
+}
+
+/* Commented text, and a comment's reference (a press on either opens the thread). */
+.fo-docx-reflow-comment {
+	background: var(--fo-reflow-comment, rgb(250 204 21 / 0.35));
+	cursor: pointer;
+}
+
+.fo-docx-reflow-comment-ref {
+	display: inline-block;
+	width: 0.4em;
+	height: 0.8em;
+	margin: 0 1px;
+	vertical-align: baseline;
+	background: var(--fo-reflow-comment-ref, rgb(234 179 8 / 0.9));
+	border-radius: 1px;
+	cursor: pointer;
+}
+
+/* The app's marks: a misspelt word, a repeated word, find results. */
+.fo-docx-reflow-mark[data-fo-mark="spelling"] {
+	text-decoration: underline wavy var(--fo-spelling, #dc2626);
+	text-decoration-skip-ink: none;
+	text-underline-offset: 2px;
+}
+
+.fo-docx-reflow-mark[data-fo-mark="repeated"] {
+	text-decoration: underline double var(--fo-repeated, #d97706);
+	text-underline-offset: 2px;
+}
+
+.fo-docx-reflow-mark[data-fo-mark="find"] {
+	background: var(--fo-find-bg, rgb(250 204 21 / 0.45));
+}
+
+.fo-docx-reflow-mark[data-fo-mark="find-active"] {
+	background: var(--fo-find-active-bg, rgb(249 115 22 / 0.6));
+}
+
+.fo-docx-reflow ::selection {
+	background: var(--fo-selection, rgb(37 99 235 / 0.3));
+}

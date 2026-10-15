@@ -96,6 +96,29 @@ describe("office settings", () => {
 		expect(again).toHaveBeenCalledTimes(1)
 	})
 
+	it("drops a question whose asker closed, and one that failed, so the next change asks again", async () => {
+		const controller = new AbortController()
+		// Never answered: its editor closed before the dialog could show.
+		const lost = vi.fn(() => new Promise<string | null>(() => undefined))
+		const pending = ensureAuthorName(lost, controller.signal)
+
+		await vi.waitFor(() => {
+			expect(lost).toHaveBeenCalledTimes(1)
+		})
+		controller.abort()
+		expect(await pending).toBeNull()
+		expect(await ensureAuthorName(lost, controller.signal)).toBeNull()
+
+		const failing = vi.fn(() => Promise.reject(new Error("dialog gone")))
+
+		expect(await ensureAuthorName(failing)).toBeNull()
+
+		const again = vi.fn(() => Promise.resolve("Joan"))
+
+		expect(await ensureAuthorName(again)).toBe("Joan")
+		expect(again).toHaveBeenCalledTimes(1)
+	})
+
 	it("uses a name another device set, without asking", async () => {
 		drive.text = serializeOfficeSettings(setAuthorName(emptyOfficeSettings(), "Remote Name", 5))
 		drive.counter = 1

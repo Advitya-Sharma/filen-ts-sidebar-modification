@@ -43,3 +43,6 @@ export {
 	splitParagraph,
 	type KeyLike
 } from "./keys"
+export { tableBorderOf, type DocxTableBorder } from "../edit/tables/hits"
+export * from "./annotations"
+export * from "./uiQueries"

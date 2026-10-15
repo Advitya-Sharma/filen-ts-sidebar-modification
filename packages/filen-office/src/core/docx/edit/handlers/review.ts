@@ -1,4 +1,5 @@
 import { Selection, TextSelection } from "prosemirror-state"
+import { storyHasTrackedEquations } from "../../math/edit"
 import type { PagedEditor } from "../../paged/editor"
 import { RevisionView } from "../../model/index"
 import {
@@ -35,7 +36,8 @@ function refresh(editor: PagedEditor): void {
 	for (const session of editor.sessions) session.invalidate()
 }
 
-// The stories of a model (by index) whose source has tracked changes: read once per model.
+// The stories of a model (by index) whose source has tracked changes (inside its equations too): read once per
+// model.
 const changedStoriesOf = new WeakMap<object, readonly number[]>()
 
 function changedStories(editor: PagedEditor): readonly number[] {
@@ -49,7 +51,16 @@ function changedStories(editor: PagedEditor): readonly number[] {
 	for (const story of model.stories) {
 		const part = model.parts[story.part]
 
-		if (part === undefined || story.parent >= 0 || story.item < 0 || part.revisions.count === 0) continue
+		if (part === undefined || story.parent >= 0 || story.item < 0) continue
+
+		// Tracked changes inside its equations (one item each, in no revision table).
+		if (storyHasTrackedEquations(part, story.item)) {
+			out.add(story.index)
+
+			continue
+		}
+
+		if (part.revisions.count === 0) continue
 
 		const document = part.document
 		const start = document.start(part.node(story.item))

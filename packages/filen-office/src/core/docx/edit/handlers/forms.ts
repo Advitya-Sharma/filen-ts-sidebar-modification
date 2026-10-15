@@ -22,6 +22,7 @@ import {
 	type LegacyFieldState,
 	type MadeControl
 } from "../../forms/controls"
+import { numericDatePicture } from "../../fields/datePictures"
 import { formatControlDate } from "../../forms/dates"
 import { watchBoundStories } from "../../forms/sync"
 import type { StoryPart } from "../../model/index"
@@ -249,6 +250,57 @@ const choose: StoryCommandHandler<"control.choose"> = {
 	}
 }
 
+// Whether no two entries share a text or a value (Word refuses either): checked here too, as an app may run a
+// command it never parsed.
+function distinctItems(items: readonly { readonly text: string; readonly value: string }[]): boolean {
+	const texts = new Set(items.map(item => item.text))
+	const values = new Set(items.map(item => item.value))
+
+	return texts.size === items.length && values.size === items.length
+}
+
+// A list's entries replaced (Word's Properties: Add, Remove): the choice stays where its entry does, else the
+// placeholder shows again (a drop-down's w:lastValue must name one of its entries).
+const items: StoryCommandHandler<"control.items"> = {
+	enabled(context) {
+		const around = controlAt(context)
+
+		return editable(around, isList)
+	},
+	run(context, command) {
+		const around = controlAt(context)
+
+		if (!editable(around, isList) || !distinctItems(command.items)) return null
+
+		const state = controlState(around.holder) ?? {}
+		// An entry the control holds value-only stays so while its text is its value.
+		const valueOnly = new Set(around.info.items.filter(item => item.valueOnly === true).map(item => item.value))
+		const entries = command.items.map(item =>
+			item.text === item.value && valueOnly.has(item.value)
+				? { text: item.text, value: item.value, valueOnly: true as const }
+				: { text: item.text, value: item.value }
+		)
+		const next: ControlState =
+			state.made !== undefined ? { ...state, made: { ...state.made, items: entries } } : { ...state, items: entries }
+		// The entry shown: by w:lastValue, else (a file without one) by the text it shows.
+		const shown = context.state.doc.textBetween(around.from, around.to)
+		const chosen = around.info.showingPlaceholder
+			? undefined
+			: around.info.lastValue !== null
+				? entries.find(item => item.value === around.info.lastValue)
+				: entries.find(item => item.text === shown)
+
+		if (chosen === undefined)
+			return setControl(context, around, placeholderText(partOf(context), around.holder, around.info), {
+				...next,
+				value: null,
+				placeholder: true
+			})
+
+		return setControl(context, around, chosen.text, { ...next, value: chosen.value, placeholder: false })
+	}
+}
+
 const date: StoryCommandHandler<"control.date"> = {
 	enabled(context) {
 		return editable(controlAt(context), isDate)
@@ -310,9 +362,29 @@ const text: StoryCommandHandler<"control.text"> = {
 const W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
 const W15 = "http://schemas.microsoft.com/office/word/2012/wordml"
 
-// Word's date format and language for a new date control (its en-US defaults).
-const NEW_DATE_FORMAT = "M/d/yyyy"
-const NEW_DATE_LID = "en-US"
+// Word's first entry of a new drop-down list or combo box, written value-only (<w:listItem w:value="Choose an
+// item."/>): choosing it shows the placeholder again.
+const CHOOSE_AN_ITEM = { text: "Choose an item.", value: "Choose an item.", valueOnly: true } as const
+
+// The short date picture Word gives a new date control in `language` (w:lid): the language's numeric date with a
+// four-digit year, Latin digits and the Gregorian calendar (en-US "M/d/yyyy", de-DE "dd.MM.yyyy", en-GB
+// "dd/MM/yyyy", ja-JP "yyyy/MM/dd").
+export function shortDatePicture(language: string): string {
+	return numericDatePicture(language)
+}
+
+// The language of the text at the selection (its w:lang, Latin script), en-US without one.
+function selectionLanguage(context: StoryCommandContext): string {
+	const session = context.session
+	const { $from } = context.state.selection
+
+	if (!$from.parent.isTextblock) return "en-US"
+
+	const props = session.formats.runProps(context.state.storedMarks ?? $from.marks())
+	const language = context.context.resolver.run(session.formats.paragraph($from.parent), props).lang.latin
+
+	return language === undefined || language === null || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(language) ? "en-US" : language
+}
 
 // Where an inline control can go: a selection within one paragraph, not inside an inline control (a caret at
 // one's edge is outside it) nor in a block one that is not typed into.
@@ -367,15 +439,28 @@ function declares(part: StoryPart, uri: string): boolean {
 	return root >= 0 && part.reader.namespaces.prefixFor(root, uri) !== undefined
 }
 
-function madeControl(kind: Exclude<DocxControlKind, "repeatingSection">, items?: readonly { text: string; value: string }[]): MadeControl {
+function madeControl(
+	kind: Exclude<DocxControlKind, "repeatingSection">,
+	language: string,
+	items?: readonly { text: string; value: string }[]
+): MadeControl {
 	const id = newControlId()
 
 	switch (kind) {
 		case "dropDownList":
 		case "comboBox":
-			return { type: kind, id, items: items ?? [] }
+			return {
+				type: kind,
+				id,
+				items: [
+					...((items ?? []).some(item => item.value === CHOOSE_AN_ITEM.value || item.text === CHOOSE_AN_ITEM.text)
+						? []
+						: [CHOOSE_AN_ITEM]),
+					...(items ?? [])
+				]
+			}
 		case "date":
-			return { type: kind, id, dateFormat: NEW_DATE_FORMAT, lid: NEW_DATE_LID }
+			return { type: kind, id, dateFormat: shortDatePicture(language), lid: language }
 		default:
 			return { type: kind, id }
 	}
@@ -405,10 +490,11 @@ const insert: StoryCommandHandler<"control.insert"> = {
 		const kind = command.kind
 
 		if (kind === "repeatingSection") return insertRepeating(context)
+		if (command.items !== undefined && !distinctItems(command.items)) return null
 		if (!inlineSpot(part, state, mayHoldControls(session)) || (kind === "checkbox" && !declares(part, W14))) return null
 		if (kind === "picture" && !selectedDrawing(state)) return null
 
-		const definition = madeControl(kind, command.items)
+		const definition = madeControl(kind, selectionLanguage(context), command.items)
 		const selection = state.selection
 		const tr = state.tr
 
@@ -671,6 +757,7 @@ export const FORM_HANDLERS: FeatureHandlers = {
 		"control.clear": clear,
 		"control.text": text,
 		"control.insert": insert,
+		"control.items": items,
 		"control.item.add": addItem,
 		"control.item.remove": removeItem
 	}

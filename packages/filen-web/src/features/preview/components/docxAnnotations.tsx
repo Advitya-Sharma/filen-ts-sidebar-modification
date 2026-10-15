@@ -160,7 +160,7 @@ function CommentText({ comment, clamp }: { comment: DocxComment; clamp: boolean 
 	)
 }
 
-function Byline({ name, date, color }: { name: string; date: string; color: string }) {
+export function Byline({ name, date, color }: { name: string; date: string; color: string }) {
 	return (
 		<div className="flex min-w-0 items-center gap-1.5">
 			<span

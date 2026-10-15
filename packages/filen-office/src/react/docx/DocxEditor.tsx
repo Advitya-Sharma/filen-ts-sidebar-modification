@@ -85,6 +85,8 @@ export interface DocxEditorProps {
 	// 1 = 100 % (96 px per inch).
 	readonly zoom: number
 	readonly gap?: number
+	// Room kept right of the pages (px on screen, a balloon column): the pages centre in what is left.
+	readonly aside?: number
 	readonly overscan?: number
 	readonly className?: string
 	// The accessible name of the editing area.
@@ -136,6 +138,7 @@ interface Layout {
 	readonly contentWidth: number
 	readonly zoom: number
 	readonly gap: number
+	readonly aside: number
 }
 
 // A page's size on screen; one not laid out yet is sized like the last that is.
@@ -156,10 +159,10 @@ function pageHeight(document: DocxDocument, index: number, zoom: number): number
 class PageLayouts {
 	private last: Layout | undefined = undefined
 
-	layout(document: DocxDocument, count: number, zoom: number, gap: number): Layout {
+	layout(document: DocxDocument, count: number, zoom: number, gap: number, aside: number): Layout {
 		const last = this.last
 
-		if (last !== undefined && last.tops.length === count && last.zoom === zoom && last.gap === gap) {
+		if (last !== undefined && last.tops.length === count && last.zoom === zoom && last.gap === gap && last.aside === aside) {
 			let same = true
 
 			for (let i = 0; i < count && same; i++)
@@ -185,7 +188,7 @@ class PageLayouts {
 			y += height + gap
 		}
 
-		this.last = { tops, heights, widths, total: y, contentWidth: widest + 2 * gap, zoom, gap }
+		this.last = { tops, heights, widths, total: y, contentWidth: widest + 2 * gap + aside, zoom, gap, aside }
 
 		return this.last
 	}
@@ -235,6 +238,7 @@ export function DocxEditor(props: DocxEditorProps) {
 	const { editor, document, zoom, ref } = props
 	const gap = props.gap ?? 16
 	const overscan = props.overscan ?? 1
+	const aside = Math.max(0, props.aside ?? 0)
 	const containerRef = useRef<HTMLDivElement | null>(null)
 	const contentRef = useRef<HTMLDivElement | null>(null)
 	const sinkHostRef = useRef<HTMLDivElement | null>(null)
@@ -244,6 +248,7 @@ export function DocxEditor(props: DocxEditorProps) {
 	const clickRef = useRef<Click>({ time: -Infinity, x: 0, y: 0, count: 0 })
 	// The end a touch handle drag keeps fixed.
 	const handleDragRef = useRef<{ end: "start" | "end"; fixed: number } | null>(null)
+	const revealRef = useRef(true)
 	const [surface] = useState(() => new EditSurface(editor))
 	const [layouts] = useState(() => new PageLayouts())
 	const [viewport, setViewport] = useState({ top: 0, height: 0, width: 0 })
@@ -252,7 +257,7 @@ export function DocxEditor(props: DocxEditorProps) {
 	const [composing, setComposing] = useState(false)
 	const [region, setRegion] = useState(() => editor.activeRegion)
 	const readOnly = props.readOnly === true || editor.session.readOnly
-	const layout = layouts.layout(document, count, zoom, gap)
+	const layout = layouts.layout(document, count, zoom, gap, aside)
 	const visible =
 		count === 0
 			? { first: 0, last: -1 }
@@ -261,7 +266,7 @@ export function DocxEditor(props: DocxEditorProps) {
 					last: Math.min(count - 1, pageAt(layout, viewport.top + viewport.height) + overscan)
 				}
 	const leftOf = (index: number): number =>
-		Math.max(gap, ((Math.max(viewport.width, layout.contentWidth) - (layout.widths[index] ?? 0)) / 2) | 0)
+		Math.max(gap, ((Math.max(viewport.width, layout.contentWidth) - aside - (layout.widths[index] ?? 0)) / 2) | 0)
 
 	// The painted caret on screen and its column's width, for the input view to put its own caret there.
 	const caretClientRect = (): { left: number; top: number; height: number; width: number } | undefined => {
@@ -463,12 +468,23 @@ export function DocxEditor(props: DocxEditorProps) {
 		}
 		const observer = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : undefined
 
+		// The user scrolling first: the caret is no longer brought into view (see revealCaret).
+		const scrolled = (): void => {
+			revealRef.current = false
+		}
+
 		read()
 		container.addEventListener("scroll", schedule, { passive: true })
+		container.addEventListener("wheel", scrolled, { passive: true })
+		container.addEventListener("touchstart", scrolled, { passive: true })
+		container.addEventListener("keydown", scrolled)
 		observer?.observe(container)
 
 		return () => {
 			container.removeEventListener("scroll", schedule)
+			container.removeEventListener("wheel", scrolled)
+			container.removeEventListener("touchstart", scrolled)
+			container.removeEventListener("keydown", scrolled)
 			observer?.disconnect()
 
 			if (frame !== 0) cancelAnimationFrame(frame)
@@ -520,21 +536,40 @@ export function DocxEditor(props: DocxEditorProps) {
 		scrollToCaretRef.current = scrollToCaret
 	})
 
+	// Shown in place of another view of the document (Mobile view), the pages bring the caret's paragraph into
+	// view once the layout has placed it, unless the user pressed or scrolled them first (revealRef).
+	const revealCaret = (): void => {
+		const container = containerRef.current
+		const caret = revealRef.current ? editor.caret() : undefined
+
+		if (container === null || caret === undefined) return
+
+		revealRef.current = false
+
+		const top = (layout.tops[caret.page] ?? 0) + caret.top * zoom
+
+		if (top < container.scrollTop || top + caret.height * zoom > container.scrollTop + container.clientHeight)
+			container.scrollTop = Math.max(0, top - container.clientHeight / 3)
+	}
+	const revealCaretRef = useRef(revealCaret)
+
 	// Overlays, scrolling to the caret and the input view's alignment happen once per frame, before it is
 	// painted (after the pages were patched), whatever triggered them.
-	const frameRef = useRef<{ id: number; draw: boolean; scroll: boolean; align: boolean }>({
+	const frameRef = useRef<{ id: number; draw: boolean; scroll: boolean; align: boolean; reveal: boolean }>({
 		id: 0,
 		draw: false,
 		scroll: false,
-		align: false
+		align: false,
+		reveal: false
 	})
-	const requestFrame = (work: { draw?: boolean; scroll?: boolean; align?: boolean }): void => {
+	const requestFrame = (work: { draw?: boolean; scroll?: boolean; align?: boolean; reveal?: boolean }): void => {
 		const frame = frameRef.current
 
 		// Plain assignments: the React Compiler does not lower `||=` (it would skip this component).
 		if (work.draw === true) frame.draw = true
 		if (work.scroll === true) frame.scroll = true
 		if (work.align === true) frame.align = true
+		if (work.reveal === true) frame.reveal = true
 
 		if (frame.id !== 0) return
 
@@ -543,6 +578,7 @@ export function DocxEditor(props: DocxEditorProps) {
 
 			current.id = 0
 
+			if (current.reveal) revealCaretRef.current()
 			if (current.draw) surface.draw()
 			if (current.scroll && sinkRef.current?.focused === true) scrollToCaretRef.current()
 			if (current.align || current.draw) sinkRef.current?.align()
@@ -550,20 +586,27 @@ export function DocxEditor(props: DocxEditorProps) {
 			current.draw = false
 			current.scroll = false
 			current.align = false
+			current.reveal = false
 		})
 	}
 	const requestFrameRef = useRef(requestFrame)
 
 	useLayoutEffect(() => {
 		requestFrameRef.current = requestFrame
+		revealCaretRef.current = revealCaret
 	})
 
 	// Layout and selection changes from the editor.
 	useEffect(
 		() =>
 			editor.subscribe(event => {
-				if (event.type === "pages") setCount(previous => (previous === event.count ? previous : event.count))
-				else {
+				if (event.type === "pages") {
+					setCount(previous => (previous === event.count ? previous : event.count))
+
+					// Laid out to the end without placing the caret: nothing left to wait for.
+					if (revealRef.current) requestFrameRef.current({ reveal: true })
+					if (event.final && editor.caret() === undefined) revealRef.current = false
+				} else {
 					if (event.type === "story") setRegion(editor.activeRegion)
 
 					requestFrameRef.current({ draw: true, scroll: true })
@@ -571,6 +614,11 @@ export function DocxEditor(props: DocxEditorProps) {
 			}),
 		[editor]
 	)
+
+	// The caret placed already (the pages laid out when shown): revealed in the first frame.
+	useEffect(() => {
+		requestFrameRef.current({ reveal: true })
+	}, [])
 
 	useEffect(
 		() => () => {
@@ -665,6 +713,8 @@ export function DocxEditor(props: DocxEditorProps) {
 	}
 
 	const onPointerDown = (event: PointerEvent<HTMLDivElement>): void => {
+		revealRef.current = false
+
 		if (!onContent(event)) return
 
 		if (event.pointerType === "touch") {

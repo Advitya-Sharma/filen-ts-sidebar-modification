@@ -1,7 +1,7 @@
 import type { Node } from "prosemirror-model"
 import { NodeSelection } from "prosemirror-state"
 import { parseFieldCode, updatableField } from "../../fields/evaluate"
-import { sourceTocOf, tocHead, tocOptions, type TocRefusal } from "../../fields/toc"
+import { sourceTocOf, tocAtomOf, tocHead, tocOptions, type TocRefusal } from "../../fields/toc"
 import { docxSchema } from "../schema"
 import type { SnapshotInput } from "./index"
 
@@ -59,14 +59,22 @@ export function fieldOf(input: SnapshotInput): DocxFieldContext | null {
 
 	if (field?.type === nodes.field) {
 		const node = field
+		// An empty table of contents, read as one field: Update Table rebuilds it (see TocRegion.atom). Its
+		// paragraph answers (typing beside the field makes it no table).
+		const toc = tocAtomOf($from.parent)?.node === node
 
-		return contextOf(node, false, () => ({
-			type: node.attrs["type"] as string,
-			updatable: updatableField(session, node),
-			toc: false,
-			instruction: node.attrs["instruction"] as string,
-			refusal: null
-		}))
+		return contextOf(toc ? $from.parent : node, false, () => {
+			const instruction = node.attrs["instruction"] as string
+			const supported = toc && tocOptions(parseFieldCode(instruction)).supported
+
+			return {
+				type: node.attrs["type"] as string,
+				updatable: toc ? supported : updatableField(session, node),
+				toc,
+				instruction,
+				refusal: toc && !supported ? "unsupportedTable" : null
+			}
+		})
 	}
 
 	const after = $from.nodeAfter

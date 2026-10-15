@@ -1,8 +1,9 @@
+import { MAX_LATEX_LENGTH } from "../../../math/latex"
 import { boolArg, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
 
 // Equations, entered as a LaTeX subset.
 
-export const MAX_LATEX = 10_000
+export const MAX_LATEX = MAX_LATEX_LENGTH
 
 export type MathCommand =
 	| { readonly type: "equation.insert"; readonly latex: string; readonly display: boolean }

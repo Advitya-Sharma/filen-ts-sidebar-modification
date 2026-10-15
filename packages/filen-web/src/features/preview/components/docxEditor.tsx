@@ -4,13 +4,19 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { bytesSource } from "@filen/office/core/opc"
 import {
+	DOCX_PARAGRAPH_STYLES,
 	STORY_FIND_LIMIT,
+	docxFontList,
 	findInStory,
 	isWriteCommand,
+	offeredParagraphStyles,
 	replaceAll,
 	replaceMatches,
 	selectMatch,
 	type DocxEditorCommand,
+	type DocxEditorCommandType,
+	type DocxFontChoice,
+	type DocxParagraphStyle,
 	type StoryMatch
 } from "@filen/office/core/docx/edit"
 import type { PagedEditor } from "@filen/office/core/docx/paged"
@@ -37,7 +43,7 @@ import { readEditorClipboard, writeEditorClipboard } from "@/features/preview/li
 import { docxEditingHost, writeDocx, type DocxSaveSnapshot } from "@/features/preview/lib/docxEditing"
 import {
 	AUTOSAVE_IDLE_MS,
-	commandRecordsAuthor,
+	E2E_AUTOSAVE_KEY,
 	editorMarkupView,
 	featureEditable,
 	editorMarks,
@@ -49,20 +55,35 @@ import {
 	shownMarkup,
 	sameToolbarSnapshot,
 	stepMatch,
-	type DocxAuthorGate
+	themeSwatches,
+	type DocxInputRequest,
+	type DocxPainterState,
+	type DocxSurface,
+	type DocxSwatch
 } from "@/features/preview/components/docxEditor.logic"
+import { commandNeedsAuthor } from "@/features/preview/components/docxAuthorGate.logic"
+import { useDocxAuthorGate } from "@/features/preview/components/docxAuthorGate"
+import { DocxCommentPopover } from "@/features/preview/components/docxCommentPopover"
+import { DocxContextCommands } from "@/features/preview/components/docxContextMenu"
 import { DocxEditToolbar } from "@/features/preview/components/docxEditToolbar"
 import { DocxEquationPopover } from "@/features/preview/components/docxEquationPopover"
+import { DocxFieldChip } from "@/features/preview/components/docxFieldChip"
 import { DocxFormControls } from "@/features/preview/components/docxFormControls"
+import { DocxParagraphDialog } from "@/features/preview/components/docxFormatControls"
+import { DocxHeaderChip } from "@/features/preview/components/docxHeaderChip"
+import { DocxPageSetupDialog } from "@/features/preview/components/docxPageSetupDialog"
+import { DocxTableBorderDrag } from "@/features/preview/components/docxTableBorderDrag"
+import { DocxTableSplitDialog } from "@/features/preview/components/docxTableMenu"
+import { useDocxImageInsert } from "@/features/preview/components/docxImageInsert"
+import { useReflowMode } from "@/features/preview/components/docxReflow.logic"
 import { DocxReflowSurface } from "@/features/preview/components/docxReflowSurface"
-import { DocxObjectHandles } from "@/features/preview/components/docxObjectHandles"
+import { DocxDrawingPress, DocxObjectHandles } from "@/features/preview/components/docxObjectHandles"
 import { DocxReviewLayer, DocxReviewPageOverlay } from "@/features/preview/components/docxReviewLayer"
-import type { DocxFindControls } from "@/features/preview/components/docxViewer.logic"
+import { BALLOON_COLUMN_WIDTH, balloonsFit, type DocxFindControls } from "@/features/preview/components/docxViewer.logic"
 import { DocxTouchSelection } from "@/features/preview/components/docxTouchSelection"
 import { SaveRefusedError } from "@/features/drive/lib/previewSave.logic"
 import { defaultSpellingLanguage, documentSpellingChecker } from "@/features/spellcheck/lib/spellcheck"
-import { ensureAuthorName, loadOfficeSettings, saveOfficeAutosave, useOfficeSettings } from "@/features/office/lib/officeSettings"
-import { AuthorNameDialog } from "@/features/office/components/authorNameDialog"
+import { loadOfficeSettings, saveOfficeAutosave, useOfficeSettings } from "@/features/office/lib/officeSettings"
 import { LoadingState } from "@/components/loadingState"
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/context-menu"
 import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"
@@ -115,6 +136,9 @@ interface Ready {
 	opened: Opened
 	editor: PagedEditor
 	spelling: DocxSpelling
+	// The style picker's styles (protection may lock some) and the colour pickers' theme colours.
+	styles: readonly DocxParagraphStyle[]
+	theme: readonly (readonly DocxSwatch[])[]
 }
 
 interface FindState {
@@ -142,12 +166,48 @@ interface MenuTarget {
 const REVIEW_OVERLAY = featureLanded("comments") || featureLanded("review")
 const OBJECT_OVERLAY = featureLanded("drawings")
 
+// What `execute` runs before the view's first commit.
+function executeNothing(): void {
+	return undefined
+}
+
+// Every input request gets its own (DocxInputRequest.nonce).
+let inputNonce = 0
+
 function subscribeNothing(): () => void {
 	return () => undefined
 }
 
+// Whether an event comes from the review layer (balloons, comment fields), which handles its own input.
+function inReview(target: EventTarget | null): boolean {
+	return target instanceof Element && target.closest("[data-docx-review]") !== null
+}
+
 function noSpelling(): readonly SpellingMark[] {
 	return NO_SPELLING
+}
+
+const NO_FONTS: readonly DocxFontChoice[] = []
+
+interface OverlayElement {
+	readonly page: DocxPageOverlay
+	readonly editor: PagedEditor
+	readonly markup: DocxMarkupMode
+	readonly press: DocxObjectPress | null
+	readonly readOnly: boolean
+	readonly element: ReactNode
+}
+
+// E2E builds only: a test lane that edits the shared read-only fixture tree turns idle autosave off for its page
+// (sessionStorage, set before the app loads). Folded away in other builds.
+const E2E_AUTOSAVE_OFF = import.meta.env.VITE_E2E === "1" && e2eAutosaveOff()
+
+function e2eAutosaveOff(): boolean {
+	try {
+		return sessionStorage.getItem(E2E_AUTOSAVE_KEY) === "off"
+	} catch {
+		return false
+	}
 }
 
 interface SaveSourceOptions {
@@ -252,56 +312,6 @@ function docxSaveSource({ host, editor, setWriting, onSaved, onRefused, onLocked
 	}
 }
 
-// The author name gate for commands that record one: asks through the dialog it returns when no name is set.
-function useAuthorGate(authorName: string | null): { withAuthor: DocxAuthorGate; dialog: ReactNode } {
-	const [answer, setAnswer] = useState<((name: string | null) => void) | null>(null)
-	const [withAuthor] = useState(() => (run: (author: string) => void): void => {
-		void ensureAuthorName(
-			() =>
-				new Promise<string | null>(resolve => {
-					setAnswer(() => resolve)
-				})
-		).then(author => {
-			if (author !== null) {
-				run(author)
-			}
-		})
-	})
-
-	useEffect(() => {
-		if (answer === null) {
-			return
-		}
-
-		// An ask still open when the editor closes is declined (after an answer this does nothing).
-		return () => {
-			answer(null)
-		}
-	}, [answer])
-
-	const reply = (name: string | null): void => {
-		answer?.(name)
-		setAnswer(null)
-	}
-
-	return {
-		withAuthor,
-		dialog: (
-			<AuthorNameDialog
-				open={answer !== null}
-				pending={false}
-				initialValue={authorName}
-				onOpenChange={open => {
-					if (!open) {
-						reply(null)
-					}
-				}}
-				onSubmit={reply}
-			/>
-		)
-	}
-}
-
 export interface DocxEditViewProps {
 	bytes: Uint8Array
 	alt: string
@@ -325,6 +335,8 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const current = ready?.opened === opened ? ready : null
 	const editor = current?.editor
 	const spelling = current?.spelling
+	// The font picker's fonts, read once the editor is open.
+	const [fonts, setFonts] = useState<{ editor: PagedEditor; fonts: readonly DocxFontChoice[] } | null>(null)
 	const controls = useDocxEditor(editor)
 	const snapshot = controls.state?.snapshot
 	// What the toolbar shows: the snapshot it was last given while nothing it shows changed (a keystroke
@@ -347,18 +359,35 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const [menu, setMenu] = useState<MenuTarget | null>(null)
 	// The last press on the pages was a touch: selections get handles and the touch menu.
 	const [touch, setTouch] = useState(false)
-	// The reflowed view in place of the pages.
-	const [reflow, setReflow] = useState(false)
+	// The reflowed view (Mobile view) in place of the pages.
+	const { reflow, setReflow } = useReflowMode(width)
+	const surface: DocxSurface = reflow ? "reflow" : "pages"
+	// A command's input asked of the component that takes it (a comment's text, an equation), until it is done.
+	const [inputRequest, setInputRequest] = useState<DocxInputRequest | null>(null)
+	const [requestInput] = useState(() => (type: DocxEditorCommandType, detail?: string): void => {
+		inputNonce += 1
+		setInputRequest({ type, nonce: inputNonce, ...(detail === undefined ? {} : { detail }) })
+	})
+	const [onInputDone] = useState(() => (nonce: number): void => {
+		setInputRequest(previous => (previous?.nonce === nonce ? null : previous))
+	})
+	const inputChannel = { inputRequest, requestInput, onInputDone }
+	// One function for the editor's lifetime: the toolbar's buttons take no new props on a keystroke. It runs
+	// the latest executeCommand (set after commit, below), which the author gate it is given to precedes.
+	const executeRef = useRef<(command: DocxEditorCommand) => void>(executeNothing)
+	const [execute] = useState(() => (command: DocxEditorCommand): void => {
+		executeRef.current(command)
+	})
 	const settings = useOfficeSettings()
-	const { withAuthor, dialog: authorDialog } = useAuthorGate(settings.authorName)
+	const { withAuthor, dialog: authorDialog } = useDocxAuthorGate({ authorName: settings.authorName, editor, execute })
+	// Each mounted page's overlay element and what it was made from (overlays, below).
+	const [overlayElements] = useState(() => new Map<number, OverlayElement>())
 	// The object a press on the pages hit, for the feature that acts on it (handles, pickers, popovers).
 	const [press, setPress] = useState<DocxObjectPress | null>(null)
 	const online = useIsOnline()
 	const onAutosaveRef = useLatestRef(onAutosave)
 	const readOnly = writing || !writable
 	const pageWidth = document.pages[0]?.width ?? document.info?.pageWidth ?? 816
-	const zoom = zoomMode === "fit" ? fitWidthZoom(width, pageWidth, PAGE_GAP) : zoomMode
-	const zoomRef = useLatestRef(zoom)
 	const sessions = editor?.sessions
 	const dirty = sessions?.some(session => session.snapshot().dirty) === true
 
@@ -396,6 +425,18 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const viewOnly = editorViewOnlyReasons(toolbarSnapshot?.readOnlyReasons ?? [], writable, renamed)
 	// Comments and tracked changes in the document: the markup menu is offered.
 	const annotated = (document.info?.comments ?? 0) + (document.info?.revisions ?? 0)
+	const review = toolbarSnapshot?.review
+	// Comments and changes there are or can be now (tracking turned on, a comment added): the markup modes.
+	const reviewing = annotated > 0 || review?.tracking === true || (review?.revisionCount ?? 0) + (review?.commentCount ?? 0) > 0
+	// Margin balloons get a column right of the pages where the window has room for one; "fit" leaves it.
+	const balloonsWanted =
+		!reflow &&
+		featureLanded("comments") &&
+		(markupInfo(shownMode).comments || markupInfo(shownMode).formatting) &&
+		(annotated > 0 || (review?.commentCount ?? 0) > 0)
+	const aside = balloonsWanted && balloonsFit(width) ? BALLOON_COLUMN_WIDTH : 0
+	const zoom = zoomMode === "fit" ? fitWidthZoom(width - aside, pageWidth, PAGE_GAP) : zoomMode
+	const zoomRef = useLatestRef(zoom)
 
 	// The editor and its spelling once the document is open for editing (proved block by block meanwhile).
 	useEffect(() => {
@@ -411,7 +452,26 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 				created = new DocxSpelling(openedEditor.body.session, documentSpellingChecker, {
 					defaultLanguage: defaultSpellingLanguage()
 				})
-				setReady({ opened, editor: openedEditor, spelling: created })
+
+				const context = openedEditor.body.session.context
+
+				setReady({
+					opened,
+					editor: openedEditor,
+					spelling: created,
+					styles: offeredParagraphStyles(context),
+					theme: themeSwatches(theme => context.resolver.theme?.themeColor(theme))
+				})
+				docxFontList(context).then(
+					list => {
+						if (live) {
+							setFonts({ editor: openedEditor, fonts: list })
+						}
+					},
+					(error: unknown) => {
+						log.warn("docx", "font list not read", { error })
+					}
+				)
 
 				const locked = opened.editing.proofLocked()
 
@@ -511,6 +571,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		if (
 			!settings.loaded ||
 			!settings.autosave ||
+			E2E_AUTOSAVE_OFF ||
 			autosaveHeld ||
 			!dirty ||
 			readOnly ||
@@ -610,13 +671,15 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 			opened.editing.setAuthor(author)
 		}
 
-		if (!readOnly) {
+		// Commands that change nothing (find the next change, field codes) run while read-only too.
+		if (!readOnly || !isWriteCommand(command.type)) {
 			const done = controls.execute(command)
 
-			// An async command (a field update, a picture) reports its own outcome; a failure is only logged.
+			// An async command (a field update, a picture) settles later: a failure is told.
 			if (typeof done !== "boolean") {
 				done.catch((error: unknown) => {
 					log.error("docx", "command failed", { type: command.type, error })
+					toast.error(t("previewDocxCommandFailed"))
 				})
 			}
 		}
@@ -624,24 +687,27 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		focusEditor()
 	})
 	// A command the session refuses now asks for nothing; one that records the author asks for the name first.
-	const executeRef = useLatestRef((command: DocxEditorCommand): void => {
-		if (snapshot === undefined || (readOnly && isWriteCommand(command.type)) || !snapshot.enabled[command.type]) {
+	// The editor's own snapshot: a component may act right after moving the selection (a control pressed).
+	const executeCommand = (command: DocxEditorCommand): void => {
+		const now = editor?.snapshot()
+
+		if (now === undefined || (readOnly && isWriteCommand(command.type)) || !now.enabled[command.type]) {
 			focusEditor()
 
 			return
 		}
 
-		if (commandRecordsAuthor(command, snapshot.review.tracking)) {
+		if (commandNeedsAuthor(command, now.review)) {
 			withAuthor(author => {
 				runRef.current(command, author)
 			})
 		} else {
 			runRef.current(command)
 		}
-	})
-	// One function for the editor's lifetime: the toolbar's buttons take no new props on a keystroke.
-	const [execute] = useState(() => (command: DocxEditorCommand): void => {
-		executeRef.current(command)
+	}
+
+	useEffect(() => {
+		executeRef.current = executeCommand
 	})
 
 	// Another markup mode: the open document is laid out again in place (its edits kept); one still opening
@@ -747,6 +813,37 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		[]
 	)
 
+	// Pictures pasted, dropped or picked (Insert menu) go in through this.
+	const image = useDocxImageInsert({
+		host: opened.editing,
+		editor,
+		handleRef,
+		snapshot: toolbarSnapshot,
+		readOnly,
+		execute,
+		surface,
+		...inputChannel
+	})
+
+	// A paste or drop into the review layer (a comment's field) stays there.
+	const pasteAndDrop: typeof image.handlers = {
+		onPasteCapture: event => {
+			if (!inReview(event.target)) {
+				image.handlers.onPasteCapture?.(event)
+			}
+		},
+		onDragOverCapture: event => {
+			if (!inReview(event.target)) {
+				image.handlers.onDragOverCapture?.(event)
+			}
+		},
+		onDropCapture: event => {
+			if (!inReview(event.target)) {
+				image.handlers.onDropCapture?.(event)
+			}
+		}
+	}
+
 	const shortcut = (key: string): string => (APPLE ? `⌘${key}` : `Ctrl+${key}`)
 
 	const blocked = (key: string): void => {
@@ -784,7 +881,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 
 		if (content === null) {
 			blocked("V")
-		} else {
+		} else if (!image.paste(content)) {
 			handleRef.current?.paste(content)
 		}
 	}
@@ -800,30 +897,136 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const onPressDone = (): void => {
 		setPress(null)
 	}
+	// A picker opened from the keyboard gives focus back to the document it was opened from once done.
+	const keyboardPressRef = useRef(false)
+
+	useEffect(() => {
+		if (press?.pointerType === "keyboard") {
+			keyboardPressRef.current = true
+		} else if (press === null && keyboardPressRef.current) {
+			keyboardPressRef.current = false
+			handleRef.current?.focus()
+		}
+	}, [press])
+
+	// Alt+Down in a dropdown or date control opens its picker at the caret, as Word does.
+	const openControlPicker = (): boolean => {
+		const control = toolbarSnapshot?.context.control ?? null
+		const part =
+			control === null
+				? null
+				: control.type === "dropDownList" || control.type === "comboBox"
+					? "list"
+					: control.type === "date"
+						? "date"
+						: null
+		const at = handleRef.current?.selectionPoints().end
+		const current = editor?.selection()
+
+		if (part === null || at === undefined || editor === undefined || current === undefined) {
+			return false
+		}
+
+		setPress({
+			hit: { kind: "control", story: editor.activeStory, pos: current.from, part },
+			page: -1,
+			x: 0,
+			y: 0,
+			clientX: at.x,
+			clientY: at.y,
+			pointerType: "keyboard",
+			pointerId: -1,
+			clicks: 1,
+			shiftKey: false
+		})
+
+		return true
+	}
+	// The pages lay out again on a keystroke and ask each mounted page for its overlay: a page whose frame and
+	// inputs are as they were gets the element it got, so React draws nothing of it again.
 	const overlays =
 		editor === undefined || !(REVIEW_OVERLAY || OBJECT_OVERLAY)
 			? undefined
-			: (page: DocxPageOverlay): ReactNode => (
-					<>
-						{REVIEW_OVERLAY ? (
-							<DocxReviewPageOverlay
-								page={page}
-								editor={editor}
-								markup={shownMode}
-							/>
-						) : null}
-						{OBJECT_OVERLAY ? (
-							<DocxObjectHandles
-								page={page}
-								editor={editor}
-								press={press}
-								readOnly={readOnly}
-								execute={execute}
-							/>
-						) : null}
-					</>
-				)
+			: (page: DocxPageOverlay): ReactNode => {
+					const known = overlayElements.get(page.index)
 
+					if (
+						known?.page.width === page.width &&
+						known.page.height === page.height &&
+						known.page.zoom === page.zoom &&
+						known.editor === editor &&
+						known.markup === shownMode &&
+						known.press === press &&
+						known.readOnly === readOnly
+					) {
+						return known.element
+					}
+
+					const element = (
+						<>
+							{REVIEW_OVERLAY ? (
+								<DocxReviewPageOverlay
+									page={page}
+									editor={editor}
+									markup={shownMode}
+								/>
+							) : null}
+							{OBJECT_OVERLAY ? (
+								<DocxObjectHandles
+									page={page}
+									editor={editor}
+									press={press}
+									readOnly={readOnly}
+									execute={execute}
+								/>
+							) : null}
+						</>
+					)
+
+					overlayElements.set(page.index, { page, editor, markup: shownMode, press, readOnly, element })
+
+					return element
+				}
+
+	// Its own element (not one with the pages'): the pages' props change as they lay out, the layer's do not.
+	const reviewLayer =
+		editor === undefined ? null : (
+			<DocxReviewLayer
+				editor={editor}
+				markup={shownMode}
+				zoom={zoom}
+				gap={PAGE_GAP}
+				container={wrapper}
+				readOnly={readOnly}
+				execute={execute}
+				withAuthor={withAuthor}
+				press={press?.hit.kind === "commentMarker" ? press : null}
+				onPressDone={onPressDone}
+				{...inputChannel}
+			/>
+		)
+
+	// What every component acting on objects in the document gets, on either surface (once it opened).
+	const objectProps =
+		editor === undefined
+			? null
+			: {
+					editor,
+					snapshot: toolbarSnapshot,
+					surface,
+					container: wrapper,
+					zoom,
+					readOnly,
+					execute,
+					onPressDone,
+					...inputChannel
+				}
+	const painter: DocxPainterState = editor?.painter === undefined ? "off" : editor.painter.sticky ? "sticky" : "once"
+	const cancelPainter = (): void => {
+		editor?.setPainter(undefined)
+		focusEditor()
+	}
+	const header = reflow ? null : (toolbarSnapshot?.context.story.header ?? null)
 	const hasSelection = selection !== undefined && !selection.empty
 	const editable = !readOnly && snapshot !== undefined && !snapshot.readOnly
 	const menuIssue = menu?.issue
@@ -846,7 +1049,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 				find={{ open: find.open, replace: find.replace, focus: find.focus, controls: findControls }}
 				onFindOpen={openFind}
 				onFindClosed={focusEditor}
-				markup={annotated > 0 ? shownMode : null}
+				markup={reviewing ? shownMode : null}
 				onMarkupChange={changeMarkup}
 				zoom={zoom}
 				onZoom={change => {
@@ -860,6 +1063,14 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 				}}
 				reflow={reflow}
 				onReflowChange={setReflow}
+				surface={surface}
+				styles={current?.styles ?? DOCX_PARAGRAPH_STYLES}
+				fonts={fonts !== null && fonts.editor === editor ? fonts.fonts : NO_FONTS}
+				theme={current?.theme ?? []}
+				painter={painter}
+				onPainterCancel={cancelPainter}
+				fieldCodes={editor?.fieldCodes === true}
+				{...inputChannel}
 			/>
 			{autosaveHeld && settings.autosave ? (
 				<p
@@ -880,14 +1091,50 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 					ref={setWrapper}
 					data-preview-surface
 					className="relative min-h-0 flex-1 select-auto"
+					onKeyDownCapture={event => {
+						if (
+							event.key === "ArrowDown" &&
+							event.altKey &&
+							!event.ctrlKey &&
+							!event.metaKey &&
+							!event.shiftKey &&
+							!inReview(event.target) &&
+							openControlPicker()
+						) {
+							event.preventDefault()
+							event.stopPropagation()
+						}
+					}}
 					onPointerDownCapture={event => {
 						setTouch(event.pointerType === "touch" || event.pointerType === "pen")
+					}}
+					// The format painter paints the selection a press in the document made (Word's).
+					onPointerUp={event => {
+						// The primary button's release only: a right click opens the context menu, it paints nothing.
+						if (
+							painter !== "off" &&
+							event.isPrimary &&
+							event.button === 0 &&
+							press === null &&
+							event.target instanceof Node &&
+							wrapper?.contains(event.target) === true
+						) {
+							execute({ type: "format.paste" })
+						}
 					}}
 					// Touch gets the touch menu (below), not this menu's long press.
 					onTouchStartCapture={event => {
 						event.stopPropagation()
 					}}
+					{...pasteAndDrop}
 					onContextMenuCapture={event => {
+						// The review layer's balloons and fields keep the browser's own menu (spelling in a comment).
+						if (inReview(event.target)) {
+							event.stopPropagation()
+
+							return
+						}
+
 						const handle = handleRef.current
 
 						if (touch || handle === null || editor === undefined) {
@@ -927,6 +1174,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 					{editor === undefined ? null : reflow ? (
 						<DocxReflowSurface
 							editor={editor}
+							document={document}
 							handleRef={handleRef}
 							label={alt}
 							readOnly={readOnly}
@@ -935,6 +1183,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 							onFind={() => {
 								openFind(false)
 							}}
+							{...(interactions === undefined ? {} : { interactions })}
 						/>
 					) : (
 						<>
@@ -952,50 +1201,65 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 									openFind(false)
 								}}
 								marks={marks}
+								aside={aside}
 								{...(interactions === undefined ? {} : { interactions })}
 								{...(overlays === undefined ? {} : { overlays })}
 							/>
-							<DocxReviewLayer
-								editor={editor}
-								document={document}
-								markup={shownMode}
-								zoom={zoom}
-								gap={PAGE_GAP}
-								container={wrapper}
-								readOnly={readOnly}
-								execute={execute}
-								withAuthor={withAuthor}
-								press={press?.hit.kind === "commentMarker" ? press : null}
-								onPressDone={onPressDone}
-							/>
+							{reviewLayer}
 						</>
 					)}
-					{editor === undefined ? null : (
+					{editor === undefined || reflow ? null : (
+						<DocxTableBorderDrag
+							editor={editor}
+							press={press?.hit.kind === "tableBorder" ? press : null}
+							onPressDone={onPressDone}
+							container={wrapper}
+							zoom={zoom}
+							readOnly={readOnly}
+							execute={execute}
+						/>
+					)}
+					{header === null || toolbarSnapshot === undefined ? null : (
+						<DocxHeaderChip
+							header={header}
+							enabled={toolbarSnapshot.enabled}
+							readOnly={readOnly}
+							execute={execute}
+							onClose={() => {
+								editor?.exitStory()
+								focusEditor()
+							}}
+						/>
+					)}
+					{objectProps === null ? null : (
 						<>
 							<DocxFormControls
-								editor={editor}
-								container={wrapper}
-								zoom={zoom}
-								readOnly={readOnly}
-								execute={execute}
+								{...objectProps}
 								press={press?.hit.kind === "control" ? press : null}
-								onPressDone={onPressDone}
 							/>
 							<DocxEquationPopover
-								editor={editor}
-								container={wrapper}
-								zoom={zoom}
-								readOnly={readOnly}
-								execute={execute}
+								{...objectProps}
 								press={press?.hit.kind === "equation" ? press : null}
-								onPressDone={onPressDone}
+							/>
+							<DocxFieldChip
+								{...objectProps}
+								press={press?.hit.kind === "field" || press?.hit.kind === "noteRef" ? press : null}
+							/>
+							<DocxDrawingPress
+								{...objectProps}
+								press={press?.hit.kind === "drawing" ? press : null}
+							/>
+							<DocxCommentPopover
+								{...objectProps}
+								withAuthor={withAuthor}
+								press={press?.hit.kind === "commentMarker" ? press : null}
 							/>
 						</>
 					)}
 					<DocxTouchSelection
 						handleRef={handleRef}
 						container={wrapper}
-						shown={touch && hasSelection}
+						shown={touch && hasSelection && !reflow}
 						selectionKey={
 							selection === undefined || !touch ? "" : `${String(selection.anchor)}:${String(selection.head)}:${String(zoom)}`
 						}
@@ -1016,7 +1280,8 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 							selectAll
 						}}
 					/>
-					{editor === undefined || document.status === "loading" ? (
+					{/* The pages' layout rests while Mobile view shows the document: it waits for the editor only. */}
+					{editor === undefined || (!reflow && document.status === "loading") ? (
 						<LoadingState
 							size="lg"
 							className="absolute inset-0 text-inherit"
@@ -1107,9 +1372,37 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 					</ContextMenuItem>
 					<ContextMenuSeparator />
 					<ContextMenuItem onClick={selectAll}>{t("previewDocxSelectAll")}</ContextMenuItem>
+					<DocxContextCommands
+						snapshot={toolbarSnapshot}
+						readOnly={readOnly}
+						execute={execute}
+						requestInput={requestInput}
+						surface={surface}
+					/>
 				</ContextMenuContent>
 			</ContextMenu>
 			{authorDialog}
+			{image.dialogs}
+			{editor === undefined ? null : (
+				<DocxPageSetupDialog
+					editor={editor}
+					readOnly={readOnly}
+					enabled={toolbarSnapshot?.enabled["page.setup"] === true}
+					{...inputChannel}
+				/>
+			)}
+			<DocxParagraphDialog
+				values={toolbarSnapshot?.values}
+				execute={execute}
+				{...inputChannel}
+			/>
+			{editor === undefined ? null : (
+				<DocxTableSplitDialog
+					editor={editor}
+					readOnly={readOnly}
+					{...inputChannel}
+				/>
+			)}
 		</div>
 	)
 }

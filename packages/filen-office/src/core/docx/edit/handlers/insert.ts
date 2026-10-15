@@ -1,6 +1,7 @@
 import { Fragment, Slice, type Mark, type Node } from "prosemirror-model"
 import { TextSelection, type EditorState, type Transaction } from "prosemirror-state"
-import type { InsertCommand } from "../commands/insert"
+import { MAX_LINK_TEXT, insertable as insertableText, type InsertCommand } from "../commands/insert"
+import { headingBookmark } from "../../fields/bookmarks"
 import type { DocxEditContext } from "../context"
 import { changeMarks, runPiecesIn } from "../formats"
 import type { FeatureHandlers, StoryCommandContext, StoryCommandHandler } from "../registry"
@@ -158,6 +159,13 @@ function linkAttrs(
 	}
 }
 
+// A heading's text as a link to it shows it: its first line, as much as a link's text holds.
+function headingText(doc: Node, pos: number): string | undefined {
+	const text = doc.nodeAt(pos)?.textContent.split("\n")[0]?.trim().slice(0, MAX_LINK_TEXT) ?? ""
+
+	return text === "" || !insertableText(text) ? undefined : text
+}
+
 // Content marks after a link without the link and the look it got for being one: what is typed after a link
 // the caret leaves.
 function withoutLink(context: DocxEditContext, marksOf: readonly Mark[]): readonly Mark[] {
@@ -170,21 +178,31 @@ function withoutLink(context: DocxEditContext, marksOf: readonly Mark[]): readon
 }
 
 // link.set: the link at the selection gets the new target (and text); else the selection becomes a link, or
-// the text (by default the target) is inserted as one at the caret.
+// the text (by default the target, or the heading linked to) is inserted as one at the caret. A link to a
+// heading goes to its hidden bookmark, made in the same step when it has none (one undo takes both).
 function setLink(context: StoryCommandContext, command: Cmd<"link.set">): Transaction | true | null {
 	const state = context.state
 	const selection = state.selection
 	const existing = selectedLink(state)
-	const target = "target" in command ? command.target : null
-	const anchor = "anchor" in command ? command.anchor : null
-	const link = marks.link.create(linkAttrs(context, existing?.link, target, anchor))
 	const tr = state.tr
-	let from = existing?.from ?? selection.from
-	let to = existing?.to ?? selection.to
+	const target = "target" in command ? command.target : null
+	const anchor =
+		"anchor" in command ? command.anchor : "heading" in command ? headingBookmark(tr, context.session, command.heading) : null
+
+	if (anchor === undefined) return null
+
+	const heading = "heading" in command ? headingText(state.doc, command.heading) : undefined
+
+	// A link to a heading without text shows nothing to click: one is made of a selection or a given text.
+	if ("heading" in command && heading === undefined && command.text === undefined && existing === undefined && selection.empty)
+		return null
+	const link = marks.link.create(linkAttrs(context, existing?.link, target, anchor))
+	let from = tr.mapping.map(existing?.from ?? selection.from, -1)
+	let to = tr.mapping.map(existing?.to ?? selection.to, 1)
 	const before = marksAt(state)
 
 	if (existing === undefined && selection.empty) {
-		const text = command.text ?? target ?? anchor ?? ""
+		const text = command.text ?? heading ?? target ?? anchor ?? ""
 
 		tr.insert(from, docxSchema.text(text, marks.link.removeFromSet(before)))
 		to = from + text.length

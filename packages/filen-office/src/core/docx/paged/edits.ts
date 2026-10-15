@@ -293,6 +293,8 @@ export class DocumentEdits implements LayoutEdits {
 	private readonly editedSections: EditedSections
 	// The document-wide switch for even pages' headers and footers as edited (LayoutEdits).
 	evenAndOddHeaders: boolean | undefined = undefined
+	// Mirror margins as edited (LayoutEdits).
+	mirrorMargins: boolean | undefined = undefined
 	// Where notes go as edited, document-wide (LayoutEdits).
 	footnotePosition: string | undefined = undefined
 	endnotePosition: string | undefined = undefined
@@ -1491,10 +1493,16 @@ export class StoryEdits {
 		const end = this.doc.attrs["end"]
 		const trailing = last === undefined || !endsLast(this.part, last.node) || (Array.isArray(end) && end.length > 0)
 		const changes: unknown = this.doc.attrs["sectionChanges"]
-		const settings = changes as { evenAndOddHeaders?: unknown; footnotePosition?: unknown; endnotePosition?: unknown } | null
+		const settings = changes as {
+			evenAndOddHeaders?: unknown
+			mirrorMargins?: unknown
+			footnotePosition?: unknown
+			endnotePosition?: unknown
+		} | null
 		const evenAndOdd = settings?.evenAndOddHeaders
 
 		this.edits.evenAndOddHeaders = typeof evenAndOdd === "boolean" ? evenAndOdd : undefined
+		this.edits.mirrorMargins = typeof settings?.mirrorMargins === "boolean" ? settings.mirrorMargins : undefined
 		this.edits.footnotePosition = typeof settings?.footnotePosition === "string" ? settings.footnotePosition : undefined
 		this.edits.endnotePosition = typeof settings?.endnotePosition === "string" ? settings.endnotePosition : undefined
 

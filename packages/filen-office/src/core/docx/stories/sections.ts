@@ -121,6 +121,8 @@ export interface FoldedChange {
 export interface DocSectionChanges {
 	readonly final?: SectionEdit
 	readonly evenAndOddHeaders?: boolean
+	// Mirror margins (w:mirrorMargins in settings).
+	readonly mirrorMargins?: boolean
 	// Where notes go, document-wide (w:pos of w:footnotePr / w:endnotePr in settings: Word ignores a section's).
 	readonly footnotePosition?: string
 	readonly endnotePosition?: string
@@ -184,6 +186,13 @@ export function finalSectionEdit(doc: Node): SectionEdit | undefined {
 }
 
 // Whether the document shows even pages' headers and footers, as edited.
+// Whether pages mirror their margins (w:mirrorMargins), as edited.
+export function mirrorMargins(context: DocxEditContext, doc: Node | undefined): boolean {
+	const value = doc === undefined ? undefined : docSectionChanges(doc).mirrorMargins
+
+	return value ?? context.model.settings.mirrorMargins
+}
+
 export function evenAndOddHeaders(context: DocxEditContext, doc: Node | undefined): boolean {
 	const value = doc === undefined ? undefined : docSectionChanges(doc).evenAndOddHeaders
 
@@ -1431,8 +1440,8 @@ function twips(value: number | undefined, fallback: number): number {
 // Page setup of the caret's section (or every section): what `setup` names changes, the rest stays. Turning the
 // page turns its margins with it, as Word's Page Setup does (and Microsoft's Open XML sample "Change the print
 // orientation of a word processing document": 90 degrees to landscape, back to portrait); unequal columns keep
-// their spacing and share the text width as they did. Refused (false) where a section would have properties a
-// save refuses (write/checks/sections.ts).
+// their spacing and share the text width as they did. Mirror margins are the document's (settings). Refused (false)
+// where a section would have properties a save refuses (write/checks/sections.ts).
 export function pageSetup(editor: PagedEditor, setup: DocxPageSetup): boolean {
 	const { states } = bodySectionsOf(editor)
 	const context = editor.body.session.context
@@ -1553,7 +1562,16 @@ export function pageSetup(editor: PagedEditor, setup: DocxPageSetup): boolean {
 
 			return savableSection(context, part, next) ? next : null
 		},
-		true
+		true,
+		tr => {
+			const mirror = setup.mirrorMargins
+
+			if (mirror === undefined || mirror === mirrorMargins(context, tr.doc)) return false
+
+			tr.setDocAttribute("sectionChanges", Object.freeze({ ...docSectionChanges(tr.doc), mirrorMargins: mirror }))
+
+			return true
+		}
 	)
 }
 

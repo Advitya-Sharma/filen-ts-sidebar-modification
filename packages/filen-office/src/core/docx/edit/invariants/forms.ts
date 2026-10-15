@@ -289,6 +289,7 @@ export function formsBefore(tr: Transaction, session: DocxEditorSession): Transa
 
 	if (formCommands.has(tr)) {
 		commandOf.add(session)
+		commandMarks.set(session, writtenControlMarks(tr))
 
 		return tr
 	}
@@ -418,6 +419,26 @@ function unlockedFormatting(tr: Transaction, session: DocxEditorSession): Transa
 	if (tr.scrolledIntoView) out.scrollIntoView()
 
 	for (const key of ["addToHistory", "uiEvent"]) if (tr.getMeta(key) !== undefined) out.setMeta(key, tr.getMeta(key))
+
+	return out
+}
+
+// The control marks a form command wrote (by control), before tracked changes record it: what all of each
+// control's content takes then (recording may leave its new content marked deleted for a moment).
+const commandMarks = new WeakMap<DocxEditorSession, ReadonlyMap<string, Mark>>()
+
+function writtenControlMarks(tr: Transaction): Map<string, Mark> {
+	const out = new Map<string, Mark>()
+
+	for (const step of tr.steps) {
+		if (!(step instanceof ReplaceStep) || step.slice.size === 0) continue
+
+		step.slice.content.descendants(node => {
+			for (const mark of node.marks) if (mark.type === marks.content_control) out.set(controlKey(mark), mark)
+
+			return true
+		})
+	}
 
 	return out
 }
@@ -578,9 +599,13 @@ function checked(tr: Transaction, session: DocxEditorSession): Transaction {
 
 	if (protection !== undefined) return refuse(tr, protection, session)
 	if (command) {
+		const written = commandMarks.get(session)
+
+		commandMarks.delete(session)
+
 		if (isInternal(tr)) return tr
 
-		unifyStates(tr)
+		unifyStates(tr, written)
 
 		return markCommand(tr)
 	}
@@ -1234,8 +1259,8 @@ function lockViolation(tr: Transaction, part: StoryPart): string | undefined {
 }
 
 // A form command recorded as tracked changes keeps the old content (deleted) next to the new: the control's
-// content all takes the state the new content has, so it stays one control.
-function unifyStates(tr: Transaction): void {
+// content all takes the state the command wrote (else the state the new content has), so it stays one control.
+function unifyStates(tr: Transaction, written: ReadonlyMap<string, Mark> | undefined): void {
 	const inserted = insertedRanges(tr)
 	const seen = new Set<number>()
 
@@ -1255,6 +1280,8 @@ function unifyStates(tr: Transaction): void {
 
 			for (const mark of child.marks) if (mark.type === marks.content_control) newest.set(controlKey(mark), mark)
 		})
+
+		for (const [key, mark] of written ?? []) newest.set(key, mark)
 
 		if (newest.size === 0) continue
 

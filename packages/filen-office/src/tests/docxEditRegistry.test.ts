@@ -135,6 +135,12 @@ const EXAMPLES: Readonly<Record<DocxEditorCommandType, object>> = {
 	"control.date": { iso: "2026-10-12" },
 	"control.clear": {},
 	"control.text": { text: "Jane Doe" },
+	"control.items": {
+		items: [
+			{ text: "Yes", value: "Y" },
+			{ text: "No", value: "N" }
+		]
+	},
 	"control.insert": {
 		kind: "dropDownList",
 		items: [
@@ -198,6 +204,14 @@ const INVALID: readonly object[] = [
 	{ type: "control.date", iso: "2026-02-30" },
 	{ type: "control.text", text: "a\u0007b" },
 	{ type: "control.insert", kind: "button" },
+	{ type: "control.items", items: "Yes" },
+	{
+		type: "control.items",
+		items: [
+			{ text: "a", value: "a" },
+			{ text: "a", value: "b" }
+		]
+	},
 	{ type: "control.insert", kind: "checkbox", items: [{ text: "a", value: "a" }] },
 	{
 		type: "control.insert",

@@ -3,6 +3,7 @@ import { EditorState, TextSelection, type Transaction } from "prosemirror-state"
 import { closeHistory, history, isHistoryTransaction, redo, redoDepth, undo, undoDepth } from "prosemirror-history"
 import { Item, type Story } from "../model/index"
 import { ReviewIndex } from "../review/index"
+import { refusedForAuthor, refusedUnsupported } from "../review/track"
 import { DocxDocBuilder, type StoryDoc } from "./build"
 import {
 	PARAGRAPH_STYLE_NAMES,
@@ -54,6 +55,10 @@ import {
 } from "./snapshot/index"
 
 export type FormatState = "on" | "off" | "mixed"
+
+// Why a user's edit came to nothing: tracking records an author and none is set, or what tracking would record
+// cannot be saved (the deletion of an equation nested too deep).
+export type DocxRefusalReason = "authorNeeded" | "unsupported"
 
 export type { DocxReadOnlyReason } from "./readOnly"
 
@@ -337,6 +342,7 @@ export class DocxEditorSession {
 	private readonly transformer: DocxTransactionTransformer | undefined
 	private readonly listeners = new Set<(snapshot: DocxEditorSnapshot) => void>()
 	private readonly appliedListeners = new Set<(transactions: readonly Transaction[], state: EditorState) => void>()
+	private readonly refusedListeners = new Set<(reason: DocxRefusalReason) => void>()
 	private current: EditorState
 	private saved: Node
 	// The track switch as last saved (or opened): a save writes it into settings.xml, so turning it is an edit.
@@ -722,6 +728,16 @@ export class DocxEditorSession {
 		}
 	}
 
+	// Hears each user edit (typing, composition, paste, drop, a shortcut) the session refused, with why; never
+	// an undo or the editor's own changes.
+	onRefused(listener: (reason: DocxRefusalReason) => void): () => void {
+		this.refusedListeners.add(listener)
+
+		return () => {
+			this.refusedListeners.delete(listener)
+		}
+	}
+
 	// Hears every change of state synchronously, with the transactions that made it (the one applied first,
 	// then those the invariants appended): a paged view lays the document out again from them.
 	onApplied(listener: (transactions: readonly Transaction[], state: EditorState) => void): () => void {
@@ -736,6 +752,7 @@ export class DocxEditorSession {
 		this.disposed = true
 		this.listeners.clear()
 		this.appliedListeners.clear()
+		this.refusedListeners.clear()
 		sessionGone(this.context, this)
 		releaseHistory()
 	}
@@ -780,7 +797,20 @@ export class DocxEditorSession {
 				: tr
 		const result = this.current.applyTransaction(transformed)
 
-		if (result.transactions.length === 0) return false
+		if (result.transactions.length === 0) {
+			// Only the transformer marks a transaction refused for its author (never an undo or the session's own).
+			if (this.refusedListeners.size > 0 && refusedForAuthor(transformed)) {
+				const reason: DocxRefusalReason | undefined = refusedUnsupported(transformed)
+					? "unsupported"
+					: (this.author ?? "") === ""
+						? "authorNeeded"
+						: undefined
+
+				if (reason !== undefined) for (const listener of this.refusedListeners) listener(reason)
+			}
+
+			return false
+		}
 
 		this.current = result.state
 		this.reviewIndexOf?.applyAll(result.transactions)

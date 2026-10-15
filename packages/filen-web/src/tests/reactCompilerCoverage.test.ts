@@ -14,7 +14,16 @@ function compile(file: string): CompilerEvent[] {
 	return compileWithCode(file).events
 }
 
+// Each file is compiled once and shared by every function and case that checks it.
+const compiled = new Map<string, { events: CompilerEvent[]; code: string }>()
+
 function compileWithCode(file: string): { events: CompilerEvent[]; code: string } {
+	const known = compiled.get(file)
+
+	if (known !== undefined) {
+		return known
+	}
+
 	const events: CompilerEvent[] = []
 
 	const result = transformFileSync(file, {
@@ -37,7 +46,11 @@ function compileWithCode(file: string): { events: CompilerEvent[]; code: string 
 		]
 	})
 
-	return { events, code: result?.code ?? "" }
+	const output = { events, code: result?.code ?? "" }
+
+	compiled.set(file, output)
+
+	return output
 }
 
 // A compiled function can still recompute a value on every render: the compiler drops the memo scope of a
@@ -130,14 +143,52 @@ describe("React Compiler coverage", () => {
 		}
 	})
 
-	it("compiles the DOCX editor's view, toolbar and touch selection", () => {
+	// About 30 files, the editor's largest among them: some 15 s cold on a loaded machine.
+	it("compiles the DOCX editor's view, toolbar, touch selection and hooks", { timeout: 60_000 }, () => {
 		for (const [file, fnName] of [
 			["src/features/preview/components/docxEditor.tsx", "DocxEditView"],
 			["../filen-office/src/react/docx/DocxEditor.tsx", "DocxEditor"],
 			["../filen-office/src/react/docx/DocxEditor.tsx", "EditorPage"],
 			["src/features/preview/components/docxEditToolbar.tsx", "DocxEditToolbar"],
 			["src/features/preview/components/docxEditToolbar.tsx", "CommandButton"],
+			["src/features/preview/components/docxFormatControls.tsx", "DocxFormatControls"],
+			["src/features/preview/components/docxFormatControls.tsx", "DocxColorGrid"],
+			["src/features/preview/components/docxTableMenu.tsx", "DocxTableMenu"],
+			["src/features/preview/components/docxFormControls.tsx", "DocxFormControls"],
+			["src/features/preview/components/docxTableBorderDrag.tsx", "DocxTableBorderDrag"],
+			["src/features/preview/components/docxHeaderChip.tsx", "DocxHeaderChip"],
+			["src/features/preview/components/docxPageSetupDialog.tsx", "DocxPageSetupDialog"],
+			["src/features/preview/components/docxContextMenu.tsx", "DocxContextCommands"],
+			["src/features/preview/components/docxFields.tsx", "DocxChoiceField"],
+			["src/features/preview/components/docxFields.tsx", "DocxRowsColumnsDialog"],
+			["src/features/preview/components/docxFormControls.tsx", "ControlListbox"],
+			["src/features/preview/components/docxFormControls.tsx", "ItemsEditor"],
+			["src/features/preview/components/docxEditor.logic.ts", "useInputForm"],
+			["src/features/preview/components/docxReviewLayer.tsx", "DocxReviewLayer"],
+			["src/features/preview/components/docxReviewLayer.tsx", "DocxReviewPageOverlay"],
+			["src/features/preview/components/docxReviewLayer.tsx", "PageMarks"],
+			["src/features/preview/components/docxReviewLayer.tsx", "PageColumn"],
+			["src/features/preview/components/docxReviewLayer.tsx", "PageMarkers"],
+			["src/features/preview/components/docxReviewLayer.tsx", "Balloon"],
+			["src/features/preview/components/docxReviewLayer.tsx", "CommentThreadCard"],
+			["src/features/preview/components/docxReviewLayer.tsx", "ChangePopup"],
+			["src/features/preview/components/docxReviewMenu.tsx", "DocxReviewMenu"],
+			["src/features/preview/components/docxCommentPopover.tsx", "DocxCommentPopover"],
+			["src/features/preview/components/docxImageInsert.tsx", "useDocxImageInsert"],
+			["src/features/preview/components/docxInsertMenu.tsx", "DocxInsertMenu"],
+			["src/features/preview/components/docxInsertDialogs.tsx", "DocxInsertDialogs"],
+			["src/features/preview/components/docxDrawingMenu.tsx", "DocxDrawingMenu"],
+			["src/features/preview/components/docxObjectHandles.tsx", "DocxObjectHandles"],
+			["src/features/preview/components/docxFieldChip.tsx", "DocxFieldChip"],
+			["src/features/drive/components/driveFilePickerDialog.tsx", "DriveFilePickerList"],
+			["src/features/preview/components/docxEquationPopover.tsx", "DocxEquationPopover"],
+			["src/features/preview/components/docxReflowSurface.tsx", "DocxReflowSurface"],
+			["src/features/preview/components/docxReflowSurface.tsx", "DocxReflowMenuItem"],
+			["../filen-office/src/react/docx/reflow/DocxReflow.tsx", "DocxReflow"],
+			["../filen-office/src/react/docx/useDocxEditor.ts", "useDocxEditor"],
 			["src/features/preview/components/docxTouchSelection.tsx", "DocxTouchSelection"],
+			["src/features/preview/components/docxAuthorGate.tsx", "useDocxAuthorGate"],
+			["src/features/preview/components/docxReflow.logic.ts", "useReflowMode"],
 			["src/features/settings/components/advanced/documentsRows.tsx", "DocumentsRows"]
 		] as const) {
 			const events = compile(file)

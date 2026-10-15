@@ -39,7 +39,7 @@ export {
 	type FieldSwitch
 } from "../fields/evaluate"
 export { NO_ENTRIES, tocInstruction, tocOptions, tocRegions, type TocOptions, type TocRegion } from "../fields/toc"
-export { DOCX_CONTROL_KINDS, type DocxControlItemInput, type DocxControlKind, type FormCommand } from "./commands/forms"
+export { DOCX_CONTROL_KINDS, MAX_CONTROL_ITEM, type DocxControlItemInput, type DocxControlKind, type FormCommand } from "./commands/forms"
 export {
 	DOCX_HIGHLIGHT_COLORS,
 	DOCX_THEME_COLORS,
@@ -53,18 +53,28 @@ export {
 	type FormattingCommand
 } from "./commands/formatting"
 export type { InsertCommand } from "./commands/insert"
-export type { MathCommand } from "./commands/math"
-export type { NoteCommand } from "./commands/notes"
+export { MAX_LATEX, type MathCommand } from "./commands/math"
+export {
+	DOCX_NOTE_NUMBER_FORMATS,
+	MAX_NOTE_MARK,
+	type DocxNoteKind,
+	type DocxNoteNumberFormat,
+	type DocxNoteOptions,
+	type DocxNotePosition,
+	type DocxNoteRestart,
+	type NoteCommand
+} from "./commands/notes"
 export { DOCX_MARKUP_VIEWS, type DocxMarkupView, type ReviewCommand } from "./commands/review"
 export {
 	DOCX_PAGE_NUMBER_FORMATS,
+	type DocxLineNumberRestart,
 	type DocxOrientation,
 	type DocxPageNumberFormat,
 	type DocxPageSetup,
 	type DocxSectionBreak,
 	type SectionCommand
 } from "./commands/sections"
-export type { DocxCellVAlign, DocxTableAlign, TableCommand } from "./commands/tables"
+export { MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, type DocxCellVAlign, type DocxTableAlign, type TableCommand } from "./commands/tables"
 export type { ViewCommand } from "./commands/view"
 export {
 	DocxIds,
@@ -104,7 +114,15 @@ export {
 	type DocxImageInfo,
 	type DocxImageRefusal
 } from "../objects/images"
-export { NO_PROTECTION, commandAllowed, protectionMode, protectionOf, type DocxProtection, type DocxProtectionMode } from "./protection"
+export {
+	NO_PROTECTION,
+	commandAllowed,
+	offeredParagraphStyles,
+	protectionMode,
+	protectionOf,
+	type DocxProtection,
+	type DocxProtectionMode
+} from "./protection"
 export { NO_VALUES } from "./snapshot/formats"
 export { DOCX_COMMON_FONTS, docxFontList, type DocxFontChoice, type DocxFontKind } from "./fontList"
 export type { DocxFormatValue, DocxIndentValue, DocxLineSpacingValue, DocxParagraphSpacingValue } from "./snapshot/formats"
@@ -214,4 +232,17 @@ export {
 	type ParagraphChange,
 	type RevisionStamp
 } from "../review/track"
-export { DocxEditorSession, type DocxEditorOptions, type DocxEditorSnapshot, type DocxReadOnlyReason, type FormatState } from "./session"
+export {
+	DocxEditorSession,
+	type DocxEditorOptions,
+	type DocxEditorSnapshot,
+	type DocxReadOnlyReason,
+	type DocxRefusalReason,
+	type FormatState
+} from "./session"
+// Editor-only: equations typed as LaTeX.
+export * from "../../math/latex"
+export * from "../../math/toLatex"
+export * from "../../math/ommlWriter"
+export * from "../math/edit"
+export { datePictures, intlDatePicture, numericDatePicture } from "../fields/datePictures"

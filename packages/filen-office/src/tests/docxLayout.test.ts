@@ -1,4 +1,7 @@
+import { existsSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { setImmediate } from "node:timers/promises"
+import { unzipSync, zipSync } from "fflate"
 import { describe, expect, it } from "vitest"
 import {
 	CLIP_INTS,
@@ -16,6 +19,7 @@ import {
 	type LayoutEvent,
 	type LayoutOptions
 } from "@filen/office/core/docx"
+import { CORPUS_DIR } from "./corpusDir"
 import { STYLES_PART } from "./docxEditFixtures"
 import { buildDocx, type SyntheticDocx } from "./docxSynthetic"
 import { HmtxMeasurer, layOut, layoutDigest, loadDocx, pageLines, type LineInfo } from "./layoutFixtures"
@@ -25,6 +29,7 @@ import { wordLikeDocument } from "./wordLike"
 // (Tinos metrics: 15.33 px lines), so a page holds 56 lines.
 const SECTION =
 	'<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+const TDF131594 = join(CORPUS_DIR, "docx", "lo__tdf131594.docx")
 const LINE = 15.33
 const WORDS = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua"
 
@@ -600,6 +605,33 @@ describe("sections", () => {
 		expect(numbers.map(line => line.text)).toEqual(["5", "10"])
 		expect((numbers[0]?.x ?? 0) + (numbers[0]?.width ?? 0)).toBeCloseTo(96 - 24, 1)
 	})
+
+	it("numbers no lines for w:countBy 0, as Word, and every line without w:countBy", async () => {
+		const section = (lnNumType: string): string =>
+			`<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>${lnNumType}</w:sectPr>`
+		const none = await layout({ body: lines(4), section: section("") })
+		const zero = await layout({ body: lines(4), section: section('<w:lnNumType w:countBy="0" w:distance="360"/>') })
+		const absent = await layout({ body: lines(4), section: section('<w:lnNumType w:distance="360"/>') })
+
+		expect(pageLines(zero, 0).filter(line => line.region === Region.LINE_NUMBER)).toEqual([])
+		expect(layoutDigest(zero)).toEqual(layoutDigest(none))
+		expect(
+			pageLines(absent, 0)
+				.filter(line => line.region === Region.LINE_NUMBER)
+				.map(line => line.text)
+		).toEqual(["1", "2", "3", "4"])
+	})
+
+	it.skipIf(!existsSync(TDF131594))("lays out LibreOffice's w:countBy 0 document as one without line numbers", async () => {
+		const bytes = readFileSync(TDF131594)
+		const files = unzipSync(bytes)
+		const xml = new TextDecoder().decode(files["word/document.xml"])
+
+		expect(xml).toContain('w:countBy="0"')
+		const stripped = zipSync({ ...files, "word/document.xml": new TextEncoder().encode(xml.replace(/<w:lnNumType [^>]*\/>/g, "")) })
+
+		expect(layoutDigest(await layOut(bytes))).toEqual(layoutDigest(await layOut(stripped)))
+	})
 })
 
 describe("lists, fields and hidden text", () => {
@@ -679,7 +711,9 @@ describe("tables", () => {
 	const borders =
 		'<w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>' +
 		'<w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders>'
-	const table = (rows: string, tblPr = ""): string => `<w:tbl><w:tblPr>${borders}${tblPr}</w:tblPr>${grid}${rows}</w:tbl>`
+	// Cells without side margins (the standard's 115 twips otherwise): text lies on the grid.
+	const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>'
+	const table = (rows: string, tblPr = ""): string => `<w:tbl><w:tblPr>${borders}${tblPr}${noMargins}</w:tblPr>${grid}${rows}</w:tbl>`
 
 	it("places cells on the grid with spans and draws their borders", async () => {
 		const result = await layout({
@@ -898,6 +932,38 @@ describe("tables", () => {
 		})
 
 		expect(texts(body(result, 1))[0]).toBe("cell")
+	})
+})
+
+describe("page counts in headers and footers", () => {
+	it("lays a page out again when its footer takes another height with the page count found", async () => {
+		const big = (inner: string): string => `<w:r><w:rPr><w:sz w:val="48"/></w:rPr>${inner}</w:r>`
+		const field = (code: string): string =>
+			big('<w:fldChar w:fldCharType="begin"/>') +
+			big(`<w:instrText xml:space="preserve"> ${code} </w:instrText>`) +
+			big('<w:fldChar w:fldCharType="separate"/>') +
+			big("<w:t>1</w:t>") +
+			big('<w:fldChar w:fldCharType="end"/>')
+		// Estimated at one page, the count found takes a digit more: "Page 10 of 11" wraps, the footer grows into
+		// the body's area.
+		const result = await layout({
+			body: lines(600),
+			footers: {
+				rId20: `<w:p>${big(`<w:t xml:space="preserve">${"x".repeat(28)} Page </w:t>`)}${field("PAGE")}${big('<w:t xml:space="preserve"> of </w:t>')}${field("NUMPAGES")}</w:p>`
+			},
+			section:
+				'<w:sectPr><w:footerReference w:type="default" r:id="rId20"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+		})
+		const footers = result.pages.map((_, index) =>
+			pageLines(result, index)
+				.filter(line => line.region === Region.FOOTER)
+				.map(line => line.text)
+				.join("")
+		)
+
+		expect(result.pages.length).toBe(11)
+		expect(footers[9]).toMatch(/Page 10 of 11$/)
+		expect(footers.every((footer, index) => footer.endsWith(`Page ${String(index + 1)} of 11`))).toBe(true)
 	})
 })
 

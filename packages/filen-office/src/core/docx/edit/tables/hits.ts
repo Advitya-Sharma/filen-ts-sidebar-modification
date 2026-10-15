@@ -1,12 +1,12 @@
 import type { Node } from "prosemirror-model"
 import { LINE_FLOATS, LINE_INTS, LineFloat, LineInt } from "../../../text/index"
-import { Item } from "../../model/index"
-import { EMPTY_TABLE } from "../../props/index"
 import { GRAPHIC_FLOATS, GRAPHIC_INTS, PageGraphic, SOURCE_INTS, SourceFlag, SourceInt, type PageDisplayList } from "../../layout/index"
 import type { ObjectHit, ObjectHitProvider } from "../../paged/objects"
 import type { PagedEditor } from "../../paged/editor"
 import { docxSchema } from "../schema"
-import { propertySource, tableMap, type TableMap } from "./map"
+import { tableRightToLeft } from "../snapshot/table"
+import { tableMap, type TableMap } from "./map"
+import { minColumn, tableCellMargins } from "./margins"
 import { paddedGrid } from "./ops"
 
 // Column borders of the active story's tables, for dragging a column's width: the vertical border line a
@@ -86,20 +86,9 @@ function placedLines(editor: PagedEditor, page: PageDisplayList): PlacedLine[] {
 	return out
 }
 
-// Whether a table is laid out right to left (w:bidiVisual), as its own properties or its style say.
+// Whether a table of the active story is laid out right to left (w:bidiVisual).
 export function rightToLeft(editor: PagedEditor, table: Node): boolean {
-	const part = editor.session.story.part
-	const context = editor.session.context
-	const src = propertySource(part, table, Item.Table)
-	const direct = src >= 0 ? context.store.table(part.document, part.tables.tblPr[part.aux[src] ?? -1] ?? -1) : EMPTY_TABLE
-
-	if (direct.bidiVisual !== undefined) return direct.bidiVisual
-
-	const styleId = (table.attrs["styleId"] as string | null) ?? undefined
-	const { styleId: _source, ...rest } = direct
-
-	return context.resolver.table(styleId === direct.styleId ? direct : styleId === undefined ? rest : { ...rest, styleId }).props
-		.bidiVisual
+	return tableRightToLeft(editor.session.story.part, editor.session.context, table)
 }
 
 // The cell boundary of row `r` of `map` at x `edge`, given the x range of each cell's lines: the number of
@@ -296,3 +285,39 @@ function borderAt(editor: PagedEditor, pageIndex: number, x: number, y: number, 
 }
 
 export const TABLE_HITS: readonly ObjectHitProvider[] = [{ kind: "tableBorder", hit: borderAt }]
+
+// What dragging a column border (a "tableBorder" hit) changes: the grid column it ends (table.column.width's
+// index), the grid's widths in twips, whether the table is right to left (a drag to the right then narrows the
+// column) and the narrowest a column may get (room for its cell margins).
+export interface DocxTableBorder {
+	readonly column: number
+	readonly widths: readonly number[]
+	readonly rtl: boolean
+	readonly minTwips: number
+}
+
+const COLUMN_PART = /^column:(\d+)$/
+
+// The border of a "tableBorder" hit, or undefined when the table is gone or the hit is another kind's. Widths
+// are the grid table.column.width sizes (a row longer than w:tblGrid padded), read when a drag starts.
+export function tableBorderOf(editor: PagedEditor, hit: ObjectHit): DocxTableBorder | undefined {
+	const column = hit.kind === "tableBorder" ? COLUMN_PART.exec(hit.part ?? "")?.[1] : undefined
+	const session = column === undefined ? undefined : editor.storySession(hit.story)
+	const table = session?.state.doc.nodeAt(hit.pos)
+
+	if (session === undefined || table?.type !== nodes.table) return undefined
+
+	const index = Number(column)
+	const part = session.story.part
+	const map = tableMap(table, part, session.context.store)
+	const widths = paddedGrid(map, map.width)
+
+	if (index >= widths.length) return undefined
+
+	return {
+		column: index,
+		widths,
+		rtl: tableRightToLeft(part, session.context, table),
+		minTwips: minColumn(tableCellMargins(part, session.context, table))
+	}
+}

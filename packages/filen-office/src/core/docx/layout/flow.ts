@@ -31,7 +31,7 @@ import type { NoteNumbering } from "./notes"
 import { ObjectKind, type FloatSpec, type ObjectSizer, type ObjectTable } from "./objects"
 import { PageGraphic, Layer, OBJECT_FLOATS, OBJECT_INTS, OutputMark, PageOutput, Region, SourceFlag } from "./output"
 import { REF_SPAN, refItem, refPart, type LayoutEdits } from "./edits"
-import { borderWidth, revisionAuthors, type DecorationTable, type RunStyles } from "./styles"
+import { borderWidth, modelAuthors, type DecorationTable, type RunStyles } from "./styles"
 import { TableLayout, type TableSnapshot } from "./table"
 import { EPSILON, twips } from "./units"
 
@@ -233,7 +233,7 @@ export class Engine {
 			markers: this.markers,
 			recordMaps: init.recordMaps ?? false,
 			memoKey: (part, item) => this.memoKey(part, item),
-			authors: revisionAuthors(init.model).index
+			authors: modelAuthors(init.model).index
 		})
 	}
 

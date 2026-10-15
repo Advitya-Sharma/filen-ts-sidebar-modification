@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react"
+import { useState, useSyncExternalStore, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import {
 	AlignCenterIcon,
@@ -22,30 +22,45 @@ import {
 	type LucideIcon
 } from "lucide-react"
 import {
-	DOCX_PARAGRAPH_STYLE_MENU,
 	parseDocxEditorCommand,
 	type DocxEditorCommand,
 	type DocxEditorCommandInfo,
 	type DocxEditorSnapshot,
+	type DocxFontChoice,
 	type DocxParagraphStyle,
 	type LockReason
 } from "@filen/office/core/docx/edit"
 import { DOCX_MARKUP_MODES, type DocxMarkupMode } from "@filen/office/dom/docx"
 import { cn } from "@filen/shared"
 import {
+	COMMAND_LABELS,
+	LINE_SPACINGS,
 	commandActive,
+	featureCommands,
+	keepFocus,
 	lockReasonKey,
 	rowCommands,
 	shortcutKeys,
 	slotCommands,
 	styleLabel,
 	toolbarFit,
+	drawingItems,
+	single,
+	KEPT_FORMAT_BUTTONS,
+	slotsWidth,
+	type DocxInputRequest,
+	type DocxPainterState,
+	type DocxRequestInput,
+	type DocxSurface,
+	type DocxSwatch,
 	type DocxToolbarCommand,
 	type DocxToolbarSlotProps
 } from "@/features/preview/components/docxEditor.logic"
+import { DocxDrawingMenu, DocxDrawingOverflow } from "@/features/preview/components/docxDrawingMenu"
 import { DocxFormatControls } from "@/features/preview/components/docxFormatControls"
 import { DocxInsertMenu } from "@/features/preview/components/docxInsertMenu"
-import { DocxReflowToggle } from "@/features/preview/components/docxReflowSurface"
+import { DocxReflowMenuItem } from "@/features/preview/components/docxReflowSurface"
+import { reflowCommands } from "@/features/preview/components/docxReflow.logic"
 import { DocxReviewMenu } from "@/features/preview/components/docxReviewMenu"
 import { DocxTableMenu } from "@/features/preview/components/docxTableMenu"
 import { MARKUP_LABELS, type DocxFindControls, type DocxViewOnlyReason } from "@/features/preview/components/docxViewer.logic"
@@ -73,10 +88,11 @@ import { Kbd, KbdKeys } from "@/lib/keymap/kbd"
 import { useElementSize } from "@/lib/useElementSize"
 
 // The DOCX editor's toolbar: one compact row in the spreadsheet toolbar's style (undo and redo, paragraph
-// style, character formatting, alignment, lists), groups that do not fit moved into the ⋯ menu with the
-// editor's options (find and replace, markup, zoom, autosave). Mod+F swaps the row for the find field.
+// style, character formatting, font and colours, alignment, lists), groups that do not fit moved into the ⋯
+// menu with the editor's options (find and replace, line spacing, the Paragraph and Page setup dialogs, field
+// codes, markup, zoom, autosave). Mod+F swaps the row for the find field.
 // Everything shown comes from the editing session's snapshot; everything done is one of its commands. A
-// feature's commands appear through its slot (insert, format, table, review, view) once they are labelled.
+// feature's commands appear through its slot (insert, format, table, picture, review, view) once they are labelled.
 
 const ICONS: Readonly<Record<string, LucideIcon>> = {
 	bold: BoldIcon,
@@ -107,6 +123,12 @@ const FORMAT_SLOT = slotCommands("format")
 const TABLE_SLOT = slotCommands("table")
 const REVIEW_SLOT = slotCommands("review")
 const VIEW_SLOT = slotCommands("view")
+// The contextual Picture group's.
+const DRAWING_GROUP = featureCommands("drawings")
+// The ⋯ menu's paragraph spacing and indents (the Paragraph dialog takes paragraph.indent's input).
+const LINE_SPACING = COMMAND_LABELS["paragraph.lineSpacing"] !== undefined
+const PARAGRAPH_DIALOG = COMMAND_LABELS["paragraph.indent"] !== undefined || COMMAND_LABELS["paragraph.spacing"] !== undefined
+const PAGE_SETUP = COMMAND_LABELS["page.setup"] !== undefined
 
 export interface DocxEditToolbarProps {
 	snapshot: DocxEditorSnapshot | undefined
@@ -127,6 +149,37 @@ export interface DocxEditToolbarProps {
 	// The reflowed (mobile) view instead of pages.
 	reflow: boolean
 	onReflowChange: (reflow: boolean) => void
+	surface: DocxSurface
+	// The paragraph styles the picker offers (offeredParagraphStyles), the document's fonts and the theme part
+	// of the colour pickers: the same for the editor's lifetime.
+	styles: readonly DocxParagraphStyle[]
+	fonts: readonly DocxFontChoice[]
+	theme: readonly (readonly DocxSwatch[])[]
+	painter: DocxPainterState
+	onPainterCancel: () => void
+	// Every field shows its code (view.fieldCodes).
+	fieldCodes: boolean
+	// The input request channel the slots take part in (docxEditor.logic.ts DocxInputRequest).
+	inputRequest: DocxInputRequest | null
+	requestInput: DocxRequestInput
+	onInputDone: (nonce: number) => void
+}
+
+// The slot menus show their names from this window width (their labels' `md` breakpoint) on.
+const SLOT_LABELS_QUERY = "(min-width: 48rem)"
+
+function subscribeSlotLabels(change: () => void): () => void {
+	const query = window.matchMedia(SLOT_LABELS_QUERY)
+
+	query.addEventListener("change", change)
+
+	return () => {
+		query.removeEventListener("change", change)
+	}
+}
+
+function slotLabelsShown(): boolean {
+	return window.matchMedia(SLOT_LABELS_QUERY).matches
 }
 
 function Divider() {
@@ -145,11 +198,6 @@ function run(info: DocxEditorCommandInfo, execute: (command: DocxEditorCommand) 
 	if (command !== undefined) {
 		execute(command)
 	}
-}
-
-// Keeps focus where it was (the document): a pressed toolbar button never takes it.
-function keepFocus(event: { preventDefault: () => void }): void {
-	event.preventDefault()
 }
 
 // Whether a toolbar command is off: no session yet, a write while read-only, or the session says so.
@@ -198,11 +246,13 @@ const STYLE_MIXED = "mixed"
 const STYLE_CUSTOM = "custom"
 
 function StylePicker({
+	styles,
 	style,
 	styleName,
 	disabled,
 	execute
 }: {
+	styles: readonly DocxParagraphStyle[]
 	style: DocxEditorSnapshot["paragraph"]["style"]
 	styleName: string
 	disabled: boolean
@@ -215,22 +265,25 @@ function StylePicker({
 
 		return label.key === "previewDocxStyleHeading" ? t(label.key, { level: label.level }) : t(label.key)
 	}
+	// A style the document's protection locks shows as the selection's own, not as an offer.
+	const offered = styles.includes(value as DocxParagraphStyle)
+	const shown = offered || value === STYLE_MIXED ? value : STYLE_CUSTOM
 	const items = [
-		...DOCX_PARAGRAPH_STYLE_MENU.map(option => ({ value: option.style, label: labelOf(option.style) })),
-		{ value: STYLE_CUSTOM, label: styleName },
+		...styles.map(option => ({ value: option, label: labelOf(option) })),
+		{ value: STYLE_CUSTOM, label: value === STYLE_CUSTOM ? styleName : labelOf(value as DocxParagraphStyle) },
 		{ value: STYLE_MIXED, label: t("previewDocxStyleMixed") }
 	]
 
 	return (
 		<Select
 			items={items}
-			value={value}
+			value={shown}
 			disabled={disabled}
 			onValueChange={next => {
-				const chosen = DOCX_PARAGRAPH_STYLE_MENU.find(option => option.style === next)
+				const chosen = styles.find(option => option === next)
 
 				if (chosen !== undefined) {
-					execute({ type: "style.set", style: chosen.style })
+					execute({ type: "style.set", style: chosen })
 				}
 			}}
 		>
@@ -243,16 +296,18 @@ function StylePicker({
 			</SelectTrigger>
 			<SelectContent data-preview-surface>
 				<SelectGroup>
-					{DOCX_PARAGRAPH_STYLE_MENU.map(option => (
+					{styles.map(option => (
 						<SelectItem
-							key={option.style}
-							value={option.style}
+							key={option}
+							value={option}
 						>
-							{labelOf(option.style)}
+							{labelOf(option)}
 						</SelectItem>
 					))}
-					{value === STYLE_CUSTOM ? <SelectItem value={STYLE_CUSTOM}>{styleName}</SelectItem> : null}
-					{value === STYLE_MIXED ? <SelectItem value={STYLE_MIXED}>{t("previewDocxStyleMixed")}</SelectItem> : null}
+					{shown === STYLE_CUSTOM ? (
+						<SelectItem value={STYLE_CUSTOM}>{items.find(item => item.value === STYLE_CUSTOM)?.label}</SelectItem>
+					) : null}
+					{shown === STYLE_MIXED ? <SelectItem value={STYLE_MIXED}>{t("previewDocxStyleMixed")}</SelectItem> : null}
 				</SelectGroup>
 			</SelectContent>
 		</Select>
@@ -308,6 +363,7 @@ function OverflowCommands({
 					<DropdownMenuCheckboxItem
 						key={info.type}
 						checked
+						closeOnClick
 						disabled={disabled}
 						onClick={() => {
 							run(info, execute)
@@ -338,12 +394,44 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 	const { snapshot, readOnly, apple, execute, find } = props
 	const [row, setRow] = useState<HTMLDivElement | null>(null)
 	const { width } = useElementSize(row)
+	const slotLabels = useSyncExternalStore(subscribeSlotLabels, slotLabelsShown)
 	const locked = snapshot?.selection.locked ?? null
-	// Badges take room from the groups.
-	const fit = toolbarFit(width, (props.viewOnly.length > 0 ? 100 : 0) + (locked === null ? 0 : 120) + (props.markup === null ? 0 : 40))
+	const pictureItems = DRAWING_GROUP.length > 0 && snapshot?.context.drawing != null ? drawingItems(DRAWING_GROUP, props.surface) : []
+	// Badges, the markup menu (the Review menu holds it once offered) and the slots take room from the groups.
+	const fit = toolbarFit(
+		width,
+		(props.viewOnly.length > 0 ? 100 : 0) +
+			(locked === null ? 0 : 120) +
+			(props.markup === null || REVIEW_SLOT.length > 0 ? 0 : 40) +
+			slotsWidth(
+				{
+					insert: INSERT_SLOT.length > 0,
+					review: REVIEW_SLOT.length > 0,
+					table: TABLE_SLOT.length > 0 && snapshot?.context.table != null
+				},
+				slotLabels
+			),
+		FORMAT_SLOT.length > 0,
+		FORMAT.length - KEPT_FORMAT_BUTTONS,
+		pictureItems.length
+	)
+	const formatShown = KEPT_FORMAT_BUTTONS + fit.format
+	const lineSpacing = single(snapshot?.values.lineSpacing ?? null)
 	const percent = Math.round(props.zoom * 100)
 	const commandProps = { snapshot, readOnly, execute }
-	const slotProps = (commands: readonly DocxToolbarCommand[]): DocxToolbarSlotProps => ({ commands, snapshot, readOnly, apple, execute })
+	const commandOff = (type: DocxEditorCommandInfo["type"]): boolean => snapshot === undefined || readOnly || !snapshot.enabled[type]
+	const slotProps = (commands: readonly DocxToolbarCommand[]): DocxToolbarSlotProps => ({
+		// Mobile view shows no headers or footers: it does not offer editing them.
+		commands: reflowCommands(commands, props.surface === "reflow"),
+		snapshot,
+		readOnly,
+		apple,
+		execute,
+		surface: props.surface,
+		inputRequest: props.inputRequest,
+		requestInput: props.requestInput,
+		onInputDone: props.onInputDone
+	})
 	const button = (command: DocxToolbarCommand): ReactNode => (
 		<CommandButton
 			key={command.info.type}
@@ -370,87 +458,109 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 			ref={setRow}
 			role="toolbar"
 			aria-label={t("previewDocxEditToolbar")}
-			className="flex h-10 shrink-0 items-center gap-0.5 overflow-hidden border-b border-border px-2"
+			className="flex h-10 shrink-0 items-center gap-0.5 border-b border-border px-2"
 		>
-			{find.open ? (
-				<>
-					{badges}
-					<div className="flex min-w-0 flex-1 justify-center">
-						<DocxFindField
-							key={find.replace ? "replace" : "find"}
-							find={find.controls}
-							focus={find.focus}
-							onClosed={props.onFindClosed}
-							replaceOpen={find.replace}
-						/>
-					</div>
-				</>
-			) : (
-				<>
-					{HISTORY.map(button)}
-					{fit.style ? (
-						<>
-							<Divider />
-							<StylePicker
-								style={snapshot?.paragraph.style ?? null}
-								styleName={snapshot?.paragraph.styleName ?? ""}
-								disabled={snapshot === undefined || readOnly || !snapshot.enabled["style.set"]}
-								execute={execute}
+			{/* The groups, fitted to the row (toolbarFit); what still does not fit (badges, a Picture group on a
+			phone) scrolls here, never pushing the ⋯ menu out of the row. */}
+			<div className="-mx-1 flex min-w-0 flex-1 [scrollbar-width:none] items-center gap-0.5 self-stretch overflow-x-auto px-1 [&::-webkit-scrollbar]:hidden">
+				{find.open ? (
+					<>
+						{badges}
+						<div className="flex min-w-0 flex-1 justify-center">
+							<DocxFindField
+								key={find.replace ? "replace" : "find"}
+								find={find.controls}
+								focus={find.focus}
+								onClosed={props.onFindClosed}
+								replaceOpen={find.replace}
 							/>
-						</>
-					) : null}
-					<Divider />
-					{FORMAT.map(button)}
-					{fit.clear ? CLEAR.map(button) : null}
-					{fit.align ? (
-						<>
-							<Divider />
-							{ALIGN.map(button)}
-						</>
-					) : null}
-					{fit.lists ? (
-						<>
-							<Divider />
-							{LISTS.map(button)}
-						</>
-					) : null}
-					{FORMAT_SLOT.length > 0 ? <DocxFormatControls {...slotProps(FORMAT_SLOT)} /> : null}
-					{INSERT_SLOT.length > 0 ? <DocxInsertMenu {...slotProps(INSERT_SLOT)} /> : null}
-					{TABLE_SLOT.length > 0 && snapshot?.context.table != null ? <DocxTableMenu {...slotProps(TABLE_SLOT)} /> : null}
-					<div className="min-w-0 flex-1" />
-					{badges}
-					{REVIEW_SLOT.length > 0 ? (
-						<DocxReviewMenu
-							{...slotProps(REVIEW_SLOT)}
-							markup={props.markup}
-							onMarkupChange={props.onMarkupChange}
-						/>
-					) : null}
-					{VIEW_SLOT.length > 0 ? (
-						<DocxReflowToggle
-							{...slotProps(VIEW_SLOT)}
-							reflow={props.reflow}
-							onReflowChange={props.onReflowChange}
-						/>
-					) : null}
-					{props.markup === null || REVIEW_SLOT.length > 0 ? null : (
-						<MarkupMenu
-							mode={props.markup}
-							onChange={props.onMarkupChange}
-						/>
-					)}
-					<TooltipIconButton
-						label={t("previewDocxFindAction")}
-						shortcut={<Kbd action="editor.find" />}
-						onMouseDown={keepFocus}
-						onClick={() => {
-							props.onFindOpen(false)
-						}}
-					>
-						<SearchIcon />
-					</TooltipIconButton>
-				</>
-			)}
+						</div>
+					</>
+				) : (
+					<>
+						{HISTORY.map(button)}
+						{fit.style ? (
+							<>
+								<Divider />
+								<StylePicker
+									styles={props.styles}
+									style={snapshot?.paragraph.style ?? null}
+									styleName={snapshot?.paragraph.styleName ?? ""}
+									disabled={snapshot === undefined || readOnly || !snapshot.enabled["style.set"]}
+									execute={execute}
+								/>
+							</>
+						) : null}
+						<Divider />
+						{FORMAT.slice(0, formatShown).map(button)}
+						{fit.clear ? CLEAR.map(button) : null}
+						{fit.align ? (
+							<>
+								<Divider />
+								{ALIGN.map(button)}
+							</>
+						) : null}
+						{fit.lists ? (
+							<>
+								<Divider />
+								{LISTS.map(button)}
+							</>
+						) : null}
+						{FORMAT_SLOT.length > 0 ? (
+							<DocxFormatControls
+								{...slotProps(FORMAT_SLOT)}
+								fonts={props.fonts}
+								theme={props.theme}
+								painter={props.painter}
+								onPainterCancel={props.onPainterCancel}
+								showFont={fit.font}
+								showColor={fit.color}
+								showPainter={fit.painter}
+							/>
+						) : null}
+						{INSERT_SLOT.length > 0 ? <DocxInsertMenu {...slotProps(INSERT_SLOT)} /> : null}
+						{TABLE_SLOT.length > 0 && snapshot?.context.table != null ? (
+							<DocxTableMenu
+								{...slotProps(TABLE_SLOT)}
+								theme={props.theme}
+							/>
+						) : null}
+						{DRAWING_GROUP.length > 0 && snapshot?.context.drawing != null ? (
+							<DocxDrawingMenu
+								{...slotProps(DRAWING_GROUP)}
+								items={pictureItems.slice(0, fit.picture)}
+							/>
+						) : null}
+						<div className="min-w-0 flex-1" />
+						{badges}
+						{REVIEW_SLOT.length > 0 ? (
+							<DocxReviewMenu
+								{...slotProps(REVIEW_SLOT)}
+								markup={props.markup}
+								onMarkupChange={props.onMarkupChange}
+							/>
+						) : null}
+						{props.markup === null || REVIEW_SLOT.length > 0 ? null : (
+							<MarkupMenu
+								mode={props.markup}
+								onChange={props.onMarkupChange}
+							/>
+						)}
+						{fit.find ? (
+							<TooltipIconButton
+								label={t("previewDocxFindAction")}
+								shortcut={<Kbd action="editor.find" />}
+								onMouseDown={keepFocus}
+								onClick={() => {
+									props.onFindOpen(false)
+								}}
+							>
+								<SearchIcon />
+							</TooltipIconButton>
+						) : null}
+					</>
+				)}
+			</div>
 			<DropdownMenu>
 				<Tooltip>
 					<TooltipTrigger
@@ -475,6 +585,12 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 					align="end"
 					data-preview-surface
 				>
+					{!find.open && fit.picture < pictureItems.length ? (
+						<DocxDrawingOverflow
+							{...slotProps(DRAWING_GROUP)}
+							items={pictureItems.slice(fit.picture)}
+						/>
+					) : null}
 					{!find.open && !fit.style ? (
 						<DropdownMenuSub>
 							<DropdownMenuSubTrigger disabled={snapshot === undefined || readOnly || !snapshot.enabled["style.set"]}>
@@ -487,13 +603,13 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 										execute({ type: "style.set", style })
 									}}
 								>
-									{DOCX_PARAGRAPH_STYLE_MENU.map(option => {
-										const label = styleLabel(option.style)
+									{props.styles.map(option => {
+										const label = styleLabel(option)
 
 										return (
 											<DropdownMenuRadioItem
-												key={option.style}
-												value={option.style}
+												key={option}
+												value={option}
 												closeOnClick
 											>
 												{label.key === "previewDocxStyleHeading"
@@ -505,6 +621,12 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 								</DropdownMenuRadioGroup>
 							</DropdownMenuSubContent>
 						</DropdownMenuSub>
+					) : null}
+					{!find.open && formatShown < FORMAT.length ? (
+						<OverflowCommands
+							commands={FORMAT.slice(formatShown)}
+							{...commandProps}
+						/>
 					) : null}
 					{!find.open && !fit.clear ? (
 						<OverflowCommands
@@ -524,7 +646,18 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 							{...commandProps}
 						/>
 					) : null}
-					{!find.open && !(fit.style && fit.clear && fit.align && fit.lists) ? <DropdownMenuSeparator /> : null}
+					{!find.open && !(fit.style && fit.clear && fit.align && fit.lists && formatShown === FORMAT.length) ? (
+						<DropdownMenuSeparator />
+					) : null}
+					{fit.find ? null : (
+						<DropdownMenuItem
+							onClick={() => {
+								props.onFindOpen(false)
+							}}
+						>
+							{t("previewDocxFindAction")}
+						</DropdownMenuItem>
+					)}
 					<DropdownMenuItem
 						onClick={() => {
 							props.onFindOpen(true)
@@ -532,6 +665,64 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 					>
 						{t("previewDocxFindReplaceAction")}
 					</DropdownMenuItem>
+					{LINE_SPACING ? (
+						<DropdownMenuSub>
+							<DropdownMenuSubTrigger disabled={commandOff("paragraph.lineSpacing")}>
+								{t("previewDocxLineSpacing")}
+							</DropdownMenuSubTrigger>
+							<DropdownMenuSubContent>
+								<DropdownMenuRadioGroup
+									value={lineSpacing?.rule === "auto" ? String(lineSpacing.value) : ""}
+									onValueChange={(value: string) => {
+										execute({ type: "paragraph.lineSpacing", rule: "auto", value: Number(value) })
+									}}
+								>
+									{LINE_SPACINGS.map(value => (
+										<DropdownMenuRadioItem
+											key={value}
+											value={String(value)}
+											closeOnClick
+										>
+											{t("previewDocxLineSpacingValue", {
+												value: value / 240,
+												formatParams: { value: { minimumFractionDigits: 1 } }
+											})}
+										</DropdownMenuRadioItem>
+									))}
+								</DropdownMenuRadioGroup>
+							</DropdownMenuSubContent>
+						</DropdownMenuSub>
+					) : null}
+					{PARAGRAPH_DIALOG ? (
+						<DropdownMenuItem
+							disabled={commandOff("paragraph.indent") && commandOff("paragraph.spacing")}
+							onClick={() => {
+								props.requestInput("paragraph.indent")
+							}}
+						>
+							{t("previewDocxParagraphAction")}
+						</DropdownMenuItem>
+					) : null}
+					{PAGE_SETUP ? (
+						<DropdownMenuItem
+							disabled={commandOff("page.setup")}
+							onClick={() => {
+								props.requestInput("page.setup")
+							}}
+						>
+							{t("previewDocxPageSetupAction")}
+						</DropdownMenuItem>
+					) : null}
+					<DropdownMenuCheckboxItem
+						closeOnClick
+						checked={props.fieldCodes}
+						disabled={snapshot?.enabled["view.fieldCodes"] !== true}
+						onCheckedChange={() => {
+							execute({ type: "view.fieldCodes" })
+						}}
+					>
+						{t("previewDocxShowFieldCodes")}
+					</DropdownMenuCheckboxItem>
 					{props.markup === null || !find.open ? null : (
 						<DropdownMenuSub>
 							<DropdownMenuSubTrigger>{t("previewDocxMarkup")}</DropdownMenuSubTrigger>
@@ -583,8 +774,16 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 							</DropdownMenuItem>
 						</DropdownMenuSubContent>
 					</DropdownMenuSub>
+					{VIEW_SLOT.length > 0 ? (
+						<DocxReflowMenuItem
+							{...slotProps(VIEW_SLOT)}
+							reflow={props.reflow}
+							onReflowChange={props.onReflowChange}
+						/>
+					) : null}
 					<DropdownMenuSeparator />
 					<DropdownMenuCheckboxItem
+						closeOnClick
 						checked={props.autosave}
 						onCheckedChange={checked => {
 							props.onAutosaveChange(checked)
@@ -594,25 +793,27 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 					</DropdownMenuCheckboxItem>
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<Tooltip>
-				<TooltipTrigger
-					render={
-						<Button
-							variant="ghost"
-							size="xs"
-							aria-label={t("previewDocxFitWidthAction", { percent })}
-							className="w-12 shrink-0 px-0 text-muted-foreground tabular-nums max-sm:hidden"
-							onMouseDown={keepFocus}
-							onClick={() => {
-								props.onZoom("fit")
-							}}
-						>
-							{t("previewDocxZoomIndicator", { percent })}
-						</Button>
-					}
-				/>
-				<TooltipContent>{t("previewDocxFitWidth")}</TooltipContent>
-			</Tooltip>
+			{fit.zoom ? (
+				<Tooltip>
+					<TooltipTrigger
+						render={
+							<Button
+								variant="ghost"
+								size="xs"
+								aria-label={t("previewDocxFitWidthAction", { percent })}
+								className="w-12 shrink-0 px-0 text-muted-foreground tabular-nums"
+								onMouseDown={keepFocus}
+								onClick={() => {
+									props.onZoom("fit")
+								}}
+							>
+								{t("previewDocxZoomIndicator", { percent })}
+							</Button>
+						}
+					/>
+					<TooltipContent>{t("previewDocxFitWidth")}</TooltipContent>
+				</Tooltip>
+			) : null}
 		</div>
 	)
 }

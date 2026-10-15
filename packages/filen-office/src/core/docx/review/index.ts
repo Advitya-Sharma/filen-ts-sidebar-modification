@@ -4,6 +4,8 @@ import { DocAttrStep, ReplaceAroundStep, ReplaceStep } from "prosemirror-transfo
 import { changedRanges } from "../edit/invariants/core"
 import { docxSchema, survivorsOf, type MarkerList } from "../edit/schema"
 import { fieldUpdateOf } from "../fields/evaluate"
+import { equationChanges } from "../math/edit"
+import type { StoryPart } from "../model/index"
 
 // Where a story's comments and tracked changes are, kept up to date edit by edit: positions are mapped
 // through each transaction and only the paragraphs it changed are read again (as spelling does), so no
@@ -136,11 +138,15 @@ export class ReviewIndex {
 	private readonly comments = new Map<string, number>()
 	private readonly revisions = new Map<string, number>()
 	private versionValue = 0
+	// Bumped only when a comment's entry was read again (see commentVersion).
+	private commentVersionValue = 0
 	private doc: Node
 	// Source paragraphs whose properties hold a tracked change (see attachSources).
 	private sources: ReadonlySet<number> | undefined = undefined
 	// Source section changes counted under another id (see attachSources).
 	private links: ReadonlyMap<number, string> | undefined = undefined
+	// The story's part: the tracked changes inside its source equations (see attachSources).
+	private part: StoryPart | undefined = undefined
 	private commentList: { readonly version: number; readonly count: number; readonly list: Int32Array } = {
 		version: -1,
 		count: 0,
@@ -161,13 +167,15 @@ export class ReviewIndex {
 
 	// Counts the source paragraphs whose own w:pPrChange (item ids in `sources`) is a change too: the
 	// document is read once more. `links`: source section changes (by item) counted as part of another change.
-	attachSources(sources: ReadonlySet<number>, links?: ReadonlyMap<number, string>): void {
+	// `part`: the story's, for the tracked changes inside its equations (`equations`: it has some).
+	attachSources(sources: ReadonlySet<number>, links?: ReadonlyMap<number, string>, part?: StoryPart, equations = false): void {
 		if (this.sources !== undefined) return
 
 		this.sources = sources
 		this.links = links
+		this.part = part
 
-		if (sources.size === 0) return
+		if (sources.size === 0 && !equations) return
 
 		const found = new Found()
 
@@ -176,14 +184,21 @@ export class ReviewIndex {
 		this.count = 0
 		this.ids.length = 0
 		this.keys.length = 0
-		scan(this.doc, 0, this.doc.content.size, found, sources, links)
+		scan(this.doc, 0, this.doc.content.size, found, sources, links, part)
 		this.insert(0, found)
 		this.versionValue++
+		this.commentVersionValue++
 	}
 
 	// Changes with every transaction that changed an entry.
 	get version(): number {
 		return this.versionValue
+	}
+
+	// Changes with every transaction that changed a comment's entry (not when only tracked changes did, as each
+	// keystroke typed while tracking does): what the comments read from the index is the same until then.
+	get commentVersion(): number {
+		return this.commentVersionValue
 	}
 
 	get size(): number {
@@ -337,12 +352,21 @@ export class ReviewIndex {
 		// Entries wholly before the first change neither move nor are read again: the first one that may, by
 		// binary search (entries before a changed paragraph end before it; see changedRegions).
 		let first = regions[0] ?? doc.content.size + 1
+		// An edit of one range (a keystroke): positions past it move by the same amount, mapped by adding that.
+		let ranges = 0
+		let past = 0
+		let shift = 0
 
 		for (const map of mapping.maps) {
-			map.forEach(oldStart => {
+			map.forEach((oldStart, oldEnd, newStart, newEnd) => {
 				first = Math.min(first, oldStart)
+				ranges++
+				past = oldEnd
+				shift = newEnd - newStart - (oldEnd - oldStart)
 			})
 		}
+
+		if (ranges !== 1) past = Infinity
 
 		let kept = this.lowerBound(first)
 
@@ -353,11 +377,14 @@ export class ReviewIndex {
 		// Entries outside the changed paragraphs move with the edit; those inside are read again. Entries and
 		// regions are both in document order: one walk.
 		let changed = false
+		let comments = false
 		let region = 0
 
 		for (let index = start; index < this.count; index++) {
-			const from = mapping.map(this.from[index] ?? 0, 1)
-			const to = Math.max(from, mapping.map(this.to[index] ?? 0, -1))
+			const oldFrom = this.from[index] ?? 0
+			const oldTo = this.to[index] ?? 0
+			const from = oldFrom > past ? oldFrom + shift : mapping.map(oldFrom, 1)
+			const to = Math.max(from, oldTo > past ? oldTo + shift : mapping.map(oldTo, -1))
 			const end = Math.max(to, from + 1)
 			let inside = false
 
@@ -366,6 +393,8 @@ export class ReviewIndex {
 			for (let k = region; k < regions.length && (regions[k] ?? 0) < end && !inside; k += 2) inside = from < (regions[k + 1] ?? 0)
 
 			if (inside) {
+				if (isComment(this.kinds[index] ?? 0)) comments = true
+
 				this.forget(index)
 				changed = true
 
@@ -389,15 +418,17 @@ export class ReviewIndex {
 			const end = regions[k + 1] ?? 0
 			const found = new Found()
 
-			scan(doc, start, end, found, this.sources, this.links)
+			scan(doc, start, end, found, this.sources, this.links, this.part)
 
 			if (found.from.length === 0) continue
 
 			changed = true
+			comments ||= found.kinds.some(isComment)
 			this.insert(this.lowerBound(start), found)
 		}
 
 		if (changed) this.versionValue++
+		if (comments) this.commentVersionValue++
 	}
 
 	// ---- internals --------------------------------------------------------------------------------------
@@ -448,10 +479,20 @@ export class ReviewIndex {
 		this.from.copyWithin(at + added, at, this.count)
 		this.to.copyWithin(at + added, at, this.count)
 		this.kinds.copyWithin(at + added, at, this.count)
-		// Not splice(at, 0, ...list): a long list overflows the call stack as arguments.
-		this.ids = at === this.count ? this.ids.concat(found.ids) : this.ids.slice(0, at).concat(found.ids, this.ids.slice(at))
+		// Moved up in place, from the end (no list made per insertion; splice(at, 0, ...list) would overflow the
+		// call stack as arguments for a long one).
+		const ids = this.ids
+		const keys = this.keys
 
-		const keys: string[] = []
+		for (let k = 0; k < added; k++) {
+			ids.push("")
+			keys.push("")
+		}
+
+		for (let k = this.count - 1; k >= at; k--) {
+			ids[k + added] = ids[k] ?? ""
+			keys[k + added] = keys[k] ?? ""
+		}
 
 		for (let k = 0; k < added; k++) {
 			const kind = found.kinds[k] ?? 0
@@ -463,15 +504,14 @@ export class ReviewIndex {
 					? `${String(kind)}:anonymous${String(++this.serial)}`
 					: `${String(kind)}:${id}`
 
-			keys.push(key)
-
+			ids[at + k] = id
+			keys[at + k] = key
 			this.from[at + k] = found.from[k] ?? 0
 			this.to[at + k] = found.to[k] ?? 0
 			this.kinds[at + k] = kind
 			map.set(key, (map.get(key) ?? 0) + 1)
 		}
 
-		this.keys = at === this.count ? this.keys.concat(keys) : this.keys.slice(0, at).concat(keys, this.keys.slice(at))
 		this.count = size
 	}
 }
@@ -597,7 +637,15 @@ function propertyChange(node: Node, sources: ReadonlySet<number> | undefined): b
 }
 
 // Entries in [from, to) of `doc`, in document order (block-level ones only where they sit inside it).
-function scan(doc: Node, from: number, to: number, found: Found, sources?: ReadonlySet<number>, links?: ReadonlyMap<number, string>): void {
+function scan(
+	doc: Node,
+	from: number,
+	to: number,
+	found: Found,
+	sources?: ReadonlySet<number>,
+	links?: ReadonlyMap<number, string>,
+	part?: StoryPart
+): void {
 	const within = (pos: number): boolean => pos >= from && pos < to
 	const visit = (node: Node, pos: number): void => {
 		if (node.isInline) {
@@ -614,6 +662,11 @@ function scan(doc: Node, from: number, to: number, found: Found, sources?: Reado
 			const update = node.type === nodes.field ? fieldUpdateOf(node) : null
 
 			if (update !== null) found.add(pos, pos + node.nodeSize, ReviewKind.FIELD_UPDATE, update.id)
+
+			// Tracked changes inside an equation (Word's revisions of its runs and objects), by kind, author and date.
+			if (node.type === nodes.math)
+				for (const change of equationChanges(node, part))
+					found.add(pos, pos + node.nodeSize, change.kind === "ins" ? ReviewKind.INSERTION : ReviewKind.DELETION, change.id)
 
 			return
 		}

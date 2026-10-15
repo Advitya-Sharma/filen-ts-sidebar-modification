@@ -488,6 +488,8 @@ class Paginator {
 	private readonly body: StoryPart | undefined
 	private bodyStory: StoryContext | undefined
 	private readonly compat: LayoutCompat
+	// `compat` with mirror margins as edited (made when they differ).
+	private editedCompat: LayoutCompat | undefined = undefined
 	private readonly maxPages: number
 	private readonly page = new PageOutput()
 	private readonly header = new PageOutput()
@@ -1028,8 +1030,8 @@ class Paginator {
 
 			this.startSection(index)
 			this.balanceStart = undefined
-			this.geometry = pageGeometry(next, this.compat, this.frame.odd)
-			this.pageParity ||= mirrored(next, this.compat)
+			this.geometry = pageGeometry(next, this.pageCompat(), this.frame.odd)
+			this.pageParity ||= mirrored(next, this.pageCompat())
 			this.engine.gridPitch = this.geometry.gridPitch
 			this.sectionTop = this.contentBottom
 			this.column = 0
@@ -1308,7 +1310,7 @@ class Paginator {
 		this.pageKeep = this.flows[this.flowIndex]?.keepBack ?? 0
 
 		const odd = number % 2 !== 0
-		const geometry = pageGeometry(section, this.compat, odd)
+		const geometry = pageGeometry(section, this.pageCompat(), odd)
 
 		this.geometry = geometry
 		this.openGeometry = geometry
@@ -1337,7 +1339,7 @@ class Paginator {
 		this.pageProps = section
 
 		// Their font is asked for before the page's text: it is loaded before the page is done.
-		if (section.lineNumbering !== undefined) this.lineNumberStyle()
+		if (shownLineNumbers(section.lineNumbering) !== undefined) this.lineNumberStyle()
 
 		this.anchor = this.anchorHere()
 
@@ -1350,7 +1352,7 @@ class Paginator {
 		this.pageParity =
 			section.type === "oddPage" ||
 			section.type === "evenPage" ||
-			mirrored(section, this.compat) ||
+			mirrored(section, this.pageCompat()) ||
 			(sectionInfo !== undefined &&
 				(this.headerFooter(sectionInfo.effectiveHeaders, !odd) !== this.headerStory ||
 					this.headerFooter(sectionInfo.effectiveFooters, !odd) !== this.footerStory))
@@ -1567,6 +1569,17 @@ class Paginator {
 
 	// Line numbers in the margin (w:lnNumType), counting body lines outside tables.
 	// Line numbers' style (w:lnNumType draws them in the LineNumber character style).
+	// The compatibility settings pages are laid out with: mirror margins as edited.
+	private pageCompat(): LayoutCompat {
+		const mirror = this.engine.edits?.mirrorMargins
+
+		if (mirror === undefined || mirror === this.compat.mirrorMargins) return this.compat
+
+		if (this.editedCompat?.mirrorMargins !== mirror) this.editedCompat = { ...this.compat, mirrorMargins: mirror }
+
+		return this.editedCompat
+	}
+
 	private lineNumberStyle(): number {
 		const engine = this.engine
 
@@ -1574,7 +1587,7 @@ class Paginator {
 	}
 
 	private lineNumbers(page: PageOutput): void {
-		const numbering = this.pageProps.lineNumbering
+		const numbering = shownLineNumbers(this.pageProps.lineNumbering)
 		const geometry = this.geometry
 
 		if (numbering === undefined || geometry === undefined || this.body === undefined) return
@@ -1719,10 +1732,12 @@ class Paginator {
 	}
 
 	// Page count fields: pages whose headers or footers used the estimate are laid out again, or with `lazy`
-	// marked stale for refresh().
-	finish(lazy = false): void {
+	// marked stale for refresh(). The first page that needs more than its header and footer (they changed
+	// height, or its body shows the counts), or -1: layout runs again from there.
+	finish(lazy = false): number {
 		const layout = this.layout
 		const total = layout.pages.length
+		let first = -1
 
 		this.resyncs = undefined
 
@@ -1734,8 +1749,10 @@ class Paginator {
 			if (entry.values.numPages === total && entry.values.sectionPages === sectionPages) continue
 
 			if (lazy) layout.stale.add(entry.index)
-			else void this.redoHeaderFooter(entry)
+			else if (this.redoHeaderFooter(entry) !== "done" && first < 0) first = entry.index
 		}
+
+		return first
 	}
 
 	// Lays page `entry.index` out again with its current page values (number and counts): its header and
@@ -2504,6 +2521,12 @@ function anchorKey(anchor: PageAnchor): string {
 	return `${anchor.section}:${anchor.story}:${anchor.part}:${anchor.block}:${anchor.row}:${anchor.offset}`
 }
 
+// A section's line numbers as shown: none for w:countBy 0, as Word (LibreOffice bug 131594); the attribute left
+// out counts every line.
+function shownLineNumbers(numbering: ResolvedSectionProps["lineNumbering"]): ResolvedSectionProps["lineNumbering"] {
+	return numbering?.countBy !== undefined && numbering.countBy <= 0 ? undefined : numbering
+}
+
 // Whether mirrored margins give the section's pages of one parity other margins than the other's.
 function mirrored(section: ResolvedSectionProps, compat: LayoutCompat): boolean {
 	const margins = section.margins
@@ -2856,7 +2879,21 @@ export class LayoutDriver {
 					continue
 				}
 
-				paginator.finish(this.lazy)
+				// A page whose header or footer changed height with the counts found is laid out again with them.
+				const moved = paginator.finish(this.lazy)
+
+				if (moved >= 0 && this.rounds < MAX_TOTALS_ROUNDS) {
+					this.rounds++
+					paginator.adoptTotals()
+
+					const start = paginator.restartPage(moved)
+
+					paginator.restartAt(start)
+					layout.notify(start, start, false)
+
+					continue
+				}
+
 				layout.final = true
 				layout.notify(0, layout.pages.length, true)
 

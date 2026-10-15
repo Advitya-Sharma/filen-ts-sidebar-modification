@@ -298,6 +298,22 @@ export const formOps: readonly EditOp[] = [
 		info => (info.type === "dropDownList" || info.type === "comboBox") && info.items.length > 0,
 		(info, rand) => ({ type: "control.choose", value: pick(rand, info.items).value })
 	),
+	// A list's entries changed: one dropped, one added (values unique, as Word keeps them).
+	onControl(
+		"formItems",
+		1,
+		info => info.type === "dropDownList" || info.type === "comboBox",
+		(info, rand) => ({
+			type: "control.items",
+			items: [
+				...info.items.filter((_, index) => index !== Math.floor(rand() * info.items.length) && info.items.length > 0),
+				{ text: `Fuzz ${String(Math.floor(rand() * 1000))}`, value: `fuzz-${String(Math.floor(rand() * 1000))}` }
+			].filter(
+				(item, index, all) =>
+					all.findIndex(other => other.value === item.value || other.text === item.text) === index && item.text !== ""
+			)
+		})
+	),
 	onControl(
 		"formDate",
 		2,

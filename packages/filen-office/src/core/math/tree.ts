@@ -98,6 +98,9 @@ export interface MathAttributes {
 	readonly frame?: number
 	// Six upper-case hex digits.
 	readonly color?: string
+	// A tracked change in the markup view (omml.ts MathRevision): drawn in its author's colour, underlined
+	// (inserted) or struck through (deleted).
+	readonly revision?: number
 }
 
 export interface MathElement {
@@ -181,6 +184,9 @@ function assertAttributes(attributes: unknown): void {
 		} else if (key === "frame") {
 			if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > MATH_FRAME_ALL)
 				fail("frame must be MathFrame bits")
+		} else if (key === "revision") {
+			if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 63 || (value & 3) === 0 || (value & 3) === 3)
+				fail("revision must be a tracked look")
 		} else if (key === "color") {
 			if (typeof value !== "string" || !/^[0-9A-F]{6}$/.test(value)) fail("color must be six upper-case hex digits")
 		} else {

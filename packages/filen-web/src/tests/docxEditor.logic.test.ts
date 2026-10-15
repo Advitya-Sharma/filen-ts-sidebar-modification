@@ -4,10 +4,35 @@ import { DOCX_EDITOR_COMMANDS, DOCX_PARAGRAPH_STYLES, NO_REVIEW, NO_VALUES, type
 import {
 	COMMAND_LABELS,
 	DOCX_COMMAND_CATALOGUE,
+	HIGHLIGHT_SWATCHES,
+	MARGIN_PRESETS,
+	PAPER_SIZES,
+	STANDARD_SWATCHES,
+	borderDragOffset,
+	borderDragWidth,
+	commandVariants,
+	contextCommands,
+	controlLockedKey,
+	fromTwips,
+	lengthUnit,
+	marginsPresetOf,
+	pageSetupCommand,
+	pageSetupForm,
+	painterAction,
+	paperOf,
+	paragraphCommands,
+	paragraphForm,
+	slotsWidth,
+	drawingItems,
+	typeAhead,
+	TYPE_AHEAD_MS,
+	themeSwatches,
+	toTwips,
+	turnedMargins,
 	commandActive,
 	commandFeature,
-	commandRecordsAuthor,
 	editorMarkupView,
+	featureCommands,
 	featureEditable,
 	rowCommands,
 	slotCommands,
@@ -128,15 +153,62 @@ describe("docx editor toolbar logic", () => {
 	})
 
 	it("moves groups into the menu as the row narrows, in priority order", () => {
-		expect(toolbarFit(2000, 0)).toEqual({ style: true, lists: true, align: true, clear: true })
-		expect(toolbarFit(300, 0)).toEqual({ style: false, lists: false, align: false, clear: false })
+		const all = {
+			picture: 0,
+			format: 2,
+			find: true,
+			painter: true,
+			style: true,
+			font: true,
+			color: true,
+			lists: true,
+			align: true,
+			clear: true,
+			zoom: true
+		}
 
-		const middle = toolbarFit(640, 0)
+		expect(toolbarFit(2000, 0, true, 2)).toEqual(all)
+		expect(toolbarFit(2000, 0)).toEqual({ ...all, format: 0, painter: false, font: false, color: false })
+		expect(toolbarFit(200, 0, true, 2)).toEqual({
+			picture: 0,
+			format: 0,
+			find: false,
+			painter: false,
+			style: false,
+			font: false,
+			color: false,
+			lists: false,
+			align: false,
+			clear: false,
+			zoom: false
+		})
+		// The font pickers go before the lists and alignment, the colours after them.
+		const narrow = toolbarFit(860, 0, true, 2)
+
+		expect(narrow.font).toBe(true)
+		expect(narrow.color).toBe(false)
+
+		const middle = toolbarFit(640, 0, false, 2)
 
 		expect(middle.style).toBe(true)
 		expect(middle.clear).toBe(false)
 		// Badges take room too.
-		expect(toolbarFit(640, 300).style).toBe(false)
+		expect(toolbarFit(640, 300, false, 2).style).toBe(false)
+		// Not measured yet: the row as it always was.
+		expect(toolbarFit(0, 0, true, 2)).toMatchObject({ format: 2, find: true, painter: true, style: false })
+	})
+
+	it("fits a phone's row (360 and 390 px windows) with the menus as icons, the formatting tail first to stay", () => {
+		const menus = slotsWidth({ insert: true, review: true, table: false }, false)
+		const table = slotsWidth({ insert: true, review: true, table: true }, false)
+
+		expect(menus).toBeLessThan(slotsWidth({ insert: true, review: true, table: false }))
+		// Inside the row's 8 px padding on each side.
+		expect(toolbarFit(390 - 16, menus, true, 2)).toMatchObject({ format: 2, find: true, painter: false, style: false, zoom: false })
+		expect(toolbarFit(390 - 16, table, true, 2)).toMatchObject({ format: 2, find: false, painter: false })
+		expect(toolbarFit(360 - 16, menus, true, 2)).toMatchObject({ format: 2, find: false, painter: false })
+		expect(toolbarFit(360 - 16, table, true, 2)).toMatchObject({ format: 1, find: false, painter: false })
+		expect(toolbarFit(320 - 16, table, true, 2)).toMatchObject({ format: 0, find: false, painter: false })
 	})
 
 	it("explains read-only editing with keys that exist", () => {
@@ -186,22 +258,17 @@ describe("docx command catalogue", () => {
 		}
 	})
 
-	it("asks for the author only for commands that will record one", () => {
-		for (const command of DOCX_EDITOR_COMMANDS) {
-			if (command.author !== true) {
-				expect(commandRecordsAuthor({ type: command.type } as never, false), command.type).toBe(false)
-			}
-		}
+	it("offers a feature's labelled commands for its contextual group, in catalogue order", () => {
+		for (const feature of Object.keys(DOCX_COMMAND_CATALOGUE) as (keyof typeof DOCX_COMMAND_CATALOGUE)[]) {
+			const commands = featureCommands(feature)
 
-		expect(commandRecordsAuthor({ type: "comment.add", text: "x" }, false)).toBe(true)
-		expect(commandRecordsAuthor({ type: "comment.reply", id: "1", text: "x" }, true)).toBe(true)
-		expect(commandRecordsAuthor({ type: "comment.edit", id: "1", text: "x" }, true)).toBe(true)
-		expect(commandRecordsAuthor({ type: "comment.delete", id: "1" }, true)).toBe(false)
-		// Tracking can always be turned off without a name.
-		expect(commandRecordsAuthor({ type: "review.track", on: true }, false)).toBe(true)
-		expect(commandRecordsAuthor({ type: "review.track", on: false }, true)).toBe(false)
-		expect(commandRecordsAuthor({ type: "review.track" }, false)).toBe(true)
-		expect(commandRecordsAuthor({ type: "review.track" }, true)).toBe(false)
+			expect(commands.map(command => command.info.type)).toEqual(
+				DOCX_EDITOR_COMMANDS.filter(info => commandFeature(info.type) === feature && COMMAND_LABELS[info.type] !== undefined).map(
+					info => info.type
+				)
+			)
+			expect(commands.length > 0).toBe(featureLanded(feature))
+		}
 	})
 })
 
@@ -324,5 +391,375 @@ describe("view-only paths for templates and macro-enabled documents", () => {
 		expect(viewOnlyReasons([], { ...where, linked: true })).toEqual(["linkedFile"])
 		expect(viewOnlyReasons([], { ...where, variant: "sharedIn" })).toEqual(["sharedIn"])
 		expect(viewOnlyReasons(["protected"], { ...where, anon: true })).toEqual(["publicLink", "protected"])
+	})
+})
+
+describe("formatting, tables and page setup logic", () => {
+	it("picks up formatting with a click, keeps it on with a double click and turns it off with a click", () => {
+		expect(painterAction(1, "off")).toBe("copy")
+		expect(painterAction(2, "off")).toBe("sticky")
+		expect(painterAction(1, "once")).toBe("cancel")
+		expect(painterAction(1, "sticky")).toBe("cancel")
+		// A double click's second click while the first turned it off: on until clicked again.
+		expect(painterAction(2, "once")).toBe("sticky")
+	})
+
+	it("turns a border drag into the column's width, the other way round in a right-to-left table", () => {
+		const ltr = { column: 0, widths: [2000, 2000, 2000], rtl: false, minTwips: 100 }
+		const rtl = { ...ltr, rtl: true }
+
+		// 10 screen px at 100 % are 150 twips.
+		expect(borderDragWidth(ltr, 10, 1)).toBe(2150)
+		expect(borderDragWidth(rtl, 10, 1)).toBe(1850)
+		expect(borderDragWidth(rtl, -10, 1)).toBe(2150)
+		// At 200 % the same screen distance is half the page distance.
+		expect(borderDragWidth(ltr, 10, 2)).toBe(2075)
+		// Never narrower than the least, nor wider than the pair leaves the next column.
+		expect(borderDragWidth(ltr, -1000, 1)).toBe(100)
+		expect(borderDragWidth(ltr, 1000, 1)).toBe(3900)
+		// The last column has no neighbour to take from.
+		expect(borderDragWidth({ ...ltr, column: 2 }, 1000, 1)).toBe(17_000)
+		// The guide follows the pointer.
+		expect(borderDragOffset(ltr, 2150, 1)).toBe(10)
+		expect(borderDragOffset(rtl, 1850, 1)).toBe(10)
+	})
+
+	it("offers Word's theme colour variations, lighter for dark colours and darker for light ones", () => {
+		const theme: Record<string, string> = {
+			background1: "FFFFFF",
+			text1: "000000",
+			background2: "E7E6E6",
+			text2: "44546A",
+			accent1: "4472C4",
+			accent2: "ED7D31",
+			accent3: "A5A5A5",
+			accent4: "FFC000",
+			accent5: "5B9BD5",
+			accent6: "70AD47"
+		}
+		const rows = themeSwatches(name => theme[name])
+
+		expect(rows).toHaveLength(6)
+		expect(rows.every(row => row.length === 10)).toBe(true)
+		expect(rows[0]?.map(swatch => swatch.key)).toEqual(Object.keys(theme).map(name => `theme:${name}`))
+		// Accent 1, lighter 60 % (Word's B4C6E7) and darker 25 %.
+		expect(rows[2]?.[4]).toMatchObject({
+			rgb: "B4C6E7",
+			key: "theme:accent1/tint:102",
+			color: { kind: "theme", theme: "accent1", tint: 102 }
+		})
+		expect(rows[4]?.[4]?.color).toEqual({ kind: "theme", theme: "accent1", shade: 191 })
+		// Black gets lighter steps from 50 %, white darker ones from 5 %.
+		expect(rows[1]?.[1]).toMatchObject({
+			rgb: "7F7F7F",
+			label: { name: "previewDocxColorText1", tone: { lighter: true, percent: 50 } }
+		})
+		expect(rows[1]?.[0]).toMatchObject({ rgb: "F2F2F2", label: { tone: { lighter: false, percent: 5 } } })
+		expect(themeSwatches(() => undefined)).toEqual([])
+
+		for (const swatch of [...rows.flat(), ...STANDARD_SWATCHES]) {
+			expect(en).toHaveProperty(swatch.label.name)
+		}
+
+		for (const swatch of HIGHLIGHT_SWATCHES) {
+			expect(en).toHaveProperty(swatch.label)
+		}
+	})
+
+	it("offers inserting a table or a form control in the Insert menu, and the header toggles only on the chip", () => {
+		const insert = slotCommands("insert").map(command => command.info.type)
+
+		expect(insert).toContain("table.insert")
+		expect(insert).toContain("control.insert")
+		expect(insert).toContain("header.edit")
+		expect(insert).not.toContain("header.differentFirst")
+		expect(insert).not.toContain("page.setup")
+		expect(slotCommands("table").map(command => command.info.type)).not.toContain("table.insert")
+
+		const variants = commandVariants("control.insert") ?? []
+
+		expect(variants.map(variant => ("command" in variant ? variant.command : variant.input))).toEqual([
+			{ type: "control.insert", kind: "checkbox" },
+			"dropDownList",
+			{ type: "control.insert", kind: "date" },
+			{ type: "control.insert", kind: "plainText" }
+		])
+
+		for (const variant of [...variants, ...(commandVariants("insert.sectionBreak") ?? [])]) {
+			expect(en).toHaveProperty(variant.label)
+		}
+
+		expect(commandVariants("format.bold")).toBeUndefined()
+	})
+
+	it("offers the context menu's commands where the selection is, and only those that can run", () => {
+		const table = {
+			rows: 2,
+			columns: 3,
+			fromRow: 0,
+			toRow: 1,
+			fromColumn: 0,
+			toColumn: 1,
+			mergeable: false,
+			splittable: true,
+			headerRow: false,
+			styleId: null,
+			depth: 0,
+			widths: [2000, 2000, 2000],
+			align: null,
+			vAlign: null,
+			shading: null,
+			styles: [],
+			rtl: false
+		}
+		const inTable = snapshot({ context: { ...CONTEXT, table } })
+		const types = contextCommands(inTable, false).map(command => command.info.type)
+
+		expect(types).toContain("table.row.insertBelow")
+		expect(contextCommands(inTable, false).find(command => command.info.type === "table.cell.split")?.action).toBe("input")
+		expect(types).not.toContain("control.clear")
+		// Read-only: nothing that writes.
+		expect(contextCommands(inTable, true).map(command => command.info.type)).not.toContain("table.row.insertBelow")
+		// Outside a table, no table commands.
+		expect(contextCommands(snapshot(), false).some(command => command.info.type.startsWith("table."))).toBe(false)
+		// Disabled commands are left out.
+		expect(
+			contextCommands({ ...inTable, enabled: { ...inTable.enabled, "table.row.insertBelow": false } }, false).map(
+				command => command.info.type
+			)
+		).not.toContain("table.row.insertBelow")
+		expect(en).toHaveProperty(controlLockedKey("bound"))
+		expect(en).toHaveProperty(controlLockedKey("contentLocked"))
+		expect(en).toHaveProperty(controlLockedKey("disabled"))
+	})
+
+	it("sends from the Paragraph dialog only what was changed, and nothing invalid", () => {
+		const values = {
+			...VALUES,
+			indent: { start: 720, end: 0, firstLine: 0, hanging: 360 },
+			spacing: { before: 0, after: 160 },
+			lineSpacing: { rule: "auto" as const, value: 276 }
+		}
+		const initial = paragraphForm(values, "in")
+
+		expect(initial).toEqual({
+			start: "0.5",
+			end: "0",
+			special: "hanging",
+			by: "0.25",
+			before: "0",
+			after: "8",
+			rule: "auto",
+			at: "1.15"
+		})
+		expect(paragraphCommands(initial, initial, "in")).toEqual([])
+		expect(paragraphCommands(initial, { ...initial, start: "1" }, "in")).toEqual([{ type: "paragraph.indent", start: 1440 }])
+		expect(paragraphCommands(initial, { ...initial, special: "firstLine", by: "0.5" }, "in")).toEqual([
+			{ type: "paragraph.indent", firstLine: 720 }
+		])
+		expect(paragraphCommands(initial, { ...initial, after: "12", rule: "exact", at: "14" }, "in")).toEqual([
+			{ type: "paragraph.spacing", after: 240 },
+			{ type: "paragraph.lineSpacing", rule: "exact", value: 280 }
+		])
+		expect(paragraphCommands(initial, { ...initial, before: "lots" }, "in")).toBeNull()
+		// Mixed values start empty, and an empty field changes nothing.
+		expect(paragraphForm({ ...VALUES, indent: "mixed" }, "cm").start).toBe("")
+		expect(fromTwips(1440, "cm")).toBe(2.54)
+		expect(toTwips("2,54", "cm")).toBe(1440)
+		expect(Number.isNaN(toTwips("", "in"))).toBe(true)
+		expect(lengthUnit("en-US")).toBe("in")
+		expect(lengthUnit("en-GB")).toBe("cm")
+		expect(lengthUnit("de")).toBe("cm")
+	})
+
+	it("turns the Page setup dialog's changes into one page.setup, the page's turn taking its margins along", () => {
+		const current = {
+			size: { width: 12_240, height: 15_840 },
+			orientation: "portrait" as const,
+			margins: { top: 1440, bottom: 1440, left: 1080, right: 1080, header: 720, footer: 720, gutter: 0 },
+			columns: { count: 1, space: 720, separator: false },
+			mirrorMargins: false,
+			pageNumbers: { start: null, format: "decimal" as const },
+			lineNumbers: null
+		}
+		const form = pageSetupForm(current)
+
+		expect(paperOf(form.width, form.height)).toBe("letter")
+		expect(paperOf(11_900, 16_840)).toBe("a4")
+		expect(paperOf(1000, 2000)).toBe("custom")
+		expect(marginsPresetOf(form.margins, false)).toBe("moderate")
+		expect(pageSetupCommand(current, form)).toBeNull()
+
+		// Turned: the size and orientation go; the margins turn on their own.
+		const landscape = { ...form, orientation: "landscape" as const, margins: turnedMargins(form.margins, true) }
+
+		expect(pageSetupCommand(current, landscape)).toEqual({
+			type: "page.setup",
+			size: { width: 12_240, height: 15_840 },
+			orientation: "landscape",
+			scope: "section"
+		})
+		expect(
+			pageSetupCommand(current, {
+				...form,
+				margins: { top: 720, bottom: 720, left: 720, right: 720 },
+				columns: 2,
+				numberStart: 5,
+				numberFormat: "lowerRoman",
+				lineNumbers: "newPage",
+				scope: "document"
+			})
+		).toEqual({
+			type: "page.setup",
+			// The whole document takes the paper and layout too, changed or not (Word's Apply to).
+			size: { width: 12_240, height: 15_840 },
+			orientation: "portrait",
+			margins: { top: 720, bottom: 720, left: 720, right: 720 },
+			columns: { count: 2 },
+			pageNumbers: { start: 5, format: "lowerRoman" },
+			lineNumbers: { countBy: 1, start: 1, restart: "newPage" },
+			scope: "document"
+		})
+		// Nothing changed but "Whole document": every section gets this one's setup.
+		expect(pageSetupCommand(current, { ...form, scope: "document" })).toEqual({
+			type: "page.setup",
+			size: { width: 12_240, height: 15_840 },
+			orientation: "portrait",
+			margins: form.margins,
+			columns: { count: 1 },
+			lineNumbers: null,
+			scope: "document"
+		})
+		expect(marginsPresetOf({ top: 1440, bottom: 1440, left: 1800, right: 1800 }, false)).toBe("office2003")
+		// A turned page shows a preset's margins turned: Moderate's sides are its top and bottom then.
+		expect(marginsPresetOf({ top: 1080, bottom: 1080, left: 1440, right: 1440 }, false, true)).toBe("moderate")
+		expect(marginsPresetOf({ top: 1080, bottom: 1080, left: 1440, right: 1440 }, false)).toBe("custom")
+
+		// Mirrored: Word's 1.25" inside and 1" outside, and only with mirror margins on.
+		const mirrored = { top: 1440, bottom: 1440, left: 1800, right: 1440 }
+
+		expect(marginsPresetOf(mirrored, true)).toBe("mirrored")
+		expect(marginsPresetOf(mirrored, false)).toBe("custom")
+		expect(marginsPresetOf(form.margins, true)).toBe("custom")
+		expect(pageSetupCommand(current, { ...form, margins: mirrored, mirrored: true })).toEqual({
+			type: "page.setup",
+			margins: mirrored,
+			mirrorMargins: true,
+			scope: "section"
+		})
+		// Turned off on its own: the document's switch alone.
+		expect(
+			pageSetupCommand(
+				{ ...current, mirrorMargins: true },
+				{ ...pageSetupForm({ ...current, mirrorMargins: true }), mirrored: false }
+			)
+		).toEqual({
+			type: "page.setup",
+			mirrorMargins: false,
+			scope: "section"
+		})
+
+		for (const paper of PAPER_SIZES) {
+			expect(en).toHaveProperty(paper.label)
+		}
+
+		for (const preset of MARGIN_PRESETS) {
+			expect(en).toHaveProperty(preset.label)
+		}
+	})
+})
+
+describe("context menu and row room for pictures and links", () => {
+	const drawing = {
+		kind: "picture",
+		resizable: true,
+		rotation: 0
+	} as unknown as NonNullable<DocxEditorSnapshot["context"]["drawing"]>
+
+	it("offers a picture's wrap and rotation as submenus, its crop and alt text by asking, and deletes it as it is", () => {
+		const actions = Object.fromEntries(
+			contextCommands(snapshot({ context: { ...CONTEXT, drawing } }), false).map(command => [command.info.type, command.action])
+		)
+
+		expect(actions["drawing.wrap"]).toBe("variants")
+		expect(actions["drawing.rotate"]).toBe("variants")
+		expect(actions["drawing.crop"]).toBe("input")
+		expect(actions["drawing.altText"]).toBe("input")
+		expect(actions["drawing.delete"]).toBe("run")
+		expect(commandVariants("drawing.wrap")?.length).toBeGreaterThan(0)
+	})
+
+	it("offers editing and removing the link at the caret", () => {
+		const link = { target: "https://filen.io", anchor: null, text: "Filen" }
+		const actions = Object.fromEntries(
+			contextCommands(snapshot({ context: { ...CONTEXT, link } }), false).map(command => [command.info.type, command.action])
+		)
+
+		expect(actions["link.set"]).toBe("input")
+		expect(actions["link.remove"]).toBe("run")
+		expect(contextCommands(snapshot(), false).some(command => command.info.type.startsWith("link."))).toBe(false)
+		// A new comment asks for its text, a change at the caret is accepted as it is.
+		const review = { ...REVIEW, current: "7", revisionCount: 1 }
+		const atChange = Object.fromEntries(
+			contextCommands(snapshot({ review }), false).map(command => [command.info.type, command.action])
+		)
+
+		expect(atChange["comment.add"]).toBe("input")
+		expect(atChange["review.accept"]).toBe("run")
+		expect(atChange["review.reject"]).toBe("run")
+	})
+
+	it("keeps room in the row for the Insert and Review menus and the contextual Table group", () => {
+		const none = slotsWidth({ insert: false, review: false, table: false })
+		const menus = slotsWidth({ insert: true, review: true, table: false })
+
+		expect(none).toBe(0)
+		expect(menus).toBeGreaterThan(0)
+		expect(slotsWidth({ insert: true, review: true, table: true })).toBeGreaterThan(menus)
+
+		// The narrowest row that keeps the lists with the menus loses them to a picture's tools.
+		let width = 300
+
+		while (!toolbarFit(width, menus, true, 2).lists) {
+			width += 10
+		}
+
+		expect(toolbarFit(width, menus, true, 2, 5).lists).toBe(false)
+	})
+
+	it("finds a list's type-ahead entry as the ARIA APG does", () => {
+		const texts = ["Red", "Green", "Grey", "Grey blue", "rose"]
+
+		// One character: the next entry starting with it, round the end.
+		expect(typeAhead(texts, 0, "g")).toBe(1)
+		expect(typeAhead(texts, 4, "R")).toBe(0)
+		// The same one repeated: on through the entries starting with it.
+		expect(typeAhead(texts, 1, "gg")).toBe(2)
+		// More characters: from the active entry on, which stays while it matches.
+		expect(typeAhead(texts, 1, "gre")).toBe(1)
+		expect(typeAhead(texts, 1, "grey")).toBe(2)
+		expect(typeAhead(texts, 2, "grey ")).toBe(3)
+		expect(typeAhead(texts, 0, "blue")).toBe(-1)
+		expect(typeAhead([], 0, "a")).toBe(-1)
+		expect(TYPE_AHEAD_MS).toBe(500)
+	})
+
+	it("fits the Picture group item by item at a phone's width, before the formatting tail", () => {
+		const menus = slotsWidth({ insert: true, review: true, table: false }, false)
+
+		expect(drawingItems(featureCommands("drawings"), "pages")).toEqual([
+			"drawing.wrap",
+			"drawing.rotate",
+			"drawing.crop",
+			"drawing.altText",
+			"drawing.delete"
+		])
+		expect(drawingItems(featureCommands("drawings"), "reflow")).not.toContain("drawing.crop")
+		// Inside the row's padding: 390, 360 and 320 px windows.
+		expect(toolbarFit(390 - 16, menus, true, 2, 5)).toMatchObject({ picture: 3, format: 0, find: false })
+		expect(toolbarFit(360 - 16, menus, true, 2, 5)).toMatchObject({ picture: 2, format: 0 })
+		expect(toolbarFit(320 - 16, menus, true, 2, 5)).toMatchObject({ picture: 1, format: 0 })
+		expect(toolbarFit(1200, menus, true, 2, 5)).toMatchObject({ picture: 5, format: 2 })
+		expect(toolbarFit(0, menus, true, 2, 5).picture).toBe(5)
 	})
 })

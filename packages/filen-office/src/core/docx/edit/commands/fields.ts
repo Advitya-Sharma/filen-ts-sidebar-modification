@@ -1,4 +1,4 @@
-import { boolArg, intArg, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
+import { boolArg, intArg, optional, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
 
 // Fields, bookmarks and tables of contents. Updates are explicit, as in Word (Update Field, F9, Update Table):
 // they wait for layout (page numbers), so they run asynchronously.
@@ -10,8 +10,9 @@ export type FieldCommand =
 	| { readonly type: "toc.update"; readonly pagesOnly: boolean }
 	| { readonly type: "insert.pageNumber" }
 	| { readonly type: "insert.pageCount" }
-	// A Word date picture ("d MMMM yyyy").
-	| { readonly type: "insert.date"; readonly format: string }
+	// A Word date picture ("d MMMM yyyy"): a DATE field, or with `field` false the date as text (Word's Date and
+	// Time without Update automatically).
+	| { readonly type: "insert.date"; readonly format: string; readonly field?: boolean }
 	// A field of FIELD_CATALOGUE by its code (` SEQ Figure \* ARABIC `, ` PAGEREF _Ref1 \h `).
 	| { readonly type: "insert.field"; readonly instruction: string }
 	| { readonly type: "bookmark.add"; readonly name: string }
@@ -78,8 +79,11 @@ export const parseFieldCommand: DocxCommandParser<FieldCommand> = (type, value) 
 		}
 		case "insert.date": {
 			const format = stringArg(value, "format", 64, 1)
+			const field = optional(value, "field", boolArg)
 
-			return format === undefined || !DATE_PICTURE.test(format) ? undefined : { type, format }
+			if (format === undefined || !DATE_PICTURE.test(format) || !field.ok) return undefined
+
+			return field.value === undefined ? { type, format } : { type, format, field: field.value }
 		}
 		case "insert.field": {
 			const instruction = stringArg(value, "instruction", 255, 1)

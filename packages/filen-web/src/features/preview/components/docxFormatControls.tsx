@@ -1,7 +1,960 @@
-import type { DocxToolbarSlotProps } from "@/features/preview/components/docxEditor.logic"
+import { useState, type ReactNode, type SubmitEvent } from "react"
+import { useTranslation } from "react-i18next"
+import type { TFunction } from "i18next"
+import {
+	AArrowDownIcon,
+	AArrowUpIcon,
+	BaselineIcon,
+	HighlighterIcon,
+	PaintbrushVerticalIcon,
+	SubscriptIcon,
+	SuperscriptIcon,
+	TypeIcon
+} from "lucide-react"
+import {
+	DOCX_FONT_SIZES,
+	type DocxEditorCommand,
+	type DocxEditorCommandType,
+	type DocxFontChoice,
+	type DocxLineSpacingRule,
+	type DocxTextColor,
+	type DocxValuesSnapshot
+} from "@filen/office/core/docx/edit"
+import { cn } from "@filen/shared"
+import {
+	CHARACTER_SPACINGS,
+	keepFocus,
+	useInputForm,
+	HIGHLIGHT_SWATCHES,
+	STANDARD_SWATCHES,
+	lengthUnit,
+	paragraphCommands,
+	paragraphForm,
+	painterAction,
+	single,
+	type DocxInputChannelProps,
+	type DocxParagraphForm,
+	type DocxPainterState,
+	type DocxSwatch,
+	type DocxSwatchLabel,
+	type DocxToolbarCommand,
+	type DocxToolbarSlotProps
+} from "@/features/preview/components/docxEditor.logic"
+import { DocxChoiceField } from "@/features/preview/components/docxFields"
+import { FormDialog } from "@/components/dialogs/formDialog"
+import { Button } from "@/components/ui/button"
+import {
+	DropdownMenu,
+	DropdownMenuCheckboxItem,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuRadioGroup,
+	DropdownMenuRadioItem,
+	DropdownMenuSeparator,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
+	DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu"
+import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { TooltipIconButton } from "@/components/ui/tooltipIconButton"
+import { i18n } from "@/lib/i18n"
 
-// The toolbar's font, size, colour, highlight and paragraph spacing controls. Nothing until its commands are
-// labelled.
-export function DocxFormatControls(_props: DocxToolbarSlotProps): null {
-	return null
+// The toolbar's character formatting beyond the row's toggles: font and size pickers, text and highlight
+// colours, a formatting menu (sub/superscript, double strikethrough, caps, grow and shrink, character spacing,
+// clear all) and the format painter. What does not fit the row (the painter too) goes into the formatting menu. Every value
+// comes from the snapshot's `values` (the same object while nothing changes), so typing re-renders nothing.
+
+export interface DocxFormatControlsProps extends DocxToolbarSlotProps {
+	// The document's fonts (theme, its own, common), once read.
+	fonts: readonly DocxFontChoice[]
+	// The theme part of the colour pickers (rows), empty without a theme.
+	theme: readonly (readonly DocxSwatch[])[]
+	painter: DocxPainterState
+	onPainterCancel: () => void
+	// Room in the row for the font pickers, the colour buttons and the format painter.
+	showFont: boolean
+	showColor: boolean
+	showPainter: boolean
+}
+
+const MIXED = "\u0000mixed"
+
+// A swatch's accessible name: its colour, and how much lighter or darker a theme variation is.
+function swatchName(label: DocxSwatchLabel): string {
+	const name = i18n.t(`preview:${label.name}`)
+
+	if (label.tone === undefined) {
+		return name
+	}
+
+	return i18n.t(label.tone.lighter ? "preview:previewDocxColorLighter" : "preview:previewDocxColorDarker", {
+		color: name,
+		percent: label.tone.percent
+	})
+}
+
+function SwatchButton({ rgb, label, chosen, onPick }: { rgb: string; label: string; chosen: boolean; onPick: () => void }) {
+	return (
+		<button
+			type="button"
+			aria-label={label}
+			aria-pressed={chosen}
+			title={label}
+			className={cn("size-5 rounded-sm focus-ring ring-1 ring-border", chosen && "ring-2 ring-primary")}
+			style={{ backgroundColor: `#${rgb}` }}
+			onMouseDown={keepFocus}
+			onClick={onPick}
+		/>
+	)
+}
+
+// The colour picker the font colour, the highlighter and table shading share: Word's theme colours and their
+// variations, its standard colours, and the option without one (Automatic or No color). `chosen`: the key
+// of the colour in effect.
+export function DocxColorGrid({
+	theme,
+	standard,
+	chosen,
+	none,
+	onPick
+}: {
+	theme: readonly (readonly DocxSwatch[])[]
+	standard: readonly DocxSwatch[]
+	chosen: string | undefined
+	none: { label: string; key: string }
+	onPick: (swatch: DocxSwatch | null) => void
+}) {
+	const { t } = useTranslation("preview")
+
+	return (
+		<div className="flex flex-col gap-2">
+			<Button
+				variant="ghost"
+				size="sm"
+				className={cn("justify-start", chosen === none.key && "bg-accent")}
+				onMouseDown={keepFocus}
+				onClick={() => {
+					onPick(null)
+				}}
+			>
+				{none.label}
+			</Button>
+			{theme.length > 0 ? (
+				<div
+					role="group"
+					aria-label={t("previewDocxColorThemeColors")}
+					className="flex flex-col gap-1"
+				>
+					<p className="text-xs text-muted-foreground">{t("previewDocxColorThemeColors")}</p>
+					{theme.map((row, index) => (
+						<div
+							key={row[0]?.key ?? index}
+							className={cn("grid grid-cols-10 gap-1", index === 1 && "mt-1")}
+						>
+							{row.map(swatch => (
+								<SwatchButton
+									key={swatch.key}
+									rgb={swatch.rgb}
+									label={swatchName(swatch.label)}
+									chosen={chosen === swatch.key}
+									onPick={() => {
+										onPick(swatch)
+									}}
+								/>
+							))}
+						</div>
+					))}
+				</div>
+			) : null}
+			<div
+				role="group"
+				aria-label={t("previewDocxColorStandardColors")}
+				className="flex flex-col gap-1"
+			>
+				<p className="text-xs text-muted-foreground">{t("previewDocxColorStandardColors")}</p>
+				<div className="grid grid-cols-10 gap-1">
+					{standard.map(swatch => (
+						<SwatchButton
+							key={swatch.key}
+							rgb={swatch.rgb}
+							label={swatchName(swatch.label)}
+							chosen={chosen === swatch.key}
+							onPick={() => {
+								onPick(swatch)
+							}}
+						/>
+					))}
+				</div>
+			</div>
+		</div>
+	)
+}
+
+// The highlighter's colours and No color.
+function HighlightGrid({ chosen, onPick }: { chosen: string | undefined; onPick: (name: string) => void }) {
+	const { t } = useTranslation("preview")
+
+	return (
+		<div className="flex flex-col gap-2">
+			<Button
+				variant="ghost"
+				size="sm"
+				className={cn("justify-start", chosen === "none" && "bg-accent")}
+				onMouseDown={keepFocus}
+				onClick={() => {
+					onPick("none")
+				}}
+			>
+				{t("previewDocxColorNone")}
+			</Button>
+			<div className="grid grid-cols-5 gap-1">
+				{HIGHLIGHT_SWATCHES.map(swatch => (
+					<SwatchButton
+						key={swatch.name}
+						rgb={swatch.rgb}
+						label={t(swatch.label)}
+						chosen={chosen === swatch.name}
+						onPick={() => {
+							onPick(swatch.name)
+						}}
+					/>
+				))}
+			</div>
+		</div>
+	)
+}
+
+function textColor(swatch: DocxSwatch | null): DocxTextColor {
+	return swatch === null ? { kind: "auto" } : swatch.color
+}
+
+// A toolbar button opening a colour picker: its icon over a bar of the colour in effect.
+function ColorButton({
+	label,
+	icon,
+	rgb,
+	disabled,
+	children
+}: {
+	label: string
+	icon: ReactNode
+	rgb: string | undefined
+	disabled: boolean
+	children: (close: () => void) => ReactNode
+}) {
+	const [open, setOpen] = useState(false)
+
+	return (
+		<Popover
+			open={open}
+			onOpenChange={setOpen}
+		>
+			<Tooltip>
+				<TooltipTrigger
+					render={
+						<PopoverTrigger
+							render={
+								<Button
+									variant="ghost"
+									size="icon-sm"
+									aria-label={label}
+									disabled={disabled}
+									className="shrink-0 flex-col gap-0"
+									onMouseDown={keepFocus}
+								>
+									{icon}
+									<span
+										aria-hidden="true"
+										className="h-0.5 w-3.5 rounded-full ring-1 ring-border"
+										style={{ backgroundColor: rgb === undefined ? "transparent" : `#${rgb}` }}
+									/>
+								</Button>
+							}
+						/>
+					}
+				/>
+				<TooltipContent>{label}</TooltipContent>
+			</Tooltip>
+			<PopoverContent
+				data-preview-surface
+				className="w-auto gap-2 p-3"
+			>
+				{children(() => {
+					setOpen(false)
+				})}
+			</PopoverContent>
+		</Popover>
+	)
+}
+
+interface FontItem {
+	value: string
+	label: string
+}
+
+// The font picker's items by group, the selection's font marked: a font in the lists is chosen by name (the
+// theme's under their role), one outside them is added.
+function fontItems(fonts: readonly DocxFontChoice[], current: DocxValuesSnapshot["font"], t: TFunction<"preview">) {
+	const groups: { label: string; items: FontItem[] }[] = []
+	const all: FontItem[] = []
+	let value: string = current === null || current === "mixed" ? MIXED : current
+
+	for (const [kind, label] of [
+		["theme", "previewDocxFontsTheme"],
+		["document", "previewDocxFontsDocument"],
+		["common", "previewDocxFontsCommon"]
+	] as const) {
+		const items = fonts
+			.filter(font => font.kind === kind)
+			.map(font => ({
+				value: font.family,
+				label:
+					font.kind === "theme"
+						? t(font.role === "headings" ? "previewDocxFontHeadings" : "previewDocxFontBody", { name: font.name })
+						: font.name
+			}))
+
+		if (items.length > 0) {
+			groups.push({ label: t(label), items })
+			all.push(...items)
+		}
+	}
+
+	const known = fonts.some(font => font.kind !== "theme" && font.name === current)
+
+	if (!known && current !== null && current !== "mixed") {
+		const theme = fonts.find(font => font.kind === "theme" && font.name === current)
+
+		if (theme !== undefined) {
+			value = theme.family
+		} else {
+			all.push({ value: current, label: current })
+		}
+	}
+
+	if (value === MIXED) {
+		all.push({ value: MIXED, label: t("previewDocxValueMixed") })
+	}
+
+	return { groups, all, value, extra: all.filter(item => !groups.some(group => group.items.includes(item))) }
+}
+
+function FontPicker({
+	fonts,
+	font,
+	disabled,
+	execute
+}: {
+	fonts: readonly DocxFontChoice[]
+	font: DocxValuesSnapshot["font"]
+	disabled: boolean
+	execute: (command: DocxEditorCommand) => void
+}) {
+	const { t } = useTranslation("preview")
+	const { groups, all, value, extra } = fontItems(fonts, font, t)
+
+	return (
+		<Select
+			items={all}
+			value={value}
+			disabled={disabled}
+			onValueChange={next => {
+				if (typeof next === "string" && next !== MIXED) {
+					execute({ type: "font.family", family: next })
+				}
+			}}
+		>
+			<SelectTrigger
+				size="sm"
+				aria-label={t("previewDocxFont")}
+				className="w-32 shrink-0"
+			>
+				<SelectValue />
+			</SelectTrigger>
+			<SelectContent
+				data-preview-surface
+				className="max-h-80 min-w-48"
+			>
+				{groups.map(group => (
+					<SelectGroup key={group.label}>
+						<SelectLabel>{group.label}</SelectLabel>
+						{group.items.map(item => (
+							<SelectItem
+								key={item.value}
+								value={item.value}
+							>
+								{item.label}
+							</SelectItem>
+						))}
+					</SelectGroup>
+				))}
+				{extra.length > 0 ? (
+					<SelectGroup>
+						{extra.map(item => (
+							<SelectItem
+								key={item.value}
+								value={item.value}
+							>
+								{item.label}
+							</SelectItem>
+						))}
+					</SelectGroup>
+				) : null}
+			</SelectContent>
+		</Select>
+	)
+}
+
+// A size in points as the pickers show it (half-points).
+function points(halfPoints: number): string {
+	return i18n.format(halfPoints / 2, "number")
+}
+
+function SizePicker({
+	size,
+	disabled,
+	execute
+}: {
+	size: DocxValuesSnapshot["size"]
+	disabled: boolean
+	execute: (command: DocxEditorCommand) => void
+}) {
+	const { t } = useTranslation("preview")
+	const value = size === null || size === "mixed" ? MIXED : String(size)
+	const sizes =
+		size === null || size === "mixed" || DOCX_FONT_SIZES.includes(size)
+			? DOCX_FONT_SIZES
+			: [...DOCX_FONT_SIZES, size].sort((a, b) => a - b)
+	const items = [
+		...sizes.map(half => ({ value: String(half), label: points(half) })),
+		...(value === MIXED ? [{ value: MIXED, label: "" }] : [])
+	]
+
+	return (
+		<Select
+			items={items}
+			value={value}
+			disabled={disabled}
+			onValueChange={next => {
+				if (typeof next === "string" && next !== MIXED) {
+					execute({ type: "font.size", halfPoints: Number(next) })
+				}
+			}}
+		>
+			<SelectTrigger
+				size="sm"
+				aria-label={t("previewDocxFontSize")}
+				className="w-16 shrink-0"
+			>
+				<SelectValue />
+			</SelectTrigger>
+			<SelectContent
+				data-preview-surface
+				className="max-h-80"
+			>
+				<SelectGroup>
+					{sizes.map(half => (
+						<SelectItem
+							key={half}
+							value={String(half)}
+						>
+							{points(half)}
+						</SelectItem>
+					))}
+				</SelectGroup>
+			</SelectContent>
+		</Select>
+	)
+}
+
+export function DocxFormatControls(props: DocxFormatControlsProps) {
+	const { t } = useTranslation("preview")
+	const { snapshot, readOnly, execute, commands } = props
+	const values = snapshot?.values
+	const has = (type: DocxEditorCommandType): DocxToolbarCommand | undefined => commands.find(command => command.info.type === type)
+	const off = (type: DocxEditorCommandType): boolean =>
+		snapshot === undefined || has(type) === undefined || (readOnly && has(type)?.info.write === true) || !snapshot.enabled[type]
+	const toggles: readonly { type: DocxEditorCommandType; on: boolean }[] = [
+		{ type: "format.superscript", on: values?.vertAlign === "superscript" },
+		{ type: "format.subscript", on: values?.vertAlign === "subscript" },
+		{ type: "format.doubleStrike", on: values?.doubleStrike === "on" },
+		{ type: "format.smallCaps", on: values?.smallCaps === "on" },
+		{ type: "format.allCaps", on: values?.allCaps === "on" }
+	]
+	const chosenColor = values === undefined ? undefined : single(values.color)
+	const chosenHighlight = values === undefined ? undefined : single(values.highlight)
+	const colorRgb = values === undefined ? undefined : single(values.colorRgb)
+	const highlightRgb =
+		chosenHighlight === undefined || chosenHighlight === "none"
+			? undefined
+			: HIGHLIGHT_SWATCHES.find(swatch => swatch.name === chosenHighlight)?.rgb
+	const spacing = values === undefined ? undefined : single(values.charSpacing)
+	const fontShown = props.showFont && has("font.family") !== undefined
+	const colorShown = props.showColor && has("color.text") !== undefined
+	const pickColor = (swatch: DocxSwatch | null): void => {
+		execute({ type: "color.text", color: textColor(swatch) })
+	}
+	const pickHighlight = (name: string): void => {
+		const command = { type: "color.highlight", name } as DocxEditorCommand
+
+		execute(command)
+	}
+	const colorGrid = (close: () => void): ReactNode => (
+		<DocxColorGrid
+			theme={props.theme}
+			standard={STANDARD_SWATCHES}
+			chosen={chosenColor}
+			none={{ label: t("previewDocxColorAutomatic"), key: "auto" }}
+			onPick={swatch => {
+				close()
+				pickColor(swatch)
+			}}
+		/>
+	)
+	const highlightGrid = (close: () => void): ReactNode => (
+		<HighlightGrid
+			chosen={chosenHighlight}
+			onPick={name => {
+				close()
+				pickHighlight(name)
+			}}
+		/>
+	)
+
+	return (
+		<>
+			{fontShown ? (
+				<>
+					<FontPicker
+						fonts={props.fonts}
+						font={values?.font ?? null}
+						disabled={off("font.family")}
+						execute={execute}
+					/>
+					{has("font.size") === undefined ? null : (
+						<SizePicker
+							size={values?.size ?? null}
+							disabled={off("font.size")}
+							execute={execute}
+						/>
+					)}
+				</>
+			) : null}
+			{colorShown ? (
+				<>
+					<ColorButton
+						label={t("previewDocxFontColor")}
+						icon={<BaselineIcon />}
+						rgb={colorRgb === "auto" ? undefined : colorRgb}
+						disabled={off("color.text")}
+					>
+						{colorGrid}
+					</ColorButton>
+					{has("color.highlight") === undefined ? null : (
+						<ColorButton
+							label={t("previewDocxHighlightColor")}
+							icon={<HighlighterIcon />}
+							rgb={highlightRgb}
+							disabled={off("color.highlight")}
+						>
+							{highlightGrid}
+						</ColorButton>
+					)}
+				</>
+			) : null}
+			<DropdownMenu>
+				<Tooltip>
+					<TooltipTrigger
+						render={
+							<DropdownMenuTrigger
+								render={
+									<Button
+										variant="ghost"
+										size="icon-sm"
+										aria-label={t("previewDocxMoreFormatting")}
+										disabled={snapshot === undefined}
+										className="shrink-0"
+										onMouseDown={keepFocus}
+									>
+										<TypeIcon />
+									</Button>
+								}
+							/>
+						}
+					/>
+					<TooltipContent>{t("previewDocxMoreFormatting")}</TooltipContent>
+				</Tooltip>
+				<DropdownMenuContent data-preview-surface>
+					{!fontShown && has("font.family") !== undefined ? (
+						<DropdownMenuSub>
+							<DropdownMenuSubTrigger disabled={off("font.family")}>{t("previewDocxFont")}</DropdownMenuSubTrigger>
+							<DropdownMenuSubContent className="max-h-80 overflow-y-auto">
+								<DropdownMenuRadioGroup
+									value={values === undefined ? "" : (single(values.font) ?? "")}
+									onValueChange={(family: string) => {
+										execute({ type: "font.family", family })
+									}}
+								>
+									{props.fonts.map(font => (
+										<DropdownMenuRadioItem
+											key={font.family}
+											value={font.kind === "theme" ? font.family : font.name}
+											closeOnClick
+										>
+											{font.kind === "theme"
+												? t(font.role === "headings" ? "previewDocxFontHeadings" : "previewDocxFontBody", {
+														name: font.name
+													})
+												: font.name}
+										</DropdownMenuRadioItem>
+									))}
+								</DropdownMenuRadioGroup>
+							</DropdownMenuSubContent>
+						</DropdownMenuSub>
+					) : null}
+					{!fontShown && has("font.size") !== undefined ? (
+						<DropdownMenuSub>
+							<DropdownMenuSubTrigger disabled={off("font.size")}>{t("previewDocxFontSize")}</DropdownMenuSubTrigger>
+							<DropdownMenuSubContent className="max-h-80 overflow-y-auto">
+								<DropdownMenuRadioGroup
+									value={values === undefined ? "" : String(single(values.size) ?? "")}
+									onValueChange={(size: string) => {
+										execute({ type: "font.size", halfPoints: Number(size) })
+									}}
+								>
+									{DOCX_FONT_SIZES.map(half => (
+										<DropdownMenuRadioItem
+											key={half}
+											value={String(half)}
+											closeOnClick
+										>
+											{points(half)}
+										</DropdownMenuRadioItem>
+									))}
+								</DropdownMenuRadioGroup>
+							</DropdownMenuSubContent>
+						</DropdownMenuSub>
+					) : null}
+					{!colorShown && has("color.text") !== undefined ? (
+						<>
+							<DropdownMenuSub>
+								<DropdownMenuSubTrigger disabled={off("color.text")}>{t("previewDocxFontColor")}</DropdownMenuSubTrigger>
+								<DropdownMenuSubContent className="p-3">{colorGrid(() => undefined)}</DropdownMenuSubContent>
+							</DropdownMenuSub>
+							{has("color.highlight") === undefined ? null : (
+								<DropdownMenuSub>
+									<DropdownMenuSubTrigger disabled={off("color.highlight")}>
+										{t("previewDocxHighlightColor")}
+									</DropdownMenuSubTrigger>
+									<DropdownMenuSubContent className="p-3">{highlightGrid(() => undefined)}</DropdownMenuSubContent>
+								</DropdownMenuSub>
+							)}
+						</>
+					) : null}
+					{toggles.map(({ type, on }) => {
+						const command = has(type)
+
+						return command === undefined ? null : (
+							<DropdownMenuCheckboxItem
+								key={type}
+								checked={on}
+								disabled={off(type)}
+								// A format applied closes the menu (Base UI keeps a checkbox item's menu open; whether focus
+								// leaving it for the document closed it depended on the browser).
+								closeOnClick
+								onClick={() => {
+									execute({ type } as DocxEditorCommand)
+								}}
+							>
+								{type === "format.superscript" ? (
+									<SuperscriptIcon />
+								) : type === "format.subscript" ? (
+									<SubscriptIcon />
+								) : null}
+								{t(command.label)}
+							</DropdownMenuCheckboxItem>
+						)
+					})}
+					{has("font.grow") === undefined ? null : (
+						<>
+							<DropdownMenuSeparator />
+							<DropdownMenuItem
+								closeOnClick={false}
+								disabled={off("font.grow")}
+								onClick={() => {
+									execute({ type: "font.grow" })
+								}}
+							>
+								<AArrowUpIcon />
+								{t("previewDocxFontGrow")}
+							</DropdownMenuItem>
+						</>
+					)}
+					{has("font.shrink") === undefined ? null : (
+						<DropdownMenuItem
+							closeOnClick={false}
+							disabled={off("font.shrink")}
+							onClick={() => {
+								execute({ type: "font.shrink" })
+							}}
+						>
+							<AArrowDownIcon />
+							{t("previewDocxFontShrink")}
+						</DropdownMenuItem>
+					)}
+					{has("font.spacing") === undefined ? null : (
+						<DropdownMenuSub>
+							<DropdownMenuSubTrigger disabled={off("font.spacing")}>
+								{t("previewDocxCharacterSpacing")}
+							</DropdownMenuSubTrigger>
+							<DropdownMenuSubContent>
+								<DropdownMenuRadioGroup
+									value={spacing === undefined ? "" : String(spacing)}
+									onValueChange={(twips: string) => {
+										execute({ type: "font.spacing", twips: Number(twips) })
+									}}
+								>
+									{CHARACTER_SPACINGS.map(step => (
+										<DropdownMenuRadioItem
+											key={step.twips}
+											value={String(step.twips)}
+											closeOnClick
+										>
+											{t(step.label)}
+										</DropdownMenuRadioItem>
+									))}
+								</DropdownMenuRadioGroup>
+							</DropdownMenuSubContent>
+						</DropdownMenuSub>
+					)}
+					{props.showPainter || has("format.copy") === undefined ? null : (
+						<DropdownMenuCheckboxItem
+							checked={props.painter !== "off"}
+							disabled={readOnly || (props.painter === "off" && off("format.copy"))}
+							closeOnClick
+							onCheckedChange={() => {
+								if (props.painter === "off") {
+									execute({ type: "format.copy" })
+								} else {
+									props.onPainterCancel()
+								}
+							}}
+						>
+							{t("previewDocxFormatPainter")}
+						</DropdownMenuCheckboxItem>
+					)}
+					{has("format.clearAll") === undefined ? null : (
+						<>
+							<DropdownMenuSeparator />
+							<DropdownMenuItem
+								disabled={off("format.clearAll")}
+								onClick={() => {
+									execute({ type: "format.clearAll" })
+								}}
+							>
+								{t("previewDocxClearAllFormatting")}
+							</DropdownMenuItem>
+						</>
+					)}
+				</DropdownMenuContent>
+			</DropdownMenu>
+			{!props.showPainter || has("format.copy") === undefined ? null : (
+				<TooltipIconButton
+					label={props.painter === "sticky" ? t("previewDocxFormatPainterSticky") : t("previewDocxFormatPainter")}
+					pressed={props.painter !== "off"}
+					// Its paste writes: off while the document cannot change.
+					disabled={readOnly || (props.painter === "off" && off("format.copy"))}
+					className={cn(props.painter !== "off" && "bg-accent text-foreground")}
+					onMouseDown={keepFocus}
+					onClick={event => {
+						const action = painterAction(event.detail, props.painter)
+
+						if (action === "cancel") {
+							props.onPainterCancel()
+						} else {
+							execute({ type: "format.copy", ...(action === "sticky" ? { sticky: true } : {}) })
+						}
+					}}
+				>
+					<PaintbrushVerticalIcon />
+				</TooltipIconButton>
+			)}
+		</>
+	)
+}
+
+const LINE_RULES: readonly {
+	rule: DocxLineSpacingRule
+	label: "previewDocxLineSpacingMultiple" | "previewDocxLineSpacingAtLeast" | "previewDocxLineSpacingExact"
+}[] = [
+	{ rule: "auto", label: "previewDocxLineSpacingMultiple" },
+	{ rule: "atLeast", label: "previewDocxLineSpacingAtLeast" },
+	{ rule: "exact", label: "previewDocxLineSpacingExact" }
+]
+
+const SPECIALS = [
+	{ value: "none", label: "previewDocxIndentNone" },
+	{ value: "firstLine", label: "previewDocxIndentFirstLine" },
+	{ value: "hanging", label: "previewDocxIndentHanging" }
+] as const
+
+export interface DocxParagraphDialogProps extends DocxInputChannelProps {
+	values: DocxValuesSnapshot | undefined
+	execute: (command: DocxEditorCommand) => void
+}
+
+// Word's Paragraph dialog (indents and spacing) for the selected paragraphs, asked for from the ⋯ menu
+// (paragraph.indent's input): prefilled with their values (empty where they differ); only what is changed
+// is sent.
+export function DocxParagraphDialog({ values, execute, inputRequest, onInputDone }: DocxParagraphDialogProps) {
+	const { t } = useTranslation(["preview", "common"])
+	const unit = lengthUnit(navigator.language)
+	const {
+		request,
+		form: opened,
+		setForm
+	} = useInputForm(
+		inputRequest,
+		asked => asked.type === "paragraph.indent",
+		() => {
+			if (values === undefined) {
+				return null
+			}
+
+			const initial = paragraphForm(values, unit)
+
+			return { initial, form: initial }
+		}
+	)
+	const shown = opened !== null
+	const commands = opened === null ? [] : paragraphCommands(opened.initial, opened.form, unit)
+	const set = (patch: Partial<DocxParagraphForm>): void => {
+		setForm(previous => ({ ...previous, form: { ...previous.form, ...patch } }))
+	}
+	const close = (): void => {
+		if (request !== null) {
+			onInputDone(request.nonce)
+		}
+	}
+	const form = opened?.form
+
+	return (
+		<FormDialog
+			open={shown}
+			pending={false}
+			title={t("previewDocxParagraphTitle")}
+			description={t("previewDocxParagraphBody")}
+			submitLabel={t("previewDocxApplyAction")}
+			cancelLabel={t("common:cancel")}
+			canSubmit={commands !== null && commands.length > 0}
+			onOpenChange={open => {
+				if (!open) {
+					close()
+				}
+			}}
+			onSubmit={(event: SubmitEvent) => {
+				event.preventDefault()
+
+				for (const command of commands ?? []) {
+					execute(command)
+				}
+
+				close()
+			}}
+		>
+			{form === undefined ? null : (
+				<FieldGroup className="grid grid-cols-2 gap-4">
+					<Field>
+						<FieldLabel htmlFor="docx-paragraph-start">{t("previewDocxIndentStart", { unit })}</FieldLabel>
+						<Input
+							id="docx-paragraph-start"
+							inputMode="decimal"
+							value={form.start}
+							onChange={event => {
+								set({ start: event.target.value })
+							}}
+						/>
+					</Field>
+					<Field>
+						<FieldLabel htmlFor="docx-paragraph-end">{t("previewDocxIndentEnd", { unit })}</FieldLabel>
+						<Input
+							id="docx-paragraph-end"
+							inputMode="decimal"
+							value={form.end}
+							onChange={event => {
+								set({ end: event.target.value })
+							}}
+						/>
+					</Field>
+					<DocxChoiceField
+						label={t("previewDocxIndentSpecial")}
+						value={form.special}
+						items={SPECIALS.map(special => ({ value: special.value, label: t(special.label) }))}
+						onChange={special => {
+							set({ special })
+						}}
+					/>
+					<Field>
+						<FieldLabel htmlFor="docx-paragraph-by">{t("previewDocxIndentBy", { unit })}</FieldLabel>
+						<Input
+							id="docx-paragraph-by"
+							inputMode="decimal"
+							disabled={form.special === "none"}
+							value={form.by}
+							onChange={event => {
+								set({ by: event.target.value })
+							}}
+						/>
+					</Field>
+					<Field>
+						<FieldLabel htmlFor="docx-paragraph-before">{t("previewDocxSpaceBefore")}</FieldLabel>
+						<Input
+							id="docx-paragraph-before"
+							inputMode="decimal"
+							value={form.before}
+							onChange={event => {
+								set({ before: event.target.value })
+							}}
+						/>
+					</Field>
+					<Field>
+						<FieldLabel htmlFor="docx-paragraph-after">{t("previewDocxSpaceAfter")}</FieldLabel>
+						<Input
+							id="docx-paragraph-after"
+							inputMode="decimal"
+							value={form.after}
+							onChange={event => {
+								set({ after: event.target.value })
+							}}
+						/>
+					</Field>
+					<DocxChoiceField
+						label={t("previewDocxLineSpacingRule")}
+						value={form.rule}
+						items={LINE_RULES.map(rule => ({ value: rule.rule, label: t(rule.label) }))}
+						onChange={rule => {
+							set({ rule })
+						}}
+					/>
+					<Field>
+						<FieldLabel htmlFor="docx-paragraph-at">{t("previewDocxLineSpacingAt")}</FieldLabel>
+						<Input
+							id="docx-paragraph-at"
+							inputMode="decimal"
+							value={form.at}
+							onChange={event => {
+								set({ at: event.target.value })
+							}}
+						/>
+					</Field>
+					{commands === null ? <FieldError className="col-span-2">{t("previewDocxInvalidNumber")}</FieldError> : null}
+				</FieldGroup>
+			)}
+		</FormDialog>
+	)
 }

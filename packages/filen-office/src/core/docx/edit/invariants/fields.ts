@@ -17,8 +17,8 @@ import { fieldFormatState, holdsFormatting, unformattableFields, resultDropsForm
 import { SetMarkSetsStep, SetMarksStep, isAddMarkLike, isMarkStep } from "../marks"
 import { RevisionFlag } from "../../model/index"
 import { isDeleted, markable, paragraphChange, planOf, setParagraphChange, type RevisionStamp } from "../../review/track"
-import { FORMATTING_MARKS, NO_SOURCE, docxSchema } from "../schema"
-import { changedRanges, isInternal, isRemarking, markInternal } from "./core"
+import { FORMATTING_MARKS, NO_SOURCE, docxSchema, survivorsOf, type MarkerAttrs, type MarkerList } from "../schema"
+import { changedRanges, isInternal, isRemarking, markInternal, reinsert } from "./core"
 import type { InvariantStage } from "./index"
 
 // Fields spanning paragraphs (a table of contents: field_char begin, its instruction texts when it is the
@@ -218,27 +218,27 @@ function splits(tr: Transaction): boolean {
 	return tr.steps.some(step => (step instanceof ReplaceStep || step instanceof ReplaceAroundStep) && step.slice.openStart > 0)
 }
 
-// Where a paragraph ends inside a field's code: the offset of its last begin with no separate after it (only
-// instruction texts and zero-width markers follow), or -1.
+// Where a paragraph ends inside a field's code: the offset of the first begin whose separate (or end) it does not
+// hold, whatever follows it (text typed or pasted into a code is the code's), or -1.
 function openCode(paragraph: Node): number {
-	let open = -1
+	const open: { offset: number; code: boolean }[] = []
 
 	paragraph.forEach((child, offset) => {
-		if (child.type === nodes.field_char) {
-			const kind = child.attrs["kind"] as string
+		if (child.type !== nodes.field_char) return
 
-			if (kind === "begin") open = offset
-			else if (kind !== "instruction" && kind !== "deletedInstruction") open = -1
-		} else if (child.type !== nodes.marker && child.type !== nodes.proof_err) {
-			open = -1
-		}
+		const kind = child.attrs["kind"] as string
+		const last = open[open.length - 1]
+
+		if (kind === "begin") open.push({ offset, code: true })
+		else if (kind === "separate" && last !== undefined) last.code = false
+		else if (kind === "end") open.pop()
 	})
 
-	return open
+	return open.find(field => field.code)?.offset ?? -1
 }
 
-// Codes split from their separates by the transactions' splits, moved after the split (onto `tr`, whose steps
-// follow them).
+// Codes split from their separates by the transactions' splits (Enter, paragraphs pasted into them), moved after
+// the split (onto `tr`, whose steps follow them).
 function rejoinCodes(transactions: readonly Transaction[], tr: Transaction): void {
 	const ranges: number[] = []
 
@@ -282,6 +282,26 @@ function rejoinCodes(transactions: readonly Transaction[], tr: Transaction): voi
 		tr.insert(into, code)
 		tr.delete(from, to)
 	}
+}
+
+// Deletes [from, to) (onto `tr`) with what outlives deletion put back where it was (range markers, comment
+// anchors): these repairs skip the invariants that keep them for an edit.
+function deleteKeeping(tr: Transaction, from: number, to: number): void {
+	const markers: MarkerAttrs[] = []
+
+	tr.doc.nodesBetween(from, to, (node, pos) => {
+		if (pos < from || pos + node.nodeSize > to) return !node.isLeaf
+
+		if (node.isBlock) for (const marker of (node.attrs["before"] as MarkerList | undefined) ?? []) markers.push(marker)
+
+		for (const marker of survivorsOf(node)) markers.push(marker)
+
+		return !node.isLeaf
+	})
+
+	tr.delete(from, to)
+
+	if (markers.length > 0) reinsert(tr, from, markers)
 }
 
 const DELETING = [docxSchema.marks.deletion, docxSchema.marks.move_from]
@@ -372,7 +392,7 @@ function wholeDeletions(transactions: readonly Transaction[], tr: Transaction): 
 			inserted === "all" &&
 			deletable(doc, first.pos, last.pos + 1)
 		) {
-			tr.delete(first.pos, last.pos + 1)
+			deleteKeeping(tr, first.pos, last.pos + 1)
 		} else if (deletion !== undefined && first !== undefined && last !== undefined) {
 			deleteWhole(tr, first.pos, last.pos + 1, deletion)
 		} else {
@@ -656,12 +676,14 @@ function repairCharacters(transactions: readonly Transaction[], state: EditorSta
 	const cut: number[] = []
 	let any = false
 
+	// The session's own transactions too where they took field characters (Accept or Reject of a part of a
+	// field's tracked change takes the characters it covers): a field is not left without its other characters.
 	transactions.forEach((tr, index) => {
-		if (!tr.docChanged || isHistoryTransaction(tr) || isInternal(tr)) return
+		if (!tr.docChanged || isHistoryTransaction(tr)) return
 
 		const points = touched(tr)
 
-		if (points === undefined) return
+		if (points === undefined || (isInternal(tr) && points.removed.length === 0)) return
 
 		any = true
 
@@ -738,13 +760,13 @@ function repairCharacters(transactions: readonly Transaction[], state: EditorSta
 		if (deletable(doc, range[0], range[1])) whole.push(range)
 	}
 
-	for (const [from, to] of whole.reverse()) tr.delete(from, to)
+	for (const [from, to] of whole.reverse()) deleteKeeping(tr, from, to)
 
 	// What is still without partners goes alone.
 	for (const left of unmatched(tr.doc).reverse()) {
 		const before = tr.mapping.invert().map(left.pos, 1)
 
-		if (!kept.has(before)) tr.delete(left.pos, left.pos + 1)
+		if (!kept.has(before)) deleteKeeping(tr, left.pos, left.pos + 1)
 	}
 
 	return tr

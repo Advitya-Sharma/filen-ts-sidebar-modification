@@ -432,6 +432,29 @@ describe("inserting fields", () => {
 	})
 })
 
+describe("a result for a field without one", () => {
+	it("writes the separator after the code, leaving no run of the end character's behind", async () => {
+		const rPr = '<w:rPr><w:sz w:val="20"/></w:rPr>'
+		const begin = `<w:r>${rPr}<w:fldChar w:fldCharType="begin"/></w:r>`
+		const code = '<w:instrText xml:space="preserve"> PAGE </w:instrText>'
+		const end = '<w:fldChar w:fldCharType="end"/>'
+		// The end character in a run of its own, and in the code's run.
+		for (const runs of [`${begin}<w:r>${rPr}${code}</w:r><w:r>${rPr}${end}</w:r>`, `${begin}<w:r>${rPr}${code}${end}</w:r>`]) {
+			const opened = await open({ body: `<w:p>${runs}<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>` })
+
+			expect(await opened.editor.execute({ type: "field.updateAll" })).toBe(true)
+			expect(fields(opened.editor.session.state.doc)).toEqual(["PAGE=1"])
+
+			const xml = await read(await save(opened))
+
+			expect(xml).toContain(
+				`<w:r>${rPr}${code}</w:r><w:r>${rPr}<w:fldChar w:fldCharType="separate"/></w:r><w:r>${rPr}<w:t>1</w:t></w:r><w:r>${rPr}${end}</w:r>`
+			)
+			expect(xml).not.toMatch(/<w:r>(<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)?<\/w:r>/)
+		}
+	})
+})
+
 describe("tracked updates", () => {
 	it("records an update while tracking as Word does (old result deleted, new inserted), accepted or rejected whole", async () => {
 		const body = `<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>${complex(" PAGE ", "9", "<w:rPr><w:b/></w:rPr>")}</w:p>`
@@ -1301,6 +1324,102 @@ describe("update field and tables of contents", () => {
 
 		expect(fields(editor.session.state.doc)).toEqual(["PAGE=1"])
 		expect(await read(await save(opened))).toContain("Stale entry")
+	})
+})
+
+describe("field codes kept in their paragraph", () => {
+	it("keeps a table's code in one paragraph when paragraphs are pasted inside it", async () => {
+		const toc =
+			'<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>' +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Entry</w:t></w:r></w:p>' +
+			'<w:p><w:r><w:t>Two</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+
+		for (const typed of ["", "x"]) {
+			const opened = await open({ body: toc + p("Alpha") + p("Beta") })
+			const session = opened.editor.session
+			let begin = -1
+
+			session.state.doc.descendants((node, pos) => {
+				if (node.type === nodes.field_char && node.attrs["kind"] === "begin") begin = pos
+
+				return begin < 0
+			})
+			expect(begin).toBeGreaterThanOrEqual(0)
+
+			// Text inside the code (a form typed into it), then two paragraphs' pieces pasted after it.
+			if (typed !== "") session.dispatch(session.state.tr.insertText(typed, begin + 1))
+
+			const alpha = find(session.state.doc, "Alpha")
+
+			session.dispatch(
+				session.state.tr.replace(begin + 1 + typed.length, begin + 1 + typed.length, session.state.doc.slice(alpha + 2, alpha + 10))
+			)
+
+			// Every character of the code in one paragraph.
+			let codes = 0
+
+			session.state.doc.descendants(node => {
+				if (node.type !== nodes.paragraph) return true
+
+				const kinds: string[] = []
+
+				node.forEach(child => {
+					if (child.type === nodes.field_char) kinds.push(child.attrs["kind"] as string)
+				})
+
+				if (kinds.includes("begin")) {
+					codes++
+					expect(kinds.slice(0, 3)).toEqual(["begin", "instruction", "separate"])
+				}
+
+				return false
+			})
+			expect(codes).toBe(1)
+			expect(await refusal(opened)).toBeUndefined()
+		}
+	})
+})
+
+describe("field characters kept with their partners", () => {
+	it("takes a whole table of contents out when Reject takes its end character's insertion, its bookmark kept", async () => {
+		const opened = await open({ body: p("Heading", '<w:outlineLvl w:val="0"/>') + p("Text") })
+		const editor = opened.editor
+		const session = editor.session
+
+		opened.context.identity.author = "Ann Lee"
+		opened.context.review.tracking = true
+		select(editor, 1)
+		expect(await editor.execute({ type: "toc.insert", levels: 3, hyperlinks: true })).toBe(true)
+		await settleAll(editor)
+
+		const chars = (): { kind: string; pos: number }[] => {
+			const out: { kind: string; pos: number }[] = []
+
+			session.state.doc.descendants((node, pos) => {
+				if (node.type === nodes.field_char) out.push({ kind: node.attrs["kind"] as string, pos })
+
+				return true
+			})
+
+			return out
+		}
+		const begin = chars().find(char => char.kind === "begin")?.pos ?? -1
+		const end = chars().find(char => char.kind === "end")?.pos ?? -1
+
+		expect(begin).toBeGreaterThanOrEqual(0)
+		expect(end).toBeGreaterThan(begin)
+		opened.context.review.tracking = false
+		select(editor, find(session.state.doc, "Heading") + 1)
+		expect(find(session.state.doc, "Heading")).toBeLessThan(end)
+		expect(editor.execute({ type: "bookmark.add", name: "Inside" })).toBe(true)
+
+		const at = chars().find(char => char.kind === "end")?.pos ?? -1
+
+		select(editor, at, at + 1)
+		expect(await editor.execute({ type: "review.reject" })).toBe(true)
+		expect(chars()).toEqual([])
+		expect(sessionBookmarks(session).list.map(bookmark => bookmark.name)).toContain("Inside")
+		expect(await refusal(opened)).toBeUndefined()
 	})
 })
 

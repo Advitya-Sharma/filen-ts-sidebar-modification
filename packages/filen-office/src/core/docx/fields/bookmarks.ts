@@ -370,3 +370,32 @@ export function hiddenBookmarkName(prefix: "_Toc" | "_Ref", taken: (name: string
 		if (!taken(name)) return name
 	}
 }
+
+// The hidden bookmark a link to the heading paragraph at `pos` of `tr`'s document goes to, as Word's Place in
+// This Document links: the first _Toc bookmark starting in it (Word's, or a table of contents'), else a new one
+// around its text, put in `tr` with a name of Word's form. Undefined when `pos` is no paragraph.
+export function headingBookmark(tr: Transaction, session: DocxEditorSession, pos: number): string | undefined {
+	const doc = tr.doc
+	const node = pos >= 0 && pos < doc.content.size ? doc.nodeAt(pos) : null
+
+	if (node?.type !== nodes.paragraph) return undefined
+
+	const index = bookmarkIndex(doc, session.story.part)
+
+	for (const bookmark of index.list) {
+		if (!bookmark.name.startsWith("_Toc") || bookmark.start !== "inline") continue
+
+		const $start = doc.resolve(bookmark.startPos)
+
+		if ($start.parent.type === nodes.paragraph && $start.before() === pos) return bookmark.name
+	}
+
+	const name = hiddenBookmarkName(
+		"_Toc",
+		candidate => index.byName.has(candidate.toLowerCase()) || bookmarkNameTaken(session.context, [session], candidate)
+	)
+
+	insertBookmark(tr, pos + 1, pos + node.nodeSize - 1, String(session.context.ids.next("bookmark")), name)
+
+	return name
+}

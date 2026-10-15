@@ -1,10 +1,15 @@
 import type { RefObject } from "react"
+import { useTranslation } from "react-i18next"
 import type { PagedEditor } from "@filen/office/core/docx/paged"
-import type { DocxEditorHandle, DocxEditorMark } from "@filen/office/react/docx/editor"
+import type { DocxDocument } from "@filen/office/react/docx"
+import { DocxReflow, type DocxEditorHandle, type DocxEditorInteractions, type DocxEditorMark } from "@filen/office/react/docx/editor"
+import { DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu"
 import type { DocxToolbarSlotProps } from "@/features/preview/components/docxEditor.logic"
 
 export interface DocxReflowSurfaceProps {
 	editor: PagedEditor
+	// The renderer's side of the same document (its media).
+	document: DocxDocument
 	// The same handle the paged editor fills (clipboard, hit tests, touch selection).
 	handleRef: RefObject<DocxEditorHandle | null>
 	label: string
@@ -12,20 +17,64 @@ export interface DocxReflowSurfaceProps {
 	apple: boolean
 	marks: readonly DocxEditorMark[]
 	onFind: () => void
+	// Presses on objects in the text (comment highlights, controls), as on the pages.
+	interactions?: DocxEditorInteractions
 }
 
 // The document reflowed to the window's width for editing on phones and narrow windows, in place of the
-// pages. Never shown yet: the toggle below is not offered.
-export function DocxReflowSurface(_props: DocxReflowSurfaceProps): null {
-	return null
+// pages: the text wraps to the screen, tracked changes show inline, comments as highlights.
+const STORY_LABELS = {
+	footnote: "previewDocxMobileFootnote",
+	endnote: "previewDocxMobileEndnote",
+	textbox: "previewDocxMobileTextBox"
+} as const
+// A note with its mark as numbered ("Footnote 3").
+const NUMBERED_LABELS = { footnote: "previewDocxMobileFootnoteNumbered", endnote: "previewDocxMobileEndnoteNumbered" } as const
+
+export function DocxReflowSurface({ handleRef, interactions, ...props }: DocxReflowSurfaceProps) {
+	const { t } = useTranslation("preview")
+
+	return (
+		<DocxReflow
+			ref={handleRef}
+			editor={props.editor}
+			document={props.document}
+			className="size-full"
+			label={props.label}
+			readOnly={props.readOnly}
+			apple={props.apple}
+			marks={props.marks}
+			onFind={props.onFind}
+			storyLabel={(kind, mark) => (kind === "textbox" || mark === "" ? t(STORY_LABELS[kind]) : t(NUMBERED_LABELS[kind], { mark }))}
+			{...(interactions === undefined ? {} : { interactions })}
+		/>
+	)
 }
 
-export interface DocxReflowToggleProps extends DocxToolbarSlotProps {
+export interface DocxReflowMenuItemProps extends DocxToolbarSlotProps {
 	reflow: boolean
 	onReflowChange: (reflow: boolean) => void
 }
 
-// The toolbar's switch between pages and the reflowed view.
-export function DocxReflowToggle(_props: DocxReflowToggleProps): null {
-	return null
+// The ⋯ menu's "Mobile view" switch between pages and the reflowed view (the user's choice holds for the open
+// document).
+export function DocxReflowMenuItem(props: DocxReflowMenuItemProps) {
+	const { t } = useTranslation("preview")
+	const command = props.commands.find(entry => entry.info.type === "view.reflow")
+
+	if (command === undefined) {
+		return null
+	}
+
+	return (
+		<DropdownMenuCheckboxItem
+			checked={props.reflow}
+			closeOnClick
+			onCheckedChange={checked => {
+				props.onReflowChange(checked)
+			}}
+		>
+			{t(command.label)}
+		</DropdownMenuCheckboxItem>
+	)
 }

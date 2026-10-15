@@ -1,12 +1,15 @@
 import { log } from "@/lib/log"
+import { htmlHoldsOnlyImages } from "@/features/preview/lib/docxImages.logic"
 
 // The system clipboard for the DOCX editor's own Cut, Copy and Paste commands (menus, touch): the selection
-// written as HTML and text (as a copy event writes it), read back as both. Keyboard shortcuts and the
-// browser's own menu go through clipboard events instead and never get here.
+// written as HTML and text (as a copy event writes it), read back as both, or a picture copied alone.
+// Keyboard shortcuts and the browser's own menu go through clipboard events instead and never get here.
 
 export interface ClipboardContent {
 	html?: string
 	text?: string
+	// Pictures on the clipboard without text (a screenshot, a copied image).
+	files?: File[]
 }
 
 // False when the browser refused (no permission, no user activation). Without `html`, text alone.
@@ -41,6 +44,19 @@ async function readItems(): Promise<ClipboardContent> {
 
 		if (out.text === undefined && item.types.includes("text/plain")) {
 			out.text = await (await item.getType("text/plain")).text()
+		}
+
+		// A picture is read only from an item without text, or whose HTML is only pictures (a copied image):
+		// copied content keeps its own pictures.
+		const image =
+			item.types.includes("text/plain") && !htmlHoldsOnlyImages(out.html)
+				? undefined
+				: item.types.find(type => type.startsWith("image/"))
+
+		if (image !== undefined) {
+			const blob = await item.getType(image)
+
+			out.files = [...(out.files ?? []), new File([blob], `image.${image.slice(6).replace(/\W.*$/, "")}`, { type: image })]
 		}
 	}
 

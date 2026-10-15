@@ -143,6 +143,9 @@ export interface TocRegion {
 	// result recorded deleted between them); -1 for the file's locked blocks.
 	readonly codeEnd: number
 	readonly endAt: number
+	// A table of one paragraph holding nothing but its field, read as one field atom (an empty table, as Word
+	// leaves one): that field's position (an update replaces the paragraph whole), else -1.
+	readonly atom: number
 }
 
 interface SourceToc {
@@ -269,7 +272,8 @@ function sourceRegion(context: DocxEditContext, part: StoryPart, parent: Node, i
 				head: false,
 				tail: undefined,
 				codeEnd: -1,
-				endAt: -1
+				endAt: -1,
+				atom: -1
 			}
 		}
 	}
@@ -458,7 +462,79 @@ function newRegion(context: DocxEditContext, part: StoryPart, parent: Node, inde
 		head: titled,
 		tail,
 		codeEnd,
-		endAt
+		endAt,
+		atom: -1
+	}
+}
+
+// The TOC field atom a paragraph holds and nothing else that shows (range markers may stand around it), with its
+// child index; undefined for any other paragraph, or a field a tracked change deleted or moved.
+export function tocAtomOf(paragraph: Node): { readonly node: Node; readonly index: number } | undefined {
+	let found: { node: Node; index: number } | undefined
+	let other = false
+
+	paragraph.forEach((child, _, index) => {
+		if (!shows(child)) return
+		if (found === undefined && child.type === nodes.field && parseFieldCode(child.attrs["instruction"] as string).type === "TOC")
+			found = { node: child, index }
+		else other = true
+	})
+
+	if (found === undefined || other) return undefined
+
+	const field = found.node
+
+	return marks.deletion.isInSet(field.marks) === undefined && marks.move_from.isInSet(field.marks) === undefined ? found : undefined
+}
+
+// A table of contents read as one field atom in `parent`'s child `index` (see TocRegion.atom).
+function atomRegion(context: DocxEditContext, part: StoryPart, parent: Node, index: number, pos: number): TocRegion | undefined {
+	const paragraph = parent.child(index)
+	const atom = tocAtomOf(paragraph)
+
+	if (atom === undefined) return undefined
+
+	const field = atom.node
+	const instruction = field.attrs["instruction"] as string
+	const options = tocOptions(parseFieldCode(instruction))
+	const lists: MarkerList[] = []
+	const templates = new Map<number, number>()
+	const item = paragraph.attrs["src"] as number
+
+	if (item !== NO_SOURCE && part.kinds[item] === Item.Paragraph) {
+		const level = tocLevel(context, partStyle(part, item), options.figures)
+
+		if (level !== undefined) templates.set(level, item)
+	}
+
+	blockMarkers(paragraph, lists)
+	paragraph.forEach(child => {
+		const markers = survivorsOf(child)
+
+		if (markers.length > 0) lists.push(markers)
+	})
+
+	let offset = 0
+
+	for (let k = 0; k < atom.index; k++) offset += paragraph.child(k).nodeSize
+
+	return {
+		from: pos,
+		to: pos + paragraph.nodeSize,
+		instruction,
+		source: false,
+		// A field with a value a command set or an update recorded while tracking is rebuilt by no update.
+		updatable: options.supported && field.attrs["state"] === null && field.attrs["update"] === null,
+		sectPr: paragraph.attrs["sectPr"] as number,
+		markers: lists.length === 0 ? NO_MARKERS : lists.flat(),
+		templates,
+		replaceFrom: pos,
+		replaceTo: pos + paragraph.nodeSize,
+		head: false,
+		tail: undefined,
+		codeEnd: -1,
+		endAt: -1,
+		atom: pos + 1 + offset
 	}
 }
 
@@ -476,7 +552,7 @@ export function tocRegions(session: DocxEditorSession): TocRegion[] {
 				child.type === nodes.locked_block
 					? sourceRegion(context, part, parent, index, pos)
 					: child.type === nodes.paragraph
-						? newRegion(context, part, parent, index, pos)
+						? (newRegion(context, part, parent, index, pos) ?? atomRegion(context, part, parent, index, pos))
 						: undefined
 
 			if (region !== undefined) {
@@ -875,9 +951,27 @@ export function takenElsewhere(sessions: readonly DocxEditorSession[], session: 
 	return name => bookmarkNameTaken(session.context, others, name)
 }
 
+// Parts with a table of contents within one paragraph (read as a field atom).
+const ONE_PARAGRAPH_TOCS = new WeakMap<StoryPart, boolean>()
+
+function hasOneParagraphToc(part: StoryPart): boolean {
+	let found = ONE_PARAGRAPH_TOCS.get(part)
+
+	if (found === undefined) {
+		found = false
+
+		for (let field = 0; field < part.fields.count && !found; field++)
+			found = (part.fields.parent[field] ?? -1) < 0 && part.fieldType(field) === "TOC"
+
+		ONE_PARAGRAPH_TOCS.set(part, found)
+	}
+
+	return found
+}
+
 // Whether the story's part has a table of contents of its own (read once per part).
 export function partHasToc(part: StoryPart): boolean {
-	return sourceTocs(part).size > 0
+	return sourceTocs(part).size > 0 || hasOneParagraphToc(part)
 }
 
 // Stories a table of contents was inserted into this session.

@@ -12,7 +12,7 @@ import { DocxWriteError } from "../values"
 import type { PartContributor, SaveParts, WrittenStories } from "./index"
 
 // settings.xml: the track switch (w:trackRevisions) where the editor turned it from what the file has, the
-// even/odd headers switch (w:evenAndOddHeaders) and where notes go (w:pos of w:footnotePr / w:endnotePr) as the
+// even/odd headers switch (w:evenAndOddHeaders), mirror margins (w:mirrorMargins) and where notes go (w:pos of w:footnotePr / w:endnotePr) as the
 // body's section edits set them; nothing else of the part changes. A package without settings gets a part holding only those. A notes part the save makes gets no
 // separator list here: its separator notes carry w:type, and layout reads the list as the source has it. The
 // contributor also claims the body's section edits (written with the stories, see write/sections.ts) and the
@@ -208,6 +208,11 @@ export const settingsParts: PartContributor = {
 
 		if (evenAndOdd !== undefined && evenAndOdd !== model.settings.evenAndOddHeaders)
 			changes.set("evenAndOddHeaders", names => (evenAndOdd ? names.empty("evenAndOddHeaders") : ""))
+
+		const mirror = edits?.mirrorMargins
+
+		if (mirror !== undefined && mirror !== model.settings.mirrorMargins)
+			changes.set("mirrorMargins", names => (mirror ? names.empty("mirrorMargins") : ""))
 
 		for (const [local, position, endnote] of [
 			["footnotePr", edits?.footnotePosition, false],

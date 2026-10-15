@@ -13,6 +13,7 @@ import { rowOverrides, type RowOverrides, type TrackStamp } from "../edit/tables
 import type { DocxEditorSession } from "../edit/session"
 import { Revision, RevisionFlag, type StoryPart } from "../model/index"
 import { wantReviewIndex } from "./index"
+import { equationDeleted, equationFault, trackedDeletion } from "../math/edit"
 import type { ParagraphBordersProps } from "../props/index"
 import { Names, Out } from "../write/markup"
 import { sameFormatting, writeRunProperties } from "../write/runs"
@@ -197,6 +198,8 @@ export interface TrackPlan {
 	readonly deleted: Range[]
 	// Paragraphs (by position) whose mark the edit deleted, table rows it deleted whole.
 	readonly marks: { readonly pos: number; readonly at: number }[]
+	// Equations it deleted whole (marked inside them).
+	readonly equations: { readonly pos: number; readonly at: number }[]
 	readonly rows: { readonly pos: number; readonly at: number }[]
 	readonly formats: FormatPiece[]
 	// Ranges whose recorded formatting changes may have been undone by the edit.
@@ -211,8 +214,10 @@ export interface TrackPlan {
 const plans = new WeakMap<Transaction, TrackPlan>()
 // The session of each user transaction (the stage moves paragraph mark revisions read from its part).
 const sessions = new WeakMap<Transaction, DocxEditorSession>()
-// Transactions refused because recording them needs the author's name first.
+// Transactions refused because recording them needs the author's name first, or (`unsupported`) because what
+// they would record could not be saved (the deletion of an equation nested too deep).
 const refused = new WeakSet<Transaction>()
+const unsupported = new WeakSet<Transaction>()
 
 export function planOf(tr: Transaction): TrackPlan | undefined {
 	return plans.get(tr)
@@ -220,6 +225,10 @@ export function planOf(tr: Transaction): TrackPlan | undefined {
 
 export function refusedForAuthor(tr: Transaction): boolean {
 	return refused.has(tr)
+}
+
+export function refusedUnsupported(tr: Transaction): boolean {
+	return unsupported.has(tr)
 }
 
 // ---- IME composition ------------------------------------------------------------------------------------
@@ -366,7 +375,12 @@ interface Deletion {
 	readonly paragraphs: number[]
 	// Table rows taken whole: flagged deleted.
 	readonly rows: number[]
+	// Equations taken whole: their runs and objects marked deleted inside them.
+	readonly equations: number[]
 	kept: boolean
+	// An equation whose deletion could not be recorded (too deep, or markup that could not be saved): the
+	// transaction is refused rather than the equation kept as it was.
+	refused: boolean
 }
 
 function pushPiece(list: [number, number][], start: number, end: number): void {
@@ -377,7 +391,7 @@ function pushPiece(list: [number, number][], start: number, end: number): void {
 }
 
 function classify(doc: Node, from: number, to: number, author: string, session: DocxEditorSession): Deletion {
-	const result: Deletion = { real: [], marked: [], paragraphs: [], rows: [], kept: false }
+	const result: Deletion = { real: [], marked: [], paragraphs: [], rows: [], equations: [], kept: false, refused: false }
 	// Pieces to mark are one range across block boundaries until content that is not marked lies between.
 	let broken = true
 	// Comment anchors that stay by themselves (no revision of their own), and where other content stays.
@@ -394,6 +408,32 @@ function classify(doc: Node, from: number, to: number, author: string, session: 
 			const anchor = commentAnchor(node)
 
 			if (anchor !== undefined) anchors.push({ pos, ...anchor })
+
+			// An equation records its deletion inside it (Word's w:del around its runs, in its objects' m:ctrlPr);
+			// the author's own insertion of all of it goes for real.
+			if (node.type === nodes.math) {
+				const part = session.story.part
+
+				const deleted = trackedDeletion(node, part, 0, { author, date: "" })
+
+				if (deleted === null) {
+					pushPiece(result.real, start, end)
+				} else {
+					if (anchor === undefined) stays.push(pos)
+
+					if (!equationDeleted(node, part)) {
+						result.equations.push(pos)
+
+						if (deleted === undefined || equationFault(deleted, part) !== undefined) result.refused = true
+					}
+
+					result.kept = true
+				}
+
+				broken = true
+
+				return false
+			}
 
 			if (ownInsertion(node, author) || inPending(session, doc, start, end)) {
 				pushPiece(result.real, start, end)
@@ -737,6 +777,7 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 			inserted: [],
 			deleted: [],
 			marks: [],
+			equations: [],
 			rows: [],
 			formats: [],
 			settle: [],
@@ -770,6 +811,7 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 		inserted: [],
 		deleted: [],
 		marks: [],
+		equations: [],
 		rows: [],
 		formats: [],
 		settle: [],
@@ -805,8 +847,10 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 		if (mapped !== null) {
 			const result = rewriteStep(mapped, out, plan, alone)
 
-			if (result === false) {
+			if (result === false || result === UNSUPPORTED) {
 				refused.add(tr)
+
+				if (result === UNSUPPORTED) unsupported.add(tr)
 
 				return tr
 			}
@@ -861,9 +905,18 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 	return out
 }
 
+// What rewriteStep returns for a step whose tracked form could not be saved.
+const UNSUPPORTED = "unsupported"
+
 // Applies one (mapped) user step to `out` in its tracked form, recording what the stage marks. Returns the
-// caret after a lone deletion or a replacement, false when the step cannot be applied, undefined otherwise.
-function rewriteStep(step: Step, out: Transaction, plan: TrackPlan, alone: EditorState | undefined): number | false | undefined {
+// caret after a lone deletion or a replacement, false when the step cannot be applied (UNSUPPORTED: its record
+// could not be saved), undefined otherwise.
+function rewriteStep(
+	step: Step,
+	out: Transaction,
+	plan: TrackPlan,
+	alone: EditorState | undefined
+): number | false | typeof UNSUPPORTED | undefined {
 	const author = plan.stamp.author
 	const session = plan.session
 
@@ -872,6 +925,8 @@ function rewriteStep(step: Step, out: Transaction, plan: TrackPlan, alone: Edito
 		let to = step.to
 		const empty = step.slice.size === 0
 		let deletion = to > from ? classify(out.doc, from, to, author, session) : undefined
+
+		if (deletion?.refused === true) return UNSUPPORTED
 		const lone = alone !== undefined && alone.selection.empty && empty
 		const backward = lone && alone.selection.head >= step.to
 
@@ -891,6 +946,8 @@ function rewriteStep(step: Step, out: Transaction, plan: TrackPlan, alone: Edito
 			from = beyond[0]
 			to = beyond[1]
 			deletion = classify(out.doc, from, to, author, session)
+
+			if (deletion.refused) return UNSUPPORTED
 		}
 
 		if (deletion === undefined || !deletion.kept) {
@@ -972,6 +1029,8 @@ function rewriteStep(step: Step, out: Transaction, plan: TrackPlan, alone: Edito
 			// the new structure around the rest is not made. A step that only moves block boundaries applies.
 			const before = classify(out.doc, step.from, step.gapFrom, author, session)
 			const after = classify(out.doc, step.gapTo, step.to, author, session)
+
+			if (before.refused || after.refused) return UNSUPPORTED
 
 			if (before.kept || after.kept) {
 				const markAt = out.steps.length
@@ -1145,6 +1204,7 @@ function recordDeletion(plan: TrackPlan, deletion: Deletion, at: number): void {
 	for (const [from, to] of deletion.marked) plan.deleted.push({ from, to, at })
 	for (const pos of deletion.paragraphs) plan.marks.push({ pos, at })
 	for (const pos of deletion.rows) plan.rows.push({ pos, at })
+	for (const pos of deletion.equations) plan.equations.push({ pos, at })
 }
 
 // A closed slice of one empty paragraph: what a deletion of whole blocks puts in their place.
@@ -1837,6 +1897,7 @@ function applyPlan(
 		return to > from ? [from, to] : undefined
 	}
 	const inserted: number[] = []
+	const equations: { pos: number; omml: string }[] = []
 
 	for (const range of plan.inserted) {
 		const at = mapped(range)
@@ -1898,6 +1959,23 @@ function applyPlan(
 		update(marking, where, { or: RevisionFlag.Deleted, andNot: 0, change: change => ({ ...change, deleted: own }) })
 	}
 
+	// Equations deleted whole: their deletion recorded inside them, as part of the deletion of the text next to them.
+	for (const { pos, at } of plan.equations) {
+		const where = map(pos, at, 1)
+		const node = where >= 0 && where < size ? doc.nodeAt(where) : null
+
+		if (node?.type !== nodes.math) continue
+
+		deletion ??=
+			continued(doc, where, where + 1, marks.deletion, stamp) ??
+			marks.deletion.create({ src: NO_SOURCE, id: newChange(context), author: stamp.author, date: stamp.date })
+
+		const omml = trackedDeletion(node, plan.session.story.part, deletion.attrs["id"] as number, stamp)
+
+		// One that could not be saved refused the transaction as it was classified.
+		if (omml !== undefined && omml !== null) equations.push({ pos: where, omml })
+	}
+
 	for (const where of rowAt) {
 		if (blocks.get(where)?.type !== nodes.table_row) continue
 
@@ -1940,6 +2018,9 @@ function applyPlan(
 
 		update(marking, where, { or: 0, andNot: 0, change: current => ({ ...current, props: { before: change.before, ...stamp, id } }) })
 	})
+
+	// Attributes move nothing: before the marking rebuilds what it marks.
+	for (const { pos, omml } of equations) tr.setNodeAttribute(pos, "omml", omml)
 
 	return applyMarking(tr, marking)
 }

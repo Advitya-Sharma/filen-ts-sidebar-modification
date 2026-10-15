@@ -618,6 +618,38 @@ describe("comments: the selection and stepping", () => {
 		await Promise.resolve()
 		expect(heard).toBe(1)
 	})
+	it("does not read the comments again for typing while tracking, which changes tracked changes only", async () => {
+		const opened = await open({
+			body:
+				'<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Commented</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>' +
+				"<w:p><w:r><w:t>Plain paragraph</w:t></w:r></w:p>",
+			comments: '<w:comment w:id="0" w:author="Ann"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment>'
+		})
+		const { editor } = opened
+		const store = docxComments(editor)
+		let heard = 0
+
+		store.subscribe(() => heard++)
+		expect(await editor.execute({ type: "review.track", on: true })).toBe(true)
+
+		const threads = store.threads()
+		const version = store.version
+		// Reading the comments again asks the host for the body's session first.
+		const read = vi.spyOn(editor, "storySession")
+		const plain = editor.session.state.doc.child(0).nodeSize + 3
+
+		for (let k = 0; k < 3; k++) {
+			editor.session.dispatch(editor.session.state.tr.insertText("x", plain + k))
+			await Promise.resolve()
+			await Promise.resolve()
+		}
+
+		expect(editor.session.reviewIndex.revisionCount).toBe(1)
+		expect(read).not.toHaveBeenCalled()
+		expect(heard).toBe(0)
+		expect(store.version).toBe(version)
+		expect(store.threads()).toBe(threads)
+	})
 })
 
 describe("comments: Gate 2", () => {
@@ -790,7 +822,7 @@ describe("comments: Word's comment styles where the document lacks them", () => 
 })
 
 describe("comments: what the commands can do", () => {
-	it("reads a header's comments from its own session, made for them, and offers what will run", async () => {
+	it("reads a header's comments from its own session, made once needed, and offers what will run", async () => {
 		const opened = await open({
 			body:
 				'<w:p><w:fldSimple w:instr="PAGE"><w:commentRangeStart w:id="5"/><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t>x</w:t></w:r>' +
@@ -818,8 +850,11 @@ describe("comments: what the commands can do", () => {
 		// Anchors held by a field are its bytes: the comment cannot lose them, nor take a reply next to them.
 		expect(flags("5")).toEqual([false, true, true])
 		expect(flags("6")).toEqual([false, false, true])
+		// The header's comment is listed as the file has it until its story has a session (none is made to open).
+		expect(opened.editor.sessions.some(session => session.story.story.kind === "header")).toBe(false)
+		expect(flags("7")).toEqual([false, false, false])
+		opened.editor.storySession(store.comment("7")?.story ?? -1)
 		expect(flags("7")).toEqual([true, true, true])
-		expect(opened.editor.sessions.some(session => session.story.story.kind === "header")).toBe(true)
 		expect(await opened.editor.execute({ type: "comment.delete", id: "5" })).toBe(false)
 		expect(await opened.editor.execute({ type: "comment.reply", id: "6", text: "no" })).toBe(false)
 		expect(await opened.editor.execute({ type: "comment.delete", id: "7" })).toBe(true)

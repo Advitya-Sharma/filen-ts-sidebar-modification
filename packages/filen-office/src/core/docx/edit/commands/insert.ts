@@ -1,12 +1,15 @@
-import { field, hasControl, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
+import { field, hasControl, intArg, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
 
 // Links, breaks and characters.
 
-// A link goes to a URL (`target`, written as an external relationship, never fetched) or to a bookmark in
-// the document (`anchor`); `text` is inserted as the link's text when the selection is empty.
+// A link goes to a URL (`target`, written as an external relationship, never fetched), to a bookmark in the
+// document (`anchor`), or to a heading of the story (`heading`: its paragraph's position), through the hidden
+// _Toc bookmark Word's Place in This Document links by (the heading's own, or one made around its text); `text`
+// is inserted as the link's text when the selection is empty.
 export type InsertCommand =
 	| { readonly type: "link.set"; readonly target: string; readonly text?: string }
 	| { readonly type: "link.set"; readonly anchor: string; readonly text?: string }
+	| { readonly type: "link.set"; readonly heading: number; readonly text?: string }
 	| { readonly type: "link.remove" }
 	| { readonly type: "insert.pageBreak" }
 	| { readonly type: "insert.lineBreak" }
@@ -44,7 +47,7 @@ export const INSERT_COMMANDS: readonly DocxCommandInfo<InsertCommand["type"]>[] 
 const MAX_TARGET = 2048
 // Word's bookmark names.
 const BOOKMARK_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/
-const MAX_LINK_TEXT = 1024
+export const MAX_LINK_TEXT = 1024
 // A grapheme or a few (a flag, a family emoji): what a symbol picker inserts at once.
 const MAX_SYMBOL = 16
 
@@ -84,11 +87,14 @@ export const parseInsertCommand: DocxCommandParser<InsertCommand> = (type, value
 	const extra = text === undefined ? {} : { text }
 	const target = stringArg(value, "target", MAX_TARGET, 1)
 	const anchor = field(value, "anchor")
+	const heading = field(value, "heading")
+	const given = [field(value, "target"), anchor, heading].filter(arg => arg !== undefined).length
 
-	if (target !== undefined && anchor === undefined && !hasControl(target)) return { type, target, ...extra }
+	if (given !== 1) return undefined
+	if (target !== undefined && !hasControl(target)) return { type, target, ...extra }
+	if (typeof anchor === "string" && BOOKMARK_NAME.test(anchor)) return { type, anchor, ...extra }
 
-	if (target === undefined && field(value, "target") === undefined && typeof anchor === "string" && BOOKMARK_NAME.test(anchor))
-		return { type, anchor, ...extra }
+	const pos = intArg(value, "heading", 0, Number.MAX_SAFE_INTEGER)
 
-	return undefined
+	return pos === undefined ? undefined : { type, heading: pos, ...extra }
 }

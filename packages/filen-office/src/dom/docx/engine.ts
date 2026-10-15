@@ -738,7 +738,7 @@ export class DocxEngine implements DocxSessionApi {
 			const part = table.parts[id] ?? -1
 			const item = table.items[id] ?? -1
 			const node = model.parts[part]?.node(item) ?? -1
-			const tree = node < 0 ? undefined : (await this.drawingLayer(model)).math(part, node)
+			const tree = node < 0 ? undefined : (await this.drawingLayer(model)).math(part, node, index)
 
 			return tree === undefined
 				? { kind: "placeholder", id, reason: "math" }

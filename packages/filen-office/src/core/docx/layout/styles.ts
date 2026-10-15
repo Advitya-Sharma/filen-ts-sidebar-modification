@@ -1,3 +1,4 @@
+import { equationAuthors } from "./objects"
 import {
 	cssFont,
 	forEachSlotRun,
@@ -78,7 +79,26 @@ export function revisionAuthors(model: DocxModel): RevisionAuthors {
 		for (let row = 0; row < table.count; row++) index(model.string(table.author[row] ?? -1))
 	}
 
+	// Equations are one item each: the authors of the changes inside them are in no revision table.
+	for (const part of model.parts) if (part !== undefined) for (const author of equationAuthors(part)) index(author)
+
 	return { names, index }
+}
+
+const sharedAuthors = new WeakMap<DocxModel, RevisionAuthors>()
+
+// Reviewers of a model numbered once for every surface drawing their colours (the pages' text and equations,
+// the balloons, Mobile view): authors met later (an author new in the session) are appended to this one list,
+// so each keeps one colour everywhere.
+export function modelAuthors(model: DocxModel): RevisionAuthors {
+	let authors = sharedAuthors.get(model)
+
+	if (authors === undefined) {
+		authors = revisionAuthors(model)
+		sharedAuthors.set(model, authors)
+	}
+
+	return authors
 }
 
 export type DecorationValue =

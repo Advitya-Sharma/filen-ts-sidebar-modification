@@ -265,19 +265,21 @@ async function placeToc(
 ): Promise<Joined | undefined> {
 	const options = tocOptions(parseFieldCode(instruction))
 	// Rebuilt while tracking: the old result stays, deleted, with its markers and section break, between the
-	// table's own code and end (as Word records an update of a field).
+	// table's own code and end (as Word records an update of a field); an empty table read as one field (its
+	// code and end inside it) stays whole, deleted, the new table inserted after it.
 	const tracked = region !== undefined && session.context.review.tracking
+	const atom = region !== undefined && region.atom >= 0
 
 	// A table of the file kept as locked blocks cannot be recorded deleted.
-	if (!options.supported || (tracked && (region.source || region.codeEnd < 0))) return undefined
+	if (!options.supported || (tracked && !atom && (region.source || region.codeEnd < 0))) return undefined
 
 	let range: { from: number; to: number; head: "title" | "join" | undefined; tail: "whole" | "open" | undefined } | undefined
 
 	if (region !== undefined) {
 		range = { from: region.replaceFrom, to: region.replaceTo, head: region.head ? "title" : undefined, tail: region.tail }
 
-		if (tracked && range.head === undefined) range = { ...range, from: region.codeEnd, head: "join" }
-		if (tracked && range.tail === undefined) range = { ...range, to: region.endAt, tail: "open" }
+		if (tracked && !atom && range.head === undefined) range = { ...range, from: region.codeEnd, head: "join" }
+		if (tracked && !atom && range.tail === undefined) range = { ...range, to: region.endAt, tail: "open" }
 	}
 
 	const host = pagedFieldHost(editor)
@@ -389,9 +391,9 @@ async function updateToc(editor: PagedEditor, pagesOnly: boolean): Promise<boole
 	if (region === undefined || !region.updatable) return false
 
 	// Page numbers alone are the table's PAGEREF fields, updated in place (a table kept as locked blocks has
-	// none the editor can reach: it stays as it is).
+	// none the editor can reach: it stays as it is; one read as a single field has none).
 	if (pagesOnly) {
-		applyChanges(session, fieldChanges(pagedFieldHost(editor), session, region.from, region.to, stamp), undefined)
+		if (region.atom < 0) applyChanges(session, fieldChanges(pagedFieldHost(editor), session, region.from, region.to, stamp), undefined)
 
 		return true
 	}
@@ -435,19 +437,44 @@ function insertField(editor: PagedEditor, instruction: string): boolean {
 		instruction: ` ${instruction.trim()} `,
 		result: ""
 	})
-	const tr = session.state.tr.replaceSelectionWith(field, false)
+	// The field takes the formatting at the caret (its w:lang the language its result is in), as typed text does.
+	const tr = session.state.tr.replaceSelectionWith(field, true)
 	const pos = tr.selection.from - field.nodeSize
+	const inserted = tr.doc.nodeAt(pos)
 
-	if (tr.doc.nodeAt(pos)?.type !== nodes.field) return false
+	if (inserted?.type !== nodes.field) return false
 
-	const result = new FieldEvaluation(pagedFieldHost(editor), session, session.context.identity.now(), tr.doc).result(field, pos)
+	const result = new FieldEvaluation(pagedFieldHost(editor), session, session.context.identity.now(), tr.doc).result(inserted, pos)
 
 	if (result !== undefined && result !== "") tr.setNodeAttribute(pos, "result", result)
 
 	return session.dispatch(tr.scrollIntoView())
 }
 
+// insert.date as text: what a DATE field with the picture shows at the caret now (its language the caret's),
+// typed there with the caret's formatting (a tracked insertion while tracking).
+function insertDateText(editor: PagedEditor, format: string): boolean {
+	const session = editor.session
+
+	if (session.readOnly || !inParagraph(session.state)) return false
+
+	const field = nodes.field.create({ src: NO_SOURCE, end: NO_SOURCE, type: "DATE", instruction: ` DATE \\@ "${format}" ` })
+	const probe = session.state.tr.replaceSelectionWith(field, true)
+	const pos = probe.selection.from - field.nodeSize
+	const inserted = probe.doc.nodeAt(pos)
+	// Evaluated as inserted: with the caret's formatting, its w:lang the language the date is in.
+	const text =
+		inserted?.type === nodes.field
+			? new FieldEvaluation(pagedFieldHost(editor), session, session.context.identity.now(), probe.doc).result(inserted, pos)
+			: undefined
+
+	return text !== undefined && text !== "" && session.dispatch(session.state.tr.insertText(text).scrollIntoView())
+}
+
 const insertable = (context: DocumentCommandContext): boolean => writable(context) && inParagraph(context.session.state)
+// Updates read the laid-out pages and wait for layout to catch up: none while paged layout is suspended (another
+// surface shows the document), where they would wait until it resumes.
+const updatable = (context: DocumentCommandContext): boolean => writable(context) && !context.editor.suspended
 
 const document: DocumentHandlers = {
 	"view.fieldCodes": {
@@ -470,20 +497,20 @@ const document: DocumentHandlers = {
 		enabled: context => {
 			const state = context.session.state
 
-			return writable(context) && (!state.selection.empty || fieldAtCaret(state) !== undefined || onToc(state, true))
+			return updatable(context) && (!state.selection.empty || fieldAtCaret(state) !== undefined || onToc(state, true))
 		},
 		run: context => update(context.editor, false)
 	},
 	"field.updateAll": {
-		enabled: writable,
+		enabled: updatable,
 		run: context => update(context.editor, true)
 	},
 	"toc.insert": {
-		enabled: context => insertable(context) && context.session === context.editor.body.session,
+		enabled: context => insertable(context) && !context.editor.suspended && context.session === context.editor.body.session,
 		run: (context, command) => insertToc(context.editor, command.levels, command.hyperlinks)
 	},
 	"toc.update": {
-		enabled: context => writable(context) && hasToc(context.session),
+		enabled: context => updatable(context) && hasToc(context.session),
 		run: (context, command) => updateToc(context.editor, command.pagesOnly)
 	},
 	"insert.pageNumber": {
@@ -496,7 +523,10 @@ const document: DocumentHandlers = {
 	},
 	"insert.date": {
 		enabled: insertable,
-		run: (context, command) => insertField(context.editor, `DATE \\@ "${command.format}"`)
+		run: (context, command) =>
+			command.field === false
+				? insertDateText(context.editor, command.format)
+				: insertField(context.editor, `DATE \\@ "${command.format}"`)
 	},
 	"insert.field": {
 		enabled: insertable,

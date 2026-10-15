@@ -798,7 +798,15 @@ export const test = base.extend<{
 		{ auto: true }
 	],
 	// CDP is chromium-only, so firefox/webkit run at full speed whatever the variable says.
-	page: async ({ page, context, browserName }, use) => {
+	page: async ({ page, context, browserName }, use, testInfo) => {
+		// Read lanes share the read-only fixture tree: a DOCX edited there never saves on its own (E2E builds read
+		// this key, docxEditor.tsx E2E_AUTOSAVE_OFF).
+		if (testInfo.project.name.endsWith("-read")) {
+			await context.addInitScript(key => {
+				sessionStorage.setItem(key, "off")
+			}, "filen-e2e-docx-autosave")
+		}
+
 		if (browserName === "chromium" && CPU_THROTTLE_RATE > 1) {
 			const throttle = async (target: Page) => {
 				const cdp = await context.newCDPSession(target)

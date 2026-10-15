@@ -33,6 +33,7 @@ import { Item, buildDocxModel, type StoryPart } from "../model/index"
 import { partReader } from "../model/reader"
 import { Ns } from "../model/namespaces"
 import { drawingSignature } from "../objects/edit"
+import { mathSignature } from "./atoms/math"
 import { parseNumbering, type Numbering } from "../numbering/index"
 import { openDocxPackage, type DocxPackage } from "../package"
 import { PropsStore } from "../props/index"
@@ -1527,6 +1528,7 @@ async function readBackBatch(
 	const built =
 		clock === undefined ? builder.build(model.body) : await builder.buildSliced(model.body, clock.pause, clock.sliceMs, clock.now)
 	const readBlocks = textblocks(built.doc)
+	const readPart = model.parts[model.body.part]
 
 	if (readBlocks.length !== paragraphs.length)
 		fail("content", `${paragraphs.length} rewritten paragraphs read back as ${readBlocks.length}`)
@@ -1536,8 +1538,8 @@ async function readBackBatch(
 
 		if (other === undefined || other.type !== nodes.paragraph) return
 
-		const expected = paragraphSignature(paragraph, input.changes.numIds, story.sections[first + index], input.context)
-		const actual = paragraphSignature(other, input.changes.numIds, undefined, context)
+		const expected = paragraphSignature(paragraph, input.changes.numIds, story.sections[first + index], input.context, story.part)
+		const actual = paragraphSignature(other, input.changes.numIds, undefined, context, readPart)
 
 		if (expected !== actual)
 			fail("content", `A rewritten paragraph of ${story.part.name} reads back differently:\n${actual}\n!=\n${expected}`)
@@ -1620,12 +1622,14 @@ function xmlText(text: string): string {
 
 // `section`: whether the paragraph is a section break as written (its own w:sectPr by default). With the
 // `context` the paragraph was built in, a drawing is what its markup and a command's overrides make it (its
-// size, placement, rotation and alt text), not its node's attributes.
+// size, placement, rotation and alt text), not its node's attributes. With the `part` its sources are in, an
+// equation is what it is written as (its new OMML, else its source element).
 export function paragraphSignature(
 	node: Node,
 	numIds: ReadonlyMap<number, number>,
 	section = (node.attrs["sectPr"] as number) >= 0,
-	context?: DocxEditContext
+	context?: DocxEditContext,
+	part?: StoryPart
 ): string {
 	const numId = node.attrs["numId"] as number | null
 	const parts: string[] = [
@@ -1666,6 +1670,12 @@ export function paragraphSignature(
 
 		if (child.type === nodes.drawing && context !== undefined) {
 			parts.push(`drawing${drawingSignature(context, child)}[${markPart}]`)
+
+			return
+		}
+
+		if (child.type === nodes.math) {
+			parts.push(`math${JSON.stringify([child.attrs["display"], mathSignature(child, part)])}[${markPart}]`)
 
 			return
 		}

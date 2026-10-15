@@ -31,6 +31,9 @@ interface InputDialogProps {
 	autoComplete?: ComponentProps<"input">["autoComplete"]
 	maxLength?: ComponentProps<"input">["maxLength"]
 	submitLabel: string
+	// A second way out beside submitting (another choice than giving the value), in the footer before the
+	// submit button. Disabled while `pending`.
+	secondaryAction?: { label: string; onClick: () => void } | undefined
 	validate: (value: string) => boolean
 	// Why the value can't be submitted, shown under the field; null while there is nothing to say (an
 	// empty field only disables the submit). Omitted shows nothing.
@@ -61,6 +64,7 @@ function InputDialog({
 	autoComplete,
 	maxLength,
 	submitLabel,
+	secondaryAction,
 	validate,
 	errorFor,
 	onOpenChange,
@@ -129,6 +133,16 @@ function InputDialog({
 						{error !== null ? <FieldError id="input-dialog-error">{error}</FieldError> : null}
 					</Field>
 					<DialogFooter>
+						{secondaryAction === undefined ? null : (
+							<Button
+								type="button"
+								variant="outline"
+								disabled={pending}
+								onClick={secondaryAction.onClick}
+							>
+								{secondaryAction.label}
+							</Button>
+						)}
 						<Button
 							type="submit"
 							disabled={pending || !valid}

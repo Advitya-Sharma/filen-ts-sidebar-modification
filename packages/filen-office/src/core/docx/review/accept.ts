@@ -24,6 +24,7 @@ import { Item, Revision, RevisionFlag, type Section, type StoryPart } from "../m
 import { ReviewKind, reviewIndexKept, revisionMarkId, wantReviewIndex, type ReviewEntry, type ReviewIndex } from "./index"
 import { bodySections, keepShown, resolveSectionChanges, sectionStates } from "../stories/sections"
 import { fieldUpdateOf, resolvedFieldUpdate } from "../fields/evaluate"
+import { SOURCE, equationChanges, equationFault, partHasTrackedEquations, resolvedEquation } from "../math/edit"
 import { paragraphChange, propertyMarks, setParagraphChange, withParagraphChange, type ParagraphAttrs, type ParagraphChange } from "./track"
 
 // Accepting and rejecting tracked changes, as one internal transaction of the story (one undo step): an
@@ -334,7 +335,7 @@ function collect(
 			seen.add(pos)
 
 			if (node.isInline) {
-				const removed = collectInline(context, node, pos, id, moves, accept, plan)
+				const removed = collectInline(context, session.story.part, node, pos, id, moves, accept, plan)
 
 				if (anchorOnly(node) && !removed) {
 					anchors.push({ from: pos, to: pos + node.nodeSize, markers: survivorsOf(node) })
@@ -405,6 +406,7 @@ function collect(
 
 function collectInline(
 	context: DocxEditContext,
+	part: StoryPart,
 	node: Node,
 	pos: number,
 	id: string | undefined,
@@ -434,6 +436,21 @@ function collectInline(
 			removed.push(mark)
 
 			if (!accept) restoreFormatting(context, node, mark, pos, end, plan)
+		}
+	}
+
+	// Tracked changes inside an equation: its XML with them resolved; nothing of it left, it goes.
+	// What could not be saved is skipped (counted), never written.
+	if (node.type === nodes.math && !moves) {
+		const resolved = resolvedEquation(node, part, id, accept)
+
+		if (resolved !== undefined && resolved !== null && resolved !== SOURCE && equationFault(resolved, part) !== undefined) {
+			plan.skipped.add(`math:${String(pos)}`)
+		} else {
+			for (const change of equationChanges(node, part)) if (id === undefined || change.id === id) plan.resolved.add(change.id)
+
+			if (resolved === null) remove = true
+			else if (resolved !== undefined) plan.attrs.push({ pos, name: "omml", value: resolved === SOURCE ? null : resolved })
 		}
 	}
 
@@ -975,7 +992,9 @@ export function storyReviewIndex(session: DocxEditorSession): ReviewIndex {
 
 		index.attachSources(
 			sourcePropertyChanges(part).all,
-			session.story.story.kind === "body" ? sourceSectionLinks(part, session.context.model.sections) : undefined
+			session.story.story.kind === "body" ? sourceSectionLinks(part, session.context.model.sections) : undefined,
+			part,
+			partHasTrackedEquations(part)
 		)
 	}
 
@@ -1036,7 +1055,13 @@ export function reviewIndexWanted(session: DocxEditorSession): boolean {
 
 	const context = session.context
 
-	if (!context.review.tracking && session.story.part.revisions.count === 0 && context.model.commentAnchors.count === 0) return false
+	if (
+		!context.review.tracking &&
+		session.story.part.revisions.count === 0 &&
+		context.model.commentAnchors.count === 0 &&
+		!partHasTrackedEquations(session.story.part)
+	)
+		return false
 
 	wantReviewIndex(session)
 

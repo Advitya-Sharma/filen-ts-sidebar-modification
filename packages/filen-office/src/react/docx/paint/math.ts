@@ -1,4 +1,4 @@
-import { MathFrame, assertMathTree, isTokenTag, type MathAttributes, type MathElement } from "../../../core/math/index"
+import { MathFrame, MathRevision, assertMathTree, isTokenTag, type MathAttributes, type MathElement } from "../../../core/math/index"
 
 // Builds MathML from a validated math tree: tags and attribute values come from the tree's allowlists and
 // are serialised here; document text reaches the DOM only as token textContent.
@@ -108,6 +108,29 @@ function applyAttributes(element: MathMLElement, attributes: MathAttributes): vo
 	if (attributes.align !== undefined) element.setAttribute("data-fo-align", attributes.align)
 	if (attributes.color !== undefined) element.setAttribute("mathcolor", `#${attributes.color}`)
 	if (attributes.frame !== undefined) applyFrame(element, attributes.frame)
+	if (attributes.revision !== undefined) applyRevision(element, attributes.revision)
+}
+
+// A tracked change in the markup view, as text's: its author's colour (the --fo-revision-<n> variables), an
+// underline under an insertion and a line through a deletion. Drawn without taking room, so the equation keeps
+// the size layout gave it.
+function applyRevision(element: MathMLElement, revision: number): void {
+	const style: CSSStyleDeclaration | undefined = element.style
+
+	if (style === undefined) return
+
+	const slot = revision >> 2
+
+	style.color = `var(--fo-revision-${String(slot === 0 ? 8 : slot)}, var(--fo-revision-mark, #000))`
+
+	if ((revision & MathRevision.DELETED) !== 0) {
+		style.backgroundImage = LINE
+		style.backgroundSize = "100% 1px"
+		style.backgroundPosition = "center"
+		style.backgroundRepeat = "no-repeat"
+	} else {
+		style.boxShadow = "inset 0 -1px 0 currentColor"
+	}
 }
 
 // Throws a MathTreeError for a tree the converter could not have produced, so the caller can show a

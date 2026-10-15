@@ -102,10 +102,40 @@ export function saveOfficeAutosave(autosave: boolean): Promise<void> {
 
 let asking: Promise<string | null> | null = null
 
+// What `ask` answers, or null once `signal` aborts (whoever asked is gone: the question is dropped, never left
+// waiting for an answer that cannot come).
+function answered(ask: () => Promise<string | null>, signal: AbortSignal | undefined): Promise<string | null> {
+	if (signal === undefined) {
+		return ask()
+	}
+
+	if (signal.aborted) {
+		return Promise.resolve(null)
+	}
+
+	return new Promise<string | null>((resolve, reject) => {
+		const abort = (): void => {
+			resolve(null)
+		}
+
+		signal.addEventListener("abort", abort, { once: true })
+		ask()
+			.then(resolve, reject)
+			.finally(() => {
+				signal.removeEventListener("abort", abort)
+			})
+	})
+}
+
 // The author name a change that records one (a comment, a tracked change) carries: the setting, or asked
 // once through `ask` when the user has not given one (never filled in from the account). Null when the user
-// declined: the change is not made, and the next one asks again. Concurrent callers share one question.
-export function ensureAuthorName(ask: () => Promise<string | null>): Promise<string | null> {
+// declined, when `signal` aborted (the editor asking closed) or when asking failed: the change is not made,
+// and the next one asks again. Concurrent callers share one question.
+export function ensureAuthorName(ask: () => Promise<string | null>, signal?: AbortSignal): Promise<string | null> {
+	if (signal?.aborted === true) {
+		return Promise.resolve(null)
+	}
+
 	asking ??= (async () => {
 		await loadOfficeSettings()
 
@@ -115,7 +145,7 @@ export function ensureAuthorName(ask: () => Promise<string | null>): Promise<str
 			return current
 		}
 
-		const answer = await ask()
+		const answer = await answered(ask, signal)
 		const name = answer === null ? undefined : normalizeAuthorName(answer)
 
 		if (name === undefined) {
@@ -128,9 +158,15 @@ export function ensureAuthorName(ask: () => Promise<string | null>): Promise<str
 		})
 
 		return name
-	})().finally(() => {
-		asking = null
-	})
+	})()
+		.catch((error: unknown) => {
+			log.warn("office", "author name not asked", { error })
+
+			return null
+		})
+		.finally(() => {
+			asking = null
+		})
 
 	return asking
 }

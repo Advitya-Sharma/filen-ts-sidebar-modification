@@ -32,6 +32,27 @@ export interface OmmlOptions {
 	readonly naryLimits?: LimitLocation
 	// The part's namespace map, when the caller already has one (building it scans the whole part).
 	readonly namespaces?: Namespaces
+	// How tracked changes inside the equation show (w:ins / w:del around its runs and objects, and in an object's
+	// m:ctrlPr): without, as the final document has it. In the markup view each change is marked with its author
+	// (an index; MathAttributes.revision).
+	readonly revisions?: OmmlRevisionView
+}
+
+export interface OmmlRevisionView {
+	readonly view: "final" | "original" | "markup"
+	readonly author?: (name: string | undefined) => number
+}
+
+// MathAttributes.revision: an insertion (1) or deletion (2) with its author's colour slot (1..8, 0 for none)
+// above them, as layout's revisionLook packs text.
+export const MathRevision = { INSERTED: 1, DELETED: 2 } as const
+
+const AUTHOR_SLOTS = 8
+
+function revisionAttribute(deleted: boolean, author: number): number {
+	const slot = author < 0 ? AUTHOR_SLOTS : (author % AUTHOR_SLOTS) + 1
+
+	return (deleted ? MathRevision.DELETED : MathRevision.INSERTED) | (slot << 2)
 }
 
 // Nesting beyond this is dropped: each level adds a few output levels, and the tree must stay well inside
@@ -271,10 +292,12 @@ class Converter {
 				this.mathObject(node, local, out, flags)
 				break
 			case Group.WORD:
-				// Revision and container wrappers hold math runs; deleted content is not shown.
+				// Revision and container wrappers hold math runs.
 				if (local === "r") {
 					this.wordRun(node, out, flags)
-				} else if (local !== "del" && local !== "moveFrom" && local !== "rPr" && local !== "sdtPr" && local !== "sdtEndPr") {
+				} else if (local === "ins" || local === "moveTo" || local === "del" || local === "moveFrom") {
+					this.revision(node, local === "del" || local === "moveFrom", out, flags)
+				} else if (local !== "rPr" && local !== "sdtPr" && local !== "sdtEndPr") {
 					this.content(node, out, flags)
 				}
 
@@ -293,7 +316,100 @@ class Converter {
 		}
 	}
 
+	// What a revision wrapper holds, as the view shows it: hidden (deleted content in the final view, inserted
+	// content in the original), as it is, or marked (the markup view).
+	revision(node: number, deleted: boolean, out: Item[], flags: number): void {
+		const view = this.options.revisions?.view ?? "final"
+
+		if (view === (deleted ? "final" : "original")) return
+		if (view !== "markup") {
+			this.content(node, out, flags)
+
+			return
+		}
+
+		const items: Item[] = []
+
+		this.content(node, items, flags)
+		this.marked(items, revisionAttribute(deleted, this.author(node)), out)
+	}
+
+	author(node: number): number {
+		const author = this.options.revisions?.author
+
+		return author === undefined ? -1 : author(this.attribute(node, "author"))
+	}
+
+	// Elements of `items` in rows marked `revision` (alignment points and breaks stay between them).
+	marked(items: readonly Item[], revision: number, out: Item[]): void {
+		let run: MathElement[] = []
+		const flush = (): void => {
+			if (run.length > 0) out.push(element("mrow", run, { revision }))
+
+			run = []
+		}
+
+		for (const item of items) {
+			if (item === ALIGN || item === BREAK) {
+				flush()
+				out.push(item)
+			} else {
+				run.push(item as MathElement)
+			}
+		}
+
+		flush()
+	}
+
+	// The w:ins or w:del in an object's m:ctrlPr (the revision of its own characters); a deletion inside an
+	// insertion (deleted since) counts as the deletion.
+	control(node: number, local: string): { readonly deleted: boolean; readonly node: number } | undefined {
+		const control = this.child(this.child(node, `${local}Pr`), "ctrlPr")
+
+		if (control < 0) return undefined
+
+		const document = this.document
+
+		for (let child = document.firstChildElement(control); child >= 0; child = document.nextSiblingElement(child)) {
+			if (this.group(child) !== Group.WORD) continue
+
+			const name = document.localName(child)
+
+			if (name === "del") return { deleted: true, node: child }
+			if (name !== "ins") continue
+
+			for (let inner = document.firstChildElement(child); inner >= 0; inner = document.nextSiblingElement(inner))
+				if (this.group(inner) === Group.WORD && document.localName(inner) === "del") return { deleted: true, node: inner }
+
+			return { deleted: false, node: child }
+		}
+
+		return undefined
+	}
+
 	mathObject(node: number, local: string, out: Item[], flags: number): void {
+		if (local !== "r" && !local.endsWith("Pr")) {
+			const control = this.control(node, local)
+
+			if (control !== undefined) {
+				const view = this.options.revisions?.view ?? "final"
+
+				if (view === (control.deleted ? "final" : "original")) return
+				if (view === "markup") {
+					const items: Item[] = []
+
+					this.object(node, local, items, flags)
+					this.marked(items, revisionAttribute(control.deleted, this.author(control.node)), out)
+
+					return
+				}
+			}
+		}
+
+		this.object(node, local, out, flags)
+	}
+
+	object(node: number, local: string, out: Item[], flags: number): void {
 		const name = flags & Flag.NAME
 
 		switch (local) {
@@ -863,7 +979,8 @@ export function ommlToMathTree(document: XmlDocument, node: number, options: Omm
 	if (converter.isMath(node, "oMath")) {
 		const content = converter.equation(node)
 
-		return content.length === 0 ? undefined : element("math", content)
+		// What a view hides of a tracked equation may be all of it: an empty equation, not none.
+		return content.length === 0 && options.revisions === undefined ? undefined : element("math", content)
 	}
 
 	if (!converter.isMath(node, "oMathPara")) return undefined
@@ -872,6 +989,7 @@ export function ommlToMathTree(document: XmlDocument, node: number, options: Omm
 	const equations = converter.children(node, "oMath").map(equation => converter.equation(equation))
 	const filled = equations.filter(content => content.length > 0)
 
+	if (filled.length === 0 && options.revisions !== undefined) return element("math", [], { display: "block", align })
 	if (filled.length <= 1) return displayMath(filled[0] ?? [], align)
 
 	const columnalign: MathColumnAlign = align === "left" ? "left" : align === "right" ? "right" : "center"

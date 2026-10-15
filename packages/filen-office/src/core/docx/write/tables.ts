@@ -15,11 +15,13 @@ import {
 	tableOverrides,
 	type CellOverrides,
 	type RowOverrides,
+	type ShadingTheme,
 	type SourceResolution,
 	type TableMap,
 	type TableOverrides,
 	type TrackStamp
 } from "../edit/tables/map"
+import { DOCX_THEME_COLORS } from "../edit/commands/formatting"
 import { dataAttr, dataChildren, type ElementData } from "../edit/copies"
 import { Item, Revision, RevisionFlag } from "../model/index"
 import { Ns } from "../model/namespaces"
@@ -119,6 +121,25 @@ const CELL_PROPERTIES = [
 
 const JC = { start: "left", center: "center", end: "right" } as const
 const FILL = /^(?:auto|[0-9A-F]{6})$/
+// ST_ThemeColor values a command may give a fill.
+const THEME_FILLS: ReadonlySet<string> = new Set(DOCX_THEME_COLORS)
+
+// w:themeFill with its tint or shade (ST_UcharHexNumber).
+function themeFill(theme: ShadingTheme): (readonly [string, string])[] {
+	if (!THEME_FILLS.has(theme.theme)) throw new DocxWriteError("invalidValue", `w:themeFill: ${JSON.stringify(theme.theme)}`)
+	if (theme.tint !== undefined && theme.shade !== undefined)
+		throw new DocxWriteError("invalidValue", "A theme fill both tinted and shaded")
+
+	const tone = (local: string, value: number | undefined): (readonly [string, string])[] => {
+		if (value === undefined) return []
+
+		integer(`w:${local}`, value, 0, 255)
+
+		return [[local, value.toString(16).toUpperCase().padStart(2, "0")]]
+	}
+
+	return [["themeFill", theme.theme], ...tone("themeFillTint", theme.tint), ...tone("themeFillShade", theme.shade)]
+}
 // Grid column width of a new table without a grid (twips).
 const NEW_COLUMN = 2000
 
@@ -362,11 +383,11 @@ function trackChanges(
 // left out.
 const TABLE_KEYS = new Set(["from", "copy", "align", "width", "borders", "look", "change", "gridChange", "source"])
 const ROW_KEYS = new Set(["from", "copy", "header", "gridBefore", "gridAfter", "ins", "del", "change", "source"])
-const CELL_KEYS = new Set(["from", "copy", "shading", "vAlign", "ins", "del", "change", "source"])
+const CELL_KEYS = new Set(["from", "copy", "shading", "shadingTheme", "vAlign", "ins", "del", "change", "source"])
 // What a change record keeps of the properties before it.
 const TABLE_PROPS = new Set(["align", "width", "borders", "look"])
 const ROW_PROPS = new Set(["header", "gridBefore", "gridAfter"])
-const CELL_PROPS = new Set(["shading", "vAlign"])
+const CELL_PROPS = new Set(["shading", "shadingTheme", "vAlign"])
 const V_ALIGN = new Set(["top", "center", "bottom"])
 
 function checkKeys(value: object, known: ReadonlySet<string>, what: string): void {
@@ -939,15 +960,19 @@ function cellChanges(
 
 		if (!FILL.test(fill)) throw new DocxWriteError("invalidValue", `w:shd fill: ${JSON.stringify(fill)} is not a valid value`)
 
+		const theme = overrides.shading === null ? undefined : overrides.shadingTheme
+
 		changes.set(
 			"shd",
 			names.empty("shd", [
 				["val", "clear"],
 				["color", "auto"],
-				["fill", fill]
+				["fill", fill],
+				// Word writes the theme colour next to the fill it computed (ECMA-376 Part 1 §17.3.5).
+				...(theme === undefined ? [] : themeFill(theme))
 			])
 		)
-	}
+	} else if (overrides.shadingTheme !== undefined) throw new DocxWriteError("invalidValue", "A theme fill without its fill")
 
 	if (overrides.vAlign !== undefined) changes.set("vAlign", names.val("vAlign", overrides.vAlign))
 

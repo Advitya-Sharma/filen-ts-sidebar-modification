@@ -1,8 +1,7 @@
-import { DOMParser, DOMSerializer, Fragment, Slice, type DOMOutputSpec, type Mark, type Node, type ResolvedPos } from "prosemirror-model"
-import { EditorState, Plugin, TextSelection, type Transaction } from "prosemirror-state"
-import { Mapping } from "prosemirror-transform"
+import type { Node } from "prosemirror-model"
+import { Plugin, type EditorState, type Transaction } from "prosemirror-state"
 import { EditorView, type NodeView, type NodeViewConstructor } from "prosemirror-view"
-import { docxSchema, type DocxEditorSession, type MarkerList } from "../../../core/docx/edit/index"
+import { docxSchema } from "../../../core/docx/edit/index"
 import {
 	besideNode,
 	commandForKey,
@@ -13,11 +12,39 @@ import {
 	splitParagraph,
 	type PagedEditor
 } from "../../../core/docx/paged/index"
-import { COMMENT_MOVE_META, freshSliceKeeping } from "../../../core/docx/edit/invariants/index"
-import { sourceCopies } from "../../../core/docx/edit/session"
-import { docxComments } from "../../../core/docx/review/comments"
 import { docxNotes } from "../../../core/docx/stories/notes"
-import { deletesBreakAtCaret, endsSection } from "../../../core/docx/stories/sections"
+import { deletesBreakAtCaret } from "../../../core/docx/stories/sections"
+import {
+	attrText,
+	clipboardParser,
+	clipboardSerializer,
+	cutMemory,
+	type CutMemory,
+	plainSlice,
+	plainText,
+	safeClipboardHtml,
+	symbolText,
+	writeClipboardEvent
+} from "./clipboard"
+import {
+	blockIndex,
+	compositionFrom,
+	gapRowCount,
+	mergeWindows,
+	rowsAround,
+	deletesBreakBefore,
+	escapesToHost,
+	isGap,
+	handFocus,
+	releaseGapText,
+	sessionTransaction,
+	takeFocus,
+	unreadSelection,
+	windowAround,
+	windowedState
+} from "./window"
+
+export { plainSlice, plainText, safeClipboardHtml }
 
 // The input sink of paged editing: a real ProseMirror view that holds focus and receives all input (keys,
 // beforeinput, IME composition, clipboard, drag and drop) while the pages show the document. It is invisible
@@ -44,27 +71,8 @@ export interface EditSinkOptions {
 }
 
 const DEFAULT_WINDOW = 20
-// The window is moved once the selection comes this close to its edge (so moving through the document moves
-// it every few blocks, not on every block).
-const WINDOW_MARGIN = 5
-const IDENTITY = new Mapping()
-
-// Gap paragraphs stand for runs of blocks outside the window: their text only gives them their size (a
-// slice of one string, so a gap costs no copy of it).
-const GAPS = new WeakSet<Node>()
-let gapText = "-"
-
-function gapParagraph(size: number): Node {
-	const length = Math.max(0, size - 2)
-
-	while (gapText.length < length) gapText += gapText
-
-	const gap = nodes.paragraph.create(null, length === 0 ? null : docxSchema.text(gapText.slice(0, length)))
-
-	GAPS.add(gap)
-
-	return gap
-}
+// Rows of a long table held on each side of the selection's ends.
+const ROW_MARGIN = 20
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K): HTMLElementTagNameMap[K] {
 	return document.createElement(tag)
@@ -83,26 +91,12 @@ function atom(text: (node: Node) => string, tag: "span" | "br" = "span"): NodeVi
 	}
 }
 
-function symbolText(node: Node): string {
-	const char = node.attrs["char"]
-
-	return typeof char === "number" && char > 0 && char <= 0x10ffff ? String.fromCodePoint(char) : ""
-}
-
-function attrText(name: string): (node: Node) => string {
-	return node => {
-		const value = node.attrs[name]
-
-		return typeof value === "string" ? value : ""
-	}
-}
-
-const NODE_VIEWS: Record<string, NodeViewConstructor> = {
+export const NODE_VIEWS: Readonly<Record<string, NodeViewConstructor>> = {
 	paragraph: node => {
-		if (GAPS.has(node)) {
+		if (isGap(node)) {
 			return {
 				dom: element("p"),
-				update: (next: Node) => GAPS.has(next),
+				update: (next: Node) => isGap(next),
 				ignoreMutation: () => true
 			} satisfies NodeView
 		}
@@ -112,7 +106,7 @@ const NODE_VIEWS: Record<string, NodeViewConstructor> = {
 		// Right-to-left paragraphs: the browser's own caret motion and IME follow the text's direction.
 		dom.dir = "auto"
 
-		return { dom, contentDOM: dom, update: (next: Node) => next.type === node.type && !GAPS.has(next) } satisfies NodeView
+		return { dom, contentDOM: dom, update: (next: Node) => next.type === node.type && !isGap(next) } satisfies NodeView
 	},
 	table: () => {
 		const dom = element("table")
@@ -122,10 +116,14 @@ const NODE_VIEWS: Record<string, NodeViewConstructor> = {
 
 		return { dom, contentDOM }
 	},
-	table_row: () => {
+	table_row: node => {
+		// Rows of a long table the view does not hold (one gap row for each run of them).
+		if (gapRowCount(node) !== undefined)
+			return { dom: element("tr"), update: (next: Node) => gapRowCount(next) !== undefined, ignoreMutation: () => true }
+
 		const dom = element("tr")
 
-		return { dom, contentDOM: dom }
+		return { dom, contentDOM: dom, update: (next: Node) => next.type === node.type && gapRowCount(next) === undefined }
 	},
 	table_cell: () => {
 		const dom = element("td")
@@ -155,6 +153,8 @@ const NODE_VIEWS: Record<string, NodeViewConstructor> = {
 	run_object: atom(attrText("text")),
 	field: atom(attrText("result")),
 	marker: atom(() => ""),
+	// A field character of a field spanning paragraphs: its result is the text around it.
+	field_char: atom(() => ""),
 	math: atom(() => ""),
 	proof_err: atom(() => ""),
 	rendered_break: atom(() => ""),
@@ -162,551 +162,6 @@ const NODE_VIEWS: Record<string, NodeViewConstructor> = {
 }
 
 const MARK_VIEWS = Object.fromEntries(Object.keys(docxSchema.marks).map(name => [name, () => ({ dom: element("span") })]))
-
-// Copying writes this HTML (and the text): structure and basic formatting, never document-controlled URLs.
-function clipboardSerializer(): DOMSerializer {
-	const text =
-		(value: (node: Node) => string) =>
-		(node: Node): DOMOutputSpec => ["span", value(node)]
-	const empty = (): DOMOutputSpec => ["span"]
-	const nodeSpecs: Record<string, (node: Node) => DOMOutputSpec> = {
-		paragraph: () => ["p", 0],
-		table: () => ["table", ["tbody", 0]],
-		table_row: () => ["tr", 0],
-		table_cell: () => ["td", 0],
-		sdt: () => ["div", 0],
-		locked_block: node => ["p", attrText("text")(node)],
-		tab: text(() => "\t"),
-		break: () => ["br"],
-		hyphen: text(node => (node.attrs["soft"] === true ? "" : "\u2011")),
-		symbol: text(symbolText),
-		note_ref: empty,
-		comment_ref: empty,
-		drawing: empty,
-		run_object: text(attrText("text")),
-		field: text(attrText("result")),
-		marker: empty,
-		math: empty,
-		proof_err: empty,
-		rendered_break: empty,
-		opaque_inline: text(attrText("text"))
-	}
-	const toggled = (tag: string) => (mark: Mark) => (mark.attrs["value"] === false ? ["span", 0] : [tag, 0]) as DOMOutputSpec
-	const markSpecs: Record<string, (mark: Mark, inline: boolean) => DOMOutputSpec> = Object.fromEntries(
-		Object.keys(docxSchema.marks).map(name => [name, () => ["span", 0] as DOMOutputSpec])
-	)
-
-	markSpecs["bold"] = toggled("strong")
-	markSpecs["italic"] = toggled("em")
-	markSpecs["underline"] = () => ["u", 0]
-	markSpecs["strike"] = toggled("s")
-
-	return new DOMSerializer(nodeSpecs, markSpecs)
-}
-
-// Pasted HTML (after safeClipboardHtml) becomes paragraphs with basic formatting, breaks and tabs; the session's
-// invariants make it new content.
-function clipboardParser(): DOMParser {
-	return new DOMParser(docxSchema, [
-		{ tag: "p", node: "paragraph" },
-		// Spaces kept; safeClipboardHtml made each line a block of its own, so no newline reaches a text node.
-		{ tag: "pre", node: "paragraph", preserveWhitespace: true },
-		{ tag: "br", node: "break" },
-		{ tag: `span[${PASTE_TAB}]`, node: "tab" },
-		{ tag: "b", mark: "bold", attrs: { value: true, cs: null } },
-		{ tag: "i", mark: "italic", attrs: { value: true, cs: null } },
-		{ tag: "u", mark: "underline" },
-		{ tag: "s", mark: "strike", attrs: { value: true } }
-	])
-}
-
-// Pasted HTML is rebuilt from its text and basic formatting before ProseMirror reads it: a flat list of <p>
-// (or <pre>) blocks holding text, <br>, tabs and b/i/u/s only, without attributes; text is escaped. Content
-// that is not text is dropped (scripts, styles, embedded and replaced content). A table becomes a paragraph
-// per row, its cells separated by tabs and a cell's paragraphs by line breaks, as Word pastes a table as text
-// (and as a copy's plain text has it): the editor cannot insert a table. Nesting is resolved here, never by
-// the HTML parser or ProseMirror's clipboard reader, which would treat a leading cell as a table fragment and
-// drop the rest. The source is parsed by DOMParser, which never runs scripts or loads anything, so what
-// ProseMirror parses next references nothing; ProseMirror's own slice data (data-pm-slice) goes too.
-const PASTE_TAB = "data-fo-tab"
-const PASTE_DROPPED = new Set([
-	"script",
-	"style",
-	"template",
-	"noscript",
-	"head",
-	"title",
-	"meta",
-	"link",
-	"base",
-	"iframe",
-	"frame",
-	"frameset",
-	"object",
-	"embed",
-	"applet",
-	"img",
-	"picture",
-	"source",
-	"track",
-	"video",
-	"audio",
-	"canvas",
-	"svg",
-	"math",
-	"map",
-	"area",
-	"form",
-	"input",
-	"button",
-	"select",
-	"textarea",
-	"option",
-	"dialog",
-	"portal",
-	"colgroup",
-	"col"
-])
-// Elements that end the paragraph before them and start a new one.
-const PASTE_BLOCKS = new Set([
-	"p",
-	"div",
-	"h1",
-	"h2",
-	"h3",
-	"h4",
-	"h5",
-	"h6",
-	"li",
-	"dt",
-	"dd",
-	"blockquote",
-	"pre",
-	"address",
-	"article",
-	"aside",
-	"section",
-	"header",
-	"footer",
-	"nav",
-	"main",
-	"figure",
-	"figcaption",
-	"center",
-	"ul",
-	"ol",
-	"dl",
-	"details",
-	"summary",
-	"hr",
-	"caption",
-	"table",
-	"thead",
-	"tbody",
-	"tfoot",
-	"tr",
-	"td",
-	"th"
-])
-// Blocks that are a paragraph of their own even when empty.
-const PASTE_PARAGRAPHS = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "pre"])
-const ESCAPED: Readonly<Record<string, string>> = { "&": "&amp;", "<": "&lt;", ">": "&gt;" }
-// Word's tab characters in its HTML (`<span style='mso-tab-count:2'>`).
-const MSO_TABS = /mso-tab-count\s*:\s*(\d+)/i
-const MARK_TAGS = ["b", "i", "u", "s"] as const
-
-interface ParsedHtml {
-	readonly body: ParsedNode | null
-}
-
-interface ParsedNode {
-	readonly nodeType: number
-	readonly nodeValue: string | null
-	readonly localName?: string
-	readonly childNodes: ArrayLike<ParsedNode>
-	readonly style?: { readonly fontWeight?: string; readonly fontStyle?: string; readonly textDecoration?: string }
-	getAttribute?(name: string): string | null
-}
-
-// Bold, italic, underline, strike: on, or off when unset.
-type PasteMarks = readonly [boolean, boolean, boolean, boolean]
-
-const NO_MARKS: PasteMarks = [false, false, false, false]
-
-function pasteMarks(node: ParsedNode, tag: string, marks: PasteMarks): PasteMarks {
-	let [bold, italic, underline, strike] = marks
-
-	if (tag === "b" || tag === "strong") bold = true
-	else if (tag === "i" || tag === "em") italic = true
-	else if (tag === "u" || tag === "ins") underline = true
-	else if (tag === "s" || tag === "del" || tag === "strike") strike = true
-
-	const style = node.style
-
-	if (style !== undefined) {
-		const weight = style.fontWeight ?? ""
-
-		// Google Docs wraps what it copies in <b style="font-weight:normal">.
-		if (/^(bold|bolder|[6-9]00)$/.test(weight)) bold = true
-		else if (/^(normal|lighter|[1-5]00)$/.test(weight)) bold = false
-
-		const fontStyle = style.fontStyle ?? ""
-
-		if (fontStyle === "italic" || fontStyle === "oblique") italic = true
-		else if (fontStyle === "normal") italic = false
-
-		const decoration = style.textDecoration ?? ""
-
-		if (decoration.includes("underline")) underline = true
-		if (decoration.includes("line-through")) strike = true
-	}
-
-	return bold === marks[0] && italic === marks[1] && underline === marks[2] && strike === marks[3]
-		? marks
-		: [bold, italic, underline, strike]
-}
-
-function marked(html: string, marks: PasteMarks): string {
-	let open = ""
-	let close = ""
-
-	for (let k = 0; k < MARK_TAGS.length; k++) {
-		if (!marks[k]) continue
-
-		open += `<${MARK_TAGS[k] ?? ""}>`
-		close = `</${MARK_TAGS[k] ?? ""}>` + close
-	}
-
-	return open + html + close
-}
-
-interface PasteBlock {
-	readonly inline: string
-	readonly pre: boolean
-}
-
-// Collects the paragraphs of a piece of HTML: inline content accumulates until a block boundary.
-class PasteBlocks {
-	readonly blocks: PasteBlock[] = []
-	private inline = ""
-	// The inline content holds more than collapsible white space.
-	private content = false
-	private pre = 0
-
-	add(parent: ParsedNode, marks: PasteMarks): void {
-		const children = parent.childNodes
-
-		for (let k = 0; k < children.length; k++) {
-			const child = children[k]
-
-			if (child === undefined) continue
-
-			if (child.nodeType === 3) {
-				this.text(child.nodeValue ?? "", marks)
-
-				continue
-			}
-
-			if (child.nodeType !== 1) continue
-
-			const tag = child.localName ?? ""
-
-			if (PASTE_DROPPED.has(tag)) continue
-
-			const inner = pasteMarks(child, tag, marks)
-
-			if (tag === "br") {
-				this.inline += marked("<br>", inner)
-				this.content = true
-			} else if (tag === "table") {
-				this.flush(false)
-				this.table(child, inner)
-			} else if (PASTE_BLOCKS.has(tag)) {
-				this.block(child, tag, inner)
-			} else {
-				const tabs = MSO_TABS.exec(child.getAttribute?.("style") ?? "")
-
-				if (tabs === null) {
-					this.add(child, inner)
-				} else {
-					this.inline += marked(`<span ${PASTE_TAB}></span>`.repeat(Math.min(Number(tabs[1]), 16)), inner)
-					this.content = true
-				}
-			}
-		}
-	}
-
-	// What is left once the source is read.
-	finish(): PasteBlock[] {
-		this.flush(false)
-
-		return this.blocks
-	}
-
-	private text(value: string, marks: PasteMarks): void {
-		if (value.length === 0) return
-
-		if (this.pre === 0 && !/[^ \t\r\n\f]/.test(value)) {
-			// White space only: a separator, never a paragraph of its own.
-			if (this.inline.length > 0) this.inline += " "
-
-			return
-		}
-
-		if (this.pre > 0) {
-			// Preformatted text keeps its lines (a paragraph each, as a plain-text paste makes them) and tabs.
-			const lines = value.split(/\r\n?|\n/)
-
-			lines.forEach((line, k) => {
-				if (k > 0) this.flush(true)
-
-				if (line.length === 0) return
-
-				this.inline += marked(
-					line
-						.split("\t")
-						.map(part => part.replace(/[&<>]/g, c => ESCAPED[c] ?? c))
-						.join(`<span ${PASTE_TAB}></span>`),
-					marks
-				)
-				this.content = true
-			})
-
-			return
-		}
-
-		this.inline += marked(
-			value.replace(/[&<>]/g, c => ESCAPED[c] ?? c),
-			marks
-		)
-		this.content = true
-	}
-
-	private block(node: ParsedNode, tag: string, marks: PasteMarks): void {
-		this.flush(false)
-
-		const before = this.blocks.length
-
-		if (tag === "pre") this.pre++
-
-		this.add(node, marks)
-
-		const paragraph = PASTE_PARAGRAPHS.has(tag)
-
-		this.flush(paragraph && this.blocks.length === before)
-
-		if (tag === "pre") this.pre--
-	}
-
-	// A paragraph per row, cells separated by tabs.
-	private table(node: ParsedNode, marks: PasteMarks): void {
-		const rows: { row: ParsedNode; marks: PasteMarks }[] = []
-		const findRows = (parent: ParsedNode, inherited: PasteMarks): void => {
-			const children = parent.childNodes
-
-			for (let k = 0; k < children.length; k++) {
-				const child = children[k]
-				const tag = child?.localName ?? ""
-
-				if (child === undefined || child.nodeType !== 1 || PASTE_DROPPED.has(tag)) continue
-
-				const inner = pasteMarks(child, tag, inherited)
-
-				if (tag === "tr") rows.push({ row: child, marks: inner })
-				else if (tag === "thead" || tag === "tbody" || tag === "tfoot") findRows(child, inner)
-				else if (tag === "caption") this.block(child, tag, inner)
-			}
-		}
-
-		findRows(node, marks)
-
-		for (const { row, marks: rowMarks } of rows) {
-			const cells: string[] = []
-			const children = row.childNodes
-
-			for (let k = 0; k < children.length; k++) {
-				const cell = children[k]
-				const tag = cell?.localName ?? ""
-
-				if (cell === undefined || (tag !== "td" && tag !== "th")) continue
-
-				const inner = new PasteBlocks()
-
-				inner.pre = this.pre
-				inner.add(cell, pasteMarks(cell, tag, rowMarks))
-				cells.push(
-					inner
-						.finish()
-						.map(block => block.inline)
-						.join("<br>")
-				)
-			}
-
-			this.blocks.push({ inline: cells.join(`<span ${PASTE_TAB}></span>`), pre: this.pre > 0 })
-		}
-	}
-
-	// Ends the paragraph being collected: kept when it has content (a lone line break or no-break space is an
-	// empty paragraph, as editors write one) or when `empty` asks for it.
-	private flush(empty: boolean): void {
-		if (this.content || empty) {
-			// A line break that ends a block adds no line (as HTML shows it).
-			const inline = this.inline.replace(/(?:<[bius]>)*<br>(?:<\/[bius]>)*\s*$/, "")
-
-			this.blocks.push({ inline: /^\s*$/.test(inline) ? "" : inline, pre: this.pre > 0 })
-		}
-
-		this.inline = ""
-		this.content = false
-	}
-}
-
-export function safeClipboardHtml(html: string): string {
-	const Parser: unknown = Reflect.get(globalThis, "DOMParser")
-
-	if (typeof Parser !== "function") return ""
-
-	const parsed = new (Parser as new () => { parseFromString(source: string, type: string): ParsedHtml })().parseFromString(
-		html,
-		"text/html"
-	)
-
-	if (parsed.body === null) return ""
-
-	const blocks = new PasteBlocks()
-
-	blocks.add(parsed.body, NO_MARKS)
-
-	return blocks
-		.finish()
-		.map(block => (block.pre ? `<pre>${block.inline}</pre>` : `<p>${block.inline}</p>`))
-		.join("")
-}
-
-const nodes = docxSchema.nodes
-// Leaves as plain text (what a copy writes and assistive technology reads).
-const PLAIN_LEAVES: Record<string, (node: Node) => string> = {
-	tab: () => "\t",
-	break: () => "\n",
-	hyphen: node => (node.attrs["soft"] === true ? "" : "\u2011"),
-	symbol: symbolText,
-	run_object: attrText("text"),
-	field: attrText("result"),
-	opaque_inline: attrText("text")
-}
-const plainLeaf = (node: Node): string => PLAIN_LEAVES[node.type.name]?.(node) ?? ""
-
-// [from, to) of `doc` as plain text, as Word copies it: paragraphs on lines of their own (empty ones
-// kept), a table's cells separated by tabs and its rows by line breaks, list numbers as text.
-export function plainText(doc: Node, from: number, to: number, marker: (pos: number) => string): string {
-	const blocks = (parent: Node, offset: number, out: string[]): string[] => {
-		parent.forEach((child, at) => {
-			const pos = offset + at
-			const end = pos + child.nodeSize
-
-			if (end <= from || pos >= to) return
-
-			if (child.isTextblock) {
-				const a = Math.max(from, pos + 1) - pos - 1
-				const b = Math.max(a, Math.min(to, end - 1) - pos - 1)
-				const prefix = from <= pos + 1 && to > pos + 1 ? marker(pos + 1) : ""
-
-				out.push(prefix + child.textBetween(a, b, undefined, plainLeaf))
-			} else if (child.type === nodes.table) {
-				child.forEach((row, rowAt) => {
-					const rowPos = pos + 1 + rowAt
-
-					if (rowPos + row.nodeSize <= from || rowPos >= to) return
-
-					const cells: string[] = []
-
-					row.forEach((cell, cellAt) => {
-						const cellPos = rowPos + 1 + cellAt
-
-						if (cellPos + cell.nodeSize > from && cellPos < to) cells.push(blocks(cell, cellPos + 1, []).join("\n"))
-					})
-					out.push(cells.join("\t"))
-				})
-			} else if (child.type === nodes.locked_block) {
-				out.push(attrText("text")(child))
-			} else {
-				blocks(child, pos + 1, out)
-			}
-		})
-
-		return out
-	}
-
-	return blocks(doc, 0, []).join("\n")
-}
-
-// Without the control characters XML cannot hold (tabs and vertical tabs become nodes).
-function withoutControls(text: string): string {
-	let out = ""
-	let last = 0
-
-	for (let k = 0; k < text.length; k++) {
-		const c = text.charCodeAt(k)
-
-		if (c < 0x20 && c !== 0x09 && c !== 0x0b) {
-			out += text.slice(last, k)
-			last = k + 1
-		}
-	}
-
-	return last === 0 ? text : out + text.slice(last)
-}
-
-// Pasted plain text: one paragraph per line (empty lines kept), tabs and vertical tabs (Word's line breaks)
-// as nodes, formatted as the text at the insertion point.
-export function plainSlice(text: string, $context: ResolvedPos): Slice {
-	const marks = $context.marks()
-	const paragraphs = text.split(/\r\n?|\n/).map(line => {
-		const inline: Node[] = []
-		const parts = withoutControls(line).split(/([\t\v])/)
-
-		for (const part of parts) {
-			if (part === "\t") inline.push(nodes.tab.create(null, null, marks))
-			else if (part === "\v") inline.push(nodes.break.create({ type: "textWrapping" }, null, marks))
-			else if (part.length > 0) inline.push(docxSchema.text(part, marks))
-		}
-
-		return nodes.paragraph.create(null, inline)
-	})
-
-	return new Slice(Fragment.from(paragraphs), 1, 1)
-}
-
-const COMMENT_MARKERS: ReadonlySet<unknown> = new Set(["commentRangeStart", "commentRangeEnd"])
-
-// Ids of the comments anchored in `fragment` (ranges, references, marker lists of blocks).
-function commentIds(fragment: Fragment): string[] {
-	const out = new Set<string>()
-	const list = (value: unknown): void => {
-		if (!Array.isArray(value)) return
-
-		for (const marker of value as MarkerList)
-			if (COMMENT_MARKERS.has(marker.kind) || marker.kind === "commentReference") if (marker.id !== null) out.add(marker.id)
-	}
-
-	fragment.descendants(node => {
-		const id: unknown = node.attrs["id"]
-
-		if (
-			node.type === docxSchema.nodes.comment_ref ||
-			(node.type === docxSchema.nodes.marker && COMMENT_MARKERS.has(node.attrs["kind"]))
-		) {
-			if (typeof id === "string") out.add(id)
-		}
-
-		list(node.attrs["before"])
-		list(node.attrs["end"])
-
-		return true
-	})
-
-	return [...out]
-}
 
 export class EditSink {
 	readonly element: HTMLDivElement
@@ -717,8 +172,8 @@ export class EditSink {
 	// The session's state the view's was made from, the top-level blocks the view holds ([from, to) index
 	// ranges, ascending) and its gap paragraphs (kept while their size does not change).
 	private real: EditorState
-	private windows: number[] = []
-	private gaps: Node[] = []
+	private windows: readonly number[] = []
+	private gaps: readonly Node[] = []
 	private offsetX = 0
 	private offsetY = 0
 	private compositionStart = -1
@@ -733,14 +188,15 @@ export class EditSink {
 	private readonly stopListening: () => void
 	private warmed = false
 	private destroyed = false
-	// What the last cut took out with comment anchors in it: pasted back as text of the same clipboard, it moves
-	// the comments (as in Word) rather than leaving them out.
-	private cut:
-		{ readonly session: DocxEditorSession; readonly text: string; readonly slice: Slice; readonly ids: readonly string[] } | undefined
+	// The last cut, when it took out comment anchors (pasted back, it moves them).
+	private readonly cut: CutMemory
+	// Focus as the view's own events tell it (a view taken out of the document hears no blur).
+	private hasFocus = false
 
 	constructor(editor: PagedEditor, parent: HTMLElement, options: EditSinkOptions) {
 		this.editor = editor
 		this.options = options
+		this.cut = cutMemory(editor)
 		this.windowSize = Math.max(1, options.window ?? DEFAULT_WINDOW)
 		this.element = element("div")
 		this.element.className = "fo-docx-sink"
@@ -775,14 +231,30 @@ export class EditSink {
 			handleScrollToSelection: () => true,
 			handleKeyDown: (view, event) => this.keyDown(view, event),
 			handleDOMEvents: {
-				// Read-only, the view is not editable and ProseMirror's own key handling is off: selection keys only.
-				keydown: (view, event) => (view.editable ? false : this.readOnlyKeyDown(view, event)),
+				keydown: (view, event) => {
+					// An Escape the editor does not take (no format painter, the body being edited) is the host's (it
+					// closes a dialog or the editor): ProseMirror's own key handling would prevent it.
+					if (escapesToHost(editor, event)) return true
+
+					// Read-only, the view is not editable and ProseMirror's own key handling is off: selection keys only.
+					return view.editable ? false : this.readOnlyKeyDown(view, event)
+				},
 				// Undo and redo from outside the keyboard (Edit menu, shake, a soft keyboard's key): the editor's,
 				// in its order across stories.
 				beforeinput: (_view, event) => this.historyInput(event),
 				// The document's selection, not the view's (whose gaps hold no content).
 				copy: (_view, event) => this.copyEvent(event, false),
 				cut: (_view, event) => this.copyEvent(event, true),
+				focus: () => {
+					this.hasFocus = true
+
+					return false
+				},
+				blur: () => {
+					this.hasFocus = false
+
+					return false
+				},
 				compositionstart: view => {
 					this.compositionStart = view.state.selection.from
 					this.compositionText = ""
@@ -834,35 +306,9 @@ export class EditSink {
 		})
 
 		if (editor.layout.final) this.warmUp()
-	}
 
-	// Backspace at the start of the paragraph after a section break: the caret goes to the end of the paragraph
-	// ending the section and section.deleteBreak deletes that break (the caret stays where it was otherwise).
-	private deletesBreakBefore(): boolean {
-		const editor = this.editor
-		const session = editor.session
-		const { $from, empty } = session.state.selection
-		const depth = $from.depth
-
-		if (session !== editor.body.session || !empty || depth < 1 || $from.parentOffset > 0 || $from.index(depth - 1) === 0) return false
-
-		const before = $from.node(depth - 1).child($from.index(depth - 1) - 1)
-
-		if (before.type !== docxSchema.nodes.paragraph || !endsSection(session.story.part, before)) return false
-
-		const selection = session.state.selection
-
-		session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, $from.before() - 1)))
-
-		if (deletesBreakAtCaret(editor)) {
-			void editor.execute({ type: "section.deleteBreak" })
-
-			return true
-		}
-
-		session.dispatch(session.state.tr.setSelection(selection.map(session.state.doc, IDENTITY)))
-
-		return false
+		// Shown in place of a view that had focus: typing goes on here.
+		if (takeFocus(editor)) this.focus()
 	}
 
 	// Read-only: the host's option or the story's session (a gate, a text box).
@@ -904,11 +350,13 @@ export class EditSink {
 
 	destroy(): void {
 		this.destroyed = true
+
+		if (this.hasFocus) handFocus(this.editor)
+
 		this.stopListening()
 		this.view.destroy()
 		this.element.remove()
-		// The gaps' text grows to a document's size: a closed document does not keep it.
-		gapText = "-"
+		releaseGapText()
 	}
 
 	focus(): void {
@@ -1015,7 +463,7 @@ export class EditSink {
 	// A transaction of the view: applied to the session's state (positions are the same), and the view brought
 	// to the result (whatever the browser changed that the session did not take is put back).
 	private dispatch(viewTr: Transaction): void {
-		const tr = viewTr.docChanged && this.readOnly ? undefined : this.sessionTransaction(viewTr)
+		const tr = viewTr.docChanged && this.readOnly ? undefined : sessionTransaction(viewTr, this.view.state.doc, this.editor.state)
 
 		if (tr === undefined) {
 			this.sync(true)
@@ -1024,29 +472,6 @@ export class EditSink {
 		}
 
 		this.apply(tr, true)
-	}
-
-	// `tr` (on the view's state) as a transaction on the session's: its steps, selection, stored marks, time
-	// and metadata; undefined when a step does not apply there.
-	private sessionTransaction(tr: Transaction): Transaction | undefined {
-		const real = this.editor.state
-
-		// The view holds the whole document: the transaction is the session's as it is.
-		if (this.view.state.doc === real.doc) return tr
-
-		const out = real.tr
-
-		for (const step of tr.steps) if (out.maybeStep(step).failed !== null) return undefined
-
-		if (tr.selectionSet) out.setSelection(tr.selection.map(out.doc, IDENTITY))
-		if (tr.storedMarksSet) out.setStoredMarks(tr.storedMarks)
-		if (tr.scrolledIntoView) out.scrollIntoView()
-
-		const meta: unknown = Reflect.get(tr, "meta")
-
-		if (typeof meta === "object" && meta !== null) for (const key in meta) out.setMeta(key, Reflect.get(meta, key))
-
-		return out.setTime(tr.time)
 	}
 
 	// Applies a transaction on the session's state; `fromView`: it came from the view, which is brought up to
@@ -1116,16 +541,11 @@ export class EditSink {
 
 	// A copy or cut writes the document's selection, as ProseMirror's own would write the view's.
 	private copyEvent(event: ClipboardEvent, cut: boolean): boolean {
-		const data = event.clipboardData
-		const content = data === null ? undefined : this.clipboardContent()
+		const content = event.clipboardData === null ? undefined : this.clipboardContent()
 
-		if (data === null || content === undefined) return false
+		if (!writeClipboardEvent(event, content) || content === undefined) return false
 
-		event.preventDefault()
-		data.clearData()
-		data.setData("text/html", content.html)
-		data.setData("text/plain", content.text)
-		this.cut = undefined
+		this.cut.forget()
 
 		if (cut && !this.readOnly) {
 			this.rememberCut(content.text)
@@ -1135,50 +555,17 @@ export class EditSink {
 		return true
 	}
 
-	// Keeps the selection as it is about to be cut when it holds comment anchors (see pasteCut).
 	private rememberCut(text?: string): void {
-		const slice = this.editor.state.selection.content()
-		const ids = commentIds(slice.content)
-
-		this.cut =
-			ids.length === 0
-				? undefined
-				: { session: this.editor.session, text: text ?? this.view.serializeForClipboard(slice).text, slice, ids }
+		this.cut.remember(this.editor.session, slice => text ?? this.view.serializeForClipboard(slice).text)
 	}
 
-	// Pastes the last cut as it was, comment anchors included, when `text` is what it wrote and its comments are
-	// anchored nowhere now (the cut took them out, untracked, and no paste put them back): the comments move, also
-	// into another story (as in Word). Once only; a copy, or anything else, pastes as usual.
+	// Pastes the last cut as it was (CutMemory.take); false for anything else.
 	private pasteCut(text: string | undefined): boolean {
-		const cut = this.cut
+		if (this.readOnly) return false
 
-		if (cut === undefined || text === undefined || this.readOnly) return false
+		const tr = this.cut.take(this.editor, this.editor.session, text)
 
-		this.cut = undefined
-
-		const comments = docxComments(this.editor)
-
-		if (text.replace(/\r\n?/g, "\n") !== cut.text.replace(/\r\n?/g, "\n") || cut.ids.some(id => comments.comment(id) !== undefined))
-			return false
-
-		// Into another part, the cut's source identities are not that part's: new content, the anchors kept.
-		const slice =
-			this.editor.session.story.part === cut.session.story.part
-				? cut.slice
-				: freshSliceKeeping(
-						cut.slice,
-						new Set(
-							cut.ids.flatMap(id => ["commentRangeStart", "commentRangeEnd", "commentReference"].map(kind => `${kind}:${id}`))
-						),
-						sourceCopies(cut.session.context),
-						cut.session.story.part.index,
-						this.editor.session.story.part.index,
-						this.editor.session.story.story.kind === "body"
-					)
-
-		return this.run(
-			this.editor.state.tr.replaceSelection(slice).scrollIntoView().setMeta("uiEvent", "paste").setMeta(COMMENT_MOVE_META, cut.ids)
-		)
+		return tr === undefined ? false : this.run(tr)
 	}
 
 	// Brings the view to the session's state; `force`: also when that did not change (the view's DOM may
@@ -1198,72 +585,20 @@ export class EditSink {
 	// each run of other blocks one gap paragraph of the run's size, and the selection there.
 	private viewState(real: EditorState): EditorState {
 		const doc = real.doc
-		const count = doc.childCount
 		const story = this.editor.story
-		const starts = story.document === doc ? story.starts : undefined
-		const indexOf = (pos: number): number => (starts === undefined ? doc.resolve(pos).index(0) : story.entryAt(pos))
 		const { from, to } = real.selection
-		const a = Math.max(0, Math.min(count - 1, indexOf(from)))
-		const b = Math.max(a, Math.min(count - 1, indexOf(to)))
-		const n = this.windowSize
-		const margin = Math.min(WINDOW_MARGIN, n >> 1)
-		const [lo = 0, hi = 0] = this.windows
-		// The window stays while the selection is well inside it (or it reaches the document's edge).
-		const kept =
-			this.windows.length === 2 &&
-			hi <= count &&
-			a >= lo &&
-			b < hi &&
-			(lo === 0 || a - lo >= margin) &&
-			(hi === count || hi - 1 - b >= margin)
+		const a = blockIndex(doc, story, from)
+		const b = Math.max(a, blockIndex(doc, story, to))
 
-		if (!kept) {
-			// A selection spanning many blocks: the blocks around each end.
-			this.windows =
-				b - a > 2 * n
-					? [Math.max(0, a - n), Math.min(count, a + n + 1), Math.max(0, b - n), Math.min(count, b + n + 1)]
-					: [Math.max(0, a - n), Math.min(count, b + n + 1)]
-		}
+		this.windows = windowAround(this.windows, a, b, doc.childCount, this.windowSize)
 
-		const windows = this.windows
+		const windowed = windowedState(real, this.windows, story, this.gaps, (_index, table, pos) =>
+			mergeWindows(rowsAround(table, pos, [from, to], ROW_MARGIN))
+		)
 
-		if (windows.length === 2 && windows[0] === 0 && windows[1] === count) {
-			this.gaps = []
+		this.gaps = windowed.gaps
 
-			return EditorState.create({ doc, selection: real.selection, storedMarks: real.storedMarks })
-		}
-
-		const children: Node[] = []
-		const gaps: Node[] = []
-		const positionOfChild = (index: number): number =>
-			index >= count ? doc.content.size : starts === undefined ? positionOf(doc, index) : (starts[index] ?? 0)
-		const gap = (start: number, end: number): void => {
-			const size = positionOfChild(end) - positionOfChild(start)
-			const node = this.gaps.find(other => other.nodeSize === size && !gaps.includes(other)) ?? gapParagraph(size)
-
-			gaps.push(node)
-			children.push(node)
-		}
-		let at = 0
-
-		for (let w = 0; w + 1 < windows.length; w += 2) {
-			const start = Math.max(at, windows[w] ?? 0)
-			const end = Math.min(count, windows[w + 1] ?? 0)
-
-			if (start > at) gap(at, start)
-
-			for (let k = start; k < end; k++) children.push(doc.child(k))
-
-			at = Math.max(at, end)
-		}
-
-		if (at < count) gap(at, count)
-
-		this.gaps = gaps
-
-		const viewDoc = doc.copy(Fragment.from(children))
-
-		return EditorState.create({ doc: viewDoc, selection: real.selection.map(viewDoc, IDENTITY), storedMarks: real.storedMarks })
+		return windowed.state
 	}
 
 	// Keys of a read-only view: what moves the selection; character and word steps through the document's
@@ -1294,6 +629,11 @@ export class EditSink {
 			event.key === "ArrowLeft" ? "left" : "right",
 			(apple ? event.altKey : event.ctrlKey) ? "word" : "character"
 		)
+
+		const moved = unreadSelection(view)
+
+		if (moved !== undefined) view.dispatch(moved)
+
 		event.preventDefault()
 
 		return true
@@ -1369,7 +709,7 @@ export class EditSink {
 			case "Backspace":
 				if (readOnly) return false
 				// After a section break: the break goes (the sections merge), as Word deletes it.
-				if (this.deletesBreakBefore()) return true
+				if (deletesBreakBefore(this.editor)) return true
 
 				return this.run(joinBackward(state))
 			case "Delete":
@@ -1423,31 +763,6 @@ export class EditSink {
 	}
 }
 
-// Where the text being composed starts: the occurrence of `text` around the caret nearest to where the
-// composition started (`start`, mapped through the edits; a browser may rewrite more of the paragraph than
-// the composition), or `start` itself.
-function compositionFrom(doc: Node, head: number, start: number, text: string): number {
-	const $head = doc.resolve(head)
-	const parent = $head.parent
-
-	if (!parent.isTextblock || text.length === 0) return Math.min(start, doc.content.size)
-
-	const content = $head.start()
-	const offset = $head.parentOffset
-	const lo = Math.max(0, offset - text.length)
-	const around = parent.textBetween(lo, Math.min(parent.content.size, offset + text.length), undefined, "\ufffc")
-	let best = -1
-
-	for (let at = around.indexOf(text); at >= 0; at = around.indexOf(text, at + 1)) {
-		const pos = content + lo + at
-
-		// The caret is inside or at either end of the composed text.
-		if (pos <= head && pos + text.length >= head && (best < 0 || Math.abs(pos - start) < Math.abs(best - start))) best = pos
-	}
-
-	return best >= 0 ? best : Math.min(Math.max(start, content), content + parent.content.size)
-}
-
 // The position one character (a surrogate pair, an inline atom) after (dir 1) or before (-1) `pos` in its
 // textblock, or undefined at the textblock's edge.
 function stepCharacter(doc: Node, pos: number, dir: 1 | -1): number | undefined {
@@ -1464,12 +779,4 @@ function stepCharacter(doc: Node, pos: number, dir: 1 | -1): number | undefined 
 	const surrogates = pair.length === 2 && /^[\ud800-\udbff][\udc00-\udfff]$/.test(pair)
 
 	return pos + dir * (surrogates ? 2 : 1)
-}
-
-function positionOf(doc: Node, index: number): number {
-	let pos = 0
-
-	for (let k = 0; k < index; k++) pos += doc.child(k).nodeSize
-
-	return pos
 }

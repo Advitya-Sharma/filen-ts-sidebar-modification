@@ -828,6 +828,39 @@ describe("EditSink", () => {
 		sink.destroy()
 	})
 
+	it("takes a word step read-only, which the browser makes, at once (no selectionchange read yet)", async () => {
+		const { editor } = await pagedEditor(LONG)
+		const sink = sinkOf(editor, { readOnly: true })
+		const start = paragraphPos(editor, 1) + 1
+		const selection = document.getSelection()
+		// The browser's word step; its selectionchange still queued.
+		const modify = vi.fn(() => {
+			const { node } = sink.view.domAtPos(start)
+
+			selection?.collapse(node.nodeType === 3 ? node : (node.firstChild ?? node), 0)
+		})
+		const hold = (event: Event): void => {
+			event.stopImmediatePropagation()
+		}
+
+		// Read-only, the view takes focus as any element with a tab stop.
+		sink.view.dom.focus()
+		sink.view.dispatch(sink.view.state.tr.setSelection(TextSelection.create(sink.view.state.doc, start + 6)))
+		Object.defineProperty(selection, "modify", { value: modify, configurable: true })
+		window.addEventListener("selectionchange", hold, true)
+
+		try {
+			expect(key(sink.view.dom, { key: "ArrowLeft", ctrlKey: true }).defaultPrevented).toBe(true)
+		} finally {
+			window.removeEventListener("selectionchange", hold, true)
+			Reflect.deleteProperty(selection ?? {}, "modify")
+		}
+
+		expect(modify).toHaveBeenCalledWith("move", "left", "word")
+		expect(editor.selection().head).toBe(start)
+		sink.destroy()
+	})
+
 	it("refuses edits read-only and allows them once writable", async () => {
 		const { editor } = await pagedEditor(LONG)
 		const sink = sinkOf(editor, { readOnly: true })

@@ -729,6 +729,8 @@ export class DocxComments {
 	// A reply to the thread of comment `id`, anchored where its first comment is (it reopens a resolved
 	// thread, as in Word).
 	reply(id: string, text: string): boolean {
+		this.withSession(this.threadOf(id) ?? id)
+
 		const author = this.context.identity.author
 		const root = this.comment(this.threadOf(id) ?? "")
 
@@ -846,6 +848,8 @@ export class DocxComments {
 
 	// Resolves (or reopens) the thread of comment `id`: every comment of it that has a paragraph id.
 	resolve(id: string, done: boolean): boolean {
+		this.withSession(id)
+
 		const thread = this.threads().find(candidate => candidate.id === this.threadOf(id))
 
 		if (thread === undefined || !thread.comment.canResolve) return false
@@ -874,6 +878,8 @@ export class DocxComments {
 
 	// Deletes comment `id` with its anchors; the first comment of a thread takes its replies with it.
 	remove(id: string): boolean {
+		this.withSession(id)
+
 		const comment = this.comment(id)
 
 		if (comment === undefined || !comment.canDelete) return false
@@ -972,6 +978,14 @@ export class DocxComments {
 	}
 
 	// ---- internals -----------------------------------------------------------------------------------------
+
+	// Comment `id`'s story gets its session when it has none (a command on a comment of a note never shown):
+	// what the commands can do there is read from its document.
+	private withSession(id: string): void {
+		const comment = this.comment(id)
+
+		if (comment !== undefined && this.live.get(id)?.session === undefined) this.host.storySession(comment.story)
+	}
 
 	private active(): DocxEditorSession | undefined {
 		return this.host.session ?? this.host.body.session
@@ -1134,7 +1148,7 @@ export class DocxComments {
 			if (session.story.story.kind === "comment") {
 				out.push(session.state.doc)
 			} else {
-				out.push(session.state.doc.attrs["comments"], session.reviewIndex.version, session.readOnly)
+				out.push(session.state.doc.attrs["comments"], session.reviewIndex.commentVersion, session.readOnly)
 			}
 		}
 
@@ -1185,18 +1199,10 @@ export class DocxComments {
 		const live = new Map<string, Live>()
 		const anchors = model.commentAnchors
 		const sourceStory = (source: SourceComment): number | undefined => anchorStory(model, source.anchor)
-		const made = new Set(this.host.sessions.map(session => session.story.story.index))
-
-		// Every story with a source comment gets its session (once): what the commands can do there is read from
-		// its document.
-		for (const source of this.sources.values()) {
-			const story = source.anchor < 0 ? undefined : sourceStory(source)
-
-			if (story !== undefined && !made.has(story)) {
-				made.add(story)
-				this.host.storySession(story)
-			}
-		}
+		// The body's comments are its session's; a comment in another story (a note, a header) is listed as the
+		// file has it until that story gets its session (shown on the pages, entered, or a command needs it): a
+		// document with comments in many notes makes none of their sessions to open.
+		this.host.storySession(this.host.body.session.story.story.index)
 
 		for (const session of this.host.sessions) {
 			sessions.set(session.story.story.index, session)

@@ -260,6 +260,21 @@ function copyItems(
 	w.copySource(out, at, to, false)
 }
 
+// Whether item `item` is the first content of run `run` (only its properties, if any, before it).
+function startsRun(part: StoryPart, run: number, item: number): boolean {
+	const document = part.document
+	const rPr = part.runs.rPr[part.aux[run] ?? -1] ?? -1
+	const bytes = document.bytes
+
+	for (let at = rPr >= 0 ? document.end(rPr) : document.openEnd(part.node(run)); at < part.start(item); at++) {
+		const byte = bytes[at] ?? 0
+
+		if (byte !== 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d) return false
+	}
+
+	return true
+}
+
 // A source run's properties without its tracked formatting change (whose id is the source run's), or as the
 // field's formatting gives them.
 function runProperties(w: StoryWriting, out: Out, run: number, restyle?: Restyle): void {
@@ -440,9 +455,24 @@ function rewrite(w: StoryWriting, out: Out, node: Node, restyle: Restyle | undef
 		out.text(`</${document.name(part.node(part.parent(field.separate)))}>`)
 		keepMarkers(w, out, field.separate + 1, field.end)
 	} else {
-		// No result yet: the code up to the end character, its run closed, and a separator.
-		copyItems(w, out, beginRun, endRun, part.start(field.end), part.parent(beginRun), deleted(node), restyle)
-		out.text(`</${document.name(part.node(endRun))}><${names.el("r")}>`)
+		// No result yet: the code up to the end character, its run closed (left out when it would hold no more
+		// than its properties: the end character opens a run of its own), and a separator.
+		const endAlone = endRun !== beginRun && startsRun(part, endRun, field.end)
+
+		copyItems(
+			w,
+			out,
+			beginRun,
+			endRun,
+			endAlone ? part.start(endRun) : part.start(field.end),
+			part.parent(beginRun),
+			deleted(node),
+			restyle
+		)
+
+		if (!endAlone) out.text(`</${document.name(part.node(endRun))}>`)
+
+		out.text(`<${names.el("r")}>`)
 		runProperties(w, out, endRun, restyle)
 		out.text(`${fieldChar(names, "separate")}</${names.el("r")}>`)
 	}
@@ -506,7 +536,7 @@ const FIELD: AtomWriter = {
 
 		// A legacy form field a form command filled in is the forms writer's.
 		if (legacyFieldEdited(node)) {
-			writeLegacyFormField(w, out, node)
+			writeLegacyFormField(w, out, node, restyleOf(w, node))
 
 			return
 		}

@@ -11,6 +11,9 @@ import { OpcError, ZipError, type Relationships } from "../opc/index"
 import { convertVml, type VmlPlacement } from "../vml/index"
 import { XmlError, type XmlDocument } from "../xml/index"
 import type { DocxModel, DrawingInfo, VmlInfo } from "./model/index"
+import { RevisionView } from "./model/kinds"
+import { equationView } from "./layout/objects"
+import { modelAuthors } from "./layout/styles"
 import { DEFAULT_COLOR_SCHEME_MAPPING, parseTheme, type Theme } from "./theme/index"
 
 // Bridges the docx model to the shared drawing layer: w:drawing (pictures, shapes, groups, canvases,
@@ -103,6 +106,8 @@ export class DocxDrawings {
 	readonly theme: DrawingTheme
 	private readonly effects: boolean
 	private readonly mathOptions: OmmlOptions
+	// Tracked changes' authors as reviewers are numbered (their colours), once an equation shows one.
+	private authors: ((name: string | undefined) => number) | undefined
 	// "part:node" of each w:txbxContent -> its story.
 	private textboxStories: Map<string, number> | null = null
 	// Part name -> its conversion, oldest first.
@@ -388,13 +393,20 @@ export class DocxDrawings {
 
 	// The MathML tree of an m:oMath or m:oMathPara node of a story part; undefined when there is none or
 	// conversion fails (never throws).
-	math(part: number, node: number): MathElement | undefined {
+	// `view`: the revision view an equation holding tracked changes is shown in (layout's object index), -1 for one
+	// without.
+	math(part: number, node: number, view = -1): MathElement | undefined {
 		const storyPart = this.model.parts[part]
 
 		if (storyPart === undefined) return undefined
 
 		try {
-			return ommlToMathTree(storyPart.document, node, { ...this.mathOptions, namespaces: storyPart.reader.namespaces })
+			const revisions =
+				view === RevisionView.Markup || view === RevisionView.Final || view === RevisionView.Original
+					? { revisions: { ...equationView(view), author: (this.authors ??= modelAuthors(this.model).index) } }
+					: {}
+
+			return ommlToMathTree(storyPart.document, node, { ...this.mathOptions, namespaces: storyPart.reader.namespaces, ...revisions })
 		} catch {
 			return undefined
 		}

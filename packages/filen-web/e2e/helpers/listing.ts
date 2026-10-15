@@ -94,6 +94,49 @@ function rowByName(listbox: Locator, name: string): Locator {
 	return listbox.getByRole("option", { name: itemNamePattern(name) })
 }
 
+// Scrolls the listing from its top until `name`'s row is mounted (the virtualizer mounts only the rows near
+// the scroll position, so a root crowded with other runs' directories can hold it below any viewport), and
+// leaves it in view. Scrolls whatever holds the listbox: the nearest ancestor (or itself) that scrolls.
+async function revealRow(listbox: Locator, name: string): Promise<void> {
+	const row = rowByName(listbox, name)
+	const scroll = (from: "top" | "next"): Promise<boolean> =>
+		listbox.evaluate(async (element, step) => {
+			let scroller: HTMLElement | null = element instanceof HTMLElement ? element : null
+
+			while (scroller !== null) {
+				const { overflowY } = getComputedStyle(scroller)
+
+				if ((overflowY === "auto" || overflowY === "scroll") && scroller.scrollHeight > scroller.clientHeight) break
+
+				scroller = scroller.parentElement
+			}
+
+			const target = scroller ?? document.scrollingElement
+
+			if (target === null) return false
+
+			const before = target.scrollTop
+
+			target.scrollTop = step === "top" ? 0 : before + Math.max(1, Math.floor(target.clientHeight * 0.8))
+			// Two frames for the virtualizer to mount what the scroll brought near.
+			await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+
+			return step === "top" || target.scrollTop !== before
+		}, from)
+
+	await scroll("top")
+
+	for (;;) {
+		if ((await row.count()) > 0) {
+			await row.first().scrollIntoViewIfNeeded()
+
+			return
+		}
+
+		if (!(await scroll("next"))) return
+	}
+}
+
 // Ceiling for a wait that closes on a live ACCOUNT WRITE rather than on UI responsiveness. Every
 // create/rename/move/trash serialises on the SDK's account-wide `drive-write` lease.
 //
@@ -602,8 +645,10 @@ export async function selectAndTrashRow(page: Page, listbox: Locator, name: stri
 	// Filtered by its own action button rather than taken as THE alertdialog on the page: a startup
 	// reminder is an alertdialog too and can pop asynchronously (this helper runs from teardowns, long
 	// after the initial dismissal), which would make a bare role lookup either a strict-mode violation
-	// or a click on the wrong dialog.
-	const confirm = page.getByRole("alertdialog").filter({ has: page.getByRole("button", { name: "Trash", exact: true }) })
+	// or a click on the wrong dialog. Matched by a name ENDING in "Trash": while the write runs the button
+	// shows a spinner labelled "Loading" before it, and a dialog matched by the exact name would read as
+	// closed (the write settled) at once, leaving the write to be cut off by whatever the caller does next.
+	const confirm = page.getByRole("alertdialog").filter({ has: page.getByRole("button", { name: /(^|\s)Trash$/ }) })
 	let confirmed = false
 
 	// ONLY the interaction retries, and only until the confirm has been clicked. Everything after that
@@ -704,6 +749,9 @@ export async function trashScratchDirectory(page: Page, name: string, confirmTim
 	// Either way the directory may still exist on the live account with nothing left to remove it, so
 	// name it for the next run's debris sweep instead of losing it silently.
 	const reachRootRow = async (): Promise<Locator> => {
+		// A test may have sized the viewport for itself; the listing is searched as every helper expects it.
+		await setTallListingViewport(page)
+
 		if (!(await dismissOverlays(page))) {
 			// A dialog whose SDK mutation never settled is undismissable by design (Escape is blocked while
 			// pending), and its modality makes the whole app inert — nothing here can reach the chrome
@@ -727,7 +775,12 @@ export async function trashScratchDirectory(page: Page, name: string, confirmTim
 
 		const { listbox } = await waitForListingSettled(page)
 
-		await expect(rowByName(listbox, name)).toBeVisible({ timeout: 15_000 })
+		// Revealed by scrolling, polled: the row is found wherever it sorts in a long root, and a refetch
+		// still bringing it in is ridden out.
+		await expect(async () => {
+			await revealRow(listbox, name)
+			await expect(rowByName(listbox, name)).toBeVisible({ timeout: 1000 })
+		}).toPass({ timeout: 15_000 })
 
 		return listbox
 	}

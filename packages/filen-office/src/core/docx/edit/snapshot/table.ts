@@ -1,11 +1,13 @@
 import type { Node } from "prosemirror-model"
 import { Item, type StoryPart } from "../../model/index"
-import type { PropsStore } from "../../props/index"
-import type { DocxStyles } from "../../styles/index"
+import { EMPTY_TABLE, type PropsStore, type TableProps } from "../../props/index"
+import type { DocxStyles, PropertyResolver } from "../../styles/index"
 import type { DocxCellVAlign, DocxTableAlign } from "../commands/tables"
+import type { DocxEditContext } from "../context"
 import type { DocxEditorSession } from "../session"
 import { MAIN, dataAttr } from "../copies"
-import { NO_SOURCE } from "../schema"
+import { colorKey } from "../formats"
+import { NO_SOURCE, type ColorAttrs } from "../schema"
 import { cellOverrides, propertySource, tableOverrides, type TableRect } from "../tables/map"
 import { canMerge, canSplit, tableAt, type TableAt } from "../tables/ops"
 import type { SnapshotInput } from "./index"
@@ -40,8 +42,11 @@ export interface DocxTableContext {
 	readonly widths: readonly number[]
 	// Direct alignment of the table, null when its style or Word's default decides.
 	readonly align: DocxTableAlign | null
-	// Of the selected cells: vertical alignment and fill ("RRGGBB"), "mixed" when they differ, null when none
-	// is set on them.
+	// Laid out right to left (w:bidiVisual): its first column is on the right, so dragging a border to the
+	// right narrows the column the border ends.
+	readonly rtl: boolean
+	// Of the selected cells: vertical alignment and fill ("RRGGBB", or a theme colour as "theme:accent1/tint:51"),
+	// "mixed" when they differ, null when none is set on them.
 	readonly vAlign: DocxCellVAlign | "mixed" | null
 	readonly shading: string | "mixed" | null
 	// The document's table styles (for table.style).
@@ -49,6 +54,10 @@ export interface DocxTableContext {
 }
 
 const previous = new WeakMap<DocxEditorSession, DocxTableContext>()
+// Right to left as a table's style decides, per resolver (a document's styles), by the table's direct properties
+// and the style a command may have set.
+const styleDirections = new WeakMap<PropertyResolver, WeakMap<TableProps, Map<string | undefined, boolean>>>()
+const OFF = /^(0|false|off)$/i
 const styleLists = new WeakMap<DocxStyles, readonly DocxTableStyle[]>()
 
 function tableStyles(styles: DocxStyles): readonly DocxTableStyle[] {
@@ -64,6 +73,50 @@ function tableStyles(styles: DocxStyles): readonly DocxTableStyle[] {
 	}
 
 	return list
+}
+
+// Whether a table is laid out right to left (w:bidiVisual): as its own properties say (those of the table a copy
+// was made from), else its style. Constant time: the style's answer is kept per properties and style.
+export function tableRightToLeft(part: StoryPart, context: DocxEditContext, table: Node): boolean {
+	const src = propertySource(part, table, Item.Table)
+
+	if (src === NO_SOURCE) {
+		const copied = tableOverrides(table).copy?.children.find(entry => entry.uri === MAIN && entry.name === "bidiVisual")
+		const value = copied === undefined ? undefined : dataAttr(copied, "val")
+
+		if (copied !== undefined) return value === undefined || !OFF.test(value)
+	}
+
+	const direct = src === NO_SOURCE ? EMPTY_TABLE : context.store.table(part.document, part.tables.tblPr[part.aux[src] ?? -1] ?? -1)
+
+	if (direct.bidiVisual !== undefined) return direct.bidiVisual
+
+	const styleId = (table.attrs["styleId"] as string | null) ?? undefined
+	const resolver = context.resolver
+	let byProps = styleDirections.get(resolver)
+
+	if (byProps === undefined) {
+		byProps = new WeakMap()
+		styleDirections.set(resolver, byProps)
+	}
+
+	let byStyle = byProps.get(direct)
+
+	if (byStyle === undefined) {
+		byStyle = new Map()
+		byProps.set(direct, byStyle)
+	}
+
+	let rtl = byStyle.get(styleId)
+
+	if (rtl === undefined) {
+		const { styleId: _source, ...rest } = direct
+
+		rtl = resolver.table(styleId === direct.styleId ? direct : styleId === undefined ? rest : { ...rest, styleId }).props.bidiVisual
+		byStyle.set(styleId, rtl)
+	}
+
+	return rtl
 }
 
 function alignOf(value: string | undefined): DocxTableAlign | null {
@@ -96,16 +149,39 @@ function cellValues(part: StoryPart, store: PropsStore, cell: Node): { vAlign: D
 
 		return child === undefined ? undefined : dataAttr(child, attribute)
 	}
-	const fill = props?.shading?.fill?.val ?? copied("shd", "fill")
+	const tone = (value: string | undefined): number | null => (value === undefined ? null : Number.parseInt(value, 16))
+	const own = overrides.shadingTheme
+	const color: ColorAttrs | undefined =
+		overrides.shading !== undefined
+			? overrides.shading === null
+				? undefined
+				: {
+						value: overrides.shading,
+						themeColor: own?.theme ?? null,
+						themeTint: own?.tint ?? null,
+						themeShade: own?.shade ?? null
+					}
+			: props?.shading?.fill !== undefined
+				? {
+						value: props.shading.fill.val ?? null,
+						themeColor: props.shading.fill.themeColor ?? null,
+						themeTint: props.shading.fill.themeTint ?? null,
+						themeShade: props.shading.fill.themeShade ?? null
+					}
+				: copied("shd", "fill") === undefined && copied("shd", "themeFill") === undefined
+					? undefined
+					: {
+							value: copied("shd", "fill") ?? null,
+							themeColor: copied("shd", "themeFill") ?? null,
+							themeTint: tone(copied("shd", "themeFillTint")),
+							themeShade: tone(copied("shd", "themeFillShade"))
+						}
+	const key = color === undefined ? "auto" : colorKey(color)
 
 	return {
 		vAlign: overrides.vAlign ?? vAlignOf(props?.vAlign ?? copied("vAlign", "val")),
-		shading:
-			overrides.shading !== undefined
-				? overrides.shading
-				: fill === undefined || fill.toLowerCase() === "auto"
-					? null
-					: fill.toUpperCase()
+		// As the colour pickers key colours: "RRGGBB", or the theme colour ("theme:accent1/tint:51").
+		shading: key === "auto" ? null : key
 	}
 }
 
@@ -170,6 +246,7 @@ export function tableOf(input: SnapshotInput): DocxTableContext | null {
 		depth: at.depth,
 		widths,
 		align: overrides.align ?? alignOf(sourceAlign),
+		rtl: tableRightToLeft(part, context, table),
 		...selectedValues(at, part, context.store),
 		styles: tableStyles(context.styles)
 	}

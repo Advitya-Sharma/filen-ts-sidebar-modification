@@ -1,19 +1,34 @@
+import { useState } from "react"
 import {
 	DOCX_EDITOR_COMMANDS,
+	MAX_TABLE_COLUMNS,
+	MAX_TABLE_ROWS,
+	parseDocxEditorCommand,
+	type DocxCommandContext,
 	type DocxEditorCommand,
 	type DocxEditorCommandGroup,
 	type DocxEditorCommandInfo,
 	type DocxEditorCommandType,
+	type DocxControlContext,
 	type DocxEditorSnapshot,
+	type DocxStoryContext,
+	type DocxHighlightColor,
+	type DocxLineNumberRestart,
+	type DocxLineSpacingRule,
+	type DocxOrientation,
+	type DocxPageNumberFormat,
 	type DocxParagraphStyle,
+	type DocxTextColor,
+	type DocxThemeColor,
+	type DocxValuesSnapshot,
 	type DocxReadOnlyReason,
 	type LockReason,
 	type StoryMatch
 } from "@filen/office/core/docx/edit"
-import { RevisionView } from "@filen/office/core/docx"
+import { HIGHLIGHT_COLORS, RevisionView, applyThemeShade, applyThemeTint, hexToRgb, rgbToHsl } from "@filen/office/core/docx"
 import { DEFAULT_MARKUP_MODE, markupInfo, type DocxMarkupInfo, type DocxMarkupMode } from "@filen/office/dom/docx"
 import type { DocxEditorInteractions, DocxEditorMark, DocxObjectPress } from "@filen/office/react/docx/editor"
-import type { ObjectHitKind } from "@filen/office/core/docx/paged"
+import type { DocxCurrentPageSetup, DocxTableBorder, ObjectHitKind } from "@filen/office/core/docx/paged"
 import type { SpellingMark } from "@filen/office/core/docx/spelling"
 import type { DocxViewOnlyReason } from "@/features/preview/components/docxViewer.logic"
 import type { PreviewKey } from "@/lib/i18n"
@@ -30,9 +45,15 @@ import { FORMS_LABELS } from "@/features/preview/components/docxCommandLabels/fo
 import { DRAWINGS_LABELS } from "@/features/preview/components/docxCommandLabels/drawings"
 import { MATH_LABELS } from "@/features/preview/components/docxCommandLabels/math"
 import { VIEW_LABELS } from "@/features/preview/components/docxCommandLabels/view"
+import { CONTROL_INSERT_VARIANTS } from "@/features/preview/components/docxCommandLabels/forms"
+import { SECTION_BREAK_VARIANTS } from "@/features/preview/components/docxCommandLabels/sections"
+import { ROTATE_VARIANTS, WRAP_VARIANTS } from "@/features/preview/components/docxCommandLabels/drawings"
 
 // Idle autosave: this long after the last edit while there are unsaved changes (one version per pause).
 export const AUTOSAVE_IDLE_MS = 30_000
+
+// E2E builds: the sessionStorage key ("off") a read-only test lane sets so the editor never autosaves there.
+export const E2E_AUTOSAVE_KEY = "filen-e2e-docx-autosave"
 
 // The package's commands by feature: each feature labels its own in docxCommandLabels/<feature>.ts and fills
 // its toolbar slot. An id the package lacks fails `satisfies`, a package id missing here the test's type check.
@@ -148,6 +169,7 @@ export const DOCX_COMMAND_CATALOGUE = {
 		"control.clear",
 		"control.text",
 		"control.insert",
+		"control.items",
 		"control.item.add",
 		"control.item.remove"
 	],
@@ -221,6 +243,27 @@ const FEATURE_SLOTS: Readonly<Record<DocxCommandFeature, DocxToolbarSlot | null>
 	view: "view"
 }
 
+// Commands offered somewhere else than their feature's slot: inserting a table or a form control is the
+// Insert menu's, the header and footer toggles the header chip's, page setup and field codes the ⋯ menu's
+// and the context menu's.
+const COMMAND_SLOTS: Readonly<Partial<Record<DocxEditorCommandType, DocxToolbarSlot | null>>> = {
+	"table.insert": "insert",
+	"control.insert": "insert",
+	"header.differentFirst": null,
+	"header.differentOddEven": null,
+	"header.linkToPrevious": null,
+	"header.remove": null,
+	"footer.remove": null,
+	"section.deleteBreak": null,
+	"page.setup": null,
+	"view.fieldCodes": null,
+	"view.fieldCode": null
+}
+
+function slotOf(type: DocxEditorCommandType, feature: DocxCommandFeature): DocxToolbarSlot | null {
+	return Object.hasOwn(COMMAND_SLOTS, type) ? (COMMAND_SLOTS[type] ?? null) : FEATURE_SLOTS[feature]
+}
+
 export interface DocxToolbarCommand {
 	readonly info: DocxEditorCommandInfo
 	readonly label: PreviewKey
@@ -248,34 +291,178 @@ export function rowCommands(group: DocxEditorCommandGroup): DocxToolbarCommand[]
 
 // The labelled commands a toolbar slot offers, in catalogue order.
 export function slotCommands(slot: DocxToolbarSlot): DocxToolbarCommand[] {
-	return toolbarCommands((_info, feature) => FEATURE_SLOTS[feature] === slot)
+	return toolbarCommands((info, feature) => slotOf(info.type, feature) === slot)
 }
 
-// What a toolbar slot component gets (docxInsertMenu, docxReviewMenu, docxTableMenu, docxFormatControls, the
-// reflow toggle): mounted only once it has commands.
-export interface DocxToolbarSlotProps {
+// A feature's labelled commands, in catalogue order (a contextual group's: the Picture group's drawings).
+export function featureCommands(feature: DocxCommandFeature): DocxToolbarCommand[] {
+	return toolbarCommands((_info, owner) => owner === feature)
+}
+
+// One form of a command a menu offers as its own item (Insert ▸ Form control ▸ Checkbox): the command to run,
+// or the input to ask for (requestInput with the command's type and this detail) where it needs more.
+export type DocxCommandVariant =
+	{ readonly label: PreviewKey; readonly command: DocxEditorCommand } | { readonly label: PreviewKey; readonly input: string }
+
+const VARIANTS: Readonly<Partial<Record<DocxEditorCommandType, readonly DocxCommandVariant[]>>> = {
+	"control.insert": CONTROL_INSERT_VARIANTS,
+	"insert.sectionBreak": SECTION_BREAK_VARIANTS,
+	"drawing.wrap": WRAP_VARIANTS,
+	"drawing.rotate": ROTATE_VARIANTS
+}
+
+// The forms a menu offers a command in (a submenu), or undefined for a command run as it is.
+export function commandVariants(type: DocxEditorCommandType): readonly DocxCommandVariant[] | undefined {
+	return VARIANTS[type]
+}
+
+// Whether the selection is in the place a contextual command acts on.
+export function contextPresent(snapshot: DocxEditorSnapshot, context: DocxCommandContext): boolean {
+	const where = snapshot.context
+
+	switch (context) {
+		case "table":
+			return where.table !== null
+		case "drawing":
+			return where.drawing !== null
+		case "control":
+			return where.control !== null
+		case "comment":
+			return where.comment !== null
+		case "revision":
+			return snapshot.review.current !== null
+		case "header":
+			return where.story.header != null
+		case "note":
+			return where.story.note != null
+	}
+}
+
+// What a context menu offers, in its order, and where: a tracked change's accept and reject, a new comment, the
+// table's rows, columns and cells, the control's content, the link, the field and the note at the selection,
+// the picture's items. Each only once labelled and while it can run.
+const CONTEXT_MENU: readonly (readonly [DocxEditorCommandType, DocxCommandContext | "field" | "link" | "always"])[] = [
+	["review.accept", "revision"],
+	["review.reject", "revision"],
+	["comment.add", "always"],
+	["table.row.insertAbove", "table"],
+	["table.row.insertBelow", "table"],
+	["table.column.insertLeft", "table"],
+	["table.column.insertRight", "table"],
+	["table.row.delete", "table"],
+	["table.column.delete", "table"],
+	["table.delete", "table"],
+	["table.cells.merge", "table"],
+	["table.cell.split", "table"],
+	["table.distributeColumns", "table"],
+	["control.clear", "control"],
+	["control.item.add", "control"],
+	["control.item.remove", "control"],
+	["link.set", "link"],
+	["link.remove", "link"],
+	["field.update", "field"],
+	["view.fieldCode", "field"],
+	["note.goto", "note"],
+	["note.convert", "note"],
+	["note.delete", "note"],
+	["drawing.wrap", "drawing"],
+	["drawing.rotate", "drawing"],
+	["drawing.crop", "drawing"],
+	["drawing.altText", "drawing"],
+	["drawing.delete", "drawing"]
+]
+
+// Commands a context menu runs by asking for their input from the editor's own components (requestInput).
+const CONTEXT_INPUTS: ReadonlySet<DocxEditorCommandType> = new Set([
+	"table.cell.split",
+	"comment.add",
+	"link.set",
+	"drawing.crop",
+	"drawing.altText"
+])
+
+// How a context menu item runs its command: as it is, by asking for its input, or through its variants (a
+// submenu).
+export type DocxContextAction = "run" | "input" | "variants"
+
+export interface DocxContextCommand extends DocxToolbarCommand {
+	readonly action: DocxContextAction
+}
+
+const INFOS: ReadonlyMap<DocxEditorCommandType, DocxEditorCommandInfo> = new Map(DOCX_EDITOR_COMMANDS.map(info => [info.type, info]))
+
+// The context menu's commands where the selection is.
+export function contextCommands(snapshot: DocxEditorSnapshot, readOnly: boolean): DocxContextCommand[] {
+	const out: DocxContextCommand[] = []
+
+	for (const [type, where] of CONTEXT_MENU) {
+		const info = INFOS.get(type)
+		const label = COMMAND_LABELS[type]
+
+		if (info === undefined || label === undefined || !snapshot.enabled[type] || (readOnly && info.write)) {
+			continue
+		}
+
+		// Notes: the command's enablement says whether the selection is at one.
+		if (
+			where === "field"
+				? snapshot.context.field === null
+				: where === "link"
+					? snapshot.context.link === null
+					: where !== "always" && where !== "note" && !contextPresent(snapshot, where)
+		) {
+			continue
+		}
+
+		const action: DocxContextAction | null = CONTEXT_INPUTS.has(type)
+			? "input"
+			: VARIANTS[type] !== undefined
+				? "variants"
+				: info.input === undefined && parseDocxEditorCommand({ type }) !== undefined
+					? "run"
+					: null
+
+		if (action !== null) {
+			out.push({ info, label, action })
+		}
+	}
+
+	return out
+}
+
+// Where the document is shown: its pages, or reflowed to the window's width (Mobile view).
+export type DocxSurface = "pages" | "reflow"
+
+// A request for a command's input (a comment's text, an equation's LaTeX, a picture) to the component that
+// takes it: from a menu, the context menu or a shortcut, to a balloon, popover or dialog elsewhere.
+export interface DocxInputRequest {
+	readonly type: DocxEditorCommandType
+	// Which form of the input, when a command takes it in several (a picture's source).
+	readonly detail?: string
+	// New for every request, so asking again for the same input is seen.
+	readonly nonce: number
+}
+
+export type DocxRequestInput = (type: DocxEditorCommandType, detail?: string) => void
+
+// What every component that takes input through the request channel gets.
+export interface DocxInputChannelProps {
+	// The open request, until its taker is done with it (onInputDone with its nonce).
+	inputRequest: DocxInputRequest | null
+	requestInput: DocxRequestInput
+	onInputDone: (nonce: number) => void
+}
+
+// What a toolbar slot component gets (docxInsertMenu, docxReviewMenu, docxTableMenu, docxFormatControls,
+// docxDrawingMenu, the reflow menu item): mounted only once it has commands.
+export interface DocxToolbarSlotProps extends DocxInputChannelProps {
 	commands: readonly DocxToolbarCommand[]
 	snapshot: DocxEditorSnapshot | undefined
 	readOnly: boolean
 	apple: boolean
 	execute: (command: DocxEditorCommand) => void
+	surface: DocxSurface
 }
-
-// Commands that can record an author: the host has the user's name before running one that will.
-const AUTHOR_COMMANDS: ReadonlySet<string> = new Set(DOCX_EDITOR_COMMANDS.filter(info => info.author === true).map(info => info.type))
-
-// Whether running `command` records the author: turning tracking off never does (it must stay possible without
-// a name).
-export function commandRecordsAuthor(command: DocxEditorCommand, tracking: boolean): boolean {
-	if (!AUTHOR_COMMANDS.has(command.type)) {
-		return false
-	}
-
-	return command.type === "review.track" ? (command.on ?? !tracking) : true
-}
-
-// Runs `run` with the user's author name, asking for it first when none is set; never when the user declines.
-export type DocxAuthorGate = (run: (author: string) => void) => void
 
 // The feature whose commands act on each kind of object a press on the pages can hit; links keep the pages'
 // own handling.
@@ -552,25 +739,123 @@ export function editorMarks(spelling: readonly SpellingMark[], matches: readonly
 	return out
 }
 
-// Groups that leave the row for the ⋯ menu, last first, as the row narrows: each needs this much width
-// (px) for itself to stay. History and character formatting always stay.
-const BUTTON_WIDTH = 34
-const STYLE_WIDTH = 150
+// What the row's items take (px), each with the gap after it, as the browsers lay them out. History, bold,
+// italic and the ⋯ menu always stay (with the formatting menu once offered); the rest leave for the ⋯ menu (or
+// the formatting menu), last first, as the row narrows.
+const BUTTON_WIDTH = 30
+const DIVIDER_WIDTH = 11
+const STYLE_WIDTH = 146
+const FONT_WIDTH = 130 + 66
 const LIST_BUTTONS = 4
 const ALIGN_BUTTONS = 4
-// History, character formatting, find, the menu and the zoom percentage.
-const RESERVED_WIDTH = 7 * BUTTON_WIDTH + 2 * BUTTON_WIDTH + 64
+const ZOOM_WIDTH = 50
+// Undo and redo, the divider after them, bold, italic and the ⋯ menu.
+const RESERVED_WIDTH = 5 * BUTTON_WIDTH + DIVIDER_WIDTH
+// Character formatting that always stays: the rest of it leaves for the ⋯ menu.
+export const KEPT_FORMAT_BUTTONS = 2
+
+// What the slots beside the row's groups take (px): the Insert and Review menus, and the contextual Table group
+// while the selection is in a table. `labels`: the menus show their names (a wide window); an icon each
+// otherwise. The Picture group's items are fitted one by one (toolbarFit).
+const INSERT_WIDTH = 80
+const REVIEW_WIDTH = 84
+const TABLE_GROUP_WIDTH = 84
+const ICON_MENU_WIDTH = 36
+
+export function slotsWidth(slots: { insert: boolean; review: boolean; table: boolean }, labels = true): number {
+	return (
+		(slots.insert ? (labels ? INSERT_WIDTH : ICON_MENU_WIDTH) : 0) +
+		(slots.review ? (labels ? REVIEW_WIDTH : ICON_MENU_WIDTH) : 0) +
+		(slots.table ? (labels ? TABLE_GROUP_WIDTH : ICON_MENU_WIDTH) : 0)
+	)
+}
+
+// How long after a typed character the next one adds to a list's type-ahead (ms), as the ARIA APG has it.
+export const TYPE_AHEAD_MS = 500
+
+// The entry type-ahead moves to for `query` (the characters typed within TYPE_AHEAD_MS of each other) from the
+// active one, `at`: one character, or the same one repeated, steps to the next entry starting with it; more
+// characters match from the active entry on, so it stays while it still matches. -1: none matches.
+export function typeAhead(texts: readonly string[], at: number, query: string): number {
+	// Each typed key is one character (KeyboardEvent.key of length 1).
+	const lower = query.toLocaleLowerCase()
+	const first = lower.charAt(0)
+
+	if (first === "" || texts.length === 0) {
+		return -1
+	}
+
+	const repeated = lower === first.repeat(lower.length)
+	const prefix = repeated ? first : lower
+	const from = repeated ? at + 1 : at
+
+	for (let offset = 0; offset < texts.length; offset++) {
+		const index = (((from + offset) % texts.length) + texts.length) % texts.length
+
+		if (texts[index]?.toLocaleLowerCase().startsWith(prefix) === true) {
+			return index
+		}
+	}
+
+	return -1
+}
+
+export type DocxDrawingItem = "drawing.wrap" | "drawing.rotate" | "drawing.crop" | "drawing.altText" | "drawing.delete"
+
+const DRAWING_ITEMS: readonly DocxDrawingItem[] = ["drawing.wrap", "drawing.rotate", "drawing.crop", "drawing.altText", "drawing.delete"]
+
+// The Picture group's items offered, in the order they stay in the row (the last leave for the ⋯ menu first);
+// cropping is the pages' only (its handles are on the page).
+export function drawingItems(commands: readonly DocxToolbarCommand[], surface: DocxSurface): DocxDrawingItem[] {
+	return DRAWING_ITEMS.filter(
+		item => (item !== "drawing.crop" || surface === "pages") && commands.some(command => command.info.type === item)
+	)
+}
 
 export interface ToolbarFit {
+	// How many of the Picture group's items stay in the row (drawingItems' order).
+	picture: number
+	// How many of the character formatting buttons after the kept ones stay in the row.
+	format: number
+	find: boolean
+	// The format painter (the formatting menu holds it otherwise).
+	painter: boolean
 	style: boolean
+	// The font and size pickers, and the colour buttons (the formatting menu holds them otherwise).
+	font: boolean
+	color: boolean
 	lists: boolean
 	align: boolean
 	clear: boolean
+	// The zoom percentage (the ⋯ menu's Zoom otherwise).
+	zoom: boolean
 }
 
-// Which groups the row has room for at `width` (px), filled in priority order.
-export function toolbarFit(width: number, extra: number): ToolbarFit {
-	let room = width - RESERVED_WIDTH - extra
+const UNMEASURED_FIT: ToolbarFit = {
+	picture: 0,
+	format: 0,
+	find: true,
+	painter: false,
+	style: false,
+	font: false,
+	color: false,
+	lists: false,
+	align: false,
+	clear: false,
+	zoom: true
+}
+
+// Which groups the row has room for at `width` (px, inside its padding), filled in priority order. `extra`:
+// what the badges and slots take; `format`: the formatting controls are offered; `formatButtons`: the
+// character formatting buttons past the kept ones; `pictureItems`: the Picture group's, while a picture is
+// selected (its tools come first, as Word's contextual tab does).
+export function toolbarFit(width: number, extra: number, format = false, formatButtons = 0, pictureItems = 0): ToolbarFit {
+	// Not measured yet: the groups that stayed before the narrow widths moved them.
+	if (width <= 0) {
+		return { ...UNMEASURED_FIT, picture: pictureItems, format: formatButtons, painter: format }
+	}
+
+	let room = width - RESERVED_WIDTH - extra - (format ? BUTTON_WIDTH : 0)
 	const take = (need: number): boolean => {
 		if (room < need) {
 			room = -1
@@ -583,12 +868,30 @@ export function toolbarFit(width: number, extra: number): ToolbarFit {
 		return true
 	}
 
-	const style = take(STYLE_WIDTH)
-	const lists = take(LIST_BUTTONS * BUTTON_WIDTH + 8)
-	const align = take(ALIGN_BUTTONS * BUTTON_WIDTH + 8)
-	const clear = take(BUTTON_WIDTH + 8)
+	let picture = 0
 
-	return { style, lists, align, clear }
+	// The group's divider with its first item.
+	while (picture < pictureItems && take(BUTTON_WIDTH + (picture === 0 ? DIVIDER_WIDTH : 0))) {
+		picture++
+	}
+
+	let shown = 0
+
+	while (shown < formatButtons && take(BUTTON_WIDTH)) {
+		shown++
+	}
+
+	const find = take(BUTTON_WIDTH)
+	const painter = format && take(BUTTON_WIDTH)
+	const zoom = take(ZOOM_WIDTH)
+	const style = take(DIVIDER_WIDTH + STYLE_WIDTH)
+	const font = format && take(FONT_WIDTH)
+	const lists = take(LIST_BUTTONS * BUTTON_WIDTH + DIVIDER_WIDTH)
+	const align = take(ALIGN_BUTTONS * BUTTON_WIDTH + DIVIDER_WIDTH)
+	const color = format && take(2 * BUTTON_WIDTH)
+	const clear = take(BUTTON_WIDTH)
+
+	return { picture, format: shown, find, painter, style, font, color, lists, align, clear, zoom }
 }
 
 type MarkupView = DocxMarkupInfo["view"]
@@ -614,4 +917,569 @@ export function markupRelayout(view: MarkupView, next: DocxMarkupMode): MarkupVi
 	const needed = markupInfo(next).view
 
 	return needed === view ? null : needed
+}
+
+// ---- format painter --------------------------------------------------------------------------------------
+
+// The painter as the toolbar shows it: off, on for one paste, or on until turned off.
+export type DocxPainterState = "off" | "once" | "sticky"
+
+// What a click on the format painter does (Word's): a click picks up the selection's formatting for the next
+// selection, a double click keeps it on for every selection until clicked again or Esc, a click while it is
+// on turns it off. `clicks`: the click's count (2 for a double click's second).
+export function painterAction(clicks: number, state: DocxPainterState): "copy" | "sticky" | "cancel" {
+	if (clicks >= 2) {
+		return "sticky"
+	}
+
+	return state === "off" ? "copy" : "cancel"
+}
+
+// ---- table border drag -----------------------------------------------------------------------------------
+
+// Layout px are 1/96 inch.
+export const TWIPS_PER_PX = 15
+
+// The width (twips) of the border's column after dragging the border `deltaPx` screen px to the right at
+// `zoom`: in a right-to-left table the column's border is its left one, so a drag to the right narrows it.
+// The column keeps at least the narrowest width; with a column after it, that one does too (they share the
+// width, as table.column.width does).
+export function borderDragWidth(border: DocxTableBorder, deltaPx: number, zoom: number): number {
+	const current = border.widths[border.column] ?? 0
+	const next = border.widths[border.column + 1]
+	const delta = (deltaPx / (zoom > 0 ? zoom : 1)) * TWIPS_PER_PX * (border.rtl ? -1 : 1)
+	const most = next === undefined ? Infinity : current + next - border.minTwips
+
+	return Math.round(Math.max(border.minTwips, Math.min(most, current + delta)))
+}
+
+// Where the dragged border shows (screen px from where the drag began) for a column `twips` wide.
+export function borderDragOffset(border: DocxTableBorder, twips: number, zoom: number): number {
+	return (((twips - (border.widths[border.column] ?? 0)) / TWIPS_PER_PX) * zoom) / (border.rtl ? -1 : 1)
+}
+
+// ---- colours ---------------------------------------------------------------------------------------------
+
+// What a colour swatch is called: a colour's name, with how much lighter or darker a theme variation is.
+export interface DocxSwatchLabel {
+	readonly name: PreviewKey
+	readonly tone?: { readonly lighter: boolean; readonly percent: number }
+}
+
+export interface DocxSwatch {
+	// The colour as the snapshot's values name it ("RRGGBB", "theme:accent1/tint:153"): the chosen one is marked.
+	readonly key: string
+	// What it shows, "RRGGBB".
+	readonly rgb: string
+	readonly label: DocxSwatchLabel
+	readonly color: DocxTextColor
+}
+
+// Word's theme colour columns, in its order.
+const THEME_COLUMNS: readonly (readonly [DocxThemeColor, PreviewKey])[] = [
+	["background1", "previewDocxColorBackground1"],
+	["text1", "previewDocxColorText1"],
+	["background2", "previewDocxColorBackground2"],
+	["text2", "previewDocxColorText2"],
+	["accent1", "previewDocxColorAccent1"],
+	["accent2", "previewDocxColorAccent2"],
+	["accent3", "previewDocxColorAccent3"],
+	["accent4", "previewDocxColorAccent4"],
+	["accent5", "previewDocxColorAccent5"],
+	["accent6", "previewDocxColorAccent6"]
+]
+
+// The lighter and darker variations Word offers of a theme colour, by its lightness (0–1): pure black and
+// white, very dark and very light colours get their own steps, others 80/60/40 % lighter and 25/50 % darker.
+function variations(lightness: number): readonly { readonly lighter: boolean; readonly percent: number }[] {
+	const lighter = (percent: number) => ({ lighter: true, percent })
+	const darker = (percent: number) => ({ lighter: false, percent })
+
+	if (lightness <= 0) return [50, 35, 25, 15, 5].map(lighter)
+	if (lightness >= 1) return [5, 15, 25, 35, 50].map(darker)
+	if (lightness < 0.2) return [90, 75, 50, 25, 10].map(lighter)
+	if (lightness > 0.8) return [10, 25, 50, 75, 90].map(darker)
+
+	return [lighter(80), lighter(60), lighter(40), darker(25), darker(50)]
+}
+
+// The theme part of a colour picker as rows (the colours, then each variation), from the document's theme;
+// empty without one.
+export function themeSwatches(rgbOf: (theme: DocxThemeColor) => string | undefined): readonly (readonly DocxSwatch[])[] {
+	const columns: DocxSwatch[][] = []
+
+	for (const [theme, name] of THEME_COLUMNS) {
+		const base = rgbOf(theme)?.toUpperCase()
+
+		if (base === undefined || !/^[0-9A-F]{6}$/.test(base)) {
+			return []
+		}
+
+		const column: DocxSwatch[] = [{ key: `theme:${theme}`, rgb: base, label: { name }, color: { kind: "theme", theme } }]
+
+		for (const tone of variations(rgbToHsl(hexToRgb(base)).l)) {
+			const amount = Math.round(255 * (1 - tone.percent / 100))
+			const rgb = (tone.lighter ? applyThemeTint(base, amount) : applyThemeShade(base, amount)).toUpperCase()
+
+			column.push({
+				key: `theme:${theme}/${tone.lighter ? "tint" : "shade"}:${String(amount)}`,
+				rgb,
+				label: { name, tone },
+				color: tone.lighter ? { kind: "theme", theme, tint: amount } : { kind: "theme", theme, shade: amount }
+			})
+		}
+
+		columns.push(column)
+	}
+
+	return (columns[0] ?? []).map((_, row) =>
+		columns.flatMap(column => {
+			const swatch = column[row]
+
+			return swatch === undefined ? [] : [swatch]
+		})
+	)
+}
+
+// Word's standard colours.
+export const STANDARD_SWATCHES: readonly DocxSwatch[] = (
+	[
+		["C00000", "previewDocxColorDarkRed"],
+		["FF0000", "previewDocxColorRed"],
+		["FFC000", "previewDocxColorOrange"],
+		["FFFF00", "previewDocxColorYellow"],
+		["92D050", "previewDocxColorLightGreen"],
+		["00B050", "previewDocxColorGreen"],
+		["00B0F0", "previewDocxColorLightBlue"],
+		["0070C0", "previewDocxColorBlue"],
+		["002060", "previewDocxColorDarkBlue"],
+		["7030A0", "previewDocxColorPurple"]
+	] as const
+).map(([rgb, name]) => ({ key: rgb, rgb, label: { name }, color: { kind: "rgb", value: rgb } }))
+
+// The highlighter's colours, in Word's order (white is not offered there).
+export const HIGHLIGHT_SWATCHES: readonly { readonly name: DocxHighlightColor; readonly rgb: string; readonly label: PreviewKey }[] = (
+	[
+		["yellow", "previewDocxHighlightYellow"],
+		["green", "previewDocxHighlightGreen"],
+		["cyan", "previewDocxHighlightCyan"],
+		["magenta", "previewDocxHighlightMagenta"],
+		["blue", "previewDocxHighlightBlue"],
+		["red", "previewDocxHighlightRed"],
+		["darkBlue", "previewDocxHighlightDarkBlue"],
+		["darkCyan", "previewDocxHighlightDarkCyan"],
+		["darkGreen", "previewDocxHighlightDarkGreen"],
+		["darkMagenta", "previewDocxHighlightDarkMagenta"],
+		["darkRed", "previewDocxHighlightDarkRed"],
+		["darkYellow", "previewDocxHighlightDarkYellow"],
+		["darkGray", "previewDocxHighlightDarkGray"],
+		["lightGray", "previewDocxHighlightLightGray"],
+		["black", "previewDocxHighlightBlack"]
+	] as const
+).map(([name, label]) => ({ name, rgb: HIGHLIGHT_COLORS[name] ?? "000000", label }))
+
+// ---- character and paragraph values ----------------------------------------------------------------------
+
+// A value of the selection as a control shows it: one value, or none ("mixed" and nothing alike).
+export function single<T>(value: T | "mixed" | null): T | undefined {
+	return value === null || value === "mixed" ? undefined : value
+}
+
+// Line spacing Word's menu offers (multiples of a line, 240ths).
+export const LINE_SPACINGS: readonly number[] = [240, 276, 360, 480, 600, 720]
+
+// Character spacing steps (twips; negative condenses): Word's Font dialog, by a point and a half.
+export const CHARACTER_SPACINGS: readonly { readonly twips: number; readonly label: PreviewKey }[] = [
+	{ twips: -60, label: "previewDocxSpacingVeryTight" },
+	{ twips: -30, label: "previewDocxSpacingTight" },
+	{ twips: 0, label: "previewDocxSpacingNormal" },
+	{ twips: 30, label: "previewDocxSpacingLoose" },
+	{ twips: 60, label: "previewDocxSpacingVeryLoose" }
+]
+
+export type DocxLengthUnit = "in" | "cm"
+
+// The unit lengths are shown in: inches where the locale's region measures in them, else centimetres.
+export function lengthUnit(locale: string): DocxLengthUnit {
+	const region = /[-_]([A-Za-z]{2})\b/.exec(locale)?.[1]?.toUpperCase()
+
+	return region === "US" || region === "LR" || region === "MM" ? "in" : "cm"
+}
+
+// Twips as `unit` (two decimals) and back; NaN for text that is no number.
+export function fromTwips(twips: number, unit: DocxLengthUnit): number {
+	return Math.round((twips / (unit === "in" ? 1440 : 1440 / 2.54)) * 100) / 100
+}
+
+export function toTwips(text: string, unit: DocxLengthUnit): number {
+	const value = Number(text.trim().replace(",", "."))
+
+	return text.trim() === "" || !Number.isFinite(value) ? Number.NaN : Math.round(value * (unit === "in" ? 1440 : 1440 / 2.54))
+}
+
+// Points (paragraph spacing) as twips and back.
+export function pointsOf(twips: number): number {
+	return Math.round((twips / 20) * 10) / 10
+}
+
+export function pointsToTwips(text: string): number {
+	const value = Number(text.trim().replace(",", "."))
+
+	return text.trim() === "" || !Number.isFinite(value) ? Number.NaN : Math.round(value * 20)
+}
+
+// The Paragraph dialog's fields as typed (lengths in `unit`, spacing in points, a multiple as lines).
+export interface DocxParagraphForm {
+	readonly start: string
+	readonly end: string
+	readonly special: "none" | "firstLine" | "hanging"
+	readonly by: string
+	readonly before: string
+	readonly after: string
+	readonly rule: DocxLineSpacingRule
+	readonly at: string
+}
+
+export function paragraphForm(values: DocxValuesSnapshot, unit: DocxLengthUnit): DocxParagraphForm {
+	const indent = single(values.indent)
+	const spacing = single(values.spacing)
+	const line = single(values.lineSpacing)
+	const length = (twips: number | undefined) => (twips === undefined ? "" : String(fromTwips(twips, unit)))
+	const special = indent === undefined ? "none" : indent.firstLine > 0 ? "firstLine" : indent.hanging > 0 ? "hanging" : "none"
+
+	return {
+		start: length(indent?.start),
+		end: length(indent?.end),
+		special,
+		by: special === "none" ? "" : length(special === "firstLine" ? indent?.firstLine : indent?.hanging),
+		before: spacing === undefined ? "" : String(pointsOf(spacing.before)),
+		after: spacing === undefined ? "" : String(pointsOf(spacing.after)),
+		rule: line?.rule ?? "auto",
+		at:
+			line === undefined
+				? ""
+				: line.rule === "auto"
+					? String(Math.round((line.value / 240) * 100) / 100)
+					: String(pointsOf(line.value))
+	}
+}
+
+// The commands that set what the Paragraph dialog changed (a field left as it was, or empty, changes nothing);
+// null when a changed field holds no valid value.
+export function paragraphCommands(initial: DocxParagraphForm, form: DocxParagraphForm, unit: DocxLengthUnit): DocxEditorCommand[] | null {
+	const out: DocxEditorCommand[] = []
+	const changed = (key: keyof DocxParagraphForm) =>
+		form[key] !== initial[key] && (typeof form[key] !== "string" || form[key].trim() !== "")
+	const length = (text: string) => toTwips(text, unit)
+
+	if (changed("start") || changed("end") || changed("special") || changed("by")) {
+		const start = changed("start") ? length(form.start) : undefined
+		const end = changed("end") ? length(form.end) : undefined
+		const by = form.special === "none" ? 0 : length(form.by)
+
+		if (Number.isNaN(start) || Number.isNaN(end) || Number.isNaN(by) || by < 0) return null
+
+		out.push({
+			type: "paragraph.indent",
+			...(start === undefined ? {} : { start }),
+			...(end === undefined ? {} : { end }),
+			...(changed("special") || changed("by") ? (form.special === "hanging" ? { hanging: by } : { firstLine: by }) : {})
+		})
+	}
+
+	if (changed("before") || changed("after")) {
+		const before = changed("before") ? pointsToTwips(form.before) : undefined
+		const after = changed("after") ? pointsToTwips(form.after) : undefined
+
+		if (Number.isNaN(before) || Number.isNaN(after) || (before ?? 0) < 0 || (after ?? 0) < 0) return null
+
+		out.push({ type: "paragraph.spacing", ...(before === undefined ? {} : { before }), ...(after === undefined ? {} : { after }) })
+	}
+
+	if ((changed("rule") || changed("at")) && form.at.trim() !== "") {
+		const amount = Number(form.at.trim().replace(",", "."))
+		const value = form.rule === "auto" ? Math.round(amount * 240) : Math.round(amount * 20)
+
+		if (!Number.isFinite(amount) || value < (form.rule === "auto" ? 1 : 0)) return null
+
+		out.push({ type: "paragraph.lineSpacing", rule: form.rule, value })
+	}
+
+	return out
+}
+
+// ---- page setup ------------------------------------------------------------------------------------------
+
+// Paper sizes Word's Page Setup offers, portrait (twips).
+export const PAPER_SIZES: readonly { readonly id: string; readonly width: number; readonly height: number; readonly label: PreviewKey }[] =
+	[
+		{ id: "letter", width: 12_240, height: 15_840, label: "previewDocxPaperLetter" },
+		{ id: "legal", width: 12_240, height: 20_160, label: "previewDocxPaperLegal" },
+		{ id: "executive", width: 10_440, height: 15_120, label: "previewDocxPaperExecutive" },
+		{ id: "tabloid", width: 15_840, height: 24_480, label: "previewDocxPaperTabloid" },
+		{ id: "a3", width: 16_838, height: 23_811, label: "previewDocxPaperA3" },
+		{ id: "a4", width: 11_906, height: 16_838, label: "previewDocxPaperA4" },
+		{ id: "a5", width: 8391, height: 11_906, label: "previewDocxPaperA5" }
+	]
+
+// Word's margin presets (twips). Mirrored: left and right are the inside and outside margins, swapped on facing
+// pages (w:mirrorMargins, ECMA-376 Part 1 §17.15.1.57; Microsoft support "Set mirror margins for facing pages").
+export const MARGIN_PRESETS: readonly {
+	readonly id: string
+	readonly label: PreviewKey
+	readonly margins: { readonly top: number; readonly bottom: number; readonly left: number; readonly right: number }
+	readonly mirrored?: true
+}[] = [
+	{ id: "normal", label: "previewDocxMarginsNormal", margins: { top: 1440, bottom: 1440, left: 1440, right: 1440 } },
+	{ id: "narrow", label: "previewDocxMarginsNarrow", margins: { top: 720, bottom: 720, left: 720, right: 720 } },
+	{ id: "moderate", label: "previewDocxMarginsModerate", margins: { top: 1440, bottom: 1440, left: 1080, right: 1080 } },
+	{ id: "wide", label: "previewDocxMarginsWide", margins: { top: 1440, bottom: 1440, left: 2880, right: 2880 } },
+	// Word's Mirrored: 1" top, bottom and outside, 1.25" inside.
+	{
+		id: "mirrored",
+		label: "previewDocxMarginsMirrored",
+		margins: { top: 1440, bottom: 1440, left: 1800, right: 1440 },
+		mirrored: true
+	},
+	// Word's "Office 2003 Default" (1" top and bottom, 1.25" sides).
+	{ id: "office2003", label: "previewDocxMarginsOffice2003", margins: { top: 1440, bottom: 1440, left: 1800, right: 1800 } }
+]
+
+// Twips a size or margin may differ by and still be the preset (Word rounds them when it writes).
+const PRESET_SLACK = 20
+
+export interface DocxMargins {
+	readonly top: number
+	readonly bottom: number
+	readonly left: number
+	readonly right: number
+}
+
+// The Page setup dialog's choices, twips; the paper portrait (the orientation turns it).
+export interface DocxPageSetupForm {
+	readonly width: number
+	readonly height: number
+	readonly orientation: DocxOrientation
+	readonly margins: DocxMargins
+	// Mirror margins (document-wide): `margins.left` is the inside margin, `margins.right` the outside one.
+	readonly mirrored: boolean
+	readonly columns: number
+	// null: numbering continues from the previous section.
+	readonly numberStart: number | null
+	readonly numberFormat: DocxPageNumberFormat | null
+	readonly lineNumbers: DocxLineNumberRestart | null
+	readonly scope: "section" | "document"
+}
+
+export function pageSetupForm(current: DocxCurrentPageSetup): DocxPageSetupForm {
+	const { width, height } = current.size
+
+	return {
+		width: Math.min(width, height),
+		height: Math.max(width, height),
+		orientation: current.orientation,
+		margins: { top: current.margins.top, bottom: current.margins.bottom, left: current.margins.left, right: current.margins.right },
+		mirrored: current.mirrorMargins,
+		columns: current.columns.count,
+		numberStart: current.pageNumbers.start,
+		numberFormat: current.pageNumbers.format,
+		lineNumbers: current.lineNumbers?.restart ?? null,
+		scope: "section"
+	}
+}
+
+// The preset a portrait paper size is, or "custom".
+export function paperOf(width: number, height: number): string {
+	return (
+		PAPER_SIZES.find(paper => Math.abs(paper.width - width) <= PRESET_SLACK && Math.abs(paper.height - height) <= PRESET_SLACK)?.id ??
+		"custom"
+	)
+}
+
+// The preset margins are (mirrored or not), or "custom".
+// `landscape`: the page is turned, its margins with it (a preset applied then is turned too).
+export function marginsPresetOf(margins: DocxMargins, mirrored: boolean, landscape = false): string {
+	const near = (a: number, b: number) => Math.abs(a - b) <= PRESET_SLACK
+
+	return (
+		MARGIN_PRESETS.find(preset => {
+			const shown = landscape ? turnedMargins(preset.margins, true) : preset.margins
+
+			return (
+				(preset.mirrored === true) === mirrored &&
+				near(shown.top, margins.top) &&
+				near(shown.bottom, margins.bottom) &&
+				near(shown.left, margins.left) &&
+				near(shown.right, margins.right)
+			)
+		})?.id ?? "custom"
+	)
+}
+
+// The margins after turning the page, as Word's Page Setup turns them (90 degrees).
+export function turnedMargins(margins: DocxMargins, landscape: boolean): DocxMargins {
+	const { top, right, bottom, left } = margins
+
+	return landscape ? { top: left, bottom: right, left: bottom, right: top } : { top: right, bottom: left, left: top, right: bottom }
+}
+
+// page.setup with what the dialog changed (the page turns its margins itself; margins typed after turning it
+// go as typed), or null when nothing changed.
+export function pageSetupCommand(current: DocxCurrentPageSetup, form: DocxPageSetupForm): DocxEditorCommand | null {
+	const before = pageSetupForm(current)
+	const turned = form.orientation !== before.orientation
+	const expected = turned ? turnedMargins(before.margins, form.orientation === "landscape") : before.margins
+	const sized = form.width !== before.width || form.height !== before.height
+	const margins =
+		form.margins.top !== expected.top ||
+		form.margins.bottom !== expected.bottom ||
+		form.margins.left !== expected.left ||
+		form.margins.right !== expected.right
+	const numbers = form.numberStart !== before.numberStart || (form.numberFormat !== before.numberFormat && form.numberFormat !== null)
+	const lines = form.lineNumbers !== before.lineNumbers
+	const columns = form.columns !== before.columns
+	const mirror = form.mirrored !== before.mirrored
+
+	// "Whole document" gives every section the dialog's paper, margins, columns and line numbers, changed or not
+	// (Word's Apply to); page numbering stays each section's unless changed.
+	const all = form.scope === "document"
+
+	if (!sized && !turned && !margins && !numbers && !lines && !columns && !mirror && !all) {
+		return null
+	}
+
+	return {
+		type: "page.setup",
+		...(sized || turned || all ? { size: { width: form.width, height: form.height }, orientation: form.orientation } : {}),
+		...(margins || all ? { margins: form.margins } : {}),
+		...(columns || all ? { columns: { count: form.columns } } : {}),
+		// The document's, whatever the dialog applies to.
+		...(mirror ? { mirrorMargins: form.mirrored } : {}),
+		...(numbers
+			? {
+					pageNumbers: {
+						...(form.numberStart !== before.numberStart ? { start: form.numberStart } : {}),
+						...(form.numberFormat !== null && form.numberFormat !== before.numberFormat ? { format: form.numberFormat } : {})
+					}
+				}
+			: {}),
+		...(lines || all
+			? {
+					lineNumbers:
+						form.lineNumbers === null
+							? null
+							: {
+									countBy: current.lineNumbers?.countBy ?? 1,
+									start: current.lineNumbers?.start ?? 1,
+									restart: form.lineNumbers
+								}
+				}
+			: {}),
+		scope: form.scope
+	}
+}
+
+export type HeaderChipKey = `preview${"Header" | "Footer"}Chip${"" | "First" | "Even" | "Odd"}${"" | "Only"}` extends infer K
+	? K extends `preview${infer R}`
+		? `previewDocx${R}`
+		: never
+	: never
+
+// The header chip's name for where it is: the section only once the document has more than one.
+export function headerChipKey(header: DocxHeaderContext): HeaderChipKey {
+	const footer = header.kind === "footer"
+	const sectioned = header.sections > 1
+
+	switch (header.type) {
+		case "first":
+			return footer
+				? sectioned
+					? "previewDocxFooterChipFirst"
+					: "previewDocxFooterChipFirstOnly"
+				: sectioned
+					? "previewDocxHeaderChipFirst"
+					: "previewDocxHeaderChipFirstOnly"
+		case "even":
+			return footer
+				? sectioned
+					? "previewDocxFooterChipEven"
+					: "previewDocxFooterChipEvenOnly"
+				: sectioned
+					? "previewDocxHeaderChipEven"
+					: "previewDocxHeaderChipEvenOnly"
+		default:
+			if (header.differentOddEven) {
+				return footer
+					? sectioned
+						? "previewDocxFooterChipOdd"
+						: "previewDocxFooterChipOddOnly"
+					: sectioned
+						? "previewDocxHeaderChipOdd"
+						: "previewDocxHeaderChipOddOnly"
+			}
+
+			return footer
+				? sectioned
+					? "previewDocxFooterChip"
+					: "previewDocxFooterChipOnly"
+				: sectioned
+					? "previewDocxHeaderChip"
+					: "previewDocxHeaderChipOnly"
+	}
+}
+
+// ---- shared by the editor's controls ---------------------------------------------------------------------
+
+// Keeps focus where it was (the document): a pressed toolbar or chip button never takes it.
+export function keepFocus(event: { preventDefault: () => void }): void {
+	event.preventDefault()
+}
+
+// Word's table limits (ECMA-376 leaves them open; Word stops at 63 columns and 32,767 rows): the package's table
+// commands' own.
+export const TABLE_LIMITS = { rows: MAX_TABLE_ROWS, columns: MAX_TABLE_COLUMNS } as const
+
+// What a dialog asked for through the input channel holds while it is open: made from the request when it
+// arrives (once per request), dropped with it. `matches`: whether a request is this dialog's.
+export function useInputForm<T>(
+	inputRequest: DocxInputRequest | null,
+	matches: (request: DocxInputRequest) => boolean,
+	make: (request: DocxInputRequest) => T | null
+): { request: DocxInputRequest | null; form: T | null; setForm: (update: (form: T) => T) => void } {
+	const request = inputRequest !== null && matches(inputRequest) ? inputRequest : null
+	const [held, setHeld] = useState<{ nonce: number; form: T | null } | null>(null)
+
+	if (request !== null && held?.nonce !== request.nonce) {
+		setHeld({ nonce: request.nonce, form: make(request) })
+	}
+
+	const form = request !== null && held?.nonce === request.nonce ? held.form : null
+
+	return {
+		request,
+		form,
+		setForm: update => {
+			setHeld(previous => {
+				const form = previous?.form ?? null
+
+				return previous === null || form === null ? previous : { ...previous, form: update(form) }
+			})
+		}
+	}
+}
+
+type DocxHeaderContext = NonNullable<DocxStoryContext["header"]>
+
+// ---- form controls ---------------------------------------------------------------------------------------
+
+// Why a content control's content cannot be changed, as the control popover and context menu say it.
+export function controlLockedKey(locked: NonNullable<DocxControlContext["locked"]>): PreviewKey {
+	switch (locked) {
+		case "contentLocked":
+			return "previewDocxControlLockedContent"
+		case "bound":
+			return "previewDocxControlLockedBound"
+		default:
+			return "previewDocxControlLockedDisabled"
+	}
 }

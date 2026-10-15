@@ -1,4 +1,5 @@
-import { MAX_TWIPS, choiceArg, field, hexArg, intArg, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
+import { MAX_TWIPS, choiceArg, field, hexArg, intArg, optional, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
+import { DOCX_THEME_COLORS, type DocxThemeColor } from "./formatting"
 
 // Table structure and properties. Commands act on the cells the selection touches.
 
@@ -25,8 +26,16 @@ export type TableCommand =
 	| { readonly type: "table.align"; readonly align: DocxTableAlign }
 	// Twips; `index` a grid column.
 	| { readonly type: "table.column.width"; readonly index: number; readonly twips: number }
-	// "RRGGBB", or null for none.
-	| { readonly type: "table.cell.shading"; readonly fill: string | null }
+	// "RRGGBB", or null for none. A theme colour (with a tint or a shade, 0–255) is written as Word writes one:
+	// its reference with the colour it gives, which the editor computes from the document's theme (`fill` where
+	// the document has none).
+	| {
+			readonly type: "table.cell.shading"
+			readonly fill: string | null
+			readonly theme?: DocxThemeColor
+			readonly tint?: number
+			readonly shade?: number
+	  }
 	| { readonly type: "table.cell.vAlign"; readonly align: DocxCellVAlign }
 	| { readonly type: "table.distributeColumns" }
 
@@ -62,6 +71,7 @@ export const TABLE_COMMANDS: readonly DocxCommandInfo<TableCommand["type"]>[] = 
 
 const TABLE_ALIGNS = new Set<string>(["start", "center", "end"])
 const CELL_ALIGNS = new Set<string>(["top", "center", "bottom"])
+const THEME_COLORS: ReadonlySet<string> = new Set(DOCX_THEME_COLORS)
 
 function size(value: object): { rows: number; cols: number } | undefined {
 	const rows = intArg(value, "rows", 1, MAX_TABLE_ROWS)
@@ -96,11 +106,31 @@ export const parseTableCommand: DocxCommandParser<TableCommand> = (type, value) 
 			return index === undefined || twips === undefined ? undefined : { type, index, twips }
 		}
 		case "table.cell.shading": {
-			if (field(value, "fill") === null) return { type, fill: null }
+			if (field(value, "fill") === null)
+				return field(value, "theme") === undefined && field(value, "tint") === undefined && field(value, "shade") === undefined
+					? { type, fill: null }
+					: undefined
 
 			const fill = hexArg(value, "fill")
+			const theme = optional(value, "theme", (holder, key) => choiceArg<DocxThemeColor>(holder, key, THEME_COLORS))
+			const tint = optional(value, "tint", (holder, key) => intArg(holder, key, 0, 255))
+			const shade = optional(value, "shade", (holder, key) => intArg(holder, key, 0, 255))
 
-			return fill === undefined ? undefined : { type, fill }
+			if (fill === undefined || !theme.ok || !tint.ok || !shade.ok) return undefined
+			// A tone belongs to a theme colour, and is a tint or a shade.
+			if (
+				(theme.value === undefined && (tint.value !== undefined || shade.value !== undefined)) ||
+				(tint.value !== undefined && shade.value !== undefined)
+			)
+				return undefined
+
+			return {
+				type,
+				fill,
+				...(theme.value === undefined ? {} : { theme: theme.value }),
+				...(tint.value === undefined ? {} : { tint: tint.value }),
+				...(shade.value === undefined ? {} : { shade: shade.value })
+			}
 		}
 		case "table.cell.vAlign": {
 			const align = choiceArg<DocxCellVAlign>(value, "align", CELL_ALIGNS)

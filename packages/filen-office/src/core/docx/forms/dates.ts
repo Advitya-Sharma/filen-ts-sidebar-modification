@@ -48,9 +48,119 @@ function format(locale: string, options: Intl.DateTimeFormatOptions): Intl.DateT
 	return found
 }
 
-// A BCP 47 tag Intl accepts for w:lid (ST_Lang: a language tag or a hex LCID, which reads as English).
-export function dateLocale(lid: string | null): string {
-	if (lid === null || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(lid)) return "en-US"
+// Windows language identifiers (MS-LCID) ST_Lang may give as four hex digits, by their language tags.
+const LCIDS: Readonly<Record<number, string>> = {
+	0x0401: "ar-SA",
+	0x0402: "bg-BG",
+	0x0403: "ca-ES",
+	0x0404: "zh-TW",
+	0x0405: "cs-CZ",
+	0x0406: "da-DK",
+	0x0407: "de-DE",
+	0x0408: "el-GR",
+	0x0409: "en-US",
+	0x040a: "es-ES",
+	0x040b: "fi-FI",
+	0x040c: "fr-FR",
+	0x040d: "he-IL",
+	0x040e: "hu-HU",
+	0x040f: "is-IS",
+	0x0410: "it-IT",
+	0x0411: "ja-JP",
+	0x0412: "ko-KR",
+	0x0413: "nl-NL",
+	0x0414: "nb-NO",
+	0x0415: "pl-PL",
+	0x0416: "pt-BR",
+	0x0418: "ro-RO",
+	0x0419: "ru-RU",
+	0x041a: "hr-HR",
+	0x041b: "sk-SK",
+	0x041c: "sq-AL",
+	0x041d: "sv-SE",
+	0x041e: "th-TH",
+	0x041f: "tr-TR",
+	0x0420: "ur-PK",
+	0x0421: "id-ID",
+	0x0422: "uk-UA",
+	0x0423: "be-BY",
+	0x0424: "sl-SI",
+	0x0425: "et-EE",
+	0x0426: "lv-LV",
+	0x0427: "lt-LT",
+	0x0429: "fa-IR",
+	0x042a: "vi-VN",
+	0x042b: "hy-AM",
+	0x042c: "az-Latn-AZ",
+	0x042d: "eu-ES",
+	0x042f: "mk-MK",
+	0x0436: "af-ZA",
+	0x0437: "ka-GE",
+	0x0439: "hi-IN",
+	0x043e: "ms-MY",
+	0x043f: "kk-KZ",
+	0x0441: "sw-KE",
+	0x0443: "uz-Latn-UZ",
+	0x0445: "bn-IN",
+	0x0446: "pa-IN",
+	0x0447: "gu-IN",
+	0x0449: "ta-IN",
+	0x044a: "te-IN",
+	0x044b: "kn-IN",
+	0x044c: "ml-IN",
+	0x044e: "mr-IN",
+	0x0450: "mn-MN",
+	0x0456: "gl-ES",
+	0x0461: "ne-NP",
+	0x0463: "ps-AF",
+	0x0464: "fil-PH",
+	0x0801: "ar-IQ",
+	0x0804: "zh-CN",
+	0x0807: "de-CH",
+	0x0809: "en-GB",
+	0x080a: "es-MX",
+	0x080c: "fr-BE",
+	0x0810: "it-CH",
+	0x0813: "nl-BE",
+	0x0814: "nn-NO",
+	0x0816: "pt-PT",
+	0x081d: "sv-FI",
+	0x0845: "bn-BD",
+	0x0c01: "ar-EG",
+	0x0c04: "zh-HK",
+	0x0c07: "de-AT",
+	0x0c09: "en-AU",
+	0x0c0a: "es-ES",
+	0x0c0c: "fr-CA",
+	0x1004: "zh-SG",
+	0x1009: "en-CA",
+	0x100c: "fr-CH",
+	0x1401: "ar-DZ",
+	0x1409: "en-NZ",
+	0x1801: "ar-MA",
+	0x1809: "en-IE",
+	0x1c09: "en-ZA",
+	0x2c01: "ar-JO",
+	0x3001: "ar-LB",
+	0x3401: "ar-KW",
+	0x3801: "ar-AE",
+	0x4001: "ar-QA",
+	0x4009: "en-IN"
+}
+
+// A language tag for a w:lang or w:lid value (ST_Lang: a tag, or a Windows language identifier in hex); undefined
+// for an identifier this does not know.
+export function languageTag(lid: string): string | undefined {
+	const hex = /^(?:0x)?([0-9A-Fa-f]{4})$/.exec(lid)
+
+	return hex === null ? lid : LCIDS[Number.parseInt(hex[1] ?? "", 16)]
+}
+
+// A BCP 47 tag Intl accepts for w:lid (ST_Lang: a language tag or a hex LCID; one it cannot read as English).
+export function dateLocale(raw: string | null): string {
+	const lid = raw === null ? undefined : languageTag(raw)
+
+	if (lid === undefined || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(lid)) return "en-US"
 
 	try {
 		return Intl.DateTimeFormat.supportedLocalesOf([lid]).length > 0 ? lid : "en-US"
@@ -70,7 +180,7 @@ function partsIn(date: Date, locale: string, calendar: string, korea: boolean): 
 		return { year: korea ? year + TANGUN_OFFSET : year, month: date.getUTCMonth() + 1, day: date.getUTCDate() }
 	}
 
-	const parts = format(`${locale}-u-ca-${calendar}`, { year: "numeric", month: "numeric", day: "numeric" }).formatToParts(date)
+	const parts = format(tagOf(locale, calendar), { year: "numeric", month: "numeric", day: "numeric" }).formatToParts(date)
 	const number = (type: string): number => {
 		const value =
 			parts.find(part => (part.type as string) === type || (type === "year" && (part.type as string) === "relatedYear"))?.value ?? ""
@@ -79,11 +189,47 @@ function partsIn(date: Date, locale: string, calendar: string, korea: boolean): 
 		return Number.isFinite(parsed) ? parsed : 0
 	}
 
-	return { year: number("year"), month: number("month"), day: number("day") }
+	// The Hebrew calendar names its months even as numbers: Word numbers them from Tishri (1 to 12, 13 in a leap year).
+	return { year: number("year"), month: calendar === "hebrew" ? hebrewMonth(date) : number("month"), day: number("day") }
 }
 
+// The month of `date` in the Hebrew year, from 1 (Tishri): counted back to the year's first day.
+function hebrewMonth(date: Date): number {
+	const months = format(tagOf("en", "hebrew"), { year: "numeric", month: "long" })
+	const at = (time: number): { year: string; month: string } => {
+		const parts = months.formatToParts(new Date(time))
+
+		return {
+			year: parts.find(part => part.type === "year")?.value ?? "",
+			month: parts.find(part => part.type === "month")?.value ?? ""
+		}
+	}
+	const start = at(date.getTime())
+	let month = start.month
+	let index = 1
+
+	// A Hebrew year has at most 385 days.
+	for (let back = 1; back <= 385; back++) {
+		const day = at(date.getTime() - back * 86_400_000)
+
+		if (day.year !== start.year) break
+		if (day.month !== month) {
+			month = day.month
+			index++
+		}
+	}
+
+	return index
+}
+
+// `locale` in `calendar` with Latin digits, whatever the language's own default calendar (Persian for fa and ps,
+// Buddhist for th) and digits: a picture's numbers are Latin, its names those of the calendar it is read in.
 function tagOf(locale: string, calendar: string): string {
-	return calendar === "gregory" ? locale : `${locale}-u-ca-${calendar}`
+	try {
+		return new Intl.Locale(locale, { calendar, numberingSystem: "latn" }).toString()
+	} catch {
+		return `${locale}-u-ca-${calendar}-nu-latn`
+	}
 }
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
@@ -99,11 +245,16 @@ function name(date: Date, locale: string, calendar: string, field: "month" | "we
 	}
 
 	if (field === "month" && dated) {
-		const part = format(tagOf(locale, calendar), { day: "numeric", month: style })
-			.formatToParts(date)
-			.find(entry => entry.type === "month")
+		const parts = format(tagOf(locale, calendar), { day: "numeric", month: style }).formatToParts(date)
+		const at = parts.findIndex(entry => entry.type === "month")
+		const value = parts[at]?.value
 
-		if (part !== undefined) return part.value
+		// A number with its unit where the language writes the month so (Japanese and Chinese 3月): the unit after it.
+		if (value !== undefined && /^\d+$/.test(value)) {
+			const unit = parts[at + 1]?.type === "literal" ? (parts[at + 1]?.value.trim() ?? "") : ""
+
+			if (/^\p{L}+$/u.test(unit)) return `${value}${unit}`
+		} else if (value !== undefined) return value
 	}
 
 	const options: Intl.DateTimeFormatOptions = field === "month" ? { month: style } : { weekday: style }
@@ -116,15 +267,33 @@ export function picturesDay(picture: string): boolean {
 	return /(^|[^dD])[dD]{1,2}(?![dD])/.test(picture.replace(/'[^']*'?/g, ""))
 }
 
-// The name of month `month` (1-12) or of weekday `weekday` (0: Sunday) in language `lid` (a w:lid or w:lang value),
-// as Word shows it in a date picture: shared by date content controls and date fields.
-export function monthName(month: number, lid: string | null | undefined, style: "long" | "short", dated: boolean): string {
-	return name(new Date(Date.UTC(2001, month - 1, 15)), dateLocale(lid ?? null), "gregory", "month", style, dated)
+const DAY_PERIOD_BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+
+// The regional settings of the person reading, as the runtime (the browser, or its worker) reports them.
+export function regionalLocale(): string | undefined {
+	const language: unknown = (globalThis as { navigator?: { language?: unknown } }).navigator?.language
+
+	return typeof language === "string" && language !== "" ? language : undefined
 }
 
-export function dayName(weekday: number, lid: string | null | undefined, style: "long" | "short"): string {
-	// 2001-01-07 was a Sunday.
-	return name(new Date(Date.UTC(2001, 0, 7 + weekday)), dateLocale(lid ?? null), "gregory", "weekday", style)
+// What the AM/PM picture item (and A/P: Word shows the whole symbol for both) shows at hour `hours` (0-23): the
+// symbol of the user's regional settings, not the field's language (Microsoft's "Format field results": the A.M.
+// and P.M. symbols are changed in the regional settings): Korean 오전/오후, Chinese 上午/下午, Japanese 午前/午後,
+// Arabic ص/م; Latin AM/PM, upper case, for English and where Intl has none. Shared by date fields and date
+// content controls (and the date dialog's choice of 12-hour times, for a language).
+export function dayPeriodName(hours: number, locale: string | null | undefined = regionalLocale()): string {
+	const latin = hours >= 12 ? "PM" : "AM"
+	const tag = dateLocale(locale ?? null)
+
+	if (/^en(?:-|$)/i.test(tag)) return latin
+
+	const period = format(tag, { hour: "numeric", hour12: true })
+		.formatToParts(new Date(Date.UTC(2001, 0, 1, hours)))
+		.find(part => part.type === "dayPeriod")
+		?.value.replace(DAY_PERIOD_BIDI, "")
+		.trim()
+
+	return period === undefined || period === "" ? latin : period
 }
 
 // The era of a date in a calendar (its name, short name) and the year within it.
@@ -149,18 +318,37 @@ function run(picture: string, at: number): number {
 	return end - at
 }
 
-// `iso` (yyyy-mm-dd) as Word shows it with `picture` (Word's default short date of the language without one).
-export function formatControlDate(iso: string, picture: string | null, lid: string | null, calendar: string | null = null): string {
-	const date = new Date(`${iso}T00:00:00Z`)
+// What a picture's era items (g, e, B; aaa) are: those of the picture's calendar (a date control's w:calendar),
+// the Japanese imperial calendar's (a field in Japanese), or literal characters (a field in any other language:
+// §17.16.4.1, other characters are output as they are).
+export type PictureEras = "calendar" | "japanese" | "literal"
 
-	if (Number.isNaN(date.getTime())) return iso
+const JAPANESE = "ja-JP"
 
+// The time of day a picture shows (a date control's is midnight).
+export interface PictureTime {
+	readonly hours: number
+	readonly minutes: number
+	readonly seconds: number
+}
+
+const MIDNIGHT: PictureTime = { hours: 0, minutes: 0, seconds: 0 }
+
+// A date under a Word date-time picture (§17.16.4.1): `day` the Gregorian day (its UTC fields), shown in `calendar`
+// (a w:calendar value: a date control's, or a field's \h hijri and \s saka) with month, weekday and era names in
+// language `lid`, `time` its time of day. Shared by date fields (fields/evaluate.ts datePicture) and date content
+// controls.
+export function pictureDate(
+	day: Date,
+	time: PictureTime,
+	picture: string,
+	lid: string | null,
+	calendar: string | null = null,
+	eras: PictureEras = "calendar"
+): string {
 	const locale = dateLocale(lid)
 	const cal = calendarOf(calendar)
-
-	if (picture === null || picture === "") return format(locale, { year: "numeric", month: "numeric", day: "numeric" }).format(date)
-
-	const parts = partsIn(date, locale, cal, calendar === "korea")
+	const parts = partsIn(day, locale, cal, calendar === "korea")
 	const dated = picturesDay(picture)
 	let out = ""
 
@@ -176,16 +364,11 @@ export function formatControlDate(iso: string, picture: string | null, lid: stri
 			continue
 		}
 
-		const rest = picture.slice(at)
-		const ampm = /^(AM\/PM|am\/pm|A\/P|a\/p)/.exec(rest)
+		const ampm = /^(AM\/PM|am\/pm|A\/P|a\/p)/.exec(picture.slice(at))
 
 		if (ampm !== null) {
-			// Midnight.
-			const token = ampm[1] ?? ""
-
-			// AM/PM either case shows upper case, as in a field (Microsoft's "Format field results"); A/P keeps its case.
-			out += token === "A/P" ? "A" : token === "a/p" ? "a" : "AM"
-			at += token.length
+			out += dayPeriodName(time.hours)
+			at += (ampm[1] ?? "").length
 
 			continue
 		}
@@ -195,48 +378,71 @@ export function formatControlDate(iso: string, picture: string | null, lid: stri
 		switch (char) {
 			case "d":
 			case "D":
-				out +=
-					count === 1
-						? String(parts.day)
-						: count === 2
-							? pad(parts.day, 2)
-							: name(date, locale, cal, "weekday", count === 3 ? "short" : "long")
+				out += count <= 2 ? pad(parts.day, count) : name(day, locale, cal, "weekday", count === 3 ? "short" : "long")
 				break
 			case "M":
-				out +=
-					count === 1
-						? String(parts.month)
-						: count === 2
-							? pad(parts.month, 2)
-							: name(date, locale, cal, "month", count === 3 ? "short" : "long", dated)
+				out += count <= 2 ? pad(parts.month, count) : name(day, locale, cal, "month", count === 3 ? "short" : "long", dated)
 				break
 			case "y":
 			case "Y":
 				out += count <= 2 ? pad(parts.year % 100, 2) : String(parts.year)
 				break
 			case "g": {
-				const era = eraOf(date, locale, cal, count === 1 ? "narrow" : "long")
+				if (eras === "literal") {
+					out += picture.slice(at, at + count)
+					break
+				}
+
+				// g the narrow era (R), ggg its name (令和), gg the name's first character.
+				const era =
+					eras === "japanese"
+						? eraOf(day, JAPANESE, "japanese", count === 1 ? "narrow" : "long")
+						: eraOf(day, locale, cal, count === 1 ? "narrow" : "long")
 
 				out += count === 2 ? [...era.name].slice(0, 1).join("") : era.name
 				break
 			}
-			case "e":
-				out += count === 1 ? String(eraOf(date, locale, cal, "long").year) : pad(eraOf(date, locale, cal, "long").year % 100, 2)
+			case "e": {
+				if (eras === "literal") {
+					out += picture.slice(at, at + count)
+					break
+				}
+
+				const year = (eras === "japanese" ? eraOf(day, JAPANESE, "japanese", "long") : eraOf(day, locale, cal, "long")).year
+
+				out += eras === "japanese" ? pad(year, Math.min(count, 2)) : count === 1 ? String(year) : pad(year % 100, 2)
 				break
+			}
 			case "B": {
-				const year = date.getUTCFullYear() + BUDDHIST_OFFSET
+				if (eras !== "calendar") {
+					out += picture.slice(at, at + count)
+					break
+				}
+
+				const year = day.getUTCFullYear() + BUDDHIST_OFFSET
 
 				out += count <= 2 ? pad(year % 100, 2) : String(year)
 				break
 			}
+			// The Japanese weekday: aaa short (木), aaaa long (木曜日).
+			case "a":
+				out +=
+					eras === "japanese" && count >= 3
+						? name(day, JAPANESE, "gregory", "weekday", count === 3 ? "short" : "long")
+						: picture.slice(at, at + count)
+				break
 			case "h":
-				out += "12"
+				out += pad(time.hours % 12 === 0 ? 12 : time.hours % 12, Math.min(count, 2))
 				break
 			case "H":
+				out += pad(time.hours, Math.min(count, 2))
+				break
 			case "m":
+				out += pad(time.minutes, Math.min(count, 2))
+				break
 			case "s":
 			case "S":
-				out += count === 1 ? "0" : "00"
+				out += pad(time.seconds, Math.min(count, 2))
 				break
 			default:
 				out += picture.slice(at, at + count)
@@ -246,6 +452,18 @@ export function formatControlDate(iso: string, picture: string | null, lid: stri
 	}
 
 	return out
+}
+
+// `iso` (yyyy-mm-dd) as Word shows it with `picture` (Word's default short date of the language without one).
+export function formatControlDate(iso: string, picture: string | null, lid: string | null, calendar: string | null = null): string {
+	const date = new Date(`${iso}T00:00:00Z`)
+
+	if (Number.isNaN(date.getTime())) return iso
+
+	if (picture === null || picture === "")
+		return format(dateLocale(lid), { year: "numeric", month: "numeric", day: "numeric" }).format(date)
+
+	return pictureDate(date, MIDNIGHT, picture, lid, calendar)
 }
 
 // The value a date bound to custom XML stores (w:storeMappedDataAs).

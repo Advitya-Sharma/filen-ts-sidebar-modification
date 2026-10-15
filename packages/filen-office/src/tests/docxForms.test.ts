@@ -20,7 +20,7 @@ import { datePicture } from "../core/docx/fields/evaluate"
 import { boundIndex } from "../core/docx/forms/positions"
 import { formChecks } from "../core/docx/write/checks/forms"
 import { parseXml } from "@filen/office/core/xml"
-import { FORMS_AFTER, FORMS_BEFORE } from "../core/docx/edit/handlers/forms"
+import { FORMS_AFTER, FORMS_BEFORE, shortDatePicture } from "../core/docx/edit/handlers/forms"
 import { REVIEW_TRANSFORMER } from "../core/docx/edit/handlers/review"
 import { resolveChanges, storyReviewIndex } from "../core/docx/review/accept"
 import { markCommand } from "../core/docx/edit/invariants/index"
@@ -177,7 +177,8 @@ describe("content controls: reading", () => {
 			uncheckedFont: "MS Gothic"
 		})
 		expect(infos[1]?.items).toEqual([
-			{ text: "Choose an item.", value: "Choose an item." },
+			// Value-only, as Word writes its first entry: kept so when written again.
+			{ text: "Choose an item.", value: "Choose an item.", valueOnly: true },
 			{ text: "Apple", value: "A" },
 			{ text: "Pear", value: "P" }
 		])
@@ -848,6 +849,35 @@ const PICTURE_XML =
 	"</a:graphic></wp:inline></w:drawing></w:r>"
 const PICTURE_CONTROL = `<w:p><w:sdt><w:sdtPr><w:id w:val="300"/><w:picture/></w:sdtPr><w:sdtContent>${PICTURE_XML}</w:sdtContent></w:sdt></w:p>`
 
+describe("content controls: tracked form commands", () => {
+	it("gives all of a checkbox's content the state the latest toggle wrote, deleted glyphs included", async () => {
+		const box =
+			'<w:p><w:r><w:t xml:space="preserve">Check: </w:t></w:r><w:sdt><w:sdtPr><w:id w:val="5"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox>' +
+			"</w:sdtPr><w:sdtContent><w:r><w:t>☐</w:t></w:r></w:sdtContent></w:sdt></w:p>"
+		const opened = await open({ body: p("x") + box }, "Ann Lee")
+		const session = opened.session
+		const states = (): string[] => {
+			const out: string[] = []
+
+			session.state.doc.child(1).forEach(child => {
+				for (const mark of child.marks) if (mark.type.name === "content_control") out.push(JSON.stringify(mark.attrs["state"]))
+			})
+
+			return out
+		}
+
+		opened.context.review.tracking = true
+
+		for (const checked of [true, false, true]) {
+			select(session, session.state.doc.child(0).nodeSize + 9)
+			expect(run({ type: "control.check" }, session)).toBe(true)
+			expect(new Set(states())).toEqual(new Set([JSON.stringify({ checked, placeholder: false })]))
+		}
+
+		await save(opened)
+	})
+})
+
 describe("content controls: pictures", () => {
 	it("lets a picture control's picture be replaced (Change Picture) and nothing typed into it", async () => {
 		const { session } = await open({ body: PICTURE_CONTROL, settings: '<w:documentProtection w:edit="forms" w:enforcement="1"/>' })
@@ -912,7 +942,10 @@ describe("content controls: new controls", () => {
 		expect(xml.match(/<w:sdt>/g)?.length).toBe(5)
 		expect(xml).toContain("<w:text/>")
 		expect(xml).toContain('<w14:checked w14:val="0"/>')
-		expect(xml).toContain('<w:comboBox><w:listItem w:displayText="Yes" w:value="Y"/></w:comboBox>')
+		// Word's "Choose an item." entry first.
+		expect(xml).toContain(
+			'<w:comboBox><w:listItem w:value="Choose an item."/><w:listItem w:displayText="Yes" w:value="Y"/></w:comboBox>'
+		)
 		expect(xml).toContain('<w:dateFormat w:val="M/d/yyyy"/>')
 
 		const reopened = await open(await save(opened))
@@ -1372,6 +1405,33 @@ describe("content controls: dates and legacy text fields", () => {
 		expect(datePicture(new Date(2026, 9, 13, 12), "MMMM yyyy", "ru-RU")).toBe(formatControlDate("2026-10-13", "MMMM yyyy", "ru-RU"))
 	})
 
+	it("keeps a legacy form field's formatting when it is filled in, tracked or not", async () => {
+		const field =
+			'<w:p><w:r><w:t xml:space="preserve">Name </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Text1"/><w:enabled/>' +
+			'<w:calcOnExit w:val="0"/><w:textInput/></w:ffData></w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> FORMTEXT </w:instrText></w:r>' +
+			'<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>old</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+
+		for (const tracked of [false, true]) {
+			const opened = await open({ body: p("x") + field }, "Ann Lee")
+			const session = opened.session
+			let pos = -1
+
+			opened.context.review.tracking = tracked
+			session.state.doc.descendants((node, at) => {
+				if (node.type === nodes.field) pos = at
+			})
+			select(session, pos, pos + 1)
+			expect(run({ type: "format.bold" }, session)).toBe(true)
+			select(session, pos)
+			expect(run({ type: "control.text", text: "filled" }, session)).toBe(true)
+
+			const xml = part(await save(opened), "word/document.xml")
+
+			expect(xml).toContain("filled")
+			expect(xml.match(/<w:b\/>/g)?.length).toBe(5)
+		}
+	})
+
 	it("fills in legacy text fields as their type and format say", async () => {
 		const field = (input: string): string =>
 			'<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Text1"/><w:enabled/><w:calcOnExit w:val="0"/>' +
@@ -1550,5 +1610,158 @@ describe("content controls: cost of undo", () => {
 		}
 
 		expect(walks.filter(stack => stack.includes("noteForeignCopies"))).toEqual([])
+	})
+})
+
+describe("content controls: list entries and new controls' defaults", () => {
+	it("changes a source drop-down's entries, keeping the choice while its entry stays", async () => {
+		const opened = await open({ body: inParagraph(LIST("dropDownList", "Apple")), ...STYLED })
+		const session = opened.session
+
+		select(session, find(session, "Apple") + 2)
+		// The file names no last value: the entry shown is found by its text.
+		expect(control(session)).toMatchObject({ value: null, placeholder: false })
+		expect(
+			run(
+				{
+					type: "control.items",
+					items: [
+						{ text: "Apple", value: "A" },
+						{ text: "Plum", value: "Plum" }
+					]
+				},
+				session
+			)
+		).toBe(true)
+		expect(control(session)?.items).toEqual([
+			{ text: "Apple", value: "A" },
+			{ text: "Plum", value: "Plum" }
+		])
+		expect(control(session)).toMatchObject({ value: "A", placeholder: false })
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		expect(xml).toContain(
+			'<w:dropDownList w:lastValue="A"><w:listItem w:displayText="Apple" w:value="A"/><w:listItem w:displayText="Plum" w:value="Plum"/></w:dropDownList>'
+		)
+		expect(xml).not.toContain("Pear")
+
+		const reopened = await open(await save(opened))
+
+		select(reopened.session, find(reopened.session, "Apple") + 2)
+		expect(control(reopened.session)?.items.map(item => item.text)).toEqual(["Apple", "Plum"])
+	})
+
+	it("shows the placeholder again when the chosen entry is removed, and undoes", async () => {
+		const opened = await open({ body: inParagraph(LIST("dropDownList", "Apple")), ...STYLED })
+		const session = opened.session
+
+		select(session, find(session, "Apple") + 2)
+		expect(
+			run(
+				{
+					type: "control.items",
+					items: [
+						{ text: "Choose an item.", value: "Choose an item." },
+						{ text: "Pear", value: "P" }
+					]
+				},
+				session
+			)
+		).toBe(true)
+		expect(control(session)).toMatchObject({ placeholder: true, value: null })
+		expect(session.state.doc.textContent).toContain("Choose an item.")
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		// The value-only entry stays value-only, as Word wrote it.
+		expect(xml).toContain(
+			'<w:dropDownList><w:listItem w:value="Choose an item."/><w:listItem w:displayText="Pear" w:value="P"/></w:dropDownList>'
+		)
+		expect(xml).toContain("showingPlcHdr")
+
+		expect(session.execute({ type: "history.undo" })).toBe(true)
+		expect(control(session)).toMatchObject({ value: null, placeholder: false })
+		expect(control(session)?.items.length).toBe(3)
+	})
+
+	it("changes a new drop-down's entries in its definition, refusing duplicates and other controls", async () => {
+		const opened = await open({ body: p("Pick ") })
+		const session = opened.session
+
+		select(session, find(session, "Pick") + 5)
+		expect(run({ type: "control.insert", kind: "dropDownList", items: [{ text: "One", value: "1" }] }, session)).toBe(true)
+		expect(control(session)?.items.map(item => item.text)).toEqual(["Choose an item.", "One"])
+		expect(
+			run(
+				{
+					type: "control.items",
+					items: [
+						{ text: "One", value: "1" },
+						{ text: "Two", value: "2" }
+					]
+				},
+				session
+			)
+		).toBe(true)
+		expect(control(session)?.items.map(item => item.text)).toEqual(["One", "Two"])
+		expect(part(await save(opened), "word/document.xml")).toContain(
+			'<w:dropDownList><w:listItem w:displayText="One" w:value="1"/><w:listItem w:displayText="Two" w:value="2"/></w:dropDownList>'
+		)
+		expect(
+			parseDocxEditorCommand({
+				type: "control.items",
+				items: [
+					{ text: "Same", value: "a" },
+					{ text: "Same", value: "b" }
+				]
+			})
+		).toBeUndefined()
+
+		// A command no parser saw is refused as well: two entries with one value, or one text.
+		expect(
+			session.execute({
+				type: "control.items",
+				items: [
+					{ text: "One", value: "1" },
+					{ text: "Uno", value: "1" }
+				]
+			})
+		).toBe(false)
+		expect(
+			session.execute({
+				type: "control.items",
+				items: [
+					{ text: "One", value: "1" },
+					{ text: "One", value: "2" }
+				]
+			})
+		).toBe(false)
+		expect(control(session)?.items.map(item => item.text)).toEqual(["One", "Two"])
+
+		const plain = await open({ body: p("x ") })
+
+		select(plain.session, 1)
+		expect(plain.session.snapshot().enabled["control.items"]).toBe(false)
+	})
+
+	it("gives a new date control the caret language's short date and that language", async () => {
+		const german = await open({
+			body: '<w:p><w:r><w:rPr><w:lang w:val="de-DE"/></w:rPr><w:t xml:space="preserve">Datum </w:t></w:r></w:p>'
+		})
+
+		select(german.session, find(german.session, "Datum") + 3)
+		expect(run({ type: "control.insert", kind: "date" }, german.session)).toBe(true)
+
+		const xml = part(await save(german), "word/document.xml")
+
+		expect(xml).toContain('<w:dateFormat w:val="dd.MM.yyyy"/><w:lid w:val="de-DE"/>')
+		expect(shortDatePicture("en-GB")).toBe("dd/MM/yyyy")
+		expect(shortDatePicture("ja-JP")).toBe("yyyy/MM/dd")
+		expect(shortDatePicture("en-US")).toBe("M/d/yyyy")
+		// Latin digits and picture letters only, whatever the language writes (no bidi marks).
+		for (const language of ["fa-IR", "ar-EG", "th-TH", "bn-BD"]) {
+			expect(shortDatePicture(language), language).toMatch(/^[dMy./\- ]+$/)
+		}
 	})
 })

@@ -1,5 +1,6 @@
 import type { Locator, Page } from "@playwright/test"
 import { expect, readFixtureManifest } from "../fixtures"
+import { DOCX_EDITING_E2E } from "./docxFixtures"
 import { clickSidebarLink, descendInto, type ListingHandle, setTallListingViewport, waitForListingSettled } from "./listing"
 
 // The shared, READ-ONLY fixture tree: one scenario directory per test that only ever LOOKS at its
@@ -67,8 +68,30 @@ export const FIXTURE_FILES = {
 	"archive-huge": ["e2e-arc-100k.zip"],
 	"archive-bulk": ["e2e-bulk-a.zip", "e2e-bulk-b.zip", "e2e-bulk-c.zip"],
 	// Text files for the compress dialog's naming, and one zip for a mixed archive + file selection.
-	"archive-dialogs": ["dialog-a.txt", "dialog-b.txt", "dialog-c.zip"]
+	"archive-dialogs": ["dialog-a.txt", "dialog-b.txt", "dialog-c.zip"],
+	// The DOCX editing specs' documents and pictures (helpers/docxFixtures.ts), built only when the run has
+	// DOCX editing (BUILT_FIXTURE_SCENARIOS). The pictures are synthesized on disk, so they are a scenario of their own.
+	"docx-edit": [
+		"w3-comments.docx",
+		"w3-equations.docx",
+		"w3-forms.docx",
+		"w3-headers.docx",
+		"w3-rtl-table.docx",
+		"w3-tables.docx",
+		"w3-toc.docx",
+		"w3-tracked.docx"
+	],
+	"docx-pictures": ["w3-picture-large.png", "w3-picture.svg", "w3-picture.webp"]
 } as const
+
+// Scenarios only a run with DOCX editing (VITE_DOCX_EDITING=1) builds and reads.
+const DOCX_SCENARIOS: ReadonlySet<string> = new Set(["docx-edit", "docx-pictures"])
+
+// The scenarios this run's tree holds, in FIXTURE_FILES order: the DOCX editing ones only when the build has
+// DOCX editing (their specs skip otherwise).
+export const BUILT_FIXTURE_SCENARIOS: readonly FixtureScenario[] = (Object.keys(FIXTURE_FILES) as FixtureScenario[]).filter(
+	scenario => DOCX_EDITING_E2E || !DOCX_SCENARIOS.has(scenario)
+)
 
 export type FixtureScenario = keyof typeof FIXTURE_FILES
 export type FixtureFileName = (typeof FIXTURE_FILES)[FixtureScenario][number]

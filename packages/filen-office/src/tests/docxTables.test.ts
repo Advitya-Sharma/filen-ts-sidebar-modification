@@ -1012,7 +1012,8 @@ describe("table commands", () => {
 			)
 		).toBe(true)
 		select(header, "x1")
-		expect(header.snapshot().context.table).toMatchObject({ shading: "DDDDDD", vAlign: "center" })
+		// The copy's fill is a theme colour: reported as that.
+		expect(header.snapshot().context.table).toMatchObject({ shading: "theme:accent1/tint:51", vAlign: "center" })
 
 		expect(header.execute({ type: "table.row.insertBelow" })).toBe(true)
 		select(header, "x1")

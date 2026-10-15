@@ -84,6 +84,13 @@ const PROPERTIES: readonly ((rand: Rand, widths: readonly number[]) => DocxEdito
 	() => ({ type: "table.row.header" }),
 	rand => ({ type: "table.align", align: pick(rand, ["start", "center", "end"] as const) }),
 	rand => ({ type: "table.cell.shading", fill: pick(rand, FILLS) }),
+	// A theme colour, tinted or shaded at times (its fill from the document's theme).
+	rand => ({
+		type: "table.cell.shading",
+		fill: "D9E2F3",
+		theme: pick(rand, ["accent1", "accent6", "text2", "background1"] as const),
+		...(rand() < 0.4 ? { tint: 51 } : rand() < 0.5 ? { shade: 191 } : {})
+	}),
 	rand => ({ type: "table.cell.vAlign", align: pick(rand, ["top", "center", "bottom"] as const) }),
 	(rand, widths) => ({
 		type: "table.column.width",

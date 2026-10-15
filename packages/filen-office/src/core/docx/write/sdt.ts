@@ -3,6 +3,7 @@ import { NodeKind, decodeUtf8, escapeAttribute } from "../../xml/index"
 import {
 	controlState,
 	formFieldData,
+	type ControlListItem,
 	type ControlState,
 	type FormFieldData,
 	type LegacyFieldState,
@@ -180,7 +181,8 @@ function writeSdtPr(w: StoryWriting, out: Out, sdtPr: number, state: ControlStat
 					continue
 				case "dropDownList":
 				case "comboBox":
-					if (state.value === undefined) copyNode(out, document, child)
+					if (state.items !== undefined) listWith(out, part, child, names, state)
+					else if (state.value === undefined) copyNode(out, document, child)
 					else withAttribute(out, part, child, names.attr("lastValue"), state.value)
 
 					continue
@@ -226,6 +228,39 @@ function withAttribute(out: Out, part: StoryPart, node: number, qualifiedName: s
 	out.text(self ? `${tag}/>` : `${tag}>`)
 
 	if (!self) out.bytes(bytes, document.openEnd(node), document.end(node))
+}
+
+// A w:listItem's attributes: w:displayText left out of a value-only entry (Word's "Choose an item.").
+function listItemAttributes(item: ControlListItem): [string, string][] {
+	return item.valueOnly === true
+		? [["value", item.value]]
+		: [
+				["displayText", item.text],
+				["value", item.value]
+			]
+}
+
+// A w:dropDownList or w:comboBox with the entries control.items gave (w:listItem, ECMA-376 Part 1 §17.5.2.21),
+// its own attributes kept but w:lastValue, which `state` sets (or the source's, when it is one of them).
+function listWith(out: Out, part: StoryPart, node: number, names: Names, state: ControlState): void {
+	const document = part.document
+	const lastName = names.attr("lastValue")
+	const sourceLast = document.attributes(node).find(attribute => attribute.name === lastName)?.value
+	const items = state.items ?? []
+	const last = state.value !== undefined ? state.value : items.some(item => item.value === sourceLast) ? (sourceLast ?? null) : null
+	let tag = `<${document.name(node)}`
+
+	for (const attribute of document.attributes(node)) {
+		if (attribute.name !== lastName) tag += ` ${attribute.name}="${escapeAttribute(attribute.value)}"`
+	}
+
+	if (last !== null) tag += attr(lastName, last)
+
+	out.text(`${tag}>`)
+
+	for (const item of items) out.text(names.empty("listItem", listItemAttributes(item)))
+
+	out.text(`</${document.name(node)}>`)
 }
 
 // w14:checkbox with w14:checked set (MS-DOCX §2.6.1.2), in the element's own prefix.
@@ -304,11 +339,7 @@ export function newSdtPr(names: Names, part: StoryPart, made: MadeControl, state
 
 			out += `<${names.el(made.type)}${value === null ? "" : attr(names.attr("lastValue"), value)}>`
 
-			for (const item of made.items ?? [])
-				out += names.empty("listItem", [
-					["displayText", item.text],
-					["value", item.value]
-				])
+			for (const item of made.items ?? []) out += names.empty("listItem", listItemAttributes(item))
 
 			out += `</${names.el(made.type)}>`
 			break
@@ -373,6 +404,19 @@ function dataSdtPr(w: StoryWriting, data: ElementData, state: ControlState): str
 	})
 	let children = data.children.flatMap((child): ElementData[] => {
 		if (child.uri === MAIN && child.name === "showingPlcHdr" && state.placeholder !== undefined) return []
+		if (child.uri === MAIN && (child.name === "dropDownList" || child.name === "comboBox") && state.items !== undefined) {
+			const sourceLast = child.attrs.find(([uri, local]) => uri === MAIN && local === "lastValue")?.[2]
+			const last =
+				state.value !== undefined ? state.value : state.items.some(item => item.value === sourceLast) ? (sourceLast ?? null) : null
+			const entries: ElementData[] = state.items.map(item => ({
+				uri: MAIN,
+				name: "listItem",
+				attrs: listItemAttributes(item).map(([name, value]) => [MAIN, name, value] as const),
+				children: []
+			}))
+
+			return [{ ...attr(child, "lastValue", last), children: entries }]
+		}
 		if (child.uri === MAIN && (child.name === "dropDownList" || child.name === "comboBox") && state.value !== undefined)
 			return [attr(child, "lastValue", state.value)]
 		if (child.uri === MAIN && child.name === "date" && state.date !== undefined)
@@ -524,8 +568,10 @@ function dataMarkup(names: Names, data: FormFieldData): string {
 
 // A legacy form field whose value a form command set: its runs from w:fldChar begin to end as the source has
 // them, with w:ffData's w:checkBox/w:checked or w:ddList/w:result set and, for a text field, its result runs
-// replaced by one run of the new text (in the first result run's properties).
-export function writeLegacyFormField(w: StoryWriting, out: Out, node: Node): void {
+// replaced by one run of the new text (in the first result run's properties). `restyle`: the run properties
+// the field's formatting gives a source run (`fresh`: the new result run modelled on it), as the field writer
+// gives them (write/atoms/fields.ts), when the field's formatting changed.
+export function writeLegacyFormField(w: StoryWriting, out: Out, node: Node, restyle?: (run: number, fresh: boolean) => string): void {
 	const part = w.part
 	const document = part.document
 	const reader = part.reader
@@ -541,12 +587,34 @@ export function writeLegacyFormField(w: StoryWriting, out: Out, node: Node): voi
 	const separate = field < 0 ? -1 : (part.fields.separate[field] ?? -1)
 	const from = part.start(begin)
 	const to = part.byteEnd(end)
+	// Source bytes [start, stop), each run starting in them with the properties `restyle` gives it.
+	const copy = (start: number, stop: number): void => {
+		let at = start
 
-	w.copySource(out, from, document.start(ffData), false)
+		if (restyle !== undefined) {
+			for (let item = begin; item <= end && item < part.count; item++) {
+				if (part.kinds[item] !== Item.Run || document.isSelfClosing(part.node(item))) continue
+
+				const openEnd = document.openEnd(part.node(item))
+
+				if (openEnd <= at || openEnd > stop) continue
+
+				const rPr = part.runs.rPr[part.aux[item] ?? -1] ?? -1
+
+				w.copySource(out, at, openEnd, false)
+				out.text(restyle(item, false))
+				at = rPr >= 0 ? document.end(rPr) : openEnd
+			}
+		}
+
+		w.copySource(out, at, stop, false)
+	}
+
+	copy(from, document.start(ffData))
 	writeFfData(out, part, ffData, names, state)
 
 	if (state.text === undefined || separate < 0) {
-		w.copySource(out, document.end(ffData), to, false)
+		copy(document.end(ffData), to)
 
 		return
 	}
@@ -557,14 +625,25 @@ export function writeLegacyFormField(w: StoryWriting, out: Out, node: Node): voi
 	const resultFrom = part.byteEnd(separateRun)
 	const resultTo = part.start(endRun)
 
-	w.copySource(out, document.end(ffData), resultFrom, false)
+	copy(document.end(ffData), resultFrom)
 
 	let written = false
-	const resultRun = (properties: number): void => {
-		const rPr = properties < 0 ? "" : decodeUtf8(document.bytes, document.start(properties), document.end(properties))
+	const resultRun = (run: number, properties: number): void => {
+		const rPr =
+			restyle !== undefined
+				? restyle(run, true)
+				: properties < 0
+					? ""
+					: decodeUtf8(document.bytes, document.start(properties), document.end(properties))
 
 		out.text(`<${names.el("r")}>${rPr}${resultMarkup(names, state.text ?? "")}</${names.el("r")}>`)
 		written = true
+	}
+
+	const runItem = (element: number): number => {
+		for (let item = separateRun; item <= end; item++) if (part.kinds[item] === Item.Run && part.node(item) === element) return item
+
+		return separateRun
 	}
 
 	for (
@@ -573,7 +652,7 @@ export function writeLegacyFormField(w: StoryWriting, out: Out, node: Node): voi
 		child = document.nextSibling(child)
 	) {
 		if (document.kinds[child] === NodeKind.Element && reader.is(child, Ns.W, "r")) {
-			if (!written) resultRun(reader.child(child, Ns.W, "rPr"))
+			if (!written) resultRun(runItem(child), reader.child(child, Ns.W, "rPr"))
 
 			continue
 		}
@@ -581,9 +660,9 @@ export function writeLegacyFormField(w: StoryWriting, out: Out, node: Node): voi
 		copyNode(out, document, child)
 	}
 
-	if (!written) resultRun(reader.child(part.node(separateRun), Ns.W, "rPr"))
+	if (!written) resultRun(separateRun, reader.child(part.node(separateRun), Ns.W, "rPr"))
 
-	w.copySource(out, resultTo, to, false)
+	copy(resultTo, to)
 }
 
 // A text field's result: Word's five en spaces for an empty one, line feeds as w:br.

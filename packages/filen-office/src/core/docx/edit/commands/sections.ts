@@ -32,6 +32,9 @@ export interface DocxPageSetup {
 		readonly distance?: number
 		readonly restart?: DocxLineNumberRestart
 	} | null
+	// Mirror margins (Word's Multiple pages "Mirror margins"): left and right are inside and outside, swapped on
+	// facing pages (w:mirrorMargins in settings, ECMA-376 Part 1 §17.15.1.57). Document-wide, whatever `scope`.
+	readonly mirrorMargins?: boolean
 	// The caret's section (default) or every section, as Word's "Apply to".
 	readonly scope?: "section" | "document"
 }
@@ -218,6 +221,11 @@ function pageSetup(value: object): DocxPageSetup | undefined {
 			...(restart.value === undefined ? {} : { restart: restart.value })
 		}
 	}
+
+	const mirror = optional(value, "mirrorMargins", boolArg)
+
+	if (!mirror.ok) return undefined
+	if (mirror.value !== undefined) out.mirrorMargins = mirror.value
 
 	if (Object.keys(out).length === 0) return undefined
 

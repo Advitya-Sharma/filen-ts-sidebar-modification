@@ -10,18 +10,23 @@ export {
 } from "./DocxEditor"
 export {
 	DRAWING_HANDLES,
+	CropDrag,
 	DrawingDrag,
 	EMU_PER_PAGE_PX,
 	MIN_DRAWING_PX,
+	cropSides,
 	handleCursor,
 	handlePoints,
 	moveCommand,
 	previewTransform,
 	resizeCommand,
 	resizedBox,
+	type CropSide,
 	type DrawingHandle,
 	type PageBox
 } from "./edit/objects"
 export { EditSink, plainText, type EditSinkOptions } from "./edit/sink"
+export { paintMath } from "./paint/math"
 export { EditSurface, type DocxEditorMark } from "./edit/surface"
 export { useDocxEditor, type DocxEditorControls, type DocxEditorState } from "./useDocxEditor"
+export * from "./reflow/index"

@@ -1,4 +1,4 @@
-import { type CommonKey } from "@/lib/i18n"
+import type { CommonKey } from "@/lib/i18n"
 
 // A section root or any route nested under it.
 export function pathIsUnder(pathname: string, root: string): boolean {
