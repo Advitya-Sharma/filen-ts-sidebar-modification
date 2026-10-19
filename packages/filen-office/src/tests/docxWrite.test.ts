@@ -254,6 +254,20 @@ describe("docx writer", () => {
 		expect(xml).toContain('<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr></w:pPr>')
 	})
 
+	it("copies a paragraph out of any list with the level the file gives it (numId 0, level past 8)", async () => {
+		const removed = '<w:numPr><w:ilvl w:val="12"/><w:numId w:val="0"/></w:numPr>'
+		const document = await opened({ body: p("Notice", removed) + p("two") })
+		const edit = session(document)
+		const doc = edit.state.doc
+		const copy = doc.child(0)
+
+		edit.dispatch(edit.state.tr.insert(doc.content.size, copy.type.create(copy.attrs, copy.content, copy.marks)))
+
+		const xml = body(await read((await save(document, edit)).bytes, "word/document.xml"))
+
+		expect(xml.split('<w:numPr><w:ilvl w:val="12"/><w:numId w:val="0"/></w:numPr>').length).toBe(3)
+	})
+
 	it("creates numbering and styles parts when the document has none", async () => {
 		const document = await opened({ body: p("one") + p("two") })
 		const edit = session(document)

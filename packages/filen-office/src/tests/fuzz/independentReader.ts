@@ -497,7 +497,8 @@ function paragraphProps(paragraph: XElement): string {
 		style === undefined ? null : wAttribute(style, "val"),
 		numId === null ? null : Number(numId),
 		level === null ? null : Number(level),
-		align === undefined ? null : wAttribute(align, "val")
+		// As the writer writes it and Word reads it: start and end are the left and right edges.
+		align === undefined ? null : writtenAlign(wAttribute(align, "val"))
 	])
 }
 
@@ -515,6 +516,12 @@ export interface ParagraphSignature {
 	readonly props: string
 	readonly text: string
 	readonly fmt: string
+}
+
+const WRITTEN_ALIGN: Readonly<Record<string, string>> = { start: "left", end: "right" }
+
+function writtenAlign(value: string | null): string | null {
+	return value === null ? null : (WRITTEN_ALIGN[value] ?? value)
 }
 
 // Text (w:t and w:delText outside fields, drawings and alternate content) with per-character run formatting.
@@ -1050,4 +1057,56 @@ export function contentTypes(bytes: Uint8Array): { defaults: Map<string, string>
 	}
 
 	return { defaults, overrides }
+}
+
+const UNIQUE_IDS = /\bw14:paraId="([^"]+)"|<w:sdtPr\b(?:(?!<\/w:sdtPr>)[\s\S])*?<w:id w:val="([^"]+)"|<wp:docPr\b[^>]*?\bid="([^"]+)"/g
+
+// A text box's mc:Fallback (its VML) repeats its mc:Choice's content, ids included, as Word writes it
+// (write/checks/forms.ts): only the content outside fallbacks counts.
+export function withoutFallbacks(xml: string): string {
+	const out: string[] = []
+	let at = 0
+	let depth = 0
+	const tags = /<(\/?)mc:Fallback\b[^>]*?(\/?)>/g
+
+	for (const tag of xml.matchAll(tags)) {
+		const index = tag.index
+		const closing = tag[1] === "/"
+		const empty = tag[2] === "/"
+
+		if (empty) {
+			if (depth === 0) out.push(xml.slice(at, index))
+			if (depth === 0) at = index + tag[0].length
+
+			continue
+		}
+
+		if (!closing) {
+			if (depth === 0) out.push(xml.slice(at, index))
+
+			depth++
+		} else if (depth > 0) {
+			depth--
+
+			if (depth === 0) at = index + tag[0].length
+		}
+	}
+
+	if (depth === 0) out.push(xml.slice(at))
+
+	return out.join("")
+}
+
+// Ids that must be unique in a story part (w14:paraId, a content control's w:id, wp:docPr ids) seen more than
+// once, by key.
+export function repeatedIds(document: Uint8Array): Map<string, number> {
+	const counts = new Map<string, number>()
+
+	for (const match of withoutFallbacks(new TextDecoder().decode(document)).matchAll(UNIQUE_IDS)) {
+		const key = match[1] !== undefined ? `paraId:${match[1]}` : match[2] !== undefined ? `sdt:${match[2]}` : `docPr:${match[3] ?? ""}`
+
+		counts.set(key, (counts.get(key) ?? 0) + 1)
+	}
+
+	return new Map([...counts].filter(([, times]) => times > 1))
 }

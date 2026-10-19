@@ -20,6 +20,7 @@ import {
 	type DocxRefusalReason,
 	type NewStoryKind
 } from "../edit/index"
+import { writesUnholdableText } from "../edit/commands/base"
 import { commandAllowed } from "../edit/protection"
 import { hostStories } from "../forms/sessions"
 import type { FieldCodes } from "../layout/fields"
@@ -36,7 +37,7 @@ import { Item, RevisionView, type Story, type StoryPart } from "../model/index"
 import { flushComposition } from "../review/track"
 import { bindAddedDrawings } from "../objects/edit"
 import type { StoryTemplate } from "../stories/clone"
-import { DocumentEdits, StoryEdits, type StoryChange, type TopEntry } from "./edits"
+import { DocumentEdits, foldTransactions, StoryEdits, type PendingChange, type StoryChange, type TopEntry } from "./edits"
 import { PagedGeometry, type Affinity, type CaretBox, type HitResult, type PageRect } from "./geometry"
 import { DocumentHistory } from "./history"
 import { hitObject, type ObjectHit } from "./objects"
@@ -120,6 +121,9 @@ export interface PagedSelection {
 }
 
 const DEFAULT_BUDGET_MS = 4
+// While suspended, the stories' views take what they applied at the latest once this many stories' runs of
+// applies wait (each keeps two documents).
+const MAX_BEHIND = 200
 // Marks of text a revision view hides.
 const HIDDEN_MARKS: Readonly<Partial<Record<RevisionView, readonly MarkType[]>>> = {
 	[RevisionView.Final]: [docxSchema.marks.deletion, docxSchema.marks.move_from],
@@ -180,6 +184,10 @@ export class PagedEditor {
 		undefined
 	// Changes with the editor's own state document commands may depend on (painter, view, suspension, stories).
 	private stateVersion = 0
+	private headersHidden = false
+	// While suspended: what the stories applied that their layout views have not taken yet, in order (keepUp),
+	// a story's consecutive applies folded into one change.
+	private readonly behind: { readonly story: EditedStory; pending: PendingChange }[] = []
 	private enabledOf:
 		{ readonly base: DocxEditorSnapshot["enabled"]; readonly enabled: Readonly<Record<DocxEditorCommandType, boolean>> } | undefined =
 		undefined
@@ -280,12 +288,22 @@ export class PagedEditor {
 		return edited?.region === undefined ? undefined : edited
 	}
 
+	// Story `story` of the document's model; one edited blocks bring (a text box) is there once layout's view of
+	// them caught up.
+	private modelStory(story: number): Story | undefined {
+		const known = (): boolean => story < this.edits.storyCount || this.edits.addedStory(story)
+
+		if (!known() && this.behind.length > 0) this.keepUp()
+
+		return known() ? this.edits.model.stories[story] : undefined
+	}
+
 	private storyOf(story: number): EditedStory | undefined {
 		const known = this.stories.get(story)
 
 		if (known !== undefined) return known
 
-		const target = story < this.edits.storyCount || this.edits.addedStory(story) ? this.edits.model.stories[story] : undefined
+		const target = this.modelStory(story)
 
 		if (target === undefined) return undefined
 
@@ -308,6 +326,9 @@ export class PagedEditor {
 	// holds what the template does. Nothing refers to it yet: a feature inserts the reference (and undoing that
 	// leaves the story out of the save).
 	addStory(kind: NewStoryKind, id?: string, template?: StoryTemplate): DocxEditorSession | undefined {
+		// Stories number in the order the document's model gets them (edited blocks bring theirs, text boxes).
+		this.keepUp()
+
 		const context = this.body.session.context
 		const space = kind === "footnote" || kind === "endnote" || kind === "comment" ? kind : undefined
 
@@ -351,6 +372,8 @@ export class PagedEditor {
 
 	// The notes part new notes of `kind` go into (made where the document has none).
 	notePart(kind: "footnote" | "endnote"): StoryPart | undefined {
+		this.keepUp()
+
 		return this.edits.notesPart(kind, this.newPartName(kind))
 	}
 
@@ -402,7 +425,7 @@ export class PagedEditor {
 	// on page `page` (the story shows on many; -1: the first); `page` -1 and story the body's: back to the body.
 	// Note separators are not entered (Word's print layout does not either).
 	enterStory(story: number, page: number): boolean {
-		const target = story < this.edits.storyCount || this.edits.addedStory(story) ? this.edits.model.stories[story] : undefined
+		const target = this.modelStory(story)
 
 		if (target === undefined || STORY_REGIONS[target.kind] === undefined || !ordinaryNote(target)) return false
 
@@ -509,6 +532,7 @@ export class PagedEditor {
 		this.unsubscribe.length = 0
 		this.listeners.clear()
 		this.refusedListeners.clear()
+		this.behind.length = 0
 
 		for (const resolve of this.settledWaiters.splice(0)) resolve()
 
@@ -528,7 +552,13 @@ export class PagedEditor {
 
 	// Whether layout has caught up with every edit.
 	get settled(): boolean {
-		return this.layout.final && this.changed.size === 0 && this.pendingPage === undefined && this.pendingStories.size === 0
+		return (
+			this.layout.final &&
+			this.changed.size === 0 &&
+			this.pendingPage === undefined &&
+			this.pendingStories.size === 0 &&
+			this.behind.length === 0
+		)
 	}
 
 	page(index: number): PageDisplayList | undefined {
@@ -568,7 +598,7 @@ export class PagedEditor {
 	execute(command: DocxEditorCommand): boolean | Promise<boolean> {
 		const info = commandInfo(command.type)
 
-		if (this.disposed || info === undefined) return false
+		if (this.disposed || info === undefined || writesUnholdableText(command)) return false
 		if (command.type === "history.undo" || command.type === "history.redo") return this.step(command.type === "history.undo")
 		if (info.scope === "story") return this.session.execute(command)
 		if (info.write && (this.body.session.readOnly || !commandAllowed(this.session, command.type))) return false
@@ -688,6 +718,19 @@ export class PagedEditor {
 		this.changedState()
 	}
 
+	// Whether the surface showing the document shows headers and footers: Mobile view does not (as Word's), and
+	// their commands are off meanwhile.
+	get headersShown(): boolean {
+		return !this.headersHidden
+	}
+
+	setHeadersShown(shown: boolean): void {
+		if (shown !== this.headersHidden) return
+
+		this.headersHidden = !shown
+		this.changedState()
+	}
+
 	// Registers bytes a command will use (a picture to insert) and returns their handle, or undefined when
 	// they are over the size limit. Chunks are kept as they came (a bridge streams them).
 	addMedia(chunks: Uint8Array | readonly Uint8Array[], info?: DocxMediaInfo): number | undefined {
@@ -697,6 +740,8 @@ export class PagedEditor {
 	// Shows the document in another revision view, laid out again from the first page (pages in view now,
 	// the rest in slices; pages not reached yet stay as they were meanwhile). False when it already is.
 	setView(view: RevisionView): boolean {
+		this.keepUp()
+
 		if (!this.edits.setView(view)) return false
 
 		for (const story of this.stories.values()) if (story.region !== undefined) story.index.truncate(0)
@@ -724,6 +769,7 @@ export class PagedEditor {
 	setFieldCodes(on: boolean): boolean {
 		if (on === this.fieldCodesAll && this.codeToggles.size === 0) return false
 
+		this.keepUp()
 		this.fieldCodesAll = on
 		this.codeToggles.clear()
 		this.layOutCodes()
@@ -743,6 +789,8 @@ export class PagedEditor {
 		if (fields.length === 0) return false
 
 		for (const field of fields) if (!this.codeToggles.delete(field)) this.codeToggles.add(field)
+
+		this.keepUp()
 
 		const body = this.body
 		const blocks =
@@ -839,7 +887,11 @@ export class PagedEditor {
 		for (const story of this.stories.values()) {
 			const found = story.edits.paragraphOf(part.index, item)
 
-			if (found !== undefined) return insideCode(story.edits.document, found.pos, node => this.fieldCodeShown(node))
+			if (found === undefined) continue
+
+			const pos = paragraphPos(story.edits, found.node, found.pos)
+
+			return pos !== undefined && insideCode(story.edits.document, pos, node => this.fieldCodeShown(node))
 		}
 
 		return false
@@ -859,6 +911,7 @@ export class PagedEditor {
 	resume(): void {
 		if (!this.suspendedValue) return
 
+		this.keepUp()
 		this.suspendedValue = false
 
 		const layout = this.layout
@@ -948,12 +1001,26 @@ export class PagedEditor {
 
 		this.syncDefinitions()
 
-		const change = story.edits.applyAll(transactions)
+		if (this.suspendedValue) {
+			// No layout reads the story's view meanwhile: it takes the edits at once when needed (keepUp), the
+			// writing of edited blocks for layout off the keystroke.
+			const last = this.behind[this.behind.length - 1]
 
-		if (change !== undefined && story.region !== undefined) {
-			if (this.suspendedValue) this.defer(story, change)
-			else if (story === this.body) this.relayout(change)
-			else this.relayoutStory(story, change)
+			if (last?.story === story) last.pending = foldTransactions(last.pending, transactions) ?? last.pending
+			else {
+				const pending = foldTransactions(undefined, transactions)
+
+				if (pending !== undefined) this.behind.push({ story, pending })
+			}
+
+			if (this.behind.length >= MAX_BEHIND) this.keepUp()
+		} else {
+			const change = story.edits.applyAll(transactions)
+
+			if (change !== undefined && story.region !== undefined) {
+				if (story === this.body) this.relayout(change)
+				else this.relayoutStory(story, change)
+			}
 		}
 
 		this.emit({ type: "selection" })
@@ -1004,6 +1071,22 @@ export class PagedEditor {
 		const tr = state.tr.setSelection(TextSelection.create(state.doc, selection.empty ? target : selection.anchor, target))
 
 		story.session.dispatch(tr.setMeta("addToHistory", false))
+	}
+
+	// Brings every story's layout view (StoryEdits: its blocks as layout knows them) up to its session's
+	// document. While suspended the stories take what they applied only here (on resume, and before what reads
+	// them as layout would); other times they are always up to date.
+	keepUp(): void {
+		if (this.behind.length === 0) return
+
+		if (this.changed.size > 0) this.flush()
+
+		// Taken in the order applied (what edited blocks bring, text boxes, numbers as it did then).
+		for (const { story, pending } of this.behind.splice(0)) {
+			const change = story.edits.applyPending(pending)
+
+			if (change !== undefined && story.region !== undefined) this.defer(story, change)
+		}
 	}
 
 	// While suspended: where layout restarts on resume.
@@ -1136,14 +1219,16 @@ export class PagedEditor {
 		for (const index of this.changed) {
 			const page = layout.pages[index]
 
+			// A page cut by a restart in the same task as its event stays wanted until the layout is final: a run
+			// keeping it from the layout before announces it no more.
+			if (page !== undefined || layout.final) this.changed.delete(index)
+
 			if (page === undefined || this.shown[index] === page) continue
 
 			this.shown[index] = page
 			this.indexPage(page)
 			changed.push(index)
 		}
-
-		this.changed.clear()
 
 		if (this.finalSeen && layout.final && this.shown.length > layout.pages.length) {
 			this.shown.length = layout.pages.length
@@ -1491,6 +1576,28 @@ function visibleFrom(doc: Node, pos: number, dir: 1 | -1, hidden: readonly MarkT
 
 		at += dir * next.nodeSize
 	}
+}
+
+// Where `paragraph` stands in the story's document as laid out, `at` as an overlay's record has it: checked, and
+// looked for in the top-level block there when the record's place is no longer the paragraph's (an edit of the
+// block before it moved it), undefined when the block does not hold it.
+export function paragraphPos(edits: Pick<StoryEdits, "document" | "starts" | "entryAt">, paragraph: Node, at: number): number | undefined {
+	const doc = edits.document
+
+	if (at >= 0 && at < doc.content.size && doc.nodeAt(at) === paragraph) return at
+
+	const index = edits.entryAt(Math.max(0, Math.min(at, doc.content.size - 1)))
+	const block = index < doc.childCount ? doc.child(index) : undefined
+	const start = edits.starts[index] ?? 0
+	let found: number | undefined
+
+	block?.descendants((node, pos) => {
+		if (found === undefined && node === paragraph) found = start + 1 + pos
+
+		return found === undefined && !node.isTextblock
+	})
+
+	return found
 }
 
 // A paragraph's fields in order: field atoms and the begin characters of fields spanning paragraphs.

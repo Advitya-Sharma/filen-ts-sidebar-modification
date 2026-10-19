@@ -1,0 +1,7 @@
+<Project>
+	<!-- Build output stays out of the source tree: node_modules/.cache is ignored. -->
+	<PropertyGroup>
+		<UseArtifactsOutput>true</UseArtifactsOutput>
+		<ArtifactsPath>$(MSBuildThisFileDirectory)../../node_modules/.cache/filen-office-openxml</ArtifactsPath>
+	</PropertyGroup>
+</Project>

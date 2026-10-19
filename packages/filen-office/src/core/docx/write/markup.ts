@@ -130,6 +130,25 @@ export class Out {
 		this.used = at
 	}
 
+	// Bytes [from, to) of what was written.
+	slice(from: number, to: number): Uint8Array {
+		const out = new Uint8Array(Math.max(0, to - from))
+		let at = 0
+
+		for (const chunk of [...this.chunks, this.scratch.subarray(0, this.used)]) {
+			const end = at + chunk.length
+
+			if (end > from && at < to)
+				out.set(chunk.subarray(Math.max(0, from - at), Math.min(chunk.length, to - at)), Math.max(0, at - from))
+
+			at = end
+
+			if (at >= to) break
+		}
+
+		return out
+	}
+
 	// Whether what was written is exactly source[from, to).
 	equals(source: Uint8Array, from: number, to: number): boolean {
 		if (to - from !== this.length) return false
@@ -372,6 +391,10 @@ export function spliceChildren(
 	}
 
 	let afterRanked = lastRanked < 0
+	// The record of a tracked change of the properties (w:rPrChange, w:pPrChange...) is their last child, after
+	// the extensions too (Word's schemas put w14:* and the like inside the properties it records).
+	const last = order[order.length - 1] ?? ""
+	const beforeExtensions = last.endsWith("Change") ? order.length - 1 : order.length + 1
 
 	openTag(out, document, container)
 
@@ -380,7 +403,7 @@ export function spliceChildren(
 			const isRanked = ranked(child)
 
 			if (isRanked) flushBefore(rankOf(document.localName(child)))
-			else if (afterRanked) flushBefore(order.length + 1)
+			else if (afterRanked) flushBefore(beforeExtensions)
 
 			if (reader.group(child) === Ns.W) {
 				const local = document.localName(child)

@@ -1,6 +1,8 @@
 import { AllSelection, NodeSelection, TextSelection, type EditorState, type Transaction } from "prosemirror-state"
+import type { Node } from "prosemirror-model"
 import { canJoin } from "prosemirror-transform"
 import { DOCX_EDITOR_COMMANDS, DOCX_PARAGRAPH_STYLE_MENU, docxSchema, type DocxEditorCommand } from "../edit/index"
+import { revisionHidden, type RevisionView } from "../model/kinds"
 
 // The structural keys an input view handles itself (the browser's own editing would change its hidden DOM
 // in ways ProseMirror cannot read back as DOCX): Enter splits the paragraph, Shift+Enter breaks the line,
@@ -23,6 +25,87 @@ export function lineBreak(state: EditorState): Transaction | null {
 	if (!state.selection.$from.parent.isTextblock) return null
 
 	return state.tr.replaceSelectionWith(docxSchema.nodes.break.create({ type: "textWrapping" }), true).scrollIntoView()
+}
+
+// A tab character in place of the selection.
+export function insertTab(state: EditorState): Transaction | null {
+	if (!state.selection.$from.parent.isTextblock) return null
+
+	return state.tr.replaceSelectionWith(docxSchema.nodes.tab.create(), true).scrollIntoView()
+}
+
+// Tab and Shift+Tab in a table (the innermost one holding both ends of the selection): the next (previous)
+// cell with its content selected, as Word's do. A vertical merge's continuation cells belong to the cell above,
+// and rows and cells revision view `view` hides are not there: both are passed over. From the last cell shown,
+// `lastRow` puts the caret in the table's last row (Word adds a row below it); false from the first cell
+// going back (nothing happens), null outside a table.
+export function cellStep(
+	state: EditorState,
+	dir: 1 | -1,
+	view: RevisionView
+): Transaction | { readonly lastRow: Transaction } | false | null {
+	const { $from, $to } = state.selection
+	const nodes = docxSchema.nodes
+	const hidden = (node: Node): boolean => revisionHidden(node.attrs["revision"] as number, view)
+
+	for (let d = Math.min($from.depth, $to.depth) - 3; d >= 1; d--) {
+		const table = $from.node(d)
+
+		if (table.type !== nodes.table || $to.node(d) !== table || $from.before(d) !== $to.before(d)) continue
+
+		const doc = state.doc
+		const $end = dir > 0 ? $to : $from
+		let row = $end.index(d)
+		let cell = $end.index(d + 1)
+		let rowPos = $end.before(d + 1)
+
+		for (;;) {
+			cell += dir
+
+			if (cell < 0 || cell >= table.child(row).childCount) {
+				const left = table.child(row)
+
+				row += dir
+
+				if (row < 0) return false
+
+				if (row >= table.childCount) {
+					const last = table.child(table.childCount - 1)
+					const caret = TextSelection.findFrom(doc.resolve($from.before(d) + table.nodeSize - last.nodeSize), 1, true)
+
+					return caret === null ? false : { lastRow: state.tr.setSelection(caret) }
+				}
+
+				const next = table.child(row)
+
+				rowPos = dir > 0 ? rowPos + left.nodeSize : rowPos - next.nodeSize
+				// Before its first cell going on (after its last going back); a hidden row is passed over whole.
+				const into = dir > 0 ? -1 : next.childCount
+
+				cell = hidden(next) ? next.childCount - 1 - into : into
+
+				continue
+			}
+
+			const target = table.child(row).child(cell)
+
+			if (target.attrs["vMerge"] === "continue" || hidden(target)) continue
+
+			let cellPos = rowPos + 1
+
+			for (let k = 0; k < cell; k++) cellPos += table.child(row).child(k).nodeSize
+
+			const start = TextSelection.findFrom(doc.resolve(cellPos + 1), 1, true)
+			const end = TextSelection.findFrom(doc.resolve(cellPos + target.nodeSize - 1), -1, true)
+
+			if (start === null || end === null || start.from < cellPos || end.to > cellPos + target.nodeSize || start.from > end.to)
+				continue
+
+			return state.tr.setSelection(TextSelection.create(doc, start.from, end.to)).scrollIntoView()
+		}
+	}
+
+	return null
 }
 
 // At a paragraph's start: joined to the paragraph before it. Inside a cell's first paragraph, or after a

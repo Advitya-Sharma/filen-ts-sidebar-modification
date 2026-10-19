@@ -13,6 +13,8 @@ export interface DocxReflowSurfaceProps {
 	// The same handle the paged editor fills (clipboard, hit tests, touch selection).
 	handleRef: RefObject<DocxEditorHandle | null>
 	label: string
+	// The id of the element describing the editing area (none read-only).
+	describedBy?: string
 	readOnly: boolean
 	apple: boolean
 	marks: readonly DocxEditorMark[]
@@ -41,6 +43,7 @@ export function DocxReflowSurface({ handleRef, interactions, ...props }: DocxRef
 			document={props.document}
 			className="size-full"
 			label={props.label}
+			{...(props.describedBy === undefined ? {} : { describedBy: props.describedBy })}
 			readOnly={props.readOnly}
 			apple={props.apple}
 			marks={props.marks}

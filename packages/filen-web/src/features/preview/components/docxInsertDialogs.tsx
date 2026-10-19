@@ -4,6 +4,7 @@ import {
 	DOCX_NOTE_NUMBER_FORMATS,
 	FIELD_CATALOGUE,
 	datePictures,
+	linkTargetRefusal,
 	parseDocxEditorCommand,
 	sessionBookmarks,
 	type DocxEditorCommand,
@@ -263,15 +264,18 @@ function LinkDialog({ editor, snapshot, enabled, run, close }: DialogProps) {
 	const [address, setAddress] = useState(link?.target ?? "")
 	const [place, setPlace] = useState(places.initial)
 	const target = linkTarget(address)
+	// A new address goes only to the web, email or a phone; the link's own target stays whatever it is.
+	const refusal = target === null ? undefined : linkTargetRefusal(target, link?.target)
 	const shownText = showText && text.trim() !== "" ? text : undefined
 	const extra = shownText === undefined ? {} : { text: shownText }
 	const valid =
 		enabled("link.set") &&
 		(kind === "web"
-			? target !== null && parseDocxEditorCommand({ type: "link.set", target, ...extra }) !== undefined
+			? target !== null && refusal === undefined && parseDocxEditorCommand({ type: "link.set", target, ...extra }) !== undefined
 			: parseDocxEditorCommand(placeLink(place, extra)) !== undefined)
 	const textId = useId()
 	const addressId = useId()
+	const addressErrorId = useId()
 
 	const submit = (): void => {
 		if (!valid) {
@@ -335,10 +339,13 @@ function LinkDialog({ editor, snapshot, enabled, run, close }: DialogProps) {
 						inputMode="url"
 						placeholder="https://"
 						maxLength={2048}
+						aria-invalid={refusal === "scheme" ? true : undefined}
+						aria-describedby={refusal === "scheme" ? addressErrorId : undefined}
 						onChange={event => {
 							setAddress(event.target.value)
 						}}
 					/>
+					{refusal === "scheme" ? <FieldError id={addressErrorId}>{t("previewDocxLinkSchemeRefused")}</FieldError> : null}
 				</Field>
 			) : noPlaces ? (
 				<p className="text-sm text-muted-foreground">{t("previewDocxLinkNoPlaces")}</p>

@@ -36,9 +36,20 @@ import type { DocxEditContext } from "../context"
 import { SetMarkSetsStep, SetMarksStep, isAddMarkLike, isMarkStep, type MarkPiece, type MarksPiece, type PieceStep } from "../marks"
 import { builtInStyleId } from "../formats"
 import { lockedStyleViolation, protectionOf, protectionViolation } from "../protection"
-import { NO_SOURCE, docxSchema } from "../schema"
+import { NO_SOURCE, docxSchema, type MarkerList } from "../schema"
 import type { DocxEditorSession } from "../session"
-import { invariantViolation, isCommand, isInternal, isRemarking, markCommand, markInternal } from "./core"
+import {
+	insertedSlices,
+	invariantViolation,
+	isCommand,
+	isInternal,
+	isRemarking,
+	markCommand,
+	markCommandAfter,
+	markInternal,
+	replacedAfter,
+	replacesOf
+} from "./core"
 import type { InvariantStage } from "./index"
 
 // Content controls keep what Word keeps (ECMA-376 Part 1 §17.5.2): locked content (w:lock contentLocked,
@@ -117,13 +128,14 @@ function noteForeignCopies(session: DocxEditorSession, transactions: readonly Tr
 		for (const step of tr.steps) {
 			if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0 || isRemarking(step)) continue
 
-			step.slice.content.descendants(node => {
-				if (node.type === nodes.sdt) noteForeignCopy(session, node)
+			for (const slice of insertedSlices(step))
+				slice.content.descendants(node => {
+					if (node.type === nodes.sdt) noteForeignCopy(session, node)
 
-				for (const mark of node.marks) if (mark.type === marks.content_control) noteForeignCopy(session, mark)
+					for (const mark of node.marks) if (mark.type === marks.content_control) noteForeignCopy(session, mark)
 
-				return true
-			})
+					return true
+				})
 		}
 	}
 }
@@ -224,11 +236,12 @@ function notePasted(
 
 			if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0) return
 
-			step.slice.content.descendants(node => {
-				if (node.type === nodes.sdt) add(node)
+			for (const slice of insertedSlices(step))
+				slice.content.descendants(node => {
+					if (node.type === nodes.sdt) add(node)
 
-				for (const mark of node.marks) if (mark.type === marks.content_control) add(mark)
-			})
+					for (const mark of node.marks) if (mark.type === marks.content_control) add(mark)
+				})
 
 			if (found) tr.mapping.maps[at]?.forEach((_oldStart, _oldEnd, newStart, newEnd) => record(index, at, newStart, newEnd))
 		})
@@ -279,6 +292,39 @@ function refuse(tr: Transaction, reason: string, session: DocxEditorSession): Tr
 	refusals.set(tr, reason)
 
 	return tr
+}
+
+// A link put on text in a plain text control, a command's or not: its content is one run with one set of
+// formatting properties (ISO/IEC 29500-1 §17.5.2.44), which a hyperlink breaks.
+function plainTextLink(tr: Transaction, session: DocxEditorSession): string | undefined {
+	if (isInternal(tr) || !mayHoldControls(session)) return undefined
+
+	const part = session.story.part
+
+	for (let k = 0; k < tr.steps.length; k++) {
+		const step = tr.steps[k]
+
+		if (!(step instanceof AddMarkStep) || step.mark.type !== marks.link) continue
+
+		const doc = tr.docs[k] as Node
+		let found = false
+
+		doc.nodesBetween(step.from, step.to, (node, pos) => {
+			if (found) return false
+			if (!node.isText) return true
+
+			const from = Math.max(pos, step.from)
+			const to = Math.min(pos + node.nodeSize, step.to)
+
+			found = from < to && plainTextAt(part, doc, from, to) !== undefined
+
+			return false
+		})
+
+		if (found) return REASONS.notText
+	}
+
+	return undefined
 }
 
 // Before tracked changes record the transaction.
@@ -433,11 +479,12 @@ function writtenControlMarks(tr: Transaction): Map<string, Mark> {
 	for (const step of tr.steps) {
 		if (!(step instanceof ReplaceStep) || step.slice.size === 0) continue
 
-		step.slice.content.descendants(node => {
-			for (const mark of node.marks) if (mark.type === marks.content_control) out.set(controlKey(mark), mark)
+		for (const slice of insertedSlices(step))
+			slice.content.descendants(node => {
+				for (const mark of node.marks) if (mark.type === marks.content_control) out.set(controlKey(mark), mark)
 
-			return true
-		})
+				return true
+			})
 	}
 
 	return out
@@ -598,6 +645,10 @@ function checked(tr: Transaction, session: DocxEditorSession): Transaction {
 	const protection = protectionViolation(tr, session, command) ?? lockedStyleViolation(tr, session.context)
 
 	if (protection !== undefined) return refuse(tr, protection, session)
+
+	const link = plainTextLink(tr, session)
+
+	if (link !== undefined) return refuse(tr, link, session)
 	if (command) {
 		const written = commandMarks.get(session)
 
@@ -625,9 +676,9 @@ function checked(tr: Transaction, session: DocxEditorSession): Transaction {
 	typedStates(tr, part)
 
 	// What this stage did beyond inline content and plain formatting (a control's marks or state, a control
-	// taken away) is not a user's to do: the core lets it through a command. Otherwise the transaction stays the
-	// user's edit, which the core's copy repairs look at.
-	return tr.steps.slice(before).every(userLike) ? tr : markCommand(tr)
+	// taken away) is not a user's to do: the core lets it through a command, still judging the user's own steps
+	// as copies. Otherwise the transaction stays the user's edit, which the core's copy repairs look at.
+	return tr.steps.slice(before).every(userLike) ? tr : markCommandAfter(tr, before)
 }
 
 // Steps showing a pasted copy's placeholder whole: part of the paste.
@@ -1223,6 +1274,19 @@ function piecesViolation(
 	return undefined
 }
 
+// Whether [from, to] of `doc` holds a content control (a block one, or text of an inline one).
+function controlBetween(doc: Node, from: number, to: number): boolean {
+	let found = false
+
+	doc.nodesBetween(from, to, node => {
+		found ||= node.type === nodes.sdt || node.marks.some(mark => mark.type === marks.content_control)
+
+		return !found
+	})
+
+	return found
+}
+
 function lockViolation(tr: Transaction, part: StoryPart): string | undefined {
 	for (let k = 0; k < tr.steps.length; k++) {
 		const step = tr.steps[k]
@@ -1232,13 +1296,17 @@ function lockViolation(tr: Transaction, part: StoryPart): string | undefined {
 		if (step instanceof ReplaceStep || step instanceof ReplaceAroundStep) {
 			if (onlyMarkers(step)) continue
 
-			violation =
-				step instanceof ReplaceAroundStep
-					? (rangeViolation(part, doc, step.from, step.gapFrom, "replace") ??
-						rangeViolation(part, doc, step.gapTo, step.to, "replace"))
-					: pictureSwap(part, doc, step.from, step.to, step.slice.content)
+			if (step instanceof ReplaceAroundStep)
+				violation =
+					rangeViolation(part, doc, step.from, step.gapFrom, "replace") ??
+					rangeViolation(part, doc, step.gapTo, step.to, "replace")
+			// A rebuild over no control (one walk) breaks no lock, however many replaces it makes.
+			else if (replacesOf(step)[0] === step || controlBetween(doc, step.from, step.to))
+				for (const replace of replacesOf(step)) {
+					violation ??= pictureSwap(part, doc, replace.from, replace.to, replace.slice.content)
 						? undefined
-						: rangeViolation(part, doc, step.from, step.to, "replace", step.slice.size > 0 ? step.slice : null)
+						: rangeViolation(part, doc, replace.from, replace.to, "replace", replace.slice.size > 0 ? replace.slice : null)
+				}
 		} else if (step !== undefined && isMarkStep(step)) {
 			const control = step.mark.type === marks.content_control
 
@@ -1322,9 +1390,9 @@ export function contentMarks(doc: Node, around: ControlAround): readonly Mark[] 
 // Replaces a control's content: an inline control's span, or a block one's content with its first paragraph
 // holding `content` (what a control shows is one paragraph's content, line breaks for lines; a control holding
 // other blocks, a table, becomes that paragraph, as Word refreshes a bound control).
-export function replaceContent(tr: Transaction, around: ControlAround, content: readonly Node[]): void {
+export function replaceContent(tr: Transaction, around: ControlAround, written: readonly Node[]): void {
 	if (around.kind === "inline") {
-		tr.replaceWith(around.from, around.to, content)
+		tr.replaceWith(around.from, around.to, [...written, ...anchorsIn(tr.doc, around.from, around.to, around.to)])
 
 		return
 	}
@@ -1349,17 +1417,50 @@ export function replaceContent(tr: Transaction, around: ControlAround, content: 
 
 	if (first === undefined) return
 
+	const end = at + first.nodeSize
+	const content = [...written, ...anchorsIn(tr.doc, at + 1, around.to, end)]
+
 	if (!paragraphs) {
 		tr.replaceWith(around.from, around.to, first.type.create(first.attrs, content, first.marks))
 
 		return
 	}
 
-	const end = at + first.nodeSize
-
 	if (around.to > end) tr.delete(end, around.to)
 
 	tr.replaceWith(at + 1, end - 1, content)
+}
+
+// What outlives a control's content written anew, in order: range markers and comment anchors inline, and the
+// markers before the paragraphs from `blocksFrom` on that go with it. The new content ends with them, so a range
+// (a comment's, a bookmark's) only shrinks, as accepting a deletion keeps them (review/accept.ts).
+function anchorsIn(doc: Node, from: number, to: number, blocksFrom: number): Node[] {
+	const out: Node[] = []
+
+	doc.nodesBetween(from, to, (child, pos) => {
+		if (child.isInline) {
+			if ((child.type === docxSchema.nodes.marker || child.type === docxSchema.nodes.comment_ref) && pos >= from) out.push(child)
+
+			return false
+		}
+
+		if (pos >= blocksFrom && child.isTextblock)
+			for (const marker of (child.attrs["before"] as MarkerList | undefined) ?? [])
+				out.push(
+					marker.kind === "commentReference"
+						? docxSchema.nodes.comment_ref.create({ src: marker.src, id: marker.id })
+						: docxSchema.nodes.marker.create({
+								src: marker.src,
+								kind: marker.kind,
+								id: marker.id,
+								name: "name" in marker ? marker.name : null
+							})
+				)
+
+		return true
+	})
+
+	return out
 }
 
 // Marks for new content of a control: its first content's, with the control mark (inline) holding `state`,
@@ -1503,9 +1604,9 @@ function insertedRanges(tr: Transaction): number[] {
 
 		if (!(step instanceof ReplaceStep) || step.slice.size === 0) return
 
-		map.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
-			if (newEnd > newStart) out.push(newStart, newEnd)
-		})
+		const after = replacedAfter(step)
+
+		for (let k = 0; k < after.length; k += 2) if ((after[k + 1] ?? 0) > (after[k] ?? 0)) out.push(after[k] ?? 0, after[k + 1] ?? 0)
 	})
 
 	return out
@@ -1524,9 +1625,14 @@ function selectionInserts(tr: Transaction, from: number, to: number): number[] {
 			out[k + 1] = map.map(out[k + 1] ?? 0, 1)
 		}
 
-		if (step instanceof ReplaceStep && step.slice.size > 0 && step.from >= from && step.to <= to) {
-			map.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
-				if (newEnd > newStart) out.push(newStart, newEnd)
+		if (step instanceof ReplaceStep && step.slice.size > 0) {
+			const after = replacedAfter(step)
+
+			replacesOf(step).forEach((replace, k) => {
+				const start = after[2 * k] ?? 0
+				const end = after[2 * k + 1] ?? 0
+
+				if (replace.from >= from && replace.to <= to && end > start) out.push(start, end)
 			})
 		}
 
@@ -1570,27 +1676,33 @@ function placeholders(tr: Transaction, session: DocxEditorSession, forms: boolea
 		if (!(step instanceof ReplaceStep) || step.to <= step.from) return
 
 		const doc = tr.docs[index] as Node
-		const $from = doc.resolve(step.from)
+		const after = replacedAfter(step)
 
-		if (!$from.parent.inlineContent || step.to > $from.end()) return
+		replacesOf(step).forEach((replace, k) => {
+			if (replace.to <= replace.from) return
 
-		for (const span of controlSpans($from.parent, $from.start())) {
-			if (span.from !== step.from || span.to !== step.to) continue
+			const $from = doc.resolve(replace.from)
 
-			const info = controlOf(part, span.mark)
+			if (!$from.parent.inlineContent || replace.to > $from.end()) return
 
-			if (info === undefined || typeable(info) !== undefined || controlKey(span.mark) === coveredKey) continue
+			for (const span of controlSpans($from.parent, $from.start())) {
+				if (span.from !== replace.from || span.to !== replace.to) continue
 
-			// The marks every node of the content shares: the control's own and those of controls around it (not
-			// those of controls inside it, which go with their content).
-			let shared: readonly Mark[] | undefined
+				const info = controlOf(part, span.mark)
 
-			doc.nodesBetween(span.from, span.to, node => {
-				if (node.isInline) shared = shared === undefined ? node.marks : shared.filter(mark => mark.isInSet(node.marks))
-			})
+				if (info === undefined || typeable(info) !== undefined || controlKey(span.mark) === coveredKey) continue
 
-			emptied.push({ mark: span.mark, markSet: shared ?? [span.mark], pos: map.map(step.from, -1) })
-		}
+				// The marks every node of the content shares: the control's own and those of controls around it (not
+				// those of controls inside it, which go with their content).
+				let shared: readonly Mark[] | undefined
+
+				doc.nodesBetween(span.from, span.to, node => {
+					if (node.isInline) shared = shared === undefined ? node.marks : shared.filter(mark => mark.isInSet(node.marks))
+				})
+
+				emptied.push({ mark: span.mark, markSet: shared ?? [span.mark], pos: after[2 * k] ?? 0 })
+			}
+		})
 	})
 
 	const typed = retyped ? selectionInserts(tr, selection.from, selection.to) : []
@@ -1644,7 +1756,7 @@ function placeholders(tr: Transaction, session: DocxEditorSession, forms: boolea
 		// as Word copies a placeholder whole.
 		if (!typed.some((pos, n) => n % 2 === 0 && mapping.map(pos, 1) === from) && wholePlaceholders(tr, session, from, to)) continue
 
-		if (!placeholderAround(part, doc, from, to)) continue
+		if (!placeholderAround(part, doc, from, to) || markersOnly(doc, from, to)) continue
 
 		const around = inlineControlAround(part, doc, from, to) ?? blockControlAround(part, doc, from, to)
 
@@ -1687,6 +1799,20 @@ function placeholders(tr: Transaction, session: DocxEditorSession, forms: boolea
 	}
 
 	return tr.steps.length > before
+}
+
+// Whether [from, to] holds range markers only (a bookmark put around a heading): nothing typed, so a placeholder
+// stays.
+function markersOnly(doc: Node, from: number, to: number): boolean {
+	let only = true
+
+	doc.nodesBetween(from, to, node => {
+		if (node.isInline && node.type !== nodes.marker) only = false
+
+		return only
+	})
+
+	return only
 }
 
 // Shows the whole placeholder in each run-level control [from, to] holds whole that shows part of it; whether

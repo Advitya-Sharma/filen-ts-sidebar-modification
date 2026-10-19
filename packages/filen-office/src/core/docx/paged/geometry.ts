@@ -132,9 +132,12 @@ export class PagedGeometry {
 		{ pool: Int32Array; start: number; end: number; text: string; shadow: Node; result: OffsetMap }
 	>()
 	private readonly columns = new WeakMap<PageDisplayList, { group: Int32Array; boxes: ColumnBox[] }>()
-	private readonly ranges = new WeakMap<PageDisplayList, { doc: Node; range: { from: number; to: number } | undefined }>()
+	private ranges = new WeakMap<PageDisplayList, { range: { from: number; to: number } | undefined }>()
 	// Each page's sources located in the document as it is (null: none), filled as asked for.
-	private readonly locatedOn = new WeakMap<PageDisplayList, { doc: Node; values: (Located | null)[] }>()
+	private locatedOn = new WeakMap<PageDisplayList, (Located | null)[]>()
+	// The document both are of: an edit drops them all (a page's entries kept from an earlier document would keep
+	// that document's nodes alive).
+	private locatedIn: Node | undefined = undefined
 	// Boxes rangesBoxes() measured, by what their line shows (lineIdentity and text, wherever it is and
 	// whichever page holds it; keyed by their hash) and the marked part of it: a line laid out again as it was
 	// (an edit in another line or on another page) is not measured again; measuring is most of the cost.
@@ -177,23 +180,35 @@ export class PagedGeometry {
 		return source
 	}
 
-	private located(page: PageDisplayList, source: number): Located | undefined {
+	// Drops what was found in an earlier document.
+	private current(): void {
 		const doc = this.story.document
-		let cache = this.locatedOn.get(page)
 
-		if (cache?.doc !== doc) {
-			cache = { doc, values: [] }
-			this.locatedOn.set(page, cache)
+		if (doc === this.locatedIn) return
+
+		this.locatedIn = doc
+		this.ranges = new WeakMap()
+		this.locatedOn = new WeakMap()
+	}
+
+	private located(page: PageDisplayList, source: number): Located | undefined {
+		this.current()
+
+		let values = this.locatedOn.get(page)
+
+		if (values === undefined) {
+			values = []
+			this.locatedOn.set(page, values)
 		}
 
-		const cached = cache.values[source]
+		const cached = values[source]
 
 		if (cached !== undefined) return cached ?? undefined
 
 		const found = this.story.paragraphOf(page.sourceParts[source] ?? -1, page.sourceInts[source * SOURCE_INTS + SourceInt.ITEM] ?? -1)
 		const located = found === undefined ? undefined : { pos: found.pos, node: found.node, shadow: found.shadow, part: found.layoutPart }
 
-		cache.values[source] = located ?? null
+		values[source] = located ?? null
 
 		return located
 	}
@@ -294,10 +309,11 @@ export class PagedGeometry {
 
 		if (page === undefined) return undefined
 
-		const doc = this.story.document
+		this.current()
+
 		const cached = this.ranges.get(page)
 
-		if (cached?.doc === doc) return cached.range
+		if (cached !== undefined) return cached.range
 
 		const text = page.text
 		let from = Infinity
@@ -321,7 +337,7 @@ export class PagedGeometry {
 
 		const range = from === Infinity ? undefined : { from, to }
 
-		this.ranges.set(page, { doc, range })
+		this.ranges.set(page, { range })
 
 		return range
 	}

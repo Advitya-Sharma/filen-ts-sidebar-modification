@@ -23,6 +23,7 @@ import {
 	type DocxValuesSnapshot,
 	type DocxReadOnlyReason,
 	type LockReason,
+	type ReplaceAllResult,
 	type StoryMatch
 } from "@filen/office/core/docx/edit"
 import { HIGHLIGHT_COLORS, RevisionView, applyThemeShade, applyThemeTint, hexToRgb, rgbToHsl } from "@filen/office/core/docx"
@@ -1471,6 +1472,22 @@ export function useInputForm<T>(
 type DocxHeaderContext = NonNullable<DocxStoryContext["header"]>
 
 // ---- form controls ---------------------------------------------------------------------------------------
+
+// The toast Replace All ends with (`changed`: whether its transaction, once applied, changed the document): the
+// count, or why it replaced none of the matches find shows (protection may leave a tracked one nothing to do).
+export function replaceAllToast(
+	result: ReplaceAllResult | null,
+	changed: boolean
+):
+	| { readonly key: "previewDocxReplacedCount"; readonly count: number }
+	| { readonly key: "previewDocxReplaceAllUnreplaceable" | "previewDocxReplaceAllTooLarge" }
+	| undefined {
+	if (result === null) return undefined
+	if ("tr" in result)
+		return changed ? { key: "previewDocxReplacedCount", count: result.count } : { key: "previewDocxReplaceAllUnreplaceable" }
+
+	return { key: result.refused === "tooLarge" ? "previewDocxReplaceAllTooLarge" : "previewDocxReplaceAllUnreplaceable" }
+}
 
 // Why a content control's content cannot be changed, as the control popover and context menu say it.
 export function controlLockedKey(locked: NonNullable<DocxControlContext["locked"]>): PreviewKey {

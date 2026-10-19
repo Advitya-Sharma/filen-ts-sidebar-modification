@@ -1,5 +1,5 @@
 import { Slice, type Mark, type Node } from "prosemirror-model"
-import { TextSelection } from "prosemirror-state"
+import { AllSelection, TextSelection } from "prosemirror-state"
 import { canJoin, canSplit } from "prosemirror-transform"
 import {
 	DOCX_PARAGRAPH_STYLES,
@@ -13,6 +13,7 @@ import {
 	type DocxEditorSession,
 	type DocxParagraphStyle
 } from "../harness"
+import { replaceAll } from "@filen/office/core/docx/edit"
 import type { EditOp, OpContext, Rand } from "./index"
 
 // The edits of the editing foundations: typing, deleting, paragraphs, formatting, styles, lists, links, table
@@ -490,6 +491,38 @@ export const baseOps: readonly EditOp[] = [
 
 				return session.execute({ type: "format.bold" })
 			}
+		}
+	},
+	{
+		// The whole document formatted (laid out in the idle slices after it); named in the op filter to run.
+		name: "formatAll",
+		harness: "paged",
+		weight: 0,
+		run(context) {
+			const session = context.session
+
+			session.dispatch(session.state.tr.setSelection(new AllSelection(session.state.doc)))
+
+			const type = pick(context.rand, FORMAT_COMMANDS)
+
+			context.execute(type, { type })
+
+			return `${type} all`
+		}
+	},
+	{
+		// Replace All of a common letter, word or space over the story; named in the op filter to run.
+		name: "replaceAll",
+		harness: "paged",
+		weight: 0,
+		run(context) {
+			const session = context.session
+			const query = pick(context.rand, ["e", "the", " "])
+			const replaced = replaceAll(session.state, query, pick(context.rand, ["E", "", "  "]))
+
+			return replaced === null || !("tr" in replaced)
+				? "noop"
+				: `replaceAll ${JSON.stringify(query)} ${String(session.dispatch(replaced.tr))}`
 		}
 	},
 	{

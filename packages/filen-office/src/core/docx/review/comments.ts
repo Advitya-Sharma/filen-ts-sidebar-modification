@@ -1,6 +1,6 @@
 import { closeHistory } from "prosemirror-history"
 import { Mark, Node } from "prosemirror-model"
-import { TextSelection, type EditorState, type Transaction } from "prosemirror-state"
+import { Plugin, TextSelection, type EditorState, type Transaction } from "prosemirror-state"
 import { symbolTable, symbolToUnicode } from "../../fonts/symbols"
 import { WORD_KANA, WORD_LETTER, WORD_NUMBER, wordSegments } from "../../text/index"
 import type { DocxEditContext, NewStoryKind } from "../edit/context"
@@ -323,6 +323,74 @@ function hasSorted(list: Uint32Array, value: number): boolean {
 	}
 
 	return list[low] === value
+}
+
+// A comment's paragraph id is its last paragraph's (commentsExtended and commentsIds key on it, MS-DOCX 2.5.3.1):
+// an edit leaving another paragraph last (one added after it, a split) moves the id there, and a paragraph left
+// holding it takes a new one. The comment commands keep the last paragraph; this keeps any other edit so. A
+// plugin of comment stories' sessions.
+export function commentParaIds(context: DocxEditContext, part: StoryPart): Plugin {
+	// The w14:paraId each top-level paragraph of `doc` is written with (write/paragraph.ts, newStory.ts), by
+	// offset: a feature's id, else its source's on the first occurrence of it; a later occurrence (a copy) takes
+	// a feature's id unless the first is written with that id already.
+	const written = (doc: Node): { offset: number; id: string | undefined; mark: string | undefined }[] => {
+		const owners = new Map<number, string | undefined>()
+		const out: { offset: number; id: string | undefined; mark: string | undefined }[] = []
+
+		doc.forEach((child, offset) => {
+			if (!child.isTextblock) return
+
+			const found = marks.para_id.isInSet(child.marks)
+			const mark = found === undefined ? undefined : (found.attrs["id"] as string).toUpperCase()
+			const src = child.attrs["src"] as number
+			const own = src >= 0 && part.kinds[src] === Item.Paragraph ? part.paragraphId(src)?.toUpperCase() : undefined
+			let id: string | undefined
+
+			if (src < 0) id = mark
+			else if (!owners.has(src)) {
+				id = mark ?? own
+				owners.set(src, id)
+			} else id = mark !== undefined && (mark !== own || owners.get(src) !== own) ? mark : undefined
+
+			out.push({ offset, id, mark })
+		})
+
+		return out
+	}
+
+	return new Plugin({
+		appendTransaction: (transactions, old, state) => {
+			if (!transactions.some(tr => tr.docChanged)) return null
+
+			const doc = state.doc
+			const last = doc.lastChild
+
+			if (old.doc.lastChild === null || last === null || !last.isTextblock) return null
+
+			// Every change is checked (a comment story is a few paragraphs): what a paragraph is written with
+			// depends on the others too (the first of two copies of a source paragraph is its source's).
+			const id = written(old.doc).at(-1)?.id
+			const now = written(doc)
+			const end = now.at(-1)
+
+			if (id === undefined || end === undefined) return null
+
+			// A feature's id on the last paragraph is the comment's from now on (commentsExtended reads it there);
+			// without one, the comment keeps the id it had.
+			const target = end.mark ?? id
+
+			if (end.id === target) return null
+
+			const tr = state.tr
+			const taken = sourceParaIds(context.model)
+
+			for (const entry of now)
+				if (entry !== end && entry.id === target)
+					tr.addNodeMark(entry.offset, marks.para_id.create({ id: context.ids.paraId(value => hasSorted(taken, value)) }))
+
+			return markInternal(end.mark === target ? tr : tr.addNodeMark(end.offset, marks.para_id.create({ id: target })))
+		}
+	})
 }
 
 // ---- anchors ----------------------------------------------------------------------------------------------

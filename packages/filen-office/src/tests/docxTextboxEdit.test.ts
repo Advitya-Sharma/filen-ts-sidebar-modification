@@ -283,6 +283,25 @@ describe("docx text box editing", () => {
 	})
 })
 
+describe("docx text box content controls", () => {
+	// Word repeats a box's controls, ids included, in the VML of mc:Fallback (the corpus's
+	// oxpt__HC031-Complicated-Document.docx): the id stays unique per part outside the fallback.
+	it("saves a content control inserted into a text box with a VML fallback, its id in both copies", async () => {
+		const { editor, pkg } = await pagedEditor(BOXED)
+
+		enterBox(editor)
+		editor.dispatch(editor.session.state.tr.setSelection(TextSelection.create(editor.session.state.doc, 3)))
+		expect(await editor.execute({ type: "control.insert", kind: "richText" })).toBe(true)
+
+		const written = boxes(await documentXml(await save(editor, pkg)))
+		const ids = written.map(box => /<w:sdt><w:sdtPr>.*?<w:id w:val="(-?\d+)"\/>/.exec(box)?.[1])
+
+		expect(written).toHaveLength(2)
+		expect(ids[0]).toBeDefined()
+		expect(ids[1]).toBe(ids[0])
+	})
+})
+
 describe("docx text box checks", () => {
 	it("refuses a rewritten mc:AlternateContent that lost its fallback", async () => {
 		const source = await openBytes(BOXED)

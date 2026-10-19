@@ -486,6 +486,10 @@ function names(locale: string, field: "month" | "weekday"): string[] {
 	return out
 }
 
+// Fields a picture may name before it is not read back. Adjacent numeric fields make the pattern backtrack
+// exponentially in their number; Word's pictures name at most four (weekday, day, month, year).
+const MAX_DATE_FIELDS = 8
+
 // The date (yyyy-mm-dd) text typed into a date control means, read with its picture in its language, or null:
 // what Word cannot read as a date it keeps as text (ECMA-376 Part 1 §17.5.2.40: a binding stores the shown text
 // when there is no date to translate). Gregorian pictures only; an ISO date is read too.
@@ -500,6 +504,7 @@ export function parseControlDate(text: string, picture: string | null, lid: stri
 	const months = names(locale, "month")
 	const groups: ("day" | "month" | "monthName" | "year2" | "year")[] = []
 	let pattern = ""
+	let fields = 0
 
 	for (let at = 0; at < picture.length;) {
 		const char = picture[at] ?? ""
@@ -507,13 +512,20 @@ export function parseControlDate(text: string, picture: string | null, lid: stri
 		if (char === "'") {
 			const close = picture.indexOf("'", at + 1)
 
-			pattern += (close < 0 ? picture.slice(at + 1) : picture.slice(at + 1, close)).replace(ESCAPE, "\\$&")
+			// Quoted spaces are spaces too: every run of them, quoted or not, is one \s* (literal spaces next to a
+			// \s* would let a run of spaces in the text split in every way, which backtracks exponentially).
+			for (const piece of (close < 0 ? picture.slice(at + 1) : picture.slice(at + 1, close)).split(/(\s+)/u))
+				if (/^\s+$/u.test(piece)) pattern = withSpace(pattern)
+				else pattern += piece.replace(ESCAPE, "\\$&")
+
 			at = close < 0 ? picture.length : close + 1
 
 			continue
 		}
 
 		const count = run(picture, at)
+
+		if ("dDMyY".includes(char) && ++fields > MAX_DATE_FIELDS) return null
 
 		switch (char) {
 			case "d":
@@ -544,7 +556,7 @@ export function parseControlDate(text: string, picture: string | null, lid: stri
 				groups.push(count <= 2 ? "year2" : "year")
 				break
 			default:
-				if (/\s/.test(char)) pattern += "\\s*"
+				if (/\s/.test(char)) pattern = withSpace(pattern)
 				else if (/[A-Za-z]/.test(char)) return null
 				else pattern += picture.slice(at, at + count).replace(ESCAPE, "\\$&")
 		}
@@ -575,6 +587,11 @@ export function parseControlDate(text: string, picture: string | null, lid: stri
 	})
 
 	return validDate(year, month, day)
+}
+
+// `pattern` and one run of whitespace, as one \s* however many runs meet.
+function withSpace(pattern: string): string {
+	return pattern.endsWith("\\s*") ? pattern : `${pattern}\\s*`
 }
 
 function validDate(year: number, month: number, day: number): string | null {

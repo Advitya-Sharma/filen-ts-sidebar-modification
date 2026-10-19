@@ -93,6 +93,16 @@ jobs:
       - name: Fetch the WordprocessingML schemas
         working-directory: packages/filen-office
         run: pnpm run generate:wml-order --fetch
+      # ECMA-376 Part 2 (relationships, content types, core properties) and the Dublin Core schemas core
+      # properties import, for the schema oracle (src/tests/oracles/xsd.ts).
+      - name: Cache the OPC schemas
+        uses: actions/cache@v4
+        with:
+          path: packages/filen-office/node_modules/.cache/filen-office-opc
+          key: office-opc-${{ hashFiles('packages/filen-office/src/tests/oracles/xsd.ts') }}
+      - name: Fetch the OPC schemas
+        working-directory: packages/filen-office
+        run: pnpm exec tsx src/tests/oracles/xsd.ts --fetch
       - name: Test
         working-directory: packages/filen-office
         env:
@@ -138,6 +148,9 @@ jobs:
       - name: Fetch the corpus
         working-directory: packages/filen-office
         run: pnpm run corpus:fetch
+      # Each night lays out in one revision view, in turn (final, markup, original).
+      - name: Pick the revision view
+        run: echo "FILEN_OFFICE_FUZZ_VIEW=$(echo final markup original | cut -d' ' -f$(( FILEN_OFFICE_FUZZ_SEED % 3 + 1 )))" >> "$GITHUB_ENV"
       - name: Paged editing fuzz
         working-directory: packages/filen-office
         env:
@@ -156,4 +169,60 @@ jobs:
         with:
           name: office-fuzz-${{ github.run_number }}
           path: ${{ github.workspace }}/office-fuzz.jsonl
+          retention-days: 14
+
+  # Nightly and on demand: the scripted edit suite's saves of every corpus document in LibreOffice (headless):
+  # each converts to PDF, ODT, flat ODT, text and DOCX, and the text and structure each edit added read the same
+  # there as in our model (src/tests/interop).
+  interop-libreoffice:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: test-office-corpus
+    concurrency:
+      group: filen-office-interop-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FILEN_OFFICE_CORPUS: ${{ github.workspace }}/packages/filen-office/.corpus
+      FILEN_OFFICE_FUZZ_SAVES: ${{ github.workspace }}/office-saves
+      FILEN_OFFICE_SOFFICE: /usr/bin/soffice
+      FILEN_OFFICE_INTEROP_WORK: ${{ github.workspace }}/office-interop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        working-directory: packages/filen-office
+        run: pnpm install --frozen-lockfile --filter @filen/office...
+      - name: Install LibreOffice
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer-nogui
+      - name: Restore the corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: packages/filen-office/.corpus
+          key: office-corpus-${{ hashFiles('packages/filen-office/corpus/manifest.json') }}
+          restore-keys: office-corpus-
+      - name: Fetch the corpus
+        working-directory: packages/filen-office
+        run: pnpm run corpus:fetch
+      - name: Save the scripted edits
+        working-directory: packages/filen-office
+        run: pnpm exec vitest run --reporter=verbose src/tests/fuzz/script.fuzz.test.ts
+      - name: Read them in LibreOffice
+        working-directory: packages/filen-office
+        env:
+          FILEN_OFFICE_INTEROP_PER_FAMILY: '0'
+        run: pnpm exec vitest run --reporter=verbose src/tests/docxInteropLibreOffice.test.ts
+      - name: Upload the reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-interop-${{ github.run_number }}
+          path: ${{ github.workspace }}/office-interop/report-*.json
           retention-days: 14

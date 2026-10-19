@@ -1,25 +1,32 @@
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import { unzipSync } from "fflate"
 import type { Node } from "prosemirror-model"
 import { TextSelection } from "prosemirror-state"
 import { Transform } from "prosemirror-transform"
 import { describe, expect, it, vi } from "vitest"
-import { refPart, type DocxPackage } from "@filen/office/core/docx"
+import { layoutDocument, refPart, RevisionView, type DocxPackage } from "@filen/office/core/docx"
 import { docxSchema, type DocxEditContext, type DocxEditorSession } from "@filen/office/core/docx/edit"
 import type { PagedEditor } from "@filen/office/core/docx/paged"
 import { saveDocx, StoryWriter } from "@filen/office/core/docx/write"
 import { MeasureCache, StyleTable } from "@filen/office/core/text"
-import { BlockFlow, type FlowSnapshot } from "../core/docx/layout/flow"
+import { BlockFlow, Engine, type FlowSnapshot } from "../core/docx/layout/flow"
 import { DecorationTable, RunStyles } from "../core/docx/layout/styles"
+import { TableLayout } from "../core/docx/layout/table"
 import { Item } from "../core/docx/model/index"
-import { namePrefixes } from "../core/docx/paged/edits"
+import { namePrefixes, StoryEdits, type OverlayRecord } from "../core/docx/paged/edits"
+import { CORPUS_DIR } from "./corpusDir"
 import { buildDocx } from "./docxSynthetic"
-import { layOut, readBytes } from "./layoutFixtures"
+import { HmtxMeasurer, layOut, loadDocx, readBytes } from "./layoutFixtures"
 import { editedLayout, finishLayout, pageDigest, pagedEditor, savedDigest, settleAll, type EditedLayout } from "./pagedFixtures"
 import { harness } from "./textFixtures"
+import { runJobs } from "./fuzz/config"
 
 // Edits laid out incrementally show exactly what a fresh layout of the saved file shows.
 
 const FIXTURES = new URL("./fixtures/", import.meta.url).pathname
+const SUSPENSIONS = join(CORPUS_DIR, "docx", "govuk__The_Suspensions_of_Import_Duty_Rates_Document_3.7.docx")
+const BROCHURE = join(CORPUS_DIR, "dotx", "oxsdk__Brochure_TP10072667.dotx")
 
 function paragraphs(doc: Node, inTables: boolean, minimum = 8): { node: Node; pos: number }[] {
 	const out: { node: Node; pos: number }[] = []
@@ -230,20 +237,22 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		expect([...edited.edits.overlayRecords()].every(record => record.node.type === docxSchema.nodes.paragraph)).toBe(true)
 		await expectSaved(edited)
 
-		// A new paragraph in a cell changes the table's structure: the table is laid out from an overlay.
+		// A new paragraph in a cell changes its row's structure: that row alone is laid out from an overlay.
 		const next = paragraphs(edited.session.state.doc, true, 4)[2]
 
 		if (next === undefined) throw new Error("no cell")
 
 		await edited.edit(edited.session.state.tr.split(next.pos + 3))
 
-		const table = [...edited.edits.overlayRecords()].find(record => record.node.type === docxSchema.nodes.table)
+		const written = [...edited.edits.overlayRecords()]
+		const row = written.find(record => record.node.type === docxSchema.nodes.table_row)
 
-		expect(table).toBeDefined()
+		expect(row).toBeDefined()
+		expect(written.some(record => record.node.type === docxSchema.nodes.table)).toBe(false)
 		await expectSaved(edited)
 
 		// Typing in its cells afterwards, the new paragraph included, lays out just those paragraphs from overlays
-		// over the table's own.
+		// over the row's own.
 		for (const index of [2, 3, 5]) {
 			const at = paragraphs(edited.session.state.doc, true, 1)[index]
 
@@ -254,9 +263,9 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 
 		const records = [...edited.edits.overlayRecords()]
 
-		expect(records.filter(record => record.node.type === docxSchema.nodes.table)).toEqual([table])
+		expect(records.filter(record => record.node.type === docxSchema.nodes.table_row)).toEqual([row])
 		expect(records.filter(record => record.node.type === docxSchema.nodes.paragraph).length).toBeGreaterThanOrEqual(3)
-		expect(records.some(record => record.node.type === docxSchema.nodes.paragraph && refPart(record.base) === table?.part.index)).toBe(
+		expect(records.some(record => record.node.type === docxSchema.nodes.paragraph && refPart(record.base) === row?.part.index)).toBe(
 			true
 		)
 		await expectSaved(edited)
@@ -334,6 +343,997 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		expect(await caretOn("row 20 ")).toBe(before.early)
 		expect(await caretOn("row 230 ")).toBe(before.late)
 		editor.dispose()
+	})
+
+	it("lays out an Enter in a long table's cell from an overlay of its row alone, one overlay per row edited", async () => {
+		const edited = await editedLayout(longTableDocument())
+		const pages = edited.layout.pages.length
+		const cellAt = (text: string): number => {
+			const found = paragraphs(edited.session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+		const written = (): OverlayRecord[] => [...edited.edits.overlayRecords()]
+
+		await edited.edit(edited.session.state.tr.split(cellAt("row 150 ")))
+
+		const rows = written().filter(record => record.node.type === docxSchema.nodes.table_row)
+
+		expect(written().some(record => record.node.type === docxSchema.nodes.table)).toBe(false)
+		expect(rows.length).toBe(1)
+		// The overlay part holds that row alone.
+		expect(rows[0]?.part.document.bytes.length ?? Infinity).toBeLessThan(4096)
+		expect(edited.last.restart).toBeGreaterThan(pages / 3)
+		await expectSaved(edited)
+
+		// Rows split again keep one overlay each (the one they were written to before is dropped).
+		for (const text of ["row 20 ", "row 150 ", "row 230 ", "row 20 "]) await edited.edit(edited.session.state.tr.split(cellAt(text)))
+
+		const live = written()
+
+		expect(live.filter(record => record.node.type === docxSchema.nodes.table_row).length).toBe(3)
+		expect(new Set(live.map(record => record.part)).size).toBe(3)
+		await expectSaved(edited)
+
+		// Undone, the rows are their sources again: nothing is laid out from an overlay.
+		for (let k = 0; k < 10; k++) if (!(await edited.edit(session => session.execute({ type: "history.undo" })))) break
+
+		expect(written()).toEqual([])
+		expect(edited.edits.rows.size).toBe(0)
+		await expectSaved(edited)
+	})
+
+	it("edits a long table inside a content control from the previous edit, not as opened", async () => {
+		const cell = (text: string): string => `<w:tc><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+		const rows = Array.from({ length: 120 }, (_, r) => `<w:tr>${cell(`row ${r} ${words(4, r)}`)}${cell(words(6, r))}</w:tr>`).join("")
+		const edited = await editedLayout(
+			buildDocx({
+				body:
+					para(words(20)) +
+					'<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>' +
+					para("inside the control") +
+					`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>${rows}</w:tbl>` +
+					"</w:sdtContent></w:sdt>" +
+					para(words(10)) +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		const cellAt = (text: string): number => {
+			const found = paragraphs(edited.session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+		const rowsWritten = (): OverlayRecord[] =>
+			[...edited.edits.overlayRecords()].filter(record => record.node.type === docxSchema.nodes.table_row)
+
+		await edited.edit(edited.session.state.tr.split(cellAt("row 30 ")))
+
+		const first = rowsWritten()
+
+		expect(first.length).toBe(1)
+		await expectSaved(edited)
+
+		// The next edits leave the row written before as it was (no second write of it), the paragraph before the
+		// table too.
+		await edited.edit(edited.session.state.tr.split(cellAt("row 90 ")))
+		await edited.edit(edited.session.state.tr.insertText("typed ", cellAt("row 30 ")))
+		const control = paragraphs(edited.session.state.doc, false, 1).find(entry => entry.node.textContent.startsWith("inside"))
+
+		if (control === undefined) throw new Error("no paragraph in the control")
+
+		await edited.edit(edited.session.state.tr.insertText("more ", control.pos + 1))
+
+		const after = rowsWritten()
+
+		expect(after.length).toBe(2)
+		expect(after).toContain(first[0])
+		expect([...edited.edits.overlayRecords()].some(record => record.node.type === docxSchema.nodes.table)).toBe(false)
+		await expectSaved(edited)
+	})
+
+	it("keeps a cell's edited paragraph where it is when an earlier cell of its row grows", async () => {
+		const cell = (text: string): string => `<w:tc><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+		const rows = Array.from(
+			{ length: 40 },
+			(_, r) => `<w:tr>${cell(`a${r} ${words(3, r)}`)}${cell(`b${r} ${words(3, r)}`)}</w:tr>`
+		).join("")
+		const edited = await editedLayout(
+			buildDocx({
+				body:
+					'<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>' +
+					para("inside the control") +
+					`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>${rows}</w:tbl>` +
+					"</w:sdtContent></w:sdt>" +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		const at = (text: string): number => {
+			const doc = edited.session.state.doc
+			const found = [...paragraphs(doc, true, 1), ...paragraphs(doc, false, 1)].find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+		const misplaced = (): OverlayRecord[] =>
+			[...edited.edits.overlayRecords()].filter(
+				record => record.node.type === docxSchema.nodes.paragraph && record.entry.node.nodeAt(record.offset - 1) !== record.node
+			)
+
+		await edited.edit(edited.session.state.tr.insertText("typed ", at("b5 ")))
+		await edited.edit(edited.session.state.tr.insertText(`${words(40, 2)} `, at("a5 ")))
+		expect(misplaced()).toEqual([])
+
+		// And shrinks again: the place a paragraph reports is where it is (paragraphOf).
+		await edited.edit(edited.session.state.tr.delete(at("a5 "), at("a5 ") + words(40, 2).length))
+		expect(misplaced()).toEqual([])
+
+		const record = [...edited.edits.overlayRecords()].find(record => record.node.textContent.startsWith("b5 "))
+
+		if (record === undefined) throw new Error("no record of b5")
+
+		expect(edited.story.paragraphOf(record.part.index, record.item)?.pos).toBe(at("b5 ") - "b5 ".length - 1)
+
+		// The control's other block edited: the table's records are taken over by where they stand.
+		await edited.edit(edited.session.state.tr.insertText("more ", at("inside ")))
+		expect(misplaced()).toEqual([])
+
+		// Every substitution is an entry's (released with it).
+		const owned = new Set(edited.story.entries.flatMap(entry => entry.substituted))
+
+		expect([...edited.edits.substitutes.keys()].filter(base => !owned.has(base))).toEqual([])
+		await expectSaved(edited)
+	})
+
+	it("lays out again what referred to a style the document lacked once an edit adds it", async () => {
+		// A footnote reference styled FootnoteReference, a style the file does not define (no styles part).
+		const noted =
+			'<w:p><w:r><w:t>noted</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>'
+		const { editor, pkg, context } = await pagedEditor(
+			buildDocx({
+				body: noted + Array.from({ length: 40 }, (_, k) => para(words(40, k))).join("") + `<w:sectPr>${PAGE}</w:sectPr>`,
+				footnotes:
+					'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
+					'<w:footnote w:id="1"><w:p><w:r><w:t>the note</w:t></w:r></w:p></w:footnote>'
+			})
+		)
+		const session = editor.body.session
+
+		await settleAll(editor)
+
+		// A note inserted far after it: the save defines the style, which the first reference now shows with.
+		const last = paragraphs(session.state.doc, false, 8).at(-1)
+
+		if (last === undefined) throw new Error("no paragraph")
+
+		select(session, last.pos + 4)
+		expect(await editor.execute({ type: "note.insertFootnote" })).toBe(true)
+		await settleAll(editor)
+		expect(pageDigest(editor.layout)).toEqual(
+			await savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+		)
+		editor.dispose()
+	})
+
+	it("keeps every paragraph a table edit writes its own when the same edit removes a row", async () => {
+		const cell = (text: string): string => `<w:tc><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+		const rows = Array.from({ length: 30 }, (_, r) => `<w:tr>${cell(`a${r} ${words(3, r)}`)}${cell(`b${r}`)}</w:tr>`).join("")
+		const edited = await editedLayout(
+			buildDocx({
+				body:
+					para("before") +
+					`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>${rows}</w:tbl>` +
+					para("after") +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+		)
+		const at = (text: string): number => {
+			const found = paragraphs(edited.session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+		// A substitution no entry owns outlives the record it points at (nothing removes it with the entry).
+		const unowned = (): number[] => {
+			const owned = new Set(edited.story.entries.flatMap(entry => entry.substituted))
+
+			return [...edited.edits.substitutes.keys()].filter(base => !owned.has(base))
+		}
+		const rowRange = (text: string): [number, number] => {
+			const $pos = edited.session.state.doc.resolve(at(text))
+
+			return [$pos.before($pos.depth - 2), $pos.after($pos.depth - 2)]
+		}
+
+		await edited.edit(edited.session.state.tr.insertText("edited ", at("a3 ")))
+
+		// One edit: that row removed and a paragraph of another row written for the first time.
+		const [from, to] = rowRange("a3 ")
+		const typed = at("a20 ")
+
+		await edited.edit(edited.session.state.tr.insertText("typed ", typed).delete(from, to))
+		expect(unowned()).toEqual([])
+		await expectSaved(edited)
+
+		// Written again in an edit that adds a block before the table (the table's entry made anew).
+		await edited.edit(edited.session.state.tr.insertText("more ", at("a20 ")).split(4))
+		expect(unowned()).toEqual([])
+		await expectSaved(edited)
+	})
+
+	it("merges edited paragraphs' overlays into one part while idle, laying their pages out the same", async () => {
+		const { editor, pkg, context } = await pagedEditor(longDocument(160))
+		const session = editor.body.session
+		const edits = editor.edits
+		const parts = (): number => new Set([...edits.overlayRecords()].map(record => record.part)).size
+		const saved = async (): Promise<string[]> =>
+			savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+
+		edits.compaction = { ...edits.compaction, parts: 6, minimum: 3, quietMs: 0 }
+
+		// Typed into one paragraph after another near the start (and into table cells): an overlay part each.
+		for (let k = 0; k < 8; k++) {
+			const target = paragraphs(session.state.doc, k % 3 === 2, 8)[k]
+
+			if (target === undefined) throw new Error("no paragraph")
+
+			select(session, target.pos + 3)
+			editor.setVisible(editor.caret()?.page ?? 0, (editor.caret()?.page ?? 0) + 1)
+			session.dispatch(session.state.tr.insertText(`typed ${String(k)} `))
+			await editor.whenSettled()
+		}
+
+		const records = [...edits.overlayRecords()].length
+
+		// The slices' loop merged them (and laid their pages out again), the blocks all still edited.
+		expect(parts()).toBeLessThan(records)
+		expect(pageDigest(editor.layout)).toEqual(await saved())
+
+		// Edited again in a merged paragraph; the caret and a click on it map through the merged part.
+		const again = paragraphs(session.state.doc, false, 8)[1]
+
+		if (again === undefined) throw new Error("no paragraph")
+
+		select(session, again.pos + 3)
+		session.dispatch(session.state.tr.insertText("again "))
+		await editor.whenSettled()
+
+		const caret = editor.caret()
+
+		if (caret === undefined) throw new Error("no caret")
+
+		expect(editor.hitTest(caret.page, caret.x, caret.top + caret.height / 2)?.pos).toBe(session.state.selection.head)
+		expect(pageDigest(editor.layout)).toEqual(await saved())
+		editor.dispose()
+	})
+
+	it("writes the blocks formatting over the whole document changes while idle, laying them out as saved", async () => {
+		for (const bytes of [longDocument(160), longTableDocument()]) {
+			const { editor, pkg, context } = await pagedEditor(bytes)
+			const session = editor.body.session
+			const edits = editor.edits
+			const saved = async (): Promise<string[]> =>
+				savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+
+			await settleAll(editor)
+
+			const end = session.state.doc.content.size
+
+			// The command itself writes none of them; the layout's slices do, and lay their pages out again.
+			session.dispatch(session.state.tr.addMark(0, end, docxSchema.marks.bold.create({ value: true })))
+			expect([...edits.overlayRecords()].length).toBe(0)
+			expect(editor.layout.final).toBe(false)
+			await settleAll(editor)
+			expect(edits.pending()).toBe(false)
+			expect([...edits.overlayRecords()].length).toBeGreaterThan(0)
+			expect(pageDigest(editor.layout)).toEqual(await saved())
+
+			// Taken off again before they are all written, then typed into.
+			session.dispatch(session.state.tr.removeMark(0, end, docxSchema.marks.bold))
+			editor.layout.advance(0, -1)
+			select(session, end - 5)
+			session.dispatch(session.state.tr.insertText("typed "))
+			await settleAll(editor)
+
+			const caret = editor.caret()
+
+			if (caret === undefined) throw new Error("no caret")
+
+			expect(editor.hitTest(caret.page, caret.x, caret.top + caret.height / 2)?.pos).toBe(session.state.selection.head)
+			expect(pageDigest(editor.layout)).toEqual(await saved())
+
+			editor.dispose()
+		}
+
+		// Laid out synchronously to the end: every block written first, a long table's rows a few at a time.
+		const edited = await editedLayout(longTableDocument())
+		const doc = edited.session.state.doc
+
+		await edited.edit(edited.session.state.tr.addMark(0, doc.content.size, docxSchema.marks.italic.create({ value: true })))
+		expect(edited.layout.final).toBe(true)
+		expect(edited.edits.pending()).toBe(false)
+		await expectSaved(edited)
+	})
+
+	it("shows a page announced and cut in the same task once a later run keeps it unannounced", async () => {
+		const { editor } = await pagedEditor(longDocument(160), 0)
+		const session = editor.body.session
+		const layout = editor.layout
+
+		await settleAll(editor)
+
+		const count = layout.pages.length
+		const list = paragraphs(session.state.doc, false)
+		const middle = list[list.length >> 1]
+
+		if (middle === undefined) throw new Error("no paragraph")
+
+		editor.setVisible(0, 0)
+		// Grows the document by a page from its middle; the run is left there.
+		session.dispatch(session.state.tr.insertText(` ${words(1200, 3)}`, middle.pos + 1))
+		expect(layout.final).toBe(false)
+
+		// In one task: that run lays the new page out to the end, then a run from the first page that may meet
+		// the layout again past page 3 yields before it does (the pages after it cut until then).
+		while (layout.advance(Infinity, -1) !== "done");
+		expect(layout.pages.length).toBeGreaterThan(count)
+		layout.beginEdit(0, [], 3)
+		layout.advance(0, -1)
+		expect(layout.pages.length).toBeLessThan(4)
+		// The editor takes the pages announced while they are cut.
+		await Promise.resolve()
+
+		await settleAll(editor)
+		expect(editor.pageCount).toBe(layout.pages.length)
+
+		for (let index = 0; index < layout.pages.length; index++) expect(editor.page(index)).toBe(layout.pages[index])
+
+		editor.dispose()
+	})
+
+	it.skipIf(!existsSync(BROCHURE))(
+		"lays a source out again from its own overlay once a pasted copy before it takes its source with another's",
+		{ timeout: 120_000 },
+		async () => {
+			// A paste into a content control holding copies of blocks of two others (one cut short), as the paged
+			// fuzz found it: the copy takes the second's source as it takes the first's.
+			vi.stubEnv("FILEN_OFFICE_FUZZ", "1")
+			vi.stubEnv("FILEN_OFFICE_FUZZ_STEPS", "11")
+			vi.stubEnv("FILEN_OFFICE_FUZZ_OPS", "type,typeEnd,enter,delete,join,format,formatAll,undo,redo,cell,paste")
+
+			const results: unknown[] = []
+
+			await runJobs([["paged", BROCHURE, "20261122", "race", "final"]], 1, 110_000, job => {
+				for (const line of job.lines) results.push(JSON.parse(line))
+			})
+			expect(results).toMatchObject([{ ok: true, steps: 11 }])
+		}
+	)
+
+	it("merges overlays once input and saves are idle, a few parts per slice", async () => {
+		const { editor, pkg, context } = await pagedEditor(longDocument(160))
+		const session = editor.body.session
+		const edits = editor.edits
+		const parts = (): number => new Set([...edits.overlayRecords()].map(record => record.part)).size
+		const saved = async (): Promise<string[]> =>
+			savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+		const pause = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+		const typeAt = async (k: number): Promise<void> => {
+			const target = paragraphs(session.state.doc, false, 8)[k]
+
+			if (target === undefined) throw new Error("no paragraph")
+
+			select(session, target.pos + 3)
+			session.dispatch(session.state.tr.insertText(`typed ${String(k)} `))
+			await editor.whenSettled()
+		}
+
+		edits.compaction = { ...edits.compaction, parts: 6, minimum: 3, quietMs: 200 }
+
+		// Settled with a merge due: none starts while typing goes on (each edit's overlay a part of its own).
+		for (let k = 0; k < 9; k++) await typeAt(k)
+
+		const before = parts()
+
+		expect(before).toBe([...edits.overlayRecords()].length)
+
+		// Nor while a save holds it off.
+		const release = edits.holdCompaction()
+
+		await pause(500)
+		expect(parts()).toBe(before)
+		release()
+
+		// Then merged, region after region.
+		await pause(800)
+		await settleAll(editor)
+		expect(parts()).toBeLessThan(before - 3)
+		expect(pageDigest(editor.layout)).toEqual(await saved())
+
+		// A merge takes the parts the slice's time allows, the minimum at least.
+		for (let k = 20; k < 29; k++) await typeAt(k)
+
+		const pages = new Map<number, [number, number]>()
+
+		editor.layout.pages.forEach((page, index) => {
+			for (let s = 0; s < page.sourceCount; s++) {
+				const part = page.sourceParts[s] ?? -1
+				const range = pages.get(part)
+
+				if (range === undefined) pages.set(part, [index, index])
+				else range[1] = index
+			}
+		})
+		expect(edits.compact(pages, () => true)?.parts.size).toBe(3)
+		// Laid out again by any run (not the merge's own): the old parts go once no page shows them.
+		editor.layout.beginEdit(0, undefined)
+		await settleAll(editor)
+		expect(edits.retiredParts().size).toBe(0)
+		expect(pageDigest(editor.layout)).toEqual(await saved())
+		editor.dispose()
+	})
+
+	it("numbers the notes of paragraphs edited while overlays are merged as a fresh layout does", async () => {
+		const { editor, pkg, context } = await pagedEditor(notedDocument())
+		const session = editor.body.session
+		const edits = editor.edits
+		const noted = (k: number): { node: Node; pos: number } => {
+			const found = paragraphs(session.state.doc, false, 8)[k]
+
+			if (found === undefined) throw new Error("no paragraph")
+
+			return found
+		}
+		const saved = async (): Promise<string[]> =>
+			savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+
+		edits.compaction = { ...edits.compaction, parts: 3, minimum: 2, quietMs: 0 }
+		editor.setView(RevisionView.Markup)
+		await settleAll(editor)
+		editor.execute({ type: "review.track", on: true })
+
+		for (let k = 0; k < 12; k++) {
+			const target = noted(k % 6)
+
+			select(session, target.pos + 3)
+
+			// A paragraph with its note copied in now and then (a new note), typed into, undone and redone.
+			if (k % 4 === 1) {
+				const from = noted(8)
+
+				session.dispatch(
+					session.state.tr.replace(
+						target.pos + 3,
+						target.pos + 3,
+						session.state.doc.slice(from.pos + 1, from.pos + from.node.nodeSize - 1)
+					)
+				)
+			} else if (k % 4 === 3) {
+				await editor.execute({ type: "history.undo" })
+				await settleAll(editor)
+				await editor.execute({ type: "history.redo" })
+			} else session.dispatch(session.state.tr.insertText(`typed ${String(k)} `))
+
+			if (k % 3 === 2) await settleAll(editor)
+			else editor.layout.advance(0, -1)
+		}
+
+		await settleAll(editor)
+		expect(pageDigest(editor.layout)).toEqual(await saved())
+		editor.dispose()
+	})
+
+	it("leaves list items out of overlay merges, numbering them as a fresh layout does", async () => {
+		const numbering =
+			'<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+		const item = (k: number): string =>
+			para(`item ${String(k)} ${words(30, k)}`, '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>')
+		const { editor, pkg, context } = await pagedEditor(
+			buildDocx({
+				body:
+					Array.from({ length: 40 }, (_, k) => item(k) + para(`plain ${String(k)} ${words(30, k)}`)).join("") +
+					`<w:sectPr>${PAGE}</w:sectPr>`,
+				parts: [
+					{
+						name: "word/numbering.xml",
+						contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml",
+						data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${numbering}</w:numbering>`
+					}
+				],
+				relationships: [{ id: "rIdN1", type: "numbering", target: "numbering.xml" }]
+			})
+		)
+		const session = editor.body.session
+		const edits = editor.edits
+		const typeInto = async (prefix: string): Promise<void> => {
+			for (let k = 0; k < 8; k++) {
+				const found = paragraphs(session.state.doc, false, 1).find(entry =>
+					entry.node.textContent.includes(`${prefix} ${String(k)} `)
+				)
+
+				if (found === undefined) throw new Error(`no ${prefix} ${String(k)}`)
+
+				select(session, found.pos + 1)
+				session.dispatch(session.state.tr.insertText(`typed ${String(k)} `))
+				await settleAll(editor)
+			}
+		}
+		const partsOf = (prefix: string): number =>
+			new Set([...edits.overlayRecords()].filter(record => record.node.textContent.includes(`${prefix} `)).map(record => record.part))
+				.size
+
+		edits.compaction = { ...edits.compaction, parts: 3, minimum: 2, quietMs: 0 }
+		await typeInto("plain")
+		await typeInto("item")
+
+		// The plain paragraphs merged, the items each in the part its edit wrote.
+		expect(partsOf("plain")).toBeLessThan(8)
+		expect(partsOf("item")).toBe(8)
+		expect(pageDigest(editor.layout)).toEqual(
+			await savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+		)
+		editor.dispose()
+	})
+
+	it("merges overlays past the cap while input never pauses, however far apart they show", async () => {
+		const { editor, pkg, context } = await pagedEditor(longDocument(900))
+		const session = editor.body.session
+		const edits = editor.edits
+		const parts = (): number => new Set([...edits.overlayRecords()].map(record => record.part)).size
+
+		// Input is never idle long enough here: only the cap starts merges.
+		edits.compaction = { ...edits.compaction, parts: 4, minimum: 3, quietMs: 3_600_000, cap: 5 }
+
+		for (let k = 0; k < 6; k++) {
+			const target = paragraphs(session.state.doc, false, 8)[k * 150]
+
+			if (target === undefined) throw new Error("no paragraph")
+
+			select(session, target.pos + 1)
+			session.dispatch(session.state.tr.insertText(`typed ${String(k)} `))
+			await settleAll(editor)
+		}
+
+		expect(editor.layout.pages.length).toBeGreaterThan(70)
+		// Every two of them more than a region's pages apart.
+		expect(parts()).toBeLessThan(5)
+		expect(pageDigest(editor.layout)).toEqual(
+			await savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+		)
+		editor.dispose()
+	})
+
+	it("writes nothing again for formatting over the whole document undone at once", async () => {
+		const { editor, pkg, context } = await pagedEditor(longTableDocument(), 0)
+		const session = editor.body.session
+		const edits = editor.edits
+		const parts = (): number => new Set([...edits.overlayRecords()].map(record => record.part)).size
+
+		for (let k = 0; k < 5; k++) {
+			const target = paragraphs(session.state.doc, true, 8)[k * 7]
+
+			if (target === undefined) throw new Error("no paragraph")
+
+			select(session, target.pos + 1)
+			session.dispatch(session.state.tr.insertText(`typed ${String(k)} `))
+			await settleAll(editor)
+		}
+
+		const before = parts()
+
+		// Bold over everything, undone in the same task (the blocks not written in between).
+		session.dispatch(session.state.tr.addMark(0, session.state.doc.content.size, docxSchema.marks.bold.create({ value: true })))
+		expect(edits.pending()).toBe(true)
+		void editor.execute({ type: "history.undo" })
+		await settleAll(editor)
+
+		// The edited blocks stand for the document's nodes again: no part written for them.
+		expect(parts()).toBe(before)
+		expect(pageDigest(editor.layout)).toEqual(
+			await savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+		)
+
+		// Edited again from there: their records and positions are the document's.
+		const again = paragraphs(session.state.doc, true, 8)[0]
+
+		if (again === undefined) throw new Error("no paragraph")
+
+		select(session, again.pos + 1)
+		session.dispatch(session.state.tr.insertText("again "))
+		await settleAll(editor)
+
+		const caret = editor.caret()
+
+		if (caret === undefined) throw new Error("no caret")
+
+		expect(editor.hitTest(caret.page, caret.x, caret.top + caret.height / 2)?.pos).toBe(session.state.selection.head)
+		expect(pageDigest(editor.layout)).toEqual(
+			await savedDigest((await saveDocx({ pkg, context, sessions: editor.sessions })).bytes as Uint8Array)
+		)
+		editor.dispose()
+	})
+
+	it("finds the caret and hits in a row laid out from an overlay of its own", async () => {
+		const { editor } = await pagedEditor(longTableDocument())
+		const session = editor.body.session
+		const at = (text: string): number => {
+			const found = paragraphs(session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+
+		select(session, at("row 150 "))
+		await settleAll(editor)
+
+		const page = editor.caret()?.page
+
+		session.dispatch(session.state.tr.split(at("row 150 ")))
+		session.dispatch(session.state.tr.insertText("split off "))
+		await settleAll(editor)
+
+		const caret = editor.caret()
+
+		expect(caret?.page).toBe(page)
+
+		// A click on the caret's place puts it there again.
+		if (caret === undefined) throw new Error("no caret")
+
+		const head = session.state.selection.head
+		const hit = editor.hitTest(caret.page, caret.x, caret.top + caret.height / 2)
+
+		expect(hit?.pos).toBe(head)
+		editor.dispose()
+	})
+
+	it("inserts and deletes rows of a long table writing those rows alone", async () => {
+		const edited = await editedLayout(longTableDocument())
+		const cellAt = (text: string): number => {
+			const found = paragraphs(edited.session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+
+		select(edited.session, cellAt("row 120 "))
+		expect(await edited.edit(session => session.execute({ type: "table.row.insertBelow" }))).toBe(true)
+
+		const added = [...edited.edits.overlayRecords()]
+
+		expect(added.map(record => record.node.type.name)).toEqual(["table_row"])
+		await expectSaved(edited)
+
+		// Typed into (the caret is in it), the new row's paragraph is laid out from an overlay over the row's own.
+		expect(edited.session.state.selection.$from.parent.content.size).toBe(0)
+		await edited.edit(edited.session.state.tr.insertText("new row text"))
+		expect(
+			[...edited.edits.overlayRecords()].some(
+				record => record.node.type === docxSchema.nodes.paragraph && refPart(record.base) === added[0]?.part.index
+			)
+		).toBe(true)
+		await expectSaved(edited)
+
+		for (const text of ["row 121 ", "row 40 ", "row 200 "]) {
+			select(edited.session, cellAt(text))
+			expect(await edited.edit(session => session.execute({ type: "table.row.delete" }))).toBe(true)
+			await expectSaved(edited)
+		}
+
+		expect([...edited.edits.overlayRecords()].some(record => record.node.type === docxSchema.nodes.table)).toBe(false)
+		expect(edited.edits.rows.size).toBe(1)
+
+		// Deleted with tracking, rows stay but the Final view leaves them out: the rows after them move up.
+		edited.session.context.review.tracking = true
+		edited.session.context.identity.author = "Reviewer"
+		select(edited.session, cellAt("row 60 "), cellAt("row 90 "))
+		expect(await edited.edit(session => session.execute({ type: "table.row.delete" }))).toBe(true)
+		await expectSaved(edited)
+	})
+
+	it("lays out tracked row deletions in a long table whose rows were written again as the saved file", async () => {
+		const edited = await editedLayout(longTableDocument())
+		const cellAt = (text: string): number => {
+			const found = paragraphs(edited.session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+
+		for (const text of ["row 70 ", "row 150 "]) await edited.edit(edited.session.state.tr.split(cellAt(text)))
+
+		edited.session.context.review.tracking = true
+		edited.session.context.identity.author = "Reviewer"
+		select(edited.session, cellAt("row 60 "), cellAt("row 90 "))
+		expect(await edited.edit(session => session.execute({ type: "table.row.delete" }))).toBe(true)
+		await expectSaved(edited)
+		expect(await edited.edit(session => session.execute({ type: "history.undo" }))).toBe(true)
+		await expectSaved(edited)
+	})
+
+	it("restarts at the edited row's page while an earlier edit's layout is under way", async () => {
+		const { editor, pkg, context } = await pagedEditor(longTableDocument(), 0)
+		const session = editor.body.session
+		const layout = editor.layout
+		const at = (text: string): number => {
+			const found = paragraphs(session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith(text))
+
+			if (found === undefined) throw new Error(`no ${text}`)
+
+			return found.pos + 1 + text.length
+		}
+		const restarts: number[] = []
+
+		layout.subscribe(event => {
+			if (!event.final && event.from === event.to) restarts.push(event.from)
+		})
+
+		select(session, at("row 230 "))
+
+		const page = editor.caret()?.page ?? -1
+
+		editor.setVisible(page, page)
+		// Grown by lines, a row moves every page break after it: that layout runs on to the table's end. It
+		// gets past the page in view.
+		session.dispatch(session.state.tr.insertText(`${words(150, 4)} `, at("row 60 ")))
+
+		while (layout.pages.length <= page + 1 && layout.advance(performance.now(), page + 1) === "more");
+
+		expect(layout.final).toBe(false)
+		restarts.length = 0
+		session.dispatch(session.state.tr.insertText("x", at("row 230 ")))
+
+		// Not the table's first page: the run under way had laid out the rows before the edited one.
+		expect(restarts.length).toBeGreaterThan(0)
+		expect(Math.min(...restarts)).toBeGreaterThan(page / 2)
+
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+		expect(pageDigest(layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
+		editor.dispose()
+	})
+
+	it("lays out the pages in view for little more than the budget when the run is far behind them, the rest in slices", async () => {
+		const loaded = await loadDocx(longTableDocument())
+		let clock = 0
+		// Every reading of the clock moves it on: time passes with work.
+		const now = (): number => clock++
+		const layout = layoutDocument(loaded.model, loaded.resolver, loaded.fonts, new HmtxMeasurer(), {
+			store: loaded.store,
+			sliceMs: Infinity,
+			now
+		})
+
+		await layout.done
+
+		const pages = layout.pages.length
+		const fresh = pageDigest(layout)
+
+		layout.beginEdit(0, undefined)
+
+		expect(layout.advance(now() + 4, pages - 1)).toBe("more")
+		expect(layout.pages.length).toBeLessThan(pages - 1)
+
+		await finishLayout(layout)
+		expect(pageDigest(layout)).toEqual(fresh)
+	})
+
+	it("lays out balanced columns and endnotes the same however it is sliced", async () => {
+		const cell = (text: string): string => `<w:tc><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+		const rows = Array.from(
+			{ length: 30 },
+			(_, r) => `<w:tr>${cell(`row ${r} ${words(6, r)}`)}${cell(words(3 + (r % 4), r))}</w:tr>`
+		).join("")
+		const bytes = buildDocx({
+			body:
+				`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>${rows}</w:tbl>` +
+				Array.from({ length: 60 }, (_, k) => para(`two columns ${k} ${words(12 + (k % 7), k)}`)).join("") +
+				`<w:p><w:pPr><w:sectPr><w:cols w:num="2" w:space="400"/><w:type w:val="continuous"/>${PAGE}</w:sectPr></w:pPr><w:r><w:t>end of columns</w:t></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p>` +
+				Array.from({ length: 30 }, (_, k) => para(`one column ${k} ${words(20, k)}`)).join("") +
+				`<w:sectPr><w:type w:val="continuous"/>${PAGE}</w:sectPr>`,
+			endnotes:
+				'<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>' +
+				`<w:endnote w:id="1"><w:p><w:r><w:endnoteRef/></w:r><w:r><w:t xml:space="preserve"> ${words(60)}</w:t></w:r></w:p></w:endnote>`,
+			settings: '<w:endnotePr><w:endnote w:id="-1"/></w:endnotePr>'
+		})
+		const fresh = pageDigest(await layOut(bytes))
+		const loaded = await loadDocx(bytes)
+		let clock = 0
+		let yields = 0
+		const layout = layoutDocument(loaded.model, loaded.resolver, loaded.fonts, new HmtxMeasurer(), {
+			store: loaded.store,
+			sliceMs: 2,
+			now: () => clock++,
+			yield: () => {
+				yields++
+
+				return Promise.resolve()
+			}
+		})
+
+		await layout.done
+
+		expect(yields).toBeGreaterThan(layout.pages.length * 2)
+		expect(pageDigest(layout)).toEqual(fresh)
+	})
+
+	it("lays out a floating table too slow for one slice and settles", async () => {
+		const cell = (text: string): string => `<w:tc><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+		const rows = Array.from({ length: 12 }, (_, r) => `<w:tr>${cell(`float ${r} ${words(4, r)}`)}${cell(words(3, r))}</w:tr>`).join("")
+		const bytes = buildDocx({
+			body:
+				para(words(30)) +
+				'<w:tbl><w:tblPr><w:tblpPr w:leftFromText="180" w:rightFromText="180" w:vertAnchor="text" w:tblpY="200"/><w:tblW w:w="3000" w:type="dxa"/></w:tblPr>' +
+				`<w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid>${rows}</w:tbl>` +
+				Array.from({ length: 40 }, (_, k) => para(`around ${k} ${words(25, k)}`)).join("") +
+				`<w:sectPr>${PAGE}</w:sectPr>`
+		})
+		const fresh = pageDigest(await layOut(bytes))
+		const loaded = await loadDocx(bytes)
+		let clock = 0
+		let yields = 0
+		// Every reading of the clock moves it on, so the floating table never fits in one slice; it is laid out
+		// whole all the same (a slice ending in it would start it over every time).
+		const layout = layoutDocument(loaded.model, loaded.resolver, loaded.fonts, new HmtxMeasurer(), {
+			store: loaded.store,
+			sliceMs: 2,
+			now: () => clock++,
+			yield: () => {
+				if (++yields > 100_000) throw new Error("Layout does not settle")
+
+				return Promise.resolve()
+			}
+		})
+
+		await layout.done
+
+		expect(pageDigest(layout)).toEqual(fresh)
+	})
+
+	it("stops floating a table once it is taller than its page can hold, wherever it is anchored", async () => {
+		const cell = (text: string): string => `<w:tc><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc>`
+		const rows = Array.from({ length: 600 }, (_, r) => `<w:tr>${cell(`row ${r} a`)}${cell(`row ${r} b`)}</w:tr>`).join("")
+		const rowLayouts = vi.spyOn(TableLayout.prototype as unknown as { layoutRow: (...args: unknown[]) => unknown }, "layoutRow")
+
+		for (const position of [
+			'w:vertAnchor="text" w:tblpY="1"',
+			'w:vertAnchor="page" w:tblpY="1440"',
+			'w:vertAnchor="margin" w:tblpYSpec="bottom"'
+		]) {
+			const bytes = buildDocx({
+				body:
+					para("before the table one") +
+					para("before two") +
+					`<w:tbl><w:tblPr><w:tblpPr w:leftFromText="180" w:rightFromText="180" ${position}/><w:tblW w:w="4000" w:type="dxa"/></w:tblPr>` +
+					`<w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>${rows}</w:tbl>` +
+					para("after") +
+					`<w:sectPr>${PAGE}</w:sectPr>`
+			})
+			const { editor, pkg, context } = await pagedEditor(bytes, 4)
+			const session = editor.body.session
+
+			await settleAll(editor)
+			editor.setVisible(0, 1)
+			select(session, 3)
+			rowLayouts.mockClear()
+			session.dispatch(session.state.tr.insertText("x"))
+			await settleAll(editor)
+
+			// Two attempts to float it (on its page, then the next) and the rows flowing on the pages laid out
+			// again: none of them the whole table.
+			expect(rowLayouts.mock.calls.length).toBeLessThan(300)
+
+			const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
+			expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
+
+			// Deliberately flowing as a table anchored to the text does: from the next page's top (the first holds
+			// the paragraphs before it), its rows over the pages after, never drawn whole off its page.
+			const digest = pageDigest(editor.layout)
+			const first = digest.findIndex(page => page.includes("row 0 a"))
+			const last = digest.findIndex(page => page.includes("row 599 a"))
+
+			expect(digest[0]).toContain("before two")
+			expect(first).toBe(1)
+			expect(last).toBeGreaterThan(first + 5)
+			editor.dispose()
+		}
+
+		rowLayouts.mockRestore()
+	})
+
+	it.skipIf(!existsSync(SUSPENSIONS))("opens a long document with floating tables and settles", { timeout: 120_000 }, async () => {
+		const { editor } = await pagedEditor(readBytes(SUSPENSIONS))
+		const layout = editor.layout
+		let rounds = 0
+
+		layout.beginEdit(0, undefined)
+
+		// Sliced as a host slices it: it reaches the end in a bounded number of slices.
+		while (layout.advance(performance.now() + 6, -1) !== "done") {
+			if (++rounds > 50_000) throw new Error("Layout does not settle")
+
+			await layout.prepareFonts()
+		}
+
+		expect(layout.final).toBe(true)
+		editor.dispose()
+	})
+
+	it("reads edits' budgets on the clock an editor reads them on", async () => {
+		const loaded = await loadDocx(longTableDocument())
+		const layout = layoutDocument(loaded.model, loaded.resolver, loaded.fonts, new HmtxMeasurer(), {
+			store: loaded.store,
+			sliceMs: Infinity
+		})
+
+		await layout.done
+		layout.beginEdit(0, undefined)
+
+		// A deadline on performance.now (PagedEditor's clock) a second away: the pages asked for are laid out.
+		layout.advance(performance.now() + 1000, 3)
+		expect(layout.pages.length).toBeGreaterThan(3)
+		await finishLayout(layout)
+	})
+
+	it("scans the stories for a switched view or field codes in the layout's slices, not in the switch", async () => {
+		const bytes = notedDocument()
+		const loaded = await loadDocx(bytes)
+		let clock = 0
+		// Every reading of the clock moves it on: a slice scans a story or two.
+		const layout = layoutDocument(loaded.model, loaded.resolver, loaded.fonts, new HmtxMeasurer(), {
+			store: loaded.store,
+			sliceMs: 2,
+			now: () => clock++,
+			yield: () => Promise.resolve()
+		})
+		const boxes = vi.spyOn(Engine.prototype, "layoutBox")
+
+		await layout.done
+
+		for (const run of [() => layout.setView(RevisionView.Markup), () => layout.setFieldCodes({ all: true, toggled: undefined })]) {
+			boxes.mockClear()
+			run()
+			expect(boxes).not.toHaveBeenCalled()
+			expect(layout.advance(clock + 2, -1)).toBe("more")
+			expect(boxes.mock.calls.length).toBeLessThan(5)
+			await finishLayout(layout)
+		}
+
+		boxes.mockRestore()
+		// Its notes have no fields: as a fresh layout in that view.
+		expect(pageDigest(layout)).toEqual(pageDigest(await layOut(bytes, { view: RevisionView.Markup })))
+	})
+
+	it("yields between the rows of a page too slow for one slice and lays out the same pages", async () => {
+		const loaded = await loadDocx(longTableDocument())
+		const fresh = pageDigest(await layOut(longTableDocument()))
+		let clock = 0
+		let yields = 0
+		const layout = layoutDocument(loaded.model, loaded.resolver, loaded.fonts, new HmtxMeasurer(), {
+			store: loaded.store,
+			sliceMs: 3,
+			now: () => clock++,
+			yield: () => {
+				yields++
+
+				return Promise.resolve()
+			}
+		})
+
+		await layout.done
+
+		expect(yields).toBeGreaterThan(layout.pages.length * 2)
+		expect(pageDigest(layout)).toEqual(fresh)
 	})
 
 	it("lays out again a page whose page number changed when it opens inside a table", async () => {
@@ -547,6 +1547,33 @@ describe("paged layout of edits", { timeout: 60_000 }, () => {
 		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
 
 		expect(editor.layout.pages.length).toBe(9)
+		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
+		editor.dispose()
+	})
+
+	it("takes a story's keystrokes while suspended as one change of its view, whatever their number", async () => {
+		const { editor, pkg, context } = await pagedEditor(longTableDocument(), 4)
+		const session = editor.body.session
+		const cell = paragraphs(session.state.doc, true, 1).find(entry => entry.node.textContent.startsWith("row 120 "))
+
+		if (cell === undefined) throw new Error("no row 120")
+
+		await settleAll(editor)
+		editor.suspend()
+		select(session, cell.pos + 1)
+
+		const changes = vi.spyOn(StoryEdits.prototype as unknown as { change: (...args: unknown[]) => unknown }, "change")
+
+		// Past the most applies left waiting: none written while typing, every one once on resume.
+		for (let k = 0; k < 450; k++) session.dispatch(session.state.tr.insertText("x"))
+		expect(changes).not.toHaveBeenCalled()
+		editor.resume()
+		expect(changes).toHaveBeenCalledTimes(1)
+		changes.mockRestore()
+		await settleAll(editor)
+
+		const saved = await saveDocx({ pkg, context, sessions: editor.sessions })
+
 		expect(pageDigest(editor.layout)).toEqual(await savedDigest(saved.bytes as Uint8Array))
 		editor.dispose()
 	})

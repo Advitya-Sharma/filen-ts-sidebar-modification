@@ -173,7 +173,12 @@ test("inserts a link and a footnote", async ({ page }) => {
 	const link = page.getByRole("dialog", { name: preview.previewDocxLinkTitle })
 
 	await link.getByLabel(preview.previewDocxLinkText).fill("E2E link text")
+	// A new link goes to a web, email or phone address only.
+	await link.getByLabel(preview.previewDocxLinkAddress).fill("ftp://files.example.com")
+	await expect(link.getByRole("alert")).toHaveText(preview.previewDocxLinkSchemeRefused)
+	await expect(link.getByRole("button", { name: preview.previewDocxInsertAction })).toBeDisabled()
 	await link.getByLabel(preview.previewDocxLinkAddress).fill("example.com")
+	await expect(link.getByRole("alert")).toHaveCount(0)
 	await link.getByRole("button", { name: preview.previewDocxInsertAction }).click()
 	await expect(pages.getByText("E2E link text")).toBeVisible()
 

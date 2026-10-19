@@ -234,6 +234,38 @@ describe("DocxInsertDialogs", () => {
 		expect(onDone).toHaveBeenCalledWith(4)
 	})
 
+	it("links new addresses to the web, email or a phone only, and edits a link's text without its target", () => {
+		const { execute } = renderDialog("link.set")
+		const insert = screen.getByRole("button", { name: "Insert" })
+		const address = screen.getByLabelText("Address")
+
+		for (const typed of ["ftp://files.example.com", "sms:123", "C:\\Reports\\a.docx"]) {
+			fireEvent.change(address, { target: { value: typed } })
+			expect(screen.getByRole("alert").textContent).toBe(
+				"Links can go to web (http, https), email (mailto) and phone (tel) addresses only."
+			)
+			expect(address.getAttribute("aria-invalid")).toBe("true")
+			expect(insert.hasAttribute("disabled") || insert.getAttribute("aria-disabled") === "true").toBe(true)
+		}
+
+		fireEvent.change(address, { target: { value: "tel:+491234" } })
+		expect(screen.queryByRole("alert")).toBeNull()
+		fireEvent.click(insert)
+		expect(execute).toHaveBeenCalledWith({ type: "link.set", target: "tel:+491234" })
+		cleanup()
+
+		const state = snapshot()
+		const edited = renderDialog("link.set", {
+			...state,
+			context: { ...state.context, link: { target: "file:///C:/a.docx", anchor: null, text: "local file" } }
+		})
+
+		expect(screen.queryByRole("alert")).toBeNull()
+		fireEvent.change(screen.getByLabelText("Text to display"), { target: { value: "the file" } })
+		fireEvent.click(screen.getByRole("button", { name: "Apply" }))
+		expect(edited.execute).toHaveBeenCalledWith({ type: "link.set", target: "file:///C:/a.docx", text: "the file" })
+	})
+
 	it("links to a heading by its position (the core makes or reuses its hidden bookmark); empty ones are not offered", async () => {
 		paged.outline = [
 			{ level: 0, text: " ", pos: 4 },

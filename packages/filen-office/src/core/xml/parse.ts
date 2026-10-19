@@ -253,7 +253,7 @@ function advance(state: ParseState, stop: number, limit: number): void {
 	let { current, rootElements, doctype, i } = state
 
 	const grow = (): void => {
-		capacity = Math.ceil(capacity * 1.5)
+		capacity = grownCapacity(capacity, count, i, length)
 
 		const widen = <T extends Uint8Array | Int32Array>(array: T, make: (size: number) => T): T => {
 			const next = make(capacity)
@@ -569,29 +569,48 @@ function advance(state: ParseState, stop: number, limit: number): void {
 	state.i = i
 }
 
-function copyInto<T extends Uint8Array | Int32Array>(into: T, array: Uint8Array | Int32Array): T {
-	into.set(array.length > into.length ? array.subarray(0, into.length) : array)
+// The node capacity to grow to once `capacity` is used up at byte `at` of `length`: the nodes the whole part
+// holds at the density read so far, 1/64 over (trimming keeps up to 1/32 of slack, so a part as dense
+// throughout is never copied again), and at least half again as many while little has been read.
+function grownCapacity(capacity: number, count: number, at: number, length: number): number {
+	const estimate = at > 0 ? Math.ceil(((count / at) * length * 65) / 64) + 64 : 0
+
+	return Math.max(capacity + 64, at < length >> 3 ? Math.ceil(capacity * 1.5) : estimate)
+}
+
+// Elements copied between yields while the node arrays are resized.
+const COPY_STEP = 1 << 20
+
+// `array`'s first `into.length` elements into `into`, a step at a time.
+function* copyInto<T extends Uint8Array | Int32Array>(into: T, array: Uint8Array | Int32Array): Generator<void, T> {
+	const length = Math.min(array.length, into.length)
+
+	for (let from = 0; from < length; from += COPY_STEP) {
+		if (from > 0) yield
+
+		into.set(array.subarray(from, Math.min(length, from + COPY_STEP)), from)
+	}
 
 	return into
 }
 
-// Grows or trims the node arrays to `size`, one array per step.
+// Grows or trims the node arrays to `size`, a step at a time.
 function* resize(state: ParseState, size: number): Generator<void, void> {
-	state.kinds = copyInto(new Uint8Array(size), state.kinds)
+	state.kinds = yield* copyInto(new Uint8Array(size), state.kinds)
 	yield
-	state.starts = copyInto(new Int32Array(size), state.starts)
+	state.starts = yield* copyInto(new Int32Array(size), state.starts)
 	yield
-	state.openEnds = copyInto(new Int32Array(size), state.openEnds)
+	state.openEnds = yield* copyInto(new Int32Array(size), state.openEnds)
 	yield
-	state.ends = copyInto(new Int32Array(size), state.ends)
+	state.ends = yield* copyInto(new Int32Array(size), state.ends)
 	yield
-	state.parents = copyInto(new Int32Array(size), state.parents)
+	state.parents = yield* copyInto(new Int32Array(size), state.parents)
 	yield
-	state.firstChildren = copyInto(new Int32Array(size), state.firstChildren)
+	state.firstChildren = yield* copyInto(new Int32Array(size), state.firstChildren)
 	yield
-	state.nextSiblings = copyInto(new Int32Array(size), state.nextSiblings)
+	state.nextSiblings = yield* copyInto(new Int32Array(size), state.nextSiblings)
 	yield
-	state.nameIds = copyInto(new Int32Array(size), state.nameIds)
+	state.nameIds = yield* copyInto(new Int32Array(size), state.nameIds)
 	state.capacity = size
 }
 
@@ -669,7 +688,7 @@ export async function parseXmlSliced(input: Uint8Array, slicing: Slicing): Promi
 	}
 
 	while (state.i < length) {
-		if (state.count === state.capacity) await resizing(Math.ceil(state.capacity * 1.5))
+		if (state.count === state.capacity) await resizing(grownCapacity(state.capacity, state.count, state.i, length))
 
 		advance(state, Math.min(length, state.i + SLICE_BYTES), state.capacity)
 

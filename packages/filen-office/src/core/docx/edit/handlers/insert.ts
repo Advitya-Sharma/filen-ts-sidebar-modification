@@ -1,6 +1,6 @@
 import { Fragment, Slice, type Mark, type Node } from "prosemirror-model"
 import { TextSelection, type EditorState, type Transaction } from "prosemirror-state"
-import { MAX_LINK_TEXT, insertable as insertableText, type InsertCommand } from "../commands/insert"
+import { MAX_LINK_TEXT, insertable as insertableText, linkTargetRefusal, linkTargetUri, type InsertCommand } from "../commands/insert"
 import { headingBookmark } from "../../fields/bookmarks"
 import type { DocxEditContext } from "../context"
 import { changeMarks, runPiecesIn } from "../formats"
@@ -185,7 +185,16 @@ function setLink(context: StoryCommandContext, command: Cmd<"link.set">): Transa
 	const selection = state.selection
 	const existing = selectedLink(state)
 	const tr = state.tr
-	const target = "target" in command ? command.target : null
+	// The file holds a URI reference: what one does not allow is encoded, as the bridge's parser does.
+	const written = "target" in command ? linkTargetUri(command.target) : null
+
+	if (
+		written !== null &&
+		("refusal" in written || linkTargetRefusal(written.uri, existing?.link.attrs["target"] as string | null) !== undefined)
+	)
+		return null
+
+	const target = written === null ? null : written.uri
 	const anchor =
 		"anchor" in command ? command.anchor : "heading" in command ? headingBookmark(tr, context.session, command.heading) : null
 

@@ -121,7 +121,8 @@ export interface DrawingData {
 }
 
 export type DocxObjectData =
-	| { readonly kind: "drawing"; readonly id: number; readonly drawing: DrawingData }
+	// alt: the picture's accessible name (its alternative text, else its title), absent for none.
+	| { readonly kind: "drawing"; readonly id: number; readonly drawing: DrawingData; readonly alt?: string }
 	// fontSize: px of the run holding the equation.
 	| { readonly kind: "math"; readonly id: number; readonly tree: MathElement; readonly fontSize: number }
 	| { readonly kind: "separator"; readonly id: number }

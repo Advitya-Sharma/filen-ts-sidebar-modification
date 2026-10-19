@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync } from "node:fs"
 import { describe, expect, it } from "vitest"
-import { CORPUS, corpusFiles, expectedRefusal, fuzzConfig, limitedProtection, runJobs, summarize } from "./config"
+import { CORPUS, WORD_EXTENSIONS, corpusFiles, expectedRefusal, fuzzConfig, limitedProtection, runJobs, summarize } from "./config"
+import { savesConfig, writeManifest } from "./saves"
 
 // Raw edit sequences over every editable corpus document (body and, at random, its other stories), saved
 // through Gates 1 and 2 and read back by the independent reader: a save Gate 2 lets through must open,
@@ -9,17 +10,19 @@ import { CORPUS, corpusFiles, expectedRefusal, fuzzConfig, limitedProtection, ru
 // FILEN_OFFICE_FUZZ=<sequences per file> turns it on; the first sequence of a file saves unedited.
 // FILEN_OFFICE_FUZZ_SEED, FILEN_OFFICE_FUZZ_FILTER, FILEN_OFFICE_FUZZ_STEPS (most ops per session, 16),
 // FILEN_OFFICE_FUZZ_MODES (stories; also undo, blockmove, undoall, xsd, selftest), FILEN_OFFICE_FUZZ_OPS,
-// FILEN_OFFICE_FUZZ_JOBS and FILEN_OFFICE_FUZZ_OUT tune it.
+// FILEN_OFFICE_FUZZ_FAMILIES, FILEN_OFFICE_FUZZ_JOBS and FILEN_OFFICE_FUZZ_OUT tune it; FILEN_OFFICE_FUZZ_SAVES keeps
+// the clean edited saves (saves.ts).
 // One file: FILEN_OFFICE_FUZZ=8 node --import tsx src/tests/fuzz/run.ts damage <file>
 
 const config = fuzzConfig()
+const saves = savesConfig()
 const JOB_TIMEOUT_MS = 1_800_000
 
 describe.skipIf(config === undefined || !existsSync(CORPUS))("writer damage fuzz over the corpus", () => {
 	it("lets nothing through Gate 2 that the independent reader rejects", { timeout: 86_400_000 }, async () => {
 		if (config === undefined) return
 
-		const jobs = corpusFiles(["docx", "docm"], config.filter).map(file => ["damage", file])
+		const jobs = corpusFiles(WORD_EXTENSIONS, config.filter).map(file => ["damage", file])
 		const blockMoves = config.modes?.includes("blockmove") === true
 
 		expect(jobs.length, "no corpus file matches").toBeGreaterThan(0)
@@ -74,8 +77,10 @@ describe.skipIf(config === undefined || !existsSync(CORPUS))("writer damage fuzz
 				(fileStats["applied"] ?? 0) === 0 &&
 				!limitedProtection(summary["protection"]) &&
 				!(blockMoves && Number(summary["blocks"]) < 2)
-			)
-				failures.push(`${String(summary["file"])}: no edit applied`)
+			) {
+				if (config.families !== undefined || config.ops !== undefined) stats["noEdit"] = (stats["noEdit"] ?? 0) + 1
+				else failures.push(`${String(summary["file"])}: no edit applied`)
+			}
 
 			for (const [key, value] of Object.entries(fileStats)) stats[key] = (stats[key] ?? 0) + value
 
@@ -83,10 +88,13 @@ describe.skipIf(config === undefined || !existsSync(CORPUS))("writer damage fuzz
 				slowest = { file: String(summary["file"]), ms: summary["ms"] }
 		})
 
+		const kept = saves === undefined ? "" : `; ${writeManifest(saves.dir)} saves in ${saves.dir}`
+
 		summarize(
-			`damage fuzz: ${files} files, ${config.runs} sequences each (seed ${config.seed}, ${(config.modes ?? ["stories"]).join("+")}) ` +
+			`damage fuzz: ${files} files, ${config.runs} sequences each (seed ${config.seed}, ${(config.modes ?? ["stories"]).join("+")}, ` +
+				`families ${config.families?.join("+") ?? "all"}) ` +
 				`${JSON.stringify(stats)}; findings ${JSON.stringify(findings)}; not fuzzed ${JSON.stringify(refused)}; ${((performance.now() - started) / 1000).toFixed(0)} s on ` +
-				`${config.jobs} processes; slowest ${slowest.file} ${slowest.ms} ms`
+				`${config.jobs} processes; slowest ${slowest.file} ${slowest.ms} ms${kept}`
 		)
 		expect(failures).toEqual([])
 		expect(stats["verified"] ?? 0, "no sequence was verified").toBeGreaterThan(0)

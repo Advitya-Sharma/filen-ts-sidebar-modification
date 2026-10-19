@@ -33,6 +33,7 @@ import { DocxPreviewFallback } from "@/features/preview/components/docxPreviewFa
 import { DocxEditView, type DocxSaveSource } from "@/features/preview/components/docxEditor"
 import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 import { DocxToolbar } from "@/features/preview/components/docxToolbar"
+import { useTrustedLinkGate } from "@/features/chats/hooks/useTrustedLinkGate"
 import { LoadingState } from "@/components/loadingState"
 import { PreviewErrorState, PreviewGate } from "@/features/preview/components/previewErrorState"
 import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"
@@ -65,15 +66,6 @@ export interface DocxEditingProps {
 const PAGE_GAP = 16
 const WHEEL_SENSITIVITY = 0.0015
 const LAYER = "[role='dialog'], [role='alertdialog']"
-
-// Links are judged when clicked (never when painted): http(s) and mailto open in a new tab with no opener
-// or referrer, inside the click's user activation so no popup blocker interferes; anything else is ignored.
-const openLink = linkActivator({
-	allow: isSafeAbsoluteHref,
-	open: href => {
-		window.open(href, "_blank", "noopener,noreferrer")
-	}
-})
 
 // The engine reads ranges of the cached buffer and gets a copy of each range it asked for, never of the
 // whole file: the buffer stays shared with the preview cache and the Download action. Tracked changes are
@@ -263,6 +255,18 @@ function DocxPageList({
 	// new layout has it.
 	const restoreRef = useRef<{ from: unknown; page: number } | null>(null)
 	const session = document.session
+	const linkGate = useTrustedLinkGate()
+	// Links are judged when clicked (never when painted): http(s) and mailto open in a new tab with no opener
+	// or referrer, inside the click's user activation so no popup blocker interferes, once a web link's
+	// domain is trusted (asked once per domain); anything else is ignored.
+	const openLink = linkActivator({
+		allow: isSafeAbsoluteHref,
+		open: href => {
+			if (!linkGate.intercept(href)) {
+				window.open(href, "_blank", "noopener,noreferrer")
+			}
+		}
+	})
 
 	useEffect(() => {
 		const restore = restoreRef.current
@@ -390,6 +394,7 @@ function DocxPageList({
 					/>
 				) : null}
 			</div>
+			{linkGate.dialog}
 		</div>
 	)
 }

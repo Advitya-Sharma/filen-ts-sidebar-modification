@@ -202,6 +202,10 @@ export class Engine {
 	readonly autoSpacing: AutoSpacing
 	// Unsaved edits laid out in place of their source (see LayoutEdits), read whenever a flow is set up.
 	readonly edits: LayoutEdits | undefined
+	// The body flow yields (FlowStatus.SUSPEND, fonts loaded) between two blocks or table rows once `clock()`
+	// reaches this, so that a page too slow for one slice is laid out over several (see LayoutDriver.advance).
+	yieldAt = Infinity
+	clock: () => number = Date.now
 
 	constructor(init: EngineInit) {
 		this.model = init.model
@@ -233,12 +237,18 @@ export class Engine {
 			markers: this.markers,
 			recordMaps: init.recordMaps ?? false,
 			memoKey: (part, item) => this.memoKey(part, item),
-			authors: modelAuthors(init.model).index
+			// Numbered when a tracked change is first drawn (reading every part's changes).
+			authors: name => modelAuthors(init.model).index(name)
 		})
 	}
 
 	memoKey(part: number, item: number): number {
 		return this.edits?.memoKey?.(part, item) ?? part * REF_SPAN + item
+	}
+
+	// Whether the body flow yields now, between two blocks or rows (see yieldAt).
+	get due(): boolean {
+		return this.yieldAt !== Infinity && this.clock() >= this.yieldAt
 	}
 
 	// The part a ref of a flow's blocks points into (the model's parts plus overlays).
@@ -304,7 +314,7 @@ export class Engine {
 		const substitutes = this.edits?.substitutes
 
 		// The story's blocks as laid out: its edited blocks from the parts they were written to.
-		if (edited === undefined && (substitutes === undefined || substitutes.size === 0)) {
+		if (edited === undefined && (substitutes === undefined || substitutes.size === 0) && (this.edits?.rows?.size ?? 0) === 0) {
 			this.scanItems(story, part, container + 1, end, values)
 
 			return
@@ -332,6 +342,14 @@ export class Engine {
 			const from = this.model.parts[refPart(laid)]
 
 			if (from !== undefined) this.scanItems(story, from, refItem(laid), from.end(refItem(laid)), values)
+
+			// Rows an edit wrote again are laid out from their overlays.
+			for (const row of this.edits?.rows?.get(laid) ?? NO_ROWS) {
+				const part = Number.isNaN(row) ? undefined : this.model.parts[refPart(row)]
+
+				if (part !== undefined && part.index !== from?.index)
+					this.scanItems(story, part, refItem(row), part.end(refItem(row)), values)
+			}
 		}
 	}
 
@@ -455,6 +473,7 @@ const STALE_CHAIN: Chain = {
 }
 
 const NO_MOVES: readonly number[] = []
+const NO_ROWS = new Float64Array(0)
 
 const SCRATCH_ITEMS: number[] = []
 const SCRATCH_PARTS: StoryPart[] = []
@@ -645,18 +664,18 @@ export class BlockFlow {
 		this.box.open = false
 	}
 
-	// The table under way: whether item `item` of it is laid out from here on (see TableLayout.ahead); true
-	// outside a table.
-	tableAhead(item: number): boolean {
-		return this.table === undefined || this.table.ahead(item)
+	// The table under way: whether item `item` of part `part` is laid out from here on (see
+	// TableLayout.ahead); true outside a table.
+	tableAhead(part: number, item: number): boolean {
+		return this.table === undefined || this.table.ahead(part, item)
 	}
 
-	// The row of the table under way holding item `item` (see TableLayout.rowOf), the row it continues at and
-	// its header rows; undefined outside a table.
-	tableRow(item: number): { readonly row: number; readonly current: number; readonly headers: number } | undefined {
+	// The row of the table under way holding item `item` of part `part` (see TableLayout.rowOf), the row it
+	// continues at and its header rows; undefined outside a table.
+	tableRow(part: number, item: number): { readonly row: number; readonly current: number; readonly headers: number } | undefined {
 		const table = this.table
 
-		return table === undefined ? undefined : { row: table.rowOf(item), current: table.currentRow, headers: table.headerCount }
+		return table === undefined ? undefined : { row: table.rowOf(part, item), current: table.currentRow, headers: table.headerCount }
 	}
 
 	get done(): boolean {
@@ -828,8 +847,16 @@ export class BlockFlow {
 			this.box.open = false
 		}
 
+		let placed = 0
+
 		while (this.index < this.count || this.inParagraph || this.table !== undefined) {
 			let status: FlowStatus
+
+			// Out of time between two blocks: the area goes on in the next slice.
+			if (placed > 0 && this.suspendable && !this.inParagraph && this.table === undefined && this.engine.due)
+				return FlowStatus.SUSPEND
+
+			placed++
 
 			if (this.table !== undefined) status = this.runTable(area)
 			else {
@@ -893,13 +920,23 @@ export class BlockFlow {
 		scratch.token = nextToken()
 		table.floated = true
 
+		// Anchored to the text where its height does not move it up, it sits no higher than `top`: past the area's
+		// bottom it does not fit whatever follows (notes in it only reserve more). Anywhere else, taller than the
+		// page it fits nowhere on it. Either way it flows as one too tall does, its rows past that not laid out.
+		table.floatLimit =
+			anchor === "text" && position.ySpec !== "center" && position.ySpec !== "bottom" && position.ySpec !== "outside"
+				? area.bottom - (area.footnotes?.reserved ?? 0) + EPSILON
+				: top + frame.height + EPSILON
+
 		const status = table.run(scratch, top)
 
-		if (status === FlowStatus.SUSPEND) {
+		if (status === FlowStatus.SUSPEND || table.tooTall) {
 			page.rollback(mark)
 			area.footnotes?.rollback(footnotes)
 
-			return FlowStatus.SUSPEND
+			if (status === FlowStatus.SUSPEND) return FlowStatus.SUSPEND
+
+			return !area.empty || this.areaPlaced > 0 ? FlowStatus.OVERFLOW : undefined
 		}
 
 		const height = table.y - top
@@ -1097,6 +1134,9 @@ export class BlockFlow {
 			const { items, parts, formats } = this.group()
 
 			engine.content.build(this.story, parts, items, formats, area.width, area.values, built)
+			// The scratch is module-wide: emptied, so a long-lived worker keeps no closed document's parts.
+			parts.length = 0
+			formats.length = 0
 			this.builtValues = area.values
 
 			const props = built.format?.props

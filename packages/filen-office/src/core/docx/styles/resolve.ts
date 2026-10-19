@@ -214,6 +214,8 @@ export class PropertyResolver {
 	private readonly borderInterner = new Interner<ResolvedBorder>()
 	private readonly shadingInterner = new Interner<ResolvedShading>()
 	private resolvedRuns = 0
+	// Style ids looked up that the styles do not define (they resolve as the defaults until defined).
+	private readonly missing = new Set<string>()
 
 	constructor(parts: ResolverParts = {}) {
 		this.stylesValue = parts.styles ?? DocxStyles.empty()
@@ -234,8 +236,18 @@ export class PropertyResolver {
 	}
 
 	// Resolves with other style and numbering definitions from now on (an editor adding the definitions a save
-	// will add): what was resolved with the old ones is forgotten.
-	redefine(styles: DocxStyles, numbering: Numbering | undefined): void {
+	// will add): what was resolved with the old ones is forgotten. Whether a style looked up before and missing
+	// is defined now (what referred to it looks different).
+	redefine(styles: DocxStyles, numbering: Numbering | undefined): boolean {
+		let defined = false
+
+		for (const id of this.missing) {
+			if (styles.byId(id) === undefined) continue
+
+			defined = true
+			this.missing.delete(id)
+		}
+
 		this.stylesValue = styles
 		this.numberingValue = numbering
 		this.defaultParagraphStyle = styles.defaultOf("paragraph")
@@ -248,6 +260,8 @@ export class PropertyResolver {
 		this.paragraphs.clear()
 		this.tables.clear()
 		this.sections.clear()
+
+		return defined
 	}
 
 	// ---- styles -----------------------------------------------------------------------------------------
@@ -259,6 +273,7 @@ export class PropertyResolver {
 
 		const style = this.styles.byId(styleId)
 
+		if (style === undefined) this.missing.add(styleId)
 		if (style?.type === "paragraph") return style
 
 		if (style?.type === "character") {
@@ -275,6 +290,7 @@ export class PropertyResolver {
 
 		const style = this.styles.byId(styleId)
 
+		if (style === undefined) this.missing.add(styleId)
 		if (style?.type === "character") return style
 
 		if (style?.type === "paragraph") {
@@ -290,6 +306,8 @@ export class PropertyResolver {
 		if (styleId === undefined) return this.defaultTableStyle
 
 		const style = this.styles.byId(styleId)
+
+		if (style === undefined) this.missing.add(styleId)
 
 		return style?.type === "table" ? style : this.defaultTableStyle
 	}

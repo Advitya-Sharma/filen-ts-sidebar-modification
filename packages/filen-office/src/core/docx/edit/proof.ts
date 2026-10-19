@@ -10,6 +10,8 @@ import { NO_SOURCE, docxSchema, type LockReason } from "./schema"
 export interface BlockProof {
 	// Undefined when `node` (a source paragraph or table of `story`) round-trips; otherwise why it cannot.
 	check(node: Node, story: StoryDoc): LockReason | undefined
+	// check() yielding whenever `due` says so (inside a long table), for a host that proves in slices.
+	steps?(node: Node, story: StoryDoc, due: () => boolean): Generator<void, LockReason | undefined>
 }
 
 export interface LockRequest {
@@ -44,29 +46,96 @@ export const conservativeProof: BlockProof = {
 // Proves the source blocks in [from, to) of a story document: paragraphs, and tables as a whole before
 // their cells' content (a failed table is locked whole). Only blocks still pristine are checked.
 export function proveBlocks(story: StoryDoc, doc: Node, proof: BlockProof, from: number = 0, to: number = doc.content.size): LockRequest[] {
+	const steps = proveSteps(story, doc, proof, from, to, undefined)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+	}
+}
+
+// proveBlocks yielding whenever `due` says so: between blocks, and inside one where the proof checks in steps.
+export function proveBlocksSteps(
+	story: StoryDoc,
+	doc: Node,
+	proof: BlockProof,
+	due: () => boolean,
+	from: number = 0,
+	to: number = doc.content.size
+): Generator<void, LockRequest[]> {
+	return proveSteps(story, doc, proof, from, to, due)
+}
+
+interface Frame {
+	readonly parent: Node
+	// The parent's content start, and the range of its content walked.
+	readonly start: number
+	readonly from: number
+	readonly to: number
+	index: number
+	pos: number
+}
+
+// The walk of doc.nodesBetween(from, to), with a stack of the containers open.
+function* proveSteps(
+	story: StoryDoc,
+	doc: Node,
+	proof: BlockProof,
+	from: number,
+	to: number,
+	due: (() => boolean) | undefined
+): Generator<void, LockRequest[]> {
 	const out: LockRequest[] = []
+	const stack: Frame[] = [{ parent: doc, start: 0, from, to, index: 0, pos: 0 }]
 
-	doc.nodesBetween(from, to, (node, pos) => {
-		if (node.isInline || node.type === nodes.locked_block) return false
+	while (stack.length > 0) {
+		const frame = stack[stack.length - 1] as Frame
 
-		const source = (node.attrs["src"] as number | undefined) ?? NO_SOURCE
+		if (frame.pos >= frame.to || frame.index >= frame.parent.childCount) {
+			stack.pop()
 
-		if (node.type === nodes.paragraph || node.type === nodes.table) {
-			if (source === NO_SOURCE || (node.type === nodes.paragraph && !story.pristine.has(node))) return false
-
-			const reason = proof.check(node, story)
-
-			if (reason !== undefined) {
-				out.push({ pos, reason })
-
-				return false
-			}
-
-			return node.type === nodes.table
+			continue
 		}
 
-		return true
-	})
+		const node = frame.parent.child(frame.index++)
+		const pos = frame.pos
+
+		frame.pos += node.nodeSize
+
+		if (frame.pos <= frame.from || node.isInline || node.type === nodes.locked_block) continue
+
+		const at = frame.start + pos
+
+		if (node.type === nodes.paragraph || node.type === nodes.table) {
+			const source = (node.attrs["src"] as number | undefined) ?? NO_SOURCE
+
+			if (source === NO_SOURCE || (node.type === nodes.paragraph && !story.pristine.has(node))) continue
+
+			const reason = due !== undefined && proof.steps !== undefined ? yield* proof.steps(node, story, due) : proof.check(node, story)
+
+			if (due?.() === true) yield
+
+			if (reason !== undefined) {
+				out.push({ pos: at, reason })
+
+				continue
+			}
+
+			if (node.type !== nodes.table) continue
+		}
+
+		if (node.content.size > 0) {
+			stack.push({
+				parent: node,
+				start: at + 1,
+				from: Math.max(0, frame.from - pos - 1),
+				to: Math.min(node.content.size, frame.to - pos - 1),
+				index: 0,
+				pos: 0
+			})
+		}
+	}
 
 	return out
 }

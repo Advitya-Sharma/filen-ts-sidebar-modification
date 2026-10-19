@@ -48,3 +48,23 @@ FILEN_OFFICE_DIGEST=/tmp/viewer.json pnpm exec vitest run src/tests/fuzz/viewer.
 - Edits live in `src/tests/fuzz/ops/`, one file per feature; ops with a `script` also form the scripted edit suite of `docxWriteCorpus.test.ts`.
 
 Failures the fuzz finds and not fixed yet go here, each with the command that repeats it (run from this package). None are open.
+
+### Opt-in oracles
+
+Each skips unless its variables are set; run from this package.
+
+```sh
+FILEN_OFFICE_FUZZ_SAVES=<dir> pnpm exec vitest run src/tests/fuzz/script.fuzz.test.ts                    # keep saves for the oracles
+FILEN_OFFICE_FUZZ_SAVES=<dir> FILEN_OFFICE_SOFFICE=<soffice>[,<soffice>] pnpm exec vitest run src/tests/docxInteropLibreOffice.test.ts
+pnpm exec tsx src/tests/oracles/xsd.ts --fetch && pnpm exec vitest run src/tests/docxWriteSchema.test.ts
+FILEN_OFFICE_OOXML_VALIDATOR=<OpenXmlValidate.dll> FILEN_OFFICE_DOTNET=<dotnet> pnpm exec vitest run src/tests/docxOpenXmlSdk.test.ts
+HERMES_CLI=<hermes> pnpm exec tsx src/scripts/hermes/run.ts
+FILEN_OFFICE_SOAK=<minutes> pnpm exec vitest run src/tests/docxSoak.test.ts
+```
+
+- Saves: `FILEN_OFFICE_FUZZ_SAVES=<dir>` makes the scripted suite and the fuzzers keep each edited save with a JSON sidecar (our text and counts) and `<dir>/manifest.json`; `_EVERY=<k>` keeps one run in k, `_MAX_BYTES` (5 MB) skips bigger sources.
+- LibreOffice: converts every kept save and its original to PDF, ODT, flat ODT, text and DOCX (and the ODT back to DOCX) and compares what each edit added and removed, text and structure, with our model; LibreOffice's own readings are listed with their reason in `src/tests/interop/accepted.ts`. `FILEN_OFFICE_INTEROP_PER_FAMILY` (50), `_LIMIT`, `_JOBS` (4) and `_WORK` (keeps outputs and `report-<office>.json`) tune a run.
+- Schemas: the WordprocessingML schemas come from `pnpm run generate:wml-order --fetch`, the OPC and Dublin Core ones from `xsd.ts --fetch` (or `FILEN_OFFICE_OPC_SCHEMAS`); a save may add no validity error to its source.
+- Open XML SDK: build `tools/openxml-validate` with `dotnet restore --locked-mode && dotnet build -c Release --no-restore` (output under `node_modules/.cache`); a save may add no error to its source but those allowlisted, with their reasons, in `allow.json`.
+- Hermes: bundles the core's open/layout/edit/save scenario as the mobile release build does and compares Hermes's results with V8's byte for byte; without `HERMES_CLI` the bundle is only compiled with `hermesc`.
+- Soak: a long editing session, run until the given minutes pass; memory grows with the content only, the undo history holds at most one copy of the content, key p95 drifts at most 20 %, a save costs what was edited since the open, no save fails or has a task over 50 ms of CPU, and the last save reopens with the session's text.

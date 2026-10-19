@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { render, waitFor } from "@testing-library/react"
+import { render as renderUi, screen, waitFor } from "@testing-library/react"
+import type { ReactElement } from "react"
+import { createTestQueryClient, queryClientWrapper } from "@/tests/testQueryClient"
 import "@/lib/i18n"
+
+// Links open through the trusted-domain query (useTrustedLinkGate).
+function render(ui: ReactElement) {
+	return renderUi(ui, { wrapper: queryClientWrapper(createTestQueryClient()) })
+}
 
 // docx-preview (now only the fallback when the own engine fails) mints an object URL per embedded image
 // and font and never revokes one; the fallback owns that, once the render it belongs to is gone.
@@ -86,5 +93,58 @@ describe("DocxPreviewFallback object URLs", () => {
 		await waitFor(() => {
 			expect(revokeObjectURL).toHaveBeenCalledTimes(2)
 		})
+	})
+})
+
+describe("DocxPreviewFallback links", () => {
+	it("asks before a web link opens a domain not trusted yet", async () => {
+		renderAsync.mockImplementation((_bytes, host) => {
+			host.innerHTML = `<p><a href="https://example.com/x">Web</a></p>`
+
+			return Promise.resolve()
+		})
+
+		const view = render(
+			<DocxPreviewFallback
+				bytes={bytes}
+				alt="doc.docx"
+			/>
+		)
+		const anchor = await screen.findByText("Web")
+		const click = new MouseEvent("click", { bubbles: true, cancelable: true })
+
+		anchor.dispatchEvent(click)
+
+		expect(click.defaultPrevented).toBe(true)
+		expect(await screen.findByRole("alertdialog", { name: "Open external link?" })).toBeTruthy()
+		view.unmount()
+	})
+
+	it("asks before a middle-click opens it too, and leaves other buttons alone", async () => {
+		renderAsync.mockImplementation((_bytes, host) => {
+			host.innerHTML = `<p><a href="https://example.com/x">Web</a></p>`
+
+			return Promise.resolve()
+		})
+
+		const view = render(
+			<DocxPreviewFallback
+				bytes={bytes}
+				alt="doc.docx"
+			/>
+		)
+		const anchor = await screen.findByText("Web")
+		const right = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 2 })
+
+		anchor.dispatchEvent(right)
+		expect(right.defaultPrevented).toBe(false)
+		expect(screen.queryByRole("alertdialog")).toBeNull()
+
+		const middle = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 })
+
+		anchor.dispatchEvent(middle)
+		expect(middle.defaultPrevented).toBe(true)
+		expect(await screen.findByRole("alertdialog", { name: "Open external link?" })).toBeTruthy()
+		view.unmount()
 	})
 })

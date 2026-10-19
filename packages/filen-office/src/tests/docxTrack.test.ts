@@ -238,6 +238,20 @@ describe("docx tracked changes: recording", () => {
 		expect(texts(session)).toEqual(["plain words"])
 	})
 
+	it("records w:rPrChange after the run's w14 properties, as the last of its properties", async () => {
+		const doc = await tracked({ body: pr(run("Ligatures here", '<w:sz w:val="24"/><w14:ligatures w14:val="standardContextual"/>')) })
+		const session = doc.session
+
+		select(session, 1, 10)
+		session.execute({ type: "format.bold" })
+
+		const { xml } = await save(doc, [session])
+
+		expect(xml).toContain("w:rPrChange")
+		expect(xml).not.toMatch(/<\/w:rPrChange><w14:/)
+		expect(xml).toMatch(/<w14:ligatures w14:val="standardContextual"\/><w:rPrChange /)
+	})
+
 	it("records a paragraph property change as w:pPrChange with the properties before", async () => {
 		const doc = await tracked({ body: p("centred", '<w:jc w:val="center"/>') })
 		const session = doc.session
@@ -396,6 +410,36 @@ describe("docx tracked changes: accepting and rejecting", () => {
 			pr(run("bold", '<w:b/><w:rPrChange w:id="13" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:rPr/></w:rPrChange>')) +
 			`<w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="14" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>${run("Centred")}</w:p>`
 	}
+
+	it("keeps a bookmark that ends in a deleted table in order once the deletion is accepted", async () => {
+		const del = (text: string): string =>
+			`<w:del w:id="2${String(text.length)}" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>${text}</w:delText></w:r></w:del>`
+		// Enough changes besides for one rebuild of the story.
+		const many = Array.from({ length: 70 }, (_, k) => pr(`${run(`Line ${String(k)} `)}${del("x")}`)).join("")
+		const doc = await tracked({
+			body:
+				many +
+				pr(`${run("Kept ")}${del("gone ")}<w:bookmarkStart w:id="3" w:name="Spans"/>${del("and more")}`) +
+				'<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>' +
+				'<w:tr><w:trPr><w:del w:id="40" w:author="Bob" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>' +
+				`${pr(`${del("cell")}<w:bookmarkEnd w:id="3"/>${del("text")}`)}</w:tc></w:tr></w:tbl>` +
+				pr(run("After"))
+		})
+		const session = doc.session
+
+		const outcome = resolveChanges(session, storyReviewIndex(session), { all: true }, true)
+
+		expect(outcome.tr).not.toBeNull()
+		session.dispatch(outcome.tr as never)
+
+		const { xml } = await save(doc, [session])
+		const start = xml.indexOf('<w:bookmarkStart w:id="3"')
+		const end = xml.indexOf('<w:bookmarkEnd w:id="3"/>')
+
+		expect(xml).not.toContain("<w:tbl>")
+		expect(start).toBeGreaterThan(0)
+		expect(end).toBeGreaterThan(start)
+	})
 
 	it("accepts every change of a source", async () => {
 		const doc = await tracked(SOURCE)

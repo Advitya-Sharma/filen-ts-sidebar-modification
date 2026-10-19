@@ -26,7 +26,8 @@ import {
 	parseXmlSliced,
 	type XmlDocument
 } from "../../xml/index"
-import { DocxDocBuilder, type StoryDoc } from "../edit/build"
+import { runSliced } from "../../slicing"
+import { DocxDocBuilder } from "../edit/build"
 import { openDocxEditContext, type DocxEditContext } from "../edit/context"
 import { docxSchema } from "../edit/schema"
 import { Item, buildDocxModel, type StoryPart } from "../model/index"
@@ -43,10 +44,12 @@ import { canonicalElement, canonicalFragment } from "./canonical"
 import { DOCX_CHECKS, checkDone, checkPart, type CheckInput, type DocxCheck, type DocxFact } from "./checks/index"
 import { DocxVerifyError, type VerifyFailure } from "./failure"
 import { isInsertionPoint } from "./newStory"
+import { writtenJustification } from "./paragraph"
 
 export { DocxVerifyError, type VerifyFailure } from "./failure"
 import type { DocxChanges, StoryChange } from "./save"
-import { cellWithin, inCell, sectionWritten, type StoryOutput } from "./story"
+import { cellWithin, inCell, originalBlock, sectionWritten, type StoryOutput } from "./story"
+import { writtenLinkTarget } from "../edit/commands/insert"
 
 // Gate 2: the written file is checked before it may be uploaded, in two halves.
 // Parts (before the zip is written): every changed part well-formed with declared prefixes, every new part
@@ -275,10 +278,116 @@ async function partFacts(document: XmlDocument, scope: FactScope): Promise<Facts
 	return facts
 }
 
-// The facts of every story part of a model, read once.
-const modelCache = new WeakMap<object, Facts>()
+// The source's facts, read only by key: ids in a sorted table (one string of the keys, their offsets and counts)
+// rather than a map, an entry and a key string each (a long document has hundreds of thousands).
+interface SourceFacts {
+	readonly ids: { get(key: string): number | undefined }
+	readonly styles: ReadonlyMap<string, number>
+	readonly lists: ReadonlyMap<number, number>
+}
 
-async function modelFacts(model: { readonly parts: readonly StoryPart[] }, scope: FactScope): Promise<Facts> {
+// `keys` sorted by UTF-16 code units, a merge sort that yields between runs of SORT_STEP keys (a long
+// document's hundreds of thousands of ids would take one long task to sort at once).
+function* sortedKeys(keys: string[]): Generator<void, string[]> {
+	const order = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+	const n = keys.length
+	let from = keys
+
+	for (let lo = 0; lo < n; lo += SORT_STEP) {
+		const run = from.slice(lo, lo + SORT_STEP).sort(order)
+
+		for (let k = 0; k < run.length; k++) from[lo + k] = run[k] as string
+
+		yield
+	}
+
+	let to: string[] = new Array<string>(n)
+	let moved = 0
+
+	for (let width = SORT_STEP; width < n; width *= 2) {
+		for (let lo = 0; lo < n; lo += 2 * width) {
+			const mid = Math.min(lo + width, n)
+			const hi = Math.min(lo + 2 * width, n)
+			let a = lo
+			let b = mid
+
+			for (let k = lo; k < hi; k++) {
+				to[k] = b >= hi || (a < mid && (from[a] as string) <= (from[b] as string)) ? (from[a++] as string) : (from[b++] as string)
+
+				if (++moved % SORT_STEP === 0) yield
+			}
+		}
+
+		const swap = from
+
+		from = to
+		to = swap
+	}
+
+	return from
+}
+
+const SORT_STEP = 8192
+
+class SortedCounts {
+	private readonly keys: string
+	// Key k is keys.slice(starts[k], starts[k + 1]).
+	private readonly starts: Int32Array
+	private readonly counts: Int32Array
+
+	// `sorted`: the map's keys in order (sortedKeys).
+	constructor(map: ReadonlyMap<string, number>, sorted: readonly string[]) {
+		this.starts = new Int32Array(sorted.length + 1)
+		this.counts = new Int32Array(sorted.length)
+
+		let at = 0
+
+		sorted.forEach((key, k) => {
+			this.starts[k] = at
+			this.counts[k] = map.get(key) ?? 0
+			at += key.length
+		})
+		this.starts[sorted.length] = at
+		this.keys = sorted.join("")
+	}
+
+	get(key: string): number | undefined {
+		let low = 0
+		let high = this.counts.length - 1
+
+		while (low <= high) {
+			const middle = (low + high) >> 1
+			const order = this.compare(middle, key)
+
+			if (order === 0) return this.counts[middle]
+			if (order < 0) low = middle + 1
+			else high = middle - 1
+		}
+
+		return undefined
+	}
+
+	// Key k against `key`, as the sort orders them (by UTF-16 code units).
+	private compare(k: number, key: string): number {
+		const start = this.starts[k] ?? 0
+		const length = (this.starts[k + 1] ?? 0) - start
+		const shared = Math.min(length, key.length)
+
+		for (let i = 0; i < shared; i++) {
+			const difference = this.keys.charCodeAt(start + i) - key.charCodeAt(i)
+
+			if (difference !== 0) return difference
+		}
+
+		return length - key.length
+	}
+}
+
+// The facts of every story part of a model, read once (each save needs them: hundreds of milliseconds on a
+// long document).
+const modelCache = new WeakMap<object, SourceFacts>()
+
+async function modelFacts(model: { readonly parts: readonly StoryPart[] }, scope: FactScope): Promise<SourceFacts> {
 	let facts = scope.cached ? modelCache.get(model) : undefined
 
 	if (facts === undefined) {
@@ -286,9 +395,11 @@ async function modelFacts(model: { readonly parts: readonly StoryPart[] }, scope
 
 		for (const part of model.parts) await collectFactsSliced(part.document, 0, part.document.count, collected, 1, scope)
 
-		if (scope.cached) modelCache.set(model, collected)
+		const sorted = await runSliced(sortedKeys([...collected.ids.keys()]), scope.clock)
 
-		facts = collected
+		facts = { ids: new SortedCounts(collected.ids, sorted), styles: collected.styles, lists: collected.lists }
+
+		if (scope.cached) modelCache.set(model, facts)
 	}
 
 	return facts
@@ -1239,46 +1350,6 @@ function sameAsSource(original: Node | undefined, node: Node): boolean {
 	return Object.keys(original.attrs).every(attr => attr === "before" || original.attrs[attr] === node.attrs[attr])
 }
 
-const originalsCache = new WeakMap<StoryDoc, Map<number, Node>>()
-
-async function originals(story: StoryDoc, clock: SliceClock | undefined): Promise<Map<number, Node>> {
-	let map = originalsCache.get(story)
-
-	if (map === undefined) {
-		const found = new Map<number, Node>()
-		const visit = (node: Node): boolean => {
-			if (node.type === nodes.paragraph) {
-				const own = node.attrs["src"] as number
-
-				if (!found.has(own)) found.set(own, node)
-
-				return false
-			}
-
-			return !node.isInline
-		}
-		// In document order; a block too long for one slice (a long table) by its children.
-		const walk = async (parent: Node): Promise<void> => {
-			for (let index = 0; index < parent.childCount; index++) {
-				const child = parent.child(index)
-
-				if (child.nodeSize <= LONG_BLOCK) {
-					if (visit(child)) child.descendants(visit)
-				} else if (visit(child)) await walk(child)
-
-				if (clock?.due === true) await clock.pause()
-			}
-		}
-
-		await walk(story.doc)
-
-		map = found
-		originalsCache.set(story, map)
-	}
-
-	return map
-}
-
 // Every story's paragraphs, in order: the editor's (a locked block stands for the source paragraphs in its
 // bytes) against the written story's (each copy for the source paragraphs in it, each new w:p as rewritten).
 // A copied paragraph must be the editor's paragraph there, unchanged; a rewritten one is read back below.
@@ -1391,7 +1462,7 @@ async function checkParagraphs(
 
 		if (clock?.due === true) await clock.pause()
 
-		const sources = await originals(story.session.story, clock)
+		const built = story.session.story
 
 		for (let index = 0; index < actual.length; index++) {
 			const paragraph = actual[index]
@@ -1404,7 +1475,7 @@ async function checkParagraphs(
 				const same =
 					editor.node === null
 						? editor.item === paragraph.item
-						: editor.item === paragraph.item && sameAsSource(sources.get(paragraph.item), editor.node)
+						: editor.item === paragraph.item && sameAsSource(originalBlock(built, paragraph.item), editor.node)
 
 				if (!same) fail("content", `${name}: a copied paragraph is not the editor's paragraph there`)
 
@@ -1426,6 +1497,58 @@ async function checkParagraphs(
 	out.push(rewritten)
 }
 
+// Read-back signatures of rewritten paragraphs by their markup and what else the read-back reads (the part's root
+// tag, relationships and the save's list ids): the same markup reads back the same, so a paragraph a save wrote
+// before as it is written now is not read back again. Found by a hash of the markup, taken only when the bytes are
+// the same. One generation per part: the last save's (one Rewritten per part holds all of its stories).
+interface ReadBackEntry {
+	readonly markup: Uint8Array
+	readonly actual: string
+}
+
+const readBackCache = new WeakMap<StoryPart, { readonly scope: string; readonly entries: Map<number, ReadBackEntry[]> }>()
+
+// How many paragraphs of `part` the next save finds read back already (for tests).
+export function readBacksKept(part: StoryPart): number {
+	let count = 0
+
+	for (const list of readBackCache.get(part)?.entries.values() ?? []) count += list.length
+
+	return count
+}
+
+// FNV-1a of `bytes`.
+function hashBytes(bytes: Uint8Array): number {
+	let hash = 0x811c9dc5
+
+	for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ (bytes[i] ?? 0), 0x01000193)
+
+	return hash >>> 0
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+	if (a.length !== b.length) return false
+
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+
+	return true
+}
+
+function cached(
+	entries: ReadonlyMap<number, readonly ReadBackEntry[]> | undefined,
+	hash: number,
+	markup: Uint8Array
+): ReadBackEntry | undefined {
+	return entries?.get(hash)?.find(entry => sameBytes(entry.markup, markup))
+}
+
+function keep(entries: Map<number, ReadBackEntry[]>, hash: number, entry: ReadBackEntry): void {
+	const list = entries.get(hash)
+
+	if (list === undefined) entries.set(hash, [entry])
+	else if (!list.includes(entry)) list.push(entry)
+}
+
 async function readBack(
 	input: VerifyPartsInput,
 	rewritten: readonly Rewritten[],
@@ -1433,25 +1556,98 @@ async function readBack(
 	clock: SliceClock | undefined
 ): Promise<void> {
 	for (const story of rewritten) {
-		// Read back in batches of about READ_BACK_BYTES of markup (each paragraph reads back on its own), so
-		// a save that rewrote much of a long document checks it a short step at a time.
-		for (let first = 0; first < story.nodes.length;) {
-			let last = first
-			let size = 0
+		const root = input.changes.roots.get(story.part)
+		const relationships = await relationshipsOf(story.part.name)
+		const scope =
+			`${root ?? ""}\u0001${relationships.all.map(item => `${item.id} ${item.type} ${item.target} ${String(item.external)}`).join("\u0002")}` +
+			`\u0001${[...input.changes.numIds].join(" ")}`
+		const last = readBackCache.get(story.part)
+		const known = last?.scope === scope ? last.entries : undefined
+		const kept = new Map<number, ReadBackEntry[]>()
+		// Paragraphs read back in a document of their own (each reads back alone, but for fields spanning
+		// paragraphs): those outside any such field without one of their own are found by their markup.
+		const pending: number[] = []
+		const hashes = new Map<number, number>()
+		let depth = 0
 
-			let open = 0
+		for (let index = 0; index < story.nodes.length; index++) {
+			const node = story.nodes[index]
+			const own = fieldCharDepth(node)
+			const markup = story.markup[index]
 
-			while (last < story.nodes.length && (last === first || size < READ_BACK_BYTES || open > 0)) {
-				open += fieldCharDepth(story.nodes[last])
-				size += story.markup[last++]?.length ?? 0
+			if (depth === 0 && own === 0 && markup !== undefined && !hasFieldChar(node)) {
+				const hash = hashBytes(markup)
+				const entry = cached(known, hash, markup)
+
+				if (entry !== undefined) {
+					compareReadBack(input, story, index, entry.actual)
+					keep(kept, hash, entry)
+
+					continue
+				}
+
+				hashes.set(index, hash)
 			}
 
-			await readBackBatch(input, story, first, last, input.changes.roots.get(story.part), relationshipsOf, clock)
+			depth += own
+			pending.push(index)
+		}
+
+		// Read back in batches of about READ_BACK_BYTES of markup, so a save that rewrote much of a long
+		// document checks it a short step at a time.
+		for (let first = 0; first < pending.length;) {
+			let last = first
+			let size = 0
+			let open = 0
+
+			while (last < pending.length && (last === first || size < READ_BACK_BYTES || open > 0)) {
+				const index = pending[last++] ?? 0
+
+				open += fieldCharDepth(story.nodes[index])
+				size += story.markup[index]?.length ?? 0
+			}
+
+			const indices = pending.slice(first, last)
+			const actual = await readBackBatch(input, story, indices, root, relationships, clock)
+
+			indices.forEach((index, k) => {
+				const hash = hashes.get(index)
+				const signature = actual[k]
+				const markup = story.markup[index]
+
+				// A copy: the markup is a view of the whole story as written, which it would keep.
+				if (hash !== undefined && signature !== undefined && markup !== undefined)
+					keep(kept, hash, { markup: markup.slice(), actual: signature })
+			})
 			first = last
 
 			if (clock?.due === true) await clock.pause()
 		}
+
+		readBackCache.set(story.part, { scope, entries: kept })
 	}
+}
+
+function hasFieldChar(paragraph: Node | undefined): boolean {
+	let found = false
+
+	paragraph?.forEach(child => {
+		if (child.type === nodes.field_char) found = true
+	})
+
+	return found
+}
+
+// Refuses the save when paragraph `index` of a rewritten story does not read back as `actual` says.
+function compareReadBack(input: VerifyPartsInput, story: Rewritten, index: number, actual: string): void {
+	const paragraph = story.nodes[index]
+
+	if (paragraph === undefined) return
+
+	const expected = paragraphSignature(paragraph, input.changes.numIds, story.sections[index], input.context, story.part)
+
+	if (expected !== actual)
+		fail("content", `A rewritten paragraph of ${story.part.name} reads back differently:\n${actual}\n!=\n${expected}`)
 }
 
 // How many fields spanning paragraphs a paragraph opens (begins less ends of its field characters).
@@ -1465,17 +1661,17 @@ function fieldCharDepth(paragraph: Node | undefined): number {
 	return depth
 }
 
-// Paragraphs [first, last) of a rewritten story, read back by the model in a document of their own.
+// Paragraphs `indices` of a rewritten story, read back by the model in a document of their own; their read-back
+// signatures (undefined for one that does not read back as a paragraph).
 async function readBackBatch(
 	input: VerifyPartsInput,
 	story: Rewritten,
-	first: number,
-	last: number,
+	indices: readonly number[],
 	rootTag: string | undefined,
-	relationshipsOf: (part: string) => Promise<Relationships>,
+	relationships: Relationships,
 	clock: SliceClock | undefined
-): Promise<void> {
-	const paragraphs = story.nodes.slice(first, last)
+): Promise<(string | undefined)[]> {
+	const paragraphs = indices.map(index => story.nodes[index] as Node)
 	const document = story.part.document
 	const reader = partReader(document)
 	const root = document.documentElement()
@@ -1489,10 +1685,9 @@ async function readBackBatch(
 		encodeUtf8(
 			`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${open.endsWith("/>") ? open.slice(0, -2) + ">" : open}<${qualify("body")}>`
 		),
-		...story.markup.slice(first, last),
+		...indices.map(index => story.markup[index] ?? new Uint8Array(0)),
 		encodeUtf8(`</${qualify("body")}></${qualify("document")}>`)
 	])
-	const relationships = await relationshipsOf(story.part.name)
 	const files: Record<string, Uint8Array> = {
 		"[Content_Types].xml": encodeUtf8(
 			'<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -1533,16 +1728,16 @@ async function readBackBatch(
 	if (readBlocks.length !== paragraphs.length)
 		fail("content", `${paragraphs.length} rewritten paragraphs read back as ${readBlocks.length}`)
 
-	paragraphs.forEach((paragraph, index) => {
-		const other = readBlocks[index]
+	return indices.map((index, k) => {
+		const other = readBlocks[k]
 
-		if (other === undefined || other.type !== nodes.paragraph) return
+		if (other === undefined || other.type !== nodes.paragraph) return undefined
 
-		const expected = paragraphSignature(paragraph, input.changes.numIds, story.sections[first + index], input.context, story.part)
 		const actual = paragraphSignature(other, input.changes.numIds, undefined, context, readPart)
 
-		if (expected !== actual)
-			fail("content", `A rewritten paragraph of ${story.part.name} reads back differently:\n${actual}\n!=\n${expected}`)
+		compareReadBack(input, story, index, actual)
+
+		return actual
 	})
 }
 
@@ -1569,11 +1764,16 @@ function sorted(value: unknown): unknown {
 	)
 }
 
+function writtenTarget(target: unknown): string {
+	return typeof target !== "string" || target === "" ? "null" : writtenLinkTarget(target)
+}
+
 function markSignature(mark: Mark): string {
 	if (IDENTITY_MARKS.has(mark.type)) return mark.type.name
 	// A tracked formatting change split over several runs gets new ids: who and when is what counts.
 	if (mark.type === marks.format_change) return `format_change:${String(mark.attrs["author"])}:${String(mark.attrs["date"])}`
-	if (mark.type === marks.link) return `link:${String(mark.attrs["anchor"] || null)}:${String(mark.attrs["target"] || null)}`
+	// A target as written (a file's link that is no URI reference is written encoded, see save.ts).
+	if (mark.type === marks.link) return `link:${String(mark.attrs["anchor"] || null)}:${writtenTarget(mark.attrs["target"])}`
 
 	return `${mark.type.name}${JSON.stringify(sorted(mark.attrs))}`
 }
@@ -1637,7 +1837,8 @@ export function paragraphSignature(
 			node.attrs["styleId"],
 			numId !== null && numId < 0 ? (numIds.get(numId) ?? numId) : numId,
 			node.attrs["ilvl"],
-			node.attrs["align"],
+			// As written: start and end are the same edges as left and right.
+			node.attrs["align"] === null ? null : writtenJustification(node.attrs["align"] as string),
 			sorted(node.attrs["indent"]),
 			sorted(node.attrs["spacing"]),
 			sorted(node.attrs["borders"]),

@@ -118,6 +118,12 @@ function markup(write: (out: Out) => void): string {
 	return decodeUtf8(out.finish())
 }
 
+// ST_Jc as written: "start" and "end" as "left" and "right", which Word reads as the same edges of a paragraph
+// of either direction and Word 2007 reads at all ([MS-OI29500] 2.1.94; layout mirrors both for bidi).
+export function writtenJustification(align: string): string {
+	return align === "start" ? "left" : align === "end" ? "right" : align
+}
+
 // The pPr children the paragraph's attributes stand for (style, numbering, alignment, indent), where `attrs`
 // differ from `props` (the properties of the container they are spliced into).
 function attributeChanges(
@@ -144,7 +150,9 @@ function attributeChanges(
 		const fileNumId = numId === null ? null : numId < 0 ? w.env.numId(numId) : numId
 
 		if (fileNumId !== null) integer("w:numId", fileNumId, 0)
-		if (ilvl !== null) integer("w:ilvl", ilvl, 0, 8)
+		// A list's levels are 0–8 (ECMA-376 Part 1 §17.9.3). numId 0 takes the paragraph out of any list (§17.9.18):
+		// its level, kept as the file has it, is any ST_DecimalNumber (Word writes such levels).
+		if (ilvl !== null) integer("w:ilvl", ilvl, fileNumId === 0 ? undefined : 0, fileNumId === 0 ? undefined : 8)
 		const numberingChanges = new Map<string, string>([
 			["ilvl", ilvl === null ? "" : names.val("ilvl", String(ilvl))],
 			["numId", fileNumId === null ? "" : names.val("numId", String(fileNumId))]
@@ -167,7 +175,7 @@ function attributeChanges(
 	if (align !== (props.alignment ?? null)) {
 		if (align !== null) oneOf("w:jc", JUSTIFICATION, align)
 
-		changes.set("jc", align === null ? "" : names.val("jc", align))
+		changes.set("jc", align === null ? "" : names.val("jc", writtenJustification(align)))
 	}
 
 	if (spacing !== (props.spacing ?? null)) {
@@ -571,16 +579,29 @@ function writeInline(w: StoryWriting, out: Out, paragraph: Node, owned: number):
 	// wrapper with them).
 	const dropped = (unit: Unit): boolean => !forced && !unit.copy && unit.nodes.every(child => child.type === nodes.rendered_break)
 	// A proofing mark is no item of the model: a hyperlink holding nothing else (its text deleted) would read
-	// back as an empty hyperlink, kept as its bytes. Those marks go, and the hyperlink with them.
-	const holdsContent = (link: Mark): boolean =>
-		list.some(unit => unit.nodes.length > 0 && unit.nodes[0]?.type !== nodes.proof_err && !dropped(unit) && link.isInSet(unit.wrappers))
+	// back as an empty hyperlink, kept as its bytes. Those marks go, and the hyperlink with them. What the
+	// hyperlink holds is the units next to `at` with the same link (another link to the same target further on
+	// is another hyperlink).
+	const holdsContent = (link: Mark, at: number): boolean => {
+		for (const step of [-1, 1]) {
+			for (let index = at + step; index >= 0 && index < list.length; index += step) {
+				const unit = list[index] as Unit
+
+				if (unit.nodes.length === 0 || dropped(unit)) continue
+				if (!link.isInSet(unit.wrappers)) break
+				if (unit.nodes[0]?.type !== nodes.proof_err) return true
+			}
+		}
+
+		return false
+	}
 
 	list.forEach((unit, index) => {
 		const node = unit.nodes[0]
 
 		if (node === undefined || dropped(unit)) return
 
-		if (node.type === nodes.proof_err && unit.wrappers.some(mark => mark.type === marks.link && !holdsContent(mark))) return
+		if (node.type === nodes.proof_err && unit.wrappers.some(mark => mark.type === marks.link && !holdsContent(mark, index))) return
 
 		// Bookkeeping marks stay only between content written as it was.
 		if (node.type === nodes.proof_err) {

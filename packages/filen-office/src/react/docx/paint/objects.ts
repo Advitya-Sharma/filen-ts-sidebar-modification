@@ -393,6 +393,13 @@ export function paintObjects(objects: readonly PaintedObject[], options: ObjectP
 
 								break
 							case "drawing":
+								// A picture with alternative text is an image to assistive technology, named by it (the
+								// drawing's own SVG stays hidden from it).
+								if (typeof result.alt === "string" && result.alt.length > 0) {
+									object.element.setAttribute("role", "img")
+									object.element.setAttribute("aria-label", result.alt)
+								}
+
 								work.push(
 									paintDrawingObject(object, result, options, holder).catch(() => {
 										placeholder(object.element)

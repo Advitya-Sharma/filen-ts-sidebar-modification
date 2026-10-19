@@ -18,6 +18,10 @@ import {
 } from "@filen/office/dom/docx"
 import { fontFaceHost } from "@filen/office/dom"
 import { buildDocx } from "./docxSynthetic"
+import { png } from "./security/generate"
+
+// A picture whose header the viewer reads (one it cannot read is not served).
+const IMAGE = png(4, 3)
 
 // A measurer without a browser: every character half an em wide.
 const measurer: TextMeasurer = {
@@ -66,7 +70,7 @@ const LINKED = buildDocx({
 		{ id: "rIdLink", type: "hyperlink", target: "https://example.com/a", external: true },
 		{ id: "rIdImg", type: "image", target: "media/image1.png" }
 	],
-	parts: [{ name: "word/media/image1.png", data: new Uint8Array([137, 80, 78, 71, 1, 2, 3]) }]
+	parts: [{ name: "word/media/image1.png", data: IMAGE }]
 })
 
 interface Run {
@@ -163,7 +167,7 @@ describe("DocxEngine", () => {
 
 		const media = await engine.media("word/media/image1.png")
 
-		expect(Array.from(media?.bytes ?? [])).toEqual([137, 80, 78, 71, 1, 2, 3])
+		expect(Array.from(media?.bytes ?? [])).toEqual(Array.from(IMAGE))
 		expect(await engine.media("word/missing.png")).toBeNull()
 	})
 
@@ -176,7 +180,7 @@ describe("DocxEngine", () => {
 		expect(Reflect.get(engine, "model")).toBeUndefined()
 		expect(object?.kind).toBe("drawing")
 		expect((await engine.locate("target"))?.page).toBe(1)
-		expect((await engine.media("word/media/image1.png"))?.bytes.length).toBe(7)
+		expect((await engine.media("word/media/image1.png"))?.bytes.length).toBe(IMAGE.length)
 		expect(Array.from(await engine.find("jump"))).toEqual([0, 0, 13, 17])
 	})
 

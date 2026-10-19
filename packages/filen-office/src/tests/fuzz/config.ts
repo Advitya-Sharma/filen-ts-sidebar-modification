@@ -38,6 +38,8 @@ export interface FuzzConfig {
 	readonly steps: number | undefined
 	// Only these ops (names from ops/), picked uniformly.
 	readonly ops: readonly string[] | undefined
+	// Only these op families (features in ops/index.ts), at their usual shares.
+	readonly families: readonly string[] | undefined
 	// Paged fuzz: sync, race and/or proof (default sync,race). Damage fuzz: stories, undo, blockmove, undoall, selftest,
 	// xsd (default stories).
 	readonly modes: readonly string[] | undefined
@@ -78,6 +80,7 @@ export function fuzzConfig(env: NodeJS.ProcessEnv = process.env): FuzzConfig | u
 		filter: env["FILEN_OFFICE_FUZZ_FILTER"] || undefined,
 		steps: count(env["FILEN_OFFICE_FUZZ_STEPS"], "FILEN_OFFICE_FUZZ_STEPS"),
 		ops: list(env["FILEN_OFFICE_FUZZ_OPS"]),
+		families: list(env["FILEN_OFFICE_FUZZ_FAMILIES"]),
 		modes: list(env["FILEN_OFFICE_FUZZ_MODES"]),
 		view,
 		jobs: count(env["FILEN_OFFICE_FUZZ_JOBS"], "FILEN_OFFICE_FUZZ_JOBS") || Math.max(1, availableParallelism() - 1),
@@ -86,6 +89,9 @@ export function fuzzConfig(env: NodeJS.ProcessEnv = process.env): FuzzConfig | u
 }
 
 export const CORPUS = CORPUS_DIR
+
+// The editable word-processing extensions.
+export const WORD_EXTENSIONS: readonly string[] = ["docx", "docm", "dotx", "dotm"]
 
 // Corpus files of these extensions (each in its own directory), sorted, matching `filter`.
 export function corpusFiles(extensions: readonly string[], filter?: string): string[] {
@@ -153,6 +159,12 @@ export interface JobResult {
 }
 
 const RUNNER = join(import.meta.dirname, "run.ts")
+// Jobs still running, killed if this process exits first (an interrupted run leaves none behind).
+const running = new Set<ReturnType<typeof spawn>>()
+
+process.once("exit", () => {
+	for (const child of running) child.kill("SIGKILL")
+})
 const PACKAGE = join(import.meta.dirname, "..", "..", "..")
 
 // Runs each job (arguments to run.ts) in its own Node process, `parallel` at a time: a job that crashes or
@@ -184,6 +196,8 @@ function runJob(args: readonly string[], timeoutMs: number): Promise<JobResult> 
 		})
 		const lines: string[] = []
 		let pending = ""
+
+		running.add(child)
 		let stderr = ""
 		let timedOut = false
 		const timer = setTimeout(() => {
@@ -208,6 +222,7 @@ function runJob(args: readonly string[], timeoutMs: number): Promise<JobResult> 
 		})
 		child.on("close", code => {
 			clearTimeout(timer)
+			running.delete(child)
 
 			if (pending.startsWith("{")) lines.push(pending)
 

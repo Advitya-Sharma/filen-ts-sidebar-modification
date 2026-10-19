@@ -191,6 +191,7 @@ describe("Mobile view surface", () => {
 				document={document}
 				handleRef={handleRef}
 				label="Report.docx"
+				describedBy="keys"
 				readOnly
 				apple
 				marks={marks}
@@ -203,7 +204,16 @@ describe("Mobile view surface", () => {
 
 		const given = reflowed.props.at(-1)
 
-		expect(given).toMatchObject({ editor, document, label: "Report.docx", readOnly: true, apple: true, marks, onFind })
+		expect(given).toMatchObject({
+			editor,
+			document,
+			label: "Report.docx",
+			describedBy: "keys",
+			readOnly: true,
+			apple: true,
+			marks,
+			onFind
+		})
 		expect(given?.ref).toBe(handleRef)
 		expect(given?.interactions?.commentMarker).toBe(commentMarker)
 		expect([

@@ -395,11 +395,16 @@ describe("docx footnotes and endnotes", () => {
 		caret(editor, 3)
 		expect(await run(editor, { type: "note.convert" })).toBe(true)
 
-		const notes = await read(await saved(opened), "word/endnotes.xml")
+		const bytes = await saved(opened)
+		const notes = await read(bytes, "word/endnotes.xml")
 		const note = notes.slice(notes.lastIndexOf("<w:endnote "))
 
 		expect(note).toContain('<w:rStyle w:val="EndnoteReference"/></w:rPr><w:t>*</w:t>')
 		expect(note).not.toContain("FootnoteReference")
+		// The reference's custom mark stays in the reference's run (in a run of its own it is text after a number).
+		expect(await read(bytes, "word/document.xml")).toMatch(
+			/<w:r><w:rPr><w:rStyle w:val="EndnoteReference"\/><\/w:rPr><w:endnoteReference w:customMarkFollows="1" w:id="\d+"\/><w:t>\*<\/w:t><\/w:r>/
+		)
 		editor.dispose()
 	})
 

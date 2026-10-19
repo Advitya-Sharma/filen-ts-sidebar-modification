@@ -134,15 +134,62 @@ export function idArg(value: object, key: string): string | undefined {
 	return typeof out === "string" && /^-?\d{1,10}$/.test(out) ? out : undefined
 }
 
-// Whether text holds C0 controls or DEL (never in a URL, a name or an id).
+// Whether text holds C0 controls or DEL (never in a URL, a name or an id), or what XML cannot carry at all
+// (U+FFFE, U+FFFF, lone surrogates).
 export function hasControl(text: string): boolean {
 	for (let k = 0; k < text.length; k++) {
 		const code = text.charCodeAt(k)
 
-		if (code < 0x20 || code === 0x7f) return true
+		if (code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(k + 1) & 0xfc00) === 0xdc00) k++
+		else if (code < 0x20 || code === 0x7f || (code >= 0xd800 && code <= 0xdfff) || code === 0xfffe || code === 0xffff) return true
 	}
 
 	return false
+}
+
+// Commands whose strings are written as they are (attribute values, field codes, marks), not cleaned as typed
+// text is.
+const VERBATIM_TEXT: ReadonlySet<string> = new Set([
+	"link.set",
+	"insert.field",
+	"insert.date",
+	"note.insertFootnote",
+	"note.insertEndnote",
+	"control.text",
+	"control.items",
+	"drawing.altText",
+	"image.insert"
+])
+
+function carriesXmlText(value: unknown, depth: number): boolean {
+	if (typeof value === "string") {
+		for (let k = 0; k < value.length; k++) {
+			const code = value.charCodeAt(k)
+
+			if (code >= 0xd800 && code <= 0xdbff && (value.charCodeAt(k + 1) & 0xfc00) === 0xdc00) k++
+			else if (
+				(code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
+				(code >= 0xd800 && code <= 0xdfff) ||
+				code === 0xfffe ||
+				code === 0xffff
+			)
+				return false
+		}
+
+		return true
+	}
+
+	if (typeof value !== "object" || value === null || depth > 4) return true
+
+	for (const item of Array.isArray(value) ? value : Object.values(value)) if (!carriesXmlText(item, depth + 1)) return false
+
+	return true
+}
+
+// Whether a command would write text XML cannot hold (tab and line ends aside): refused at the command, as a
+// bridge message is, rather than by every save after it.
+export function writesUnholdableText(command: { readonly type: string }): boolean {
+	return VERBATIM_TEXT.has(command.type) && !carriesXmlText(command, 0)
 }
 
 // Twips, as far as Word's own limits go (22 inches).

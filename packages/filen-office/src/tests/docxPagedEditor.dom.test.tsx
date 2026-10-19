@@ -423,6 +423,81 @@ describe("DocxEditor input", () => {
 		expect(editor.selection().head).toBeLessThan(paragraphPos(editor, 1) + 1 + paragraph.content.size)
 	})
 
+	it("edits a note beside the body (no dimming, a click or tap in the body goes back), a header dimmed and left by a double click", async () => {
+		const NOTES =
+			'<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
+			'<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
+			'<w:footnote w:id="1"><w:p><w:r><w:t>Note text</w:t></w:r></w:p></w:footnote>'
+		const { editor } = await pagedEditor(
+			buildDocx({
+				body:
+					'<w:p><w:r><w:t>Body text with a note</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>' +
+					"<w:p><w:r><w:t>Second paragraph</w:t></w:r></w:p>" +
+					'<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>',
+				headers: { rIdH: "<w:p><w:r><w:t>Header text</w:t></w:r></w:p>" },
+				footnotes: NOTES
+			})
+		)
+		const { content } = await mount(editor)
+		const body = editor.body.session.story.story.index
+		const second = textStart(editor, "Second paragraph") + 3
+		const box = editor.geometry.locate(second)
+
+		if (box === undefined) throw new Error("no caret")
+
+		const point = clientPoint(editor, box.page, box.x + 1, box.top + box.height / 2)
+		const page = container.querySelector(`[data-fo-page="${String(box.page)}"]`) ?? content
+		const click = (init: PointerEventInit = {}): void =>
+			act(() => {
+				page.dispatchEvent(pointer("pointerdown", point, init))
+				page.dispatchEvent(pointer("pointerup", point, init))
+			})
+		const dimmed = (): boolean => container.querySelector(".fo-docx-dim") !== null
+		const note = editor.edits.model.footnotes.get("1")?.index ?? -1
+		const header = editor.edits.model.stories.findIndex(story => story.kind === "header")
+
+		act(() => {
+			editor.enterStory(note, -1)
+		})
+		await act(frame)
+		expect(editor.activeStory).toBe(note)
+		expect(dimmed()).toBe(false)
+
+		// One click in the body: the caret there.
+		click()
+		expect(editor.activeStory).toBe(body)
+		expect(editor.selection().head).toBe(second)
+
+		// One tap, the same (touch has no Escape key and no double click to leave by).
+		act(() => {
+			editor.enterStory(note, -1)
+		})
+		await act(frame)
+		expect(editor.activeStory).toBe(note)
+		click({ pointerType: "touch" })
+		expect(editor.activeStory).toBe(body)
+		expect(editor.selection().head).toBe(second)
+
+		act(() => {
+			editor.enterStory(header, 0)
+		})
+		await act(frame)
+		expect(dimmed()).toBe(true)
+
+		// A header is left by a double click on the body only (presses apart, not counted as one).
+		const apart = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 600))
+
+		await apart()
+		click()
+		expect(editor.activeStory).toBe(header)
+		await apart()
+		click()
+		click()
+		expect(editor.activeStory).toBe(body)
+		await act(frame)
+		expect(dimmed()).toBe(false)
+	})
+
 	it("places the caret on the nearest line for presses between and beside pages", async () => {
 		const { editor } = await pagedEditor(LONG)
 		const { content } = await mount(editor)

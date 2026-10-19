@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import { bytesSource } from "@filen/office/core/opc"
 import type { FontExtents, TextMeasurer } from "@filen/office/core/text"
 import { DocxEditorSession, docxSchema, type BlockProof } from "@filen/office/core/docx/edit"
-import { saveDocx, writerProof } from "@filen/office/core/docx/write"
+import { prepareDocxSave, saveDocx, writerProof } from "@filen/office/core/docx/write"
 import type { DocxEngineServices } from "@filen/office/dom/docx"
 import { inThreadEditingHost } from "@filen/office/dom/docx/editing"
 import { nodeText, openBytes } from "./docxEditFixtures"
@@ -106,6 +106,68 @@ describe("inThreadEditingHost", () => {
 		const check = new DocxEditorSession(reopened.context)
 
 		expect(nodeText(check.state.doc.child(0))).toBe("Hello, world")
+		session.close()
+	})
+	it("holds overlay merges while a save runs", async () => {
+		const pause = (ms: number): Promise<void> => new Promise(done => setTimeout(done, ms))
+		const seen: { held: boolean[]; parts: number[] } = { held: [], parts: [] }
+		let parts: () => number = () => 0
+		let held: () => boolean = () => false
+		const editing = inThreadEditingHost(() => services({ count: 0 }), {
+			writer: {
+				async prepare(input, options) {
+					// A merge due now would run in this wait if the save did not hold it off.
+					await pause(60)
+					seen.held.push(held())
+					seen.parts.push(parts())
+
+					return prepareDocxSave(input, options)
+				}
+			}
+		})
+		const session = editing.host(
+			bytesSource(buildDocx({ body: Array.from({ length: 40 }, (_, k) => p(`Paragraph ${String(k)}`)).join("") })),
+			() => undefined
+		)
+		const editor = await editing.editor
+		const edits = editor.edits
+
+		parts = () => new Set([...edits.overlayRecords()].map(record => record.part)).size
+		held = () => edits.compactHeld()
+		edits.compaction = { ...edits.compaction, parts: 3, minimum: 2, quietMs: 0 }
+
+		// Typed with merges held: one overlay part per edit.
+		const release = edits.holdCompaction()
+
+		for (let k = 0; k < 6; k++) {
+			let at = -1
+			let index = 0
+
+			editor.state.doc.forEach((_node, offset) => {
+				if (index++ === k * 5) at = offset + 3
+			})
+			editor.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, at)).insertText("typed "))
+			await editor.whenSettled()
+		}
+
+		const before = parts()
+
+		expect(before).toBeGreaterThanOrEqual(3)
+		release()
+
+		const saving = editing.save()
+
+		expect(held()).toBe(true)
+		await saving
+		expect(seen.held).toEqual([true])
+		expect(seen.parts).toEqual([before])
+		expect(parts()).toBe(before)
+		expect(held()).toBe(false)
+
+		// Released: the merge the save held off runs.
+		await pause(200)
+		await editor.whenSettled()
+		expect(parts()).toBeLessThan(before)
 		session.close()
 	})
 })

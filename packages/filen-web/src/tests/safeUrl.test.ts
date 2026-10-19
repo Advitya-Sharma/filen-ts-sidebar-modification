@@ -44,6 +44,14 @@ describe("isSafeAbsoluteHref", () => {
 		expect(isSafeAbsoluteHref("//example.com/x")).toBe(false)
 	})
 
+	it("rejects a scheme-relative href, which parses alone but opens against the app's origin", () => {
+		// new URL("https:/reset/x") is https://reset/x, yet the page resolves it to its own origin's /reset/x.
+		expect(isSafeAbsoluteHref("https:/reset/x")).toBe(false)
+		expect(isSafeAbsoluteHref("https:d/uuid#key")).toBe(false)
+		expect(isSafeAbsoluteHref("http:example.com")).toBe(false)
+		expect(isSafeAbsoluteHref("https://example.com/a?b#c")).toBe(true)
+	})
+
 	it("fails closed on a string the URL parser can't resolve", () => {
 		expect(isSafeAbsoluteHref("http://")).toBe(false)
 	})

@@ -11,6 +11,7 @@ import {
 	SOURCE_INTS,
 	SourceInt,
 	buildDocxModel,
+	drawingAltText,
 	layoutDocument,
 	openDocxPackage,
 	gateReasons,
@@ -18,6 +19,7 @@ import {
 	parseStyles,
 	parseTheme,
 	styleSettings,
+	vmlAltText,
 	type DocumentLayout,
 	type DocxModel,
 	type DocxPackage,
@@ -27,6 +29,8 @@ import {
 	type ObjectSizer,
 	type PageDisplayList
 } from "../../core/docx/index"
+import type { StoryPart } from "../../core/docx/model/index"
+import { viewable } from "../../core/docx/objects/images"
 import type { DrawingList } from "../../core/drawingml/index"
 import {
 	FontManager,
@@ -111,9 +115,12 @@ export interface DocxEngineEditing {
 	opened(open: DocxEngineOpen): void
 }
 
-// Images larger than this (inflated) are not shown.
+// Images larger than this (inflated) are not shown, nor rasters decoding to more pixels (200 MB as RGBA), nor
+// bytes that are neither a raster with a readable size nor an SVG (viewable).
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024
+const MAX_MEDIA_PIXELS = 50_000_000
 const COLOR = /^[0-9A-Fa-f]{6}$/
+const NO_LINKS: readonly LinkRange[] = []
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp", "image/svg+xml"])
 
 function isDocumentError(error: unknown): boolean {
@@ -243,7 +250,8 @@ export class DocxEngine implements DocxSessionApi {
 	private readonly pendingFaces: DocxFontFace[] = []
 	private readonly links: DocxLinkTarget[] = []
 	private readonly linkKeys = new Map<string, number>()
-	private readonly paragraphLinkCache = new Map<number, readonly LinkRange[]>()
+	// Per part (an edit's overlay part goes with it), by paragraph item.
+	private paragraphLinkCache = new WeakMap<StoryPart, Map<number, readonly LinkRange[]>>()
 	private shippedPages = 0
 	private shippedStyles = 0
 	private shippedDecorations = 0
@@ -557,14 +565,24 @@ export class DocxEngine implements DocxSessionApi {
 
 		// The paragraph's own part (an edited one is laid out from its overlay part), else its story's.
 		const partIndex = sourcePart >= 0 ? sourcePart : (model.stories[story]?.part ?? -1)
-		const key = partIndex * 0x4000000 + item
-		let ranges = this.paragraphLinkCache.get(key)
+		const part = model.parts[partIndex]
+
+		if (part === undefined || part.kinds[item] !== Item.Paragraph) return NO_LINKS
+
+		let byItem = this.paragraphLinkCache.get(part)
+
+		if (byItem === undefined) {
+			byItem = new Map()
+			this.paragraphLinkCache.set(part, byItem)
+		}
+
+		let ranges = byItem.get(item)
 
 		if (ranges === undefined) {
-			const part = model.parts[partIndex]
+			const found = paragraphLinks(part, item, text, this.view)
 
-			ranges = part === undefined || part.kinds[item] !== Item.Paragraph ? [] : paragraphLinks(part, item, text, this.view)
-			this.paragraphLinkCache.set(key, ranges)
+			ranges = found.length === 0 ? NO_LINKS : found
+			byItem.set(item, ranges)
 		}
 
 		return ranges
@@ -756,9 +774,22 @@ export class DocxEngine implements DocxSessionApi {
 						? await drawings.vmlDrawing(vmlInfo)
 						: ({ kind: "placeholder", reason: "missing" } as const)
 
-			return result.kind === "drawing"
-				? { kind: "drawing", id, drawing: drawingData(result.list, transfer, await this.drawingFonts(result.list)) }
-				: { kind: "placeholder", id, reason: result.reason }
+			if (result.kind !== "drawing") return { kind: "placeholder", id, reason: result.reason }
+
+			const reader = model.parts[drawingInfo?.part ?? vmlInfo?.part ?? -1]?.reader
+			const alt =
+				reader === undefined
+					? ""
+					: drawingInfo !== undefined
+						? drawingAltText(reader, drawingInfo.docPr)
+						: vmlAltText(reader, vmlInfo?.shape ?? -1)
+
+			return {
+				kind: "drawing",
+				id,
+				drawing: drawingData(result.list, transfer, await this.drawingFonts(result.list)),
+				...(alt === "" ? {} : { alt })
+			}
 		}
 
 		return { kind: "placeholder", id, reason: "unsupported" }
@@ -790,8 +821,11 @@ export class DocxEngine implements DocxSessionApi {
 		// A new picture of the document being edited, not in the package yet.
 		const pending = pkg.opc.entry(partName) !== undefined ? undefined : this.layoutModel?.pendingMedia?.media(partName)
 
-		if (pending !== undefined)
+		if (pending !== undefined) {
+			if (!viewable(pending.bytes, MAX_MEDIA_PIXELS)) return null
+
 			return { bytes: pending.bytes.slice(), type: IMAGE_TYPES.has(pending.contentType) ? pending.contentType : "" }
+		}
 
 		const entry = pkg.opc.entry(partName)
 
@@ -800,6 +834,8 @@ export class DocxEngine implements DocxSessionApi {
 		try {
 			const bytes = await pkg.opc.read(partName)
 			const type = (pkg.contentTypes.typeOf(partName) ?? "").toLowerCase()
+
+			if (!viewable(bytes, MAX_MEDIA_PIXELS)) return null
 
 			return { bytes, type: IMAGE_TYPES.has(type) ? type : "" }
 		} catch (error) {
@@ -953,7 +989,7 @@ export class DocxEngine implements DocxSessionApi {
 		this.model = undefined
 		this.drawings = undefined
 		this.bookmarks = undefined
-		this.paragraphLinkCache.clear()
+		this.paragraphLinkCache = new WeakMap()
 		this.mathSizes.clear()
 		this.objectIds.clear()
 	}
@@ -974,7 +1010,7 @@ export class DocxEngine implements DocxSessionApi {
 		this.objectCache = undefined
 		this.bookmarkLocations = undefined
 		this.annotationCache = undefined
-		this.paragraphLinkCache.clear()
+		this.paragraphLinkCache = new WeakMap()
 		this.mathSizes.clear()
 		this.objectIds.clear()
 		this.pendingFaces.length = 0

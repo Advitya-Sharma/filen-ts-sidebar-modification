@@ -26,7 +26,9 @@ import { EPSILON, twips } from "./units"
 // repeated on every page and rows split across pages unless w:cantSplit.
 
 interface Slot {
+	// The cell, and the part its row is laid out from.
 	readonly item: number
+	readonly part: StoryPart
 	readonly format: CellFormat
 	readonly column: number
 	readonly span: number
@@ -191,7 +193,8 @@ export function cellFill(cell: ResolvedShading | undefined, table: ResolvedShadi
 }
 
 // The table row `row` of the table at `table` of `part` is laid out with (its w:tblPrEx over the table's
-// w:tblPr; `direct` the table's own), and the row's properties.
+// w:tblPr; `direct` the table's own), and the row's properties. `rowPart`: the part the row is laid out from
+// (an edit's overlay).
 export function rowFormat(
 	resolver: PropertyResolver,
 	store: PropsStore,
@@ -199,17 +202,21 @@ export function rowFormat(
 	table: number,
 	row: number,
 	direct: TableFormat,
-	position: RowPosition
+	position: RowPosition,
+	rowPart: StoryPart = part
 ): { readonly table: TableFormat; readonly props: ResolvedTableRowProps } {
-	const document = part.document
-	const rowRow = part.aux[row] ?? -1
-	const tblPrEx = part.rows.tblPrEx[rowRow] ?? -1
+	const document = rowPart.document
+	const rowRow = rowPart.aux[row] ?? -1
+	const tblPrEx = rowPart.rows.tblPrEx[rowRow] ?? -1
 	const format =
 		tblPrEx < 0
 			? direct
-			: resolver.table(store.table(document, part.tables.tblPr[part.aux[table] ?? -1] ?? -1), store.table(document, tblPrEx))
+			: resolver.table(
+					store.tableLook(part.document, part.tables.tblPr[part.aux[table] ?? -1] ?? -1),
+					store.tableLook(document, tblPrEx)
+				)
 
-	return { table: format, props: resolver.row(format, store.row(document, part.rows.trPr[rowRow] ?? -1), position) }
+	return { table: format, props: resolver.row(format, store.rowLook(document, rowPart.rows.trPr[rowRow] ?? -1), position) }
 }
 
 // A cell's format in its row (`own` its w:tcPr) from grid column `column` of `columns`, and the columns it spans.
@@ -358,6 +365,112 @@ export function rowIndex(part: StoryPart, rows: readonly number[], item: number)
 	return row !== undefined && item < part.end(row) ? high : -1
 }
 
+// The rows of a table laid out in a revision view: its own, or the rows an edit gave it (some of overlay
+// parts, see LayoutEdits.rows).
+export class LaidRows {
+	readonly part: StoryPart
+	readonly items: number[] = []
+	// Each row's part (undefined: all are the table's).
+	readonly parts: StoryPart[] | undefined
+	// Per part, its rows' items (ascending) and their indices, made when first asked.
+	private byPart: Map<number, { readonly items: number[]; readonly rows: number[]; readonly part: StoryPart }> | undefined = undefined
+
+	constructor(
+		part: StoryPart,
+		table: number,
+		view: RevisionView,
+		list: Float64Array | undefined,
+		partOf: (index: number) => StoryPart | undefined
+	) {
+		this.part = part
+
+		if (list === undefined) {
+			tableRows(part, table, view, this.items)
+			this.parts = undefined
+
+			return
+		}
+
+		const parts: StoryPart[] = []
+
+		for (const value of list) {
+			const row = Number.isNaN(value) ? undefined : partOf(refPart(value))
+			const item = refItem(value)
+
+			if (row === undefined || (view !== RevisionView.Markup && row.hidden(item, view))) continue
+
+			this.items.push(item)
+			parts.push(row)
+		}
+
+		this.parts = parts
+	}
+
+	partAt(k: number): StoryPart {
+		return this.parts?.[k] ?? this.part
+	}
+
+	// The index of the row holding item `item` of part `part`, or -1.
+	indexOf(part: number, item: number): number {
+		const parts = this.parts
+
+		if (parts === undefined) return part === this.part.index ? rowIndex(this.part, this.items, item) : -1
+
+		let byPart = this.byPart
+
+		if (byPart === undefined) {
+			byPart = new Map()
+
+			for (let k = 0; k < parts.length; k++) {
+				const row = parts[k]
+
+				if (row === undefined) continue
+
+				let entry = byPart.get(row.index)
+
+				if (entry === undefined) {
+					entry = { items: [], rows: [], part: row }
+					byPart.set(row.index, entry)
+				}
+
+				entry.items.push(this.items[k] ?? -1)
+				entry.rows.push(k)
+			}
+
+			// Rows moved by an edit may stand out of their part's order.
+			for (const entry of byPart.values()) {
+				let sorted = true
+
+				for (let k = 1; k < entry.items.length && sorted; k++) sorted = (entry.items[k - 1] ?? 0) < (entry.items[k] ?? 0)
+
+				if (sorted) continue
+
+				const order = entry.items.map((_, k) => k).sort((a, b) => (entry.items[a] ?? 0) - (entry.items[b] ?? 0))
+				const items = order.map(k => entry.items[k] ?? -1)
+				const rows = order.map(k => entry.rows[k] ?? -1)
+
+				entry.items.splice(0, items.length, ...items)
+				entry.rows.splice(0, rows.length, ...rows)
+			}
+
+			this.byPart = byPart
+		}
+
+		const entry = byPart.get(part)
+
+		if (entry === undefined) return -1
+
+		const at = rowIndex(entry.part, entry.items, item)
+
+		return at < 0 ? -1 : (entry.rows[at] ?? -1)
+	}
+}
+
+// The rows table `item` of `part` is laid out with (see LaidRows).
+export function laidRows(engine: Engine, part: StoryPart, item: number): LaidRows {
+	return new LaidRows(part, item, engine.view, engine.edits?.rows?.get(ref(part.index, item)), index => engine.part(index))
+}
+
 export function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
 	if (a === b) return true
 	if (a.length !== b.length) return false
@@ -375,9 +488,13 @@ export class TableLayout {
 	y = 0
 	// Laid out as a floating table (w:tblpPr) at a position the flow chose: its own offset is applied.
 	floated = false
+	// Floated: past this bottom it cannot fit where it floats, and laying it out stops (tooTall).
+	floatLimit = Infinity
+	tooTall = false
 	// Body rows placed in the current area (repeated header rows not counted).
 	rowsPlaced = 0
-	private readonly rows: number[] = []
+	private readonly laid: LaidRows
+	private readonly rows: number[]
 	private readonly direct: TableFormat
 	private readonly floating: FloatingTablePosition | undefined
 	private grid: number[] = []
@@ -426,9 +543,10 @@ export class TableLayout {
 		const tableRow = part.aux[item] ?? -1
 		const tblPr = part.tables.tblPr[tableRow] ?? -1
 
-		this.direct = engine.resolver.table(engine.store.table(part.document, tblPr))
+		this.direct = engine.resolver.table(engine.store.tableLook(part.document, tblPr))
 		this.floating = floatingPosition(this.direct.props.position)
-		this.collectRows()
+		this.laid = laidRows(engine, part, item)
+		this.rows = this.laid.items
 
 		if (resume === undefined) {
 			this.computeGrid(area)
@@ -490,9 +608,17 @@ export class TableLayout {
 		}
 	}
 
-	// Whether item `item` (in a cell) is laid out from here on: in a row not laid out yet, or a header row the
-	// table repeats.
-	ahead(item: number): boolean {
+	// Whether item `item` of part `part` (in a cell) is laid out from here on: in a row not laid out yet, or a
+	// header row the table repeats.
+	ahead(part: number, item: number): boolean {
+		if (this.laid.parts !== undefined) {
+			const row = this.laid.indexOf(part, item)
+
+			return row >= 0 && (row >= this.row || row < this.headerRows)
+		}
+
+		if (part !== this.part.index) return false
+
 		const current = this.rows[this.row]
 
 		if (current !== undefined && item >= current) return true
@@ -502,17 +628,14 @@ export class TableLayout {
 		return header !== undefined && item < this.part.end(header)
 	}
 
-	// The index among the rows laid out of the row holding item `item`, or -1 (in no row laid out).
-	rowOf(item: number): number {
-		return rowIndex(this.part, this.rows, item)
+	// The index among the rows laid out of the row holding item `item` of part `part`, or -1 (in no row laid
+	// out).
+	rowOf(part: number, item: number): number {
+		return this.laid.indexOf(part, item)
 	}
 
-	private collectRows(): void {
-		tableRows(this.part, this.item, this.engine.view, this.rows)
-	}
-
-	private cellItems(row: number): number[] {
-		return cellItems(this.part, row, this.engine.view)
+	private cellItems(part: StoryPart, row: number): number[] {
+		return cellItems(part, row, this.engine.view)
 	}
 
 	private computeGrid(area: Area): void {
@@ -532,11 +655,13 @@ export class TableLayout {
 		const props = this.direct.props
 		let columns = 0
 
-		for (const row of this.rows.slice(0, 32)) {
-			const rowProps = this.engine.store.row(document, part.rows.trPr[part.aux[row] ?? -1] ?? -1)
+		for (let k = 0; k < this.rows.length && k < 32; k++) {
+			const row = this.rows[k] ?? -1
+			const from = this.laid.partAt(k)
+			const rowProps = this.engine.store.rowLook(from.document, from.rows.trPr[from.aux[row] ?? -1] ?? -1)
 			let count = (rowProps.gridBefore ?? 0) + (rowProps.gridAfter ?? 0)
 
-			for (const cell of this.cellItems(row)) count += this.cellProps(cell).gridSpan ?? 1
+			for (const cell of this.cellItems(from, row)) count += this.cellProps(from, cell).gridSpan ?? 1
 
 			columns = Math.max(columns, count)
 		}
@@ -626,14 +751,13 @@ export class TableLayout {
 	}
 
 	// A cell's direct properties, parsed once (the grid reads the first rows before they are laid out).
-	private cellProps(cell: number): TableCellProps {
-		let props = this.cells.get(cell)
+	private cellProps(part: StoryPart, cell: number): TableCellProps {
+		const key = ref(part.index, cell)
+		let props = this.cells.get(key)
 
 		if (props === undefined) {
-			const part = this.part
-
-			props = this.engine.store.cell(part.document, part.cells.tcPr[part.aux[cell] ?? -1] ?? -1)
-			this.cells.set(cell, props)
+			props = this.engine.store.cellLook(part.document, part.cells.tcPr[part.aux[cell] ?? -1] ?? -1)
+			this.cells.set(key, props)
 		}
 
 		return props
@@ -650,15 +774,16 @@ export class TableLayout {
 
 		const engine = this.engine
 		const position = { rowIndex: index, rowCount: this.rows.length }
-		const { table, props } = rowFormat(engine.resolver, engine.store, this.part, this.item, item, this.direct, position)
+		const from = this.laid.partAt(index)
+		const { table, props } = rowFormat(engine.resolver, engine.store, this.part, this.item, item, this.direct, position, from)
 		const slots: Slot[] = []
 		let column = props.gridBefore
 		const bidi = this.direct.props.bidiVisual
 
-		for (const cell of this.cellItems(item)) {
-			const direct = this.cellProps(cell)
+		for (const cell of this.cellItems(from, item)) {
+			const direct = this.cellProps(from, cell)
 
-			this.cells.delete(cell)
+			this.cells.delete(ref(from.index, cell))
 
 			const { format, span } = cellFormat(engine.resolver, table, direct, position, column, this.grid.length)
 			const end = Math.min(this.grid.length, column + span)
@@ -667,6 +792,7 @@ export class TableLayout {
 
 			slots.push({
 				item: cell,
+				part: from,
 				format,
 				column,
 				span,
@@ -792,6 +918,8 @@ export class TableLayout {
 				this.y += twips(position.y)
 		}
 
+		let placed = 0
+
 		while (this.row < this.rows.length) {
 			const info = this.info(this.row)
 
@@ -801,6 +929,11 @@ export class TableLayout {
 				continue
 			}
 
+			// Out of time between two rows: the area goes on in the next slice (a body table flowing with the text:
+			// a floating one is laid out whole, again from its start).
+			if (placed > 0 && this.flow.suspendable && !this.floated && this.engine.due) return FlowStatus.SUSPEND
+
+			placed++
 			page.mark(this.mark)
 
 			const status = this.layoutRow(area, this.row, this.pool, false, this.continuing)
@@ -812,6 +945,13 @@ export class TableLayout {
 				this.infos.delete(this.row - 64)
 				this.row++
 				this.rowsPlaced++
+
+				if (this.y > this.floatLimit) {
+					this.tooTall = true
+
+					return FlowStatus.OVERFLOW
+				}
+
 				continue
 			}
 
@@ -870,7 +1010,7 @@ export class TableLayout {
 					pool[k] = flow
 				}
 
-				if (!slot.continued) flow.setContainer(this.part, slot.item, slot.format)
+				if (!slot.continued) flow.setContainer(slot.part, slot.item, slot.format)
 				else flow.setRange(this.part, 0, 0)
 			})
 		}
@@ -1102,9 +1242,10 @@ export class TableLayout {
 
 	private firstParagraphBreaks(): boolean {
 		const slot = this.info(0)?.slots[0]
-		const part = this.part
 
 		if (slot === undefined) return false
+
+		const part = slot.part
 
 		for (let item = slot.item + 1; item < part.end(slot.item); item++) {
 			if (part.kinds[item] !== Item.Paragraph) continue

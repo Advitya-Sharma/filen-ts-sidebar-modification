@@ -31,6 +31,7 @@ import { InternTable } from "../react/docx/reflow/decorate"
 import { docxComments } from "../core/docx/review/comments"
 import { BlockHeights, estimateHeight } from "../react/docx/reflow/heights"
 import { ReflowView, type ReflowViewOptions } from "../react/docx/reflow/view"
+import { LiveStarts } from "../react/docx/edit/window"
 import { buildDocx, p } from "./docxSynthetic"
 import { pagedEditor } from "./pagedDomFixtures"
 
@@ -148,9 +149,10 @@ describe("reflow CSS", () => {
 		const css = paragraphCss(format)
 
 		expect(css).toContain("text-align: center")
-		expect(css).toContain("padding-inline-start: min(48px, 30%)")
-		// Indents never more than a share of the box (a narrow table cell): the text stays in it.
-		expect(css).toContain("text-indent: max(-24px, -30%)")
+		// Indents never more than a share of the box (a narrow table cell): the text stays in it. The hang comes
+		// out of the start indent, a marker's room is its share of the paragraph's box.
+		expect(css).toContain("padding-inline-start: calc(min(24px, 30%) + min(24px, 30%))")
+		expect(css).toContain("text-indent: calc(-1 * min(24px, 30%))")
 		expect(css).toContain("--fo-reflow-hang: min(24px, 30%)")
 		expect(paragraphCss(formats.paragraph(second))).not.toContain("text-indent")
 		expect(css).toContain("padding-top: 16px")
@@ -175,6 +177,126 @@ describe("reflow CSS", () => {
 
 		expect(up).toContain("vertical-align: super")
 		expect(up).toContain("background-color: #FFFF00")
+	})
+})
+
+describe("reflow CSS, indents", () => {
+	it("starts a capped hanging first line in its box: the hang takes no more than the start indent", async () => {
+		const css = async (ind: string): Promise<string> => {
+			const { editor } = await pagedEditor(buildDocx({ body: `<w:p><w:pPr><w:ind ${ind}/></w:pPr><w:r><w:t>Text</w:t></w:r></w:p>` }))
+			const session = editor.body.session
+
+			return paragraphCss(session.formats.paragraph(session.state.doc.child(0)))
+		}
+		// A list's usual indent: all of it hangs, the first line at the box's start.
+		const list = await css('w:left="720" w:hanging="720"')
+
+		expect(list).toContain("padding-inline-start: min(48px, 30%)")
+		expect(list).toContain("text-indent: calc(-1 * min(48px, 30%))")
+		expect(list).toContain("--fo-reflow-hang: min(48px, 30%)")
+
+		// A hang past the start indent: the first line at the box's start, the others at the start indent.
+		const past = await css('w:left="360" w:hanging="720"')
+
+		expect(past).toContain("padding-inline-start: min(24px, 30%)")
+		expect(past).toContain("text-indent: calc(-1 * min(24px, 30%))")
+
+		// No start indent: nothing hangs out of the box.
+		expect(await css('w:hanging="360"')).not.toContain("text-indent")
+
+		// A first-line indent is the first line's own.
+		const first = await css('w:left="720" w:firstLine="360"')
+
+		expect(first).toContain("padding-inline-start: min(48px, 30%)")
+		expect(first).toContain("text-indent: min(24px, 30%)")
+		expect(first).not.toContain("--fo-reflow-hang")
+	})
+})
+
+describe("live block starts", () => {
+	it("follows a story's edits, reading only the blocks they change, as starts counted anew", async () => {
+		const { editor } = await pagedEditor(LONG)
+		const session = editor.body.session
+		const starts = new LiveStarts(session.state.doc)
+		const stop = session.onApplied(transactions => starts.applyAll(transactions))
+		const counted = (): number[] => {
+			const out: number[] = []
+
+			session.state.doc.forEach((_node, offset) => out.push(offset))
+
+			return out
+		}
+		let seed = 7
+		const random = (): number => {
+			seed = (seed * 16807) % 2147483647
+
+			return seed / 2147483647
+		}
+
+		for (let step = 0; step < 200; step++) {
+			const doc = session.state.doc
+			const pos = 1 + Math.floor(random() * (doc.content.size - 2))
+			const $pos = doc.resolve(pos)
+			const tr = session.state.tr
+
+			if (!$pos.parent.isTextblock) continue
+
+			const roll = random()
+
+			if (roll < 0.5) tr.insertText("ab", pos)
+			else if (roll < 0.7) tr.split(pos)
+			else if (roll < 0.9) tr.delete(pos, Math.min(doc.content.size - 1, pos + Math.floor(random() * 400)))
+			else tr.insertText("x", 1).insertText("y", doc.content.size - 2)
+
+			session.dispatch(tr)
+			expect(starts.document).toBe(session.state.doc)
+			expect([...starts.starts]).toEqual(counted())
+		}
+
+		const middle = counted()[150] ?? 0
+
+		expect(starts.entryAt(middle)).toBe(150)
+		expect(starts.entryAt(middle + 1)).toBe(150)
+		stop()
+	})
+})
+
+describe("PagedEditor while the pages rest", () => {
+	it("leaves layout's view of the stories behind until resumed or a revision view asks, and no header commands meanwhile", async () => {
+		const DOC = buildDocx({
+			body:
+				p("Body text") + '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>',
+			headers: { rIdH: p("Header text") }
+		})
+		const { editor } = await pagedEditor(DOC)
+		const session = editor.body.session
+		const type = (text: string): void => {
+			session.dispatch(session.state.tr.insertText(text, 1))
+		}
+
+		editor.suspend()
+
+		const applied = vi.spyOn(editor.body.edits, "applyPending")
+
+		type("One ")
+		type("Two ")
+		expect(applied).not.toHaveBeenCalled()
+		expect(editor.body.edits.document).not.toBe(session.state.doc)
+		// Headers are not edited while their pages rest (their caret page would be stale).
+		expect(editor.snapshot().enabled["header.edit"]).toBe(false)
+		expect(editor.snapshot().enabled["header.remove"]).toBe(false)
+
+		// Another revision view reads the stories again: they catch up first (the edits as one change).
+		editor.setView(RevisionView.Final)
+		expect(applied).toHaveBeenCalledTimes(1)
+		expect(editor.body.edits.document).toBe(session.state.doc)
+
+		type("Three ")
+		editor.resume()
+		expect(editor.body.edits.document).toBe(session.state.doc)
+		expect(editor.snapshot().enabled["header.edit"]).toBe(true)
+		applied.mockRestore()
+		expect(session.state.doc.textContent).toBe("Three Two One Body text")
 	})
 })
 
@@ -297,6 +419,102 @@ describe("ReflowView", () => {
 		expect(press("End", { ctrlKey: true })).toBe(true)
 		expect(modify).toHaveBeenCalledTimes(2)
 		expect(editor.body.session.state.selection.from).toBe(editor.body.session.state.doc.content.size - 1)
+		Reflect.deleteProperty(selection ?? {}, "modify")
+	})
+
+	it("goes to the start of the line End went to the end of on Home, where the line wraps", async () => {
+		const { editor } = await pagedEditor(buildDocx({ body: p("First line wrapping here") }))
+		const reflow = open(editor)
+		const view = reflow.main.view
+		const selection = document.getSelection()
+		// The browser's moves: End to where the line wraps (also where the next line starts), Home to the line's start.
+		const wrap = 1 + "First line ".length
+		const calls: string[][] = []
+		const modify = (alter: string, direction: string, granularity: string): void => {
+			calls.push([alter, direction, granularity])
+
+			const head = view.state.selection.head
+			const to = granularity === "character" ? head - 1 : direction === "forward" ? wrap : head < wrap ? 1 : wrap
+
+			view.dispatch(
+				view.state.tr.setSelection(
+					alter === "extend"
+						? TextSelection.create(view.state.doc, view.state.selection.anchor, to)
+						: TextSelection.create(view.state.doc, to)
+				)
+			)
+		}
+
+		Object.defineProperty(selection, "modify", { value: modify, configurable: true })
+		// The line wraps at `wrap`: a position there is drawn at the first line's end and the second line's start.
+		vi.spyOn(view, "coordsAtPos").mockImplementation((pos, side = 1) => {
+			const top = pos < wrap || (pos === wrap && side < 0) ? 0 : 20
+
+			return { left: 0, right: 0, top, bottom: top + 16 }
+		})
+
+		const press = (name: string, init: KeyboardEventInit = {}): void => {
+			view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true, ...init }))
+		}
+
+		view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 3)))
+		press("End")
+		expect(editor.body.session.state.selection.head).toBe(wrap)
+		// End again: the same line's end (the browser's own move would take the next line's).
+		press("End")
+		expect(calls.slice(1)).toEqual([
+			["move", "backward", "character"],
+			["move", "forward", "lineboundary"]
+		])
+		expect(editor.body.session.state.selection.head).toBe(wrap)
+
+		press("Home")
+		expect(calls.slice(3)).toEqual([
+			["move", "backward", "character"],
+			["move", "backward", "lineboundary"]
+		])
+		expect(editor.body.session.state.selection.head).toBe(1)
+
+		// Text typed where the line wraps: the caret ends the line it was typed on. Typed elsewhere (no line wraps at
+		// the caret), Home is the browser's own move.
+		calls.length = 0
+		view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, wrap - 1)))
+		view.dom.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertText", data: "!", bubbles: true, cancelable: true }))
+		view.dispatch(view.state.tr.insertText("!"))
+		expect(editor.body.session.state.selection.head).toBe(wrap)
+		press("Home")
+		view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 4)))
+		view.dom.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertText", data: "!", bubbles: true, cancelable: true }))
+		view.dispatch(view.state.tr.insertText("!"))
+		press("Home")
+		expect(calls).toEqual([
+			["move", "backward", "character"],
+			["move", "backward", "lineboundary"],
+			["move", "backward", "lineboundary"]
+		])
+		view.dispatch(view.state.tr.delete(4, 5).delete(wrap - 1, wrap))
+		view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 3)))
+
+		// Extending too (Shift pressed alone first changes nothing); after another key, Home is the browser's own move.
+		calls.length = 0
+		press("End", { shiftKey: true })
+		press("Shift", { shiftKey: true })
+		press("Home", { shiftKey: true })
+		expect(calls).toEqual([
+			["extend", "forward", "lineboundary"],
+			["extend", "backward", "character"],
+			["extend", "backward", "lineboundary"]
+		])
+
+		calls.length = 0
+		press("End")
+		press("ArrowLeft")
+		view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, wrap)))
+		press("Home")
+		expect(calls).toEqual([
+			["move", "forward", "lineboundary"],
+			["move", "backward", "lineboundary"]
+		])
 		Reflect.deleteProperty(selection ?? {}, "modify")
 	})
 
@@ -542,6 +760,12 @@ describe("ReflowView", () => {
 		expect(editor.activeStory).toBe(story)
 		expect(editor.storySession(story)?.state.doc.textContent).toContain("Note text!")
 		expect(reference?.textContent).toContain("Note text!")
+
+		// The note is edited beside the body: a click (focus) in the body goes back to it, as on the pages.
+		act(() => {
+			reflow.main.view.dom.dispatchEvent(new FocusEvent("focus"))
+		})
+		expect(editor.activeStory).toBe(editor.body.session.story.story.index)
 	})
 
 	it("draws the app's marks and a picture inserted since the document opened", async () => {
@@ -672,6 +896,194 @@ describe("ReflowView, as the pages resolve it", () => {
 
 		expect(scroller.textContent).toContain("A2x")
 		check()
+	})
+
+	it("bands rows and finds the last row among the rows the revision view shows, as the pages do", async () => {
+		const banded =
+			'<w:style w:type="table" w:styleId="Banded"><w:name w:val="Banded"/><w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr>' +
+			'<w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="DDDDDD"/></w:tcPr></w:tblStylePr>' +
+			'<w:tblStylePr w:type="lastRow"><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="00FF00"/></w:tcPr></w:tblStylePr></w:style>'
+		const del = '<w:trPr><w:del w:id="1" w:author="Ann" w:date="2024-01-01T00:00:00Z"/></w:trPr>'
+		const row = (text: string, trPr = ""): string => `<w:tr>${trPr}${cell(text)}${cell(`${text}b`)}</w:tr>`
+		const xml =
+			'<w:tbl><w:tblPr><w:tblStyle w:val="Banded"/><w:tblW w:w="0" w:type="auto"/><w:tblLook w:firstRow="0" w:lastRow="1" w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr>' +
+			'<w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>' +
+			row("R0") +
+			row("R1", del) +
+			row("R2") +
+			row("R3") +
+			row("R4", del) +
+			"</w:tbl>"
+		const { editor } = await pagedEditor(buildDocx({ body: xml + p("After"), ...styles(banded) }))
+
+		open(editor)
+
+		const fills = (): string[] =>
+			[...scroller.querySelectorAll("tr")].map(tr => tr.querySelector("td")?.style.getPropertyValue("background-color") ?? "")
+		const revisions = (): string[] => [...scroller.querySelectorAll("tr")].map(tr => tr.getAttribute("data-fo-revision") ?? "")
+
+		act(() => {
+			editor.setView(RevisionView.Markup)
+		})
+		// Every row counts: R4 is the last, R0 R2 the odd bands.
+		expect(fills()).toEqual(["#DDDDDD", "", "#DDDDDD", "", "#00FF00"])
+		expect(revisions()).toEqual(["", "del", "", "", "del"])
+
+		act(() => {
+			editor.setView(RevisionView.Final)
+		})
+		// R1 and R4 are not shown (the stylesheet hides them): R0 R3 the odd bands, R3 the last row.
+		expect(scroller.dataset["foRevisions"]).toBe("final")
+		expect(fills()[0]).toBe("#DDDDDD")
+		expect(fills()[2]).toBe("")
+		expect(fills()[3]).toBe("#00FF00")
+
+		act(() => {
+			editor.setView(RevisionView.Original)
+		})
+		expect(fills()).toEqual(["#DDDDDD", "", "#DDDDDD", "", "#00FF00"])
+	})
+
+	it("hides the rows and cells the revision view hides, as the pages do: one inserted and deleted is in neither", async () => {
+		const by = 'w:author="Ann" w:date="2024-01-01T00:00:00Z"'
+		const both = `<w:trPr><w:ins w:id="1" ${by}/><w:del w:id="2" ${by}/></w:trPr>`
+		const xml =
+			'<w:tbl><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>' +
+			`<w:tr>${cell("A1")}${cell("B1", `<w:cellDel w:id="3" ${by}/>`)}</w:tr>` +
+			`<w:tr>${both}${cell("A2")}${cell("B2")}</w:tr>` +
+			`<w:tr>${cell("A3")}${cell("B3", `<w:cellIns w:id="4" ${by}/>`)}</w:tr></w:tbl>`
+		const { editor } = await pagedEditor(buildDocx({ body: xml + p("After") }))
+
+		open(editor)
+
+		// The stylesheet hides a row or cell by its tokens per revision view (docxReflow.test.ts reads the rule).
+		const RULES: Readonly<Record<string, string>> = {
+			markup: ":not(*)",
+			final: '[data-fo-revision~="del"]',
+			original: '[data-fo-revision~="ins"]'
+		}
+		const hidden = (): string[] =>
+			[...scroller.querySelectorAll("tr, td")]
+				.filter(element => element.matches(RULES[scroller.dataset["foRevisions"] ?? ""] ?? ":not(*)"))
+				.map(element => element.textContent)
+
+		expect([...scroller.querySelectorAll("tr, td")].map(element => element.getAttribute("data-fo-revision") ?? "")).toEqual([
+			"",
+			"",
+			"del",
+			"ins del",
+			"",
+			"",
+			"",
+			"",
+			"ins"
+		])
+
+		act(() => {
+			editor.setView(RevisionView.Markup)
+		})
+		expect(hidden()).toEqual([])
+		act(() => {
+			editor.setView(RevisionView.Final)
+		})
+		expect(hidden()).toEqual(["B1", "A2B2"])
+		act(() => {
+			editor.setView(RevisionView.Original)
+		})
+		expect(hidden()).toEqual(["A2B2", "B3"])
+	})
+
+	it("keeps a table's look while the pages rest, catching layout's view up only when its rows change", async () => {
+		const grid =
+			'<w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:tblPr><w:tblBorders>' +
+			'<w:insideH w:val="dashed" w:sz="8" w:space="0" w:color="00FF00"/></w:tblBorders></w:tblPr></w:style>'
+		const table =
+			'<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>' +
+			`<w:tr>${cell("A1")}${cell("B1")}</w:tr><w:tr>${cell("A2")}${cell("B2")}</w:tr></w:tbl>`
+		const { editor } = await pagedEditor(buildDocx({ body: p("Before") + table + p("After"), ...styles(grid) }))
+
+		editor.suspend()
+
+		const reflow = open(editor)
+		const view = reflow.main.view
+		const applied = vi.spyOn(editor.body.edits, "applyPending")
+		const bottoms = (): string[] => [...scroller.querySelectorAll("td")].map(td => td.style.getPropertyValue("border-bottom-style"))
+		const at = (text: string): number => {
+			let pos = -1
+
+			view.state.doc.descendants((node, offset) => {
+				if (pos < 0 && node.isText && node.text?.startsWith(text) === true) pos = offset + text.length
+
+				return pos < 0
+			})
+
+			return pos
+		}
+
+		expect(bottoms()).toEqual(["dashed", "dashed", "none", "none"])
+
+		// Text typed in a cell: the look as it was, layout's view left behind.
+		act(() => {
+			view.dispatch(view.state.tr.insertText("x", at("A1")))
+		})
+		expect(scroller.textContent).toContain("A1x")
+		expect(bottoms()).toEqual(["dashed", "dashed", "none", "none"])
+		expect(applied).not.toHaveBeenCalled()
+
+		// A row added: layout's view catches up, the new row looks as the table's last.
+		act(() => {
+			view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, at("B2"))))
+			void editor.execute({ type: "table.row.insertBelow" })
+		})
+		expect(applied).toHaveBeenCalled()
+		expect(bottoms()).toEqual(["dashed", "dashed", "dashed", "dashed", "none", "none"])
+		expect(editor.body.edits.document).toBe(editor.body.session.state.doc)
+		applied.mockRestore()
+		editor.resume()
+	})
+
+	it("reads tables' and cells' properties for their look only: tracked edits of them leave the store flat", async () => {
+		const table =
+			'<w:tbl><w:tblPr><w:tblBorders><w:insideH w:val="single" w:sz="4"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>' +
+			`<w:tr>${cell("A1")}${cell("B1")}</w:tr><w:tr>${cell("A2")}${cell("B2")}</w:tr></w:tbl>`
+		const { editor } = await pagedEditor(buildDocx({ body: p("Before") + table + p("After") }))
+		const session = editor.body.session
+		const store = session.context.store
+
+		session.context.review.tracking = true
+		session.context.identity.author = "Ann"
+		editor.suspend()
+		open(editor)
+
+		const at = (text: string): number => {
+			let pos = -1
+
+			session.state.doc.descendants((node, offset) => {
+				if (pos < 0 && node.isText && node.text === text) pos = offset + 1
+
+				return pos < 0
+			})
+
+			return pos
+		}
+		const counts = (): number[] => {
+			const stats = store.stats()
+
+			return [stats.tables, stats.cells]
+		}
+		const before = counts()
+
+		// Each a tracked change of its own (a w:tcPrChange with an id of its own): drawn, none is interned whole.
+		for (const [k, text] of ["A1", "B1", "A2", "B2", "A1"].entries()) {
+			act(() => {
+				session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, at(text))))
+				void editor.execute({ type: "table.cell.shading", fill: k % 2 === 0 ? "FF0000" : "00FF00" })
+			})
+		}
+
+		expect(scroller.querySelectorAll("td")[0]?.style.getPropertyValue("background-color")).toBe("#FF0000")
+		expect(counts()).toEqual(before)
+		editor.resume()
 	})
 
 	it("drops the spacing between paragraphs of one style that have contextual spacing", async () => {
@@ -999,10 +1411,33 @@ describe("ReflowView, stories and focus", () => {
 		expect(reflow.viewOf(second)?.hasFocus()).toBe(true)
 	})
 
-	it("does not edit a header or footer, which it does not show", async () => {
-		const { editor } = await pagedEditor(buildDocx({ body: p("Start") + reference(1), footnotes: NOTES + note(1) }))
+	it("does not edit a header or footer, which it does not show: their commands are off while it shows the document", async () => {
+		const { editor } = await pagedEditor(
+			buildDocx({
+				body:
+					p("Start") +
+					reference(1) +
+					'<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>',
+				headers: { rIdH: p("Header text") },
+				footnotes: NOTES + note(1)
+			})
+		)
+		const HEADER_COMMANDS = [
+			"header.edit",
+			"footer.edit",
+			"header.differentFirst",
+			"header.differentOddEven",
+			"header.remove",
+			"footer.remove"
+		] as const
+		const enabled = (): boolean[] => HEADER_COMMANDS.map(type => editor.snapshot().enabled[type])
 
-		open(editor)
+		expect(enabled()).toEqual([true, true, true, true, true, false])
+
+		const reflow = open(editor)
+
+		expect(enabled()).toEqual([false, false, false, false, false, false])
+		expect(editor.headersShown).toBe(false)
 
 		const body = editor.body.session.story.story.index
 
@@ -1019,6 +1454,14 @@ describe("ReflowView, stories and focus", () => {
 			expect(editor.activeStory).toBe(body)
 			expect(editor.body.session.state.selection.from).toBe(3)
 		}
+
+		expect(await editor.execute({ type: "header.differentFirst" })).toBe(false)
+
+		// The pages back: the commands too.
+		reflow.destroy()
+		views.splice(views.indexOf(reflow), 1)
+		expect(editor.headersShown).toBe(true)
+		expect(enabled()).toEqual([true, true, true, true, true, false])
 	})
 
 	it("makes no session for notes scrolled past and shows a note entered off the screen", async () => {

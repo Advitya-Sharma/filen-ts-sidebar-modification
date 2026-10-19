@@ -94,6 +94,13 @@ const FEATURES: readonly Feature[] = [
 
 export const EDIT_OPS: readonly EditOp[] = FEATURES.flatMap(feature => feature.ops)
 
+// The features (op families) with ops for `harness`.
+export function featureNames(harness: EditOp["harness"]): string[] {
+	return FEATURES.filter(feature => feature[harness] > 0 && feature.ops.some(op => op.harness === harness && (op.weight ?? 1) > 0)).map(
+		feature => feature.name
+	)
+}
+
 // Picks one op by weight with one draw.
 function pickWeighted(ops: readonly EditOp[], rand: Rand): EditOp {
 	const weight = (op: EditOp): number => Math.max(op.weight ?? 1, 1)
@@ -116,7 +123,8 @@ function stream(seed: number, name: string): Rand {
 // draw the op makes, come from that feature's own stream (a base op on a lent share from the lending feature's
 // own lent stream). A seed therefore replays every step up to the first one that picks a feature whose ops
 // changed, and later steps still pick the same features.
-// With `names`, it picks uniformly among those ops on the run's own stream instead.
+// With `names`, it picks uniformly among those ops on the run's own stream instead. With `families`, only those
+// features take shares, and none lends to base.
 export class OpPicker {
 	private readonly features: {
 		readonly feature: Feature
@@ -128,14 +136,20 @@ export class OpPicker {
 	private readonly total: number
 	private readonly named: EditOp[] | undefined
 
-	constructor(harness: EditOp["harness"], seed: number, names?: readonly string[]) {
-		this.features = FEATURES.map(feature => ({
-			feature,
-			ops: feature.ops.filter(op => op.harness === harness && (op.weight ?? 1) > 0),
-			rand: stream(seed, feature.name),
-			lent: stream(seed, `${feature.name}:lent`),
-			share: feature[harness]
-		})).filter(entry => entry.share > 0)
+	constructor(harness: EditOp["harness"], seed: number, names?: readonly string[], families?: readonly string[]) {
+		const unknown = families?.filter(family => !featureNames(harness).includes(family)) ?? []
+
+		if (unknown.length > 0) throw new Error(`No ${harness} ops in ${unknown.join(", ")}`)
+
+		this.features = FEATURES.filter(feature => families === undefined || families.includes(feature.name))
+			.map(feature => ({
+				feature,
+				ops: feature.ops.filter(op => op.harness === harness && (op.weight ?? 1) > 0),
+				rand: stream(seed, feature.name),
+				lent: stream(seed, `${feature.name}:lent`),
+				share: feature[harness]
+			}))
+			.filter(entry => entry.share > 0)
 		this.total = this.features.reduce((sum, entry) => sum + entry.share, 0)
 		this.named = names === undefined ? undefined : EDIT_OPS.filter(op => op.harness === harness && names.includes(op.name))
 
@@ -146,7 +160,7 @@ export class OpPicker {
 		if (this.named !== undefined) return { op: pickWeighted(this.named, run), rand: run }
 
 		let at = Math.floor(run() * this.total)
-		const base = this.features[0] as { readonly ops: EditOp[] }
+		const base = (this.features.find(entry => entry.feature.name === "base") ?? this.features[0]) as { readonly ops: EditOp[] }
 
 		for (const entry of this.features) {
 			at -= entry.share

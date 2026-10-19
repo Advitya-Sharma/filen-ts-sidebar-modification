@@ -62,7 +62,7 @@ export function DocxTouchSelection({
 	selectionKey: string
 	actions: TouchMenuActions
 }) {
-	const { t } = useTranslation("preview")
+	const { t } = useTranslation(["preview", "common"])
 	const [placed, setPlaced] = useState<Placed | null>(null)
 	const [dragging, setDragging] = useState<"start" | "end" | null>(null)
 	const dragOffset = useRef(0)
@@ -117,8 +117,9 @@ export function DocxTouchSelection({
 		}
 	}, [shown, container, handleRef, selectionKey])
 
-	// Until the ends of a new selection were read, nothing (rather than the last selection's).
-	if (!shown || placed?.key !== selectionKey) {
+	// Until the ends of a new selection were read, nothing (rather than the last selection's), except while a
+	// handle is dragged: unmounting it would end its pointer capture, and the drag with it.
+	if (!shown || placed === null || (placed.key !== selectionKey && dragging === null)) {
 		return null
 	}
 
@@ -214,6 +215,7 @@ export function DocxTouchSelection({
 		menu = (
 			<div
 				role="menu"
+				aria-label={t("common:selectionActionsLabel")}
 				data-preview-surface
 				className="pointer-events-auto absolute flex h-9 items-center overflow-hidden rounded-xl bg-popover text-xs text-popover-foreground shadow-md ring-1 ring-foreground/10"
 				style={{ left, top }}

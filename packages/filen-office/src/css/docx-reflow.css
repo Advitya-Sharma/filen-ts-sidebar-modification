@@ -224,7 +224,11 @@
 }
 
 .fo-docx-reflow[data-fo-revisions="final"] .fo-docx-reflow-del,
-.fo-docx-reflow[data-fo-revisions="original"] .fo-docx-reflow-ins {
+.fo-docx-reflow[data-fo-revisions="original"] .fo-docx-reflow-ins,
+.fo-docx-reflow[data-fo-revisions="final"] tr[data-fo-revision~="del"],
+.fo-docx-reflow[data-fo-revisions="final"] td[data-fo-revision~="del"],
+.fo-docx-reflow[data-fo-revisions="original"] tr[data-fo-revision~="ins"],
+.fo-docx-reflow[data-fo-revisions="original"] td[data-fo-revision~="ins"] {
 	display: none;
 }
 

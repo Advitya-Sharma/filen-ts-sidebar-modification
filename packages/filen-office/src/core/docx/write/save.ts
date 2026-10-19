@@ -30,6 +30,7 @@ import type { Node } from "prosemirror-model"
 import type { DocxEditContext, NewStory } from "../edit/context"
 import type { NewList } from "../edit/formats"
 import type { DocxEditorSession } from "../edit/session"
+import { writtenLinkTarget } from "../edit/commands/insert"
 import type { StoryPart } from "../model/index"
 import type { DocxPackage } from "../package"
 import { DocxSaveError, DocxVerifyError } from "./failure"
@@ -113,12 +114,23 @@ export interface DocxPrepareOptions {
 	readonly checksums?: boolean
 }
 
-// Bytes checksummed between checks of the clock.
-const CRC_STEP = 4 * 1024 * 1024
+// Bytes checksummed between checks of the clock: a few ms on a phone.
+const CRC_STEP = 1024 * 1024
 
 // The CRC-32 of a part's new content, in steps.
 async function checksum(bytes: PartBytes, clock: SliceClock | undefined): Promise<number> {
-	if (bytes instanceof Uint8Array) return crc32(bytes)
+	if (bytes instanceof Uint8Array) {
+		let crc = 0
+
+		for (let from = 0; from < bytes.length; from += CRC_STEP) {
+			crc = crc32(bytes.subarray(from, Math.min(bytes.length, from + CRC_STEP)), crc)
+
+			if (clock?.due === true) await clock.pause()
+		}
+
+		return crc
+	}
+
 	if (!(bytes instanceof BytePieces)) {
 		let crc = 0
 
@@ -838,7 +850,9 @@ export async function serializeDocx(input: DocxSaveInput, options: DocxPrepareOp
 
 			if (plan === undefined) throw new DocxWriteError("unsupported", `No relationships for ${part}`)
 
-			return plan.add({ type: `${RELATIONSHIP_BASE}/hyperlink`, target, external: true })
+			// A Target is an xsd:anyURI (ECMA-376 Part 2 §9.3): a target link.set did not make (a copy of a file's
+			// link that is not one) is written as link.set writes it.
+			return plan.add({ type: `${RELATIONSHIP_BASE}/hyperlink`, target: writtenLinkTarget(target), external: true })
 		},
 		parts,
 		...(nested === undefined ? {} : { nested: nested.nested })

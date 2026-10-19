@@ -11,14 +11,18 @@ import { parseFilenPublicLink } from "@filen/shared"
 // @filen/shared's chatMessageSegments carry the raw matched string, unhardened — this function no longer
 // has an upstream guarantee that only ever hands it an http(s) url, so the null path is genuinely
 // reachable whenever a caller passes something un-hardened, not just a defensive total-function guard.
-// The one current call site (messageContent.tsx) always hardens via hardenLinkHref first.
+// The chat call site (messageContent.tsx) always hardens via hardenLinkHref first; a document's links
+// arrive as the document wrote them (docxViewer.tsx), so a mailto: (no host) is null too.
 export function externalLinkDomain(url: string): string | null {
 	if (parseFilenPublicLink(url) !== null) {
 		return null
 	}
 
 	try {
-		return new URL(url).hostname.toLowerCase()
+		const host = new URL(url).hostname.toLowerCase()
+
+		// No host (mailto:): the mail client is what the user confirms in.
+		return host === "" ? null : host
 	} catch {
 		return null
 	}

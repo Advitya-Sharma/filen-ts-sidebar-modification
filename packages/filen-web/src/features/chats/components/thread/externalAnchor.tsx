@@ -6,11 +6,13 @@ export const EXTERNAL_LINK_REL = "noopener noreferrer nofollow"
 export function ExternalAnchor({
 	href,
 	className,
-	onClick
+	onClick,
+	onAuxClick
 }: {
 	href: string
 	className?: string | undefined
 	onClick?: MouseEventHandler<HTMLAnchorElement>
+	onAuxClick?: MouseEventHandler<HTMLAnchorElement>
 }) {
 	return (
 		<a
@@ -19,6 +21,7 @@ export function ExternalAnchor({
 			rel={EXTERNAL_LINK_REL}
 			className={className}
 			onClick={onClick}
+			onAuxClick={onAuxClick}
 		>
 			{href}
 		</a>

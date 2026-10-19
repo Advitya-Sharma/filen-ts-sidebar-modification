@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react"
+import { useDeferredValue, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react"
 import { flushSync } from "react-dom"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -52,6 +52,7 @@ import {
 	firstMatchFrom,
 	markupRelayout,
 	objectInteractions,
+	replaceAllToast,
 	shownMarkup,
 	sameToolbarSnapshot,
 	stepMatch,
@@ -71,6 +72,7 @@ import { DocxFieldChip } from "@/features/preview/components/docxFieldChip"
 import { DocxFormControls } from "@/features/preview/components/docxFormControls"
 import { DocxParagraphDialog } from "@/features/preview/components/docxFormatControls"
 import { DocxHeaderChip } from "@/features/preview/components/docxHeaderChip"
+import { DocxLayoutBusy } from "@/features/preview/components/docxLayoutBusy"
 import { DocxPageSetupDialog } from "@/features/preview/components/docxPageSetupDialog"
 import { DocxTableBorderDrag } from "@/features/preview/components/docxTableBorderDrag"
 import { DocxTableSplitDialog } from "@/features/preview/components/docxTableMenu"
@@ -348,6 +350,9 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	}
 
 	const handleRef = useRef<DocxEditorHandle | null>(null)
+	// Describes the editing area to screen readers while it can be edited: Tab stays in it, Escape leaves.
+	const keysId = useId()
+	const describedBy = writable ? keysId : undefined
 	const [wrapper, setWrapper] = useState<HTMLDivElement | null>(null)
 	const rootRef = useRef<HTMLDivElement | null>(null)
 	const { width } = useElementSize(wrapper)
@@ -779,10 +784,19 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 					return
 				}
 
-				const replaced = replaceAll(editor.state, find.query, replacement, { caseSensitive: find.caseSensitive })
+				const result = replaceAll(editor.state, find.query, replacement, { caseSensitive: find.caseSensitive })
+				const before = editor.state.doc
 
-				if (replaced !== null && editor.dispatch(replaced.tr)) {
-					toast.success(t("previewDocxReplacedCount", { count: replaced.count }))
+				if (result !== null && "tr" in result && !editor.dispatch(result.tr)) {
+					return
+				}
+
+				const notice = replaceAllToast(result, editor.state.doc !== before)
+
+				if (notice?.key === "previewDocxReplacedCount") {
+					toast.success(t(notice.key, { count: notice.count }))
+				} else if (notice !== undefined) {
+					toast.error(t(notice.key))
 				}
 			}
 		}
@@ -1171,12 +1185,21 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 						}
 					}}
 				>
+					{describedBy === undefined ? null : (
+						<span
+							id={describedBy}
+							className="sr-only"
+						>
+							{t("previewDocxEditorKeys")}
+						</span>
+					)}
 					{editor === undefined ? null : reflow ? (
 						<DocxReflowSurface
 							editor={editor}
 							document={document}
 							handleRef={handleRef}
 							label={alt}
+							{...(describedBy === undefined ? {} : { describedBy })}
 							readOnly={readOnly}
 							apple={APPLE}
 							marks={marks}
@@ -1195,6 +1218,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 								gap={PAGE_GAP}
 								className="size-full"
 								label={alt}
+								{...(describedBy === undefined ? {} : { describedBy })}
 								readOnly={readOnly}
 								apple={APPLE}
 								onFind={() => {
@@ -1206,6 +1230,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 								{...(overlays === undefined ? {} : { overlays })}
 							/>
 							{reviewLayer}
+							<DocxLayoutBusy busy={document.status === "streaming"} />
 						</>
 					)}
 					{editor === undefined || reflow ? null : (

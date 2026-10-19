@@ -3,13 +3,14 @@ import type { Decoration, EditorView, MarkViewConstructor, NodeView, NodeViewCon
 import { BLOCK_NODE_MARKS, docxSchema, equationTree } from "../../../core/docx/edit/index"
 import type { OmmlRevisionView } from "../../../core/math/index"
 import { ObjectKind, textboxStories } from "../../../core/docx/layout/objects"
+import { RevisionFlag } from "../../../core/docx/model/kinds"
 import { drawingEdit, drawingState, isNewPicture, sourceDrawing } from "../../../core/docx/objects/edit"
 import type { PagedEditor } from "../../../core/docx/paged/index"
 import type { ObjectHitKind } from "../../../core/docx/paged/objects"
 import type { CssFaces } from "../../../core/docx/reflow/css"
 import { docxNotes } from "../../../core/docx/stories/notes"
 import { symbolTable, symbolToUnicode } from "../../../core/fonts/index"
-import { attrText } from "../edit/clipboard"
+import { attrText, fieldText } from "../edit/clipboard"
 import { gapRowCount, isGap } from "../edit/window"
 import { paintMath } from "../paint/math"
 import { paintObjects } from "../paint/objects"
@@ -199,7 +200,19 @@ export function reflowNodeViews(host: ReflowNodeHost, session: ReflowSource): Re
 
 			const dom = element("tr")
 
-			return { dom, contentDOM: dom, update: (next: Node) => next.type === node.type && gapRowCount(next) === undefined }
+			revise(dom, node)
+
+			return {
+				dom,
+				contentDOM: dom,
+				update: (next: Node) => {
+					if (next.type !== node.type || gapRowCount(next) !== undefined) return false
+
+					revise(dom, next)
+
+					return true
+				}
+			}
 		},
 		table_cell: node => {
 			const dom = element("td")
@@ -209,10 +222,18 @@ export function reflowNodeViews(host: ReflowNodeHost, session: ReflowSource): Re
 			// A vertically merged cell's continuation: one cell with the one above, as Word draws it.
 			if (node.attrs["vMerge"] === "continue") dom.dataset["foMerged"] = ""
 
+			revise(dom, node)
+
 			return {
 				dom,
 				contentDOM: dom,
-				update: (next: Node) => next.type === node.type && next.attrs["colspan"] === node.attrs["colspan"]
+				update: (next: Node) => {
+					if (next.type !== node.type || next.attrs["colspan"] !== node.attrs["colspan"]) return false
+
+					revise(dom, next)
+
+					return true
+				}
 			}
 		},
 		sdt: () => {
@@ -334,12 +355,13 @@ export function reflowNodeViews(host: ReflowNodeHost, session: ReflowSource): Re
 			}
 		},
 		run_object: leaf(attrText("text"), "fo-docx-reflow-object"),
-		// Its result, or its code in braces while it shows that (a data-fo-code decoration, as the pages show it).
+		// What it shows (fieldText), or its code in braces while it shows that (a data-fo-code decoration, as the
+		// pages show it).
 		field: (node, _view, getPos) => {
 			const dom = element("span", "fo-docx-reflow-field")
 			const result = element("span", "fo-docx-reflow-result")
 
-			result.textContent = attrText("result")(node)
+			result.textContent = fieldText(node)
 			dom.appendChild(result)
 			dom.contentEditable = "false"
 			host.target(dom, "field", session, getPos)
@@ -468,6 +490,20 @@ function drawingView(host: ReflowNodeHost, session: ReflowSource, node: Node, ge
 			for (const cleanup of cleanups) cleanup()
 		}
 	}
+}
+
+// A row's or cell's tracked insertion and deletion ("ins", "del", both): the stylesheet hides it in the revision
+// view that does not have it (Original an insertion, Final a deletion), as the pages do (revisionHidden).
+function revise(dom: HTMLElement, node: Node): void {
+	const flags = node.attrs["revision"] as number
+	const inserted = (flags & (RevisionFlag.Inserted | RevisionFlag.MovedTo)) !== 0
+	const deleted = (flags & (RevisionFlag.Deleted | RevisionFlag.MovedFrom)) !== 0
+	const kind = inserted && deleted ? "ins del" : inserted ? "ins" : deleted ? "del" : undefined
+
+	if (dom.dataset["foRevision"] === kind) return
+
+	if (kind === undefined) delete dom.dataset["foRevision"]
+	else dom.dataset["foRevision"] = kind
 }
 
 // Tracked changes as inserted and deleted text (shown per revision view by the stylesheet), links, and content

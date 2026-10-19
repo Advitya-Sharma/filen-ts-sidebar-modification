@@ -579,13 +579,19 @@ runLevel.add(docxSchema.nodes.text)
 // Whether a container's effective last block (through content controls) is a table: Word wants a cell to
 // end with a paragraph.
 export function endsWithTable(container: Node): boolean {
-	let last = container.lastChild
+	return tableEdge(container.lastChild, true)
+}
 
-	while (last !== null && last.type === docxSchema.nodes.sdt) last = last.lastChild
+// Whether a block is a table at its end (`end`) or start: a table, a locked one, or a block control ending
+// (starting) with one. Word and LibreOffice show two such edges with no paragraph between them as one table.
+export function tableEdge(block: Node | null, end: boolean): boolean {
+	let node = block
+
+	while (node !== null && node.type === docxSchema.nodes.sdt) node = end ? node.lastChild : node.firstChild
 
 	return (
-		last !== null &&
-		(last.type === docxSchema.nodes.table || (last.type === docxSchema.nodes.locked_block && last.attrs["kind"] === "table"))
+		node !== null &&
+		(node.type === docxSchema.nodes.table || (node.type === docxSchema.nodes.locked_block && node.attrs["kind"] === "table"))
 	)
 }
 

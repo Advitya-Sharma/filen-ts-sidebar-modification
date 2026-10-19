@@ -584,6 +584,54 @@ describe("content controls: data binding", () => {
 		expect(header.state.doc.textContent).toBe(body.state.doc.textContent)
 	})
 
+	it("keeps a comment's range end and reference in a bound control whose value another control changes", async () => {
+		const binding =
+			'<w:dataBinding w:prefixMappings="xmlns:ns0=\'urn:x\'" w:xpath="/ns0:root/ns0:name" w:storeItemID="{11111111-2222-3333-4444-555555555555}"/>'
+		const anchored =
+			'<w:p><w:commentRangeStart w:id="0"/><w:r><w:t xml:space="preserve">Before </w:t></w:r>' +
+			`<w:sdt><w:sdtPr><w:id w:val="9"/>${binding}<w:text/></w:sdtPr><w:sdtContent><w:r><w:t>Old</w:t></w:r>` +
+			'<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:sdtContent></w:sdt></w:p>'
+		const opened = await open({
+			...spec(anchored + inParagraph(BOUND("/ns0:root[1]/ns0:name[1]", "Old", "7"))),
+			comments: '<w:comment w:id="0" w:author="Bo" w:date="2020-01-01T00:00:00Z"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment>'
+		})
+		const session = opened.session
+		const at = findLast(session, "Old")
+
+		select(session, at, at + 3)
+		expect(session.dispatch(session.state.tr.insertText("New"))).toBe(true)
+
+		const anchors: string[] = []
+
+		session.state.doc.descendants(node => {
+			if (node.type === nodes.marker || node.type === nodes.comment_ref) anchors.push(String(node.attrs["kind"] ?? "reference"))
+		})
+		expect(session.state.doc.textContent).toBe("Before NewBefore New after")
+		expect(anchors).toEqual(["commentRangeStart", "commentRangeEnd", "reference"])
+		expect(part(await save(opened), "word/document.xml")).toContain('<w:commentRangeEnd w:id="0"/>')
+	})
+
+	it("passes a bound value once to a span another story holds under two controls bound to the node", async () => {
+		const binding =
+			'<w:dataBinding w:prefixMappings="xmlns:ns0=\'urn:x\'" w:xpath="/ns0:root/ns0:name" w:storeItemID="{11111111-2222-3333-4444-555555555555}"/>'
+		const nested =
+			`<w:sdt><w:sdtPr><w:id w:val="9"/>${binding}<w:text/></w:sdtPr><w:sdtContent>` +
+			`<w:sdt><w:sdtPr><w:id w:val="10"/>${binding}<w:text/></w:sdtPr><w:sdtContent><w:r><w:t>Old</w:t></w:r></w:sdtContent></w:sdt>` +
+			"</w:sdtContent></w:sdt>"
+		const opened = await open(withHeader(inParagraph(BOUND("/ns0:root[1]/ns0:name[1]", "Old", "7")), inParagraph(nested)))
+		const story = opened.context.model.stories.find(entry => entry.kind === "header")
+
+		if (story === undefined) throw new Error("no header")
+
+		const body = opened.session
+		const header = new DocxEditorSession(opened.context, { transformer, story })
+		const at = find(body, "Old")
+
+		select(body, at, at + 3)
+		expect(body.dispatch(body.state.tr.insertText("Kraków"))).toBe(true)
+		expect(header.state.doc.textContent).toBe("Before Kraków after")
+	})
+
 	it("keeps a pasted copy of a bound control showing the node's value, and in step with the original", async () => {
 		const opened = await open(spec(inParagraph(BOUND("/ns0:root[1]/ns0:name[1]", "Old", "7")) + p("End")))
 		const session = opened.session
@@ -1299,7 +1347,7 @@ describe("content controls: review fixes", () => {
 
 		const replaced = replaceAll(session.state, "teh", "the")
 
-		expect(replaced === null ? false : session.dispatch(replaced.tr)).toBe(true)
+		expect(replaced !== null && "tr" in replaced && session.dispatch(replaced.tr)).toBe(true)
 		expect(part(await save(opened), "word/document.xml")).toContain("<w:t>Other with the typo</w:t>")
 	})
 
@@ -1326,9 +1374,9 @@ describe("content controls: review fixes", () => {
 		})
 		const replaced = replaceAll(session.state, "foo", "bar")
 
-		expect(replaced === null ? false : session.dispatch(replaced.tr)).toBe(true)
+		expect(replaced !== null && "tr" in replaced && session.dispatch(replaced.tr)).toBe(true)
 		expect(text(session)).toBe("bar foo barBefore ☐ after")
-		expect(replaceAll(session.state, "☐", "☒")).toBeNull()
+		expect(replaceAll(session.state, "☐", "☒")).toEqual({ refused: "unreplaceable" })
 
 		const from = find(session, "bar")
 		const to = findLast(session, "bar") + 3

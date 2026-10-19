@@ -6,6 +6,7 @@ import { docxSchema, survivorsOf, type MarkerList } from "../edit/schema"
 import { fieldUpdateOf } from "../fields/evaluate"
 import { equationChanges } from "../math/edit"
 import type { StoryPart } from "../model/index"
+import type { Slicing } from "../../slicing"
 
 // Where a story's comments and tracked changes are, kept up to date edit by edit: positions are mapped
 // through each transaction and only the paragraphs it changed are read again (as spelling does), so no
@@ -125,6 +126,48 @@ export function reviewIndexKept(session: object): boolean {
 	return WANTED.has(session)
 }
 
+// Scans of a story document made beforehand, in slices, with the sources the index attaches (see
+// prepareReviewIndex): the index made for that very document takes its entries from here.
+interface Scanned {
+	readonly found: Found
+	readonly sources: ReadonlySet<number>
+	readonly links: ReadonlyMap<number, string> | undefined
+	readonly part: StoryPart
+}
+
+const scanned = new WeakMap<Node, Scanned>()
+
+// Reads `doc` for the index in slices, as attachSources would with these arguments, so a ReviewIndex made
+// for it later (while it is still the story's document) costs no scan. False when closed meanwhile.
+export async function prepareReviewIndex(
+	doc: Node,
+	sources: ReadonlySet<number>,
+	links: ReadonlyMap<number, string> | undefined,
+	part: StoryPart,
+	equations: boolean,
+	slicing: Slicing,
+	closed: () => boolean
+): Promise<boolean> {
+	const found = new Found()
+	const attached = sources.size > 0 || equations
+	const steps = attached ? scanSteps(doc, 0, doc.content.size, found, sources, links, part) : scanSteps(doc, 0, doc.content.size, found)
+	let started = slicing.now()
+
+	while (steps.next().done !== true) {
+		if (slicing.now() - started < slicing.sliceMs) continue
+
+		await slicing.pause()
+
+		if (closed()) return false
+
+		started = slicing.now()
+	}
+
+	scanned.set(doc, { found, sources, links, part })
+
+	return true
+}
+
 export class ReviewIndex {
 	private from = new Int32Array(16)
 	private to = new Int32Array(16)
@@ -154,9 +197,23 @@ export class ReviewIndex {
 	}
 
 	constructor(doc: Node) {
-		const found = new Found()
+		const ready = scanned.get(doc)
 
 		this.doc = doc
+
+		if (ready !== undefined) {
+			// Read in slices beforehand (prepareReviewIndex), its sources attached.
+			scanned.delete(doc)
+			this.sources = ready.sources
+			this.links = ready.links
+			this.part = ready.part
+			this.insert(0, ready.found)
+
+			return
+		}
+
+		const found = new Found()
+
 		scan(doc, 0, doc.content.size, found)
 		this.insert(0, found)
 	}
@@ -646,6 +703,21 @@ function scan(
 	links?: ReadonlyMap<number, string>,
 	part?: StoryPart
 ): void {
+	const steps = scanSteps(doc, from, to, found, sources, links, part)
+
+	while (steps.next().done !== true);
+}
+
+// scan() yielding after each top-level block it reads, and in a table after each row.
+function* scanSteps(
+	doc: Node,
+	from: number,
+	to: number,
+	found: Found,
+	sources?: ReadonlySet<number>,
+	links?: ReadonlyMap<number, string>,
+	part?: StoryPart
+): Generator<void, void> {
 	const within = (pos: number): boolean => pos >= from && pos < to
 	const visit = (node: Node, pos: number): void => {
 		if (node.isInline) {
@@ -671,17 +743,21 @@ function scan(
 			return
 		}
 
-		const end = pos + node.nodeSize - 1
-
-		if (within(pos)) {
-			markers(node.attrs["before"], pos, found)
-
-			// A block kept as bytes holds its anchors in them.
-			if (node.isLeaf) markers(node.attrs["markers"], pos, found)
-		}
-
+		open(node, pos)
 		children(node, pos + 1)
+		close(node, pos)
+	}
+	// A block's own entries before its content, and after it.
+	const open = (node: Node, pos: number): void => {
+		if (!within(pos)) return
 
+		markers(node.attrs["before"], pos, found)
+
+		// A block kept as bytes holds its anchors in them.
+		if (node.isLeaf) markers(node.attrs["markers"], pos, found)
+	}
+	const close = (node: Node, pos: number): void => {
+		const end = pos + node.nodeSize - 1
 		const kind = BLOCK_KINDS.get(node.type)
 		const revision: unknown = node.attrs["revision"]
 
@@ -730,7 +806,36 @@ function scan(
 		})
 	}
 
-	children(doc, 0)
+	for (let index = 0, at = 0; index < doc.childCount && at < to; index++) {
+		const child = doc.child(index)
+
+		if (at + child.nodeSize > from && child.type === nodes.table) {
+			// A row at a time.
+			open(child, at)
+
+			for (let row = 0, rowAt = at + 1; row < child.childCount && rowAt < to; row++) {
+				const node = child.child(row)
+
+				if (rowAt + node.nodeSize > from) {
+					visit(node, rowAt)
+
+					yield
+				}
+
+				rowAt += node.nodeSize
+			}
+
+			close(child, at)
+
+			yield
+		} else if (at + child.nodeSize > from) {
+			visit(child, at)
+
+			yield
+		}
+
+		at += child.nodeSize
+	}
 
 	const size = doc.content.size
 

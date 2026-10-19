@@ -1,6 +1,7 @@
 import { Item } from "../model/kinds"
 import { Ns } from "../model/namespaces"
 import type { StoryPart } from "../model/part"
+import { macroButtonText } from "../model/macroButton"
 import { englishCardinal, englishOrdinal, formatNumber } from "../numbering/formats"
 
 // Fields whose result layout computes instead of showing the cached result Word stored: page numbers per page,
@@ -73,6 +74,14 @@ export function fieldInfo(instruction: string): FieldInfo {
 	for (const match of instruction.matchAll(SWITCH)) format = numberSwitchFormat(match[1] ?? "") ?? format
 
 	return { kind, format }
+}
+
+export { macroButtonText }
+
+// The text a field with result text `result` and instruction `instruction` shows: its result, else a
+// MACROBUTTON's display text.
+export function shownFieldText(result: string, instruction: string): string {
+	return result !== "" ? result : (macroButtonText(instruction) ?? "")
 }
 
 // A page number as a field shows it: the switch's format, else (PAGE) the section's w:pgNumType format.

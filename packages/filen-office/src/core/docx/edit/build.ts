@@ -460,6 +460,13 @@ export class DocxDocBuilder {
 		const info = this.info
 		let pending: MarkerAttrs[] | null = null
 		const storyEnd = part.end(story.item)
+		const resume = (): void => {
+			this.part = part
+			this.plan = plan
+			this.info = info
+			this.pristine = pristine
+			this.unformattable = unformattable
+		}
 
 		// As blocks(), a block at a time: the builder's state is restored after each pause (a host may build
 		// another story meanwhile).
@@ -482,7 +489,11 @@ export class DocxDocBuilder {
 
 			unformattable.found = false
 
-			const block = this.block(item, pending ?? NO_MARKERS)
+			// A table yields after each row too: a long one is not one step.
+			const block =
+				part.kinds[item] === Item.Table
+					? yield* this.tableSteps(item, pending ?? NO_MARKERS, resume)
+					: this.block(item, pending ?? NO_MARKERS)
 
 			builtFrom(this.context, block, part.index)
 			unformattableFields.set(block, unformattable.found)
@@ -492,11 +503,7 @@ export class DocxDocBuilder {
 
 			yield
 
-			this.part = part
-			this.plan = plan
-			this.info = info
-			this.pristine = pristine
-			this.unformattable = unformattable
+			resume()
 		}
 
 		const end = pending ?? NO_MARKERS
@@ -809,6 +816,17 @@ export class DocxDocBuilder {
 	}
 
 	private table(item: number, before: MarkerList): Node {
+		const steps = this.tableSteps(item, before)
+
+		for (;;) {
+			const step = steps.next()
+
+			if (step.done === true) return step.value
+		}
+	}
+
+	// table() yielding after each row; `resume` restores the builder's state after a pause.
+	private *tableSteps(item: number, before: MarkerList, resume?: () => void): Generator<void, Node> {
 		const part = this.part
 		const saved = this.tableFailure
 		const savedLocked = this.lockedBlocks
@@ -835,12 +853,20 @@ export class DocxDocBuilder {
 			} else if (part.kinds[child] === Item.Row) {
 				rows.push(this.row(child, pending ?? NO_MARKERS))
 				pending = null
+
+				if (resume !== undefined) {
+					const held: LockReason | null = this.tableFailure
+
+					yield
+					resume()
+					this.tableFailure = held
+				}
 			} else {
 				this.tableFailure ??= "tableStructure"
 			}
 		}
 
-		const failure = this.tableFailure ?? (rows.length === 0 ? "tableStructure" : null)
+		const failure: LockReason | null = this.tableFailure ?? (rows.length === 0 ? "tableStructure" : null)
 
 		this.tableFailure = saved
 

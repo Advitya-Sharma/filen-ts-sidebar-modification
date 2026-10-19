@@ -221,7 +221,7 @@
 	background: var(--fo-selection, rgb(37 99 235 / 0.3));
 }
 
-/* The body while a header, footer or note is edited. */
+/* The body while a header or footer is edited. */
 .fo-docx-dim {
 	background: var(--fo-dim, rgb(255 255 255 / 0.55));
 }

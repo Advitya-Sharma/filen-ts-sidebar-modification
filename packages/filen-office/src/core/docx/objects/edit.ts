@@ -17,7 +17,7 @@ import { NO_SOURCE, docxSchema, type DrawingOverrides } from "../edit/schema"
 import { tableCellMargins } from "../edit/tables/margins"
 import { tableMap } from "../edit/tables/map"
 import { paddedGrid } from "../edit/tables/ops"
-import type { DrawingInfo } from "../model/drawings"
+import { vmlAltText, type DrawingInfo } from "../model/drawings"
 import { Ns } from "../model/namespaces"
 import type { StoryPart } from "../model/index"
 import { EMU_PER_INCH, naturalExtent, sniffImage, type DocxImageInfo, type DocxImageRefusal } from "./images"
@@ -334,6 +334,30 @@ export function bindAddedDrawings(
 // The part a source drawing is in: the document's, or one an editor added.
 function drawingPart(context: DocxEditContext, drawing: DrawingInfo): StoryPart | undefined {
 	return context.model.parts[drawing.part] ?? ADDED_DRAWINGS.get(context)?.parts?.()[drawing.part]
+}
+
+// What assistive technology calls a drawing: its alternative text as it is now, else its source's title
+// (wp:docPr, ECMA-376 Part 1 §20.4.2.5), or a VML shape's alt or title; "" for none.
+export function drawingName(context: DocxEditContext, node: Node): string {
+	if (node.type !== nodes.drawing) return ""
+
+	const descr = drawingState(context, node).descr.trim()
+
+	if (descr !== "") return descr
+
+	const drawing = sourceDrawing(context, node)
+
+	if (drawing !== undefined) {
+		const part = drawingPart(context, drawing)
+
+		return part === undefined || drawing.docPr < 0 ? "" : (part.reader.attr(drawing.docPr, Ns.None, "title")?.trim() ?? "")
+	}
+
+	const vml =
+		node.attrs["kind"] === "drawing" || node.attrs["src"] === NO_SOURCE ? undefined : context.model.vml[node.attrs["index"] as number]
+	const reader = vml === undefined ? undefined : context.model.parts[vml.part]?.reader
+
+	return vml === undefined || reader === undefined ? "" : vmlAltText(reader, vml.shape)
 }
 
 // Whether the node is a picture a command inserted.

@@ -1,4 +1,4 @@
-import type { Node } from "prosemirror-model"
+import { Fragment, type Node } from "prosemirror-model"
 import type { Transaction } from "prosemirror-state"
 import { AddNodeMarkStep, AttrStep, RemoveNodeMarkStep, ReplaceAroundStep, ReplaceStep, StepMap } from "prosemirror-transform"
 import { isMarkStep } from "../edit/marks"
@@ -7,10 +7,14 @@ import { decodeUtf8, encodeUtf8, parseXml, XmlError, type XmlDocument } from "..
 import { parseNumbering, type Numbering } from "../numbering/index"
 import { PropsStore } from "../props/index"
 import { parseStyles, type DocxStyles } from "../styles/index"
-import { DocxDocBuilder, docxSchema, type DocxEditContext, type NewStoryKind, type StoryDoc } from "../edit/index"
+import { DocxDocBuilder, FormatResolver, RunBases, docxSchema, type DocxEditContext, type NewStoryKind, type StoryDoc } from "../edit/index"
 import { SetAttrsStep } from "../edit/attrs"
+import { knowOrigins } from "../edit/origin"
+import { tableMap } from "../edit/tables/map"
 import type { NewList } from "../edit/formats"
 import { ref, refItem, refPart, type BodyBlocks, type DirtyBlock, type LayoutEdits } from "../layout/index"
+import type { Compaction } from "../layout/edits"
+import { tableRows } from "../layout/table"
 import {
 	Item,
 	ModelTables,
@@ -92,13 +96,30 @@ export interface OverlayRecord {
 	readonly item: number
 	// The source block it stands for (a ref), or -1 for a block the editor created.
 	readonly base: number
-	readonly node: Node
+	// The block as written (the document's own while unchanged: see StoryEdits.adopt).
+	node: Node
 	readonly story: StoryEdits
 	// The top-level entry holding the block, and its position inside the entry's node.
 	entry: TopEntry
 	offset: number
 	// The block as the editor builds it from the overlay part (lazily; maps pages to the editing document).
 	shadow: Node | null | undefined
+	// Inside a table laid out with rows of its own (see TableRows): the editing row holding the block (the
+	// row itself for a row written again).
+	holder?: Node | undefined
+}
+
+// A table laid out from its source with the rows edits gave it (LayoutEdits.rows): per row of the editing
+// table `node`, the row laid out (a ref, -1 while not placed) and the overlay record of a row written again.
+interface TableRows {
+	// The table laid out (a ref) and the rows of its own part.
+	readonly table: number
+	readonly sourceRows: number
+	node: Node
+	readonly refs: number[]
+	readonly records: (OverlayRecord | undefined)[]
+	// As published (NaN for a row not placed).
+	readonly list: Float64Array
 }
 
 // An overlay part: the blocks one edit wrote, parsed together. It lives while a block of it is laid out.
@@ -132,14 +153,65 @@ export interface TopEntry {
 	// Where its blocks end sections: after how many of its refs, per block carrying a section break (none:
 	// undefined).
 	breaks: number[] | undefined
-	// Tables among its blocks whose cells' paragraphs alone the edit that built it changed: per laid ref, the
-	// items of those paragraphs in the table's part (see DirtyBlock.cells).
+	// Tables among its blocks whose rows and cells' paragraphs alone the edit that built it changed: per laid
+	// ref, those paragraphs and rows (refs, see DirtyBlock.cells).
 	cells?: Map<number, number[]> | undefined
+	// Those of them whose rows came, went or moved (see DirtyBlock.moved).
+	moved?: Set<number> | undefined
+	// Its tables laid out with rows of their own, by laid ref.
+	tables?: Map<number, TableRows> | undefined
 }
 
 // The part of an edit the layout must redo: the changed top-level blocks as laid out now, the entries the
 // edit replaced and, when blocks came or went, their neighbours (layout restarts at the first page showing
 // any of those).
+// Transactions a story applied, folded as applyAll reads them: what is kept of them is their first document and
+// their last, never those between.
+export interface PendingChange {
+	readonly before: Node
+	readonly after: Node
+	// Every transaction applied to the one before it.
+	readonly chained: boolean
+	// Some transaction has steps.
+	readonly stepped: boolean
+	// The span the steps changed, of `after`.
+	readonly span: { readonly from: number; readonly to: number; readonly whole: boolean } | undefined
+}
+
+// `transactions` folded onto `into` (applied after it).
+export function foldTransactions(into: PendingChange | undefined, transactions: readonly Transaction[]): PendingChange | undefined {
+	const first = transactions[0]
+
+	if (first === undefined) return into
+
+	let span = into?.span
+	let chained = into === undefined || (into.chained && first.before === into.after)
+	let stepped = into?.stepped ?? false
+	let previous: Transaction | undefined
+
+	for (const tr of transactions) {
+		if (previous !== undefined && tr.before !== previous.doc) chained = false
+
+		previous = tr
+
+		if (tr.steps.length === 0) continue
+
+		stepped = true
+
+		if (span !== undefined && !span.whole) span = { from: tr.mapping.map(span.from, -1), to: tr.mapping.map(span.to, 1), whole: false }
+
+		const own = changedSpan(tr)
+
+		if (own !== undefined)
+			span =
+				span === undefined
+					? own
+					: { from: Math.min(span.from, own.from), to: Math.max(span.to, own.to), whole: span.whole || own.whole }
+	}
+
+	return { before: into?.before ?? first.before, after: previous?.doc ?? first.doc, chained, stepped, span }
+}
+
 export interface StoryChange {
 	readonly dirty: DirtyBlock[]
 	readonly replaced: readonly TopEntry[]
@@ -273,6 +345,7 @@ export class DocumentEdits implements LayoutEdits {
 	readonly model: DocxModel
 	readonly extension: ModelExtension
 	readonly substitutes = new Map<number, number>()
+	readonly rows = new Map<number, Float64Array>()
 	private viewValue: RevisionView
 	body: BodyBlocks | undefined = undefined
 	// Stories other than the body whose block structure changed: their blocks (refs).
@@ -349,6 +422,109 @@ export class DocumentEdits implements LayoutEdits {
 
 	register(story: StoryEdits): void {
 		this.storyEdits.add(story)
+	}
+
+	// ---- merging overlays (LayoutEdits.compact) -----------------------------------------------------------
+
+	// Live overlay parts past which the body's are merged, how many a merge takes at least, how long input is to
+	// have been idle first, and past how many parts a merge waits for that no longer and takes parts however far
+	// apart they show (input that never pauses still has them merged; tests lower them).
+	compaction: { parts: number; minimum: number; quietMs: number; cap: number } = { parts: 64, minimum: 4, quietMs: 750, cap: 96 }
+	// Saves under way (holdCompaction).
+	private holds = 0
+	// The overlay count a merge last found nothing to do at.
+	private fruitless = -1
+	private retired: OverlayRecord[] = []
+
+	compactDue(): boolean {
+		return (
+			this.pending() ||
+			(this.retired.length === 0 && this.overlays.size >= this.compaction.parts && this.overlays.size !== this.fruitless)
+		)
+	}
+
+	pending(): boolean {
+		return this.bodyEdits()?.lagging === true
+	}
+
+	compactWait(): number {
+		return this.pending() || this.overlays.size >= this.compaction.cap ? 0 : this.compaction.quietMs
+	}
+
+	compactHeld(): boolean {
+		return this.holds > 0
+	}
+
+	// A save under way: no merge starts until the returned release (what the save reads stays as it is, and
+	// its slices have the CPU).
+	holdCompaction(): () => void {
+		let held = true
+
+		this.holds++
+
+		return () => {
+			if (!held) return
+
+			held = false
+			this.holds--
+		}
+	}
+
+	private bodyEdits(): StoryEdits | undefined {
+		for (const story of this.storyEdits) if (story.story.story.kind === "body") return story
+
+		return undefined
+	}
+
+	compact(pages: ReadonlyMap<number, readonly [number, number]>, due: () => boolean = () => false): Compaction | undefined {
+		const body = this.bodyEdits()
+
+		if (body?.lagging === true) return body.catchUp(due)
+
+		const batch = body?.compactRegion(pages, this.liveOverlays(), due, this.overlays.size >= this.compaction.cap)
+
+		if (batch === undefined) {
+			this.fruitless = this.overlays.size
+
+			return undefined
+		}
+
+		for (const record of batch.retired) this.retired.push(record)
+
+		return batch
+	}
+
+	// Keeps `record` readable while a page shows it (compacted()).
+	retire(record: OverlayRecord): void {
+		this.retired.push(record)
+	}
+
+	retiredParts(): ReadonlySet<number> {
+		const parts = new Set<number>()
+
+		for (const record of this.retired) parts.add(record.part.index)
+
+		return parts
+	}
+
+	compacted(shown: ReadonlySet<number>): void {
+		const retired = this.retired
+
+		this.retired = []
+
+		for (const record of retired) {
+			if (shown.has(record.part.index)) this.retired.push(record)
+			else this.dropRecord(record)
+		}
+	}
+
+	// The live records of each overlay part.
+	private *liveOverlays(): Generator<readonly [number, readonly OverlayRecord[]]> {
+		for (const [index, overlay] of this.overlays) {
+			const records = compacted(overlay).filter(record => !overlay.dropped.has(record))
+
+			if (records.length > 0) yield [index, records]
+		}
 	}
 
 	// Whether `story` is one the editor added.
@@ -716,7 +892,9 @@ export class DocumentEdits implements LayoutEdits {
 		const declared = roots.declarations
 		const prefixes = new Set<string>()
 
-		if (declared === undefined || !namePrefixes(bytes, prefixes)) return full
+		// A large write is parsed under the root as it is: finding the prefixes it uses would read every byte once
+		// more for a few declarations less.
+		if (declared === undefined || bytes.length > FULL_ROOT_BYTES || !namePrefixes(bytes, prefixes)) return full
 
 		prefixes.add(document.prefix(root))
 
@@ -1053,9 +1231,11 @@ export class StoryEdits {
 	private readonly indexes = new Set<{ replace(pairs: readonly (readonly [TopEntry, TopEntry])[]): void }>()
 	// Tables of the document as opened (the builder records paragraphs only): written as their source.
 	private readonly openedTables = new WeakSet<Node>()
+	// The story's top-level tables (those in content controls too) as opened, by source item.
+	private readonly originalTables = new Map<number, Node>()
+	private readonly openedRows = new WeakMap<Node, Map<number, Node>>()
 	// Blocks the edit being applied wrote, parsed into one overlay part when it is done (place()).
 	private readonly queued: QueuedBlock[] = []
-	private shadows: DocxDocBuilder | undefined = undefined
 
 	// `doc` is the session's document now (blocks the proof locked replaced).
 	constructor(edits: DocumentEdits, story: StoryDoc, doc: Node, context: DocxEditContext, env?: WriteEnvironment) {
@@ -1089,6 +1269,15 @@ export class StoryEdits {
 
 			return !node.isTextblock
 		})
+
+		const tables = (container: Node): void =>
+			container.forEach(child => {
+				if (child.type === nodes.table && (child.attrs["src"] as number) >= 0)
+					this.originalTables.set(child.attrs["src"] as number, child)
+				else if (child.type === nodes.sdt) tables(child)
+			})
+
+		tables(doc)
 		this.rebuildAll(doc)
 	}
 
@@ -1140,36 +1329,21 @@ export class StoryEdits {
 	// out only as the session holds them, never in a state between two repairs. Undefined when nothing the
 	// layout shows changed.
 	applyAll(transactions: readonly Transaction[]): StoryChange | undefined {
-		const first = transactions[0]
-		const last = transactions[transactions.length - 1]
+		const pending = foldTransactions(undefined, transactions)
 
-		if (first === undefined || last === undefined) return undefined
+		return pending === undefined ? undefined : this.applyPending(pending)
+	}
 
-		let span: { from: number; to: number; whole: boolean } | undefined
-		let chained = first.before === this.doc
+	// applyAll over the transactions folded into `pending` (see foldTransactions).
+	applyPending(pending: PendingChange): StoryChange | undefined {
+		if (!pending.stepped) return undefined
 
-		for (const tr of transactions) {
-			if (tr.steps.length === 0) continue
-			if (span !== undefined && !span.whole) {
-				span = { from: tr.mapping.map(span.from, -1), to: tr.mapping.map(span.to, 1), whole: false }
-			}
+		const after = pending.after
 
-			const own = changedSpan(tr)
-
-			if (own !== undefined)
-				span =
-					span === undefined
-						? own
-						: { from: Math.min(span.from, own.from), to: Math.max(span.to, own.to), whole: span.whole || own.whole }
-		}
-
-		for (let k = 1; k < transactions.length; k++) if (transactions[k]?.before !== transactions[k - 1]?.doc) chained = false
-
-		if (!transactions.some(tr => tr.steps.length > 0)) return undefined
-
-		const after = last.doc
-
-		return this.change(after, chained ? span : { from: 0, to: after.content.size, whole: true })
+		return this.change(
+			after,
+			pending.chained && pending.before === this.doc ? pending.span : { from: 0, to: after.content.size, whole: true }
+		)
 	}
 
 	apply(tr: Transaction): StoryChange | undefined {
@@ -1217,6 +1391,29 @@ export class StoryEdits {
 			return { dirty: this.dirtyOf(0, this.entries.length - 1), replaced, around: [], whole: true }
 		}
 
+		// Marks over much of the body (bold over everything): its blocks are written in the layout's idle slices
+		// (catchUp), shown as they were until then; every position is where it was.
+		if (
+			this.body &&
+			newCount === oldCount &&
+			oldLast === last &&
+			spanSize(after, first, last) >= DEFER_SIZE &&
+			marksOnly(before, after, first, last)
+		) {
+			this.lagFrom = this.lagFrom < 0 ? first : Math.min(this.lagFrom, first)
+			this.lagTo = Math.max(this.lagTo, last)
+
+			const at = this.entries[first]
+
+			return { dirty: [], replaced: [], around: at === undefined ? [] : [at], whole: false }
+		}
+
+		// Blocks still to catch up move with what came or went before them: every entry is looked at.
+		if (this.lagFrom >= 0 && newCount !== oldCount) {
+			this.lagFrom = 0
+			this.lagTo = Infinity
+		}
+
 		const removed = this.entries.slice(first, oldLast + 1)
 		const reuse = new Map<Node, TopEntry>()
 		const children = new Set<Node>()
@@ -1239,6 +1436,7 @@ export class StoryEdits {
 				kept.index = k
 				// Unchanged by this edit: no cells of an earlier one.
 				kept.cells = undefined
+				kept.moved = undefined
 				fresh.push(kept)
 
 				if (removed[k - first] !== kept) structural = true
@@ -1372,6 +1570,7 @@ export class StoryEdits {
 	// laid out again for it, with the ones they replace.
 	private reconcile(changed: readonly TopEntry[]): [TopEntry, TopEntry][] {
 		const moved: [TopEntry, TopEntry][] = []
+		const lost = new Map<number, TopEntry>()
 		const values = new Set<number>()
 
 		for (const entry of changed) for (const value of entry.sources) values.add(value)
@@ -1388,6 +1587,13 @@ export class StoryEdits {
 
 			if (first === undefined || owner === first) continue
 
+			// Rebuilt, it claims every source it holds, not only this one: their owners as they were.
+			for (const source of first.sources) {
+				const was = this.owners.get(source)
+
+				if (was !== undefined && was !== first && !lost.has(source)) lost.set(source, was)
+			}
+
 			this.ordered = true
 
 			const taken = this.rebuild(first)
@@ -1396,6 +1602,15 @@ export class StoryEdits {
 
 			if (owner !== undefined && this.entries[owner.index] === owner) moved.push([owner, this.rebuild(owner)])
 
+			this.ordered = false
+		}
+
+		// An entry that lost a source to a rebuilt one lays its block out again (from an overlay of its own).
+		for (const [source, was] of lost) {
+			if (this.owners.get(source) === was || this.entries[was.index] !== was) continue
+
+			this.ordered = true
+			moved.push([was, this.rebuild(was)])
 			this.ordered = false
 		}
 
@@ -1430,6 +1645,10 @@ export class StoryEdits {
 	}
 
 	private rebuildAll(doc: Node): void {
+		this.lagFrom = -1
+		this.lagTo = -1
+		this.caught = undefined
+
 		for (const entry of this.entries) this.release(entry)
 
 		this.owners.clear()
@@ -1668,7 +1887,13 @@ export class StoryEdits {
 					return
 				}
 
-				if (node.type === nodes.table && old !== undefined && this.cellEdits(entry, node, offset, base, old)) return
+				if (
+					node.type === nodes.table &&
+					(old === undefined
+						? this.rowEdits(entry, node, offset, base, undefined, -1)
+						: this.cellEdits(entry, node, offset, base, old))
+				)
+					return
 
 				this.overlay(entry, node, offset, base)
 
@@ -1728,102 +1953,65 @@ export class StoryEdits {
 		entry.offsets.push(offset)
 	}
 
-	// A table whose rows and cells are as they were, with paragraphs edited inside: those paragraphs are laid
-	// out from overlays, the table from its source, or from its own overlay when an edit changed its
-	// structure (or the editor made it). False when its structure changed now.
+	// A table edited inside. Laid out from its own overlay (the editor made it, or an edit changed its
+	// properties) with rows and cells as they were: the paragraphs changed are laid out from overlays. Otherwise
+	// see rowEdits. False when it is written again whole.
 	private cellEdits(entry: TopEntry, node: Node, offset: number, base: number, old: TopEntry): boolean {
-		const previous = old.node.type === nodes.table && old.node.attrs["src"] === node.attrs["src"] ? old.node : undefined
-
-		if (previous === undefined) return false
-
-		const part = this.part
 		const substitute = base >= 0 ? this.edits.substitutes.get(base) : old.laid[0]
+		// The table as `old` laid it out: where it stood in its entry (the entry itself, or a block of a content
+		// control).
+		const index = old.laid.indexOf(substitute ?? base)
+		const oldOffset = index < 0 ? -1 : (old.offsets[index] ?? -1)
+		const candidate = oldOffset === 0 ? old.node : oldOffset > 0 ? old.node.nodeAt(oldOffset - 1) : null
+		const previous =
+			candidate !== null && candidate.type === nodes.table && candidate.attrs["src"] === node.attrs["src"] ? candidate : undefined
 		// The table's own overlay, as last written.
 		const table =
 			substitute === undefined
 				? undefined
 				: old.records.find(record => record.node.type === nodes.table && ref(record.part.index, record.item) === substitute)
-		const changed: ChangedParagraph[] = []
 
 		if (table === undefined) {
-			// Only a table laid out from its source last time (not a copy written on its own) keeps it.
-			if (base < 0 || substitute !== undefined || !old.laid.includes(base) || !sameStructure(previous, node)) return false
+			// Laid out from its source last time (with rows of its own or not): edited from there.
+			const fromSource = previous !== undefined && base >= 0 && substitute === undefined && old.laid.includes(base)
 
-			changedParagraphs(previous, node, offset, [], changed)
-		} else {
-			if (table.offset !== offset || !sameShape(table.node, node) || !sameShape(previous, node)) return false
-
-			changedParagraphs(previous, node, offset, [], changed)
-
-			const shadow = this.shadowOf(table)
-
-			if (shadow === null) return false
-
-			// Paragraphs of the overlay table are those at the same place in the table it was written from.
-			for (const paragraph of changed) {
-				const src = atPath(shadow, paragraph.path)?.attrs["src"]
-
-				if (typeof src !== "number" || src < 0) return false
-
-				paragraph.base = ref(table.part.index, src)
-			}
+			return this.rowEdits(entry, node, offset, base, fromSource ? old : undefined, oldOffset)
 		}
 
-		// Substitutions of paragraphs that did not change carry over.
-		for (const kept of old.substituted) entry.substituted.push(kept)
-		for (const record of old.records) entry.records.push(record)
+		if (
+			previous === undefined ||
+			table.offset !== offset ||
+			oldOffset !== offset ||
+			!sameShape(table.node, node) ||
+			!sameShape(previous, node)
+		)
+			return this.rowEdits(entry, node, offset, base, undefined, -1)
 
-		old.substituted.length = 0
-		old.records.length = 0
+		const changed: ChangedParagraph[] = []
 
-		for (const record of entry.records) record.entry = entry
+		changedParagraphs(previous, node, offset, [], changed)
 
+		const shadow = this.shadowOf(table)
+
+		if (shadow === null) return false
+
+		// Paragraphs of the overlay table are those at the same place in the table it was written from.
+		for (const paragraph of changed) {
+			const src = atPath(shadow, paragraph.path)?.attrs["src"]
+
+			if (typeof src !== "number" || src < 0) return false
+
+			paragraph.base = ref(table.part.index, src)
+		}
+
+		const moved = this.takeOver(entry, old, oldOffset, oldOffset + previous.nodeSize, base)
 		const replaced = new Set<OverlayRecord>()
 
-		for (const paragraph of changed) {
-			const value = paragraph.base >= 0 ? paragraph.base : ref(part.index, paragraph.node.attrs["src"] as number)
-			const existing = this.edits.substitutes.get(value)
+		for (const paragraph of changed) this.substitute(entry, paragraph, false, replaced, undefined)
 
-			// A paragraph of a table laid out from its source that is its source again (an undo): no overlay.
-			if (table === undefined && this.writer.isSource(paragraph.node)) {
-				const record = existing === undefined ? undefined : this.edits.recordAt(refPart(existing), refItem(existing))
-
-				if (record !== undefined) {
-					this.edits.dropRecord(record)
-					replaced.add(record)
-				}
-
-				this.edits.substitutes.delete(value)
-
-				continue
-			}
-
-			if (existing !== undefined) {
-				const record = this.edits.recordAt(refPart(existing), refItem(existing))
-
-				if (record !== undefined) {
-					this.edits.dropRecord(record)
-					replaced.add(record)
-				}
-			} else {
-				entry.substituted.push(value)
-			}
-
-			const bytes = this.written(paragraph.node, true)
-
-			if (bytes === undefined) this.edits.substitutes.delete(value)
-			else this.queued.push({ entry, node: paragraph.node, offset: paragraph.offset, base: value, bytes, slot: -1 })
-		}
-
-		if (replaced.size > 0) {
-			const kept = entry.records.filter(record => !replaced.has(record))
-
-			entry.records.length = 0
-			for (const record of kept) entry.records.push(record)
-		}
+		if (replaced.size > 0) keepRecords(entry, replaced)
 
 		// Paragraphs edited before move by what the changed ones before them grew (positions as they were).
-		const before = table === undefined ? (old.offsets[old.laid.indexOf(base)] ?? -1) : offset
 		const shifts: number[] = []
 		let grown = 0
 
@@ -1834,16 +2022,10 @@ export class StoryEdits {
 			grown += paragraph.node.nodeSize - size
 		}
 
-		for (const record of entry.records) {
+		for (const record of moved) {
 			if (record === table || changed.some(paragraph => paragraph.node === record.node)) continue
 
-			if (before < 0) {
-				record.offset = offsetOf(node, offset, record.node) ?? record.offset
-
-				continue
-			}
-
-			const at = record.offset - before
+			const at = record.offset - offset
 
 			// Outside this table (another block of the entry).
 			if (at <= 0 || at >= previous.nodeSize) continue
@@ -1855,18 +2037,594 @@ export class StoryEdits {
 			record.offset = offset + at + shift
 		}
 
-		const laid = table === undefined ? base : ref(table.part.index, table.item)
+		const laid = ref(table.part.index, table.item)
 
 		if (changed.length > 0)
 			(entry.cells ??= new Map()).set(
 				laid,
-				changed.map(paragraph =>
-					refItem(paragraph.base >= 0 ? paragraph.base : ref(part.index, paragraph.node.attrs["src"] as number))
-				)
+				changed.map(paragraph => paragraph.base)
 			)
 
 		entry.base.push(base >= 0 ? base : laid)
 		entry.laid.push(laid)
+		entry.offsets.push(offset)
+
+		return true
+	}
+
+	// rowEdits for a table laid out from its source rows before and after whose rows are where they were, those
+	// changed with only their paragraphs' content changed: just those rows are looked at. False (nothing done)
+	// otherwise.
+	private paragraphEdits(
+		entry: TopEntry,
+		node: Node,
+		offset: number,
+		base: number,
+		old: TopEntry,
+		previous: Node,
+		oldOffset: number
+	): boolean {
+		const count = node.childCount
+
+		if (count !== previous.childCount) return false
+
+		const changed: number[] = []
+
+		for (let k = 0; k < count; k++) {
+			const row = node.child(k)
+			const prevRow = previous.child(k)
+
+			if (row === prevRow) continue
+
+			const src = row.attrs["src"] as number
+
+			if (src < 0 || prevRow.attrs["src"] !== src || !sameStructure(prevRow, row)) return false
+
+			changed.push(k)
+		}
+
+		const moved = this.takeOver(entry, old, oldOffset, oldOffset + previous.nodeSize, base)
+		const part = this.part
+		const replaced = new Set<OverlayRecord>()
+		const cells: number[] = []
+		const changedRows = new Set<Node>()
+		// Per changed row: where it started before (relative to the table) and what it grew by.
+		const shifts: number[] = []
+		let at = 1
+		let next = 0
+		let grown = 0
+
+		for (let k = 0; next < changed.length && k < count; k++) {
+			const prevRow = previous.child(k)
+
+			if (k === changed[next]) {
+				const row = node.child(k)
+				const rowOffset = offset + at + grown
+				const paragraphs: ChangedParagraph[] = []
+
+				next++
+				// Records placed in the row now are not moved again with the rows after it.
+				changedRows.add(prevRow).add(row)
+				changedParagraphs(prevRow, row, rowOffset, [], paragraphs)
+
+				// Paragraphs edited before, unchanged now: where they stand in the row now.
+				for (const record of moved) {
+					if (record.holder !== prevRow || paragraphs.some(paragraph => paragraph.node === record.node)) continue
+
+					record.offset = offsetOf(row, rowOffset, record.node) ?? record.offset
+					record.holder = row
+				}
+
+				for (const paragraph of paragraphs) {
+					this.substitute(entry, paragraph, true, replaced, row)
+					cells.push(paragraph.base >= 0 ? paragraph.base : ref(part.index, paragraph.node.attrs["src"] as number))
+				}
+
+				shifts.push(at, row.nodeSize - prevRow.nodeSize)
+				grown += row.nodeSize - prevRow.nodeSize
+			}
+
+			at += prevRow.nodeSize
+		}
+
+		// Paragraphs edited before in other rows: where the table stands now, moved by what changed rows before
+		// them grew.
+		if (grown !== 0 || offset !== oldOffset) {
+			for (const record of moved) {
+				if (record.holder === undefined || changedRows.has(record.holder)) continue
+
+				const relative = record.offset - oldOffset
+				let shift = 0
+
+				for (let k = 0; k < shifts.length && (shifts[k] ?? 0) < relative; k += 2) shift += shifts[k + 1] ?? 0
+
+				record.offset = offset + relative + shift
+			}
+		}
+
+		if (replaced.size > 0) keepRecords(entry, replaced)
+		if (cells.length > 0) (entry.cells ??= new Map()).set(base, cells)
+
+		entry.base.push(base)
+		entry.laid.push(base)
+		entry.offsets.push(offset)
+
+		return true
+	}
+
+	// The rows of table `item` as opened, by source item (made when first asked).
+	private originalRows(item: number): Map<number, Node> | undefined {
+		const table = this.originalTables.get(item)
+
+		if (table === undefined) return undefined
+
+		let rows = this.openedRows.get(table)
+
+		if (rows === undefined) {
+			rows = new Map()
+
+			for (let k = 0; k < table.childCount; k++) {
+				const row = table.child(k)
+				const src = row.attrs["src"] as number
+
+				if (src >= 0) rows.set(src, row)
+			}
+
+			this.openedRows.set(table, rows)
+		}
+
+		return rows
+	}
+
+	// The records, substitutions and tables of `old`, which `entry` replaces, are its own now.
+	// Those of the table at [from, to) of `old` (with laid ref `table`): `old` is a content control holding other
+	// blocks too, which are laid out anew.
+	private takeOver(entry: TopEntry, old: TopEntry, from: number, to: number, table: number): ReadonlySet<OverlayRecord> {
+		const moved = new Set<OverlayRecord>()
+
+		// All of them when the table is the whole of `old`.
+		const whole = from <= 0 && to >= old.node.nodeSize
+
+		for (const record of old.records) if (whole || (record.offset >= from && record.offset < to)) moved.add(record)
+
+		if (moved.size === old.records.length) {
+			for (const kept of old.substituted) entry.substituted.push(kept)
+
+			old.substituted.length = 0
+		} else {
+			const left: number[] = []
+
+			for (const value of old.substituted) {
+				const substitute = this.edits.substitutes.get(value)
+				const record = substitute === undefined ? undefined : this.edits.recordAt(refPart(substitute), refItem(substitute))
+
+				if (record !== undefined && moved.has(record)) entry.substituted.push(value)
+				else left.push(value)
+			}
+
+			old.substituted.length = 0
+			for (const value of left) old.substituted.push(value)
+		}
+
+		keepRecords(old, moved)
+
+		for (const record of moved) {
+			entry.records.push(record)
+			record.entry = entry
+		}
+
+		const rows = old.tables?.get(table)
+
+		if (rows !== undefined) {
+			old.tables?.delete(table)
+			;(entry.tables ??= new Map()).set(table, rows)
+		}
+
+		return moved
+	}
+
+	// Lays changed paragraph `paragraph` of a table out from an overlay (`value`: the block it stands for), or
+	// from its source again when it is that again (`fromSource`: in a row laid out from its source). Records
+	// it replaces are added to `replaced`.
+	private substitute(
+		entry: TopEntry,
+		paragraph: ChangedParagraph,
+		fromSource: boolean,
+		replaced: Set<OverlayRecord>,
+		holder: Node | undefined
+	): void {
+		const part = this.part
+		const value = paragraph.base >= 0 ? paragraph.base : ref(part.index, paragraph.node.attrs["src"] as number)
+		const existing = this.edits.substitutes.get(value)
+		const record = existing === undefined ? undefined : this.edits.recordAt(refPart(existing), refItem(existing))
+
+		if (record !== undefined) {
+			this.edits.dropRecord(record)
+			replaced.add(record)
+		}
+
+		// A paragraph of a row laid out from its source that is its source again (an undo): no overlay.
+		if (fromSource && this.writer.isSource(paragraph.node)) {
+			this.edits.substitutes.delete(value)
+
+			return
+		}
+
+		if (existing === undefined) entry.substituted.push(value)
+
+		const bytes = this.written(paragraph.node, true)
+
+		if (bytes === undefined) this.edits.substitutes.delete(value)
+		else this.queued.push({ entry, node: paragraph.node, offset: paragraph.offset, base: value, bytes, slot: -1, holder })
+	}
+
+	// A table laid out from its source (`old`: the entry that laid it out so last, else as the story was opened)
+	// whose properties are as they were: rows unchanged keep what they were laid out from, rows whose paragraphs
+	// alone changed have those laid out from overlays, and rows added or changed otherwise (a paragraph split or
+	// joined in a cell) are written again alone, into one overlay part, and laid out from it (LayoutEdits.rows).
+	// False when the table is written again whole (most of its rows are).
+	// `oldOffset`: where the table stood in `old`.
+	private rowEdits(entry: TopEntry, node: Node, offset: number, base: number, old: TopEntry | undefined, oldOffset: number): boolean {
+		const part = this.part
+		const tableItem = refItem(base)
+
+		if (base < 0 || refPart(base) !== part.index || part.kinds[tableItem] !== Item.Table) return false
+
+		const known = old?.tables?.get(base)
+		const previous =
+			old === undefined
+				? this.originalTables.get(tableItem)
+				: oldOffset === 0
+					? old.node
+					: oldOffset > 0
+						? (old.node.nodeAt(oldOffset - 1) ?? undefined)
+						: undefined
+		const state = known !== undefined && known.node === previous ? known : undefined
+
+		if (previous === undefined || previous.type !== nodes.table || !previous.sameMarkup(node)) return false
+
+		// A keystroke's usual change: laid out from its source rows before and after, only rows' paragraphs changed.
+		if (old !== undefined && known === undefined && this.paragraphEdits(entry, node, offset, base, old, previous, oldOffset))
+			return true
+
+		const count = node.childCount
+		const prevCount = previous.childCount
+		let sourceRows = state?.sourceRows ?? -1
+		let prevRefs = state?.refs
+
+		// Rows as the source has them: each editing row is its source row, in order.
+		if (prevRefs === undefined) {
+			const rows = tableRows(part, tableItem, RevisionView.Markup)
+
+			if (rows.length !== prevCount) return false
+
+			prevRefs = []
+
+			for (let k = 0; k < prevCount; k++) {
+				const row = rows[k] ?? -1
+
+				if (previous.child(k).attrs["src"] !== row) return false
+
+				prevRefs.push(ref(part.index, row))
+			}
+
+			sourceRows = rows.length
+		}
+
+		const prevRecords = state?.records
+		const prevAt = new Map<Node, number>()
+		const bySource = new Map<number, number>()
+		const prevOffsets: number[] = []
+		let unique = true
+
+		previous.forEach((row, rowOffset, k) => {
+			prevAt.set(row, k)
+			prevOffsets.push(1 + rowOffset)
+
+			const src = row.attrs["src"] as number
+
+			if (src < 0) return
+			if (bySource.has(src)) unique = false
+
+			bySource.set(src, k)
+		})
+
+		// A row pasted as a copy of another: the save writes it as one, so the table is written whole.
+		const sources = new Set<number>()
+
+		node.forEach(row => {
+			const src = row.attrs["src"] as number
+
+			if (src < 0) return
+			if (sources.has(src)) unique = false
+
+			sources.add(src)
+		})
+
+		if (!unique) return false
+
+		const SAME = 0
+		const CONTENT = 1
+		const WRITE = 2
+		// As opened again (an undo): laid out from its source row.
+		const SOURCE = 3
+		const original = this.originalRows(tableItem)
+		const plans: { kind: number; from: number; offset: number; paragraphs: ChangedParagraph[] | undefined }[] = []
+		let writes = 0
+
+		// Rows of the table before still there as they were.
+		const kept = new Set<number>()
+
+		node.forEach(row => {
+			const same = prevAt.get(row)
+
+			if (same !== undefined) kept.add(same)
+		})
+
+		node.forEach((row, rowOffset, k) => {
+			const at = offset + 1 + rowOffset
+			const same = prevAt.get(row)
+
+			if (same !== undefined) {
+				plans.push({ kind: SAME, from: same, offset: at, paragraphs: undefined })
+
+				return
+			}
+
+			const src = row.attrs["src"] as number
+			// A row the editor made (no source) is the one at its place before, when the rows are as many.
+			const from =
+				src >= 0
+					? (bySource.get(src) ?? -1)
+					: count === prevCount && !kept.has(k) && previous.child(k).attrs["src"] === src
+						? k
+						: -1
+			const record = prevRecords?.[from]
+			const prevRow = from >= 0 ? previous.child(from) : undefined
+			const opened = src >= 0 ? original?.get(src) : undefined
+
+			if (opened !== undefined && row.eq(opened)) {
+				plans.push({ kind: SOURCE, from, offset: at, paragraphs: undefined })
+
+				return
+			}
+
+			if (prevRow !== undefined && (prevRefs[from] ?? -1) >= 0) {
+				const fits = record === undefined ? sameStructure(prevRow, row) : sameShape(record.node, row) && sameShape(prevRow, row)
+				const shadow = fits && record !== undefined ? this.shadowOf(record) : undefined
+
+				if (fits && shadow !== null) {
+					const paragraphs: ChangedParagraph[] = []
+					let mapped = true
+
+					changedParagraphs(prevRow, row, at, [], paragraphs)
+
+					// In a row written again: the paragraph at the same place in it.
+					if (shadow !== undefined && record !== undefined) {
+						for (const paragraph of paragraphs) {
+							const inner = atPath(shadow, paragraph.path)?.attrs["src"]
+
+							if (typeof inner !== "number" || inner < 0) mapped = false
+							else paragraph.base = ref(record.part.index, inner)
+						}
+					}
+
+					if (mapped) {
+						plans.push({ kind: CONTENT, from, offset: at, paragraphs })
+
+						return
+					}
+				}
+			}
+
+			plans.push({ kind: WRITE, from, offset: at, paragraphs: undefined })
+			writes++
+		})
+
+		if (writes * 2 > count + 1) return false
+
+		// The rows written again, as a table of their own (written before anything changes: a refusal writes the
+		// table whole).
+		let bytes: Uint8Array | undefined
+
+		if (writes > 0) {
+			const rows: Node[] = []
+
+			plans.forEach((plan, k) => {
+				if (plan.kind === WRITE) rows.push(node.child(k))
+			})
+
+			const alone = node.copy(Fragment.fromArray(rows))
+
+			// Wider than the grid: the save writes the table with a wider one.
+			if (tableMap(alone, part, this.context.store).width > ((node.attrs["grid"] as readonly number[] | undefined)?.length ?? 0))
+				return false
+
+			bytes = this.written(alone, false)
+
+			if (bytes === undefined) return false
+		}
+
+		// What `old` laid out this table with carries over (as opened: nothing, it was laid out from its source).
+		const reused = old !== undefined
+
+		const moved = old === undefined ? NO_MOVED : this.takeOver(entry, old, oldOffset, oldOffset + previous.nodeSize, base)
+		const byHolder = new Map<Node, OverlayRecord[]>()
+		const dropped = new Set<OverlayRecord>()
+
+		if (reused) {
+			for (const record of moved) {
+				const holder = record.holder
+
+				if (holder === undefined) continue
+
+				const list = byHolder.get(holder)
+
+				if (list === undefined) byHolder.set(holder, [record])
+				else list.push(record)
+			}
+		}
+
+		// Drops the overlays of a row of the table before (one written again, or gone).
+		const dropRow = (from: number): void => {
+			if (from < 0) return
+
+			const row = previous.child(from)
+			const record = prevRecords?.[from]
+
+			if (record !== undefined) {
+				this.edits.dropRecord(record)
+				dropped.add(record)
+			}
+
+			for (const inner of byHolder.get(row) ?? NO_RECORDS) {
+				if (inner === record) continue
+
+				this.edits.dropRecord(inner)
+				dropped.add(inner)
+
+				if (this.edits.substitutes.get(inner.base) === ref(inner.part.index, inner.item)) this.edits.substitutes.delete(inner.base)
+			}
+		}
+
+		const refs: number[] = []
+		const records: (OverlayRecord | undefined)[] = []
+		const used = new Set<number>()
+		const cells: number[] = []
+		const replaced = new Set<OverlayRecord>()
+		const group: RowGroup = { table: base, state: undefined, indices: [], nodes: [], offsets: [] }
+		let first = -1
+
+		plans.forEach((plan, k) => {
+			const row = node.child(k)
+			const from = plan.from
+
+			if (from >= 0) used.add(from)
+			if (first < 0 && (plan.kind !== SAME || from !== k)) first = k
+
+			if (plan.kind === WRITE) {
+				dropRow(from)
+				refs.push(-1)
+				records.push(undefined)
+				group.indices.push(k)
+				group.nodes.push(row)
+				group.offsets.push(plan.offset)
+
+				return
+			}
+
+			if (plan.kind === SOURCE) {
+				dropRow(from)
+				refs.push(ref(part.index, row.attrs["src"] as number))
+				records.push(undefined)
+				cells.push(ref(part.index, row.attrs["src"] as number))
+
+				return
+			}
+
+			const record = prevRecords?.[from]
+			const prevRow = previous.child(from)
+
+			refs.push(prevRefs[from] ?? -1)
+			records.push(record)
+
+			if (!reused) {
+				for (const paragraph of plan.paragraphs ?? NO_PARAGRAPHS) {
+					this.substitute(entry, paragraph, true, replaced, row)
+					cells.push(paragraph.base >= 0 ? paragraph.base : ref(part.index, paragraph.node.attrs["src"] as number))
+				}
+
+				return
+			}
+
+			const delta = plan.offset - (oldOffset + (prevOffsets[from] ?? 0))
+			const changed = plan.paragraphs
+			const inside = byHolder.get(prevRow) ?? NO_RECORDS
+
+			if (record !== undefined) {
+				record.offset = plan.offset
+				record.holder = row
+			}
+
+			for (const inner of inside) {
+				if (inner === record) continue
+
+				if (changed === undefined) {
+					inner.offset += delta
+
+					continue
+				}
+
+				// A paragraph edited before, unchanged now: where it stands in the row now.
+				if (!changed.some(paragraph => paragraph.node === inner.node)) {
+					inner.offset = offsetOf(row, plan.offset, inner.node) ?? inner.offset
+					inner.holder = row
+				}
+			}
+
+			for (const paragraph of changed ?? NO_PARAGRAPHS) {
+				this.substitute(entry, paragraph, record === undefined, replaced, row)
+				cells.push(paragraph.base >= 0 ? paragraph.base : ref(part.index, paragraph.node.attrs["src"] as number))
+			}
+		})
+
+		// Rows of the table before that are gone.
+		for (let from = 0; from < prevCount; from++) if (!used.has(from)) dropRow(from)
+
+		// Rows moved up into the place of rows removed (or the last row, when they were last): they may now fit
+		// earlier.
+		if (first < 0 && prevCount !== count) first = count - 1
+		if (first >= 0 && (refs[first] ?? -1) >= 0 && plans[first]?.kind !== CONTENT) cells.push(refs[first] ?? -1)
+
+		for (const record of replaced) dropped.add(record)
+
+		if (dropped.size > 0) keepRecords(entry, dropped)
+
+		// Paragraph overlays of rows gone stand for nothing now (those written by this edit are placed later).
+		if (dropped.size > 0) {
+			const substitutes = this.edits.substitutes
+			const queued = new Set(this.queued.map(block => block.base))
+			const live = entry.substituted.filter(value => substitutes.has(value) || queued.has(value))
+
+			entry.substituted.length = 0
+			for (const value of live) entry.substituted.push(value)
+		}
+
+		let plain = writes === 0 && count === sourceRows
+
+		for (let k = 0; plain && k < refs.length; k++) {
+			const value = refs[k] ?? -1
+
+			plain = refPart(value) === part.index && (k === 0 || value > (refs[k - 1] ?? 0))
+		}
+
+		if (plain) {
+			entry.tables?.delete(base)
+			this.edits.rows.delete(base)
+		} else {
+			const list = Float64Array.from(refs, value => (value < 0 ? Number.NaN : value))
+			const rows: TableRows = { table: base, sourceRows, node, refs, records, list }
+
+			;(entry.tables ??= new Map()).set(base, rows)
+			this.edits.rows.set(base, list)
+			group.state = rows
+		}
+
+		if (bytes !== undefined && group.state !== undefined)
+			this.queued.push({ entry, node, offset, base: -1, bytes, slot: -1, holder: undefined, rows: group })
+
+		if (cells.length > 0 || bytes !== undefined) (entry.cells ??= new Map()).set(base, cells)
+
+		// Rows that came, went or show in the view or not (tracked) move the rest: their indices among the rows
+		// laid out are not the earlier layout's.
+		if (
+			count !== prevCount ||
+			plans.some((plan, k) => plan.from !== k || node.child(k).attrs["revision"] !== previous.child(plan.from).attrs["revision"])
+		)
+			(entry.moved ??= new Set()).add(base)
+
+		entry.base.push(base)
+		entry.laid.push(base)
 		entry.offsets.push(offset)
 
 		return true
@@ -1944,8 +2702,12 @@ export class StoryEdits {
 
 				const item = added.items[next]
 
-				if (item !== undefined && document.start(added.part.node(item)) - added.offset < end) this.placed(block, added.part, item)
-				else left.push(block)
+				if (
+					item === undefined ||
+					document.start(added.part.node(item)) - added.offset >= end ||
+					!this.placed(block, added.part, item)
+				)
+					left.push(block)
 
 				start = end
 			}
@@ -1959,11 +2721,7 @@ export class StoryEdits {
 			const one = this.edits.addPart(this.part, this.story.story.item, block.bytes, this.countsAsBody)
 			const item = one?.items[0]
 
-			if (one !== undefined && item !== undefined) {
-				this.placed(block, one.part, item)
-
-				continue
-			}
+			if (one !== undefined && item !== undefined && this.placed(block, one.part, item)) continue
 
 			if (one !== undefined) this.edits.dropUnused(one.part)
 
@@ -2001,7 +2759,11 @@ export class StoryEdits {
 		}
 	}
 
-	private placed(block: QueuedBlock, part: StoryPart, item: number): void {
+	private placed(block: QueuedBlock, part: StoryPart, item: number): boolean {
+		const group = block.rows
+
+		if (group !== undefined) return this.placedRows(block, group, part, item)
+
 		const record: OverlayRecord = {
 			part,
 			item,
@@ -2010,7 +2772,8 @@ export class StoryEdits {
 			story: this,
 			entry: block.entry,
 			offset: block.offset,
-			shadow: undefined
+			shadow: undefined,
+			holder: block.holder
 		}
 		const laid = ref(part.index, item)
 
@@ -2024,6 +2787,50 @@ export class StoryEdits {
 
 			if (block.base < 0) block.entry.base[block.slot] = laid
 		}
+
+		return true
+	}
+
+	// The rows of `group`, the rows of table `item` of `part` (false when they are not as many).
+	private placedRows(block: QueuedBlock, group: RowGroup, part: StoryPart, item: number): boolean {
+		const state = group.state
+		const rows = part.kinds[item] === Item.Table ? tableRows(part, item, RevisionView.Markup) : []
+
+		if (state === undefined || rows.length !== group.indices.length) return false
+
+		const cells = (block.entry.cells ??= new Map()).get(group.table) ?? []
+
+		block.entry.cells.set(group.table, cells)
+
+		group.indices.forEach((index, k) => {
+			const row = rows[k] ?? -1
+			const node = group.nodes[k]
+
+			if (node === undefined) return
+
+			const record: OverlayRecord = {
+				part,
+				item: row,
+				// A row stands for its table (see DocumentEdits.sourceBlock).
+				base: group.table,
+				node,
+				story: this,
+				entry: block.entry,
+				offset: group.offsets[k] ?? 0,
+				shadow: undefined,
+				holder: node
+			}
+			const laid = ref(part.index, row)
+
+			this.edits.addRecord(record)
+			block.entry.records.push(record)
+			state.records[index] = record
+			state.refs[index] = laid
+			state.list[index] = laid
+			cells.push(laid)
+		})
+
+		return true
 	}
 
 	// Records that `entry` holds source `source` (one holder is kept as itself, more as a list).
@@ -2061,16 +2868,369 @@ export class StoryEdits {
 
 		for (const source of entry.sources) this.unhold(source, entry)
 
-		for (const record of entry.records) this.edits.dropRecord(record)
+		const retiring = this.retiring
+		const kept = retiring === undefined ? undefined : new Set(entry.records)
+
+		if (retiring === undefined) for (const record of entry.records) this.edits.dropRecord(record)
+		else for (const record of entry.records) retiring.push(record)
+
 		for (const base of entry.substituted) {
 			const substitute = this.edits.substitutes.get(base)
 
-			if (substitute !== undefined && this.edits.recordAt(refPart(substitute), refItem(substitute)) === undefined)
-				this.edits.substitutes.delete(base)
+			if (substitute === undefined) continue
+
+			const record = this.edits.recordAt(refPart(substitute), refItem(substitute))
+
+			if (record === undefined || kept?.has(record) === true) this.edits.substitutes.delete(base)
 		}
 
 		entry.records.length = 0
 		entry.substituted.length = 0
+
+		for (const rows of entry.tables?.values() ?? NO_TABLES)
+			if (this.edits.rows.get(rows.table) === rows.list) this.edits.rows.delete(rows.table)
+
+		entry.tables = undefined
+	}
+
+	// ---- blocks an edit left for later -----------------------------------------------------------------
+
+	// Entries in [lagFrom, lagTo] may stand for an earlier version of their block (see change()).
+	private lagFrom = -1
+	private lagTo = -1
+	// The entries brought up to date so far, laid out again once they all are: the first of them and its changed
+	// rows when a table (where layout restarts), and the last (where it may stop).
+	private caught: { first: TopEntry; cells: (readonly number[] | undefined)[] | undefined; last: TopEntry } | undefined
+	// Records of entries brought up to date, readable until that layout ends (pages show them meanwhile).
+	private retiring: OverlayRecord[] | undefined
+
+	get lagging(): boolean {
+		return this.lagFrom >= 0
+	}
+
+	// Brings entries an edit left behind up to the document until `due` (one at least; a long table some rows
+	// at a time). Once they all are, the batch to lay out again; undefined before (the pages show the blocks as
+	// they were, at the same positions).
+	catchUp(due: () => boolean): Compaction | undefined {
+		const doc = this.doc
+		const end = Math.min(this.lagTo, this.entries.length - 1, doc.childCount - 1)
+		const pairs: [TopEntry, TopEntry][] = []
+		const retiring: OverlayRecord[] = []
+		let k = this.lagFrom
+		let moved = false
+
+		this.retiring = retiring
+
+		try {
+			for (; k <= end; k++) {
+				const entry = this.entries[k]
+				const node = doc.child(k)
+
+				if (entry === undefined || entry.node === node) continue
+				if (pairs.length > 0 && due()) break
+
+				// What it stands for again (formatting undone): the document's nodes, nothing written.
+				if (entry.node.eq(node)) {
+					this.adopt(entry, node)
+
+					continue
+				}
+
+				const target = node.type === nodes.table && entry.node.type === nodes.table ? partlyAdvanced(entry.node, node) : node
+				const fresh = this.entry(target, k, entry)
+
+				fresh.section = entry.section
+				this.entries[k] = fresh
+				pairs.push([entry, fresh])
+
+				if (!sameRefs(entry.base, fresh.base) || (entry.breaks?.length ?? 0) !== (fresh.breaks?.length ?? 0)) moved = true
+
+				const caught = this.caught
+
+				// A long table's later steps keep the rows its first step changed.
+				if (caught === undefined || fresh.index < caught.first.index)
+					this.caught = { first: fresh, cells: undefined, last: caught?.last ?? fresh }
+				else if (caught.first === entry) caught.first = fresh
+
+				const now = this.caught
+
+				if (now !== undefined && (now.last === entry || fresh.index > now.last.index)) now.last = fresh
+
+				// The rest of a long table in the next slice.
+				if (target !== node) break
+			}
+		} finally {
+			this.retiring = undefined
+		}
+
+		for (const record of retiring) this.edits.retire(record)
+
+		if (k > end) {
+			this.lagFrom = -1
+			this.lagTo = -1
+		} else {
+			this.lagFrom = k
+		}
+
+		if (pairs.length > 0) {
+			this.place()
+			this.building.clear()
+			this.sourcesValid = false
+
+			if (moved) {
+				this.structured = true
+				this.publish()
+			}
+
+			for (const index of this.indexes) index.replace(pairs)
+
+			const caught = this.caught
+
+			// The changed rows of its first block, now laid out from their refs.
+			if (caught !== undefined && caught.cells === undefined) {
+				const first = caught.first
+
+				caught.cells = first.laid.map(laid => first.cells?.get(laid))
+			}
+		}
+
+		const caught = this.caught
+
+		if (this.lagging || caught === undefined) return undefined
+
+		this.caught = undefined
+
+		const live = (entry: TopEntry): boolean => this.entries[entry.index] === entry
+		const first = caught.first
+
+		// Every block behind the last is (to the end when an edit meanwhile took it).
+		const last = live(caught.last) ? caught.last : this.entries[this.entries.length - 1]
+		const dirty: DirtyBlock[] = []
+
+		if (last !== undefined) dirtyBlocks(last, dirty)
+
+		// From the start when an edit meanwhile took the first.
+		if (!live(first)) return { dirty, parts: new Set(), from: { section: 0, index: 0, rows: [] } }
+
+		// Its index in its section's flow.
+		let index = 0
+
+		for (let j = 0; j < first.index; j++) {
+			const entry = this.entries[j]
+
+			if (entry === undefined) continue
+
+			const breaks = entry.breaks ?? NO_BREAKS
+			let section = entry.section
+			let next = 0
+
+			for (let r = 0; r < entry.base.length; r++) {
+				while (next < breaks.length && (breaks[next] ?? 0) <= r) {
+					section++
+					next++
+				}
+
+				if (section === first.section) index++
+			}
+		}
+
+		const rows: DirtyBlock[] = []
+
+		dirtyBlocks(first, rows)
+
+		const cells = caught.cells
+
+		return {
+			dirty,
+			parts: new Set(),
+			from: {
+				section: first.section,
+				index,
+				rows: rows.map((block, k) => {
+					const items = cells?.[k]
+
+					return items === undefined ? block : { ...block, cells: items }
+				})
+			}
+		}
+	}
+
+	// `entry` stands for `node`, a block the same as its own (other node objects): it and its records take them.
+	private adopt(entry: TopEntry, node: Node): void {
+		const same = new Map<Node, Node>()
+		const pair = (a: Node, b: Node): void => {
+			same.set(a, b)
+
+			if (a.isTextblock || a.isLeaf) return
+
+			for (let k = 0; k < a.childCount; k++) pair(a.child(k), b.child(k))
+		}
+
+		pair(entry.node, node)
+		entry.node = node
+
+		for (const record of entry.records) {
+			record.node = same.get(record.node) ?? record.node
+
+			if (record.holder !== undefined) record.holder = same.get(record.holder) ?? record.holder
+		}
+
+		for (const rows of entry.tables?.values() ?? NO_TABLES) rows.node = same.get(rows.node) ?? rows.node
+	}
+
+	// ---- merging overlays --------------------------------------------------------------------------------
+
+	private formats: FormatResolver | undefined = undefined
+
+	// One region's overlays of this story (body) written again into one part: parts every live block of which is
+	// an edited paragraph of this story (a top-level one, or a cell's) and that show on nearby pages (`wide`: on
+	// any), at least `minimum` of them. Their blocks are laid out from the merged part at once; the old records stay readable
+	// (pages showing them) until the layout has laid those pages out again (`retired`).
+	compactRegion(
+		pages: ReadonlyMap<number, readonly [number, number]>,
+		overlays: Iterable<readonly [number, readonly OverlayRecord[]]>,
+		due: () => boolean = () => false,
+		wide = false
+	): (Compaction & { readonly retired: readonly OverlayRecord[] }) | undefined {
+		const candidates: { part: number; first: number; last: number; records: readonly OverlayRecord[] }[] = []
+
+		for (const [part, records] of overlays) {
+			const shown = pages.get(part)
+
+			if (shown === undefined || records.length > MERGE_RECORDS || !records.every(record => this.mergeable(record))) continue
+
+			candidates.push({ part, first: shown[0], last: shown[1], records })
+		}
+
+		candidates.sort((a, b) => a.first - b.first)
+
+		const minimum = this.edits.compaction.minimum
+		const span = wide ? Infinity : MERGE_PAGES
+		let chosen: typeof candidates = []
+
+		for (let k = 0; k < candidates.length && chosen.length < minimum; k++) {
+			const start = candidates[k]?.first ?? 0
+
+			chosen = []
+
+			for (let j = k; j < candidates.length && chosen.length < MERGE_PARTS; j++) {
+				const candidate = candidates[j]
+
+				if (candidate === undefined || candidate.first > start + span) break
+				if (candidate.last <= start + span) chosen.push(candidate)
+			}
+		}
+
+		if (chosen.length < minimum) return undefined
+
+		// Written before anything changes: a block the writer refuses leaves the region as it is. Parts past the
+		// slice's time are left for the next merge.
+		const writes: { record: OverlayRecord; bytes: Uint8Array; cell: boolean }[] = []
+		let taken = 0
+
+		for (const candidate of chosen) {
+			if (taken >= minimum && due()) break
+
+			taken++
+
+			for (const record of candidate.records) {
+				const cell = record.entry.node !== record.node
+				const src = (record.node.attrs["src"] as number | undefined) ?? -1
+				const bytes = this.written(record.node, cell, !cell && record.base < 0 && src >= 0)
+
+				if (bytes === undefined) return undefined
+
+				writes.push({ record, bytes, cell })
+			}
+		}
+
+		const retired: OverlayRecord[] = []
+		const tops = new Set<TopEntry>()
+		const cellBases = new Map<TopEntry, number[]>()
+
+		for (const { record, bytes, cell } of writes) {
+			const entry = record.entry
+			const at = entry.records.indexOf(record)
+
+			if (at >= 0) entry.records.splice(at, 1)
+
+			retired.push(record)
+
+			if (cell) {
+				this.queued.push({
+					entry,
+					node: record.node,
+					offset: record.offset,
+					base: record.base,
+					bytes,
+					slot: -1,
+					holder: record.holder
+				})
+
+				const bases = cellBases.get(entry) ?? []
+
+				bases.push(record.base)
+				cellBases.set(entry, bases)
+			} else {
+				this.queued.push({
+					entry,
+					node: record.node,
+					offset: record.offset,
+					base: record.base,
+					bytes,
+					slot: 0,
+					holder: undefined
+				})
+				tops.add(entry)
+			}
+		}
+
+		this.place()
+		this.building.clear()
+
+		// Blocks the editor made are laid out under their overlay's ref: the block list follows.
+		if ([...tops].some(entry => (entry.base[0] ?? -1) === entry.laid[0])) this.publish()
+
+		const dirty: DirtyBlock[] = []
+
+		for (const entry of tops) dirtyBlocks(entry, dirty)
+
+		// A cell's paragraph by what it stands for in its table's rows (see DirtyBlock.cells).
+		for (const [entry, bases] of cellBases) dirty.push({ section: entry.section, ref: entry.laid[0] ?? -1, cells: bases })
+
+		return { dirty, parts: new Set(chosen.slice(0, taken).map(candidate => candidate.part)), retired }
+	}
+
+	// Whether a merge can write `record` again: an edited paragraph of this story, as the document holds it now,
+	// the only block of a top-level entry or a cell paragraph of a table that is one.
+	private mergeable(record: OverlayRecord): boolean {
+		const entry = record.entry
+
+		if (record.story !== this || record.node.type !== nodes.paragraph || this.entries[entry.index] !== entry || entry.laid.length !== 1)
+			return false
+
+		// What layout numbers as it lays it out (a list item, a note reference) is counted under its items: written
+		// into another part, a run laying out its page again would number it anew.
+		let noted = false
+
+		record.node.descendants(node => {
+			if (node.type === nodes.note_ref) noted = true
+
+			return !noted
+		})
+
+		if (noted || (this.formats ??= new FormatResolver(this.context, this.part)).listOf(record.node) !== undefined) return false
+
+		if (entry.node === record.node) return record.offset === 0 && entry.laid[0] === ref(record.part.index, record.item)
+
+		if (entry.node.type !== nodes.table || record.base < 0) return false
+
+		const start = this.starts[entry.index] ?? 0
+
+		return (
+			this.edits.substitutes.get(record.base) === ref(record.part.index, record.item) &&
+			this.doc.nodeAt(start + record.offset) === record.node
+		)
 	}
 
 	// ---- lookups -------------------------------------------------------------------------------------------
@@ -2185,8 +3345,8 @@ export class StoryEdits {
 				return { pos: start + record.offset, node: record.node, shadow, layoutPart: record.part }
 			}
 
-			// A paragraph inside an overlay table: found in the shadow, at the same place in the table as it is
-			// now (cells edited since keep the shape).
+			// A paragraph inside an overlay table (or row): found in the shadow, at the same place in the table as
+			// it is now (cells edited since keep the shape).
 			const path = pathOfSource(shadow, item)
 			const inner = path === undefined ? undefined : atPath(shadow, path)
 			const table = record.offset === 0 ? entry.node : entry.node.nodeAt(record.offset - 1)
@@ -2229,9 +3389,9 @@ export class StoryEdits {
 			if (record.node === node && start + record.offset === pos) return { part: record.part.index, item: record.item }
 		}
 
-		// Inside a table laid out from an overlay: the shadow's paragraph at the same place.
+		// Inside a table (or a row) laid out from an overlay: the shadow's paragraph at the same place.
 		for (const record of entry.records) {
-			if (record.node.type !== nodes.table) continue
+			if (record.node.type !== nodes.table && record.node.type !== nodes.table_row) continue
 
 			const table = record.offset === 0 ? entry.node : entry.node.nodeAt(record.offset - 1)
 			const offset = pos - start - record.offset - 1
@@ -2260,17 +3420,37 @@ export class StoryEdits {
 		if (record.shadow !== undefined) return record.shadow
 
 		const model = this.edits.model
-		const story = model.storyOf(record.part, record.part.parent(record.item)) as Story | undefined
+		// A row written again: its row of the table it was written in.
+		const row = record.part.kinds[record.item] === Item.Row
+		const block = row ? record.part.parent(record.item) : record.item
+		const story = model.storyOf(record.part, record.part.parent(block)) as Story | undefined
 		let shadow: Node | null = null
 
 		if (story !== undefined) {
-			this.shadows ??= new DocxDocBuilder({ ...this.context, model })
+			// A shadow gives the block's structure (maps, fields), never formatting a write or a command reads: it is
+			// built with property containers and run bases of its own, which go with it. The document's would keep
+			// every stamped container an overlay held, and a run base for each with the overlay's whole part.
+			const store = new PropsStore()
+			const context = { ...this.context, model, store, bases: new RunBases(store) }
+
+			// Shadows are never pasted: their blocks record their origins as they are built rather than wait in a
+			// list that would keep every shadow for as long as the context lives (origin.ts).
+			knowOrigins(context)
 
 			try {
-				shadow = this.shadows.buildBlock(story, record.item)
+				shadow = new DocxDocBuilder(context).buildBlock(story, block)
 			} catch {
 				shadow = null
 			}
+		}
+
+		if (row && shadow !== null) {
+			let found: Node | null = null
+
+			shadow.forEach(child => {
+				if (child.attrs["src"] === record.item) found = child
+			})
+			shadow = found
 		}
 
 		record.shadow = shadow
@@ -2332,7 +3512,13 @@ function dirtyBlocks(entry: TopEntry, out: DirtyBlock[], cells = false): void {
 
 		const items = cells ? entry.cells?.get(laid) : undefined
 
-		out.push(items === undefined ? { section, ref: laid } : { section, ref: laid, cells: items })
+		out.push(
+			items === undefined
+				? { section, ref: laid }
+				: entry.moved?.has(laid) === true
+					? { section, ref: laid, cells: items, moved: true }
+					: { section, ref: laid, cells: items }
+		)
 	})
 }
 
@@ -2407,6 +3593,136 @@ interface QueuedBlock {
 	readonly base: number
 	readonly bytes: Uint8Array
 	readonly slot: number
+	// The editing row holding a paragraph of a table laid out with rows of its own.
+	readonly holder?: Node | undefined
+	// Rows of a table written again, as a table of their own.
+	readonly rows?: RowGroup | undefined
+}
+
+// Rows of a table (laid out from `table`) written again by an edit: their indices among the editing table's
+// rows, their nodes and positions in the entry.
+interface RowGroup {
+	readonly table: number
+	state: TableRows | undefined
+	readonly indices: number[]
+	readonly nodes: Node[]
+	readonly offsets: number[]
+}
+
+const NO_RECORDS: readonly OverlayRecord[] = []
+// An edit of marks over blocks this large is written for layout later (StoryEdits.catchUp), the paragraphs of
+// a long table about STEP_PARAGRAPHS at a time.
+const DEFER_SIZE = 16384
+const STEP_PARAGRAPHS = 96
+
+// Whether blocks `first`..`last` of `before` and `after` differ in marks alone.
+function marksOnly(before: Node, after: Node, first: number, last: number): boolean {
+	for (let k = first; k <= last; k++) if (!sameButMarks(before.child(k), after.child(k))) return false
+
+	return true
+}
+
+function sameButMarks(a: Node, b: Node): boolean {
+	if (a === b) return true
+	if (a.content.size !== b.content.size || (a.childCount !== b.childCount && !a.inlineContent)) return false
+	// The type and attributes (deeply), not the marks.
+	if (!a.hasMarkup(b.type, b.attrs, a.marks)) return false
+	if (a.isText) return a.text === b.text
+
+	if (a.inlineContent) {
+		if (a.textContent !== b.textContent) return false
+
+		// Inline nodes other than text at the same offsets.
+		const leaves: [number, Node][] = []
+
+		a.forEach((child, offset) => {
+			if (!child.isText) leaves.push([offset, child])
+		})
+
+		let at = 0
+		let same = true
+
+		b.forEach((child, offset) => {
+			if (!same || child.isText) return
+
+			const other = leaves[at++]
+
+			same = other !== undefined && other[0] === offset && sameButMarks(other[1], child)
+		})
+
+		return same && at === leaves.length
+	}
+
+	for (let k = 0; k < a.childCount; k++) if (!sameButMarks(a.child(k), b.child(k))) return false
+
+	return true
+}
+
+function spanSize(doc: Node, first: number, last: number): number {
+	let size = 0
+
+	for (let k = first; k <= last && size < DEFER_SIZE; k++) size += doc.child(k).nodeSize
+
+	return size
+}
+
+// Table `node` (`old` as last laid out, the same rows otherwise) with its next rows that differ taken from
+// `node`, about STEP_PARAGRAPHS paragraphs of them; `node` itself once that is all of them.
+function partlyAdvanced(old: Node, node: Node): Node {
+	const count = node.childCount
+
+	if (old.childCount !== count) return node
+
+	let start = 0
+
+	while (start < count && old.child(start) === node.child(start)) start++
+
+	let end = start
+	let paragraphs = 0
+
+	// Rows that changed count; those that did not cost nothing to lay out from their own refs.
+	while (end < count && paragraphs < STEP_PARAGRAPHS) {
+		const row = node.child(end)
+
+		if (row !== old.child(end))
+			row.descendants(child => {
+				if (child.isTextblock) paragraphs++
+
+				return !child.isTextblock
+			})
+
+		end++
+	}
+
+	let rest = end
+
+	while (rest < count && old.child(rest) === node.child(rest)) rest++
+
+	if (rest >= count) return node
+
+	const rows: Node[] = []
+
+	for (let k = 0; k < count; k++) rows.push(k < end ? node.child(k) : old.child(k))
+
+	return node.copy(Fragment.fromArray(rows))
+}
+
+// A write this large outweighs the root's declarations: finding the prefixes it uses costs more than they do.
+const FULL_ROOT_BYTES = 1 << 14
+// A merge of overlays: the most parts and blocks per part it takes, and the pages a region spans.
+const MERGE_PARTS = 64
+const MERGE_RECORDS = 32
+const MERGE_PAGES = 12
+const NO_MOVED: ReadonlySet<OverlayRecord> = new Set()
+const NO_TABLES: readonly TableRows[] = []
+const NO_PARAGRAPHS: readonly ChangedParagraph[] = []
+
+// Takes records `gone` out of the entry's.
+function keepRecords(entry: TopEntry, gone: ReadonlySet<OverlayRecord>): void {
+	const kept = entry.records.filter(record => !gone.has(record))
+
+	entry.records.length = 0
+	for (const record of kept) entry.records.push(record)
 }
 
 // Paragraphs of `b` that differ from `a` (same structure), with their positions relative to `offset`.
@@ -2428,8 +3744,9 @@ function changedParagraphs(a: Node, b: Node, offset: number, path: readonly numb
 // differs. Unlike sameStructure, blocks match by place, not by source.
 function sameShape(a: Node, b: Node): boolean {
 	if (a === b) return true
-	if (!a.sameMarkup(b) || a.childCount !== b.childCount) return false
+	if (!a.sameMarkup(b)) return false
 	if (a.type === nodes.paragraph) return true
+	if (a.childCount !== b.childCount) return false
 
 	for (let k = 0; k < a.childCount; k++) if (!sameShape(a.child(k), b.child(k))) return false
 

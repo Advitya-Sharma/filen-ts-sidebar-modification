@@ -31,9 +31,9 @@ export interface WriteEnvironment {
 	hyperlink(part: string, target: string): string
 	// The parts of the save being written, for writers that add to them or reference new ones (pictures,
 	// notes); absent where nothing new may be (gate 1, the layout of edited blocks).
-	readonly parts?: SaveParts
+	readonly parts?: SaveParts | undefined
 	// Stories rewritten inside source bytes this story copies (see nested.ts).
-	readonly nested?: NestedStories
+	readonly nested?: NestedStories | undefined
 }
 
 export interface StoryWriteOptions {
@@ -83,6 +83,55 @@ export interface StoryDraft {
 
 const NO_SIBLINGS: readonly number[] = []
 
+// A set of source items the writer keeps across a story's blocks (runs copied or started, wrappers opened,
+// changes written) that can note which items one block's write looks at.
+class TouchSet extends Set<number> {
+	// While a block's write is noted: the items it looked at, and whether one was already there (another block's).
+	touched: Set<number> | undefined = undefined
+	before = false
+
+	override has(item: number): boolean {
+		const found = super.has(item)
+
+		if (this.touched !== undefined) {
+			if (found && !this.touched.has(item)) this.before = true
+
+			this.touched.add(item)
+		}
+
+		return found
+	}
+
+	override add(item: number): this {
+		if (this.touched !== undefined) {
+			if (super.has(item) && !this.touched.has(item)) this.before = true
+
+			this.touched.add(item)
+		}
+
+		return super.add(item)
+	}
+}
+
+// What a top-level block wrote when nothing outside it shaped the write: its bytes (new markup and source copies,
+// replayed as written), its paragraphs and containers, and the items it put in the writer's sets. A later save
+// writes the very same node again the same way, so it replays this instead (see StoryWriting.writeTop).
+interface WrittenBlock {
+	readonly bytes: Uint8Array
+	// [from, to, source from, source to] of each source copy, from relative to the block.
+	readonly copies: readonly number[]
+	readonly paragraphs: readonly WrittenParagraph[]
+	readonly containers: readonly WrittenContainer[]
+	// Per set (copiedRuns, startedRuns, openedWrappers, writtenChanges): the items the write looked at, and
+	// those it added.
+	readonly touched: readonly (readonly number[])[]
+	readonly added: readonly (readonly number[])[]
+}
+
+// The blocks each story's last draft wrote (one generation: a draft keeps what it wrote or replayed), per way of
+// writing (the prefixes the part binds, what the save writes alongside: a copied story's writer is not a save's).
+const writtenBlocks = new WeakMap<StoryDoc, Map<string, WeakMap<Node, WrittenBlock>>>()
+
 // Where source item `item` is among a container's children (items ascend in source order), or -1.
 function indexOf(siblings: readonly number[], item: number): number {
 	let low = 0
@@ -127,7 +176,7 @@ async function drive<T>(steps: Generator<void, T>, clock: SliceClock): Promise<T
 const childItems = new WeakMap<Node, Int32Array>()
 const SCAN_CHILDREN = 16
 
-function originalBlock(story: StoryDoc, item: number): Node | undefined {
+export function originalBlock(story: StoryDoc, item: number): Node | undefined {
 	return item === NO_SOURCE ? undefined : descend(story, item)
 }
 
@@ -266,7 +315,12 @@ export class StoryWriter {
 	// `copy`: an earlier block of the story holds the same source (a pasted copy), as writeStory finds it.
 	// `cell`: whether the block is in a table cell (by default, where its source is).
 	writeBlockAlone(node: Node, copy = false, cell?: boolean): Out {
-		return this.writing.writeBlockAlone(node, copy, cell)
+		return complete(this.writing.blockAlone(node, copy, cell, undefined))
+	}
+
+	// writeBlockAlone yielding between the children it writes (a long table's rows and cells) when `due` says so.
+	writeBlockAloneSteps(node: Node, due: () => boolean): Generator<void, Out> {
+		return this.writing.blockAlone(node, false, undefined, due)
 	}
 
 	// Whether a paragraph is again the one the story was built with (an undo): its source bytes stand for it.
@@ -311,19 +365,57 @@ export class StoryWriting {
 	private readonly siblings = new Map<number, number[]>()
 	// Set while writing in slices.
 	clock: SliceClock | undefined
-	readonly copiedRuns = new Set<number>()
-	readonly startedRuns = new Set<number>()
-	readonly openedWrappers = new Set<number>()
+	// Set while a block alone is written in steps: when to yield (see due()).
+	private stepDue: (() => boolean) | undefined = undefined
+	readonly copiedRuns: Set<number> = new TouchSet()
+	readonly startedRuns: Set<number> = new TouchSet()
+	readonly openedWrappers: Set<number> = new TouchSet()
 	readonly paragraphs: WrittenParagraph[] = []
 	// The w14:textId attribute's qualified name, and the w14 prefix the part binds ("" when it binds none).
 	readonly textId: ReadonlySet<string> | undefined
 	readonly w14: string
 	private readonly containers: WrittenContainer[] = []
 	// Bases whose w:rPrChange has been written (copied runs included).
-	readonly writtenChanges = new Set<number>()
+	readonly writtenChanges: Set<number> = new TouchSet()
+	// Calls on the save's environment (new ids, relationships, parts, stories spliced in) while a block is written.
+	private effects = 0
+	// The blocks this draft wrote alone, for the next draft of the story written the same way (see writeTop).
+	private written: WeakMap<Node, WrittenBlock> | undefined = undefined
+	private readonly config: string
 
 	constructor(env: WriteEnvironment, story: StoryDoc, options: StoryWriteOptions) {
-		this.env = env
+		const effect = (): void => {
+			this.effects++
+		}
+
+		this.env = {
+			context: env.context,
+			nextRevisionId: () => {
+				effect()
+
+				return env.nextRevisionId()
+			},
+			numId: id => {
+				effect()
+
+				return env.numId(id)
+			},
+			hyperlink: (part, target) => {
+				effect()
+
+				return env.hyperlink(part, target)
+			},
+			get parts() {
+				if (env.parts !== undefined) effect()
+
+				return env.parts
+			},
+			get nested() {
+				if (env.nested !== undefined) effect()
+
+				return env.nested
+			}
+		}
 		this.story = story
 		this.part = story.part
 		this.bytes = story.part.document.bytes
@@ -338,6 +430,14 @@ export class StoryWriting {
 		this.w14 = w14 ?? options.prefixes?.get(W14_NAMESPACE) ?? ""
 		this.textId = w14 === undefined || w14 === "" ? undefined : new Set([`${w14}:textId`])
 		this.names = new Names(reader.namespaces.prefixFor(root, W_NAMESPACE) ?? "", reader.namespaces.prefixFor(root, R_NAMESPACE) ?? "")
+		this.config = [
+			this.names.w,
+			this.names.r,
+			this.w14,
+			[...(this.textId ?? [])].join(" "),
+			env.parts !== undefined,
+			env.nested !== undefined
+		].join("\u0001")
 	}
 
 	*draft(doc: Node): Generator<void, StoryDraft> {
@@ -381,7 +481,9 @@ export class StoryWriting {
 
 		openTag(out, document, container)
 
-		const tail = yield* this.writeChildren(out, doc, this.story.story.item, (child, at) => this.writeBlock(at, child), {
+		this.written = new WeakMap()
+
+		const tail = yield* this.writeChildren(out, doc, this.story.story.item, (child, at) => this.writeTop(at, child), {
 			from: document.openEnd(container),
 			to: document.contentEnd(container),
 			tail: sectPr === NO_SOURCE || final !== undefined ? [] : [sectPr]
@@ -391,12 +493,22 @@ export class StoryWriting {
 		else if (!tail && sectPr !== NO_SOURCE) this.copyWhole(out, this.part.node(sectPr))
 
 		closeTag(out, document, container)
+		let generations = writtenBlocks.get(this.story)
+
+		if (generations === undefined) {
+			generations = new Map()
+			writtenBlocks.set(this.story, generations)
+		}
+
+		generations.set(this.config, this.written)
+		this.written = undefined
 
 		return { out, paragraphs: [...this.paragraphs], containers: [...this.containers] }
 	}
 
-	writeBlockAlone(node: Node, copy: boolean, cell: boolean | undefined): Out {
+	*blockAlone(node: Node, copy: boolean, cell: boolean | undefined, due: (() => boolean) | undefined): Generator<void, Out> {
 		this.force = node
+		this.stepDue = undefined
 		// Each block is written alone once (a proof keeps its writer): nothing of one is kept for the next.
 		this.siblings.clear()
 		this.owners.clear()
@@ -433,7 +545,13 @@ export class StoryWriting {
 
 		const out = new Out()
 
-		complete(this.writeBlock(out, node))
+		this.stepDue = due
+
+		try {
+			yield* this.writeBlock(out, node)
+		} finally {
+			this.stepDue = undefined
+		}
 
 		return out
 	}
@@ -470,9 +588,9 @@ export class StoryWriting {
 		}
 	}
 
-	// Whether the write in progress should give the host a turn (only in slices).
+	// Whether the write in progress should give the host a turn (only in slices or in steps).
 	due(): boolean {
-		return this.clock !== undefined && this.clock.due
+		return (this.stepDue !== undefined && this.stepDue()) || (this.clock !== undefined && this.clock.due)
 	}
 
 	// canCopy for every block, children before their container (each container then looks only at its
@@ -507,6 +625,11 @@ export class StoryWriting {
 				if (this.due()) yield
 			}
 		}
+	}
+
+	// The node source item `own` is written as (its first occurrence), if any.
+	ownerOf(own: number): Node | undefined {
+		return this.owners.get(own)
 	}
 
 	// Whether `node` is the first occurrence of its source item, which it is then written as.
@@ -702,6 +825,106 @@ export class StoryWriting {
 		while (start > 0 && MARKER_ITEMS.has(this.part.kinds[siblings[start - 1] ?? -1] ?? 0)) start--
 
 		return siblings.slice(start, index)
+	}
+
+	// A top-level block of the story. A paragraph standing alone (owned, no source item of it written elsewhere
+	// in the story, no new ids, relationships or parts) is written as the story's last draft wrote that very node,
+	// when nothing written before it this time touched what it touched; gate 2 checks it as any other.
+	*writeTop(out: Out, node: Node): Generator<void, void> {
+		const written = this.written
+
+		if (
+			written === undefined ||
+			node.type !== nodes.paragraph ||
+			this.duplicated ||
+			this.shared.size > 0 ||
+			this.repeating > 0 ||
+			this.force !== undefined ||
+			this.cells > 0
+		) {
+			yield* this.writeBlock(out, node)
+
+			return
+		}
+
+		const sets = [this.copiedRuns, this.startedRuns, this.openedWrappers, this.writtenChanges] as TouchSet[]
+		const last = writtenBlocks.get(this.story)?.get(this.config)?.get(node)
+
+		if (last !== undefined && sets.every((set, k) => (last.touched[k] ?? []).every(item => !set.has(item)))) {
+			this.replay(out, last, sets)
+			written.set(node, last)
+
+			return
+		}
+
+		const from = out.size
+		const trusted = out.trusted.length
+		const paragraphs = this.paragraphs.length
+		const containers = this.containers.length
+		const effects = this.effects
+
+		for (const set of sets) {
+			set.touched = new Set()
+			set.before = false
+		}
+
+		try {
+			yield* this.writeBlock(out, node)
+		} finally {
+			const touched = sets.map(set => set.touched ?? new Set<number>())
+			// The block's first copy joined the copy before it (Out.copy joins adjacent ones): its `copies` would
+			// miss that range, so it is not kept for replay. (A top-level paragraph starts with new markup.)
+			const merged = trusted > 0 && (out.trusted[trusted - 3] ?? 0) > from
+			const alone = !merged && this.effects === effects && sets.every(set => !set.before) && (out.trusted[trusted] ?? from) >= from
+
+			for (const set of sets) set.touched = undefined
+
+			if (alone) {
+				const copies = out.trusted.slice(trusted)
+
+				for (let k = 0; k < copies.length; k += 4) {
+					copies[k] = (copies[k] ?? 0) - from
+					copies[k + 1] = (copies[k + 1] ?? 0) - from
+				}
+
+				written.set(node, {
+					bytes: out.slice(from, out.size),
+					copies,
+					paragraphs: this.paragraphs
+						.slice(paragraphs)
+						.map(record => ({ ...record, from: record.from - from, to: record.to - from })),
+					containers: this.containers
+						.slice(containers)
+						.map(record => ({ ...record, from: record.from - from, to: record.to - from })),
+					touched: touched.map(items => [...items]),
+					// Nothing it touched was there before (`before`): what is there now, it added.
+					added: sets.map((set, k) => [...(touched[k] ?? [])].filter(item => set.has(item)))
+				})
+			}
+		}
+	}
+
+	// A block as an earlier draft wrote it: the same bytes, source copies as copies, and what it added to the sets.
+	private replay(out: Out, block: WrittenBlock, sets: readonly TouchSet[]): void {
+		const from = out.size
+		let at = 0
+
+		for (let k = 0; k < block.copies.length; k += 4) {
+			const start = block.copies[k] ?? 0
+
+			out.bytes(block.bytes, at, start)
+			out.copy(this.bytes, block.copies[k + 2] ?? 0, block.copies[k + 3] ?? 0)
+			at = block.copies[k + 1] ?? start
+		}
+
+		out.bytes(block.bytes, at, block.bytes.length)
+
+		for (const record of block.paragraphs) this.paragraphs.push({ ...record, from: record.from + from, to: record.to + from })
+		for (const record of block.containers) this.containers.push({ ...record, from: record.from + from, to: record.to + from })
+
+		block.added.forEach((items, k) => {
+			for (const item of items) sets[k]?.add(item)
+		})
 	}
 
 	*writeBlock(out: Out, node: Node): Generator<void, void> {

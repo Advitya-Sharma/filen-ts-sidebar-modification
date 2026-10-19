@@ -5,13 +5,23 @@ import { AddMarkStep, AttrStep, Mapping, RemoveMarkStep, ReplaceAroundStep, Repl
 import { decodeUtf8, encodeUtf8, parseXml } from "../../xml/index"
 import type { DocxEditContext, DocxIdentity } from "../edit/context"
 import type { RunBase } from "../edit/formatting"
-import { invariantViolation, isCommand, isInternal, markCommand, markInternal, markRemarking } from "../edit/invariants/core"
+import {
+	OrderedDoc,
+	invariantViolation,
+	isCommand,
+	isInternal,
+	markCommand,
+	markInternal,
+	markRemarking,
+	markTyping
+} from "../edit/invariants/core"
 import { FORMATTING_MARKS, NO_SOURCE, docxSchema, inlineLevel, type IndentAttrs, type SpacingAttrs } from "../edit/schema"
 import { SetAttrsStep } from "../edit/attrs"
 import { MarkChanges, SetMarkSetsStep, SetMarksStep, isMarkStep, type PieceStep } from "../edit/marks"
 import { rowOverrides, type RowOverrides, type TrackStamp } from "../edit/tables/map"
 import type { DocxEditorSession } from "../edit/session"
-import { Revision, RevisionFlag, type StoryPart } from "../model/index"
+import { Item, Revision, RevisionFlag, type StoryPart } from "../model/index"
+import { simpleFieldRewritable } from "../fields/evaluate"
 import { wantReviewIndex } from "./index"
 import { equationDeleted, equationFault, trackedDeletion } from "../math/edit"
 import type { ParagraphBordersProps } from "../props/index"
@@ -140,6 +150,15 @@ const UNMARKED: ReadonlySet<unknown> = new Set([nodes.rendered_break, nodes.comm
 
 export function markable(node: Node): boolean {
 	return node.isInline && (inlineLevel(node) === "run" || node.type === nodes.field) && !UNMARKED.has(node.type)
+}
+
+function untrackableField(node: Node, session: DocxEditorSession): boolean {
+	if (node.type !== nodes.field) return false
+
+	const own = node.attrs["src"] as number
+	const part = session.story.part
+
+	return own >= 0 && part.kinds[own] === Item.FieldSimple && !simpleFieldRewritable(part, own)
 }
 
 export function isDeleted(node: Node): boolean {
@@ -317,14 +336,31 @@ function waiting(session: DocxEditorSession): Pending | undefined {
 	return undefined
 }
 
+// Whether [from, to) of `doc` was all typed in a composition not marked yet: the ranges of its steps together
+// (each step of a composition is a range of its own, side by side).
 function inPending(session: DocxEditorSession, doc: Node, from: number, to: number): boolean {
 	const entry = pending.get(session)
 
 	if (entry === undefined || entry.doc !== doc) return false
 
-	for (let k = 0; k < entry.ranges.length; k += 2) if (from >= (entry.ranges[k] ?? 0) && to <= (entry.ranges[k + 1] ?? 0)) return true
+	let covered = from
+	let grew = true
 
-	return false
+	while (grew && covered < to) {
+		grew = false
+
+		for (let k = 0; k < entry.ranges.length; k += 2) {
+			const start = entry.ranges[k] ?? 0
+			const end = entry.ranges[k + 1] ?? 0
+
+			if (start <= covered && end > covered) {
+				covered = end
+				grew = true
+			}
+		}
+	}
+
+	return covered >= to
 }
 
 // Marks what was typed during a composition that has ended (the host calls this at compositionend; the next
@@ -437,6 +473,13 @@ function classify(doc: Node, from: number, to: number, author: string, session: 
 
 			if (ownInsertion(node, author) || inPending(session, doc, start, end)) {
 				pushPiece(result.real, start, end)
+				broken = true
+			} else if (untrackableField(node, session)) {
+				// A simple field with a drawing or a field in it: no tracked change holds it (a w:del holds runs
+				// only, and it has no complex form), so it stays, as a locked block does.
+				if (anchor === undefined) stays.push(pos)
+
+				result.kept = true
 				broken = true
 			} else {
 				if (anchor === undefined) stays.push(pos)
@@ -730,6 +773,78 @@ export function formattingBase(context: DocxEditContext, part: StoryPart, nodeMa
 
 const KEPT_WHEN_TRACKED: ReadonlySet<string> = new Set(["sectionBreak", "lockedBlock", "lockedContentControl"])
 
+// ---- tracked replaces built whole ---------------------------------------------------------------------------
+
+// Transactions built in their tracked form already (Replace All): left as they are, their plan marked after.
+const prebuilt = new WeakSet<Transaction>()
+
+// How replacing [from, to] of `block` (positions in its content; text only) is tracked, as rewriteStep tracks a
+// replace of it: `real` (the author's own insertion) goes for real, `marked` is marked deleted; undefined when
+// it cannot be told this way (text being composed, a comment going with it, an equation, nothing to mark), the
+// transaction then going step by step. The author is the session's stamp's.
+export interface TrackedReplace {
+	readonly real: readonly (readonly [number, number])[]
+	readonly marked: readonly (readonly [number, number])[]
+	// Whether anything stays (else the replace goes as it is).
+	readonly kept: boolean
+}
+
+export function trackedReplace(block: Node, from: number, to: number, session: DocxEditorSession): TrackedReplace | undefined {
+	const stamp = revisionStamp(session.context.identity)
+
+	if (stamp === undefined || waiting(session) !== undefined) return undefined
+
+	const deletion = classify(block, from, to, stamp.author, session)
+
+	if (deletion.refused || deletion.paragraphs.length > 0 || deletion.rows.length > 0 || deletion.equations.length > 0) return undefined
+	if (deletion.real.some(([start, end]) => start < from || end > to)) return undefined
+	if (deletion.kept && deletion.marked.length === 0 && deletion.real.length === 0) return undefined
+
+	return { real: deletion.real, marked: deletion.marked, kept: deletion.kept }
+}
+
+// Records `tr` (built from `state` in its tracked form, see trackedReplace) as the change tracker's own rewrite:
+// `deleted` and `inserted` ([from, to] pairs of its final document, in the order the tracker records them, the
+// last replace first) are marked as the tracker marks what it records. False without the author's name.
+export function prebuiltTracking(
+	tr: Transaction,
+	session: DocxEditorSession,
+	deleted: readonly number[],
+	inserted: readonly number[]
+): boolean {
+	const stamp = revisionStamp(session.context.identity)
+
+	if (stamp === undefined) return false
+
+	const at = tr.steps.length
+	const ranges = (flat: readonly number[]): Range[] => {
+		const out: Range[] = []
+
+		for (let k = 0; k < flat.length; k += 2) out.push({ from: flat[k] ?? 0, to: flat[k + 1] ?? 0, at })
+
+		return out
+	}
+
+	plans.set(tr, {
+		stamp,
+		session,
+		inserted: ranges(inserted),
+		deleted: ranges(deleted),
+		marks: [],
+		equations: [],
+		rows: [],
+		formats: [],
+		settle: [],
+		props: [],
+		propsSeen: new Set(),
+		composing: false
+	})
+	sessions.set(tr, session)
+	prebuilt.add(tr)
+
+	return true
+}
+
 // Turns a user transaction into its tracked form (see the top of this file). Transactions of feature
 // commands, undo and redo pass as they are; without the author's name a transaction is refused.
 export function trackTransaction(tr: Transaction, session: DocxEditorSession): Transaction {
@@ -739,6 +854,8 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 
 	// What tracking records is counted from now on, whether a snapshot asked or not (commands record too).
 	if (context.review.tracking && tr.docChanged) wantReviewIndex(session)
+
+	if (prebuilt.has(tr)) return tr
 
 	if (!context.review.tracking && tr.docChanged && !isCommand(tr) && !isInternal(tr) && tr.before === session.state.doc) {
 		const closed = closedPaste(tr, session.state)
@@ -828,8 +945,6 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 	const typed = composing ? undefined : waiting(session)
 
 	if (typed !== undefined) {
-		pending.delete(session)
-
 		for (let k = 0; k < typed.ranges.length; k += 2)
 			plan.inserted.push({ from: typed.ranges[k] ?? 0, to: typed.ranges[k + 1] ?? 0, at: 0 })
 	}
@@ -868,6 +983,9 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 		mapping = new Mapping([...inverted, ...out.mapping.maps])
 	}
 
+	// What the composition typed and this edit deleted went for real (the author's own, not marked yet).
+	if (typed !== undefined) pending.delete(session)
+
 	copyMeta(tr, out)
 	out.setTime(tr.time)
 
@@ -903,6 +1021,30 @@ export function trackTransaction(tr: Transaction, session: DocxEditorSession): T
 	plans.set(out, plan)
 
 	return out
+}
+
+// The insertion mark text typed by `step` takes in the step itself, or undefined when the step is more than
+// typing (a transaction of several steps, a composition, content outside a paragraph or not all marked as runs,
+// text typed in a composition waiting to be marked with it).
+function typedInsertion(step: ReplaceStep, doc: Node, plan: TrackPlan, alone: EditorState | undefined): Mark | undefined {
+	if (alone === undefined || plan.composing || plan.inserted.length > 0 || step.from !== step.to) return undefined
+
+	const slice = step.slice
+
+	if (slice.openStart !== 0 || slice.openEnd !== 0 || !doc.resolve(step.from).parent.isTextblock) return undefined
+
+	for (let k = 0; k < slice.content.childCount; k++) {
+		const node = slice.content.child(k)
+
+		if (!markable(node) || node.marks.some(mark => REVISION_TYPES.includes(mark.type))) return undefined
+	}
+
+	const stamp = plan.stamp
+
+	return (
+		continued(doc, step.from, step.to, marks.insertion, stamp) ??
+		marks.insertion.create({ src: NO_SOURCE, id: newChange(plan.session.context), author: stamp.author, date: stamp.date })
+	)
 }
 
 // What rewriteStep returns for a step whose tracked form could not be saved.
@@ -948,6 +1090,23 @@ function rewriteStep(
 			deletion = classify(out.doc, from, to, author, session)
 
 			if (deletion.refused) return UNSUPPORTED
+		}
+
+		// Text typed (the transaction's one step, inline content inserted in a paragraph): marked in the step
+		// itself, as the typing of a change it continues or of a new one. The undo history then joins a run of
+		// keys into one step, as it does untracked (Word undoes typing in runs too).
+		const typedMark = deletion === undefined && !empty ? typedInsertion(step, out.doc, plan, alone) : undefined
+
+		if (typedMark !== undefined) {
+			const content: Node[] = []
+
+			step.slice.content.forEach(node => content.push(node.mark(typedMark.addToSet(node.marks))))
+
+			if (out.maybeStep(new ReplaceStep(from, to, new Slice(Fragment.from(content), 0, 0))).failed !== null) return false
+
+			markTyping(out)
+
+			return undefined
 		}
 
 		if (deletion === undefined || !deletion.kept) {
@@ -1520,7 +1679,8 @@ function addInsertion(
 	to: number,
 	stamp: RevisionStamp,
 	context: DocxEditContext,
-	same?: Mark
+	same?: Mark,
+	walk?: OrderedDoc
 ): Mark {
 	const mark =
 		same ??
@@ -1528,8 +1688,10 @@ function addInsertion(
 		marks.insertion.create({ src: NO_SOURCE, id: newChange(context), author: stamp.author, date: stamp.date })
 	const own: RevisionStamp = { author: stamp.author, date: stamp.date, id: mark.attrs["id"] as number }
 
+	const walker = walk ?? new OrderedDoc(doc)
+
 	marking.marks.push({ from, to, kind: "insert", mark })
-	doc.nodesBetween(from, to, (node, pos) => {
+	walker.nodesBetween(from, to, (node, pos) => {
 		if (node.isInline) return false
 
 		const close = pos + node.nodeSize - 1
@@ -1907,11 +2069,18 @@ function applyPlan(
 
 	if (plan.composing) {
 		if (inserted.length > 0) addPending(plan.session, stamp, inserted, doc, batch)
-	} else {
-		let mark: Mark | undefined
+	} else if (inserted.length > 0) {
+		// One change for all of it, the one the first range continues (or a new one); the ranges marked in
+		// document order, by one walk of it.
+		const mark =
+			continued(doc, inserted[0] ?? 0, inserted[1] ?? 0, marks.insertion, stamp) ??
+			marks.insertion.create({ src: NO_SOURCE, id: newChange(context), author: stamp.author, date: stamp.date })
+		const pairs: [number, number][] = []
+		const walk = new OrderedDoc(doc)
 
-		for (let k = 0; k < inserted.length; k += 2)
-			mark = addInsertion(doc, marking, inserted[k] ?? 0, inserted[k + 1] ?? 0, stamp, context, mark)
+		for (let k = 0; k < inserted.length; k += 2) pairs.push([inserted[k] ?? 0, inserted[k + 1] ?? 0])
+
+		for (const [from, to] of pairs.sort((a, b) => a[0] - b[0])) addInsertion(doc, marking, from, to, stamp, context, mark, walk)
 	}
 
 	// What one transaction deletes is one change (text and paragraph marks, across blocks), continuing the

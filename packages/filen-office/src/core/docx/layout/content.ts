@@ -8,7 +8,7 @@ import { EMPTY_RUN } from "../props/parse"
 import type { PropsStore } from "../props/store"
 import type { ResolvedRunProps, RunProps } from "../props/types"
 import type { CellFormat, ParagraphFormat, PropertyResolver } from "../styles/resolve"
-import { FieldKind, fieldInfo, formFieldLook, numberText, type FieldCodes } from "./fields"
+import { FieldKind, fieldInfo, formFieldLook, macroButtonText, numberText, type FieldCodes } from "./fields"
 import { objectAt, ObjectKind, type ObjectSizer, type ObjectTable } from "./objects"
 import { TrackedLook, revisionLook, type RunStyles } from "./styles"
 import { halfPoints, twips } from "./units"
@@ -226,6 +226,10 @@ export class ContentBuilder {
 	private readonly fieldKinds: number[] = []
 	private readonly fieldModes: number[] = []
 	private readonly fieldValues: FieldValue[] = []
+	// Per open field: what it shows when its result shows nothing (a MACROBUTTON's display text, else undefined),
+	// and where its result starts in the text (-1 before its separator).
+	private readonly fieldDisplays: (string | undefined)[] = []
+	private readonly resultStarts: number[] = []
 	private hidden = 0
 	// The field codes view (undefined: results shown), and per part the paragraphs whose marks lie inside a
 	// field shown as its code (hidden there, as Word hides them).
@@ -298,7 +302,7 @@ export class ContentBuilder {
 		const row = part.paragraphRow(item)
 		const pPr = row < 0 ? -1 : (part.paragraphs.pPr[row] ?? -1)
 
-		return this.services.resolver.paragraph(this.services.store.paragraph(part.document, pPr), cell)
+		return this.services.resolver.paragraph(this.services.store.paragraphLook(part.document, pPr), cell)
 	}
 
 	// Whether the paragraph's mark is absent in the view, joining it to the next paragraph.
@@ -435,6 +439,23 @@ export class ContentBuilder {
 		let revision: TrackedLook = TrackedLook.NONE
 		let runHidden = false
 		const map = services.recordMaps ? this.map : undefined
+		// A w:fldSimple MACROBUTTON open: it and its end, its display text, where its result started and its run.
+		let simpleItem = -1
+		let simpleEnd = -1
+		let simpleDisplay = ""
+		let simpleStart = 0
+		let simpleRun = base
+		let simpleRevision: TrackedLook = TrackedLook.NONE
+		const closeSimple = (): void => {
+			// Its result shows nothing: its display text instead.
+			if (builder.length === simpleStart && this.hidden === 0) {
+				this.text(simpleDisplay, simpleRun, simpleRevision)
+
+				if (map !== undefined && builder.length > simpleStart) map.push(part.index, simpleItem, simpleStart, builder.length)
+			}
+
+			simpleEnd = -1
+		}
 
 		// Fields stop at each paragraph's end; shown as codes, a field spanning paragraphs joins them (their marks
 		// are hidden) and goes on.
@@ -443,6 +464,8 @@ export class ContentBuilder {
 		for (let item = paragraph + 1; item < end;) {
 			const kind = kinds[item] ?? 0
 			let next = part.end(item)
+
+			if (simpleEnd >= 0 && item >= simpleEnd) closeSimple()
 
 			if (item >= runEnd && runEnd >= 0) {
 				run = base
@@ -457,7 +480,7 @@ export class ContentBuilder {
 				case Item.Run: {
 					const row = part.runs.rPr[part.aux[item] ?? -1] ?? -1
 
-					run = resolver.run(format, store.run(part.document, row))
+					run = resolver.run(format, store.runLook(part.document, row))
 					runEnd = next
 					revision = view === RevisionView.Markup ? this.revisionOf(part, item, paragraph) : TrackedLook.NONE
 					runHidden = (run.vanish || run.specVanish) && !services.showHidden
@@ -493,13 +516,24 @@ export class ContentBuilder {
 
 						next = part.end(item)
 					} else if (info.kind === FieldKind.OTHER || info.kind === FieldKind.CHECKBOX || info.kind === FieldKind.DROPDOWN) {
+						const display = this.fieldModes.length === 0 && simpleEnd < 0 ? macroButtonText(instruction) : undefined
+
+						if (display !== undefined && !runHidden) {
+							simpleItem = item
+							simpleEnd = part.end(item)
+							simpleDisplay = display
+							simpleStart = builder.length
+							simpleRun = run
+							simpleRevision = revision
+						}
+
 						next = item + 1
 					} else if (this.hidden === 0) {
 						const firstRun = this.firstRun(part, item)
 						const fieldRun =
 							firstRun < 0
 								? run
-								: resolver.run(format, store.run(part.document, part.runs.rPr[part.aux[firstRun] ?? -1] ?? -1))
+								: resolver.run(format, store.runLook(part.document, part.runs.rPr[part.aux[firstRun] ?? -1] ?? -1))
 
 						this.computedField(
 							info.kind,
@@ -612,6 +646,8 @@ export class ContentBuilder {
 
 			item = next
 		}
+
+		if (simpleEnd >= 0) closeSimple()
 	}
 
 	private firstRun(part: StoryPart, container: number): number {
@@ -711,6 +747,8 @@ export class ContentBuilder {
 		this.fieldKinds.length = 0
 		this.fieldModes.length = 0
 		this.fieldValues.length = 0
+		this.fieldDisplays.length = 0
+		this.resultStarts.length = 0
 		this.hidden = 0
 	}
 
@@ -730,6 +768,8 @@ export class ContentBuilder {
 			if (this.codes !== undefined && this.codeShown(part, item)) {
 				kinds.push(FieldKind.OTHER)
 				this.fieldValues.push(NO_VALUE)
+				this.fieldDisplays.push(undefined)
+				this.resultStarts.push(-1)
 				modes.push(FIELD_SHOWN)
 
 				if (this.hidden === 0 && !runHidden) this.text("{", run, revision)
@@ -738,10 +778,14 @@ export class ContentBuilder {
 			}
 
 			const field = part.fieldOf(item)
-			const info = field < 0 ? undefined : fieldInfo(part.fieldInstruction(field, view))
+			const instruction = field < 0 ? "" : part.fieldInstruction(field, view)
+			const info = field < 0 ? undefined : fieldInfo(instruction)
 			const kind = info?.kind ?? FieldKind.OTHER
 
 			kinds.push(kind)
+			// Inside another field a MACROBUTTON shows nothing (MS-OI29500 §17.16.5.34).
+			this.fieldDisplays.push(modes.length === 0 ? macroButtonText(instruction) : undefined)
+			this.resultStarts.push(-1)
 			this.fieldValues.push(
 				kind === FieldKind.CHECKBOX || kind === FieldKind.DROPDOWN
 					? this.formValue(part, item, kind)
@@ -775,6 +819,7 @@ export class ContentBuilder {
 			if (kind === FieldKind.OTHER) {
 				modes[depth - 1] = FIELD_RESULT
 				this.hidden--
+				this.resultStarts[depth - 1] = this.builder.length
 			} else {
 				modes[depth - 1] = FIELD_REPLACED
 
@@ -789,6 +834,8 @@ export class ContentBuilder {
 			modes.pop()
 
 			const value = this.fieldValues.pop() ?? NO_VALUE
+			const display = this.fieldDisplays.pop()
+			const resultStart = this.resultStarts.pop() ?? -1
 
 			if (mode === FIELD_SHOWN || mode === FIELD_SHOWN_RESULT) {
 				if (mode === FIELD_SHOWN_RESULT) this.hidden--
@@ -797,9 +844,17 @@ export class ContentBuilder {
 				return
 			}
 
-			if (mode === FIELD_RESULT) return
+			// A MACROBUTTON whose result shows nothing (none stored, or empty) shows its display text.
+			if (mode === FIELD_RESULT) {
+				if (display !== undefined && this.builder.length === resultStart && this.hidden === 0 && !runHidden)
+					this.text(display, run, revision)
+
+				return
+			}
 
 			this.hidden--
+
+			if (display !== undefined && mode === FIELD_CODE && this.hidden === 0 && !runHidden) this.text(display, run, revision)
 
 			// A computed field without a stored result still shows its value.
 			if (mode === FIELD_CODE && kind !== FieldKind.OTHER && this.hidden === 0) this.computedField(kind, value, run, revision)
@@ -823,7 +878,7 @@ export class ContentBuilder {
 		const runItem = part.parent(item)
 		const row = part.kinds[runItem] === Item.Run ? (part.runs.rPr[part.aux[runItem] ?? -1] ?? -1) : -1
 		const services = this.services
-		const props = services.store.run(part.document, row)
+		const props = services.store.runLook(part.document, row)
 
 		return {
 			format: undefined,

@@ -371,12 +371,18 @@ export function equationRunProperties(base: { readonly document: XmlDocument; re
 		children: []
 	}
 	let children: XElement[] = []
+	// The declarations of the namespaces the properties use besides math and WordprocessingML (w14:glow...),
+	// which the tree puts on its root: kept on the new w:rPr, or those children lose their namespace.
+	let declarations: (readonly [string, string])[] = []
 
 	if (base !== undefined && base.node >= 0) {
 		try {
-			children = ommlTree(base.document, base.node).children.filter(
+			const tree = ommlTree(base.document, base.node)
+
+			children = tree.children.filter(
 				(child): child is XElement => typeof child === "object" && !DROPPED_RUN_PROPERTIES.has(child.name)
 			)
+			declarations = tree.attrs.filter(([name]) => name.startsWith("xmlns:"))
 		} catch {
 			children = []
 		}
@@ -385,7 +391,7 @@ export function equationRunProperties(base: { readonly document: XmlDocument; re
 	// w:rFonts after w:rStyle, before the rest (CT_RPr's order).
 	const styled = children[0]?.name === "w:rStyle" ? 1 : 0
 
-	return { name: "w:rPr", attrs: [], children: [...children.slice(0, styled), fonts, ...children.slice(styled)] }
+	return { name: "w:rPr", attrs: declarations, children: [...children.slice(0, styled), fonts, ...children.slice(styled)] }
 }
 
 // What a run's properties give no equation: fonts (the math font's), and revision records.

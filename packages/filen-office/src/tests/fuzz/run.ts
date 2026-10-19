@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, writeFileSync } from "node:fs"
 import { basename } from "node:path"
 import type { Transaction } from "prosemirror-state"
 import { protectionOf } from "../../core/docx/edit/protection"
@@ -15,10 +15,12 @@ import {
 	isSaveRefusal,
 	isSuspended,
 	markerCounts,
+	withoutTextBoxes,
 	memoisedProof,
 	openEditable,
 	openPaged,
 	otherStories,
+	refusalListener,
 	reopenProblem,
 	resume,
 	savePaged,
@@ -40,14 +42,20 @@ import {
 } from "./harness"
 import * as Reader from "./independentReader"
 import { OpPicker, type OpContext } from "./ops/index"
+import { runEditScript } from "../docxWriteFixtures"
 import { typeSomewhere, undoBurst } from "./ops/base"
+import { savesConfig, summarizeDocument, writeManifest, writeSave, type DocumentSummary } from "./saves"
 
 // One fuzz job in its own process; the fuzz tests run these through config.runJobs. Prints JSON lines.
-//   paged <file> <seed> <sync|race|proof>   one paged run: after each settled step the pages shown must
+//   paged <file> <seed> <sync|race|proof> [view]
+//                                           one paged run: after each settled step the pages shown must
 //                                           equal a fresh layout of the saved file
 //   damage <file>                           every damage sequence of one file, verified by the independent reader
 //   viewer <file>...                        the viewer digests of unedited files
-// Both read FILEN_OFFICE_FUZZ_* (harness.fuzzConfig) for runs, seeds, steps, ops, modes and view.
+//   script <file>...                        the scripted edit suite of each file, saved (FILEN_OFFICE_FUZZ_SAVES)
+//   manifest <dir>                          rewrites <dir>/manifest.json from the saves' sidecars
+// Both read FILEN_OFFICE_FUZZ_* (harness.fuzzConfig) for runs, seeds, steps, ops, modes and view; with
+// FILEN_OFFICE_FUZZ_SAVES they keep their edited saves (saves.ts).
 
 function print(value: Record<string, unknown>): void {
 	process.stdout.write(`${JSON.stringify(value)}\n`)
@@ -59,6 +67,25 @@ function relative(file: string): string {
 
 function errorText(error: unknown, length: number): string {
 	return (error instanceof Error ? (error.stack ?? error.message) : String(error)).slice(0, length)
+}
+
+const SAVES = savesConfig()
+const REPLAY = process.env["FILEN_OFFICE_FUZZ_REPLAY"] ? Number(process.env["FILEN_OFFICE_FUZZ_REPLAY"]) : undefined
+// FILEN_OFFICE_FUZZ_KEEP=<file>: the last save a replayed sequence made, to look at.
+const KEEP = process.env["FILEN_OFFICE_FUZZ_KEEP"] || undefined
+const MODES = ["sync", "race", "proof"]
+const VIEW_NAMES = ["final", "markup", "original"]
+
+// The op family a run's saves are filed under.
+function familyOf(config: FuzzConfig): string {
+	return config.families?.join("+") ?? (config.ops === undefined ? "mixed" : "ops")
+}
+
+// The source's summary, read once per process and only when a save is kept.
+function summaryOnce(bytes: Uint8Array): () => Promise<DocumentSummary | undefined> {
+	let summary: Promise<DocumentSummary | undefined> | undefined
+
+	return () => (summary ??= summarizeDocument(bytes))
 }
 
 // ---- paged ----
@@ -77,7 +104,11 @@ async function paged(config: FuzzConfig, file: string, seed: number, mode: Paged
 
 	const run: PagedRun = opened
 	const editor = run.editor
-	const picker = new OpPicker("paged", seed, config.ops)
+	const picker = new OpPicker("paged", seed, config.ops, config.families)
+	const refusals: Record<string, number> = {}
+	const listen = refusalListener(editor, reason => {
+		refusals[reason] = (refusals[reason] ?? 0) + 1
+	})
 	const pending: Promise<unknown>[] = []
 	const contexts = new Map<Rand, OpContext>()
 	const contextOf = (stream: Rand): OpContext => {
@@ -114,20 +145,22 @@ async function paged(config: FuzzConfig, file: string, seed: number, mode: Paged
 		return context
 	}
 	const log: string[] = []
+	let last: { bytes: Uint8Array; changedParts: readonly string[] } | undefined
 	// After each settled step (and at the end) the pages shown must equal a fresh layout of the saved file.
 	const check = async (step: number | "end"): Promise<Record<string, unknown> | undefined> => {
 		await settle(editor)
 
 		const shown = shownPages(editor, source)
-		let saved: Uint8Array
 
 		try {
-			saved = await savePaged(run)
+			last = await savePaged(run)
 		} catch (error) {
+			if (isSaveRefusal(error)) return { step, saveRefused: error.reason, message: error.message.slice(0, 300), log }
+
 			return { step, saveFail: errorText(error, 300), log }
 		}
 
-		const difference = firstDifference(shown, await freshPages(saved, editor))
+		const difference = firstDifference(shown, await freshPages(last.bytes, editor))
 
 		return difference === undefined ? undefined : { step, view: viewName(editor), diverge: difference, log }
 	}
@@ -139,7 +172,9 @@ async function paged(config: FuzzConfig, file: string, seed: number, mode: Paged
 		const before = documents(editor)
 
 		try {
+			listen()
 			log.push(await op.run(contextOf(stream)))
+			listen()
 
 			// A command waiting for layout (a field update) waits while the editor is suspended, until it resumes.
 			if (!isSuspended(editor)) await Promise.all(pending.splice(0))
@@ -180,7 +215,55 @@ async function paged(config: FuzzConfig, file: string, seed: number, mode: Paged
 
 	if (failure !== undefined) return result(failure)
 
-	result({ ok: true, steps, applied, pages: editor.pageCount, protection: protectionOf(editor.body.session.context).mode })
+	// The final save, read back by the independent reader as the damage fuzz reads its saves.
+	const findings: Record<string, unknown>[] = []
+
+	if (last !== undefined && last.changedParts.length > 0) {
+		const report: Damage = {
+			log,
+			finding(kind, data) {
+				findings.push({ finding: kind, ...data, log: undefined })
+			},
+			bump() {}
+		}
+
+		try {
+			await verifySaved(report, sourceFacts(source, run.pkg.mainPart), last, editor.body.session, undefined, false, false)
+		} catch (error) {
+			findings.push({ finding: "verifierThrew", error: errorText(error, 800) })
+		}
+
+		if (findings.length > 0) return result({ step: "end", bypass: findings, log })
+
+		if (SAVES !== undefined)
+			await writeSave(
+				SAVES,
+				{
+					source: name,
+					sourceBytes: source,
+					family: familyOf(config),
+					harness: "paged",
+					mode,
+					seed,
+					n: 3 * MODES.indexOf(mode) + VIEW_NAMES.indexOf(config.view ?? "final"),
+					view: config.view ?? "final",
+					endView: viewName(editor),
+					ops: log,
+					changedParts: last.changedParts,
+					bytes: last.bytes
+				},
+				summaryOnce(source)
+			)
+	}
+
+	result({
+		ok: true,
+		steps,
+		applied,
+		refusals,
+		pages: editor.pageCount,
+		protection: protectionOf(editor.body.session.context).mode
+	})
 }
 
 // ---- damage ----
@@ -194,11 +277,17 @@ interface SourceFacts {
 	readonly numberingIds: Set<string>
 	readonly violations: Reader.Counts
 	readonly markers: Map<string, number>
+	// The markers outside text boxes.
+	readonly keptMarkers: Map<string, number>
+	// Ids Word wants unique (w14:paraId, w:sdt's w:id, wp:docPr's id) that repeat in the main part, and how often.
+	readonly repeatedIds: Map<string, number>
 	readonly parts: Map<string, { numbering: Set<string>; problems: string[]; styles: Set<string> | undefined; styleProblems: string[] }>
 	schemaErrors: Map<string, number> | undefined
 }
 
 const BIG = 40e6
+// Sources this big are opened again for each damage sequence.
+const REOPEN_BYTES = 2e6
 // The kinds harness.markerCounts counts, and those no edit takes out.
 const MARKER_KINDS: ReadonlySet<string> = new Set([
 	"bookmarkStart",
@@ -279,6 +368,8 @@ function sourceFacts(input: Uint8Array, mainPart: string): SourceFacts {
 			? new Map()
 			: Reader.violations(Reader.parseXml(document), { numIds: parts.numbering, styleIds: parts.styles, relationships }).counts,
 		markers: big ? new Map() : markerCounts(document),
+		keptMarkers: big ? new Map() : markerCounts(withoutTextBoxes(document)),
+		repeatedIds: big ? new Map() : Reader.repeatedIds(document),
 		parts: new Map([[main, parts]]),
 		schemaErrors: undefined
 	}
@@ -303,12 +394,10 @@ interface Damage {
 	bump(key: string): void
 }
 
-// `document` without its first bookmark start in a text box, else its first one (selftest).
+// `document` without its first bookmark start (selftest).
 function withoutMarker(document: Uint8Array): Uint8Array {
 	const text = new TextDecoder().decode(document)
-	const box = text.indexOf("<w:txbxContent")
-	const find = (from: number): number => (from < 0 ? -1 : text.indexOf("<w:bookmarkStart ", from))
-	const start = find(box) >= 0 ? find(box) : find(0)
+	const start = text.indexOf("<w:bookmarkStart ")
 
 	if (start < 0) return document
 
@@ -322,7 +411,10 @@ async function verifySaved(
 	saved: { bytes: Uint8Array; changedParts: readonly string[] },
 	session: DocxEditorSession,
 	schema: ((bytes: Uint8Array) => Map<string, number>) | undefined,
-	selftest = false
+	selftest = false,
+	// Whether the source's bookmarks and permission ranges must all survive (no op deletes one on purpose; the
+	// paged fuzz's bookmark.delete does).
+	kept = true
 ): Promise<void> {
 	const log = damage.log
 	const output = Reader.zipEntries(saved.bytes)
@@ -350,6 +442,25 @@ async function verifySaved(
 			damage.bump("changedButSameContent")
 	}
 
+	// Content Word keeps to the body (LibreOffice opens no document with it): note references in headers, footers,
+	// notes and comments, floating drawings in comments. Only more than the source part had counts.
+	for (const entry of changed) {
+		const after = read(output, entry)
+
+		if (after === undefined || !/\.xml$/.test(entry)) continue
+
+		const text = new TextDecoder().decode(after)
+		const root = /<(?:\w+:)?(hdr|ftr|footnotes|endnotes|comments)\b/.exec(text.slice(0, 4000))?.[1]
+
+		if (root === undefined) continue
+
+		const before = source.entries.has(entry) ? new TextDecoder().decode(read(source.entries, entry)) : ""
+		const more = (pattern: RegExp): boolean => (text.match(pattern)?.length ?? 0) > (before.match(pattern)?.length ?? 0)
+
+		if (more(/<w:(?:footnote|endnote)Reference\b/g)) damage.finding("noteReferenceOutsideBody", { entry, log })
+		if (root === "comments" && more(/<wp:anchor\b/g)) damage.finding("floatingDrawingInComment", { entry, log })
+	}
+
 	const reopen = await reopenProblem(saved.bytes)
 
 	if (reopen !== undefined) damage.finding("reopenFailed", { problem: reopen, log })
@@ -369,6 +480,9 @@ async function verifySaved(
 
 		if (errors.length > before) damage.finding("xmlErrors", { entry, errors: errors.slice(0, 3), log })
 	}
+
+	for (const [key, times] of Reader.repeatedIds(document))
+		if (times > (source.repeatedIds.get(key) ?? 1)) damage.finding("idRepeated", { key, times, log })
 
 	const relationshipsOut = Reader.relationshipsOf(read(output, relationshipsName(main)))
 
@@ -435,12 +549,15 @@ async function verifySaved(
 
 	// The file holds the markers the editor holds: comment commands add and take out comment ranges and
 	// references, resolving a tracked move takes its ranges out. Bookmarks and permission ranges survive every
-	// edit, so those are also checked against the source.
-	const markers = markerCounts(selftest ? withoutMarker(document) : document)
-	const held = source.document.length > BIG ? source.markers : editorMarkers(session)
+	// edit, so those are also checked against the source. Markers in text boxes are left out on both sides: a text
+	// box edited in a session of its own is written from it (its fallback copy too), and deleting its drawing
+	// takes them out.
+	const outside = withoutTextBoxes(document)
+	const markers = markerCounts(selftest ? withoutMarker(outside) : outside)
+	const held = source.document.length > BIG ? source.keptMarkers : editorMarkers(session, false)
 	const expected = new Map([...held].filter(([key]) => MARKER_KINDS.has(key.slice(0, key.indexOf(":")))))
 
-	for (const [key, times] of source.markers) {
+	for (const [key, times] of kept ? source.keptMarkers : []) {
 		if (KEPT_KINDS.has(key.slice(0, key.indexOf(":"))) && (expected.get(key) ?? 0) < times) damage.finding("markerLost", { key, log })
 	}
 
@@ -626,41 +743,61 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 	const started = performance.now()
 	const name = relative(file)
 	const input = new Uint8Array(readFileSync(file))
-	const editable = await openEditable(input)
+	const opened = await openEditable(input)
 	const stats: Record<string, number> = {}
 	const bump = (key: string): void => {
 		stats[key] = (stats[key] ?? 0) + 1
 	}
 
-	if ("refused" in editable) return print({ file: name, refused: editable.refused })
+	if ("refused" in opened) return print({ file: name, refused: opened.refused })
+
+	// What ops add to the edit context (new lists, styles and stories) stays in it: a big document is opened
+	// again for each sequence, or memory grows with every sequence.
+	let editable: Editable = opened
 
 	const modes = new Set(config.modes ?? ["stories"])
 	const names = modes.has("blockmove") ? ["blockMove"] : config.ops
+	const sourceSummary = summaryOnce(input)
 	const most = config.steps ?? 16
-	const proof = memoisedProof(editable.context)
+	let proof = memoisedProof(editable.context)
 	const source = sourceFacts(input, editable.mainPart)
 	const schema = modes.has("xsd") ? schemaOracle() : undefined
 	const base = (Math.imul(config.seed, 100_003) ^ nameHash(name)) >>> 0
 	// What ops change in the edit context the sequences share (tracking switched on, an author named): each
 	// sequence starts from the file's.
 	const { review, identity } = editable.context
-	const opened = { tracking: review.tracking, persist: review.persist, author: identity.author, initials: identity.initials }
+	const reopen = input.length > REOPEN_BYTES
+	const was = { tracking: review.tracking, persist: review.persist, author: identity.author, initials: identity.initials }
 	// The body's top-level blocks (blockmove mode has nothing to move with fewer than two).
 	let blocks = 0
 
 	for (let q = 0; q < config.runs; q++) {
 		const seed = (base + q) >>> 0
 
-		review.tracking = opened.tracking
-		review.persist = opened.persist
-		identity.author = opened.author
-		identity.initials = opened.initials
+		// FILEN_OFFICE_FUZZ_REPLAY=<seed>: that sequence only (each sequence draws from its own seed).
+		if (REPLAY !== undefined && seed !== REPLAY) continue
+
+		if (reopen && q > 0) {
+			const again = await openEditable(input)
+
+			if ("refused" in again) throw new Error(`${name} no longer opens: ${again.refused}`)
+
+			editable = again
+			proof = memoisedProof(editable.context)
+		}
+
+		editable.context.review.tracking = was.tracking
+		editable.context.review.persist = was.persist
+		editable.context.identity.author = was.author
+		editable.context.identity.initials = was.initials
 
 		const rand = rng(seed)
 		const log: string[] = []
+		let found = 0
 		const report: Damage = {
 			log,
 			finding(kind, data) {
+				found++
 				print({ finding: kind, file: name, seed, ...data })
 			},
 			bump
@@ -689,7 +826,7 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 		// The first sequence of each file saves unedited: it must come back byte for byte.
 		const count = q === 0 ? 0 : 1 + Math.floor(rand() * most)
 
-		const picker = new OpPicker("damage", seed, names)
+		const picker = new OpPicker("damage", seed, names, config.families)
 
 		for (const session of sessions) {
 			const contexts = new Map<Rand, OpContext>()
@@ -745,13 +882,16 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 
 		bump("saved")
 
+		if (KEEP !== undefined) writeFileSync(KEEP, saved.bytes)
+
 		if (modes.has("blockmove")) {
 			const differences = blockMoveDifferences(input, saved.bytes, source.mainPart)
 
 			if (differences > 0) report.finding("blockMoveChangedBytes", { differences, log })
 		}
 
-		if (duplicates.length > 0) report.finding("savedWithDuplicateSrc", { types: [...new Set(duplicates)], log })
+		// The writer writes a copied source block anew (story.ts `copy`); the ids the reader checks stay unique.
+		if (duplicates.length > 0) bump("savedCopies")
 		if (count === 0 && !Buffer.from(saved.bytes).equals(Buffer.from(input))) report.finding("uneditedNotIdentical", {})
 		if (sessions.every(sessionPristine) && saved.changedParts.length > 0)
 			report.finding("undoneButChanged", { parts: saved.changedParts, log })
@@ -770,6 +910,27 @@ async function damage(config: FuzzConfig, file: string): Promise<void> {
 		} catch (error) {
 			report.finding("verifierThrew", { error: errorText(error, 800) })
 		}
+
+		// Clean edited saves only: a finding is reported above, and an oracle reading it would only repeat it.
+		if (SAVES !== undefined && found === 0 && count > 0 && saved.changedParts.length > 0 && !modes.has("selftest"))
+			await writeSave(
+				SAVES,
+				{
+					source: name,
+					sourceBytes: input,
+					family: familyOf(config),
+					harness: "damage",
+					mode: [...modes].sort().join("+"),
+					seed,
+					n: 0,
+					view: "final",
+					endView: "final",
+					ops: [...log],
+					changedParts: saved.changedParts,
+					bytes: saved.bytes
+				},
+				sourceSummary
+			)
 
 		if (modes.has("undoall")) {
 			for (const session of sessions) while (session.execute({ type: "history.undo" })) continue
@@ -833,16 +994,65 @@ function damageContext(editable: Editable, session: DocxEditorSession, rand: Ran
 	}
 }
 
+// ---- the scripted edit suite ----
+
+async function script(path: string): Promise<void> {
+	const name = relative(path)
+	const input = new Uint8Array(readFileSync(path))
+	const editable = await openEditable(input)
+
+	if ("refused" in editable) return print({ file: name, refused: editable.refused })
+
+	try {
+		const edited = runEditScript(editable)
+		const saved = await saveSessions(editable, edited.sessions)
+		const kept =
+			SAVES !== undefined &&
+			saved.changedParts.length > 0 &&
+			(await writeSave(
+				SAVES,
+				{
+					source: name,
+					sourceBytes: input,
+					family: "script",
+					harness: "script",
+					mode: "script",
+					seed: 0,
+					n: 0,
+					view: "final",
+					endView: "final",
+					ops: edited.done,
+					changedParts: saved.changedParts,
+					bytes: saved.bytes
+				},
+				summaryOnce(input)
+			))
+
+		print({ file: name, ok: true, edits: edited.done.length, kept })
+	} catch (error) {
+		print({ file: name, ...(isSaveRefusal(error) ? { saveRefused: error.reason } : { crash: errorText(error, 800) }) })
+	}
+}
+
 const [command, file, seed, mode] = process.argv.slice(2)
 
 if (command === "viewer") for (const path of process.argv.slice(3)) print({ file: relative(path), digest: await viewerDigest(path) })
+else if (command === "script") for (const path of process.argv.slice(3)) await script(path)
+else if (command === "manifest" && file !== undefined) print({ manifest: writeManifest(file) })
 else {
 	const config = fuzzConfig()
 
 	if (config === undefined) throw new Error("Set FILEN_OFFICE_FUZZ")
 
+	const view = process.argv[6]
+
+	if (view !== undefined && view !== "final" && view !== "markup" && view !== "original") throw new Error(`Unknown view ${view}`)
+
 	if (command === "paged" && file !== undefined && (mode === "sync" || mode === "race" || mode === "proof"))
-		await paged(config, file, Number(seed), mode)
+		await paged(view === undefined ? config : { ...config, view }, file, Number(seed), mode)
 	else if (command === "damage" && file !== undefined) await damage(config, file)
-	else throw new Error("Usage: run.ts paged <file> <seed> <sync|race|proof> | damage <file> | viewer <file>...")
+	else
+		throw new Error(
+			"Usage: run.ts paged <file> <seed> <sync|race|proof> [view] | damage <file> | viewer|script <file>... | manifest <dir>"
+		)
 }

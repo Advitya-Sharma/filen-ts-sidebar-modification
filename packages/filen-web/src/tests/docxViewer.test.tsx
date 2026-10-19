@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render as renderUi, screen, waitFor } from "@testing-library/react"
+import type { ReactElement } from "react"
+import { createTestQueryClient, queryClientWrapper } from "@/tests/testQueryClient"
 import type { ByteSource } from "@filen/office/core/opc"
 import type {
 	DocxAnnotations,
@@ -17,10 +19,16 @@ import { registerAllActions } from "@/lib/keymap/actions"
 import type { DriveItem } from "@/features/drive/lib/item"
 import { linkedFileItem } from "@/tests/fixtures/sdk"
 
+// Links open through the trusted-domain query (useTrustedLinkGate).
+function render(ui: ReactElement) {
+	return renderUi(ui, { wrapper: queryClientWrapper(createTestQueryClient()) })
+}
+
 // The new viewer: the engine reads ranges of the cached buffer (never a copy of the whole file), docx-preview
 // takes over only when the engine fails, and image object URLs live exactly as long as the document.
 
-const { renderAsync, warn, host, prewarm } = vi.hoisted(() => ({
+const { renderAsync, warn, host, prewarm, kvStore } = vi.hoisted(() => ({
+	kvStore: new Map<string, unknown>(),
 	prewarm: vi.fn(),
 	renderAsync: vi.fn<(bytes: Uint8Array, container: HTMLElement) => Promise<void>>(() => Promise.resolve()),
 	warn: vi.fn(),
@@ -36,6 +44,15 @@ const { renderAsync, warn, host, prewarm } = vi.hoisted(() => ({
 const BYTES = new Uint8Array([80, 75, 3, 4, 9, 9, 9, 9])
 
 vi.mock("docx-preview", () => ({ renderAsync }))
+// The trusted link domains (useTrustedLinkGate), in memory.
+vi.mock("@/lib/storage/adapter", () => ({
+	kvGetJson: (key: string) => Promise.resolve(kvStore.get(key) ?? null),
+	kvSetJson: (key: string, value: unknown) => {
+		kvStore.set(key, value)
+
+		return Promise.resolve()
+	}
+}))
 vi.mock("@/lib/log", () => ({ log: { warn, info: vi.fn(), error: vi.fn(), debug: vi.fn() } }))
 vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 	usePreviewBytes: () => ({ status: "success", bytes: BYTES, refetch: () => undefined })
@@ -222,6 +239,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+	kvStore.clear()
+	vi.restoreAllMocks()
 	renderAsync.mockClear()
 	warn.mockClear()
 	prewarm.mockClear()
@@ -493,5 +512,84 @@ describe("DocxViewer", () => {
 			expect(host.options.at(-1)?.view).toBe("markup")
 		})
 		view.unmount()
+	})
+
+	describe("links", () => {
+		// "Hello" as one external link.
+		function linked(href: string): DocxEvent {
+			return {
+				...pages(),
+				pages: [{ ...page(), linkCount: 1, linkInts: Int32Array.from([0, 0, 5, 0]) }],
+				links: [{ kind: "external", href, tooltip: undefined }]
+			} as DocxEvent
+		}
+
+		async function show(href: string) {
+			const open = vi.spyOn(window, "open").mockReturnValue(null)
+			const view = render(
+				<DocxViewer
+					item={item}
+					alt="doc.docx"
+				/>
+			)
+
+			await emit(opened({}))
+			await emit(linked(href))
+
+			const link = await screen.findByRole("link", { name: "Hello" })
+
+			return { open, view, link }
+		}
+
+		it("asks before opening a web link to a domain not trusted yet, then trusts it", async () => {
+			const { open, view, link } = await show("https://example.com/a")
+
+			fireEvent.click(link)
+
+			const dialog = await screen.findByRole("alertdialog", { name: "Open external link?" })
+
+			expect(dialog.textContent).toContain("example.com")
+			expect(open).not.toHaveBeenCalled()
+
+			fireEvent.click(screen.getByRole("button", { name: "Open link" }))
+
+			expect(open).toHaveBeenCalledWith("https://example.com/a", "_blank", "noopener,noreferrer")
+			await waitFor(() => {
+				expect(kvStore.get("chats.trustedLinkDomains.v1")).toEqual(["example.com"])
+			})
+			view.unmount()
+		})
+
+		it("opens a link to a trusted domain at once, and a mailto: link (the mail client asks)", async () => {
+			kvStore.set("chats.trustedLinkDomains.v1", ["example.com"])
+
+			const { open, view, link } = await show("https://example.com/b")
+
+			// The trusted set is read once the query settles.
+			await waitFor(() => {
+				fireEvent.click(link)
+				expect(open).toHaveBeenCalledWith("https://example.com/b", "_blank", "noopener,noreferrer")
+			})
+			expect(screen.queryByRole("alertdialog")).toBeNull()
+			view.unmount()
+
+			const mail = await show("mailto:someone@example.org")
+
+			fireEvent.click(mail.link)
+			expect(mail.open).toHaveBeenCalledWith("mailto:someone@example.org", "_blank", "noopener,noreferrer")
+			expect(screen.queryByRole("alertdialog")).toBeNull()
+			mail.view.unmount()
+		})
+
+		it("never opens or asks about javascript: and data: links", async () => {
+			for (const href of ["javascript:alert(1)", "data:text/html,<script>alert(1)</script>"]) {
+				const { open, view, link } = await show(href)
+
+				fireEvent.click(link)
+				expect(open).not.toHaveBeenCalled()
+				expect(screen.queryByRole("alertdialog")).toBeNull()
+				view.unmount()
+			}
+		})
 	})
 })

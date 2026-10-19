@@ -1,5 +1,5 @@
 import type { Node } from "prosemirror-model"
-import type { PageDisplayList } from "../../../core/docx/layout/index"
+import { Region, type PageDisplayList } from "../../../core/docx/layout/index"
 import { MarkBoxes, type CaretBox, type PagedEditor, type PageRect } from "../../../core/docx/paged/index"
 import type { DocxPageData, DocxSessionApi } from "../../../dom/docx/protocol"
 import type { DocxMediaCache } from "../media"
@@ -309,8 +309,9 @@ export class EditSurface {
 		const editor = this.editor
 		const selection = editor.selection()
 
-		// Editing a header, footer or note: the body is shown dimmed.
-		const band = editor.activeStory === editor.body.session.story.story.index ? undefined : editor.bodyBand(index)
+		// Editing a header or footer: the body is shown dimmed (a note is edited beside the body, as in Word).
+		const region = editor.activeRegion
+		const band = region === Region.HEADER || region === Region.FOOTER ? editor.bodyBand(index) : undefined
 		const shown = band === undefined ? undefined : editor.page(index)
 
 		if (band !== undefined && shown !== undefined) {

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 import { bytesSource } from "@filen/office/core/opc"
 import { buildDocxModel, gateReasons, openDocxPackage, type DocxPackage, type Story } from "@filen/office/core/docx"
 import { viewOnlyProtection } from "../core/docx/package"
-import { DocxEditorSession, docxSchema, openDocxEditContext, type DocxEditContext } from "@filen/office/core/docx/edit"
+import { DocxEditorSession, docxSchema, openDocxEditContext, replaceAll, type DocxEditContext } from "@filen/office/core/docx/edit"
 import { saveDocx } from "@filen/office/core/docx/write"
 import { FORMS_AFTER, FORMS_BEFORE } from "../core/docx/edit/handlers/forms"
 import { REVIEW_TRANSFORMER } from "../core/docx/edit/handlers/review"
@@ -195,6 +195,29 @@ describe("document protection: forms", () => {
 		expect(commandAllowed(session, "comment.add")).toBe(false)
 		expect(commandAllowed(session, "history.undo")).toBe(true)
 	})
+})
+
+describe("document protection: Replace All", () => {
+	for (const tracking of [false, true])
+		it(`replaces the matches in ranges open to everyone and leaves the others${tracking ? " (tracked)" : ""}`, async () => {
+			const { session, context } = await open({
+				body: p("Fixed text") + PERMITTED('w:edGrp="everyone"'),
+				settings: protection("readOnly")
+			})
+
+			context.review.tracking = tracking
+
+			expect(replaceAll(session.state, "Fixed", "Moved")).toEqual({ refused: "unreplaceable" })
+
+			const mixed = replaceAll(session.state, "text", "words")
+
+			if (mixed === null || !("tr" in mixed)) throw new Error("nothing replaced")
+
+			expect(mixed.count).toBe(1)
+			expect(session.dispatch(mixed.tr)).toBe(true)
+			expect(session.state.doc.child(0).textContent).toBe("Fixed text")
+			expect(session.state.doc.child(1).textContent).toBe(tracking ? "Open textwords" : "Open words")
+		})
 })
 
 describe("document protection: comments", () => {

@@ -87,35 +87,20 @@ export interface SectionEdit {
 	readonly change?: SectionChangeRecord | null
 	// The source's own w:sectPrChange was rejected: the properties it recorded stand (references stay).
 	readonly rejected?: boolean
-	// Properties tracking changed on top of the source's own w:sectPrChange (one change with it, as Word keeps
-	// the earliest), with what they were before where that was not the source's: written into its record where
-	// it records them not (so a reject, ours or Word's, takes them back).
-	readonly folded?: FoldedChange
 }
 
-// The section properties a change records, by SectionEdit field, with their element.
-export type FoldedField =
-	"type" | "pageSize" | "pageMargins" | "columns" | "pageNumbering" | "lineNumbering" | "titlePage" | "footnotes" | "endnotes"
-
-const FIELD_ELEMENTS: Readonly<Record<FoldedField, string>> = {
-	type: "type",
-	pageSize: "pgSz",
-	pageMargins: "pgMar",
-	columns: "cols",
-	pageNumbering: "pgNumType",
-	lineNumbering: "lnNumType",
-	titlePage: "titlePg",
-	footnotes: "footnotePr",
-	endnotes: "endnotePr"
-}
-
-const FOLDED_FIELDS = Object.keys(FIELD_ELEMENTS) as FoldedField[]
-
-export interface FoldedChange {
-	readonly fields: readonly FoldedField[]
-	// Values before (absent: the source's own).
-	readonly before: Partial<SectionEdit>
-}
+// The SectionEdit fields of the properties a w:sectPrChange records.
+const RECORDED_FIELDS = [
+	"type",
+	"pageSize",
+	"pageMargins",
+	"columns",
+	"pageNumbering",
+	"lineNumbering",
+	"titlePage",
+	"footnotes",
+	"endnotes"
+] as const
 
 // The doc's sectionChanges attribute.
 export interface DocSectionChanges {
@@ -423,9 +408,10 @@ function changedChildren(
 	const node = sectionNode(part, edit.base)
 	const source = node < 0 ? undefined : input.props(node)
 
-	// The properties a rejected change recorded replace those it holds, the others stay: Word records only what
-	// changed (a margin change records w:pgMar alone). What stands for the absence of an element (DEFAULTS) takes it
-	// out.
+	// A rejected change gives the section the properties it recorded: w:sectPrChange's w:sectPr is the previous
+	// section properties whole (ECMA-376 Part 1 §17.13.5.32), so a property it lacks had its default then (no line
+	// numbers, no title page...) and goes. What stands for the absence of an element (DEFAULTS) takes it out too.
+	// References stay: CT_SectPrBase has none.
 	if (edit.rejected === true && node >= 0) {
 		const document = part.document
 		const recorded = children(part, node, "sectPrChange").flatMap(change => children(part, change, "sectPr"))[0]
@@ -435,11 +421,9 @@ function changedChildren(
 
 			const found = children(part, recorded, local)
 
-			if (found.length === 0) continue
-
 			changes.set(
 				local,
-				found.every(child => absent(part, child))
+				found.length === 0 || found.every(child => absent(part, child))
 					? ""
 					: found.map(child => decodeUtf8(document.bytes, document.start(child), document.end(child))).join("")
 			)
@@ -547,6 +531,15 @@ function changedChildren(
 
 	if (edit.titlePage !== undefined) changes.set("titlePg", onOff(names, "titlePg", edit.titlePage))
 
+	// Word takes w:countBy 1 to 100 only (MS-OI29500 Part 1 §17.6.8 c): a source's other count (0: no line numbers,
+	// as absent() reads it) is written as no line numbering, in a section written anew and in a record alike.
+	if (!changes.has("lnNumType") && node >= 0)
+		for (const child of children(part, node, "lnNumType")) {
+			const countBy = Number(part.reader.attr(child, Ns.W, "countBy") ?? "1")
+
+			if (!(Number.isInteger(countBy) && countBy >= 1 && countBy <= 100)) changes.set("lnNumType", "")
+		}
+
 	if (previous) {
 		changes.set("sectPrChange", "")
 
@@ -570,77 +563,14 @@ function changedChildren(
 
 			changes.set("sectPrChange", `${tag.slice(0, -2)}>${before}</${names.el("sectPrChange")}>`)
 		}
-	} else if (edit.folded !== undefined && node >= 0) {
-		const record = foldedRecord(input, edit, node)
-
-		if (record !== undefined) changes.set("sectPrChange", record)
 	}
 
 	return changes
 }
 
-// The source's own w:sectPrChange of section node `node` (its id, author and date kept) recording too what
-// tracking changed since (`edit.folded`) where it records that not: each property as it was before, its
-// default where the section had none.
-function foldedRecord(input: SectionMarkupInput, edit: SectionEdit, node: number): string | undefined {
-	const { part } = input
-	const document = part.document
-	const change = children(part, node, "sectPrChange")[0]
-	const recorded = change === undefined ? undefined : children(part, change, "sectPr")[0]
-	const fold = edit.folded
-
-	if (change === undefined || recorded === undefined || fold === undefined) return undefined
-
-	const has = recordedElements(part, node)
-	const added = new Map<string, string>()
-
-	for (const field of fold.fields) {
-		const local = FIELD_ELEMENTS[field]
-
-		if (has.includes(local)) continue
-
-		// The property as it was: the value before, else the source's own, else its default (a previous record
-		// adds the default of what the section has after and lacked).
-		const before: SectionEdit = {
-			section: edit.section,
-			base: edit.base,
-			...(fold.before[field] === undefined ? {} : { [field]: fold.before[field] })
-		}
-		const made = changedChildren(input, before, true, new Set([local])).get(local)
-		const own = children(part, node, local)
-			.map(child => decodeUtf8(document.bytes, document.start(child), document.end(child)))
-			.join("")
-
-		// (A value before that reads as none is its default, added for the property it has after.)
-		added.set(local, made ?? own)
-	}
-
-	if (added.size === 0) return undefined
-
-	return markup(out => {
-		out.bytes(document.bytes, document.start(change), document.start(recorded))
-		spliceChildren(out, part.reader, recorded, added, SECTION_PROPERTIES)
-		out.bytes(document.bytes, document.end(recorded), document.end(change))
-	})
-}
-
-// The properties the source's own w:sectPrChange of section node `node` records (local names).
-function recordedElements(part: StoryPart, node: number): string[] {
-	const recorded = children(part, node, "sectPrChange").flatMap(change => children(part, change, "sectPr"))[0]
-	const document = part.document
-	const out: string[] = []
-
-	if (recorded === undefined) return out
-
-	for (let child = document.firstChildElement(recorded); child >= 0; child = document.nextSiblingElement(child))
-		if (part.reader.group(child) === Ns.W) out.push(document.localName(child))
-
-	return out
-}
-
-// The section properties a command edits, as their absence reads (ECMA-376 17.6; a page as layout takes it, no
-// line numbers: Word shows none for w:countBy 0, LibreOffice bug 131594), for the properties a recorded change
-// says a section had before.
+// The section properties a command edits, as their absence reads (ECMA-376 17.6; a page as layout takes it), for
+// the properties a recorded change says a section had before. Line numbering has no such form: Word takes
+// w:countBy 1 to 100 only (MS-OI29500 Part 1 §17.6.8 c), so a record of a section without it holds none.
 const DEFAULTS: readonly (readonly [string, (names: Names) => string])[] = [
 	["footnotePr", names => names.empty("footnotePr")],
 	["endnotePr", names => names.empty("endnotePr")],
@@ -666,7 +596,6 @@ const DEFAULTS: readonly (readonly [string, (names: Names) => string])[] = [
 				["gutter", "0"]
 			])
 	],
-	["lnNumType", names => names.empty("lnNumType", [["countBy", "0"]])],
 	["pgNumType", names => names.empty("pgNumType")],
 	["cols", names => names.empty("cols", [["space", "720"]])],
 	["titlePg", names => names.empty("titlePg", [["val", "0"]])]
@@ -681,8 +610,9 @@ function holds(part: StoryPart, node: number, changes: ReadonlyMap<string, strin
 	return changed !== undefined ? changed !== "" : node >= 0 && children(part, node, local).length > 0
 }
 
-// Whether a recorded property stands for its absence (DEFAULTS): no line numbers, no title page, a section
-// starting on a new page in one column, no note or page number properties.
+// Whether a recorded property stands for its absence (DEFAULTS): no title page, a section starting on a new page
+// in one column, no note or page number properties; no line numbers for w:countBy 0, which other writers record
+// (LibreOffice bug 131594).
 function absent(part: StoryPart, node: number): boolean {
 	const reader = part.reader
 	const document = part.document
@@ -978,7 +908,8 @@ export function editOf(end: SectionEnd): SectionEdit {
 }
 
 // `next` recorded as a tracked change of `previous` where tracking records one (`stamp`): the first change
-// keeps the properties before it; a source w:sectPrChange stays as Word keeps the earliest.
+// keeps the properties before it; a source w:sectPrChange stays as Word keeps the earliest, its record already
+// the properties before every later one (ECMA-376 Part 1 §17.13.5.32).
 export function trackedEdit(
 	previous: SectionEdit,
 	next: SectionEdit,
@@ -987,7 +918,7 @@ export function trackedEdit(
 ): SectionEdit {
 	if (stamp === undefined) return next
 	if (previous.change !== undefined && previous.change !== null) return { ...next, change: previous.change }
-	if (sourceChange && previous.change === undefined) return folded(previous, next)
+	if (sourceChange && previous.change === undefined) return next
 
 	const { change: _change, headers: _headers, footers: _footers, ...before } = previous
 
@@ -1000,23 +931,6 @@ export function trackedEdit(
 			before: Object.keys(before).length > 2 ? before : null
 		}
 	}
-}
-
-// `next` folded into the source's own record: each property it changes for the first time while tracking is
-// recorded with its value before.
-function folded(previous: SectionEdit, next: SectionEdit): SectionEdit {
-	const fields = [...(previous.folded?.fields ?? [])]
-	const before: Record<string, unknown> = { ...previous.folded?.before }
-
-	for (const field of FOLDED_FIELDS) {
-		if (fields.includes(field) || JSON.stringify(previous[field]) === JSON.stringify(next[field])) continue
-
-		fields.push(field)
-
-		if (previous[field] !== undefined) before[field] = previous[field]
-	}
-
-	return fields.length === 0 ? next : { ...next, folded: { fields, before: before as Partial<SectionEdit> } }
 }
 
 // Whether a section's properties can be edited: it ends with a paragraph or the body's own properties, not a
@@ -1759,25 +1673,15 @@ export function resolveSectionChanges(
 						change: null
 					}
 		} else if (accept) {
-			const { folded: _folded, ...kept } = edit
-
-			next = { ...kept, change: null }
+			next = { ...edit, change: null }
 		} else {
-			// The properties the source's change records come back (ECMA-376 17.13.5.32; Word records only those
-			// that changed), those tracking changed since among them; the others stay as they are, as do the
-			// references (it records none). As a reject after a save reads the record written for it.
-			const node = sectionNode(part, edit.base)
-			const recorded = node < 0 ? [] : recordedElements(part, node)
-			const { folded: fold, change: _change, ...kept } = edit
+			// The section the source's change records comes back whole (ECMA-376 Part 1 §17.13.5.32: its w:sectPr
+			// is the previous section properties), whatever tracking changed since; the references stay (it records
+			// none). As a reject after a save reads the record.
+			const { change: _change, ...kept } = edit
 			const out: Record<string, unknown> = { ...kept, rejected: true, change: null }
 
-			for (const field of FOLDED_FIELDS) {
-				if (recorded.includes(FIELD_ELEMENTS[field])) delete out[field]
-				else if (fold?.fields.includes(field) === true) {
-					if (fold.before[field] === undefined) delete out[field]
-					else out[field] = fold.before[field]
-				}
-			}
+			for (const field of RECORDED_FIELDS) delete out[field]
 
 			next = out as unknown as SectionEdit
 		}

@@ -28,6 +28,10 @@ describe("externalLinkDomain", () => {
 		expect(externalLinkDomain("not a url")).toBeNull()
 	})
 
+	it("is null for a link with no host to confirm (mailto:, where the mail client asks)", () => {
+		expect(externalLinkDomain("mailto:someone@example.com")).toBeNull()
+	})
+
 	it("distinguishes subdomains as separate domains (each gets its own one-time confirmation)", () => {
 		expect(externalLinkDomain("https://cdn.example.com/a.png")).toBe("cdn.example.com")
 		expect(externalLinkDomain("https://example.com/a.png")).toBe("example.com")

@@ -15,6 +15,10 @@ export type { MetafileConversion, MetafileFailure, MetafileFormat } from "./type
 
 class TooLarge extends Error {}
 
+// Compressed bytes per inflate step: fflate inflates all it is given before handing anything over, so the
+// cap is checked after at most ~1032 times this much output.
+const INFLATE_STEP = 8 * 1024
+
 // A gzip-compressed metafile (.emz, .wmz) inflated, or undefined when it is not gzip, is corrupt, or
 // inflates beyond the input bound.
 export function inflateMetafile(bytes: Uint8Array): Uint8Array | undefined {
@@ -31,7 +35,9 @@ export function inflateMetafile(bytes: Uint8Array): Uint8Array | undefined {
 	})
 
 	try {
-		gunzip.push(bytes, true)
+		for (let at = 0; at < bytes.length; at += INFLATE_STEP) {
+			gunzip.push(bytes.subarray(at, at + INFLATE_STEP), at + INFLATE_STEP >= bytes.length)
+		}
 	} catch {
 		return undefined
 	}

@@ -127,6 +127,16 @@ export function DocxFormControls({ editor, snapshot, readOnly, execute, press, o
 					/>
 					<PopoverContent
 						align="start"
+						aria-label={
+							control.title ??
+							t(
+								shown.hit.part === "date"
+									? "previewDocxControlDate"
+									: shown.hit.part === "checkbox"
+										? "previewDocxControlCheck"
+										: "previewDocxControlChoose"
+							)
+						}
 						data-preview-surface
 						data-docx-control-popover=""
 						initialFocus={shown.hit.part === "list" ? listRef : true}

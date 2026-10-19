@@ -12,6 +12,7 @@ import {
 	splitParagraph,
 	type PagedEditor
 } from "../../../core/docx/paged/index"
+import { drawingName } from "../../../core/docx/objects/edit"
 import { docxNotes } from "../../../core/docx/stories/notes"
 import { deletesBreakAtCaret } from "../../../core/docx/stories/sections"
 import {
@@ -20,15 +21,18 @@ import {
 	clipboardSerializer,
 	cutMemory,
 	type CutMemory,
+	fieldText,
 	plainSlice,
 	plainText,
 	safeClipboardHtml,
+	shownSlice,
 	symbolText,
 	writeClipboardEvent
 } from "./clipboard"
 import {
 	blockIndex,
 	compositionFrom,
+	readComposition,
 	gapRowCount,
 	mergeWindows,
 	rowsAround,
@@ -38,6 +42,7 @@ import {
 	handFocus,
 	releaseGapText,
 	sessionTransaction,
+	tabKey,
 	takeFocus,
 	unreadSelection,
 	windowAround,
@@ -56,6 +61,8 @@ export { plainSlice, plainText, safeClipboardHtml }
 export interface EditSinkOptions {
 	// The accessible name of the editing area.
 	readonly label: string
+	// The id of an element describing it (how to leave it from the keyboard).
+	readonly describedBy?: string
 	readonly readOnly?: boolean
 	// Cmd (Apple platforms) or Ctrl as the shortcut modifier.
 	readonly apple?: boolean
@@ -151,7 +158,7 @@ export const NODE_VIEWS: Readonly<Record<string, NodeViewConstructor>> = {
 	comment_ref: atom(() => ""),
 	drawing: atom(() => ""),
 	run_object: atom(attrText("text")),
-	field: atom(attrText("result")),
+	field: atom(fieldText),
 	marker: atom(() => ""),
 	// A field character of a field spanning paragraphs: its result is the text around it.
 	field_char: atom(() => ""),
@@ -159,6 +166,24 @@ export const NODE_VIEWS: Readonly<Record<string, NodeViewConstructor>> = {
 	proof_err: atom(() => ""),
 	rendered_break: atom(() => ""),
 	opaque_inline: atom(attrText("text"))
+}
+
+// A drawing: an image named by its alternative text (else its title), or nothing to read without one. Made
+// anew when its node changes (an alt text edit), as every atom here.
+function drawingView(editor: PagedEditor): NodeViewConstructor {
+	return node => {
+		const dom = element("span")
+		const name = drawingName(editor.session.context, node)
+
+		dom.contentEditable = "false"
+
+		if (name !== "") {
+			dom.setAttribute("role", "img")
+			dom.setAttribute("aria-label", name)
+		}
+
+		return { dom, ignoreMutation: () => true }
+	}
 }
 
 const MARK_VIEWS = Object.fromEntries(Object.keys(docxSchema.marks).map(name => [name, () => ({ dom: element("span") })]))
@@ -214,7 +239,7 @@ export class EditSink {
 			plugins: editor.state.plugins.flatMap(plugin =>
 				plugin.spec.props === undefined || plugin.spec.state !== undefined ? [] : [new Plugin({ props: plugin.spec.props })]
 			),
-			nodeViews: NODE_VIEWS,
+			nodeViews: { ...NODE_VIEWS, drawing: drawingView(editor) },
 			markViews: MARK_VIEWS,
 			clipboardSerializer: clipboardSerializer(),
 			clipboardParser: clipboardParser(),
@@ -223,7 +248,7 @@ export class EditSink {
 				const state = this.editor.state
 				const { from, to } = state.selection
 
-				return plainText(state.doc, from, to, pos => this.editor.geometry.markerText(pos))
+				return plainText(state.doc, from, to, pos => this.editor.geometry.markerText(pos), this.editor.view)
 			},
 			clipboardTextParser: (text, $context) => plainSlice(text, $context),
 			handlePaste: (_view, event) => this.pasteCut(event.clipboardData?.getData("text/plain")),
@@ -266,7 +291,8 @@ export class EditSink {
 
 					return false
 				},
-				compositionend: () => {
+				compositionend: view => {
+					readComposition(view)
 					this.compositionStart = -1
 					this.compositionText = ""
 					this.editor.setComposition(undefined)
@@ -278,6 +304,7 @@ export class EditSink {
 				role: "textbox",
 				"aria-multiline": "true",
 				"aria-label": options.label,
+				...(options.describedBy === undefined ? {} : { "aria-describedby": options.describedBy }),
 				spellcheck: "false",
 				translate: "no",
 				// Not editable but still focused (selection, copy).
@@ -385,7 +412,7 @@ export class EditSink {
 
 		if (state.selection.empty) return undefined
 
-		const { dom, text } = this.view.serializeForClipboard(state.selection.content())
+		const { dom, text } = this.view.serializeForClipboard(shownSlice(state.selection.content(), this.editor.view))
 
 		return { html: dom.innerHTML, text }
 	}
@@ -705,6 +732,8 @@ export class EditSink {
 				if (mod || event.altKey || readOnly) return false
 
 				return this.run(extend ? lineBreak(state) : splitParagraph(state))
+			case "Tab":
+				return !readOnly && tabKey(editor, editor.session, event, apple, tr => this.run(tr))
 			// At a paragraph's edge any deletion (a character, a word, to the line's start) joins paragraphs.
 			case "Backspace":
 				if (readOnly) return false

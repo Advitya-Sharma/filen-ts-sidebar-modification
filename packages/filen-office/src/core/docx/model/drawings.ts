@@ -265,6 +265,25 @@ export function readDrawing(reader: PartReader, node: number, index: number, par
 	}
 }
 
+// A picture's accessible name: wp:docPr@descr (alternative text), else its @title (ECMA-376 Part 1 §20.4.2.5,
+// CT_NonVisualDrawingProps); "" for none.
+export function drawingAltText(reader: PartReader, docPr: number): string {
+	if (docPr < 0) return ""
+
+	const descr = reader.attr(docPr, Ns.None, "descr")?.trim() ?? ""
+
+	return descr !== "" ? descr : (reader.attr(docPr, Ns.None, "title")?.trim() ?? "")
+}
+
+// A VML shape's: v:shape@alt, else @title (ECMA-376 Part 4 §19.1.2.19, the shape's core attributes).
+export function vmlAltText(reader: PartReader, shape: number): string {
+	if (shape < 0) return ""
+
+	const alt = reader.attr(shape, Ns.None, "alt")?.trim() ?? ""
+
+	return alt !== "" ? alt : (reader.attr(shape, Ns.None, "title")?.trim() ?? "")
+}
+
 export function readVml(
 	reader: PartReader,
 	node: number,

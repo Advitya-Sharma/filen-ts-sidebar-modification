@@ -17,6 +17,8 @@ export interface DocxReflowProps {
 	readonly className?: string
 	// The accessible name of the editing area.
 	readonly label: string
+	// The id of an element describing it (how to leave it from the keyboard).
+	readonly describedBy?: string
 	readonly readOnly?: boolean
 	// Cmd as the shortcut modifier (Apple platforms).
 	readonly apple?: boolean
@@ -40,6 +42,7 @@ export function DocxReflow(props: DocxReflowProps): ReactNode {
 	const viewRef = useRef<ReflowView | null>(null)
 	const options: ReflowViewOptions = {
 		label: props.label,
+		describedBy: props.describedBy,
 		readOnly: props.readOnly === true,
 		apple: props.apple === true,
 		onFind: props.onFind,

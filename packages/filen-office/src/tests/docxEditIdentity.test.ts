@@ -96,9 +96,12 @@ describe("docx editing: source identity", () => {
 
 		expect(markerKeys(after)).toEqual(keys)
 		expect(new Set(sources(after)).size).toBe(sources(after).length)
+		expect(after.child(after.childCount - 3).attrs["src"]).toBe(NO_SOURCE)
+		expect(after.child(after.childCount - 2).type.name).toBe("table")
 		expect(after.child(after.childCount - 2).attrs["src"]).toBe(NO_SOURCE)
-		expect(after.lastChild?.type.name).toBe("table")
-		expect(after.lastChild?.attrs["src"]).toBe(NO_SOURCE)
+		// The story ends with a paragraph again, as Word keeps one after a last table.
+		expect(after.lastChild?.type.name).toBe("paragraph")
+		expect(after.lastChild?.content.size).toBe(0)
 		after.check()
 
 		// A move keeps identity: the original is gone.

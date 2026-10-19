@@ -13,7 +13,7 @@ import {
 	waitForListingSettled
 } from "../helpers/listing"
 import { BUILT_FIXTURE_SCENARIOS, FIXTURE_FILES, type FixtureFileName, type FixtureScenario } from "../helpers/fixtures"
-import { DOCX_MIME, docxFixtureBytes, largePictureBytes, svgPictureBytes, webpPictureBytes } from "../helpers/docxFixtures"
+import { DOCX_MIME, docxFixtureBytes, docxViewerBytes, largePictureBytes, svgPictureBytes, webpPictureBytes } from "../helpers/docxFixtures"
 import {
 	BMP_BYTES,
 	CODE_BYTES,
@@ -156,7 +156,18 @@ const PAYLOADS = {
 	// ~27 MB: off disk, like download-cancel.bin (so the scenario's other pictures are too).
 	"w3-picture-large.png": { generate: largePictureBytes },
 	"w3-picture.svg": { generate: svgPictureBytes },
-	"w3-picture.webp": { generate: webpPictureBytes }
+	"w3-picture.webp": { generate: webpPictureBytes },
+	"notes.docx": { buffer: docxFixtureBytes("notes.docx"), mimeType: DOCX_MIME },
+	"described-picture.docx": { buffer: docxFixtureBytes("described-picture.docx"), mimeType: DOCX_MIME },
+	"viewer-300p.docx": { buffer: docxViewerBytes("viewer-300p.docx"), mimeType: DOCX_MIME },
+	"viewer-archive.7z": { buffer: docxViewerBytes("viewer-archive.7z"), mimeType: "application/x-7z-compressed" },
+	"viewer-archive.zip": { buffer: docxViewerBytes("viewer-archive.zip"), mimeType: "application/zip" },
+	"viewer-encrypted.docx": { buffer: docxViewerBytes("viewer-encrypted.docx"), mimeType: DOCX_MIME },
+	"viewer-fonts.docx": { buffer: docxViewerBytes("viewer-fonts.docx"), mimeType: DOCX_MIME },
+	"viewer-legacy.docx": { buffer: docxViewerBytes("viewer-legacy.docx"), mimeType: DOCX_MIME },
+	"viewer-links.docx": { buffer: docxViewerBytes("viewer-links.docx"), mimeType: DOCX_MIME },
+	"viewer-malformed.docx": { buffer: docxViewerBytes("viewer-malformed.docx"), mimeType: DOCX_MIME },
+	"viewer-review.docx": { buffer: docxViewerBytes("viewer-review.docx"), mimeType: DOCX_MIME }
 } satisfies Record<FixtureFileName, FixturePayload>
 
 // ONE wall clock for the whole build, the shape cleanup-setup's SWEEP_BUDGET_MS already uses. Each row

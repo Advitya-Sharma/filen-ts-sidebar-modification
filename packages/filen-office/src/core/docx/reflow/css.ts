@@ -81,14 +81,21 @@ export function paragraphCss(format: ParagraphFormat): string {
 	const end = twips(props.indent.end)
 	const first = twips(props.indent.firstLine)
 
-	// A hanging first line takes its room from the start indent, as Word draws it.
-	if (start > 0) out.push(`padding-inline-start: min(${px(start)}, ${MAX_INDENT})`)
+	// Each indent is capped (in a narrow table cell no indent pushes the text out of its box). A hanging first line
+	// takes its room from the start indent, as Word draws it: never more than the start indent, so a capped first
+	// line still starts in the box (the padding's share is of the cell, the hang's of the paragraph inside its
+	// padding, never more), and a marker's room is the hang's share of the same box.
+	const hang = first < 0 ? Math.min(-first, Math.max(0, start)) : 0
+	const lead = start - hang
+	const hangCss = `min(${px(hang)}, ${MAX_INDENT})`
+
+	if (hang > 0) out.push(`padding-inline-start: ${lead > 0 ? `calc(min(${px(lead)}, ${MAX_INDENT}) + ${hangCss})` : hangCss}`)
+	else if (start > 0) out.push(`padding-inline-start: min(${px(start)}, ${MAX_INDENT})`)
+
 	if (end > 0) out.push(`padding-inline-end: min(${px(end)}, ${MAX_INDENT})`)
 
-	// The first line's indent (and a hanging marker's room) too: in a narrow table cell no indent pushes the text
-	// out of its box.
 	if (first > 0) out.push(`text-indent: min(${px(first)}, ${MAX_INDENT})`)
-	else if (first < 0) out.push(`text-indent: max(${px(first)}, -${MAX_INDENT})`, `--fo-reflow-hang: min(${px(-first)}, ${MAX_INDENT})`)
+	else if (hang > 0) out.push(`text-indent: calc(-1 * ${hangCss})`, `--fo-reflow-hang: ${hangCss}`)
 
 	const spacing = props.spacing
 	// Word adds the space after a paragraph to the space before the next (no collapsing): padding, not margins.
@@ -143,8 +150,22 @@ const UNDERLINES: Readonly<Record<string, string>> = {
 	wavyDouble: "wavy"
 }
 
+// The name comes from the document: a quote or backslash would end or escape the string, and a line break or
+// other control character would end it as a bad string, after which the rest reads as declarations.
 function family(name: string, faces: CssFaces | undefined): string {
-	return faces?.(name) ?? `"${name.replace(/["\\]/g, "")}"`
+	const known = faces?.(name)
+
+	if (known !== undefined) return known
+
+	let quoted = ""
+
+	for (const char of name) {
+		const code = char.charCodeAt(0)
+
+		if (code >= 0x20 && code !== 0x7f && char !== '"' && char !== "\\") quoted += char
+	}
+
+	return `"${quoted}"`
 }
 
 // A run's declarations within its paragraph; `faces` names the faces the document registered for its fonts.

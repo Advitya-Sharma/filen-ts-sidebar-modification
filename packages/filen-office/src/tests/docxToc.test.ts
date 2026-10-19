@@ -116,6 +116,23 @@ function entries(doc: ProseMirrorNode, from: number, to: number): string[] {
 }
 
 describe("tables of contents", () => {
+	it("bookmarks a heading in a content control showing its placeholder, the placeholder kept", async () => {
+		const control = (text: string): string =>
+			`<w:sdt><w:sdtPr><w:id w:val="7"/><w:temporary/><w:showingPlcHdr/></w:sdtPr><w:sdtContent>${heading(1, text)}</w:sdtContent></w:sdt>`
+		const opened = await open(spec(p("Contents") + control("[Heading]") + p("Text.")))
+		const editor = opened.editor
+
+		caretAt(editor, find(editor.session.state.doc, "Contents"))
+		expect(await editor.execute({ type: "toc.insert", levels: 3, hyperlinks: true })).toBe(true)
+		await settleAll(editor)
+
+		const document = await read(await save(opened), "word/document.xml")
+
+		expect(document).toMatch(
+			/<w:showingPlcHdr\/>.*<w:bookmarkStart w:id="\d+" w:name="_Toc\d+"\/>.*\[Heading\].*<w:bookmarkEnd w:id="\d+"\/>/
+		)
+	})
+
 	it("inserts Word's default table from the headings, with links, bookmarks and page numbers", async () => {
 		const opened = await open(spec(HEADINGS))
 		const editor = opened.editor

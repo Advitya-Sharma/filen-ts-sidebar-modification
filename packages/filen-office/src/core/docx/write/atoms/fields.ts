@@ -2,8 +2,8 @@ import type { Mark, Node } from "prosemirror-model"
 import { decodeUtf8, escapeText } from "../../../xml/index"
 import type { RunBase } from "../../edit/formatting"
 import { NO_SOURCE, docxSchema } from "../../edit/schema"
-import { fieldUpdateOf, rewritableSource, type SourceField } from "../../fields/evaluate"
-import { fieldFormatState, fieldFormatting, resultFormatRun, resultRunOf } from "../../fields/format"
+import { fieldUpdateOf, rewritableSource, simpleFieldRewritable, type SourceField } from "../../fields/evaluate"
+import { fieldFormatRun, fieldFormatState, fieldFormatting, resultFormatRun, resultRunOf } from "../../fields/format"
 import { storedResult, type FieldUpdate } from "../../fields/result"
 import { Item, type StoryPart } from "../../model/index"
 import { Ns } from "../../model/namespaces"
@@ -15,6 +15,7 @@ import { RUN_PROPERTIES } from "../order.generated"
 import { src } from "../source"
 import type { StoryWriting } from "../story"
 import { DocxWriteError } from "../values"
+import { isRevisionWrapper } from "../wrappers"
 import type { AtomWriter } from "./index"
 
 // Fields. A source field whose result an update changed keeps its bytes up to its separator (instruction,
@@ -484,6 +485,38 @@ function rewrite(w: StoryWriting, out: Out, node: Node, restyle: Restyle | undef
 	out.text(`</${names.el("r")}>`)
 }
 
+// A tracked change holds runs only (CT_RunTrackChange, ECMA-376 Part 1 §17.13.5): a source w:fldSimple that a
+// new w:ins or w:del wraps is written as the complex field it stands for, its instruction in a run of its own
+// (deleted with the field) and w:dirty / w:fldLock on its begin character.
+function writeSimpleAsComplex(w: StoryWriting, out: Out, node: Node, restyle: Restyle | undefined): void {
+	const part = w.part
+	const field = { begin: src(node) }
+	const names = w.names
+	const xml = part.node(field.begin)
+	const on = (name: string): boolean => /^(1|true|on)$/.test(part.document.attribute(xml, names.attr(name)) ?? "")
+	// Every run carries the properties the field is read with (its first result run's, fields/format.ts): a
+	// complex field's are read from its code, and the result looks as it did.
+	const run = fieldFormatRun(part, field.begin, node.attrs["end"] as number, true)
+	const inRun = (inner: string): void => {
+		out.text(`<${names.el("r")}>`)
+		runProperties(w, out, run, restyle)
+		out.text(`${inner}</${names.el("r")}>`)
+	}
+
+	inRun(
+		names.empty("fldChar", [
+			["fldCharType", "begin"],
+			["fldLock", on("fldLock") ? "true" : null],
+			["dirty", on("dirty") ? "true" : null]
+		])
+	)
+	inRun(instructionElement(names, node.attrs["instruction"] as string, deleted(node)))
+	inRun(fieldChar(names, "separate"))
+	keepMarkers(w, out, field.begin + 1, part.end(field.begin))
+	resultRuns(w, out, run, node, restyle)
+	inRun(fieldChar(names, "end"))
+}
+
 // A field the editor made (`ffData`: a copy of a legacy form field's, in its begin character).
 function writeNew(w: StoryWriting, out: Out, node: Node, ffData: string): void {
 	const names = w.names
@@ -493,8 +526,11 @@ function writeNew(w: StoryWriting, out: Out, node: Node, ffData: string): void {
 	const restyle = restyleOf(w, node) as Restyle
 	const run = (inner: string): string => `<${names.el("r")}>${restyle(NO_SOURCE, true)}${inner}</${names.el("r")}>`
 	const tracked = fieldUpdateOf(node) !== null
+	// A tracked change holds runs only (CT_RunTrackChange, ECMA-376 Part 1 §17.13.5): a simple field in one (a copy
+	// of a source w:fldSimple pasted or deleted while tracking) is written complex.
+	const inChange = removed || marks.insertion.isInSet(node.marks) !== undefined || marks.move_to.isInSet(node.marks) !== undefined
 
-	if (node.attrs["simple"] === true) {
+	if (node.attrs["simple"] === true && !inChange) {
 		const tag = names.empty("fldSimple", [["instr", instruction]])
 
 		if (result === "" && !tracked) {
@@ -546,6 +582,17 @@ const FIELD: AtomWriter = {
 		const stored = storedResult(part, own, end, part.kinds[own] === Item.FieldSimple)
 
 		const restyle = restyleOf(w, node)
+
+		if (part.kinds[own] === Item.FieldSimple && node.marks.some(mark => isRevisionWrapper(mark) && src(mark) === NO_SOURCE)) {
+			// One holding a drawing or a field of its own has no complex form: tracked changes leave it out
+			// (review/track.ts), and a save refuses one that a change wraps anyway.
+			if (!simpleFieldRewritable(part, own))
+				throw new DocxWriteError("unsupported", "A tracked change around a simple field that cannot be written inside one")
+
+			writeSimpleAsComplex(w, out, node, restyle)
+
+			return
+		}
 
 		if ((node.attrs["result"] as string) === stored.result && sameUpdate(fieldUpdateOf(node), stored.update)) {
 			const simple = part.kinds[own] === Item.FieldSimple

@@ -1,6 +1,6 @@
 import type { Mark, MarkType, Node } from "prosemirror-model"
 import type { EditorState, Transaction } from "prosemirror-state"
-import type { StoryPart } from "../model/index"
+import { Item, type StoryPart } from "../model/index"
 import {
 	EMPTY_PARAGRAPH,
 	type ParagraphProps,
@@ -71,10 +71,14 @@ interface Formatting {
 	readonly color: string | undefined
 	readonly values: Map<ParagraphFormat, RunValues>
 	readonly styleValues: Map<ParagraphFormat, RunValues>
+	// FormatResolver.toggles per paragraph format.
+	readonly toggles: Map<ParagraphFormat, number>
 }
 
 interface TrieNode {
-	next: Map<Mark, TrieNode> | undefined
+	// Weak: a path through marks no node carries any more (a tracked change's own marks, an edit's new ones) goes
+	// with them; the formatting it led to stays, found by content.
+	next: WeakMap<Mark, TrieNode> | undefined
 	// Without and with a complex script base.
 	readonly leaf: [Formatting | undefined, Formatting | undefined]
 }
@@ -270,6 +274,22 @@ export function withMark(marksOf: readonly Mark[], type: MarkType, mark: Mark | 
 	return mark === undefined ? without : mark.addToSet(without)
 }
 
+// Whether a paragraph node's attributes still say what its source w:pPr says (compared by identity: unchanged
+// copies keep the attribute values the builder read).
+function saysSource(node: Node, source: ParagraphProps): boolean {
+	const attrs = node.attrs
+
+	return (
+		attrs["styleId"] === (source.styleId ?? null) &&
+		attrs["numId"] === (source.numbering?.numId ?? null) &&
+		attrs["ilvl"] === (source.numbering?.ilvl ?? null) &&
+		attrs["align"] === (source.alignment ?? null) &&
+		attrs["indent"] === (source.indent ?? null) &&
+		attrs["spacing"] === (source.spacing ?? null) &&
+		attrs["borders"] === (source.borders ?? null)
+	)
+}
+
 // Effective formatting of editing nodes: a paragraph's direct properties are its source w:pPr with the
 // attributes commands edit laid over; a run's toggles are its direct marks, else what the paragraph and
 // character styles give. Everything is cached by identity (attribute objects are shared by unchanged node
@@ -277,12 +297,17 @@ export function withMark(marksOf: readonly Mark[], type: MarkType, mark: Mark | 
 export class FormatResolver {
 	private readonly context: DocxEditContext
 	private readonly part: StoryPart
-	private readonly paragraphs = new WeakMap<object, ParagraphFormat>()
-	private readonly sources: (ParagraphProps | undefined)[] = []
+	// Per source paragraph (by its row in the part's paragraph table): its w:pPr's properties as an index into
+	// `sourceProps` (-1 before the first read), and the format of each while a paragraph's attributes still
+	// say what it says (paragraph()). Four bytes a paragraph, where a map per node would hold an entry each.
+	private sourceRows: Int32Array | undefined = undefined
+	private readonly sourceList: ParagraphProps[] = []
+	private readonly sourceIds = new Map<ParagraphProps, number>()
+	private readonly sourceFormats: (ParagraphFormat | undefined)[] = []
+	private readonly edited = new WeakMap<object, ParagraphFormat>()
 	private readonly styleParagraphs = new Map<string | null, ParagraphFormat>()
 	private readonly characterStyles = new Map<string | null, RunProps>()
 	private readonly overrides = new WeakMap<ParagraphProps, Map<string, ParagraphProps>>()
-	private readonly toggleCache = new WeakMap<readonly Mark[], { paragraph: ParagraphFormat; bits: number }>()
 	// Distinct direct formattings (by the property marks' attributes and the base's script), and their values
 	// per paragraph format: keyed by content, not by mark array (every source run has its own array), so a
 	// large selection adds nothing per run.
@@ -303,18 +328,40 @@ export class FormatResolver {
 	// the store interns them by their bytes, which a command over a long document would otherwise hash again
 	// for every paragraph.
 	sourceProps(node: Node): ParagraphProps {
+		const id = this.sourceId(node)
+
+		return id < 0 ? EMPTY_PARAGRAPH : (this.sourceList[id] ?? EMPTY_PARAGRAPH)
+	}
+
+	// The index of a paragraph node's source properties in `sourceList`, -1 for a new paragraph.
+	private sourceId(node: Node): number {
 		const src = node.attrs["src"] as number
+		const part = this.part
 
-		if (src === NO_SOURCE || this.part.kinds[src] === undefined) return EMPTY_PARAGRAPH
+		if (src === NO_SOURCE || part.kinds[src] !== Item.Paragraph) return -1
 
-		let props = this.sources[src]
+		const row = part.aux[src] ?? -1
+		const pPrs = part.paragraphs.pPr
 
-		if (props === undefined) {
-			props = this.context.store.paragraph(this.part.document, this.part.paragraphs.pPr[this.part.aux[src] ?? -1] ?? -1)
-			this.sources[src] = props
+		if (row < 0 || row >= pPrs.length) return -1
+
+		const rows = (this.sourceRows ??= new Int32Array(pPrs.length).fill(-1))
+		let id = rows[row] ?? -1
+
+		if (id < 0) {
+			const props = this.context.store.paragraph(part.document, pPrs[row] ?? -1)
+
+			id = this.sourceIds.get(props) ?? this.sourceList.length
+
+			if (id === this.sourceList.length) {
+				this.sourceList.push(props)
+				this.sourceIds.set(props, id)
+			}
+
+			rows[row] = id
 		}
 
-		return props
+		return id
 	}
 
 	// The direct paragraph properties of a paragraph node: its source w:pPr's own (interned) object while
@@ -322,6 +369,9 @@ export class FormatResolver {
 	// otherwise one interned object per source and override set.
 	direct(node: Node): ParagraphProps {
 		const source = this.sourceProps(node)
+
+		if (saysSource(node, source)) return source
+
 		const styleId = node.attrs["styleId"] as string | null
 		const numId = node.attrs["numId"] as number | null
 		const ilvl = node.attrs["ilvl"] as number | null
@@ -329,18 +379,6 @@ export class FormatResolver {
 		const indent = node.attrs["indent"] as IndentAttrs | null
 		const spacing = node.attrs["spacing"] as SpacingProps | null
 		const borders = node.attrs["borders"] as ParagraphBordersProps | null
-
-		if (
-			styleId === (source.styleId ?? null) &&
-			numId === (source.numbering?.numId ?? null) &&
-			ilvl === (source.numbering?.ilvl ?? null) &&
-			align === (source.alignment ?? null) &&
-			indent === (source.indent ?? null) &&
-			spacing === (source.spacing ?? null) &&
-			borders === (source.borders ?? null)
-		) {
-			return source
-		}
 
 		const key = JSON.stringify([styleId, numId, ilvl, align, indent, spacing, borders])
 		let bySource = this.overrides.get(source)
@@ -383,12 +421,26 @@ export class FormatResolver {
 	}
 
 	paragraph(node: Node): ParagraphFormat {
+		const id = this.sourceId(node)
+		const source = id < 0 ? undefined : this.sourceList[id]
+
+		if (source !== undefined && saysSource(node, source)) {
+			let format = this.sourceFormats[id]
+
+			if (format === undefined) {
+				format = this.context.resolver.paragraph(source)
+				this.sourceFormats[id] = format
+			}
+
+			return format
+		}
+
 		const key = node.attrs
-		let format = this.paragraphs.get(key)
+		let format = this.edited.get(key)
 
 		if (format === undefined) {
 			format = this.context.resolver.paragraph(this.direct(node))
-			this.paragraphs.set(key, format)
+			this.edited.set(key, format)
 		}
 
 		return format
@@ -425,27 +477,18 @@ export class FormatResolver {
 		return direct
 	}
 
-	// Whether content with `marksOf` in `paragraph` is complex script (w:rtl or w:cs in its base or
-	// styles): then w:bCs and w:iCs are what count for bold and italic.
-	private complex(style: ResolvedRunProps, marksOf: readonly Mark[]): boolean {
-		if (style.rtl || style.cs) return true
-
-		const base = marks.run.isInSet(marksOf)?.attrs["base"] as number | undefined
-		const props = base === undefined ? undefined : this.context.bases.get(base)?.props
-
-		return props?.rtl === true || props?.cs === true
-	}
-
 	// The four toggles of content with `marksOf` in `paragraph` as bits: TOGGLE_ON << k when toggle k is
-	// on, TOGGLE_STYLE << k when the styles alone give it. Cached per mark array (unchanged nodes keep
-	// theirs), so a snapshot over a large selection reads a map per node.
+	// on, TOGGLE_STYLE << k when the styles alone give it. Cached per distinct formatting and paragraph format
+	// (bold, italic, underline and strike are formatting marks; content is complex script when its styles or its
+	// base say so), so a large selection adds nothing per run.
 	toggles(paragraph: ParagraphFormat, marksOf: readonly Mark[]): number {
-		const cached = this.toggleCache.get(marksOf)
+		const formatting = this.formatting(marksOf)
+		const cached = formatting.toggles.get(paragraph)
 
-		if (cached !== undefined && cached.paragraph === paragraph) return cached.bits
+		if (cached !== undefined) return cached
 
-		const style = this.styleRun(paragraph, marksOf)
-		const complex = this.complex(style, marksOf)
+		const style = this.context.resolver.run(paragraph, formatting.style)
+		const complex = style.rtl || style.cs || formatting.complexBase
 		let bits = 0
 
 		RUN_TOGGLES.forEach((toggle, k) => {
@@ -488,7 +531,7 @@ export class FormatResolver {
 			if (fromStyle) bits |= TOGGLE_STYLE << k
 		})
 
-		this.toggleCache.set(marksOf, { paragraph, bits })
+		formatting.toggles.set(paragraph, bits)
 
 		return bits
 	}
@@ -525,7 +568,7 @@ export class FormatResolver {
 
 				if (next === undefined) {
 					next = { next: undefined, leaf: [undefined, undefined] }
-					node.next ??= new Map()
+					node.next ??= new WeakMap()
 					node.next.set(mark, next)
 				}
 
@@ -556,7 +599,8 @@ export class FormatResolver {
 					complexBase,
 					color: color === undefined ? undefined : colorKey(color.attrs as ColorAttrs),
 					values: new Map(),
-					styleValues: new Map()
+					styleValues: new Map(),
+					toggles: new Map()
 				}
 				this.formattings.set(key, formatting)
 			}

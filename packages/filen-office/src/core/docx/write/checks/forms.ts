@@ -144,7 +144,8 @@ function idsInSource(part: StoryPart): ReadonlyMap<string, number> {
 }
 
 // A control's w:id is unique within its part (ECMA-376 Part 1 §17.5.2.18): a copy carries an id of its own; ids
-// the source already repeats stay as they were.
+// the source already repeats stay as they were. A text box's mc:Fallback (its VML) repeats the mc:Choice's
+// controls with their ids, as Word writes it: those are not counted.
 const controls: DocxCheck = {
 	part(_input: CheckInput, part: CheckedPart) {
 		if (part.part === undefined) return
@@ -153,11 +154,21 @@ const controls: DocxCheck = {
 		const reader = partReader(document)
 		const ids = new Map<string, number>()
 		let kept: ReadonlySet<string> | undefined
+		let fallbackEnd = -1
 
 		for (let node = 0; node < document.count; node++) {
-			if (document.kinds[node] !== NodeKind.Element || !reader.is(node, Ns.W, "sdt")) continue
+			if (document.kinds[node] !== NodeKind.Element) continue
+			if (fallbackEnd >= 0 && document.start(node) >= fallbackEnd) fallbackEnd = -1
 
-			const id = controlId(reader, node)
+			if (fallbackEnd < 0 && reader.group(node) === Ns.MC && document.localName(node) === "Fallback") {
+				fallbackEnd = document.end(node)
+
+				continue
+			}
+
+			if (!reader.is(node, Ns.W, "sdt")) continue
+
+			const id = fallbackEnd >= 0 ? undefined : controlId(reader, node)
 
 			if (id !== undefined) {
 				const count = (ids.get(id) ?? 0) + 1

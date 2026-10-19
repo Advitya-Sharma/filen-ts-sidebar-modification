@@ -10,7 +10,7 @@ import { MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, type DocxCellVAlign, type DocxTableA
 import type { DocxEditContext } from "../context"
 import { markCommand } from "../invariants/core"
 import { minColumn, tableCellMargins } from "./margins"
-import { NO_MARKERS, NO_SOURCE, docxSchema, type MarkerList } from "../schema"
+import { NO_MARKERS, NO_SOURCE, docxSchema, tableEdge, type MarkerList } from "../schema"
 import {
 	RECORD_KEYS,
 	cellOverrides,
@@ -605,7 +605,20 @@ export function insertTable(
 	const paragraph = $from.parent
 	let at: number
 
-	if (paragraph.content.size === 0 || $from.parentOffset === 0) {
+	// Word and LibreOffice show tables with no paragraph between them as one table: right after a table (a locked
+	// one, a control ending with one), the new one gets a paragraph of its own before it (the split below at offset 0).
+	let depth = $from.depth - 1
+	let before = $from.node(depth).maybeChild($from.index(depth) - 1)
+
+	// The first block of a control: what comes before the control.
+	while (before === null && depth > 0 && $from.node(depth).type === nodes.sdt) {
+		depth--
+		before = $from.node(depth).maybeChild($from.index(depth) - 1)
+	}
+
+	const afterTable = tableEdge(before, true)
+
+	if (!afterTable && (paragraph.content.size === 0 || $from.parentOffset === 0)) {
 		at = $from.before()
 		tr.insert(at, table)
 	} else {

@@ -91,6 +91,8 @@ export interface DocxEditorProps {
 	readonly className?: string
 	// The accessible name of the editing area.
 	readonly label: string
+	// The id of an element describing it (how to leave it from the keyboard).
+	readonly describedBy?: string
 	readonly readOnly?: boolean
 	// Cmd as the shortcut modifier (Apple platforms).
 	readonly apple?: boolean
@@ -362,7 +364,7 @@ export function DocxEditor(props: DocxEditorProps) {
 		})
 	}
 
-	// Double-clicking a header or footer edits it; double-clicking the body goes back to it (as Word does).
+	// Double-clicking a header, footer or note edits it; double-clicking the body goes back to it (as Word does).
 	const switchStory = (clientX: number, clientY: number): void => {
 		const point = pointAt(clientX, clientY)
 
@@ -499,6 +501,7 @@ export function DocxEditor(props: DocxEditorProps) {
 
 		const sink = new EditSink(editor, host, {
 			label: props.label,
+			...(props.describedBy === undefined ? {} : { describedBy: props.describedBy }),
 			readOnly: readOnlyRef.current,
 			apple: props.apple === true,
 			...(props.window === undefined ? {} : { window: props.window }),
@@ -712,6 +715,20 @@ export function DocxEditor(props: DocxEditorProps) {
 		if (onContent(event)) event.preventDefault()
 	}
 
+	// A single press (click or tap) while a story other than the body is edited: on another page's copy of the
+	// header being edited it moves the caret there; in the body it leaves a note for it (a note is edited beside
+	// the body, a header or footer only by double-clicking).
+	const pressOutsideStory = (clientX: number, clientY: number): void => {
+		if (editor.activeStory === editor.body.session.story.story.index) return
+
+		const point = pointAt(clientX, clientY)
+		const story = point === undefined ? -1 : editor.storyAt(point.index, point.x, point.y)
+		const region = editor.activeRegion
+
+		if (point !== undefined && story === editor.activeStory) editor.geometry.preferPage(point.index)
+		else if (story < 0 && (region === Region.FOOTNOTE || region === Region.ENDNOTE)) editor.exitStory()
+	}
+
 	const onPointerDown = (event: PointerEvent<HTMLDivElement>): void => {
 		revealRef.current = false
 
@@ -724,9 +741,13 @@ export function DocxEditor(props: DocxEditorProps) {
 			touch.timer = setTimeout(() => {
 				touch.timer = undefined
 
+				if (touchRef.current !== touch) return
+
+				pressOutsideStory(touch.x, touch.y)
+
 				const hit = hitAt(touch.x, touch.y)
 
-				if (touchRef.current !== touch || hit === undefined) return
+				if (hit === undefined) return
 
 				touch.handled = true
 				editor.selectWord(hit.pos)
@@ -761,13 +782,7 @@ export function DocxEditor(props: DocxEditorProps) {
 		}
 
 		if (clicks === 2 && onPage) switchStory(event.clientX, event.clientY)
-		else if (editor.activeStory !== editor.body.session.story.story.index) {
-			// Clicking another page's copy of the header being edited moves the caret there.
-			const point = pointAt(event.clientX, event.clientY)
-
-			if (point !== undefined && editor.storyAt(point.index, point.x, point.y) === editor.activeStory)
-				editor.geometry.preferPage(point.index)
-		}
+		else pressOutsideStory(event.clientX, event.clientY)
 
 		const hit = hitAt(event.clientX, event.clientY)
 
@@ -845,7 +860,11 @@ export function DocxEditor(props: DocxEditorProps) {
 			touchRef.current = null
 
 			if (!touch.handled) {
-				const hit = pressObject(event, 1) ? undefined : hitAt(event.clientX, event.clientY)
+				const object = pressObject(event, 1)
+
+				if (!object) pressOutsideStory(event.clientX, event.clientY)
+
+				const hit = object ? undefined : hitAt(event.clientX, event.clientY)
 
 				if (hit !== undefined) editor.select(hit)
 

@@ -1,3 +1,6 @@
+// What every empty column trims to: a part of one paragraph (an edit's overlay) has dozens of them.
+const EMPTY = new Int32Array(0)
+
 // A growable Int32 column for model tables: rows are appended while one part is built, then trimmed.
 export class Column {
 	private array: Int32Array
@@ -29,6 +32,8 @@ export class Column {
 	}
 
 	trim(): Int32Array {
+		if (this.length === 0) return EMPTY
+
 		return this.array.length === this.length ? this.array : this.array.slice(0, this.length)
 	}
 }

@@ -12,6 +12,7 @@ export { CommentAnchors, ModelTables, buildPart, buildPartSliced } from "./build
 export type { BuildCounts, MaxIds } from "./build"
 export type { CommentExtension, CommentInfo, Person } from "./comments"
 export type { AnchorInfo, AnchorPosition, DiagramIds, DrawingInfo, DrawingPlacement, VmlInfo, VmlKind, WrapType } from "./drawings"
+export { drawingAltText, vmlAltText } from "./drawings"
 export {
 	BreakClear,
 	BreakType,

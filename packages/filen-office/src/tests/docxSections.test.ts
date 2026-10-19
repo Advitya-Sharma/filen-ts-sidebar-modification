@@ -740,7 +740,9 @@ describe("docx sections: a tracked break read back", () => {
 })
 
 describe("docx sections: a recorded change takes back what it records", () => {
-	it("rejects a change Word recorded partly (margins alone): the page size, columns and grid stay", async () => {
+	// ECMA-376 Part 1 §17.13.5.32: w:sectPrChange holds "the complete set of section properties which were applied
+	// to the parent section before this revision"; what it lacks had its default.
+	it("rejects a change recorded with margins alone to that section whole: page size, columns and grid as defaults", async () => {
 		const file = join(CORPUS_DIR, "docx", "oxpt__RP027-Change-Section.docx")
 
 		if (!existsSync(file)) return
@@ -753,17 +755,15 @@ describe("docx sections: a recorded change takes back what it records", () => {
 		const xml = await read(await saved(opened), "word/document.xml")
 		const first = /<w:sectPr\b[^>]*>(?:(?!<\/w:sectPr>).)*<\/w:sectPr>/.exec(xml)?.[0] ?? ""
 
-		expect(first).toContain('<w:pgSz w:w="11906" w:h="16838"/>')
-		expect(first).toContain(
-			'<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+		expect(first).toBe(
+			'<w:sectPr w:rsidR="000F585A" w:rsidSect="005B7327"><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
 		)
-		expect(first).toContain('<w:cols w:space="720"/>')
-		expect(first).toContain('<w:docGrid w:linePitch="360"/>')
-		expect(first).not.toContain("sectPrChange")
 		editor.dispose()
 	})
 
-	it("records what a section lacked before as its default, so a reject after reopening gives the section back", async () => {
+	// ECMA-376 Part 1 §17.13.5.32: the recorded w:sectPr is the section's previous properties whole, so the
+	// line numbering it lacks (w:countBy has no "none" Word takes, MS-OI29500 Part 1 §17.6.8 c) was none.
+	it("records what a section lacked before, so a reject after reopening gives the section back, no line numbers included", async () => {
 		const bytes = buildDocx({ body: p("Alpha") + `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr>` })
 		const opened = await pagedEditor(bytes)
 		const { editor, context } = opened
@@ -776,17 +776,23 @@ describe("docx sections: a recorded change takes back what it records", () => {
 		expect(await run(editor, { type: "insert.sectionBreak", kind: "continuous" })).toBe(true)
 
 		const written = await saved(opened)
-		// The last section's record: the type, columns and line numbering it lacked, as their defaults.
+		// The last section's record: the type and columns it lacked, as their defaults. Line numbering has no form
+		// for "none" Word takes (w:countBy is 1 to 100, MS-OI29500 Part 1 §17.6.8 c): the record holds none.
 		const last = (await sections(written)).at(-1) ?? ""
 
 		expect(last).toMatch(
-			/<w:sectPrChange [^>]*><w:sectPr><w:type w:val="nextPage"\/><w:pgSz w:w="11906" w:h="16838"\/><w:pgMar [^>]*\/><w:lnNumType w:countBy="0"\/><w:cols w:space="720"\/><\/w:sectPr><\/w:sectPrChange>/
+			/<w:sectPrChange [^>]*><w:sectPr><w:type w:val="nextPage"\/><w:pgSz w:w="11906" w:h="16838"\/><w:pgMar [^>]*\/><w:cols w:space="720"\/><\/w:sectPr><\/w:sectPrChange>/
 		)
+		expect(last.slice(last.indexOf("<w:sectPrChange"))).not.toContain("w:lnNumType")
 
 		const again = await pagedEditor(written)
 
+		// The section the record holds comes back whole: the line numbering it lacks goes, as in the session.
 		expect(await run(again.editor, { type: "review.rejectAll" })).toBe(true)
 		expect(await sections(await saved(again))).toEqual([`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr>`])
+
+		expect(await run(editor, { type: "review.rejectAll" })).toBe(true)
+		expect(await sections(await saved(opened))).toEqual([`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr>`])
 		editor.dispose()
 		again.editor.dispose()
 	})
@@ -841,8 +847,9 @@ describe("docx sections: Delete before a section break", () => {
 	})
 })
 
-describe("docx sections: tracked edits folded into a section change the file recorded", () => {
-	it("records what they changed in that record, so a reject in the session and after a save agree", async () => {
+describe("docx sections: tracked edits on a section change the file recorded", () => {
+	// ECMA-376 Part 1 §17.13.5.32: the record is the section's properties before the earliest change, whole.
+	it("leave that record as it is, and a reject in the session and after a save give its section back", async () => {
 		const live = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="2000" w:header="720" w:footer="720" w:gutter="0"/>'
 		const bytes = buildDocx({
 			body:
@@ -866,9 +873,9 @@ describe("docx sections: tracked edits folded into a section change the file rec
 			if (reopen) {
 				const [recorded] = await sections(await saved(opened))
 
-				// One change, Bob's, now recording the page and columns before too.
-				expect(recorded).toMatch(
-					/<w:sectPrChange w:id="9" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:sectPr><w:pgSz w:w="11906" w:h="16838"\/><w:pgMar w:top="1440" [^>]*\/><w:cols w:space="720"\/><\/w:sectPr><\/w:sectPrChange>/
+				// One change, Bob's, recording what it did.
+				expect(recorded).toContain(
+					`<w:sectPrChange w:id="9" w:author="Bob" w:date="2026-01-01T00:00:00Z"><w:sectPr>${MARGINS}</w:sectPr></w:sectPrChange>`
 				)
 			}
 
@@ -878,7 +885,7 @@ describe("docx sections: tracked edits folded into a section change the file rec
 			if (reopen) target.editor.dispose()
 		}
 
-		expect(rejected[0]).toEqual([`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}</w:sectPr>`])
+		expect(rejected[0]).toEqual([`<w:sectPr>${MARGINS}</w:sectPr>`])
 		expect(rejected[1]).toEqual(rejected[0])
 	})
 
@@ -905,7 +912,30 @@ describe("docx sections: tracked edits folded into a section change the file rec
 		const back = await saved(third)
 
 		expect(await savedDigest(back)).toEqual(await savedDigest(bytes))
-		expect(await sections(back)).toEqual([`<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>${MARGINS}</w:sectPr>`])
+		expect(await sections(back)).toEqual([`<w:sectPr>${MARGINS}</w:sectPr>`])
 		for (const opened of [first, second, third]) opened.editor.dispose()
+	})
+	it("writes a source's line numbering of w:countBy 0 (none, as other writers write it) as none, in a record and a new section", async () => {
+		const bytes = buildDocx({
+			body: p("Alpha") + `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>${MARGINS}<w:lnNumType w:countBy="0"/></w:sectPr>`
+		})
+		const opened = await pagedEditor(bytes)
+		const { editor, context } = opened
+
+		context.identity.author = "Tester"
+		context.review.tracking = true
+		caret(editor, 2)
+		expect(await run(editor, { type: "page.setup", columns: { count: 2 } })).toBe(true)
+
+		const last = (await sections(await saved(opened))).at(-1) ?? ""
+
+		expect(last).toContain("<w:sectPrChange ")
+		expect(last.slice(last.indexOf("<w:sectPrChange"))).not.toContain("w:lnNumType")
+
+		// A section break made from it: no copy of the count either.
+		context.review.tracking = false
+		expect(await run(editor, { type: "insert.sectionBreak", kind: "continuous" })).toBe(true)
+		expect((await sections(await saved(opened))).join("")).not.toContain('w:countBy="0"')
+		editor.dispose()
 	})
 })

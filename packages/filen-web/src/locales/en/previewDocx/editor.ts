@@ -58,6 +58,10 @@ export const previewDocxEditor = {
 	previewDocxReplacedCount_one: "Replaced {{count}} match",
 	/** Docx editor — as previewDocxReplacedCount_one, for several */
 	previewDocxReplacedCount_other: "Replaced {{count}} matches",
+	/** Docx editor — toast when Replace all finds matches but every one is in locked content or deleted text */
+	previewDocxReplaceAllUnreplaceable: "None of these matches can be replaced: they are in locked content or deleted text.",
+	/** Docx editor — toast when Replace all finds too many matches in content controls to replace them at once */
+	previewDocxReplaceAllTooLarge: "Too many of these matches are in content controls to replace them all at once.",
 	/** Docx editor — context and touch menu: cut the selection */
 	previewDocxCut: "Cut",
 	/** Docx editor — context and touch menu: copy the selection */
@@ -116,6 +120,8 @@ export const previewDocxEditor = {
 	previewDocxSaveSearching: "Checking which changes can be saved…",
 	/** Docx editor — notice under the toolbar while autosave is held because the save check refused the document; {{shortcut}} is the save shortcut, e.g. ⌘S */
 	previewDocxAutosaveHeld: "Changes aren't being saved automatically: this document needs a save by you. Press {{shortcut}} to save.",
+	/** Docx editor — tooltip of the thin bar along the top of the pages while their layout is being redone */
+	previewDocxLayoutUpdating: "Laying out pages…",
 	/** Docx editor — action on the save-locked toast: copies the text the user had typed into those parts */
 	previewDocxSaveLockedCopy: "Copy my changes",
 	/** Docx editor — dialog title asking for the name comments and tracked changes are signed with */
@@ -131,5 +137,7 @@ export const previewDocxEditor = {
 	/** Docx editor — ⋯ menu switch: every field shows its code instead of its result (Word's Alt+F9) */
 	previewDocxShowFieldCodes: "Show field codes",
 	/** Docx editor — context menu item on a field: shows its code instead of its result, or back (Word's Shift+F9) */
-	previewDocxToggleFieldCode: "Toggle field code"
+	previewDocxToggleFieldCode: "Toggle field code",
+	/** Docx editor — screen reader description of the document's editing area: Tab works as in Word instead of moving focus, Escape leaves (from a header, footer or note it first goes back to the body text) */
+	previewDocxEditorKeys: "Tab inserts a tab or moves to the next table cell. Press Escape to leave the editor."
 } as const

@@ -81,11 +81,25 @@ export const FIXTURE_FILES = {
 		"w3-toc.docx",
 		"w3-tracked.docx"
 	],
-	"docx-pictures": ["w3-picture-large.png", "w3-picture.svg", "w3-picture.webp"]
+	"docx-pictures": ["w3-picture-large.png", "w3-picture.svg", "w3-picture.webp"],
+	// The editor's notes and a picture (handles), for the IME, accessibility and touch specs; DOCX editing only.
+	"docx-notes-picture": ["notes.docx", "described-picture.docx"],
+	// The viewer's subjects (helpers/docxFixtures.ts), in every build: name order is the overlay pager's.
+	"docx-viewer": [
+		"viewer-300p.docx",
+		"viewer-archive.7z",
+		"viewer-archive.zip",
+		"viewer-encrypted.docx",
+		"viewer-fonts.docx",
+		"viewer-legacy.docx",
+		"viewer-links.docx",
+		"viewer-malformed.docx",
+		"viewer-review.docx"
+	]
 } as const
 
 // Scenarios only a run with DOCX editing (VITE_DOCX_EDITING=1) builds and reads.
-const DOCX_SCENARIOS: ReadonlySet<string> = new Set(["docx-edit", "docx-pictures"])
+const DOCX_SCENARIOS: ReadonlySet<string> = new Set(["docx-edit", "docx-pictures", "docx-notes-picture"])
 
 // The scenarios this run's tree holds, in FIXTURE_FILES order: the DOCX editing ones only when the build has
 // DOCX editing (their specs skip otherwise).

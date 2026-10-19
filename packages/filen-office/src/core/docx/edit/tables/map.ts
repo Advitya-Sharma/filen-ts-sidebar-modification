@@ -339,13 +339,28 @@ export function sameRect(a: TableRect, b: TableRect): boolean {
 	return a.top === b.top && a.bottom === b.bottom && a.left === b.left && a.right === b.right
 }
 
+// A row's record in TableMap.pool: before, after, end, header (0/1), the cell count n, then n starts, n spans and
+// n offsets.
+const BEFORE = 0
+const AFTER = 1
+const END = 2
+const HEADER = 3
+const COUNT = 4
+const CELLS = 5
+// Rows kept as MapRow objects (row() gives them to callers; the table's rows stay in the pool).
+const VIEWS = 32
+
 export class TableMap {
 	readonly table: Node
 	private readonly part: StoryPart
 	private readonly store: PropsStore
-	// Rows read so far (a snapshot reads the selection's only).
-	private readonly rows = new Map<number, MapRow>()
-	private rowOffsets: number[] | undefined
+	// Rows read so far (a snapshot reads the selection's only), packed: per row the start of its record in
+	// `pool` (-1 before it is read). A long table's rows as objects and arrays would take several times this.
+	private records: Int32Array | undefined
+	private pool = new Int32Array(64)
+	private used = 0
+	private readonly views = new Map<number, MapRow>()
+	private rowOffsets: Int32Array | undefined
 
 	constructor(table: Node, part: StoryPart, store: PropsStore) {
 		this.table = table
@@ -365,54 +380,118 @@ export class TableMap {
 	get width(): number {
 		let width = this.grid.length
 
-		for (let r = 0; r < this.height; r++) width = Math.max(width, this.row(r).end + this.row(r).after)
+		for (let r = 0; r < this.height; r++) {
+			const at = this.record(r)
+
+			width = Math.max(width, (this.pool[at + END] ?? 0) + (this.pool[at + AFTER] ?? 0))
+		}
 
 		return width
 	}
 
-	private offsets(): number[] {
+	private offsets(): Int32Array {
 		if (this.rowOffsets === undefined) {
-			const out: number[] = []
+			const out = new Int32Array(this.height)
 
-			this.table.forEach((_row, offset) => out.push(offset))
+			this.table.forEach((_row, offset, index) => {
+				out[index] = offset
+			})
 			this.rowOffsets = out
 		}
 
 		return this.rowOffsets
 	}
 
-	row(r: number): MapRow {
-		let row = this.rows.get(r)
+	// Row `r`'s record in the pool, read now when it was not.
+	private record(r: number): number {
+		const records = (this.records ??= new Int32Array(this.height).fill(-1))
+		const found = records[r] ?? -1
 
-		if (row !== undefined) return row
+		if (found >= 0) return found
 
 		const node = this.table.child(r)
 		const grid = rowGrid(this.part, this.store, node)
-		const starts: number[] = []
-		const spans: number[] = []
-		const offsets: number[] = []
+		const count = node.childCount
+		const at = this.reserve(CELLS + count * 3)
+		const pool = this.pool
 		let column = grid.before
 
-		node.forEach((cell, offset) => {
+		pool[at + BEFORE] = grid.before
+		pool[at + AFTER] = grid.after
+		pool[at + HEADER] = grid.header ? 1 : 0
+		pool[at + COUNT] = count
+		node.forEach((cell, offset, index) => {
 			const span = Math.max(1, cell.attrs["colspan"] as number)
 
-			starts.push(column)
-			spans.push(span)
-			offsets.push(offset)
+			pool[at + CELLS + index] = column
+			pool[at + CELLS + count + index] = span
+			pool[at + CELLS + 2 * count + index] = offset
 			column += span
 		})
+		pool[at + END] = column
+		records[r] = at
+
+		return at
+	}
+
+	private reserve(size: number): number {
+		const at = this.used
+
+		if (at + size > this.pool.length) {
+			const grown = new Int32Array(Math.max(at + size, this.pool.length * 2))
+
+			grown.set(this.pool.subarray(0, at))
+			this.pool = grown
+		}
+
+		this.used = at + size
+
+		return at
+	}
+
+	// Cell counts and cells of row `r` without a MapRow (what the map's own walks read).
+	private count(r: number): number {
+		return this.pool[this.record(r) + COUNT] ?? 0
+	}
+
+	private start(r: number, index: number): number {
+		return this.pool[this.record(r) + CELLS + index] ?? 0
+	}
+
+	private span(r: number, index: number): number {
+		const at = this.record(r)
+
+		return this.pool[at + CELLS + (this.pool[at + COUNT] ?? 0) + index] ?? 1
+	}
+
+	row(r: number): MapRow {
+		let row = this.views.get(r)
+
+		if (row !== undefined) return row
+
+		const at = this.record(r)
+		const pool = this.pool
+		const count = pool[at + COUNT] ?? 0
+		const cells = at + CELLS
 
 		row = {
-			node,
-			before: grid.before,
-			after: grid.after,
-			header: grid.header,
-			starts,
-			spans,
-			offsets,
-			end: column
+			node: this.table.child(r),
+			before: pool[at + BEFORE] ?? 0,
+			after: pool[at + AFTER] ?? 0,
+			header: pool[at + HEADER] === 1,
+			starts: Array.from(pool.subarray(cells, cells + count)),
+			spans: Array.from(pool.subarray(cells + count, cells + 2 * count)),
+			offsets: Array.from(pool.subarray(cells + 2 * count, cells + 3 * count)),
+			end: pool[at + END] ?? 0
 		}
-		this.rows.set(r, row)
+
+		if (this.views.size >= VIEWS) {
+			const oldest = this.views.keys().next()
+
+			if (oldest.done !== true) this.views.delete(oldest.value)
+		}
+
+		this.views.set(r, row)
 
 		return row
 	}
@@ -423,7 +502,9 @@ export class TableMap {
 
 	// The position of cell `index` of row `r`, the table being at `tablePos` (reads every row once).
 	cellPos(tablePos: number, r: number, index: number): number {
-		return this.rowPos(tablePos, r) + 1 + (this.row(r).offsets[index] ?? 0)
+		const at = this.record(r)
+
+		return this.rowPos(tablePos, r) + 1 + (this.pool[at + CELLS + 2 * (this.pool[at + COUNT] ?? 0) + index] ?? 0)
 	}
 
 	rowPos(tablePos: number, r: number): number {
@@ -432,16 +513,18 @@ export class TableMap {
 
 	// The cell of row `r` covering grid column `column`, or -1.
 	cellAt(r: number, column: number): number {
-		const row = this.row(r)
+		const at = this.record(r)
+		const pool = this.pool
+		const count = pool[at + COUNT] ?? 0
 		let low = 0
-		let high = row.starts.length - 1
+		let high = count - 1
 
 		while (low <= high) {
 			const middle = (low + high) >> 1
-			const start = row.starts[middle] ?? 0
+			const start = pool[at + CELLS + middle] ?? 0
 
 			if (column < start) high = middle - 1
-			else if (column >= start + (row.spans[middle] ?? 1)) low = middle + 1
+			else if (column >= start + (pool[at + CELLS + count + middle] ?? 1)) low = middle + 1
 			else return middle
 		}
 
@@ -451,9 +534,8 @@ export class TableMap {
 	// The cell of row `r` starting at grid column `column` with span `span`, or -1.
 	cellExactly(r: number, column: number, span: number): number {
 		const index = this.cellAt(r, column)
-		const row = this.row(r)
 
-		return index >= 0 && row.starts[index] === column && row.spans[index] === span ? index : -1
+		return index >= 0 && this.start(r, index) === column && this.span(r, index) === span ? index : -1
 	}
 
 	vMerge(r: number, index: number): "restart" | "continue" | null {
@@ -465,17 +547,15 @@ export class TableMap {
 	continues(r: number, index: number): boolean {
 		if (r === 0 || this.vMerge(r, index) !== "continue") return false
 
-		const row = this.row(r)
-		const above = this.cellExactly(r - 1, row.starts[index] ?? 0, row.spans[index] ?? 1)
+		const above = this.cellExactly(r - 1, this.start(r, index), this.span(r, index))
 
 		return above >= 0 && this.vMerge(r - 1, above) !== null
 	}
 
 	// The rows [top, bottom) of the vertical merge holding cell `index` of row `r` (just its row when none).
 	chain(r: number, index: number): { top: number; bottom: number } {
-		const row = this.row(r)
-		const column = row.starts[index] ?? 0
-		const span = row.spans[index] ?? 1
+		const column = this.start(r, index)
+		const span = this.span(r, index)
 		let top = r
 		let at = index
 
@@ -505,11 +585,11 @@ export class TableMap {
 			const before = { top, bottom, left, right }
 
 			for (let r = top; r < bottom; r++) {
-				const row = this.row(r)
+				const count = this.count(r)
 
-				for (let index = 0; index < row.starts.length; index++) {
-					const start = row.starts[index] ?? 0
-					const end = start + (row.spans[index] ?? 1)
+				for (let index = 0; index < count; index++) {
+					const start = this.start(r, index)
+					const end = start + this.span(r, index)
 
 					if (end <= left || start >= right) continue
 
@@ -534,12 +614,12 @@ export class TableMap {
 		const out: { row: number; index: number }[] = []
 
 		for (let r = rect.top; r < rect.bottom; r++) {
-			const row = this.row(r)
+			const count = this.count(r)
 
-			for (let index = 0; index < row.starts.length; index++) {
-				const start = row.starts[index] ?? 0
+			for (let index = 0; index < count; index++) {
+				const start = this.start(r, index)
 
-				if (start >= rect.left && start + (row.spans[index] ?? 1) <= rect.right) out.push({ row: r, index })
+				if (start >= rect.left && start + this.span(r, index) <= rect.right) out.push({ row: r, index })
 			}
 		}
 

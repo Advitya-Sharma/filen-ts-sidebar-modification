@@ -23,6 +23,10 @@ function bound(context: DocumentCommandContext): DocumentCommandContext {
 }
 
 const writable = (context: DocumentCommandContext): boolean => !bound(context).editor.body.session.readOnly
+// Header and footer options act on the header or footer being edited: not where none is shown (Mobile view),
+// nor while the pages rest.
+const headerWritable = (context: DocumentCommandContext): boolean =>
+	writable(context) && context.editor.headersShown && !context.editor.suspended
 
 const document: DocumentHandlers = {
 	"insert.sectionBreak": {
@@ -47,11 +51,11 @@ const document: DocumentHandlers = {
 		run: context => editHeader(bound(context).editor, "footer")
 	},
 	"header.differentFirst": {
-		enabled: writable,
+		enabled: headerWritable,
 		run: context => toggleTitlePage(bound(context).editor)
 	},
 	"header.differentOddEven": {
-		enabled: writable,
+		enabled: headerWritable,
 		run: context => toggleEvenAndOdd(bound(context).editor)
 	},
 	"header.linkToPrevious": {

@@ -2,6 +2,7 @@ import type { MarkType, Node } from "prosemirror-model"
 import { TextSelection } from "prosemirror-state"
 import { NO_SOURCE, docxSchema, type DocxEditorSession } from "../edit/index"
 import { Item, RevisionView, type Story, type StoryPart } from "../model/index"
+import { shownFieldText } from "../layout/fields"
 import { Ns } from "../model/namespaces"
 import type { PagedEditor } from "./editor"
 
@@ -158,8 +159,9 @@ function countInline(counter: Counter, node: Node): void {
 
 			break
 		}
+		// What it shows: a MACROBUTTON without a result its display text.
 		case nodes.field:
-			counter.text(node.attrs["result"] as string)
+			counter.text(shownFieldText(node.attrs["result"] as string, node.attrs["instruction"] as string))
 
 			break
 		case nodes.run_object:

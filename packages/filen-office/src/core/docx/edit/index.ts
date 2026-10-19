@@ -52,7 +52,7 @@ export {
 	type DocxThemeColor,
 	type FormattingCommand
 } from "./commands/formatting"
-export type { InsertCommand } from "./commands/insert"
+export { linkTargetRefusal, type DocxLinkTargetRefusal, type InsertCommand } from "./commands/insert"
 export { MAX_LATEX, type MathCommand } from "./commands/math"
 export {
 	DOCX_NOTE_NUMBER_FORMATS,
@@ -151,6 +151,7 @@ export {
 	replaceAll,
 	replaceMatches,
 	selectMatch,
+	type ReplaceAllResult,
 	type StoryFindOptions,
 	type StoryMatch
 } from "./find"
@@ -173,7 +174,7 @@ export {
 	type ListAttrs,
 	type ListNormalizer
 } from "./invariants/index"
-export { conservativeProof, lockBlocks, proveBlocks, type BlockProof, type LockRequest } from "./proof"
+export { conservativeProof, lockBlocks, proveBlocks, proveBlocksSteps, type BlockProof, type LockRequest } from "./proof"
 export {
 	BLOCK_NODE_MARKS,
 	FORMATTING_MARKS,
@@ -214,6 +215,7 @@ export {
 } from "./unsavable"
 export { ReviewIndex, ReviewKind, revisionMarkId, type ReviewEntry } from "../review/index"
 export {
+	prepareStoryReviewIndex,
 	resolveChanges,
 	reviewIndexWanted,
 	storyReviewIndex,

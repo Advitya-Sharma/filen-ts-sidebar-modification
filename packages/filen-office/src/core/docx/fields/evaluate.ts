@@ -214,6 +214,18 @@ function numberFormatOf(code: FieldCode): string | undefined {
 	return format
 }
 
+// The most decimal places Number.prototype.toFixed accepts.
+const MAX_FIXED_DIGITS = 100
+
+// Digits with a comma before every group of three from the right.
+function groupThousands(digits: string): string {
+	let out = digits.slice(0, digits.length % 3 || 3)
+
+	for (let at = out.length; at < digits.length; at += 3) out += `,${digits.slice(at, at + 3)}`
+
+	return out
+}
+
 // A number under a \# numeric picture (§17.16.4.2, as Microsoft's "Format field results" describes it): 0 a
 // digit (zero when none), # a digit (a space when none), x a digit that drops the digits to its left (rounding
 // to its right), "." the decimal point, "," digit grouping, "-" a minus for a negative number (else a space),
@@ -264,7 +276,9 @@ export function numericPicture(value: number, picture: string): string {
 		if (isCode(at, ",")) grouping = true
 	}
 
-	const [whole = "0", fraction = ""] = magnitude.toFixed(decimals).split(".")
+	const [whole = "0", fixed = ""] = magnitude.toFixed(Math.min(decimals, MAX_FIXED_DIGITS)).split(".")
+	// Places past what toFixed gives are zeros at any double's precision.
+	const fraction = decimals > MAX_FIXED_DIGITS && fixed !== "" ? fixed.padEnd(decimals, "0") : fixed
 	let digits = whole.replace(/^0+(?=\d)/, "")
 
 	if (digits === "0" && zeros === 0 && decimals > 0) digits = ""
@@ -273,7 +287,7 @@ export function numericPicture(value: number, picture: string): string {
 
 	// An x keeps itself and the places after it.
 	if (truncate > 0) digits = digits.slice(Math.max(0, digits.length - (places - truncate + 1)))
-	if (grouping) digits = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+	if (grouping) digits = digits.replace(/\d+/g, groupThousands)
 
 	// Places no digit fills show as spaces.
 	const integer = " ".repeat(Math.max(0, places - digits.replace(/,/g, "").length)) + digits
@@ -682,6 +696,18 @@ function nestingFields(part: StoryPart): ReadonlySet<number> {
 // rewrite may drop.
 export function rewritableSource(part: StoryPart, node: Node): SourceField | undefined {
 	return rewritableSourceAt(part, node.attrs["src"] as number, node.attrs["end"] as number)
+}
+
+// Whether source w:fldSimple `first` holds only what a result written anew carries (RESULT_KINDS) and no field
+// of its own, whatever its lock: it can be written as the complex field it stands for (a tracked change holds
+// runs only). One that cannot stays out of tracked changes (review/track.ts).
+export function simpleFieldRewritable(part: StoryPart, first: number): boolean {
+	if (first < 0 || first >= part.count || part.kinds[first] !== Item.FieldSimple) return false
+	if (nestingFields(part).has(part.aux[first] ?? -1)) return false
+
+	for (let item = first + 1; item < part.end(first); item++) if (!RESULT_KINDS.has(part.kinds[item] ?? 0)) return false
+
+	return true
 }
 
 // The same for the source field of items `first` to `last`.

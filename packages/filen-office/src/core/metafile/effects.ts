@@ -1,4 +1,4 @@
-import { unzlibSync } from "fflate"
+import { Unzlib } from "fflate"
 import type { DrawingImage, DrawingText, GradientStops, Paint, Rgba, TextRun } from "../drawingml/displayList"
 import { decodeDib, encodePng, parseDib, type PixelBudget } from "./dib"
 import { Bytes } from "./bytes"
@@ -163,6 +163,9 @@ export function effectImage(image: DrawingImage, picture: DrawingImage, budget: 
 	}
 }
 
+// Compressed bytes per inflate step (at most ~1032 times as much output).
+const INFLATE_STEP = 8 * 1024
+
 function paeth(a: number, b: number, c: number): number {
 	const p = a + b - c
 	const pa = Math.abs(p - a)
@@ -210,10 +213,19 @@ function decodePng(bytes: Uint8Array): { rgba: Uint8Array; width: number; height
 	}
 
 	const stride = width * channels
-	let raw: Uint8Array
+	const raw = new Uint8Array((stride + 1) * height)
+	let written = 0
+	// fflate inflates all it is given before handing anything over, so the data goes in small steps and stops
+	// once the declared rows are filled, however far the rest would expand.
+	const unzlib = new Unzlib(chunk => {
+		raw.set(chunk.subarray(0, raw.length - written), written)
+		written += Math.min(chunk.length, raw.length - written)
+	})
 
 	try {
-		raw = unzlibSync(joined, { out: new Uint8Array((stride + 1) * height) })
+		for (let at = 0; at < joined.length && written < raw.length; at += INFLATE_STEP) {
+			unzlib.push(joined.subarray(at, at + INFLATE_STEP), at + INFLATE_STEP >= joined.length)
+		}
 	} catch {
 		return undefined
 	}

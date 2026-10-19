@@ -176,6 +176,53 @@ async function closeDocumentDiscarding(page: Page): Promise<void> {
 	await expect(page.getByRole("toolbar", { name: preview.previewDocxEditToolbar })).toHaveCount(0)
 }
 
+test("keyboard: Tab moves through a table's cells and adds a row from the last, and changes a list's level", async ({ page }) => {
+	await withScratchDirectory(page, "docx-editing-tab", async ({ listbox, runId }) => {
+		const names = await upload(page, listbox, runId, ["w3-tables.docx"])
+		const x = async (text: string): Promise<number> => (await pageText(page, text).boundingBox())?.x ?? Number.NaN
+
+		await openDocument(page, listbox, names["w3-tables.docx"] ?? "", DOCX_FIXTURE_TEXT["w3-tables.docx"])
+
+		// The editing area says how Tab works there and how to leave it.
+		const textbox = page.locator(".fo-docx-sink [role='textbox']").first()
+
+		await expect(textbox).toHaveAccessibleDescription(preview.previewDocxEditorKeys)
+
+		// Tab selects the next cell's content (typing replaces it), Shift+Tab the previous one's; focus stays.
+		await pageText(page, "A1").click()
+		await page.keyboard.press("Tab")
+		await page.keyboard.type("x")
+		await expect(pageText(page, "x")).toBeVisible()
+		await expect(pageText(page, "B1")).toHaveCount(0)
+		await page.keyboard.press("Shift+Tab")
+		await page.keyboard.type("y")
+		await expect(pageText(page, "y")).toBeVisible()
+		await expect(pageText(page, "A1")).toHaveCount(0)
+
+		// From the last cell, a new row.
+		await pageText(page, "C2").click()
+		await page.keyboard.press("Tab")
+		await page.keyboard.type("new")
+		await expect(pageText(page, "new")).toBeVisible()
+		expect((await pageText(page, "new").boundingBox())?.y ?? 0).toBeGreaterThan((await pageText(page, "A2").boundingBox())?.y ?? 0)
+
+		// A bulleted paragraph: Tab at its start takes it a level down, Shift+Tab back.
+		await pageText(page, "After the table.").click()
+		await page.getByRole("button", { name: preview.previewDocxBulletList, exact: true }).click()
+		await page.keyboard.press("Home")
+
+		const level0 = await x("After the table.")
+
+		await page.keyboard.press("Tab")
+		await expect.poll(() => x("After the table.")).toBeGreaterThan(level0 + 10)
+		await page.keyboard.press("Shift+Tab")
+		await expect.poll(() => x("After the table.")).toBe(level0)
+
+		// Escape leaves the editor (the host asks about the changes).
+		await closeDocumentDiscarding(page)
+	})
+})
+
 // The toolbar at a phone's width in page view: its groups fit the row (what does not leaves for the menus), and
 // the ⋯ menu is in it and stays open once pressed.
 async function expectToolbarFits(page: Page): Promise<void> {
@@ -346,8 +393,11 @@ test("forms: a checkbox ticked, a dropdown item and a date chosen where the cont
 		await expect(page.getByRole("toolbar", { name: preview.previewDocxEditToolbar })).toBeVisible()
 
 		await clickEnd(lineWith(page, "Date: 1/1/2026"))
-		await page.getByLabel(preview.previewDocxControlDateLabel).fill("2026-10-13")
-		await page.getByRole("button", { name: preview.previewDocxControlDateSet }).click()
+		// The popover itself is named "Pick a date" (or the control's title): the field by its exact label in it.
+		const datePopover = page.locator("[data-docx-control-popover]")
+
+		await datePopover.getByLabel(preview.previewDocxControlDateLabel, { exact: true }).fill("2026-10-13")
+		await datePopover.getByRole("button", { name: preview.previewDocxControlDateSet }).click()
 		await expect(lineWith(page, "Date:")).toContainText("10/13/2026")
 
 		// Saved, the controls keep what was chosen.

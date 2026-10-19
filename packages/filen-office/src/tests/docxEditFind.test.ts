@@ -1,6 +1,8 @@
-import { TextSelection } from "prosemirror-state"
+import type { Node } from "prosemirror-model"
+import { TextSelection, type Transaction } from "prosemirror-state"
 import { describe, expect, it } from "vitest"
 import {
+	DocxEditorSession,
 	STORY_FIND_LIMIT,
 	findInStory,
 	findPattern,
@@ -9,8 +11,35 @@ import {
 	replaceMatches,
 	selectMatch
 } from "@filen/office/core/docx/edit"
-import { nodeText, sessionOf } from "./docxEditFixtures"
+import { nodeText, openSpec, sessionOf } from "./docxEditFixtures"
 import { p } from "./docxSynthetic"
+
+const LOCKED = (value: string): string =>
+	`<w:p><w:sdt><w:sdtPr><w:id w:val="7"/><w:lock w:val="sdtContentLocked"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>${value}</w:t></w:r></w:sdtContent></w:sdt><w:r><w:t xml:space="preserve"> and of</w:t></w:r></w:p>`
+const cell = (text: string): string => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p(text)}</w:tc>`
+const TABLE = (rows: number): string =>
+	`<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>${Array.from({ length: rows }, (_, k) => `<w:tr>${cell(`row ${String(k)} of`)}${cell("none")}</w:tr>`).join("")}</w:tbl>`
+const run = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`
+
+// The text of `doc` carrying a mark of `type`, in document order.
+function textWith(doc: Node, type: string): string {
+	let out = ""
+
+	doc.descendants(node => {
+		if (node.isText && node.marks.some(mark => mark.type.name === type)) out += node.text ?? ""
+
+		return true
+	})
+
+	return out
+}
+
+// Replace All's transaction and count; the test fails when it replaced nothing.
+function replacing(result: ReturnType<typeof replaceAll>): { readonly tr: Transaction; readonly count: number } {
+	if (result === null || !("tr" in result)) throw new Error(`nothing replaced: ${JSON.stringify(result)}`)
+
+	return result
+}
 
 const BOLD_RUN = '<w:p><w:r><w:t xml:space="preserve">plain </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r></w:p>'
 
@@ -145,12 +174,10 @@ describe("replaceAll", () => {
 
 		expect(findInStory(session.state.doc, "ab")).toHaveLength(STORY_FIND_LIMIT)
 
-		const result = replaceAll(session.state, "ab", "xyz")
-
-		if (result === null) throw new Error("nothing replaced")
+		const result = replacing(replaceAll(session.state, "ab", "xyz"))
 
 		expect(result.count).toBe(12_000)
-		expect(result.tr.steps).toHaveLength(2)
+		expect(result.tr.steps).toHaveLength(1)
 		expect(session.dispatch(result.tr)).toBe(true)
 		expect(findInStory(session.state.doc, "ab")).toHaveLength(0)
 		expect(findInStory(session.state.doc, "xyz", {}, Number.POSITIVE_INFINITY)).toHaveLength(12_000)
@@ -161,9 +188,7 @@ describe("replaceAll", () => {
 
 	it("keeps each match's formatting, deletes with an empty replacement, and is null without a match", async () => {
 		const session = await sessionOf({ body: BOLD_RUN + p("cat cat") })
-		const bold = replaceAll(session.state, "Bold", "Strong")
-
-		if (bold === null) throw new Error("no replacement")
+		const bold = replacing(replaceAll(session.state, "Bold", "Strong"))
 
 		session.dispatch(bold.tr)
 
@@ -174,15 +199,128 @@ describe("replaceAll", () => {
 		session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, match.from, match.to)))
 		expect(session.snapshot().formats.bold).toBe("on")
 
-		const cats = replaceAll(session.state, "CAT", "")
-
-		if (cats === null) throw new Error("nothing deleted")
+		const cats = replacing(replaceAll(session.state, "CAT", ""))
 
 		expect(cats.count).toBe(2)
 		session.dispatch(cats.tr)
 		expect(nodeText(session.state.doc.child(1))).toBe(" ")
 		expect(replaceAll(session.state, "dog", "x")).toBeNull()
 		expect(replaceAll(session.state, "CAT", "x", { caseSensitive: true })).toBeNull()
+	})
+})
+
+describe("replaceAll over many blocks", () => {
+	it("replaces matches in thousands of blocks in few steps, undone to the same blocks", async () => {
+		const body = Array.from({ length: 3000 }, (_, k) => p(k % 3 === 0 ? `part ${String(k)} of it` : "plain")).join("") + TABLE(2000)
+		const session = await sessionOf({ body })
+		const before = session.state.doc
+		const result = replacing(replaceAll(session.state, "of", "OF", { caseSensitive: true }))
+
+		expect(result.count).toBe(3000)
+		// One over the paragraphs, one inside the long table (a step per paragraph would copy the 3,001 blocks
+		// around each of its 3,000 paragraphs).
+		expect(result.tr.steps).toHaveLength(2)
+		expect(session.dispatch(result.tr)).toBe(true)
+		expect(findInStory(session.state.doc, "of", { caseSensitive: true }, Number.POSITIVE_INFINITY)).toHaveLength(0)
+		expect(findInStory(session.state.doc, "OF", { caseSensitive: true }, Number.POSITIVE_INFINITY)).toHaveLength(3000)
+		expect(session.state.doc.child(1)).toBe(before.child(1))
+		expect(session.execute({ type: "history.undo" })).toBe(true)
+		expect(session.state.doc.eq(before)).toBe(true)
+
+		// The same blocks come back: the paragraphs, and the long table's rows (the table around them is a copy).
+		let same = 0
+
+		before.forEach((child, _, index) => {
+			const now = session.state.doc.child(index)
+
+			if (child.type.name === "table") child.forEach((row, __, at) => (same += now.child(at) === row ? 1 : 0))
+			else if (now === child) same++
+		})
+
+		expect(same).toBe(before.childCount - 1 + 2000)
+	})
+
+	it("replaces around a locked control, leaving its content, in one rebuild undone to the same blocks", async () => {
+		const session = await sessionOf({ body: p("one of") + LOCKED("of") + p("two of") })
+		const before = session.state.doc
+		const result = replacing(replaceAll(session.state, "of", "OF", { caseSensitive: true }))
+
+		expect(result.count).toBe(3)
+		expect(result.tr.steps).toHaveLength(1)
+		expect(session.dispatch(result.tr)).toBe(true)
+		expect(session.state.doc.textContent).toBe("one OFof and OFtwo OF")
+		expect(session.execute({ type: "history.undo" })).toBe(true)
+		expect([0, 1, 2].map(k => session.state.doc.child(k) === before.child(k))).toEqual([true, true, true])
+	})
+
+	it("leaves the text after a run-level control outside it when a match ending the control is deleted", async () => {
+		const plain = `<w:p>${run("before ")}<w:sdt><w:sdtPr><w:id w:val="9"/><w:text/></w:sdtPr><w:sdtContent>${run("plain foo")}</w:sdtContent></w:sdt>${run(" after foo")}</w:p>`
+		const session = await sessionOf({ body: plain })
+
+		expect(session.dispatch(replacing(replaceAll(session.state, "foo", "")).tr)).toBe(true)
+		expect(session.state.doc.textContent).toBe("before plain  after ")
+		expect(textWith(session.state.doc, "content_control")).toBe("plain ")
+	})
+
+	it("records only the matches as changed when tracked", async () => {
+		const opened = await openSpec({ body: `<w:p>${run("foo one foo")}</w:p>` })
+
+		opened.context.identity.author = "Ann"
+		opened.context.review.tracking = true
+
+		const session = new DocxEditorSession(opened.context)
+
+		expect(session.dispatch(replacing(replaceAll(session.state, "foo", "BAR")).tr)).toBe(true)
+		expect(textWith(session.state.doc, "deletion")).toBe("foofoo")
+		expect(textWith(session.state.doc, "insertion")).toBe("BARBAR")
+	})
+
+	it("makes text replaced inside another author's insertion plain, whatever else the edit holds", async () => {
+		const inserted = `<w:p><w:ins w:id="20" w:author="Bob" w:date="2025-01-01T00:00:00Z">${run("inserted foo")}</w:ins>${run(" end")}</w:p>`
+		const plain = `<w:p><w:sdt><w:sdtPr><w:id w:val="9"/><w:text/></w:sdtPr><w:sdtContent>${run("plain foo")}</w:sdtContent></w:sdt></w:p>`
+
+		for (const body of [inserted, inserted + plain]) {
+			const session = await sessionOf({ body })
+			// The control's own text changes too, which the forms rules finish as a command of theirs.
+			const tr = replaceMatches(session.state, findInStory(session.state.doc, "o"), "o", "oo")
+
+			if (tr === null) throw new Error("nothing replaced")
+
+			expect(session.dispatch(tr)).toBe(true)
+			expect(textWith(session.state.doc, "insertion")).toBe("inserted f")
+		}
+	})
+
+	it("leaves matches in deleted text as they are and replaces the others", async () => {
+		const deleted =
+			'<w:p><w:r><w:t xml:space="preserve">one of </w:t></w:r><w:del w:id="1" w:author="Ann" w:date="2020-01-01T00:00:00Z"><w:r><w:delText>of</w:delText></w:r></w:del></w:p>'
+		const session = await sessionOf({ body: p("two of") + deleted })
+		const result = replacing(replaceAll(session.state, "of", "OF", { caseSensitive: true }))
+
+		expect(result.count).toBe(2)
+		expect(session.dispatch(result.tr)).toBe(true)
+		expect(session.state.doc.textContent).toBe("two OFone OF of")
+	})
+
+	it("tracks a Replace All over thousands of paragraphs, also ones holding tracked changes, in few steps", async () => {
+		const reviewed = (k: number): string =>
+			`<w:p>${run(`line ${String(k)} of `)}<w:ins w:id="${String(k + 10)}" w:author="Bob" w:date="2025-01-01T00:00:00Z">${run("x")}</w:ins></w:p>`
+		const opened = await openSpec({ body: Array.from({ length: 5000 }, (_, k) => reviewed(k)).join("") })
+
+		opened.context.identity.author = "Ann"
+		opened.context.review.tracking = true
+
+		const session = new DocxEditorSession(opened.context)
+		const before = session.state.doc
+		const result = replacing(replaceAll(session.state, "of", "OF", { caseSensitive: true }))
+
+		expect(result.count).toBe(5000)
+		expect(result.tr.steps.length).toBeLessThan(10)
+		expect(session.dispatch(result.tr)).toBe(true)
+		expect(textWith(session.state.doc, "deletion")).toBe("of".repeat(5000))
+		expect(textWith(session.state.doc, "insertion")).toBe("OFx".repeat(5000))
+		expect(session.execute({ type: "history.undo" })).toBe(true)
+		expect(session.state.doc.eq(before)).toBe(true)
 	})
 })
 

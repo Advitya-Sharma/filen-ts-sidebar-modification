@@ -2,6 +2,7 @@ import type { Mark, MarkType, Node } from "prosemirror-model"
 import { EditorState, TextSelection, type Transaction } from "prosemirror-state"
 import { closeHistory, history, isHistoryTransaction, redo, redoDepth, undo, undoDepth } from "prosemirror-history"
 import { Item, type Story } from "../model/index"
+import { commentParaIds } from "../review/comments"
 import { ReviewIndex } from "../review/index"
 import { refusedForAuthor, refusedUnsupported } from "../review/track"
 import { DocxDocBuilder, type StoryDoc } from "./build"
@@ -16,7 +17,7 @@ import {
 	type DocxParagraphStyle,
 	DOCX_EDITOR_COMMANDS
 } from "./commands"
-import { BASE_COMMANDS } from "./commands/base"
+import { BASE_COMMANDS, writesUnholdableText } from "./commands/base"
 import type { DocxEditContext } from "./context"
 import {
 	FormatResolver,
@@ -390,7 +391,8 @@ export class DocxEditorSession {
 					copies: sourceCopies(context),
 					notes: this.story.story.kind === "body",
 					...(options.normalizeList !== undefined ? { normalizeList: options.normalizeList } : {})
-				})
+				}),
+				...(story.kind === "comment" ? [commentParaIds(context, this.story.part)] : [])
 			]
 		})
 
@@ -689,6 +691,7 @@ export class DocxEditorSession {
 	// paged editor, except undo and redo, which here undo this story's own edits.
 	execute(command: DocxEditorCommand): boolean {
 		if (this.disposed || (isWriteCommand(command.type) && (this.readOnly || !commandAllowed(this, command.type)))) return false
+		if (writesUnholdableText(command)) return false
 
 		const tr = this.transactionFor(command)
 

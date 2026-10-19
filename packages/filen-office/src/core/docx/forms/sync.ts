@@ -213,10 +213,23 @@ function mirror(target: DocxEditorSession, values: ReadonlyMap<string, string>):
 
 	if (changes.length === 0) return
 
+	// A control one written holds goes with that one's content (one span under two control marks included), as in
+	// the session's own invariant; the rest change from the end.
+	changes.sort((a, b) => a.around.from - b.around.from || b.around.to - a.around.to)
+
+	const written: ControlAround[] = []
+	const kept: typeof changes = []
+
+	for (const change of changes) {
+		if (written.some(other => other.from <= change.around.from && other.to >= change.around.to)) continue
+
+		written.push(change.around)
+		kept.push(change)
+	}
+
 	const tr = state.tr
 
-	for (const { around, value } of changes.sort((a, b) => b.around.from - a.around.from))
-		showValue(tr, target.context, part, around, value)
+	for (const { around, value } of kept.reverse()) showValue(tr, target.context, part, around, value)
 
 	if (!tr.docChanged) return
 

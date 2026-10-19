@@ -1362,7 +1362,15 @@ export function parseSectionProps(r: PropsReader, node: number): SectionProps {
 	return out
 }
 
-const CHANGE_ELEMENTS = new Set(["rPrChange", "pPrChange", "tblPrChange", "tblPrExChange", "trPrChange", "tcPrChange", "sectPrChange"])
+export const CHANGE_ELEMENTS: ReadonlySet<string> = new Set([
+	"rPrChange",
+	"pPrChange",
+	"tblPrChange",
+	"tblPrExChange",
+	"trPrChange",
+	"tcPrChange",
+	"sectPrChange"
+])
 
 // The tracked-change element (w:rPrChange...) inside a property container, for the writer; -1 if none.
 export function propertyChangeNode(r: PropsReader, node: number): number {

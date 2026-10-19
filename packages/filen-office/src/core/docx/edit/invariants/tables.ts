@@ -1,12 +1,13 @@
-import type { Node, Slice } from "prosemirror-model"
+import type { Mark, Node, NodeType, Slice } from "prosemirror-model"
 import { isHistoryTransaction } from "prosemirror-history"
 import type { EditorState, Transaction } from "prosemirror-state"
 import { AttrStep, ReplaceAroundStep, ReplaceStep } from "prosemirror-transform"
 import { RevisionFlag } from "../../model/index"
 import { SetAttrsStep } from "../attrs"
-import { NO_SOURCE, docxSchema } from "../schema"
+import { NO_SOURCE, docxSchema, tableEdge } from "../schema"
 import { cellOverrides, rowOverrides } from "../tables/map"
-import { changedRanges, isCommand, isInternal, markInternal } from "./core"
+import { planOf, type RevisionStamp } from "../../review/track"
+import { changedRanges, isCommand, isInternal, markInternal, orderedResolve, positionBefore, replacesOf } from "./core"
 import type { InvariantStage } from "./index"
 
 // Tables keep a grid every row fits and their vertical merges whole: spans, merges and grid widths change
@@ -18,6 +19,7 @@ import type { InvariantStage } from "./index"
 // merges start where its copy starts.
 
 const nodes = docxSchema.nodes
+const marks = docxSchema.marks
 const STRUCTURE = ["colspan", "vMerge", "grid"]
 const containers = new Set([nodes.table, nodes.table_cell])
 
@@ -35,44 +37,57 @@ function merged(row: Node | null | undefined, which: "any" | "continue"): boolea
 	return found
 }
 
-// Whether a row or cell (`node`, at `pos` of `doc`) whose start or end token an edit takes out belongs to a
-// table that stays and sits where a merge runs: in its row (or the row itself), or continuing below it.
-function breaksMerge(doc: Node, node: Node, pos: number, from: number, to: number): boolean {
-	const $node = doc.resolve(pos)
-	let depth = $node.depth
+// Whether a row whose start or end token an edit taking out [from, to) takes, or that holds such a cell, belongs
+// to a table that stays (`table` at `tablePos`) and sits where a merge runs: in the row, or continuing below it.
+function breaksMerge(table: Node, tablePos: number, row: Node, rowIndex: number, from: number, to: number): boolean {
+	if (tablePos >= from && tablePos + table.nodeSize <= to) return false
 
-	while (depth > 0 && $node.node(depth).type !== nodes.table) depth--
-
-	const table = $node.node(depth)
-	const tablePos = depth > 0 ? $node.before(depth) : -1
-
-	if (tablePos < 0 || (tablePos >= from && tablePos + table.nodeSize <= to)) return false
-
-	const row = node.type === nodes.table_row ? node : $node.parent
-	const rowEnd = node.type === nodes.table_row ? pos + node.nodeSize : $node.after()
-
-	return merged(row, "any") || merged(doc.nodeAt(rowEnd), "continue")
+	return merged(row, "any") || merged(table.maybeChild(rowIndex + 1), "continue")
 }
 
 // Rows or cells of a table that stays taken out of [from, to) of `doc`, or joined with a neighbour (a start or
-// end token in the range), where a merge runs.
+// end token in the range), where a merge runs. The walk keeps the tables and rows around what it visits, so no
+// position is resolved (a step over many rows of a long table stays linear).
 function removesMergedRows(doc: Node, from: number, to: number): boolean {
-	// Inside one paragraph (a key deleting text): no row or cell (the step resolved both ends already).
-	const $from = doc.resolve(from)
+	// Inside one paragraph (a key deleting text, a match Replace All replaces): no row or cell.
+	const start = orderedResolve(doc, from)
+	const end = orderedResolve(doc, to)
 
-	if ($from.parent.inlineContent && $from.sameParent(doc.resolve(to))) return false
+	if (start.$pos.parent.inlineContent && start.start + start.$pos.start() === end.start + end.$pos.start()) return false
 
 	let found = false
+	const tables = new Map<Node, number>()
+	const rows = new Map<Node, { readonly table: Node; readonly index: number }>()
 
-	doc.nodesBetween(from, to, (node, pos) => {
+	doc.nodesBetween(from, to, (node, pos, parent, index) => {
 		if (found) return false
+
+		if (node.type === nodes.table) {
+			// A table taken out whole (Replace All rebuilding it) breaks none of its merges.
+			if (pos >= from && pos + node.nodeSize <= to) return false
+
+			tables.set(node, pos)
+
+			return true
+		}
+
 		if (node.type !== nodes.table_row && node.type !== nodes.table_cell) return !node.isInline
 
 		const end = pos + node.nodeSize
 		const opens = pos >= from && pos < to
 		const closes = end - 1 >= from && end - 1 < to
+		const row = node.type === nodes.table_row ? { table: parent, index } : parent === null ? undefined : rows.get(parent)
 
-		if ((opens || closes) && breaksMerge(doc, node, pos, from, to)) found = true
+		if (node.type === nodes.table_row && parent !== null) rows.set(node, { table: parent, index })
+
+		if (opens || closes) {
+			const table = row?.table ?? null
+			const tablePos = table === null ? undefined : tables.get(table)
+			const rowNode = node.type === nodes.table_row ? node : parent
+
+			if (table !== null && tablePos !== undefined && rowNode !== null && row !== undefined)
+				found = breaksMerge(table, tablePos, rowNode, row.index, from, to)
+		}
 
 		return !found && !(opens && closes)
 	})
@@ -145,8 +160,10 @@ function violation(tr: Transaction): string | undefined {
 		}
 
 		if (step instanceof ReplaceStep) {
-			if (step.to > step.from && removesMergedRows(doc, step.from, step.to)) return "tableStructure"
-			if (step.slice.size > 0 && insertsMergedRows(step.slice, doc, step.to)) return "tableStructure"
+			for (const replace of replacesOf(step)) {
+				if (replace.to > replace.from && removesMergedRows(doc, replace.from, replace.to)) return "tableStructure"
+				if (replace.slice.size > 0 && insertsMergedRows(replace.slice, doc, replace.to)) return "tableStructure"
+			}
 
 			continue
 		}
@@ -184,13 +201,23 @@ const TRACKED: readonly [number, "ins" | "del"][] = [
 // another: new rows have no grid columns before their cells) that continue under no merge: such a cell starts
 // the merge when the cell below continues it, and is no merge when nothing does.
 function healMerges(table: Node, tablePos: number, fixes: { pos: number; vMerge: string | null }[]): void {
-	const rows: { start: number; span: number; vMerge: string | null; pos: number }[][] = []
+	const rows: {
+		start: number
+		span: number
+		vMerge: string | null
+		pos: number
+	}[][] = []
 	const fresh: boolean[] = []
 
 	table.forEach((row, rowOffset) => {
 		fresh.push((row.attrs["src"] as number) === NO_SOURCE)
 
-		const cells: { start: number; span: number; vMerge: string | null; pos: number }[] = []
+		const cells: {
+			start: number
+			span: number
+			vMerge: string | null
+			pos: number
+		}[] = []
 		let column = 0
 
 		row.forEach((cell, cellOffset) => {
@@ -249,9 +276,115 @@ function withinTextblocks(tr: Transaction): boolean {
 	})
 }
 
+// A row or cell the end of a step's deletion lay in, which ProseMirror's fitting opens again from its type and
+// attributes alone (Fitter.openFrontierNode): its node marks (properties commands set, tracked-change stamps)
+// are left behind. Where it is in the state's document (inside it), and what it had.
+interface Reopened {
+	pos: number
+	readonly type: NodeType
+	readonly attrs: Node["attrs"]
+	readonly marks: readonly Mark[]
+}
+
+function reopened(tr: Transaction, out: Reopened[]): void {
+	tr.steps.forEach((step, index) => {
+		const doc = tr.docs[index]
+
+		if (!(step instanceof ReplaceStep) || step.to <= step.from || doc === undefined) return
+
+		const $to = doc.resolve(step.to)
+
+		for (let depth = 1; depth <= $to.depth; depth++) {
+			const node = $to.node(depth)
+
+			// Only one the step opened (it starts inside what the step replaces).
+			if (
+				(node.type !== nodes.table_row && node.type !== nodes.table_cell) ||
+				node.marks.length === 0 ||
+				$to.before(depth) < step.from
+			)
+				continue
+
+			out.push({
+				pos: tr.mapping.slice(index).map(step.to, 1),
+				type: node.type,
+				attrs: node.attrs,
+				marks: node.marks
+			})
+		}
+	})
+}
+
+// Junctions of tables side by side in `node`'s blocks (content from `start`) within [from, to], into `out`.
+function sideBySide(node: Node, start: number, from: number, to: number, out: number[]): void {
+	let previous: Node | null = null
+
+	node.forEach((child, offset) => {
+		const at = start + offset
+
+		if (previous !== null && at >= from && at <= to && tableEdge(previous, true) && tableEdge(child, false)) out.push(at)
+		if (!child.isTextblock && !child.isLeaf && at <= to && at + child.nodeSize >= from) sideBySide(child, at + 1, from, to, out)
+
+		previous = child
+	})
+}
+
+function sideBySideAt(doc: Node, pos: number): boolean {
+	const $pos = doc.resolve(pos)
+
+	return !$pos.parent.isTextblock && tableEdge($pos.nodeBefore, true) && tableEdge($pos.nodeAfter, false)
+}
+
+// Where a host's edit put tables side by side that were not (the paragraph between two deleted, a table pasted or
+// dropped right after another), in `tr`'s document: Word and LibreOffice show such tables as one table, so a
+// paragraph goes back between them.
+function joinedTables(tr: Transaction): number[] {
+	// Attributes and marks put no blocks side by side; the span every other step changed is walked once.
+	const ranges = changedRanges(tr, false, NO_ATTRS)
+	let from = Infinity
+	let to = -Infinity
+
+	for (let k = 0; k < ranges.length; k += 2) {
+		from = Math.min(from, ranges[k] ?? 0)
+		to = Math.max(to, ranges[k + 1] ?? 0)
+	}
+
+	if (from > to) return []
+
+	const found: number[] = []
+
+	sideBySide(tr.doc, 0, Math.max(0, from), Math.min(tr.doc.content.size, to), found)
+
+	return found.filter(pos => !sideBySideAt(tr.before, positionBefore(tr, pos)))
+}
+
+const NO_ATTRS: ReadonlySet<string> = new Set()
+
+// A paragraph a repair puts back at `pos` of `doc` for an edit recorded with `stamp` while tracking: tracked as
+// inserted (its mark carrying the insertion, as Word records it, ECMA-376 Part 1 §17.13.5.15) by the change of the
+// table the edit inserted next to it when there is one, so it goes when that change is rejected.
+function separator(doc: Node, pos: number, stamp: RevisionStamp | undefined): Node {
+	if (stamp === undefined) return nodes.paragraph.create()
+
+	const $pos = doc.resolve(pos)
+	const inserted = insertedBy($pos.nodeAfter, true) ?? insertedBy($pos.nodeBefore, false) ?? stamp
+
+	return nodes.paragraph.create({ revision: RevisionFlag.Inserted }, null, [marks.paragraph_change.create({ value: { inserted } })])
+}
+
+// The tracked insertion of a table's first (or last) row.
+function insertedBy(table: Node | null | undefined, first: boolean): RevisionStamp | undefined {
+	const row = table?.type === nodes.table ? (first ? table.firstChild : table.lastChild) : null
+
+	if (row === null || ((row.attrs["revision"] as number) & RevisionFlag.Inserted) === 0) return undefined
+
+	return rowOverrides(row).ins
+}
+
 function repair(transactions: readonly Transaction[], state: EditorState): Transaction | null {
 	let fix: Transaction | null = null
 	const size = state.doc.content.size
+	const lost: Reopened[] = []
 	const merges: { pos: number; vMerge: string | null }[] = []
 	const healed = new Set<number>()
 
@@ -259,8 +392,34 @@ function repair(transactions: readonly Transaction[], state: EditorState): Trans
 	// (a property of every paragraph) has a range per block, so past a few their whole span is read once.
 	const spans: [number, number][] = []
 
+	const joins = new Map<number, RevisionStamp | undefined>()
+	let endsWithTable: { stamp: RevisionStamp | undefined } | undefined
+
 	transactions.forEach((tr, index) => {
 		if (!tr.docChanged || isInternal(tr) || isCommand(tr) || isHistoryTransaction(tr) || withinTextblocks(tr)) return
+
+		const stamp = planOf(tr)?.stamp
+
+		// The story's last paragraph taken from after its last table: Word always keeps a paragraph there.
+		if (tableEdge(tr.doc.lastChild, true) && !tableEdge(tr.before.lastChild, true)) endsWithTable = { stamp }
+
+		for (let pos of joinedTables(tr)) {
+			for (let later = index + 1; later < transactions.length; later++) pos = transactions[later]?.mapping.map(pos, 1) ?? pos
+
+			joins.set(pos, stamp)
+		}
+
+		const from = lost.length
+
+		reopened(tr, lost)
+
+		for (let k = from; k < lost.length; k++) {
+			const entry = lost[k]
+
+			if (entry !== undefined)
+				for (let later = index + 1; later < transactions.length; later++)
+					entry.pos = transactions[later]?.mapping.map(entry.pos, 1) ?? entry.pos
+		}
 
 		// Inline marks change no table structure.
 		const ranges = changedRanges(tr, false)
@@ -279,6 +438,31 @@ function repair(transactions: readonly Transaction[], state: EditorState): Trans
 			if (to > from) spans.push([Math.max(0, from), Math.min(size, to)])
 		}
 	})
+
+	// Their marks back, on the node they opened again (its type and attributes as they were, no marks).
+	const restored = new Set<number>()
+
+	for (const entry of lost) {
+		if (entry.pos < 0 || entry.pos > size) continue
+
+		const $pos = state.doc.resolve(entry.pos)
+
+		for (let depth = $pos.depth; depth > 0; depth--) {
+			const node = $pos.node(depth)
+
+			if (!node.hasMarkup(entry.type, entry.attrs)) continue
+
+			const at = $pos.before(depth)
+
+			fix ??= state.tr
+
+			for (const mark of entry.marks) fix.addNodeMark(at, mark)
+
+			restored.add(at)
+
+			break
+		}
+	}
 
 	spans.sort((a, b) => a[0] - b[0])
 
@@ -319,7 +503,7 @@ function repair(transactions: readonly Transaction[], state: EditorState): Trans
 
 			const bits = node.attrs["revision"] as number
 
-			if (bits === 0 || (node.attrs["src"] as number) !== NO_SOURCE) return true
+			if (bits === 0 || (node.attrs["src"] as number) !== NO_SOURCE || restored.has(pos)) return true
 
 			const overrides = node.type === nodes.table_row ? rowOverrides(node) : cellOverrides(node)
 			let kept = bits
@@ -334,7 +518,26 @@ function repair(transactions: readonly Transaction[], state: EditorState): Trans
 
 	for (const merge of merges) (fix ??= state.tr).setNodeAttribute(merge.pos, "vMerge", merge.vMerge)
 
+	// Last, from the end: a paragraph between tables an edit put side by side.
+	for (const [pos, stamp] of [...joins].sort((a, b) => b[0] - a[0])) {
+		if (pos < 0 || pos > size || !sideBySideAt(state.doc, pos)) continue
+
+		fix ??= state.tr
+		fix.insert(fix.mapping.map(pos), separator(state.doc, pos, stamp))
+	}
+
+	// A story an edit left ending with a table gets its last paragraph back, as Word always keeps one there
+	// (LibreOffice 26.8's text export of such a body never ends).
+	if (endsWithTable !== undefined && tableEdge(state.doc.lastChild, true)) {
+		fix ??= state.tr
+		fix.insert(fix.mapping.map(size), separator(state.doc, size, endsWithTable.stamp))
+	}
+
 	return fix === null ? null : markInternal(fix)
 }
 
-export const TABLES_STAGE: InvariantStage | null = { name: "tables", violation, repair }
+export const TABLES_STAGE: InvariantStage | null = {
+	name: "tables",
+	violation,
+	repair
+}

@@ -159,11 +159,20 @@ function w14(w: StoryWriting): string {
 }
 
 // The start tag of a paragraph not written as its source (new, or a copy of source paragraph `source`),
-// with the w14:paraId it was given. A copy never repeats its source's id.
+// with the w14:paraId it was given. A copy never repeats its source's id while the source's own paragraph
+// (its first occurrence) is written with it; one given another id leaves it to the copy (a comment's split,
+// its id moved to its last paragraph).
 export function newParagraphTag(w: StoryWriting, source: number, id: string | undefined): string {
 	const p = w.names.el("p")
 
-	if (id === undefined || (source !== NO_SOURCE && sameParagraphId(w, source, id))) return `<${p}>`
+	if (id === undefined) return `<${p}>`
+
+	if (source !== NO_SOURCE && sameParagraphId(w, source, id)) {
+		const owner = w.ownerOf(source)
+		const ownerId = owner === undefined ? undefined : paragraphId(owner)
+
+		if (owner !== undefined && (ownerId === undefined || sameParagraphId(w, source, ownerId))) return `<${p}>`
+	}
 
 	return `<${p} ${w14(w)}:paraId="${id}">`
 }

@@ -15,13 +15,22 @@ import {
 import type { PropsStore } from "../props/index"
 import { formattingMarks } from "../edit/formatting"
 import { markInternal, reinsert } from "../edit/invariants/core"
-import { NO_MARKERS, NO_SOURCE, docxSchema, survivorsOf, type MarkerAttrs, type MarkerList } from "../edit/schema"
+import { NO_MARKERS, NO_SOURCE, docxSchema, survivorsOf, tableEdge, type MarkerAttrs, type MarkerList } from "../edit/schema"
 import type { DocxEditorSession } from "../edit/session"
 import { Ns } from "../model/namespaces"
 import { partReader } from "../model/reader"
+import type { Slicing } from "../../slicing"
 import type { XmlDocument } from "../../xml/index"
 import { Item, Revision, RevisionFlag, type Section, type StoryPart } from "../model/index"
-import { ReviewKind, reviewIndexKept, revisionMarkId, wantReviewIndex, type ReviewEntry, type ReviewIndex } from "./index"
+import {
+	ReviewKind,
+	prepareReviewIndex,
+	reviewIndexKept,
+	revisionMarkId,
+	wantReviewIndex,
+	type ReviewEntry,
+	type ReviewIndex
+} from "./index"
 import { bodySections, keepShown, resolveSectionChanges, sectionStates } from "../stories/sections"
 import { fieldUpdateOf, resolvedFieldUpdate } from "../fields/evaluate"
 import { SOURCE, equationChanges, equationFault, partHasTrackedEquations, resolvedEquation } from "../math/edit"
@@ -983,6 +992,30 @@ function sourcePropertyChanges(part: StoryPart): SourceChanges {
 	return found
 }
 
+// Story documents above this size (positions) take longer than a frame to read for the index.
+const PREPARE_SIZE = 1 << 18
+
+// Makes a long story's review index in slices (as storyReviewIndex would at once, on the first comment or
+// once tracking is on): it is kept up to date edit by edit from then on. Nothing while it is short.
+export async function prepareStoryReviewIndex(session: DocxEditorSession, slicing: Slicing, closed: () => boolean): Promise<void> {
+	const doc = session.state.doc
+
+	if (doc.content.size < PREPARE_SIZE) return
+
+	const part = session.story.part
+	const ready = await prepareReviewIndex(
+		doc,
+		sourcePropertyChanges(part).all,
+		session.story.story.kind === "body" ? sourceSectionLinks(part, session.context.model.sections) : undefined,
+		part,
+		partHasTrackedEquations(part),
+		slicing,
+		closed
+	)
+
+	if (ready && session.state.doc === doc) storyReviewIndex(session)
+}
+
 // The session's review index with its source paragraph property changes counted.
 export function storyReviewIndex(session: DocxEditorSession): ReviewIndex {
 	const index = session.reviewIndex
@@ -1191,6 +1224,27 @@ function collectMoveMarkers(doc: Node, from: number, to: number, plan: Plan): vo
 // ---- applying -----------------------------------------------------------------------------------------------
 
 // Tables losing rows or cells, with the rows and the cells (outside those rows) that go.
+// A paragraph whose mark's change goes (an accepted deletion, a rejected insertion) between two tables that stay
+// keeps its place instead of joining the table after it: tables with no paragraph between them are one table to
+// Word and LibreOffice, which these pages would not show. Its change resolved, it is an untracked paragraph.
+function keepBetweenTables(doc: Node, plan: Plan, removals: ReadonlyMap<number, { readonly rows: readonly number[] }>): void {
+	const stays = (node: Node, pos: number): boolean => node.type !== nodes.table || (removals.get(pos)?.rows.length ?? 0) < node.childCount
+
+	for (let k = plan.joins.length - 1; k >= 0; k--) {
+		const pos = plan.joins[k] ?? -1
+		const node = doc.nodeAt(pos)
+
+		if (node?.type !== nodes.paragraph) continue
+
+		const $pos = doc.resolve(pos)
+		const before = $pos.parent.maybeChild($pos.index() - 1)
+		const after = $pos.parent.maybeChild($pos.index() + 1)
+
+		if (before === null || after === null || !tableEdge(before, true) || !tableEdge(after, false)) continue
+		if (stays(before, pos - before.nodeSize) && stays(after, pos + node.nodeSize)) plan.joins.splice(k, 1)
+	}
+}
+
 function tableRemovals(plan: Plan): Map<number, { rows: number[]; cells: Plan["cells"] }> {
 	const out = new Map<number, { rows: number[]; cells: Plan["cells"] }>()
 	const of = (table: number): { rows: number[]; cells: Plan["cells"] } => {
@@ -1337,6 +1391,7 @@ function apply(state: EditorState, plan: Plan, accept: boolean, part: StoryPart,
 	const removals = tableRemovals(plan)
 
 	keepFeasibleRemovals(state, plan, accept, part, store, removals)
+	keepBetweenTables(state.doc, plan, removals)
 
 	if (count > BULK) return keepRanges(state.doc, applyBulk(state, plan, accept, part, store, removals), plan)
 
@@ -1421,21 +1476,23 @@ const KEPT_RANGES: ReadonlySet<string> = new Set([
 ])
 
 // Range markers (and comment references) of `doc` by key, with where they are.
-function rangeAnchors(doc: Node): Map<string, { marker: MarkerAttrs; pos: number }> {
-	const out = new Map<string, { marker: MarkerAttrs; pos: number }>()
-	const add = (marker: MarkerAttrs, pos: number): void => {
-		if (marker.id !== null && KEPT_RANGES.has(marker.kind)) out.set(`${marker.kind}:${marker.id}`, { marker, pos })
+// `listed`: in a block's marker list (before it, or after its content), not inline.
+function rangeAnchors(doc: Node): Map<string, { marker: MarkerAttrs; pos: number; listed: "before" | "end" | undefined }> {
+	const out = new Map<string, { marker: MarkerAttrs; pos: number; listed: "before" | "end" | undefined }>()
+	const add = (marker: MarkerAttrs, pos: number, listed: "before" | "end" | undefined): void => {
+		if (marker.id !== null && KEPT_RANGES.has(marker.kind)) out.set(`${marker.kind}:${marker.id}`, { marker, pos, listed })
 	}
 
 	doc.descendants((node, pos) => {
-		for (const name of ["before", "end"]) {
+		for (const name of ["before", "end"] as const) {
 			const list: unknown = node.attrs[name]
 
-			if (Array.isArray(list)) for (const marker of list as MarkerList) add(marker, name === "before" ? pos : pos + node.nodeSize)
+			if (Array.isArray(list))
+				for (const marker of list as MarkerList) add(marker, name === "before" ? pos : pos + node.nodeSize, name)
 		}
 
 		if (node.isInline) {
-			for (const marker of survivorsOf(node)) add(marker, pos)
+			for (const marker of survivorsOf(node)) add(marker, pos, undefined)
 
 			return false
 		}
@@ -1444,6 +1501,11 @@ function rangeAnchors(doc: Node): Map<string, { marker: MarkerAttrs; pos: number
 	})
 
 	return out
+}
+
+// The other end of a range marker's range (its own kind for a comment reference).
+function partnerKind(kind: string): string {
+	return kind.endsWith("Start") ? `${kind.slice(0, -5)}End` : kind.endsWith("End") ? `${kind.slice(0, -3)}Start` : kind
 }
 
 // What resolving took out with removed rows, tables or paragraphs of a range whose other markers stay (a comment
@@ -1467,7 +1529,16 @@ function keepRanges(before: Node, tr: Transaction | null, plan: Plan): Transacti
 
 		if (is.has(key) || (comment && plan.dropped.has(marker.id ?? "")) || !staying.has(range(marker))) continue
 
-		const at = tr.mapping.map(pos, -1)
+		// Where the content was, but never on the wrong side of the range's end that stays (a start) or of its
+		// start (an end): content that went may have held one of them and not the other.
+		let at = tr.mapping.map(pos, -1)
+		const partner = is.get(`${partnerKind(marker.kind)}:${marker.id ?? ""}`)
+
+		if (partner !== undefined && marker.kind.endsWith("Start"))
+			at = Math.min(at, partner.listed === "end" ? partner.pos - 1 : partner.pos)
+		else if (partner !== undefined && marker.kind.endsWith("End"))
+			at = Math.max(at, partner.listed === "end" ? partner.pos : partner.pos + 1)
+
 		const list = lost.get(at)
 
 		if (list === undefined) lost.set(at, [marker])

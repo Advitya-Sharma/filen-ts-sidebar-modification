@@ -22,7 +22,7 @@ export const common = {
 	searchNoResults: "No matches",
 	/** Shared list filter box (ListFilterInput) — screen-reader label on the icon-only button clearing the typed filter */
 	clearFilter: "Clear filter",
-	/** Floating selection bar (selectionActionBar.tsx) — accessible name of the toolbar */
+	/** Floating selection bar (selectionActionBar.tsx) — accessible name of the toolbar; also the docx editor's touch menu (cut, copy, paste, select all) */
 	selectionActionsLabel: "Selection actions",
 	/** Floating selection bar — the clear-selection button's label; also every surface's Escape command description */
 	clearSelection: "Clear selection",

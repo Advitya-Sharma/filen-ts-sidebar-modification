@@ -4,6 +4,7 @@ import { AllSelection, TextSelection } from "prosemirror-state"
 import { describe, expect, it } from "vitest"
 import { DocxEditorSession } from "@filen/office/core/docx/edit"
 import { storyReviewIndex } from "../core/docx/review/accept"
+import { addComments, openEditor, percentile as share, typeBursts } from "../bench/editHarness"
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 
@@ -87,6 +88,38 @@ describe("docx tracked changes performance", () => {
 		expect(on).toBeLessThan(48)
 		expect(on).toBeLessThan(Math.max(off * 3, off + 8))
 	})
+
+	// Under review as the web shows it: Markup view, tracking on, 200 comments; keys in page view (the pages in
+	// view laid out in the key's task) and with paged layout suspended (what Mobile view leaves the core).
+	it.skipIf(!existsSync(TARIFF))(
+		"types into Tariff under review in page view and with the pages suspended",
+		{ timeout: 600_000 },
+		async () => {
+			const opened = await openEditor(new Uint8Array(readFileSync(TARIFF)), { view: "markup" })
+			const editor = opened.editor
+
+			editor.execute({ type: "review.track", on: true })
+			expect(addComments(editor, 200)).toBe(200)
+			await editor.whenSettled()
+
+			const paged = await typeBursts(editor, 10, 15, ["type"], 0, 100)
+
+			editor.suspend()
+
+			const suspended = await typeBursts(editor, 10, 15, ["type"], 50, 0)
+
+			editor.resume()
+			console.log(
+				`Tariff under review: keystroke p50/p95 in page view ${share(paged.times, 0.5).toFixed(2)}/${share(paged.times, 0.95).toFixed(2)} ms, ` +
+					`suspended ${share(suspended.times, 0.5).toFixed(2)}/${share(suspended.times, 0.95).toFixed(2)} ms; changes ${storyReviewIndex(editor.session).revisionCount}`
+			)
+			opened.close()
+			expect(paged.refused + suspended.refused).toBe(0)
+			// The target is 8 ms (src/bench/editBench.ts measures the gate); the bounds leave room for loaded machines.
+			expect(share(paged.times, 0.95)).toBeLessThan(48)
+			expect(share(suspended.times, 0.95)).toBeLessThan(24)
+		}
+	)
 
 	it.skipIf(!existsSync(TARIFF))("types into Tariff with tracking on, and deletes all of it", { timeout: 600_000 }, async () => {
 		const { off, on } = await measure(TARIFF, "Tariff")

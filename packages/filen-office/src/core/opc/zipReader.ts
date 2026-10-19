@@ -35,6 +35,9 @@ const LOCAL_SIZE = 30
 // How far from the end an end record is looked for: the longest comment, plus junk some tools append.
 const MAX_END_SEARCH = 1024 * 1024
 const END_SEARCH_WINDOW = 256 * 1024
+// End-record signatures tried before the search gives up: each costs reads, and a file can hold one every
+// 22 bytes.
+const MAX_END_CANDIDATES = 256
 const READ_STEP = 1024 * 1024
 // Compressed bytes per inflate step: one step expands at most ~1032-fold before the output is checked, so
 // steps shrink as the declared size runs out. fflate holds a step's whole output twice (its buffer and the
@@ -479,6 +482,7 @@ async function findEndRecord(source: ByteSource): Promise<EndRecord | null> {
 	const size = source.size
 	let windowEnd = size
 	let windowLength = EOCD_SIZE + MAX_COMMENT + ZIP64_LOCATOR_SIZE
+	let candidates = 0
 
 	while (windowEnd >= EOCD_SIZE && size - windowEnd < MAX_END_SEARCH) {
 		const windowStart = Math.max(0, windowEnd - windowLength)
@@ -490,6 +494,7 @@ async function findEndRecord(source: ByteSource): Promise<EndRecord | null> {
 
 		for (let at = window.length - EOCD_SIZE; at >= 0; at--) {
 			if (window[at] !== 0x50 || data.getUint32(at, true) !== EOCD_SIGNATURE) continue
+			if (++candidates > MAX_END_CANDIDATES) return null
 
 			const found = await endRecordAt(peek, size, new DataView(window.buffer, window.byteOffset + at, EOCD_SIZE), windowStart + at)
 

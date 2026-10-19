@@ -145,7 +145,12 @@ function jpeg(b: Uint8Array): DocxImageInfo | undefined {
 	let orientation = 1
 
 	for (let at = 2; at + 4 <= b.length;) {
-		if (b[at] !== 0xff) return undefined
+		// Stray bytes before a marker: decoders skip them, so the size is read past them too.
+		if (b[at] !== 0xff) {
+			at++
+
+			continue
+		}
 
 		const marker = b[at + 1] ?? 0
 
@@ -369,6 +374,85 @@ export function sniffImage(bytes: Uint8Array): DocxImageInfo | DocxImageRefusal 
 	if (found.width * found.height > MAX_IMAGE_PIXELS && !VECTOR.has(found.format)) return "pixels"
 
 	return found
+}
+
+// Pixels a raster picture decodes to, from its header alone; undefined for vector pictures and headers this
+// cannot read. A viewer checks it before handing the bytes to a decoder.
+export function rasterPixels(bytes: Uint8Array): number | undefined {
+	let found: DocxImageInfo | undefined
+
+	if (starts(bytes, 0, "\x89PNG\r\n\x1a\n")) found = png(bytes)
+	else if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) found = jpeg(bytes)
+	else if (starts(bytes, 0, "GIF87a") || starts(bytes, 0, "GIF89a")) return gifPixels(bytes)
+	else if (starts(bytes, 0, "BM")) found = bmp(bytes)
+	else if (starts(bytes, 0, "RIFF") && starts(bytes, 8, "WEBP")) return webpPixels(bytes)
+
+	return found === undefined ? undefined : found.width * found.height
+}
+
+// Whether a viewer may hand `bytes` to the platform's decoders, which sniff the bytes rather than trust the part's
+// content type: a raster whose header declares at most `maxPixels`, or an SVG. Anything else is refused.
+export function viewable(bytes: Uint8Array, maxPixels: number): boolean {
+	const pixels = rasterPixels(bytes)
+
+	if (pixels !== undefined) return pixels > 0 && pixels <= maxPixels
+
+	return typeof svg(bytes) === "object"
+}
+
+// GIF canvas size: the logical screen grown to the first frame (decoders that grow it draw the frame whole);
+// undefined when no frame can be read.
+function gifPixels(b: Uint8Array): number | undefined {
+	if (b.length < 13) return undefined
+
+	const flags = b[10] ?? 0
+	let at = 13 + ((flags & 0x80) !== 0 ? 3 * (1 << ((flags & 7) + 1)) : 0)
+
+	while (at < b.length) {
+		const kind = b[at]
+
+		if (kind === 0x2c) {
+			if (at + 9 > b.length) return undefined
+
+			const width = Math.max(u16le(b, 6), u16le(b, at + 1) + u16le(b, at + 5))
+			const height = Math.max(u16le(b, 8), u16le(b, at + 3) + u16le(b, at + 7))
+
+			return width * height
+		}
+
+		// An extension: its label, then data sub-blocks up to an empty one.
+		if (kind !== 0x21) return undefined
+
+		at += 2
+
+		while (at < b.length && b[at] !== 0) at += 1 + (b[at] ?? 0)
+
+		at++
+	}
+
+	return undefined
+}
+
+// WebP canvas size: VP8X (24-bit sizes less one), VP8L (14-bit sizes less one) or a VP8 key frame (14 bits).
+function webpPixels(b: Uint8Array): number | undefined {
+	if (b.length < 30) return undefined
+
+	if (starts(b, 12, "VP8X")) {
+		const width = ((b[24] ?? 0) | ((b[25] ?? 0) << 8) | ((b[26] ?? 0) << 16)) + 1
+		const height = ((b[27] ?? 0) | ((b[28] ?? 0) << 8) | ((b[29] ?? 0) << 16)) + 1
+
+		return width * height
+	}
+
+	if (starts(b, 12, "VP8L")) {
+		const bits = u32le(b, 21)
+
+		return ((bits & 0x3fff) + 1) * (((bits >>> 14) & 0x3fff) + 1)
+	}
+
+	if (starts(b, 12, "VP8 ")) return (u16le(b, 26) & 0x3fff) * (u16le(b, 28) & 0x3fff)
+
+	return undefined
 }
 
 // The size (EMUs) Word gives a picture inserted at its own resolution: pixels at the file's dpi, a vector

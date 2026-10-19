@@ -1,6 +1,6 @@
 import type { Node } from "prosemirror-model"
-import { relativeTarget } from "../../../opc/index"
-import { XmlEditor, encodeUtf8, escapeAttribute, type XmlDocument } from "../../../xml/index"
+import { BytePieces, relativeTarget } from "../../../opc/index"
+import { XmlEditor, decodeCharacterData, encodeUtf8, escapeAttribute, type SliceClock, type XmlDocument } from "../../../xml/index"
 import type { StoryDoc } from "../../edit/build"
 import type { DocxEditContext } from "../../edit/context"
 import { docxSchema } from "../../edit/schema"
@@ -96,6 +96,21 @@ function factsOf(context: DocxEditContext, written: WrittenStories): Facts {
 	})
 
 	return { records, added, stories, sources }
+}
+
+// Source comments whose last paragraph is written with another id than the file keys them on (edits that
+// moved it there, a split), by the old id.
+function movedParaIds(facts: Facts): Map<string, string> {
+	const out = new Map<string, string>()
+
+	for (const [id, doc] of facts.stories) {
+		const before = facts.sources.get(id)?.paraId?.toUpperCase()
+		const now = lastParagraphId(doc)?.toUpperCase()
+
+		if (before !== undefined && now !== undefined && before !== now) out.set(before, now)
+	}
+
+	return out
 }
 
 function paraIdOf(facts: Facts, id: string): string | undefined {
@@ -236,8 +251,14 @@ async function contribute(parts: SaveParts, written: WrittenStories): Promise<vo
 	}
 
 	const cut = deletedComments(parts, written)
+	const moved = movedParaIds(facts)
 
-	if (facts.added.size === 0 && resolved.size === 0 && deleted.size === 0 && cut.size === 0) return
+	if (facts.added.size === 0 && resolved.size === 0 && deleted.size === 0 && cut.size === 0 && moved.size === 0) {
+		// Accepting or rejecting an author's last changes leaves their person behind.
+		if (written.stories.length > 0) await people(parts, written, facts, new Set(), cut)
+
+		return
+	}
 
 	// A deleted comment leaves the comments part (the save cuts its w:comment out: removed below), and its
 	// entries leave the other parts of the family.
@@ -254,7 +275,7 @@ async function contribute(parts: SaveParts, written: WrittenStories): Promise<vo
 		[...removed].map(id => sources.get(id)?.paraId?.toUpperCase()).filter((id): id is string => id !== undefined)
 	)
 
-	await extended(parts, facts, resolved, removedParaIds)
+	await extended(parts, facts, resolved, removed, removedParaIds, moved)
 
 	const idsPart = await familyPart(parts, "commentsIds")
 	const durable = new Map<string, string>()
@@ -267,6 +288,12 @@ async function contribute(parts: SaveParts, written: WrittenStories): Promise<vo
 
 		for (const node of children(idsPart.document, Ns.W16Cid, "commentId")) {
 			const paraId = attribute(idsPart.document, node, Ns.W16Cid, "paraId")
+			const now = paraId === undefined ? undefined : moved.get(paraId.toUpperCase())
+
+			if (now !== undefined) {
+				idsPart.editor.setAttribute(node, qualified(idsPart.prefix, "paraId"), now)
+				idsPart.changed = true
+			}
 
 			if (paraId !== undefined && removedParaIds.has(paraId)) {
 				idsPart.editor.remove(node)
@@ -326,23 +353,323 @@ async function contribute(parts: SaveParts, written: WrittenStories): Promise<vo
 		}
 	}
 
-	const people = await familyPart(parts, "people")
+	await people(parts, written, facts, removed, cut)
+}
 
-	if (people !== undefined) {
-		const reader = partReader(people.document)
-		const known = new Set(children(people.document, Ns.W15, "person").map(node => reader.attr(node, Ns.W15, "author")))
-		const added: string[] = []
+// people: a person for each new comment's author it lacks, and none for an author no comment or revision of
+// the saved file names any more (MS-DOCX 2.5.3.5: w15:author MUST name the author of one).
+async function people(
+	parts: SaveParts,
+	written: WrittenStories,
+	facts: Facts,
+	removed: ReadonlySet<string>,
+	cut: ReadonlyMap<StoryPart, readonly number[]>
+): Promise<void> {
+	const part = await familyPart(parts, "people")
 
-		for (const [id, doc] of facts.added) {
-			const author = commentRecords(doc)[id]?.author
+	if (part === undefined) return
 
-			if (author === undefined || known.has(author)) continue
+	const reader = partReader(part.document)
+	const persons = children(part.document, Ns.W15, "person")
+	const known = new Set(persons.map(node => reader.attr(node, Ns.W15, "author")))
+	const added: string[] = []
+	// Authors of the comments the save writes.
+	const named = new Set<string>()
 
-			known.add(author)
-			added.push(`<${qualified(people.prefix, "person")}${attributes(people.prefix, [["author", author]])}/>`)
+	for (const comment of facts.sources.values()) if (!removed.has(comment.id) && comment.author !== undefined) named.add(comment.author)
+
+	for (const [id, doc] of facts.added) {
+		const author = commentRecords(doc)[id]?.author
+
+		if (author === undefined) continue
+
+		named.add(author)
+
+		if (known.has(author)) continue
+
+		known.add(author)
+		added.push(`<${qualified(part.prefix, "person")}${attributes(part.prefix, [["author", author]])}/>`)
+	}
+
+	const unnamed = await revisionOnly(
+		parts,
+		written,
+		cut,
+		persons.map(node => reader.attr(node, Ns.W15, "author") ?? "").filter(author => !named.has(author))
+	)
+
+	for (const node of persons) {
+		if (!unnamed.has(reader.attr(node, Ns.W15, "author") ?? "")) continue
+
+		part.editor.remove(node)
+		part.changed = true
+	}
+
+	await finish(parts, "people", part, added)
+}
+
+// Of `authors` (persons no written comment names), those no revision of the saved file names either: what the
+// story parts hold as written (their rewritten stories, the rest of their source but removed comments), and the
+// styles and numbering parts (their revisions as the source has them). Values are compared decoded (however a
+// file quotes or escapes them); a part not in UTF-8 names them all. A source part is read once per document
+// (SOURCE_AUTHORS), the rewritten stories' new markup each save, in slices.
+async function revisionOnly(
+	parts: SaveParts,
+	written: WrittenStories,
+	cut: ReadonlyMap<StoryPart, readonly number[]>,
+	authors: readonly string[]
+): Promise<Set<string>> {
+	const left = new Set(authors.filter(author => author !== ""))
+	const clock = parts.clock
+	const named = (author: string): void => {
+		left.delete(author)
+	}
+
+	if (left.size === 0) return left
+
+	// Each story part: rewritten stories and removed comments out of its source, then what they were written as.
+	const skipped = new Map<StoryPart, { from: number; to: number }[]>()
+
+	for (const story of written.stories) {
+		const document = story.part.document
+		const node = story.range === undefined ? story.part.node(story.session.story.story.item) : -1
+		const range = story.range ?? { from: document.start(node), to: document.end(node) }
+		const list = skipped.get(story.part)
+
+		if (list === undefined) skipped.set(story.part, [range])
+		else list.push(range)
+
+		if (utf16(document.bytes)) return new Set()
+
+		await writtenAuthors(story.output.bytes, document.bytes, clock, named)
+
+		if (left.size === 0) return left
+	}
+
+	for (const [part, items] of cut) {
+		const list = skipped.get(part) ?? []
+
+		for (const item of items) list.push({ from: part.document.start(part.node(item)), to: part.document.end(part.node(item)) })
+
+		skipped.set(part, list)
+	}
+
+	for (const part of parts.context.model.parts) {
+		if (part === undefined) continue
+
+		const bytes = part.document.bytes
+
+		if (utf16(bytes)) return new Set()
+
+		const index = await authorIndex(bytes, clock)
+		const ranges = (skipped.get(part) ?? []).sort((a, b) => a.from - b.from)
+		let range = 0
+
+		for (let k = 0; k < index.at.length && left.size > 0; k++) {
+			const at = index.at[k] ?? 0
+
+			while (range < ranges.length && (ranges[range]?.to ?? 0) <= at) range++
+
+			if (range < ranges.length && (ranges[range]?.from ?? 0) <= at) continue
+
+			named(index.who[k] ?? "")
 		}
 
-		await finish(parts, "people", people, added)
+		if (left.size === 0) return left
+	}
+
+	for (const kind of ["styles", "numbering"] as const) {
+		const name = parts.pkg.part(kind)
+		const document = name === undefined ? undefined : await parts.xml(name)
+
+		if (document === undefined) continue
+		if (utf16(document.bytes)) return new Set()
+
+		for (const author of (await authorIndex(document.bytes, clock)).who) named(author)
+	}
+
+	return left
+}
+
+function utf16(bytes: Uint8Array): boolean {
+	return (bytes[0] === 0xfe && bytes[1] === 0xff) || (bytes[0] === 0xff && bytes[1] === 0xfe)
+}
+
+// Where each author="..." of a source part is and the author it names (decoded).
+interface AuthorIndex {
+	readonly at: number[]
+	readonly who: string[]
+}
+
+const SOURCE_AUTHORS = new WeakMap<Uint8Array, AuthorIndex>()
+
+async function authorIndex(bytes: Uint8Array, clock: SliceClock | undefined): Promise<AuthorIndex> {
+	let index = SOURCE_AUTHORS.get(bytes)
+
+	if (index === undefined) {
+		const at: number[] = []
+		const who: string[] = []
+
+		await scanAuthors(bytes, 0, bytes.length, clock, (position, author) => {
+			at.push(position)
+			who.push(author)
+		})
+		index = { at, who }
+		SOURCE_AUTHORS.set(bytes, index)
+	}
+
+	return index
+}
+
+// The authors a story as written names: its copies of the source by the source's index, its new markup read.
+async function writtenAuthors(
+	bytes: Uint8Array | BytePieces,
+	source: Uint8Array,
+	clock: SliceClock | undefined,
+	named: (author: string) => void
+): Promise<void> {
+	if (bytes instanceof Uint8Array) {
+		await scanAuthors(bytes, 0, bytes.length, clock, (_at, author) => named(author))
+
+		return
+	}
+
+	// Runs of new markup, and ranges of the source copied as they are.
+	const runs: { readonly fresh: Uint8Array[] | undefined; readonly from: number; readonly to: number }[] = []
+
+	bytes.visit(0, bytes.length, (piece, pieceFrom, count) => {
+		const share = piece.subarray(pieceFrom, pieceFrom + count)
+
+		if (
+			share.buffer === source.buffer &&
+			share.byteOffset >= source.byteOffset &&
+			share.byteOffset + count <= source.byteOffset + source.length
+		) {
+			const from = share.byteOffset - source.byteOffset
+
+			runs.push({ fresh: undefined, from, to: from + count })
+		} else {
+			const last = runs[runs.length - 1]
+
+			if (last?.fresh !== undefined) last.fresh.push(share)
+			else runs.push({ fresh: [share], from: 0, to: 0 })
+		}
+
+		return true
+	})
+
+	const index = await authorIndex(source, clock)
+
+	for (const run of runs) {
+		if (run.fresh === undefined) {
+			for (let k = lowerBound(index.at, run.from); k < index.at.length && (index.at[k] ?? 0) < run.to; k++) named(index.who[k] ?? "")
+
+			continue
+		}
+
+		const joined = run.fresh.length === 1 ? (run.fresh[0] as Uint8Array) : concat(run.fresh)
+
+		await scanAuthors(joined, 0, joined.length, clock, (_at, author) => named(author))
+	}
+}
+
+function lowerBound(sorted: readonly number[], value: number): number {
+	let low = 0
+	let high = sorted.length
+
+	while (low < high) {
+		const middle = (low + high) >> 1
+
+		if ((sorted[middle] ?? 0) < value) low = middle + 1
+		else high = middle
+	}
+
+	return low
+}
+
+function concat(chunks: readonly Uint8Array[]): Uint8Array {
+	const out = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0))
+	let at = 0
+
+	for (const chunk of chunks) {
+		out.set(chunk, at)
+		at += chunk.length
+	}
+
+	return out
+}
+
+// Bytes read between looks at the clock.
+const SCAN_STEP = 1 << 20
+const AUTHOR = [0x61, 0x75, 0x74, 0x68, 0x6f, 0x72]
+
+// Calls `found` for each attribute named author (any prefix) whose start lies in bytes [from, to), with its
+// value decoded, pausing between megabytes.
+async function scanAuthors(
+	bytes: Uint8Array,
+	from: number,
+	to: number,
+	clock: SliceClock | undefined,
+	found: (at: number, author: string) => void
+): Promise<void> {
+	let next = from + SCAN_STEP
+
+	for (let at = bytes.indexOf(0x61, from); at >= 0 && at < to; at = bytes.indexOf(0x61, at + 1)) {
+		if (at >= next) {
+			next = at + SCAN_STEP
+
+			if (clock?.due === true) await clock.pause()
+		}
+
+		let k = 1
+
+		while (k < AUTHOR.length && bytes[at + k] === AUTHOR[k]) k++
+
+		if (k < AUTHOR.length) continue
+
+		// The whole name, or its local part after a prefix, in a start tag (text, comments and processing
+		// instructions say author= too).
+		const before = at > 0 ? (bytes[at - 1] ?? 0) : 0x20
+
+		if (before !== 0x3a && before !== 0x20 && before !== 0x09 && before !== 0x0a && before !== 0x0d) continue
+
+		// (A run of new markup may start inside a tag: no "<" before it there is no "outside a tag" either.)
+		const open = bytes.lastIndexOf(0x3c, at)
+		const kind = open < 0 ? 0 : bytes[open + 1]
+
+		if (bytes.lastIndexOf(0x3e, at) > open || kind === 0x21 || kind === 0x3f || kind === 0x2f) continue
+
+		let p = at + AUTHOR.length
+
+		while (bytes[p] === 0x20 || bytes[p] === 0x09 || bytes[p] === 0x0a || bytes[p] === 0x0d) p++
+
+		if (bytes[p] !== 0x3d) continue
+
+		p++
+
+		while (bytes[p] === 0x20 || bytes[p] === 0x09 || bytes[p] === 0x0a || bytes[p] === 0x0d) p++
+
+		const quote = bytes[p]
+
+		if (quote !== 0x22 && quote !== 0x27) continue
+
+		const end = bytes.indexOf(quote, p + 1)
+		const tag = bytes.indexOf(0x3c, p + 1)
+
+		// An attribute value holds no "<"; one no reference of which decodes is no author either.
+		if (end < 0 || (tag >= 0 && tag < end)) continue
+
+		let author: string | undefined
+
+		try {
+			author = decodeCharacterData(bytes, p + 1, end, true)
+		} catch {
+			author = undefined
+		}
+
+		if (author !== undefined) found(at, author)
+
+		at = end
 	}
 }
 
@@ -390,7 +717,9 @@ async function extended(
 	parts: SaveParts,
 	facts: Facts,
 	resolved: ReadonlyMap<string, boolean>,
-	removed: ReadonlySet<string>
+	removedIds: ReadonlySet<string>,
+	removed: ReadonlySet<string>,
+	moved: ReadonlyMap<string, string>
 ): Promise<void> {
 	const part = await familyPart(parts, "commentsExtended")
 	const prefix = part?.prefix ?? COMMENT_PARTS.commentsExtended.prefix
@@ -417,6 +746,19 @@ async function extended(
 		const parents = new Map<string, string>()
 
 		if (removed.size > 0) {
+			const reader = partReader(document)
+			const root = document.documentElement()
+
+			// Another element keyed on a removed comment's paragraph (one no schema has) goes with it.
+			for (let child = document.firstChildElement(root); child >= 0; child = document.nextSiblingElement(child)) {
+				const paraId = attribute(document, child, Ns.W15, "paraId")
+
+				if (paraId !== undefined && removed.has(paraId) && !reader.is(child, Ns.W15, "commentEx")) {
+					part.editor.remove(child)
+					part.changed = true
+				}
+			}
+
 			for (const node of entries) {
 				const paraId = attribute(document, node, Ns.W15, "paraId")
 				const parent = attribute(document, node, Ns.W15, "paraIdParent")
@@ -426,25 +768,41 @@ async function extended(
 		}
 
 		for (const node of entries) {
-			const paraId = attribute(document, node, Ns.W15, "paraId")
+			const was = attribute(document, node, Ns.W15, "paraId")
 
-			if (paraId === undefined) continue
+			if (was === undefined) continue
 
-			if (removed.has(paraId)) {
+			// A comment whose id moved to its last paragraph (MS-DOCX 2.5.3.1): its entry, and its replies'
+			// parent, follow it (removal and threads below go by the ids the file has).
+			const paraId = moved.get(was.toUpperCase()) ?? was
+			const answers = attribute(document, node, Ns.W15, "paraIdParent")
+			const answered = answers === undefined ? undefined : moved.get(answers.toUpperCase())
+
+			if (!removed.has(was) && paraId !== was) {
+				part.editor.setAttribute(node, qualified(prefix, "paraId"), paraId)
+				part.changed = true
+			}
+
+			if (answers !== undefined && answered !== undefined && !removed.has(answers)) {
+				part.editor.setAttribute(node, qualified(prefix, "paraIdParent"), answered)
+				part.changed = true
+			}
+
+			if (removed.has(was)) {
 				part.editor.remove(node)
 				part.changed = true
 
 				continue
 			}
 
-			const parent = parents.get(paraId)
+			const parent = parents.get(was)
 
 			// A reply to a removed comment answers its thread's first comment now (where that is kept).
 			if (parent !== undefined && removed.has(parent)) {
 				const root = survivingRoot(parents, parent, removed)
 
 				if (root === undefined) part.editor.removeAttribute(node, qualified(prefix, "paraIdParent"))
-				else part.editor.setAttribute(node, qualified(prefix, "paraIdParent"), root)
+				else part.editor.setAttribute(node, qualified(prefix, "paraIdParent"), moved.get(root.toUpperCase()) ?? root)
 
 				part.changed = true
 			}
@@ -479,15 +837,34 @@ async function extended(
 			continue
 		}
 
-		const parent = record?.parent === undefined ? undefined : paraIdOf(facts, record.parent)
-
-		if (record?.parent !== undefined && parent === undefined)
-			throw new DocxWriteError("missingSource", `Comment ${id} replies to ${record.parent}, which has no paragraph id`)
-
-		appended.push(entry(paraId, parent, record?.done === true))
+		appended.push(
+			entry(paraId, record?.parent === undefined ? undefined : writtenParent(facts, record.parent, removedIds), record?.done === true)
+		)
 	}
 
 	await finish(parts, "commentsExtended", part, appended)
+}
+
+// The paragraph id a new reply to comment `parent` answers in the file: the topmost comment of its thread the
+// save writes, as the comments' list shows the thread (review/comments.ts). Undefined when the save writes none
+// of them (their anchors went): the reply is a thread of its own, as a source reply whose thread's comments the
+// save removes is (MS-DOCX 2.5.3.1: w15:paraIdParent names a comment of the part).
+function writtenParent(facts: Facts, parent: string, removed: ReadonlySet<string>): string | undefined {
+	const seen = new Set<string>()
+	let found: string | undefined
+
+	for (let at: string | undefined = parent; at !== undefined && !seen.has(at);) {
+		seen.add(at)
+
+		const source = facts.sources.get(at)
+		const paraId = (source !== undefined ? !removed.has(at) : facts.added.has(at)) ? paraIdOf(facts, at) : undefined
+
+		if (paraId !== undefined) found = paraId
+
+		at = source?.parentId ?? facts.records.get(at)?.parent
+	}
+
+	return found
 }
 
 // The first comment of the thread of paragraph `paraId` (it and its ancestors by `parents`) that is not

@@ -3,12 +3,16 @@ import { RevisionView } from "../../core/docx/index"
 import {
 	DocxEditorSession,
 	openDocxEditContext,
+	prepareStoryReviewIndex,
+	proveBlocksSteps,
 	type BlockProof,
 	type DocxEditContext,
 	type DocxEditorOptions,
 	type DocxMediaInfo,
+	type LockReason,
 	authorInitials
 } from "../../core/docx/edit/index"
+import type { DocumentLayout } from "../../core/docx/layout/document"
 import { DocumentEdits, PagedEditor, type PagedEditorOptions } from "../../core/docx/paged/index"
 import { mediaInUse, releaseUnusedMedia, settleMedia } from "../../core/docx/objects/edit"
 import { compositionMarked, flushComposition } from "../../core/docx/review/track"
@@ -82,11 +86,13 @@ export interface DocxEditingWriter {
 	readonly zipper?: DocxZipperFactory
 }
 
-// Top-level blocks proved per step between checks of the clock.
+// Top-level blocks proved per run, and the size (positions) a run stops before: each run is proved a block
+// at a time (a long table a few rows at a time), then its failed blocks are locked.
 const PROOF_CHUNK = 32
+const PROOF_SIZE = 4096
 
-// Gate 1 over the body's blocks in slices (no long task however long the document): each step proves
-// a run of top-level blocks, then the next run starts after them however the locks resized them. The
+// Gate 1 over the body's blocks in slices (no long task however long the document): each run of top-level
+// blocks is proved in steps, then the next run starts after them however the locks resized them. The
 // locks are not edits: the session is marked saved again. Returns the blocks locked.
 async function proveInSlices(session: DocxEditorSession, proof: BlockProof, slicing: Slicing, closed: () => boolean): Promise<number> {
 	let locked = 0
@@ -103,23 +109,95 @@ async function proveInSlices(session: DocxEditorSession, proof: BlockProof, slic
 		let end = index
 
 		while (end < doc.childCount && end - index < PROOF_CHUNK) {
-			to += doc.child(end).nodeSize
+			const size = doc.child(end).nodeSize
+
+			if (end > index && to - from + size > PROOF_SIZE) break
+
+			to += size
 			end++
 		}
 
-		locked += session.prove(proof, from, to)
-		from = to + session.state.doc.content.size - doc.content.size
-		index = end
+		const failed = new Map<Node, LockReason>()
+		const recording: BlockProof = {
+			check(node, story) {
+				const reason = proof.check(node, story)
+
+				if (reason !== undefined) failed.set(node, reason)
+
+				return reason
+			},
+			*steps(node, story, due) {
+				const reason = proof.steps === undefined ? proof.check(node, story) : yield* proof.steps(node, story, due)
+
+				if (reason !== undefined) failed.set(node, reason)
+
+				return reason
+			}
+		}
+		let looks = 0
+		// The clock is read every few steps (a step can be one table cell).
+		const due = (): boolean => (++looks & 15) === 0 && slicing.now() - started >= slicing.sliceMs
+		const steps = proveBlocksSteps(session.story, doc, recording, due, from, to)
+
+		for (let step = steps.next(); step.done !== true; step = steps.next()) {
+			await slicing.pause()
+			started = slicing.now()
+
+			if (closed()) return locked
+		}
 
 		if (slicing.now() - started >= slicing.sliceMs) {
 			await slicing.pause()
 			started = slicing.now()
+
+			if (closed()) return locked
 		}
+
+		// The run's verdicts lock what failed (proved again should the document have changed meanwhile).
+		locked += session.prove(session.state.doc === doc ? { check: node => failed.get(node) } : proof, from, to)
+		from = to + session.state.doc.content.size - doc.content.size
+		index = end
 	}
 
 	if (locked > 0) session.markSaved()
 
 	return locked
+}
+
+// Pages laid out before the editor's open takes the thread from the layout: the first screen paints first.
+const FIRST_PAGES = 3
+
+// The editor's open (the body's build, Gate 1, the review index) before the engine's layout beyond the first
+// pages: each engine turn waits while the open holds. Both still run in slices, so no task is long.
+class OpenPriority {
+	private layout: DocumentLayout | undefined = undefined
+	private released: Promise<void> | undefined = undefined
+	private releaser: (() => void) | undefined = undefined
+
+	hold(layout: DocumentLayout): void {
+		this.layout = layout
+		this.released ??= new Promise(resolve => {
+			this.releaser = resolve
+		})
+	}
+
+	release(): void {
+		this.layout = undefined
+		this.released = undefined
+		this.releaser?.()
+		this.releaser = undefined
+	}
+
+	engineYield(pause: () => Promise<void>): () => Promise<void> {
+		return async () => {
+			await pause()
+
+			const layout = this.layout
+
+			if (layout !== undefined && this.released !== undefined && (layout.final || layout.pages.length >= FIRST_PAGES))
+				await this.released
+		}
+	}
 }
 
 // A styles or numbering part as opened, or undefined (missing or unreadable: the save writes a new one).
@@ -152,6 +230,8 @@ export function inThreadEditingHost(
 	let current: PagedEditor | undefined
 	// Set once the editor is open: how saves slice their work here, and the zipper.
 	let writing: { readonly slicing: Slicing; readonly zipper: DocxZipper } | undefined
+	// Overlay merges wait while a save reads the sessions (DocumentEdits.holdCompaction).
+	let holdMerges: () => () => void = () => () => undefined
 	// `checksums`: a trial (nothing zipped) skips the parts' CRCs.
 	// What an IME composition typed is marked as tracked before anything is written (it would be written as
 	// untracked text). A composition still going on is written marked as it stands, the session left as it is
@@ -175,6 +255,15 @@ export function inThreadEditingHost(
 
 		return docs.size === 0 ? saveInput : { ...saveInput, docs }
 	}
+	const held = async <T>(run: () => Promise<T>): Promise<T> => {
+		const release = holdMerges()
+
+		try {
+			return await run()
+		} finally {
+			release()
+		}
+	}
 	const prepare = (sessions: readonly DocxEditorSession[] | undefined, checksums: boolean): Promise<DocxPreparedSave> => {
 		const input = flushed()
 
@@ -191,7 +280,8 @@ export function inThreadEditingHost(
 			{ slicing: writing.slicing, checksums }
 		)
 	}
-	const save = async (sessions?: readonly DocxEditorSession[]): Promise<DocxWritten> => {
+	const save = (sessions?: readonly DocxEditorSession[]): Promise<DocxWritten> => held(() => written(sessions))
+	const written = async (sessions?: readonly DocxEditorSession[]): Promise<DocxWritten> => {
 		// Handles added after this may be on their way into a command: the release below keeps them.
 		const through = saveInput?.context.media.lastHandle ?? 0
 		const prepared = await prepare(sessions, true)
@@ -232,9 +322,12 @@ export function inThreadEditingHost(
 			options.view === "original" ? RevisionView.Original : options.view === "markup" ? RevisionView.Markup : RevisionView.Final
 		let edits: DocumentEdits | undefined
 		const engineServices = services(options)
+		// While the body is built and proved, the engine's turns (its layout) wait once the first pages are laid
+		// out: editing comes as soon as it would without layout beyond the pages in view.
+		const priority = new OpenPriority()
 		const engine: DocxEngine = new DocxEngine(
 			source,
-			engineServices,
+			{ ...engineServices, yield: priority.engineYield(engineServices.yield) },
 			event => {
 				if (closed) return
 
@@ -250,7 +343,9 @@ export function inThreadEditingHost(
 					return { model: edits.model, edits }
 				},
 				opened(open: DocxEngineOpen) {
-					void start(open).catch((error: unknown) => reject(error))
+					void start(open)
+						.catch((error: unknown) => reject(error))
+						.finally(() => priority.release())
 				}
 			}
 		)
@@ -277,6 +372,9 @@ export function inThreadEditingHost(
 				now: engineServices.now ?? (() => Date.now())
 			}
 			const proof = editing.proof?.(context)
+
+			priority.hold(open.layout)
+
 			// With a proof the body is proved below, in slices; other stories prove as their sessions start.
 			const bodyOptions = proof === undefined ? (editing.session ?? {}) : { ...editing.session, proof: null }
 			const storyOptions = proof === undefined ? editing.session : { ...editing.session, proof }
@@ -289,6 +387,13 @@ export function inThreadEditingHost(
 
 			if (closed) return
 
+			// A long body's review index is read now, in slices, not in the task that first needs it.
+			await prepareStoryReviewIndex(session, slicing, () => closed)
+
+			if (closed) return
+
+			priority.release()
+
 			const editor = new PagedEditor({
 				session,
 				edits,
@@ -300,6 +405,7 @@ export function inThreadEditingHost(
 
 			paged = editor
 			current = editor
+			holdMerges = () => editor.edits.holdCompaction()
 			writing = {
 				// A save under way when the document closes stops at its next turn.
 				slicing: {
@@ -341,8 +447,10 @@ export function inThreadEditingHost(
 				saveInput = undefined
 				writing?.zipper.dispose()
 				writing = undefined
+				holdMerges = () => () => undefined
 				paged?.dispose()
 				paged?.session.dispose()
+				priority.release()
 				engine.close()
 				reject(new Error("closed"))
 			}
@@ -354,7 +462,7 @@ export function inThreadEditingHost(
 		editor,
 		saveInput: flushed,
 		save,
-		prepare: sessions => prepare(sessions, false),
+		prepare: sessions => held(() => prepare(sessions, false)),
 		proofLocked: () => proofLocked,
 		setAuthor(name) {
 			author = name

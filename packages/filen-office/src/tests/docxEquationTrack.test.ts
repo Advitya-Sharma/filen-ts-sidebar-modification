@@ -589,6 +589,24 @@ describe("edits, deletions and changes of equations holding changes", () => {
 		expect(xml).toContain(`<m:ctrlPr>${properties}</m:ctrlPr>`)
 		expect(xml).toContain(`<m:r>${properties}<m:t>a</m:t></m:r>`)
 	})
+
+	it("keeps the namespaces of the formatting a tracked new equation takes, through an edit", async () => {
+		const opened = await pagedEditor(
+			docx('<w:p><w:r><w:rPr><w:sz w:val="32"/><w14:ligatures w14:val="standardContextual"/></w:rPr><w:t>Big</w:t></w:r></w:p>')
+		)
+		const editor = opened.editor
+
+		editor.dispatch(editor.session.state.tr.setSelection(TextSelection.create(editor.session.state.doc, 3)))
+		tracked(editor, "Ada")
+		expect(await run_(editor, { type: "equation.insert", latex: "\\frac{a}{b}", display: false })).toBe(true)
+		expect(selectEquation(editor.session, maths(editor.session.state.doc)[0]?.pos ?? -1)).toBe(true)
+		expect(await run_(editor, { type: "equation.edit", latex: "\\frac{a}{c}" })).toBe(true)
+
+		const xml = await documentXml(await saved(editor, opened))
+
+		expect(xml).toContain('<w14:ligatures w14:val="standardContextual"/>')
+		expect(xml).not.toMatch(/<ligatures\b/)
+	})
 })
 
 // ---- fix round 2 ---------------------------------------------------------------------------------------------

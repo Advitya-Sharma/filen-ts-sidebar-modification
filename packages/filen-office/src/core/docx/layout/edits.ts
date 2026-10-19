@@ -31,6 +31,9 @@ export interface LayoutEdits {
 	readonly body: BodyBlocks | undefined
 	// Other stories (headers, footers, notes) whose block structure changed: their blocks, by story index.
 	readonly stories?: ReadonlyMap<number, Float64Array>
+	// Tables whose rows changed (rows added, removed or written again): their rows in order (refs, some of
+	// overlay parts), by the table laid out (a ref).
+	readonly rows?: ReadonlyMap<number, Float64Array>
 	// Whether a part's paragraphs are laid out by the body flow (the body part and overlays of its blocks):
 	// what the flow counted for them is forgotten when layout restarts.
 	bodyPart(part: number): boolean
@@ -46,4 +49,30 @@ export interface LayoutEdits {
 	// Where notes go as edited, document-wide (undefined: the settings').
 	readonly footnotePosition?: string | undefined
 	readonly endnotePosition?: string | undefined
+	// Edited blocks' overlays merged into fewer parts while the layout is idle: whether a merge is due; one
+	// region's (`pages`: by part index, the first and last page showing it), with its blocks to lay out again
+	// (DirtyBlock, from layout/document) and the parts it leaves, readable until no page shows them
+	// (compacted()). Undefined when nothing is merged.
+	compactDue?(): boolean
+	// How long input is to have been idle before a merge due starts (0: now), and whether a save holds merges
+	// off meanwhile.
+	compactWait?(): number
+	compactHeld?(): boolean
+	compact?(pages: ReadonlyMap<number, readonly [number, number]>, due: () => boolean): Compaction | undefined
+	// The parts of records merges and edits left readable (pages showed them), and their release: those of the
+	// parts no page shows (`shown`) go.
+	retiredParts?(): ReadonlySet<number>
+	compacted?(shown: ReadonlySet<number>): void
+	// Blocks an edit of most of the story left to be written in those slices (shown as they were meanwhile):
+	// the layout does not settle before they are.
+	pending?(): boolean
+}
+
+// One merge of overlays (see LayoutEdits.compact).
+export interface Compaction {
+	readonly dirty: readonly { readonly section: number; readonly ref: number; readonly cells?: readonly number[] }[]
+	readonly parts: ReadonlySet<number>
+	// Where to lay out again from instead (blocks no overlay part tells): the first changed block (its index in
+	// its section's flow) and, when a table, its changed rows.
+	readonly from?: { readonly section: number; readonly index: number; readonly rows: Compaction["dirty"] } | undefined
 }

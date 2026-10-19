@@ -1,4 +1,4 @@
-import { boolArg, intArg, optional, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
+import { boolArg, hasControl, intArg, optional, stringArg, type DocxCommandInfo, type DocxCommandParser } from "./base"
 
 // Fields, bookmarks and tables of contents. Updates are explicit, as in Word (Update Field, F9, Update Table):
 // they wait for layout (page numbers), so they run asynchronously.
@@ -88,7 +88,10 @@ export const parseFieldCommand: DocxCommandParser<FieldCommand> = (type, value) 
 		case "insert.field": {
 			const instruction = stringArg(value, "instruction", 255, 1)
 
-			return instruction === undefined || !INSTRUCTION.test(instruction) || !CATALOGUE_TYPES.has(fieldCodeType(instruction))
+			return instruction === undefined ||
+				!INSTRUCTION.test(instruction) ||
+				hasControl(instruction) ||
+				!CATALOGUE_TYPES.has(fieldCodeType(instruction))
 				? undefined
 				: { type, instruction }
 		}

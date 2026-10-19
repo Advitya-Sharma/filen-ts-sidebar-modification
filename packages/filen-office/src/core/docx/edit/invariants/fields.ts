@@ -18,7 +18,7 @@ import { SetMarkSetsStep, SetMarksStep, isAddMarkLike, isMarkStep } from "../mar
 import { RevisionFlag } from "../../model/index"
 import { isDeleted, markable, paragraphChange, planOf, setParagraphChange, type RevisionStamp } from "../../review/track"
 import { FORMATTING_MARKS, NO_SOURCE, docxSchema, survivorsOf, type MarkerAttrs, type MarkerList } from "../schema"
-import { changedRanges, isInternal, isRemarking, markInternal, reinsert } from "./core"
+import { changedRanges, isInternal, isRemarking, markInternal, nodesBetweenRanges, reinsert } from "./core"
 import type { InvariantStage } from "./index"
 
 // Fields spanning paragraphs (a table of contents: field_char begin, its instruction texts when it is the
@@ -979,8 +979,51 @@ function unformattable(transactions: readonly Transaction[], tr: Transaction): v
 	})
 }
 
+// A field spanning paragraphs (a table of contents built as paragraphs) whose begin and end an edit puts in one
+// paragraph (that paragraph joined with the one holding its end, a deletion across its paragraphs) is refused:
+// read back, a field in one paragraph is one field atom (edit/build.ts), not the characters the editor holds, so
+// no save could write what the editor shows.
+function collapsedField(tr: Transaction): string | undefined {
+	if (!tr.docChanged || isHistoryTransaction(tr) || isInternal(tr)) return undefined
+
+	let found = false
+
+	// One walk however many ranges a transaction changed (Replace All changes one per match).
+	nodesBetweenRanges(tr.doc, changedRanges(tr, false, NO_ATTRS), node => {
+		if (found || node.isTextblock) {
+			if (!found && node.type === nodes.paragraph) found = beginsAndEnds(node)
+
+			return false
+		}
+
+		return !node.isLeaf
+	})
+
+	return found ? "A field spanning paragraphs would begin and end in one paragraph" : undefined
+}
+
+const NO_ATTRS: ReadonlySet<string> = new Set()
+
+// Whether a paragraph holds a field character begin and the end that closes it.
+function beginsAndEnds(paragraph: Node): boolean {
+	let open = 0
+
+	for (let index = 0; index < paragraph.childCount; index++) {
+		const child = paragraph.child(index)
+
+		if (child.type !== nodes.field_char) continue
+
+		const kind = child.attrs["kind"] as string
+
+		if (kind === "begin") open++
+		else if (kind === "end" && open > 0) return true
+	}
+
+	return false
+}
+
 export const FIELDS_STAGE: InvariantStage | null = {
 	name: "fields",
-	violation: brokenMove,
+	violation: tr => brokenMove(tr) ?? collapsedField(tr),
 	repair
 }

@@ -311,4 +311,16 @@ describe("reflow stylesheet", () => {
 		expect(rule(".fo-docx-reflow-p")).toContain("display: flow-root")
 		expect(rule(".fo-docx-reflow-table")).not.toMatch(/\bmargin:/)
 	})
+
+	it("hides tracked rows and cells by token, in the revision views that do not have them (one both is in neither)", () => {
+		const css = readFileSync(join(import.meta.dirname, "..", "css", "docx-reflow.css"), "utf8")
+		const hiding = (/([^{}]*data-fo-revision[^{}]*)\{\s*display: none;/.exec(css)?.[1] ?? "")
+			.split(",")
+			.map(selector => selector.trim())
+
+		for (const element of ["tr", "td"]) {
+			expect(hiding).toContain(`.fo-docx-reflow[data-fo-revisions="final"] ${element}[data-fo-revision~="del"]`)
+			expect(hiding).toContain(`.fo-docx-reflow[data-fo-revisions="original"] ${element}[data-fo-revision~="ins"]`)
+		}
+	})
 })

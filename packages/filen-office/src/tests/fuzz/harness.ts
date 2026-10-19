@@ -30,6 +30,7 @@ import {
 import { DocumentEdits, PagedEditor } from "@filen/office/core/docx/paged"
 import { DocxSaveError, saveDocx, writerProof } from "@filen/office/core/docx/write"
 import { HitTester } from "@filen/office/core/text"
+import { writtenJustification } from "../../core/docx/write/paragraph"
 import { SCHEMA_CACHE, transitionalSchemas } from "../../scripts/wmlOrder"
 import { HmtxMeasurer, loadDocx, type LoadedDocx } from "../layoutFixtures"
 import type { FuzzConfig } from "./config"
@@ -187,12 +188,27 @@ export async function freshPages(bytes: Uint8Array, editor: PagedEditor): Promis
 	return layout.pages.map(page => digestPage(layout, page, media))
 }
 
-export async function savePaged(run: PagedRun): Promise<Uint8Array> {
+export async function savePaged(run: PagedRun): Promise<{ bytes: Uint8Array; changedParts: readonly string[] }> {
 	const result = await saveDocx({ pkg: run.pkg, context: run.context, sessions: run.editor.sessions })
 
 	if (result.bytes === undefined) throw new Error("Save returned no bytes")
 
-	return result.bytes
+	return { bytes: result.bytes, changedParts: result.changedParts }
+}
+
+// Hears the typed reasons each of the editor's sessions refuses a user edit with (sessions added later are
+// subscribed on the next call).
+export function refusalListener(editor: PagedEditor, onReason: (reason: string) => void): () => void {
+	const heard = new WeakSet<DocxEditorSession>()
+
+	return () => {
+		for (const session of editor.sessions) {
+			if (heard.has(session)) continue
+
+			heard.add(session)
+			session.onRefused(onReason)
+		}
+	}
 }
 
 // Every story's current document: a step applied an edit when any of them changed.
@@ -431,6 +447,15 @@ export function markerCounts(bytes: Uint8Array, out = new Map<string, number>())
 	return out
 }
 
+// `document` without the content of its text boxes.
+export function withoutTextBoxes(document: Uint8Array): Uint8Array {
+	const text = new TextDecoder().decode(document)
+
+	return text.includes("<w:txbxContent")
+		? new TextEncoder().encode(text.replace(/<w:txbxContent\b[\s\S]*?<\/w:txbxContent>/g, ""))
+		: document
+}
+
 // Blocks and atoms the writer copies as their source bytes, whatever stories sit in them (text boxes, the
 // mc:Fallback copy of one): their markers are counted in those bytes.
 const BYTE_COPIES: ReadonlySet<NodeType> = new Set([
@@ -442,8 +467,8 @@ const BYTE_COPIES: ReadonlySet<NodeType> = new Set([
 
 // Range markers and comment references a session's story is written with (inline, in block and story lists,
 // in atoms and locked blocks kept as bytes), keyed "<file element name>:<w:id>" as the damage fuzz counts a
-// written file's.
-export function editorMarkers(session: DocxEditorSession): Map<string, number> {
+// written file's. `textBoxes` false leaves out those in the text boxes of drawings kept as bytes.
+export function editorMarkers(session: DocxEditorSession, textBoxes = true): Map<string, number> {
 	const out = new Map<string, number>()
 	const part = session.context.model.parts[session.story.story.part]
 	const add = (list: unknown): void => {
@@ -463,7 +488,9 @@ export function editorMarkers(session: DocxEditorSession): Map<string, number> {
 
 		if (part === undefined || item === null || item < 0) return false
 
-		markerCounts(part.document.bytes.subarray(part.start(item), part.byteEnd(item)), out)
+		const bytes = part.document.bytes.subarray(part.start(item), part.byteEnd(item))
+
+		markerCounts(textBoxes ? bytes : withoutTextBoxes(bytes), out)
 
 		return true
 	}
@@ -486,7 +513,8 @@ export function editorMarkers(session: DocxEditorSession): Map<string, number> {
 	return out
 }
 
-// The editor's paragraphs as the independent reader signs a written paragraph: style, list, alignment, text
+// The editor's paragraphs as the independent reader signs a written paragraph: style, list, alignment (as written:
+// start and end as left and right), text
 // and per-character bold/italic/underline/strike/deleted. Paragraphs of locked blocks are left out.
 export function editorSignatures(doc: Node): ParagraphSignature[] {
 	const marks = docxSchema.marks
@@ -501,7 +529,7 @@ export function editorSignatures(doc: Node): ParagraphSignature[] {
 			node.attrs["styleId"],
 			numId === null ? null : numId < 0 ? "NEW" : numId,
 			node.attrs["ilvl"],
-			node.attrs["align"]
+			typeof node.attrs["align"] === "string" ? writtenJustification(node.attrs["align"]) : node.attrs["align"]
 		])
 		let text = ""
 		let fmt = ""
@@ -528,7 +556,8 @@ export function editorSignatures(doc: Node): ParagraphSignature[] {
 					underline === undefined ? "" : String(underline.attrs["style"]),
 					toggleValue(marks.strike.isInSet(set))
 				].join("|") + (marks.deletion.isInSet(set) ? "|D" : "")
-			const value = child.text ?? ""
+			// Written run by run, a lone surrogate (a raw edit can split a pair) as U+FFFD.
+			const value = (child.text ?? "").toWellFormed()
 
 			text += value
 			fmt += `${format};`.repeat(value.length)

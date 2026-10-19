@@ -21,6 +21,7 @@ import {
 	type MarkerList,
 	type StoryDoc
 } from "@filen/office/core/docx/edit"
+import { shownFieldText } from "../core/docx/layout/fields"
 import { openSynthetic, p, type SyntheticDocx } from "./docxSynthetic"
 
 // Opening documents for editing in tests, and a structural comparison of an editing document with the
@@ -126,7 +127,7 @@ export function nodeText(paragraph: Node): string {
 				break
 			}
 			case "field":
-				out += child.attrs["result"] as string
+				out += shownFieldText(child.attrs["result"] as string, child.attrs["instruction"] as string)
 
 				break
 			case "run_object":

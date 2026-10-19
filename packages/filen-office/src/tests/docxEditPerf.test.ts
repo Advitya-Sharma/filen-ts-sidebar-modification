@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { AllSelection, TextSelection } from "prosemirror-state"
 import { describe, expect, it } from "vitest"
 import { DocxDocBuilder, DocxEditorSession, docxSchema } from "@filen/office/core/docx/edit"
+import { key, memory, openEditor, percentile as share, placeCaret, spreadPosition, typeBursts } from "../bench/editHarness"
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 
@@ -103,6 +104,35 @@ describe("docx editing performance", () => {
 		expect(percentile(enter, 0.95)).toBeLessThan(48)
 		expect(percentile(backspace, 0.95)).toBeLessThan(48)
 	})
+
+	// As the web edits: the in-thread editing host (sliced open with the writer's proof), the pages in view laid
+	// out in the key's task, the toolbar's snapshot read after each key.
+	it(
+		"opens the 300-page fixture for editing and types into it in page view under a frame per keystroke",
+		{ timeout: 120_000 },
+		async () => {
+			const before = memory()
+			const opened = await openEditor(new Uint8Array(readFileSync(FIXTURE)))
+			const heap = memory().heapMb - before.heapMb
+			const editor = opened.editor
+
+			placeCaret(editor, spreadPosition(editor.session.state, 5000))
+
+			const first = key(editor, "type")?.ms ?? 0
+			const typed = await typeBursts(editor, 10, 20, ["type"], 0, 0)
+			const enter = await typeBursts(editor, 5, 10, ["enter"], 50, 0)
+			const p95 = share(typed.times, 0.95)
+
+			console.log(
+				`300p page view: open ${opened.editorMs.toFixed(0)} ms, heap ${heap.toFixed(1)} MB, longest open task ${opened.tasks.maxMs.toFixed(0)} ms; ` +
+					`first key ${first.toFixed(2)} ms; keystroke p50 ${share(typed.times, 0.5).toFixed(2)} ms p95 ${p95.toFixed(2)} ms; enter p95 ${share(enter.times, 0.95).toFixed(2)} ms`
+			)
+			opened.close()
+			expect(typed.refused).toBe(0)
+			// The target is 16 ms (src/bench/editBench.ts measures the gate); the bound leaves room for loaded CI machines.
+			expect(p95).toBeLessThan(48)
+		}
+	)
 
 	it.skipIf(!existsSync(TARIFF))("builds the Tariff document", { timeout: 300_000 }, async () => {
 		const { session, buildMs, sessionMs, heap, blocks } = await measureBuild(TARIFF)

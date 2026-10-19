@@ -93,13 +93,14 @@ vi.mock("@/features/preview/components/docxReflow.logic", async importOriginal =
 }))
 vi.mock("@/features/preview/components/docxReflowSurface", () => ({
 	DocxReflowMenuItem: () => null,
-	DocxReflowSurface: (props: { interactions?: DocxEditorInteractions }) => {
+	DocxReflowSurface: (props: { interactions?: DocxEditorInteractions; describedBy?: string }) => {
 		hooks.interactions = props.interactions
 
 		return (
 			<div
 				role="textbox"
 				aria-label="reflowed"
+				aria-describedby={props.describedBy}
 			/>
 		)
 	}
@@ -151,12 +152,12 @@ registerAllActions()
 
 const FIXTURES = join(process.cwd(), "../filen-office/src/tests/fixtures")
 
-async function openEditor(file: string): Promise<PagedEditor> {
+async function openEditor(file: string, writable = true): Promise<PagedEditor> {
 	render(
 		<DocxEditView
 			bytes={new Uint8Array(readFileSync(join(FIXTURES, file)))}
 			alt="report.docx"
-			writable
+			writable={writable}
 			renamed={false}
 			onDirtyChange={() => undefined}
 			saveRef={{ current: null }}
@@ -255,6 +256,23 @@ describe("DocxEditView routing", () => {
 		await waitFor(() => {
 			expect(screen.getByRole("button", { name: /^Zoom 100%/ })).toBeTruthy()
 		})
+	})
+
+	it("describes the editing area's keys (Tab stays in it, Escape leaves) while it can be edited", async () => {
+		for (const reflow of [false, true]) {
+			hooks.reflow = reflow
+			await openEditor("01-plain.docx")
+			expect(screen.getAllByRole("textbox")[0]?.getAttribute("aria-describedby")).toBeTruthy()
+			expect(document.getElementById(screen.getAllByRole("textbox")[0]?.getAttribute("aria-describedby") ?? "")?.textContent).toBe(
+				"Tab inserts a tab or moves to the next table cell. Press Escape to leave the editor."
+			)
+			cleanup()
+
+			await openEditor("01-plain.docx", false)
+			expect(screen.getAllByRole("textbox")[0]?.hasAttribute("aria-describedby")).toBe(false)
+			expect(screen.queryByText(/Press Escape to leave the editor/)).toBeNull()
+			cleanup()
+		}
 	})
 
 	it("leaves the context menu, a paste and a drop in the review layer to it", async () => {

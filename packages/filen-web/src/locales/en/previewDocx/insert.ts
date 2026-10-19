@@ -179,6 +179,8 @@ export const previewDocxInsert = {
 	previewDocxLinkBookmarks: "Bookmarks",
 	/** Docx editor — link dialog: shown instead of the place picker when there is nowhere to link to */
 	previewDocxLinkNoPlaces: "This document has no headings or bookmarks to link to.",
+	/** Docx editor — link dialog: the address has a scheme a new link cannot have (only web, email and phone links) */
+	previewDocxLinkSchemeRefused: "Links can go to web (http, https), email (mailto) and phone (tel) addresses only.",
 
 	// ── Symbols ──────────────────────────────────────────────────────────────
 	/** Docx editor — symbol dialog title */

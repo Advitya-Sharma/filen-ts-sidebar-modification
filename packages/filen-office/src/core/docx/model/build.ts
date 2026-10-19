@@ -429,7 +429,9 @@ class PartBuilder {
 		const top = storyKind === "body"
 
 		for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
-			this.content(child, item, depth, Ctx.Block, top)
+			// A table yields after each row too (content() would build it whole).
+			if (depth <= MAX_DEPTH && reader.wellFormed(child) && reader.code(child) === El.Tbl) yield* this.tableSteps(child, item, depth)
+			else this.content(child, item, depth, Ctx.Block, top)
 
 			yield
 		}
@@ -1263,6 +1265,11 @@ class PartBuilder {
 	}
 
 	private tableElement(node: number, parent: number, depth: number): void {
+		drain(this.tableSteps(node, parent, depth))
+	}
+
+	// tableElement yielding after each row.
+	private *tableSteps(node: number, parent: number, depth: number): Generator<void, void> {
 		const document = this.document
 		const reader = this.reader
 		const table = this.table
@@ -1295,6 +1302,8 @@ class PartBuilder {
 				this.childRevision(child, El.TblGridChange, Revision.TableGrid, item)
 			} else {
 				this.content(child, item, depth + 1, Ctx.Rows, false)
+
+				yield
 			}
 		}
 

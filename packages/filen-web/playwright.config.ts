@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import { defineConfig, devices, type Project } from "@playwright/test"
 
@@ -10,6 +11,11 @@ try {
 } catch {
 	// no local .env — credentials come from the environment (or the authed specs skip)
 }
+
+// One id per run of the suite, set here in the runner and inherited by every worker it starts (each
+// loads this file again and keeps it): run-scoped files on disk, the fixture manifest (e2e/fixtures.ts),
+// are keyed by it, so two runs at once never read or delete each other's.
+process.env["E2E_RUN_ID"] ??= randomUUID()
 
 // E2E_PORT serves a second build beside one already on the default port (a reused server is the one there).
 const PORT = Number(process.env["E2E_PORT"] ?? "4173")
@@ -38,7 +44,7 @@ const BASE_URL = `http://localhost:${String(PORT)}`
 // creating a scratch directory and uploading its own files. Provisioning was the only reason those
 // specs ever took the lock.
 const READ_SPECS =
-	/\/(archive-browse|archive-dialogs|auth|boot|contacts|docx-equation|docx-insert|docx-smoke|downloads|drive|drive-marquee|keymap|narrow-viewport|no-coi|no-opfs|preview-media|preview-media-formats|public-links|register|reset|settings|shell|shortcuts|storage|sw-version|thumbnails|touch)\.spec\.ts$/
+	/\/(archive-browse|archive-dialogs|auth|boot|contacts|docx-a11y|docx-equation|docx-insert|docx-smoke|docx-touch|downloads|drive|drive-marquee|keymap|narrow-viewport|no-coi|no-opfs|preview-media|preview-media-formats|public-links|register|reset|settings|shell|shortcuts|storage|sw-version|thumbnails|touch)\.spec\.ts$/
 // Own surfaces, own limits: notes hits the free plan's 10-note cap, chats the conversation-create rate
 // limiter. Neither touches the drive lock, but both race THEMSELVES, so each owns a serial lane.
 const NOTES_SPEC = /\/notes\.spec\.ts$/

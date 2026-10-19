@@ -1,9 +1,10 @@
-import { Fragment, Slice, type Mark, type MarkType, type Node, type NodeType } from "prosemirror-model"
+import { Fragment, Slice, type Mark, type MarkType, type Node, type NodeType, type ResolvedPos } from "prosemirror-model"
 import { Plugin, PluginKey, type EditorState, type Transaction } from "prosemirror-state"
 import {
 	AddNodeMarkStep,
 	AttrStep,
 	DocAttrStep,
+	MapResult,
 	RemoveNodeMarkStep,
 	ReplaceAroundStep,
 	ReplaceStep,
@@ -64,12 +65,401 @@ export function isCommand(tr: Transaction): boolean {
 	return commands.has(tr)
 }
 
+// Typing the change tracker marked as inserted in its own step: that mark is no copy of another revision.
+const typing = new WeakSet<Transaction>()
+
+export function markTyping(tr: Transaction): Transaction {
+	typing.add(tr)
+
+	return tr
+}
+
 // Steps that only rebuild blocks with tracking marks and records (a large tracked marking without format
 // records, review/track.ts): they bring no content, field, control or formatting the blocks had not.
 const remarkings = new WeakSet<Step>()
 
 export function markRemarking(step: Step): void {
 	remarkings.add(step)
+}
+
+// A step that rebuilds blocks putting back the same nodes around what it changes (Replace All): it declares the
+// replaces it amounts to (in document order), maps positions as they do (RebuildMap), and every judgment of steps
+// here reads them instead of its range.
+export interface Replace {
+	readonly from: number
+	readonly to: number
+	readonly slice: Slice
+}
+
+const NOWHERE = Object.freeze({ index: -1, shift: 0 })
+// StepMap's deletion flags.
+const DELETED_BEFORE = 1
+const DELETED_AFTER = 2
+const DELETED_ACROSS = 4
+const DELETED_SIDE = 8
+
+// A MapResult as StepMap makes one (its constructor is ProseMirror's own, not in its types).
+function mapResult(pos: number, deleted: number, recover: number | null): MapResult {
+	return Reflect.construct(MapResult, [pos, deleted, recover]) as MapResult
+}
+
+// A StepMap of many ranges ([start, oldSize, newSize] each, sorted), mapping a position by a binary search over
+// them (a StepMap walks every range before it, which a rebuild of thousands of replaces makes quadratic).
+// Results equal StepMap's, recovery values included.
+class RebuildMap extends StepMap {
+	private readonly source: readonly number[]
+	private readonly flipped: boolean
+	// By range, in the coordinates mapped from: where it starts, its size there and after, and the shift of what
+	// comes before it.
+	private readonly starts: Float64Array
+	private readonly sizes: Float64Array
+	private readonly results: Float64Array
+	private readonly shifts: Float64Array
+	private readonly total: number
+
+	constructor(ranges: readonly number[], inverted = false) {
+		super(ranges, inverted)
+		this.source = ranges
+		this.flipped = inverted
+
+		const count = ranges.length / 3
+
+		this.starts = new Float64Array(count)
+		this.sizes = new Float64Array(count)
+		this.results = new Float64Array(count)
+		this.shifts = new Float64Array(count)
+
+		let shift = 0
+
+		for (let k = 0; k < count; k++) {
+			const start = ranges[3 * k] ?? 0
+			const oldSize = ranges[3 * k + 1] ?? 0
+			const newSize = ranges[3 * k + 2] ?? 0
+
+			this.starts[k] = inverted ? start + shift : start
+			this.sizes[k] = inverted ? newSize : oldSize
+			this.results[k] = inverted ? oldSize : newSize
+			this.shifts[k] = inverted ? -shift : shift
+			shift += newSize - oldSize
+		}
+
+		this.total = inverted ? -shift : shift
+	}
+
+	// The first range holding `pos` (-1: none), and the shift of what is before `pos` otherwise.
+	private locate(pos: number): { readonly index: number; readonly shift: number } {
+		const starts = this.starts
+		let lo = 0
+		let hi = starts.length - 1
+		let last = -1
+
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1
+
+			if ((starts[mid] ?? 0) <= pos) {
+				last = mid
+				lo = mid + 1
+			} else hi = mid - 1
+		}
+
+		if (last < 0) return NOWHERE
+
+		const sizes = this.sizes
+		let index = last
+
+		// Ranges touching one another (a deletion, then an insertion where it ends): the first holding it.
+		while (index > 0 && (starts[index - 1] ?? 0) + (sizes[index - 1] ?? 0) >= pos) index--
+
+		if ((starts[index] ?? 0) + (sizes[index] ?? 0) >= pos) return { index, shift: 0 }
+
+		return { index: -1, shift: last + 1 < starts.length ? (this.shifts[last + 1] ?? 0) : this.total }
+	}
+
+	override map(pos: number, assoc = 1): number {
+		const { index, shift } = this.locate(pos)
+
+		if (index < 0) return pos + shift
+
+		const start = this.starts[index] ?? 0
+		const size = this.sizes[index] ?? 0
+		const side = size === 0 ? assoc : pos === start ? -1 : pos === start + size ? 1 : assoc
+
+		return start + (this.shifts[index] ?? 0) + (side < 0 ? 0 : (this.results[index] ?? 0))
+	}
+
+	// StepMap's result for the range holding `pos` (its deletion flags, and a recovery value indexing that range
+	// in StepMap's encoding, which recover() and mirrored Mappings read), or for none.
+	override mapResult(pos: number, assoc = 1): MapResult {
+		const { index, shift } = this.locate(pos)
+
+		if (index < 0) return mapResult(pos + shift, 0, null)
+
+		const start = this.starts[index] ?? 0
+		const size = this.sizes[index] ?? 0
+		const end = start + size
+		const side = size === 0 ? assoc : pos === start ? -1 : pos === end ? 1 : assoc
+		const result = start + (this.shifts[index] ?? 0) + (side < 0 ? 0 : (this.results[index] ?? 0))
+		const recover = pos === (assoc < 0 ? start : end) ? null : index + (pos - start) * 0x10000
+		let deleted = 0
+
+		if (size > 0) {
+			deleted |= pos === start ? DELETED_AFTER : pos === end ? DELETED_BEFORE : DELETED_ACROSS
+
+			if (assoc < 0 ? pos !== start : pos !== end) deleted |= DELETED_SIDE
+		}
+
+		return mapResult(result, deleted, recover)
+	}
+
+	override invert(): StepMap {
+		return new RebuildMap(this.source, !this.flipped)
+	}
+}
+
+export class RebuildStep extends ReplaceStep {
+	readonly replaces: readonly Replace[]
+	// What it edits beyond its replaces ([from, to] pairs before it): text a tracked replace leaves to be marked
+	// deleted, which protection judges as any edit of it.
+	readonly touched: readonly number[]
+
+	constructor(from: number, to: number, slice: Slice, replaces: readonly Replace[], touched: readonly number[] = []) {
+		super(from, to, slice)
+		this.replaces = replaces
+		this.touched = touched
+	}
+
+	override getMap(): StepMap {
+		if (this.replaces.length === 0) return StepMap.empty
+
+		return new RebuildMap(this.replaces.flatMap(replace => [replace.from, replace.to - replace.from, replace.slice.size]))
+	}
+
+	// The rebuild back: each replace's content where it put its own (sliced from the container holding it).
+	override invert(doc: Node): ReplaceStep {
+		let shift = 0
+		const walk = new OrderedDoc(doc)
+		const replaces = this.replaces.map(replace => {
+			const from = replace.from + shift
+
+			shift += replace.slice.size - (replace.to - replace.from)
+
+			return { from, to: from + replace.slice.size, slice: walk.slice(replace.from, replace.to) }
+		})
+
+		return new RebuildStep(this.from, this.from + this.slice.size, doc.slice(this.from, this.to), replaces)
+	}
+}
+
+// The replaces a replace step makes (in the document before it): its own range, or a rebuild's.
+export function replacesOf(step: ReplaceStep): readonly Replace[] {
+	return step instanceof RebuildStep ? step.replaces : [step]
+}
+
+// Where each of a step's replaces ends up in the document after it ([from, to] pairs).
+export function replacedAfter(step: ReplaceStep): number[] {
+	const out: number[] = []
+	let shift = 0
+
+	for (const replace of replacesOf(step)) {
+		const from = replace.from + shift
+
+		out.push(from, from + replace.slice.size)
+		shift += replace.slice.size - (replace.to - replace.from)
+	}
+
+	return out
+}
+
+// Lookups in one document at positions met in growing order, each walking on from the last (ProseMirror's own
+// walk down from the document's first child each time, which many ranges of a long document make quadratic).
+// A position before the last one walks again from the start of the container it is in.
+export class OrderedDoc {
+	// The containers walked into, outermost first: content start, and the child last looked at (index, offset).
+	private readonly path: { node: Node; start: number; index: number; offset: number }[]
+
+	constructor(doc: Node) {
+		this.path = [{ node: doc, start: 0, index: 0, offset: 0 }]
+	}
+
+	// Walks to the innermost container whose content holds [from, to] (no child of it holding all of it).
+	private enclose(from: number, to: number): { node: Node; start: number; index: number; offset: number } {
+		const path = this.path
+
+		while (path.length > 1) {
+			const top = path[path.length - 1] as (typeof path)[number]
+
+			if (from >= top.start && to <= top.start + top.node.content.size) break
+
+			path.pop()
+		}
+
+		for (;;) {
+			const top = path[path.length - 1] as (typeof path)[number]
+			const node = top.node
+
+			if (from - top.start < top.offset) {
+				top.index = 0
+				top.offset = 0
+			}
+
+			while (top.index < node.childCount && top.offset + node.child(top.index).nodeSize <= from - top.start) {
+				top.offset += node.child(top.index).nodeSize
+				top.index++
+			}
+
+			const child = node.maybeChild(top.index)
+			const at = top.start + top.offset
+
+			if (child === null || child.isInline || child.content.size === 0 || from <= at || to >= at + child.nodeSize) return top
+
+			path.push({ node: child, start: at + 1, index: 0, offset: 0 })
+		}
+	}
+
+	// doc.nodesBetween(from, to, f).
+	nodesBetween(from: number, to: number, f: (node: Node, pos: number, parent: Node | null, index: number) => boolean | void): void {
+		const top = this.enclose(from, to)
+		const path = this.path
+
+		for (let k = 1; k < path.length; k++) {
+			const level = path[k] as (typeof path)[number]
+			const parent = path[k - 1] as (typeof path)[number]
+
+			if (f(level.node, level.start - 1, parent.node, parent.index) === false) return
+		}
+
+		// From the child holding `from` (ProseMirror's walk counts from the first child).
+		const node = top.node
+		const local = from - top.start
+		const localTo = to - top.start
+
+		for (let index = top.index, offset = top.offset; index < node.childCount && offset < localTo; index++) {
+			const child = node.child(index)
+			const end = offset + child.nodeSize
+
+			if (end > local && f(child, top.start + offset, node, index) !== false && child.content.size > 0)
+				child.nodesBetween(
+					Math.max(0, local - offset - 1),
+					Math.min(child.content.size, localTo - offset - 1),
+					f,
+					top.start + offset + 1
+				)
+
+			offset = end
+		}
+	}
+
+	// The content between `from` and `to`, sliced from the innermost container holding both (open no deeper).
+	slice(from: number, to: number): Slice {
+		const top = this.enclose(from, to)
+
+		return top.node.slice(from - top.start, to - top.start)
+	}
+
+	// doc.resolve(pos), resolved in the innermost container holding it: depths count from that container, and
+	// `ancestors` are the nodes around it (outermost first, the document left out).
+	resolve(pos: number): { readonly $pos: ResolvedPos; readonly start: number; readonly ancestors: readonly Node[] } {
+		const top = this.enclose(pos, pos)
+
+		return { $pos: top.node.resolve(pos - top.start), start: top.start, ancestors: this.path.slice(1).map(level => level.node) }
+	}
+}
+
+// [from, to] pairs sorted by `from` (a copy).
+function sortedPairs(flat: readonly number[]): number[] {
+	const pairs: [number, number][] = []
+
+	for (let k = 0; k < flat.length; k += 2) pairs.push([flat[k] ?? 0, flat[k + 1] ?? 0])
+
+	return pairs.sort((a, b) => a[0] - b[0]).flat()
+}
+
+// doc.nodesBetween over each of the [from, to] pairs `flat` lists, walked in order of `from` (one walk of the
+// document however many there are); `f` returning false stops the walk below a node, as there.
+export function nodesBetweenRanges(
+	doc: Node,
+	flat: readonly number[],
+	f: (node: Node, pos: number, parent: Node | null, index: number) => boolean | void
+): void {
+	const sorted = sortedPairs(flat)
+	const walk = new OrderedDoc(doc)
+	const size = doc.content.size
+
+	for (let k = 0; k < sorted.length; k += 2) {
+		const from = Math.max(0, Math.min(size, sorted[k] ?? 0))
+
+		walk.nodesBetween(from, Math.max(from, Math.min(size, sorted[k + 1] ?? 0)), f)
+	}
+}
+
+const walkers = new WeakMap<Node, OrderedDoc>()
+
+// doc.resolve(pos) in the innermost container holding it (see OrderedDoc.resolve), cheap for positions asked in
+// growing order.
+export function orderedResolve(doc: Node, pos: number): { readonly $pos: ResolvedPos; readonly start: number } {
+	return ordered(doc).resolve(pos)
+}
+
+// The walker of `doc` (positions asked in growing order are cheap; others still correct).
+function ordered(doc: Node): OrderedDoc {
+	let walker = walkers.get(doc)
+
+	if (walker === undefined) {
+		walker = new OrderedDoc(doc)
+		walkers.set(doc, walker)
+	}
+
+	return walker
+}
+
+// Where `pos` of `tr`'s final document was in the document it started from (a rebuild's replaces moving what is
+// between them by their sizes alone).
+export function positionBefore(tr: Transaction, pos: number): number {
+	let out = pos
+
+	for (let k = tr.steps.length - 1; k >= 0; k--) {
+		const step = tr.steps[k]
+
+		if (step instanceof RebuildStep) {
+			let shift = 0
+
+			for (const replace of step.replaces) {
+				const from = replace.from + shift
+
+				if (from >= out) break
+
+				shift += replace.slice.size - (replace.to - replace.from)
+			}
+
+			out -= shift
+		} else out = tr.mapping.maps[k]?.invert().map(out, -1) ?? out
+	}
+
+	return out
+}
+
+// Where `pos` (outside its replaces) of the document before a rebuild is after it.
+function rebuiltPos(step: ReplaceStep, pos: number): number {
+	let out = pos
+
+	for (const replace of replacesOf(step)) if (replace.to <= pos) out += replace.slice.size - (replace.to - replace.from)
+
+	return out
+}
+
+// What a replace step puts in: its slice, or a rebuild's new content alone.
+export function insertedSlices(step: ReplaceStep | ReplaceAroundStep): readonly Slice[] {
+	return step instanceof ReplaceStep ? replacesOf(step).map(replace => replace.slice) : [step.slice]
+}
+
+// Transactions the forms stage made commands for steps of its own appended to a user's edit: steps before the
+// index are the user's, judged as any edit is (a copy of a revision in what they insert).
+const userSteps = new WeakMap<Transaction, number>()
+
+export function markCommandAfter(tr: Transaction, index: number): Transaction {
+	userSteps.set(tr, index)
+
+	return markCommand(tr)
 }
 
 export function isRemarking(step: Step): boolean {
@@ -552,7 +942,8 @@ export function changedRanges(tr: Transaction, marks = true, attrs?: ReadonlySet
 		} else if (step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) out.push(step.pos, step.pos + 1)
 		else if (isMarkStep(step)) {
 			if (marks) out.push(step.from, step.to)
-		} else map.forEach((_oldStart, _oldEnd, newStart, newEnd) => out.push(newStart, newEnd))
+		} else if (step instanceof RebuildStep) out.push(...replacedAfter(step))
+		else map.forEach((_oldStart, _oldEnd, newStart, newEnd) => out.push(newStart, newEnd))
 	})
 
 	return out
@@ -560,14 +951,15 @@ export function changedRanges(tr: Transaction, marks = true, attrs?: ReadonlySet
 
 // What each replace step inserted, as [from, to] pairs in the final document (both sides of the gap of a
 // ReplaceAroundStep).
-function insertedRanges(tr: Transaction): number[] {
+// What the steps before `steps` inserted, in the transaction's final document.
+function insertedRanges(tr: Transaction, steps = tr.steps.length): number[] {
 	const maps = tr.mapping.maps
 	const out: number[] = []
 
 	tr.steps.forEach((step, index) => {
-		if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0) return
+		if (index >= steps || !(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0) return
 
-		maps[index]?.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+		const push = (newStart: number, newEnd: number): void => {
 			if (newEnd <= newStart) return
 
 			let from = newStart
@@ -579,7 +971,13 @@ function insertedRanges(tr: Transaction): number[] {
 			}
 
 			if (to > from) out.push(from, to)
-		})
+		}
+
+		if (step instanceof RebuildStep) {
+			const after = replacedAfter(step)
+
+			for (let k = 0; k < after.length; k += 2) push(after[k] ?? 0, after[k + 1] ?? 0)
+		} else maps[index]?.forEach((_oldStart, _oldEnd, newStart, newEnd) => push(newStart, newEnd))
 	})
 
 	return out
@@ -619,9 +1017,17 @@ function batchInsertions(transactions: readonly Transaction[]): Map<Transaction,
 			if (looked && (step instanceof ReplaceStep || step instanceof ReplaceAroundStep) && step.slice.size > 0) {
 				const next = [...made]
 
-				map.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
-					if (newEnd > newStart) next.push(newStart, newEnd)
-				})
+				if (step instanceof RebuildStep) {
+					const after = replacedAfter(step)
+
+					for (let k = 0; k < after.length; k += 2)
+						if ((after[k + 1] ?? 0) > (after[k] ?? 0)) next.push(after[k] ?? 0, after[k + 1] ?? 0)
+				} else {
+					map.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+						if (newEnd > newStart) next.push(newStart, newEnd)
+					})
+				}
+
 				made = next
 			}
 		})
@@ -632,10 +1038,32 @@ function batchInsertions(transactions: readonly Transaction[]): Map<Transaction,
 	return out
 }
 
-function within(ranges: readonly number[], from: number, to: number): boolean {
-	for (let k = 0; k < ranges.length; k += 2) if (from >= (ranges[k] ?? 0) && to <= (ranges[k + 1] ?? 0)) return true
+// Whether [from, to] lies inside one of `flat`'s ranges ([from, to] pairs), by a binary search over them
+// sorted (a walk asking for each node of a range stays linear in the ranges).
+export function containment(flat: readonly number[]): (from: number, to: number) => boolean {
+	const pairs = sortedPairs(flat)
+	const count = pairs.length / 2
+	// The furthest end of the ranges up to each one.
+	const reach = new Float64Array(count)
 
-	return false
+	for (let k = 0; k < count; k++) reach[k] = Math.max(k > 0 ? (reach[k - 1] ?? 0) : -Infinity, pairs[2 * k + 1] ?? 0)
+
+	return (from, to) => {
+		let lo = 0
+		let hi = count - 1
+		let last = -1
+
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1
+
+			if ((pairs[2 * mid] ?? 0) <= from) {
+				last = mid
+				lo = mid + 1
+			} else hi = mid - 1
+		}
+
+		return last >= 0 && (reach[last] ?? 0) >= to
+	}
 }
 
 interface DeletedRange {
@@ -654,7 +1082,8 @@ function deletedRanges(tr: Transaction): DeletedRange[] {
 		if (doc === undefined) return
 
 		if (step instanceof ReplaceStep) {
-			if (step.to > step.from) out.push({ step: index, doc, from: step.from, to: step.to })
+			for (const replace of replacesOf(step))
+				if (replace.to > replace.from) out.push({ step: index, doc, from: replace.from, to: replace.to })
 		} else if (step instanceof ReplaceAroundStep) {
 			if (step.gapFrom > step.from) out.push({ step: index, doc, from: step.from, to: step.gapFrom })
 			if (step.to > step.gapTo) out.push({ step: index, doc, from: step.gapTo, to: step.to })
@@ -733,14 +1162,14 @@ export function invariantViolation(tr: Transaction): string | undefined {
 		if (
 			(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) &&
 			step.slice.size > 0 &&
-			holdsUnwritableCopy(step.slice.content)
+			insertedSlices(step).some(slice => holdsUnwritableCopy(slice.content))
 		)
 			return "unwritableCopy"
 
 	for (const range of deletedRanges(tr)) {
 		let violation: string | undefined
 
-		range.doc.nodesBetween(range.from, range.to, (node, pos) => {
+		ordered(range.doc).nodesBetween(range.from, range.to, (node, pos) => {
 			if (violation !== undefined) return false
 
 			const type = node.type
@@ -779,14 +1208,18 @@ export function invariantViolation(tr: Transaction): string | undefined {
 
 		if (doc === undefined || !(step instanceof ReplaceStep) || step.slice.size === 0) continue
 
-		const before = doc.resolve(step.from).nodeBefore
-		const after = doc.resolve(step.to).nodeAfter
+		for (const replace of replacesOf(step)) {
+			if (replace.slice.size === 0) continue
 
-		if (before === null || after === null || !before.isInline || !after.isInline) continue
+			const before = ordered(doc).resolve(replace.from).$pos.nodeBefore
+			const after = ordered(doc).resolve(replace.to).$pos.nodeAfter
 
-		for (const mark of before.marks) {
-			if ((mark.type === docxSchema.marks.deletion || mark.type === docxSchema.marks.move_from) && mark.isInSet(after.marks)) {
-				return "deletedText"
+			if (before === null || after === null || !before.isInline || !after.isInline) continue
+
+			for (const mark of before.marks) {
+				if ((mark.type === docxSchema.marks.deletion || mark.type === docxSchema.marks.move_from) && mark.isInSet(after.marks)) {
+					return "deletedText"
+				}
 			}
 		}
 	}
@@ -1049,7 +1482,7 @@ function rangePlaces(doc: Node): Map<string, MarkerPlace> {
 // Adds to `carried` the range ends in the `before` list of the block right after a deleted range whose starts
 // the range held (`found`, its markers by key).
 function carriedEnds(range: DeletedRange, found: ReadonlyMap<string, MarkerAttrs>, carried: Set<string>): void {
-	const next = range.to < range.doc.content.size ? range.doc.nodeAt(range.to) : null
+	const next = range.to < range.doc.content.size ? ordered(range.doc).resolve(range.to).$pos.nodeAfter : null
 	const before = next?.isBlock === true ? (next.attrs["before"] as MarkerList | undefined) : undefined
 
 	if (before === undefined) return
@@ -1066,7 +1499,7 @@ function carriedEnds(range: DeletedRange, found: ReadonlyMap<string, MarkerAttrs
 function endsLeftBehind(range: DeletedRange, found: ReadonlyMap<string, MarkerAttrs>): string[] {
 	const out: string[] = []
 
-	range.doc.nodesBetween(range.from, range.to, (node, pos) => {
+	ordered(range.doc).nodesBetween(range.from, range.to, (node, pos) => {
 		if (node.isInline || pos < range.from || pos + node.nodeSize > range.to) return !node.isInline
 
 		for (const marker of (node.attrs["before"] as MarkerList | undefined) ?? NO_MARKERS) {
@@ -1258,6 +1691,26 @@ function orderRanges(
 // alone: one walk in document order over the spans' union (spans sorted by from), each node once. A long
 // transaction of mark steps (formatting a whole long document) has tens of thousands of spans; walking from
 // the top for each would cost the document's top-level length each time.
+// Whether a position lies in one of `flat`'s ranges ([from, to) pairs), for positions asked in growing order: the
+// ranges ending before one are done with, so a walk of many positions over many ranges stays linear.
+function inOrder(flat: readonly number[]): (pos: number) => boolean {
+	const ranges: [number, number][] = []
+
+	for (let k = 0; k < flat.length; k += 2) ranges.push([flat[k] ?? 0, flat[k + 1] ?? 0])
+
+	ranges.sort((a, b) => a[0] - b[0])
+
+	let at = 0
+
+	return pos => {
+		while (at < ranges.length && (ranges[at]?.[1] ?? 0) <= pos) at++
+
+		for (let k = at; k < ranges.length && (ranges[k]?.[0] ?? 0) <= pos; k++) if (pos < (ranges[k]?.[1] ?? 0)) return true
+
+		return false
+	}
+}
+
 function nodesInSpans(doc: Node, spans: readonly (readonly [number, number])[], f: (node: Node, pos: number) => boolean): void {
 	const union: [number, number][] = []
 
@@ -1389,13 +1842,14 @@ function duplicateFixes(
 	}
 
 	const seenPos = new Set<number>()
+	const walk = new OrderedDoc(doc)
 
 	// Containers that start in inserted content and end in the document's: their identity came with the
 	// insertion (an open slice end), their rest did not.
 	const opened: { pos: number; own: string | undefined; markers: string[]; alien: boolean }[] = []
 
 	for (const [from, to] of spans) {
-		doc.nodesBetween(from, to, (node, pos) => {
+		walk.nodesBetween(from, to, (node, pos) => {
 			if (pos >= from && pos < to && pos + node.nodeSize > to && !seenPos.has(pos)) {
 				const src: unknown = node.attrs["src"]
 				const markers: string[] = []
@@ -1421,10 +1875,9 @@ function duplicateFixes(
 
 			if (keys.length > 0) inside.push({ node, pos, keys })
 
-			// A source block is judged whole; a fresh one may hold copies.
-			const src: unknown = node.attrs["src"]
-
-			return !node.isLeaf && !(typeof src === "number" && src !== NO_SOURCE)
+			// What a block holds is judged too: a copy of a source block may hold copies of what is elsewhere (a
+			// paste into a block it rebuilt).
+			return !node.isLeaf
 		})
 	}
 
@@ -1467,6 +1920,8 @@ function duplicateFixes(
 
 	const fixes: DuplicateFix[] = []
 	const taken = new Set<string>()
+	// The end of the last block made new whole: what it holds goes with it (see `keep`).
+	let wholeTo = -1
 
 	for (const { pos, own, markers, alien: renew } of opened) {
 		const fresh = own !== undefined && (renew || outside.has(own) || taken.has(own))
@@ -1479,6 +1934,8 @@ function duplicateFixes(
 	}
 
 	for (const { node, pos, keys } of inside) {
+		if (pos < wholeTo) continue
+
 		const ownKey = keys[0]
 		const ownIsSource = ownKey !== undefined && !ownKey.startsWith("m")
 		const markerOnly = node.type === nodes.marker || node.type === nodes.comment_ref
@@ -1518,6 +1975,7 @@ function duplicateFixes(
 				for (const key of keys) if (key.startsWith("m") && !duplicate.includes(key)) keep.add(key.slice(1))
 
 				node.descendants(child => (visit(child), true))
+				wholeTo = pos + node.nodeSize
 			}
 
 			fixes.push({ pos, fresh: true, drop: new Set(), keep, renew })
@@ -1782,9 +2240,14 @@ export function repairTransaction(
 	}
 	const lost = new Map<number, MarkerAttrs[]>()
 	const changed: number[] = []
+	// What changed other than marks: only there can an edit have made a node with attributes of its own, whose
+	// origin is recorded below (a mark step keeps every node's attributes object).
+	const remade: number[] = []
 	const inserted: number[] = []
 	// Inserted by transactions other than commands: revision marks there are copies (commands add their own).
 	const insertedCopies: number[] = []
+	// What the transactions' users inserted (a forms command's own steps aside): a revision there is a copy.
+	const revisionCopies: number[] = []
 	let insertsRevisions = false
 	// Whether the transactions inserted content carrying a source run-level content control (a copy, text typed
 	// into the control, its content rebuilt), and the controls whose content they took out.
@@ -1830,13 +2293,21 @@ export function repairTransaction(
 		const insertions = insertedRanges(tr)
 
 		insertsBlocks ||= tr.steps.some(
-			step => (step instanceof ReplaceStep || step instanceof ReplaceAroundStep) && holdsMarkedBlocks(step.slice)
+			step => (step instanceof ReplaceStep || step instanceof ReplaceAroundStep) && insertedSlices(step).some(holdsMarkedBlocks)
 		)
 
 		if (!reorders && insertions.length > 0) reorders = movesRangeMarkers(tr)
 
 		for (let k = 0; k < ranges.length; k += 2) changed.push(toState(index, ranges[k] ?? 0, -1), toState(index, ranges[k + 1] ?? 0, 1))
+
+		const others = changedRanges(tr, false, REPAIRED_ATTRS)
+
+		for (let k = 0; k < others.length; k += 2) remade.push(toState(index, others[k] ?? 0, -1), toState(index, others[k + 1] ?? 0, 1))
 		const command = isCommand(tr)
+		const typed = typing.has(tr)
+		// A user's edit the forms stage made a command of: what the user's own steps insert is judged still.
+		const users = command ? (userSteps.get(tr) ?? 0) : tr.steps.length
+		const copies = typed ? [] : users === tr.steps.length ? insertions : insertedRanges(tr, users)
 
 		if (!command) breakMoves(tr, (key, pos, change) => breakOwners.set(key, { pos: toState(index, pos, 1), change }))
 
@@ -1846,38 +2317,55 @@ export function repairTransaction(
 
 			inserted.push(from, to)
 
-			if (!command) insertedCopies.push(from, to)
+			if (!command && !typed) insertedCopies.push(from, to)
 		}
 
+		// New content never carries a copy of a source revision, whatever else the transaction holds.
+		for (let k = 0; k < copies.length; k += 2)
+			revisionCopies.push(toState(index, copies[k] ?? 0, 1), toState(index, copies[k + 1] ?? 0, -1))
+
 		insertsRevisions ||=
-			!command &&
+			!typed &&
 			tr.steps.some(
-				step =>
+				(step, at) =>
+					at < users &&
 					(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) &&
 					step.slice.size > 0 &&
-					carries(step.slice.content, mark => revisionTypes.includes(mark.type))
+					insertedSlices(step).some(slice => carries(slice.content, mark => revisionTypes.includes(mark.type)))
 			)
 
 		insertsControls ||= tr.steps.some(
 			step =>
 				(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) &&
 				step.slice.size > 0 &&
-				carries(step.slice.content, mark => mark.type === docxSchema.marks.content_control && mark.attrs["src"] !== NO_SOURCE)
+				insertedSlices(step).some(slice =>
+					carries(slice.content, mark => mark.type === docxSchema.marks.content_control && mark.attrs["src"] !== NO_SOURCE)
+				)
 		)
 
 		// Markers a deletion took out, by key, with where the deletion ended up.
 		const candidates = new Map<string, { marker: MarkerAttrs; pos: number }>()
 
+		// What earlier steps inserted, by step (asked for each node a deletion takes).
+		const madeBy = new Map<number, ((from: number, to: number) => boolean) | undefined>()
+
 		for (const range of deletedRanges(tr)) {
 			const found = new Map<string, MarkerAttrs>()
-			const made = fresh.get(tr)?.[range.step] ?? NO_RANGES
 
-			range.doc.nodesBetween(range.from, range.to, (node, pos) => {
+			if (!madeBy.has(range.step)) {
+				const made = fresh.get(tr)?.[range.step] ?? NO_RANGES
+
+				madeBy.set(range.step, made.length > 0 ? containment(made) : undefined)
+			}
+
+			const madeHolds = madeBy.get(range.step)
+
+			ordered(range.doc).nodesBetween(range.from, range.to, (node, pos) => {
 				const end = pos + node.nodeSize
 				const opens = pos >= range.from && pos < range.to
 
 				// Content an earlier step of these transactions inserted takes out nothing the document had.
-				if (made.length > 0 && within(made, pos, end)) return false
+				if (madeHolds?.(pos, end) === true) return false
 
 				if (insertions.length > 0 && opens && end <= range.to) {
 					const keys: string[] = []
@@ -1943,11 +2431,14 @@ export function repairTransaction(
 		const present = new Set<string>()
 		const finalSize = tr.doc.content.size
 
-		for (let k = 0; k < ranges.length; k += 2) {
-			const from = Math.max(0, Math.min(finalSize, (ranges[k] ?? 0) - 1))
-			const to = Math.max(from, Math.min(finalSize, (ranges[k + 1] ?? 0) + 1))
+		const walk = new OrderedDoc(tr.doc)
+		const sorted = sortedPairs(ranges)
 
-			tr.doc.nodesBetween(from, to, node => {
+		for (let k = 0; k < sorted.length; k += 2) {
+			const from = Math.max(0, Math.min(finalSize, (sorted[k] ?? 0) - 1))
+			const to = Math.max(from, Math.min(finalSize, (sorted[k + 1] ?? 0) + 1))
+
+			walk.nodesBetween(from, to, node => {
 				keysIn(node, present)
 
 				return true
@@ -1972,7 +2463,7 @@ export function repairTransaction(
 	// originals are gone. Atoms at paragraph level carry wrapper marks only (a marker written inside a w:r
 	// also its run).
 	if (insertsRevisions) {
-		for (const { from, to, mark } of copiedRevisions(state.doc, insertedCopies, moved)) repair.removeMark(from, to, mark)
+		for (const { from, to, mark } of copiedRevisions(state.doc, revisionCopies, moved)) repair.removeMark(from, to, mark)
 	}
 
 	// A copy of part of a source content control (one not next to the rest of it) is a copy of the control, with
@@ -1994,6 +2485,9 @@ export function repairTransaction(
 
 	spans.sort((a, b) => a[0] - b[0])
 
+	// The walk below goes in document order.
+	const isRemade = inOrder(remade)
+
 	const holders = new Map<number, number[]>()
 	const listFixes: { pos: number; attrs: ListAttrs }[] = []
 	const markerFixes: { pos: number; name: string; list: MarkerList }[] = []
@@ -2003,17 +2497,9 @@ export function repairTransaction(
 	const cellEnds: number[] = []
 	const emptyLinks: { from: number; to: number; mark: Mark }[] = []
 	const listed = new Set<string>()
-	const copied = (pos: number): boolean => {
-		for (let k = 0; k < insertedCopies.length; k += 2)
-			if (pos >= (insertedCopies[k] ?? 0) && pos < (insertedCopies[k + 1] ?? 0)) return true
-
-		return false
-	}
-	const startsInserted = (pos: number): boolean => {
-		for (let k = 0; k < inserted.length; k += 2) if (pos >= (inserted[k] ?? 0) && pos < (inserted[k + 1] ?? 0)) return true
-
-		return false
-	}
+	// Asked in the document order of the walk below.
+	const copied = inOrder(insertedCopies)
+	const startsInserted = inOrder(inserted)
 	const seen = new Set<number>()
 	// Blocks carrying a section change: it belongs to the paragraph holding its break.
 	const sectioned: { pos: number; node: Node }[] = []
@@ -2027,7 +2513,7 @@ export function repairTransaction(
 
 		// What an edit made here is this part's (a later paste into another part tells it by this); pasted
 		// content is judged below.
-		if (part !== undefined && !copied(pos)) claimOrigin(node, part)
+		if (part !== undefined && !copied(pos) && isRemade(pos)) claimOrigin(node, part)
 
 		if (node.isTextblock) textblocks.push({ node, pos })
 
@@ -2329,18 +2815,25 @@ function breakMoves(tr: Transaction, f: (key: number, pos: number, change: Mark 
 
 		if (doc === undefined || !(step instanceof ReplaceStep)) return
 
-		const $to = doc.resolve(step.to)
-		const key = $to.parent.attrs["sectPr"]
+		const walk = ordered(doc)
 
-		if (typeof key !== "number" || key === NO_SOURCE || !$to.parent.isTextblock) return
-		// Within the paragraph, only a slice of paragraphs splits it.
-		if (doc.resolve(step.from).sameParent($to) && step.slice.openEnd === 0) return
+		for (const replace of replacesOf(step)) {
+			const from = walk.resolve(replace.from)
+			const to = walk.resolve(replace.to)
+			const $to = to.$pos
+			const key = $to.parent.attrs["sectPr"]
 
-		let pos = $to.end()
+			if (typeof key !== "number" || key === NO_SOURCE || !$to.parent.isTextblock) continue
+			// Within the paragraph, only a slice of paragraphs splits it.
+			if (from.start + from.$pos.start() === to.start + $to.start() && replace.slice.openEnd === 0) continue
 
-		for (let later = index; later < tr.steps.length; later++) pos = tr.mapping.maps[later]?.map(pos, 1) ?? pos
+			const end = to.start + $to.end()
+			let pos = step instanceof RebuildStep ? rebuiltPos(step, end) : (tr.mapping.maps[index]?.map(end, 1) ?? end)
 
-		f(key, pos, sectionChange.isInSet($to.parent.marks))
+			for (let later = index + 1; later < tr.steps.length; later++) pos = tr.mapping.maps[later]?.map(pos, 1) ?? pos
+
+			f(key, pos, sectionChange.isInSet($to.parent.marks))
+		}
 	})
 }
 
@@ -2373,41 +2866,87 @@ function insertsSources(tr: Transaction): boolean {
 	return tr.steps.some((step, index) => {
 		if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0) return false
 
-		let found = false
-		let local: { readonly attrs: Set<object>; readonly marks: Set<Mark> } | undefined
-		const here = (): { readonly attrs: Set<object>; readonly marks: Set<Mark> } => {
-			if (local !== undefined) return local
+		const doc = tr.docs[index] ?? tr.doc
 
-			const doc = tr.docs[index] ?? tr.doc
-			const attrs = new Set<object>()
-			const marks = new Set<Mark>(tr.storedMarks ?? [])
+		return (step instanceof ReplaceStep ? replacesOf(step) : [step]).some(replace => {
+			if (replace.slice.size === 0) return false
 
-			for (const at of [step.from, step.to]) {
-				const $at = doc.resolve(Math.min(at, doc.content.size))
+			let found = false
+			let local: { readonly attrs: Set<object>; readonly marks: SourceMarks } | undefined
+			const here = (): { readonly attrs: Set<object>; readonly marks: SourceMarks } => {
+				if (local !== undefined) return local
 
-				for (let depth = 1; depth <= $at.depth; depth++) attrs.add($at.node(depth).attrs)
-				for (const node of [$at.nodeBefore, $at.nodeAfter]) for (const mark of node?.marks ?? []) marks.add(mark)
+				const attrs = new Set<object>()
+				const marks = new SourceMarks(tr.storedMarks ?? [])
+
+				for (const at of [replace.from, replace.to]) {
+					const { $pos: $at, ancestors } = ordered(doc).resolve(Math.min(at, doc.content.size))
+
+					for (const node of ancestors) attrs.add(node.attrs)
+					for (let depth = 1; depth <= $at.depth; depth++) attrs.add($at.node(depth).attrs)
+
+					// The textblock's own runs (text typed after a reference takes the formatting of the run before it).
+					if ($at.parent.inlineContent) $at.parent.forEach(node => marks.addAll(node.marks))
+					else for (const node of [$at.nodeBefore, $at.nodeAfter]) marks.addAll(node?.marks ?? [])
+				}
+
+				// What the step puts back of the range it replaces is the story's own (Replace All takes out the text
+				// between a paragraph's matches and puts it back).
+				ordered(doc).nodesBetween(replace.from, Math.min(replace.to, doc.content.size), node => {
+					attrs.add(node.attrs)
+					marks.addAll(node.marks)
+				})
+
+				local = { attrs, marks }
+
+				return local
 			}
 
-			local = { attrs, marks }
+			replace.slice.content.descendants(node => {
+				if (found) return false
 
-			return local
-		}
+				const src = node.attrs["src"]
 
-		step.slice.content.descendants(node => {
-			if (found) return false
+				found =
+					(typeof src === "number" && src !== NO_SOURCE && !here().attrs.has(node.attrs)) ||
+					node.marks.some(
+						mark => typeof mark.attrs["src"] === "number" && mark.attrs["src"] !== NO_SOURCE && !here().marks.has(mark)
+					)
 
-			const src = node.attrs["src"]
+				return !found
+			})
 
-			found =
-				(typeof src === "number" && src !== NO_SOURCE && !here().attrs.has(node.attrs)) ||
-				node.marks.some(mark => typeof mark.attrs["src"] === "number" && mark.attrs["src"] !== NO_SOURCE && !here().marks.has(mark))
-
-			return !found
+			return found
 		})
-
-		return found
 	})
+}
+
+// Marks naming a source, found by value: text typed at a run carries that run's mark, which the tracking
+// transform may have made again (an equal mark, another object).
+class SourceMarks {
+	private readonly bySource = new Map<string, Mark[]>()
+
+	constructor(marks: readonly Mark[]) {
+		this.addAll(marks)
+	}
+
+	addAll(marks: readonly Mark[]): void {
+		for (const mark of marks) {
+			const src = mark.attrs["src"]
+
+			if (typeof src !== "number" || src === NO_SOURCE) continue
+
+			const key = `${mark.type.name}:${String(src)}`
+			const list = this.bySource.get(key)
+
+			if (list === undefined) this.bySource.set(key, [mark])
+			else if (!list.some(other => other === mark || other.eq(mark))) list.push(mark)
+		}
+	}
+
+	has(mark: Mark): boolean {
+		return this.bySource.get(`${mark.type.name}:${String(mark.attrs["src"])}`)?.some(other => other === mark || other.eq(mark)) ?? false
+	}
 }
 
 // Inline content inserted (by `inserted`, pairs) whose marks name a source of another part, outside blocks of
@@ -2415,14 +2954,16 @@ function insertsSources(tr: Transaction): boolean {
 function alienRuns(doc: Node, inserted: readonly number[], alien: (value: Node | Mark) => boolean): number[] {
 	const out: number[] = []
 	const size = doc.content.size
+	const ranges = sortedPairs(inserted)
+	const walk = new OrderedDoc(doc)
 
-	for (let k = 0; k < inserted.length; k += 2) {
-		const from = Math.max(0, Math.min(size, inserted[k] ?? 0))
-		const to = Math.max(from, Math.min(size, inserted[k + 1] ?? 0))
+	for (let k = 0; k < ranges.length; k += 2) {
+		const from = Math.max(0, Math.min(size, ranges[k] ?? 0))
+		const to = Math.max(from, Math.min(size, ranges[k + 1] ?? 0))
 
 		if (to <= from) continue
 
-		doc.nodesBetween(from, to, (node, pos) => {
+		walk.nodesBetween(from, to, (node, pos) => {
 			if (node.isInline) {
 				if (pos >= from && node.marks.some(mark => alien(mark))) out.push(pos)
 
@@ -2453,19 +2994,21 @@ function holdsMarkedBlocks(slice: Slice): boolean {
 function blockCopies(doc: Node, inserted: readonly number[], movedMarks: readonly Mark[]): CopyFix[] {
 	const out: CopyFix[] = []
 	const size = doc.content.size
+	const ranges = sortedPairs(inserted)
+	const walk = new OrderedDoc(doc)
 
-	for (let k = 0; k < inserted.length; k += 2) {
-		const from = Math.max(0, Math.min(size, inserted[k] ?? 0))
-		const to = Math.max(from, Math.min(size, inserted[k + 1] ?? 0))
+	for (let k = 0; k < ranges.length; k += 2) {
+		const from = Math.max(0, Math.min(size, ranges[k] ?? 0))
+		const to = Math.max(from, Math.min(size, ranges[k + 1] ?? 0))
 
 		if (to <= from) continue
 
 		// Text inside one paragraph (typing) inserts no block: nothing to look at.
-		const $from = doc.resolve(from)
+		const { $pos: $from, start } = walk.resolve(from)
 
-		if ($from.parent.isTextblock && to <= $from.end()) continue
+		if ($from.parent.isTextblock && to <= start + $from.end()) continue
 
-		doc.nodesBetween(from, to, (node, pos) => {
+		walk.nodesBetween(from, to, (node, pos) => {
 			if (node.isInline) return false
 			// Only blocks whose start the edit inserted.
 			if (pos < from) return !node.isTextblock
@@ -2539,30 +3082,34 @@ function movesRangeMarkers(tr: Transaction): boolean {
 	return tr.steps.some((step, index) => {
 		if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep) || step.slice.size === 0) return false
 
-		const inserted = rangeMarkerKeys(step.slice.content, [])
-
-		if (inserted.length === 0) return false
-
 		const doc = tr.docs[index]
 
-		if (step instanceof ReplaceAroundStep || doc === undefined) return true
+		if (step instanceof ReplaceAroundStep || doc === undefined) return rangeMarkerKeys(step.slice.content, []).length > 0
 
-		const removed = rangeMarkerKeys(doc.slice(step.from, step.to).content, [])
+		return replacesOf(step).some(replace => {
+			const inserted = rangeMarkerKeys(replace.slice.content, [])
 
-		return removed.length !== inserted.length || removed.some((key, k) => key !== inserted[k])
+			if (inserted.length === 0) return false
+
+			const removed = rangeMarkerKeys(doc.slice(replace.from, replace.to).content, [])
+
+			return removed.length !== inserted.length || removed.some((key, k) => key !== inserted[k])
+		})
 	})
 }
 
 function insertsRange(doc: Node, inserted: readonly number[]): boolean {
 	let found = false
+	const ranges = sortedPairs(inserted)
+	const walk = new OrderedDoc(doc)
 
-	for (let k = 0; k < inserted.length && !found; k += 2) {
-		const from = inserted[k] ?? 0
-		const to = inserted[k + 1] ?? 0
+	for (let k = 0; k < ranges.length && !found; k += 2) {
+		const from = ranges[k] ?? 0
+		const to = ranges[k + 1] ?? 0
 
 		if (to <= from) continue
 
-		doc.nodesBetween(from, to, node => {
+		walk.nodesBetween(from, to, node => {
 			if (found) return false
 			if (survivorsOf(node).some(isRangeMarker)) found = true
 			if (node.isBlock)
@@ -2582,23 +3129,26 @@ function copiedRevisions(doc: Node, inserted: readonly number[], moved: Readonly
 	const found: { from: number; to: number; mark: Mark }[] = []
 	const size = doc.content.size
 	const spans: [number, number][] = []
+	const sorted = sortedPairs(inserted)
+	const walk = new OrderedDoc(doc)
 
-	for (let k = 0; k < inserted.length; k += 2) {
-		const from = Math.max(0, Math.min(size, inserted[k] ?? 0))
-		const to = Math.max(from, Math.min(size, inserted[k + 1] ?? 0))
+	for (let k = 0; k < sorted.length; k += 2) {
+		const from = Math.max(0, Math.min(size, sorted[k] ?? 0))
+		const to = Math.max(from, Math.min(size, sorted[k + 1] ?? 0))
 
 		if (to > from) spans.push([from, to])
 	}
 
-	const insideSpan = (pos: number): boolean => spans.some(([from, to]) => pos >= from && pos < to)
+	// Asked in document order (the walk of the whole document below).
+	const insideSpan = inOrder(spans.flat())
 	const adjacent = new Set<number>()
 
 	for (const [from, to] of spans) {
-		for (const node of [doc.resolve(from).nodeBefore, doc.resolve(to).nodeAfter]) {
+		for (const node of [walk.resolve(from).$pos.nodeBefore, walk.resolve(to).$pos.nodeAfter]) {
 			for (const mark of node?.marks ?? []) if (revisionTypes.includes(mark.type)) adjacent.add(mark.attrs["src"] as number)
 		}
 
-		doc.nodesBetween(from, to, (node, pos) => {
+		walk.nodesBetween(from, to, (node, pos) => {
 			if (!node.isInline) return true
 
 			for (const mark of node.marks) {
@@ -2654,14 +3204,16 @@ function copiedControls(
 	const type = docxSchema.marks.content_control
 	const size = doc.content.size
 	const islands: { from: number; to: number; mark: Mark }[] = []
+	const ranges = sortedPairs(inserted)
+	const walk = new OrderedDoc(doc)
 
-	for (let k = 0; k < inserted.length; k += 2) {
-		const from = Math.max(0, Math.min(size, inserted[k] ?? 0))
-		const to = Math.max(from, Math.min(size, inserted[k + 1] ?? 0))
+	for (let k = 0; k < ranges.length; k += 2) {
+		const from = Math.max(0, Math.min(size, ranges[k] ?? 0))
+		const to = Math.max(from, Math.min(size, ranges[k + 1] ?? 0))
 
 		if (to <= from) continue
 
-		doc.nodesBetween(from, to, (node, pos) => {
+		walk.nodesBetween(from, to, (node, pos) => {
 			if (!node.isInline) return true
 
 			const start = Math.max(from, pos)
@@ -2687,12 +3239,14 @@ function copiedControls(
 	// Next to more of its control: typed into it, or a split of it.
 	const copies = islands.filter(
 		({ from, to, mark }) =>
-			!mark.isInSet(doc.resolve(from).nodeBefore?.marks ?? []) && !mark.isInSet(doc.resolve(to).nodeAfter?.marks ?? [])
+			!mark.isInSet(walk.resolve(from).$pos.nodeBefore?.marks ?? []) && !mark.isInSet(walk.resolve(to).$pos.nodeAfter?.marks ?? [])
 	)
 
 	if (copies.length === 0) return []
 
 	const wanted = new Set(copies.map(island => island.mark.attrs["src"] as number).filter(own => !removed.has(own)))
+	// Asked in document order (the walk of the whole document below).
+	const inCopies = inOrder(copies.flatMap(island => [island.from, island.to]))
 	const elsewhere = new Set<number>()
 
 	if (wanted.size > 0) {
@@ -2702,8 +3256,7 @@ function copiedControls(
 			for (const mark of node.marks) {
 				const own = mark.attrs["src"] as number
 
-				if (mark.type === type && wanted.has(own) && !copies.some(island => pos >= island.from && pos < island.to))
-					elsewhere.add(own)
+				if (mark.type === type && wanted.has(own) && !inCopies(pos)) elsewhere.add(own)
 			}
 
 			return false

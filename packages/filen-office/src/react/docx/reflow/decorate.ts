@@ -1,10 +1,10 @@
 import type { Node } from "prosemirror-model"
 import { Decoration, DecorationSet } from "prosemirror-view"
 import { DocxEditorSession, docxSchema } from "../../../core/docx/edit/index"
-import type { StoryPart } from "../../../core/docx/model/part"
+import type { RevisionView } from "../../../core/docx/model/kinds"
 import { markerText, type StoryCounters } from "../../../core/docx/reflow/counters"
 import { paragraphCss, runCss, type CssFaces } from "../../../core/docx/reflow/css"
-import { cellTables, tableLook } from "../../../core/docx/reflow/tables"
+import { cellTables, tableLook, type LaidTable } from "../../../core/docx/reflow/tables"
 import { ReviewKind, reviewIndexKept } from "../../../core/docx/review/index"
 import type { DocxEditorMark } from "../edit/surface"
 import { gapRowCount, type StoryStarts } from "../edit/window"
@@ -30,11 +30,13 @@ interface FieldPlace {
 
 interface BlockLooks {
 	readonly faces: number
+	// The revision view its tables were drawn for (-1: it has none).
+	readonly view: number
 	readonly locals: readonly Local[]
 }
 
 // The part and item a table is laid out from (undefined: drawn with the view's own borders).
-export type TableSource = (table: Node, index: number) => { readonly part: StoryPart; readonly item: number } | undefined
+export type TableSource = (table: Node, index: number) => LaidTable | undefined
 
 // What the view reads of a story it shows: a session's, or a story only shown (made editable when it is used).
 export type ReflowSource = Pick<DocxEditorSession, "formats" | "context" | "story" | "state">
@@ -144,23 +146,25 @@ function runLooks(session: ReflowSource, paragraph: Node, faces: CssFaces, faces
 function blockLooks(
 	session: ReflowSource,
 	block: Node,
-	source: { readonly part: StoryPart; readonly item: number } | undefined,
+	source: LaidTable | undefined,
 	faces: CssFaces,
-	facesVersion: number
+	facesVersion: number,
+	view: RevisionView
 ): BlockLooks {
 	const cached = looks.get(block)
 
-	if (cached !== undefined && cached.faces === facesVersion) return cached
+	if (cached !== undefined && cached.faces === facesVersion && (cached.view < 0 || cached.view === view)) return cached
 
 	const resolver = session.context.resolver
 	const store = session.context.store
 	const locals: Local[] = []
+	let tabled = false
 	const paragraph = (node: Node, pos: number): void => {
 		for (const local of runLooks(session, node, faces, facesVersion))
 			locals.push({ from: pos + local.from, to: pos + local.to, node: false, attrs: local.attrs })
 	}
 	// Blocks inside a container (a cell, a content control), and contextual spacing between them.
-	const children = (parent: Node, pos: number, tablesOf: (k: number) => { part: StoryPart; item: number } | undefined): void => {
+	const children = (parent: Node, pos: number, tablesOf: (k: number) => LaidTable | undefined): void => {
 		let tableIndex = 0
 
 		parent.forEach((child, at, k) => {
@@ -175,9 +179,11 @@ function blockLooks(
 			if (spacing !== undefined) locals.push({ from: childPos, to: childPos + child.nodeSize, node: true, attrs: spacing })
 		})
 	}
-	const table = (node: Node, pos: number, from: { part: StoryPart; item: number } | undefined): void => {
+	const table = (node: Node, pos: number, from: LaidTable | undefined): void => {
 		const grid = Array.isArray(node.attrs["grid"]) ? (node.attrs["grid"] as unknown[]).length : 0
-		const look = from === undefined ? undefined : tableLook(from.part, from.item, grid, resolver, store)
+		const look = from === undefined ? undefined : tableLook(from.part, from.item, grid, resolver, store, view, from.edited)
+
+		tabled = true
 		// The row of the table each row of the view stands for (a gap row stands for several).
 		let r = 0
 
@@ -200,19 +206,19 @@ function blockLooks(
 				const cellPos = rowPos + 1 + cellAt
 				const css = look?.cells[index]?.[c]
 				const item = look?.items[index]?.[c]
-				const inner = look === undefined || item === undefined ? [] : cellTables(look.part, item)
+				const inner = look === undefined || item === undefined ? [] : cellTables(look.parts?.[index] ?? look.part, item)
 
 				if (css !== undefined) locals.push({ from: cellPos, to: cellPos + cell.nodeSize, node: true, attrs: styleAttrs(css) })
 
 				children(cell, cellPos, k => {
 					const at = inner[k]
 
-					return look === undefined || at === undefined ? undefined : { part: look.part, item: at }
+					return look === undefined || at === undefined ? undefined : { part: look.parts?.[index] ?? look.part, item: at }
 				})
 			})
 		})
 	}
-	const visit = (node: Node, pos: number, from: { part: StoryPart; item: number } | undefined): void => {
+	const visit = (node: Node, pos: number, from: LaidTable | undefined): void => {
 		if (node.isTextblock) paragraph(node, pos)
 		else if (node.type === nodes.table) table(node, pos, from)
 		else if (!node.isLeaf) children(node, pos, () => undefined)
@@ -220,7 +226,7 @@ function blockLooks(
 
 	visit(block, 0, source)
 
-	const made = { faces: facesVersion, locals }
+	const made = { faces: facesVersion, view: tabled ? view : -1, locals }
 
 	looks.set(block, made)
 
@@ -424,6 +430,8 @@ export interface StoryDecorations {
 	readonly counters: StoryCounters | undefined
 	readonly faces: CssFaces
 	readonly facesVersion: number
+	// The revision view shown (tables' banding and edge rows count the rows it shows).
+	readonly view: RevisionView
 	// Sorted by `from` (the app's marks, for the body only).
 	readonly marks: readonly DocxEditorMark[]
 	// Where each top-level table is laid out from.
@@ -513,7 +521,7 @@ export function storyDecorations(input: StoryDecorations): DecorationSet {
 
 			const source = block.type === nodes.table ? input.tables(block, index) : undefined
 
-			for (const local of blockLooks(session, shown, source, faces, input.facesVersion).locals)
+			for (const local of blockLooks(session, shown, source, faces, input.facesVersion, input.view).locals)
 				decorations.push(
 					local.node
 						? Decoration.node(start + local.from, start + local.to, local.attrs)

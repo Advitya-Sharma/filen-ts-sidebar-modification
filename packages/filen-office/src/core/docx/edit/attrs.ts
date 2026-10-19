@@ -1,12 +1,16 @@
 import { Fragment, type Node, type Schema } from "prosemirror-model"
 import type { Transaction } from "prosemirror-state"
 import { Step, StepMap, StepResult, type Mappable } from "prosemirror-transform"
+import { asBuilt, builtBlock } from "./origin"
 
 // A node whose attributes a SetAttrsStep sets: its position (where it starts) and the attributes changed,
 // with their new values (the others stay).
 export interface AttrsEntry {
 	readonly pos: number
 	readonly attrs: Readonly<Record<string, unknown>>
+	// An inverse's: the attributes object the node had, set again when the node's other attributes are still
+	// its (an undo gives the node back the very object, which asBuilt and identity caches recognise).
+	readonly previous?: Readonly<Record<string, unknown>>
 }
 
 // Sets attributes of many nodes as one step. A step per node (setNodeAttribute) copies the block list around
@@ -58,7 +62,7 @@ export class SetAttrsStep extends Step {
 	override apply(doc: Node): StepResult {
 		try {
 			const cursor = new Cursor(this.entries)
-			const next = this.rebuild(doc, 0, cursor)
+			const next = this.rebuild(doc, 0, cursor, undefined)
 
 			if (cursor.missed()) return StepResult.fail("No node at a position of SetAttrsStep")
 
@@ -68,12 +72,14 @@ export class SetAttrsStep extends Step {
 		}
 	}
 
-	// `node` (its content starting at `start`) with its descendants' attributes set.
-	private rebuild(node: Node, start: number, cursor: Cursor): Node {
+	// `node` (its content starting at `start`) with its descendants' attributes set, a block the builder made
+	// when it is that again (asBuilt; `built` is what it made in `node`'s place).
+	private rebuild(node: Node, start: number, cursor: Cursor, built: Node | undefined): Node {
 		const out: Node[] = []
 		let changed = false
+		const paired = built !== undefined && built.childCount === node.childCount ? built : undefined
 
-		node.forEach((child, offset) => {
+		node.forEach((child, offset, index) => {
 			const pos = start + offset
 
 			if (!cursor.within(pos, pos + child.nodeSize)) {
@@ -83,13 +89,20 @@ export class SetAttrsStep extends Step {
 			}
 
 			const entry = cursor.at(pos)
-			const content = cursor.within(pos + 1, pos + child.nodeSize) ? this.rebuild(child, pos + 1, cursor).content : child.content
-			const next =
+			const attrs = entry === undefined ? child.attrs : (restored(child.attrs, entry) ?? withAttrs(child.attrs, entry.attrs))
+			const own = paired === undefined ? (builtBlock(attrs) ?? builtBlock(child.attrs)) : paired.child(index)
+			const content = cursor.within(pos + 1, pos + child.nodeSize) ? this.rebuild(child, pos + 1, cursor, own).content : child.content
+			// An inverse giving back the built node's attributes object (an undo) rebuilds from that node, which keeps
+			// it: NodeType.create would copy it, and asBuilt could no longer find the built block.
+			const rebuilt =
 				entry === undefined
 					? content === child.content
 						? child
 						: child.copy(content)
-					: child.type.create(withAttrs(child.attrs, entry.attrs), content, child.marks)
+					: own?.attrs === attrs
+						? own.mark(child.marks).copy(content)
+						: child.type.create(attrs, content, child.marks)
+			const next = rebuilt === child ? child : asBuilt(rebuilt, own, attrs)
 
 			if (next !== child) changed = true
 
@@ -111,7 +124,7 @@ export class SetAttrsStep extends Step {
 
 			for (const name of Object.keys(attrs)) old[name] = node.attrs[name]
 
-			entries.push({ pos, attrs: old })
+			entries.push({ pos, attrs: old, previous: node.attrs })
 		})
 
 		return new SetAttrsStep(entries)
@@ -124,7 +137,7 @@ export class SetAttrsStep extends Step {
 		for (const entry of this.entries) {
 			const result = mapping.mapResult(entry.pos, 1)
 
-			if (!result.deletedAfter) entries.push({ pos: result.pos, attrs: entry.attrs })
+			if (!result.deletedAfter) entries.push({ ...entry, pos: result.pos })
 		}
 
 		return entries.length === 0 ? null : new SetAttrsStep(entries)
@@ -182,6 +195,20 @@ export class AttrChanges {
 		entries.sort((a, b) => a.pos - b.pos)
 		tr.step(new SetAttrsStep(entries))
 	}
+}
+
+// The attributes object an inverse's entry gives back: the node's previous one, when the node's other
+// attributes are still that object's (undefined when they are not, or the entry has none).
+function restored(attrs: Readonly<Record<string, unknown>>, entry: AttrsEntry): Readonly<Record<string, unknown>> | undefined {
+	const previous = entry.previous
+
+	if (previous === undefined) return undefined
+
+	for (const name in entry.attrs) if (entry.attrs[name] !== previous[name]) return undefined
+	for (const name in attrs) if (!Object.hasOwn(entry.attrs, name) && attrs[name] !== previous[name]) return undefined
+	for (const name in previous) if (!Object.hasOwn(attrs, name)) return undefined
+
+	return previous
 }
 
 // `attrs` with `changes` laid over (copied as AttrStep does: a spread of attribute objects is several times

@@ -6,6 +6,7 @@ import { prepareDocxSave, saveDocx, writerProof, zipDocxSave } from "@filen/offi
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 import { runEditScript } from "./docxWriteFixtures"
+import { buildDocx } from "./docxSynthetic"
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "08-large-300p.docx")
 const TARIFF = join(CORPUS_DIR, "docx", "govuk__Tariff_of_the_United_Kingdom_v1.34.docx")
@@ -146,5 +147,42 @@ describe("docx writer performance", () => {
 
 	it.skipIf(!existsSync(TARIFF))("proves and saves the Tariff document", { timeout: 600_000 }, async () => {
 		console.log(`Tariff: ${await measure(TARIFF)}`)
+	})
+})
+
+describe("docx writer performance: people", () => {
+	const PARAGRAPH =
+		'<w:p><w:pPr><w:spacing w:after="120"/></w:pPr><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">The quick brown fox jumps over the lazy dog and a cat and a rat.</w:t></w:r></w:p>'
+	const REVISION = '<w:p><w:ins w:id="9" w:author="Bo" w:date="2020-01-03T00:00:00Z"><w:r><w:t>Added</w:t></w:r></w:ins></w:p>'
+	const people = (author: string): string =>
+		'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w15:people xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">' +
+		`<w15:person w15:author="${author}"/></w15:people>`
+
+	// The fastest of a few saves after an edit, the person named first thing in the body or by nothing.
+	async function fastest(people: string): Promise<number> {
+		const opened = await openBytes(buildDocx({ body: REVISION + PARAGRAPH.repeat(100_000), people }))
+		const session = new DocxEditorSession(opened.context)
+		let best = Infinity
+
+		for (let k = 0; k < 3; k++) {
+			session.dispatch(session.state.tr.insertText("x", 1))
+
+			const started = performance.now()
+
+			await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [session] })
+			best = Math.min(best, performance.now() - started)
+		}
+
+		return best
+	}
+
+	// The source's authors are read once per document: a person no revision names costs a later save no scan
+	// of the whole file.
+	it("costs a save no scan of the source for a person nothing names", { timeout: 600_000 }, async () => {
+		const named = await fastest(people("Bo"))
+		const orphan = await fastest(people("Zed"))
+
+		console.log(`people census: named ${named.toFixed(0)} ms, orphan ${orphan.toFixed(0)} ms`)
+		expect(orphan - named).toBeLessThan(25)
 	})
 })

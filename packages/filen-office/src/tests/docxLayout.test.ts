@@ -1118,6 +1118,21 @@ describe("notes", () => {
 		expect(texts(body(result, 0))).toEqual(["texti"])
 		expect(notes.map(line => line.text)).toEqual(["￼", "i the note"])
 	})
+
+	it("lays endnotes out below the text they follow, each below the one before", async () => {
+		const result = await layout({
+			body: '<w:p><w:r><w:t>text</w:t></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p>' + p("more") + lines(3),
+			endnotes:
+				'<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>' +
+				'<w:endnote w:id="1"><w:p><w:r><w:endnoteRef/></w:r><w:r><w:t xml:space="preserve"> the note</w:t></w:r></w:p></w:endnote>',
+			settings: '<w:endnotePr><w:endnote w:id="-1"/></w:endnotePr>'
+		})
+		const text = body(result, 0)
+		const [separator, note] = pageLines(result, 0).filter(line => line.region === Region.ENDNOTE)
+
+		expect(separator?.top).toBeGreaterThanOrEqual((text.at(-1)?.bottom ?? Number.NaN) - 0.01)
+		expect(note?.top).toBeGreaterThanOrEqual((separator?.bottom ?? Number.NaN) - 0.01)
+	})
 })
 
 describe("objects", () => {

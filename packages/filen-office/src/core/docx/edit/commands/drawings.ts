@@ -77,7 +77,7 @@ const RELATIVE_V = new Set<string>(["margin", "page", "paragraph", "line", "topM
 const MAX_EMU = 2147483647
 const MAX_ALT_TEXT = 10_000
 
-// Alt text XML can hold: no C0 controls but tab and line breaks.
+// Alt text XML can hold: no C0 controls but tab and line breaks, no lone surrogate or U+FFFE/FFFF.
 function altTextArg(value: object, key: string): string | undefined {
 	const text = stringArg(value, key, MAX_ALT_TEXT)
 
@@ -86,7 +86,14 @@ function altTextArg(value: object, key: string): string | undefined {
 	for (let k = 0; k < text.length; k++) {
 		const code = text.charCodeAt(k)
 
-		if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0xfffe || code === 0xffff) return undefined
+		if (code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(k + 1) & 0xfc00) === 0xdc00) k++
+		else if (
+			(code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
+			(code >= 0xd800 && code <= 0xdfff) ||
+			code === 0xfffe ||
+			code === 0xffff
+		)
+			return undefined
 	}
 
 	return text

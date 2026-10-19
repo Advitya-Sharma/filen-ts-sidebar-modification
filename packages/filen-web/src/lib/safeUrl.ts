@@ -6,10 +6,15 @@
 // open a copy of the app, so it is rejected along with every unlisted scheme.
 
 const SAFE_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"])
+// A special-scheme href without "//" ("https:/reset/x", "http:host") parses as absolute alone, but a page of
+// the same scheme resolves it against its own origin: it must read the same against either base.
+const PROBE_BASES = ["https://probe.invalid/a/", "http://probe.invalid/a/"]
 
 export function isSafeAbsoluteHref(href: string): boolean {
 	try {
-		return SAFE_LINK_PROTOCOLS.has(new URL(href).protocol)
+		const url = new URL(href)
+
+		return SAFE_LINK_PROTOCOLS.has(url.protocol) && PROBE_BASES.every(base => new URL(href, base).href === url.href)
 	} catch {
 		return false
 	}

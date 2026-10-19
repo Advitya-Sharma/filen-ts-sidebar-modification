@@ -1,6 +1,13 @@
 import { describe, expect, expectTypeOf, it } from "vitest"
 import { RevisionView } from "@filen/office/core/docx"
-import { DOCX_EDITOR_COMMANDS, DOCX_PARAGRAPH_STYLES, NO_REVIEW, NO_VALUES, type DocxEditorSnapshot } from "@filen/office/core/docx/edit"
+import {
+	DOCX_EDITOR_COMMANDS,
+	DOCX_PARAGRAPH_STYLES,
+	NO_REVIEW,
+	NO_VALUES,
+	type DocxEditorSnapshot,
+	type ReplaceAllResult
+} from "@filen/office/core/docx/edit"
 import {
 	COMMAND_LABELS,
 	DOCX_COMMAND_CATALOGUE,
@@ -40,6 +47,7 @@ import {
 	editorMarks,
 	editorViewOnlyReasons,
 	firstMatchFrom,
+	replaceAllToast,
 	lockReasonKey,
 	featureLanded,
 	markupRelayout,
@@ -761,5 +769,18 @@ describe("context menu and row room for pictures and links", () => {
 		expect(toolbarFit(320 - 16, menus, true, 2, 5)).toMatchObject({ picture: 1, format: 0 })
 		expect(toolbarFit(1200, menus, true, 2, 5)).toMatchObject({ picture: 5, format: 2 })
 		expect(toolbarFit(0, menus, true, 2, 5).picture).toBe(5)
+	})
+})
+
+describe("replaceAllToast", () => {
+	it("counts what Replace all replaced and says why it replaced none", () => {
+		const tr = {} as Extract<ReplaceAllResult, { readonly tr: unknown }>["tr"]
+
+		expect(replaceAllToast({ tr, count: 3 }, true)).toEqual({ key: "previewDocxReplacedCount", count: 3 })
+		// Applied, yet nothing changed (protection left the tracked marking nothing to do).
+		expect(replaceAllToast({ tr, count: 3 }, false)).toEqual({ key: "previewDocxReplaceAllUnreplaceable" })
+		expect(replaceAllToast({ refused: "tooLarge" }, false)).toEqual({ key: "previewDocxReplaceAllTooLarge" })
+		expect(replaceAllToast({ refused: "unreplaceable" }, false)).toEqual({ key: "previewDocxReplaceAllUnreplaceable" })
+		expect(replaceAllToast(null, false)).toBeUndefined()
 	})
 })

@@ -1,5 +1,5 @@
 import type { Node } from "prosemirror-model"
-import { EditorState, Plugin, TextSelection, type Transaction } from "prosemirror-state"
+import { EditorState, Plugin, TextSelection, type Selection as EditorSelection, type Transaction } from "prosemirror-state"
 import { Mapping, StepMap } from "prosemirror-transform"
 import { DecorationSet, EditorView } from "prosemirror-view"
 import { DocxDocBuilder, FormatResolver, type DocxEditorSession } from "../../../core/docx/edit/index"
@@ -32,22 +32,27 @@ import {
 	plainSlice,
 	plainText,
 	safeClipboardHtml,
+	shownSlice,
 	writeClipboardEvent
 } from "../edit/clipboard"
 import type { DocxEditorMark } from "../edit/surface"
 import {
 	blockIndex,
+	changedRange,
 	compositionFrom,
 	deletesBreakBefore,
+	readComposition,
 	escapesToHost,
 	gapRowCount,
 	handFocus,
+	LiveStarts,
 	mergeWindows,
 	ROW_WINDOW_MIN,
 	releaseGapText,
 	rowsAround,
 	sameWindows,
 	sessionTransaction,
+	tabKey,
 	takeFocus,
 	unreadSelection,
 	windowAround,
@@ -55,7 +60,7 @@ import {
 } from "../edit/window"
 import type { DocxDocument } from "../store"
 import { StoryCounters, markerCopy } from "../../../core/docx/reflow/counters"
-import { laidTable, sourceTable } from "../../../core/docx/reflow/tables"
+import { laidTable, sameTableLook, sourceTable } from "../../../core/docx/reflow/tables"
 import { CodeScan, blockPositions, storyDecorations, type ReflowSource, type TableSource } from "./decorate"
 import { LayoutFaces } from "./faces"
 import { BlockHeights, estimateHeight } from "./heights"
@@ -70,6 +75,8 @@ import { reflowMarkViews, reflowNodeViews, type NestedStory, type ReflowNodeHost
 
 export interface ReflowViewOptions {
 	readonly label: string
+	// The id of an element describing the editing area (how to leave it from the keyboard).
+	readonly describedBy?: string | undefined
 	readonly readOnly: boolean
 	readonly apple: boolean
 	readonly onFind: (() => void) | undefined
@@ -84,6 +91,7 @@ export interface ReflowViewOptions {
 
 // Blocks held on each side of the selection's ends.
 const SELECTION_WINDOW = 8
+const MODIFIER_KEYS: ReadonlySet<string> = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "AltGraph", "Fn", "OS"])
 // Rows of a long table held on each side of the selection's ends.
 const ROW_MARGIN = 12
 // The screens held above and below the one in view.
@@ -154,6 +162,10 @@ class StoryView {
 	private readonly tables: TableSource
 	private dispatching = false
 	private compositionStart = -1
+	// The caret End or typed text left (right after a character on its line), while it is the session's.
+	private lineEnd: EditorSelection | undefined
+	// Text typed (beforeinput insertText) the view has not read yet.
+	private typing = false
 	private compositionText = ""
 	private readOnlyShown: boolean
 	private rewindowed = false
@@ -172,9 +184,25 @@ class StoryView {
 		this.counters = new StoryCounters(editor, session)
 		this.tables = windowed
 			? (table, index) => {
-					const entry = editor.body.edits.entries[index]
+					const entries = editor.body.edits.entries
+					let entry = entries[index]
 
-					return entry?.node === table ? laidTable(editor.edits.model, entry.laid[0]) : sourceTable(session.story.part, table)
+					// The pages resting, layout's view of the body takes edits only when asked (keepUp): a table blocks
+					// came or went before is its own entry still, one edited in its text only looks as its previous
+					// version did, else the view catches up.
+					if (entry?.node !== table && editor.suspended) {
+						const before = entries[index - (session.state.doc.childCount - entries.length)] ?? entry
+
+						if (before !== undefined && (before.node === table || sameTableLook(before.node, table)))
+							return laidTable(editor.edits.model, before.laid[0], editor.edits.rows)
+
+						editor.keepUp()
+						entry = editor.body.edits.entries[index]
+					}
+
+					return entry?.node === table
+						? laidTable(editor.edits.model, entry.laid[0], editor.edits.rows)
+						: sourceTable(session.story.part, table)
 				}
 			: table => sourceTable(session.story.part, table)
 		this.readOnlyShown = this.readOnly
@@ -200,7 +228,7 @@ class StoryView {
 				const state = this.session.state
 				const { from, to } = state.selection
 
-				return plainText(state.doc, from, to, this.markerTexts(from, to))
+				return plainText(state.doc, from, to, this.markerTexts(from, to), host.editor.view)
 			},
 			clipboardTextParser: (text, $context) => plainSlice(text, $context),
 			handlePaste: (_view, event) => this.pasteCut(event.clipboardData?.getData("text/plain")),
@@ -215,7 +243,11 @@ class StoryView {
 
 					return false
 				},
-				beforeinput: (_view, event) => this.historyInput(event),
+				beforeinput: (_view, event) => {
+					if (event.inputType === "insertText") this.typing = true
+
+					return this.historyInput(event)
+				},
 				copy: (_view, event) => this.copyEvent(event, false),
 				cut: (_view, event) => this.copyEvent(event, true),
 				compositionstart: view => {
@@ -229,7 +261,8 @@ class StoryView {
 
 					return false
 				},
-				compositionend: () => {
+				compositionend: view => {
+					readComposition(view)
 					this.compositionStart = -1
 					this.compositionText = ""
 					editor.setComposition(undefined)
@@ -243,6 +276,7 @@ class StoryView {
 				role: "textbox",
 				"aria-multiline": "true",
 				"aria-label": label?.() ?? host.label,
+				...(host.describedBy === undefined ? {} : { "aria-describedby": host.describedBy }),
 				// The app's spelling is drawn as marks: the browser's own would mark the same words again.
 				spellcheck: "false",
 				translate: "no",
@@ -250,7 +284,23 @@ class StoryView {
 				...(this.readOnly ? { "aria-readonly": "true" } : {})
 			})
 		})
+		// After ProseMirror's own dragstart (which writes the raw selection): a drag out writes what the revision
+		// view shows, as a copy does. A move inside the editor takes view.dragging's slice, left whole.
+		this.view.dom.addEventListener("dragstart", this.dragStart)
 		this.made = true
+	}
+
+	private readonly dragStart = (event: DragEvent): void => {
+		const data = event.dataTransfer
+
+		if (data === null || this.view.dragging === null || this.host.editor.view === RevisionView.Markup) return
+
+		const content = this.clipboardContent()
+
+		if (content === undefined) return
+
+		data.setData("text/html", content.html)
+		data.setData("text/plain", content.text)
 	}
 
 	private get viewComposing(): boolean {
@@ -264,6 +314,7 @@ class StoryView {
 	destroy(): void {
 		this.gone = true
 		this.host.unregister(this)
+		this.view.dom.removeEventListener("dragstart", this.dragStart)
 		this.view.destroy()
 	}
 
@@ -346,7 +397,7 @@ class StoryView {
 		let windows: readonly number[] | undefined
 
 		if (this.windowed) {
-			const story = host.editor.body.edits
+			const story = host.starts
 			const { from, to } = real.selection
 			const a = blockIndex(doc, story, from)
 			const b = Math.max(a, blockIndex(doc, story, to))
@@ -379,10 +430,11 @@ class StoryView {
 					doc: real.doc,
 					shown: state.doc,
 					windows,
-					starts: this.windowed ? host.editor.body.edits : undefined,
+					starts: this.windowed ? host.starts : undefined,
 					counters: this.counters,
 					faces: host.faces,
 					facesVersion: host.facesVersion,
+					view: host.editor.view,
 					marks: this.windowed ? host.marks : [],
 					tables: this.tables,
 					codeShown: field => host.editor.fieldCodeShown(field),
@@ -397,7 +449,7 @@ class StoryView {
 	// layout, resting, has none to give).
 	private markerTexts(from: number, to: number): (pos: number) => string {
 		const doc = this.session.state.doc
-		const starts = this.windowed ? this.host.editor.body.edits : undefined
+		const starts = this.windowed ? this.host.starts : undefined
 		const texts = new Map<number, string>()
 
 		this.counters.count(
@@ -463,22 +515,14 @@ class StoryView {
 		// The top-level blocks the change touches, found from its steps (what the body's heights and counters
 		// redo), before the session's document moves on.
 		if (this.windowed && tr.docChanged) {
-			let from = Infinity
-			let to = -Infinity
-
-			tr.mapping.maps.forEach((map, k) => {
-				const back = tr.mapping.slice(0, k).invert()
-
-				map.forEach((start, end) => {
-					from = Math.min(from, back.map(start, -1))
-					to = Math.max(to, back.map(end, 1))
-				})
-			})
-
-			const story = this.host.editor.body.edits
+			const changed = changedRange(tr)
+			const story = this.host.starts
 			const doc = tr.before
 
-			this.host.hint(doc, from === Infinity ? undefined : [blockIndex(doc, story, from), blockIndex(doc, story, to)])
+			this.host.hint(
+				doc,
+				changed === undefined ? undefined : [blockIndex(doc, story, changed.from), blockIndex(doc, story, changed.to)]
+			)
 		}
 
 		this.dispatching = true
@@ -487,6 +531,13 @@ class StoryView {
 			this.session.dispatch(tr)
 		} finally {
 			this.dispatching = false
+		}
+
+		if (this.typing && fromView && tr.docChanged) {
+			const selection = this.session.state.selection
+
+			this.typing = false
+			this.lineEnd = selection.empty ? selection : undefined
 		}
 
 		this.sync(fromView)
@@ -534,7 +585,7 @@ class StoryView {
 
 		if (state.selection.empty) return undefined
 
-		const { dom, text } = this.view.serializeForClipboard(state.selection.content())
+		const { dom, text } = this.view.serializeForClipboard(shownSlice(state.selection.content(), this.host.editor.view))
 
 		return { html: dom.innerHTML, text }
 	}
@@ -584,9 +635,26 @@ class StoryView {
 		return this.run(selectAll(this.session.state))
 	}
 
+	// Whether a line wraps at `pos` (it ends one line and starts the next).
+	private wrapsAt(pos: number): boolean {
+		if (this.session.state.doc !== this.real.doc) return false
+
+		try {
+			return Math.abs(this.view.coordsAtPos(pos, -1).top - this.view.coordsAtPos(pos, 1).top) > 1
+		} catch {
+			return false
+		}
+	}
+
 	// Keys the view handles itself; caret motion is the browser's (the text is where it is drawn).
 	private keyDown(event: KeyboardEvent): boolean {
-		if (this.view.composing || event.isComposing) return false
+		// A modifier pressed alone (Shift before Shift+Home) changes nothing.
+		if (this.view.composing || event.isComposing || MODIFIER_KEYS.has(event.key)) return false
+
+		const lineEnd = this.lineEnd
+
+		this.lineEnd = undefined
+		this.typing = false
 
 		const host = this.host
 		const editor = host.editor
@@ -611,8 +679,24 @@ class StoryView {
 
 				if (selection === null || typeof selection.modify !== "function") return false
 
-				selection.modify(extend ? "extend" : "move", event.key === "End" ? "forward" : "backward", "lineboundary")
+				const alter = extend ? "extend" : "move"
+				const end = event.key === "End"
+				const from = state.selection.head
+
+				// The end of a line that wraps is where the next line starts, and the browser takes a caret End or
+				// typing put there for the next line's (ProseMirror redraws the selection without the side it was
+				// on): from there both keys step back over the character before it first, as Word's stay on the
+				// line the caret ends.
+				const upstream = state.selection === lineEnd && (extend || state.selection.empty) && this.wrapsAt(from)
+
+				if (upstream) selection.modify(alter, "backward", "character")
+
+				selection.modify(alter, end ? "forward" : "backward", "lineboundary")
 				this.readSelection()
+
+				const after = this.session.state.selection
+
+				if (end && (after.head > from || upstream)) this.lineEnd = after
 
 				return true
 			}
@@ -620,6 +704,8 @@ class StoryView {
 				if (mod || event.altKey || readOnly) return false
 
 				return this.run(extend ? lineBreak(state) : splitParagraph(state))
+			case "Tab":
+				return !readOnly && tabKey(editor, this.session, event, apple, tr => this.run(tr))
 			case "Backspace":
 				if (readOnly) return false
 				if (this.windowed && deletesBreakBefore(editor)) return true
@@ -731,6 +817,7 @@ class ShownStory {
 			counters: this.counters,
 			faces: host.faces,
 			facesVersion: host.facesVersion,
+			view: host.editor.view,
 			marks: [],
 			tables: table => sourceTable(part, table),
 			codeShown: field => host.editor.fieldCodeShown(field),
@@ -787,6 +874,9 @@ export class ReflowView implements ReflowNodeHost {
 	private handleFixed: { readonly end: "start" | "end"; readonly fixed: number } | undefined
 	private readonly stopListening: () => void
 	private readonly cleanups: (() => void)[] = []
+	// Where the body's top-level blocks start, kept up edit by edit (layout's view of it is behind while the
+	// pages rest).
+	readonly starts: LiveStarts
 	private warmed = false
 	private equations: { readonly view: RevisionView; readonly value: OmmlRevisionView } | undefined
 	private destroyed = false
@@ -800,19 +890,24 @@ export class ReflowView implements ReflowNodeHost {
 		this.layoutFaces.refresh()
 		this.width = scroller.clientWidth > 0 ? scroller.clientWidth : DEFAULT_WIDTH
 
-		// Headers and footers are not shown here: editing goes back to the body.
+		// Headers and footers are not shown here: editing goes back to the body, and their commands are off.
 		if (editor.activeStory !== editor.body.session.story.story.index) {
 			const active = editor.storySession(editor.activeStory)?.story.story.kind
 
 			if (active === "header" || active === "footer") editor.exitStory()
 		}
 
-		const doc = editor.body.session.state.doc
+		editor.setHeadersShown(false)
 
+		const doc = editor.body.session.state.doc
+		const starts = new LiveStarts(doc)
+
+		this.starts = starts
+		this.cleanups.push(editor.body.session.onApplied(transactions => starts.applyAll(transactions)))
 		this.heights.reset(doc, this.width)
 
 		// The caret's block on screen a third of the way down.
-		const caret = blockIndex(doc, editor.body.edits, editor.body.session.state.selection.head)
+		const caret = blockIndex(doc, starts, editor.body.session.state.selection.head)
 		const top = Math.max(0, this.heights.top(caret) - this.screen() / 3)
 
 		this.viewport = this.viewportAt(top)
@@ -866,8 +961,9 @@ export class ReflowView implements ReflowNodeHost {
 			}
 
 			if (event.type === "document") {
-				// Another revision view: equations are painted anew for it (their trees differ per view), in place.
-				if (this.showRevisions()) for (const refresh of [...this.refreshers]) refresh()
+				// Another revision view: equations are painted anew for it (their trees differ per view) and tables'
+				// banding counts the rows it shows, in place.
+				if (this.showRevisions()) this.refresh()
 
 				// The view of field codes may have changed: decorations drawn anew.
 				for (const story of [...this.stories.values()]) {
@@ -906,6 +1002,10 @@ export class ReflowView implements ReflowNodeHost {
 
 	get label(): string {
 		return this.options.label
+	}
+
+	get describedBy(): string | undefined {
+		return this.options.describedBy
 	}
 
 	get apple(): boolean {
@@ -1221,7 +1321,7 @@ export class ReflowView implements ReflowNodeHost {
 
 		if (pinned === undefined) return screen
 
-		const index = blockIndex(doc, this.editor.body.edits, pinned)
+		const index = blockIndex(doc, this.starts, pinned)
 
 		return mergeWindows(screen, [index, index + 1])
 	}
@@ -1371,7 +1471,7 @@ export class ReflowView implements ReflowNodeHost {
 		// A long table's gap rows take the height of their rows; its rows shown are measured. Each row's element is
 		// the one the view drew for it (found by its position), never one counted among the table's elements.
 		const rows = new Map<Element, Node>()
-		const starts = this.editor.body.edits
+		const starts = this.starts
 
 		for (const index of blocks.values()) {
 			const shown = story.shownTables.get(index)
@@ -1793,7 +1893,8 @@ export class ReflowView implements ReflowNodeHost {
 			if (!options.readOnly) this.warmUp()
 		}
 
-		if (options.label !== previous.label) for (const story of this.stories.values()) story.view.setProps({})
+		if (options.label !== previous.label || options.describedBy !== previous.describedBy)
+			for (const story of this.stories.values()) story.view.setProps({})
 		if (options.marks !== previous.marks) this.main.redraw()
 	}
 
@@ -1840,6 +1941,7 @@ export class ReflowView implements ReflowNodeHost {
 		if (this.scroller.dataset["foFocused"] !== undefined) handFocus(this.editor)
 
 		this.stopListening()
+		this.editor.setHeadersShown(true)
 
 		for (const cleanup of this.cleanups) cleanup()
 

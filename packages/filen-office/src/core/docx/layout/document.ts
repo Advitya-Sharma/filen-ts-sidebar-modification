@@ -29,7 +29,7 @@ import { FootnoteArea, NoteNumbering, type FootnoteState, type NoteNumberingSnap
 import { ObjectTable, type ObjectSizer } from "./objects"
 import { PageGraphic, Layer, OutputMark, PageDisplayList, PageOutput, Region, SOURCE_INTS, SourceFlag, SourceInt } from "./output"
 import { DecorationTable, RunStyles, borderWidth, type DecorationValue, type FontSource, type RunStyleInfo } from "./styles"
-import { rowIndex, sameNumbers, tableRows, type TableSnapshot } from "./table"
+import { laidRows, sameNumbers, type TableSnapshot } from "./table"
 import { EPSILON, twips } from "./units"
 
 export interface LayoutOptions {
@@ -46,6 +46,7 @@ export interface LayoutOptions {
 	readonly sliceMs?: number
 	// Gives the host a turn between slices (web: scheduler.yield or a MessageChannel; default a microtask).
 	readonly yield?: () => Promise<void>
+	// The clock slices and edits' budgets are read on (default performance.now, else Date.now).
 	readonly now?: () => number
 	readonly signal?: { readonly aborted: boolean }
 	// Stops after this many pages (default 100000).
@@ -63,9 +64,13 @@ export interface LayoutOptions {
 export interface DirtyBlock {
 	readonly section: number
 	readonly ref: number
-	// A table whose cells' paragraphs alone changed: those paragraphs (items of the table's part). Laid out
-	// once the rows holding them are, unless one is a header row (repeated on every page).
+	// A table whose rows and cells' paragraphs alone changed: those paragraphs and rows (refs: the table's
+	// part, or overlays of rows written again). Laid out once the rows holding them are, unless one is a header
+	// row (repeated on every page).
 	readonly cells?: readonly number[]
+	// Its rows came, went or moved: rows after them are not where the previous layout had them, so layout does
+	// not meet it again inside the table.
+	readonly moved?: boolean
 }
 
 export type AdvanceResult = "done" | "more" | "fonts"
@@ -430,20 +435,47 @@ function countRenderedBreaks(
 ): number {
 	const kinds = part.kinds
 	const substitutes = edits?.substitutes.size === 0 ? undefined : edits?.substitutes
+	const rows = edits?.rows?.size === 0 ? undefined : edits?.rows
 	let count = 0
+
+	// Nothing laid out from elsewhere: one search of the kinds.
+	if (substitutes === undefined && rows === undefined) {
+		for (
+			let at = kinds.indexOf(Item.LastRenderedPageBreak, start);
+			at >= 0 && at < end;
+			at = kinds.indexOf(Item.LastRenderedPageBreak, at + 1)
+		)
+			count++
+
+		return count
+	}
 
 	for (let item = start; item < end;) {
 		const kind = kinds[item]
-		const laid =
-			substitutes !== undefined && (kind === Item.Paragraph || kind === Item.Table)
-				? substitutes.get(part.index * REF_SPAN + item)
-				: undefined
+		const block = kind === Item.Paragraph || kind === Item.Table
+		const laid = substitutes !== undefined && block ? substitutes.get(part.index * REF_SPAN + item) : undefined
 		const overlay = laid === undefined ? undefined : parts?.[refPart(laid)]
 
 		if (laid !== undefined && overlay !== undefined && overlay !== part) {
 			const at = refItem(laid)
 
 			count += countRenderedBreaks(overlay, at, overlay.end(at), edits, parts)
+			item = part.end(item)
+
+			continue
+		}
+
+		// A table with rows of its own: theirs.
+		const list = rows !== undefined && kind === Item.Table ? rows.get(part.index * REF_SPAN + item) : undefined
+
+		if (list !== undefined) {
+			for (const value of list) {
+				const from = Number.isNaN(value) ? undefined : parts?.[refPart(value)]
+				const row = refItem(value)
+
+				if (from !== undefined) count += countRenderedBreaks(from, row, from.end(row), edits, parts)
+			}
+
 			item = part.end(item)
 
 			continue
@@ -485,6 +517,10 @@ class Paginator {
 	private readonly engine: Engine
 	private readonly layout: DocumentLayout
 	private readonly model: DocxModel
+
+	get edits(): LayoutEdits | undefined {
+		return this.engine.edits
+	}
 	private readonly body: StoryPart | undefined
 	private bodyStory: StoryContext | undefined
 	private readonly compat: LayoutCompat
@@ -551,6 +587,12 @@ class Paginator {
 	private nextStart: AreaStart = AreaStart.DOCUMENT
 	finished = false
 
+	// The body flow yields between blocks once `clock` reaches `at` (Infinity: never).
+	yieldAt(at: number, clock: () => number): void {
+		this.engine.yieldAt = at
+		this.engine.clock = clock
+	}
+
 	constructor(engine: Engine, layout: DocumentLayout, estimate: number | undefined, maxPages: number) {
 		this.engine = engine
 		this.layout = layout
@@ -590,16 +632,19 @@ class Paginator {
 		this.engine.content.setFieldCodes(codes)
 	}
 
-	// The resolver's definitions changed (styles and lists an editor added): counting goes on with them.
-	redefine(styles: DocxStyles, numbering: Numbering | undefined): void {
-		this.engine.resolver.redefine(styles, numbering)
+	// The resolver's definitions changed (styles and lists an editor added): counting goes on with them. Whether
+	// a style laid out as missing is defined now.
+	redefine(styles: DocxStyles, numbering: Numbering | undefined): boolean {
+		const defined = this.engine.resolver.redefine(styles, numbering)
 
-		if (numbering === undefined) return
+		if (numbering === undefined) return defined
 
 		const body = this.bodyStory
 
 		if (body?.counters !== undefined) body.counters.use(numbering)
 		else if (body !== undefined) this.bodyStory = { ...body, counters: new NumberingCounters(numbering) }
+
+		return defined
 	}
 
 	private counters(): NumberingCounters | undefined {
@@ -621,11 +666,14 @@ class Paginator {
 
 	// Lays out every header, footer and note once off-page, so the fonts they need (tables and text boxes
 	// included) are loaded before layout starts: they are laid out where layout cannot wait for fonts.
-	scanStories(): void {
+	// From story `from` on, until `clock()` reaches `until`: the story to go on from then, -1 once done.
+	scanStories(from = 0, until = Infinity, clock: () => number = Date.now): number {
 		const scratch = new PageOutput()
 
 		// By index: an editing layout's model drops stories of overlay parts it no longer uses.
-		for (let index = 0; index < this.model.stories.length; index++) {
+		for (let index = from; index < this.model.stories.length; index++) {
+			if (index > from && until !== Infinity && clock() >= until) return index
+
 			const story = this.model.stories[index]
 
 			if (story === undefined) continue
@@ -640,6 +688,8 @@ class Paginator {
 			this.engine.layoutBox(context, region, scratch, this.values, this.frame, 0, 0, 600)
 			scratch.reset()
 		}
+
+		return -1
 	}
 
 	private resolved(index: number): ResolvedSectionProps {
@@ -712,7 +762,12 @@ class Paginator {
 			case FlowStatus.DONE:
 				this.flowIndex++
 
-				return this.flowIndex >= this.flows.length ? this.nextSection() : Step.PROGRESS
+				if (this.flowIndex >= this.flows.length) return this.nextSection()
+
+				// The next flow (an endnote) goes on below this one, not from the column's top.
+				this.continueBelow()
+
+				return Step.PROGRESS
 			case FlowStatus.SUSPEND:
 				return Step.SUSPEND
 			case FlowStatus.PAGE_BREAK:
@@ -918,19 +973,34 @@ class Paginator {
 	// `rows`: inside the table under way, only what it lays out again (rows to come, repeated header rows).
 	private ahead(flow: BlockFlow, part: number, item: number, rows = false): boolean {
 		const last = Math.max(flow.index, flow.furthest)
+		const edits = this.engine.edits
 		// An edited paragraph inside a block (a table cell's) is laid out from an overlay of its own: it is where
-		// its source is.
-		const source = this.engine.edits?.sourceBlock?.(part, item) ?? -1
+		// its source is. A row an edit wrote again stands for its table (its paragraphs' overlays for the row).
+		const source = edits?.sourceBlock?.(part, item) ?? -1
 		const sourcePart = source < 0 ? -1 : refPart(source)
 		const sourceItem = source < 0 ? -1 : refItem(source)
+		const outer = source < 0 ? -1 : (edits?.sourceBlock?.(sourcePart, sourceItem) ?? -1)
+		const outerPart = outer < 0 ? -1 : refPart(outer)
+		const outerItem = outer < 0 ? -1 : refItem(outer)
 
 		for (let k = flow.index; k <= last && k < flow.count; k++) {
 			const block = flow.blocks[k] ?? -1
 			const end = flow.partAt(k)?.end(block) ?? block + 1
 
-			if (flow.parts[k] === part && item >= block && item < end) return !rows || k !== flow.index || flow.tableAhead(item)
+			if (flow.parts[k] === part && item >= block && item < end) return !rows || k !== flow.index || flow.tableAhead(part, item)
+			// The row (or cell paragraph) the table holds is the level below the table itself.
 			if (flow.parts[k] === sourcePart && sourceItem >= block && sourceItem < end)
-				return !rows || k !== flow.index || flow.tableAhead(sourceItem)
+				return (
+					!rows ||
+					k !== flow.index ||
+					(sourceItem === block ? flow.tableAhead(part, item) : flow.tableAhead(sourcePart, sourceItem))
+				)
+			if (flow.parts[k] === outerPart && outerItem >= block && outerItem < end)
+				return (
+					!rows ||
+					k !== flow.index ||
+					(outerItem === block ? flow.tableAhead(sourcePart, sourceItem) : flow.tableAhead(outerPart, outerItem))
+				)
 
 			// An edited paragraph counts under its source's key, and so do the paragraphs of its text boxes.
 			const key = this.engine.memoKey(flow.parts[k] ?? -1, block)
@@ -939,7 +1009,7 @@ class Paginator {
 
 			if (keyPart === part && keyItem === item) return true
 			if (keyPart === part && keyPart !== flow.parts[k] && item > keyItem && item < (this.model.parts[keyPart]?.end(keyItem) ?? 0))
-				return !rows || k !== flow.index || flow.tableAhead(item)
+				return !rows || k !== flow.index || flow.tableAhead(part, item)
 		}
 
 		return false
@@ -1121,7 +1191,20 @@ class Paginator {
 		this.flows = flows
 		this.flowIndex = 0
 
+		// After the section's text on its last page (each flow starts at its area's top).
+		if (this.pageOpen) this.continueBelow()
+
 		return true
+	}
+
+	// The area resumes below what the column holds, for a flow that follows another in it.
+	private continueBelow(): void {
+		const area = this.area
+
+		if (this.columnBottom <= area.top + EPSILON) return
+
+		area.top = this.columnBottom
+		area.empty = false
 	}
 
 	// Lays the section's part of the page out again with the lowest column bottom that still holds it, so the
@@ -1136,16 +1219,24 @@ class Paginator {
 
 		let low = this.sectionTop
 		let high = this.bodyBottom
+		const yieldAt = this.engine.yieldAt
 
-		for (let k = 0; k < BALANCE_STEPS && high - low > 0.5; k++) {
-			const middle = (low + high) / 2
+		// Each try runs to its end: a slice running out in one would read as text that did not fit.
+		this.engine.yieldAt = Infinity
 
-			if (this.fillColumns(start, flow, middle, geometry.columnX.length)) high = middle
-			else low = middle
+		try {
+			for (let k = 0; k < BALANCE_STEPS && high - low > 0.5; k++) {
+				const middle = (low + high) / 2
+
+				if (this.fillColumns(start, flow, middle, geometry.columnX.length)) high = middle
+				else low = middle
+			}
+
+			if (!this.fillColumns(start, flow, high, geometry.columnX.length))
+				this.fillColumns(start, flow, this.bodyBottom, geometry.columnX.length)
+		} finally {
+			this.engine.yieldAt = yieldAt
 		}
-
-		if (!this.fillColumns(start, flow, high, geometry.columnX.length))
-			this.fillColumns(start, flow, this.bodyBottom, geometry.columnX.length)
 	}
 
 	// Lays the section's part of the page out from `start` into its columns ending at `bottom`; whether it
@@ -1898,11 +1989,11 @@ class Paginator {
 
 			if (cells === undefined || cells.length === 0 || part === undefined) return undefined
 
-			const rows = tableRows(part, item, this.engine.view)
+			const rows = laidRows(this.engine, part, item)
 			let first = Infinity
 
 			for (const cell of cells) {
-				const row = rowIndex(part, rows, cell)
+				const row = rows.indexOf(refPart(cell), refItem(cell))
 
 				if (row >= 0) first = Math.min(first, row)
 			}
@@ -2488,10 +2579,10 @@ interface InPlace {
 function rowsBehind(block: DirtyBlock, flow: BlockFlow): boolean {
 	const cells = block.cells
 
-	if (cells === undefined || cells.length === 0) return false
+	if (cells === undefined || cells.length === 0 || block.moved === true) return false
 
-	for (const item of cells) {
-		const at = flow.tableRow(item)
+	for (const cell of cells) {
+		const at = flow.tableRow(refPart(cell), refItem(cell))
 
 		if (at === undefined) return false
 		// In a row not laid out (hidden in the view): nothing of it shows.
@@ -2779,6 +2870,10 @@ interface BalanceStart {
 
 // Layouts again for page count fields in the text, at most.
 const MAX_TOTALS_ROUNDS = 3
+// What laying out the pages in view may take past an edit's budget (a frame, with the budget).
+const THROUGH_MS = 12
+// How often a merge held off by a save looks again.
+const MERGE_POLL_MS = 250
 
 // Steps a document's paginator: synchronously within a time budget (editing lays out the pages in view in
 // the keystroke's task), or in slices from layoutDocument's loop.
@@ -2796,6 +2891,17 @@ export class LayoutDriver {
 	private from = 0
 	// The run lays out again for edits: page count fields of earlier pages are refreshed when shown.
 	private lazy = false
+	// The run lays out again what a merge of overlays moved (see LayoutEdits.compact); one is due once the
+	// slices' loop runs. Merges wait for input (an edit's run) and saves (LayoutEdits.compactHeld) to have been
+	// idle for LayoutEdits.compactWait.
+	private compacting = false
+	private wantCompact = false
+	private mergeTimer: unknown = undefined
+	private editedSinceMerge = false
+	private catchUp = false
+	// A paginator switched to (another view or field codes) scans its stories first, in slices, from this story
+	// (-1: done; see Paginator.scanStories).
+	private scanFrom = -1
 	// Starts the slice loop when it is not running (set by layoutDocument).
 	continue: () => Promise<void> = () => Promise.resolve()
 
@@ -2810,12 +2916,20 @@ export class LayoutDriver {
 	// under way stands); with `dirty`, the run may stop where it meets the previous layout again.
 	begin(page: number, dirty: readonly DirtyBlock[] | undefined, through = -1): number {
 		const paginator = this.paginator
+
+		// Input: a merge due waits for it to be idle again.
+		this.dropMerge()
+		this.wantCompact = false
+		this.editedSinceMerge = true
 		const layout = this.layout
 		// A layout still under way without an earlier edit run cannot stop early: it has pages left to lay out.
 		const resync = dirty !== undefined && (layout.final || paginator.resyncing)
-		const cells = layout.final && dirty !== undefined ? paginator.cellsRestart(page, dirty) : undefined
-		const target = cells ?? (layout.final ? page : Math.min(page, paginator.progress))
-		const from = paginator.restartPage(target, layout.final && dirty !== undefined)
+		// Rows before the changed ones lay out as they did, under way or not (the pages a run under way laid out
+		// are the edited document's up to its edit's rows, those behind it the document's before).
+		const cells = dirty !== undefined ? paginator.cellsRestart(page, dirty) : undefined
+		const asked = cells ?? page
+		const target = layout.final ? asked : Math.min(asked, paginator.progress)
+		const from = paginator.restartPage(target, dirty !== undefined)
 
 		this.rounds = 0
 		this.lazy = dirty !== undefined
@@ -2829,14 +2943,65 @@ export class LayoutDriver {
 	}
 
 	advance(deadline: number, through: number): AdvanceResult {
+		try {
+			return this.steps(deadline, through)
+		} finally {
+			this.paginator.yieldAt(Infinity, this.now)
+		}
+	}
+
+	private steps(deadline: number, through: number): AdvanceResult {
 		const paginator = this.paginator
 		const layout = this.layout
 
-		if (layout.final) return "done"
+		if (this.scanFrom >= 0) {
+			this.scanFrom = paginator.scanStories(this.scanFrom, deadline, this.now)
+
+			if (this.scanFrom >= 0) return "more"
+			if (this.styles.hasMissing) return "fonts"
+		}
+
+		if (layout.final) {
+			// Laid out to the end with a merge of overlays due: the slices' loop starts it (after a save holding it
+			// off).
+			if (through >= 0 || !this.wantCompact) return "done"
+
+			this.wantCompact = false
+
+			if (this.paginator.edits?.compactHeld?.() === true) {
+				this.armMerge(MERGE_POLL_MS)
+
+				return "done"
+			}
+
+			this.editedSinceMerge = false
+
+			if (!this.compact(deadline)) return "done"
+		}
+
+		// An edit's blocks left for the slices: the next of them, a slice after the pages laid out before.
+		if (this.catchUp && (through < 0 || through === Infinity)) {
+			this.catchUp = false
+
+			// Not all of them yet: the pages show what they did meanwhile.
+			if (!this.compact(through === Infinity ? Infinity : deadline) && paginator.edits?.pending?.() === true) {
+				this.catchUp = true
+
+				return "more"
+			}
+		}
 
 		this.redoMissed()
 
+		// Pages up to `through` (those in view) are laid out before returning, for THROUGH_MS past the deadline at
+		// most: a run far behind them lays the rest out in slices (the view shows them as they were meanwhile).
+		const cap = deadline + THROUGH_MS
+
 		for (;;) {
+			const limit = paginator.progress > through ? deadline : cap
+
+			paginator.yieldAt(limit, this.now)
+
 			const step = paginator.step()
 
 			if (step === Step.FINISHED) {
@@ -2894,8 +3059,43 @@ export class LayoutDriver {
 					continue
 				}
 
+				// Records a merge or an edit left readable go once no page shows them.
+				const merged = this.compacting
+
+				this.compacting = false
+				this.releaseRetired()
+
+				// An edit's blocks still to write: not settled. Synchronously to the end, or the slices' loop takes
+				// the next of them up a slice later (after this run's pages are delivered).
+				if (paginator.edits?.pending?.() === true) {
+					if (through === Infinity) {
+						// A long table comes a few rows at a time: until they are all laid out again.
+						let started = false
+
+						while (!started && paginator.edits.pending()) started = this.compact(Infinity)
+
+						if (started) continue
+					} else {
+						this.catchUp = true
+
+						return "more"
+					}
+				}
+
+				// Overlays to merge: a region at a time, its pages laid out again from the merged part (the same
+				// text), in the slices' loop once this run's pages are delivered (a slice later), once input has
+				// been idle (the next region right away while it still is).
+				if (paginator.edits?.compactDue?.() === true) {
+					const wait = merged && !this.editedSinceMerge ? 0 : (paginator.edits.compactWait?.() ?? 0)
+
+					if (wait > 0) this.armMerge(wait)
+					else this.wantCompact = true
+				}
+
 				layout.final = true
 				layout.notify(0, layout.pages.length, true)
+
+				if (this.wantCompact && through >= 0) void this.continue()
 
 				return "done"
 			}
@@ -2909,7 +3109,7 @@ export class LayoutDriver {
 				return "fonts"
 			}
 
-			if (paginator.progress > through && this.now() >= deadline) {
+			if (this.now() >= (paginator.progress > through ? deadline : cap)) {
 				paginator.detach()
 
 				return "more"
@@ -2919,6 +3119,139 @@ export class LayoutDriver {
 
 	prepareFonts(): Promise<void> {
 		return this.styles.prepareMissing()
+	}
+
+	// A merge of overlays waits for the slices' loop.
+	get merging(): boolean {
+		return this.wantCompact
+	}
+
+	private releaseRetired(): void {
+		const edits = this.paginator.edits
+		const parts = edits?.retiredParts?.()
+
+		if (parts === undefined || parts.size === 0) return
+
+		const shown = new Set<number>()
+
+		for (const page of this.layout.pages) {
+			for (let s = 0; s < page.sourceCount; s++) {
+				const part = page.sourceParts[s] ?? -1
+
+				if (parts.has(part)) shown.add(part)
+			}
+		}
+
+		edits?.compacted?.(shown)
+	}
+
+	// A merge due starts in `ms` unless an edit comes first (begin()), later while a save holds it off.
+	private armMerge(ms: number): void {
+		const set: unknown = Reflect.get(globalThis, "setTimeout")
+
+		this.dropMerge()
+
+		// No timers here: it starts now.
+		if (typeof set !== "function") {
+			this.wantCompact = true
+
+			return
+		}
+
+		this.mergeTimer = (set as (callback: () => void, ms: number) => unknown)(() => {
+			this.mergeTimer = undefined
+
+			const edits = this.paginator.edits
+
+			if (!this.layout.final || this.layout.suspended || this.layout.cancelled || edits?.compactDue?.() !== true) return
+
+			if (edits.compactHeld?.() === true) {
+				this.armMerge(Math.max(ms, MERGE_POLL_MS))
+
+				return
+			}
+
+			this.wantCompact = true
+			void this.continue()
+		}, ms)
+	}
+
+	private dropMerge(): void {
+		const clear: unknown = Reflect.get(globalThis, "clearTimeout")
+
+		if (this.mergeTimer === undefined) return
+		if (typeof clear === "function") (clear as (handle: unknown) => void)(this.mergeTimer)
+
+		this.mergeTimer = undefined
+	}
+
+	// Starts laying out again the pages a merge of overlays moved, from the first page showing them; false when
+	// none is due.
+	private compact(deadline: number): boolean {
+		const paginator = this.paginator
+		const layout = this.layout
+		const edits = paginator.edits
+
+		if (edits?.compactDue?.() !== true || edits.compact === undefined) return false
+
+		const pages = new Map<number, [number, number]>()
+
+		// Blocks an edit left behind tell their pages otherwise (Compaction.from).
+		if (edits.pending?.() !== true)
+			layout.pages.forEach((page, index) => {
+				for (let s = 0; s < page.sourceCount; s++) {
+					const part = page.sourceParts[s] ?? -1
+					const range = pages.get(part)
+
+					if (range === undefined) pages.set(part, [index, index])
+					else range[1] = index
+				}
+			})
+
+		const batch = edits.compact(pages, () => this.now() >= deadline)
+
+		if (batch === undefined) return false
+
+		let first = Infinity
+
+		for (const part of batch.parts) first = Math.min(first, pages.get(part)?.[0] ?? Infinity)
+
+		// The last page starting before the first block laid out anew.
+		if (batch.from !== undefined) {
+			const { section, index } = batch.from
+
+			first = 0
+
+			for (let page = 0; page < layout.anchors.length; page++) {
+				const anchor = layout.anchors[page]
+
+				if (anchor === undefined || anchor.section > section || (anchor.section === section && anchor.index >= index)) break
+
+				first = page
+			}
+
+			// In a long table, from the first row changed.
+			first = paginator.cellsRestart(first, batch.from.rows) ?? first
+		}
+
+		if (first === Infinity) {
+			this.releaseRetired()
+
+			return false
+		}
+
+		const from = paginator.restartPage(first, true)
+
+		this.compacting = true
+		this.rounds = 0
+		this.lazy = true
+		this.edited = true
+		this.fresh = false
+		this.from = from
+		paginator.restartAt(from, batch.dirty, true, first)
+		layout.notify(from, from, false)
+
+		return true
 	}
 
 	// Pages closed while fonts were loading are laid out again once they are loaded (a run then comes out the
@@ -2956,8 +3289,9 @@ export class LayoutDriver {
 		return first
 	}
 
+	// Content that referred to a style missing until now looks different: laid out again from the start.
 	redefine(styles: DocxStyles, numbering: Numbering | undefined): void {
-		this.paginator.redefine(styles, numbering)
+		if (this.paginator.redefine(styles, numbering)) this.begin(0, undefined)
 	}
 
 	// Where the last run met the previous layout again, or -1.
@@ -2968,8 +3302,19 @@ export class LayoutDriver {
 	// Lays out with `paginator` from now on (a revision view switch: a new engine, laid out from the start).
 	use(paginator: Paginator): void {
 		this.paginator = paginator
+		this.scanFrom = 0
 		this.rounds = 0
+		this.wantCompact = false
+		this.dropMerge()
 	}
+}
+
+// performance.now where there is one (the clock an editor reads its budgets on, see PagedEditor), else Date.now.
+function monotonicNow(): () => number {
+	const performance: unknown = Reflect.get(globalThis, "performance")
+	const now: unknown = typeof performance === "object" && performance !== null ? Reflect.get(performance, "now") : undefined
+
+	return typeof now === "function" ? () => (now as () => number).call(performance) : Date.now
 }
 
 function defaultYield(): Promise<void> {
@@ -3021,7 +3366,7 @@ export function layoutDocument(
 	}
 	let paginator = new Paginator(engineOf(), layout, options.estimatedPages, options.maxPages ?? 100000)
 	const slice = options.sliceMs ?? 8
-	const now = options.now ?? Date.now
+	const now = options.now ?? monotonicNow()
 	const pause = options.yield ?? defaultYield
 	const driver = new LayoutDriver(paginator, layout, runStyles, now)
 
@@ -3033,7 +3378,12 @@ export function layoutDocument(
 
 		try {
 			if (scan) {
-				paginator.scanStories()
+				for (let next = 0; next >= 0;) {
+					next = paginator.scanStories(next, now() + slice, now)
+
+					if (next >= 0) await pause()
+				}
+
 				await runStyles.prepareMissing()
 			}
 
@@ -3056,7 +3406,8 @@ export function layoutDocument(
 
 				const result = driver.advance(now() + slice, -1)
 
-				if (result === "done") break
+				// Done with a merge of overlays due: it starts a slice later (the pages just delivered shown).
+				if (result === "done" && !driver.merging) break
 				if (result === "fonts") await runStyles.prepareMissing()
 
 				await pause()
@@ -3089,7 +3440,6 @@ export function layoutDocument(
 		next => {
 			view = next
 			paginator = new Paginator(engineOf(), layout, options.estimatedPages, options.maxPages ?? 100000)
-			paginator.scanStories()
 			driver.use(paginator)
 		},
 		(next, fresh) => {
@@ -3103,7 +3453,6 @@ export function layoutDocument(
 			}
 
 			paginator = new Paginator(engineOf(), layout, options.estimatedPages, options.maxPages ?? 100000)
-			paginator.scanStories()
 			driver.use(paginator)
 		}
 	)

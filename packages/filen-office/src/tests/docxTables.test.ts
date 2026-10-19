@@ -299,6 +299,33 @@ describe("table commands", () => {
 		expect(xml).toMatch(/Before the <\/w:t>.*<w:tbl>.*<\/w:tbl>.*>table<\/w:t>/)
 	})
 
+	it("keeps a paragraph between a table and one inserted right after it", async () => {
+		const after = (session: DocxEditorSession): void => {
+			session.dispatch(session.state.tr.setSelection(TextSelection.create(session.state.doc, textPos(session.state.doc, "After"))))
+		}
+		const { bytes, layout } = await edited(docx(GRID3), after, [{ type: "table.insert", rows: 1, cols: 2 }])
+		const xml = await partXml(bytes)
+
+		expect(xml).not.toContain("</w:tbl><w:tbl>")
+		expect(xml).toMatch(/<\/w:tbl><w:p\b[^>]*\/?>(?:<\/w:p>)?<w:tbl>/)
+		expect(layout.session.state.doc.childCount).toBe(5)
+
+		const tracked = await edited(
+			docx(GRID3),
+			session => {
+				session.context.review.tracking = true
+				session.context.identity.author = "Ann Author"
+				after(session)
+			},
+			[{ type: "table.insert", rows: 1, cols: 2 }]
+		)
+
+		// While tracking, the new paragraph's mark is inserted with the table.
+		expect(await partXml(tracked.bytes)).toMatch(
+			/<\/w:tbl><w:p><w:pPr><w:rPr><w:ins w:id="\d+" w:author="Ann Author"[^>]*\/><\/w:rPr><\/w:pPr><\/w:p><w:tbl>/
+		)
+	})
+
 	it("inserts a table in place of the selection, the deletion tracked while changes are", async () => {
 		const word = (session: DocxEditorSession): void => {
 			const from = textPos(session.state.doc, "the tab")

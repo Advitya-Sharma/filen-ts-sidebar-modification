@@ -1,9 +1,21 @@
-import { DOMParser, DOMSerializer, Fragment, Slice, type DOMOutputSpec, type Mark, type Node, type ResolvedPos } from "prosemirror-model"
+import {
+	DOMParser,
+	DOMSerializer,
+	Fragment,
+	Slice,
+	type DOMOutputSpec,
+	type Mark,
+	type MarkType,
+	type Node,
+	type ResolvedPos
+} from "prosemirror-model"
 import type { Transaction } from "prosemirror-state"
 import { docxSchema, type DocxEditorSession, type MarkerList } from "../../../core/docx/edit/index"
 import type { PagedEditor } from "../../../core/docx/paged/index"
 import { COMMENT_MOVE_META, freshSliceKeeping } from "../../../core/docx/edit/invariants/index"
 import { sourceCopies } from "../../../core/docx/edit/session"
+import { RevisionView, revisionHidden } from "../../../core/docx/model/kinds"
+import { shownFieldText } from "../../../core/docx/layout/fields"
 import { docxComments } from "../../../core/docx/review/comments"
 
 // The clipboard of the editing views (the paged editor's input sink, the reflowed view): what a copy writes
@@ -27,6 +39,11 @@ export function attrText(name: string): (node: Node) => string {
 	}
 }
 
+// What a field shows: its result, or a MACROBUTTON's display text where it has none.
+export function fieldText(node: Node): string {
+	return shownFieldText(attrText("result")(node), attrText("instruction")(node))
+}
+
 // Copying writes this HTML (and the text): structure and basic formatting, never document-controlled URLs.
 export function clipboardSerializer(): DOMSerializer {
 	const text =
@@ -48,7 +65,7 @@ export function clipboardSerializer(): DOMSerializer {
 		comment_ref: empty,
 		drawing: empty,
 		run_object: text(attrText("text")),
-		field: text(attrText("result")),
+		field: text(fieldText),
 		marker: empty,
 		field_char: empty,
 		math: empty,
@@ -455,41 +472,164 @@ const PLAIN_LEAVES: Record<string, (node: Node) => string> = {
 	hyphen: node => (node.attrs["soft"] === true ? "" : "\u2011"),
 	symbol: symbolText,
 	run_object: attrText("text"),
-	field: attrText("result"),
+	field: fieldText,
 	opaque_inline: attrText("text")
 }
 const plainLeaf = (node: Node): string => PLAIN_LEAVES[node.type.name]?.(node) ?? ""
 
+// ---- what the revision view shows -----------------------------------------------------------------------------
+
+// The marks of text revision view `view` hides: deletions in the Final view (No Markup), insertions in the
+// Original view, none in Markup (which shows and copies tracked changes as they are).
+export function hiddenMarks(view: RevisionView): readonly MarkType[] {
+	if (view === RevisionView.Final) return [docxSchema.marks.deletion, docxSchema.marks.move_from]
+	if (view === RevisionView.Original) return [docxSchema.marks.insertion, docxSchema.marks.move_to]
+
+	return []
+}
+
+function hiddenBy(node: Node, hidden: readonly MarkType[]): boolean {
+	return node.isInline && node.marks.some(mark => hidden.includes(mark.type))
+}
+
+// A tracked row or cell `view` does not show (a deleted one in Final, an inserted one in Original).
+function rowOrCellHidden(node: Node, view: RevisionView): boolean {
+	return (node.type === nodes.table_row || node.type === nodes.table_cell) && revisionHidden(node.attrs["revision"] as number, view)
+}
+
+// A paragraph whose mark `view` does not show: it runs on into the next paragraph there.
+function markHidden(node: Node, view: RevisionView): boolean {
+	return node.type === nodes.paragraph && revisionHidden(node.attrs["revision"] as number, view)
+}
+
+// `fragment` as revision view `view` shows it: without the inline content `hidden` marks and the rows and cells
+// the view leaves out, a paragraph whose mark it leaves out joined to the next (which keeps its mark).
+function shownFragment(fragment: Fragment, view: RevisionView, hidden: readonly MarkType[]): Fragment {
+	let changed = false
+	const children: Node[] = []
+	// A paragraph whose mark is not shown, waiting for the next paragraph to run on into.
+	let pending: { readonly node: Node; readonly content: Fragment } | undefined
+	const flush = (): void => {
+		if (pending !== undefined) children.push(pending.node.copy(pending.content))
+
+		pending = undefined
+	}
+
+	fragment.forEach(child => {
+		if (hiddenBy(child, hidden) || rowOrCellHidden(child, view)) {
+			changed = true
+
+			return
+		}
+
+		let content = child.isLeaf || child.isText ? child.content : shownFragment(child.content, view, hidden)
+
+		if (content !== child.content) changed = true
+
+		// A table row without a cell shown, or a table without a row: none.
+		if (content.childCount === 0 && (child.type === nodes.table_row || child.type === nodes.table)) {
+			changed = true
+
+			return
+		}
+
+		if (pending !== undefined && child.isTextblock) {
+			content = pending.content.append(content)
+			pending = undefined
+		} else flush()
+
+		if (markHidden(child, view)) {
+			pending = { node: child, content }
+			changed = true
+
+			return
+		}
+
+		children.push(content === child.content ? child : child.copy(content))
+	})
+	// The run-on text with no paragraph after it here stays a paragraph of its own.
+	flush()
+
+	return changed ? Fragment.from(children) : fragment
+}
+
+// A copied slice as revision view `view` shows it: text it hides is left out (none in Markup).
+export function shownSlice(slice: Slice, view: RevisionView): Slice {
+	if (view === RevisionView.Markup) return slice
+
+	const content = shownFragment(slice.content, view, hiddenMarks(view))
+
+	return content === slice.content ? slice : new Slice(content, slice.openStart, slice.openEnd)
+}
+
+// [from, to) of a textblock's content as plain text, leaving out what `hidden` marks.
+function shownText(block: Node, from: number, to: number, hidden: readonly MarkType[]): string {
+	if (hidden.length === 0) return block.textBetween(from, to, undefined, plainLeaf)
+
+	let out = ""
+
+	block.forEach((child, at) => {
+		const end = at + child.nodeSize
+
+		if (end <= from || at >= to || hiddenBy(child, hidden)) return
+
+		out += child.isText ? (child.text ?? "").slice(Math.max(0, from - at), Math.min(child.nodeSize, to - at)) : plainLeaf(child)
+	})
+
+	return out
+}
+
 // [from, to) of `doc` as plain text, as Word copies it: paragraphs on lines of their own (empty ones
-// kept), a table's cells separated by tabs and its rows by line breaks, list numbers as text.
-export function plainText(doc: Node, from: number, to: number, marker: (pos: number) => string): string {
+// kept), a table's cells separated by tabs and its rows by line breaks, list numbers as text. What revision view
+// `view` hides is left out: text, rows and cells, and paragraph marks (the next paragraph runs on).
+export function plainText(
+	doc: Node,
+	from: number,
+	to: number,
+	marker: (pos: number) => string,
+	view: RevisionView = RevisionView.Markup
+): string {
+	const hidden = hiddenMarks(view)
 	const blocks = (parent: Node, offset: number, out: string[]): string[] => {
+		// The previous paragraph's mark is not shown: this one's text runs on from it.
+		let runOn = false
+
 		parent.forEach((child, at) => {
 			const pos = offset + at
 			const end = pos + child.nodeSize
 
 			if (end <= from || pos >= to) return
 
+			const joins = runOn
+
+			runOn = false
+
 			if (child.isTextblock) {
 				const a = Math.max(from, pos + 1) - pos - 1
 				const b = Math.max(a, Math.min(to, end - 1) - pos - 1)
 				const prefix = from <= pos + 1 && to > pos + 1 ? marker(pos + 1) : ""
+				const text = prefix + shownText(child, a, b, hidden)
 
-				out.push(prefix + child.textBetween(a, b, undefined, plainLeaf))
+				if (joins && out.length > 0) out[out.length - 1] += text
+				else out.push(text)
+
+				runOn = markHidden(child, view)
 			} else if (child.type === nodes.table) {
 				child.forEach((row, rowAt) => {
 					const rowPos = pos + 1 + rowAt
 
-					if (rowPos + row.nodeSize <= from || rowPos >= to) return
+					if (rowPos + row.nodeSize <= from || rowPos >= to || rowOrCellHidden(row, view)) return
 
 					const cells: string[] = []
 
 					row.forEach((cell, cellAt) => {
 						const cellPos = rowPos + 1 + cellAt
 
-						if (cellPos + cell.nodeSize > from && cellPos < to) cells.push(blocks(cell, cellPos + 1, []).join("\n"))
+						if (cellPos + cell.nodeSize > from && cellPos < to && !rowOrCellHidden(cell, view))
+							cells.push(blocks(cell, cellPos + 1, []).join("\n"))
 					})
-					out.push(cells.join("\t"))
+
+					if (cells.length > 0) out.push(cells.join("\t"))
 				})
 			} else if (child.type === nodes.locked_block) {
 				out.push(attrText("text")(child))

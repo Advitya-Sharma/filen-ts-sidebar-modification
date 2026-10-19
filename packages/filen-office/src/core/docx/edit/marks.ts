@@ -1,6 +1,7 @@
 import { Fragment, type Mark, type MarkType, type Node, type Schema } from "prosemirror-model"
 import type { Transaction } from "prosemirror-state"
 import { AddMarkStep, RemoveMarkStep, Step, StepResult, type Mappable } from "prosemirror-transform"
+import { asBuilt, builtBlock } from "./origin"
 
 // Run-level content of [from, to) and the mark of the step's type it gets (null: none of that type).
 export interface MarkPiece {
@@ -58,19 +59,21 @@ abstract class PieceMarksStep<P extends Range> extends Step {
 
 	override apply(doc: Node): StepResult {
 		try {
-			return StepResult.ok(this.rebuild(doc, 0, new Cursor(this.pieces)))
+			return StepResult.ok(this.rebuild(doc, 0, new Cursor(this.pieces), undefined))
 		} catch (error) {
 			return StepResult.fail(error instanceof Error ? error.message : String(error))
 		}
 	}
 
 	// `node` (its content starting at `start`) with the pieces' marks set: the same node when nothing in it
-	// changed.
-	private rebuild(node: Node, start: number, cursor: Cursor): Node {
+	// changed, a block the builder made when it is that again (asBuilt; `built` is what it made in `node`'s
+	// place).
+	private rebuild(node: Node, start: number, cursor: Cursor, built: Node | undefined): Node {
 		const out: Node[] = []
 		let changed = false
+		const paired = built !== undefined && built.childCount === node.childCount ? built : undefined
 
-		node.forEach((child, offset) => {
+		node.forEach((child, offset, index) => {
 			const pos = start + offset
 			const end = pos + child.nodeSize
 
@@ -91,7 +94,9 @@ abstract class PieceMarksStep<P extends Range> extends Step {
 				return
 			}
 
-			const next = child.content.size > 0 ? this.rebuild(child, pos + 1, cursor) : child
+			const own = paired === undefined ? builtBlock(child.attrs) : paired.child(index)
+			const rebuilt = child.content.size > 0 ? this.rebuild(child, pos + 1, cursor, own) : child
+			const next = rebuilt === child ? child : asBuilt(rebuilt, own)
 
 			if (next !== child) changed = true
 

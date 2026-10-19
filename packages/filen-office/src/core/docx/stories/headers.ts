@@ -109,7 +109,8 @@ function caretPage(editor: PagedEditor): number {
 export function headerContext(editor: PagedEditor): DocxHeaderContext | null {
 	const kind = editor.session.story.story.kind
 
-	if (kind !== "header" && kind !== "footer") return null
+	// The pages resting (another surface shows the document), none is placed on them.
+	if ((kind !== "header" && kind !== "footer") || editor.suspended) return null
 
 	const shown = shownType(editor, caretPage(editor))
 	const sections = editor.edits.model.sections
@@ -131,8 +132,10 @@ export function headerContext(editor: PagedEditor): DocxHeaderContext | null {
 
 // ---- commands -------------------------------------------------------------------------------------------------
 
+// Headers and footers are edited where they are shown: not in Mobile view, nor while the pages rest (their
+// caret's page would be read from pages laid out before the edits since).
 function writable(editor: PagedEditor): boolean {
-	return !editor.body.session.readOnly && editor.pageCount > 0
+	return !editor.body.session.readOnly && editor.pageCount > 0 && editor.headersShown && !editor.suspended
 }
 
 export function canEditHeader(editor: PagedEditor): boolean {

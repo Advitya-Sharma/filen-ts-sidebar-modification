@@ -369,6 +369,10 @@ function caretValues(state: ProviderState, editor: EditorState): { run: RunValue
 function computeValues(state: ProviderState, editor: EditorState): DocxValuesSnapshot {
 	const caret = editor.selection.empty ? caretValues(state, editor) : undefined
 	const tally = editor.selection.empty ? undefined : selectionTally(state, editor)
+
+	// A caret drops the last selection's tally: it holds the document it counted (after a format over everything,
+	// a copy of the whole document until the next selection).
+	if (editor.selection.empty) state.selection = null
 	let runs: ReadonlyMap<RunValues, number>
 	let chars: number
 	let paras: ReadonlyMap<ParagraphValues, number>

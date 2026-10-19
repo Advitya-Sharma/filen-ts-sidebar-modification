@@ -21,8 +21,14 @@ interface Built {
 
 const built = new WeakMap<DocxEditContext, Built>()
 
+// Top-level blocks as the builder made them, by their attributes object, which every copy an edit makes of a
+// block shares (until its attributes change; one with a source is its block's own): see asBuilt.
+const builtBlocks = new WeakMap<object, Node>()
+
 // A block (or story) the builder made from `part`.
 export function builtFrom(context: DocxEditContext, node: Node, part: number): void {
+	if (hasSource(node.attrs)) builtBlocks.set(node.attrs, node)
+
 	let state = built.get(context)
 
 	if (state === undefined) {
@@ -80,4 +86,29 @@ export function claimOrigin(node: Node, part: number): void {
 // The part a node's attributes or a mark came from, or undefined when unknown.
 export function originOf(value: Node | object): number | undefined {
 	return origins.get("attrs" in value && "type" in value && "content" in value ? (value as Node).attrs : value)
+}
+
+// The top-level block the builder made with the attributes object `attrs` (an edit's copy of a block keeps it).
+export function builtBlock(attrs: object): Node | undefined {
+	return builtBlocks.get(attrs)
+}
+
+// `next`, a block an edit rebuilt, as the builder made it when it equals `built` (what the builder made in its
+// place: builtBlock, or the matching child of such a block): the very node, so the document shares it again
+// instead of holding a copy (a format applied to the whole document and undone would otherwise double it).
+// `attrs` is the attributes object `next` stands for: a copy keeps the built block's (an undo of an attribute
+// step gives it back), so another block of equal content never matches.
+export function asBuilt(next: Node, built: Node | undefined, attrs: object = next.attrs): Node {
+	if (built === undefined || built === next || built.attrs !== attrs || built.childCount !== next.childCount) return next
+	if (built.type !== next.type || !sameMarks(built.marks, next.marks)) return next
+
+	if (next.inlineContent) return built.content.eq(next.content) ? built : next
+
+	for (let k = 0; k < next.childCount; k++) if (next.child(k) !== built.child(k)) return next
+
+	return built
+}
+
+function sameMarks(a: readonly Mark[], b: readonly Mark[]): boolean {
+	return a === b || (a.length === b.length && a.every((mark, k) => mark === b[k] || mark.eq(b[k] as Mark)))
 }

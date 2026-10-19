@@ -491,6 +491,23 @@ describe("comments: threads, resolving and deleting", () => {
 		expect(await read(bytes, "word/commentsExtended.xml")).not.toContain("22222222")
 	})
 
+	it("takes another writer's element keyed on a deleted comment's paragraph out of commentsExtended too", async () => {
+		const opened = await open({
+			...W2013,
+			commentsExtended: (W2013.commentsExtended ?? "").replace(
+				"</w15:commentsEx>",
+				'<w15:commentExNG w15:paraId="22222222" w15:done="0"/></w15:commentsEx>'
+			)
+		})
+
+		expect(await opened.editor.execute({ type: "comment.delete", id: "1" })).toBe(true)
+
+		const extended = (await read(await save(opened), "word/commentsExtended.xml")) ?? ""
+
+		expect(extended).not.toContain("22222222")
+		expect(extended).toContain('<w15:commentEx w15:paraId="11111111" w15:done="0"/>')
+	})
+
 	it("removes a deleted comment while the save rewrites another comment of its part", async () => {
 		const opened = await open(W2013)
 
@@ -1068,6 +1085,257 @@ describe("comments: deleting a reply that has replies", () => {
 		})
 	})
 })
+
+// The root's anchors deleted alone (raw steps, as keys typed and deleted around adjacent anchors can leave it).
+function dropAnchors(editor: PagedEditor, id: string): void {
+	const doc = editor.session.state.doc
+	const tr = editor.session.state.tr
+	const at: number[] = []
+
+	doc.descendants((node, pos) => {
+		if ((node.type === nodes.marker || node.type === nodes.comment_ref) && node.attrs["id"] === id) at.push(pos)
+
+		return true
+	})
+
+	for (const pos of at.reverse()) tr.delete(pos, pos + 1)
+
+	expect(editor.session.dispatch(tr)).toBe(true)
+}
+
+describe("comments: a reply whose thread's first comment lost its anchors", () => {
+	it("is a thread of its own in the list and in the file, and every save goes on", async () => {
+		const opened = await open(PLAIN)
+		const { editor } = opened
+		const store = docxComments(editor)
+
+		select(editor, 1, 4)
+		expect(await editor.execute({ type: "comment.add", text: "Root" })).toBe(true)
+
+		const root = store.threads()[0]?.id ?? ""
+
+		expect(await editor.execute({ type: "comment.reply", id: root, text: "Reply" })).toBe(true)
+
+		const reply = store.threads()[0]?.replies[0]?.id ?? ""
+
+		dropAnchors(editor, root)
+		expect(store.threads().map(thread => [thread.id, thread.replies.length])).toEqual([[reply, 0]])
+
+		const bytes = await save(opened)
+
+		expect((await parents(bytes)).map(([, parent]) => parent)).toEqual(["-"])
+		expect((await reopenComments(bytes)).map(comment => [comment.id, comment.parent, comment.text])).toEqual([
+			[reply, undefined, "Reply"]
+		])
+
+		// Undone, the thread is whole again, in the list and in the file (the reply still records its parent).
+		expect(await editor.execute({ type: "history.undo" })).toBe(true)
+		expect(store.threads().map(thread => [thread.id, thread.replies.map(item => item.id)])).toEqual([[root, [reply]]])
+
+		const whole = await parents(await save(opened))
+
+		expect(whole.map(([, parent]) => parent)).toEqual(["-", whole[0]?.[0]])
+	})
+
+	it("answers no comment of the file the save removes, a reply added to a source thread", async () => {
+		const opened = await open(W2013)
+		const { editor } = opened
+
+		expect(await editor.execute({ type: "comment.reply", id: "0", text: "New reply" })).toBe(true)
+		dropAnchors(editor, "0")
+
+		const bytes = await save(opened)
+
+		// The source reply and the new one each a thread of their own; comment 0 and its entry gone.
+		expect(await parents(bytes)).toEqual([
+			["22222222", "-"],
+			[expect.stringMatching(/^[0-9A-F]{8}$/), "-"]
+		])
+		expect((await reopenComments(bytes)).map(comment => [comment.id, comment.parent])).toEqual([
+			["1", undefined],
+			["2", undefined]
+		])
+	})
+})
+
+describe("comments: the last paragraph keeps the comment's paragraph id", () => {
+	async function edited(how: "after" | "split"): Promise<Uint8Array> {
+		const opened = await open(W2013)
+		const story = opened.context.model.stories.find(candidate => candidate.kind === "comment" && candidate.id === "0")
+		const session = story === undefined ? undefined : opened.editor.storySession(story.index)
+
+		if (session === undefined) throw new Error("no comment session")
+
+		const tr = session.state.tr
+		const size = session.state.doc.content.size
+
+		if (how === "after") tr.insert(size, nodes.paragraph.create(null, docxSchema.text("Added")))
+		else tr.split(size - 2)
+
+		expect(session.dispatch(tr)).toBe(true)
+
+		return save(opened)
+	}
+
+	const paraIds = async (bytes: Uint8Array): Promise<(string | undefined)[]> => {
+		const comment = /<w:comment w:id="0"[^>]*>(.*?)<\/w:comment>/.exec((await read(bytes, "word/comments.xml")) ?? "")?.[1] ?? ""
+
+		return [...comment.matchAll(/<w:p(?: w14:paraId="([0-9A-F]{8})")?>/g)].map(match => match[1])
+	}
+
+	it("moves it to a paragraph added after it, the thread kept in commentsExtended", async () => {
+		const bytes = await edited("after")
+		const ids = await paraIds(bytes)
+
+		expect(ids).toHaveLength(2)
+		expect(ids[1]).toBe("11111111")
+		expect(ids[0]).toMatch(/^[0-9A-F]{8}$/)
+		expect(ids[0]).not.toBe("11111111")
+		expect(await parents(bytes)).toEqual([
+			["11111111", "-"],
+			["22222222", "11111111"]
+		])
+		expect((await reopenComments(bytes)).map(item => [item.id, item.parent])).toEqual([
+			["0", undefined],
+			["1", "0"]
+		])
+	})
+
+	it("points the comment's entries, and its replies', at a new id its last paragraph was given", async () => {
+		const opened = await open(W2013)
+		const story = opened.context.model.stories.find(candidate => candidate.kind === "comment" && candidate.id === "0")
+		const session = story === undefined ? undefined : opened.editor.storySession(story.index)
+
+		if (session === undefined) throw new Error("no comment session")
+
+		const last = session.state.doc.lastChild
+
+		if (last === null) throw new Error("no paragraph")
+
+		const at = session.state.doc.content.size - last.nodeSize
+
+		expect(session.dispatch(markInternal(session.state.tr.addNodeMark(at, docxSchema.marks.para_id.create({ id: "3ABCDEF0" }))))).toBe(
+			true
+		)
+
+		const bytes = await save(opened)
+
+		expect(await paraIds(bytes)).toEqual(["3ABCDEF0"])
+		expect(await parents(bytes)).toEqual([
+			["3ABCDEF0", "-"],
+			["22222222", "3ABCDEF0"]
+		])
+	})
+
+	// MS-DOCX 2.5.3.1: commentsExtended (and commentsIds) key on the comment's last paragraph.
+	it("moves it to the second half of a split, the first half taking a new one", async () => {
+		const bytes = await edited("split")
+		const ids = await paraIds(bytes)
+
+		expect(ids).toHaveLength(2)
+		expect(ids[1]).toBe("11111111")
+		expect(ids[0]).toMatch(/^[0-9A-F]{8}$/)
+		expect(ids[0]).not.toBe("11111111")
+		expect(await parents(bytes)).toEqual([
+			["11111111", "-"],
+			["22222222", "11111111"]
+		])
+	})
+})
+
+describe("comments: people", () => {
+	// A revision's author compared as it reads, however the file writes it (an apostrophe as is, a character
+	// reference): its person stays.
+	// Only attributes of start tags name authors: author= in an XML comment (where a raw & is legal) or in text.
+	it.each([
+		["an XML comment holding a raw ampersand", '<!-- author="a & b" -->'],
+		["text with an apostrophe after it", '<w:p><w:r><w:t xml:space="preserve">the author=\'s note</w:t></w:r></w:p>']
+	])("reads revision authors past author= in %s", async (_name, stray) => {
+		const opened = await open({
+			...W2013,
+			body:
+				W2013.body +
+				stray +
+				'<w:p><w:ins w:id="9" w:author="Ed" w:date="2020-01-03T00:00:00Z"><w:r><w:t>Added</w:t></w:r></w:ins></w:p>',
+			people: (W2013.people ?? "").replace("</w15:people>", '<w15:person w15:author="Ed"/></w15:people>')
+		})
+		const session = opened.editor.session
+
+		session.dispatch(session.state.tr.insertText("Typed ", 1))
+
+		expect((await read(await save(opened), "word/people.xml")) ?? "").toContain('w15:author="Ed"')
+	})
+
+	it.each([
+		["an apostrophe written as is", "Di O'Hara", "Di O'Hara"],
+		["a character reference", "Jos&#233;", "José"]
+	])("keeps the person of a tracked change's author written with %s", async (_name, written, author) => {
+		const opened = await open({
+			...W2013,
+			body:
+				W2013.body +
+				`<w:p><w:del w:id="9" w:author="${written}" w:date="2020-01-03T00:00:00Z"><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>`,
+			people: (W2013.people ?? "").replace("</w15:people>", `<w15:person w15:author="${author}"/></w15:people>`)
+		})
+		const session = opened.editor.session
+
+		session.dispatch(session.state.tr.insertText("Typed ", 1))
+
+		const people = (await read(await save(opened), "word/people.xml")) ?? ""
+
+		expect(people).toContain(`w15:author="${author}"`)
+	})
+
+	it("removes the person of an author whose last comment was deleted, keeping the others", async () => {
+		const opened = await open(W2013)
+
+		expect(await opened.editor.execute({ type: "comment.delete", id: "1" })).toBe(true)
+		expect(await read(await save(opened), "word/people.xml")).toBe(
+			'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w15:people xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">' +
+				'<w15:person w15:author="Bo"/></w15:people>'
+		)
+	})
+
+	it("keeps the person of an author a tracked change still names, and removes it once the change is accepted", async () => {
+		const opened = await open({
+			...W2013,
+			body: W2013.body + '<w:p><w:ins w:id="9" w:author="Cy" w:date="2020-01-03T00:00:00Z"><w:r><w:t>Added</w:t></w:r></w:ins></w:p>'
+		})
+
+		expect(await opened.editor.execute({ type: "comment.delete", id: "1" })).toBe(true)
+		expect(await read(await save(opened), "word/people.xml")).toContain('w15:author="Cy"')
+
+		expect(await opened.editor.execute({ type: "review.acceptAll" })).toBe(true)
+		expect(await read(await save(opened), "word/people.xml")).not.toContain('w15:author="Cy"')
+	})
+
+	it("removes a person only a change named once it is rejected, and leaves an unedited file as it was", async () => {
+		const spec: SyntheticDocx = {
+			...W2013,
+			body:
+				W2013.body +
+				'<w:p><w:r><w:t xml:space="preserve">Kept </w:t></w:r><w:del w:id="9" w:author="Di" w:date="2020-01-03T00:00:00Z"><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>',
+			people: (W2013.people ?? "").replace("</w15:people>", '<w15:person w15:author="Di"/></w15:people>')
+		}
+		const opened = await open(spec)
+
+		expect(await changedParts(opened)).toEqual([])
+		editorType(opened.editor)
+		expect(await read(await save(opened), "word/people.xml")).toContain('w15:author="Di"')
+
+		expect(await opened.editor.execute({ type: "review.rejectAll" })).toBe(true)
+
+		const people = (await read(await save(opened), "word/people.xml")) ?? ""
+
+		expect(people).not.toContain('w15:author="Di"')
+		expect(people).toContain('<w15:person w15:author="Bo"/><w15:person w15:author="Cy"/>')
+	})
+})
+
+// Typing at the start of the body.
+function editorType(editor: PagedEditor): void {
+	editor.dispatch(editor.session.state.tr.insertText("Typed ", 1))
+}
 
 describe("comments: where one can be added", () => {
 	it("adds only in the main document's text; a header's comments still take replies and resolving", async () => {

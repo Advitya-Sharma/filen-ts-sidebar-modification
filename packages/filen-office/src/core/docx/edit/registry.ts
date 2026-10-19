@@ -1,6 +1,7 @@
 import type { EditorState, Transaction } from "prosemirror-state"
 import type { PagedEditor } from "../paged/editor"
 import type { DocxCommandOf, DocxEditorCommandType } from "./commands"
+import { writesUnholdableText } from "./commands/base"
 import type { DocxEditContext } from "./context"
 import { FEATURE_HANDLERS, FEATURE_TRANSFORMERS } from "./handlers/index"
 import type { DocxEditorSession } from "./session"
@@ -53,12 +54,22 @@ export interface FeatureHandlers {
 // for every transaction that changes the document and is neither the session's own nor an undo or redo.
 export type DocxTransactionTransformer = (tr: Transaction, session: DocxEditorSession) => Transaction
 
+// A document command whose text XML cannot hold is refused here, whatever path sent it (story commands are
+// refused by the session).
+function refusingUnholdable(handler: DocumentCommandHandler): DocumentCommandHandler {
+	return {
+		enabled: context => handler.enabled(context),
+		run: (context, command) => !writesUnholdableText(command) && handler.run(context, command)
+	}
+}
+
 const storyHandlers = new Map<string, StoryCommandHandler>()
 const documentHandlers = new Map<string, DocumentCommandHandler>()
 
 for (const feature of FEATURE_HANDLERS) {
 	for (const [type, handler] of Object.entries(feature.story ?? {})) storyHandlers.set(type, handler as StoryCommandHandler)
-	for (const [type, handler] of Object.entries(feature.document ?? {})) documentHandlers.set(type, handler as DocumentCommandHandler)
+	for (const [type, handler] of Object.entries(feature.document ?? {}))
+		documentHandlers.set(type, refusingUnholdable(handler as DocumentCommandHandler))
 }
 
 export function storyHandler<T extends DocxEditorCommandType>(type: T): StoryCommandHandler<T> | undefined {

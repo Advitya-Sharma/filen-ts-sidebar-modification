@@ -2,6 +2,7 @@ import type { Relationships } from "../../opc/index"
 import { NodeKind, decodeCharacterData, type XmlDocument } from "../../xml/index"
 import type { XmlNodeRef } from "../props/types"
 import { BreakType, FieldCharType, Item, RevisionView, TRANSPARENT, revisionHidden, type SdtLevel } from "./kinds"
+import { macroButtonText } from "./macroButton"
 import { Ns } from "./namespaces"
 import type { PartReader } from "./reader"
 
@@ -455,9 +456,22 @@ export class StoryPart implements PartItems, PartTables {
 		let paragraphs = 0
 		let joinNext = false
 		const codeStack: number[] = []
+		// Per open field: a MACROBUTTON's display text (shown where its result shows nothing, as layout shows it)
+		// and where its result starts (-1 before its separator); a w:fldSimple one's end, text and start.
+		const displays: (string | undefined)[] = []
+		const resultStarts: number[] = []
+		let simpleEnd = -1
+		let simpleDisplay = ""
+		let simpleStart = 0
 
 		for (let i = item + 1; i < end;) {
 			const kind = this.kinds[i] ?? 0
+
+			if (simpleEnd >= 0 && i >= simpleEnd) {
+				if (out.length === simpleStart) out += simpleDisplay
+
+				simpleEnd = -1
+			}
 
 			if (view !== RevisionView.Markup && this.hidden(i, view)) {
 				i = this.end(i)
@@ -470,14 +484,25 @@ export class StoryPart implements PartItems, PartTables {
 					const type = this.fieldCharType(i)
 
 					if (type === FieldCharType.Begin) {
+						const field = fieldDepth === 0 ? this.fieldOf(i) : -1
+
+						// Inside another field a MACROBUTTON shows nothing.
+						displays.push(field < 0 ? undefined : macroButtonText(this.fieldInstruction(field, view)))
+						resultStarts.push(-1)
 						codeStack.push(codeDepth)
 						fieldDepth++
 						codeDepth = fieldDepth
 					} else if (type === FieldCharType.Separate) {
 						codeDepth = codeStack[codeStack.length - 1] ?? 0
+						resultStarts[resultStarts.length - 1] = out.length
 					} else if (type === FieldCharType.End && fieldDepth > 0) {
 						fieldDepth--
 						codeDepth = codeStack.pop() ?? 0
+
+						const display = displays.pop()
+						const start = resultStarts.pop() ?? -1
+
+						if (display !== undefined && codeDepth === 0 && (start < 0 || out.length === start)) out += display
 					}
 
 					break
@@ -515,6 +540,18 @@ export class StoryPart implements PartItems, PartTables {
 
 					break
 				}
+				case Item.FieldSimple: {
+					const display =
+						fieldDepth === 0 && simpleEnd < 0 ? macroButtonText(this.fieldInstruction(this.aux[i] ?? -1, view)) : undefined
+
+					if (display !== undefined) {
+						simpleEnd = this.end(i)
+						simpleDisplay = display
+						simpleStart = out.length
+					}
+
+					break
+				}
 				case Item.Paragraph:
 					if (paragraphs++ > 0 && !joinNext) out += "\n"
 
@@ -528,6 +565,8 @@ export class StoryPart implements PartItems, PartTables {
 					? i + 1
 					: this.end(i)
 		}
+
+		if (simpleEnd >= 0 && out.length === simpleStart) out += simpleDisplay
 
 		return out
 	}

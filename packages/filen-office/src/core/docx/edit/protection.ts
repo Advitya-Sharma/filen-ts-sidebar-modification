@@ -16,6 +16,7 @@ import { Item } from "../model/kinds"
 import { controlAround, pictureSwap, typeable } from "../forms/controls"
 import type { PropsStore } from "../props/index"
 import { SetAttrsStep } from "./attrs"
+import { RebuildStep } from "./invariants/core"
 import { DOCX_PARAGRAPH_STYLES, PARAGRAPH_STYLE_NAMES, type DocxEditorCommandType, type DocxParagraphStyle } from "./commands"
 import { canonicalStyleName } from "../styles/styles"
 import type { DocxEditContext } from "./context"
@@ -469,7 +470,11 @@ function openRanges(part: StoryPart, doc: Node, store: PropsStore): number[] {
 // What a step touches, as [from, to] ranges of the document it applies to; undefined for steps no protection
 // lets through (document attributes).
 function stepRanges(step: Step, doc: Node): number[] | undefined {
-	if (step instanceof ReplaceStep || step instanceof ReplaceAroundStep) return [step.from, step.to]
+	// A rebuild touches what its replaces do (the nodes it puts back are the same), and the text it leaves marked
+	// deleted.
+	if (step instanceof RebuildStep) return [...step.replaces.flatMap(replace => [replace.from, replace.to]), ...step.touched]
+	if (step instanceof ReplaceStep) return [step.from, step.to]
+	if (step instanceof ReplaceAroundStep) return [step.from, step.to]
 	if (isMarkStep(step)) return [step.from, step.to]
 
 	if (step instanceof AttrStep || step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) {

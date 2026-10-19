@@ -720,11 +720,19 @@ export class DocxNotes {
 
 			if (made === undefined || old === null) return false
 
-			const nodeMarks = old.marks.map(mark =>
-				mark.type === marks.char_style ? (referenceMarks(this.context, kind)[0] ?? mark) : mark
-			)
+			const style = referenceMarks(this.context, kind)[0]
+			const nodeMarks = old.marks.map(mark => (mark.type === marks.char_style ? (style ?? mark) : mark))
+			// The custom mark is the text after the reference in its style: it takes the new style with it, or it would
+			// be written in a run of its own, which readers show as text after a numbered reference.
+			const markSize = customMarkSize(tr.doc, pos)
+			const oldStyle = old.marks.find(mark => mark.type === marks.char_style)
 
 			tr.replaceWith(pos, pos + 1, nodes.note_ref.create({ src: NO_SOURCE, kind, id: made.id, custom }, null, nodeMarks))
+
+			if (markSize > 0 && style !== undefined && oldStyle !== undefined && !oldStyle.eq(style)) {
+				tr.removeMark(pos + 1, pos + 1 + markSize, oldStyle)
+				tr.addMark(pos + 1, pos + 1 + markSize, style)
+			}
 		}
 
 		return found.length > 0 && session.dispatch(markInternal(tr))

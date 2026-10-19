@@ -14,6 +14,64 @@ const coreImportPatterns = [
 	}
 ]
 
+// Builtins Hermes (React Native's engine, which may run core modules next to the file) lacks or only partly
+// implements, measured on the RN 0.86 Hermes. The core reaches them only behind a guard: read through
+// globalThis (Reflect.get, or a cast to an optional member) and handle their absence, or construct them
+// inside try. A typeof check of the member also counts.
+const hermesGuard = ":not(TryStatement > BlockStatement.block *, UnaryExpression[operator='typeof'] > *)"
+const hermesMessage = "Hermes lacks this builtin: reach it through globalThis with a fallback, or inside try."
+const hermesGlobals = [
+	"TextDecoder",
+	"CompressionStream",
+	"DecompressionStream",
+	"Response",
+	"Blob",
+	"structuredClone",
+	"FinalizationRegistry",
+	"Atomics",
+	"SharedArrayBuffer",
+	"Float16Array",
+	"Iterator",
+	"queueMicrotask",
+	"MessageChannel",
+	"performance",
+	"crypto",
+	"fetch",
+	"window",
+	"document",
+	"self",
+	"navigator"
+].map(name => ({ name, message: hermesMessage }))
+const hermesMembers = {
+	Intl: ["Segmenter", "Locale", "PluralRules", "ListFormat", "DisplayNames", "RelativeTimeFormat", "DurationFormat", "supportedValuesOf"],
+	Object: ["groupBy"],
+	Map: ["groupBy"],
+	Array: ["fromAsync"],
+	Math: ["sumPrecise"],
+	RegExp: ["escape"],
+	Uint8Array: ["fromBase64", "fromHex"]
+}
+// Prototype methods by name (no type information): unique enough not to hit the package's own methods.
+const hermesMethods = ["toSorted", "toBase64", "toHex", "setFromBase64", "setFromHex", "transferToFixedLength", "getFloat16", "setFloat16"]
+const hermesSyntax = [
+	...Object.entries(hermesMembers).map(([object, names]) => ({
+		selector: `MemberExpression[object.type='Identifier'][object.name='${object}'][property.name=/^(${names.join("|")})$/]${hermesGuard}`,
+		message: hermesMessage
+	})),
+	{
+		selector: `MemberExpression[property.name=/^(${hermesMethods.join("|")})$/]${hermesGuard}`,
+		message: hermesMessage
+	},
+	{
+		selector: "Literal[regex.flags=/v/]",
+		message: "Hermes has no RegExp v flag: use u."
+	},
+	{
+		selector: "NewExpression[callee.name='RegExp'] > Literal.arguments:nth-child(2)[value=/v/]",
+		message: "Hermes has no RegExp v flag: use u."
+	}
+]
+
 // Nothing in the package may depend on a host app.
 const appImportPatterns = [
 	{
@@ -61,7 +119,9 @@ export default tseslint.config(
 				{
 					patterns: [...coreImportPatterns, ...appImportPatterns]
 				}
-			]
+			],
+			"no-restricted-globals": ["error", ...hermesGlobals],
+			"no-restricted-syntax": ["error", ...hermesSyntax]
 		}
 	}
 )

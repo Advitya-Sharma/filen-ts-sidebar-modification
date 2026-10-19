@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { test as base, expect, type BrowserContext, type BrowserType, type Page, type Request, type TestInfo } from "@playwright/test"
+import { fixtureManifestName } from "@/e2e-hooks/runManifest"
 import { SESSION_BINDING } from "@/e2e-hooks/sessionSeed"
 import { common } from "@/locales/en/common"
 import { silenceMediaElements } from "./helpers/muteMedia"
@@ -16,9 +17,11 @@ export const SESSION_FILE = fileURLToPath(new URL(".auth/session.json", import.m
 // Where setup/fixtures.setup.ts records the shared read-only fixture tree it built, for every spec
 // worker (a separate process) and the teardown project to read back. Gitignored for the same reason
 // as .auth/ above — it is per-run state, never source — though unlike the session blob it holds
-// nothing secret: just a run id and a directory name.
+// nothing secret: just a run id and a directory name. One file per run (E2E_RUN_ID, set once by
+// playwright.config.ts in the runner and inherited by its workers): concurrent local runs share this
+// directory, and one run's teardown must never remove another run's manifest.
 export const FIXTURES_DIR = fileURLToPath(new URL(".fixtures", import.meta.url))
-export const FIXTURES_FILE = fileURLToPath(new URL(".fixtures/tree.json", import.meta.url))
+export const FIXTURES_FILE = join(FIXTURES_DIR, fixtureManifestName(process.env["E2E_RUN_ID"]))
 
 export interface FixtureManifest {
 	runId: string
