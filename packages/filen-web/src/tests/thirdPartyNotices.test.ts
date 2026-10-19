@@ -66,6 +66,44 @@ describe("third-party notices drift guard", () => {
 		expect([...payloadNpmIds].filter(id => !lockIds.has(id)).sort(), "in the payload but not installed — run pnpm install").toEqual([])
 	})
 
+	it("lists every peer of the workspace packages the app compiles from source", () => {
+		// Workspace packages ship as source, so the app bundles their peers. pnpm reports a package only along
+		// `dependencies` edges, so a peer the app does not declare itself still bundles (from the workspace
+		// package's own dev copy) and silently drops out of the attribution.
+		interface Manifest {
+			dependencies?: Record<string, string>
+			peerDependencies?: Record<string, string>
+		}
+
+		const manifest = (url: URL): Manifest => JSON.parse(readFileSync(url, "utf8")) as Manifest
+		const workspaceDeps = (deps: Record<string, string> | undefined) =>
+			Object.entries(deps ?? {})
+				.filter(([, spec]) => spec.startsWith("workspace:"))
+				.map(([name]) => name)
+		const queue = workspaceDeps(manifest(new URL("../../package.json", import.meta.url)).dependencies)
+		const visited = new Set<string>()
+		const peers = new Set<string>()
+
+		for (let name = queue.shift(); name !== undefined; name = queue.shift()) {
+			if (visited.has(name)) {
+				continue
+			}
+
+			visited.add(name)
+
+			const workspace = manifest(new URL(`../../node_modules/${name}/package.json`, import.meta.url))
+
+			for (const peer of Object.keys(workspace.peerDependencies ?? {})) {
+				peers.add(peer)
+			}
+
+			queue.push(...workspaceDeps(workspace.dependencies))
+		}
+
+		expect(visited.has("@filen/office")).toBe(true)
+		expect([...peers].filter(peer => ![...lockIds].some(id => id.startsWith(`${peer}@`))).sort()).toEqual([])
+	})
+
 	it("was generated against the installed SDK", () => {
 		// Turns three previously-silent failures red: generating from the wrong filen-rs checkout, merging a
 		// payload built before an SDK bump, and any future bump that forgets to re-run the generator.

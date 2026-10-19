@@ -1003,6 +1003,21 @@ importers:
       pdfjs-dist:
         specifier: 6.3.289
         version: 6.3.289
+      prosemirror-history:
+        specifier: 1.5.1
+        version: 1.5.1
+      prosemirror-model:
+        specifier: 1.25.12
+        version: 1.25.12
+      prosemirror-state:
+        specifier: 1.4.4
+        version: 1.4.4
+      prosemirror-transform:
+        specifier: 1.12.2
+        version: 1.12.2
+      prosemirror-view:
+        specifier: 1.42.6
+        version: 1.42.6
       quill:
         specifier: 2.0.3
         version: 2.0.3

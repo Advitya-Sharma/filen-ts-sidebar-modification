@@ -41,7 +41,9 @@ import { QWEN35_4B } from "../src/features/assistant/runtime/models"
  * assistant's model weights, which Filen serves from its own host. @filen/sdk-rs is
  * a registry package and is described here; @filen/shared, @filen/office and @filen/spellcheck are
  * workspace members, so pnpm does not report them and they are correctly absent — first-party code needs
- * no attribution. The third-party material @filen/office and @filen/spellcheck carry (fonts, derived
+ * no attribution. Their dependencies are reported through them; their peers are reported only because this
+ * package declares each one, as the app that provides them (src/tests/thirdPartyNotices.test.ts fails on a
+ * peer it does not). The third-party material @filen/office and @filen/spellcheck carry (fonts, derived
  * code, crates, dictionaries) is vendored and described from their own records.
  *
  * The licensing core is shared with filen-mobile's generator through @filen/shared/tooling. Unlike
