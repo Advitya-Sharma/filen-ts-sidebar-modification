@@ -5,13 +5,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { unzipSync } from "fflate"
+import { smlSchemas } from "../../scripts/smlOrder"
 import { transitionalSchemas } from "../../scripts/wmlOrder"
 import { SCHEMA_ARCHIVE, XMLLINT } from "../fuzz/harness"
 import { decodeUtf8, Namespaces, NodeKind, parseXml } from "@filen/office/core/xml"
 import { applyMarkupCompatibility, NotWellFormed } from "./mc"
 
 // Schema oracle for written packages: xmllint against the ECMA-376 Transitional schemas (Part 4: WordprocessingML,
-// DrawingML, VML, math, shared types, document properties) and the Open Packaging Conventions schemas (Part 2:
+// SpreadsheetML, DrawingML, VML, math, shared types, document properties) and the Open Packaging Conventions schemas (Part 2:
 // relationships, content types, core properties, with the Dublin Core schemas core properties import). Markup
 // Compatibility (Part 3) is applied first (mc.ts), so extension markup no longer hides the errors after it. xmllint
 // streams (--stream): a 130 MB part validates in a few MB of memory.
@@ -50,7 +51,9 @@ const IMPORTS: readonly (readonly [string, string])[] = [
 	["http://www.w3.org/XML/1998/namespace", "xml.xsd"],
 	["http://schemas.openxmlformats.org/wordprocessingml/2006/main", "wml.xsd"],
 	["http://schemas.openxmlformats.org/drawingml/2006/main", "dml-main.xsd"],
+	["http://schemas.openxmlformats.org/spreadsheetml/2006/main", "sml.xsd"],
 	["http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing", "dml-wordprocessingDrawing.xsd"],
+	["http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing", "dml-spreadsheetDrawing.xsd"],
 	["http://schemas.openxmlformats.org/drawingml/2006/picture", "dml-picture.xsd"],
 	["http://schemas.openxmlformats.org/drawingml/2006/chart", "dml-chart.xsd"],
 	["http://schemas.openxmlformats.org/drawingml/2006/chartDrawing", "dml-chartDrawing.xsd"],
@@ -60,6 +63,7 @@ const IMPORTS: readonly (readonly [string, string])[] = [
 	["urn:schemas-microsoft-com:vml", "vml-main.xsd"],
 	["urn:schemas-microsoft-com:office:office", "vml-officeDrawing.xsd"],
 	["urn:schemas-microsoft-com:office:word", "vml-wordprocessingDrawing.xsd"],
+	["urn:schemas-microsoft-com:office:excel", "vml-spreadsheetDrawing.xsd"],
 	["http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", "shared-documentPropertiesExtended.xsd"],
 	["http://schemas.openxmlformats.org/officeDocument/2006/custom-properties", "shared-documentPropertiesCustom.xsd"],
 	["http://schemas.openxmlformats.org/officeDocument/2006/customXml", "shared-customXmlDataProperties.xsd"],
@@ -80,7 +84,7 @@ const XML_SCHEMA =
 const EXTENSIONS = /\{http:\/\/schemas\.microsoft\.com\/|\{http:\/\/schemas\.openxmlformats\.org\/markup-compatibility\//
 
 // "opc": relationships, content types and core properties (Part 2 schemas).
-export type SchemaFamily = "wml" | "dml" | "opc" | "props"
+export type SchemaFamily = "wml" | "sml" | "dml" | "opc" | "props"
 
 // The ECMA WordprocessingML parts. Word's own parts under the same prefix (people, commentsExtended, commentsIds,
 // commentsExtensible) have Microsoft roots no ECMA schema declares: the Open XML SDK validator covers them.
@@ -101,7 +105,35 @@ const WML_KINDS = new Set([
 ])
 const WML_PREFIX = "application/vnd.openxmlformats-officedocument.wordprocessingml."
 const MACRO_MAIN = /^application\/vnd\.ms-word\.(document|template)\.macroEnabled(Template)?\.main\+xml$/
+// The ECMA SpreadsheetML parts (ECMA-376 Part 1 §12.3 and §18); Excel's own parts under the same prefix have none.
+const SML_KINDS = new Set([
+	"sheet.main",
+	"template.main",
+	"worksheet",
+	"chartsheet",
+	"dialogsheet",
+	"sharedStrings",
+	"styles",
+	"comments",
+	"table",
+	"calcChain",
+	"externalLink",
+	"pivotTable",
+	"pivotCacheDefinition",
+	"pivotCacheRecords",
+	"queryTable",
+	"connections",
+	"revisionHeaders",
+	"revisionLog",
+	"userNames",
+	"tableSingleCells",
+	"sheetMetadata",
+	"volatileDependencies"
+])
+const SML_PREFIX = "application/vnd.openxmlformats-officedocument.spreadsheetml."
+const SML_MACRO_MAIN = /^application\/vnd\.ms-excel\.(sheet|template)\.macroEnabled\.main\+xml$/
 const DML_TYPES = new Set([
+	"application/vnd.openxmlformats-officedocument.drawing+xml",
 	"application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
 	"application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml",
 	"application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml",
@@ -127,6 +159,10 @@ export function schemaFamily(part: string, contentType: string | undefined): Sch
 	if (PROPS_TYPES.has(contentType)) return "props"
 	if (DML_TYPES.has(contentType)) return "dml"
 	if (MACRO_MAIN.test(contentType)) return "wml"
+	if (SML_MACRO_MAIN.test(contentType)) return "sml"
+	if (contentType.startsWith(SML_PREFIX) && contentType.endsWith("+xml")) {
+		return SML_KINDS.has(contentType.slice(SML_PREFIX.length, -4)) ? "sml" : undefined
+	}
 	if (contentType.startsWith(WML_PREFIX) && contentType.endsWith("+xml")) {
 		return WML_KINDS.has(contentType.slice(WML_PREFIX.length, -4)) ? "wml" : undefined
 	}
@@ -267,10 +303,11 @@ export class XsdOracle {
 		const decoder = new TextDecoder()
 		this.opc = opcSchemasMissing() === undefined
 
-		const files = new Map([
-			...transitionalSchemas(new Uint8Array(readFileSync(SCHEMA_ARCHIVE))),
-			...(this.opc ? opcSchemas(OPC_DIRECTORY) : [])
-		])
+		const transitional = transitionalSchemas(new Uint8Array(readFileSync(SCHEMA_ARCHIVE)))
+
+		smlSchemas(transitional)
+
+		const files = new Map([...transitional, ...(this.opc ? opcSchemas(OPC_DIRECTORY) : [])])
 
 		for (const [name, bytes] of files) writeFileSync(join(schemas, name), localImports(decoder.decode(bytes)))
 

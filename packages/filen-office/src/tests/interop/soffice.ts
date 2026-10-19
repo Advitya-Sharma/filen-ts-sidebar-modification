@@ -29,7 +29,7 @@ export function offices(env: NodeJS.ProcessEnv = process.env): Office[] {
 	return out
 }
 
-function officeEnv(): NodeJS.ProcessEnv {
+export function officeEnv(): NodeJS.ProcessEnv {
 	return { ...process.env, SAL_ENABLE_FILE_LOCKING: "0", PYTHONDONTWRITEBYTECODE: "1" }
 }
 
@@ -72,6 +72,19 @@ function convertOnce(
 	outdir: string,
 	timeoutMs: number
 ): Promise<BatchResult> {
+	return convertWith(office, profile, FORMATS[format], inputs, outdir, timeoutMs)
+}
+
+// One soffice --convert-to run with a "<extension>:<filter>[:<options>]" target; the process group is killed
+// whole on a timeout.
+export function convertWith(
+	office: Office,
+	profile: string,
+	target: string,
+	inputs: readonly string[],
+	outdir: string,
+	timeoutMs: number
+): Promise<BatchResult> {
 	mkdirSync(outdir, { recursive: true })
 
 	return new Promise(resolve => {
@@ -86,7 +99,7 @@ function convertOnce(
 				"--nodefault",
 				"--nolockcheck",
 				"--convert-to",
-				FORMATS[format],
+				target,
 				"--outdir",
 				outdir,
 				...inputs

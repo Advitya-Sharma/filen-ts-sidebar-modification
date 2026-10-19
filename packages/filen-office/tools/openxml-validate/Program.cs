@@ -1,6 +1,8 @@
-// Validates WordprocessingML packages with the Open XML SDK (FileFormatVersions.Microsoft365): one file path per
-// stdin line, one JSON line per file on stdout: {"file", "fatal"?, "errors": [{"id", "description", "path", "part"}]},
-// "fatal" when the SDK cannot open or walk the package. MaxNumberOfErrors 0 lifts the limit of 1,000.
+// Validates WordprocessingML and SpreadsheetML packages with the Open XML SDK (FileFormatVersions.Microsoft365):
+// one file path per stdin line, one JSON line per file on stdout: {"file", "fatal"?, "errors": [{"id",
+// "description", "path", "part"}]}, "fatal" when the SDK cannot open or walk the package. .xlsx, .xlsm, .xltx and
+// .xltm open as spreadsheets, everything else as a word-processing document. MaxNumberOfErrors 0 lifts the limit
+// of 1,000.
 //
 //   dotnet restore --locked-mode && dotnet build -c Release --no-restore
 //   dotnet <ArtifactsPath>/bin/OpenXmlValidate/release/OpenXmlValidate.dll < files.txt
@@ -10,6 +12,7 @@ using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Validation;
 
 var validator = new OpenXmlValidator(FileFormatVersions.Microsoft365) { MaxNumberOfErrors = 0 };
+string[] spreadsheetExtensions = [".xlsx", ".xlsm", ".xltx", ".xltm"];
 using var stdout = Console.OpenStandardOutput();
 
 string? file;
@@ -31,7 +34,9 @@ while ((file = Console.In.ReadLine()) is not null)
 
 		try
 		{
-			using var document = WordprocessingDocument.Open(file, false);
+			using OpenXmlPackage document = spreadsheetExtensions.Contains(Path.GetExtension(file).ToLowerInvariant())
+				? SpreadsheetDocument.Open(file, false)
+				: WordprocessingDocument.Open(file, false);
 
 			errors = [.. validator.Validate(document).Select(error => (error.Id, error.Description, error.Path?.XPath, error.Part?.Uri.ToString()))];
 		}
