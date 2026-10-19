@@ -1,7 +1,7 @@
 import { findUnsavableBlocks, type DocxEditorSession } from "@filen/office/core/docx/edit"
 import { DocxSaveError, prepareDocxSave, writerProof } from "@filen/office/core/docx/write"
-import { fetchFontAssets, windowServices } from "@filen/office/dom/docx"
-import { inThreadEditingHost, type DocxEditingHost } from "@filen/office/dom/docx/editing"
+import { fetchFontAssets, windowServices, type DocxUnlockedDocument } from "@filen/office/dom/docx"
+import { docxSealer, inThreadEditingHost, isSealedOfficeFile, type DocxEditingHost, type DocxSealer } from "@filen/office/dom/docx/editing"
 import { docxZipWorker } from "@filen/office/dom/docx/save"
 import { plainText } from "@filen/office/react/docx/editor"
 import { DOCX_FONT_URLS } from "@/features/preview/lib/docxEngine"
@@ -40,11 +40,77 @@ const zipper = docxZipWorker(() => {
 	}
 })
 
-export function docxEditingHost(): DocxEditingHost {
+// `writeUnlocked`: the document's password to modify was given (docxWriteProtection.tsx). `encryption`: it was
+// opened with its password (docxViewer.tsx): every save is sealed with its key after the zip and checked.
+export function docxEditingHost(writeUnlocked = false, encryption?: DocxSealer): DocxEditingHost {
 	return inThreadEditingHost(options => windowServices(window, fetchFontAssets(options.fontUrls ?? DOCX_FONT_URLS)), {
 		proof: writerProof,
-		writer: { prepare: prepareDocxSave, zipper }
+		writer: { prepare: prepareDocxSave, zipper },
+		writeUnlocked,
+		...(encryption === undefined ? {} : { encryption })
 	})
+}
+
+// A password-protected document as the editor holds it: its own copy of the decrypted package (taken from where
+// the viewer's engine holds it) and a sealer whose key comes from there at the first seal. `close` releases the key once no seal
+// still runs (a save that started finishes sealed).
+export interface DocxTakenSession {
+	readonly bytes: Uint8Array
+	readonly sealer: DocxSealer
+	close: () => void
+}
+
+export async function takeProtectedDocument(document: DocxUnlockedDocument, signal: AbortSignal): Promise<DocxTakenSession> {
+	const taken = await document.take({ signal })
+	// The key is asked for at the first seal (a session that never saves never derives or moves it).
+	const held = docxSealer(taken)
+	const sealer = held.sealer
+	let open = true
+	let sealing = 0
+	const releaseIfIdle = (): void => {
+		if (!open && sealing === 0) {
+			held.release()
+		}
+	}
+
+	return {
+		bytes: taken.bytes,
+		sealer: {
+			get released() {
+				return sealer.released
+			},
+			async seal(zip, options) {
+				sealing++
+
+				try {
+					return await sealer.seal(zip, options)
+				} finally {
+					sealing--
+					releaseIfIdle()
+				}
+			}
+		},
+		close: () => {
+			open = false
+			releaseIfIdle()
+		}
+	}
+}
+
+// What a save of a password-protected document hands to the upload must be sealed (a compound file, never
+// the decrypted zip): checked once more right before it leaves the editor.
+export class DocxPlaintextUploadError extends Error {
+	constructor() {
+		super("A password-protected document's save is not sealed")
+
+		this.name = "DocxPlaintextUploadError"
+	}
+}
+
+export function assertSealedUpload(bytes: Uint8Array, encrypted: boolean): void {
+	if (encrypted && !isSealedOfficeFile(bytes)) {
+		throw new DocxPlaintextUploadError()
+	}
 }
 
 // The file as edited, and the call that marks exactly what it holds saved once stored.

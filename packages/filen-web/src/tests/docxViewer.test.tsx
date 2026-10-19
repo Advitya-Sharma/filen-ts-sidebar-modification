@@ -329,9 +329,11 @@ describe("DocxViewer", () => {
 			/>
 		)
 
-		await emit({ type: "error", reason: "encrypted", message: "EncryptedPackage" })
+		await emit({ type: "error", reason: "rightsManaged", message: "EncryptedPackage" })
 
-		expect(await screen.findByText("This document is password-protected and can't be opened here.")).toBeTruthy()
+		expect(
+			await screen.findByText("This document is protected with rights management (IRM) and can't be opened in Filen.")
+		).toBeTruthy()
 		expect(renderAsync).not.toHaveBeenCalled()
 	})
 

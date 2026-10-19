@@ -5,7 +5,10 @@ import { type DriveItem } from "@/features/drive/lib/item"
 import { extensionOf, itemTypeExtension } from "@/features/drive/lib/preview.logic"
 import { usePreviewBytes } from "@/features/preview/hooks/usePreviewBytes"
 import { gridDoc, type GridDoc } from "@/features/spreadsheet/lib/cellStore.logic"
-import { closeSpreadsheet, openSpreadsheet, sniffSpreadsheetKind } from "@/features/spreadsheet/lib/spreadsheetClient"
+import type { SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
+import { closeSpreadsheet, openSpreadsheet, sniffSpreadsheetKind, type SpreadsheetLock } from "@/features/spreadsheet/lib/spreadsheetClient"
+import type { WorkbookRefusal } from "@/features/spreadsheet/lib/xlsxEncryption"
+import type { PasswordVerdict } from "@/features/preview/components/docxPasswordPrompt"
 import { spreadsheetFileKind, spreadsheetSaveFormat } from "@/features/spreadsheet/lib/fileKind"
 import { type ErrorDTO } from "@/lib/sdk/errors"
 
@@ -13,12 +16,19 @@ export type SpreadsheetDocState =
 	| { status: "pending" }
 	| { status: "error"; dto: ErrorDTO; retry: () => void }
 	| { status: "unreadable" }
+	// A password-protected workbook, refused without asking (rights-managed, an encryption Filen can't open,
+	// or damaged).
+	| { status: "refused"; reason: WorkbookRefusal }
+	// A password-protected workbook waiting for its password: `verify` tries one (passed on to the worker and
+	// kept nowhere), for the password prompt.
+	| { status: "locked"; verify: (password: string, signal: AbortSignal) => Promise<PasswordVerdict> }
 	// `unnamed`: the file's name does not say it is a spreadsheet, so its kind was read from its bytes and
 	// it opens read-only (saving could rewrite it as the wrong format). `renamed`: the file has since been
 	// renamed to another format's extension, which a save would mislabel, so it is read-only too.
 	// `bytes`: the file as opened (the preview cache's own buffer: read it, never transfer it). `doc`: the
 	// view as it now stands, edits folded in through `updateDoc` (the one copy held: the view as opened is
-	// let go once edits move past it).
+	// let go once edits move past it). `encrypted`: a password-protected workbook, opened decrypted in the
+	// worker (`bytes` is the sealed file: the worker proves it from its plaintext, and seals its saves).
 	| {
 			status: "ready"
 			id: number
@@ -27,9 +37,21 @@ export type SpreadsheetDocState =
 			unnamed: boolean
 			renamed: boolean
 			bytes: Uint8Array
+			encrypted: "verified" | "unchecked" | undefined
 	  }
 
-type Opened = { status: "unreadable" } | { status: "ready"; id: number; doc: GridDoc; unnamed: boolean; format: string | null }
+type Opened =
+	| { status: "unreadable" }
+	| { status: "refused"; reason: WorkbookRefusal }
+	| { status: "locked"; verify: (password: string, signal: AbortSignal) => Promise<PasswordVerdict> }
+	| {
+			status: "ready"
+			id: number
+			doc: GridDoc
+			unnamed: boolean
+			format: string | null
+			encrypted: "verified" | "unchecked" | undefined
+	  }
 
 function extension(item: DriveItem): string {
 	return extensionOf(driveItemName(item))
@@ -66,32 +88,116 @@ export function useSpreadsheetDoc(item: DriveItem, documentKey: string): Spreads
 
 		let live = true
 		let id: number | null = null
+		let lock: SpreadsheetLock | null = null
 		const sniffed = sniffSpreadsheetKind(source)
 		const kind = named ?? (unnamedTab && sniffed === "csv" ? "tsv" : sniffed)
 		const copy = source.slice()
 
-		openSpreadsheet(Comlink.transfer(copy, [copy.buffer]), kind)
+		const file = source
+
+		function show(state: Opened): void {
+			setOpened({ bytes: file, state })
+		}
+
+		function ready(result: { id: number; doc: SpreadsheetDoc; encrypted?: "verified" | "unchecked" }): void {
+			id = result.id
+			show({
+				status: "ready",
+				id: result.id,
+				doc: gridDoc(result.doc),
+				unnamed: named === null,
+				format,
+				encrypted: result.encrypted
+			})
+		}
+
+		// The password prompt's check (DocxPasswordPrompt's `verify`): `signal` stops the try (the user's
+		// Cancel), leaving the workbook locked for another. A password that turns out right as the try is
+		// cancelled still opens it.
+		async function verify(password: string, signal: AbortSignal): Promise<PasswordVerdict> {
+			const held = lock
+
+			if (held === null) {
+				return "aborted"
+			}
+
+			const cancel = () => {
+				held.cancel()
+			}
+
+			signal.addEventListener("abort", cancel, { once: true })
+
+			// A try that rejects (the decrypted workbook does not open, the worker died) gives the lock up.
+			const answer = await held.unlock(password).catch(() => null)
+
+			signal.removeEventListener("abort", cancel)
+
+			// Gone meanwhile: the lock was discarded, which closes whatever the try opened.
+			if (!live) {
+				return "aborted"
+			}
+
+			if (answer === null) {
+				held.discard()
+				lock = null
+				show({ status: "unreadable" })
+
+				return "aborted"
+			}
+
+			if ("id" in answer) {
+				lock = null
+				ready(answer)
+
+				return "accepted"
+			}
+
+			if ("wrongPassword" in answer) {
+				return "wrong"
+			}
+
+			if ("refused" in answer) {
+				lock = null
+				show({ status: "refused", reason: answer.refused })
+			}
+
+			return "aborted"
+		}
+
+		// Stops a protected workbook's default-password try if the viewer goes first.
+		const leaving = new AbortController()
+
+		openSpreadsheet(Comlink.transfer(copy, [copy.buffer]), kind, leaving.signal)
 			.then(result => {
 				if (!live) {
-					closeSpreadsheet(result.id)
+					if ("id" in result) {
+						closeSpreadsheet(result.id)
+					} else if ("locked" in result) {
+						result.locked.discard()
+					}
 
 					return
 				}
 
-				id = result.id
-				setOpened({
-					bytes: source,
-					state: { status: "ready", id: result.id, doc: gridDoc(result.doc), unnamed: named === null, format }
-				})
+				if ("id" in result) {
+					ready(result)
+				} else if ("locked" in result) {
+					lock = result.locked
+					show({ status: "locked", verify })
+				} else {
+					show({ status: "refused", reason: result.refused })
+				}
 			})
 			.catch(() => {
 				if (live) {
-					setOpened({ bytes: source, state: { status: "unreadable" } })
+					show({ status: "unreadable" })
 				}
 			})
 
 		return () => {
 			live = false
+			leaving.abort()
+			lock?.discard()
 
 			if (id !== null) {
 				closeSpreadsheet(id)
@@ -108,15 +214,24 @@ export function useSpreadsheetDoc(item: DriveItem, documentKey: string): Spreads
 		return { status: "pending" }
 	}
 
-	if (opened.state.status === "unreadable") {
+	if (opened.state.status !== "ready") {
 		return opened.state
 	}
 
-	const { id, doc, unnamed, format: openedAs } = opened.state
+	const { id, doc, unnamed, format: openedAs, encrypted } = opened.state
 
 	function updateDoc(update: (doc: GridDoc) => GridDoc): void {
 		setOpened(prev => (prev?.state.status === "ready" ? { ...prev, state: { ...prev.state, doc: update(prev.state.doc) } } : prev))
 	}
 
-	return { status: "ready", id, doc, updateDoc, unnamed, renamed: !unnamed && nameFormat(item) !== openedAs, bytes: opened.bytes }
+	return {
+		status: "ready",
+		id,
+		doc,
+		updateDoc,
+		unnamed,
+		renamed: !unnamed && nameFormat(item) !== openedAs,
+		bytes: opened.bytes,
+		encrypted
+	}
 }

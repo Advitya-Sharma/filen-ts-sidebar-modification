@@ -16,6 +16,19 @@ export {
 	type DocxRevisionKind,
 	type DocxRevisionTarget
 } from "./annotations"
+export {
+	heldSource,
+	type DocxAbortSignal,
+	type DocxDocumentUnlock,
+	type DocxEncryptionRefusal,
+	type DocxLockedDocument,
+	type DocxProtectedOpen,
+	type DocxProtection,
+	type DocxProtectionOptions,
+	type DocxTakenPackage,
+	type DocxUnlockedDocument
+} from "./protection"
+export { inThreadDocxProtection } from "./protectionWorker"
 export { DocxEngine, type DocxEmit, type DocxEngineServices } from "./engine"
 export { findMatches, lineOf, type FindablePage } from "./find"
 export {

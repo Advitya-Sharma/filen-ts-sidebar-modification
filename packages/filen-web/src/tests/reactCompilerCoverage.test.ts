@@ -234,6 +234,26 @@ describe("React Compiler coverage", () => {
 		)
 	})
 
+	it("compiles the password prompts, the protected-document boundary, its badge and useSpreadsheetDoc", () => {
+		for (const [file, fnName] of [
+			["src/features/preview/components/docxPasswordPrompt.tsx", "DocxPasswordPrompt"],
+			["src/features/preview/components/docxPasswordPrompt.tsx", "DocxPasswordGate"],
+			["src/features/preview/components/docxViewer.tsx", "DocxPasswordBoundary"],
+			["src/features/preview/components/docxToolbar.tsx", "PasswordBadge"],
+			["src/features/preview/components/docxWriteProtection.tsx", "DocxWriteProtectionBar"],
+			["src/features/preview/components/docxEditor.tsx", "DocxProtectedEditView"],
+			["src/features/spreadsheet/hooks/useSpreadsheetDoc.ts", "useSpreadsheetDoc"]
+		] as const) {
+			const events = compile(file)
+
+			expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
+			expect(
+				events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0),
+				fnName
+			).toBe(true)
+		}
+	})
+
 	it("compiles GridCell, so a scroll step, selection move or keystroke re-renders only the cells that changed", () => {
 		const events = compile("src/features/spreadsheet/components/sheetGrid.tsx")
 

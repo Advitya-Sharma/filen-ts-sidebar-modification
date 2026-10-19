@@ -3,8 +3,9 @@ import { ZipArchive, ZipError } from "@filen/office/core/opc"
 import { openDocxPackage } from "@filen/office/core/docx"
 import { compoundFile, countingSource, directoryEntry, type CompoundFile } from "./generate"
 
-// The compound-file sniffer that tells encrypted OOXML from legacy binary files: every walk is capped and no
-// count in the file is trusted, so a hostile header costs a bounded number of reads and answers with a kind.
+// Telling encrypted OOXML from legacy binary files (core/cfb's reader under openDocxPackage): every walk is
+// capped and no count in the file is trusted, so a hostile header costs a bounded number of reads and answers
+// with a kind.
 
 interface Sniffed {
 	readonly reason: string | undefined
@@ -23,17 +24,45 @@ async function sniff(file: CompoundFile | Uint8Array): Promise<Sniffed> {
 	}
 }
 
-// A minimal valid layout: FAT in sector 0, directory in sector 1.
+// A minimal valid layout ([MS-CFB] §2.2): FAT in sector 0, directory in sector 1, empty streams, the root's
+// children linked as a right-leaning tree in directory order (§2.6.4).
 function wellFormed(names: readonly string[]): CompoundFile {
 	const file = compoundFile(9, 3)
 	const { view } = file
 
+	view.setUint16(0x18, 0x3e, true)
+	view.setUint16(0x1a, 3, true)
+	view.setUint16(0x1c, 0xfffe, true)
+	view.setUint16(0x20, 6, true)
+	view.setUint32(0x2c, 1, true)
 	view.setUint32(0x30, 1, true)
+	view.setUint32(0x38, 4096, true)
+	view.setUint32(0x3c, 0xfffffffe, true)
+	view.setUint32(0x44, 0xfffffffe, true)
 	view.setUint32(0x4c, 0, true)
 	view.setUint32(file.sector(0) + 0, 0xfffffffd, true)
 	view.setUint32(file.sector(0) + 4, 0xfffffffe, true)
 
-	names.forEach((name, k) => directoryEntry(file, file.sector(1) + k * 128, name))
+	for (let k = 2; k < 128; k++) view.setUint32(file.sector(0) + k * 4, 0xffffffff, true)
+
+	names.forEach((name, k) => directoryEntry(file, file.sector(1) + k * 128, name, k === 0 ? 5 : 2))
+
+	const order = names
+		.map((name, k) => ({ name, k }))
+		.slice(1)
+		.sort((a, b) => a.name.length - b.name.length || (a.name.toUpperCase() < b.name.toUpperCase() ? -1 : 1))
+
+	for (let k = 0; k < names.length; k++) {
+		const at = file.sector(1) + k * 128
+
+		view.setUint32(at + 0x44, 0xffffffff, true)
+		view.setUint32(at + 0x48, 0xffffffff, true)
+		view.setUint32(at + 0x4c, 0xffffffff, true)
+		view.setUint32(at + 0x74, 0xfffffffe, true)
+	}
+
+	view.setUint32(file.sector(1) + 0x4c, order[0]?.k ?? 0xffffffff, true)
+	order.forEach((entry, k) => view.setUint32(file.sector(1) + entry.k * 128 + 0x48, order[k + 1]?.k ?? 0xffffffff, true))
 
 	return file
 }

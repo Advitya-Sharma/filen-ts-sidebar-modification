@@ -105,11 +105,12 @@ export type Writability = "unproven" | "checking" | "writable" | "readOnly" | "t
 // the proof costs the worker seconds and several times the workbook's memory on a large one; a workbook
 // known at open to stay view-only is never asked about, and a file that will never be edited here
 // (`neverEditable`) tells the worker to skip the proof. The proof reads the file as opened (`bytes`), sent
-// along. An answer arriving after the viewer has gone is ignored, as the document is closed by then.
+// along (null for a password-protected workbook, whose plaintext the worker kept). An answer arriving after
+// the viewer has gone is ignored, as the document is closed by then.
 export function useSpreadsheetWritability(
 	id: number,
 	doc: Pick<GridDoc, "kind" | "writable" | "unprovable">,
-	bytes: Uint8Array,
+	bytes: Uint8Array | null,
 	wanted: boolean,
 	neverEditable: boolean
 ): Writability {

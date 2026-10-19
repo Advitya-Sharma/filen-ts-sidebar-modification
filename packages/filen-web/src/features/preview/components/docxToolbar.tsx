@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react"
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react"
 import { useTranslation } from "react-i18next"
 import {
 	CaseSensitiveIcon,
@@ -7,6 +7,8 @@ import {
 	ChevronRightIcon,
 	ChevronUpIcon,
 	EyeIcon,
+	LockIcon,
+	TriangleAlertIcon,
 	MessageSquareTextIcon,
 	ReplaceAllIcon,
 	ReplaceIcon,
@@ -64,6 +66,8 @@ export interface DocxToolbarProps {
 	markup: DocxMarkupMode | null
 	onMarkupChange: (mode: DocxMarkupMode) => void
 	viewOnly: readonly DocxViewOnlyReason[]
+	// Opened with its password, and whether its integrity was verified.
+	encrypted?: PasswordIntegrity | undefined
 	// Bumped to focus the find field (and select its text) again while it is open.
 	findFocus: number
 	// Where focus goes when the find field closes.
@@ -93,6 +97,52 @@ export function ViewOnlyBadge({ reasons }: { reasons: readonly DocxViewOnlyReaso
 						<li key={reason}>{t(viewOnlyReasonKey(reason))}</li>
 					))}
 				</ul>
+			</PopoverContent>
+		</Popover>
+	)
+}
+
+// Whether an encrypted package's integrity was verified ([MS-OFFCRYPTO] §2.3.4.14 dataIntegrity HMAC), or could
+// not be: Standard encryption has none, and an Agile file may leave it out, so its content may have been changed.
+export type PasswordIntegrity = "verified" | "unchecked"
+
+// A document opened with its password: `saving` while its saves keep the password (an editor that can save),
+// else it was decrypted here only. An unchecked one says so, in the popover and as the badge's description.
+export function PasswordBadge({ integrity, saving }: { integrity: PasswordIntegrity; saving: boolean }) {
+	const { t } = useTranslation("preview")
+	const noteId = useId()
+	const unchecked = integrity === "unchecked"
+
+	return (
+		<Popover>
+			<Badge
+				variant="outline"
+				className={cn("cursor-pointer hover:bg-muted", unchecked ? "text-warning-foreground" : "text-muted-foreground")}
+				render={
+					<PopoverTrigger
+						aria-label={t("previewDocxPasswordProtected")}
+						aria-describedby={unchecked ? noteId : undefined}
+					/>
+				}
+			>
+				{unchecked ? <TriangleAlertIcon data-icon="inline-start" /> : <LockIcon data-icon="inline-start" />}
+				<span className="max-sm:hidden">{t("previewDocxPasswordProtected")}</span>
+			</Badge>
+			{unchecked ? (
+				<span
+					id={noteId}
+					className="sr-only"
+				>
+					{t("previewDocxPasswordUnchecked")}
+				</span>
+			) : null}
+			<PopoverContent
+				align="start"
+				className="gap-2"
+			>
+				<p className="font-medium">{t("previewDocxPasswordProtected")}</p>
+				<p className="text-muted-foreground">{t(saving ? "previewDocxPasswordSaved" : "previewDocxPasswordOpened")}</p>
+				{unchecked ? <p className="text-warning-foreground">{t("previewDocxPasswordUnchecked")}</p> : null}
 			</PopoverContent>
 		</Popover>
 	)
@@ -465,12 +515,20 @@ function Navigation({ state, dispatch }: { state: DocxViewerState; dispatch: (co
 	)
 }
 
-export function DocxToolbar({ state, dispatch, markup, onMarkupChange, viewOnly, findFocus, onFindClosed }: DocxToolbarProps) {
+export function DocxToolbar({ state, dispatch, markup, onMarkupChange, viewOnly, encrypted, findFocus, onFindClosed }: DocxToolbarProps) {
 	const { t } = useTranslation("preview")
 
 	return (
 		<div className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 px-2">
-			<div className="flex min-w-0 items-center">{viewOnly.length > 0 ? <ViewOnlyBadge reasons={viewOnly} /> : null}</div>
+			<div className="flex min-w-0 items-center gap-1">
+				{viewOnly.length > 0 ? <ViewOnlyBadge reasons={viewOnly} /> : null}
+				{encrypted === undefined ? null : (
+					<PasswordBadge
+						integrity={encrypted}
+						saving={false}
+					/>
+				)}
+			</div>
 			{state.find.open ? (
 				<DocxFindField
 					find={viewerFindControls(state, dispatch)}

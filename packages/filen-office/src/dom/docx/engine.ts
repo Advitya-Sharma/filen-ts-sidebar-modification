@@ -57,6 +57,7 @@ import {
 import { XmlError, type XmlDocument } from "../../core/xml/index"
 import { collectAnnotations } from "./annotate"
 import type { DocxAnnotations } from "./annotations"
+import { encryptedPackageVerdict } from "../encryption/sealedPackage"
 import { findMatches, type FindablePage } from "./find"
 import { bookmarkIndex, paragraphLinks, paragraphOf, type LinkRange } from "./links"
 import {
@@ -317,7 +318,24 @@ export class DocxEngine implements DocxSessionApi {
 		if (this.closed) return
 
 		if (!opened.ok) {
-			this.fail(opened.reason, opened.message)
+			if (opened.reason === "encrypted") {
+				const verdict = await encryptedPackageVerdict(this.source)
+
+				if (this.closed) return
+
+				this.fail(
+					verdict === "needsPassword"
+						? "needsPassword"
+						: verdict === "rightsManaged"
+							? "rightsManaged"
+							: verdict === "unsupported"
+								? "unsupportedEncryption"
+								: "damagedEncryption",
+					opened.message
+				)
+			} else {
+				this.fail(opened.reason, opened.message)
+			}
 
 			return
 		}

@@ -293,8 +293,36 @@ export const preview = {
 	// ── Docx ─────────────────────────────────────────────────────────────────
 	/** Docx viewer — shown in place of the document when it fails to load or render */
 	previewDocxLoadFailed: "This document couldn't be rendered.",
-	/** Docx viewer — shown in place of a password-protected (encrypted) Word document, which can't be opened here */
-	previewDocxEncrypted: "This document is password-protected and can't be opened here.",
+	/** Docx viewer — in place of a password-protected Word document, behind its password prompt (and when the prompt was dismissed) */
+	previewDocxNeedsPassword: "This document is password-protected.",
+	/** Docx viewer — reopens a dismissed password prompt */
+	previewDocxEnterPassword: "Enter password",
+	/** Docx password prompt — title */
+	previewDocxPasswordTitle: "Password-protected document",
+	/** Docx password prompt — body; {{name}} is the document's name */
+	previewDocxPasswordBody: "Enter the password to open “{{name}}”.",
+	/** Docx password prompt — the field's label */
+	previewDocxPasswordLabel: "Password",
+	/** Docx password prompt — submit button */
+	previewDocxPasswordSubmit: "Open",
+	/** Docx password prompt — the submit button and a status while the password is checked (a few seconds on slower browsers); Cancel stops it */
+	previewDocxPasswordUnlocking: "Unlocking…",
+	/** Docx password prompt — under the field after a wrong password; the field is cleared for another try */
+	previewDocxPasswordWrong: "That password isn't right. Try again.",
+	/** Docx viewer — in place of a document protected with rights management (IRM, a sensitivity label), which is never asked a password */
+	previewDocxRightsManaged: "This document is protected with rights management (IRM) and can't be opened in Filen.",
+	/** Docx viewer — in place of a document encrypted with a scheme Filen doesn't implement (certificate-only, non-AES, extensible) */
+	previewDocxUnsupportedEncryption: "This document uses an encryption method Filen can't open.",
+	/** Docx viewer — in place of an encrypted document whose container is malformed or failed its integrity check */
+	previewDocxDamagedEncryption: "This document is damaged or was modified after it was encrypted.",
+	/** Docx viewer and editor — toolbar badge (and its popover's title) for a document opened with its password */
+	previewDocxPasswordProtected: "Password-protected",
+	/** Docx viewer — the Password-protected badge's popover: the document was decrypted with its password in this browser, in memory only */
+	previewDocxPasswordOpened: "Opened with its password, in this browser only.",
+	/** Docx editor and spreadsheet editor — the Password-protected badge's popover: every save (explicit or autosave) is encrypted again with the password the file was opened with. In preview.ts, not previewDocx/*: the spreadsheet editor shows it in builds without DOCX editing */
+	previewDocxPasswordSaved: "Saved with the same password.",
+	/** Docx viewer and editor, spreadsheet — the Password-protected badge's warning (popover and screen-reader description) for a file whose encryption carries no integrity check (Standard encryption, or an Agile file without one): its content may have been changed after it was encrypted */
+	previewDocxPasswordUnchecked: "Its integrity can't be verified: it may have been changed after it was encrypted.",
 	/** Docx viewer — shown in place of an older binary Word document (.doc) saved with a .docx name */
 	previewDocxLegacyFormat: "This document uses an older Word format that can't be opened here.",
 	/** Docx viewer — shown when the file is not a Word document at all (another Office file, or not a document) */

@@ -3,7 +3,7 @@ import { XmlError, type XmlDocument } from "../../xml/index"
 import type { DocxModel, MaxIds, Story } from "../model/index"
 import { parseNumbering, type Numbering } from "../numbering/index"
 import { gateReasons, type DocxGateReason, type DocxPackage } from "../package"
-import { protectionMode, protectionOf, readOnlyExceptions } from "./protection"
+import { gateLifted, protectionMode, protectionOf, readOnlyExceptions } from "./protection"
 import { bindingsKnown, partHasBindings } from "../forms/binding"
 import { PropsStore } from "../props/index"
 import { DocxStyles, PropertyResolver, parseStyles, styleSettings } from "../styles/index"
@@ -250,6 +250,9 @@ export interface EditContextParts {
 	// changes go to context.identity.
 	readonly author?: string
 	readonly clock?: () => number
+	// The document's password to modify was given: its write protection does not make it view-only
+	// (edit/protection.ts writeProtectionOf).
+	readonly writeUnlocked?: boolean
 }
 
 // Reads styles, numbering and theme for `model` (or reuses what a caller already parsed for layout).
@@ -281,7 +284,9 @@ export async function openDocxEditContext(pkg: DocxPackage, model: DocxModel, re
 		malformed: unreadable.length > 0 || store.malformed.length > 0
 	}).filter(
 		// A read-only document with ranges open to everyone opens editable within them (edit/protection.ts).
-		reason => reason !== "protected" || pkg.facts.documentProtection?.edit !== "readOnly" || !readOnlyExceptions(model)
+		reason =>
+			!gateLifted(reason, reuse) &&
+			(reason !== "protected" || pkg.facts.documentProtection?.edit !== "readOnly" || !readOnlyExceptions(model))
 	)
 
 	const context: DocxEditContext = {

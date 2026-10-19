@@ -1,10 +1,12 @@
 import type {
 	DocxAnnotations,
+	DocxEncryptionRefusal,
 	DocxErrorReason,
 	DocxMarkupInfo,
 	DocxMarkupMode,
 	DocxOpenInfo,
 	DocxRevisionTarget,
+	DocxUnlockedDocument,
 	DocxViewerCommand,
 	DocxViewerState
 } from "@filen/office/dom/docx"
@@ -38,12 +40,27 @@ export function docxFailure(document: DocxDocument, fileBytes: number): DocxFail
 	return { fallback, detail: `${error.reason}: ${error.message} (main part ${size === undefined ? "unknown" : String(size)} bytes)` }
 }
 
-export type DocxErrorKey = "previewDocxEncrypted" | "previewDocxLegacyFormat" | "previewDocxNotDocument" | "previewDocxLoadFailed"
+export type DocxErrorKey =
+	| "previewDocxNeedsPassword"
+	| "previewDocxRightsManaged"
+	| "previewDocxUnsupportedEncryption"
+	| "previewDocxDamagedEncryption"
+	| "previewDocxLegacyFormat"
+	| "previewDocxNotDocument"
+	| "previewDocxLoadFailed"
 
 export function docxErrorKey(reason: DocxErrorReason | undefined): DocxErrorKey {
 	switch (reason) {
-		case "encrypted":
-			return "previewDocxEncrypted"
+		// The viewer unlocks a password-protected file before the engine opens it: the engine meets one only
+		// when that was not done (the file then needs the preview opened again).
+		case "needsPassword":
+			return "previewDocxNeedsPassword"
+		case "rightsManaged":
+			return "previewDocxRightsManaged"
+		case "unsupportedEncryption":
+			return "previewDocxUnsupportedEncryption"
+		case "damagedEncryption":
+			return "previewDocxDamagedEncryption"
 		case "legacyBinary":
 			return "previewDocxLegacyFormat"
 		case "notWordprocessing":
@@ -52,6 +69,44 @@ export function docxErrorKey(reason: DocxErrorReason | undefined): DocxErrorKey 
 			return "previewDocxNotDocument"
 		default:
 			return "previewDocxLoadFailed"
+	}
+}
+
+// Why an encrypted document is not opened, before any password is asked.
+export function docxRefusalKey(reason: DocxEncryptionRefusal): DocxErrorKey {
+	switch (reason) {
+		case "rightsManaged":
+			return "previewDocxRightsManaged"
+		case "unsupported":
+			return "previewDocxUnsupportedEncryption"
+		case "damaged":
+			return "previewDocxDamagedEncryption"
+	}
+}
+
+// An unlocked document, held where it was decrypted (the docx worker) while its preview shows it, and released
+// once the preview let go of it (drop). The release waits a turn, so the viewer and editor close first and a
+// remount in the same turn (React's Strict Mode check) keeps it.
+export interface DocxSessionKey {
+	readonly document: DocxUnlockedDocument
+	hold: () => void
+	drop: () => void
+}
+
+export function docxSessionKey(document: DocxUnlockedDocument): DocxSessionKey {
+	let timer: ReturnType<typeof setTimeout> | undefined
+
+	return {
+		document,
+		hold: () => {
+			clearTimeout(timer)
+		},
+		drop: () => {
+			clearTimeout(timer)
+			timer = setTimeout(() => {
+				document.release()
+			}, 0)
+		}
 	}
 }
 

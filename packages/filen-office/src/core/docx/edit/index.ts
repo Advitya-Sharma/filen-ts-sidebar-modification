@@ -120,9 +120,20 @@ export {
 	offeredParagraphStyles,
 	protectionMode,
 	protectionOf,
+	writeProtectionOf,
 	type DocxProtection,
-	type DocxProtectionMode
+	type DocxProtectionMode,
+	type DocxWriteProtection
 } from "./protection"
+export {
+	MAX_PROTECTION_SPIN_COUNT,
+	legacyPasswordVerifier,
+	protectionHashInputs,
+	readProtectionHash,
+	type ProtectionHash,
+	type ProtectionHashName,
+	type ProtectionHashRead
+} from "../protection/hash"
 export { NO_VALUES } from "./snapshot/formats"
 export { DOCX_COMMON_FONTS, docxFontList, type DocxFontChoice, type DocxFontKind } from "./fontList"
 export type { DocxFormatValue, DocxIndentValue, DocxLineSpacingValue, DocxParagraphSpacingValue } from "./snapshot/formats"

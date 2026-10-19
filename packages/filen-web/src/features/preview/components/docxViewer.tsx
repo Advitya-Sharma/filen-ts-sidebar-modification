@@ -1,7 +1,16 @@
-import { useEffect, useRef, useState, type RefObject } from "react"
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { useTranslation } from "react-i18next"
-import { bytesSource } from "@filen/office/core/opc"
-import { DEFAULT_MARKUP_MODE, markupInfo, type DocxMarkupMode } from "@filen/office/dom/docx"
+import { isCompoundFile } from "@filen/office/core/cfb"
+import { bytesSource, type ByteSource } from "@filen/office/core/opc"
+import {
+	DEFAULT_MARKUP_MODE,
+	markupInfo,
+	type DocxEncryptionRefusal,
+	type DocxHost,
+	type DocxLockedDocument,
+	type DocxMarkupMode,
+	type DocxProtectedOpen
+} from "@filen/office/dom/docx"
 import {
 	DocxPages,
 	indexAnnotations,
@@ -17,25 +26,29 @@ import { isLinkedEmbedItem, type DriveItem } from "@/features/drive/lib/item"
 import type { DriveVariant } from "@/features/drive/lib/preferences"
 import { usePreviewBytes } from "@/features/preview/hooks/usePreviewBytes"
 import { usePreviewAccessMode, usePreviewByteSource } from "@/features/preview/lib/accessMode"
-import { DOCX_FONT_URLS, docxHost, prewarmDocxWorker } from "@/features/preview/lib/docxEngine"
+import { DOCX_FONT_URLS, docxHost, docxProtection, prewarmDocxWorker } from "@/features/preview/lib/docxEngine"
 import {
 	BALLOON_COLUMN_WIDTH,
 	balloonsFit,
 	hasBalloons,
 	docxErrorKey,
 	docxFailure,
+	docxRefusalKey,
+	docxSessionKey,
 	viewOnlyReasons,
 	type DocxGateReason,
-	type DocxOpenContext
+	type DocxOpenContext,
+	type DocxSessionKey
 } from "@/features/preview/components/docxViewer.logic"
 import { DocxAnnotationLayer, type DocxBalloonKey } from "@/features/preview/components/docxAnnotations"
 import { DocxPreviewFallback } from "@/features/preview/components/docxPreviewFallback"
-import { DocxEditView, type DocxSaveSource } from "@/features/preview/components/docxEditor"
+import { DocxPasswordGate, type PasswordVerdict } from "@/features/preview/components/docxPasswordPrompt"
+import { DocxEditView, DocxProtectedEditView, type DocxSaveSource } from "@/features/preview/components/docxEditor"
 import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
-import { DocxToolbar } from "@/features/preview/components/docxToolbar"
+import { DocxToolbar, type PasswordIntegrity } from "@/features/preview/components/docxToolbar"
 import { useTrustedLinkGate } from "@/features/chats/hooks/useTrustedLinkGate"
 import { LoadingState } from "@/components/loadingState"
-import { PreviewErrorState, PreviewGate } from "@/features/preview/components/previewErrorState"
+import { PreviewDownloadButton, PreviewErrorState, PreviewGate, PreviewLoading } from "@/features/preview/components/previewErrorState"
 import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"
 import { IN_EDITORS, useAction } from "@/lib/keymap/useAction"
 import { isSafeAbsoluteHref } from "@/lib/safeUrl"
@@ -67,11 +80,23 @@ const PAGE_GAP = 16
 const WHEEL_SENSITIVITY = 0.0015
 const LAYER = "[role='dialog'], [role='alertdialog']"
 
-// The engine reads ranges of the cached buffer and gets a copy of each range it asked for, never of the
-// whole file: the buffer stays shared with the preview cache and the Download action. Tracked changes are
-// laid out as the markup mode shows them (a new layout per view).
-function sourceFor(bytes: Uint8Array, mode: DocxMarkupMode): DocxSource {
-	return { host: docxHost, bytes: bytesSource(bytes), options: { fontUrls: DOCX_FONT_URLS, view: markupInfo(mode).view } }
+// What the viewer opens: the file as downloaded (the engine reads ranges of the cached buffer and gets a copy of
+// each range it asked for, never of the whole file: the buffer stays shared with the preview cache and the
+// Download action), or a password-protected file's decrypted package, held in the docx worker by its unlocked
+// document (never on the page). `file`: the buffer, for docx-preview's fallback; none for a decrypted package.
+interface DocxContent {
+	readonly host: DocxHost
+	readonly bytes: ByteSource
+	readonly file: Uint8Array | null
+}
+
+function fileContent(bytes: Uint8Array): DocxContent {
+	return { host: docxHost, bytes: bytesSource(bytes), file: bytes }
+}
+
+// Tracked changes are laid out as the markup mode shows them (a new layout per view).
+function sourceFor(content: DocxContent, mode: DocxMarkupMode): DocxSource {
+	return { host: content.host, bytes: content.bytes, options: { fontUrls: DOCX_FONT_URLS, view: markupInfo(mode).view } }
 }
 
 export function DocxViewer({ item, alt, variant, editing }: DocxViewerProps) {
@@ -94,76 +119,324 @@ export function DocxViewer({ item, alt, variant, editing }: DocxViewerProps) {
 
 	return (
 		<PreviewGate result={result}>
-			{ready => {
-				const viewer = (
-					<DocxDocumentView
-						bytes={ready.bytes}
-						alt={alt}
-						context={{ anon, archive, linked: isLinkedEmbedItem(item), variant }}
-					/>
-				)
+			{ready => (
+				<DocxPasswordBoundary
+					bytes={ready.bytes}
+					name={alt}
+				>
+					{(content, key) => {
+						const viewer = (
+							<DocxDocumentView
+								content={content}
+								alt={alt}
+								encrypted={key?.document.integrity}
+								context={{ anon, archive, linked: isLinkedEmbedItem(item), variant }}
+							/>
+						)
 
-				// DOCX_EDITING first: a build without editing drops the editor entirely.
-				return DOCX_EDITING && edit && editing !== undefined ? (
-					<DocxEditView
-						bytes={ready.bytes}
-						alt={alt}
-						writable={editing.writable}
-						renamed={editing.renamed}
-						onDirtyChange={editing.onDirtyChange}
-						saveRef={editing.saveRef}
-						onAutosave={editing.onAutosave}
-						viewer={() => viewer}
-					/>
-				) : (
-					viewer
-				)
-			}}
+						if (!DOCX_EDITING || !edit || editing === undefined) {
+							return viewer
+						}
+
+						const editProps = {
+							alt,
+							writable: editing.writable,
+							renamed: editing.renamed,
+							onDirtyChange: editing.onDirtyChange,
+							saveRef: editing.saveRef,
+							onAutosave: editing.onAutosave,
+							viewer: () => viewer
+						}
+
+						// DOCX_EDITING first: a build without editing drops the editor entirely. A password-protected
+						// document's editor takes its own copy and seals its saves with its key.
+						return key === null || content.file !== null ? (
+							<DocxEditView
+								bytes={content.file ?? ready.bytes}
+								{...editProps}
+							/>
+						) : (
+							<DocxProtectedEditView
+								document={key.document}
+								{...editProps}
+							/>
+						)
+					}}
+				</DocxPasswordBoundary>
+			)}
 		</PreviewGate>
 	)
 }
 
-interface Opened {
+// What the file is before anything is shown: a zip opens at once; a compound file is probed for a password
+// ([MS-OFFCRYPTO] §2.3.4) in the docx worker: refused (rights management, an unsupported scheme, damage), locked,
+// or not encrypted at all (a legacy .doc, which the engine reports).
+type Protection =
+	| { readonly kind: "probing" }
+	| { readonly kind: "open"; readonly content: DocxContent; readonly key: DocxSessionKey | null }
+	| { readonly kind: "refused"; readonly reason: DocxEncryptionRefusal }
+	| { readonly kind: "locked"; readonly locked: DocxLockedDocument }
+
+function initial(bytes: Uint8Array): Protection {
+	return isCompoundFile(bytes) ? { kind: "probing" } : { kind: "open", content: fileContent(bytes), key: null }
+}
+
+function protectionOf(bytes: Uint8Array, opened: Exclude<DocxProtectedOpen, { kind: "aborted" }>): Protection {
+	switch (opened.kind) {
+		case "plain":
+			return { kind: "open", content: fileContent(bytes), key: null }
+		case "refused":
+			return { kind: "refused", reason: opened.reason }
+		case "needsPassword":
+			return { kind: "locked", locked: opened.locked }
+	}
+}
+
+// The document behind its password, if it has one: the prompt in its place until it is given, then the viewer
+// on the decrypted package where the worker holds it (or the editor on its own copy), released once the preview
+// closes, whatever closes it (the overlay, a route change, a new version of the file, an error above). Reopening
+// asks again.
+function DocxPasswordBoundary({
+	bytes,
+	name,
+	children
+}: {
 	bytes: Uint8Array
+	name: string
+	children: (content: DocxContent, key: DocxSessionKey | null) => ReactNode
+}) {
+	const { t } = useTranslation("preview")
+	const [state, setState] = useState(() => ({ bytes, protection: initial(bytes) }))
+	// Every document this preview unlocked and still holds: released when it unmounts, also one whose state
+	// never committed.
+	const [keys] = useState(() => new Set<DocxSessionKey>())
+	let current = state
+
+	if (state.bytes !== bytes) {
+		current = { bytes, protection: initial(bytes) }
+		setState(current)
+	}
+
+	const { protection } = current
+	const probing = protection.kind === "probing"
+	const key = protection.kind === "open" ? protection.key : null
+	const locked = protection.kind === "locked" ? protection.locked : null
+
+	useEffect(() => {
+		if (!probing) {
+			return
+		}
+
+		const controller = new AbortController()
+
+		docxProtection.open(bytesSource(bytes), { signal: controller.signal }).then(
+			opened => {
+				if (opened.kind === "aborted" || controller.signal.aborted) {
+					if (opened.kind === "needsPassword") {
+						opened.locked.dispose()
+					}
+
+					return
+				}
+
+				const next = protectionOf(bytes, opened)
+
+				setState(previous => (previous.bytes === bytes ? { bytes, protection: next } : previous))
+			},
+			(error: unknown) => {
+				// Not one of the file's own verdicts (those resolve): the engine reads the file and says what it is.
+				log.error("docx", "encryption probe failed", error)
+
+				if (!controller.signal.aborted) {
+					setState(previous =>
+						previous.bytes === bytes
+							? { bytes, protection: { kind: "open", content: fileContent(bytes), key: null } }
+							: previous
+					)
+				}
+			}
+		)
+
+		return () => {
+			controller.abort()
+		}
+	}, [bytes, probing])
+
+	// A locked file the prompt left without unlocking is dropped where the worker holds it, a turn later (a
+	// remount in the same turn, React's Strict Mode check, keeps it).
+	useEffect(() => {
+		if (locked === null) {
+			return
+		}
+
+		clearTimeout(disposals.get(locked))
+
+		return () => {
+			disposals.set(
+				locked,
+				setTimeout(() => {
+					if (!unlockedLocks.has(locked)) {
+						locked.dispose()
+					}
+				}, 0)
+			)
+		}
+	}, [locked])
+
+	useEffect(() => {
+		if (key === null) {
+			return
+		}
+
+		keys.add(key)
+		key.hold()
+
+		return () => {
+			keys.delete(key)
+			key.drop()
+		}
+	}, [key, keys])
+
+	useEffect(
+		() => () => {
+			for (const held of keys) {
+				held.drop()
+			}
+		},
+		[keys]
+	)
+
+	switch (protection.kind) {
+		case "probing":
+			return <PreviewLoading />
+		case "refused":
+			return (
+				<PreviewErrorState
+					message={t(docxRefusalKey(protection.reason))}
+					action={<PreviewDownloadButton />}
+				/>
+			)
+		case "locked": {
+			const lockedDocument = protection.locked
+			const verify = async (password: string, signal: AbortSignal): Promise<PasswordVerdict> => {
+				const result = await lockedDocument.unlock(password, { signal })
+
+				if (!result.ok) {
+					const { reason } = result
+
+					if (reason === "wrongPassword") {
+						return "wrong"
+					}
+
+					// The password verified, then the package failed its integrity check: no prompt helps.
+					if (reason !== "aborted") {
+						setState(previous => (previous.bytes === bytes ? { bytes, protection: { kind: "refused", reason } } : previous))
+					}
+
+					return "aborted"
+				}
+
+				unlockedLocks.add(lockedDocument)
+
+				// The prompt went (closed, a new version, the preview unmounted): nothing holds the document.
+				if (signal.aborted) {
+					result.document.release()
+
+					return "aborted"
+				}
+
+				const unlocked = docxSessionKey(result.document)
+				const content: DocxContent = { host: result.document.host, bytes: result.document.bytes, file: null }
+
+				keys.add(unlocked)
+				setState(previous =>
+					previous.bytes === bytes ? { bytes, protection: { kind: "open", content, key: unlocked } } : previous
+				)
+
+				return "accepted"
+			}
+
+			return (
+				<DocxPasswordGate
+					title={t("previewDocxPasswordTitle")}
+					body={t("previewDocxPasswordBody", { name })}
+					wrongMessage={t("previewDocxPasswordWrong")}
+					label={t("previewDocxPasswordLabel")}
+					submitLabel={t("previewDocxPasswordSubmit")}
+					progressLabel={t("previewDocxPasswordUnlocking")}
+					message={t("previewDocxNeedsPassword")}
+					enterLabel={t("previewDocxEnterPassword")}
+					verify={verify}
+				/>
+			)
+		}
+		case "open":
+			return children(protection.content, key)
+	}
+}
+
+// Locked files whose unlock succeeded: their dispose would release the unlocked document (the same hold).
+const unlockedLocks = new WeakSet<DocxLockedDocument>()
+// Locked files about to be dropped (their preview let go of them).
+const disposals = new WeakMap<DocxLockedDocument, ReturnType<typeof setTimeout>>()
+
+interface Opened {
+	content: DocxContent
 	mode: DocxMarkupMode
 	source: DocxSource
 }
 
-function DocxDocumentView({ bytes, alt, context }: { bytes: Uint8Array; alt: string; context: DocxOpenContext }) {
+function DocxDocumentView({
+	content,
+	alt,
+	encrypted,
+	context
+}: {
+	content: DocxContent
+	alt: string
+	// Opened with its password, and whether its integrity was verified (the badge says so).
+	encrypted: PasswordIntegrity | undefined
+	context: DocxOpenContext
+}) {
 	const { t } = useTranslation("preview")
-	// A retry, or a markup mode laid out differently, opens the same buffer again under a fresh source (a
-	// new document on the shared worker).
+	// A retry, or a markup mode laid out differently, opens the same content again under a fresh source (a new
+	// document on the shared worker).
 	const [opened, setOpened] = useState<Opened>(() => ({
-		bytes,
+		content,
 		mode: DEFAULT_MARKUP_MODE,
-		source: sourceFor(bytes, DEFAULT_MARKUP_MODE)
+		source: sourceFor(content, DEFAULT_MARKUP_MODE)
 	}))
 	let current = opened
 
-	if (opened.bytes !== bytes) {
-		current = { bytes, mode: DEFAULT_MARKUP_MODE, source: sourceFor(bytes, DEFAULT_MARKUP_MODE) }
+	if (opened.content !== content) {
+		current = { content, mode: DEFAULT_MARKUP_MODE, source: sourceFor(content, DEFAULT_MARKUP_MODE) }
 		setOpened(current)
 	}
 
 	const document = useDocxDocument(current.source)
-	const failure = docxFailure(document, bytes.byteLength)
-	const fallback = failure?.fallback === true
+	const failure = docxFailure(document, content.bytes.size)
+	// A decrypted package is not on the page: docx-preview has nothing to read.
+	const file = failure?.fallback === true ? content.file : null
 	const detail = failure?.detail
 
 	useEffect(() => {
 		if (detail !== undefined) {
 			log.warn(
 				"docx",
-				fallback ? "Engine failed, showing docx-preview instead:" : "Engine failed, too large for docx-preview:",
+				file !== null
+					? "Engine failed, showing docx-preview instead:"
+					: content.file === null
+						? "Engine failed on a decrypted package:"
+						: "Engine failed, too large for docx-preview:",
 				detail
 			)
 		}
-	}, [detail, fallback])
+	}, [detail, file, content.file])
 
-	if (fallback) {
+	if (file !== null) {
 		return (
 			<DocxPreviewFallback
-				bytes={bytes}
+				bytes={file}
 				alt={alt}
 			/>
 		)
@@ -174,7 +447,7 @@ function DocxDocumentView({ bytes, alt, context }: { bytes: Uint8Array; alt: str
 			<PreviewErrorState
 				message={t(docxErrorKey(document.error?.reason))}
 				onRetry={() => {
-					setOpened({ bytes, mode: current.mode, source: sourceFor(bytes, current.mode) })
+					setOpened({ content, mode: current.mode, source: sourceFor(content, current.mode) })
 				}}
 			/>
 		)
@@ -194,9 +467,10 @@ function DocxDocumentView({ bytes, alt, context }: { bytes: Uint8Array; alt: str
 				setOpened(
 					markupInfo(mode).view === markupInfo(current.mode).view
 						? { ...current, mode }
-						: { bytes, mode, source: sourceFor(bytes, mode) }
+						: { content, mode, source: sourceFor(content, mode) }
 				)
 			}}
+			encrypted={encrypted}
 			context={context}
 		/>
 	)
@@ -216,12 +490,14 @@ function DocxPageList({
 	alt,
 	mode,
 	onModeChange,
+	encrypted,
 	context
 }: {
 	document: DocxDocument
 	alt: string
 	mode: DocxMarkupMode
 	onModeChange: (mode: DocxMarkupMode) => void
+	encrypted: PasswordIntegrity | undefined
 	context: DocxOpenContext
 }) {
 	const { t } = useTranslation("preview")
@@ -354,6 +630,7 @@ function DocxPageList({
 					onModeChange(next)
 				}}
 				viewOnly={facts === null ? [] : viewOnlyReasons(facts.gate, context)}
+				encrypted={encrypted}
 				findFocus={findFocus}
 				onFindClosed={() => {
 					wrapper?.querySelector<HTMLElement>(".fo-docx-pages")?.focus()

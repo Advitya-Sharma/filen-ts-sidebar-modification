@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { SpreadsheetOpen } from "@/features/spreadsheet/lib/spreadsheetClient"
 
 // The spreadsheet worker's lifetime: kept while a document is open or a call is in flight, torn down once
 // idle, and never reached by a call on a document that has closed. The worker and its Comlink proxy are
@@ -23,11 +24,17 @@ interface FakeRemote {
 	open: ReturnType<typeof vi.fn>
 	close: ReturnType<typeof vi.fn>
 	markSaved: ReturnType<typeof vi.fn>
+	unlock: ReturnType<typeof vi.fn>
+	cancelOpen: ReturnType<typeof vi.fn>
+	cancelUnlock: ReturnType<typeof vi.fn>
+	discardLocked: ReturnType<typeof vi.fn>
 }
 
 let remotes: FakeRemote[] = []
 // What every open waits on before it answers: settled unless a test holds it.
 let openGate: Promise<unknown> = Promise.resolve()
+// What the next opens answer instead of a document: a locked or refused workbook.
+let openAnswers: unknown[] = []
 
 async function freshClient() {
 	vi.resetModules()
@@ -36,6 +43,7 @@ async function freshClient() {
 
 	remotes = []
 	openGate = Promise.resolve()
+	openAnswers = []
 	WorkerCtor.mockReset()
 	wrap.mockReset()
 	terminate.mockReset()
@@ -51,10 +59,14 @@ async function freshClient() {
 			open: vi.fn(async () => {
 				await openGate
 
-				return { id: nextWorkerId++, doc: DOC }
+				return openAnswers.shift() ?? { id: nextWorkerId++, doc: DOC }
 			}),
 			close: vi.fn(() => Promise.resolve()),
-			markSaved: vi.fn((workerId: number) => Promise.resolve({ dirty: false, canUndo: false, canRedo: false, workerId }))
+			markSaved: vi.fn((workerId: number) => Promise.resolve({ dirty: false, canUndo: false, canRedo: false, workerId })),
+			unlock: vi.fn(() => Promise.resolve({ wrongPassword: true })),
+			cancelOpen: vi.fn(() => Promise.resolve()),
+			cancelUnlock: vi.fn(() => Promise.resolve()),
+			discardLocked: vi.fn(() => Promise.resolve())
 		}
 
 		remotes.push(remote)
@@ -63,6 +75,17 @@ async function freshClient() {
 	})
 
 	return await import("@/features/spreadsheet/lib/spreadsheetClient")
+}
+
+// An open that opened a document (not a locked or refused workbook).
+async function opened(pending: Promise<SpreadsheetOpen>): Promise<Extract<SpreadsheetOpen, { id: number }>> {
+	const result = await pending
+
+	if (!("id" in result)) {
+		throw new Error("expected an opened document")
+	}
+
+	return result
 }
 
 beforeEach(() => {
@@ -76,7 +99,7 @@ afterEach(() => {
 describe("spreadsheetClient", () => {
 	it("keeps the worker while a document is open, and tears it down once idle after it closes", async () => {
 		const client = await freshClient()
-		const { id } = await client.openSpreadsheet(new Uint8Array([1]), "csv")
+		const { id } = await opened(client.openSpreadsheet(new Uint8Array([1]), "csv"))
 
 		await vi.advanceTimersByTimeAsync(IDLE_MS * 2)
 		expect(terminate).not.toHaveBeenCalled()
@@ -94,7 +117,7 @@ describe("spreadsheetClient", () => {
 	it("checks for a newer build when the worker fails to start", async () => {
 		const client = await freshClient()
 
-		await client.openSpreadsheet(new Uint8Array([1]), "csv")
+		await opened(client.openSpreadsheet(new Uint8Array([1]), "csv"))
 
 		const worker = WorkerCtor.mock.results[0]?.value as EventTarget | undefined
 
@@ -118,7 +141,7 @@ describe("spreadsheetClient", () => {
 
 		answer()
 
-		const { id } = await pending
+		const { id } = await opened(pending)
 
 		client.closeSpreadsheet(id)
 		await vi.advanceTimersByTimeAsync(IDLE_MS)
@@ -127,7 +150,7 @@ describe("spreadsheetClient", () => {
 
 	it("rejects a call on a closed document without spinning up a worker", async () => {
 		const client = await freshClient()
-		const { id } = await client.openSpreadsheet(new Uint8Array([1]), "csv")
+		const { id } = await opened(client.openSpreadsheet(new Uint8Array([1]), "csv"))
 
 		client.closeSpreadsheet(id)
 		await vi.advanceTimersByTimeAsync(IDLE_MS)
@@ -142,12 +165,12 @@ describe("spreadsheetClient", () => {
 
 	it("never lets a closed document's id reach a newer worker's document of the same worker id", async () => {
 		const client = await freshClient()
-		const first = await client.openSpreadsheet(new Uint8Array([1]), "csv")
+		const first = await opened(client.openSpreadsheet(new Uint8Array([1]), "csv"))
 
 		client.closeSpreadsheet(first.id)
 		await vi.advanceTimersByTimeAsync(IDLE_MS)
 
-		const second = await client.openSpreadsheet(new Uint8Array([2]), "csv")
+		const second = await opened(client.openSpreadsheet(new Uint8Array([2]), "csv"))
 
 		// Both workers numbered their document 1; the ids handed out differ.
 		expect(WorkerCtor).toHaveBeenCalledTimes(2)
@@ -164,7 +187,7 @@ describe("spreadsheetClient", () => {
 
 	it("keeps the worker for a call still in flight when its document closes", async () => {
 		const client = await freshClient()
-		const { id } = await client.openSpreadsheet(new Uint8Array([1]), "csv")
+		const { id } = await opened(client.openSpreadsheet(new Uint8Array([1]), "csv"))
 		let answer: (value: unknown) => void = () => undefined
 
 		remotes[0]?.markSaved.mockReturnValueOnce(
@@ -192,5 +215,147 @@ describe("spreadsheetClient", () => {
 		expect(terminate).not.toHaveBeenCalled()
 		await vi.advanceTimersByTimeAsync(IDLE_MS)
 		expect(terminate).toHaveBeenCalledOnce()
+	})
+})
+
+describe("spreadsheetClient: password-protected workbooks", () => {
+	async function lockedClient() {
+		const client = await freshClient()
+
+		openAnswers = [{ locked: 7 }]
+
+		const result = await client.openSpreadsheet(new Uint8Array([1]), "xlsx")
+
+		if (!("locked" in result)) {
+			throw new Error("expected a locked workbook")
+		}
+
+		return { client, lock: result.locked, remote: remotes[0] }
+	}
+
+	it("keeps the worker while a workbook waits for its password, through wrong passwords and cancelled tries", async () => {
+		const { lock, remote } = await lockedClient()
+
+		await expect(lock.unlock("wrong")).resolves.toEqual({ wrongPassword: true })
+		remote?.unlock.mockResolvedValueOnce({ aborted: true })
+		lock.cancel()
+		await expect(lock.unlock("slow")).resolves.toEqual({ aborted: true })
+		await vi.advanceTimersByTimeAsync(IDLE_MS * 2)
+
+		expect(remote?.cancelUnlock).toHaveBeenCalledWith(7)
+		expect(remote?.unlock).toHaveBeenNthCalledWith(1, 7, "wrong")
+		expect(terminate).not.toHaveBeenCalled()
+	})
+
+	it("hands an unlocked workbook a tab-wide id, held until it closes", async () => {
+		const { client, lock, remote } = await lockedClient()
+
+		remote?.unlock.mockResolvedValueOnce({ id: 3, doc: DOC, encrypted: true })
+
+		const answer = await lock.unlock("right")
+
+		if (!("id" in answer)) {
+			throw new Error("expected the workbook opened")
+		}
+
+		expect(answer.encrypted).toBe(true)
+		await expect(lock.unlock("again")).rejects.toThrow("no longer locked")
+		await vi.advanceTimersByTimeAsync(IDLE_MS * 2)
+		expect(terminate).not.toHaveBeenCalled()
+
+		client.closeSpreadsheet(answer.id)
+		await vi.advanceTimersByTimeAsync(0)
+		expect(remote?.close).toHaveBeenCalledExactlyOnceWith(3)
+		await vi.advanceTimersByTimeAsync(IDLE_MS)
+		expect(terminate).toHaveBeenCalledOnce()
+	})
+
+	it("lets the worker go once a locked workbook is discarded or refused", async () => {
+		const discarded = await lockedClient()
+		const terminated = terminate.mock.calls.length
+
+		discarded.lock.discard()
+		discarded.lock.discard()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(discarded.remote?.discardLocked).toHaveBeenCalledExactlyOnceWith(7)
+		await vi.advanceTimersByTimeAsync(IDLE_MS)
+		expect(terminate).toHaveBeenCalledTimes(terminated + 1)
+
+		const refused = await lockedClient()
+
+		refused.remote?.unlock.mockResolvedValueOnce({ refused: "damaged" })
+		await expect(refused.lock.unlock("right")).resolves.toEqual({ refused: "damaged" })
+		await vi.advanceTimersByTimeAsync(IDLE_MS)
+		expect(terminate).toHaveBeenCalledOnce()
+		expect(refused.remote?.discardLocked).not.toHaveBeenCalled()
+	})
+
+	it("closes, in the worker, a workbook a try opened after the page discarded it", async () => {
+		const { lock, remote } = await lockedClient()
+		let answer: (value: unknown) => void = () => undefined
+
+		remote?.unlock.mockReturnValueOnce(
+			new Promise(resolve => {
+				answer = resolve
+			})
+		)
+
+		const trying = lock.unlock("right")
+
+		lock.discard()
+		answer({ id: 4, doc: DOC, encrypted: true })
+
+		await expect(trying).resolves.toEqual({ aborted: true })
+		await vi.advanceTimersByTimeAsync(0)
+		expect(remote?.close).toHaveBeenCalledExactlyOnceWith(4)
+	})
+
+	it("cancels an open in the worker once its caller has gone", async () => {
+		const client = await freshClient()
+		let answer: () => void = () => undefined
+
+		openGate = new Promise<void>(resolve => {
+			answer = resolve
+		})
+
+		const leaving = new AbortController()
+		const pending = client.openSpreadsheet(new Uint8Array([1]), "xlsx", leaving.signal)
+
+		await vi.advanceTimersByTimeAsync(0)
+
+		const token = remotes[0]?.open.mock.calls[0]?.[2] as number
+
+		leaving.abort()
+		expect(remotes[0]?.cancelOpen).toHaveBeenCalledExactlyOnceWith(token)
+		answer()
+		await pending
+
+		// Once answered, its caller's signal is no longer heard.
+		const later = new AbortController()
+
+		await client.openSpreadsheet(new Uint8Array([2]), "xlsx", later.signal)
+		later.abort()
+		expect(remotes[0]?.cancelOpen).toHaveBeenCalledOnce()
+	})
+
+	it("passes a refused workbook on without holding the worker", async () => {
+		const client = await freshClient()
+
+		openAnswers = [{ refused: "rightsManaged" }]
+
+		await expect(client.openSpreadsheet(new Uint8Array([1]), "xlsx")).resolves.toEqual({ refused: "rightsManaged" })
+		await vi.advanceTimersByTimeAsync(IDLE_MS)
+		expect(terminate).toHaveBeenCalledOnce()
+	})
+
+	it("gives the lock up and ends the hold when a try fails in the worker", async () => {
+		const { lock, remote } = await lockedClient()
+
+		remote?.unlock.mockRejectedValueOnce(new Error("spreadsheet: too many cells"))
+		await expect(lock.unlock("right")).rejects.toThrow("too many cells")
+		expect(remote?.discardLocked).toHaveBeenCalledWith(7)
+		await vi.advanceTimersByTimeAsync(IDLE_MS)
+		expect(terminate).toHaveBeenCalledOnce()
+		await expect(lock.unlock("right")).rejects.toThrow("no longer locked")
 	})
 })

@@ -234,7 +234,7 @@ test("drive preview overlay: every viewer document, one shared docx worker ended
 		await closeOverlay(page)
 
 		overlay = await openRow(page, rows, "viewer-encrypted.docx")
-		await expectMessage(overlay, preview.previewDocxEncrypted)
+		await expectMessage(overlay, preview.previewDocxUnsupportedEncryption)
 		await closeOverlay(page)
 
 		overlay = await openRow(page, rows, "viewer-legacy.docx")
@@ -285,7 +285,7 @@ test("drive preview overlay: every viewer document, one shared docx worker ended
 	await closeOverlay(page)
 
 	overlay = await openRow(page, rows, "viewer-encrypted.docx")
-	await expectMessage(overlay, preview.previewDocxEncrypted)
+	await expectMessage(overlay, preview.previewDocxUnsupportedEncryption)
 	await closeOverlay(page)
 
 	overlay = await openRow(page, rows, "viewer-legacy.docx")

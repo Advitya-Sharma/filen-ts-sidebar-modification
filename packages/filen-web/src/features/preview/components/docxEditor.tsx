@@ -17,14 +17,24 @@ import {
 	type DocxEditorCommandType,
 	type DocxFontChoice,
 	type DocxParagraphStyle,
-	type StoryMatch
+	type DocxWriteProtection,
+	type StoryMatch,
+	writeProtectionOf
 } from "@filen/office/core/docx/edit"
 import type { PagedEditor } from "@filen/office/core/docx/paged"
 import type { SpellingIssue, SpellingMark } from "@filen/office/core/docx/spelling"
 import { DocxSpelling } from "@filen/office/core/docx/spelling"
 import { DocxSaveError } from "@filen/office/core/docx/write"
-import { DEFAULT_MARKUP_MODE, clampZoom, fitWidthZoom, markupInfo, stepZoom, type DocxMarkupMode } from "@filen/office/dom/docx"
-import type { DocxEditingHost } from "@filen/office/dom/docx/editing"
+import {
+	DEFAULT_MARKUP_MODE,
+	clampZoom,
+	fitWidthZoom,
+	markupInfo,
+	stepZoom,
+	type DocxMarkupMode,
+	type DocxUnlockedDocument
+} from "@filen/office/dom/docx"
+import type { DocxEditingHost, DocxSealer } from "@filen/office/dom/docx/editing"
 import { useDocxDocument, type DocxSource } from "@filen/office/react/docx"
 import {
 	DocxEditor,
@@ -40,7 +50,14 @@ import "@filen/office/css/docx-objects.css"
 import "@filen/office/css/docx-reflow.css"
 import { DOCX_FONT_URLS } from "@/features/preview/lib/docxEngine"
 import { readEditorClipboard, writeEditorClipboard } from "@/features/preview/lib/docxClipboard"
-import { docxEditingHost, writeDocx, type DocxSaveSnapshot } from "@/features/preview/lib/docxEditing"
+import {
+	assertSealedUpload,
+	docxEditingHost,
+	takeProtectedDocument,
+	writeDocx,
+	type DocxSaveSnapshot,
+	type DocxTakenSession
+} from "@/features/preview/lib/docxEditing"
 import {
 	AUTOSAVE_IDLE_MS,
 	E2E_AUTOSAVE_KEY,
@@ -67,6 +84,7 @@ import { useDocxAuthorGate } from "@/features/preview/components/docxAuthorGate"
 import { DocxCommentPopover } from "@/features/preview/components/docxCommentPopover"
 import { DocxContextCommands } from "@/features/preview/components/docxContextMenu"
 import { DocxEditToolbar } from "@/features/preview/components/docxEditToolbar"
+import type { PasswordIntegrity } from "@/features/preview/components/docxToolbar"
 import { DocxEquationPopover } from "@/features/preview/components/docxEquationPopover"
 import { DocxFieldChip } from "@/features/preview/components/docxFieldChip"
 import { DocxFormControls } from "@/features/preview/components/docxFormControls"
@@ -78,6 +96,7 @@ import { DocxTableBorderDrag } from "@/features/preview/components/docxTableBord
 import { DocxTableSplitDialog } from "@/features/preview/components/docxTableMenu"
 import { useDocxImageInsert } from "@/features/preview/components/docxImageInsert"
 import { useReflowMode } from "@/features/preview/components/docxReflow.logic"
+import { DocxWriteProtectionBar } from "@/features/preview/components/docxWriteProtection"
 import { DocxReflowSurface } from "@/features/preview/components/docxReflowSurface"
 import { DocxDrawingPress, DocxObjectHandles } from "@/features/preview/components/docxObjectHandles"
 import { DocxReviewLayer, DocxReviewPageOverlay } from "@/features/preview/components/docxReviewLayer"
@@ -125,8 +144,10 @@ interface Opened {
 	source: DocxSource
 }
 
-function openEditing(bytes: Uint8Array, mode: DocxMarkupMode): Opened {
-	const editing = docxEditingHost()
+// `writeUnlocked`: the document's password to modify was given (docxWriteProtection.tsx). `encryption`: it was
+// opened with its password, and saves are sealed with its key.
+function openEditing(bytes: Uint8Array, mode: DocxMarkupMode, writeUnlocked = false, encryption?: DocxSealer): Opened {
+	const editing = docxEditingHost(writeUnlocked, encryption)
 
 	return {
 		editing,
@@ -141,6 +162,8 @@ interface Ready {
 	// The style picker's styles (protection may lock some) and the colour pickers' theme colours.
 	styles: readonly DocxParagraphStyle[]
 	theme: readonly (readonly DocxSwatch[])[]
+	// Password to modify or read-only recommended (w:writeProtection).
+	writeProtection: DocxWriteProtection | undefined
 }
 
 interface FindState {
@@ -215,6 +238,8 @@ function e2eAutosaveOff(): boolean {
 interface SaveSourceOptions {
 	host: DocxEditingHost
 	editor: PagedEditor
+	// Opened with its password: what is handed to the upload must be sealed.
+	encrypted: boolean
 	setWriting: (writing: boolean) => void
 	// The file was stored: what it holds is saved.
 	onSaved: () => void
@@ -249,7 +274,16 @@ function documentText(editor: PagedEditor): string {
 // lands halfway through). Blocks the writer refuses on an explicit save are written as last saved and taken
 // back once the file is stored (the user is told then); a refusal nothing resolves keeps the document open
 // and unsaved, with its text to copy. An autosave never searches: a refusal holds autosave, quietly.
-function docxSaveSource({ host, editor, setWriting, onSaved, onRefused, onLocked, onSearch }: SaveSourceOptions): DocxSaveSource {
+function docxSaveSource({
+	host,
+	editor,
+	encrypted,
+	setWriting,
+	onSaved,
+	onRefused,
+	onLocked,
+	onSearch
+}: SaveSourceOptions): DocxSaveSource {
 	return async (options = {}) => {
 		const auto = options.auto === true
 
@@ -269,7 +303,9 @@ function docxSaveSource({ host, editor, setWriting, onSaved, onRefused, onLocked
 				}
 			})
 
-			log.info("docx", "document written", { bytes: written.bytes.byteLength, ms: Math.round(written.elapsedMs) })
+			// Never the decrypted package to the upload (the host seals; checked again here, at the hand-off).
+			assertSealedUpload(written.bytes, encrypted)
+			log.info("docx", "document written", { bytes: written.bytes.byteLength, ms: Math.round(written.elapsedMs), encrypted })
 
 			return {
 				...written,
@@ -326,15 +362,103 @@ export interface DocxEditViewProps {
 	onAutosave: () => boolean
 	// The viewer, for a document the editor cannot open (it shows its own error or fallback).
 	viewer: () => ReactNode
+	// Opened with its password (docxViewer.tsx): every save is sealed with its key, never stored decrypted.
+	encryption?: DocxSealer | undefined
+	// Whether the encrypted package's integrity was verified (the badge warns when it could not be).
+	encryptionIntegrity?: PasswordIntegrity | undefined
+	// The editor opened on `bytes` (each time it opens).
+	onEditorOpened?: (() => void) | undefined
 }
 
-export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, saveRef, onAutosave, viewer }: DocxEditViewProps) {
+export type DocxProtectedEditViewProps = Omit<DocxEditViewProps, "bytes" | "encryption" | "encryptionIntegrity"> & {
+	// Unlocked where the viewer's engine holds it: the editor takes its own copy and the key to seal saves.
+	document: DocxUnlockedDocument
+}
+
+// The editor on a password-protected document: its decrypted package and key taken to this thread (the viewer
+// never has them), every save sealed with that key, the key released once the editor closes and no seal runs.
+// A copy that cannot be taken leaves the document to the viewer.
+export function DocxProtectedEditView({ document, ...props }: DocxProtectedEditViewProps) {
+	const [taken, setTaken] = useState<{ document: DocxUnlockedDocument; session: DocxTakenSession | null } | null>(null)
+	const current = taken?.document === document ? taken.session : undefined
+
+	useEffect(() => {
+		const controller = new AbortController()
+		let session: DocxTakenSession | null = null
+
+		takeProtectedDocument(document, controller.signal).then(
+			opened => {
+				if (controller.signal.aborted) {
+					opened.close()
+
+					return
+				}
+
+				session = opened
+				setTaken({ document, session: opened })
+			},
+			(error: unknown) => {
+				if (!controller.signal.aborted) {
+					log.error("docx", "the protected document could not be taken for editing", error)
+					setTaken({ document, session: null })
+				}
+			}
+		)
+
+		return () => {
+			controller.abort()
+			session?.close()
+		}
+	}, [document])
+
+	if (current === undefined) {
+		return (
+			<LoadingState
+				size="lg"
+				className="size-full text-inherit"
+			/>
+		)
+	}
+
+	if (current === null) {
+		return props.viewer()
+	}
+
+	return (
+		<DocxEditView
+			{...props}
+			bytes={current.bytes}
+			encryption={current.sealer}
+			encryptionIntegrity={document.integrity}
+			// The editor has its own copy now: the one the viewer's engine held goes (a fallback viewer after that
+			// shows the error state).
+			onEditorOpened={() => {
+				document.dropPackage()
+			}}
+		/>
+	)
+}
+
+export function DocxEditView({
+	bytes,
+	alt,
+	writable,
+	renamed,
+	onDirtyChange,
+	saveRef,
+	onAutosave,
+	viewer,
+	encryption,
+	encryptionIntegrity,
+	onEditorOpened
+}: DocxEditViewProps) {
 	const { t } = useTranslation("preview")
 	const [markupMode, setMarkupMode] = useState<DocxMarkupMode>(DEFAULT_MARKUP_MODE)
-	const [opened, setOpened] = useState(() => openEditing(bytes, DEFAULT_MARKUP_MODE))
+	const [opened, setOpened] = useState(() => openEditing(bytes, DEFAULT_MARKUP_MODE, false, encryption))
 	const document = useDocxDocument(opened.source)
 	const [ready, setReady] = useState<Ready | null>(null)
 	const current = ready?.opened === opened ? ready : null
+	const openedRef = useLatestRef(onEditorOpened)
 	const editor = current?.editor
 	const spelling = current?.spelling
 	// The font picker's fonts, read once the editor is open.
@@ -357,6 +481,15 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const rootRef = useRef<HTMLDivElement | null>(null)
 	const { width } = useElementSize(wrapper)
 	const [writing, setWriting] = useState(false)
+	// The editing area had focus as a save started: read-only while it writes drops it, so it is given back.
+	const refocusRef = useRef(false)
+	const [setWritingKeepingFocus] = useState(() => (next: boolean): void => {
+		if (next) {
+			refocusRef.current = rootRef.current?.contains(window.document.activeElement) === true
+		}
+
+		setWriting(next)
+	})
 	// The writer refused the document: autosave waits for an explicit save (which can resolve it).
 	const [autosaveHeld, setAutosaveHeld] = useState(false)
 	const [zoomMode, setZoomMode] = useState<"fit" | number>("fit")
@@ -391,7 +524,11 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const [press, setPress] = useState<DocxObjectPress | null>(null)
 	const online = useIsOnline()
 	const onAutosaveRef = useLatestRef(onAutosave)
-	const readOnly = writing || !writable
+	// The user gave the password to modify, or chose to edit a document recommended read-only, this session.
+	const [writeUnlocked, setWriteUnlocked] = useState(false)
+	// Write protection keeps the document view-only until then (a password gates the editor itself too).
+	const writeProtection = writable && !writeUnlocked ? current?.writeProtection : undefined
+	const readOnly = writing || !writable || writeProtection !== undefined
 	const pageWidth = document.pages[0]?.width ?? document.info?.pageWidth ?? 816
 	const sessions = editor?.sessions
 	const dirty = sessions?.some(session => session.snapshot().dirty) === true
@@ -460,12 +597,14 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 
 				const context = openedEditor.body.session.context
 
+				openedRef.current?.()
 				setReady({
 					opened,
 					editor: openedEditor,
 					spelling: created,
 					styles: offeredParagraphStyles(context),
-					theme: themeSwatches(theme => context.resolver.theme?.themeColor(theme))
+					theme: themeSwatches(theme => context.resolver.theme?.themeColor(theme)),
+					writeProtection: writeProtectionOf(context)
 				})
 				docxFontList(context).then(
 					list => {
@@ -492,7 +631,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 			live = false
 			created?.dispose()
 		}
-	}, [opened, t])
+	}, [opened, t, openedRef])
 
 	useEffect(() => {
 		void loadOfficeSettings()
@@ -520,6 +659,23 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		onDirtyChange(dirty)
 	}, [dirty, onDirtyChange])
 
+	// Only where focus fell out of the editor to the page or the overlay around it, not where the user moved it.
+	useEffect(() => {
+		const root = rootRef.current
+
+		if (writing || !refocusRef.current || root === null) {
+			return
+		}
+
+		refocusRef.current = false
+
+		const active = window.document.activeElement
+
+		if (active === null || (!root.contains(active) && active.contains(root))) {
+			handleRef.current?.focus()
+		}
+	}, [writing])
+
 	// The overlay saves through this while the document can be saved.
 	useEffect(() => {
 		if (editor === undefined || !writable) {
@@ -529,7 +685,8 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		saveRef.current = docxSaveSource({
 			host: opened.editing,
 			editor,
-			setWriting,
+			encrypted: encryption !== undefined,
+			setWriting: setWritingKeepingFocus,
 			onSaved: () => {
 				setAutosaveHeld(false)
 			},
@@ -562,7 +719,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 		return () => {
 			saveRef.current = null
 		}
-	}, [editor, writable, opened, saveRef, t])
+	}, [editor, writable, opened, saveRef, t, encryption, setWritingKeepingFocus])
 
 	// Idle autosave: a pause this long after the last edit saves once (selection moves are not edits), once
 	// the user's setting is known (never on the default before the file was read). A document a save started
@@ -720,7 +877,7 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 	const changeMarkup = (mode: DocxMarkupMode): void => {
 		if (editor === undefined) {
 			if (markupInfo(mode).view !== markupInfo(markupMode).view) {
-				setOpened(openEditing(bytes, mode))
+				setOpened(openEditing(bytes, mode, writeUnlocked, encryption))
 				setPress(null)
 			}
 		} else {
@@ -733,6 +890,16 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 
 		setMarkupMode(mode)
 		focusEditor()
+	}
+
+	// A password lifts what the editor opened with: the document opens again unlocked (nothing was edited).
+	const unlockWrite = (): void => {
+		setWriteUnlocked(true)
+
+		if (writeProtection?.password !== undefined) {
+			setOpened(openEditing(bytes, markupMode, true, encryption))
+			setPress(null)
+		}
 	}
 
 	const canReplace = !readOnly && snapshot !== undefined && !snapshot.readOnly
@@ -1060,6 +1227,15 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 				apple={APPLE}
 				execute={execute}
 				viewOnly={viewOnly}
+				encrypted={
+					encryption === undefined
+						? undefined
+						: {
+								integrity: encryptionIntegrity ?? "unchecked",
+								// Saves keep the password only while the session can save (not read-only, nor write-protected).
+								saving: writable && writeProtection === undefined && toolbarSnapshot?.readOnly !== true
+							}
+				}
 				find={{ open: find.open, replace: find.replace, focus: find.focus, controls: findControls }}
 				onFindOpen={openFind}
 				onFindClosed={focusEditor}
@@ -1086,6 +1262,13 @@ export function DocxEditView({ bytes, alt, writable, renamed, onDirtyChange, sav
 				fieldCodes={editor?.fieldCodes === true}
 				{...inputChannel}
 			/>
+			{writeProtection === undefined ? null : (
+				<DocxWriteProtectionBar
+					protection={writeProtection}
+					name={alt}
+					onUnlock={unlockWrite}
+				/>
+			)}
 			{autosaveHeld && settings.autosave ? (
 				<p
 					role="status"

@@ -7,6 +7,9 @@ import { boxOf, centerOf } from "./helpers/geometry"
 import { withScratchDirectory, LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, uploadFiles } from "./helpers/listing"
 import { resolveModKey } from "./helpers/modkey"
 import { trackCspViolations } from "./helpers/csp"
+import { storedPassword, trackPasswordCanary } from "./helpers/passwordCanary"
+import { WORKBOOK_PASSWORD, encryptedWorkbook } from "@/tests/encryptedWorkbookFixtures"
+import { preview } from "@/locales/en/preview"
 
 // The spreadsheet viewer end to end: a real parse in the spreadsheet worker (hucre, and HyperFormula for
 // the recalculation — both of which must run under the app's CSP, which forbids eval), the grid, typing
@@ -15,6 +18,9 @@ import { trackCspViolations } from "./helpers/csp"
 test.describe.configure({ mode: "default" })
 
 const XLS_FIXTURE = fileURLToPath(new URL("../src/tests/fixtures/spreadsheet/budget.xls", import.meta.url))
+// The password-protected workbooks are built at test time (src/tests/encryptedWorkbookFixtures.ts).
+const ENCRYPTED_PASSWORD = WORKBOOK_PASSWORD
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 const CSV_BYTES = Buffer.from("Name;Qty\r\nApples;3\r\nPears;5\r\n", "utf8")
 
@@ -263,4 +269,81 @@ test("an .xls opens read-only and saves as an editable .xlsx beside it", async (
 		await expect(listbox.getByRole("option", { name: nameXlsx })).toBeVisible()
 		await expect(listbox.getByRole("option", { name: xlsRowName })).toBeVisible()
 	})
+})
+
+test("a password-protected xlsx is asked its password, saved sealed and asked again; Excel's default password opens it silently", async ({
+	page
+}) => {
+	const cspViolations = trackCspViolations(page)
+	const canary = trackPasswordCanary(page, ENCRYPTED_PASSWORD)
+	const dialog = page.getByRole("dialog").first()
+	const grid = page.getByRole("grid")
+	const saveButton = page.getByRole("button", { name: "Save", exact: true })
+	const prompt = page.getByRole("dialog", { name: preview.previewDocxPasswordTitle })
+	const badge = page.getByRole("button", { name: preview.previewDocxPasswordProtected })
+
+	async function unlock(password: string): Promise<void> {
+		const field = prompt.getByLabel(preview.previewDocxPasswordLabel, { exact: true })
+
+		await expect(field).toBeFocused({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await field.fill(password)
+		await prompt.getByRole("button", { name: preview.previewDocxPasswordSubmit, exact: true }).click()
+	}
+
+	await withScratchDirectory(page, "preview-spreadsheet-encrypted", async ({ listbox, runId }) => {
+		const encrypted = `e2e-sheet-${runId}-encrypted.xlsx`
+		const silent = `e2e-sheet-${runId}-default.xlsx`
+
+		await uploadFiles(
+			page,
+			[
+				{ name: encrypted, mimeType: XLSX_MIME, buffer: Buffer.from(await encryptedWorkbook("agile")) },
+				{ name: silent, mimeType: XLSX_MIME, buffer: Buffer.from(await encryptedWorkbook("default")) }
+			],
+			listbox
+		)
+
+		// Asked, a wrong password says so; the right one opens it, marked as protected.
+		await listbox.getByRole("option", { name: encrypted }).dblclick()
+		await expect(prompt).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await unlock("wrong")
+		await expect(prompt.getByText(preview.previewDocxPasswordWrong)).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await unlock(ENCRYPTED_PASSWORD)
+		await expect(prompt).toHaveCount(0, { timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await expect(gridCell(grid, 1, 1)).toHaveText("Item", { timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await expect(badge).toBeVisible()
+
+		// Edited and saved without being asked again.
+		await expect(dialog.getByRole("button", { name: "Bold", exact: true })).toBeEnabled({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await typeInto(page, grid, 2, 1, "Sealed edit")
+		await expect(saveButton).toBeEnabled()
+		await saveButton.click()
+		await expect(saveButton).toHaveCount(0, { timeout: LIVE_WRITE_TIMEOUT_MS })
+		await expect(prompt).toHaveCount(0)
+		await page.keyboard.press("Escape")
+		await expect(grid).toHaveCount(0)
+
+		// What the drive now holds is still protected: asked again, it holds the edit.
+		await page.reload()
+		await expect(listbox.getByRole("option", { name: encrypted })).toBeVisible({ timeout: LIVE_WRITE_TIMEOUT_MS })
+		await listbox.getByRole("option", { name: encrypted }).dblclick()
+		await expect(prompt).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await unlock(ENCRYPTED_PASSWORD)
+		await expect(gridCell(grid, 2, 1)).toHaveText("Sealed edit", { timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await page.keyboard.press("Escape")
+		await expect(grid).toHaveCount(0)
+
+		// Excel's default password: no prompt at all.
+		await listbox.getByRole("option", { name: silent }).dblclick()
+		await expect(gridCell(grid, 1, 1)).toHaveText("Item", { timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await expect(badge).toBeVisible()
+		await expect(prompt).toHaveCount(0)
+		await page.keyboard.press("Escape")
+		await expect(grid).toHaveCount(0)
+
+		expect(await storedPassword(page, ENCRYPTED_PASSWORD)).toEqual([])
+	})
+
+	expect(canary.leaks).toEqual([])
+	expect(cspViolations).toEqual([])
 })

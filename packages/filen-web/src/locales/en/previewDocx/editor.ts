@@ -139,5 +139,28 @@ export const previewDocxEditor = {
 	/** Docx editor — context menu item on a field: shows its code instead of its result, or back (Word's Shift+F9) */
 	previewDocxToggleFieldCode: "Toggle field code",
 	/** Docx editor — screen reader description of the document's editing area: Tab works as in Word instead of moving focus, Escape leaves (from a header, footer or note it first goes back to the body text) */
-	previewDocxEditorKeys: "Tab inserts a tab or moves to the next table cell. Press Escape to leave the editor."
+	previewDocxEditorKeys: "Tab inserts a tab or moves to the next table cell. Press Escape to leave the editor.",
+	/** Docx editor — bar above a document Word protects with a password to modify (w:writeProtection): it opens view-only until the password is given */
+	previewDocxWritePassword: "This document needs a password to be edited. You can view it without one.",
+	/** Docx editor — the same bar when the password uses a hash method the app can't check (e.g. MD5): it stays view-only */
+	previewDocxWritePasswordUnsupported:
+		"This document needs a password to be edited, and its password can't be checked here, so it can only be viewed.",
+	/** Docx editor — bar above a document its author recommends opening read-only (Word's "Read-only recommended"), with no password */
+	previewDocxWriteRecommended: "The author recommends opening this document read-only.",
+	/** Docx editor — button in that bar: edit the document anyway, as Word offers */
+	previewDocxWriteEditAnyway: "Edit anyway",
+	/** Docx editor — button in the password bar: asks for the password to modify */
+	previewDocxWriteEnterPassword: "Edit…",
+	/** Docx editor — title of the prompt for a document's password to modify */
+	previewDocxWritePasswordTitle: "Password to edit",
+	/** Docx editor — body of that prompt; name is the file's name */
+	previewDocxWritePasswordBody: "Enter the password to edit “{{name}}”. The document keeps its password.",
+	/** Docx editor — that prompt's submit button and status while the password is checked */
+	previewDocxWritePasswordChecking: "Checking…",
+	/** Docx editor — under that prompt's field after a wrong password; the document stays view-only */
+	previewDocxWritePasswordWrong: "That password isn't right. Try again, or cancel to keep viewing.",
+	/** Docx editor — label of the prompt's password field */
+	previewDocxWritePasswordLabel: "Password",
+	/** Docx editor — submit button of that prompt */
+	previewDocxWritePasswordSubmit: "Edit"
 } as const

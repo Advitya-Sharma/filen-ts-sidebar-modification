@@ -23,7 +23,85 @@ import type { XmlDocument } from "../../core/xml/index"
 import { DocxEngine, type DocxEngineOpen, type DocxEngineServices } from "./engine"
 import type { DocxHost } from "./host"
 import type { DocxOpenOptions } from "./protocol"
+import { isSealedOfficeFile } from "../../core/encryption/index"
+import { PackageSealError, packageSealer, type PackageSealer, type PackageSealFailure } from "../encryption/seal"
+import { importOfficeKey, type AbortSignalLike, type OfficeKeyTransfer } from "../encryption/webCrypto"
 import { DocxClosedError, inThreadDocxZipper, type DocxZipper, type DocxZipperFactory } from "./save"
+
+// A password-protected document's saves: sealed with the key the document's holder handed over
+// (DocxUnlockedDocument.take), on this thread, in the editor's own chain (a viewer never loads seal code).
+export type DocxSealer = PackageSealer
+export type DocxSealFailure = PackageSealFailure
+export { PackageSealError as DocxSealError, isSealedOfficeFile }
+
+// Where an editor's key comes from: a taken document's key() (protection.ts), asked at the first seal.
+export interface DocxKeySource {
+	key(options?: { readonly signal?: AbortSignalLike }): Promise<OfficeKeyTransfer>
+}
+
+// The sealer for DocxEditingOptions.encryption. Its first seal asks `source` for the key (a Standard source's
+// upgrade spin runs then, where the document is held, while editing goes on) and registers it here; a save waits
+// for it, so nothing is handed out unsealed. release() drops the key on this thread (the editor closed).
+export function docxSealer(source: DocxKeySource): { readonly sealer: DocxSealer; release(): void } {
+	let released = false
+	let held: Promise<{ readonly sealer: PackageSealer; release(): void }> | undefined
+
+	const sealerOf = (signal: AbortSignalLike | undefined): Promise<{ readonly sealer: PackageSealer; release(): void }> => {
+		held ??= source.key(signal === undefined ? {} : { signal }).then(
+			key => {
+				const imported = packageSealer(importOfficeKey(key))
+
+				// Released while the key was on its way: it goes at once.
+				if (released) imported.release()
+
+				return imported
+			},
+			(error: unknown) => {
+				// Asked again by the next seal.
+				held = undefined
+
+				throw error
+			}
+		)
+
+		return held
+	}
+
+	return {
+		sealer: {
+			get released() {
+				return released
+			},
+			async seal(zip, options = {}) {
+				if (released) throw new PackageSealError("released", "The package's key was released")
+
+				let imported: { readonly sealer: PackageSealer }
+
+				try {
+					imported = await sealerOf(options.signal)
+				} catch (error) {
+					if (released) throw new PackageSealError("released", "The package's key was released")
+					if (options.signal?.aborted === true) throw new PackageSealError("aborted", "The seal was aborted")
+
+					throw new PackageSealError("check", error instanceof Error ? error.message : String(error))
+				}
+
+				if (released) throw new PackageSealError("released", "The package's key was released")
+
+				return imported.sealer.seal(zip, options)
+			}
+		},
+		release() {
+			if (released) return
+
+			released = true
+			void held?.then(
+				imported => imported.release(),
+				() => undefined
+			)
+		}
+	}
+}
 
 // Editing runs on the thread that shows the pages (web main thread, mobile WebView), with the model, the
 // layout and the editing session in one realm: no model copy, no mirroring protocol, one code path for
@@ -41,7 +119,9 @@ export interface DocxEditingHost {
 	// write some blocks as last saved): the lossless writer and the part half of gate 2 in slices on this
 	// thread, then the zip and its half of gate 2 in the zipper (DocxEditingOptions.writer). The editor must
 	// not change the documents meanwhile (they are read once, as the save starts). Rejects with a
-	// DocxSaveError when the writer refuses, with a DocxClosedError when the document closed first.
+	// DocxSaveError when the writer refuses, with a DocxClosedError when the document closed first. An encrypted
+	// document's file is then sealed and checked (DocxEditingOptions.encryption); a failure there rejects with a
+	// DocxSealError, nothing handed out.
 	save(sessions?: readonly DocxEditorSession[]): Promise<DocxWritten>
 	// The writer and the part half of gate 2 alone, in slices (nothing zipped or stored): whether, and what,
 	// a save of `sessions` would write.
@@ -62,9 +142,13 @@ export interface DocxEditingHost {
 }
 
 export interface DocxWritten {
+	// The file to store: for an encrypted document the sealed compound file, never the package itself.
 	readonly bytes: Uint8Array
+	// Sealed with the document's password (DocxEditingOptions.encryption).
+	readonly encrypted: boolean
 	readonly changedParts: readonly string[]
-	readonly timings: DocxSaveTimings
+	// sealMs: sealing and its check, for an encrypted document.
+	readonly timings: DocxSaveTimings & { readonly sealMs?: number }
 }
 
 export interface DocxEditingOptions {
@@ -79,6 +163,12 @@ export interface DocxEditingOptions {
 	// The writer for save() and prepare() (prepareDocxSave, injected like the proof), and where saves zip the
 	// file (default: on this thread; web passes a worker's, docxZipWorker). Without it the host cannot save.
 	readonly writer?: DocxEditingWriter
+	// The document's password to modify was given (edit/protection.ts gateLifted): its write protection does
+	// not make it view-only for this session.
+	readonly writeUnlocked?: boolean
+	// The document was opened from a password-protected file (docxSealer): every save is sealed with its key
+	// after the zip and its Gate 2, and checked, before the bytes are handed out.
+	readonly encryption?: DocxSealer
 }
 
 export interface DocxEditingWriter {
@@ -288,7 +378,17 @@ export function inThreadEditingHost(
 
 		if (writing === undefined) throw new DocxClosedError()
 
-		const zipped = await writing.zipper.zip(prepared)
+		const { slicing, zipper } = writing
+		const zipped = await zipper.zip(prepared)
+		const sealer = editing.encryption
+		const sealing = slicing.now()
+		const bytes = sealer === undefined ? zipped.bytes : await sealer.seal(zipped.bytes, { slicing })
+		const sealMs = slicing.now() - sealing
+
+		// A zip must never leave an encrypted document's save.
+		if (sealer !== undefined && !isSealedOfficeFile(bytes))
+			throw new PackageSealError("check", "An encrypted document's save is not sealed")
+
 		const live = saveInput
 
 		// Pictures no story (nor its undo history) can bring back are dropped from memory.
@@ -300,13 +400,15 @@ export function inThreadEditingHost(
 			)
 
 		return {
-			bytes: zipped.bytes,
+			bytes,
+			encrypted: sealer !== undefined,
 			changedParts: zipped.changedParts,
 			timings: {
 				serializeMs: prepared.serializeMs,
 				verifyPartsMs: prepared.verifyPartsMs,
 				zipMs: zipped.zipMs,
-				verifyZipMs: zipped.verifyZipMs
+				verifyZipMs: zipped.verifyZipMs,
+				...(sealer === undefined ? {} : { sealMs })
 			}
 		}
 	}
@@ -355,7 +457,8 @@ export function inThreadEditingHost(
 				...(open.styles === undefined ? {} : { styles: open.styles }),
 				...(open.numbering === undefined ? {} : { numbering: open.numbering }),
 				resolver: open.resolver,
-				...(editing.clock === undefined ? {} : { clock: editing.clock })
+				...(editing.clock === undefined ? {} : { clock: editing.clock }),
+				...(editing.writeUnlocked === true ? { writeUnlocked: true } : {})
 			})
 
 			// The name as it is now (setAuthor may have changed it since the host was made).

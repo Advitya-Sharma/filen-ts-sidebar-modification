@@ -33,6 +33,10 @@ const pool = docxWorkerPool(() => {
 
 export const docxHost = pool.host
 
+// Password-protected files: probed, unlocked and held in the same worker, so neither the password spin nor the
+// decrypted package is on the page (an editor takes its own copy).
+export const docxProtection = pool.protection
+
 // Starts the worker while a document still downloads, so its script is parsed by the time the bytes arrive.
 export function prewarmDocxWorker(): void {
 	pool.prewarm()

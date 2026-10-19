@@ -4,7 +4,11 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { type DriveItem } from "@/features/drive/lib/item"
 import { stableUuidOf } from "@/features/drive/store/useDriveClipboardStore"
-import { PreviewErrorState, PreviewLoading } from "@/features/preview/components/previewErrorState"
+import { driveItemName } from "@filen/shared"
+import { PreviewDownloadButton, PreviewErrorState, PreviewLoading } from "@/features/preview/components/previewErrorState"
+import { DocxPasswordGate } from "@/features/preview/components/docxPasswordPrompt"
+import { PasswordBadge, type PasswordIntegrity } from "@/features/preview/components/docxToolbar"
+import { docxRefusalKey } from "@/features/preview/components/docxViewer.logic"
 import { FormatToolbar } from "@/features/spreadsheet/components/formatToolbar"
 import { SheetGrid } from "@/features/spreadsheet/components/sheetGrid"
 import { SheetTabs } from "@/features/spreadsheet/components/sheetTabs"
@@ -45,6 +49,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { Button } from "@/components/ui/button"
 import { ConfirmDialog } from "@/components/dialogs/confirmDialog"
 import { saveAsXlsx } from "@/features/spreadsheet/lib/saveAsXlsx"
+import { assertSealedUpload } from "@/features/spreadsheet/lib/xlsxEncryption"
 
 // The overlay's handle on the open file's bytes as edited, read when it saves: an open cell entry is
 // committed first, and the bytes come after every edit already made. `commit` marks them saved once
@@ -187,12 +192,14 @@ function SpreadsheetBody({
 	onDirtyChange,
 	saveRef,
 	layerKey,
-	onSaveAsXlsx
+	onSaveAsXlsx,
+	encrypted
 }: {
 	id: number
 	doc: GridDoc
 	updateDoc: (update: (doc: GridDoc) => GridDoc) => void
-	// The file as opened, which proving it reads.
+	// The file as opened, which proving it reads (a protected workbook's is sealed: the worker proves it from
+	// its plaintext).
 	bytes: Uint8Array
 	alt: string
 	editable: boolean
@@ -205,6 +212,9 @@ function SpreadsheetBody({
 	layerKey: LayerKey
 	// An .xls the user may write beside: converts it to an .xlsx next to it. Resolves once done or failed.
 	onSaveAsXlsx: (() => Promise<void>) | undefined
+	// A password-protected workbook, opened with its password (its saves are sealed with it), and whether its
+	// integrity was verified.
+	encrypted: PasswordIntegrity | undefined
 }) {
 	const { t } = useTranslation(["preview", "common"])
 	// Loaded whatever the file: CSV shifts reach it from the edits below, and only a workbook proven
@@ -217,7 +227,13 @@ function SpreadsheetBody({
 	// made): the proof is costly, and most files are only looked at.
 	const [editIntent, setEditIntent] = useState(false)
 	// A file without a spreadsheet extension is never edited, whatever it may say.
-	const writability = useSpreadsheetWritability(id, doc, bytes, editable && !unnamed && editIntent, neverEditable || unnamed)
+	const writability = useSpreadsheetWritability(
+		id,
+		doc,
+		encrypted === undefined ? bytes : null,
+		editable && !unnamed && editIntent,
+		neverEditable || unnamed
+	)
 	const mayEdit = editable && !unnamed && !renamed
 	// Edits made before the verdict wait for it in the worker, which refuses them if the proof fails.
 	const canEdit = mayEdit && (writability === "writable" || writability === "unproven" || writability === "checking")
@@ -607,7 +623,14 @@ function SpreadsheetBody({
 	async function save(): Promise<SpreadsheetSnapshot> {
 		commit("none")
 
-		return edits.snapshot()
+		const snapshot = await edits.snapshot()
+
+		// The worker sealed it; a protected workbook never uploads anything else.
+		if (encrypted !== undefined) {
+			assertSealedUpload(snapshot.bytes)
+		}
+
+		return snapshot
 	}
 
 	useEffect(() => {
@@ -816,6 +839,12 @@ function SpreadsheetBody({
 					>
 						{shownNote}
 					</span>
+				)}
+				{encrypted === undefined ? null : (
+					<PasswordBadge
+						integrity={encrypted}
+						saving={canEdit}
+					/>
 				)}
 				{onSaveAsXlsx === undefined ? null : (
 					<Button
@@ -1031,6 +1060,28 @@ export function SpreadsheetViewer({
 					{t("previewSpreadsheetUnreadable")}
 				</div>
 			)
+		// A protected workbook is refused, or asked its password, in the words a Word document is.
+		case "refused":
+			return (
+				<PreviewErrorState
+					message={t(docxRefusalKey(state.reason))}
+					action={<PreviewDownloadButton />}
+				/>
+			)
+		case "locked":
+			return (
+				<DocxPasswordGate
+					title={t("previewDocxPasswordTitle")}
+					body={t("previewDocxPasswordBody", { name: driveItemName(item) })}
+					wrongMessage={t("previewDocxPasswordWrong")}
+					label={t("previewDocxPasswordLabel")}
+					submitLabel={t("previewDocxPasswordSubmit")}
+					progressLabel={t("previewDocxPasswordUnlocking")}
+					message={t("previewDocxNeedsPassword")}
+					enterLabel={t("previewDocxEnterPassword")}
+					verify={state.verify}
+				/>
+			)
 		case "ready":
 			return state.doc.sheets.length === 0 ? (
 				<div className="flex size-full items-center justify-center text-sm text-muted-foreground">
@@ -1051,6 +1102,7 @@ export function SpreadsheetViewer({
 					neverEditable={neverEditable === true}
 					onDirtyChange={onDirtyChange}
 					saveRef={saveRef}
+					encrypted={state.encrypted}
 					layerKey={layerKeyFor(stableUuidOf(item), documentKey)}
 					onSaveAsXlsx={
 						state.doc.kind === "xls" && canSaveCopy === true

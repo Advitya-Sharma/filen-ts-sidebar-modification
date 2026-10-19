@@ -12,6 +12,8 @@
 	"sideEffects": false,
 	"exports": {
 		"./core/opc": "./src/core/opc/index.ts",
+		"./core/cfb": "./src/core/cfb/index.ts",
+		"./core/encryption": "./src/core/encryption/index.ts",
 		"./core/xml": "./src/core/xml/index.ts",
 		"./core/fonts": "./src/core/fonts/index.ts",
 		"./core/docx": "./src/core/docx/index.ts",
@@ -20,6 +22,9 @@
 		"./core/math": "./src/core/math/index.ts",
 		"./core/text": "./src/core/text/index.ts",
 		"./dom": "./src/dom/index.ts",
+		"./dom/encryption": "./src/dom/encryption/index.ts",
+		"./dom/encryption/seal": "./src/dom/encryption/seal.ts",
+		"./testing/encryption": "./src/tests/encryption/testing.ts",
 		"./assets/fonts/*": "./assets/fonts/*",
 		"./dom/docx": "./src/dom/docx/index.ts",
 		"./react/docx": "./src/react/docx/index.ts",

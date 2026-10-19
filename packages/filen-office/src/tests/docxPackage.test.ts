@@ -1,5 +1,6 @@
 import { strToU8, unzipSync, zipSync } from "fflate"
 import { describe, expect, it } from "vitest"
+import { cfbBytes } from "@filen/office/core/cfb"
 import { bytesSource } from "@filen/office/core/opc"
 import { buildDocxModel, gateReasons, openDocxPackage, relationshipKind, type DocxFacts } from "@filen/office/core/docx"
 import { buildDocx, openSynthetic, p } from "./docxSynthetic"
@@ -10,42 +11,9 @@ async function open(bytes: Uint8Array) {
 	return openDocxPackage(bytesSource(bytes))
 }
 
-// A minimal MS-CFB file (512-byte sectors): header, one directory sector, one FAT sector.
-function compoundFile(names: readonly string[]): Uint8Array {
-	const bytes = new Uint8Array(512 * 3)
-	const view = new DataView(bytes.buffer)
-
-	;[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1].forEach((byte, k) => (bytes[k] = byte))
-	view.setUint16(0x1a, 0x3e, true)
-	view.setUint16(0x1c, 0xfffe, true)
-	view.setUint16(0x1e, 9, true)
-	view.setUint16(0x20, 6, true)
-	view.setUint32(0x2c, 1, true)
-	view.setUint32(0x30, 0, true)
-	view.setUint32(0x44, 0xfffffffe, true)
-
-	for (let k = 0; k < 109; k++) view.setUint32(0x4c + k * 4, k === 0 ? 1 : 0xffffffff, true)
-
-	const directory = 512
-	const entries = ["Root Entry", ...names]
-
-	entries.slice(0, 4).forEach((name, index) => {
-		const at = directory + index * 128
-
-		for (let k = 0; k < name.length; k++) view.setUint16(at + k * 2, name.charCodeAt(k), true)
-
-		view.setUint16(at + 0x40, (name.length + 1) * 2, true)
-		view.setUint8(at + 0x42, index === 0 ? 5 : 2)
-	})
-
-	const fat = 1024
-
-	view.setUint32(fat, 0xfffffffe, true)
-	view.setUint32(fat + 4, 0xfffffffd, true)
-
-	for (let k = 2; k < 128; k++) view.setUint32(fat + k * 4, 0xffffffff, true)
-
-	return bytes
+// A compound file holding a small stream of each name (the package's own CFB writer).
+function compoundFile(names: readonly string[]): Promise<Uint8Array> {
+	return cfbBytes(names.map(name => ({ path: name.split("/"), bytes: new Uint8Array(16).fill(7) })))
 }
 
 function facts(overrides: Partial<DocxFacts>): DocxFacts {
@@ -176,60 +144,40 @@ describe("openDocxPackage", () => {
 	})
 
 	it("tells encrypted documents from legacy binaries and other compound files", async () => {
-		expect(await open(compoundFile(["EncryptionInfo", "EncryptedPackage"]))).toMatchObject({ ok: false, reason: "encrypted" })
-		expect(await open(compoundFile(["WordDocument", "1Table"]))).toMatchObject({ ok: false, reason: "legacyBinary" })
-		expect(await open(compoundFile(["Something"]))).toMatchObject({ ok: false, reason: "compoundFile" })
+		expect(await open(await compoundFile(["EncryptionInfo", "EncryptedPackage"]))).toMatchObject({ ok: false, reason: "encrypted" })
+		expect(await open(await compoundFile(["WordDocument", "1Table"]))).toMatchObject({ ok: false, reason: "legacyBinary" })
+		expect(await open(await compoundFile(["Something"]))).toMatchObject({ ok: false, reason: "compoundFile" })
+		// The package is checked first: Word 2007 and POI leave a WordDocument stream (and an ObjectPool) beside it.
+		expect(await open(await compoundFile(["WordDocument", "ObjectPool/x", "EncryptionInfo", "EncryptedPackage"]))).toMatchObject({
+			ok: false,
+			reason: "encrypted"
+		})
+		// Rights management describes the package by its DataSpaces alone.
+		expect(await open(await compoundFile(["\u0006DataSpaces/DataSpaceMap", "EncryptedPackage"]))).toMatchObject({
+			ok: false,
+			reason: "encrypted"
+		})
+		expect(await open(await compoundFile(["EncryptedPackage"]))).toMatchObject({ ok: false, reason: "compoundFile" })
+		expect(await open(await compoundFile(["EncryptionInfo/EncryptedPackage", "EncryptedPackage/x"]))).toMatchObject({
+			ok: false,
+			reason: "compoundFile"
+		})
 
-		const truncated = compoundFile(["EncryptionInfo"]).subarray(0, 600)
+		const truncated = (await compoundFile(["EncryptionInfo"])).subarray(0, 600)
 
 		expect(await open(truncated)).toMatchObject({ ok: false, reason: "compoundFile" })
 	})
 
-	it("follows DIFAT sectors to find a directory far into a large compound file", async () => {
-		const sectorSize = 512
-		const directorySector = 14000
-		const difatSector = 200
-		const fatSector = 201
-		const sectors = new Map<number, Uint8Array>()
-		const header = new Uint8Array(sectorSize)
-		const headerView = new DataView(header.buffer)
+	it("finds the package in a compound file whose FAT runs past the header's 109 DIFAT slots", async () => {
+		// 8 MiB of 512-byte sectors need more FAT sectors than the header lists: the rest come from DIFAT sectors.
+		const bytes = await cfbBytes([
+			{ path: ["Filler"], bytes: new Uint8Array(8 * 1024 * 1024) },
+			{ path: ["EncryptionInfo"], bytes: new Uint8Array(16) },
+			{ path: ["EncryptedPackage"], bytes: new Uint8Array(16) }
+		])
 
-		;[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1].forEach((byte, k) => (header[k] = byte))
-		headerView.setUint16(0x1e, 9, true)
-		headerView.setUint32(0x30, directorySector, true)
-		headerView.setUint32(0x44, difatSector, true)
-		headerView.setUint32(0x48, 1, true)
-
-		for (let k = 0; k < 109; k++) headerView.setUint32(0x4c + k * 4, 0xffffffff, true)
-
-		const difat = new Uint8Array(sectorSize)
-
-		new DataView(difat.buffer).setUint32(0, fatSector, true)
-		new DataView(difat.buffer).setUint32(sectorSize - 4, 0xfffffffe, true)
-		sectors.set(difatSector, difat)
-
-		const fat = new Uint8Array(sectorSize)
-
-		// The directory spans two sectors; the stream names sit in the second, reached only through the FAT.
-		new DataView(fat.buffer).setUint32((directorySector % 128) * 4, directorySector + 1, true)
-		new DataView(fat.buffer).setUint32(((directorySector + 1) % 128) * 4, 0xfffffffe, true)
-		sectors.set(fatSector, fat)
-		sectors.set(directorySector, compoundFile(["Filler1", "Filler2", "Filler3"]).subarray(512, 1024))
-		sectors.set(directorySector + 1, compoundFile(["EncryptionInfo", "EncryptedPackage", "Filler4"]).subarray(512, 1024))
-
-		const size = (directorySector + 3) * sectorSize
-		const source = {
-			size,
-			read(offset: number, length: number): Promise<Uint8Array> {
-				if (offset === 0) return Promise.resolve(header.subarray(0, length))
-
-				const sector = offset / sectorSize - 1
-
-				return Promise.resolve(sectors.get(sector)?.subarray(0, length) ?? new Uint8Array(length))
-			}
-		}
-
-		expect(await openDocxPackage(source)).toMatchObject({ ok: false, reason: "encrypted" })
+		expect(new DataView(bytes.buffer).getUint32(0x48, true)).toBeGreaterThan(0)
+		expect(await open(bytes)).toMatchObject({ ok: false, reason: "encrypted" })
 	})
 
 	it("opens view-only, not failing, when settings do not parse", async () => {

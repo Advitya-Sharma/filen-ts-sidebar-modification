@@ -3,3 +3,7 @@
 export function DocxEditView(): null {
 	return null
 }
+
+export function DocxProtectedEditView(): null {
+	return null
+}

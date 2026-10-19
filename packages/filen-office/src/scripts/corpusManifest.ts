@@ -15,6 +15,11 @@ interface SourceFile {
 	file: string
 	sha256: string
 	size: number
+	// The published fixture password of an encrypted file, from the source repository's own test data.
+	password?: string
+	// The published password to modify or unprotect of a file whose w:writeProtection or w:documentProtection
+	// carries a hash (the file itself opens without one).
+	modifyPassword?: string
 	source: {
 		collection: string
 		url: string
@@ -98,6 +103,10 @@ export interface CorpusFile {
 	url: string
 	// The publication page of a GOV.UK attachment, for attribution.
 	page?: string
+	// The published fixture password of an encrypted file (the encryption oracles and known-answer tests use it).
+	password?: string
+	// The published password of a w:writeProtection or w:documentProtection hash (known-answer tests).
+	modifyPassword?: string
 }
 
 export interface CorpusManifest {
@@ -242,7 +251,9 @@ function main(): void {
 			source: collection,
 			licence,
 			url,
-			...(entry.source.pageUrl !== undefined && { page: entry.source.pageUrl })
+			...(entry.source.pageUrl !== undefined && { page: entry.source.pageUrl }),
+			...(entry.password !== undefined && { password: entry.password }),
+			...(entry.modifyPassword !== undefined && { modifyPassword: entry.modifyPassword })
 		})
 
 		const { sha256: _sha256, size: _size, ext: _ext, container, ...rest } = entry.catalogue

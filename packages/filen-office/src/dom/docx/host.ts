@@ -1,6 +1,9 @@
-import type { ByteSource } from "../../core/opc/index"
+import { bytesSource, type ByteSource } from "../../core/opc/index"
+import type { OfficeKeyTransfer } from "../encryption/webCrypto"
 import { DocxEngine, type DocxEngineServices } from "./engine"
 import type { DocxAnnotations } from "./annotations"
+import { heldSource, type DocxDocumentUnlock, type DocxProtectedOpen, type DocxProtection, type DocxProtectionOptions } from "./protection"
+import { docxProtectionServer, type DocxProtectVerdict, type DocxUnlockAnswer } from "./protectionWorker"
 import type { DocxEvent, DocxFindOptions, DocxSessionApi, DocxLocation, DocxMedia, DocxObjectData, DocxOpenOptions } from "./protocol"
 
 // Two ways to run the engine behind the same DocxSessionApi: in a worker (web), talking over a small
@@ -51,8 +54,17 @@ export function macrotaskYield(): () => Promise<void> {
 type Method = "objects" | "media" | "locate" | "find" | "annotations"
 
 // `s`: the session (one open document) a message belongs to.
+// A password-protected file (protection.ts) is a session of its own: "protect" classifies it from reads of the
+// page's bytes, "unlock" and "take" are calls on it, and an engine session opens its decrypted package with
+// `doc` (no reads from the page).
 type ToWorker =
-	| { readonly t: "open"; readonly s: number; readonly size: number; readonly options: DocxOpenOptions }
+	| { readonly t: "open"; readonly s: number; readonly size: number; readonly options: DocxOpenOptions; readonly doc?: number }
+	| { readonly t: "protect"; readonly s: number; readonly size: number }
+	| { readonly t: "unlock"; readonly s: number; readonly id: number; readonly password: string }
+	| { readonly t: "take"; readonly s: number; readonly id: number }
+	| { readonly t: "key"; readonly s: number; readonly id: number }
+	| { readonly t: "drop"; readonly s: number }
+	| { readonly t: "abort"; readonly s: number; readonly id: number }
 	| { readonly t: "read"; readonly s: number; readonly id: number; readonly bytes?: Uint8Array; readonly error?: string }
 	| {
 			readonly t: "call"
@@ -68,6 +80,16 @@ type FromWorker =
 	| { readonly t: "event"; readonly s: number; readonly event: DocxEvent }
 	| { readonly t: "read"; readonly s: number; readonly id: number; readonly offset: number; readonly length: number }
 	| { readonly t: "result"; readonly s: number; readonly id: number; readonly value?: unknown; readonly error?: string }
+	| { readonly t: "protected"; readonly s: number; readonly verdict?: DocxProtectVerdict; readonly error?: string }
+	| { readonly t: "unlocked"; readonly s: number; readonly id: number; readonly answer?: DocxUnlockAnswer; readonly error?: string }
+	| {
+			readonly t: "taken"
+			readonly s: number
+			readonly id: number
+			readonly bytes?: Uint8Array
+			readonly key?: OfficeKeyTransfer
+			readonly error?: string
+	  }
 
 function bufferOf(bytes: ArrayBufferView): ArrayBuffer | undefined {
 	return bytes.buffer instanceof ArrayBuffer ? bytes.buffer : undefined
@@ -110,6 +132,23 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 	const post = (message: FromWorker, transfer: readonly ArrayBuffer[] = []): void => {
 		scope.post(message, transfer)
 	}
+	const protection = docxProtectionServer()
+	// Reads of the page's bytes for a protected file being classified or unlocked.
+	const protectReads = new Map<number, { reads: WorkerSession["reads"]; nextRead: number }>()
+	const pageSource = (id: number, size: number, reads: { reads: WorkerSession["reads"]; nextRead: number }): ByteSource => ({
+		size,
+		read(offset, length) {
+			if (!protectReads.has(id)) return Promise.reject(new Error("closed"))
+
+			const read = reads.nextRead++
+
+			return new Promise((resolve, reject) => {
+				reads.reads.set(read, { resolve, reject })
+				post({ t: "read", s: id, id: read, offset, length })
+			})
+		}
+	})
+	const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 	scope.listen(data => {
 		if (!isRecord(data) || typeof data["s"] !== "number") return
@@ -121,21 +160,32 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 			case "open": {
 				if (sessions.has(id) || typeof message.size !== "number") return
 
+				// An engine on a held document's decrypted package reads it here.
+				const held = typeof message.doc === "number" ? protection.plaintext(message.doc) : undefined
+
+				if (typeof message.doc === "number" && held === undefined) {
+					post({ t: "event", s: id, event: { type: "error", reason: "failed", message: "The document is no longer unlocked" } })
+
+					return
+				}
+
 				const session: WorkerSession = {
 					engine: new DocxEngine(
-						{
-							size: message.size,
-							read(offset, length) {
-								if (session.engine.closed) return Promise.reject(new Error("closed"))
+						held !== undefined
+							? bytesSource(held)
+							: {
+									size: message.size,
+									read(offset, length) {
+										if (session.engine.closed) return Promise.reject(new Error("closed"))
 
-								const read = session.nextRead++
+										const read = session.nextRead++
 
-								return new Promise((resolve, reject) => {
-									session.reads.set(read, { resolve, reject })
-									post({ t: "read", s: id, id: read, offset, length })
-								})
-							}
-						},
+										return new Promise((resolve, reject) => {
+											session.reads.set(read, { resolve, reject })
+											post({ t: "read", s: id, id: read, offset, length })
+										})
+									}
+								},
 						services(message.options),
 						(event, transfer) => post({ t: "event", s: id, event }, transfer),
 						message.options
@@ -149,8 +199,78 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 
 				break
 			}
+			case "protect": {
+				if (protectReads.has(id) || sessions.has(id) || typeof message.size !== "number") return
+
+				const reads = { reads: new Map() as WorkerSession["reads"], nextRead: 1 }
+
+				protectReads.set(id, reads)
+				protection.protect(id, pageSource(id, message.size, reads)).then(
+					verdict => {
+						if (verdict.kind !== "needsPassword") protectReads.delete(id)
+
+						post({ t: "protected", s: id, verdict })
+					},
+					(error: unknown) => {
+						protectReads.delete(id)
+						protection.close(id)
+						post({ t: "protected", s: id, error: messageOf(error) })
+					}
+				)
+
+				break
+			}
+			case "unlock": {
+				const call = message.id
+
+				protection.unlock(id, call, typeof message.password === "string" ? message.password : "").then(
+					answer => {
+						// The page's bytes are no longer needed once the package is decrypted.
+						if (answer.ok) protectReads.delete(id)
+
+						post({ t: "unlocked", s: id, id: call, answer })
+					},
+					(error: unknown) => post({ t: "unlocked", s: id, id: call, error: messageOf(error) })
+				)
+
+				break
+			}
+			case "take": {
+				const call = message.id
+				let bytes: Uint8Array
+
+				try {
+					bytes = protection.take(id)
+				} catch (error) {
+					post({ t: "taken", s: id, id: call, error: messageOf(error) })
+
+					break
+				}
+
+				post({ t: "taken", s: id, id: call, bytes }, bufferOf(bytes) === undefined ? [] : [bytes.buffer as ArrayBuffer])
+
+				break
+			}
+			case "key": {
+				const call = message.id
+
+				protection.key(id, call).then(
+					key => post({ t: "taken", s: id, id: call, key }),
+					(error: unknown) => post({ t: "taken", s: id, id: call, error: messageOf(error) })
+				)
+
+				break
+			}
+			case "drop":
+				protection.drop(id)
+
+				break
+			case "abort":
+				protection.abort(id, message.id)
+
+				break
 			case "read": {
-				const session = sessions.get(id)
+				const session = sessions.get(id) ?? protectReads.get(id)
 				const pending = session?.reads.get(message.id)
 
 				session?.reads.delete(message.id)
@@ -221,6 +341,14 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 				break
 			}
 			case "close": {
+				const reads = protectReads.get(id)
+
+				protectReads.delete(id)
+
+				for (const pending of reads?.reads.values() ?? []) pending.reject(new Error("closed"))
+
+				if (protection.close(id)) break
+
 				const session = sessions.get(id)
 
 				sessions.delete(id)
@@ -245,6 +373,8 @@ export interface DocxWorkerLike {
 
 export interface DocxWorkerPool {
 	readonly host: DocxHost
+	// Password-protected files, unlocked and held in the worker (protection.ts).
+	readonly protection: DocxProtection
 	// Starts the worker ahead of the first document (its script is parsed while the file downloads).
 	prewarm(): void
 	dispose(): void
@@ -321,7 +451,8 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 		return current
 	}
 
-	const host: DocxHost = (source, listener, options = {}) => {
+	// `doc`: a protected file's session whose decrypted package the worker holds (the engine reads it there).
+	const openSession = (source: ByteSource, listener: DocxListener, options: DocxOpenOptions, doc?: number): DocxSessionApi => {
 		const current = connect()
 		const id = nextSession++
 		const worker = current.worker
@@ -406,7 +537,7 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 				}
 			}
 		})
-		worker.post({ t: "open", s: id, size: source.size, options } satisfies ToWorker, [])
+		worker.post({ t: "open", s: id, size: source.size, options, ...(doc === undefined ? {} : { doc }) } satisfies ToWorker, [])
 
 		const call = <T>(method: Method, arg: unknown, callOptions?: unknown): Promise<T> => {
 			if (closed) return Promise.reject(new Error("closed"))
@@ -428,9 +559,14 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 			close
 		}
 	}
+	const host: DocxHost = (source, listener, options = {}) => openSession(source, listener, options)
+	const protection: DocxProtection = {
+		open: (source, options = {}) => openProtected(connect, () => nextSession++, scheduleIdle, openSession, source, options)
+	}
 
 	return {
 		host,
+		protection,
 		prewarm() {
 			scheduleIdle(connect())
 		},
@@ -448,6 +584,223 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 			current.worker.terminate()
 		}
 	}
+}
+
+const SIGNAL_POLL_MS = 10
+
+// The page's side of a protected file in the worker: reads of `source` answered while it is classified and
+// unlocked, then calls on the held document. Its session keeps the worker alive until released.
+function openProtected(
+	connect: () => Connection,
+	nextId: () => number,
+	scheduleIdle: (connection: Connection) => void,
+	openSession: (source: ByteSource, listener: DocxListener, options: DocxOpenOptions, doc?: number) => DocxSessionApi,
+	source: ByteSource,
+	options: DocxProtectionOptions
+): Promise<DocxProtectedOpen> {
+	if (options.signal?.aborted === true) return Promise.resolve({ kind: "aborted" })
+
+	const current = connect()
+	const id = nextId()
+	const worker = current.worker
+	let closed = false
+	let nextCall = 1
+	let probed: { resolve: (verdict: DocxProtectVerdict) => void; reject: (error: Error) => void } | undefined
+	const calls = new Map<number, { resolve: (message: FromWorker) => void; reject: (error: Error) => void }>()
+	const end = (error: Error): void => {
+		if (closed) return
+
+		closed = true
+		current.sessions.delete(id)
+		current.failures.delete(id)
+		probed?.reject(error)
+
+		for (const pending of calls.values()) pending.reject(error)
+
+		calls.clear()
+		scheduleIdle(current)
+	}
+	const close = (): void => {
+		if (closed) return
+
+		worker.post({ t: "close", s: id } satisfies ToWorker, [])
+		end(new Error("closed"))
+	}
+	// One call on the held document; an abort of `signal` asks the worker to stop it.
+	// One call on the held document; an abort of `signal` asks the worker to stop it (a signal without events is
+	// looked at every SIGNAL_POLL_MS).
+	const call = (message: (callId: number) => ToWorker, signal: DocxProtectionOptions["signal"]): Promise<FromWorker> => {
+		if (closed) return Promise.reject(new Error("closed"))
+
+		const callId = nextCall++
+		let stopped = false
+		let poll: unknown
+		const stop = (): void => {
+			if (stopped || closed) return
+
+			stopped = true
+			worker.post({ t: "abort", s: id, id: callId } satisfies ToWorker, [])
+		}
+		const look = (): void => {
+			poll = undefined
+
+			if (signal?.aborted === true) stop()
+			else if (!stopped && calls.has(callId)) poll = setTimer(look, SIGNAL_POLL_MS)
+		}
+
+		if (signal?.addEventListener !== undefined) signal.addEventListener("abort", stop)
+
+		return new Promise<FromWorker>((resolve, reject) => {
+			calls.set(callId, { resolve, reject })
+			worker.post(message(callId), [])
+
+			if (signal?.aborted === true) stop()
+			else if (signal !== undefined && signal.addEventListener === undefined) poll = setTimer(look, SIGNAL_POLL_MS)
+		}).finally(() => {
+			signal?.removeEventListener?.("abort", stop)
+
+			if (poll !== undefined) clearTimer(poll)
+		})
+	}
+
+	current.failures.set(id, () => end(new Error("The document worker failed")))
+	current.sessions.set(id, message => {
+		if (closed) return
+
+		switch (message.t) {
+			case "read":
+				source.read(message.offset, message.length).then(
+					view => {
+						if (closed) return
+
+						const copy = view.slice()
+
+						worker.post({ t: "read", s: id, id: message.id, bytes: copy } satisfies ToWorker, [copy.buffer])
+					},
+					(error: unknown) => {
+						if (!closed)
+							worker.post(
+								{
+									t: "read",
+									s: id,
+									id: message.id,
+									error: error instanceof Error ? error.message : String(error)
+								} satisfies ToWorker,
+								[]
+							)
+					}
+				)
+
+				break
+			case "protected":
+				if (message.verdict === undefined) probed?.reject(new Error(message.error ?? "The protection check failed"))
+				else probed?.resolve(message.verdict)
+
+				probed = undefined
+
+				break
+			case "unlocked":
+			case "taken": {
+				const pending = calls.get(message.id)
+
+				calls.delete(message.id)
+				pending?.resolve(message)
+
+				break
+			}
+		}
+	})
+
+	const abortProbe = (): void => close()
+
+	options.signal?.addEventListener?.("abort", abortProbe)
+
+	return new Promise<DocxProtectVerdict>((resolve, reject) => {
+		probed = { resolve, reject }
+		worker.post({ t: "protect", s: id, size: source.size } satisfies ToWorker, [])
+	})
+		.finally(() => options.signal?.removeEventListener?.("abort", abortProbe))
+		.then(
+			verdict => {
+				if (verdict.kind !== "needsPassword" || options.signal?.aborted === true) {
+					close()
+
+					return verdict.kind === "needsPassword" ? { kind: "aborted" } : verdict
+				}
+
+				let unlocked = false
+
+				return {
+					kind: "needsPassword",
+					locked: {
+						scheme: verdict.scheme,
+						spinCount: verdict.spinCount,
+						async unlock(password, unlockOptions = {}): Promise<DocxDocumentUnlock> {
+							if (unlocked) return { ok: false, reason: "aborted" }
+
+							const reply = await call(callId => ({ t: "unlock", s: id, id: callId, password }), unlockOptions.signal)
+
+							if (reply.t !== "unlocked" || reply.answer === undefined)
+								throw new Error(reply.t === "unlocked" ? (reply.error ?? "Unlock failed") : "Unlock failed")
+
+							const answer = reply.answer
+
+							if (!answer.ok) return answer
+
+							unlocked = true
+
+							return {
+								ok: true,
+								document: {
+									scheme: answer.scheme,
+									integrity: answer.integrity,
+									bytes: heldSource(answer.size),
+									host: (held, listener, openOptions = {}) => openSession(held, listener, openOptions, id),
+									async take(takeOptions = {}) {
+										const taken = await call(callId => ({ t: "take", s: id, id: callId }), takeOptions.signal)
+
+										if (taken.t !== "taken" || taken.bytes === undefined)
+											throw new Error(
+												taken.t === "taken"
+													? (taken.error ?? "The document could not be taken")
+													: "The document could not be taken"
+											)
+
+										return {
+											bytes: taken.bytes,
+											async key(keyOptions = {}) {
+												const reply = await call(callId => ({ t: "key", s: id, id: callId }), keyOptions.signal)
+
+												if (reply.t !== "taken" || reply.key === undefined)
+													throw new Error(
+														reply.t === "taken"
+															? (reply.error ?? "The key could not be taken")
+															: "The key could not be taken"
+													)
+
+												return reply.key
+											}
+										}
+									},
+									dropPackage() {
+										if (!closed) worker.post({ t: "drop", s: id } satisfies ToWorker, [])
+									},
+									release: close
+								}
+							}
+						},
+						dispose: close
+					}
+				}
+			},
+			(error: unknown) => {
+				close()
+
+				if (options.signal?.aborted === true) return { kind: "aborted" }
+
+				throw error
+			}
+		)
 }
 
 // A host that runs the engine on the calling thread, yielding between slices. `services` is called per

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { createElement } from "react"
+import { createElement, createRef } from "react"
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { DriveItem } from "@/features/drive/lib/item"
 import type { EditResult } from "@/features/spreadsheet/lib/edits"
@@ -11,7 +11,8 @@ import { mockSheetView } from "@/tests/mockSheetView"
 const BYTES = new Uint8Array([1, 2, 3])
 const NOTHING = { dirty: false, canUndo: false, canRedo: false }
 
-const { remote, toastError, layerUpdate } = vi.hoisted(() => ({
+const { remote, toastError, layerUpdate, openSpreadsheet } = vi.hoisted(() => ({
+	openSpreadsheet: vi.fn(),
 	remote: {
 		apply: vi.fn(),
 		undo: vi.fn(),
@@ -34,13 +35,13 @@ vi.mock("@/features/spreadsheet/hooks/useSizeLayer", () => ({
 }))
 vi.mock(import("@/features/spreadsheet/lib/spreadsheetClient"), async importOriginal => ({
 	...(await importOriginal()),
-	openSpreadsheet: () => Promise.resolve({ id: 1, doc: DOC }),
+	openSpreadsheet,
 	closeSpreadsheet: vi.fn(),
 	withOpenSpreadsheet: (id: number, run: (remote: never, workerId: number) => Promise<unknown>) => run(remote as never, id) as never
 }))
 
 import "@/lib/i18n"
-import { SpreadsheetViewer } from "@/features/spreadsheet/components/spreadsheetViewer"
+import { SpreadsheetViewer, type SpreadsheetSaveSource } from "@/features/spreadsheet/components/spreadsheetViewer"
 
 // Two sheets, A1 holding a value, the second sheet's name "Two".
 const DOC: SpreadsheetDoc = {
@@ -86,6 +87,8 @@ beforeEach(() => {
 
 	remote.writability.mockReturnValue(new Promise(() => undefined))
 	remote.apply.mockResolvedValue({ type: "none", state: NOTHING })
+	openSpreadsheet.mockReset()
+	openSpreadsheet.mockImplementation(() => Promise.resolve({ id: 1, doc: DOC }))
 })
 
 afterEach(() => {
@@ -176,5 +179,126 @@ describe("SpreadsheetViewer editing an unproven workbook", () => {
 			expect(layerUpdate).toHaveBeenCalledWith(0, "cols", [[0, null]])
 		})
 		expect(remote.apply).toHaveBeenCalledWith(1, { type: "resize", sheet: 0, axis: "cols", sizes: [[0, null]] })
+	})
+})
+
+describe("SpreadsheetViewer with a password-protected workbook", () => {
+	const CFB = Uint8Array.of(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0)
+	const ZIP = Uint8Array.of(0x50, 0x4b, 0x03, 0x04, 0)
+
+	function lock() {
+		return { unlock: vi.fn(), cancel: vi.fn(), discard: vi.fn() }
+	}
+
+	async function submit(password: string): Promise<void> {
+		fireEvent.change(await screen.findByLabelText("Password"), { target: { value: password } })
+		fireEvent.click(screen.getByRole("button", { name: "Open" }))
+	}
+
+	it("shows the workbook unreadable and gives its lock up when a try fails", async () => {
+		const locked = lock()
+
+		locked.unlock.mockRejectedValueOnce(new Error("spreadsheet: too many cells"))
+		openSpreadsheet.mockResolvedValue({ locked })
+
+		const { unmount } = render(viewer())
+
+		await submit("right")
+		await waitFor(() => {
+			expect(screen.queryByRole("dialog")).toBeNull()
+		})
+		expect(locked.discard).toHaveBeenCalledOnce()
+		unmount()
+		expect(locked.discard).toHaveBeenCalledOnce()
+	})
+
+	it("asks for the password in the workbook's place, says when it is wrong, and opens with the right one", async () => {
+		const locked = lock()
+
+		locked.unlock.mockResolvedValueOnce({ wrongPassword: true }).mockResolvedValueOnce({ id: 1, doc: DOC, encrypted: "verified" })
+		openSpreadsheet.mockResolvedValue({ locked })
+		render(viewer())
+
+		expect(await screen.findByText("This document is password-protected.")).toBeTruthy()
+		expect(screen.getByRole("dialog", { name: "Password-protected document" })).toBeTruthy()
+
+		await submit("wrong")
+		expect(await screen.findByText("That password isn't right. Try again.")).toBeTruthy()
+
+		await submit("right")
+		await screen.findByRole("grid")
+
+		expect(locked.unlock.mock.calls).toEqual([["wrong"], ["right"]])
+		expect(screen.getByRole("button", { name: "Password-protected" })).toBeTruthy()
+		expect(locked.discard).not.toHaveBeenCalled()
+	})
+
+	it("gives up on the lock when the viewer goes, and stops a try the user cancels", async () => {
+		const locked = lock()
+		let answer: (value: unknown) => void = () => undefined
+
+		locked.unlock.mockReturnValueOnce(
+			new Promise(resolve => {
+				answer = resolve
+			})
+		)
+		openSpreadsheet.mockResolvedValue({ locked })
+
+		const { unmount } = render(viewer())
+
+		await submit("slow")
+		fireEvent.click(await screen.findByRole("button", { name: "Cancel" }))
+		expect(locked.cancel).toHaveBeenCalledOnce()
+		answer({ aborted: true })
+
+		unmount()
+		expect(locked.discard).toHaveBeenCalledOnce()
+	})
+
+	it.each([
+		["rightsManaged", "This document is protected with rights management (IRM) and can't be opened in Filen."],
+		["unsupported", "This document uses an encryption method Filen can't open."],
+		["damaged", "This document is damaged or was modified after it was encrypted."]
+	] as const)("refuses a %s workbook without asking for a password", async (reason, message) => {
+		openSpreadsheet.mockResolvedValue({ refused: reason })
+		render(viewer())
+
+		expect(await screen.findByText(message)).toBeTruthy()
+		expect(screen.queryByRole("dialog")).toBeNull()
+	})
+
+	it("warns, beside the badge's wording, when the workbook's integrity can't be verified", async () => {
+		openSpreadsheet.mockResolvedValue({ id: 1, doc: DOC, encrypted: "unchecked" })
+		render(viewer(false))
+		await screen.findByRole("grid")
+
+		const badge = screen.getByRole("button", { name: "Password-protected" })
+
+		expect(badge.getAttribute("aria-describedby")).toBeTruthy()
+		expect(screen.getByText("Its integrity can't be verified: it may have been changed after it was encrypted.")).toBeTruthy()
+		fireEvent.click(badge)
+		expect(await screen.findByText("Opened with its password, in this browser only.")).toBeTruthy()
+	})
+
+	it("proves it from the worker's plaintext and saves only sealed bytes", async () => {
+		const saveRef = createRef<SpreadsheetSaveSource | null>() as { current: SpreadsheetSaveSource | null }
+
+		openSpreadsheet.mockResolvedValue({ id: 1, doc: DOC, encrypted: "verified" })
+		remote.writability.mockResolvedValue(true)
+		render(createElement(SpreadsheetViewer, { item: file(), documentKey: "book", alt: "book.xlsx", editable: true, saveRef }))
+		await screen.findByRole("grid")
+
+		fireEvent.focus(bar())
+		await waitFor(() => {
+			expect(remote.writability).toHaveBeenCalledWith(1, null)
+		})
+		await waitFor(() => {
+			expect(saveRef.current).not.toBeNull()
+		})
+
+		remote.serialize.mockResolvedValueOnce({ bytes: ZIP, version: 1 }).mockResolvedValueOnce({ bytes: CFB, version: 1 })
+
+		await expect(saveRef.current?.()).rejects.toThrow("not sealed")
+		await expect(saveRef.current?.().then(snapshot => snapshot.bytes)).resolves.toEqual(CFB)
 	})
 })

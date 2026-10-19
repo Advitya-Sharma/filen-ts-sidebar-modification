@@ -10,7 +10,14 @@ import type { DocxAnnotations } from "./annotations"
 // renderer still validates what it turns into DOM: colours, sizes and tree shapes are checked again on
 // arrival.
 
-export type DocxErrorReason = DocxOpenFailure | "malformed" | "failed"
+// The engine reports an encrypted package by why it cannot open it, never as "encrypted" (that stays for a
+// host's own checks). Unlocking (encrypted.ts) comes before the engine is given the decrypted package.
+//   needsPassword          password encryption, opened once given the password
+//   rightsManaged          IRM / a sensitivity label
+//   unsupportedEncryption  an encryption scheme Filen does not implement
+//   damagedEncryption      a malformed encrypted container
+export type DocxErrorReason =
+	DocxOpenFailure | "needsPassword" | "rightsManaged" | "unsupportedEncryption" | "damagedEncryption" | "malformed" | "failed"
 
 export interface DocxOpenInfo {
 	readonly variant: DocxVariant

@@ -8,6 +8,8 @@ import {
 	type Slicing,
 	type ZipOpenOptions
 } from "../opc/index"
+import { CfbError, CfbFile, isCompoundFile } from "../cfb/index"
+import { isEncryptedContainer } from "../encryption/index"
 import { XmlError, type XmlDocument } from "../xml/index"
 import { NO_SETTINGS, readSettings, type DocumentProtection, type DocxSettings, type WriteProtection } from "./model/settings"
 
@@ -15,7 +17,8 @@ export type DocxVariant = "docx" | "docm" | "dotx" | "dotm"
 
 // Why a file could not be opened as a word-processing package at all.
 export type DocxOpenFailure =
-	// OOXML encrypted with a password (an OLE2 compound file holding EncryptionInfo + EncryptedPackage).
+	// An encrypted OOXML package: a compound file holding EncryptedPackage with EncryptionInfo or DataSpaces
+	// (dom/docx/encrypted.ts tells a password from rights management and opens it).
 	| "encrypted"
 	// A legacy binary Office file (.doc, .xls, .ppt) under a .docx name.
 	| "legacyBinary"
@@ -191,8 +194,6 @@ export type DocxOpenResult =
 	| { readonly ok: true; readonly package: DocxPackage }
 	| { readonly ok: false; readonly reason: DocxOpenFailure; readonly message: string }
 
-const OLE_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]
-
 function failure(reason: DocxOpenFailure, message: string): DocxOpenResult {
 	return { ok: false, reason, message }
 }
@@ -207,9 +208,7 @@ export interface DocxPackageOptions extends ZipOpenOptions {
 // but the content types, relationships and settings is read.
 export async function openDocxPackage(source: ByteSource, options: DocxPackageOptions = {}): Promise<DocxOpenResult> {
 	if (source.size >= 8) {
-		const head = await source.read(0, 8)
-
-		if (OLE_SIGNATURE.every((byte, k) => head[k] === byte)) {
+		if (isCompoundFile(await source.read(0, 8))) {
 			const kind = await compoundFileKind(source)
 
 			return failure(
@@ -339,95 +338,25 @@ async function signatureCount(opc: OpcPackage, packageRelationships: Relationshi
 	return count
 }
 
-const MAX_DIRECTORY_SECTORS = 4096
-const MAX_DIFAT_SECTORS = 1024
-
-// Tells an encrypted OOXML file from a legacy binary one by the stream names in the compound file's
-// directory (MS-CFB). Only the header, the FAT sectors the directory chain needs and the directory itself
-// are read; anything malformed is just "compoundFile".
+// Tells an encrypted OOXML package from a legacy binary file by the streams at the compound file's root. The
+// encrypted container is checked first: Word 2007 and POI leave a WordDocument stream beside it. A compound
+// file this reader cannot open is just "compoundFile".
 async function compoundFileKind(source: ByteSource): Promise<"encrypted" | "legacyBinary" | "compoundFile"> {
+	let cfb: CfbFile
+
 	try {
-		if (source.size < 512) return "compoundFile"
+		cfb = await CfbFile.open(source)
+	} catch (error) {
+		if (error instanceof CfbError) return "compoundFile"
 
-		const header = new DataView((await source.read(0, 512)).slice().buffer)
-		const shift = header.getUint16(0x1e, true)
-
-		if (shift !== 9 && shift !== 12) return "compoundFile"
-
-		const sectorSize = 1 << shift
-		const perSector = sectorSize / 4
-		const difat: number[] = []
-
-		for (let k = 0; k < 109; k++) difat.push(header.getUint32(0x4c + k * 4, true))
-
-		const sectors = new Map<number, DataView>()
-		const sector = async (index: number): Promise<DataView | undefined> => {
-			const offset = (index + 1) * sectorSize
-
-			if (index >= 0xfffffffa || offset + sectorSize > source.size) return undefined
-
-			let view = sectors.get(index)
-
-			if (view === undefined) {
-				view = new DataView((await source.read(offset, sectorSize)).slice().buffer)
-				sectors.set(index, view)
-			}
-
-			return view
-		}
-		// FAT sectors past the header's 109 are listed in a chain of DIFAT sectors: each holds perSector - 1
-		// FAT sector numbers and the next DIFAT sector last.
-		let difatNext = header.getUint32(0x44, true)
-		let difatLeft = Math.min(header.getUint32(0x48, true), MAX_DIFAT_SECTORS)
-		const fatSector = async (index: number): Promise<number> => {
-			while (index >= difat.length && difatLeft > 0 && difatNext < 0xfffffffa) {
-				const chain = await sector(difatNext)
-
-				difatLeft--
-
-				if (chain === undefined) break
-
-				for (let k = 0; k < perSector - 1; k++) difat.push(chain.getUint32(k * 4, true))
-
-				difatNext = chain.getUint32((perSector - 1) * 4, true)
-			}
-
-			return difat[index] ?? 0xffffffff
-		}
-		const names = new Set<string>()
-		let current = header.getUint32(0x30, true)
-
-		for (let visited = 0; visited < MAX_DIRECTORY_SECTORS && current < 0xfffffffa; visited++) {
-			const directory = await sector(current)
-
-			if (directory === undefined) break
-
-			for (let entry = 0; entry < sectorSize; entry += 128) {
-				const length = Math.min(directory.getUint16(entry + 0x40, true), 64)
-				const type = directory.getUint8(entry + 0x42)
-
-				if (type === 0 || length < 2) continue
-
-				let name = ""
-
-				for (let k = 0; k < length - 2; k += 2) name += String.fromCharCode(directory.getUint16(entry + k, true))
-
-				names.add(name)
-			}
-
-			const fat = await sector(await fatSector(Math.floor(current / perSector)))
-
-			if (fat === undefined) break
-
-			current = fat.getUint32((current % perSector) * 4, true)
-		}
-
-		if (names.has("EncryptionInfo") && names.has("EncryptedPackage")) return "encrypted"
-		if (names.has("WordDocument") || names.has("Workbook") || names.has("Book") || names.has("PowerPoint Document"))
-			return "legacyBinary"
-
-		return "compoundFile"
-	} catch {
-		return "compoundFile"
+		throw error
 	}
+
+	if (isEncryptedContainer(cfb)) return "encrypted"
+	if (LEGACY_STREAMS.some(name => cfb.entry([name])?.kind === "stream")) return "legacyBinary"
+
+	return "compoundFile"
 }
+
+// The main streams of Word, Excel (5.0 and later; 95 and before) and PowerPoint binary files.
+const LEGACY_STREAMS = ["WordDocument", "Workbook", "Book", "PowerPoint Document"]

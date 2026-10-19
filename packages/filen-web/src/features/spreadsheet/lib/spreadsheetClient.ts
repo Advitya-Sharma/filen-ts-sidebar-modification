@@ -1,7 +1,13 @@
 import * as Comlink from "comlink"
 import SpreadsheetWorker from "@/features/spreadsheet/workers/spreadsheet.worker.ts?worker"
-import type { SpreadsheetDoc, SpreadsheetKind } from "@/features/spreadsheet/lib/model"
-import type { SpreadsheetFileKind, SpreadsheetWorkerApi } from "@/features/spreadsheet/workers/spreadsheet.worker"
+import type { SpreadsheetKind } from "@/features/spreadsheet/lib/model"
+import type {
+	SpreadsheetFileKind,
+	SpreadsheetOpened,
+	SpreadsheetUnlock,
+	SpreadsheetWorkerApi
+} from "@/features/spreadsheet/workers/spreadsheet.worker"
+import type { WorkbookRefusal } from "@/features/spreadsheet/lib/xlsxEncryption"
 import { idleResource } from "@/lib/idleResource"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 
@@ -34,30 +40,134 @@ const spreadsheetWorker = idleResource(
 // worker while the document is open.
 const documents = new Map<number, { workerId: number; release: () => void }>()
 let nextId = 1
+let nextOpen = 1
 
-// Opens a document and keeps the worker until closeSpreadsheet: the hold starts before the bytes are sent,
-// so a long parse is never torn down under.
-export function openSpreadsheet(bytes: Uint8Array, kind: SpreadsheetFileKind): Promise<{ id: number; doc: SpreadsheetDoc }> {
-	const opened = Promise.withResolvers<{ id: number; doc: SpreadsheetDoc }>()
+// A password-protected workbook waiting for its password. `unlock` tries one (one at a time): opened, or
+// `wrongPassword` (and `aborted`, after `cancel` stopped it) to ask again; `discard` gives up on it (a try
+// under way stops). The worker is kept until it opens, is refused or is discarded.
+export interface SpreadsheetLock {
+	unlock: (password: string) => Promise<SpreadsheetUnlock>
+	cancel: () => void
+	discard: () => void
+}
+
+export type SpreadsheetOpen = SpreadsheetOpened | { locked: SpreadsheetLock } | { refused: WorkbookRefusal }
+
+// Opens a document and keeps the worker until closeSpreadsheet (or, for a locked workbook, until it is
+// discarded or refused): the hold starts before the bytes are sent, so a long parse is never torn down under.
+// `signal` stops a protected workbook's default-password try once the caller has gone (the open rejects); what
+// opens regardless is still the caller's to close.
+export function openSpreadsheet(bytes: Uint8Array, kind: SpreadsheetFileKind, signal?: AbortSignal): Promise<SpreadsheetOpen> {
+	const opened = Promise.withResolvers<SpreadsheetOpen>()
+	const token = nextOpen++
 
 	spreadsheetWorker
 		.use(async ({ remote }) => {
-			const result = await remote.open(bytes, kind)
-			const closed = Promise.withResolvers<undefined>()
-			const id = nextId++
+			const cancel = () => {
+				void remote.cancelOpen(token)
+			}
 
-			documents.set(id, {
-				workerId: result.id,
-				release: () => {
-					closed.resolve(undefined)
-				}
-			})
-			opened.resolve({ id, doc: result.doc })
+			signal?.addEventListener("abort", cancel, { once: true })
+
+			let result: Awaited<ReturnType<typeof remote.open>>
+
+			try {
+				result = await remote.open(bytes, kind, token)
+			} finally {
+				signal?.removeEventListener("abort", cancel)
+			}
+
+			if ("refused" in result) {
+				opened.resolve(result)
+
+				return
+			}
+
+			const closed = Promise.withResolvers<undefined>()
+			const release = () => {
+				closed.resolve(undefined)
+			}
+
+			opened.resolve("locked" in result ? { locked: lockOf(result.locked, release) } : registered(result, release))
 			await closed.promise
 		})
 		.catch(opened.reject)
 
 	return opened.promise
+}
+
+// Registers a document the worker opened under a tab-wide id; `release` ends the hold once it closes.
+function registered(result: SpreadsheetOpened, release: () => void): SpreadsheetOpened {
+	const id = nextId++
+
+	documents.set(id, { workerId: result.id, release })
+
+	return { ...result, id }
+}
+
+function lockOf(lockId: number, release: () => void): SpreadsheetLock {
+	// Opened, refused or discarded: nothing more is asked of the lock.
+	let settled = false
+
+	const discard = (): void => {
+		if (settled) {
+			return
+		}
+
+		settled = true
+		// Sent before the hold ends, so the worker outlives it.
+		void spreadsheetWorker.use(({ remote }) => remote.discardLocked(lockId))
+		release()
+	}
+
+	return {
+		unlock: password => {
+			if (settled) {
+				return Promise.reject(new Error("spreadsheet: this workbook is no longer locked"))
+			}
+
+			// The hold is still on (not settled), so this is the worker holding the lock.
+			return spreadsheetWorker
+				.use<SpreadsheetUnlock>(({ remote }) => remote.unlock(lockId, password))
+				.then(
+					answer => {
+						if (settled) {
+							// Discarded meanwhile: what the worker opened before it heard is closed there.
+							if ("id" in answer) {
+								void spreadsheetWorker.use(({ remote }) => remote.close(answer.id))
+							}
+
+							return { aborted: true }
+						}
+
+						if ("id" in answer) {
+							settled = true
+
+							return registered(answer, release)
+						}
+
+						if ("refused" in answer) {
+							settled = true
+							release()
+						}
+
+						return answer
+					},
+					(error: unknown) => {
+						// The try failed in the worker: the lock is given up there and the hold ends, whoever holds it.
+						discard()
+
+						throw error
+					}
+				)
+		},
+		cancel: () => {
+			if (!settled) {
+				void spreadsheetWorker.use(({ remote }) => remote.cancelUnlock(lockId))
+			}
+		},
+		discard
+	}
 }
 
 export function closeSpreadsheet(id: number): void {
@@ -98,7 +208,8 @@ function startsWith(bytes: Uint8Array, magic: readonly number[]): boolean {
 }
 
 // A file whose name does not say what it is, read from its first bytes: a zip is taken for an .xlsx, an
-// OLE2 compound file for an .xls, anything else for text.
+// OLE2 compound file for an .xls (or a password-protected workbook, which the worker tells apart), anything
+// else for text.
 export function sniffSpreadsheetKind(bytes: Uint8Array): SpreadsheetKind {
 	if (startsWith(bytes, ZIP)) return "xlsx"
 	if (startsWith(bytes, OLE2)) return "xls"

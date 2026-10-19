@@ -64,7 +64,7 @@ import { reflowCommands } from "@/features/preview/components/docxReflow.logic"
 import { DocxReviewMenu } from "@/features/preview/components/docxReviewMenu"
 import { DocxTableMenu } from "@/features/preview/components/docxTableMenu"
 import { MARKUP_LABELS, type DocxFindControls, type DocxViewOnlyReason } from "@/features/preview/components/docxViewer.logic"
-import { DocxFindField, MarkupMenu, ViewOnlyBadge } from "@/features/preview/components/docxToolbar"
+import { DocxFindField, MarkupMenu, PasswordBadge, ViewOnlyBadge, type PasswordIntegrity } from "@/features/preview/components/docxToolbar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -137,6 +137,8 @@ export interface DocxEditToolbarProps {
 	apple: boolean
 	execute: (command: DocxEditorCommand) => void
 	viewOnly: readonly DocxViewOnlyReason[]
+	// Opened with its password: its integrity, and whether saves keep the password now (the session can save).
+	encrypted?: { integrity: PasswordIntegrity; saving: boolean } | undefined
 	find: { open: boolean; replace: boolean; focus: number; controls: DocxFindControls }
 	onFindOpen: (replace: boolean) => void
 	onFindClosed: () => void
@@ -401,6 +403,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 	const fit = toolbarFit(
 		width,
 		(props.viewOnly.length > 0 ? 100 : 0) +
+			(props.encrypted === undefined ? 0 : 140) +
 			(locked === null ? 0 : 120) +
 			(props.markup === null || REVIEW_SLOT.length > 0 ? 0 : 40) +
 			slotsWidth(
@@ -444,10 +447,16 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 	)
 	let badges: ReactNode = null
 
-	if (props.viewOnly.length > 0 || locked !== null) {
+	if (props.viewOnly.length > 0 || props.encrypted !== undefined || locked !== null) {
 		badges = (
 			<div className="flex shrink-0 items-center gap-1">
 				{props.viewOnly.length > 0 ? <ViewOnlyBadge reasons={props.viewOnly} /> : null}
+				{props.encrypted === undefined ? null : (
+					<PasswordBadge
+						integrity={props.encrypted.integrity}
+						saving={props.encrypted.saving}
+					/>
+				)}
 				{locked === null ? null : <LockedBadge reason={locked} />}
 			</div>
 		)

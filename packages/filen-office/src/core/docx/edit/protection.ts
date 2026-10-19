@@ -24,6 +24,8 @@ import { docxSchema, NO_SOURCE, type MarkerKind, type MarkerList } from "./schem
 import { sectionNode } from "../stories/sections"
 import { rowGrid } from "./tables/map"
 import type { DocxEditorSession } from "./session"
+import type { DocxGateReason } from "../package"
+import { readProtectionHash, type ProtectionHashRead } from "../protection/hash"
 
 // Document protection that allows editing within limits (ECMA-376 Part 1 §17.15.1.29 w:documentProtection
 // with w:enforcement on): "forms" lets only content controls and legacy form fields change, plus the ranges an
@@ -75,6 +77,35 @@ export function protectionOf(context: DocxEditContext): DocxProtection {
 	}
 
 	return found
+}
+
+// w:writeProtection (ECMA-376 Part 1 §17.15.1.93): Word's "password to modify" and "read-only recommended".
+// A password keeps the document view-only (gate 0 reason "writeProtected") until the user gives it: the app
+// checks it (dom/protection.ts) and opens the document again with EditContextParts.writeUnlocked, which lifts
+// the reason for that session. A recommendation alone gates nothing here: the app offers it as Word does on
+// open ("Edit anyway"). Either way the element is written back as it is (the password is not changed or
+// removed). Write protection is not a security measure ([MS-OFFCRYPTO] §4.1.4).
+export interface DocxWriteProtection {
+	readonly recommended: boolean
+	// The password's hash ("unsupported": one that cannot be checked here); undefined without a password.
+	readonly password: ProtectionHashRead
+}
+
+export function writeProtectionOf(context: DocxEditContext): DocxWriteProtection | undefined {
+	const pkg = context.model.package
+	const facts = pkg.facts.writeProtection
+
+	if (facts === undefined) return undefined
+
+	return {
+		recommended: facts.recommended,
+		password: facts.hashed ? (readProtectionHash(pkg.settings, "writeProtection") ?? "unsupported") : undefined
+	}
+}
+
+// Whether gate 0 reason `reason` is lifted for a session opened with `parts`.
+export function gateLifted(reason: DocxGateReason, parts: { readonly writeUnlocked?: boolean }): boolean {
+	return reason === "writeProtected" && parts.writeUnlocked === true
 }
 
 // Commands each mode allows; any other write command is refused (undo and redo stay: they only take back what
