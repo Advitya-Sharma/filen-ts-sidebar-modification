@@ -126,12 +126,8 @@ async function classify(source: ByteSource): Promise<Classified> {
 
 	try {
 		container = await readEncryptedContainer(cfb)
-
-		const stream = container.encryptedPackage
-
-		streamSizeOf(stream.size < 8 ? new Uint8Array(0) : await stream.read(0, 8), stream.size)
 	} catch (error) {
-		if (error instanceof CfbError || error instanceof OfficeCryptoError) return { kind: "refused", reason: "damaged" }
+		if (error instanceof CfbError) return { kind: "refused", reason: "damaged" }
 
 		throw error
 	}
@@ -158,6 +154,17 @@ async function classify(source: ByteSource): Promise<Classified> {
 			kind: "refused",
 			reason: reason === "wrongPassword" || reason === "aborted" ? "damaged" : reason
 		}
+	}
+
+	// The scheme decides first: one Filen does not implement is unsupported however its package looks.
+	try {
+		const stream = container.encryptedPackage
+
+		streamSizeOf(stream.size < 8 ? new Uint8Array(0) : await stream.read(0, 8), stream.size)
+	} catch (error) {
+		if (error instanceof CfbError || error instanceof OfficeCryptoError) return { kind: "refused", reason: "damaged" }
+
+		throw error
 	}
 
 	return {

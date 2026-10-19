@@ -357,6 +357,18 @@ describe("classifying reads only the package's StreamSize", () => {
 		if (result.ok) result.document.release()
 	})
 
+	it("says unsupported for an unknown EncryptionInfo version, whatever its package holds (§2.3.4.1)", async () => {
+		// Version 0x0404.0x0404: no scheme of [MS-OFFCRYPTO] (Agile is 4.4, Standard x.2, Extensible x.3).
+		const info = new Uint8Array(4096).fill(0x04)
+		const damagedPackage = new Uint8Array(8192).fill(0xa5)
+
+		expect(probeEncryptionInfo(info)).toEqual({ ok: false, reason: "unsupported" })
+		expect(await openEncryptedPackage(bytesSource(await fileOf({ encryptionInfo: info, encryptedPackage: damagedPackage })))).toEqual({
+			kind: "refused",
+			reason: "unsupported"
+		})
+	})
+
 	it("refuses a StreamSize larger than the stream as damaged before any prompt", async () => {
 		const streams = agileStreams(new Uint8Array(100), "pw", { spinCount: 5 })
 		const lying = streams.encryptedPackage.slice()
