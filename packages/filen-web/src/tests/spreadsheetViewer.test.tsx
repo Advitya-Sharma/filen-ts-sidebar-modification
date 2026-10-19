@@ -20,7 +20,8 @@ const { remote, toastError, layerUpdate, openSpreadsheet } = vi.hoisted(() => ({
 		writability: vi.fn(),
 		viewOnly: vi.fn(),
 		serialize: vi.fn(),
-		markSaved: vi.fn()
+		markSaved: vi.fn(),
+		sheet: vi.fn()
 	},
 	toastError: vi.fn(),
 	layerUpdate: vi.fn()
@@ -179,6 +180,38 @@ describe("SpreadsheetViewer editing an unproven workbook", () => {
 			expect(layerUpdate).toHaveBeenCalledWith(0, "cols", [[0, null]])
 		})
 		expect(remote.apply).toHaveBeenCalledWith(1, { type: "resize", sheet: 0, axis: "cols", sizes: [[0, null]] })
+	})
+})
+
+describe("SpreadsheetViewer with a deferred sheet", () => {
+	it("asks the worker for a sheet the first time it is shown, and shows it once built", async () => {
+		const deferred = { ...DOC, sheets: [DOC.sheets[0], mockSheetView({ name: "Two", rowCount: 3, colCount: 3, deferred: true })] }
+
+		openSpreadsheet.mockImplementation(() => Promise.resolve({ id: 1, doc: deferred }))
+		remote.sheet.mockResolvedValue({
+			type: "sheets",
+			sheets: [null, mockSheetView({ name: "Two", rowCount: 3, colCount: 3, cells: new Map([[cellKey(1, 1), { text: "built" }]]) })],
+			styles: [],
+			state: NOTHING
+		} satisfies EditResult)
+
+		// jsdom has no scrolling; a sheet switch scrolls the grid to its top.
+		Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined })
+		await opened()
+
+		expect(remote.sheet).not.toHaveBeenCalled()
+
+		fireEvent.click(screen.getByRole("tab", { name: "Two" }))
+
+		expect(await screen.findByText("built")).toBeTruthy()
+		expect(remote.sheet).toHaveBeenCalledExactlyOnceWith(1, 1)
+
+		fireEvent.click(screen.getByRole("tab", { name: "One" }))
+		fireEvent.click(screen.getByRole("tab", { name: "Two" }))
+
+		expect(screen.getByText("built")).toBeTruthy()
+		expect(remote.sheet).toHaveBeenCalledOnce()
+		Reflect.deleteProperty(HTMLElement.prototype, "scrollTo")
 	})
 })
 

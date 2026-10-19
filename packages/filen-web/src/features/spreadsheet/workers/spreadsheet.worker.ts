@@ -3,9 +3,7 @@ import { openXlsx, readXls } from "hucre/xlsx"
 import type { SpreadsheetDoc, SpreadsheetKind } from "@/features/spreadsheet/lib/model"
 import { MAX_SHEET_CELLS, type DocState, type EditOp, type EditResult } from "@/features/spreadsheet/lib/edits"
 import { workbookDoc, WorkbookViews } from "@/features/spreadsheet/lib/xlsxView"
-import { parseCsvFile } from "@/features/spreadsheet/lib/csvView"
 import { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
-import { CsvDocument } from "@/features/spreadsheet/lib/csvDocument"
 import { checkZipLimits } from "@/features/spreadsheet/lib/zipLimits"
 import { xlsToXlsx } from "@/features/spreadsheet/lib/xlsConvert"
 import {
@@ -18,11 +16,12 @@ import {
 	type WorkbookUnlocked
 } from "@/features/spreadsheet/lib/xlsxEncryption"
 
-// Owns every open spreadsheet: the parsed workbook stays here, with its edits and undo history, and the
-// page gets views of it (model.ts) and patches after each edit (edits.ts). A file is untrusted input, so
-// parsing runs off the main thread, inside limits: a zip whose entries inflate past DECOMPRESSED_LIMIT in
-// all (or number past ZIP_ENTRY_LIMIT) or a grid past CELL_LIMIT fails to open rather than taking the tab's
-// memory.
+// Owns every open workbook: the parsed workbook stays here, with its edits and undo history, and the page
+// gets views of it (model.ts: the active sheet at open, any other once shown) and patches after each edit
+// (edits.ts). A file is untrusted input, so parsing runs off the main thread, inside limits: a zip whose
+// entries inflate past DECOMPRESSED_LIMIT in all (or number past ZIP_ENTRY_LIMIT) or a grid past CELL_LIMIT
+// fails to open rather than taking the tab's memory. CSV and TSV open in csv.worker.ts, which loads neither
+// the workbook reader nor the formula engine.
 
 export type SpreadsheetFileKind = SpreadsheetKind | "tsv"
 
@@ -46,7 +45,7 @@ export type SpreadsheetOpen = SpreadsheetOpened | { locked: number } | { refused
 export type SpreadsheetUnlock = SpreadsheetOpened | { wrongPassword: true } | { refused: WorkbookRefusal } | { aborted: true }
 
 // An .xls opens to be looked at only: nothing is kept, as nothing can be written back.
-const documents = new Map<number, XlsxDocument | CsvDocument>()
+const documents = new Map<number, XlsxDocument>()
 // A protected workbook's key, its saves' seal, and its plaintext until the proof read it (the page holds only
 // the file as stored, which is sealed).
 const protections = new Map<number, { protection: WorkbookProtection; plaintext: Uint8Array | null }>()
@@ -85,7 +84,7 @@ async function openDecrypted({ plaintext, protection, integrity }: WorkbookUnloc
 	}
 
 	const id = nextId++
-	const doc = document.doc()
+	const doc = document.doc(true)
 
 	documents.set(id, document)
 	// Kept only for a proof that may still run: a workbook known at open to stay view-only is never proven.
@@ -94,80 +93,61 @@ async function openDecrypted({ plaintext, protection, integrity }: WorkbookUnloc
 	return { id, doc, encrypted: integrity }
 }
 
-// `token` names the open for cancelOpen.
+// `token` names the open for cancelOpen. A compound file named or sniffed as a workbook may be a
+// password-protected .xlsx (its name may still say .xls: it then opens read-only, as any .xls). Text is
+// opened by csv.worker.ts, never sent here.
 async function open(bytes: Uint8Array, kind: SpreadsheetFileKind, token?: number): Promise<SpreadsheetOpen> {
-	// A compound file named or sniffed as a workbook may be a password-protected .xlsx (its name may still say
-	// .xls: it then opens read-only, as any .xls).
-	if (kind === "xlsx" || kind === "xls") {
-		const signal = { aborted: false }
+	const signal = { aborted: false }
 
+	if (token !== undefined) {
+		openings.set(token, signal)
+	}
+
+	let encrypted: Awaited<ReturnType<typeof openEncryptedWorkbook>>
+
+	try {
+		encrypted = await openEncryptedWorkbook(bytes, signal)
+	} finally {
 		if (token !== undefined) {
-			openings.set(token, signal)
+			openings.delete(token)
 		}
+	}
 
-		let encrypted: Awaited<ReturnType<typeof openEncryptedWorkbook>>
+	switch (encrypted.kind) {
+		case "plain":
+			break
+		case "refused":
+			return { refused: encrypted.reason }
+		case "aborted":
+			// The page went: nothing was opened.
+			throw new Error("spreadsheet: opening was cancelled")
+		case "needsPassword": {
+			const lock = nextId++
 
-		try {
-			encrypted = await openEncryptedWorkbook(bytes, signal)
-		} finally {
-			if (token !== undefined) {
-				openings.delete(token)
-			}
+			locks.set(lock, { locked: encrypted.locked, attempt: null })
+
+			return { locked: lock }
 		}
-
-		switch (encrypted.kind) {
-			case "plain":
-				break
-			case "refused":
-				return { refused: encrypted.reason }
-			case "aborted":
-				// The page went: nothing was opened.
-				throw new Error("spreadsheet: opening was cancelled")
-			case "needsPassword": {
-				const lock = nextId++
-
-				locks.set(lock, { locked: encrypted.locked, attempt: null })
-
-				return { locked: lock }
-			}
-			case "unlocked":
-				return await openDecrypted(encrypted)
-		}
+		case "unlocked":
+			return await openDecrypted(encrypted)
 	}
 
 	const id = nextId++
 
-	switch (kind) {
-		case "xlsx": {
-			const document = await openXlsxDocument(bytes)
+	if (kind === "xls") {
+		const workbook = await readXls(bytes, { maxTotalCells: CELL_LIMIT })
 
-			documents.set(id, document)
-
-			return { id, doc: document.doc() }
-		}
-		case "xls": {
-			const workbook = await readXls(bytes, { maxTotalCells: CELL_LIMIT })
-
-			return { id, doc: { ...workbookDoc(workbook, new WorkbookViews(workbook.themeColors), false), kind: "xls" } }
-		}
-		case "csv":
-		case "tsv": {
-			const { rows, format } = parseCsvFile(bytes, kind === "tsv")
-
-			if (rows.reduce((cells, row) => cells + row.length, 0) > CELL_LIMIT) {
-				throw new Error("spreadsheet: too many cells")
-			}
-
-			const document = new CsvDocument(rows, format)
-
-			documents.set(id, document)
-
-			return { id, doc: document.doc() }
-		}
+		return { id, doc: { ...workbookDoc(workbook, new WorkbookViews(workbook.themeColors), false), kind: "xls" } }
 	}
+
+	const document = await openXlsxDocument(bytes)
+
+	documents.set(id, document)
+
+	return { id, doc: document.doc(true) }
 }
 
-function document(id: number): XlsxDocument | CsvDocument {
+function document(id: number): XlsxDocument {
 	const found = documents.get(id)
 
 	if (found === undefined) {
@@ -246,11 +226,7 @@ const api = {
 		stopAttempt(lockId)
 		locks.delete(lockId)
 	},
-	apply: async (id: number, op: EditOp): Promise<EditResult> => {
-		const found = document(id)
-
-		return found instanceof XlsxDocument ? await found.edit(op) : found.apply(op)
-	},
+	apply: (id: number, op: EditOp): Promise<EditResult> => document(id).edit(op),
 	undo: (id: number): EditResult => document(id).undo(),
 	redo: (id: number): EditResult => document(id).redo(),
 	// The file's bytes as they now stand, handed over rather than copied, and the edit state they hold.
@@ -264,17 +240,13 @@ const api = {
 
 		return Comlink.transfer({ bytes, version: serialized.version }, [bytes.buffer as ArrayBuffer])
 	},
-	// Whether the open document can be saved: for a workbook, once proven from the file's bytes (`source`,
-	// a copy the proof lets go; a protected workbook's plaintext is kept here instead, as `source` is sealed)
-	// that saving loses nothing (its doc opens with writable false until then); for text, as its format
-	// allows.
+	// Whether the workbook can be saved: once proven from the file's bytes (`source`, a copy the proof lets
+	// go; a protected workbook's plaintext is kept here instead, as `source` is sealed) that saving loses
+	// nothing (its doc opens with writable false until then). The page asks once the user sets out to edit:
+	// once proven, the formula engine the first edit needs is built next, while that edit is being typed
+	// (after the answer goes, so the page hears it first).
 	writability: async (id: number, source: Uint8Array | null): Promise<boolean> => {
 		const found = document(id)
-
-		if (!(found instanceof XlsxDocument)) {
-			return found.writable
-		}
-
 		const kept = protections.get(id)
 		const bytes = kept === undefined ? source : kept.plaintext
 
@@ -282,9 +254,17 @@ const api = {
 			kept.plaintext = null
 		}
 
-		return await found.verifyWritable(bytes ?? undefined)
+		const writable = await found.verifyWritable(bytes ?? undefined)
+
+		if (writable) {
+			setTimeout(() => {
+				found.prepareEditing()
+			}, 0)
+		}
+
+		return writable
 	},
-	// The page will not edit this document: a workbook skips its proof and drops what only saving needs.
+	// The page will not edit this workbook: it skips its proof and drops what only saving needs.
 	viewOnly: (id: number): void => {
 		const found = document(id)
 		const kept = protections.get(id)
@@ -293,10 +273,10 @@ const api = {
 			kept.plaintext = null
 		}
 
-		if (found instanceof XlsxDocument) {
-			found.viewOnly()
-		}
+		found.viewOnly()
 	},
+	// A sheet the page holds deferred, which it now shows (grid index).
+	sheet: (id: number, index: number): EditResult => document(id).sheet(index),
 	// An .xls converted to an .xlsx (values and merges only: lib/xlsConvert.ts), handed over.
 	xlsToXlsx: async (bytes: Uint8Array): Promise<Uint8Array> => {
 		const converted = await xlsToXlsx(bytes, CELL_LIMIT)
@@ -307,12 +287,7 @@ const api = {
 	markSaved: (id: number, version: number): DocState => document(id).markSaved(version),
 	// A protected workbook's key goes with it: a save still under way fails rather than sealing.
 	close: (id: number): void => {
-		const found = documents.get(id)
-
-		if (found instanceof XlsxDocument) {
-			found.close()
-		}
-
+		documents.get(id)?.close()
 		documents.delete(id)
 		protections.get(id)?.protection.release()
 		protections.delete(id)
@@ -320,5 +295,11 @@ const api = {
 }
 
 export type SpreadsheetWorkerApi = typeof api
+
+// What csv.worker.ts answers too: opening, and the calls on an open document.
+export type SpreadsheetDocumentApi = Pick<
+	SpreadsheetWorkerApi,
+	"open" | "cancelOpen" | "apply" | "undo" | "redo" | "serialize" | "writability" | "viewOnly" | "sheet" | "markSaved" | "close"
+>
 
 Comlink.expose(api)

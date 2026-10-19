@@ -1,19 +1,34 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { SpreadsheetOpen } from "@/features/spreadsheet/lib/spreadsheetClient"
 
-// The spreadsheet worker's lifetime: kept while a document is open or a call is in flight, torn down once
-// idle, and never reached by a call on a document that has closed. The worker and its Comlink proxy are
-// plain fakes; spreadsheet.worker.ts itself is covered by the engine tests.
+// The spreadsheet workers' lifetime: kept while a document is open or a call is in flight, torn down once
+// idle, and never reached by a call on a document that has closed. The workers and their Comlink proxies are
+// plain fakes; spreadsheet.worker.ts itself is covered by the engine tests. Text opens in a worker of its own
+// (every worker constructed is counted in WorkerCtor, the text one in CsvWorkerCtor too).
 
-const { WorkerCtor, wrap, terminate, release, recoverIfNewerBuild } = vi.hoisted(() => ({
-	recoverIfNewerBuild: vi.fn(),
-	WorkerCtor: vi.fn(),
-	wrap: vi.fn(),
-	terminate: vi.fn(),
-	release: vi.fn()
-}))
+const { WorkerCtor, CsvWorkerCtor, wrap, terminate, release, recoverIfNewerBuild } = vi.hoisted(() => {
+	const WorkerCtor = vi.fn()
+	const csvBuilt = vi.fn()
+
+	return {
+		recoverIfNewerBuild: vi.fn(),
+		WorkerCtor,
+		CsvWorkerCtor: Object.assign(
+			function CsvWorker(): unknown {
+				csvBuilt()
+
+				return new WorkerCtor()
+			},
+			{ built: csvBuilt }
+		),
+		wrap: vi.fn(),
+		terminate: vi.fn(),
+		release: vi.fn()
+	}
+})
 
 vi.mock("@/features/spreadsheet/workers/spreadsheet.worker.ts?worker", () => ({ default: WorkerCtor }))
+vi.mock("@/features/spreadsheet/workers/csv.worker.ts?worker", () => ({ default: CsvWorkerCtor }))
 vi.mock("@/lib/appUpdate", () => ({ recoverIfNewerBuild }))
 vi.mock("comlink", async importOriginal => ({ ...(await importOriginal<typeof import("comlink")>()), wrap }))
 
@@ -45,6 +60,7 @@ async function freshClient() {
 	openGate = Promise.resolve()
 	openAnswers = []
 	WorkerCtor.mockReset()
+	CsvWorkerCtor.built.mockReset()
 	wrap.mockReset()
 	terminate.mockReset()
 	release.mockReset()
@@ -206,6 +222,38 @@ describe("spreadsheetClient", () => {
 		await saving
 		await vi.advanceTimersByTimeAsync(IDLE_MS)
 		expect(terminate).toHaveBeenCalledOnce()
+	})
+
+	it("opens text in a worker of its own, and sends each document's calls to the worker holding it", async () => {
+		const client = await freshClient()
+		const text = await opened(client.openSpreadsheet(new Uint8Array([1]), "tsv"))
+
+		expect(CsvWorkerCtor.built).toHaveBeenCalledOnce()
+		expect(WorkerCtor).toHaveBeenCalledOnce()
+
+		const book = await opened(client.openSpreadsheet(new Uint8Array([2]), "xlsx"))
+
+		expect(CsvWorkerCtor.built).toHaveBeenCalledOnce()
+		expect(WorkerCtor).toHaveBeenCalledTimes(2)
+		expect(remotes[0]?.open).toHaveBeenCalledExactlyOnceWith(new Uint8Array([1]), "tsv", expect.any(Number))
+		expect(remotes[1]?.open).toHaveBeenCalledWith(new Uint8Array([2]), "xlsx", expect.any(Number))
+
+		await client.withOpenSpreadsheet(text.id, (remote, workerId) => remote.markSaved(workerId, 1))
+		await client.withOpenSpreadsheet(book.id, (remote, workerId) => remote.markSaved(workerId, 2))
+		expect(remotes[0]?.markSaved).toHaveBeenCalledExactlyOnceWith(1, 1)
+		expect(remotes[1]?.markSaved).toHaveBeenCalledExactlyOnceWith(1, 2)
+
+		// Each worker goes once its own documents have.
+		client.closeSpreadsheet(text.id)
+		await vi.advanceTimersByTimeAsync(IDLE_MS)
+		expect(remotes[0]?.close).toHaveBeenCalledExactlyOnceWith(1)
+		expect(remotes[1]?.close).not.toHaveBeenCalled()
+		expect(terminate).toHaveBeenCalledOnce()
+
+		client.closeSpreadsheet(book.id)
+		await vi.advanceTimersByTimeAsync(IDLE_MS)
+		expect(remotes[1]?.close).toHaveBeenCalledExactlyOnceWith(1)
+		expect(terminate).toHaveBeenCalledTimes(2)
 	})
 
 	it("runs a one-off call in its own use, disposed once idle", async () => {

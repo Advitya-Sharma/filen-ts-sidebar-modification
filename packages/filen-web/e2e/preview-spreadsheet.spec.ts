@@ -157,7 +157,10 @@ test("csv and xlsx open as grids, edit, recalculate and save, no CSP console err
 		await xlsxRow.dblclick()
 		await expect(gridCell(grid, 4, 2)).toHaveText("1700", { timeout: LAZY_VIEWER_TIMEOUT_MS })
 		await expect(gridCell(grid, 5, 2)).toHaveText("3400")
-		await expect(dialog.getByRole("tab", { name: "Notes" })).toBeVisible()
+
+		// A sheet other than the active one is built once first shown.
+		await dialog.getByRole("tab", { name: "Notes" }).click()
+		await expect(gridCell(grid, 1, 1)).toHaveText("second sheet")
 
 		await page.keyboard.press("Escape")
 		await expect(dialog).toHaveCount(0)

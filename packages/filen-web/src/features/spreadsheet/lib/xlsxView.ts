@@ -389,19 +389,43 @@ export function workbookStructureLocked(workbook: Workbook): boolean {
 	)
 }
 
-export function workbookDoc(workbook: Workbook, views: WorkbookViews, writable: boolean): SpreadsheetDoc {
-	const lockStructure = workbookStructureLocked(workbook)
-	const sheets = workbook.sheets.filter(isWorksheet).map(sheet => views.sheet(sheet, lockStructure))
-	// The file names its active tab among all of them; the grid counts worksheets only.
+// A sheet not built yet: its name and used area, held structure-locked until its view comes.
+export function deferredSheetView(sheet: Sheet): SheetView {
+	return {
+		name: sheet.name,
+		...sheetExtent(sheet),
+		cells: new Map(),
+		merges: [],
+		colWidths: new Map(),
+		rowHeights: new Map(),
+		hiddenCols: [],
+		hiddenRows: [],
+		frozenRows: 0,
+		frozenCols: 0,
+		structureLocked: true,
+		deferred: true
+	}
+}
+
+// The grid index of the workbook's active sheet: the file names its active tab among all of them, the grid
+// counts worksheets only.
+export function activeWorksheet(workbook: Workbook): number {
+	const worksheets = workbook.sheets.filter(isWorksheet).length
 	const active = workbook.sheets.slice(0, (workbook.activeSheet ?? 0) + 1).filter(isWorksheet).length - 1
 
-	return {
-		kind: "xlsx",
-		sheets,
-		activeSheet: Math.min(Math.max(active, 0), Math.max(sheets.length - 1, 0)),
-		styles: views.styles.styles,
-		writable
-	}
+	return Math.min(Math.max(active, 0), Math.max(worksheets - 1, 0))
+}
+
+// Every sheet's view, or (`activeOnly`) the active sheet's alone with the rest deferred, so an open costs
+// what the sheet on show holds.
+export function workbookDoc(workbook: Workbook, views: WorkbookViews, writable: boolean, activeOnly = false): SpreadsheetDoc {
+	const lockStructure = workbookStructureLocked(workbook)
+	const activeSheet = activeWorksheet(workbook)
+	const sheets = workbook.sheets
+		.filter(isWorksheet)
+		.map((sheet, index) => (activeOnly && index !== activeSheet ? deferredSheetView(sheet) : views.sheet(sheet, lockStructure)))
+
+	return { kind: "xlsx", sheets, activeSheet, styles: views.styles.styles, writable }
 }
 
 // Chart sheets and the like show as empty tabs in the workbook model; the grid lists worksheets only.

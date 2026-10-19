@@ -14,7 +14,12 @@ import { SheetGrid } from "@/features/spreadsheet/components/sheetGrid"
 import { SheetTabs } from "@/features/spreadsheet/components/sheetTabs"
 import { useSizeLayer } from "@/features/spreadsheet/hooks/useSizeLayer"
 import { useSpreadsheetDoc } from "@/features/spreadsheet/hooks/useSpreadsheetDoc"
-import { useSpreadsheetEdits, useSpreadsheetWritability, type SpreadsheetSnapshot } from "@/features/spreadsheet/hooks/useSpreadsheetEdits"
+import {
+	showSheet,
+	useSpreadsheetEdits,
+	useSpreadsheetWritability,
+	type SpreadsheetSnapshot
+} from "@/features/spreadsheet/hooks/useSpreadsheetEdits"
 import {
 	rangeArea,
 	rangeCols,
@@ -637,15 +642,21 @@ function SpreadsheetBody({
 		onDirtyChange?.(dirty)
 	}, [dirty, onDirtyChange])
 
-	// Another sheet on show (a tab, or an undone "add sheet" taking the shown one away) starts at its top.
+	// Another sheet on show (a tab, or an undone "add sheet" taking the shown one away) starts at its top, and
+	// is built first if deferred (a workbook opens with its active sheet's view alone).
 	const shownSheet = useRef(sheetIndex)
+	const deferred = sheet.deferred === true
 
 	useLayoutEffect(() => {
 		if (shownSheet.current !== sheetIndex) {
 			shownSheet.current = sheetIndex
 			gridRef.current?.scrollTo({ top: 0, left: 0 })
 		}
-	}, [sheetIndex])
+
+		if (deferred) {
+			showSheet(id, sheetIndex, updateDoc)
+		}
+	}, [sheetIndex, deferred, id, updateDoc])
 
 	// The latest handlers, for callers outside React's events.
 	useEffect(() => {

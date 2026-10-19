@@ -96,6 +96,19 @@ export function useSpreadsheetEdits(
 	}
 }
 
+// Builds a sheet the page holds deferred (`sheet`, a grid index), now shown: a workbook opens with its active
+// sheet's view alone. Asked outside the edits' queue, as the worker answers it at once: its answer (a result
+// keeping every other sheet) lands before that of any edit it answers later, which then patches the sheet,
+// and after any it answered earlier, which left the sheet alone. A failed ask leaves the sheet deferred.
+export function showSheet(id: number, sheet: number, updateDoc: (update: (doc: GridDoc) => GridDoc) => void): void {
+	withOpenSpreadsheet<EditResult>(id, (remote, workerId) => remote.sheet(workerId, sheet)).then(
+		result => {
+			updateDoc(prev => applyEditResult(prev, result))
+		},
+		() => undefined
+	)
+}
+
 // "unproven": a workbook nothing asked to prove yet; "tooLarge": one too large to prove, so read-only.
 export type Writability = "unproven" | "checking" | "writable" | "readOnly" | "tooLarge"
 

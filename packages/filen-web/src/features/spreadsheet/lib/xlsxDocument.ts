@@ -560,6 +560,9 @@ export class XlsxDocument {
 	private styleMark = 0
 	private prepared = false
 	private closed = false
+	// Sheets the page holds as deferred stand-ins (doc(true)): edits send nothing for them, as the view the
+	// page asks for when it first shows one is built from the workbook as it then stands.
+	private deferred = new WeakSet<Sheet>()
 
 	constructor(workbook: RoundtripWorkbook, historyBudget = HISTORY_BYTES, proofCellLimit = PROOF_CELL_LIMIT) {
 		this.workbook = workbook
@@ -630,10 +633,29 @@ export class XlsxDocument {
 		}
 	}
 
-	doc(): SpreadsheetDoc {
-		const doc = workbookDoc(this.workbook, this.views, this.writable)
+	// The view of every sheet, or (`activeOnly`, as the page opens it) of the active one alone, the others
+	// deferred until sheet() builds them.
+	doc(activeOnly = false): SpreadsheetDoc {
+		const doc = workbookDoc(this.workbook, this.views, this.writable, activeOnly)
+		const worksheets = this.worksheets()
+
+		this.deferred = new WeakSet()
+		doc.sheets.forEach((view, index) => {
+			const sheet = worksheets[index]
+
+			if (view.deferred === true && sheet !== undefined) this.deferred.add(sheet)
+		})
 
 		return this.unprovable === undefined ? doc : { ...doc, unprovable: this.unprovable }
+	}
+
+	// A deferred sheet's view (grid index), as a result that keeps every other sheet: from now on edits keep
+	// it in step. Asked again, it sends nothing new: the view sent first reaches the page before this.
+	sheet(index: number): EditResult {
+		const sheet = this.worksheets()[index]
+		const deferred = sheet !== undefined && this.deferred.delete(sheet)
+
+		return this.sheetsResult(deferred ? new Set([index]) : new Set(), new Set())
 	}
 
 	// Grid sheet index → workbook sheet (worksheets only).
@@ -902,6 +924,14 @@ export class XlsxDocument {
 		this.verification ??= this.verify()
 
 		return this.verification
+	}
+
+	// Builds the formula engine a proven workbook's first edit would otherwise build (a second or more on a
+	// large one), while the user is still typing that edit.
+	prepareEditing(): void {
+		if (this.proven && this.hasFormulas && !this.closed) {
+			this.ensureEngine()
+		}
 	}
 
 	// The file's parts as opened, read again from its bytes for those let go; null when closed meanwhile.
@@ -1982,7 +2012,7 @@ export class XlsxDocument {
 		collect((index, row, col) => {
 			const sheet = worksheets[index]
 
-			if (sheet === undefined) {
+			if (sheet === undefined || this.deferred.has(sheet)) {
 				return
 			}
 
@@ -2025,14 +2055,16 @@ export class XlsxDocument {
 	}
 
 	// A view of each sheet in `layout` (grid indices), null for the rest; of the other sheets, only the
-	// `cells` whose view may have changed, every sheet's name, and the exact extent of those `reached`. A
-	// held extent only ever grows, so it can outlast an undone edit that grew the sheet; a reached sheet
-	// once came back in full, which reset it. Nothing else about a sheet outside `layout` changes: its
+	// `cells` whose view may have changed, every sheet's name, and the exact extent of those `reached`; of a
+	// deferred sheet, its name alone. A held extent only ever grows, so it can outlast an undone edit that
+	// grew the sheet; a reached sheet once came back in full, which reset it. Nothing else about a sheet outside `layout` changes: its
 	// merges, sizes and lock stay as they were.
 	private sheetsResult(layout: ReadonlySet<number>, reached: ReadonlySet<number>, ...cells: (readonly GridCell[])[]): EditResult {
 		const lockStructure = workbookStructureLocked(this.workbook)
 		const worksheets = this.worksheets()
-		const sheets = worksheets.map((sheet, index) => (layout.has(index) ? this.views.sheet(sheet, lockStructure) : null))
+		const sheets = worksheets.map((sheet, index) =>
+			layout.has(index) && !this.deferred.has(sheet) ? this.views.sheet(sheet, lockStructure) : null
+		)
 		const patches = this.patches(add => {
 			for (const list of cells) {
 				for (const cell of list) {
@@ -2045,7 +2077,7 @@ export class XlsxDocument {
 		for (const index of reached) {
 			const sheet = worksheets[index]
 
-			if (sheet !== undefined && !layout.has(index)) extents.push({ sheet: index, ...viewExtent(sheet) })
+			if (sheet !== undefined && !layout.has(index) && !this.deferred.has(sheet)) extents.push({ sheet: index, ...viewExtent(sheet) })
 		}
 
 		return {

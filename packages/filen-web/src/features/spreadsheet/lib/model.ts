@@ -1,6 +1,6 @@
-// What the spreadsheet worker hands the grid: a view of a workbook, never the workbook itself, which stays
-// in the worker (workers/spreadsheet.worker.ts) so a save can write it back with everything the view
-// leaves out. Plain, structured-cloneable data only.
+// What the spreadsheet workers hand the grid: a view of a workbook, never the workbook itself, which stays
+// in its worker (workers/spreadsheet.worker.ts, or workers/csv.worker.ts for text) so a save can write it
+// back with everything the view leaves out. Plain, structured-cloneable data only.
 
 export type SpreadsheetKind = "xlsx" | "xls" | "csv"
 
@@ -80,6 +80,9 @@ export interface SheetView {
 	// formatted otherwise, whose format wins over a Text column's, and the cells (keys) with details of
 	// their own that show nothing, whose own format wins over both. Absent when there are no Text ones.
 	textFormat?: { rows: number[]; cols: number[]; otherRows: number[]; otherCells: number[] }
+	// A workbook sheet not built yet (only the active one is at open): its name and extent only, with no
+	// cells, until the page first shows it and asks for it.
+	deferred?: true
 }
 
 export interface SpreadsheetDoc {
