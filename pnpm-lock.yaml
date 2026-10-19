@@ -711,6 +711,9 @@ importers:
         specifier: 0.8.3
         version: 0.8.3
     devDependencies:
+      '@codemirror/state':
+        specifier: 6.7.4
+        version: 6.7.4
       '@eslint/js':
         specifier: ^9.39.3
         version: 9.39.5
@@ -753,6 +756,12 @@ importers:
       react-dom:
         specifier: 19.2.3
         version: 19.2.3(react@19.2.3)
+      react-markdown:
+        specifier: 10.1.0
+        version: 10.1.0(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1)
+      remark-gfm:
+        specifier: 4.0.1
+        version: 4.0.1(supports-color@8.1.1)
       tsx:
         specifier: 4.23.13
         version: 4.23.13
@@ -8641,6 +8650,7 @@ packages:
 
   react-native-edge-to-edge@1.8.2:
     resolution: {integrity: sha512-9yhI/RpaXVkMqFKNHz72A7Vi8KrT6BqDcY8HOdck/so+qH0fq1EkIeNTSLplnoFW84DcLn2D7s9L/xfYSN8gyQ==}
+    deprecated: This package is deprecated. Set edgeToEdgeEnabled=true in android/gradle.properties instead.
     peerDependencies:
       react: '*'
       react-native: '*'

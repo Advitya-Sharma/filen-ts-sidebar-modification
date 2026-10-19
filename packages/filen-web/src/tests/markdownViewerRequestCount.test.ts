@@ -17,6 +17,9 @@ vi.mock("@/lib/sdk/client", () => ({
 	threadCount: () => 1
 }))
 
+// The rendered view's link gate reads the trusted link domains.
+vi.mock("@/lib/storage/adapter", () => ({ kvGetJson: () => Promise.resolve(null), kvSetJson: () => Promise.resolve() }))
+
 vi.mock("@/providers/themeProvider", () => ({ useTheme: () => ({ theme: "light", setTheme: vi.fn() }), resolveTheme: () => "light" }))
 
 // CodeMirror's own view needs layout jsdom lacks; a textarea stands in for the editor surface over a
@@ -73,6 +76,7 @@ import { setPreviewDirty, usePreviewUnsavedGuardStore } from "@/features/preview
 import { MarkdownViewer } from "@/features/preview/components/markdownViewer"
 import { PREVIEW_ACTIONS } from "@/features/preview/lib/keymap"
 import { registerAction } from "@/lib/keymap/registry"
+import { createTestQueryClient, queryClientWrapper } from "@/tests/testQueryClient"
 
 const ALT = "readme.md"
 const ORIGINAL = "# Original heading\n\nbody"
@@ -130,7 +134,9 @@ afterEach(() => {
 describe("MarkdownViewer request count", () => {
 	it("rendered -> source -> rendered -> source reuses the one download", async () => {
 		downloadFileBytes.mockResolvedValue(bytes(ORIGINAL))
-		render(createElement(MarkdownViewer, { item: mdFile("readonly"), alt: ALT }))
+		render(createElement(MarkdownViewer, { item: mdFile("readonly"), alt: ALT }), {
+			wrapper: queryClientWrapper(createTestQueryClient())
+		})
 
 		await screen.findByRole("heading", { name: "Original heading" })
 		toggle("View source")
@@ -152,7 +158,9 @@ describe("MarkdownViewer request count", () => {
 		)
 		const contentRef = { current: null as (() => string) | null }
 		const props = { alt: ALT, editable: true, onDirtyChange: setPreviewDirty, contentRef }
-		const { rerender } = render(createElement(MarkdownViewer, { key: "before", item: mdFile("before"), ...props }))
+		const { rerender } = render(createElement(MarkdownViewer, { key: "before", item: mdFile("before"), ...props }), {
+			wrapper: queryClientWrapper(createTestQueryClient())
+		})
 
 		await screen.findByRole("heading", { name: "Original heading" })
 		toggle("View source")

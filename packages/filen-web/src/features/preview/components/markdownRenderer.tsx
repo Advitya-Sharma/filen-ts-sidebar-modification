@@ -1,18 +1,14 @@
-import { type ReactNode } from "react"
-import Markdown, { type Components, type UrlTransform } from "react-markdown"
-import remarkGfm from "remark-gfm"
+import { type MouseEvent, type ReactNode } from "react"
 import { cn } from "@filen/shared"
+import { MarkdownView, type MarkdownComponents, type MarkdownUrlTransform } from "@filen/office/react/markdown"
 import { markdownUrlTransform } from "@/features/preview/components/markdownViewer.logic"
+import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
 
-// Shared rendered-markdown surface — extracted from markdownViewer.tsx so the notes reader's md split
-// preview reuses the SAME remark/rehype config and link-hardening as file preview rather than a second
-// copy. Preview's own markdownViewer.tsx is this module's regression net.
+// Shared rendered-markdown surface: file preview, the notes reader and editor preview, and the assistant's
+// replies render through the package's MarkdownView with these element slots.
 
-// react-markdown never parses raw HTML in the source into real elements (no rehype-raw plugin is used,
-// deliberately) — a `<script>`/`<img onerror>` written into a .md file renders as an escaped, inert
-// text string, never runs. urlTransform closes the remaining hole (a crafted `[link](javascript:...)`
-// or `![x](javascript:...)`) via the SAME scheme allowlist docxViewer.tsx's own sanitizeLinks sweep
-// uses — see markdownViewer.logic.ts.
+// Links open in a new tab, once their domain is trusted (the container's delegated handlers below); the
+// URL itself already passed the link policy (markdownViewer.logic.ts).
 function MarkdownLink({ href, children }: { href?: string | undefined; children?: ReactNode | undefined }) {
 	return (
 		<a
@@ -42,7 +38,7 @@ function MarkdownPre({ children }: { children?: ReactNode | undefined }) {
 
 // Module-scope (not re-created per render, no useMemo needed for a React-Compiler-managed component):
 // none of these close over per-render props, so a stable object reference is the natural shape here.
-const MARKDOWN_COMPONENTS: Components = {
+const MARKDOWN_COMPONENTS: MarkdownComponents = {
 	a: MarkdownLink,
 	code: MarkdownCode,
 	pre: MarkdownPre,
@@ -72,21 +68,25 @@ const MARKDOWN_COMPONENTS: Components = {
 	)
 }
 
-// `className` replaces the full-pane geometry for an inline host (the assistant's reply bubbles).
-// `overrides` replace single elements and `urlTransform` the link policy, for a host with a stricter one;
-// pass module-scope values.
-export function MarkdownRenderer({
+interface MarkdownRendererProps {
+	text: string
+	alt: string
+	className?: string | undefined
+	overrides?: MarkdownComponents | undefined
+	urlTransform?: MarkdownUrlTransform | undefined
+}
+
+function MarkdownBody({
 	text,
 	alt,
 	className,
 	overrides,
-	urlTransform = markdownUrlTransform
-}: {
-	text: string
-	alt: string
-	className?: string | undefined
-	overrides?: Components | undefined
-	urlTransform?: UrlTransform | undefined
+	urlTransform,
+	onClick,
+	onAuxClick
+}: MarkdownRendererProps & {
+	onClick?: ((event: MouseEvent<HTMLElement>) => void) | undefined
+	onAuxClick?: ((event: MouseEvent<HTMLElement>) => void) | undefined
 }) {
 	const components = overrides === undefined ? MARKDOWN_COMPONENTS : { ...MARKDOWN_COMPONENTS, ...overrides }
 
@@ -95,14 +95,37 @@ export function MarkdownRenderer({
 			role="document"
 			aria-label={alt}
 			className={cn("size-full overflow-auto px-6 py-4 select-text", className)}
+			onClick={onClick}
+			onAuxClick={onAuxClick}
 		>
-			<Markdown
-				remarkPlugins={[remarkGfm]}
-				urlTransform={urlTransform}
+			<MarkdownView
+				text={text}
 				components={components}
-			>
-				{text}
-			</Markdown>
+				urlTransform={urlTransform ?? markdownUrlTransform}
+			/>
 		</div>
 	)
+}
+
+function GatedMarkdown(props: MarkdownRendererProps) {
+	const linkGate = useTrustedLinkGate()
+
+	return (
+		<>
+			<MarkdownBody
+				{...props}
+				onClick={linkGate.onClick}
+				onAuxClick={linkGate.onAuxClick}
+			/>
+			{linkGate.dialog}
+		</>
+	)
+}
+
+// `className` replaces the full-pane geometry for an inline host (the assistant's reply bubbles).
+// `overrides` replace single elements and `urlTransform` the link policy, for a host with a stricter one;
+// pass module-scope values. A host that replaces the link slot owns its links, so only the default one
+// goes through the trust confirmation.
+export function MarkdownRenderer(props: MarkdownRendererProps) {
+	return props.overrides?.a === undefined ? <GatedMarkdown {...props} /> : <MarkdownBody {...props} />
 }

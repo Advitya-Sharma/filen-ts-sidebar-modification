@@ -269,12 +269,6 @@ export const chats = {
 	chatAttachDriveDialogTitle: "Attach from Drive",
 	/** Drive-attach picker — confirm/select hint shown under a selectable file row (not a button, click-to-attach) */
 	chatAttachDriveDialogHint: "Click a file to attach it",
-	/** External-link trust confirmation — dialog title, shown once per not-yet-trusted domain */
-	chatLinkTrustTitle: "Open external link?",
-	/** External-link trust confirmation — body, {{domain}} is the link's own hostname */
-	chatLinkTrustBody: "This link leads to {{domain}}, outside Filen. You won't be asked again for this domain.",
-	/** External-link trust confirmation — confirm button (opens the link in a new tab and remembers the domain) */
-	chatLinkTrustConfirm: "Open link",
 
 	// ── Typing indicators ────────────────────────────────────────────────────────
 	/** Typing indicator — a single remote user is typing (thread footer + sidebar row preview) */

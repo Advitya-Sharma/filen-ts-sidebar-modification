@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { externalLinkDomain, shouldInterceptLinkClick } from "@/features/chats/lib/linkTrust.logic"
+import { externalLinkDomain, shouldInterceptLinkClick } from "@/lib/trustedLinks/linkTrust.logic"
 
 // Version 4 (third group starts "4"), variant 8 (fourth "8"), and a 64-hex-char (32-byte) key —
 // @filen/shared's parseFilenPublicLink, which this recognition ultimately delegates to, hard-rejects
@@ -30,6 +30,17 @@ describe("externalLinkDomain", () => {
 
 	it("is null for a link with no host to confirm (mailto:, where the mail client asks)", () => {
 		expect(externalLinkDomain("mailto:someone@example.com")).toBeNull()
+	})
+
+	it("is null for the hostless communication schemes, which the OS's own UI confirms", () => {
+		for (const href of ["tel:+15551234", "sms:+15551234", "whatsapp://send?text=hi", "geo:37.78,-122.41", "maps:?q=Berlin"]) {
+			expect(externalLinkDomain(href)).toBeNull()
+		}
+	})
+
+	it("is null for a link the shared policy blocks", () => {
+		expect(externalLinkDomain("javascript://example.com/%0aalert(1)")).toBeNull()
+		expect(externalLinkDomain("ftp://example.com/f")).toBeNull()
 	})
 
 	it("distinguishes subdomains as separate domains (each gets its own one-time confirmation)", () => {

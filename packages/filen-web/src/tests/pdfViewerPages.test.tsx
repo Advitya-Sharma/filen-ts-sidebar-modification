@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { act, render, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor } from "@testing-library/react"
 import "@/lib/i18n"
 import { linkedFileItem } from "@/tests/fixtures/sdk"
+import { createTestQueryClient, queryClientWrapper } from "@/tests/testQueryClient"
 
 // PdfPage's own lifecycle against a stand-in pdf.js: eviction must release the page's decoded
 // resources, and a page reaching the render margin must not re-render its siblings.
@@ -18,6 +19,9 @@ interface FakePage {
 }
 
 const { pages } = vi.hoisted(() => ({ pages: new Map<number, FakePage>() }))
+
+// The link gate reads the trusted link domains.
+vi.mock("@/lib/storage/adapter", () => ({ kvGetJson: () => Promise.resolve(null), kvSetJson: () => Promise.resolve() }))
 
 function fakePage(): FakePage {
 	return {
@@ -133,7 +137,8 @@ async function mount(): Promise<void> {
 		<PdfViewer
 			item={item}
 			alt="doc.pdf"
-		/>
+		/>,
+		{ wrapper: queryClientWrapper(createTestQueryClient()) }
 	)
 
 	await waitFor(() => {
@@ -166,5 +171,24 @@ describe("PdfPage", () => {
 
 		expect(page(2).render).toHaveBeenCalledTimes(1)
 		expect(page(3).getViewport.mock.calls.length).toBe(siblingRenders)
+	})
+})
+
+describe("PDF links", () => {
+	it("asks before a link annotation opens a domain not trusted yet", async () => {
+		pages.set(1, {
+			...fakePage(),
+			getAnnotations: vi.fn(() => Promise.resolve([{ subtype: "Link", url: "https://example.com/x", rect: [0, 0, 10, 10] }]))
+		})
+		await mount()
+		fire(observerFor(1, "evict"), true)
+
+		const link = await screen.findByRole("link", { name: "https://example.com/x" })
+		const click = new MouseEvent("click", { bubbles: true, cancelable: true })
+
+		link.dispatchEvent(click)
+
+		expect(click.defaultPrevented).toBe(true)
+		expect(await screen.findByRole("alertdialog", { name: "Open external link?" })).toBeTruthy()
 	})
 })

@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { renderAsync } from "docx-preview"
 import { collectBlobUrls, sanitizeDocxLinks } from "@/features/preview/lib/docxDom"
 import { LoadingState } from "@/components/loadingState"
 import { PreviewErrorState } from "@/features/preview/components/previewErrorState"
-import { useTrustedLinkGate } from "@/features/chats/hooks/useTrustedLinkGate"
+import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
 
 // docx-preview, kept for one release only as the automatic fallback for documents the own engine
 // (docxViewer.tsx) fails on; removed with docxDom.ts after that.
@@ -91,16 +91,6 @@ export function DocxPreviewFallback({ bytes, alt }: { bytes: Uint8Array; alt: st
 		}
 	}, [bytes, retryToken])
 
-	// The links sanitizeDocxLinks kept open in a new tab, once their domain is trusted.
-	const gateLink = (event: MouseEvent<HTMLDivElement>): void => {
-		const anchor = event.target instanceof Element ? event.target.closest("a[target='_blank'][href]") : null
-		const href = anchor?.getAttribute("href")
-
-		if (href !== null && href !== undefined && linkGate.intercept(href)) {
-			event.preventDefault()
-		}
-	}
-
 	return (
 		<div className="relative size-full overflow-auto">
 			{status === "pending" ? (
@@ -125,13 +115,9 @@ export function DocxPreviewFallback({ bytes, alt }: { bytes: Uint8Array; alt: st
 				role="document"
 				aria-label={alt}
 				className={status === "success" ? "select-text" : "hidden"}
-				onClick={gateLink}
-				onAuxClick={event => {
-					// A middle-click opens a link too (in a new tab, without a click event).
-					if (event.button === 1) {
-						gateLink(event)
-					}
-				}}
+				// The links sanitizeDocxLinks kept open in a new tab, once their domain is trusted.
+				onClick={linkGate.onClick}
+				onAuxClick={linkGate.onAuxClick}
 			/>
 			{linkGate.dialog}
 		</div>

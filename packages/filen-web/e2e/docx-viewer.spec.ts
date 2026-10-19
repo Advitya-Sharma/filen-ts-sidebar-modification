@@ -24,7 +24,7 @@ import {
 	uploadFiles,
 	withScratchDirectory
 } from "./helpers/listing"
-import { chats } from "@/locales/en/chats"
+import { common } from "@/locales/en/common"
 import { preview } from "@/locales/en/preview"
 
 // The DOCX viewer in a real browser against the real backend, at each place a document opens read-only: the
@@ -192,14 +192,14 @@ async function expectLinks(page: Page, scope: Locator): Promise<void> {
 		// A domain not trusted yet asks first; the link opens from the confirmation.
 		await scope.getByRole("link", { name: VIEWER_LINKS.web.text, exact: true }).click()
 
-		const confirm = page.getByRole("alertdialog", { name: chats.chatLinkTrustTitle })
+		const confirm = page.getByRole("alertdialog", { name: common.linkTrustTitle })
 
 		await expect(confirm).toContainText(new URL(VIEWER_LINKS.web.href).hostname)
 		expect(opened).toHaveLength(0)
 
 		const popup = context.waitForEvent("page")
 
-		await confirm.getByRole("button", { name: chats.chatLinkTrustConfirm, exact: true }).click()
+		await confirm.getByRole("button", { name: common.linkTrustConfirm, exact: true }).click()
 
 		const tab = await popup
 

@@ -1,9 +1,9 @@
 import { type, type Type } from "arktype"
 import { kvGetJson, kvSetJson } from "@/lib/storage/adapter"
 
-// One-time-per-domain memory for the chat message external-link trust confirmation — a domain the user
-// has already confirmed opening once stays trusted for every future link to it, in every chat, across
-// reloads.
+// One-time-per-domain memory for the external-link trust confirmation: a domain confirmed once stays
+// trusted for every later link to it (chats, documents, markdown, PDF), across reloads. The key predates
+// the documents using it and stays, so trust already given carries over.
 const TRUSTED_DOMAINS_KV_KEY = "chats.trustedLinkDomains.v1"
 
 const trustedDomainsSchema: Type<string[]> = type("string[]")

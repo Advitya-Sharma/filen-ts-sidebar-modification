@@ -46,7 +46,7 @@ import { DocxPasswordGate, type PasswordVerdict } from "@/features/preview/compo
 import { DocxEditView, DocxProtectedEditView, type DocxSaveSource } from "@/features/preview/components/docxEditor"
 import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 import { DocxToolbar, type PasswordIntegrity } from "@/features/preview/components/docxToolbar"
-import { useTrustedLinkGate } from "@/features/chats/hooks/useTrustedLinkGate"
+import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
 import { LoadingState } from "@/components/loadingState"
 import { PreviewDownloadButton, PreviewErrorState, PreviewGate, PreviewLoading } from "@/features/preview/components/previewErrorState"
 import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"

@@ -1,5 +1,5 @@
-import { externalLinkDomain } from "@/features/chats/lib/linkTrust.logic"
-import { useTrustedLinkGate } from "@/features/chats/hooks/useTrustedLinkGate"
+import { externalLinkDomain } from "@/lib/trustedLinks/linkTrust.logic"
+import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
 import { ExternalAnchor } from "@/features/chats/components/thread/externalAnchor"
 
 // A message-text link anchor, gated by a one-time-per-domain trust confirmation before it's ever opened

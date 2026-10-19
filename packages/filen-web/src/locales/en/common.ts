@@ -222,5 +222,13 @@ export const common = {
 	/** Seek slider — spoken position; {{current}} and {{total}} are clock times such as 1:05 */
 	mediaTimeOf: "{{current}} of {{total}}",
 	/** Volume slider — spoken level; {{percent}} is 0-100 */
-	mediaVolumePercent: "{{percent}}%"
+	mediaVolumePercent: "{{percent}}%",
+
+	// ── External-link trust confirmation (chats, documents, markdown, PDF) ──────
+	/** Dialog title, shown once per not-yet-trusted domain */
+	linkTrustTitle: "Open external link?",
+	/** Body, {{domain}} is the link's own hostname */
+	linkTrustBody: "This link leads to {{domain}}, outside Filen. You won't be asked again for this domain.",
+	/** Confirm button (opens the link in a new tab and remembers the domain) */
+	linkTrustConfirm: "Open link"
 } as const

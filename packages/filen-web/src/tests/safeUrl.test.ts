@@ -54,6 +54,18 @@ describe("isSafeAbsoluteHref", () => {
 
 	it("fails closed on a string the URL parser can't resolve", () => {
 		expect(isSafeAbsoluteHref("http://")).toBe(false)
+		expect(isSafeAbsoluteHref("https://exa%mple.com")).toBe(false)
+	})
+
+	it("allows the shared policy's communication schemes", () => {
+		for (const href of ["tel:+15551234", "sms:+15551234", "whatsapp://send?text=hi", "geo:37.78,-122.41", "maps:?q=Berlin"]) {
+			expect(isSafeAbsoluteHref(href)).toBe(true)
+		}
+	})
+
+	it("rejects interior whitespace and control characters the URL parser would strip", () => {
+		expect(isSafeAbsoluteHref("https://exa\nmple.com")).toBe(false)
+		expect(isSafeAbsoluteHref("\x01https://example.com")).toBe(false)
 	})
 })
 

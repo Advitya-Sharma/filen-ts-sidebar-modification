@@ -13,7 +13,7 @@ vi.mock("@/lib/storage/adapter", () => ({
 	}
 }))
 
-import { getTrustedDomains, trustDomain } from "@/features/chats/lib/trustedDomains"
+import { getTrustedDomains, trustDomain } from "@/lib/trustedLinks/trustedDomains"
 
 beforeEach(() => {
 	kvStore.clear()

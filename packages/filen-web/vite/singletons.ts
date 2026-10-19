@@ -6,5 +6,7 @@ export const SINGLETONS = [
 	"@codemirror/view",
 	"@codemirror/language",
 	"@lezer/common",
-	"@lezer/highlight"
+	"@lezer/highlight",
+	"react-markdown",
+	"remark-gfm"
 ]

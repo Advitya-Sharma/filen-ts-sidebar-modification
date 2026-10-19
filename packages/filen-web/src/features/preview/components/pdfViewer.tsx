@@ -30,6 +30,7 @@ import {
 	type PdfLinkAnnotation
 } from "@/features/preview/components/pdfViewer.logic"
 import { useLatestRef } from "@/lib/useLatestRef"
+import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
 import { prefersReducedMotion } from "@/lib/motion"
 import { LoadingState } from "@/components/loadingState"
 import { Button } from "@/components/ui/button"
@@ -537,6 +538,7 @@ function PdfPageList({ doc, alt }: { doc: PDFDocumentProxy; alt: string }) {
 	const ratiosRef = useRef<Map<number, number>>(new Map())
 	const [currentPage, setCurrentPage] = useState(1)
 	const [scale, setScale] = useState(BASE_SCALE)
+	const linkGate = useTrustedLinkGate()
 
 	function goToPage(target: number): void {
 		const clamped = clampListboxIndex(target - 1, numPages) + 1
@@ -648,9 +650,12 @@ function PdfPageList({ doc, alt }: { doc: PDFDocumentProxy; alt: string }) {
 					<ZoomInIcon />
 				</Button>
 			</div>
+			{/* The annotation links open in a new tab once their domain is trusted. */}
 			<div
 				ref={containerRef}
 				className="min-h-0 flex-1 overflow-y-auto"
+				onClick={linkGate.onClick}
+				onAuxClick={linkGate.onAuxClick}
 			>
 				<PdfPages
 					doc={doc}
@@ -661,6 +666,7 @@ function PdfPageList({ doc, alt }: { doc: PDFDocumentProxy; alt: string }) {
 					pageRefs={pageRefs}
 				/>
 			</div>
+			{linkGate.dialog}
 		</div>
 	)
 }

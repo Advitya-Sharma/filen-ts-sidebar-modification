@@ -85,6 +85,7 @@ const ASSISTANT_RESTRICTED_PATHS = [
 	{ name: "@/features/chats/lib/inflight", message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/chats/lib/outboxCoordinator", message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/chats/lib/trustedDomains", message: ASSISTANT_FORBIDDEN },
+	{ name: "@/lib/trustedLinks/trustedDomains", message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/chats/lib/attachments", message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/chats/store/useChatsInflight", allowTypeImports: true, message: ASSISTANT_FORBIDDEN },
 	{ name: "@/features/audio/lib/playlists", importNames: ["deletePlaylistAction"], message: ASSISTANT_FORBIDDEN },

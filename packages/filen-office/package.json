@@ -38,7 +38,9 @@
 		"./core/docx/spelling": "./src/core/docx/spelling/index.ts",
 		"./dom/docx/editing": "./src/dom/docx/editing.ts",
 		"./dom/docx/save": "./src/dom/docx/save.ts",
-		"./react/docx/editor": "./src/react/docx/editor.ts"
+		"./react/docx/editor": "./src/react/docx/editor.ts",
+		"./core/markdown": "./src/core/markdown/index.ts",
+		"./react/markdown": "./src/react/markdown/index.ts"
 	},
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.react.json && tsc -p tsconfig.test.json && tsc -p tsconfig.dom-test.json",
@@ -60,6 +62,7 @@
 	},
 	"license": "AGPLv3",
 	"devDependencies": {
+		"@codemirror/state": "6.7.4",
 		"@eslint/js": "^9.39.3",
 		"@types/node": "^24.0.0",
 		"@types/react": "~19.2.18",
@@ -74,6 +77,8 @@
 		"prosemirror-view": "1.42.6",
 		"react": "19.2.3",
 		"react-dom": "19.2.3",
+		"react-markdown": "10.1.0",
+		"remark-gfm": "4.0.1",
 		"tsx": "4.23.13",
 		"typescript": "~6.0.3",
 		"typescript-eslint": "^8.56.1",
@@ -84,15 +89,21 @@
 		"fflate": "0.8.3"
 	},
 	"peerDependencies": {
+		"@codemirror/state": "^6.7.4",
 		"prosemirror-history": "^1.5.1",
 		"prosemirror-model": "^1.25.12",
 		"prosemirror-state": "^1.4.4",
 		"prosemirror-transform": "^1.12.2",
 		"prosemirror-view": "^1.42.6",
 		"react": ">=19.2.3",
-		"react-dom": ">=19.2.3"
+		"react-dom": ">=19.2.3",
+		"react-markdown": "^10.1.0",
+		"remark-gfm": "^4.0.1"
 	},
 	"peerDependenciesMeta": {
+		"@codemirror/state": {
+			"optional": true
+		},
 		"prosemirror-history": {
 			"optional": true
 		},
@@ -112,6 +123,12 @@
 			"optional": true
 		},
 		"react-dom": {
+			"optional": true
+		},
+		"react-markdown": {
+			"optional": true
+		},
+		"remark-gfm": {
 			"optional": true
 		}
 	}
