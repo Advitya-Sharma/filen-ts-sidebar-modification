@@ -7,12 +7,13 @@ import { asDirectoryOrFile, narrowItem, type DriveItem } from "@/features/drive/
 import { type DriveVariant } from "@/features/drive/lib/preferences"
 import { runPreviewSave } from "@/features/drive/lib/previewSave.logic"
 import { currentRootUuid } from "@/features/drive/lib/actions"
-import { driveListingQueryOptions, driveListingQueryUpdate, normalizeParentUuid } from "@/features/drive/queries/drive"
+import { driveListingQueryOptions, driveListingQueryUpdate, listingKnownCurrent, normalizeParentUuid } from "@/features/drive/queries/drive"
 import { emitPreviewFileMetaChanged, subscribePreviewReconcile, type PreviewReconcileEvent } from "@/features/preview/lib/previewReconcile"
 import type { FileMeta } from "@filen/sdk-rs"
 import { isRevisionOf, settleHeldRevisions, type PreviewRevision } from "@/features/preview/lib/remoteChange.logic"
 import { usePreviewCacheScope } from "@/features/preview/lib/accessMode"
 import { loadPreviewBytes } from "@/features/preview/lib/previewCache"
+import { isOwnSave, recordOwnSave } from "@/features/preview/lib/ownSaves"
 import { dropPreviewBuffer, usePreviewUnsavedGuardStore } from "@/features/preview/store/usePreviewUnsavedGuard"
 import { queryClient } from "@/queries/client"
 import { sdkApi } from "@/lib/sdk/client"
@@ -201,7 +202,8 @@ function handleRevision(ctx: RemoteChangeContext, revision: PreviewRevision, aft
 		case "show":
 			latest.commitSaved(slot.frozenUuid, revision.item)
 
-			if (decision.announce && !ownRestore) {
+			// A version this tab saved before a reload, met again through a listing restored from disk, is the user's own.
+			if (decision.announce && !ownRestore && !isOwnSave(revision.item.data.uuid)) {
 				toast(i18n.t("preview:previewUpdatedElsewhere"))
 			}
 
@@ -270,13 +272,22 @@ function handleFileMeta(ctx: RemoteChangeContext, uuid: string, meta: FileMeta):
 // After a socket drop, the file on screen is looked up in its directory's listing, once per reconnect:
 // a newer version, a rename, or its absence (trashed or moved away meanwhile) is answered as the missed
 // event would have been. A slot off screen is looked up when it comes on screen. The reconnect re-reads
-// the listings it invalidated, so the lookup joins that read or reuses its socket-fresh result.
+// the listings it invalidated, so the lookup joins that read or reuses its socket-fresh result. So is a
+// slot opened from a listing not yet read this session (restored from disk at boot): its row may name a
+// version since replaced, which an edit would then overwrite.
 async function checkCurrentSlot(ctx: RemoteChangeContext): Promise<void> {
 	const latest = ctx.latest.current
 	const slot = displayedOf(ctx, latest.items[latest.index])
 	const reconnects = ctx.reconnects.current
 
-	if (slot === null || (ctx.checkedAt.current.get(slot.frozenUuid) ?? 0) >= reconnects) {
+	if (slot === null) {
+		return
+	}
+
+	const parent = slot.displayed.type === "file" ? normalizeParentUuid(slot.displayed.data.parent, currentRootUuid()) : null
+	const unread = latest.variant === "drive" && !listingKnownCurrent("drive", parent)
+
+	if ((ctx.checkedAt.current.get(slot.frozenUuid) ?? (unread ? -1 : 0)) >= reconnects) {
 		return
 	}
 
@@ -293,7 +304,7 @@ async function checkCurrentSlot(ctx: RemoteChangeContext): Promise<void> {
 	let listing: DriveItem[]
 
 	try {
-		listing = await queryClient.query(driveListingQueryOptions("drive", normalizeParentUuid(displayed.data.parent, currentRootUuid())))
+		listing = await queryClient.query(driveListingQueryOptions("drive", parent))
 	} catch (e) {
 		log.warn("preview", "resync after reconnect failed", e)
 
@@ -528,6 +539,10 @@ export function usePreviewRemoteChanges({
 	// the save is judged against both.
 	function saveSettled(savedItem: DriveItem | null): void {
 		saving.current = false
+
+		if (savedItem !== null) {
+			recordOwnSave(savedItem.data.uuid)
+		}
 
 		const settled = settleHeldRevisions(held.current, savedItem?.data.uuid ?? null)
 		const leaving = heldLeaving.current

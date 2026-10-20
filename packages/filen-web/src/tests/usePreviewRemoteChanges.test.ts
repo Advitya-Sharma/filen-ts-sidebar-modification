@@ -6,10 +6,12 @@ import { QueryClient } from "@tanstack/react-query"
 import type { File, FileMeta } from "@filen/sdk-rs"
 import { testUuid } from "@/tests/support/uuid"
 
-const { toast, runPreviewSave, nameExistsInDirectory } = vi.hoisted(() => ({
+const { toast, runPreviewSave, nameExistsInDirectory, listings } = vi.hoisted(() => ({
 	toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
 	runPreviewSave: vi.fn(),
-	nameExistsInDirectory: vi.fn(() => Promise.resolve(false))
+	nameExistsInDirectory: vi.fn(() => Promise.resolve(false)),
+	// Whether the listings were read this session (else restored from disk).
+	listings: { current: true }
 }))
 
 vi.mock("sonner", () => ({ toast }))
@@ -22,6 +24,7 @@ vi.mock("@/features/drive/lib/actions", () => ({ currentRootUuid: () => "root" }
 vi.mock("@/features/drive/queries/drive", () => ({
 	driveListingQueryOptions: vi.fn(),
 	driveListingQueryUpdate: vi.fn(),
+	listingKnownCurrent: () => listings.current,
 	normalizeParentUuid: (parent: string) => parent
 }))
 
@@ -125,6 +128,7 @@ async function flush(): Promise<void> {
 
 beforeEach(() => {
 	vi.clearAllMocks()
+	listings.current = true
 	usePreviewUnsavedGuardStore.getState().clear()
 	setPreviewDirty(true)
 })
@@ -444,6 +448,66 @@ describe("usePreviewRemoteChanges", () => {
 		await flush()
 
 		expect(listing.reads()).toBe(2)
+	})
+
+	it("looks up a slot opened from a listing restored from disk, showing the version saved since", async () => {
+		setPreviewDirty(false)
+		listings.current = false
+
+		// The file was saved again (by this user before a reload, or elsewhere): the restored row names the
+		// version before.
+		const listing = serveListing([file("a2"), file("b", { stableUUID: "other" as File["stableUUID"] })])
+		const { hook, commitSaved } = setup()
+
+		await flush()
+
+		expect(listing.reads()).toBe(1)
+		expect(commitSaved.mock.lastCall?.[0]).toBe(testUuid("a"))
+		expect(commitSaved.mock.lastCall?.[1].data.uuid).toBe(testUuid("a2"))
+
+		// Once per slot until a reconnect.
+		hook.rerender({ items: [file("a"), file("b", { stableUUID: "other" as File["stableUUID"] })], index: 0 })
+		await flush()
+
+		expect(listing.reads()).toBe(1)
+	})
+
+	it("shows this tab's own save from before a reload unannounced, and one made elsewhere announced", async () => {
+		const { recordOwnSave } = await import("@/features/preview/lib/ownSaves")
+
+		setPreviewDirty(false)
+		listings.current = false
+		recordOwnSave(testUuid("a2"))
+		serveListing([file("a2")])
+
+		const own = setup()
+
+		await flush()
+
+		expect(own.commitSaved.mock.lastCall?.[1].data.uuid).toBe(testUuid("a2"))
+		expect(toast).not.toHaveBeenCalledWith("preview:previewUpdatedElsewhere")
+		own.hook.unmount()
+
+		serveListing([file("a3")])
+
+		const elsewhere = setup()
+
+		await flush()
+
+		expect(elsewhere.commitSaved.mock.lastCall?.[1].data.uuid).toBe(testUuid("a3"))
+		expect(toast).toHaveBeenCalledWith("preview:previewUpdatedElsewhere")
+	})
+
+	it("asks before showing a newer version over unsaved edits made in a slot from a restored listing", async () => {
+		listings.current = false
+		serveListing([file("a2")])
+
+		const { hook, commitSaved } = setup()
+
+		await flush()
+
+		expect(hook.result.current.prompt?.kind).toBe("revised")
+		expect(commitSaved).not.toHaveBeenCalled()
 	})
 
 	it("reopens on a file saved anew from its own upload, not a download of it", async () => {

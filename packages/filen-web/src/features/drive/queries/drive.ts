@@ -2,6 +2,8 @@ import { useQueries, useQuery, type Query, type UseQueryResult } from "@tanstack
 import { sdkApi } from "@/lib/sdk/client"
 import { currentSocketEpoch, socketLiveSince } from "@/lib/sdk/socketSession"
 import { queryClient } from "@/queries/client"
+import { persister } from "@/queries/persist"
+import { readSignOutPending } from "@/lib/signOutPending"
 import { cachedQueriesWithPrefix, cachedQuery, setQueryDataKeepInvalidated } from "@/queries/patch"
 // Whole-statement `import type` here too — sdk.worker.ts's own top-level code pulls in
 // @filen/sdk-rs as a real value import, same elision hazard as above.
@@ -95,6 +97,13 @@ function listingId(variant: DriveVariant, uuid: string | null): string {
 // mark overlaps may predate the change behind it, so none of those count.
 const listingsReadThisSession = new Set<string>()
 let listingStaleMarks = 0
+
+// Whether a listing's rows are known current: read this session under a live socket, every change since
+// patched in. A listing restored from disk is not, until its read lands: a row of it may name a version
+// since replaced (a save made just before a reload, or on another device).
+export function listingKnownCurrent(variant: DriveVariant, uuid: string | null): boolean {
+	return SOCKET_SYNCED_VARIANTS.has(variant) && listingsReadThisSession.has(listingId(variant, uuid))
+}
 
 type ListingPatch = (items: DriveItem[]) => DriveItem[]
 
@@ -729,11 +738,47 @@ function applyPatches(queued: readonly Patch[]): void {
 		// Most cached listings don't hold the row; writing one would re-render it for nothing.
 		if (next !== prev) {
 			setQueryDataKeepInvalidated(query, next)
+			persistLater(query)
 		}
 	}
 
 	for (const params of rereads.values()) {
 		void queryClient.invalidateQueries({ queryKey: driveListingQueryKey(params), exact: true })
+	}
+}
+
+// The persister writes a query's row only after its read: a listing patched since (a save, an upload, a
+// socket event) would come back from disk as it was read, naming versions since replaced, until the first
+// read after the next boot lands. So patched listings are written too, each once per window however many
+// patches it took meanwhile, and never once a sign-out started (its wipe must not be undone).
+const LISTING_PERSIST_MS = 500
+const unpersistedListings = new Set<Query>()
+let listingPersistTimer: ReturnType<typeof setTimeout> | undefined
+
+function persistLater(query: Query): void {
+	unpersistedListings.add(query)
+	listingPersistTimer ??= setTimeout(persistPatchedListings, LISTING_PERSIST_MS)
+}
+
+function persistPatchedListings(): void {
+	clearTimeout(listingPersistTimer)
+	listingPersistTimer = undefined
+
+	const queries = [...unpersistedListings]
+
+	unpersistedListings.clear()
+
+	if (readSignOutPending()) {
+		return
+	}
+
+	const cache = queryClient.getQueryCache()
+
+	for (const query of queries) {
+		// One removed meanwhile (a sign-out, a dropped listing) stays gone.
+		if (cache.get(query.queryHash) === query) {
+			void persister.persistQuery(query)
+		}
 	}
 }
 
