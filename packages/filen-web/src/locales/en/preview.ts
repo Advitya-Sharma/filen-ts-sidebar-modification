@@ -14,6 +14,10 @@ import { previewDocxSections } from "@/locales/en/previewDocx/sections"
 import { previewDocxMath } from "@/locales/en/previewDocx/math"
 import { previewDocxReflow } from "@/locales/en/previewDocx/reflow"
 import { previewSheetNext } from "@/locales/en/previewSheet/next"
+import { previewSheetFormat } from "@/locales/en/previewSheet/format"
+import { previewSheetSave } from "@/locales/en/previewSheet/save"
+import { previewSheetStructure } from "@/locales/en/previewSheet/structure"
+import { previewSheetKeys } from "@/locales/en/previewSheet/keys"
 
 export const preview = {
 	// ── Header ───────────────────────────────────────────────────────────────
@@ -730,5 +734,9 @@ export const preview = {
 	...previewDocxSections,
 	...previewDocxMath,
 	...previewDocxReflow,
-	...previewSheetNext
+	...previewSheetNext,
+	...previewSheetSave,
+	...previewSheetFormat,
+	...previewSheetKeys,
+	...previewSheetStructure
 } as const

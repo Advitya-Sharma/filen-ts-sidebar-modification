@@ -1,6 +1,7 @@
 import { formulaTranslator, renameSheetInFormula, rewriteFormula, sameSheet, shiftFormula } from "../../sheet/refs/formulaRefs"
 import type { AxisShift } from "./axis"
 import { moveReference, type CellMove } from "./moveRefs"
+import { quickShift } from "./quick"
 import { rewriteStructured, type TableEdit } from "./structured"
 
 // Formula text moved for one structure edit, as Excel moves it (ECMA-376 Part 1 §18.17; support.microsoft.com
@@ -33,6 +34,46 @@ function includesName(upper: string, name: string): boolean {
 	const target = name.toUpperCase()
 
 	return upper.includes(target) || (target.includes("'") && upper.includes(target.replaceAll("'", "''")))
+}
+
+// Characters of a sheet name written without quotes (anything else is quoted): letters, digits, "_", "." and
+// characters past ASCII; ":" joins the ends of a 3-D span.
+const UNQUOTED = /[\p{L}\p{N}_.:\u0080-\uffff]/u
+
+// The sheet prefix of each reference in text, before each "!": a sheet, or the two ends of a 3-D span. Prefixes of
+// other workbooks ([1]Sheet!) are left out: no edit here moves them.
+function sheetPrefixes(text: string): { sheet: string; last: string | null }[] {
+	const out: { sheet: string; last: string | null }[] = []
+
+	for (let bang = text.indexOf("!"); bang > 0; bang = text.indexOf("!", bang + 1)) {
+		let start = bang - 1
+		let prefix: string
+
+		if (text[start] === "'") {
+			// Back to the opening quote, past doubled ones.
+			for (start--; start >= 0; start--) {
+				if (text[start] !== "'") continue
+				if (start > 0 && text[start - 1] === "'") start--
+				else break
+			}
+
+			if (start < 0) continue
+
+			prefix = text.slice(start + 1, bang - 1).replaceAll("''", "'")
+		} else {
+			while (start >= 0 && UNQUOTED.test(text[start] ?? "")) start--
+
+			prefix = text.slice(start + 1, bang)
+		}
+
+		if (prefix === "" || prefix.startsWith("[")) continue
+
+		const colon = prefix.indexOf(":")
+
+		out.push(colon < 0 ? { sheet: prefix, last: null } : { sheet: prefix.slice(0, colon), last: prefix.slice(colon + 1) })
+	}
+
+	return out
 }
 
 const ENTITY = /&(?:#x([0-9a-fA-F]+)|#([0-9]+)|(amp|lt|gt|quot|apos));/g
@@ -77,6 +118,34 @@ export class FormulaShift {
 		const upper = unescaped(markup).toUpperCase()
 
 		return includesName(upper, op.target) || (op.kind === "moveCells" && includesName(upper, op.move.to))
+	}
+
+	// Whether markup no edit rewrites (extensions of newer schemas) holds a reference this edit would change: a sheet
+	// prefix naming the edited sheet (Name!, 'Name'!, either end of a 3-D span), a 3-D span when sheets are deleted
+	// or reordered, or a structured reference to a table that loses columns. Sheet names written elsewhere (feature
+	// names, GUIDs, attribute values) are no reference.
+	markupReferencesEdit(markup: string): boolean {
+		const text = unescaped(markup)
+		const op = this.op
+
+		if (this.tables.size > 0 && text.includes("[")) {
+			const upper = text.toUpperCase()
+
+			for (const table of this.tables.keys()) if (upper.includes(`${table}[`)) return true
+		}
+
+		for (const prefix of sheetPrefixes(text)) {
+			if (prefix.last !== null && (op.kind === "deleteSheet" || op.kind === "moveSheet")) return true
+			if (op.kind === "moveSheet") continue
+			if (sameSheet(prefix.sheet, op.target) || (prefix.last !== null && sameSheet(prefix.last, op.target))) return true
+			if (
+				op.kind === "moveCells" &&
+				(sameSheet(prefix.sheet, op.move.to) || (prefix.last !== null && sameSheet(prefix.last, op.move.to)))
+			)
+				return true
+		}
+
+		return false
 	}
 
 	// mayChange for formulas held in markup, where a name or an operator may be written as an entity.
@@ -131,7 +200,11 @@ export class FormulaShift {
 
 		switch (op.kind) {
 			case "axis":
-				return shiftFormula(text, own ?? NO_SHEET, op.target, op.shift).formula
+				// A formula on the edited sheet without sheet names: the quick scan, else the parser.
+				return (
+					(own !== null && sameSheet(own, op.target) ? quickShift(text, op.shift) : null) ??
+					shiftFormula(text, own ?? NO_SHEET, op.target, op.shift).formula
+				)
 			case "renameSheet":
 				return renameSheetInFormula(text, op.target, op.name)
 			case "deleteSheet": {

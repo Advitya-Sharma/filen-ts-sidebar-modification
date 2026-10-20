@@ -18,6 +18,7 @@ import {
 	shiftSizes,
 	withSizes
 } from "../core/sheet/index"
+import { defaultColPx, defaultColWidth } from "../core/sheet/sizes/sizes"
 
 const noneHidden = () => false
 
@@ -30,6 +31,23 @@ describe("units", () => {
 		for (let px = MIN_SIZE; px <= MAX_ROW_HEIGHT; px++) {
 			expect(rowHeightToPx(pxToRowHeight(px))).toBe(px)
 		}
+	})
+
+	// ECMA-376 Part 1 §18.3.1.13: a stored width counts the 5 px of padding.
+	it("reads and writes column widths as Excel stores them", () => {
+		expect(colWidthToPx(8.7109375)).toBe(61)
+		expect(colWidthToPx(9.140625)).toBe(64)
+		expect(pxToColWidth(61)).toBe(8.7109375)
+		expect(pxToColWidth(64)).toBe(9.140625)
+	})
+
+	it("sizes the default column from defaultColWidth, else from baseColWidth as Excel draws it", () => {
+		// 8 characters and padding, 61 px, round up to Excel's 64 px ("8.43 characters").
+		expect(defaultColPx({ defaultColWidth: Number.NaN, baseColWidth: 8 })).toBe(64)
+		expect(defaultColWidth({ defaultColWidth: Number.NaN, baseColWidth: 8 })).toBe(9.140625)
+		expect(defaultColPx({ defaultColWidth: Number.NaN, baseColWidth: 10 })).toBe(80)
+		expect(defaultColPx({ defaultColWidth: 9.140625, baseColWidth: 8 })).toBe(64)
+		expect(defaultColWidth({ defaultColWidth: 12.5, baseColWidth: 8 })).toBe(12.5)
 	})
 
 	it("stores widths at Excel's 1/256-character precision", () => {

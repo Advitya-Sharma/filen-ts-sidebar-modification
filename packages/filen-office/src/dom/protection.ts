@@ -1,7 +1,12 @@
-import { MAX_PROTECTION_SALT_BYTES, protectionHashInputs, type ProtectionHash } from "../core/docx/protection/hash"
-import { constantTimeEqual, decodeBase64, utf16LE } from "./encryption/bytes"
+import {
+	MAX_PROTECTION_SALT_BYTES,
+	MAX_PROTECTION_SPIN_COUNT,
+	protectionHashInputs,
+	type ProtectionHash
+} from "../core/docx/protection/hash"
+import { constantTimeEqual, decodeBase64, encodeBase64, utf16LE } from "./encryption/bytes"
 import { OfficeCryptoError } from "./encryption/errors"
-import { subtle } from "./encryption/subtle"
+import { randomBytes, subtle } from "./encryption/subtle"
 import { turn, turnsOf, type OfficeCryptoOptions, type Turns } from "./encryption/turns"
 
 // Checks a password against a protection hash (core/docx/protection/hash.ts) on the platform's WebCrypto:
@@ -17,7 +22,8 @@ const DIGEST_BYTES: Readonly<Record<ProtectionHash["algorithm"], number>> = { "S
 const SPIN_CHECK = 64
 
 // Rejects with an OfficeCryptoError "aborted" when the signal fires; "unsupported" covers a hash or salt that
-// is not base64 of the right size, and a platform without SubtleCrypto.
+// is not base64 of the right size, a spin count that is not a whole number up to the 10,000,000 Office supports
+// (a file's own count would otherwise spin without bound), and a platform without SubtleCrypto.
 export async function verifyProtectionPassword(
 	hash: ProtectionHash,
 	password: string,
@@ -25,6 +31,8 @@ export async function verifyProtectionPassword(
 ): Promise<ProtectionVerdict> {
 	let expected: Uint8Array
 	let salt: Uint8Array
+
+	if (!Number.isInteger(hash.spinCount) || hash.spinCount < 0 || hash.spinCount > MAX_PROTECTION_SPIN_COUNT) return "unsupported"
 
 	try {
 		expected = decodeBase64(hash.hash)
@@ -101,4 +109,44 @@ async function spin(hash: ProtectionHash, first: Uint8Array, turns: Turns): Prom
 	}
 
 	return h
+}
+
+// Excel's own parameters for a new password hash (a sheet, the workbook): SHA-512, a 16-byte salt, 100,000 spins.
+export const NEW_PROTECTION_SPIN_COUNT = 100_000
+const NEW_PROTECTION_SALT_BYTES = 16
+
+export interface NewProtectionHash {
+	readonly algorithmName: "SHA-512"
+	readonly hashValue: string
+	readonly saltValue: string
+	readonly spinCount: number
+}
+
+// The hash a protection with `password` is written with ([MS-OFFCRYPTO] §2.4.2.4: H0 = H(salt + UTF-16LE), then
+// spun), base64 as SpreadsheetML writes it.
+export async function hashProtectionPassword(password: string, options: OfficeCryptoOptions = {}): Promise<NewProtectionHash> {
+	const salt = randomBytes(NEW_PROTECTION_SALT_BYTES)
+	const encoded = utf16LE(password)
+	const first = new Uint8Array(salt.length + encoded.length)
+
+	first.set(salt)
+	first.set(encoded, salt.length)
+	encoded.fill(0)
+
+	const found = await spin(
+		{ algorithm: "SHA-512", hash: "", salt: "", spinCount: NEW_PROTECTION_SPIN_COUNT, input: "plain" },
+		first,
+		turnsOf(options)
+	)
+
+	try {
+		return {
+			algorithmName: "SHA-512",
+			hashValue: encodeBase64(found),
+			saltValue: encodeBase64(salt),
+			spinCount: NEW_PROTECTION_SPIN_COUNT
+		}
+	} finally {
+		found.fill(0)
+	}
 }

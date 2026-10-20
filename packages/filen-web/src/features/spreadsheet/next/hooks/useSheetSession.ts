@@ -37,6 +37,8 @@ export type SheetSessionState =
 			renamed: boolean
 			bytes: Uint8Array
 			editAnyway: (() => void) | undefined
+			// The file has a password to modify and it was not given: this reopens it for editing once it is.
+			modifyLocked: (() => void) | undefined
 	  }
 
 type Opened =
@@ -215,6 +217,13 @@ export function useSheetSession(item: DriveItem, documentKey: string): SheetSess
 					setWriteUnlocked({ source, key: documentKey })
 				}
 			: undefined
+	// The file's password to modify was given (checked by next/menus/modifyPassword.tsx): reopened for editing.
+	const modifyLocked =
+		!unlockedWrite && sharing?.modifyPassword === true
+			? () => {
+					setWriteUnlocked({ source, key: documentKey })
+				}
+			: undefined
 
 	return {
 		status: "ready",
@@ -224,6 +233,7 @@ export function useSheetSession(item: DriveItem, documentKey: string): SheetSess
 		unnamed,
 		renamed: !unnamed && nameFormat(item) !== openedAs,
 		bytes: opened.bytes,
-		editAnyway
+		editAnyway,
+		modifyLocked
 	}
 }

@@ -94,6 +94,8 @@ interface SpreadsheetViewerProps {
 	onOpenFile?: (item: DriveItem) => void
 	// A converted copy may be written beside this file (an .xls offers Save as .xlsx).
 	canSaveCopy?: boolean
+	// Idle autosave, which only the office engine's viewer (next/sheetNextViewer.tsx) does: unused here.
+	onAutosave?: () => boolean
 }
 
 const ORIGIN: Selection = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } }

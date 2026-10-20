@@ -186,3 +186,41 @@ export function rewriteStructured(text: string, context: string | null, tables: 
 
 	return pending === 0 ? text : out + text.slice(pending)
 }
+
+// The formula with every structured reference to a table in `names` (upper case -> new name) naming the new one.
+export function renameTables(text: string, names: ReadonlyMap<string, string>): string {
+	let out = ""
+	let pending = 0
+	let index = 0
+
+	while (index < text.length) {
+		const code = text.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) {
+			index = skipQuoted(text, index, code)
+
+			continue
+		}
+
+		if (!isWordChar(code) || (code >= 48 && code <= 57) || code === 35) {
+			index++
+
+			continue
+		}
+
+		let end = index
+
+		while (end < text.length && isWordChar(text.charCodeAt(end))) end++
+
+		const renamed = text.charCodeAt(end) === BRACKET_OPEN ? names.get(text.slice(index, end).toUpperCase()) : undefined
+
+		if (renamed !== undefined) {
+			out += `${text.slice(pending, index)}${renamed}`
+			pending = end
+		}
+
+		index = end
+	}
+
+	return pending === 0 ? text : out + text.slice(pending)
+}

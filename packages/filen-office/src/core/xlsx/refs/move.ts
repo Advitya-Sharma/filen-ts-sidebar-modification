@@ -12,7 +12,7 @@ import { pivotSource, rewriteChart, rewriteConnections, rewriteControlProperties
 import { partKind } from "./plan"
 import { MODEL_SECTIONS, PLAIN_SECTIONS, rewriteSection } from "./sections"
 import { formatRef, formatSqref, parseRef, parseSqref } from "./sqref"
-import { refState } from "./state"
+import { liveRelationships, refState } from "./state"
 import { readTable, rewriteTable } from "./tables"
 
 // What a cut and paste (cells moved) does outside the cells themselves, planned before anything changes. As Excel
@@ -382,7 +382,7 @@ async function plan(workbook: XlsxWorkbookModel, move: CellMove, slicing: Slicin
 
 		if (model === null) refuse("structureLocked", "unreadSheet")
 
-		for (const relationship of model.relationships.all)
+		for (const relationship of liveRelationships(workbook, entry.part, model.relationships.all))
 			if (!relationship.external && relationship.partName !== undefined) owners.set(partKey(relationship.partName), entry)
 
 		const sheet = new SheetMove(entry, move)
@@ -454,7 +454,7 @@ async function plan(workbook: XlsxWorkbookModel, move: CellMove, slicing: Slicin
 				break
 			case "table":
 				if (owner !== null) {
-					const relationship = owner.model?.relationships.all.find(
+					const relationship = liveRelationships(workbook, owner.part, owner.model?.relationships.all ?? []).find(
 						candidate => candidate.partName !== undefined && partKey(candidate.partName) === partKey(part.name)
 					)
 
@@ -521,7 +521,7 @@ async function plan(workbook: XlsxWorkbookModel, move: CellMove, slicing: Slicin
 async function placedParts(workbook: XlsxWorkbookModel, entry: XlsxSheetEntry, model: XlsxSheetModel, sheet: SheetMove): Promise<void> {
 	const state = refState(workbook)
 
-	for (const relationship of model.relationships.all) {
+	for (const relationship of liveRelationships(workbook, entry.part, model.relationships.all)) {
 		const type = lastSegment(relationship.type)
 
 		if (relationship.external || relationship.partName === undefined) continue

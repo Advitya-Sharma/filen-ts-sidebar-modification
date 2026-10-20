@@ -14,7 +14,12 @@
 #   {"op": "insertRows"|"deleteRows"|"insertColumns"|"deleteColumns", "sheet", "at", "count"}
 #   {"op": "sort", "sheet", "range": "A1:D9", "keys": [{"column", "ascending"?, "caseSensitive"?}], "header"?}
 #   {"op": "deleteSheet", "sheet"}  {"op": "moveSheet", "sheet", "to"}  ("to": the final 0-based position)
+#   {"op": "mergeCells"|"unmergeCells", "sheet", "range"}  {"op": "hideRows"|"hideColumns", "sheet", "at", "count", "hidden"?}
+#   {"op": "freeze", "sheet", "rows", "cols"}  {"op": "copySheet", "sheet", "name", "to"}  {"op": "renameSheet", "sheet", "name"}
+#   {"op": "hideSheet", "sheet", "hidden"?}  {"op": "tabColor", "sheet", "color"}  {"op": "protectSheet", "sheet", "password"?}
 # "sheet" is a name or a 0-based index; a sort key's column is 0-based within the range.
+# "views": true adds each sheet's view as loaded: {"name", "frozen", "splitRow", "splitColumn", "panes": [[firstRow,
+# firstColumn], ...]} (the view's panes in LibreOffice's order: XViewPane.getFirstVisibleRow/Column).
 import json
 import os
 import re
@@ -163,8 +168,53 @@ def apply(doc, op):
         current = list(sheets.getElementNames()).index(name)
         # moveByName inserts before the sheet at the given position of the current order.
         sheets.moveByName(name, op["to"] + 1 if op["to"] > current else op["to"])
+    elif kind == "mergeCells":
+        sheet_of(doc, op["sheet"]).getCellRangeByName(op["range"]).merge(True)
+    elif kind == "unmergeCells":
+        sheet_of(doc, op["sheet"]).getCellRangeByName(op["range"]).merge(False)
+    elif kind in ("hideRows", "hideColumns"):
+        sheet = sheet_of(doc, op["sheet"])
+        axis = sheet.getRows() if kind == "hideRows" else sheet.getColumns()
+        for index in range(op["at"], op["at"] + op["count"]):
+            axis.getByIndex(index).setPropertyValue("IsVisible", not op.get("hidden", True))
+    elif kind == "freeze":
+        controller = doc.getCurrentController()
+        controller.setActiveSheet(sheet_of(doc, op["sheet"]))
+        controller.freezeAtPosition(op["cols"], op["rows"])
+    elif kind == "copySheet":
+        sheets = doc.getSheets()
+        sheets.copyByName(sheet_of(doc, op["sheet"]).getName(), op["name"], op["to"])
+    elif kind == "renameSheet":
+        sheet_of(doc, op["sheet"]).setName(op["name"])
+    elif kind == "hideSheet":
+        sheet_of(doc, op["sheet"]).setPropertyValue("IsVisible", not op.get("hidden", True))
+    elif kind == "tabColor":
+        sheet_of(doc, op["sheet"]).setPropertyValue("TabColor", op["color"])
+    elif kind == "protectSheet":
+        sheet_of(doc, op["sheet"]).protect(op.get("password", ""))
     else:
         raise ValueError("unknown operation " + kind)
+
+
+def views(doc):
+    controller = doc.getCurrentController()
+    out = []
+    sheets = doc.getSheets()
+    for index in range(sheets.getCount()):
+        sheet = sheets.getByIndex(index)
+        controller.setActiveSheet(sheet)
+        panes = []
+        for k in range(controller.getCount()):
+            pane = controller.getByIndex(k)
+            panes.append([pane.getFirstVisibleRow(), pane.getFirstVisibleColumn()])
+        out.append({
+            "name": sheet.getName(),
+            "frozen": bool(controller.hasFrozenPanes()),
+            "splitRow": controller.getSplitRow(),
+            "splitColumn": controller.getSplitColumn(),
+            "panes": panes,
+        })
+    return out
 
 
 def run(desktop, job):
@@ -184,6 +234,8 @@ def run(desktop, job):
             doc.calculateAll()
         else:
             result["skipCalc"] = outside[:200]
+        if job.get("views"):
+            result["views"] = views(doc)
         budget = int(job.get("maxCells", 250000))
         before, count, truncated = dump(doc, budget)
         out = {"before": before}

@@ -1,0 +1,29 @@
+import type { SheetFileKind, SheetRefusal } from "@filen/office/core/sheet"
+import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
+import { isTextSheetKind, textToXlsx } from "@/features/spreadsheet/next/lib/sheetHosts"
+import { fileStem } from "@/features/spreadsheet/next/save/sheetSave.logic"
+
+export type SheetXlsxCopy =
+	{ readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly refusal: SheetRefusal | null }
+
+// Which open files Save as .xlsx: a text file (its cells as they now are, edits included) and a legacy workbook
+// (opened from its conversion, view-only).
+export function savesAsXlsx(kind: SheetFileKind): boolean {
+	return kind === "xls" || isTextSheetKind(kind)
+}
+
+// The .xlsx a Save as uploads. A text file's cells go from its worker to the workbook worker, which makes the
+// workbook, its sheet named after the file. A legacy workbook's session holds the .xlsx it was converted to, saved
+// as it stands. An open entry is the caller's to commit first.
+export async function sheetXlsxCopy(handle: SheetHandle, kind: SheetFileKind, fileName: string): Promise<SheetXlsxCopy> {
+	if (isTextSheetKind(kind)) {
+		const { bytes } = await handle.session.query("saveAs.cells", {})
+		const converted = await textToXlsx(bytes, fileStem(fileName))
+
+		return converted.ok ? { ok: true, bytes: converted.bytes } : { ok: false, refusal: converted.refusal }
+	}
+
+	const saved = await handle.session.save()
+
+	return saved.ok ? { ok: true, bytes: saved.bytes } : { ok: false, refusal: null }
+}

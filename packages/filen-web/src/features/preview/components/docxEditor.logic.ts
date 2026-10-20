@@ -50,11 +50,7 @@ import { CONTROL_INSERT_VARIANTS } from "@/features/preview/components/docxComma
 import { SECTION_BREAK_VARIANTS } from "@/features/preview/components/docxCommandLabels/sections"
 import { ROTATE_VARIANTS, WRAP_VARIANTS } from "@/features/preview/components/docxCommandLabels/drawings"
 
-// Idle autosave: this long after the last edit while there are unsaved changes (one version per pause).
-export const AUTOSAVE_IDLE_MS = 30_000
-
-// E2E builds: the sessionStorage key ("off") a read-only test lane sets so the editor never autosaves there.
-export const E2E_AUTOSAVE_KEY = "filen-e2e-docx-autosave"
+export { AUTOSAVE_IDLE_MS } from "@/features/office/lib/officeAutosave"
 
 // The package's commands by feature: each feature labels its own in docxCommandLabels/<feature>.ts and fills
 // its toolbar slot. An id the package lacks fails `satisfies`, a package id missing here the test's type check.

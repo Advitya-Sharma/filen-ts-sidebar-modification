@@ -5,12 +5,15 @@ import {
 	type SheetId,
 	type SheetLayout,
 	type SheetRange,
-	type SheetRenderStyle
+	type SheetPatternType,
+	type SheetRenderStyle,
+	type SheetTile
 } from "../../../core/sheet/protocol"
+import { fitGeneral } from "../../../core/sheet/numfmt/general"
 import { axisEntry, shownIndex } from "../axis"
 import type { SheetGridModel } from "../model"
 import type { SheetGridTheme } from "../theme"
-import { entryRepeat, entryRuns, entryText } from "../tiles"
+import { entryInput, entryRepeat, entryRuns, entryText } from "../tiles"
 import { screenOf, type AxisView, type GridView } from "../view"
 import { BorderPainter, strongerLine } from "./borders"
 import { rgb, type GridCanvas } from "./canvas"
@@ -20,6 +23,14 @@ import { layoutText, textFont, type TextLine, type TextMeasurer, type TextRun } 
 // The cells layer: per pane (frozen corner, frozen rows, frozen columns, body), gridlines, fills (a cell's own
 // style, else its row's or column's), merged blocks, borders and text. Only cells on screen are visited, so a
 // frame costs what the viewport holds, never what the sheet holds.
+//
+// A right-to-left sheet (sheetView rightToLeft, §18.3.1.87) is drawn mirrored: column A on the right, as Excel and
+// LibreOffice show it. The grid is laid out as for left to right and drawn through a mirroring transform; text is
+// drawn unmirrored at its mirrored place. A cell's left and right borders are its leading and trailing edges
+// (Part 4 §15.5.1/§15.5.2, equivalent to start and end, Part 1 §18.8.37/§18.8.16), so they mirror with the grid.
+// Explicit left and right alignment stays on that side of the screen ("even in Right-to-Left mode", §18.18.40), as
+// do diagonals and patterns. General alignment does not follow the sheet (§18.18.40 is silent; LibreOffice measured):
+// numbers at the right, text at the side its own direction starts from.
 
 // Text inset from the cell's edges at 100 %, as Excel draws it.
 export const TEXT_PADDING = 3
@@ -68,7 +79,8 @@ interface Segment {
 export function segments(view: AxisView): Segment[] {
 	const parts: Segment[] = []
 
-	if (view.frozen > 0) parts.push({ first: 0, last: view.frozen - 1, start: view.header, end: view.header + view.frozenSize })
+	if (view.frozen > 0)
+		parts.push({ first: view.frozenFirst, last: view.frozenEnd - 1, start: view.header, end: view.header + view.frozenSize })
 	if (view.last >= view.first) parts.push({ first: view.first, last: view.last, start: view.header + view.frozenSize, end: view.view })
 
 	return parts
@@ -147,7 +159,7 @@ class Lookup {
 
 		const found = this.scene.model.entry(this.scene.sheet, row, col)
 
-		return found === null ? "" : entryText(found.tile, found.entry)
+		return found === null ? "" : shownText(this.scene, found.tile, found.entry)
 	}
 
 	merge(row: number, col: number): SheetRange | null {
@@ -163,6 +175,16 @@ class Lookup {
 	occupied(row: number, col: number): boolean {
 		return this.text(row, col) !== "" || this.merge(row, col) !== null
 	}
+}
+
+// Whether a formula cell shows its formula instead of its result (Ctrl+`, Excel's Show Formulas).
+function showsFormula(scene: CellScene, tile: SheetTile, entry: number): boolean {
+	return ((tile.flags[entry] ?? 0) & CellFlag.FORMULA) !== 0 && scene.model.getSnapshot().showFormulas
+}
+
+// What an entry shows: its text, or its formula as typed.
+function shownText(scene: CellScene, tile: SheetTile, entry: number): string {
+	return showsFormula(scene, tile, entry) ? entryInput(tile, entry) : entryText(tile, entry)
 }
 
 function intersecting(layout: SheetLayout, rows: Segment, cols: Segment): SheetRange[] {
@@ -189,15 +211,48 @@ function intersecting(layout: SheetLayout, rows: Segment, cols: Segment): SheetR
 
 export function paintCells(painters: CellPainters, scene: CellScene): void {
 	const { canvas } = painters
-	const { view, theme, pixelRatio } = scene
+	const { view, theme } = scene
 
-	canvas.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+	logical(canvas, scene)
 	canvas.fillStyle = theme.background
 	canvas.fillRect(0, 0, view.width, view.height)
 	painters.borders.reset(theme.border)
 	painters.measurer.reset()
+	roundedTexts.delete(scene.model)
 
 	for (const rows of segments(view.rows)) for (const cols of segments(view.cols)) paintPane(painters, scene, rows, cols)
+}
+
+// restore() puts back the font saved with the state, which the measurer cannot see.
+function restore(painters: CellPainters): void {
+	painters.canvas.restore()
+	painters.measurer.reset()
+}
+
+// The transform cells are laid out in: mirrored for a right-to-left sheet.
+function logical(canvas: GridCanvas, scene: CellScene): void {
+	const { pixelRatio, view } = scene
+
+	if (scene.layout.rightToLeft) canvas.setTransform(-pixelRatio, 0, 0, pixelRatio, view.width * pixelRatio, 0)
+	else canvas.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+}
+
+// The screen's own transform, for text in a mirrored sheet: a span from x to x + width is drawn from screen x.
+function physical(canvas: GridCanvas, scene: CellScene): void {
+	canvas.setTransform(scene.pixelRatio, 0, 0, scene.pixelRatio, 0, 0)
+}
+
+// Where a span laid out from x to x + width starts on screen.
+function screenX(scene: CellScene, x: number, width: number): number {
+	return scene.layout.rightToLeft ? scene.view.width - x - width : x
+}
+
+// The pattern drawn mirrored that shows the file's (a diagonal hatch leans the other way).
+const MIRRORED_PATTERNS: Partial<Record<SheetPatternType, SheetPatternType>> = {
+	darkDown: "darkUp",
+	darkUp: "darkDown",
+	lightDown: "lightUp",
+	lightUp: "lightDown"
 }
 
 interface Box {
@@ -304,7 +359,7 @@ function paintPane(painters: CellPainters, scene: CellScene, rows: Segment, cols
 		}
 	})
 
-	canvas.restore()
+	restore(painters)
 }
 
 function mergeBox(view: GridView, merge: SheetRange): Box {
@@ -319,7 +374,12 @@ function mergeBox(view: GridView, merge: SheetRange): Box {
 function fillBox(painters: CellPainters, scene: CellScene, style: SheetRenderStyle, box: Box): void {
 	const { canvas, patterns } = painters
 
-	canvas.fillStyle = style.pattern !== undefined ? patterns.fill(canvas, style.pattern, scene.pixelRatio) : rgb(style.fill ?? 0xffffff)
+	const pattern =
+		style.pattern !== undefined && scene.layout.rightToLeft
+			? { ...style.pattern, type: MIRRORED_PATTERNS[style.pattern.type] ?? style.pattern.type }
+			: style.pattern
+
+	canvas.fillStyle = pattern !== undefined ? patterns.fill(canvas, pattern, scene.pixelRatio) : rgb(style.fill ?? 0xffffff)
 	canvas.fillRect(box.x, box.y, box.width, box.height)
 }
 
@@ -402,20 +462,21 @@ function paintBorders(
 				}
 			}
 
-			if (merge === null) diagonals(borders, style, { x, y, width, height }, scale)
+			if (merge === null) diagonals(borders, style, { x, y, width, height }, scale, scene.layout.rightToLeft)
 		})
 	})
 
-	for (const { merge, box } of blocks) diagonals(borders, styleOf(merge.startRow, merge.startCol), box, scale)
+	for (const { merge, box } of blocks) diagonals(borders, styleOf(merge.startRow, merge.startCol), box, scale, scene.layout.rightToLeft)
 }
 
 function hasFill(style: SheetRenderStyle): boolean {
 	return style.fill !== undefined || style.pattern !== undefined
 }
 
-function diagonals(borders: BorderPainter, style: SheetRenderStyle, box: Box, scale: number): void {
-	const up: SheetBorderLine | undefined = style.diagonalUp
-	const down: SheetBorderLine | undefined = style.diagonalDown
+// Mirrored, a line laid out going down shows going up.
+function diagonals(borders: BorderPainter, style: SheetRenderStyle, box: Box, scale: number, mirrored: boolean): void {
+	const up: SheetBorderLine | undefined = mirrored ? style.diagonalDown : style.diagonalUp
+	const down: SheetBorderLine | undefined = mirrored ? style.diagonalUp : style.diagonalDown
 	const onFill = hasFill(style)
 
 	if (up !== undefined) borders.diagonal(up, "up", box.x, box.y, box.width - 1, box.height - 1, scale, onFill)
@@ -435,12 +496,72 @@ interface CellText {
 	readonly align: Align
 	readonly wrap: boolean
 	readonly pending: boolean
+	// Where the text came from, for what only a cell too narrow for it needs (its General value).
+	readonly tile: SheetTile | null
+	readonly entry: number
+	readonly row: number
+	readonly col: number
 }
 
-function horizontal(style: SheetRenderStyle, flags: number, pending: boolean, text: string): Align {
+// General numbers the last frame drew rounded to fit their cell, by grid and "sheet:row:col".
+const roundedTexts = new WeakMap<SheetGridModel, Map<string, string>>()
+
+// What the last frame drew for a General number it rounded to fit its cell (Excel's Increase Decimal starts from
+// it), or undefined when it drew the number whole or not at all.
+export function roundedGeneral(model: SheetGridModel, sheet: SheetId, row: number, col: number): string | undefined {
+	return roundedTexts.get(model)?.get(`${String(sheet)}:${String(row)}:${String(col)}`)
+}
+
+type GeneralLayer = NonNullable<NonNullable<SheetTile["layers"]>["general"]>
+
+// Each "general" layer's rows by entry, built when a cell of its tile first does not fit.
+const generalRows = new WeakMap<GeneralLayer, Map<number, number>>()
+
+// The value of an entry shown in plain General (the tile's "general" layer), or null.
+function generalValue(tile: SheetTile | null, entry: number): { value: number; decimal: string } | null {
+	const layer = tile?.layers?.general
+
+	if (layer === undefined) return null
+
+	let rows = generalRows.get(layer)
+
+	if (rows === undefined) {
+		rows = new Map()
+
+		for (let i = 0; i < layer.entries.length; i++) rows.set(layer.entries[i] ?? -1, i)
+
+		generalRows.set(layer, rows)
+	}
+
+	const row = rows.get(entry)
+
+	return row === undefined ? null : { value: layer.values[row] ?? 0, decimal: layer.decimal }
+}
+
+// Letters of the right-to-left scripts.
+const RTL_LETTER =
+	/[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}\p{Script=Samaritan}\p{Script=Mandaic}\p{Script=Adlam}]/u
+const LETTER = /\p{L}/u
+
+// Whether text reads right to left: its reading order, else its first letter's script (the "context" order).
+function readsRightToLeft(style: SheetRenderStyle, text: string): boolean {
+	if (style.rightToLeft === true) return true
+
+	const letter = LETTER.exec(text)
+
+	return letter !== null && RTL_LETTER.test(letter[0])
+}
+
+// The side as laid out: the screen's left is the layout's right in a mirrored sheet.
+function side(screen: "left" | "right", mirrored: boolean): Align {
+	return mirrored ? (screen === "left" ? "right" : "left") : screen
+}
+
+function horizontal(style: SheetRenderStyle, flags: number, pending: boolean, text: string, mirrored: boolean): Align {
 	switch (style.align) {
 		case "left":
 		case "right":
+			return side(style.align, mirrored)
 		case "center":
 		case "fill":
 			return style.align
@@ -448,17 +569,18 @@ function horizontal(style: SheetRenderStyle, flags: number, pending: boolean, te
 		case "distributed":
 			return "center"
 		case "justify":
-			return "left"
 		case undefined:
 			break
 	}
 
-	// General: numbers right, logical values and errors centred, text left (Excel's "General" alignment).
-	if (pending) return /^[-+]?[\d.,]+%?$/u.test(text.trim()) ? "right" : "left"
-	if ((flags & CellFlag.NUMBER) !== 0) return "right"
-	if ((flags & (CellFlag.BOOLEAN | CellFlag.ERROR)) !== 0) return "center"
+	// General: numbers right, logical values and errors centred, text left (Excel's "General" alignment); text that
+	// reads right to left starts at the right.
+	if (style.align === undefined) {
+		if (pending ? /^[-+]?[\d.,]+%?$/u.test(text.trim()) : (flags & CellFlag.NUMBER) !== 0) return side("right", mirrored)
+		if (!pending && (flags & (CellFlag.BOOLEAN | CellFlag.ERROR)) !== 0) return "center"
+	}
 
-	return "left"
+	return side(readsRightToLeft(style, text) ? "right" : "left", mirrored)
 }
 
 function cellText(scene: CellScene, lookup: Lookup, row: number, col: number): CellText | null {
@@ -476,13 +598,42 @@ function cellText(scene: CellScene, lookup: Lookup, row: number, col: number): C
 			style,
 			flags: 0,
 			repeat: null,
-			align: horizontal(style, 0, true, pending),
+			align: horizontal(style, 0, true, pending, scene.layout.rightToLeft),
 			wrap: style.wrap === true,
-			pending: true
+			pending: true,
+			tile: null,
+			entry: -1,
+			row,
+			col
 		}
 	}
 
 	if (found === null) return null
+
+	// Ctrl+`: a formula shows as typed, as text (aligned, running on and never "#" as text is).
+	if (showsFormula(scene, found.tile, found.entry)) {
+		const input = entryInput(found.tile, found.entry)
+
+		if (input === "") return null
+
+		const flags =
+			(found.tile.flags[found.entry] ?? 0) & ~(CellFlag.NUMBER | CellFlag.BOOLEAN | CellFlag.ERROR | CellFlag.RICH | CellFlag.REPEAT)
+
+		return {
+			text: input,
+			runs: null,
+			style,
+			flags,
+			repeat: null,
+			align: horizontal(style, flags, false, input, scene.layout.rightToLeft),
+			wrap: style.wrap === true,
+			pending: false,
+			tile: null,
+			entry: -1,
+			row,
+			col
+		}
+	}
 
 	const text = entryText(found.tile, found.entry)
 
@@ -501,9 +652,13 @@ function cellText(scene: CellScene, lookup: Lookup, row: number, col: number): C
 		style,
 		flags,
 		repeat: (flags & CellFlag.REPEAT) !== 0 ? entryRepeat(found.tile, found.entry) : null,
-		align: horizontal(style, flags, false, text),
+		align: horizontal(style, flags, false, text, scene.layout.rightToLeft),
 		wrap: style.wrap === true || style.align === "justify" || style.align === "distributed",
-		pending: false
+		pending: false,
+		tile: found.tile,
+		entry: found.entry,
+		row,
+		col
 	}
 }
 
@@ -622,11 +777,26 @@ function drawText(painters: CellPainters, scene: CellScene, content: CellText, b
 
 		lines = layoutText(measurer, text.repeat(Math.min(copies, 1024)), null, style, { ...options, wrap: false })
 	} else if ((content.flags & CellFlag.NUMBER) !== 0 && !content.wrap && rotation === 0 && widest > avail && !content.pending) {
-		// A number too wide for its cell shows as "#" across it (Excel never cuts a number).
+		// A number too wide for its cell: General rounds it to fit, as Excel does; anything else, or a General number
+		// nothing fits, shows as "#" across the cell (Excel never cuts a number).
+		const general = generalValue(content.tile, content.entry)
+		const fitted =
+			general === null ? null : fitGeneral(general.value, general.decimal, candidate => measurer.width(font.css, candidate) <= avail)
 		const hashWidth = measurer.width(font.css, "#")
 		const count = hashWidth > 0 ? Math.max(1, Math.floor(avail / hashWidth)) : 1
 
-		lines = layoutText(measurer, "#".repeat(Math.min(count, 4096)), null, style, { ...options, wrap: false })
+		if (fitted !== null) {
+			let rounded = roundedTexts.get(scene.model)
+
+			if (rounded === undefined) {
+				rounded = new Map()
+				roundedTexts.set(scene.model, rounded)
+			}
+
+			rounded.set(`${String(scene.sheet)}:${String(content.row)}:${String(content.col)}`, fitted)
+		}
+
+		lines = layoutText(measurer, fitted ?? "#".repeat(Math.min(count, 4096)), null, style, { ...options, wrap: false })
 	} else if (style.shrink === true && !content.wrap && rotation === 0 && widest > avail && widest > 0) {
 		shrink = Math.max(0.25, avail / widest)
 	}
@@ -648,8 +818,10 @@ function drawText(painters: CellPainters, scene: CellScene, content: CellText, b
 		canvas.clip()
 	}
 
+	if (scene.layout.rightToLeft) physical(canvas, scene)
+
 	if (rotation !== 0 && rotation !== 255) {
-		drawRotated(painters, lines[0], style, content.align, box, padding, rotation, color)
+		drawRotated(painters, scene, lines[0], style, content.align, box, padding, rotation, color)
 	} else {
 		const valign = style.valign ?? "bottom"
 		let top =
@@ -673,12 +845,14 @@ function drawText(painters: CellPainters, scene: CellScene, content: CellText, b
 			const height = heights[k] ?? 0
 			const baseline = top + height - (height - line.px * shrink) / 2 - line.px * shrink * DESCENT
 
-			drawLine(painters, line, x, baseline, shrink, color)
+			drawLine(painters, line, screenX(scene, x, lineWidth), baseline, shrink, color)
 			top += height
 		})
 	}
 
-	if (!fits) canvas.restore()
+	if (scene.layout.rightToLeft) logical(canvas, scene)
+
+	if (!fits) restore(painters)
 }
 
 function drawLine(
@@ -726,6 +900,7 @@ function drawLine(
 // Text turned by `degrees` (counter-clockwise): its turned box is placed in the cell as the alignment says.
 function drawRotated(
 	painters: CellPainters,
+	scene: CellScene,
 	line: TextLine | undefined,
 	style: SheetRenderStyle,
 	align: Align,
@@ -756,8 +931,8 @@ function drawRotated(
 				: box.y + box.height - padding - turnedHeight / 2
 
 	canvas.save()
-	canvas.translate(cx, cy)
+	canvas.translate(screenX(scene, cx, 0), cy)
 	canvas.rotate(-radians)
 	drawLine(painters, line, -line.width / 2, line.px * (0.5 - DESCENT), 1, color)
-	canvas.restore()
+	restore(painters)
 }

@@ -14,7 +14,11 @@ export interface AxisView {
 	readonly axis: GridAxis
 	// The header band (0 when the sheet hides headings).
 	readonly header: number
+	// The frozen indices: `frozen` of them from `frozenFirst` (to `frozenEnd`, exclusive). Those before
+	// `frozenFirst` are not shown (Excel's view of a sheet frozen while scrolled).
 	readonly frozen: number
+	readonly frozenFirst: number
+	readonly frozenEnd: number
 	readonly frozenSize: number
 	// Where the scrolled part starts on the axis.
 	readonly bodyStart: number
@@ -45,18 +49,20 @@ export function bodyTotal(view: AxisView): number {
 	return Math.max(0, view.axis.total - view.bodyStart)
 }
 
-function axisView(axis: GridAxis, header: number, frozenCount: number, scroll: number, viewSize: number): AxisView {
-	const frozen = Math.min(frozenCount, axis.count)
-	const frozenSize = axis.offset(frozen)
-	const bodyStart = frozenSize
+function axisView(axis: GridAxis, header: number, frozenFrom: number, frozenCount: number, scroll: number, viewSize: number): AxisView {
+	const frozenFirst = frozenCount > 0 ? Math.min(frozenFrom, axis.count) : 0
+	const frozenEnd = Math.min(frozenFirst + frozenCount, axis.count)
+	const frozen = frozenEnd - frozenFirst
+	const bodyStart = axis.offset(frozenEnd)
+	const frozenSize = bodyStart - axis.offset(frozenFirst)
 	const bodyView = Math.max(0, viewSize - header - frozenSize)
 	const maxScroll = Math.max(0, axis.total - bodyStart - bodyView)
 	const clamped = Math.max(0, Math.min(scroll, maxScroll))
-	const first = frozen >= axis.count ? axis.count : Math.max(frozen, axis.indexAt(bodyStart + clamped))
+	const first = frozenEnd >= axis.count ? axis.count : Math.max(frozenEnd, axis.indexAt(bodyStart + clamped))
 	const last =
-		frozen >= axis.count || bodyView <= 0 ? first - 1 : Math.min(axis.lastShown, axis.indexAt(bodyStart + clamped + bodyView - 1))
+		frozenEnd >= axis.count || bodyView <= 0 ? first - 1 : Math.min(axis.lastShown, axis.indexAt(bodyStart + clamped + bodyView - 1))
 
-	return { axis, header, frozen, frozenSize, bodyStart, scroll: clamped, view: viewSize, bodyView, first, last }
+	return { axis, header, frozen, frozenFirst, frozenEnd, frozenSize, bodyStart, scroll: clamped, view: viewSize, bodyView, first, last }
 }
 
 export function gridView(
@@ -71,17 +77,18 @@ export function gridView(
 	const colHeader = headings ? COL_HEADER_HEIGHT : 0
 
 	return {
-		rows: axisView(axes.rows, colHeader, layout.pane?.rows ?? 0, scroll.top, height),
-		cols: axisView(axes.cols, rowHeader, layout.pane?.cols ?? 0, scroll.left, width),
+		rows: axisView(axes.rows, colHeader, layout.pane?.firstRow ?? 0, layout.pane?.rows ?? 0, scroll.top, height),
+		cols: axisView(axes.cols, rowHeader, layout.pane?.firstCol ?? 0, layout.pane?.cols ?? 0, scroll.left, width),
 		width,
 		height
 	}
 }
 
 // Where `index` starts on screen.
+// Where `index` starts on screen (one before the frozen ones is above them, out of view).
 export function screenOf(view: AxisView, index: number): number {
-	return index < view.frozen
-		? view.header + view.axis.offset(index)
+	return index < view.frozenEnd
+		? view.header + view.axis.offset(index) - view.axis.offset(view.frozenFirst)
 		: view.header + view.frozenSize + view.axis.offset(index) - view.bodyStart - view.scroll
 }
 
@@ -90,14 +97,16 @@ export type AxisHit = { readonly part: "header" } | { readonly part: "frozen" | 
 export function hitAxis(view: AxisView, at: number): AxisHit | null {
 	if (at < 0 || at >= view.view) return null
 	if (at < view.header) return { part: "header" }
-	if (at < view.header + view.frozenSize) return { part: "frozen", index: view.axis.indexAt(at - view.header) }
+	if (at < view.header + view.frozenSize)
+		return { part: "frozen", index: view.axis.indexAt(at - view.header + view.axis.offset(view.frozenFirst)) }
 
 	return { part: "body", index: view.axis.indexAt(at - view.header - view.frozenSize + view.bodyStart + view.scroll) }
 }
 
-// The scroll offset that brings `index` fully into view (unchanged when it is, or when it is frozen).
+// The scroll offset that brings `index` fully into view (unchanged when it is, when it is frozen, or before the
+// frozen ones, where nothing scrolls it into view).
 export function revealOffset(view: AxisView, index: number): number {
-	if (index < view.frozen) return view.scroll
+	if (index < view.frozenEnd) return view.scroll
 
 	const start = view.axis.offset(index) - view.bodyStart
 	const end = start + view.axis.size(index)
@@ -121,7 +130,9 @@ export function edgeAt(view: AxisView, at: number, slop: number): number | null 
 
 	if (end - at <= slop) return index
 	if (at - start <= slop) {
-		for (let before = index - 1; before >= 0; before--) if (view.axis.size(before) > 0) return before
+		const lowest = index < view.frozenEnd ? view.frozenFirst : 0
+
+		for (let before = index - 1; before >= lowest; before--) if (view.axis.size(before) > 0) return before
 	}
 
 	return null

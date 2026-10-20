@@ -1,9 +1,10 @@
 import { partKey } from "../../opc/partNames"
 import type { PartBytes } from "../../opc/pieces"
+import type { Relationship } from "../../opc/relationships"
 import type { SheetId, SheetRange } from "../../sheet/protocol"
 import { decodeUtf8, encodeUtf8, type Markup } from "../../xml/index"
-import type { XlsxPartWrite, XlsxSectionWriter, XlsxSheetModel, XlsxWorkbookModel } from "../model/types"
-import { usedRange } from "../write/cells"
+import type { XlsxPartWrite, XlsxSectionWriter, XlsxSheetModel, XlsxWorkbookModel, XlsxWorkbookSectionWriter } from "../model/types"
+import { editedRange, usedRange } from "../write/cells"
 import { readDimension, writeDimension } from "../write/sections"
 import { refuse } from "./catalogue"
 
@@ -22,6 +23,8 @@ export class RefState {
 	private readonly parts = new Map<string, Uint8Array>()
 	private readonly partWrites = new Map<string, PartWrite>()
 	private readonly ownPartWrites = new Set<XlsxPartWrite>()
+	private readonly workbookSections = new Map<string, string>()
+	private readonly workbookWriters = new Map<string, XlsxWorkbookSectionWriter>()
 	private readonly workbook: XlsxWorkbookModel
 
 	constructor(workbook: XlsxWorkbookModel) {
@@ -74,6 +77,40 @@ export class RefState {
 
 	ownsSection(writer: XlsxSectionWriter | null | undefined): boolean {
 		return writer !== null && writer !== undefined && this.ownWriters.has(writer)
+	}
+
+	// A workbook child as it now is ("" when absent). One another edit serialises is refused.
+	workbookMarkup(name: string): string {
+		const held = this.workbookSections.get(name)
+
+		if (held !== undefined) return held
+
+		const marked = this.workbook.changes.workbookSections
+
+		if (marked.has(name) && !this.isOwnWorkbookWriter(marked.get(name))) refuse("structureLocked", `workbook ${name}: edited`)
+
+		const section = this.workbook.workbookSections.find(candidate => candidate.name === name)
+
+		return section === undefined ? "" : decodeUtf8(section.bytes ?? new Uint8Array(0))
+	}
+
+	setWorkbookSection(name: string, markup: string): void {
+		this.workbookSections.set(name, markup)
+
+		let writer = this.workbookWriters.get(name)
+
+		if (writer === undefined) {
+			const created: XlsxWorkbookSectionWriter = () => this.workbookSections.get(name) ?? ""
+
+			writer = created
+			this.workbookWriters.set(name, created)
+		}
+
+		this.workbook.changes.workbookSection(name, writer)
+	}
+
+	private isOwnWorkbookWriter(writer: XlsxWorkbookSectionWriter | null | undefined): boolean {
+		return writer !== null && writer !== undefined && [...this.workbookWriters.values()].includes(writer)
 	}
 
 	// A part's bytes as they now are: null when another edit removed it. One another edit writes is refused.
@@ -129,12 +166,22 @@ export class RefState {
 	}
 }
 
-// The dimension as moved, widened when cells reach past it (a dimension too small makes a reader drop cells).
+// The dimension as moved, widened to the cells when they reach past it (a dimension too small makes a reader drop
+// cells). Moved back to the source's own, it stays as the source wrote it unless rows edits changed reach past it:
+// an undone edit saves the source again, even one whose dimension was already too small.
 function coveringDimension(sheet: XlsxSheetModel, markup: string): Markup {
 	if (markup === "") return markup
 
 	const bytes = encodeUtf8(markup)
 	const recorded = readDimension(bytes)
+	const source = sheet.sections.find(section => section.name === "dimension")?.bytes ?? null
+
+	if (source !== null && recorded !== null && decodeUtf8(source) === markup) {
+		const edited = editedRange(sheet)
+
+		if (edited === null || contains(recorded, edited)) return source
+	}
+
 	const used = usedRange(sheet)
 
 	if (used === null || (recorded !== null && contains(recorded, used))) return bytes
@@ -156,6 +203,15 @@ function contains(outer: SheetRange, inner: SheetRange): boolean {
 	return (
 		outer.startRow <= inner.startRow && outer.startCol <= inner.startCol && outer.endRow >= inner.endRow && outer.endCol >= inner.endCol
 	)
+}
+
+// A part's relationships as they now are: those read, less the ones edits removed, with the ones they added.
+export function liveRelationships(workbook: XlsxWorkbookModel, source: string, read: readonly Relationship[]): Relationship[] {
+	const edits = workbook.changes.relationships.get(source)
+
+	if (edits === undefined) return read.slice()
+
+	return [...read.filter(relationship => !edits.removed.has(relationship.id)), ...edits.added]
 }
 
 const states = new WeakMap<XlsxWorkbookModel, RefState>()

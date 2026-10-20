@@ -22,6 +22,7 @@ import {
 	type SheetLayout,
 	type SheetOpenFailure,
 	type SheetOpened,
+	type SheetPane,
 	type SheetQueryResult,
 	type SheetRange,
 	type SheetRefusal,
@@ -31,6 +32,9 @@ import {
 	type SheetSummary,
 	type SheetWritability
 } from "./protocol"
+import { textFillFeature } from "./fill/text"
+import { textFindFeature } from "./find/text"
+import { textNavigateFeature } from "./navigate/text"
 import { defineSheetFeature, sheetRegistry, type SheetChangeSink, type SheetFeature, type SheetHandled } from "./registry"
 import { RenderStyleTable, SheetSession, sessionFeature, type SheetEntrySink, type SheetSessionDocument } from "./session"
 
@@ -55,9 +59,27 @@ function field(text: string): string {
 	return /[\t\n\r"]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
 }
 
+declare module "./protocol" {
+	interface SheetCommandMap {
+		// Rows above and columns left of the scrolling pane kept in view (0 and 0 unfreeze); `topRow` and `leftCol`
+		// name the scrolling pane's first cell (by default the first after the frozen ones). A workbook writes it
+		// into the sheet's view; a text file, which cannot hold it, keeps it in the session (the app keeps it beside
+		// the file and gives it again at the next open).
+		"view.freeze": {
+			readonly sheet: SheetId
+			readonly rows: number
+			readonly cols: number
+			readonly topRow?: number
+			readonly leftCol?: number
+		}
+	}
+}
+
 export class TextSheetDocument implements SheetSessionDocument {
 	readonly kind: SheetFileKind
 	readonly date1904 = false
+	// Frozen panes, the session's alone.
+	pane: SheetPane | null = null
 	readonly encrypted = undefined
 	settings: SheetSessionSettings
 	readonly format: CsvFormat
@@ -172,7 +194,7 @@ export class TextSheetDocument implements SheetSessionDocument {
 			rows: empty(DEFAULT_ROW_HEIGHT),
 			cols: empty(DEFAULT_COL_WIDTH),
 			merges: new Uint32Array(0),
-			pane: null,
+			pane: this.pane,
 			zoom: 100,
 			gridLines: true,
 			headings: true,
@@ -651,6 +673,31 @@ export const textFeature = defineSheetFeature<TextSheetDocument>({
 		"clipboard.paste": {
 			info: { write: true },
 			run: (context, command) => pasteTexts(context.doc, command.at, command.text, command.clip, context.changes)
+		},
+		// Changes no file: no step, and a read-only text file freezes too.
+		"view.freeze": {
+			info: { write: false },
+			run: (context, command) => {
+				const { rows, cols } = command
+				const topRow = command.topRow ?? rows
+				const leftCol = command.leftCol ?? cols
+
+				if (
+					![rows, cols, topRow, leftCol].every(Number.isInteger) ||
+					rows < 0 ||
+					cols < 0 ||
+					topRow < rows ||
+					leftCol < cols ||
+					topRow >= SHEET_MAX_ROWS ||
+					leftCol >= SHEET_MAX_COLS
+				)
+					return { refused: { reason: "tooLarge" } }
+
+				context.doc.pane = rows === 0 && cols === 0 ? null : { rows, cols, firstRow: 0, firstCol: 0, topRow, leftCol }
+				context.changes.layout(TEXT_SHEET)
+
+				return null
+			}
 		}
 	},
 	queries: {
@@ -692,7 +739,10 @@ export async function openTextSession(
 	const session = new SheetSession(
 		document,
 		styles,
-		{ features: own => sheetRegistry([textFeature, ...features, sessionFeature(own)]) },
+		{
+			features: own =>
+				sheetRegistry([textFeature, textFindFeature, textNavigateFeature, textFillFeature, ...features, sessionFeature(own)])
+		},
 		options,
 		onEvent
 	)

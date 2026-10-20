@@ -87,7 +87,7 @@ describe("XlsxDocument resize", () => {
 	it("changes nothing, and leaves the file clean, when no size would change", async () => {
 		const document = await workbook()
 
-		// Column B has no width of its own; A is already 20 characters (145 px).
+		// Column B has no width of its own; A is already stored 20 wide, 140 px (ECMA-376 Part 1 §18.3.1.13).
 		expect(
 			document.apply({
 				type: "resize",
@@ -95,7 +95,7 @@ describe("XlsxDocument resize", () => {
 				axis: "cols",
 				sizes: [
 					[1, null],
-					[0, 145]
+					[0, 140]
 				]
 			})
 		).toEqual({ type: "none", state: { dirty: false, canUndo: false, canRedo: false } })

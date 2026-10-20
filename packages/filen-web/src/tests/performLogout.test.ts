@@ -27,7 +27,8 @@ const {
 	wipeThumbnailStore,
 	wipeArtStore,
 	wipeVideoIndexStore,
-	resetVideoSession
+	resetVideoSession,
+	officeSettingsReset
 } = vi.hoisted(() => {
 	const calls: string[] = []
 	const record =
@@ -62,7 +63,8 @@ const {
 		wipeThumbnailStore: vi.fn(() => Promise.resolve()),
 		wipeArtStore: vi.fn(() => Promise.resolve()),
 		wipeVideoIndexStore: vi.fn(() => Promise.resolve()),
-		resetVideoSession: vi.fn(record("resetVideoSession", () => undefined))
+		resetVideoSession: vi.fn(record("resetVideoSession", () => undefined)),
+		officeSettingsReset: vi.fn()
 	}
 })
 
@@ -115,6 +117,10 @@ vi.mock("@/features/assistant/store/assistantSession", () => ({ shutdownAssistan
 vi.mock("@/features/preview/lib/heicTransform", () => ({ releaseHeicWorker, transformHeicBytesOwned: vi.fn() }))
 vi.mock("@/queries/client", () => ({ queryClient: { cancelQueries: vi.fn(), clear: vi.fn() } }))
 vi.mock("sonner", () => ({ toast: { warning: toastWarning } }))
+// A build with the spreadsheet editor and without DOCX editing: the document settings are still this account's.
+vi.mock("@/features/preview/lib/docxEditingFlag", () => ({ DOCX_EDITING: false }))
+vi.mock("@/features/spreadsheet/next/sheetNextFlag", () => ({ SHEET_NEXT: true }))
+vi.mock("@/features/office/lib/officeSettings", () => ({ officeSettings: { reset: officeSettingsReset } }))
 
 import { kvClear } from "@/lib/storage/adapter"
 import { usePreviewUnsavedGuardStore } from "@/features/preview/store/usePreviewUnsavedGuard"
@@ -253,6 +259,12 @@ describe("performLogout", () => {
 		cache.put("archive-uuid", listing)
 
 		expect(cache.get("archive-uuid")).toBeUndefined()
+	})
+
+	it("forgets the document settings in a build whose only office editor is the spreadsheet's", async () => {
+		await performLogout()
+
+		expect(officeSettingsReset).toHaveBeenCalledTimes(1)
 	})
 
 	it("empties the drive clipboard, whose items belong to this account", async () => {

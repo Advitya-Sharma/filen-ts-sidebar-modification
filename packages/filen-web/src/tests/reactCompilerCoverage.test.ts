@@ -688,7 +688,15 @@ describe("React Compiler coverage of the spreadsheet grid and its shell", () => 
 		["src/features/spreadsheet/next/components/sheetGridMenu.tsx", "SheetGridMenu"],
 		["src/features/spreadsheet/next/components/sheetGridMenu.tsx", "ResetItems"],
 		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "SheetToolbar"],
-		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "useActiveStyle"],
+		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "useActiveCell"],
+		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "useFormatChoices"],
+		["src/features/spreadsheet/next/toolbar/colorButton.tsx", "SheetColorButton"],
+		["src/features/spreadsheet/next/toolbar/bordersMenu.tsx", "BordersMenu"],
+		["src/features/spreadsheet/next/toolbar/bordersMenu.tsx", "BorderItems"],
+		["src/features/spreadsheet/next/toolbar/fontControls.tsx", "FontPicker"],
+		["src/features/spreadsheet/next/toolbar/alignMenus.tsx", "HorizontalAlignMenu"],
+		["src/features/spreadsheet/next/toolbar/numberFormatMenu.tsx", "NumberFormatMenu"],
+		["src/features/spreadsheet/next/dialogs/formatCells.tsx", "FormatCellsForm"],
 		["src/features/spreadsheet/next/hooks/useSheetSession.ts", "useSheetSession"],
 		["src/features/spreadsheet/next/clipboard/useSheetClipboard.ts", "useSheetClipboard"]
 	])("compiles %s's %s", (file, fnName) => {

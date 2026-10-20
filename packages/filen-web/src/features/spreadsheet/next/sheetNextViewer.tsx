@@ -9,9 +9,11 @@ import { PreviewDownloadButton, PreviewErrorState, PreviewLoading } from "@/feat
 import { DocxPasswordGate } from "@/features/preview/components/docxPasswordPrompt"
 import { docxRefusalKey } from "@/features/preview/components/docxViewer.logic"
 import type { SpreadsheetSnapshot } from "@/features/spreadsheet/hooks/useSpreadsheetEdits"
-import { saveAsXlsx } from "@/features/spreadsheet/lib/saveAsXlsx"
+import { uploadXlsxCopy } from "@/features/spreadsheet/lib/saveAsXlsx"
 import { SheetBody } from "@/features/spreadsheet/next/components/sheetBody"
 import { useSheetSession } from "@/features/spreadsheet/next/hooks/useSheetSession"
+import { saveAsRefusalKey } from "@/features/spreadsheet/next/save/sheetSave.logic"
+import { savesAsXlsx, sheetXlsxCopy } from "@/features/spreadsheet/next/save/sheetSaveAs"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 import { log } from "@/lib/log"
 
@@ -31,8 +33,10 @@ export interface SheetViewerProps {
 	saveRef?: RefObject<(() => Promise<SpreadsheetSnapshot>) | null>
 	// Shows another file in this preview's place: the .xlsx an .xls was just saved as.
 	onOpenFile?: (item: DriveItem) => void
-	// A converted copy may be written beside this file (an .xls offers Save as .xlsx).
+	// A converted copy may be written beside this file (a CSV, TSV or .xls offers Save as .xlsx).
 	canSaveCopy?: boolean
+	// Idle autosave asks the overlay to save; true when a save started.
+	onAutosave?: () => boolean
 }
 
 // A CSV, TSV or Excel file on the office engine: the file is read and edited in a sheet worker (dom/sheet), which
@@ -48,7 +52,8 @@ export function SheetNextViewer({
 	onDirtyChange,
 	saveRef,
 	onOpenFile,
-	canSaveCopy
+	canSaveCopy,
+	onAutosave
 }: SheetViewerProps) {
 	const { t } = useTranslation("preview")
 	const state = useSheetSession(item, documentKey)
@@ -110,12 +115,26 @@ export function SheetNextViewer({
 					onDirtyChange={onDirtyChange}
 					saveRef={saveRef}
 					editAnyway={state.editAnyway}
+					modifyLocked={state.modifyLocked}
 					layerKey={layerKeyFor(stableUuidOf(item), documentKey)}
+					onAutosave={onAutosave}
 					onSaveAsXlsx={
-						state.kind === "xls" && canSaveCopy === true
+						savesAsXlsx(state.kind) && canSaveCopy === true
 							? async () => {
-									const outcome = await saveAsXlsx(item, state.bytes).catch((e: unknown) => {
-										log.error("spreadsheet", "saving an .xls as .xlsx failed", e)
+									const copy = await sheetXlsxCopy(state.handle, state.kind, driveItemName(item)).catch((e: unknown) => {
+										log.error("spreadsheet", "making the .xlsx copy failed", e)
+
+										return { ok: false, refusal: null } as const
+									})
+
+									if (!copy.ok) {
+										toast.error(t(saveAsRefusalKey(copy.refusal)))
+
+										return
+									}
+
+									const outcome = await uploadXlsxCopy(item, copy.bytes).catch((e: unknown) => {
+										log.error("spreadsheet", "uploading the .xlsx copy failed", e)
 
 										return { status: "error", dto: null } as const
 									})

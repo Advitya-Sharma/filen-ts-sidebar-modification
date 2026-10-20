@@ -21,6 +21,16 @@ export type GridKeyMove =
 
 const ARROWS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" } as const
 
+// In a right-to-left sheet the grid is mirrored and Left and Right move the way they point on screen: Right goes to
+// the column before (as Excel does in a right-to-left sheet when the sheet is not protected; learn.microsoft.com
+// Q&A 1378177 "Keyboard arrow-keys move cursor in opposite direction in protected Right-to-Left Excel Worksheet").
+// Tab and Shift+Tab keep going to the next and previous column.
+export function visualKey(key: string, layout: Pick<SheetLayout, "rightToLeft">): string {
+	if (!layout.rightToLeft) return key
+
+	return key === "ArrowLeft" ? "ArrowRight" : key === "ArrowRight" ? "ArrowLeft" : key
+}
+
 function mergeAt(merges: readonly SheetRange[], row: number, col: number): SheetRange | undefined {
 	return merges.find(merge => row >= merge.startRow && row <= merge.endRow && col >= merge.startCol && col <= merge.endCol)
 }
@@ -50,13 +60,16 @@ function cycle(selection: GridSelection, across: boolean, back: boolean, merges:
 }
 
 export function keyMove(
-	event: GridKey,
+	pressed: GridKey,
 	selection: GridSelection,
 	axes: GridAxes,
 	layout: SheetLayout,
 	merges: readonly SheetRange[],
 	pageRows: number
 ): GridKeyMove | null {
+	const key = visualKey(pressed.key, layout)
+	const event = key === pressed.key ? pressed : { ...pressed, key }
+
 	const mod = event.ctrlKey || event.metaKey
 	const arrow = ARROWS[event.key as keyof typeof ARROWS] as (typeof ARROWS)[keyof typeof ARROWS] | undefined
 

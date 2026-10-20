@@ -412,6 +412,53 @@ export function rewriteFormula(formula: string, visit: (ref: FormulaRef) => Form
 	return render(formulaParts(formula), visit)
 }
 
+// F4 while a formula is typed: the reference the caret is in or just after (in `formula`, without the "=") made
+// absolute, then absolute in its row alone, then in its column alone, then relative again, as Excel cycles it; both
+// ends of a range take the state that follows the first's. A whole-column or whole-row range turns absolute and
+// back. The formula and where the reference now ends, or null when the caret is at none.
+export function cycleReference(formula: string, caret: number): { readonly formula: string; readonly end: number } | null {
+	let offset = 0
+
+	for (const part of formulaParts(formula)) {
+		if (typeof part === "string") {
+			offset += part.length
+
+			continue
+		}
+
+		const start = offset
+		const areaStart = start + part.prefix.length
+		const end = areaStart + part.areaText.length
+
+		offset = end
+
+		const area = part.ref.area
+
+		if (caret < start || caret > end || area === null || part.ref.external) continue
+
+		let rowAbs: boolean
+		let colAbs: boolean
+
+		if (area.kind === "cell") {
+			// Relative → $A$1 → A$1 → $A1 → relative.
+			const state = (area.startColAbs ? 1 : 0) + (area.startRowAbs ? 2 : 0)
+			const next = state === 0 ? 3 : state === 3 ? 2 : state === 2 ? 1 : 0
+
+			colAbs = (next & 1) !== 0
+			rowAbs = (next & 2) !== 0
+		} else {
+			colAbs = area.kind === "cols" && !area.startColAbs
+			rowAbs = area.kind === "rows" && !area.startRowAbs
+		}
+
+		const text = areaText({ ...area, startRowAbs: rowAbs, endRowAbs: rowAbs, startColAbs: colAbs, endColAbs: colAbs })
+
+		return { formula: formula.slice(0, areaStart) + text + formula.slice(end), end: areaStart + text.length }
+	}
+
+	return null
+}
+
 // A shared formula's text for a cell `rows` down and `cols` right of the one that stores it: relative
 // references move, absolute ones stay, and one pushed off the sheet becomes #REF!. Parses once for many
 // cells.

@@ -153,7 +153,7 @@ describe("grid view", () => {
 	const cols = axisLayout(64, [[1, 0, AxisFlag.HIDDEN]])
 
 	it("places frozen rows and columns before the scrolled ones and hit-tests each part", () => {
-		const sheet = layout(rows, cols, { rows: 2, cols: 1, topRow: 2, leftCol: 1 })
+		const sheet = layout(rows, cols, { rows: 2, cols: 1, firstRow: 0, firstCol: 0, topRow: 2, leftCol: 1 })
 		const axes = { rows: createGridAxis(rows, 200, 1), cols: createGridAxis(cols, 40, 1), scale: 1 }
 		const view = gridView(axes, sheet, { top: 100, left: 0 }, 600, 400)
 
@@ -171,7 +171,7 @@ describe("grid view", () => {
 	})
 
 	it("scrolls the least that reveals a cell and leaves frozen ones alone", () => {
-		const sheet = layout(rows, cols, { rows: 2, cols: 0, topRow: 2, leftCol: 0 })
+		const sheet = layout(rows, cols, { rows: 2, cols: 0, firstRow: 0, firstCol: 0, topRow: 2, leftCol: 0 })
 		const axes = { rows: createGridAxis(rows, 200, 1), cols: createGridAxis(cols, 40, 1), scale: 1 }
 		const view = gridView(axes, sheet, { top: 0, left: 0 }, 600, 400)
 
@@ -179,6 +179,30 @@ describe("grid view", () => {
 		expect(revealOffset(view.rows, 5)).toBe(0)
 		// The body shows 400 - 20 - 40 = 340 px: row 30 ends at 31 * 20 - 40.
 		expect(revealOffset(view.rows, 30)).toBe(31 * 20 - 40 - 340)
+	})
+
+	it("shows a frozen block that starts past the sheet's first row, and the rows above it nowhere", () => {
+		// Frozen while scrolled: rows 3 and 4 (0-based) frozen, rows 0-2 not shown, the scrolled part from row 5.
+		const sheet = layout(rows, cols, { rows: 2, cols: 0, firstRow: 3, firstCol: 0, topRow: 9, leftCol: 0 })
+		const axes = { rows: createGridAxis(rows, 200, 1), cols: createGridAxis(cols, 40, 1), scale: 1 }
+		const view = gridView(axes, sheet, { top: 0, left: 0 }, 600, 400)
+
+		expect([view.rows.frozenFirst, view.rows.frozenEnd, view.rows.frozen, view.rows.frozenSize]).toEqual([3, 5, 2, 40])
+		expect(view.rows.first).toBe(5)
+		expect(screenOf(view.rows, 3)).toBe(20)
+		expect(screenOf(view.rows, 4)).toBe(40)
+		expect(screenOf(view.rows, 5)).toBe(60)
+		expect(hitAxis(view.rows, 25)).toEqual({ part: "frozen", index: 3 })
+		expect(hitAxis(view.rows, 61)).toEqual({ part: "body", index: 5 })
+		// Rows above the block: none scrolls them into view.
+		expect(revealOffset(view.rows, 1)).toBe(0)
+		expect(bodyTotal(view.rows)).toBe(200 * 20 - 100)
+
+		const scrolled = gridView(axes, sheet, { top: 80, left: 0 }, 600, 400)
+
+		expect(scrolled.rows.first).toBe(9)
+		expect(screenOf(scrolled.rows, 9)).toBe(60)
+		expect(edgeAt(scrolled.rows, 21, 4)).toBeNull()
 	})
 
 	it("finds the header edge a pointer is on, skipping hidden columns", () => {

@@ -14,7 +14,7 @@ import type { XlsxDocument } from "../../../core/xlsx/edit/document"
 import type { Rand } from "../config"
 
 // The sheet fuzz's operations: every command family the xlsx session registers (cells, format, axis, resize,
-// sheet, clipboard) and undo/redo, with targets near what a sheet holds and inputs that reach the edge cases
+// sheet, sheets, hide, freeze, merge, protection, clipboard) and undo/redo, with targets near what a sheet holds and inputs that reach the edge cases
 // (formulas that do not read, text that looks like a number, characters XML cannot hold, the grid's edges).
 
 // Refusal reasons the protocol names (protocol.ts SheetRefusalReasons). Anything else a command answers with is
@@ -34,7 +34,8 @@ export const KNOWN_REFUSALS: ReadonlySet<string> = new Set([
 	"protectedWorkbook",
 	"encoding",
 	"styleLimit",
-	"unsupported"
+	"unsupported",
+	"mergeLosesValues"
 ])
 
 export type Outcome =
@@ -324,6 +325,119 @@ export const OPS: readonly Op[] = [
 				name:
 					context.rand() < 0.5 ? `${pick(context.rand, SHEET_NAMES)}${int(context.rand, 0, 9)}` : pick(context.rand, SHEET_NAMES)
 			}))
+	},
+	{
+		name: "sheet.delete",
+		family: "sheets",
+		weight: 0.3,
+		plan: context => command(context, at => ({ type: "sheet.delete", sheet: at.sheet }))
+	},
+	{
+		name: "sheet.move",
+		family: "sheets",
+		weight: 0.4,
+		plan: context =>
+			command(context, at => ({
+				type: "sheet.move",
+				sheet: at.sheet,
+				to: int(context.rand, 0, context.session.document.workbook.sheets.length - 1)
+			}))
+	},
+	{
+		name: "sheet.duplicate",
+		family: "sheets",
+		weight: 0.3,
+		plan: context => command(context, at => ({ type: "sheet.duplicate", sheet: at.sheet }))
+	},
+	{
+		name: "sheet.state",
+		family: "sheets",
+		weight: 0.3,
+		plan: context =>
+			command(context, at => ({
+				type: "sheet.state",
+				sheet: at.sheet,
+				state: pick(context.rand, ["visible", "hidden", "veryHidden"] as const)
+			}))
+	},
+	{
+		name: "sheet.tabColor",
+		family: "sheets",
+		weight: 0.2,
+		plan: context =>
+			command(context, at => ({
+				type: "sheet.tabColor",
+				sheet: at.sheet,
+				color: pick(context.rand, [null, 0xff0000, { theme: 4 }, { theme: 5, tint: -0.25 }])
+			}))
+	},
+	{
+		name: "axis.hide",
+		family: "hide",
+		weight: 0.8,
+		plan: context =>
+			command(context, at => {
+				const axis: SheetAxis = context.rand() < 0.6 ? "rows" : "cols"
+				const start = int(context.rand, 0, axis === "rows" ? at.rows + 1 : at.cols + 1)
+
+				return {
+					type: "axis.hide",
+					sheet: at.sheet,
+					axis,
+					spans: [{ start, end: start + int(context.rand, 0, 3) }],
+					hidden: context.rand() < 0.6
+				}
+			})
+	},
+	{
+		name: "view.freeze",
+		family: "freeze",
+		weight: 0.5,
+		plan: context =>
+			command(context, at =>
+				context.rand() < 0.25
+					? { type: "view.freeze", sheet: at.sheet, rows: 0, cols: 0 }
+					: { type: "view.freeze", sheet: at.sheet, rows: int(context.rand, 0, 5), cols: int(context.rand, 0, 3) }
+			)
+	},
+	{
+		name: "merge.cells",
+		family: "merge",
+		weight: 0.8,
+		plan: context =>
+			command(context, at => ({
+				type: "merge.cells",
+				sheet: at.sheet,
+				ranges: [range(context.rand, at, false)],
+				mode: pick(context.rand, ["merge", "center", "across"] as const),
+				discard: context.rand() < 0.7
+			}))
+	},
+	{
+		name: "merge.unmerge",
+		family: "merge",
+		weight: 0.4,
+		plan: context => command(context, at => ({ type: "merge.unmerge", sheet: at.sheet, ranges: [range(context.rand, at, false)] }))
+	},
+	{
+		name: "sheet.protect",
+		family: "protection",
+		weight: 0.2,
+		plan: context =>
+			command(context, at =>
+				context.rand() < 0.5
+					? { type: "sheet.unprotect", sheet: at.sheet }
+					: {
+							type: "sheet.protect",
+							sheet: at.sheet,
+							allows: [
+								"selectLockedCells",
+								"selectUnlockedCells",
+								...(context.rand() < 0.5 ? (["insertRows", "formatCells"] as const) : [])
+							],
+							...(context.rand() < 0.5 && { hash: { legacy: "83AF" } })
+						}
+			)
 	},
 	{
 		name: "clipboard.paste",

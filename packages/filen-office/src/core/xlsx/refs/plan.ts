@@ -5,21 +5,23 @@ import { sameSheet } from "../../sheet/refs/formulaRefs"
 import {
 	CellKind,
 	type XlsxDefinedName,
+	type XlsxFormula,
 	type XlsxSheetEntry,
 	type XlsxSheetModel,
 	type XlsxSheetView,
 	type XlsxWorkbookModel
 } from "../model/types"
 import { readView } from "../read/worksheet"
-import { XmlEditor, XmlError, encodeUtf8, parseXml } from "../../xml/index"
+import { XmlEditor, XmlError, decodeUtf8, encodeUtf8, parseXml } from "../../xml/index"
 import { ChangeLog } from "../model/changes"
-import type { SheetStore } from "../model/store"
+import { FormulaTable } from "../model/formulas"
+import type { RowBlock, SheetStore } from "../model/store"
 import { StoreSnapshot } from "../edit/history"
 import { axisLimit, shiftRange, type AxisShift } from "./axis"
 import { RefRefused, refuse, type RefConstruct } from "./catalogue"
 import { SheetFormulas, sharedStringCells, type FormulaChange } from "./cells"
 import { FormulaShift, hasUnqualifiedArea, type FormulaOp } from "./formulas"
-import { childElements, editMarkup, type RefJob } from "./markup"
+import { childElements, descendants, editMarkup, shiftFormulaAttribute, type RefJob } from "./markup"
 import {
 	checkPivotSource,
 	checkPivotTable,
@@ -39,7 +41,7 @@ import {
 } from "./parts"
 import { MODEL_SECTIONS, PLAIN_SECTIONS, rewriteSection, sectionKnown } from "./sections"
 import { formatRef, parseRef } from "./sqref"
-import { refState } from "./state"
+import { liveRelationships, refState } from "./state"
 import { readTable, rewriteTable, shiftTable, tableEdit, withoutTablePart, type TableInfo, type TableShift } from "./tables"
 import type { TableEdit } from "./structured"
 import { shiftCols, shiftMerges, shiftView } from "./views"
@@ -331,9 +333,10 @@ async function plan(workbook: XlsxWorkbookModel, edit: RefEdit): Promise<RefPlan
 	const owners = new Map<string, { entry: XlsxSheetEntry; relationship: Relationship }>()
 
 	for (const entry of workbook.sheets) {
-		const relationships = entry.model?.relationships ?? (entry.part === "" ? undefined : await workbook.parts.relationships(entry.part))
+		const read = entry.model?.relationships ?? (entry.part === "" ? undefined : await workbook.parts.relationships(entry.part))
 
-		for (const relationship of relationships?.all ?? []) {
+		// A sheet added since open (a copy) has its relationships in the change log alone.
+		for (const relationship of liveRelationships(workbook, entry.part, read?.all ?? [])) {
 			if (relationship.external || relationship.partName === undefined) continue
 
 			owners.set(partKey(relationship.partName), { entry, relationship })
@@ -386,7 +389,7 @@ async function plan(workbook: XlsxWorkbookModel, edit: RefEdit): Promise<RefPlan
 
 		if (bytes === null) continue
 
-		const related = (await workbook.parts.relationships(part.name)).all.flatMap(relationship =>
+		const related = liveRelationships(workbook, part.name, (await workbook.parts.relationships(part.name)).all).flatMap(relationship =>
 			relationship.external || relationship.partName === undefined ? [] : [relationship.partName]
 		)
 		const table = readTable(part.name, part.contentType, part.owner.id, part.relationship.id, bytes, related)
@@ -471,9 +474,10 @@ async function plan(workbook: XlsxWorkbookModel, edit: RefEdit): Promise<RefPlan
 
 	if (shift !== null && targetModel !== null) planCells(workbook, target, targetModel, shift, [...tableShifts.values()], steps, touch)
 
-	// --- Defined names ---
+	// --- Defined names and the workbook's other children ---
 
 	planNames(workbook, edit, formulas, steps, touch)
+	planWorkbookSections(workbook, formulas, steps, touch)
 
 	// --- Parts ---
 
@@ -719,9 +723,15 @@ function formulaStep(
 		workbook.changes.sheetRows(model.id)
 	}
 
+	const set = (id: number, formula: XlsxFormula | string): void => {
+		if (typeof formula !== "string") table.set(id, formula)
+		else if (table instanceof FormulaTable) table.setText(id, formula)
+		else table.set(id, { ...table.formula(id), text: formula })
+	}
+
 	return {
 		apply: () => {
-			for (const change of changes) table.set(change.id, change.after)
+			for (const change of changes) set(change.id, change.after)
 
 			mark()
 		},
@@ -729,7 +739,7 @@ function formulaStep(
 			for (let k = changes.length - 1; k >= 0; k--) {
 				const change = changes[k] as FormulaChange
 
-				table.set(change.id, change.before)
+				set(change.id, change.before)
 			}
 		}
 	}
@@ -800,6 +810,9 @@ function planCells(
 	}
 
 	let snapshot: StoreSnapshot | null = null
+	// An insert of columns marks the rows it moves as changed, and so does the delete that reverts it: their flags as
+	// they were are put back, so rows as the source has them stay its own (the dimension and the rows keep their bytes).
+	let flags: { readonly block: RowBlock; readonly flags: Uint16Array }[] = []
 	const shared = workbook.sharedStrings
 	// Rows are written again only when some row or cell is at or past the edit.
 	const moves = headers.length > 0 || (shift.axis === "rows" ? store.rowExtent : store.colExtent) > shift.at
@@ -809,7 +822,13 @@ function planCells(
 
 	steps.unshift({
 		apply: () => {
-			snapshot = new StoreSnapshot(store, shift.axis === "cols")
+			// An insert loses nothing: its revert deletes what it inserted, so the store's blocks are moved in place
+			// rather than copied for a snapshot (a delete keeps the blocks it takes).
+			snapshot = shift.type === "delete" ? new StoreSnapshot(store, shift.axis === "cols") : null
+			flags =
+				shift.axis === "cols" && shift.type === "insert"
+					? store.blocks.filter(block => block.colExtent > shift.at).map(block => ({ block, flags: block.rowFlags.slice() }))
+					: []
 
 			if (shift.axis === "rows") {
 				if (shift.type === "insert") store.insertRows(shift.at, shift.count)
@@ -844,7 +863,19 @@ function planCells(
 			if (moves) workbook.changes.sheetRows(entry.id)
 		},
 		revert: () => {
-			;(snapshot as StoreSnapshot | null)?.restore(store)
+			if (shift.type === "insert") {
+				if (shift.axis === "rows") store.deleteRows(shift.at, shift.count)
+				else store.deleteCols(shift.at, shift.count)
+
+				const blocks = new Set(store.blocks)
+
+				for (const saved of flags)
+					if (blocks.has(saved.block) && saved.block.rowCount === saved.flags.length) saved.block.rowFlags.set(saved.flags)
+
+				flags = []
+			} else {
+				;(snapshot as StoreSnapshot | null)?.restore(store)
+			}
 
 			const references = headers.length - strings
 
@@ -898,6 +929,80 @@ function planNames(
 	}
 
 	steps.push({ apply: () => set(after), revert: () => set(before) })
+}
+
+// Workbook children that hold no reference to cells or sheets, or one planned elsewhere (definedNames, the sheets,
+// pivotCaches through their parts).
+const PLAIN_WORKBOOK_SECTIONS: ReadonlySet<string> = new Set([
+	"fileVersion",
+	"fileSharing",
+	"workbookPr",
+	"workbookProtection",
+	"bookViews",
+	"sheets",
+	"functionGroups",
+	"externalReferences",
+	"definedNames",
+	"calcPr",
+	"oleSize",
+	"customWorkbookViews",
+	"pivotCaches",
+	"smartTagPr",
+	"smartTagTypes",
+	"webPublishing",
+	"fileRecoveryPr"
+])
+
+const ABS_PATH_ONLY =
+	/^\s*<([\w.-]+:)?AlternateContent\b[^>]*>\s*<([\w.-]+:)?Choice\b[^>]*>\s*<[\w.-]+:absPath\b[^>]*\/>\s*<\/([\w.-]+:)?Choice>\s*<\/([\w.-]+:)?AlternateContent>\s*$/
+
+// The workbook's other children: web publishing objects' sources moved; any other child that may name the edited
+// sheet refuses.
+function planWorkbookSections(
+	workbook: XlsxWorkbookModel,
+	formulas: FormulaShift,
+	steps: Step[],
+	touch: (construct: RefConstruct) => void
+): void {
+	const state = refState(workbook)
+
+	for (const name of new Set(workbook.workbookSections.map(section => section.name))) {
+		if (PLAIN_WORKBOOK_SECTIONS.has(name)) continue
+
+		// Extensions and children of newer schemas (xr:revisionPtr, x15ac:absPath, calcFeatures), each occurrence (a
+		// workbook can hold several AlternateContent children): refused only when one holds a reference the edit would
+		// change (no edit can move what is written there).
+		if (name !== "webPublishObjects") {
+			const occurrences = workbook.changes.workbookSections.has(name)
+				? [state.workbookMarkup(name)]
+				: workbook.workbookSections
+						.filter(section => section.name === name)
+						.map(section => decodeUtf8(section.bytes ?? new Uint8Array(0)))
+
+			for (const markup of occurrences) {
+				// The workbook's saved path (x15ac:absPath, Excel's alternate content): a file path, never a reference.
+				if (ABS_PATH_ONLY.test(markup)) continue
+				if (formulas.markupReferencesEdit(markup)) refuse("structureLocked", `workbook ${name}`)
+			}
+
+			continue
+		}
+
+		const before = state.workbookMarkup(name)
+
+		const edited = editMarkup(encodeUtf8(before), "webPublishObjects")
+		const job: RefJob = { own: null, shift: null, formulas, touch }
+
+		for (const node of descendants(edited.document, edited.document.documentElement()))
+			if (edited.document.localName(node) === "webPublishObject")
+				shiftFormulaAttribute(edited, node, "sourceObject", job, "webPublishItems", null)
+
+		const after = decodeUtf8(edited.editor.serialize())
+
+		if (after === before) continue
+
+		steps.push({ apply: () => state.setWorkbookSection(name, after), revert: () => state.setWorkbookSection(name, before) })
+	}
 }
 
 // A defined name with another formula: its element as written keeps every other attribute (comment, description,

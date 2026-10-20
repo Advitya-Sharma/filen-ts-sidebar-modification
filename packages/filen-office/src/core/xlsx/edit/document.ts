@@ -40,6 +40,7 @@ import {
 	type SheetFileSharing,
 	type SheetId,
 	type SheetLayout,
+	type SheetPane,
 	type SheetProtectedAction,
 	type SheetProtectionState,
 	type SheetRefusal,
@@ -53,7 +54,7 @@ import {
 } from "../../sheet/protocol"
 import type { SheetChangeSink } from "../../sheet/registry"
 import type { AxisEdit } from "../../sheet/model/edits"
-import { colWidthToPx, rowHeightToPx } from "../../sheet/sizes/sizes"
+import { colWidthToPx, defaultColPx, rowHeightToPx } from "../../sheet/sizes/sizes"
 import {
 	absoluteCell,
 	engineCellFormula,
@@ -81,12 +82,15 @@ import {
 	type XlsxFont,
 	type XlsxProtectionHash,
 	type XlsxSheetEntry,
-	type XlsxSheetModel
+	type XlsxSheetModel,
+	type XlsxSheetView
 } from "../model/types"
 import { XlsxReadError, decodeXstring, parseRange, type XlsxWorkbook } from "../read/index"
 import { saveXlsx, seedImpliedStyles } from "../write/index"
 import type { XlsxClip } from "./clipboard"
 import type { ChangeLog } from "../model/changes"
+import { RefRefused } from "../refs/catalogue"
+import { refState } from "../refs/state"
 import { ABSENT, cellKeyOf, cellState, type CellLog, type CellState, type ShownResult } from "./history"
 
 // The xlsx session's document: the workbook model with what a session adds to it. It shows cells (their text
@@ -418,6 +422,14 @@ function decodeAscii(bytes: Uint8Array, from: number, to: number): string {
 	for (let i = from; i < to; i++) text += String.fromCharCode(bytes[i] ?? 0)
 
 	return text
+}
+
+export interface XlsxTableRange {
+	// Upper case.
+	readonly name: string
+	readonly sheet: SheetId
+	readonly range: SheetRange
+	readonly headerRows: number
 }
 
 export class XlsxDocument {
@@ -1071,6 +1083,33 @@ export class XlsxDocument {
 	}
 
 	// A cell's text, what editing it starts from (null: its text), its render style and its flags.
+	// What a cell the caller found in the store shows, and what editing it starts from (null when that is its text,
+	// and for a protected sheet's hidden formula, flagged FORMULA_HIDDEN): no lookup, no render style. A search's read.
+	shownAt(
+		model: XlsxSheetModel,
+		row: number,
+		col: number,
+		slot: number
+	): { readonly text: string; readonly input: string | null; readonly flags: number } {
+		const block = (model.store as SheetStore).blocks[Math.floor(slot / SLOT_BLOCK)]
+		const at = slot % SLOT_BLOCK
+
+		if (block === undefined) return { text: "", input: null, flags: 0 }
+
+		const xf = block.styles[at] ?? 0
+		const formula = block.formulas?.[at] ?? -1
+		const shown = this.show(model, row, col, (block.kinds[at] ?? 0) as CellKind, block.values[at] ?? 0, xf, formula)
+		let flags = shown.flags
+		let input = shown.input
+
+		if (model.protection !== null && formula >= 0 && this.styles.formulaHidden(xf)) {
+			flags |= CellFlag.FORMULA_HIDDEN
+			input = null
+		}
+
+		return { text: shown.text, input: input === shown.text ? null : input, flags }
+	}
+
 	cellView(sheet: SheetId, row: number, col: number): { text: string; input: string | null; style: number; flags: number; xf: number } {
 		const model = this.model(sheet)
 
@@ -1213,8 +1252,7 @@ export class XlsxDocument {
 			}
 		}
 
-		const baseWidth = Number.isNaN(format.defaultColWidth) ? format.baseColWidth + 0.43 : format.defaultColWidth
-		const defaultCol = colWidthToPx(baseWidth)
+		const defaultCol = defaultColPx(format)
 		const colIndices: number[] = []
 		const colSizes: number[] = []
 		const colStyles: number[] = []
@@ -1273,13 +1311,14 @@ export class XlsxDocument {
 			rows: axisLayout(defaultRow, rowIndices, rowSizes, rowStyles, rowFlags),
 			cols: axisLayout(defaultCol, colIndices, colSizes, colStyles, colFlags),
 			merges: merges.slice(),
-			pane: frozen === null ? null : { rows: frozen.rows, cols: frozen.cols, topRow: frozen.topLeftRow, leftCol: frozen.topLeftCol },
+			pane: frozen === null ? null : layoutPane(view, frozen),
 			selection: { activeRow: view.activeRow, activeCol: view.activeCol, ranges: view.selection },
 			zoom: view.zoom,
 			gridLines: view.gridLines,
 			headings: view.headings,
 			rightToLeft: view.rightToLeft,
-			protection: this.protection(sheet)
+			// The model shown (a preview's while the sheet is parsed), as its tiles flag locked cells.
+			protection: model.protection === null ? null : { hasPassword: hasHash(model.protection.hash), allows: model.protection.allows }
 		}
 	}
 
@@ -1393,8 +1432,8 @@ export class XlsxDocument {
 	private readonly alone = new Map<SheetId, Set<number>>()
 	// What each of them reads, by sheet and cell (null: not known, so any edit), read when first needed.
 	private readonly aloneInputs = new Map<SheetId, Map<number, readonly ReadArea[] | null>>()
-	// The workbook's tables: name (upper case), sheet and range.
-	private tables: readonly { readonly name: string; readonly sheet: SheetId; readonly range: SheetRange }[] | null = null
+	// The workbook's tables: name (upper case), sheet, range and header rows.
+	private tables: readonly XlsxTableRange[] | null = null
 
 	private markAlone(sheet: SheetId, row: number, col: number): void {
 		let cells = this.alone.get(sheet)
@@ -1417,27 +1456,62 @@ export class XlsxDocument {
 		return { row, col, content: new HeldResult(value) }
 	}
 
-	// Reads every table part once (what structured references in held formulas read).
+	// A structure edit moved, renamed or removed what held results read (tables, names, cells): the tables are read
+	// again (loadTables) and what each held result reads is worked out again when next needed.
+	structureChanged(): void {
+		this.tables = null
+		this.aloneInputs.clear()
+	}
+
+	// Reads every table part once, as edits left it (what structured references in held formulas read). A table part
+	// another edit rewrites is left out: a formula naming it reads what is not known.
 	async loadTables(): Promise<void> {
 		if (this.tables !== null) return
 
-		const tables: { name: string; sheet: SheetId; range: SheetRange }[] = []
+		const tables: XlsxTableRange[] = []
+		const state = refState(this.workbook)
 
 		for (const entry of this.workbook.sheets) {
-			for (const relationship of entry.model?.relationships.all ?? []) {
+			const edits = this.workbook.changes.relationships.get(entry.part)
+			const relationships = [
+				...(entry.model?.relationships.all ?? []).filter(relationship => edits?.removed.has(relationship.id) !== true),
+				...(entry.model === null ? [] : (edits?.added ?? []))
+			]
+
+			for (const relationship of relationships) {
 				if (relationship.external || !relationship.type.endsWith("/table") || relationship.partName === undefined) continue
 
-				const text = decodeUtf8(await this.workbook.parts.read(relationship.partName))
+				let bytes: Uint8Array | null
+
+				try {
+					bytes = await state.partBytes(relationship.partName)
+				} catch (error) {
+					if (error instanceof RefRefused) continue
+
+					throw error
+				}
+
+				if (bytes === null) continue
+
+				const text = decodeUtf8(bytes)
 				const root = /<(?:\w+:)?table\b[^>]*>/.exec(text)?.[0] ?? ""
 				const name = /\sdisplayName="([^"]*)"/.exec(root)?.[1] ?? /\sname="([^"]*)"/.exec(root)?.[1]
 				const ref = /\sref="([^"]*)"/.exec(root)?.[1]
 				const range = ref === undefined ? null : parseRange(ref)
+				const headerRows = Number(/\sheaderRowCount="(\d+)"/.exec(root)?.[1] ?? "1")
 
-				if (name !== undefined && range !== null) tables.push({ name: name.toUpperCase(), sheet: entry.id, range })
+				if (name !== undefined && range !== null) tables.push({ name: name.toUpperCase(), sheet: entry.id, range, headerRows })
 			}
 		}
 
 		this.tables = tables
+	}
+
+	// A sheet's tables as edits left them.
+	async sheetTables(sheet: SheetId): Promise<readonly XlsxTableRange[]> {
+		await this.loadTables()
+
+		return (this.tables ?? []).filter(table => table.sheet === sheet)
 	}
 
 	// The areas a formula reads, through the defined names and tables it names; null when that is not known (OFFSET,
@@ -2033,35 +2107,47 @@ export class XlsxDocument {
 		}
 	}
 
-	// One sheet as "CSV UTF-8": what each cell shows, with a BOM.
+	// The sheet as Excel's "CSV UTF-8": its data area, from A1 to the last row and column holding a value or a
+	// formula, every row that wide, as LibreOffice's CSV export writes it, with a BOM. A cell holding only a format is no data.
 	csv(sheet: SheetId): Uint8Array | null {
 		const model = this.model(sheet)
 
 		if (model === null) return null
 
 		const store = model.store as SheetStore
-		const rows: string[][] = []
+		let lastRow = -1
+		let lastCol = -1
 
 		for (const block of store.blocks) {
 			for (let i = 0; i < block.rowCount; i++) {
-				const row = block.firstRow + (block.rows[i] ?? 0)
-				const values: string[] = []
+				for (let k = block.rowStarts[i] ?? 0; k < (block.rowStarts[i + 1] ?? 0); k++) {
+					if (block.kinds[k] === CellKind.EMPTY && (block.formulas?.[k] ?? -1) < 0) continue
+
+					lastRow = Math.max(lastRow, block.firstRow + (block.rows[i] ?? 0))
+					lastCol = Math.max(lastCol, block.cols[k] ?? 0)
+				}
+			}
+		}
+
+		const rows: string[][] = Array.from({ length: lastRow + 1 }, () => new Array<string>(lastCol + 1).fill(""))
+
+		for (const block of store.blocks) {
+			for (let i = 0; i < block.rowCount; i++) {
+				const values = rows[block.firstRow + (block.rows[i] ?? 0)]
+
+				if (values === undefined) continue
 
 				for (let k = block.rowStarts[i] ?? 0; k < (block.rowStarts[i + 1] ?? 0); k++) {
 					const col = block.cols[k] ?? 0
 
-					while (values.length < col) values.push("")
-
-					values[col] = this.cellView(sheet, row, col).text
+					if (col <= lastCol && (block.kinds[k] !== CellKind.EMPTY || (block.formulas?.[k] ?? -1) >= 0))
+						values[col] = this.cellView(sheet, block.firstRow + (block.rows[i] ?? 0), col).text
 				}
-
-				while (rows.length < row) rows.push([])
-
-				rows[row] = values
 			}
 		}
 
-		const text = encodeUtf8(writeCsv(rows, ",", "\r\n"))
+		// Each row ends with a line end, the last too.
+		const text = encodeUtf8(rows.length === 0 ? "" : `${writeCsv(rows, ",", "\r\n")}\r\n`)
 		const bytes = new Uint8Array(text.length + 3)
 
 		bytes.set([0xef, 0xbb, 0xbf], 0)
@@ -2164,4 +2250,22 @@ export function encodeXstring(text: string): string {
 	}
 
 	return from === 0 ? text : out + text.slice(from)
+}
+
+// A frozen view as the grid shows it (ECMA-376 Part 1 §18.3.1.66, §18.3.1.87): the frozen block starts at the view's
+// first row (column) and the scrolling pane past it, at the pane's first cell; an axis with nothing frozen starts
+// where the view does (a pane's first cell names the scrolling pane, which that axis does not split: [MS-XLS] Pane
+// rwTop and colLeft name the bottom and right panes).
+function layoutPane(view: XlsxSheetView, frozen: NonNullable<XlsxSheetView["frozen"]>): SheetPane {
+	const firstRow = frozen.rows > 0 ? Math.min(view.topRow, SHEET_MAX_ROWS - 1 - frozen.rows) : 0
+	const firstCol = frozen.cols > 0 ? Math.min(view.leftCol, SHEET_MAX_COLS - 1 - frozen.cols) : 0
+
+	return {
+		rows: frozen.rows,
+		cols: frozen.cols,
+		firstRow,
+		firstCol,
+		topRow: frozen.rows > 0 ? Math.min(Math.max(frozen.topLeftRow, firstRow + frozen.rows), SHEET_MAX_ROWS - 1) : view.topRow,
+		leftCol: frozen.cols > 0 ? Math.min(Math.max(frozen.topLeftCol, firstCol + frozen.cols), SHEET_MAX_COLS - 1) : view.leftCol
+	}
 }

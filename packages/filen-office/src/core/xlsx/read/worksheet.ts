@@ -43,6 +43,7 @@ export class XlsxSheet implements XlsxSheetModel {
 	readonly prefix: string
 	// The part was UTF-16: spans index its UTF-8 transcoding, so the part is rewritten whole, never spliced.
 	readonly utf16: boolean
+	readonly freshRoot: string | undefined
 
 	constructor(init: {
 		id: SheetId
@@ -55,6 +56,7 @@ export class XlsxSheet implements XlsxSheetModel {
 		rootEnd: number
 		prefix: string
 		utf16: boolean
+		freshRoot?: string
 	}) {
 		this.id = init.id
 		this.part = init.part
@@ -66,6 +68,7 @@ export class XlsxSheet implements XlsxSheetModel {
 		this.rootEnd = init.rootEnd
 		this.prefix = init.prefix
 		this.utf16 = init.utf16
+		this.freshRoot = init.freshRoot
 		this.cols = []
 		this.merges = new Uint32Array(0)
 		this.format = DEFAULT_FORMAT
@@ -93,6 +96,8 @@ export const DEFAULT_FORMAT: XlsxSheetFormat = {
 
 export const DEFAULT_VIEW: XlsxSheetView = {
 	frozen: null,
+	topRow: 0,
+	leftCol: 0,
 	activeRow: 0,
 	activeCol: 0,
 	selection: [{ startRow: 0, startCol: 0, endRow: 0, endCol: 0 }],
@@ -560,14 +565,19 @@ const VIEW_KINDS: ReadonlySet<string> = new Set(["normal", "pageLayout", "pageBr
 export function readView(document: XmlDocument, node: number): XlsxSheetView {
 	const pane = childByLocal(document, node, "pane")
 	const state = pane < 0 ? undefined : document.attribute(pane, "state")
+	const first = parseRange(document.attribute(node, "topLeftCell") ?? "")
+	const topRow = first?.startRow ?? 0
+	const leftCol = first?.startCol ?? 0
 	let frozen: XlsxSheetView["frozen"] = null
 
 	if (pane >= 0 && (state === "frozen" || state === "frozenSplit")) {
+		// ySplit and xSplit count the rows and columns the top-left pane shows (MS-OI29500 §2.1.640 d), from the
+		// view's first row and column.
 		const rows = Math.max(0, Math.floor(numberAttribute(document, pane, "ySplit") ?? 0))
 		const cols = Math.max(0, Math.floor(numberAttribute(document, pane, "xSplit") ?? 0))
 		const topLeft = parseRange(document.attribute(pane, "topLeftCell") ?? "")
 
-		frozen = { rows, cols, topLeftRow: topLeft?.startRow ?? rows, topLeftCol: topLeft?.startCol ?? cols }
+		frozen = { rows, cols, topLeftRow: topLeft?.startRow ?? topRow + rows, topLeftCol: topLeft?.startCol ?? leftCol + cols }
 	}
 
 	const activePane = pane < 0 ? undefined : (document.attribute(pane, "activePane") ?? "topLeft")
@@ -602,6 +612,8 @@ export function readView(document: XmlDocument, node: number): XlsxSheetView {
 
 	return {
 		frozen,
+		topRow,
+		leftCol,
 		activeRow,
 		activeCol,
 		selection: selection.length > 0 ? selection : [{ startRow: activeRow, startCol: activeCol, endRow: activeRow, endCol: activeCol }],

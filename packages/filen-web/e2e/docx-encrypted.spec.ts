@@ -18,7 +18,7 @@ test.describe.configure({ mode: "default" })
 
 // The password's key derivation: 100,000 SHA-512 rounds, about 3 s in WebKit on an idle machine.
 const UNLOCK_TIMEOUT_MS = 60_000
-// The editor's idle autosave waits 30 s after the last edit (docxEditor.logic.ts AUTOSAVE_IDLE_MS).
+// The editor's idle autosave waits 30 s after the last edit (features/office/lib/officeAutosave.ts AUTOSAVE_IDLE_MS).
 const AUTOSAVE_TIMEOUT_MS = 30_000 + LIVE_WRITE_TIMEOUT_MS
 
 function pageText(page: Page, text: string): Locator {

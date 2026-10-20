@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { parseNameBox } from "@/features/spreadsheet/next/lib/nameBox.logic"
 import { readOnlyNoteKey, refusalKey, viewOnlyKey } from "@/features/spreadsheet/next/lib/sheetMessages.logic"
-import { sheetFormatPatch, toolbarStyle } from "@/features/spreadsheet/next/lib/toolbarStyle.logic"
 import { SheetEventRelay } from "@/features/spreadsheet/next/lib/sheetEvents"
 import type { SheetEvent } from "@filen/office/core/sheet"
 import { preview } from "@/locales/en/preview"
@@ -87,32 +86,6 @@ describe("view-only and refusal messages", () => {
 
 		expect(refusalKey({ reason: "readOnly", detail: "signed" }, "xlsx")).toBe("previewSheetReadOnlySigned")
 		expect(refusalKey({ reason: "readOnly", detail: "something else" }, "xlsx")).toBe("previewSpreadsheetReadOnlyLossy")
-	})
-})
-
-describe("toolbar style", () => {
-	it("reads a render style as the toolbar's view, with only the alignments it offers", () => {
-		expect(toolbarStyle({ bold: true, underline: "double", color: 0xff0000, fill: 0x00ff, align: "center" }, "0.00%")).toEqual({
-			bold: true,
-			underline: true,
-			color: "#ff0000",
-			fill: "#0000ff",
-			align: "center",
-			numFmt: "0.00%"
-		})
-		expect(toolbarStyle({ align: "justify" }, "General")).toEqual({ numFmt: "General" })
-	})
-
-	it("turns the toolbar's patch into the session's", () => {
-		expect(sheetFormatPatch({ bold: true, underline: false, color: "#00ff00", fill: null, align: null, numFmt: "@" })).toEqual({
-			bold: true,
-			underline: null,
-			color: 0x00ff00,
-			fill: null,
-			align: null,
-			numFmt: "@"
-		})
-		expect(sheetFormatPatch({ underline: true, color: "red" })).toEqual({ underline: "single" })
 	})
 })
 

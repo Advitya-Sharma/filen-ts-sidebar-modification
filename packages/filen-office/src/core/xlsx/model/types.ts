@@ -323,7 +323,13 @@ export interface XlsxSheetFormat {
 
 // The first <sheetView> (the others are kept as written).
 export interface XlsxSheetView {
+	// Frozen rows and columns (ySplit, xSplit), counted from the view's first row and column; the scrolling pane's
+	// first cell (the pane's topLeftCell).
 	readonly frozen: { readonly rows: number; readonly cols: number; readonly topLeftRow: number; readonly topLeftCol: number } | null
+	// The first row and column the view shows (its topLeftCell, ECMA-376 Part 1 §18.3.1.87; [MS-XLSB] BrtBeginWsView
+	// rwTop and colLeft): with frozen rows (columns), the first frozen one, which need not be the sheet's first.
+	readonly topRow: number
+	readonly leftCol: number
 	readonly activeRow: number
 	readonly activeCol: number
 	readonly selection: readonly SheetRange[]
@@ -365,6 +371,9 @@ export interface XlsxSheetModel {
 	view: XlsxSheetView
 	protection: XlsxSheetProtection | null
 	tabColor: XlsxColor | null
+	// A sheet with no part in the source (a duplicated one): its root's start tag, when it takes another part's
+	// (namespaces, mc:Ignorable); without one the writer makes a plain root.
+	readonly freshRoot?: string | undefined
 }
 
 // --- Workbook ---

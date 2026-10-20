@@ -132,11 +132,14 @@ describe("sheet session: formulas moved with rows", () => {
 	})
 })
 
-describe("sheet session: what keeps rows and columns from moving", () => {
-	it("refuses when a table on another sheet calculates from the edited sheet", async () => {
+describe("sheet session: what refers to the edited sheet moves with its rows", () => {
+	it("moves a table's calculated formula on another sheet that reads the edited sheet", async () => {
 		const { result, session } = await insertRow(tableFixture("One!$A$5*2"))
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "table+xml" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/tables/table1.xml"]).toContain(
+			"<calculatedColumnFormula>One!$A$6*2</calculatedColumnFormula>"
+		)
 		session.close()
 	})
 
@@ -148,7 +151,7 @@ describe("sheet session: what keeps rows and columns from moving", () => {
 		session.close()
 	})
 
-	it("refuses when a legacy form control on another sheet links to the edited sheet", async () => {
+	it("moves a legacy form control's link on another sheet", async () => {
 		const { result, session } = await insertRow({
 			sheets: [
 				ONE,
@@ -161,21 +164,23 @@ describe("sheet session: what keeps rows and columns from moving", () => {
 			parts: { "xl/drawings/vmlDrawing1.vml": { text: VML, type: VML_TYPE } }
 		})
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "vmldrawing" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/drawings/vmlDrawing1.vml"]).toContain("<x:FmlaLink>One!$A$6</x:FmlaLink>")
 		session.close()
 	})
 
-	it("refuses when form control properties on another sheet link to the edited sheet", async () => {
+	it("moves form control properties' links on another sheet", async () => {
 		const { result, session } = await insertRow({
 			sheets: [ONE, { name: "Two", body: "<sheetData/>", rels: relationship("rId1", "ctrlProp", "../ctrlProps/ctrlProp1.xml") }],
 			parts: { "xl/ctrlProps/ctrlProp1.xml": { text: CONTROL, type: TYPES.controlProperties } }
 		})
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "controlproperties+xml" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/ctrlProps/ctrlProp1.xml"]).toContain('fmlaLink="One!$A$6"')
 		session.close()
 	})
 
-	it("refuses when a data consolidation on another sheet reads the edited sheet", async () => {
+	it("moves a data consolidation's source on another sheet", async () => {
 		const { result, session } = await insertRow({
 			sheets: [
 				ONE,
@@ -186,42 +191,46 @@ describe("sheet session: what keeps rows and columns from moving", () => {
 			]
 		})
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "reference" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/worksheets/sheet2.xml"]).toContain('<dataRef ref="A2:A6" sheet="One"/>')
 		session.close()
 	})
 
-	it("refuses when a connection parameter is bound to a cell of the edited sheet", async () => {
+	it("moves a connection parameter bound to a cell of the edited sheet", async () => {
 		const { result, session } = await insertRow({
 			sheets: [ONE],
 			parts: { "xl/connections.xml": { text: CONNECTIONS, type: TYPES.connections } }
 		})
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "connections+xml" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/connections.xml"]).toContain('cell="One!$A$6"')
 		session.close()
 	})
 
-	it("refuses when a web publishing object names the edited sheet", async () => {
+	it("moves a web publishing object's source", async () => {
 		const { result, session } = await insertRow({
 			sheets: [ONE],
 			workbookTail:
 				'<webPublishObjects count="1"><webPublishObject id="1" divId="d" sourceObject="One!A1:A5" destinationFile="x.htm"/></webPublishObjects>'
 		})
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "webPublishObjects" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/workbook.xml"]).toContain('sourceObject="One!A2:A6"')
 		session.close()
 	})
 
-	it("refuses when real-time data refers to cells by the sheet's position", async () => {
+	it("moves real-time data's cells on the sheet they name by position", async () => {
 		const { result, session } = await insertRow({
 			sheets: [ONE],
 			parts: { "xl/volatileDependencies.xml": { text: VOLATILE, type: TYPES.volatile } }
 		})
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "volatiledependencies+xml" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/volatileDependencies.xml"]).toContain('<tr r="A6" s="1"/>')
 		session.close()
 	})
 
-	it("refuses when the edited sheet's threaded comments refer to its cells", async () => {
+	it("moves the edited sheet's threaded comments with their cells", async () => {
 		const { result, session } = await insertRow({
 			sheets: [{ ...ONE, rels: relationship("rId1", "threadedComment", "../threadedComments/threadedComment1.xml") }],
 			parts: {
@@ -232,7 +241,8 @@ describe("sheet session: what keeps rows and columns from moving", () => {
 			}
 		})
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "threadedComment" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/threadedComments/threadedComment1.xml"]).toContain('ref="A6"')
 		session.close()
 	})
 
@@ -244,10 +254,127 @@ describe("sheet session: what keeps rows and columns from moving", () => {
 		const escaped = await insertRow(fixture("R&amp;D", "'R&amp;D'!$A$5"))
 		const quoted = await insertRow(fixture("Bob's", "'Bob''s'!$A$5"))
 
-		expect(refusal(escaped.result)?.detail).toBe("connections+xml")
-		expect(refusal(quoted.result)?.detail).toBe("connections+xml")
+		changeOf(escaped.result)
+		changeOf(quoted.result)
+		expect(parts(await savedBytes(escaped.session))["xl/connections.xml"]).toContain("$A$6")
+		expect(parts(await savedBytes(quoted.session))["xl/connections.xml"]).toContain("&apos;Bob&apos;&apos;s&apos;!$A$6")
 		escaped.session.close()
 		quoted.session.close()
+	})
+
+	it("moves rows in a workbook with children of newer schemas that do not name the sheet", async () => {
+		const { result, session } = await insertRow({
+			sheets: [ONE],
+			workbookTail:
+				'<extLst><ext uri="{140A7094-0E35-4892-8432-C4D2E57EDEB5}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:workbookPr chartTrackingRefBase="1"/></ext></extLst>'
+		})
+
+		changeOf(result)
+		session.close()
+	})
+
+	it("moves rows in a workbook whose saved path names the sheet's name", async () => {
+		const { result, session } = await insertRow({
+			sheets: [ONE],
+			workbookTail:
+				'<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x15"><x15ac:absPath xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac" url="C:\\One!\\"/></mc:Choice></mc:AlternateContent>'
+		})
+
+		changeOf(result)
+		session.close()
+	})
+
+	// Excel 365's usual workbook extensions, whose feature names, GUIDs and attributes hold sheet names as plain text.
+	const EXCEL_EXTENSIONS =
+		'<extLst><ext uri="{140A7094-0E35-4892-8432-C4D2E57EDEB5}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:workbookPr chartTrackingRefBase="1"/></ext>' +
+		'<ext uri="{B58B0392-4F1F-4190-BB64-5DF3571DCE5F}" xmlns:xcalcf="http://schemas.microsoft.com/office/spreadsheetml/2018/calcfeatures"><xcalcf:calcFeatures><xcalcf:feature name="microsoft.com:RD"/><xcalcf:feature name="microsoft.com:Single"/><xcalcf:feature name="microsoft.com:FV"/><xcalcf:feature name="microsoft.com:CNMTM"/><xcalcf:feature name="microsoft.com:LET_WF"/></xcalcf:calcFeatures></ext></extLst>'
+
+	for (const name of ["A", "B5", "Calc", "Single", "FV", "Flags"]) {
+		it(`edits a sheet named ${name} whose name the workbook's extensions write as plain text`, async () => {
+			const fixture = {
+				sheets: [{ ...ONE, name }],
+				workbookTail:
+					'<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="mx"><mx:ArchID xmlns:mx="http://schemas.microsoft.com/office/mac/excel/2008/main" Flags="2"/></mc:Choice></mc:AlternateContent>' +
+					'<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x15"><x15ac:absPath xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac" url="/Users/a/"/></mc:Choice></mc:AlternateContent>' +
+					EXCEL_EXTENSIONS
+			}
+			const inserted = await insertRow(fixture)
+
+			changeOf(inserted.result)
+			inserted.session.close()
+
+			const renamed = await renameOne(fixture)
+
+			changeOf(renamed.result)
+			renamed.session.close()
+		})
+	}
+
+	it("refuses when a later alternate content child of the workbook refers to the edited sheet", async () => {
+		const alternate = (inner: string): string =>
+			`<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x15">${inner}</mc:Choice></mc:AlternateContent>`
+		const { result, session } = await insertRow({
+			sheets: [ONE],
+			workbookTail:
+				alternate('<x15ac:absPath xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac" url="/Users/a/"/>') +
+				alternate('<x:ref xmlns:x="urn:x">One!A5</x:ref>')
+		})
+
+		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "workbook mc:AlternateContent" })
+		session.close()
+	})
+
+	for (const reference of ["One!$A$5", "'One'!$A$5", "&apos;One&apos;!A5", "Two:One!A5", "'Two:One'!A5", "One:Two!A5"]) {
+		it(`refuses when a workbook extension refers to the edited sheet: ${reference}`, async () => {
+			const { result, session } = await insertRow({
+				sheets: [ONE, { name: "Two", body: "<sheetData/>" }],
+				workbookTail: `<extLst><ext uri="{X}" xmlns:x="urn:x"><x:ref>${reference}</x:ref></ext></extLst>`
+			})
+
+			expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "workbook extLst" })
+			session.close()
+		})
+	}
+
+	it("refuses to delete or move sheets past a 3-D span a workbook extension holds", async () => {
+		const fixture = {
+			sheets: [ONE, { name: "Two", body: "<sheetData/>" }, { name: "Three", body: "<sheetData/>" }],
+			workbookTail: '<extLst><ext uri="{X}" xmlns:x="urn:x"><x:ref>One:Two!A5</x:ref></ext></extLst>'
+		}
+		const opened = await openFixture(fixture)
+
+		expect(refusal(await opened.session.command({ type: "sheet.move", sheet: opened.info.sheets[2]!.id, to: 0 }))).toEqual({
+			reason: "structureLocked",
+			detail: "workbook extLst"
+		})
+		expect(refusal(await opened.session.command({ type: "sheet.delete", sheet: opened.info.sheets[2]!.id }))).toEqual({
+			reason: "structureLocked",
+			detail: "workbook extLst"
+		})
+		changeOf(await opened.session.command({ type: "axis.insert", sheet: opened.info.sheets[2]!.id, axis: "rows", at: 0, count: 1 }))
+		opened.session.close()
+	})
+
+	it("refuses when a workbook extension names the edited sheet", async () => {
+		const { result, session } = await insertRow({
+			sheets: [ONE],
+			workbookTail: '<extLst><ext uri="{X}" xmlns:x="urn:x"><x:ref>One!$A$5</x:ref></ext></extLst>'
+		})
+
+		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "workbook extLst" })
+		session.close()
+	})
+
+	it("refuses an edit an undo could not take back exactly: a pivot table's range cut through", async () => {
+		const pivot = `${DECLARATION}<pivotTableDefinition xmlns="${MAIN}" name="P" cacheId="1" dataCaption="Values"><location ref="A3:B6" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/></pivotTableDefinition>`
+		const { session, info } = await openFixture({
+			sheets: [{ ...ONE, rels: relationship("rId1", "pivotTable", "../pivotTables/pivotTable1.xml") }],
+			parts: { "xl/pivotTables/pivotTable1.xml": { text: pivot, type: TYPES.pivotTable } }
+		})
+		const result = await session.command({ type: "axis.delete", sheet: info.sheets[0]!.id, axis: "rows", at: 3, count: 1 })
+
+		expect(refusal(result)?.reason).toBe("pivot")
+		session.close()
 	})
 })
 
@@ -285,7 +412,7 @@ describe("sheet session: sheets renamed", () => {
 		session.close()
 	})
 
-	it("refuses when a legacy form control links to the sheet by its name", async () => {
+	it("renames the sheet in a legacy form control's link", async () => {
 		const { result, session } = await renameOne({
 			sheets: [
 				ONE,
@@ -298,11 +425,12 @@ describe("sheet session: sheets renamed", () => {
 			parts: { "xl/drawings/vmlDrawing1.vml": { text: VML, type: VML_TYPE } }
 		})
 
-		expect(refusal(result)).toEqual({ reason: "structureLocked", detail: "vmldrawing" })
+		changeOf(result)
+		expect(parts(await savedBytes(session))["xl/drawings/vmlDrawing1.vml"]).toContain("<x:FmlaLink>Main!$A$5</x:FmlaLink>")
 		session.close()
 	})
 
-	it("refuses when a connection or a data consolidation names the sheet", async () => {
+	it("renames the sheet in a connection and a data consolidation", async () => {
 		const connection = await renameOne({
 			sheets: [ONE],
 			parts: { "xl/connections.xml": { text: CONNECTIONS, type: TYPES.connections } }
@@ -317,9 +445,36 @@ describe("sheet session: sheets renamed", () => {
 			]
 		})
 
-		expect(refusal(connection.result)).toEqual({ reason: "structureLocked", detail: "connections+xml" })
-		expect(refusal(consolidation.result)).toEqual({ reason: "structureLocked", detail: "reference" })
+		changeOf(connection.result)
+		changeOf(consolidation.result)
+		expect(parts(await savedBytes(connection.session))["xl/connections.xml"]).toContain('cell="Main!$A$5"')
+		expect(parts(await savedBytes(consolidation.session))["xl/worksheets/sheet2.xml"]).toContain('sheet="Main"')
 		connection.session.close()
 		consolidation.session.close()
 	})
+})
+
+describe("sheet session: structure edits undone", () => {
+	// A dimension smaller than the cells (a cell whose reference does not read takes the next column).
+	const SHORT_DIMENSION: FixtureSheet = {
+		name: "One",
+		body: '<dimension ref="A1"/><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B"><v>2</v></c></row></sheetData>'
+	}
+
+	for (const [axis, at] of [
+		["cols", 1],
+		["cols", 0],
+		["rows", 0],
+		["rows", 3]
+	] as const) {
+		it(`saves the source again after ${axis} inserted at ${String(at)} are undone, its dimension as written`, async () => {
+			const { session, info, bytes } = await openFixture({ sheets: [SHORT_DIMENSION] })
+
+			changeOf(await session.command({ type: "axis.insert", sheet: info.sheets[0]!.id, axis, at, count: 1 }))
+			changeOf(await session.undo())
+
+			expect(parts(await savedBytes(session))["xl/worksheets/sheet1.xml"]).toBe(parts(bytes)["xl/worksheets/sheet1.xml"])
+			session.close()
+		})
+	}
 })

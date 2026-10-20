@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { AxisEdit } from "../core/sheet/model/edits"
 import { shiftFormula } from "../core/sheet/refs/formulaRefs"
-import { quickShift } from "../core/xlsx/edit/structure-basic"
+import { quickShift } from "../core/xlsx/refs/quick"
 
 // The quick scan that moves plain formulas for an inserted or deleted run gives the formula parser's text, or
 // leaves the formula to it.

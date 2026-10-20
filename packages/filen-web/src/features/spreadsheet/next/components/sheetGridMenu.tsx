@@ -1,8 +1,22 @@
-import { Fragment, type ReactNode } from "react"
+import { Fragment, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
-import { AxisFlag, resetTargets, type SheetAxis, type SheetAxisLayout, type SheetCommand } from "@filen/office/core/sheet"
+import { AxisFlag, resetTargets, type LayerKey, type SheetAxis, type SheetAxisLayout, type SheetCommand } from "@filen/office/core/sheet"
 import type { SheetGridState } from "@filen/office/react/sheet"
-import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/context-menu"
+import {
+	ContextMenu,
+	ContextMenuContent,
+	ContextMenuItem,
+	ContextMenuSeparator,
+	ContextMenuSub,
+	ContextMenuSubContent,
+	ContextMenuSubTrigger,
+	ContextMenuTrigger
+} from "@/components/ui/context-menu"
+import { useEscapeClosesMenu } from "@/features/spreadsheet/next/components/menuEscape"
+import { useLocalPane } from "@/features/spreadsheet/next/menus/localPane"
+import { FREEZE_ITEMS, MERGE_ITEMS, freezeEnabled, freezeTo, selectionHasMerge } from "@/features/spreadsheet/next/menus/structureCommands"
+import { useMergeCommands } from "@/features/spreadsheet/next/menus/useMergeCommands"
+import { selectionSpans, spanCount, unhideSpans } from "@/features/spreadsheet/next/menus/structure.logic"
 
 // The structural items, in menu order; a separator follows each axis's delete. `after` inserts past the
 // selection's end rather than at its start.
@@ -13,6 +27,11 @@ const STRUCTURE_ITEMS = [
 	{ key: "previewSpreadsheetInsertColumnsLeft", type: "axis.insert", axis: "cols", after: false },
 	{ key: "previewSpreadsheetInsertColumnsRight", type: "axis.insert", axis: "cols", after: true },
 	{ key: "previewSpreadsheetDeleteColumns", type: "axis.delete", axis: "cols", after: false }
+] as const
+
+const HIDE_ITEMS = [
+	{ axis: "rows", hide: "previewSheetHideRows", unhide: "previewSheetUnhideRows" },
+	{ axis: "cols", hide: "previewSheetHideColumns", unhide: "previewSheetUnhideColumns" }
 ] as const
 
 function hiddenIn(layout: SheetAxisLayout): (index: number) => boolean {
@@ -27,22 +46,37 @@ function hiddenIn(layout: SheetAxisLayout): (index: number) => boolean {
 	return index => hidden.has(index)
 }
 
-// The grid's menu: rows and columns inserted or deleted, contents cleared, sizes reset. Read-only, it holds only the
-// size resets.
+// The grid's menu: rows and columns inserted, deleted, hidden and shown, contents cleared, panes frozen, cells merged,
+// sizes reset. Read-only, it holds only the size resets (and a text file's frozen panes, which it keeps beside the
+// file: `localPane`, the file's key, for a text file).
 export function SheetGridMenu({
 	grid,
 	canEdit,
 	run,
+	text,
+	localPane,
 	children
 }: {
 	grid: SheetGridState
 	canEdit: boolean
 	run: (command: SheetCommand) => void
+	// A text file: no formats, merges or hidden rows; its panes freeze though it is read-only.
+	text?: boolean
+	localPane?: LayerKey
 	children: ReactNode
 }) {
 	const { t } = useTranslation("preview")
 	const { sheet, selection, layout } = grid
 	const range = selection.ranges[selection.ranges.length - 1]
+	const textFile = text === true
+	const merges = useMergeCommands(grid)
+	const [menuOpen, setMenuOpen] = useState(false)
+
+	useEscapeClosesMenu(menuOpen, () => {
+		setMenuOpen(false)
+	})
+
+	useLocalPane(grid, localPane ?? { kind: "session", id: "" }, textFile && localPane !== undefined)
 
 	function resets(axis: SheetAxis): number[] {
 		if (range === undefined || layout === null) {
@@ -62,46 +96,133 @@ export function SheetGridMenu({
 		grid.model.resize(sheet, axis, Uint32Array.from(indices), new Float32Array(indices.length).fill(Number.NaN)).catch(() => undefined)
 	}
 
-	return (
-		<ContextMenu>
-			<ContextMenuTrigger className="flex min-h-0 flex-1 flex-col">{children}</ContextMenuTrigger>
-			<ContextMenuContent>
-				{canEdit && range !== undefined ? (
-					<>
-						{STRUCTURE_ITEMS.map(item => {
-							const rows = item.axis === "rows"
-							const count = rows ? range.endRow - range.startRow + 1 : range.endCol - range.startCol + 1
-							const start = rows ? range.startRow : range.startCol
+	const freezes = canEdit || textFile
 
-							return (
-								<Fragment key={item.key}>
-									<ContextMenuItem
-										onClick={() => {
-											run({ type: item.type, sheet, axis: item.axis, at: item.after ? start + count : start, count })
-										}}
-									>
-										{t(item.key, { count })}
-									</ContextMenuItem>
-									{item.type === "axis.delete" ? <ContextMenuSeparator /> : null}
-								</Fragment>
-							)
-						})}
-						<ContextMenuItem
-							onClick={() => {
-								run({ type: "cells.clear", sheet, ranges: selection.ranges, what: "contents" })
-							}}
-						>
-							{t("previewSpreadsheetClearCells")}
-						</ContextMenuItem>
-						<ContextMenuSeparator />
-					</>
-				) : null}
-				<ResetItems
-					resets={resets}
-					onReset={reset}
-				/>
-			</ContextMenuContent>
-		</ContextMenu>
+	return (
+		<>
+			<ContextMenu
+				open={menuOpen}
+				onOpenChange={setMenuOpen}
+			>
+				<ContextMenuTrigger className="flex min-h-0 flex-1 flex-col">{children}</ContextMenuTrigger>
+				<ContextMenuContent>
+					{canEdit && range !== undefined ? (
+						<>
+							{STRUCTURE_ITEMS.map(item => {
+								const rows = item.axis === "rows"
+								const count = rows ? range.endRow - range.startRow + 1 : range.endCol - range.startCol + 1
+								const start = rows ? range.startRow : range.startCol
+
+								return (
+									<Fragment key={item.key}>
+										<ContextMenuItem
+											onClick={() => {
+												run({
+													type: item.type,
+													sheet,
+													axis: item.axis,
+													at: item.after ? start + count : start,
+													count
+												})
+											}}
+										>
+											{t(item.key, { count })}
+										</ContextMenuItem>
+										{item.type === "axis.delete" ? <ContextMenuSeparator /> : null}
+									</Fragment>
+								)
+							})}
+							{textFile ? null : (
+								<>
+									{HIDE_ITEMS.map(item => {
+										const spans = selectionSpans(selection.ranges, item.axis)
+										const shown = unhideSpans(spans, layout, item.axis)
+
+										return (
+											<Fragment key={item.axis}>
+												<ContextMenuItem
+													onClick={() => {
+														run({ type: "axis.hide", sheet, axis: item.axis, spans, hidden: true })
+													}}
+												>
+													{t(item.hide, { count: spanCount(spans) })}
+												</ContextMenuItem>
+												<ContextMenuItem
+													disabled={shown === null}
+													onClick={() => {
+														if (shown !== null) {
+															run({ type: "axis.hide", sheet, axis: item.axis, spans: shown, hidden: false })
+														}
+													}}
+												>
+													{t(item.unhide)}
+												</ContextMenuItem>
+											</Fragment>
+										)
+									})}
+									<ContextMenuSeparator />
+									<ContextMenuSub>
+										<ContextMenuSubTrigger>{t("previewSheetMerge")}</ContextMenuSubTrigger>
+										<ContextMenuSubContent>
+											{MERGE_ITEMS.map(item => (
+												<ContextMenuItem
+													key={item.mode}
+													onClick={() => {
+														merges.merge(item.mode)
+													}}
+												>
+													{t(item.key)}
+												</ContextMenuItem>
+											))}
+											<ContextMenuItem
+												disabled={!selectionHasMerge(grid)}
+												onClick={merges.unmerge}
+											>
+												{t("previewSheetUnmerge")}
+											</ContextMenuItem>
+										</ContextMenuSubContent>
+									</ContextMenuSub>
+								</>
+							)}
+							<ContextMenuItem
+								onClick={() => {
+									run({ type: "cells.clear", sheet, ranges: selection.ranges, what: "contents" })
+								}}
+							>
+								{t("previewSpreadsheetClearCells")}
+							</ContextMenuItem>
+							<ContextMenuSeparator />
+						</>
+					) : null}
+					{freezes ? (
+						<>
+							<ContextMenuSub>
+								<ContextMenuSubTrigger>{t("previewSheetFreeze")}</ContextMenuSubTrigger>
+								<ContextMenuSubContent>
+									{FREEZE_ITEMS.map(item => (
+										<ContextMenuItem
+											key={item.target}
+											disabled={!freezeEnabled(grid, item.target)}
+											onClick={() => {
+												freezeTo(grid, item.target)
+											}}
+										>
+											{t(item.key)}
+										</ContextMenuItem>
+									))}
+								</ContextMenuSubContent>
+							</ContextMenuSub>
+							<ContextMenuSeparator />
+						</>
+					) : null}
+					<ResetItems
+						resets={resets}
+						onReset={reset}
+					/>
+				</ContextMenuContent>
+			</ContextMenu>
+			{merges.dialog}
+		</>
 	)
 }
 

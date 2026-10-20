@@ -213,7 +213,10 @@ describe("sheet registry", () => {
 		expect(
 			registry
 				.query("dataRegion")
-				?.run({ doc: { cells: new Map() }, settings: {}, slicing: undefined, signal: undefined }, { sheet: 0, row: 2, col: 3 })
+				?.run(
+					{ doc: { cells: new Map() }, settings: {}, slicing: undefined, signal: undefined, version: 0 },
+					{ sheet: 0, row: 2, col: 3 }
+				)
 		).toEqual({
 			startRow: 2,
 			startCol: 3,

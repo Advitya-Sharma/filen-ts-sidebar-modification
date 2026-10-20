@@ -1,9 +1,10 @@
+import { equalBytes } from "../../docx/write/bytes"
 import { encodeUtf8 } from "../../xml/index"
 import type { SheetRange } from "../../sheet/protocol"
 import { runSliced, type SliceClock } from "../../slicing"
 import type { XlsxSection, XlsxSheetChanges, XlsxSheetEntry, XlsxSheetModel, XlsxWorkbookModel } from "../model/types"
 import { assembleSections } from "./assemble"
-import { namespacesCompatible, usedRange, writeSheetDataSteps, type CarriedPart, type WrittenRow } from "./cells"
+import { editedRange, namespacesCompatible, usedRange, writeSheetDataSteps, type CarriedPart, type WrittenRow } from "./cells"
 import { XlsxWriteError } from "./failure"
 import { Pieces, rootTag, toBytes, utf8Part } from "./markup"
 import { namespacesOf } from "./namespaces"
@@ -102,10 +103,13 @@ export async function writeSheet(
 
 	if (bytes === null) {
 		const namespaces = namespacesOf(workbook.strict)
-		const root = `<${entry.kind === "chartsheet" ? "chartsheet" : "worksheet"} xmlns="${namespaces.main}" xmlns:r="${namespaces.relationships}">`
+		const plain = `<${entry.kind === "chartsheet" ? "chartsheet" : "worksheet"} xmlns="${namespaces.main}" xmlns:r="${namespaces.relationships}">`
+		const root = sheet.freshRoot ?? plain
+		const name = /^<([^\s/>]+)/.exec(root)?.[1] ?? "worksheet"
+		const colon = name.indexOf(":")
 		const head = encodeUtf8(`${DECLARATION}${root}`)
-		const data = encodeUtf8("<sheetData/>")
-		const tail = encodeUtf8(`</${entry.kind === "chartsheet" ? "chartsheet" : "worksheet"}>`)
+		const data = encodeUtf8(`<${colon < 0 ? "" : name.slice(0, colon + 1)}sheetData/>`)
+		const tail = encodeUtf8(`</${name}>`)
 
 		bytes = new Uint8Array(head.length + data.length + tail.length)
 		bytes.set(head, 0)
@@ -126,11 +130,24 @@ export async function writeSheet(
 	}
 
 	for (const [name, writer] of marked) {
-		const section = byName.get(name)
+		// A fresh part's model can carry a section's markup (a duplicated sheet's): its own writer edits that.
+		const carried = fresh ? sheet.sections.find(candidate => candidate.name === name && candidate.bytes !== null) : undefined
+		const section = byName.get(name) ?? carried
 		const current = section === undefined ? null : sectionBytes(part, section)
 
 		if (writer !== null) {
-			replacements.set(name, toBytes(writer(sheet, workbook)))
+			const written = toBytes(writer(sheet, workbook))
+
+			// A section written back as the source has it is the source's (an undone edit).
+			if (
+				carried === undefined &&
+				current !== null &&
+				written.length === current.length &&
+				equalBytes(written, 0, current, 0, current.length)
+			)
+				continue
+
+			replacements.set(name, written)
 
 			continue
 		}
@@ -141,16 +158,17 @@ export async function writeSheet(
 
 		const written = own(sheet, current, prefix)
 
-		if (written !== null && written !== current) replacements.set(name, written)
+		if (written !== null && (written !== current || carried !== undefined)) replacements.set(name, written)
 	}
 
-	// Content the edits added outside the recorded dimension widens it (a dimension that is too small makes a
-	// reader drop cells).
+	// Content the edits added outside the recorded dimension widens it to the cells (a dimension that is too small
+	// makes a reader drop cells); rows as the source has them keep its dimension, even one too small for them.
 	const dimension = byName.get("dimension")
 
 	if (changes?.rows === true && !marked.has("dimension") && dimension !== undefined) {
 		const recorded = readDimension(sectionBytes(part, dimension))
-		const used = usedRange(sheet)
+		const edited = editedRange(sheet)
+		const used = edited === null || (recorded !== null && contains(recorded, edited)) ? null : usedRange(sheet)
 
 		if (used !== null && (recorded === null || !contains(recorded, used))) {
 			const union =

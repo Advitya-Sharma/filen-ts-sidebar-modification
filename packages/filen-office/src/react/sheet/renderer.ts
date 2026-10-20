@@ -18,6 +18,10 @@ import { bodyTotal, gridView, hitAxis, revealOffset, screenOf, edgeAt, type Grid
 // fetches the tiles it lacks (they paint in a later frame), positions the editor and the accessible active cell,
 // and grows the extent when the user scrolled to its end.
 //
+// A right-to-left sheet (SheetLayout.rightToLeft) is laid out as any other and shown mirrored: the painters
+// mirror what they draw, hit-testing mirrors the pointer, and the scroller's horizontal offset runs from its end,
+// so the scrollbar starts at the right and dragging it left brings in the columns past the left edge.
+//
 // Canvas rather than rows of memoised cell elements: both cost about the same for a step of a few rows, but a step
 // that replaces the window (a page, a jump, a fast fling) makes the DOM build and lay out every cell again, several
 // times the canvas's draw in Chromium (and past a frame on a slow CPU); and a canvas draws every border style,
@@ -187,6 +191,16 @@ export class GridRenderer {
 		this.height = scroller.clientHeight
 	}
 
+	// The current sheet is shown right to left.
+	private mirrored(): boolean {
+		return this.model.layout(this.model.getSnapshot().sheet)?.rightToLeft === true
+	}
+
+	// The scroller's horizontal offset as laid out: from its end in a mirrored sheet.
+	private laidOutLeft(scroller: HTMLElement): number {
+		return this.mirrored() ? Math.max(0, scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft) : scroller.scrollLeft
+	}
+
 	// Keeps the virtual offsets when the browser's are what we set them to (rounding would move them otherwise).
 	private readScroll(): void {
 		const scroller = this.elements?.scroller
@@ -194,7 +208,7 @@ export class GridRenderer {
 		if (scroller === undefined || this.view === null) return
 
 		const top = scroller.scrollTop
-		const left = scroller.scrollLeft
+		const left = this.laidOutLeft(scroller)
 
 		if (Math.abs(top - this.scroll.domTop) >= 1) {
 			this.scroll.top = toVirtual(top, bodyTotal(this.view.rows), this.view.rows.bodyView)
@@ -222,11 +236,12 @@ export class GridRenderer {
 
 		const kept = this.scrolls.get(sheet)
 		const pane = layout.pane
-		const frozenRows = pane?.rows ?? 0
-		const frozenCols = pane?.cols ?? 0
+		// The scrolled part starts past the frozen block.
+		const bodyRow = pane === null ? 0 : pane.rows > 0 ? pane.firstRow + pane.rows : 0
+		const bodyCol = pane === null ? 0 : pane.cols > 0 ? pane.firstCol + pane.cols : 0
 
-		this.scroll.top = kept?.top ?? (pane === null ? 0 : Math.max(0, axes.rows.offset(pane.topRow) - axes.rows.offset(frozenRows)))
-		this.scroll.left = kept?.left ?? (pane === null ? 0 : Math.max(0, axes.cols.offset(pane.leftCol) - axes.cols.offset(frozenCols)))
+		this.scroll.top = kept?.top ?? (pane === null ? 0 : Math.max(0, axes.rows.offset(pane.topRow) - axes.rows.offset(bodyRow)))
+		this.scroll.left = kept?.left ?? (pane === null ? 0 : Math.max(0, axes.cols.offset(pane.leftCol) - axes.cols.offset(bodyCol)))
 		this.view = this.computeView()
 		this.writeScroll()
 	}
@@ -256,9 +271,11 @@ export class GridRenderer {
 		this.scroll.top = view.rows.scroll
 		this.scroll.left = view.cols.scroll
 		elements.scroller.scrollTop = top
-		elements.scroller.scrollLeft = left
+		elements.scroller.scrollLeft = this.mirrored()
+			? Math.max(0, elements.scroller.scrollWidth - elements.scroller.clientWidth - left)
+			: left
 		this.scroll.domTop = elements.scroller.scrollTop
-		this.scroll.domLeft = elements.scroller.scrollLeft
+		this.scroll.domLeft = this.laidOutLeft(elements.scroller)
 	}
 
 	// Whether the extent's size changed.
@@ -334,6 +351,7 @@ export class GridRenderer {
 				view,
 				theme,
 				pixelRatio,
+				rightToLeft: layout.rightToLeft,
 				selection: snapshot.selection,
 				merges: this.model.merges(layout),
 				guide:
@@ -395,12 +413,12 @@ export class GridRenderer {
 		const rowSpans: [number, number][] = []
 		const colSpans: [number, number][] = []
 
-		if (view.rows.frozen > 0) rowSpans.push([0, view.rows.frozen - 1])
+		if (view.rows.frozen > 0) rowSpans.push([view.rows.frozenFirst, view.rows.frozenEnd - 1])
 		if (view.rows.last >= view.rows.first)
-			rowSpans.push([Math.max(view.rows.frozen, view.rows.first - MARGIN_ROWS), view.rows.last + MARGIN_ROWS])
-		if (view.cols.frozen > 0) colSpans.push([0, view.cols.frozen - 1])
+			rowSpans.push([Math.max(view.rows.frozenEnd, view.rows.first - MARGIN_ROWS), view.rows.last + MARGIN_ROWS])
+		if (view.cols.frozen > 0) colSpans.push([view.cols.frozenFirst, view.cols.frozenEnd - 1])
 		if (view.cols.last >= view.cols.first)
-			colSpans.push([Math.max(view.cols.frozen, view.cols.first - MARGIN_COLS), view.cols.last + MARGIN_COLS])
+			colSpans.push([Math.max(view.cols.frozenEnd, view.cols.first - MARGIN_COLS), view.cols.last + MARGIN_COLS])
 
 		const tileRows = new Set<number>()
 		const tileCols = new Set<number>()
@@ -427,11 +445,14 @@ export class GridRenderer {
 
 		const box = this.cellBox(view, active)
 		const a11y = elements.active
+		const mirrored = this.mirrored()
+		// Where a box laid out from x starts on screen.
+		const screenX = (x: number, width: number): number => (mirrored ? view.width - x - width : x)
 
 		if (box === null) {
 			a11y.style.transform = "translate(-9999px, 0)"
 		} else {
-			a11y.style.transform = `translate(${String(this.scroll.domLeft + box.x)}px, ${String(this.scroll.domTop + box.y)}px)`
+			a11y.style.transform = `translate(${String(elements.scroller.scrollLeft + screenX(box.x, box.width))}px, ${String(this.scroll.domTop + box.y)}px)`
 			a11y.style.width = `${String(box.width)}px`
 			a11y.style.height = `${String(box.height)}px`
 		}
@@ -454,10 +475,15 @@ export class GridRenderer {
 		const style = this.model.style(found === null ? 0 : (found.tile.styles[found.entry] ?? 0))
 		const scale = layout === null ? 1 : this.model.scale(layout)
 
-		editor.style.transform = `translate(${String(editBox.x)}px, ${String(editBox.y)}px)`
+		const editX = screenX(editBox.x, editBox.width)
+
+		// Mirrored, the editor keeps its cell's right edge and grows to the left.
+		editor.style.transform = mirrored
+			? `translate(calc(${String(editX + editBox.width)}px - 100%), ${String(editBox.y)}px)`
+			: `translate(${String(editX)}px, ${String(editBox.y)}px)`
 		editor.style.minWidth = `${String(editBox.width)}px`
 		editor.style.minHeight = `${String(editBox.height)}px`
-		editor.style.maxWidth = `${String(Math.max(editBox.width, view.width - editBox.x))}px`
+		editor.style.maxWidth = `${String(Math.max(editBox.width, mirrored ? editX + editBox.width : view.width - editX))}px`
 		editor.style.font = textFont(style, this.model.style(0), this.currentTheme().font, scale).css
 		editor.style.paddingLeft = `${String(Math.max(1, Math.round(TEXT_PADDING * scale)))}px`
 	}
@@ -516,11 +542,13 @@ export class GridRenderer {
 		if (elements === null || view === null) return null
 
 		const rect = elements.scroller.getBoundingClientRect()
-		const x = clientX - rect.left
+		const screenX = clientX - rect.left
 		const y = clientY - rect.top
 
 		// The scrollbars.
-		if (x >= this.width || y >= this.height) return null
+		if (screenX >= this.width || y >= this.height) return null
+
+		const x = this.layoutX(screenX)
 
 		const row = hitAxis(view.rows, y)
 		const col = hitAxis(view.cols, x)
@@ -534,7 +562,12 @@ export class GridRenderer {
 		return { kind: "cell", row: row.index, col: col.index }
 	}
 
-	// Where a pointer is, in the scroller's own coordinates.
+	// A screen x in the scroller as the grid is laid out (mirrored in a right-to-left sheet).
+	layoutX(x: number): number {
+		return this.mirrored() ? this.width - x : x
+	}
+
+	// Where a pointer is, in the scroller's own coordinates (on screen: layoutX gives the laid-out x).
 	local(clientX: number, clientY: number): { x: number; y: number } | null {
 		const scroller = this.elements?.scroller
 
@@ -588,6 +621,13 @@ export class GridRenderer {
 		const view = this.view
 
 		return view === null ? 20 : Math.max(1, view.rows.last - view.rows.first)
+	}
+
+	// Columns a screen holds (Alt+Page Up, Alt+Page Down).
+	pageCols(): number {
+		const view = this.view
+
+		return view === null ? 8 : Math.max(1, view.cols.last - view.cols.first)
 	}
 
 	// A screen position along an axis's edge, for a resize's guide: where `index` ends.

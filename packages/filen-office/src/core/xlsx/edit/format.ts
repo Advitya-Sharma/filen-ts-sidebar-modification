@@ -1,9 +1,13 @@
+import { numFmtProblem, unwritableText } from "../../sheet/numfmt/edit"
 import { SHEET_MAX_EDIT_CELLS, type SheetColorInput, type SheetFormatPatch, type SheetId, type SheetRange } from "../../sheet/protocol"
-import type { SheetStore } from "../model/store"
+import { BLOCK_ROWS, type CellWrite, type SheetStore } from "../model/store"
 import { CellKind, XfApply, type XlsxAlignment, type XlsxColor, type XlsxFont, type XlsxXf } from "../model/types"
 import { XlsxReadError } from "../read/index"
 import type { XlsxDocument } from "./document"
+import { runSliced, sliceClock, type Slicing } from "../../slicing"
+import { AxisChange, partialAxis, restoreAxisChange, wholeAxis, wholeAxisTargets, type PositionedPatch } from "./formatAxes"
 import { CellLog } from "./history"
+import { fittedRows } from "./formatHeights"
 import type { SheetChangeSink, SheetEditStep, SheetHandled } from "../../sheet/registry"
 
 // Cell formats an edit asks for, as appended records: the format a cell had, patched, becomes a new cell format
@@ -11,6 +15,8 @@ import type { SheetChangeSink, SheetEditStep, SheetHandled } from "../../sheet/r
 // changed in place, and each distinct format is patched once per edit.
 
 // Excel's own limit on the cell formats one edit may append is the workbook's (styleLimit).
+const DEFAULT_XF: XlsxXf = { numFmtId: 0, fontId: 0, fillId: 0, borderId: 0, xfId: 0, flags: 0 }
+
 export class StyleLimitError extends Error {
 	constructor() {
 		super("The workbook has as many cell formats as Excel allows")
@@ -93,9 +99,32 @@ export class XfPatcher {
 	}
 }
 
-function append(document: XlsxDocument, xf: XlsxXf): number {
+const PARTS = [
+	[XfApply.NUMBER_FORMAT, "numFmtId"],
+	[XfApply.FONT, "fontId"],
+	[XfApply.FILL, "fillId"],
+	[XfApply.BORDER, "borderId"]
+] as const
+
+// An apply bit (§18.8.45) on a part equal to the cell style's tells nothing (applied or not, it is the same part):
+// it goes, so a change back gives the format the cell started from rather than a look-alike.
+function withoutIdleApply(document: XlsxDocument, xf: XlsxXf): XlsxXf {
+	const parent = xf.xfId >= 0 ? document.workbook.styles.cellStyleXfs[xf.xfId] : undefined
+
+	if (parent === undefined) return xf
+
+	let flags = xf.flags
+
+	for (const [bit, key] of PARTS) if ((flags & bit) !== 0 && xf[key] === parent[key]) flags &= ~bit
+
+	return flags === xf.flags ? xf : { ...xf, flags }
+}
+
+// A cell format's index: an equal one the workbook holds, else one appended. `copy`: a record of its own even where
+// the file holds an equal one. Throws StyleLimitError past the workbook's limit.
+export function appendXf(document: XlsxDocument, xf: XlsxXf, copy = false): number {
 	try {
-		const index = document.workbook.styles.appendXf(xf)
+		const index = document.workbook.styles.appendXf(copy ? xf : withoutIdleApply(document, xf), copy)
 
 		document.workbook.changes.stylesAppended()
 
@@ -109,7 +138,7 @@ function append(document: XlsxDocument, xf: XlsxXf): number {
 
 export function patchXf(document: XlsxDocument, index: number, patch: SheetFormatPatch): number {
 	const styles = document.workbook.styles
-	const xf: XlsxXf = styles.cellXfs[index] ?? styles.cellXfs[0] ?? { numFmtId: 0, fontId: 0, fillId: 0, borderId: 0, xfId: 0, flags: 0 }
+	const xf: XlsxXf = styles.cellXfs[index] ?? styles.cellXfs[0] ?? DEFAULT_XF
 	let next: XlsxXf = { ...xf }
 	let flags = xf.flags
 
@@ -155,7 +184,7 @@ export function patchXf(document: XlsxDocument, index: number, patch: SheetForma
 
 	next = { ...next, flags }
 
-	return append(document, next)
+	return appendXf(document, next)
 }
 
 // The format with the quote prefix (§18.8.45: an entry typed with a leading apostrophe) set or cleared, and the
@@ -168,7 +197,7 @@ export function typedXf(document: XlsxDocument, index: number, quoted: boolean, 
 
 	if ((prefixed !== 0) === quoted && (numFmt === undefined || !general)) return index
 
-	const base: XlsxXf = xf ?? styles.cellXfs[0] ?? { numFmtId: 0, fontId: 0, fillId: 0, borderId: 0, xfId: 0, flags: 0 }
+	const base: XlsxXf = xf ?? styles.cellXfs[0] ?? DEFAULT_XF
 	let flags = quoted ? base.flags | XfApply.QUOTE_PREFIX : base.flags & ~XfApply.QUOTE_PREFIX
 	let numFmtId = base.numFmtId
 
@@ -177,7 +206,7 @@ export function typedXf(document: XlsxDocument, index: number, quoted: boolean, 
 		flags |= XfApply.NUMBER_FORMAT
 	}
 
-	return append(document, { ...base, numFmtId, flags })
+	return appendXf(document, { ...base, numFmtId, flags })
 }
 
 // Clips a range to what one format edit takes: the whole range when the limits allow, else (whole rows or
@@ -274,72 +303,330 @@ export function reportLogged(log: CellLog, changes: SheetChangeSink, kind: "cont
 	for (const [sheet, range] of bounds) changes[kind](sheet, range)
 }
 
-// format.apply: each range's cells take their format patched; cells without one of their own start from their
-// row's or column's.
-export function applyFormat(
+function areaOf(range: SheetRange): number {
+	return (range.endRow - range.startRow + 1) * (range.endCol - range.startCol + 1)
+}
+
+// Puts every logged cell of a format edit back as `which` side has it, through one batch (see planSteps): such an
+// edit changed styles only, so the cells' contents, formulas and shown results are the same on both sides.
+function restoreStyles(store: SheetStore, log: CellLog, which: "before" | "after"): void {
+	const states = which === "before" ? log.before : log.after
+	const cells: CellWrite[] = []
+
+	for (let i = 0; i < log.size; i++) {
+		const state = states[i]
+
+		if (state === undefined) continue
+
+		cells.push(
+			state.present
+				? {
+						row: log.rows[i] ?? 0,
+						col: log.cols[i] ?? 0,
+						kind: state.kind,
+						value: state.value,
+						style: state.style,
+						formula: state.formula,
+						origin: state.origin ?? -1
+					}
+				: { row: log.rows[i] ?? 0, col: log.cols[i] ?? 0, kind: CellKind.EMPTY, value: 0, style: 0, formula: -1, origin: -1 }
+		)
+	}
+
+	store.setCells(cells)
+}
+
+// Where a refused edit's partial changes are reported while they are taken back: nowhere (nothing was reported).
+const UNSEEN: SheetChangeSink = {
+	content: () => undefined,
+	look: () => undefined,
+	moved: () => undefined,
+	layout: () => undefined,
+	sheets: () => undefined,
+	select: () => undefined
+}
+
+// One range of a format edit: its cells take `patch` (by where they are). `existing`: a neighbour whose facing
+// border goes, never formatted through its axes; an empty cell gets a cell only where the format its row or column
+// gives it changes.
+export interface FormatPlanEntry {
+	readonly range: SheetRange
+	readonly patch: PositionedPatch
+	readonly existing?: boolean
+}
+
+// Runs a format edit range by range, each seeing what the ones before it did: whole columns and rows through their
+// axes (formatAxes.ts), other ranges cell by cell. Refused, with nothing changed, past the edit's cell budget or the
+// workbook's style limit.
+// `fitRows`: the edit may change font sizes, so the rows it touched fit their fonts again (formatHeights.ts).
+export function formatPlan(
 	document: XlsxDocument,
 	sheet: SheetId,
-	ranges: readonly SheetRange[],
-	patch: SheetFormatPatch,
-	changes: SheetChangeSink
-): SheetHandled {
+	entries: readonly FormatPlanEntry[],
+	changes: SheetChangeSink,
+	slicing?: Slicing,
+	fitRows = false
+): Promise<SheetHandled> {
+	return runSliced(planSteps(document, sheet, entries, changes, fitRows), slicing === undefined ? undefined : sliceClock(slicing))
+}
+
+// Cells written between the host's turns are counted in these.
+const CELLS_PER_STEP = 64
+// Cells written to the store at once: about a block's worth, each block rebuilt about once.
+const CELLS_PER_BATCH = 1024
+
+function* planSteps(
+	document: XlsxDocument,
+	sheet: SheetId,
+	entries: readonly FormatPlanEntry[],
+	changes: SheetChangeSink,
+	fitRows: boolean
+): Generator<void, SheetHandled> {
 	const model = document.model(sheet)
 
 	if (model === null) return { refused: { reason: "tooLarge" } }
 
 	const store = model.store as SheetStore
-	const clipped: SheetRange[] = []
+	const log = new CellLog()
+	const axes = new AxisChange(sheet)
+	const looked: SheetRange[] = []
 	let budget = SHEET_MAX_EDIT_CELLS
+	let written = 0
+	// A format changes cells' styles only (and adds or drops cells without content): written to the store in
+	// batches, so a block is rebuilt once per batch rather than once per cell it gains.
+	const pending: CellWrite[] = []
+	const flush = (): void => {
+		if (pending.length === 0) return
 
-	for (const range of ranges) {
-		const fitted = clippedRange(store, range, budget)
+		store.setCells(pending)
+		pending.length = 0
+		document.workbook.changes.sheetRows(sheet)
+	}
+	const write = (row: number, col: number, style: number): boolean => {
+		const state = document.state(sheet, row, col)
 
-		if (fitted === null) return { refused: { reason: "tooLarge" } }
+		log.touch(sheet, row, col, () => state, true)
+		pending.push(
+			state.present
+				? { row, col, kind: state.kind, value: state.value, style, formula: state.formula, origin: -1 }
+				: { row, col, kind: CellKind.EMPTY, value: 0, style, formula: -1, origin: -1 }
+		)
 
-		clipped.push(fitted)
-		budget -= (fitted.endRow - fitted.startRow + 1) * (fitted.endCol - fitted.startCol + 1)
+		if (pending.length >= CELLS_PER_BATCH) {
+			flush()
+
+			return true
+		}
+
+		return ++written % CELLS_PER_STEP === 0
+	}
+	const undoAll = (): void => {
+		pending.length = 0
+		restoreStyles(store, log, "before")
+		document.workbook.changes.sheetRows(sheet)
+		restoreAxisChange(document, axes, "before", UNSEEN)
+	}
+	const refuse = (reason: "tooLarge" | "styleLimit"): SheetHandled => {
+		undoAll()
+
+		return { refused: { reason } }
 	}
 
-	const patcher = new XfPatcher(document, patch)
-	const log = new CellLog()
-	const targets: { row: number; col: number; style: number }[] = []
-
 	try {
-		for (const range of clipped) {
+		for (const entry of entries) {
+			let whole = entry.existing === true ? null : wholeAxis(entry.range)
+
+			// A range reaching the grid's edge from inside it is formatted cell by cell while that fits.
+			if (whole !== null && partialAxis(entry.range, whole) && areaOf(entry.range) <= budget) whole = null
+
+			if (whole !== null) {
+				const taken = yield* wholeAxisTargets(model, entry.range, whole, entry.patch, budget)
+
+				if (taken === null) return refuse("tooLarge")
+
+				for (const target of taken.cells) if (write(target.row, target.col, target.style)) yield
+
+				if (taken.cols !== null) {
+					axes.setCols(model, taken.cols)
+					document.workbook.changes.sheetSection(sheet, "cols")
+				}
+
+				// A block of rows at a time: each is rebuilt once.
+				for (let at = 0; at < taken.rows.length; at += BLOCK_ROWS) {
+					axes.setRows(store, taken.rows.slice(at, at + BLOCK_ROWS))
+					yield
+				}
+
+				if (taken.rows.length > 0) document.workbook.changes.sheetRows(sheet)
+
+				budget -= taken.cells.length
+				flush()
+				looked.push(entry.range)
+				continue
+			}
+
+			// A range is formatted whole or not at all. An `existing` one adds a cell only where the format its row or
+			// column gives it changes.
+			const range = entry.range
+
+			if (entry.existing !== true) {
+				if (areaOf(range) > budget) return refuse("tooLarge")
+
+				budget -= areaOf(range)
+			}
+
 			for (let row = range.startRow; row <= range.endRow; row++) {
 				for (let col = range.startCol; col <= range.endCol; col++) {
 					const slot = store.locate(row, col)
 					const xf = slot < 0 ? document.startingStyle(model, row, col) : store.style(slot)
-					const next = patcher.xf(xf)
+					const next = entry.patch(xf, row, col, true)
 
-					if (slot >= 0 && next === xf) continue
+					if (next === xf) continue
+					if (slot < 0 && entry.existing === true && --budget < 0) return refuse("tooLarge")
 
-					targets.push({ row, col, style: next })
+					if (write(row, col, next)) yield
 				}
 			}
+
+			flush()
+			looked.push(range)
 		}
 	} catch (error) {
-		if (error instanceof StyleLimitError) return { refused: { reason: "styleLimit" } }
+		if (error instanceof StyleLimitError) return refuse("styleLimit")
 
 		throw error
 	}
 
-	if (targets.length === 0) return null
+	if (log.size === 0 && !axes.changed) return null
 
-	for (const { row, col, style } of targets) {
-		const state = document.state(sheet, row, col)
+	// A cell of the default format without content is no cell, so it would show its row's or column's format: where
+	// that is not the default, it is kept as a copy of the default format (an equal record of its own).
+	let copy = -1
 
-		log.touch(sheet, row, col, () => state, true)
-		document.write(sheet, row, col, state.present ? { ...state, style } : { ...state, present: true, kind: CellKind.EMPTY, style })
+	try {
+		for (let i = 0; i < log.size; i++) {
+			const row = log.rows[i] ?? 0
+			const col = log.cols[i] ?? 0
+
+			if (store.locate(row, col) < 0 && log.direct[i] === true && document.startingStyle(model, row, col) !== 0) {
+				if (copy < 0) copy = appendXf(document, { ...(document.workbook.styles.cellXfs[0] ?? DEFAULT_XF) }, true)
+
+				pending.push({ row, col, kind: CellKind.EMPTY, value: 0, style: copy, formula: -1, origin: -1 })
+
+				if (pending.length >= CELLS_PER_BATCH) flush()
+			}
+
+			if ((i + 1) % CELLS_PER_STEP === 0) yield
+		}
+	} catch (error) {
+		if (error instanceof StyleLimitError) return refuse("styleLimit")
+
+		throw error
 	}
 
-	log.seal((s, r, c) => document.state(s, r, c))
+	flush()
+
+	if (fitRows) {
+		const rows = new Set<number>(log.rows)
+
+		for (const row of axes.rows.keys()) rows.add(row)
+
+		const fitted = yield* fittedRows(
+			document,
+			model,
+			[...rows].sort((a, b) => a - b)
+		)
+
+		for (let at = 0; at < fitted.length; at += BLOCK_ROWS) {
+			axes.setRows(store, fitted.slice(at, at + BLOCK_ROWS))
+			yield
+		}
+
+		if (fitted.length > 0) document.workbook.changes.sheetRows(sheet)
+	}
+
+	// What each touched cell now holds (CellLog.seal), in steps.
+	log.after.length = 0
+
+	for (let i = 0; i < log.size; i++) {
+		log.after.push(document.state(log.sheets[i] ?? sheet, log.rows[i] ?? 0, log.cols[i] ?? 0))
+
+		if ((i + 1) % CELLS_PER_STEP === 0) yield
+	}
 
 	const report = (sink: SheetChangeSink): void => {
-		for (const range of clipped) sink.look(sheet, range)
+		for (const range of looked) sink.look(sheet, range)
 	}
+	const replay = (which: "before" | "after", sink: SheetChangeSink): void => {
+		restoreStyles(store, log, which)
+		document.workbook.changes.sheetRows(sheet)
+		restoreAxisChange(document, axes, which, sink)
+		report(sink)
+	}
+
+	if (axes.changed) changes.layout(sheet)
 
 	report(changes)
 
-	return cellStep(document, log, report, false)
+	return {
+		bytes: log.bytes + axes.bytes,
+		undo: sink => replay("before", sink),
+		redo: sink => replay("after", sink)
+	}
+}
+
+// What a patch asks that the styles part cannot hold: a number format code the Format Cells dialog refuses too
+// (numFmtProblem), or a font name with a character XML cannot carry.
+function unwritable(patch: SheetFormatPatch): string | null {
+	if (patch.numFmt !== undefined && numFmtProblem(patch.numFmt) !== null) return "numFmt"
+	if (patch.font !== undefined && patch.font !== null && (patch.font.trim() === "" || unwritableText(patch.font))) return "font"
+
+	return null
+}
+
+// format.apply: each range's cells take their format patched (whole columns and rows their axes' too); cells
+// without one of their own start from their row's or column's.
+export function applyFormat(
+	document: XlsxDocument,
+	sheet: SheetId,
+	ranges: readonly SheetRange[],
+	patch: SheetFormatPatch,
+	changes: SheetChangeSink,
+	slicing?: Slicing
+): Promise<SheetHandled> {
+	const detail = unwritable(patch)
+
+	if (detail !== null) return Promise.resolve({ refused: { reason: "unsupported", detail } })
+
+	const patcher = new XfPatcher(document, patch)
+	const patchCell: PositionedPatch = xf => patcher.xf(xf)
+
+	return formatPlan(
+		document,
+		sheet,
+		ranges.map(range => ({ range, patch: patchCell })),
+		changes,
+		slicing,
+		patch.size !== undefined
+	)
+}
+
+// format.clear: every cell back to the default format (cellXfs 0), whole columns' and rows' axes too.
+export function clearFormats(
+	document: XlsxDocument,
+	sheet: SheetId,
+	ranges: readonly SheetRange[],
+	changes: SheetChangeSink,
+	slicing?: Slicing
+): Promise<SheetHandled> {
+	const cleared: PositionedPatch = () => 0
+
+	return formatPlan(
+		document,
+		sheet,
+		ranges.map(range => ({ range, patch: cleared })),
+		changes,
+		slicing,
+		true
+	)
 }

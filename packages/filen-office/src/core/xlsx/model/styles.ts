@@ -27,6 +27,23 @@ export function recordKey(value: unknown): string {
 	return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${recordKey(entry)}`).join(",")}}`
 }
 
+// A border's identity: an edge without a line (<left/>, style "none") is no edge.
+function borderKey(border: XlsxBorder): string {
+	const lines: Record<string, unknown> = {}
+
+	for (const [key, value] of Object.entries(border)) {
+		if (typeof value === "object" && (value.style === undefined || (value.style as string) === "none")) continue
+
+		lines[key] = value
+	}
+
+	return recordKey(lines)
+}
+
+function keyOf(kind: string, record: unknown): string {
+	return kind + (kind === "border" ? borderKey(record as XlsxBorder) : recordKey(record))
+}
+
 export interface StyleSource {
 	readonly numFmts: Map<number, string>
 	readonly fonts: XlsxFont[]
@@ -57,8 +74,10 @@ export class StyleTable implements XlsxStyleTable {
 		readonly cellXfs: number
 		readonly dxfs: number
 	}
-	// Appended records by key, so an equal append reuses one.
+	// Records by key, so an equal append reuses one: appended ones, and the source's (first of equals), indexed on
+	// a kind's first append so a change back to a format the file had finds it.
 	private readonly appended = new Map<string, number>()
+	private readonly indexed = new Set<string>()
 	// Custom format ids by code (first wins), built on first use.
 	private codes: Map<string, number> | null = null
 
@@ -124,23 +143,55 @@ export class StyleTable implements XlsxStyleTable {
 		return this.append("border", this.borders, border)
 	}
 
-	appendXf(xf: XlsxXf): number {
+	// `copy`: a record of its own even where the source holds an equal one (an appended equal one is still reused).
+	appendXf(xf: XlsxXf, copy = false): number {
 		const key = `xf${recordKey(xf)}`
-		const existing = this.appended.get(key)
+
+		if (!copy) this.indexSource("xf", this.cellXfs, this.sourceCounts.cellXfs)
+
+		const existing = copy ? this.copies.get(key) : this.appended.get(key)
 
 		if (existing !== undefined) return existing
 		if (this.cellXfs.length >= MAX_CELL_XFS)
 			throw new XlsxReadError("styleLimit", "The workbook has as many cell formats as Excel allows")
 
-		return this.append("xf", this.cellXfs, xf)
+		this.cellXfs.push(xf)
+
+		const index = this.cellXfs.length - 1
+
+		this.copies.set(key, index)
+		if (!this.appended.has(key)) this.appended.set(key, index)
+
+		return index
 	}
 
 	appendDxf(dxf: XlsxDxf): number {
 		return this.append("dxf", this.dxfs, dxf)
 	}
 
-	private append<T>(kind: string, list: T[], record: T): number {
-		const key = kind + recordKey(record)
+	// Appended cell formats by key, for `copy` appends.
+	private readonly copies = new Map<string, number>()
+
+	private indexSource<T>(kind: string, list: readonly T[], count: number): void {
+		if (this.indexed.has(kind)) return
+
+		this.indexed.add(kind)
+
+		for (let i = 0; i < count && i < list.length; i++) {
+			const key = keyOf(kind, list[i])
+
+			if (!this.appended.has(key)) this.appended.set(key, i)
+		}
+	}
+
+	private append<T>(kind: "font" | "fill" | "border" | "dxf", list: T[], record: T): number {
+		this.indexSource(
+			kind,
+			list,
+			this.sourceCounts[kind === "font" ? "fonts" : kind === "fill" ? "fills" : kind === "border" ? "borders" : "dxfs"]
+		)
+
+		const key = keyOf(kind, record)
 		const existing = this.appended.get(key)
 
 		if (existing !== undefined) return existing

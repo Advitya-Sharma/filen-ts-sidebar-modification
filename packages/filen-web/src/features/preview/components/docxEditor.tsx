@@ -60,7 +60,6 @@ import {
 } from "@/features/preview/lib/docxEditing"
 import {
 	AUTOSAVE_IDLE_MS,
-	E2E_AUTOSAVE_KEY,
 	editorMarkupView,
 	featureEditable,
 	editorMarks,
@@ -105,6 +104,7 @@ import { DocxTouchSelection } from "@/features/preview/components/docxTouchSelec
 import { SaveRefusedError } from "@/features/drive/lib/previewSave.logic"
 import { defaultSpellingLanguage, documentSpellingChecker } from "@/features/spellcheck/lib/spellcheck"
 import { loadOfficeSettings, saveOfficeAutosave, useOfficeSettings } from "@/features/office/lib/officeSettings"
+import { E2E_AUTOSAVE_OFF } from "@/features/office/lib/officeAutosave"
 import { LoadingState } from "@/components/loadingState"
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/context-menu"
 import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"
@@ -221,18 +221,6 @@ interface OverlayElement {
 	readonly press: DocxObjectPress | null
 	readonly readOnly: boolean
 	readonly element: ReactNode
-}
-
-// E2E builds only: a test lane that edits the shared read-only fixture tree turns idle autosave off for its page
-// (sessionStorage, set before the app loads). Folded away in other builds.
-const E2E_AUTOSAVE_OFF = import.meta.env.VITE_E2E === "1" && e2eAutosaveOff()
-
-function e2eAutosaveOff(): boolean {
-	try {
-		return sessionStorage.getItem(E2E_AUTOSAVE_KEY) === "off"
-	} catch {
-		return false
-	}
 }
 
 interface SaveSourceOptions {

@@ -803,7 +803,7 @@ export const test = base.extend<{
 	// CDP is chromium-only, so firefox/webkit run at full speed whatever the variable says.
 	page: async ({ page, context, browserName }, use, testInfo) => {
 		// Read lanes share the read-only fixture tree: a DOCX edited there never saves on its own (E2E builds read
-		// this key, docxEditor.tsx E2E_AUTOSAVE_OFF).
+		// this key, features/office/lib/officeAutosave.ts E2E_AUTOSAVE_OFF; the spreadsheet editor reads it too).
 		if (testInfo.project.name.endsWith("-read")) {
 			await context.addInitScript(key => {
 				sessionStorage.setItem(key, "off")

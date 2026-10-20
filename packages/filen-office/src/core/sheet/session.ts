@@ -158,6 +158,15 @@ export class RenderStyleTable {
 
 // --- Tiles ---
 
+// A layer whose `entries` name tile entries, remapped when the entries were reordered.
+function remappedLayer<T>(value: T, remap: Uint16Array, ordered: boolean): T {
+	if (ordered || typeof value !== "object" || value === null) return value
+
+	const entries = (value as { entries?: unknown }).entries
+
+	return entries instanceof Uint16Array ? { ...value, entries: Uint16Array.from(entries, entry => remap[entry] ?? 0) } : value
+}
+
 class TileBuilder implements SheetTileBuilder, SheetEntrySink {
 	readonly sheet: SheetId
 	readonly firstRow: number
@@ -323,8 +332,11 @@ class TileBuilder implements SheetTileBuilder, SheetEntrySink {
 					runStarts: runs.runStarts,
 					runStyles: runs.runStyles
 				}
+			} else if (name !== "runs" && name !== "repeats") {
+				// A feature's own layer, its entry indices (an `entries` array) in the entries' final order.
+				;(layers as Record<string, unknown>)[name] = remappedLayer(value, remap, this.ordered)
 			} else if (name === "repeats" && layers.repeats === undefined) {
-				layers.repeats = value as SheetTileLayerMap["repeats"]
+				layers.repeats = remappedLayer(value as SheetTileLayerMap["repeats"], remap, this.ordered)
 			}
 		}
 
@@ -733,7 +745,7 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 	}
 
 	private readContext(signal: SheetAbortSignal | undefined): SheetReadContext<D> {
-		return { doc: this.document, settings: this.document.settings, slicing: this.slicing, signal }
+		return { doc: this.document, settings: this.document.settings, slicing: this.slicing, signal, version: this.version }
 	}
 
 	private buildTile(sheet: SheetId, tileRow: number, tileCol: number): SheetTile {

@@ -76,6 +76,18 @@ export function singleCell(selection: GridSelection): boolean {
 	return selection.ranges.length === 1 && selection.anchor.row === selection.focus.row && selection.anchor.col === selection.focus.col
 }
 
+// The axis whose whole lines the selection is (one range of whole rows or of whole columns), or null for cells.
+export function wholeAxis(selection: GridSelection): "rows" | "cols" | null {
+	const range = selection.ranges[0]
+
+	if (range === undefined || selection.ranges.length !== 1) return null
+
+	const rows = range.startCol === 0 && range.endCol >= SHEET_MAX_COLS - 1
+	const cols = range.startRow === 0 && range.endRow >= SHEET_MAX_ROWS - 1
+
+	return rows === cols ? null : rows ? "rows" : "cols"
+}
+
 export function toSelectionState(selection: GridSelection): SheetSelectionState {
 	return { activeRow: selection.active.row, activeCol: selection.active.col, ranges: selection.ranges }
 }

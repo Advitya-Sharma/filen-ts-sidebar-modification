@@ -116,11 +116,13 @@ export async function resizeAxis(
 	if (rows.length === 0) return null
 
 	const set = (states: readonly RowState[], sink: SheetChangeSink): void => {
-		rows.forEach((row, index) => {
-			const state = states[index] ?? NO_ROW
+		store.setRows(
+			rows.map((row, index) => {
+				const state = states[index] ?? NO_ROW
 
-			store.setRow(row, state.height, state.style, state.flags)
-		})
+				return { row, height: state.height, style: state.style, flags: state.flags }
+			})
+		)
 		document.workbook.changes.sheetRows(sheet)
 		sink.layout(sheet)
 	}

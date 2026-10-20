@@ -44,6 +44,20 @@ export type UnoOperation =
 	  }
 	| { readonly op: "deleteSheet"; readonly sheet: string | number }
 	| { readonly op: "moveSheet"; readonly sheet: string | number; readonly to: number }
+	| { readonly op: "mergeCells" | "unmergeCells"; readonly sheet: string | number; readonly range: string }
+	| {
+			readonly op: "hideRows" | "hideColumns"
+			readonly sheet: string | number
+			readonly at: number
+			readonly count: number
+			readonly hidden?: boolean
+	  }
+	| { readonly op: "freeze"; readonly sheet: string | number; readonly rows: number; readonly cols: number }
+	| { readonly op: "copySheet"; readonly sheet: string | number; readonly name: string; readonly to: number }
+	| { readonly op: "renameSheet"; readonly sheet: string | number; readonly name: string }
+	| { readonly op: "hideSheet"; readonly sheet: string | number; readonly hidden?: boolean }
+	| { readonly op: "tabColor"; readonly sheet: string | number; readonly color: number }
+	| { readonly op: "protectSheet"; readonly sheet: string | number; readonly password?: string }
 
 export interface UnoJob {
 	readonly input: string
@@ -53,6 +67,18 @@ export interface UnoJob {
 	// Cells dumped at most (both dumps together); the rest is left out and `truncated` set.
 	readonly maxCells?: number
 	readonly password?: string
+	// Each sheet's view as LibreOffice loads it (UnoView).
+	readonly views?: boolean
+}
+
+// A sheet's view as LibreOffice loads it: frozen or not, the split's row and column, and each pane's first visible
+// row and column (0-based, in LibreOffice's pane order).
+export interface UnoView {
+	readonly name: string
+	readonly frozen: boolean
+	readonly splitRow: number
+	readonly splitColumn: number
+	readonly panes: readonly (readonly [number, number])[]
 }
 
 export interface UnoResult {
@@ -66,6 +92,7 @@ export interface UnoResult {
 	readonly truncated?: boolean
 	readonly ops?: readonly { readonly ok: boolean; readonly error?: string }[]
 	readonly saved?: string
+	readonly views?: readonly UnoView[]
 	readonly before?: UnoWorkbook
 	readonly after?: UnoWorkbook
 }

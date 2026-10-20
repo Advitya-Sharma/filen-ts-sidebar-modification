@@ -174,6 +174,8 @@ export function mergeTile(base: SheetTile, patch: SheetTilePatch): SheetTile {
 	if (repeatEntries.length > 0)
 		layers.repeats = { entries: Uint16Array.from(repeatEntries), offsets: Uint32Array.from(repeatOffsets), chars: repeatChars }
 
+	Object.assign(layers, featureLayers(sources, base, patch))
+
 	return {
 		sheet: base.sheet,
 		tileRow: base.tileRow,
@@ -188,6 +190,91 @@ export function mergeTile(base: SheetTile, patch: SheetTilePatch): SheetTile {
 		strings,
 		...(Object.keys(layers).length > 0 && { layers })
 	}
+}
+
+type Rows = ArrayLike<unknown> & { readonly length: number }
+
+interface FeatureLayer {
+	readonly entries?: unknown
+	readonly [key: string]: unknown
+}
+
+function rowsOf(value: unknown, length: number): value is Rows {
+	return (Array.isArray(value) || ArrayBuffer.isView(value)) && (value as Rows).length === length
+}
+
+// A feature's layers (any but runs and repeats) over merged entries: a layer with `entries` keeps the rows of the
+// entries that stayed and takes the patch's for the rest (each array as long as `entries` is a column of rows);
+// its other fields, and a layer without entries, are the patch's when it has the layer, else the base's.
+function featureLayers(sources: readonly (readonly [SheetTile, number])[], base: SheetTile, patch: SheetTile): Record<string, unknown> {
+	const out: Record<string, unknown> = {}
+	const names = new Set([...Object.keys(base.layers ?? {}), ...Object.keys(patch.layers ?? {})])
+
+	for (const name of names) {
+		if (name === "runs" || name === "repeats") continue
+
+		const own = (tile: SheetTile): FeatureLayer | undefined =>
+			(tile.layers as Record<string, FeatureLayer | undefined> | undefined)?.[name]
+		const fromBase = own(base)
+		const fromPatch = own(patch)
+		const shape = fromPatch ?? fromBase
+
+		if (shape === undefined) continue
+
+		if (!(shape.entries instanceof Uint16Array)) {
+			out[name] = shape
+
+			continue
+		}
+
+		// Row of each entry, per source tile.
+		const rowOf = new Map<SheetTile, Map<number, number>>()
+
+		for (const [tile, layer] of [
+			[base, fromBase],
+			[patch, fromPatch]
+		] as const) {
+			const entries = layer?.entries
+
+			if (!(entries instanceof Uint16Array)) continue
+
+			const rows = new Map<number, number>()
+
+			entries.forEach((entry, row) => rows.set(entry, row))
+			rowOf.set(tile, rows)
+		}
+
+		const columns = Object.keys(shape).filter(key => key !== "entries" && rowsOf(shape[key], (shape.entries as Uint16Array).length))
+		const entries: number[] = []
+		const picked: unknown[][] = columns.map(() => [])
+
+		sources.forEach(([tile, entry], k) => {
+			const row = rowOf.get(tile)?.get(entry)
+			const layer = tile === base ? fromBase : fromPatch
+
+			if (row === undefined || layer === undefined) return
+
+			entries.push(k)
+			columns.forEach((key, c) => picked[c]?.push((layer[key] as Rows)[row]))
+		})
+
+		if (entries.length === 0) continue
+
+		const merged: Record<string, unknown> = { ...shape, entries: Uint16Array.from(entries) }
+
+		columns.forEach((key, c) => {
+			const column = shape[key]
+			const values = picked[c] ?? []
+
+			merged[key] = ArrayBuffer.isView(column)
+				? (column.constructor as unknown as { from(values: readonly unknown[]): unknown }).from(values)
+				: values
+		})
+
+		out[name] = merged
+	}
+
+	return out
 }
 
 function intersects(region: SheetRegion, tile: SheetTile): boolean {

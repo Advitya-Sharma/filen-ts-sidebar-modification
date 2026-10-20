@@ -53,6 +53,8 @@ export interface SheetReadContext<D> {
 	// The in-thread host's slices: long work yields at each one (absent in a worker host).
 	readonly slicing: Slicing | undefined
 	readonly signal: SheetAbortSignal | undefined
+	// The session's version (SheetDocState.version) when the call runs: what a query's answer reflects.
+	readonly version: number
 }
 
 export interface SheetCommandContext<D> extends SheetReadContext<D> {

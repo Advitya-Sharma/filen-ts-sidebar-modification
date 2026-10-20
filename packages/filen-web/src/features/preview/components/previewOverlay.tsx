@@ -836,7 +836,8 @@ export function PreviewOverlay({
 		return text === undefined ? null : { bytes: new TextEncoder().encode(text), commit: null }
 	}
 
-	// Idle autosave (the Word document editor's) runs the same save, with its guards, as it stands now.
+	// Idle autosave (the Word document editor's, the spreadsheet editor's) runs the same save, with its guards, as it
+	// stands now.
 	const performSaveRef = useLatestRef(performSave)
 
 	useAction(
@@ -1442,6 +1443,7 @@ function PreviewBody({
 					saveRef={spreadsheetRef}
 					onOpenFile={onOpenFile}
 					canSaveCopy={canSaveCopy}
+					onAutosave={onAutosave}
 				/>
 			)
 		case "docx":

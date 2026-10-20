@@ -156,6 +156,8 @@ export { detectDelimiter, parseCsv, writeCsv } from "./csv/csvParse"
 export type { CsvEncoding } from "./csv/encoding"
 export {
 	builtinFormatCode,
+	changedDecimals,
+	COMMA_STYLE,
 	EXCEL_BUILTIN_FORMATS,
 	formatGeneral,
 	formatNumberInto,
@@ -165,19 +167,33 @@ export {
 	MAX_SERIAL_1900,
 	MAX_SERIAL_1904,
 	numFmt,
+	numFmtCategory,
+	numFmtProblem,
+	NUMBER_FORMAT_PRESETS,
 	NUMFMT_EN_US,
 	NumFmtOutput,
+	PERCENT_STYLE,
 	type NumFmt,
+	type NumFmtCategory,
 	type NumFmtLocale,
+	type NumFmtProblem,
 	type NumFmtOptions,
 	type NumFmtResult
 } from "./numfmt"
 export {
 	applyTint,
+	borderPresetEdges,
 	DEFAULT_PALETTE,
 	resolveColor,
+	SHEET_BORDER_PRESETS,
 	SheetStyles,
+	themeTints,
 	workbookPalette,
+	type SheetBorderEdges,
+	type SheetBorderLineInput,
+	type SheetBorderPatch,
+	type SheetBorderPreset,
+	type SheetFormatChoices,
 	type SheetStyleSource,
 	type SheetStylesOptions
 } from "./style"

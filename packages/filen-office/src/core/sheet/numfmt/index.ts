@@ -12,3 +12,15 @@ export {
 } from "./format"
 export { NUMFMT_EN_US, type NumFmtLocale } from "./locale"
 export { parseNumFmt, SectionKind, Tok, type NumFmt, type NumFmtSection, type Token } from "./parse"
+export {
+	COMMA_STYLE,
+	MAX_NUMFMT_LENGTH,
+	NUMBER_FORMAT_PRESETS,
+	PERCENT_STYLE,
+	changedDecimals,
+	numFmtCategory,
+	numFmtProblem,
+	type NumFmtCategory,
+	type NumFmtProblem
+} from "./edit"
+export { GENERAL_CHARS, fitGeneral, generalWithin, isPlainGeneral } from "./general"

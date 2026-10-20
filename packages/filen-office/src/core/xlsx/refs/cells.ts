@@ -11,10 +11,11 @@ import { parseRef } from "./sqref"
 // be written again. Shared formulas (ECMA-376 Part 1 §18.3.1.40) keep their group when every member still reads
 // as the master's text moved to it; members that would read differently become formulas of their own.
 
+// A formula record changed: whole, or (the common case, kept small) only its text, as a string.
 export interface FormulaChange {
 	readonly id: number
-	readonly before: XlsxFormula
-	readonly after: XlsxFormula
+	readonly before: XlsxFormula | string
+	readonly after: XlsxFormula | string
 }
 
 export interface SheetFormulaPlan {
@@ -160,6 +161,16 @@ export class SheetFormulas {
 		this.cells.push(at.row, at.col)
 	}
 
+	private recordText(member: Member, before: string, after: string): void {
+		const at = this.moved(member)
+
+		if (at === null) return
+
+		this.touch("formulas")
+		this.changes.push({ id: member.id, before, after })
+		this.cells.push(at.row, at.col)
+	}
+
 	private shiftedRange(range: SheetRange | null, what: string): SheetRange | null {
 		if (range === null || this.shift === null) return range
 
@@ -171,6 +182,18 @@ export class SheetFormulas {
 	}
 
 	private single(table: XlsxFormulaTable, member: Member): void {
+		const kind = table.kind(member.id)
+
+		// An ordinary formula: only its text can change, read without an object per formula.
+		if (kind !== FormulaKind.ARRAY && kind !== FormulaKind.DATA_TABLE) {
+			const before = table.text(member.id)
+			const text = this.formulas.shift(before, this.own)
+
+			if (text !== before) this.recordText(member, before, text)
+
+			return
+		}
+
 		const formula = table.formula(member.id)
 		const at = this.moved(member)
 
@@ -191,7 +214,8 @@ export class SheetFormulas {
 
 		if (text === formula.text && ref === formula.ref && r1 === formula.r1 && r2 === formula.r2) return
 
-		this.record(member, { ...formula, text, ref, ...(r1 !== undefined && { r1 }), ...(r2 !== undefined && { r2 }) }, "formulas")
+		if (ref === formula.ref && r1 === formula.r1 && r2 === formula.r2) this.recordText(member, formula.text, text)
+		else this.record(member, { ...formula, text, ref, ...(r1 !== undefined && { r1 }), ...(r2 !== undefined && { r2 }) }, "formulas")
 	}
 
 	// A data table's input cell moved; a deleted one refuses.

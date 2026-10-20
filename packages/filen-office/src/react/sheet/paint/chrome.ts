@@ -8,7 +8,8 @@ import { segments } from "./cells"
 
 // The chrome layer over the cells: column and row headers (the selection's tinted), the frozen panes' dividers,
 // the selection's tint and outline, and a resize's guide. Cheap to draw again on every selection move, so the
-// cells layer is left alone then.
+// cells layer is left alone then. A right-to-left sheet's chrome is mirrored as its cells are (row headers on the
+// right), its labels drawn unmirrored.
 
 export interface ChromeScene {
 	readonly view: GridView
@@ -18,6 +19,28 @@ export interface ChromeScene {
 	readonly merges: readonly SheetRange[]
 	// A resize being dragged: the edge's position on screen.
 	readonly guide: { readonly axis: "rows" | "cols"; readonly at: number } | null
+	// The sheet is shown right to left (SheetLayout.rightToLeft): positions are laid out left to right and mirrored.
+	readonly rightToLeft?: boolean
+}
+
+function layOut(canvas: GridCanvas, scene: ChromeScene): void {
+	const { pixelRatio, view } = scene
+
+	if (scene.rightToLeft === true) canvas.setTransform(-pixelRatio, 0, 0, pixelRatio, view.width * pixelRatio, 0)
+	else canvas.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+}
+
+// A label centred at x, y as laid out.
+function label(canvas: GridCanvas, scene: ChromeScene, text: string, x: number, y: number): void {
+	if (scene.rightToLeft !== true) {
+		canvas.fillText(text, x, y)
+
+		return
+	}
+
+	canvas.setTransform(scene.pixelRatio, 0, 0, scene.pixelRatio, 0, 0)
+	canvas.fillText(text, scene.view.width - x, y)
+	layOut(canvas, scene)
 }
 
 interface Rect {
@@ -113,8 +136,8 @@ function headers(canvas: GridCanvas, scene: ChromeScene, axis: "rows" | "cols"):
 			if (size >= 6) {
 				canvas.fillStyle = active ? theme.headerActiveText : theme.headerText
 
-				if (axis === "cols") canvas.fillText(columnName(index), start + size / 2, band / 2)
-				else canvas.fillText(String(index + 1), band / 2, start + size / 2)
+				if (axis === "cols") label(canvas, scene, columnName(index), start + size / 2, band / 2)
+				else label(canvas, scene, String(index + 1), band / 2, start + size / 2)
 			}
 		}
 
@@ -128,9 +151,9 @@ function headers(canvas: GridCanvas, scene: ChromeScene, axis: "rows" | "cols"):
 }
 
 export function paintChrome(canvas: GridCanvas, scene: ChromeScene): void {
-	const { view, theme, selection, pixelRatio } = scene
+	const { view, theme, selection } = scene
 
-	canvas.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+	layOut(canvas, scene)
 	canvas.clearRect(0, 0, view.width, view.height)
 
 	// The selection: a tint over every range (the active cell left clear), then outlines: 2 px round the last range,

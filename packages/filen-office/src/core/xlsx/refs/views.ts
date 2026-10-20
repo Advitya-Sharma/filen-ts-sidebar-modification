@@ -12,7 +12,11 @@ export function shiftMerges(merges: Uint32Array, shift: AxisShift): Uint32Array 
 
 	for (let k = 0; k + 3 < merges.length; k += 4) {
 		const range = { startRow: merges[k] ?? 0, startCol: merges[k + 1] ?? 0, endRow: merges[k + 2] ?? 0, endCol: merges[k + 3] ?? 0 }
-		const next = shiftRange(range, shift)
+		const first = shift.axis === "rows" ? range.startRow : range.startCol
+		// A delete that takes the merge's first row (column), where its value is, takes the merge: as LibreOffice
+		// does (Microsoft's documentation is silent); a delete further in shrinks it.
+		const anchorGone = shift.type === "delete" && first >= shift.at && first < shift.at + shift.count
+		const next = anchorGone ? null : shiftRange(range, shift)
 
 		if (next !== range) changed = true
 		if (next === null || (next.startRow === next.endRow && next.startCol === next.endCol)) {
@@ -55,11 +59,26 @@ export function shiftCols(cols: readonly XlsxColRange[], shift: AxisShift): read
 	return changed ? out : cols
 }
 
-// A frozen split (the count of frozen rows or columns) after the edit.
-export function shiftSplit(split: number, shift: AxisShift): number {
-	if (shift.type === "insert") return shift.at < split ? Math.min(split + shift.count, axisLimit(shift.axis) - 1) : split
+// How many of the indices [from, to) a deletion takes.
+function deleted(from: number, to: number, shift: AxisShift): number {
+	return Math.max(0, Math.min(to, shift.at + shift.count) - Math.max(from, shift.at))
+}
 
-	return split - Math.max(0, Math.min(split, shift.at + shift.count) - Math.min(split, shift.at))
+// A frozen split (the count of frozen rows or columns, from the view's first `first`) after the edit: rows inserted
+// in it join it, rows deleted from it leave it.
+export function shiftSplit(split: number, shift: AxisShift, first = 0): number {
+	if (shift.type === "insert")
+		return shift.at >= first && shift.at < first + split ? Math.min(split + shift.count, axisLimit(shift.axis) - 1) : split
+
+	return split - deleted(first, first + split, shift)
+}
+
+// The view's first row (column) after the edit: an index, not a cell, so rows inserted at it show there (and join a
+// frozen block it starts); rows inserted or deleted before it move it.
+export function shiftViewStart(first: number, shift: AxisShift): number {
+	if (shift.type === "insert") return shift.at < first ? Math.min(first + shift.count, axisLimit(shift.axis) - 1) : first
+
+	return first - deleted(0, first, shift)
 }
 
 // A view index (active cell, top-left cell) after the edit: a deleted one goes to the first index after the run.
@@ -81,18 +100,20 @@ export function shiftView(view: XlsxSheetView, shift: AxisShift): XlsxSheetView 
 		selection = [{ startRow: activeRow, startCol: activeCol, endRow: activeRow, endCol: activeCol }]
 
 	let frozen = view.frozen
+	const topRow = rows ? shiftViewStart(view.topRow, shift) : view.topRow
+	const leftCol = rows ? view.leftCol : shiftViewStart(view.leftCol, shift)
 
 	if (frozen !== null) {
 		const next = {
-			rows: rows ? shiftSplit(frozen.rows, shift) : frozen.rows,
-			cols: rows ? frozen.cols : shiftSplit(frozen.cols, shift),
+			rows: rows ? shiftSplit(frozen.rows, shift, view.topRow) : frozen.rows,
+			cols: rows ? frozen.cols : shiftSplit(frozen.cols, shift, view.leftCol),
 			topLeftRow: rows ? viewIndex(frozen.topLeftRow, shift) : frozen.topLeftRow,
 			topLeftCol: rows ? frozen.topLeftCol : viewIndex(frozen.topLeftCol, shift)
 		}
 
 		// The bottom-right pane starts at or after the split.
-		next.topLeftRow = Math.max(next.topLeftRow, next.rows)
-		next.topLeftCol = Math.max(next.topLeftCol, next.cols)
+		next.topLeftRow = Math.max(next.topLeftRow, (next.rows > 0 ? topRow : 0) + next.rows)
+		next.topLeftCol = Math.max(next.topLeftCol, (next.cols > 0 ? leftCol : 0) + next.cols)
 
 		frozen =
 			next.rows === 0 && next.cols === 0
@@ -105,7 +126,15 @@ export function shiftView(view: XlsxSheetView, shift: AxisShift): XlsxSheetView 
 					: next
 	}
 
-	if (activeRow === view.activeRow && activeCol === view.activeCol && selection === view.selection && frozen === view.frozen) return view
+	if (
+		activeRow === view.activeRow &&
+		activeCol === view.activeCol &&
+		selection === view.selection &&
+		frozen === view.frozen &&
+		topRow === view.topRow &&
+		leftCol === view.leftCol
+	)
+		return view
 
-	return { ...view, activeRow, activeCol, selection, frozen }
+	return { ...view, activeRow, activeCol, selection, frozen, topRow, leftCol }
 }

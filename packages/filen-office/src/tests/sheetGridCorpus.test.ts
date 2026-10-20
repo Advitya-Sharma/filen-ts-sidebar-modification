@@ -35,7 +35,7 @@ async function settle(model: SheetGridModel, sheet: number, view: GridView): Pro
 		for (let col = Math.floor(view.cols.first / 32); col <= Math.floor(Math.max(view.cols.first, view.cols.last) / 32); col++)
 			coordinates.push(row, col)
 
-	for (let row = 0; view.rows.frozen > 0 && row <= Math.floor((view.rows.frozen - 1) / 64); row++)
+	for (let row = Math.floor(view.rows.frozenFirst / 64); view.rows.frozen > 0 && row <= Math.floor((view.rows.frozenEnd - 1) / 64); row++)
 		for (let col = 0; col <= Math.floor(Math.max(view.cols.first, view.cols.last) / 32); col++) coordinates.push(row, col)
 
 	model.need(sheet, coordinates)

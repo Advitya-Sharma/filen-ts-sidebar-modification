@@ -173,6 +173,40 @@ interface RowRecord {
 	origins: number[]
 }
 
+// One cell as setCells writes it: setCell's arguments.
+export interface CellWrite {
+	readonly row: number
+	readonly col: number
+	readonly kind: CellKind
+	readonly value: number
+	readonly style: number
+	readonly formula: number
+	readonly origin: number
+}
+
+// The first index of a sorted list whose value is not below `value`.
+function lowerBound(list: readonly number[], value: number): number {
+	let low = 0
+	let high = list.length
+
+	while (low < high) {
+		const mid = (low + high) >>> 1
+
+		if ((list[mid] ?? 0) < value) low = mid + 1
+		else high = mid
+	}
+
+	return low
+}
+
+// A row's own properties, as setRows takes them.
+export interface RowProperties {
+	readonly row: number
+	readonly height: number
+	readonly style: number
+	readonly flags: number
+}
+
 function rowRecords(block: RowBlock): RowRecord[] {
 	const out: RowRecord[] = []
 
@@ -606,23 +640,143 @@ export class SheetStore implements XlsxSheetStore {
 	}
 
 	setRow(row: number, height: number, style: number, flags: number): void {
-		this.version++
+		this.setRows([{ row, height, style, flags }])
+	}
 
-		const own = flags & PROPERTY_FLAGS
+	// setCell for many cells, each named once: a block whose cells all stay where they are is written in place, any
+	// other block they fall in is rebuilt once (setCell copies a block per cell added or removed).
+	setCells(cells: readonly CellWrite[]): void {
+		if (cells.length === 0) return
 
-		this.edit(row, records => {
-			let record = records.find(candidate => candidate.row === row)
+		const groups = new Map<number, CellWrite[]>()
 
-			if (record === undefined) {
-				record = emptyRecord(row)
-				records.push(record)
-				records.sort((a, z) => a.row - z.row)
+		for (const cell of cells) {
+			const index = Math.max(0, this.blockOf(cell.row))
+			const group = groups.get(index)
+
+			if (group === undefined) groups.set(index, [cell])
+			else group.push(cell)
+		}
+
+		// Last block first: rebuilding a block moves only the blocks after it.
+		for (const index of [...groups.keys()].sort((a, b) => b - a)) {
+			const group = groups.get(index) ?? []
+			const block = this.blocks[index]
+
+			if (block !== undefined && group.every(cell => this.inPlace(block, cell))) {
+				for (const { row, col, kind, value, style, formula, origin } of group)
+					this.setCell(row, col, kind, value, style, formula, origin)
+
+				continue
 			}
 
-			record.height = height
-			record.style = style
-			record.flags = (record.flags & (RowFlag.NEW | RowFlag.DIRTY)) | own | RowFlag.DIRTY
-		})
+			this.version++
+			this.edit(group[0]?.row ?? 0, records => {
+				const byRow = new Map(records.map(record => [record.row, record]))
+				let added = false
+
+				for (const { row, col, kind, value, style, formula, origin } of group) {
+					const remove = origin < 0 && kind === CellKind.EMPTY && style === 0 && formula < 0
+					let record = byRow.get(row)
+
+					if (record === undefined) {
+						if (remove) continue
+
+						record = emptyRecord(row)
+						records.push(record)
+						byRow.set(row, record)
+						added = true
+					}
+
+					record.flags |= RowFlag.DIRTY
+
+					const at = lowerBound(record.cols, col)
+					const exists = record.cols[at] === col
+
+					if (remove) {
+						if (exists) {
+							record.cols.splice(at, 1)
+							record.kinds.splice(at, 1)
+							record.values.splice(at, 1)
+							record.styles.splice(at, 1)
+							record.formulas.splice(at, 1)
+							record.origins.splice(at, 1)
+						}
+					} else if (exists) {
+						record.kinds[at] = kind
+						record.values[at] = value
+						record.styles[at] = style
+						record.formulas[at] = formula
+
+						if (origin >= 0) record.origins[at] = origin
+					} else {
+						record.cols.splice(at, 0, col)
+						record.kinds.splice(at, 0, kind)
+						record.values.splice(at, 0, value)
+						record.styles.splice(at, 0, style)
+						record.formulas.splice(at, 0, formula)
+						record.origins.splice(at, 0, Math.max(0, origin))
+					}
+				}
+
+				if (added) records.sort((a, z) => a.row - z.row)
+			})
+		}
+	}
+
+	// Whether setCell writes the cell where it is, moving nothing.
+	private inPlace(block: RowBlock, cell: CellWrite): boolean {
+		const index = block.rowIndex(cell.row)
+
+		if (index < 0 || block.cellIndex(index, cell.col) < 0) return false
+
+		const remove = cell.origin < 0 && cell.kind === CellKind.EMPTY && cell.style === 0 && cell.formula < 0
+
+		return !remove && (cell.formula < 0 || block.formulas !== null)
+	}
+
+	// setRow for many rows: each block they fall in is rebuilt once.
+	setRows(rows: readonly RowProperties[]): void {
+		if (rows.length === 0) return
+
+		this.version++
+
+		const groups = new Map<number, RowProperties[]>()
+
+		for (const entry of rows) {
+			const index = Math.max(0, this.blockOf(entry.row))
+			const group = groups.get(index)
+
+			if (group === undefined) groups.set(index, [entry])
+			else group.push(entry)
+		}
+
+		// Last block first: rebuilding a block moves only the blocks after it.
+		for (const index of [...groups.keys()].sort((a, b) => b - a)) {
+			const group = groups.get(index) ?? []
+
+			this.edit(group[0]?.row ?? 0, records => {
+				const byRow = new Map(records.map(record => [record.row, record]))
+				let added = false
+
+				for (const { row, height, style, flags } of group) {
+					let record = byRow.get(row)
+
+					if (record === undefined) {
+						record = emptyRecord(row)
+						records.push(record)
+						byRow.set(row, record)
+						added = true
+					}
+
+					record.height = height
+					record.style = style
+					record.flags = (record.flags & (RowFlag.NEW | RowFlag.DIRTY)) | (flags & PROPERTY_FLAGS) | RowFlag.DIRTY
+				}
+
+				if (added) records.sort((a, z) => a.row - z.row)
+			})
+		}
 	}
 
 	// Rebuilds the block holding `row` (the one before it when none does) through `change`, which edits its row

@@ -26,6 +26,7 @@ import {
 	type SheetWritability
 } from "../../core/sheet/protocol"
 import { createGridAxis, type GridAxis } from "./axis"
+import { RowFitter, type TextMeasure } from "./rowFit"
 import { cellSelection, fromSelectionState, mergeRanges, type GridPoint, type GridSelection } from "./selection"
 import { TileCache, entryInput, entryOf, entryText, regionHoldsTile, type GridEntry } from "./tiles"
 
@@ -87,6 +88,8 @@ export interface SheetGridSnapshot {
 	readonly failed: string | null
 	// The app's own view-only (a shared link, a preview): no editing starts.
 	readonly readOnly: boolean
+	// Formulas are shown in their cells instead of their results (Ctrl+`).
+	readonly showFormulas: boolean
 }
 
 export interface GridAxes {
@@ -136,8 +139,8 @@ interface SheetShiftStep {
 
 const TEXT_KINDS: ReadonlySet<SheetFileKind> = new Set(["csv", "tsv", "tab"])
 
-// A refused command and what it was, for the app's message.
-export type SheetGridRefusalHandler = (refusal: SheetRefusal, command: SheetCommand["type"] | "undo" | "redo") => void
+// A refused command and what it was, for the app's message (or, for a refusal that asks the user, its question).
+export type SheetGridRefusalHandler = (refusal: SheetRefusal, command: SheetCommand | "undo" | "redo") => void
 
 export interface SheetGridModelOptions {
 	readonly session: SheetSessionApi
@@ -149,6 +152,30 @@ interface InFlight {
 	stale: boolean
 	// A whole-tile patch that arrived before the tile did.
 	replacement: SheetTile | null
+}
+
+// A command F4 can do again elsewhere: one that acts on the selection's ranges, or inserts or deletes rows or
+// columns at it.
+function repeatable(command: SheetCommand): boolean {
+	if (command.type === "axis.insert" || command.type === "axis.delete") return true
+
+	const fields = command as { readonly sheet?: unknown; readonly ranges?: unknown }
+
+	return typeof fields.sheet === "number" && Array.isArray(fields.ranges)
+}
+
+// Fields holding the user's answer to a question about the cells a command was first sent for: a repeat elsewhere
+// goes without them, so it is refused again and the app asks about those cells.
+const CONSENTS: readonly string[] = ["discard"]
+
+function withoutConsent(command: SheetCommand): SheetCommand {
+	if (!CONSENTS.some(field => field in command)) return command
+
+	const repeated: Record<string, unknown> = { ...command }
+
+	for (const field of CONSENTS) delete repeated[field]
+
+	return repeated as unknown as SheetCommand
 }
 
 // Whether an entry can start in the active cell: not view-only, the session alive, the cell not locked.
@@ -208,6 +235,10 @@ export class SheetGridModel {
 	private clipped: { sheet: SheetId; row: number; col: number; tile: GridEntry["tile"]; input: string | null } | null = null
 	// Refused commands, for the app's message.
 	private onRefusal: SheetGridRefusalHandler | null = null
+	// The last command that changed the file and can be done again on another selection (F4).
+	private lastRepeatable: SheetCommand | null = null
+	// Rows without a height of their own fitted to the wrapped text an edit changes (rowFit.ts).
+	private readonly fitter = new RowFitter(this)
 
 	constructor(options: SheetGridModelOptions) {
 		const { session, info } = options
@@ -233,7 +264,8 @@ export class SheetGridModel {
 			editing: null,
 			active: NO_ACTIVE,
 			failed: null,
-			readOnly: false
+			readOnly: false,
+			showFormulas: false
 		}
 	}
 
@@ -252,6 +284,11 @@ export class SheetGridModel {
 	// Where refused commands go (null: nowhere), for the app's message.
 	setRefusalHandler(handler: SheetGridRefusalHandler | null): void {
 		this.onRefusal = handler
+	}
+
+	// The grid's text measure, for fitting rows to wrapped text while it draws; returns the detach.
+	measureWith(measure: TextMeasure): () => void {
+		return this.fitter.attach(measure)
 	}
 
 	// Anything a frame draws changed (tiles, layout, styles, selection, a pending entry).
@@ -319,6 +356,10 @@ export class SheetGridModel {
 		this.zoom = percent === null ? null : Math.min(400, Math.max(10, percent))
 		this.axesMemo = null
 		this.repaint()
+	}
+
+	setShowFormulas(showFormulas: boolean): void {
+		if (showFormulas !== this.snapshot.showFormulas) this.update({ showFormulas })
 	}
 
 	scale(layout: SheetLayout): number {
@@ -494,6 +535,18 @@ export class SheetGridModel {
 			missing.push(tileRow, tileCol)
 		}
 
+		// The active cell's tile is kept and fetched whatever is in view: the formula bar and the editor read it.
+		if (sheet === this.snapshot.sheet) {
+			const { row, col } = this.snapshot.selection.active
+			const key = tileKey(sheet, row >>> 6, col >>> 5)
+
+			if (!needed.has(key)) {
+				needed.add(key)
+
+				if (this.tiles.touch(key) === undefined && !this.inFlight.has(key)) missing.push(row >>> 6, col >>> 5)
+			}
+		}
+
 		this.needed = needed
 		this.tiles.evict(this.capacity(), needed)
 		this.tiles.keep(needed)
@@ -541,6 +594,8 @@ export class SheetGridModel {
 				}
 
 				for (const key of keys) this.inFlight.delete(key)
+
+				this.fitter.arrived(keys)
 
 				// A dropped tile is fetched again by the next frame that needs it; until then the session need not
 				// patch it.
@@ -621,6 +676,31 @@ export class SheetGridModel {
 
 	// --- Selection ---
 
+	// Whether sheet protection lets a cell be selected (ECMA-376 Part 1 §18.3.1.85 sheetProtection): no cell when
+	// unlocked cells may not be selected, and no locked one when locked cells may not. A cell is locked unless its
+	// tile entry says otherwise (the default format locks), so one whose tile is not held counts as locked.
+	selectable(sheet: SheetId, point: GridPoint): boolean {
+		const allows = this.layouts.get(sheet)?.protection?.allows
+
+		if (allows === undefined) return true
+		if (!allows.has("selectUnlockedCells")) return false
+		if (allows.has("selectLockedCells")) return true
+
+		const found = this.entry(sheet, point.row, point.col)
+
+		return found !== null && ((found.tile.flags[found.entry] ?? 0) & CellFlag.LOCKED) === 0
+	}
+
+	// A selection the user made (a key, a click, the name box): its active cell must be selectable, else nothing
+	// changes. Answers whether it was taken.
+	choose(selection: GridSelection): boolean {
+		if (!this.selectable(this.snapshot.sheet, selection.active)) return false
+
+		this.select(selection)
+
+		return true
+	}
+
 	select(selection: GridSelection): void {
 		const sheet = this.snapshot.sheet
 
@@ -639,7 +719,15 @@ export class SheetGridModel {
 	}
 
 	private activeCell(sheet: SheetId, point: GridPoint): GridActiveCell {
-		if (!this.tileHeld(sheet, point.row, point.col)) return NO_ACTIVE
+		if (!this.tileHeld(sheet, point.row, point.col)) {
+			// Asked for now, whether or not a frame draws it (the cell answers once it arrives).
+			const key = tileKey(sheet, point.row >>> 6, point.col >>> 5)
+
+			if (!this.disposed && this.snapshot.failed === null && !this.inFlight.has(key) && this.layouts.has(sheet))
+				this.fetch(sheet, [point.row >>> 6, point.col >>> 5])
+
+			return NO_ACTIVE
+		}
 
 		const found = this.entry(sheet, point.row, point.col)
 
@@ -796,16 +884,14 @@ export class SheetGridModel {
 		if (!changed) return true
 
 		let result: SheetCommandResult
+		const command: SheetCommand = {
+			type: "cells.set",
+			sheet: editing.sheet,
+			cells: { rows: Uint32Array.of(editing.row), cols: Uint16Array.of(editing.col), inputs: [editing.text] }
+		}
 
 		try {
-			result = await this.command(
-				{
-					type: "cells.set",
-					sheet: editing.sheet,
-					cells: { rows: Uint32Array.of(editing.row), cols: Uint16Array.of(editing.col), inputs: [editing.text] }
-				},
-				false
-			)
+			result = await this.command(command, false)
 		} catch {
 			// The session failed (a "failed" event says so): the entry was not kept.
 			this.pending.delete(key)
@@ -828,7 +914,7 @@ export class SheetGridModel {
 				this.select(cellSelection({ row: editing.row, col: editing.col }, layout === null ? [] : this.merges(layout)))
 				this.update({ editing: { ...editing, mode: "edit", invalid: true } })
 			} else {
-				this.onRefusal?.(result.refusal, "cells.set")
+				this.onRefusal?.(result.refusal, command)
 			}
 
 			this.repaint()
@@ -849,7 +935,7 @@ export class SheetGridModel {
 		// Changes before this answer arrived before it: a newer version is this command's step.
 		const before = this.snapshot.state.version
 
-		this.settle(result, report ? command.type : null)
+		this.settle(result, report ? command : null)
 
 		// A step the session can undo: the size layer's shift is kept beside it.
 		if (result.ok && result.change.state.version > before) {
@@ -870,9 +956,28 @@ export class SheetGridModel {
 			this.shifts.undo.push(step)
 			this.shifts.redo = []
 			this.follow(step, false)
+
+			if (repeatable(command)) this.lastRepeatable = withoutConsent(command)
 		}
 
 		return result
+	}
+
+	// The last command again, on `selection` of the sheet shown (F4): null when there is none to repeat.
+	repeat(selection: { readonly ranges: readonly SheetRange[] }): Promise<SheetCommandResult> | null {
+		const last = this.lastRepeatable
+		const range = selection.ranges[selection.ranges.length - 1]
+
+		if (last === null || range === undefined) return null
+
+		const sheet = this.snapshot.sheet
+		let next: SheetCommand
+
+		if (last.type === "axis.insert" || last.type === "axis.delete")
+			next = { ...last, sheet, at: last.axis === "rows" ? range.startRow : range.startCol }
+		else next = { ...last, sheet, ranges: selection.ranges } as SheetCommand
+
+		return this.command(next)
 	}
 
 	async undo(): Promise<SheetCommandResult> {
@@ -911,7 +1016,7 @@ export class SheetGridModel {
 		if (step !== null && layer !== null && this.keepsSizes()) layer.follow(step.sheet, { ...step.shift, revert })
 	}
 
-	private settle(result: SheetCommandResult, reported: SheetCommand["type"] | "undo" | "redo" | null): void {
+	private settle(result: SheetCommandResult, reported: SheetCommand | "undo" | "redo" | null): void {
 		if (result.ok) {
 			this.apply(result.change)
 
@@ -953,6 +1058,8 @@ export class SheetGridModel {
 	// on their way), invalidated tiles dropped, layouts, the sheet list, styles and the selection taken.
 	apply(change: SheetChange): void {
 		if (this.disposed) return
+
+		this.fitter.changed(change)
 
 		const patched = new Set<number>()
 

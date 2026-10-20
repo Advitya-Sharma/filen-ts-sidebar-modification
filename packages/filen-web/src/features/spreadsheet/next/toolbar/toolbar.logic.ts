@@ -1,0 +1,413 @@
+import {
+	CellFlag,
+	COMMA_STYLE,
+	NUMBER_FORMAT_PRESETS,
+	PERCENT_STYLE,
+	applyTint,
+	changedDecimals,
+	numFmtCategory,
+	themeTints,
+	type NumFmtCategory,
+	type SheetBorderPreset,
+	type SheetBorderStyle,
+	type SheetColorInput,
+	type SheetFormatChoices,
+	type SheetFormatPatch,
+	type SheetHorizontalAlign,
+	type SheetRenderStyle,
+	type SheetRgb,
+	type SheetVerticalAlign
+} from "@filen/office/core/sheet"
+import { STANDARD_SWATCHES, type DocxSwatch } from "@/features/preview/components/docxEditor.logic"
+import type { PreviewKey } from "@/lib/i18n"
+
+// What the spreadsheet toolbar shows and sends: the active cell's format as the controls read it, the pickers'
+// choices (fonts, sizes, colours, border lines, alignments, number formats), the changes each control makes, and
+// which groups the row has room for.
+
+// --- The active cell ---
+
+export interface ActiveFormat {
+	readonly font: string
+	readonly size: number
+	readonly bold: boolean
+	readonly italic: boolean
+	readonly underline: boolean
+	readonly strike: boolean
+	// 0xRRGGBB; undefined for automatic text and no fill.
+	readonly color: SheetRgb | undefined
+	readonly fill: SheetRgb | undefined
+	readonly align: SheetHorizontalAlign | "general"
+	readonly valign: SheetVerticalAlign
+	readonly wrap: boolean
+	readonly numFmt: string
+	// The cell's text as shown (what Increase Decimal starts a General cell from).
+	readonly shown: string
+}
+
+// Excel's default font for a workbook without one.
+const DEFAULT_FONT = "Calibri"
+const DEFAULT_SIZE = 11
+
+// A cell's render style over the workbook's default one (style 0), as the toolbar reads it.
+export function activeFormat(style: SheetRenderStyle, base: SheetRenderStyle, numFmt: string, shown: string): ActiveFormat {
+	return {
+		font: style.font ?? base.font ?? DEFAULT_FONT,
+		size: style.size ?? base.size ?? DEFAULT_SIZE,
+		bold: style.bold === true,
+		italic: style.italic === true,
+		underline: style.underline !== undefined,
+		strike: style.strike === true,
+		color: style.color,
+		fill: style.fill,
+		align: style.align ?? "general",
+		valign: style.valign ?? "bottom",
+		wrap: style.wrap === true,
+		numFmt,
+		shown
+	}
+}
+
+// The 1900 date system's day 0 (1899-12-30, as serials count past the leap day Excel keeps) and the 1904 system's
+// offset from it (ECMA-376 Part 1 §18.17.4).
+const DAY_MS = 86_400_000
+const EPOCH_1900 = Date.UTC(1899, 11, 30)
+const OFFSET_1904 = 1462
+const ISO = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?$/u
+
+// A cell's number from what editing it starts from (a number, or a date as yyyy-mm-dd[Thh:mm:ss]), for the format
+// previews; null for text, a formula or anything else.
+export function sampleOf(input: string, flags: number, date1904: boolean): number | null {
+	if ((flags & CellFlag.FORMULA) !== 0 || (flags & CellFlag.NUMBER) === 0) {
+		return null
+	}
+
+	const number = Number(input)
+
+	if (input.trim() !== "" && Number.isFinite(number)) {
+		return number
+	}
+
+	const iso = ISO.exec(input)
+
+	if (iso === null) {
+		return null
+	}
+
+	const day = (Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])) - EPOCH_1900) / DAY_MS
+	const time = (Number(iso[4] ?? 0) * 3600 + Number(iso[5] ?? 0) * 60 + Number(iso[6] ?? 0)) / 86_400
+	// Serials before 1900-03-01 count Excel's 1900-02-29 too.
+	const serial = day < 61 ? day - 1 + time : day + time
+
+	return date1904 ? serial - OFFSET_1904 : serial
+}
+
+// --- Fonts ---
+
+// Excel's font size list.
+export const FONT_SIZES: readonly number[] = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]
+
+// Fonts most systems have, offered after the theme's and the workbook's own.
+export const COMMON_FONTS: readonly string[] = [
+	"Aptos",
+	"Arial",
+	"Calibri",
+	"Cambria",
+	"Candara",
+	"Consolas",
+	"Courier New",
+	"Georgia",
+	"Segoe UI",
+	"Tahoma",
+	"Times New Roman",
+	"Trebuchet MS",
+	"Verdana"
+]
+
+export interface FontGroup {
+	readonly label: PreviewKey
+	readonly fonts: readonly { readonly name: string; readonly theme?: "headings" | "body" }[]
+}
+
+// The font picker's groups: the theme's heading and body fonts, the workbook's, then common ones; each font once,
+// the first group that has it keeping it.
+export function fontGroups(choices: SheetFormatChoices | undefined): FontGroup[] {
+	const seen = new Set<string>()
+	const take = (name: string): boolean => {
+		const key = name.toLowerCase()
+
+		if (name === "" || seen.has(key)) {
+			return false
+		}
+
+		seen.add(key)
+
+		return true
+	}
+	const theme: { name: string; theme: "headings" | "body" }[] = []
+
+	if (choices !== undefined && take(choices.majorFont)) {
+		theme.push({ name: choices.majorFont, theme: "headings" })
+	}
+
+	if (choices !== undefined && take(choices.minorFont)) {
+		theme.push({ name: choices.minorFont, theme: "body" })
+	}
+
+	const own = (choices?.fonts ?? []).filter(take).map(name => ({ name }))
+	const common = COMMON_FONTS.filter(take).map(name => ({ name }))
+	const groups: FontGroup[] = []
+
+	if (theme.length > 0) {
+		groups.push({ label: "previewSheetFormatThemeFonts", fonts: theme })
+	}
+
+	if (own.length > 0) {
+		groups.push({ label: "previewSheetFormatWorkbookFonts", fonts: own })
+	}
+
+	groups.push({ label: "previewSheetFormatOtherFonts", fonts: common })
+
+	return groups
+}
+
+// --- Colours ---
+
+export interface SheetSwatch extends DocxSwatch {
+	readonly input: SheetColorInput
+}
+
+function hex(rgb: SheetRgb): string {
+	return rgb.toString(16).padStart(6, "0").toUpperCase()
+}
+
+const THEME_NAMES: readonly PreviewKey[] = [
+	"previewDocxColorBackground1",
+	"previewDocxColorText1",
+	"previewDocxColorBackground2",
+	"previewDocxColorText2",
+	"previewDocxColorAccent1",
+	"previewDocxColorAccent2",
+	"previewDocxColorAccent3",
+	"previewDocxColorAccent4",
+	"previewDocxColorAccent5",
+	"previewDocxColorAccent6"
+]
+
+// The colour picker's theme part as rows (the ten theme colours, then each tint variation), from the workbook's
+// theme colours (SpreadsheetML theme indices 0-9, §18.8.3) and Excel's tints; colours shown as the grid draws them.
+export function themeSwatchRows(themeColors: readonly SheetRgb[]): SheetSwatch[][] {
+	const columns = THEME_NAMES.map((name, theme) => {
+		const base = themeColors[theme] ?? 0
+		const column: SheetSwatch[] = [
+			{ key: `theme:${String(theme)}`, rgb: hex(base), label: { name }, color: { kind: "rgb", value: hex(base) }, input: { theme } }
+		]
+
+		for (const tint of themeTints(theme)) {
+			const rgb = hex(applyTint(base, tint))
+
+			column.push({
+				key: `theme:${String(theme)}:${String(tint)}`,
+				rgb,
+				label: { name, tone: { lighter: tint > 0, percent: Math.round(Math.abs(tint) * 100) } },
+				color: { kind: "rgb", value: rgb },
+				input: { theme, tint }
+			})
+		}
+
+		return column
+	})
+
+	return (columns[0] ?? []).map((_, row) => columns.flatMap(column => (column[row] === undefined ? [] : [column[row]])))
+}
+
+// Excel's standard colours (the same ten as Word's).
+export const STANDARD_SHEET_SWATCHES: readonly SheetSwatch[] = STANDARD_SWATCHES.map(swatch => ({
+	...swatch,
+	input: Number.parseInt(swatch.rgb, 16)
+}))
+
+// The swatch showing a colour, for marking the one in effect.
+export function swatchKeyOf(rgb: SheetRgb | undefined, swatches: readonly SheetSwatch[]): string | undefined {
+	if (rgb === undefined) {
+		return undefined
+	}
+
+	const wanted = hex(rgb)
+
+	return swatches.find(swatch => swatch.rgb === wanted)?.key
+}
+
+// --- Borders ---
+
+export const BORDER_LABELS: Readonly<Record<SheetBorderPreset, PreviewKey>> = {
+	bottom: "previewSheetBorderBottom",
+	top: "previewSheetBorderTop",
+	left: "previewSheetBorderLeft",
+	right: "previewSheetBorderRight",
+	none: "previewSheetBorderNone",
+	all: "previewSheetBorderAll",
+	outside: "previewSheetBorderOutside",
+	thickOutside: "previewSheetBorderThickOutside",
+	bottomDouble: "previewSheetBorderBottomDouble",
+	thickBottom: "previewSheetBorderThickBottom",
+	topBottom: "previewSheetBorderTopBottom",
+	topThickBottom: "previewSheetBorderTopThickBottom",
+	topDoubleBottom: "previewSheetBorderTopDoubleBottom",
+	inside: "previewSheetBorderInside",
+	insideHorizontal: "previewSheetBorderInsideHorizontal",
+	insideVertical: "previewSheetBorderInsideVertical",
+	diagonalUp: "previewSheetBorderDiagonalUp",
+	diagonalDown: "previewSheetBorderDiagonalDown"
+}
+
+// Excel's line styles, in its dialog's order, with how a menu draws each (SVG stroke width and dashes).
+export const LINE_STYLES: readonly {
+	readonly style: SheetBorderStyle
+	readonly label: PreviewKey
+	readonly width: number
+	readonly dash: string
+	readonly double?: boolean
+}[] = [
+	{ style: "hair", label: "previewSheetLineHair", width: 1, dash: "1 1" },
+	{ style: "dotted", label: "previewSheetLineDotted", width: 1, dash: "1 2" },
+	{ style: "dashDotDot", label: "previewSheetLineDashDotDot", width: 1, dash: "9 3 3 3 3 3" },
+	{ style: "dashDot", label: "previewSheetLineDashDot", width: 1, dash: "9 3 3 3" },
+	{ style: "dashed", label: "previewSheetLineDashed", width: 1, dash: "3 1" },
+	{ style: "thin", label: "previewSheetLineThin", width: 1, dash: "" },
+	{ style: "mediumDashDotDot", label: "previewSheetLineMediumDashDotDot", width: 2, dash: "9 3 3 3 3 3" },
+	{ style: "slantDashDot", label: "previewSheetLineSlantDashDot", width: 2, dash: "11 1 5 1" },
+	{ style: "mediumDashDot", label: "previewSheetLineMediumDashDot", width: 2, dash: "9 3 3 3" },
+	{ style: "mediumDashed", label: "previewSheetLineMediumDashed", width: 2, dash: "9 3" },
+	{ style: "medium", label: "previewSheetLineMedium", width: 2, dash: "" },
+	{ style: "thick", label: "previewSheetLineThick", width: 3, dash: "" },
+	{ style: "double", label: "previewSheetLineDouble", width: 1, dash: "", double: true }
+]
+
+// --- Alignment ---
+
+export const HORIZONTAL_ALIGNS: readonly { readonly align: SheetHorizontalAlign | "general"; readonly label: PreviewKey }[] = [
+	{ align: "general", label: "previewSheetAlignGeneral" },
+	{ align: "left", label: "previewSheetAlignLeft" },
+	{ align: "center", label: "previewSheetAlignCenter" },
+	{ align: "right", label: "previewSheetAlignRight" },
+	{ align: "fill", label: "previewSheetAlignFill" },
+	{ align: "justify", label: "previewSheetAlignJustify" },
+	{ align: "centerContinuous", label: "previewSheetAlignCenterAcross" },
+	{ align: "distributed", label: "previewSheetAlignDistributed" }
+]
+
+export const VERTICAL_ALIGNS: readonly { readonly valign: SheetVerticalAlign; readonly label: PreviewKey }[] = [
+	{ valign: "top", label: "previewSheetAlignTop" },
+	{ valign: "center", label: "previewSheetAlignMiddle" },
+	{ valign: "bottom", label: "previewSheetAlignBottom" },
+	{ valign: "justify", label: "previewSheetAlignJustify" },
+	{ valign: "distributed", label: "previewSheetAlignDistributed" }
+]
+
+// General is no alignment of the cell's own (null clears it); bottom is the default vertical one.
+export function alignPatch(align: SheetHorizontalAlign | "general"): SheetFormatPatch {
+	return { align: align === "general" ? null : align }
+}
+
+export function valignPatch(valign: SheetVerticalAlign): SheetFormatPatch {
+	return { valign: valign === "bottom" ? null : valign }
+}
+
+// --- Number formats ---
+
+const CATEGORY_LABELS_BY_NAME: Readonly<Record<NumFmtCategory, PreviewKey>> = {
+	general: "previewSheetNumberGeneral",
+	number: "previewSheetNumberNumber",
+	currency: "previewSheetNumberCurrency",
+	accounting: "previewSheetNumberAccounting",
+	date: "previewSheetNumberDate",
+	time: "previewSheetNumberTime",
+	percentage: "previewSheetNumberPercentage",
+	fraction: "previewSheetNumberFraction",
+	scientific: "previewSheetNumberScientific",
+	text: "previewSheetNumberText",
+	custom: "previewSheetNumberCustom"
+}
+
+// The Number Format menu's items: Excel's Home tab list (core NUMBER_FORMAT_PRESETS), each with its label.
+export const NUMBER_ITEMS: readonly { readonly code: string; readonly label: PreviewKey }[] = NUMBER_FORMAT_PRESETS.map(
+	(preset, index) => ({
+		code: preset.code,
+		label:
+			preset.category === "date"
+				? index === NUMBER_FORMAT_PRESETS.findIndex(entry => entry.category === "date")
+					? "previewSheetNumberShortDate"
+					: "previewSheetNumberLongDate"
+				: CATEGORY_LABELS_BY_NAME[preset.category]
+	})
+)
+
+// The Format Cells dialog's categories, in its order.
+export const CATEGORIES: readonly NumFmtCategory[] = [
+	"general",
+	"number",
+	"currency",
+	"accounting",
+	"date",
+	"time",
+	"percentage",
+	"fraction",
+	"scientific",
+	"text",
+	"custom"
+]
+
+export const CATEGORY_LABELS: Readonly<Record<NumFmtCategory, PreviewKey>> = CATEGORY_LABELS_BY_NAME
+
+// The menu trigger's label: the item showing the code, else its category's name.
+export function numberLabel(code: string): PreviewKey {
+	const item = NUMBER_ITEMS.find(entry => entry.code === code)
+
+	return item?.label ?? CATEGORY_LABELS[numFmtCategory(code)]
+}
+
+// Increase or Decrease Decimal on a cell of `numFmt` showing `shown`: the change, or null when its format has no
+// decimals to change (text, dates, times, fractions).
+export function decimalsPatch(numFmt: string, shown: string, delta: 1 | -1, decimal: string): SheetFormatPatch | null {
+	const code = changedDecimals(numFmt, delta, shown, decimal)
+
+	return code === null ? null : { numFmt: code }
+}
+
+export const PERCENT_PATCH: SheetFormatPatch = { numFmt: PERCENT_STYLE }
+export const COMMA_PATCH: SheetFormatPatch = { numFmt: COMMA_STYLE }
+
+// --- Fitting the row ---
+
+// The groups the row may move into the ⋯ menu, right to left, and the room each takes (px; buttons are 32,
+// dropdown triggers 44, the dividers 9).
+const GROUP_WIDTHS = { decimals: 105, number: 129, align: 129, borders: 53, toggles: 137, font: 213 } as const
+
+export type ToolbarGroup = keyof typeof GROUP_WIDTHS
+
+// What always stays: undo and redo, the colour pickers, merge, freeze, find and the ⋯ button, with dividers.
+const KEPT_WIDTH = 64 + 9 + 64 + 9 + 53 + 53 + 32 + 32 + 16
+
+// Which groups the row shows at `width` (0: not measured yet, everything). The rest go into the ⋯ menu, the last
+// groups first.
+export function toolbarFit(width: number): Readonly<Record<ToolbarGroup, boolean>> {
+	const order: readonly ToolbarGroup[] = ["font", "toggles", "borders", "align", "number", "decimals"]
+	const shown: Record<ToolbarGroup, boolean> = { font: true, toggles: true, borders: true, align: true, number: true, decimals: true }
+
+	if (width <= 0) {
+		return shown
+	}
+
+	let room = width - KEPT_WIDTH
+
+	for (const group of order) {
+		room -= GROUP_WIDTHS[group]
+
+		if (room < 0) {
+			shown[group] = false
+		}
+	}
+
+	return shown
+}

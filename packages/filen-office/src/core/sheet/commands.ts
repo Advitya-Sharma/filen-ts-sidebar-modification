@@ -4,9 +4,14 @@ import { XlsxDocument } from "../xlsx/edit/document"
 import { clearCells, setCells } from "../xlsx/edit/cells"
 import { copyCells, pasteCells } from "../xlsx/edit/clipboard"
 import { applyFormat } from "../xlsx/edit/format"
+import { formattingFeature } from "../xlsx/edit/formatFeature"
 import { fitSample, resizeAxis } from "../xlsx/edit/resize"
 import { addSheet, moveAxis, renameSheet } from "../xlsx/edit/structure-basic"
+import { STRUCTURE_FEATURES } from "../xlsx/edit/structure-features"
 import type { SheetEvent, SheetOpenFailure, SheetOpened, SheetSessionOptions } from "./protocol"
+import { xlsxFillFeature } from "./fill/xlsx"
+import { xlsxFindFeature } from "./find/xlsx"
+import { xlsxNavigateFeature } from "./navigate/xlsx"
 import { defineSheetFeature, sheetRegistry, type SheetFeature } from "./registry"
 import { RenderStyleTable, SheetSession, sessionFeature } from "./session"
 
@@ -32,7 +37,8 @@ export const formatFeature = defineSheetFeature<XlsxDocument>({
 	commands: {
 		"format.apply": {
 			info: { write: true, protection: "formatCells" },
-			run: (context, command) => applyFormat(context.doc, command.sheet, command.ranges, command.patch, context.changes)
+			run: (context, command) =>
+				applyFormat(context.doc, command.sheet, command.ranges, command.patch, context.changes, context.slicing)
 		}
 	}
 })
@@ -97,9 +103,14 @@ export const clipboardFeature = defineSheetFeature<XlsxDocument>({
 export const XLSX_FEATURES: readonly SheetFeature<XlsxDocument>[] = [
 	cellsFeature,
 	formatFeature,
+	formattingFeature,
 	axisFeature,
 	sheetsFeature,
-	clipboardFeature
+	clipboardFeature,
+	...STRUCTURE_FEATURES,
+	xlsxFindFeature,
+	xlsxNavigateFeature,
+	xlsxFillFeature
 ]
 
 export type XlsxSessionOpen =

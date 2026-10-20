@@ -212,6 +212,9 @@ function unreadable(
 	if (!content.includes("!") && !content.includes(":")) return null
 
 	for (const ref of formulaInputs(content.slice(1)).refs) {
+		// The engine has no 3-D references.
+		if (ref.lastSheet !== null) return "sheet"
+
 		const first = ref.sheet === null ? sheets[own] : sheets.find(sheet => sameSheet(sheet.name, ref.sheet ?? ""))
 
 		if (first === undefined || (ref.lastSheet !== null && !sheets.some(sheet => sameSheet(sheet.name, ref.lastSheet ?? ""))))

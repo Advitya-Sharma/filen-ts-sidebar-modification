@@ -103,6 +103,8 @@ export function refusalKey(refusal: SheetRefusal, kind: SheetFileKind): PreviewK
 			return "previewSheetStyleLimit"
 		case "unsupported":
 			return "previewSheetUnsupported"
+		case "mergeLosesValues":
+			return "previewSheetMergeLosesValues"
 	}
 }
 

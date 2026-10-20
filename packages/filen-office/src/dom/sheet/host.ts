@@ -13,6 +13,7 @@ import type {
 import type { SheetFeature } from "../../core/sheet/registry"
 import type { XlsxDocument } from "../../core/xlsx/edit/document"
 import { isTextKind, type TextSheetDocument } from "../../core/sheet/text"
+import { saveAsXlsxFeature } from "../../core/sheet/save/xlsx"
 import { textOpener, trackedSessions } from "./text"
 import type { SheetOpener } from "./worker"
 import { openProtectedWorkbook, sheetEncryption } from "./protection"
@@ -134,7 +135,7 @@ function lockedFile(
 }
 
 // Opens a workbook on the thread that holds it: an encrypted package is unlocked (Excel's default password first);
-// a text file opens as text (text.ts).
+// a text file opens as text (text.ts), and here, beside the workbook writer, also converts to .xlsx (saveAs.xlsx).
 export async function openWorkbook(
 	source: ByteSource,
 	options: SheetOpenOptions,
@@ -142,7 +143,7 @@ export async function openWorkbook(
 	features: SheetHostOptions,
 	track: (session: SheetSessionApi) => void
 ): Promise<SheetOpenResult> {
-	if (isTextKind(options.kind)) return textOpener(features.textFeatures)(source, options, onEvent, track)
+	if (isTextKind(options.kind)) return textOpener([saveAsXlsxFeature, ...(features.textFeatures ?? [])])(source, options, onEvent, track)
 	if (options.signal?.aborted === true) return { kind: "aborted" }
 
 	const workbook = features.features ?? []

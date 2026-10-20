@@ -1,9 +1,10 @@
 import { DEFAULT_ROW_HEIGHT, type CellRange } from "../model/model"
 
 // Column and row sizes: the grid's pixels, the xlsx's own units, the limits both share, and the edits
-// resizing makes to a sheet's size maps. Column widths are in characters of the default font, row
-// heights in points.
-const PX_PER_CHAR = 7
+// resizing makes to a sheet's size maps. Column widths are stored as characters of the default font's widest
+// digit with 5 px of padding counted in (ECMA-376 Part 1 §18.3.1.13), row heights in points.
+// Calibri 11's widest digit at 96 dpi.
+const DIGIT_PX = 7
 const CHAR_PADDING = 5
 export const PX_PER_POINT = 4 / 3
 
@@ -12,9 +13,10 @@ export type SizeAxis = "rows" | "cols"
 // An index's new pixel size; null takes it back to the file's (or the default) size.
 export type SizeEntry = readonly [index: number, px: number | null]
 
-// Excel's own limits (255 characters, 409 points), in pixels. Never 0: resizing does not hide.
+// Excel's own limits (a stored width of 255, MS-OI29500 2.1.598; 409 points), in pixels. Never 0: resizing does
+// not hide.
 export const MIN_SIZE = 8
-export const MAX_COL_WIDTH = 1790
+export const MAX_COL_WIDTH = 1785
 export const MAX_ROW_HEIGHT = 545
 
 // The most indices one resize names. A whole selection larger than this (select-all on a large sheet)
@@ -32,13 +34,34 @@ export function clampSize(axis: SizeAxis, px: number): number {
 	return Math.round(Math.min(axis === "cols" ? MAX_COL_WIDTH : MAX_ROW_HEIGHT, Math.max(MIN_SIZE, px)))
 }
 
-export function colWidthToPx(chars: number): number {
-	return Math.round(chars * PX_PER_CHAR + CHAR_PADDING)
+// A stored width's pixels: Truncate(((256 * width + Truncate(128 / digit)) / 256) * digit) (§18.3.1.13).
+export function colWidthToPx(width: number): number {
+	return Math.trunc(((256 * width + Math.trunc(128 / DIGIT_PX)) * DIGIT_PX) / 256)
 }
 
-// Excel keeps widths to 1/256 of a character.
+// The width stored for pixels, to 1/256 of a character (§18.3.1.13, with (px - 5) / digit characters).
 export function pxToColWidth(px: number): number {
-	return Math.round(((px - CHAR_PADDING) / PX_PER_CHAR) * 256) / 256
+	return Math.trunc((px * 256) / DIGIT_PX) / 256
+}
+
+export interface ColWidthFormat {
+	// Stored width, NaN when absent.
+	readonly defaultColWidth: number
+	// Characters, padding not counted.
+	readonly baseColWidth: number
+}
+
+// The default column's pixels: defaultColWidth's, else baseColWidth characters with their padding (§18.3.1.81),
+// which Excel rounds up to whole 8 px (MS-OI29500 2.1.598 f): 64 px for 8, the "8.43 characters" Excel shows.
+export function defaultColPx(format: ColWidthFormat): number {
+	if (!Number.isNaN(format.defaultColWidth)) return colWidthToPx(format.defaultColWidth)
+
+	return Math.ceil((format.baseColWidth * DIGIT_PX + CHAR_PADDING) / 8) * 8
+}
+
+// The width a <col> of the default column's size stores.
+export function defaultColWidth(format: ColWidthFormat): number {
+	return Number.isNaN(format.defaultColWidth) ? pxToColWidth(defaultColPx(format)) : format.defaultColWidth
 }
 
 export function rowHeightToPx(points: number): number {

@@ -1,7 +1,7 @@
 import { cellName } from "../../sheet/refs/cellRef"
 import { decodeUtf8, encodeUtf8 } from "../../xml/index"
 import { axisLimit, shiftAxisSpan, shiftIndex, type AxisShift } from "./axis"
-import { shiftSplit } from "./views"
+import { shiftSplit, shiftViewStart } from "./views"
 import { refuse } from "./catalogue"
 import { shiftAnchor } from "./anchors"
 import {
@@ -303,7 +303,20 @@ function selectionAndPane(edited: Edited, view: number, job: RefJob, construct: 
 		return next
 	}
 
-	moveCell(view, "topLeftCell")
+	// The view's first row (column): an index the frozen block counts from, moved as one (shiftViewStart).
+	const topLeft = document.attribute(view, "topLeftCell")
+	const origin = topLeft === undefined ? null : parseRef(topLeft)
+	const first = origin === null ? 0 : shift.axis === "rows" ? origin.startRow : origin.startCol
+
+	if (topLeft !== undefined && origin !== null) {
+		const index = shiftViewStart(first, shift)
+		const next = shift.axis === "rows" ? cellName(index, origin.startCol) : cellName(origin.startRow, index)
+
+		if (next !== topLeft.replaceAll("$", "")) {
+			job.touch(construct)
+			editor.setAttribute(view, "topLeftCell", next)
+		}
+	}
 
 	for (const child of childElements(document, view)) {
 		switch (document.localName(child)) {
@@ -315,7 +328,7 @@ function selectionAndPane(edited: Edited, view: number, job: RefJob, construct: 
 					const name = shift.axis === "rows" ? "ySplit" : "xSplit"
 					const other = shift.axis === "rows" ? "xSplit" : "ySplit"
 					const split = Math.floor(Number(document.attribute(child, name) ?? "0"))
-					const next = shiftSplit(split, shift)
+					const next = shiftSplit(split, shift, first)
 
 					if (next !== split) {
 						job.touch(construct)

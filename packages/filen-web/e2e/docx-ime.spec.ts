@@ -20,7 +20,7 @@ test.describe.configure({ mode: "default" })
 // Wide enough for the balloon column beside the page at 100 %.
 const WIDE = { width: 1600, height: 900 }
 const AUTHOR = "E2E Reviewer"
-// docxEditor.logic.ts's E2E_AUTOSAVE_KEY: an E2E build reads it before the app loads.
+// features/office/lib/officeAutosave.ts's E2E_AUTOSAVE_KEY: an E2E build reads it before the app loads.
 const AUTOSAVE_KEY = "filen-e2e-docx-autosave"
 
 test.beforeEach(async ({ page, browserName }) => {

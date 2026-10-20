@@ -36,3 +36,17 @@ export {
 } from "./history"
 export { fitSample, resizeAxis } from "./resize"
 export { addSheet, moveAxis, renameSheet, sheetNameRefusal } from "./structure-basic"
+export { deleteSheet, moveSheet, setSheetState, setTabColor, sheetOpsFeature } from "./sheets"
+export { MAX_HIDDEN_ROWS, hideAxis, hideFeature } from "./hide"
+export { freezeFeature, freezePanes } from "./freeze"
+export { mergeCells, mergeFeature, unmergeCells } from "./merge"
+export {
+	DEFAULT_SHEET_ALLOWS,
+	legacySheetPassword,
+	protectionFeature,
+	sheetPasswordCheck,
+	type SheetPasswordCheck,
+	type SheetPasswordHash
+} from "./protection"
+export { copyName, duplicateSheet, sheetCopyFeature } from "./sheetCopy"
+export { STRUCTURE_FEATURES } from "./structure-features"

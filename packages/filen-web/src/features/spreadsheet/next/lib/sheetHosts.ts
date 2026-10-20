@@ -6,6 +6,7 @@ import type {
 	SheetLockedFile,
 	SheetOpenOptions,
 	SheetOpenResult,
+	SheetQueryResult,
 	SheetSessionApi
 } from "@filen/office/core/sheet"
 import WorkbookWorker from "@/features/spreadsheet/next/workers/sheetWorkbook.worker.ts?worker"
@@ -180,4 +181,26 @@ export function isTextSheetKind(kind: SheetFileKind): boolean {
 // transferred: pass a copy of anything still held elsewhere.
 export function openSheet(bytes: Uint8Array, options: SheetOpenOptions, onEvent: (event: SheetEvent) => void): Promise<SheetOpenResult> {
 	return (isTextSheetKind(options.kind) ? openText : openWorkbook)(bytes, options, onEvent)
+}
+
+// Save as .xlsx of a text file: its cells as the text session handed them out (the saveAs.cells query, a UTF-8
+// TSV), made a workbook in the workbook worker, which holds the writer (the text worker never loads it). The
+// session opened there for it closes once done. Transferred: pass bytes nothing else holds.
+export async function textToXlsx(cells: Uint8Array, name: string): Promise<SheetQueryResult<"saveAs.xlsx">> {
+	const opened = await openWorkbook(cells, { kind: "tsv" }, () => undefined)
+
+	if (opened.kind !== "opened") {
+		// A text file asks no password; what holds the worker goes all the same.
+		if (opened.kind === "needsPassword") {
+			opened.locked.dispose()
+		}
+
+		return { ok: false, refusal: { reason: "unsupported", detail: opened.kind } }
+	}
+
+	try {
+		return await opened.session.query("saveAs.xlsx", { name })
+	} finally {
+		opened.session.close()
+	}
 }

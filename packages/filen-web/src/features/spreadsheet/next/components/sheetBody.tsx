@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react"
+import { useEffect, useRef, useState, type RefObject } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import {
-	TOGGLE_FORMATS,
 	newSheetName,
 	type LayerKey,
 	type SheetCommand,
@@ -16,25 +15,36 @@ import {
 	editingChanged,
 	useSheetGrid,
 	type SheetGridHandle,
-	type SheetGridSizes
+	type SheetGridSizes,
+	wholeAxis,
+	type SheetShortcut
 } from "@filen/office/react/sheet"
 import "@filen/office/css/sheet.css"
 import "@/features/spreadsheet/next/sheetTheme.css"
 import { Button } from "@/components/ui/button"
 import { ConfirmDialog } from "@/components/dialogs/confirmDialog"
-import { InputDialog } from "@/components/dialogs/inputDialog"
 import { PasswordBadge } from "@/features/preview/components/docxToolbar"
-import { SheetTabs } from "@/features/spreadsheet/components/sheetTabs"
 import { useSizeLayer } from "@/features/spreadsheet/hooks/useSizeLayer"
 import type { SpreadsheetSnapshot } from "@/features/spreadsheet/hooks/useSpreadsheetEdits"
 import { assertSealedUpload } from "@/features/spreadsheet/lib/xlsxEncryption"
 import { useSheetClipboard } from "@/features/spreadsheet/next/clipboard/useSheetClipboard"
 import { SheetFormulaBar } from "@/features/spreadsheet/next/components/sheetFormulaBar"
+import { openSheetFind, stepSheetFind } from "@/features/spreadsheet/next/find/findState"
+import { SheetAxisDialog, type SheetAxisDialogKind } from "@/features/spreadsheet/next/components/sheetAxisDialog"
+import { SheetFindBar } from "@/features/spreadsheet/next/find/sheetFindBar"
 import { SheetGridMenu } from "@/features/spreadsheet/next/components/sheetGridMenu"
+import { structureShortcut } from "@/features/spreadsheet/next/menus/structureShortcuts"
+import { useMergeCommands } from "@/features/spreadsheet/next/menus/useMergeCommands"
+import { SheetModifyPassword } from "@/features/spreadsheet/next/menus/modifyPassword"
+import { SheetTabs } from "@/features/spreadsheet/next/tabs/sheetTabs"
 import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
 import { isTextSheetKind } from "@/features/spreadsheet/next/lib/sheetHosts"
 import { readOnlyNoteKey, refusalKey } from "@/features/spreadsheet/next/lib/sheetMessages.logic"
 import { SheetToolbar } from "@/features/spreadsheet/next/toolbar/sheetToolbar"
+import { borderShortcut, setFormatCellsOpen } from "@/features/spreadsheet/next/toolbar/formatCellsState"
+import { downloadSheetCsv } from "@/features/spreadsheet/next/save/sheetCsv"
+import { SheetFileMenu } from "@/features/spreadsheet/next/save/sheetFileMenu"
+import { useSheetAutosave } from "@/features/spreadsheet/next/save/useSheetAutosave"
 import { resolveTheme, useTheme } from "@/providers/themeProvider"
 
 export interface SheetBodyProps {
@@ -52,10 +62,15 @@ export interface SheetBodyProps {
 	saveRef: RefObject<(() => Promise<SpreadsheetSnapshot>) | null> | undefined
 	// The author recommends read-only: reopens the file for editing.
 	editAnyway: (() => void) | undefined
+	// The workbook has a password to modify that was not given: called once it is.
+	modifyLocked: (() => void) | undefined
 	// Where the sizes kept beside the file live (a text file's, a view-only workbook's).
 	layerKey: LayerKey
-	// A legacy workbook the user may write beside: converts it to an .xlsx next to it. Resolves once done or failed.
+	// A text file or legacy workbook the user may write beside: saves it as an .xlsx next to it (a text file with its
+	// edits). Resolves once done or failed.
 	onSaveAsXlsx: (() => Promise<void>) | undefined
+	// Idle autosave asks the overlay to save; true when a save started.
+	onAutosave: (() => boolean) | undefined
 }
 
 // An open session as a grid, with the formula bar, the formatting toolbar, the sheet tabs and the grid's menu. The
@@ -72,8 +87,10 @@ export function SheetBody({
 	onDirtyChange,
 	saveRef,
 	editAnyway,
+	modifyLocked,
 	layerKey,
-	onSaveAsXlsx
+	onSaveAsXlsx,
+	onAutosave
 }: SheetBodyProps) {
 	const { t } = useTranslation(["preview", "common"])
 	const [model] = useState(() => createSheetGrid(handle))
@@ -102,8 +119,8 @@ export function SheetBody({
 	}
 	const gridRef = useRef<SheetGridHandle>(null)
 	const containerRef = useRef<HTMLDivElement>(null)
-	const [renaming, setRenaming] = useState<number | null>(null)
 	const [xlsxAsked, setXlsxAsked] = useState(false)
+	const [axisAsked, setAxisAsked] = useState<SheetAxisDialogKind | null>(null)
 	const [xlsxSaving, setXlsxSaving] = useState(false)
 	const text = isTextSheetKind(kind)
 	const mayEdit = editable && !unnamed && !renamed && !neverEditable
@@ -113,9 +130,6 @@ export function SheetBody({
 	const noteKey = readOnlyNoteKey({ editable, readOnlyReason, unnamed, renamed, writability: grid.writability, kind })
 	const entryChanged = grid.editing !== null && editingChanged(grid.editing)
 	const dirty = grid.state.dirty || entryChanged
-	const shownSheets = grid.sheets.filter(sheet => sheet.state === "visible")
-	const shownIndex = shownSheets.findIndex(sheet => sheet.id === grid.sheet)
-	const activeTab = shownIndex < 0 ? 0 : shownIndex
 	const sheetName = grid.sheets.find(sheet => sheet.id === grid.sheet)?.name ?? ""
 
 	useEffect(
@@ -137,8 +151,18 @@ export function SheetBody({
 		}
 	}, [handle, neverEditable, unnamed, grid.writability.state])
 
+	const merges = useMergeCommands(grid)
+	const askMerge = merges.ask
+
 	useEffect(() => {
-		model.setRefusalHandler(refusal => {
+		model.setRefusalHandler((refusal, command) => {
+			// A merge repeated elsewhere (F4) asks about the values it would drop, as the menu's does.
+			if (refusal.reason === "mergeLosesValues" && typeof command !== "string" && command.type === "merge.cells") {
+				askMerge(command)
+
+				return
+			}
+
 			// One toast per reason: edits queued behind a failing proof are all refused alike.
 			toast.error(t(refusalKey(refusal, kind)), { id: refusal.reason })
 		})
@@ -146,11 +170,19 @@ export function SheetBody({
 		return () => {
 			model.setRefusalHandler(null)
 		}
-	}, [model, t, kind])
+	}, [model, t, kind, askMerge])
 
 	useEffect(() => {
 		onDirtyChange?.(dirty)
 	}, [dirty, onDirtyChange])
+
+	useSheetAutosave({
+		version: grid.state.version,
+		dirty: grid.state.dirty,
+		editing: grid.editing !== null,
+		canSave: canEdit && saveRef !== undefined,
+		onAutosave
+	})
 
 	useSheetClipboard({
 		model,
@@ -198,6 +230,32 @@ export function SheetBody({
 		}
 	}
 
+	// Excel's "CSV UTF-8": the sheet on show, as each cell shows; a password-protected workbook's cells stay sealed.
+	const downloadCsv =
+		handle.info.encrypted === undefined && grid.failed === null
+			? () => {
+					const sheet = grid.sheets.find(entry => entry.id === grid.sheet)
+
+					if (sheet === undefined) {
+						return
+					}
+
+					void model
+						.commitEditing(null)
+						.then(done => (done ? downloadSheetCsv(handle, sheet, grid.sheets.length, alt) : null))
+						.then(
+							result => {
+								if (result !== null && !result.ok) {
+									toast.error(t("previewSheetDownloadCsvFailed"))
+								}
+							},
+							() => {
+								toast.error(t("previewSheetDownloadCsvFailed"))
+							}
+						)
+				}
+			: undefined
+
 	useEffect(() => {
 		if (saveRef === undefined) {
 			return undefined
@@ -210,37 +268,65 @@ export function SheetBody({
 		}
 	})
 
-	function handleKey(event: KeyboardEvent<HTMLDivElement>): boolean {
-		const mod = event.ctrlKey || event.metaKey
+	// The grid's shortcuts only this view can do (react/sheet/keys.ts): Find and Replace (Mod+F, Mod+H, Shift+F4),
+	// a new sheet (Shift+F11) and the insert and delete dialogs for cells. The rest it does itself.
+	function handleShortcut(shortcut: SheetShortcut): boolean {
+		switch (shortcut) {
+			case "find":
+			case "replace":
+				openSheetFind(model, shortcut === "replace" && canEdit ? "replace" : "find")
 
-		if (!mod || event.altKey || event.shiftKey || !canEdit || text) {
-			return false
+				return true
+			case "findNext":
+			case "findPrevious":
+				stepSheetFind(model, shortcut === "findNext" ? 1 : -1)
+
+				return true
+			// Whole rows or columns the grid inserts and deletes itself; on cells, a dialog asks which.
+			case "insertCells":
+			case "deleteCells":
+				if (wholeAxis(grid.selection) !== null) {
+					return false
+				}
+
+				if (canEdit) {
+					setAxisAsked(shortcut === "insertCells" ? "insert" : "delete")
+				}
+
+				return true
+			case "formatCells":
+				if (canEdit && !text) {
+					setFormatCellsOpen(model, true)
+				}
+
+				return true
+			case "borderOutline":
+			case "borderNone":
+				if (canEdit && !text) {
+					run(borderShortcut(shortcut, grid.sheet, grid.selection.ranges))
+				}
+
+				return true
+			case "newSheet":
+				if (canEdit && !text) {
+					run({
+						type: "sheet.add",
+						name: newSheetName(
+							grid.sheets.map(sheet => sheet.name),
+							number => t("previewSpreadsheetNewSheetName", { number })
+						)
+					})
+				}
+
+				return true
+			// Not taken here: the key goes on to the preview's own Save (preview.save, Mod+S), the one save path, which
+			// commits an open entry first and keeps the browser's Save Page As away whether or not there is a save.
+			case "save":
+				return false
+			// Hide and unhide rows and columns (Ctrl+9, Ctrl+0, Ctrl+Shift+9, Ctrl+Shift+0); a text file has none.
+			default:
+				return structureShortcut(grid, shortcut, canEdit && !text)
 		}
-
-		const key = event.key.toLowerCase()
-		const toggle = TOGGLE_FORMATS.find(entry => entry.shortcutKey === key)
-
-		if (toggle === undefined) {
-			return false
-		}
-
-		event.preventDefault()
-
-		const { row, col } = grid.selection.active
-		const sheet = grid.sheet
-
-		// On or off as the active cell is, as the toolbar button does.
-		void model.session.query("cell", { sheet, row, col }).then(
-			detail => {
-				const style = model.style(detail.style)
-				const on = toggle.format === "underline" ? style.underline !== undefined : style[toggle.format] === true
-
-				format(toggle.format === "underline" ? { underline: on ? null : "single" } : { [toggle.format]: !on })
-			},
-			() => undefined
-		)
-
-		return true
 	}
 
 	return (
@@ -257,6 +343,11 @@ export function SheetBody({
 					onFormat={format}
 				/>
 			) : null}
+			<SheetFindBar
+				grid={grid}
+				gridRef={gridRef}
+				canEdit={canEdit}
+			/>
 			<SheetFormulaBar
 				grid={grid}
 				gridRef={gridRef}
@@ -295,13 +386,21 @@ export function SheetBody({
 						{t("previewSheetEditAnyway")}
 					</Button>
 				) : null}
+				{modifyLocked !== undefined && editable && !unnamed && !renamed && !neverEditable ? (
+					<SheetModifyPassword
+						session={handle.session}
+						name={alt}
+						onUnlock={modifyLocked}
+					/>
+				) : null}
 				{handle.info.encrypted === undefined ? null : (
 					<PasswordBadge
 						integrity={handle.info.encrypted}
 						saving={canEdit}
 					/>
 				)}
-				{onSaveAsXlsx === undefined ? null : (
+				{/* A legacy workbook is only ever edited as its .xlsx: the way there is in plain sight. */}
+				{onSaveAsXlsx === undefined || kind !== "xls" ? null : (
 					<Button
 						variant="outline"
 						size="xs"
@@ -313,11 +412,25 @@ export function SheetBody({
 						{t("previewSpreadsheetSaveAsXlsx")}
 					</Button>
 				)}
+				<SheetFileMenu
+					text={text}
+					onDownloadCsv={downloadCsv}
+					onSaveAsXlsx={
+						onSaveAsXlsx === undefined
+							? undefined
+							: () => {
+									setXlsxAsked(true)
+								}
+					}
+					autosave={canEdit && onAutosave !== undefined}
+				/>
 			</SheetFormulaBar>
 			<SheetGridMenu
 				grid={grid}
 				canEdit={canEdit}
 				run={run}
+				text={text}
+				{...(text && { localPane: layerKey })}
 			>
 				<SheetGrid
 					ref={gridRef}
@@ -330,85 +443,45 @@ export function SheetBody({
 					resizeLabel={(axis, px) =>
 						t(axis === "cols" ? "previewSpreadsheetWidthPx" : "previewSpreadsheetHeightPx", { size: px })
 					}
-					onKey={handleKey}
+					onShortcut={handleShortcut}
 				/>
 			</SheetGridMenu>
-			{text ? null : (
-				<SheetTabs
-					sheets={shownSheets}
-					active={activeTab}
-					onSelect={index => {
-						const target = shownSheets[index]
-
-						if (target === undefined || target.id === grid.sheet) {
-							return
-						}
-
-						void model.commitEditing(null).then(done => {
-							if (done) {
-								model.setSheet(target.id)
-							}
-						})
-					}}
-					onAdd={
-						canEdit
-							? () => {
-									run({
-										type: "sheet.add",
-										name: newSheetName(
-											grid.sheets.map(sheet => sheet.name),
-											number => t("previewSpreadsheetNewSheetName", { number })
-										)
-									})
-								}
-							: undefined
-					}
-					onRename={
-						canEdit
-							? index => {
-									setRenaming(shownSheets[index]?.id ?? null)
-								}
-							: undefined
-					}
-				/>
-			)}
-			<InputDialog
-				open={canEdit && renaming !== null}
-				pending={false}
-				title={t("previewSpreadsheetRenameSheet")}
-				body={t("previewSpreadsheetRenameSheetBody")}
-				label={t("previewSpreadsheetSheetName")}
-				initialValue={grid.sheets.find(sheet => sheet.id === renaming)?.name ?? ""}
-				submitLabel={t("previewSpreadsheetRenameSheet")}
-				validate={value => value.trim().length > 0}
-				onOpenChange={open => {
-					if (!open) {
-						setRenaming(null)
-					}
-				}}
-				onSubmit={value => {
-					if (canEdit && renaming !== null) {
-						run({ type: "sheet.rename", sheet: renaming, name: value })
-					}
-
-					setRenaming(null)
+			{merges.dialog}
+			<SheetAxisDialog
+				kind={axisAsked}
+				grid={grid}
+				run={run}
+				onClose={() => {
+					setAxisAsked(null)
 				}}
 			/>
+			{text ? null : (
+				<SheetTabs
+					grid={grid}
+					canEdit={canEdit}
+					run={run}
+				/>
+			)}
 			{onSaveAsXlsx === undefined ? null : (
 				<ConfirmDialog
 					open={xlsxAsked}
 					pending={xlsxSaving}
 					title={t("previewSpreadsheetSaveAsXlsxTitle")}
-					body={t("previewSpreadsheetSaveAsXlsxBody")}
+					body={t(text ? "previewSheetSaveAsXlsxTextBody" : "previewSpreadsheetSaveAsXlsxBody")}
 					confirmLabel={t("previewSpreadsheetSaveAsXlsx")}
 					cancelLabel={t("common:cancel")}
 					onOpenChange={setXlsxAsked}
 					onConfirm={() => {
 						setXlsxSaving(true)
-						void onSaveAsXlsx().finally(() => {
-							setXlsxSaving(false)
-							setXlsxAsked(false)
-						})
+						// A text file's copy holds its edits: an open entry is committed first (one that does not read as
+						// an entry stays open, and nothing is saved).
+						void model
+							.commitEditing(null)
+							.then(done => (done ? onSaveAsXlsx() : undefined))
+							.finally(() => {
+								setXlsxSaving(false)
+								setXlsxAsked(false)
+							})
 					}}
 				/>
 			)}

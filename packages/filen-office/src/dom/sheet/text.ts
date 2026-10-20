@@ -3,6 +3,7 @@ import type { Slicing } from "../../core/slicing"
 import type { SheetHost, SheetSessionApi } from "../../core/sheet/protocol"
 import type { SheetFeature } from "../../core/sheet/registry"
 import { isTextKind, openTextSession, type TextSheetDocument } from "../../core/sheet/text"
+import { saveAsCellsFeature } from "../../core/sheet/save/cells"
 import { serveSheetWorker, type SheetOpener, type SheetWorkerScope } from "./worker"
 
 // Text files (CSV, TSV, .tab) on their own: a host and a worker that load neither the workbook reader and writer
@@ -12,12 +13,14 @@ async function wholeSource(source: ByteSource): Promise<Uint8Array> {
 	return source.size === 0 ? new Uint8Array(0) : source.read(0, source.size)
 }
 
-// Opens a text file; any other kind is not one.
+// Opens a text file; any other kind is not one. Its cells can be handed out for Save as .xlsx (saveAs.cells).
 export function textOpener(features: readonly SheetFeature<TextSheetDocument>[] = []): SheetOpener {
+	const all = [saveAsCellsFeature, ...features]
+
 	return async (source, options, onEvent, track) => {
 		if (!isTextKind(options.kind)) return { kind: "failed", reason: "unsupported", message: "Not a text file" }
 
-		const opened = await openTextSession(await wholeSource(source), options, onEvent, features)
+		const opened = await openTextSession(await wholeSource(source), options, onEvent, all)
 
 		if (opened.kind === "opened") track(opened.session)
 

@@ -1,4 +1,3 @@
-import { decodeUtf8 } from "../../xml/index"
 import {
 	SHEET_MAX_CELL_TEXT,
 	SHEET_MAX_COLS,
@@ -8,14 +7,14 @@ import {
 	type SheetId,
 	type SheetRange
 } from "../../sheet/protocol"
-import type { SheetChangeSink, SheetHandled } from "../../sheet/registry"
+import type { SheetChangeSink, SheetEditStep, SheetHandled } from "../../sheet/registry"
 import { parseCellInput } from "../../sheet/input/cellInput"
 import { storedFormula, wellFormedFormula } from "../../sheet/refs/formulaRefs"
 import type { SheetStore } from "../model/store"
 import { CellKind, FormulaKind, type XlsxSheetModel } from "../model/types"
-import { parseRange } from "../read/index"
+import { liveRelationships } from "../refs/state"
 import { dateSerial, encodeXstring, type XlsxDocument } from "./document"
-import { StyleLimitError, cellStep, reportLogged, typedXf } from "./format"
+import { StyleLimitError, cellStep, clearFormats, reportLogged, typedXf } from "./format"
 import { ABSENT, CellLog, type CellState } from "./history"
 
 // Cell entries (cells.set) and clearing (cells.clear): what is typed, read as Excel reads it in that cell, written
@@ -170,17 +169,8 @@ export function splitsArray(model: XlsxSheetModel, rows: ArrayLike<number>, cols
 export async function tableHeaders(document: XlsxDocument, model: XlsxSheetModel): Promise<SheetRange[]> {
 	const headers: SheetRange[] = []
 
-	for (const relationship of model.relationships.all) {
-		if (relationship.external || !relationship.type.endsWith("/table") || relationship.partName === undefined) continue
-
-		const text = decodeUtf8(await document.workbook.parts.read(relationship.partName))
-		const root = /<(?:\w+:)?table\b[^>]*>/.exec(text)?.[0] ?? ""
-		const ref = /\sref="([^"]*)"/.exec(root)?.[1]
-		const headerRows = Number(/\sheaderRowCount="(\d+)"/.exec(root)?.[1] ?? "1")
-		const range = ref === undefined ? null : parseRange(ref)
-
-		if (range !== null && headerRows > 0) headers.push({ ...range, endRow: range.startRow + headerRows - 1 })
-	}
+	for (const table of await document.sheetTables(model.id))
+		if (table.headerRows > 0) headers.push({ ...table.range, endRow: table.range.startRow + table.headerRows - 1 })
 
 	return headers
 }
@@ -341,7 +331,9 @@ export async function setCells(
 
 	if (splitsArray(model, cells.rows, cells.cols)) return { refused: { reason: "arrayFormula" } }
 
-	if (model.relationships.all.some(relationship => relationship.type.endsWith("/table"))) {
+	if (
+		liveRelationships(document.workbook, model.part, model.relationships.all).some(relationship => relationship.type.endsWith("/table"))
+	) {
 		const headers = await tableHeaders(document, model)
 
 		for (let i = 0; i < count; i++) {
@@ -452,12 +444,13 @@ export async function clearCells(
 
 	for (const { row, col } of targets) if (document.locked(sheet, row, col)) return { refused: { reason: "protectedSheet" } }
 
-	if (what !== "formats") {
-		const rows = Uint32Array.from(targets, target => target.row)
-		const cols = Uint32Array.from(targets, target => target.col)
+	// Formats clear as format.clear does (whole columns' and rows' own formats too): one implementation.
+	if (what === "formats") return clearFormats(document, sheet, ranges, changes)
 
-		if (splitsArray(model, rows, cols)) return { refused: { reason: "arrayFormula" } }
-	}
+	const rows = Uint32Array.from(targets, target => target.row)
+	const cols = Uint32Array.from(targets, target => target.col)
+
+	if (splitsArray(model, rows, cols)) return { refused: { reason: "arrayFormula" } }
 
 	const log = new CellLog()
 
@@ -466,8 +459,6 @@ export async function clearCells(
 		let next: CellState
 
 		if (what === "all") next = ABSENT
-		else if (what === "formats")
-			next = before.kind === CellKind.EMPTY && before.formula < 0 ? ABSENT : { ...before, style: 0, present: true }
 		else
 			next =
 				before.style === 0
@@ -483,21 +474,46 @@ export async function clearCells(
 		)
 			continue
 
-		if (what !== "formats" && before.formula >= 0 && store.formulas.kind(before.formula) === FormulaKind.SHARED_MASTER)
+		if (before.formula >= 0 && store.formulas.kind(before.formula) === FormulaKind.SHARED_MASTER)
 			unshare(document, sheet, row, col, log)
 
 		log.touch(sheet, row, col, () => document.state(sheet, row, col), true)
 		document.write(sheet, row, col, next)
 	}
 
-	if (log.size === 0) return null
+	let contents: SheetEditStep | null = null
 
-	const kind = what === "formats" ? "look" : "content"
+	if (log.size > 0) {
+		recalculateLogged(document, log, changes)
+		log.seal((s, r, c) => document.state(s, r, c))
+		reportLogged(log, changes, "content")
+		contents = cellStep(document, log, sink => reportLogged(log, sink, "content"), true)
+	}
 
-	if (kind === "content") recalculateLogged(document, log, changes)
+	if (what === "contents") return contents
 
-	log.seal((s, r, c) => document.state(s, r, c))
-	reportLogged(log, changes, kind)
+	// Clear All: the contents, then the formats as format.clear clears them; refused formats take the contents back.
+	const formats = await clearFormats(document, sheet, ranges, changes)
 
-	return cellStep(document, log, sink => reportLogged(log, sink, kind), kind === "content")
+	if (formats !== null && "refused" in formats) {
+		await contents?.undo(changes)
+
+		return formats
+	}
+
+	if (formats === null || contents === null) return formats ?? contents
+
+	const done = contents
+
+	return {
+		bytes: done.bytes + formats.bytes,
+		undo: async sink => {
+			await formats.undo(sink)
+			await done.undo(sink)
+		},
+		redo: async sink => {
+			await done.redo(sink)
+			await formats.redo(sink)
+		}
+	}
 }

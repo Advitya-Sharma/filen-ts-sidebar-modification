@@ -72,6 +72,28 @@ function writeSheets(workbook: XlsxWorkbookModel, section: Uint8Array | null, co
 		}
 	}
 
+	// The sheets as the source lists them (an edit and its undo): the section as written.
+	if (document !== null) {
+		const listed: number[] = []
+
+		for (let node = document.firstChildElement(document.documentElement()); node >= 0; node = document.nextSiblingElement(node))
+			if (document.localName(node) === "sheet") listed.push(node)
+
+		const same =
+			listed.length === workbook.sheets.length &&
+			workbook.sheets.every((sheet, index) => {
+				const node = listed[index] as number
+				const raw = document.raw(node)
+
+				return (
+					byRelationship.get(sheet.relationshipId) === node &&
+					syncAttributes(raw, document.name(node), sheetFields(workbook, index)) === raw
+				)
+			})
+
+		if (same && section !== null) return section
+	}
+
 	const root = document === null ? -1 : document.documentElement()
 	const open =
 		document === null || document.isSelfClosing(root)

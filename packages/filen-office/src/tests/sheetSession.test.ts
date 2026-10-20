@@ -404,7 +404,7 @@ describe("sheet session: formats, sizes and structure", () => {
 		session.close()
 	})
 
-	it("refuses to move rows past a construct it cannot move, naming it", async () => {
+	it("moves a conditional format's range and formula with the rows", async () => {
 		const { session, info } = await openFixture({
 			sheets: [
 				{
@@ -413,9 +413,29 @@ describe("sheet session: formats, sizes and structure", () => {
 				}
 			]
 		})
+
+		changeOf(await session.command({ type: "axis.insert", sheet: info.sheets[0]!.id, axis: "rows", at: 0, count: 1 }))
+
+		const sheet = parts(await savedBytes(session))["xl/worksheets/sheet1.xml"] ?? ""
+
+		expect(sheet).toContain('<conditionalFormatting sqref="A2">')
+		expect(sheet).toContain("<formula>A2&gt;0</formula>")
+		session.close()
+	})
+
+	it("refuses to move rows past a construct it cannot move, naming it", async () => {
+		const { session, info } = await openFixture({
+			sheets: [{ name: "One", body: '<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>' }],
+			parts: {
+				"xl/revisions/revisionHeaders.xml": {
+					text: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<headers xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" guid="{00000000-0000-0000-0000-000000000000}"/>',
+					type: "application/vnd.openxmlformats-officedocument.spreadsheetml.revisionHeaders+xml"
+				}
+			}
+		})
 		const result = await session.command({ type: "axis.insert", sheet: info.sheets[0]!.id, axis: "rows", at: 0, count: 1 })
 
-		expect(result.ok ? null : result.refusal).toEqual({ reason: "structureLocked", detail: "conditionalFormatting" })
+		expect(result.ok ? null : result.refusal).toEqual({ reason: "structureLocked", detail: "revisions" })
 		session.close()
 	})
 

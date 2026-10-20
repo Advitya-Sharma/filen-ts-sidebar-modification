@@ -341,10 +341,14 @@ export const AxisFlag = {
 } as const
 
 export interface SheetPane {
-	// Frozen rows and columns (0 for none).
+	// Frozen rows and columns (0 for none), from `firstRow` and `firstCol`: the first frozen row and column, which
+	// need not be the sheet's first (the rows above and the columns left of them are not shown, as in Excel).
 	readonly rows: number
 	readonly cols: number
-	// The first cell of the scrolling pane.
+	readonly firstRow: number
+	readonly firstCol: number
+	// The first cell of the scrolling pane, past the frozen rows and columns; on an axis with none frozen, where the
+	// view starts.
 	readonly topRow: number
 	readonly leftCol: number
 }
@@ -568,11 +572,17 @@ export interface SheetQueryMap {
 	find: {
 		request: {
 			readonly scope: { readonly sheet: SheetId } | "workbook"
+			// Only these ranges of the scope's sheet (a selection of more than one cell, as Excel searches it); the
+			// whole scope when absent.
+			readonly within?: readonly SheetRange[]
 			readonly text: string
 			readonly matchCase: boolean
 			readonly wholeCell: boolean
 			readonly lookIn: "values" | "formulas"
 			readonly from?: SheetCell
+			// Where the walk starts: after `from` (the default), round to `from` itself; or at `from`, round to the cell
+			// before it; or "before": the matches before `from` (the walk at it), the last `limit` of them.
+			readonly start?: "after" | "at" | "before"
 			readonly limit: number
 		}
 		// Triples: sheet, row, col.

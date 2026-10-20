@@ -474,16 +474,34 @@ export function sameProtection(a: XlsxSheetProtection | null, b: XlsxSheetProtec
 	return sameHash(a.hash, b.hash) && a.allows.size === b.allows.size && [...a.allows].every(action => b.allows.has(action))
 }
 
+// Unprotected, an element that does not protect (Excel keeps the Protect Sheet choices in one without sheet="1"
+// once a sheet is unprotected) stays as written.
 export function writeSheetProtection(protection: XlsxSheetProtection | null, section: Uint8Array | null, prefix: string): Uint8Array {
-	if (protection === null) return new Uint8Array(0)
+	if (protection === null) return section !== null && section.length > 0 && readProtection(section) === null ? section : new Uint8Array(0)
 
 	return syncAttributes(section, qualify(prefix, "sheetProtection"), protectionFields(protection))
 }
 
 // --- sheetViews ---
 
+// The view's first cell (topLeftCell): none at A1, and a source's way of writing it read as the cell it names.
+function topLeftField(view: XlsxSheetView): AttributeField {
+	const name = (row: number, col: number): string | null => (row === 0 && col === 0 ? null : cellRef(row, col))
+
+	return {
+		name: "topLeftCell",
+		value: name(view.topRow, view.leftCol),
+		read: source => {
+			const range = source === undefined ? undefined : parseRangeRef(source)
+
+			return range === undefined ? (source ?? null) : name(range.startRow, range.startCol)
+		}
+	}
+}
+
 function viewFields(view: XlsxSheetView): AttributeField[] {
 	return [
+		topLeftField(view),
 		booleanField("tabSelected", view.tabSelected, false),
 		booleanField("showGridLines", view.gridLines, true),
 		booleanField("showRowColHeaders", view.headings, true),
@@ -538,6 +556,8 @@ function sameSelection(a: XlsxSheetView, b: XlsxSheetView): boolean {
 function sameViews(a: XlsxSheetView, b: XlsxSheetView): boolean {
 	return (
 		sameFrozen(a.frozen, b.frozen) &&
+		a.topRow === b.topRow &&
+		a.leftCol === b.leftCol &&
 		sameSelection(a, b) &&
 		a.zoom === b.zoom &&
 		a.gridLines === b.gridLines &&
@@ -632,18 +652,22 @@ function splicePanes(document: XmlDocument, node: number, editor: XmlEditor, vie
 		}
 	}
 
-	// The selection the reader takes after the splice: the active pane's, else the first left.
+	// The selection the reader takes after the splice: the active pane's, else the first left. A pane the split
+	// no longer has takes its selection with it (as Excel writes only the panes that exist).
 	const before = readSelection(document, node)
+	const resplit = frozen !== null && !sameFrozen(read.frozen, view.frozen)
 	let target = -1
-
-	for (const selection of selections) {
+	const kept = selections.filter(selection => {
 		const name = document.attribute(selection, "pane") ?? "topLeft"
+		const gone = (paneGone && name !== "topLeft") || (resplit && !paneExists(name, frozen))
 
-		if (paneGone && name !== "topLeft") {
-			editor.remove(selection)
+		if (gone) editor.remove(selection)
 
-			continue
-		}
+		return !gone
+	})
+
+	for (const selection of kept) {
+		const name = document.attribute(selection, "pane") ?? "topLeft"
 
 		if (target < 0) target = selection
 		if (active !== undefined && name === active) {

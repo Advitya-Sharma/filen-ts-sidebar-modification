@@ -57,10 +57,11 @@ describe("the office engine's spreadsheet viewer left out of builds without it",
 		}
 	})
 
+	// The flag itself is a constant the build folds (a settings page shows the documents group for it).
 	it("reaches the new viewer only through the switch, so nothing else carries it into a build", () => {
 		const outside = sources(join(ROOT, "src"))
 			.filter(({ path }) => !path.includes(join("features", "spreadsheet", "next")))
-			.filter(({ text }) => /from "@\/features\/spreadsheet\/next\/(?!spreadsheetView")/.test(text))
+			.filter(({ text }) => /from "@\/features\/spreadsheet\/next\/(?!spreadsheetView"|sheetNextFlag")/.test(text))
 			.map(({ path }) => path)
 
 		expect(outside).toEqual([])

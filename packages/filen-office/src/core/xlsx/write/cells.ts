@@ -35,7 +35,7 @@ import { cellRef, formatNumber, parseCellRef, parseRangeRef, rangeRef, readBoole
 // view), a row that only moved has its r attributes rewritten, and a changed row is serialised from the store
 // with every cell equal to its source copied as written. The same row decoding reads rows back for the gate.
 
-const ROW_ATTRIBUTES: ReadonlySet<string> = new Set([
+const ROW_ATTRIBUTES = [
 	"r",
 	"spans",
 	"s",
@@ -47,8 +47,8 @@ const ROW_ATTRIBUTES: ReadonlySet<string> = new Set([
 	"collapsed",
 	"thickTop",
 	"thickBot"
-])
-const CELL_ATTRIBUTES: ReadonlySet<string> = new Set(["r", "s", "t", "cm", "vm"])
+] as const
+const CELL_ATTRIBUTES = ["r", "s", "t", "cm", "vm"] as const
 // Cell kinds with their text in the sheet's strings.
 const TEXT_KINDS: ReadonlySet<number> = new Set<number>([CellKind.INLINE_STRING, CellKind.FORMULA_STRING, CellKind.ERROR, CellKind.DATE])
 const TYPES: Readonly<Record<number, string>> = {
@@ -138,26 +138,159 @@ function number(text: string | undefined, fallback: number): number {
 	return Number.isFinite(value) ? value : fallback
 }
 
-function attributes(
+const NO_SPANS: readonly number[] = []
+
+// Whether the bytes [start, end) are the ASCII name `name`.
+function isName(bytes: Uint8Array, start: number, end: number, name: string): boolean {
+	if (end - start !== name.length) return false
+
+	for (let i = 0; i < name.length; i++) if (bytes[start + i] !== name.charCodeAt(i)) return false
+
+	return true
+}
+
+// The start tag's attributes named in `names`: their raw value spans into `spans` by index (document offsets, -1
+// when absent); the others' absolute [from, to) spans are returned (kept on a rewrite). Names are matched on their
+// bytes and nothing is decoded: a value is read from its span when it is needed (valueAt, intAt).
+function knownAttributes(
 	document: XmlDocument,
 	node: number,
 	base: number,
-	known: ReadonlySet<string>
-): { values: Map<string, string>; kept: number[] } {
-	const list = document.attributes(node)
-	const spans = document.attributeSpans(node)
-	const values = new Map<string, string>()
-	const kept: number[] = []
+	names: readonly string[],
+	spans: Int32Array
+): readonly number[] {
+	const all = document.attributeSpans(node)
+	const bytes = document.bytes
+	let kept: number[] | null = null
 
-	for (let k = 0; k < list.length; k++) {
-		const attribute = list[k] as { readonly name: string; readonly value: string }
+	spans.fill(-1)
 
-		values.set(attribute.name, attribute.value)
+	for (let k = 0; k < all.length; k += 4) {
+		const nameStart = all[k] ?? 0
+		const nameEnd = all[k + 1] ?? 0
+		let known = -1
 
-		if (!known.has(attribute.name)) kept.push(base + (spans[k * 4] ?? 0), base + (spans[k * 4 + 3] ?? 0) + 1)
+		for (let n = 0; n < names.length; n++) {
+			if (isName(bytes, nameStart, nameEnd, names[n] ?? "")) {
+				known = n
+				break
+			}
+		}
+
+		if (known < 0) {
+			kept ??= []
+			kept.push(base + nameStart, base + (all[k + 3] ?? 0) + 1)
+
+			continue
+		}
+
+		spans[known * 2] = all[k + 2] ?? 0
+		spans[known * 2 + 1] = all[k + 3] ?? 0
 	}
 
-	return { values, kept }
+	return kept ?? NO_SPANS
+}
+
+// The decoded value of the attribute at `index` of `spans`, or undefined when absent.
+function valueAt(bytes: Uint8Array, spans: Int32Array, index: number): string | undefined {
+	const start = spans[index * 2] ?? -1
+
+	return start < 0 ? undefined : decodeCharacterData(bytes, start, spans[index * 2 + 1] ?? 0, true)
+}
+
+// number() of the attribute at `index`: plain digits read from the bytes, anything else decoded first.
+function intAt(bytes: Uint8Array, spans: Int32Array, index: number, fallback: number): number {
+	const start = spans[index * 2] ?? -1
+
+	if (start < 0) return fallback
+
+	const end = spans[index * 2 + 1] ?? 0
+
+	if (end > start && end - start <= 9) {
+		let value = 0
+		let i = start
+
+		for (; i < end; i++) {
+			const b = bytes[i] ?? 0
+
+			if (b < 48 || b > 57) break
+
+			value = value * 10 + (b - 48)
+		}
+
+		if (i === end) return value
+	}
+
+	return number(valueAt(bytes, spans, index), fallback)
+}
+
+// The cell types ECMA-376 names (§18.18.11), matched on their bytes.
+const CELL_TYPES = ["n", "s", "str", "b", "e", "inlineStr", "d"] as const
+
+function typeAt(bytes: Uint8Array, spans: Int32Array, index: number): string | undefined {
+	const start = spans[index * 2] ?? -1
+
+	if (start < 0) return undefined
+
+	const end = spans[index * 2 + 1] ?? 0
+
+	for (const type of CELL_TYPES) if (isName(bytes, start, end, type)) return type
+
+	return valueAt(bytes, spans, index)
+}
+
+// parseCellRef of an attribute's raw value: the plain "A1" form read from its bytes, anything else (entities,
+// "$") through parseCellRef.
+function cellRefAt(
+	bytes: Uint8Array,
+	start: number,
+	end: number,
+	spans: Int32Array,
+	index: number
+): { readonly row: number; readonly col: number } | undefined {
+	let i = start
+	let col = 0
+
+	while (i < end && i - start < 3) {
+		const b = bytes[i] ?? 0
+		const upper = b >= 97 && b <= 122 ? b - 32 : b
+
+		if (upper < 65 || upper > 90) break
+
+		col = col * 26 + (upper - 64)
+		i++
+	}
+
+	const letters = i - start
+	let row = 0
+
+	while (i < end && i - start - letters < 7) {
+		const b = bytes[i] ?? 0
+
+		if (b < 48 || b > 57) break
+
+		row = row * 10 + (b - 48)
+		i++
+	}
+
+	if (letters === 0 || i === start + letters || i !== end) return parseCellRef(valueAt(bytes, spans, index) ?? "")
+
+	return row >= 1 ? { row: row - 1, col: col - 1 } : undefined
+}
+
+const cellSpans = new Int32Array(CELL_ATTRIBUTES.length * 2)
+const rowSpans = new Int32Array(ROW_ATTRIBUTES.length * 2)
+const A = CELL_ATTRIBUTES.indexOf("r")
+const S = CELL_ATTRIBUTES.indexOf("s")
+const T = CELL_ATTRIBUTES.indexOf("t")
+const CM = CELL_ATTRIBUTES.indexOf("cm")
+const VM = CELL_ATTRIBUTES.indexOf("vm")
+
+// The current row's attribute (decodeRowElement's scratch).
+let rowBytes: Uint8Array = new Uint8Array(0)
+
+function rowValue(name: (typeof ROW_ATTRIBUTES)[number]): string | undefined {
+	return valueAt(rowBytes, rowSpans, ROW_ATTRIBUTES.indexOf(name))
 }
 
 function decodeFormula(document: XmlDocument, node: number): DecodedFormula {
@@ -208,11 +341,15 @@ function inlineText(document: XmlDocument, node: number): string {
 }
 
 function decodeCell(document: XmlDocument, node: number, base: number, row: number, implied: number): DecodedCell {
-	const { values, kept } = attributes(document, node, base, CELL_ATTRIBUTES)
-	const reference = values.get("r")
-	const at = reference === undefined ? undefined : parseCellRef(reference)
-	const rSpan = new Int32Array(2)
-	const type = values.get("t") ?? "n"
+	const bytes = document.bytes
+	const kept = knownAttributes(document, node, base, CELL_ATTRIBUTES, cellSpans)
+	const type = typeAt(bytes, cellSpans, T) ?? "n"
+	const style = intAt(bytes, cellSpans, S, 0)
+	const cm = intAt(bytes, cellSpans, CM, -1)
+	const vm = (cellSpans[VM * 2] ?? -1) >= 0
+	const rStart = cellSpans[A * 2] ?? -1
+	const rEnd = cellSpans[A * 2 + 1] ?? 0
+	const at = rStart < 0 ? undefined : cellRefAt(bytes, rStart, rEnd, cellSpans, A)
 	let formula: DecodedFormula | null = null
 	let value: string | undefined
 	let inline: string | undefined
@@ -220,8 +357,6 @@ function decodeCell(document: XmlDocument, node: number, base: number, row: numb
 	let valueSpan: [number, number] | null = null
 	let inlineSpan: [number, number] | null = null
 	const children: number[] = []
-
-	if (reference !== undefined) document.findAttribute(node, "r", rSpan)
 
 	for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
 		const local = document.localName(child)
@@ -284,14 +419,14 @@ function decodeCell(document: XmlDocument, node: number, base: number, row: numb
 		start: base + document.start(node),
 		end: base + document.end(node),
 		col: at === undefined ? implied : row >= 0 && at.row !== row ? -1 : at.col,
-		r: reference === undefined ? null : [base + (rSpan[0] ?? 0), base + (rSpan[1] ?? 0)],
-		style: number(values.get("s"), 0),
+		r: rStart < 0 ? null : [base + rStart, base + rEnd],
+		style,
 		kind,
 		number: numeric,
 		text,
 		formula,
-		cm: number(values.get("cm"), -1),
-		vm: values.has("vm"),
+		cm,
+		vm,
 		kept,
 		children,
 		formulaSpan,
@@ -313,18 +448,21 @@ export function decodeRow(bytes: Uint8Array, start: number, end: number): Decode
 
 // A <row> element of a parsed document; `start` is the offset of the document's bytes in the part.
 export function decodeRowElement(document: XmlDocument, root: number, start: number, end: number, tag: ScannedTag): DecodedRow {
-	const { values, kept } = attributes(document, root, start, ROW_ATTRIBUTES)
-	const rowNumber = number(values.get("r"), 0)
+	const kept = knownAttributes(document, root, start, ROW_ATTRIBUTES, rowSpans)
+
+	rowBytes = document.bytes
+
+	const rowNumber = number(rowValue("r"), 0)
 	const row = rowNumber >= 1 ? rowNumber - 1 : -1
-	const outline = number(values.get("outlineLevel"), 0)
+	const outline = number(rowValue("outlineLevel"), 0)
 	let flags = (Math.max(0, Math.min(7, outline)) << RowFlag.OUTLINE_SHIFT) & RowFlag.OUTLINE_MASK
 
-	if (readBoolean(values.get("hidden"), false)) flags |= RowFlag.HIDDEN
-	if (readBoolean(values.get("customHeight"), false)) flags |= RowFlag.CUSTOM_HEIGHT
-	if (readBoolean(values.get("customFormat"), false)) flags |= RowFlag.CUSTOM_FORMAT
-	if (readBoolean(values.get("collapsed"), false)) flags |= RowFlag.COLLAPSED
-	if (readBoolean(values.get("thickTop"), false)) flags |= RowFlag.THICK_TOP
-	if (readBoolean(values.get("thickBot"), false)) flags |= RowFlag.THICK_BOTTOM
+	if (readBoolean(rowValue("hidden"), false)) flags |= RowFlag.HIDDEN
+	if (readBoolean(rowValue("customHeight"), false)) flags |= RowFlag.CUSTOM_HEIGHT
+	if (readBoolean(rowValue("customFormat"), false)) flags |= RowFlag.CUSTOM_FORMAT
+	if (readBoolean(rowValue("collapsed"), false)) flags |= RowFlag.COLLAPSED
+	if (readBoolean(rowValue("thickTop"), false)) flags |= RowFlag.THICK_TOP
+	if (readBoolean(rowValue("thickBot"), false)) flags |= RowFlag.THICK_BOTTOM
 
 	const cells: DecodedCell[] = []
 	const children: number[] = []
@@ -348,10 +486,10 @@ export function decodeRowElement(document: XmlDocument, root: number, start: num
 		end,
 		tag,
 		row,
-		height: number(values.get("ht"), Number.NaN),
-		style: number(values.get("s"), -1),
+		height: number(rowValue("ht"), Number.NaN),
+		style: number(rowValue("s"), -1),
 		flags,
-		spans: values.get("spans"),
+		spans: rowValue("spans"),
 		cells,
 		kept,
 		children
@@ -966,7 +1104,10 @@ const FORMULA_KINDS: Readonly<Record<string, number>> = {
 	normal: FormulaKind.NORMAL
 }
 
-// A dirty row whose properties and cells (styles, values, formula kinds and flags) are its source's: its source
+const TAG_EDITS: [number, number, string][] = []
+
+// A dirty row whose properties and cells (values, formula kinds and flags) are its source's, its cells' styles
+// spliced where a format edit changed them: its source
 // bytes with r renumbered, each moved cell's r renamed, each removed cell cut out, spans widened and each changed
 // formula's text and range spliced in, read without a parse, as a structure edit leaves most rows. Cells are
 // matched to the store's by their origins. False for anything else (the row is then written by writeRow).
@@ -1067,6 +1208,10 @@ function quickRow(
 		let rFrom = -1
 		let rTo = -1
 		let cellStyle = 0
+		// The s attribute: where its name starts and its value's span (-1 when absent).
+		let sName = -1
+		let sFrom = -1
+		let sTo = -1
 		let type = "n"
 		let cm = -1
 
@@ -1082,6 +1227,9 @@ function quickRow(
 				rTo = valueTo
 			} else if (nameTo - nameFrom === 1 && first === 115) {
 				cellStyle = uintAt(bytes, valueFrom, valueTo)
+				sName = nameFrom
+				sFrom = valueFrom
+				sTo = valueTo
 			} else if (nameTo - nameFrom === 1 && first === 116) {
 				type = decodeCharacterData(bytes, valueFrom, valueTo, true)
 			} else if (nameTo - nameFrom === 2 && first === 99 && bytes[nameFrom + 1] === 109) {
@@ -1159,22 +1307,39 @@ function quickRow(
 		if (origin !== ordinal) return false
 
 		const col = block.cols[slot] ?? -1
+		const style = block.styles[slot] ?? 0
+		// The start tag's edits, put in order before those inside the cell (edits stay ascending).
+		const tagEdits = TAG_EDITS
 
-		if (cellStyle !== (block.styles[slot] ?? 0)) return false
+		tagEdits.length = 0
 
-		// The cell's r names the new row and column (its edit comes before those inside the cell: edits stay
-		// ascending).
+		// The cell's r names the new row and column.
 		if (rFrom < 0) {
-			edits.push([cell.nameEnd, cell.nameEnd, ` r="${cellRef(row, col)}"`])
+			tagEdits.push([cell.nameEnd, cell.nameEnd, ` r="${cellRef(row, col)}"`])
 		} else if (sourceCol !== col) {
-			edits.push([rFrom, rTo, cellRef(row, col)])
+			tagEdits.push([rFrom, rTo, cellRef(row, col)])
 		} else if (sourceAt !== row) {
 			let digits = rFrom
 
 			while (digits < rTo && ((bytes[digits] ?? 0) > 57 || bytes[digits] === 36)) digits++
 
-			edits.push([digits, rTo, rowText])
+			tagEdits.push([digits, rTo, rowText])
 		}
+
+		// A format edit's new s: its value replaced, or the attribute added or (back to the default) taken out with
+		// the space before it.
+		if (cellStyle !== style) {
+			// Added after r, where Excel writes it.
+			const after = rFrom < 0 ? cell.nameEnd : rTo + 1
+
+			if (sFrom < 0) tagEdits.push([after, after, ` s="${String(style)}"`])
+			else if (style === 0) tagEdits.push([sName - 1, sTo + 1, ""])
+			else tagEdits.push([sFrom, sTo, String(style)])
+		}
+
+		if (tagEdits.length > 1) tagEdits.sort((a, z) => a[0] - z[0])
+
+		for (const edit of tagEdits) edits.push(edit)
 
 		// The value as the store holds it.
 		const kind = block.kinds[slot] ?? 0
@@ -1538,7 +1703,18 @@ export function* writeSheetDataSteps(
 }
 
 // The used range of the store (cells only), or null when it has none.
+// The range of the cells in rows edits changed (rewritten, added or moved): what a dimension must be widened to cover.
+// Rows as the source has them keep the source's dimension, even one too small for them, so an undone edit saves the
+// source again.
+export function editedRange(sheet: XlsxSheetModel): SheetRange | null {
+	return cellsRange(sheet, true)
+}
+
 export function usedRange(sheet: XlsxSheetModel): SheetRange | null {
+	return cellsRange(sheet, false)
+}
+
+function cellsRange(sheet: XlsxSheetModel, editedOnly: boolean): SheetRange | null {
 	let startRow = -1
 	let endRow = -1
 	let startCol = Number.POSITIVE_INFINITY
@@ -1552,6 +1728,14 @@ export function usedRange(sheet: XlsxSheetModel): SheetRange | null {
 			if (from === to) continue
 
 			const row = block.firstRow + (block.rows[index] ?? 0)
+
+			if (
+				editedOnly &&
+				((block.rowFlags[index] ?? 0) & (RowFlag.DIRTY | RowFlag.NEW)) === 0 &&
+				block.sourceFirstRow >= 0 &&
+				block.sourceFirstRow + (block.rows[index] ?? 0) === row
+			)
+				continue
 
 			if (startRow < 0) startRow = row
 

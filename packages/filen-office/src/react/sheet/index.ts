@@ -19,7 +19,18 @@ export {
 	type SheetGridSizes,
 	type SheetGridSnapshot
 } from "./model"
-export { keyMove, stepFrom, type GridKey, type GridKeyMove } from "./navigation"
+export {
+	APP_SHORTCUTS,
+	SHEET_SHORTCUTS,
+	isMacPlatform,
+	shortcutOf,
+	type KeyChord,
+	type SheetShortcut,
+	type ShortcutEntry,
+	type ShortcutKey
+} from "./keys"
+export { keyMove, stepFrom, visualKey, type GridKey, type GridKeyMove } from "./navigation"
+export { roundedGeneral } from "./paint/cells"
 export { GridRenderer, type GridElements, type GridHit } from "./renderer"
 export { MAX_SCROLL_PX, domExtent, toDom, toVirtual } from "./scroll"
 export {
@@ -32,6 +43,7 @@ export {
 	singleCell,
 	spanOf,
 	toSelectionState,
+	wholeAxis,
 	type GridPoint,
 	type GridSelection
 } from "./selection"

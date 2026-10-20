@@ -344,8 +344,9 @@ describe("worksheet constructs", () => {
 
 		expect(sheet).toContain('<scenarios current="0" sqref="B3:B4"><scenario name="s" count="1"><inputCells r="B3" val="1"/>')
 		expect(sheet).toContain('<dataRef ref="A3:A6" sheet="Data"/>')
+		// The frozen row (row 2, counted from the view's topLeftCell) moves down with the rows inserted above it.
 		expect(sheet).toContain(
-			'<customSheetView guid="{1}" topLeftCell="A3"><pane ySplit="2" topLeftCell="A4" state="frozen"/><selection activeCell="A5" sqref="A5"/>'
+			'<customSheetView guid="{1}" topLeftCell="A3"><pane ySplit="1" topLeftCell="A4" state="frozen"/><selection activeCell="A5" sqref="A5"/>'
 		)
 		expect(sheet).toContain('<brk id="4" max="16383" man="1"/></rowBreaks><autoFilter ref="A2:B6"/>')
 		expect(sheet).toContain('<cellWatch r="A4"/>')

@@ -93,6 +93,14 @@ export class FormulaTable implements XlsxFormulaTable {
 		this.write(id, formula)
 	}
 
+	// Only a formula's text: no object per formula (structure edits rewrite many).
+	setText(id: number, text: string): void {
+		if (id < 0 || id >= this.count) throw new RangeError(`No formula ${id}`)
+
+		this.chars += text.length - (this.texts[id]?.length ?? 0)
+		this.texts[id] = text
+	}
+
 	// The reader's add: no object per formula.
 	addRead(
 		kind: FormulaKind,

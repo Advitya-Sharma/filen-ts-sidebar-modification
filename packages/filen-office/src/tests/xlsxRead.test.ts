@@ -316,6 +316,8 @@ describe("xlsx reader: sheet sections", () => {
 		expect(sheet.tabColor).toEqual({ theme: 4, tint: 0.4 })
 		expect(sheet.view).toEqual({
 			frozen: { rows: 2, cols: 1, topLeftRow: 2, topLeftCol: 1 },
+			topRow: 0,
+			leftCol: 0,
 			activeRow: 3,
 			activeCol: 2,
 			selection: [
@@ -464,12 +466,18 @@ describe("xlsx reader: workbook", () => {
 
 		expect(font).toBe(2)
 		expect(styles.appendFont({ bold: true, name: "Arial" })).toBe(2)
-		// An append equal to a source record is still appended: source records are never reused.
-		expect(styles.appendFill({ kind: "pattern", pattern: "none" })).toBe(3)
+		// An append equal to a source record finds it, so a change back gives the format the file had (a border's
+		// edges without a line count as none); `copy` appends a cell format of its own all the same.
+		expect(styles.appendFill({ kind: "pattern", pattern: "none" })).toBe(0)
 		expect(styles.appendXf({ numFmtId: 0, fontId: 2, fillId: 0, borderId: 0, xfId: 0, flags: XfApply.FONT })).toBe(3)
 		expect(styles.appendXf({ fontId: 2, numFmtId: 0, fillId: 0, borderId: 0, xfId: 0, flags: XfApply.FONT })).toBe(3)
+		expect(styles.appendXf({ ...(styles.cellXfs[0] ?? { numFmtId: 0, fontId: 0, fillId: 0, borderId: 0, xfId: 0, flags: 0 }) })).toBe(0)
+		expect(
+			styles.appendXf({ ...(styles.cellXfs[0] ?? { numFmtId: 0, fontId: 0, fillId: 0, borderId: 0, xfId: 0, flags: 0 }) }, true)
+		).toBe(4)
 		expect(styles.appendDxf({ font: { italic: true } })).toBe(1)
-		expect(styles.appendBorder({})).toBe(2)
+		expect(styles.appendBorder({ top: {} })).toBe(0)
+		expect(styles.appendBorder({ top: { style: "thin" } })).toBe(2)
 	})
 
 	it("reads a record wrapped in mc:AlternateContent as one record, its fallback", async () => {
