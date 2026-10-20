@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { PagedEditor } from "@filen/office/core/docx/paged"
 import type { FontExtents, TextMeasurer } from "@filen/office/core/text"
 import type { DocxEditingHost } from "@filen/office/dom/docx/editing"
@@ -294,9 +294,18 @@ describe("DocxEditView routing", () => {
 		expect(hooks.paste).not.toHaveBeenCalled()
 		expect(hooks.drop).not.toHaveBeenCalled()
 
-		// Elsewhere they are the editor's.
-		fireEvent.paste(screen.getByRole("textbox", { name: "report.docx" }))
+		// Elsewhere they are the editor's. A browser's paste carries the clipboard: one without it sends ProseMirror to
+		// its legacy capture, a timer that would outlive the test.
+		const timers = vi.spyOn(globalThis, "setTimeout")
+		const paste = createEvent.paste(screen.getByRole("textbox", { name: "report.docx" }), {
+			clipboardData: { types: ["text/plain"], getData: (type: string) => (type === "text/plain" ? "pasted" : "") }
+		})
+
+		fireEvent(screen.getByRole("textbox", { name: "report.docx" }), paste)
 		expect(hooks.paste).toHaveBeenCalledTimes(1)
+		expect(paste.defaultPrevented).toBe(true)
+		expect(timers.mock.calls.filter(call => call[1] === 50)).toEqual([])
+		timers.mockRestore()
 		fireEvent.contextMenu(screen.getByRole("textbox", { name: "report.docx" }))
 		expect(await screen.findByRole("menuitem", { name: "Select all" })).toBeTruthy()
 	})
