@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest"
+import { readdirSync } from "node:fs"
+import { join } from "node:path"
 import { transformFileSync } from "@babel/core"
 
 // The React Compiler silently skips a hook or component it can't compile, and lint doesn't notice.
@@ -616,5 +618,49 @@ describe("Videos browsing compiles", () => {
 				expect(code.includes(call), `${file} calls ${call}`).toBe(false)
 			}
 		}
+	})
+})
+
+// The spreadsheet grid draws its cells on canvases outside React, and the shell around it re-renders on every
+// selection move and keystroke: each component and hook of the grid and the shell must compile, so such a render
+// reaches only the editor, the accessible active cell, the live region and the controls whose props changed.
+const SHEET_DIRECTORIES = ["../filen-office/src/react/sheet", "src/features/spreadsheet/next"]
+
+function sourceFiles(directory: string): string[] {
+	return readdirSync(directory, { recursive: true, encoding: "utf8" })
+		.filter(name => /\.tsx?$/.test(name) && !name.endsWith(".d.ts"))
+		.map(name => join(directory, name))
+		.sort()
+}
+
+describe("React Compiler coverage of the spreadsheet grid and its shell", () => {
+	it("bails out of no function in any of their files", { timeout: 60_000 }, () => {
+		for (const file of SHEET_DIRECTORIES.flatMap(sourceFiles)) {
+			expect(
+				compile(file).filter(event => event.kind !== "CompileSuccess"),
+				file
+			).toEqual([])
+		}
+	})
+
+	it.each([
+		["../filen-office/src/react/sheet/SheetGrid.tsx", "SheetGrid"],
+		["../filen-office/src/react/sheet/SheetGrid.tsx", "CellEditor"],
+		["../filen-office/src/react/sheet/useSheetGrid.ts", "useSheetGrid"],
+		["src/features/spreadsheet/next/sheetNextViewer.tsx", "SheetNextViewer"],
+		["src/features/spreadsheet/next/components/sheetBody.tsx", "SheetBody"],
+		["src/features/spreadsheet/next/components/sheetFormulaBar.tsx", "SheetFormulaBar"],
+		["src/features/spreadsheet/next/components/sheetFormulaBar.tsx", "NameBox"],
+		["src/features/spreadsheet/next/components/sheetGridMenu.tsx", "SheetGridMenu"],
+		["src/features/spreadsheet/next/components/sheetGridMenu.tsx", "ResetItems"],
+		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "SheetToolbar"],
+		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "useActiveStyle"],
+		["src/features/spreadsheet/next/hooks/useSheetSession.ts", "useSheetSession"],
+		["src/features/spreadsheet/next/clipboard/useSheetClipboard.ts", "useSheetClipboard"]
+	])("compiles %s's %s", (file, fnName) => {
+		const events = compile(file)
+
+		expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
+		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(true)
 	})
 })

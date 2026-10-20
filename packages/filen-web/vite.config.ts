@@ -159,6 +159,21 @@ function docxEditingAlias(mode: string): { find: RegExp; replacement: string }[]
 			]
 }
 
+// The spreadsheet viewer on the office engine (src/features/spreadsheet/next/sheetNextFlag.ts) stays out of builds
+// without VITE_SHEET_NEXT=1, as DOCX editing does: the switch between the viewers resolves to the current one, and
+// the new viewer's strings (locales/en/previewSheet/*) to empty catalogs.
+function sheetNextAlias(mode: string): { find: RegExp; replacement: string }[] {
+	return loadEnv(mode, process.cwd(), "VITE_SHEET_NEXT")["VITE_SHEET_NEXT"] === "1"
+		? []
+		: [
+				{
+					find: /^@\/features\/spreadsheet\/next\/spreadsheetView$/,
+					replacement: "/src/features/spreadsheet/next/spreadsheetView.off.ts"
+				},
+				{ find: /^@\/locales\/en\/previewSheet\/[A-Za-z]+$/, replacement: "/src/locales/en/previewSheet/off.ts" }
+			]
+}
+
 const contentSecurityPolicy = (connectExtra: readonly string[]) =>
 	[
 		"default-src 'none'",
@@ -229,7 +244,7 @@ export default defineConfig(({ mode }) => ({
 	// where pnpm links their own (dev) copies: @filen/office's react is not the app's. One copy of each
 	// singleton, resolved from this package; a package name covers its subpaths (react/jsx-runtime, and
 	// react/compiler-runtime that the React Compiler injects into those sources too).
-	resolve: { alias: [...docxEditingAlias(mode), { find: "@", replacement: "/src" }], dedupe: SINGLETONS },
+	resolve: { alias: [...docxEditingAlias(mode), ...sheetNextAlias(mode), { find: "@", replacement: "/src" }], dedupe: SINGLETONS },
 	// @sqlite.org/sqlite-wasm's own Vite guidance (README "Usage with vite"): it self-locates
 	// sqlite3.wasm and the OPFS async proxy via `new URL(..., import.meta.url)` (verified against
 	// the installed 3.53.0-build1 package) — esbuild's dev-time dep pre-bundling would rewrite/copy

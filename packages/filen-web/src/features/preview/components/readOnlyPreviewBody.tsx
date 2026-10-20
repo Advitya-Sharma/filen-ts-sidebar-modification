@@ -7,7 +7,7 @@ import { DocxViewer } from "@/features/preview/components/docxViewer"
 import { MarkdownViewer } from "@/features/preview/components/markdownViewer"
 import { PdfViewer } from "@/features/preview/components/pdfViewer"
 import { TextViewer } from "@/features/preview/components/textViewer"
-import { SpreadsheetViewer } from "@/features/spreadsheet/components/spreadsheetViewer"
+import { SpreadsheetView } from "@/features/spreadsheet/next/spreadsheetView"
 
 // The viewer for a file shown read-only outside the preview overlay's own body: a public link's file and an
 // archive's entry, each fed a fabricated DriveItem under the providers that say where its bytes come from.
@@ -47,7 +47,7 @@ export function ReadOnlyPreviewBody({ item, category, alt }: { item: DriveItem; 
 			)
 		case "spreadsheet":
 			return (
-				<SpreadsheetViewer
+				<SpreadsheetView
 					item={item}
 					documentKey={item.data.uuid}
 					neverEditable

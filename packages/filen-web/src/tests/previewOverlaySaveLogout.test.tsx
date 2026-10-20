@@ -84,6 +84,8 @@ vi.mock("@/features/preview/components/docxViewer", () => ({
 		return null
 	}
 }))
+// The overlay over the current viewer's double, whichever viewer the build carries.
+vi.mock("@/features/spreadsheet/next/sheetNextFlag", () => ({ SHEET_NEXT: false }))
 vi.mock("@/features/spreadsheet/components/spreadsheetViewer", () => ({
 	SpreadsheetViewer: ({ saveRef, onDirtyChange }: { saveRef: { current: unknown }; onDirtyChange: (dirty: boolean) => void }) => {
 		useEffect(() => {
