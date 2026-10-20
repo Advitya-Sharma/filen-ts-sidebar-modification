@@ -1,8 +1,14 @@
 import { dateToSerial, formatValue, type Cell, type CellStyle, type CellValue, type Sheet, type Workbook } from "hucre"
-import { cellKey, type CellView, type SheetView, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
-import { shownFormula } from "@/features/spreadsheet/lib/formulaRefs"
+import {
+	cellKey,
+	colWidthToPx,
+	rowHeightToPx,
+	shownFormula,
+	type CellView,
+	type SheetView,
+	type SpreadsheetDoc
+} from "@filen/office/core/sheet"
 import { StyleTable, styleView } from "@/features/spreadsheet/lib/styleTable"
-import { colWidthToPx, rowHeightToPx } from "@/features/spreadsheet/lib/sizes.logic"
 
 const DEFAULT_FONT_SIZE = 11
 

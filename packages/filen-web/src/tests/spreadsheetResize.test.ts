@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { openXlsx, writeXlsx } from "hucre/xlsx"
-import { applyEditResult, gridDoc } from "@/features/spreadsheet/lib/cellStore.logic"
-import { CsvDocument } from "@/features/spreadsheet/lib/csvDocument"
-import { parseCsvFile } from "@/features/spreadsheet/lib/csvView"
-import { MAX_COL_WIDTH, MAX_RESIZE_TARGETS } from "@/features/spreadsheet/lib/sizes.logic"
+import { CsvDocument, MAX_COL_WIDTH, MAX_RESIZE_TARGETS, applyEditResult, gridDoc, parseCsvFile } from "@filen/office/core/sheet"
 import type { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import { proven } from "@/tests/spreadsheetProven"
 

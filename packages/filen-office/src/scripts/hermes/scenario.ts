@@ -9,6 +9,7 @@ import { inThreadEditingHost } from "../../dom/docx/editing"
 import type { DocxEngineServices } from "../../dom/docx/engine"
 import { inThreadDocxHost, macrotaskYield } from "../../dom/docx/host"
 import { FIND_INTS, type DocxEvent, type DocxPageData } from "../../dom/docx/protocol"
+import { sheetProbes } from "./sheetScenario"
 
 // The core's open → layout → edit → save path, the way the mobile DOM component runs it (in-thread host, no
 // Worker, MessageChannel or OffscreenCanvas), written so the same code runs under Node and Hermes and their
@@ -369,6 +370,7 @@ function probes(): ProbeResult[] {
 
 	probe("forms.legacyText maxLength", () => legacyText(TEXT_FIELD, "e\u0301a\u{1F44D}\u{1F3FD}\u{1F1E9}\u{1F1EA}x"))
 	probe("forms.legacyText title case", () => legacyText({ ...TEXT_FIELD, maxLength: 0, format: "Title case" }, "\u00E9lan vital \u00DFx"))
+	sheetProbes(probe)
 
 	return out
 }

@@ -1,6 +1,6 @@
-import type { CellEntry } from "@/features/spreadsheet/lib/gridEdits.logic"
-import type { CellRange, CellStyleView, CellView, HorizontalAlign, SheetView } from "@/features/spreadsheet/lib/model"
-import type { SizeAxis, SizeEntry } from "@/features/spreadsheet/lib/sizes.logic"
+import type { CellEntry } from "../grid/gridEdits"
+import type { CellRange, CellStyleView, CellView, HorizontalAlign, SheetView } from "./model"
+import type { SizeAxis, SizeEntry } from "../sizes/sizes"
 
 // What the grid asks the worker to change, and what comes back. Sheet indices are the grid's (worksheets
 // only, in order).
@@ -46,7 +46,7 @@ export type EditOp =
 	| { type: "renameSheet"; sheet: number; name: string }
 	| { type: "format"; sheet: number; range: CellRange; patch: FormatPatch }
 	// Column widths or row heights, in pixels (null: back to the default). Editable workbooks only: every
-	// other view keeps sizes beside the file (lib/sizeLayer.ts).
+	// other view keeps sizes beside the file (sizes/sizeLayer.ts).
 	| { type: "resize"; sheet: number; axis: SizeAxis; sizes: readonly SizeEntry[] }
 
 export interface DocState {

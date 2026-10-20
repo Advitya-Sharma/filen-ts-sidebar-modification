@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest"
 import { openXlsx, writeXlsx } from "hucre/xlsx"
-import { csvDoc, parseCsvFile, serializeCsv } from "@/features/spreadsheet/lib/csvView"
-import { cellKey } from "@/features/spreadsheet/lib/model"
+import { cellKey, csvDoc, parseCsvFile, serializeCsv } from "@filen/office/core/sheet"
 import { displayText, workbookDoc, WorkbookViews } from "@/features/spreadsheet/lib/xlsxView"
 import { cssColor } from "@/features/spreadsheet/lib/styleTable"
 import { standardWindows1252Decoding } from "@/tests/whatwgWindows1252"

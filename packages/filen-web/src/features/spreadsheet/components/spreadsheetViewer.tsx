@@ -21,31 +21,47 @@ import {
 	type SpreadsheetSnapshot
 } from "@/features/spreadsheet/hooks/useSpreadsheetEdits"
 import {
+	CellStore,
+	MAX_EDIT_CELLS,
+	TOGGLE_FORMATS,
+	cellKey,
+	clearedCells,
+	endedCut,
+	gridMove,
+	isTypedCharacter,
+	layerKeyFor,
+	layeredSheet,
+	malformedFormula,
+	newSheetName,
+	pastedCells,
 	rangeArea,
 	rangeCols,
 	rangeName,
 	rangeRows,
+	rangeToClip,
+	rangeToTsv,
+	resetTargets,
 	selectionRange,
-	type CellPosition,
-	type Selection
-} from "@/features/spreadsheet/lib/cellRef.logic"
-import { CellStore, type GridDoc, type GridSheet } from "@/features/spreadsheet/lib/cellStore.logic"
-import {
-	MAX_EDIT_CELLS,
-	TOGGLE_FORMATS,
+	sheetBounds,
+	sheetCols,
+	sheetRows,
+	sizesInFile,
+	snapToMerge,
+	takesText,
 	toggledPatch,
+	type CellPosition,
+	type CellRange,
 	type EditOp,
 	type EditResult,
-	type FormatPatch
-} from "@/features/spreadsheet/lib/edits"
-import { clearedCells, newSheetName } from "@/features/spreadsheet/lib/gridEdits.logic"
-import { malformedFormula, takesText } from "@/features/spreadsheet/lib/cellInput.logic"
-import { cellKey, type CellRange } from "@/features/spreadsheet/lib/model"
-import { gridMove, isTypedCharacter, sheetBounds, sheetCols, sheetRows, snapToMerge } from "@/features/spreadsheet/lib/navigation.logic"
-import { layeredSheet, type LayerKey } from "@/features/spreadsheet/lib/sizeLayer"
-import { layerKeyFor, sizesInFile } from "@/features/spreadsheet/lib/sizeRouting.logic"
-import { resetTargets, type SizeAxis, type SizeEntry } from "@/features/spreadsheet/lib/sizes.logic"
-import { endedCut, pastedCells, rangeToClip, rangeToTsv, type GridClip } from "@/features/spreadsheet/lib/tsv.logic"
+	type FormatPatch,
+	type GridClip,
+	type GridDoc,
+	type GridSheet,
+	type LayerKey,
+	type Selection,
+	type SizeAxis,
+	type SizeEntry
+} from "@filen/office/core/sheet"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 import { isImeKeydown } from "@/lib/ime"
 import { log } from "@/lib/log"

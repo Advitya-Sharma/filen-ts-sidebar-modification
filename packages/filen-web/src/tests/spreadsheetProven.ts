@@ -1,8 +1,7 @@
 import { readFileSync } from "node:fs"
 import { openXlsx, writeXlsx, type RoundtripWorkbook } from "hucre/xlsx"
 import type { Cell, CellValue, Workbook } from "hucre"
-import type { CellPatch, EditResult } from "@/features/spreadsheet/lib/edits"
-import { cellKey, type CellView } from "@/features/spreadsheet/lib/model"
+import { cellKey, type CellPatch, type CellView, type EditResult } from "@filen/office/core/sheet"
 import { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 
 const FIXTURES = new URL("./fixtures/spreadsheet/", import.meta.url)

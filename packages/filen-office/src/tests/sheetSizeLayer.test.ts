@@ -1,20 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
-
-const { kvStore } = vi.hoisted(() => ({ kvStore: new Map<string, unknown>() }))
-
-vi.mock("@/lib/storage/adapter", () => ({
-	kvGetJson: (key: string) => Promise.resolve(kvStore.get(key) ?? null),
-	kvSetJson: (key: string, value: unknown) => {
-		kvStore.set(key, value)
-
-		return Promise.resolve()
-	},
-	kvDelete: (key: string) => {
-		kvStore.delete(key)
-
-		return Promise.resolve()
-	}
-}))
+import { beforeEach, describe, expect, it } from "vitest"
 
 import {
 	EMPTY_LAYER,
@@ -23,8 +7,24 @@ import {
 	layeredSheet,
 	loadLayer,
 	saveLayer,
-	updateLayer
-} from "@/features/spreadsheet/lib/sizeLayer"
+	updateLayer,
+	type SizeLayerStorage
+} from "../core/sheet/index"
+
+const kvStore = new Map<string, unknown>()
+const storage: SizeLayerStorage = {
+	get: key => Promise.resolve(kvStore.get(key) ?? null),
+	set: (key, value) => {
+		kvStore.set(key, value)
+
+		return Promise.resolve()
+	},
+	delete: key => {
+		kvStore.delete(key)
+
+		return Promise.resolve()
+	}
+}
 
 beforeEach(() => {
 	kvStore.clear()
@@ -46,9 +46,9 @@ describe("persistence", () => {
 	it("round-trips a layer under the file's stable id", async () => {
 		const layer = updateLayer(updateLayer(EMPTY_LAYER, 0, "cols", [[1, 99]]), 2, "rows", [[4, 40]])
 
-		await saveLayer({ kind: "stable", id: "s1" }, layer)
+		await saveLayer(storage, { kind: "stable", id: "s1" }, layer)
 
-		const loaded = await loadLayer({ kind: "stable", id: "s1" })
+		const loaded = await loadLayer(storage, { kind: "stable", id: "s1" })
 
 		expect(loaded.get(0)?.cols.get(1)).toBe(99)
 		expect(loaded.get(2)?.rows.get(4)).toBe(40)
@@ -57,21 +57,21 @@ describe("persistence", () => {
 	it("reads a corrupt entry as empty", async () => {
 		kvStore.set("spreadsheet.sizes.v1.bad", { sheets: 42 })
 
-		expect((await loadLayer({ kind: "stable", id: "bad" })).size).toBe(0)
+		expect((await loadLayer(storage, { kind: "stable", id: "bad" })).size).toBe(0)
 	})
 
 	it("keeps session layers in memory only", async () => {
-		await saveLayer({ kind: "session", id: "doc-1" }, updateLayer(EMPTY_LAYER, 0, "cols", [[0, 70]]))
+		await saveLayer(storage, { kind: "session", id: "doc-1" }, updateLayer(EMPTY_LAYER, 0, "cols", [[0, 70]]))
 
 		expect(kvStore.size).toBe(0)
-		expect((await loadLayer({ kind: "session", id: "doc-1" })).get(0)?.cols.get(0)).toBe(70)
+		expect((await loadLayer(storage, { kind: "session", id: "doc-1" })).get(0)?.cols.get(0)).toBe(70)
 	})
 
 	it("forgets the oldest file past the limit", async () => {
 		const layer = updateLayer(EMPTY_LAYER, 0, "cols", [[0, 70]])
 
 		for (let index = 0; index <= SIZE_LAYER_LIMIT; index++) {
-			await saveLayer({ kind: "stable", id: `f${String(index)}` }, layer)
+			await saveLayer(storage, { kind: "stable", id: `f${String(index)}` }, layer)
 		}
 
 		expect(kvStore.has("spreadsheet.sizes.v1.f0")).toBe(false)
@@ -80,8 +80,8 @@ describe("persistence", () => {
 	})
 
 	it("deletes a file's entry once its layer is empty", async () => {
-		await saveLayer({ kind: "stable", id: "s2" }, updateLayer(EMPTY_LAYER, 0, "cols", [[0, 70]]))
-		await saveLayer({ kind: "stable", id: "s2" }, EMPTY_LAYER)
+		await saveLayer(storage, { kind: "stable", id: "s2" }, updateLayer(EMPTY_LAYER, 0, "cols", [[0, 70]]))
+		await saveLayer(storage, { kind: "stable", id: "s2" }, EMPTY_LAYER)
 
 		expect(kvStore.has("spreadsheet.sizes.v1.s2")).toBe(false)
 		expect(kvStore.get("spreadsheet.sizes.index.v1")).toEqual([])

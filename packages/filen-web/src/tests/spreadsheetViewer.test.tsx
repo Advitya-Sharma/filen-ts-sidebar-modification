@@ -4,8 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createElement, createRef } from "react"
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { DriveItem } from "@/features/drive/lib/item"
-import type { EditResult } from "@/features/spreadsheet/lib/edits"
-import { cellKey, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
+import { cellKey, type EditResult, type SpreadsheetDoc } from "@filen/office/core/sheet"
 import { mockSheetView } from "@/tests/mockSheetView"
 
 const BYTES = new Uint8Array([1, 2, 3])

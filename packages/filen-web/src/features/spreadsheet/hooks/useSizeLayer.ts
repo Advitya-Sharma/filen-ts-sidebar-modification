@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from "react"
+import { type } from "arktype"
 import {
 	EMPTY_LAYER,
 	followShift,
 	loadLayer,
 	saveLayer,
 	updateLayer,
+	type AxisEdit,
 	type LayerKey,
+	type SizeAxis,
+	type SizeEntry,
 	type SizeLayer,
+	type SizeLayerStorage,
 	type StashedSizes
-} from "@/features/spreadsheet/lib/sizeLayer"
-import type { AxisEdit } from "@/features/spreadsheet/lib/edits"
-import type { SizeAxis, SizeEntry } from "@/features/spreadsheet/lib/sizes.logic"
+} from "@filen/office/core/sheet"
+import { kvDelete, kvGetJson, kvSetJson } from "@/lib/storage/adapter"
 import { log } from "@/lib/log"
 
 export interface SizeLayerHandle {
@@ -20,8 +24,16 @@ export interface SizeLayerHandle {
 	follow: (sheet: number, shift: AxisEdit & { revert: boolean }) => void
 }
 
+// The layers live in the app's key-value store; the layer module checks what it reads back.
+const anyJson = type("unknown")
+const storage: SizeLayerStorage = {
+	get: key => kvGetJson(key, anyJson),
+	set: kvSetJson,
+	delete: kvDelete
+}
+
 function persist(key: LayerKey, layer: SizeLayer): void {
-	saveLayer(key, layer).catch((e: unknown) => {
+	saveLayer(storage, key, layer).catch((e: unknown) => {
 		log.error("spreadsheet", "keeping column and row sizes failed", e)
 	})
 }
@@ -51,7 +63,7 @@ export function useSizeLayer(key: LayerKey): SizeLayerHandle {
 		current.current = { layer: EMPTY_LAYER, stash: [] }
 		pending.current = []
 
-		loadLayer({ kind, id }).then(
+		loadLayer(storage, { kind, id }).then(
 			loaded => {
 				if (!live) {
 					return

@@ -1,13 +1,14 @@
-import type { CellValue } from "hucre"
-import { cellKey, type CellStyleView, type CellView, type SheetView } from "@/features/spreadsheet/lib/model"
-import { wellFormedFormula } from "@/features/spreadsheet/lib/formulaRefs"
+import { cellKey, type CellStyleView, type CellView, type SheetView } from "../model/model"
+import { wellFormedFormula } from "../refs/formulaRefs"
 
 // What a typed entry becomes, the way spreadsheets read it: a leading "=" starts a formula, a leading "'"
 // keeps the rest as text whatever it looks like, and otherwise numbers (with thousands separators, a
 // percent sign, an exponent), TRUE/FALSE and ISO dates are recognised, with the format they imply for a
 // cell that has none. Anything else is text, as typed.
 export type ParsedInput =
-	{ type: "empty" } | { type: "formula"; formula: string } | { type: "value"; value: Exclude<CellValue, null>; impliedFormat?: string }
+	| { type: "empty" }
+	| { type: "formula"; formula: string }
+	| { type: "value"; value: string | number | boolean | Date; impliedFormat?: string }
 
 const NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i
 const GROUPED = /^[-+]?\d{1,3}(,\d{3})+(\.\d+)?$/

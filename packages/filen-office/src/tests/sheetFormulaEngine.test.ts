@@ -1,0 +1,87 @@
+import { describe, expect, it } from "vitest"
+import { CYCLE, FormulaEngine, UNPARSEABLE, type EngineSheet } from "../core/sheet/formula/index"
+
+function sheet(name: string, rows: EngineSheet["rows"], formulas: EngineSheet["formulas"] = []): EngineSheet {
+	return { name, rows, formulas }
+}
+
+function values(cells: ReturnType<FormulaEngine["set"]>): string[] {
+	return cells
+		.map(cell => `${String(cell.sheet)}:${String(cell.row)},${String(cell.col)}=${String(cell.value)}${cell.error ? "!" : ""}`)
+		.sort()
+}
+
+describe("FormulaEngine", () => {
+	it("calculates across sheets and names, and reports what an edit changes", () => {
+		const engine = new FormulaEngine(
+			[sheet("Data", [[1, 2, "=A1+B1"]]), sheet("Sum", [["=SUM(Data!A1:C1)*Rate"]])],
+			[{ name: "Rate", expression: "2" }]
+		)
+
+		try {
+			expect(engine.result(0, 0, 2)).toEqual({ value: 3 })
+			expect(engine.result(1, 0, 0)).toEqual({ value: 12 })
+			expect(values(engine.set(0, [{ row: 0, col: 0, content: 10 }]))).toEqual(["0:0,0=10", "0:0,2=12", "1:0,0=48"])
+		} finally {
+			engine.destroy()
+		}
+	})
+
+	it("gives Excel's error texts, and keeps the stored result of a formula it cannot calculate", () => {
+		const engine = new FormulaEngine(
+			[
+				sheet(
+					"S",
+					[["=1/0", "=NOSUCHFUNCTION(1)", "=B1+1", "=D1"]],
+					[
+						{ row: 0, col: 1, content: "=NOSUCHFUNCTION(1)", fallback: 41 },
+						{ row: 0, col: 3, content: "=D1", fallback: 0 }
+					]
+				)
+			],
+			[]
+		)
+
+		try {
+			expect(engine.result(0, 0, 0)).toEqual({ value: "#DIV/0!", error: true })
+			expect(engine.result(0, 0, 1)).toEqual({ value: 41 })
+			expect(engine.result(0, 0, 2)).toEqual({ value: 42 })
+			expect(FormulaEngine.unsupported(CYCLE)).toBe(true)
+			expect(FormulaEngine.unsupported("#NAME?")).toBe(true)
+			expect(FormulaEngine.unsupported("#REF!")).toBe(false)
+			expect(UNPARSEABLE.startsWith("'")).toBe(true)
+		} finally {
+			engine.destroy()
+		}
+	})
+
+	it("moves references with inserted and deleted rows, and follows a renamed sheet", () => {
+		const engine = new FormulaEngine([sheet("A", [[1], [2], ["=SUM(A1:A2)"]]), sheet("B", [["=A!A3*10"]])], [])
+
+		try {
+			engine.insert(0, "rows", 1, 2)
+			expect(engine.result(0, 4, 0)).toEqual({ value: 3 })
+			expect(values(engine.set(0, [{ row: 1, col: 0, content: 5 }]))).toEqual(["0:1,0=5", "0:4,0=8", "1:0,0=80"])
+			engine.remove(0, "rows", 0, 1)
+			expect(engine.result(0, 3, 0)).toEqual({ value: 7 })
+			engine.renameSheet(0, "Renamed")
+			expect(engine.result(1, 0, 0)).toEqual({ value: 70 })
+		} finally {
+			engine.destroy()
+		}
+	})
+
+	it("counts serial dates from 1900 (with its leap day) or from 1904", () => {
+		const e1900 = new FormulaEngine([sheet("S", [["=DATE(1900,3,1)", "=DATE(2024,2,29)"]])], [])
+		const e1904 = new FormulaEngine([sheet("S", [["=DATE(1904,1,2)"]])], [], true)
+
+		try {
+			expect(e1900.result(0, 0, 0)).toEqual({ value: 61 })
+			expect(e1900.result(0, 0, 1)).toEqual({ value: 45351 })
+			expect(e1904.result(0, 0, 0)).toEqual({ value: 1 })
+		} finally {
+			e1900.destroy()
+			e1904.destroy()
+		}
+	})
+})

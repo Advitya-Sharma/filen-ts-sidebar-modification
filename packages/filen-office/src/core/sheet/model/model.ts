@@ -1,6 +1,6 @@
-// What the spreadsheet workers hand the grid: a view of a workbook, never the workbook itself, which stays
-// in its worker (workers/spreadsheet.worker.ts, or workers/csv.worker.ts for text) so a save can write it
-// back with everything the view leaves out. Plain, structured-cloneable data only.
+// What a spreadsheet worker hands the grid: a view of a workbook, never the workbook itself, which stays
+// in its worker (the app's workbook worker, or its text worker for CSV) so a save can write it back with
+// everything the view leaves out. Plain, structured-cloneable data only.
 
 export type SpreadsheetKind = "xlsx" | "xls" | "csv"
 

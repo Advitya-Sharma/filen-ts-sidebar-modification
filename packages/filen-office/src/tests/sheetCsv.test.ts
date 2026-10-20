@@ -1,10 +1,17 @@
-import { beforeEach, describe, expect, it } from "vitest"
-import { canEncodeWindows1252, parseCsvFile, serializeCsv, type CsvFormat } from "@/features/spreadsheet/lib/csvView"
-import { applyEditResult, gridDoc, type GridDoc } from "@/features/spreadsheet/lib/cellStore.logic"
-import { CsvDocument } from "@/features/spreadsheet/lib/csvDocument"
-import type { EditOp, EditResult } from "@/features/spreadsheet/lib/edits"
-import { MAX_COLUMNS } from "@/features/spreadsheet/lib/model"
-import { standardWindows1252Decoding } from "@/tests/whatwgWindows1252"
+import { describe, expect, it } from "vitest"
+import {
+	CsvDocument,
+	MAX_COLUMNS,
+	applyEditResult,
+	canEncodeWindows1252,
+	gridDoc,
+	parseCsvFile,
+	serializeCsv,
+	type CsvFormat,
+	type EditOp,
+	type EditResult,
+	type GridDoc
+} from "../core/sheet/index"
 
 const encoder = new TextEncoder()
 
@@ -44,8 +51,6 @@ function utf16Bytes(text: string, littleEndian: boolean, bom: readonly number[])
 }
 
 describe("CSV encodings", () => {
-	beforeEach(standardWindows1252Decoding)
-
 	it("reads and writes back a UTF-16LE file with its BOM", () => {
 		const source = "name,city\r\ncafé,björk\r\n"
 		const bytes = utf16Bytes(source, true, [0xff, 0xfe])

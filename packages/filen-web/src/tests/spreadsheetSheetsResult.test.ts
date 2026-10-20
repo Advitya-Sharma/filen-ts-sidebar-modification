@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { Cell } from "hucre"
-import { applyEditResult, gridDoc, type GridDoc, type GridSheet } from "@/features/spreadsheet/lib/cellStore.logic"
-import type { EditOp, EditResult } from "@/features/spreadsheet/lib/edits"
-import { cellKey } from "@/features/spreadsheet/lib/model"
+import { applyEditResult, cellKey, gridDoc, type EditOp, type EditResult, type GridDoc, type GridSheet } from "@filen/office/core/sheet"
 import type { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import { formula, openSheets } from "@/tests/spreadsheetProven"
 

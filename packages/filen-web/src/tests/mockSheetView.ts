@@ -1,4 +1,4 @@
-import type { SheetView } from "@/features/spreadsheet/lib/model"
+import type { SheetView } from "@filen/office/core/sheet"
 
 // Apart from the xlsx helpers so grid tests do not load the workbook engine.
 export function mockSheetView(overrides: Partial<SheetView> = {}): SheetView {

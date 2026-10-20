@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { openXlsx, saveXlsx, writeXlsx } from "hucre/xlsx"
-import { shownFormula, storedFormula } from "@/features/spreadsheet/lib/formulaRefs"
-import { cellKey } from "@/features/spreadsheet/lib/model"
+import { cellKey, shownFormula, storedFormula } from "@filen/office/core/sheet"
 import type { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import { saveLosses } from "@/features/spreadsheet/lib/xlsxVerify"
 import { structureLocked } from "@/features/spreadsheet/lib/xlsxView"

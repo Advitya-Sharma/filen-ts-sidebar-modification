@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+	DEFAULT_ROW_HEIGHT,
 	MAX_COL_WIDTH,
 	MAX_RESIZE_TARGETS,
 	MAX_ROW_HEIGHT,
@@ -16,8 +17,7 @@ import {
 	sheetWithSizes,
 	shiftSizes,
 	withSizes
-} from "@/features/spreadsheet/lib/sizes.logic"
-import { DEFAULT_ROW_HEIGHT } from "@/features/spreadsheet/lib/model"
+} from "../core/sheet/index"
 
 const noneHidden = () => false
 

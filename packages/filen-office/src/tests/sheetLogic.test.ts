@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest"
-import { createAxis } from "@/features/spreadsheet/lib/axis.logic"
-import { cellName, columnIndex, columnName, expandToMerges, rangeName } from "@/features/spreadsheet/lib/cellRef.logic"
-import { gridMove, type GridBounds } from "@/features/spreadsheet/lib/navigation.logic"
-import { parseTsv, rangeToTsv } from "@/features/spreadsheet/lib/tsv.logic"
-import { cellKey, type SheetView } from "@/features/spreadsheet/lib/model"
-import { wellFormedFormula } from "@/features/spreadsheet/lib/formulaRefs"
-import { malformedFormula } from "@/features/spreadsheet/lib/cellInput.logic"
+import {
+	cellKey,
+	cellName,
+	columnIndex,
+	columnName,
+	createAxis,
+	expandToMerges,
+	gridMove,
+	malformedFormula,
+	parseTsv,
+	rangeName,
+	rangeToTsv,
+	wellFormedFormula,
+	type GridBounds,
+	type SheetView
+} from "../core/sheet/index"
 
 describe("createAxis", () => {
 	const axis = createAxis(10, 20, new Map([[2, 50]]), [5])

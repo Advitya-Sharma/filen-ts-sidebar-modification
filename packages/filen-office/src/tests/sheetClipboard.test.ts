@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest"
-import { clearedCells, newSheetName } from "@/features/spreadsheet/lib/gridEdits.logic"
-import { cellKey, type CellView } from "@/features/spreadsheet/lib/model"
-import { endedCut, parseTsv, pastedCells, pastedInputs, rangeToClip, type GridClip } from "@/features/spreadsheet/lib/tsv.logic"
+import {
+	cellKey,
+	clearedCells,
+	endedCut,
+	newSheetName,
+	parseTsv,
+	pastedCells,
+	pastedInputs,
+	rangeToClip,
+	type CellView,
+	type GridClip
+} from "../core/sheet/index"
 
 function sheetOf(name: string, cells: [row: number, col: number, view: CellView][]) {
 	const map = new Map(cells.map(([row, col, view]) => [cellKey(row, col), view]))

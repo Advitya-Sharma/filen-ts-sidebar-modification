@@ -1,4 +1,4 @@
-import type { DocState, EditOp } from "@/features/spreadsheet/lib/edits"
+import type { DocState, EditOp } from "../model/edits"
 
 // Excel's own limit.
 const HISTORY_LIMIT = 100

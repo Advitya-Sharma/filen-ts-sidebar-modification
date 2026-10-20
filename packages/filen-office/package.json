@@ -22,6 +22,7 @@
 		"./core/math": "./src/core/math/index.ts",
 		"./core/text": "./src/core/text/index.ts",
 		"./core/sheet": "./src/core/sheet/index.ts",
+		"./core/sheet/formula": "./src/core/sheet/formula/index.ts",
 		"./core/xlsx": "./src/core/xlsx/index.ts",
 		"./dom": "./src/dom/index.ts",
 		"./dom/encryption": "./src/dom/encryption/index.ts",
@@ -73,7 +74,6 @@
 		"@types/react-dom": "~19.2.3",
 		"eslint": "^9.39.3",
 		"happy-dom": "^20.14.0",
-		"hyperformula": "3.4.0",
 		"prettier": "^3.9.6",
 		"prosemirror-history": "1.5.1",
 		"prosemirror-model": "1.25.12",
@@ -91,7 +91,8 @@
 	},
 	"dependencies": {
 		"@filen/shared": "workspace:*",
-		"fflate": "0.8.3"
+		"fflate": "0.8.3",
+		"hyperformula": "3.4.0"
 	},
 	"peerDependencies": {
 		"@codemirror/state": "^6.7.4",

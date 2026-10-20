@@ -4,8 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import { useState } from "react"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import type { DriveItem } from "@/features/drive/lib/item"
-import { cellKey, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
-import type { GridDoc } from "@/features/spreadsheet/lib/cellStore.logic"
+import { cellKey, type GridDoc, type SpreadsheetDoc } from "@filen/office/core/sheet"
 
 const { open, close, undo, redo, apply, writability, viewOnly } = vi.hoisted(() => ({
 	viewOnly: vi.fn(() => Promise.resolve()),
@@ -34,8 +33,8 @@ vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 
 const { useSpreadsheetDoc } = await import("@/features/spreadsheet/hooks/useSpreadsheetDoc")
 const { useSpreadsheetEdits, useSpreadsheetWritability } = await import("@/features/spreadsheet/hooks/useSpreadsheetEdits")
-const { gridDoc } = await import("@/features/spreadsheet/lib/cellStore.logic")
-const { csvDoc } = await import("@/features/spreadsheet/lib/csvView")
+const { gridDoc } = await import("@filen/office/core/sheet")
+const { csvDoc } = await import("@filen/office/core/sheet")
 
 const DOC: SpreadsheetDoc = { kind: "csv", sheets: [], activeSheet: 0, styles: [], writable: true }
 

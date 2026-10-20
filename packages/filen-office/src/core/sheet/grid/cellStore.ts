@@ -1,6 +1,6 @@
-import type { CellPatch, EditResult } from "@/features/spreadsheet/lib/edits"
-import { cellKey, keyCol, keyRow, type CellView, type SheetView, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
-import { sheetWithSizes, shiftIndex, type SizeAxis } from "@/features/spreadsheet/lib/sizes.logic"
+import type { CellPatch, EditResult } from "../model/edits"
+import { cellKey, keyCol, keyRow, type CellView, type SheetView, type SpreadsheetDoc } from "../model/model"
+import { sheetWithSizes, shiftIndex, type SizeAxis } from "../sizes/sizes"
 
 // A sheet's cells on the page, changed without copying them: the worker's Map as it arrived, plus the
 // cells edited since (null: emptied). An edit copies only that patch, which folds into a new base once it
@@ -45,7 +45,7 @@ export class CellStore {
 		let size = this.size
 
 		for (const [key, view] of changes) {
-			const filled = patch.has(key) ? patch.get(key) != null : this.base.has(key)
+			const filled = patch.has(key) ? (patch.get(key) ?? null) !== null : this.base.has(key)
 
 			size += (view === null ? 0 : 1) - (filled ? 1 : 0)
 			patch.set(key, view)

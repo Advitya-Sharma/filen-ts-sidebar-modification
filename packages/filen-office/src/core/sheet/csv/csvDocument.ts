@@ -1,8 +1,8 @@
-import { canEncodeWindows1252, csvCellView, csvDoc, serializeCsv, type CsvFormat } from "@/features/spreadsheet/lib/csvView"
-import { EditHistory, HISTORY_BYTES } from "@/features/spreadsheet/lib/editHistory"
-import { MAX_EDIT_CELLS, type AxisEdit, type DocState, type EditOp, type EditResult } from "@/features/spreadsheet/lib/edits"
-import { cellKey, keyCol, keyRow, MAX_COLUMNS, MAX_ROWS, type CellView, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
-import type { SizeAxis } from "@/features/spreadsheet/lib/sizes.logic"
+import { canEncodeWindows1252, csvCellView, csvDoc, serializeCsv, type CsvFormat } from "./csvView"
+import { EditHistory, HISTORY_BYTES } from "../history/editHistory"
+import { MAX_EDIT_CELLS, type AxisEdit, type DocState, type EditOp, type EditResult } from "../model/edits"
+import { cellKey, keyCol, keyRow, MAX_COLUMNS, MAX_ROWS, type CellView, type SpreadsheetDoc } from "../model/model"
+import type { SizeAxis } from "../sizes/sizes"
 
 type Step =
 	// `rowCount`/`rowWidths` are the sheet's extent just before this step's writes grew it — a setCells past
@@ -256,7 +256,7 @@ export class CsvDocument {
 
 				return { type: "structure", edit: { type: op.type, axis: "cols", at: op.at, count: op.count }, removed }
 			}
-			// A CSV is one sheet, and holds no formats or sizes (its sizes live beside it: lib/sizeLayer.ts).
+			// A CSV is one sheet, and holds no formats or sizes (its sizes live beside it: sizes/sizeLayer.ts).
 			case "addSheet":
 			case "renameSheet":
 			case "format":

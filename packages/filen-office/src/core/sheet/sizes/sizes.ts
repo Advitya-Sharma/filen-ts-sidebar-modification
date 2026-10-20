@@ -1,4 +1,4 @@
-import { DEFAULT_ROW_HEIGHT, type CellRange } from "@/features/spreadsheet/lib/model"
+import { DEFAULT_ROW_HEIGHT, type CellRange } from "../model/model"
 
 // Column and row sizes: the grid's pixels, the xlsx's own units, the limits both share, and the edits
 // resizing makes to a sheet's size maps. Column widths are in characters of the default font, row

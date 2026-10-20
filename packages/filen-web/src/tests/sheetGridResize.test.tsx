@@ -4,9 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen } from "@testing-library/react"
 import "@/lib/i18n"
 import { SheetGrid } from "@/features/spreadsheet/components/sheetGrid"
-import { gridSheet } from "@/features/spreadsheet/lib/cellStore.logic"
-import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT } from "@/features/spreadsheet/lib/model"
-import type { Selection } from "@/features/spreadsheet/lib/cellRef.logic"
+import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, gridSheet, type Selection } from "@filen/office/core/sheet"
 import { mockSheetView } from "@/tests/mockSheetView"
 
 beforeEach(() => {

@@ -1,7 +1,7 @@
-import { rangeCols, rangeRows, type CellPosition } from "@/features/spreadsheet/lib/cellRef.logic"
-import { formulaTranslator, rewriteFormula, sameSheet, type FormulaRef } from "@/features/spreadsheet/lib/formulaRefs"
-import type { CellEntry } from "@/features/spreadsheet/lib/gridEdits.logic"
-import { cellKey, MAX_COLUMNS, MAX_ROWS, type CellRange, type CellView } from "@/features/spreadsheet/lib/model"
+import { rangeCols, rangeRows, type CellPosition } from "../refs/cellRef"
+import { formulaTranslator, rewriteFormula, sameSheet, type FormulaRef } from "../refs/formulaRefs"
+import type { CellEntry } from "../grid/gridEdits"
+import { cellKey, MAX_COLUMNS, MAX_ROWS, type CellRange, type CellView } from "../model/model"
 
 // How far a copy reaches: past this the clipboard text would run to hundreds of megabytes.
 const MAX_COPY_CELLS = 1_000_000

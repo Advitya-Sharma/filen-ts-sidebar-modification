@@ -1,7 +1,5 @@
-import { type } from "arktype"
-import { kvDelete, kvGetJson, kvSetJson } from "@/lib/storage/adapter"
-import type { AxisEdit } from "@/features/spreadsheet/lib/edits"
-import { restoreSizes, shiftSizes, withSizes, type SizeAxis, type SizeEntry } from "@/features/spreadsheet/lib/sizes.logic"
+import type { AxisEdit } from "../model/edits"
+import { restoreSizes, shiftSizes, withSizes, type SizeAxis, type SizeEntry } from "./sizes"
 
 // Column widths and row heights kept beside a file rather than in it: every view but an editable
 // workbook (a CSV cannot hold sizes, and a read-only file is never written). Keyed by the file's stable
@@ -18,6 +16,14 @@ export type SizeLayer = ReadonlyMap<number, SheetSizes>
 
 export const EMPTY_LAYER: SizeLayer = new Map()
 
+// Where the stable layers are kept: the app's key-value store of JSON values (get answers null for a key it
+// does not hold). What it hands back is checked here, so a stored value of another shape reads as none.
+export interface SizeLayerStorage {
+	get(key: string): Promise<unknown>
+	set(key: string, value: unknown): Promise<void>
+	delete(key: string): Promise<void>
+}
+
 // Files remembered at once; saving past it forgets the one saved longest ago.
 export const SIZE_LAYER_LIMIT = 200
 
@@ -27,43 +33,86 @@ function fileKey(id: string): string {
 	return `spreadsheet.sizes.v1.${id}`
 }
 
-const pairs = type(["number", "number"]).array()
-const storedSchema = type({ sheets: { "[string]": { cols: pairs, rows: pairs } } })
-const indexSchema = type("string[]")
+type StoredPairs = [number, number][]
+
+function isPairs(value: unknown): value is StoredPairs {
+	return (
+		Array.isArray(value) &&
+		value.every(
+			(pair: unknown) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "number" && typeof pair[1] === "number"
+		)
+	)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+// The stored layer's sheets, or null when the value is not one.
+function storedSheets(value: unknown): [string, { cols: StoredPairs; rows: StoredPairs }][] | null {
+	const sheets = isRecord(value) ? value["sheets"] : undefined
+
+	if (!isRecord(sheets)) {
+		return null
+	}
+
+	const out: [string, { cols: StoredPairs; rows: StoredPairs }][] = []
+
+	for (const [sheet, sizes] of Object.entries(sheets)) {
+		if (!isRecord(sizes)) {
+			return null
+		}
+
+		const { cols, rows } = sizes
+
+		if (!isPairs(cols) || !isPairs(rows)) {
+			return null
+		}
+
+		out.push([sheet, { cols, rows }])
+	}
+
+	return out
+}
+
+function isStrings(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((id: unknown) => typeof id === "string")
+}
+
+function storedIndex(value: unknown): string[] {
+	return isStrings(value) ? value : []
+}
 
 const sessionLayers = new Map<string, SizeLayer>()
 
-export async function loadLayer(key: LayerKey): Promise<SizeLayer> {
+export async function loadLayer(storage: SizeLayerStorage, key: LayerKey): Promise<SizeLayer> {
 	if (key.kind === "session") {
 		return sessionLayers.get(key.id) ?? EMPTY_LAYER
 	}
 
-	const stored = await kvGetJson(fileKey(key.id), storedSchema)
+	const stored = storedSheets(await storage.get(fileKey(key.id)))
 
 	if (stored === null) {
 		return EMPTY_LAYER
 	}
 
 	return new Map(
-		Object.entries(stored.sheets).map(([sheet, sizes]): [number, SheetSizes] => [
-			Number(sheet),
-			{ cols: new Map(sizes.cols), rows: new Map(sizes.rows) }
-		])
+		stored.map(([sheet, sizes]): [number, SheetSizes] => [Number(sheet), { cols: new Map(sizes.cols), rows: new Map(sizes.rows) }])
 	)
 }
 
-export async function saveLayer(key: LayerKey, layer: SizeLayer): Promise<void> {
+export async function saveLayer(storage: SizeLayerStorage, key: LayerKey, layer: SizeLayer): Promise<void> {
 	if (key.kind === "session") {
 		sessionLayers.set(key.id, layer)
 
 		return
 	}
 
-	const index = ((await kvGetJson(INDEX_KEY, indexSchema)) ?? []).filter(id => id !== key.id)
+	const index = storedIndex(await storage.get(INDEX_KEY)).filter(id => id !== key.id)
 
 	if (layer.size === 0) {
-		await kvDelete(fileKey(key.id))
-		await kvSetJson(INDEX_KEY, index)
+		await storage.delete(fileKey(key.id))
+		await storage.set(INDEX_KEY, index)
 
 		return
 	}
@@ -72,11 +121,11 @@ export async function saveLayer(key: LayerKey, layer: SizeLayer): Promise<void> 
 
 	const evicted = index.splice(0, Math.max(0, index.length - SIZE_LAYER_LIMIT))
 
-	await kvSetJson(fileKey(key.id), {
+	await storage.set(fileKey(key.id), {
 		sheets: Object.fromEntries([...layer].map(([sheet, sizes]) => [String(sheet), { cols: [...sizes.cols], rows: [...sizes.rows] }]))
 	})
-	await Promise.all(evicted.map(id => kvDelete(fileKey(id))))
-	await kvSetJson(INDEX_KEY, index)
+	await Promise.all(evicted.map(id => storage.delete(fileKey(id))))
+	await storage.set(INDEX_KEY, index)
 }
 
 export function updateLayer(layer: SizeLayer, sheet: number, axis: SizeAxis, entries: readonly SizeEntry[]): SizeLayer {

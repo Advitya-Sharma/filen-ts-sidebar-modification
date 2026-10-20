@@ -1,6 +1,6 @@
-import { createAxis, type Axis } from "@/features/spreadsheet/lib/axis.logic"
-import { rangeContains, type CellPosition, type Selection } from "@/features/spreadsheet/lib/cellRef.logic"
-import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, type CellRange } from "@/features/spreadsheet/lib/model"
+import { createAxis, type Axis } from "./axis"
+import { rangeContains, type CellPosition, type Selection } from "../refs/cellRef"
+import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, type CellRange } from "../model/model"
 
 // Blank rows and columns past the used area, as a spreadsheet shows.
 const EXTRA_ROWS = 100

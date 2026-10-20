@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest"
 import type { Cell, CellValue } from "hucre"
 import { openXlsx, writeXlsx } from "hucre/xlsx"
-import { cellKey, type CellView } from "@/features/spreadsheet/lib/model"
+import { cellKey, takesText, type CellView } from "@filen/office/core/sheet"
 import { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import { displayText } from "@/features/spreadsheet/lib/xlsxView"
-import { takesText } from "@/features/spreadsheet/lib/cellInput.logic"
 import { proven } from "@/tests/spreadsheetProven"
 
 async function workbookBytes(rows: CellValue[][], cells?: Map<string, Cell>, dateSystem?: "1904"): Promise<Uint8Array> {

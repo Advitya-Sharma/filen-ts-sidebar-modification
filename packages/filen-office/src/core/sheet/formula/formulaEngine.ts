@@ -1,12 +1,12 @@
 import { DetailedCellError, ErrorType, HyperFormula, type RawCellContent, type SimpleCellAddress } from "hyperformula"
-import type { AxisEdit } from "@/features/spreadsheet/lib/edits"
-import { MAX_COLUMNS, MAX_ROWS } from "@/features/spreadsheet/lib/model"
-import type { SizeAxis } from "@/features/spreadsheet/lib/sizes.logic"
+import type { AxisEdit } from "../model/edits"
+import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
+import type { SizeAxis } from "../sizes/sizes"
 
 // HyperFormula over a workbook, for recalculating what an edit changes. Built only once the workbook has a
 // formula to care about, and kept in step with the workbook from then on (cells, inserted and deleted rows
 // and columns, added and renamed sheets). Formula text is never read back from it: references are moved in
-// the workbook's own text (formulaRefs.ts), which stays Excel's.
+// the workbook's own text (refs/formulaRefs.ts), which stays Excel's.
 // GPL-3.0 licensed, as the app (AGPL-3.0) may combine it.
 const LICENSE_KEY = "gpl-v3"
 
@@ -102,7 +102,7 @@ export class FormulaEngine {
 		this.engine = HyperFormula.buildFromSheets(contents, {
 			licenseKey: LICENSE_KEY,
 			// Ordinary formulas as Excel calculates them: a range where one value is expected meets the
-			// formula's row or column. Array-evaluating calls are marked with ARRAYFORMULA (formulaRefs.ts).
+			// formula's row or column. Array-evaluating calls are marked with ARRAYFORMULA (refs/formulaRefs.ts).
 			useArrayArithmetic: false,
 			maxRows: MAX_ROWS,
 			maxColumns: MAX_COLUMNS,

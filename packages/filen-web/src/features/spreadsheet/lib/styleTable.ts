@@ -1,6 +1,6 @@
 import type { CellStyle, Color } from "hucre"
 import { resolveThemeColor } from "hucre/xlsx"
-import type { CellStyleView, HorizontalAlign, VerticalAlign } from "@/features/spreadsheet/lib/model"
+import type { CellStyleView, HorizontalAlign, VerticalAlign } from "@filen/office/core/sheet"
 
 // Excel's legacy indexed palette, the first 64 entries (0-7 repeat 8-15); newer files use rgb or theme
 // colours, older ones still index into this.

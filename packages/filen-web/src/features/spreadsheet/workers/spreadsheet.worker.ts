@@ -1,7 +1,13 @@
 import * as Comlink from "comlink"
 import { openXlsx, readXls } from "hucre/xlsx"
-import type { SpreadsheetDoc, SpreadsheetKind } from "@/features/spreadsheet/lib/model"
-import { MAX_SHEET_CELLS, type DocState, type EditOp, type EditResult } from "@/features/spreadsheet/lib/edits"
+import {
+	MAX_SHEET_CELLS,
+	type DocState,
+	type EditOp,
+	type EditResult,
+	type SpreadsheetDoc,
+	type SpreadsheetKind
+} from "@filen/office/core/sheet"
 import { workbookDoc, WorkbookViews } from "@/features/spreadsheet/lib/xlsxView"
 import { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import { checkZipLimits } from "@/features/spreadsheet/lib/zipLimits"
@@ -17,11 +23,11 @@ import {
 } from "@/features/spreadsheet/lib/xlsxEncryption"
 
 // Owns every open workbook: the parsed workbook stays here, with its edits and undo history, and the page
-// gets views of it (model.ts: the active sheet at open, any other once shown) and patches after each edit
-// (edits.ts). A file is untrusted input, so parsing runs off the main thread, inside limits: a zip whose
-// entries inflate past DECOMPRESSED_LIMIT in all (or number past ZIP_ENTRY_LIMIT) or a grid past CELL_LIMIT
-// fails to open rather than taking the tab's memory. CSV and TSV open in csv.worker.ts, which loads neither
-// the workbook reader nor the formula engine.
+// gets views of it (the active sheet at open, any other once shown) and patches after each edit, both as
+// @filen/office/core/sheet defines them. A file is untrusted input, so parsing runs off the main thread,
+// inside limits: a zip whose entries inflate past DECOMPRESSED_LIMIT in all (or number past
+// ZIP_ENTRY_LIMIT) or a grid past CELL_LIMIT fails to open rather than taking the tab's memory. CSV and TSV
+// open in csv.worker.ts, which loads neither the workbook reader nor the formula engine.
 
 export type SpreadsheetFileKind = SpreadsheetKind | "tsv"
 

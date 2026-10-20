@@ -1,7 +1,5 @@
-import { columnIndex } from "@/features/spreadsheet/lib/cellRef.logic"
-import { formulaTranslator } from "@/features/spreadsheet/lib/formulaRefs"
+import { cellKey, columnIndex, formulaTranslator } from "@filen/office/core/sheet"
 import { decodeXml, dirname, relationshipTypeName, relsPath, resolvePart } from "@/features/spreadsheet/lib/opcPaths"
-import { cellKey } from "@/features/spreadsheet/lib/model"
 import { INDEXED_COLORS } from "@/features/spreadsheet/lib/styleTable"
 
 // Whether saving a workbook loses anything: its unedited save compared with the file it was opened from,

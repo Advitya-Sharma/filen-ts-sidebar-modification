@@ -15,8 +15,14 @@ import {
 	type LucideIcon
 } from "lucide-react"
 import { cn } from "@filen/shared"
-import { TOGGLE_FORMATS, toggledPatch, type FormatPatch, type ToggleFormat } from "@/features/spreadsheet/lib/edits"
-import type { CellStyleView, HorizontalAlign } from "@/features/spreadsheet/lib/model"
+import {
+	TOGGLE_FORMATS,
+	toggledPatch,
+	type CellStyleView,
+	type FormatPatch,
+	type HorizontalAlign,
+	type ToggleFormat
+} from "@filen/office/core/sheet"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"

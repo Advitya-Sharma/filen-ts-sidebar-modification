@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { useLatestRef } from "@/lib/useLatestRef"
 import { withOpenSpreadsheet } from "@/features/spreadsheet/lib/spreadsheetClient"
-import { applyEditResult, type GridDoc } from "@/features/spreadsheet/lib/cellStore.logic"
-import type { AxisEdit, DocState, EditOp, EditResult } from "@/features/spreadsheet/lib/edits"
+import { applyEditResult, type AxisEdit, type DocState, type EditOp, type EditResult, type GridDoc } from "@filen/office/core/sheet"
 
 export interface SpreadsheetSnapshot {
 	bytes: Uint8Array

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { layerKeyFor, sizesInFile } from "@/features/spreadsheet/lib/sizeRouting.logic"
+import { layerKeyFor, sizesInFile } from "../core/sheet/index"
 
 describe("sizesInFile", () => {
 	// A workbook not yet proven keeps its sizes in the file too: a resize waits for the proof like any edit.

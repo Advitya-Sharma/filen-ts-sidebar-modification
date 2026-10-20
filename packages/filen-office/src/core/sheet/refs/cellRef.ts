@@ -1,4 +1,4 @@
-import type { CellRange } from "@/features/spreadsheet/lib/model"
+import type { CellRange } from "../model/model"
 
 // "A", "B", … "Z", "AA", … — a column's letters from its 0-based index.
 export function columnName(index: number): string {

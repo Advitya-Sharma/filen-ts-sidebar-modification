@@ -1,7 +1,7 @@
 import * as Comlink from "comlink"
 import SpreadsheetWorker from "@/features/spreadsheet/workers/spreadsheet.worker.ts?worker"
 import CsvWorker from "@/features/spreadsheet/workers/csv.worker.ts?worker"
-import type { SpreadsheetKind } from "@/features/spreadsheet/lib/model"
+import type { SpreadsheetKind } from "@filen/office/core/sheet"
 import type {
 	SpreadsheetDocumentApi,
 	SpreadsheetFileKind,

@@ -1,6 +1,6 @@
-import { columnIndex, columnName } from "@/features/spreadsheet/lib/cellRef.logic"
-import type { AxisEdit } from "@/features/spreadsheet/lib/edits"
-import { MAX_COLUMNS, MAX_ROWS } from "@/features/spreadsheet/lib/model"
+import { columnIndex, columnName } from "./cellRef"
+import type { AxisEdit } from "../model/edits"
+import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
 
 // Cell references inside Excel formula text, found and rewritten without evaluating anything: filling a
 // shared formula down, moving references for inserted or deleted rows and columns, renaming a sheet. The

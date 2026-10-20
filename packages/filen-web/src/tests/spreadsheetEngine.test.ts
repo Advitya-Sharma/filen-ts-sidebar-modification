@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { openXlsx, writeXlsx } from "hucre/xlsx"
 import type { Cell } from "hucre"
-import { engineFormula, formulaTranslator, renameSheetInFormula, shiftFormula } from "@/features/spreadsheet/lib/formulaRefs"
+import { engineFormula, formulaTranslator, renameSheetInFormula, shiftFormula } from "@filen/office/core/sheet"
 import { sniffSpreadsheetKind } from "@/features/spreadsheet/lib/spreadsheetClient"
 import { formula, openFixture, openSheets, proven, reopen, shownCell, viewCell } from "@/tests/spreadsheetProven"
 import { checkZipLimits } from "@/features/spreadsheet/lib/zipLimits"

@@ -2,9 +2,7 @@ import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { writeXlsx } from "hucre/xlsx"
-import { applyEditResult, gridDoc, type GridDoc, type GridSheet } from "@/features/spreadsheet/lib/cellStore.logic"
-import type { EditResult } from "@/features/spreadsheet/lib/edits"
-import { cellKey, type SheetView } from "@/features/spreadsheet/lib/model"
+import { applyEditResult, cellKey, gridDoc, type EditResult, type GridDoc, type GridSheet, type SheetView } from "@filen/office/core/sheet"
 import type { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import type { CsvWorkerApi } from "@/features/spreadsheet/workers/csv.worker"
 import type { SpreadsheetOpened, SpreadsheetWorkerApi } from "@/features/spreadsheet/workers/spreadsheet.worker"
@@ -23,7 +21,7 @@ vi.mock(import("comlink"), async importOriginal => ({
 		exposed.push(api)
 	}
 }))
-vi.mock(import("@/features/spreadsheet/lib/formulaEngine"), async importOriginal => {
+vi.mock(import("@filen/office/core/sheet/formula"), async importOriginal => {
 	const actual = await importOriginal()
 
 	class CountedEngine extends actual.FormulaEngine {
@@ -274,10 +272,13 @@ describe("the text worker", () => {
 		expect(() => csvWorker.undo(opened.id)).toThrow("no open document")
 	})
 
-	// Every module the text worker reaches, through the app's own imports: none is the workbook reader or the
-	// formula engine (the bundle check counts their bytes).
+	// Every module the text worker reaches, through the app's own imports and @filen/office's (whole barrels,
+	// before any tree-shaking): none is the workbook reader or the formula engine (the bundle check counts
+	// their bytes).
 	it("reaches neither the workbook reader nor the formula engine", () => {
 		const SRC = join(dirname(new URL(import.meta.url).pathname), "..")
+		const OFFICE = join(SRC, "..", "..", "filen-office")
+		const exportsMap = (JSON.parse(readFileSync(join(OFFICE, "package.json"), "utf8")) as { exports: Record<string, string> }).exports
 		const seen = new Set<string>()
 		const packages = new Set<string>()
 		const visit = (file: string): void => {
@@ -285,11 +286,23 @@ describe("the text worker", () => {
 
 			seen.add(file)
 
-			for (const [, specifier] of readFileSync(file, "utf8").matchAll(/^import\s(?!type\b)[^"]*"([^"]+)"/gm)) {
+			for (const [, specifier] of readFileSync(file, "utf8").matchAll(
+				/^(?:import|export)\s(?!type\b)(?:[^";]*?\sfrom\s)?"([^"]+)"/gm
+			)) {
 				if (specifier === undefined) continue
+
+				const office = specifier.startsWith("@filen/office/")
+					? exportsMap[`./${specifier.slice("@filen/office/".length)}`]
+					: undefined
 
 				if (specifier.startsWith("@/")) {
 					visit(join(SRC, `${specifier.slice(2).replace(/\.ts$/, "")}.ts`))
+				} else if (office !== undefined) {
+					visit(join(OFFICE, office))
+				} else if (specifier.startsWith(".")) {
+					const target = join(dirname(file), specifier)
+
+					visit(target.endsWith(".ts") ? target : `${target}.ts`)
 				} else {
 					packages.add(specifier)
 				}
@@ -297,7 +310,8 @@ describe("the text worker", () => {
 		}
 
 		visit(join(SRC, "features/spreadsheet/workers/csv.worker.ts"))
-		expect(seen.size).toBeGreaterThan(3)
-		expect([...packages].sort()).toEqual(["comlink", "hucre"])
+		expect([...seen].some(file => file.includes("/core/sheet/csv/"))).toBe(true)
+		expect([...seen].some(file => file.includes("/core/sheet/formula/"))).toBe(false)
+		expect([...packages].sort()).toEqual(["comlink"])
 	})
 })

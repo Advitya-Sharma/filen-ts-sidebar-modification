@@ -1,4 +1,4 @@
-import type { SizeAxis } from "@/features/spreadsheet/lib/sizes.logic"
+import type { SizeAxis } from "@filen/office/core/sheet"
 
 // The laid-out size of each rendered, unmerged cell's content in one column or row: what autofit fits.
 // Reads the text's own box (a Range), so a stretched or truncated span still reports its content.

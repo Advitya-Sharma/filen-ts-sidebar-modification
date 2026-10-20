@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest"
 import { render } from "@testing-library/react"
 import { SheetGrid } from "@/features/spreadsheet/components/sheetGrid"
-import { gridSheet } from "@/features/spreadsheet/lib/cellStore.logic"
+import { gridSheet } from "@filen/office/core/sheet"
 import { mockSheetView } from "@/tests/mockSheetView"
 
 // The rail cells' tint is a translucent token (bg-muted / bg-accent): the sticky layer holding them must

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { readFileSync } from "node:fs"
 import { openXlsx, saveXlsx, writeXlsx } from "hucre/xlsx"
-import { FormulaEngine } from "@/features/spreadsheet/lib/formulaEngine"
+import { FormulaEngine } from "@filen/office/core/sheet/formula"
 import { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import { saveLosses } from "@/features/spreadsheet/lib/xlsxVerify"
 import { rawEntries, xlsxSavePlan } from "@/features/spreadsheet/lib/xlsxWritable"

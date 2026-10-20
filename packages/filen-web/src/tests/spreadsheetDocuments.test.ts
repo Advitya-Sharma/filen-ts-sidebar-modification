@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest"
 import { openXlsx, writeXlsx } from "hucre/xlsx"
-import type { EditResult } from "@/features/spreadsheet/lib/edits"
+import { CsvDocument, cellKey, parseCsvFile, type CellView, type EditResult } from "@filen/office/core/sheet"
 import { XlsxDocument } from "@/features/spreadsheet/lib/xlsxDocument"
 import { proven, viewCell } from "@/tests/spreadsheetProven"
-import { CsvDocument } from "@/features/spreadsheet/lib/csvDocument"
-import { parseCsvFile } from "@/features/spreadsheet/lib/csvView"
-import { cellKey, type CellView } from "@/features/spreadsheet/lib/model"
 import { readZip } from "@/features/spreadsheet/lib/zipLimits"
 
 async function workbook(): Promise<XlsxDocument> {

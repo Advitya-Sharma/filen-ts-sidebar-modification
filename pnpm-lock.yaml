@@ -710,6 +710,9 @@ importers:
       fflate:
         specifier: 0.8.3
         version: 0.8.3
+      hyperformula:
+        specifier: 3.4.0
+        version: 3.4.0
     devDependencies:
       '@codemirror/state':
         specifier: 6.7.4
@@ -732,9 +735,6 @@ importers:
       happy-dom:
         specifier: ^20.14.0
         version: 20.14.5
-      hyperformula:
-        specifier: 3.4.0
-        version: 3.4.0
       prettier:
         specifier: ^3.9.6
         version: 3.9.6

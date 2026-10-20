@@ -12,19 +12,47 @@ import {
 } from "hucre"
 import { openXlsx, parseRange, saveXlsx, writeXlsx, type RoundtripWorkbook } from "hucre/xlsx"
 import type { RawCellContent } from "hyperformula"
-import { parseCellInput, type ParsedInput } from "@/features/spreadsheet/lib/cellInput.logic"
-import { EditHistory, HISTORY_BYTES } from "@/features/spreadsheet/lib/editHistory"
-import { rangeArea, rangeContains } from "@/features/spreadsheet/lib/cellRef.logic"
 import {
+	EditHistory,
+	HISTORY_BYTES,
+	MAX_COLUMNS,
 	MAX_EDIT_CELLS,
+	MAX_RESIZE_TARGETS,
+	MAX_ROWS,
 	MAX_SHEET_CELLS,
+	cellKey,
+	clampSize,
+	colWidthToPx,
+	engineCellFormula,
+	engineFormula,
+	formulaTranslator,
+	namesSheet,
+	parseCellInput,
+	pxToColWidth,
+	pxToRowHeight,
+	rangeArea,
+	rangeContains,
+	renameSheetInFormula,
+	rowHeightToPx,
+	sameSheet,
+	shiftFormula,
+	shiftSpan,
+	storedFormula,
+	wellFormedFormula,
 	type AxisEdit,
+	type CellEntry,
 	type CellPatch,
+	type CellRange,
+	type CellView,
 	type DocState,
 	type EditOp,
 	type EditResult,
-	type FormatPatch
-} from "@/features/spreadsheet/lib/edits"
+	type FormatPatch,
+	type ParsedInput,
+	type SizeAxis,
+	type SizeEntry,
+	type SpreadsheetDoc
+} from "@filen/office/core/sheet"
 import {
 	CYCLE,
 	FormulaEngine,
@@ -33,21 +61,7 @@ import {
 	type EngineName,
 	type EngineSheet,
 	type RecalculatedCell
-} from "@/features/spreadsheet/lib/formulaEngine"
-import {
-	engineCellFormula,
-	engineFormula,
-	formulaTranslator,
-	namesSheet,
-	renameSheetInFormula,
-	sameSheet,
-	shiftFormula,
-	shiftSpan,
-	storedFormula,
-	wellFormedFormula
-} from "@/features/spreadsheet/lib/formulaRefs"
-import type { CellEntry } from "@/features/spreadsheet/lib/gridEdits.logic"
-import { cellKey, MAX_COLUMNS, MAX_ROWS, type CellRange, type CellView, type SpreadsheetDoc } from "@/features/spreadsheet/lib/model"
+} from "@filen/office/core/sheet/formula"
 import {
 	cellIdOf,
 	hasArrayFormulas,
@@ -59,16 +73,6 @@ import {
 	workbookStructureLocked,
 	WorkbookViews
 } from "@/features/spreadsheet/lib/xlsxView"
-import {
-	clampSize,
-	colWidthToPx,
-	MAX_RESIZE_TARGETS,
-	pxToColWidth,
-	pxToRowHeight,
-	rowHeightToPx,
-	type SizeAxis,
-	type SizeEntry
-} from "@/features/spreadsheet/lib/sizes.logic"
 import { pause, saveLosses } from "@/features/spreadsheet/lib/xlsxVerify"
 import { rawEntries, xlsxSavePlan, type SavePlan } from "@/features/spreadsheet/lib/xlsxWritable"
 import { readZip } from "@/features/spreadsheet/lib/zipLimits"

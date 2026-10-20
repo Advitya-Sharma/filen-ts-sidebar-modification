@@ -14,30 +14,37 @@ import { createPortal } from "react-dom"
 import { useTranslation } from "react-i18next"
 import { cn } from "@filen/shared"
 import { listenWindowDrag } from "@/lib/windowDrag"
-import type { Axis } from "@/features/spreadsheet/lib/axis.logic"
-import {
-	cellName,
-	columnName,
-	expandToMerges,
-	rangeContains,
-	selectionRange,
-	type CellPosition,
-	type Selection
-} from "@/features/spreadsheet/lib/cellRef.logic"
-import type { GridSheet } from "@/features/spreadsheet/lib/cellStore.logic"
-import { gridMove, lastUsed, mergeAt, sheetBounds, sheetCols, sheetRows } from "@/features/spreadsheet/lib/navigation.logic"
-import { cellKey, DEFAULT_ROW_HEIGHT, type CellRange, type CellStyleView, type CellView } from "@/features/spreadsheet/lib/model"
-import { measureContents } from "@/features/spreadsheet/lib/autofit"
 import {
 	CELL_PADDING,
-	clampSize,
-	fitSize,
+	DEFAULT_ROW_HEIGHT,
 	PX_PER_POINT,
+	cellKey,
+	cellName,
+	clampSize,
+	columnName,
+	expandToMerges,
+	fitSize,
+	gridMove,
+	lastUsed,
+	mergeAt,
+	rangeContains,
 	resizeTargets,
+	selectionRange,
+	sheetBounds,
+	sheetCols,
+	sheetRows,
 	sheetWithSizes,
+	type Axis,
+	type CellPosition,
+	type CellRange,
+	type CellStyleView,
+	type CellView,
+	type GridSheet,
+	type Selection,
 	type SizeAxis,
 	type SizeEntry
-} from "@/features/spreadsheet/lib/sizes.logic"
+} from "@filen/office/core/sheet"
+import { measureContents } from "@/features/spreadsheet/lib/autofit"
 
 const ROW_HEADER_WIDTH = 52
 const COL_HEADER_HEIGHT = 24

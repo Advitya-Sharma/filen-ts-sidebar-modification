@@ -1,5 +1,5 @@
-import { rangeArea, rangeContains } from "@/features/spreadsheet/lib/cellRef.logic"
-import { cellKey, keyCol, keyRow, type CellRange } from "@/features/spreadsheet/lib/model"
+import { rangeArea, rangeContains } from "../refs/cellRef"
+import { cellKey, keyCol, keyRow, type CellRange } from "../model/model"
 
 export interface CellEntry {
 	row: number

@@ -1,8 +1,6 @@
 import * as Comlink from "comlink"
 import type { SpreadsheetFileKind, SpreadsheetOpened } from "@/features/spreadsheet/workers/spreadsheet.worker"
-import { MAX_SHEET_CELLS, type DocState, type EditOp, type EditResult } from "@/features/spreadsheet/lib/edits"
-import { parseCsvFile } from "@/features/spreadsheet/lib/csvView"
-import { CsvDocument } from "@/features/spreadsheet/lib/csvDocument"
+import { CsvDocument, MAX_SHEET_CELLS, parseCsvFile, type DocState, type EditOp, type EditResult } from "@filen/office/core/sheet"
 
 // Owns every open CSV and TSV file, as spreadsheet.worker.ts owns workbooks, without the workbook reader and
 // the formula engine a text file never needs: opening one loads only this. Answers the same calls for an
