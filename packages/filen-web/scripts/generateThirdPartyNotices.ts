@@ -633,6 +633,13 @@ const OFFICE_DERIVED: {
 		version: /^ECMA-376 Part 1, (\S+ edition) /,
 		license: "LicenseRef-Ecma-Copyright-Notice",
 		text: sections => noticeFence(sections, "ECMA-376 preset shape definitions")
+	},
+	{
+		section: "pdf.js",
+		name: "pdf.js",
+		version: /^pdfjs-dist (\d+\.\d+\.\d+), /,
+		license: "Apache-2.0",
+		text: sections => noticeFence(sections, "Apache License 2.0")
 	}
 ]
 

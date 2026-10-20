@@ -22,6 +22,12 @@ Document engines and editors shared by the Filen apps. `pnpm run lint`, `pnpm ru
 - `@filen/office/react/markdown` is the rendered view, unstyled: `<MarkdownView>` renders CommonMark and GFM with no raw HTML, takes the host's element slots (`components`, a module-scope object) and its `urlTransform` (the link policy by default). Opening links, and asking before an untrusted domain, is the host's job.
 - `react-markdown`, `remark-gfm` and `@codemirror/state` are optional peer dependencies (MIT). An app that uses these entry points adds them as its own dependencies, dedupes them (Vite `resolve.dedupe`, Metro `resolveRequest`), and adds their notices to its third-party notices.
 
+## PDF
+
+- `@filen/office/dom/pdf` opens a PDF with the pdf.js module the host passes in (typed structurally; web: `pdfjs-dist` with a worker script; mobile: the legacy build with the in-thread worker). Assets come from `none`, `urls` or `inline`; the source is the whole file or ranged reads. A password loop runs on one loading task, and errors map to a closed set. Links pass `@filen/shared`'s link policy, in-document destinations resolve to a page, and find runs over the text content.
+- `@filen/office/react/pdf` is headless: `<PdfPages>` (virtualised pages with pdf.js's text layer), `usePdfDocument` and `usePdfViewer`, with commands and state like the DOCX viewer. `@filen/office/css/pdf.css` is structural; its colours are `--fo-pdf-*` variables.
+- `pdfjs-dist` is an optional peer dependency (Apache-2.0); this package bundles none of it. An app that uses these entry points adds it as its own dependency, dedupes it, and adds its notice.
+
 ## Real-world corpus
 
 The corpus holds 1,454 licensed real-world files in every supported format (DOCX, XLSX, CSV/TSV, PPTX, ODT, ODS, ODP, RTF, DOC, XLS, PPT and their template/macro variants); the corpus tests (`src/tests/*Corpus.test.ts`) run each engine over its own family. The files are never committed; `corpus/manifest.json` lists each one with its download URL, licence, size and SHA-256, and `corpus/README.md` lists the sources, licences and families. `src/tests/corpusFiles.test.ts` checks every fetched family, with an engine or not, against the manifest.

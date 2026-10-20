@@ -1,42 +1,32 @@
-import { useEffect, useRef, useState, type RefObject } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { getDocument, GlobalWorkerOptions, PDFDataRangeTransport, TextLayer } from "pdfjs-dist"
+import { ChevronLeftIcon, ChevronRightIcon, SearchIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
+import { isPdfCommandEnabled, type PdfSource, type PdfViewerCommand, type PdfViewerState } from "@filen/office/dom/pdf"
 import {
-	getDocument,
-	GlobalWorkerOptions,
-	PasswordResponses,
-	TextLayer,
-	type PDFDocumentProxy,
-	type PDFPageProxy,
-	type RenderTask
-} from "pdfjs-dist"
-import { ChevronLeftIcon, ChevronRightIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
+	PdfPages,
+	usePdfDocument,
+	usePdfViewer,
+	type PdfDocumentOptions,
+	type PdfDomDocument,
+	type PdfJsDom
+} from "@filen/office/react/pdf"
 import { type DriveItem } from "@/features/drive/lib/item"
-import { clampListboxIndex } from "@/features/drive/lib/listbox"
 import { usePreviewBytes } from "@/features/preview/hooks/usePreviewBytes"
-import {
-	mostVisiblePage,
-	canvasDimsForViewport,
-	canvasRenderTransform,
-	pdfPageAction,
-	pdfAnnotationBox,
-	pdfLayerScaleVars,
-	pdfLinkAnnotations,
-	pdfStepZoomScale,
-	pdfWheelZoomScale,
-	PDF_PAGE_RENDER_MARGIN_PX,
-	PDF_PAGE_EVICT_MARGIN_PX,
-	PDF_MIN_SCALE,
-	PDF_MAX_SCALE,
-	type PdfLinkAnnotation
-} from "@/features/preview/components/pdfViewer.logic"
-import { useLatestRef } from "@/lib/useLatestRef"
+import { DocxFindField } from "@/features/preview/components/docxToolbar"
+import type { DocxFindControls } from "@/features/preview/components/docxViewer.logic"
 import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
-import { prefersReducedMotion } from "@/lib/motion"
+import { isSafeAbsoluteHref } from "@/lib/safeUrl"
+import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"
+import { IN_EDITORS, useAction } from "@/lib/keymap/useAction"
+import { Kbd } from "@/lib/keymap/kbd"
 import { LoadingState } from "@/components/loadingState"
 import { Button } from "@/components/ui/button"
+import { TooltipIconButton } from "@/components/ui/tooltipIconButton"
 import { InputDialog } from "@/components/dialogs/inputDialog"
 import { PreviewErrorState, PreviewGate, PreviewLoading } from "@/features/preview/components/previewErrorState"
-import "@/features/preview/components/pdfLayers.css"
+import "@filen/office/css/pdf.css"
+import "@/features/preview/components/pdfTheme.css"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 
 export interface PdfViewerProps {
@@ -44,109 +34,29 @@ export interface PdfViewerProps {
 	alt: string
 }
 
-// Vite statically recognizes `new URL(specifier, import.meta.url)` and rewrites it to a same-origin,
-// content-hashed asset URL — worker-src 'self' covers it (no blob: wrapper ever needed, since the
-// resolved URL always shares this page's origin). Confirmed against the installed 6.1.200 bundle:
-// neither pdf.mjs nor pdf.worker.mjs calls eval/Function, so 'wasm-unsafe-eval' — already present in
-// the CSP for the SDK's own wasm — is the only script-src concession pdf.js benefits from, and even
-// that's only for its own optional wasm codecs; nothing here needed a CSP change.
-//
-// A STRING workerSrc (not a shared, manually-constructed Worker assigned to workerPort) is
-// deliberate: pdf.js caches ONE PDFWorker wrapper per port object, and PDFDocumentLoadingTask.destroy
-// always tears down that wrapper's underlying Worker — sharing one physical worker across documents
-// would mean closing the FIRST preview kills every other one still open. workerSrc instead gives
-// every getDocument() call its own dedicated worker, safely destroyed on that one item's own unmount.
-GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.mjs", import.meta.url).href
+// Only what the viewer uses, so the rest of pdf.js's exports stay out of the bundle.
+const PDFJS: PdfJsDom = { getDocument, GlobalWorkerOptions, PDFDataRangeTransport, TextLayer }
 
-// Fixed render resolution (independent of container width) — the canvas is then constrained to
-// max-width:100% so narrower viewports shrink it, while devicePixelRatio (applied separately, see
-// canvasRenderTransform) keeps the underlying bitmap crisp on HiDPI screens either way.
-const BASE_SCALE = 1.5
+// Vite rewrites `new URL(specifier, import.meta.url)` to a same-origin, content-hashed asset URL, which
+// worker-src 'self' covers. A worker script (not one shared Worker) gives every document its own worker,
+// destroyed with it: pdf.js tears down the worker of the task it destroys. pdf.js has no eval path, so the CSP
+// needs nothing more.
+const OPTIONS: PdfDocumentOptions = { worker: { kind: "script", src: new URL("pdfjs-dist/build/pdf.worker.mjs", import.meta.url).href } }
+
+// Find opens for keys pressed in the layer the document is shown in (the preview overlay), never one over it.
+const LAYER = "[role='dialog'], [role='alertdialog']"
+
+const CLASS_NAMES = {
+	column: "flex flex-col items-center gap-4 py-4",
+	page: "flex shrink-0 items-center justify-center bg-white shadow-sm",
+	canvas: (rendered: boolean) => (rendered ? "block max-w-full" : "invisible"),
+	link: "rounded-xs focus-ring-row"
+}
 
 type PasswordAttempt = "initial" | "retry"
 
-type DocumentState =
-	| { status: "loading" }
-	| { status: "password"; attempt: PasswordAttempt }
-	| { status: "success"; doc: PDFDocumentProxy }
-	| { status: "error" }
-
-// Owns one pdf.js loading task's whole lifecycle: worker-backed parsing, the onPassword retry loop,
-// and teardown. onPassword (not a caught rejection) is the only viable retry path here — getDocument
-// transfers `bytes`' backing ArrayBuffer to the worker on the FIRST call (detaching it), so a second,
-// independent getDocument() call for a retry would hand the worker an already-empty buffer; onPassword
-// instead resumes the SAME task/transport, which already holds the full file worker-side.
-function usePdfDocument(bytes: Uint8Array): { state: DocumentState; submitPassword: (password: string) => void; retry: () => void } {
-	const [state, setState] = useState<DocumentState>({ status: "loading" })
-	const updatePasswordRef = useRef<((password: string) => void) | null>(null)
-	// Bumped by the error state's own Retry button — `bytes` never changes on a retry (already the
-	// whole file, held by the caller's usePreviewBytes), so a dedicated counter re-runs this effect
-	// against the SAME buffer, mirroring imageViewer.tsx's own TransformedImageBytes retry idiom.
-	const [retryToken, setRetryToken] = useState(0)
-
-	useEffect(() => {
-		let live = true
-		// bytes.slice(): getDocument transfers `data`'s backing ArrayBuffer to the worker (postMessage
-		// with a transfer list — verified against the installed 6.1.200 source), detaching it. StrictMode
-		// double-invokes this effect in dev with the SAME `bytes` reference, so the first call would
-		// detach the SDK-owned buffer out from under the second, racing loser. A copy gives every call —
-		// StrictMode's extra one included — its own buffer to transfer; `bytes` itself is never touched.
-		const task = getDocument({ data: bytes.slice() })
-
-		task.onPassword = (updatePassword: (password: string) => void, reason: number) => {
-			updatePasswordRef.current = updatePassword
-
-			if (live) {
-				setState({ status: "password", attempt: reason === PasswordResponses.INCORRECT_PASSWORD ? "retry" : "initial" })
-			}
-		}
-
-		task.promise
-			.then(doc => {
-				if (live) {
-					setState({ status: "success", doc })
-				}
-			})
-			.catch(() => {
-				// pdf.worker is its own file: a deploy that changed it fails documents in older tabs.
-				recoverIfNewerBuild()
-
-				if (live) {
-					setState({ status: "error" })
-				}
-			})
-
-		return () => {
-			live = false
-			updatePasswordRef.current = null
-			void task.destroy()
-		}
-	}, [bytes, retryToken])
-
-	function submitPassword(password: string): void {
-		const updatePassword = updatePasswordRef.current
-
-		if (!updatePassword) {
-			return
-		}
-
-		setState({ status: "loading" })
-		updatePassword(password)
-	}
-
-	function retry(): void {
-		setState({ status: "loading" })
-		setRetryToken(prev => prev + 1)
-	}
-
-	return { state, submitPassword, retry }
-}
-
-// The password prompt: an InputDialog (the shared single-field-prompt primitive, nested inside the
-// preview overlay's own dialog exactly like versionsDialog.tsx nests a ConfirmDialog) that can be
-// dismissed without resolving it — pdf.js just leaves the task waiting rather than failing, so a
-// small reopen button stands in for the dialog once dismissed rather than stranding the user with no
-// way back in.
+// The password prompt: the shared single-field dialog, nested in the preview overlay's own. Dismissing it leaves
+// pdf.js waiting (it does not fail the task), so a button stands in to open it again.
 function PdfPasswordPrompt({ attempt, onSubmit }: { attempt: PasswordAttempt; onSubmit: (password: string) => void }) {
 	const { t } = useTranslation("preview")
 	const [dismissed, setDismissed] = useState(false)
@@ -181,543 +91,220 @@ function PdfPasswordPrompt({ attempt, onSubmit }: { attempt: PasswordAttempt; on
 	)
 }
 
-// convertToViewportPoint is typed `any[]` by pdfjs-dist, so its corners are narrowed here rather than
-// cast — same guard-not-cast rule pdfLinkAnnotations follows.
-function viewportPoint(point: unknown[]): { x: number; y: number } {
-	const [x, y] = point
-
-	return { x: typeof x === "number" ? x : 0, y: typeof y === "number" ? y : 0 }
+// The find field's view of the viewer: a query shows as searched (with its count) once its search finished.
+function findControls(state: PdfViewerState, dispatch: (command: PdfViewerCommand) => void): DocxFindControls {
+	return {
+		query: state.find.done ? state.find.query : "",
+		caseSensitive: state.find.caseSensitive,
+		count: state.find.count,
+		capped: state.find.capped,
+		active: state.find.active,
+		search: (query, caseSensitive) => {
+			dispatch({ type: "find.query", query, caseSensitive })
+		},
+		step: direction => {
+			dispatch({ type: direction > 0 ? "find.next" : "find.previous" })
+		},
+		close: () => {
+			dispatch({ type: "find.close" })
+		}
+	}
 }
 
-// One page's canvas — resolves its own PDFPageProxy on mount (cheap: already-parsed doc structure,
-// not rasterization), then renders once metadata is ready AND its lazy gate (shouldRender) opens. The
-// gate keeps a many-page document from rasterizing every page up front (each canvas allocates
-// width*height*4 bytes — the same tab-crashing-allocation concern PREVIEW_MAX_BYTES already guards at
-// the whole-file level, just at per-page granularity here). A page's canvas is also released once it
-// scrolls past the wider PDF_PAGE_EVICT_MARGIN_PX zone (pdfPageAction below) — without that, a long,
-// low-byte-size document could still accumulate hundreds of full-res canvases over one scroll-through
-// and exhaust the tab despite never approaching the whole-file byte cap. Eviction also releases the
-// page's decoded images and operator list (page.cleanup()), which pdf.js otherwise keeps on the proxy
-// for the document's whole life. Re-entering the render margin re-renders from scratch; the wrapper
-// div's own size (from the already-resolved `page`, never reset by eviction) keeps scroll position
-// stable across an evict/re-render cycle.
-function PdfPage({
-	doc,
-	pageNumber,
-	label,
-	root,
-	scale,
-	onIntersect,
-	wrapperRef
-}: {
-	doc: PDFDocumentProxy
-	pageNumber: number
-	label: string
-	root: RefObject<HTMLDivElement | null>
-	// The user's current zoom level (PdfPageList's own state) — every page re-renders at this scale;
-	// see the render effect below for how a scale change (without a fresh page or visibility change)
-	// still triggers a re-render at the new size.
-	scale: number
-	onIntersect: (pageNumber: number, ratio: number) => void
-	wrapperRef: (el: HTMLDivElement | null) => void
-}) {
-	const divRef = useRef<HTMLDivElement | null>(null)
-	const canvasRef = useRef<HTMLCanvasElement | null>(null)
-	const textLayerRef = useRef<HTMLDivElement | null>(null)
-	const [links, setLinks] = useState<PdfLinkAnnotation[]>([])
-	const [page, setPage] = useState<PDFPageProxy | null>(null)
-	// The same proxy, for the eviction observer's callback, which outlives any one render.
-	const pageRef = useRef<PDFPageProxy | null>(null)
-	// Monotonic: set the first time this page enters the render margin, and never cleared — the lazy
-	// gate that keeps a long document from rasterizing every page up front. Page 1 starts open so the
-	// first paint needs no observer round trip. Local to the page, so reaching a new page re-renders only
-	// that page, not the whole list.
-	const [shouldRender, setShouldRender] = useState(pageNumber === 1)
-	// The proxy whose annotations have already been requested — the lazy fetch below must fire once per
-	// page, not once per re-entry into the extended view.
-	const annotationsRequestedFor = useRef<PDFPageProxy | null>(null)
-	// Which scale this page's canvas was last painted at, if any — `null` before any render (or right
-	// after eviction). Storing the SCALE (not just a rendered boolean) is what lets a zoom change force
-	// a fresh render without a separate reset effect: `rendered` below is derived fresh every render
-	// from a straight `=== scale` comparison, so a scale change alone flips it to false in the SAME
-	// render pass, no extra round-trip needed.
-	const [renderedAtScale, setRenderedAtScale] = useState<number | null>(null)
-	const rendered = renderedAtScale === scale
-	// Live (non-monotonic, unlike shouldRender) membership in the wider eviction margin —
-	// gates the render effect below (see pdfPageAction) and is itself set from the eviction observer.
-	const [withinExtendedView, setWithinExtendedView] = useState(false)
-
-	// Latest onIntersect, read (never as a dependency) from the observer callback below — keeps that
-	// effect from tearing down and recreating its IntersectionObserver on every ancestor re-render,
-	// which a raw `onIntersect` dependency would otherwise force on every one of those renders.
-	const onIntersectRef = useLatestRef(onIntersect)
-
-	useEffect(() => {
-		let live = true
-
-		void doc.getPage(pageNumber).then(resolved => {
-			if (live) {
-				pageRef.current = resolved
-				setPage(resolved)
-			}
-		})
-
-		return () => {
-			live = false
-			pageRef.current = null
-		}
-	}, [doc, pageNumber])
-
-	useEffect(() => {
-		const container = root.current
-		const el = divRef.current
-
-		if (!container || !el) {
-			return
-		}
-
-		const observer = new IntersectionObserver(
-			entries => {
-				const entry = entries[0]
-
-				if (entry) {
-					if (entry.isIntersecting) {
-						setShouldRender(true)
-					}
-
-					onIntersectRef.current(pageNumber, entry.intersectionRatio)
-				}
-			},
-			{ root: container, rootMargin: `${String(PDF_PAGE_RENDER_MARGIN_PX)}px 0px`, threshold: [0, 0.25, 0.5, 0.75, 1] }
-		)
-
-		observer.observe(el)
-
-		return () => {
-			observer.disconnect()
-		}
-	}, [root, pageNumber, onIntersectRef])
-
-	// A second, wider-margin observer purely for eviction — deliberately separate from the one above
-	// (which needs fine-grained ratios for the current-page indicator, not a 1200px-wide root). Boolean
-	// isIntersecting only, so threshold stays at the default single crossing. Eviction itself (canvas
-	// release + un-rendering) runs right here in the callback rather than in a state-driven effect body
-	// below — a subscription callback is where React wants an external-system reaction to live
-	// (react-hooks/set-state-in-effect), and it also sidesteps ever reading a stale `rendered`: the
-	// action is the same (release, unconditionally) whether or not this page had finished rendering.
-	useEffect(() => {
-		const container = root.current
-		const el = divRef.current
-
-		if (!container || !el) {
-			return
-		}
-
-		const observer = new IntersectionObserver(
-			entries => {
-				const entry = entries[0]
-
-				if (!entry) {
-					return
-				}
-
-				setWithinExtendedView(entry.isIntersecting)
-
-				if (!entry.isIntersecting) {
-					// Releases a fully-rendered canvas, or one an in-flight render had already sized before
-					// the render effect's own cleanup (triggered by the withinExtendedView update above)
-					// cancels that task — safe either way; a resized canvas just stops accepting meaningful
-					// draws. setRenderedAtScale(null) when already null is a no-op React bails out on.
-					const canvas = canvasRef.current
-
-					if (canvas) {
-						canvas.width = 0
-						canvas.height = 0
-					}
-
-					// Safe with a render in flight: pdf.js defers the release until that task (cancelled by the
-					// render effect's cleanup) has settled. A re-entry re-fetches the operator list.
-					pageRef.current?.cleanup()
-					setRenderedAtScale(null)
-				}
-			},
-			{ root: container, rootMargin: `${String(PDF_PAGE_EVICT_MARGIN_PX)}px 0px` }
-		)
-
-		observer.observe(el)
-
-		return () => {
-			observer.disconnect()
-		}
-	}, [root])
-
-	useEffect(() => {
-		if (!page || !shouldRender) {
-			return
-		}
-
-		const canvas = canvasRef.current
-
-		if (!canvas) {
-			return
-		}
-
-		if (pdfPageAction(withinExtendedView, rendered) !== "render") {
-			return
-		}
-
-		let cancelled = false
-		const viewport = page.getViewport({ scale })
-		const ratio = window.devicePixelRatio
-		const dims = canvasDimsForViewport(viewport.width, viewport.height, ratio)
-
-		canvas.width = dims.bufferWidth
-		canvas.height = dims.bufferHeight
-		canvas.style.width = `${String(dims.cssWidth)}px`
-		canvas.style.height = `${String(dims.cssHeight)}px`
-
-		const task: RenderTask = page.render({ canvas, viewport, transform: canvasRenderTransform(ratio) })
-
-		task.promise
-			.then(() => {
-				if (!cancelled) {
-					setRenderedAtScale(scale)
-				}
-			})
-			.catch(() => {
-				// A cancelled task rejects too, with a RenderingCancelledException (RenderTask.cancel's own
-				// documented contract, confirmed against the installed d.ts) — the `cancelled` guard above
-				// already keeps that path from reaching here, and eviction (same cancel path) hits it just
-				// as harmlessly. A scale change while a render is in flight cancels it the SAME way (this
-				// effect's own cleanup below, triggered by `scale` changing), so a stale-scale bitmap never
-				// finishes painting over a fresh one. Nothing else surfaces a page-level render error; the
-				// document-level error branch already covers a genuinely broken PDF, and a single bad page
-				// is rare enough not to warrant its own labeled state yet.
-			})
-
-		return () => {
-			cancelled = true
-			task.cancel()
-		}
-	}, [page, shouldRender, withinExtendedView, rendered, scale])
-
-	// Deliberately NOT part of the canvas effect above: that one lists `rendered` in its own deps, so it
-	// tears down and re-runs the instant its render resolves — anything destructive in its cleanup would
-	// fire immediately after every successful page paint and never be rebuilt. The text layer's
-	// lifecycle is the page/scale/visibility one, so it gets its own effect, whose cleanup is then the
-	// single place that both cancels the layer and releases its DOM. Eviction flips withinExtendedView,
-	// which re-runs that cleanup, so a long document releases text layers on the canvas's own schedule
-	// with no eviction-observer change.
-	useEffect(() => {
-		const textLayerDiv = textLayerRef.current
-
-		if (!page || !shouldRender || !withinExtendedView || !textLayerDiv) {
-			return
-		}
-
-		const viewport = page.getViewport({ scale })
-		// streamTextContent is synchronous to call and streams progressively, so this effect body stays
-		// synchronous and needs no `cancelled` flag of its own.
-		const textLayer = new TextLayer({ textContentSource: page.streamTextContent(), container: textLayerDiv, viewport })
-
-		textLayer.render().catch(() => {
-			// A cancelled/failed text layer is a degraded-but-usable preview: the canvas still renders and
-			// the page stays readable, just not selectable. Never surfaced — the document-level error branch
-			// already covers a genuinely broken PDF.
-		})
-
-		return () => {
-			textLayer.cancel()
-			// The ctor never clears the container and render() appends progressively, so a rebuild at a new
-			// scale would otherwise stack two sets of spans.
-			textLayerDiv.replaceChildren()
-		}
-	}, [page, shouldRender, withinExtendedView, scale])
-
-	// Fetched once per page, in its own effect: not in the canvas render effect (same `rendered`-in-deps
-	// teardown trap as above) and not in the text-layer effect either, since the annotation DATA does not
-	// depend on `scale` — only its layout does. Gated on the same extended-viewport membership those two
-	// use, so a long document costs one worker round trip per page the reader actually approaches instead
-	// of one per page at open. Only external links are rendered: resolving an internal destination needs
-	// a real link service wired to this viewer's own scroll container, which this viewer has none of.
-	useEffect(() => {
-		if (!page || !withinExtendedView || annotationsRequestedFor.current === page) {
-			return
-		}
-
-		annotationsRequestedFor.current = page
-
-		void page
-			.getAnnotations({ intent: "display" })
-			.then((annotations: unknown[]) => {
-				// Guarded on the page identity, not on an effect-scoped `live` flag: getAnnotations is a raw
-				// worker round trip with no cache of its own, so a page that leaves the extended view
-				// mid-flight must keep the result it already paid for rather than drop it and refetch on the
-				// way back. What must stay inert is a response for a REPLACED proxy (a new document in the
-				// same slot), which this comparison catches.
-				if (annotationsRequestedFor.current === page) {
-					setLinks(pdfLinkAnnotations(annotations))
-				}
-			})
-			.catch(() => {
-				// A page whose annotations fail to parse still renders and stays readable — just without its
-				// links. The document-level error branch already covers a genuinely broken PDF.
-			})
-	}, [page, withinExtendedView])
-
-	const viewport = page?.getViewport({ scale })
+function Navigation({ state, dispatch }: { state: PdfViewerState; dispatch: (command: PdfViewerCommand) => void }) {
+	const { t } = useTranslation("preview")
 
 	return (
-		<div
-			ref={el => {
-				divRef.current = el
-				wrapperRef(el)
-			}}
-			className="relative flex shrink-0 items-center justify-center bg-white shadow-sm"
-			style={viewport ? { width: viewport.width, height: viewport.height } : { width: 300, height: 400 }}
-		>
-			{!rendered ? (
-				<LoadingState
-					size="sm"
-					className="absolute inset-0 text-inherit"
-				/>
-			) : null}
-			<canvas
-				ref={canvasRef}
-				aria-label={label}
-				className={rendered ? "block max-w-full" : "invisible"}
+		<div className="flex min-w-0 items-center gap-2 max-sm:gap-1">
+			<Button
+				variant="ghost"
+				size="icon-sm"
+				disabled={!isPdfCommandEnabled(state, "page.previous")}
+				aria-label={t("previewPdfPreviousPageAction")}
+				onClick={() => {
+					dispatch({ type: "page.previous" })
+				}}
+			>
+				<ChevronLeftIcon />
+			</Button>
+			<span className="text-xs whitespace-nowrap text-muted-foreground tabular-nums">
+				{t("previewPdfPageIndicator", { current: state.page, total: state.pageCount })}
+			</span>
+			<Button
+				variant="ghost"
+				size="icon-sm"
+				disabled={!isPdfCommandEnabled(state, "page.next")}
+				aria-label={t("previewPdfNextPageAction")}
+				onClick={() => {
+					dispatch({ type: "page.next" })
+				}}
+			>
+				<ChevronRightIcon />
+			</Button>
+			<span
+				aria-hidden="true"
+				className="mx-1 h-4 w-px bg-border max-sm:mx-0"
 			/>
-			{/* Positioning + the whole span contract come from pdfLayers.css; the wrapper is already
-			`relative` and sized to the viewport. */}
-			<div
-				ref={textLayerRef}
-				className="pdf-text-layer"
-				style={pdfLayerScaleVars(scale, page?.userUnit ?? 1)}
-			/>
-			{/* LAST children of the wrapper on purpose: the text layer above covers the whole page with no
-			pointer-events opt-out, so anchors painted before it would be unclickable. Real <a href> elements,
-			so they are keyboard-reachable — a capability the canvas-only viewer never had. The aria-label is
-			the URL itself (data, not UI copy — an empty anchor would have no accessible name at all).
-			Rendered on the same gate the canvas and text layer use: an anchor over an evicted (spinner-only)
-			page is invisible but still in the tab order, so Tab would land focus on nothing and scroll the
-			list there. */}
-			{viewport && shouldRender && withinExtendedView
-				? links.map(link => {
-						const start = viewportPoint(viewport.convertToViewportPoint(link.rect[0], link.rect[1]))
-						const end = viewportPoint(viewport.convertToViewportPoint(link.rect[2], link.rect[3]))
-						const box = pdfAnnotationBox(start.x, start.y, end.x, end.y)
-
-						return (
-							<a
-								key={`${link.url}-${String(box.left)}-${String(box.top)}`}
-								href={link.url}
-								target="_blank"
-								rel="noreferrer"
-								aria-label={link.url}
-								className="absolute rounded-xs focus-ring-row"
-								style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
-							/>
-						)
-					})
-				: null}
+			<Button
+				variant="ghost"
+				size="icon-sm"
+				disabled={!isPdfCommandEnabled(state, "zoom.out")}
+				aria-label={t("previewPdfZoomOutAction")}
+				onClick={() => {
+					dispatch({ type: "zoom.out" })
+				}}
+			>
+				<ZoomOutIcon />
+			</Button>
+			<span className="w-10 text-center text-xs text-muted-foreground tabular-nums">
+				{t("previewPdfZoomIndicator", { percent: state.zoom })}
+			</span>
+			<Button
+				variant="ghost"
+				size="icon-sm"
+				disabled={!isPdfCommandEnabled(state, "zoom.in")}
+				aria-label={t("previewPdfZoomInAction")}
+				onClick={() => {
+					dispatch({ type: "zoom.in" })
+				}}
+			>
+				<ZoomInIcon />
+			</Button>
 		</div>
 	)
 }
 
-// The scrollable page list plus its own local toolbar (page indicator + Prev/Next-PAGE buttons) —
-// deliberately NOT the overlay's ArrowLeft/ArrowRight (those are sibling-FILE nav, trapped by the
-// dialog's own focus scope before they could ever reach this component; reusing them here would also
-// just be ambiguous with that outer meaning). Natural scroll plus these buttons are the only page-nav
-// surfaces.
-function PdfPageList({ doc, alt }: { doc: PDFDocumentProxy; alt: string }) {
+// The toolbar row, laid out as the DOCX viewer's: page navigation and zoom in the middle, swapped for the find
+// field while finding; find on the right.
+function PdfToolbar({
+	state,
+	dispatch,
+	findFocus,
+	onFindClosed
+}: {
+	state: PdfViewerState
+	dispatch: (command: PdfViewerCommand) => void
+	findFocus: number
+	onFindClosed: () => void
+}) {
 	const { t } = useTranslation("preview")
-	const numPages = doc.numPages
 
-	const containerRef = useRef<HTMLDivElement | null>(null)
-	const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map())
-	const ratiosRef = useRef<Map<number, number>>(new Map())
-	const [currentPage, setCurrentPage] = useState(1)
-	const [scale, setScale] = useState(BASE_SCALE)
+	return (
+		<div className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 px-2">
+			<div />
+			{state.find.open ? (
+				<DocxFindField
+					find={findControls(state, dispatch)}
+					focus={findFocus}
+					onClosed={onFindClosed}
+				/>
+			) : (
+				<Navigation
+					state={state}
+					dispatch={dispatch}
+				/>
+			)}
+			<div className="flex min-w-0 items-center justify-end gap-1">
+				{state.find.open ? null : (
+					<TooltipIconButton
+						label={t("previewDocxFindAction")}
+						shortcut={<Kbd action="editor.find" />}
+						onClick={() => {
+							dispatch({ type: "find.open" })
+						}}
+					>
+						<SearchIcon />
+					</TooltipIconButton>
+				)}
+			</div>
+		</div>
+	)
+}
+
+function PdfReader({ document, alt }: { document: PdfDomDocument; alt: string }) {
+	const { t } = useTranslation("preview")
+	const viewer = usePdfViewer(document)
+	const { state, dispatch } = viewer
+	const rootRef = useRef<HTMLDivElement | null>(null)
+	const [findFocus, setFindFocus] = useState(0)
 	const linkGate = useTrustedLinkGate()
 
-	function goToPage(target: number): void {
-		const clamped = clampListboxIndex(target - 1, numPages) + 1
-		const el = pageRefs.current.get(clamped)
+	useAction(
+		"editor.find",
+		keyboardEvent => {
+			const root = rootRef.current
 
-		// The app's global reduced-motion rule is CSS, which a JS-supplied `behavior` overrides — so the
-		// preference has to be read here too.
-		el?.scrollIntoView({
-			behavior: prefersReducedMotion() ? "auto" : "smooth",
-			block: "start"
-		})
-	}
-
-	// Ctrl/Cmd+wheel zoom — a plain React onWheel prop can never preventDefault the browser's own
-	// native pinch-zoom/page-scroll here (react-dom registers it PASSIVE at its root, see
-	// imageViewer.tsx's own identical comment on ZoomableImage's wheel listener for the verified
-	// rationale), so this needs a real, non-passive native listener too. A plain (non-modified) wheel
-	// is left untouched — this container's own overflow-y-auto scroll handles that natively.
-	useEffect(() => {
-		const container = containerRef.current
-
-		if (!container) {
-			return
-		}
-
-		const handleWheel = (event: WheelEvent): void => {
-			if (!event.ctrlKey && !event.metaKey) {
+			if (root === null) {
 				return
 			}
 
-			event.preventDefault()
-			setScale(prev => pdfWheelZoomScale(prev, event.deltaY))
-		}
+			const layer = root.closest(LAYER)
+			const target = keyboardEvent.target instanceof Element ? keyboardEvent.target.closest(LAYER) : null
 
-		container.addEventListener("wheel", handleWheel, { passive: false })
+			if (target !== layer || (layer === null && isAnyDialogOpen())) {
+				return
+			}
 
-		return () => {
-			container.removeEventListener("wheel", handleWheel)
-		}
-	}, [])
+			keyboardEvent.preventDefault()
 
-	// Declared after the hooks so the compiler memoizes it once, which keeps the PdfPages element (and all
-	// N pages) out of the re-render every currentPage change triggers.
-	function handleIntersect(pageNumber: number, ratio: number): void {
-		ratiosRef.current.set(pageNumber, ratio)
-
-		const visible = mostVisiblePage(ratiosRef.current)
-
-		if (visible !== null) {
-			setCurrentPage(visible)
-		}
-	}
+			if (state.find.open) {
+				setFindFocus(focus => focus + 1)
+			} else {
+				dispatch({ type: "find.open" })
+			}
+		},
+		IN_EDITORS,
+		[state.find.open, dispatch]
+	)
 
 	return (
-		<div className="flex size-full flex-col">
-			<div className="flex h-10 shrink-0 items-center justify-center gap-2">
-				<Button
-					variant="ghost"
-					size="icon-sm"
-					disabled={currentPage <= 1}
-					aria-label={t("previewPdfPreviousPageAction")}
-					onClick={() => {
-						goToPage(currentPage - 1)
-					}}
-				>
-					<ChevronLeftIcon />
-				</Button>
-				<span className="text-xs text-muted-foreground tabular-nums">
-					{t("previewPdfPageIndicator", { current: currentPage, total: numPages })}
-				</span>
-				<Button
-					variant="ghost"
-					size="icon-sm"
-					disabled={currentPage >= numPages}
-					aria-label={t("previewPdfNextPageAction")}
-					onClick={() => {
-						goToPage(currentPage + 1)
-					}}
-				>
-					<ChevronRightIcon />
-				</Button>
-				<span
-					aria-hidden="true"
-					className="mx-1 h-4 w-px bg-border"
-				/>
-				<Button
-					variant="ghost"
-					size="icon-sm"
-					disabled={scale <= PDF_MIN_SCALE}
-					aria-label={t("previewPdfZoomOutAction")}
-					onClick={() => {
-						setScale(prev => pdfStepZoomScale(prev, -1))
-					}}
-				>
-					<ZoomOutIcon />
-				</Button>
-				<span className="w-10 text-center text-xs text-muted-foreground tabular-nums">
-					{t("previewPdfZoomIndicator", { percent: Math.round((scale / BASE_SCALE) * 100) })}
-				</span>
-				<Button
-					variant="ghost"
-					size="icon-sm"
-					disabled={scale >= PDF_MAX_SCALE}
-					aria-label={t("previewPdfZoomInAction")}
-					onClick={() => {
-						setScale(prev => pdfStepZoomScale(prev, 1))
-					}}
-				>
-					<ZoomInIcon />
-				</Button>
-			</div>
-			{/* The annotation links open in a new tab once their domain is trusted. */}
-			<div
-				ref={containerRef}
-				className="min-h-0 flex-1 overflow-y-auto"
+		<div
+			ref={rootRef}
+			className="flex size-full flex-col"
+		>
+			<PdfToolbar
+				state={state}
+				dispatch={dispatch}
+				findFocus={findFocus}
+				onFindClosed={() => {
+					viewer.pages.scrollerRef.current?.focus()
+				}}
+			/>
+			{/* External links open in a new tab once their domain is trusted. */}
+			<PdfPages
+				pdfjs={PDFJS}
+				{...viewer.pages}
+				className="min-h-0 flex-1 overflow-y-auto outline-none"
+				classNames={CLASS_NAMES}
+				pageLabel={(page, total) => `${alt} — ${t("previewPdfPageIndicator", { current: page, total })}`}
+				placeholder={
+					<LoadingState
+						size="sm"
+						className="absolute inset-0 text-inherit"
+					/>
+				}
+				allowLink={isSafeAbsoluteHref}
+				tabIndex={-1}
 				onClick={linkGate.onClick}
 				onAuxClick={linkGate.onAuxClick}
-			>
-				<PdfPages
-					doc={doc}
-					alt={alt}
-					root={containerRef}
-					scale={scale}
-					onIntersect={handleIntersect}
-					pageRefs={pageRefs}
-				/>
-			</div>
+			/>
 			{linkGate.dialog}
-		</div>
-	)
-}
-
-// The page column, split out of PdfPageList so its toolbar state (currentPage) never re-renders the N pages.
-function PdfPages({
-	doc,
-	alt,
-	root,
-	scale,
-	onIntersect,
-	pageRefs
-}: {
-	doc: PDFDocumentProxy
-	alt: string
-	root: RefObject<HTMLDivElement | null>
-	scale: number
-	onIntersect: (pageNumber: number, ratio: number) => void
-	pageRefs: RefObject<Map<number, HTMLDivElement>>
-}) {
-	const { t } = useTranslation("preview")
-	const numPages = doc.numPages
-	const pageNumbers = Array.from({ length: numPages }, (_, i) => i + 1)
-
-	return (
-		<div className="flex flex-col items-center gap-4 py-4">
-			{pageNumbers.map(pageNumber => (
-				<PdfPage
-					key={pageNumber}
-					doc={doc}
-					pageNumber={pageNumber}
-					label={`${alt} — ${t("previewPdfPageIndicator", { current: pageNumber, total: numPages })}`}
-					root={root}
-					scale={scale}
-					onIntersect={onIntersect}
-					wrapperRef={el => {
-						if (el) {
-							pageRefs.current.set(pageNumber, el)
-						} else {
-							pageRefs.current.delete(pageNumber)
-						}
-					}}
-				/>
-			))}
 		</div>
 	)
 }
 
 function PdfDocument({ bytes, alt }: { bytes: Uint8Array; alt: string }) {
 	const { t } = useTranslation("preview")
-	const { state, submitPassword, retry } = usePdfDocument(bytes)
+	const source: PdfSource = { kind: "bytes", bytes }
+	const { state, password, retry } = usePdfDocument(PDFJS, source, OPTIONS)
+	const failed = state.status === "error"
+
+	useEffect(() => {
+		if (failed) {
+			// pdf.worker is its own file: a deploy that changed it fails documents in older tabs.
+			recoverIfNewerBuild()
+		}
+	}, [failed])
 
 	if (state.status === "loading") {
 		return <PreviewLoading />
@@ -726,8 +313,8 @@ function PdfDocument({ bytes, alt }: { bytes: Uint8Array; alt: string }) {
 	if (state.status === "password") {
 		return (
 			<PdfPasswordPrompt
-				attempt={state.attempt}
-				onSubmit={submitPassword}
+				attempt={state.reason === "incorrect" ? "retry" : "initial"}
+				onSubmit={password}
 			/>
 		)
 	}
@@ -742,15 +329,14 @@ function PdfDocument({ bytes, alt }: { bytes: Uint8Array; alt: string }) {
 	}
 
 	return (
-		<PdfPageList
-			doc={state.doc}
+		<PdfReader
+			document={state.document}
 			alt={alt}
 		/>
 	)
 }
 
-// Top-level gate on the whole-buffer download (usePreviewBytes, shared with every other buffered
-// category) — PdfDocument above owns everything pdf.js-specific once bytes are in hand.
+// Gated on the whole-buffer download every buffered preview shares; PdfDocument owns the rest.
 export function PdfViewer({ item, alt }: PdfViewerProps) {
 	return (
 		<PreviewGate result={usePreviewBytes(item)}>

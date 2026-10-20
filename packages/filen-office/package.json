@@ -41,6 +41,7 @@
 		"./css/docx-review.css": "./src/css/docx-review.css",
 		"./css/docx-objects.css": "./src/css/docx-objects.css",
 		"./css/sheet.css": "./src/css/sheet.css",
+		"./css/pdf.css": "./src/css/pdf.css",
 		"./css/docx-reflow.css": "./src/css/docx-reflow.css",
 		"./core/docx/edit": "./src/core/docx/edit/index.ts",
 		"./core/docx/write": "./src/core/docx/write/index.ts",
@@ -51,7 +52,9 @@
 		"./react/docx/editor": "./src/react/docx/editor.ts",
 		"./core/markdown": "./src/core/markdown/index.ts",
 		"./react/markdown": "./src/react/markdown/index.ts",
-		"./react/sheet": "./src/react/sheet/index.ts"
+		"./react/sheet": "./src/react/sheet/index.ts",
+		"./dom/pdf": "./src/dom/pdf/index.ts",
+		"./react/pdf": "./src/react/pdf/index.ts"
 	},
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.react.json && tsc -p tsconfig.test.json && tsc -p tsconfig.dom-test.json",
@@ -104,6 +107,7 @@
 	},
 	"peerDependencies": {
 		"@codemirror/state": "^6.7.4",
+		"pdfjs-dist": "^6.3.289",
 		"prosemirror-history": "^1.5.1",
 		"prosemirror-model": "^1.25.12",
 		"prosemirror-state": "^1.4.4",
@@ -116,6 +120,9 @@
 	},
 	"peerDependenciesMeta": {
 		"@codemirror/state": {
+			"optional": true
+		},
+		"pdfjs-dist": {
 			"optional": true
 		},
 		"prosemirror-history": {

@@ -90,7 +90,7 @@ test("HEIC preview transforms client-side and renders via the buffered path, nev
 // real scroll and that the lazy render gate keeps up with it, and that the whole load produces zero
 // CSP console violations (the pdf.js worker's own acceptance check). The selectable text layer and the
 // annotation link overlay are DOM-only too — pdf.js generates that DOM, so this is their only proof.
-test("PDF preview renders multi-page content with a selectable text layer and safe annotation links, pages via its own toolbar with a real scroll, and closes, no CSP console errors", async ({
+test("PDF preview renders multi-page content with a selectable text layer and safe annotation links, pages via its own toolbar with a real scroll, finds text, and closes, no CSP console errors", async ({
 	page
 }) => {
 	// Two 60s canvas renders, a 30s text layer, the retried band reads and the page-2 scroll add to
@@ -164,6 +164,22 @@ test("PDF preview renders multi-page content with a selectable text layer and sa
 	await page.getByRole("button", { name: "Next page" }).click()
 	await expect(page.getByText("Page 2 of 2")).toBeVisible({ timeout: 30_000 })
 	await expect(page.locator('canvas[aria-label*="Page 2 of 2"]')).toBeVisible({ timeout: 30_000 })
+
+	// Find: the toolbar's field searches every page's text and paints the matches into the text layer. It
+	// starts at the page in view (page 2, the second match) and steps on round to page 1, scrolling it back
+	// into view. Escape closes the field only, not the preview, and takes the highlights with it.
+	await page.getByRole("button", { name: "Find in document" }).click()
+	const findField = page.getByRole("searchbox", { name: "Find" })
+	await findField.fill("page")
+	await expect(page.getByText("2/2", { exact: true })).toBeVisible({ timeout: 30_000 })
+	await expect(page.locator(".fo-pdf-text-layer .highlight.selected")).toHaveText("Page", { timeout: 30_000 })
+	await findField.press("Enter")
+	await expect(page.getByText("1/2", { exact: true })).toBeVisible()
+	await expect(page.locator(".fo-pdf-text-layer .highlight.selected")).toHaveText("Page")
+	await findField.press("Escape")
+	await expect(findField).toHaveCount(0)
+	await expect(page.locator(".fo-pdf-text-layer .highlight")).toHaveCount(0)
+	await expect(page.getByText("Page 1 of 2")).toBeVisible({ timeout: 30_000 })
 
 	await page.keyboard.press("Escape")
 	await expect(firstPageCanvas).toHaveCount(0)

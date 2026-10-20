@@ -268,8 +268,6 @@ describe("React Compiler coverage", () => {
 	it.each([
 		// A selection toggle re-renders only the toggled add-tracks row.
 		["src/features/audio/components/addPlaylistTracksDialog.tsx", "AddTrackRow"],
-		// A current-page change skips every PdfPage.
-		["src/features/preview/components/pdfViewer.tsx", "PdfPages"],
 		// The media players: a playhead tick re-renders only the parts that read the playhead.
 		["src/lib/media/useMediaState.ts", "useMediaValue"],
 		["src/lib/media/useMediaState.ts", "useSyncedMediaVolume"],
@@ -618,6 +616,25 @@ describe("Videos browsing compiles", () => {
 				expect(code.includes(call), `${file} calls ${call}`).toBe(false)
 			}
 		}
+	})
+})
+
+// The PDF viewer re-renders on every page-indicator change and find step: every component and hook of the pages and
+// the shell must compile, so such a render reaches only the toolbar and the pages whose matches changed.
+describe("React Compiler coverage of the PDF viewer", () => {
+	it.each([
+		["../filen-office/src/react/pdf/PdfPages.tsx", "PdfPages"],
+		["../filen-office/src/react/pdf/PdfPages.tsx", "PdfPageView"],
+		["../filen-office/src/react/pdf/usePdfViewer.ts", "usePdfViewer"],
+		["../filen-office/src/react/pdf/usePdfDocument.ts", "usePdfDocument"],
+		["src/features/preview/components/pdfViewer.tsx", "PdfReader"],
+		["src/features/preview/components/pdfViewer.tsx", "PdfToolbar"],
+		["src/features/preview/components/pdfViewer.tsx", "PdfDocument"]
+	])("compiles %s's %s", (file, fnName) => {
+		const events = compile(file)
+
+		expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
+		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(true)
 	})
 })
 

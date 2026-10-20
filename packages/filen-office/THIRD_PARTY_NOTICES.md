@@ -98,6 +98,14 @@ defect or inaccuracy in this document or the included data.
   - Modified: the combining embellishments are mapped to their spacing forms, the arrow embellishments to spacing arrows, and the stretchy brace pieces are left out.
   - Our adaptation is licensed under the GNU General Public License version 3 (GPL-3.0-only), under Creative Commons' declared one-way compatibility of BY-SA 4.0 with GPLv3 (https://wiki.creativecommons.org/wiki/ShareAlike_compatibility:_GPLv3), and is combined with the rest of `@filen/office` under section 13 of the GNU Affero General Public License v3.0.
 
+## pdf.js
+
+- Source: pdfjs-dist 6.3.289, https://github.com/mozilla/pdf.js
+- Copyright: 2014 Mozilla Foundation
+- Licence: Apache License 2.0 (text below)
+- Derived files, modified for `@filen/office`:
+  - `src/css/pdf.css` (the `.textLayer` rules of `web/pdf_viewer.css`, selector renamed and colours made variables)
+
 ## Apache License 2.0
 
 ```

@@ -1,36 +1,27 @@
-/*
- * pdf.js text-layer styles.
- *
- * The `.pdf-text-layer` block below is a VERBATIM copy of `.textLayer` from
- * pdfjs-dist/web/pdf_viewer.css with only the selector renamed; the three `[data-main-rotation]`
- * rules that follow are re-scoped copies of that file's own bare top-level rules.
- * Copyright the pdf.js contributors, licensed under the Apache License, Version 2.0.
- *
- * Why a copy rather than importing pdf_viewer.css: that file is ~163 KB and carries four top-level
- * `:root` blocks (including a `color-scheme` override) plus bare top-level attribute selectors, all
- * of which would leak global tokens and an unscoped transform into this app's theme.
- *
- * Why a copy rather than a hand-picked subset: pdf.js splits the layer contract across JS and CSS,
- * and the CSS half is not discoverable from the JS. `--min-font-size`, `--text-scale-factor` and
- * `--min-font-size-inv` are defined ONLY here — pdf.js never writes them — so dropping them makes
- * the span rule's `font-size`/`transform` invalid at computed-value time while the layer still
- * renders visible, in-canvas, selectable spans. That failure is silent to every weak assertion.
- *
- * The app must supply `--total-scale-factor` / `--scale-round-x` / `--scale-round-y` on the
- * container (pdfLayerScaleVars, pdfViewer.logic.ts): pdf.js sizes it with
- * `round(down, var(--total-scale-factor) * <page px>, var(--scale-round-*))`, which is invalid — and
- * collapses the layer to auto size — if any of them is missing.
- *
- * Two inert leftovers the copy deliberately keeps: `.endOfContent` is created by the viewer's own
- * TextLayerBuilder (not the core TextLayer this app uses), and the `forced-colors` `.highlight`
- * declarations reference `--hcm-highlight-*` variables that live only in the `:root` blocks this
- * file refuses to import — both are simply never matched or never valid.
- *
- * The class name is also referenced from previewOverlay.tsx's chrome-toggle selector, so a rename
- * has to touch both.
- */
+/* Structure of @filen/office's PDF pages (react/pdf PdfPages). The page is the document's own paper, light in every
+   app theme; the only visual values are --fo-pdf-* variables, defaulting to pdf.js's own:
+   --fo-pdf-highlight (find matches), --fo-pdf-highlight-selected (the current match), --fo-pdf-selection (selected
+   text).
 
-.pdf-text-layer {
+   The text-layer block is a copy of `.textLayer` from pdfjs-dist/web/pdf_viewer.css (Copyright 2014 Mozilla
+   Foundation, Apache License 2.0) with the selector renamed and the colours above made variables. Not imported
+   whole: that file is about 163 KB of global :root tokens, a color-scheme override and bare attribute selectors.
+   Nor trimmed: pdf.js splits the layer contract between JS and CSS. --min-font-size, --text-scale-factor and
+   --min-font-size-inv exist only here, and without them every span's font-size and transform are invalid while the
+   layer still renders visible, selectable, wrongly sized spans. PdfPages supplies --total-scale-factor and
+   --scale-round-x/-y on the layer (pdfTextLayerVars). `.endOfContent` and the forced-colors `--hcm-*` references are
+   inert leftovers of the copy. */
+
+.fo-pdf-page {
+	position: relative;
+}
+
+/* Over the text layer, which covers the page: the links stay clickable. */
+.fo-pdf-link {
+	position: absolute;
+}
+
+.fo-pdf-text-layer {
 	color-scheme: only light;
 
 	position: absolute;
@@ -91,8 +82,8 @@
 	}
 
 	.highlight {
-		--highlight-bg-color: rgb(180 0 170 / 0.25);
-		--highlight-selected-bg-color: rgb(0 100 0 / 0.25);
+		--highlight-bg-color: var(--fo-pdf-highlight, rgb(180 0 170 / 0.25));
+		--highlight-selected-bg-color: var(--fo-pdf-highlight-selected, rgb(0 100 0 / 0.25));
 		--highlight-backdrop-filter: none;
 		--highlight-selected-backdrop-filter: none;
 
@@ -134,13 +125,13 @@
 
 	::-moz-selection {
 		background: rgba(0 0 255 / 0.25);
-		background: color-mix(in srgb, AccentColor, transparent 50%);
+		background: var(--fo-pdf-selection, color-mix(in srgb, AccentColor, transparent 50%));
 		color: transparent;
 	}
 
 	::selection {
 		background: rgba(0 0 255 / 0.25);
-		background: color-mix(in srgb, AccentColor, transparent 50%);
+		background: var(--fo-pdf-selection, color-mix(in srgb, AccentColor, transparent 50%));
 		color: transparent;
 	}
 
@@ -177,17 +168,16 @@
 	}
 }
 
-/* pdf.js sets data-main-rotation on the container (setLayerDimensions); this app's viewer never
- * overrides a page's own /Rotate, so a rotated page would otherwise leave its text layer unrotated
- * over a rotated canvas. Scoped copies of pdf_viewer.css's bare top-level rules. */
-.pdf-text-layer[data-main-rotation="90"] {
+/* pdf.js sets data-main-rotation on the layer (setLayerDimensions) from the page's own /Rotate; without these a rotated
+   page's text would lie unrotated over its rotated canvas. Scoped copies of pdf_viewer.css's bare top-level rules. */
+.fo-pdf-text-layer[data-main-rotation="90"] {
 	transform: rotate(90deg) translateY(-100%);
 }
 
-.pdf-text-layer[data-main-rotation="180"] {
+.fo-pdf-text-layer[data-main-rotation="180"] {
 	transform: rotate(180deg) translate(-100%, -100%);
 }
 
-.pdf-text-layer[data-main-rotation="270"] {
+.fo-pdf-text-layer[data-main-rotation="270"] {
 	transform: rotate(270deg) translateX(-100%);
 }

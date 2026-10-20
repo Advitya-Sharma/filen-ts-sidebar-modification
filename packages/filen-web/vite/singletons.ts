@@ -8,5 +8,6 @@ export const SINGLETONS = [
 	"@lezer/common",
 	"@lezer/highlight",
 	"react-markdown",
-	"remark-gfm"
+	"remark-gfm",
+	"pdfjs-dist"
 ]

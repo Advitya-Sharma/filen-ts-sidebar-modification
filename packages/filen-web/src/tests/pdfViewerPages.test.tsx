@@ -1,19 +1,20 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import "@/lib/i18n"
+import { registerAllActions } from "@/lib/keymap/actions"
 import { linkedFileItem } from "@/tests/fixtures/sdk"
 import { createTestQueryClient, queryClientWrapper } from "@/tests/testQueryClient"
 
-// PdfPage's own lifecycle against a stand-in pdf.js: eviction must release the page's decoded
-// resources, and a page reaching the render margin must not re-render its siblings.
+// The preview's PDF viewer on @filen/office's pages against a stand-in pdf.js: pages, the link gate and find.
 
 interface FakePage {
 	getViewport: ReturnType<typeof vi.fn>
 	render: ReturnType<typeof vi.fn>
 	cleanup: ReturnType<typeof vi.fn>
-	streamTextContent: ReturnType<typeof vi.fn>
+	streamTextContent: () => unknown
+	getTextContent: () => Promise<{ items: unknown[] }>
 	getAnnotations: ReturnType<typeof vi.fn>
 	userUnit: number
 }
@@ -23,12 +24,15 @@ const { pages } = vi.hoisted(() => ({ pages: new Map<number, FakePage>() }))
 // The link gate reads the trusted link domains.
 vi.mock("@/lib/storage/adapter", () => ({ kvGetJson: () => Promise.resolve(null), kvSetJson: () => Promise.resolve() }))
 
-function fakePage(): FakePage {
+function fakePage(text: string[] = []): FakePage {
+	const items = text.map(str => ({ str, hasEOL: false }))
+
 	return {
 		getViewport: vi.fn(() => ({ width: 100, height: 100, convertToViewportPoint: (x: number, y: number) => [x, y] })),
-		render: vi.fn(() => ({ promise: new Promise(() => undefined), cancel: vi.fn() })),
+		render: vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() })),
 		cleanup: vi.fn(() => true),
-		streamTextContent: vi.fn(() => ({})),
+		streamTextContent: () => items,
+		getTextContent: () => Promise.resolve({ items }),
 		getAnnotations: vi.fn(() => Promise.resolve([])),
 		userUnit: 1
 	}
@@ -36,20 +40,40 @@ function fakePage(): FakePage {
 
 vi.mock("pdfjs-dist", () => ({
 	GlobalWorkerOptions: { workerSrc: "" },
-	PasswordResponses: { NEED_PASSWORD: 1, INCORRECT_PASSWORD: 2 },
+	// Only a ranged source constructs one.
+	PDFDataRangeTransport: vi.fn(),
 	TextLayer: class {
+		readonly textDivs: HTMLElement[] = []
+		readonly textContentItemsStr: string[] = []
+		private readonly params: { textContentSource: { str: string }[]; container: HTMLElement }
+
+		constructor(params: { textContentSource: { str: string }[]; container: HTMLElement }) {
+			this.params = params
+		}
+
 		render(): Promise<void> {
+			for (const { str } of this.params.textContentSource) {
+				const span = document.createElement("span")
+
+				span.textContent = str
+				this.textDivs.push(span)
+				this.textContentItemsStr.push(str)
+				this.params.container.append(span)
+			}
+
 			return Promise.resolve()
 		}
 
 		cancel(): void {
-			// Nothing to cancel in the stand-in.
+			// Renders at once.
 		}
 	},
 	getDocument: () => ({
 		promise: Promise.resolve({
 			numPages: 3,
-			getPage: (n: number) => Promise.resolve(pages.get(n))
+			getPage: (n: number) => Promise.resolve(pages.get(n)),
+			getDestination: () => Promise.resolve(null),
+			getPageIndex: () => Promise.resolve(0)
 		}),
 		destroy: () => Promise.resolve()
 	})
@@ -62,7 +86,7 @@ vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 interface Observed {
 	callback: IntersectionObserverCallback
 	options: IntersectionObserverInit | undefined
-	element: Element | null
+	elements: Set<Element>
 }
 
 const observers: Observed[] = []
@@ -71,54 +95,49 @@ class FakeIntersectionObserver {
 	readonly entry: Observed
 
 	constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
-		this.entry = { callback, options, element: null }
+		this.entry = { callback, options, elements: new Set() }
 		observers.push(this.entry)
 	}
 
 	observe(element: Element): void {
-		this.entry.element = element
+		this.entry.elements.add(element)
+	}
+
+	unobserve(element: Element): void {
+		this.entry.elements.delete(element)
 	}
 
 	disconnect(): void {
-		// Observers are only ever driven by hand here.
+		this.entry.elements.clear()
 	}
 }
 
 const { PdfViewer } = await import("@/features/preview/components/pdfViewer")
 
+registerAllActions()
+
 const item = linkedFileItem("doc.pdf", { uuid: "aaaaaaaa-0000-0000-0000-000000000001", mime: { Decrypted: "application/pdf" }, size: 1n })
 
-// The render-margin observer asks for ratio thresholds; the eviction one does not.
-function observerFor(pageNumber: number, kind: "render" | "evict"): Observed {
-	const found = observers.find(observed => {
-		const wrapper = observed.element
-		const index = wrapper?.parentElement === null || wrapper === null ? -1 : Array.from(wrapper.parentElement.children).indexOf(wrapper)
-		const isRender = Array.isArray(observed.options?.threshold)
+function pageElement(n: number): Element {
+	const element = document.querySelector(`[data-page="${String(n)}"]`)
 
-		return index === pageNumber - 1 && isRender === (kind === "render")
-	})
-
-	if (found === undefined) {
-		throw new Error(`no ${kind} observer for page ${String(pageNumber)}`)
-	}
-
-	return found
-}
-
-function fire(observed: Observed, isIntersecting: boolean, intersectionRatio = 0): void {
-	act(() => {
-		observed.callback([{ isIntersecting, intersectionRatio } as IntersectionObserverEntry], {} as IntersectionObserver)
-	})
-}
-
-function page(n: number): FakePage {
-	const found = pages.get(n)
-
-	if (found === undefined) {
+	if (element === null) {
 		throw new Error(`no page ${String(n)}`)
 	}
 
-	return found
+	return element
+}
+
+// Brings a page into both margins, as the view would on scrolling to it.
+function show(n: number, ratio = 1): void {
+	act(() => {
+		for (const observed of observers) {
+			observed.callback(
+				[{ target: pageElement(n), isIntersecting: true, intersectionRatio: ratio } as unknown as IntersectionObserverEntry],
+				{} as IntersectionObserver
+			)
+		}
+	})
 }
 
 beforeEach(() => {
@@ -130,6 +149,8 @@ beforeEach(() => {
 	}
 
 	vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver)
+	// jsdom lays nothing out and has no scrollIntoView.
+	Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() })
 })
 
 async function mount(): Promise<void> {
@@ -143,45 +164,30 @@ async function mount(): Promise<void> {
 
 	await waitFor(() => {
 		for (const n of [1, 2, 3]) {
-			expect(page(n).getViewport).toHaveBeenCalled()
+			expect(pages.get(n)?.getViewport).toHaveBeenCalled()
 		}
 	})
 }
 
-describe("PdfPage", () => {
-	it("releases the page's decoded resources when it leaves the eviction margin", async () => {
+describe("PdfViewer", () => {
+	it("labels each page's canvas and follows the page most in view", async () => {
 		await mount()
 
-		fire(observerFor(2, "evict"), true)
-		expect(page(2).cleanup).not.toHaveBeenCalled()
+		expect(screen.getByLabelText("doc.pdf — Page 2 of 3")).toBeTruthy()
+		expect(screen.getByText("Page 1 of 3")).toBeTruthy()
 
-		fire(observerFor(2, "evict"), false)
-		expect(page(2).cleanup).toHaveBeenCalledTimes(1)
+		show(2)
+
+		expect(await screen.findByText("Page 2 of 3")).toBeTruthy()
 	})
 
-	it("renders a page once it reaches the render margin, without re-rendering its siblings", async () => {
-		await mount()
-
-		fire(observerFor(2, "evict"), true)
-		expect(page(2).render).not.toHaveBeenCalled()
-
-		const siblingRenders = page(3).getViewport.mock.calls.length
-
-		fire(observerFor(2, "render"), true)
-
-		expect(page(2).render).toHaveBeenCalledTimes(1)
-		expect(page(3).getViewport.mock.calls.length).toBe(siblingRenders)
-	})
-})
-
-describe("PDF links", () => {
 	it("asks before a link annotation opens a domain not trusted yet", async () => {
 		pages.set(1, {
 			...fakePage(),
 			getAnnotations: vi.fn(() => Promise.resolve([{ subtype: "Link", url: "https://example.com/x", rect: [0, 0, 10, 10] }]))
 		})
 		await mount()
-		fire(observerFor(1, "evict"), true)
+		show(1)
 
 		const link = await screen.findByRole("link", { name: "https://example.com/x" })
 		const click = new MouseEvent("click", { bubbles: true, cancelable: true })
@@ -190,5 +196,27 @@ describe("PDF links", () => {
 
 		expect(click.defaultPrevented).toBe(true)
 		expect(await screen.findByRole("alertdialog", { name: "Open external link?" })).toBeTruthy()
+	})
+
+	it("finds text from the toolbar and highlights the current match", async () => {
+		pages.set(1, fakePage(["alpha beta"]))
+		pages.set(3, fakePage(["beta"]))
+		await mount()
+		show(1)
+
+		fireEvent.click(screen.getByRole("button", { name: "Find in document" }))
+		fireEvent.change(await screen.findByRole("searchbox", { name: "Find" }), { target: { value: "beta" } })
+
+		expect(await screen.findByText("1/2")).toBeTruthy()
+		await waitFor(() => {
+			expect(pageElement(1).querySelector(".highlight.selected")?.textContent).toBe("beta")
+		})
+
+		fireEvent.click(screen.getByRole("button", { name: "Close find" }))
+
+		await waitFor(() => {
+			expect(document.querySelector(".highlight")).toBeNull()
+		})
+		expect(screen.getByText("Page 1 of 3")).toBeTruthy()
 	})
 })

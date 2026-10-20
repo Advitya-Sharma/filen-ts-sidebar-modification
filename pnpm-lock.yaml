@@ -713,6 +713,9 @@ importers:
       hyperformula:
         specifier: 3.4.0
         version: 3.4.0
+      pdfjs-dist:
+        specifier: ^6.3.289
+        version: 6.3.289
     devDependencies:
       '@codemirror/state':
         specifier: 6.7.4
