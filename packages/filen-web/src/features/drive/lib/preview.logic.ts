@@ -3,6 +3,7 @@ import { clampListboxIndex } from "@/features/drive/lib/listbox"
 import { ARCHIVE_NAME_EXTENSIONS } from "@/features/drive/lib/archiveFormats"
 import { SPREADSHEET_EXTENSIONS } from "@/features/spreadsheet/lib/fileKind"
 import { CODE_FILE_EXTENSIONS, extensionStart, resolveFileKind, type ContentVerdict, type FileKind } from "@filen/shared"
+import { codeLanguageExtensions, codeLanguageForExtension, type CodeLanguageId } from "@filen/office/core/code"
 import { fileKindVerdict } from "@/features/drive/lib/fileKindVerdicts"
 
 // Every previewable file resolves to one of these; "other" is the download-only fallback (no viewer,
@@ -311,81 +312,17 @@ export function looksBinary(bytes: Uint8Array): boolean {
 	return bytes.subarray(0, BINARY_PROBE_BYTES).includes(0)
 }
 
-// ext -> the language tag codeMirrorShared.ts maps to a CodeMirror language package (this file stays
-// framework-free, so the map value is a plain string, never a CodeMirror Extension). "" means no
-// grammar is wired for that extension; the file still renders as a fully usable read-only,
-// unhighlighted CodeMirror view, never a blocked preview. Every
-// CODE_FILE_EXTENSIONS entry is covered (some intentionally unmapped — no maintained CodeMirror 6
-// grammar exists for a bare Makefile/DOS-batch, and "vue"/"svelte" SFC parsing is out of scope), plus
-// the two markdown extensions for markdownViewer.tsx's view-source editor. Several tags share one
-// CodeMirror package family (js/cjs/mjs/jsx/tsx/ts all resolve via
-// @codemirror/lang-javascript with different jsx/typescript flags; c/cpp/h/hpp share
-// @codemirror/lang-cpp's C-family grammar; cs/kt/dart/gradle route through the legacy clike/groovy
-// stream parsers, the closest available grammars for those).
-const CODE_LANGUAGE_MAP = {
-	js: "javascript",
-	cjs: "javascript",
-	mjs: "javascript",
-	jsx: "jsx",
-	tsx: "tsx",
-	ts: "typescript",
-	mts: "typescript",
-	cts: "typescript",
-	json: "json",
-	htm: "html",
-	html: "html",
-	html5: "html",
-	css: "css",
-	css3: "css",
-	coffee: "coffeescript",
-	litcoffee: "coffeescript",
-	sass: "sass",
-	xml: "xml",
-	sql: "sql",
-	java: "java",
-	kt: "kotlin",
-	swift: "swift",
-	py: "python",
-	py3: "python",
-	cmake: "cmake",
-	cs: "csharp",
-	dart: "dart",
-	dockerfile: "dockerfile",
-	go: "go",
-	less: "less",
-	yaml: "yaml",
-	vbs: "vbscript",
-	cobol: "cobol",
-	toml: "toml",
-	conf: "ini",
-	ini: "ini",
-	gradle: "groovy",
-	lua: "lua",
-	cpp: "cpp",
-	c: "cpp",
-	h: "cpp",
-	hpp: "cpp",
-	rs: "rust",
-	sh: "shell",
-	rb: "ruby",
-	ps1: "powershell",
-	protobuf: "protobuf",
-	proto: "protobuf",
-	php: "php",
-	md: "markdown",
-	markdown: "markdown"
-} as const satisfies Readonly<Record<string, string>>
-
-export type CodeMirrorTag = (typeof CODE_LANGUAGE_MAP)[keyof typeof CODE_LANGUAGE_MAP]
+// ext -> the code language (@filen/office/core/code: every grammar both apps ship) codeMirrorShared.ts
+// builds the editor's highlighting from. "" means no grammar covers the extension; the file still renders
+// as a fully usable, unhighlighted CodeMirror view, never a blocked preview.
+export type CodeMirrorTag = CodeLanguageId
 
 export function codeMirrorLanguageFor(ext: string): CodeMirrorTag | "" {
-	const byExt: Readonly<Partial<Record<string, CodeMirrorTag>>> = CODE_LANGUAGE_MAP
-	return byExt[ext] ?? ""
+	return codeLanguageForExtension(ext) ?? ""
 }
 
 // Every extension codeMirrorLanguageFor recognizes — the notes import feature builds its file input's
-// `accept` union from this list, so a future CODE_LANGUAGE_MAP addition is picked up there automatically
-// instead of drifting out of sync with a hand-maintained second list.
+// `accept` union from this list, so the language table and that list never drift apart.
 export function codeMirrorSupportedExtensions(): readonly string[] {
-	return Object.keys(CODE_LANGUAGE_MAP)
+	return codeLanguageExtensions()
 }

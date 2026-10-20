@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type RefObject } from "react"
-import CodeMirror, { ExternalChange, type ReactCodeMirrorRef } from "@uiw/react-codemirror"
-import { Compartment, EditorState, type Extension } from "@codemirror/state"
+import { Compartment, type Extension } from "@codemirror/state"
 import { EditorView } from "@codemirror/view"
-import { languageExtensionFor, useCodeMirrorTheme, useEditorKeymap } from "@/features/preview/lib/codeMirrorShared"
+import { codeEditorSetup, codeFillParent, codeReadOnly, codeTheme } from "@filen/office/dom/code"
+import { CodeEditor } from "@filen/office/react/code"
+import { languageExtensionFor, useEditorKeymap } from "@/features/preview/lib/codeMirrorShared"
 
 // Shared CodeMirror read/write surface — extracted from textViewer.tsx so the notes reader (and the
 // notes editor) reuses the SAME language/theme plumbing (lib/codeMirrorShared.ts) as file preview
@@ -36,7 +37,7 @@ export interface CodeMirrorSourceProps {
 	locked?: boolean
 }
 
-const LOCKED: Extension = [EditorState.readOnly.of(true), EditorView.editable.of(false)]
+const LOCKED: Extension = codeReadOnly(true)
 
 // Its own compartment, swapped alone: the editable/readOnly props would rebuild the whole configuration.
 // Compartment contents survive the wrapper's own full reconfigures (theme, language).
@@ -46,14 +47,8 @@ function emptyCompartment(): { compartment: Compartment; initial: Extension } {
 	return { compartment, initial: compartment.of([]) }
 }
 
-const BASIC_SETUP = { searchKeymap: false }
-
-// CodeMirror splits the doc on CR, LF and CRLF and joins it with LF, so a seed carrying CR differs from
-// its own doc: @uiw then replaces the whole doc with it again at mount, a second full copy that the undo
-// history keeps and a full reparse. Seeding it already joined gives the same doc without that.
-function joinLinesLikeCodeMirror(text: string): string {
-	return text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text
-}
+// Extension values hold no state of their own, so every editor shares one setup.
+const SETUP: Extension = codeEditorSetup()
 
 function noopDirtyChange(): void {
 	// Default for every read-only caller — CodeMirrorSource always calls onDirtyChange, so a real
@@ -81,17 +76,14 @@ export function CodeMirrorSource({
 }: CodeMirrorSourceProps) {
 	const editable = editableProp ?? false
 	const onDirtyChange = onDirtyChangeProp ?? noopDirtyChange
-	const codeMirrorTheme = useCodeMirrorTheme()
 	const languageExtension = languageExtensionFor(tag)
 	// Find, replace and (in markdown) formatting, on the user's own shortcuts.
 	const editorKeymap = useEditorKeymap(tag === "markdown")
 	const [lock] = useState(emptyCompartment)
 	// Holds the change listener, installed once the view exists (handleCreateEditor).
 	const [changes] = useState(emptyCompartment)
-	const editorRef = useRef<ReactCodeMirrorRef>(null)
-	// The view as handed over at creation: the imperative handle only catches up a commit later.
 	const viewRef = useRef<EditorView | null>(null)
-	const [seed] = useState(() => joinLinesLikeCodeMirror(text))
+	const [seed] = useState(text)
 	const [dirty, setDirty] = useState(false)
 	// Latest sinks for the change listener, which is installed once: a new callback identity must never
 	// reconfigure the editor.
@@ -101,14 +93,25 @@ export function CodeMirrorSource({
 		sinksRef.current = { editable, contentRef, onValueChange }
 	})
 
+	const readOnly = codeReadOnly(!editable)
 	const extensions = languageExtension
-		? [languageExtension, EditorView.lineWrapping, editorKeymap, lock.initial, changes.initial]
-		: [EditorView.lineWrapping, editorKeymap, lock.initial, changes.initial]
+		? [
+				codeFillParent,
+				SETUP,
+				codeTheme,
+				readOnly,
+				languageExtension,
+				EditorView.lineWrapping,
+				editorKeymap,
+				lock.initial,
+				changes.initial
+			]
+		: [codeFillParent, SETUP, codeTheme, readOnly, EditorView.lineWrapping, editorKeymap, lock.initial, changes.initial]
 	const isLocked = locked === true
 
 	// A lock change on the live view; a view created while locked takes it in handleCreateEditor.
 	useEffect(() => {
-		editorRef.current?.view?.dispatch({ effects: lock.compartment.reconfigure(isLocked ? LOCKED : []) })
+		viewRef.current?.dispatch({ effects: lock.compartment.reconfigure(isLocked ? LOCKED : []) })
 	}, [lock, isLocked])
 
 	function handleCreateEditor(view: EditorView): void {
@@ -125,12 +128,7 @@ export function CodeMirrorSource({
 		const listener = EditorView.updateListener.of(update => {
 			const sinks = sinksRef.current
 
-			// @uiw's own value sync is not an edit (its onChange skips it the same way).
-			if (
-				!update.docChanged ||
-				!sinks.editable ||
-				update.transactions.some(transaction => transaction.annotation(ExternalChange) === true)
-			) {
+			if (!update.docChanged || !sinks.editable) {
 				return
 			}
 
@@ -166,28 +164,16 @@ export function CodeMirrorSource({
 
 	return (
 		<div className="size-full">
-			<CodeMirror
-				// @uiw's own wrapper div (the one this className lands on) has no height of its own — the
-				// `height="100%"` prop below only reaches `.cm-editor`/`.cm-scroller` INSIDE that wrapper, so
-				// without this the wrapper collapses to content height and everything past the fold is
-				// unreachable. The parent `size-full` div above must already be height-bounded by the caller.
-				ref={editorRef}
+			<CodeEditor
+				// The parent `size-full` div must already be height-bounded by the caller; the editor fills it.
 				className="size-full"
-				// The seed, never the live buffer: the view's doc is the buffer of record. A changing value is
-				// written back into the doc, and one committed mid-typing is held until typing pauses and then
-				// written over whatever was typed since. No onChange either: @uiw would flatten the whole doc
-				// into a string on every change for it.
-				value={seed}
+				// The seed, read once: the view's doc is the buffer of record. No change callback either: a
+				// string of the whole doc is built only for a caller that reads it.
+				doc={seed}
 				extensions={extensions}
-				editable={editable}
-				readOnly={!editable}
-				theme={codeMirrorTheme}
-				// Its Mod-f would shadow a rebound editor.find; useEditorKeymap carries the rest of it.
-				basicSetup={BASIC_SETUP}
-				height="100%"
-				aria-label={alt}
+				label={alt}
 				autoFocus={autoFocus ?? false}
-				onCreateEditor={handleCreateEditor}
+				onCreate={handleCreateEditor}
 			/>
 		</div>
 	)

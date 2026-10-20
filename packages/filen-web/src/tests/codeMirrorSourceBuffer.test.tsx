@@ -4,11 +4,9 @@ import { createRef } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { act, render } from "@testing-library/react"
 import { EditorView } from "@codemirror/view"
-import { ExternalChange } from "@uiw/react-codemirror"
 
 vi.mock("@/features/preview/lib/codeMirrorShared", () => ({
 	languageExtensionFor: () => null,
-	useCodeMirrorTheme: () => [],
 	useEditorKeymap: () => []
 }))
 
@@ -214,29 +212,34 @@ describe("CodeMirrorSource buffer", () => {
 		expect(onValueChange.mock.calls.map(([value]) => value)).toEqual(["a\nb\nc!"])
 	})
 
-	it("ignores @uiw's own value sync", () => {
+	// The editor invariant: only a remount reseeds it, so a new `text` from a re-render never touches the
+	// buffer being edited.
+	it("keeps the buffer when a re-render brings a different text", () => {
 		const onValueChange = vi.fn<(value: string) => void>()
-		const onDirtyChange = vi.fn<(dirty: boolean) => void>()
-		const { container } = render(
+		const { container, rerender } = render(
 			<CodeMirrorSource
 				text="saved"
 				tag="text"
 				alt="notes.txt"
 				editable
 				onValueChange={onValueChange}
-				onDirtyChange={onDirtyChange}
 			/>
 		)
 		const view = editorView(container)
 
-		act(() => {
-			view.dispatch({
-				changes: { from: 0, to: view.state.doc.length, insert: "synced" },
-				annotations: [ExternalChange.of(true)]
-			})
-		})
+		append(view, "!")
+		rerender(
+			<CodeMirrorSource
+				text="from elsewhere"
+				tag="text"
+				alt="notes.txt"
+				editable
+				onValueChange={onValueChange}
+			/>
+		)
 
-		expect(onValueChange).not.toHaveBeenCalled()
-		expect(onDirtyChange).not.toHaveBeenCalledWith(true)
+		expect(editorView(container)).toBe(view)
+		expect(view.state.doc.toString()).toBe("saved!")
+		expect(onValueChange.mock.calls.map(([value]) => value)).toEqual(["saved!"])
 	})
 })

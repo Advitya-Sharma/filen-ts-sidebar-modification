@@ -106,6 +106,38 @@ defect or inaccuracy in this document or the included data.
 - Derived files, modified for `@filen/office`:
   - `src/css/pdf.css` (the `.textLayer` rules of `web/pdf_viewer.css`, selector renamed and colours made variables)
 
+## CodeMirror highlight styles
+
+- Source: @codemirror/language 6.12.4 (`defaultHighlightStyle`) and @codemirror/theme-one-dark 6.1.3 (`oneDarkHighlightStyle`), https://github.com/codemirror
+- Copyright: 2018-2021 Marijn Haverbeke and others
+- Licence: MIT (text below)
+- Derived files, modified for `@filen/office`:
+  - `src/dom/code/theme.ts` (the two styles' colours, weights and decorations per highlight tag, as CSS variables)
+
+```
+MIT License
+
+Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ## Apache License 2.0
 
 ```

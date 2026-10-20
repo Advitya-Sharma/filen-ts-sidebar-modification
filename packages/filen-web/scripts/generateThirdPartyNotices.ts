@@ -635,6 +635,13 @@ const OFFICE_DERIVED: {
 		text: sections => noticeFence(sections, "ECMA-376 preset shape definitions")
 	},
 	{
+		section: "CodeMirror highlight styles",
+		name: "CodeMirror highlight styles",
+		version: /@codemirror\/theme-one-dark (\d+\.\d+\.\d+) /,
+		license: "MIT",
+		text: sections => noticeFence(sections, "CodeMirror highlight styles")
+	},
+	{
 		section: "pdf.js",
 		name: "pdf.js",
 		version: /^pdfjs-dist (\d+\.\d+\.\d+), /,

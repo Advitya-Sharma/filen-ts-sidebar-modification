@@ -24,25 +24,24 @@ vi.mock("@/providers/themeProvider", () => ({ useTheme: () => ({ theme: "light",
 
 // CodeMirror's own view needs layout jsdom lacks; a textarea stands in for the editor surface over a
 // detached EditorView carrying CodeMirrorSource's real extensions, so its buffer, dirty and contentRef
-// logic stays under test. Uncontrolled, like the editor: `value` seeds it, and the typed buffer lives in
-// it. The view is handed over once, as @uiw does.
-vi.mock("@uiw/react-codemirror", async () => {
-	const { Annotation, EditorState } = await import("@codemirror/state")
+// logic stays under test. Uncontrolled, like the editor: `doc` seeds it, and the typed buffer lives in
+// it. The view is handed over once, as the real editor does.
+vi.mock("@filen/office/react/code", async () => {
+	const { EditorState } = await import("@codemirror/state")
 	const { EditorView } = await import("@codemirror/view")
 	const { useEffectEvent, useLayoutEffect, useState } = await import("react")
 
 	interface FakeProps {
-		value: string
-		readOnly: boolean
-		"aria-label": string
-		extensions: Extension[]
-		onCreateEditor?: (view: InstanceType<typeof EditorView>) => void
+		doc: string
+		label?: string
+		extensions: Extension
+		onCreate?: (view: InstanceType<typeof EditorView>) => void
 	}
 
-	function FakeCodeMirror(props: FakeProps) {
-		const [view] = useState(() => new EditorView({ state: EditorState.create({ doc: props.value, extensions: props.extensions }) }))
+	function FakeCodeEditor(props: FakeProps) {
+		const [view] = useState(() => new EditorView({ state: EditorState.create({ doc: props.doc, extensions: props.extensions }) }))
 		const created = useEffectEvent(() => {
-			props.onCreateEditor?.(view)
+			props.onCreate?.(view)
 		})
 
 		useLayoutEffect(() => {
@@ -54,21 +53,16 @@ vi.mock("@uiw/react-codemirror", async () => {
 		}, [view])
 
 		return createElement("textarea", {
-			"aria-label": props["aria-label"],
-			defaultValue: props.value,
-			readOnly: props.readOnly,
+			"aria-label": props.label,
+			defaultValue: props.doc,
+			readOnly: view.state.readOnly,
 			onChange: (event: ChangeEvent<HTMLTextAreaElement>) => {
 				view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: event.target.value } })
 			}
 		})
 	}
 
-	return {
-		// The source's update listener skips @uiw's own value-sync transactions by this annotation.
-		ExternalChange: Annotation.define<boolean>(),
-		oneDarkHighlightStyle: (await import("@codemirror/language")).HighlightStyle.define([]),
-		default: FakeCodeMirror
-	}
+	return { CodeEditor: FakeCodeEditor }
 })
 
 import { narrowItem, type DriveItem } from "@/features/drive/lib/item"

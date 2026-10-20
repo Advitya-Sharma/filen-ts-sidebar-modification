@@ -1,0 +1,5 @@
+export { codeLanguageSupport } from "./languages"
+export { codeHighlightStyle, codeSyntaxVariables, codeTheme } from "./theme"
+export { codeEditorSetup, codeFillParent, codeReadOnly } from "./setup"
+export { CODE_EDITOR_SCOPE, CODE_SEARCH_SCOPE, codeKeymap, openReplacePanel, openSearchPanel, type CodeBinding } from "./search"
+export { mountCodeCompare, type CodeCompareOptions } from "./merge"

@@ -145,6 +145,23 @@ describe("React Compiler coverage", () => {
 		}
 	})
 
+	it("compiles the code editor, its preview and notes surface and the remote-change comparison", () => {
+		for (const [file, fnName] of [
+			["../filen-office/src/react/code/CodeEditor.tsx", "CodeEditor"],
+			["src/features/preview/components/codeMirrorSource.tsx", "CodeMirrorSource"],
+			["src/features/preview/components/remoteCompare.tsx", "RemoteCompare"],
+			["src/features/preview/components/remoteCompare.tsx", "RemoteFileCompare"],
+			["src/features/preview/lib/codeMirrorShared.ts", "useEditorKeymap"]
+		] as const) {
+			const events = compile(file)
+
+			expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
+			expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === fnName && (event.memoSlots ?? 0) > 0)).toBe(
+				true
+			)
+		}
+	})
+
 	// About 30 files, the editor's largest among them: some 15 s cold on a loaded machine.
 	it("compiles the DOCX editor's view, toolbar, touch selection and hooks", { timeout: 60_000 }, () => {
 		for (const [file, fnName] of [

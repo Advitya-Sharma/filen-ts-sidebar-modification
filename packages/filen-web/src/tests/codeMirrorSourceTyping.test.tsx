@@ -7,7 +7,6 @@ import { EditorView } from "@codemirror/view"
 
 vi.mock("@/features/preview/lib/codeMirrorShared", () => ({
 	languageExtensionFor: () => null,
-	useCodeMirrorTheme: () => [],
 	useEditorKeymap: () => []
 }))
 

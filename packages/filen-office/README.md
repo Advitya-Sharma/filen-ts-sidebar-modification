@@ -28,6 +28,10 @@ Document engines and editors shared by the Filen apps. `pnpm run lint`, `pnpm ru
 - `@filen/office/react/pdf` is headless: `<PdfPages>` (virtualised pages with pdf.js's text layer), `usePdfDocument` and `usePdfViewer`, with commands and state like the DOCX viewer. `@filen/office/css/pdf.css` is structural; its colours are `--fo-pdf-*` variables.
 - `pdfjs-dist` is an optional peer dependency (Apache-2.0); this package bundles none of it. An app that uses these entry points adds it as its own dependency, dedupes it, and adds its notice.
 
+## Code editor
+
+- `@filen/office/core/code` maps a lowercased file extension to a code language (234 extensions, 123 languages; DOM-free, Hermes-safe). `@filen/office/dom/code` holds the CodeMirror pieces: `codeLanguageSupport` (every grammar, each built on first use), `codeTheme` (chrome and syntax colours as `--fo-code-*` variables; light falls back to CodeMirror's default style, `codeSyntaxVariables("dark")` is One Dark), `codeEditorSetup`, `codeKeymap`/`openReplacePanel`, and `mountCodeCompare`. `@filen/office/react/code` is the headless `<CodeEditor>`. The CodeMirror packages, `@lezer/highlight` and `@replit/codemirror-lang-{nix,solidity,svelte}` are optional peer dependencies (MIT); an app that uses these entry points adds them as its own dependencies, dedupes the stateful ones, and adds their notices.
+
 ## Real-world corpus
 
 The corpus holds 1,454 licensed real-world files in every supported format (DOCX, XLSX, CSV/TSV, PPTX, ODT, ODS, ODP, RTF, DOC, XLS, PPT and their template/macro variants); the corpus tests (`src/tests/*Corpus.test.ts`) run each engine over its own family. The files are never committed; `corpus/manifest.json` lists each one with its download URL, licence, size and SHA-256, and `corpus/README.md` lists the sources, licences and families. `src/tests/corpusFiles.test.ts` checks every fetched family, with an engine or not, against the manifest.

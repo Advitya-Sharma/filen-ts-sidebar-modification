@@ -57,10 +57,9 @@ test("editable text preview saves via its Save button, persists across reopen, a
 		const original = page.getByRole("dialog").getByText("Hello from a tiny text fixture.")
 		await expect(original).toBeVisible({ timeout: 30_000 })
 
-		// Select-all + type replaces the whole buffer with a deterministic string (basicSetup's
-		// defaultKeymap, on by default, binds Mod-a — verified against the installed
-		// @uiw/codemirror-extensions-basic-setup) — simpler to assert on than an appended tail, and
-		// exercises onChange/dirty-tracking across the WHOLE buffer, not just its end.
+		// Select-all + type replaces the whole buffer with a deterministic string (the editor setup's
+		// defaultKeymap binds Mod-a: @filen/office/dom/code codeEditorSetup) — simpler to assert on than an
+		// appended tail, and exercises onChange/dirty-tracking across the WHOLE buffer, not just its end.
 		const editor = page.locator(".cm-content")
 		await focusEditorSurface(editor)
 		await page.keyboard.press(`${modKey}+a`)

@@ -1,19 +1,13 @@
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { EditorState, type Extension } from "@codemirror/state"
-import { EditorView } from "@codemirror/view"
-import { MergeView, unifiedMergeView } from "@codemirror/merge"
+import type { Extension } from "@codemirror/state"
+import { codeTheme, mountCodeCompare } from "@filen/office/dom/code"
 import { type DriveItem } from "@/features/drive/lib/item"
 import { codeMirrorLanguageFor, decodeUtf8, itemTypeExtension } from "@/features/drive/lib/preview.logic"
-import { languageExtensionFor, useCodeMirrorTheme } from "@/features/preview/lib/codeMirrorShared"
+import { languageExtensionFor } from "@/features/preview/lib/codeMirrorShared"
 import { usePreviewBytes } from "@/features/preview/hooks/usePreviewBytes"
 import { LoadingState } from "@/components/loadingState"
 import { isNarrowViewport } from "@/features/shell/lib/breakpoints"
-
-// Unchanged stretches fold away so the differences stay in view, and a diff that runs long falls back
-// to a coarser one rather than holding the main thread on two large, very different files.
-const COLLAPSE_UNCHANGED = { margin: 3, minSize: 4 }
-const DIFF_CONFIG = { scanLimit: 10_000, timeout: 500 }
 
 // The newer version's text, as far as it has been had.
 export type RemoteTheirs = { status: "loading" } | { status: "failed" } | { status: "ready"; text: string }
@@ -23,7 +17,6 @@ export type RemoteTheirs = { status: "loading" } | { status: "failed" } | { stat
 export function RemoteCompare({ theirs, mine, tag }: { theirs: RemoteTheirs; mine: string; tag: string }) {
 	const { t } = useTranslation("preview")
 	const theirsText = theirs.status === "ready" ? theirs.text : null
-	const theme = useCodeMirrorTheme()
 	const language = languageExtensionFor(tag)
 	const hostRef = useRef<HTMLDivElement>(null)
 	// Side by side needs the width; a narrow window gets one column with both versions interleaved.
@@ -36,46 +29,10 @@ export function RemoteCompare({ theirs, mine, tag }: { theirs: RemoteTheirs; min
 			return undefined
 		}
 
-		const extensions: Extension[] = [EditorState.readOnly.of(true), EditorView.editable.of(false), EditorView.lineWrapping, theme]
+		const extensions: Extension = language === null ? codeTheme : [codeTheme, language]
 
-		if (language !== null) {
-			extensions.push(language)
-		}
-
-		if (sideBySide) {
-			const view = new MergeView({
-				a: { doc: theirsText, extensions },
-				b: { doc: mine, extensions },
-				parent: host,
-				gutter: true,
-				collapseUnchanged: COLLAPSE_UNCHANGED,
-				diffConfig: DIFF_CONFIG
-			})
-
-			return () => {
-				view.destroy()
-			}
-		}
-
-		const view = new EditorView({
-			doc: mine,
-			extensions: [
-				...extensions,
-				unifiedMergeView({
-					original: theirsText,
-					mergeControls: false,
-					gutter: true,
-					collapseUnchanged: COLLAPSE_UNCHANGED,
-					diffConfig: DIFF_CONFIG
-				})
-			],
-			parent: host
-		})
-
-		return () => {
-			view.destroy()
-		}
-	}, [theirsText, mine, theme, language, sideBySide])
+		return mountCodeCompare({ parent: host, theirs: theirsText, mine, sideBySide, extensions })
+	}, [theirsText, mine, language, sideBySide])
 
 	if (theirs.status === "failed") {
 		return <p className="flex items-center justify-center text-sm text-destructive">{t("previewRemoteCompareFailed")}</p>

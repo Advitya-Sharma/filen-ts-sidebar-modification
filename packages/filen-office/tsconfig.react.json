@@ -1,6 +1,6 @@
 {
 	"extends": "./tsconfig.json",
-	"include": ["src/react", "src/globals.d.ts"],
+	"include": ["src/react", "src/dom/code", "src/globals.d.ts"],
 	"exclude": [],
 	"compilerOptions": {
 		"lib": ["ESNext", "DOM", "DOM.Iterable"],

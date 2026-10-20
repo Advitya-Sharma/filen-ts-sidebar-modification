@@ -784,9 +784,8 @@ describe("decodeUtf8", () => {
 })
 
 describe("codeMirrorLanguageFor — extension to CodeMirror language tag", () => {
-	// The full code-extension set (CODE_FILE_EXTENSIONS) mapped to the tag
-	// textViewer.tsx's own loader switches on, or "" when no CodeMirror grammar is wired for it (still
-	// a fully usable read-only plain-text view, just unhighlighted).
+	// The full code-extension set (CODE_FILE_EXTENSIONS) mapped to its language, or "" when no grammar
+	// covers it (still a fully usable read-only plain-text view, just unhighlighted).
 	const EXPECTED: Record<string, string> = {
 		js: "javascript",
 		cjs: "javascript",
@@ -820,8 +819,8 @@ describe("codeMirrorLanguageFor — extension to CodeMirror language tag", () =>
 		go: "go",
 		less: "less",
 		yaml: "yaml",
-		vue: "",
-		svelte: "",
+		vue: "vue",
+		svelte: "svelte",
 		vbs: "vbscript",
 		cobol: "cobol",
 		toml: "toml",
@@ -851,6 +850,23 @@ describe("codeMirrorLanguageFor — extension to CodeMirror language tag", () =>
 	// language too, even though md/markdown never reach here via the "code" category.
 	it.each(["md", "markdown"])("%s -> markdown (view-source fallback)", ext => {
 		expect(codeMirrorLanguageFor(ext)).toBe("markdown")
+	})
+
+	// Beyond the code category: a file opened as text (or a note named so) gets its grammar too.
+	it.each([
+		["scala", "scala"],
+		["hs", "haskell"],
+		["tex", "latex"],
+		["yml", "yaml"],
+		["scss", "scss"],
+		["nix", "nix"]
+	])("%s -> %s", (ext, expected) => {
+		expect(codeMirrorLanguageFor(ext)).toBe(expected)
+	})
+
+	it('returns "" for an inherited object key', () => {
+		expect(codeMirrorLanguageFor("constructor")).toBe("")
+		expect(codeMirrorLanguageFor("__proto__")).toBe("")
 	})
 
 	it('returns "" for an unrecognized extension', () => {

@@ -1,0 +1,85 @@
+/* The code editor's --fo-code-* variables (@filen/office/dom/code) on the app's tokens. The chrome follows
+   the tokens in both themes; syntax colours fall back to CodeMirror's light style, and the dark theme sets
+   One Dark (codeSyntaxVariables("dark"), checked by codeMirrorTheme.test.ts). */
+.cm-editor {
+	--fo-code-bg: transparent;
+	--fo-code-fg: var(--foreground);
+	--fo-code-gutter-bg: transparent;
+	--fo-code-gutter-fg: var(--muted-foreground);
+	--fo-code-active-line: var(--muted);
+	--fo-code-caret: var(--foreground);
+	--fo-code-selection: color-mix(in oklab, var(--foreground) 18%, transparent);
+	--fo-code-panel-bg: var(--background);
+	--fo-code-panel-fg: var(--foreground);
+	--fo-code-border: var(--border);
+	--fo-code-input-border: var(--input);
+	--fo-code-focus-ring: var(--ring);
+	--fo-code-focus-shadow: color-mix(in oklab, var(--ring) 35%, transparent);
+	--fo-code-radius: 8px;
+	--fo-code-button-bg: var(--secondary);
+	--fo-code-button-fg: var(--secondary-foreground);
+	--fo-code-button-hover-bg: color-mix(in oklab, var(--secondary) 80%, var(--foreground));
+	--fo-code-muted-fg: var(--muted-foreground);
+	--fo-code-match: color-mix(in oklab, #facc15 35%, transparent);
+	--fo-code-match-selected: color-mix(in oklab, #f97316 45%, transparent);
+}
+
+.dark .cm-editor {
+	--fo-code-meta: #7d8799;
+	--fo-code-link: #7d8799;
+	--fo-code-link-decoration: underline;
+	--fo-code-heading: #e06c75;
+	--fo-code-heading-weight: bold;
+	--fo-code-heading-decoration: none;
+	--fo-code-emphasis-style: italic;
+	--fo-code-strong-weight: bold;
+	--fo-code-strikethrough-decoration: line-through;
+	--fo-code-keyword: #c678dd;
+	--fo-code-atom: #d19a66;
+	--fo-code-bool: #d19a66;
+	--fo-code-url: #56b6c2;
+	--fo-code-content-separator: currentColor;
+	--fo-code-label-name: #61afef;
+	--fo-code-literal: currentColor;
+	--fo-code-inserted: #98c379;
+	--fo-code-string: #98c379;
+	--fo-code-deleted: #e06c75;
+	--fo-code-regexp: #56b6c2;
+	--fo-code-escape: #56b6c2;
+	--fo-code-special-string: #56b6c2;
+	--fo-code-definition-variable-name: #abb2bf;
+	--fo-code-local-variable-name: #e06c75;
+	--fo-code-type-name: #e5c07b;
+	--fo-code-namespace: #e5c07b;
+	--fo-code-class-name: #e5c07b;
+	--fo-code-special-variable-name: #d19a66;
+	--fo-code-macro-name: #e06c75;
+	--fo-code-definition-property-name: #e06c75;
+	--fo-code-comment: #7d8799;
+	--fo-code-invalid: #ffffff;
+	--fo-code-name: #e06c75;
+	--fo-code-character: #e06c75;
+	--fo-code-property-name: #e06c75;
+	--fo-code-function-variable-name: #61afef;
+	--fo-code-color: #d19a66;
+	--fo-code-constant-name: #d19a66;
+	--fo-code-standard-name: #d19a66;
+	--fo-code-definition-name: #abb2bf;
+	--fo-code-separator: #abb2bf;
+	--fo-code-number: #e5c07b;
+	--fo-code-changed: #e5c07b;
+	--fo-code-annotation: #e5c07b;
+	--fo-code-modifier: #e5c07b;
+	--fo-code-self: #e5c07b;
+	--fo-code-operator: #56b6c2;
+	--fo-code-operator-keyword: #56b6c2;
+	--fo-code-processing-instruction: #98c379;
+	--fo-code-special-character: #e06c75;
+	--fo-code-definition-function-variable-name: #61afef;
+	--fo-code-definition-special-variable-name: #d19a66;
+	--fo-code-constant-local-variable-name: #d19a66;
+	--fo-code-function-local-variable-name: #61afef;
+	--fo-code-function-special-variable-name: #61afef;
+	--fo-code-standard-local-variable-name: #d19a66;
+	--fo-code-local-special-variable-name: #d19a66;
+}
