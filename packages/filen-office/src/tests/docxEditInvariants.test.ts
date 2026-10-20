@@ -16,6 +16,7 @@ import { SetMarksStep } from "../core/docx/edit/marks"
 import { RICH, markerKeys, openBytes, openSpec, sessionOf } from "./docxEditFixtures"
 import { buildDocx, p } from "./docxSynthetic"
 import { pagedEditor, settleAll } from "./pagedFixtures"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 function sectionHolders(doc: Node): number[] {
 	const out: number[] = []
@@ -892,7 +893,7 @@ describe("docx editing invariants", () => {
 
 		files["word/header1.xml"] = Uint8Array.from(new TextEncoder().encode(header))
 
-		const opened = await openBytes(zipSync(files))
+		const opened = await openBytes(zipSync(files, { mtime: ZIP_ENTRY_TIME }))
 		const story = opened.context.model.stories.find(entry => entry.kind === "header")
 
 		if (story === undefined) throw new Error("no header")

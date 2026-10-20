@@ -1,6 +1,7 @@
 import { strToU8, zipSync, type Zippable } from "fflate"
 import { bytesSource } from "@filen/office/core/opc"
 import { buildDocxModel, openDocxPackage, type DocxModel, type DocxPackage } from "@filen/office/core/docx"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 // Minimal word-processing packages assembled from XML snippets, for tests of single constructs.
 
@@ -181,7 +182,7 @@ export function buildDocx(spec: SyntheticDocx): Uint8Array {
 			"</Types>"
 	)
 
-	return zipSync(files, { level: 1 })
+	return zipSync(files, { level: 1, mtime: ZIP_ENTRY_TIME })
 }
 
 export async function openSynthetic(spec: SyntheticDocx): Promise<DocxPackage> {

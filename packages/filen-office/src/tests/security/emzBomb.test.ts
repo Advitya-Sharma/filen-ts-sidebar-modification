@@ -25,7 +25,7 @@ describe("compressed metafiles", () => {
 
 	it("still inflates a metafile below the cap", () => {
 		const bytes = new Uint8Array(3 * 1024 * 1024).map((_, k) => (k * 7) & 0xff)
-		const inflated = inflateMetafile(gzipSync(bytes))
+		const inflated = inflateMetafile(gzipSync(bytes, { mtime: 0 }))
 
 		expect(inflated !== undefined && Buffer.from(inflated).equals(bytes)).toBe(true)
 	})

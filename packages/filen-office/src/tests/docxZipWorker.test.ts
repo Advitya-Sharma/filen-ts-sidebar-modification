@@ -13,6 +13,7 @@ import { inThreadEditingHost } from "@filen/office/dom/docx/editing"
 import { DocxClosedError, DocxZipWorkerError, docxZipWorker, inThreadDocxZipper, serveDocxZipWorker } from "@filen/office/dom/docx/save"
 import { nodeText, openBytes } from "./docxEditFixtures"
 import { buildDocx, p } from "./docxSynthetic"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 // The zip half of a save behind its worker protocol: a real message channel (structured clone, transfers)
 // between the page side and serveDocxZipWorker, the original file read back from the page.
@@ -282,7 +283,10 @@ describe("docx zip worker", () => {
 	it("saves a document whose untouched entries it cannot decode, copied as they are", async () => {
 		const files = unzipSync(FIXTURE)
 		// A stored entry whose recorded CRC is wrong (readers that check it refuse it; the save leaves it be).
-		const archive = zipSync({ ...files, "word/media/odd.bin": [encodeUtf8("x".repeat(200) + "y".repeat(200)), { level: 0 }] })
+		const archive = zipSync(
+			{ ...files, "word/media/odd.bin": [encodeUtf8("x".repeat(200) + "y".repeat(200)), { level: 0 }] },
+			{ mtime: ZIP_ENTRY_TIME }
+		)
 		const name = encodeUtf8("word/media/odd.bin")
 		let local = -1
 

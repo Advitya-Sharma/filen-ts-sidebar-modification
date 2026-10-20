@@ -14,6 +14,7 @@ import { STYLES_PART } from "./docxEditFixtures"
 import { buildDocx, p } from "./docxSynthetic"
 import { layOut, layoutDigest } from "./layoutFixtures"
 import { pagedEditor } from "./pagedFixtures"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 // A table's cell margins (w:tblCellMar, else its style hierarchy's, else the standard's 115 twips a side) bound how
 // narrow a column gets and how wide what goes into a cell may be, and layout pads cells by the same; a table's
@@ -197,10 +198,13 @@ describe("cell margins in layout", () => {
 			expect(xml).not.toContain("tblCellMar")
 			expect(files["word/styles.xml"]).toBeUndefined()
 
-			const written = zipSync({
-				...files,
-				"word/document.xml": new TextEncoder().encode(xml.replace(/<\/w:tblPr>/g, `${explicit(115)}</w:tblPr>`))
-			})
+			const written = zipSync(
+				{
+					...files,
+					"word/document.xml": new TextEncoder().encode(xml.replace(/<\/w:tblPr>/g, `${explicit(115)}</w:tblPr>`))
+				},
+				{ mtime: ZIP_ENTRY_TIME }
+			)
 
 			expect(layoutDigest(await layOut(bytes))).toEqual(layoutDigest(await layOut(written)))
 		}

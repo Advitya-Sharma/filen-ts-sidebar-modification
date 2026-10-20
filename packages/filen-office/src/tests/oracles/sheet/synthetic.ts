@@ -1,5 +1,6 @@
 import { zipSync } from "fflate"
 import { encodeUtf8 } from "@filen/office/core/xml"
+import { ZIP_ENTRY_TIME } from "../../zipTime"
 
 // Minimal SpreadsheetML packages for the oracles' self-tests.
 
@@ -94,5 +95,5 @@ export function buildXlsx(workbook: SyntheticWorkbook): Uint8Array {
 		files["xl/calcChain.xml"] =
 			`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<calcChain xmlns="${SML}"><c r="A1" i="1"/></calcChain>`
 
-	return zipSync(Object.fromEntries(Object.entries(files).map(([name, text]) => [name, encodeUtf8(text)])))
+	return zipSync(Object.fromEntries(Object.entries(files).map(([name, text]) => [name, encodeUtf8(text)])), { mtime: ZIP_ENTRY_TIME })
 }

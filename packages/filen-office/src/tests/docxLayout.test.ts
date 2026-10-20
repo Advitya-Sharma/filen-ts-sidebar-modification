@@ -24,6 +24,7 @@ import { STYLES_PART } from "./docxEditFixtures"
 import { buildDocx, type SyntheticDocx } from "./docxSynthetic"
 import { HmtxMeasurer, layOut, layoutDigest, loadDocx, pageLines, type LineInfo } from "./layoutFixtures"
 import { wordLikeDocument } from "./wordLike"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 // Letter paper, 1 in margins: a 624 x 864 px text area. Without a styles part text is Times New Roman 10 pt
 // (Tinos metrics: 15.33 px lines), so a page holds 56 lines.
@@ -628,7 +629,10 @@ describe("sections", () => {
 		const xml = new TextDecoder().decode(files["word/document.xml"])
 
 		expect(xml).toContain('w:countBy="0"')
-		const stripped = zipSync({ ...files, "word/document.xml": new TextEncoder().encode(xml.replace(/<w:lnNumType [^>]*\/>/g, "")) })
+		const stripped = zipSync(
+			{ ...files, "word/document.xml": new TextEncoder().encode(xml.replace(/<w:lnNumType [^>]*\/>/g, "")) },
+			{ mtime: ZIP_ENTRY_TIME }
+		)
 
 		expect(layoutDigest(await layOut(bytes))).toEqual(layoutDigest(await layOut(stripped)))
 	})

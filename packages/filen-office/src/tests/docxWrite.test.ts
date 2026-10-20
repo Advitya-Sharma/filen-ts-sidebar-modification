@@ -36,6 +36,7 @@ import {
 import { elementOrder } from "../scripts/wmlOrder"
 import { NUMBERING_PART, RICH, STYLES_PART, openBytes, type Opened } from "./docxEditFixtures"
 import { buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 const decoder = new TextDecoder()
 
@@ -1037,7 +1038,7 @@ describe("docx writer: structure and values", () => {
 
 		files["[Content_Types].xml"] = new Uint8Array(encodeUtf8(types.replace(/<Default Extension="rels"[^>]*\/>/, "")))
 
-		const document = await openBytes(zipSync(files))
+		const document = await openBytes(zipSync(files, { mtime: ZIP_ENTRY_TIME }))
 		const header = document.model.stories.find(story => story.kind === "header")
 
 		if (header === undefined) throw new Error("No header")

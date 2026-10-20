@@ -5,6 +5,7 @@ import { acceptedCount, acceptedReason } from "./interop/accepted"
 import type { EntryResult } from "./interop/interop"
 import { summarizeFodt } from "./interop/odfSummary"
 import { buildDocx } from "./docxSynthetic"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 // The LibreOffice leg's tables are counted in the body's flow on both sides (not in notes or a chart's data on
 // LibreOffice's), and tables in DrawingML text boxes, which LibreOffice cannot hold, are witnessed; so are the
@@ -14,17 +15,20 @@ const W =
 	'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
 
 function docx(body: string): Uint8Array {
-	return zipSync({
-		"[Content_Types].xml": strToU8(
-			'<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
-		),
-		"_rels/.rels": strToU8(
-			'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
-		),
-		"word/document.xml": strToU8(
-			`<?xml version="1.0" encoding="UTF-8"?><w:document ${W}><w:body>${body}<w:sectPr/></w:body></w:document>`
-		)
-	})
+	return zipSync(
+		{
+			"[Content_Types].xml": strToU8(
+				'<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+			),
+			"_rels/.rels": strToU8(
+				'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+			),
+			"word/document.xml": strToU8(
+				`<?xml version="1.0" encoding="UTF-8"?><w:document ${W}><w:body>${body}<w:sectPr/></w:body></w:document>`
+			)
+		},
+		{ mtime: ZIP_ENTRY_TIME }
+	)
 }
 
 const p = (text: string): string => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`

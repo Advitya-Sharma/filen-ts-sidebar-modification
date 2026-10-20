@@ -484,7 +484,7 @@ describe("metafile robustness", () => {
 
 	it("inflates gzip-compressed metafiles (.emz, .wmz) and refuses corrupt ones", () => {
 		const bytes = rectangle(brush(emf(), 1, 0x0000ff), 0, 0, 500, 250).build()
-		const compressed = gzipSync(bytes)
+		const compressed = gzipSync(bytes, { mtime: 0 })
 
 		expect(inflateMetafile(compressed)).toEqual(bytes)
 		expect(converted(compressed).list.itemCount).toBe(1)

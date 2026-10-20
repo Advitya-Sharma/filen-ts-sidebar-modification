@@ -2,6 +2,7 @@ import { strToU8, zipSync } from "fflate"
 import { describe, expect, it } from "vitest"
 import { summarizeDocument } from "./fuzz/saves"
 import { summarizeFodt } from "./interop/odfSummary"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 // The LibreOffice leg's readings of drop caps, deletions inside an index, field codes
 // deleted as a tracked change, and the witnesses of LibreOffice's own readings (breaks before floating drawings,
@@ -12,17 +13,20 @@ const W =
 const AUTHOR = 'w:author="Ada" w:date="2026-01-01T00:00:00Z"'
 
 function docx(body: string): Uint8Array {
-	return zipSync({
-		"[Content_Types].xml": strToU8(
-			'<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
-		),
-		"_rels/.rels": strToU8(
-			'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
-		),
-		"word/document.xml": strToU8(
-			`<?xml version="1.0" encoding="UTF-8"?><w:document ${W}><w:body>${body}<w:sectPr/></w:body></w:document>`
-		)
-	})
+	return zipSync(
+		{
+			"[Content_Types].xml": strToU8(
+				'<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+			),
+			"_rels/.rels": strToU8(
+				'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+			),
+			"word/document.xml": strToU8(
+				`<?xml version="1.0" encoding="UTF-8"?><w:document ${W}><w:body>${body}<w:sectPr/></w:body></w:document>`
+			)
+		},
+		{ mtime: ZIP_ENTRY_TIME }
+	)
 }
 
 const p = (text: string): string => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`

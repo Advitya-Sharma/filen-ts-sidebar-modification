@@ -6,6 +6,7 @@ import { OpcPackage, bytesSource, memorySink, writeZip } from "@filen/office/cor
 import { NodeKind, XmlEditor, assertWellFormed, decodeUtf8, parseXml } from "@filen/office/core/xml"
 import { wordLikeDocument } from "./wordLike"
 import { sameBytes } from "./zipBuilder"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 const FIXTURES = join(import.meta.dirname, "fixtures")
 const fixtures = readdirSync(FIXTURES).filter(name => name.endsWith(".docx"))
@@ -67,7 +68,7 @@ describe("large generated document", () => {
 				"word/document.xml": documentXml,
 				"word/media/image1.png": [media, { level: 0 }]
 			},
-			{ level: 6 }
+			{ level: 6, mtime: ZIP_ENTRY_TIME }
 		)
 		const opc = await OpcPackage.open(bytesSource(archive))
 		const bytes = await opc.read("word/document.xml")

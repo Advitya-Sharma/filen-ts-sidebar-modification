@@ -31,6 +31,8 @@ export interface BuildOptions {
 
 const encoder = new TextEncoder()
 
+export { ZIP_ENTRY_TIME } from "./zipTime"
+
 function u16(value: number): number[] {
 	return [value & 0xff, (value >>> 8) & 0xff]
 }

@@ -16,6 +16,9 @@ const SIGNATURE = "application/vnd.ms-office.vbaProjectSignature"
 const VBA_REL = "http://schemas.microsoft.com/office/2006/relationships/vbaProject"
 const SIGNATURE_REL = "http://schemas.microsoft.com/office/2006/relationships/vbaProjectSignature"
 
+// Every rebuilt entry's time (JSZip's default is the clock): two rebuilds of one file are the same bytes.
+const ENTRY_DATE = new Date(Date.UTC(2000, 0, 1, 12))
+
 // An Excel file rebuilt with `change` made to its parts (by path), as another program might have written it.
 async function rebuilt(name: string, change: (parts: Map<string, string | Uint8Array>) => void): Promise<Uint8Array> {
 	const parts = new Map<string, string | Uint8Array>((await readZip(new Uint8Array(readFileSync(new URL(name, FIXTURES))))) ?? [])
@@ -24,7 +27,7 @@ async function rebuilt(name: string, change: (parts: Map<string, string | Uint8A
 
 	const zip = new JSZip()
 
-	for (const [path, data] of parts) zip.file(path, data)
+	for (const [path, data] of parts) zip.file(path, data, { date: ENTRY_DATE })
 
 	return await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" })
 }

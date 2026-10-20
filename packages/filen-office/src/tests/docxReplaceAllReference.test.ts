@@ -1,5 +1,5 @@
 import { undo } from "prosemirror-history"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { DocxEditorSession, findInStory, replaceAll, replaceMatches } from "@filen/office/core/docx/edit"
 import { saveDocx } from "@filen/office/core/docx/write"
 import { openSpec } from "./docxEditFixtures"
@@ -7,6 +7,7 @@ import { p, type SyntheticDocx } from "./docxSynthetic"
 
 // Replace All against replacing each match on its own (replaceMatches), through the same session (invariants and
 // tracking included): the documents are equal, the saves byte-identical, and one undo restores the original.
+// The two documents are opened seconds apart (as on a loaded machine): nothing in the saves may follow the clock.
 
 const r = (text: string, rPr = ""): string =>
 	`<w:r>${rPr === "" ? "" : `<w:rPr>${rPr}</w:rPr>`}<w:t xml:space="preserve">${text}</w:t></w:r>`
@@ -54,6 +55,10 @@ async function session(tracking: boolean): Promise<{ s: DocxEditorSession; opene
 }
 
 describe("Replace All against one replace per match", () => {
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
 	for (const tracking of [false, true])
 		for (const [query, replacement] of [
 			["foo", "BAR"],
@@ -63,7 +68,12 @@ describe("Replace All against one replace per match", () => {
 			[" ", "_"]
 		] as const)
 			it(`${query} -> ${JSON.stringify(replacement)} (tracking ${String(tracking)})`, async () => {
+				vi.useFakeTimers({ toFake: ["Date"] })
+
 				const a = await session(tracking)
+
+				vi.setSystemTime(Date.now() + 3_000)
+
 				const b = await session(tracking)
 				const original = a.s.state.doc
 				const all = replaceAll(a.s.state, query, replacement)

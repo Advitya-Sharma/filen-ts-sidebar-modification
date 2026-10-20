@@ -4,6 +4,7 @@ import { cfbBytes } from "@filen/office/core/cfb"
 import { bytesSource } from "@filen/office/core/opc"
 import { buildDocxModel, gateReasons, openDocxPackage, relationshipKind, type DocxFacts } from "@filen/office/core/docx"
 import { buildDocx, openSynthetic, p } from "./docxSynthetic"
+import { ZIP_ENTRY_TIME } from "./zipTime"
 
 const WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 
@@ -186,7 +187,7 @@ describe("openDocxPackage", () => {
 
 		files["word/settings.xml"] = strToU8("<w:settings><unclosed></w:settings>")
 
-		const opened = await open(zipSync(files))
+		const opened = await open(zipSync(files, { mtime: ZIP_ENTRY_TIME }))
 
 		if (!opened.ok) throw new Error(opened.reason)
 
@@ -209,14 +210,17 @@ describe("openDocxPackage", () => {
 
 		expect(await open(workbook)).toMatchObject({ ok: false, reason: "notWordprocessing" })
 
-		const noMain = zipSync({
-			"[Content_Types].xml": strToU8('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'),
-			"_rels/.rels": strToU8('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
-		})
+		const noMain = zipSync(
+			{
+				"[Content_Types].xml": strToU8('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'),
+				"_rels/.rels": strToU8('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
+			},
+			{ mtime: ZIP_ENTRY_TIME }
+		)
 
 		expect(await open(noMain)).toMatchObject({ ok: false, reason: "notWordprocessing" })
 
-		const noTypes = zipSync({ "word/document.xml": strToU8("<x/>") })
+		const noTypes = zipSync({ "word/document.xml": strToU8("<x/>") }, { mtime: ZIP_ENTRY_TIME })
 
 		expect(await open(noTypes)).toMatchObject({ ok: false, reason: "invalidPackage" })
 	})
