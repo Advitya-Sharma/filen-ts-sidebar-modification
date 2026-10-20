@@ -84,4 +84,25 @@ describe("FormulaEngine", () => {
 			e1904.destroy()
 		}
 	})
+
+	it("holds a sparse sheet sparsely: one value far right and one far down build in bounded memory", () => {
+		const rows: EngineSheet["rows"] = Array.from({ length: 1_048_576 }, () => [])
+		const wide = new Array<number | string | null>(16_384).fill(null)
+
+		wide[16_383] = "far right"
+		rows[1] = wide
+		rows[0] = ["=B1+1", 2]
+		rows[1_048_575] = [7]
+
+		const before = process.memoryUsage().heapUsed
+		const engine = new FormulaEngine([{ name: "Sparse", rows, formulas: [] }], [])
+
+		try {
+			expect(engine.result(0, 0, 0)).toEqual({ value: 3 })
+			// One slot per cell of a 16,384 by 1,048,576 rectangle would not fit in memory at all.
+			expect(process.memoryUsage().heapUsed - before).toBeLessThan(256 * 1024 * 1024)
+		} finally {
+			engine.destroy()
+		}
+	})
 })

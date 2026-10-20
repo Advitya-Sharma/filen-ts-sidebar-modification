@@ -24,6 +24,22 @@ import type { Slicing } from "../slicing"
 // Excel's own grid ("Excel specifications and limits"). Rows and columns are 0-based everywhere here.
 export const SHEET_MAX_ROWS = 1_048_576
 export const SHEET_MAX_COLS = 16_384
+// What one cell holds there: characters of text, and of a formula's contents.
+export const SHEET_MAX_CELL_TEXT = 32_767
+export const SHEET_MAX_FORMULA_TEXT = 8_192
+// What of a cell's text a tile carries: no cell paints more (Excel 2000 and 2003 documented "Only 1,024 display in
+// a cell; all 32,767 display in the formula bar"), and a tile of 2,048 cells stays a few MB. The cell query gives
+// the whole input.
+export const SHEET_TILE_TEXT = 1_024
+
+// A text cut at SHEET_TILE_TEXT, never between the halves of a surrogate pair.
+export function tileText(text: string): string {
+	if (text.length <= SHEET_TILE_TEXT) return text
+
+	const code = text.charCodeAt(SHEET_TILE_TEXT - 1)
+
+	return text.slice(0, code >= 0xd800 && code <= 0xdbff ? SHEET_TILE_TEXT - 1 : SHEET_TILE_TEXT)
+}
 
 // Cells one edit, paste or clear may name, and cells one copy may hold.
 export const SHEET_MAX_EDIT_CELLS = 200_000
@@ -121,8 +137,10 @@ export const CellFlag = {
 	SPILL_ANCHOR: 1 << 14,
 	SPILL: 1 << 15,
 	// The value breaks the cell's data validation.
-	INVALID: 1 << 16
-	// Bits 17-31 are free for features: claim one here, never reuse one.
+	INVALID: 1 << 16,
+	// The text or input is cut at SHEET_TILE_TEXT: the cell query gives the whole input to edit.
+	CLIPPED: 1 << 17
+	// Bits 18-31 are free for features: claim one here, never reuse one.
 } as const
 
 // One tile's cells, sparse: only the cells with something to draw or to know (a value, a style other than the
@@ -577,10 +595,16 @@ export interface SheetQueryMap {
 		result: SheetRange
 	}
 	// The cells autofit measures for one column or row: the `limit` longest texts with their render styles (the
-	// renderer measures them; the core has no fonts).
+	// renderer measures them; the core has no fonts), and where each is: its row (a column's sample) or its column
+	// (a row's sample, so a wrapped text is measured at its column's width).
 	fitSample: {
 		request: { readonly sheet: SheetId; readonly axis: SheetAxis; readonly index: number; readonly limit: number }
-		result: { readonly texts: readonly string[]; readonly styles: Uint32Array; readonly wraps: Uint8Array }
+		result: {
+			readonly texts: readonly string[]
+			readonly styles: Uint32Array
+			readonly wraps: Uint8Array
+			readonly indices: Uint32Array
+		}
 	}
 	// What a cell holds beyond its tile entry.
 	cell: {
@@ -717,7 +741,8 @@ export type SheetEvent =
 	// Results that arrived after an edit's answer (a recalculation finished in slices).
 	| { readonly type: "change"; readonly change: SheetChange }
 	| { readonly type: "progress"; readonly task: "open" | "proof" | "save" | "find"; readonly done: number; readonly total: number }
-	// The session cannot go on (its worker died): every call rejects from now on.
+	// The session cannot go on (its worker died, or the active sheet is damaged past the preview it opened on): every
+	// call rejects from now on.
 	| { readonly type: "failed"; readonly message: string }
 
 // --- Session ---

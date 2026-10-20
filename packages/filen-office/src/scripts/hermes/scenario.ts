@@ -9,11 +9,12 @@ import { inThreadEditingHost } from "../../dom/docx/editing"
 import type { DocxEngineServices } from "../../dom/docx/engine"
 import { inThreadDocxHost, macrotaskYield } from "../../dom/docx/host"
 import { FIND_INTS, type DocxEvent, type DocxPageData } from "../../dom/docx/protocol"
-import { sheetProbes } from "./sheetScenario"
+import { runSheetFixture, sheetKind, sheetProbes, type SheetFixtureResult } from "./sheetScenario"
 
 // The core's open → layout → edit → save path, the way the mobile DOM component runs it (in-thread host, no
 // Worker, MessageChannel or OffscreenCanvas), written so the same code runs under Node and Hermes and their
-// results can be compared byte for byte. Only ECMAScript builtins and setTimeout are used.
+// results can be compared byte for byte. Only ECMAScript builtins and setTimeout are used. Workbooks and text
+// files (.xlsx, .xlsm, .csv, .tsv) go through the sheet session instead.
 
 export interface ScenarioFixture {
 	readonly name: string
@@ -50,6 +51,8 @@ export interface ProbeResult {
 
 export interface ScenarioResult {
 	readonly fixtures: readonly FixtureResult[]
+	// Workbooks and text files, through the sheet session (sheetScenario.ts).
+	readonly sheets: readonly SheetFixtureResult[]
 	readonly probes: readonly ProbeResult[]
 	readonly errors: readonly string[]
 }
@@ -377,15 +380,17 @@ function probes(): ProbeResult[] {
 
 export async function runScenario(fixtures: readonly ScenarioFixture[]): Promise<ScenarioResult> {
 	const results: FixtureResult[] = []
+	const sheets: SheetFixtureResult[] = []
 	const errors: string[] = []
 
 	for (const fixture of fixtures) {
 		try {
-			results.push(await runFixture(fixture))
+			if (sheetKind(fixture.name) === null) results.push(await runFixture(fixture))
+			else sheets.push(await runSheetFixture(fixture.name, fixture.bytes))
 		} catch (error) {
 			errors.push(`${fixture.name}: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`)
 		}
 	}
 
-	return { fixtures: results, probes: probes(), errors }
+	return { fixtures: results, sheets, probes: probes(), errors }
 }

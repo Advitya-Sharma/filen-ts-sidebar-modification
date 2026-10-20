@@ -1,3 +1,4 @@
+import { functionPrefix, functionSupport, functionVolatility, sheetFunction } from "../functions/catalogue"
 import { columnIndex, columnName } from "./cellRef"
 import type { AxisEdit } from "../model/edits"
 import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
@@ -577,36 +578,14 @@ export function renameSheetInFormula(formula: string, from: string, to: string):
 	})
 }
 
-// Functions newer than the file format's first version, which a file names with a prefix (Excel reads the
-// bare name as unknown, #NAME?). FILTER and SORT belong to the worksheet-function namespace besides.
-const FUTURE_FUNCTIONS = new Set(
-	(
-		"ACOT ACOTH AGGREGATE ARABIC ARRAYTOTEXT BASE BETA.DIST BETA.INV BINOM.DIST BINOM.DIST.RANGE BINOM.INV BITAND " +
-		"BITLSHIFT BITOR BITRSHIFT BITXOR BYCOL BYROW CEILING.MATH CEILING.PRECISE CHISQ.DIST CHISQ.DIST.RT CHISQ.INV " +
-		"CHISQ.INV.RT CHISQ.TEST CHOOSECOLS CHOOSEROWS COMBINA CONCAT CONFIDENCE.NORM CONFIDENCE.T COT COTH " +
-		"COVARIANCE.P COVARIANCE.S CSC CSCH DAYS DECIMAL DROP ENCODEURL ERF.PRECISE ERFC.PRECISE EXPAND EXPON.DIST " +
-		"F.DIST F.DIST.RT F.INV F.INV.RT F.TEST FILTERXML FLOOR.MATH FLOOR.PRECISE FORECAST.ETS FORECAST.ETS.CONFINT " +
-		"FORECAST.ETS.SEASONALITY FORECAST.ETS.STAT FORECAST.LINEAR FORMULATEXT GAMMA GAMMA.DIST GAMMA.INV " +
-		"GAMMALN.PRECISE GAUSS GROUPBY HSTACK HYPGEOM.DIST IFNA IFS IMAGE IMCOSH IMCOT IMCSC IMCSCH IMSEC IMSECH " +
-		"IMSINH IMTAN ISFORMULA ISOMITTED ISOWEEKNUM LAMBDA LET LOGNORM.DIST LOGNORM.INV MAKEARRAY MAP MAXIFS MINIFS " +
-		"MODE.MULT MODE.SNGL MUNIT NEGBINOM.DIST NORM.DIST NORM.INV NORM.S.DIST NORM.S.INV NUMBERVALUE PDURATION " +
-		"PERCENTILE.EXC PERCENTILE.INC PERCENTOF PERCENTRANK.EXC PERCENTRANK.INC PERMUTATIONA PHI PIVOTBY " +
-		"POISSON.DIST QUARTILE.EXC QUARTILE.INC RANDARRAY RANK.AVG RANK.EQ REDUCE REGEXEXTRACT REGEXREPLACE " +
-		"REGEXTEST RRI SCAN SEC SECH SEQUENCE SHEET SHEETS SINGLE SKEW.P SORTBY STDEV.P STDEV.S SWITCH T.DIST " +
-		"T.DIST.2T T.DIST.RT T.INV T.INV.2T T.TEST TAKE TEXTAFTER TEXTBEFORE TEXTJOIN TEXTSPLIT TOCOL TOROW " +
-		"TRIMRANGE UNICHAR UNICODE UNIQUE VALUETOTEXT VAR.P VAR.S VSTACK WEBSERVICE WEIBULL.DIST WRAPCOLS WRAPROWS " +
-		"XLOOKUP XMATCH XOR Z.TEST"
-	).split(" ")
-)
-const WORKSHEET_FUNCTIONS = new Set(["FILTER", "SORT"])
-
+// What a file stores before a function's name (Excel reads the bare name of a newer function as unknown,
+// #NAME?), as the function catalogue gives it. _xlfn.SINGLE is how a file stores the implicit intersection
+// operator (@), which the catalogue does not list.
 function prefixOf(name: string): string | null {
 	const upper = name.toUpperCase()
+	const prefix = upper === "SINGLE" ? "_xlfn." : functionPrefix(upper)
 
-	if (WORKSHEET_FUNCTIONS.has(upper)) return "_xlfn._xlws."
-	if (FUTURE_FUNCTIONS.has(upper)) return "_xlfn."
-
-	return null
+	return prefix === undefined || prefix === "" ? null : prefix
 }
 
 // A function name without the _xlfn./_xlws. prefixes files store for newer functions.
@@ -646,6 +625,129 @@ function mapWords(formula: string, map: (word: string, called: boolean) => strin
 	}
 
 	return text
+}
+
+// Whether a formula calls a function the formula engine does not calculate (one the function catalogue does not
+// mark "hyperformula", or no worksheet function at all: an add-in's, a LAMBDA's), or names one that
+// `unknownName` (given the name in upper case) says the engine lacks. Such a formula keeps the result its file
+// stored: under an error trap (IFERROR, ISERROR) the engine's #NAME? for the call would read as a value.
+export function engineLacks(formula: string, unknownName?: (name: string) => boolean): boolean {
+	let index = 0
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) {
+			index = skipQuoted(formula, index, code)
+		} else if (code === BRACKET_OPEN) {
+			index = skipBracket(formula, index)
+		} else if (code === HASH) {
+			index = skipError(formula, index)
+		} else if (isWordChar(code)) {
+			const end = readWord(formula, index)
+			const next = formula.charCodeAt(end)
+
+			if (next === 40) {
+				if (functionSupport(bareFunctionName(formula.slice(index, end)).toUpperCase()) !== "hyperformula") return true
+			} else if (unknownName !== undefined && next !== 33 && unknownName(formula.slice(index, end).toUpperCase())) {
+				return true
+			}
+
+			index = end
+		} else {
+			index++
+		}
+	}
+
+	return false
+}
+
+// A defined name's formula when it is one absolute cell of a sheet of this workbook ('Data'!$A$1), as the engine
+// reads it; null for anything else. Such a name stands for its cell wherever it is used.
+export function absoluteCell(formula: string): string | null {
+	const parts = formulaParts(formula.trim())
+	const part = parts[0]
+
+	if (parts.length !== 1 || part === undefined || typeof part === "string") return null
+
+	const { ref } = part
+	const area = ref.area
+
+	if (ref.external || ref.sheet === null || ref.lastSheet !== null || area === null || area.kind !== "cell" || area.range) return null
+
+	return area.startRowAbs && area.startColAbs ? engineFormula(`${part.prefix}${part.areaText}`) : null
+}
+
+export interface FormulaInputs {
+	// Its references into this workbook (sheet null: the formula's own; lastSheet set: a 3D span).
+	readonly refs: readonly { readonly sheet: string | null; readonly lastSheet: string | null; readonly area: RefArea }[]
+	// The words that may name defined names, upper case.
+	readonly names: readonly string[]
+	// The tables its structured references name, upper case ("" for the formula's own: [@Amount]).
+	readonly tables: readonly string[]
+	// It calls a volatile function that computes the references it reads (OFFSET, INDIRECT): what it reads is not
+	// known. (NOW, TODAY and RAND read no cell.)
+	readonly dynamic: boolean
+}
+
+// What a formula reads, without evaluating anything.
+export function formulaInputs(formula: string): FormulaInputs {
+	const refs: { sheet: string | null; lastSheet: string | null; area: RefArea }[] = []
+	const names: string[] = []
+	const tables: string[] = []
+	let dynamic = false
+
+	for (const part of formulaParts(formula)) {
+		if (typeof part !== "string") {
+			if (!part.ref.external && part.ref.area !== null)
+				refs.push({ sheet: part.ref.sheet, lastSheet: part.ref.lastSheet, area: part.ref.area })
+
+			continue
+		}
+
+		let index = 0
+		let word = ""
+
+		while (index < part.length) {
+			const code = part.charCodeAt(index)
+
+			if (code === QUOTE || code === APOSTROPHE) {
+				index = skipQuoted(part, index, code)
+				word = ""
+			} else if (code === BRACKET_OPEN) {
+				tables.push(word.toUpperCase())
+				index = skipBracket(part, index)
+				word = ""
+			} else if (code === HASH) {
+				index = skipError(part, index)
+				word = ""
+			} else if (isWordChar(code)) {
+				const end = readWord(part, index)
+				const next = part.charCodeAt(end)
+
+				word = part.slice(index, end)
+
+				if (next === 40) {
+					const name = bareFunctionName(word).toUpperCase()
+
+					if (
+						functionVolatility(name) === "always" &&
+						sheetFunction(name)?.args.some(arg => arg.id === "reference" || arg.id === "ref_text") === true
+					)
+						dynamic = true
+				} else if (next !== 33 && next !== BRACKET_OPEN && /^[A-Za-z_\\\u0080-\uffff]/.test(word)) {
+					names.push(word.toUpperCase())
+				}
+
+				index = end
+			} else {
+				index++
+				word = ""
+			}
+		}
+	}
+
+	return { refs, names, tables, dynamic }
 }
 
 const PARAMETER = "_xlpm."
@@ -1150,6 +1252,11 @@ const ARRAY_RESULTS = new Set([
 	"XLOOKUP"
 ])
 
+// A call to any of ARRAY_RESULTS, or to one of them but XLOOKUP, in any case: one test where each name would be one.
+const CALLS_ARRAY_RESULT = new RegExp(`(?:${[...ARRAY_RESULTS].map(name => name.replaceAll(".", "\\.")).join("|")})\\(`, "i")
+const BUILDS_ARRAY = new RegExp(`(?:${[...ARRAY_RESULTS].filter(name => name !== "XLOOKUP").join("|")})\\(`, "i")
+const CALLS_SIZED = /(?:SEQUENCE|RANDARRAY|MUNIT)\(/i
+
 // The most cells an array a formula builds may hold: the engine keeps every value of it, a few hundred
 // bytes each.
 const MAX_ARRAY_CELLS = 200_000
@@ -1157,20 +1264,11 @@ const MAX_ARRAY_CELLS = 200_000
 // Whether the formula calls an array-returning function over more cells than MAX_ARRAY_CELLS, going by
 // its literal sizes (SEQUENCE(1000,1000)) and the largest range it names.
 function arrayTooLarge(formula: string): boolean {
-	const upper = formula.toUpperCase()
-	let calls = false
-
-	for (const name of ARRAY_RESULTS) {
-		if (name !== "XLOOKUP" && upper.includes(`${name}(`)) {
-			calls = true
-
-			break
-		}
-	}
-
-	if (!calls) {
+	if (!BUILDS_ARRAY.test(formula)) {
 		return false
 	}
+
+	const upper = formula.toUpperCase()
 
 	for (const [, name, rows = "1", cols = "1"] of upper.matchAll(/(SEQUENCE|RANDARRAY|MUNIT)\(\s*(\d+)\s*(?:,\s*(\d+))?/g)) {
 		const size = name === "MUNIT" ? Number(rows) ** 2 : Number(rows) * Number(cols)
@@ -1278,24 +1376,54 @@ function boundArraySizes(text: string): string {
 	return out
 }
 
+// Whether a formula holds a bracket outside strings and quoted sheet names: a structured reference
+// (Table1[Amount]) or one into another workbook ([1]Sheet1!A1), which the engine has no syntax for.
+export function holdsBracket(formula: string): boolean {
+	if (!formula.includes("[")) return false
+
+	let index = 0
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) index = skipQuoted(formula, index, code)
+		else if (code === BRACKET_OPEN) return true
+		else index++
+	}
+
+	return false
+}
+
+// Whether a formula holds an array constant: a brace outside strings, quoted sheet names and brackets.
+export function holdsArrayConstant(formula: string): boolean {
+	if (!formula.includes("{")) return false
+
+	let index = 0
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) index = skipQuoted(formula, index, code)
+		else if (code === BRACKET_OPEN) index = skipBracket(formula, index)
+		else if (code === 123) return true
+		else index++
+	}
+
+	return false
+}
+
 // A cell's formula as HyperFormula takes it (with its "="), or null when it cannot be given to it: nested
 // past its parser's depth, or building an array too large to hold. Evaluated as Excel reads an ordinary
 // formula: an array result gives its first value (INDEX), and nothing spills.
-export function engineCellFormula(formula: string): string | null {
+export function engineCellFormula(formula: string, aliases?: ReadonlyMap<string, string>): string | null {
 	if (!engineCanParse(formula) || arrayTooLarge(formula)) {
 		return null
 	}
 
-	const text = boundArraySizes(engineFormula(formula))
-	const upper = text.toUpperCase()
+	const read = engineFormula(formula, aliases)
+	const text = CALLS_SIZED.test(read) ? boundArraySizes(read) : read
 
-	for (const name of ARRAY_RESULTS) {
-		if (upper.includes(`${name}(`)) {
-			return `=INDEX((${text}),1,1)`
-		}
-	}
-
-	return `=${text}`
+	return CALLS_ARRAY_RESULT.test(text) ? `=INDEX((${text}),1,1)` : `=${text}`
 }
 
 // Excel formula text as HyperFormula reads it, where only the spelling differs: function names lose the
@@ -1304,8 +1432,9 @@ export function engineCellFormula(formula: string): string | null {
 // CHAR(34) (HyperFormula has no escape for it; inside an array constant it is left to fail), and calls
 // that evaluate arrays are wrapped in ARRAYFORMULA. What HyperFormula still cannot read (intersections,
 // unions, structured and external references) fails to parse there, and the caller keeps the file's own
-// result.
-export function engineFormula(formula: string): string {
+// result. A defined name in `aliases` (upper case) is spelled as its alias: the engine reads some names Excel
+// takes (CustomCost1, R2D2) as references.
+export function engineFormula(formula: string, aliases?: ReadonlyMap<string, string>): string {
 	let text = ""
 	let braces = 0
 	let index = 0
@@ -1349,22 +1478,25 @@ export function engineFormula(formula: string): string {
 			const word = formula.slice(index, end)
 			const next = formula.charCodeAt(end)
 
+			// A number starts with a digit or a point; only those are read for an exponent.
+			const numeric = (code >= 48 && code <= 57) || code === 46
+
 			if (next === 40) {
-				const name = bareFunctionName(word)
+				const name = code === 95 ? bareFunctionName(word) : word
 
 				wrapNext = ARRAY_ARGUMENTS.has(name.toUpperCase())
 				text += wrapNext ? `ARRAYFORMULA(${name}` : name
-			} else if (/^(\d+\.?\d*|\.\d+)E$/i.test(word) && (next === 43 || next === 45)) {
+			} else if (numeric && (next === 43 || next === 45) && /^(\d+\.?\d*|\.\d+)E$/i.test(word)) {
 				text += `${word.slice(0, -1)}e`
-			} else if (/^(\d+\.?\d*|\.\d+)E\d+$/i.test(word)) {
+			} else if (numeric && /^(\d+\.?\d*|\.\d+)E\d+$/i.test(word)) {
 				text += word.replace(/E/i, "e")
 			} else if (next === 33) {
 				// HyperFormula reads only plain ASCII sheet names unquoted (not 数据!A1, not Q1.2024!A1).
 				text += `'${word.replaceAll("'", "''")}'`
-			} else if (next !== 58 && /^(TRUE|FALSE)$/i.test(word)) {
+			} else if (next !== 58 && (word.length === 4 || word.length === 5) && /^(TRUE|FALSE)$/i.test(word)) {
 				text += `${word}()`
 			} else {
-				text += word
+				text += !numeric && aliases !== undefined && aliases.size > 0 ? (aliases.get(word.toUpperCase()) ?? word) : word
 			}
 
 			index = end

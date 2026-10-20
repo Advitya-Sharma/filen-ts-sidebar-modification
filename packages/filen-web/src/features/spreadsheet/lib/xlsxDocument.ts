@@ -682,7 +682,7 @@ export class XlsxDocument {
 	private buildEngine(): FormulaEngine {
 		const worksheets = this.worksheets()
 		const sheets: EngineSheet[] = worksheets.map(sheet => {
-			const rows = sheet.rows.map(values => values.map(value => engineValue(value, this.date1904)))
+			const rows: EngineSheet["rows"] = sheet.rows.map(values => values.map(value => engineValue(value, this.date1904)))
 			const formulas: EngineCell[] = []
 
 			for (const [cellId, cell] of sheet.cells ?? []) {
@@ -766,7 +766,8 @@ export class XlsxDocument {
 			const sheet = worksheets[recalculated.sheet]
 			const cell = sheet?.cells?.get(cellIdOf(recalculated.row, recalculated.col))
 
-			if (sheet === undefined || cell?.formula === undefined) {
+			// A stale held result keeps its value: it is not a recalculation.
+			if (sheet === undefined || cell?.formula === undefined || recalculated.stale === true) {
 				continue
 			}
 

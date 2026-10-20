@@ -5,7 +5,9 @@ import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { runInNewContext } from "node:vm"
+import { createContext, runInContext } from "node:vm"
+import { BASIC } from "../../tests/sheetSessionFixtures"
+import { buildFixture, type Fixture } from "../../tests/xlsxWriteFixtures"
 import { decodeBase64, encodeBase64 } from "./base64"
 import { INPUT_GLOBAL, RESULT_PREFIX } from "./protocol"
 
@@ -18,7 +20,10 @@ import { INPUT_GLOBAL, RESULT_PREFIX } from "./protocol"
 //   tsx src/scripts/hermes/run.ts [--hermes <hermes CLI>] [--root <office package>] [--mobile <app>] [--out <dir>] [fixtures...]
 //
 // Without a Hermes CLI (HERMES_CLI or --hermes) the bundle is only compiled with hermesc, which still checks
-// that every module parses and compiles for Hermes.
+// that every module parses and compiles for Hermes, and run in the bare V8 context alone.
+//
+// Workbooks and text files (.xlsx, .xlsm, .csv, .tsv) run the sheet session's scenario. Without fixtures named,
+// the DOCX fixtures run with workbooks and text files built here, and a few of the corpus's when it is present.
 
 const here = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_FIXTURES = [
@@ -30,6 +35,59 @@ const DEFAULT_FIXTURES = [
 	"07-chart-customxml-unknown.docx",
 	"08-large-300p.docx"
 ]
+
+// From the corpus (.corpus, fetched by the corpus script), when present.
+const CORPUS_SHEETS = [
+	"xlsx/oxsdk__SheetData.xlsx",
+	"xlsx/xlsxwriter__dynamic_array01.xlsx",
+	"xlsx/lo__tdf122191.xlsx",
+	"xlsx/poi__51444.xlsx",
+	"xlsx/closedxml__ExternalReference-input.xlsx",
+	"csv/ccsv__bom.csv",
+	"csv/ccsv__emoji.csv",
+	"csv/ccsv__sample1.csv"
+]
+
+const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text)
+
+// Columns, merges, a frozen pane, a shared formula, dates and inline text.
+const LAID_OUT: Fixture = {
+	sheets: [
+		{
+			name: "Laid out",
+			body:
+				'<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>' +
+				'<cols><col min="1" max="2" width="18" customWidth="1"/></cols><sheetData>' +
+				'<row r="1"><c r="A1" t="inlineStr"><is><t>Größe</t></is></c><c r="B1" s="1"><v>45351</v></c></row>' +
+				'<row r="2" ht="30" customHeight="1"><c r="A2"><v>1.5</v></c><c r="B2"><f t="shared" ref="B2:B4" si="0">A2*2</f><v>3</v></c></row>' +
+				'<row r="3"><c r="A3"><v>-2</v></c><c r="B3"><f t="shared" si="0"/><v>-4</v></c></row>' +
+				'<row r="4"><c r="A4" t="b"><v>1</v></c><c r="B4"><f t="shared" si="0"/><v>2</v></c></row>' +
+				'</sheetData><mergeCells count="1"><mergeCell ref="C1:D2"/></mergeCells>'
+		}
+	]
+}
+
+// Workbooks and text files the sheet scenario always runs: written to `out`, returned as paths.
+function builtSheets(out: string): string[] {
+	const files: readonly [string, Uint8Array][] = [
+		["basic.xlsx", buildFixture(BASIC)],
+		["laid-out.xlsx", buildFixture(LAID_OUT)],
+		["utf8.csv", utf8('id,name,amount\r\n1,"Größe, ""x""",1.5\r\n2,😀,=1+1\r\n')],
+		["windows-1252.csv", Uint8Array.of(0x63, 0x61, 0x66, 0xe9, 0x3b, 0x80, 0x0d, 0x0a, 0x93, 0x71, 0x94, 0x3b, 0x78, 0x0d, 0x0a)],
+		["data.tsv", utf8('a\t"x\ty"\t3\n"l1\nl2"\t\t-4.5\n')]
+	]
+	const dir = join(out, "sheets")
+
+	mkdirSync(dir, { recursive: true })
+
+	return files.map(([name, bytes]) => {
+		const path = join(dir, name)
+
+		writeFileSync(path, bytes)
+
+		return path
+	})
+}
 
 interface Options {
 	readonly root: string
@@ -68,7 +126,14 @@ function options(argv: readonly string[]): Options {
 		mobile,
 		out,
 		hermes,
-		fixtures: fixtures.length > 0 ? fixtures : DEFAULT_FIXTURES.map(name => join(root, "src/tests/fixtures", name))
+		fixtures:
+			fixtures.length > 0
+				? fixtures
+				: [
+						...DEFAULT_FIXTURES.map(name => join(root, "src/tests/fixtures", name)),
+						...builtSheets(out),
+						...CORPUS_SHEETS.map(name => join(root, ".corpus", name)).filter(path => existsSync(path))
+					]
 	}
 }
 
@@ -153,8 +218,23 @@ interface FixtureOut {
 	readonly ms: Readonly<Record<string, number>>
 }
 
+interface SheetOut {
+	readonly name: string
+	readonly open: string
+	readonly unedited: string
+	readonly uneditedIdentical: boolean
+	readonly tiles: string
+	readonly verdict: string
+	readonly steps: readonly string[]
+	readonly edited: string
+	readonly reopened: string
+}
+
+const SHEET_KEYS = ["open", "unedited", "uneditedIdentical", "tiles", "verdict", "edited", "reopened"] as const
+
 interface RunOut {
 	readonly fixtures?: readonly FixtureOut[]
+	readonly sheets?: readonly SheetOut[]
 	readonly probes?: readonly { readonly name: string; readonly value: string }[]
 	readonly errors?: readonly string[]
 	readonly fatal?: string
@@ -174,7 +254,7 @@ async function runNode(script: string): Promise<{ out: RunOut; ms: number }> {
 	const started = performance.now()
 	const lines: string[] = []
 	const done = Promise.withResolvers<void>()
-	const context = {
+	const context = createContext({
 		print: (line: string) => {
 			lines.push(line)
 
@@ -183,11 +263,25 @@ async function runNode(script: string): Promise<{ out: RunOut; ms: number }> {
 		setTimeout,
 		clearTimeout,
 		setInterval,
-		clearInterval,
-		TextEncoder
+		clearInterval
+	})
+	// The CLI's TextEncoder is the bundle's own realm's: so are the arrays it returns, as `instanceof` expects.
+	const Inner = runInContext("Uint8Array", context) as Uint8ArrayConstructor
+	const encoder = new TextEncoder()
+
+	context["TextEncoder"] = class {
+		readonly encoding = "utf-8"
+
+		encode(text = ""): Uint8Array {
+			return Inner.from(encoder.encode(text))
+		}
+
+		encodeInto(text: string, into: Uint8Array): ReturnType<TextEncoder["encodeInto"]> {
+			return encoder.encodeInto(text, into)
+		}
 	}
 
-	runInNewContext(script, context, { filename: "bundle.js" })
+	runInContext(script, context, { filename: "bundle.js" })
 	await done.promise
 
 	return { out: parse(lines.join("\n")), ms: performance.now() - started }
@@ -251,6 +345,24 @@ function compare(node: RunOut, hermes: RunOut): string[] {
 		if (ours.edited !== theirs.edited) problems.push(`${ours.name}: edited save bytes differ`)
 	}
 
+	const sheets = new Map((hermes.sheets ?? []).map(sheet => [sheet.name, sheet]))
+
+	for (const ours of node.sheets ?? []) {
+		const theirs = sheets.get(ours.name)
+
+		if (theirs === undefined) {
+			problems.push(`${ours.name}: missing under Hermes`)
+
+			continue
+		}
+
+		for (const key of SHEET_KEYS) {
+			if (ours[key] !== theirs[key]) problems.push(`${ours.name}: ${key} differs between V8 and Hermes`)
+		}
+
+		if (ours.steps.join("\n") !== theirs.steps.join("\n")) problems.push(`${ours.name}: steps differ between V8 and Hermes`)
+	}
+
 	const probes = new Map((node.probes ?? []).map(probe => [probe.name, probe.value]))
 
 	for (const probe of hermes.probes ?? []) {
@@ -290,7 +402,15 @@ async function main(): Promise<void> {
 		bytecodeBytes: readFileSync(bytecode).length,
 		bundleMs: Math.round(bundleMs),
 		compileMs: Math.round(compileMs),
-		v8: { ms: Math.round(node.ms), probes: node.out.probes, errors: node.out.errors, fatal: node.out.fatal }
+		v8: { ms: Math.round(node.ms), probes: node.out.probes, errors: node.out.errors, fatal: node.out.fatal },
+		sheets: (node.out.sheets ?? []).map(sheet => ({
+			name: sheet.name,
+			open: sheet.open,
+			uneditedIdentical: sheet.uneditedIdentical,
+			verdict: sheet.verdict,
+			edited: sheet.edited,
+			refusals: sheet.steps.filter(step => step.startsWith("refused") || step.endsWith("refused"))
+		}))
 	}
 	let problems: string[] = node.out.fatal === undefined ? [] : [`V8 fatal: ${node.out.fatal}`]
 

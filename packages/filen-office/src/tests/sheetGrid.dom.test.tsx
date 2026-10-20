@@ -1,0 +1,576 @@
+// @vitest-environment happy-dom
+import { act, createRef, useEffect } from "react"
+import { createRoot, type Root } from "react-dom/client"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { SHEET_MAX_ROWS } from "../core/sheet/protocol"
+import { inThreadSheetHost } from "../dom/sheet/host"
+import {
+	DEFAULT_THEME,
+	MAX_SCROLL_PX,
+	SheetGrid,
+	SheetGridModel,
+	readTheme,
+	type SheetGridHandle,
+	type SheetGridKeptSizes,
+	type SheetGridSizes
+} from "../react/sheet/index"
+import { RecordingCanvas } from "./sheetGridCanvas"
+import { BASIC, IMMEDIATE, buildFixture } from "./sheetSessionFixtures"
+
+// The grid component on the in-thread host: ARIA grid semantics and the active cell's live region, keyboard and
+// pointer selection, the in-cell editor (typing, input methods, Enter and Escape), resizing and autofit from the
+// headers, and scaled scrolling to the sheet's last row.
+
+const WIDTH = 800
+const HEIGHT = 400
+const canvases = new WeakMap<HTMLCanvasElement, RecordingCanvas>()
+
+Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true)
+
+beforeEach(() => {
+	vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
+		let canvas = canvases.get(this)
+
+		if (canvas === undefined) {
+			canvas = new RecordingCanvas()
+			canvases.set(this, canvas)
+		}
+
+		return canvas as unknown as CanvasRenderingContext2D
+	} as unknown as typeof HTMLCanvasElement.prototype.getContext)
+	vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+		return this.classList.contains("fo-sheet-scroller") ? WIDTH : 0
+	})
+	vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+		return this.classList.contains("fo-sheet-scroller") ? HEIGHT : 0
+	})
+	vi.spyOn(Element.prototype, "setPointerCapture").mockImplementation(() => undefined)
+})
+
+const roots: Root[] = []
+
+afterEach(() => {
+	for (const root of roots.splice(0)) act(() => root.unmount())
+
+	document.body.innerHTML = ""
+})
+
+async function settle(): Promise<void> {
+	for (let k = 0; k < 6; k++) await act(() => new Promise(resolve => setTimeout(resolve, 0)))
+}
+
+interface Mounted {
+	readonly model: SheetGridModel
+	readonly handle: SheetGridHandle
+	readonly root: Root
+	readonly scroller: HTMLElement
+	readonly cells: RecordingCanvas
+	paint(): void
+}
+
+async function mount(bytes = buildFixture(BASIC)): Promise<Mounted> {
+	const host = inThreadSheetHost()
+	const opened = await host.open(bytes, { kind: "xlsx", slicing: IMMEDIATE }, () => undefined)
+
+	if (opened.kind !== "opened") throw new Error(opened.kind)
+
+	const model = new SheetGridModel({ session: opened.session, info: opened.info })
+	const container = document.createElement("div")
+	const ref = createRef<SheetGridHandle>()
+	const root = createRoot(container)
+
+	roots.push(root)
+
+	document.body.appendChild(container)
+	await act(async () => {
+		root.render(
+			<SheetGrid
+				ref={ref}
+				grid={model}
+				label="Sheet"
+				editorLabel="Cell entry"
+				resizeLabel={(axis, px) => `${axis} ${String(px)}`}
+			/>
+		)
+	})
+	await settle()
+
+	const handle = ref.current as SheetGridHandle
+	const scroller = container.querySelector<HTMLElement>(".fo-sheet-scroller") as HTMLElement
+	const cells = canvases.get(container.querySelector("canvas") as HTMLCanvasElement) as RecordingCanvas
+	const paint = (): void => {
+		act(() => handle.renderer.paint())
+	}
+
+	paint()
+	await settle()
+	paint()
+
+	return { model, handle, root, scroller, cells, paint }
+}
+
+function key(target: Element, init: KeyboardEventInit & { keyCode?: number }): void {
+	act(() => {
+		const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init })
+
+		if (init.keyCode !== undefined) Object.defineProperty(event, "keyCode", { value: init.keyCode })
+
+		target.dispatchEvent(event)
+	})
+}
+
+function pointer(target: Element, type: string, init: PointerEventInit): void {
+	act(() => {
+		target.dispatchEvent(
+			new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", button: 0, ...init })
+		)
+	})
+}
+
+function cellCenter(handle: SheetGridHandle, row: number, col: number): { clientX: number; clientY: number } {
+	const view = handle.renderer.currentView()
+
+	if (view === null) throw new Error("no view")
+
+	const box = handle.renderer.cellBox(view, { row, col })
+
+	if (box === null) throw new Error("off screen")
+
+	return { clientX: box.x + box.width / 2, clientY: box.y + box.height / 2 }
+}
+
+function live(scroller: HTMLElement): string {
+	return scroller.parentElement?.querySelector(".fo-sheet-live")?.textContent ?? ""
+}
+
+describe("SheetGrid", () => {
+	it("is an ARIA grid whose active descendant and live region say the active cell", async () => {
+		const { scroller, cells } = await mount()
+
+		expect(scroller.getAttribute("role")).toBe("grid")
+		expect(scroller.getAttribute("aria-label")).toBe("Sheet")
+		expect(scroller.getAttribute("aria-rowcount")).toBe(String(SHEET_MAX_ROWS))
+		expect(scroller.getAttribute("aria-multiselectable")).toBe("true")
+
+		const active = document.getElementById(scroller.getAttribute("aria-activedescendant") ?? "")
+
+		expect(active?.getAttribute("role")).toBe("gridcell")
+		expect(active?.parentElement?.getAttribute("role")).toBe("row")
+		expect(active?.textContent).toBe("2")
+		expect(live(scroller)).toBe("A1 2")
+		expect(cells.texts()).toEqual(expect.arrayContaining(["2", "hello", "6"]))
+
+		key(scroller, { key: "ArrowRight" })
+
+		expect(active?.getAttribute("aria-colindex")).toBe("2")
+		expect(live(scroller)).toBe("B1 hello")
+	})
+
+	it("opens the editor on a typed character, shows the entry at once and commits it with Enter", async () => {
+		const { scroller, model, cells, paint } = await mount()
+
+		key(scroller, { key: "7" })
+
+		const editor = document.querySelector<HTMLTextAreaElement>("textarea.fo-sheet-editor")
+
+		expect(editor?.value).toBe("7")
+		expect(document.activeElement).toBe(editor)
+		expect(editor?.getAttribute("aria-label")).toBe("Cell entry")
+
+		key(editor as HTMLTextAreaElement, { key: "Enter" })
+		cells.reset()
+		paint()
+
+		// Drawn before the session answers.
+		expect(cells.texts()).toContain("7")
+		expect(document.querySelector("textarea")).toBeNull()
+		expect(model.getSnapshot().selection.active).toEqual({ row: 1, col: 0 })
+		expect(document.activeElement).toBe(scroller)
+
+		await settle()
+		cells.reset()
+		paint()
+
+		expect(cells.texts()).toEqual(expect.arrayContaining(["7", "21"]))
+	})
+
+	it("leaves the entry open when the window loses focus, and commits it when focus moves within the page", async () => {
+		const { scroller, model } = await mount()
+
+		key(scroller, { key: "h" })
+
+		const editor = document.querySelector<HTMLTextAreaElement>("textarea.fo-sheet-editor") as HTMLTextAreaElement
+		const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false)
+		const blur = (): void => {
+			act(() => {
+				editor.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: null }))
+			})
+		}
+
+		act(() => model.setEditText("half typ"))
+		// The window goes to the background: the editor blurs with nothing focused after it.
+		blur()
+		await settle()
+
+		expect(model.getSnapshot().editing?.text).toBe("half typ")
+
+		hasFocus.mockReturnValue(true)
+		blur()
+		await settle()
+
+		expect(model.getSnapshot().editing).toBeNull()
+		expect(model.pendingText(model.getSnapshot().sheet, 0, 0) ?? model.getSnapshot().active.input).toBe("half typ")
+	})
+
+	it("opens an empty editor synchronously for an input method's key, so the composition lands in it", async () => {
+		const { scroller } = await mount()
+
+		key(scroller, { key: "Process", keyCode: 229 })
+
+		const editor = document.querySelector<HTMLTextAreaElement>("textarea.fo-sheet-editor")
+
+		expect(editor?.value).toBe("")
+		expect(document.activeElement).toBe(editor)
+
+		// Keys of the composition are the input method's: Enter confirms it and commits nothing.
+		key(editor as HTMLTextAreaElement, { key: "Enter", isComposing: true })
+
+		expect(document.querySelector("textarea.fo-sheet-editor")).not.toBeNull()
+
+		key(editor as HTMLTextAreaElement, { key: "Escape" })
+
+		expect(document.querySelector("textarea")).toBeNull()
+		expect(document.activeElement).toBe(scroller)
+	})
+
+	it("selects with the pointer: a click, a drag, Shift to extend and Ctrl to add a range", async () => {
+		const { scroller, model, handle } = await mount()
+
+		pointer(scroller, "pointerdown", cellCenter(handle, 1, 1))
+		pointer(scroller, "pointermove", cellCenter(handle, 2, 2))
+		pointer(scroller, "pointerup", cellCenter(handle, 2, 2))
+
+		expect(model.getSnapshot().selection.active).toEqual({ row: 1, col: 1 })
+		expect(model.getSnapshot().selection.ranges).toEqual([{ startRow: 1, startCol: 1, endRow: 2, endCol: 2 }])
+
+		pointer(scroller, "pointerdown", { ...cellCenter(handle, 4, 0), ctrlKey: true })
+		pointer(scroller, "pointerup", cellCenter(handle, 4, 0))
+
+		expect(model.getSnapshot().selection.ranges).toHaveLength(2)
+
+		pointer(scroller, "pointerdown", { ...cellCenter(handle, 6, 1), shiftKey: true })
+		pointer(scroller, "pointerup", cellCenter(handle, 6, 1))
+
+		expect(model.getSnapshot().selection.ranges[1]).toEqual({ startRow: 4, startCol: 0, endRow: 6, endCol: 1 })
+
+		// A touch selects on a tap, never on a pan.
+		pointer(scroller, "pointerdown", { ...cellCenter(handle, 3, 3), pointerType: "touch", pointerId: 2 })
+		pointer(scroller, "pointerup", {
+			...cellCenter(handle, 3, 3),
+			clientY: cellCenter(handle, 3, 3).clientY + 40,
+			pointerType: "touch",
+			pointerId: 2
+		})
+
+		expect(model.getSnapshot().selection.active).toEqual({ row: 4, col: 0 })
+
+		pointer(scroller, "pointerdown", { ...cellCenter(handle, 3, 3), pointerType: "touch", pointerId: 3 })
+		pointer(scroller, "pointerup", { ...cellCenter(handle, 3, 3), pointerType: "touch", pointerId: 3 })
+
+		expect(model.getSnapshot().selection.active).toEqual({ row: 3, col: 3 })
+	})
+
+	it("resizes a column by dragging its header edge and fits it to its content on a double-click", async () => {
+		const { scroller, model, handle } = await mount()
+		const view = handle.renderer.currentView()
+
+		if (view === null) throw new Error("no view")
+
+		const edge = view.cols.header + view.cols.axis.size(0) - 1
+
+		pointer(scroller, "pointerdown", { clientX: edge, clientY: 10 })
+		pointer(scroller, "pointermove", { clientX: edge + 36, clientY: 10 })
+
+		expect(model.getDraft()?.sizes.get(0)).toBe(100)
+		expect(scroller.parentElement?.querySelector(".fo-sheet-tip")?.textContent).toBe("cols 100")
+
+		pointer(scroller, "pointerup", { clientX: edge + 36, clientY: 10 })
+		await settle()
+
+		expect(model.getDraft()).toBeNull()
+		expect(model.axes(model.getSnapshot().sheet)?.cols.size(0)).toBe(100)
+
+		const header = handle.renderer.currentView()?.cols.header ?? 0
+
+		act(() => {
+			scroller.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, clientX: header + 100 - 1, clientY: 10 }))
+		})
+		await settle()
+
+		// Column A's widest text is "45002" (shown as a date's serial in this fixture's General format) or "2":
+		// fitted to it, padding included, and never wider than before.
+		const fitted = model.axes(model.getSnapshot().sheet)?.cols.size(0) ?? 0
+
+		expect(fitted).toBeLessThan(100)
+		expect(fitted).toBeGreaterThan(8)
+	})
+
+	it("scrolls to the sheet's last row through a scroll range the browsers can hold", async () => {
+		const { model, handle, scroller, paint } = await mount()
+
+		act(() => handle.goTo({ row: SHEET_MAX_ROWS - 1, col: 0 }))
+		paint()
+
+		const view = handle.renderer.currentView()
+		const extent = scroller.querySelector<HTMLElement>(".fo-sheet-extent")
+
+		expect(model.getSnapshot().selection.active.row).toBe(SHEET_MAX_ROWS - 1)
+		expect(view?.rows.last).toBe(SHEET_MAX_ROWS - 1)
+		expect(Number.parseFloat(extent?.style.height ?? "0")).toBeLessThanOrEqual(MAX_SCROLL_PX + 100)
+		expect(scroller.scrollTop).toBeGreaterThan(0)
+		expect(scroller.scrollTop).toBeLessThanOrEqual(MAX_SCROLL_PX)
+
+		const hit = handle.hit(cellCenter(handle, SHEET_MAX_ROWS - 1, 0).clientX, cellCenter(handle, SHEET_MAX_ROWS - 1, 0).clientY)
+
+		expect(hit).toEqual({ kind: "cell", row: SHEET_MAX_ROWS - 1, col: 0 })
+	})
+
+	it("reads its colours from the --fo-sheet-* variables", () => {
+		const element = document.createElement("div")
+
+		element.style.setProperty("--fo-sheet-bg", "#123456")
+		element.style.setProperty("--fo-sheet-font", "Inter, sans-serif")
+		document.body.appendChild(element)
+
+		expect(readTheme(element)).toMatchObject({ background: "#123456", font: "Inter, sans-serif", gridLine: DEFAULT_THEME.gridLine })
+	})
+
+	it("draws the theme an app sets in its own effect when it changes the theme key", async () => {
+		const host = inThreadSheetHost()
+		const opened = await host.open(buildFixture(BASIC), { kind: "xlsx", slicing: IMMEDIATE }, () => undefined)
+
+		if (opened.kind !== "opened") throw new Error(opened.kind)
+
+		const model = new SheetGridModel({ session: opened.session, info: opened.info })
+		const container = document.createElement("div")
+		const ref = createRef<SheetGridHandle>()
+		const root = createRoot(container)
+		const BACKGROUNDS = { light: "#fafafa", dark: "#202020" } as const
+
+		// As an app's theme provider does: its effect, which runs after the grid's, moves the variables (this DOM
+		// inherits no custom property, so they go on the grid's own root).
+		function App({ theme }: { theme: keyof typeof BACKGROUNDS }) {
+			useEffect(() => {
+				container.querySelector<HTMLElement>(".fo-sheet")?.style.setProperty("--fo-sheet-bg", BACKGROUNDS[theme])
+			}, [theme])
+
+			return (
+				<SheetGrid
+					ref={ref}
+					grid={model}
+					label="Sheet"
+					editorLabel="Cell entry"
+					themeKey={theme}
+					resizeLabel={(axis, px) => `${axis} ${String(px)}`}
+				/>
+			)
+		}
+
+		roots.push(root)
+		document.body.appendChild(container)
+		await act(async () => root.render(<App theme="light" />))
+		await settle()
+
+		const handle = ref.current as SheetGridHandle
+		const cells = canvases.get(container.querySelector("canvas") as HTMLCanvasElement) as RecordingCanvas
+		const background = (): unknown => {
+			cells.reset()
+			act(() => handle.renderer.paint())
+
+			return cells.calls.find(call => call.op === "fillRect")?.fill
+		}
+
+		expect(background()).toBe(BACKGROUNDS.light)
+
+		await act(async () => root.render(<App theme="dark" />))
+
+		expect(background()).toBe(BACKGROUNDS.dark)
+
+		await act(async () => root.render(<App theme="light" />))
+
+		expect(background()).toBe(BACKGROUNDS.light)
+	})
+
+	it("keeps each sheet's scroll position and selection when switching back to it", async () => {
+		const { model, handle, paint } = await mount()
+		const first = model.getSnapshot().sheet
+		const second = model.getSnapshot().sheets[1]?.id as number
+
+		act(() => handle.goTo({ row: 500, col: 2 }))
+		paint()
+
+		const scrolled = handle.renderer.currentView()?.rows.scroll ?? 0
+
+		expect(scrolled).toBeGreaterThan(0)
+
+		act(() => model.setSheet(second))
+		await settle()
+		paint()
+
+		expect(handle.renderer.currentView()?.rows.scroll).toBe(0)
+
+		act(() => model.setSheet(first))
+		paint()
+
+		expect(handle.renderer.currentView()?.rows.scroll).toBe(scrolled)
+		expect(model.getSnapshot().selection.active).toEqual({ row: 500, col: 2 })
+	})
+
+	it("resizes and autofits into the app's size layer when the file is view-only", async () => {
+		const { scroller, model, handle, root } = await mount()
+		const command = vi.spyOn(model.session, "command")
+		let kept: SheetGridKeptSizes = { cols: new Map(), rows: new Map() }
+		const updates: unknown[] = []
+		const layer = (): SheetGridSizes => ({
+			sizes: () => kept,
+			update: (_sheet, axis, entries) => {
+				updates.push([axis, entries])
+
+				const cols = new Map(kept.cols)
+
+				for (const [index, px] of entries) if (px !== null) cols.set(index, px)
+
+				kept = { ...kept, cols }
+				rerender(layer())
+			},
+			follow: () => undefined
+		})
+		const rerender = (sizes: SheetGridSizes): void => {
+			root.render(
+				<SheetGrid
+					grid={model}
+					label="Sheet"
+					editorLabel="Cell entry"
+					sizes={sizes}
+				/>
+			)
+		}
+
+		act(() => model.setReadOnly(true))
+		act(() => rerender(layer()))
+
+		const view = handle.renderer.currentView()
+
+		if (view === null) throw new Error("no view")
+
+		const edge = view.cols.header + view.cols.axis.size(0) - 1
+
+		pointer(scroller, "pointerdown", { clientX: edge, clientY: 10 })
+		pointer(scroller, "pointermove", { clientX: edge + 36, clientY: 10 })
+		pointer(scroller, "pointerup", { clientX: edge + 36, clientY: 10 })
+		await settle()
+
+		expect(updates).toEqual([["cols", [[0, 100]]]])
+		expect(model.getDraft()).toBeNull()
+		expect(model.axes(model.getSnapshot().sheet)?.cols.size(0)).toBe(100)
+
+		act(() => {
+			scroller.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, clientX: view.cols.header + 100 - 1, clientY: 10 }))
+		})
+		await settle()
+
+		expect(updates).toHaveLength(2)
+		expect(model.axes(model.getSnapshot().sheet)?.cols.size(0)).toBeLessThan(100)
+		expect(command).not.toHaveBeenCalled()
+	})
+
+	it("starts no entry in a view-only grid and says so", async () => {
+		const { scroller, model } = await mount()
+
+		act(() => model.setReadOnly(true))
+		key(scroller, { key: "x" })
+
+		expect(document.querySelector("textarea")).toBeNull()
+		expect(scroller.getAttribute("aria-readonly")).toBe("true")
+	})
+})
+
+// A cell whose text is past what a tile holds (32,767 characters): its whole input comes from the cell query.
+const LONG = `${"x".repeat(40_000)}END`
+
+function clippedFixture(): Uint8Array {
+	return buildFixture({
+		sheets: [
+			{
+				name: "One",
+				body: `<dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>${LONG}</t></is></c><c r="B1"><v>5</v></c></row></sheetData>`
+			}
+		]
+	})
+}
+
+async function inputOf(model: SheetGridModel, row: number, col: number): Promise<string> {
+	return (await model.session.query("cell", { sheet: model.getSnapshot().sheet, row, col })).input
+}
+
+describe("SheetGrid: an entry on a cell whose input is not known yet", () => {
+	it("edits a clipped cell's whole input from F2 even before the query answers, and an unchanged Enter keeps it", async () => {
+		const { scroller, model } = await mount(clippedFixture())
+
+		key(scroller, { key: "ArrowRight" })
+		key(scroller, { key: "ArrowLeft" })
+		key(scroller, { key: "F2" })
+		await settle()
+
+		const editor = document.querySelector<HTMLTextAreaElement>("textarea.fo-sheet-editor") as HTMLTextAreaElement
+
+		expect(editor.value).toBe(LONG)
+		key(editor, { key: "Enter" })
+		await settle()
+
+		expect(await inputOf(model, 0, 0)).toBe(LONG)
+		expect(model.getSnapshot().state.dirty).toBe(false)
+	})
+
+	it("commits F2 then Enter pressed before the query answers as unchanged", async () => {
+		const { scroller, model } = await mount(clippedFixture())
+
+		key(scroller, { key: "ArrowRight" })
+		key(scroller, { key: "ArrowLeft" })
+		key(scroller, { key: "F2" })
+		key(document.querySelector("textarea.fo-sheet-editor") as HTMLTextAreaElement, { key: "Enter" })
+		await settle()
+
+		expect(await inputOf(model, 0, 0)).toBe(LONG)
+		expect(model.getSnapshot().state.dirty).toBe(false)
+	})
+
+	it("clears a clipped cell on Backspace then Enter, before the query answers", async () => {
+		const { scroller, model } = await mount(clippedFixture())
+
+		key(scroller, { key: "ArrowRight" })
+		key(scroller, { key: "ArrowLeft" })
+		key(scroller, { key: "Backspace" })
+		key(document.querySelector("textarea.fo-sheet-editor") as HTMLTextAreaElement, { key: "Enter" })
+		await settle()
+
+		expect(await inputOf(model, 0, 0)).toBe("")
+	})
+
+	it("clears a clipped cell on Backspace then Enter right after its tile changed", async () => {
+		const { scroller, model } = await mount(clippedFixture())
+
+		// An edit of B1, in the same tile, patches it: A1's whole input is asked for again.
+		key(scroller, { key: "ArrowRight" })
+		key(scroller, { key: "7" })
+		key(document.querySelector("textarea.fo-sheet-editor") as HTMLTextAreaElement, { key: "Enter" })
+		await settle()
+		key(scroller, { key: "ArrowUp" })
+		key(scroller, { key: "ArrowLeft" })
+		key(scroller, { key: "Backspace" })
+		key(document.querySelector("textarea.fo-sheet-editor") as HTMLTextAreaElement, { key: "Enter" })
+		await settle()
+
+		expect(await inputOf(model, 0, 0)).toBe("")
+	})
+})

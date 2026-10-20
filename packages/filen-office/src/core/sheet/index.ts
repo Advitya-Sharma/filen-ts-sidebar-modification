@@ -154,3 +154,30 @@ export { canEncodeWindows1252, csvCellView, csvDoc, parseCsvFile, serializeCsv, 
 export { CsvDocument } from "./csv/csvDocument"
 export { detectDelimiter, parseCsv, writeCsv } from "./csv/csvParse"
 export type { CsvEncoding } from "./csv/encoding"
+export {
+	builtinFormatCode,
+	EXCEL_BUILTIN_FORMATS,
+	formatGeneral,
+	formatNumberInto,
+	formatTextInto,
+	formatValue,
+	IMPLIED_BUILTINS,
+	MAX_SERIAL_1900,
+	MAX_SERIAL_1904,
+	numFmt,
+	NUMFMT_EN_US,
+	NumFmtOutput,
+	type NumFmt,
+	type NumFmtLocale,
+	type NumFmtOptions,
+	type NumFmtResult
+} from "./numfmt"
+export {
+	applyTint,
+	DEFAULT_PALETTE,
+	resolveColor,
+	SheetStyles,
+	workbookPalette,
+	type SheetStyleSource,
+	type SheetStylesOptions
+} from "./style"

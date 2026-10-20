@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
+import { probePython } from "../../oracles/sheet/libreOffice"
 import type { OracleResult, ResolvedEntry } from "./outputs"
 
 // The LibreOffice UNO oracle: a headless soffice opens our output with its password (open.py, in lo/), proving
@@ -29,6 +30,7 @@ export function libreOffice(env: NodeJS.ProcessEnv = process.env): LibreOffice |
 	const python = join(dirname(soffice), "..", "Resources", "python")
 
 	if (!existsSync(python)) return undefined
+	if (probePython(dirname(python)) !== undefined) return undefined
 
 	return { soffice, python }
 }

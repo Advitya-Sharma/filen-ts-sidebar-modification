@@ -1,0 +1,121 @@
+/* Structure of @filen/office's spreadsheet grid. Every visual value is a --fo-* variable with a neutral light default;
+   apps map them to their tokens (any CSS colour, set on the grid or an ancestor).
+
+   Drawn on the canvases (read when the grid mounts, when the colour scheme changes, and when the app changes
+   SheetGrid's themeKey): --fo-sheet-bg (cell area), --fo-sheet-text (automatic text on cells without a fill),
+   --fo-sheet-grid (gridlines), --fo-sheet-border (automatic borders), --fo-sheet-header-bg, --fo-sheet-header-text,
+   --fo-sheet-header-line, --fo-sheet-header-active-bg, --fo-sheet-header-active-text, --fo-sheet-selection-fill
+   (translucent), --fo-sheet-selection-line, --fo-sheet-selection-halo (a ring inside the line, 9:1 or more from it so
+   one of the two shows on any fill), --fo-sheet-frozen-line, --fo-sheet-resize-line, --fo-sheet-font (the
+   stack after a cell's own family), --fo-sheet-header-font (a CSS font shorthand).
+
+   In CSS: --fo-sheet-editor-bg, --fo-sheet-editor-text, --fo-sheet-editor-shadow, --fo-sheet-invalid,
+   --fo-sheet-tip-bg, --fo-sheet-tip-text, --fo-sheet-tip-font, --fo-sheet-tip-radius, --fo-focus-ring. A cell's own
+   fill, text colour and font are the file's. */
+
+.fo-sheet {
+	position: relative;
+	overflow: hidden;
+	min-height: 0;
+	background: var(--fo-sheet-bg, #fff);
+	contain: strict;
+}
+
+.fo-sheet-canvas {
+	position: absolute;
+	top: 0;
+	left: 0;
+	pointer-events: none;
+}
+
+.fo-sheet-scroller {
+	position: absolute;
+	inset: 0;
+	overflow: auto;
+	outline: none;
+	overscroll-behavior: contain;
+	/* Panning stays the browser's; a tap selects and a pinch never zooms the page. */
+	touch-action: pan-x pan-y;
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+.fo-sheet-scroller:focus-visible {
+	box-shadow: inset 0 0 0 2px var(--fo-focus-ring, #2563eb);
+}
+
+.fo-sheet[data-cursor="col-resize"] .fo-sheet-scroller {
+	cursor: col-resize;
+}
+
+.fo-sheet[data-cursor="row-resize"] .fo-sheet-scroller {
+	cursor: row-resize;
+}
+
+.fo-sheet-extent {
+	position: relative;
+	overflow: hidden;
+}
+
+/* The accessible active cell: kept over the drawn one for assistive technology, never painted. */
+.fo-sheet-a11y {
+	position: absolute;
+	top: 0;
+	left: 0;
+	overflow: hidden;
+	color: transparent;
+	white-space: nowrap;
+	pointer-events: none;
+}
+
+.fo-sheet-a11y > * {
+	width: 100%;
+	height: 100%;
+}
+
+.fo-sheet-editor {
+	position: absolute;
+	top: 0;
+	left: 0;
+	z-index: 2;
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0 3px;
+	border: 0;
+	resize: none;
+	overflow: hidden;
+	white-space: pre;
+	field-sizing: content;
+	line-height: 1.2;
+	color: var(--fo-sheet-editor-text, var(--fo-sheet-text, #000));
+	background: var(--fo-sheet-editor-bg, var(--fo-sheet-bg, #fff));
+	outline: 2px solid var(--fo-sheet-selection-line, #2563eb);
+	outline-offset: -1px;
+	box-shadow: var(--fo-sheet-editor-shadow, 0 1px 4px rgb(0 0 0 / 0.2));
+}
+
+.fo-sheet-editor[aria-invalid="true"] {
+	outline-color: var(--fo-sheet-invalid, #dc2626);
+}
+
+.fo-sheet-live {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
+.fo-sheet-tip {
+	position: absolute;
+	top: 0;
+	left: 0;
+	z-index: 3;
+	padding: 2px 6px;
+	border-radius: var(--fo-sheet-tip-radius, 4px);
+	font: var(--fo-sheet-tip-font, 12px system-ui, sans-serif);
+	color: var(--fo-sheet-tip-text, #fff);
+	background: var(--fo-sheet-tip-bg, rgb(0 0 0 / 0.8));
+	pointer-events: none;
+}

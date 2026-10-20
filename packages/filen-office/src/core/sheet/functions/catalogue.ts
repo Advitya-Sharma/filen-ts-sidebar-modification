@@ -1050,6 +1050,24 @@ export function sheetFunctions(): readonly SheetFunction[] {
 	return load().list
 }
 
+// The prefix a file stores a function under, by its name as typed in upper case ("STDEV.S"); undefined for a name
+// that is no worksheet function.
+export function functionPrefix(name: string): FunctionPrefix | undefined {
+	return load().byName.get(name)?.prefix
+}
+
+// How a function is calculated, by its name as typed in upper case; undefined for a name that is no worksheet
+// function.
+export function functionSupport(name: string): FunctionSupport | undefined {
+	return load().byName.get(name)?.support
+}
+
+// When a function recalculates, by its name as typed in upper case; undefined for a name that is no worksheet
+// function.
+export function functionVolatility(name: string): FunctionVolatility | undefined {
+	return load().byName.get(name)?.volatility
+}
+
 // A function by its name as typed ("stdev.s") or as a file stores it ("_xlfn.STDEV.S").
 export function sheetFunction(name: string): SheetFunction | undefined {
 	return load().byName.get(split(name.toUpperCase().replace(/^_XLFN\.(_XLWS\.)?/u, "_xlfn.")).name)

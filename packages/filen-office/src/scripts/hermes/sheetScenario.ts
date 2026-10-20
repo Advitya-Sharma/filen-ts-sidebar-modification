@@ -15,6 +15,9 @@ import {
 	wellFormedFormula
 } from "../../core/sheet/index"
 import { FormulaEngine } from "../../core/sheet/formula/index"
+import type { SheetCommand, SheetFileKind, SheetSessionApi, SheetTile } from "../../core/sheet/protocol"
+import type { Slicing } from "../../core/slicing"
+import { inThreadSheetHost } from "../../dom/sheet/host"
 
 // The spreadsheet core's text paths (references, CSV reading and writing in every encoding, typed input) and
 // a HyperFormula workbook, run alike under V8 and Hermes: each probe's value is compared between them.
@@ -191,4 +194,186 @@ export function sheetProbes(probe: (name: string, run: () => unknown) => void): 
 		)
 	)
 	probe("sheet.hyperformula", engineProbe)
+}
+
+// --- Sessions: a workbook or text file opened, edited and saved through the in-thread host ---
+
+export interface SheetFixtureResult {
+	readonly name: string
+	readonly open: string
+	// The save as opened: its digest, and whether it is the source byte for byte.
+	readonly unedited: string
+	readonly uneditedIdentical: boolean
+	readonly tiles: string
+	readonly verdict: string
+	// What each edit returned: its patches' digest, or the refusal.
+	readonly steps: readonly string[]
+	readonly edited: string
+	// The edited save opened again: its first tiles.
+	readonly reopened: string
+}
+
+// Results do not depend on where the slices fall, so the clock may be the wall clock.
+const SLICING: Slicing = {
+	sliceMs: 8,
+	now: () => Date.now(),
+	pause: () =>
+		new Promise<void>(resolve => {
+			setTimeout(resolve, 0)
+		})
+}
+
+// Two FNV-1a hashes and the length: equal digests are equal bytes, short enough to print.
+export function bytesDigest(bytes: Uint8Array): string {
+	let a = 0x811c9dc5
+	let b = 0x01000193
+
+	for (let i = 0; i < bytes.length; i++) {
+		const byte = bytes[i] ?? 0
+
+		a = Math.imul(a ^ byte, 0x01000193)
+		b = Math.imul(b ^ byte, 0x0100019d) ^ (b >>> 15)
+	}
+
+	return `${String(bytes.length)}:${(a >>> 0).toString(16)}${(b >>> 0).toString(16)}`
+}
+
+function tileDigest(tile: SheetTile): string {
+	const parts: string[] = [`${String(tile.tileRow)},${String(tile.tileCol)}`]
+
+	for (let i = 0; i < tile.count; i++) {
+		const text = tile.texts[i] ?? -1
+		const input = tile.inputs[i] ?? -1
+
+		parts.push(
+			`${String(tile.positions[i])}=${text < 0 ? "" : (tile.strings[text] ?? "")}|${input < 0 ? "" : (tile.strings[input] ?? "")}|${String(tile.styles[i])}|${String(tile.flags[i])}`
+		)
+	}
+
+	return parts.join(";")
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+	if (a.length !== b.length) return false
+
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+
+	return true
+}
+
+export function sheetKind(name: string): SheetFileKind | null {
+	const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase()
+
+	switch (extension) {
+		case "xlsx":
+		case "xlsm":
+		case "csv":
+		case "tsv":
+			return extension
+		default:
+			return null
+	}
+}
+
+async function firstTiles(session: SheetSessionApi, sheet: number): Promise<string> {
+	const { tiles } = await session.tiles(sheet, Uint32Array.of(0, 0, 0, 1, 1, 0))
+
+	return tiles.map(tileDigest).join("\n")
+}
+
+function edits(sheet: number, text: boolean): SheetCommand[] {
+	const set: SheetCommand = {
+		type: "cells.set",
+		sheet,
+		cells: {
+			rows: Uint32Array.of(0, 1, 2, 3, 4),
+			cols: Uint16Array.of(0, 1, 2, 3, 0),
+			inputs: ["3.14159", "2024-02-29", "=1/3", "50%", "Größe € 😀"]
+		}
+	}
+
+	if (text)
+		return [
+			set,
+			{ type: "axis.insert", sheet, axis: "rows", at: 1, count: 2 },
+			{ type: "axis.delete", sheet, axis: "cols", at: 2, count: 1 }
+		]
+
+	return [
+		set,
+		{
+			type: "format.apply",
+			sheet,
+			ranges: [{ startRow: 0, startCol: 0, endRow: 3, endCol: 3 }],
+			patch: { numFmt: "#,##0.00;[Red]-#,##0.00", bold: true }
+		},
+		{ type: "axis.insert", sheet, axis: "rows", at: 1, count: 2 },
+		{ type: "axis.delete", sheet, axis: "cols", at: 2, count: 1 },
+		{ type: "axis.resize", sheet, axis: "cols", indices: Uint32Array.of(0), sizes: Float32Array.of(120) }
+	]
+}
+
+// One file: opened, saved untouched, its first tiles, the save verdict, a run of edits with an undo and a redo,
+// the edited save, and that save opened again.
+export async function runSheetFixture(name: string, bytes: Uint8Array): Promise<SheetFixtureResult> {
+	const kind = sheetKind(name) ?? "xlsx"
+	const host = inThreadSheetHost()
+	const empty = { unedited: "", uneditedIdentical: false, tiles: "", verdict: "", steps: [], edited: "", reopened: "" }
+
+	try {
+		const opened = await host.open(bytes.slice(), { kind, slicing: SLICING }, () => undefined)
+
+		if (opened.kind !== "opened") return { name, open: opened.kind, ...empty }
+
+		const { session, info } = opened
+		const sheet = info.activeSheet
+		const unedited = await session.save()
+		const tiles = await firstTiles(session, sheet)
+		const verdict = await session.intent()
+		const steps: string[] = []
+		let edited = ""
+		let reopened = ""
+
+		if (verdict.state === "writable") {
+			for (const command of edits(sheet, kind === "csv" || kind === "tsv")) {
+				const result = await session.command(command)
+
+				steps.push(result.ok ? result.change.patches.map(tileDigest).join("/") : `refused ${result.refusal.reason}`)
+			}
+
+			steps.push((await session.undo()).ok ? "undo" : "undo refused")
+			steps.push((await session.redo()).ok ? "redo" : "redo refused")
+
+			const saved = await session.save()
+
+			edited = saved.ok ? bytesDigest(saved.bytes) : `failed ${saved.reason}`
+
+			if (saved.ok) {
+				const again = await host.open(saved.bytes, { kind, slicing: SLICING }, () => undefined)
+
+				if (again.kind === "opened") {
+					reopened = await firstTiles(again.session, again.info.activeSheet)
+					again.session.close()
+				} else {
+					reopened = again.kind
+				}
+			}
+		}
+
+		session.close()
+
+		return {
+			name,
+			open: "opened",
+			unedited: unedited.ok ? bytesDigest(unedited.bytes) : `failed ${unedited.reason}`,
+			uneditedIdentical: unedited.ok && sameBytes(unedited.bytes, bytes),
+			tiles,
+			verdict: JSON.stringify(verdict),
+			steps,
+			edited,
+			reopened
+		}
+	} finally {
+		host.dispose()
+	}
 }

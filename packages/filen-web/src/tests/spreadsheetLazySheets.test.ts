@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { writeXlsx } from "hucre/xlsx"
@@ -302,7 +302,7 @@ describe("the text worker", () => {
 				} else if (specifier.startsWith(".")) {
 					const target = join(dirname(file), specifier)
 
-					visit(target.endsWith(".ts") ? target : `${target}.ts`)
+					visit(target.endsWith(".ts") ? target : existsSync(`${target}.ts`) ? `${target}.ts` : join(target, "index.ts"))
 				} else {
 					packages.add(specifier)
 				}

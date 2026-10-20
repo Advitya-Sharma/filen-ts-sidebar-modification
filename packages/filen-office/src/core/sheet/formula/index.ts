@@ -1,6 +1,7 @@
 export {
 	CYCLE,
 	FormulaEngine,
+	HeldResult,
 	UNPARSEABLE,
 	type EngineCell,
 	type EngineName,

@@ -1,6 +1,7 @@
 import { Deflate, deflateSync } from "fflate"
 import { encodeUtf8 } from "../xml/utf8"
 import { crc32 } from "./crc32"
+import { sliceClock, type Slicing } from "../slicing"
 import { ZipError } from "./errors"
 import type { ByteSink, ByteSource } from "./io"
 import type { PartBytes } from "./pieces"
@@ -55,6 +56,8 @@ export interface WriteZipOptions {
 	// ZIP64 fields and end records on everything, as some writers always emit.
 	readonly forceZip64?: boolean
 	readonly copyChunkSize?: number
+	// Gives the host a turn between chunks once its slice is up (checksumming large new parts is long work).
+	readonly slicing?: Slicing
 }
 
 export interface WriteZipReport {
@@ -320,24 +323,56 @@ function joinChunks(parts: readonly Uint8Array[]): Uint8Array {
 	return out
 }
 
+// Bytes checksummed between looks at the slice clock.
+const CRC_SLICE = 1 << 20
+// Bytes deflated between looks at the slice clock (deflate is far slower than a checksum).
+const DEFLATE_SLICE = 1 << 18
+
 // A new entry's content as the archive stores it, with the CRC of what it holds. Pieces are streamed: read
 // once to checksum and deflate (twice when stored: the CRC goes before the data).
 async function dataOf(item: Extract<ZipPlanItem, { kind: "data" }>, options: WriteZipOptions): Promise<EntryContent> {
 	const bytes = item.bytes
+	const clock = options.slicing === undefined ? undefined : sliceClock(options.slicing)
 
-	if (bytes instanceof Uint8Array) {
+	// Deflated on a clock, joined bytes go through the sliced stream below.
+	if (bytes instanceof Uint8Array && !(item.compress && clock !== undefined && options.deflate === undefined)) {
 		const data = !item.compress
 			? bytes
 			: options.deflate !== undefined
 				? await options.deflate(bytes)
 				: deflateSync(bytes, { level: options.level ?? 6 })
 
-		const crc = crc32(bytes)
+		let crc = 0
 
-		return { crc, size: data.length, data: () => once(data), fed: () => crc }
+		for (let at = 0; at < bytes.length; at += CRC_SLICE) {
+			crc = crc32(bytes.subarray(at, Math.min(bytes.length, at + CRC_SLICE)), crc)
+
+			if (clock?.due === true) await clock.pause()
+		}
+
+		const fed = crc
+
+		return { crc: fed, size: data.length, data: () => once(data), fed: () => fed }
 	}
 
 	let crc = 0
+
+	if (bytes instanceof Uint8Array) {
+		const checked = async function* (): AsyncIterable<Uint8Array> {
+			for (let at = 0; at < bytes.length; at += DEFLATE_SLICE) {
+				const slice = bytes.subarray(at, Math.min(bytes.length, at + DEFLATE_SLICE))
+
+				crc = crc32(slice, crc)
+
+				if (clock?.due === true) await clock.pause()
+
+				yield slice
+			}
+		}
+		const data = await deflateStream(checked(), options.level)
+
+		return { crc, size: data.length, data: () => once(data), fed: () => crc }
+	}
 
 	if (!item.compress) {
 		const known = item.crc32
@@ -349,6 +384,8 @@ async function dataOf(item: Extract<ZipPlanItem, { kind: "data" }>, options: Wri
 				for await (const chunk of bytes.chunks()) {
 					crc = crc32(chunk, crc)
 
+					if (clock?.due === true) await clock.pause()
+
 					yield chunk
 				}
 			}
@@ -356,16 +393,26 @@ async function dataOf(item: Extract<ZipPlanItem, { kind: "data" }>, options: Wri
 			return { crc: known, size: bytes.length, data, fed: () => crc }
 		}
 
-		for await (const chunk of bytes.chunks()) crc = crc32(chunk, crc)
+		for await (const chunk of bytes.chunks()) {
+			crc = crc32(chunk, crc)
+
+			if (clock?.due === true) await clock.pause()
+		}
 
 		return { crc, size: bytes.length, data: () => bytes.chunks(), fed: () => crc }
 	}
 
 	const checked = async function* (): AsyncIterable<Uint8Array> {
 		for await (const chunk of bytes.chunks()) {
-			crc = crc32(chunk, crc)
+			for (let at = 0; at < chunk.length; at += DEFLATE_SLICE) {
+				const slice = chunk.subarray(at, Math.min(chunk.length, at + DEFLATE_SLICE))
 
-			yield chunk
+				crc = crc32(slice, crc)
+
+				if (clock?.due === true) await clock.pause()
+
+				yield slice
+			}
 		}
 	}
 	const data =

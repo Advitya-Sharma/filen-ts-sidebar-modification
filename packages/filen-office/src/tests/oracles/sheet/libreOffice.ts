@@ -1,5 +1,17 @@
 import { spawnSync } from "node:child_process"
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync
+} from "node:fs"
+import { tmpdir } from "node:os"
 import { dirname, extname, join } from "node:path"
 import { convertWith, offices, officeEnv, type Office } from "../../interop/soffice"
 
@@ -35,7 +47,45 @@ export function unoEnv(resources: string): NodeJS.ProcessEnv {
 	}
 }
 
-function probePython(resources: string): string | undefined {
+// Verdicts per install, kept across runs: a killed bundled Python writes a crash report (and, on macOS, a dialog)
+// each time it is exec'd, and no static check (codesign, spctl) predicts the kill, so each install is exec-probed
+// once. The key is the install plus the real Python binary's size and mtime, so a reinstall is probed again.
+const PROBE_CACHE = join(tmpdir(), "filen-office-lo-probe.json")
+
+function pythonKey(resources: string): string {
+	const frameworks = join(resources, "..", "Frameworks", "LibreOfficePython.framework", "Versions")
+	let binary = join(resources, "python")
+
+	try {
+		for (const version of readdirSync(frameworks)) {
+			const candidate = join(frameworks, version, "Resources", "Python.app", "Contents", "MacOS", "LibreOfficePython")
+
+			if (existsSync(candidate)) {
+				binary = candidate
+
+				break
+			}
+		}
+
+		const stat = statSync(binary)
+
+		return `${resources}|${stat.size}|${Math.floor(stat.mtimeMs)}`
+	} catch {
+		return `${resources}|unknown`
+	}
+}
+
+function readProbeCache(): Record<string, string | null> {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(PROBE_CACHE, "utf8"))
+
+		return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, string | null>) : {}
+	} catch {
+		return {}
+	}
+}
+
+function execProbe(resources: string): string | undefined {
 	const result = spawnSync(join(resources, "python"), ["-I", "-c", "import sys; sys.stdout.write('ok')"], {
 		encoding: "utf8",
 		timeout: PROBE_TIMEOUT_MS,
@@ -46,6 +96,28 @@ function probePython(resources: string): string | undefined {
 	if (result.signal !== null) return `its bundled Python was killed at exec (${result.signal})`
 
 	return `its bundled Python failed (exit ${result.status}): ${(result.stderr ?? "").slice(0, 200)}`
+}
+
+// Why the install's bundled Python cannot run, or undefined when it can. Exec'd at most once per install.
+export function probePython(resources: string): string | undefined {
+	const key = pythonKey(resources)
+	const cache = readProbeCache()
+	const cached = cache[key]
+
+	if (cached !== undefined) return cached ?? undefined
+
+	const verdict = execProbe(resources)
+
+	try {
+		const tmp = `${PROBE_CACHE}.${process.pid}.tmp`
+
+		writeFileSync(tmp, JSON.stringify({ ...readProbeCache(), [key]: verdict ?? null }))
+		renameSync(tmp, PROBE_CACHE)
+	} catch {
+		// An unwritable cache only costs a re-probe.
+	}
+
+	return verdict
 }
 
 export function sheetOffices(env: NodeJS.ProcessEnv = process.env): SheetOffice[] {

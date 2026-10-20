@@ -1,0 +1,1052 @@
+import {
+	CellFlag,
+	SHEET_MAX_COLS,
+	SHEET_MAX_ROWS,
+	tileKey,
+	tileKeyCol,
+	tileKeyRow,
+	tileKeySheet,
+	type SheetAxis,
+	type SheetChange,
+	type SheetCommand,
+	type SheetCommandResult,
+	type SheetDocState,
+	type SheetEvent,
+	type SheetFileKind,
+	type SheetId,
+	type SheetLayout,
+	type SheetRange,
+	type SheetRefusal,
+	type SheetRenderStyle,
+	type SheetSessionApi,
+	type SheetStyleAppend,
+	type SheetSummary,
+	type SheetTile,
+	type SheetWorkbookInfo,
+	type SheetWritability
+} from "../../core/sheet/protocol"
+import { createGridAxis, type GridAxis } from "./axis"
+import { cellSelection, fromSelectionState, mergeRanges, type GridPoint, type GridSelection } from "./selection"
+import { TileCache, entryInput, entryOf, entryText, regionHoldsTile, type GridEntry } from "./tiles"
+
+// What a grid knows of an open session, outside React: the sheet list, layouts, render styles and the tiles in
+// view (an LRU cache the frame's needs bound), kept current by command answers and session events in the order
+// they arrive. React reads a small snapshot (sheet, selection, editing, document state); the canvas reads the
+// rest on every frame it draws, so a tile arriving or a scroll step renders no component.
+
+// Blank rows and columns shown past the used area (and past the active cell), as a spreadsheet shows.
+export const EXTRA_ROWS = 100
+export const EXTRA_COLS = 20
+const MIN_COLS = 26
+// Tiles kept beyond what a frame needs: room for scrolling back without fetching again.
+const MIN_CAPACITY = 24
+
+export interface GridEditing {
+	readonly sheet: SheetId
+	readonly row: number
+	readonly col: number
+	readonly text: string
+	// The cell's input when editing started (null: not known yet, the cell query brings it): committing it unchanged
+	// sends nothing.
+	readonly initial: string | null
+	// Started from the cell's input (F2, the formula bar), not from what was typed.
+	readonly fromInput: boolean
+	// "enter": started by typing, arrows commit and move (Excel's Enter mode); "edit": F2, arrows move the caret.
+	readonly mode: "enter" | "edit"
+	// A commit was refused (a formula that does not read as one): kept open, marked.
+	readonly invalid: boolean
+}
+
+// Whether committing the entry changes the cell. One started from the cell's input before it was known, still
+// empty, is unchanged; any other entry whose start was not known is a change (typing replaces, Backspace clears).
+export function editingChanged(editing: GridEditing): boolean {
+	return editing.initial === null ? !(editing.fromInput && editing.text === "") : editing.text !== editing.initial
+}
+
+export interface GridActiveCell {
+	readonly text: string
+	readonly input: string
+	readonly flags: number
+	// Its tile is held: text and flags are the cell's, not a placeholder.
+	readonly known: boolean
+}
+
+export type GridEngineState = "none" | "building" | "ready" | "failed"
+
+export interface SheetGridSnapshot {
+	readonly sheet: SheetId
+	readonly sheets: readonly SheetSummary[]
+	readonly layout: SheetLayout | null
+	readonly state: SheetDocState
+	readonly writability: SheetWritability
+	readonly engine: GridEngineState
+	readonly selection: GridSelection
+	readonly editing: GridEditing | null
+	readonly active: GridActiveCell
+	// The session failed (its worker died): nothing answers any more.
+	readonly failed: string | null
+	// The app's own view-only (a shared link, a preview): no editing starts.
+	readonly readOnly: boolean
+}
+
+export interface GridAxes {
+	readonly rows: GridAxis
+	readonly cols: GridAxis
+	readonly scale: number
+}
+
+// A resize being dragged: sizes at 100 % (NaN: back to the default) shown until the session's answer lands.
+export interface GridResizeDraft {
+	readonly sheet: SheetId
+	readonly axis: "rows" | "cols"
+	readonly sizes: ReadonlyMap<number, number>
+}
+
+// A sheet's kept sizes: pixels at 100 % by index, over the file's.
+export interface SheetGridKeptSizes {
+	readonly cols: ReadonlyMap<number, number>
+	readonly rows: ReadonlyMap<number, number>
+}
+
+// A shift of rows or columns, as a size layer follows it: `revert` undoes an earlier shift (an undone delete gets
+// back the sizes it took out).
+export interface SheetGridShift {
+	readonly type: "insert" | "delete"
+	readonly axis: SheetAxis
+	readonly at: number
+	readonly count: number
+	readonly revert: boolean
+}
+
+// Sizes the app keeps beside the file (its key-value layer) for a session that cannot hold them: a text file, or a
+// workbook that is view-only (by its writability or the app's). The grid draws them over the file's, and resizes,
+// autofits and row or column shifts go to them instead of the session.
+export interface SheetGridSizes {
+	// The sheet's kept sizes, the same object until they change; undefined for none.
+	sizes(sheet: SheetId): SheetGridKeptSizes | undefined
+	// Indices resized (null: back to the file's size).
+	update(sheet: SheetId, axis: SheetAxis, entries: readonly (readonly [index: number, px: number | null])[]): void
+	follow(sheet: SheetId, shift: SheetGridShift): void
+}
+
+interface SheetShiftStep {
+	readonly sheet: SheetId
+	readonly shift: SheetGridShift
+}
+
+const TEXT_KINDS: ReadonlySet<SheetFileKind> = new Set(["csv", "tsv", "tab"])
+
+// A refused command and what it was, for the app's message.
+export type SheetGridRefusalHandler = (refusal: SheetRefusal, command: SheetCommand["type"] | "undo" | "redo") => void
+
+export interface SheetGridModelOptions {
+	readonly session: SheetSessionApi
+	readonly info: SheetWorkbookInfo
+}
+
+interface InFlight {
+	// A change touched the tile after it was built: it is fetched again.
+	stale: boolean
+	// A whole-tile patch that arrived before the tile did.
+	replacement: SheetTile | null
+}
+
+// Whether an entry can start in the active cell: not view-only, the session alive, the cell not locked.
+export function canEditSnapshot(snapshot: SheetGridSnapshot): boolean {
+	const { writability, failed, active, readOnly } = snapshot
+
+	return !readOnly && failed === null && writability.state !== "viewOnly" && (active.flags & CellFlag.LOCKED) === 0
+}
+
+const NO_ACTIVE: GridActiveCell = { text: "", input: "", flags: 0, known: false }
+
+function pendingKey(sheet: SheetId, row: number, col: number): string {
+	return `${String(sheet)}:${String(row)}:${String(col)}`
+}
+
+function sameActive(a: GridActiveCell, b: GridActiveCell): boolean {
+	return a.text === b.text && a.input === b.input && a.flags === b.flags && a.known === b.known
+}
+
+export class SheetGridModel {
+	readonly session: SheetSessionApi
+	readonly tiles = new TileCache()
+	readonly date1904: boolean
+	readonly kind: SheetFileKind
+	private snapshot: SheetGridSnapshot
+	private readonly listeners = new Set<() => void>()
+	private readonly painters = new Set<() => void>()
+	private readonly inFlight = new Map<number, InFlight>()
+	// What the last frame needed: never evicted.
+	private needed: ReadonlySet<number> = new Set()
+	private readonly styles: SheetRenderStyle[] = []
+	private readonly layouts = new Map<SheetId, SheetLayout>()
+	private readonly layoutRequests = new Set<SheetId>()
+	private readonly selections = new Map<SheetId, GridSelection>()
+	private readonly reach = new Map<SheetId, GridPoint>()
+	private readonly pending = new Map<string, string>()
+	private readonly mergeMemo = new WeakMap<Uint32Array, SheetRange[]>()
+	private axesMemo: {
+		layout: SheetLayout
+		rows: number
+		cols: number
+		scale: number
+		draft: GridResizeDraft | null
+		kept: SheetGridKeptSizes | undefined
+		axes: GridAxes
+	} | null = null
+	private draft: GridResizeDraft | null = null
+	private sizeLayer: SheetGridSizes | null = null
+	// Row and column shifts of the steps the session can undo and redo, for the size layer to follow back.
+	private readonly shifts: { undo: (SheetShiftStep | null)[]; redo: (SheetShiftStep | null)[] } = { undo: [], redo: [] }
+	private zoom: number | null = null
+	private intention: Promise<SheetWritability> | null = null
+	private disposed = false
+	// The cell query of the open entry whose start was not known (identity: a later entry asks again).
+	private entryQuery: object | null = null
+	// A clipped active cell's whole input, from the cell query, for the tile it was asked for (a new tile asks again).
+	private clipped: { sheet: SheetId; row: number; col: number; tile: GridEntry["tile"]; input: string | null } | null = null
+	// Refused commands, for the app's message.
+	private onRefusal: SheetGridRefusalHandler | null = null
+
+	constructor(options: SheetGridModelOptions) {
+		const { session, info } = options
+
+		this.session = session
+		this.date1904 = info.date1904
+		this.kind = info.kind
+		this.appendStyles(info.styles)
+		this.layouts.set(info.activeSheet, info.activeLayout)
+
+		const merges = this.merges(info.activeLayout)
+		const selection = fromSelectionState(info.activeLayout.selection, merges)
+
+		this.selections.set(info.activeSheet, selection)
+		this.snapshot = {
+			sheet: info.activeSheet,
+			sheets: info.sheets,
+			layout: info.activeLayout,
+			state: info.state,
+			writability: info.writability,
+			engine: "none",
+			selection,
+			editing: null,
+			active: NO_ACTIVE,
+			failed: null,
+			readOnly: false
+		}
+	}
+
+	// --- Subscriptions ---
+
+	subscribe = (listener: () => void): (() => void) => {
+		this.listeners.add(listener)
+
+		return () => {
+			this.listeners.delete(listener)
+		}
+	}
+
+	getSnapshot = (): SheetGridSnapshot => this.snapshot
+
+	// Where refused commands go (null: nowhere), for the app's message.
+	setRefusalHandler(handler: SheetGridRefusalHandler | null): void {
+		this.onRefusal = handler
+	}
+
+	// Anything a frame draws changed (tiles, layout, styles, selection, a pending entry).
+	onPaint(listener: () => void): () => void {
+		this.painters.add(listener)
+
+		return () => {
+			this.painters.delete(listener)
+		}
+	}
+
+	// A new snapshot when anything in it changed (the active cell read again from the tiles held), and a frame.
+	private update(patch: Partial<SheetGridSnapshot>): void {
+		const previous = this.snapshot
+		const next = { ...previous, ...patch }
+
+		if (patch.active === undefined) {
+			const active = this.activeCell(next.sheet, next.selection.active)
+
+			next.active = sameActive(active, previous.active) ? previous.active : active
+		}
+
+		if ((Object.keys(next) as (keyof SheetGridSnapshot)[]).some(key => next[key] !== previous[key])) {
+			this.snapshot = next
+
+			for (const listener of this.listeners) listener()
+		}
+
+		this.repaint()
+	}
+
+	repaint(): void {
+		for (const painter of this.painters) painter()
+	}
+
+	dispose(): void {
+		this.disposed = true
+		this.listeners.clear()
+		this.painters.clear()
+	}
+
+	// --- Reads for painting ---
+
+	style(index: number): SheetRenderStyle {
+		return this.styles[index] ?? this.styles[0] ?? {}
+	}
+
+	layout(sheet: SheetId): SheetLayout | null {
+		return this.layouts.get(sheet) ?? null
+	}
+
+	merges(layout: SheetLayout): readonly SheetRange[] {
+		let ranges = this.mergeMemo.get(layout.merges)
+
+		if (ranges === undefined) {
+			ranges = mergeRanges(layout.merges)
+			this.mergeMemo.set(layout.merges, ranges)
+		}
+
+		return ranges
+	}
+
+	// The app's zoom in percent over the sheet's own (null: the sheet's).
+	setZoom(percent: number | null): void {
+		this.zoom = percent === null ? null : Math.min(400, Math.max(10, percent))
+		this.axesMemo = null
+		this.repaint()
+	}
+
+	scale(layout: SheetLayout): number {
+		return (this.zoom ?? (layout.zoom > 0 ? layout.zoom : 100)) / 100
+	}
+
+	// Rows and columns shown: the used area, the active cell and how far the user went, plus blank ones past them.
+	extent(sheet: SheetId, layout: SheetLayout): { rows: number; cols: number } {
+		const reach = this.reach.get(sheet)
+		const selection = this.selections.get(sheet)
+		const lastRow = Math.max(layout.rowCount, (reach?.row ?? 0) + 1, (selection?.active.row ?? 0) + 1)
+		const lastCol = Math.max(layout.colCount, (reach?.col ?? 0) + 1, (selection?.active.col ?? 0) + 1)
+
+		return {
+			rows: Math.min(SHEET_MAX_ROWS, lastRow + EXTRA_ROWS),
+			cols: Math.min(SHEET_MAX_COLS, Math.max(MIN_COLS, lastCol + EXTRA_COLS))
+		}
+	}
+
+	// The extent grows to hold this cell (a jump, or scrolling to the end).
+	grow(sheet: SheetId, row: number, col: number): void {
+		const reach = this.reach.get(sheet)
+		const toRow = Math.min(SHEET_MAX_ROWS - 1, Math.max(row, reach?.row ?? 0))
+		const toCol = Math.min(SHEET_MAX_COLS - 1, Math.max(col, reach?.col ?? 0))
+
+		if (reach !== undefined && reach.row === toRow && reach.col === toCol) return
+
+		this.reach.set(sheet, { row: toRow, col: toCol })
+		this.axesMemo = null
+		this.repaint()
+	}
+
+	axes(sheet: SheetId): GridAxes | null {
+		const layout = this.layouts.get(sheet)
+
+		if (layout === undefined) return null
+
+		const { rows, cols } = this.extent(sheet, layout)
+		const scale = this.scale(layout)
+		const draft = this.draft?.sheet === sheet ? this.draft : null
+		const kept = this.keepsSizes() ? this.sizeLayer?.sizes(sheet) : undefined
+		const memo = this.axesMemo
+
+		if (
+			memo?.layout === layout &&
+			memo.rows === rows &&
+			memo.cols === cols &&
+			memo.scale === scale &&
+			memo.draft === draft &&
+			memo.kept === kept
+		)
+			return memo.axes
+
+		const overrides = (axis: SheetAxis): ReadonlyMap<number, number> | undefined => {
+			const own = axis === "rows" ? kept?.rows : kept?.cols
+			const dragged = draft?.axis === axis ? draft.sizes : undefined
+
+			if (own === undefined || own.size === 0) return dragged
+			if (dragged === undefined) return own
+
+			return new Map([...own, ...dragged])
+		}
+
+		const axes: GridAxes = {
+			rows: createGridAxis(layout.rows, rows, scale, overrides("rows")),
+			cols: createGridAxis(layout.cols, cols, scale, overrides("cols")),
+			scale
+		}
+
+		this.axesMemo = { layout, rows, cols, scale, draft, kept, axes }
+
+		return axes
+	}
+
+	// The app's size layer (null: none). Handed in again whenever its sizes change.
+	setSizes(sizes: SheetGridSizes | null): void {
+		if (this.sizeLayer === sizes) return
+
+		this.sizeLayer = sizes
+		this.repaint()
+	}
+
+	// Sizes go to the app's layer: the session cannot hold them, or the file is not to be written.
+	keepsSizes(): boolean {
+		const { writability, readOnly } = this.snapshot
+
+		return this.sizeLayer !== null && (TEXT_KINDS.has(this.kind) || writability.state === "viewOnly" || readOnly)
+	}
+
+	// Columns or rows can be resized: into the file, or into the app's layer (a text file holds no sizes).
+	canResize(): boolean {
+		return this.snapshot.failed === null && (this.keepsSizes() || (this.canChange() && !TEXT_KINDS.has(this.kind)))
+	}
+
+	// Pixel sizes at 100 % (NaN: back to the file's size), to the app's layer or the session. Resolves once the
+	// new sizes are the ones drawn (a draft can go then).
+	async resize(sheet: SheetId, axis: SheetAxis, indices: Uint32Array, sizes: Float32Array): Promise<void> {
+		const layer = this.sizeLayer
+
+		if (layer !== null && this.keepsSizes()) {
+			layer.update(
+				sheet,
+				axis,
+				Array.from(indices, (index, k) => {
+					const px = sizes[k] ?? Number.NaN
+
+					return [index, Number.isNaN(px) ? null : px] as const
+				})
+			)
+
+			// The app hands its new sizes in when it renders, which a discrete event's update does before a macrotask.
+			await new Promise(resolve => setTimeout(resolve, 0))
+
+			return
+		}
+
+		await this.command({ type: "axis.resize", sheet, axis, indices, sizes })
+	}
+
+	setDraft(draft: GridResizeDraft | null): void {
+		if (this.draft === draft) return
+
+		this.draft = draft
+		this.repaint()
+	}
+
+	getDraft(): GridResizeDraft | null {
+		return this.draft
+	}
+
+	// A held cell's tile entry (no fetch).
+	entry(sheet: SheetId, row: number, col: number): GridEntry | null {
+		const tile = this.tiles.peek(tileKey(sheet, row >>> 6, col >>> 5))
+
+		if (tile === undefined) return null
+
+		const entry = entryOf(tile, row, col)
+
+		return entry < 0 ? null : { tile, entry }
+	}
+
+	// A held cell's tile, entry or not.
+	tileHeld(sheet: SheetId, row: number, col: number): boolean {
+		return this.tiles.has(tileKey(sheet, row >>> 6, col >>> 5))
+	}
+
+	// What an entry being committed shows until the session's answer lands.
+	pendingText(sheet: SheetId, row: number, col: number): string | undefined {
+		return this.pending.size === 0 ? undefined : this.pending.get(pendingKey(sheet, row, col))
+	}
+
+	// --- Tiles ---
+
+	// The tiles a frame draws (tile row and column pairs of one sheet): missing ones are fetched in one call, the
+	// rest kept as recently used, and the cache trimmed to a multiple of the need.
+	need(sheet: SheetId, coordinates: readonly number[]): void {
+		if (this.disposed || this.snapshot.failed !== null) return
+
+		const needed = new Set<number>()
+		const missing: number[] = []
+
+		for (let i = 0; i + 1 < coordinates.length; i += 2) {
+			const tileRow = coordinates[i] ?? 0
+			const tileCol = coordinates[i + 1] ?? 0
+			const key = tileKey(sheet, tileRow, tileCol)
+
+			if (needed.has(key)) continue
+
+			needed.add(key)
+
+			if (this.tiles.touch(key) !== undefined || this.inFlight.has(key)) continue
+
+			missing.push(tileRow, tileCol)
+		}
+
+		this.needed = needed
+		this.tiles.evict(this.capacity(), needed)
+		this.tiles.keep(needed)
+		this.flushReleases()
+
+		if (missing.length > 0) this.fetch(sheet, missing)
+	}
+
+	private capacity(): number {
+		return Math.max(MIN_CAPACITY, this.needed.size * 3)
+	}
+
+	private flushReleases(): void {
+		const released = this.tiles.takeReleased()
+
+		if (released !== null) this.session.release(released)
+	}
+
+	private fetch(sheet: SheetId, coordinates: number[]): void {
+		const keys: number[] = []
+
+		for (let i = 0; i + 1 < coordinates.length; i += 2) {
+			const key = tileKey(sheet, coordinates[i] ?? 0, coordinates[i + 1] ?? 0)
+
+			keys.push(key)
+			this.inFlight.set(key, { stale: false, replacement: null })
+		}
+
+		this.session.tiles(sheet, Uint32Array.from(coordinates)).then(
+			answer => {
+				if (answer.styles !== undefined) this.appendStyles(answer.styles)
+
+				const dropped: number[] = []
+
+				for (const tile of answer.tiles) {
+					const key = tileKey(tile.sheet, tile.tileRow, tile.tileCol)
+					const flight = this.inFlight.get(key)
+
+					this.inFlight.delete(key)
+
+					if (flight !== undefined && flight.replacement !== null && flight.replacement.version >= tile.version)
+						this.tiles.put(flight.replacement)
+					else if (flight?.stale === true) dropped.push(key)
+					else this.tiles.put(tile)
+				}
+
+				for (const key of keys) this.inFlight.delete(key)
+
+				// A dropped tile is fetched again by the next frame that needs it; until then the session need not
+				// patch it.
+				if (dropped.length > 0) this.session.release(Float64Array.from(dropped))
+
+				this.tiles.evict(this.capacity(), this.needed)
+				this.flushReleases()
+
+				// The active cell may have arrived.
+				this.update({})
+			},
+			() => {
+				for (const key of keys) this.inFlight.delete(key)
+			}
+		)
+	}
+
+	private appendStyles(append: SheetStyleAppend): void {
+		append.styles.forEach((style, k) => {
+			this.styles[append.from + k] = style
+		})
+	}
+
+	// --- Sheets ---
+
+	setSheet(sheet: SheetId): void {
+		if (sheet === this.snapshot.sheet || !this.snapshot.sheets.some(entry => entry.id === sheet)) return
+
+		this.commitOrDrop()
+
+		const layout = this.layouts.get(sheet) ?? null
+
+		if (layout === null) this.loadLayout(sheet)
+
+		this.update({
+			sheet,
+			layout,
+			selection: this.selections.get(sheet) ?? fromSelectionState(layout?.selection, layout === null ? [] : this.merges(layout)),
+			editing: null
+		})
+	}
+
+	// Switching sheets mid-entry drops the entry (the caller commits it first when it should be kept).
+	private commitOrDrop(): void {
+		if (this.snapshot.editing !== null) this.snapshot = { ...this.snapshot, editing: null }
+	}
+
+	private loadLayout(sheet: SheetId): void {
+		if (this.layoutRequests.has(sheet)) return
+
+		this.layoutRequests.add(sheet)
+		this.session.layout(sheet).then(
+			layout => {
+				this.layoutRequests.delete(sheet)
+				this.storeLayout(sheet, layout)
+			},
+			() => {
+				this.layoutRequests.delete(sheet)
+			}
+		)
+	}
+
+	private storeLayout(sheet: SheetId, layout: SheetLayout): void {
+		const held = this.layouts.get(sheet)
+
+		if (held !== undefined && held.version > layout.version) return
+
+		this.layouts.set(sheet, layout)
+
+		if (!this.selections.has(sheet)) this.selections.set(sheet, fromSelectionState(layout.selection, this.merges(layout)))
+
+		if (sheet === this.snapshot.sheet) {
+			this.update({ layout, selection: this.selections.get(sheet) ?? this.snapshot.selection })
+		} else {
+			this.repaint()
+		}
+	}
+
+	// --- Selection ---
+
+	select(selection: GridSelection): void {
+		const sheet = this.snapshot.sheet
+
+		this.selections.set(sheet, selection)
+
+		const reach = this.reach.get(sheet)
+		const focus =
+			selection.focus.row < SHEET_MAX_ROWS - 1 && selection.focus.col < SHEET_MAX_COLS - 1 ? selection.focus : selection.active
+
+		if (reach === undefined || reach.row < focus.row || reach.col < focus.col) {
+			this.reach.set(sheet, { row: Math.max(focus.row, reach?.row ?? 0), col: Math.max(focus.col, reach?.col ?? 0) })
+			this.axesMemo = null
+		}
+
+		this.update({ selection })
+	}
+
+	private activeCell(sheet: SheetId, point: GridPoint): GridActiveCell {
+		if (!this.tileHeld(sheet, point.row, point.col)) return NO_ACTIVE
+
+		const found = this.entry(sheet, point.row, point.col)
+
+		if (found === null) return { text: "", input: "", flags: 0, known: true }
+
+		const flags = found.tile.flags[found.entry] ?? 0
+		const text = entryText(found.tile, found.entry)
+
+		if ((flags & CellFlag.CLIPPED) === 0) return { text, input: entryInput(found.tile, found.entry), flags, known: true }
+
+		// The tile holds only the start of the cell's text: its whole input comes from the cell query, and until it
+		// does the entry is not known (an edit starts from the query too).
+		const held = this.clipped
+
+		if (held?.sheet === sheet && held.row === point.row && held.col === point.col && held.tile === found.tile) {
+			return held.input === null
+				? { text, input: entryInput(found.tile, found.entry), flags, known: false }
+				: { text, input: held.input, flags, known: true }
+		}
+
+		const asked = { sheet, row: point.row, col: point.col, tile: found.tile, input: null as string | null }
+
+		this.clipped = asked
+		this.session.query("cell", { sheet, row: point.row, col: point.col }).then(
+			detail => {
+				if (this.clipped !== asked || this.disposed) return
+
+				asked.input = detail.input
+				this.update({})
+			},
+			() => undefined
+		)
+
+		return { text, input: entryInput(found.tile, found.entry), flags, known: false }
+	}
+
+	// --- Editing ---
+
+	// An entry open as the grid turns read-only is committed, not dropped (the app's discard prompt then sees it); a
+	// refusal, a malformed formula's too, goes to the refusal handler, as the entry can no longer be mended.
+	setReadOnly(readOnly: boolean): void {
+		if (readOnly === this.snapshot.readOnly) return
+
+		this.update({ readOnly })
+
+		if (readOnly) void this.commitEditing(null)
+	}
+
+	canEdit(): boolean {
+		return canEditSnapshot(this.snapshot)
+	}
+
+	// Commands that change the file but not a cell's content (resizing) are allowed.
+	canChange(): boolean {
+		const { writability, failed, readOnly } = this.snapshot
+
+		return !readOnly && failed === null && writability.state !== "viewOnly"
+	}
+
+	// The user set out to edit: the session proves the file (once) and builds its formula engine.
+	// Never rejects: a session that cannot answer leaves the writability as it was.
+	intent(): Promise<SheetWritability> {
+		this.intention ??= this.session.intent().then(
+			writability => {
+				if (writability !== this.snapshot.writability) this.update({ writability })
+
+				return writability
+			},
+			() => this.snapshot.writability
+		)
+
+		return this.intention
+	}
+
+	// Starts an entry in the active cell from `text`, or from what the cell holds (its input) when null. False when
+	// the cell cannot be edited.
+	startEditing(text: string | null, mode: GridEditing["mode"]): boolean {
+		if (!this.canEdit()) return false
+
+		const { sheet, selection, active } = this.snapshot
+		const { row, col } = selection.active
+		const initial = active.known ? active.input : null
+
+		void this.intent()
+		this.update({
+			editing: { sheet, row, col, text: text ?? initial ?? "", initial, fromInput: text === null, mode, invalid: false }
+		})
+
+		if (active.known) {
+			this.entryQuery = null
+
+			return true
+		}
+
+		// What the cell holds is not known (its tile is not held, or holds only the start of its text): it comes from
+		// the session, once per entry. An entry started from it and still empty takes it.
+		const query = {}
+
+		this.entryQuery = query
+		this.session.query("cell", { sheet, row, col }).then(
+			detail => {
+				const editing = this.snapshot.editing
+
+				if (this.entryQuery !== query || editing?.sheet !== sheet || editing.row !== row || editing.col !== col) return
+
+				this.entryQuery = null
+				this.update({
+					editing: {
+						...editing,
+						text: editing.fromInput && editing.text === "" ? detail.input : editing.text,
+						initial: detail.input
+					}
+				})
+			},
+			() => undefined
+		)
+
+		return true
+	}
+
+	setEditText(text: string): void {
+		const editing = this.snapshot.editing
+
+		if (editing !== null && editing.text !== text) this.update({ editing: { ...editing, text, invalid: false } })
+	}
+
+	setEditMode(mode: GridEditing["mode"]): void {
+		const editing = this.snapshot.editing
+
+		if (editing !== null && editing.mode !== mode) this.update({ editing: { ...editing, mode } })
+	}
+
+	cancelEditing(): void {
+		if (this.snapshot.editing !== null) this.update({ editing: null })
+	}
+
+	// Commits the entry and moves the selection to `next` (null: stays). The cell shows what was typed until the
+	// session answers. Resolves false when the session refused it; a malformed formula reopens the entry, marked.
+	async commitEditing(next: GridSelection | null): Promise<boolean> {
+		const editing = this.snapshot.editing
+
+		if (editing === null) return true
+
+		const changed = editingChanged(editing)
+
+		this.entryQuery = null
+		const key = pendingKey(editing.sheet, editing.row, editing.col)
+
+		if (changed) this.pending.set(key, editing.text)
+
+		this.update({ editing: null })
+
+		if (next !== null && editing.sheet === this.snapshot.sheet) this.select(next)
+		if (!changed) return true
+
+		let result: SheetCommandResult
+
+		try {
+			result = await this.command(
+				{
+					type: "cells.set",
+					sheet: editing.sheet,
+					cells: { rows: Uint32Array.of(editing.row), cols: Uint16Array.of(editing.col), inputs: [editing.text] }
+				},
+				false
+			)
+		} catch {
+			// The session failed (a "failed" event says so): the entry was not kept.
+			this.pending.delete(key)
+			this.repaint()
+
+			return false
+		}
+
+		if (this.pending.get(key) === editing.text) this.pending.delete(key)
+
+		if (!result.ok) {
+			if (
+				result.refusal.reason === "formula" &&
+				editing.sheet === this.snapshot.sheet &&
+				this.snapshot.editing === null &&
+				!this.snapshot.readOnly
+			) {
+				const layout = this.snapshot.layout
+
+				this.select(cellSelection({ row: editing.row, col: editing.col }, layout === null ? [] : this.merges(layout)))
+				this.update({ editing: { ...editing, mode: "edit", invalid: true } })
+			} else {
+				this.onRefusal?.(result.refusal, "cells.set")
+			}
+
+			this.repaint()
+
+			return false
+		}
+
+		this.repaint()
+
+		return true
+	}
+
+	// --- Commands ---
+
+	// Runs a command and applies its change. `report`: a refusal goes to onRefusal.
+	async command(command: SheetCommand, report = true): Promise<SheetCommandResult> {
+		const result = await this.session.command(command)
+		// Changes before this answer arrived before it: a newer version is this command's step.
+		const before = this.snapshot.state.version
+
+		this.settle(result, report ? command.type : null)
+
+		// A step the session can undo: the size layer's shift is kept beside it.
+		if (result.ok && result.change.state.version > before) {
+			const step: SheetShiftStep | null =
+				command.type === "axis.insert" || command.type === "axis.delete"
+					? {
+							sheet: command.sheet,
+							shift: {
+								type: command.type === "axis.insert" ? "insert" : "delete",
+								axis: command.axis,
+								at: command.at,
+								count: command.count,
+								revert: false
+							}
+						}
+					: null
+
+			this.shifts.undo.push(step)
+			this.shifts.redo = []
+			this.follow(step, false)
+		}
+
+		return result
+	}
+
+	async undo(): Promise<SheetCommandResult> {
+		const result = await this.session.undo()
+
+		this.settle(result, "undo")
+
+		if (result.ok) {
+			const step = this.shifts.undo.pop() ?? null
+
+			this.shifts.redo.push(step)
+			this.follow(step, true)
+		}
+
+		return result
+	}
+
+	async redo(): Promise<SheetCommandResult> {
+		const result = await this.session.redo()
+
+		this.settle(result, "redo")
+
+		if (result.ok) {
+			const step = this.shifts.redo.pop() ?? null
+
+			this.shifts.undo.push(step)
+			this.follow(step, false)
+		}
+
+		return result
+	}
+
+	private follow(step: SheetShiftStep | null, revert: boolean): void {
+		const layer = this.sizeLayer
+
+		if (step !== null && layer !== null && this.keepsSizes()) layer.follow(step.sheet, { ...step.shift, revert })
+	}
+
+	private settle(result: SheetCommandResult, reported: SheetCommand["type"] | "undo" | "redo" | null): void {
+		if (result.ok) {
+			this.apply(result.change)
+
+			return
+		}
+
+		if (result.state.version >= this.snapshot.state.version && result.state !== this.snapshot.state)
+			this.update({ state: result.state })
+		if (reported !== null) this.onRefusal?.(result.refusal, reported)
+	}
+
+	// --- Changes and events ---
+
+	handleEvent(event: SheetEvent): void {
+		switch (event.type) {
+			case "change":
+				this.apply(event.change)
+				break
+			case "sheetReady":
+				this.update({ sheets: this.snapshot.sheets.map(sheet => (sheet.id === event.sheet.id ? event.sheet : sheet)) })
+				this.storeLayout(event.sheet.id, event.layout)
+				break
+			case "writability":
+				this.update({ writability: event.writability })
+				break
+			case "engine":
+				this.update({ engine: event.state })
+				break
+			case "failed":
+				this.inFlight.clear()
+				this.update({ failed: event.message, editing: null })
+				break
+			case "progress":
+				break
+		}
+	}
+
+	// A change, as a command answer or an event carries it: patches folded into held tiles (or kept for tiles still
+	// on their way), invalidated tiles dropped, layouts, the sheet list, styles and the selection taken.
+	apply(change: SheetChange): void {
+		if (this.disposed) return
+
+		const patched = new Set<number>()
+
+		for (const patch of change.patches) {
+			const key = tileKey(patch.sheet, patch.tileRow, patch.tileCol)
+			const flight = this.inFlight.get(key)
+
+			patched.add(key)
+
+			if (flight !== undefined) {
+				if (patch.mode === "replace" && (flight.replacement === null || flight.replacement.version <= patch.version))
+					flight.replacement = patch
+				else flight.stale = true
+
+				continue
+			}
+
+			this.tiles.patch(patch)
+		}
+
+		for (const region of change.invalidated) {
+			this.tiles.invalidate(region, patched)
+
+			for (const [key, flight] of this.inFlight) {
+				if (!patched.has(key) && regionHoldsTile(region, tileKeySheet(key), tileKeyRow(key), tileKeyCol(key))) {
+					flight.stale = true
+					flight.replacement = null
+				}
+			}
+		}
+
+		this.flushReleases()
+
+		for (const patch of change.layouts) {
+			const held = this.layouts.get(patch.sheet)
+
+			if (held === undefined || held.version > change.state.version) continue
+
+			this.layouts.set(patch.sheet, { ...held, ...patch.layout, version: change.state.version })
+		}
+
+		if (change.styles !== undefined) this.appendStyles(change.styles)
+
+		const update: { -readonly [K in keyof SheetGridSnapshot]?: SheetGridSnapshot[K] } = {}
+
+		if (change.sheets !== undefined) {
+			const ids = new Set(change.sheets.map(sheet => sheet.id))
+
+			for (const sheet of this.layouts.keys()) {
+				if (ids.has(sheet)) continue
+
+				this.layouts.delete(sheet)
+				this.selections.delete(sheet)
+				this.reach.delete(sheet)
+				this.tiles.dropSheet(sheet)
+			}
+
+			this.flushReleases()
+			update.sheets = change.sheets
+
+			if (!ids.has(this.snapshot.sheet)) {
+				const next = change.sheets.find(sheet => sheet.state === "visible") ?? change.sheets[0]
+
+				if (next !== undefined) {
+					update.sheet = next.id
+					update.editing = null
+
+					if (!this.layouts.has(next.id)) this.loadLayout(next.id)
+				}
+			}
+		}
+
+		if (change.state.version >= this.snapshot.state.version) update.state = change.state
+
+		const selection = change.selection
+
+		if (selection !== undefined) {
+			const layout = this.layouts.get(selection.sheet)
+			const next = fromSelectionState(selection, layout === undefined ? [] : this.merges(layout))
+
+			this.selections.set(selection.sheet, next)
+
+			if (selection.sheet !== (update.sheet ?? this.snapshot.sheet)) {
+				update.sheet = selection.sheet
+				update.editing = null
+			}
+		}
+
+		const sheet = update.sheet ?? this.snapshot.sheet
+		const layout = this.layouts.get(sheet) ?? null
+
+		update.layout = layout
+		update.selection = this.selections.get(sheet) ?? fromSelectionState(layout?.selection, layout === null ? [] : this.merges(layout))
+		this.axesMemo = null
+		this.update(update)
+	}
+}

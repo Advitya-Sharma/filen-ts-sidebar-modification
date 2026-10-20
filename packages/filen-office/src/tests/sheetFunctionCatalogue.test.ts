@@ -6,6 +6,7 @@ import {
 	sheetFunctions,
 	type FunctionVolatility
 } from "../core/sheet/functions/catalogue"
+import { shownFormula, storedFormula } from "../core/sheet/refs/formulaRefs"
 
 // The future functions of [MS-XLSX] 2.2.3 (learn.microsoft.com, revised 2024-02-20), as the list writes them: a
 // name without a prefix is one ISO/IEC 29500 already defines.
@@ -213,5 +214,21 @@ describe("sheet function catalogue", () => {
 		expect(functions.filter(entry => entry.support === "cached").map(entry => entry.name)).toEqual(CACHED)
 		expect(functions.filter(entry => entry.support === "hyperformula")).toHaveLength(384)
 		expect(functions.filter(entry => entry.support === "plugin")).toHaveLength(116)
+	})
+
+	it("stores a typed call under the catalogue's prefix, and shows it without", () => {
+		const wrong: string[] = []
+
+		for (const entry of functions) {
+			const typed = `${entry.name}(1)`
+			const stored = `${entry.prefix}${entry.name}(1)`
+
+			if (storedFormula(typed) !== stored) wrong.push(`stored ${typed}: ${storedFormula(typed)}`)
+			if (shownFormula(stored) !== typed) wrong.push(`shown ${stored}: ${shownFormula(stored)}`)
+		}
+
+		expect(wrong).toEqual([])
+		expect(storedFormula("single(A1:A3)")).toBe("_xlfn.SINGLE(A1:A3)")
+		expect(shownFormula("_xlfn.SINGLE(A1:A3)")).toBe("SINGLE(A1:A3)")
 	})
 })

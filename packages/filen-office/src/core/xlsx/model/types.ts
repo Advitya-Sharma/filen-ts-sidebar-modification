@@ -105,6 +105,31 @@ export interface XlsxRowBlock {
 	readonly styles: Uint32Array
 	// Index into the sheet's formula table, -1 for none; null for a block without formulas.
 	readonly formulas: Int32Array | null
+	// Per cell, which <c> of its row's source element it is (1-based, 0 for a cell not from the source): the
+	// writer keeps that element's markup the model does not hold. Null while every cell is the one at its
+	// position in its row (blockOrigin).
+	readonly origins: Uint32Array | null
+}
+
+// Origins at and past this name a source cell a paste carried in (XlsxSheetStore.carriedCell), not the row's own.
+export const CARRIED = 0x80000000
+
+// A cell of a source sheet part: the part, the span of its row's element, and which <c> of it (1-based).
+export interface XlsxSourceCell {
+	readonly part: string
+	readonly spanStart: number
+	readonly spanEnd: number
+	readonly ordinal: number
+}
+
+// A source cell as one number (unique while parts stay under 512 MB and rows under 2^24 cells), -1 past that.
+export function sourceKey(spanStart: number, ordinal: number): number {
+	return ordinal < 0x1000000 ? spanStart * 0x1000000 + ordinal : -1
+}
+
+// The source cell (1-based ordinal in its row's source element, 0 for none) of cell `k` in row `index`.
+export function blockOrigin(block: XlsxRowBlock, index: number, k: number): number {
+	return block.origins === null ? k - (block.rowStarts[index] ?? 0) + 1 : (block.origins[k] ?? 0)
 }
 
 // A store slot: block index * SLOT_BLOCK + index into the block's cell arrays.
@@ -121,8 +146,15 @@ export interface XlsxSheetStore {
 	readonly colExtent: number
 	// The slot holding a cell, or -1.
 	locate(row: number, col: number): number
-	// Writes one cell (marking its row dirty). An EMPTY kind with style 0 and no formula removes the cell.
-	setCell(row: number, col: number, kind: CellKind, value: number, style: number, formula: number): void
+	// Writes one cell (marking its row dirty). An EMPTY kind with style 0 and no formula removes the cell. With
+	// `origin` (0 or more) the cell is put back as it was: it stays though it holds nothing, and is again that source
+	// cell (blockOrigin), so the writer keeps what the file held on it.
+	setCell(row: number, col: number, kind: CellKind, value: number, style: number, formula: number, origin?: number): void
+	// The source cell a slot is (blockOrigin), 0 for none.
+	origin(slot: number): number
+	// The source cell a carried origin (CARRIED and past) names, and the parts carried cells come from.
+	carriedCell(origin: number): XlsxSourceCell | undefined
+	carriedParts(): ReadonlySet<string>
 	// Writes a row's properties (height NaN for none, style -1 for none, flags without DIRTY and NEW).
 	setRow(row: number, height: number, style: number, flags: number): void
 	// Moves rows or columns at and after `at`; deleted ones go. Cells only: formulas, merges and everything else
@@ -321,6 +353,9 @@ export interface XlsxSheetModel {
 	readonly id: SheetId
 	readonly part: string
 	readonly store: XlsxSheetStore
+	// Shared indexes whose children the source already left outside every master (none for a new sheet): the
+	// gate takes those as the file's, not a save's.
+	readonly sourceOrphanedShared?: ReadonlySet<number>
 	readonly sections: readonly XlsxSection[]
 	readonly relationships: Relationships
 	cols: readonly XlsxColRange[]
@@ -355,7 +390,8 @@ export interface XlsxDefinedName {
 	readonly sheet: SheetId | null
 	readonly formula: string
 	readonly hidden: boolean
-	// The element as written, for a name no edit changed; null once changed or for a new one.
+	// The element to write: as the source wrote it, or with an edit's formula as its text (its other attributes
+	// kept); null for a new one.
 	readonly source: Uint8Array | null
 }
 

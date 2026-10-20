@@ -1,0 +1,7 @@
+export { axisLimit, preimage, shiftCell, shiftIndex, shiftRange, type Axis, type AxisShift } from "./axis"
+export { shiftEdges, shiftVmlAnchor, type AnchorMode, type AnchorPoint } from "./anchors"
+export { REF_CATALOGUE, REF_CONSTRUCTS, type RefConstruct } from "./catalogue"
+export { FormulaShift, type FormulaOp } from "./formulas"
+export { planRefEdit, type RefEdit, type RefPlan, type RefPlanResult } from "./plan"
+export { formatSqref, parseRef, parseSqref } from "./sqref"
+export { rewriteStructured, specifierColumns, type TableEdit } from "./structured"
