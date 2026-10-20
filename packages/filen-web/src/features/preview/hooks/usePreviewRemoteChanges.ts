@@ -7,7 +7,14 @@ import { asDirectoryOrFile, narrowItem, type DriveItem } from "@/features/drive/
 import { type DriveVariant } from "@/features/drive/lib/preferences"
 import { runPreviewSave } from "@/features/drive/lib/previewSave.logic"
 import { currentRootUuid } from "@/features/drive/lib/actions"
-import { driveListingQueryOptions, driveListingQueryUpdate, listingKnownCurrent, normalizeParentUuid } from "@/features/drive/queries/drive"
+import {
+	cachedListing,
+	driveListingQueryOptions,
+	driveListingQueryUpdate,
+	listingRowsVerified,
+	normalizeParentUuid,
+	type DriveListingParams
+} from "@/features/drive/queries/drive"
 import { emitPreviewFileMetaChanged, subscribePreviewReconcile, type PreviewReconcileEvent } from "@/features/preview/lib/previewReconcile"
 import type { FileMeta } from "@filen/sdk-rs"
 import { isRevisionOf, settleHeldRevisions, type PreviewRevision } from "@/features/preview/lib/remoteChange.logic"
@@ -168,9 +175,14 @@ function revisedSlot(ctx: RemoteChangeContext, revision: PreviewRevision): numbe
 	})
 }
 
-function handleRevision(ctx: RemoteChangeContext, revision: PreviewRevision, afterSave: boolean): void {
+// `sourceIndex`: the slot, when the caller already matched it.
+function handleRevision(
+	ctx: RemoteChangeContext,
+	revision: PreviewRevision,
+	afterSave: boolean,
+	sourceIndex = revisedSlot(ctx, revision)
+): void {
 	const latest = ctx.latest.current
-	const sourceIndex = revisedSlot(ctx, revision)
 	const slot = sourceIndex === undefined ? null : displayedOf(ctx, latest.items[sourceIndex])
 
 	if (slot === null) {
@@ -269,12 +281,48 @@ function handleFileMeta(ctx: RemoteChangeContext, uuid: string, meta: FileMeta):
 	}
 }
 
-// After a socket drop, the file on screen is looked up in its directory's listing, once per reconnect:
-// a newer version, a rename, or its absence (trashed or moved away meanwhile) is answered as the missed
-// event would have been. A slot off screen is looked up when it comes on screen. The reconnect re-reads
-// the listings it invalidated, so the lookup joins that read or reuses its socket-fresh result. So is a
-// slot opened from a listing not yet read this session (restored from disk at boot): its row may name a
-// version since replaced, which an edit would then overwrite.
+// Where a slot's file is looked up, if anywhere. In My Drive: its directory's listing, after each reconnect
+// and while that listing is unverified. Elsewhere: only while unverified, the cached listing of the variant
+// that holds it (a flat listing's own, a shared directory's, or the shared root's for a file shared on its
+// own), as a preview of that variant may also open from elsewhere (a chat's link). `uuids`: the slot's
+// frozen and displayed uuids, either of which that listing may hold.
+function lookupListing(
+	variant: DriveVariant,
+	displayed: DriveItem,
+	uuids: readonly string[],
+	checked: number | undefined,
+	reconnects: number
+): DriveListingParams | null {
+	if (variant === "drive") {
+		const params: DriveListingParams = { variant, uuid: normalizeParentUuid(displayed.data.parent, currentRootUuid()) }
+		const unread = !listingRowsVerified(params.variant, params.uuid)
+
+		return (checked ?? (unread ? -1 : 0)) < reconnects ? params : null
+	}
+
+	if (checked !== undefined) {
+		return null
+	}
+
+	const candidates = variant === "sharedIn" || variant === "sharedOut" ? [displayed.data.parent, null] : [null]
+
+	for (const uuid of candidates) {
+		if (!listingRowsVerified(variant, uuid) && cachedListing(variant, uuid)?.some(row => uuids.includes(row.data.uuid)) === true) {
+			return { variant, uuid }
+		}
+	}
+
+	return null
+}
+
+// The file on screen is looked up in the listing it came from when that listing's rows are not yet
+// verified (restored from disk at boot, not read since): its row may name a version since replaced, which
+// the preview would show, and an edit overwrite. In My Drive it is also looked up after a socket drop, once
+// per reconnect: a newer version, a rename, or its absence (trashed or moved away meanwhile) is answered as
+// the missed event would have been. A slot off screen is looked up when it comes on screen. The lookup joins
+// the read under way (the listing's mount read, a reconnect's re-read) or reuses its result. Elsewhere a
+// row's absence proves nothing (a recent ages out, a shared file's new version is another file), and a
+// listing that rereads on every mount and focus needs no lookup once read.
 async function checkCurrentSlot(ctx: RemoteChangeContext): Promise<void> {
 	const latest = ctx.latest.current
 	const slot = displayedOf(ctx, latest.items[latest.index])
@@ -284,29 +332,29 @@ async function checkCurrentSlot(ctx: RemoteChangeContext): Promise<void> {
 		return
 	}
 
-	const parent = slot.displayed.type === "file" ? normalizeParentUuid(slot.displayed.data.parent, currentRootUuid()) : null
-	const unread = latest.variant === "drive" && !listingKnownCurrent("drive", parent)
+	const myDrive = latest.variant === "drive"
+	const checked = ctx.checkedAt.current.get(slot.frozenUuid)
+	const source = lookupListing(latest.variant, slot.displayed, [slot.frozenUuid, slot.displayed.data.uuid], checked, reconnects)
 
-	if ((ctx.checkedAt.current.get(slot.frozenUuid) ?? (unread ? -1 : 0)) >= reconnects) {
-		return
+	// Outside My Drive nothing reopens a slot's lookup, so one found needless is not weighed again.
+	if (source !== null || !myDrive) {
+		ctx.checkedAt.current.set(slot.frozenUuid, reconnects)
 	}
-
-	ctx.checkedAt.current.set(slot.frozenUuid, reconnects)
 
 	const displayed = slot.displayed
 
-	if (latest.variant !== "drive" || displayed.type !== "file") {
+	if (source === null || asDirectoryOrFile(displayed).type !== "file") {
 		return
 	}
 
 	const uuid = displayed.data.uuid
-	const stableUuid = displayed.data.stableUUID
+	const stableUuid = displayed.type === "file" || displayed.type === "sharedFile" ? displayed.data.stableUUID : undefined
 	let listing: DriveItem[]
 
 	try {
-		listing = await queryClient.query(driveListingQueryOptions("drive", parent))
+		listing = await queryClient.query(driveListingQueryOptions(source.variant, source.uuid))
 	} catch (e) {
-		log.warn("preview", "resync after reconnect failed", e)
+		log.warn("preview", "looking the file on screen up in its listing failed", e)
 
 		return
 	}
@@ -317,16 +365,26 @@ async function checkCurrentSlot(ctx: RemoteChangeContext): Promise<void> {
 	}
 
 	const found = listing.find(
-		item => item.data.uuid === uuid || (stableUuid !== undefined && item.type === "file" && item.data.stableUUID === stableUuid)
+		item =>
+			item.data.uuid === uuid ||
+			(stableUuid !== undefined && (item.type === "file" || item.type === "sharedFile") && item.data.stableUUID === stableUuid)
 	)
 
 	if (found === undefined) {
-		handleLeaving(ctx, uuid, null, false)
-	} else if (found.data.uuid !== uuid) {
-		handleRevision(ctx, { item: found }, false)
-	} else if (found.type === "file" && driveItemName(found) !== driveItemName(displayed)) {
+		if (myDrive) {
+			handleLeaving(ctx, uuid, null, false)
+		}
+
+		return
+	}
+
+	const foundFile = asDirectoryOrFile(found)
+
+	if (found.data.uuid !== uuid) {
+		handleRevision(ctx, { item: found }, false, slotIndex(ctx).byUuid.get(uuid))
+	} else if (foundFile.type === "file" && driveItemName(found) !== driveItemName(displayed)) {
 		// Reaches the pager and this overlay's overrides alike.
-		emitPreviewFileMetaChanged(uuid, found.data.meta)
+		emitPreviewFileMetaChanged(uuid, foundFile.data.meta)
 	}
 }
 

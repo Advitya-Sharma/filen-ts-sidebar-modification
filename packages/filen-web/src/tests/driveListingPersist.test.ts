@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Query } from "@tanstack/react-query"
 import type { File } from "@filen/sdk-rs"
@@ -5,7 +7,9 @@ import { testUuid } from "@/tests/support/uuid"
 
 // A save's listing patch reaches disk: the persister writes a row only after a read, so without this a reload
 // restores the listing as last read, naming the version the save replaced, and a click before its first read
-// lands opens that version. Patched listings are written once per window, never once a sign-out started.
+// lands opens that version. Serializing a listing blocks the main thread, so a patched listing is written once
+// its patches pause, one listing per task, at once when the page is hidden or left, and never once a sign-out
+// started.
 
 const hooks = vi.hoisted(() => ({ persisted: [] as Query[], signOut: false }))
 
@@ -46,6 +50,7 @@ function file(label: string, name = "budget.xlsx"): DriveItem {
 }
 
 const KEY = driveListingQueryKey({ variant: "drive", uuid: testUuid("parent") })
+const OTHER_KEY = driveListingQueryKey({ variant: "drive", uuid: testUuid("other parent") })
 
 async function save(from: DriveItem, to: DriveItem): Promise<void> {
 	const outcome = await runPreviewSave(
@@ -64,6 +69,11 @@ function uuidsOf(query: Query | undefined): string[] {
 	return ((query?.state.data ?? []) as DriveItem[]).map(item => item.data.uuid)
 }
 
+function setVisibility(state: DocumentVisibilityState): void {
+	Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state })
+	document.dispatchEvent(new Event("visibilitychange"))
+}
+
 beforeEach(() => {
 	vi.useFakeTimers()
 	hooks.persisted = []
@@ -77,12 +87,12 @@ afterEach(() => {
 })
 
 describe("a drive listing patched after a save", () => {
-	it("is written to disk naming the saved version, once for every patch in the window", async () => {
+	it("is written to disk naming the saved version, once for every patch before the pause", async () => {
 		await save(file("v0"), file("v1"))
 		await save(file("v1"), file("v2"))
 		expect(hooks.persisted).toEqual([])
 
-		await vi.advanceTimersByTimeAsync(1_000)
+		await vi.advanceTimersByTimeAsync(3_000)
 
 		expect(hooks.persisted).toHaveLength(1)
 		expect(uuidsOf(hooks.persisted[0])).toEqual(expect.arrayContaining([testUuid("v2"), testUuid("other")]))
@@ -90,16 +100,98 @@ describe("a drive listing patched after a save", () => {
 		expect(uuidsOf(hooks.persisted[0])).not.toContain(testUuid("v1"))
 	})
 
+	it("is not written while patches keep coming, and once when they pause", async () => {
+		let version = 0
+
+		// A bulk action or a socket burst: a patch every 250 ms for 10 s.
+		for (let i = 0; i < 40; i++) {
+			await save(file(`v${String(version)}`), file(`v${String(version + 1)}`))
+			version++
+			await vi.advanceTimersByTimeAsync(250)
+		}
+
+		expect(hooks.persisted).toEqual([])
+
+		await vi.advanceTimersByTimeAsync(3_000)
+
+		expect(hooks.persisted).toHaveLength(1)
+		expect(uuidsOf(hooks.persisted[0])).toContain(testUuid(`v${String(version)}`))
+	})
+
+	it("writes one listing per task", async () => {
+		queryClient.setQueryData(OTHER_KEY, [file("w0")])
+		await save(file("v0"), file("v1"))
+		driveListingQueryUpdate(testUuid("other parent"), { type: "replace", uuid: testUuid("w0"), replace: () => file("w1") })
+
+		await vi.advanceTimersByTimeAsync(2_000)
+		expect(hooks.persisted).toHaveLength(1)
+
+		await vi.advanceTimersToNextTimerAsync()
+		expect(hooks.persisted).toHaveLength(2)
+		expect(hooks.persisted.map(query => query.queryKey)).toEqual(expect.arrayContaining([KEY, OTHER_KEY]))
+	})
+
+	it("is written at once when the page is hidden or left", async () => {
+		await save(file("v0"), file("v1"))
+		setVisibility("hidden")
+		expect(hooks.persisted).toHaveLength(1)
+		setVisibility("visible")
+
+		await save(file("v1"), file("v2"))
+		window.dispatchEvent(new Event("pagehide"))
+		expect(hooks.persisted).toHaveLength(2)
+		expect(uuidsOf(hooks.persisted[1])).toContain(testUuid("v2"))
+
+		// Nothing left for the pause.
+		await vi.advanceTimersByTimeAsync(3_000)
+		expect(hooks.persisted).toHaveLength(2)
+	})
+
+	it("is left to a read under way, which writes it, and written if that read fails", async () => {
+		const read = Promise.withResolvers<DriveItem[]>()
+		const fetching = queryClient.query({ queryKey: KEY, queryFn: () => read.promise })
+
+		await save(file("v0"), file("v1"))
+		await vi.advanceTimersByTimeAsync(5_000)
+		expect(hooks.persisted).toEqual([])
+
+		read.resolve([file("v1"), file("other", "notes.txt")])
+		await fetching
+		await vi.advanceTimersByTimeAsync(5_000)
+		expect(hooks.persisted).toEqual([])
+
+		const failing = Promise.withResolvers<DriveItem[]>()
+		const refetching = queryClient.query({ queryKey: KEY, queryFn: () => failing.promise, staleTime: 0 })
+
+		await save(file("v1"), file("v2"))
+		await vi.advanceTimersByTimeAsync(5_000)
+		expect(hooks.persisted).toEqual([])
+
+		failing.reject(new Error("offline"))
+		await expect(refetching).rejects.toThrow("offline")
+		await vi.advanceTimersByTimeAsync(3_000)
+		expect(hooks.persisted).toHaveLength(1)
+		expect(uuidsOf(hooks.persisted[0])).toContain(testUuid("v2"))
+	})
+
 	it("is not written once a sign-out started, nor once the listing was dropped", async () => {
 		await save(file("v0"), file("v1"))
 		hooks.signOut = true
-		await vi.advanceTimersByTimeAsync(1_000)
+		await vi.advanceTimersByTimeAsync(3_000)
 		expect(hooks.persisted).toEqual([])
 
-		hooks.signOut = false
 		await save(file("v1"), file("v2"))
-		queryClient.removeQueries({ queryKey: KEY })
-		await vi.advanceTimersByTimeAsync(1_000)
+		setVisibility("hidden")
+		window.dispatchEvent(new Event("pagehide"))
 		expect(hooks.persisted).toEqual([])
+		setVisibility("visible")
+
+		hooks.signOut = false
+		await save(file("v2"), file("v3"))
+		queryClient.removeQueries({ queryKey: KEY })
+		await vi.advanceTimersByTimeAsync(3_000)
+		setVisibility("hidden")
+		expect(hooks.persisted).toEqual([])
+		setVisibility("visible")
 	})
 })

@@ -3,15 +3,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
 import { QueryClient } from "@tanstack/react-query"
-import type { File, FileMeta } from "@filen/sdk-rs"
+import type { File, FileMeta, SharingRole } from "@filen/sdk-rs"
+import type { DriveVariant } from "@/features/drive/lib/preferences"
 import { testUuid } from "@/tests/support/uuid"
 
-const { toast, runPreviewSave, nameExistsInDirectory, listings } = vi.hoisted(() => ({
+const { toast, runPreviewSave, nameExistsInDirectory, listings, cachedListings } = vi.hoisted(() => ({
 	toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
 	runPreviewSave: vi.fn(),
 	nameExistsInDirectory: vi.fn(() => Promise.resolve(false)),
 	// Whether the listings were read this session (else restored from disk).
-	listings: { current: true }
+	listings: { current: true },
+	// The cached listings, by `${variant}:${uuid}`.
+	cachedListings: new Map<string, unknown[]>()
 }))
 
 vi.mock("sonner", () => ({ toast }))
@@ -24,7 +27,8 @@ vi.mock("@/features/drive/lib/actions", () => ({ currentRootUuid: () => "root" }
 vi.mock("@/features/drive/queries/drive", () => ({
 	driveListingQueryOptions: vi.fn(),
 	driveListingQueryUpdate: vi.fn(),
-	listingKnownCurrent: () => listings.current,
+	listingRowsVerified: () => listings.current,
+	cachedListing: (variant: string, uuid: string | null) => cachedListings.get(`${variant}:${uuid ?? ""}`),
 	normalizeParentUuid: (parent: string) => parent
 }))
 
@@ -41,6 +45,17 @@ type DriveItem = ReturnType<typeof narrowItem>
 
 function meta(name: string): FileMeta {
 	return { type: "decoded", data: { name, mime: "text/plain", modified: 0n, size: 1n, key: "k", version: 2 } }
+}
+
+// A file of a shared directory, as the shared listings hold it.
+function sharedFile(label: string, overrides: Partial<File> = {}): DriveItem {
+	const owned = file(label, overrides)
+
+	if (owned.type !== "file") {
+		throw new Error("not a file")
+	}
+
+	return narrowItem({ ...owned.data, sharingRole: { type: "sharer" } as unknown as SharingRole })
 }
 
 function file(label: string, overrides: Partial<File> = {}): DriveItem {
@@ -67,7 +82,8 @@ function nameOf(item: DriveItem | undefined): string | undefined {
 function setup(
 	items = [file("a"), file("b", { stableUUID: "other" as File["stableUUID"] })],
 	index = 0,
-	readEdits?: () => Promise<Uint8Array | null>
+	readEdits?: () => Promise<Uint8Array | null>,
+	variant: DriveVariant = "drive"
 ) {
 	const savedRef = { current: new Map<string, DriveItem>() as ReadonlyMap<string, DriveItem> }
 	const commitSaved = vi.fn((frozenUuid: string, item: DriveItem) => {
@@ -78,7 +94,7 @@ function setup(
 	const hook = renderHook(
 		(props: { items: DriveItem[]; index: number }) =>
 			usePreviewRemoteChanges({
-				variant: "drive",
+				variant,
 				items: props.items,
 				index: props.index,
 				savedRef,
@@ -99,23 +115,25 @@ function setup(
 	return { hook, savedRef, commitSaved, onItemRemoved }
 }
 
-// The listing a reconnect's lookup reads, counting the reads.
-function serveListing(listing: DriveItem[]): { reads: () => number } {
+// The listing a lookup reads, counting the reads and naming the listings read.
+function serveListing(listing: DriveItem[]): { reads: () => number; read: string[] } {
 	let reads = 0
+	const read: string[] = []
 
 	vi.mocked(driveListingQueryOptions).mockImplementation(
-		(_variant, uuid) =>
+		(variant, uuid) =>
 			({
-				queryKey: ["drive", "listing", { variant: "drive", uuid }],
+				queryKey: ["drive", "listing", { variant, uuid }],
 				queryFn: () => {
 					reads++
+					read.push(`${variant}:${uuid ?? ""}`)
 
 					return Promise.resolve(listing)
 				}
 			}) as unknown as ReturnType<typeof driveListingQueryOptions>
 	)
 
-	return { reads: () => reads }
+	return { reads: () => reads, read }
 }
 
 async function flush(): Promise<void> {
@@ -129,6 +147,7 @@ async function flush(): Promise<void> {
 beforeEach(() => {
 	vi.clearAllMocks()
 	listings.current = true
+	cachedListings.clear()
 	usePreviewUnsavedGuardStore.getState().clear()
 	setPreviewDirty(true)
 })
@@ -508,6 +527,94 @@ describe("usePreviewRemoteChanges", () => {
 
 		expect(hook.result.current.prompt?.kind).toBe("revised")
 		expect(commitSaved).not.toHaveBeenCalled()
+	})
+
+	it("looks up a slot opened from a restored recents listing in that listing, once, showing the version saved since", async () => {
+		setPreviewDirty(false)
+		listings.current = false
+		cachedListings.set("recents:", [file("a"), file("b", { stableUUID: "other" as File["stableUUID"] })])
+
+		const listing = serveListing([file("a2"), file("b", { stableUUID: "other" as File["stableUUID"] })])
+		const { hook, commitSaved } = setup(undefined, undefined, undefined, "recents")
+
+		await flush()
+
+		expect(listing.read).toEqual(["recents:"])
+		expect(commitSaved.mock.lastCall?.[0]).toBe(testUuid("a"))
+		expect(commitSaved.mock.lastCall?.[1].data.uuid).toBe(testUuid("a2"))
+
+		// Not again for the slot, nor after a reconnect: the listing rereads on every mount and focus.
+		act(() => {
+			emitPreviewResync()
+		})
+		hook.rerender({ items: [file("a"), file("b", { stableUUID: "other" as File["stableUUID"] })], index: 0 })
+		await flush()
+
+		expect(listing.reads()).toBe(1)
+	})
+
+	it("keeps a slot from a restored favorites listing its fresh read no longer holds", async () => {
+		setPreviewDirty(false)
+		listings.current = false
+		cachedListings.set("favorites:", [file("a")])
+		serveListing([])
+
+		const { onItemRemoved, commitSaved } = setup(undefined, undefined, undefined, "favorites")
+
+		await flush()
+
+		expect(onItemRemoved).not.toHaveBeenCalled()
+		expect(commitSaved).not.toHaveBeenCalled()
+	})
+
+	it("looks up a file of a restored shared directory listing in it, showing the version saved since", async () => {
+		setPreviewDirty(false)
+		listings.current = false
+		cachedListings.set(`sharedOut:${testUuid("parent")}`, [sharedFile("a")])
+
+		const listing = serveListing([sharedFile("a2")])
+		const { commitSaved } = setup([sharedFile("a")], 0, undefined, "sharedOut")
+
+		await flush()
+
+		expect(listing.read).toEqual([`sharedOut:${testUuid("parent")}`])
+		expect(commitSaved.mock.lastCall?.[1].data.uuid).toBe(testUuid("a2"))
+	})
+
+	it("looks up a file shared on its own in the restored shared root listing", async () => {
+		setPreviewDirty(false)
+		listings.current = false
+		cachedListings.set("sharedIn:", [sharedFile("a", { meta: meta("old.txt") })])
+
+		const events: string[] = []
+		const unsubscribe = subscribePreviewReconcile(event => {
+			events.push(event.type)
+		})
+		const listing = serveListing([sharedFile("a")])
+
+		setup([sharedFile("a", { meta: meta("old.txt") })], 0, undefined, "sharedIn")
+
+		await flush()
+
+		expect(listing.read).toEqual(["sharedIn:"])
+		// Renamed since.
+		expect(events).toContain("fileMeta")
+		unsubscribe()
+	})
+
+	it("never looks up a slot of a variant whose listing was read this session, or that its listing does not hold", async () => {
+		cachedListings.set("links:", [file("other")])
+
+		const listing = serveListing([file("a2")])
+
+		listings.current = true
+		setup(undefined, undefined, undefined, "recents").hook.unmount()
+		// A chat's link opens with the links variant, its file in no listing.
+		listings.current = false
+		setup(undefined, undefined, undefined, "links")
+		await flush()
+
+		expect(listing.reads()).toBe(0)
 	})
 
 	it("reopens on a file saved anew from its own upload, not a download of it", async () => {

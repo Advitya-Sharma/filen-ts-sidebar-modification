@@ -97,12 +97,18 @@ function listingId(variant: DriveVariant, uuid: string | null): string {
 // mark overlaps may predate the change behind it, so none of those count.
 const listingsReadThisSession = new Set<string>()
 let listingStaleMarks = 0
+// Listings any read landed for this session, socket or not.
+const listingsFetchedThisSession = new Set<string>()
 
-// Whether a listing's rows are known current: read this session under a live socket, every change since
-// patched in. A listing restored from disk is not, until its read lands: a row of it may name a version
-// since replaced (a save made just before a reload, or on another device).
-export function listingKnownCurrent(variant: DriveVariant, uuid: string | null): boolean {
-	return SOCKET_SYNCED_VARIANTS.has(variant) && listingsReadThisSession.has(listingId(variant, uuid))
+// Whether a listing's rows can be trusted to name each file's current version. A socket-synced listing's
+// can once read this session under a live socket, every change since patched in; any other listing's once
+// a read landed this session, as it rereads on every mount and focus. A listing restored from disk and not
+// yet read cannot: a row of it may name a version since replaced (a save made just before a reload, or on
+// another device).
+export function listingRowsVerified(variant: DriveVariant, uuid: string | null): boolean {
+	const id = listingId(variant, uuid)
+
+	return SOCKET_SYNCED_VARIANTS.has(variant) ? listingsReadThisSession.has(id) : listingsFetchedThisSession.has(id)
 }
 
 type ListingPatch = (items: DriveItem[]) => DriveItem[]
@@ -191,6 +197,8 @@ async function readListing(variant: Exclude<DriveVariant, "sharedIn" | "sharedOu
 
 	const id = listingId(variant, uuid)
 
+	listingsFetchedThisSession.add(id)
+
 	if (socketLiveSince(epoch) && marks === listingStaleMarks && !marked) {
 		listingsReadThisSession.add(id)
 	} else {
@@ -233,7 +241,14 @@ export function driveListingQueryOptions(variant: DriveVariant, uuid: string | n
 		queryKey: driveListingQueryKey({ variant, uuid }),
 		queryFn: async (): Promise<DriveItem[]> => {
 			if (variant === "sharedIn" || variant === "sharedOut") {
-				return (await readApplyingPatches({ variant, uuid }, () => fetchSharedListing(variant, uuid, path))).items
+				const { items, dropped } = await readApplyingPatches({ variant, uuid }, () => fetchSharedListing(variant, uuid, path))
+
+				// The read that replaced it records its own.
+				if (!dropped) {
+					listingsFetchedThisSession.add(listingId(variant, uuid))
+				}
+
+				return items
 			}
 
 			return readListing(variant, uuid)
@@ -749,22 +764,79 @@ function applyPatches(queued: readonly Patch[]): void {
 
 // The persister writes a query's row only after its read: a listing patched since (a save, an upload, a
 // socket event) would come back from disk as it was read, naming versions since replaced, until the first
-// read after the next boot lands. So patched listings are written too, each once per window however many
-// patches it took meanwhile, and never once a sign-out started (its wipe must not be undone).
-const LISTING_PERSIST_MS = 500
-const unpersistedListings = new Set<Query>()
+// read after the next boot lands. So patched listings are written too. Serializing one blocks the main
+// thread for about 50 ms per 20,000 rows, while a bulk upload or a socket burst patches it every few hundred
+// ms, so a listing is written only once its patches pause, one listing per task, and at once when the page
+// is hidden or left, which may be the last chance. Never once a sign-out started: its wipe must not be
+// undone.
+const LISTING_PERSIST_IDLE_MS = 2_000
+// Each patched listing not yet written, with the rows its latest patch left.
+const unpersistedListings = new Map<Query, unknown>()
 let listingPersistTimer: ReturnType<typeof setTimeout> | undefined
+let listingPersistFlushBound = false
 
 function persistLater(query: Query): void {
-	unpersistedListings.add(query)
-	listingPersistTimer ??= setTimeout(persistPatchedListings, LISTING_PERSIST_MS)
+	unpersistedListings.set(query, query.state.data)
+	clearTimeout(listingPersistTimer)
+	listingPersistTimer = setTimeout(persistIdleListings, LISTING_PERSIST_IDLE_MS)
+
+	if (!listingPersistFlushBound && typeof document !== "undefined") {
+		listingPersistFlushBound = true
+
+		window.addEventListener("pagehide", persistAllListings)
+		document.addEventListener("visibilitychange", () => {
+			if (document.visibilityState === "hidden") {
+				persistAllListings()
+			}
+		})
+	}
 }
 
-function persistPatchedListings(): void {
+// Whether a listing's patched rows still need writing. One removed meanwhile (a sign-out, a dropped
+// listing) stays gone, and rows a read replaced were written by that read.
+function stillUnpersisted(query: Query, rows: unknown): boolean {
+	return queryClient.getQueryCache().get(query.queryHash) === query && query.state.data === rows
+}
+
+function persistIdleListings(): void {
+	listingPersistTimer = undefined
+
+	if (readSignOutPending()) {
+		unpersistedListings.clear()
+
+		return
+	}
+
+	let wrote = false
+
+	for (const [query, rows] of unpersistedListings) {
+		if (!stillUnpersisted(query, rows)) {
+			unpersistedListings.delete(query)
+		} else if (query.state.fetchStatus !== "fetching") {
+			unpersistedListings.delete(query)
+			void persister.persistQuery(query)
+
+			wrote = true
+
+			break
+		}
+		// Else its read under way writes the rows, patches included, or fails and leaves them to the next pass.
+	}
+
+	if (unpersistedListings.size > 0) {
+		listingPersistTimer = setTimeout(persistIdleListings, wrote ? 0 : LISTING_PERSIST_IDLE_MS)
+	}
+}
+
+function persistAllListings(): void {
+	if (unpersistedListings.size === 0) {
+		return
+	}
+
 	clearTimeout(listingPersistTimer)
 	listingPersistTimer = undefined
 
-	const queries = [...unpersistedListings]
+	const pending = [...unpersistedListings]
 
 	unpersistedListings.clear()
 
@@ -772,11 +844,9 @@ function persistPatchedListings(): void {
 		return
 	}
 
-	const cache = queryClient.getQueryCache()
-
-	for (const query of queries) {
-		// One removed meanwhile (a sign-out, a dropped listing) stays gone.
-		if (cache.get(query.queryHash) === query) {
+	for (const [query, rows] of pending) {
+		// A read under way too: the page may not live to see it land.
+		if (stillUnpersisted(query, rows)) {
 			void persister.persistQuery(query)
 		}
 	}
@@ -978,8 +1048,8 @@ export function flushListingCreates(): void {
 	applyPatches(patches)
 }
 
-// Logout: the queued creates and patches, the changes kept for reads under way and which listings were read
-// belong to the ended session.
+// Logout: the queued creates and patches, the changes kept for reads under way, which listings were read and
+// which wait to be written belong to the ended session.
 export function discardListingPatches(): void {
 	if (createFlushTimer !== undefined) {
 		clearTimeout(createFlushTimer)
@@ -995,6 +1065,10 @@ export function discardListingPatches(): void {
 	queuedListingEdits = 0
 	listingReads.clear()
 	listingsReadThisSession.clear()
+	listingsFetchedThisSession.clear()
+	clearTimeout(listingPersistTimer)
+	listingPersistTimer = undefined
+	unpersistedListings.clear()
 }
 
 // For a patch that can't carry its whole change (a directory row whose colour no current listing holds):
