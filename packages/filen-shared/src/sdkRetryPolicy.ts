@@ -7,7 +7,7 @@
 // numeric uniffi ErrorKind enum, web's wasm ErrorDTO), reduced to a raw `kind: string | undefined` by
 // a thin per-platform adapter before it reaches these predicates.
 //
-// SPELLING GUARD: only the four kind names below are verified identical on both generated SDK
+// SPELLING GUARD: only the five kind names below are verified identical on both generated SDK
 // surfaces — e.g. `Io` (uniffi) vs `IO` (wasm) proves the two enums diverge in casing elsewhere. This
 // is a verified-identical-spelling allowlist, never a general kind taxonomy; check both generated
 // surfaces before adding to it.
@@ -26,15 +26,22 @@ export function isRetryableAuthErrorKind(kind: string | undefined): boolean {
 	return kind === "Unauthenticated"
 }
 
+// The resource lock the operation held lost its server-side lease (another client may hold it), so the SDK
+// stopped before its next write. Running it again takes the lock afresh and repeats no write it made, so it is a
+// retry, not a rejection — never counts toward the drop.
+export function isRetryableLockErrorKind(kind: string | undefined): boolean {
+	return kind === "LockLost"
+}
+
 // A genuine read-only/permission rejection must eventually DROP so the wedged consumer (a note's
 // content query, a chat's send queue) un-wedges — but a TRANSIENT non-network error (e.g. a one-off
 // `Server`, the catch-all for non-`Internal` API failures) must NOT lose the first edit/message. We
-// bound the drop: only after this many CONSECUTIVE non-network, non-auth SDK rejections for the same
+// bound the drop: only after this many CONSECUTIVE non-network, non-auth, non-lock SDK rejections for the same
 // item do we discard it.
 export const MAX_NON_RETRYABLE_REJECTIONS = 3
 
 // `hasSdkError` is false for a non-SDK throw (e.g. abort, a plain worker Error) — always keep-for-retry,
 // never counted toward the drop bound.
 export function isPermanentRejection({ hasSdkError, kind }: { hasSdkError: boolean; kind: string | undefined }): boolean {
-	return hasSdkError && !isNetworkClassErrorKind(kind) && !isRetryableAuthErrorKind(kind)
+	return hasSdkError && !isNetworkClassErrorKind(kind) && !isRetryableAuthErrorKind(kind) && !isRetryableLockErrorKind(kind)
 }
