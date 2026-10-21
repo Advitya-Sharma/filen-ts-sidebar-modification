@@ -1496,7 +1496,8 @@ export class XlsxDocument {
 		switch (kind) {
 			case CellKind.EMPTY:
 				// A result the session shows without storing it: held as the cell's result once given to the engine again.
-				if (shown === undefined || shown.value === null) return undefined
+				// The engine failing on it (an unparseable formula) is no result: given again, it fails the same way.
+				if (shown === undefined || shown.value === null || FormulaEngine.unsupported(shown.value)) return undefined
 				if (typeof shown.value === "string") return shown.error ? shown.value : `'${shown.value}`
 
 				return shown.value

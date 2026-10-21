@@ -373,6 +373,28 @@ function unreadableShows(reason: "sheet" | "range"): RawCellContent {
 	return reason === "sheet" ? REF_ERROR : UNPARSEABLE
 }
 
+// A sheet's contents as the engine writes them back, each row up to its last cell. getSheetSerialized fills every row
+// to the sheet's width and height, which a cell at the grid's far edge makes past what memory holds.
+function serializedSheet(engine: HyperFormula, id: number): RawCellContent[][] {
+	const rows: RawCellContent[][] = []
+
+	for (const [address] of engine.dependencyGraph.addressMapping.sheetEntries(id)) {
+		const content = engine.getCellSerialized(address)
+
+		if (content === null || content === undefined) continue
+
+		while (rows.length <= address.row) rows.push([])
+
+		const row = rows[address.row] as RawCellContent[]
+
+		while (row.length < address.col) row.push(null)
+
+		row[address.col] = content
+	}
+
+	return rows
+}
+
 // A value the engine gave, as content holding it: text kept as text, an error as its text.
 function rawValue(value: unknown): RawCellContent | undefined {
 	if (value instanceof DetailedCellError) return exported(value) ?? undefined
@@ -1362,7 +1384,7 @@ export class FormulaEngine {
 			requote && typeof content === "string" && content.startsWith("=") ? `=${quoteSheetNames(content.slice(1))}` : content
 
 		this.sheetIds.forEach((id, index) => {
-			const rows = old.getSheetSerialized(id)
+			const rows = serializedSheet(old, id)
 
 			contents[names[index] ?? ""] = requote ? rows.map(row => row.map(serialized)) : rows
 		})

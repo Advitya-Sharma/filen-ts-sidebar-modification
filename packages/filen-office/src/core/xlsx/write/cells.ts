@@ -94,6 +94,9 @@ export interface DecodedCell {
 	readonly col: number
 	// r's value span, or null without r.
 	readonly r: readonly [number, number] | null
+	// Whether r names the cell; without (r absent, or no reference such as "B") its column is implied by the cell
+	// before it, so it is copied as written only while that cell is.
+	readonly named: boolean
 	readonly style: number
 	// A CellKind, or UNREADABLE.
 	readonly kind: number
@@ -420,6 +423,7 @@ function decodeCell(document: XmlDocument, node: number, base: number, row: numb
 		end: base + document.end(node),
 		col: at === undefined ? implied : row >= 0 && at.row !== row ? -1 : at.col,
 		r: rStart < 0 ? null : [base + rStart, base + rEnd],
+		named: at !== undefined,
 		style,
 		kind,
 		number: numeric,
@@ -935,7 +939,7 @@ function writeRow(out: ByteBuilder, context: RowContext, block: XlsxRowBlock, in
 			sameValue(cell, kind, value, store.strings) &&
 			sameFormula(cell.formula, cell.cm, formula)
 		) {
-			if (carried === undefined && cell.col === col && cell.r !== null && source?.row === row) {
+			if (carried === undefined && cell.col === col && cell.named && source?.row === row) {
 				out.bytes(cellBytes, cell.start, cell.end)
 			} else {
 				copyCell(out, cellBytes, cell, row, col)

@@ -148,8 +148,9 @@ function unchangedNames(workbook: XlsxWorkbookModel, section: Uint8Array): boole
 }
 
 function writeDefinedNames(workbook: XlsxWorkbookModel, section: Uint8Array | null, context: WorkbookContext): Uint8Array {
-	if (workbook.definedNames.length === 0) return new Uint8Array(0)
+	// Before the empty case: a source's own empty element stays.
 	if (section !== null && unchangedNames(workbook, section)) return section
+	if (workbook.definedNames.length === 0) return new Uint8Array(0)
 
 	const index = new Map(workbook.sheets.map((sheet, position) => [sheet.id, position]))
 	const name = qualify(context.prefix, "definedName")
@@ -222,20 +223,33 @@ function sharingFields(workbook: XlsxWorkbookModel): AttributeField[] | null {
 	]
 }
 
-// The first workbookView: the active tab, and the first tab shown kept within the sheets.
+// The first workbookView: the active tab, and the first tab shown kept within the sheets. Without a view to hold it,
+// the first tab (the default) needs none: the source's markup, or its absence, stays.
 function writeBookViews(workbook: XlsxWorkbookModel, section: Uint8Array | null, context: WorkbookContext): Uint8Array {
 	const last = Math.max(0, workbook.sheets.length - 1)
+	const created = (): string => `<${qualify(context.prefix, "workbookView")}${attr("activeTab", workbook.activeTab)}/>`
 
 	if (section === null) {
-		const view = `<${qualify(context.prefix, "workbookView")}${workbook.activeTab === 0 ? "" : attr("activeTab", workbook.activeTab)}/>`
+		if (workbook.activeTab === 0) return new Uint8Array(0)
 
-		return encodeUtf8(`<${qualify(context.prefix, "bookViews")}>${view}</${qualify(context.prefix, "bookViews")}>`)
+		return encodeUtf8(`<${qualify(context.prefix, "bookViews")}>${created()}</${qualify(context.prefix, "bookViews")}>`)
 	}
 
 	const document = parseXml(section)
-	const view = childElement(document, document.documentElement(), "workbookView")
+	const root = document.documentElement()
+	const view = childElement(document, root, "workbookView")
 
-	if (view < 0) return section
+	if (view < 0) {
+		if (workbook.activeTab === 0) return section
+
+		const open = document.openEnd(root)
+
+		// <bookViews/> opens with its own start tag, "/>" made ">".
+		if (document.isSelfClosing(root))
+			return join([section.subarray(0, open - 2), encodeUtf8(`>${created()}</${document.name(root)}>`), section.subarray(open)])
+
+		return join([section.subarray(0, open), encodeUtf8(created()), section.subarray(open)])
+	}
 
 	const firstSheet = Number(document.attribute(view, "firstSheet") ?? 0) || 0
 	const fields = [numberField("activeTab", workbook.activeTab, 0), numberField("firstSheet", Math.min(firstSheet, last), 0)]

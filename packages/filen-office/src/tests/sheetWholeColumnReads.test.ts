@@ -366,3 +366,48 @@ describe("whole-column references ending at their columns' cells", () => {
 		}
 	})
 })
+
+describe("whole-column lookups over columns running to the grid's last row", () => {
+	// 300 lookups over D:E, whose only cell past row 300 is in the grid's last row: each costs the cells there are.
+	function lookups(formula: (row: number) => string): EngineSheet["rows"] {
+		const rows: EngineSheet["rows"] = []
+
+		for (let r = 1; r <= 300; r++) rows.push([r, formula(r), null, r, r * 10])
+
+		while (rows.length < LAST) rows.push([])
+
+		rows.push([null, null, null, null, "last"])
+
+		return rows
+	}
+
+	it.each([
+		["VLOOKUP", (r: number) => `=VLOOKUP(A${String(r)},$D:$E,2,0)`],
+		["MATCH", (r: number) => `=INDEX($E:$E,MATCH(A${String(r)},$D:$D,0))`],
+		["XLOOKUP", (r: number) => `=XLOOKUP(A${String(r)},$D:$D,$E:$E)`]
+	])("builds the engine for %s in the time its cells take, and finds a value written below them", { timeout: 60_000 }, (_, formula) => {
+		const rows = lookups(formula)
+		const start = process.cpuUsage().user
+		const built = engine(rows)
+
+		try {
+			expect((process.cpuUsage().user - start) / 1000).toBeLessThan(3_000)
+			expect(built.result(0, 0, 1)).toEqual({ value: 10 })
+			expect(built.result(0, 299, 1)).toEqual({ value: 3000 })
+
+			// A key no row holds yet, then written far below the others: the lookup reads it.
+			built.set(0, [{ row: 0, col: 0, content: 777 }])
+
+			expect(built.result(0, 0, 1).value).toBe("#N/A")
+
+			built.set(0, [
+				{ row: 5000, col: 3, content: 777 },
+				{ row: 5000, col: 4, content: 7 }
+			])
+
+			expect(built.result(0, 0, 1)).toEqual({ value: 7 })
+		} finally {
+			built.destroy()
+		}
+	})
+})

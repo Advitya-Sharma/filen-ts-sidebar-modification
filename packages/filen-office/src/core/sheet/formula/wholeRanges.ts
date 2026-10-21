@@ -1,4 +1,4 @@
-import { HyperFormula } from "hyperformula"
+import { EmptyValue, HyperFormula, SimpleRangeValue } from "hyperformula"
 import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
 
 // Whole-column (A:A) and whole-row (1:1) references, as far as the engine reads them. HyperFormula ends one at the
@@ -383,6 +383,144 @@ export class WholeRanges {
 	}
 }
 
+interface SearchRange extends WholeRange {
+	isFinite(): boolean
+	effectiveEndRow(graph: unknown): number
+	effectiveEndColumn(graph: unknown): number
+}
+
+// What a search reads: a range, or values alone (valuesFromTopLeftCorner).
+interface SearchValues {
+	readonly range?: SearchRange
+	valuesFromTopLeftCorner(): unknown[]
+}
+
+interface SearchInternals {
+	readonly dependencyGraph: GraphInternals & { getScalarValue(address: Address & { readonly sheet: number }): unknown }
+}
+
+type BasicFind = (this: SearchInternals, key: unknown, range: SearchValues, coordinate: string, options: { ordering: string }) => number
+type AdvancedFind = (this: SearchInternals, matcher: (value: unknown) => boolean, range: SearchValues, options?: object) => number
+
+interface SearchPrototype {
+	basicFind: BasicFind
+	advancedFind: AdvancedFind
+}
+
+// A whole range's stored cells as the values a search reads, in the order it reads them (row by row), each with its
+// position in the range's values; null where the range is not whole or fills most of what it spans.
+function storedValues(graph: SearchInternals["dependencyGraph"], range: SearchRange): { values: unknown[]; at: number[] } | null {
+	const columns = range.end.row === Number.POSITIVE_INFINITY
+	const endRow = range.effectiveEndRow(graph)
+	const endCol = range.effectiveEndColumn(graph)
+	const width = endCol - range.start.col + 1
+	const height = endRow - range.start.row + 1
+	let storage: Storage
+
+	try {
+		storage = graph.addressMapping.getStrategyForSheetOrThrow(range.sheet)
+	} catch {
+		return null
+	}
+
+	const found: { address: Address; at: number }[] = []
+
+	for (const address of storedIn(storage, range, columns ? endRow : endCol, columns)) {
+		found.push({ address, at: (address.row - range.start.row) * width + (address.col - range.start.col) })
+	}
+
+	// Most of the range filled: reading it whole costs no more.
+	if (found.length * 4 > width * height) return null
+
+	let sorted = true
+
+	for (let k = 1; k < found.length && sorted; k++) sorted = (found[k - 1] as { at: number }).at < (found[k] as { at: number }).at
+
+	if (!sorted) found.sort((a, b) => a.at - b.at)
+
+	return {
+		values: found.map(entry => graph.getScalarValue({ sheet: range.sheet, ...entry.address })),
+		at: found.map(entry => entry.at)
+	}
+}
+
+// Searches (VLOOKUP, HLOOKUP, MATCH, XLOOKUP) through a whole column or row that reaches far past its cells read the
+// cells stored there, not every address to the end: a match among them is where the full read finds it, empty cells
+// never match a key that is not empty, and an unordered search for the nearest value skips them.
+function installSparseSearch(prototype: SearchPrototype): void {
+	const basic = prototype.basicFind
+	const advanced = prototype.advancedFind
+
+	prototype.basicFind = function (key, range, coordinate, options) {
+		const whole = range.range
+
+		if (whole === undefined || whole.isFinite() || options.ordering !== "none" || key === EmptyValue)
+			return basic.call(this, key, range, coordinate, options)
+
+		const stored = storedValues(this.dependencyGraph, whole)
+
+		if (stored === null) return basic.call(this, key, range, coordinate, options)
+
+		const found = basic.call(this, key, { valuesFromTopLeftCorner: () => stored.values }, coordinate, options)
+
+		return found < 0 ? found : (stored.at[found] ?? -1)
+	}
+
+	prototype.advancedFind = function (matcher, range, options) {
+		const whole = range.range
+
+		if (whole === undefined || whole.isFinite() || matcher(EmptyValue)) return advanced.call(this, matcher, range, options)
+
+		const stored = storedValues(this.dependencyGraph, whole)
+
+		if (stored === null) return advanced.call(this, matcher, range, options)
+
+		const found = advanced.call(this, matcher, { valuesFromTopLeftCorner: () => stored.values }, options)
+
+		return found < 0 ? found : (stored.at[found] ?? -1)
+	}
+}
+
+interface ReadRange {
+	readonly range?: SearchRange
+	readonly dependencyGraph: { getCellValue(address: Address & { readonly sheet: number }): unknown }
+	readonly data: unknown[][]
+	width(): number
+	height(): number
+}
+
+type Xlookup = (this: unknown, key: unknown, lookup: ReadRange, read: ReadRange, ...rest: unknown[]) => unknown
+
+// XLOOKUP's result row read alone from a whole-column return range: the engine reads the range's every row for the
+// one it returns.
+function installRowRead(prototype: { doXlookup: Xlookup }): void {
+	const xlookup = prototype.doXlookup
+
+	prototype.doXlookup = function (key, lookup, read, ...rest) {
+		const whole = read.range
+
+		if (whole === undefined || whole.isFinite() || lookup.width() !== 1 || read.height() !== lookup.height())
+			return xlookup.call(this, key, lookup, read, ...rest)
+
+		const rowAt = (index: number): unknown[] =>
+			Array.from({ length: read.width() }, (_, col) => {
+				const value = read.dependencyGraph.getCellValue({
+					sheet: whole.sheet,
+					row: whole.start.row + index,
+					col: whole.start.col + col
+				})
+
+				return value instanceof SimpleRangeValue ? read.data[index]?.[col] : value
+			})
+		const rows = new Proxy([] as unknown[][], {
+			get: (target, property, receiver) =>
+				typeof property === "string" && /^\d+$/.test(property) ? rowAt(Number(property)) : Reflect.get(target, property, receiver)
+		})
+
+		return xlookup.call(this, key, lookup, Object.create(read, { data: { get: () => rows } }) as ReadRange, ...rest)
+	}
+}
+
 // The ends in force for the engine calculating now (FormulaEngine sets them around every call into it).
 let active: WholeRanges | null = null
 
@@ -400,6 +538,58 @@ export function withWholeRanges<T>(ranges: WholeRanges | null, work: () => T): T
 
 let installed = false
 
+interface GraphRangeVertex {
+	idInGraph?: number
+	bruteForce: boolean
+}
+
+interface GraphInternals {
+	readonly addressMapping: { getStrategyForSheetOrThrow(sheet: number): Storage }
+	readonly rangeMapping: { addOrUpdateVertex(vertex: GraphRangeVertex): void }
+	readonly arrayMapping: { getArray(range: unknown): unknown }
+	readonly graph: {
+		addNodeIfNotExists(vertex: unknown): void
+		addEdge(from: unknown, to: unknown): void
+		markNodeAsInfiniteRange(id: number): void
+	}
+	getRange(start: Address, end: Address): GraphRangeVertex | undefined
+	fetchCellOrCreateEmpty(address: Address & { readonly sheet: number }): { vertex: unknown; id?: number }
+}
+
+type ProcessDependencies = (this: GraphInternals, dependencies: unknown[], end: { idInGraph?: number }) => void
+
+// The stored cells of a whole-column (whole-row) range up to its end.
+function* storedIn(storage: Storage, range: WholeRange, end: number, columns: boolean): Generator<Address> {
+	const mapping = storage.mapping
+
+	if (mapping instanceof Map) {
+		for (const [col, rows] of mapping as Map<number, unknown>) {
+			if (!(rows instanceof Map)) continue
+			if (columns ? col < range.start.col || col > range.end.col : col > end) continue
+
+			for (const row of rows.keys() as Iterable<number>) {
+				if (columns ? row <= end : row >= range.start.row && row <= range.end.row) yield { row, col }
+			}
+		}
+
+		return
+	}
+
+	if (!Array.isArray(mapping)) return
+
+	const [first, last] = columns ? [0, Math.min(end, mapping.length - 1)] : [range.start.row, Math.min(range.end.row, mapping.length - 1)]
+
+	for (let row = first; row <= last; row++) {
+		const line: unknown = mapping[row]
+
+		if (!Array.isArray(line)) continue
+
+		const [from, to] = columns ? [range.start.col, Math.min(range.end.col, line.length - 1)] : [0, Math.min(end, line.length - 1)]
+
+		for (let col = from; col <= to; col++) if (line[col] !== undefined) yield { row, col }
+	}
+}
+
 type EffectiveExtent = (this: WholeRange, graph: Graph) => number
 
 // Ends the engine's whole-column and whole-row ranges as above. Its range classes are not exported: they are found
@@ -412,6 +602,99 @@ export function installWholeRanges(licenseKey: string): void {
 	const probe = HyperFormula.buildFromArray([[], [null, null, "=SUM(1:1)"], [null, "=SUM(A:A)"]], { licenseKey })
 
 	try {
+		const graphPrototype = Object.getPrototypeOf(probe.dependencyGraph) as { processCellDependencies: ProcessDependencies }
+		const process = graphPrototype.processCellDependencies
+		let RangeVertex: (new (range: WholeRange) => GraphRangeVertex) | null = null
+
+		for (const vertex of probe.dependencyGraph.graph.getInfiniteRanges()) {
+			RangeVertex = (vertex as object).constructor as new (range: WholeRange) => GraphRangeVertex
+
+			break
+		}
+
+		const Vertex = RangeVertex
+
+		// A whole-column (whole-row) range reads the cells stored in it, not every address to its end: HyperFormula
+		// would make an empty cell of each (a million for a column a cell in the last row ends), and walk them again for
+		// every formula reading the range. A cell written into it later is joined to it as it is written (the engine's
+		// correctInfiniteRangesDependency), so the empty addresses need no vertex.
+		if (Vertex !== null) {
+			const joined = new WeakSet<GraphRangeVertex>()
+
+			graphPrototype.processCellDependencies = function (dependencies, endVertex) {
+				const rest: unknown[] = []
+				const endId = endVertex.idInGraph
+
+				for (const dependency of dependencies) {
+					const range = dependency as Partial<WholeRange> & {
+						isFinite?: () => boolean
+						effectiveEndRow?: (graph: unknown) => number
+						effectiveEndColumn?: (graph: unknown) => number
+					}
+
+					if (
+						endId === undefined ||
+						typeof range.isFinite !== "function" ||
+						range.isFinite() ||
+						range.start === undefined ||
+						range.end === undefined ||
+						range.sheet === undefined
+					) {
+						rest.push(dependency)
+
+						continue
+					}
+
+					const whole = range as WholeRange
+					const columns = whole.end.row === Number.POSITIVE_INFINITY
+					let vertex = this.getRange(whole.start, whole.end)
+
+					if (vertex === undefined) {
+						vertex = new Vertex(whole)
+						this.rangeMapping.addOrUpdateVertex(vertex)
+					}
+
+					this.graph.addNodeIfNotExists(vertex)
+
+					const id = vertex.idInGraph
+
+					if (id === undefined) throw new Error("spreadsheet: a range vertex is not in the graph")
+
+					this.graph.markNodeAsInfiniteRange(id)
+
+					if (!joined.has(vertex)) {
+						joined.add(vertex)
+						vertex.bruteForce = true
+
+						const array = this.arrayMapping.getArray(whole)
+
+						if (array !== undefined) {
+							this.graph.addEdge(array, id)
+						} else {
+							const end = columns ? (range.effectiveEndRow?.(this) ?? -1) : (range.effectiveEndColumn?.(this) ?? -1)
+							const storage = this.addressMapping.getStrategyForSheetOrThrow(whole.sheet)
+
+							for (const address of storedIn(storage, whole, end, columns)) {
+								const cell = this.fetchCellOrCreateEmpty({ sheet: whole.sheet, ...address })
+
+								this.graph.addEdge(cell.id ?? cell.vertex, id)
+							}
+						}
+					}
+
+					this.graph.addEdge(id, endId)
+				}
+
+				if (rest.length > 0) process.call(this, rest, endVertex)
+			}
+		}
+
+		installSparseSearch(Object.getPrototypeOf(Object.getPrototypeOf(probe.columnSearch)) as SearchPrototype)
+
+		const lookups = HyperFormula.getFunctionPlugin("XLOOKUP")?.prototype as { doXlookup?: Xlookup } | undefined
+
+		if (lookups?.doXlookup !== undefined) installRowRead(lookups as { doXlookup: Xlookup })
+
 		for (const vertex of probe.dependencyGraph.graph.getInfiniteRanges()) {
 			const range = (vertex as { range?: WholeRange }).range
 
