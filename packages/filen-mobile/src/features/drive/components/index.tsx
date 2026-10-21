@@ -474,7 +474,7 @@ const Drive = () => {
 									)
 								}
 
-								const emptyState = getDriveEmptyState(drivePath.type)
+								const emptyState = getDriveEmptyState(drivePath.type, drivePath.uuid)
 								const parent = getDriveParent(drivePath)
 
 								return (

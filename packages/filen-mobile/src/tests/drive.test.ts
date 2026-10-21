@@ -207,7 +207,8 @@ vi.mock("@/features/drive/queries/useDriveItems.query", () => ({
 	driveItemsQueryUpdateGlobal: mockDriveItemsQueryUpdateGlobal,
 	driveItemsQueryUpdateForNormalParent: mockDriveItemsQueryUpdateForNormalParent,
 	driveItemsQueryGet: mockDriveItemsQueryGet,
-	driveItemsQueryRemoveDirectoryFromPhotos: mockRemoveDirectoryFromPhotos
+	driveItemsQueryRemoveDirectoryFromPhotos: mockRemoveDirectoryFromPhotos,
+	driveItemsQueryRemoveDirectoryDescendantsFromRoots: vi.fn()
 }))
 
 vi.mock("@/features/drive/queries/useDriveItemVersions.query", () => ({

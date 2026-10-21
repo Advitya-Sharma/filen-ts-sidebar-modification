@@ -81,7 +81,8 @@ vi.mock("@/features/drive/queries/useDriveItems.query", () => ({
 		mockDriveItemsQueryUpdate({ params: { path: { type, uuid: null } }, updater }),
 	driveItemsQueryUpdateForNormalParent: mockDriveItemsQueryUpdateForNormalParent,
 	driveItemsQueryGet: vi.fn(),
-	driveItemsQueryRemoveDirectoryFromPhotos: vi.fn()
+	driveItemsQueryRemoveDirectoryFromPhotos: vi.fn(),
+	driveItemsQueryRemoveDirectoryDescendantsFromRoots: vi.fn()
 }))
 
 vi.mock("@/features/drive/queries/useDriveItemVersions.query", () => ({

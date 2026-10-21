@@ -125,6 +125,7 @@ import { type Note, type NoteTag, type NoteParticipant } from "@/types"
 import { type NoteType } from "@filen/sdk-rs"
 import { fs } from "@/tests/mocks/expoFileSystem"
 import { makeNote, makeSdkNote } from "@/tests/fixtures/notes"
+import useAppStore from "@/stores/useApp.store"
 
 // ---------------------------------------------------------------------------
 // Factory helpers
@@ -490,6 +491,8 @@ describe("notes.delete", () => {
 	})
 
 	afterEach(() => {
+		useAppStore.getState().setPathname("/")
+		vi.clearAllTimers()
 		vi.useRealTimers()
 	})
 
@@ -512,12 +515,15 @@ describe("notes.delete", () => {
 		expect(sdkClient.deleteNote).toHaveBeenCalledTimes(1)
 	})
 
-	it("after 3000ms setTimeout: notesWithContentQueryUpdate filters out the note uuid", async () => {
+	it("from the open editor, after 3000ms: notesWithContentQueryUpdate filters out the note uuid", async () => {
 		const sdkClient = makeMockSdkClient()
 		mockGetSdkClients.mockResolvedValue({ authedSdkClient: sdkClient })
 
 		const note = makeNote({ trash: true, uuid: "note-uuid-del" })
 		const otherNote = { ...makeNote({ uuid: "other-note" }), content: "keep" }
+
+		// Deleted from its own editor, which stays open.
+		useAppStore.getState().setPathname("/note/note-uuid-del")
 
 		await notes.delete({ note })
 
@@ -553,6 +559,44 @@ describe("notes.delete", () => {
 		vi.advanceTimersByTime(3000)
 
 		expect(mockRemoveQueryEverywhere).toHaveBeenCalledWith(["useNoteContentQuery", { uuid: "note-uuid-del" }])
+	})
+
+	it("from the list: the row and body go at once, so the row can't be acted on again", async () => {
+		mockGetSdkClients.mockResolvedValue({ authedSdkClient: makeMockSdkClient() })
+		mockRemoveQueryEverywhere.mockClear()
+
+		useAppStore.getState().setPathname("/tabs/notes")
+
+		await notes.delete({ note: makeNote({ trash: true, uuid: "note-uuid-del" }) })
+
+		expect(mockNotesWithContentQueryUpdate).toHaveBeenCalledTimes(1)
+		expect(mockRemoveQueryEverywhere).toHaveBeenCalledWith(["useNoteContentQuery", { uuid: "note-uuid-del" }])
+
+		vi.advanceTimersByTime(3000)
+
+		expect(mockNotesWithContentQueryUpdate).toHaveBeenCalledTimes(1)
+	})
+
+	it("from the open editor: the row goes as soon as the editor is left, not after the delay", async () => {
+		mockGetSdkClients.mockResolvedValue({ authedSdkClient: makeMockSdkClient() })
+
+		useAppStore.getState().setPathname("/note/note-uuid-del")
+
+		await notes.delete({ note: makeNote({ trash: true, uuid: "note-uuid-del" }) })
+
+		useAppStore.getState().setBiometricUnlocked(true)
+
+		expect(mockNotesWithContentQueryUpdate).not.toHaveBeenCalled()
+
+		useAppStore.getState().setPathname("/tabs/notes")
+
+		expect(mockNotesWithContentQueryUpdate).toHaveBeenCalledTimes(1)
+
+		vi.advanceTimersByTime(3000)
+		useAppStore.getState().setPathname("/note/note-uuid-del")
+		useAppStore.getState().setPathname("/")
+
+		expect(mockNotesWithContentQueryUpdate).toHaveBeenCalledTimes(1)
 	})
 })
 
@@ -1692,6 +1736,8 @@ describe("notes.leave", () => {
 	})
 
 	afterEach(() => {
+		useAppStore.getState().setPathname("/")
+		vi.clearAllTimers()
 		vi.useRealTimers()
 	})
 
@@ -1716,6 +1762,8 @@ describe("notes.leave", () => {
 
 		const note = makeNote({ uuid: "note-uuid-1" })
 		const other = { ...makeNote({ uuid: "other-uuid" }), content: "keep" }
+
+		useAppStore.getState().setPathname("/note/note-uuid-1")
 
 		await notes.leave({ note })
 

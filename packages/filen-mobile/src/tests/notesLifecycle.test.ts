@@ -97,6 +97,7 @@ import { leave } from "@/features/notes/notesParticipants"
 import { type NoteHistory } from "@/types"
 import useNotesStore from "@/features/notes/store/useNotes.store"
 import { makeNote, makeSdkNote } from "@/tests/fixtures/notes"
+import useAppStore from "@/stores/useApp.store"
 
 // ---------------------------------------------------------------------------
 // Factory helpers
@@ -338,6 +339,7 @@ describe("deleteNote selection purge", () => {
 	})
 
 	afterEach(() => {
+		useAppStore.getState().setPathname("/")
 		vi.clearAllTimers()
 		vi.useRealTimers()
 	})
@@ -380,6 +382,7 @@ describe("deleteNote selection purge", () => {
 		const deleted = makeNote({ uuid: "note-uuid-1", trash: true })
 
 		useNotesStore.getState().setSelectedNotes([deleted])
+		useAppStore.getState().setPathname("/note/note-uuid-1")
 
 		await deleteNote({ note: deleted })
 
@@ -407,6 +410,7 @@ describe("leave selection purge", () => {
 	})
 
 	afterEach(() => {
+		useAppStore.getState().setPathname("/")
 		vi.clearAllTimers()
 		vi.useRealTimers()
 	})
@@ -441,6 +445,7 @@ describe("leave selection purge", () => {
 		const left = makeNote({ uuid: "note-uuid-1" })
 
 		useNotesStore.getState().setSelectedNotes([left])
+		useAppStore.getState().setPathname("/note/note-uuid-1")
 
 		await leave({ note: left })
 

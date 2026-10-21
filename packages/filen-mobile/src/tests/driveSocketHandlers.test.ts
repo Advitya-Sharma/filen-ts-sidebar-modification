@@ -1,7 +1,15 @@
 import { vi, describe, it, expect, beforeEach } from "vitest"
 vi.mock("@/lib/logger", async () => await import("@/tests/mocks/logger"))
 
-const { mockMarkDirectorySizesStale, mockEnqueue, mockFlushNow, mockRemoveDirectoryFromPhotos, mockInvalidateAfterDeleteAll, callOrder } =
+const {
+	mockMarkDirectorySizesStale,
+	mockEnqueue,
+	mockFlushNow,
+	mockRemoveDirectoryFromPhotos,
+	mockRemoveDirectoryDescendantsFromRoots,
+	mockInvalidateAfterDeleteAll,
+	callOrder
+} =
 	vi.hoisted(() => {
 		const callOrder: string[] = []
 
@@ -12,6 +20,7 @@ const { mockMarkDirectorySizesStale, mockEnqueue, mockFlushNow, mockRemoveDirect
 				callOrder.push("flush")
 			}),
 			mockRemoveDirectoryFromPhotos: vi.fn(),
+			mockRemoveDirectoryDescendantsFromRoots: vi.fn(),
 			mockInvalidateAfterDeleteAll: vi.fn(),
 			callOrder
 		}
@@ -76,6 +85,7 @@ vi.mock("@/features/drive/queries/useDriveItems.query", () => ({
 	driveItemsQueryUpdateForNormalParent: mockDriveItemsQueryUpdateForNormalParent,
 	driveItemsQueryUpdateForPhotos: vi.fn(),
 	driveItemsQueryRemoveDirectoryFromPhotos: mockRemoveDirectoryFromPhotos,
+	driveItemsQueryRemoveDirectoryDescendantsFromRoots: mockRemoveDirectoryDescendantsFromRoots,
 	driveItemsQueryInvalidateAfterDeleteAll: mockInvalidateAfterDeleteAll,
 	driveItemsQueryMarkAllStale: vi.fn()
 }))
@@ -250,6 +260,7 @@ describe("handleDriveEvent — drive socket handler", () => {
 		mockEnqueue.mockClear()
 		mockFlushNow.mockClear()
 		mockRemoveDirectoryFromPhotos.mockClear()
+		mockRemoveDirectoryDescendantsFromRoots.mockClear()
 		mockInvalidateAfterDeleteAll.mockClear()
 		callOrder.length = 0
 		mockCacheDirectoryUuidToAnyNormalDirGet.mockReset()
@@ -1457,12 +1468,14 @@ describe("handleDriveEvent — drive socket handler", () => {
 			await handleDriveEvent({ event: makeFolderTrashEvent("trashed-dir") })
 
 			expect(mockRemoveDirectoryFromPhotos).toHaveBeenCalledExactlyOnceWith({ dirUuid: "trashed-dir" })
+			expect(mockRemoveDirectoryDescendantsFromRoots).toHaveBeenCalledExactlyOnceWith("trashed-dir")
 		})
 
 		it("FolderDeletedPermanent drops the directory's descendants from Photos", async () => {
 			await handleDriveEvent({ event: makeFolderDeletedPermanentEvent("deleted-dir") })
 
 			expect(mockRemoveDirectoryFromPhotos).toHaveBeenCalledExactlyOnceWith({ dirUuid: "deleted-dir" })
+			expect(mockRemoveDirectoryDescendantsFromRoots).toHaveBeenCalledExactlyOnceWith("deleted-dir")
 		})
 
 		it("FolderMove asks Photos to drop them only if the destination is outside the tree", async () => {

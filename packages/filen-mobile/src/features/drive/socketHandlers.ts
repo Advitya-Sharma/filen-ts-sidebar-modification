@@ -6,6 +6,7 @@ import {
 	driveItemsQueryUpdateForNormalParent,
 	driveItemsQueryUpdateForPhotos,
 	driveItemsQueryRemoveDirectoryFromPhotos,
+	driveItemsQueryRemoveDirectoryDescendantsFromRoots,
 	driveItemsQueryInvalidateAfterDeleteAll,
 	driveItemsQueryMarkAllStale
 } from "@/features/drive/queries/useDriveItems.query"
@@ -240,6 +241,8 @@ export async function handleDriveEvent({ event }: { event: DriveSocketEvent }): 
 				dirUuid: inner.uuid
 			})
 
+			driveItemsQueryRemoveDirectoryDescendantsFromRoots(inner.uuid)
+
 			cache.forgetItem(inner.uuid)
 			dropDriveItem(inner.uuid)
 
@@ -446,6 +449,8 @@ export async function handleDriveEvent({ event }: { event: DriveSocketEvent }): 
 			driveItemsQueryRemoveDirectoryFromPhotos({
 				dirUuid: inner.uuid
 			})
+
+			driveItemsQueryRemoveDirectoryDescendantsFromRoots(inner.uuid)
 
 			const fromCache = cache.getNormalDir(inner.uuid)
 

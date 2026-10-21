@@ -66,8 +66,9 @@ export function filterDriveItemsBySearchQuery<T extends DriveItem>(items: T[], s
 	return items.filter(item => driveItemDisplayName(item).toLowerCase().includes(normalized))
 }
 
-export function getDriveEmptyState(type: DrivePathType | null): DriveEmptyState {
-	return type === null ? FOLDER_EMPTY_STATE : DRIVE_EMPTY_STATE[type]
+// A uuid names a real directory browsed inside a variant (e.g. favorites/<uuid>): only the variant's root gets its own state.
+export function getDriveEmptyState(type: DrivePathType | null, uuid: string | null): DriveEmptyState {
+	return type === null || uuid ? FOLDER_EMPTY_STATE : DRIVE_EMPTY_STATE[type]
 }
 
 /**
