@@ -4,6 +4,7 @@ import { SHEET_MAX_COLS, SHEET_MAX_ROWS, type SheetAxis, type SheetId, type Shee
 import type { SheetChangeSink, SheetHandled } from "../../sheet/registry"
 import type { AxisEdit } from "../../sheet/model/edits"
 import { sameSheet } from "../../sheet/refs/formulaRefs"
+import { ChangeLog } from "../model/changes"
 import { FormulaTable } from "../model/formulas"
 import { SheetStore } from "../model/store"
 import { SheetStrings } from "../model/strings"
@@ -250,11 +251,13 @@ export function sheetNameRefusal(document: XlsxDocument, name: string, except: S
 
 export function newSheetPart(document: XlsxDocument): string {
 	const taken = new Set(document.workbook.sheets.map(entry => entry.part.toLowerCase()))
+	const changes = document.workbook.changes
 
 	for (let n = 1; ; n++) {
 		const name = `xl/worksheets/sheet${String(n)}.xml`
 
-		if (!taken.has(name) && !document.workbook.opc.has(name)) return name
+		// Nor a name a sheet added and taken away again had: its relationships' ids are retired with it.
+		if (!taken.has(name) && !document.workbook.opc.has(name) && !(changes instanceof ChangeLog && changes.hadName(name))) return name
 	}
 }
 

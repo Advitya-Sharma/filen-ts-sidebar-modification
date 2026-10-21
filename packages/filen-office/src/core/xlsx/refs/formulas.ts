@@ -1,4 +1,5 @@
-import { formulaTranslator, renameSheetInFormula, rewriteFormula, sameSheet, shiftFormula } from "../../sheet/refs/formulaRefs"
+import { SHEET_MAX_COLS, SHEET_MAX_ROWS } from "../../sheet/protocol"
+import { formulaTranslator, renameSheetInFormula, rewriteFormula, sameSheet, shiftFormula, shiftSpan } from "../../sheet/refs/formulaRefs"
 import type { AxisShift } from "./axis"
 import { moveReference, type CellMove } from "./moveRefs"
 import { quickShift } from "./quick"
@@ -7,7 +8,8 @@ import { rewriteStructured, type TableEdit } from "./structured"
 // Formula text moved for one structure edit, as Excel moves it (ECMA-376 Part 1 §18.17; support.microsoft.com
 // "Create a 3-D reference to the same cell range on multiple worksheets" for 3-D spans):
 // - rows or columns of a sheet: references into it move; one whose area was deleted becomes #REF!. 3-D spans and
-//   references into other workbooks stay as written.
+//   references into other workbooks stay as written. Cells shifted in a band move a reference that lies across the
+//   band alone (LibreOffice's rule; whole rows and whole columns stay), and leave any other as written.
 // - a sheet deleted: references to it become #REF! (Sheet2!A1 -> #REF!A1); a 3-D span losing an end narrows to
 //   the next sheet inside, and one losing every sheet becomes #REF!.
 // - a sheet renamed: references name it anew (quoted when the name needs it).
@@ -200,6 +202,8 @@ export class FormulaShift {
 
 		switch (op.kind) {
 			case "axis":
+				if (op.shift.band !== undefined) return bandShift(text, own, op.target, op.shift)
+
 				// A formula on the edited sheet without sheet names: the quick scan, else the parser.
 				return (
 					(own !== null && sameSheet(own, op.target) ? quickShift(text, op.shift) : null) ??
@@ -249,6 +253,43 @@ export class FormulaShift {
 				})
 		}
 	}
+}
+
+// A formula on `own` after cells of `target` were shifted in a band (shift.band set).
+function bandShift(text: string, own: string | null, target: string, shift: AxisShift): string {
+	const onTarget = own !== null && sameSheet(own, target)
+	const band = shift.band
+
+	if (band === undefined || (!onTarget && !text.includes("!"))) return text
+
+	const rows = shift.axis === "rows"
+
+	return rewriteFormula(text, ref => {
+		const area = ref.area
+
+		if (ref.external || ref.lastSheet !== null || area === null || area.kind !== "cell") return undefined
+		if (!(ref.sheet === null ? onTarget : sameSheet(ref.sheet, target))) return undefined
+
+		const crossLow = rows ? Math.min(area.startCol, area.endCol) : Math.min(area.startRow, area.endRow)
+		const crossHigh = rows ? Math.max(area.startCol, area.endCol) : Math.max(area.startRow, area.endRow)
+
+		if (crossLow < band.start || crossHigh > band.end) return undefined
+
+		const start = rows ? area.startRow : area.startCol
+		const end = rows ? area.endRow : area.endCol
+		const moved = shiftSpan(Math.min(start, end), Math.max(start, end), shift, rows ? SHEET_MAX_ROWS : SHEET_MAX_COLS, area.range)
+
+		if (moved === null) return null
+
+		const [nextStart, nextEnd] = start <= end ? moved : [moved[1], moved[0]]
+
+		if (nextStart === start && nextEnd === end) return undefined
+
+		return {
+			...ref,
+			area: rows ? { ...area, startRow: nextStart, endRow: nextEnd } : { ...area, startCol: nextStart, endCol: nextEnd }
+		}
+	})
 }
 
 // Whether a defined name's formula has a reference without a sheet (relative to the sheet it is used on), which

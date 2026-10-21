@@ -292,7 +292,8 @@ export async function writeXlsx(input: XlsxSaveInput, slicing?: Slicing): Promis
 		put(plan, opc, workbook.workbookPart, writtenWorkbook.bytes, undefined, source)
 	}
 
-	// The relationships of removed parts go with them.
+	// The relationships of removed parts go with them, a part added since open and removed again too (a copied sheet
+	// deleted, whose relationships the change log alone holds).
 	for (const name of plan.remove) {
 		const rels = relationshipsPartName(name)
 
@@ -300,6 +301,10 @@ export async function writeXlsx(input: XlsxSaveInput, slicing?: Slicing): Promis
 
 		relationshipChanges.delete(name)
 	}
+
+	const removed = new Set([...changes.parts].flatMap(([name, write]) => (write === null ? [partKey(name)] : [])))
+
+	for (const source of [...relationshipChanges.keys()]) if (removed.has(partKey(source))) relationshipChanges.delete(source)
 
 	const relationships = new Map<string, Uint8Array>()
 

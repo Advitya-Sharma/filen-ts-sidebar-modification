@@ -460,7 +460,7 @@ describe("formatting, tables and page setup logic", () => {
 		// Black gets lighter steps from 50 %, white darker ones from 5 %.
 		expect(rows[1]?.[1]).toMatchObject({
 			rgb: "7F7F7F",
-			label: { name: "previewDocxColorText1", tone: { lighter: true, percent: 50 } }
+			label: { name: "previewOfficeColorText1", tone: { lighter: true, percent: 50 } }
 		})
 		expect(rows[1]?.[0]).toMatchObject({ rgb: "F2F2F2", label: { tone: { lighter: false, percent: 5 } } })
 		expect(themeSwatches(() => undefined)).toEqual([])

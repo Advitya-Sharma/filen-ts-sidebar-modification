@@ -1,7 +1,7 @@
 import type { SheetRange } from "../../sheet/protocol"
 import { decodeUtf8, type XmlDocument } from "../../xml/index"
 import { sameSheet } from "../../sheet/refs/formulaRefs"
-import { reaches, shiftCell, type AxisShift } from "./axis"
+import { axisLimit, meetsMoved, reaches, shiftCell, type AxisShift } from "./axis"
 import { shiftAnchor, shiftVmlAnchor } from "./anchors"
 import { refuse, type RefConstruct } from "./catalogue"
 import {
@@ -116,6 +116,7 @@ export function rewriteVml(bytes: Uint8Array, job: RefJob, part: string): Uint8A
 		let col = -1
 		let rowNode = -1
 		let colNode = -1
+		let anchorNode = -1
 
 		for (const child of childElements(document, node)) {
 			const local = document.localName(child)
@@ -126,22 +127,35 @@ export function rewriteVml(bytes: Uint8Array, job: RefJob, part: string): Uint8A
 			} else if (local === "Column") {
 				colNode = child
 				col = Number(document.textContent(child).trim())
-			} else if (local === "Anchor" && job.shift !== null) {
-				const text = document.textContent(child)
-				const next = shiftVmlAnchor(text, job.shift)
-
-				if (next !== null && next !== text) {
-					job.touch("commentShapes")
-					editor.setText(child, next)
-				}
+			} else if (local === "Anchor") {
+				anchorNode = child
 			} else if (VML_FORMULAS.has(local)) {
 				shiftFormulaText(edited, child, job, "commentShapes", null)
 			}
 		}
 
-		if (job.shift === null || rowNode < 0 || colNode < 0 || !Number.isInteger(row) || !Number.isInteger(col)) continue
+		const shift = job.shift
 
-		const at = shiftCell(row, col, job.shift)
+		if (shift === null) continue
+
+		const note = rowNode >= 0 && colNode >= 0 && Number.isInteger(row) && Number.isInteger(col)
+		const at = note ? shiftCell(row, col, shift) : null
+
+		if (anchorNode >= 0) {
+			const text = document.textContent(anchorNode)
+			// Cells shifted in a band: a note's box goes where its cell goes, as it is.
+			const next =
+				shift.band !== undefined && note
+					? at === null
+						? text
+						: offsetVmlAnchor(text, shift.axis === "rows" ? at.row - row : at.col - col, shift)
+					: shiftVmlAnchor(text, shift)
+
+			if (next !== null && next !== text) {
+				job.touch("commentShapes")
+				editor.setText(anchorNode, next)
+			}
+		}
 
 		if (at === null) continue
 		if (at.row !== row) editor.setText(rowNode, String(at.row))
@@ -150,6 +164,23 @@ export function rewriteVml(bytes: Uint8Array, job: RefJob, part: string): Uint8A
 	}
 
 	return editor.changed ? editor.serialize() : bytes
+}
+
+// An x:Anchor moved `by` along the shifted axis (kept on the sheet), or null when it does not read.
+function offsetVmlAnchor(text: string, by: number, shift: AxisShift): string | null {
+	if (by === 0) return text
+
+	const values = text.split(",").map(part => Number(part.trim()))
+
+	if (values.length !== 8 || values.some(value => !Number.isInteger(value))) return null
+
+	const base = shift.axis === "rows" ? 2 : 0
+	const last = axisLimit(shift.axis) - 1
+
+	values[base] = Math.max(0, Math.min(last, (values[base] ?? 0) + by))
+	values[base + 4] = Math.max(0, Math.min(last, (values[base + 4] ?? 0) + by))
+
+	return values.join(", ")
 }
 
 // A shape's cell (x:Row, x:Column) was deleted.
@@ -232,7 +263,8 @@ export function checkPivotTable(bytes: Uint8Array, shift: AxisShift, part: strin
 
 	const rows = shift.axis === "rows"
 
-	if (reaches(rows ? range.endRow : range.endCol, shift)) refuse("pivot", "pivotTables")
+	if (shift.band !== undefined ? meetsMoved(range, shift) : reaches(rows ? range.endRow : range.endCol, shift))
+		refuse("pivot", "pivotTables")
 }
 
 export interface PivotSource {
@@ -267,7 +299,8 @@ export function checkPivotSource(source: PivotSource, sheet: string, shift: Axis
 
 	const rows = shift.axis === "rows"
 
-	if (reaches(rows ? source.ref.endRow : source.ref.endCol, shift)) refuse("pivot", "pivotSources")
+	if (shift.band !== undefined ? meetsMoved(source.ref, shift) : reaches(rows ? source.ref.endRow : source.ref.endCol, shift))
+		refuse("pivot", "pivotSources")
 }
 
 export function renamePivotSource(bytes: Uint8Array, from: string, to: string, part: string): Uint8Array {

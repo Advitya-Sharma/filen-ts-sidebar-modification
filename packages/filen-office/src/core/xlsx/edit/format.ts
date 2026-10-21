@@ -4,7 +4,7 @@ import { BLOCK_ROWS, type CellWrite, type SheetStore } from "../model/store"
 import { CellKind, XfApply, type XlsxAlignment, type XlsxColor, type XlsxFont, type XlsxXf } from "../model/types"
 import { XlsxReadError } from "../read/index"
 import type { XlsxDocument } from "./document"
-import { runSliced, sliceClock, type Slicing } from "../../slicing"
+import { runSliced, sliceClock, type SliceClock, type Slicing } from "../../slicing"
 import { AxisChange, partialAxis, restoreAxisChange, wholeAxis, wholeAxisTargets, type PositionedPatch } from "./formatAxes"
 import { CellLog } from "./history"
 import { fittedRows } from "./formatHeights"
@@ -226,11 +226,23 @@ export function clippedRange(store: SheetStore, range: SheetRange, budget: numbe
 	return area(clipped) <= budget ? clipped : null
 }
 
-export function cellStep(document: XlsxDocument, log: CellLog, report: (changes: SheetChangeSink) => void, engine: boolean): SheetEditStep {
-	const replay = (which: "before" | "after", changes: SheetChangeSink): void => {
-		log.restore(document.restoreCell, which)
+// Cells the formula engine is given at a time in a sliced edit, its evaluation held between parts.
+export const ENGINE_SLICE = 8192
 
-		if (engine) syncEngine(document, log)
+// With `slicing` (the in-thread host), undo and redo write the cells back in slices.
+export function cellStep(
+	document: XlsxDocument,
+	log: CellLog,
+	report: (changes: SheetChangeSink) => void,
+	engine: boolean,
+	slicing?: Slicing
+): SheetEditStep {
+	const replay = async (which: "before" | "after", changes: SheetChangeSink): Promise<void> => {
+		const clock = slicing === undefined ? undefined : sliceClock(slicing)
+
+		await document.restoreLogSliced(log, which, clock)
+
+		if (engine) await syncEngine(document, log, clock)
 
 		report(changes)
 	}
@@ -243,8 +255,9 @@ export function cellStep(document: XlsxDocument, log: CellLog, report: (changes:
 }
 
 // After cells were restored: the engine gets the edited cells as they now stand; their dependents were restored
-// from the log (the engine's own values of them already match what it calculated before).
-export function syncEngine(document: XlsxDocument, log: CellLog): void {
+// from the log (the engine's own values of them already match what it calculated before). With a clock, in parts of
+// ENGINE_SLICE cells, evaluation held between them, yielding once the slice is up.
+export async function syncEngine(document: XlsxDocument, log: CellLog, clock?: SliceClock): Promise<void> {
 	const engine = document.engine
 
 	if (engine === null) return
@@ -271,12 +284,36 @@ export function syncEngine(document: XlsxDocument, log: CellLog): void {
 
 		if (model === null || index < 0) continue
 
-		document.guarded(() =>
-			engine.set(
-				index,
-				cells.map(cell => document.engineCell(model, cell.row, cell.col))
+		if (clock === undefined) {
+			document.guarded(() =>
+				engine.set(
+					index,
+					cells.map(cell => document.engineCell(model, cell.row, cell.col))
+				)
 			)
-		)
+
+			continue
+		}
+
+		// In parts, evaluation held until all are in: what reads them is recalculated once.
+		try {
+			engine.holdEvaluation()
+
+			for (let start = 0; start < cells.length; start += ENGINE_SLICE) {
+				engine.set(
+					index,
+					cells.slice(start, start + ENGINE_SLICE).map(cell => document.engineCell(model, cell.row, cell.col))
+				)
+
+				if (clock.due) await clock.pause()
+			}
+
+			await engine.releaseEvaluation(false, clock)
+		} catch {
+			document.dropEngine()
+
+			return
+		}
 	}
 }
 

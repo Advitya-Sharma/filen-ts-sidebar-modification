@@ -351,6 +351,11 @@ export class SheetDataReader {
 		if (row < 0) row = this.previousRow + 1
 		if (row >= SHEET_MAX_ROWS) scanner.fail("A row lies outside the grid", start)
 
+		// The row's shared masters placed, now its index is known: a child moves from its master's own cell.
+		for (let i = 0; i + 1 < this.masterCols.length; i += 2)
+			this.formulas.placeMaster(this.masterCols[i] ?? -1, row, this.masterCols[i + 1] ?? 0)
+
+		this.masterCols.length = 0
 		builder.endRow(row, start, at, flags, height, style)
 		this.previousRow = row
 		this.at = at
@@ -366,6 +371,8 @@ export class SheetDataReader {
 	private valueText: string | null = null
 	private inline: string | null = null
 	private formula = -1
+	// The shared masters of the row being read: formula id, column pairs.
+	private readonly masterCols: number[] = []
 
 	private cell(start: number, name: number, previousCol: number): number {
 		const bytes = this.bytes
@@ -553,6 +560,8 @@ export class SheetDataReader {
 		}
 
 		this.builder.cell(col, kind, value, style, this.formula, this.marked)
+
+		if (this.formula >= 0 && this.formulas.kind(this.formula) === FormulaKind.SHARED_MASTER) this.masterCols.push(this.formula, col)
 
 		return at
 	}

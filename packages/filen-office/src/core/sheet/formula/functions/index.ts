@@ -1,0 +1,52 @@
+import { HyperFormula, type FunctionPluginDefinition } from "hyperformula"
+import { AggregateFunctions } from "./aggregate"
+import { ArrayFunctions } from "./arrays"
+import { ARRAY_RESULTS } from "../../refs/formulaRefs"
+import { installBlankTails } from "./blankTails"
+import { CriteriaFunctions } from "./criteria"
+import { DateFunctions } from "./date"
+import { LookupFunctions } from "./lookup"
+import { ReferenceFunctions } from "./reference"
+import { StatisticalFunctions } from "./statistical"
+import { TextFunctions } from "./text"
+
+// The app's own functions, registered with the engine once, before the first engine is built. A function the engine
+// has of its own is replaced where it calculates differently from Excel (TEXT, SUBTOTAL, COUNTBLANK); the others are
+// functions it lacks, and the engine-only functions its formula text calls (functions/engineNames.ts).
+const PLUGINS: readonly FunctionPluginDefinition[] = [
+	TextFunctions,
+	AggregateFunctions,
+	CriteriaFunctions,
+	DateFunctions,
+	ReferenceFunctions,
+	LookupFunctions,
+	StatisticalFunctions,
+	ArrayFunctions
+]
+
+let registered = false
+
+// Registers the functions (once). Names in the engine's language table are its own; a new name is added under itself.
+export function registerSheetFunctions(): void {
+	if (registered) return
+
+	registered = true
+
+	const known = new Set(HyperFormula.getRegisteredFunctionNames("enGB"))
+
+	for (const plugin of PLUGINS) {
+		const added = Object.keys(plugin.implementedFunctions).filter(name => !known.has(name))
+
+		HyperFormula.registerFunctionPlugin(
+			plugin,
+			added.length === 0 ? undefined : { enGB: Object.fromEntries(added.map(name => [name, name])) }
+		)
+	}
+
+	installBlankTails(ARRAY_RESULTS)
+}
+
+// The functions the app adds to the engine (not those it replaces), upper case.
+export function pluginFunctionNames(): readonly string[] {
+	return PLUGINS.flatMap(plugin => Object.keys(plugin.implementedFunctions))
+}

@@ -1,8 +1,8 @@
 export { clearCells, readEntry, recalculateLogged, setCells, splitsArray, tableHeaders, unshare, type CellInputs } from "./cells"
 export { copyCells, pasteCells, type XlsxClip } from "./clipboard"
+export { dateSerial } from "../../sheet/numfmt/date"
 export {
 	XlsxDocument,
-	dateSerial,
 	encodeXstring,
 	typedSerial,
 	type RenderStyleInterner,

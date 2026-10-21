@@ -167,7 +167,12 @@ export async function runSequence(
 
 	try {
 		const opened = await within(
-			openXlsxSession(bytesSource(bytes.slice()), { kind, slicing: IMMEDIATE }, () => undefined),
+			// Notes and comments are written under an author.
+			openXlsxSession(
+				bytesSource(bytes.slice()),
+				{ kind, slicing: IMMEDIATE, settings: { author: "Fuzz", clock: () => 0 } },
+				() => undefined
+			),
 			options.callTimeoutMs,
 			"open"
 		)

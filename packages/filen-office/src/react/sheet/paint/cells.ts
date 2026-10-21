@@ -11,10 +11,11 @@ import {
 } from "../../../core/sheet/protocol"
 import { fitGeneral } from "../../../core/sheet/numfmt/general"
 import { axisEntry, shownIndex } from "../axis"
+import { segments, type GridSegment } from "../layers"
 import type { SheetGridModel } from "../model"
 import type { SheetGridTheme } from "../theme"
 import { entryInput, entryRepeat, entryRuns, entryText } from "../tiles"
-import { screenOf, type AxisView, type GridView } from "../view"
+import { screenOf, type GridView } from "../view"
 import { BorderPainter, strongerLine } from "./borders"
 import { rgb, type GridCanvas } from "./canvas"
 import type { PatternCache } from "./patterns"
@@ -52,6 +53,8 @@ function ink(color: number | undefined, onFill: boolean, theme: SheetGridTheme):
 }
 
 export interface CellScene {
+	// Pixels at 100 % a cell's text leaves free at its leading edge, by its tile flags (a decorator's icon there).
+	readonly inset?: ((flags: number) => number) | undefined
 	readonly model: SheetGridModel
 	readonly sheet: SheetId
 	readonly layout: SheetLayout
@@ -68,24 +71,6 @@ export interface CellPainters {
 	readonly patterns: PatternCache
 }
 
-interface Segment {
-	readonly first: number
-	readonly last: number
-	readonly start: number
-	readonly end: number
-}
-
-// An axis's parts on screen: the frozen indices, then the scrolled ones.
-export function segments(view: AxisView): Segment[] {
-	const parts: Segment[] = []
-
-	if (view.frozen > 0)
-		parts.push({ first: view.frozenFirst, last: view.frozenEnd - 1, start: view.header, end: view.header + view.frozenSize })
-	if (view.last >= view.first) parts.push({ first: view.first, last: view.last, start: view.header + view.frozenSize, end: view.view })
-
-	return parts
-}
-
 // Look-ups one frame repeats: a row's or column's own style, whether a row's style wins.
 class Lookup {
 	private readonly rowStyles = new Map<number, number>()
@@ -96,7 +81,7 @@ class Lookup {
 	// The merges by row, for the rows drawn and one each side (the rest search them all).
 	private readonly byRow: Map<number, SheetRange[]> | null
 
-	constructor(scene: CellScene, merges: readonly SheetRange[], rows: Segment) {
+	constructor(scene: CellScene, merges: readonly SheetRange[], rows: GridSegment) {
 		this.scene = scene
 		this.merges = merges
 		this.byRow = merges.length === 0 ? null : new Map()
@@ -187,7 +172,7 @@ function shownText(scene: CellScene, tile: SheetTile, entry: number): string {
 	return showsFormula(scene, tile, entry) ? entryInput(tile, entry) : entryText(tile, entry)
 }
 
-function intersecting(layout: SheetLayout, rows: Segment, cols: Segment): SheetRange[] {
+function intersecting(layout: SheetLayout, rows: GridSegment, cols: GridSegment): SheetRange[] {
 	const found: SheetRange[] = []
 	const quads = layout.merges
 
@@ -209,7 +194,9 @@ function intersecting(layout: SheetLayout, rows: Segment, cols: Segment): SheetR
 	return found
 }
 
-export function paintCells(painters: CellPainters, scene: CellScene): void {
+// `under` draws what goes between a pane's fills and its borders and text (layers.ts's "under" decorators), clipped
+// to the pane.
+export function paintCells(painters: CellPainters, scene: CellScene, under?: (rows: GridSegment, cols: GridSegment) => void): void {
 	const { canvas } = painters
 	const { view, theme } = scene
 
@@ -220,7 +207,7 @@ export function paintCells(painters: CellPainters, scene: CellScene): void {
 	painters.measurer.reset()
 	roundedTexts.delete(scene.model)
 
-	for (const rows of segments(view.rows)) for (const cols of segments(view.cols)) paintPane(painters, scene, rows, cols)
+	for (const rows of segments(view.rows)) for (const cols of segments(view.cols)) paintPane(painters, scene, rows, cols, under)
 }
 
 // restore() puts back the font saved with the state, which the measurer cannot see.
@@ -262,7 +249,13 @@ interface Box {
 	readonly height: number
 }
 
-function paintPane(painters: CellPainters, scene: CellScene, rows: Segment, cols: Segment): void {
+function paintPane(
+	painters: CellPainters,
+	scene: CellScene,
+	rows: GridSegment,
+	cols: GridSegment,
+	under: ((rows: GridSegment, cols: GridSegment) => void) | undefined
+): void {
 	const { canvas } = painters
 	const { model, view, layout, theme } = scene
 	const rowAxis = view.rows.axis
@@ -322,6 +315,12 @@ function paintPane(painters: CellPainters, scene: CellScene, rows: Segment, cols
 			canvas.fillStyle = theme.background
 			canvas.fillRect(box.x, box.y, box.width - 1, box.height - 1)
 		}
+	}
+
+	if (under !== undefined) {
+		canvas.save()
+		under(rows, cols)
+		restore(painters)
 	}
 
 	paintBorders(painters, scene, lookup, rowList, colList, rowY, colX, blocks)
@@ -672,7 +671,7 @@ function paintRunOn(
 	col: number,
 	y: number,
 	height: number,
-	cols: Segment,
+	cols: GridSegment,
 	knownX?: number
 ): void {
 	const colAxis = scene.view.cols.axis
@@ -730,8 +729,11 @@ function lineHeight(px: number): number {
 }
 
 // Draws a cell's text in `box`, clipped to left..right (its run-on) and the box's height.
-function drawText(painters: CellPainters, scene: CellScene, content: CellText, box: Box, left: number, right: number): void {
+function drawText(painters: CellPainters, scene: CellScene, content: CellText, cellBox: Box, cellLeft: number, right: number): void {
 	const { canvas, measurer } = painters
+	const leading = scene.inset === undefined || content.pending ? 0 : Math.min(cellBox.width, scene.inset(content.flags) * scene.scale)
+	const box = leading === 0 ? cellBox : { ...cellBox, x: cellBox.x + leading, width: cellBox.width - leading }
+	const left = cellLeft === cellBox.x ? box.x : cellLeft
 	const { scale, theme, model } = scene
 	const style = content.style
 	const base = model.style(0)

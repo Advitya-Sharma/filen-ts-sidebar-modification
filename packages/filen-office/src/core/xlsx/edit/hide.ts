@@ -4,7 +4,7 @@ import { defaultColWidth } from "../../sheet/sizes/sizes"
 import type { SheetStore } from "../model/store"
 import { ColFlag, RowFlag, type XlsxColRange } from "../model/types"
 import type { XlsxDocument } from "./document"
-import { NO_ROW, rowState, type RowState } from "./history"
+import { CellLog, NO_ROW, rowState, type RowState } from "./history"
 
 // Rows and columns hidden and shown again (§18.3.1.73 row hidden, §18.3.1.13 col hidden). A row's own record
 // carries the flag; a column's range is split where the flag changes, and a column with no range of its own gets
@@ -171,6 +171,8 @@ export async function hideAxis(
 
 	if (rows.length === 0) return null
 
+	await document.engineBeforeRows(changes)
+
 	const set = (states: readonly RowState[], sink: SheetChangeSink): void => {
 		store.setRows(
 			rows.map((row, index) => {
@@ -185,7 +187,23 @@ export async function hideAxis(
 
 	set(afters, changes)
 
-	return { bytes: rows.length * 48, undo: sink => set(befores, sink), redo: sink => set(afters, sink) }
+	// SUBTOTAL and AGGREGATE leave hidden rows out.
+	const results = new CellLog()
+
+	document.rowsChanged(results, changes)
+	results.seal((s, r, c) => document.state(s, r, c))
+
+	return {
+		bytes: rows.length * 48 + results.bytes,
+		undo: sink => {
+			set(befores, sink)
+			document.rowsRestored(results, "before", sink)
+		},
+		redo: sink => {
+			set(afters, sink)
+			document.rowsRestored(results, "after", sink)
+		}
+	}
 }
 
 export const hideFeature = defineSheetFeature<XlsxDocument>({

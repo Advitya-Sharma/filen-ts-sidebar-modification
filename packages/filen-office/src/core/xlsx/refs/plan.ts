@@ -64,8 +64,18 @@ export interface RefPlan {
 	readonly touched: ReadonlySet<RefConstruct>
 	// Cells whose formula changed, per sheet, as positions after the edit (rows, cols).
 	readonly formulaCells: ReadonlyMap<SheetId, readonly number[]>
+	// Cells shifted in a band: the plan moves no cell (the caller does), and these header cells name the table
+	// columns the edit adds, each formatted as the cell at `styleFrom` (a column of the header row).
+	readonly headers: readonly TableHeader[]
 	apply(): void
 	revert(): void
+}
+
+export interface TableHeader {
+	readonly row: number
+	readonly col: number
+	readonly name: string
+	readonly styleFrom: number
 }
 
 export type RefPlanResult = { readonly ok: true; readonly plan: RefPlan } | { readonly ok: false; readonly refusal: SheetRefusal }
@@ -289,6 +299,18 @@ async function plan(workbook: XlsxWorkbookModel, edit: RefEdit): Promise<RefPlan
 			)
 				refuse("tooLarge", "axis")
 
+			const band = shift.band
+
+			if (
+				band !== undefined &&
+				(!Number.isInteger(band.start) ||
+					!Number.isInteger(band.end) ||
+					band.start < 0 ||
+					band.start > band.end ||
+					band.end >= axisLimit(shift.axis === "rows" ? "cols" : "rows"))
+			)
+				refuse("tooLarge", "band")
+
 			op = { kind: "axis", target: target.name, shift }
 			break
 		}
@@ -321,11 +343,11 @@ async function plan(workbook: XlsxWorkbookModel, edit: RefEdit): Promise<RefPlan
 	const shift = edit.kind === "axis" ? edit.shift : null
 	const targetModel = target.model
 
-	if (shift !== null && targetModel !== null) {
+	// Excel will not push cells off the sheet (cells shifted in a band: the caller checks the band's own cells).
+	if (shift !== null && shift.band === undefined && targetModel !== null) {
 		const store = targetModel.store
 		const extent = shift.axis === "rows" ? store.rowExtent : store.colExtent
 
-		// Excel will not push cells off the sheet.
 		if (shift.type === "insert" && extent + shift.count > axisLimit(shift.axis)) refuse("tooLarge", "cells")
 	}
 
@@ -472,7 +494,12 @@ async function plan(workbook: XlsxWorkbookModel, edit: RefEdit): Promise<RefPlan
 		planSheet(workbook, entry, model, job, steps, formulaCells, touch)
 	}
 
-	if (shift !== null && targetModel !== null) planCells(workbook, target, targetModel, shift, [...tableShifts.values()], steps, touch)
+	const headers: TableHeader[] = []
+
+	if (shift !== null && targetModel !== null) {
+		if (shift.band === undefined) planCells(workbook, target, targetModel, shift, [...tableShifts.values()], steps, touch)
+		else headers.push(...tableHeaders(shift, [...tableShifts.values()]))
+	}
 
 	// --- Defined names and the workbook's other children ---
 
@@ -587,6 +614,7 @@ async function plan(workbook: XlsxWorkbookModel, edit: RefEdit): Promise<RefPlan
 		edit,
 		touched,
 		formulaCells,
+		headers,
 		apply: () => {
 			for (const step of steps) step.apply()
 		},
@@ -647,7 +675,7 @@ function planSheet(
 			}
 		}
 
-		if (views !== undefined && viewsByModel) {
+		if (views !== undefined && viewsByModel && shift.band === undefined) {
 			const { document } = editMarkup(views.bytes ?? new Uint8Array(0), "section sheetViews")
 			const all = childElements(document, document.documentElement()).filter(view => document.localName(view) === "sheetView")
 
@@ -659,8 +687,9 @@ function planSheet(
 		if (viewStep !== null) steps.push(viewStep)
 	}
 
-	// Sections without a model, every occurrence of each name together.
-	const names = [...new Set(model.sections.map(section => section.name))]
+	// Sections without a model, every occurrence of each name together; with the ones an edit added (a sheet that had
+	// no data validations given one).
+	const names = [...new Set([...model.sections.map(section => section.name), ...state.heldSections(model)])]
 
 	for (const name of names) {
 		if (PLAIN_SECTIONS.has(name) || (MODEL_SECTIONS.has(name) && name !== "dimension")) continue
@@ -799,15 +828,7 @@ function planCells(
 ): void {
 	const store = model.store as SheetStore
 	const strings = shift.type === "delete" ? sharedStringCells(model, shift) : 0
-	const headers: { row: number; col: number; name: string; styleFrom: number }[] = []
-
-	for (const moved of tables) {
-		const added = moved.added
-
-		if (added === null || added.headerRow < 0 || moved.ref === null) continue
-
-		added.names.forEach((name, k) => headers.push({ row: added.headerRow, col: shift.at + k, name, styleFrom: shift.at - 1 }))
-	}
+	const headers = tableHeaders(shift, tables)
 
 	let snapshot: StoreSnapshot | null = null
 	// An insert of columns marks the rows it moves as changed, and so does the delete that reverts it: their flags as
@@ -823,8 +844,10 @@ function planCells(
 	steps.unshift({
 		apply: () => {
 			// An insert loses nothing: its revert deletes what it inserted, so the store's blocks are moved in place
-			// rather than copied for a snapshot (a delete keeps the blocks it takes).
-			snapshot = shift.type === "delete" ? new StoreSnapshot(store, shift.axis === "cols") : null
+			// rather than copied for a snapshot (a delete keeps the blocks it takes). The snapshot keeps the blocks'
+			// columns too, a delete of rows as well: a later insert of columns shifts them in place, and its undo shifts
+			// back a copy instead when a cell edit copied the block meanwhile.
+			snapshot = shift.type === "delete" ? new StoreSnapshot(store, true) : null
 			flags =
 				shift.axis === "cols" && shift.type === "insert"
 					? store.blocks.filter(block => block.colExtent > shift.at).map(block => ({ block, flags: block.rowFlags.slice() }))
@@ -882,6 +905,21 @@ function planCells(
 			if (references !== 0) shared.adjustReferences(-references)
 		}
 	})
+}
+
+// The header cells of the table columns an insert of columns adds.
+function tableHeaders(shift: AxisShift, tables: readonly TableShift[]): TableHeader[] {
+	const headers: TableHeader[] = []
+
+	for (const moved of tables) {
+		const added = moved.added
+
+		if (added === null || added.headerRow < 0 || moved.ref === null) continue
+
+		added.names.forEach((name, k) => headers.push({ row: added.headerRow, col: shift.at + k, name, styleFrom: shift.at - 1 }))
+	}
+
+	return headers
 }
 
 function planNames(

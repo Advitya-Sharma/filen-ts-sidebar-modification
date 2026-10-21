@@ -174,6 +174,16 @@ function sheetNextAlias(mode: string): { find: RegExp; replacement: string }[] {
 			]
 }
 
+// The strings both office editors use (locales/en/previewOffice/*) ship with either flag, and resolve to empty catalogs
+// with neither.
+function officeSharedAlias(mode: string): { find: RegExp; replacement: string }[] {
+	const env = loadEnv(mode, process.cwd(), "VITE_")
+
+	return env["VITE_DOCX_EDITING"] === "1" || env["VITE_SHEET_NEXT"] === "1"
+		? []
+		: [{ find: /^@\/locales\/en\/previewOffice\/[A-Za-z]+$/, replacement: "/src/locales/en/previewOffice/off.ts" }]
+}
+
 const contentSecurityPolicy = (connectExtra: readonly string[]) =>
 	[
 		"default-src 'none'",
@@ -244,7 +254,10 @@ export default defineConfig(({ mode }) => ({
 	// where pnpm links their own (dev) copies: @filen/office's react is not the app's. One copy of each
 	// singleton, resolved from this package; a package name covers its subpaths (react/jsx-runtime, and
 	// react/compiler-runtime that the React Compiler injects into those sources too).
-	resolve: { alias: [...docxEditingAlias(mode), ...sheetNextAlias(mode), { find: "@", replacement: "/src" }], dedupe: SINGLETONS },
+	resolve: {
+		alias: [...docxEditingAlias(mode), ...sheetNextAlias(mode), ...officeSharedAlias(mode), { find: "@", replacement: "/src" }],
+		dedupe: SINGLETONS
+	},
 	// @sqlite.org/sqlite-wasm's own Vite guidance (README "Usage with vite"): it self-locates
 	// sqlite3.wasm and the OPFS async proxy via `new URL(..., import.meta.url)` (verified against
 	// the installed 3.53.0-build1 package) — esbuild's dev-time dep pre-bundling would rewrite/copy

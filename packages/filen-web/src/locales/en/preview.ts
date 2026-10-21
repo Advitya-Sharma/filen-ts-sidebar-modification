@@ -13,11 +13,18 @@ import { previewDocxFields } from "@/locales/en/previewDocx/fields"
 import { previewDocxSections } from "@/locales/en/previewDocx/sections"
 import { previewDocxMath } from "@/locales/en/previewDocx/math"
 import { previewDocxReflow } from "@/locales/en/previewDocx/reflow"
+import { previewOfficeShared } from "@/locales/en/previewOffice/shared"
 import { previewSheetNext } from "@/locales/en/previewSheet/next"
 import { previewSheetFormat } from "@/locales/en/previewSheet/format"
 import { previewSheetSave } from "@/locales/en/previewSheet/save"
 import { previewSheetStructure } from "@/locales/en/previewSheet/structure"
 import { previewSheetKeys } from "@/locales/en/previewSheet/keys"
+import { previewSheetShift } from "@/locales/en/previewSheet/shift"
+import { previewSheetConditional } from "@/locales/en/previewSheet/conditional"
+import { previewSheetNotes } from "@/locales/en/previewSheet/notes"
+import { previewSheetClipboard } from "@/locales/en/previewSheet/clipboard"
+import { previewSheetSortFilter } from "@/locales/en/previewSheet/sortFilter"
+import { previewSheetFormula } from "@/locales/en/previewSheet/formula"
 
 export const preview = {
 	// ── Header ───────────────────────────────────────────────────────────────
@@ -148,11 +155,11 @@ export const preview = {
 	/** Spreadsheet toolbar — toggle strikethrough on the selected cells */
 	previewSpreadsheetStrikethrough: "Strikethrough",
 	/** Spreadsheet toolbar — opens the palette for the selected cells' text colour */
-	previewSpreadsheetTextColor: "Text colour",
+	previewSpreadsheetTextColor: "Text color",
 	/** Spreadsheet toolbar — opens the palette for the selected cells' fill (background) colour */
-	previewSpreadsheetFillColor: "Fill colour",
+	previewSpreadsheetFillColor: "Fill color",
 	/** Spreadsheet toolbar colour palette — removes the colour */
-	previewSpreadsheetColorNone: "No colour",
+	previewSpreadsheetColorNone: "No color",
 	/** Spreadsheet toolbar — align the selected cells' content left */
 	previewSpreadsheetAlignLeft: "Align left",
 	/** Spreadsheet toolbar — centre the selected cells' content */
@@ -734,9 +741,16 @@ export const preview = {
 	...previewDocxSections,
 	...previewDocxMath,
 	...previewDocxReflow,
+	...previewOfficeShared,
 	...previewSheetNext,
 	...previewSheetSave,
 	...previewSheetFormat,
 	...previewSheetKeys,
-	...previewSheetStructure
+	...previewSheetStructure,
+	...previewSheetShift,
+	...previewSheetConditional,
+	...previewSheetNotes,
+	...previewSheetClipboard,
+	...previewSheetSortFilter,
+	...previewSheetFormula
 } as const

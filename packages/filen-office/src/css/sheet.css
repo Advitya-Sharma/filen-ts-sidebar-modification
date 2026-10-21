@@ -9,7 +9,8 @@
    one of the two shows on any fill), --fo-sheet-frozen-line, --fo-sheet-resize-line, --fo-sheet-font (the
    stack after a cell's own family), --fo-sheet-header-font (a CSS font shorthand).
 
-   In CSS: --fo-sheet-editor-bg, --fo-sheet-editor-text, --fo-sheet-editor-shadow, --fo-sheet-invalid,
+   In CSS: --fo-sheet-editor-bg, --fo-sheet-editor-text, --fo-sheet-editor-shadow, --fo-sheet-editor-selection (the
+   selected text's fill while the editor's text is drawn by a backdrop: translucent), --fo-sheet-invalid,
    --fo-sheet-tip-bg, --fo-sheet-tip-text, --fo-sheet-tip-font, --fo-sheet-tip-radius, --fo-focus-ring. A cell's own
    fill, text colour and font are the file's. */
 
@@ -73,25 +74,108 @@
 	height: 100%;
 }
 
-.fo-sheet-editor {
+/* Features' overlays (SheetGrid's children) over the cells and under the editor. The layer passes the pointer through:
+   an overlay that takes it sets pointer-events: auto on itself. */
+.fo-sheet-overlays {
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	overflow: hidden;
+	pointer-events: none;
+}
+
+/* The fill handle: a square on the selection's corner (transform puts its centre there). Its hit area is larger than
+   the square, a finger's size on a touch screen; dragging it never pans the grid. */
+.fo-sheet-fill-handle {
+	position: absolute;
+	top: -3px;
+	left: -3px;
+	z-index: 1;
+	width: 7px;
+	height: 7px;
+	background: var(--fo-sheet-selection-line, #1e3a8a);
+	box-shadow: 0 0 0 1px var(--fo-sheet-selection-halo, #fff);
+	cursor: crosshair;
+	touch-action: none;
+}
+
+.fo-sheet-fill-handle::before {
+	content: "";
+	position: absolute;
+	inset: -4px;
+}
+
+@media (pointer: coarse) {
+	.fo-sheet-fill-handle::before {
+		inset: -19px;
+	}
+}
+
+.fo-sheet-fill-handle[hidden] {
+	display: none;
+}
+
+/* The renderer places the box over the cell and sets its font and the --fo-sheet-editor-* sizes; the textarea sizes
+   it to the entry. A backdrop (an extension's coloured text) fills the box under the textarea with the same text
+   layout, the textarea's text clear over it. */
+.fo-sheet-editor-box {
 	position: absolute;
 	top: 0;
 	left: 0;
 	z-index: 2;
+}
+
+.fo-sheet-editor,
+.fo-sheet-editor-backdrop {
 	box-sizing: border-box;
 	margin: 0;
-	padding: 0 3px;
+	padding: 0 3px 0 var(--fo-sheet-editor-padding, 3px);
 	border: 0;
-	resize: none;
 	overflow: hidden;
+	font: inherit;
+	letter-spacing: normal;
+	word-spacing: normal;
+	text-indent: 0;
+	text-transform: none;
+	text-align: start;
+	tab-size: 8;
 	white-space: pre;
+	word-break: normal;
+	overflow-wrap: normal;
+}
+
+.fo-sheet-editor {
+	position: relative;
+	display: block;
+	min-width: var(--fo-sheet-editor-min-width, 0);
+	min-height: var(--fo-sheet-editor-min-height, 0);
+	max-width: var(--fo-sheet-editor-max-width, none);
+	resize: none;
 	field-sizing: content;
-	line-height: 1.2;
 	color: var(--fo-sheet-editor-text, var(--fo-sheet-text, #000));
 	background: var(--fo-sheet-editor-bg, var(--fo-sheet-bg, #fff));
 	outline: 2px solid var(--fo-sheet-selection-line, #2563eb);
 	outline-offset: -1px;
 	box-shadow: var(--fo-sheet-editor-shadow, 0 1px 4px rgb(0 0 0 / 0.2));
+}
+
+.fo-sheet-editor-backdrop {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	color: var(--fo-sheet-editor-text, var(--fo-sheet-text, #000));
+	background: var(--fo-sheet-editor-bg, var(--fo-sheet-bg, #fff));
+}
+
+.fo-sheet-editor-box[data-colored] > .fo-sheet-editor {
+	color: transparent;
+	caret-color: var(--fo-sheet-editor-text, var(--fo-sheet-text, #000));
+	background: transparent;
+}
+
+.fo-sheet-editor-box[data-colored] > .fo-sheet-editor::selection {
+	color: transparent;
+	background: var(--fo-sheet-editor-selection, rgb(37 99 235 / 0.3));
 }
 
 .fo-sheet-editor[aria-invalid="true"] {

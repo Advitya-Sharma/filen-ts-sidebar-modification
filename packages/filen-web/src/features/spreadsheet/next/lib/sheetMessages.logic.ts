@@ -92,7 +92,7 @@ export function refusalKey(refusal: SheetRefusal, kind: SheetFileKind): PreviewK
 		case "pivot":
 			return "previewSheetPivot"
 		case "merged":
-			return "previewSheetMerged"
+			return refusal.detail === "mergeSize" ? "previewSheetSortMergeSize" : "previewSheetMerged"
 		case "protectedSheet":
 			return "previewSheetProtectedSheet"
 		case "protectedWorkbook":
@@ -105,6 +105,16 @@ export function refusalKey(refusal: SheetRefusal, kind: SheetFileKind): PreviewK
 			return "previewSheetUnsupported"
 		case "mergeLosesValues":
 			return "previewSheetMergeLosesValues"
+		case "notesUnavailable":
+			return "previewSheetNotesUnavailable"
+		case "authorNeeded":
+			return "previewSheetAuthorNeeded"
+		case "notOwnComment":
+			return "previewSheetNotOwnComment"
+		case "linkTarget":
+			return "previewSheetLinkTargetInvalid"
+		case "filterCriteria":
+			return "previewSheetFilterCriteria"
 	}
 }
 

@@ -611,7 +611,7 @@ const OFFICE_DERIVED: {
 	name: string
 	version: RegExp
 	license: string
-	text: (sections: Map<string, NoticeSection>) => string
+	text: (sections: Map<string, NoticeSection>) => string | readonly string[]
 }[] = [
 	{
 		section: "SuperDoc 1.x",
@@ -640,6 +640,13 @@ const OFFICE_DERIVED: {
 		version: /@codemirror\/theme-one-dark (\d+\.\d+\.\d+) /,
 		license: "MIT",
 		text: sections => noticeFence(sections, "CodeMirror highlight styles")
+	},
+	{
+		section: "LibreOffice locale data",
+		name: "LibreOffice locale data",
+		version: /^LibreOffice (\d+\.\d+\.\d+\.\d+) /,
+		license: "MPL-2.0 AND Apache-2.0",
+		text: sections => [noticeFence(sections, "LibreOffice locale data"), noticeFence(sections, "Apache License 2.0")]
 	},
 	{
 		section: "pdf.js",
@@ -779,7 +786,7 @@ function officeDerivedNotices(): Collected[] {
 				repository,
 				terms: [
 					`Code in @filen/office (${OFFICE_REPO_DIR} in the filen-ts repository, ${FILEN_TS_REPOSITORY}) derived from this work, as ${OFFICE_REPO_DIR}/THIRD_PARTY_NOTICES.md records it:\n${record}`,
-					entry.text(sections)
+					...[entry.text(sections)].flat()
 				]
 			},
 			"vendored"

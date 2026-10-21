@@ -4,8 +4,11 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { rangeName } from "@filen/office/core/sheet"
 import type { SheetGridHandle, SheetGridState } from "@filen/office/react/sheet"
+import { Button } from "@/components/ui/button"
+import { cn } from "@filen/shared"
 import { isImeKeydown } from "@/lib/ime"
 import { parseNameBox } from "@/features/spreadsheet/next/lib/nameBox.logic"
+import type { SheetFormulaExtension } from "@/features/spreadsheet/next/formulaBar/useSheetFormula"
 
 // The name box: the selection's name, and where to go when one is typed (a cell, or a range to select).
 function NameBox({ grid, gridRef }: { grid: SheetGridState; gridRef: RefObject<SheetGridHandle | null> }) {
@@ -74,21 +77,41 @@ function NameBox({ grid, gridRef }: { grid: SheetGridState; gridRef: RefObject<S
 	)
 }
 
-// The bar over the grid: the name box, the active cell's contents (editable as the in-cell editor is: both edit
-// one entry), and what the viewer has to say beside them.
+// The formula being typed with its references in their colours (useSheetFormula's coloredText), drawn under the
+// bar's own text (which is clear while it shows): the same colours outline the cells they name. Kept in step with the
+// input's horizontal scroll.
+function ReferenceBackdrop({ colored, scroll }: { colored: ReactNode; scroll: number }) {
+	return (
+		<div
+			aria-hidden="true"
+			className="pointer-events-none absolute inset-0 overflow-hidden px-2 font-mono text-xs leading-7 whitespace-pre"
+		>
+			<div style={{ transform: `translateX(${String(-scroll)}px)` }}>{colored}</div>
+		</div>
+	)
+}
+
+// The bar over the grid: the name box, AutoSum, the active cell's contents (editable as the in-cell editor is: both
+// edit one entry), and what the viewer has to say beside them.
 export function SheetFormulaBar({
 	grid,
 	gridRef,
 	canEdit,
+	formula,
 	children
 }: {
 	grid: SheetGridState
 	gridRef: RefObject<SheetGridHandle | null>
 	canEdit: boolean
+	// The formula typing extension (AutoSum's button, the references' colours); none for a view without it.
+	formula?: SheetFormulaExtension
 	children: ReactNode
 }) {
 	const { t } = useTranslation("preview")
 	const { model, editing, active } = grid
+	const [scroll, setScroll] = useState(0)
+	const coloredText = editing === null ? null : (formula?.coloredText ?? null)
+	const colored = coloredText !== null
 
 	function commit(down: number, right: number): void {
 		const { row, col } = grid.selection.active
@@ -126,44 +149,70 @@ export function SheetFormulaBar({
 				grid={grid}
 				gridRef={gridRef}
 			/>
+			{canEdit && formula !== undefined ? (
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					className="shrink-0 font-semibold"
+					aria-label={t("previewSheetAutoSum")}
+					title={t("previewSheetAutoSum")}
+					onClick={formula.autoSum}
+				>
+					Σ
+				</Button>
+			) : null}
 			{canEdit ? (
-				<input
-					data-sheet-editor=""
-					aria-label={t("previewSpreadsheetCellContents")}
-					aria-invalid={editing?.invalid === true}
-					value={editing === null ? active.input : editing.text}
-					spellCheck={false}
-					autoComplete="off"
-					className="h-7 min-w-0 flex-1 rounded-md bg-transparent px-2 font-mono text-xs outline-none focus-visible:bg-muted/60 aria-invalid:text-destructive"
-					onFocus={event => {
-						if (editing !== null) {
-							return
-						}
+				<div className="relative flex h-7 min-w-0 flex-1 rounded-md focus-within:bg-muted/60">
+					{colored ? (
+						<ReferenceBackdrop
+							colored={coloredText}
+							scroll={scroll}
+						/>
+					) : null}
+					<input
+						data-sheet-editor=""
+						aria-label={t("previewSpreadsheetCellContents")}
+						aria-invalid={editing?.invalid === true}
+						value={editing === null ? active.input : editing.text}
+						spellCheck={false}
+						autoComplete="off"
+						className={cn(
+							"relative h-7 min-w-0 flex-1 bg-transparent px-2 font-mono text-xs leading-7 outline-none aria-invalid:text-destructive",
+							colored && "text-transparent caret-foreground selection:text-transparent"
+						)}
+						onScroll={event => {
+							setScroll(event.currentTarget.scrollLeft)
+						}}
+						onFocus={event => {
+							if (editing !== null) {
+								return
+							}
 
-						const bar = event.currentTarget
+							const bar = event.currentTarget
 
-						// The in-cell editor takes focus as it appears; the entry is typed here, so focus comes back.
-						flushSync(() => {
-							model.startEditing(null, "edit")
-						})
-						bar.focus({ preventScroll: true })
-					}}
-					onChange={event => {
-						model.setEditText(event.target.value)
-					}}
-					onKeyDown={handleKey}
-					onBlur={event => {
-						const related = event.relatedTarget
+							// The in-cell editor takes focus as it appears; the entry is typed here, so focus comes back.
+							flushSync(() => {
+								model.startEditing(null, "edit")
+							})
+							bar.focus({ preventScroll: true })
+						}}
+						onChange={event => {
+							model.setEditText(event.target.value)
+						}}
+						onKeyDown={handleKey}
+						onBlur={event => {
+							const related = event.relatedTarget
 
-						if (related instanceof Element && related.closest("[data-sheet-editor]") !== null) {
-							return
-						}
+							if (related instanceof Element && related.closest("[data-sheet-editor]") !== null) {
+								return
+							}
 
-						if (model.getSnapshot().editing !== null && document.hasFocus()) {
-							void model.commitEditing(null)
-						}
-					}}
-				/>
+							if (model.getSnapshot().editing !== null && document.hasFocus()) {
+								void model.commitEditing(null)
+							}
+						}}
+					/>
+				</div>
 			) : (
 				<span
 					aria-label={t("previewSpreadsheetCellContents")}

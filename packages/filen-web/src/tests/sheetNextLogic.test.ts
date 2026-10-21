@@ -86,6 +86,9 @@ describe("view-only and refusal messages", () => {
 
 		expect(refusalKey({ reason: "readOnly", detail: "signed" }, "xlsx")).toBe("previewSheetReadOnlySigned")
 		expect(refusalKey({ reason: "readOnly", detail: "something else" }, "xlsx")).toBe("previewSpreadsheetReadOnlyLossy")
+		// A sort over merged cells of different sizes says so, as Excel does.
+		expect(refusalKey({ reason: "merged", detail: "mergeSize" }, "xlsx")).toBe("previewSheetSortMergeSize")
+		expect(preview).toHaveProperty("previewSheetSortMergeSize")
 	})
 })
 

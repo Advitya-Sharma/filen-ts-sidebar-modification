@@ -18,7 +18,7 @@ import {
 	type SheetRgb,
 	type SheetVerticalAlign
 } from "@filen/office/core/sheet"
-import { STANDARD_SWATCHES, type DocxSwatch } from "@/features/preview/components/docxEditor.logic"
+import { STANDARD_SWATCHES, type DocxSwatch } from "@/features/office/lib/officeControls"
 import type { PreviewKey } from "@/lib/i18n"
 
 // What the spreadsheet toolbar shows and sends: the active cell's format as the controls read it, the pickers'
@@ -182,16 +182,16 @@ function hex(rgb: SheetRgb): string {
 }
 
 const THEME_NAMES: readonly PreviewKey[] = [
-	"previewDocxColorBackground1",
-	"previewDocxColorText1",
-	"previewDocxColorBackground2",
-	"previewDocxColorText2",
-	"previewDocxColorAccent1",
-	"previewDocxColorAccent2",
-	"previewDocxColorAccent3",
-	"previewDocxColorAccent4",
-	"previewDocxColorAccent5",
-	"previewDocxColorAccent6"
+	"previewOfficeColorBackground1",
+	"previewOfficeColorText1",
+	"previewOfficeColorBackground2",
+	"previewOfficeColorText2",
+	"previewOfficeColorAccent1",
+	"previewOfficeColorAccent2",
+	"previewOfficeColorAccent3",
+	"previewOfficeColorAccent4",
+	"previewOfficeColorAccent5",
+	"previewOfficeColorAccent6"
 ]
 
 // The colour picker's theme part as rows (the ten theme colours, then each tint variation), from the workbook's

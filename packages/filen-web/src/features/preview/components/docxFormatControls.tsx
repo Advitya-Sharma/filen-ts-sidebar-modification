@@ -36,11 +36,11 @@ import {
 	type DocxParagraphForm,
 	type DocxPainterState,
 	type DocxSwatch,
-	type DocxSwatchLabel,
 	type DocxToolbarCommand,
 	type DocxToolbarSlotProps
 } from "@/features/preview/components/docxEditor.logic"
 import { DocxChoiceField } from "@/features/preview/components/docxFields"
+import { DocxColorGrid, SwatchButton } from "@/features/office/components/officeColorGrid"
 import { FormDialog } from "@/components/dialogs/formDialog"
 import { Button } from "@/components/ui/button"
 import {
@@ -82,118 +82,10 @@ export interface DocxFormatControlsProps extends DocxToolbarSlotProps {
 	showPainter: boolean
 }
 
+// The colour picker lives in a leaf the spreadsheet toolbar shares without reaching the editor.
+export { DocxColorGrid } from "@/features/office/components/officeColorGrid"
+
 const MIXED = "\u0000mixed"
-
-// A swatch's accessible name: its colour, and how much lighter or darker a theme variation is.
-function swatchName(label: DocxSwatchLabel): string {
-	const name = i18n.t(`preview:${label.name}`)
-
-	if (label.tone === undefined) {
-		return name
-	}
-
-	return i18n.t(label.tone.lighter ? "preview:previewDocxColorLighter" : "preview:previewDocxColorDarker", {
-		color: name,
-		percent: label.tone.percent
-	})
-}
-
-function SwatchButton({ rgb, label, chosen, onPick }: { rgb: string; label: string; chosen: boolean; onPick: () => void }) {
-	return (
-		<button
-			type="button"
-			aria-label={label}
-			aria-pressed={chosen}
-			title={label}
-			className={cn("size-5 rounded-sm focus-ring ring-1 ring-border", chosen && "ring-2 ring-primary")}
-			style={{ backgroundColor: `#${rgb}` }}
-			onMouseDown={keepFocus}
-			onClick={onPick}
-		/>
-	)
-}
-
-// The colour picker the font colour, the highlighter and table shading share: Word's theme colours and their
-// variations, its standard colours, and the option without one (Automatic or No color). `chosen`: the key
-// of the colour in effect.
-export function DocxColorGrid({
-	theme,
-	standard,
-	chosen,
-	none,
-	onPick
-}: {
-	theme: readonly (readonly DocxSwatch[])[]
-	standard: readonly DocxSwatch[]
-	chosen: string | undefined
-	none: { label: string; key: string }
-	onPick: (swatch: DocxSwatch | null) => void
-}) {
-	const { t } = useTranslation("preview")
-
-	return (
-		<div className="flex flex-col gap-2">
-			<Button
-				variant="ghost"
-				size="sm"
-				className={cn("justify-start", chosen === none.key && "bg-accent")}
-				onMouseDown={keepFocus}
-				onClick={() => {
-					onPick(null)
-				}}
-			>
-				{none.label}
-			</Button>
-			{theme.length > 0 ? (
-				<div
-					role="group"
-					aria-label={t("previewDocxColorThemeColors")}
-					className="flex flex-col gap-1"
-				>
-					<p className="text-xs text-muted-foreground">{t("previewDocxColorThemeColors")}</p>
-					{theme.map((row, index) => (
-						<div
-							key={row[0]?.key ?? index}
-							className={cn("grid grid-cols-10 gap-1", index === 1 && "mt-1")}
-						>
-							{row.map(swatch => (
-								<SwatchButton
-									key={swatch.key}
-									rgb={swatch.rgb}
-									label={swatchName(swatch.label)}
-									chosen={chosen === swatch.key}
-									onPick={() => {
-										onPick(swatch)
-									}}
-								/>
-							))}
-						</div>
-					))}
-				</div>
-			) : null}
-			<div
-				role="group"
-				aria-label={t("previewDocxColorStandardColors")}
-				className="flex flex-col gap-1"
-			>
-				<p className="text-xs text-muted-foreground">{t("previewDocxColorStandardColors")}</p>
-				<div className="grid grid-cols-10 gap-1">
-					{standard.map(swatch => (
-						<SwatchButton
-							key={swatch.key}
-							rgb={swatch.rgb}
-							label={swatchName(swatch.label)}
-							chosen={chosen === swatch.key}
-							onPick={() => {
-								onPick(swatch)
-							}}
-						/>
-					))}
-				</div>
-			</div>
-		</div>
-	)
-}
 
 // The highlighter's colours and No color.
 function HighlightGrid({ chosen, onPick }: { chosen: string | undefined; onPick: (name: string) => void }) {
@@ -210,7 +102,7 @@ function HighlightGrid({ chosen, onPick }: { chosen: string | undefined; onPick:
 					onPick("none")
 				}}
 			>
-				{t("previewDocxColorNone")}
+				{t("previewOfficeColorNone")}
 			</Button>
 			<div className="grid grid-cols-5 gap-1">
 				{HIGHLIGHT_SWATCHES.map(swatch => (
@@ -509,7 +401,7 @@ export function DocxFormatControls(props: DocxFormatControlsProps) {
 			theme={props.theme}
 			standard={STANDARD_SWATCHES}
 			chosen={chosenColor}
-			none={{ label: t("previewDocxColorAutomatic"), key: "auto" }}
+			none={{ label: t("previewOfficeColorAutomatic"), key: "auto" }}
 			onPick={swatch => {
 				close()
 				pickColor(swatch)

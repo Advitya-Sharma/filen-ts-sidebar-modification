@@ -336,7 +336,7 @@ describe("sheet session: what else refers to cut cells", () => {
 		for (const opened of [format, validation, link]) opened.session.close()
 	})
 
-	it("moves a cut cell's conditional format, re-anchoring the rest of its range, as LibreOffice does", async () => {
+	it("moves a cut cell's conditional format, its formula written for the top-left of the rectangle around its ranges", async () => {
 		const { session, result, bytes } = await cutOne(
 			{
 				sheets: [
@@ -358,7 +358,7 @@ describe("sheet session: what else refers to cut cells", () => {
 		const sheet = parts(await savedBytes(session))["xl/worksheets/sheet1.xml"] ?? ""
 
 		expect(sheet).toContain(
-			'<conditionalFormatting sqref="A2:A3 E1"><cfRule type="expression" priority="1"><formula>$B2&gt;5</formula>'
+			'<conditionalFormatting sqref="A2:A3 E1"><cfRule type="expression" priority="1"><formula>$B1&gt;5</formula>'
 		)
 		expect(sheet).toContain('<dataValidation type="whole" sqref="A2:A3 E1">')
 		expect(sheet).toContain('<hyperlink ref="E1" location="One!C3" display="go"/>')

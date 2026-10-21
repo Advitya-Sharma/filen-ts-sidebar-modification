@@ -48,9 +48,11 @@ export type SheetShortcut =
 	| "print"
 	| "formatCells"
 	| "filter"
+	| "openDropdown"
 	| "hyperlink"
 	| "note"
 	| "newSheet"
+	| "autoSum"
 	| "borderOutline"
 	| "borderNone"
 	| "hideRows"
@@ -69,9 +71,11 @@ export const APP_SHORTCUTS: ReadonlySet<SheetShortcut> = new Set<SheetShortcut>(
 	"print",
 	"formatCells",
 	"filter",
+	"openDropdown",
 	"hyperlink",
 	"note",
 	"newSheet",
+	"autoSum",
 	"borderOutline",
 	"borderNone",
 	"hideRows",
@@ -91,6 +95,8 @@ export interface KeyChord {
 	readonly control?: boolean
 	readonly shift?: boolean
 	readonly alt?: boolean
+	// A character some layouts type with Shift ("=" is Shift+0 on a German one): Shift held or not.
+	readonly anyShift?: boolean
 }
 
 export interface ShortcutEntry {
@@ -327,9 +333,22 @@ export const SHEET_SHORTCUTS: readonly ShortcutEntry[] = [
 		windows: [{ key: "l", primary: true, shift: true }],
 		mac: [{ key: "f", primary: true, shift: true }]
 	},
+	// Opens the selected drop-down: an autofilter's menu, a validation list (Option+Down on a Mac).
+	{ action: "openDropdown", windows: [{ key: "ArrowDown", alt: true }], mac: [{ key: "ArrowDown", alt: true }] },
 	{ action: "hyperlink", windows: [{ key: "k", primary: true }], mac: [{ key: "k", primary: true }] },
 	{ action: "note", windows: [{ key: "F2", shift: true }], mac: [{ key: "F2", shift: true }] },
-	{ action: "newSheet", windows: [{ key: "F11", shift: true }], mac: [{ key: "F11", shift: true }] }
+	{ action: "newSheet", windows: [{ key: "F11", shift: true }], mac: [{ key: "F11", shift: true }] },
+	// "AutoSum formula: Alt+Equal sign": the "=" the layout types, wherever it sits. On a Mac "Insert the AutoSum
+	// formula: Command+Shift+T", which browsers keep for reopening a tab: Option+= (the Windows keys; Option changes
+	// the character there, so by the key's position) first.
+	{
+		action: "autoSum",
+		windows: [{ key: "=", alt: true, anyShift: true }],
+		mac: [
+			{ code: "Equal", alt: true },
+			{ key: "t", primary: true, shift: true }
+		]
+	}
 ]
 
 export interface ShortcutKey {
@@ -352,7 +371,7 @@ export function layoutKey(event: Pick<ShortcutKey, "key" | "code">): string {
 
 function matches(chord: KeyChord, event: ShortcutKey, key: string, mac: boolean): boolean {
 	if (chord.code !== undefined ? chord.code !== event.code : chord.key?.toLowerCase() !== key) return false
-	if ((chord.shift === true) !== event.shiftKey || (chord.alt === true) !== event.altKey) return false
+	if ((chord.anyShift !== true && (chord.shift === true) !== event.shiftKey) || (chord.alt === true) !== event.altKey) return false
 
 	if (mac) return (chord.primary === true) === event.metaKey && (chord.control === true) === event.ctrlKey
 

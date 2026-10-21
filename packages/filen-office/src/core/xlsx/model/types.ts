@@ -216,6 +216,9 @@ export interface XlsxFormula {
 	readonly cellMetadata: number
 	readonly r1?: string
 	readonly r2?: string
+	// A shared master's own cell from its ref's top-left, when it is not that cell: its children's references move
+	// from the master cell (ECMA-376 Part 1 §18.3.1.40), which a file may place anywhere in the ref.
+	readonly masterOffset?: { readonly row: number; readonly col: number }
 }
 
 // Formulas of one sheet, by id. Columnar inside; `formula` builds an object for an edit, never for a scan.
@@ -371,6 +374,8 @@ export interface XlsxSheetModel {
 	view: XlsxSheetView
 	protection: XlsxSheetProtection | null
 	tabColor: XlsxColor | null
+	// sheetPr filterMode (§18.3.1.82): whether a filter hides rows. Undefined: as the source has it.
+	filterMode?: boolean
 	// A sheet with no part in the source (a duplicated one): its root's start tag, when it takes another part's
 	// (namespaces, mc:Ignorable); without one the writer makes a plain root.
 	readonly freshRoot?: string | undefined
@@ -586,16 +591,7 @@ export interface XlsxCellProtection {
 	readonly hidden?: boolean
 }
 
-export const XfApply = {
-	NUMBER_FORMAT: 1 << 0,
-	FONT: 1 << 1,
-	FILL: 1 << 2,
-	BORDER: 1 << 3,
-	ALIGNMENT: 1 << 4,
-	PROTECTION: 1 << 5,
-	QUOTE_PREFIX: 1 << 6,
-	PIVOT_BUTTON: 1 << 7
-} as const
+export { XfApply } from "../../sheet/style/xfApply"
 
 export interface XlsxXf {
 	readonly numFmtId: number

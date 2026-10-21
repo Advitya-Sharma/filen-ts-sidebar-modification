@@ -19,3 +19,10 @@ if (typeof globalThis.ResizeObserver === "undefined") {
 if (typeof globalThis.location === "undefined") {
 	Object.defineProperty(globalThis, "location", { value: new URL("https://app.filen.io/"), configurable: true, writable: true })
 }
+
+// jsdom lays nothing out: a Range has no boxes (the formula's reference colours are measured from them).
+if (typeof Range !== "undefined" && typeof Range.prototype.getClientRects !== "function") {
+	Range.prototype.getClientRects = function () {
+		return [] as unknown as DOMRectList
+	}
+}

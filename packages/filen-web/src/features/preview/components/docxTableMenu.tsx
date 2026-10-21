@@ -179,7 +179,7 @@ export function DocxTableMenu(props: DocxTableMenuProps) {
 								theme={props.theme}
 								standard={STANDARD_SWATCHES}
 								chosen={table.shading === "mixed" ? undefined : (table.shading ?? "none")}
-								none={{ label: t("previewDocxColorNone"), key: "none" }}
+								none={{ label: t("previewOfficeColorNone"), key: "none" }}
 								onPick={swatch => {
 									const color = swatch?.color
 

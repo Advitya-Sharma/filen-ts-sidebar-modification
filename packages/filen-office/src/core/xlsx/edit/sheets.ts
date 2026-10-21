@@ -83,6 +83,25 @@ export async function ownedParts(workbook: XlsxWorkbookModel, entry: XlsxSheetEn
 			if (!relationship.external && relationship.partName !== undefined) shared.add(partKey(relationship.partName))
 	}
 
+	// What a part that stays reaches stays too (a pivot cache the workbook lists keeps its records).
+	const kept = [...owned].filter(([key]) => key !== partKey(entry.part) && shared.has(key)).map(([, name]) => name)
+
+	while (kept.length > 0) {
+		const source = kept.shift() as string
+
+		for (const relationship of liveRelationships(workbook, source, (await workbook.parts.relationships(source)).all)) {
+			if (relationship.external || relationship.partName === undefined) continue
+
+			const key = partKey(relationship.partName)
+
+			if (shared.has(key) || key === partKey(entry.part)) continue
+
+			shared.add(key)
+
+			if (owned.has(key)) kept.push(relationship.partName)
+		}
+	}
+
 	return [...owned].filter(([key]) => key === partKey(entry.part) || !shared.has(key)).map(([, name]) => name)
 }
 

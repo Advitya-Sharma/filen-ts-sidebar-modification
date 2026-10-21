@@ -1,4 +1,5 @@
 import type { Slicing } from "../slicing"
+import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT } from "./model/model"
 import {
 	SHEET_MAX_COLS,
 	SHEET_MAX_ROWS,
@@ -53,6 +54,7 @@ import {
 	type SheetEditStep,
 	type SheetFeature,
 	type SheetReadContext,
+	type SheetReadyResult,
 	type SheetRegistry,
 	type SheetTileBuilder
 } from "./registry"
@@ -281,6 +283,19 @@ class TileBuilder implements SheetTileBuilder, SheetEntrySink {
 		this.styles[entry] = style
 	}
 
+	styleOf(index: number): SheetRenderStyle {
+		return this.table.styles[index] ?? {}
+	}
+
+	setText(entry: number, text: string, input: string | null): void {
+		this.texts[entry] = this.string(text)
+		this.inputs[entry] = this.string(input === text ? null : input)
+	}
+
+	layerOf<L extends SheetTileLayerName>(name: L): SheetTileLayerMap[L] | undefined {
+		return this.layers.get(name) as SheetTileLayerMap[L] | undefined
+	}
+
 	intern(style: SheetRenderStyle): number {
 		return this.table.intern(style)
 	}
@@ -361,51 +376,55 @@ class TileBuilder implements SheetTileBuilder, SheetEntrySink {
 
 const MAX_RANGES = 256
 
+// Adds a range to a sheet's list, folding the list into one box over them all past MAX_RANGES (over-reporting costs
+// only work).
+function addRange(map: Map<SheetId, SheetRange[]>, sheet: SheetId, range: SheetRange): void {
+	let list = map.get(sheet)
+
+	if (list === undefined) {
+		list = []
+		map.set(sheet, list)
+	}
+
+	if (list.length < MAX_RANGES) {
+		list.push(range)
+
+		return
+	}
+
+	const box = list.reduce(
+		(a, b) => ({
+			startRow: Math.min(a.startRow, b.startRow),
+			startCol: Math.min(a.startCol, b.startCol),
+			endRow: Math.max(a.endRow, b.endRow),
+			endCol: Math.max(a.endCol, b.endCol)
+		}),
+		range
+	)
+
+	list.length = 0
+	list.push(box)
+}
+
 class ChangeCollector implements SheetChangeSink {
 	readonly ranges = new Map<SheetId, SheetRange[]>()
+	// The ranges whose content changed (a subset of `ranges`): what features' dependents hooks are asked about.
+	readonly contents = new Map<SheetId, SheetRange[]>()
 	readonly moves: { sheet: SheetId; axis: SheetAxis; at: number; count: number }[] = []
 	readonly layouts = new Set<SheetId>()
 	sheetList = false
 	selection: ({ readonly sheet: SheetId } & SheetSelectionState) | undefined
 	any = false
 
-	private range(sheet: SheetId, range: SheetRange): void {
-		this.any = true
-
-		let list = this.ranges.get(sheet)
-
-		if (list === undefined) {
-			list = []
-			this.ranges.set(sheet, list)
-		}
-
-		if (list.length < MAX_RANGES) {
-			list.push(range)
-
-			return
-		}
-
-		// Many scattered changes: one box over them all (over-reporting costs only work).
-		const box = list.reduce(
-			(a, b) => ({
-				startRow: Math.min(a.startRow, b.startRow),
-				startCol: Math.min(a.startCol, b.startCol),
-				endRow: Math.max(a.endRow, b.endRow),
-				endCol: Math.max(a.endCol, b.endCol)
-			}),
-			range
-		)
-
-		list.length = 0
-		list.push(box)
-	}
-
 	content(sheet: SheetId, range: SheetRange): void {
-		this.range(sheet, range)
+		this.any = true
+		addRange(this.ranges, sheet, range)
+		addRange(this.contents, sheet, range)
 	}
 
 	look(sheet: SheetId, range: SheetRange): void {
-		this.range(sheet, range)
+		this.any = true
+		addRange(this.ranges, sheet, range)
 	}
 
 	moved(sheet: SheetId, axis: SheetAxis, at: number, count: number): void {
@@ -552,6 +571,8 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 	private readonly slicing: Slicing | undefined
 	private readonly history: StepHistory
 	private readonly held = new Set<number>()
+	// Sheets whose features' ready hooks were started.
+	private readonly featureLoads = new Set<SheetId>()
 	private chain: Promise<unknown> = Promise.resolve()
 	private version = 1
 	private writability: SheetWritability
@@ -584,6 +605,9 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 	async start(signal?: SheetAbortSignal): Promise<SheetWorkbookInfo> {
 		const document = this.document
 		const active = document.activeSheet()
+
+		// Alongside the parse: the first tiles never wait for it.
+		this.loadFeatures(active)
 
 		// The active sheet's first rows answer the first tiles while the rest is parsed.
 		const previewed = !document.isReady(active) && document.preview !== undefined && (await document.preview(active))
@@ -714,6 +738,48 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 		return run
 	}
 
+	// Starts what a sheet's features read beside it (SheetFeature.ready), once. Tiles and layouts never wait for it:
+	// what lands patches those already sent, and a feature that cannot load is reported. A sheet an edit took away
+	// has nothing to load: its features load when an undo or redo brings it back and it is asked for again.
+	private loadFeatures(sheet: SheetId): void {
+		if (this.featureLoads.has(sheet) || this.registry.ready.length === 0 || this.gone(sheet)) return
+
+		this.featureLoads.add(sheet)
+
+		const context = this.readContext(this.loading)
+
+		for (const [feature, ready] of this.registry.ready) {
+			;(async () => ready(context, sheet))().then(
+				result => {
+					if (!this.closed && (result.ranges.length > 0 || result.layout === true))
+						void this.enqueue(() => this.featureLanded(sheet, result)).catch(() => undefined)
+				},
+				(error: unknown) => {
+					if (this.gone(sheet)) this.featureLoads.delete(sheet)
+					else if (!this.closed)
+						this.onEvent({
+							type: "featureUnavailable",
+							sheet,
+							feature,
+							message: error instanceof Error ? error.message : String(error)
+						})
+				}
+			)
+		}
+	}
+
+	private featureLanded(sheet: SheetId, result: SheetReadyResult): void {
+		if (!this.document.sheets().some(summary => summary.id === sheet)) return
+
+		const collector = new ChangeCollector()
+
+		for (const range of result.ranges) collector.look(sheet, range)
+
+		if (result.layout === true) collector.layout(sheet)
+
+		this.onEvent({ type: "change", change: this.change(collector) })
+	}
+
 	private settled(): void {
 		this.pending--
 		this.lastCall = Date.now()
@@ -745,7 +811,28 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 	}
 
 	private readContext(signal: SheetAbortSignal | undefined): SheetReadContext<D> {
-		return { doc: this.document, settings: this.document.settings, slicing: this.slicing, signal, version: this.version }
+		return {
+			doc: this.document,
+			settings: this.document.settings,
+			slicing: this.slicing,
+			signal,
+			version: this.version,
+			later: this.later
+		}
+	}
+
+	// A feature's work after a call (SheetReadContext.later): what it lands patches the sheet's tiles, as a ready
+	// hook's result does. Work that fails leaves the tiles as they are.
+	private readonly later = (sheet: SheetId, work: () => Promise<SheetReadyResult>): void => {
+		if (this.closed) return
+
+		work().then(
+			result => {
+				if (!this.closed && (result.ranges.length > 0 || result.layout === true))
+					void this.enqueue(() => this.featureLanded(sheet, result)).catch(() => undefined)
+			},
+			() => undefined
+		)
 	}
 
 	private buildTile(sheet: SheetId, tileRow: number, tileCol: number): SheetTile {
@@ -760,10 +847,35 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 		return builder.finish(this.version)
 	}
 
+	// The cells whose look follows the changed cells (SheetFeature.dependents) join the change. Cells moved by a
+	// structure edit count as changed from where the edit is to the sheet's end.
+	private dependents(collector: ChangeCollector): void {
+		if (this.registry.dependents.length === 0 || (collector.contents.size === 0 && collector.moves.length === 0)) return
+
+		const context = this.readContext(undefined)
+		const changed: [SheetId, SheetRange][] = []
+
+		for (const [sheet, ranges] of collector.contents) for (const range of ranges) changed.push([sheet, range])
+
+		for (const move of collector.moves)
+			changed.push([
+				move.sheet,
+				move.axis === "rows"
+					? { startRow: move.at, startCol: 0, endRow: SHEET_MAX_ROWS - 1, endCol: SHEET_MAX_COLS - 1 }
+					: { startRow: 0, startCol: move.at, endRow: SHEET_MAX_ROWS - 1, endCol: SHEET_MAX_COLS - 1 }
+			])
+
+		const add = (sheet: SheetId, range: SheetRange): void => collector.look(sheet, range)
+
+		for (const [sheet, range] of changed) for (const [, dependents] of this.registry.dependents) dependents(context, sheet, range, add)
+	}
+
 	// What a collector holds, as the change the client applies: held tiles in changed ranges rebuilt, moved regions
 	// invalidated (and no longer held), layouts and the sheet list as they now are.
 	private change(collector: ChangeCollector): SheetChange {
 		if (collector.any) this.version++
+
+		this.dependents(collector)
 
 		const invalidated: SheetRegion[] = []
 
@@ -885,7 +997,14 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 	// --- SheetSessionApi ---
 
 	tiles(sheet: SheetId, coordinates: Uint32Array): Promise<{ readonly tiles: readonly SheetTile[]; readonly styles?: SheetStyleAppend }> {
+		this.loadFeatures(sheet)
+
 		return this.enqueue(async () => {
+			// A sheet an edit took away while the request was on its way has no tiles.
+			if (this.gone(sheet)) return { tiles: [] }
+
+			this.loadFeatures(sheet)
+
 			const tileRows: number[] = []
 
 			for (let i = 0; i + 1 < coordinates.length; i += 2) tileRows.push(coordinates[i] ?? 0)
@@ -917,11 +1036,22 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 	}
 
 	layout(sheet: SheetId): Promise<SheetLayout> {
+		this.loadFeatures(sheet)
+
 		return this.enqueue(async () => {
+			// A sheet an edit took away while the request was on its way: an empty sheet's layout.
+			if (this.gone(sheet)) return goneLayout(sheet, this.version)
+
+			this.loadFeatures(sheet)
+
 			await this.document.ready(sheet, this.slicing)
 
 			return this.fullLayout(sheet)
 		})
+	}
+
+	private gone(sheet: SheetId): boolean {
+		return !this.document.sheets().some(summary => summary.id === sheet)
 	}
 
 	command(command: SheetCommand): Promise<SheetCommandResult> {
@@ -1137,6 +1267,33 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 	}
 }
 
+// The layout of a sheet that is no longer there: empty, at the default sizes.
+function goneLayout(sheet: SheetId, version: number): SheetLayout {
+	const axis = (defaultSize: number) => ({
+		defaultSize,
+		indices: new Uint32Array(0),
+		sizes: new Float32Array(0),
+		styles: new Uint32Array(0),
+		flags: new Uint16Array(0)
+	})
+
+	return {
+		sheet,
+		version,
+		rowCount: 0,
+		colCount: 0,
+		rows: axis(DEFAULT_ROW_HEIGHT),
+		cols: axis(DEFAULT_COL_WIDTH),
+		merges: new Uint32Array(0),
+		pane: null,
+		zoom: 100,
+		gridLines: true,
+		headings: true,
+		rightToLeft: false,
+		protection: null
+	}
+}
+
 // The commandState query, answered by the session itself.
 export function sessionFeature<D extends SheetSessionDocument>(session: SheetSession<D>): SheetFeature<D> {
 	return defineSheetFeature<D>({
@@ -1146,6 +1303,9 @@ export function sessionFeature<D extends SheetSessionDocument>(session: SheetSes
 			// A cell of a sheet still being parsed (a preview shows its first rows only) is read once it is.
 			cell: {
 				run: async (context, request) => {
+					// A sheet an edit took away while the request was on its way holds nothing.
+					if (!context.doc.sheets().some(summary => summary.id === request.sheet))
+						return { input: "", numFmt: "General", style: 0, flags: 0 }
 					if (!context.doc.isReady(request.sheet)) await context.doc.ready(request.sheet, context.slicing, context.signal)
 
 					return context.doc.cellDetail(request)

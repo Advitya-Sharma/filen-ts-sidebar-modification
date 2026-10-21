@@ -184,21 +184,6 @@ export interface CellWrite {
 	readonly origin: number
 }
 
-// The first index of a sorted list whose value is not below `value`.
-function lowerBound(list: readonly number[], value: number): number {
-	let low = 0
-	let high = list.length
-
-	while (low < high) {
-		const mid = (low + high) >>> 1
-
-		if ((list[mid] ?? 0) < value) low = mid + 1
-		else high = mid
-	}
-
-	return low
-}
-
 // A row's own properties, as setRows takes them.
 export interface RowProperties {
 	readonly row: number
@@ -331,6 +316,239 @@ function isVacant(record: RowRecord): boolean {
 		Number.isNaN(record.height) &&
 		record.style < 0
 	)
+}
+
+// A block (or none) with a batch's cells written, as one setCell per cell leaves it, rebuilt over typed arrays
+// (no object per row): the rows in order, each row's cells merged with the batch's, rows a write adds new and dirty,
+// rows that end up vacant gone. Rows before the block go into blocks of their own; the rest are cut where a block
+// would outgrow its limits, each based at its first row with the source shift of the block it came from (edit).
+function writtenBlocks(block: RowBlock | undefined, writes: readonly CellWrite[]): RowBlock[] {
+	const count = writes.length
+	const order = sortedWrites(writes)
+	const rowCount = block?.rowCount ?? 0
+	const maxRows = rowCount + count
+	const maxCells = (block?.cellCount ?? 0) + count
+	const baseRow = block?.firstRow ?? writes[order[0] ?? 0]?.row ?? 0
+	const shift = block === undefined || block.sourceFirstRow < 0 ? Number.NaN : block.firstRow - block.sourceFirstRow
+	const rows = new Uint32Array(maxRows)
+	const rowStarts = new Uint32Array(maxRows + 1)
+	const rowSpans = new Uint32Array(maxRows * 2)
+	const rowFlags = new Uint16Array(maxRows)
+	const rowHeights = new Float64Array(maxRows)
+	const rowStyles = new Int32Array(maxRows)
+	const cols = new Uint16Array(maxCells)
+	const kinds = new Uint8Array(maxCells)
+	const values = new Float64Array(maxCells)
+	const styles = new Uint32Array(maxCells)
+	const formulas = new Int32Array(maxCells)
+	const origins = new Uint32Array(maxCells)
+	let outRows = 0
+	let outCells = 0
+	let i = 0
+	let w = 0
+
+	while (i < rowCount || w < count) {
+		const existing = block !== undefined && i < rowCount ? block.firstRow + (block.rows[i] ?? 0) : Number.POSITIVE_INFINITY
+		const written = w < count ? (writes[order[w] ?? 0]?.row ?? 0) : Number.POSITIVE_INFINITY
+		const row = Math.min(existing, written)
+		const own = block !== undefined && existing === row ? i++ : -1
+		const rowStart = outCells
+		let present = own >= 0
+		let flags = 0
+
+		if (block !== undefined && own >= 0) {
+			flags = block.rowFlags[own] ?? 0
+			rowSpans[outRows * 2] = block.rowSpans[own * 2] ?? NO_SPAN
+			rowSpans[outRows * 2 + 1] = block.rowSpans[own * 2 + 1] ?? NO_SPAN
+			rowHeights[outRows] = block.rowHeights[own] ?? Number.NaN
+			rowStyles[outRows] = block.rowStyles[own] ?? -1
+		} else {
+			rowSpans[outRows * 2] = NO_SPAN
+			rowSpans[outRows * 2 + 1] = NO_SPAN
+			rowHeights[outRows] = Number.NaN
+			rowStyles[outRows] = -1
+		}
+
+		let k = block !== undefined && own >= 0 ? (block.rowStarts[own] ?? 0) : 0
+		const kEnd = block !== undefined && own >= 0 ? (block.rowStarts[own + 1] ?? 0) : 0
+
+		// The row's writes, by column: the row's own cells before each written column kept as they are.
+		while (w < count && (writes[order[w] ?? 0]?.row ?? 0) === row) {
+			const col = writes[order[w] ?? 0]?.col ?? 0
+
+			while (block !== undefined && k < kEnd && (block.cols[k] ?? 0) < col) {
+				copyCell(block, own, k++, outCells++, cols, kinds, values, styles, formulas, origins)
+			}
+
+			let exists = block !== undefined && k < kEnd && block.cols[k] === col
+
+			if (exists && block !== undefined) copyCell(block, own, k++, outCells, cols, kinds, values, styles, formulas, origins)
+
+			for (; w < count && (writes[order[w] ?? 0]?.row ?? 0) === row && (writes[order[w] ?? 0]?.col ?? 0) === col; w++) {
+				const cell = writes[order[w] ?? 0] as CellWrite
+				const remove = cell.origin < 0 && cell.kind === CellKind.EMPTY && cell.style === 0 && cell.formula < 0
+
+				// Removing a cell that is not there changes nothing (as setCell).
+				if (remove) {
+					if (exists) flags |= RowFlag.DIRTY
+
+					exists = false
+
+					continue
+				}
+
+				if (!present) {
+					present = true
+					flags = RowFlag.NEW
+				}
+
+				flags |= RowFlag.DIRTY
+				cols[outCells] = col
+				kinds[outCells] = cell.kind
+				values[outCells] = cell.value
+				styles[outCells] = cell.style
+				formulas[outCells] = cell.formula
+
+				if (!exists || cell.origin >= 0) origins[outCells] = Math.max(0, cell.origin)
+
+				exists = true
+			}
+
+			if (exists) outCells++
+		}
+
+		while (block !== undefined && k < kEnd) copyCell(block, own, k++, outCells++, cols, kinds, values, styles, formulas, origins)
+
+		const vacant =
+			outCells === rowStart &&
+			(flags & RowFlag.NEW) !== 0 &&
+			(flags & PROPERTY_FLAGS) === 0 &&
+			Number.isNaN(rowHeights[outRows] ?? 0) &&
+			(rowStyles[outRows] ?? -1) < 0
+
+		if (!present || vacant) {
+			outCells = rowStart
+
+			continue
+		}
+
+		rows[outRows] = row
+		rowFlags[outRows] = flags
+		rowStarts[outRows] = rowStart
+		outRows++
+	}
+
+	rowStarts[outRows] = outCells
+
+	const out: RowBlock[] = []
+	let start = 0
+
+	while (start < outRows) {
+		const before = (rows[start] ?? 0) < baseRow
+		let end = start
+		let cells = 0
+
+		while (end < outRows && end - start < BLOCK_ROWS && (rows[end] ?? 0) < baseRow === before) {
+			const size = (rowStarts[end + 1] ?? 0) - (rowStarts[end] ?? 0)
+
+			if (end > start && cells + size > BLOCK_CELLS) break
+
+			cells += size
+			end++
+		}
+
+		const head = rows[start] ?? 0
+		const from = rowStarts[start] ?? 0
+		const to = rowStarts[end] ?? 0
+		const sliceRows = rows.slice(start, end)
+		const sliceStarts = rowStarts.slice(start, end + 1)
+		let hasFormulas = false
+		let moved = false
+
+		for (let r = 0; r < sliceRows.length; r++) sliceRows[r] = (sliceRows[r] ?? 0) - head
+		for (let r = 0; r < sliceStarts.length; r++) sliceStarts[r] = (sliceStarts[r] ?? 0) - from
+		for (let c = from; c < to && !hasFormulas; c++) hasFormulas = (formulas[c] ?? -1) >= 0
+
+		for (let r = start; r < end && !moved; r++) {
+			const first = rowStarts[r] ?? 0
+
+			for (let c = first; c < (rowStarts[r + 1] ?? 0); c++) {
+				if (origins[c] !== c - first + 1) {
+					moved = true
+
+					break
+				}
+			}
+		}
+
+		out.push(
+			new RowBlock(
+				head,
+				before || Number.isNaN(shift) ? -1 : head - shift,
+				sliceRows,
+				sliceStarts,
+				rowSpans.slice(start * 2, end * 2),
+				rowFlags.slice(start, end),
+				rowHeights.slice(start, end),
+				rowStyles.slice(start, end),
+				cols.slice(from, to),
+				kinds.slice(from, to),
+				values.slice(from, to),
+				styles.slice(from, to),
+				hasFormulas ? formulas.slice(from, to) : null,
+				moved ? origins.slice(from, to) : null
+			)
+		)
+		start = end
+	}
+
+	return out
+}
+
+// The order a batch is written in: by row, then column, then as given (a later write to a cell wins).
+function sortedWrites(writes: readonly CellWrite[]): Uint32Array {
+	const order = new Uint32Array(writes.length)
+	let sorted = true
+
+	for (let k = 0; k < writes.length; k++) {
+		order[k] = k
+
+		if (k > 0 && sorted) {
+			const a = writes[k - 1] as CellWrite
+			const b = writes[k] as CellWrite
+
+			sorted = a.row < b.row || (a.row === b.row && a.col <= b.col)
+		}
+	}
+
+	if (sorted) return order
+
+	return order.sort((a, b) => {
+		const x = writes[a] as CellWrite
+		const y = writes[b] as CellWrite
+
+		return x.row - y.row || x.col - y.col || a - b
+	})
+}
+
+function copyCell(
+	block: RowBlock,
+	index: number,
+	k: number,
+	at: number,
+	cols: Uint16Array,
+	kinds: Uint8Array,
+	values: Float64Array,
+	styles: Uint32Array,
+	formulas: Int32Array,
+	origins: Uint32Array
+): void {
+	cols[at] = block.cols[k] ?? 0
+	kinds[at] = block.kinds[k] ?? 0
+	values[at] = block.values[k] ?? 0
+	styles[at] = block.styles[k] ?? 0
+	formulas[at] = block.formulas?.[k] ?? -1
+	origins[at] = blockOrigin(block, index, k)
 }
 
 export class SheetStore implements XlsxSheetStore {
@@ -663,76 +881,67 @@ export class SheetStore implements XlsxSheetStore {
 			const group = groups.get(index) ?? []
 			const block = this.blocks[index]
 
-			if (block !== undefined && group.every(cell => this.inPlace(block, cell))) {
-				for (const { row, col, kind, value, style, formula, origin } of group)
-					this.setCell(row, col, kind, value, style, formula, origin)
-
-				continue
-			}
+			if (block !== undefined && this.writeInPlace(index, block, group)) continue
 
 			this.version++
-			this.edit(group[0]?.row ?? 0, records => {
-				const byRow = new Map(records.map(record => [record.row, record]))
-				let added = false
-
-				for (const { row, col, kind, value, style, formula, origin } of group) {
-					const remove = origin < 0 && kind === CellKind.EMPTY && style === 0 && formula < 0
-					let record = byRow.get(row)
-
-					if (record === undefined) {
-						if (remove) continue
-
-						record = emptyRecord(row)
-						records.push(record)
-						byRow.set(row, record)
-						added = true
-					}
-
-					record.flags |= RowFlag.DIRTY
-
-					const at = lowerBound(record.cols, col)
-					const exists = record.cols[at] === col
-
-					if (remove) {
-						if (exists) {
-							record.cols.splice(at, 1)
-							record.kinds.splice(at, 1)
-							record.values.splice(at, 1)
-							record.styles.splice(at, 1)
-							record.formulas.splice(at, 1)
-							record.origins.splice(at, 1)
-						}
-					} else if (exists) {
-						record.kinds[at] = kind
-						record.values[at] = value
-						record.styles[at] = style
-						record.formulas[at] = formula
-
-						if (origin >= 0) record.origins[at] = origin
-					} else {
-						record.cols.splice(at, 0, col)
-						record.kinds.splice(at, 0, kind)
-						record.values.splice(at, 0, value)
-						record.styles.splice(at, 0, style)
-						record.formulas.splice(at, 0, formula)
-						record.origins.splice(at, 0, Math.max(0, origin))
-					}
-				}
-
-				if (added) records.sort((a, z) => a.row - z.row)
-			})
+			this.blocks.splice(index, block === undefined ? 0 : 1, ...writtenBlocks(block, group))
+			this.measure()
 		}
 	}
 
-	// Whether setCell writes the cell where it is, moving nothing.
-	private inPlace(block: RowBlock, cell: CellWrite): boolean {
-		const index = block.rowIndex(cell.row)
+	// Writes a batch's cells of one block where they are, as setCell would one by one, when every one of them is
+	// there to write (none added or removed, no formula column wanted): the block is copied at most once (when an undo
+	// snapshot holds it, or the batch changes origins), not once per cell. False, writing nothing, otherwise.
+	private writeInPlace(b: number, block: RowBlock, cells: readonly CellWrite[]): boolean {
+		const rows = new Int32Array(cells.length)
+		const slots = new Int32Array(cells.length)
+		let origins = false
 
-		if (index < 0 || block.cellIndex(index, cell.col) < 0) return false
+		for (let i = 0; i < cells.length; i++) {
+			const cell = cells[i] as CellWrite
+			const index = block.rowIndex(cell.row)
+			const k = index < 0 ? -1 : block.cellIndex(index, cell.col)
+			const remove = cell.origin < 0 && cell.kind === CellKind.EMPTY && cell.style === 0 && cell.formula < 0
 
-		const remove = cell.origin < 0 && cell.kind === CellKind.EMPTY && cell.style === 0 && cell.formula < 0
+			if (k < 0 || remove || (cell.formula >= 0 && block.formulas === null)) return false
 
-		return !remove && (cell.formula < 0 || block.formulas !== null)
+			rows[i] = index
+			slots[i] = k
+			origins ||= cell.origin >= 0 && blockOrigin(block, index, k) !== cell.origin
+		}
+
+		let target = this.held.has(block) ? copyBlock(block) : block
+
+		if (origins) {
+			const next = target.origins?.slice() ?? positionalOrigins(target)
+
+			for (let i = 0; i < cells.length; i++) {
+				const origin = (cells[i] as CellWrite).origin
+
+				if (origin >= 0) next[slots[i] ?? 0] = origin
+			}
+
+			target = withOriginArray(target, next)
+		}
+
+		for (let i = 0; i < cells.length; i++) {
+			const cell = cells[i] as CellWrite
+			const k = slots[i] ?? 0
+			const index = rows[i] ?? 0
+
+			target.kinds[k] = cell.kind
+			target.values[k] = cell.value
+			target.styles[k] = cell.style
+
+			if (target.formulas !== null) target.formulas[k] = cell.formula
+
+			target.rowFlags[index] = (target.rowFlags[index] ?? 0) | RowFlag.DIRTY
+		}
+
+		this.blocks[b] = target
+		this.version++
+
+		return true
 	}
 
 	// setRow for many rows: each block they fall in is rebuilt once.
@@ -1095,6 +1304,11 @@ function withOrigin(block: RowBlock, k: number, origin: number): RowBlock {
 
 	origins[k] = origin
 
+	return withOriginArray(block, origins)
+}
+
+// The block with `origins` as its origins (its other arrays shared).
+function withOriginArray(block: RowBlock, origins: Uint32Array): RowBlock {
 	return new RowBlock(
 		block.firstRow,
 		block.sourceFirstRow,

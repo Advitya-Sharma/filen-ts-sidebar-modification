@@ -82,7 +82,7 @@ function mergesOf(ranges: readonly SheetRange[], mode: "merge" | "center" | "acr
 }
 
 // Why the merges cannot be made, or null.
-async function mergeRefusal(
+export async function mergeRefusal(
 	document: XlsxDocument,
 	sheet: SheetId,
 	merges: readonly SheetRange[]

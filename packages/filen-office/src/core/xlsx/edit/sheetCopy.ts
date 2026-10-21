@@ -6,6 +6,7 @@ import type { SheetId, SheetRefusal } from "../../sheet/protocol"
 import { defineSheetFeature, type SheetChangeSink, type SheetHandled } from "../../sheet/registry"
 import { renameSheetInFormula } from "../../sheet/refs/formulaRefs"
 import { XmlEditor, decodeUtf8, encodeUtf8, parseXml } from "../../xml/index"
+import { ChangeLog } from "../model/changes"
 import { FormulaTable } from "../model/formulas"
 import { RowBlock, SheetStore } from "../model/store"
 import { SheetStrings } from "../model/strings"
@@ -129,7 +130,7 @@ function revisionPrefixes(rootTag: string): string[] {
 }
 
 // A new GUID as SpreadsheetML writes one ({XXXXXXXX-XXXX-4XXX-YXXX-XXXXXXXXXXXX}, upper-case).
-function newGuid(): string {
+export function newGuid(): string {
 	const bytes = new Uint8Array(16)
 	const crypto: unknown = Reflect.get(globalThis, "crypto")
 
@@ -179,12 +180,20 @@ class CopyPlan {
 	readonly parts: PartOp[] = []
 	readonly relationships: RelationshipOp[] = []
 	private readonly taken = new Set<string>()
+	private readonly changes: XlsxWorkbookModel["changes"]
 
 	constructor(workbook: XlsxWorkbookModel) {
 		for (const part of workbook.parts.parts()) this.taken.add(partKey(part.name))
 		// Sheets added since open have parts no package or change holds yet.
 		for (const sheet of workbook.sheets) if (sheet.part !== "") this.taken.add(partKey(sheet.part))
 		for (const name of workbook.changes.parts.keys()) this.taken.add(partKey(name))
+
+		this.changes = workbook.changes
+	}
+
+	// Taken, or a part's name since open (an undone copy's): its retired relationships keep their ids.
+	private used(name: string): boolean {
+		return this.taken.has(partKey(name)) || (this.changes instanceof ChangeLog && this.changes.hadName(name))
 	}
 
 	take(name: string): void {
@@ -200,7 +209,7 @@ class CopyPlan {
 		for (let n = 1; ; n++) {
 			const candidate = `${stem}${String(n)}${extension}`
 
-			if (!this.taken.has(partKey(candidate))) {
+			if (!this.used(candidate)) {
 				this.taken.add(partKey(candidate))
 
 				return candidate
@@ -559,13 +568,15 @@ export async function duplicateSheet(
 	const sourceBytes = await workbook.parts.read(source.part).catch(() => null)
 	const sourcePart = sourceBytes === null ? null : utf8Part(sourceBytes)
 	// The source root's start tag: the copy's root takes it (its namespaces and mc:Ignorable cover the markup it
-	// copies, ECMA-376 Part 3 §10.2.1), its uid new.
+	// copies, ECMA-376 Part 3 §10.2.1), its uid new. A source that is itself a copy has the root it took.
 	const rootTag =
-		sourcePart === null
-			? ""
-			: model instanceof XlsxSheet && model.rootOpenEnd > model.rootStart
-				? decodeUtf8(sourcePart.subarray(model.rootStart, model.rootOpenEnd))
-				: (/<[A-Za-z_][^>]*>/.exec(decodeUtf8(sourcePart.subarray(0, Math.min(sourcePart.length, 8192))))?.[0] ?? "")
+		model.freshRoot !== undefined
+			? model.freshRoot
+			: sourcePart === null
+				? ""
+				: model instanceof XlsxSheet && model.rootOpenEnd > model.rootStart
+					? decodeUtf8(sourcePart.subarray(model.rootStart, model.rootOpenEnd))
+					: (/<[A-Za-z_][^>]*>/.exec(decodeUtf8(sourcePart.subarray(0, Math.min(sourcePart.length, 8192))))?.[0] ?? "")
 	const sourcePrefix = model instanceof XlsxSheet ? model.prefix : ""
 	const prefixes = relationshipPrefixes(rootTag)
 	const uids = revisionPrefixes(rootTag)
@@ -573,7 +584,8 @@ export async function duplicateSheet(
 	const marked = workbook.changes.sheets.get(model.id)?.sections
 
 	try {
-		for (const section of new Set(model.sections.map(candidate => candidate.name))) {
+		// The source's sections, and the ones an edit added (a validation given to a sheet that had none).
+		for (const section of new Set([...model.sections.map(candidate => candidate.name), ...state.heldSections(model)])) {
 			if (MODEL_WRITTEN.has(section)) continue
 
 			// The model's own sections as read (the model is written into them below), unless the catalogue holds them.

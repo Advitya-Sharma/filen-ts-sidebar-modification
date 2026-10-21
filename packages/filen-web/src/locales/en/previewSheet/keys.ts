@@ -24,11 +24,11 @@ export const previewSheetKeys = {
 	/** Insert dialog (Ctrl+Shift+Plus on cells) — title, and its confirm button */
 	previewSheetInsertDialogTitle: "Insert",
 	/** Insert dialog — what it does */
-	previewSheetInsertDialogBody: "Insert whole rows or columns at the selection.",
+	previewSheetInsertDialogBody: "Insert cells at the selection, moving the cells there aside, or insert whole rows or columns.",
 	/** Delete dialog (Ctrl+Minus on cells) — title, and its confirm button */
 	previewSheetDeleteDialogTitle: "Delete",
 	/** Delete dialog — what it does */
-	previewSheetDeleteDialogBody: "Delete the rows or columns of the selection.",
+	previewSheetDeleteDialogBody: "Delete the selected cells, moving the cells after them in, or delete whole rows or columns.",
 	/** Insert and delete dialogs — the whole rows of the selection */
 	previewSheetDialogEntireRow: "Entire row",
 	/** Insert and delete dialogs — the whole columns of the selection */

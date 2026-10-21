@@ -115,6 +115,12 @@ export function rejection(workbook: XlsxWorkbook, source: string): Rejection | u
 }
 
 // Excel's cached results of every <f> cell of `bytes`, or why the workbook does not count.
+// A cached text's escaped characters read (ST_Xstring, ECMA-376 Part 1 §22.9.2.19: "_x000D_" is a carriage return,
+// "_x005F_" a low line): the value the formula gave.
+function xstring(text: string): string {
+	return text.includes("_x") ? text.replace(/_x([0-9A-Fa-f]{4})_/g, (_, code: string) => String.fromCharCode(parseInt(code, 16))) : text
+}
+
 export async function excelCachedValues(name: string, bytes: Uint8Array, source: string): Promise<ExcelWorkbook | Rejection> {
 	let workbook: XlsxWorkbook
 
@@ -152,7 +158,7 @@ export async function excelCachedValues(name: string, bytes: Uint8Array, source:
 				column: cell.column,
 				formula,
 				source,
-				expected: cell.value,
+				expected: cell.value.type === "s" ? { type: "s", value: xstring(cell.value.value) } : cell.value,
 				functions,
 				volatile: functions.some(name => VOLATILE.has(name)),
 				external: EXTERNAL.test(source)

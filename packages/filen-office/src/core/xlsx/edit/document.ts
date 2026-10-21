@@ -1,6 +1,6 @@
 import type { RawCellContent } from "hyperformula"
 import { isSealedOfficeFile } from "../../encryption/index"
-import type { Slicing } from "../../slicing"
+import type { SliceClock, Slicing } from "../../slicing"
 import { decodeUtf8, encodeUtf8 } from "../../xml/index"
 import { writeCsv } from "../../sheet/csv/csvParse"
 import {
@@ -23,6 +23,7 @@ import {
 	type NumFmt,
 	type NumFmtOptions
 } from "../../sheet/numfmt/index"
+import { dateSerial } from "../../sheet/numfmt/date"
 import {
 	AxisFlag,
 	CellFlag,
@@ -66,8 +67,9 @@ import {
 	sameSheet,
 	shownFormula
 } from "../../sheet/refs/formulaRefs"
+import { localizedInput } from "../../sheet/input/locale"
 import { SheetStyles } from "../../sheet/style/index"
-import type { SheetStore } from "../model/store"
+import type { CellWrite, SheetStore } from "../model/store"
 import { readWorksheet } from "../read/worksheet"
 import { readDimension } from "../write/sections"
 import { Inflate } from "fflate"
@@ -137,28 +139,8 @@ function pad(value: number): string {
 	return value < 10 ? `0${String(value)}` : String(value)
 }
 
-// Days from 1970-01-01 to a proleptic Gregorian date (civil calendar arithmetic).
-function civilDays(year: number, month: number, day: number): number {
-	const y = month <= 2 ? year - 1 : year
-	const era = Math.floor(y / 400)
-	const yoe = y - era * 400
-	const doy = Math.floor((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5) + day - 1
-	const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy
-
-	return era * 146_097 + doe - 719_468
-}
-
-// A date's serial in the workbook's date system (ECMA-376 Part 1 §18.17.4): the 1900 system counts the
-// 1900-02-29 it does not have, so dates before March 1900 are a day lower than a plain count.
-export function dateSerial(year: number, month: number, day: number, date1904: boolean): number {
-	const days = civilDays(year, month, day)
-
-	if (date1904) return days + 24_107
-
-	const serial = days + 25_569
-
-	return serial < 61 ? serial - 1 : serial
-}
+// Cells one part of a sliced write takes: about a few milliseconds of work.
+const WRITE_SLICE = 2048
 
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?/
 
@@ -480,10 +462,16 @@ export class XlsxDocument {
 		return this.ownSettings
 	}
 
-	// New settings: the locale's separators show in every tile built from now on.
+	// New settings: the locale's separators show in every tile built from now on. Text dates in formulas read in the
+	// locale's order: an engine built for another is dropped (built again when next needed).
 	set settings(settings: SheetSessionSettings) {
+		const before = this.ownSettings.locale
+		const after = settings.locale
+
 		this.ownSettings = settings
 		this.numFmtOptions = this.formatOptions()
+
+		if (before?.dateOrder !== after?.dateOrder || before?.decimal !== after?.decimal) this.dropEngine()
 	}
 
 	// The app's locale gives the separators; month and day names stay en-US until the app injects a NumFmtLocale.
@@ -580,8 +568,11 @@ export class XlsxDocument {
 	}
 
 	// Parses a sheet; rejects with the XlsxReadError a sheet that cannot be read gives, at once when it was read
-	// before (it is not inflated and parsed again).
+	// before (it is not inflated and parsed again). A sheet the workbook does not hold now (an edit took it away; an
+	// undo or redo may bring it back) is no parse failure and is never remembered as one.
 	async ready(sheet: SheetId, slicing?: Slicing, signal?: SheetAbortSignal): Promise<XlsxSheetModel> {
+		if (this.workbook.sheet(sheet) === undefined) throw new XlsxReadError("missingPart", `No sheet ${sheet}`)
+
 		const failure = this.failed.get(sheet)
 
 		if (failure !== undefined) throw failure
@@ -617,8 +608,9 @@ export class XlsxDocument {
 		if (!this.allReady) await this.readyAll(this.activeSheet(), slicing, () => undefined, signal)
 	}
 
-	// Results shown for formulas the file keeps none for move with their cells; a deleted one goes.
-	shiftShown(sheet: SheetId, edit: AxisEdit): void {
+	// Results shown for formulas the file keeps none for move with their cells; a deleted one goes. `band`: only the
+	// cells of these columns (an edit of rows) or rows (of columns) move (cells inserted or deleted).
+	shiftShown(sheet: SheetId, edit: AxisEdit & { readonly band?: CellBand }): void {
 		// What alone-held results read moves too: read again when next needed.
 		this.aloneInputs.clear()
 
@@ -643,21 +635,9 @@ export class XlsxDocument {
 		const moved = new Map<number, ShownResult>()
 
 		for (const [key, result] of results) {
-			const row = Math.floor(key / 16_384)
-			const col = key % 16_384
-			const index = edit.axis === "rows" ? row : col
+			const next = shiftedKey(key, edit)
 
-			if (index < edit.at) {
-				moved.set(key, result)
-
-				continue
-			}
-
-			if (edit.type === "delete" && index < edit.at + edit.count) continue
-
-			const next = edit.type === "insert" ? index + edit.count : index - edit.count
-
-			moved.set(edit.axis === "rows" ? cellKeyOf(next, col) : cellKeyOf(row, next), result)
+			if (next >= 0) moved.set(next, result)
 		}
 
 		this.shownResults.set(sheet, moved)
@@ -971,7 +951,8 @@ export class XlsxDocument {
 		shown.repeatChar = out.repeatChar
 		shown.flags |= CellFlag.NUMBER
 
-		if (!formula) shown.input = format.isDate ? typedSerial(value, this.date1904) : String(value)
+		if (!formula)
+			shown.input = format.isDate ? typedSerial(value, this.date1904) : localizedInput(String(value), this.ownSettings.locale)
 	}
 
 	private showText(format: NumFmt, text: string, formula: boolean, quoted: boolean, rich = false): void {
@@ -1016,7 +997,7 @@ export class XlsxDocument {
 			const formulaKind = model.store.formulas.kind(formula)
 
 			shown.flags |= CellFlag.FORMULA
-			shown.input = `=${shownFormula(this.formulaText(model, formula, row, col))}`
+			shown.input = localizedInput(`=${shownFormula(this.formulaText(model, formula, row, col))}`, this.ownSettings.locale)
 
 			if (formulaKind === FormulaKind.ARRAY || formulaKind === FormulaKind.DATA_TABLE) shown.flags |= CellFlag.CACHED
 
@@ -1338,34 +1319,66 @@ export class XlsxDocument {
 		if (model === null) return
 
 		const store = model.store as SheetStore
+		const write = this.cellWrite(sheet, store, row, col, state, restore)
+
+		store.setCell(row, col, write.kind, write.value, write.style, write.formula, write.origin)
+		this.wrote(sheet, write.delta, write.formulaChanged)
+	}
+
+	// write for many cells of one sheet, each named once: the store rebuilds each block they fall in once
+	// (SheetStore.setCells), where one write after another copies a block for every row or cell added.
+	writeCells(
+		sheet: SheetId,
+		cells: readonly { readonly row: number; readonly col: number; readonly state: CellState }[],
+		restore = false
+	): void {
+		const only = cells.length === 1 ? cells[0] : undefined
+
+		if (only !== undefined) {
+			this.write(sheet, only.row, only.col, only.state, restore)
+
+			return
+		}
+
+		const model = this.model(sheet)
+
+		if (model === null || cells.length === 0) return
+
+		const store = model.store as SheetStore
+		const writes: CellWrite[] = []
+		let delta = 0
+		let formulaChanged = false
+
+		for (const { row, col, state } of cells) {
+			const write = this.cellWrite(sheet, store, row, col, state, restore)
+
+			writes.push(write)
+			delta += write.delta
+			formulaChanged ||= write.formulaChanged
+		}
+
+		store.setCells(writes)
+		this.wrote(sheet, delta, formulaChanged)
+	}
+
+	// What write gives the store for one cell (its old content read before anything is written), with the shown
+	// result kept or dropped.
+	private cellWrite(
+		sheet: SheetId,
+		store: SheetStore,
+		row: number,
+		col: number,
+		state: CellState,
+		restore: boolean
+	): CellWrite & { readonly delta: number; readonly formulaChanged: boolean } {
 		const slot = store.locate(row, col)
 		const oldKind = slot < 0 ? CellKind.EMPTY : store.kind(slot)
 		const oldFormula = slot < 0 ? -1 : store.formula(slot)
 		const kind = state.present ? state.kind : CellKind.EMPTY
 		const formula = state.present ? state.formula : -1
-		const strings = this.workbook.sharedStrings
-		let delta = 0
-
-		if (oldKind === CellKind.SHARED_STRING) delta--
-		if (kind === CellKind.SHARED_STRING) delta++
+		const delta = (oldKind === CellKind.SHARED_STRING ? -1 : 0) + (kind === CellKind.SHARED_STRING ? 1 : 0)
 
 		if (oldFormula !== formula) this.alone.get(sheet)?.delete(cellKeyOf(row, col))
-
-		store.setCell(
-			row,
-			col,
-			kind,
-			state.present ? state.value : 0,
-			state.present ? state.style : 0,
-			formula,
-			// Put back as it was (an undo or redo), or a paste carrying a source cell's markup (CARRIED).
-			state.present && state.origin !== undefined && (restore || state.origin >= CARRIED) ? state.origin : -1
-		)
-		this.workbook.changes.sheetRows(sheet)
-
-		if (delta !== 0) strings.adjustReferences(delta)
-		if (delta !== 0 || strings.length > strings.sourceLength) this.workbook.changes.sharedStringsAppended()
-		if (oldFormula !== formula) this.workbook.changes.formulasChanged()
 
 		const results = this.shownResults.get(sheet)
 
@@ -1381,11 +1394,91 @@ export class XlsxDocument {
 
 			map.set(cellKeyOf(row, col), state.shown)
 		}
+
+		return {
+			row,
+			col,
+			kind,
+			value: state.present ? state.value : 0,
+			style: state.present ? state.style : 0,
+			formula,
+			// Put back as it was (an undo or redo), or a paste carrying a source cell's markup (CARRIED).
+			origin: state.present && state.origin !== undefined && (restore || state.origin >= CARRIED) ? state.origin : -1,
+			delta,
+			formulaChanged: oldFormula !== formula
+		}
+	}
+
+	// The change log after cells were written: their rows, the shared strings' references, the formulas.
+	private wrote(sheet: SheetId, delta: number, formulaChanged: boolean): void {
+		const strings = this.workbook.sharedStrings
+
+		this.workbook.changes.sheetRows(sheet)
+
+		if (delta !== 0) strings.adjustReferences(delta)
+		if (delta !== 0 || strings.length > strings.sourceLength) this.workbook.changes.sharedStringsAppended()
+		if (formulaChanged) this.workbook.changes.formulasChanged()
+	}
+
+	// writeCells in parts of WRITE_SLICE cells, yielding between them once the clock's slice is up (a large paste, fill
+	// or undo in the in-thread host). Each cell is named once, so the parts may go in any order.
+	async writeCellsSliced(
+		sheet: SheetId,
+		cells: readonly { readonly row: number; readonly col: number; readonly state: CellState }[],
+		restore: boolean,
+		clock: SliceClock | undefined
+	): Promise<void> {
+		if (clock === undefined || cells.length <= WRITE_SLICE) {
+			this.writeCells(sheet, cells, restore)
+
+			return
+		}
+
+		for (let start = 0; start < cells.length; start += WRITE_SLICE) {
+			this.writeCells(sheet, cells.slice(start, start + WRITE_SLICE), restore)
+
+			if (clock.due) await clock.pause()
+		}
 	}
 
 	// The writer CellLog.restore takes.
 	readonly restoreCell = (sheet: SheetId, row: number, col: number, state: CellState): void => {
 		this.write(sheet, row, col, state, true)
+	}
+
+	// Writes back every cell of a log as it was before (undo) or after (redo) the edit, a sheet's cells at once
+	// (writeCells): a log names each cell once, so the order CellLog.restore keeps does not matter here.
+	restoreLog(log: CellLog, which: "before" | "after"): void {
+		for (const [sheet, cells] of this.logCells(log, which)) this.writeCells(sheet, cells, true)
+	}
+
+	// restoreLog in slices (writeCellsSliced).
+	async restoreLogSliced(log: CellLog, which: "before" | "after", clock: SliceClock | undefined): Promise<void> {
+		for (const [sheet, cells] of this.logCells(log, which)) await this.writeCellsSliced(sheet, cells, true, clock)
+	}
+
+	// A log's cells as they were before or after its edit, by sheet.
+	private logCells(log: CellLog, which: "before" | "after"): Map<SheetId, { row: number; col: number; state: CellState }[]> {
+		const states = which === "before" ? log.before : log.after
+		const bySheet = new Map<SheetId, { row: number; col: number; state: CellState }[]>()
+
+		for (let i = 0; i < log.size; i++) {
+			const state = states[i]
+			const sheet = log.sheets[i] ?? 0
+
+			if (state === undefined) continue
+
+			let cells = bySheet.get(sheet)
+
+			if (cells === undefined) {
+				cells = []
+				bySheet.set(sheet, cells)
+			}
+
+			cells.push({ row: log.rows[i] ?? 0, col: log.cols[i] ?? 0, state })
+		}
+
+		return bySheet
 	}
 
 	// --- Formula engine ---
@@ -1890,11 +1983,20 @@ export class XlsxDocument {
 
 			return { name: entry.name, rows, formulas }
 		})
-		const engine = new FormulaEngine(sheets, names, this.date1904, (index, row, col) => {
-			const sheet = this.engineSheets.length > 0 ? this.engineSheets[index] : entries[index]?.id
+		const sheetAt = (index: number): SheetId | undefined =>
+			this.engineSheets.length > 0 ? this.engineSheets[index] : entries[index]?.id
+		const engine = new FormulaEngine(
+			sheets,
+			names,
+			this.date1904,
+			(index, row, col) => {
+				const sheet = sheetAt(index)
 
-			if (sheet !== undefined) this.markAlone(sheet, row, col)
-		})
+				if (sheet !== undefined) this.markAlone(sheet, row, col)
+			},
+			(index, row) => this.rowState(sheetAt(index), row),
+			this.ownSettings.locale
+		)
 
 		this.engine = engine
 		this.engineSheets = entries.map(entry => entry.id)
@@ -1932,6 +2034,71 @@ export class XlsxDocument {
 		this.engineSheets = []
 	}
 
+	// Whether a hidden row is hidden by a filter (in the body of a filter that filters something): set by the filter
+	// feature. Without it every hidden row reads as hidden by hand.
+	filteredRow: ((sheet: SheetId, row: number) => boolean) | null = null
+
+	// A row as SUBTOTAL and AGGREGATE read it: 0 shown, 1 hidden by hand, 2 hidden by a filter.
+	private rowState(sheet: SheetId | undefined, row: number): number {
+		const model = sheet === undefined ? null : this.model(sheet)
+
+		if (sheet === undefined || model === null) return 0
+
+		const store = model.store as SheetStore
+		const block = store.blocks[store.blockOf(row)]
+		const index = block?.rowIndex(row) ?? -1
+
+		if (block === undefined || index < 0 || ((block.rowFlags[index] ?? 0) & RowFlag.HIDDEN) === 0) return 0
+
+		return this.filteredRow?.(sheet, row) === true ? 2 : 1
+	}
+
+	// Before an edit that hides or shows rows: the engine built from the cells as they stand (all sheets ready, a
+	// workbook with formulas), so the edit is what it recalculates.
+	async engineBeforeRows(changes: SheetChangeSink): Promise<void> {
+		if (this.engine !== null || !this.allReady || !this.hasFormulas) return
+
+		await this.loadTables()
+
+		if (!this.closed && this.engine === null) this.buildEngine(changes)
+	}
+
+	// Rows were hidden or shown: SUBTOTAL and AGGREGATE calculated again, their results stored as recalculate stores
+	// them (logged first).
+	rowsChanged(log: CellLog | null, changes: SheetChangeSink): void {
+		const engine = this.engine
+
+		if (engine !== null)
+			this.apply(
+				this.guarded(() => engine.rowsChanged()),
+				log,
+				changes
+			)
+	}
+
+	// The rows of an edit hidden or shown again by its undo or redo: the engine calculates SUBTOTAL and AGGREGATE again
+	// (giving what it gave then), and the results the edit stored come back from its log. An edit made with no engine
+	// logged none: what the engine now gives is stored.
+	rowsRestored(log: CellLog, which: "before" | "after", changes: SheetChangeSink): void {
+		const engine = this.engine
+		const results = engine === null ? [] : this.guarded(() => engine.rowsChanged())
+
+		if (log.size === 0) {
+			this.apply(results, null, changes)
+
+			return
+		}
+
+		this.restoreLog(log, which)
+
+		for (let i = 0; i < log.size; i++) {
+			const row = log.rows[i] ?? 0
+			const col = log.cols[i] ?? 0
+
+			changes.content(log.sheets[i] ?? 0, { startRow: row, startCol: col, endRow: row, endCol: col })
+		}
+	}
+
 	// Gives the engine the cells as they now stand, and stores what it recalculated in the formula cells it
 	// names (logged first). Without an engine, nothing.
 	recalculate(sheet: SheetId, cells: readonly { row: number; col: number }[], log: CellLog | null, changes: SheetChangeSink): void {
@@ -1948,6 +2115,18 @@ export class XlsxDocument {
 			)
 		)
 
+		this.applyRecalculated(sheet, cells, results, log, changes)
+	}
+
+	// Stores what the engine recalculated for `cells` of `sheet` (given to it apart from recalculate: in parts, its
+	// evaluation held between them), as recalculate does.
+	applyRecalculated(
+		sheet: SheetId,
+		cells: readonly { row: number; col: number }[],
+		results: readonly RecalculatedCell[],
+		log: CellLog | null,
+		changes: SheetChangeSink
+	): void {
 		this.apply([...results, ...this.staleAlone(sheet, cells, results)], log, changes)
 	}
 
@@ -2187,13 +2366,20 @@ function overlaps(a: ReadArea, b: ReadArea): boolean {
 	return a.startRow <= b.endRow && b.startRow <= a.endRow && a.startCol <= b.endCol && b.startCol <= a.endCol
 }
 
+// An inclusive span of columns (rows) whose cells alone an edit of rows (columns) moves.
+interface CellBand {
+	readonly start: number
+	readonly end: number
+}
+
 // A cell's key after rows or columns move, or -1 when they deleted it.
-function shiftedKey(key: number, edit: AxisEdit): number {
+function shiftedKey(key: number, edit: AxisEdit & { readonly band?: CellBand }): number {
 	const row = Math.floor(key / 16_384)
 	const col = key % 16_384
 	const index = edit.axis === "rows" ? row : col
+	const cross = edit.axis === "rows" ? col : row
 
-	if (index < edit.at) return key
+	if (index < edit.at || (edit.band !== undefined && (cross < edit.band.start || cross > edit.band.end))) return key
 	if (edit.type === "delete" && index < edit.at + edit.count) return -1
 
 	const next = edit.type === "insert" ? index + edit.count : index - edit.count

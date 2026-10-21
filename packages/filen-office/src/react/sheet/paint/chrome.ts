@@ -2,9 +2,9 @@ import { columnName } from "../../../core/sheet/refs/cellRef"
 import type { SheetRange } from "../../../core/sheet/protocol"
 import type { GridSelection } from "../selection"
 import type { SheetGridTheme } from "../theme"
-import { screenOf, type AxisView, type GridView } from "../view"
+import { rangeRects, segments, type GridRect } from "../layers"
+import { screenOf, type GridView } from "../view"
 import type { GridCanvas } from "./canvas"
-import { segments } from "./cells"
 
 // The chrome layer over the cells: column and row headers (the selection's tinted), the frozen panes' dividers,
 // the selection's tint and outline, and a resize's guide. Cheap to draw again on every selection move, so the
@@ -12,6 +12,8 @@ import { segments } from "./cells"
 // right), its labels drawn unmirrored.
 
 export interface ChromeScene {
+	// Drawn over the selection, under the headers (layers.ts "chrome" layers).
+	readonly overSelection?: (() => void) | undefined
 	readonly view: GridView
 	readonly theme: SheetGridTheme
 	readonly pixelRatio: number
@@ -19,6 +21,8 @@ export interface ChromeScene {
 	readonly merges: readonly SheetRange[]
 	// A resize being dragged: the edge's position on screen.
 	readonly guide: { readonly axis: "rows" | "cols"; readonly at: number } | null
+	// A fill-handle drag: the range it would fill, outlined dashed.
+	readonly fill?: SheetRange | null
 	// The sheet is shown right to left (SheetLayout.rightToLeft): positions are laid out left to right and mirrored.
 	readonly rightToLeft?: boolean
 }
@@ -41,47 +45,6 @@ function label(canvas: GridCanvas, scene: ChromeScene, text: string, x: number, 
 	canvas.setTransform(scene.pixelRatio, 0, 0, scene.pixelRatio, 0, 0)
 	canvas.fillText(text, scene.view.width - x, y)
 	layOut(canvas, scene)
-}
-
-interface Rect {
-	readonly x: number
-	readonly y: number
-	readonly width: number
-	readonly height: number
-}
-
-// A range's rectangle within one axis's segment: [start, end) on screen, or null when it is not in it.
-function spanIn(view: AxisView, first: number, last: number, segmentFirst: number, segmentLast: number): [number, number] | null {
-	const from = Math.max(first, segmentFirst)
-	const to = Math.min(last, segmentLast)
-
-	if (from > to) return null
-
-	return [screenOf(view, from), screenOf(view, to) + view.axis.size(to)]
-}
-
-// A range's on-screen rectangles, one per pane it shows in.
-export function rangeRects(view: GridView, range: SheetRange): Rect[] {
-	const rects: Rect[] = []
-
-	for (const rows of segments(view.rows)) {
-		const ys = spanIn(view.rows, range.startRow, range.endRow, rows.first, rows.last)
-
-		if (ys === null) continue
-
-		for (const cols of segments(view.cols)) {
-			const xs = spanIn(view.cols, range.startCol, range.endCol, cols.first, cols.last)
-
-			if (xs === null) continue
-
-			const x = Math.max(xs[0], cols.start)
-			const y = Math.max(ys[0], rows.start)
-
-			rects.push({ x, y, width: Math.min(xs[1], cols.end) - x, height: Math.min(ys[1], rows.end) - y })
-		}
-	}
-
-	return rects
 }
 
 function covers(ranges: readonly SheetRange[], axis: "rows" | "cols", index: number): boolean {
@@ -176,7 +139,7 @@ export function paintChrome(canvas: GridCanvas, scene: ChromeScene): void {
 	for (const rect of activeRects) canvas.clearRect(rect.x, rect.y, rect.width, rect.height)
 
 	const last = selection.ranges.length - 1
-	const outlines: { rect: Rect; width: number }[] = []
+	const outlines: { rect: GridRect; width: number }[] = []
 
 	selection.ranges.forEach((range, k) => {
 		for (const rect of rangeRects(view, range)) outlines.push({ rect, width: k === last ? 2 : 1 })
@@ -191,6 +154,25 @@ export function paintChrome(canvas: GridCanvas, scene: ChromeScene): void {
 	canvas.fillStyle = theme.selectionLine
 
 	for (const { rect, width } of outlines) ring(canvas, rect, 0, width)
+
+	if (scene.fill !== undefined && scene.fill !== null) {
+		canvas.strokeStyle = theme.selectionLine
+		canvas.lineWidth = 1
+		canvas.setLineDash([3, 2])
+
+		for (const rect of rangeRects(view, scene.fill)) {
+			canvas.beginPath()
+			canvas.rect(rect.x - 0.5, rect.y - 0.5, rect.width, rect.height)
+			canvas.stroke()
+		}
+
+		canvas.setLineDash([])
+	}
+
+	if (scene.overSelection !== undefined) {
+		scene.overSelection()
+		layOut(canvas, scene)
+	}
 
 	// Frozen panes' dividers.
 	canvas.fillStyle = theme.frozenLine
@@ -223,7 +205,7 @@ export function paintChrome(canvas: GridCanvas, scene: ChromeScene): void {
 
 // A ring `width` wide, `inset` inside the rectangle's edges (its left and top gridlines included), so it never
 // covers the neighbouring cells' text.
-function ring(canvas: GridCanvas, rect: Rect, inset: number, width: number): void {
+function ring(canvas: GridCanvas, rect: GridRect, inset: number, width: number): void {
 	const x = rect.x - 1 + inset
 	const y = rect.y - 1 + inset
 	const w = rect.width + 1 - 2 * inset

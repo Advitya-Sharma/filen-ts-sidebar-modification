@@ -1,7 +1,8 @@
 import { SHEET_MAX_COLS, SHEET_MAX_ROWS, type SheetRange } from "../../sheet/protocol"
 import { cellName, columnIndex } from "../../sheet/refs/cellRef"
 import { parseRange } from "../read/sheetData"
-import { shiftRange, type AxisShift } from "./axis"
+import { deletedCells, inBand, shiftRange, type AxisShift } from "./axis"
+import { intersects } from "./moveRefs"
 
 // ST_Sqref (ECMA-376 Part 1 §18.18.76): references separated by spaces. A1 cells and areas, with whole columns
 // (A:C) and rows (1:3) read as the areas they name.
@@ -79,4 +80,90 @@ export function shiftRanges(ranges: readonly SheetRange[], shift: AxisShift): re
 	}
 
 	return changed ? out : ranges
+}
+
+// The top-left cell of the rectangle around a range list: what formulas written relative to the list (conditional
+// formats, validations) are written for (Excel's files and LibreOffice agree; ECMA-376 leaves it open).
+export function topLeft(ranges: readonly SheetRange[]): { row: number; col: number } {
+	let row = Infinity
+	let col = Infinity
+
+	for (const range of ranges) {
+		row = Math.min(row, range.startRow)
+		col = Math.min(col, range.startCol)
+	}
+
+	return { row, col }
+}
+
+// The part of `range` inside `other` (they must meet).
+export function overlapRange(range: SheetRange, other: SheetRange): SheetRange {
+	return {
+		startRow: Math.max(range.startRow, other.startRow),
+		startCol: Math.max(range.startCol, other.startCol),
+		endRow: Math.min(range.endRow, other.endRow),
+		endCol: Math.min(range.endCol, other.endCol)
+	}
+}
+
+// `range` without the cells of `cut`: the rows above and below it whole, then what is left and right of it in its
+// rows. [range] when they do not meet.
+export function subtractRange(range: SheetRange, cut: SheetRange): SheetRange[] {
+	if (!intersects(range, cut)) return [range]
+
+	const out: SheetRange[] = []
+	const top = Math.max(range.startRow, cut.startRow)
+	const bottom = Math.min(range.endRow, cut.endRow)
+
+	if (range.startRow < cut.startRow) out.push({ ...range, endRow: cut.startRow - 1 })
+	if (range.endRow > cut.endRow) out.push({ ...range, startRow: cut.endRow + 1 })
+	if (range.startCol < cut.startCol) out.push({ startRow: top, endRow: bottom, startCol: range.startCol, endCol: cut.startCol - 1 })
+	if (range.endCol > cut.endCol) out.push({ startRow: top, endRow: bottom, startCol: cut.endCol + 1, endCol: range.endCol })
+
+	return out
+}
+
+// How a range list follows cells inserted or deleted in a band (whole rows and columns: shiftRanges):
+// - "list" (conditional formats, protected ranges, ignored errors, sparklines): the deleted cells leave each range,
+//   then each piece moves only when it lies across the band;
+// - "cells" (validations, which belong to their cells): each range's part across the band moves, the rest stays.
+// LibreOffice's rules for the two (Microsoft's documentation is silent). The same array when nothing moved.
+export function shiftRangeList(ranges: readonly SheetRange[], shift: AxisShift, mode: "list" | "cells"): readonly SheetRange[] {
+	const band = shift.band
+
+	if (band === undefined) return shiftRanges(ranges, shift)
+
+	let pieces: readonly SheetRange[] = ranges
+
+	if (mode === "list") {
+		const deleted = deletedCells(shift)
+
+		if (deleted !== null && ranges.some(range => intersects(range, deleted)))
+			pieces = ranges.flatMap(range => subtractRange(range, deleted))
+	} else if (ranges.some(range => !inBand(range, shift) && intersects(range, strip(shift)))) {
+		const across = strip(shift)
+
+		// The piece holding the range's first cell first: formulas stay written from it.
+		pieces = ranges.flatMap(range => {
+			if (inBand(range, shift) || !intersects(range, across)) return [range]
+
+			const inside = overlapRange(range, across)
+			const outside = subtractRange(range, across)
+
+			return inside.startRow === range.startRow && inside.startCol === range.startCol ? [inside, ...outside] : [...outside, inside]
+		})
+	}
+
+	const moved = shiftRanges(pieces, shift)
+
+	return moved === pieces && pieces === ranges ? ranges : moved
+}
+
+// Every cell of the band, the whole length of the edited axis.
+function strip(shift: AxisShift): SheetRange {
+	const band = shift.band ?? { start: 0, end: (shift.axis === "rows" ? SHEET_MAX_COLS : SHEET_MAX_ROWS) - 1 }
+
+	return shift.axis === "rows"
+		? { startRow: 0, startCol: band.start, endRow: SHEET_MAX_ROWS - 1, endCol: band.end }
+		: { startRow: band.start, startCol: 0, endRow: band.end, endCol: SHEET_MAX_COLS - 1 }
 }

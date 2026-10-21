@@ -9,13 +9,16 @@ import {
 	type SheetRange,
 	type SheetRefusal
 } from "../../../core/sheet/protocol"
+import type { SheetValidationRule } from "../../../core/sheet/dv/xlsx"
+import type { SheetFilterCriteria } from "../../../core/sheet/filter/criteria"
 import type { SheetSession } from "../../../core/sheet/session"
 import type { XlsxDocument } from "../../../core/xlsx/edit/document"
 import type { Rand } from "../config"
 
-// The sheet fuzz's operations: every command family the xlsx session registers (cells, format, axis, resize,
-// sheet, sheets, hide, freeze, merge, protection, clipboard) and undo/redo, with targets near what a sheet holds and inputs that reach the edge cases
-// (formulas that do not read, text that looks like a number, characters XML cannot hold, the grid's edges).
+// The sheet fuzz's operations: every command family the xlsx session registers (cells, format, axis, shift, resize,
+// sheet, sheets, hide, freeze, merge, protection, clipboard, annotations, validation, sort, filter) and undo/redo, with
+// targets near what a sheet holds and inputs that reach the edge cases (formulas that do not read, text that looks
+// like a number, characters XML cannot hold, the grid's edges).
 
 // Refusal reasons the protocol names (protocol.ts SheetRefusalReasons). Anything else a command answers with is
 // an untyped refusal.
@@ -35,7 +38,12 @@ export const KNOWN_REFUSALS: ReadonlySet<string> = new Set([
 	"encoding",
 	"styleLimit",
 	"unsupported",
-	"mergeLosesValues"
+	"mergeLosesValues",
+	"notesUnavailable",
+	"authorNeeded",
+	"notOwnComment",
+	"linkTarget",
+	"filterCriteria"
 ])
 
 export type Outcome =
@@ -201,6 +209,109 @@ function command(context: OpContext, build: (at: Target) => SheetCommand | null)
 	return made === null ? null : async () => outcome(await context.session.command(made))
 }
 
+// A data validation as the dialog sends it: every kind and operator, bounds typed as numbers, dates, text or
+// formulas (some that do not read), lists typed or referenced, messages up to and past Excel's limits.
+function rand2(rand: Rand): boolean {
+	return rand() < 0.2
+}
+
+function validationRule(rand: Rand): SheetValidationRule {
+	const type = pick(rand, ["none", "whole", "decimal", "list", "date", "time", "textLength", "custom"] as const)
+	const operator = pick(rand, [
+		"between",
+		"notBetween",
+		"equal",
+		"notEqual",
+		"lessThan",
+		"lessThanOrEqual",
+		"greaterThan",
+		"greaterThanOrEqual"
+	] as const)
+	const bound = (): string =>
+		pick(rand, ["1", "-2.5", "1000000", "2024-02-29", "12:30", "=A1", "=$B$2*2", "=SUM(", "abc", "", "=TODAY()"])
+	const value1 =
+		type === "list"
+			? pick(rand, ["a,b,c", "Yes,No", "=$A$1:$A$5", "=A1:B1", '="x,y"', "x".repeat(256), "=SUM(", "1,2,3"])
+			: type === "custom"
+				? pick(rand, ["=A1>0", "=ISNUMBER(A1)", "=COUNTIF($A:$A,A1)=1", "=SUM(", "=LEN(A1)<5"])
+				: bound()
+	const text = (limit: number): string => pick(rand, ["", "Pick", "a".repeat(limit), "a".repeat(limit + 1), "\u0001", "Ünï\ncode"])
+
+	return {
+		type,
+		operator,
+		value1,
+		value2: bound(),
+		allowBlank: rand() < 0.7,
+		inCellDropdown: rand() < 0.8,
+		showInputMessage: rand() < 0.5,
+		promptTitle: text(32),
+		prompt: text(255),
+		showErrorMessage: rand() < 0.8,
+		errorStyle: pick(rand, ["stop", "warning", "information"] as const),
+		errorTitle: text(32),
+		error: text(225)
+	}
+}
+
+// Criteria of every kind an autofilter column takes, with values near the fixtures' cells.
+function criteria(rand: Rand): SheetFilterCriteria | null {
+	switch (int(rand, 0, 6)) {
+		case 0:
+			return null
+		case 1:
+			return {
+				kind: "values",
+				values: pick(rand, [["1"], ["a", "x"], [], ["TRUE", "#DIV/0!"]]),
+				blank: rand() < 0.5,
+				dates: rand() < 0.2 ? [{ grouping: "month", year: 2024, month: 2 }] : []
+			}
+		case 2:
+			return {
+				kind: "custom",
+				and: rand() < 0.5,
+				conditions: [
+					{
+						operator: pick(rand, ["equal", "notEqual", "greaterThan", "lessThanOrEqual"] as const),
+						value: pick(rand, ["1", "*a*", "b?", "", " ", "45000"])
+					},
+					...(rand() < 0.5
+						? [{ operator: pick(rand, ["greaterThanOrEqual", "lessThan"] as const), value: String(int(rand, -5, 50)) }]
+						: [])
+				]
+			}
+		case 3:
+			return { kind: "top10", top: rand() < 0.5, percent: rand() < 0.3, value: int(rand, 1, 20) }
+		case 4:
+			return {
+				kind: "dynamic",
+				type: pick(rand, ["aboveAverage", "belowAverage", "today", "thisMonth", "lastYear", "Q2", "M11"] as const)
+			}
+		case 5:
+			return { kind: "color", cell: rand() < 0.7, color: rand() < 0.3 ? null : pick(rand, [0xffff00, 0x000000, 0xff0000]) }
+		default:
+			return { kind: "values", values: [String(int(rand, 0, 9))], blank: false, dates: [] }
+	}
+}
+
+const NOTE_TEXTS = ["Fuzz:\nnote", "", "a & <b>", "line\nbreak", "\u0001ctl", "x".repeat(300)]
+const LINKS: readonly ({ readonly url: string } | { readonly location: string })[] = [
+	{ url: "https://filen.io/a?b=1&c" },
+	{ url: "mailto:a@b.c" },
+	{ url: "javascript:alert(1)" },
+	{ location: "A1" },
+	{ location: "Data!B2" },
+	{ location: "Nowhere!A1" }
+]
+
+// A comment of the thread on a cell (the first, or any), null when the cell has none.
+async function threadComment(context: OpContext, sheet: SheetId, at: { row: number; col: number }, first: boolean): Promise<string | null> {
+	const thread = await context.session.query("thread.get", { sheet, row: at.row, col: at.col })
+	const comments = thread?.comments ?? []
+
+	return (first ? comments[0] : comments[comments.length - 1])?.id ?? null
+}
+
 const SHEET_NAMES = ["New", "Data", "data", "Calc", "Sheet 9", "a/b", "", "x".repeat(32), "History", "'quoted", "Ünïcode", "Data (2)"]
 
 export const OPS: readonly Op[] = [
@@ -286,6 +397,19 @@ export const OPS: readonly Op[] = [
 					count: int(context.rand, 1, 3)
 				}
 			})
+	},
+	{
+		name: "cells.shift",
+		family: "shift",
+		weight: 2,
+		plan: context =>
+			command(context, at => ({
+				type: "cells.shift",
+				sheet: at.sheet,
+				range: range(context.rand, at, context.edges),
+				edit: context.rand() < 0.5 ? "insert" : "delete",
+				axis: context.rand() < 0.5 ? "rows" : "cols"
+			}))
 	},
 	{
 		name: "axis.resize",
@@ -401,6 +525,21 @@ export const OPS: readonly Op[] = [
 			)
 	},
 	{
+		name: "validation.set",
+		family: "validation",
+		weight: 0.6,
+		plan: context =>
+			command(context, at => ({
+				type: "validation.set",
+				sheet: at.sheet,
+				ranges: rand2(context.rand)
+					? [range(context.rand, at, context.edges), range(context.rand, at, false)]
+					: [range(context.rand, at, context.edges)],
+				rule: context.rand() < 0.25 ? null : validationRule(context.rand),
+				...(context.rand() < 0.5 && { at: cell(context.rand, at, false) })
+			}))
+	},
+	{
 		name: "merge.cells",
 		family: "merge",
 		weight: 0.8,
@@ -412,6 +551,68 @@ export const OPS: readonly Op[] = [
 				mode: pick(context.rand, ["merge", "center", "across"] as const),
 				discard: context.rand() < 0.7
 			}))
+	},
+	{
+		name: "sort.apply",
+		family: "sort",
+		weight: 0.6,
+		plan: context =>
+			command(context, at => {
+				const sorted = range(context.rand, at, false)
+				const rows = context.rand() < 0.85
+				const keys = Array.from({ length: int(context.rand, 1, 3) }, () => ({
+					index: rows ? int(context.rand, sorted.startCol, sorted.endCol) : int(context.rand, sorted.startRow, sorted.endRow),
+					descending: context.rand() < 0.5
+				}))
+
+				return {
+					type: "sort.apply",
+					sheet: at.sheet,
+					range: sorted,
+					orientation: rows ? "rows" : "cols",
+					header: context.rand() < 0.5,
+					caseSensitive: context.rand() < 0.3,
+					keys
+				}
+			})
+	},
+	{
+		name: "filter.toggle",
+		family: "filter",
+		weight: 0.4,
+		plan: context =>
+			command(context, at => {
+				const filtered = range(context.rand, at, false)
+
+				return {
+					type: "filter.toggle",
+					sheet: at.sheet,
+					range: filtered,
+					active: { row: filtered.startRow, col: filtered.startCol }
+				}
+			})
+	},
+	{
+		name: "filter.column",
+		family: "filter",
+		weight: 0.6,
+		plan: context =>
+			command(context, at => {
+				const header = cell(context.rand, at, false)
+
+				return { type: "filter.column", sheet: at.sheet, row: header.row, col: header.col, criteria: criteria(context.rand) }
+			})
+	},
+	{
+		name: "filter.clear",
+		family: "filter",
+		weight: 0.2,
+		plan: context =>
+			command(context, at => {
+				const header = cell(context.rand, at, false)
+
+				return { type: context.rand() < 0.5 ? "filter.clear" : "filter.reapply", sheet: at.sheet, row: header.row, col: header.col }
+			})
 	},
 	{
 		name: "merge.unmerge",
@@ -472,6 +673,108 @@ export const OPS: readonly Op[] = [
 				)
 			}
 		}
+	},
+	{
+		name: "note.set",
+		family: "annotations",
+		weight: 1,
+		plan: context =>
+			command(context, at => ({
+				type: "note.set",
+				sheet: at.sheet,
+				...cell(context.rand, at, context.edges),
+				text: pick(context.rand, NOTE_TEXTS)
+			}))
+	},
+	{
+		name: "note.delete",
+		family: "annotations",
+		weight: 0.5,
+		plan: context =>
+			command(context, at => ({ type: "note.delete", sheet: at.sheet, ranges: [range(context.rand, at, context.edges)] }))
+	},
+	{
+		name: "note.show",
+		family: "annotations",
+		weight: 0.3,
+		plan: context =>
+			command(context, at => ({ type: "note.show", sheet: at.sheet, ...cell(context.rand, at, false), shown: context.rand() < 0.6 }))
+	},
+	{
+		name: "thread.add",
+		family: "annotations",
+		weight: 0.8,
+		plan: context =>
+			command(context, at => ({
+				type: "thread.add",
+				sheet: at.sheet,
+				...cell(context.rand, at, context.edges),
+				text: pick(context.rand, NOTE_TEXTS.slice(2))
+			}))
+	},
+	{
+		name: "thread.edit",
+		family: "annotations",
+		weight: 0.3,
+		plan: context => {
+			const at = target(context)
+
+			if (at === null) return null
+
+			const place = cell(context.rand, at, false)
+			const first = context.rand() < 0.5
+			const text = pick(context.rand, NOTE_TEXTS.slice(2))
+
+			return async () => {
+				const id = await threadComment(context, at.sheet, place, first)
+
+				return id === null
+					? { kind: "noop" }
+					: outcome(await context.session.command({ type: "thread.edit", sheet: at.sheet, id, text }))
+			}
+		}
+	},
+	{
+		name: "thread.delete",
+		family: "annotations",
+		weight: 0.3,
+		plan: context => {
+			const at = target(context)
+
+			if (at === null) return null
+
+			const place = cell(context.rand, at, false)
+			const first = context.rand() < 0.5
+
+			return async () => {
+				const id = await threadComment(context, at.sheet, place, first)
+
+				return id === null
+					? { kind: "noop" }
+					: outcome(await context.session.command({ type: "thread.delete", sheet: at.sheet, id }))
+			}
+		}
+	},
+	{
+		name: "link.set",
+		family: "annotations",
+		weight: 0.8,
+		plan: context =>
+			command(context, at => ({
+				type: "link.set",
+				sheet: at.sheet,
+				ranges: [range(context.rand, at, context.edges)],
+				target: pick(context.rand, LINKS),
+				...(context.rand() < 0.5 && { text: pick(context.rand, ["Link", "=1+1", "", "123"]) }),
+				...(context.rand() < 0.3 && { tooltip: pick(context.rand, ["tip", "x".repeat(300)]) })
+			}))
+	},
+	{
+		name: "link.remove",
+		family: "annotations",
+		weight: 0.5,
+		plan: context =>
+			command(context, at => ({ type: "link.remove", sheet: at.sheet, ranges: [range(context.rand, at, context.edges)] }))
 	},
 	{
 		name: "undo",

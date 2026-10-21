@@ -63,7 +63,8 @@ describe("General values in tiles", () => {
 
 		session.configure({ locale: { decimal: ",", group: ".", argument: ";", dateOrder: "dmy" } })
 
-		const result = await session.command({ type: "cells.set", sheet, cells: cells([[0, 0, "3.25"]]) })
+		// Typed as the locale types it.
+		const result = await session.command({ type: "cells.set", sheet, cells: cells([[0, 0, "3,25"]]) })
 
 		if (!result.ok) throw new Error(result.refusal.reason)
 

@@ -48,13 +48,15 @@ function hiddenIn(layout: SheetAxisLayout): (index: number) => boolean {
 
 // The grid's menu: rows and columns inserted, deleted, hidden and shown, contents cleared, panes frozen, cells merged,
 // sizes reset. Read-only, it holds only the size resets (and a text file's frozen panes, which it keeps beside the
-// file: `localPane`, the file's key, for a text file).
+// file: `localPane`, the file's key, for a text file). Features add groups of their own (`items`, each followed by a
+// separator), shown read-only too: an item that edits checks for itself.
 export function SheetGridMenu({
 	grid,
 	canEdit,
 	run,
 	text,
 	localPane,
+	items,
 	children
 }: {
 	grid: SheetGridState
@@ -63,6 +65,7 @@ export function SheetGridMenu({
 	// A text file: no formats, merges or hidden rows; its panes freeze though it is read-only.
 	text?: boolean
 	localPane?: LayerKey
+	items?: readonly { readonly id: string; readonly node: ReactNode }[]
 	children: ReactNode
 }) {
 	const { t } = useTranslation("preview")
@@ -194,6 +197,12 @@ export function SheetGridMenu({
 							<ContextMenuSeparator />
 						</>
 					) : null}
+					{items?.map(group => (
+						<Fragment key={group.id}>
+							{group.node}
+							<ContextMenuSeparator />
+						</Fragment>
+					))}
 					{freezes ? (
 						<>
 							<ContextMenuSub>

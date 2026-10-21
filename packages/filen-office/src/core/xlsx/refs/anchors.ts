@@ -1,4 +1,4 @@
-import { axisLimit, type AxisShift } from "./axis"
+import { axisLimit, crossInBand, type AxisShift } from "./axis"
 import type { RefConstruct } from "./catalogue"
 import { childByLocal, type Edited, type RefJob } from "./markup"
 
@@ -7,6 +7,10 @@ import { childByLocal, type Edited, type RefJob } from "./markup"
 // with its cells, "oneCell" moves with its top-left cell and keeps its size, "absolute" stays. An edge at offset
 // 0 of a row lies on the boundary above it: an object's top edge there belongs to that row, its bottom edge to the
 // row above, so an insert at the boundary moves the object and does not grow it.
+//
+// Cells shifted in a band: an object across the band alone moves and sizes as for whole rows or columns; one
+// reaching outside it moves with its top-left cell, keeping its size, as LibreOffice moves it (Microsoft's
+// documentation is silent); one whose top-left cell does not move stays.
 
 export type AnchorMode = "twoCell" | "oneCell" | "absolute"
 
@@ -115,7 +119,22 @@ export function shiftAnchor(
 
 	if (from === null) return
 
-	const next = shiftEdges(from.point, to?.point ?? null, to === null ? "oneCell" : mode, shift)
+	let kept = mode
+
+	if (shift.band !== undefined) {
+		const fromCross = readPoint(edited, fromNode, !rows)
+		const toCross = toNode < 0 ? null : readPoint(edited, toNode, !rows)
+
+		if (fromCross === null) return
+
+		const across = bandMode(fromCross.point, toCross?.point ?? null, shift)
+
+		if (across === null) return
+
+		kept = to === null ? "oneCell" : across === "whole" ? mode : "oneCell"
+	}
+
+	const next = shiftEdges(from.point, to?.point ?? null, to === null ? "oneCell" : kept, shift)
 	let changed = writePoint(edited, from, next.from)
 
 	if (to !== null && next.to !== null) changed = writePoint(edited, to, next.to) || changed
@@ -140,8 +159,20 @@ function anchorMode(edited: Edited, node: number): AnchorMode {
 	return editAs === "oneCell" ? "oneCell" : editAs === "absolute" ? "absolute" : "twoCell"
 }
 
+// For cells shifted in a band, how an object with these edges across the axis follows them: "whole" when it lies
+// across the band alone, "top" when only its top-left cell is in the band, null when that cell is not.
+function bandMode(from: AnchorPoint, to: AnchorPoint | null, shift: AxisShift): "whole" | "top" | null {
+	if (!crossInBand(from.index, shift)) return null
+
+	// The far edge at offset 0 lies on the boundary before its index.
+	const far = to === null ? from.index : to.offset === 0 && to.index > from.index ? to.index - 1 : to.index
+
+	return crossInBand(far, shift) ? "whole" : "top"
+}
+
 // A legacy drawing (VML) x:Anchor: "LeftColumn, LeftOffset, TopRow, TopOffset, RightColumn, RightOffset,
-// BottomRow, BottomOffset". The shape moves and sizes with its cells.
+// BottomRow, BottomOffset". The shape moves and sizes with its cells (with cells shifted in a band, as shiftAnchor
+// says).
 export function shiftVmlAnchor(text: string, shift: AxisShift): string | null {
 	const values = text.split(",").map(part => Number(part.trim()))
 
@@ -149,9 +180,21 @@ export function shiftVmlAnchor(text: string, shift: AxisShift): string | null {
 
 	const rows = shift.axis === "rows"
 	const base = rows ? 2 : 0
+	const cross = rows ? 0 : 2
 	const from = { index: values[base] ?? 0, offset: values[base + 1] ?? 0 }
 	const to = { index: values[base + 4] ?? 0, offset: values[base + 5] ?? 0 }
-	const next = shiftEdges(from, to, "twoCell", shift)
+	const across =
+		shift.band === undefined
+			? "whole"
+			: bandMode(
+					{ index: values[cross] ?? 0, offset: values[cross + 1] ?? 0 },
+					{ index: values[cross + 4] ?? 0, offset: values[cross + 5] ?? 0 },
+					shift
+				)
+
+	if (across === null) return text
+
+	const next = shiftEdges(from, to, across === "whole" ? "twoCell" : "oneCell", shift)
 
 	if (next.from === from && next.to === to) return text
 

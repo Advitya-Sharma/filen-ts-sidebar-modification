@@ -1,9 +1,9 @@
 import { XmlEditor, XmlError, parseXml, type Markup, type XmlDocument } from "../../xml/index"
 import type { SheetRange } from "../../sheet/protocol"
-import { preimage, shiftIndex, type AxisShift } from "./axis"
+import { preimageCell, shiftIndex, type AxisShift } from "./axis"
 import { refuse, type RefConstruct } from "./catalogue"
 import type { FormulaShift } from "./formulas"
-import { formatSqref, parseRef, parseSqref, shiftRanges } from "./sqref"
+import { formatSqref, parseRef, parseSqref, shiftRangeList, shiftRanges, topLeft } from "./sqref"
 
 // What one sheet's (or part's) rewrite needs: the edit as it applies here, and where to report.
 export interface RefJob {
@@ -108,8 +108,9 @@ export function* descendants(document: XmlDocument, node: number): Generator<num
 		yield* descendants(document, child)
 }
 
-// Formulas written relative to a range list's top-left cell (conditional formats, validations) are written again
-// for the cell that is the top-left after the edit: `rows`/`cols` from the old top-left to where that cell was.
+// Formulas written relative to a range list's top-left cell (the rectangle around its ranges: conditional formats,
+// validations) are written again for the cell that is the top-left after the edit: `rows`/`cols` from the old
+// top-left to where that cell was.
 export interface RangeAnchor {
 	readonly rows: number
 	readonly cols: number
@@ -118,26 +119,29 @@ export interface RangeAnchor {
 const STILL: RangeAnchor = { rows: 0, cols: 0 }
 
 // A range list attribute (sqref) moved. Returns the moved ranges (empty: all deleted) and the anchor move, or null
-// when the attribute is absent. Unreadable lists refuse.
+// when the attribute is absent. Unreadable lists refuse. `mode`: how the list follows cells shifted in a band
+// (shiftRangeList).
 export function shiftSqrefAttribute(
 	edited: Edited,
 	node: number,
 	name: string,
 	job: RefJob,
-	construct: RefConstruct
+	construct: RefConstruct,
+	mode: "list" | "cells" = "list"
 ): { ranges: readonly SheetRange[]; anchor: RangeAnchor } | null {
 	const text = edited.document.attribute(node, name)
 
 	if (text === undefined) return null
 
-	return shiftSqrefText(text, job, construct, next => edited.editor.setAttribute(node, name, next))
+	return shiftSqrefText(text, job, construct, next => edited.editor.setAttribute(node, name, next), mode)
 }
 
 export function shiftSqrefText(
 	text: string,
 	job: RefJob,
 	construct: RefConstruct,
-	write: (next: string) => void
+	write: (next: string) => void,
+	mode: "list" | "cells" = "list"
 ): { ranges: readonly SheetRange[]; anchor: RangeAnchor } {
 	const ranges = parseSqref(text)
 
@@ -147,7 +151,7 @@ export function shiftSqrefText(
 
 	if (job.shift === null || first === undefined) return { ranges, anchor: STILL }
 
-	const next = shiftRanges(ranges, job.shift)
+	const next = shiftRangeList(ranges, job.shift, mode)
 	const head = next[0]
 
 	if (next !== ranges) {
@@ -159,10 +163,11 @@ export function shiftSqrefText(
 	if (head === undefined) return { ranges: next, anchor: STILL }
 
 	// The cell now at the new top-left was at its preimage before.
-	if (job.shift.axis === "rows")
-		return { ranges: next, anchor: { rows: preimage(head.startRow, job.shift) - first.startRow, cols: head.startCol - first.startCol } }
+	const before = topLeft(ranges)
+	const after = topLeft(next)
+	const was = preimageCell(after.row, after.col, job.shift)
 
-	return { ranges: next, anchor: { rows: head.startRow - first.startRow, cols: preimage(head.startCol, job.shift) - first.startCol } }
+	return { ranges: next, anchor: { rows: was.row - before.row, cols: was.col - before.col } }
 }
 
 // A single range attribute (ref) moved: false when the range was deleted (the caller drops the element), true

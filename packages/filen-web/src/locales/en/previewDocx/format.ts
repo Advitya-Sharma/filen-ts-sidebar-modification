@@ -64,58 +64,6 @@ export const previewDocxFormat = {
 	previewDocxFontBody: "{{name}} (Body)",
 	/** Docx editor — font or size picker value while the selection has several */
 	previewDocxValueMixed: "Several",
-	/** Docx editor — colour picker: automatic text colour (black on light, white on dark) */
-	previewDocxColorAutomatic: "Automatic",
-	/** Docx editor — colour picker: no highlight or shading */
-	previewDocxColorNone: "No color",
-	/** Docx editor — colour picker section heading */
-	previewDocxColorThemeColors: "Theme colors",
-	/** Docx editor — colour picker section heading */
-	previewDocxColorStandardColors: "Standard colors",
-	/** Docx editor — a theme colour variation's name; {{color}} is the colour, {{percent}} how much lighter */
-	previewDocxColorLighter: "{{color}}, lighter {{percent}}%",
-	/** Docx editor — a theme colour variation's name; {{color}} is the colour, {{percent}} how much darker */
-	previewDocxColorDarker: "{{color}}, darker {{percent}}%",
-	/** Docx editor — theme colour name */
-	previewDocxColorBackground1: "Background 1",
-	/** Docx editor — theme colour name */
-	previewDocxColorText1: "Text 1",
-	/** Docx editor — theme colour name */
-	previewDocxColorBackground2: "Background 2",
-	/** Docx editor — theme colour name */
-	previewDocxColorText2: "Text 2",
-	/** Docx editor — theme colour name */
-	previewDocxColorAccent1: "Accent 1",
-	/** Docx editor — theme colour name */
-	previewDocxColorAccent2: "Accent 2",
-	/** Docx editor — theme colour name */
-	previewDocxColorAccent3: "Accent 3",
-	/** Docx editor — theme colour name */
-	previewDocxColorAccent4: "Accent 4",
-	/** Docx editor — theme colour name */
-	previewDocxColorAccent5: "Accent 5",
-	/** Docx editor — theme colour name */
-	previewDocxColorAccent6: "Accent 6",
-	/** Docx editor — standard colour name */
-	previewDocxColorDarkRed: "Dark red",
-	/** Docx editor — standard colour name */
-	previewDocxColorRed: "Red",
-	/** Docx editor — standard colour name */
-	previewDocxColorOrange: "Orange",
-	/** Docx editor — standard colour name */
-	previewDocxColorYellow: "Yellow",
-	/** Docx editor — standard colour name */
-	previewDocxColorLightGreen: "Light green",
-	/** Docx editor — standard colour name */
-	previewDocxColorGreen: "Green",
-	/** Docx editor — standard colour name */
-	previewDocxColorLightBlue: "Light blue",
-	/** Docx editor — standard colour name */
-	previewDocxColorBlue: "Blue",
-	/** Docx editor — standard colour name */
-	previewDocxColorDarkBlue: "Dark blue",
-	/** Docx editor — standard colour name */
-	previewDocxColorPurple: "Purple",
 	/** Docx editor — highlighter colour name */
 	previewDocxHighlightYellow: "Yellow",
 	/** Docx editor — highlighter colour name */

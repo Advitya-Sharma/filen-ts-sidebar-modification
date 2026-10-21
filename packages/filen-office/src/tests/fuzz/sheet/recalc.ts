@@ -1,6 +1,7 @@
 import { HyperFormula, type SimpleCellAddress, type SimpleCellRange } from "hyperformula"
 import { bytesSource } from "../../../core/opc/index"
 import type { FormulaEngine } from "../../../core/sheet/formula/formulaEngine"
+import { registerSheetFunctions } from "../../../core/sheet/formula/functions"
 import { sheetFunction } from "../../../core/sheet/functions/catalogue"
 import type { SheetFileKind } from "../../../core/sheet/protocol"
 import { RenderStyleTable } from "../../../core/sheet/session"
@@ -16,7 +17,10 @@ import type { CellScalar } from "../../oracles/sheet/xlsxCells"
 // moment). Cells the engine could not calculate at all (it fell back to the file's result) are counted apart:
 // they would otherwise match by construction.
 
-// What the engine registers, upper case: what "calculates" means here, whatever the catalogue says.
+registerSheetFunctions()
+
+// What the engine registers (the app's own functions included), upper case: what "calculates" means here, whatever
+// the catalogue says.
 const REGISTERED: ReadonlySet<string> = new Set(HyperFormula.getRegisteredFunctionNames("enGB").map(name => name.toUpperCase()))
 
 export type Support = "engine" | "cached" | "missing" | "unknown"
@@ -158,8 +162,12 @@ export class RecalcTally {
 	private current = new Set<string>()
 	private fallbacks = new Set<string>()
 	private counts = { unsupported: 0, fellBack: 0, dependents: 0 }
+	// Root-cause examples kept per function and kind.
+	private readonly exampleLimit: number
 
-	constructor() {
+	constructor(exampleLimit = 4) {
+		this.exampleLimit = exampleLimit
+
 		this.comparison = new CachedComparison({
 			exclude: (workbook, cell) => this.excluded(workbook, cell)
 		})
@@ -342,7 +350,7 @@ export class RecalcTally {
 
 					const examples = this.examples.get(`${name} ${kind}`) ?? []
 
-					if (root && examples.length < 4)
+					if (root && examples.length < this.exampleLimit)
 						examples.push({
 							workbook: workbook.name,
 							sheet: cell.sheet,

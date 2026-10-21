@@ -70,11 +70,6 @@ export const previewDocxReview = {
 	previewDocxAccept: "Accept",
 	/** Docx editor — button in a change card or balloon undoing the tracked change */
 	previewDocxReject: "Reject",
-	/** Docx editor — body of the name prompt when an edit was not made because track changes needs the author's name */
-	previewDocxAuthorNameTrackBody:
-		"Track changes is on, so every edit carries your name. Give it to keep editing, or turn track changes off.",
-	/** Docx editor — button in the name prompt turning track changes off instead of giving a name */
-	previewDocxTurnOffTracking: "Turn off track changes",
 	/** Docx editor — tracked change balloon of a table's, row's or cell's changed properties (Word's wording) */
 	previewDocxFormattedTable: "Formatted Table",
 	/** Docx editor — what a formatting change changed: the font's changes, comma-separated, as Word's balloons list them ({{items}} e.g. "Bold, Italic") */

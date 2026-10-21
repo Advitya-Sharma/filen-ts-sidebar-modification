@@ -90,9 +90,9 @@ describe("sheet session: an ordinary formula giving an array constant", () => {
 
 describe("sheet session: a function the engine lacks, under an error trap", () => {
 	it.each([
-		['IFERROR(AVERAGEIFS(A1:A2,B1:B2,"x"),A1)', "5", false],
-		['IF(ISERROR(_xlfn.CONCAT(A1,"x")),A1,_xlfn.CONCAT(A1,"x"))', "1x", true],
-		["IFERROR(_xlfn.AGGREGATE(9,6,A1:A2),A1)", "10", false]
+		["IFERROR(_xlfn.PERCENTOF(A1:A2,B1:B2),A1)", "5", false],
+		["IF(ISERROR(_xlfn.VALUETOTEXT(A1)),A1,_xlfn.VALUETOTEXT(A1))", "1x", true],
+		["IFERROR(TRIMMEAN(A1:A2,0),A1)", "10", false]
 	] as const)(
 		"%s keeps its stored result, never the trap's, and asks Excel to recalculate once a precedent changes",
 		async (formula, cached, isString) => {
@@ -127,7 +127,7 @@ describe("sheet session: a function the engine lacks, under an error trap", () =
 					name: "One",
 					body:
 						'<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" t="inlineStr"><is><t>x</t></is></c>' +
-						`<c r="C1"><f>IFERROR(AVERAGEIFS(A1:A2,B1:B2,&quot;x&quot;),0)</f><v>5</v></c></row>${XA}` +
+						`<c r="C1"><f>IFERROR(_xlfn.PERCENTOF(A1:A2,B1:B2),0)</f><v>5</v></c></row>${XA}` +
 						'<row r="9"><c r="F9"><v>1</v></c></row></sheetData>'
 				}
 			]
@@ -159,9 +159,7 @@ describe("sheet session: a function the engine lacks, under an error trap", () =
 		})
 		const one = info.sheets[0]?.id ?? 0
 
-		changeOf(
-			await session.command({ type: "cells.set", sheet: one, cells: cells([[0, 2, '=IFERROR(AVERAGEIFS(A1:A2,B1:B2,"x"),0)']]) })
-		)
+		changeOf(await session.command({ type: "cells.set", sheet: one, cells: cells([[0, 2, "=IFERROR(PERCENTOF(A1:A2,B1:B2),0)"]]) }))
 
 		const { sheet, workbook } = await saved(session)
 
@@ -177,7 +175,7 @@ describe("sheet session: a function the engine lacks, under an error trap", () =
 		})
 		const one = info.sheets[0]?.id ?? 0
 
-		changeOf(await session.command({ type: "cells.set", sheet: one, cells: cells([[0, 2, '=AVERAGEIFS(Table1[A],Table1[B],"x")']]) }))
+		changeOf(await session.command({ type: "cells.set", sheet: one, cells: cells([[0, 2, "=PERCENTOF(Table1[A],Table1[B])"]]) }))
 
 		const reopened = await openFixture(await savedBytes(session))
 
@@ -214,7 +212,7 @@ describe("sheet session: a function the engine lacks, under an error trap", () =
 
 	it("holds a formula that reads a defined name the engine lacks", async () => {
 		const { session, info } = await openFixture({
-			workbookTail: '<definedNames><definedName name="avg">_xlfn.AGGREGATE(9,6,One!$A$1:$A$2)</definedName></definedNames>',
+			workbookTail: '<definedNames><definedName name="avg">TRIMMEAN(One!$A$1:$A$2,0)</definedName></definedNames>',
 			sheets: [
 				{
 					name: "One",
@@ -243,7 +241,7 @@ describe("sheet session: results held from the file", () => {
 					name: "One",
 					body:
 						'<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" t="inlineStr"><is><t>x</t></is></c>' +
-						`<c r="C1"><f>AVERAGEIFS(A1:A2,B1:B2,&quot;x&quot;)</f><v>5</v></c><c r="D1"><f>C1*2</f><v>10</v></c><c r="E1"><f>C1+F1</f><v>5</v></c></row>${XA}</sheetData>`
+						`<c r="C1"><f>_xlfn.PERCENTOF(A1:A2,B1:B2)</f><v>5</v></c><c r="D1"><f>C1*2</f><v>10</v></c><c r="E1"><f>C1+F1</f><v>5</v></c></row>${XA}</sheetData>`
 				}
 			]
 		})
@@ -283,7 +281,7 @@ describe("sheet session: results held from the file", () => {
 			sheets: [
 				{
 					name: "One",
-					body: '<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="C1"><f>_xlfn.AGGREGATE(9,6,A1:A3)</f><v>10</v></c></row><row r="2"><c r="A2"><v>9</v></c></row></sheetData>'
+					body: '<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="C1"><f>TRIMMEAN(A1:A3,0)</f><v>10</v></c></row><row r="2"><c r="A2"><v>9</v></c></row></sheetData>'
 				}
 			]
 		})

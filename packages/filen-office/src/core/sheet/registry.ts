@@ -55,6 +55,10 @@ export interface SheetReadContext<D> {
 	readonly signal: SheetAbortSignal | undefined
 	// The session's version (SheetDocState.version) when the call runs: what a query's answer reflects.
 	readonly version: number
+	// Work a feature does after a call, in turns of its own (statistics read again after a large edit, while its tiles
+	// show what it last knew): what it resolves with patches those tiles, as a ready hook's result does. Absent where
+	// the session runs nothing later; the feature then does the work at once.
+	readonly later?: (sheet: SheetId, work: () => Promise<SheetReadyResult>) => void
 }
 
 export interface SheetCommandContext<D> extends SheetReadContext<D> {
@@ -117,17 +121,47 @@ export interface SheetTileBuilder {
 	flags(entry: number): number
 	addFlags(entry: number, flags: number): void
 	setStyle(entry: number, style: number): void
+	// A render style by its index (an entry's, as earlier features left it).
+	styleOf(index: number): SheetRenderStyle
+	// What the entry shows, and what editing it starts from (null: its text): a format a feature applies over the
+	// cell's own (a conditional format's number format, a value hidden behind a data bar).
+	setText(entry: number, text: string, input: string | null): void
 	// The session's index of a look (interned; new ones reach the client with the tile).
 	intern(style: SheetRenderStyle): number
 	// Built entries are final: a layer refers to entries by the indices find and entry return.
 	layer<L extends SheetTileLayerName>(name: L, value: SheetTileLayerMap[L]): void
+	// A layer an earlier feature set on this tile (its entry indices as built).
+	layerOf<L extends SheetTileLayerName>(name: L): SheetTileLayerMap[L] | undefined
 }
 
 export type SheetTileProducer<D> = (context: SheetReadContext<D>, tile: SheetTileBuilder) => void
 
+// The cells whose look follows other cells' content (a conditional format over its range's values, a rule's formula
+// reading cells elsewhere): told that `range` of `sheet` changed (its content, or cells moved there by a structure
+// edit), a feature adds the ranges whose tiles must be built again, on any sheet. Called before the change's tiles
+// are patched, also for undo, redo and recalculated results; a feature drops what it cached for those cells here.
+export type SheetDependentsHook<D> = (
+	context: SheetReadContext<D>,
+	sheet: SheetId,
+	range: SheetRange,
+	add: (sheet: SheetId, range: SheetRange) => void
+) => void
+
 export type SheetLayoutProducers<D> = {
 	readonly [K in SheetLayoutExtensionName]?: (context: SheetReadContext<D>, sheet: SheetId) => SheetLayoutExtensionMap[K] | undefined
 }
+
+// What a feature's ready hook found on a sheet: the cells whose tiles show it, and whether the sheet's layout does.
+export interface SheetReadyResult {
+	readonly ranges: readonly SheetRange[]
+	readonly layout?: boolean
+}
+
+// Loads what a feature reads beside a sheet's own part (another part of the package): tile and layout producers are
+// synchronous, so they show it once it has landed. Tiles and layouts never wait for it; the session patches those
+// built before it landed. Rejects (with an Error saying why) when the feature cannot read what it needs: the feature
+// then shows nothing on the sheet and refuses its commands there, and the session reports it (featureUnavailable).
+export type SheetReadyHook<D> = (context: SheetReadContext<D>, sheet: SheetId) => Promise<SheetReadyResult>
 
 export type SheetCellDetailProducers<D> = {
 	readonly [K in SheetCellDetailName]?: (context: SheetReadContext<D>, cell: SheetCell) => SheetCellDetailMap[K] | undefined
@@ -144,6 +178,9 @@ export interface SheetFeature<D> {
 	readonly queries?: SheetQueryHandlers<D>
 	// Run on every tile built, in feature order.
 	readonly tiles?: SheetTileProducer<D>
+	// Started once per sheet, when the sheet is first opened or asked for.
+	readonly ready?: SheetReadyHook<D>
+	readonly dependents?: SheetDependentsHook<D>
 	readonly layout?: SheetLayoutProducers<D>
 	readonly cell?: SheetCellDetailProducers<D>
 }
@@ -160,6 +197,10 @@ export interface SheetRegistry<D> {
 	owner(name: SheetCommandType | SheetQueryName): string | undefined
 	query<Q extends SheetQueryName>(name: Q): SheetQueryHandler<D, Q> | undefined
 	readonly tiles: readonly SheetTileProducer<D>[]
+	// Each ready hook with its feature's id.
+	readonly ready: readonly (readonly [string, SheetReadyHook<D>])[]
+	// Each dependents hook with its feature's id.
+	readonly dependents: readonly (readonly [string, SheetDependentsHook<D>])[]
 	readonly layout: readonly (readonly [SheetLayoutExtensionName, (context: SheetReadContext<D>, sheet: SheetId) => unknown])[]
 	readonly cell: readonly (readonly [SheetCellDetailName, (context: SheetReadContext<D>, cell: SheetCell) => unknown])[]
 }
@@ -181,6 +222,8 @@ export function sheetRegistry<D>(features: readonly SheetFeature<D>[]): SheetReg
 	const queries = new Map<string, unknown>()
 	const extensionOwners = new Map<string, string>()
 	const tiles: SheetTileProducer<D>[] = []
+	const ready: (readonly [string, SheetReadyHook<D>])[] = []
+	const dependents: (readonly [string, SheetDependentsHook<D>])[] = []
 	const layout: (readonly [SheetLayoutExtensionName, (context: SheetReadContext<D>, sheet: SheetId) => unknown])[] = []
 	const cell: (readonly [SheetCellDetailName, (context: SheetReadContext<D>, cell: SheetCell) => unknown])[] = []
 
@@ -204,6 +247,8 @@ export function sheetRegistry<D>(features: readonly SheetFeature<D>[]): SheetReg
 		}
 
 		if (feature.tiles !== undefined) tiles.push(feature.tiles)
+		if (feature.ready !== undefined) ready.push([feature.id, feature.ready])
+		if (feature.dependents !== undefined) dependents.push([feature.id, feature.dependents])
 
 		for (const [name, produce] of Object.entries(feature.layout ?? {})) {
 			if (produce === undefined) continue
@@ -226,6 +271,8 @@ export function sheetRegistry<D>(features: readonly SheetFeature<D>[]): SheetReg
 		owner: name => owners.get(name),
 		query: <Q extends SheetQueryName>(name: Q) => queries.get(name) as SheetQueryHandler<D, Q> | undefined,
 		tiles,
+		ready,
+		dependents,
 		layout,
 		cell
 	}

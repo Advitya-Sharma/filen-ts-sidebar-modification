@@ -36,6 +36,28 @@ function civil(days: number, out: DateParts): void {
 const EPOCH_1900 = -25569
 const EPOCH_1904 = -24107
 
+// Days from 1970-01-01 to a proleptic Gregorian date (civil calendar arithmetic, integers only).
+function civilDays(year: number, month: number, day: number): number {
+	const y = month <= 2 ? year - 1 : year
+	const era = Math.floor(y / 400)
+	const yoe = y - era * 400
+	const doy = Math.floor((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5) + day - 1
+
+	return era * 146097 + yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy - 719468
+}
+
+// A date's serial in a date system, serialDate's inverse: the 1900 system counts the 1900-02-29 it does not have, so
+// dates before March 1900 are a day lower than a plain count.
+export function dateSerial(year: number, month: number, day: number, date1904: boolean): number {
+	const days = civilDays(year, month, day)
+
+	if (date1904) return days - EPOCH_1904
+
+	const serial = days - EPOCH_1900
+
+	return serial < 61 ? serial - 1 : serial
+}
+
 // The date of a whole serial day (>= 0, at most the system's maximum).
 export function serialDate(day: number, date1904: boolean, out: DateParts): DateParts {
 	if (date1904) {

@@ -1,6 +1,6 @@
 import { cellName } from "../../sheet/refs/cellRef"
 import { decodeUtf8, encodeUtf8 } from "../../xml/index"
-import { axisLimit, shiftAxisSpan, shiftIndex, type AxisShift } from "./axis"
+import { axisLimit, inBand, shiftAxisSpan, shiftIndex, straddles, type AxisShift } from "./axis"
 import { shiftSplit, shiftViewStart } from "./views"
 import { refuse } from "./catalogue"
 import { shiftAnchor } from "./anchors"
@@ -167,6 +167,14 @@ export function autoFilter(edited: Edited, node: number, job: RefJob, construct:
 	const range = text === undefined ? null : parseRef(text)
 
 	if (text !== undefined && range === null) refuse("structureLocked", `${construct}: autofilter range "${text}"`)
+
+	// Cells shifted in a band: a filtered range they do not lie across stays, unless they move part of it.
+	if (job.shift?.band !== undefined && range !== null && !inBand(range, job.shift)) {
+		if (straddles(range, job.shift)) refuse("structureLocked", `${construct}: part of the filtered range`)
+
+		return true
+	}
+
 	if (!shiftRefAttribute(edited, node, "ref", job, construct)) return false
 
 	const shift = job.shift
@@ -209,6 +217,10 @@ export function sortState(
 	job: RefJob,
 	construct: "sortState" | "autoFilter" | "tables" | "customSheetViews"
 ): boolean {
+	const range = parseRef(edited.document.attribute(node, "ref") ?? "")
+
+	if (job.shift?.band !== undefined && range !== null && straddles(range, job.shift))
+		refuse("structureLocked", `${construct}: part of the sorted range`)
 	if (!shiftRefAttribute(edited, node, "ref", job, construct)) return false
 
 	const { left, dropped } = filterChildren(
@@ -226,7 +238,8 @@ export function sortState(
 function breaks(edited: Edited, root: number, job: RefJob, rowBreaks: boolean): boolean {
 	const shift = job.shift
 
-	if (shift === null) return true
+	// Cells shifted in a band leave page breaks where they are.
+	if (shift === null || shift.band !== undefined) return true
 
 	const { document, editor } = edited
 	const own = (rowBreaks ? "rows" : "cols") === shift.axis
@@ -283,7 +296,8 @@ function selectionAndPane(edited: Edited, view: number, job: RefJob, construct: 
 	const { document, editor } = edited
 	const shift = job.shift
 
-	if (shift === null) return
+	// Cells shifted in a band leave the views as they are.
+	if (shift === null || shift.band !== undefined) return
 
 	const moveCell = (node: number, name: string): string | null => {
 		const text = document.attribute(node, name)
@@ -410,7 +424,7 @@ function conditionalFormatting(edited: Edited, root: number, job: RefJob): boole
 function dataValidations(edited: Edited, root: number, job: RefJob): boolean {
 	const { document } = edited
 	const { left, dropped } = filterChildren(edited, root, "dataValidation", node => {
-		const moved = shiftSqrefAttribute(edited, node, "sqref", job, "dataValidations")
+		const moved = shiftSqrefAttribute(edited, node, "sqref", job, "dataValidations", "cells")
 
 		if (moved !== null && moved.ranges.length === 0) return true
 
@@ -432,6 +446,10 @@ function dataValidations(edited: Edited, root: number, job: RefJob): boolean {
 
 function hyperlinks(edited: Edited, root: number, job: RefJob): boolean {
 	const { left, dropped } = filterChildren(edited, root, "hyperlink", node => {
+		const range = parseRef(edited.document.attribute(node, "ref") ?? "")
+
+		// A hyperlink belongs to its cells: one only partly shifted in a band cannot follow them.
+		if (job.shift?.band !== undefined && range !== null && straddles(range, job.shift)) refuse("structureLocked", "hyperlinks")
 		if (!shiftRefAttribute(edited, node, "ref", job, "hyperlinks")) return true
 
 		shiftFormulaAttribute(edited, node, "location", job, "hyperlinks", null)
@@ -537,7 +555,13 @@ function x14Block(edited: Edited, node: number, job: RefJob, construct: "conditi
 	let anchor: RangeAnchor | null = null
 
 	if (sqref >= 0) {
-		const moved = shiftSqrefText(document.textContent(sqref), job, construct, next => editor.setText(sqref, next))
+		const moved = shiftSqrefText(
+			document.textContent(sqref),
+			job,
+			construct,
+			next => editor.setText(sqref, next),
+			construct === "dataValidationsX14" ? "cells" : "list"
+		)
 
 		if (moved.ranges.length === 0) return false
 

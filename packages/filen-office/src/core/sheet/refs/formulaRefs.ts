@@ -2,6 +2,7 @@ import { functionPrefix, functionSupport, functionVolatility, sheetFunction } fr
 import { columnIndex, columnName } from "./cellRef"
 import type { AxisEdit } from "../model/edits"
 import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
+import { CRITERION_FUNCTION, INTERSECT_FUNCTION } from "../functions/engineNames"
 
 // Cell references inside Excel formula text, found and rewritten without evaluating anything: filling a
 // shared formula down, moving references for inserted or deleted rows and columns, renaming a sheet. The
@@ -412,6 +413,24 @@ export function rewriteFormula(formula: string, visit: (ref: FormulaRef) => Form
 	return render(formulaParts(formula), visit)
 }
 
+// Whether a sheet's name is quoted where a formula names it ('2024'!A1, 'Q1 Data'!A1).
+export function sheetNameNeedsQuotes(name: string): boolean {
+	return needsQuotes(name)
+}
+
+// The formula with every sheet it names spelled as Excel's grammar needs: quoted where the name needs it. HyperFormula
+// writes such a name back bare (2024!A1), which it cannot read again.
+export function quoteSheetNames(formula: string): string {
+	let text = ""
+
+	for (const part of formulaParts(formula)) {
+		if (typeof part === "string") text += part
+		else text += (part.ref.sheet === null ? part.prefix : sheetPrefix(part.ref.sheet, part.ref.lastSheet)) + part.areaText
+	}
+
+	return text
+}
+
 // F4 while a formula is typed: the reference the caret is in or just after (in `formula`, without the "=") made
 // absolute, then absolute in its row alone, then in its column alone, then relative again, as Excel cycles it; both
 // ends of a range take the state that follows the first's. A whole-column or whole-row range turns absolute and
@@ -457,6 +476,45 @@ export function cycleReference(formula: string, caret: number): { readonly formu
 	}
 
 	return null
+}
+
+// A reference in formula text as typed: where it is (start and end, its sheet prefix included) and what it names.
+export interface ReferenceSpan {
+	readonly start: number
+	readonly end: number
+	// The sheet it names, null for the formula's own.
+	readonly sheet: string | null
+	readonly area: RefArea
+}
+
+// The references of a formula (without its "="), in order: what a formula being typed highlights. References into
+// other workbooks, 3-D spans and names are left out.
+export function referenceSpans(formula: string): ReferenceSpan[] {
+	const spans: ReferenceSpan[] = []
+	let offset = 0
+
+	for (const part of formulaParts(formula)) {
+		if (typeof part === "string") {
+			offset += part.length
+
+			continue
+		}
+
+		const start = offset
+		const end = start + part.prefix.length + part.areaText.length
+
+		offset = end
+
+		if (part.ref.area !== null && !part.ref.external && part.ref.lastSheet === null)
+			spans.push({ start, end, sheet: part.ref.sheet, area: part.ref.area })
+	}
+
+	return spans
+}
+
+// A reference's text: the cell or range, behind a sheet prefix (quoted where the name needs it) when `sheet` is given.
+export function referenceText(area: RefArea, sheet: string | null = null): string {
+	return `${sheet === null ? "" : sheetPrefix(sheet)}${areaText(area)}`
 }
 
 // A shared formula's text for a cell `rows` down and `cols` right of the one that stores it: relative
@@ -675,7 +733,7 @@ function mapWords(formula: string, map: (word: string, called: boolean) => strin
 }
 
 // Whether a formula calls a function the formula engine does not calculate (one the function catalogue does not
-// mark "hyperformula", or no worksheet function at all: an add-in's, a LAMBDA's), or names one that
+// mark "hyperformula" or "plugin", or no worksheet function at all: an add-in's, a LAMBDA's), or names one that
 // `unknownName` (given the name in upper case) says the engine lacks. Such a formula keeps the result its file
 // stored: under an error trap (IFERROR, ISERROR) the engine's #NAME? for the call would read as a value.
 export function engineLacks(formula: string, unknownName?: (name: string) => boolean): boolean {
@@ -695,7 +753,9 @@ export function engineLacks(formula: string, unknownName?: (name: string) => boo
 			const next = formula.charCodeAt(end)
 
 			if (next === 40) {
-				if (functionSupport(bareFunctionName(formula.slice(index, end)).toUpperCase()) !== "hyperformula") return true
+				const support = functionSupport(bareFunctionName(formula.slice(index, end)).toUpperCase())
+
+				if (support !== "hyperformula" && support !== "plugin") return true
 			} else if (unknownName !== undefined && next !== 33 && unknownName(formula.slice(index, end).toUpperCase())) {
 				return true
 			}
@@ -709,8 +769,8 @@ export function engineLacks(formula: string, unknownName?: (name: string) => boo
 	return false
 }
 
-// A defined name's formula when it is one absolute cell of a sheet of this workbook ('Data'!$A$1), as the engine
-// reads it; null for anything else. Such a name stands for its cell wherever it is used.
+// A defined name's formula when it is one absolute cell of a sheet of this workbook ('Data'!$A$1, or the range
+// 'Data'!$A$1:$A$1), as the engine reads it; null for anything else. Such a name stands for its cell wherever it is used.
 export function absoluteCell(formula: string): string | null {
 	const parts = formulaParts(formula.trim())
 	const part = parts[0]
@@ -720,9 +780,14 @@ export function absoluteCell(formula: string): string | null {
 	const { ref } = part
 	const area = ref.area
 
-	if (ref.external || ref.sheet === null || ref.lastSheet !== null || area === null || area.kind !== "cell" || area.range) return null
+	if (ref.external || ref.sheet === null || ref.lastSheet !== null || area === null || area.kind !== "cell") return null
 
-	return area.startRowAbs && area.startColAbs ? engineFormula(`${part.prefix}${part.areaText}`) : null
+	// A range of one cell ($A$1:$A$1) is that cell.
+	if (area.range && (area.startRow !== area.endRow || area.startCol !== area.endCol || !area.endRowAbs || !area.endColAbs)) return null
+
+	return area.startRowAbs && area.startColAbs
+		? engineFormula(`${part.prefix}${cellText(area.startRow, area.startCol, true, true)}`)
+		: null
 }
 
 export interface FormulaInputs {
@@ -1279,7 +1344,7 @@ const ARRAY_ARGUMENTS = new Set(["SUMPRODUCT", "SUMX2MY2", "SUMX2PY2", "SUMXMY2"
 
 // Functions returning an array. Excel reads an ordinary formula holding one as taking the array's first
 // value; the engine would spill it over the cells below and beside instead.
-const ARRAY_RESULTS = new Set([
+export const ARRAY_RESULTS: ReadonlySet<string> = new Set([
 	"SEQUENCE",
 	"MMULT",
 	"TRANSPOSE",
@@ -1296,7 +1361,14 @@ const ARRAY_RESULTS = new Set([
 	"RANDARRAY",
 	"MUNIT",
 	"FREQUENCY",
-	"XLOOKUP"
+	"XLOOKUP",
+	"TEXTSPLIT",
+	"TAKE",
+	"DROP",
+	"CHOOSECOLS",
+	"CHOOSEROWS",
+	"MODE.MULT",
+	"TREND"
 ])
 
 // A call to any of ARRAY_RESULTS, or to one of them but XLOOKUP, in any case: one test where each name would be one.
@@ -1423,8 +1495,9 @@ function boundArraySizes(text: string): string {
 	return out
 }
 
-// Whether a formula holds a bracket outside strings and quoted sheet names: a structured reference
-// (Table1[Amount]) or one into another workbook ([1]Sheet1!A1), which the engine has no syntax for.
+// Whether a formula holds a bracket outside strings: a structured reference (Table1[Amount]) or one into another
+// workbook ([1]Sheet1!A1, '[1]Sheet 1'!A1), which the engine has no syntax for. A bracket inside a quoted sheet
+// name is a workbook's only at its start.
 export function holdsBracket(formula: string): boolean {
 	if (!formula.includes("[")) return false
 
@@ -1433,7 +1506,13 @@ export function holdsBracket(formula: string): boolean {
 	while (index < formula.length) {
 		const code = formula.charCodeAt(index)
 
-		if (code === QUOTE || code === APOSTROPHE) index = skipQuoted(formula, index, code)
+		if (code === APOSTROPHE && formula.charCodeAt(index + 1) === BRACKET_OPEN) {
+			const end = skipQuoted(formula, index, code)
+
+			if (formula.charCodeAt(end) === 33) return true
+
+			index = end
+		} else if (code === QUOTE || code === APOSTROPHE) index = skipQuoted(formula, index, code)
 		else if (code === BRACKET_OPEN) return true
 		else index++
 	}
@@ -1467,10 +1546,166 @@ export function engineCellFormula(formula: string, aliases?: ReadonlyMap<string,
 		return null
 	}
 
-	const read = engineFormula(formula, aliases)
+	const read = engineFormula(RESIZED_CALL.test(formula) ? resizedSumRanges(formula) : formula, aliases)
 	const text = CALLS_SIZED.test(read) ? boundArraySizes(read) : read
 
-	return CALLS_ARRAY_RESULT.test(text) ? `=INDEX((${text}),1,1)` : `=${text}`
+	if (CALLS_ARRAY_RESULT.test(text)) return `=INDEX((${text}),1,1)`
+
+	// A formula that is a range alone (=B1:B9, =Sheet2!A1:C1) gives the cell of it in the formula's row or column, as
+	// Excel reads an ordinary formula (implicit intersection).
+	return rangeAlone(formula) ? `=${INTERSECT_FUNCTION}(${text})` : `=${text}`
+}
+
+// Whether the formula is one reference to more than one cell, and nothing else.
+function rangeAlone(formula: string): boolean {
+	if (!formula.includes(":")) return false
+
+	const parts = formulaParts(formula)
+	let ref: RefPart | null = null
+
+	for (const part of parts) {
+		if (typeof part === "string") {
+			if (part.trim() !== "") return false
+		} else if (ref === null) ref = part
+		else return false
+	}
+
+	const area = ref?.ref.area
+
+	return ref !== null && !ref.ref.external && area !== null && area !== undefined && (area.range || area.kind !== "cell")
+}
+
+const RESIZED_CALL = /(?:SUMIF|AVERAGEIF|LOOKUP)\(/i
+const RESIZED = /^(?:_xlfn\.)?(?:SUMIF|AVERAGEIF)$/i
+
+// The reference an argument is, alone, or null.
+function soleReference(text: string): RefPart | null {
+	const parts = formulaParts(text.trim())
+	const part = parts[0]
+
+	return parts.length === 1 && part !== undefined && typeof part !== "string" && !part.ref.external && part.ref.area !== null
+		? part
+		: null
+}
+
+// SUMIF and AVERAGEIF with a sum_range of another size than the range it is tested over: Excel reads the sum_range
+// as starting at its top-left cell with the range's size ("The sum_range argument does not have to be the same
+// size and shape as the range argument. The actual cells that are added are determined by using the upper
+// leftmost cell in the sum_range argument as the beginning cell, and then including cells that correspond in
+// size and shape to the range argument": support.microsoft.com "SUMIF function"); the engine wants one size.
+// Rewritten so where both are plain references (the engine then follows the cells it reads); and LOOKUP's
+// result_vector shorter than its lookup_vector likewise.
+function resizedSumRanges(formula: string): string {
+	let out = ""
+	let index = 0
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) {
+			const end = skipQuoted(formula, index, code)
+
+			out += formula.slice(index, end)
+			index = end
+
+			continue
+		}
+
+		if (code === BRACKET_OPEN) {
+			const end = skipBracket(formula, index)
+
+			out += formula.slice(index, end)
+			index = end
+
+			continue
+		}
+
+		if (!isWordChar(code)) {
+			out += formula[index] ?? ""
+			index++
+
+			continue
+		}
+
+		const end = readWord(formula, index)
+		const word = formula.slice(index, end)
+		const call = formula.charCodeAt(end) === 40 ? callArguments(formula, end) : null
+
+		if (call === null) {
+			out += word
+			index = end
+
+			continue
+		}
+
+		const args = call.args.map(resizedSumRanges)
+		const range = args.length === 3 && RESIZED.test(word) ? soleReference(args[0] ?? "") : null
+		const sum = range === null ? null : soleReference(args[2] ?? "")
+		const resized = range === null || sum === null ? null : resizedArea(range.ref.area as RefArea, sum.ref.area as RefArea)
+
+		if (resized !== null && sum !== null) args[2] = `${sum.prefix}${areaText(resized)}`
+
+		// LOOKUP's result_vector shorter than lookup_vector: read on from its first cell, along itself (one cell: along
+		// lookup_vector), as Excel and LibreOffice read it.
+		if (args.length === 3 && /^LOOKUP$/i.test(word)) {
+			const vector = soleReference(args[1] ?? "")?.ref.area
+			const result = soleReference(args[2] ?? "")
+			const area = result?.ref.area
+
+			if (vector !== undefined && vector !== null && result !== null && area?.kind === "cell" && vector.kind === "cell") {
+				const length = Math.max(Math.abs(vector.endRow - vector.startRow), Math.abs(vector.endCol - vector.startCol)) + 1
+				const rows = Math.abs(area.endRow - area.startRow) + 1
+				const cols = Math.abs(area.endCol - area.startCol) + 1
+				const down = area.range
+					? cols === 1
+					: Math.abs(vector.endRow - vector.startRow) >= Math.abs(vector.endCol - vector.startCol)
+				const shape: RefArea = down
+					? { ...vector, startRow: 0, startCol: 0, endRow: length - 1, endCol: 0 }
+					: { ...vector, startRow: 0, startCol: 0, endRow: 0, endCol: length - 1 }
+
+				if ((rows === 1 || cols === 1) && Math.max(rows, cols) < length) {
+					const grown = resizedArea(shape, area)
+
+					if (grown !== null) args[2] = `${result.prefix}${areaText(grown)}`
+				}
+			}
+		}
+
+		out += `${word}(${args.join(",")})`
+		index = call.end
+	}
+
+	return out
+}
+
+// `sum` from its top-left cell with `range`'s size, or null when it already has it (or either spans whole rows or
+// columns, whose size the text does not give).
+function resizedArea(range: RefArea, sum: RefArea): RefArea | null {
+	if (range.kind !== "cell" || sum.kind !== "cell") return null
+
+	const rows = Math.abs(range.endRow - range.startRow)
+	const cols = Math.abs(range.endCol - range.startCol)
+	const top = Math.min(sum.startRow, sum.endRow)
+	const left = Math.min(sum.startCol, sum.endCol)
+
+	if (Math.abs(sum.endRow - sum.startRow) === rows && Math.abs(sum.endCol - sum.startCol) === cols) return null
+	if (top + rows >= MAX_ROWS || left + cols >= MAX_COLUMNS) return null
+
+	const topAbs = sum.startRow <= sum.endRow ? sum.startRowAbs : sum.endRowAbs
+	const leftAbs = sum.startCol <= sum.endCol ? sum.startColAbs : sum.endColAbs
+
+	return {
+		kind: "cell",
+		range: rows > 0 || cols > 0,
+		startRow: top,
+		startCol: left,
+		endRow: top + rows,
+		endCol: left + cols,
+		startRowAbs: topAbs,
+		startColAbs: leftAbs,
+		endRowAbs: topAbs,
+		endColAbs: leftAbs
+	}
 }
 
 // Excel formula text as HyperFormula reads it, where only the spelling differs: function names lose the
@@ -1485,9 +1720,11 @@ export function engineFormula(formula: string, aliases?: ReadonlyMap<string, str
 	let text = ""
 	let braces = 0
 	let index = 0
-	// Per open parenthesis: whether it opened a call wrapped in ARRAYFORMULA, which closes with it.
-	const opened: boolean[] = []
+	// Per open parenthesis: whether it opened a call wrapped in ARRAYFORMULA, which closes with it, and for a call
+	// taking criteria, which argument is being written and whether it is wrapped in CRITERION_FUNCTION.
+	const opened: { wrap: boolean; criteria: ((index: number) => boolean) | null; arg: number; braces: number; criterion: boolean }[] = []
 	let wrapNext = false
+	let criteriaNext: ((index: number) => boolean) | null = null
 
 	while (index < formula.length) {
 		const code = formula.charCodeAt(index)
@@ -1532,6 +1769,7 @@ export function engineFormula(formula: string, aliases?: ReadonlyMap<string, str
 				const name = code === 95 ? bareFunctionName(word) : word
 
 				wrapNext = ARRAY_ARGUMENTS.has(name.toUpperCase())
+				criteriaNext = CRITERIA.get(name.toUpperCase()) ?? null
 				text += wrapNext ? `ARRAYFORMULA(${name}` : name
 			} else if (numeric && (next === 43 || next === 45) && /^(\d+\.?\d*|\.\d+)E$/i.test(word)) {
 				text += `${word.slice(0, -1)}e`
@@ -1543,7 +1781,10 @@ export function engineFormula(formula: string, aliases?: ReadonlyMap<string, str
 			} else if (next !== 58 && (word.length === 4 || word.length === 5) && /^(TRUE|FALSE)$/i.test(word)) {
 				text += `${word}()`
 			} else {
-				text += !numeric && aliases !== undefined && aliases.size > 0 ? (aliases.get(word.toUpperCase()) ?? word) : word
+				// A word on either side of ":" is a column of a range (AA:AA), never a name.
+				const column = next === 58 || formula.charCodeAt(index - 1) === 58
+
+				text += !numeric && !column && aliases !== undefined && aliases.size > 0 ? (aliases.get(word.toUpperCase()) ?? word) : word
 			}
 
 			index = end
@@ -1551,12 +1792,32 @@ export function engineFormula(formula: string, aliases?: ReadonlyMap<string, str
 			if (code === 123) braces++
 			if (code === 125) braces--
 
+			const frame = opened.at(-1)
+
+			// The end of a criteria argument.
+			if ((code === 41 || (code === 44 && frame?.braces === braces)) && frame?.criterion === true) {
+				text += ")"
+				frame.criterion = false
+			}
+
 			text += formula[index] ?? ""
 
 			if (code === 40) {
-				opened.push(wrapNext)
+				const criteria = criteriaNext
+				const criterion = criteria?.(0) === true
+
+				opened.push({ wrap: wrapNext, criteria, arg: 0, braces, criterion })
+
+				if (criterion) text += `${CRITERION_FUNCTION}(`
+
 				wrapNext = false
-			} else if (code === 41 && opened.pop() === true) {
+				criteriaNext = null
+			} else if (code === 44 && frame !== undefined && frame.criteria !== null && frame.braces === braces) {
+				frame.arg++
+				frame.criterion = frame.criteria(frame.arg)
+
+				if (frame.criterion) text += `${CRITERION_FUNCTION}(`
+			} else if (code === 41 && opened.pop()?.wrap === true) {
 				text += ")"
 			}
 
@@ -1566,3 +1827,16 @@ export function engineFormula(formula: string, aliases?: ReadonlyMap<string, str
 
 	return text
 }
+
+// The criteria arguments of the functions that take them, by position from 0. Each is given to the engine through
+// CRITERION_FUNCTION, which reads an empty cell as 0 as Excel does.
+const CRITERIA: ReadonlyMap<string, (index: number) => boolean> = new Map([
+	["COUNTIF", (index: number) => index === 1],
+	["SUMIF", (index: number) => index === 1],
+	["AVERAGEIF", (index: number) => index === 1],
+	["COUNTIFS", (index: number) => index % 2 === 1],
+	["SUMIFS", (index: number) => index >= 2 && index % 2 === 0],
+	["AVERAGEIFS", (index: number) => index >= 2 && index % 2 === 0],
+	["MAXIFS", (index: number) => index >= 2 && index % 2 === 0],
+	["MINIFS", (index: number) => index >= 2 && index % 2 === 0]
+])

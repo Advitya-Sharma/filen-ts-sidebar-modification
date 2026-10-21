@@ -5,6 +5,7 @@ import {
 	SHEET_MAX_FORMULA_TEXT,
 	SHEET_MAX_ROWS,
 	type SheetId,
+	type SheetLocale,
 	type SheetRange
 } from "../../sheet/protocol"
 import type { SheetChangeSink, SheetEditStep, SheetHandled } from "../../sheet/registry"
@@ -13,8 +14,11 @@ import { storedFormula, wellFormedFormula } from "../../sheet/refs/formulaRefs"
 import type { SheetStore } from "../model/store"
 import { CellKind, FormulaKind, type XlsxSheetModel } from "../model/types"
 import { liveRelationships } from "../refs/state"
-import { dateSerial, encodeXstring, type XlsxDocument } from "./document"
-import { StyleLimitError, cellStep, clearFormats, reportLogged, typedXf } from "./format"
+import { dateSerial } from "../../sheet/numfmt/date"
+import { encodeXstring, type XlsxDocument } from "./document"
+import type { RecalculatedCell } from "../../sheet/formula/index"
+import { ENGINE_SLICE, StyleLimitError, cellStep, clearFormats, reportLogged, typedXf } from "./format"
+import { sliceClock, type SliceClock, type Slicing } from "../../slicing"
 import { ABSENT, CellLog, type CellState } from "./history"
 
 // Cell entries (cells.set) and clearing (cells.clear): what is typed, read as Excel reads it in that cell, written
@@ -73,15 +77,16 @@ function dateTimeEntry(input: string, date1904: boolean): Entry | null {
 	}
 }
 
-// What is typed into a cell, read as Excel reads it there: into a Text ("@") cell, as text, a formula too.
-export function readEntry(input: string, textFormat: boolean, date1904: boolean): Entry {
+// What is typed into a cell, read as Excel reads it there: into a Text ("@") cell, as text, a formula too. With the
+// session's locale, as typed in it (cellInput.ts); without one, in the file's own (en-US) syntax.
+export function readEntry(input: string, textFormat: boolean, date1904: boolean, locale?: SheetLocale): Entry {
 	if (textFormat && input !== "" && !input.startsWith("'")) return { type: "text", text: input }
 
 	const dateTime = dateTimeEntry(input, date1904)
 
 	if (dateTime !== null) return dateTime
 
-	const parsed = parseCellInput(input)
+	const parsed = parseCellInput(input, locale)
 
 	switch (parsed.type) {
 		case "empty":
@@ -208,7 +213,7 @@ export function unshare(document: XlsxDocument, sheet: SheetId, masterRow: numbe
 	}
 }
 
-function sharedString(document: XlsxDocument, text: string): number {
+export function sharedString(document: XlsxDocument, text: string): number {
 	const strings = document.workbook.sharedStrings
 	const encoded = encodeXstring(text)
 	const found = strings.find(encoded)
@@ -288,6 +293,9 @@ export interface CellInputs {
 	readonly styles?: ArrayLike<number>
 	// The source cell each carries (XlsxSheetStore.carry, a paste of this workbook's own cells), -1 for none.
 	readonly origins?: ArrayLike<number>
+	// 1 where the input is in the file's own (en-US) syntax rather than typed in the session's locale: a value or
+	// formula a paste carries exactly (this workbook's own copy, clipboard HTML's typed values).
+	readonly canonical?: ArrayLike<number>
 }
 
 // Writes typed entries (cells.set, a paste). `prepare` runs once the edit is known to go ahead, before the cells
@@ -297,10 +305,12 @@ export async function setCells(
 	sheet: SheetId,
 	cells: CellInputs,
 	changes: SheetChangeSink,
-	prepare?: (log: CellLog) => void
+	prepare?: (log: CellLog) => void,
+	slicing?: Slicing
 ): Promise<SheetHandled> {
 	const model = await document.ready(sheet)
 	const count = cells.inputs.length
+	const clock = slicing === undefined ? undefined : sliceClock(slicing)
 
 	if (count > SHEET_MAX_EDIT_CELLS || cells.rows.length !== count || cells.cols.length !== count)
 		return { refused: { reason: "tooLarge" } }
@@ -308,6 +318,7 @@ export async function setCells(
 	for (let i = 0; i < count; i++) {
 		if ((cells.rows[i] ?? 0) >= SHEET_MAX_ROWS || (cells.cols[i] ?? 0) >= SHEET_MAX_COLS) return { refused: { reason: "tooLarge" } }
 		if (document.locked(sheet, cells.rows[i] ?? 0, cells.cols[i] ?? 0)) return { refused: { reason: "protectedSheet" } }
+		if ((i & SLICE_MASK) === SLICE_MASK) await due(clock)
 	}
 
 	const store = model.store as SheetStore
@@ -318,7 +329,12 @@ export async function setCells(
 		const col = cells.cols[i] ?? 0
 		const slot = store.locate(row, col)
 		const xf = slot < 0 ? document.startingStyle(model, row, col) : store.style(slot)
-		const entry = readEntry(cells.inputs[i] ?? "", document.numFmt(xf).isText, document.date1904)
+		const entry = readEntry(
+			cells.inputs[i] ?? "",
+			document.numFmt(xf).isText,
+			document.date1904,
+			cells.canonical?.[i] === 1 ? undefined : document.settings.locale
+		)
 
 		if (entry.type === "formula" && !wellFormedFormula(entry.text)) return { refused: { reason: "formula" } }
 
@@ -327,6 +343,8 @@ export async function setCells(
 		if (tooLarge !== null) return { refused: { reason: "tooLarge", detail: tooLarge } }
 
 		entries.push(entry)
+
+		if ((i & SLICE_MASK) === SLICE_MASK) await due(clock)
 	}
 
 	if (splitsArray(model, cells.rows, cells.cols)) return { refused: { reason: "arrayFormula" } }
@@ -368,6 +386,8 @@ export async function setCells(
 			const styled = style < 0 ? state : { ...state, present: true, style }
 
 			states.push(origin < 0 ? styled : { ...styled, origin })
+
+			if ((i & SLICE_MASK) === SLICE_MASK) await due(clock)
 		}
 	} catch (error) {
 		if (error instanceof StyleLimitError) return { refused: { reason: "styleLimit" } }
@@ -377,29 +397,130 @@ export async function setCells(
 
 	prepare?.(log)
 
-	for (let i = 0; i < count; i++) {
-		const row = cells.rows[i] ?? 0
-		const col = cells.cols[i] ?? 0
+	return writeLogged(document, sheet, cells.rows, cells.cols, states, log, changes, slicing)
+}
+
+// Cells between two looks at the slice clock in a sliced edit (a power of two, less one).
+const SLICE_MASK = 255
+
+function due(clock: SliceClock | undefined): Promise<void> | undefined {
+	return clock?.due === true ? clock.pause() : undefined
+}
+
+// Writes an edit's cells (shared formulas split first, each cell logged), recalculates what reads them and reports
+// them: the edit's step. With `slicing` (the in-thread host) every stage yields once the slice is up; the session
+// answers nothing else until the edit is done, so nothing reads the cells half written.
+export async function writeLogged(
+	document: XlsxDocument,
+	sheet: SheetId,
+	rows: ArrayLike<number>,
+	cols: ArrayLike<number>,
+	states: readonly CellState[],
+	log: CellLog,
+	changes: SheetChangeSink,
+	slicing: Slicing | undefined
+): Promise<SheetEditStep> {
+	const clock = slicing === undefined ? undefined : sliceClock(slicing)
+	const store = (document.model(sheet)?.store ?? null) as SheetStore | null
+	const writes: { row: number; col: number; state: CellState }[] = []
+
+	for (let i = 0; i < states.length; i++) {
+		const row = rows[i] ?? 0
+		const col = cols[i] ?? 0
 		const before = document.state(sheet, row, col)
 
-		if (before.formula >= 0 && store.formulas.kind(before.formula) === FormulaKind.SHARED_MASTER)
+		if (store !== null && before.formula >= 0 && store.formulas.kind(before.formula) === FormulaKind.SHARED_MASTER)
 			unshare(document, sheet, row, col, log)
 
 		log.touch(sheet, row, col, () => document.state(sheet, row, col), true)
-		document.write(sheet, row, col, states[i] as CellState)
+		writes.push({ row, col, state: states[i] as CellState })
+
+		if ((i & SLICE_MASK) === SLICE_MASK) await due(clock)
 	}
 
-	recalculateLogged(document, log, changes)
-	log.seal((s, r, c) => document.state(s, r, c))
+	await document.writeCellsSliced(sheet, writes, false, clock)
+	await recalculateSliced(document, log, changes, clock)
+
+	const state = (s: SheetId, r: number, c: number): CellState => document.state(s, r, c)
+
+	for (let from = 0; ; from += WRITE_PART) {
+		log.seal(state, from, Math.min(log.size, from + WRITE_PART))
+
+		if (from + WRITE_PART >= log.size) break
+
+		await due(clock)
+	}
+
 	reportLogged(log, changes, "content")
 
-	return cellStep(document, log, sink => reportLogged(log, sink, "content"), true)
+	return cellStep(document, log, sink => reportLogged(log, sink, "content"), true, slicing)
 }
+
+// Log entries sealed between two looks at the slice clock.
+const WRITE_PART = 4096
 
 // The engine gets the cells the edit wrote, sheet by sheet, and its results go into the log.
 export function recalculateLogged(document: XlsxDocument, log: CellLog, changes: SheetChangeSink): void {
 	if (document.engine === null) return
 
+	for (const [sheet, list] of directCells(log)) document.recalculate(sheet, list, log, changes)
+}
+
+// recalculateLogged with the engine given the cells ENGINE_SLICE at a time, its evaluation held until all are in (what
+// reads them is recalculated once), yielding between parts once the clock's slice is up.
+async function recalculateSliced(
+	document: XlsxDocument,
+	log: CellLog,
+	changes: SheetChangeSink,
+	clock: SliceClock | undefined
+): Promise<void> {
+	const engine = document.engine
+
+	if (clock === undefined || engine === null) {
+		recalculateLogged(document, log, changes)
+
+		return
+	}
+
+	const bySheet = directCells(log)
+	let results: RecalculatedCell[]
+
+	try {
+		engine.holdEvaluation()
+
+		for (const [sheet, list] of bySheet) {
+			const model = document.model(sheet)
+			const index = document.engineIndex(sheet)
+
+			if (model === null || index < 0) continue
+
+			for (let start = 0; start < list.length; start += ENGINE_SLICE) {
+				engine.set(
+					index,
+					list.slice(start, start + ENGINE_SLICE).map(cell => document.engineCell(model, cell.row, cell.col))
+				)
+				await due(clock)
+			}
+		}
+
+		results = await engine.releaseEvaluation(true, clock)
+	} catch {
+		// Built again from the cells when next needed, as a failing recalculate leaves it.
+		document.dropEngine()
+
+		return
+	}
+
+	let first = true
+
+	for (const [sheet, list] of bySheet) {
+		document.applyRecalculated(sheet, list, first ? results : [], log, changes)
+		first = false
+	}
+}
+
+// The cells an edit wrote itself, by sheet.
+function directCells(log: CellLog): Map<SheetId, { row: number; col: number }[]> {
 	const bySheet = new Map<SheetId, { row: number; col: number }[]>()
 
 	for (let i = 0; i < log.size; i++) {
@@ -416,7 +537,7 @@ export function recalculateLogged(document: XlsxDocument, log: CellLog, changes:
 		list.push({ row: log.rows[i] ?? 0, col: log.cols[i] ?? 0 })
 	}
 
-	for (const [sheet, list] of bySheet) document.recalculate(sheet, list, log, changes)
+	return bySheet
 }
 
 // cells.clear: contents (values and formulas; formats stay), formats (back to the default; values stay) or all.
@@ -425,10 +546,12 @@ export async function clearCells(
 	sheet: SheetId,
 	ranges: readonly SheetRange[],
 	what: "contents" | "formats" | "all",
-	changes: SheetChangeSink
+	changes: SheetChangeSink,
+	slicing?: Slicing
 ): Promise<SheetHandled> {
 	const model = await document.ready(sheet)
 	const store = model.store as SheetStore
+	const clock = slicing === undefined ? undefined : sliceClock(slicing)
 	const targets: { row: number; col: number }[] = []
 
 	for (const range of ranges) {
@@ -453,8 +576,12 @@ export async function clearCells(
 	if (splitsArray(model, rows, cols)) return { refused: { reason: "arrayFormula" } }
 
 	const log = new CellLog()
+	const changedRows: number[] = []
+	const changedCols: number[] = []
+	const cleared: CellState[] = []
 
-	for (const { row, col } of targets) {
+	for (let i = 0; i < targets.length; i++) {
+		const { row, col } = targets[i] as { row: number; col: number }
 		const before = document.state(sheet, row, col)
 		let next: CellState
 
@@ -474,21 +601,15 @@ export async function clearCells(
 		)
 			continue
 
-		if (before.formula >= 0 && store.formulas.kind(before.formula) === FormulaKind.SHARED_MASTER)
-			unshare(document, sheet, row, col, log)
+		changedRows.push(row)
+		changedCols.push(col)
+		cleared.push(next)
 
-		log.touch(sheet, row, col, () => document.state(sheet, row, col), true)
-		document.write(sheet, row, col, next)
+		if ((i & SLICE_MASK) === SLICE_MASK) await due(clock)
 	}
 
-	let contents: SheetEditStep | null = null
-
-	if (log.size > 0) {
-		recalculateLogged(document, log, changes)
-		log.seal((s, r, c) => document.state(s, r, c))
-		reportLogged(log, changes, "content")
-		contents = cellStep(document, log, sink => reportLogged(log, sink, "content"), true)
-	}
+	const contents =
+		cleared.length === 0 ? null : await writeLogged(document, sheet, changedRows, changedCols, cleared, log, changes, slicing)
 
 	if (what === "contents") return contents
 

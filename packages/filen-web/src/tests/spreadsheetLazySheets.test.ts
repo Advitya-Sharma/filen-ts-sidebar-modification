@@ -312,6 +312,7 @@ describe("the text worker", () => {
 		visit(join(SRC, "features/spreadsheet/workers/csv.worker.ts"))
 		expect([...seen].some(file => file.includes("/core/sheet/csv/"))).toBe(true)
 		expect([...seen].some(file => file.includes("/core/sheet/formula/"))).toBe(false)
+		expect([...seen].filter(file => file.includes("/core/xlsx/"))).toEqual([])
 		expect([...packages].sort()).toEqual(["comlink"])
 	})
 })

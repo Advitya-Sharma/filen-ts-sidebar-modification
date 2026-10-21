@@ -124,14 +124,6 @@ export const previewDocxEditor = {
 	previewDocxLayoutUpdating: "Laying out pages…",
 	/** Docx editor — action on the save-locked toast: copies the text the user had typed into those parts */
 	previewDocxSaveLockedCopy: "Copy my changes",
-	/** Docx editor — dialog title asking for the name comments and tracked changes are signed with */
-	previewDocxAuthorNameTitle: "Your name in documents",
-	/** Docx editor — dialog body asking for the author name; it is synced and can be changed in settings */
-	previewDocxAuthorNameBody: "Comments and tracked changes show this name. You can change it later in settings.",
-	/** Docx editor — author name field label */
-	previewDocxAuthorNameLabel: "Name",
-	/** Docx editor — author name dialog submit button */
-	previewDocxAuthorNameSave: "Save",
 	/** Docx editor — toast when a command that runs in the background (updating fields, inserting a picture) failed */
 	previewDocxCommandFailed: "That change couldn't be made.",
 	/** Docx editor — ⋯ menu switch: every field shows its code instead of its result (Word's Alt+F9) */

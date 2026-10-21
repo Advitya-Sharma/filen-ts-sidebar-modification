@@ -32,9 +32,12 @@ import {
 	type SheetSummary,
 	type SheetWritability
 } from "./protocol"
+import { textClipboardHtmlFeature } from "./clipboard/text"
 import { textFillFeature } from "./fill/text"
 import { textFindFeature } from "./find/text"
 import { textNavigateFeature } from "./navigate/text"
+import { textShiftFeature } from "./shift/text"
+import { textSortFeature } from "./sort/text"
 import { defineSheetFeature, sheetRegistry, type SheetChangeSink, type SheetFeature, type SheetHandled } from "./registry"
 import { RenderStyleTable, SheetSession, sessionFeature, type SheetEntrySink, type SheetSessionDocument } from "./session"
 
@@ -741,7 +744,17 @@ export async function openTextSession(
 		styles,
 		{
 			features: own =>
-				sheetRegistry([textFeature, textFindFeature, textNavigateFeature, textFillFeature, ...features, sessionFeature(own)])
+				sheetRegistry([
+					textFeature,
+					textFindFeature,
+					textNavigateFeature,
+					textFillFeature,
+					textShiftFeature,
+					textSortFeature,
+					textClipboardHtmlFeature,
+					...features,
+					sessionFeature(own)
+				])
 		},
 		options,
 		onEvent

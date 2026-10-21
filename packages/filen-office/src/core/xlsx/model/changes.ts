@@ -1,5 +1,5 @@
 import type { NewRelationship, Relationship, Relationships } from "../../opc/relationships"
-import { resolvePartName } from "../../opc/partNames"
+import { partKey, resolvePartName } from "../../opc/partNames"
 import type { SheetId } from "../../sheet/protocol"
 import { XlsxReadError } from "../read/errors"
 import type {
@@ -38,6 +38,8 @@ export class ChangeLog implements XlsxChangeLog {
 	private readonly highest = new Map<string, number>()
 	// Added relationships removed again, by source and identity: added once more (a redo), each gets its id back.
 	private readonly retired = new Map<string, Relationship>()
+	// Every part written or given relationships since open, removed again or not (partKey).
+	private readonly named = new Set<string>()
 	private readonly relationshipsOf: (source: string) => Relationships | undefined
 
 	constructor(relationshipsOf: (source: string) => Relationships | undefined) {
@@ -89,7 +91,14 @@ export class ChangeLog implements XlsxChangeLog {
 	}
 
 	writePart(name: string, write: XlsxPartWrite): void {
+		this.named.add(partKey(name))
 		this.parts.set(name, write)
+	}
+
+	// Whether a part had this name since open (an undone copy's): a new part takes another, so the ids its markup
+	// is written with are the ids its relationships get, not ones the old part's retired relationships hold.
+	hadName(name: string): boolean {
+		return this.named.has(partKey(name))
 	}
 
 	removePart(name: string): void {
@@ -112,6 +121,8 @@ export class ChangeLog implements XlsxChangeLog {
 	}
 
 	addRelationship(source: string, relationship: NewRelationship): Relationship {
+		this.named.add(partKey(source))
+
 		const identity = retiredKey(source, relationship.type, relationship.target, relationship.external === true)
 		const retired = this.retired.get(identity)
 

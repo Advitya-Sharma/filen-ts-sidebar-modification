@@ -159,6 +159,14 @@ export function readTabColor(section: Uint8Array | null): XlsxColor | null {
 }
 
 export function writeSheetPr(sheet: XlsxSheetModel, section: Uint8Array | null, prefix: string): Uint8Array | null {
+	const colored = writeTabColor(sheet, section, prefix)
+
+	if (sheet.filterMode === undefined || (colored === null && !sheet.filterMode)) return colored
+
+	return syncAttributes(colored, qualify(prefix, "sheetPr"), [booleanField("filterMode", sheet.filterMode, false)])
+}
+
+function writeTabColor(sheet: XlsxSheetModel, section: Uint8Array | null, prefix: string): Uint8Array | null {
 	if (sameColor(readTabColor(section), sheet.tabColor)) return section
 
 	const tab = sheet.tabColor === null ? "" : `<${qualify(prefix, "tabColor")}${colorAttributes(sheet.tabColor)}/>`

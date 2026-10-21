@@ -34,10 +34,11 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { TooltipIconButton } from "@/components/ui/tooltipIconButton"
-import { keepFocus } from "@/features/preview/components/docxEditor.logic"
+import { keepFocus } from "@/features/office/lib/officeControls"
 import { FormatCellsDialog } from "@/features/spreadsheet/next/dialogs/formatCells"
 import { setFormatCellsOpen, useFormatCellsOpen } from "@/features/spreadsheet/next/toolbar/formatCellsState"
 import { FindButton } from "@/features/spreadsheet/next/find/findButton"
+import { SortFilterMenu } from "@/features/spreadsheet/next/data/sortFilterMenu"
 import { FreezeMenu } from "@/features/spreadsheet/next/menus/freezeMenu"
 import { MergeMenu } from "@/features/spreadsheet/next/menus/mergeMenu"
 import {
@@ -215,7 +216,7 @@ export function SheetToolbar({
 	const theme = choices === undefined ? [] : themeSwatchRows(choices.themeColors)
 	const active = cell?.format
 	const off = disabled || active === undefined
-	const automatic = t("previewDocxColorAutomatic")
+	const automatic = t("previewOfficeColorAutomatic")
 	const noFill = t("previewSpreadsheetColorNone")
 
 	function command(next: SheetCommand): void {
@@ -494,6 +495,10 @@ export function SheetToolbar({
 			<div className="-mx-1 flex min-w-0 flex-1 [scrollbar-width:none] items-center gap-0.5 self-stretch overflow-x-auto px-1 [&::-webkit-scrollbar]:hidden">
 				{history}
 				{shown}
+				<SortFilterMenu
+					grid={grid}
+					disabled={disabled}
+				/>
 				<FindButton
 					grid={grid}
 					disabled={disabled}

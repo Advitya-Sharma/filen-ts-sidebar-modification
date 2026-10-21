@@ -1,0 +1,142 @@
+import { CellError, EmptyValue, FunctionArgumentType, SimpleRangeValue, type ImplementedFunctions } from "hyperformula"
+import { INTERSECT_FUNCTION } from "../../functions/engineNames"
+import { MAX_COLUMNS, MAX_ROWS } from "../../model/model"
+import {
+	naError,
+	refError,
+	SheetFunctionPlugin,
+	valueError,
+	type PluginCall,
+	type PluginRange,
+	type PluginScalar,
+	type PluginState
+} from "./plugin"
+
+// A reference's rows and columns as Excel counts them: a whole column has the grid's every row, wherever the engine
+// ends reading it (formula/wholeRanges.ts).
+function heightOf(value: SimpleRangeValue, range: PluginRange | undefined): number {
+	return range !== undefined && range.end.row === Number.POSITIVE_INFINITY ? MAX_ROWS - range.start.row : value.height()
+}
+
+function widthOf(value: SimpleRangeValue, range: PluginRange | undefined): number {
+	return range !== undefined && range.end.col === Number.POSITIVE_INFINITY ? MAX_COLUMNS - range.start.col : value.width()
+}
+
+// References as Excel reads them where the engine differs.
+export class ReferenceFunctions extends SheetFunctionPlugin {
+	static override implementedFunctions: ImplementedFunctions = {
+		[INTERSECT_FUNCTION]: { method: "intersect", parameters: [{ argumentType: FunctionArgumentType.ANY }] },
+		INDEX: {
+			method: "index",
+			parameters: [
+				{ argumentType: FunctionArgumentType.RANGE },
+				{ argumentType: FunctionArgumentType.NUMBER, optionalArg: true },
+				{ argumentType: FunctionArgumentType.NUMBER, optionalArg: true },
+				{ argumentType: FunctionArgumentType.NUMBER, optionalArg: true }
+			]
+		},
+		HYPERLINK: {
+			method: "hyperlink",
+			parameters: [{ argumentType: FunctionArgumentType.STRING }, { argumentType: FunctionArgumentType.SCALAR, optionalArg: true }]
+		}
+	}
+
+	// A range where one value is wanted: its cell in the formula's row (a column of cells) or column (a row of cells),
+	// or in both (a block); #VALUE! when the formula's row or column misses it. The engine does this only on the
+	// formula's own sheet; Excel on any.
+	intersect(ast: PluginCall, state: PluginState): unknown {
+		const [arg] = ast.args
+
+		if (arg === undefined) return naError()
+
+		const value = this.evaluateAst(arg, state)
+
+		if (!(value instanceof SimpleRangeValue)) return value
+
+		const range = value.range
+
+		if (range === undefined) return value.data[0]?.[0] ?? valueError()
+
+		const { row, col } = state.formulaAddress
+		const height = heightOf(value, range)
+		const width = widthOf(value, range)
+		const rowOffset = height === 1 ? 0 : row - range.start.row
+		const colOffset = width === 1 ? 0 : col - range.start.col
+
+		if (rowOffset < 0 || rowOffset >= height || colOffset < 0 || colOffset >= width) return valueError()
+
+		// The one cell, read alone: the range's values are not gathered (a whole column is a million).
+		const cell = this.cellOf(range, rowOffset, colOffset)
+
+		return cell === EmptyValue ? 0 : cell
+	}
+
+	// The value of the cell `row` and `col` into a reference, which the engine has calculated by now (the formula
+	// depends on its every cell).
+	private cellOf(range: PluginRange, row: number, col: number): PluginScalar {
+		return this.dependencyGraph.getScalarValue({ sheet: range.sheet, row: range.start.row + row, col: range.start.col + col })
+	}
+
+	// INDEX(array, row_num, [column_num], [area_num]) (support.microsoft.com "INDEX function"): over one row or
+	// column a single number counts along it; 0 (or nothing) for the row or column gives the whole column or row; a
+	// number outside the array is #REF!. The engine knew neither the single number along a row nor 0. Only the one
+	// area a reference here can have is 1.
+	index(ast: PluginCall, state: PluginState): unknown {
+		return this.runFunction(
+			ast.args,
+			state,
+			this.metadata("INDEX"),
+			(array: SimpleRangeValue, rowArg: number | undefined, colArg: number | undefined, area: number | undefined) => {
+				if (area !== undefined && Math.trunc(area) !== 1) return area < 1 ? valueError() : refError()
+
+				const range = array.range
+				const height = heightOf(array, range)
+				const width = widthOf(array, range)
+				// One cell of the array, a reference's read alone.
+				const at = (row: number, col: number): PluginScalar | undefined =>
+					range === undefined ? array.data[row]?.[col] : this.cellOf(range, row, col)
+				let row = Math.trunc(rowArg ?? 0)
+				let col = Math.trunc(colArg ?? 0)
+
+				if (colArg === undefined && height === 1 && width > 1) {
+					col = row
+					row = 0
+				} else if (colArg === undefined && width === 1) col = 1
+
+				if (row < 0 || col < 0) return valueError()
+				if (row > height || col > width) return refError()
+
+				if (row > 0 && col > 0) return at(row - 1, col - 1) ?? refError()
+				if (row === 0 && col === 0) return array
+				if (height === 1 && row === 0 && col > 0) return at(0, col - 1) ?? refError()
+				if (width === 1 && col === 0 && row > 0) return at(row - 1, 0) ?? refError()
+
+				if (range !== undefined) {
+					const part =
+						row === 0
+							? range.rangeWithSameHeight(range.start.col + col - 1, 1)
+							: range.rangeWithSameWidth(range.start.row + row - 1, 1)
+
+					return SimpleRangeValue.onlyRange(part, this.dependencyGraph)
+				}
+
+				const data = array.data
+
+				return SimpleRangeValue.onlyValues(row === 0 ? data.map(line => [line[col - 1] ?? EmptyValue]) : [data[row - 1] ?? []])
+			}
+		)
+	}
+
+	// HYPERLINK(link_location, [friendly_name]): the friendly name as it is (a number stays one, an empty cell is 0),
+	// else the link (support.microsoft.com "HYPERLINK function"). The engine made every result text. The link is kept
+	// where the engine keeps it for the cell.
+	hyperlink(ast: PluginCall, state: PluginState): unknown {
+		return this.runFunction(ast.args, state, this.metadata("HYPERLINK"), (url: string, label: PluginScalar | undefined) => {
+			;(ast as { hyperlink?: string }).hyperlink = url
+
+			if (label instanceof CellError) return label
+
+			return label === undefined ? url : label === EmptyValue ? 0 : label
+		})
+	}
+}

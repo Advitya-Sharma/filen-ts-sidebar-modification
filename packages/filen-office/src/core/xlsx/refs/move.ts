@@ -11,7 +11,7 @@ import { contains, intersects, type CellMove } from "./moveRefs"
 import { pivotSource, rewriteChart, rewriteConnections, rewriteControlProperties, rewriteDrawing, rewriteVml } from "./parts"
 import { partKind } from "./plan"
 import { MODEL_SECTIONS, PLAIN_SECTIONS, rewriteSection } from "./sections"
-import { formatRef, formatSqref, parseRef, parseSqref } from "./sqref"
+import { formatRef, formatSqref, overlapRange, parseRef, parseSqref, subtractRange, topLeft } from "./sqref"
 import { liveRelationships, refState } from "./state"
 import { readTable, rewriteTable } from "./tables"
 
@@ -39,30 +39,6 @@ const TRAVELLING_SECTIONS: ReadonlySet<string> = new Set(["conditionalFormatting
 
 function lastSegment(type: string): string {
 	return type.slice(type.lastIndexOf("/") + 1)
-}
-
-function subtract(range: SheetRange, cut: SheetRange): SheetRange[] {
-	if (!intersects(range, cut)) return [range]
-
-	const out: SheetRange[] = []
-	const top = Math.max(range.startRow, cut.startRow)
-	const bottom = Math.min(range.endRow, cut.endRow)
-
-	if (range.startRow < cut.startRow) out.push({ ...range, endRow: cut.startRow - 1 })
-	if (range.endRow > cut.endRow) out.push({ ...range, startRow: cut.endRow + 1 })
-	if (range.startCol < cut.startCol) out.push({ startRow: top, endRow: bottom, startCol: range.startCol, endCol: cut.startCol - 1 })
-	if (range.endCol > cut.endCol) out.push({ startRow: top, endRow: bottom, startCol: cut.endCol + 1, endCol: range.endCol })
-
-	return out
-}
-
-function overlap(a: SheetRange, b: SheetRange): SheetRange {
-	return {
-		startRow: Math.max(a.startRow, b.startRow),
-		startCol: Math.max(a.startCol, b.startCol),
-		endRow: Math.min(a.endRow, b.endRow),
-		endCol: Math.min(a.endCol, b.endCol)
-	}
 }
 
 // One sheet's view of the move.
@@ -100,11 +76,11 @@ class SheetMove {
 		const move = this.move
 		let kept = ranges.slice()
 
-		if (this.onSource) kept = kept.flatMap(range => subtract(range, move.range))
-		if (this.onDestination) kept = kept.flatMap(range => subtract(range, move.destination))
+		if (this.onSource) kept = kept.flatMap(range => subtractRange(range, move.range))
+		if (this.onDestination) kept = kept.flatMap(range => subtractRange(range, move.destination))
 
 		const moved = this.onSource
-			? ranges.filter(range => intersects(range, move.range)).map(range => this.offset(overlap(range, move.range)))
+			? ranges.filter(range => intersects(range, move.range)).map(range => this.offset(overlapRange(range, move.range)))
 			: []
 
 		if (moved.length > 0 && !this.onDestination) refuse("structureLocked", `${what}: another sheet`)
@@ -178,15 +154,16 @@ function travel(edited: Edited, node: number, sheet: SheetMove, job: RefJob, wha
 
 	if (next.length === 0) return false
 
-	const first = ranges[0] as SheetRange
-	const now = next[0] as SheetRange
+	// Formulas are written for the top-left of the rectangle around the list's ranges.
+	const first = topLeft(ranges)
+	const now = topLeft(next)
 
 	if (next !== ranges) {
 		if (child === undefined) editor.setAttribute(node, "sqref", formatSqref(next))
 		else editor.setText(child, formatSqref(next))
 	}
 
-	moveFormulas(edited, node, job, now.startRow - first.startRow, now.startCol - first.startCol, done)
+	moveFormulas(edited, node, job, now.row - first.row, now.col - first.col, done)
 
 	return true
 }
@@ -390,7 +367,7 @@ async function plan(workbook: XlsxWorkbookModel, move: CellMove, slicing: Slicin
 
 		if (sheet.touched.length > 0) await placedParts(workbook, entry, model, sheet)
 
-		for (const name of new Set(model.sections.map(section => section.name))) {
+		for (const name of new Set([...model.sections.map(section => section.name), ...state.heldSections(model)])) {
 			if (PLAIN_SECTIONS.has(name) || MODEL_SECTIONS.has(name)) continue
 
 			const before = state.sectionMarkup(model, name)

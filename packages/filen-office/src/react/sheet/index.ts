@@ -2,6 +2,44 @@ export { autofitSizes, MAX_FIT_INDICES } from "./autofit"
 export { axisEntry, createGridAxis, shownIndex, type AxisOverrides, type GridAxis } from "./axis"
 export { isImeKeydown } from "./ime"
 export {
+	gridPanes,
+	rangeRects,
+	segments,
+	type GridDecoration,
+	type GridPaintScene,
+	type GridPane,
+	type GridRect,
+	type GridSegment,
+	type SheetCellDecorator,
+	type SheetCellDrag,
+	type SheetCellPointer,
+	type SheetCellPointerResult,
+	type SheetEntryCheck,
+	type SheetEntryHook,
+	type SheetEntryVerdict,
+	type SheetGridExtension,
+	type SheetGridLayer
+} from "./layers"
+export { rgb, type GridCanvas } from "./paint/canvas"
+export { CF_BAR_DECORATOR, CF_ICON_DECORATOR, CONDITIONAL_FORMATTING_EXTENSION, drawIcon, iconShape } from "./overlays/cf"
+export {
+	FILTER_BUTTONS_LAYER,
+	FILTER_BUTTON_SIZE,
+	filterButtonAt,
+	filterButtonRect,
+	filterRangeAt,
+	inFilterButton,
+	type FilterButtonTarget
+} from "./overlays/filterButtons"
+export { ANNOTATION_DECORATORS } from "./overlays/notes"
+export {
+	placeOverlay,
+	useCellPlacement,
+	validationEntry,
+	type SheetValidationEntry,
+	type ValidationPlacement
+} from "./overlays/dvPlacement"
+export {
 	canEditSnapshot,
 	editingChanged,
 	EXTRA_COLS,

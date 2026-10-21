@@ -1,10 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { bytesSource } from "../core/opc/index"
 import type { SheetCommand, SheetCommandResult, SheetSessionApi, SheetWorkbookInfo } from "../core/sheet/protocol"
 import { FormulaKind, RowFlag, ColFlag } from "../core/xlsx/model/types"
 import { openXlsx } from "../core/xlsx/read/index"
+import { parseSqref } from "../core/xlsx/refs/sqref"
 import { decodeUtf8 } from "../core/xml/index"
 import { CORPUS_DIR } from "./corpusDir"
 import { sheetOffices, unoOffice } from "./oracles/sheet/libreOffice"
@@ -20,7 +22,7 @@ import { openFixture, savedBytes } from "./sheetSessionFixtures"
 // FILEN_OFFICE_SOFFICE=<soffice>.
 
 const UNO = unoOffice(sheetOffices())
-const SCRATCH = "/tmp/p3/lo-G1-1"
+const SCRATCH = join(tmpdir(), "filen-office-structure-lo")
 const MAX_ROW = 60
 const MAX_COL = 20
 
@@ -31,6 +33,9 @@ function normal(formula: string): string {
 			.replace(/\$/g, "")
 			// Excel writes a reference to a deleted sheet as #REF! followed by the cell (#REF!A1), and a deleted cell of a
 			// sheet as the sheet followed by #REF! ('Sheet 2'!#REF!); LibreOffice writes #REF! alone for both.
+			// LibreOffice writes a reference that lost only its row or column with the rest kept (B#REF!, #REF!2).
+			.replace(/\$?[A-Za-z]{1,3}\$?#REF!/g, "#REF!")
+			.replace(/#REF!\$?[0-9]+(?![0-9]*!)/g, "#REF!")
 			.replace(/#REF!\$?[A-Z]{1,3}\$?[0-9]+/g, "#REF!")
 			.replace(/(?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_.]*)!#REF!/g, "#REF!")
 			.replace(/'([A-Za-z_][A-Za-z0-9_. ()]*)'!/g, (_, name: string) => (/[ ()]/.test(name) ? `'${name}'!` : `${name}!`))
@@ -152,9 +157,48 @@ async function structures(bytes: Uint8Array): Promise<Record<string, string>> {
 	return out
 }
 
-// A sqref with its ranges in order (LibreOffice may write them in another).
+// The cells a sqref covers, as one canonical text whatever ranges they are written in (LibreOffice joins and splits
+// ranges otherwise): bands of rows, each with its runs of columns.
 function sqref(text: string): string {
-	return text.trim().split(/\s+/).sort().join(",")
+	const ranges = parseSqref(text)
+
+	if (ranges === null || ranges.length === 0) return text.trim()
+
+	const rowCuts = [...new Set(ranges.flatMap(range => [range.startRow, range.endRow + 1]))].sort((a, b) => a - b)
+	const colCuts = [...new Set(ranges.flatMap(range => [range.startCol, range.endCol + 1]))].sort((a, b) => a - b)
+	const bands: { from: number; to: number; runs: string }[] = []
+
+	for (let r = 0; r + 1 < rowCuts.length; r++) {
+		const top = rowCuts[r] ?? 0
+		const runs: string[] = []
+		let open = -1
+
+		for (let c = 0; c + 1 < colCuts.length; c++) {
+			const left = colCuts[c] ?? 0
+			const covered = ranges.some(
+				range => range.startRow <= top && range.endRow >= top && range.startCol <= left && range.endCol >= left
+			)
+
+			if (covered && open < 0) open = left
+			if (!covered && open >= 0) {
+				runs.push(`${String(open)}-${String(left - 1)}`)
+				open = -1
+			}
+		}
+
+		if (open >= 0) runs.push(`${String(open)}-${String((colCuts[colCuts.length - 1] ?? 0) - 1)}`)
+
+		const joined = runs.join("+")
+		const last = bands[bands.length - 1]
+
+		if (last !== undefined && last.runs === joined && last.to === top - 1) last.to = (rowCuts[r + 1] ?? top) - 1
+		else bands.push({ from: top, to: (rowCuts[r + 1] ?? top) - 1, runs: joined })
+	}
+
+	return bands
+		.filter(band => band.runs !== "")
+		.map(band => `r${String(band.from)}-${String(band.to)}c${band.runs}`)
+		.join(",")
 }
 
 // Every table of a saved package has an id and a name of its own (ECMA-376 Part 1 §18.5.1.2).
@@ -196,8 +240,8 @@ function differences(ours: Record<string, string>, theirs: Record<string, string
 // Differences LibreOffice's own re-save makes, or where it departs from Excel.
 const ACCEPTED: readonly { readonly pattern: RegExp; readonly why: string }[] = [
 	{
-		pattern: /^[^:]*insert rows[^:]*: [^/]+\/validations: ours \[C3:C8\] LibreOffice \[C1:C8\]$/,
-		why: "rows inserted above a validation's range move it as they move a reference to the range (its sqref is a list of references, ECMA-376 Part 1 §18.3.1.32), as they move the conditional formats' ranges here; LibreOffice widens the validation alone"
+		pattern: /^[^:]*insert (?:rows|cells down)[^:]*: [^/]+\/validations: ours \[r2-7c2-2\] LibreOffice \[r0-7c2-2\]$/,
+		why: "rows (or cells shifting down) inserted above a validation's range move it as they move a reference to the range (its sqref is a list of references, ECMA-376 Part 1 §18.3.1.32), as they move the conditional formats' ranges here; LibreOffice widens the validation alone"
 	},
 	{
 		pattern: /^delete columns: [^/]+\/formulas: ours \[.*SUM\(#REF!\).*\] LibreOffice \[.*TABLE1\[\[#THIS ROW\]/,
@@ -355,6 +399,60 @@ const CASES: readonly Case[] = [
 		]
 	},
 	{
+		name: "insert cells down",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(0, 1, 0, 1), edit: "insert", axis: "rows" }),
+		theirs: { op: "insertCells", sheet: 0, range: "B1", mode: "down" }
+	},
+	{
+		name: "insert cells down across a range",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(1, 0, 1, 0), edit: "insert", axis: "rows" }),
+		theirs: { op: "insertCells", sheet: 0, range: "A2", mode: "down" }
+	},
+	{
+		name: "delete cells up",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(0, 0, 0, 0), edit: "delete", axis: "rows" }),
+		theirs: { op: "removeCells", sheet: 0, range: "A1", mode: "up" }
+	},
+	{
+		name: "insert cells right",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(0, 0, 0, 0), edit: "insert", axis: "cols" }),
+		theirs: { op: "insertCells", sheet: 0, range: "A1", mode: "right" }
+	},
+	{
+		name: "delete cells left",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(4, 0, 4, 0), edit: "delete", axis: "cols" }),
+		theirs: { op: "removeCells", sheet: 0, range: "A5", mode: "left" }
+	},
+	{
+		name: "insert cells down over a merge",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(0, 3, 0, 4), edit: "insert", axis: "rows" }),
+		theirs: { op: "insertCells", sheet: 0, range: "D1:E1", mode: "down" }
+	},
+	{
+		name: "delete cells up over a merge",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(0, 3, 0, 4), edit: "delete", axis: "rows" }),
+		theirs: { op: "removeCells", sheet: 0, range: "D1:E1", mode: "up" }
+	},
+	{
+		name: "insert cells down across the used columns",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(0, 0, 1, 11), edit: "insert", axis: "rows" }),
+		theirs: { op: "insertCells", sheet: 0, range: "A1:L2", mode: "down" }
+	},
+	{
+		name: "delete cells left across the used rows",
+		ours: info => ({ type: "cells.shift", sheet: info.sheets[0]!.id, range: range(0, 0, 29, 0), edit: "delete", axis: "cols" }),
+		theirs: { op: "removeCells", sheet: 0, range: "A1:A30", mode: "left" }
+	},
+	{
+		name: "duplicate then insert cells right on the copy",
+		ours: info => ({ type: "sheet.duplicate", sheet: info.sheets[0]!.id }),
+		then: [sheets => ({ type: "cells.shift", sheet: sheets[1]!.id, range: range(0, 0, 0, 0), edit: "insert", axis: "cols" })],
+		theirs: info => [
+			{ op: "copySheet", sheet: 0, name: `${info.sheets[0]!.name} (2)`, to: 1 },
+			{ op: "insertCells", sheet: 1, range: "A1", mode: "right" }
+		]
+	},
+	{
 		name: "protect sheet",
 		ours: info => ({
 			type: "sheet.protect",
@@ -385,7 +483,13 @@ const CORPUS_CASES: ReadonlySet<string> = new Set([
 	"duplicate then insert rows on the copy",
 	"duplicate then delete columns on the copy",
 	"duplicate twice",
-	"duplicate the copy, then insert rows on the source"
+	"duplicate the copy, then insert rows on the source",
+	"insert cells down",
+	"delete cells up",
+	"insert cells right",
+	"delete cells left",
+	"insert cells down across the used columns",
+	"delete cells left across the used rows"
 ])
 
 async function ours(

@@ -608,20 +608,20 @@ export function changeTitle(revision: Pick<EditAnnotationRevision, "kind" | "tar
 export type ReviewTranslate = (key: PreviewKey, values?: Readonly<Record<string, string | number>>) => string
 
 const THEME_COLOR_KEYS: Readonly<Record<string, PreviewKey>> = {
-	dark1: "previewDocxColorText1",
-	text1: "previewDocxColorText1",
-	light1: "previewDocxColorBackground1",
-	background1: "previewDocxColorBackground1",
-	dark2: "previewDocxColorText2",
-	text2: "previewDocxColorText2",
-	light2: "previewDocxColorBackground2",
-	background2: "previewDocxColorBackground2",
-	accent1: "previewDocxColorAccent1",
-	accent2: "previewDocxColorAccent2",
-	accent3: "previewDocxColorAccent3",
-	accent4: "previewDocxColorAccent4",
-	accent5: "previewDocxColorAccent5",
-	accent6: "previewDocxColorAccent6",
+	dark1: "previewOfficeColorText1",
+	text1: "previewOfficeColorText1",
+	light1: "previewOfficeColorBackground1",
+	background1: "previewOfficeColorBackground1",
+	dark2: "previewOfficeColorText2",
+	text2: "previewOfficeColorText2",
+	light2: "previewOfficeColorBackground2",
+	background2: "previewOfficeColorBackground2",
+	accent1: "previewOfficeColorAccent1",
+	accent2: "previewOfficeColorAccent2",
+	accent3: "previewOfficeColorAccent3",
+	accent4: "previewOfficeColorAccent4",
+	accent5: "previewOfficeColorAccent5",
+	accent6: "previewOfficeColorAccent6",
 	hyperlink: "previewDocxFormatHyperlink",
 	followedHyperlink: "previewDocxFormatFollowedHyperlink"
 }
@@ -690,11 +690,11 @@ export function reviewColorName(color: EditFormatColor, t: ReviewTranslate): str
 		const name = t(THEME_COLOR_KEYS[color.theme] ?? "previewDocxFormatAuto")
 
 		if (color.tint !== undefined && color.tint < 255) {
-			return t("previewDocxColorLighter", { color: name, percent: Math.round((1 - color.tint / 255) * 100) })
+			return t("previewOfficeColorLighter", { color: name, percent: Math.round((1 - color.tint / 255) * 100) })
 		}
 
 		if (color.shade !== undefined && color.shade < 255) {
-			return t("previewDocxColorDarker", { color: name, percent: Math.round((1 - color.shade / 255) * 100) })
+			return t("previewOfficeColorDarker", { color: name, percent: Math.round((1 - color.shade / 255) * 100) })
 		}
 
 		return name

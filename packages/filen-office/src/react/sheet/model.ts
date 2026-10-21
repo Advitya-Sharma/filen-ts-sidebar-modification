@@ -26,6 +26,7 @@ import {
 	type SheetWritability
 } from "../../core/sheet/protocol"
 import { createGridAxis, type GridAxis } from "./axis"
+import { checkEntry, type SheetEntryHook } from "./layers"
 import { RowFitter, type TextMeasure } from "./rowFit"
 import { cellSelection, fromSelectionState, mergeRanges, type GridPoint, type GridSelection } from "./selection"
 import { TileCache, entryInput, entryOf, entryText, regionHoldsTile, type GridEntry } from "./tiles"
@@ -212,6 +213,10 @@ export class SheetGridModel {
 	private readonly selections = new Map<SheetId, GridSelection>()
 	private readonly reach = new Map<SheetId, GridPoint>()
 	private readonly pending = new Map<string, string>()
+	// The commit each pending text is from: a later commit of the same cell owns it, and an earlier one's answer
+	// leaves it alone.
+	private readonly pendingOwners = new Map<string, number>()
+	private commits = 0
 	private readonly mergeMemo = new WeakMap<Uint32Array, SheetRange[]>()
 	private axesMemo: {
 		layout: SheetLayout
@@ -235,6 +240,7 @@ export class SheetGridModel {
 	private clipped: { sheet: SheetId; row: number; col: number; tile: GridEntry["tile"]; input: string | null } | null = null
 	// Refused commands, for the app's message.
 	private onRefusal: SheetGridRefusalHandler | null = null
+	private entryHooks: readonly SheetEntryHook[] = []
 	// The last command that changed the file and can be done again on another selection (F4).
 	private lastRepeatable: SheetCommand | null = null
 	// Rows without a height of their own fitted to the wrapped text an edit changes (rowFit.ts).
@@ -864,8 +870,38 @@ export class SheetGridModel {
 		if (this.snapshot.editing !== null) this.update({ editing: null })
 	}
 
+	// The extensions' entry hooks (layers.ts), asked before an entry is written.
+	setEntryHooks(hooks: readonly SheetEntryHook[]): void {
+		this.entryHooks = hooks
+	}
+
+	// An entry the extensions let through (with the text they leave), or what they said instead; the entry is reopened
+	// on its cell for "edit". Resolves at once without hooks.
+	async checkEntry(
+		editing: GridEditing
+	): Promise<{ readonly verdict: "commit"; readonly text: string } | { readonly verdict: "edit" | "discard" }> {
+		if (this.entryHooks.length === 0) return { verdict: "commit", text: editing.text }
+
+		const answer = await checkEntry(this.entryHooks, { sheet: editing.sheet, row: editing.row, col: editing.col, text: editing.text })
+
+		if (
+			answer.verdict === "edit" &&
+			editing.sheet === this.snapshot.sheet &&
+			this.snapshot.editing === null &&
+			!this.snapshot.readOnly
+		) {
+			const layout = this.snapshot.layout
+
+			this.select(cellSelection({ row: editing.row, col: editing.col }, layout === null ? [] : this.merges(layout)))
+			this.update({ editing: { ...editing, mode: "edit" } })
+		}
+
+		return answer
+	}
+
 	// Commits the entry and moves the selection to `next` (null: stays). The cell shows what was typed until the
-	// session answers. Resolves false when the session refused it; a malformed formula reopens the entry, marked.
+	// session answers. Resolves false when the session refused it, or an extension stopped it (layers.ts entry
+	// hooks); a malformed formula reopens the entry, marked.
 	async commitEditing(next: GridSelection | null): Promise<boolean> {
 		const editing = this.snapshot.editing
 
@@ -875,32 +911,54 @@ export class SheetGridModel {
 
 		this.entryQuery = null
 		const key = pendingKey(editing.sheet, editing.row, editing.col)
+		const commit = ++this.commits
+		const owns = (): boolean => this.pendingOwners.get(key) === commit
+		const release = (): void => {
+			if (!owns()) return
 
-		if (changed) this.pending.set(key, editing.text)
+			this.pending.delete(key)
+			this.pendingOwners.delete(key)
+		}
+
+		if (changed) {
+			this.pending.set(key, editing.text)
+			this.pendingOwners.set(key, commit)
+		}
 
 		this.update({ editing: null })
 
 		if (next !== null && editing.sheet === this.snapshot.sheet) this.select(next)
 		if (!changed) return true
 
+		const checked = await this.checkEntry(editing)
+
+		if (checked.verdict !== "commit") {
+			release()
+			this.repaint()
+
+			return false
+		}
+
+		if (checked.text !== editing.text && owns()) this.pending.set(key, checked.text)
+
 		let result: SheetCommandResult
 		const command: SheetCommand = {
 			type: "cells.set",
 			sheet: editing.sheet,
-			cells: { rows: Uint32Array.of(editing.row), cols: Uint16Array.of(editing.col), inputs: [editing.text] }
+			cells: { rows: Uint32Array.of(editing.row), cols: Uint16Array.of(editing.col), inputs: [checked.text] }
 		}
 
 		try {
 			result = await this.command(command, false)
 		} catch {
 			// The session failed (a "failed" event says so): the entry was not kept.
-			this.pending.delete(key)
+			release()
 			this.repaint()
 
 			return false
 		}
 
-		if (this.pending.get(key) === editing.text) this.pending.delete(key)
+		release()
 
 		if (!result.ok) {
 			if (

@@ -58,6 +58,9 @@ export type UnoOperation =
 	| { readonly op: "hideSheet"; readonly sheet: string | number; readonly hidden?: boolean }
 	| { readonly op: "tabColor"; readonly sheet: string | number; readonly color: number }
 	| { readonly op: "protectSheet"; readonly sheet: string | number; readonly password?: string }
+	// Cells of `range` inserted (the cells there shifted down or right) or removed (the cells after shifted up or left).
+	| { readonly op: "insertCells"; readonly sheet: string | number; readonly range: string; readonly mode: "down" | "right" }
+	| { readonly op: "removeCells"; readonly sheet: string | number; readonly range: string; readonly mode: "up" | "left" }
 
 export interface UnoJob {
 	readonly input: string

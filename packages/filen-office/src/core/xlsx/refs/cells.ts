@@ -2,7 +2,7 @@ import { formulaTranslator, rewriteFormula, sameSheet, type FormulaRef } from ".
 import type { SheetRange } from "../../sheet/protocol"
 import { cellName } from "../../sheet/refs/cellRef"
 import { CellKind, FormulaKind, type XlsxFormula, type XlsxFormulaTable, type XlsxSheetModel } from "../model/types"
-import { axisLimit, shiftCell, shiftRange, splits, type AxisShift } from "./axis"
+import { axisLimit, inBand, shiftCell, shiftRange, splits, straddles, type AxisShift } from "./axis"
 import { refuse, type RefConstruct } from "./catalogue"
 import type { FormulaShift } from "./formulas"
 import { parseRef } from "./sqref"
@@ -32,6 +32,16 @@ interface Member {
 
 function normal(formula: XlsxFormula, text: string): XlsxFormula {
 	return { kind: FormulaKind.NORMAL, text, sharedIndex: -1, ref: null, flags: formula.flags, cellMetadata: formula.cellMetadata }
+}
+
+// A master's formula with its offset from its ref's top-left for where it now lies (none when it is that cell).
+function withMasterAt(formula: XlsxFormula, at: { readonly row: number; readonly col: number }): XlsxFormula {
+	const { masterOffset: _offset, ...rest } = formula
+	const ref = formula.ref
+
+	if (ref === null || (at.row === ref.startRow && at.col === ref.startCol)) return rest
+
+	return { ...rest, masterOffset: { row: at.row - ref.startRow, col: at.col - ref.startCol } }
 }
 
 function refsOf(text: string): FormulaRef[] {
@@ -173,6 +183,8 @@ export class SheetFormulas {
 
 	private shiftedRange(range: SheetRange | null, what: string): SheetRange | null {
 		if (range === null || this.shift === null) return range
+		if (straddles(range, this.shift)) refuse("arrayFormula", what)
+		if (!inBand(range, this.shift)) return range
 
 		const rows = this.shift.axis === "rows"
 
@@ -252,7 +264,7 @@ export class SheetFormulas {
 			const at = this.moved(master)
 
 			if (at === null || ref === null) return
-			if (text !== formula.text || ref !== anchor) this.record(master, { ...formula, text, ref }, "sharedFormulas")
+			if (text !== formula.text || ref !== anchor) this.record(master, withMasterAt({ ...formula, text, ref }, at), "sharedFormulas")
 
 			return
 		}
@@ -299,6 +311,17 @@ export class SheetFormulas {
 			}
 		}
 
+		// Nothing moved and nothing reads differently: the group stays as written.
+		if (
+			own.length === 0 &&
+			kept.length === children.length &&
+			head.text === formula.text &&
+			head.at.row === master.row &&
+			head.at.col === master.col &&
+			kept.every(entry => entry.at?.row === entry.member.row && entry.at.col === entry.member.col)
+		)
+			return
+
 		if (range.startRow !== head.at.row || range.startCol !== head.at.col) {
 			own.push(...kept)
 			kept.length = 0
@@ -307,14 +330,20 @@ export class SheetFormulas {
 
 		for (const entry of own) this.record(entry.member, normal(table.formula(entry.member.id), entry.text), "sharedFormulas")
 
-		this.record(master, kept.length === 0 ? normal(formula, head.text) : { ...formula, text: head.text, ref: range }, "sharedFormulas")
+		this.record(
+			master,
+			kept.length === 0 ? normal(formula, head.text) : withMasterAt({ ...formula, text: head.text, ref: range }, head.at),
+			"sharedFormulas"
+		)
 	}
 
-	// Whether the edit moves every member's references alike, so the master's text moved is right for all.
+	// Whether the edit moves every member's references alike, so the master's text moved is right for all. Cells
+	// shifted in a band move members and references by where each lies: each member is read on its own.
 	private uniform(text: string, anchor: SheetRange, master: Member, children: readonly Member[]): boolean {
 		const shift = this.formulas.op.kind === "axis" ? this.formulas.op.shift : null
 
 		if (shift === null) return true
+		if (shift.band !== undefined) return false
 
 		const target = this.formulas.op.kind === "axis" ? this.formulas.op.target : ""
 		const rows = shift.axis === "rows"

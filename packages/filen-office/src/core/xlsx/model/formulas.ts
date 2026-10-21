@@ -16,6 +16,8 @@ export class FormulaTable implements XlsxFormulaTable {
 	private readonly inputs = new Map<number, { readonly r1?: string; readonly r2?: string }>()
 	// Shared index -> the master's id.
 	private readonly masters = new Map<number, number>()
+	// A master's own cell from its ref's top-left, by id, where it is not that cell (XlsxFormula.masterOffset).
+	private readonly offsets = new Map<number, { readonly row: number; readonly col: number }>()
 	private chars = 0
 
 	get length(): number {
@@ -45,6 +47,7 @@ export class FormulaTable implements XlsxFormulaTable {
 
 	formula(id: number): XlsxFormula {
 		const inputs = this.inputs.get(id)
+		const offset = this.offsets.get(id)
 
 		return {
 			kind: this.kind(id),
@@ -54,7 +57,8 @@ export class FormulaTable implements XlsxFormulaTable {
 			flags: this.flags[id] ?? 0,
 			cellMetadata: this.metadata.get(id) ?? -1,
 			...(inputs?.r1 !== undefined && { r1: inputs.r1 }),
-			...(inputs?.r2 !== undefined && { r2: inputs.r2 })
+			...(inputs?.r2 !== undefined && { r2: inputs.r2 }),
+			...(offset !== undefined && { masterOffset: offset })
 		}
 	}
 
@@ -66,7 +70,22 @@ export class FormulaTable implements XlsxFormulaTable {
 
 		if (master < 0 || anchor === null) return this.text(id)
 
-		return moveRelativeReferences(this.text(master), row - anchor.startRow, col - anchor.startCol)
+		// From the master's own cell, its ref's top-left unless the file put it elsewhere.
+		const offset = this.offsets.get(master)
+
+		return moveRelativeReferences(
+			this.text(master),
+			row - anchor.startRow - (offset?.row ?? 0),
+			col - anchor.startCol - (offset?.col ?? 0)
+		)
+	}
+
+	// The reader's: where a master it added lies, kept when that is not its ref's top-left.
+	placeMaster(id: number, row: number, col: number): void {
+		const ref = this.kind(id) === FormulaKind.SHARED_MASTER ? this.ref(id) : null
+
+		if (ref !== null && (row !== ref.startRow || col !== ref.startCol))
+			this.offsets.set(id, { row: row - ref.startRow, col: col - ref.startCol })
 	}
 
 	add(formula: XlsxFormula): number {
@@ -142,6 +161,9 @@ export class FormulaTable implements XlsxFormulaTable {
 
 		if (formula.cellMetadata < 0) this.metadata.delete(id)
 		else this.metadata.set(id, formula.cellMetadata)
+
+		if (formula.masterOffset === undefined || formula.kind !== FormulaKind.SHARED_MASTER) this.offsets.delete(id)
+		else this.offsets.set(id, formula.masterOffset)
 
 		if (formula.r1 === undefined && formula.r2 === undefined) this.inputs.delete(id)
 		else

@@ -9,7 +9,7 @@ import { CORPUS_DIR } from "./corpusDir"
 import { OpenXmlSdk, openXmlSdkMissing, sdkErrorCounts } from "./oracles/openXmlSdk"
 import { parts } from "./xlsxWriteFixtures"
 import { cells, firstTile, openFixture, savedBytes, tileEntry } from "./sheetSessionFixtures"
-import { TYPES, relationship } from "./xlsxRefsFixtures"
+import { R, TYPES, relationship } from "./xlsxRefsFixtures"
 
 // Sheets duplicated: cells, formats, sections, local names, and the parts cloned for the copy (drawings with their
 // charts retargeted, notes, tables under new names), each save passing the gate and reading back.
@@ -378,6 +378,52 @@ describe("sheet session: duplicated sheets edited again", () => {
 		}
 	)
 
+	it("gives a copy made after another was undone relationships of its own, each where its markup points", async () => {
+		const links = '<sheetData/><hyperlinks><hyperlink ref="A1" r:id="rId1"/><hyperlink ref="A2" r:id="rId2"/></hyperlinks>'
+		const rel = (id: string, url: string) => `<Relationship Id="${id}" Type="${R}/hyperlink" Target="${url}" TargetMode="External"/>`
+		const { session, info } = await openFixture({
+			sheets: [
+				{ name: "One", body: links, rels: rel("rId1", "https://a.example/") + rel("rId2", "https://b.example/") },
+				{ name: "Two", body: links, rels: rel("rId1", "https://b.example/") + rel("rId2", "https://a.example/") }
+			]
+		})
+
+		changeOf(await session.command({ type: "sheet.duplicate", sheet: info.sheets[0]!.id }))
+		changeOf(await session.undo())
+
+		const copy = changeOf(await session.command({ type: "sheet.duplicate", sheet: info.sheets[1]!.id })).sheets?.[2]?.name ?? ""
+		const files = parts(await savedBytes(session))
+		const part = sheetPartOf(files, copy)
+		const rels = files[part.replace(/([^/]+)$/, "_rels/$1.rels")] ?? ""
+		const target = (ref: string): string => {
+			const id = new RegExp(`<hyperlink ref="${ref}" r:id="([^"]*)"`).exec(files[part] ?? "")?.[1] ?? ""
+
+			return new RegExp(`Id="${id}"[^>]*Target="([^"]*)"`).exec(rels)?.[1] ?? ""
+		}
+
+		expect(target("A1")).toBe("https://b.example/")
+		expect(target("A2")).toBe("https://a.example/")
+		session.close()
+	})
+
+	it.skipIf(corpus("xlsx/xlsxwriter__comment01.xlsx") === null)(
+		"saves after a copy with notes is deleted again, its relationships gone with it",
+		async () => {
+			const { session, info } = await openFixture(corpus("xlsx/xlsxwriter__comment01.xlsx") as Uint8Array)
+			const copy = changeOf(await session.command({ type: "sheet.duplicate", sheet: info.sheets[0]!.id })).sheets?.[1]?.id ?? -1
+
+			changeOf(await session.command({ type: "sheet.delete", sheet: copy }))
+
+			const files = parts(await savedBytes(session))
+
+			expect(Object.keys(files).filter(file => /^xl\/worksheets\/_rels\//.test(file))).toEqual([
+				"xl/worksheets/_rels/sheet1.xml.rels"
+			])
+			expect(Object.keys(files).filter(file => /^xl\/comments\d+\.xml$/.test(file))).toEqual(["xl/comments1.xml"])
+			session.close()
+		}
+	)
+
 	it.skipIf(corpus("xlsx/xlsxwriter__comment01.xlsx") === null)(
 		"moves the copy's notes with an insert on the copy, and gives each duplicate a shape block of its own",
 		async () => {
@@ -501,6 +547,23 @@ describe("sheet session: a duplicated sheet's root", () => {
 		expect(linkUid).toMatch(GUID)
 		expect(linkUid).not.toBe("{3210318E-49B7-475D-84EB-F466F1057241}")
 		expect(files["xl/worksheets/sheet1.xml"]).toBe(xml)
+		session.close()
+	})
+
+	it("gives a copy of a copy the namespaces of the root the copy took", async () => {
+		const xml =
+			`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="${MAIN}" xmlns:r="${R}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x14ac" xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac">` +
+			'<sheetFormatPr defaultRowHeight="15" x14ac:dyDescent="0.25"/><sheetData><row r="1" x14ac:dyDescent="0.25"><c r="A1"><v>1</v></c></row></sheetData></worksheet>'
+		const { session, info } = await openFixture({ sheets: [{ name: "One", xml }] })
+		const copy = changeOf(await session.command({ type: "sheet.duplicate", sheet: info.sheets[0]!.id })).sheets?.[1]?.id ?? -1
+
+		changeOf(await session.command({ type: "sheet.duplicate", sheet: copy }))
+
+		const saved = await savedBytes(session)
+		const third = parts(saved)["xl/worksheets/sheet3.xml"] ?? ""
+
+		expect(/<worksheet\b[^>]*>/.exec(third)?.[0]).toContain('xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"')
+		expect(await reread(saved)).toEqual(["One", "One (2)", "One (2) (2)"])
 		session.close()
 	})
 

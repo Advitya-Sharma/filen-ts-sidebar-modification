@@ -66,7 +66,7 @@ export const previewSheetFormat = {
 	/** Spreadsheet viewer — borders menu item: a line from each cell's upper left to its lower right */
 	previewSheetBorderDiagonalDown: "Diagonal down border",
 	/** Spreadsheet viewer — borders menu: submenu choosing the colour of the lines the items draw */
-	previewSheetBorderLineColor: "Line colour",
+	previewSheetBorderLineColor: "Line color",
 	/** Spreadsheet viewer — borders menu: submenu choosing the style of the lines the items draw */
 	previewSheetBorderLineStyle: "Line style",
 	/** Spreadsheet viewer — border line style */

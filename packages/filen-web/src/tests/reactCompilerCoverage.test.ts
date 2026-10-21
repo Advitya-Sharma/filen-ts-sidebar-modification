@@ -171,7 +171,7 @@ describe("React Compiler coverage", () => {
 			["src/features/preview/components/docxEditToolbar.tsx", "DocxEditToolbar"],
 			["src/features/preview/components/docxEditToolbar.tsx", "CommandButton"],
 			["src/features/preview/components/docxFormatControls.tsx", "DocxFormatControls"],
-			["src/features/preview/components/docxFormatControls.tsx", "DocxColorGrid"],
+			["src/features/office/components/officeColorGrid.tsx", "DocxColorGrid"],
 			["src/features/preview/components/docxTableMenu.tsx", "DocxTableMenu"],
 			["src/features/preview/components/docxFormControls.tsx", "DocxFormControls"],
 			["src/features/preview/components/docxTableBorderDrag.tsx", "DocxTableBorderDrag"],

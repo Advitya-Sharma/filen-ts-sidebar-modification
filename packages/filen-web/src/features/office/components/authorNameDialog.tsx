@@ -26,15 +26,15 @@ export function AuthorNameDialog({
 		<InputDialog
 			open={open}
 			pending={pending}
-			title={t("previewDocxAuthorNameTitle")}
-			body={onTurnOffTracking === undefined ? t("previewDocxAuthorNameBody") : t("previewDocxAuthorNameTrackBody")}
-			label={t("previewDocxAuthorNameLabel")}
+			title={t("previewOfficeAuthorNameTitle")}
+			body={onTurnOffTracking === undefined ? t("previewOfficeAuthorNameBody") : t("previewOfficeAuthorNameTrackBody")}
+			label={t("previewOfficeAuthorNameLabel")}
 			initialValue={initialValue ?? ""}
 			autoComplete="name"
 			maxLength={MAX_AUTHOR_NAME_LENGTH}
-			submitLabel={t("previewDocxAuthorNameSave")}
+			submitLabel={t("previewOfficeAuthorNameSave")}
 			secondaryAction={
-				onTurnOffTracking === undefined ? undefined : { label: t("previewDocxTurnOffTracking"), onClick: onTurnOffTracking }
+				onTurnOffTracking === undefined ? undefined : { label: t("previewOfficeTurnOffTracking"), onClick: onTurnOffTracking }
 			}
 			validate={value => normalizeAuthorName(value) !== undefined}
 			onOpenChange={onOpenChange}

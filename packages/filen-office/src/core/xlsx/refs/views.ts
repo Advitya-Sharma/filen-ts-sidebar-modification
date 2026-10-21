@@ -1,17 +1,26 @@
 import type { XlsxColRange, XlsxSheetView } from "../model/types"
-import { axisLimit, shiftAxisSpan, shiftIndex, shiftRange, type AxisShift } from "./axis"
+import { axisLimit, inBand, shiftAxisSpan, shiftIndex, shiftRange, straddles, type AxisShift } from "./axis"
+import { refuse } from "./catalogue"
 import { shiftRanges } from "./sqref"
 
 // What the model holds for the sheet's own layout, moved: merged ranges, column ranges and the first sheet view.
 
-// Merges as quads; a merge left with one cell is no merge (ECMA-376 Part 1 §18.3.1.55). The same array when
-// nothing moved.
+// Merges as quads; a merge left with one cell is no merge (ECMA-376 Part 1 §18.3.1.55). Cells shifted in a band
+// refuse to move part of a merge (as LibreOffice does). The same array when nothing moved.
 export function shiftMerges(merges: Uint32Array, shift: AxisShift): Uint32Array {
 	const out: number[] = []
 	let changed = false
 
 	for (let k = 0; k + 3 < merges.length; k += 4) {
 		const range = { startRow: merges[k] ?? 0, startCol: merges[k + 1] ?? 0, endRow: merges[k + 2] ?? 0, endCol: merges[k + 3] ?? 0 }
+
+		if (straddles(range, shift)) refuse("merged", "mergeCells")
+
+		if (!inBand(range, shift)) {
+			out.push(range.startRow, range.startCol, range.endRow, range.endCol)
+
+			continue
+		}
 		const first = shift.axis === "rows" ? range.startRow : range.startCol
 		// A delete that takes the merge's first row (column), where its value is, takes the merge: as LibreOffice
 		// does (Microsoft's documentation is silent); a delete further in shrinks it.
@@ -34,7 +43,8 @@ export function shiftMerges(merges: Uint32Array, shift: AxisShift): Uint32Array 
 // Column ranges (widths, styles): an insert inside a range widens it, as the inserted columns take the format of
 // the columns around them. The same array when nothing moved.
 export function shiftCols(cols: readonly XlsxColRange[], shift: AxisShift): readonly XlsxColRange[] {
-	if (shift.axis !== "cols") return cols
+	// Cells shifted in a band leave the columns' own properties where they are.
+	if (shift.axis !== "cols" || shift.band !== undefined) return cols
 
 	let changed = false
 	const out: XlsxColRange[] = []
@@ -90,7 +100,10 @@ function viewIndex(index: number, shift: AxisShift): number {
 	return Math.min(shift.at, axisLimit(shift.axis) - 1)
 }
 
+// Cells shifted in a band leave the view (selection, panes) as it is.
 export function shiftView(view: XlsxSheetView, shift: AxisShift): XlsxSheetView {
+	if (shift.band !== undefined) return view
+
 	const rows = shift.axis === "rows"
 	const activeRow = rows ? viewIndex(view.activeRow, shift) : view.activeRow
 	const activeCol = rows ? view.activeCol : viewIndex(view.activeCol, shift)

@@ -12,9 +12,16 @@ import {
 	type SimpleCellAddress
 } from "hyperformula"
 import type { AxisEdit } from "../model/edits"
-import { formulaInputs, sameSheet } from "../refs/formulaRefs"
+import type { SheetLocale } from "../protocol"
+import { runSliced, type SliceClock } from "../../slicing"
+import { cellName } from "../refs/cellRef"
+import { formulaInputs, quoteSheetNames, sameSheet, sheetNameNeedsQuotes } from "../refs/formulaRefs"
 import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
 import type { SizeAxis } from "../sizes/sizes"
+import { registerSheetFunctions } from "./functions"
+import { CALC_ERROR, guardFunctionPlugins, UNMODELED, withRowState } from "./functions/plugin"
+import { textDateParser } from "./textDates"
+import { installWholeRanges, WholeRanges, withWholeRanges } from "./wholeRanges"
 
 // HyperFormula over a workbook, for recalculating what an edit changes. Built only once the workbook has a
 // formula to care about, and kept in step with the workbook from then on (cells, inserted and deleted rows
@@ -89,6 +96,9 @@ const ERROR_TEXT: Readonly<Partial<Record<ErrorType, string>>> = {
 
 const INSERT_RUN = 10_000
 
+// A formula calling SUBTOTAL or AGGREGATE, which read whether rows are hidden.
+const CALLS_TOTAL = /(?:SUBTOTAL|AGGREGATE)\s*\(/i
+
 // The most cells the engine may copy for one removal: it copies what it removes for an undo of its own (every cell
 // of the removed rows across the sheet's width, of a removed sheet), which far cells make billions.
 const MAX_COPIED_CELLS = 1_048_576
@@ -110,6 +120,18 @@ const PARSE_ERROR = "#ERROR!"
 // Content standing in for a formula the engine cannot be given: text reading as its parse error.
 export const UNPARSEABLE = `'${PARSE_ERROR}`
 
+// Changed cells read back between yields to a slice clock (releaseEvaluation).
+const READ_PART = 4_096
+
+// Runs sliced steps to their end without yielding.
+function drain<T>(steps: Generator<void, T>): T {
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+	}
+}
+
 // A recalculated cell's key in a batch's changes.
 function changeKey(address: SimpleCellAddress): string {
 	return `${String(address.sheet)},${String(address.row)},${String(address.col)}`
@@ -117,10 +139,31 @@ function changeKey(address: SimpleCellAddress): string {
 
 function exported(value: unknown): RecalculatedCell["value"] {
 	if (value instanceof DetailedCellError) {
+		// #CALC!, which the engine has no type for: its generic error with that message (functions/plugin.ts).
+		if (value.type === ErrorType.ERROR && value.message === CALC_ERROR) return CALC_ERROR
+
 		return ERROR_TEXT[value.type] ?? value.value
 	}
 
 	return typeof value === "number" || typeof value === "string" || typeof value === "boolean" ? value : null
+}
+
+// Excel's smallest positive number ("Excel specifications and limits"): a result below it is 0.
+const SMALLEST = 2.2250738585072014e-308
+const NUM_ERROR = new DetailedCellError(new CellError(ErrorType.NUM), "#NUM!")
+
+// A number result at Excel's 15 significant digits ("Excel specifications and limits"), from the value the engine
+// holds: its export scales by a power of ten, which overflows past about 1e294 and below about 1e-294 (Infinity or
+// NaN) and is off in the last digit for large numbers (1e300 as 9.999999999999999e299). Past a double, #NUM!.
+function heldNumber(held: unknown): number | DetailedCellError {
+	const value = typeof held === "object" && held !== null && "val" in held ? held.val : held
+
+	if (typeof value !== "number" || !Number.isFinite(value)) return NUM_ERROR
+	if (Math.abs(value) < SMALLEST) return 0
+
+	const rounded = Number(value.toPrecision(15))
+
+	return Number.isFinite(rounded) ? rounded : value
 }
 
 interface Pending {
@@ -156,6 +199,9 @@ function registerHeld(): void {
 	if (registered) return
 
 	HyperFormula.registerFunctionPlugin(HeldResultPlugin, { enGB: { [HELD]: HELD } })
+	registerSheetFunctions()
+	guardFunctionPlugins()
+	installWholeRanges(LICENSE_KEY)
 	registered = true
 }
 
@@ -166,7 +212,7 @@ const ERROR_TYPES = new Map<string, ErrorType>(
 // What a formula naming a sheet the workbook does not have shows (Excel's reading of it).
 const REF_ERROR = "#REF!"
 
-function engineConfig(date1904: boolean): Partial<ConfigParams> {
+function engineConfig(date1904: boolean, locale: SheetLocale | undefined): Partial<ConfigParams> {
 	return {
 		licenseKey: LICENSE_KEY,
 		// Ordinary formulas as Excel calculates them: a range where one value is expected meets the
@@ -183,6 +229,13 @@ function engineConfig(date1904: boolean): Partial<ConfigParams> {
 		nullDate: date1904 ? { year: 1904, month: 1, day: 1 } : { year: 1899, month: 12, day: 31 },
 		ignoreWhiteSpace: "any",
 		evaluateNullToZero: true,
+		// Text dates and times as the session's locale reads them (textDates.ts), in place of the engine's formats.
+		dateFormats: [],
+		timeFormats: [],
+		parseDateTime: textDateParser(locale),
+		// Results to 15 significant digits, Excel's precision ("Excel specifications and limits"); the engine's own
+		// default keeps 11.
+		precisionRounding: 14,
 		// Undo is the document's own; the engine's would hold copies of what each operation replaced.
 		undoLimit: 0
 	}
@@ -193,6 +246,17 @@ function engineConfig(date1904: boolean): Partial<ConfigParams> {
 // million).
 const MAX_RANGE_CELLS = 2_097_152
 
+// Collects the sheets one formula reads whole columns or rows of together (wholeRanges.ts), its defined names
+// included when there are any.
+interface WholeLink {
+	names(): boolean
+	add(sheets: ReadonlySet<string>, names: readonly string[], own: number): void
+}
+
+// The most cells a sheet's whole-column (whole-row) references may read in all at one recalculation, once a cell
+// written far past the cells they cover makes them reach that far (about four seconds of the engine's reading).
+const MAX_SHEET_READS = 8_388_608
+
 interface SheetExtent {
 	readonly name: string
 	readonly height: number
@@ -201,17 +265,43 @@ interface SheetExtent {
 
 // Why the engine is not given a formula: it names a sheet the workbook lacks ("sheet": the engine would keep a
 // placeholder for it, and fails on the cell when it is written next), or a range past what the engine can read
-// ("range"). Null when it is given.
+// ("range"), a whole column or row of a sheet in `heavy` (upper-case names) included. Null when it is given.
 function unreadable(
 	content: unknown,
 	sheets: readonly SheetExtent[],
 	own: number,
-	reach?: (sheet: string, cols: number, rows: number) => void
+	reach?: (sheet: string, cols: number, rows: number) => void,
+	heavy?: ReadonlySet<string>,
+	link?: WholeLink
 ): "sheet" | "range" | null {
 	if (typeof content !== "string" || !content.startsWith("=") || content.startsWith(`=${HELD}(`)) return null
-	if (!content.includes("!") && !content.includes(":")) return null
 
-	for (const ref of formulaInputs(content.slice(1)).refs) {
+	// A formula naming no other sheet and no range reads whole columns only through defined names.
+	const plain = !content.includes("!") && !content.includes(":")
+
+	if (plain && link?.names() !== true) return null
+
+	const inputs = formulaInputs(content.slice(1))
+	const refs = inputs.refs
+
+	// The sheets whose whole columns or rows this formula reads, which then end together (wholeRanges.ts).
+	if (link !== undefined) {
+		const whole = new Set<string>()
+
+		for (const ref of refs) {
+			if (ref.area.kind === "cell" || ref.lastSheet !== null) continue
+
+			const named = ref.sheet === null ? sheets[own] : sheets.find(sheet => sameSheet(sheet.name, ref.sheet ?? ""))
+
+			if (named !== undefined) whole.add(named.name)
+		}
+
+		link.add(whole, inputs.names, own)
+	}
+
+	if (plain) return null
+
+	for (const ref of refs) {
 		// The engine has no 3-D references.
 		if (ref.lastSheet !== null) return "sheet"
 
@@ -223,6 +313,7 @@ function unreadable(
 		const area = ref.area
 
 		if (!area.range && area.kind === "cell") continue
+		if (area.kind !== "cell" && heavy?.has(first.name.toUpperCase()) === true) return "range"
 
 		const top = area.kind === "cols" ? 0 : Math.min(area.startRow, area.endRow)
 		const bottom = area.kind === "cols" ? first.height - 1 : Math.min(Math.max(area.startRow, area.endRow), first.height - 1)
@@ -240,6 +331,41 @@ function unreadable(
 	}
 
 	return null
+}
+
+// Whether a formula reads its own cell (a reference to it, or a range holding it, on its own sheet): a circle, whatever
+// the other cells hold. Its own cell's name in the text is looked for first, so most formulas are not parsed.
+function readsItself(content: unknown, own: number, row: number, col: number, sheets: readonly string[]): boolean {
+	if (typeof content !== "string" || !content.startsWith("=")) return false
+
+	const text = content.includes("$") ? content.replaceAll("$", "") : content
+	const name = cellName(row, col)
+	let at = text.toUpperCase().indexOf(name)
+
+	for (; at >= 0; at = text.toUpperCase().indexOf(name, at + 1)) {
+		const before = text.charCodeAt(at - 1)
+		const after = text.charCodeAt(at + name.length)
+
+		if (!(before >= 65 && before <= 90) && !(before >= 97 && before <= 122) && !(after >= 48 && after <= 57)) break
+	}
+
+	if (at < 0) return false
+
+	return formulaInputs(content.slice(1)).refs.some(ref => {
+		if (ref.lastSheet !== null || (ref.sheet !== null && !sameSheet(ref.sheet, sheets[own] ?? ""))) return false
+
+		const area = ref.area
+
+		if (area.kind === "cols") return col >= Math.min(area.startCol, area.endCol) && col <= Math.max(area.startCol, area.endCol)
+		if (area.kind === "rows") return row >= Math.min(area.startRow, area.endRow) && row <= Math.max(area.startRow, area.endRow)
+
+		return (
+			row >= Math.min(area.startRow, area.endRow) &&
+			row <= Math.max(area.startRow, area.endRow) &&
+			col >= Math.min(area.startCol, area.endCol) &&
+			col <= Math.max(area.startCol, area.endCol)
+		)
+	})
 }
 
 // What a formula the engine is not given shows when its file stored no result.
@@ -286,18 +412,83 @@ export class FormulaEngine {
 	}
 	// The held results recalculated while an edit is recorded (their inputs changed), by changeKey.
 	private recorded: Map<string, SimpleCellAddress> | null = null
+	// Sets made while evaluation is held (holdEvaluation): their cells, recalculated together at releaseEvaluation.
+	private deferred: {
+		readonly own: Set<string>
+		readonly pending: Pending[]
+		// Sheet index, row, col of each cell set.
+		readonly written: number[]
+		results: RecalculatedCell[]
+	} | null = null
+	// Whether a row is shown, hidden or hidden by a filter (functions/plugin.ts ROW_*), by grid sheet index: what
+	// SUBTOTAL and AGGREGATE leave out.
+	private readonly rows: ((sheet: number, row: number) => number) | undefined
+	// The cells whose formula calls SUBTOTAL or AGGREGATE, by engine sheet id (row * MAX_COLUMNS + col): calculated
+	// again when rows are hidden or shown (rowsChanged).
+	private readonly totals = new Map<number, Set<number>>()
+	// Each engine sheet id's grid index while the first build calculates (sheetIds is filled after it).
+	private building: number[] | null = null
+	// Where its whole-column and whole-row references end (wholeRanges.ts).
+	private readonly whole = new WholeRanges()
+	// The defined names by scope (grid sheet index, -1 for the workbook's) and upper-case name.
+	private readonly definedNames = new Map<string, EngineName>()
+	// The workbook's sheet names in grid order, for the names' own references.
+	private sheetNames: readonly string[] = []
+	private readonly link: WholeLink = {
+		names: () => this.definedNames.size > 0,
+		add: (sheets, names, own) => {
+			const all = new Set(sheets)
+
+			for (const name of names) for (const sheet of this.namedWhole(name, own, new Set())) all.add(sheet)
+
+			if (all.size > 1) this.whole.link([...all])
+		}
+	}
+
+	// The sheets whose whole columns or rows a defined name reads, through the names it names in turn.
+	private namedWhole(name: string, own: number, seen: Set<EngineName>): string[] {
+		const named = this.definedNames.get(`${String(own)}|${name}`) ?? this.definedNames.get(`-1|${name}`)
+
+		if (named === undefined || seen.has(named)) return []
+
+		seen.add(named)
+
+		const at = named.scope ?? own
+		const inputs = formulaInputs(named.expression)
+		const sheets: string[] = []
+
+		for (const ref of inputs.refs) {
+			if (ref.area.kind === "cell" || ref.lastSheet !== null) continue
+
+			const sheet = ref.sheet === null ? this.sheetNames[at] : this.sheetNames.find(known => sameSheet(known, ref.sheet ?? ""))
+
+			if (sheet !== undefined) sheets.push(sheet)
+		}
+
+		for (const inner of inputs.names) sheets.push(...this.namedWhole(inner, at, seen))
+
+		return sheets
+	}
 
 	// `held`: told of each cell this engine comes to hold on its own account (a formula it fails on), by grid sheet
 	// index; with it, a formula in a circle the engine finds, or naming a sheet the workbook lacks, is held too (the
 	// caller tracks what held results read).
+	// `rows`: whether a row of a sheet (by grid sheet index) is shown (0), hidden (1) or hidden by a filter (2); every
+	// row shown without it. `locale`: how text dates in formulas read (en-US's month first without it).
 	constructor(
 		sheets: readonly EngineSheet[],
 		names: readonly EngineName[],
 		date1904 = false,
-		held?: (sheet: number, row: number, col: number) => void
+		held?: (sheet: number, row: number, col: number) => void,
+		rows?: (sheet: number, row: number) => number,
+		locale?: SheetLocale
 	) {
 		this.held = held
-		this.config = engineConfig(date1904)
+		this.rows = rows
+		this.config = engineConfig(date1904, locale)
+		this.sheetNames = sheets.map(sheet => sheet.name)
+
+		for (const named of names) this.definedNames.set(`${String(named.scope ?? -1)}|${named.name.toUpperCase()}`, named)
 		registerHeld()
 
 		// A null-prototype record: a sheet named "__proto__" is a key like any other.
@@ -320,18 +511,16 @@ export class FormulaEngine {
 				if (cell.fallback !== undefined) fallbacks.set(cell.row * MAX_COLUMNS + cell.col, cell.fallback)
 			}
 
-			if (held !== undefined) {
-				sheet.rows.forEach((row, rowIndex) => {
-					row.forEach((value, col) => {
-						const reason = unreadable(value, extents, index, this.reach)
+			sheet.rows.forEach((row, rowIndex) => {
+				row.forEach((value, col) => {
+					const reason = unreadable(value, extents, index, this.reach, undefined, this.link)
 
-						if (reason === null) return
+					if (reason === null || held === undefined) return
 
-						row[col] = this.holding(new HeldResult(fallbacks.get(rowIndex * MAX_COLUMNS + col) ?? unreadableShows(reason)))
-						missing.push({ sheet: index, row: rowIndex, col })
-					})
+					row[col] = this.holding(new HeldResult(fallbacks.get(rowIndex * MAX_COLUMNS + col) ?? unreadableShows(reason)))
+					missing.push({ sheet: index, row: rowIndex, col })
 				})
-			}
+			})
 
 			contents[sheet.name] = sheet.rows as RawCellContent[][]
 		})
@@ -357,7 +546,10 @@ export class FormulaEngine {
 
 		const build = (): HyperFormula => this.run(() => HyperFormula.buildFromSheets(contents, this.config, namedExpressions))
 
+		// While the first build calculates, the engine's sheet ids are the record's key order.
+		this.building = order.map(name => sheets.findIndex(sheet => sheet.name === name))
 		this.engine = build()
+		this.building = null
 
 		for (const sheet of sheets) {
 			const id = this.engine.getSheetId(sheet.name)
@@ -368,6 +560,18 @@ export class FormulaEngine {
 
 			this.sheetIds.push(id)
 		}
+
+		sheets.forEach((sheet, index) => {
+			const id = this.sheetIds[index]
+
+			if (id === undefined) return
+
+			sheet.rows.forEach((row, rowIndex) => {
+				row.forEach((value, col) => {
+					if (typeof value === "string" && CALLS_TOTAL.test(value)) this.noteTotal(id, rowIndex, col, value)
+				})
+			})
+		})
 
 		let pending = sheets.flatMap((sheet, index) => sheet.formulas.flatMap(cell => this.pending(index, cell)))
 
@@ -456,10 +660,80 @@ export class FormulaEngine {
 		running = this.answer
 
 		try {
-			return work()
+			return withWholeRanges(this.whole, () => (this.rows === undefined ? work() : withRowState(this.rowState, work)))
 		} finally {
 			running = previous
 		}
+	}
+
+	private readonly rowState = (sheet: number, row: number): number =>
+		this.rows?.(this.building === null ? this.sheetIndex(sheet) : (this.building[sheet] ?? -1), row) ?? 0
+
+	// Keeps the registry of SUBTOTAL and AGGREGATE cells in step with what a cell is given.
+	private noteTotal(id: number, row: number, col: number, content: unknown): void {
+		const key = row * MAX_COLUMNS + col
+
+		if (typeof content === "string" && CALLS_TOTAL.test(content)) {
+			let cells = this.totals.get(id)
+
+			if (cells === undefined) {
+				cells = new Set()
+				this.totals.set(id, cells)
+			}
+
+			cells.add(key)
+		} else this.totals.get(id)?.delete(key)
+	}
+
+	// The registry after rows or columns are inserted (count > 0) or deleted (count < 0) at `at` of one sheet.
+	private moveTotals(id: number, axis: SizeAxis, at: number, count: number): void {
+		const cells = this.totals.get(id)
+
+		if (cells === undefined || cells.size === 0) return
+
+		const moved = new Set<number>()
+
+		for (const key of cells) {
+			const row = Math.floor(key / MAX_COLUMNS)
+			const col = key % MAX_COLUMNS
+			const index = axis === "rows" ? row : col
+
+			if (count < 0 && index >= at && index < at - count) continue
+
+			const next = index >= at ? index + count : index
+
+			moved.add(axis === "rows" ? next * MAX_COLUMNS + col : row * MAX_COLUMNS + next)
+		}
+
+		this.totals.set(id, moved)
+	}
+
+	// Rows were hidden or shown (by hand or by a filter): every SUBTOTAL and AGGREGATE is calculated again, and what
+	// changed reported as `set` reports it.
+	rowsChanged(): RecalculatedCell[] {
+		const cells: SimpleCellAddress[] = []
+
+		for (const [sheet, keys] of this.totals) {
+			for (const key of keys) {
+				const address = { sheet, row: Math.floor(key / MAX_COLUMNS), col: key % MAX_COLUMNS }
+				const formula = this.engine.getCellFormula(address)
+
+				if (formula !== undefined && CALLS_TOTAL.test(formula)) cells.push(address)
+				else keys.delete(key)
+			}
+		}
+
+		if (cells.length === 0) return []
+
+		return [
+			...this.recording(
+				() =>
+					this.batched(() => {
+						for (const address of cells) this.engine.setCellContents(address, this.engine.getCellFormula(address) ?? null)
+					}),
+				null
+			).values()
+		]
 	}
 
 	// A held result as the formula the engine is given.
@@ -497,12 +771,17 @@ export class FormulaEngine {
 
 	// What a cell the engine fails on holds instead: its stored result. Null when the engine does not fail on it.
 	private failure(cell: Pending): HeldResult | null {
-		const value = this.engine.getCellValue(cell.address)
+		const value = this.cellValue(this.engine, cell.address)
 		const fallback = cell.fallback
 
 		if (!(value instanceof DetailedCellError) || fallback === undefined) {
 			return null
 		}
+
+		// A whole column read past the engine's end in a way it cannot tell Excel's answer for (functions/blankTails.ts),
+		// in this very formula.
+		if (value.type === ErrorType.ERROR && value.message === UNMODELED)
+			return value.address === this.engine.simpleCellAddressToString(cell.address, -1) ? new HeldResult(fallback) : null
 
 		if (value.type === ErrorType.ERROR) {
 			return typeof cell.content !== "string" || !this.engine.validateFormula(cell.content) ? new HeldResult(fallback) : null
@@ -526,12 +805,20 @@ export class FormulaEngine {
 	// Replaces formulas the engine fails on with their held results, recording what that recalculates. A second
 	// round catches formulas whose own failure an inherited one hid.
 	private settle(cells: Pending[], changes: Map<string, RecalculatedCell>): void {
+		drain(this.settling(cells, changes))
+	}
+
+	// The same, yielding between parts of the cells checked.
+	private *settling(cells: Pending[], changes: Map<string, RecalculatedCell>): Generator<void, void> {
 		let pending = cells
 
 		for (let round = 0; round < 3 && pending.length > 0; round++) {
 			const failing: { cell: Pending; held: HeldResult }[] = []
+			let checked = 0
 
 			for (const cell of pending) {
+				if (++checked % READ_PART === 0) yield
+
 				const held = this.failure(cell)
 
 				if (held !== null) failing.push({ cell, held })
@@ -543,7 +830,7 @@ export class FormulaEngine {
 
 			this.collect(
 				this.run(() =>
-					this.engine.batch(() => {
+					this.batched(() => {
 						for (const { cell, held } of failing) {
 							this.engine.setCellContents(cell.address, this.holding(held))
 						}
@@ -567,6 +854,13 @@ export class FormulaEngine {
 		}
 	}
 
+	// A cell's value as the engine exports it, a number rounded from what it holds (heldNumber).
+	private cellValue(engine: HyperFormula, address: SimpleCellAddress): ReturnType<HyperFormula["getCellValue"]> {
+		const value = engine.getCellValue(address)
+
+		return typeof value !== "number" ? value : heldNumber(engine.dependencyGraph.getScalarValue(address))
+	}
+
 	private sheetIndex(id: number): number {
 		return this.sheetIds.indexOf(id)
 	}
@@ -575,7 +869,15 @@ export class FormulaEngine {
 	// always what the cell holds (a formula giving a range, =A1:A3, is reported as spilling its values over the
 	// cells below, while it holds #VALUE! and they keep their own).
 	private collect(exportedChanges: ReturnType<HyperFormula["batch"]>, into: Map<string, RecalculatedCell>): void {
+		drain(this.collecting(exportedChanges, into))
+	}
+
+	private *collecting(exportedChanges: ReturnType<HyperFormula["batch"]>, into: Map<string, RecalculatedCell>): Generator<void, void> {
+		let read = 0
+
 		for (const change of exportedChanges) {
+			if (++read % READ_PART === 0) yield
+
 			if (!("address" in change)) {
 				continue
 			}
@@ -586,7 +888,7 @@ export class FormulaEngine {
 				continue
 			}
 
-			const value: unknown = this.engine.getCellValue(change.address)
+			const value: unknown = this.cellValue(this.engine, change.address)
 
 			into.set(changeKey(change.address), {
 				sheet,
@@ -596,6 +898,29 @@ export class FormulaEngine {
 				...(value instanceof DetailedCellError ? { error: true } : {})
 			})
 		}
+	}
+
+	// HyperFormula's batch without its undo grouping, whose bookkeeping costs time quadratic in the operations batched
+	// (each walks the batch so far; with undoLimit 0 nothing is ever undone): evaluation suspended for the work and
+	// resumed once, as batch does, a throw included.
+	// `moved`: the work moves cells (rows or columns inserted or removed), so where whole-column and whole-row
+	// references end is read again before anything calculates.
+	private batched(work: () => void, moved = false): ReturnType<HyperFormula["batch"]> {
+		this.engine.suspendEvaluation()
+
+		try {
+			work()
+		} catch (error) {
+			if (moved) this.whole.reset()
+
+			this.engine.resumeEvaluation()
+
+			throw error
+		}
+
+		if (moved) this.whole.reset()
+
+		return this.engine.resumeEvaluation()
 	}
 
 	// Runs an edit, reporting what it recalculates: the held results whose inputs changed among it (`own`, the
@@ -627,7 +952,7 @@ export class FormulaEngine {
 
 			if (sheet < 0 || own?.has(key) === true || changes.has(key)) continue
 
-			const value: unknown = this.engine.getCellValue(address)
+			const value: unknown = this.cellValue(this.engine, address)
 
 			changes.set(key, {
 				sheet,
@@ -642,6 +967,7 @@ export class FormulaEngine {
 
 	// Sets cells and returns every cell whose value changed as a result, the set ones included (except
 	// formulas that fell back to their stored result, which did not change), and the held results it made stale.
+	// While evaluation is held it only writes them and returns nothing: releaseEvaluation reports them.
 	set(sheet: number, cells: readonly EngineCell[]): RecalculatedCell[] {
 		const id = this.sheetIds[sheet]
 
@@ -649,9 +975,110 @@ export class FormulaEngine {
 			return []
 		}
 
-		if (this.held !== undefined && this.outgrows(id, cells)) return [...this.rebuildWith(sheet, cells).values()]
+		const heavy = this.held === undefined ? null : this.outgrows(id, cells)
+
+		if (heavy !== null) {
+			if (this.deferred === null) return [...this.rebuildWith(sheet, cells, heavy).values()]
+
+			// Built again from what it holds: what was held is recalculated first, then held again.
+			const earlier = drain(this.releasing(true))
+			const rebuilt = [...this.rebuildWith(sheet, cells, heavy).values()]
+
+			this.holdEvaluation()
+
+			if (this.deferred !== null) this.deferred.results = [...earlier, ...rebuilt]
+
+			return []
+		}
+
+		const deferred = this.deferred
+
+		if (deferred !== null) {
+			this.write(id, sheet, cells)
+
+			for (const cell of cells) {
+				deferred.own.add(changeKey({ sheet: id, row: cell.row, col: cell.col }))
+				deferred.pending.push(...this.pending(sheet, cell))
+				deferred.written.push(sheet, cell.row, cell.col)
+				this.noteTotal(id, cell.row, cell.col, cell.content instanceof HeldResult ? null : cell.content)
+			}
+
+			return []
+		}
 
 		const own = new Set(cells.map(cell => changeKey({ sheet: id, row: cell.row, col: cell.col })))
+		const changes = this.recording(() => this.batched(() => this.write(id, sheet, cells)), own)
+
+		this.settle(
+			cells.flatMap(cell => this.pending(sheet, cell)),
+			changes
+		)
+
+		for (const cell of cells) this.noteTotal(id, cell.row, cell.col, cell.content instanceof HeldResult ? null : cell.content)
+
+		drain(
+			this.reporting(
+				changes,
+				cells.flatMap(cell => [sheet, cell.row, cell.col])
+			)
+		)
+
+		return [...changes.values()]
+	}
+
+	// Holds evaluation: sets write their cells and nothing is recalculated until releaseEvaluation, which works out
+	// everything they changed once (a long write its caller slices: a total over the cells is not recalculated for
+	// each part). Only sets may run while it is held.
+	holdEvaluation(): void {
+		if (this.deferred !== null) return
+
+		this.engine.suspendEvaluation()
+		this.deferred = { own: new Set(), pending: [], written: [], results: [] }
+	}
+
+	// Recalculates what the sets since holdEvaluation changed, in one task of the engine's, and returns it as set
+	// returns it, the changed cells read back in slices of `clock`; with `report` false returns nothing and spares
+	// reading them (a caller that has the results already: an undo).
+	async releaseEvaluation(report = true, clock?: SliceClock): Promise<RecalculatedCell[]> {
+		return await runSliced(this.releasing(report), clock)
+	}
+
+	private *releasing(report: boolean): Generator<void, RecalculatedCell[]> {
+		const deferred = this.deferred
+
+		if (deferred === null) return []
+
+		this.deferred = null
+
+		if (!report) {
+			this.run(() => this.engine.resumeEvaluation())
+			yield* this.settling(deferred.pending, new Map())
+
+			return []
+		}
+
+		const changes = new Map<string, RecalculatedCell>()
+		const recorded = new Map<string, SimpleCellAddress>()
+		let exportedChanges: ReturnType<HyperFormula["batch"]>
+
+		this.recorded = recorded
+
+		try {
+			exportedChanges = this.run(() => this.engine.resumeEvaluation())
+		} finally {
+			this.recorded = null
+		}
+
+		yield* this.collecting(exportedChanges, changes)
+		this.staled(recorded, deferred.own, changes)
+		yield* this.settling(deferred.pending, changes)
+		yield* this.reporting(changes, deferred.written)
+
+		return [...deferred.results, ...changes.values()]
+	}
+
+	// The cells given, one by one, evaluation suspended by the caller.
+	private write(id: number, sheet: number, cells: readonly EngineCell[]): void {
 		// The sheets as far as the engine has seen them, read once, when a formula needs them.
 		let known: SheetExtent[] | null = null
 		const extents = (): SheetExtent[] =>
@@ -660,58 +1087,82 @@ export class FormulaEngine {
 
 				return { name: this.engine.getSheetName(sheetId) ?? "", height, width }
 			}))
-		const changes = this.recording(
-			() =>
-				this.engine.batch(() => {
-					for (const cell of cells) {
-						const address = { sheet: id, row: cell.row, col: cell.col }
 
-						try {
-							const reason = this.held === undefined ? null : unreadable(cell.content, extents(), sheet, this.reach)
-
-							if (reason !== null) {
-								this.engine.setCellContents(address, this.holding(new HeldResult(cell.fallback ?? unreadableShows(reason))))
-								this.heldBy(address)
-							} else {
-								this.engine.setCellContents(address, this.contentOf(cell.content))
-							}
-						} catch {
-							// A formula the parser overflows on: it holds what it stored, or reads as unparseable.
-							const stored = cell.fallback
-
-							this.engine.setCellContents(address, stored === undefined ? UNPARSEABLE : this.holding(new HeldResult(stored)))
-
-							if (stored !== undefined) this.heldBy(address)
-						}
-					}
-				}),
-			own
-		)
-
-		this.settle(
-			cells.flatMap(cell => this.pending(sheet, cell)),
-			changes
-		)
-
-		// A set cell whose value is what it was is not reported by the engine, though the caller wrote it anew.
 		for (const cell of cells) {
 			const address = { sheet: id, row: cell.row, col: cell.col }
+
+			// Any cell written, a held one too, can move where whole columns and rows end.
+			if (cell.content !== null && cell.content !== undefined && cell.content !== "") this.whole.written(id, cell.row, cell.col)
+
+			try {
+				const read =
+					typeof cell.content === "string" && cell.content.startsWith("=")
+						? unreadable(cell.content, extents(), sheet, this.reach, undefined, this.link)
+						: null
+				const reason = this.held === undefined ? null : read
+
+				// A formula reading its own cell is a circle: held at its stored result now, rather than found by the
+				// engine and held after it calculated everything reading it (a second recalculation).
+				if (
+					reason === null &&
+					this.held !== undefined &&
+					cell.fallback !== undefined &&
+					readsItself(cell.content, sheet, cell.row, cell.col, this.sheetNames)
+				) {
+					this.engine.setCellContents(address, this.holding(new HeldResult(cell.fallback)))
+					this.heldBy(address)
+
+					continue
+				}
+
+				if (reason !== null) {
+					this.engine.setCellContents(address, this.holding(new HeldResult(cell.fallback ?? unreadableShows(reason))))
+					this.heldBy(address)
+				} else {
+					const content = this.contentOf(cell.content)
+
+					this.engine.setCellContents(address, content)
+
+					// A spilled array fills cells besides its own.
+					if (typeof content === "string" && content.startsWith("=") && this.engine.isCellPartOfArray(address)) this.whole.reset()
+				}
+			} catch {
+				// A formula the parser overflows on: it holds what it stored, or reads as unparseable.
+				const stored = cell.fallback
+
+				this.engine.setCellContents(address, stored === undefined ? UNPARSEABLE : this.holding(new HeldResult(stored)))
+
+				if (stored !== undefined) this.heldBy(address)
+			}
+		}
+	}
+
+	// A set cell whose value is what it was is not reported by the engine, though the caller wrote it anew: added
+	// (`written`: sheet index, row, col triples). Yields between parts.
+	private *reporting(changes: Map<string, RecalculatedCell>, written: readonly number[]): Generator<void, void> {
+		for (let k = 0; k + 2 < written.length; k += 3) {
+			if (k > 0 && k % (3 * READ_PART) === 0) yield
+
+			const sheet = written[k] ?? 0
+			const id = this.sheetIds[sheet]
+
+			if (id === undefined) continue
+
+			const address = { sheet: id, row: written[k + 1] ?? 0, col: written[k + 2] ?? 0 }
 			const key = changeKey(address)
 
 			if (changes.has(key)) continue
 
-			const value: unknown = this.engine.getCellValue(address)
+			const value: unknown = this.cellValue(this.engine, address)
 
 			changes.set(key, {
 				sheet,
-				row: cell.row,
-				col: cell.col,
+				row: address.row,
+				col: address.col,
 				value: exported(value),
 				...(value instanceof DetailedCellError ? { error: true } : {})
 			})
 		}
-
-		return [...changes.values()]
 	}
 
 	// Whether a result is the engine failing rather than the formula (a function it lacks, syntax it cannot
@@ -765,18 +1216,20 @@ export class FormulaEngine {
 
 		if (id === undefined) return []
 
+		this.moveTotals(id, axis, at, count)
+
 		// In runs: the engine spreads the new rows into one call, which a large insert overflows.
 		return [
 			...this.recording(
 				() =>
-					this.engine.batch(() => {
+					this.batched(() => {
 						for (let done = 0; done < count; done += INSERT_RUN) {
 							const run = Math.min(INSERT_RUN, count - done)
 
 							if (axis === "rows") this.engine.addRows(id, [at, run])
 							else this.engine.addColumns(id, [at, run])
 						}
-					}),
+					}, true),
 				null
 			).values()
 		]
@@ -788,10 +1241,15 @@ export class FormulaEngine {
 		if (id === undefined) return []
 
 		this.ensureCopies(this.removedCopies(id, axis, count))
+		this.moveTotals(id, axis, at, -count)
 
 		return [
 			...this.recording(
-				() => (axis === "rows" ? this.engine.removeRows(id, [at, count]) : this.engine.removeColumns(id, [at, count])),
+				() =>
+					this.batched(() => {
+						if (axis === "rows") this.engine.removeRows(id, [at, count])
+						else this.engine.removeColumns(id, [at, count])
+					}, true),
 				null
 			).values()
 		]
@@ -806,6 +1264,7 @@ export class FormulaEngine {
 		}
 
 		this.sheetIds.push(id)
+		this.sheetNames = [...this.sheetNames, added]
 	}
 
 	// Removes the last sheet (an added one being undone).
@@ -818,6 +1277,9 @@ export class FormulaEngine {
 
 		this.ensureCopies(width * height)
 		this.sheetIds.pop()
+		this.sheetNames = this.sheetNames.slice(0, -1)
+		this.totals.delete(id)
+		this.whole.reset()
 
 		return [...this.recording(() => this.engine.removeSheet(id), null).values()]
 	}
@@ -832,6 +1294,8 @@ export class FormulaEngine {
 			this.run(() => {
 				this.engine.renameSheet(id, name)
 			})
+			this.whole.rename(before, name)
+			this.sheetNames = this.sheetNames.map((known, index) => (index === sheet ? name : known))
 
 			if (reach !== undefined) {
 				this.reaches.delete(before)
@@ -841,37 +1305,66 @@ export class FormulaEngine {
 	}
 
 	// Whether writing these cells makes the sheet reach so far that a formula reading it to its last row or column
-	// would read past MAX_RANGE_CELLS.
-	private outgrows(id: number, cells: readonly EngineCell[]): boolean {
-		const reach = this.reaches.get((this.engine.getSheetName(id) ?? "").toUpperCase())
+	// would read past MAX_RANGE_CELLS, or its whole-column (whole-row) references together past MAX_SHEET_READS at a
+	// jump (a cell written far below the cells they cover; growing as data does is left alone): null when not, else the
+	// sheets (upper-case names) whose whole-column and whole-row references are held for it.
+	private outgrows(id: number, cells: readonly EngineCell[]): ReadonlySet<string> | null {
+		const name = (this.engine.getSheetName(id) ?? "").toUpperCase()
+		const reach = this.reaches.get(name)
 
-		if (reach === undefined) return false
+		if (reach === undefined) return null
 
+		const graph = this.engine.dependencyGraph
 		const { width, height } = this.engine.getSheetDimensions(id)
+		const ends = this.whole.ends(graph, id)
 		let rows = height
 		let cols = width
+		let coveredRows = ends.rows
+		let coveredCols = ends.cols
 
 		for (const cell of cells) {
 			if (cell.content === null || cell.content === undefined || cell.content === "") continue
 
 			rows = Math.max(rows, cell.row + 1)
 			cols = Math.max(cols, cell.col + 1)
+
+			const reads = this.whole.reads(id, cell.row, cell.col)
+
+			if (reads.rows) coveredRows = Math.max(coveredRows, cell.row + 1)
+			if (reads.cols) coveredCols = Math.max(coveredCols, cell.col + 1)
 		}
 
-		return (rows > height && reach.cols * rows > MAX_RANGE_CELLS) || (cols > width && reach.rows * cols > MAX_RANGE_CELLS)
+		if ((rows > height && reach.cols * rows > MAX_RANGE_CELLS) || (cols > width && reach.rows * cols > MAX_RANGE_CELLS))
+			return new Set()
+
+		if (coveredRows <= 2 * ends.rows && coveredCols <= 2 * ends.cols) return null
+
+		const load = this.whole.load(graph, id)
+
+		return (coveredRows > 2 * ends.rows && load.rows * coveredRows > MAX_SHEET_READS) ||
+			(coveredCols > 2 * ends.cols && load.cols * coveredCols > MAX_SHEET_READS)
+			? this.whole.groupNames(graph, id)
+			: null
 	}
 
 	// Builds the engine again with these cells written, holding at the results they had the formulas that read past
-	// MAX_RANGE_CELLS once the sheet reaches as far, and reports every formula cell whose value that changed and the
-	// cells written. Rare (a cell written at the grid's far edge) and whole-workbook: the engine would otherwise read
+	// MAX_RANGE_CELLS once the sheet reaches as far (and those reading a whole column or row of a `heavy` sheet), and
+	// reports every formula cell whose value that changed and the cells written. Rare (a cell written at the grid's far edge) and whole-workbook: the engine would otherwise read
 	// each of those ranges cell by cell, past what memory holds.
-	private rebuildWith(sheet: number, cells: readonly EngineCell[]): Map<string, RecalculatedCell> {
+	private rebuildWith(sheet: number, cells: readonly EngineCell[], heavy: ReadonlySet<string>): Map<string, RecalculatedCell> {
 		const old = this.engine
 		const names = this.sheetIds.map(id => old.getSheetName(id) ?? "")
 		const contents = Object.create(null) as Record<string, RawCellContent[][]>
 
+		// The engine writes formulas back with names that need quotes bare (2024!A1), which it cannot read again.
+		const requote = names.some(sheetNameNeedsQuotes)
+		const serialized = (content: RawCellContent): RawCellContent =>
+			requote && typeof content === "string" && content.startsWith("=") ? `=${quoteSheetNames(content.slice(1))}` : content
+
 		this.sheetIds.forEach((id, index) => {
-			contents[names[index] ?? ""] = old.getSheetSerialized(id)
+			const rows = old.getSheetSerialized(id)
+
+			contents[names[index] ?? ""] = requote ? rows.map(row => row.map(serialized)) : rows
 		})
 
 		const written = contents[names[sheet] ?? ""] ?? []
@@ -906,8 +1399,8 @@ export class FormulaEngine {
 
 					const address = { sheet: id, row: rowIndex, col }
 					const own = index === sheet && fallbacks.has(rowIndex * MAX_COLUMNS + col)
-					const was: unknown = own ? undefined : old.getCellValue(address)
-					const reason = unreadable(value, extents, index, this.reach)
+					const was: unknown = own ? undefined : this.cellValue(old, address)
+					const reason = unreadable(value, extents, index, this.reach, heavy, this.link)
 
 					before.set(changeKey(address), { address, value: was })
 
@@ -925,13 +1418,20 @@ export class FormulaEngine {
 		const named = old.getAllNamedExpressionsSerialized().map(entry => {
 			const scope = entry.scope === undefined ? undefined : order.indexOf(old.getSheetName(entry.scope) ?? "")
 
-			const { scope: _scope, ...global } = entry
+			const { scope: _scope, ...global } = { ...entry, expression: serialized(entry.expression) }
 
 			return scope === undefined || scope < 0 ? global : { ...global, scope }
 		})
 
 		old.destroy()
-		this.engine = this.run(() => HyperFormula.buildFromSheets(contents, this.config, named))
+		// While the new engine calculates, its sheet ids are the record's key order; sheetIds still names the old ones.
+		this.building = order.map(name => names.indexOf(name))
+
+		try {
+			this.engine = this.run(() => HyperFormula.buildFromSheets(contents, this.config, named))
+		} finally {
+			this.building = null
+		}
 
 		const ids = names.map(name => this.engine.getSheetId(name) ?? -1)
 		const remap = (address: SimpleCellAddress): SimpleCellAddress => ({
@@ -943,7 +1443,7 @@ export class FormulaEngine {
 
 		const changes = new Map<string, RecalculatedCell>()
 		const report = (address: SimpleCellAddress, was: unknown, always: boolean): void => {
-			const value: unknown = this.engine.getCellValue(address)
+			const value: unknown = this.cellValue(this.engine, address)
 
 			if (!always && exported(value) === exported(was) && value instanceof DetailedCellError === was instanceof DetailedCellError)
 				return
@@ -959,7 +1459,19 @@ export class FormulaEngine {
 
 		const previous = [...before.values()].map(entry => ({ address: remap(entry.address), value: entry.value }))
 
+		const totals = new Map(this.totals)
+
+		this.totals.clear()
+		this.sheetIds.forEach((previous, index) => {
+			const cells = totals.get(previous)
+			const next = ids[index]
+
+			if (cells !== undefined && next !== undefined) this.totals.set(next, cells)
+		})
 		this.sheetIds.splice(0, this.sheetIds.length, ...ids)
+
+		for (const cell of cells)
+			this.noteTotal(ids[sheet] ?? 0, cell.row, cell.col, cell.content instanceof HeldResult ? null : cell.content)
 
 		for (const entry of previous) report(entry.address, entry.value, false)
 		for (const cell of cells) report({ sheet: ids[sheet] ?? 0, row: cell.row, col: cell.col }, undefined, true)
@@ -970,7 +1482,7 @@ export class FormulaEngine {
 	// A cell's value, and whether it is an error.
 	result(sheet: number, row: number, col: number): Pick<RecalculatedCell, "value" | "error"> {
 		const id = this.sheetIds[sheet]
-		const value: unknown = id === undefined ? null : this.engine.getCellValue({ sheet: id, row, col })
+		const value: unknown = id === undefined ? null : this.cellValue(this.engine, { sheet: id, row, col })
 
 		return value instanceof DetailedCellError ? { value: exported(value), error: true } : { value: exported(value) }
 	}

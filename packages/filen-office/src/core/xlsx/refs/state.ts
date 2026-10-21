@@ -46,6 +46,11 @@ export class RefState {
 		return sheet.sections.filter(section => section.name === name).map(section => decodeUtf8(section.bytes ?? new Uint8Array(0)))
 	}
 
+	// The sections held for a sheet (written by the catalogue or through setSection), by name.
+	heldSections(sheet: XlsxSheetModel): readonly string[] {
+		return [...(this.sections.get(sheet.id)?.keys() ?? [])]
+	}
+
 	setSection(sheet: XlsxSheetModel, name: string, occurrences: readonly string[]): void {
 		let held = this.sections.get(sheet.id)
 

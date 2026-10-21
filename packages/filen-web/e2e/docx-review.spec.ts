@@ -55,11 +55,11 @@ async function closeDocumentDiscarding(page: Page): Promise<void> {
 
 // The account may have no author name yet: the first change that records one asks for it.
 async function giveNameIfAsked(page: Page): Promise<void> {
-	const dialog = page.getByRole("dialog", { name: preview.previewDocxAuthorNameTitle })
+	const dialog = page.getByRole("dialog", { name: preview.previewOfficeAuthorNameTitle })
 
 	if (await dialog.isVisible({ timeout: 2000 }).catch(() => false)) {
-		await dialog.getByRole("textbox", { name: preview.previewDocxAuthorNameLabel }).fill(AUTHOR)
-		await dialog.getByRole("button", { name: preview.previewDocxAuthorNameSave }).click()
+		await dialog.getByRole("textbox", { name: preview.previewOfficeAuthorNameLabel }).fill(AUTHOR)
+		await dialog.getByRole("button", { name: preview.previewOfficeAuthorNameSave }).click()
 		await expect(dialog).toHaveCount(0)
 	}
 }

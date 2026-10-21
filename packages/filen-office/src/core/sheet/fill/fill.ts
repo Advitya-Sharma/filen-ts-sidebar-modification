@@ -1,5 +1,6 @@
 import { SHEET_MAX_COLS, SHEET_MAX_EDIT_CELLS, SHEET_MAX_ROWS, type SheetCellInputs, type SheetRange } from "../protocol"
 import { formulaTranslator } from "../refs/formulaRefs"
+import type { FillMode, FillSourceCell, FillValue, SeriesRequest } from "./series"
 
 // Fill Down and Fill Right (Ctrl+D, Ctrl+R in Excel's "Keyboard shortcuts in Excel"), and Fill Up and Left: the
 // first row (column) of each range is copied into the rest of it, contents and formats, a formula's relative
@@ -21,6 +22,22 @@ declare module "../protocol" {
 			readonly ranges: readonly SheetRange[]
 			readonly entry: string
 			readonly from: { readonly row: number; readonly col: number }
+		}
+		// The fill handle dragged from `source` out to `target` (the source and the cells it reaches, one way):
+		// series.ts's fillSeries per line. "alternate": Ctrl held. The selection becomes `target`.
+		"fill.auto": {
+			readonly sheet: SheetId
+			readonly source: SheetRange
+			readonly target: SheetRange
+			readonly mode: FillMode
+		}
+		// The Series dialog over `range`: each row ("rows") or column ("cols") is a line (series.ts's seriesLine). A stop
+		// value that does not read as a number (or a date, in a workbook) is refused ("unsupported", detail "stop").
+		"fill.series": {
+			readonly sheet: SheetId
+			readonly range: SheetRange
+			readonly orientation: "rows" | "cols"
+			readonly options: SeriesRequest
 		}
 	}
 }
@@ -171,4 +188,146 @@ export function entryCells(
 	})
 
 	return { rows, cols, inputs }
+}
+
+// --- The fill handle and the Series dialog ---
+
+// Cells written with their source cells (whose format each takes, and content for a copy) and, where it is not a
+// copy, the value of their own.
+export interface FillWrites extends FillPlan {
+	readonly values: readonly FillValue[]
+}
+
+// Where the handle's target lies from its source, or null when it is not the source grown one way.
+export function autoFillDirection(source: SheetRange, target: SheetRange): FillDirection | null {
+	const sameCols = source.startCol === target.startCol && source.endCol === target.endCol
+	const sameRows = source.startRow === target.startRow && source.endRow === target.endRow
+
+	if (source.endRow < source.startRow || source.endCol < source.startCol) return null
+	if (sameCols && target.startRow === source.startRow && target.endRow > source.endRow) return "down"
+	if (sameCols && target.endRow === source.endRow && target.startRow < source.startRow) return "up"
+	if (sameRows && target.startCol === source.startCol && target.endCol > source.endCol) return "right"
+	if (sameRows && target.endCol === source.endCol && target.startCol < source.startCol) return "left"
+
+	return null
+}
+
+// The fill handle's writes: per line, `read` gives the source's cells (in fill order: from the far end when filling
+// up or left) and fillSeries what each target takes. "tooLarge" past the cells one edit takes; null for nothing.
+export function autoFillWrites(
+	source: SheetRange,
+	target: SheetRange,
+	mode: FillMode,
+	read: (row: number, col: number) => FillSourceCell,
+	series: (cells: readonly FillSourceCell[], mode: FillMode, backward: boolean) => (k: number) => FillValue
+): FillWrites | "tooLarge" | null {
+	const direction = autoFillDirection(source, target)
+
+	if (direction === null) return null
+
+	const vertical = direction === "down" || direction === "up"
+	const backward = direction === "up" || direction === "left"
+	const lines = vertical ? source.endCol - source.startCol + 1 : source.endRow - source.startRow + 1
+	const depth = vertical ? source.endRow - source.startRow + 1 : source.endCol - source.startCol + 1
+	const reach = vertical ? target.endRow - target.startRow + 1 - depth : target.endCol - target.startCol + 1 - depth
+	const count = lines * reach
+
+	if (count > SHEET_MAX_EDIT_CELLS) return "tooLarge"
+	if (count === 0) return null
+
+	const rows = new Uint32Array(count)
+	const cols = new Uint32Array(count)
+	const sourceRows = new Uint32Array(count)
+	const sourceCols = new Uint32Array(count)
+	const values: FillValue[] = []
+	// The source's i-th cell in fill order, and the k-th target, along a line.
+	const along = (line: number, i: number, edge: number, step: number): { row: number; col: number } =>
+		vertical ? { row: edge + step * i, col: source.startCol + line } : { row: source.startRow + line, col: edge + step * i }
+	const sourceEdge = vertical ? (backward ? source.endRow : source.startRow) : backward ? source.endCol : source.startCol
+	const targetEdge = vertical ? (backward ? source.startRow - 1 : source.endRow + 1) : backward ? source.startCol - 1 : source.endCol + 1
+	const step = backward ? -1 : 1
+	let at = 0
+
+	for (let line = 0; line < lines; line++) {
+		const cells: FillSourceCell[] = []
+
+		for (let i = 0; i < depth; i++) {
+			const cell = along(line, i, sourceEdge, step)
+
+			cells.push(read(cell.row, cell.col))
+		}
+
+		const next = series(cells, mode, backward)
+
+		for (let k = 0; k < reach; k++) {
+			const cell = along(line, k, targetEdge, step)
+			const from = along(line, k % depth, sourceEdge, step)
+
+			rows[at] = cell.row
+			cols[at] = cell.col
+			sourceRows[at] = from.row
+			sourceCols[at] = from.col
+			values.push(next(k))
+			at++
+		}
+	}
+
+	return { rows, cols, sourceRows, sourceCols, ranges: [target], values }
+}
+
+// The Series dialog's writes over `range`: per line, `line` gives what each cell takes (null leaves it).
+export function seriesWrites(
+	range: SheetRange,
+	orientation: "rows" | "cols",
+	read: (row: number, col: number) => FillSourceCell,
+	line: (cells: readonly FillSourceCell[]) => readonly ({ readonly value: FillValue; readonly source: number } | null)[]
+): FillWrites | "tooLarge" | null {
+	const across = orientation === "rows"
+	const lines = across ? range.endRow - range.startRow + 1 : range.endCol - range.startCol + 1
+	const length = across ? range.endCol - range.startCol + 1 : range.endRow - range.startRow + 1
+
+	if (lines <= 0 || length <= 0) return null
+	if (lines * length > SHEET_MAX_EDIT_CELLS) return "tooLarge"
+
+	const rows: number[] = []
+	const cols: number[] = []
+	const sourceRows: number[] = []
+	const sourceCols: number[] = []
+	const values: FillValue[] = []
+	const cell = (index: number, i: number): { row: number; col: number } =>
+		across ? { row: range.startRow + index, col: range.startCol + i } : { row: range.startRow + i, col: range.startCol + index }
+
+	for (let index = 0; index < lines; index++) {
+		const cells: FillSourceCell[] = []
+
+		for (let i = 0; i < length; i++) {
+			const at = cell(index, i)
+
+			cells.push(read(at.row, at.col))
+		}
+
+		line(cells).forEach((write, i) => {
+			if (write === null) return
+
+			const at = cell(index, i)
+			const from = cell(index, write.source)
+
+			rows.push(at.row)
+			cols.push(at.col)
+			sourceRows.push(from.row)
+			sourceCols.push(from.col)
+			values.push(write.value)
+		})
+	}
+
+	if (values.length === 0) return null
+
+	return {
+		rows: Uint32Array.from(rows),
+		cols: Uint32Array.from(cols),
+		sourceRows: Uint32Array.from(sourceRows),
+		sourceCols: Uint32Array.from(sourceCols),
+		ranges: [range],
+		values
+	}
 }

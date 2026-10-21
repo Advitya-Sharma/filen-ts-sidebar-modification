@@ -1,4 +1,14 @@
-import { TILE_COLS, TILE_ROWS, type SheetId } from "../../core/sheet/protocol"
+import { TILE_COLS, TILE_ROWS, type SheetId, type SheetRange } from "../../core/sheet/protocol"
+import {
+	decoratePane,
+	decoratorInset,
+	NO_EXTENSIONS,
+	paintLayers,
+	paintScene,
+	sameParts,
+	type GridExtensionParts,
+	type GridRect
+} from "./layers"
 import type { SheetGridModel } from "./model"
 import { BorderPainter } from "./paint/borders"
 import type { GridCanvas } from "./paint/canvas"
@@ -80,10 +90,16 @@ export class GridRenderer {
 	private extentWidth = -1
 	private extentHeight = -1
 	private readonly detach: (() => void)[] = []
-	// The editor, placed over its cell on every frame while it is open.
+	// The editor's box, placed over its cell on every frame while it is open.
 	private editor: HTMLElement | null = null
 	// A resize's guide: the edge after `index`.
 	private guide: { axis: "rows" | "cols"; index: number } | null = null
+	// What a fill-handle drag would fill (or keep, dragged back inside the selection).
+	private fill: SheetRange | null = null
+	// The extensions' layers and decorators (layers.ts), and who hears of each frame (overlays re-placing).
+	private parts: GridExtensionParts = NO_EXTENSIONS
+	private inset: ((flags: number) => number) | undefined = undefined
+	private readonly frameListeners = new Set<() => void>()
 	// Frame costs (ms), for the perf harness.
 	readonly costs: number[] = []
 	measure = false
@@ -171,6 +187,29 @@ export class GridRenderer {
 		const view = this.view
 
 		if (view !== null && editor !== null) this.place(view, this.model.getSnapshot().selection.active)
+	}
+
+	// A list with the same parts (a parent's render rebuilding it) repaints nothing.
+	setExtensions(parts: GridExtensionParts): void {
+		if (sameParts(parts, this.parts)) return
+
+		this.parts = parts
+		this.inset = decoratorInset(parts.decorators)
+		this.schedule()
+	}
+
+	// Called after every frame drawn: what an overlay placed over a cell reads again (cellRect).
+	onFrame(listener: () => void): () => void {
+		this.frameListeners.add(listener)
+
+		return () => {
+			this.frameListeners.delete(listener)
+		}
+	}
+
+	setFillPreview(range: SheetRange | null): void {
+		this.fill = range
+		this.schedule()
 	}
 
 	setGuide(guide: { axis: "rows" | "cols"; index: number } | null): void {
@@ -339,15 +378,43 @@ export class GridRenderer {
 
 		this.requestTiles(snapshot.sheet, view)
 
+		const parts = this.parts
+		const extended = parts.decorators.length > 0 || parts.cellLayers.length > 0 || parts.chromeLayers.length > 0
+		const scene = extended
+			? paintScene({
+					model: this.model,
+					sheet: snapshot.sheet,
+					layout,
+					view,
+					theme,
+					scale: axes.scale,
+					pixelRatio,
+					rightToLeft: layout.rightToLeft
+				})
+			: null
+
 		if (this.cells !== null && this.measurer !== null && this.borders !== null) {
+			const cells = this.cells
+
 			paintCells(
-				{ canvas: this.cells, measurer: this.measurer, borders: this.borders, patterns: this.patterns },
-				{ model: this.model, sheet: snapshot.sheet, layout, view, theme, scale: axes.scale, pixelRatio }
+				{ canvas: cells, measurer: this.measurer, borders: this.borders, patterns: this.patterns },
+				{ model: this.model, sheet: snapshot.sheet, layout, view, theme, scale: axes.scale, pixelRatio, inset: this.inset },
+				scene === null ? undefined : (rows, cols) => decoratePane(cells, scene, parts.decorators, "under", rows, cols)
 			)
+
+			if (scene !== null) {
+				for (const pane of scene.panes) decoratePane(cells, scene, parts.decorators, "over", pane.rows, pane.cols)
+
+				paintLayers(cells, scene, parts.cellLayers)
+			}
 		}
 
 		if (this.chrome !== null) {
-			paintChrome(this.chrome, {
+			const chrome = this.chrome
+
+			paintChrome(chrome, {
+				overSelection: scene === null ? undefined : () => paintLayers(chrome, scene, parts.chromeLayers),
+				fill: this.fill,
 				view,
 				theme,
 				pixelRatio,
@@ -368,6 +435,8 @@ export class GridRenderer {
 
 		this.place(view, snapshot.selection.active)
 		this.growIfAtEnd(snapshot.sheet, view)
+
+		for (const listener of this.frameListeners) listener()
 
 		if (this.measure) this.costs.push(performance.now() - started)
 	}
@@ -481,11 +550,50 @@ export class GridRenderer {
 		editor.style.transform = mirrored
 			? `translate(calc(${String(editX + editBox.width)}px - 100%), ${String(editBox.y)}px)`
 			: `translate(${String(editX)}px, ${String(editBox.y)}px)`
-		editor.style.minWidth = `${String(editBox.width)}px`
-		editor.style.minHeight = `${String(editBox.height)}px`
-		editor.style.maxWidth = `${String(Math.max(editBox.width, mirrored ? editX + editBox.width : view.width - editX))}px`
+		// The box's textarea takes the sizes and the padding (css/sheet.css); the font is inherited by it and its backdrop.
+		editor.style.setProperty("--fo-sheet-editor-min-width", `${String(editBox.width)}px`)
+		editor.style.setProperty("--fo-sheet-editor-min-height", `${String(editBox.height)}px`)
+		editor.style.setProperty(
+			"--fo-sheet-editor-max-width",
+			`${String(Math.max(editBox.width, mirrored ? editX + editBox.width : view.width - editX))}px`
+		)
+		editor.style.setProperty("--fo-sheet-editor-padding", `${String(Math.max(1, Math.round(TEXT_PADDING * scale)))}px`)
 		editor.style.font = textFont(style, this.model.style(0), this.currentTheme().font, scale).css
-		editor.style.paddingLeft = `${String(Math.max(1, Math.round(TEXT_PADDING * scale)))}px`
+	}
+
+	// A cell's (or its merge's) box as the grid's root shows it (mirrored for a right-to-left sheet), in CSS pixels
+	// from the root's top left; null when it is not on screen.
+	cellRect(point: GridPoint): GridRect | null {
+		const view = this.view
+
+		if (view === null) return null
+
+		const box = this.cellBox(view, point)
+
+		if (box === null) return null
+
+		return this.mirrored() ? { ...box, x: view.width - box.x - box.width } : box
+	}
+
+	// A range's bottom-right corner as the root shows it (bottom-left in a right-to-left sheet), or null when it is
+	// not on screen (scrolled away, or under the frozen panes).
+	cornerOf(range: SheetRange): { x: number; y: number } | null {
+		const view = this.view
+
+		if (view === null) return null
+
+		const edge = (axis: GridView["rows"], index: number): number | null => {
+			const at = screenOf(axis, index) + axis.axis.size(index)
+			const start = index < axis.frozenEnd ? axis.header : axis.header + axis.frozenSize
+
+			return at <= start || at > axis.view ? null : at
+		}
+		const x = edge(view.cols, range.endCol)
+		const y = edge(view.rows, range.endRow)
+
+		if (x === null || y === null) return null
+
+		return { x: this.mirrored() ? view.width - x : x, y }
 	}
 
 	// A cell's (or its merge's) box on screen, or null when it is not on screen.

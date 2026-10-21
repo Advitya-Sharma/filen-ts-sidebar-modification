@@ -18,7 +18,6 @@ import {
 	type DocxOrientation,
 	type DocxPageNumberFormat,
 	type DocxParagraphStyle,
-	type DocxTextColor,
 	type DocxThemeColor,
 	type DocxValuesSnapshot,
 	type DocxReadOnlyReason,
@@ -33,6 +32,7 @@ import type { DocxCurrentPageSetup, DocxTableBorder, ObjectHitKind } from "@file
 import type { SpellingMark } from "@filen/office/core/docx/spelling"
 import type { DocxViewOnlyReason } from "@/features/preview/components/docxViewer.logic"
 import type { PreviewKey } from "@/lib/i18n"
+import type { DocxSwatch } from "@/features/office/lib/officeControls"
 import { BASE_LABELS } from "@/features/preview/components/docxCommandLabels/base"
 import { FORMATTING_LABELS } from "@/features/preview/components/docxCommandLabels/formatting"
 import { INSERT_LABELS } from "@/features/preview/components/docxCommandLabels/insert"
@@ -957,33 +957,20 @@ export function borderDragOffset(border: DocxTableBorder, twips: number, zoom: n
 
 // ---- colours ---------------------------------------------------------------------------------------------
 
-// What a colour swatch is called: a colour's name, with how much lighter or darker a theme variation is.
-export interface DocxSwatchLabel {
-	readonly name: PreviewKey
-	readonly tone?: { readonly lighter: boolean; readonly percent: number }
-}
-
-export interface DocxSwatch {
-	// The colour as the snapshot's values name it ("RRGGBB", "theme:accent1/tint:153"): the chosen one is marked.
-	readonly key: string
-	// What it shows, "RRGGBB".
-	readonly rgb: string
-	readonly label: DocxSwatchLabel
-	readonly color: DocxTextColor
-}
+export { STANDARD_SWATCHES, type DocxSwatch, type DocxSwatchLabel } from "@/features/office/lib/officeControls"
 
 // Word's theme colour columns, in its order.
 const THEME_COLUMNS: readonly (readonly [DocxThemeColor, PreviewKey])[] = [
-	["background1", "previewDocxColorBackground1"],
-	["text1", "previewDocxColorText1"],
-	["background2", "previewDocxColorBackground2"],
-	["text2", "previewDocxColorText2"],
-	["accent1", "previewDocxColorAccent1"],
-	["accent2", "previewDocxColorAccent2"],
-	["accent3", "previewDocxColorAccent3"],
-	["accent4", "previewDocxColorAccent4"],
-	["accent5", "previewDocxColorAccent5"],
-	["accent6", "previewDocxColorAccent6"]
+	["background1", "previewOfficeColorBackground1"],
+	["text1", "previewOfficeColorText1"],
+	["background2", "previewOfficeColorBackground2"],
+	["text2", "previewOfficeColorText2"],
+	["accent1", "previewOfficeColorAccent1"],
+	["accent2", "previewOfficeColorAccent2"],
+	["accent3", "previewOfficeColorAccent3"],
+	["accent4", "previewOfficeColorAccent4"],
+	["accent5", "previewOfficeColorAccent5"],
+	["accent6", "previewOfficeColorAccent6"]
 ]
 
 // The lighter and darker variations Word offers of a theme colour, by its lightness (0–1): pure black and
@@ -1037,22 +1024,6 @@ export function themeSwatches(rgbOf: (theme: DocxThemeColor) => string | undefin
 		})
 	)
 }
-
-// Word's standard colours.
-export const STANDARD_SWATCHES: readonly DocxSwatch[] = (
-	[
-		["C00000", "previewDocxColorDarkRed"],
-		["FF0000", "previewDocxColorRed"],
-		["FFC000", "previewDocxColorOrange"],
-		["FFFF00", "previewDocxColorYellow"],
-		["92D050", "previewDocxColorLightGreen"],
-		["00B050", "previewDocxColorGreen"],
-		["00B0F0", "previewDocxColorLightBlue"],
-		["0070C0", "previewDocxColorBlue"],
-		["002060", "previewDocxColorDarkBlue"],
-		["7030A0", "previewDocxColorPurple"]
-	] as const
-).map(([rgb, name]) => ({ key: rgb, rgb, label: { name }, color: { kind: "rgb", value: rgb } }))
 
 // The highlighter's colours, in Word's order (white is not offered there).
 export const HIGHLIGHT_SWATCHES: readonly { readonly name: DocxHighlightColor; readonly rgb: string; readonly label: PreviewKey }[] = (
@@ -1427,10 +1398,7 @@ export function headerChipKey(header: DocxHeaderContext): HeaderChipKey {
 
 // ---- shared by the editor's controls ---------------------------------------------------------------------
 
-// Keeps focus where it was (the document): a pressed toolbar or chip button never takes it.
-export function keepFocus(event: { preventDefault: () => void }): void {
-	event.preventDefault()
-}
+export { keepFocus } from "@/features/office/lib/officeControls"
 
 // Word's table limits (ECMA-376 leaves them open; Word stops at 63 columns and 32,767 rows): the package's table
 // commands' own.

@@ -12,7 +12,7 @@ import { buildXlsx } from "./oracles/sheet/synthetic"
 // booleans and errors exactly) where every function it calls is one the engine calculates, nothing in it is
 // volatile, it refers to no other workbook and depends on no volatile cell. Formulas the engine could not take
 // fall back to the file's result and are counted apart.
-// The corpus run is opt-in: FILEN_OFFICE_SHEET_RECALC=1 (minutes). FILEN_OFFICE_SHEET_RECALC_MIN (default 0.985) is
+// The corpus run is opt-in: FILEN_OFFICE_SHEET_RECALC=1 (minutes). FILEN_OFFICE_SHEET_RECALC_MIN (default 0.995, the gate) is
 // the rate it must reach; FILEN_OFFICE_SHEET_RECALC_OUT=<file.json> keeps the full report.
 
 const EXCEL = { name: "Microsoft Excel", version: "16.0300" }
@@ -120,6 +120,6 @@ describe.skipIf(!RUN || !existsSync(join(CORPUS_DIR, "xlsx")))("recalculation ov
 		)
 
 		expect(failed.map(workbook => workbook.name)).toEqual([])
-		expect(comparison.rate()).toBeGreaterThanOrEqual(Number(process.env["FILEN_OFFICE_SHEET_RECALC_MIN"] ?? "0.985"))
+		expect(comparison.rate()).toBeGreaterThanOrEqual(Number(process.env["FILEN_OFFICE_SHEET_RECALC_MIN"] ?? "0.995"))
 	})
 })

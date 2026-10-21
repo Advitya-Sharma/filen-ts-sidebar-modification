@@ -1,6 +1,6 @@
 import { escapeAttribute, decodeUtf8, encodeUtf8 } from "../../xml/index"
 import type { SheetId, SheetRange } from "../../sheet/protocol"
-import { shiftRange, type AxisShift } from "./axis"
+import { inBand, shiftRange, straddles, type AxisShift } from "./axis"
 import { refuse } from "./catalogue"
 import { childByLocal, childElements, editMarkup, type RefJob } from "./markup"
 import { autoFilter, sortState } from "./sections"
@@ -94,8 +94,13 @@ function freshNames(columns: readonly TableColumn[], count: number): string[] {
 	return names
 }
 
-// How the edit moves a table on the edited sheet; refuses what Excel would not do.
+// How the edit moves a table on the edited sheet; refuses what Excel would not do. Cells shifted in a band move a
+// table they lie across as whole rows or columns would, and refuse to move part of one, whose columns would no
+// longer hold its cells.
 export function shiftTable(table: TableInfo, shift: AxisShift): TableShift {
+	if (straddles(table.ref, shift)) refuse("structureLocked", "tables: part of a table")
+	if (!inBand(table.ref, shift)) return { table, ref: table.ref, added: null, removed: [] }
+
 	const ref = shiftRange(table.ref, shift)
 
 	if (ref === null) return { table, ref: null, added: null, removed: table.columns }

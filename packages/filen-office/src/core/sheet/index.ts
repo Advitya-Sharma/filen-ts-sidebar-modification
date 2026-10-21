@@ -135,6 +135,8 @@ export {
 	type StashedSizes
 } from "./sizes/sizeLayer"
 export { endedCut, parseTsv, pastedCells, pastedInputs, rangeToClip, rangeToTsv, type GridClip, type PastedBlock } from "./clipboard/tsv"
+export { MAX_HTML_COPY_CELLS } from "./clipboard/html"
+export type { FillMode, SeriesOptions, SeriesRequest } from "./fill/series"
 export { createAxis, type Axis } from "./grid/axis"
 export {
 	gridMove,
@@ -197,3 +199,47 @@ export {
 	type SheetStyleSource,
 	type SheetStylesOptions
 } from "./style"
+export {
+	DYNAMIC_FILTERS,
+	MAX_FILTER_CONDITIONS,
+	MAX_FILTER_TEXT,
+	MAX_FILTER_VALUES,
+	filterNumber,
+	type SheetDynamicFilter,
+	type SheetFilterCondition,
+	type SheetFilterCriteria,
+	type SheetFilterDate,
+	type SheetFilterOperator
+} from "./filter/criteria"
+export { FilterButton, type SheetFilterItem, type SheetFilterLayout, type SheetFilterRange, type SheetFilterValues } from "./filter/types"
+export { CfBarFlag, ICON_SETS, iconCount, iconSetIndex, type IconSetName } from "./cf/layers"
+// The workbook-only CF and DV features register through commands.ts: their modules reach the workbook model, which a
+// text document never loads.
+export type { SheetValidationAlert, SheetValidationLayout, SheetValidationRule } from "./dv/xlsx"
+export type { DvErrorStyle, DvOperator, DvType } from "./dv/rules"
+export type { DvListItem } from "./dv/validate"
+export {
+	acceptSuggestion,
+	argumentAt,
+	formulaContext,
+	functionSuggestions,
+	highlightedReferences,
+	insertReference,
+	pointedReference,
+	signatureParts,
+	type FormulaCall,
+	type FormulaContext,
+	type FormulaWord,
+	type HighlightedReference,
+	type SignaturePart
+} from "./functions/formulaEditing"
+export { autoSum, type AutoSumCells, type SheetAutoSum } from "./functions/autoSum"
+export {
+	delocalizeFormula,
+	EN_US_LOCALE,
+	localizedDate,
+	localizedInput,
+	localizedNumber,
+	localizeFormula,
+	plainLocale
+} from "./input/locale"

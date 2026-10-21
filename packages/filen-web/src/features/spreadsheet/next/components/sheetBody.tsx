@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react"
+import { Fragment, useEffect, useRef, useState, type RefObject } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import {
@@ -33,6 +33,12 @@ import { openSheetFind, stepSheetFind } from "@/features/spreadsheet/next/find/f
 import { SheetAxisDialog, type SheetAxisDialogKind } from "@/features/spreadsheet/next/components/sheetAxisDialog"
 import { SheetFindBar } from "@/features/spreadsheet/next/find/sheetFindBar"
 import { SheetGridMenu } from "@/features/spreadsheet/next/components/sheetGridMenu"
+import {
+	extensionShortcut,
+	gridExtensions,
+	menuGroups,
+	type SheetBodyExtension
+} from "@/features/spreadsheet/next/components/sheetExtension"
 import { structureShortcut } from "@/features/spreadsheet/next/menus/structureShortcuts"
 import { useMergeCommands } from "@/features/spreadsheet/next/menus/useMergeCommands"
 import { SheetModifyPassword } from "@/features/spreadsheet/next/menus/modifyPassword"
@@ -45,7 +51,13 @@ import { borderShortcut, setFormatCellsOpen } from "@/features/spreadsheet/next/
 import { downloadSheetCsv } from "@/features/spreadsheet/next/save/sheetCsv"
 import { SheetFileMenu } from "@/features/spreadsheet/next/save/sheetFileMenu"
 import { useSheetAutosave } from "@/features/spreadsheet/next/save/useSheetAutosave"
+import { useSheetFill } from "@/features/spreadsheet/next/fill/useSheetFill"
+import { useSheetAnnotations } from "@/features/spreadsheet/next/comments/useSheetAnnotations"
+import { useSheetSortFilter } from "@/features/spreadsheet/next/data/filterExtension"
+import { useSheetConditional } from "@/features/spreadsheet/next/data/cfExtension"
+import { useSheetFormula } from "@/features/spreadsheet/next/formulaBar/useSheetFormula"
 import { resolveTheme, useTheme } from "@/providers/themeProvider"
+import { log } from "@/lib/log"
 
 export interface SheetBodyProps {
 	handle: SheetHandle
@@ -135,6 +147,11 @@ export function SheetBody({
 	useEffect(
 		() =>
 			handle.events.attach(event => {
+				// A feature that cannot read its part beside a sheet (a damaged comments part) shows nothing there.
+				if (event.type === "featureUnavailable") {
+					log.warn("preview", "spreadsheet feature unavailable", event.feature, event.message)
+				}
+
 				model.handleEvent(event)
 			}),
 		[handle, model]
@@ -268,9 +285,23 @@ export function SheetBody({
 		}
 	})
 
+	const annotations = useSheetAnnotations({ grid, gridRef, handle, canEdit, text })
+	const sortFilter = useSheetSortFilter({ grid, gridRef, handle, canEdit, text, run })
+	const conditional = useSheetConditional({ grid, model, gridRef, session: handle.session, canEdit, text, run })
+	const formula = useSheetFormula({ grid, gridRef, handle, canEdit, run })
+	const fill = useSheetFill({ grid, canEdit, run })
+	// Features' parts of the view (sheetExtension.ts), in this order: their grid layers, overlays, menu groups,
+	// dialogs and shortcuts (the first to take a pointer press or a shortcut has it).
+	const extensions: readonly SheetBodyExtension[] = [annotations, sortFilter, conditional, formula, fill]
+
 	// The grid's shortcuts only this view can do (react/sheet/keys.ts): Find and Replace (Mod+F, Mod+H, Shift+F4),
-	// a new sheet (Shift+F11) and the insert and delete dialogs for cells. The rest it does itself.
+	// a new sheet (Shift+F11) and the insert and delete dialogs for cells; the features' own first. The rest the grid
+	// does itself.
 	function handleShortcut(shortcut: SheetShortcut): boolean {
+		if (extensionShortcut(extensions, shortcut)) {
+			return true
+		}
+
 		switch (shortcut) {
 			case "find":
 			case "replace":
@@ -352,6 +383,7 @@ export function SheetBody({
 				grid={grid}
 				gridRef={gridRef}
 				canEdit={canEdit}
+				formula={formula}
 			>
 				{grid.failed !== null ? (
 					<span
@@ -430,6 +462,7 @@ export function SheetBody({
 				canEdit={canEdit}
 				run={run}
 				text={text}
+				items={menuGroups(extensions)}
 				{...(text && { localPane: layerKey })}
 			>
 				<SheetGrid
@@ -444,8 +477,16 @@ export function SheetBody({
 						t(axis === "cols" ? "previewSpreadsheetWidthPx" : "previewSpreadsheetHeightPx", { size: px })
 					}
 					onShortcut={handleShortcut}
-				/>
+					extensions={gridExtensions(extensions)}
+				>
+					{extensions.some(extension => extension.overlay !== undefined)
+						? extensions.map(extension => <Fragment key={extension.id}>{extension.overlay}</Fragment>)
+						: undefined}
+				</SheetGrid>
 			</SheetGridMenu>
+			{extensions.map(extension => (
+				<Fragment key={extension.id}>{extension.dialogs}</Fragment>
+			))}
 			{merges.dialog}
 			<SheetAxisDialog
 				kind={axisAsked}

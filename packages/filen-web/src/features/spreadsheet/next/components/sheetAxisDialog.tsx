@@ -1,15 +1,52 @@
 import { useId, useState } from "react"
 import { useTranslation } from "react-i18next"
-import type { SheetCommand } from "@filen/office/core/sheet"
+import type { SheetCommand, SheetRange } from "@filen/office/core/sheet"
 import type { SheetGridState } from "@filen/office/react/sheet"
 import { FormDialog } from "@/components/dialogs/formDialog"
 import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import type { PreviewKey } from "@/lib/i18n"
 
 export type SheetAxisDialogKind = "insert" | "delete"
 
-// Excel's Insert and Delete dialogs (Ctrl+Shift+Plus, Ctrl+Minus on cells): the selection's whole rows or columns
-// inserted at it or deleted. Shifting part of a row or column is not offered: the engine moves whole ones.
+// What the dialog does with the selection: its cells shifted along rows (down, up) or columns (right, left), or its
+// whole rows or columns.
+type SheetAxisChoice = "cellsRows" | "cellsCols" | "rows" | "cols"
+
+// Excel's options, in its order.
+const CHOICES: Readonly<Record<SheetAxisDialogKind, readonly { readonly value: SheetAxisChoice; readonly key: PreviewKey }[]>> = {
+	insert: [
+		{ value: "cellsCols", key: "previewSheetShiftCellsRight" },
+		{ value: "cellsRows", key: "previewSheetShiftCellsDown" },
+		{ value: "rows", key: "previewSheetDialogEntireRow" },
+		{ value: "cols", key: "previewSheetDialogEntireColumn" }
+	],
+	delete: [
+		{ value: "cellsCols", key: "previewSheetShiftCellsLeft" },
+		{ value: "cellsRows", key: "previewSheetShiftCellsUp" },
+		{ value: "rows", key: "previewSheetDialogEntireRow" },
+		{ value: "cols", key: "previewSheetDialogEntireColumn" }
+	]
+}
+
+const VALUES: readonly SheetAxisChoice[] = ["cellsRows", "cellsCols", "rows", "cols"]
+
+function axisDialogCommand(kind: SheetAxisDialogKind, choice: SheetAxisChoice, sheet: number, range: SheetRange): SheetCommand {
+	if (choice === "cellsRows" || choice === "cellsCols") {
+		return { type: "cells.shift", sheet, range, edit: kind, axis: choice === "cellsRows" ? "rows" : "cols" }
+	}
+
+	return {
+		type: kind === "insert" ? "axis.insert" : "axis.delete",
+		sheet,
+		axis: choice,
+		at: choice === "rows" ? range.startRow : range.startCol,
+		count: choice === "rows" ? range.endRow - range.startRow + 1 : range.endCol - range.startCol + 1
+	}
+}
+
+// Excel's Insert and Delete dialogs (Ctrl+Shift+Plus, Ctrl+Minus on cells): the selection's cells inserted or deleted,
+// the cells beside them shifting along, or its whole rows or columns.
 export function SheetAxisDialog({
 	kind,
 	grid,
@@ -23,7 +60,12 @@ export function SheetAxisDialog({
 }) {
 	const { t } = useTranslation(["preview", "common"])
 	const id = useId()
-	const [axis, setAxis] = useState<"rows" | "cols">("rows")
+	// Each dialog keeps its own last choice: one made in Insert never carries into Delete.
+	const [choices, setChoices] = useState<Readonly<Record<SheetAxisDialogKind, SheetAxisChoice>>>({
+		insert: "cellsRows",
+		delete: "cellsRows"
+	})
+	const choice = choices[kind ?? "insert"]
 	const range = grid.selection.ranges[grid.selection.ranges.length - 1]
 	const title = t(kind === "delete" ? "previewSheetDeleteDialogTitle" : "previewSheetInsertDialogTitle")
 
@@ -45,13 +87,7 @@ export function SheetAxisDialog({
 				event.preventDefault()
 
 				if (kind !== null && range !== undefined) {
-					run({
-						type: kind === "insert" ? "axis.insert" : "axis.delete",
-						sheet: grid.sheet,
-						axis,
-						at: axis === "rows" ? range.startRow : range.startCol,
-						count: axis === "rows" ? range.endRow - range.startRow + 1 : range.endCol - range.startCol + 1
-					})
+					run(axisDialogCommand(kind, choice, grid.sheet, range))
 				}
 
 				onClose()
@@ -60,23 +96,24 @@ export function SheetAxisDialog({
 			<RadioGroup
 				aria-label={title}
 				name={`${id}-axis`}
-				value={axis}
+				value={choice}
 				onValueChange={next => {
-					setAxis(next === "cols" ? "cols" : "rows")
+					const value = VALUES.find(candidate => candidate === next) ?? "cellsRows"
+					const dialog = kind ?? "insert"
+
+					setChoices(current => ({ ...current, [dialog]: value }))
 				}}
 			>
-				{(["rows", "cols"] as const).map(value => (
+				{CHOICES[kind ?? "insert"].map(option => (
 					<div
-						key={value}
+						key={option.value}
 						className="flex items-center gap-3"
 					>
 						<RadioGroupItem
-							id={`${id}-${value}`}
-							value={value}
+							id={`${id}-${option.value}`}
+							value={option.value}
 						/>
-						<Label htmlFor={`${id}-${value}`}>
-							{t(value === "rows" ? "previewSheetDialogEntireRow" : "previewSheetDialogEntireColumn")}
-						</Label>
+						<Label htmlFor={`${id}-${option.value}`}>{t(option.key)}</Label>
 					</div>
 				))}
 			</RadioGroup>

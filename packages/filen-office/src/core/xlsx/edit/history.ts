@@ -98,11 +98,12 @@ export class CellLog {
 		this.before.push(state())
 	}
 
-	// Records what every touched cell holds once the edit is done.
-	seal(state: (sheet: SheetId, row: number, col: number) => CellState): void {
-		this.after.length = 0
+	// Records what every touched cell holds once the edit is done; `from` and `to` seal a part of them at a time,
+	// in order (a sliced edit).
+	seal(state: (sheet: SheetId, row: number, col: number) => CellState, from = 0, to = this.rows.length): void {
+		if (from === 0) this.after.length = 0
 
-		for (let i = 0; i < this.rows.length; i++) this.after.push(state(this.sheets[i] ?? 0, this.rows[i] ?? 0, this.cols[i] ?? 0))
+		for (let i = from; i < to; i++) this.after.push(state(this.sheets[i] ?? 0, this.rows[i] ?? 0, this.cols[i] ?? 0))
 	}
 
 	// Writes every cell back as it was before (undo) or after (redo) the edit, the latest touched first.

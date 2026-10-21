@@ -4,13 +4,22 @@ import { XlsxDocument } from "../xlsx/edit/document"
 import { clearCells, setCells } from "../xlsx/edit/cells"
 import { copyCells, pasteCells } from "../xlsx/edit/clipboard"
 import { applyFormat } from "../xlsx/edit/format"
+import { notesFeature } from "../xlsx/comments/feature"
+import { linksFeature } from "../xlsx/hyperlinks/feature"
+import { threadsFeature } from "../xlsx/threaded/feature"
+import { filterFeature } from "../xlsx/edit/filter"
 import { formattingFeature } from "../xlsx/edit/formatFeature"
 import { fitSample, resizeAxis } from "../xlsx/edit/resize"
+import { sortFeature } from "../xlsx/edit/sort"
 import { addSheet, moveAxis, renameSheet } from "../xlsx/edit/structure-basic"
 import { STRUCTURE_FEATURES } from "../xlsx/edit/structure-features"
 import type { SheetEvent, SheetOpenFailure, SheetOpened, SheetSessionOptions } from "./protocol"
+import { conditionalFormattingFeature } from "./cf/xlsx"
+import { xlsxClipboardHtmlFeature } from "./clipboard/xlsx"
+import { dataValidationFeature } from "./dv/xlsx"
 import { xlsxFillFeature } from "./fill/xlsx"
 import { xlsxFindFeature } from "./find/xlsx"
+import { xlsxAutoSumFeature } from "./functions/autoSumXlsx"
 import { xlsxNavigateFeature } from "./navigate/xlsx"
 import { defineSheetFeature, sheetRegistry, type SheetFeature } from "./registry"
 import { RenderStyleTable, SheetSession, sessionFeature } from "./session"
@@ -23,11 +32,12 @@ export const cellsFeature = defineSheetFeature<XlsxDocument>({
 	commands: {
 		"cells.set": {
 			info: { write: true },
-			run: (context, command) => setCells(context.doc, command.sheet, command.cells, context.changes)
+			run: (context, command) => setCells(context.doc, command.sheet, command.cells, context.changes, undefined, context.slicing)
 		},
 		"cells.clear": {
 			info: { write: true },
-			run: (context, command) => clearCells(context.doc, command.sheet, command.ranges, command.what, context.changes)
+			run: (context, command) =>
+				clearCells(context.doc, command.sheet, command.ranges, command.what, context.changes, context.slicing)
 		}
 	}
 })
@@ -110,7 +120,17 @@ export const XLSX_FEATURES: readonly SheetFeature<XlsxDocument>[] = [
 	...STRUCTURE_FEATURES,
 	xlsxFindFeature,
 	xlsxNavigateFeature,
-	xlsxFillFeature
+	xlsxAutoSumFeature,
+	xlsxFillFeature,
+	xlsxClipboardHtmlFeature,
+	notesFeature,
+	threadsFeature,
+	linksFeature,
+	sortFeature,
+	filterFeature,
+	dataValidationFeature,
+	// Last: a rule's look goes over what the features before it gave the cell.
+	conditionalFormattingFeature
 ]
 
 export type XlsxSessionOpen =

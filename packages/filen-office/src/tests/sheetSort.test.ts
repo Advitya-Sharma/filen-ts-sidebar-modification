@@ -1,0 +1,457 @@
+import { HyperFormula } from "hyperformula"
+import { describe, expect, it, vi } from "vitest"
+import type { SheetCommandResult, SheetOpened, SheetTile } from "../core/sheet/protocol"
+import { SortType, compareSortValues, sortOrder, textSortKey, type SortValue } from "../core/sheet/sort/order"
+import { inThreadSheetHost } from "../dom/sheet/host"
+import { IMMEDIATE, savedBytes, tileTexts } from "./sheetSessionFixtures"
+import { buildFixture, parts, type Fixture } from "./xlsxWriteFixtures"
+
+// Sorting: Excel's order of values (numbers, text, logical values, errors, then blanks in either direction; text
+// character by character, apostrophes and hyphens ignored, case only when asked), and sort.apply over a workbook:
+// the header row, several keys, formulas moved as copies, formats along, hidden rows left in place, the sort state of
+// an autofilter, and the refusals.
+
+const text = (value: string, caseSensitive = false): SortValue => ({
+	type: SortType.TEXT,
+	number: 0,
+	key: textSortKey(value, caseSensitive)
+})
+const num = (value: number): SortValue => ({ type: SortType.NUMBER, number: value, key: "" })
+const bool = (value: boolean): SortValue => ({ type: SortType.BOOLEAN, number: value ? 1 : 0, key: "" })
+const error: SortValue = { type: SortType.ERROR, number: 0, key: "" }
+const blank: SortValue = { type: SortType.BLANK, number: 0, key: "" }
+
+function sorted(values: readonly SortValue[], descending = false): number[] {
+	return [...sortOrder(values.length, [{ descending }], (_, item) => values[item] as SortValue)]
+}
+
+function textsSorted(values: readonly string[], caseSensitive = false): string[] {
+	return [...sortOrder(values.length, [{ descending: false }], (_, item) => text(values[item] as string, caseSensitive))].map(
+		index => values[index] as string
+	)
+}
+
+describe("Excel's sort order", () => {
+	it("puts numbers, text, logical values and errors in that order, and blanks last either way", () => {
+		const values = [blank, error, bool(true), text("b"), num(2), bool(false), text("a"), num(-1), error]
+
+		expect(sorted(values)).toEqual([7, 4, 6, 3, 5, 2, 1, 8, 0])
+		// Descending reverses all but the blanks; equal errors keep their order.
+		expect(sorted(values, true)).toEqual([1, 8, 2, 5, 3, 6, 4, 7, 0])
+	})
+
+	it("orders text character by character in the documented order, case-insensitively", () => {
+		expect(textsSorted(["A11", "A100", "A1"])).toEqual(["A1", "A100", "A11"])
+		expect(textsSorted(["b", "!", "1", " ", "~", "+", "A", ">"])).toEqual(["1", " ", "!", "~", "+", ">", "A", "b"])
+		expect(textsSorted(["B", "a", "A", "b"])).toEqual(["a", "A", "B", "b"])
+	})
+
+	it("ignores apostrophes and hyphens, but sorts the hyphenated of two otherwise equal texts last", () => {
+		expect(textsSorted(["co-op", "coop", "cop"])).toEqual(["coop", "co-op", "cop"])
+		expect(textsSorted(["it's", "its", "itself"])).toEqual(["its", "it's", "itself"])
+	})
+
+	it("sorts lowercase before uppercase only when case counts", () => {
+		expect(textsSorted(["B", "a", "A", "b"], true)).toEqual(["a", "A", "b", "B"])
+		expect(compareSortValues(text("a", true), text("A", true), false)).toBe(-1)
+		expect(compareSortValues(text("a"), text("A"), false)).toBe(0)
+	})
+
+	it("sorts accented letters with their base letter, after it", () => {
+		expect(textsSorted(["eb", "éa", "ea", "f"])).toEqual(["ea", "éa", "eb", "f"])
+	})
+
+	it("is stable over equal keys", () => {
+		expect(sorted([num(1), num(0), num(1), num(0)])).toEqual([1, 3, 0, 2])
+	})
+})
+
+// --- Sessions ---
+
+async function open(fixture: Fixture): Promise<SheetOpened & { readonly bytes: Uint8Array }> {
+	const bytes = buildFixture(fixture)
+	const host = inThreadSheetHost()
+	const result = await host.open(bytes.slice(), { kind: "xlsx", slicing: IMMEDIATE }, () => undefined)
+
+	if (result.kind !== "opened") throw new Error(`expected an open, got ${result.kind}`)
+
+	await result.session.intent()
+
+	return { session: result.session, info: result.info, bytes }
+}
+
+function ok(result: SheetCommandResult): void {
+	if (!result.ok) throw new Error(`refused: ${result.refusal.reason} (${result.refusal.detail ?? ""})`)
+}
+
+async function texts(opened: SheetOpened, sheet = opened.info.sheets[0]?.id ?? 0): Promise<Map<string, string>> {
+	const { tiles } = await opened.session.tiles(sheet, Uint32Array.of(0, 0))
+
+	return tileTexts(tiles[0] as SheetTile)
+}
+
+function column(cells: Map<string, string>, col: number, from: number, to: number): string[] {
+	const out: string[] = []
+
+	for (let row = from; row <= to; row++) out.push(cells.get(`${row},${col}`) ?? "")
+
+	return out
+}
+
+const STRINGS = (values: readonly string[]): string =>
+	`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${values.length}" uniqueCount="${values.length}">${values.map(value => `<si><t>${value}</t></si>`).join("")}</sst>`
+
+// Name | Score | Double, with a formula per row reading its own row.
+const TABLE: Fixture = {
+	sheets: [
+		{
+			name: "Data",
+			body:
+				'<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>' +
+				'<row r="2"><c r="A2" t="s"><v>3</v></c><c r="B2" s="1"><v>30</v></c><c r="C2"><f>B2*2</f><v>60</v></c></row>' +
+				'<row r="3"><c r="A3" t="s"><v>4</v></c><c r="B3"><v>10</v></c><c r="C3"><f>B3*2</f><v>20</v></c></row>' +
+				'<row r="4"><c r="A4" t="s"><v>5</v></c><c r="B4"><v>20</v></c><c r="C4"><f>B4*2</f><v>40</v></c></row>' +
+				'<row r="5"><c r="A5" t="s"><v>6</v></c><c r="C5"><f>$B$2+1</f><v>31</v></c></row>' +
+				"</sheetData>"
+		}
+	],
+	sharedStrings: STRINGS(["Name", "Score", "Double", "carol", "alice", "bob", "dave"])
+}
+
+describe("sort.apply", () => {
+	it("sorts rows under the header by a column, formulas moving as copies and formats along", async () => {
+		const opened = await open(TABLE)
+		const sheet = opened.info.sheets[0]!.id
+
+		ok(
+			await opened.session.command({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 },
+				orientation: "rows",
+				header: true,
+				caseSensitive: false,
+				keys: [{ index: 1, descending: false }]
+			})
+		)
+
+		const cells = await texts(opened)
+
+		expect(column(cells, 0, 0, 4)).toEqual(["Name", "alice", "bob", "carol", "dave"])
+		// B2 holds a date format (s="1"), which travels with its value.
+		expect(column(cells, 1, 0, 4)).toEqual(["Score", "10", "20", "1/30/1900", ""])
+
+		const sheetXml = parts(await savedBytes(opened.session))["xl/worksheets/sheet1.xml"] ?? ""
+
+		expect(sheetXml).toContain('<c r="C2"><f>B2*2</f>')
+		expect(sheetXml).toContain('<c r="C4"><f>B4*2</f>')
+		// The absolute reference stays; the blank score sorts last.
+		expect(sheetXml).toContain('<c r="C5"><f>$B$2+1</f>')
+		// B2's format (s="1") went with its value to row 4.
+		expect(sheetXml).toContain('<c r="B4" s="1"><v>30</v></c>')
+		expect(column(cells, 2, 1, 4)).toEqual(["20", "40", "60", "11"])
+
+		ok(await opened.session.undo())
+		expect(parts(await savedBytes(opened.session))["xl/worksheets/sheet1.xml"]).toBe(parts(opened.bytes)["xl/worksheets/sheet1.xml"])
+
+		ok(await opened.session.redo())
+		expect(column(await texts(opened), 0, 1, 4)).toEqual(["alice", "bob", "carol", "dave"])
+		opened.session.close()
+	})
+
+	it("sorts by several keys, descending, and leaves hidden rows where they are", async () => {
+		const opened = await open({
+			sheets: [
+				{
+					name: "Data",
+					body:
+						"<sheetData>" +
+						'<row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>1</v></c></row>' +
+						'<row r="2"><c r="A2"><v>2</v></c><c r="B2"><v>5</v></c></row>' +
+						'<row r="3" hidden="1"><c r="A3"><v>9</v></c><c r="B3"><v>9</v></c></row>' +
+						'<row r="4"><c r="A4"><v>1</v></c><c r="B4"><v>3</v></c></row>' +
+						'<row r="5"><c r="A5"><v>2</v></c><c r="B5"><v>4</v></c></row>' +
+						"</sheetData>"
+				}
+			]
+		})
+		const sheet = opened.info.sheets[0]!.id
+
+		ok(
+			await opened.session.command({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 0, startCol: 0, endRow: 4, endCol: 1 },
+				orientation: "rows",
+				header: false,
+				caseSensitive: false,
+				keys: [
+					{ index: 0, descending: true },
+					{ index: 1, descending: false }
+				]
+			})
+		)
+
+		const cells = await texts(opened)
+
+		expect(column(cells, 0, 0, 4)).toEqual(["2", "2", "9", "1", "1"])
+		expect(column(cells, 1, 0, 4)).toEqual(["4", "5", "9", "1", "3"])
+		opened.session.close()
+	})
+
+	it("sorts columns left to right by a row", async () => {
+		const opened = await open({
+			sheets: [
+				{
+					name: "Data",
+					body: '<sheetData><row r="1"><c r="A1"><v>3</v></c><c r="B1"><v>1</v></c><c r="C1"><v>2</v></c></row><row r="2"><c r="A2" t="s"><v>0</v></c><c r="B2" t="s"><v>1</v></c><c r="C2" t="s"><v>2</v></c></row></sheetData>'
+				}
+			],
+			sharedStrings: STRINGS(["three", "one", "two"])
+		})
+		const sheet = opened.info.sheets[0]!.id
+
+		ok(
+			await opened.session.command({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 0, startCol: 0, endRow: 1, endCol: 2 },
+				orientation: "cols",
+				header: false,
+				caseSensitive: false,
+				keys: [{ index: 0, descending: false }]
+			})
+		)
+
+		const cells = await texts(opened)
+
+		expect([cells.get("1,0"), cells.get("1,1"), cells.get("1,2")]).toEqual(["one", "two", "three"])
+		opened.session.close()
+	})
+
+	it("writes the sort state of the autofilter it sorts", async () => {
+		const opened = await open({
+			sheets: [
+				{
+					name: "Data",
+					body: TABLE.sheets[0]!.body!.replace("</sheetData>", "</sheetData>") + '<autoFilter ref="A1:C5"/>'
+				}
+			],
+			sharedStrings: TABLE.sharedStrings!
+		})
+		const sheet = opened.info.sheets[0]!.id
+
+		ok(
+			await opened.session.command({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 },
+				orientation: "rows",
+				header: true,
+				caseSensitive: false,
+				keys: [{ index: 0, descending: true }]
+			})
+		)
+
+		const sheetXml = parts(await savedBytes(opened.session))["xl/worksheets/sheet1.xml"] ?? ""
+
+		expect(sheetXml).toContain(
+			'<autoFilter ref="A1:C5"><sortState ref="A2:C5"><sortCondition descending="1" ref="A2:A5"/></sortState></autoFilter>'
+		)
+
+		const layout = await opened.session.layout(sheet)
+
+		expect([...(layout.extensions?.filters?.ranges[0]?.buttons ?? [])]).toEqual([1 | 8, 1, 1])
+		opened.session.close()
+	})
+
+	it("undoes to the source after columns are inserted and cells edited past it", async () => {
+		const opened = await open(TABLE)
+		const sheet = opened.info.sheets[0]!.id
+
+		ok(
+			await opened.session.command({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 },
+				orientation: "rows",
+				header: true,
+				caseSensitive: false,
+				keys: [{ index: 0, descending: false }]
+			})
+		)
+		// Columns inserted inside the sorted rows shift their blocks' cells in place.
+		ok(await opened.session.command({ type: "axis.insert", sheet, axis: "cols", at: 0, count: 3 }))
+		ok(
+			await opened.session.command({
+				type: "cells.set",
+				sheet,
+				cells: { rows: Uint32Array.of(2, 6), cols: Uint16Array.of(4, 1), inputs: ["edited", "7"] }
+			})
+		)
+
+		for (let k = 0; k < 3; k++) ok(await opened.session.undo())
+
+		expect(parts(await savedBytes(opened.session))["xl/worksheets/sheet1.xml"]).toBe(parts(opened.bytes)["xl/worksheets/sheet1.xml"])
+		expect(column(await texts(opened), 0, 0, 4)).toEqual(["Name", "carol", "alice", "bob", "dave"])
+		opened.session.close()
+	})
+
+	it("undoes to the source when a column insert and a cell edit came after it", async () => {
+		const opened = await open({
+			sheets: [
+				{
+					name: "Data",
+					body: '<sheetData><row r="4"><c r="F4"><v>2</v></c></row><row r="5"><c r="F5"><v>1</v></c></row></sheetData>'
+				}
+			]
+		})
+		const sheet = opened.info.sheets[0]!.id
+
+		ok(
+			await opened.session.command({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 3, startCol: 5, endRow: 4, endCol: 5 },
+				orientation: "rows",
+				header: false,
+				caseSensitive: false,
+				keys: [{ index: 5, descending: false }]
+			})
+		)
+		// The insert shifts the blocks the sort's undo holds in place; the edit then copies one of them.
+		ok(await opened.session.command({ type: "axis.insert", sheet, axis: "cols", at: 1, count: 3 }))
+		ok(
+			await opened.session.command({
+				type: "cells.set",
+				sheet,
+				cells: { rows: Uint32Array.of(3), cols: Uint16Array.of(4), inputs: ["x"] }
+			})
+		)
+
+		for (let k = 0; k < 3; k++) ok(await opened.session.undo())
+
+		const cells = await texts(opened)
+
+		expect([cells.get("3,5"), cells.get("4,5"), cells.get("3,8")]).toEqual(["2", "1", undefined])
+		expect(parts(await savedBytes(opened.session))["xl/worksheets/sheet1.xml"]).toBe(parts(opened.bytes)["xl/worksheets/sheet1.xml"])
+		opened.session.close()
+	})
+
+	it("sorts, undoes and redoes rows of formulas in slices, recalculating once per step, giving the same workbook as at once", async () => {
+		const count = 3_000
+		const rowsXml: string[] = [
+			'<row r="1"><c r="A1" t="inlineStr"><is><t>Key</t></is></c><c r="E1"><f>SUM(C2:C3001)</f><v>0</v></c></row>'
+		]
+
+		for (let r = 2; r <= count + 1; r++)
+			rowsXml.push(
+				`<row r="${r}"><c r="A${r}"><v>${(r * 7919) % 3001}</v></c><c r="B${r}"><v>${r}</v></c><c r="C${r}"><f>B${r}*2+D${r}</f><v>${r * 2 + r}</v></c><c r="D${r}"><v>${r}</v></c></row>`
+			)
+
+		const fixture: Fixture = { sheets: [{ name: "Data", body: `<sheetData>${rowsXml.join("")}</sheetData>` }] }
+		const sort = (sheet: number) =>
+			({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 0, startCol: 0, endRow: count, endCol: 2 },
+				orientation: "rows",
+				header: true,
+				caseSensitive: false,
+				keys: [{ index: 0, descending: false }]
+			}) as const
+		const sheetXml = async (opened: SheetOpened): Promise<string | undefined> =>
+			parts(await savedBytes(opened.session))["xl/worksheets/sheet1.xml"]
+
+		const atOnce = await open(fixture)
+
+		ok(await atOnce.session.command(sort(atOnce.info.sheets[0]!.id)))
+
+		const expected = await sheetXml(atOnce)
+
+		atOnce.session.close()
+
+		let pauses = 0
+		const bytes = buildFixture(fixture)
+		const result = await inThreadSheetHost().open(
+			bytes.slice(),
+			{ kind: "xlsx", slicing: { sliceMs: 0, now: () => 0, pause: () => (pauses++, Promise.resolve()) } },
+			() => undefined
+		)
+
+		if (result.kind !== "opened") throw new Error(result.kind)
+
+		await result.session.intent()
+
+		const sheet = result.info.sheets[0]!.id
+		const resumes = vi.spyOn(HyperFormula.prototype, "resumeEvaluation")
+		// Pauses and recalculations a step makes: the totals over the moved rows are worked out once per step.
+		const counted = async (work: () => Promise<SheetCommandResult>): Promise<{ pauses: number; recalculations: number }> => {
+			const from = pauses
+
+			resumes.mockClear()
+			ok(await work())
+
+			return { pauses: pauses - from, recalculations: resumes.mock.calls.length }
+		}
+
+		const sorted = await counted(() => result.session.command(sort(sheet)))
+
+		expect(sorted.pauses).toBeGreaterThan(4)
+		expect(sorted.recalculations).toBe(1)
+		expect(await sheetXml(result)).toBe(expected)
+		const undone = await counted(() => result.session.undo())
+
+		expect(undone.pauses).toBeGreaterThan(1)
+		expect(undone.recalculations).toBe(1)
+		expect(await sheetXml(result)).toBe(parts(bytes)["xl/worksheets/sheet1.xml"])
+		const redone = await counted(() => result.session.redo())
+
+		expect(redone.pauses).toBeGreaterThan(1)
+		expect(redone.recalculations).toBe(1)
+		expect(await sheetXml(result)).toBe(expected)
+		resumes.mockRestore()
+		result.session.close()
+	})
+
+	it("refuses merged cells, array formulas, a hyperlink over moved rows and locked cells on a protected sheet", async () => {
+		const base = TABLE.sheets[0]!.body!
+		const command = (sheet: number) =>
+			({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 },
+				orientation: "rows",
+				header: true,
+				caseSensitive: false,
+				keys: [{ index: 1, descending: false }]
+			}) as const
+		const refusal = async (body: string): Promise<string | undefined> => {
+			const opened = await open({ sheets: [{ name: "Data", body }], sharedStrings: TABLE.sharedStrings! })
+			const result = await opened.session.command(command(opened.info.sheets[0]!.id))
+
+			opened.session.close()
+
+			return result.ok ? undefined : result.refusal.reason
+		}
+
+		expect(await refusal(`${base}<mergeCells count="1"><mergeCell ref="A2:A3"/></mergeCells>`)).toBe("merged")
+		expect(await refusal(base.replace("<f>B3*2</f>", '<f t="array" ref="C3:C4">B3:B4*2</f>'))).toBe("arrayFormula")
+		expect(await refusal(`${base}<sheetProtection sheet="1" sort="0"/>`)).toBe("protectedSheet")
+		// A hyperlink over two moved rows cannot go anywhere whole.
+		expect(await refusal(`${base}<hyperlinks><hyperlink ref="A3:A4" display="x" location="Data!A1"/></hyperlinks>`)).toBe(
+			"structureLocked"
+		)
+		// A conditional format over the whole column moves nothing it covers unevenly.
+		expect(
+			await refusal(
+				`${base}<conditionalFormatting sqref="B1:B9"><cfRule type="cellIs" priority="1" operator="greaterThan" dxfId="0"><formula>1</formula></cfRule></conditionalFormatting>`
+			)
+		).toBeUndefined()
+		expect(
+			await refusal(
+				`${base}<conditionalFormatting sqref="B3"><cfRule type="cellIs" priority="1" operator="greaterThan" dxfId="0"><formula>1</formula></cfRule></conditionalFormatting>`
+			)
+		).toBe("structureLocked")
+	})
+})

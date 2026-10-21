@@ -1,24 +1,41 @@
 import {
+	CellFlag,
+	SHEET_MAX_COLS,
 	SHEET_MAX_COPY_CELLS,
 	SHEET_MAX_EDIT_CELLS,
+	SHEET_MAX_ROWS,
 	type SheetId,
 	type SheetQueryResult,
 	type SheetRange,
 	type SheetRefusal
 } from "../../sheet/protocol"
 import type { SheetChangeSink, SheetHandled } from "../../sheet/registry"
+import {
+	clipboardHtml,
+	MAX_HTML_COPY_CELLS,
+	MAX_HTML_COPY_LENGTH,
+	parseClipboardHtml,
+	type ClipBorders,
+	type ClipCell,
+	type ClipOutCell,
+	type ClipValue
+} from "../../sheet/clipboard/html"
+import { r1c1ToA1 } from "../../sheet/clipboard/r1c1"
 import { pastedCells, type GridClip } from "../../sheet/clipboard/tsv"
 import { cellKey } from "../../sheet/model/model"
-import { rewriteFormula, sameSheet } from "../../sheet/refs/formulaRefs"
+import { formulaTranslator, rewriteFormula, sameSheet } from "../../sheet/refs/formulaRefs"
 import { sliceClock, type Slicing } from "../../slicing"
 import type { SheetStore } from "../model/store"
-import { FormulaKind, type XlsxDefinedName, type XlsxSheetModel, type XlsxSourceCell } from "../model/types"
+import { CellKind, FormulaKind, XfApply, type XlsxDefinedName, type XlsxSheetModel, type XlsxSourceCell } from "../model/types"
 import { planMove, type MovePlan } from "../refs/move"
 import { moveReference, type CellMove } from "../refs/moveRefs"
 import { nameWithFormula } from "../refs/plan"
 import { parseRef } from "../refs/sqref"
 import type { XlsxDocument } from "./document"
-import { setCells, splitsArray, unshare, type CellInputs } from "./cells"
+import { readEntry, setCells, splitsArray, unshare, type CellInputs } from "./cells"
+import { appendXf, patchXf, StyleLimitError } from "./format"
+import { mergeCells, mergeRefusal } from "./merge"
+import { changedBorder } from "./formatBorders"
 import { ABSENT, type CellLog } from "./history"
 
 // The TSV clipboard: a copy is the cells' text as other spreadsheets paste it, with the session's own record of
@@ -54,6 +71,9 @@ export async function copyCells(
 	const cols = range.endCol - range.startCol + 1
 
 	if (rows <= 0 || cols <= 0 || rows * cols > SHEET_MAX_COPY_CELLS) return { refused: "tooLarge" }
+
+	// A sheet an edit took away while the request was on its way has nothing to copy.
+	if (document.workbook.sheet(sheet) === undefined) return { clip: document.nextClip++, text: "" }
 
 	const model = await document.ready(sheet)
 	const store = model.store as SheetStore
@@ -383,6 +403,18 @@ function applyCut(document: XlsxDocument, cut: XlsxClip, plan: CutPlan, log: Cel
 	changes.content(cut.sheet, cut.grid.range)
 }
 
+// The session's latest copy when `clipId` names it, `text` is still its text and the sheet it came from is still there.
+function ownClip(document: XlsxDocument, clipId: number | undefined, text: string): XlsxClip | null {
+	const held = document.clip
+
+	return held !== null &&
+		clipId === held.id &&
+		lineEnds(text) === lineEnds(held.grid.tsv) &&
+		document.workbook.sheet(held.sheet) !== undefined
+		? held
+		: null
+}
+
 // clipboard.paste: the session's own copy when `clip` names it and the text is still its text, else the text read
 // as tab-separated values.
 export async function pasteCells(
@@ -394,8 +426,8 @@ export async function pasteCells(
 	changes: SheetChangeSink,
 	slicing?: Slicing
 ): Promise<SheetHandled> {
-	const held = document.clip
-	const own = held !== null && clipId === held.id && lineEnds(text) === lineEnds(held.grid.tsv) ? held : null
+	// The session's own copy, while the sheet it came from is there (a cut whose sheet went is a cut no more).
+	const own = ownClip(document, clipId, text)
 	const target = document.workbook.sheet(sheet)
 
 	if (target === undefined) return { refused: { reason: "tooLarge" } }
@@ -435,7 +467,8 @@ export async function pasteCells(
 		sheet,
 		inputs,
 		changes,
-		cut === null || plan === null ? undefined : log => applyCut(document, cut, plan, log, changes)
+		cut === null || plan === null ? undefined : log => applyCut(document, cut, plan, log, changes),
+		slicing
 	)
 
 	if (handled === null || "refused" in handled) return handled
@@ -461,6 +494,249 @@ export async function pasteCells(
 			if (names !== null) setNames(document, names.after)
 
 			await handled.redo(sink)
+		}
+	}
+}
+
+// --- HTML ---
+
+function copiedValue(document: XlsxDocument, model: XlsxSheetModel, sheet: SheetId, row: number, col: number, text: string): ClipValue {
+	const state = document.state(sheet, row, col)
+
+	if (state.formula >= 0 && state.shown !== undefined) {
+		const value = state.shown.value
+
+		if (state.shown.error || value === null) return text === "" ? { kind: "empty" } : { kind: "typed", text }
+
+		return typeof value === "number"
+			? { kind: "number", value }
+			: typeof value === "boolean"
+				? { kind: "boolean", value }
+				: { kind: "text", text: value }
+	}
+
+	switch (state.kind) {
+		case CellKind.NUMBER:
+			return { kind: "number", value: state.value }
+		case CellKind.BOOLEAN:
+			return { kind: "boolean", value: state.value !== 0 }
+		case CellKind.SHARED_STRING:
+		case CellKind.INLINE_STRING:
+		case CellKind.FORMULA_STRING:
+			return { kind: "text", text: document.stringOf(model, state.kind, state.value) }
+		default:
+			return text === "" ? { kind: "empty" } : { kind: "typed", text }
+	}
+}
+
+// A range as clipboard HTML (html.ts): what each cell shows, its value, formula and format. Null past
+// MAX_HTML_COPY_CELLS or MAX_HTML_COPY_LENGTH.
+export async function copyHtml(document: XlsxDocument, sheet: SheetId, range: SheetRange): Promise<SheetQueryResult<"copyHtml">> {
+	const rows = range.endRow - range.startRow + 1
+	const cols = range.endCol - range.startCol + 1
+
+	if (rows <= 0 || cols <= 0 || rows * cols > MAX_HTML_COPY_CELLS || document.workbook.sheet(sheet) === undefined) return { html: null }
+
+	const model = await document.ready(sheet)
+	const store = model.store as SheetStore
+	const cells = new Map<number, ClipOutCell>()
+
+	store.forEachCell(range, (row, col, slot) => {
+		const view = document.cellView(sheet, row, col)
+		const formula = store.formula(slot)
+
+		cells.set(cellKey(row - range.startRow, col - range.startCol), {
+			text: view.text,
+			value: copiedValue(document, model, sheet, row, col, view.text),
+			// In the file's own syntax, whatever the session's locale shows (a paste reads it so).
+			formula:
+				formula < 0 || (view.flags & CellFlag.FORMULA_HIDDEN) !== 0 ? null : `=${document.formulaText(model, formula, row, col)}`,
+			style: document.styles.renderStyle(view.xf),
+			numFmt: document.styles.numFmtCode(view.xf)
+		})
+	})
+
+	return {
+		html: clipboardHtml(
+			rows,
+			cols,
+			{ row: range.startRow, col: range.startCol },
+			(row, col) => cells.get(cellKey(row, col)) ?? null,
+			MAX_HTML_COPY_LENGTH
+		)
+	}
+}
+
+// Whether a pasted cell's entry is in the file's own syntax (a formula, a value the HTML says exactly) rather than text
+// typed in the session's locale.
+function canonicalInput(cell: ClipCell): boolean {
+	return cell.formula !== null || (cell.value.kind !== "typed" && cell.value.kind !== "empty")
+}
+
+// The entry a pasted cell is typed as at `row`, `col`: its formula moved there, else its value as this app reads it
+// back exactly (text as text, numbers in full).
+function pastedInput(cell: ClipCell, row: number, col: number): string {
+	const formula = cell.formula
+
+	if (formula !== null) {
+		const text = formula.text.slice(1)
+
+		return formula.kind === "r1c1"
+			? `=${r1c1ToA1(text, row, col)}`
+			: `=${formulaTranslator(text)(row - formula.row, col - formula.col)}`
+	}
+
+	const value = cell.value
+
+	switch (value.kind) {
+		case "typed":
+			// Text formatted as Text stays text.
+			return cell.format?.numFmt === "@" ? `'${value.text}` : value.text
+		case "text":
+			return `'${value.text}`
+		case "number":
+			return String(value.value)
+		case "boolean":
+			return value.value ? "TRUE" : "FALSE"
+		case "empty":
+			return ""
+	}
+}
+
+// The cell format a pasted cell takes: the workbook's default with the HTML's format (and borders), plus the number
+// format its entry implies when the HTML names none (a date typed as text). -1 for the format typing gives, when the
+// table says nothing of formats at all. Each distinct format is made once.
+function pastedXf(document: XlsxDocument, cell: ClipCell, input: string, formatted: boolean, made: Map<string, number>): number {
+	if (!formatted) return -1
+
+	const implied =
+		cell.format?.numFmt === undefined && cell.formula === null
+			? readEntry(input, false, document.date1904, canonicalInput(cell) ? undefined : document.settings.locale)
+			: null
+	const format =
+		implied?.type === "number" && implied.format !== undefined ? { ...cell.format, numFmt: implied.format } : (cell.format ?? {})
+	const key = JSON.stringify([format, cell.borders])
+	let xf = made.get(key)
+
+	if (xf === undefined) {
+		xf = patchXf(document, 0, format)
+		xf = cell.borders === null ? xf : borderedXf(document, xf, cell.borders)
+		made.set(key, xf)
+	}
+
+	return xf
+}
+
+function borderedXf(document: XlsxDocument, index: number, borders: ClipBorders): number {
+	const styles = document.workbook.styles
+	const xf = styles.cellXfs[index] ?? styles.cellXfs[0]
+
+	if (xf === undefined) return index
+
+	const border = changedBorder(styles.borders[xf.borderId] ?? {}, borders)
+
+	return appendXf(document, { ...xf, borderId: styles.appendBorder(border), flags: xf.flags | XfApply.BORDER })
+}
+
+// clipboard.pasteHtml: the session's own copy when `clip` names it and the text is still its text; else the HTML's
+// first table, its values, formulas and formats (html.ts); else the text as tab-separated values.
+export async function pasteHtml(
+	document: XlsxDocument,
+	sheet: SheetId,
+	at: { readonly row: number; readonly col: number },
+	html: string,
+	text: string,
+	clipId: number | undefined,
+	changes: SheetChangeSink,
+	slicing?: Slicing
+): Promise<SheetHandled> {
+	if (ownClip(document, clipId, text) !== null) return pasteCells(document, sheet, at, text, clipId, changes, slicing)
+
+	const table = parseClipboardHtml(html, SHEET_MAX_EDIT_CELLS)
+
+	if (table === "tooLarge") return { refused: { reason: "tooLarge" } }
+	if (table === null) return pasteCells(document, sheet, at, text, clipId, changes, slicing)
+	if (at.row + table.rows > SHEET_MAX_ROWS || at.col + table.cols > SHEET_MAX_COLS) return { refused: { reason: "tooLarge" } }
+
+	await document.ready(sheet)
+
+	// The table's spans are merged where they land, as Excel pastes them; one that cannot be is a refusal up front.
+	const merges = table.spans.map(span => ({
+		startRow: at.row + span.startRow,
+		startCol: at.col + span.startCol,
+		endRow: at.row + span.endRow,
+		endCol: at.col + span.endCol
+	}))
+	const mergeRefused = merges.length === 0 ? null : await mergeRefusal(document, sheet, merges)
+
+	if (mergeRefused !== null) return { refused: mergeRefused }
+
+	const formatted = table.cells.some(cell => cell.format !== null || cell.borders !== null)
+	const made = new Map<string, number>()
+	const count = table.cells.length
+	const rows = new Uint32Array(count)
+	const cols = new Uint32Array(count)
+	const inputs: string[] = []
+	const styles = new Int32Array(count)
+	const canonical = Uint8Array.from(table.cells, cell => (canonicalInput(cell) ? 1 : 0))
+
+	try {
+		table.cells.forEach((cell, i) => {
+			const row = at.row + cell.row
+			const col = at.col + cell.col
+			const input = pastedInput(cell, row, col)
+
+			rows[i] = row
+			cols[i] = col
+			inputs.push(input)
+			styles[i] = pastedXf(document, cell, input, formatted, made)
+		})
+	} catch (error) {
+		if (error instanceof StyleLimitError) return { refused: { reason: "styleLimit" } }
+
+		throw error
+	}
+
+	const handled = await setCells(
+		document,
+		sheet,
+		formatted ? { rows, cols, inputs, styles, canonical } : { rows, cols, inputs, canonical },
+		changes,
+		undefined,
+		slicing
+	)
+
+	if (handled === null || "refused" in handled) return handled
+
+	changes.select(sheet, {
+		activeRow: at.row,
+		activeCol: at.col,
+		ranges: [{ startRow: at.row, startCol: at.col, endRow: at.row + table.rows - 1, endCol: at.col + table.cols - 1 }]
+	})
+
+	if (merges.length === 0) return handled
+
+	// The cells the spans cover were pasted empty: the merge drops nothing.
+	const merged = await mergeCells(document, sheet, merges, "merge", true, changes)
+
+	if (merged === null) return handled
+
+	// Refused past the check above (more formats than a workbook holds): the paste is taken back, so nothing changed.
+	if ("refused" in merged) {
+		await handled.undo(changes)
+
+		return merged
+	}
+
+	return {
+		bytes: handled.bytes + merged.bytes,
+		undo: async sink => {
+			await merged.undo(sink)
+			await handled.undo(sink)
+		},
+		redo: async sink => {
+			await handled.redo(sink)
+			await merged.redo(sink)
 		}
 	}
 }

@@ -20,6 +20,7 @@
 	--fo-sheet-header-font: 12px var(--font-sans);
 	--fo-sheet-editor-bg: var(--background);
 	--fo-sheet-editor-text: var(--foreground);
+	--fo-sheet-editor-selection: color-mix(in oklab, var(--primary) 28%, transparent);
 	--fo-sheet-invalid: var(--destructive);
 	--fo-sheet-tip-bg: var(--popover);
 	--fo-sheet-tip-text: var(--foreground);

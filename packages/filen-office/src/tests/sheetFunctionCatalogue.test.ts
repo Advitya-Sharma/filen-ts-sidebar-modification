@@ -213,7 +213,7 @@ describe("sheet function catalogue", () => {
 	it("keeps the cached result of the functions that cannot be calculated here", () => {
 		expect(functions.filter(entry => entry.support === "cached").map(entry => entry.name)).toEqual(CACHED)
 		expect(functions.filter(entry => entry.support === "hyperformula")).toHaveLength(384)
-		expect(functions.filter(entry => entry.support === "plugin")).toHaveLength(116)
+		expect(functions.filter(entry => entry.support === "plugin" || entry.support === "missing")).toHaveLength(116)
 	})
 
 	it("stores a typed call under the catalogue's prefix, and shows it without", () => {

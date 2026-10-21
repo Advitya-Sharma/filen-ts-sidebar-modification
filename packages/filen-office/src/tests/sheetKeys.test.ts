@@ -87,6 +87,12 @@ const TABLE: readonly (readonly [Press, Press | null, SheetShortcut])[] = [
 	[{ key: "s", ctrl: true }, { key: "s", meta: true }, "save"],
 	[{ key: "p", ctrl: true }, { key: "p", meta: true }, "print"],
 	[{ key: "L", ctrl: true, shift: true }, { key: "f", meta: true, shift: true }, "filter"],
+	[{ key: "ArrowDown", alt: true }, { key: "ArrowDown", alt: true }, "openDropdown"],
+	[{ key: "=", code: "Equal", alt: true }, { key: "T", meta: true, shift: true }, "autoSum"],
+	// Option+= types "≠"; browsers keep Command+Shift+T for reopening a tab.
+	[{ key: "=", code: "Equal", alt: true }, { key: "≠", code: "Equal", alt: true }, "autoSum"],
+	// Where "=" is Shift+0 (German): the character, Shift held.
+	[{ key: "=", code: "Digit0", alt: true, shift: true }, null, "autoSum"],
 	[{ key: "k", ctrl: true }, { key: "k", meta: true }, "hyperlink"],
 	[{ key: "F2", shift: true }, { key: "F2", shift: true }, "note"],
 	[{ key: "F11", shift: true }, { key: "F11", shift: true }, "newSheet"]
@@ -118,6 +124,12 @@ describe("the sheet shortcut table", () => {
 				}
 			}
 		}
+	})
+
+	it('leaves AutoSum to the "=" a layout types, not to whatever sits where a US layout has it', () => {
+		// The German layout's ´ sits on the Equal position.
+		expect(press({ key: "´", code: "Equal", alt: true }, false)).toBeNull()
+		expect(press({ key: "=", code: "Equal", ctrl: true, alt: true }, false)).toBeNull()
 	})
 
 	it("keeps Ctrl and Command apart on a Mac", () => {

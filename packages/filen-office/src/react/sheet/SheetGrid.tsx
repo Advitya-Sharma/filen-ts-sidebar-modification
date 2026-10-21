@@ -10,6 +10,7 @@ import {
 	type KeyboardEvent,
 	type MouseEvent,
 	type PointerEvent,
+	type ReactNode,
 	type Ref
 } from "react"
 import { flushSync } from "react-dom"
@@ -32,6 +33,16 @@ import {
 	timeEntry,
 	type SheetShortcut
 } from "./keys"
+import {
+	editorBackdrop,
+	extensionParts,
+	type GridRect,
+	type SheetCellDrag,
+	type SheetCellPointer,
+	type SheetCellPointerResult,
+	type SheetGridExtension
+} from "./layers"
+import { fillDownTo, fillHandleShown, fillLeft, fillTarget, sameRange } from "./fill"
 import { canEditSnapshot, type GridResizeDraft, type SheetGridModel, type SheetGridSizes } from "./model"
 import { keyMove, stepFrom } from "./navigation"
 import { GridRenderer, type GridHit } from "./renderer"
@@ -51,6 +62,14 @@ export interface SheetGridHandle {
 	// Selects a cell and scrolls to it (the name box, Ctrl+G).
 	goTo(point: GridPoint): void
 	hit(clientX: number, clientY: number): GridHit | null
+	// A cell's (or its merge's) box in CSS pixels from the grid's top left, as shown (mirrored in a right-to-left
+	// sheet); null when it is not on screen. For overlays placed in the grid (SheetGrid's children).
+	cellRect(point: GridPoint): GridRect | null
+	// The same box in client coordinates (a popover's anchor).
+	clientRect(point: GridPoint): DOMRect | null
+	// Called after every frame drawn (a scroll, a zoom, a sheet switch): overlays re-place themselves from cellRect
+	// without a React render.
+	onFrame(listener: () => void): () => void
 	// The renderer's frame costs while `measure` is on (perf harness).
 	readonly renderer: GridRenderer
 }
@@ -80,6 +99,12 @@ export interface SheetGridProps {
 	// The app's size layer, for sessions that cannot hold sizes (text files, view-only workbooks): hand in a new
 	// object whenever its sizes change.
 	readonly sizes?: SheetGridSizes
+	// Features' paint layers, cell decorators and pointer hooks (layers.ts), in order. A new list (or a new layer in
+	// it) repaints.
+	readonly extensions?: readonly SheetGridExtension[]
+	// Overlays over the cells (under the editor), in a layer that passes the pointer through except where a child
+	// takes it: placed with the handle's cellRect, re-placed on its onFrame.
+	readonly children?: ReactNode
 	readonly ref?: Ref<SheetGridHandle>
 }
 
@@ -99,6 +124,14 @@ interface Resize {
 	readonly origin: number
 	readonly scale: number
 	draft: GridResizeDraft | null
+}
+
+// A fill-handle drag: the selection it started from, what it would fill now, and the cell the pointer was last on.
+interface FillDrag {
+	readonly pointerId: number
+	readonly source: SheetRange
+	target: SheetRange
+	at: GridPoint
 }
 
 interface Tap {
@@ -150,16 +183,25 @@ interface CellEditorProps {
 	readonly label: string
 	readonly text: string
 	readonly invalid: boolean
-	readonly element: (element: HTMLTextAreaElement | null) => void
+	// Drawn under the text, which is then clear (layers.ts editorText); null for plain text.
+	readonly backdrop: ReactNode | null
+	readonly element: (element: HTMLDivElement | null) => void
 	readonly onText: (text: string) => void
 	readonly onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void
 	readonly onBlur: (event: FocusEvent<HTMLTextAreaElement>) => void
 }
 
 // The in-cell editor. It exists only while an entry is typed, and takes focus as it appears (in the same task, so
-// a composition started by the key that opened it lands here), with the caret after what it starts from.
-function CellEditor({ id, label, text, invalid, element, onText, onKeyDown, onBlur }: CellEditorProps) {
+// a composition started by the key that opened it lands here), with the caret after what it starts from. The
+// renderer places its box, which the textarea sizes; a backdrop fills the same box with the same font and padding
+// and moves with the textarea's scroll, so its glyphs sit under the textarea's clear ones. While an input method
+// composes the textarea's own text shows (its underline and candidates are the input method's).
+function CellEditor({ id, label, text, invalid, backdrop, element, onText, onKeyDown, onBlur }: CellEditorProps) {
+	const boxRef = useRef<HTMLDivElement>(null)
 	const inputRef = useRef<HTMLTextAreaElement>(null)
+	const layerRef = useRef<HTMLDivElement>(null)
+	const [composing, setComposing] = useState(false)
+	const colored = backdrop !== null && !composing
 
 	useLayoutEffect(() => {
 		const input = inputRef.current
@@ -169,27 +211,57 @@ function CellEditor({ id, label, text, invalid, element, onText, onKeyDown, onBl
 	}, [])
 
 	useLayoutEffect(() => {
-		element(inputRef.current)
+		element(boxRef.current)
 
 		return () => element(null)
 	}, [element])
 
+	function follow(): void {
+		const input = inputRef.current
+		const layer = layerRef.current
+
+		if (input !== null && layer !== null)
+			layer.style.transform = `translate(${String(-input.scrollLeft)}px, ${String(-input.scrollTop)}px)`
+	}
+
+	// A backdrop appearing over an editor already scrolled starts where it is.
+	useLayoutEffect(() => {
+		if (colored) follow()
+	}, [colored])
+
 	return (
-		<textarea
-			ref={inputRef}
-			id={id}
-			data-sheet-editor=""
-			className="fo-sheet-editor"
-			aria-label={label}
-			aria-invalid={invalid}
-			spellCheck={false}
-			autoComplete="off"
-			rows={1}
-			value={text}
-			onChange={event => onText(event.target.value)}
-			onKeyDown={onKeyDown}
-			onBlur={onBlur}
-		/>
+		<div
+			ref={boxRef}
+			className="fo-sheet-editor-box"
+			data-colored={colored ? "" : undefined}
+		>
+			{colored ? (
+				<div
+					className="fo-sheet-editor-backdrop"
+					aria-hidden="true"
+				>
+					<div ref={layerRef}>{backdrop}</div>
+				</div>
+			) : null}
+			<textarea
+				ref={inputRef}
+				id={id}
+				data-sheet-editor=""
+				className="fo-sheet-editor"
+				aria-label={label}
+				aria-invalid={invalid}
+				spellCheck={false}
+				autoComplete="off"
+				rows={1}
+				value={text}
+				onChange={event => onText(event.target.value)}
+				onKeyDown={onKeyDown}
+				onBlur={onBlur}
+				onScroll={colored ? follow : undefined}
+				onCompositionStart={() => setComposing(true)}
+				onCompositionEnd={() => setComposing(false)}
+			/>
+		</div>
 	)
 }
 
@@ -207,6 +279,8 @@ export function SheetGrid({
 	onCellActivate,
 	themeKey,
 	sizes,
+	extensions,
+	children,
 	ref
 }: SheetGridProps) {
 	const snapshot = useSyncExternalStore(grid.subscribe, grid.getSnapshot, grid.getSnapshot)
@@ -227,18 +301,50 @@ export function SheetGrid({
 	const chromeRef = useRef<HTMLCanvasElement>(null)
 	const activeRef = useRef<HTMLDivElement>(null)
 	const tipRef = useRef<HTMLDivElement>(null)
+	const handleRef = useRef<HTMLDivElement>(null)
+	const fillRef = useRef<FillDrag | null>(null)
 	const dragRef = useRef<Drag | null>(null)
 	const resizeRef = useRef<Resize | null>(null)
 	const tapRef = useRef<Tap | null>(null)
 	const autoscrollRef = useRef<{ frame: number; x: number; y: number } | null>(null)
+	// A press an extension took, and the cell its pointer was last on.
+	const takenRef = useRef<{ pointerId: number; drag: SheetCellDrag; row: number; col: number } | null>(null)
+	// The cell a mouse or pen hovers (for the extensions' "hover"), or null off the cells.
+	const hoverRef = useRef<GridPoint | null>(null)
+	const parts = extensionParts(extensions)
 	const ids = useId()
 	const activeId = `${ids}-active`
 	const editorId = `${ids}-editor`
 	const { selection, editing, active, layout } = snapshot
+	// Its own value, so the editor renders again only when it changes: a render while a key's input is on its way
+	// (before onChange reads it) would put back the text it held.
+	const backdrop = editing === null ? null : editorBackdrop(extensions, editing.text)
 	const describe = describeCell ?? defaultDescription
 	const liveText = describe(cellName(selection.active.row, selection.active.col), active.text)
 	const readOnly = !canEditSnapshot(snapshot)
 	const onMac = mac ?? isMacPlatform()
+
+	// Shown at the corner of a single selection while it can be edited and no entry is open; kept while dragged.
+	function placeHandle(): void {
+		const element = handleRef.current
+
+		if (element === null) return
+
+		const snapshot = grid.getSnapshot()
+		const fill = fillRef.current
+		const range = fill?.source ?? fillHandleShown(snapshot.selection.ranges)
+		const corner =
+			range === null || (fill === null && (snapshot.editing !== null || !canEditSnapshot(snapshot))) ? null : renderer.cornerOf(range)
+
+		if (corner === null) {
+			if (!element.hidden) element.hidden = true
+
+			return
+		}
+
+		element.hidden = false
+		element.style.transform = `translate(${String(corner.x)}px, ${String(corner.y)}px)`
+	}
 
 	useLayoutEffect(() => {
 		const root = rootRef.current
@@ -255,8 +361,11 @@ export function SheetGrid({
 
 		// Rows fit the wrapped text an edit changes, measured as the renderer draws it (rowFit.ts).
 		const unmeasure = grid.measureWith({ measurer: () => renderer.measurerFor(), font: () => renderer.themeFont() })
+		// The fill handle follows the selection's corner on every frame.
+		const unframe = renderer.onFrame(placeHandle)
 
 		return () => {
+			unframe()
 			unmeasure()
 			renderer.dispose()
 		}
@@ -265,6 +374,16 @@ export function SheetGrid({
 	useEffect(() => {
 		if (themeKey !== undefined) renderer.refreshTheme()
 	}, [renderer, themeKey])
+
+	// An entry opening, or the grid turning read-only, hides the fill handle without a frame.
+	useLayoutEffect(() => {
+		placeHandle()
+	})
+
+	useLayoutEffect(() => {
+		renderer.setExtensions(parts)
+		grid.setEntryHooks(parts.entries)
+	}, [renderer, grid, parts])
 
 	// Before the frame, so a resize's draft never shows the old size for a frame.
 	useLayoutEffect(() => {
@@ -291,6 +410,18 @@ export function SheetGrid({
 				if (grid.choose(cellSelection(point, current === null ? [] : grid.merges(current)))) renderer.reveal(point)
 			},
 			hit: (clientX, clientY) => renderer.hit(clientX, clientY, EDGE_SLOP),
+			cellRect: point => renderer.cellRect(point),
+			clientRect: point => {
+				const box = renderer.cellRect(point)
+				const root = rootRef.current
+
+				if (box === null || root === null) return null
+
+				const origin = root.getBoundingClientRect()
+
+				return new DOMRect(origin.left + box.x, origin.top + box.y, box.width, box.height)
+			},
+			onFrame: listener => renderer.onFrame(listener),
 			renderer
 		}),
 		[grid, renderer]
@@ -503,6 +634,15 @@ export function SheetGrid({
 		}
 	}
 
+	// A fill-handle drag reaching `point`: what it would fill, previewed.
+	function moveFill(fill: FillDrag, point: GridPoint): void {
+		if (point.row === fill.at.row && point.col === fill.at.col) return
+
+		fill.at = point
+		fill.target = fillTarget(fill.source, point)
+		renderer.setFillPreview(sameRange(fill.target, fill.source) ? null : fill.target)
+	}
+
 	// While a selection drag is past the grid's edge, scroll towards it and extend to the cell at the edge.
 	function autoscroll(x: number, y: number): void {
 		const view = renderer.currentView()
@@ -530,14 +670,15 @@ export function SheetGrid({
 		const tick = (): void => {
 			const state = autoscrollRef.current
 			const drag = dragRef.current
+			const fill = fillRef.current
 			const now = renderer.currentView()
 
-			if (state === null || drag === null || now === null) return
+			if (state === null || (drag === null && fill === null) || now === null) return
 
 			const ddx = state.x < left ? state.x - left : state.x > now.width ? state.x - now.width : 0
 			const ddy = state.y < top ? state.y - top : state.y > now.height ? state.y - now.height : 0
 
-			renderer.scrollBy(drag.kind === "rows" ? 0 : ddx * AUTOSCROLL_RATE, drag.kind === "cols" ? 0 : ddy * AUTOSCROLL_RATE)
+			renderer.scrollBy(drag?.kind === "rows" ? 0 : ddx * AUTOSCROLL_RATE, drag?.kind === "cols" ? 0 : ddy * AUTOSCROLL_RATE)
 
 			const edge = renderer.currentView()
 
@@ -545,13 +686,72 @@ export function SheetGrid({
 				const row = ddy < 0 ? edge.rows.first : ddy > 0 ? edge.rows.last : null
 				const col = ddx < 0 ? edge.cols.first : ddx > 0 ? edge.cols.last : null
 
-				extendDrag(drag, row, col)
+				if (drag !== null) extendDrag(drag, row, col)
+				else if (fill !== null) moveFill(fill, { row: row ?? fill.at.row, col: col ?? fill.at.col })
 			}
 
 			state.frame = requestAnimationFrame(tick)
 		}
 
 		autoscrollRef.current = { frame: requestAnimationFrame(tick), x, y }
+	}
+
+	// --- The fill handle (fill.ts) ---
+
+	// The extensions hear a pointer event in order; the first to take a "down" has it.
+	function askPointer(pointer: SheetCellPointer): SheetCellPointerResult {
+		for (const listener of parts.pointers) {
+			const answer = listener(pointer)
+
+			if (pointer.kind === "down" && answer !== undefined && answer !== false) return answer
+		}
+
+		return undefined
+	}
+
+	function cellDown(event: PointerEvent<HTMLDivElement>, row: number, col: number): SheetCellPointerResult {
+		if (parts.pointers.length === 0) return undefined
+
+		return askPointer({
+			kind: "down",
+			row,
+			col,
+			clientX: event.clientX,
+			clientY: event.clientY,
+			pointerType: event.pointerType,
+			ctrlKey: event.ctrlKey,
+			metaKey: event.metaKey,
+			shiftKey: event.shiftKey,
+			altKey: event.altKey,
+			editing: grid.getSnapshot().editing !== null
+		})
+	}
+
+	function hover(event: PointerEvent<HTMLDivElement>, hit: GridHit | null): void {
+		if (parts.pointers.length === 0) return
+
+		const last = hoverRef.current
+
+		if (hit?.kind !== "cell") {
+			if (last !== null) {
+				hoverRef.current = null
+				askPointer({ kind: "leave" })
+			}
+
+			return
+		}
+
+		if (last !== null && last.row === hit.row && last.col === hit.col) return
+
+		hoverRef.current = { row: hit.row, col: hit.col }
+		askPointer({ kind: "hover", row: hit.row, col: hit.col, clientX: event.clientX, clientY: event.clientY })
+	}
+
+	function handlePointerLeave(): void {
+		if (hoverRef.current === null) return
+
+		hoverRef.current = null
+		askPointer({ kind: "leave" })
 	}
 
 	function handlePointerDown(event: PointerEvent<HTMLDivElement>): void {
@@ -582,13 +782,28 @@ export function SheetGrid({
 			return
 		}
 
-		focusGrid()
-
 		if ((hit.kind === "colHeader" || hit.kind === "rowHeader") && hit.edge !== null && canResize()) {
+			focusGrid()
 			startResize(event, hit.kind === "colHeader" ? "cols" : "rows", hit.edge)
 
 			return
 		}
+
+		// An extension's press: nothing is selected, and an open entry keeps focus.
+		const taken = hit.kind === "cell" ? cellDown(event, hit.row, hit.col) : undefined
+
+		if (hit.kind === "cell" && taken !== undefined && taken !== false) {
+			event.preventDefault()
+
+			if (taken !== true) {
+				takenRef.current = { pointerId: event.pointerId, drag: taken, row: hit.row, col: hit.col }
+				event.currentTarget.setPointerCapture(event.pointerId)
+			}
+
+			return
+		}
+
+		focusGrid()
 
 		const add = event.ctrlKey || event.metaKey
 		const kind = selectHit(hit, event.shiftKey, add)
@@ -608,10 +823,29 @@ export function SheetGrid({
 			return
 		}
 
+		const taken = takenRef.current
+
+		if (taken !== null && taken.pointerId === event.pointerId) {
+			const hit = renderer.hit(event.clientX, event.clientY, 0)
+
+			if (hit?.kind === "cell" && (hit.row !== taken.row || hit.col !== taken.col)) {
+				taken.row = hit.row
+				taken.col = hit.col
+				taken.drag.move({ row: hit.row, col: hit.col })
+			}
+
+			return
+		}
+
 		const drag = dragRef.current
 
 		if (drag === null || drag.pointerId !== event.pointerId) {
-			if (event.pointerType !== "touch") hoverCursor(event)
+			if (event.pointerType !== "touch" && event.buttons === 0) {
+				const hit = renderer.hit(event.clientX, event.clientY, EDGE_SLOP)
+
+				hoverCursor(hit)
+				hover(event, hit)
+			}
 
 			return
 		}
@@ -629,9 +863,8 @@ export function SheetGrid({
 		else if (hit.kind === "rowHeader" && drag.kind !== "cols") extendDrag(drag, hit.row, null)
 	}
 
-	function hoverCursor(event: PointerEvent<HTMLDivElement>): void {
+	function hoverCursor(hit: GridHit | null): void {
 		const root = rootRef.current
-		const hit = renderer.hit(event.clientX, event.clientY, EDGE_SLOP)
 		const cursor =
 			hit?.kind === "colHeader" && hit.edge !== null && canResize()
 				? "col-resize"
@@ -651,6 +884,15 @@ export function SheetGrid({
 			return
 		}
 
+		const taken = takenRef.current
+
+		if (taken !== null && taken.pointerId === event.pointerId) {
+			takenRef.current = null
+			taken.drag.end(true)
+
+			return
+		}
+
 		const tap = tapRef.current
 
 		if (tap !== null && tap.pointerId === event.pointerId) {
@@ -658,6 +900,14 @@ export function SheetGrid({
 
 			if (Math.hypot(event.clientX - tap.x, event.clientY - tap.y) < TAP_SLOP && event.timeStamp - tap.time < TAP_MS) {
 				const hit = renderer.hit(event.clientX, event.clientY, 0)
+				// A tap is a touch's press: an extension may take it (a drag ends where it began).
+				const tapTaken = hit?.kind === "cell" ? cellDown(event, hit.row, hit.col) : undefined
+
+				if (tapTaken !== undefined && tapTaken !== false) {
+					if (tapTaken !== true) tapTaken.end(true)
+
+					return
+				}
 
 				if (hit !== null) {
 					focusGrid()
@@ -675,6 +925,13 @@ export function SheetGrid({
 	}
 
 	function handlePointerCancel(event: PointerEvent<HTMLDivElement>): void {
+		const taken = takenRef.current
+
+		if (taken !== null && taken.pointerId === event.pointerId) {
+			takenRef.current = null
+			taken.drag.end(false)
+		}
+
 		if (resizeRef.current?.pointerId === event.pointerId) endResize(null)
 		if (tapRef.current?.pointerId === event.pointerId) tapRef.current = null
 		if (dragRef.current?.pointerId === event.pointerId) {
@@ -741,6 +998,113 @@ export function SheetGrid({
 		const sent = run()
 
 		if (sent !== null) settled(sent)
+	}
+
+	// --- Filling from the handle (fill.ts) ---
+
+	function endFill(commit: { readonly alternate: boolean } | null): void {
+		const fill = fillRef.current
+
+		fillRef.current = null
+		stopAutoscroll()
+		renderer.setFillPreview(null)
+
+		if (fill === null || commit === null || sameRange(fill.target, fill.source)) {
+			placeHandle()
+
+			return
+		}
+
+		const { sheet } = grid.getSnapshot()
+		const target = fill.target
+		const left = fillLeft(fill.source, target)
+
+		select(
+			{
+				active: { row: fill.source.startRow, col: fill.source.startCol },
+				anchor: { row: target.startRow, col: target.startCol },
+				focus: { row: target.endRow, col: target.endCol },
+				ranges: [target]
+			},
+			null
+		)
+		edit(() =>
+			left === null
+				? grid.command({ type: "fill.auto", sheet, source: fill.source, target, mode: commit.alternate ? "alternate" : "auto" })
+				: grid.command({ type: "cells.clear", sheet, ranges: [left], what: "contents" })
+		)
+	}
+
+	function handleFillDown(event: PointerEvent<HTMLDivElement>): void {
+		const source = fillHandleShown(grid.getSnapshot().selection.ranges)
+
+		if (event.button !== 0 || source === null || !grid.canEdit()) return
+
+		event.preventDefault()
+		event.stopPropagation()
+
+		// The handle follows its pointer off itself; a script's pointer (no device behind it) has nothing to capture.
+		if (event.nativeEvent.isTrusted) event.currentTarget.setPointerCapture(event.pointerId)
+
+		focusGrid()
+		fillRef.current = { pointerId: event.pointerId, source, target: source, at: { row: source.endRow, col: source.endCol } }
+	}
+
+	function handleFillMove(event: PointerEvent<HTMLDivElement>): void {
+		const fill = fillRef.current
+
+		if (fill === null || fill.pointerId !== event.pointerId) return
+
+		const local = renderer.local(event.clientX, event.clientY)
+
+		if (local !== null) autoscroll(renderer.layoutX(local.x), local.y)
+
+		const hit = renderer.hit(event.clientX, event.clientY, 0)
+
+		if (hit?.kind === "cell") moveFill(fill, { row: hit.row, col: hit.col })
+		else if (hit?.kind === "colHeader") moveFill(fill, { row: fill.at.row, col: hit.col })
+		else if (hit?.kind === "rowHeader") moveFill(fill, { row: hit.row, col: fill.at.col })
+	}
+
+	function handleFillUp(event: PointerEvent<HTMLDivElement>): void {
+		if (fillRef.current?.pointerId !== event.pointerId) return
+
+		// Ctrl (Option on a Mac) swaps a copy and a series, as Excel's fill handle does.
+		endFill({ alternate: event.ctrlKey || (onMac && event.altKey) })
+	}
+
+	function handleFillCancel(event: PointerEvent<HTMLDivElement>): void {
+		if (fillRef.current?.pointerId === event.pointerId) endFill(null)
+	}
+
+	// Fills down as far as the data beside the selection runs.
+	function handleFillDoubleClick(event: MouseEvent<HTMLDivElement>): void {
+		event.stopPropagation()
+
+		const { sheet, selection: current } = grid.getSnapshot()
+		const source = fillHandleShown(current.ranges)
+
+		if (source === null || !grid.canEdit()) return
+
+		fillDownTo(grid.session, sheet, source).then(
+			last => {
+				if (last === null || grid.getSnapshot().selection !== current) return
+
+				const target = { ...source, endRow: last }
+
+				select(
+					{
+						...current,
+						anchor: { row: source.startRow, col: source.startCol },
+						focus: { row: last, col: source.endCol },
+						ranges: [target]
+					},
+					null
+				)
+				edit(() => grid.command({ type: "fill.auto", sheet, source, target, mode: "auto" }))
+			},
+			() => undefined
+		)
 	}
 
 	// On or off as the active cell is, as a toolbar button toggles it.
@@ -1004,11 +1368,13 @@ export function SheetGrid({
 	function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
 		if (event.target !== event.currentTarget || onKey?.(event) === true) return
 
-		if (resizeRef.current !== null) {
+		if (resizeRef.current !== null || fillRef.current !== null) {
 			if (event.key === "Escape") {
 				event.preventDefault()
 				event.stopPropagation()
-				endResize(null)
+
+				if (resizeRef.current !== null) endResize(null)
+				else endFill(null)
 			}
 
 			return
@@ -1239,12 +1605,19 @@ export function SheetGrid({
 
 	// Ctrl+Enter: the entry goes into every selected cell (a merge's first one), a formula's relative references
 	// moving from the active cell to each, as Excel fills a selection. The session lists the cells (fill.entry).
+	// The extensions check the entry first, as they check one committed (an entry they stop is reopened or dropped).
 	function fillSelection(text: string, current: GridSelection): void {
-		const { sheet } = grid.getSnapshot()
+		const { sheet, editing: entry } = grid.getSnapshot()
 
 		grid.cancelEditing()
 		focusGrid()
-		edit(() => grid.command({ type: "fill.entry", sheet, ranges: current.ranges, entry: text, from: current.active }))
+
+		if (entry === null) return
+
+		void grid.checkEntry({ ...entry, text }).then(checked => {
+			if (checked.verdict === "commit")
+				edit(() => grid.command({ type: "fill.entry", sheet, ranges: current.ranges, entry: checked.text, from: current.active }))
+		})
 	}
 
 	function handleEditorBlur(event: FocusEvent<HTMLTextAreaElement>): void {
@@ -1257,7 +1630,7 @@ export function SheetGrid({
 		if (grid.getSnapshot().editing !== null) void grid.commitEditing(null)
 	}
 
-	function editorElement(element: HTMLTextAreaElement | null): void {
+	function editorElement(element: HTMLDivElement | null): void {
 		renderer.setEditor(element)
 	}
 
@@ -1292,6 +1665,7 @@ export function SheetGrid({
 				onPointerMove={handlePointerMove}
 				onPointerUp={handlePointerUp}
 				onPointerCancel={handlePointerCancel}
+				onPointerLeave={handlePointerLeave}
 				onDoubleClick={handleDoubleClick}
 				onKeyDown={handleKeyDown}
 			>
@@ -1317,12 +1691,14 @@ export function SheetGrid({
 					</div>
 				</div>
 			</div>
+			{children === undefined ? null : <div className="fo-sheet-overlays">{children}</div>}
 			{editing === null ? null : (
 				<CellEditor
 					id={editorId}
 					label={editorLabel}
 					text={editing.text}
 					invalid={editing.invalid}
+					backdrop={backdrop}
 					element={editorElement}
 					onText={text => grid.setEditText(text)}
 					onKeyDown={handleEditorKey}
@@ -1342,6 +1718,18 @@ export function SheetGrid({
 				className="fo-sheet-tip"
 				role="status"
 				hidden
+			/>
+			{/* The fill handle (fill.ts): placed on every frame; Ctrl+D, Ctrl+R and the Series dialog do the same by keys. */}
+			<div
+				ref={handleRef}
+				className="fo-sheet-fill-handle"
+				aria-hidden="true"
+				hidden
+				onPointerDown={handleFillDown}
+				onPointerMove={handleFillMove}
+				onPointerUp={handleFillUp}
+				onPointerCancel={handleFillCancel}
+				onDoubleClick={handleFillDoubleClick}
 			/>
 		</div>
 	)

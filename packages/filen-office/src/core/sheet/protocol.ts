@@ -139,8 +139,11 @@ export const CellFlag = {
 	// The value breaks the cell's data validation.
 	INVALID: 1 << 16,
 	// The text or input is cut at SHEET_TILE_TEXT: the cell query gives the whole input to edit.
-	CLIPPED: 1 << 17
-	// Bits 18-31 are free for features: claim one here, never reuse one.
+	CLIPPED: 1 << 17,
+	// Conditional formatting draws a data bar (the "cfBars" layer) or an icon (the "cfIcons" layer) in the cell.
+	CF_BAR: 1 << 18,
+	CF_ICON: 1 << 19
+	// Bits 20-31 are free for features: claim one here, never reuse one.
 } as const
 
 // One tile's cells, sparse: only the cells with something to draw or to know (a value, a style other than the
@@ -751,6 +754,9 @@ export type SheetEvent =
 	// Results that arrived after an edit's answer (a recalculation finished in slices).
 	| { readonly type: "change"; readonly change: SheetChange }
 	| { readonly type: "progress"; readonly task: "open" | "proof" | "save" | "find"; readonly done: number; readonly total: number }
+	// A feature could not read what it shows on a sheet (a damaged part beside the sheet's own): it shows nothing there
+	// and refuses its commands on that sheet; the file's parts are saved as they were.
+	| { readonly type: "featureUnavailable"; readonly sheet: SheetId; readonly feature: string; readonly message: string }
 	// The session cannot go on (its worker died, or the active sheet is damaged past the preview it opened on): every
 	// call rejects from now on.
 	| { readonly type: "failed"; readonly message: string }

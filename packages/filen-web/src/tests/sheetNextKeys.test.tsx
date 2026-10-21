@@ -96,23 +96,28 @@ async function openViewer(name: string, source: Uint8Array): Promise<HTMLElement
 }
 
 describe("the spreadsheet viewer's grid shortcuts", () => {
-	it("asks with Ctrl+Minus on cells whether to delete their rows or columns, as Excel's Delete dialog", async () => {
-		const grid = await openViewer("rows.csv", Uint8Array.from(new TextEncoder().encode("a,b\r\n1,2\r\n3,4\r\n")))
+	it("asks with Ctrl+Minus on cells how to delete them, as Excel's Delete dialog", async () => {
+		const grid = await openViewer("rows.csv", Uint8Array.from(new TextEncoder().encode("a,b,c\r\n1,2,x\r\n3,4,y\r\n")))
 
 		await goTo("A2:B2")
 		fireEvent.keyDown(grid, { key: "-", code: "Minus", ctrlKey: true })
 
 		const dialog = await screen.findByRole("dialog", { name: preview.previewSheetDeleteDialogTitle })
 
-		expect(screen.getByRole("radio", { name: preview.previewSheetDialogEntireRow }).getAttribute("aria-checked")).toBe("true")
+		expect(screen.getByRole("radio", { name: preview.previewSheetShiftCellsUp }).getAttribute("aria-checked")).toBe("true")
 		fireEvent.click(screen.getByRole("button", { name: preview.previewSheetDeleteDialogTitle }))
 		await waitFor(() => {
 			expect(dialog.isConnected).toBe(false)
 		})
 
+		// The cells below moved up; the column beside the selection kept its own.
 		await goTo("A2")
 		await waitFor(() => {
 			expect(contents()).toBe("3")
+		})
+		await goTo("C2")
+		await waitFor(() => {
+			expect(contents()).toBe("x")
 		})
 	})
 

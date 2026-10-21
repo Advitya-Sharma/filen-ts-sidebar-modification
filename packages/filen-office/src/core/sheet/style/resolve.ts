@@ -3,18 +3,18 @@ import { builtinFormatCode } from "../numfmt/builtins"
 import { numFmt } from "../numfmt/format"
 import { NUMFMT_EN_US, type NumFmtLocale } from "../numfmt/locale"
 import type { NumFmt } from "../numfmt/parse"
-import {
-	XfApply,
-	type XlsxAlignment,
-	type XlsxBorderEdge,
-	type XlsxCellProtection,
-	type XlsxColor,
-	type XlsxFill,
-	type XlsxFont,
-	type XlsxStyleTable,
-	type XlsxTheme,
-	type XlsxXf
+import type {
+	XlsxAlignment,
+	XlsxBorderEdge,
+	XlsxCellProtection,
+	XlsxColor,
+	XlsxFill,
+	XlsxFont,
+	XlsxStyleTable,
+	XlsxTheme,
+	XlsxXf
 } from "../../xlsx/model/types"
+import { XfApply } from "./xfApply"
 import { resolveColor } from "./color"
 import { SYSTEM_BACKGROUND, SYSTEM_FOREGROUND, workbookPalette } from "./palette"
 

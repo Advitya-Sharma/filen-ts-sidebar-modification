@@ -17,6 +17,8 @@
 #   {"op": "mergeCells"|"unmergeCells", "sheet", "range"}  {"op": "hideRows"|"hideColumns", "sheet", "at", "count", "hidden"?}
 #   {"op": "freeze", "sheet", "rows", "cols"}  {"op": "copySheet", "sheet", "name", "to"}  {"op": "renameSheet", "sheet", "name"}
 #   {"op": "hideSheet", "sheet", "hidden"?}  {"op": "tabColor", "sheet", "color"}  {"op": "protectSheet", "sheet", "password"?}
+#   {"op": "insertCells", "sheet", "range": "B2:C3", "mode": "down"|"right"}  (XCellRangeMovement.insertCells)
+#   {"op": "removeCells", "sheet", "range", "mode": "up"|"left"}  (XCellRangeMovement.removeRange)
 # "sheet" is a name or a 0-based index; a sort key's column is 0-based within the range.
 # "views": true adds each sheet's view as loaded: {"name", "frozen", "splitRow", "splitColumn", "panes": [[firstRow,
 # firstColumn], ...]} (the view's panes in LibreOffice's order: XViewPane.getFirstVisibleRow/Column).
@@ -192,6 +194,13 @@ def apply(doc, op):
         sheet_of(doc, op["sheet"]).setPropertyValue("TabColor", op["color"])
     elif kind == "protectSheet":
         sheet_of(doc, op["sheet"]).protect(op.get("password", ""))
+    elif kind in ("insertCells", "removeCells"):
+        sheet = sheet_of(doc, op["sheet"])
+        address = sheet.getCellRangeByName(op["range"]).getRangeAddress()
+        if kind == "insertCells":
+            sheet.insertCells(address, uno.Enum("com.sun.star.sheet.CellInsertMode", op["mode"].upper()))
+        else:
+            sheet.removeRange(address, uno.Enum("com.sun.star.sheet.CellDeleteMode", op["mode"].upper()))
     else:
         raise ValueError("unknown operation " + kind)
 

@@ -106,3 +106,28 @@ describe("FormulaEngine", () => {
 		}
 	})
 })
+
+describe("FormulaEngine at scale", () => {
+	// Setting many cells is linear in them: HyperFormula's own batch grouping walks every operation batched so far at
+	// each one (16,000 sets took a second, 40,000 several).
+	it("sets 40,000 cells over 40,000 dependents in time linear in them", () => {
+		const count = 40_000
+		const rows: EngineSheet["rows"] = Array.from({ length: count }, (_, row) => [row, `=A${String(row + 1)}*2`])
+		const engine = new FormulaEngine([sheet("S", rows)], [])
+
+		try {
+			const started = performance.now()
+			const changed = engine.set(
+				0,
+				Array.from({ length: count }, (_, row) => ({ row, col: 0, content: row + 1 }))
+			)
+			const elapsed = performance.now() - started
+
+			expect(changed).toHaveLength(count * 2)
+			expect(engine.result(0, count - 1, 1)).toEqual({ value: count * 2 })
+			expect(elapsed).toBeLessThan(2_500)
+		} finally {
+			engine.destroy()
+		}
+	})
+})

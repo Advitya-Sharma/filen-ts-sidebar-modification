@@ -107,7 +107,7 @@ async function mounted(): Promise<{
 
 	// The controls turn on once the active cell's format is known.
 	await waitFor(() => {
-		expect(screen.getByRole("button", { name: "Text colour" }).hasAttribute("disabled")).toBe(false)
+		expect(screen.getByRole("button", { name: "Text color" }).hasAttribute("disabled")).toBe(false)
 	})
 
 	return {
@@ -119,7 +119,7 @@ async function mounted(): Promise<{
 }
 
 describe("spreadsheet toolbar", () => {
-	it("lays out Excel's groups in one row: history, font, toggles, colours, borders, alignment, merge, number, freeze, find", async () => {
+	it("lays out Excel's groups in one row: history, font, toggles, colours, borders, alignment, merge, number, freeze, sort and filter, find", async () => {
 		await mounted()
 
 		const toolbar = screen.getByRole("toolbar", { name: "Formatting" })
@@ -134,8 +134,8 @@ describe("spreadsheet toolbar", () => {
 			"Italic",
 			"Underline",
 			"Strikethrough",
-			"Text colour",
-			"Fill colour",
+			"Text color",
+			"Fill color",
 			"Borders",
 			"Horizontal alignment",
 			"Vertical alignment",
@@ -146,6 +146,7 @@ describe("spreadsheet toolbar", () => {
 			"Increase decimal",
 			"Percent style",
 			"Freeze",
+			"Sort and filter",
 			"Find and replace",
 			"More formatting"
 		])
@@ -294,7 +295,7 @@ describe("spreadsheet toolbar", () => {
 			/>
 		)
 		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Text colour" }).hasAttribute("disabled")).toBe(false)
+			expect(screen.getByRole("button", { name: "Text color" }).hasAttribute("disabled")).toBe(false)
 		})
 		expect(screen.queryByRole("dialog", { name: "Format cells" })).toBeNull()
 	})
