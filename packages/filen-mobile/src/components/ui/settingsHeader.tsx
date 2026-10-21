@@ -1,4 +1,4 @@
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import Header, { type HeaderItem, type HeaderSearch } from "@/components/ui/header"
 import { Platform } from "react-native"
 

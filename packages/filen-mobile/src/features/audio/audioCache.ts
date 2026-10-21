@@ -259,7 +259,7 @@ export class AudioCache extends DiskCache {
 								intermediates: true
 							})
 
-							pictureFile.write(picture.data)
+							await pictureFile.write(picture.data)
 
 							pictureUri = pictureFile.uri
 

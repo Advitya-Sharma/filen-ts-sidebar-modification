@@ -444,7 +444,7 @@ class SecureStore {
 				let promoted = false
 
 				try {
-					tmpFile.write(payload)
+					await tmpFile.write(payload)
 
 					// Move the existing store aside to the backup before clearing the destination.
 					// Use a fresh handle so the shared this.secureStoreFile.uri is never mutated by move().

@@ -39,7 +39,7 @@ describe("sweepTmpDir", () => {
 
 		// Trigger lazy creation, then add a file inside tmp
 		const file = newTmpFile("stale.bin")
-		file.write(new Uint8Array([1, 2, 3]))
+		file.writeSync(new Uint8Array([1, 2, 3]))
 
 		expect(file.exists).toBe(true)
 
@@ -224,9 +224,9 @@ describe("writeTmpFile", () => {
 	it("writes the data to a filen-tmp file, replacing a leftover of the same name", async () => {
 		const { writeTmpFile, newTmpFile, TMP_DIR_NAME } = await freshTmp()
 
-		newTmpFile("export.txt").write("stale")
+		newTmpFile("export.txt").writeSync("stale")
 
-		const { file } = writeTmpFile("export.txt", "fresh")
+		const { file } = await writeTmpFile("export.txt", "fresh")
 
 		expect(file.uri).toContain(`/${TMP_DIR_NAME}/export.txt`)
 		expect(file.textSync()).toBe("fresh")
@@ -235,7 +235,7 @@ describe("writeTmpFile", () => {
 	it("cleanup deletes the file and is a no-op once it is gone", async () => {
 		const { writeTmpFile } = await freshTmp()
 
-		const { file, cleanup } = writeTmpFile("export.bin", new Uint8Array([1, 2, 3]))
+		const { file, cleanup } = await writeTmpFile("export.bin", new Uint8Array([1, 2, 3]))
 
 		expect(file.exists).toBe(true)
 

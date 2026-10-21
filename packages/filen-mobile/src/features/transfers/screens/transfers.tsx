@@ -12,7 +12,7 @@ import VirtualList, { type ListRenderItemInfo } from "@/components/ui/virtualLis
 import View from "@/components/ui/view"
 import EllipsisMenuTrigger from "@/components/ui/ellipsisMenuTrigger"
 import SettingsHeader from "@/components/ui/settingsHeader"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { useSafeAreaInsets } from "react-native-safe-area-context"
 import { router } from "@/lib/router"
 import { useTranslation } from "react-i18next"

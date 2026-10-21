@@ -1,6 +1,17 @@
 import { useEffect } from "react"
 import { type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native"
-import { Gesture, GestureDetector } from "react-native-gesture-handler"
+import {
+	GestureDetector,
+	GestureStateManager,
+	type PanGestureConfig,
+	type PinchGestureConfig,
+	type TapGesture,
+	type TapGestureConfig,
+	useCompetingGestures,
+	usePanGesture,
+	usePinchGesture,
+	useTapGesture
+} from "react-native-gesture-handler"
 import Animated, {
 	type SharedValue,
 	useSharedValue,
@@ -11,7 +22,7 @@ import Animated, {
 	withDecay,
 	cancelAnimation
 } from "react-native-reanimated"
-import { runOnJS } from "react-native-worklets"
+import { scheduleOnRN } from "react-native-worklets"
 
 const MIN_ZOOM = 1
 const MAX_ZOOM = 10
@@ -195,7 +206,7 @@ type SharedValues = {
 	opacity: SharedValue<number>
 	savedScale: SharedValue<number>
 	// Translate captured at the start of the active gesture (pinch OR pan). The
-	// Race composition means pinch and pan never run on the same touch stream, so
+	// competing composition means pinch and pan never run on the same touch stream, so
 	// they safely share one anchor — no separate pinch anchor is needed anymore.
 	savedTranslateX: SharedValue<number>
 	savedTranslateY: SharedValue<number>
@@ -236,7 +247,7 @@ function panBoundsFor(
 
 // One frame of the pinch transform, extracted as a pure UI-thread worklet so it
 // is unit-testable. Anchors on savedTranslateX/Y (the translate captured at pinch
-// start). With the Race composition the pan never runs during a pinch, so this
+// start). With the competing composition the pan never runs during a pinch, so this
 // anchor is stable for the whole gesture (no dual-anchor dance needed anymore).
 //
 // Glues the focal material point under the fingers (the two-finger model):
@@ -338,15 +349,18 @@ function applyContentSize(
 }
 
 /**
- * Builds all gesture handlers at module scope so the React Compiler does not
- * analyse them.  The compiler only inspects React components and hooks — plain
+ * The gesture configs are built at module scope so the React Compiler does not
+ * analyse them. The compiler only inspects React components and hooks — plain
  * functions are left alone, which avoids "Cannot access refs during render" and
  * "This value cannot be modified" diagnostics that fire when shared values are
- * mutated inside closures created during render.
+ * mutated inside closures created during render. useZoomGestures is the hook
+ * boundary: the compiler freezes its arguments and memoizes each config on them,
+ * so a gesture's native config is re-sent only when an input changes, not on
+ * every render.
  *
- * Reanimated's babel plugin still processes every `"worklet"` directive
- * regardless of where the enclosing function lives, so shared-value
- * serialisation for the UI thread works exactly as before.
+ * The worklets plugin still processes every `"worklet"` directive regardless of
+ * where the enclosing function lives, and worklet callbacks make the hook route
+ * the gesture's events to the UI thread.
  *
  * Transform model: the content is translated then scaled about the container
  * center. During gestures nothing is hard-clamped — out-of-bounds translation
@@ -355,40 +369,38 @@ function applyContentSize(
  * content follows the fingers freely and the release either commits the
  * dismiss (shrink + fade, then notify) or springs back to rest.
  */
-function buildComposedGesture(
+function buildPinchConfig(
 	sv: SharedValues,
 	notifyZoomChange: (zoom: number) => void,
-	onSingleTap: (() => void) | undefined,
-	notifySingleTap: () => void,
-	onPinchDismiss: (() => void) | undefined,
+	hasPinchDismiss: boolean,
 	notifyPinchDismiss: () => void,
 	notifyPinchActive: (active: boolean) => void
-) {
-	const pinchGesture = Gesture.Pinch()
-		.manualActivation(true)
-		.onTouchesDown((e, stateManager) => {
+): PinchGestureConfig {
+	return {
+		manualActivation: true,
+		onTouchesDown: e => {
 			"worklet"
 
 			// Two fingers = a pinch. Activate synchronously on the UI thread: this
 			// starts the pinch AND cancels the parent FlashList's native scroll in
 			// the same frame (a JS scrollEnabled toggle loses that race). One finger
-			// keeps the pinch dormant so the pan / taps can win the Race.
+			// keeps the pinch dormant so the pan / taps can win the race.
 			if (e.numberOfTouches >= 2) {
-				stateManager.activate()
+				GestureStateManager.activate(e.handlerTag)
 			}
-		})
-		.onTouchesUp((e, stateManager) => {
+		},
+		onTouchesUp: e => {
 			"worklet"
 
-			// Drop below two fingers → end the pinch (fires onEnd → the single
-			// settle). Because the pinch holds the Race until it ends, a staggered
+			// Drop below two fingers → end the pinch (fires onDeactivate → the single
+			// settle). Because the pinch holds the race until it ends, a staggered
 			// 2→1→0 lift can no longer hand a lone finger to the pan mid-release —
 			// that handoff was the snap-back.
 			if (e.numberOfTouches < 2) {
-				stateManager.end()
+				GestureStateManager.deactivate(e.handlerTag)
 			}
-		})
-		.onStart(e => {
+		},
+		onActivate: e => {
 			"worklet"
 
 			// Catch a running settle/snap-back animation seamlessly instead of
@@ -411,10 +423,10 @@ function buildComposedGesture(
 			if (sv.pinchActive.value === 0) {
 				sv.pinchActive.value = 1
 
-				runOnJS(notifyPinchActive)(true)
+				scheduleOnRN(notifyPinchActive, true)
 			}
-		})
-		.onUpdate(e => {
+		},
+		onUpdate: e => {
 			"worklet"
 
 			if (sv.dismissCommitted.value === 1 || e.numberOfPointers < 2) {
@@ -422,7 +434,7 @@ function buildComposedGesture(
 			}
 
 			// First two-finger update: re-anchor the baseline from THIS event stream and
-			// apply nothing this frame. The content has not moved since onStart, so
+			// apply nothing this frame. The content has not moved since onActivate, so
 			// skipping one frame is invisible — while any mismatch between the activation
 			// event's focal/scale and the update stream (Android's first-pointer focal
 			// seed) would otherwise land as a jump toward the first finger.
@@ -435,13 +447,13 @@ function buildComposedGesture(
 				return
 			}
 
-			const next = computePinchTransform(sv, e.scale, e.focalX, e.focalY, !!onPinchDismiss)
+			const next = computePinchTransform(sv, e.scale, e.focalX, e.focalY, hasPinchDismiss)
 
 			sv.translateX.value = next.translateX
 			sv.translateY.value = next.translateY
 			sv.scale.value = next.scale
-		})
-		.onEnd(e => {
+		},
+		onDeactivate: e => {
 			"worklet"
 
 			if (sv.dismissCommitted.value === 1) {
@@ -449,7 +461,7 @@ function buildComposedGesture(
 			}
 
 			if (
-				onPinchDismiss &&
+				hasPinchDismiss &&
 				(sv.scale.value < PINCH_DISMISS_THRESHOLD ||
 					(sv.scale.value < PINCH_DISMISS_VELOCITY_MAX_SCALE && e.velocity < PINCH_DISMISS_VELOCITY))
 			) {
@@ -471,7 +483,7 @@ function buildComposedGesture(
 						"worklet"
 
 						if (finished) {
-							runOnJS(notifyPinchDismiss)()
+							scheduleOnRN(notifyPinchDismiss)
 						}
 					}
 				)
@@ -497,22 +509,25 @@ function buildComposedGesture(
 				sv.translateY.value = withSpring(target.translateY, SPRING_SETTLE)
 			}
 
-			runOnJS(notifyZoomChange)(target.scale)
-		})
-		.onFinalize(() => {
+			scheduleOnRN(notifyZoomChange, target.scale)
+		},
+		onFinalize: () => {
 			"worklet"
 
 			if (sv.pinchActive.value === 1) {
 				sv.pinchActive.value = 0
 
-				runOnJS(notifyPinchActive)(false)
+				scheduleOnRN(notifyPinchActive, false)
 			}
-		})
+		}
+	}
+}
 
-	const panGesture = Gesture.Pan()
-		.manualActivation(true)
-		.maxPointers(1)
-		.onTouchesDown(e => {
+function buildPanConfig(sv: SharedValues): PanGestureConfig {
+	return {
+		manualActivation: true,
+		maxPointers: 1,
+		onTouchesDown: e => {
 			"worklet"
 
 			const touch = e.allTouches[0]
@@ -528,15 +543,15 @@ function buildComposedGesture(
 				cancelAnimation(sv.translateX)
 				cancelAnimation(sv.translateY)
 			}
-		})
-		.onTouchesMove((e, stateManager) => {
+		},
+		onTouchesMove: e => {
 			"worklet"
 
 			// Zoomed in → this single finger pans the image: activate (also blocks
-			// the pager). maxPointers(1) makes a second finger FAIL this pan, handing
+			// the pager). maxPointers 1 makes a second finger FAIL this pan, handing
 			// the stream to the pinch — that is the pan→pinch transition.
 			if (sv.scale.value > MIN_ZOOM && sv.dismissCommitted.value === 0) {
-				stateManager.activate()
+				GestureStateManager.activate(e.handlerTag)
 
 				return
 			}
@@ -554,16 +569,16 @@ function buildComposedGesture(
 			const dy = touch.y - sv.panTouchStartY.value
 
 			if (dx * dx + dy * dy > PAN_FAIL_SLOP_SQUARED) {
-				stateManager.fail()
+				GestureStateManager.fail(e.handlerTag)
 			}
-		})
-		.onStart(() => {
+		},
+		onActivate: () => {
 			"worklet"
 
 			sv.savedTranslateX.value = sv.translateX.value
 			sv.savedTranslateY.value = sv.translateY.value
-		})
-		.onUpdate(e => {
+		},
+		onUpdate: e => {
 			"worklet"
 
 			if (sv.scale.value <= MIN_ZOOM || sv.dismissCommitted.value === 1) {
@@ -574,11 +589,11 @@ function buildComposedGesture(
 
 			sv.translateX.value = rubberBandClamp(sv.savedTranslateX.value + e.translationX, -bounds.x, bounds.x, sv.containerWidth.value)
 			sv.translateY.value = rubberBandClamp(sv.savedTranslateY.value + e.translationY, -bounds.y, bounds.y, sv.containerHeight.value)
-		})
-		.onEnd((e, success) => {
+		},
+		onDeactivate: e => {
 			"worklet"
 
-			if (!success || sv.scale.value <= MIN_ZOOM || sv.dismissCommitted.value === 1) {
+			if (e.canceled || sv.scale.value <= MIN_ZOOM || sv.dismissCommitted.value === 1) {
 				return
 			}
 
@@ -594,12 +609,15 @@ function buildComposedGesture(
 				relX.type === "decay" ? withDecay({ velocity: relX.velocity, clamp: relX.clamp }) : withSpring(relX.to, SPRING_SETTLE)
 			sv.translateY.value =
 				relY.type === "decay" ? withDecay({ velocity: relY.velocity, clamp: relY.clamp }) : withSpring(relY.to, SPRING_SETTLE)
-		})
+		}
+	}
+}
 
-	const doubleTapGesture = Gesture.Tap()
-		.numberOfTaps(2)
-		.maxDelay(300)
-		.onEnd(e => {
+function buildDoubleTapConfig(sv: SharedValues, notifyZoomChange: (zoom: number) => void): TapGestureConfig {
+	return {
+		numberOfTaps: 2,
+		maxDelay: 300,
+		onDeactivate: e => {
 			"worklet"
 
 			if (sv.dismissCommitted.value === 1) {
@@ -611,7 +629,7 @@ function buildComposedGesture(
 				sv.translateX.value = withSpring(0, SPRING_TOGGLE)
 				sv.translateY.value = withSpring(0, SPRING_TOGGLE)
 
-				runOnJS(notifyZoomChange)(MIN_ZOOM)
+				scheduleOnRN(notifyZoomChange, MIN_ZOOM)
 
 				return
 			}
@@ -627,26 +645,43 @@ function buildComposedGesture(
 			sv.translateX.value = withSpring(targetTx, SPRING_TOGGLE)
 			sv.translateY.value = withSpring(targetTy, SPRING_TOGGLE)
 
-			runOnJS(notifyZoomChange)(targetScale)
-		})
+			scheduleOnRN(notifyZoomChange, targetScale)
+		}
+	}
+}
 
-	const singleTapGesture = Gesture.Tap()
-		.enabled(!!onSingleTap)
-		.numberOfTaps(1)
-		.requireExternalGestureToFail(doubleTapGesture)
-		.onEnd(() => {
+function buildSingleTapConfig(enabled: boolean, doubleTapGesture: TapGesture, notifySingleTap: () => void): TapGestureConfig {
+	return {
+		enabled,
+		numberOfTaps: 1,
+		requireToFail: doubleTapGesture,
+		onDeactivate: () => {
 			"worklet"
 
-			if (onSingleTap) {
-				runOnJS(notifySingleTap)()
-			}
-		})
+			scheduleOnRN(notifySingleTap)
+		}
+	}
+}
 
-	// Race (NOT Simultaneous): only one of pinch / pan / taps can be active on a
-	// touch stream. The 2-finger-gated pinch holds the Race until it ends, so the
-	// pan can never run alongside it and hijack the release — that dual-settle was
-	// the snap-back. maxPointers(1) on the pan yields a 2nd finger to the pinch.
-	return Gesture.Race(pinchGesture, panGesture, doubleTapGesture, singleTapGesture)
+// Competing (NOT simultaneous): only one of pinch / pan / taps can be active on a
+// touch stream. The 2-finger-gated pinch holds the race until it ends, so the pan
+// can never run alongside it and hijack the release — that dual-settle was the
+// snap-back. maxPointers 1 on the pan yields a 2nd finger to the pinch.
+function useZoomGestures(
+	sv: SharedValues,
+	notifyZoomChange: (zoom: number) => void,
+	hasPinchDismiss: boolean,
+	notifyPinchDismiss: () => void,
+	notifyPinchActive: (active: boolean) => void,
+	singleTapEnabled: boolean,
+	notifySingleTap: () => void
+) {
+	const pinchGesture = usePinchGesture(buildPinchConfig(sv, notifyZoomChange, hasPinchDismiss, notifyPinchDismiss, notifyPinchActive))
+	const panGesture = usePanGesture(buildPanConfig(sv))
+	const doubleTapGesture = useTapGesture(buildDoubleTapConfig(sv, notifyZoomChange))
+	const singleTapGesture = useTapGesture(buildSingleTapConfig(singleTapEnabled, doubleTapGesture, notifySingleTap))
+
+	return useCompetingGestures(pinchGesture, panGesture, doubleTapGesture, singleTapGesture)
 }
 
 const ZoomableView = ({
@@ -707,34 +742,36 @@ const ZoomableView = ({
 	// every path (gesture frames, springs, decay) — single source of truth.
 	useAnimatedReaction(() => scale.value, buildScaleMirror(scaleValue), [scaleValue])
 
-	const composed = buildComposedGesture(
-		{
-			scale,
-			translateX,
-			translateY,
-			opacity,
-			savedScale,
-			savedTranslateX,
-			savedTranslateY,
-			pinchBaseScale,
-			panTouchStartX,
-			panTouchStartY,
-			pinchActive,
-			pinchAnchored,
-			dismissCommitted,
-			focalX,
-			focalY,
-			containerWidth,
-			containerHeight,
-			contentWidth,
-			contentHeight
-		},
+	const sv: SharedValues = {
+		scale,
+		translateX,
+		translateY,
+		opacity,
+		savedScale,
+		savedTranslateX,
+		savedTranslateY,
+		pinchBaseScale,
+		panTouchStartX,
+		panTouchStartY,
+		pinchActive,
+		pinchAnchored,
+		dismissCommitted,
+		focalX,
+		focalY,
+		containerWidth,
+		containerHeight,
+		contentWidth,
+		contentHeight
+	}
+
+	const composed = useZoomGestures(
+		sv,
 		notifyZoomChange,
-		onSingleTap,
-		notifySingleTap,
-		onPinchDismiss,
+		!!onPinchDismiss,
 		notifyPinchDismiss,
-		notifyPinchActive
+		notifyPinchActive,
+		!!onSingleTap,
+		notifySingleTap
 	)
 
 	const animatedStyle = useAnimatedStyle(() => {

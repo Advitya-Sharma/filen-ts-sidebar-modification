@@ -1,7 +1,7 @@
 import { useState, Fragment, useCallback } from "react"
 import useDismissStack from "@/hooks/useDismissStack"
 import { useTranslation } from "react-i18next"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import SettingsHeader from "@/components/ui/settingsHeader"
 import { ScreenBody } from "@/components/ui/safeAreaView"
 import View from "@/components/ui/view"

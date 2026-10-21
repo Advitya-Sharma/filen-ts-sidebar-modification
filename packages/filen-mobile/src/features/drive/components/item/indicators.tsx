@@ -1,6 +1,6 @@
 import View from "@/components/ui/view"
 import Ionicons from "@expo/vector-icons/Ionicons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 
 // Favorited / offline badge overlaid on a thumbnail. Position, size and background differ per
 // surface: the drive list sits just outside the thumbnail (negative offsets), the drive grid card

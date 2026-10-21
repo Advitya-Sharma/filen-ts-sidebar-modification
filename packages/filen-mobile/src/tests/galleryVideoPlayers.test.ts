@@ -58,7 +58,9 @@ describe("galleryVideoPlayers", () => {
 		}) as unknown as MockPlayer
 
 		expect(createVideoPlayer).toHaveBeenCalledTimes(1)
-		expect(createVideoPlayer).toHaveBeenCalledWith("http://localhost/a.mp4")
+		expect(createVideoPlayer).toHaveBeenCalledWith("http://localhost/a.mp4", {
+			videoChangeFrameRateStrategy: "off"
+		})
 		expect(player.loop).toBe(false)
 		expect(player.staysActiveInBackground).toBe(false)
 		expect(player.play).toHaveBeenCalledTimes(1)

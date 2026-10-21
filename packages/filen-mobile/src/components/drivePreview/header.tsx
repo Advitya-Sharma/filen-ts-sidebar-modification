@@ -15,7 +15,7 @@ import useIsItemStoredOffline from "@/features/offline/hooks/useIsItemStoredOffl
 import { useShallow } from "zustand/shallow"
 import { driveItemDisplayName } from "@/lib/decryption"
 import { cn } from "@filen/shared"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import Menu from "@/components/ui/menu"
 import useOpenExternalLink from "@/hooks/useOpenExternalLink"
 import SafeAreaView from "@/components/ui/safeAreaView"

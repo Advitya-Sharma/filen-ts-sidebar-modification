@@ -23,7 +23,7 @@ import { withSystemPresentation, systemPresentation, useSystemPresentationStore 
 import usePipStore from "@/stores/usePip.store"
 import { ROOT_OVERLAY_CLASSES } from "@/components/rootOverlay"
 import Ionicons from "@expo/vector-icons/Ionicons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { useSafeAreaInsets } from "react-native-safe-area-context"
 import Svg, { Circle } from "react-native-svg"
 

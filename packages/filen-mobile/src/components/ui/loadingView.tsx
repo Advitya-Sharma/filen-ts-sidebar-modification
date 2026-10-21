@@ -1,6 +1,6 @@
 import View from "@/components/ui/view"
 import { ActivityIndicator } from "react-native"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 
 export function LoadingView() {
 	const textForeground = useResolveClassNames("text-foreground")

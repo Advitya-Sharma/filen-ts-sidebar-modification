@@ -2065,7 +2065,7 @@ describe("notes.importFromFile", () => {
 		const { File: MockFile } = await import("@/tests/mocks/expoFileSystem")
 		const f = new MockFile("file:///document/import-me.txt")
 
-		f.write("hello imported content")
+		f.writeSync("hello imported content")
 
 		const sdkClient = makeMockSdkClient({
 			createNote: vi.fn().mockResolvedValue(makeSdkNote("note-uuid-imported")),
@@ -2099,7 +2099,7 @@ describe("notes.importFromFile", () => {
 		const { File: MockFile } = await import("@/tests/mocks/expoFileSystem")
 		const f = new MockFile("file:///document/import-tagged.txt")
 
-		f.write("content")
+		f.writeSync("content")
 
 		const tag = makeTag({ uuid: "tag-uuid-1" })
 		const sdkClient = makeMockSdkClient({
@@ -2124,7 +2124,7 @@ describe("notes.importFromFile", () => {
 		const { File: MockFile } = await import("@/tests/mocks/expoFileSystem")
 		const f = new MockFile("file:///document/import-plain.txt")
 
-		f.write("content")
+		f.writeSync("content")
 
 		const sdkClient = makeMockSdkClient({
 			createNote: vi.fn().mockResolvedValue(makeSdkNote("note-uuid-imported")),

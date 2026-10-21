@@ -1,5 +1,6 @@
 import { useState, Fragment } from "react"
-import { withUniwind, useResolveClassNames } from "uniwind"
+import { withUniwind } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { RefreshControl, ActivityIndicator } from "react-native"
 import View from "@/components/ui/view"
 import useViewLayout from "@/hooks/useViewLayout"

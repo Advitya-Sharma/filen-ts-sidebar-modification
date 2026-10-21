@@ -33,3 +33,100 @@ index 09be306d5aa39337c5114c2ad6ba7513218e0751..d13312c59b4419efa238467d4d6989d5
    };
    
    var reactTouchHandlers: [RCTTouchHandler]? {
+diff --git a/ios/Sources/ObjcHelpers/UIApplication+RNIHelpers.mm b/ios/Sources/ObjcHelpers/UIApplication+RNIHelpers.mm
+index a3cb9522f3727cc7f9f148675bf4c35cc7a19e27..01b4470187461f3494048e5256eec3e3e652c1b1 100644
+--- a/ios/Sources/ObjcHelpers/UIApplication+RNIHelpers.mm
++++ b/ios/Sources/ObjcHelpers/UIApplication+RNIHelpers.mm
+@@ -20,7 +20,9 @@
+ #endif
+ 
+ #import <React/RCTSurfacePresenter.h>
++#ifndef RCT_REMOVE_LEGACY_ARCH
+ #import <React/RCTSurfacePresenterBridgeAdapter.h>
++#endif
+ #import <React/RCTMountingManager.h>
+ #import <React/RCTComponentViewRegistry.h>
+ 
+@@ -113,7 +115,11 @@ - (RCTAppDelegate *)reactAppDelegate
+ 
+ - (RCTSurfacePresenterBridgeAdapter *)reactBridgeAdapter
+ {
+-  #ifdef USE_RCT_APP_DELEGATE
++  // Patched (filen): RN 0.88 compiles the bridge adapter (and RCTAppDelegate.bridgeAdapter) out under
++  // RCT_REMOVE_LEGACY_ARCH; bridgeless never has one, so the presenter lookups below resolve to nil.
++  #ifdef RCT_REMOVE_LEGACY_ARCH
++  return nil;
++  #elif defined(USE_RCT_APP_DELEGATE)
+   RCTAppDelegate *reactAppDelegate = [self reactAppDelegate];
+   
+   if(reactAppDelegate == nil){
+@@ -140,7 +146,11 @@ - (RCTSurfacePresenter *) reactSurfacePresenter
+     return nil;
+   };
+   
++  #ifdef RCT_REMOVE_LEGACY_ARCH
++  return nil;
++  #else
+   return [reactBridgeAdapter surfacePresenter];
++  #endif
+ }
+ 
+ - (RCTMountingManager *)reactMountingManager
+diff --git a/ios/Sources/ObjcHelpers/UIView+RNIPaperHelpers.mm b/ios/Sources/ObjcHelpers/UIView+RNIPaperHelpers.mm
+index 4083b045e1a2ccf7edf23a382c48d1ca98e7e944..905f3ac9f3d3252e6c36e4e40bb3725a0abfa1af 100644
+--- a/ios/Sources/ObjcHelpers/UIView+RNIPaperHelpers.mm
++++ b/ios/Sources/ObjcHelpers/UIView+RNIPaperHelpers.mm
+@@ -17,7 +17,7 @@
+ #import <React/RCTUIManagerUtils.h>
+ #import <React/RCTShadowView.h>
+ 
+-#if RCT_NEW_ARCH_ENABLED
++#if RCT_NEW_ARCH_ENABLED && !defined(RCT_REMOVE_LEGACY_ARCH)
+ #import <React/RCTSurfacePresenterBridgeAdapter.h>
+ #endif
+ 
+@@ -26,7 +26,10 @@ @implementation UIView (RNIPaperHelpers)
+ 
+ - (RCTBridge *)reactGetPaperBridge
+ {
+-  #if RCT_NEW_ARCH_ENABLED
++  // Patched (filen): RN 0.88 compiles RCTSurfacePresenterBridgeAdapter out under
++  // RCT_REMOVE_LEGACY_ARCH (bridgeless has no adapter); fall through to currentBridge.
++  #if RCT_NEW_ARCH_ENABLED && defined(RCT_REMOVE_LEGACY_ARCH)
++  #elif RCT_NEW_ARCH_ENABLED
+   RCTSurfacePresenterBridgeAdapter *reactBridgeAdapter =
+     [[UIApplication sharedApplication] reactBridgeAdapter];
+     
+diff --git a/ios/Sources/RNIUtilitiesModule/RNIUtilitiesModule.mm b/ios/Sources/RNIUtilitiesModule/RNIUtilitiesModule.mm
+index 0e53f8489c5d1fbeba5325071da985b16490507b..5e207bb2b1b36467dd1ecc5d21a7373dfd72d42b 100644
+--- a/ios/Sources/RNIUtilitiesModule/RNIUtilitiesModule.mm
++++ b/ios/Sources/RNIUtilitiesModule/RNIUtilitiesModule.mm
+@@ -33,6 +33,13 @@
+ using namespace RNIUtilities;
+ #endif
+ 
++// Patched (filen): RN 0.88 compiles the RCTCxxBridge interface (which declared `runtime`) out under
++// RCT_REMOVE_LEGACY_ARCH. The bridgeless RCTBridgeProxy still implements `- (void *)runtime`; declare
++// just that selector so the host object installs exactly as before.
++@protocol RNIBridgeRuntimeProviding
++- (void *)runtime;
++@end
++
+ static BOOL SHOULD_LOG = NO;
+ 
+ @implementation RNIUtilitiesModule {
+@@ -77,12 +84,12 @@ - (void)installHostObjectIfNeeded
+   
+   RCTBridge *bridge = [RCTBridge currentBridge];
+   
+-  RCTCxxBridge *cxxBridge = (RCTCxxBridge *)bridge;
++  id<RNIBridgeRuntimeProviding> cxxBridge = (id<RNIBridgeRuntimeProviding>)bridge;
+   if (cxxBridge == nil) {
+     return;
+   };
+   
+-  auto jsiRuntime = (jsi::Runtime *)cxxBridge.runtime;
++  auto jsiRuntime = (jsi::Runtime *)[cxxBridge runtime];
+   if (jsiRuntime == nil) {
+     return;
+   };

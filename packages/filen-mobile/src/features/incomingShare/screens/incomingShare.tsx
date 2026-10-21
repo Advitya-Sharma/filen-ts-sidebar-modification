@@ -4,7 +4,7 @@ import { ScreenBody } from "@/components/ui/safeAreaView"
 import ListEmpty from "@/components/ui/listEmpty"
 import { Fragment, useCallback, useEffect, useRef, useState } from "react"
 import SettingsHeader from "@/components/ui/settingsHeader"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { useNavigation, useFocusEffect } from "expo-router"
 import VirtualList from "@/components/ui/virtualList"
 import { useSafeAreaInsets } from "react-native-safe-area-context"
@@ -187,11 +187,15 @@ function IncomingShare() {
 	}, [resolvedSharedPayloads, clear, isResolving, error])
 
 	useEffect(() => {
-		const unsubscribe = navigation.addListener("beforeRemove", () => {
+		const unsubscribe = navigation.addListener("removed", () => {
 			clear(currentPayloadsRef.current)
 		})
 
-		return unsubscribe
+		// "removed" is delivered after this screen's effect cleanup has run, so unsubscribing at once would
+		// drop it.
+		return () => {
+			queueMicrotask(unsubscribe)
+		}
 	}, [navigation, clear])
 
 	const handleUpload = useCallback(async () => {

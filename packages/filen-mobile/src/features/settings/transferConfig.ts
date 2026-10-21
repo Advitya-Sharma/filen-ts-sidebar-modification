@@ -28,14 +28,16 @@ export type ResolvedTransferConfig = {
 	downloadKbps: number | undefined
 }
 
-// concurrency (from TRANSFER_PRESET_VALUES) is the SDK's GLOBAL in-flight HTTP request cap
-// (GlobalConcurrencyLimitLayer). Under HTTP/1.1 each in-flight request tends to hold its own socket
-// = one file descriptor, and the SAME client backs the localhost video HTTP provider — so this cap
-// is shared between bulk transfers and video streaming. iOS's default file-descriptor soft limit is
-// low (historically 256), and the provider + SQLite + the expo-image disk cache all draw from the
-// same table; the previous top presets (224/256) could exhaust it → EMFILE surfacing as "could not
-// load this file" + choppy / slow video. The ladder is deliberately conservative (4/8/16/32) — even
-// "maximum" (32) sits at 2× the SDK's own default (16) and leaves a huge FD margin on iOS,
+// concurrency (from TRANSFER_PRESET_VALUES) caps the SDK's in-flight chunk transfers; every other
+// request (listings, renames, upload/done, bulk calls) has 4 more places chunks never take, so the
+// client holds at most concurrency + 4 requests (plus lock requests) at once. Under HTTP/1.1 each
+// in-flight request tends to hold its own socket = one file descriptor, and the SAME client backs the
+// localhost video HTTP provider — so the chunk cap is shared between bulk transfers and video
+// streaming. iOS's default file-descriptor soft limit is low (historically 256), and the provider +
+// SQLite + the expo-image disk cache all draw from the same table; the previous top presets (224/256)
+// could exhaust it → EMFILE surfacing as "could not load this file" + choppy / slow video. The ladder
+// is deliberately conservative (4/8/16/32) — even "maximum" (32, 36 requests with the headroom) sits
+// at 2× the SDK's own default (16) and leaves a huge FD margin on iOS,
 // prioritising reliable video streaming over peak bulk-transfer parallelism. maxParallelRequests /
 // maxIoMemoryUsage below are mirrored (no consumer found in the pinned SDK, but set to avoid any
 // regression — see the design doc).
@@ -103,7 +105,13 @@ export function buildJsClientConfig(resolved: ResolvedTransferConfig): JsClientC
 		// receive an explicit per-host budget through auth.json (fileProvider.ts).
 		thumbnailMemBudget: undefined,
 		thumbnailMaxSourceBytes: undefined,
-		thumbnailDecodeConcurrency: undefined
+		thumbnailDecodeConcurrency: undefined,
+		// The app runs no archive jobs: the platform defaults (one job at a time on mobile) stay.
+		archiveCodecMemBudget: undefined,
+		archiveJobConcurrency: undefined,
+		// The SDK's 5 ms default: concurrent calls to a route with a bulk twin go out as one request
+		// (fewer API requests for bulk actions); the first call of a burst is never delayed.
+		batchWindowMs: undefined
 	}
 }
 

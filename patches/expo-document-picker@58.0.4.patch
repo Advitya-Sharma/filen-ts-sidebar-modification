@@ -1,5 +1,5 @@
 diff --git a/android/src/main/java/expo/modules/documentpicker/DocumentPickerModule.kt b/android/src/main/java/expo/modules/documentpicker/DocumentPickerModule.kt
-index 6c2bff0523842cff4051ee00a9ad11d969fb68e3..0fa1772b5d7abcc6ff659b5d79594defd6936ab0 100644
+index 6ee5e2ddbbb46e501f90b8f376e464b5d74b705c..581e1c9f0fe15190f15e86bbc113ec6364a0c222 100644
 --- a/android/src/main/java/expo/modules/documentpicker/DocumentPickerModule.kt
 +++ b/android/src/main/java/expo/modules/documentpicker/DocumentPickerModule.kt
 @@ -12,6 +12,8 @@ import expo.modules.kotlin.exception.Exceptions

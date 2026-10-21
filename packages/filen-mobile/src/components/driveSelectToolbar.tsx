@@ -1,7 +1,7 @@
 import { Fragment, useRef } from "react"
 import { CrossGlassContainerView } from "@/components/ui/view"
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import FloatingActionPill from "@/components/ui/floatingActionPill"
 import { PressableScale } from "@/components/ui/pressables"
 import useDrivePath from "@/hooks/useDrivePath"

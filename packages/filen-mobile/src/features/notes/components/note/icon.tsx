@@ -1,7 +1,7 @@
 import Ionicons from "@expo/vector-icons/Ionicons"
 import { NoteType } from "@filen/sdk-rs"
 import { type Note } from "@/types"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 
 export enum NoteTypeExtended {
 	Trash = 101,

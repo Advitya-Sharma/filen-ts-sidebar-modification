@@ -12,7 +12,7 @@ import useChatsStore, { type ChatMessageWithInflightId } from "@/features/chats/
 import { useShallow } from "zustand/shallow"
 import Message from "@/features/chats/components/chat/message"
 import { ActivityIndicator, type NativeSyntheticEvent, type NativeScrollEvent } from "react-native"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { run } from "@filen/shared"
 import chats from "@/features/chats/chats"
 import { withoutInflight } from "@/features/chats/chatsWrap"

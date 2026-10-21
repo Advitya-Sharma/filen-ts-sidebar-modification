@@ -30,7 +30,7 @@ index ea72ce827b184cdec4972c9c4202abd64cb43c3d..017fd2a529661ac4430e348b1da4ddfe
    # Swift/Objective-C compatibility
    s.pod_target_xcconfig = {
 diff --git a/ios/ImageModule.swift b/ios/ImageModule.swift
-index 033da4024ce4413c99df65d204717b2503d60511..cf0d12b4bac3fd494c00f513194b89141a144e8f 100644
+index c480af35f737fcfbea1b77cd40a9ff348db15821..1ccef46e4cf386552f607ff10bbc7a945278acf4 100644
 --- a/ios/ImageModule.swift
 +++ b/ios/ImageModule.swift
 @@ -2,7 +2,6 @@
@@ -41,12 +41,12 @@ index 033da4024ce4413c99df65d204717b2503d60511..cf0d12b4bac3fd494c00f513194b8914
  internal import SDWebImageSVGCoder
  
  public final class ImageModule: Module {
-@@ -352,7 +351,7 @@ public final class ImageModule: Module {
+@@ -370,7 +369,7 @@ public final class ImageModule: Module {
    static func registerCoders() {
      SDImageCodersManager.shared.addCoder(WebPCoder.shared)
      SDImageCodersManager.shared.addCoder(PSDCoder.shared)
 -    SDImageCodersManager.shared.addCoder(SDImageAVIFCoder.shared)
 +    // AVIF is left to ImageIO (iOS 16+): the bundled libavif/dav1d coder aborts on some files in release builds.
-     SDImageCodersManager.shared.addCoder(SDImageSVGCoder.shared)
+     SDImageCodersManager.shared.addCoder(SVGCoder.shared)
      SDImageCodersManager.shared.addCoder(SDImageHEICCoder.shared)
    }

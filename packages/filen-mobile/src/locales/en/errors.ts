@@ -57,6 +57,8 @@ export const errors = {
 	stale_state: "This item has changed since it was loaded. Refresh and try again.",
 	/** SDK error: the item carries no whole-life id (public link / shared-in), so it is read-only here */
 	item_not_modifiable: "This file can only be opened or downloaded, not changed.",
+	/** SDK error: the operation stopped because it lost its hold on the data, so another device may be changing it; retrying repeats nothing already done */
+	lock_lost: "Another device may be changing this right now. Please try again.",
 	/** Generic fallback for an unknown / unmapped SDK error kind */
 	error_generic: "Something went wrong. Please try again."
 } as const

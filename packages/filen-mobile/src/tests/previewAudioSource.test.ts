@@ -36,22 +36,19 @@ vi.mock("@/components/ui/image", async () => ({ ImageBackground: await passthrou
 vi.mock("@expo/vector-icons/Ionicons", async () => ({ default: await passthrough() }))
 vi.mock("uniwind", () => ({ useResolveClassNames: () => ({ color: "#fff" }) }))
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }))
-vi.mock("react-native-gesture-handler", async () => {
-	// Every builder method returns the builder, whatever the chain.
-	const chain: Record<string, unknown> = new Proxy({}, { get: () => () => chain })
-
-	return {
-		Gesture: chain,
-		GestureDetector: await passthrough()
-	}
-})
+vi.mock("react-native-gesture-handler", async () => ({
+	GestureDetector: await passthrough(),
+	usePanGesture: (config: unknown) => config,
+	useTapGesture: (config: unknown) => config,
+	useExclusiveGestures: (...gestures: unknown[]) => gestures
+}))
 vi.mock("react-native-reanimated", () => ({
 	useSharedValue: (value: unknown) => ({ value }),
 	useAnimatedStyle: () => ({}),
 	useDerivedValue: (fn: () => unknown) => ({ value: fn() }),
 	withSpring: (value: unknown) => value
 }))
-vi.mock("react-native-worklets", () => ({ runOnJS: (fn: unknown) => fn }))
+vi.mock("react-native-worklets", () => ({ scheduleOnRN: vi.fn() }))
 vi.mock("expo-audio", () => ({
 	useAudioPlayer: mockUseAudioPlayer,
 	useAudioPlayerStatus: () => ({ isLoaded: true, isBuffering: false, playing: false, currentTime: 0, duration: 10 })

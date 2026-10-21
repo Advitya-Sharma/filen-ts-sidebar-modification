@@ -1,0 +1,10 @@
+diff --git a/android/proguard-rules.pro b/android/proguard-rules.pro
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2e086dd2a499266cc92e9fb2e81b060f6604065
+--- /dev/null
++++ b/android/proguard-rules.pro
+@@ -0,0 +1,4 @@
++# Patched (filen): build.gradle declares this as a consumer ProGuard file but the published package
++# ships none, which AGP 9 rejects even with minification off. The TurboModule and its JNI entry
++# points are looked up by name, so keep them intact if the app ever enables R8.
++-keep class io.filen.sdkrsturbomodule.** { *; }

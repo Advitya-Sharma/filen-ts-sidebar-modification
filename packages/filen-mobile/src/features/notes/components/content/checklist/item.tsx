@@ -1,8 +1,8 @@
 import { useRef, useEffect, useState, useContext } from "react"
 import { useStore } from "zustand"
-import { TextInput, type TextInputKeyPressEvent, type TextInputSubmitEditingEvent } from "react-native"
+import { TextInput, type TextInputInstance, type TextInputKeyPressEvent, type TextInputSubmitEditingEvent } from "react-native"
 import MaterialIcons from "@expo/vector-icons/MaterialIcons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { type ChecklistItem, checklistParser, cn, addChecklistLine, removeChecklistItem } from "@filen/shared"
 import { PressableOpacity } from "@/components/ui/pressables"
 import View from "@/components/ui/view"
@@ -34,7 +34,7 @@ const Item = ({
 	readOnly?: boolean
 	onDidType: () => void
 }) => {
-	const textInputRef = useRef<TextInput>(null)
+	const textInputRef = useRef<TextInputInstance>(null)
 	// Dedupes one physical Enter press reaching us twice (native onSubmitEditing + the key event —
 	// platform-dependent which fire). Genuine repeat presses are slower than this window.
 	const lastEnterAtRef = useRef<number>(0)

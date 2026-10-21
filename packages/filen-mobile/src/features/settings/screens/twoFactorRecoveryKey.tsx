@@ -71,7 +71,7 @@ function TwoFactorRecoveryKey() {
 								<Button
 									onPress={async () => {
 										const exportResult = await run(async () => {
-											return writeTmpFile(`recovery-key.${Date.now()}.txt`, recoveryKey)
+											return await writeTmpFile(`recovery-key.${Date.now()}.txt`, recoveryKey)
 										})
 
 										if (!exportResult.success) {

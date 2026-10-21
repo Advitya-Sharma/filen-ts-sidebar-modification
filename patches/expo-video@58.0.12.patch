@@ -1,0 +1,41 @@
+diff --git a/android/src/main/java/expo/modules/video/managers/PictureInPictureManager.kt b/android/src/main/java/expo/modules/video/managers/PictureInPictureManager.kt
+index 1792ff268567a5b3553be0aa667cf8ddfa798afd..226687e4d77afa6df00b54a26293b13a3bc50101 100644
+--- a/android/src/main/java/expo/modules/video/managers/PictureInPictureManager.kt
++++ b/android/src/main/java/expo/modules/video/managers/PictureInPictureManager.kt
+@@ -286,7 +286,13 @@ class PictureInPictureManager(appContext: AppContext) : PictureInPictureFragment
+     val decorView = mainActivity.window.decorView
+     val rootView = decorView.findViewById<ViewGroup>(android.R.id.content)
+ 
+-    rootView.removeView(playerView)
++    // rootView.removeView(playerView) is a silent no-op when the playerView is not (or no longer)
++    // a child of THIS activity's content view — e.g. the PiP enter/exit transition raced a slow
++    // surface re-init (large/high-res videos) or an activity recreation, leaving the playerView
++    // parented elsewhere. The unconditional addView below then throws
++    // "The specified child already has a parent" and crashes the app. Detach from the ACTUAL
++    // parent instead — the exact defensive pattern layoutForPiPEnter already uses.
++    (playerView?.parent as? ViewGroup)?.removeView(playerView)
+     videoView?.addView(playerView)
+ 
+     for (i in 0 until rootView.childCount) {
+diff --git a/android/src/main/java/expo/modules/video/player/VideoPlayer.kt b/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
+index 7ccce9681477328701755792fdc3bab09b428e30..a96a3f181aaefa636a60c52d9b6e840380251087 100644
+--- a/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
++++ b/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
+@@ -85,12 +85,13 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+       playerBuilderOptions?.seekForwardIncrement?.let {
+         setSeekForwardIncrementMs((it).toLong(DurationUnit.MILLISECONDS).coerceIn(1, 999_000))
+       }
+-    }.build()
+-    .apply {
++      // Patched (filen): set on the Builder. The player setter it replaces ran right after build() on the
++      // JS thread (this constructor runs there), and ExoPlayer is bound to the main looper, so creating a
++      // player with this option threw "Player is accessed on the wrong thread". Upstreamable.
+       playerBuilderOptions?.videoChangeFrameRateStrategy?.let {
+-        videoChangeFrameRateStrategy = it.toMedia3Strategy()
++        setVideoChangeFrameRateStrategy(it.toMedia3Strategy())
+       }
+-    }
++    }.build()
+ 
+   internal val firstFrameEventGenerator: FirstFrameEventGenerator
+   val serviceConnection = PlaybackServiceConnection(WeakReference(this), appContext)

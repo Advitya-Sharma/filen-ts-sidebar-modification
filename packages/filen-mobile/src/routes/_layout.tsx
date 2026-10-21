@@ -3,7 +3,7 @@ import "react-native-reanimated"
 import StyleProvider from "@/providers/style.provider"
 import { useState, Fragment } from "react"
 import { Stack } from "expo-router"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import View from "@/components/ui/view"
 import Text from "@/components/ui/text"
 import Button from "@/components/ui/button"
@@ -193,7 +193,6 @@ const RootLayout = () => {
 											</Fragment>
 										)}
 										<Stack
-											initialRouteName={isAuthed ? "index" : "auth"}
 											screenOptions={{
 												headerShown: false,
 												contentStyle: {

@@ -1,6 +1,6 @@
 import View, { CrossGlassContainerView } from "@/components/ui/view"
 import { useKeyboardState } from "react-native-keyboard-controller"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import FontAwesome6 from "@expo/vector-icons/FontAwesome6"
 import { useSafeAreaInsets } from "react-native-safe-area-context"
 import { useTextEditorMarkdownPreviewActive } from "@/components/textEditor/markdownPreviewPreference"

@@ -91,6 +91,12 @@ vi.mock("react-native", () => ({
 //   2. A direct NetInfo.addEventListener that also calls onlineManager.setOnline.
 import "@/queries/onlineStatus"
 
+// Vitest clears mock call history before every test, so snapshot the module-init calls here.
+const initCalls = {
+	appStateAddEventListener: [...mockAppState.addEventListener.mock.calls],
+	netInfoConfigure: [...mockNetInfoConfigure.mock.calls]
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 type PartialNetInfoState = {
@@ -207,7 +213,7 @@ describe("onlineStatus AppState 'change' handler", () => {
 
 	it("AppState.addEventListener was called with 'change' during module init", () => {
 		// The module registers exactly one AppState 'change' listener at init time
-		expect(mockAppState.addEventListener).toHaveBeenCalledWith("change", expect.any(Function))
+		expect(initCalls.appStateAddEventListener).toEqual([["change", expect.any(Function)]])
 		expect(mockAppState._capturedChangeHandlers).toHaveLength(1)
 	})
 })
@@ -221,15 +227,15 @@ describe("onlineStatus AppState 'change' handler", () => {
 
 describe("onlineStatus NetInfo.configure ordering", () => {
 	it("calls NetInfo.configure exactly once at module init", () => {
-		expect(mockNetInfoConfigure).toHaveBeenCalledTimes(1)
+		expect(initCalls.netInfoConfigure).toHaveLength(1)
 	})
 
 	it("configures with the Filen reachability config", () => {
-		expect(mockNetInfoConfigure).toHaveBeenCalledWith(
+		expect(initCalls.netInfoConfigure[0]).toEqual([
 			expect.objectContaining({
 				reachabilityUrl: "https://gateway.filen.io"
 			})
-		)
+		])
 	})
 
 	it("REGRESSION: configure runs BEFORE the first addEventListener (configure severs existing subscriptions)", () => {

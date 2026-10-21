@@ -444,9 +444,10 @@ export class Logger {
 			})
 		}
 
-		// Single batched append. Off the hot path and infrequent; isolated here so the primitive
-		// (currently write({append}); could become a FileHandle / native async writer) can be swapped.
-		file.write(text, {
+		// Single batched append. Off the hot path and infrequent. writeSync, NOT write: write() is async
+		// since expo-file-system 58, and both the size read in rotateIfNeeded and the crash-time
+		// flushNow() need the bytes on disk when this returns.
+		file.writeSync(text, {
 			append: true
 		})
 

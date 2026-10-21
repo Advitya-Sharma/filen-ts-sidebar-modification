@@ -1,0 +1,36 @@
+diff --git a/source/detectors/zip.js b/source/detectors/zip.js
+index 0bb016fadc3db6145ea6f657093863858ff90a73..0f3d6472bc39d14d174253581655f54988bf94e5 100644
+--- a/source/detectors/zip.js
++++ b/source/detectors/zip.js
+@@ -564,7 +564,7 @@ export async function detectZip(tokenizer) {
+ 				}
+ 
+ 				default:
+-					if (/classes\d*\.dex/v.test(zipHeader.filename)) {
++					if (/classes\d*\.dex/.test(zipHeader.filename)) {
+ 						fileType = {
+ 							ext: 'apk',
+ 							mime: 'application/vnd.android.package-archive',
+diff --git a/source/index.js b/source/index.js
+index 930fdcc4689d6163acd7488bd45e771fbb6d8ff4..8d47683bfddebc864dfc3092f716141447fefb57 100644
+--- a/source/index.js
++++ b/source/index.js
+@@ -65,7 +65,8 @@ function getKnownFileSizeOrMaximum(fileSize) {
+ // Keep the specifier non-literal at the call site so browser bundlers do not try to resolve Node-only imports.
+ function importAtRuntime(specifier) {
+ 	// eslint-disable-next-line jsdoc/no-bad-blocks
+-	return import(/* @vite-ignore */ /* webpackIgnore: true */ specifier);
++	// Hermes cannot compile a dynamic import(); only fromFile (Node) reaches this.
++	return Promise.reject(new Error(`Cannot import ${specifier} at runtime`));
+ }
+ 
+ // Wrap stream in an identity TransformStream to avoid BYOB readers.
+@@ -1185,7 +1186,7 @@ export class FileTypeParser {
+ 
+ 		if (this.checkString('AC')) {
+ 			const version = new Token.StringType(4, 'latin1').get(this.buffer, 2);
+-			if (/^\d+$/v.test(version) && version >= 1000 && version <= 1050) {
++			if (/^\d+$/.test(version) && version >= 1000 && version <= 1050) {
+ 				return {
+ 					ext: 'dwg',
+ 					mime: 'image/vnd.dwg',

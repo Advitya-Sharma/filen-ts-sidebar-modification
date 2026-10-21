@@ -359,7 +359,7 @@ describe("logger", () => {
 			logger.flushNow()
 
 			// A partially-written final line (e.g. a crash mid-append).
-			currentFile().write("this is not json\n", { append: true })
+			currentFile().writeSync("this is not json\n", { append: true })
 
 			expect(logger.readEntries().map(e => e.msg)).toEqual(["valid"])
 		})

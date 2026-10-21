@@ -5,7 +5,7 @@ import { Group } from "@/components/ui/settingsGroup"
 import { LoadErrorEmpty } from "@/components/ui/listEmpty"
 import { Fragment } from "react"
 import useDismissStack from "@/hooks/useDismissStack"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import SettingsHeader from "@/components/ui/settingsHeader"
 import useAccountQuery, { accountQueryPatch } from "@/queries/useAccount.query"
 import { runWithLoading } from "@/components/ui/fullScreenLoadingModal"
@@ -173,7 +173,7 @@ function Security() {
 
 										const exportResult = await runWithLoading(async () => {
 											const keys = await (await auth.getSdkClients()).authedSdkClient.exportMasterKeys()
-											const exported = writeTmpFile(`${accountQuery.data.email}.masterKeys.${Date.now()}.txt`, keys)
+											const exported = await writeTmpFile(`${accountQuery.data.email}.masterKeys.${Date.now()}.txt`, keys)
 
 											// The export call itself records the flag server-side.
 											accountQueryPatch({

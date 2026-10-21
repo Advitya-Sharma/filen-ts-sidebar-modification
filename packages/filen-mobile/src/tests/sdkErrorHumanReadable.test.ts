@@ -30,7 +30,8 @@ const { ErrorKindMock } = vi.hoisted(() => {
 		FolderNotFound: "FolderNotFound",
 		WrongPassword: "WrongPassword",
 		MaxStorageReached: "MaxStorageReached",
-		FileChunkNotFound: "FileChunkNotFound"
+		FileChunkNotFound: "FileChunkNotFound",
+		LockLost: "LockLost"
 	} as const
 
 	return { ErrorKindMock }
@@ -110,6 +111,12 @@ describe("unwrappedSdkErrorToHumanReadable", () => {
 
 		// Network/parse/codec inners are technical Rust/reqwest strings; the label wins.
 		expect(result).toBe(en.network_error)
+	})
+
+	it("a lost resource lock shows the translated label, never the inner naming the Rust lock", () => {
+		const result = unwrappedSdkErrorToHumanReadable(makeError(ErrorKindMock.LockLost, "", { innerMessage: "lock lost: drive-write" }))
+
+		expect(result).toBe(en.lock_lost)
 	})
 
 	it("falls back to the raw inner Rust message only for an UNMAPPED kind", () => {

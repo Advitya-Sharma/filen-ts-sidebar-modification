@@ -188,8 +188,22 @@ export class File {
 		return btoa(binary)
 	}
 
-	write(content: string | Uint8Array, options?: { encoding?: string; append?: boolean }): void {
-		const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content
+	/**
+	 * Async since expo-file-system 58, as the real one is. The body still runs synchronously up to the
+	 * returned promise, so the bytes are visible immediately — what matters for tests is that callers
+	 * see a Promise (an un-awaited write is a bug on device, where the native write lands later).
+	 */
+	async write(content: string | Uint8Array | ArrayBuffer, options?: { encoding?: string; append?: boolean }): Promise<void> {
+		this.writeSync(content, options)
+	}
+
+	writeSync(content: string | Uint8Array | ArrayBuffer, options?: { encoding?: string; append?: boolean }): void {
+		const bytes =
+			typeof content === "string"
+				? new TextEncoder().encode(content)
+				: content instanceof ArrayBuffer
+					? new Uint8Array(content.slice(0))
+					: content
 
 		if (options?.append) {
 			const existing = fs.get(this.uri)
@@ -293,8 +307,10 @@ export class File {
 	 */
 	open(_mode?: unknown): {
 		close: () => void
-		readBytes: (length: number) => Uint8Array
-		writeBytes: (bytes: Uint8Array) => void
+		readBytes: (length: number) => Promise<Uint8Array>
+		readBytesSync: (length: number) => Uint8Array
+		writeBytes: (bytes: Uint8Array) => Promise<void>
+		writeBytesSync: (bytes: Uint8Array) => void
 		offset: number | null
 		size: number | null
 	} {
@@ -320,39 +336,56 @@ export class File {
 			return entry
 		}
 
+		const readBytesSync = (length: number): Uint8Array => {
+			if (closed) {
+				throw new Error("handle is closed")
+			}
+
+			const entry = contents()
+			// Advances by what was actually read, not by what was asked for, so a read past the end
+			// returns short — which is how a caller's short-read guard gets exercised.
+			const chunk = entry.slice(offset, offset + length)
+
+			offset += chunk.length
+
+			return chunk
+		}
+
+		const writeBytesSync = (bytes: Uint8Array): void => {
+			if (closed) {
+				throw new Error("handle is closed")
+			}
+
+			const entry = contents()
+			const end = offset + bytes.length
+			const next = new Uint8Array(Math.max(entry.length, end))
+
+			next.set(entry, 0)
+			next.set(bytes, offset)
+
+			fs.set(uri, next)
+
+			offset = end
+		}
+
+		// The async pair (expo-file-system 58) reads/writes at the offset current when the call RUNS, after
+		// a microtask — as on device, where the native op runs later on another thread. A caller that seeks
+		// and then reads without serialising against another seek is caught by that, not hidden.
 		return {
 			close() {
 				closed = true
 			},
-			readBytes(length: number) {
-				if (closed) {
-					throw new Error("handle is closed")
-				}
+			readBytesSync,
+			writeBytesSync,
+			async readBytes(length: number) {
+				await Promise.resolve()
 
-				const entry = contents()
-				// Advances by what was actually read, not by what was asked for, so a read past the end
-				// returns short — which is how a caller's short-read guard gets exercised.
-				const chunk = entry.slice(offset, offset + length)
-
-				offset += chunk.length
-
-				return chunk
+				return readBytesSync(length)
 			},
-			writeBytes(bytes: Uint8Array) {
-				if (closed) {
-					throw new Error("handle is closed")
-				}
+			async writeBytes(bytes: Uint8Array) {
+				await Promise.resolve()
 
-				const entry = contents()
-				const end = offset + bytes.length
-				const next = new Uint8Array(Math.max(entry.length, end))
-
-				next.set(entry, 0)
-				next.set(bytes, offset)
-
-				fs.set(uri, next)
-
-				offset = end
+				writeBytesSync(bytes)
 			},
 			get offset() {
 				return offset
@@ -426,7 +459,7 @@ export class File {
 		const destFile =
 			destination instanceof File ? destination : new File(Paths.join(destination.uri, url.split("/").pop() ?? "download"))
 
-		destFile.write(new Uint8Array([]))
+		destFile.writeSync(new Uint8Array([]))
 
 		return destFile
 	}

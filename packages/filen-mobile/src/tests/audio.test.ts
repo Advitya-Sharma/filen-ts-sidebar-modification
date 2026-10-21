@@ -110,10 +110,16 @@ const mockSdkClient = {
 	downloadFileToBytes: vi.fn(),
 	uploadFileFromBytes: vi.fn().mockResolvedValue(undefined),
 	deleteFilePermanently: vi.fn().mockResolvedValue(undefined),
-	createDir: vi.fn(),
-	getFileOptional: vi.fn(),
-	root: vi.fn(() => ({ uuid: "root-uuid" }))
+	getFileOptional: vi.fn()
 }
+
+// The Playlists directory itself (its lookup under .filen is dotFilenDirectory.test's concern).
+vi.mock("@/lib/dotFilenDirectory", () => ({
+	ensureDotFilenSubdirectory: vi.fn(async () => ({
+		uuid: "playlists-dir-uuid",
+		meta: { tag: "Decoded", inner: [{ name: "Playlists" }] }
+	}))
+}))
 
 vi.mock("@/lib/auth", () => ({
 	default: {
@@ -261,9 +267,7 @@ beforeEach(() => {
 	mockSdkClient.downloadFileToBytes.mockReset()
 	mockSdkClient.uploadFileFromBytes.mockReset().mockResolvedValue(undefined)
 	mockSdkClient.deleteFilePermanently.mockReset().mockResolvedValue(undefined)
-	mockSdkClient.createDir.mockReset()
 	mockSdkClient.getFileOptional.mockReset()
-	mockSdkClient.root.mockReset().mockReturnValue({ uuid: "root-uuid" })
 
 	playlistsCache.current = []
 	patchedSinceRead.uuids.clear()
@@ -1987,37 +1991,14 @@ describe("Audio", () => {
 		it("skips malformed JSON entries and returns the rest", async () => {
 			const { audio } = await createAudio()
 
-			// Stub getPlaylistsDirectory's underlying listDir + the playlist file listing
-			mockSdkClient.listDir
-				.mockResolvedValueOnce({
-					dirs: [
-						{
-							meta: {
-								tag: "Decoded",
-								inner: [{ name: ".filen" }]
-							}
-						}
-					],
-					files: []
-				})
-				.mockResolvedValueOnce({
-					dirs: [
-						{
-							meta: {
-								tag: "Decoded",
-								inner: [{ name: "Playlists" }]
-							}
-						}
-					],
-					files: []
-				})
-				.mockResolvedValueOnce({
-					dirs: [],
-					files: [
-						{ uuid: "playlist-bad", meta: { tag: "Decoded", inner: [{ name: "bad.json" }] } },
-						{ uuid: "playlist-good", meta: { tag: "Decoded", inner: [{ name: "good.json" }] } }
-					]
-				})
+			// Stub the playlist file listing
+			mockSdkClient.listDir.mockResolvedValueOnce({
+				dirs: [],
+				files: [
+					{ uuid: "playlist-bad", meta: { tag: "Decoded", inner: [{ name: "bad.json" }] } },
+					{ uuid: "playlist-good", meta: { tag: "Decoded", inner: [{ name: "good.json" }] } }
+				]
+			})
 
 			const goodPlaylist = {
 				uuid: "good-uuid",
@@ -2042,36 +2023,13 @@ describe("Audio", () => {
 		it("skips entries that fail arktype validation", async () => {
 			const { audio } = await createAudio()
 
-			mockSdkClient.listDir
-				.mockResolvedValueOnce({
-					dirs: [
-						{
-							meta: {
-								tag: "Decoded",
-								inner: [{ name: ".filen" }]
-							}
-						}
-					],
-					files: []
-				})
-				.mockResolvedValueOnce({
-					dirs: [
-						{
-							meta: {
-								tag: "Decoded",
-								inner: [{ name: "Playlists" }]
-							}
-						}
-					],
-					files: []
-				})
-				.mockResolvedValueOnce({
-					dirs: [],
-					files: [
-						{ uuid: "playlist-bad", meta: { tag: "Decoded", inner: [{ name: "bad.json" }] } },
-						{ uuid: "playlist-good", meta: { tag: "Decoded", inner: [{ name: "good.json" }] } }
-					]
-				})
+			mockSdkClient.listDir.mockResolvedValueOnce({
+				dirs: [],
+				files: [
+					{ uuid: "playlist-bad", meta: { tag: "Decoded", inner: [{ name: "bad.json" }] } },
+					{ uuid: "playlist-good", meta: { tag: "Decoded", inner: [{ name: "good.json" }] } }
+				]
+			})
 
 			const goodPlaylist = {
 				uuid: "good-uuid",
@@ -2098,16 +2056,13 @@ describe("Audio", () => {
 		it("skips a playlist whose download throws (transient) and returns the rest", async () => {
 			const { audio } = await createAudio()
 
-			mockSdkClient.listDir
-				.mockResolvedValueOnce({ dirs: [{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } }], files: [] })
-				.mockResolvedValueOnce({ dirs: [{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }], files: [] })
-				.mockResolvedValueOnce({
-					dirs: [],
-					files: [
-						{ uuid: "playlist-fail", meta: { tag: "Decoded", inner: [{ name: "fail.json" }] } },
-						{ uuid: "playlist-good", meta: { tag: "Decoded", inner: [{ name: "good.json" }] } }
-					]
-				})
+			mockSdkClient.listDir.mockResolvedValueOnce({
+				dirs: [],
+				files: [
+					{ uuid: "playlist-fail", meta: { tag: "Decoded", inner: [{ name: "fail.json" }] } },
+					{ uuid: "playlist-good", meta: { tag: "Decoded", inner: [{ name: "good.json" }] } }
+				]
+			})
 
 			const goodPlaylist = { uuid: "good-uuid", name: "Good", created: Date.now(), updated: Date.now(), files: [] }
 
@@ -2128,13 +2083,10 @@ describe("Audio", () => {
 		it("keeps a track whose getFileOptional throws transiently instead of dropping it", async () => {
 			const { audio } = await createAudio()
 
-			mockSdkClient.listDir
-				.mockResolvedValueOnce({ dirs: [{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } }], files: [] })
-				.mockResolvedValueOnce({ dirs: [{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }], files: [] })
-				.mockResolvedValueOnce({
-					dirs: [],
-					files: [{ uuid: "playlist-1", meta: { tag: "Decoded", inner: [{ name: "playlist-1.json" }] } }]
-				})
+			mockSdkClient.listDir.mockResolvedValueOnce({
+				dirs: [],
+				files: [{ uuid: "playlist-1", meta: { tag: "Decoded", inner: [{ name: "playlist-1.json" }] } }]
+			})
 
 			const playlistWithTrack = {
 				uuid: "p-uuid",
@@ -2204,10 +2156,7 @@ describe("Audio", () => {
 			}
 
 			mockSdkClient.listDir.mockImplementation(async () => ({
-				dirs: [
-					{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } },
-					{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }
-				],
+				dirs: [],
 				files: [
 					{ uuid: "playlist-1", meta: { tag: "Decoded", inner: [{ name: "playlist-1.json" }] } },
 					{ uuid: "playlist-2", meta: { tag: "Decoded", inner: [{ name: "playlist-2.json" }] } }
@@ -2305,23 +2254,10 @@ describe("Audio", () => {
 				]
 			}
 
-			// Every call to getPlaylists triggers: listDir(root) + listDir(.filen) + listDir(playlists)
+			// Every call to getPlaylists triggers: listDir(playlists)
 			// followed by downloadFileToBytes per playlist file, then getFileOptional per file in playlist.
 			mockSdkClient.listDir.mockImplementation(async () => ({
-				dirs: [
-					{
-						meta: {
-							tag: "Decoded",
-							inner: [{ name: ".filen" }]
-						}
-					},
-					{
-						meta: {
-							tag: "Decoded",
-							inner: [{ name: "Playlists" }]
-						}
-					}
-				],
+				dirs: [],
 				files: [{ uuid: "playlist-1", meta: { tag: "Decoded", inner: [{ name: "playlist-1.json" }] } }]
 			}))
 
@@ -3332,24 +3268,9 @@ describe("Audio", () => {
 
 	describe("deletePlaylist", () => {
 		function setupPlaylistsDir(playlistFileUuid: string, playlistJsonName: string) {
-			// getPlaylistsDirectory calls listDir twice: root → .filen, .filen → Playlists.
-			// deletePlaylist then calls listDir once more on Playlists to find the file to delete.
-			// Use a call-count-based implementation so fire-and-forget calls from earlier tests
-			// (which may consume mockResolvedValueOnce slots) don't desync the sequence.
-			let callCount = 0
-
+			// deletePlaylist lists the Playlists directory to find the file to delete. An implementation, not
+			// mockResolvedValueOnce, so fire-and-forget calls from earlier tests can't desync it.
 			mockSdkClient.listDir.mockImplementation(async () => {
-				callCount++
-
-				if (callCount === 1) {
-					return { dirs: [{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } }], files: [] }
-				}
-
-				if (callCount === 2) {
-					return { dirs: [{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }], files: [] }
-				}
-
-				// 3rd call: actual playlist directory listing
 				return {
 					dirs: [],
 					files: [{ uuid: playlistFileUuid, meta: { tag: "Decoded", inner: [{ name: playlistJsonName }] } }]
@@ -3422,20 +3343,7 @@ describe("Audio", () => {
 			}
 
 			// Playlists directory is empty — the file for pl-missing doesn't exist.
-			let callCount = 0
-
 			mockSdkClient.listDir.mockImplementation(async () => {
-				callCount++
-
-				if (callCount === 1) {
-					return { dirs: [{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } }], files: [] }
-				}
-
-				if (callCount === 2) {
-					return { dirs: [{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }], files: [] }
-				}
-
-				// 3rd call: empty playlist dir (no matching file)
 				return { dirs: [], files: [] }
 			})
 
@@ -3527,10 +3435,7 @@ describe("Audio", () => {
 	describe("addFilesToPlaylist", () => {
 		function setupPlaylistsDirForSave() {
 			mockSdkClient.listDir.mockImplementation(async () => ({
-				dirs: [
-					{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } },
-					{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }
-				],
+				dirs: [],
 				files: []
 			}))
 			mockSdkClient.uploadFileFromBytes.mockReset().mockResolvedValue(undefined)
@@ -3778,10 +3683,7 @@ describe("Audio", () => {
 	describe("playlist mutation freshness + serialization (AU-06/AU-07)", () => {
 		function setupPlaylistsDir() {
 			mockSdkClient.listDir.mockImplementation(async () => ({
-				dirs: [
-					{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } },
-					{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }
-				],
+				dirs: [],
 				files: []
 			}))
 		}
@@ -3965,10 +3867,7 @@ describe("Audio", () => {
 		// The one playlist file a read downloads, and the tracks the drive no longer has.
 		function setupPlaylistRead(downloaded: ReturnType<typeof makePlaylist>, deadUuids: string[]) {
 			mockSdkClient.listDir.mockImplementation(async () => ({
-				dirs: [
-					{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } },
-					{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }
-				],
+				dirs: [],
 				files: [{ uuid: `file-${downloaded.uuid}`, meta: { tag: "Decoded", inner: [{ name: `${downloaded.uuid}.json` }] } }]
 			}))
 			mockSdkClient.downloadFileToBytes.mockResolvedValue(Buffer.from(JSON.stringify(downloaded), "utf-8"))
@@ -4077,10 +3976,7 @@ describe("Audio", () => {
 			// Use mockImplementation (not mockResolvedValueOnce) so that fire-and-forget savePlaylist
 			// calls from earlier tests cannot consume the setup intended for this test.
 			mockSdkClient.listDir.mockImplementation(async () => ({
-				dirs: [
-					{ meta: { tag: "Decoded", inner: [{ name: ".filen" }] } },
-					{ meta: { tag: "Decoded", inner: [{ name: "Playlists" }] } }
-				],
+				dirs: [],
 				files: []
 			}))
 			mockSdkClient.uploadFileFromBytes.mockReset().mockResolvedValue(undefined)

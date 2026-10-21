@@ -1,4 +1,7 @@
-import { type AppStateStatus } from "react-native"
+import { type AppState } from "react-native"
+
+// `AppState.currentState` is typed `string | null | undefined` since RN 0.88; null/unknown is judged like "inactive".
+type AppStateCurrent = (typeof AppState)["currentState"]
 
 // Pure decision for the privacy cover's redaction (extracted from the component for unit testing).
 //
@@ -20,7 +23,7 @@ import { type AppStateStatus } from "react-native"
 //     full screens (Move → a drive browser) OVER the mounted preview while PiP is alive — those must
 //     redact, so the caller computes this as pipActive AND pathname === drivePreview.
 export function shouldRedact(
-	appState: AppStateStatus,
+	appState: AppStateCurrent,
 	presentationSuppressed: boolean,
 	biometricLocked: boolean,
 	pipPreviewVisible: boolean

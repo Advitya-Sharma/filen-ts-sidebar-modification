@@ -1,8 +1,8 @@
 diff --git a/src/components/ReorderableListCore.tsx b/src/components/ReorderableListCore.tsx
-index 81bdff2c77320769401e3609dab2edd5716a437c..dd6da7831e1b5bc1fea5c191359b82a66b115732 100644
+index 7f1ca891f1823026054ffe167dbea79d27422284..ae92313639b81bdf888f4d3f35cce70461f07504 100644
 --- a/src/components/ReorderableListCore.tsx
 +++ b/src/components/ReorderableListCore.tsx
-@@ -511,7 +511,19 @@ const ReorderableListCore = <T,>(
+@@ -507,7 +507,19 @@ const ReorderableListCore = <T,>(
    const reorder = (fromIndex: number, toIndex: number) => {
      runOnUI(resetSharedValues)();
  

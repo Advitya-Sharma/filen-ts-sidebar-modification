@@ -4,43 +4,22 @@ import { vi, describe, it, expect } from "vitest"
 // zoomableView.tsx imports gesture-handler/reanimated at module level; stub
 // them so the pure math exports can be loaded in a node vitest environment.
 
-vi.mock("react-native-gesture-handler", () => {
-	const chainable = () => {
-		const gesture: Record<string, (...args: unknown[]) => unknown> = {}
-		const methods = [
-			"enabled",
-			"manualActivation",
-			"minPointers",
-			"maxPointers",
-			"numberOfTaps",
-			"maxDelay",
-			"onBegin",
-			"onStart",
-			"onUpdate",
-			"onEnd",
-			"onFinalize",
-			"onTouchesDown",
-			"onTouchesMove",
-			"requireExternalGestureToFail"
-		]
-
-		for (const method of methods) {
-			gesture[method] = () => gesture
-		}
-
-		return gesture
-	}
-
-	return {
-		GestureDetector: () => null,
-		Gesture: {
-			Pinch: chainable,
-			Pan: chainable,
-			Tap: chainable,
-			Simultaneous: (...gestures: unknown[]) => gestures
-		}
-	}
-})
+vi.mock("react-native-gesture-handler", () => ({
+	GestureDetector: () => null,
+	GestureStateManager: {
+		activate: () => undefined,
+		fail: () => undefined,
+		deactivate: () => undefined
+	},
+	State: {
+		BEGAN: 2,
+		ACTIVE: 4
+	},
+	usePinchGesture: (config: unknown) => config,
+	usePanGesture: (config: unknown) => config,
+	useTapGesture: (config: unknown) => config,
+	useCompetingGestures: (...gestures: unknown[]) => gestures
+}))
 
 vi.mock("react-native-reanimated", () => ({
 	default: {
@@ -56,7 +35,7 @@ vi.mock("react-native-reanimated", () => ({
 }))
 
 vi.mock("react-native-worklets", () => ({
-	runOnJS: (fn: unknown) => fn
+	scheduleOnRN: () => undefined
 }))
 
 // ─── Actual import ───────────────────────────────────────────────────────────

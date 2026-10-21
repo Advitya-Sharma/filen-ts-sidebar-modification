@@ -1,5 +1,4 @@
-import { ConfigPlugin } from "@expo/config-plugins"
-import { withAppBuildGradle } from "@expo/config-plugins/build/plugins/android-plugins"
+import { type ConfigPlugin, withAppBuildGradle } from "expo/config-plugins"
 
 const SUFFIX = ".debug"
 

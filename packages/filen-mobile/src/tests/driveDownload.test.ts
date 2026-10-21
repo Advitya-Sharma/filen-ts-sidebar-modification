@@ -1734,7 +1734,7 @@ describe("downloadFileItemToTmp", () => {
 		mockTransfersDownload.mockImplementation(async ({ destination }: { destination: FileSystem.File }) => {
 			expect(destination.parentDirectory.exists).toBe(true)
 
-			destination.write("data")
+			destination.writeSync("data")
 
 			return { files: [destination], directories: [] }
 		})

@@ -1,7 +1,7 @@
 import Text from "@/components/ui/text"
 import { router } from "@/lib/router"
 import Ionicons from "@expo/vector-icons/Ionicons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import ListRow from "@/components/ui/listRow"
 import useOfflineStore from "@/features/offline/store/useOffline.store"
 import { useTranslation } from "react-i18next"

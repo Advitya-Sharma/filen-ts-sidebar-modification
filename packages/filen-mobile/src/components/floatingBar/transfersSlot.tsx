@@ -8,7 +8,7 @@ import useTransfersStore, { type Transfer } from "@/features/transfers/store/use
 import View from "@/components/ui/view"
 import Text from "@/components/ui/text"
 import { PressableScale } from "@/components/ui/pressables"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import AnimatedProgressBar from "@/components/floatingBar/animatedProgressBar"
 import { copyingItemCount } from "@/features/copy/copyRowText"
 

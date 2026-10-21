@@ -43,7 +43,7 @@ import { PressableScale } from "@/components/ui/pressables"
 import Text from "@/components/ui/text"
 import Ionicons from "@expo/vector-icons/Ionicons"
 import logger from "@/lib/logger"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 
 // Subscribes to the clipboard itself so a copy or cut re-renders this button, not the whole listing.
 const EmptyAddMenu = ({ parent, drivePath }: { parent: AnyNormalDir | null; drivePath: DrivePath }) => {

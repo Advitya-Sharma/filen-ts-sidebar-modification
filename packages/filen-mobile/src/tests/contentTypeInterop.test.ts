@@ -1,36 +1,67 @@
 import { describe, it, expect } from "vitest"
 import { createRequire } from "node:module"
+import { readFileSync } from "node:fs"
+import path from "node:path"
+import { parseBuffer } from "music-metadata"
 
 // Regression guard for the "music-metadata can't parse any audio file" bug (Hermes only).
 //
-// music-metadata default-imports content-type (`import ContentType from "content-type"`) and then
-// calls `ContentType.parse(...)` inside its MIME→parser lookup. Metro/Babel compile that default
-// import through `_interopRequireDefault`, which — for a CJS module that declares `__esModule: true`
-// but ships NO real `default` export — binds the import to `module.exports.default` === `undefined`.
-// `ContentType.parse(...)` then throws, music-metadata swallows it, and reports
-// "Guessed MIME-type not supported: <type>" for EVERY file.
+// music-metadata 11 default-imported content-type 2 (`import ContentType from "content-type"`), a CJS
+// module declaring `__esModule: true` with no `default` export. Metro/Babel's `_interopRequireDefault`
+// bound that import to `undefined`, `ContentType.parse(...)` threw inside the MIME→parser lookup, and
+// every file failed with "Guessed MIME-type not supported". Node's (and vitest's) interop hides it.
 //
-// Node's (and therefore vitest's) interop binds the default to the whole `module.exports`, so a plain
-// `import` here would hide the bug. We reproduce Metro's interop explicitly so this fails in CI if
-// content-type ever ships that broken shape again (it did at 2.0.0; see the content-type
-// patch in patches/).
+// music-metadata 12 imports `parse` BY NAME from content-type 3 (ESM), which Babel compiles to a plain
+// `require("content-type").parse` — no default interop, so no patch. These tests fail if either side
+// regresses to the broken shape.
 const require = createRequire(import.meta.url)
+const musicMetadataEntry = require.resolve("music-metadata")
+const parserFactorySource = readFileSync(path.join(path.dirname(musicMetadataEntry), "ParserFactory.js"), "utf8")
 
-// Exactly what Babel/Metro emit for `import X from "mod"`.
-function interopRequireDefault(mod: { __esModule?: boolean }): { default: unknown } {
-	return mod && mod.__esModule ? (mod as { default: unknown }) : { default: mod }
+// 44-byte PCM WAV header + 4 silent samples (8 kHz, mono, 16 bit).
+function silentWav(): Uint8Array {
+	const dataSize = 8
+	const view = new DataView(new ArrayBuffer(44 + dataSize))
+	const ascii = (offset: number, text: string) => {
+		for (let i = 0; i < text.length; i++) {
+			view.setUint8(offset + i, text.charCodeAt(i))
+		}
+	}
+
+	ascii(0, "RIFF")
+	view.setUint32(4, 36 + dataSize, true)
+	ascii(8, "WAVE")
+	ascii(12, "fmt ")
+	view.setUint32(16, 16, true)
+	view.setUint16(20, 1, true)
+	view.setUint16(22, 1, true)
+	view.setUint32(24, 8000, true)
+	view.setUint32(28, 16000, true)
+	view.setUint16(32, 2, true)
+	view.setUint16(34, 16, true)
+	ascii(36, "data")
+	view.setUint32(40, dataSize, true)
+
+	return new Uint8Array(view.buffer)
 }
 
-describe("content-type default-import interop (Metro/Babel → music-metadata)", () => {
-	it("resolves to a callable parse() through a Babel-style default import", () => {
-		const mod = require("content-type") as { __esModule?: boolean }
-		const ContentType = interopRequireDefault(mod).default as { parse?: (input: string) => { type: string } }
+describe("content-type import interop (Metro/Babel → music-metadata)", () => {
+	it("music-metadata imports content-type's parse by name, never as a default import", () => {
+		expect(parserFactorySource).toMatch(/import\s*\{\s*parse(\s+as\s+\w+)?\s*\}\s*from\s*["']content-type["']/)
+		expect(parserFactorySource).not.toMatch(/import\s+\w+\s*(,\s*\{[^}]*\})?\s*from\s*["']content-type["']/)
+	})
 
-		expect(ContentType).toBeDefined()
-		expect(typeof ContentType?.parse).toBe("function")
+	it("the content-type music-metadata resolves exposes a callable named parse()", () => {
+		const contentType = createRequire(musicMetadataEntry)("content-type") as { parse?: (input: string) => { type: string } }
 
-		const parsed = (ContentType as { parse: (input: string) => { type: string } }).parse("audio/mpeg")
+		expect(typeof contentType.parse).toBe("function")
+		expect(contentType.parse?.("audio/mpeg; charset=binary").type).toBe("audio/mpeg")
+	})
 
-		expect(parsed.type).toBe("audio/mpeg")
+	it("selects the parser from the MIME type (the path that broke) and parses a WAV", async () => {
+		const metadata = await parseBuffer(silentWav(), { mimeType: "audio/wav", size: 52 })
+
+		expect(metadata.format.container).toBe("WAVE")
+		expect(metadata.format.sampleRate).toBe(8000)
 	})
 })

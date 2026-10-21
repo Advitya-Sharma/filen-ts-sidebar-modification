@@ -1,7 +1,7 @@
 import type { ComponentProps } from "react"
 import { useTranslation } from "react-i18next"
 import View, { GestureHandlerScrollView, CrossGlassContainerView } from "@/components/ui/view"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { PressableOpacity } from "@/components/ui/pressables"
 import FontAwesome6 from "@expo/vector-icons/FontAwesome6"
 import Menu, { type MenuButton } from "@/components/ui/menu"

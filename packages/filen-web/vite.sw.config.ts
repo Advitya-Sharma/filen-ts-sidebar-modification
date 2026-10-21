@@ -11,7 +11,7 @@ export default defineConfig({
 		emptyOutDir: false,
 		copyPublicDir: false,
 		minify: "oxc",
-		rollupOptions: {
+		rolldownOptions: {
 			input: "src/sw/sw.ts",
 			output: {
 				format: "es",

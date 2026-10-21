@@ -7,7 +7,8 @@ import DomKeyboardHost, { DOM_HOST_WEBVIEW_PROPS } from "@/components/domKeyboar
 import { useNativeDomEvents, type DOMRef } from "@/hooks/useDomEvents/useNativeDomEvents"
 import { AppState, Platform } from "react-native"
 import { useNavigation } from "expo-router"
-import { useResolveClassNames, useUniwind } from "uniwind"
+import { useUniwind } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import useRichtextStore from "@/stores/useRichtext.store"
 import MarkdownPreviewButton from "@/components/textEditor/markdownPreviewButton"
 import { useTextEditorMarkdownPreviewActive } from "@/components/textEditor/markdownPreviewPreference"
@@ -446,16 +447,17 @@ export const TextEditor = ({
 
 	// Belt for lost incremental change events (#67): ask the DOM side to commit any
 	// in-flight IME composition and report the final document if it diverged from what
-	// change events already delivered. Fired when the screen starts leaving (the WebView
-	// survives through the pop animation — a teardown-time round trip would be too late)
-	// and when the app backgrounds. Healthy devices emit nothing extra: the DOM side
-	// only reports when its document differs from the last reported value.
+	// change events already delivered. Fired when the app backgrounds, and when a pop of this
+	// screen is blocked (the drive preview's unsaved-changes prompt), so a Save there includes
+	// the composed text. A pop that goes through gets none: React unmounts the screen at
+	// dispatch, so the DOM side's reply could never land. Healthy devices emit nothing extra:
+	// the DOM side only reports when its document differs from the last reported value.
 	useEffect(() => {
 		if (readOnly) {
 			return
 		}
 
-		const unsubscribe = navigation.addListener("beforeRemove", () => {
+		const unsubscribe = navigation.addListener("removePrevented", () => {
 			postMessageRef.current({
 				type: "flushContent",
 				data: {

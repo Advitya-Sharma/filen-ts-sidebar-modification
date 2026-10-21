@@ -293,7 +293,12 @@ export class File {
 		return node.text !== null ? textEncoder.encode(node.text) : new Uint8Array(node.size)
 	}
 
-	write(content: string | Uint8Array, _options?: { encoding?: string; append?: boolean }): void {
+	// write() is async since expo-file-system 58; writeSync keeps the synchronous form. Both count as one write.
+	async write(content: string | Uint8Array, options?: { encoding?: string; append?: boolean }): Promise<void> {
+		this.writeSync(content, options)
+	}
+
+	writeSync(content: string | Uint8Array, _options?: { encoding?: string; append?: boolean }): void {
 		fsOpCounts.write++
 
 		if (typeof content === "string") {

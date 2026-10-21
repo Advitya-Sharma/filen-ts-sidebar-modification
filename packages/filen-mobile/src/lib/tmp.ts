@@ -31,14 +31,14 @@ export function newTmpFile(name?: string): FileSystem.File {
 
 // Writes `data` to filen-tmp/`name` (replacing a leftover of the same name) and pairs the file with
 // the cleanup shareTmpFile runs after the share sheet closes.
-export function writeTmpFile(name: string, data: string | Uint8Array): { file: FileSystem.File; cleanup: () => void } {
+export async function writeTmpFile(name: string, data: string | Uint8Array): Promise<{ file: FileSystem.File; cleanup: () => void }> {
 	const file = newTmpFile(name)
 
 	if (file.exists) {
 		file.delete()
 	}
 
-	file.write(data)
+	await file.write(data)
 
 	return {
 		file,

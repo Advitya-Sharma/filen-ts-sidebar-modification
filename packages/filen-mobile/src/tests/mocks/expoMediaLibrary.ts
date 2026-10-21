@@ -68,6 +68,15 @@ export enum MediaType {
 	VIDEO = "video"
 }
 
+export enum AssetUriVersion {
+	CURRENT = "current",
+	ORIGINAL = "original"
+}
+
+export type AssetUriOptions = {
+	version?: AssetUriVersion
+}
+
 export enum AssetField {
 	CREATION_TIME = "creationTime",
 	MODIFICATION_TIME = "modificationTime",
@@ -113,6 +122,8 @@ type StoredAlbum = {
 class BackingStore {
 	readonly assets = new Map<string, StoredAsset>()
 	readonly albums = new Map<string, StoredAlbum>()
+	/** Every getUri() call with the version it asked for, so a test can pin what each media type resolves. */
+	readonly uriRequests: { id: string; version: AssetUriVersion | undefined }[] = []
 
 	addAsset(partial: Partial<StoredAsset> & { id: string }): Asset {
 		const stored: StoredAsset = {
@@ -149,6 +160,7 @@ class BackingStore {
 	clear(): void {
 		this.assets.clear()
 		this.albums.clear()
+		this.uriRequests.length = 0
 	}
 }
 
@@ -211,7 +223,12 @@ export class Asset {
 		}
 	}
 
-	async getUri(): Promise<string> {
+	async getUri(options?: AssetUriOptions): Promise<string> {
+		ml.uriRequests.push({
+			id: this.id,
+			version: options?.version
+		})
+
 		return this.stored.uri
 	}
 

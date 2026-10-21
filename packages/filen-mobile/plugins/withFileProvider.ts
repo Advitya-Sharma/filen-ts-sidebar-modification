@@ -1,7 +1,5 @@
-import { ConfigPlugin } from "@expo/config-plugins"
-import { withXcodeProject } from "@expo/config-plugins/build/plugins/ios-plugins"
-import { withDangerousMod } from "@expo/config-plugins/build/plugins/withDangerousMod"
-import { build } from "@expo/plist/build/build.js"
+import { type ConfigPlugin, withXcodeProject, withDangerousMod } from "expo/config-plugins"
+import plist from "@expo/plist"
 import { execSync } from "child_process"
 import fs from "node:fs"
 import path from "node:path"
@@ -18,7 +16,7 @@ type FileProviderPluginProps = {
 const EXTENSION_NAME = "FilenFileProvider"
 
 const getFileProviderInfoContent = (appName: string, props: FileProviderPluginProps) => {
-	return build({
+	return plist.build({
 		AppGroup: props.iosAppGroupIdentifier,
 		CFBundleName: "$(PRODUCT_NAME)",
 		CFBundleDisplayName: `${appName} - File Provider`,
@@ -66,7 +64,7 @@ const writeFileProviderFiles = async (
 
 	await fs.promises.writeFile(
 		path.join(extensionDir, `${EXTENSION_NAME}.entitlements`),
-		build({
+		plist.build({
 			"com.apple.security.application-groups": [props.iosAppGroupIdentifier],
 			// Shared keychain access group so the extension can read the auth.json DEK the app wrote via
 			// expo-secure-store.
@@ -76,7 +74,7 @@ const writeFileProviderFiles = async (
 
 	await fs.promises.writeFile(
 		path.join(extensionDir, "PrivacyInfo.xcprivacy"),
-		build({
+		plist.build({
 			NSPrivacyAccessedAPITypes: [
 				{
 					NSPrivacyAccessedAPIType: "NSPrivacyAccessedAPICategoryUserDefaults",

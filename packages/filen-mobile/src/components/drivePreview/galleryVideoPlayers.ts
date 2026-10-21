@@ -87,7 +87,11 @@ export class GalleryVideoPlayers {
 			}
 		}
 
-		const player = createVideoPlayer(fileUrl)
+		// Android: never retune the display to the video's frame rate; on adaptive-refresh panels a
+		// 30 fps video otherwise caps the whole UI (pager, pinch-dismiss) at 30 Hz while it plays.
+		const player = createVideoPlayer(fileUrl, {
+			videoChangeFrameRateStrategy: "off"
+		})
 
 		player.loop = false
 		player.staysActiveInBackground = false

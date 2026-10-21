@@ -1147,7 +1147,7 @@ describe("Offline", () => {
 			// Mock download to write data to the destination file
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([10, 20, 30]))
+					destination.writeSync(new Uint8Array([10, 20, 30]))
 				}
 
 				return { files: [], directories: [] }
@@ -1177,7 +1177,7 @@ describe("Offline", () => {
 
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1]))
+					destination.writeSync(new Uint8Array([1]))
 				}
 
 				return { files: [], directories: [] }
@@ -1197,7 +1197,7 @@ describe("Offline", () => {
 
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1]))
+					destination.writeSync(new Uint8Array([1]))
 				}
 
 				return { files: [], directories: [] }
@@ -1275,7 +1275,7 @@ describe("Offline", () => {
 
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1]))
+					destination.writeSync(new Uint8Array([1]))
 				}
 
 				return { files: [], directories: [] }
@@ -1340,7 +1340,7 @@ describe("Offline", () => {
 				await firstDownloadGate
 
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1, 2, 3]))
+					destination.writeSync(new Uint8Array([1, 2, 3]))
 				}
 
 				return { files: [], directories: [] }
@@ -2612,7 +2612,7 @@ describe("Offline", () => {
 
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1, 2, 3, 4, 5]))
+					destination.writeSync(new Uint8Array([1, 2, 3, 4, 5]))
 				}
 
 				return { files: [], directories: [] }
@@ -3313,7 +3313,7 @@ describe("Offline", () => {
 				await new Promise(resolve => setTimeout(resolve, 10))
 
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1, 2, 3]))
+					destination.writeSync(new Uint8Array([1, 2, 3]))
 				}
 
 				concurrentCount--
@@ -3354,7 +3354,7 @@ describe("Offline", () => {
 				await new Promise(resolve => setTimeout(resolve, 5))
 
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1, 2, 3]))
+					destination.writeSync(new Uint8Array([1, 2, 3]))
 				} else {
 					const destUri = (destination as { uri: string }).uri
 
@@ -3434,7 +3434,7 @@ describe("Offline", () => {
 			try {
 				vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 					if (destination instanceof File) {
-						destination.write(new Uint8Array([1, 2, 3]))
+						destination.writeSync(new Uint8Array([1, 2, 3]))
 					}
 
 					return { files: [], directories: [] }
@@ -3514,7 +3514,7 @@ describe("Offline", () => {
 
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([10, 20, 30]))
+					destination.writeSync(new Uint8Array([10, 20, 30]))
 				}
 
 				return { files: [], directories: [] }
@@ -4591,7 +4591,7 @@ describe("Offline", () => {
 				capturedSignal = s
 
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1, 2, 3]))
+					destination.writeSync(new Uint8Array([1, 2, 3]))
 				}
 
 				return { files: [], directories: [] }
@@ -4647,7 +4647,7 @@ describe("Offline", () => {
 
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([7, 7, 7]))
+					destination.writeSync(new Uint8Array([7, 7, 7]))
 				}
 
 				return { files: [], directories: [] }
@@ -4723,7 +4723,7 @@ describe("Offline", () => {
 
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1, 2]))
+					destination.writeSync(new Uint8Array([1, 2]))
 				}
 
 				return { files: [], directories: [] }
@@ -6508,7 +6508,7 @@ describe("Offline", () => {
 
 			vi.mocked(transfers.download).mockImplementationOnce(async ({ destination }) => {
 				if (destination instanceof File) {
-					destination.write(new Uint8Array([1]))
+					destination.writeSync(new Uint8Array([1]))
 				}
 
 				return { files: [], directories: [] }

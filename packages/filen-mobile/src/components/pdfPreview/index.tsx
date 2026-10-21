@@ -20,7 +20,7 @@ import prompts from "@/lib/prompts"
 import alerts from "@/lib/alerts"
 import logger from "@/lib/logger"
 import type { WebViewMessageEvent } from "react-native-webview"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 
 type Phase = "loading" | "ready" | "unsupported" | "error" | "passwordCancelled"
 

@@ -2,7 +2,8 @@ import { vi, describe, it, expect, beforeEach } from "vitest"
 
 const { mockSdkClient } = vi.hoisted(() => ({
 	mockSdkClient: {
-		listDir: vi.fn(),
+		findDirUuid: vi.fn(),
+		getDir: vi.fn(),
 		createDir: vi.fn(),
 		root: vi.fn(() => ({ uuid: "root-uuid" }))
 	}
@@ -28,8 +29,7 @@ vi.mock("@filen/sdk-rs", () => {
 	}
 
 	return {
-		AnyNormalDir: { Root: WrapClass, Dir: WrapClass },
-		DirMeta_Tags: { Decoded: "Decoded", Encrypted: "Encrypted" }
+		AnyNormalDir: { Root: WrapClass, Dir: WrapClass }
 	}
 })
 
@@ -37,59 +37,85 @@ import { ensureDotFilenSubdirectory, clearDotFilenDirectoryMemo } from "@/lib/do
 import { useSocketStore } from "@/stores/useSocket.store"
 import events from "@/lib/events"
 
-function dir(name: string, tag = "Decoded") {
-	return { uuid: `${name}-uuid`, meta: { tag, inner: [{ name }] } }
+function dir(name: string) {
+	return { uuid: `${name}-uuid`, meta: { tag: "Decoded", inner: [{ name }] } }
+}
+
+const dotFilen = dir(".filen")
+const playlists = dir("Playlists")
+const chats = dir("Chat Uploads")
+const existing = [dotFilen, playlists, chats]
+
+// The drive as the name-hash lookup sees it: `.filen` under the root, both subdirectories under `.filen`.
+function serveExisting(): void {
+	mockSdkClient.findDirUuid.mockImplementation(async (parent: string, name: string) => {
+		const lower = name.toLowerCase()
+
+		if (parent === "root-uuid") {
+			return lower === ".filen" ? dotFilen.uuid : undefined
+		}
+
+		return parent === dotFilen.uuid ? existing.find(d => d.meta.inner[0]?.name.toLowerCase() === lower)?.uuid : undefined
+	})
+	mockSdkClient.getDir.mockImplementation(async (uuid: string) => existing.find(d => d.uuid === uuid))
+}
+
+function resetClient(): void {
+	mockSdkClient.findDirUuid.mockReset()
+	mockSdkClient.getDir.mockReset()
+	mockSdkClient.createDir.mockReset()
 }
 
 describe("ensureDotFilenSubdirectory", () => {
 	beforeEach(() => {
 		clearDotFilenDirectoryMemo()
 		useSocketStore.setState({ state: "disconnected", connectedAt: 0 })
-		mockSdkClient.listDir.mockReset()
-		mockSdkClient.createDir.mockReset()
+		resetClient()
 	})
 
-	it("reuses existing directories matched case-insensitively without creating", async () => {
-		const dotFilen = dir(" .FILEN ")
-		const playlists = dir("playlists")
-
-		mockSdkClient.listDir.mockResolvedValueOnce({ dirs: [dir("other"), dotFilen], files: [] })
-		mockSdkClient.listDir.mockResolvedValueOnce({ dirs: [playlists], files: [] })
+	it("finds existing directories by name and fetches only the subdirectory, listing nothing", async () => {
+		serveExisting()
 
 		const signal = new AbortController().signal
 
 		await expect(ensureDotFilenSubdirectory("Playlists", signal)).resolves.toBe(playlists)
-		expect(mockSdkClient.listDir).toHaveBeenNthCalledWith(1, { inner: { uuid: "root-uuid" } }, { signal })
-		expect(mockSdkClient.listDir).toHaveBeenNthCalledWith(2, { inner: dotFilen }, { signal })
+		expect(mockSdkClient.findDirUuid).toHaveBeenNthCalledWith(1, "root-uuid", ".filen", { signal })
+		expect(mockSdkClient.findDirUuid).toHaveBeenNthCalledWith(2, dotFilen.uuid, "Playlists", { signal })
+		expect(mockSdkClient.getDir).toHaveBeenCalledTimes(1)
+		expect(mockSdkClient.getDir).toHaveBeenCalledWith(playlists.uuid, { signal })
 		expect(mockSdkClient.createDir).not.toHaveBeenCalled()
 	})
 
-	it("creates missing directories, ignoring undecryptable name matches", async () => {
-		const createdDotFilen = dir(".filen")
+	it("creates both levels when .filen is missing, without looking under the new directory", async () => {
 		const createdChild = dir("Chat Uploads")
 
-		mockSdkClient.listDir.mockResolvedValueOnce({ dirs: [dir(".filen", "Encrypted")], files: [] })
-		mockSdkClient.listDir.mockResolvedValueOnce({ dirs: [], files: [] })
-		mockSdkClient.createDir.mockResolvedValueOnce(createdDotFilen)
+		mockSdkClient.findDirUuid.mockResolvedValueOnce(undefined)
+		mockSdkClient.createDir.mockResolvedValueOnce(dotFilen)
 		mockSdkClient.createDir.mockResolvedValueOnce(createdChild)
 
 		await expect(ensureDotFilenSubdirectory("Chat Uploads")).resolves.toBe(createdChild)
+		expect(mockSdkClient.findDirUuid).toHaveBeenCalledTimes(1)
+		expect(mockSdkClient.getDir).not.toHaveBeenCalled()
 		expect(mockSdkClient.createDir).toHaveBeenNthCalledWith(1, { inner: { uuid: "root-uuid" } }, ".filen", undefined)
-		expect(mockSdkClient.createDir).toHaveBeenNthCalledWith(2, { inner: createdDotFilen }, "Chat Uploads", undefined)
+		expect(mockSdkClient.createDir).toHaveBeenNthCalledWith(2, { inner: dotFilen }, "Chat Uploads", undefined)
+	})
+
+	it("fetches .filen to create a missing subdirectory in it", async () => {
+		const createdChild = dir("Playlists")
+
+		mockSdkClient.findDirUuid.mockResolvedValueOnce(dotFilen.uuid)
+		mockSdkClient.findDirUuid.mockResolvedValueOnce(undefined)
+		mockSdkClient.getDir.mockResolvedValueOnce(dotFilen)
+		mockSdkClient.createDir.mockResolvedValueOnce(createdChild)
+
+		await expect(ensureDotFilenSubdirectory("Playlists")).resolves.toBe(createdChild)
+		expect(mockSdkClient.getDir).toHaveBeenCalledWith(dotFilen.uuid, undefined)
+		expect(mockSdkClient.createDir).toHaveBeenCalledTimes(1)
+		expect(mockSdkClient.createDir).toHaveBeenCalledWith({ inner: dotFilen }, "Playlists", undefined)
 	})
 })
 
 describe("ensureDotFilenSubdirectory memo", () => {
-	type Parent = { inner: { uuid: string } }
-
-	const dotFilen = dir(" .FILEN ")
-	const playlists = dir("Playlists")
-	const chats = dir("Chat Uploads")
-
-	function listing(parent: Parent) {
-		return { dirs: parent.inner.uuid === "root-uuid" ? [dir("other"), dotFilen] : [chats, playlists], files: [] }
-	}
-
 	function connect(connectedAt: number): void {
 		useSocketStore.setState({ state: "connected", connectedAt })
 	}
@@ -97,8 +123,8 @@ describe("ensureDotFilenSubdirectory memo", () => {
 	beforeEach(() => {
 		clearDotFilenDirectoryMemo()
 		useSocketStore.setState({ state: "disconnected", connectedAt: 0 })
-		mockSdkClient.listDir.mockReset().mockImplementation(async (parent: Parent) => listing(parent))
-		mockSdkClient.createDir.mockReset()
+		resetClient()
+		serveExisting()
 	})
 
 	it("reuses each resolved directory within the same connected socket session", async () => {
@@ -106,14 +132,14 @@ describe("ensureDotFilenSubdirectory memo", () => {
 
 		await expect(ensureDotFilenSubdirectory("Playlists")).resolves.toBe(playlists)
 		await expect(ensureDotFilenSubdirectory("Playlists")).resolves.toBe(playlists)
-		expect(mockSdkClient.listDir).toHaveBeenCalledTimes(2)
+		expect(mockSdkClient.findDirUuid).toHaveBeenCalledTimes(2)
 
 		await expect(ensureDotFilenSubdirectory("Chat Uploads")).resolves.toBe(chats)
 		await expect(ensureDotFilenSubdirectory("Chat Uploads")).resolves.toBe(chats)
-		expect(mockSdkClient.listDir).toHaveBeenCalledTimes(4)
+		expect(mockSdkClient.findDirUuid).toHaveBeenCalledTimes(4)
 	})
 
-	it("lists every time while the socket is not connected", async () => {
+	it("looks up every time while the socket is not connected", async () => {
 		await ensureDotFilenSubdirectory("Playlists")
 		await ensureDotFilenSubdirectory("Playlists")
 
@@ -121,10 +147,10 @@ describe("ensureDotFilenSubdirectory memo", () => {
 
 		await ensureDotFilenSubdirectory("Playlists")
 
-		expect(mockSdkClient.listDir).toHaveBeenCalledTimes(6)
+		expect(mockSdkClient.findDirUuid).toHaveBeenCalledTimes(6)
 	})
 
-	it("lists again once the socket reconnected", async () => {
+	it("looks up again once the socket reconnected", async () => {
 		connect(100)
 
 		await ensureDotFilenSubdirectory("Playlists")
@@ -134,7 +160,7 @@ describe("ensureDotFilenSubdirectory memo", () => {
 		await ensureDotFilenSubdirectory("Playlists")
 		await ensureDotFilenSubdirectory("Playlists")
 
-		expect(mockSdkClient.listDir).toHaveBeenCalledTimes(4)
+		expect(mockSdkClient.findDirUuid).toHaveBeenCalledTimes(4)
 	})
 
 	it("keeps nothing a clear overlapped", async () => {
@@ -145,10 +171,10 @@ describe("ensureDotFilenSubdirectory memo", () => {
 			release = resolve
 		})
 
-		mockSdkClient.listDir.mockImplementationOnce(async (parent: Parent) => {
+		mockSdkClient.findDirUuid.mockImplementationOnce(async () => {
 			await gate
 
-			return listing(parent)
+			return dotFilen.uuid
 		})
 
 		const pending = ensureDotFilenSubdirectory("Playlists")
@@ -160,21 +186,21 @@ describe("ensureDotFilenSubdirectory memo", () => {
 
 		await ensureDotFilenSubdirectory("Playlists")
 
-		expect(mockSdkClient.listDir).toHaveBeenCalledTimes(4)
+		expect(mockSdkClient.findDirUuid).toHaveBeenCalledTimes(4)
 	})
 
 	it("keeps nothing resolved across a connect: what changed while down was missed", async () => {
 		useSocketStore.setState({ state: "disconnected", connectedAt: 100 })
-		mockSdkClient.listDir.mockImplementationOnce(async (parent: Parent) => {
+		mockSdkClient.findDirUuid.mockImplementationOnce(async () => {
 			connect(300)
 
-			return listing(parent)
+			return dotFilen.uuid
 		})
 
 		await ensureDotFilenSubdirectory("Playlists")
 		await ensureDotFilenSubdirectory("Playlists")
 
-		expect(mockSdkClient.listDir).toHaveBeenCalledTimes(4)
+		expect(mockSdkClient.findDirUuid).toHaveBeenCalledTimes(4)
 	})
 
 	it("local drive changes and logout clear it", async () => {
@@ -191,6 +217,6 @@ describe("ensureDotFilenSubdirectory memo", () => {
 		events.emit("logout")
 		await ensureDotFilenSubdirectory("Playlists")
 
-		expect(mockSdkClient.listDir).toHaveBeenCalledTimes(8)
+		expect(mockSdkClient.findDirUuid).toHaveBeenCalledTimes(8)
 	})
 })

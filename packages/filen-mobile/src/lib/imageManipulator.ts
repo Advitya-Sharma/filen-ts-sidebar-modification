@@ -11,13 +11,18 @@ export async function renderAndSave(
 	// Hold the Context in a local binding across the awaits: it cancels its native coroutine on
 	// sharedObjectDidRelease, so a Context that became Hermes-GC-eligible mid-render would reject
 	// with JobCancellationException.
-	let context = ImageManipulator.ImageManipulator.manipulate(uri)
-
-	if (resizeWidth !== undefined) {
-		context = context.resize({
-			width: resizeWidth
-		})
-	}
+	//
+	// With a target width the source is also DECODED no wider than it (expo-image-manipulator 58): the
+	// full-size bitmap is never materialised just to be scaled down. resize() still runs, since the
+	// decode only bounds the width from above.
+	const context =
+		resizeWidth === undefined
+			? ImageManipulator.ImageManipulator.manipulate(uri)
+			: ImageManipulator.ImageManipulator.manipulate(uri, {
+					maxWidth: resizeWidth
+				}).resize({
+					width: resizeWidth
+				})
 
 	// The Context and the rendered ImageRef wrap decoded native bitmaps Hermes GC does not track;
 	// bulk callers (camera upload, thumbnails) decode many images back-to-back, so both are

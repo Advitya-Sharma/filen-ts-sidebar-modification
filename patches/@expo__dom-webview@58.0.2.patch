@@ -202,6 +202,20 @@ index 125ad1db8dc4e099b689ac45b651f142b07c728c..3b045c28ad29406130705c3a30735cc8
      override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
        super.onPageStarted(view, url, favicon)
        if (this@DomWebView.useExpoModulesBridge) {
+diff --git a/build/DomWebView.js b/build/DomWebView.js
+index 9c61f8347f7bd96b51b5277df3e8bf3073aebc3f..84128148af43a878b5088658ae2f3bb92419fbc6 100644
+--- a/build/DomWebView.js
++++ b/build/DomWebView.js
+@@ -9,7 +9,8 @@ const WebView = /*#__PURE__*/ React.forwardRef(({ containerStyle, style, injecte
+     const viewRef = React.useRef(null);
+     React.useImperativeHandle(ref, ()=>({
+             scrollTo: (params)=>viewRef.current?.scrollTo(params),
+-            injectJavaScript: (script)=>viewRef.current?.injectJavaScript(script),
++            // Patched (filen): see src/DomWebView.tsx — swallow the fire-and-forget native rejection.
++            injectJavaScript: (script)=>void viewRef.current?.injectJavaScript(script)?.catch(()=>{}),
+             reload: ()=>viewRef.current?.reload()
+         }), []);
+     const webViewStyles = [
 diff --git a/ios/DomWebView.swift b/ios/DomWebView.swift
 index d18e5cbc44dc3576d2a5ee0bf21b2a22f4010eee..f8225b0a528e1aee24868d75ec2102edc6553860 100644
 --- a/ios/DomWebView.swift

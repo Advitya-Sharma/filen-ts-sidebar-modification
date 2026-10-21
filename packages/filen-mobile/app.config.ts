@@ -10,8 +10,9 @@ const VERSION: string = "4.0.18"
 
 const ANDROID_MIN_SDK_VERSION: number = 31
 const ANDROID_TARGET_SDK_VERSION: number = 36
-const ANDROID_COMPILE_SDK_VERSION: number = 36
-const ANDROID_BUILD_TOOLS_VERSION: string = "36.0.0"
+// compileSdk/buildTools follow React Native's version catalog (RN builds from source here); targetSdk is separate
+const ANDROID_COMPILE_SDK_VERSION: number = 37
+const ANDROID_BUILD_TOOLS_VERSION: string = "37.0.0"
 // Gradle ABIs and the Rust .so set must match. x86_64 first: withAndroidRustBuild reads targets[0] for uniffi-bindgen
 const ANDROID_ABIS: string[] = ["x86_64", "arm64-v8a"]
 const IOS_DEPLOYMENT_TARGET: string = "26.0"
@@ -177,7 +178,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
 					minSdkVersion: ANDROID_MIN_SDK_VERSION,
 					buildToolsVersion: ANDROID_BUILD_TOOLS_VERSION,
 					buildArchs: ANDROID_ABIS,
-					enableProguardInReleaseBuilds: false,
+					enableMinifyInReleaseBuilds: false,
 					enableShrinkResourcesInReleaseBuilds: false,
 					enableBundleCompression: false,
 					useLegacyPackaging: false,
@@ -265,7 +266,16 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
 			}
 		],
 		"@config-plugins/react-native-blob-util",
-		"expo-localization",
+		[
+			"expo-localization",
+			{
+				// The app is LTR-only (see withAndroidApplicationAttributes). Since SDK 58 this plugin writes
+				// android:supportsRtl itself, defaulting to true, and its manifest mod runs after ours, so
+				// the option has to be stated here too. It also makes the native module apply
+				// allowRTL(false) before JS starts, on both platforms.
+				supportsRTL: false
+			}
+		],
 		"expo-background-task",
 		"expo-secure-store",
 		"expo-navigation-bar",

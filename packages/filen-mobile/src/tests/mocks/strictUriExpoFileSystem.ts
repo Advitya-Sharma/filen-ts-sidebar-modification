@@ -193,7 +193,12 @@ export class File {
 		return new TextDecoder().decode(entry)
 	}
 
-	write(content: string | Uint8Array): void {
+	// write() is async since expo-file-system 58; writeSync keeps the synchronous form.
+	async write(content: string | Uint8Array): Promise<void> {
+		this.writeSync(content)
+	}
+
+	writeSync(content: string | Uint8Array): void {
 		strictFs.set(this.uri, typeof content === "string" ? new TextEncoder().encode(content) : content)
 	}
 
@@ -214,7 +219,8 @@ export class File {
 			throw new Error(`File not found: ${this.uri}`)
 		}
 
-		const destUri = destination instanceof File ? destination.uri : `${destination.uri}/${this.uri.slice(this.uri.lastIndexOf("/") + 1)}`
+		const destUri =
+			destination instanceof File ? destination.uri : `${destination.uri}/${this.uri.slice(this.uri.lastIndexOf("/") + 1)}`
 
 		if (strictFs.has(destUri) && destUri !== this.uri) {
 			if (options?.overwrite !== true) {
@@ -241,7 +247,8 @@ export class File {
 			throw new Error(`File not found: ${this.uri}`)
 		}
 
-		const destUri = destination instanceof File ? destination.uri : `${destination.uri}/${this.uri.slice(this.uri.lastIndexOf("/") + 1)}`
+		const destUri =
+			destination instanceof File ? destination.uri : `${destination.uri}/${this.uri.slice(this.uri.lastIndexOf("/") + 1)}`
 
 		if (strictFs.has(destUri) && options?.overwrite !== true) {
 			throw new Error(`Destination already exists: ${destUri}`)

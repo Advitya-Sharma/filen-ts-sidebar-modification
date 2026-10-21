@@ -1,5 +1,5 @@
 import auth from "@/lib/auth"
-import { AnyNormalDir, DirMeta_Tags, type Dir, type JsClientInterface } from "@filen/sdk-rs"
+import { AnyNormalDir, type Dir } from "@filen/sdk-rs"
 import { toSignalOpts } from "@/lib/signals"
 import { useSocketStore } from "@/stores/useSocket.store"
 import events from "@/lib/events"
@@ -20,16 +20,9 @@ events.subscribe("driveItemRemoved", clearDotFilenDirectoryMemo)
 events.subscribe("driveItemUpdated", clearDotFilenDirectoryMemo)
 events.subscribe("logout", clearDotFilenDirectoryMemo)
 
-async function findOrCreateDir(client: JsClientInterface, parent: AnyNormalDir, name: string, signal?: AbortSignal): Promise<Dir> {
-	const lowerName = name.toLowerCase()
-	const existing = (await client.listDir(parent, toSignalOpts(signal))).dirs.find(
-		d => d.meta.tag === DirMeta_Tags.Decoded && d.meta.inner[0].name.trim().toLowerCase() === lowerName
-	)
-
-	return existing ?? (await client.createDir(parent, name, toSignalOpts(signal)))
-}
-
-// Every feature must resolve the same root-level ".filen" directory, so the name match lives here once.
+// Every feature must resolve the same root-level ".filen" directory, so the name match lives here once. Each level is
+// found by name hash (one request, no listing or decryption, case-insensitive like the server's hash); only the
+// directory handed back is fetched whole, and ".filen" itself only when a missing subdirectory must be created in it.
 export async function ensureDotFilenSubdirectory(name: string, signal?: AbortSignal): Promise<Dir> {
 	const socket = useSocketStore.getState()
 	const memoized = memo.get(name)
@@ -40,16 +33,32 @@ export async function ensureDotFilenSubdirectory(name: string, signal?: AbortSig
 
 	const resolvedGeneration = generation
 	const connectedAt = socket.connectedAt
+	const opts = toSignalOpts(signal)
 	const { authedSdkClient } = await auth.getSdkClients()
-	const dotFilenDir = await findOrCreateDir(
-		authedSdkClient,
-		new AnyNormalDir.Root({
-			uuid: authedSdkClient.root().uuid
-		}),
-		".filen",
-		signal
-	)
-	const sub = await findOrCreateDir(authedSdkClient, new AnyNormalDir.Dir(dotFilenDir), name, signal)
+	const rootUuid = authedSdkClient.root().uuid
+	const dotFilenUuid = await authedSdkClient.findDirUuid(rootUuid, ".filen", opts)
+	let sub: Dir
+
+	if (dotFilenUuid === undefined) {
+		const dotFilenDir = await authedSdkClient.createDir(
+			new AnyNormalDir.Root({
+				uuid: rootUuid
+			}),
+			".filen",
+			opts
+		)
+
+		// Created just now: it has no children to find.
+		sub = await authedSdkClient.createDir(new AnyNormalDir.Dir(dotFilenDir), name, opts)
+	} else {
+		const subUuid = await authedSdkClient.findDirUuid(dotFilenUuid, name, opts)
+
+		sub =
+			subUuid !== undefined
+				? await authedSdkClient.getDir(subUuid, opts)
+				: await authedSdkClient.createDir(new AnyNormalDir.Dir(await authedSdkClient.getDir(dotFilenUuid, opts)), name, opts)
+	}
+
 	const after = useSocketStore.getState()
 
 	if (after.state === "connected" && after.connectedAt === connectedAt && generation === resolvedGeneration) {

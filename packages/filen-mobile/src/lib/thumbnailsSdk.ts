@@ -37,13 +37,13 @@ export type SdkThumbnailOutcome = "written" | "settled"
 // return the same union and differ only in where the bytes came from — ranged reads of the encrypted
 // remote file, or a path on this device — so the write, the tmp-rename and the 4-arm mapping live here
 // once rather than twice.
-function handleThumbnailResult(
+async function handleThumbnailResult(
 	result: MakeThumbnailInMemoryResult,
 	params: {
 		uuid: string
 		outputPath: string
 	}
-): SdkThumbnailOutcome {
+): Promise<SdkThumbnailOutcome> {
 	switch (result.tag) {
 		case MakeThumbnailInMemoryResult_Tags.Thumbnail: {
 			// Write beside the destination and rename into place so a crash never leaves a torn
@@ -55,7 +55,9 @@ function handleThumbnailResult(
 			const outputFile = new FileSystem.File(params.outputPath)
 
 			try {
-				tmpFile.write(new Uint8Array(result.inner.thumbnail.webpData))
+				// Awaited: write() is async since expo-file-system 58, and the rename must not run before
+				// the bytes land.
+				await tmpFile.write(result.inner.thumbnail.webpData)
 				tmpFile.moveSync(outputFile, {
 					overwrite: true
 				})
@@ -134,7 +136,7 @@ export async function generateImageViaSdk(params: {
 
 	throwIfAborted(params.signal)
 
-	return handleThumbnailResult(result, params)
+	return await handleThumbnailResult(result, params)
 }
 
 // Local image thumbnails: the bytes are already on this device — an offline copy, a file-cache hit, or
@@ -188,6 +190,6 @@ export async function generateImageFromPathViaSdk(params: {
 		// flavour irrelevant to the caller's failure ledger.
 		throwIfAborted(params.signal)
 
-		return handleThumbnailResult(outcome, params)
+		return await handleThumbnailResult(outcome, params)
 	})
 }

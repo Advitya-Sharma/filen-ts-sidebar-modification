@@ -4,13 +4,13 @@ import usePipStore from "@/stores/usePip.store"
 import View from "@/components/ui/view"
 import { AnimatedView } from "@/components/ui/animated"
 import { useNavigation } from "expo-router"
-import { goBackIfPossible, router } from "@/lib/router"
+import { router } from "@/lib/router"
 import { type DriveItemFileExtracted } from "@/types"
 import { type ContentVerdict } from "@filen/shared"
 import { isImagePreviewType } from "@/lib/previewType"
 import { useWindowDimensions, Platform, type NativeSyntheticEvent, type NativeScrollEvent, type LayoutChangeEvent } from "react-native"
 import { SystemBars } from "react-native-edge-to-edge"
-import { GestureDetector, Gesture } from "react-native-gesture-handler"
+import { GestureDetector, GestureStateManager, type PanGestureConfig, usePanGesture } from "react-native-gesture-handler"
 import { useSharedValue, useAnimatedStyle, type SharedValue, withSpring, interpolate, Extrapolation } from "react-native-reanimated"
 import { type DrivePath } from "@/hooks/useDrivePath"
 import GalleryHeader from "@/components/drivePreview/header"
@@ -18,7 +18,7 @@ import GalleryItem from "@/components/drivePreview/galleryItem"
 import { galleryItemFollowing, galleryItemPreviewType } from "@/components/drivePreview/galleryRenderName"
 import useDrivePreviewStore from "@/stores/useDrivePreview.store"
 import events from "@/lib/events"
-import { runOnJS } from "react-native-worklets"
+import { scheduleOnRN } from "react-native-worklets"
 import { useShallow } from "zustand/shallow"
 import * as ScreenOrientation from "expo-screen-orientation"
 import ListEmpty from "@/components/ui/listEmpty"
@@ -137,25 +137,27 @@ export function galleryItemKey(item: GalleryItemTagged): string {
  * an untouchable transparent overlay over the app for the transition's
  * duration (500ms on iOS).
  *
- * Hook-named (it calls no hooks) so the React Compiler freezes its arguments;
- * as a plain call it assumes they may be mutated and leaves the callbacks passed
- * in, and everything keyed on them, unmemoized.
+ * The config is built by a plain module-scope function so the React Compiler does
+ * not analyse the shared-value writes inside the worklets; useDismissGesture is
+ * the hook boundary, so the compiler freezes its arguments and memoizes the config
+ * on them (a new config object would re-send the native config on every render).
  */
-function useDismissGesture(
+function buildDismissConfig(
 	sv: DismissSharedValues,
 	screenHeight: number,
 	goBack: () => void,
 	onDismissStart: () => void,
 	onDismissCancel: () => void,
 	enabled: boolean
-) {
-	return Gesture.Pan()
-		.manualActivation(true)
-		.onTouchesDown((e, stateManager) => {
+): PanGestureConfig {
+	return {
+		enabled,
+		manualActivation: true,
+		onTouchesDown: e => {
 			"worklet"
 
 			if (sv.isDismissing.value === 1) {
-				stateManager.fail()
+				GestureStateManager.fail(e.handlerTag)
 
 				return
 			}
@@ -166,12 +168,12 @@ function useDismissGesture(
 				sv.startTouchX.value = touch.x
 				sv.startTouchY.value = touch.y
 			}
-		})
-		.onTouchesMove((e, stateManager) => {
+		},
+		onTouchesMove: e => {
 			"worklet"
 
 			if (sv.zoomScale.value > 1 || e.allTouches.length !== 1) {
-				stateManager.fail()
+				GestureStateManager.fail(e.handlerTag)
 
 				return
 			}
@@ -179,7 +181,7 @@ function useDismissGesture(
 			const touch = e.allTouches[0]
 
 			if (!touch) {
-				stateManager.fail()
+				GestureStateManager.fail(e.handlerTag)
 
 				return
 			}
@@ -188,28 +190,28 @@ function useDismissGesture(
 			const dy = touch.y - sv.startTouchY.value
 
 			if (dy > 10 && Math.abs(dy) > Math.abs(dx) * 1.5) {
-				stateManager.activate()
+				GestureStateManager.activate(e.handlerTag)
 			} else if (Math.abs(dx) > 10 || dy < -10) {
-				stateManager.fail()
+				GestureStateManager.fail(e.handlerTag)
 			}
-		})
-		.onStart(() => {
+		},
+		onActivate: () => {
 			"worklet"
 
 			sv.savedDismissTranslateX.value = sv.dismissTranslateX.value
 			sv.savedDismissTranslateY.value = sv.dismissTranslateY.value
 
-			runOnJS(onDismissStart)()
-		})
-		.onUpdate(e => {
+			scheduleOnRN(onDismissStart)
+		},
+		onUpdate: e => {
 			"worklet"
 
 			const ty = sv.savedDismissTranslateY.value + e.translationY
 
 			sv.dismissTranslateY.value = ty > 0 ? ty : ty * 0.3
 			sv.dismissTranslateX.value = sv.savedDismissTranslateX.value + e.translationX
-		})
-		.onEnd(e => {
+		},
+		onDeactivate: e => {
 			"worklet"
 
 			const passedDistance = sv.dismissTranslateY.value > screenHeight * DISMISS_POSITION_RATIO
@@ -234,7 +236,7 @@ function useDismissGesture(
 						"worklet"
 
 						if (finished) {
-							runOnJS(goBack)()
+							scheduleOnRN(goBack)
 						}
 					}
 				)
@@ -252,9 +254,20 @@ function useDismissGesture(
 				velocity: e.velocityX
 			})
 
-			runOnJS(onDismissCancel)()
-		})
-		.enabled(enabled)
+			scheduleOnRN(onDismissCancel)
+		}
+	}
+}
+
+function useDismissGesture(
+	sv: DismissSharedValues,
+	screenHeight: number,
+	goBack: () => void,
+	onDismissStart: () => void,
+	onDismissCancel: () => void,
+	enabled: boolean
+) {
+	return usePanGesture(buildDismissConfig(sv, screenHeight, goBack, onDismissStart, onDismissCancel, enabled))
 }
 
 // Android PiP resizes the ACTIVITY window while the list stays mounted (the remount key is
@@ -282,7 +295,18 @@ function navigateBack({ didNavigateBack, isDismissing }: { didNavigateBack: Shar
 	didNavigateBack.value = 1
 	isDismissing.value = 1
 
-	goBackIfPossible()
+	if (!router.canGoBack()) {
+		return
+	}
+
+	// The single point where this gallery commits to leaving. Every exit it starts funnels through here
+	// — the header close button, the swipe-down/pinch dismiss, the last item being removed. Until that
+	// pop completes this screen keeps its data in the store, and that window is exactly where a tap on
+	// the next item used to be dropped on the floor; the flag lets the store park it instead. Set before
+	// the pop: router dispatch is deferred to after the next commit.
+	useDrivePreviewStore.getState().setLeaving(true)
+
+	router.back()
 }
 
 const Gallery = () => {
@@ -605,20 +629,6 @@ const Gallery = () => {
 		isImage || isVideo || isAudio || items.length === 0
 	)
 
-	// The single point where this gallery commits to leaving. Every exit funnels through the route pop
-	// — the header close button, the swipe-down/pinch dismiss, the Android hardware back button, the
-	// last item being removed — so one listener covers them all (the same reason UnsavedChangesGuard
-	// uses it). Until that pop completes this screen keeps its data in the store to paint the
-	// animation, and that window is exactly where a tap on the next item used to be dropped on the
-	// floor; the flag lets the store park it instead.
-	useEffect(() => {
-		const unsubscribe = navigation.addListener("beforeRemove", () => {
-			useDrivePreviewStore.getState().setLeaving(true)
-		})
-
-		return unsubscribe
-	}, [navigation])
-
 	useEffect(() => {
 		return () => {
 			// Players and the orientation lock are torn down BEFORE the session ends: endSession() can
@@ -669,8 +679,8 @@ const Gallery = () => {
 			didNavigateBack.value = 0
 			isDismissing.value = 0
 
-			// The pop already fired beforeRemove and latched the leaving flag before the guard vetoed it —
-			// unwind it (and anything parked behind it) so this still-live gallery keeps owning the store.
+			// navigateBack latched the leaving flag before the guard vetoed the pop — unwind it (and
+			// anything parked behind it) so this still-live gallery keeps owning the store.
 			useDrivePreviewStore.getState().setLeaving(false)
 		})
 

@@ -79,6 +79,18 @@ describe("shareTmpFile", () => {
 	beforeEach(() => {
 		appStateHandlers.clear()
 		mockShareAsync.mockReset().mockResolvedValue(undefined)
+		Platform.OS = "android"
+	})
+
+	it("omits the mimeType on iOS, where expo-sharing would append its extension to the shared name", async () => {
+		Platform.OS = "ios"
+
+		await shareTmpFile({ uri: "file:///tmp/photo.jpg", name: "photo.jpg", mimeType: "image/jpeg", cleanup: vi.fn() })
+
+		expect(mockShareAsync).toHaveBeenCalledWith("file:///tmp/photo.jpg", {
+			mimeType: undefined,
+			dialogTitle: "photo.jpg"
+		})
 	})
 
 	it("shares the uri with dialogTitle=name and default text/plain mime", async () => {
@@ -230,7 +242,7 @@ describe("shareUrl", () => {
 	beforeEach(() => {
 		appStateHandlers.clear()
 		mockShareAsync.mockReset()
-		vi.mocked(Share.share).mockReset().mockResolvedValue({ action: "sharedAction" })
+		vi.mocked(Share.share).mockReset().mockResolvedValue({ action: "sharedAction", activityType: undefined })
 		Platform.OS = "ios"
 	})
 

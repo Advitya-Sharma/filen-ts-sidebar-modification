@@ -6,7 +6,7 @@ import useOfflineStore from "@/features/offline/store/useOffline.store"
 import { useShallow } from "zustand/shallow"
 import { ActivityIndicator } from "react-native"
 import Text from "@/components/ui/text"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { useTranslation } from "react-i18next"
 
 const Indicator = () => {

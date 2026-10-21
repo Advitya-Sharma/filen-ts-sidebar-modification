@@ -116,7 +116,11 @@ export async function shareTmpFile({
 		// presentation coordinator like the pickers — keeps the privacy cover hidden and skips a re-lock.
 		await withSystemPresentation(() =>
 			shareAsyncWithSettleWatchdog(uri, {
-				mimeType,
+				// Android only. Since expo-sharing 58, iOS stages a copy whose name gets the type's preferred
+				// extension appended whenever it differs from the file's own, so a stored `image/jpeg` would
+				// share `photo.jpg` as `photo.jpg.jpeg`. Every file shared here already carries its name's
+				// extension, which is what iOS types it by; before 58 iOS ignored mimeType entirely.
+				mimeType: Platform.OS === "android" ? mimeType : undefined,
 				dialogTitle: name
 			})
 		)
