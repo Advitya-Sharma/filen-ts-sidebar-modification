@@ -1,35 +1,4 @@
-import type { CellEntry } from "../grid/gridEdits"
-import type { CellRange, CellStyleView, CellView, HorizontalAlign, SheetView } from "./model"
-import type { SizeAxis, SizeEntry } from "../sizes/sizes"
-
-// What the grid asks the worker to change, and what comes back. Sheet indices are the grid's (worksheets
-// only, in order).
-export type FormatPatch = Partial<{
-	bold: boolean
-	italic: boolean
-	underline: boolean
-	strike: boolean
-	// CSS hex, or null to clear.
-	color: string | null
-	fill: string | null
-	align: HorizontalAlign | null
-	// An Excel number format, "General" to clear.
-	numFmt: string
-}>
-
-export type ToggleFormat = "bold" | "italic" | "underline" | "strike"
-
-// The on/off formats, in toolbar order; those with a key toggle on mod+key.
-export const TOGGLE_FORMATS: readonly { format: ToggleFormat; shortcutKey?: string }[] = [
-	{ format: "bold", shortcutKey: "b" },
-	{ format: "italic", shortcutKey: "i" },
-	{ format: "underline", shortcutKey: "u" },
-	{ format: "strike" }
-]
-
-export function toggledPatch(style: CellStyleView | undefined, format: ToggleFormat): FormatPatch {
-	return { [format]: style?.[format] !== true }
-}
+import type { SizeAxis } from "../sizes/sizes"
 
 // A run of rows or columns inserted or deleted.
 export interface AxisEdit {
@@ -38,78 +7,6 @@ export interface AxisEdit {
 	at: number
 	count: number
 }
-
-export type EditOp =
-	| { type: "setCells"; sheet: number; cells: readonly CellEntry[] }
-	| ({ sheet: number } & AxisEdit)
-	| { type: "addSheet"; name: string }
-	| { type: "renameSheet"; sheet: number; name: string }
-	| { type: "format"; sheet: number; range: CellRange; patch: FormatPatch }
-	// Column widths or row heights, in pixels (null: back to the default). Editable workbooks only: every
-	// other view keeps sizes beside the file (sizes/sizeLayer.ts).
-	| { type: "resize"; sheet: number; axis: SizeAxis; sizes: readonly SizeEntry[] }
-
-export interface DocState {
-	// Differs from what was opened or last saved.
-	dirty: boolean
-	canUndo: boolean
-	canRedo: boolean
-}
-
-// The cells of one sheet an edit changed, recalculated ones included (null: the cell is now empty), and
-// the sheet's extent after it.
-export interface CellPatch {
-	sheet: number
-	cells: [number, CellView | null][]
-	rowCount: number
-	colCount: number
-}
-
-export type EditResult =
-	// Cells changed, on the edited sheet and on any sheet whose formulas read it. `styles` is the whole
-	// style table when it grew, empty otherwise.
-	| { type: "cells"; patches: CellPatch[]; styles: CellStyleView[]; state: DocState }
-	// Sheets were added, renamed, or had rows or columns moved: one entry per sheet, the new count of them,
-	// a full view of each sheet whose layout changed and null for the rest (keep the view held, named
-	// `names[i]`, with any of `patches` for it folded in and its extent set to any of `extents` for it, as a
-	// full view would report it). `styles` is the whole style table.
-	| {
-			type: "sheets"
-			sheets: (SheetView | null)[]
-			names?: string[]
-			patches?: CellPatch[]
-			extents?: { sheet: number; rowCount: number; colCount: number }[]
-			styles: CellStyleView[]
-			state: DocState
-	  }
-	// A CSV's rows or columns moved (applied, redone, or undone when `revert`): the held cells move with
-	// them, `cells` (those an undone delete puts back) land on top, and the sheet's extent becomes
-	// rowCount by colCount. Sizes kept beside the file follow `shift` too.
-	| {
-			type: "shifted"
-			sheet: number
-			shift: AxisEdit & { revert: boolean }
-			cells: [number, CellView][]
-			rowCount: number
-			colCount: number
-			state: DocState
-	  }
-	// Columns or rows were resized: their sizes as the sheet now reads them (null: none of their own).
-	| { type: "sizes"; sheet: number; axis: SizeAxis; sizes: SizeEntry[]; state: DocState }
-	// The edit could not be made: the sheet's structure is locked, a sheet name is taken or invalid, it
-	// would reach past a sheet's limits, it would change part of an array formula's range, it would
-	// rename a table column by editing its header, it holds a formula that does not read as one, the
-	// workbook turned out not to save intact (so it stays view-only), or (CSV only) it types a character
-	// the file's fixed legacy encoding cannot hold.
-	| {
-			type: "refused"
-			reason: "structureLocked" | "sheetName" | "tooLarge" | "arrayFormula" | "tableHeader" | "formula" | "readOnly" | "encoding"
-			state: DocState
-	  }
-	// Nothing to undo or redo.
-	| { type: "none"; state: DocState }
-
-export const MAX_EDIT_CELLS = 200_000
 
 // The largest sheet opened or grown by an edit. A workbook sheet holds its values as a dense rectangle,
 // so this bounds its rows times its columns, whatever is filled.

@@ -5,7 +5,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import { writeXlsx } from "hucre/xlsx"
 import { inThreadSheetHost } from "@filen/office/dom/sheet"
 import type { DriveItem } from "@/features/drive/lib/item"
-import { menuGroups, rendersItems } from "@/features/spreadsheet/next/components/sheetExtension"
+import { menuGroups, rendersItems } from "@/features/spreadsheet/components/sheetExtension"
 import { registerAllActions } from "@/lib/keymap/actions"
 
 // The grid's menu puts a separator only between groups that show something: none first, last or twice in a row,
@@ -26,17 +26,17 @@ vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 	usePreviewBytes: () => ({ status: "success", bytes: bytes.current, refetch: () => undefined })
 }))
 
-vi.mock("@/features/spreadsheet/next/lib/sheetHosts", async importOriginal => {
+vi.mock("@/features/spreadsheet/lib/sheetHosts", async importOriginal => {
 	const host = inThreadSheetHost()
 
 	return {
-		...(await importOriginal<typeof import("@/features/spreadsheet/next/lib/sheetHosts")>()),
+		...(await importOriginal<typeof import("@/features/spreadsheet/lib/sheetHosts")>()),
 		openSheet: (source: Uint8Array, options: Parameters<typeof host.open>[1], onEvent: Parameters<typeof host.open>[2]) =>
 			host.open(source, options, onEvent)
 	}
 })
 
-const { SheetNextViewer } = await import("@/features/spreadsheet/next/sheetNextViewer")
+const { SheetViewer } = await import("@/features/spreadsheet/sheetViewer")
 
 registerAllActions()
 
@@ -75,7 +75,7 @@ describe("the grid menu's separators", () => {
 	it("starts, ends and runs without a separator on a read-only file", async () => {
 		bytes.current = await writeXlsx({ sheets: [{ name: "One", rows: [["a", "b"]] }] })
 		render(
-			<SheetNextViewer
+			<SheetViewer
 				item={{ type: "file", data: { uuid: "u-ro", decryptedMeta: { name: "ro.xlsx" }, size: 1n } } as unknown as DriveItem}
 				documentKey="ro"
 				alt="ro.xlsx"

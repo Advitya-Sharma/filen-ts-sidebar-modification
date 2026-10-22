@@ -5,8 +5,8 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { useEffect } from "react"
 import { CellFlag } from "@filen/office/core/sheet"
 import type { SheetCellPointer, SheetGridHandle, SheetGridModel, SheetGridState, SheetShortcut } from "@filen/office/react/sheet"
-import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
-import type { SheetBodyExtension } from "@/features/spreadsheet/next/components/sheetExtension"
+import type { SheetHandle } from "@/features/spreadsheet/hooks/useSheetSession"
+import type { SheetBodyExtension } from "@/features/spreadsheet/components/sheetExtension"
 import { openGrid, workbook } from "@/tests/sheetMenusFixtures"
 import { GridHarness } from "@/tests/sheetMenusHarness"
 import { previewSheetNotes } from "@/locales/en/previewSheet/notes"
@@ -26,7 +26,7 @@ vi.mock("@/lib/trustedLinks/useTrustedLinkGate", () => ({
 	useTrustedLinkGate: () => ({ intercept, onClick: () => undefined, onAuxClick: () => undefined, dialog: null })
 }))
 
-const { useSheetAnnotations } = await import("@/features/spreadsheet/next/comments/useSheetAnnotations")
+const { useSheetAnnotations } = await import("@/features/spreadsheet/comments/useSheetAnnotations")
 
 type NotesKey = keyof typeof previewSheetNotes
 

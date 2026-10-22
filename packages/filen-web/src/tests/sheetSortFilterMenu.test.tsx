@@ -6,7 +6,7 @@ import type { SheetCommand, SheetLayout } from "@filen/office/core/sheet"
 import type { SheetGridModel, SheetGridState } from "@filen/office/react/sheet"
 import "@/lib/i18n"
 import { preview } from "@/locales/en/preview"
-import { SortFilterMenu } from "@/features/spreadsheet/next/data/sortFilterMenu"
+import { SortFilterMenu } from "@/features/spreadsheet/data/sortFilterMenu"
 
 // The toolbar's sort and filter menu: a quick sort of the data around the active cell by its column (the header row
 // guessed and kept), the filter turned on over that data, and a text file offered the sort alone.

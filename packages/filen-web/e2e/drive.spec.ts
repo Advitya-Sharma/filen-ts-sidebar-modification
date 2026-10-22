@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures"
 import { trackConsoleErrors } from "./helpers/csp"
 import { bootTo, breadcrumb, clickSidebarLink, waitForListingSettled } from "./helpers/listing"
-import { BUILT_FIXTURE_SCENARIOS, enterFixtureRoot } from "./helpers/fixtures"
+import { FIXTURE_SCENARIOS, enterFixtureRoot } from "./helpers/fixtures"
 import { resolveModKey } from "./helpers/modkey"
 
 // Nothing here ever creates, renames, moves, or deletes anything: the new-directory flow is exercised
@@ -18,7 +18,7 @@ import { resolveModKey } from "./helpers/modkey"
 //
 // One directory per scenario, built once by the fixtures-setup project — the fixture root's exact row
 // count, which the select-all assertion below is pinned to rather than to a snapshot read at runtime.
-const FIXTURE_ROOT_ROW_COUNT = BUILT_FIXTURE_SCENARIOS.length
+const FIXTURE_ROOT_ROW_COUNT = FIXTURE_SCENARIOS.length
 
 test.describe("drive", () => {
 	test("the Cloud Drive listing renders the shell, breadcrumb, and directory contents region", async ({ page }) => {

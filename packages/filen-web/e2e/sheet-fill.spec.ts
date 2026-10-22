@@ -4,11 +4,10 @@ import { test, expect } from "./fixtures"
 import { withScratchDirectory, LAZY_VIEWER_TIMEOUT_MS, uploadFiles } from "./helpers/listing"
 import { preview } from "@/locales/en/preview"
 
-// The office engine's fill and clipboard end to end, in builds with VITE_SHEET_NEXT=1: the fill handle dragged with
+// The office engine's fill and clipboard end to end: the fill handle dragged with
 // the mouse (a series, a copy with Ctrl held, back inside to clear) and with a finger (touch pointer events on the
 // handle, which never pans the grid), the Series dialog from the grid's menu, and clipboard HTML pasted from another
 // spreadsheet (LibreOffice's, with Google Sheets' attributes): values, an R1C1 formula and number formats.
-test.skip(process.env["VITE_SHEET_NEXT"] !== "1", "the office engine's viewer is only in builds with VITE_SHEET_NEXT=1")
 test.describe.configure({ mode: "default" })
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

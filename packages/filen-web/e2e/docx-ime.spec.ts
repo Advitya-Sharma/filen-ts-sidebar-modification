@@ -2,7 +2,7 @@ import type { CDPSession, Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { bootTo, LAZY_VIEWER_TIMEOUT_MS } from "./helpers/listing"
 import { FIXTURE_FILES, openFixtureRows } from "./helpers/fixtures"
-import { DOCX_EDITING_E2E, DOCX_FIXTURE_TEXT, type DocxFixtureName } from "./helpers/docxFixtures"
+import { DOCX_FIXTURE_TEXT, type DocxFixtureName } from "./helpers/docxFixtures"
 import { trackCspViolations } from "./helpers/csp"
 import { preview } from "@/locales/en/preview"
 
@@ -14,7 +14,6 @@ import { preview } from "@/locales/en/preview"
 //
 // Chromium only: Firefox and WebKit have no protocol to drive an input method.
 
-test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
 test.describe.configure({ mode: "default" })
 
 // Wide enough for the balloon column beside the page at 100 %.

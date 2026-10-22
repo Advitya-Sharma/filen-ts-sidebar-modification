@@ -3,13 +3,10 @@
 import { describe, expect, it, vi } from "vitest"
 import { render } from "@testing-library/react"
 
-// The document settings (author name, autosave) follow remote changes in every build with an office editor: one with
-// the spreadsheet editor and without DOCX editing too.
+// The document settings (author name, autosave) follow remote changes.
 
 const { registerOfficeSettings } = vi.hoisted(() => ({ registerOfficeSettings: vi.fn(() => () => undefined) }))
 
-vi.mock("@/features/preview/lib/docxEditingFlag", () => ({ DOCX_EDITING: false }))
-vi.mock("@/features/spreadsheet/next/sheetNextFlag", () => ({ SHEET_NEXT: true }))
 vi.mock("@/features/office/lib/officeSettings", () => ({ registerOfficeSettingsSocketHandlers: registerOfficeSettings }))
 vi.mock("@/lib/sdk/socket", () => ({ socketBridge: { start: vi.fn(() => Promise.resolve()) } }))
 vi.mock("@/features/notes/lib/socketHandlers", () => ({ registerNoteSocketHandlers: () => () => undefined }))
@@ -26,7 +23,7 @@ vi.mock("@/features/spellcheck/lib/userDictionary", () => ({ registerUserDiction
 const { SocketHost } = await import("@/features/shell/components/socketHost")
 
 describe("the socket host", () => {
-	it("hears remote changes to the document settings in a build whose only office editor is the spreadsheet's", () => {
+	it("hears remote changes to the document settings", () => {
 		render(<SocketHost />)
 
 		expect(registerOfficeSettings).toHaveBeenCalledTimes(1)

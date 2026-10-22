@@ -8,8 +8,6 @@ import { LogsBlock } from "@/features/settings/components/advanced/logsBlock"
 import { AboutRows } from "@/features/settings/components/advanced/aboutRows"
 import { ThirdPartyNoticesRow } from "@/features/settings/components/advanced/thirdPartyNoticesRow"
 import { DocumentsRows } from "@/features/settings/components/advanced/documentsRows"
-import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
-import { SHEET_NEXT } from "@/features/spreadsheet/next/sheetNextFlag"
 import { SettingsGroup, SettingsPage } from "@/features/settings/components/settingsLayout"
 import { routeHead } from "@/lib/head/routeHead"
 import { i18n } from "@/lib/i18n"
@@ -19,21 +17,8 @@ export const Route = createFileRoute("/_app/settings/advanced")({
 	component: AdvancedPage
 })
 
-// What the documents group covers: the editors this build has (both flags are constants, so a build with neither
-// drops the group and its strings).
-function useDocumentsDescription(): string {
-	const { t } = useTranslation(["settings", "preview"])
-
-	if (!SHEET_NEXT) {
-		return t("settingsAdvancedDocumentsDescription")
-	}
-
-	return t(DOCX_EDITING ? "preview:previewSheetDocumentsDescription" : "preview:previewSheetDocumentsDescriptionSheets")
-}
-
 function AdvancedPage() {
 	const { t } = useTranslation("settings")
-	const documentsDescription = useDocumentsDescription()
 
 	return (
 		<SettingsPage
@@ -52,14 +37,12 @@ function AdvancedPage() {
 			>
 				<ArchiveMemoryRow />
 			</SettingsGroup>
-			{DOCX_EDITING || SHEET_NEXT ? (
-				<SettingsGroup
-					title={t("settingsAdvancedDocumentsTitle")}
-					description={documentsDescription}
-				>
-					<DocumentsRows />
-				</SettingsGroup>
-			) : null}
+			<SettingsGroup
+				title={t("settingsAdvancedDocumentsTitle")}
+				description={t("settingsAdvancedDocumentsDescription")}
+			>
+				<DocumentsRows />
+			</SettingsGroup>
 			<SettingsGroup
 				title={t("settingsAdvancedUploadsTitle")}
 				description={t("settingsAdvancedUploadsDescription")}

@@ -1,6 +1,6 @@
 import {
-	CsvDocument,
-	csvDoc,
+	cellKey,
+	csvCellView,
 	engineFormula,
 	formulaTranslator,
 	malformedFormula,
@@ -85,8 +85,13 @@ const INPUTS = ["42", "1,234.5", "12%", "-.5e3", "2024-02-29", "2023-02-29", "tr
 
 function csvProbe(file: Uint8Array, tsv: boolean): string {
 	const { rows, format } = parseCsvFile(file, tsv)
-	const doc = csvDoc(rows, format.writable)
-	const cells = [...(doc.sheets[0]?.cells ?? new Map())].map(([key, view]) => `${String(key)}:${view.text}${view.numeric ? "#" : ""}`)
+	const cells = rows.flatMap((row, rowIndex) =>
+		row.flatMap((text, colIndex) => {
+			const view = csvCellView(text)
+
+			return view === null ? [] : [`${String(cellKey(rowIndex, colIndex))}:${view.text}${view.numeric === true ? "#" : ""}`]
+		})
+	)
 	let saved: string
 
 	try {
@@ -96,20 +101,6 @@ function csvProbe(file: Uint8Array, tsv: boolean): string {
 	}
 
 	return JSON.stringify({ rows, format, cells, saved })
-}
-
-function csvEdits(): string {
-	const { rows, format } = parseCsvFile(utf8("a,b\n1,2\n"), false)
-	const document = new CsvDocument(rows, format)
-	const results = [
-		document.apply({ type: "setCells", sheet: 0, cells: [{ row: 3, col: 2, input: 'new "value"' }] }),
-		document.apply({ sheet: 0, type: "insert", axis: "rows", at: 1, count: 1 }),
-		document.apply({ sheet: 0, type: "delete", axis: "cols", at: 0, count: 1 }),
-		document.undo(),
-		document.redo()
-	].map(result => result.type)
-
-	return `${results.join()} ${hex(document.serialize().bytes)}`
 }
 
 function engineProbe(): string {
@@ -259,7 +250,6 @@ export function sheetProbes(probe: (name: string, run: () => unknown) => void): 
 
 	for (const [name, file, tsv] of CSV_FILES) probe(`sheet.csv ${name}`, () => csvProbe(file, tsv))
 
-	probe("sheet.csv edits", csvEdits)
 	probe("sheet.tsv clipboard", () => JSON.stringify(parseTsv('a\t"b\nc"\td\r\n"x""y"\t\t')))
 	probe("sheet.input", () =>
 		JSON.stringify(

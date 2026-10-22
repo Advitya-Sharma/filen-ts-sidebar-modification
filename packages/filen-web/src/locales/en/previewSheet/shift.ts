@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — the Insert and Delete dialogs' cell options
+// "preview" namespace, spreadsheet viewer — the Insert and Delete dialogs' cell options
 // (Ctrl+Shift+Plus, Ctrl+Minus), as Excel's. Spread into preview.ts; same catalog rules.
 export const previewSheetShift = {
 	/** Insert dialog — inserts cells at the selection, moving the cells there and to their right further right */

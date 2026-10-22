@@ -10,7 +10,7 @@ import { inThreadSheetHost } from "@filen/office/dom/sheet"
 import { label, openGrid, workbook } from "@/tests/sheetMenusFixtures"
 import { GridHarness } from "@/tests/sheetMenusHarness"
 
-// The structure items of the office engine's spreadsheet viewer: rows and columns hidden and shown from the grid's
+// The structure items of the spreadsheet viewer: rows and columns hidden and shown from the grid's
 // menu, merges (with Excel's value-loss question), and a text file's frozen panes kept beside it across a reopen.
 
 const { kv } = vi.hoisted(() => ({ kv: new Map<string, unknown>() }))
@@ -29,11 +29,11 @@ vi.mock("@/lib/storage/adapter", () => ({
 	}
 }))
 
-const { SheetGridMenu } = await import("@/features/spreadsheet/next/components/sheetGridMenu")
-const { useMergeCommands } = await import("@/features/spreadsheet/next/menus/useMergeCommands")
-const { SheetModifyPassword } = await import("@/features/spreadsheet/next/menus/modifyPassword")
-const { freezeTo } = await import("@/features/spreadsheet/next/menus/structureCommands")
-const { structureShortcut } = await import("@/features/spreadsheet/next/menus/structureShortcuts")
+const { SheetGridMenu } = await import("@/features/spreadsheet/components/sheetGridMenu")
+const { useMergeCommands } = await import("@/features/spreadsheet/menus/useMergeCommands")
+const { SheetModifyPassword } = await import("@/features/spreadsheet/menus/modifyPassword")
+const { freezeTo } = await import("@/features/spreadsheet/menus/structureCommands")
+const { structureShortcut } = await import("@/features/spreadsheet/menus/structureShortcuts")
 
 function hiddenRows(model: SheetGridModel): number[] {
 	const layout = model.getSnapshot().layout

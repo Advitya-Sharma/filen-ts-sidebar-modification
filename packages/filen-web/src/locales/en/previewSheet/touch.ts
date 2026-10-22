@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — touch and screen readers (the touch menu over the
+// "preview" namespace, spreadsheet viewer — touch and screen readers (the touch menu over the
 // selection, what the grid's live region says). Spread into preview.ts; same catalog rules.
 export const previewSheetTouch = {
 	/** Touch menu over the selected cells — opens the active cell for typing (the on-screen keyboard comes up) */

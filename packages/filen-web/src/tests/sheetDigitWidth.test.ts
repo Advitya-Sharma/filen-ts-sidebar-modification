@@ -2,8 +2,8 @@
 
 import { describe, expect, it } from "vitest"
 import type { SheetEvent, SheetId, SheetLayout, SheetOpened } from "@filen/office/core/sheet"
-import { SheetEventRelay } from "@/features/spreadsheet/next/lib/sheetEvents"
-import { withWorkbookDigit } from "@/features/spreadsheet/next/lib/sheetDigitWidth"
+import { SheetEventRelay } from "@/features/spreadsheet/lib/sheetEvents"
+import { withWorkbookDigit } from "@/features/spreadsheet/lib/sheetDigitWidth"
 
 // A workbook's column-width unit, which the session works out from its default font once asked: Calibri 11's 7 px
 // leaves the layouts as they are; another unit has the layouts made before it (the active sheet's, and those held

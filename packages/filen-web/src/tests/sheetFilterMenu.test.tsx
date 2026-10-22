@@ -6,8 +6,8 @@ import type { SheetCommand, SheetFilterRange, SheetFilterValues, SheetSessionApi
 import type { SheetGridHandle, SheetGridModel } from "@filen/office/react/sheet"
 import "@/lib/i18n"
 import { preview } from "@/locales/en/preview"
-import { FilterMenu } from "@/features/spreadsheet/next/data/filterMenu"
-import { setSortFilterOpen, useSortFilterOpen } from "@/features/spreadsheet/next/data/sortFilterState"
+import { FilterMenu } from "@/features/spreadsheet/data/filterMenu"
+import { setSortFilterOpen, useSortFilterOpen } from "@/features/spreadsheet/data/sortFilterState"
 
 // A header's filter menu: its values listed once each (searched, checked, the blanks too), OK filtering by what is
 // checked, the sort commands ordering the filter's range by the column, and the conditions opening their dialog.

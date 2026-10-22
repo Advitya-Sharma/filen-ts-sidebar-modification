@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url"
 import type { Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, uploadFiles, withScratchDirectory } from "./helpers/listing"
-import { DOCX_EDITING_E2E, DOCX_MIME } from "./helpers/docxFixtures"
+import { DOCX_MIME } from "./helpers/docxFixtures"
 import { cdpMemory, pageTimingsScript, readPageTimings, type MemorySample, type PageTimings } from "./helpers/cdpMemory"
 import { resolveModKey } from "./helpers/modkey"
 import { preview } from "@/locales/en/preview"
@@ -16,7 +16,6 @@ import { preview } from "@/locales/en/preview"
 // no long task outside a save passes 100 ms, every blob URL made is revoked, and keys do not get slower.
 // Firefox and WebKit have no heap API: keys only.
 
-test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
 test.skip(process.env["FILEN_WEB_E2E_SOAK"] !== "1", "The soak runs on request (FILEN_WEB_E2E_SOAK=1)")
 test.describe.configure({ mode: "default" })
 

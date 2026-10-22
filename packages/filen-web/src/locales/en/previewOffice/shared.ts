@@ -1,5 +1,5 @@
-// "preview" namespace — strings both office editors use (DOCX editing and the spreadsheet viewer on the office engine).
-// Spread into preview.ts; same catalog rules. Builds with neither flag resolve it to the empty stub (vite.config.ts).
+// "preview" namespace — strings both office editors use (DOCX editing and the spreadsheet viewer).
+// Spread into preview.ts; same catalog rules.
 export const previewOfficeShared = {
 	/** Office editors — dialog title asking for the name comments, notes and tracked changes are signed with */
 	previewOfficeAuthorNameTitle: "Your name in documents",

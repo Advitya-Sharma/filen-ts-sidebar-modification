@@ -7,11 +7,8 @@ import { buildZip } from "./archiveFixtures"
 // text a spec finds it by, and the pictures an insert leg feeds the image pipeline (one over the 25 MiB
 // limit, a WebP that is converted, an SVG that gets a PNG fallback).
 //
-// The specs that read them run only with DOCX editing built in (VITE_DOCX_EDITING=1), so the fixture setup
-// builds their scenarios only then. Specs that SAVE a document upload these bytes into their own scratch
-// directory instead: the shared tree is read-only.
-
-export const DOCX_EDITING_E2E = process.env["VITE_DOCX_EDITING"] === "1"
+// Specs that SAVE a document upload these bytes into their own scratch directory instead: the shared tree is
+// read-only.
 
 export const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -380,9 +377,10 @@ export function svgPictureBytes(): Buffer {
 	)
 }
 
-// ── The viewer's subjects (scenario "docx-viewer", every build) ─────────────────────────────────────────────
+// ── The viewer's subjects (scenario "docx-viewer") ───────────────────────────────────────────────────────
 
-// The line of text each readable viewer document is found by. The archives hold VIEWER_ENTRY_NAME; the
+// The line of text each readable viewer document is found by. The archives hold VIEWER_ENTRY_NAME, and the zip also
+// VIEWER_ARCHIVE_DOCUMENTS (a document in the drive opens in the editor, an archive's entry in the viewer); the
 // encrypted and legacy files hold no text a viewer can show.
 export const DOCX_VIEWER_TEXT = {
 	"viewer-300p.docx": "Viewer 300 pages fixture",
@@ -396,6 +394,8 @@ export type DocxViewerFile =
 	keyof typeof DOCX_VIEWER_TEXT | "viewer-archive.7z" | "viewer-archive.zip" | "viewer-encrypted.docx" | "viewer-legacy.docx"
 
 export const VIEWER_ENTRY_NAME = "viewer-entry.docx"
+// The viewer documents the zip holds beside VIEWER_ENTRY_NAME.
+export const VIEWER_ARCHIVE_DOCUMENTS = ["viewer-300p.docx", "viewer-fonts.docx", "viewer-links.docx", "viewer-review.docx"] as const
 export const VIEWER_ENTRY_TEXT = "Viewer archive entry fixture"
 export const VIEWER_PAGES = 300
 // The embedded font's family, and the text set in it (every glyph a 1 em box) beside the same text in the default font.
@@ -484,7 +484,11 @@ const VIEWER_BUILDERS: Readonly<Record<DocxViewerFile, () => Buffer>> = {
 			defaults: [{ extension: "odttf", type: "application/vnd.openxmlformats-officedocument.obfuscatedFont" }]
 		}),
 	"viewer-legacy.docx": () => compoundFile([{ name: "WordDocument", data: Buffer.alloc(4096, 0xec) }]),
-	"viewer-archive.zip": () => buildZip([{ name: VIEWER_ENTRY_NAME, data: viewerEntry() }]),
+	"viewer-archive.zip": () =>
+		buildZip([
+			{ name: VIEWER_ENTRY_NAME, data: viewerEntry() },
+			...VIEWER_ARCHIVE_DOCUMENTS.map(name => ({ name, data: VIEWER_BUILDERS[name]() }))
+		]),
 	"viewer-archive.7z": () => sevenZipStored(VIEWER_ENTRY_NAME, viewerEntry()),
 	"viewer-links.docx": () =>
 		docx({

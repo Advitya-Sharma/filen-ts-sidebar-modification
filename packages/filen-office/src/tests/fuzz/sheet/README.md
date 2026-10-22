@@ -41,6 +41,6 @@ Replaying one sequence:
 - `node --expose-gc --import tsx src/bench/sheetBench.ts <fixture> [--keys=50] [--json]`: open, first tile, proof,
   engine, keystroke commits, inserted row, scrolled tiles, save after one edit and after everything, each with
   this thread's CPU time, retained memory and message sizes, beside the previous engine's numbers. The fixtures are
-  the baseline's (100k×10 values, with formulas without and with results, 300k×10, the CSV).
+  the baseline's (100k×10 values, with formulas without and with results, 300k×10).
 - `node --expose-gc --import tsx src/bench/sheetSoak.ts <workbook.xlsx> [--ops=5000] [--save-every=250] [--json]`: a
   long session with a save every 250 operations: retained memory, the history's weight, save CPU and key p95 drift.

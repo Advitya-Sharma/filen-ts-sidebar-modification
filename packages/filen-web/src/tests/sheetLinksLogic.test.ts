@@ -10,8 +10,8 @@ import {
 	placeName,
 	type LinkForm,
 	type SheetLink
-} from "@/features/spreadsheet/next/comments/annotations.logic"
-import { refusalKey } from "@/features/spreadsheet/next/lib/sheetMessages.logic"
+} from "@/features/spreadsheet/comments/annotations.logic"
+import { refusalKey } from "@/features/spreadsheet/lib/sheetMessages.logic"
 import { preview } from "@/locales/en/preview"
 
 const SHEETS: SheetSummary[] = [

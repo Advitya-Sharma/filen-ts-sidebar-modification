@@ -5,8 +5,8 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { useEffect } from "react"
 import { CellFlag } from "@filen/office/core/sheet"
 import type { SheetGridHandle, SheetGridModel, SheetGridState, SheetShortcut } from "@filen/office/react/sheet"
-import type { SheetBodyExtension } from "@/features/spreadsheet/next/components/sheetExtension"
-import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
+import type { SheetBodyExtension } from "@/features/spreadsheet/components/sheetExtension"
+import type { SheetHandle } from "@/features/spreadsheet/hooks/useSheetSession"
 import { openGrid, workbook } from "@/tests/sheetMenusFixtures"
 import { GridHarness } from "@/tests/sheetMenusHarness"
 
@@ -21,7 +21,7 @@ vi.mock("@/lib/trustedLinks/useTrustedLinkGate", () => ({
 	useTrustedLinkGate: () => ({ intercept: () => true, onClick: () => undefined, onAuxClick: () => undefined, dialog: null })
 }))
 
-const { useSheetAnnotations } = await import("@/features/spreadsheet/next/comments/useSheetAnnotations")
+const { useSheetAnnotations } = await import("@/features/spreadsheet/comments/useSheetAnnotations")
 
 interface Probe {
 	shortcut: ((key: SheetShortcut) => boolean) | null

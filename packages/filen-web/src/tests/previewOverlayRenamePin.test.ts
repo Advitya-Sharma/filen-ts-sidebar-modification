@@ -45,9 +45,7 @@ function viewerStub(kind: "text" | "spreadsheet") {
 }
 
 vi.mock("@/features/preview/components/textViewer", () => ({ TextViewer: viewerStub("text") }))
-vi.mock("@/features/spreadsheet/components/spreadsheetViewer", () => ({ SpreadsheetViewer: viewerStub("spreadsheet") }))
-// The overlay over the current viewer's double, whichever viewer the build carries.
-vi.mock("@/features/spreadsheet/next/sheetNextFlag", () => ({ SHEET_NEXT: false }))
+vi.mock("@/features/spreadsheet/sheetViewer", () => ({ SheetViewer: viewerStub("spreadsheet") }))
 // The slot stepped to in between (other.pdf); its own loading is not what these tests are about.
 vi.mock("@/features/preview/components/pdfViewer", () => ({ PdfViewer: () => null }))
 

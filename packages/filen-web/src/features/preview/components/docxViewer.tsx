@@ -44,7 +44,6 @@ import { DocxAnnotationLayer, type DocxBalloonKey } from "@/features/preview/com
 import { DocxPreviewFallback } from "@/features/preview/components/docxPreviewFallback"
 import { DocxPasswordGate, type PasswordVerdict } from "@/features/preview/components/docxPasswordPrompt"
 import { DocxEditView, DocxProtectedEditView, type DocxSaveSource } from "@/features/preview/components/docxEditor"
-import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 import { DocxToolbar, type PasswordIntegrity } from "@/features/preview/components/docxToolbar"
 import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
 import { LoadingState } from "@/components/loadingState"
@@ -102,7 +101,7 @@ function sourceFor(content: DocxContent, mode: DocxMarkupMode): DocxSource {
 export function DocxViewer({ item, alt, variant, editing }: DocxViewerProps) {
 	// Editing or viewing is decided as the file mounts. The editor keeps the document it opened across the
 	// user's own saves (each makes the file a new version under a new uuid): its bytes stay the ones it read.
-	const [edit] = useState(() => DOCX_EDITING && editing?.writable === true)
+	const [edit] = useState(() => editing?.writable === true)
 	const [openedItem] = useState(item)
 	const result = usePreviewBytes(edit ? openedItem : item)
 	const downloading = result.status === "pending"
@@ -134,7 +133,7 @@ export function DocxViewer({ item, alt, variant, editing }: DocxViewerProps) {
 							/>
 						)
 
-						if (!DOCX_EDITING || !edit || editing === undefined) {
+						if (!edit || editing === undefined) {
 							return viewer
 						}
 
@@ -148,8 +147,7 @@ export function DocxViewer({ item, alt, variant, editing }: DocxViewerProps) {
 							viewer: () => viewer
 						}
 
-						// DOCX_EDITING first: a build without editing drops the editor entirely. A password-protected
-						// document's editor takes its own copy and seals its saves with its key.
+						// A password-protected document's editor takes its own copy and seals its saves with its key.
 						return key === null || content.file !== null ? (
 							<DocxEditView
 								bytes={content.file ?? ready.bytes}

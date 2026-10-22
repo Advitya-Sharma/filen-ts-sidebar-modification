@@ -2,7 +2,8 @@ import type { Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { bootTo, LAZY_VIEWER_TIMEOUT_MS } from "./helpers/listing"
 import { FIXTURE_FILES, openFixtureRows, type FixtureScenario } from "./helpers/fixtures"
-import { DOCX_EDITING_E2E, DOCX_FIXTURE_TEXT, DOCX_VIEWER_TEXT, DOCX_PICTURE_ALT, type DocxFixtureName } from "./helpers/docxFixtures"
+import { archiveBrowser } from "./helpers/archive"
+import { DOCX_FIXTURE_TEXT, DOCX_PICTURE_ALT, DOCX_VIEWER_TEXT, type DocxFixtureName } from "./helpers/docxFixtures"
 import { preview } from "@/locales/en/preview"
 
 // What a screen reader is told about the DOCX surfaces that are not text: the comment balloons (viewer and
@@ -66,10 +67,14 @@ async function openInEditor(page: Page, scenario: "docx-edit" | "docx-notes-pict
 	await expect(page.getByRole("button", { name: preview.previewDocxBold, exact: true })).toBeEnabled({ timeout: LAZY_VIEWER_TIMEOUT_MS })
 }
 
+// A document in the drive opens in the editor; the viewer's are read from the fixture zip.
 test("viewer balloons and pictures: a named comments landmark, each balloon named by its author, a named picture", async ({ page }) => {
-	test.skip(DOCX_EDITING_E2E, "with DOCX editing a document in the drive opens in the editor (see the editor balloons)")
+	await openRow(page, "docx-viewer", "viewer-archive.zip")
 
-	await openRow(page, "docx-viewer", "viewer-review.docx")
+	const browser = archiveBrowser(page)
+
+	await expect(browser.row("viewer-review.docx")).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+	await browser.row("viewer-review.docx").dblclick()
 	await expect(pageText(page, DOCX_VIEWER_TEXT["viewer-review.docx"])).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
 
 	const column = page.getByRole("complementary", { name: preview.previewDocxComments })
@@ -81,8 +86,6 @@ test("viewer balloons and pictures: a named comments landmark, each balloon name
 })
 
 test.describe("editor", () => {
-	test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
-
 	test("comment balloons: a named comments landmark, every control in a balloon named", async ({ page }) => {
 		await openInEditor(page, "docx-edit", "w3-comments.docx")
 

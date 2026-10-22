@@ -3,7 +3,6 @@ import { test, expect, settleLeases } from "./fixtures"
 import { archiveBrowser, openRowMenu, previewOverlay } from "./helpers/archive"
 import { trackCspViolations } from "./helpers/csp"
 import {
-	DOCX_EDITING_E2E,
 	DOCX_MIME,
 	DOCX_VIEWER_TEXT,
 	VIEWER_ENTRY_NAME,
@@ -27,17 +26,14 @@ import {
 import { common } from "@/locales/en/common"
 import { preview } from "@/locales/en/preview"
 
-// The DOCX viewer in a real browser against the real backend, at each place a document opens read-only: the
-// drive's preview overlay, an archive's entry (zip and 7z), a public link (signed out, and with downloads
-// off) and a chat's link card. Per place: the engine drew the pages (never docx-preview's .docx-wrapper),
-// nothing violated the CSP, find and zoom work. The overlay leg also covers an embedded font, links (only
-// http(s) and mailto open, in a new tab with no opener), the docx-preview fallback for a package the engine
-// refuses, the messages for an encrypted and a legacy file, and the one docx worker every document shares
-// and that ends a minute after the last one closed.
-//
-// With DOCX editing built in, a document in the drive opens in the editor (docx-smoke.spec.ts), so the
-// overlay leg there checks only the files the editor hands back to the viewer; the archive leg is the
-// viewer's in both builds.
+// The DOCX viewer in a real browser against the real backend, at each place a document opens read-only: an
+// archive's entry (zip and 7z), a public link (signed out, and with downloads off) and a chat's link card. Per
+// place: the engine drew the pages (never docx-preview's .docx-wrapper), nothing violated the CSP, find and zoom
+// work. The zip's documents also cover comments, an embedded font, links (only http(s) and mailto open, in a new tab
+// with no opener), 300 pages, and the one docx worker every document shares and that ends a minute after the last
+// one closed. A document in the drive opens in the editor (docx-smoke.spec.ts), so the overlay leg checks only the
+// files the editor hands to the viewer: the docx-preview fallback for a package the engine refuses, and the
+// messages for an encrypted and a legacy file.
 
 test.describe.configure({ mode: "default" })
 
@@ -219,68 +215,13 @@ async function expectLinks(page: Page, scope: Locator): Promise<void> {
 	}
 }
 
-test("drive preview overlay: every viewer document, one shared docx worker ended once idle, no CSP errors", async ({ page }) => {
-	test.slow()
-
+test("drive preview overlay: the documents the editor hands to the viewer, no CSP errors", async ({ page }) => {
 	const cspViolations = trackCspViolations(page)
-	const workers = trackDocxWorkers(page)
 	const rows = await viewerRows(page)
 
-	if (DOCX_EDITING_E2E) {
-		// The editor opens the readable documents (docx-smoke.spec.ts); what it cannot open goes to the viewer.
-		let overlay = await openRow(page, rows, "viewer-malformed.docx")
+	// The editor opens the readable documents (docx-smoke.spec.ts); what it cannot open goes to the viewer.
+	let overlay = await openRow(page, rows, "viewer-malformed.docx")
 
-		await expectFallback(overlay)
-		await closeOverlay(page)
-
-		overlay = await openRow(page, rows, "viewer-encrypted.docx")
-		await expectMessage(overlay, preview.previewDocxUnsupportedEncryption)
-		await closeOverlay(page)
-
-		overlay = await openRow(page, rows, "viewer-legacy.docx")
-		await expectMessage(overlay, preview.previewDocxLegacyFormat)
-		await closeOverlay(page)
-
-		expect(cspViolations).toEqual([])
-
-		return
-	}
-
-	// Comments and tracked changes: the balloons beside the page, find and zoom.
-	let overlay = await openRow(page, rows, "viewer-review.docx")
-
-	await expectEngine(overlay, DOCX_VIEWER_TEXT["viewer-review.docx"])
-	// The column is a landmark around absolutely placed balloons (it has no box of its own).
-	await expect(overlay.getByRole("complementary", { name: preview.previewDocxComments })).toBeAttached({
-		timeout: LAZY_VIEWER_TIMEOUT_MS
-	})
-	await expect(overlay.getByLabel("Comment by E2E Reviewer", { exact: true }).first()).toBeVisible()
-	await expectFind(overlay, "fixture", 1)
-	await expectZoom(overlay)
-	await closeOverlay(page)
-
-	overlay = await openRow(page, rows, "viewer-fonts.docx")
-	await expectEngine(overlay, DOCX_VIEWER_TEXT["viewer-fonts.docx"])
-	await expectEmbeddedFont(overlay)
-	await closeOverlay(page)
-
-	overlay = await openRow(page, rows, "viewer-links.docx")
-	await expectEngine(overlay, DOCX_VIEWER_TEXT["viewer-links.docx"])
-	await expectLinks(page, overlay)
-	await closeOverlay(page)
-
-	// 300 pages: laid out to the end, and found on its last.
-	const opening = Date.now()
-
-	overlay = await openRow(page, rows, "viewer-300p.docx")
-	await expectEngine(overlay, DOCX_VIEWER_TEXT["viewer-300p.docx"])
-	console.log(`docx-viewer: 300 pages, first page shown ${String(Date.now() - opening)} ms after the double-click`)
-	await expect(overlay.getByText(`Page 1 of ${String(VIEWER_PAGES)}`, { exact: true })).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
-	await expectFind(overlay, `Viewer page ${String(VIEWER_PAGES)}`, 1)
-	await expect(pageText(overlay, `Viewer page ${String(VIEWER_PAGES)}`)).toBeInViewport()
-	await closeOverlay(page)
-
-	overlay = await openRow(page, rows, "viewer-malformed.docx")
 	await expectFallback(overlay)
 	await closeOverlay(page)
 
@@ -293,15 +234,6 @@ test("drive preview overlay: every viewer document, one shared docx worker ended
 	await closeOverlay(page)
 
 	expect(cspViolations).toEqual([])
-
-	// Every document above ran on one worker, which ends a minute after the last one closed.
-	expect(workers).toHaveLength(1)
-
-	const [worker] = workers
-
-	if (worker !== undefined) {
-		await worker.waitForEvent("close", { timeout: WORKER_IDLE_WAIT_MS })
-	}
 })
 
 test("archive entries: a docx in a zip and in a 7z opens in the viewer, view-only, on one docx worker", async ({ page }) => {
@@ -333,6 +265,71 @@ test("archive entries: a docx in a zip and in a 7z opens in the viewer, view-onl
 
 	expect(workers).toHaveLength(1)
 	expect(cspViolations).toEqual([])
+})
+
+test("archive viewer documents: comments, an embedded font, links and 300 pages on one docx worker ended once idle", async ({ page }) => {
+	test.slow()
+
+	const cspViolations = trackCspViolations(page)
+	const workers = trackDocxWorkers(page)
+	const rows = await viewerRows(page)
+
+	await rows["viewer-archive.zip"].dblclick()
+
+	const browser = archiveBrowser(page)
+	const overlay = browser.overlay
+
+	async function openEntry(name: string, text: string): Promise<void> {
+		await expect(browser.row(name)).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+		await browser.row(name).dblclick()
+		await expectEngine(overlay, text)
+	}
+
+	async function back(name: string): Promise<void> {
+		await overlay.getByRole("button", { name: preview.previewArchiveEntryBack, exact: true }).click()
+		await expect(browser.row(name)).toBeVisible()
+	}
+
+	// Comments and tracked changes: the balloons beside the page, find and zoom.
+	await openEntry("viewer-review.docx", DOCX_VIEWER_TEXT["viewer-review.docx"])
+	// The column is a landmark around absolutely placed balloons (it has no box of its own).
+	await expect(overlay.getByRole("complementary", { name: preview.previewDocxComments })).toBeAttached({
+		timeout: LAZY_VIEWER_TIMEOUT_MS
+	})
+	await expect(overlay.getByLabel("Comment by E2E Reviewer", { exact: true }).first()).toBeVisible()
+	await expectFind(overlay, "fixture", 1)
+	await expectZoom(overlay)
+	await back("viewer-review.docx")
+
+	await openEntry("viewer-fonts.docx", DOCX_VIEWER_TEXT["viewer-fonts.docx"])
+	await expectEmbeddedFont(overlay)
+	await back("viewer-fonts.docx")
+
+	await openEntry("viewer-links.docx", DOCX_VIEWER_TEXT["viewer-links.docx"])
+	await expectLinks(page, overlay)
+	await back("viewer-links.docx")
+
+	// 300 pages: laid out to the end, and found on its last.
+	const opening = Date.now()
+
+	await openEntry("viewer-300p.docx", DOCX_VIEWER_TEXT["viewer-300p.docx"])
+	console.log(`docx-viewer: 300 pages, first page shown ${String(Date.now() - opening)} ms after the double-click`)
+	await expect(overlay.getByText(`Page 1 of ${String(VIEWER_PAGES)}`, { exact: true })).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
+	await expectFind(overlay, `Viewer page ${String(VIEWER_PAGES)}`, 1)
+	await expect(pageText(overlay, `Viewer page ${String(VIEWER_PAGES)}`)).toBeInViewport()
+	await back("viewer-300p.docx")
+	await browser.close()
+
+	expect(cspViolations).toEqual([])
+
+	// Every document above ran on one worker, which ends a minute after the last one closed.
+	expect(workers).toHaveLength(1)
+
+	const [worker] = workers
+
+	if (worker !== undefined) {
+		await worker.waitForEvent("close", { timeout: WORKER_IDLE_WAIT_MS })
+	}
 })
 
 // ---- public links and chat cards: success needs a link the account owns, which is premium ---------------

@@ -1,48 +1,16 @@
 import { describe, expect, it } from "vitest"
 import {
-	cellKey,
 	cellName,
 	columnIndex,
 	columnName,
-	createAxis,
 	expandToMerges,
 	gridMove,
 	malformedFormula,
 	parseTsv,
 	rangeName,
-	rangeToTsv,
 	wellFormedFormula,
-	type GridBounds,
-	type SheetView
+	type GridBounds
 } from "../core/sheet/index"
-
-describe("createAxis", () => {
-	const axis = createAxis(10, 20, new Map([[2, 50]]), [5])
-
-	it("places indices past the exceptions and sizes the exceptions", () => {
-		expect(axis.offset(0)).toBe(0)
-		expect(axis.offset(2)).toBe(40)
-		expect(axis.offset(3)).toBe(90)
-		expect(axis.size(5)).toBe(0)
-		expect(axis.offset(6)).toBe(90 + 40)
-		expect(axis.total).toBe(20 * 10 + 30 - 20)
-	})
-
-	it("finds the index holding a position, skipping hidden ones", () => {
-		expect(axis.indexAt(0)).toBe(0)
-		expect(axis.indexAt(45)).toBe(2)
-		expect(axis.indexAt(89)).toBe(2)
-		expect(axis.indexAt(90)).toBe(3)
-		expect(axis.indexAt(130)).toBe(6)
-		expect(axis.indexAt(1e9)).toBe(9)
-	})
-
-	it("stays cheap for a million rows with few exceptions", () => {
-		const big = createAxis(1_000_000, 24, new Map([[500_000, 100]]), [])
-
-		expect(big.indexAt(big.offset(750_000) + 1)).toBe(750_000)
-	})
-})
 
 describe("cell names", () => {
 	it("names columns and ranges as spreadsheets do", () => {
@@ -113,19 +81,6 @@ describe("gridMove", () => {
 })
 
 describe("TSV", () => {
-	const sheet = {
-		cells: new Map([
-			[cellKey(0, 0), { text: "name" }],
-			[cellKey(0, 1), { text: 'say "hi"' }],
-			[cellKey(1, 0), { text: "two\nlines" }],
-			[cellKey(1, 1), { text: "3" }]
-		])
-	} as unknown as SheetView
-
-	it("copies what cells show, quoting what would break the layout", () => {
-		expect(rangeToTsv(sheet, { startRow: 0, startCol: 0, endRow: 1, endCol: 1 })).toBe('name\t"say ""hi"""\r\n"two\nlines"\t3')
-	})
-
 	it("reads pasted TSV back, quotes and a trailing line end included", () => {
 		expect(parseTsv('name\t"say ""hi"""\r\n"two\nlines"\t3\r\n')).toEqual([
 			["name", 'say "hi"'],

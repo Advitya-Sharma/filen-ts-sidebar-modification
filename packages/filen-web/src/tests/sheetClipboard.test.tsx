@@ -5,8 +5,8 @@ import { useRef } from "react"
 import { render } from "@testing-library/react"
 import type { SheetCommand } from "@filen/office/core/sheet"
 import type { SheetGridModel } from "@filen/office/react/sheet"
-import { MAX_PASTE_HTML, sanitizeSheetClipboard } from "@/features/spreadsheet/next/clipboard/sheetClipboardSanitizer"
-import { useSheetClipboard } from "@/features/spreadsheet/next/clipboard/useSheetClipboard"
+import { MAX_PASTE_HTML, sanitizeSheetClipboard } from "@/features/spreadsheet/clipboard/sheetClipboardSanitizer"
+import { useSheetClipboard } from "@/features/spreadsheet/clipboard/useSheetClipboard"
 
 // The sheet clipboard on the web: HTML goes through the shared sheet clipboard sanitizer both ways, a copy puts text
 // and HTML on the clipboard (text alone past the HTML size), and a paste hands the session sanitised HTML beside the

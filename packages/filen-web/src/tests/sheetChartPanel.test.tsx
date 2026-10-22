@@ -4,14 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 import "@/lib/i18n"
 import type { ChartInfo, SheetChartEdit } from "@filen/office/react/sheet/charts"
-import { ChartPanel } from "@/features/spreadsheet/next/charts/chartPanel"
+import { ChartPanel } from "@/features/spreadsheet/charts/chartPanel"
 import {
 	axisKey,
 	groupingOptions,
 	labelPositionOptions,
 	numberField,
 	selectionReference
-} from "@/features/spreadsheet/next/charts/chartPanel.logic"
+} from "@/features/spreadsheet/charts/chartPanel.logic"
 
 // The chart editor panel: what it offers for the chart it shows, and the one edit each change sends (text fields on
 // Enter or blur); a chart the editor cannot change shows read-only; Escape closes it.

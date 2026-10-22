@@ -1,20 +1,17 @@
 import { describe, expect, it } from "vitest"
 import {
-	DEFAULT_ROW_HEIGHT,
 	MAX_COL_WIDTH,
 	MAX_RESIZE_TARGETS,
 	MAX_ROW_HEIGHT,
 	MIN_SIZE,
 	clampSize,
 	colWidthToPx,
-	fitSize,
 	pxToColWidth,
 	pxToRowHeight,
 	resetTargets,
 	resizeTargets,
 	restoreSizes,
 	rowHeightToPx,
-	sheetWithSizes,
 	shiftSizes,
 	withSizes
 } from "../core/sheet/index"
@@ -84,15 +81,6 @@ describe("withSizes", () => {
 		])
 		expect(base.get(2)).toBe(60)
 	})
-
-	it("replaces only the resized axis of a sheet", () => {
-		const sheet = { colWidths: new Map([[0, 50]]), rowHeights: new Map([[0, 30]]), name: "s" }
-		const next = sheetWithSizes(sheet, "cols", [[1, 70]])
-
-		expect(next.colWidths.get(1)).toBe(70)
-		expect(next.rowHeights).toBe(sheet.rowHeights)
-		expect(next.name).toBe("s")
-	})
 })
 
 describe("shiftSizes / restoreSizes", () => {
@@ -143,23 +131,6 @@ describe("resizeTargets", () => {
 	it("falls back to the dragged index when the selection is past the cap", () => {
 		expect(resizeTargets("rows", 7, range, true, noneHidden)).toEqual([7])
 		expect(range.endRow - range.startRow + 1).toBeGreaterThan(MAX_RESIZE_TARGETS)
-	})
-})
-
-describe("fitSize", () => {
-	it("fits a column to its widest content plus padding", () => {
-		expect(fitSize("cols", [30.2, 81.4, 12])).toBe(82 + 14)
-	})
-
-	it("fits a row to its tallest content, never below the default", () => {
-		expect(fitSize("rows", [16.25])).toBeNull()
-		expect(fitSize("rows", [48.1])).toBe(49 + 7)
-		expect(49 + 7).toBeGreaterThan(DEFAULT_ROW_HEIGHT)
-	})
-
-	it("goes back to the default with nothing to measure", () => {
-		expect(fitSize("cols", [])).toBeNull()
-		expect(fitSize("rows", [])).toBeNull()
 	})
 })
 

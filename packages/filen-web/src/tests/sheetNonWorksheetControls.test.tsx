@@ -21,8 +21,8 @@ vi.mock("@/lib/storage/adapter", () => ({
 	kvDelete: () => Promise.resolve()
 }))
 
-const { SheetToolbar } = await import("@/features/spreadsheet/next/toolbar/sheetToolbar")
-const { SheetFormulaBar } = await import("@/features/spreadsheet/next/components/sheetFormulaBar")
+const { SheetToolbar } = await import("@/features/spreadsheet/toolbar/sheetToolbar")
+const { SheetFormulaBar } = await import("@/features/spreadsheet/components/sheetFormulaBar")
 
 afterEach(() => {
 	cleanup()

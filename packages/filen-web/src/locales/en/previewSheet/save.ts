@@ -1,6 +1,5 @@
-// "preview" namespace, spreadsheet viewer on the office engine — saving: the file menu (Save as .xlsx, Download as
-// CSV, autosave), and the documents settings in builds where spreadsheets are edited. Spread into preview.ts; same
-// catalog rules.
+// "preview" namespace, spreadsheet viewer — saving: the file menu (Save as .xlsx, Download as
+// CSV, autosave). Spread into preview.ts; same catalog rules.
 export const previewSheetSave = {
 	/** Spreadsheet viewer — accessible label and tooltip of the button opening the file menu (Save as .xlsx, Download as CSV, Save automatically) */
 	previewSheetFileMenu: "File",
@@ -16,9 +15,5 @@ export const previewSheetSave = {
 	previewSheetSaveAsXlsxTextBody:
 		"An .xlsx copy with your changes is saved in the same directory and opens here; this file stays as it was last saved. Numbers become numbers, and everything else stays text, formulas and dates included.",
 	/** Toast — the file holds more than an .xlsx workbook can: rows past 1,048,576, columns past 16,384, or a cell longer than 32,767 characters */
-	previewSheetSaveAsXlsxTooLarge: "This file holds more than an .xlsx workbook can, so it can't be saved as one.",
-	/** Advanced settings — documents group description in builds where Word documents and spreadsheets are both edited */
-	previewSheetDocumentsDescription: "Editing Word documents and spreadsheets, synced across your devices",
-	/** Advanced settings — documents group description in builds where only spreadsheets are edited */
-	previewSheetDocumentsDescriptionSheets: "Editing spreadsheets, synced across your devices"
+	previewSheetSaveAsXlsxTooLarge: "This file holds more than an .xlsx workbook can, so it can't be saved as one."
 }

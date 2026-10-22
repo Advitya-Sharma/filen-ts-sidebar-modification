@@ -6,7 +6,7 @@ import type { SheetCommand } from "@filen/office/core/sheet"
 import type { SheetGridState } from "@filen/office/react/sheet"
 import "@/lib/i18n"
 import { preview } from "@/locales/en/preview"
-import { SheetAxisDialog, type SheetAxisDialogKind } from "@/features/spreadsheet/next/components/sheetAxisDialog"
+import { SheetAxisDialog, type SheetAxisDialogKind } from "@/features/spreadsheet/components/sheetAxisDialog"
 
 // Excel's Insert and Delete dialogs for cells: its four options in its order, cells shifted by default, and each
 // option's command.

@@ -5,11 +5,10 @@ import { withScratchDirectory, LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, up
 import { resolveModKey } from "./helpers/modkey"
 import { preview } from "@/locales/en/preview"
 
-// Sheet structure on the office engine end to end, in builds with VITE_SHEET_NEXT=1: rows and columns inserted,
+// Sheet structure on the office engine end to end: rows and columns inserted,
 // deleted, hidden and shown from the grid's menu, the top row frozen, cells merged and centred (with Excel's
 // value-loss question), sheets added, renamed, duplicated, moved and deleted from the tabs, and a protected sheet
 // refusing an edit. Each leg saves and reopens, so what it checks is the file the drive now holds.
-test.skip(process.env["VITE_SHEET_NEXT"] !== "1", "the office engine's viewer is only in builds with VITE_SHEET_NEXT=1")
 test.describe.configure({ mode: "default" })
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

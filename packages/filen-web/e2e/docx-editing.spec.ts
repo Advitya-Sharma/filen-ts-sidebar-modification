@@ -1,23 +1,14 @@
 import type { Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, uploadFiles, withScratchDirectory } from "./helpers/listing"
-import {
-	DOCX_EDITING_E2E,
-	DOCX_FIXTURE_TEXT,
-	DOCX_MIME,
-	docxFixtureBytes,
-	svgPictureBytes,
-	type DocxFixtureName
-} from "./helpers/docxFixtures"
+import { DOCX_FIXTURE_TEXT, DOCX_MIME, docxFixtureBytes, svgPictureBytes, type DocxFixtureName } from "./helpers/docxFixtures"
 import { trackCspViolations } from "./helpers/csp"
 import { preview } from "@/locales/en/preview"
 
 // The DOCX editor's editing UI in a real browser: the Table group and a column border dragged on the page, a
 // header edited from its chip, content controls filled in where they are, and character formatting that a
 // save keeps. Each document is uploaded into the test's own scratch directory (they are edited and saved).
-// Runs only against a build with DOCX editing (VITE_DOCX_EDITING=1).
 
-test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
 test.describe.configure({ mode: "default" })
 
 function pageText(page: Page, text: string): Locator {

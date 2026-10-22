@@ -5,9 +5,9 @@ import { act, cleanup, renderHook } from "@testing-library/react"
 import type { SheetLayout } from "@filen/office/core/sheet"
 import type { SheetCellPointer, SheetGridHandle, SheetGridModel, SheetGridState } from "@filen/office/react/sheet"
 import "@/lib/i18n"
-import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
-import { useSheetSortFilter } from "@/features/spreadsheet/next/data/filterExtension"
-import { setSortFilterOpen, useSortFilterOpen } from "@/features/spreadsheet/next/data/sortFilterState"
+import type { SheetHandle } from "@/features/spreadsheet/hooks/useSheetSession"
+import { useSheetSortFilter } from "@/features/spreadsheet/data/filterExtension"
+import { setSortFilterOpen, useSortFilterOpen } from "@/features/spreadsheet/data/sortFilterState"
 
 // The sort and filter extension's grid parts: a press on a header's filter button (and only on it) opens that
 // header's menu and a second press closes it, Alt+Down on a filter header opens it, and a text file gets the sort

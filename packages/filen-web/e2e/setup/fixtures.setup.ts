@@ -12,7 +12,7 @@ import {
 	setTallListingViewport,
 	waitForListingSettled
 } from "../helpers/listing"
-import { BUILT_FIXTURE_SCENARIOS, FIXTURE_FILES, type FixtureFileName, type FixtureScenario } from "../helpers/fixtures"
+import { FIXTURE_SCENARIOS, FIXTURE_FILES, type FixtureFileName, type FixtureScenario } from "../helpers/fixtures"
 import { DOCX_MIME, docxFixtureBytes, docxViewerBytes, largePictureBytes, svgPictureBytes, webpPictureBytes } from "../helpers/docxFixtures"
 import {
 	BMP_BYTES,
@@ -159,15 +159,11 @@ const PAYLOADS = {
 	"w3-picture.webp": { generate: webpPictureBytes },
 	"notes.docx": { buffer: docxFixtureBytes("notes.docx"), mimeType: DOCX_MIME },
 	"described-picture.docx": { buffer: docxFixtureBytes("described-picture.docx"), mimeType: DOCX_MIME },
-	"viewer-300p.docx": { buffer: docxViewerBytes("viewer-300p.docx"), mimeType: DOCX_MIME },
 	"viewer-archive.7z": { buffer: docxViewerBytes("viewer-archive.7z"), mimeType: "application/x-7z-compressed" },
 	"viewer-archive.zip": { buffer: docxViewerBytes("viewer-archive.zip"), mimeType: "application/zip" },
 	"viewer-encrypted.docx": { buffer: docxViewerBytes("viewer-encrypted.docx"), mimeType: DOCX_MIME },
-	"viewer-fonts.docx": { buffer: docxViewerBytes("viewer-fonts.docx"), mimeType: DOCX_MIME },
 	"viewer-legacy.docx": { buffer: docxViewerBytes("viewer-legacy.docx"), mimeType: DOCX_MIME },
-	"viewer-links.docx": { buffer: docxViewerBytes("viewer-links.docx"), mimeType: DOCX_MIME },
-	"viewer-malformed.docx": { buffer: docxViewerBytes("viewer-malformed.docx"), mimeType: DOCX_MIME },
-	"viewer-review.docx": { buffer: docxViewerBytes("viewer-review.docx"), mimeType: DOCX_MIME }
+	"viewer-malformed.docx": { buffer: docxViewerBytes("viewer-malformed.docx"), mimeType: DOCX_MIME }
 } satisfies Record<FixtureFileName, FixturePayload>
 
 // ONE wall clock for the whole build, the shape cleanup-setup's SWEEP_BUDGET_MS already uses. Each row
@@ -327,7 +323,7 @@ setup("build the shared read-only fixture tree", async ({ page }) => {
 	const uploadDeadline = Date.now() + UPLOAD_BUDGET_MS
 
 	try {
-		for (const scenario of BUILT_FIXTURE_SCENARIOS) {
+		for (const scenario of FIXTURE_SCENARIOS) {
 			await createDirectoryViaDialog(page, scenario, listbox)
 			await descendInto(page, listbox, scenario)
 			await uploadScenarioFiles(page, scenario, workDir, uploadDeadline)

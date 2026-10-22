@@ -1,27 +1,17 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { MessageChannel, type MessagePort } from "node:worker_threads"
 import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { CsvDocument, parseCsvFile, type EditOp } from "../core/sheet/index"
-import {
-	tileKey,
-	tileText,
-	type SheetChange,
-	type SheetCommandResult,
-	type SheetFileKind,
-	type SheetSessionApi
-} from "../core/sheet/protocol"
+import type { SheetChange, SheetCommandResult, SheetFileKind, SheetSessionApi } from "../core/sheet/protocol"
 import { openTextSession } from "../core/sheet/text"
 import { sheetWorkerHost, type SheetWorkerLike } from "../dom/sheet/client"
 import { serveTextWorker } from "../dom/sheet/text"
-import { CORPUS_DIR } from "./corpusDir"
 import { cells, firstTile, numeric, savedBytes, tileEntry, tileTexts } from "./sheetSessionFixtures"
 import { equalBytes } from "./xlsxWriteFixtures"
 
 // CSV, TSV and .tab files as sessions: text stored as typed, the file written back in its own encoding, separator
 // and line ends, an unedited (or undone) save as the source byte for byte; and the text path's imports, which
-// never reach the workbook stack or the formula engine. The corpus differential holds every CSV and TSV to
-// HEAD's text editing (CsvDocument).
+// never reach the workbook stack or the formula engine.
 
 async function open(bytes: Uint8Array, kind: SheetFileKind = "csv"): Promise<SheetSessionApi> {
 	const opened = await openTextSession(bytes, { kind }, () => undefined)
@@ -158,6 +148,65 @@ describe("text sessions", () => {
 	})
 })
 
+// A file the heuristic misdetects as writable windows-1252 (its true source encoding is really windows-1250,
+// windows-1251 or GBK) is never re-encoded on save: decode-then-encode is a bijection on every byte these sources
+// use, so an untouched cell comes back byte-identical, and an edit typing a character windows-1252 cannot hold is
+// refused rather than silently reformatting the whole file.
+describe("text sessions over a misdetected legacy encoding", () => {
+	const hexBytes = (hex: string): Uint8Array => Uint8Array.from(hex.match(/../g) ?? [], byte => Number.parseInt(byte, 16))
+	// "Jméno,Město\nJiří,Brno\nZdeněk,Ústí\n" encoded as windows-1250.
+	const WINDOWS_1250 = "4a6de96e6f2c4dec73746f0a4a69f8ed2c42726e6f0a5a64656eec6b2cda7374ed0a"
+	// "id,unit,qty\n1,шт,5\n2,кг,3\n" encoded as windows-1251.
+	const WINDOWS_1251 = "69642c756e69742c7174790a312cf8f22c350a322ceae32c330a"
+	// "id,name,qty\n1,A,5\n2,B,3\n3,C,4\n4,D,1\n5,表,9\n" encoded as GBK.
+	const GBK = "69642c6e616d652c7174790a312c412c350a322c422c330a332c432c340a342c442c310a352cb1ed2c390a"
+
+	it("keeps the source byte-exact past the edited row after a representable edit", async () => {
+		for (const hex of [WINDOWS_1250, WINDOWS_1251, GBK]) {
+			const bytes = hexBytes(hex)
+			const session = await open(bytes)
+
+			changeOf(await session.command({ type: "cells.set", sheet: 0, cells: cells([[0, 0, "ID!"]]) }))
+
+			const out = await savedBytes(session)
+
+			// Only the header row's first cell was touched: every byte from the first line break on matches the source.
+			expect(Array.from(out.subarray(out.indexOf(0x0a)))).toEqual(Array.from(bytes.subarray(bytes.indexOf(0x0a))))
+			session.close()
+		}
+	})
+
+	it("refuses an edit typing a character windows-1252 cannot hold, leaving the file's bytes unchanged", async () => {
+		const cases: [string, number, number, string][] = [
+			// Polish/Czech Ł is outside windows-1252 even though the file passed the heuristic.
+			[WINDOWS_1250, 1, 0, "Łódź"],
+			// Cyrillic is outside windows-1252.
+			[WINDOWS_1251, 1, 1, "шт"],
+			// Han is outside windows-1252.
+			[GBK, 1, 1, "新"]
+		]
+
+		for (const [hex, row, col, typed] of cases) {
+			const bytes = hexBytes(hex)
+			const session = await open(bytes)
+			const result = await session.command({ type: "cells.set", sheet: 0, cells: cells([[row, col, typed]]) })
+
+			expect(result.ok ? null : result.refusal.reason).toBe("encoding")
+			// Nothing was written, and no UTF-8 BOM crept in.
+			expect(equalBytes(await savedBytes(session), bytes)).toBe(true)
+			session.close()
+		}
+	})
+
+	it("still allows a representable edit even though the true encoding differs", async () => {
+		const session = await open(hexBytes(WINDOWS_1250))
+
+		changeOf(await session.command({ type: "cells.set", sheet: 0, cells: cells([[1, 2, "Nové"]]) }))
+		expect(tileTexts(await firstTile(session, 0)).get("1,2")).toBe("Nové")
+		session.close()
+	})
+})
+
 describe("the text path's imports", () => {
 	it("never reach the workbook reader and writer, the formula engine or encryption", () => {
 		const seen = new Set<string>()
@@ -195,128 +244,5 @@ describe("the text path's imports", () => {
 		expect(files).not.toContain("core/sheet/commands.ts")
 		expect(files).not.toContain("dom/sheet/host.ts")
 		expect([...packages].sort()).toEqual([])
-	})
-})
-
-const CORPUS = (["csv", "tsv"] as const).flatMap(kind =>
-	existsSync(join(CORPUS_DIR, kind))
-		? readdirSync(join(CORPUS_DIR, kind)).map(name => ({ kind, path: join(CORPUS_DIR, kind, name) }))
-		: []
-)
-
-describe.skipIf(CORPUS.length === 0)("text sessions against HEAD's text editing, over the corpus", () => {
-	it("shows the same cells, saves unedited as the source and edited as HEAD does", { timeout: 300_000 }, async () => {
-		const differences: string[] = []
-		let compared = 0
-
-		for (const { kind, path } of CORPUS) {
-			const bytes = new Uint8Array(readFileSync(path))
-			let head: CsvDocument
-
-			try {
-				const parsed = parseCsvFile(bytes, kind === "tsv")
-
-				head = new CsvDocument(parsed.rows, parsed.format)
-			} catch {
-				const opened = await openTextSession(bytes, { kind }, () => undefined)
-
-				if (opened.kind === "opened") differences.push(`${path}: HEAD refuses it, the session opens it`)
-
-				continue
-			}
-
-			const opened = await openTextSession(bytes.slice(), { kind }, () => undefined)
-
-			if (opened.kind !== "opened") {
-				differences.push(`${path}: ${opened.kind}`)
-				continue
-			}
-
-			const { session, info } = opened
-			const sheet = head.doc().sheets[0]
-
-			compared++
-
-			if (info.writability.state !== (head.writable ? "writable" : "viewOnly"))
-				differences.push(`${path}: writability ${info.writability.state}`)
-			if (info.activeLayout.rowCount !== sheet?.rowCount || info.activeLayout.colCount !== sheet.colCount)
-				differences.push(`${path}: extent`)
-
-			// Every cell HEAD shows, through the session's tiles.
-			const tileRows = Math.ceil((sheet?.rowCount ?? 0) / 64)
-			const tileCols = Math.ceil((sheet?.colCount ?? 0) / 32)
-			const shown = new Map<number, { text: string; numeric: boolean }>()
-
-			for (let tileRow = 0; tileRow < tileRows; tileRow++) {
-				const coordinates: number[] = []
-
-				for (let tileCol = 0; tileCol < tileCols; tileCol++) coordinates.push(tileRow, tileCol)
-
-				const { tiles } = await session.tiles(0, Uint32Array.from(coordinates))
-
-				for (const tile of tiles) {
-					for (let i = 0; i < tile.count; i++) {
-						const position = tile.positions[i] ?? 0
-						const row = tile.tileRow * 64 + (position >> 5)
-						const col = tile.tileCol * 32 + (position & 31)
-
-						shown.set(row * 16_384 + col, {
-							text: tile.strings[tile.texts[i] ?? -1] ?? "",
-							numeric: numeric(tile.flags[i] ?? 0)
-						})
-					}
-				}
-
-				session.release(Float64Array.from(tiles, tile => tileKey(tile.sheet, tile.tileRow, tile.tileCol)))
-			}
-
-			for (const [key, view] of sheet?.cells ?? []) {
-				const ours = shown.get(key)
-
-				// A tile carries what a cell paints of a long text (the cell query gives the rest).
-				if (ours?.text !== tileText(view.text) || ours.numeric !== (view.numeric === true)) {
-					differences.push(`${path}: cell ${key} ${JSON.stringify(view)} / ${JSON.stringify(ours)}`)
-					break
-				}
-			}
-
-			if (shown.size !== (sheet?.cells.size ?? 0)) differences.push(`${path}: ${shown.size} cells, HEAD ${sheet?.cells.size ?? 0}`)
-
-			if (head.writable) {
-				const saved = await session.save()
-
-				if (!saved.ok || !equalBytes(saved.bytes, bytes)) differences.push(`${path}: unedited save is not the source`)
-
-				// The same edits, then both saves.
-				const ops: EditOp[] = [
-					{ type: "setCells", sheet: 0, cells: [{ row: 1, col: 1, input: 'edited, "quoted"' }] },
-					{ type: "delete", sheet: 0, axis: "rows", at: 0, count: 1 },
-					{ type: "insert", sheet: 0, axis: "cols", at: 0, count: 1 }
-				]
-
-				for (const op of ops) head.apply(op)
-
-				changeOf(await session.command({ type: "cells.set", sheet: 0, cells: cells([[1, 1, 'edited, "quoted"']]) }))
-				changeOf(await session.command({ type: "axis.delete", sheet: 0, axis: "rows", at: 0, count: 1 }))
-				changeOf(await session.command({ type: "axis.insert", sheet: 0, axis: "cols", at: 0, count: 1 }))
-
-				const edited = await session.save()
-
-				if (!edited.ok || !equalBytes(edited.bytes, head.serialize().bytes))
-					differences.push(`${path}: edited save differs from HEAD's`)
-
-				for (let i = 0; i < 3; i++) changeOf(await session.undo())
-
-				const undone = await session.save()
-
-				if (!undone.ok || !equalBytes(undone.bytes, bytes)) differences.push(`${path}: undone save is not the source`)
-			}
-
-			session.close()
-		}
-
-		process.stdout.write(`text corpus: ${compared} of ${CORPUS.length} files compared with HEAD\n`)
-		expect(compared).toBeGreaterThan(0)
-		expect(differences).toEqual([])
 	})
 })

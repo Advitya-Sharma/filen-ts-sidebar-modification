@@ -8,10 +8,10 @@ import { writeXlsx } from "hucre/xlsx"
 import { inThreadSheetHost } from "@filen/office/dom/sheet"
 import type { SheetOpened } from "@filen/office/core/sheet"
 import { createSheetGrid, useSheetGrid, type SheetGridHandle, type SheetGridModel } from "@filen/office/react/sheet"
-import { requestChart } from "@/features/spreadsheet/next/charts/chartRequests"
-import { useSheetCharts } from "@/features/spreadsheet/next/charts/useSheetCharts"
-import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
-import { selectedObjectKey } from "@/features/spreadsheet/next/objects/objectSelection"
+import { requestChart } from "@/features/spreadsheet/charts/chartRequests"
+import { useSheetCharts } from "@/features/spreadsheet/charts/useSheetCharts"
+import type { SheetHandle } from "@/features/spreadsheet/hooks/useSheetSession"
+import { selectedObjectKey } from "@/features/spreadsheet/objects/objectSelection"
 
 // The charts feature in the sheet view over a real session on this thread: the Insert menu's request inserts a chart of
 // the selected cells, selects it and opens its editor, and an edit made there reaches the chart and comes back into

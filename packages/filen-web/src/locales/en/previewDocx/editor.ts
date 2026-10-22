@@ -1,6 +1,5 @@
 // "preview" namespace, Word document editor — the editor itself: its toolbar row, clipboard and spelling menu, locked
-// parts, saving and the author prompt. Spread into preview.ts; same catalog rules. Builds without DOCX editing
-// resolve it to an empty catalog (vite.config.ts), as they do the other previewDocx/* files.
+// parts, saving and the author prompt. Spread into preview.ts; same catalog rules.
 export const previewDocxEditor = {
 	/** Docx editor — accessible name of the formatting toolbar row */
 	previewDocxEditToolbar: "Formatting",

@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — charts: inserting one, and the chart editor's side
+// "preview" namespace, spreadsheet viewer — charts: inserting one, and the chart editor's side
 // panel. Spread into preview.ts; same catalog rules.
 export const previewSheetCharts = {
 	/** Spreadsheet Insert menu and grid menu — submenu of chart types to insert a chart of the selected cells */

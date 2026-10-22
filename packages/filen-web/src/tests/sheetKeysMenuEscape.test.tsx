@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
-import { useEscapeClosesMenu } from "@/features/spreadsheet/next/components/menuEscape"
+import { useEscapeClosesMenu } from "@/features/spreadsheet/components/menuEscape"
 
 // A menu over the grid inside the preview's dialog: Escape with focus still in the grid closes the menu, never the
 // dialog under it.

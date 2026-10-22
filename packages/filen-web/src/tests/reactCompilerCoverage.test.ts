@@ -253,15 +253,14 @@ describe("React Compiler coverage", () => {
 		)
 	})
 
-	it("compiles the password prompts, the protected-document boundary, its badge and useSpreadsheetDoc", () => {
+	it("compiles the password prompts, the protected-document boundary and its badge", () => {
 		for (const [file, fnName] of [
 			["src/features/preview/components/docxPasswordPrompt.tsx", "DocxPasswordPrompt"],
 			["src/features/preview/components/docxPasswordPrompt.tsx", "DocxPasswordGate"],
 			["src/features/preview/components/docxViewer.tsx", "DocxPasswordBoundary"],
 			["src/features/preview/components/docxToolbar.tsx", "PasswordBadge"],
 			["src/features/preview/components/docxWriteProtection.tsx", "DocxWriteProtectionBar"],
-			["src/features/preview/components/docxEditor.tsx", "DocxProtectedEditView"],
-			["src/features/spreadsheet/hooks/useSpreadsheetDoc.ts", "useSpreadsheetDoc"]
+			["src/features/preview/components/docxEditor.tsx", "DocxProtectedEditView"]
 		] as const) {
 			const events = compile(file)
 
@@ -271,15 +270,6 @@ describe("React Compiler coverage", () => {
 				fnName
 			).toBe(true)
 		}
-	})
-
-	it("compiles GridCell, so a scroll step, selection move or keystroke re-renders only the cells that changed", () => {
-		const events = compile("src/features/spreadsheet/components/sheetGrid.tsx")
-
-		expect(events.filter(event => event.kind !== "CompileSuccess")).toEqual([])
-		expect(events.some(event => event.kind === "CompileSuccess" && event.fnName === "GridCell" && (event.memoSlots ?? 0) > 0)).toBe(
-			true
-		)
 	})
 
 	it.each([
@@ -658,7 +648,7 @@ describe("React Compiler coverage of the PDF viewer", () => {
 // The spreadsheet grid draws its cells on canvases outside React, and the shell around it re-renders on every
 // selection move and keystroke: each component and hook of the grid and the shell must compile, so such a render
 // reaches only the editor, the accessible active cell, the live region and the controls whose props changed.
-const SHEET_DIRECTORIES = ["../filen-office/src/react/sheet", "src/features/spreadsheet/next"]
+const SHEET_DIRECTORIES = ["../filen-office/src/react/sheet", "src/features/spreadsheet"]
 
 function sourceFiles(directory: string): string[] {
 	return readdirSync(directory, { recursive: true, encoding: "utf8" })
@@ -681,24 +671,24 @@ describe("React Compiler coverage of the spreadsheet grid and its shell", () => 
 		["../filen-office/src/react/sheet/SheetGrid.tsx", "SheetGrid"],
 		["../filen-office/src/react/sheet/SheetGrid.tsx", "CellEditor"],
 		["../filen-office/src/react/sheet/useSheetGrid.ts", "useSheetGrid"],
-		["src/features/spreadsheet/next/sheetNextViewer.tsx", "SheetNextViewer"],
-		["src/features/spreadsheet/next/components/sheetBody.tsx", "SheetBody"],
-		["src/features/spreadsheet/next/components/sheetFormulaBar.tsx", "SheetFormulaBar"],
-		["src/features/spreadsheet/next/components/sheetFormulaBar.tsx", "NameBox"],
-		["src/features/spreadsheet/next/components/sheetGridMenu.tsx", "SheetGridMenu"],
-		["src/features/spreadsheet/next/components/sheetGridMenu.tsx", "ResetItems"],
-		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "SheetToolbar"],
-		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "useActiveCell"],
-		["src/features/spreadsheet/next/toolbar/sheetToolbar.tsx", "useFormatChoices"],
-		["src/features/spreadsheet/next/toolbar/colorButton.tsx", "SheetColorButton"],
-		["src/features/spreadsheet/next/toolbar/bordersMenu.tsx", "BordersMenu"],
-		["src/features/spreadsheet/next/toolbar/bordersMenu.tsx", "BorderItems"],
-		["src/features/spreadsheet/next/toolbar/fontControls.tsx", "FontPicker"],
-		["src/features/spreadsheet/next/toolbar/alignMenus.tsx", "HorizontalAlignMenu"],
-		["src/features/spreadsheet/next/toolbar/numberFormatMenu.tsx", "NumberFormatMenu"],
-		["src/features/spreadsheet/next/dialogs/formatCells.tsx", "FormatCellsForm"],
-		["src/features/spreadsheet/next/hooks/useSheetSession.ts", "useSheetSession"],
-		["src/features/spreadsheet/next/clipboard/useSheetClipboard.ts", "useSheetClipboard"]
+		["src/features/spreadsheet/sheetViewer.tsx", "SheetViewer"],
+		["src/features/spreadsheet/components/sheetBody.tsx", "SheetBody"],
+		["src/features/spreadsheet/components/sheetFormulaBar.tsx", "SheetFormulaBar"],
+		["src/features/spreadsheet/components/sheetFormulaBar.tsx", "NameBox"],
+		["src/features/spreadsheet/components/sheetGridMenu.tsx", "SheetGridMenu"],
+		["src/features/spreadsheet/components/sheetGridMenu.tsx", "ResetItems"],
+		["src/features/spreadsheet/toolbar/sheetToolbar.tsx", "SheetToolbar"],
+		["src/features/spreadsheet/toolbar/sheetToolbar.tsx", "useActiveCell"],
+		["src/features/spreadsheet/toolbar/sheetToolbar.tsx", "useFormatChoices"],
+		["src/features/spreadsheet/toolbar/colorButton.tsx", "SheetColorButton"],
+		["src/features/spreadsheet/toolbar/bordersMenu.tsx", "BordersMenu"],
+		["src/features/spreadsheet/toolbar/bordersMenu.tsx", "BorderItems"],
+		["src/features/spreadsheet/toolbar/fontControls.tsx", "FontPicker"],
+		["src/features/spreadsheet/toolbar/alignMenus.tsx", "HorizontalAlignMenu"],
+		["src/features/spreadsheet/toolbar/numberFormatMenu.tsx", "NumberFormatMenu"],
+		["src/features/spreadsheet/dialogs/formatCells.tsx", "FormatCellsForm"],
+		["src/features/spreadsheet/hooks/useSheetSession.ts", "useSheetSession"],
+		["src/features/spreadsheet/clipboard/useSheetClipboard.ts", "useSheetClipboard"]
 	])("compiles %s's %s", (file, fnName) => {
 		const events = compile(file)
 

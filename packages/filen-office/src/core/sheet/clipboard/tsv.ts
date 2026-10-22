@@ -1,50 +1,7 @@
 import { rangeCols, rangeRows, type CellPosition } from "../refs/cellRef"
 import { formulaTranslator, rewriteFormula, sameSheet, type FormulaRef } from "../refs/formulaRefs"
 import type { CellEntry } from "../grid/gridEdits"
-import { cellKey, MAX_COLUMNS, MAX_ROWS, type CellRange, type CellView } from "../model/model"
-
-// How far a copy reaches: past this the clipboard text would run to hundreds of megabytes.
-const MAX_COPY_CELLS = 1_000_000
-
-function tsvField(text: string): string {
-	return /[\t\n\r"]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
-}
-
-// A range as the tab-separated text other spreadsheets paste: what each cell shows, quoted where a tab, a
-// line end or a quote would break the layout. Null past MAX_COPY_CELLS. `inputs` collects, by offset in
-// the range, what editing each cell starts from where that is not what it shows.
-export function rangeToTsv(
-	sheet: { cells: { get: (key: number) => CellView | undefined } },
-	range: CellRange,
-	inputs?: Map<number, string>
-): string | null {
-	const rows = rangeRows(range)
-	const cols = rangeCols(range)
-
-	if (rows * cols > MAX_COPY_CELLS) {
-		return null
-	}
-
-	const lines: string[] = []
-
-	for (let row = range.startRow; row <= range.endRow; row++) {
-		const fields: string[] = []
-
-		for (let col = range.startCol; col <= range.endCol; col++) {
-			const view = sheet.cells.get(cellKey(row, col))
-
-			if (view?.input !== undefined) {
-				inputs?.set(cellKey(row - range.startRow, col - range.startCol), view.input)
-			}
-
-			fields.push(tsvField(view?.text ?? ""))
-		}
-
-		lines.push(fields.join("\t"))
-	}
-
-	return lines.join("\r\n")
-}
+import { cellKey, MAX_COLUMNS, MAX_ROWS, type CellRange } from "../model/model"
 
 // A range copied or cut in the grid, kept beside its clipboard text: a paste of that same text back into
 // the grid writes what the cells held (a formula, a number or date its format rounds or dresses up)
@@ -55,24 +12,6 @@ export interface GridClip {
 	range: CellRange
 	cut: boolean
 	inputs: ReadonlyMap<number, string>
-}
-
-// Null past MAX_COPY_CELLS.
-export function rangeToClip(
-	sheet: { name: string; cells: { get: (key: number) => CellView | undefined } },
-	range: CellRange,
-	cut: boolean
-): GridClip | null {
-	const inputs = new Map<number, string>()
-	const tsv = rangeToTsv(sheet, range, inputs)
-
-	return tsv === null ? null : { tsv, sheet: sheet.name, range, cut, inputs }
-}
-
-// A cut whose cells changed since (restored by an undo, or edited) is no longer what there is to move: a
-// paste copies it instead, as spreadsheets end a cut.
-export function endedCut(clip: GridClip | null): GridClip | null {
-	return clip?.cut === true ? { ...clip, cut: false } : clip
 }
 
 // A cut formula's references as spreadsheets move them: one into the cut range follows its cells to

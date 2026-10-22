@@ -143,47 +143,6 @@ function assistantModelSources(mode: string): string[] {
 	return [url.origin]
 }
 
-// DOCX editing (src/features/preview/lib/docxEditingFlag.ts) stays out of builds without VITE_DOCX_EDITING=1: the
-// editor module resolves to a stub that renders nothing. A static import of the real one would keep the
-// module-level code of everything below it (ProseMirror, the in-thread engine, the writer) even unrendered.
-// The editor's strings (locales/en/previewDocx/*) resolve to empty catalogs the same way.
-function docxEditingAlias(mode: string): { find: RegExp; replacement: string }[] {
-	return loadEnv(mode, process.cwd(), "VITE_DOCX_EDITING")["VITE_DOCX_EDITING"] === "1"
-		? []
-		: [
-				{
-					find: /^@\/features\/preview\/components\/docxEditor$/,
-					replacement: "/src/features/preview/components/docxEditor.off.tsx"
-				},
-				{ find: /^@\/locales\/en\/previewDocx\/[A-Za-z]+$/, replacement: "/src/locales/en/previewDocx/off.ts" }
-			]
-}
-
-// The spreadsheet viewer on the office engine (src/features/spreadsheet/next/sheetNextFlag.ts) stays out of builds
-// without VITE_SHEET_NEXT=1, as DOCX editing does: the switch between the viewers resolves to the current one, and
-// the new viewer's strings (locales/en/previewSheet/*) to empty catalogs.
-function sheetNextAlias(mode: string): { find: RegExp; replacement: string }[] {
-	return loadEnv(mode, process.cwd(), "VITE_SHEET_NEXT")["VITE_SHEET_NEXT"] === "1"
-		? []
-		: [
-				{
-					find: /^@\/features\/spreadsheet\/next\/spreadsheetView$/,
-					replacement: "/src/features/spreadsheet/next/spreadsheetView.off.ts"
-				},
-				{ find: /^@\/locales\/en\/previewSheet\/[A-Za-z]+$/, replacement: "/src/locales/en/previewSheet/off.ts" }
-			]
-}
-
-// The strings both office editors use (locales/en/previewOffice/*) ship with either flag, and resolve to empty catalogs
-// with neither.
-function officeSharedAlias(mode: string): { find: RegExp; replacement: string }[] {
-	const env = loadEnv(mode, process.cwd(), "VITE_")
-
-	return env["VITE_DOCX_EDITING"] === "1" || env["VITE_SHEET_NEXT"] === "1"
-		? []
-		: [{ find: /^@\/locales\/en\/previewOffice\/[A-Za-z]+$/, replacement: "/src/locales/en/previewOffice/off.ts" }]
-}
-
 const contentSecurityPolicy = (connectExtra: readonly string[]) =>
 	[
 		"default-src 'none'",
@@ -255,7 +214,7 @@ export default defineConfig(({ mode }) => ({
 	// singleton, resolved from this package; a package name covers its subpaths (react/jsx-runtime, and
 	// react/compiler-runtime that the React Compiler injects into those sources too).
 	resolve: {
-		alias: [...docxEditingAlias(mode), ...sheetNextAlias(mode), ...officeSharedAlias(mode), { find: "@", replacement: "/src" }],
+		alias: [{ find: "@", replacement: "/src" }],
 		dedupe: SINGLETONS
 	},
 	// @sqlite.org/sqlite-wasm's own Vite guidance (README "Usage with vite"): it self-locates

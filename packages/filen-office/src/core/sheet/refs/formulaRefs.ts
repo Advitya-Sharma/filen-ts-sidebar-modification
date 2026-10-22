@@ -895,21 +895,6 @@ export function shiftFormula(formula: string, ownSheet: string, target: string, 
 	return { formula: shifted, cut: wasCut }
 }
 
-// Whether the formula refers to sheet `name` (3D references by either end).
-export function namesSheet(formula: string, name: string): boolean {
-	if (!formula.includes("!")) {
-		return false
-	}
-
-	return formulaParts(formula).some(
-		part =>
-			typeof part !== "string" &&
-			!part.ref.external &&
-			((part.ref.sheet !== null && sameSheet(part.ref.sheet, name)) ||
-				(part.ref.lastSheet !== null && sameSheet(part.ref.lastSheet, name)))
-	)
-}
-
 // A formula with every reference to sheet `from` naming `to` instead.
 export function renameSheetInFormula(formula: string, from: string, to: string): string {
 	if (!formula.includes("!")) {

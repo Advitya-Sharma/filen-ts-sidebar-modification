@@ -5,11 +5,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { useEffect } from "react"
 import { gridView, type SheetGridHandle, type SheetGridModel, type SheetGridState } from "@filen/office/react/sheet"
 import type { SheetDrawingObject } from "@filen/office/react/sheet/drawings"
-import type { SheetBodyExtension } from "@/features/spreadsheet/next/components/sheetExtension"
-import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
-import { requestImage } from "@/features/spreadsheet/next/objects/insertRequests"
-import { objectLabel, objectsEditable, pictureRefusalKey } from "@/features/spreadsheet/next/objects/objects.logic"
-import { selectObject, selectedObjectKey } from "@/features/spreadsheet/next/objects/objectSelection"
+import type { SheetBodyExtension } from "@/features/spreadsheet/components/sheetExtension"
+import type { SheetHandle } from "@/features/spreadsheet/hooks/useSheetSession"
+import { requestImage } from "@/features/spreadsheet/objects/insertRequests"
+import { objectLabel, objectsEditable, pictureRefusalKey } from "@/features/spreadsheet/objects/objects.logic"
+import { selectObject, selectedObjectKey } from "@/features/spreadsheet/objects/objectSelection"
 import { openGrid, workbook } from "@/tests/sheetMenusFixtures"
 import { GridHarness } from "@/tests/sheetMenusHarness"
 import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from "@/components/ui/context-menu"
@@ -22,7 +22,7 @@ vi.mock("@/features/drive/components/driveFilePickerDialog", () => ({
 	DriveFilePickerDialog: ({ title }: { title: string }) => <div role="dialog">{title}</div>
 }))
 
-const { useSheetObjects } = await import("@/features/spreadsheet/next/objects/useSheetObjects")
+const { useSheetObjects } = await import("@/features/spreadsheet/objects/useSheetObjects")
 
 // A 1×1 PNG.
 const PNG = Uint8Array.from(

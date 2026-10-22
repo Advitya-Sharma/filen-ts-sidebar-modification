@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — pictures, shapes and other drawing objects. Spread
+// "preview" namespace, spreadsheet viewer — pictures, shapes and other drawing objects. Spread
 // into preview.ts; same catalog rules.
 export const previewSheetObjects = {
 	/** Spreadsheet toolbar — the Insert menu (pictures, a chart, a link, a note) */

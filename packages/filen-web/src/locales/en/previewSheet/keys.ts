@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — find and replace, and the insert and delete
+// "preview" namespace, spreadsheet viewer — find and replace, and the insert and delete
 // dialogs (Ctrl+Shift+Plus, Ctrl+Minus). Spread into preview.ts; same catalog rules.
 export const previewSheetKeys = {
 	/** Spreadsheet toolbar — opens the find bar */

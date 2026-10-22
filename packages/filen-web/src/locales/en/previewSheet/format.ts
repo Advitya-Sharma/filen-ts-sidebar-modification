@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — the formatting toolbar and the Format Cells
+// "preview" namespace, spreadsheet viewer — the formatting toolbar and the Format Cells
 // dialog. Spread into preview.ts; same catalog rules.
 export const previewSheetFormat = {
 	/** Spreadsheet viewer — accessible label of the formatting toolbar above the grid */

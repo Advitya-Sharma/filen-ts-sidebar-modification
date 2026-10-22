@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { CellFlag, formatValue, numFmtCategory } from "@filen/office/core/sheet"
-import { codeOf, optionsOf, TYPES, type FormatOptions } from "@/features/spreadsheet/next/dialogs/formatCells.logic"
+import { codeOf, optionsOf, TYPES, type FormatOptions } from "@/features/spreadsheet/dialogs/formatCells.logic"
 import {
 	activeFormat,
 	alignPatch,
@@ -11,7 +11,7 @@ import {
 	themeSwatchRows,
 	toolbarFit,
 	valignPatch
-} from "@/features/spreadsheet/next/toolbar/toolbar.logic"
+} from "@/features/spreadsheet/toolbar/toolbar.logic"
 import { preview } from "@/locales/en/preview"
 
 // The spreadsheet toolbar's and Format Cells dialog's logic: what they read from the active cell and the workbook,

@@ -8,7 +8,7 @@ import { inThreadSheetHost } from "@filen/office/dom/sheet"
 import type { SheetOpened, SheetRenderStyle } from "@filen/office/core/sheet"
 import { createSheetGrid, useSheetGrid, type SheetGridModel } from "@filen/office/react/sheet"
 import { act } from "react"
-import { borderShortcut, setFormatCellsOpen } from "@/features/spreadsheet/next/toolbar/formatCellsState"
+import { borderShortcut, setFormatCellsOpen } from "@/features/spreadsheet/toolbar/formatCellsState"
 
 // The spreadsheet toolbar over a real session on this thread: it shows the active cell's format, and what its
 // controls do reaches the session (formats, borders, decimals, the Format Cells dialog's code).
@@ -28,12 +28,12 @@ vi.mock("@filen/office/react/sheet", async importOriginal => ({
 // What the Insert menu asks the features that insert for.
 const requests = vi.hoisted(() => ({ image: vi.fn(), shortcut: vi.fn() }))
 
-vi.mock("@/features/spreadsheet/next/objects/insertRequests", () => ({
+vi.mock("@/features/spreadsheet/objects/insertRequests", () => ({
 	requestImage: requests.image,
 	requestShortcut: requests.shortcut
 }))
 
-const { SheetToolbar } = await import("@/features/spreadsheet/next/toolbar/sheetToolbar")
+const { SheetToolbar } = await import("@/features/spreadsheet/toolbar/sheetToolbar")
 
 afterEach(() => {
 	cleanup()

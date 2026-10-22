@@ -3,8 +3,6 @@ import { basename } from "node:path"
 import v8 from "node:v8"
 import { bytesSource } from "@filen/office/core/opc"
 import { openXlsxSession } from "../core/sheet/commands"
-import { CsvDocument } from "../core/sheet/csv/csvDocument"
-import { parseCsvFile } from "../core/sheet/csv/csvView"
 import type { SheetChange, SheetCommandResult, SheetEvent } from "../core/sheet/protocol"
 import type { SheetSession } from "../core/sheet/session"
 import type { XlsxDocument } from "../core/xlsx/edit/document"
@@ -14,9 +12,9 @@ import { saveXlsx } from "../core/xlsx/write/index"
 // host runs the same session code): CPU time of this thread, wall time, retained heap after a full collection,
 // the process's peak RSS, and the size of what would cross to the page (v8.serialize, postMessage's serializer).
 // Compared against the previous engine's numbers at the same fixtures (HEAD in the baseline document).
-//   node --expose-gc --import tsx src/bench/sheetBench.ts <fixture.xlsx|.csv> [--keys=50] [--json]
+//   node --expose-gc --import tsx src/bench/sheetBench.ts <fixture.xlsx> [--keys=50] [--json]
 // The fixtures: 100k×10 values (m0), with a formula column and no stored results (m1), with stored results (m2),
-// 300k×10 values, and the same 100k×10 as CSV.
+// and 300k×10 values.
 
 const gc = (globalThis as { gc?: () => void }).gc
 
@@ -62,8 +60,7 @@ const HEAD: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		insertRowMessageMb: 31.5,
 		saveCpuMs: 456
 	},
-	"3m": { openCpuMs: 4093, openRetainedMb: 69.4, openPeakRssMb: 650 },
-	csv: { openCpuMs: 372, openRetainedMb: 36.6 }
+	"3m": { openCpuMs: 4093, openRetainedMb: 69.4, openPeakRssMb: 650 }
 }
 
 function retained(): number {
@@ -130,7 +127,6 @@ async function measure<T>(
 }
 
 function fixtureKey(name: string): string {
-	if (name.endsWith(".csv")) return "csv"
 	if (name.includes("300000")) return "3m"
 
 	return /-(m\d)\./.exec(name)?.[1] ?? name
@@ -145,19 +141,6 @@ async function savePhases(session: SheetSession<XlsxDocument>): Promise<Record<s
 	if (!saved.ok) return saved.reason
 
 	return Object.fromEntries(Object.entries(saved.timings).map(([name, ms]) => [name, round(ms)]))
-}
-
-async function benchCsv(bytes: Uint8Array): Promise<void> {
-	const base = retained()
-	const { value: document } = await measure("open", () => {
-		const { rows, format } = parseCsvFile(bytes, false)
-
-		return { document: new CsvDocument(rows, format), rows: rows.length }
-	})
-
-	results["openRetainedMb"] = round(retained() - base)
-	results["rows"] = document.rows
-	results["writable"] = document.document.writable
 }
 
 async function benchXlsx(bytes: Uint8Array): Promise<void> {
@@ -286,8 +269,7 @@ async function benchXlsx(bytes: Uint8Array): Promise<void> {
 const bytes = new Uint8Array(readFileSync(file))
 const key = fixtureKey(basename(file))
 
-if (file.endsWith(".csv")) await benchCsv(bytes)
-else await benchXlsx(bytes)
+await benchXlsx(bytes)
 
 results["peakRssMb"] = Math.round(peakRss())
 

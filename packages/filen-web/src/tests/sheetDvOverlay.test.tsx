@@ -7,7 +7,7 @@ import type { SheetCommand, SheetLayout, SheetSessionApi } from "@filen/office/c
 import type { SheetGridHandle, SheetGridState } from "@filen/office/react/sheet"
 import "@/lib/i18n"
 import { preview } from "@/locales/en/preview"
-import { ValidationOverlay } from "@/features/spreadsheet/next/data/dvOverlay"
+import { ValidationOverlay } from "@/features/spreadsheet/data/dvOverlay"
 
 // A list validation's button beside the active cell (its values picked and written as typed), and the input
 // message under it; neither while the cell is being edited, the list not on a read-only sheet.

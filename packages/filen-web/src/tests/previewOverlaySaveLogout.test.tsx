@@ -27,7 +27,6 @@ vi.mock("@tanstack/react-router", () => ({
 }))
 vi.mock("@/lib/keymap/useAction", () => ({ useAction: vi.fn(), IN_EDITORS: {}, IN_EDITORS_AND_FIELDS: {} }))
 vi.mock("@/lib/useIsOnline", () => ({ useIsOnline: () => true }))
-vi.mock("@/features/preview/lib/docxEditingFlag", () => ({ DOCX_EDITING: true }))
 vi.mock("@/features/preview/lib/previewCache", async () => ({
 	...(await vi.importActual<typeof import("@/features/preview/lib/previewCache")>("@/features/preview/lib/previewCache")),
 	loadPreviewBytes: () => Promise.resolve()
@@ -84,10 +83,8 @@ vi.mock("@/features/preview/components/docxViewer", () => ({
 		return null
 	}
 }))
-// The overlay over the current viewer's double, whichever viewer the build carries.
-vi.mock("@/features/spreadsheet/next/sheetNextFlag", () => ({ SHEET_NEXT: false }))
-vi.mock("@/features/spreadsheet/components/spreadsheetViewer", () => ({
-	SpreadsheetViewer: ({ saveRef, onDirtyChange }: { saveRef: { current: unknown }; onDirtyChange: (dirty: boolean) => void }) => {
+vi.mock("@/features/spreadsheet/sheetViewer", () => ({
+	SheetViewer: ({ saveRef, onDirtyChange }: { saveRef: { current: unknown }; onDirtyChange: (dirty: boolean) => void }) => {
 		useEffect(() => {
 			saveRef.current = source
 			dirtyChange = onDirtyChange

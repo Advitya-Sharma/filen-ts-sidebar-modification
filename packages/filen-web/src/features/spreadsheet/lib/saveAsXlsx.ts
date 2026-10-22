@@ -1,10 +1,8 @@
-import * as Comlink from "comlink"
 import { driveItemName } from "@filen/shared"
 import { currentRootUuid } from "@/features/drive/lib/actions"
 import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
 import { runPreviewSave } from "@/features/drive/lib/previewSave.logic"
 import { driveListingQueryUpdate, normalizeParentUuid } from "@/features/drive/queries/drive"
-import { withSpreadsheetWorker } from "@/features/spreadsheet/lib/spreadsheetClient"
 import { xlsxCopyName } from "@/features/spreadsheet/lib/xlsConvert"
 import { sdkApi } from "@/lib/sdk/client"
 import type { ErrorDTO } from "@/lib/sdk/errors"
@@ -34,17 +32,4 @@ export async function uploadXlsxCopy(item: DriveItem, converted: Uint8Array): Pr
 	)
 
 	return outcome.status === "error" ? { status: "error", dto: outcome.dto } : { status: "saved", item: outcome.item, name }
-}
-
-// An .xls converted to an .xlsx and uploaded beside it (uploadXlsxCopy). `bytes` is the preview cache's buffer:
-// the worker gets a copy.
-export async function saveAsXlsx(item: DriveItem, bytes: Uint8Array): Promise<SaveAsXlsxOutcome> {
-	if (asDirectoryOrFile(item).type !== "file") {
-		return { status: "error", dto: null }
-	}
-
-	const copy = bytes.slice()
-	const converted = await withSpreadsheetWorker(remote => remote.xlsToXlsx(Comlink.transfer(copy, [copy.buffer])))
-
-	return await uploadXlsxCopy(item, converted)
 }

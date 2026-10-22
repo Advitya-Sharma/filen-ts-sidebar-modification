@@ -18,7 +18,7 @@ vi.mock("@/lib/storage/adapter", () => ({
 	kvDelete: () => Promise.resolve()
 }))
 
-const { SheetGridMenu } = await import("@/features/spreadsheet/next/components/sheetGridMenu")
+const { SheetGridMenu } = await import("@/features/spreadsheet/components/sheetGridMenu")
 
 // The same grid with its sheets as chartsheets (or not).
 function asChartsheets(grid: SheetGridState, chartsheet: boolean): SheetGridState {

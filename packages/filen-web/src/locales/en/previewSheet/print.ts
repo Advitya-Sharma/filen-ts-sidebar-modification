@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — printing: the print dialog (what prints, paper,
+// "preview" namespace, spreadsheet viewer — printing: the print dialog (what prints, paper,
 // orientation, scaling, gridlines and headings, with a page preview) and its messages. Spread into preview.ts; same
 // catalog rules.
 export const previewSheetPrint = {

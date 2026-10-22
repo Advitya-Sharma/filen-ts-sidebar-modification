@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — data validation: the in-cell list, the input
+// "preview" namespace, spreadsheet viewer — data validation: the in-cell list, the input
 // message, the alert an invalid entry shows and the Data validation dialog. Spread into preview.ts; same catalog rules.
 export const previewSheetConditional = {
 	/** Spreadsheet grid menu — opens the Data validation dialog for the selected cells */

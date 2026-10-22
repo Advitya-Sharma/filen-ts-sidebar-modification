@@ -9,7 +9,7 @@ import type { SheetChartSource } from "@filen/office/react/sheet/charts"
 
 vi.mock("@/lib/useElementSize", () => ({ useElementSize: () => ({ width: 800, height: 600 }) }))
 
-const { ChartSheetView } = await import("@/features/spreadsheet/next/charts/chartSheetView")
+const { ChartSheetView } = await import("@/features/spreadsheet/charts/chartSheetView")
 
 afterEach(() => {
 	cleanup()

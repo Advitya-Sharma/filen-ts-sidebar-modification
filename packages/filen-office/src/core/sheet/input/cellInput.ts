@@ -1,4 +1,3 @@
-import { cellKey, type CellStyleView, type CellView, type SheetView } from "../model/model"
 import type { SheetLocale } from "../protocol"
 import { wellFormedFormula } from "../refs/formulaRefs"
 import { delocalizeFormula, localizedDate, localizedDateFormat, localizedNumber } from "./locale"
@@ -92,28 +91,6 @@ function localizedValue(input: string, trimmed: string, locale: SheetLocale): Pa
 	}
 
 	return { type: "value", value: input }
-}
-
-// Whether a workbook cell takes what is typed as text, as the worker reads it: by the cell's own format
-// when it has a cell, else by its row's format, else by its column's.
-export function takesText(
-	sheet: Pick<SheetView, "textFormat">,
-	row: number,
-	col: number,
-	cell: CellView | undefined,
-	styles: readonly CellStyleView[]
-): boolean {
-	if (cell !== undefined) {
-		return cell.style !== undefined && styles[cell.style]?.numFmt === "@"
-	}
-
-	const format = sheet.textFormat
-
-	return (
-		format !== undefined &&
-		!format.otherCells.includes(cellKey(row, col)) &&
-		(format.rows.includes(row) || (!format.otherRows.includes(row) && format.cols.includes(col)))
-	)
 }
 
 // Whether an entry would be stored as a formula that does not read as one (a parenthesis left open, ";"

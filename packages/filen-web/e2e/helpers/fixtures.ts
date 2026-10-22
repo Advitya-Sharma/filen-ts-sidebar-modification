@@ -1,6 +1,5 @@
 import type { Locator, Page } from "@playwright/test"
 import { expect, readFixtureManifest } from "../fixtures"
-import { DOCX_EDITING_E2E } from "./docxFixtures"
 import { clickSidebarLink, descendInto, type ListingHandle, setTallListingViewport, waitForListingSettled } from "./listing"
 
 // The shared, READ-ONLY fixture tree: one scenario directory per test that only ever LOOKS at its
@@ -69,8 +68,8 @@ export const FIXTURE_FILES = {
 	"archive-bulk": ["e2e-bulk-a.zip", "e2e-bulk-b.zip", "e2e-bulk-c.zip"],
 	// Text files for the compress dialog's naming, and one zip for a mixed archive + file selection.
 	"archive-dialogs": ["dialog-a.txt", "dialog-b.txt", "dialog-c.zip"],
-	// The DOCX editing specs' documents and pictures (helpers/docxFixtures.ts), built only when the run has
-	// DOCX editing (BUILT_FIXTURE_SCENARIOS). The pictures are synthesized on disk, so they are a scenario of their own.
+	// The DOCX editing specs' documents and pictures (helpers/docxFixtures.ts). The pictures are synthesized on disk,
+	// so they are a scenario of their own.
 	"docx-edit": [
 		"w3-comments.docx",
 		"w3-equations.docx",
@@ -82,30 +81,15 @@ export const FIXTURE_FILES = {
 		"w3-tracked.docx"
 	],
 	"docx-pictures": ["w3-picture-large.png", "w3-picture.svg", "w3-picture.webp"],
-	// The editor's notes and a picture (handles), for the IME, accessibility and touch specs; DOCX editing only.
+	// The editor's notes and a picture (handles), for the IME, accessibility and touch specs.
 	"docx-notes-picture": ["notes.docx", "described-picture.docx"],
-	// The viewer's subjects (helpers/docxFixtures.ts), in every build: name order is the overlay pager's.
-	"docx-viewer": [
-		"viewer-300p.docx",
-		"viewer-archive.7z",
-		"viewer-archive.zip",
-		"viewer-encrypted.docx",
-		"viewer-fonts.docx",
-		"viewer-legacy.docx",
-		"viewer-links.docx",
-		"viewer-malformed.docx",
-		"viewer-review.docx"
-	]
+	// The viewer's subjects (helpers/docxFixtures.ts): name order is the overlay pager's. The viewer documents a drive
+	// preview would open in the editor are entries of the zip.
+	"docx-viewer": ["viewer-archive.7z", "viewer-archive.zip", "viewer-encrypted.docx", "viewer-legacy.docx", "viewer-malformed.docx"]
 } as const
 
-// Scenarios only a run with DOCX editing (VITE_DOCX_EDITING=1) builds and reads.
-const DOCX_SCENARIOS: ReadonlySet<string> = new Set(["docx-edit", "docx-pictures", "docx-notes-picture"])
-
-// The scenarios this run's tree holds, in FIXTURE_FILES order: the DOCX editing ones only when the build has
-// DOCX editing (their specs skip otherwise).
-export const BUILT_FIXTURE_SCENARIOS: readonly FixtureScenario[] = (Object.keys(FIXTURE_FILES) as FixtureScenario[]).filter(
-	scenario => DOCX_EDITING_E2E || !DOCX_SCENARIOS.has(scenario)
-)
+// The scenarios the tree holds, in FIXTURE_FILES order.
+export const FIXTURE_SCENARIOS: readonly FixtureScenario[] = Object.keys(FIXTURE_FILES) as FixtureScenario[]
 
 export type FixtureScenario = keyof typeof FIXTURE_FILES
 export type FixtureFileName = (typeof FIXTURE_FILES)[FixtureScenario][number]

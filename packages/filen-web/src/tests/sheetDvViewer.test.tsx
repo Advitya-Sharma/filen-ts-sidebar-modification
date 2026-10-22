@@ -27,17 +27,17 @@ vi.mock("@/providers/themeProvider", async importOriginal => ({
 vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 	usePreviewBytes: () => ({ status: "success", bytes: bytes.current, refetch: () => undefined })
 }))
-vi.mock("@/features/spreadsheet/next/lib/sheetHosts", async importOriginal => {
+vi.mock("@/features/spreadsheet/lib/sheetHosts", async importOriginal => {
 	const host = inThreadSheetHost()
 
 	return {
-		...(await importOriginal<typeof import("@/features/spreadsheet/next/lib/sheetHosts")>()),
+		...(await importOriginal<typeof import("@/features/spreadsheet/lib/sheetHosts")>()),
 		openSheet: (source: Uint8Array, options: Parameters<typeof host.open>[1], onEvent: Parameters<typeof host.open>[2]) =>
 			host.open(source, options, onEvent)
 	}
 })
 
-const { SheetNextViewer } = await import("@/features/spreadsheet/next/sheetNextViewer")
+const { SheetViewer } = await import("@/features/spreadsheet/sheetViewer")
 
 registerAllActions()
 
@@ -76,7 +76,7 @@ async function workbook(): Promise<Uint8Array> {
 async function openViewer(): Promise<HTMLElement> {
 	bytes.current = await workbook()
 	render(
-		<SheetNextViewer
+		<SheetViewer
 			item={file("dv.xlsx")}
 			documentKey="dv"
 			alt="dv.xlsx"

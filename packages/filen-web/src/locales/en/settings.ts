@@ -249,7 +249,7 @@ export const settings = {
 	/** Advanced settings — group title for document editing settings */
 	settingsAdvancedDocumentsTitle: "Documents",
 	/** Advanced settings — documents group description */
-	settingsAdvancedDocumentsDescription: "Editing Word documents, synced across your devices",
+	settingsAdvancedDocumentsDescription: "Editing Word documents and spreadsheets, synced across your devices",
 	/** Advanced settings — row label: the name comments and tracked changes in documents are signed with */
 	settingsDocumentsAuthorName: "Author name",
 	/** Advanced settings — author name row description */

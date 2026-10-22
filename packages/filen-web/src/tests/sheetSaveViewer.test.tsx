@@ -6,11 +6,11 @@ import { writeXlsx } from "hucre/xlsx"
 import { inThreadSheetHost } from "@filen/office/dom/sheet"
 import { CellFlag, type SheetFileKind, type SheetQueryResult } from "@filen/office/core/sheet"
 import type { DriveItem } from "@/features/drive/lib/item"
-import type { SpreadsheetSnapshot } from "@/features/spreadsheet/hooks/useSpreadsheetEdits"
+import type { SpreadsheetSnapshot } from "@/features/spreadsheet/save/sheetSave.logic"
 import { WORKBOOK_PASSWORD, encryptedWorkbook } from "@/tests/encryptedWorkbookFixtures"
 import { preview } from "@/locales/en/preview"
 
-// Saving on the office engine's viewer, over real sessions on this thread (an in-thread host stands in for each
+// Saving on the spreadsheet viewer, over real sessions on this thread (an in-thread host stands in for each
 // worker): idle autosave asks the overlay, Save as .xlsx carries a text file's edits into the copy it uploads and
 // opens, and Download as CSV hands out Excel's "CSV UTF-8" of the sheet on show, never a protected workbook's.
 
@@ -39,11 +39,11 @@ vi.mock("@/providers/themeProvider", async importOriginal => ({
 vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 	usePreviewBytes: () => ({ status: "success", bytes: hooks.bytes, refetch: () => undefined })
 }))
-vi.mock("@/features/spreadsheet/next/lib/sheetHosts", async importOriginal => {
+vi.mock("@/features/spreadsheet/lib/sheetHosts", async importOriginal => {
 	const host = inThreadSheetHost()
 
 	return {
-		...(await importOriginal<typeof import("@/features/spreadsheet/next/lib/sheetHosts")>()),
+		...(await importOriginal<typeof import("@/features/spreadsheet/lib/sheetHosts")>()),
 		openSheet: (source: Uint8Array, options: Parameters<typeof host.open>[1], onEvent: Parameters<typeof host.open>[2]) =>
 			host.open(source, options, onEvent),
 		// As the workbook worker does it (lib/sheetHosts.ts), on this thread.
@@ -85,7 +85,7 @@ vi.mock("@/features/office/lib/officeAutosave", () => ({ AUTOSAVE_IDLE_MS: 100, 
 vi.mock("@/lib/useIsOnline", () => ({ useIsOnline: () => true }))
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), loading: vi.fn(), dismiss: vi.fn() } }))
 
-const { SheetNextViewer } = await import("@/features/spreadsheet/next/sheetNextViewer")
+const { SheetViewer } = await import("@/features/spreadsheet/sheetViewer")
 
 beforeEach(() => {
 	vi.stubGlobal(
@@ -179,7 +179,7 @@ async function openFileMenu(): Promise<void> {
 	})
 }
 
-describe("saving on the office engine's spreadsheet viewer", () => {
+describe("saving on the spreadsheet viewer", () => {
 	it("saves an edited CSV as an .xlsx copy holding its edits, numbers as numbers, and shows the copy", async () => {
 		// This realm's array: jsdom's TextEncoder answers in its own.
 		hooks.bytes = Uint8Array.from(new TextEncoder().encode("Name;Qty\r\nApples;3\r\n=1+2;007\r\n"))
@@ -188,7 +188,7 @@ describe("saving on the office engine's spreadsheet viewer", () => {
 		const saveRef = { current: null as (() => Promise<SpreadsheetSnapshot>) | null }
 
 		render(
-			<SheetNextViewer
+			<SheetViewer
 				item={file("fruit.csv")}
 				documentKey="k1"
 				alt="fruit.csv"
@@ -231,7 +231,7 @@ describe("saving on the office engine's spreadsheet viewer", () => {
 		hooks.bytes = await budget()
 
 		render(
-			<SheetNextViewer
+			<SheetViewer
 				item={file("b.xlsx")}
 				documentKey="k2"
 				alt="b.xlsx"
@@ -263,7 +263,7 @@ describe("saving on the office engine's spreadsheet viewer", () => {
 		hooks.bytes = await encryptedWorkbook("default")
 
 		render(
-			<SheetNextViewer
+			<SheetViewer
 				item={file("locked.xlsx")}
 				documentKey="k3"
 				alt="locked.xlsx"
@@ -286,7 +286,7 @@ describe("saving on the office engine's spreadsheet viewer", () => {
 		const onAutosave = vi.fn(() => true)
 
 		render(
-			<SheetNextViewer
+			<SheetViewer
 				item={file("b.xlsx")}
 				documentKey="k4"
 				alt="b.xlsx"

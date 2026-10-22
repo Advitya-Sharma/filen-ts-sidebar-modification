@@ -8,8 +8,8 @@ import { highlightedReferences } from "@filen/office/core/sheet"
 import { inThreadSheetHost } from "@filen/office/dom/sheet"
 import type { GridCanvas, GridPaintScene } from "@filen/office/react/sheet"
 import type { DriveItem } from "@/features/drive/lib/item"
-import { REFERENCE_COLORS, referenceColors } from "@/features/spreadsheet/next/formulaBar/referenceColors"
-import { referenceLayer } from "@/features/spreadsheet/next/formulaBar/referenceLayer"
+import { REFERENCE_COLORS, referenceColors } from "@/features/spreadsheet/formulaBar/referenceColors"
+import { referenceLayer } from "@/features/spreadsheet/formulaBar/referenceLayer"
 import { registerAllActions } from "@/lib/keymap/actions"
 import { preview } from "@/locales/en/preview"
 
@@ -32,17 +32,17 @@ vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 	usePreviewBytes: () => ({ status: "success", bytes: bytes.current, refetch: () => undefined })
 }))
 
-vi.mock("@/features/spreadsheet/next/lib/sheetHosts", async importOriginal => {
+vi.mock("@/features/spreadsheet/lib/sheetHosts", async importOriginal => {
 	const host = inThreadSheetHost()
 
 	return {
-		...(await importOriginal<typeof import("@/features/spreadsheet/next/lib/sheetHosts")>()),
+		...(await importOriginal<typeof import("@/features/spreadsheet/lib/sheetHosts")>()),
 		openSheet: (source: Uint8Array, options: Parameters<typeof host.open>[1], onEvent: Parameters<typeof host.open>[2]) =>
 			host.open(source, options, onEvent)
 	}
 })
 
-const { SheetNextViewer } = await import("@/features/spreadsheet/next/sheetNextViewer")
+const { SheetViewer } = await import("@/features/spreadsheet/sheetViewer")
 
 registerAllActions()
 
@@ -72,7 +72,7 @@ async function openViewer(): Promise<HTMLElement> {
 	bytes.current = await writeXlsx({ sheets: [{ name: "Data", rows: [["Amount"], [1], [2]] }] })
 
 	render(
-		<SheetNextViewer
+		<SheetViewer
 			item={file("refs.xlsx")}
 			documentKey="refs"
 			alt="refs.xlsx"

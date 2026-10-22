@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { highlightedReferences } from "@filen/office/core/sheet"
 import type { GridCanvas, GridPaintScene } from "@filen/office/react/sheet"
-import { referenceColors, REFERENCE_COLORS } from "@/features/spreadsheet/next/formulaBar/referenceColors"
-import { referenceLayer } from "@/features/spreadsheet/next/formulaBar/referenceLayer"
-import { sheetLocaleOf } from "@/features/spreadsheet/next/formulaBar/sheetLocale"
+import { referenceColors, REFERENCE_COLORS } from "@/features/spreadsheet/formulaBar/referenceColors"
+import { referenceLayer } from "@/features/spreadsheet/formulaBar/referenceLayer"
+import { sheetLocaleOf } from "@/features/spreadsheet/formulaBar/sheetLocale"
 
 describe("the locale entries are typed in", () => {
 	it("comes from the browser's formatting locale, ; between arguments where , is the point", () => {

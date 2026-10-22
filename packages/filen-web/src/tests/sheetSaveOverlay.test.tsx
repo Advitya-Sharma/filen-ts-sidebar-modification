@@ -71,9 +71,8 @@ function source(): Promise<{ bytes: Uint8Array; commit: () => void }> {
 let dirtyChange: ((dirty: boolean) => void) | undefined
 let autosave: (() => boolean) | undefined
 
-vi.mock("@/features/spreadsheet/next/sheetNextFlag", () => ({ SHEET_NEXT: false }))
-vi.mock("@/features/spreadsheet/components/spreadsheetViewer", () => ({
-	SpreadsheetViewer: ({
+vi.mock("@/features/spreadsheet/sheetViewer", () => ({
+	SheetViewer: ({
 		saveRef,
 		onDirtyChange,
 		onAutosave

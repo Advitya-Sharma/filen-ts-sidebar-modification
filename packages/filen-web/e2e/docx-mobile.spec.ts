@@ -1,7 +1,7 @@
 import type { Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, toasts, uploadFiles, withScratchDirectory } from "./helpers/listing"
-import { DOCX_EDITING_E2E, DOCX_FIXTURE_TEXT, DOCX_MIME, docxFixtureBytes, type DocxFixtureName } from "./helpers/docxFixtures"
+import { DOCX_FIXTURE_TEXT, DOCX_MIME, docxFixtureBytes, type DocxFixtureName } from "./helpers/docxFixtures"
 import { trackCspViolations } from "./helpers/csp"
 import { common } from "@/locales/en/common"
 import { preview } from "@/locales/en/preview"
@@ -9,9 +9,8 @@ import { preview } from "@/locales/en/preview"
 // The DOCX editor's Mobile view in a real browser at a phone's width: it shows by itself, the text is edited
 // in place (typing, an IME composition, the app's own spelling marks, the browser's off), comments and tracked
 // changes show inline, the ⋯ menu switches back to pages, and a save keeps what was typed. Each document is
-// uploaded into the test's own scratch directory. Runs only against a build with DOCX editing.
+// uploaded into the test's own scratch directory.
 
-test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
 test.describe.configure({ mode: "default" })
 const PHONE = { width: 390, height: 844 }
 // The width the scratch directory is trashed at: its sidebar link shows only on a wider window.

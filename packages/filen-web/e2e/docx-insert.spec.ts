@@ -2,14 +2,12 @@ import type { Locator, Page } from "@playwright/test"
 import { test, expect, readFixtureManifest } from "./fixtures"
 import { bootTo, LAZY_VIEWER_TIMEOUT_MS } from "./helpers/listing"
 import { FIXTURE_FILES, openFixtureRows } from "./helpers/fixtures"
-import { DOCX_EDITING_E2E, DOCX_FIXTURE_TEXT, largePictureBytes, svgPictureBytes, webpPictureBytes } from "./helpers/docxFixtures"
+import { DOCX_FIXTURE_TEXT, largePictureBytes, svgPictureBytes, webpPictureBytes } from "./helpers/docxFixtures"
 import { preview } from "@/locales/en/preview"
 
 // The DOCX editor's Insert menu in a real browser: a picture from this device, the clipboard, a drop and the
 // drive (the 25 MB one refused before it is read), a table of contents inserted and updated from its chip, a
 // link and a footnote. Nothing is saved: the documents are only changed in the page.
-
-test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
 
 type DocxEditFile = (typeof FIXTURE_FILES)["docx-edit"][number]
 

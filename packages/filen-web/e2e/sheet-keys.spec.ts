@@ -5,11 +5,10 @@ import { withScratchDirectory, LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, up
 import { resolveModKey } from "./helpers/modkey"
 import { preview } from "@/locales/en/preview"
 
-// The office engine's grid keyboard end to end, in builds with VITE_SHEET_NEXT=1: Excel's shortcuts (Ctrl+arrow to
+// The office engine's grid keyboard end to end: Excel's shortcuts (Ctrl+arrow to
 // the data region's edge, Ctrl+A, Ctrl+Space, Ctrl+D, Ctrl+Page Down, Ctrl+;, F4 in a formula, Ctrl+Minus) and the
 // find bar (Mod+F, Mod+H), against a real session in the sheet worker. Mod is Command where the page says it runs on
 // a Mac, as the app's keymap reads it.
-test.skip(process.env["VITE_SHEET_NEXT"] !== "1", "the office engine's viewer is only in builds with VITE_SHEET_NEXT=1")
 test.describe.configure({ mode: "default" })
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

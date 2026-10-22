@@ -40,7 +40,6 @@ const CODEC: SyncedFileCodec<OfficeSettingsDoc> = {
 	same: sameOfficeSettings
 }
 
-// Pure: a build without DOCX editing, where nothing reads it, drops the module.
 export const officeSettings = /* @__PURE__ */ new SyncedDotFilenFile<OfficeSettingsDoc>(
 	{
 		...officeDirectory,

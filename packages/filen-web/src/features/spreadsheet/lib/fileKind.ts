@@ -1,6 +1,7 @@
 import type { SpreadsheetKind } from "@filen/office/core/sheet"
-import type { SpreadsheetFileKind } from "@/features/spreadsheet/workers/spreadsheet.worker"
-import { SHEET_NEXT } from "@/features/spreadsheet/next/sheetNextFlag"
+
+// What a spreadsheet file opens as: the office engine's kinds, and tab-separated text beside CSV.
+export type SpreadsheetFileKind = SpreadsheetKind | "tsv"
 
 // The one list of spreadsheet extensions: the preview category, the editable gate and the worker's kind
 // all read it. A Map, so a name like "constructor" is not found on a prototype.
@@ -13,14 +14,10 @@ const KINDS: ReadonlyMap<string, SpreadsheetFileKind> = new Map([
 	["xls", "xls"],
 	["csv", "csv"],
 	["tsv", "tsv"],
-	// The office engine's viewer also opens a legacy template like an .xls (view-only, saved as an .xlsx), and a .tab
-	// file as the tab-separated text it is (edited, and saved as it was written).
-	...(SHEET_NEXT
-		? ([
-				["xlt", "xls"],
-				["tab", "tsv"]
-			] as const)
-		: [])
+	// A legacy template opens like an .xls (view-only, saved as an .xlsx), and a .tab file as the tab-separated text
+	// it is (edited, and saved as it was written).
+	["xlt", "xls"],
+	["tab", "tsv"]
 ])
 
 export const SPREADSHEET_EXTENSIONS: readonly string[] = [...KINDS.keys()]

@@ -41,15 +41,6 @@ export interface Selection {
 	focus: CellPosition
 }
 
-export function selectionRange(selection: Selection): CellRange {
-	return {
-		startRow: Math.min(selection.anchor.row, selection.focus.row),
-		startCol: Math.min(selection.anchor.col, selection.focus.col),
-		endRow: Math.max(selection.anchor.row, selection.focus.row),
-		endCol: Math.max(selection.anchor.col, selection.focus.col)
-	}
-}
-
 // "B2" for one cell, "B2:D7" for a range.
 export function rangeName(range: CellRange): string {
 	const start = cellName(range.startRow, range.startCol)
@@ -63,14 +54,6 @@ export function rangeRows(range: CellRange): number {
 
 export function rangeCols(range: CellRange): number {
 	return range.endCol - range.startCol + 1
-}
-
-export function rangeArea(range: CellRange): number {
-	return rangeRows(range) * rangeCols(range)
-}
-
-export function rangeContains(range: CellRange, row: number, col: number): boolean {
-	return row >= range.startRow && row <= range.endRow && col >= range.startCol && col <= range.endCol
 }
 
 export function rangesIntersect(a: CellRange, b: CellRange): boolean {

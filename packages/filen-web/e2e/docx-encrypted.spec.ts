@@ -1,14 +1,14 @@
 import type { Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, uploadFiles, withScratchDirectory } from "./helpers/listing"
-import { DOCX_EDITING_E2E, DOCX_MIME } from "./helpers/docxFixtures"
+import { DOCX_MIME } from "./helpers/docxFixtures"
 import { ENCRYPTED_DOCX_PASSWORD, ENCRYPTED_DOCX_TEXT, encryptedDocxBytes, rightsManagedDocxBytes } from "./helpers/docxEncryptedFixtures"
 import { trackCspViolations } from "./helpers/csp"
 import { storedPassword, trackPasswordCanary } from "./helpers/passwordCanary"
 import { preview } from "@/locales/en/preview"
 
 // Password-protected Word documents in a real browser: a rights-managed one refused without a prompt; an
-// encrypted one asking its password (a wrong one says so), opened once given, and — with DOCX editing built in —
+// encrypted one asking its password (a wrong one says so), opened once given, and
 // edited, saved by the idle autosave and by the user without being asked again, and reopened with the same
 // password (the stored file is still encrypted). The password never reaches the console, a request or web
 // storage (local, session, IndexedDB). The documents are uploaded into the test's own scratch directory (they
@@ -103,33 +103,31 @@ test("password-protected documents: refused when rights-managed, asked, unlocked
 		await expect(pageText(page, ENCRYPTED_DOCX_TEXT)).toBeVisible({ timeout: LAZY_VIEWER_TIMEOUT_MS })
 		await expect(page.getByRole("button", { name: preview.previewDocxPasswordProtected })).toBeVisible()
 
-		if (DOCX_EDITING_E2E) {
-			const save = page.getByRole("dialog").getByRole("button", { name: preview.previewSaveAction, exact: true })
+		const save = page.getByRole("dialog").getByRole("button", { name: preview.previewSaveAction, exact: true })
 
-			await expect(page.getByRole("button", { name: preview.previewDocxBold, exact: true })).toBeEnabled({
-				timeout: LAZY_VIEWER_TIMEOUT_MS
-			})
+		await expect(page.getByRole("button", { name: preview.previewDocxBold, exact: true })).toBeEnabled({
+			timeout: LAZY_VIEWER_TIMEOUT_MS
+		})
 
-			// The idle autosave seals with the session's key: nothing asked.
-			await pageText(page, ENCRYPTED_DOCX_TEXT).click()
-			await page.keyboard.press("End")
-			await page.keyboard.type(" autosaved")
-			await expect(save).toBeVisible()
-			await expect(save).toHaveCount(0, { timeout: AUTOSAVE_TIMEOUT_MS })
-			await expect(passwordPrompt(page)).toHaveCount(0)
+		// The idle autosave seals with the session's key: nothing asked.
+		await pageText(page, ENCRYPTED_DOCX_TEXT).click()
+		await page.keyboard.press("End")
+		await page.keyboard.type(" autosaved")
+		await expect(save).toBeVisible()
+		await expect(save).toHaveCount(0, { timeout: AUTOSAVE_TIMEOUT_MS })
+		await expect(passwordPrompt(page)).toHaveCount(0)
 
-			// So does a save by the user.
-			// The editing area keeps focus through the save: typing goes on where it was.
-			await expect(page.locator(".fo-docx-sink [role='textbox']").first()).toBeFocused()
-			await page.keyboard.type(" saved")
-			await save.click()
-			await expect(save).toHaveCount(0, { timeout: LIVE_WRITE_TIMEOUT_MS })
-			await expect(passwordPrompt(page)).toHaveCount(0)
-			await closePreview(page)
+		// So does a save by the user.
+		// The editing area keeps focus through the save: typing goes on where it was.
+		await expect(page.locator(".fo-docx-sink [role='textbox']").first()).toBeFocused()
+		await page.keyboard.type(" saved")
+		await save.click()
+		await expect(save).toHaveCount(0, { timeout: LIVE_WRITE_TIMEOUT_MS })
+		await expect(passwordPrompt(page)).toHaveCount(0)
+		await closePreview(page)
 
-			// Stored encrypted: asked again, and the edits are there.
-			await openUnlocked(page, listbox, encrypted, `${ENCRYPTED_DOCX_TEXT} autosaved saved`)
-		}
+		// Stored encrypted: asked again, and the edits are there.
+		await openUnlocked(page, listbox, encrypted, `${ENCRYPTED_DOCX_TEXT} autosaved saved`)
 
 		await closePreview(page)
 

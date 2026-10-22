@@ -5,11 +5,10 @@ import { withScratchDirectory, LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, up
 import { resolveModKey } from "./helpers/modkey"
 import { preview } from "@/locales/en/preview"
 
-// Sorting and autofilters on the office engine end to end, in builds with VITE_SHEET_NEXT=1: the toolbar's sort and
+// Sorting and autofilters on the office engine end to end: the toolbar's sort and
 // filter menu sorts the data around the active cell and turns the filter on, a header's filter button opens its menu
 // (a value unchecked, the rows holding it hidden), the custom sort dialog sorts by two columns, and Ctrl+Shift+L
 // (Cmd+Shift+F) turns the filter off. Each leg saves and reopens, so what it checks is the file the drive now holds.
-test.skip(process.env["VITE_SHEET_NEXT"] !== "1", "the office engine's viewer is only in builds with VITE_SHEET_NEXT=1")
 test.describe.configure({ mode: "default" })
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

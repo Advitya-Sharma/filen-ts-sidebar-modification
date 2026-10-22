@@ -6,17 +6,10 @@ import type { SheetCommand } from "@filen/office/core/sheet"
 import { DEFAULT_PAGE_SETUP, paginate, paperPoints } from "@filen/office/core/sheet/print"
 import "@/lib/i18n"
 import { preview } from "@/locales/en/preview"
-import { SheetPrintDialog } from "@/features/spreadsheet/next/print/printDialog"
-import { sheetSettings } from "@/features/spreadsheet/next/print/printSettings"
-import {
-	applyForm,
-	formOf,
-	patchOf,
-	percentOf,
-	printRequests,
-	type PrintSheetSettings
-} from "@/features/spreadsheet/next/print/print.logic"
-import { printPages, svgElement } from "@/features/spreadsheet/next/print/printRoot"
+import { SheetPrintDialog } from "@/features/spreadsheet/print/printDialog"
+import { sheetSettings } from "@/features/spreadsheet/print/printSettings"
+import { applyForm, formOf, patchOf, percentOf, printRequests, type PrintSheetSettings } from "@/features/spreadsheet/print/print.logic"
+import { printPages, svgElement } from "@/features/spreadsheet/print/printRoot"
 import { GridHarness } from "@/tests/sheetMenusHarness"
 import { openGrid, workbook } from "@/tests/sheetMenusFixtures"
 

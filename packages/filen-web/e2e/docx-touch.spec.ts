@@ -2,7 +2,7 @@ import type { Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { bootTo, LAZY_VIEWER_TIMEOUT_MS } from "./helpers/listing"
 import { FIXTURE_FILES, openFixtureRows } from "./helpers/fixtures"
-import { DOCX_EDITING_E2E, DOCX_FIXTURE_TEXT, type DocxFixtureName } from "./helpers/docxFixtures"
+import { DOCX_FIXTURE_TEXT, type DocxFixtureName } from "./helpers/docxFixtures"
 import { trackCspViolations } from "./helpers/csp"
 import { common } from "@/locales/en/common"
 import { preview } from "@/locales/en/preview"
@@ -17,7 +17,6 @@ import { preview } from "@/locales/en/preview"
 // so there the same pointer events are dispatched to the element under the finger, with pointer capture
 // standing in as the platform would give it.
 
-test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
 test.describe.configure({ mode: "default" })
 test.use({ hasTouch: true })
 

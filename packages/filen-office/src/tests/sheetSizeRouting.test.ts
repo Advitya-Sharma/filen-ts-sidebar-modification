@@ -1,15 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { layerKeyFor, sizesInFile } from "../core/sheet/index"
-
-describe("sizesInFile", () => {
-	// A workbook not yet proven keeps its sizes in the file too: a resize waits for the proof like any edit.
-	it("is only a workbook this viewer may edit", () => {
-		expect(sizesInFile("xlsx", true)).toBe(true)
-		expect(sizesInFile("xlsx", false)).toBe(false)
-		expect(sizesInFile("csv", true)).toBe(false)
-		expect(sizesInFile("xls", false)).toBe(false)
-	})
-})
+import { layerKeyFor } from "../core/sheet/index"
 
 describe("layerKeyFor", () => {
 	it("keys by the stable id, and by the document for the session without one", () => {

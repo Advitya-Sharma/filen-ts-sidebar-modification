@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — sorting and filtering: the toolbar's sort and filter
+// "preview" namespace, spreadsheet viewer — sorting and filtering: the toolbar's sort and filter
 // menu, the grid menu's items, the autofilter menu, its condition dialogs and the custom sort dialog. Spread into
 // preview.ts; same catalog rules.
 export const previewSheetSortFilter = {

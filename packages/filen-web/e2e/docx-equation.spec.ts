@@ -2,14 +2,12 @@ import type { Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { bootTo, LAZY_VIEWER_TIMEOUT_MS } from "./helpers/listing"
 import { FIXTURE_FILES, openFixtureRows } from "./helpers/fixtures"
-import { DOCX_EDITING_E2E, DOCX_FIXTURE_TEXT } from "./helpers/docxFixtures"
+import { DOCX_FIXTURE_TEXT } from "./helpers/docxFixtures"
 import { preview } from "@/locales/en/preview"
 
 // Equations in the DOCX editor in a real browser: a new one typed as LaTeX from the Insert menu, its preview
 // painted as typed and an error shown inline, and one of the document opened by a press on it and changed.
 // Nothing is saved: the document is only changed in the page.
-
-test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
 
 const NAME = "w3-equations.docx"
 

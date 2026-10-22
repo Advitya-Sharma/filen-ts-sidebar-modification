@@ -26,17 +26,17 @@ vi.mock("@/features/preview/hooks/usePreviewBytes", () => ({
 	usePreviewBytes: () => ({ status: "success", bytes: bytes.current, refetch: () => undefined })
 }))
 
-vi.mock("@/features/spreadsheet/next/lib/sheetHosts", async importOriginal => {
+vi.mock("@/features/spreadsheet/lib/sheetHosts", async importOriginal => {
 	const host = inThreadSheetHost()
 
 	return {
-		...(await importOriginal<typeof import("@/features/spreadsheet/next/lib/sheetHosts")>()),
+		...(await importOriginal<typeof import("@/features/spreadsheet/lib/sheetHosts")>()),
 		openSheet: (source: Uint8Array, options: Parameters<typeof host.open>[1], onEvent: Parameters<typeof host.open>[2]) =>
 			host.open(source, options, onEvent)
 	}
 })
 
-const { SheetNextViewer } = await import("@/features/spreadsheet/next/sheetNextViewer")
+const { SheetViewer } = await import("@/features/spreadsheet/sheetViewer")
 
 // The find field is the document editor's, which binds Mod+F through the app's keymap.
 registerAllActions()
@@ -73,7 +73,7 @@ async function openViewer(
 	bytes.current = await book(sheets)
 
 	render(
-		<SheetNextViewer
+		<SheetViewer
 			item={file("fruit.xlsx")}
 			documentKey="formula"
 			alt="fruit.xlsx"

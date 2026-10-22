@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — notes, threaded comments and hyperlinks. Spread into
+// "preview" namespace, spreadsheet viewer — notes, threaded comments and hyperlinks. Spread into
 // preview.ts; same catalog rules.
 export const previewSheetNotes = {
 	/** Spreadsheet grid menu — adds a note (a plain annotation) to the active cell */

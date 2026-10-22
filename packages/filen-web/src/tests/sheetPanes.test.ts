@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it } from "vitest"
-import { paneAfter } from "@/features/spreadsheet/next/components/sheetPanes"
+import { paneAfter } from "@/features/spreadsheet/components/sheetPanes"
 
 // F6 and Shift+F6 in the sheet view: a full cycle over its panes, as Excel's F6 switches between the worksheet and the
 // panes around it.

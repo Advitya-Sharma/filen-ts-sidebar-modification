@@ -54,8 +54,8 @@ import type { DocxSaveSource } from "@/features/preview/components/docxEditor"
 import { MarkdownViewer } from "@/features/preview/components/markdownViewer"
 import { PdfViewer } from "@/features/preview/components/pdfViewer"
 import { TextViewer } from "@/features/preview/components/textViewer"
-import { type SpreadsheetSaveSource } from "@/features/spreadsheet/components/spreadsheetViewer"
-import { SpreadsheetView } from "@/features/spreadsheet/next/spreadsheetView"
+import type { SpreadsheetSaveSource } from "@/features/spreadsheet/save/sheetSave.logic"
+import { SheetViewer } from "@/features/spreadsheet/sheetViewer"
 import { RemoteFileCompare } from "@/features/preview/components/remoteCompare"
 import { ArchiveBrowser } from "@/features/archive/components/archiveBrowser"
 import { ArchiveListingScope } from "@/features/archive/components/archiveListingScope"
@@ -1432,7 +1432,7 @@ function PreviewBody({
 			)
 		case "spreadsheet":
 			return (
-				<SpreadsheetView
+				<SheetViewer
 					item={item}
 					documentKey={documentKey}
 					alt={alt}

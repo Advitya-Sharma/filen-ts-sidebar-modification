@@ -1,16 +1,5 @@
 import { describe, expect, it } from "vitest"
-import {
-	cellKey,
-	clearedCells,
-	endedCut,
-	newSheetName,
-	parseTsv,
-	pastedCells,
-	pastedInputs,
-	rangeToClip,
-	type CellView,
-	type GridClip
-} from "../core/sheet/index"
+import { cellKey, newSheetName, parseTsv, pastedCells, pastedInputs, type CellView, type GridClip } from "../core/sheet/index"
 
 function sheetOf(name: string, cells: [row: number, col: number, view: CellView][]) {
 	const map = new Map(cells.map(([row, col, view]) => [cellKey(row, col), view]))
@@ -28,32 +17,34 @@ const ROW = sheetOf("Data", [
 ])
 const RANGE = { startRow: 0, startCol: 0, endRow: 0, endCol: 4 }
 
+// A range as the grid copies it: what each cell shows as tab-separated text (quoted where a tab, a line end or a
+// quote would break it), and what the cells hold where that is not what they show.
 function clipOf(sheet: ReturnType<typeof sheetOf>, range: typeof RANGE, cut: boolean): GridClip {
-	const clip = rangeToClip(sheet, range, cut)
+	const inputs = new Map<number, string>()
+	const lines: string[] = []
 
-	if (clip === null) {
-		throw new Error("expected a clip")
+	for (let row = range.startRow; row <= range.endRow; row++) {
+		const fields: string[] = []
+
+		for (let col = range.startCol; col <= range.endCol; col++) {
+			const view = sheet.cells.get(cellKey(row, col))
+
+			if (view?.input !== undefined) inputs.set(cellKey(row - range.startRow, col - range.startCol), view.input)
+
+			const text = view?.text ?? ""
+
+			fields.push(/[\t\n\r"]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text)
+		}
+
+		lines.push(fields.join("\t"))
 	}
 
-	return clip
+	return { tsv: lines.join("\r\n"), sheet: sheet.name, range, cut, inputs }
 }
 
 describe("grid clipboard", () => {
-	it("copies what cells show, keeping beside it what they hold", () => {
-		const clip = rangeToClip(ROW, RANGE, false)
-
-		expect(clip?.tsv).toBe("3.14\t6.28\t$1,234.50\t9/28/2026\tplain")
-		expect(clip?.inputs.size).toBe(4)
-		expect(clip?.inputs.get(cellKey(0, 4))).toBeUndefined()
-	})
-
 	it("pastes a copy's entries, relative references moved by the paste's offset", () => {
-		const clip = rangeToClip(ROW, RANGE, false)
-
-		if (clip === null) {
-			throw new Error("expected a clip")
-		}
-
+		const clip = clipOf(ROW, RANGE, false)
 		const inputs = pastedInputs(clip, { row: 2, col: 5 }, "Data")
 
 		expect(inputs.get(cellKey(0, 0))).toBe("3.14159265")
@@ -68,11 +59,7 @@ describe("grid clipboard", () => {
 			[0, 0, { text: "1", numeric: true }],
 			[0, 1, { text: "2", input: "=A1*2+$A$1+Z9", numeric: true }]
 		])
-		const clip = rangeToClip(sheet, { startRow: 0, startCol: 0, endRow: 0, endCol: 1 }, true)
-
-		if (clip === null) {
-			throw new Error("expected a clip")
-		}
+		const clip = clipOf(sheet, { startRow: 0, startCol: 0, endRow: 0, endCol: 1 }, true)
 
 		expect(pastedInputs(clip, { row: 0, col: 5 }, "Data").get(cellKey(0, 1))).toBe("=F1*2+$F$1+Z9")
 		// Onto another sheet, what stays behind is named by its sheet.
@@ -151,54 +138,6 @@ describe("grid clipboard", () => {
 
 		expect(pastedCells(clip.tsv, clip, { row: 0, col: 0 }, "Data", 4)).toBeNull()
 		expect(pastedCells("a\tb\tc", null, { row: 0, col: 0 }, "Data", 2)).toBeNull()
-	})
-
-	// A1 1, B1 "=$A$1*2": cut A1:B1, undone, pasted at F1.
-	it("copies a cut once its cells changed since", () => {
-		const sheet = sheetOf("Data", [
-			[0, 0, { text: "1", numeric: true }],
-			[0, 1, { text: "2", input: "=$A$1*2", numeric: true }]
-		])
-		const cut = clipOf(sheet, { startRow: 0, startCol: 0, endRow: 0, endCol: 1 }, true)
-		const ended = endedCut(cut)
-
-		expect(pastedCells(cut.tsv, cut, { row: 0, col: 5 }, "Data", 10)?.cells[1]?.input).toBe("=$F$1*2")
-		expect(ended).toMatchObject({ cut: false, range: cut.range, inputs: cut.inputs })
-		expect(pastedCells(cut.tsv, ended, { row: 0, col: 5 }, "Data", 10)?.cells[1]?.input).toBe("=$A$1*2")
-
-		const copy = clipOf(sheet, { startRow: 0, startCol: 0, endRow: 0, endCol: 1 }, false)
-
-		expect(endedCut(copy)).toBe(copy)
-		expect(endedCut(null)).toBeNull()
-	})
-
-	it("is refused past the copy limit", () => {
-		expect(rangeToClip(ROW, { startRow: 0, startCol: 0, endRow: 1_048_575, endCol: 4 }, false)).toBeNull()
-	})
-})
-
-describe("clearedCells", () => {
-	const cells = new Map([
-		[cellKey(0, 0), { text: "a" }],
-		[cellKey(1, 1), { text: "b" }],
-		[cellKey(5, 2), { text: "c" }]
-	])
-	const store = { size: cells.size, has: (key: number) => cells.has(key), keys: () => cells.keys() }
-
-	it("empties the filled cells in the range, walking the range or the cells", () => {
-		expect(clearedCells(store, { startRow: 0, startCol: 0, endRow: 0, endCol: 1 }, 10)).toEqual([{ row: 0, col: 0, input: "" }])
-		expect(clearedCells(store, { startRow: 0, startCol: 0, endRow: 1_000, endCol: 1 }, 10)).toEqual([
-			{ row: 0, col: 0, input: "" },
-			{ row: 1, col: 1, input: "" }
-		])
-	})
-
-	it("gives up past the limit, either way", () => {
-		// A range no larger than the filled cells is walked cell by cell.
-		expect(clearedCells(store, { startRow: 0, startCol: 0, endRow: 0, endCol: 0 }, 0)).toBeNull()
-		expect(clearedCells(store, { startRow: 0, startCol: 0, endRow: 1, endCol: 1 }, 1)).toBeNull()
-		expect(clearedCells(store, { startRow: 0, startCol: 0, endRow: 1_000, endCol: 16_000 }, 2)).toBeNull()
-		expect(clearedCells(store, { startRow: 0, startCol: 0, endRow: 1_000, endCol: 16_000 }, 3)).toHaveLength(3)
 	})
 })
 

@@ -7,10 +7,10 @@ import type { SheetGridHandle } from "@filen/office/react/sheet"
 import "@/lib/i18n"
 import { common } from "@/locales/en/common"
 import { preview } from "@/locales/en/preview"
-import { ValidationDialog } from "@/features/spreadsheet/next/data/dvDialog"
-import { NEW_RULE, validationComplete, validationFields, validationRefusalKey } from "@/features/spreadsheet/next/data/dvDialog.logic"
-import { ALERT_BUTTONS, useValidationAlert, type ValidationVerdict } from "@/features/spreadsheet/next/data/dvAlert"
-import { checkEntry } from "@/features/spreadsheet/next/data/cfExtension"
+import { ValidationDialog } from "@/features/spreadsheet/data/dvDialog"
+import { NEW_RULE, validationComplete, validationFields, validationRefusalKey } from "@/features/spreadsheet/data/dvDialog.logic"
+import { ALERT_BUTTONS, useValidationAlert, type ValidationVerdict } from "@/features/spreadsheet/data/dvAlert"
+import { checkEntry } from "@/features/spreadsheet/data/cfExtension"
 
 // The Data validation dialog (Excel's fields per kind, the rule sent, a refusal shown), the alert an invalid entry
 // shows with Excel's buttons per style, and an entry checked before it is written.

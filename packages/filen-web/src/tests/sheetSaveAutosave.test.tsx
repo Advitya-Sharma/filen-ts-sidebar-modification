@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
-import type { SheetAutosaveInput } from "@/features/spreadsheet/next/save/useSheetAutosave"
+import type { SheetAutosaveInput } from "@/features/spreadsheet/save/useSheetAutosave"
 
 // The spreadsheet's idle autosave, as the Word document editor's: once per pause after an edit, with the user's
 // synced setting, never over an open cell entry, offline or before the setting was read.
@@ -23,7 +23,7 @@ vi.mock("@/features/office/lib/officeSettings", () => ({
 }))
 vi.mock("@/lib/useIsOnline", () => ({ useIsOnline: () => hooks.online }))
 
-const { useSheetAutosave } = await import("@/features/spreadsheet/next/save/useSheetAutosave")
+const { useSheetAutosave } = await import("@/features/spreadsheet/save/useSheetAutosave")
 const { AUTOSAVE_IDLE_MS } = await import("@/features/office/lib/officeAutosave")
 
 function setup(initial: Partial<SheetAutosaveInput>, answer = true) {

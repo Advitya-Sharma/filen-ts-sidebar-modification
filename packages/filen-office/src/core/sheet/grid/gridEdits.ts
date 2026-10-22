@@ -1,51 +1,7 @@
-import { rangeArea, rangeContains } from "../refs/cellRef"
-import { cellKey, keyCol, keyRow, type CellRange } from "../model/model"
-
 export interface CellEntry {
 	row: number
 	col: number
 	input: string
-}
-
-// The entries a clear sends: one emptying each cell in the range holding anything. Whichever is smaller is
-// walked, the range or the sheet's filled cells, so selecting whole columns costs what the sheet holds.
-// Null once past `limit` (more than the worker takes in one edit), before the rest is built.
-export function clearedCells(
-	cells: { readonly size: number; has: (key: number) => boolean; keys: () => Iterable<number> },
-	target: CellRange,
-	limit: number
-): CellEntry[] | null {
-	const cleared: CellEntry[] = []
-	if (rangeArea(target) <= cells.size) {
-		for (let row = target.startRow; row <= target.endRow; row++) {
-			for (let col = target.startCol; col <= target.endCol; col++) {
-				if (cells.has(cellKey(row, col))) {
-					if (cleared.length === limit) {
-						return null
-					}
-
-					cleared.push({ row, col, input: "" })
-				}
-			}
-		}
-
-		return cleared
-	}
-
-	for (const key of cells.keys()) {
-		const row = keyRow(key)
-		const col = keyCol(key)
-
-		if (rangeContains(target, row, col)) {
-			if (cleared.length === limit) {
-				return null
-			}
-
-			cleared.push({ row, col, input: "" })
-		}
-	}
-
-	return cleared
 }
 
 // The name an added sheet proposes: numbered after the sheets there are, or the first number past it no

@@ -14,7 +14,7 @@ import { previewDocxSections } from "@/locales/en/previewDocx/sections"
 import { previewDocxMath } from "@/locales/en/previewDocx/math"
 import { previewDocxReflow } from "@/locales/en/previewDocx/reflow"
 import { previewOfficeShared } from "@/locales/en/previewOffice/shared"
-import { previewSheetNext } from "@/locales/en/previewSheet/next"
+import { previewSheetViewer } from "@/locales/en/previewSheet/viewer"
 import { previewSheetFormat } from "@/locales/en/previewSheet/format"
 import { previewSheetSave } from "@/locales/en/previewSheet/save"
 import { previewSheetStructure } from "@/locales/en/previewSheet/structure"
@@ -139,8 +139,6 @@ export const preview = {
 	previewSpreadsheetEmpty: "This spreadsheet has no sheets.",
 	/** Spreadsheet viewer — the file could not be read as a spreadsheet (damaged, encrypted with a password, or too large to open) */
 	previewSpreadsheetUnreadable: "This spreadsheet couldn't be opened. It may be damaged, password-protected or too large.",
-	/** Spreadsheet viewer — accessible label for the box showing the selected cell or range, e.g. "B2:D7" */
-	previewSpreadsheetSelectedCells: "Selected cells",
 	/** Spreadsheet viewer — accessible label for the bar showing the active cell's contents or formula */
 	previewSpreadsheetCellContents: "Cell contents",
 	/** Spreadsheet viewer — accessible label for the row of sheet tabs */
@@ -165,30 +163,8 @@ export const preview = {
 	previewSpreadsheetFillColor: "Fill color",
 	/** Spreadsheet toolbar colour palette — removes the colour */
 	previewSpreadsheetColorNone: "No color",
-	/** Spreadsheet toolbar — align the selected cells' content left */
-	previewSpreadsheetAlignLeft: "Align left",
-	/** Spreadsheet toolbar — centre the selected cells' content */
-	previewSpreadsheetAlignCenter: "Centre",
-	/** Spreadsheet toolbar — align the selected cells' content right */
-	previewSpreadsheetAlignRight: "Align right",
 	/** Spreadsheet toolbar — accessible label of the number format menu */
 	previewSpreadsheetNumberFormat: "Number format",
-	/** Number format menu — no particular format */
-	previewSpreadsheetFormatGeneral: "General",
-	/** Number format menu — 1,234.56 */
-	previewSpreadsheetFormatNumber: "Number",
-	/** Number format menu — $1,234.56 */
-	previewSpreadsheetFormatDollar: "Currency ($)",
-	/** Number format menu — 1,234.56 € */
-	previewSpreadsheetFormatEuro: "Currency (€)",
-	/** Number format menu — 12.34% */
-	previewSpreadsheetFormatPercent: "Percent",
-	/** Number format menu — 2026-09-27 */
-	previewSpreadsheetFormatDate: "Date",
-	/** Number format menu — the value kept as text */
-	previewSpreadsheetFormatText: "Text",
-	/** Number format menu — the cell carries a format not in this list */
-	previewSpreadsheetFormatCustom: "Custom",
 	/** Spreadsheet grid menu — insert as many rows as are selected, above them */
 	previewSpreadsheetInsertRowsAbove_one: "Insert row above",
 	previewSpreadsheetInsertRowsAbove_other: "Insert {{count}} rows above",
@@ -232,10 +208,6 @@ export const preview = {
 	previewSpreadsheetWidthPx: "Width: {{size}} px",
 	/** Spreadsheet grid — the size tip shown while dragging a row's edge */
 	previewSpreadsheetHeightPx: "Height: {{size}} px",
-	/** Spreadsheet grid — tooltip of a column header's resize edge */
-	previewSpreadsheetResizeColumn: "Resize column",
-	/** Spreadsheet grid — tooltip of a row header's resize edge */
-	previewSpreadsheetResizeRow: "Resize row",
 	/** Spreadsheet sheet tabs — adds a new empty sheet */
 	previewSpreadsheetAddSheet: "Add sheet",
 	/** Name given to a newly added sheet; {{number}} is its position */
@@ -276,8 +248,6 @@ export const preview = {
 	previewSpreadsheetReadOnlyTooLarge: "Read-only here: this file is too large to edit in the browser.",
 	/** Spreadsheet viewer — shown beside the formula bar (and as a toast for a paste) when an entry starts with "=" but isn't a formula Excel can read, e.g. a parenthesis left open or ";" between arguments */
 	previewSpreadsheetFormulaInvalid: "This formula can't be read. Check its parentheses and quotes, and separate arguments with commas.",
-	/** Spreadsheet grid — below a sheet too tall to show whole; {{rows}} is the number of rows shown, already formatted */
-	previewSpreadsheetRowsTruncated: "Showing the first {{rows}} rows. Rows further down can't be shown here.",
 
 	// ── PDF ──────────────────────────────────────────────────────────────────
 	/** PDF viewer — password dialog title, shown both on the first prompt and on a wrong-password retry */
@@ -336,7 +306,7 @@ export const preview = {
 	previewDocxPasswordProtected: "Password-protected",
 	/** Docx viewer — the Password-protected badge's popover: the document was decrypted with its password in this browser, in memory only */
 	previewDocxPasswordOpened: "Opened with its password, in this browser only.",
-	/** Docx editor and spreadsheet editor — the Password-protected badge's popover: every save (explicit or autosave) is encrypted again with the password the file was opened with. In preview.ts, not previewDocx/*: the spreadsheet editor shows it in builds without DOCX editing */
+	/** Docx editor and spreadsheet editor — the Password-protected badge's popover: every save (explicit or autosave) is encrypted again with the password the file was opened with. In preview.ts, not previewDocx/*: the spreadsheet editor shows it too */
 	previewDocxPasswordSaved: "Saved with the same password.",
 	/** Docx viewer and editor, spreadsheet — the Password-protected badge's warning (popover and screen-reader description) for a file whose encryption carries no integrity check (Standard encryption, or an Agile file without one): its content may have been changed after it was encrypted */
 	previewDocxPasswordUnchecked: "Its integrity can't be verified: it may have been changed after it was encrypted.",
@@ -747,7 +717,7 @@ export const preview = {
 	...previewDocxMath,
 	...previewDocxReflow,
 	...previewOfficeShared,
-	...previewSheetNext,
+	...previewSheetViewer,
 	...previewSheetSave,
 	...previewSheetFormat,
 	...previewSheetKeys,

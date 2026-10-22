@@ -6,7 +6,7 @@ import {
 	seriesStep,
 	seriesStopValid,
 	seriesTrendOffered
-} from "@/features/spreadsheet/next/fill/seriesDialog.logic"
+} from "@/features/spreadsheet/fill/seriesDialog.logic"
 
 // The Series dialog's defaults and the command it sends.
 

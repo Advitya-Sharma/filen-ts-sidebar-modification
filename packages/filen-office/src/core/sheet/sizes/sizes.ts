@@ -1,4 +1,4 @@
-import { DEFAULT_ROW_HEIGHT, type CellRange } from "../model/model"
+import type { CellRange } from "../model/model"
 
 // Column and row sizes: the grid's pixels, the xlsx's own units, the limits both share, and the edits
 // resizing makes to a sheet's size maps. Column widths are stored as characters of the default font's widest
@@ -78,13 +78,6 @@ export const MAX_ROW_HEIGHT = 545
 // resizes only the dragged one, so no gesture builds a size map the size of the sheet.
 export const MAX_RESIZE_TARGETS = 10_000
 
-// A cell's horizontal padding (px-1.5 each side) and its gridline.
-export const CELL_PADDING = 13
-// What autofit adds to measured content: a cell's padding and 1px of slack; a row's line box to the
-// default row's height.
-const CELL_FIT_PADDING = CELL_PADDING + 1
-const ROW_FIT_PADDING = 7
-
 export function clampSize(axis: SizeAxis, px: number): number {
 	return Math.round(Math.min(axis === "cols" ? MAX_COL_WIDTH : MAX_ROW_HEIGHT, Math.max(MIN_SIZE, px)))
 }
@@ -139,16 +132,6 @@ export function withSizes(sizes: ReadonlyMap<number, number>, entries: readonly 
 	}
 
 	return next
-}
-
-export function sheetWithSizes<T extends { colWidths: ReadonlyMap<number, number>; rowHeights: ReadonlyMap<number, number> }>(
-	sheet: T,
-	axis: SizeAxis,
-	entries: readonly SizeEntry[]
-): T {
-	return axis === "cols"
-		? { ...sheet, colWidths: withSizes(sheet.colWidths, entries) }
-		: { ...sheet, rowHeights: withSizes(sheet.rowHeights, entries) }
 }
 
 // Where a row or column index lands once `count` of them are inserted or deleted at `at` (null: deleted).
@@ -220,24 +203,6 @@ export function resizeTargets(
 	}
 
 	return targets
-}
-
-// Autofit from the measured content of an index's rendered cells: null (the default) with nothing to
-// measure, or for a row whose content fits the default height.
-export function fitSize(axis: SizeAxis, contents: readonly number[]): number | null {
-	if (contents.length === 0) {
-		return null
-	}
-
-	const largest = Math.ceil(Math.max(...contents))
-
-	if (axis === "cols") {
-		return clampSize("cols", largest + CELL_FIT_PADDING)
-	}
-
-	const height = clampSize("rows", largest + ROW_FIT_PADDING)
-
-	return height <= DEFAULT_ROW_HEIGHT ? null : height
 }
 
 // What a Reset of the selected columns or rows applies to: the selection cut at the used area (select-all

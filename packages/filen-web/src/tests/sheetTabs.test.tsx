@@ -15,7 +15,7 @@ const { toasts } = vi.hoisted(() => ({ toasts: [] as string[] }))
 
 vi.mock("sonner", () => ({ toast: { error: (message: string) => toasts.push(message), success: () => undefined } }))
 
-const { SheetTabs } = await import("@/features/spreadsheet/next/tabs/sheetTabs")
+const { SheetTabs } = await import("@/features/spreadsheet/tabs/sheetTabs")
 
 async function opened(): Promise<SheetGridModel> {
 	return await openGrid(

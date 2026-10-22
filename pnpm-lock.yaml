@@ -1111,9 +1111,6 @@ importers:
       hucre:
         specifier: 1.1.0
         version: 1.1.0(patch_hash=124b27fed0bdaabab64305a4f088386146c994f7503574e069989b56c5883175)
-      hyperformula:
-        specifier: 3.4.0
-        version: 3.4.0
       i18next:
         specifier: ^26.4.2
         version: 26.4.2(typescript@6.0.3)

@@ -117,9 +117,6 @@ vi.mock("@/features/assistant/store/assistantSession", () => ({ shutdownAssistan
 vi.mock("@/features/preview/lib/heicTransform", () => ({ releaseHeicWorker, transformHeicBytesOwned: vi.fn() }))
 vi.mock("@/queries/client", () => ({ queryClient: { cancelQueries: vi.fn(), clear: vi.fn() } }))
 vi.mock("sonner", () => ({ toast: { warning: toastWarning } }))
-// A build with the spreadsheet editor and without DOCX editing: the document settings are still this account's.
-vi.mock("@/features/preview/lib/docxEditingFlag", () => ({ DOCX_EDITING: false }))
-vi.mock("@/features/spreadsheet/next/sheetNextFlag", () => ({ SHEET_NEXT: true }))
 vi.mock("@/features/office/lib/officeSettings", () => ({ officeSettings: { reset: officeSettingsReset } }))
 
 import { kvClear } from "@/lib/storage/adapter"
@@ -261,7 +258,7 @@ describe("performLogout", () => {
 		expect(cache.get("archive-uuid")).toBeUndefined()
 	})
 
-	it("forgets the document settings in a build whose only office editor is the spreadsheet's", async () => {
+	it("forgets the document settings, which are this account's", async () => {
 		await performLogout()
 
 		expect(officeSettingsReset).toHaveBeenCalledTimes(1)

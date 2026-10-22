@@ -1,13 +1,4 @@
 import { describe, expect, it, vi } from "vitest"
-
-// DOCX editing is a build constant; the tests flip it.
-const docxFlag = vi.hoisted(() => ({ on: false }))
-
-vi.mock("@/features/preview/lib/docxEditingFlag", () => ({
-	get DOCX_EDITING() {
-		return docxFlag.on
-	}
-}))
 import type { File as SdkFile } from "@filen/sdk-rs"
 import {
 	canSaveCopyBeside,
@@ -129,42 +120,31 @@ describe("isEditable", () => {
 		).toBe(false)
 	})
 
-	it("is true for a .docx only in builds with DOCX editing, and never outside the drive", () => {
-		docxFlag.on = false
-		expect(isEditable(fileItem({ meta: decodedMeta("report.docx") }), "drive")).toBe(false)
+	it("is true for a .docx in the drive, and never outside it", () => {
+		expect(isEditable(fileItem({ meta: decodedMeta("report.docx") }), "drive")).toBe(true)
+		expect(isEditable(fileItem({ meta: decodedMeta("report.docx") }), "sharedIn")).toBe(false)
+		expect(isEditable(fileItem({ meta: decodedMeta("report.docx") }), "trash")).toBe(false)
 
-		docxFlag.on = true
+		// Macro-enabled documents and templates too (shown as Word documents by their type); a document under
+		// another name is not.
+		const word = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-		try {
-			expect(isEditable(fileItem({ meta: decodedMeta("report.docx") }), "drive")).toBe(true)
-			expect(isEditable(fileItem({ meta: decodedMeta("report.docx") }), "sharedIn")).toBe(false)
-			expect(isEditable(fileItem({ meta: decodedMeta("report.docx") }), "trash")).toBe(false)
-
-			// Macro-enabled documents and templates too (shown as Word documents by their type); a document under
-			// another name is not.
-			const word = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-
-			for (const name of ["macro.docm", "letter.dotx", "normal.DOTM"]) {
-				expect(isEditable(fileItem({ meta: byMime(name, word) }), "drive")).toBe(true)
-			}
-
-			expect(isEditable(fileItem({ meta: byMime("report.bin", word) }), "drive")).toBe(false)
-
-			// By their own extensions and types, and only in the user's own drive.
-			for (const name of ["macro.docm", "letter.dotx", "normal.dotm"]) {
-				expect(isEditable(fileItem({ meta: decodedMeta(name) }), "drive")).toBe(true)
-
-				for (const variant of ["sharedIn", "sharedOut", "links", "recents", "favorites", "trash"] as const) {
-					expect(isEditable(fileItem({ meta: decodedMeta(name) }), variant)).toBe(false)
-				}
-			}
-
-			expect(isEditable(fileItem({ meta: byMime("letter", "application/vnd.ms-word.template.macroEnabled.12") }), "drive")).toBe(
-				false
-			)
-		} finally {
-			docxFlag.on = false
+		for (const name of ["macro.docm", "letter.dotx", "normal.DOTM"]) {
+			expect(isEditable(fileItem({ meta: byMime(name, word) }), "drive")).toBe(true)
 		}
+
+		expect(isEditable(fileItem({ meta: byMime("report.bin", word) }), "drive")).toBe(false)
+
+		// By their own extensions and types, and only in the user's own drive.
+		for (const name of ["macro.docm", "letter.dotx", "normal.dotm"]) {
+			expect(isEditable(fileItem({ meta: decodedMeta(name) }), "drive")).toBe(true)
+
+			for (const variant of ["sharedIn", "sharedOut", "links", "recents", "favorites", "trash"] as const) {
+				expect(isEditable(fileItem({ meta: decodedMeta(name) }), variant)).toBe(false)
+			}
+		}
+
+		expect(isEditable(fileItem({ meta: byMime("letter", "application/vnd.ms-word.template.macroEnabled.12") }), "drive")).toBe(false)
 	})
 
 	it("is true for markdown — edited through the viewer's own source mode", () => {

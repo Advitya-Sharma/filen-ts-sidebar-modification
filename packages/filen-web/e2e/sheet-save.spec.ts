@@ -16,13 +16,13 @@ import { trackCspViolations } from "./helpers/csp"
 import { storedPassword, trackPasswordCanary } from "./helpers/passwordCanary"
 import { WORKBOOK_PASSWORD, encryptedWorkbook } from "@/tests/encryptedWorkbookFixtures"
 import { preview } from "@/locales/en/preview"
+import { settings } from "@/locales/en/settings"
 
-// Saving on the office engine's spreadsheet viewer end to end, in builds with VITE_SHEET_NEXT=1: the idle autosave,
+// Saving on the spreadsheet viewer end to end: the idle autosave,
 // Cmd/Ctrl+S, a save made elsewhere asked about over unsaved edits, Save as .xlsx of a CSV (its unsaved edits go
 // into the copy, the CSV stays as last saved), Download as CSV ("CSV UTF-8", with a BOM), and a password-protected
 // workbook whose stored bytes are only ever its sealed package (the upload canary: the stored file holds neither
 // the cells nor the password, as UTF-8 or UTF-16). Each leg reads back what the drive now holds.
-test.skip(process.env["VITE_SHEET_NEXT"] !== "1", "the office engine's viewer is only in builds with VITE_SHEET_NEXT=1")
 test.describe.configure({ mode: "default" })
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -309,11 +309,11 @@ test("a password-protected workbook's saves store only its sealed package, and i
 	expect(cellCanary.leaks.filter(leak => !leak.startsWith("console"))).toEqual([])
 })
 
-test("the documents settings hold the autosave switch in builds with the spreadsheet editor", async ({ page }) => {
+test("the documents settings hold the autosave switch", async ({ page }) => {
 	await bootTo(page, "/settings/advanced")
 
 	// Read only: the setting is the account's, shared with every other test.
-	await expect(page.getByText(preview.previewSheetDocumentsDescriptionSheets, { exact: true })).toBeVisible({
+	await expect(page.getByText(settings.settingsAdvancedDocumentsDescription, { exact: true })).toBeVisible({
 		timeout: LAZY_VIEWER_TIMEOUT_MS
 	})
 	await expect(page.getByRole("switch", { name: "Save automatically" })).toBeVisible()

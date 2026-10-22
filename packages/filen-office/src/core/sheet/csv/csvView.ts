@@ -9,7 +9,7 @@ import {
 	isWindows1252Undefined,
 	type CsvEncoding
 } from "./encoding"
-import { cellKey, MAX_COLUMNS, type CellView, type SpreadsheetDoc } from "../model/model"
+import { MAX_COLUMNS, type CellView } from "../model/model"
 
 // How a CSV file was written, so a save writes it back the same way: its separator, its line ends, a byte
 // order mark, a final line end, and the byte encoding it was read as. A legacy windows-1252 export is
@@ -18,7 +18,7 @@ import { cellKey, MAX_COLUMNS, type CellView, type SpreadsheetDoc } from "../mod
 // come back as the same bytes even when the true source encoding was really 1250, 1251, GBK, or another
 // single-byte encoding windows-1252 happened to decode without throwing. The rows are written anew, not
 // copied: quotes a field did not need go, and line ends all become the first one read. An edit that types
-// a character the table cannot hold is refused outright (see CsvDocument and canEncodeWindows1252), not
+// a character the table cannot hold is refused outright (see the text session and canEncodeWindows1252), not
 // silently reformatted.
 // `writable` is false when the source bytes hold a byte windows-1252 leaves undefined, or when they read
 // as confidently non-Western text — both cases where editing would show confusing mojibake.
@@ -173,7 +173,7 @@ export function parseCsvFile(bytes: Uint8Array, tabSeparated: boolean): { rows: 
 	}
 }
 
-// Whether `text` can be written back as windows-1252 without loss — used by CsvDocument to refuse an edit
+// Whether `text` can be written back as windows-1252 without loss — used by the text session to refuse an edit
 // before it ever reaches serializeCsv, rather than letting the file's saved encoding change silently.
 export function canEncodeWindows1252(text: string): boolean {
 	return encodeWindows1252(text) !== null
@@ -200,7 +200,7 @@ export function serializeCsv(rows: readonly (readonly string[])[], format: CsvFo
 		const encoded = encodeWindows1252(text)
 
 		if (encoded === null) {
-			// CsvDocument refuses any edit that would introduce a character this table cannot hold, so a
+			// The text session refuses any edit that would introduce a character this table cannot hold, so a
 			// reachable document's text is always fully encodable here — this file never silently changes
 			// encoding on save. Reaching this is a bug upstream, not a case to paper over with UTF-8.
 			throw new Error("spreadsheet: windows-1252 CSV holds a character it cannot represent")
@@ -223,43 +223,4 @@ const NUMERIC = /^[-+]?(\d+([.,]\d+)?|\d{1,3}([.,]\d{3})+([.,]\d+)?)%?$/
 // A CSV cell shows its text as is; one that reads as a number sits on the right, as a number does.
 export function csvCellView(text: string): CellView | null {
 	return text === "" ? null : NUMERIC.test(text.trim()) ? { text, numeric: true } : { text }
-}
-
-export function csvDoc(rows: readonly (readonly string[])[], writable: boolean): SpreadsheetDoc {
-	const cells = new Map<number, CellView>()
-	let colCount = 0
-
-	rows.forEach((row, rowIndex) => {
-		colCount = Math.max(colCount, row.length)
-		row.forEach((value, colIndex) => {
-			const view = csvCellView(value)
-
-			if (view !== null) {
-				cells.set(cellKey(rowIndex, colIndex), view)
-			}
-		})
-	})
-
-	return {
-		kind: "csv",
-		sheets: [
-			{
-				name: "",
-				rowCount: rows.length,
-				colCount,
-				cells,
-				merges: [],
-				colWidths: new Map(),
-				rowHeights: new Map(),
-				hiddenCols: [],
-				hiddenRows: [],
-				frozenRows: 0,
-				frozenCols: 0,
-				structureLocked: false
-			}
-		],
-		activeSheet: 0,
-		styles: [],
-		writable
-	}
 }

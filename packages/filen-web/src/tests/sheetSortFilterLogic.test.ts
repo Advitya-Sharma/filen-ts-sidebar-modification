@@ -20,7 +20,7 @@ import {
 	serialIso,
 	storedNumber,
 	valueCriteria
-} from "@/features/spreadsheet/next/data/sortFilter.logic"
+} from "@/features/spreadsheet/data/sortFilter.logic"
 import { previewSheetSortFilter } from "@/locales/en/previewSheet/sortFilter"
 
 // What the sort and filter menus work out before they send a command: Excel's header guess, the criteria a values

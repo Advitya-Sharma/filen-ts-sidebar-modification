@@ -5,18 +5,17 @@ import { withScratchDirectory, LAZY_VIEWER_TIMEOUT_MS, uploadFiles } from "./hel
 import { common } from "@/locales/en/common"
 import { preview } from "@/locales/en/preview"
 
-// The office engine's grid under a finger, on a sheet's whole range and for a screen reader, in builds with
-// VITE_SHEET_NEXT=1. A tap selects and a pan selects nothing, a double tap opens the entry with focus in it (the soft
-// keyboard's target), a long press shows the touch menu above the cell (Cut, Copy, Paste, Select all, Edit, with
-// 44 px targets), the start handle drags a touch selection wider, and the menu's Edit and Select all work. The name
-// box and Ctrl+arrows reach row 1,048,576 and column XFD through a scroll range the browsers hold, the wheel moves
-// the sheet by its own pixels there and the scrollbar maps linearly onto it. The grid is a named ARIA grid whose live
-// region says the active cell and the selected range.
+// The office engine's grid under a finger, on a sheet's whole range and for a screen reader. A tap selects and a pan
+// selects nothing, a double tap opens the entry with focus in it (the soft keyboard's target), a long press shows the
+// touch menu above the cell (Cut, Copy, Paste, Select all, Edit, with 44 px targets), the start handle drags a touch
+// selection wider, and the menu's Edit and Select all work. The name box and Ctrl+arrows reach row 1,048,576 and
+// column XFD through a scroll range the browsers hold, the wheel moves the sheet by its own pixels there and the
+// scrollbar maps linearly onto it. The grid is a named ARIA grid whose live region says the active cell and the
+// selected range.
 //
 // Chromium's touches go through CDP; Firefox and WebKit have no touch protocol in Playwright beyond a tap, so there
 // the same pointer events are dispatched to the element under the finger, captured by what they pressed as a touch's
 // are.
-test.skip(process.env["VITE_SHEET_NEXT"] !== "1", "the office engine's viewer is only in builds with VITE_SHEET_NEXT=1")
 test.describe.configure({ mode: "default" })
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

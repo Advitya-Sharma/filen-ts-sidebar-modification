@@ -2,7 +2,7 @@ import type { DocxTextColor } from "@filen/office/core/docx/edit"
 import type { PreviewKey } from "@/lib/i18n"
 
 // What the office editors' controls share (the DOCX editor and the spreadsheet toolbar), in a module that reaches no
-// editor code: a build with only one editor carries none of the other's.
+// editor code.
 
 // Keeps focus where it was (the document): a pressed toolbar or chip button never takes it.
 export function keepFocus(event: { preventDefault: () => void }): void {

@@ -5,7 +5,6 @@ import { asDirectoryOrFile, narrowItem, upsertDriveItem, type DriveItem } from "
 import { extensionOf, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
 import { type DriveVariant } from "@/features/drive/lib/preferences"
 import { isEditableSpreadsheetExtension } from "@/features/spreadsheet/lib/fileKind"
-import { DOCX_EDITING } from "@/features/preview/lib/docxEditingFlag"
 import { runOp, type ActionOutcome } from "@/lib/actions/outcome"
 import type { PreviewKey } from "@/lib/i18n"
 import { asErrorDTO, plainErrorDTO, PARENT_NOT_FOUND_PREFIX, type ErrorDTO } from "@/lib/sdk/errors"
@@ -65,11 +64,10 @@ export function isEditable(item: DriveItem, variant: DriveVariant): boolean {
 		return isEditableSpreadsheetExtension(extensionOf(driveItemName(base)))
 	}
 
-	// A Word document edits on its pages once editing is complete (until then only in internal builds): a
-	// document or template, macro-enabled or not (macros are kept byte for byte and never run; the writer
+	// A Word document edits on its pages: a document or template, macro-enabled or not (macros are kept byte for byte and never run; the writer
 	// keeps the file's content type).
 	if (category === "docx") {
-		return DOCX_EDITING && DOCX_EDITABLE_EXTENSIONS.has(extensionOf(driveItemName(base)))
+		return DOCX_EDITABLE_EXTENSIONS.has(extensionOf(driveItemName(base)))
 	}
 
 	return isTextCategory(category)

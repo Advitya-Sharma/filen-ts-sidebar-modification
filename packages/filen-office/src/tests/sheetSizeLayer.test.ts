@@ -1,15 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest"
 
-import {
-	EMPTY_LAYER,
-	SIZE_LAYER_LIMIT,
-	followShift,
-	layeredSheet,
-	loadLayer,
-	saveLayer,
-	updateLayer,
-	type SizeLayerStorage
-} from "../core/sheet/index"
+import { EMPTY_LAYER, SIZE_LAYER_LIMIT, followShift, loadLayer, saveLayer, updateLayer, type SizeLayerStorage } from "../core/sheet/index"
 
 const kvStore = new Map<string, unknown>()
 const storage: SizeLayerStorage = {
@@ -85,23 +76,6 @@ describe("persistence", () => {
 
 		expect(kvStore.has("spreadsheet.sizes.v1.s2")).toBe(false)
 		expect(kvStore.get("spreadsheet.sizes.index.v1")).toEqual([])
-	})
-})
-
-describe("layeredSheet", () => {
-	it("lays local sizes over the file's, and returns the sheet itself with none", () => {
-		const sheet = { colWidths: new Map([[0, 40]]), rowHeights: new Map<number, number>() }
-
-		expect(layeredSheet(sheet, undefined)).toBe(sheet)
-		expect(layeredSheet(sheet, { cols: new Map([[0, 80]]), rows: new Map() }).colWidths.get(0)).toBe(80)
-	})
-
-	// sheetRows/sheetCols memoize by map identity: an unchanged layer must not rebuild the axes.
-	it("returns the same sheet for the same sheet and sizes", () => {
-		const sheet = { colWidths: new Map([[0, 40]]), rowHeights: new Map<number, number>() }
-		const sizes = { cols: new Map([[1, 80]]), rows: new Map<number, number>() }
-
-		expect(layeredSheet(sheet, sizes)).toBe(layeredSheet(sheet, sizes))
 	})
 })
 

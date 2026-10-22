@@ -1,14 +1,5 @@
-import { createAxis, type Axis } from "./axis"
-import { rangeContains, type CellPosition, type Selection } from "../refs/cellRef"
-import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, type CellRange } from "../model/model"
-
-// Blank rows and columns past the used area, as a spreadsheet shows.
-const EXTRA_ROWS = 100
-const EXTRA_COLS = 20
-const MIN_COLS = 26
-// Browsers cap an element's height (Firefox near 17.9 million pixels): rows past it cannot be scrolled to,
-// so the grid stops there and says so.
-const MAX_GRID_PIXELS = 15_000_000
+import type { Selection } from "../refs/cellRef"
+import type { CellRange } from "../model/model"
 
 export interface GridBounds {
 	rowCount: number
@@ -30,102 +21,6 @@ interface KeyLike {
 	ctrlKey: boolean
 	metaKey: boolean
 	altKey: boolean
-}
-
-// The merge covering a cell. Linear, for single lookups (a key, a click); the grid indexes what it draws.
-export function mergeAt(merges: readonly CellRange[], row: number, col: number): CellRange | undefined {
-	return merges.find(merge => rangeContains(merge, row, col))
-}
-
-// A position inside a merge stands for the merge's anchor, the one cell of it that holds anything.
-export function snapToMerge(position: CellPosition, merges: readonly CellRange[]): CellPosition {
-	const merge = mergeAt(merges, position.row, position.col)
-
-	return merge === undefined || (merge.startRow === position.row && merge.startCol === position.col)
-		? position
-		: { row: merge.startRow, col: merge.startCol }
-}
-
-export interface NavigableSheet {
-	rowCount: number
-	colCount: number
-	hiddenRows: readonly number[]
-	hiddenCols: readonly number[]
-	rowHeights: ReadonlyMap<number, number>
-	colWidths: ReadonlyMap<number, number>
-	merges: readonly CellRange[]
-}
-
-interface AxisMemo<T> {
-	hidden: readonly number[]
-	count: number
-	value: T
-}
-
-// Axes by the size map they were built from: a cell edit keeps a sheet's sizes and hidden lists, so it
-// reuses the axes rather than sorting every custom size again.
-const rowAxes = new WeakMap<ReadonlyMap<number, number>, AxisMemo<{ axis: Axis; truncated: boolean }>>()
-const colAxes = new WeakMap<ReadonlyMap<number, number>, AxisMemo<Axis>>()
-
-function memo<T>(
-	cache: WeakMap<ReadonlyMap<number, number>, AxisMemo<T>>,
-	sizes: ReadonlyMap<number, number>,
-	hidden: readonly number[],
-	count: number,
-	build: () => T
-): T {
-	const hit = cache.get(sizes)
-
-	if (hit?.hidden === hidden && hit.count === count) {
-		return hit.value
-	}
-
-	const value = build()
-
-	cache.set(sizes, { hidden, count, value })
-
-	return value
-}
-
-// A sheet's rows as the grid shows them, cut off at MAX_GRID_PIXELS (`truncated`).
-export function sheetRows(sheet: NavigableSheet): { axis: Axis; truncated: boolean } {
-	return memo(rowAxes, sheet.rowHeights, sheet.hiddenRows, sheet.rowCount, () => {
-		const full = createAxis(sheet.rowCount + EXTRA_ROWS, DEFAULT_ROW_HEIGHT, sheet.rowHeights, sheet.hiddenRows)
-
-		if (full.total <= MAX_GRID_PIXELS) {
-			return { axis: full, truncated: false }
-		}
-
-		const shown = full.indexAt(MAX_GRID_PIXELS)
-
-		return { axis: createAxis(shown, DEFAULT_ROW_HEIGHT, sheet.rowHeights, sheet.hiddenRows), truncated: sheet.rowCount > shown }
-	})
-}
-
-export function sheetCols(sheet: NavigableSheet): Axis {
-	return memo(colAxes, sheet.colWidths, sheet.hiddenCols, sheet.colCount, () =>
-		createAxis(Math.max(sheet.colCount + EXTRA_COLS, MIN_COLS), DEFAULT_COL_WIDTH, sheet.colWidths, sheet.hiddenCols)
-	)
-}
-
-// The sheet's last used row and column: where header clicks, select-all and mod+arrow stop.
-export function lastUsed(sheet: NavigableSheet): { row: number; col: number } {
-	return { row: Math.max(0, sheet.rowCount - 1), col: Math.max(0, sheet.colCount - 1) }
-}
-
-// The bounds a sheet's grid moves within, bar the page size, which depends on the viewport.
-export function sheetBounds(sheet: NavigableSheet, rows: Axis, cols: Axis): Omit<GridBounds, "pageRows"> {
-	const last = lastUsed(sheet)
-
-	return {
-		rowCount: rows.count,
-		colCount: cols.count,
-		lastUsedRow: last.row,
-		lastUsedCol: last.col,
-		hiddenRow: row => rows.size(row) === 0,
-		hiddenCol: col => cols.size(col) === 0,
-		mergeAt: (row, col) => mergeAt(sheet.merges, row, col)
-	}
 }
 
 // One step from `from` towards `delta`, past hidden indices; null when nothing shown lies that way.

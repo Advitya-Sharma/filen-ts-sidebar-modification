@@ -5,11 +5,10 @@ import { withScratchDirectory, LAZY_VIEWER_TIMEOUT_MS, LIVE_WRITE_TIMEOUT_MS, up
 import { resolveModKey } from "./helpers/modkey"
 import { preview } from "@/locales/en/preview"
 
-// Notes, threaded comments and hyperlinks on the office engine end to end, in builds with VITE_SHEET_NEXT=1: a note
+// Notes, threaded comments and hyperlinks on the office engine end to end: a note
 // added from the grid's menu and shown on hover, a comment thread started and replied to, a web link inserted with
 // Ctrl/Cmd+K (Ctrl/Cmd+click asks before an untrusted domain opens) and a link to another sheet followed. Saved and
 // reopened, so what it checks is the file the drive now holds.
-test.skip(process.env["VITE_SHEET_NEXT"] !== "1", "the office engine's viewer is only in builds with VITE_SHEET_NEXT=1")
 test.describe.configure({ mode: "default" })
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

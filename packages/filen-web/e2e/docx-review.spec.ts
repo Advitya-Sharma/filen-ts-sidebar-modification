@@ -1,7 +1,7 @@
 import type { Locator, Page } from "@playwright/test"
 import { test, expect } from "./fixtures"
 import { LAZY_VIEWER_TIMEOUT_MS, uploadFiles, withScratchDirectory } from "./helpers/listing"
-import { DOCX_EDITING_E2E, DOCX_FIXTURE_TEXT, DOCX_MIME, docxFixtureBytes, type DocxFixtureName } from "./helpers/docxFixtures"
+import { DOCX_FIXTURE_TEXT, DOCX_MIME, docxFixtureBytes, type DocxFixtureName } from "./helpers/docxFixtures"
 import { trackCspViolations } from "./helpers/csp"
 import { preview } from "@/locales/en/preview"
 
@@ -9,9 +9,8 @@ import { preview } from "@/locales/en/preview"
 // resolved in its margin balloon (and composed in the popover where the margin has no room), track changes
 // switched on with typing recorded and the changes accepted and rejected, and (Chromium, through CDP) IME
 // composition recorded as one tracked insertion. Each document is uploaded into the test's own scratch
-// directory. Runs only against a build with DOCX editing (VITE_DOCX_EDITING=1).
+// directory.
 
-test.skip(!DOCX_EDITING_E2E, "DOCX editing is not built in (VITE_DOCX_EDITING=1)")
 test.describe.configure({ mode: "default" })
 // Wide enough for the balloon column beside the page at 100 %; set again once in the scratch directory (entering
 // one makes the viewport tall for the listing).

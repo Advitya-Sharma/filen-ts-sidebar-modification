@@ -143,36 +143,6 @@ export function updateLayer(layer: SizeLayer, sheet: number, axis: SizeAxis, ent
 	return layers
 }
 
-// Last result per layer entry: sheetRows/sheetCols memoize by map identity, so an unchanged sheet and
-// layer must give the same sheet back, or every render would rebuild both axes.
-const layered = new WeakMap<SheetSizes, { sheet: object; result: object }>()
-
-// The sheet as shown: its own sizes with the layer's over them.
-export function layeredSheet<T extends { colWidths: ReadonlyMap<number, number>; rowHeights: ReadonlyMap<number, number> }>(
-	sheet: T,
-	sizes: SheetSizes | undefined
-): T {
-	if (sizes === undefined) {
-		return sheet
-	}
-
-	const cached = layered.get(sizes)
-
-	if (cached?.sheet === sheet) {
-		return cached.result as T
-	}
-
-	const result: T = {
-		...sheet,
-		colWidths: sizes.cols.size === 0 ? sheet.colWidths : withSizes(sheet.colWidths, [...sizes.cols]),
-		rowHeights: sizes.rows.size === 0 ? sheet.rowHeights : withSizes(sheet.rowHeights, [...sizes.rows])
-	}
-
-	layered.set(sizes, { sheet, result })
-
-	return result
-}
-
 // Sizes a delete took out, for its undo to put back; most recent last.
 export interface StashedSizes {
 	id: string

@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — typing formulas: function suggestions, the syntax of
+// "preview" namespace, spreadsheet viewer — typing formulas: function suggestions, the syntax of
 // the function being typed, and AutoSum. Spread into preview.ts; same catalog rules.
 export const previewSheetFormula = {
 	/** Spreadsheet formula typing — accessible name of the list of function names offered while a formula is typed */

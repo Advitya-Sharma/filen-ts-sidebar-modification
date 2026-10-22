@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — sheet structure: hiding, freezing, merging, the
+// "preview" namespace, spreadsheet viewer — sheet structure: hiding, freezing, merging, the
 // sheet tabs' menu and protection. Spread into preview.ts; same catalog rules.
 export const previewSheetStructure = {
 	/** Spreadsheet grid menu — hides the selected rows */

@@ -1,4 +1,4 @@
-// "preview" namespace, spreadsheet viewer on the office engine — filling cells (the grid menu's Fill submenu and the
+// "preview" namespace, spreadsheet viewer — filling cells (the grid menu's Fill submenu and the
 // Series dialog). Spread into preview.ts; same catalog rules.
 export const previewSheetClipboard = {
 	/** Spreadsheet grid menu — submenu that fills the selection from its first cells */

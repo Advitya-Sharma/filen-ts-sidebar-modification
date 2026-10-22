@@ -39,42 +39,20 @@ export {
 	MAX_COLUMNS,
 	MAX_ROWS,
 	cellKey,
-	keyCol,
-	keyRow,
 	type CellRange,
-	type CellStyleView,
 	type CellView,
-	type HorizontalAlign,
-	type SheetView,
-	type SpreadsheetDoc,
-	type SpreadsheetKind,
-	type VerticalAlign
+	type SpreadsheetKind
 } from "./model/model"
-export {
-	MAX_EDIT_CELLS,
-	MAX_SHEET_CELLS,
-	TOGGLE_FORMATS,
-	toggledPatch,
-	type AxisEdit,
-	type CellPatch,
-	type DocState,
-	type EditOp,
-	type EditResult,
-	type FormatPatch,
-	type ToggleFormat
-} from "./model/edits"
+export { MAX_SHEET_CELLS, type AxisEdit } from "./model/edits"
 export {
 	cellName,
 	columnIndex,
 	columnName,
 	expandToMerges,
-	rangeArea,
 	rangeCols,
-	rangeContains,
 	rangeName,
 	rangeRows,
 	rangesIntersect,
-	selectionRange,
 	type CellPosition,
 	type Selection
 } from "./refs/cellRef"
@@ -82,7 +60,6 @@ export {
 	engineCellFormula,
 	engineFormula,
 	formulaTranslator,
-	namesSheet,
 	renameSheetInFormula,
 	rewriteFormula,
 	sameSheet,
@@ -94,10 +71,8 @@ export {
 	type FormulaRef,
 	type RefArea
 } from "./refs/formulaRefs"
-export { malformedFormula, parseCellInput, takesText, type ParsedInput } from "./input/cellInput"
-export { EditHistory, HISTORY_BYTES } from "./history/editHistory"
+export { malformedFormula, parseCellInput, type ParsedInput } from "./input/cellInput"
 export {
-	CELL_PADDING,
 	MAX_COL_WIDTH,
 	MAX_RESIZE_TARGETS,
 	MAX_ROW_HEIGHT,
@@ -105,26 +80,23 @@ export {
 	PX_PER_POINT,
 	clampSize,
 	colWidthToPx,
-	fitSize,
 	pxToColWidth,
 	pxToRowHeight,
 	resetTargets,
 	resizeTargets,
 	restoreSizes,
 	rowHeightToPx,
-	sheetWithSizes,
 	shiftIndex,
 	shiftSizes,
 	withSizes,
 	type SizeAxis,
 	type SizeEntry
 } from "./sizes/sizes"
-export { layerKeyFor, sizesInFile } from "./sizes/sizeRouting"
+export { layerKeyFor } from "./sizes/sizeRouting"
 export {
 	EMPTY_LAYER,
 	SIZE_LAYER_LIMIT,
 	followShift,
-	layeredSheet,
 	loadLayer,
 	saveLayer,
 	updateLayer,
@@ -134,26 +106,12 @@ export {
 	type SizeLayerStorage,
 	type StashedSizes
 } from "./sizes/sizeLayer"
-export { endedCut, parseTsv, pastedCells, pastedInputs, rangeToClip, rangeToTsv, type GridClip, type PastedBlock } from "./clipboard/tsv"
+export { parseTsv, pastedCells, pastedInputs, type GridClip, type PastedBlock } from "./clipboard/tsv"
 export { MAX_HTML_COPY_CELLS } from "./clipboard/html"
 export type { FillMode, SeriesOptions, SeriesRequest } from "./fill/series"
-export { createAxis, type Axis } from "./grid/axis"
-export {
-	gridMove,
-	isTypedCharacter,
-	lastUsed,
-	mergeAt,
-	sheetBounds,
-	sheetCols,
-	sheetRows,
-	snapToMerge,
-	type GridBounds,
-	type NavigableSheet
-} from "./grid/navigation"
-export { CellStore, applyEditResult, gridDoc, gridSheet, shiftedStore, type GridDoc, type GridSheet } from "./grid/cellStore"
-export { clearedCells, newSheetName, type CellEntry } from "./grid/gridEdits"
-export { canEncodeWindows1252, csvCellView, csvDoc, parseCsvFile, serializeCsv, type CsvFormat } from "./csv/csvView"
-export { CsvDocument } from "./csv/csvDocument"
+export { gridMove, isTypedCharacter, type GridBounds } from "./grid/navigation"
+export { newSheetName, type CellEntry } from "./grid/gridEdits"
+export { canEncodeWindows1252, csvCellView, parseCsvFile, serializeCsv, type CsvFormat } from "./csv/csvView"
 export { detectDelimiter, parseCsv, writeCsv } from "./csv/csvParse"
 export type { CsvEncoding } from "./csv/encoding"
 export {
