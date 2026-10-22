@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { File as SdkFile } from "@filen/sdk-rs"
-import { normalizeTextFileName, runCreateTextFile, type CreateTextFileDeps } from "@/features/drive/lib/createTextFile"
+import { normalizeTextFileName, runCreateFile, runCreateTextFile, type CreateFileDeps } from "@/features/drive/lib/createTextFile"
 import type { DriveItem } from "@/features/drive/lib/item"
 import type { ErrorDTO } from "@/lib/sdk/errors"
 import { testUuid } from "@/tests/support/uuid"
@@ -35,8 +35,9 @@ function sdkDto(kind: string): ErrorDTO {
 function makeHarness() {
 	const uploadFileBytes = vi.fn<(parentUuid: string | null, data: Uint8Array, name: string, mime: string) => Promise<SdkFile>>()
 	const patchListing = vi.fn<(parentUuid: string | null, updater: (prev: DriveItem[]) => DriveItem[]) => void>()
-	const deps: CreateTextFileDeps = { uploadFileBytes, patchListing }
-	return { deps, uploadFileBytes, patchListing }
+	const nameTaken = vi.fn<(parentUuid: string | null, name: string) => Promise<boolean>>(() => Promise.resolve(false))
+	const deps: CreateFileDeps = { uploadFileBytes, patchListing, nameTaken }
+	return { deps, uploadFileBytes, patchListing, nameTaken }
 }
 
 beforeEach(() => {
@@ -134,5 +135,42 @@ describe("runCreateTextFile (injected deps, no worker or query client)", () => {
 				label: "parent directory not found: missing-uuid"
 			}
 		})
+	})
+
+	it("never uploads onto a taken name, which would make a new version of that file", async () => {
+		const h = makeHarness()
+		h.nameTaken.mockResolvedValue(true)
+
+		const outcome = await runCreateTextFile(h.deps, "parent-uuid", "notes.txt")
+
+		expect(outcome).toEqual({ status: "taken" })
+		expect(h.nameTaken).toHaveBeenCalledWith("parent-uuid", "notes.txt")
+		expect(h.uploadFileBytes).not.toHaveBeenCalled()
+		expect(h.patchListing).not.toHaveBeenCalled()
+	})
+
+	it("does not upload when the name check itself fails", async () => {
+		const h = makeHarness()
+		const dto = sdkDto("Unauthenticated")
+		h.nameTaken.mockRejectedValue(dto)
+
+		const outcome = await runCreateTextFile(h.deps, "parent-uuid", "notes.txt")
+
+		expect(outcome).toEqual({ status: "error", dto })
+		expect(h.uploadFileBytes).not.toHaveBeenCalled()
+	})
+})
+
+describe("runCreateFile", () => {
+	it("uploads the given bytes under the given type once the name is free", async () => {
+		const h = makeHarness()
+		const bytes = new Uint8Array([0x50, 0x4b, 3, 4])
+		h.uploadFileBytes.mockResolvedValue(mockFile({ uuid: testUuid("doc") }))
+
+		const outcome = await runCreateFile(h.deps, null, "Untitled document.docx", bytes, "application/x-test")
+
+		expect(outcome.status).toBe("success")
+		expect(h.nameTaken).toHaveBeenCalledWith(null, "Untitled document.docx")
+		expect(h.uploadFileBytes).toHaveBeenCalledWith(null, bytes, "Untitled document.docx", "application/x-test")
 	})
 })

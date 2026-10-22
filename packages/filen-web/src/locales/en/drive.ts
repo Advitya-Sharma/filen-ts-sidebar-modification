@@ -170,6 +170,8 @@ export const drive = {
 	driveNewTextFilePlaceholder: "Untitled",
 	/** New-text-file dialog — submit button label */
 	driveNewTextFileSubmit: "Create",
+	/** New-file name dialogs — inline error under the name field when a file or directory of that name (any letter case) is already in the directory; creating it would replace that file's content */
+	driveNewFileNameTaken: "A file or directory with this name already exists here.",
 
 	// ── Breadcrumb ───────────────────────────────────────────────────────────
 	/** Drive breadcrumb — accessible label on the breadcrumb navigation landmark */

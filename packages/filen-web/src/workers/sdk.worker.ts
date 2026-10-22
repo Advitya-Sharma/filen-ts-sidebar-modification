@@ -87,7 +87,7 @@ import init, {
 	type UserEventResult,
 	type JsClientConfig
 } from "@filen/sdk-rs"
-import { InFlight, isUuid, run, runEffect, runTimeout } from "@filen/shared"
+import { InFlight, isUuid, nameCollisionKey, run, runEffect, runTimeout } from "@filen/shared"
 import { asErrorDTO, ErrorWithDTO, toErrorDTO, PARENT_NOT_FOUND_PREFIX, DIRECTORY_NOT_FOUND_PREFIX } from "@/lib/sdk/errors"
 import {
 	compressReportToDTO,
@@ -1452,12 +1452,18 @@ const api = {
 		}
 	},
 	// Whether `name` is taken in the directory. uploadFileBytes onto a taken file name makes a new
-	// version of THAT file, so a caller writing a fresh file checks here first.
+	// version of THAT file, so a caller writing a fresh file checks here first. Compared as the server
+	// does (nameCollisionKey): findItemInDir matches exact names only, so "Report.docx" would miss
+	// "report.docx" and the upload would version it.
 	async nameExistsInDirectory(parentUuid: string | null, name: string): Promise<boolean> {
 		const c = requireClient()
 		const parent = await resolveNormalDirParent(c, parentUuid)
+		const { dirs, files } = await c.listDir(parent)
+		const wanted = nameCollisionKey(name)
 
-		return (await c.findItemInDir(parent, name)) !== undefined
+		cacheDirs(dirs)
+
+		return [...dirs, ...files].some(item => item.meta.type === "decoded" && nameCollisionKey(item.meta.data.name) === wanted)
 	},
 	// ── Download ───────────────────────────────────────────────────────────────
 	// The reverse of uploadFile: the WritableStream SINK arrives via Comlink.transfer (a transferable

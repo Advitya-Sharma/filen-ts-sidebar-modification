@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import { startUploads } from "@/features/drive/lib/upload"
 import { startDirectoryUpload } from "@/features/drive/lib/uploadDirectory"
 import { normalizeTextFileName, runCreateTextFile } from "@/features/drive/lib/createTextFile"
+import { nameTakenInDirectory } from "@/features/drive/lib/nameTaken"
 import { notifyIfNameIsHidden } from "@/features/drive/lib/hiddenNameNotice"
 import { driveListingQueryUpdate } from "@/features/drive/queries/drive"
 import { type DriveItem } from "@/features/drive/lib/item"
@@ -52,6 +53,8 @@ export function useUploadMenuActions({
 	const directoryInputRef = useRef<HTMLInputElement>(null)
 	const [textFileDialogOpen, setTextFileDialogOpen] = useState(false)
 	const [textFilePending, setTextFilePending] = useState(false)
+	// The normalized name the last submit found taken; the error stays until the name changes.
+	const [takenTextFileName, setTakenTextFileName] = useState<string | null>(null)
 	// From a picker's click until its change or cancel.
 	const [pickerOpen, setPickerOpen] = useState(false)
 
@@ -108,6 +111,10 @@ export function useUploadMenuActions({
 		settlePicker()
 	}
 
+	function isTakenTextFileName(name: string): boolean {
+		return takenTextFileName !== null && normalizeTextFileName(name.trim()) === takenTextFileName
+	}
+
 	async function handleTextFileSubmit(name: string): Promise<void> {
 		setTextFilePending(true)
 
@@ -117,7 +124,8 @@ export function useUploadMenuActions({
 		const outcome = await runCreateTextFile(
 			{
 				uploadFileBytes: (parent, data, fileName, mime) => sdkApi.uploadFileBytes(parent, data, fileName, mime),
-				patchListing: driveListingQueryUpdate
+				patchListing: driveListingQueryUpdate,
+				nameTaken: nameTakenInDirectory
 			},
 			parentUuid,
 			normalized
@@ -125,9 +133,14 @@ export function useUploadMenuActions({
 
 		setTextFilePending(false)
 
+		if (outcome.status === "taken") {
+			setTakenTextFileName(normalized)
+			return
+		}
+
 		if (outcome.status === "error") {
-			// Dialog stays open on error (e.g. a name clash with a directory) so the user can fix the
-			// name and retry — mirrors newDirectory.tsx's identical convention.
+			// Dialog stays open on error so the user can fix the name and retry — mirrors newDirectory.tsx's
+			// identical convention.
 			toast.error(errorLabel(outcome.dto))
 			return
 		}
@@ -150,6 +163,7 @@ export function useUploadMenuActions({
 			directoryInputRef.current?.click()
 		},
 		newTextFile: () => {
+			setTakenTextFileName(null)
 			setTextFileDialogOpen(true)
 		},
 		busy: pickerOpen || textFileDialogOpen || textFilePending,
@@ -184,7 +198,8 @@ export function useUploadMenuActions({
 					label={t("driveNewTextFileLabel")}
 					placeholder={t("driveNewTextFilePlaceholder")}
 					submitLabel={t("driveNewTextFileSubmit")}
-					validate={name => name.trim().length > 0}
+					validate={name => name.trim().length > 0 && !isTakenTextFileName(name)}
+					errorFor={name => (isTakenTextFileName(name) ? t("driveNewFileNameTaken") : null)}
 					onOpenChange={setTextFileDialogOpen}
 					onSubmit={value => {
 						void handleTextFileSubmit(value)

@@ -24,3 +24,11 @@ export interface DriveItemLike {
 export function driveItemName(item: DriveItemLike): string {
 	return item.data.decryptedMeta?.name ?? item.data.uuid
 }
+
+// The key two names in one directory collide on. The server keeps names unique through a hash of the
+// name lowercased with Rust's str::to_lowercase (sdk-rs hash_name), the full Unicode lowercase mapping
+// with final sigma; String.prototype.toLowerCase is the same mapping, so "İ" folds to "i" plus a combining
+// dot here too, never a plain "i".
+export function nameCollisionKey(name: string): string {
+	return name.toLowerCase()
+}

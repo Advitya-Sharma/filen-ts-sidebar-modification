@@ -15,26 +15,35 @@ export function normalizeTextFileName(name: string): string {
 // Injected collaborators so the attempt is unit-testable without a worker or a query client —
 // mirrors CreateDirectoryDeps's shape (createDirectory.ts), swapping the create call for the same
 // whole-buffer uploadFileBytes op the editable-preview save path already uses (previewSave.logic.ts).
-export interface CreateTextFileDeps {
+export interface CreateFileDeps {
 	uploadFileBytes: (parentUuid: string | null, data: Uint8Array, name: string, mime: string) => Promise<SdkFile>
 	patchListing: (parentUuid: string | null, updater: (prev: DriveItem[]) => DriveItem[]) => void
+	// An upload onto a taken name makes a new version of that file, never a new one.
+	nameTaken: (parentUuid: string | null, name: string) => Promise<boolean>
 }
 
-// One create-text-file attempt: upload a zero-byte "text/plain" buffer under `name` (mobile parity —
-// useDriveUpload.ts's createTextFile writes an empty tmp file, never a placeholder line), narrow the
-// result into a DriveItem, then patch the affected listing so the new file appears without a
-// refetch. `name` is expected already normalized (normalizeTextFileName above) — this function does
-// not re-derive the extension itself, mirroring runCreateDirectory's identical "caller trims" split.
-// "error" is a name clash against a directory, an invalid name, or any transport failure; the caller
-// surfaces the DTO's label.
-export async function runCreateTextFile(
-	deps: CreateTextFileDeps,
+// "taken" leaves every file as it was; the caller asks for another name.
+export type CreateFileOutcome = ActionOutcome<DriveItem> | { status: "taken" }
+
+// One create-new-file attempt: refuse a taken name, upload `data` under `name`, narrow the result into
+// a DriveItem, then patch the affected listing so the new file appears without a refetch. `name` is
+// expected already normalized — this function does not re-derive the extension itself, mirroring
+// runCreateDirectory's identical "caller trims" split. "error" is an invalid name or any transport
+// failure; the caller surfaces the DTO's label.
+export async function runCreateFile(
+	deps: CreateFileDeps,
 	parentUuid: string | null,
-	name: string
-): Promise<ActionOutcome<DriveItem>> {
+	name: string,
+	data: Uint8Array,
+	mime: string
+): Promise<CreateFileOutcome> {
 	let created: SdkFile
 	try {
-		created = await deps.uploadFileBytes(parentUuid, new Uint8Array(0), name, "text/plain")
+		if (await deps.nameTaken(parentUuid, name)) {
+			return { status: "taken" }
+		}
+
+		created = await deps.uploadFileBytes(parentUuid, data, name, mime)
 	} catch (e) {
 		return { status: "error", dto: asErrorDTO(e) }
 	}
@@ -43,4 +52,10 @@ export async function runCreateTextFile(
 	deps.patchListing(parentUuid, prev => upsertDriveItem(prev, item))
 
 	return { status: "success", item }
+}
+
+// A zero-byte "text/plain" file (mobile parity — useDriveUpload.ts's createTextFile writes an empty
+// tmp file, never a placeholder line).
+export function runCreateTextFile(deps: CreateFileDeps, parentUuid: string | null, name: string): Promise<CreateFileOutcome> {
+	return runCreateFile(deps, parentUuid, name, new Uint8Array(0), "text/plain")
 }

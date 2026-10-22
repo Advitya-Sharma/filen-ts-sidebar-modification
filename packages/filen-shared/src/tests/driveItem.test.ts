@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { driveItemName } from "@filen/shared"
+import { driveItemName, nameCollisionKey } from "@filen/shared"
 
 describe("driveItemName", () => {
 	it("returns the decrypted metadata's name when present", () => {
@@ -12,5 +12,20 @@ describe("driveItemName", () => {
 
 	it("falls back to the uuid when decryptedMeta is undefined", () => {
 		expect(driveItemName({ data: { uuid: "uuid-3" } })).toBe("uuid-3")
+	})
+})
+
+describe("nameCollisionKey", () => {
+	it("makes names differing only in letter case collide", () => {
+		expect(nameCollisionKey("Report.DOCX")).toBe(nameCollisionKey("report.docx"))
+		expect(nameCollisionKey("ÄRGER.txt")).toBe(nameCollisionKey("ärger.txt"))
+		expect(nameCollisionKey("report.docx")).not.toBe(nameCollisionKey("report 2.docx"))
+	})
+
+	it("folds as the server's name hash does (Rust str::to_lowercase), not as a simple case fold", () => {
+		expect(nameCollisionKey("İstanbul")).toBe("i\u0307stanbul")
+		expect(nameCollisionKey("ΟΔΟΣ")).toBe("οδος")
+		// "." is case-ignorable and letters follow, so the sigma is not final (as in Rust).
+		expect(nameCollisionKey("ΟΔΟΣ.txt")).toBe("οδοσ.txt")
 	})
 })
