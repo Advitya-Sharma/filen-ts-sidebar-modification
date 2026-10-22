@@ -1428,10 +1428,33 @@ function insideString(formula: string, at: number): boolean {
 	return false
 }
 
-// The calls that may give a range or an array where one value is read: Excel shows them with @ in a formula written
-// before dynamic arrays (support.microsoft.com "Implicit intersection operator: @": INDEX, OFFSET, a user-defined
-// function), as INDIRECT, which gives a reference too.
+// The functions that may give a multi-cell range or an array, which Excel shows with @ in a formula written before
+// dynamic arrays (support.microsoft.com "Excel functions that return ranges or arrays": CELL, COLUMN, FILTERXML,
+// FORMULATEXT, FREQUENCY, GROWTH, HYPERLINK, INDEX, INDIRECT, ISFORMULA, LINEST, LOGEST, MINVERSE, MMULT, MODE.MULT,
+// MUNIT, OFFSET, ROW, TRANSPOSE, TREND and every user-defined function). INDEX, OFFSET and INDIRECT give a reference
+// whatever their arguments ("Implicit intersection operator: @" shows =@INDEX(A1:A10,B1)); the others give an array
+// from a range they are given, so they take @ when a reference to more than one cell is among their arguments (ROW(A1)
+// gives one value, ROW(A1:A3) three).
 const RANGE_CALLS = new Set(["INDEX", "OFFSET", "INDIRECT"])
+const ARRAY_CALLS = new Set([
+	"CELL",
+	"COLUMN",
+	"FILTERXML",
+	"FORMULATEXT",
+	"FREQUENCY",
+	"GROWTH",
+	"HYPERLINK",
+	"ISFORMULA",
+	"LINEST",
+	"LOGEST",
+	"MINVERSE",
+	"MMULT",
+	"MODE.MULT",
+	"MUNIT",
+	"ROW",
+	"TRANSPOSE",
+	"TREND"
+])
 
 // Whether a reference names more than one cell.
 function manyCells(ref: FormulaRef): boolean {
@@ -1453,16 +1476,32 @@ export function legacyIntersections(
 ): string {
 	if (!formula.includes(":") && !formula.includes("(")) return formula
 
-	// One frame per open parenthesis: whether its current argument takes one value, and the call it belongs to.
-	const frames: { one: boolean; call: string | null; argument: number }[] = [{ one: true, call: null, argument: 0 }]
+	// One frame per open parenthesis: whether its current argument takes one value, and the call it belongs to; for a
+	// call of ARRAY_CALLS read for one value, where its name is in `text` (its @ goes there once a reference to more
+	// than one cell is among its arguments: `ranged`).
+	interface Frame {
+		one: boolean
+		call: string | null
+		argument: number
+		at: number
+		ranged: boolean
+	}
+
+	const frames: Frame[] = [{ one: true, call: null, argument: 0, at: -1, ranged: false }]
 	let text = ""
 	let call: string | null = null
+	// Where the last call's name was written, and whether it is one of ARRAY_CALLS read for one value.
+	let callAt = -1
 
 	for (const part of formulaParts(formula)) {
-		const frame = frames.at(-1) ?? { one: false, call: null, argument: 0 }
+		const frame = frames.at(-1) ?? { one: false, call: null, argument: 0, at: -1, ranged: false }
 
 		if (typeof part !== "string") {
-			text += `${frame.one && !part.ref.external && manyCells(part.ref) ? "@" : ""}${part.prefix}${part.areaText}`
+			const many = !part.ref.external && manyCells(part.ref)
+
+			if (many) for (const open of frames) open.ranged = true
+
+			text += `${frame.one && many ? "@" : ""}${part.prefix}${part.areaText}`
 			call = null
 
 			continue
@@ -1472,7 +1511,7 @@ export function legacyIntersections(
 
 		while (index < part.length) {
 			const code = part.charCodeAt(index)
-			const top = frames.at(-1) ?? { one: false, call: null, argument: 0 }
+			const top = frames.at(-1) ?? { one: false, call: null, argument: 0, at: -1, ranged: false }
 
 			// A string, a quoted name or a structured reference's brackets (T[[#This Row],[x]]): whole, its commas no
 			// argument's.
@@ -1496,6 +1535,7 @@ export function legacyIntersections(
 					const name = bareFunctionName(word).toUpperCase()
 
 					call = name
+					callAt = top.one && ARRAY_CALLS.has(name) ? text.length : -1
 					text += top.one && (RANGE_CALLS.has(name) || !known(word)) ? `@${word}` : word
 				} else text += word
 
@@ -1504,10 +1544,20 @@ export function legacyIntersections(
 				continue
 			}
 
-			if (code === 40) frames.push({ one: call === null ? top.one : oneValue(call, 0), call, argument: 0 })
-			else if (code === 123) frames.push({ one: false, call: null, argument: 0 })
-			else if ((code === 41 || code === 125) && frames.length > 1) frames.pop()
-			else if (code === 44 && top.call !== null) {
+			if (code === 40)
+				frames.push({
+					one: call === null ? top.one : oneValue(call, 0),
+					call,
+					argument: 0,
+					at: call === null ? -1 : callAt,
+					ranged: false
+				})
+			else if (code === 123) frames.push({ one: false, call: null, argument: 0, at: -1, ranged: false })
+			else if ((code === 41 || code === 125) && frames.length > 1) {
+				frames.pop()
+
+				if (top.at >= 0 && top.ranged) text = `${text.slice(0, top.at)}@${text.slice(top.at)}`
+			} else if (code === 44 && top.call !== null) {
 				top.argument++
 				top.one = oneValue(top.call, top.argument)
 			}

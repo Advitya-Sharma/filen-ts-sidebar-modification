@@ -37,54 +37,80 @@ const MAX_CAPTURE_WORK = 2_000_000
 // a match's higher-priority threads read past it, which this bounds.
 export const STEP_BUDGET = 2_000_000
 
-// The characters a node's matches start with, and whether it may match nothing (`empty`); null when not known.
-function firstCodes(node: Node): { codes: Set<number>; empty: boolean } | null {
+// The characters a node's matches start with (`codes`; a caseless letter by its fold, in `folded`), and whether it may
+// match nothing (`empty`); null when not known.
+interface Firsts {
+	readonly codes: Set<number>
+	readonly folded: Set<number>
+	empty: boolean
+}
+
+function firstCodes(node: Node): Firsts | null {
 	switch (node.type) {
 		case "empty":
-			return { codes: new Set(), empty: true }
+			return { codes: new Set(), folded: new Set(), empty: true }
 		case "char":
-			return node.caseless ? null : { codes: new Set([node.code]), empty: false }
+			return node.caseless
+				? { codes: new Set([node.code]), folded: new Set([fold(node.code)]), empty: false }
+				: { codes: new Set([node.code]), folded: new Set(), empty: false }
 		case "group":
 			return firstCodes(node.body)
 		case "repeat": {
 			const body = firstCodes(node.body)
 
-			return body === null ? null : { codes: body.codes, empty: body.empty || node.min === 0 }
+			return body === null ? null : { ...body, empty: body.empty || node.min === 0 }
 		}
-		case "alternate": {
-			const codes = new Set<number>()
-			let empty = false
-
-			for (const alternative of node.alternatives) {
-				const first = firstCodes(alternative)
-
-				if (first === null) return null
-
-				for (const code of first.codes) codes.add(code)
-
-				empty ||= first.empty
-			}
-
-			return { codes, empty }
-		}
+		case "alternate":
 		case "concat": {
-			const codes = new Set<number>()
+			const firsts: Firsts = { codes: new Set(), folded: new Set(), empty: node.type === "concat" }
 
-			for (const item of node.items) {
+			for (const item of node.type === "alternate" ? node.alternatives : node.items) {
 				const first = firstCodes(item)
 
 				if (first === null) return null
 
-				for (const code of first.codes) codes.add(code)
+				for (const code of first.codes) firsts.codes.add(code)
+				for (const code of first.folded) firsts.folded.add(code)
 
-				if (!first.empty) return { codes, empty: false }
+				if (node.type === "alternate") firsts.empty ||= first.empty
+				else if (!first.empty) {
+					firsts.empty = false
+
+					return firsts
+				}
 			}
 
-			return { codes, empty: true }
+			return firsts
 		}
 		default:
 			return null
 	}
+}
+
+// The literal runs every match holds in order (the pattern's own letters, outside any repeat or alternative): a text
+// that does not hold them in that order from a position holds no match from there.
+function requiredRuns(root: Node): { readonly codes: readonly number[]; readonly caseless: readonly boolean[] }[] {
+	const items = root.type === "concat" ? root.items : [root]
+	const runs: { codes: number[]; caseless: boolean[] }[] = []
+	let run: { codes: number[]; caseless: boolean[] } | null = null
+
+	for (const item of items) {
+		if (item.type === "char" && item.code <= 0xffff) {
+			run ??= { codes: [], caseless: [] }
+			run.codes.push(item.code)
+			run.caseless.push(item.caseless)
+
+			continue
+		}
+
+		if (run !== null) runs.push(run)
+
+		run = null
+	}
+
+	if (run !== null) runs.push(run)
+
+	return runs
 }
 
 // A search over its step budget: the formula keeps the file's result.
@@ -207,10 +233,16 @@ export class Program {
 	readonly slotCount: number
 	// Literal text every match starts with (case-sensitive), found by indexOf.
 	private readonly prefix: string
-	// The characters every match starts with (case-sensitive, from the Basic Multilingual Plane), or null when that is
-	// not known (a class, a caseless letter, a pattern that may match nothing first): where no search is under way, the
-	// text up to the next of them is passed over without a step.
+	// The characters every match starts with (from the Basic Multilingual Plane; a caseless letter by its fold), or null
+	// when that is not known (a class, a pattern that may match nothing first): where no search is under way, the text
+	// up to the next of them is passed over without a step.
 	private readonly firstCodes: ReadonlySet<number> | null
+	private readonly firstFolded: ReadonlySet<number>
+	// The literal runs every match holds in order (requiredRuns), and the last text looked through for them with the
+	// last position a match may start from in it (-1: none).
+	private readonly runs: ReturnType<typeof requiredRuns>
+	private runsText: string | null = null
+	private runsFrom = -1
 	// Whether every match starts at the start of the text (^ or \A first).
 	private readonly startAnchored: boolean
 	private readonly visited: Int32Array
@@ -253,6 +285,8 @@ export class Program {
 		const firsts = firstCodes(parsed.root)
 
 		this.firstCodes = firsts === null || firsts.empty || [...firsts.codes].some(code => code > 0xffff) ? null : firsts.codes
+		this.firstFolded = firsts?.folded ?? new Set()
+		this.runs = requiredRuns(parsed.root)
 		this.startAnchored = first[0]?.type === "assert" && (first[0].kind === "bol" || first[0].kind === "start")
 	}
 
@@ -390,6 +424,40 @@ export class Program {
 		return this.length
 	}
 
+	// The last position a match may start from in `text`: where the first required run is found, the runs taken from
+	// the end in reverse order (each before the next); -1 when they are not all there. Once per text.
+	private lastStart(text: string): number {
+		if (this.runsText === text) return this.runsFrom
+
+		let limit = text.length
+
+		for (let r = this.runs.length - 1; r >= 0 && limit >= 0; r--) {
+			const run = this.runs[r] as ReturnType<typeof requiredRuns>[number]
+			const length = run.codes.length
+			let found = -1
+
+			for (let at = limit - length; at >= 0 && found < 0; at--) {
+				let all = true
+
+				for (let i = 0; i < length && all; i++) {
+					const code = text.charCodeAt(at + i)
+					const want = run.codes[i] ?? 0
+
+					all = code === want || (run.caseless[i] === true && fold(code) === fold(want))
+				}
+
+				if (all) found = at
+			}
+
+			limit = found
+		}
+
+		this.runsText = text
+		this.runsFrom = limit
+
+		return limit
+	}
+
 	// Starts a new step budget of `steps`.
 	resetBudget(steps = STEP_BUDGET): void {
 		this.budget = steps
@@ -409,6 +477,9 @@ export class Program {
 		const size = this.length
 		const end = text.length
 		const start = options.start
+
+		if (this.runs.length > 0 && start > this.lastStart(text)) return null
+
 		const previousEnd = options.previousEnd ?? start
 		const anchored = options.anchored === true
 		const notEmpty = options.notEmptyAtStart === true
@@ -435,7 +506,14 @@ export class Program {
 
 					pos = found
 				} else if (this.firstCodes !== null) {
-					while (pos < end && !this.firstCodes.has(text.charCodeAt(pos))) pos++
+					const codes = this.firstCodes
+					const folded = this.firstFolded
+
+					for (; pos < end; pos++) {
+						const at = text.charCodeAt(pos)
+
+						if (codes.has(at) || (folded.size > 0 && folded.has(fold(at)))) break
+					}
 
 					if (pos >= end) break
 				}

@@ -607,6 +607,56 @@ describe("a formula written before dynamic arrays", () => {
 		])
 	})
 
+	it("shows @ on a function that may give a range or an array, where it would give one", () => {
+		// support.microsoft.com "Excel functions that return ranges or arrays": COLUMN, ROW, TRANSPOSE, MMULT and the
+		// others take @ in a formula written before dynamic arrays; ROW(A1) gives one value, and an argument that reads
+		// an array whole (SUM's) needs none.
+		const shown = (formula: string): string => shownFormula(legacyIntersections(formula, takesOneValue, () => true))
+
+		expect(
+			[
+				"COLUMN(1:2)",
+				"ROW(A1:A3)",
+				"ROW(A1)+ROW()",
+				"TRANSPOSE(A1:C1)",
+				"MMULT(A1:B2,C1:D2)*2",
+				"SUM(ROW(A1:A3))",
+				"LEN(TRANSPOSE(A1:C1))",
+				"TRANSPOSE(ROW(A1:A3))",
+				'HYPERLINK("https://filen.io","x")'
+			].map(shown)
+		).toEqual([
+			"@COLUMN(1:2)",
+			"@ROW(A1:A3)",
+			"ROW(A1)+ROW()",
+			"@TRANSPOSE(A1:C1)",
+			"@MMULT(A1:B2,C1:D2)*2",
+			"SUM(ROW(A1:A3))",
+			"LEN(@TRANSPOSE(A1:C1))",
+			"@TRANSPOSE(ROW(A1:A3))",
+			'HYPERLINK("https://filen.io","x")'
+		])
+	})
+
+	it("typed again as shown or edited, a function that may give an array keeps giving one value", async () => {
+		const body =
+			'<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>COLUMN(1:2)</f><v>1</v></c><c r="C1"><f>ROW(A1:A3)</f><v>1</v></c></row>' +
+			'<row r="2"><c r="A2"><v>2</v></c></row><row r="3"><c r="A3"><v>3</v></c></row></sheetData>'
+		const source = workbook(body, METADATA)
+		const { session, sheet } = await open(source)
+		const original = (await saved(session)).sheet
+
+		expect(await inputs(session, sheet, ["B1", "C1"])).toEqual(["=@COLUMN(1:2)", "=@ROW(A1:A3)"])
+
+		for (const cell of ["B1", "C1"]) await set(session, sheet, cell, (await inputs(session, sheet, [cell]))[0] ?? "")
+		expect((await saved(session)).sheet).toBe(original)
+
+		await set(session, sheet, "C1", "=@ROW(A1:A3)+1")
+		expect(await texts(session, sheet, ["C1", "C2"])).toEqual(["2", ""])
+		expect((await saved(session)).sheet).not.toContain('t="array"')
+		session.close()
+	})
+
 	it("edited, keeps reading one value where it shows @", async () => {
 		const body =
 			'<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="D1"><v>1</v></c><c r="E1"><v>10</v></c></row>' +

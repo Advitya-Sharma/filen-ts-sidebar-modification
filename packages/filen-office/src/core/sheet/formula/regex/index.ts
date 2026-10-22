@@ -2,7 +2,7 @@ import { parse } from "./parse"
 import { Program } from "./program"
 import { RegexSyntaxError, RegexUnsupportedError, type Parsed } from "./syntax"
 
-export { RegexBudgetError } from "./program"
+export { RegexBudgetError, STEP_BUDGET } from "./program"
 export { RegexSyntaxError, RegexUnsupportedError } from "./syntax"
 
 // A PCRE2 pattern compiled for this engine. Throws RegexSyntaxError for a pattern PCRE2 rejects and

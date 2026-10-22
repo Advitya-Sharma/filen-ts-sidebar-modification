@@ -1,5 +1,5 @@
 import { CellError, FunctionArgumentType, SimpleRangeValue, type ImplementedFunctions } from "hyperformula"
-import { Regex, RegexSyntaxError, RegexUnsupportedError } from "../regex/index"
+import { Regex, RegexSyntaxError, RegexUnsupportedError, STEP_BUDGET } from "../regex/index"
 import { naError, SheetFunctionPlugin, unmodeledError, valueError, type PluginCall, type PluginState } from "./plugin"
 
 // REGEXTEST, REGEXEXTRACT and REGEXREPLACE as support.microsoft.com defines them, over PCRE2 patterns run by the
@@ -12,16 +12,16 @@ const MAX_TEXT = 32767
 const CASE = { argumentType: FunctionArgumentType.INTEGER, defaultValue: 0, emptyAsDefault: true } as const
 const TEXT = { argumentType: FunctionArgumentType.STRING } as const
 
-// The thread steps one call may take (formula/regex): in proportion to its text's length times its program's size
-// (what one search visiting each instruction once per character takes; finding every match rescans, hence the
-// factor), at least MIN_STEPS, at most MAX_STEPS (about 35 ms of work on Hermes, less on the web's engines), so a call
-// is never a long task. Each call has its own: its result is the same whatever else calculates with it.
+// The thread steps one call may take (formula/regex). One search visits each character at most once per instruction of
+// the program (the engine is linear), so a call over a text, work the user's own text and pattern set, is given room for
+// eight such scans: finding every match rescans what higher-priority threads read past one. What runs out of it is a
+// search that rescans more than that. At least MIN_STEPS, at most STEP_BUDGET (a pattern of some sixty instructions over
+// a cell's longest text). Each call has its own: its result is the same whatever else calculates with it.
 const MIN_STEPS = 4_096
-const MAX_STEPS = 100_000
 const STEPS_PER_INSTRUCTION = 8
 
 function callSteps(regex: Regex, text: string): number {
-	return Math.min(MAX_STEPS, Math.max(MIN_STEPS, text.length * regex.size * STEPS_PER_INSTRUCTION))
+	return Math.min(STEP_BUDGET, Math.max(MIN_STEPS, text.length * regex.size * STEPS_PER_INSTRUCTION))
 }
 
 // Compiled patterns by flags and text: a column of formulas usually shares one pattern.

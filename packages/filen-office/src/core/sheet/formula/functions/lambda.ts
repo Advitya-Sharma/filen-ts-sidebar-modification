@@ -179,7 +179,26 @@ function fnv(hash: number, text: string): number {
 	return Math.imul(next ^ 0x2c, 0x01000193)
 }
 
+// Hashes of long texts already sampled (a list's texts are keyed again each call that drops one), up to SAMPLED_KEPT,
+// for one drive (it lets them go as it ends, keeping no text alive); the engine's own string hash makes finding one
+// cheap.
+const sampledHashes = new Map<string, string>()
+const SAMPLED_KEPT = 4_096
+
 function sampledHash(text: string): string {
+	const known = sampledHashes.get(text)
+
+	if (known !== undefined) return known
+	if (sampledHashes.size >= SAMPLED_KEPT) sampledHashes.clear()
+
+	const hash = sampleHash(text)
+
+	sampledHashes.set(text, hash)
+
+	return hash
+}
+
+function sampleHash(text: string): string {
 	const step = Math.max(1, Math.floor((text.length - 2 * SAMPLED) / SAMPLED))
 	let hash = fnv(fnv(0x811c9dc5, text.slice(0, SAMPLED)), text.slice(-SAMPLED))
 
@@ -664,6 +683,7 @@ export class LambdaFunctions extends SheetFunctionPlugin {
 			}
 		} finally {
 			driving = null
+			sampledHashes.clear()
 			nesting = before.nesting
 			level = before.level
 		}

@@ -233,10 +233,12 @@ describe("regex functions: user patterns cannot hang the calculation", () => {
 					'=REGEXTEST(REPT("x",31000)&"baz","foo|bar|baz|qux")',
 					'=REGEXTEST(REPT("x",32000),"(a|aa)*c")',
 					'=REGEXTEST(REPT("x",32000),"(?i)SHIPPED.*TOTAL.*XYZ")',
+					'=REGEXTEST(REPT("Order ABC-1234 shipped to john.doe@example.com on 2024-05-01; total $1,234.56. ",395)&"xyz","(?i)SHIPPED.*TOTAL.*XYZ")',
+					'=REGEXTEST(REPT("Order ABC-1234 shipped to john.doe@example.com on 2024-05-01; total $1,234.56. ",395),"(?i)SHIPPED.*TOTAL.*XYZ")',
 					'=REGEXEXTRACT(REPT("x",30000)&"order-123","(\\w+)-(\\d+)$")'
 				]
 			])
-		).toEqual({ A1: false, B1: true, C1: false, D1: false, E1: `${"x".repeat(30000)}order-123` })
+		).toEqual({ A1: false, B1: true, C1: false, D1: false, E1: true, F1: false, G1: `${"x".repeat(30000)}order-123` })
 	})
 
 	it("give each cell what it gives alone, however many calculate together", () => {
@@ -267,8 +269,10 @@ describe("regex functions: user patterns cannot hang the calculation", () => {
 		])
 
 		expect(results).toEqual({ A1: false, B1: false, C1: true, D1: 2001 })
-		// Past a call's step budget, the file's result is kept.
-		expect(heldResult('REGEXEXTRACT(REPT("a",30000),"(.*a){20}")', "stored")).toEqual({ value: "stored" })
+		// A search linear over a cell's longest text calculates; one rescanning past its step budget keeps the file's
+		// result.
+		expect(heldResult('REGEXEXTRACT(REPT("a",30000),"(.*a){20}")=REPT("a",30000)', "stored")).toEqual({ value: true })
+		expect(heldResult('ROWS(REGEXEXTRACT(REPT("a",30000),"(?:a*a*a*a*c)|a",1))', "stored")).toEqual({ value: "stored" })
 		expect(Date.now() - start).toBeLessThan(5000)
 	})
 })

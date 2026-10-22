@@ -351,6 +351,16 @@ describe("regex engine: linear time", () => {
 		expect(large).toBeLessThan(Math.max(50, small * 30))
 	})
 
+	it("passes over text that cannot start or hold a match, caseless letters too, finding the same matches", () => {
+		const regex = compile("(?i)SHIPPED.*TOTAL.*XYZ")
+
+		expect(regex.test(`${"x".repeat(20)}xyz shipped, total`)).toBe(false)
+		expect(regex.test("shipped, Total, XyZ")).toBe(true)
+		expect(regex.test(`SHIPPED${"-".repeat(20000)}total${"-".repeat(10000)}xyz`)).toBe(true)
+		expect(compile("(?i)ab|cd").exec("xxABxxCd")?.[0]).toBe(2)
+		expect([...compile("(?i)k").matches("ak\u212aK")].map(slots => slots[0])).toEqual([1, 2, 3])
+	})
+
 	it("stops a search over its step budget", () => {
 		const regex = compile("(?:a*a*a*a*c)|a")
 		const subject = "a".repeat(30_000)
