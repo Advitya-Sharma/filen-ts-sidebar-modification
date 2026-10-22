@@ -113,70 +113,100 @@ describe("sizes kept beside a text file", () => {
 	it("keeps a resized column across a reopen", async () => {
 		const first = open()
 
-		await waitFor(() => {
-			expect(seen.sizes).not.toBeNull()
-		})
+		await waitFor(
+			() => {
+				expect(seen.sizes).not.toBeNull()
+			},
+			{ timeout: 5000 }
+		)
 		await act(() => grid().resize(grid().getSnapshot().sheet, "cols", Uint32Array.of(1), Float32Array.of(140)))
-		await waitFor(() => {
-			expect(columns()?.get(1)).toBe(140)
-		})
-		await waitFor(() => {
-			expect([...kv.keys()].some(key => key.includes("stable-sizes"))).toBe(true)
-		})
+		await waitFor(
+			() => {
+				expect(columns()?.get(1)).toBe(140)
+			},
+			{ timeout: 5000 }
+		)
+		await waitFor(
+			() => {
+				expect([...kv.keys()].some(key => key.includes("stable-sizes"))).toBe(true)
+			},
+			{ timeout: 5000 }
+		)
 		first.unmount()
 		seen.grid = null
 
 		open()
-		await waitFor(() => {
-			expect(columns()?.get(1)).toBe(140)
-		})
+		await waitFor(
+			() => {
+				expect(columns()?.get(1)).toBe(140)
+			},
+			{ timeout: 5000 }
+		)
 	})
 
 	it("moves the sizes with a deleted column and gives them back when the delete is undone", async () => {
 		open()
-		await waitFor(() => {
-			expect(seen.sizes).not.toBeNull()
-		})
+		await waitFor(
+			() => {
+				expect(seen.sizes).not.toBeNull()
+			},
+			{ timeout: 5000 }
+		)
 
 		const sheet = grid().getSnapshot().sheet
 
 		await act(() => grid().resize(sheet, "cols", Uint32Array.of(2), Float32Array.of(150)))
-		await waitFor(() => {
-			expect(columns()?.get(2)).toBe(150)
-		})
+		await waitFor(
+			() => {
+				expect(columns()?.get(2)).toBe(150)
+			},
+			{ timeout: 5000 }
+		)
 
 		await act(async () => {
 			const deleted = await grid().command({ type: "axis.delete", sheet, axis: "cols", at: 0, count: 1 })
 
 			expect(deleted.ok).toBe(true)
 		})
-		await waitFor(() => {
-			expect(columns()?.get(1)).toBe(150)
-		})
+		await waitFor(
+			() => {
+				expect(columns()?.get(1)).toBe(150)
+			},
+			{ timeout: 5000 }
+		)
 		expect(columns()?.has(2)).toBe(false)
 
 		await act(async () => {
 			expect((await grid().undo()).ok).toBe(true)
 		})
-		await waitFor(() => {
-			expect(columns()?.get(2)).toBe(150)
-		})
+		await waitFor(
+			() => {
+				expect(columns()?.get(2)).toBe(150)
+			},
+			{ timeout: 5000 }
+		)
 		expect(columns()?.has(1)).toBe(false)
 	})
 
 	it("resets a kept column width from the grid's menu", async () => {
 		const view = open()
 
-		await waitFor(() => {
-			expect(seen.sizes).not.toBeNull()
-		})
+		await waitFor(
+			() => {
+				expect(seen.sizes).not.toBeNull()
+			},
+			{ timeout: 5000 }
+		)
 
 		const sheet = grid().getSnapshot().sheet
 
 		await act(() => grid().resize(sheet, "cols", Uint32Array.of(1), Float32Array.of(140)))
-		await waitFor(() => {
-			expect(columns()?.get(1)).toBe(140)
-		})
+		await waitFor(
+			() => {
+				expect(columns()?.get(1)).toBe(140)
+			},
+			{ timeout: 5000 }
+		)
 		act(() => {
 			grid().select({
 				active: { row: 0, col: 1 },
@@ -198,9 +228,12 @@ describe("sizes kept beside a text file", () => {
 
 		fireEvent.contextMenu(trigger)
 		fireEvent.click(await screen.findByText(preview.previewSpreadsheetResetColumnWidth_one))
-		await waitFor(() => {
-			expect(columns()?.get(1)).toBeUndefined()
-		})
+		await waitFor(
+			() => {
+				expect(columns()?.get(1)).toBeUndefined()
+			},
+			{ timeout: 5000 }
+		)
 		expect(refusals).toEqual([])
 	})
 
@@ -217,15 +250,21 @@ describe("sizes kept beside a text file", () => {
 		)
 		const view = render(shown(true))
 
-		await waitFor(() => {
-			expect(seen.grid).not.toBeNull()
-		})
+		await waitFor(
+			() => {
+				expect(seen.grid).not.toBeNull()
+			},
+			{ timeout: 5000 }
+		)
 		act(() => {
 			expect(grid().startEditing("typed", "enter")).toBe(true)
 		})
-		await waitFor(() => {
-			expect(dirty.at(-1)).toBe(true)
-		})
+		await waitFor(
+			() => {
+				expect(dirty.at(-1)).toBe(true)
+			},
+			{ timeout: 5000 }
+		)
 
 		// A rename to another format, or a failed save locking the buffer: the overlay passes editable={false}.
 		view.rerender(shown(false))

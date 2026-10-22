@@ -17,7 +17,7 @@ import {
 	type LucideIcon
 } from "lucide-react"
 import type { SheetBorderEdges, SheetCommand, SheetFormatChoices, SheetFormatPatch, SheetRenderStyle } from "@filen/office/core/sheet"
-import { entryText, roundedGeneral, type SheetGridModel, type SheetGridState } from "@filen/office/react/sheet"
+import { cellsEditable, entryText, roundedGeneral, type SheetGridModel, type SheetGridState } from "@filen/office/react/sheet"
 import { Button } from "@/components/ui/button"
 import {
 	DropdownMenu,
@@ -39,6 +39,7 @@ import { FormatCellsDialog } from "@/features/spreadsheet/next/dialogs/formatCel
 import { setFormatCellsOpen, useFormatCellsOpen } from "@/features/spreadsheet/next/toolbar/formatCellsState"
 import { FindButton } from "@/features/spreadsheet/next/find/findButton"
 import { SortFilterMenu } from "@/features/spreadsheet/next/data/sortFilterMenu"
+import { InsertMenu } from "@/features/spreadsheet/next/objects/insertMenu"
 import { FreezeMenu } from "@/features/spreadsheet/next/menus/freezeMenu"
 import { MergeMenu } from "@/features/spreadsheet/next/menus/mergeMenu"
 import {
@@ -215,7 +216,9 @@ export function SheetToolbar({
 	}, [model, dialogOpen, wanted])
 	const theme = choices === undefined ? [] : themeSwatchRows(choices.themeColors)
 	const active = cell?.format
-	const off = disabled || active === undefined
+	// A chartsheet, dialog sheet or macro sheet takes no cell command (the session refuses them): only undo and redo.
+	const noCells = disabled || !cellsEditable(grid)
+	const off = noCells || active === undefined
 	const automatic = t("previewOfficeColorAutomatic")
 	const noFill = t("previewSpreadsheetColorNone")
 
@@ -419,7 +422,7 @@ export function SheetToolbar({
 		"merge",
 		<MergeMenu
 			grid={grid}
-			disabled={disabled}
+			disabled={noCells}
 		/>
 	)
 
@@ -481,7 +484,7 @@ export function SheetToolbar({
 		"freeze",
 		<FreezeMenu
 			grid={grid}
-			disabled={disabled}
+			disabled={noCells}
 		/>
 	)
 
@@ -497,7 +500,11 @@ export function SheetToolbar({
 				{shown}
 				<SortFilterMenu
 					grid={grid}
-					disabled={disabled}
+					disabled={noCells}
+				/>
+				<InsertMenu
+					grid={grid}
+					disabled={noCells}
 				/>
 				<FindButton
 					grid={grid}
@@ -716,7 +723,7 @@ export function SheetToolbar({
 						{t("previewSheetFormatCells")}
 					</DropdownMenuItem>
 					<DropdownMenuItem
-						disabled={disabled}
+						disabled={noCells}
 						onClick={() => {
 							command({ type: "format.clear", sheet: grid.sheet, ranges: grid.selection.ranges })
 						}}

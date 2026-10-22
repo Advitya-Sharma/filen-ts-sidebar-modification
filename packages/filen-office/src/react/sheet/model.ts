@@ -179,11 +179,33 @@ function withoutConsent(command: SheetCommand): SheetCommand {
 	return repeated as unknown as SheetCommand
 }
 
-// Whether an entry can start in the active cell: not view-only, the session alive, the cell not locked.
+// A sheet with no cells: a chartsheet (its chart is all it shows) or a dialog sheet (ECMA-376 §18.3.1.34: no
+// sheetData). Nothing on it is selected, entered or moved to by keys.
+export function celllessSheet(snapshot: SheetGridSnapshot, sheet: SheetId = snapshot.sheet): boolean {
+	const kind = snapshot.sheets.find(entry => entry.id === sheet)?.kind
+
+	return kind === "chartsheet" || kind === "dialogsheet"
+}
+
+// Whether the sheet's cells, rows and columns can be changed: a worksheet's only (the session refuses the others; a
+// macro sheet's cells are shown, not edited). A sheet not listed yet counts as a worksheet.
+export function cellsEditable(snapshot: SheetGridSnapshot, sheet: SheetId = snapshot.sheet): boolean {
+	const kind = snapshot.sheets.find(entry => entry.id === sheet)?.kind
+
+	return kind === undefined || kind === "worksheet"
+}
+
+// Whether an entry can start in the active cell: not view-only, the session alive, a worksheet, the cell not locked.
 export function canEditSnapshot(snapshot: SheetGridSnapshot): boolean {
 	const { writability, failed, active, readOnly } = snapshot
 
-	return !readOnly && failed === null && writability.state !== "viewOnly" && (active.flags & CellFlag.LOCKED) === 0
+	return (
+		!readOnly &&
+		failed === null &&
+		writability.state !== "viewOnly" &&
+		cellsEditable(snapshot) &&
+		(active.flags & CellFlag.LOCKED) === 0
+	)
 }
 
 const NO_ACTIVE: GridActiveCell = { text: "", input: "", flags: 0, known: false }
@@ -392,6 +414,24 @@ export class SheetGridModel {
 		const toCol = Math.min(SHEET_MAX_COLS - 1, Math.max(col, reach?.col ?? 0))
 
 		if (reach !== undefined && reach.row === toRow && reach.col === toCol) return
+
+		this.reach.set(sheet, { row: toRow, col: toCol })
+		this.axesMemo = null
+		this.repaint()
+	}
+
+	// The extent gives back how far the user went, down to `row` and `col` (the renderer's choice: what its view
+	// still needs). The used area and the active cell stay in extent() anyway; the selection's far corner is kept.
+	shrink(sheet: SheetId, row: number, col: number): void {
+		const reach = this.reach.get(sheet)
+
+		if (reach === undefined) return
+
+		const focus = this.selections.get(sheet)?.focus
+		const toRow = Math.max(0, Math.min(reach.row, Math.max(row, focus?.row ?? 0)))
+		const toCol = Math.max(0, Math.min(reach.col, Math.max(col, focus?.col ?? 0)))
+
+		if (toRow === reach.row && toCol === reach.col) return
 
 		this.reach.set(sheet, { row: toRow, col: toCol })
 		this.axesMemo = null
@@ -790,7 +830,7 @@ export class SheetGridModel {
 	canChange(): boolean {
 		const { writability, failed, readOnly } = this.snapshot
 
-		return !readOnly && failed === null && writability.state !== "viewOnly"
+		return !readOnly && failed === null && writability.state !== "viewOnly" && cellsEditable(this.snapshot)
 	}
 
 	// The user set out to edit: the session proves the file (once) and builds its formula engine.
@@ -806,6 +846,10 @@ export class SheetGridModel {
 		)
 
 		return this.intention
+	}
+
+	cellless(sheet: SheetId = this.snapshot.sheet): boolean {
+		return celllessSheet(this.snapshot, sheet)
 	}
 
 	// Starts an entry in the active cell from `text`, or from what the cell holds (its input) when null. False when

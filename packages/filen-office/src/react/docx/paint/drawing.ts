@@ -2155,6 +2155,51 @@ export function drawingImages(data: DrawingData): DrawingImage[] {
 
 // The MIME type an image is shown as through <image>/<img> (an SVG there runs no script), or "" when it
 // cannot be shown natively. An SVG rendition, when there is one, is what the caller loads.
+// Raster formats a drawing may carry inline (bitmaps of a metafile); anything else is not shown.
+export function inlineImageMime(image: DrawingImage): string | undefined {
+	if (!(image.bytes instanceof Uint8Array) || image.partName !== undefined) return undefined
+
+	switch (image.format) {
+		case "png":
+		case "jpeg":
+		case "gif":
+		case "bmp":
+			return imageMime(image)
+		default:
+			return undefined
+	}
+}
+
+// Object URLs for the bitmaps a drawing carries inline (a metafile's), by image: one per encoded bitmap, so entries
+// that differ only in crop or effects share their bytes. `create` makes one (undefined: that bitmap shows nothing).
+export function inlineImageUrls(
+	data: DrawingData,
+	create: (bytes: Uint8Array, type: string) => string | undefined
+): Map<DrawingImage, string> {
+	const inline = new Map<DrawingImage, string>()
+	const byBytes = new Map<Uint8Array, string>()
+
+	for (const image of Array.isArray(data.images) ? data.images : []) {
+		const type = image === null || typeof image !== "object" ? undefined : inlineImageMime(image)
+
+		if (type === undefined || image.bytes === undefined || inline.has(image)) continue
+
+		let url = byBytes.get(image.bytes)
+
+		if (url === undefined) {
+			url = create(image.bytes, type)
+
+			if (url === undefined) continue
+
+			byBytes.set(image.bytes, url)
+		}
+
+		inline.set(image, url)
+	}
+
+	return inline
+}
+
 export function imageMime(image: DrawingImage): string {
 	if (typeof image.svgPartName === "string") return "image/svg+xml"
 

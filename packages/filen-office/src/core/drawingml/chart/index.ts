@@ -223,21 +223,25 @@ function paragraphsWidth(paragraphs: readonly TextParagraph[]): number {
 	return widest
 }
 
-// Converts one chart part. `width`/`height` are the frame extent in EMU.
+// Converts one chart part. `width`/`height` are the frame extent in EMU. `matrix` places the chart in a list that is
+// not its own (a chart inside a group): its items go through it, and the list keeps its own size.
 export function convertChart(
 	context: PaintContext,
 	document: XmlDocument,
 	width: number,
 	height: number,
-	list?: DrawingList
+	list?: DrawingList,
+	matrix?: readonly number[]
 ): ChartConversion {
 	const target = list ?? context.list
 	const paintContext: PaintContext = target === context.list ? context : { ...context, list: target }
 	const W = Math.max(0, width / EMU_PER_PX)
 	const H = Math.max(0, height / EMU_PER_PX)
 
-	target.width = W
-	target.height = H
+	if (matrix === undefined) {
+		target.width = W
+		target.height = H
+	}
 
 	const reader = drawingReader(document)
 	const root = document.documentElement()
@@ -267,7 +271,8 @@ export function convertChart(
 		reader,
 		chartStyle(reader, root),
 		date1904,
-		probe.textProps(reader.child(root, D.C, "txPr"), base)
+		probe.textProps(reader.child(root, D.C, "txPr"), base),
+		matrix
 	)
 	const blanksNode = reader.child(chart, D.C, "dispBlanksAs")
 	const blanksValue = blanksNode < 0 ? "gap" : (reader.attr(blanksNode, "val") ?? "zero")

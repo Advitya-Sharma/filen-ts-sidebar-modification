@@ -8,3 +8,4 @@ export {
 	type EngineSheet,
 	type RecalculatedCell
 } from "./formulaEngine"
+export type { SpillSize } from "./functions/spill"

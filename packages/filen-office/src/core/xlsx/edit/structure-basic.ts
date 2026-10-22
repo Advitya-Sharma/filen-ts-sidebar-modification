@@ -15,7 +15,8 @@ import { planRefEdit, type RefPlan } from "../refs/plan"
 import { relationshipType } from "../write/index"
 import type { XlsxDocument } from "./document"
 import { reportLogged } from "./format"
-import { CellLog } from "./history"
+import type { RecalculatedCell } from "../../sheet/formula/index"
+import { CellLog, type CellState } from "./history"
 
 // Rows and columns inserted or deleted, and sheets added and renamed. Every construct that refers to cells moves
 // through the references catalogue (refs/plan.ts), or the edit is refused with the construct that cannot move.
@@ -150,10 +151,14 @@ export async function moveAxis(
 		document.shiftShown(sheet, edit)
 		document.structureChanged()
 	}
-	const engineForward = () =>
+	const engineForward = async (clock: SliceClock | undefined): Promise<RecalculatedCell[]> =>
 		engine === null || index < 0
 			? []
-			: document.guarded(() => (type === "insert" ? engine.insert(index, axis, at, count) : engine.remove(index, axis, at, count)))
+			: await document.guardedSliced(() =>
+					type === "insert"
+						? engine.insertSliced(index, axis, at, count, clock)
+						: engine.removeSliced(index, axis, at, count, clock)
+				)
 	const report = (sink: SheetChangeSink): void => {
 		for (const [formulaSheet] of plan.formulaCells) {
 			// On the edited sheet, cells past `at` are in the moved region, which `moved` invalidates.
@@ -180,24 +185,28 @@ export async function moveAxis(
 	forward()
 	await document.loadTables()
 	await turn(clock)
-	document.apply(engineForward(), post, changes)
-	post.seal((s, r, c) => document.state(s, r, c))
+	await document.applySliced(await engineForward(clock), post, changes, clock)
+	await sealSliced(document, post, clock)
 	report(changes)
 
 	return {
 		bytes: planBytes(plan) + post.bytes + removed.length * 16,
 		undo: async sink => {
-			post.restore(document.restoreCell, "before")
+			const clock = clockOf()
+
+			await document.restoreLogSliced(post, "before", clock)
 			plan.revert()
 			document.shiftShown(sheet, inverse)
 			document.structureChanged()
 			await document.loadTables()
-			await turn(clockOf())
+			await turn(clock)
 
 			const live = document.engine
 
 			if (live !== null && index >= 0) {
-				document.guarded(() => (type === "insert" ? live.remove(index, axis, at, count) : live.insert(index, axis, at, count)))
+				await document.guardedSliced(() =>
+					type === "insert" ? live.removeSliced(index, axis, at, count, clock) : live.insertSliced(index, axis, at, count, clock)
+				)
 
 				if (type === "delete") {
 					engineSet(document, sheet, removed)
@@ -225,15 +234,32 @@ export async function moveAxis(
 			report(sink)
 		},
 		redo: async sink => {
-			await turn(clockOf())
+			const clock = clockOf()
+
+			await turn(clock)
 			forward()
 			await document.loadTables()
-			engineForward()
-			post.restore(document.restoreCell, "after")
+			await engineForward(clock)
+			await document.restoreLogSliced(post, "after", clock)
 			report(sink)
 		}
 	}
 }
+
+// Seals a log's entries in parts, yielding between them once the clock's slice is up.
+async function sealSliced(document: XlsxDocument, log: CellLog, clock: SliceClock | undefined): Promise<void> {
+	const state = (s: SheetId, r: number, c: number): CellState => document.state(s, r, c)
+
+	for (let from = 0; ; from += SEAL_PART) {
+		log.seal(state, from, Math.min(log.size, from + SEAL_PART))
+
+		if (from + SEAL_PART >= log.size) break
+		if (clock?.due === true) await clock.pause()
+	}
+}
+
+// Log entries sealed between two looks at the slice clock.
+const SEAL_PART = 4096
 
 // --- Sheets ---
 
@@ -272,10 +298,12 @@ export async function addSheet(
 	document: XlsxDocument,
 	requested: string | undefined,
 	index: number | undefined,
-	changes: SheetChangeSink
+	changes: SheetChangeSink,
+	slicing?: Slicing
 ): Promise<SheetHandled> {
 	const workbook = document.workbook
 	const sheets = workbook.sheets
+	const clockOf = (): SliceClock | undefined => (slicing === undefined ? undefined : sliceClock(slicing))
 	let name = requested
 
 	if (name === undefined) {
@@ -335,7 +363,10 @@ export async function addSheet(
 	}
 	const activeBefore = workbook.activeTab
 	const activeAfter = at <= activeBefore && at < sheets.length ? activeBefore + 1 : activeBefore
-	const added = (sink: SheetChangeSink): void => {
+	// What INDIRECT recalculates, naming the new sheet by name: its results (logged), taken back by the undo.
+	const log = new CellLog()
+	let logged = false
+	const added = async (sink: SheetChangeSink): Promise<void> => {
 		sheets.splice(at, 0, entry)
 		workbook.activeTab = activeAfter
 		workbook.changes.workbookSection("sheets")
@@ -345,18 +376,29 @@ export async function addSheet(
 		const engine = document.engine
 
 		if (engine !== null) {
-			engine.addSheet(entry.name)
-			document.engineSheets.push(id)
+			const clock = clockOf()
+			const results = await document.guardedSliced(() => engine.addSheetSliced(entry.name, clock))
+
+			if (document.engine === engine) document.engineSheets.push(id)
+
+			if (logged) await document.restoreLogSliced(log, "after", clock)
+			else {
+				await document.applySliced(results, log, sink, clock)
+				await sealSliced(document, log, clock)
+				logged = true
+			}
+
+			reportLogged(log, sink, "content")
 		}
 
 		sink.sheets()
 	}
 
-	added(changes)
+	await added(changes)
 
 	return {
 		bytes: 512,
-		undo: sink => {
+		undo: async sink => {
 			const position = sheets.indexOf(entry)
 
 			if (position >= 0) sheets.splice(position, 1)
@@ -366,16 +408,20 @@ export async function addSheet(
 
 			const engine = document.engine
 
+			const clock = clockOf()
+
 			if (engine !== null && document.engineSheets.at(-1) === id) {
-				document.guarded(() => engine.removeLastSheet())
+				await document.guardedSliced(() => engine.removeLastSheetSliced(clock))
 				document.engineSheets.pop()
 			}
 
+			await document.restoreLogSliced(log, "before", clock)
+			reportLogged(log, sink, "content")
 			sink.sheets()
 		},
-		redo: sink => {
+		redo: async sink => {
 			workbook.changes.addRelationship(workbook.workbookPart, { type: relationship.type, target: relationship.target })
-			added(sink)
+			await added(sink)
 		}
 	}
 }
@@ -397,7 +443,13 @@ export async function orderLock(document: XlsxDocument): Promise<SheetRefusal | 
 }
 
 // sheet.rename: the name, and every formula, defined name and part that names the sheet.
-export async function renameSheet(document: XlsxDocument, sheet: SheetId, name: string, changes: SheetChangeSink): Promise<SheetHandled> {
+export async function renameSheet(
+	document: XlsxDocument,
+	sheet: SheetId,
+	name: string,
+	changes: SheetChangeSink,
+	slicing?: Slicing
+): Promise<SheetHandled> {
 	const target = document.entry(sheet)
 
 	if (target === undefined) return { refused: { reason: "sheetName", detail: "missing" } }
@@ -418,7 +470,12 @@ export async function renameSheet(document: XlsxDocument, sheet: SheetId, name: 
 	const plan = planned.plan
 	const workbook = document.workbook
 	const from = target.name
-	const apply = (which: "before" | "after", sink: SheetChangeSink): void => {
+	// What INDIRECT recalculates, naming sheets by name: its results (logged), put back by undo and redo.
+	const log = new CellLog()
+	let logged = false
+	const apply = async (which: "before" | "after", sink: SheetChangeSink): Promise<void> => {
+		const clock = slicing === undefined ? undefined : sliceClock(slicing)
+
 		if (which === "after") plan.apply()
 		else plan.revert()
 
@@ -430,11 +487,24 @@ export async function renameSheet(document: XlsxDocument, sheet: SheetId, name: 
 		const index = document.engineIndex(sheet)
 
 		if (engine !== null && index >= 0) {
-			try {
-				engine.renameSheet(index, target.name)
-			} catch {
-				document.dropEngine()
+			const results = await document.guardedSliced(() => engine.renameSheetSliced(index, target.name, clock))
+
+			if (!logged) {
+				await document.applySliced(results, log, sink, clock)
+				await sealSliced(document, log, clock)
+				logged = true
+
+				return finish(sink)
 			}
+		}
+
+		if (logged) await document.restoreLogSliced(log, which, clock)
+
+		finish(sink)
+	}
+	const finish = (sink: SheetChangeSink): void => {
+		if (logged) {
+			reportLogged(log, sink, "content")
 		}
 
 		for (const [formulaSheet] of plan.formulaCells) {
@@ -446,7 +516,7 @@ export async function renameSheet(document: XlsxDocument, sheet: SheetId, name: 
 		sink.sheets()
 	}
 
-	apply("after", changes)
+	await apply("after", changes)
 
 	return { bytes: planBytes(plan), undo: sink => apply("before", sink), redo: sink => apply("after", sink) }
 }

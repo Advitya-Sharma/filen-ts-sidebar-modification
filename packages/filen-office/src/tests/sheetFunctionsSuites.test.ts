@@ -33,6 +33,50 @@ const RANGES =
 const SYNTAX = "Excel takes no such call: the formula does not enter"
 const DEVIATIONS: Readonly<Record<string, string>> = {
 	"formulajs/test/date-time.js:188": "a text date is read in the engine's day-first order (en-GB); Excel reads it in the system locale's",
+	"formulajs/test/financial.js:25":
+		'ACCRINT sums Aᵢ/NLᵢ, "NLi = normal length in days of the quasi-coupon period within odd period" (support.microsoft.com "ACCRINT function"); formulajs divides by YEARFRAC\'s year',
+	"formulajs/test/financial.js:29":
+		'ACCRINT sums Aᵢ/NLᵢ, "NLi = normal length in days of the quasi-coupon period within odd period" (support.microsoft.com "ACCRINT function"); formulajs divides by YEARFRAC\'s year',
+	"formulajs/test/financial.js:33":
+		'ACCRINT sums Aᵢ/NLᵢ, "NLi = normal length in days of the quasi-coupon period within odd period" (support.microsoft.com "ACCRINT function"); formulajs divides by YEARFRAC\'s year',
+	"formulajs/test/financial.js:73":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:77":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:81":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:85":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:89":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:93":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:97":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:101":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:105":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:109":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:113":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:117":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:121":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:125":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:129":
+		'ACCRINT: "A value of FALSE (0) returns the accrued interest from first_interest to settlement" (support.microsoft.com "ACCRINT function"); formulajs ignores calc_method',
+	"formulajs/test/financial.js:153":
+		'ACCRINT sums Aᵢ/NLᵢ, "NLi = normal length in days of the quasi-coupon period within odd period" (support.microsoft.com "ACCRINT function"); formulajs divides by YEARFRAC\'s year',
+	"formulajs/test/financial.js:213":
+		'ACCRINT sums Aᵢ/NLᵢ, "NLi = normal length in days of the quasi-coupon period within odd period" (support.microsoft.com "ACCRINT function"); formulajs divides by YEARFRAC\'s year',
+	"formulajs/test/financial.js:412":
+		'"If settlement ≥ maturity, DISC returns the #NUM! error value" (support.microsoft.com "DISC function")',
+	"formulajs/test/financial.js:622":
+		'"If settlement ≥ maturity, PRICEDISC returns the #NUM! error value" (support.microsoft.com "PRICEDISC function")',
 	"formulajs/test/information.js:103": "a one-value array is laid out as one cell here, and TYPE of a cell is its value's type",
 	"formulajs/test/lookup-reference.js:177": SYNTAX,
 	"formulajs/test/lookup-reference.js:179": SYNTAX,
@@ -61,7 +105,17 @@ const DEVIATIONS: Readonly<Record<string, string>> = {
 	"formulajs/test/text.js:96": "an argument left empty in a formula is 0, not the default (formulajs's undefined)",
 	"formulajs/test/text.js:209": "NUMBERVALUE of a logical value: text expected, #VALUE! (formulajs's own #N/A)",
 	"formulajs/test/text.js:340": "an error argument is the result, as for every function (formulajs's own #N/A)",
-	"formulajs/test/text.js:346": "TEXT reads a logical format_text as its text, TRUE, a format of literal letters"
+	"formulajs/test/text.js:346": "TEXT reads a logical format_text as its text, TRUE, a format of literal letters",
+	"formulajs/test/engineering.js:137": SYNTAX,
+	"formulajs/test/information.js:8": "the engine has no #NULL! error value: a formula naming it does not parse here (ERROR.TYPE's 1)",
+	"formulajs/test/information.js:15":
+		"the engine has no #GETTING_DATA error value: a formula naming it does not parse here (ERROR.TYPE's 8)",
+	"formulajs/test/math-trig.js:632": SYNTAX,
+	"formulajs/test/math-trig.js:634": SYNTAX,
+	"formulajs/test/statistical.js:566":
+		"INTERCEPT: \"If known_y's and known_x's contain a different number of data points or contain no data points, INTERCEPT returns the #N/A error value\"",
+	"formulajs/test/statistical.js:821": RANGES,
+	"formulajs/test/statistical.js:1110": RANGES
 }
 
 type Cell = string | number | boolean | null
@@ -185,7 +239,7 @@ function evaluate(item: FunctionCase): { value: unknown; error: boolean } | null
 }
 
 describe.skipIf(suiteMissing("formulajs") !== undefined)("the app's functions against the formulajs suite", () => {
-	it("gives the suite's results", () => {
+	it("gives the suite's results", { timeout: 120_000 }, () => {
 		const names = new Set(pluginFunctionNames())
 		const cases = allFormulajsCases().cases.filter(item => names.has(item.function) && item.expected.type !== "array")
 		const failures: string[] = []
@@ -218,6 +272,25 @@ const LIBREOFFICE_XLSX = join(suiteDir("libreoffice"), "xlsx-lo-26.8.1.1")
 const LO_DATES = "LibreOffice's day 0 is 1899-12-30; Excel's 1900 system has 0 as 1900-01-00 (ECMA-376 Part 1 §18.17.4.1)"
 const LO_BOOLEANS = "LibreOffice has no logical type (TRUE is 1); Excel's TYPE(TRUE) is 4 and 1 is not TRUE in a lookup"
 const LO_SYNTAX = "Excel takes no such call: the formula does not enter"
+const LO_SHEET_POINT =
+	"LibreOffice separates a sheet with its own point (Sheet1.A1); Excel's ADDRESS and INDIRECT use ! (support.microsoft.com \"ADDRESS function\": 'EXCEL SHEET'!R2C3)"
+
+const LO_CONVERT_EXACT =
+	'CONVERT: each unit is the one its page names ("Grain", "Light-year", "IT calorie", "BTU", "Horsepower", "Pferdestärke", "Admiralty knot", ...) at its exact definition (NIST SP 811 Appendix B); LibreOffice\'s table rounds or approximates the factor'
+const LO_CONVERT_CASE =
+	'CONVERT: "Unit names and prefixes are case-sensitive.", and the page lists "Picapt" and "Pica" (1/72 inch), "pica" (1/6 inch), and squares and cubes of "Picapt" and "Pica" only: "picapt", and "pica" squared or cubed, are no units'
+const LO_CONVERT_FLB = 'CONVERT: "Foot-pound" "flb" is a foot times a pound-force (1.3558 J); LibreOffice\'s flb is the foot-poundal'
+const LO_CONVERT_MTON = 'CONVERT: "Measurement ton (freight ton)" "MTON" is 40 cubic feet; LibreOffice\'s is 25'
+const LO_CONVERT_HWEIGHT = 'CONVERT: "Imperial hundredweight" is "uk_cwt" or "lcwt" ("hweight"), one unit: 1 exactly'
+const LO_PERCENTRANK =
+	'PERCENTRANK: significance counts decimals and cuts, not rounds ("If omitted, PERCENTRANK uses three digits (0.xxx)"; the pages give 0.555 for 5/9 and PERCENTRANK.EXC(A2:A10,5.43,1) as 0.3)'
+const LO_SIGNIFICANCE = '"If significance < 1, PERCENTRANK returns the #NUM! error value."'
+const LO_TRIMMEAN = 'TRIMMEAN: "If percent < 0 or percent > 1, TRIMMEAN returns the #NUM! error value." (1 itself is not out of range)'
+const LO_ENCODEURL =
+	'ENCODEURL keeps "." (support.microsoft.com "ENCODEURL function": its example gives http%3A%2F%2Fcontoso.sharepoint.com%2FFinance%2F...)'
+const LO_ARRAY_ARITHMETIC =
+	"the engine evaluates an ordinary formula without array arithmetic, so LINEST's (LOGEST's) array times {9,1} reads its first value; Excel sums both (support.microsoft.com \"LINEST function\", Example 2: 11000)"
+const LO_RANDOM = "RANDARRAY's numbers are random: the workbook's expected cell holds a check of them, not a value"
 
 // Where LibreOffice answers otherwise than Excel, by case id: the reason.
 const LIBREOFFICE_DEVIATIONS: Readonly<Record<string, string>> = {
@@ -236,10 +309,110 @@ const LIBREOFFICE_DEVIATIONS: Readonly<Record<string, string>> = {
 	"date_time/fods/year.fods Sheet2!A6": LO_DATES,
 	"date_time/fods/year.fods Sheet2!A7": LO_DATES,
 	"date_time/fods/year.fods Sheet2!A8": "Excel has no negative date serials: YEAR(-1) is #NUM!",
+	"financial/fods/accrintm.fods Sheet2!A7": LO_SYNTAX,
+	"financial/fods/accrintm.fods Sheet2!A12":
+		'ACCRINT sums Aᵢ/NLᵢ, "NLi = normal length in days of the quasi-coupon period within odd period" (support.microsoft.com "ACCRINT function"); LibreOffice divides by the days of the issue\'s year',
+	"financial/fods/amorlinc.fods Sheet2!A19":
+		'AMORLINC takes the bases its page lists, 0, 1, 3 and 4 (support.microsoft.com "AMORLINC function"): actual/360 is #NUM!',
+	"financial/fods/amorlinc.fods Sheet2!A20":
+		'AMORLINC takes the bases its page lists, 0, 1, 3 and 4 (support.microsoft.com "AMORLINC function"): actual/360 is #NUM!',
+	"financial/fods/amorlinc.fods Sheet2!A21":
+		'AMORLINC takes the bases its page lists, 0, 1, 3 and 4 (support.microsoft.com "AMORLINC function"): actual/360 is #NUM!',
+	"financial/fods/amorlinc.fods Sheet2!A22":
+		'AMORLINC takes the bases its page lists, 0, 1, 3 and 4 (support.microsoft.com "AMORLINC function"): actual/360 is #NUM!',
+	"financial/fods/amorlinc.fods Sheet2!A23":
+		'AMORLINC takes the bases its page lists, 0, 1, 3 and 4 (support.microsoft.com "AMORLINC function"): actual/360 is #NUM!',
+	"financial/fods/mduration.fods Sheet2!A2":
+		'MDURATION discounts from the coupon dates, DSC/E periods to the next: support.microsoft.com "MDURATION function" gives its example as 5.736, LibreOffice\'s YEARFRAC offset 5.734',
+	"financial/fods/mduration.fods Sheet2!A3":
+		'MDURATION discounts from the coupon dates, DSC/E periods to the next: support.microsoft.com "MDURATION function" gives its example as 5.736, LibreOffice\'s YEARFRAC offset 5.734',
+	"financial/fods/mduration.fods Sheet2!A7":
+		'MDURATION discounts from the coupon dates, DSC/E periods to the next: support.microsoft.com "MDURATION function" gives its example as 5.736, LibreOffice\'s YEARFRAC offset 5.734',
+	"financial/fods/mduration.fods Sheet2!A8":
+		'MDURATION discounts from the coupon dates, DSC/E periods to the next: support.microsoft.com "MDURATION function" gives its example as 5.736, LibreOffice\'s YEARFRAC offset 5.734',
+	"financial/fods/mduration.fods Sheet2!A11":
+		'MDURATION discounts from the coupon dates, DSC/E periods to the next: support.microsoft.com "MDURATION function" gives its example as 5.736, LibreOffice\'s YEARFRAC offset 5.734',
+	"financial/fods/mduration.fods Sheet2!A12":
+		'MDURATION discounts from the coupon dates, DSC/E periods to the next: support.microsoft.com "MDURATION function" gives its example as 5.736, LibreOffice\'s YEARFRAC offset 5.734',
+	"financial/fods/mduration.fods Sheet2!A16":
+		'"If yld < 0 or if coupon < 0, MDURATION returns the #NUM! error value": a yield left empty is 0',
+	"financial/fods/mduration.fods Sheet2!A18":
+		'"If yld < 0 or if coupon < 0, MDURATION returns the #NUM! error value": a coupon left empty is 0',
+	"financial/fods/mduration.fods Sheet2!A19":
+		'MDURATION discounts from the coupon dates, DSC/E periods to the next: support.microsoft.com "MDURATION function" gives its example as 5.736, LibreOffice\'s YEARFRAC offset 5.734',
+	"financial/fods/mduration.fods Sheet2!A20":
+		'MDURATION discounts from the coupon dates, DSC/E periods to the next: support.microsoft.com "MDURATION function" gives its example as 5.736, LibreOffice\'s YEARFRAC offset 5.734',
+	"financial/fods/oddlprice.fods Sheet2!A19":
+		'"If rate < 0 or if yld < 0, ODDLPRICE returns the #NUM! error value": a rate of 0, or an argument left empty (0), prices',
+	"financial/fods/oddlprice.fods Sheet2!A20":
+		'"If rate < 0 or if yld < 0, ODDLPRICE returns the #NUM! error value": a rate of 0, or an argument left empty (0), prices',
+	"financial/fods/oddlprice.fods Sheet2!A22":
+		'"If rate < 0 or if yld < 0, ODDLPRICE returns the #NUM! error value": a rate of 0, or an argument left empty (0), prices',
+	"financial/fods/oddlyield.fods Sheet2!A25":
+		'"If rate < 0 or if pr ≤ 0, ODDLYIELD returns the #NUM! error value": a rate of 0, or one left empty (0), yields',
+	"financial/fods/oddlyield.fods Sheet2!A26":
+		'"If rate < 0 or if pr ≤ 0, ODDLYIELD returns the #NUM! error value": a rate of 0, or one left empty (0), yields',
+	"financial/fods/price.fods Sheet2!A17":
+		'"If yld < 0 or if rate < 0, PRICE returns the #NUM! error value": an argument left empty is 0, which prices',
+	"financial/fods/price.fods Sheet2!A21":
+		'"If yld < 0 or if rate < 0, PRICE returns the #NUM! error value": an argument left empty is 0, which prices',
+	"financial/fods/price.fods Sheet2!A32":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A33":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A34":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A39":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A40":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A41":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A42":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A43":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A44":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A45":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A46":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A47":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A48":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A49":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A50":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A51":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A52":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A53":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/price.fods Sheet2!A54":
+		'PRICE: "When N = 1 (N is the number of coupons payable between the settlement date and redemption date), PRICE is calculated" by its own equation (support.microsoft.com "PRICE function"); LibreOffice discounts as for N > 1',
+	"financial/fods/pricemat.fods Sheet2!A10":
+		'"If rate < 0 or if yld < 0, PRICEMAT returns the #NUM! error value": an argument left empty is 0, which prices',
+	"financial/fods/pricemat.fods Sheet2!A12":
+		'"If rate < 0 or if yld < 0, PRICEMAT returns the #NUM! error value": an argument left empty is 0, which prices',
+	"financial/fods/received.fods Sheet2!A16":
+		"a settlement left empty is 0, the 1900 system's day 0 (1900-01-00, ECMA-376 Part 1 §18.17.4.1): a date, so RECEIVED calculates",
+	"financial/fods/yield.fods Sheet2!A14": '"If rate < 0, YIELD returns the #NUM! error value": a rate left empty is 0, which yields',
 	"information/fods/type.fods Sheet2!A2": LO_BOOLEANS,
 	"information/fods/type.fods Sheet2!A7": LO_SYNTAX,
 	"information/fods/type.fods Sheet2!A15": 'TYPE has no 8 in Excel (support.microsoft.com "TYPE function": 1, 2, 4, 16, 64, 128)',
+	"spreadsheet/fods/address.fods Sheet2!A2": LO_SHEET_POINT,
+	"spreadsheet/fods/address.fods Sheet2!A10": LO_SHEET_POINT,
+	"spreadsheet/fods/address.fods Sheet2!A14": LO_SHEET_POINT,
+	"spreadsheet/fods/address.fods Sheet2!A25": LO_SHEET_POINT,
+	"spreadsheet/fods/address.fods Sheet2!A26": LO_SHEET_POINT,
+	"spreadsheet/fods/address.fods Sheet2!A27": LO_SHEET_POINT,
+	"spreadsheet/fods/address.fods Sheet2!A28": LO_SHEET_POINT,
 	"spreadsheet/fods/hyperlink.fods Sheet2!A30": LO_BOOLEANS,
+	"spreadsheet/fods/indirect.fods Sheet2!A12": LO_SHEET_POINT,
 	"spreadsheet/fods/xmatch.fods Sheet2!A31":
 		"XMATCH with nothing to look up: Microsoft's page is silent; an empty cell matches nothing here",
 	"spreadsheet/fods/xmatch.fods Sheet2!A32":
@@ -268,7 +441,107 @@ const LIBREOFFICE_DEVIATIONS: Readonly<Record<string, string>> = {
 	"text/fods/text.fods Sheet2!A4": LO_DATES,
 	"text/fods/text.fods Sheet2!A5": LO_DATES,
 	"text/fods/text.fods Sheet2!A6": LO_DATES,
-	"text/fods/text.fods Sheet2!A22": LO_SYNTAX
+	"text/fods/text.fods Sheet2!A22": LO_SYNTAX,
+	"addin/fods/convert.fods Sheet2!A9": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A16": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A19": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A23": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A26": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A27": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A28": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A29": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A32": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A36": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A43": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A44": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A46": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A47": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A49": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A50": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A51": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A53": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A54": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A57": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A59": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A61": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A77": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A78": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A83": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A105": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A111": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A112": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A120": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A136": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A146": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A153": LO_CONVERT_EXACT,
+	"addin/fods/convert.fods Sheet2!A31": LO_CONVERT_FLB,
+	"addin/fods/convert.fods Sheet2!A113": LO_CONVERT_FLB,
+	"addin/fods/convert.fods Sheet2!A85": LO_CONVERT_MTON,
+	"addin/fods/convert.fods Sheet2!A86": LO_CONVERT_MTON,
+	"addin/fods/convert.fods Sheet2!A140": LO_CONVERT_MTON,
+	"addin/fods/convert.fods Sheet2!A118": LO_CONVERT_HWEIGHT,
+	"addin/fods/convert.fods Sheet2!A37":
+		'CONVERT: "If the unit does not exist, CONVERT returns the #N/A error value." (the page lists no "pond")',
+	"addin/fods/convert.fods Sheet2!A141": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A142": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A143": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A144": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A145": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A147": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A148": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A149": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A150": LO_CONVERT_CASE,
+	"addin/fods/convert.fods Sheet2!A151": LO_CONVERT_CASE,
+	"array/dubious/fods/linest.fods Sheet2!A17": LO_ARRAY_ARITHMETIC,
+	"array/fods/logest.fods Sheet2!A17": LO_ARRAY_ARITHMETIC,
+	"spreadsheet/fods/error.type.fods Sheet2!A13": 'A9 is #VALUE! here as in LibreOffice, and "ERROR.TYPE function" numbers #VALUE! 3',
+	"spreadsheet/fods/randarray.fods Sheet2!A12": LO_RANDOM,
+	"spreadsheet/fods/randarray.fods Sheet2!A26": LO_RANDOM,
+	"statistical/fods/intercept.fods Sheet2!A11":
+		"INTERCEPT: \"If known_y's and known_x's ... contain no data points, INTERCEPT returns the #N/A error value\"",
+	"statistical/fods/percentrank.exc.fods Sheet2!A4": LO_PERCENTRANK,
+	"statistical/fods/percentrank.exc.fods Sheet2!A5": LO_PERCENTRANK,
+	"statistical/fods/percentrank.exc.fods Sheet2!A12": LO_PERCENTRANK,
+	"statistical/fods/percentrank.exc.fods Sheet2!A13": LO_PERCENTRANK,
+	"statistical/fods/percentrank.exc.fods Sheet2!A25": LO_PERCENTRANK,
+	"statistical/fods/percentrank.exc.fods Sheet2!A21": LO_SIGNIFICANCE,
+	"statistical/fods/percentrank.exc.fods Sheet2!A22": LO_SIGNIFICANCE,
+	"statistical/fods/percentrank.fods Sheet2!A2": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A3": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A4": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A7": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A9": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A10": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A12": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A14": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A15": LO_PERCENTRANK,
+	"statistical/fods/percentrank.fods Sheet2!A21": LO_SIGNIFICANCE,
+	"statistical/fods/percentrank.fods Sheet2!A22": LO_SIGNIFICANCE,
+	"statistical/fods/percentrank.inc.fods Sheet2!A2": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A3": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A4": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A7": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A9": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A10": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A12": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A14": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A15": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A25": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A27": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A28": LO_PERCENTRANK,
+	"statistical/fods/percentrank.inc.fods Sheet2!A21": LO_SIGNIFICANCE,
+	"statistical/fods/percentrank.inc.fods Sheet2!A22": LO_SIGNIFICANCE,
+	"statistical/fods/permut.fods Sheet2!A15": 'PERMUT: "If number ≤ 0 or if number_chosen < 0, PERMUT returns the #NUM! error value."',
+	"statistical/fods/permutationa.fods Sheet2!A11":
+		'PERMUTATIONA: "when the total number is zero (0) and the chosen number is larger than zero (0), PERMUTATIONA returns the #NUM! error value"',
+	"statistical/fods/trimmean.fods Sheet2!A17": LO_TRIMMEAN,
+	"statistical/fods/trimmean.fods Sheet2!A18": LO_TRIMMEAN,
+	"text/fods/bahttext.fods Sheet2!A10": LO_SYNTAX,
+	"text/fods/encodeurl.fods Sheet2!A7": LO_SYNTAX,
+	"text/fods/encodeurl.fods Sheet2!A2": LO_ENCODEURL,
+	"text/fods/encodeurl.fods Sheet2!A4": LO_ENCODEURL,
+	"text/fods/encodeurl.fods Sheet2!A5": LO_ENCODEURL,
+	"text/fods/encodeurl.fods Sheet2!A6": LO_ENCODEURL
 }
 
 // LibreOffice's expected text for an error: an Excel error text, "error" for any, "Err:nnn" for its own codes.

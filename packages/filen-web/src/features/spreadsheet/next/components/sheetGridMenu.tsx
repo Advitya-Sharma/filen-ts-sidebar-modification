@@ -1,7 +1,7 @@
 import { Fragment, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { AxisFlag, resetTargets, type LayerKey, type SheetAxis, type SheetAxisLayout, type SheetCommand } from "@filen/office/core/sheet"
-import type { SheetGridState } from "@filen/office/react/sheet"
+import { celllessSheet, type SheetGridState } from "@filen/office/react/sheet"
 import {
 	ContextMenu,
 	ContextMenuContent,
@@ -57,6 +57,7 @@ export function SheetGridMenu({
 	text,
 	localPane,
 	items,
+	onOpenChange,
 	children
 }: {
 	grid: SheetGridState
@@ -66,6 +67,8 @@ export function SheetGridMenu({
 	text?: boolean
 	localPane?: LayerKey
 	items?: readonly { readonly id: string; readonly node: ReactNode }[]
+	// Hears the menu open and close (the touch menu's ⋯ opens it with finger-sized items).
+	onOpenChange?: (open: boolean) => void
 	children: ReactNode
 }) {
 	const { t } = useTranslation("preview")
@@ -73,7 +76,11 @@ export function SheetGridMenu({
 	const range = selection.ranges[selection.ranges.length - 1]
 	const textFile = text === true
 	const merges = useMergeCommands(grid)
-	const [menuOpen, setMenuOpen] = useState(false)
+	const [menuOpen, setOpen] = useState(false)
+	const setMenuOpen = (open: boolean): void => {
+		setOpen(open)
+		onOpenChange?.(open)
+	}
 
 	useEscapeClosesMenu(menuOpen, () => {
 		setMenuOpen(false)
@@ -99,7 +106,9 @@ export function SheetGridMenu({
 		grid.model.resize(sheet, axis, Uint32Array.from(indices), new Float32Array(indices.length).fill(Number.NaN)).catch(() => undefined)
 	}
 
-	const freezes = canEdit || textFile
+	// A chartsheet or dialog sheet has no cells: only the features' groups (its chart's) are shown.
+	const cellless = celllessSheet(grid, sheet)
+	const freezes = (canEdit || textFile) && !cellless
 
 	return (
 		<>
@@ -108,8 +117,8 @@ export function SheetGridMenu({
 				onOpenChange={setMenuOpen}
 			>
 				<ContextMenuTrigger className="flex min-h-0 flex-1 flex-col">{children}</ContextMenuTrigger>
-				<ContextMenuContent>
-					{canEdit && range !== undefined ? (
+				<ContextMenuContent aria-label={t("previewSheetGridMenu")}>
+					{canEdit && range !== undefined && !cellless ? (
 						<>
 							{STRUCTURE_ITEMS.map(item => {
 								const rows = item.axis === "rows"
@@ -224,10 +233,12 @@ export function SheetGridMenu({
 							<ContextMenuSeparator />
 						</>
 					) : null}
-					<ResetItems
-						resets={resets}
-						onReset={reset}
-					/>
+					{cellless || !grid.model.canResize() ? null : (
+						<ResetItems
+							resets={resets}
+							onReset={reset}
+						/>
+					)}
 				</ContextMenuContent>
 			</ContextMenu>
 			{merges.dialog}

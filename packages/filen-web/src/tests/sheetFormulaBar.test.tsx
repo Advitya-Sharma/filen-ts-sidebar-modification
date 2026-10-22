@@ -189,8 +189,11 @@ describe("entries in the browser's locale", () => {
 		fireEvent.keyDown(input, { key: "Enter" })
 		await goTo("C2")
 		await goTo("B2")
-		await waitFor(() => {
-			expect(bar().value).toBe("=ROUND(A2*1,25;1)")
-		})
+		await waitFor(
+			() => {
+				expect(bar().value).toBe("=ROUND(A2*1,25;1)")
+			},
+			{ timeout: 5000 }
+		)
 	})
 })

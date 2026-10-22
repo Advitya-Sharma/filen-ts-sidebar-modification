@@ -23,16 +23,18 @@ export interface SheetFileMenuProps {
 	onSaveAsXlsx: (() => void) | undefined
 	// Offers the autosave setting: the file is edited here.
 	autosave: boolean
+	// Offers Print… (opens the print dialog).
+	onPrint?: (() => void) | undefined
 }
 
-// The spreadsheet's file actions beside the cell contents: Save as .xlsx, Download as CSV, and the autosave setting
+// The spreadsheet's file actions beside the cell contents: Save as .xlsx, Download as CSV, Print, and the autosave setting
 // (the same synced setting as Settings → Advanced → Documents). Nothing to offer: not shown.
-export function SheetFileMenu({ text, onDownloadCsv, onSaveAsXlsx, autosave }: SheetFileMenuProps) {
+export function SheetFileMenu({ text, onDownloadCsv, onSaveAsXlsx, autosave, onPrint }: SheetFileMenuProps) {
 	const { t } = useTranslation(["preview", "settings"])
 	const settings = useOfficeSettings()
 	const online = useIsOnline()
 
-	if (onDownloadCsv === undefined && onSaveAsXlsx === undefined && !autosave) {
+	if (onDownloadCsv === undefined && onSaveAsXlsx === undefined && onPrint === undefined && !autosave) {
 		return null
 	}
 
@@ -69,9 +71,12 @@ export function SheetFileMenu({ text, onDownloadCsv, onSaveAsXlsx, autosave }: S
 						{t(text ? "previewSheetDownloadCsv" : "previewSheetDownloadSheetCsv")}
 					</DropdownMenuItem>
 				)}
+				{onPrint === undefined ? null : <DropdownMenuItem onClick={onPrint}>{t("previewSheetPrintMenu")}</DropdownMenuItem>}
 				{autosave ? (
 					<>
-						{onSaveAsXlsx === undefined && onDownloadCsv === undefined ? null : <DropdownMenuSeparator />}
+						{onSaveAsXlsx === undefined && onDownloadCsv === undefined && onPrint === undefined ? null : (
+							<DropdownMenuSeparator />
+						)}
 						<DropdownMenuCheckboxItem
 							closeOnClick
 							checked={settings.autosave}

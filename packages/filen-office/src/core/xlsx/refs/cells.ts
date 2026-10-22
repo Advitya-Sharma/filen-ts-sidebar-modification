@@ -193,6 +193,20 @@ export class SheetFormulas {
 		return shiftRange(range, this.shift)
 	}
 
+	// A dynamic array's range: what it spills over is calculated again after the edit (support.microsoft.com "Dynamic
+	// array formulas and spilled array behavior"), so rows and columns may be inserted or deleted through it, unlike a
+	// legacy array formula's. It moves with its cell, growing or shrinking where the edit runs through it; cut apart, it
+	// is its cell alone until it spills again.
+	private spillRange(range: SheetRange | null, at: { row: number; col: number }): SheetRange | null {
+		if (range === null || this.shift === null) return range
+
+		const shifted = inBand(range, this.shift) ? shiftRange(range, this.shift) : null
+
+		if (shifted !== null && shifted.startRow === at.row && shifted.startCol === at.col) return shifted
+
+		return { startRow: at.row, startCol: at.col, endRow: at.row, endCol: at.col }
+	}
+
 	private single(table: XlsxFormulaTable, member: Member): void {
 		const kind = table.kind(member.id)
 
@@ -213,9 +227,11 @@ export class SheetFormulas {
 
 		const text = this.formulas.shift(formula.text, this.own)
 		const ref =
-			formula.kind === FormulaKind.ARRAY || formula.kind === FormulaKind.DATA_TABLE
-				? this.shiftedRange(formula.ref, "array formula")
-				: formula.ref
+			formula.kind === FormulaKind.ARRAY && formula.cellMetadata >= 0
+				? this.spillRange(formula.ref, at)
+				: formula.kind === FormulaKind.ARRAY || formula.kind === FormulaKind.DATA_TABLE
+					? this.shiftedRange(formula.ref, "array formula")
+					: formula.ref
 		let r1 = formula.r1
 		let r2 = formula.r2
 

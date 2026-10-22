@@ -8,6 +8,7 @@ import type { PasswordVerdict } from "@/features/preview/components/docxPassword
 import { spreadsheetSaveFormat } from "@/features/spreadsheet/lib/fileKind"
 import { openSheet } from "@/features/spreadsheet/next/lib/sheetHosts"
 import { SheetEventRelay } from "@/features/spreadsheet/next/lib/sheetEvents"
+import { withWorkbookDigit } from "@/features/spreadsheet/next/lib/sheetDigitWidth"
 import { sheetKindOf } from "@/features/spreadsheet/next/lib/sheetKind"
 import { type ErrorDTO } from "@/lib/sdk/errors"
 
@@ -97,11 +98,19 @@ export function useSheetSession(item: DriveItem, documentKey: string): SheetSess
 			setOpened({ bytes: file, writeUnlocked: unlockedWrite, state })
 		}
 
+		// Shown once the workbook's digit width is measured and handed in (sheetDigitWidth.ts): the grid never lays
+		// columns out in another unit first.
 		function ready(result: SheetOpened): void {
 			close = () => {
 				result.session.close()
 			}
-			show({ status: "ready", id: newSessionId(), handle: { ...result, events }, kind, unnamed, format })
+			void withWorkbookDigit(result, events)
+				.catch(() => result)
+				.then(measured => {
+					if (live) {
+						show({ status: "ready", id: newSessionId(), handle: { ...measured, events }, kind, unnamed, format })
+					}
+				})
 		}
 
 		async function verify(

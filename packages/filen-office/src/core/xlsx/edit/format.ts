@@ -477,7 +477,7 @@ function* planSteps(
 			if (whole !== null && partialAxis(entry.range, whole) && areaOf(entry.range) <= budget) whole = null
 
 			if (whole !== null) {
-				const taken = yield* wholeAxisTargets(model, entry.range, whole, entry.patch, budget)
+				const taken = yield* wholeAxisTargets(model, entry.range, whole, entry.patch, budget, document.digitPx)
 
 				if (taken === null) return refuse("tooLarge")
 

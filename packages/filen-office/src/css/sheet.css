@@ -39,6 +39,8 @@
 	touch-action: pan-x pan-y;
 	-webkit-user-select: none;
 	user-select: none;
+	/* A long press is the grid's (its touch menu), never the platform's callout. */
+	-webkit-touch-callout: none;
 }
 
 .fo-sheet-scroller:focus-visible {
@@ -113,6 +115,46 @@
 
 .fo-sheet-fill-handle[hidden] {
 	display: none;
+}
+
+/* A touch selection's start handle: a disc on the selection's start corner (transform puts its centre there), with a
+   44 px hit area round it; dragging it never pans the grid. */
+.fo-sheet-touch-handle {
+	position: absolute;
+	top: -7px;
+	left: -7px;
+	z-index: 1;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	background: var(--fo-sheet-selection-line, #1e3a8a);
+	box-shadow: 0 0 0 2px var(--fo-sheet-selection-halo, #fff);
+	touch-action: none;
+}
+
+.fo-sheet-touch-handle::before {
+	content: "";
+	position: absolute;
+	inset: -15px;
+}
+
+.fo-sheet-touch-handle[hidden] {
+	display: none;
+}
+
+/* Takes focus for a moment as a finger opens an entry, so the soft keyboard comes up: never seen. 16 px keeps a
+   phone from zooming in to it. */
+.fo-sheet-touch-sink {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	border: 0;
+	opacity: 0;
+	font-size: 16px;
+	pointer-events: none;
 }
 
 /* The renderer places the box over the cell and sets its font and the --fo-sheet-editor-* sizes; the textarea sizes

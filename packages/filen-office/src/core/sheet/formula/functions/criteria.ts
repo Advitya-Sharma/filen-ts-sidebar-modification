@@ -1,6 +1,17 @@
-import { CellError, EmptyValue, FunctionArgumentType, SimpleRangeValue, type ImplementedFunctions } from "hyperformula"
+import { CellError, EmptyValue, ErrorType, FunctionArgumentType, SimpleRangeValue, type ImplementedFunctions } from "hyperformula"
 import { CRITERION_FUNCTION } from "../../functions/engineNames"
 import { divError, rawNumber, SheetFunctionPlugin, valueError, type PluginCall, type PluginScalar, type PluginState } from "./plugin"
+
+// Excel's error texts, as a criterion names an error.
+const ERROR_TEXT: Readonly<Partial<Record<ErrorType, string>>> = {
+	[ErrorType.DIV_BY_ZERO]: "#DIV/0!",
+	[ErrorType.NAME]: "#NAME?",
+	[ErrorType.VALUE]: "#VALUE!",
+	[ErrorType.NUM]: "#NUM!",
+	[ErrorType.NA]: "#N/A",
+	[ErrorType.REF]: "#REF!",
+	[ErrorType.SPILL]: "#SPILL!"
+}
 
 // The criteria of COUNTIF and its kind, as Excel reads them.
 export class CriteriaFunctions extends SheetFunctionPlugin {
@@ -91,6 +102,8 @@ export class CriteriaFunctions extends SheetFunctionPlugin {
 		const value = this.evaluateAst(arg, state)
 
 		if (value instanceof SimpleRangeValue) return value
+		// An error matches cells holding that error (COUNTIF(A:A,#N/A) counts them): its text as the criterion.
+		if (value instanceof CellError) return ERROR_TEXT[value.type] ?? value
 
 		return value === EmptyValue ? 0 : value
 	}

@@ -24,7 +24,8 @@ export const D = {
 	C14: 18,
 	Cdr: 19,
 	Lc: 20,
-	Wp: 21
+	Wp: 21,
+	Xdr: 22
 } as const
 
 export type D = (typeof D)[keyof typeof D]
@@ -59,6 +60,10 @@ const GROUP_URIS: readonly (readonly [D, readonly string[]])[] = [
 			"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
 			"http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"
 		]
+	],
+	[
+		D.Xdr,
+		["http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing", "http://purl.oclc.org/ooxml/drawingml/spreadsheetDrawing"]
 	]
 ]
 

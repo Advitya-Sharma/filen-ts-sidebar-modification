@@ -1,6 +1,7 @@
 import {
 	AxisFlag,
 	CellFlag,
+	SHEET_MAX_COLS,
 	type SheetBorderLine,
 	type SheetId,
 	type SheetLayout,
@@ -275,14 +276,43 @@ function paintPane(
 	canvas.rect(cols.start, rows.start, cols.end - cols.start, rows.end - rows.start)
 	canvas.clip()
 
+	LAID_OUT.clear()
+
 	// Gridlines on each cell's right and bottom pixel.
 	if (layout.gridLines && rowList.length > 0 && colList.length > 0) {
 		const right = Math.min(cols.end, (colX[colX.length - 1] ?? 0) + colAxis.size(colList[colList.length - 1] ?? 0))
 		const bottom = Math.min(rows.end, (rowY[rowY.length - 1] ?? 0) + rowAxis.size(rowList[rowList.length - 1] ?? 0))
 
+		// Text running on into empty neighbours hides the vertical gridlines it crosses, as Excel draws it.
+		const covered = runOnCover(painters, scene, lookup, rowList, colList, colX, cols)
+
 		canvas.fillStyle = theme.gridLine
 		rowList.forEach((row, i) => canvas.fillRect(cols.start, (rowY[i] ?? 0) + rowAxis.size(row) - 1, right - cols.start, 1))
-		colList.forEach((col, j) => canvas.fillRect((colX[j] ?? 0) + colAxis.size(col) - 1, rows.start, 1, bottom - rows.start))
+		colList.forEach((col, j) => {
+			const x = (colX[j] ?? 0) + colAxis.size(col) - 1
+			const hidden = covered.get(x)
+
+			if (hidden === undefined) {
+				canvas.fillRect(x, rows.start, 1, bottom - rows.start)
+
+				return
+			}
+
+			// The line in pieces, around the rows whose text crosses it.
+			let from = rows.start
+
+			rowList.forEach((row, i) => {
+				if (!hidden.has(row)) return
+
+				const top = rowY[i] ?? 0
+
+				if (top > from) canvas.fillRect(x, from, 1, top - from)
+
+				from = top + rowAxis.size(row) - 1
+			})
+
+			if (bottom > from) canvas.fillRect(x, from, 1, bottom - from)
+		})
 	}
 
 	// Fills: a cell's own, or its row's or column's. Merged cells are drawn as one block below.
@@ -332,32 +362,17 @@ function paintPane(
 		const y = rowY[i] ?? 0
 		const height = rowAxis.size(row)
 
-		// A cell left of the drawn columns whose text runs on into them.
-		for (let col = cols.first - 1; col >= Math.max(0, cols.first - CARRY_COLUMNS); col--) {
-			if (lookup.merge(row, col) !== null) break
-			if (colAxis.size(col) === 0 || lookup.text(row, col) === "") continue
+		textCells(scene, lookup, row, colList, colX, cols, (col, knownX) => {
+			// Text the gridline pass laid out already (it runs on) is drawn from that layout.
+			const laid = LAID_OUT.get(row * SHEET_MAX_COLS + col)
+			const run = laid?.run ?? runOn(scene, lookup, row, col, cols, knownX)
 
-			paintRunOn(painters, scene, lookup, row, col, y, height, cols)
-			break
-		}
-
-		colList.forEach((col, j) => {
-			if (lookup.merges.length > 0 && lookup.merge(row, col) !== null) return
-			if (lookup.text(row, col) === "") return
-
-			paintRunOn(painters, scene, lookup, row, col, y, height, cols, colX[j])
+			if (run !== null)
+				drawText(painters, scene, run.content, { x: run.x, y, width: run.width, height }, run.left, run.right, laid?.line)
 		})
-
-		// A cell right of the drawn columns whose right-aligned text runs back into them.
-		for (let col = cols.last + 1; col <= Math.min(colAxis.lastShown, cols.last + CARRY_COLUMNS); col++) {
-			if (lookup.merge(row, col) !== null) break
-			if (colAxis.size(col) === 0 || lookup.text(row, col) === "") continue
-
-			paintRunOn(painters, scene, lookup, row, col, y, height, cols)
-			break
-		}
 	})
 
+	LAID_OUT.clear()
 	restore(painters)
 }
 
@@ -661,27 +676,61 @@ function cellText(scene: CellScene, lookup: Lookup, row: number, col: number): C
 	}
 }
 
-// A single cell's text, with its run-on: left-aligned text continues over empty cells to its right, right-aligned
-// to its left, centred both ways, as far as the next cell with content (Excel's overflow).
-function paintRunOn(
-	painters: CellPainters,
+// The single cells of a row whose text is drawn over the pane: one left of the drawn columns whose text runs on into
+// them, the drawn ones (merged cells aside), and one right of them whose right-aligned text runs back.
+function textCells(
 	scene: CellScene,
 	lookup: Lookup,
 	row: number,
-	col: number,
-	y: number,
-	height: number,
+	colList: readonly number[],
+	colX: readonly number[],
 	cols: GridSegment,
-	knownX?: number
+	visit: (col: number, knownX: number | undefined) => void
 ): void {
+	const colAxis = scene.view.cols.axis
+
+	for (let col = cols.first - 1; col >= Math.max(0, cols.first - CARRY_COLUMNS); col--) {
+		if (lookup.merge(row, col) !== null) break
+		if (colAxis.size(col) === 0 || lookup.text(row, col) === "") continue
+
+		visit(col, undefined)
+		break
+	}
+
+	colList.forEach((col, j) => {
+		if (lookup.merges.length > 0 && lookup.merge(row, col) !== null) return
+		if (lookup.text(row, col) === "") return
+
+		visit(col, colX[j])
+	})
+
+	for (let col = cols.last + 1; col <= Math.min(colAxis.lastShown, cols.last + CARRY_COLUMNS); col++) {
+		if (lookup.merge(row, col) !== null) break
+		if (colAxis.size(col) === 0 || lookup.text(row, col) === "") continue
+
+		visit(col, undefined)
+		break
+	}
+}
+
+interface RunOn {
+	readonly content: CellText
+	readonly x: number
+	readonly width: number
+	readonly left: number
+	readonly right: number
+}
+
+// A single cell's text with its run-on: left-aligned text continues over empty cells to its right, right-aligned
+// to its left, centred both ways, as far as the next cell with content (Excel's overflow). Null when nothing shows.
+function runOn(scene: CellScene, lookup: Lookup, row: number, col: number, cols: GridSegment, knownX?: number): RunOn | null {
 	const colAxis = scene.view.cols.axis
 	const x = knownX ?? screenOf(scene.view.cols, col)
 	const width = colAxis.size(col)
 	const content = cellText(scene, lookup, row, col)
 
-	if (content === null || width === 0) return
+	if (content === null || width === 0) return null
 
-	const box = { x, y, width, height }
 	const runs = !content.wrap && content.align !== "fill" && (content.style.rotation ?? 0) === 0 && content.style.shrink !== true
 	let left = x
 	let right = x + width
@@ -704,9 +753,92 @@ function paintRunOn(
 		}
 	}
 
-	if (right <= cols.start || left >= cols.end) return
+	if (right <= cols.start || left >= cols.end) return null
 
-	drawText(painters, scene, content, box, left, right)
+	return { content, x, width, left, right }
+}
+
+// The vertical gridlines text running on crosses, by their x, with the rows it crosses them in. Only cells whose
+// run-on reaches past their own box are measured (one line: text that runs on never wraps); their layouts are kept in
+// LAID_OUT for the text pass. The map, its sets and the edges are reused from frame to frame.
+const COVERED = new Map<number, Set<number>>()
+const SPARE_ROWS: Set<number>[] = []
+const EDGES: number[] = []
+// One pane's run-on texts laid out by the gridline pass, by row * SHEET_MAX_COLS + col.
+const LAID_OUT = new Map<number, { readonly run: RunOn; readonly line: TextLine | undefined }>()
+
+function runOnCover(
+	painters: CellPainters,
+	scene: CellScene,
+	lookup: Lookup,
+	rowList: readonly number[],
+	colList: readonly number[],
+	colX: readonly number[],
+	cols: GridSegment
+): ReadonlyMap<number, ReadonlySet<number>> {
+	const covered = COVERED
+	const { measurer } = painters
+	const { scale, theme, model } = scene
+	const base = model.style(0)
+	const padding = Math.max(1, Math.round(TEXT_PADDING * scale))
+	const edges = EDGES
+
+	for (const rows of covered.values()) {
+		rows.clear()
+		SPARE_ROWS.push(rows)
+	}
+
+	covered.clear()
+	edges.length = 0
+	colList.forEach((col, j) => edges.push((colX[j] ?? 0) + scene.view.cols.axis.size(col) - 1))
+
+	for (const row of rowList) {
+		textCells(scene, lookup, row, colList, colX, cols, (col, knownX) => {
+			// Most text has neighbours with content on both sides: nothing of it runs on.
+			if (lookup.occupied(row, col + 1) && (col === 0 || lookup.occupied(row, col - 1))) return
+
+			const run = runOn(scene, lookup, row, col, cols, knownX)
+
+			if (run === null || (run.left === run.x && run.right === run.x + run.width)) return
+
+			const { content } = run
+			const font = textFont(content.style, base, theme.font, scale)
+			const indent = (content.style.indent ?? 0) > 0 ? (content.style.indent ?? 0) * measurer.width(font.css, "   ") : 0
+			const [line] = layoutText(measurer, content.text, content.runs, content.style, {
+				wrap: false,
+				width: Number.POSITIVE_INFINITY,
+				base,
+				fallback: theme.font,
+				scale
+			})
+
+			LAID_OUT.set(row * SHEET_MAX_COLS + col, { run, line })
+
+			const textWidth = line?.width ?? 0
+			const start =
+				content.align === "right"
+					? run.x + run.width - 1 - padding - indent - textWidth
+					: content.align === "center"
+						? run.x + (run.width - 1 - textWidth) / 2
+						: run.x + padding + indent
+			const end = start + textWidth
+
+			for (const edge of edges) {
+				if (edge <= start || edge >= end || edge < run.left || edge >= run.right - 1) continue
+
+				let rows = covered.get(edge)
+
+				if (rows === undefined) {
+					rows = SPARE_ROWS.pop() ?? new Set()
+					covered.set(edge, rows)
+				}
+
+				rows.add(row)
+			}
+		})
+	}
+
+	return covered
 }
 
 function paintText(
@@ -729,7 +861,16 @@ function lineHeight(px: number): number {
 }
 
 // Draws a cell's text in `box`, clipped to left..right (its run-on) and the box's height.
-function drawText(painters: CellPainters, scene: CellScene, content: CellText, cellBox: Box, cellLeft: number, right: number): void {
+// `laid`: the text's one line as the gridline pass laid it out (it runs on, so it neither wraps nor rotates).
+function drawText(
+	painters: CellPainters,
+	scene: CellScene,
+	content: CellText,
+	cellBox: Box,
+	cellLeft: number,
+	right: number,
+	laid?: TextLine
+): void {
 	const { canvas, measurer } = painters
 	const leading = scene.inset === undefined || content.pending ? 0 : Math.min(cellBox.width, scene.inset(content.flags) * scene.scale)
 	const box = leading === 0 ? cellBox : { ...cellBox, x: cellBox.x + leading, width: cellBox.width - leading }
@@ -762,7 +903,9 @@ function drawText(painters: CellPainters, scene: CellScene, content: CellText, c
 	const options = { wrap: content.wrap && rotation === 0, width: avail, base, fallback: theme.font, scale }
 	let lines: TextLine[]
 
-	if (rotation === 255) {
+	if (laid !== undefined && rotation === 0 && !options.wrap && content.repeat === null) {
+		lines = [laid]
+	} else if (rotation === 255) {
 		lines = [...text.replace(/\r?\n|\r/gu, "")].map(
 			char => layoutText(measurer, char, null, style, { ...options, wrap: false })[0] as TextLine
 		)

@@ -228,10 +228,12 @@ export async function mergeCells(
 		sink.layout(sheet)
 	}
 
+	// Merged first: a dynamic array no longer spills over the merged cells (#SPILL!).
+	setMerges(after, changes)
 	recalculateLogged(document, log, changes)
+	document.spillsChanged(sheet, log, changes)
 	log.seal((s, r, c) => document.state(s, r, c))
 	reportLogged(log, changes, "content")
-	setMerges(after, changes)
 
 	const cells = cellStep(document, log, sink => reportLogged(log, sink, "content"), true)
 
@@ -275,7 +277,30 @@ export async function unmergeCells(
 
 	set(after, changes)
 
-	return { bytes: before.byteLength + after.byteLength, undo: sink => set(before, sink), redo: sink => set(after, sink) }
+	// A dynamic array the merge held back spills again.
+	const log = new CellLog()
+
+	document.spillsChanged(sheet, log, changes)
+
+	if (log.size === 0)
+		return { bytes: before.byteLength + after.byteLength, undo: sink => set(before, sink), redo: sink => set(after, sink) }
+
+	log.seal((s, r, c) => document.state(s, r, c))
+	reportLogged(log, changes, "content")
+
+	const cells = cellStep(document, log, sink => reportLogged(log, sink, "content"), true)
+
+	return {
+		bytes: cells.bytes + before.byteLength + after.byteLength,
+		undo: async sink => {
+			await cells.undo(sink)
+			set(before, sink)
+		},
+		redo: async sink => {
+			set(after, sink)
+			await cells.redo(sink)
+		}
+	}
 }
 
 // Whether the selection has merges to undo (menus).

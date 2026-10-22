@@ -90,8 +90,8 @@ export interface WholeAxisTargets {
 }
 
 // The sheet's default column width, as a <col> without customWidth stores it.
-function defaultWidth(model: XlsxSheetModel): number {
-	return defaultColWidth(model.format)
+function defaultWidth(model: XlsxSheetModel, digit: number): number {
+	return defaultColWidth(model.format, digit)
 }
 
 function sameRange(a: XlsxColRange, b: XlsxColRange): boolean {
@@ -154,9 +154,9 @@ function colClasses(cols: readonly XlsxColRange[], first: number, last: number):
 }
 
 // The column list with each class's new style; ranges are cut and joined as the styles fall.
-function restyledCols(model: XlsxSheetModel, classes: readonly ColClass[], first: number, last: number): XlsxColRange[] {
+function restyledCols(model: XlsxSheetModel, classes: readonly ColClass[], first: number, last: number, digit: number): XlsxColRange[] {
 	const out: XlsxColRange[] = []
-	const width = defaultWidth(model)
+	const width = defaultWidth(model, digit)
 
 	for (const range of model.cols) {
 		if (range.last < first || range.first > last) out.push(range)
@@ -219,7 +219,9 @@ export function* wholeAxisTargets(
 	range: SheetRange,
 	kind: WholeAxis,
 	patch: PositionedPatch,
-	budget: number
+	budget: number,
+	// The workbook's column-width digit (document.digitPx).
+	digit: number
 ): Generator<void, WholeAxisTargets | null> {
 	const store = model.store as SheetStore
 	const targets: CellTarget[] = []
@@ -404,7 +406,7 @@ export function* wholeAxisTargets(
 		if (due(classes.length)) yield
 	}
 
-	const cols = kind === "rows" ? null : restyledCols(model, classes, firstCol, lastCol)
+	const cols = kind === "rows" ? null : restyledCols(model, classes, firstCol, lastCol, digit)
 
 	return { cells: targets, cols, rows: rowStates }
 }

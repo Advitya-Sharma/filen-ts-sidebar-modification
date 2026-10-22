@@ -27,16 +27,7 @@ describe("view-only and refusal messages", () => {
 	const base = { editable: true, readOnlyReason: undefined, unnamed: false, renamed: false, kind: "xlsx" } as const
 
 	it("names every view-only reason with a string the catalog has", () => {
-		for (const reason of [
-			"legacyFormat",
-			"strict",
-			"lossy",
-			"tooLarge",
-			"unsafe",
-			"signed",
-			"readOnlyRecommended",
-			"modifyPassword"
-		] as const) {
+		for (const reason of ["legacyFormat", "lossy", "tooLarge", "unsafe", "signed", "readOnlyRecommended", "modifyPassword"] as const) {
 			expect(preview).toHaveProperty(viewOnlyKey(reason, "xlsx"))
 		}
 

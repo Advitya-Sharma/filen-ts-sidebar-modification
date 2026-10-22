@@ -1,0 +1,6 @@
+export type { DrawingAnchor, DrawingMarker } from "../../../core/xlsx/drawings/anchor"
+export type { SheetDrawingObject, SheetDrawings } from "../../../core/xlsx/drawings/feature"
+export type { DrawingObjectKind } from "../../../core/xlsx/drawings/read"
+export type { DrawingRender } from "../../../core/xlsx/drawings/render"
+export { EMU_PER_PX, anchorBox, anchorOf, axisStart, draggedBox, nearView, placeOnScreen, type Handle, type SheetBox } from "./geometry"
+export { SheetObjects, focusBeside, objectAt, objectInView, type SheetObjectSource, type SheetObjectsProps } from "./SheetObjects"

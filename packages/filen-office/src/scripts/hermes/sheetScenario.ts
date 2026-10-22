@@ -15,6 +15,7 @@ import {
 	wellFormedFormula
 } from "../../core/sheet/index"
 import { FormulaEngine } from "../../core/sheet/formula/index"
+import { engineCellFormula, engineSpillFormula } from "../../core/sheet/refs/formulaRefs"
 import type { SheetCommand, SheetFileKind, SheetSessionApi, SheetTile } from "../../core/sheet/protocol"
 import type { Slicing } from "../../core/slicing"
 import { inThreadSheetHost } from "../../dom/sheet/host"
@@ -161,6 +162,85 @@ function engineProbe(): string {
 	}
 }
 
+// The app's own functions where the engine has none: regular expressions, LET and LAMBDA, bonds, INDIRECT, and a
+// dynamic array spilling and growing.
+function functionsProbe(): string {
+	const typed = [
+		'REGEXEXTRACT("Order 123-456","\\d+-(\\d+)",2)',
+		'REGEXREPLACE("a1b22c333","\\d+","#")',
+		'REGEXTEST("Ünïcode","^\\w+$")',
+		"LET(x,A1,LAMBDA(n,n*x)(3))",
+		"SUM(MAP(A1:A3,LAMBDA(v,v^2)))",
+		"REDUCE(0,A1:A3,LAMBDA(a,b,a+b))",
+		"PRICE(DATE(2008,2,15),DATE(2017,11,15),0.0575,0.065,100,2,0)",
+		"YIELD(DATE(2008,2,15),DATE(2016,11,15),0.0575,95.04287,100,2,0)",
+		'INDIRECT("A"&A1)',
+		'SUM(INDIRECT("R1C1:R3C1",FALSE))'
+	]
+	const rows: (string | number | null)[][] = [[2], [3], [4], [], []]
+
+	typed.forEach((formula, col) => {
+		const row = rows[0] as (string | number | null)[]
+
+		row[col + 1] = engineCellFormula(storedFormula(formula)) ?? ""
+	})
+
+	const spill = engineSpillFormula("_xlfn.SEQUENCE(A1)") ?? ""
+
+	;(rows[4] as (string | number | null)[])[0] = spill
+
+	const engine = new FormulaEngine([{ name: "S", rows, formulas: [{ row: 4, col: 0, content: spill, spill: { rows: 1, cols: 1 } }] }], [])
+
+	try {
+		const values = typed.map((_, col) => engine.result(0, 0, col + 1))
+		const grown = engine
+			.set(0, [{ row: 0, col: 0, content: 3 }])
+			.map(
+				cell =>
+					`${String(cell.row)},${String(cell.col)}=${String(cell.value)}${cell.spill === undefined ? "" : ` ${String(cell.spill.rows)}`}`
+			)
+			.sort()
+
+		return JSON.stringify({ values, grown })
+	} finally {
+		engine.destroy()
+	}
+}
+
+// LAMBDA recursion to just past its limit (1,024 calls one inside another): the same on every engine, whatever its
+// stack.
+function recursionProbe(): string {
+	const lambdas = new Set(["SUMTO", "DOWN", "DEEP"])
+	const aliases = new Map<string, string>()
+	const names = [
+		{ name: "SumTo", expression: engineFormula("_xlfn.LAMBDA(_xlpm.n,IF(_xlpm.n<=0,0,_xlpm.n+SumTo(_xlpm.n-1)))", aliases, lambdas) },
+		{ name: "Down", expression: engineFormula("_xlfn.LAMBDA(_xlpm.n,IF(_xlpm.n<=0,0,Down(_xlpm.n-1)))", aliases, lambdas) },
+		{
+			name: "Deep",
+			expression: engineFormula(
+				"_xlfn.LAMBDA(_xlpm.n,IF(_xlpm.n<=0,0,ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(ABS(1+Deep(_xlpm.n-1)))))))))))))))))))",
+				aliases,
+				lambdas
+			)
+		}
+	]
+	const out: string[] = []
+
+	for (const call of ["SumTo", "Down", "Deep"]) {
+		const ns = [10, 500, 1023, 1024]
+		const rows = [ns.map(n => engineCellFormula(`${call}(${String(n)})`, aliases, lambdas) ?? "")]
+		const engine = new FormulaEngine([{ name: "S", rows, formulas: [] }], names)
+
+		try {
+			out.push(ns.map((n, col) => `${call}(${String(n)})=${String(engine.result(0, 0, col).value)}`).join(" "))
+		} finally {
+			engine.destroy()
+		}
+	}
+
+	return out.join(" ")
+}
+
 export function sheetProbes(probe: (name: string, run: () => unknown) => void): void {
 	probe("sheet.refs", () =>
 		JSON.stringify(
@@ -194,6 +274,8 @@ export function sheetProbes(probe: (name: string, run: () => unknown) => void): 
 		)
 	)
 	probe("sheet.hyperformula", engineProbe)
+	probe("sheet.functions", functionsProbe)
+	probe("sheet.recursion", recursionProbe)
 }
 
 // --- Sessions: a workbook or text file opened, edited and saved through the in-thread host ---

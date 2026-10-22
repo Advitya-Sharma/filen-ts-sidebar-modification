@@ -2,7 +2,7 @@ import { functionPrefix, functionSupport, functionVolatility, sheetFunction } fr
 import { columnIndex, columnName } from "./cellRef"
 import type { AxisEdit } from "../model/edits"
 import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
-import { CRITERION_FUNCTION, INTERSECT_FUNCTION } from "../functions/engineNames"
+import { ANCHOR_FUNCTION, CALL_FUNCTION, CRITERION_FUNCTION, INTERSECT_FUNCTION, SPILL_FUNCTION } from "../functions/engineNames"
 
 // Cell references inside Excel formula text, found and rewritten without evaluating anything: filling a
 // shared formula down, moving references for inserted or deleted rows and columns, renaming a sheet. The
@@ -245,6 +245,251 @@ function parseArea(text: string, start: number): { area: RefArea; end: number } 
 		},
 		end: firstEnd
 	}
+}
+
+// The functions taking a LAMBDA, where a function's name alone stands for one (BYROW(A1:B3,SUM)), which a file
+// stores as _xleta.SUM.
+const ETA_PREFIX = "_xleta."
+const HELPERS = new Set(["MAP", "REDUCE", "SCAN", "BYROW", "BYCOL", "MAKEARRAY", "GROUPBY", "PIVOTBY"])
+const HELPER_CALL = /\b(?:_xlfn\.)?(?:MAP|REDUCE|SCAN|BYROW|BYCOL|MAKEARRAY|GROUPBY|PIVOTBY)\s*\(/i
+
+// A function's name typed whole as an argument of a LAMBDA helper, as a file stores it: _xleta.SUM.
+function storedEta(formula: string): string {
+	let text = ""
+	let index = 0
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) {
+			const end = skipQuoted(formula, index, code)
+
+			text += formula.slice(index, end)
+			index = end
+
+			continue
+		}
+
+		if (isWordChar(code)) {
+			const end = readWord(formula, index)
+			const word = formula.slice(index, end)
+			const call =
+				formula.charCodeAt(end) === 40 && HELPERS.has(bareFunctionName(word).toUpperCase()) ? callArguments(formula, end) : null
+
+			if (call === null) {
+				text += word
+				index = end
+
+				continue
+			}
+
+			const args = call.args.map(arg => {
+				const name = arg.trim()
+
+				return /^[A-Za-z][A-Za-z0-9.]*$/.test(name) && sheetFunction(name) !== undefined
+					? arg.replace(name, `${ETA_PREFIX}${name.toUpperCase()}`)
+					: storedEta(arg)
+			})
+
+			text += `${word}(${args.join(",")})`
+			index = call.end
+
+			continue
+		}
+
+		text += formula[index] ?? ""
+		index++
+	}
+
+	return text
+}
+
+const SINGLE_CALL = "_xlfn.SINGLE("
+
+// The end of the operand starting at `start` (a reference, a name, or a call with its arguments), or `start` for none.
+function operandEnd(formula: string, start: number): number {
+	const first = formulaParts(formula.slice(start))[0]
+
+	if (first !== undefined && typeof first !== "string" && first.ref.area !== null)
+		return start + first.prefix.length + first.areaText.length
+
+	const end = readWord(formula, start)
+
+	if (end > start && formula.charCodeAt(end) === 40) return callArguments(formula, end)?.end ?? end
+
+	return end
+}
+
+// The implicit intersection operator as typed (@A1:A9, @INDEX(...)) as a file stores it: _xlfn.SINGLE(A1:A9).
+function storedIntersections(formula: string): string {
+	let text = ""
+	let index = 0
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) {
+			const end = skipQuoted(formula, index, code)
+
+			// A quoted sheet name starts a reference: kept whole with what follows by operandEnd.
+			if (code === APOSTROPHE && formula.charCodeAt(end) === 33) {
+				const after = operandEnd(formula, index)
+
+				text += formula.slice(index, after)
+				index = Math.max(after, end)
+			} else {
+				text += formula.slice(index, end)
+				index = end
+			}
+
+			continue
+		}
+
+		if (code === 64) {
+			const end = operandEnd(formula, index + 1)
+
+			if (end > index + 1) {
+				text += `${SINGLE_CALL}${storedIntersections(formula.slice(index + 1, end))})`
+				index = end
+
+				continue
+			}
+		}
+
+		text += formula[index] ?? ""
+		index++
+	}
+
+	return text
+}
+
+// _xlfn.SINGLE(x) of one operand as Excel shows it: @x.
+function shownIntersections(formula: string): string {
+	let text = ""
+	let index = 0
+	const lower = formula.toLowerCase()
+	const call = SINGLE_CALL.toLowerCase()
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) {
+			const end = skipQuoted(formula, index, code)
+
+			text += formula.slice(index, end)
+			index = end
+
+			continue
+		}
+
+		if (lower.startsWith(call, index) && (index === 0 || !isWordChar(formula.charCodeAt(index - 1)))) {
+			const open = index + call.length - 1
+			const args = callArguments(formula, open)
+			const inner = args?.args.length === 1 ? (args.args[0] ?? "") : null
+
+			if (args !== null && inner !== null && operandEnd(inner, 0) === inner.length && inner.length > 0) {
+				text += `@${shownIntersections(inner)}`
+				index = args.end
+
+				continue
+			}
+		}
+
+		text += formula[index] ?? ""
+		index++
+	}
+
+	return text
+}
+
+const ANCHOR_CALL = "_xlfn.ANCHORARRAY("
+
+// Whether a reference is one cell of this workbook (a spill range reference's anchor).
+function oneCell(part: RefPart): boolean {
+	const area = part.ref.area
+
+	return !part.ref.external && part.ref.lastSheet === null && area !== null && area.kind === "cell" && !area.range
+}
+
+// A spill range reference as typed (A1#, Sheet2!B3#) as a file stores it: _xlfn.ANCHORARRAY(A1) ([MS-XLSX] 2.2.2).
+function storedSpillReferences(formula: string): string {
+	const parts = formulaParts(formula)
+	let text = ""
+
+	parts.forEach((part, index) => {
+		if (typeof part === "string") {
+			const before = parts[index - 1]
+
+			text +=
+				before !== undefined && typeof before !== "string" && oneCell(before) && part.startsWith("#") ? `)${part.slice(1)}` : part
+
+			return
+		}
+
+		const after = parts[index + 1]
+		const spill = oneCell(part) && typeof after === "string" && after.startsWith("#") && !/^#[A-Z/0]/i.test(after)
+
+		text += spill ? `${ANCHOR_CALL}${part.prefix}${part.areaText}` : `${part.prefix}${part.areaText}`
+	})
+
+	return text
+}
+
+// _xlfn.ANCHORARRAY(A1) as it is typed and shown: A1#.
+function shownSpillReferences(formula: string): string {
+	const parts = formulaParts(formula)
+	let text = ""
+
+	parts.forEach((part, index) => {
+		if (typeof part !== "string") {
+			text += `${part.prefix}${part.areaText}`
+
+			return
+		}
+
+		const before = parts[index - 1]
+		const after = parts[index + 1]
+		let piece = part
+
+		if (before !== undefined && typeof before !== "string" && oneCell(before) && piece.startsWith(")") && anchored(parts, index - 1))
+			piece = `#${piece.slice(1)}`
+		if (
+			after !== undefined &&
+			typeof after !== "string" &&
+			oneCell(after) &&
+			piece.toLowerCase().endsWith(ANCHOR_CALL.toLowerCase()) &&
+			closes(parts, index + 1)
+		)
+			piece = piece.slice(0, -ANCHOR_CALL.length)
+
+		text += piece
+	})
+
+	return text
+}
+
+// Whether the reference at `index` is the whole argument of an ANCHORARRAY call before it, and so is closed after it.
+function anchored(parts: readonly Part[], index: number): boolean {
+	const before = parts[index - 1]
+
+	return typeof before === "string" && before.toLowerCase().endsWith(ANCHOR_CALL.toLowerCase())
+}
+
+function closes(parts: readonly Part[], index: number): boolean {
+	const after = parts[index + 1]
+
+	return typeof after === "string" && after.startsWith(")")
+}
+
+// The one A1 reference a text is and nothing else ("Sheet 2"!B3, A:A, $A$1:B9), as INDIRECT reads one; null for any
+// other text. `area` null: the sheet prefix is followed by a name or nothing that is a reference (Sheet1!Name).
+export function singleReference(text: string): (FormulaRef & { readonly areaText: string }) | null {
+	const parts = formulaParts(text)
+	const part = parts[0]
+
+	if (parts.length !== 1 || part === undefined || typeof part === "string") return null
+
+	return { ...part.ref, areaText: part.areaText }
 }
 
 // The formula as text and the references in it, in order.
@@ -736,7 +981,7 @@ function mapWords(formula: string, map: (word: string, called: boolean) => strin
 // mark "hyperformula" or "plugin", or no worksheet function at all: an add-in's, a LAMBDA's), or names one that
 // `unknownName` (given the name in upper case) says the engine lacks. Such a formula keeps the result its file
 // stored: under an error trap (IFERROR, ISERROR) the engine's #NAME? for the call would read as a value.
-export function engineLacks(formula: string, unknownName?: (name: string) => boolean): boolean {
+export function engineLacks(formula: string, unknownName?: (name: string) => boolean, lambdas?: ReadonlySet<string>): boolean {
 	let index = 0
 
 	while (index < formula.length) {
@@ -753,7 +998,12 @@ export function engineLacks(formula: string, unknownName?: (name: string) => boo
 			const next = formula.charCodeAt(end)
 
 			if (next === 40) {
-				const support = functionSupport(bareFunctionName(formula.slice(index, end)).toUpperCase())
+				const word = formula.slice(index, end)
+				const bare = bareFunctionName(word).toUpperCase()
+				const support =
+					isParameter(word) || ENGINE_SPELLED.has(bare) || lambdas?.has(word.toUpperCase()) === true || TRIM_FUNCTION.test(bare)
+						? "plugin"
+						: functionSupport(bare)
 
 				if (support !== "hyperformula" && support !== "plugin") return true
 			} else if (unknownName !== undefined && next !== 33 && unknownName(formula.slice(index, end).toUpperCase())) {
@@ -865,6 +1115,23 @@ export function formulaInputs(formula: string): FormulaInputs {
 const PARAMETER = "_xlpm."
 const SCOPES = /\b(?:LET|LAMBDA)\(/i
 
+// Calls a file stores that are no worksheet function of the catalogue's, and the engine-only functions they reach it
+// as: the spill range reference A1# (_xlfn.ANCHORARRAY(A1)) and the implicit intersection operator @ (_xlfn.SINGLE).
+const ENGINE_SPELLED: ReadonlyMap<string, string> = new Map([
+	["ANCHORARRAY", ANCHOR_FUNCTION],
+	["SINGLE", INTERSECT_FUNCTION]
+])
+
+// The engine-only function a stored call reaches the engine as (ANCHORARRAY, SINGLE), upper case; undefined for others.
+export function engineSpelledName(name: string): string | undefined {
+	return ENGINE_SPELLED.get(name.toUpperCase())
+}
+
+// Whether a word is a LET or LAMBDA name as a file stores it (_xlpm.x).
+function isParameter(word: string): boolean {
+	return word.length > PARAMETER.length && word.slice(0, PARAMETER.length).toLowerCase() === PARAMETER
+}
+
 function withoutPrefix(name: string): string {
 	return name.length > PARAMETER.length && name.slice(0, PARAMETER.length).toLowerCase() === PARAMETER
 		? name.slice(PARAMETER.length)
@@ -898,7 +1165,7 @@ interface Scope {
 
 // The names LET and LAMBDA bind, where declared and where used within their call, with the prefix a file
 // stores them with (Excel reads the bare name as a defined name). A name already prefixed stays as it is.
-// A word beside ":" is a range's end, and one before "(" a function, unless the name holds a LAMBDA.
+// A word beside ":" is a range's end, and one before "(" a function, unless the name is bound and names no function.
 function prefixParameters(formula: string): string {
 	if (!SCOPES.test(formula)) return formula
 
@@ -969,7 +1236,11 @@ function prefixParameters(formula: string): string {
 				} else {
 					const callable = lookup(key)
 
-					bound = called ? callable === true : callable !== undefined
+					// Called, a name in scope is one holding a LAMBDA, or a name whose value cannot be known before it
+					// calculates (a LAMBDA's parameter given a LAMBDA) unless it names a function.
+					bound = called
+						? callable === true || (callable === false && functionPrefix(bare) === undefined)
+						: callable !== undefined
 				}
 			}
 
@@ -1009,7 +1280,14 @@ function prefixParameters(formula: string): string {
 // A typed formula as a file stores it: newer functions with the prefix Excel requires, and the names LET
 // and LAMBDA bind with theirs.
 export function storedFormula(formula: string): string {
-	return mapWords(prefixParameters(formula), (name, called) => {
+	const operators = formula.includes("@") ? storedIntersections(formula) : formula
+
+	const spills = operators.includes("#") ? storedSpillReferences(operators) : operators
+
+	// After the LET and LAMBDA names are marked: a bound name in a helper's argument is no function's.
+	const bound = prefixParameters(spills)
+
+	return mapWords(HELPER_CALL.test(bound) ? storedEta(bound) : bound, (name, called) => {
 		if (!called || name.startsWith("_")) return name
 
 		const prefix = prefixOf(name)
@@ -1022,8 +1300,13 @@ export function storedFormula(formula: string): string {
 // A prefix on a function it does not know stays, so nothing is lost by editing.
 export function shownFormula(formula: string): string {
 	if (!formula.includes("_xl")) return formula
+	if (/_xlfn\.SINGLE\(/i.test(formula)) return shownFormula(shownIntersections(formula))
+	if (/_xlfn\.ANCHORARRAY\(/i.test(formula)) return shownFormula(shownSpillReferences(formula))
 
 	return mapWords(formula, (name, called) => {
+		if (!called && name.length > ETA_PREFIX.length && name.slice(0, ETA_PREFIX.length).toLowerCase() === ETA_PREFIX)
+			return name.slice(ETA_PREFIX.length)
+
 		const unbound = withoutPrefix(name)
 
 		if (unbound !== name || !called) return unbound
@@ -1033,6 +1316,209 @@ export function shownFormula(formula: string): string {
 
 		return prefix !== null && name.toLowerCase() === `${prefix}${bare}`.toLowerCase() ? bare : name
 	})
+}
+
+// Trim references (support.microsoft.com "TRIMRANGE function": A1.:.E10 trims both ends, A1:.E10 the trailing empty
+// rows and columns, A1.:E10 the leading). A file Excel wrote may hold them as _xlfn._TRO_ALL(A1:E10), _TRO_TRAILING and
+// _TRO_LEADING: kept as written, and read by the engine as TRIMRANGE with its codes (1 leading, 2 trailing, 3 both).
+const TRIM_KINDS = { ALL: 3, TRAILING: 2, LEADING: 1 } as const
+const TRIM_CALL = /_xlfn\._TRO_(ALL|TRAILING|LEADING)\(/gi
+const TRIM_FUNCTION = /^_TRO_(?:ALL|TRAILING|LEADING)$/
+// A reference's end beside a trim operator: a cell, a column or a row, with a sheet before the first.
+const TRIM_END = String.raw`\$?[A-Za-z]{1,3}\$?\d+|\$?[A-Za-z]{1,3}|\$?\d+`
+const TRIM_OPERATOR = new RegExp(
+	String.raw`(^|[^A-Za-z0-9_.$!'\]])((?:'(?:[^']|'')+'!|[A-Za-z_][\w.]*!)?(?:${TRIM_END}))(\.?):(\.?)(${TRIM_END})(?![\w.(!])`,
+	"g"
+)
+
+// Each run of `formula` outside its strings, rewritten by `map`.
+function outsideStrings(formula: string, map: (text: string) => string): string {
+	let text = ""
+	let from = 0
+	let index = 0
+
+	while (index < formula.length) {
+		if (formula.charCodeAt(index) === QUOTE) {
+			const end = skipQuoted(formula, index, QUOTE)
+
+			text += map(formula.slice(from, index)) + formula.slice(index, end)
+			index = end
+			from = end
+		} else index++
+	}
+
+	return text + map(formula.slice(from))
+}
+
+// Whether a typed formula holds a trim reference (A1:.A9, A1.:A9, A1.:.A9). Excel's stored form of one is not
+// documented ([MS-XLSX] 2.2.3 lists no such function, and support.microsoft.com "TRIMRANGE function" gives none), so a
+// typed one is refused rather than written under a name Excel may not read.
+export function holdsTrimReference(formula: string): boolean {
+	if (!formula.includes(".:") && !formula.includes(":.")) return false
+
+	let found = false
+
+	outsideStrings(formula, text => {
+		for (const match of text.matchAll(TRIM_OPERATOR)) if (match[3] !== "" || match[4] !== "") found = true
+
+		return text
+	})
+
+	return found
+}
+
+// Stored trim references as the engine reads them: TRIMRANGE.
+function engineTrimReferences(formula: string): string {
+	let text = ""
+	let index = 0
+
+	for (const match of formula.matchAll(TRIM_CALL)) {
+		const at = match.index
+
+		if (at < index) continue
+
+		const open = at + match[0].length - 1
+		const args = callArguments(formula, open)
+
+		if (args === null || args.args.length !== 1) continue
+
+		const code = String(TRIM_KINDS[(match[1] ?? "").toUpperCase() as keyof typeof TRIM_KINDS])
+
+		text += `${formula.slice(index, at)}_xlfn.TRIMRANGE(${engineTrimReferences(args.args[0] ?? "")},${code},${code})`
+		index = args.end
+	}
+
+	return text + formula.slice(index)
+}
+
+const REGEX_CALL = /(?<![\w.])(?:_xlfn\.)?REGEX(?:TEST|EXTRACT|REPLACE)\(/gi
+
+// The patterns a formula's REGEXTEST, REGEXEXTRACT and REGEXREPLACE calls give as text written in the formula (their
+// second argument a string alone), unquoted.
+export function regexPatterns(formula: string): string[] {
+	const patterns: string[] = []
+
+	for (const match of formula.matchAll(REGEX_CALL)) {
+		if (insideString(formula, match.index)) continue
+
+		const args = callArguments(formula, match.index + match[0].length - 1)
+		const pattern = args?.args[1]?.trim() ?? ""
+
+		if (pattern.length >= 2 && pattern.startsWith('"') && skipQuoted(pattern, 0, QUOTE) === pattern.length)
+			patterns.push(pattern.slice(1, -1).replaceAll('""', '"'))
+	}
+
+	return patterns
+}
+
+// Whether a position of a formula is inside a string.
+function insideString(formula: string, at: number): boolean {
+	let index = 0
+
+	while (index < at) {
+		if (formula.charCodeAt(index) === QUOTE) {
+			const end = skipQuoted(formula, index, QUOTE)
+
+			if (end > at) return true
+
+			index = end
+		} else index++
+	}
+
+	return false
+}
+
+// The calls that may give a range or an array where one value is read: Excel shows them with @ in a formula written
+// before dynamic arrays (support.microsoft.com "Implicit intersection operator: @": INDEX, OFFSET, a user-defined
+// function), as INDIRECT, which gives a reference too.
+const RANGE_CALLS = new Set(["INDEX", "OFFSET", "INDIRECT"])
+
+// Whether a reference names more than one cell.
+function manyCells(ref: FormulaRef): boolean {
+	const area = ref.area
+
+	return area !== null && (area.kind !== "cell" || (area.range && (area.startRow !== area.endRow || area.startCol !== area.endCol)))
+}
+
+// A stored formula without dynamic-array metadata (Excel calculates it as it did before dynamic arrays) with the @
+// Excel shows where it reads one value from a range (support.microsoft.com "Implicit intersection operator: @"):
+// before a range or a call that may give one (RANGE_CALLS, or a function `known` does not know) that is the whole
+// result, or in an argument that takes one value (`oneValue`), alone or in an operation (=@A1:A9*2, =LEN(@A1:A9)).
+// A range a function reads whole (SUM) is left as it is, as is anything inside an argument not known to take one
+// value. Shown as typed again, the formula means what it did.
+export function legacyIntersections(
+	formula: string,
+	oneValue: (name: string, index: number) => boolean,
+	known: (name: string) => boolean
+): string {
+	if (!formula.includes(":") && !formula.includes("(")) return formula
+
+	// One frame per open parenthesis: whether its current argument takes one value, and the call it belongs to.
+	const frames: { one: boolean; call: string | null; argument: number }[] = [{ one: true, call: null, argument: 0 }]
+	let text = ""
+	let call: string | null = null
+
+	for (const part of formulaParts(formula)) {
+		const frame = frames.at(-1) ?? { one: false, call: null, argument: 0 }
+
+		if (typeof part !== "string") {
+			text += `${frame.one && !part.ref.external && manyCells(part.ref) ? "@" : ""}${part.prefix}${part.areaText}`
+			call = null
+
+			continue
+		}
+
+		let index = 0
+
+		while (index < part.length) {
+			const code = part.charCodeAt(index)
+			const top = frames.at(-1) ?? { one: false, call: null, argument: 0 }
+
+			// A string, a quoted name or a structured reference's brackets (T[[#This Row],[x]]): whole, its commas no
+			// argument's.
+			if (code === QUOTE || code === APOSTROPHE || code === BRACKET_OPEN) {
+				const end = code === BRACKET_OPEN ? skipBracket(part, index) : skipQuoted(part, index, code)
+
+				text += part.slice(index, end)
+				index = end
+				call = null
+
+				continue
+			}
+
+			if (isWordChar(code)) {
+				const end = readWord(part, index)
+				const word = part.slice(index, end)
+
+				call = null
+
+				if (part.charCodeAt(end) === 40) {
+					const name = bareFunctionName(word).toUpperCase()
+
+					call = name
+					text += top.one && (RANGE_CALLS.has(name) || !known(word)) ? `@${word}` : word
+				} else text += word
+
+				index = end
+
+				continue
+			}
+
+			if (code === 40) frames.push({ one: call === null ? top.one : oneValue(call, 0), call, argument: 0 })
+			else if (code === 123) frames.push({ one: false, call: null, argument: 0 })
+			else if ((code === 41 || code === 125) && frames.length > 1) frames.pop()
+			else if (code === 44 && top.call !== null) {
+				top.argument++
+				top.one = oneValue(top.call, top.argument)
+			}
+
+			call = null
+			text += part[index] ?? ""
+			index++
+		}
+	}
+
+	return text
 }
 
 // Past a quoted run ("…" or '…', the quote doubled inside), or -1 when it never closes.
@@ -1368,7 +1854,27 @@ export const ARRAY_RESULTS: ReadonlySet<string> = new Set([
 	"CHOOSECOLS",
 	"CHOOSEROWS",
 	"MODE.MULT",
-	"TREND"
+	"TREND",
+	"MAP",
+	"SCAN",
+	"BYROW",
+	"BYCOL",
+	"MAKEARRAY",
+	"REGEXEXTRACT",
+	"TOCOL",
+	"TOROW",
+	"WRAPCOLS",
+	"WRAPROWS",
+	"EXPAND",
+	"TRIMRANGE",
+	"LINEST",
+	"LOGEST",
+	"GROWTH",
+	"GROUPBY",
+	"PIVOTBY",
+	// A spill range reference (A1#) as the file stores it and as the engine reads it.
+	"ANCHORARRAY",
+	ANCHOR_FUNCTION
 ])
 
 // A call to any of ARRAY_RESULTS, or to one of them but XLOOKUP, in any case: one test where each name would be one.
@@ -1541,12 +2047,12 @@ export function holdsArrayConstant(formula: string): boolean {
 // A cell's formula as HyperFormula takes it (with its "="), or null when it cannot be given to it: nested
 // past its parser's depth, or building an array too large to hold. Evaluated as Excel reads an ordinary
 // formula: an array result gives its first value (INDEX), and nothing spills.
-export function engineCellFormula(formula: string, aliases?: ReadonlyMap<string, string>): string | null {
+export function engineCellFormula(formula: string, aliases?: ReadonlyMap<string, string>, lambdas?: ReadonlySet<string>): string | null {
 	if (!engineCanParse(formula) || arrayTooLarge(formula)) {
 		return null
 	}
 
-	const read = engineFormula(RESIZED_CALL.test(formula) ? resizedSumRanges(formula) : formula, aliases)
+	const read = engineFormula(RESIZED_CALL.test(formula) ? resizedSumRanges(formula) : formula, aliases, lambdas)
 	const text = CALLS_SIZED.test(read) ? boundArraySizes(read) : read
 
 	if (CALLS_ARRAY_RESULT.test(text)) return `=INDEX((${text}),1,1)`
@@ -1554,6 +2060,53 @@ export function engineCellFormula(formula: string, aliases?: ReadonlyMap<string,
 	// A formula that is a range alone (=B1:B9, =Sheet2!A1:C1) gives the cell of it in the formula's row or column, as
 	// Excel reads an ordinary formula (implicit intersection).
 	return rangeAlone(formula) ? `=${INTERSECT_FUNCTION}(${text})` : `=${text}`
+}
+
+// A formula's text evaluated as an array, without spilling (ARRAYFORMULA): what FormulaEngine.givesArray reads.
+export function engineArrayFormula(formula: string, aliases?: ReadonlyMap<string, string>, lambdas?: ReadonlySet<string>): string | null {
+	if (!engineCanParse(formula) || arrayTooLarge(formula)) return null
+
+	const read = engineFormula(RESIZED_CALL.test(formula) ? resizedSumRanges(formula) : formula, aliases, lambdas)
+
+	return `=ARRAYFORMULA(${CALLS_SIZED.test(read) ? boundArraySizes(read) : read})`
+}
+
+// A dynamic-array formula's text as the engine takes it (with its "="): evaluated as an array and spilled
+// (SPILL_FUNCTION), or null when it cannot be given to it.
+export function engineSpillFormula(formula: string, aliases?: ReadonlyMap<string, string>, lambdas?: ReadonlySet<string>): string | null {
+	if (!engineCanParse(formula) || arrayTooLarge(formula)) return null
+
+	const read = engineFormula(RESIZED_CALL.test(formula) ? resizedSumRanges(formula) : formula, aliases, lambdas)
+
+	return `=${SPILL_FUNCTION}(${CALLS_SIZED.test(read) ? boundArraySizes(read) : read})`
+}
+
+// Operators that take one value from each side: a range beside one makes an array of the operation.
+const OPERATORS = new Set(["+", "-", "*", "/", "^", "&", "=", "<", ">", "%"])
+
+// Whether a formula may give an array as Excel's dynamic arrays calculate it: it calls a function returning one, is a
+// range alone, or takes a range into an operation (A1:A9*2). A range given to a function's argument is read by the
+// function (SUM) and gives no array.
+export function mayReturnArray(formula: string): boolean {
+	if (CALLS_ARRAY_RESULT.test(formula) || rangeAlone(formula)) return true
+	if (!formula.includes(":")) return false
+
+	const parts = formulaParts(formula)
+
+	return parts.some((part, index) => {
+		if (typeof part === "string" || part.ref.external || part.ref.area === null) return false
+
+		const area = part.ref.area
+
+		if (!area.range && area.kind === "cell") return false
+
+		const before = parts[index - 1]
+		const after = parts[index + 1]
+		const left = typeof before === "string" ? before.trimEnd().at(-1) : undefined
+		const right = typeof after === "string" ? after.trimStart()[0] : undefined
+
+		return (left !== undefined && OPERATORS.has(left)) || (right !== undefined && OPERATORS.has(right))
+	})
 }
 
 // Whether the formula is one reference to more than one cell, and nothing else.
@@ -1716,14 +2269,26 @@ function resizedArea(range: RefArea, sum: RefArea): RefArea | null {
 // unions, structured and external references) fails to parse there, and the caller keeps the file's own
 // result. A defined name in `aliases` (upper case) is spelled as its alias: the engine reads some names Excel
 // takes (CustomCost1, R2D2) as references.
-export function engineFormula(formula: string, aliases?: ReadonlyMap<string, string>): string {
+export function engineFormula(source: string, aliases?: ReadonlyMap<string, string>, lambdas?: ReadonlySet<string>): string {
+	const formula = /_xlfn\._TRO_/i.test(source) ? engineTrimReferences(source) : source
 	let text = ""
 	let braces = 0
 	let index = 0
 	// Per open parenthesis: whether it opened a call wrapped in ARRAYFORMULA, which closes with it, and for a call
 	// taking criteria, which argument is being written and whether it is wrapped in CRITERION_FUNCTION.
-	const opened: { wrap: boolean; criteria: ((index: number) => boolean) | null; arg: number; braces: number; criterion: boolean }[] = []
+	const opened: {
+		wrap: boolean
+		criteria: ((index: number) => boolean) | null
+		arg: number
+		braces: number
+		criterion: boolean
+		// Where a LAMBDA call's text starts, should it be called in place (LAMBDA(x,x)(1)).
+		lambda: number
+	}[] = []
 	let wrapNext = false
+	// The next "(" opens the values of a LAMBDA called through CALL_FUNCTION, which has opened already.
+	let callNext = false
+	let lambdaNext = -1
 	let criteriaNext: ((index: number) => boolean) | null = null
 
 	while (index < formula.length) {
@@ -1765,11 +2330,18 @@ export function engineFormula(formula: string, aliases?: ReadonlyMap<string, str
 			// A number starts with a digit or a point; only those are read for an exponent.
 			const numeric = (code >= 48 && code <= 57) || code === 46
 
-			if (next === 40) {
-				const name = code === 95 ? bareFunctionName(word) : word
+			if (next === 40 && (isParameter(word) || lambdas?.has(word.toUpperCase()) === true)) {
+				// A call of a LET or LAMBDA name (_xlpm.f(1)) or of a defined name holding a LAMBDA (MyFn(1)), which the
+				// engine reads as an unknown function.
+				text += `${CALL_FUNCTION}(${isParameter(word) ? word : (aliases?.get(word.toUpperCase()) ?? word)}`
+				callNext = true
+			} else if (next === 40) {
+				const bare = code === 95 ? bareFunctionName(word) : word
+				const name = ENGINE_SPELLED.get(bare.toUpperCase()) ?? bare
 
 				wrapNext = ARRAY_ARGUMENTS.has(name.toUpperCase())
 				criteriaNext = CRITERIA.get(name.toUpperCase()) ?? null
+				lambdaNext = name.toUpperCase() === "LAMBDA" ? text.length : -1
 				text += wrapNext ? `ARRAYFORMULA(${name}` : name
 			} else if (numeric && (next === 43 || next === 45) && /^(\d+\.?\d*|\.\d+)E$/i.test(word)) {
 				text += `${word.slice(0, -1)}e`
@@ -1800,13 +2372,17 @@ export function engineFormula(formula: string, aliases?: ReadonlyMap<string, str
 				frame.criterion = false
 			}
 
-			text += formula[index] ?? ""
+			// The values of a LAMBDA called follow the LAMBDA as CALL_FUNCTION's next arguments.
+			if (code === 40 && callNext) text += nextCode(formula, index + 1) === 41 ? "" : ","
+			else text += formula[index] ?? ""
 
 			if (code === 40) {
 				const criteria = criteriaNext
 				const criterion = criteria?.(0) === true
 
-				opened.push({ wrap: wrapNext, criteria, arg: 0, braces, criterion })
+				opened.push({ wrap: wrapNext, criteria, arg: 0, braces, criterion, lambda: callNext ? -1 : lambdaNext })
+				callNext = false
+				lambdaNext = -1
 
 				if (criterion) text += `${CRITERION_FUNCTION}(`
 
@@ -1817,8 +2393,16 @@ export function engineFormula(formula: string, aliases?: ReadonlyMap<string, str
 				frame.criterion = frame.criteria(frame.arg)
 
 				if (frame.criterion) text += `${CRITERION_FUNCTION}(`
-			} else if (code === 41 && opened.pop()?.wrap === true) {
-				text += ")"
+			} else if (code === 41) {
+				const closed = opened.pop()
+
+				if (closed?.wrap === true) text += ")"
+
+				// A LAMBDA called in place: LAMBDA(x,x)(1) is CALL_FUNCTION(LAMBDA(x,x),1).
+				if (closed !== undefined && closed.lambda >= 0 && nextCode(formula, index + 1) === 40) {
+					text = `${text.slice(0, closed.lambda)}${CALL_FUNCTION}(${text.slice(closed.lambda)}`
+					callNext = true
+				}
 			}
 
 			index++

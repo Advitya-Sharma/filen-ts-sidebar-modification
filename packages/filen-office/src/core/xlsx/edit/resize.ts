@@ -74,7 +74,7 @@ export async function resizeAxis(
 		for (let i = 0; i < indices.length; i++) {
 			const col = indices[i] ?? 0
 			const px = sizes[i] ?? Number.NaN
-			const width = Number.isNaN(px) ? Number.NaN : pxToColWidth(clampSize("cols", px))
+			const width = Number.isNaN(px) ? Number.NaN : pxToColWidth(clampSize("cols", px), document.digitPx)
 
 			if (!sameHeight(widthOf(cols, col), width)) cols = withWidth(cols, col, width)
 		}

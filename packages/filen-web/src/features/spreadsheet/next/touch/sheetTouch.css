@@ -1,0 +1,4 @@
+/* The grid's context menu opened from the touch menu's ⋯ (useSheetTouch.tsx): finger-sized items, its submenus too. */
+:root[data-sheet-touch-menu] :is([data-slot="context-menu-content"], [data-slot="context-menu-sub-content"]) [role^="menuitem"] {
+	min-height: 44px;
+}

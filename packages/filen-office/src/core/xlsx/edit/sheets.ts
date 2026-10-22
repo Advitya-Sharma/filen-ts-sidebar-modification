@@ -117,18 +117,18 @@ function changedNames(document: XlsxDocument, before: readonly XlsxDefinedName[]
 }
 
 // After the engine's sheets changed (a sheet deleted or added, formulas rewritten): it is built again, and the
-// formulas the plan rewrote and those naming a changed name are recalculated (logged); with nothing rewritten the
-// next edit builds it.
+// formulas the plan rewrote, those naming a changed name and those calling INDIRECT (whose sheet names may name
+// another sheet now) are recalculated (logged); with none of them the next edit builds it.
 function rebuildEngine(document: XlsxDocument, plan: RefPlan, names: ReadonlySet<string>, log: CellLog, changes: SheetChangeSink): void {
+	const cells = document.indirectCells()
+
 	document.dropEngine()
 
-	if ((plan.formulaCells.size === 0 && names.size === 0) || !document.hasFormulas || !document.allReady) return
+	if ((plan.formulaCells.size === 0 && names.size === 0 && cells.size === 0) || !document.hasFormulas || !document.allReady) return
 
 	document.buildEngine(changes)
 
-	const cells = new Map<SheetId, { row: number; col: number }[]>()
-
-	for (const [sheet] of plan.formulaCells) cells.set(sheet, planCellsOf(plan, sheet))
+	for (const [sheet] of plan.formulaCells) cells.set(sheet, [...(cells.get(sheet) ?? []), ...planCellsOf(plan, sheet)])
 
 	if (names.size > 0) {
 		for (const entry of document.workbook.sheets) {

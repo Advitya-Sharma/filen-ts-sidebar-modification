@@ -2,7 +2,7 @@ import { shadeRaster, type DrawingImage, type Paint } from "../../../core/drawin
 import { encodePng } from "../../../core/metafile/dib"
 import type { DocxObjectData, DocxSessionApi } from "../../../dom/docx/protocol"
 import type { DocxMediaCache } from "../media"
-import { drawingImages, imageMime, paintDrawing } from "./drawing"
+import { drawingImages, imageMime, inlineImageUrls, paintDrawing } from "./drawing"
 import { paintMath } from "./math"
 import type { PaintedObject } from "./page"
 
@@ -219,21 +219,6 @@ interface Holder {
 	readonly shader: Shader
 }
 
-// Raster formats a drawing may carry inline (bitmaps of a metafile); anything else is not shown.
-function inlineMime(image: DrawingImage): string | undefined {
-	if (!(image.bytes instanceof Uint8Array) || image.partName !== undefined) return undefined
-
-	switch (image.format) {
-		case "png":
-		case "jpeg":
-		case "gif":
-		case "bmp":
-			return imageMime(image)
-		default:
-			return undefined
-	}
-}
-
 async function paintDrawingObject(
 	object: PaintedObject,
 	data: Extract<DocxObjectData, { kind: "drawing" }>,
@@ -263,28 +248,11 @@ async function paintDrawingObject(
 
 	if (options.signal.aborted) return
 
-	const inline = new Map<DrawingImage, string>()
-	// One URL per encoded bitmap: entries that differ only in crop or effects share their bytes.
-	const byBytes = new Map<Uint8Array, string>()
+	const inline = inlineImageUrls(data.drawing, (bytes, type) => {
+		const created = options.media.createBytesUrl(bytes, type)
 
-	for (const image of Array.isArray(data.drawing.images) ? data.drawing.images : []) {
-		const type = image === null || typeof image !== "object" ? undefined : inlineMime(image)
-
-		if (type === undefined || image.bytes === undefined || inline.has(image)) continue
-
-		let url = byBytes.get(image.bytes)
-
-		if (url === undefined) {
-			const created = options.media.createBytesUrl(image.bytes, type)
-
-			if (created === undefined || !holder.holdUrl(created)) continue
-
-			url = created
-			byBytes.set(image.bytes, url)
-		}
-
-		inline.set(image, url)
-	}
+		return created !== undefined && holder.holdUrl(created) ? created : undefined
+	})
 
 	const svg = paintDrawing(data.drawing, {
 		document: options.document,

@@ -11,6 +11,8 @@ import {
 } from "@filen/office/core/sheet"
 import {
 	SheetGrid,
+	cellsEditable,
+	celllessSheet,
 	createSheetGrid,
 	editingChanged,
 	useSheetGrid,
@@ -19,6 +21,7 @@ import {
 	wholeAxis,
 	type SheetShortcut
 } from "@filen/office/react/sheet"
+import { paneAfter } from "@/features/spreadsheet/next/components/sheetPanes"
 import "@filen/office/css/sheet.css"
 import "@/features/spreadsheet/next/sheetTheme.css"
 import { Button } from "@/components/ui/button"
@@ -45,6 +48,8 @@ import { SheetModifyPassword } from "@/features/spreadsheet/next/menus/modifyPas
 import { SheetTabs } from "@/features/spreadsheet/next/tabs/sheetTabs"
 import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
 import { isTextSheetKind } from "@/features/spreadsheet/next/lib/sheetHosts"
+import { isLegacySheetKind } from "@/features/spreadsheet/next/lib/sheetKind"
+import { saveAsXlsxBodyKey } from "@/features/spreadsheet/next/save/sheetSaveAs"
 import { readOnlyNoteKey, refusalKey } from "@/features/spreadsheet/next/lib/sheetMessages.logic"
 import { SheetToolbar } from "@/features/spreadsheet/next/toolbar/sheetToolbar"
 import { borderShortcut, setFormatCellsOpen } from "@/features/spreadsheet/next/toolbar/formatCellsState"
@@ -52,10 +57,15 @@ import { downloadSheetCsv } from "@/features/spreadsheet/next/save/sheetCsv"
 import { SheetFileMenu } from "@/features/spreadsheet/next/save/sheetFileMenu"
 import { useSheetAutosave } from "@/features/spreadsheet/next/save/useSheetAutosave"
 import { useSheetFill } from "@/features/spreadsheet/next/fill/useSheetFill"
+import { useShortcutRequests } from "@/features/spreadsheet/next/objects/insertRequests"
+import { useSheetObjects } from "@/features/spreadsheet/next/objects/useSheetObjects"
+import { useSheetCharts } from "@/features/spreadsheet/next/charts/useSheetCharts"
 import { useSheetAnnotations } from "@/features/spreadsheet/next/comments/useSheetAnnotations"
 import { useSheetSortFilter } from "@/features/spreadsheet/next/data/filterExtension"
 import { useSheetConditional } from "@/features/spreadsheet/next/data/cfExtension"
 import { useSheetFormula } from "@/features/spreadsheet/next/formulaBar/useSheetFormula"
+import { useSheetTouch } from "@/features/spreadsheet/next/touch/useSheetTouch"
+import { useSheetPrint } from "@/features/spreadsheet/next/print/useSheetPrint"
 import { resolveTheme, useTheme } from "@/providers/themeProvider"
 import { log } from "@/lib/log"
 
@@ -84,6 +94,9 @@ export interface SheetBodyProps {
 	// Idle autosave asks the overlay to save; true when a save started.
 	onAutosave: (() => boolean) | undefined
 }
+
+// The features whose menu groups are about a chartsheet's chart (the others' are about cells, which it has none of).
+const CHARTSHEET_MENU_GROUPS: ReadonlySet<string> = new Set(["objects", "charts"])
 
 // An open session as a grid, with the formula bar, the formatting toolbar, the sheet tabs and the grid's menu. The
 // session holds the cells; the grid's model (react/sheet) holds what is on show and talks to the session.
@@ -142,7 +155,11 @@ export function SheetBody({
 	const noteKey = readOnlyNoteKey({ editable, readOnlyReason, unnamed, renamed, writability: grid.writability, kind })
 	const entryChanged = grid.editing !== null && editingChanged(grid.editing)
 	const dirty = grid.state.dirty || entryChanged
-	const sheetName = grid.sheets.find(sheet => sheet.id === grid.sheet)?.name ?? ""
+	const shown = grid.sheets.find(sheet => sheet.id === grid.sheet)
+	const sheetName = shown?.name ?? ""
+	// A chartsheet or dialog sheet has no cells; a macro sheet's are shown, not edited (the session refuses both).
+	const cellless = celllessSheet(grid)
+	const cellsWritable = canEdit && cellsEditable(grid)
 
 	useEffect(
 		() =>
@@ -201,7 +218,7 @@ export function SheetBody({
 		onAutosave
 	})
 
-	useSheetClipboard({
+	const clipboard = useSheetClipboard({
 		model,
 		container: containerRef,
 		canEdit,
@@ -285,14 +302,38 @@ export function SheetBody({
 		}
 	})
 
-	const annotations = useSheetAnnotations({ grid, gridRef, handle, canEdit, text })
-	const sortFilter = useSheetSortFilter({ grid, gridRef, handle, canEdit, text, run })
-	const conditional = useSheetConditional({ grid, model, gridRef, session: handle.session, canEdit, text, run })
-	const formula = useSheetFormula({ grid, gridRef, handle, canEdit, run })
-	const fill = useSheetFill({ grid, canEdit, run })
+	const annotations = useSheetAnnotations({ grid, gridRef, handle, canEdit: cellsWritable, text })
+	const sortFilter = useSheetSortFilter({ grid, gridRef, handle, canEdit: cellsWritable, text, run })
+	const conditional = useSheetConditional({ grid, model, gridRef, session: handle.session, canEdit: cellsWritable, text, run })
+	const formula = useSheetFormula({ grid, gridRef, handle, canEdit: cellsWritable, run })
+	const fill = useSheetFill({ grid, canEdit: cellsWritable, run })
+	const touch = useSheetTouch({ grid, gridRef, canEdit: cellsWritable, clipboard })
+	const print = useSheetPrint({ grid, model, kind, name: alt, canEdit, run })
+	const charts = useSheetCharts({ grid, gridRef, handle, canEdit, text })
+	// Pictures, shapes and chart frames: their overlay goes first, under the other features' cards and popovers.
+	const objects = useSheetObjects({
+		grid,
+		gridRef,
+		handle,
+		canEdit,
+		text,
+		renderChart: charts.renderChart,
+		onEditObject: charts.onEditObject
+	})
 	// Features' parts of the view (sheetExtension.ts), in this order: their grid layers, overlays, menu groups,
-	// dialogs and shortcuts (the first to take a pointer press or a shortcut has it).
-	const extensions: readonly SheetBodyExtension[] = [annotations, sortFilter, conditional, formula, fill]
+	// dialogs and shortcuts (the first to take a pointer press or a shortcut has it). The touch menu is the last
+	// overlay.
+	const extensions: readonly SheetBodyExtension[] = [
+		objects,
+		charts.extension,
+		annotations,
+		sortFilter,
+		conditional,
+		formula,
+		fill,
+		{ id: "touch", overlay: touch.overlay },
+		print.extension
+	]
 
 	// The grid's shortcuts only this view can do (react/sheet/keys.ts): Find and Replace (Mod+F, Mod+H, Shift+F4),
 	// a new sheet (Shift+F11) and the insert and delete dialogs for cells; the features' own first. The rest the grid
@@ -320,20 +361,20 @@ export function SheetBody({
 					return false
 				}
 
-				if (canEdit) {
+				if (cellsWritable) {
 					setAxisAsked(shortcut === "insertCells" ? "insert" : "delete")
 				}
 
 				return true
 			case "formatCells":
-				if (canEdit && !text) {
+				if (cellsWritable && !text) {
 					setFormatCellsOpen(model, true)
 				}
 
 				return true
 			case "borderOutline":
 			case "borderNone":
-				if (canEdit && !text) {
+				if (cellsWritable && !text) {
 					run(borderShortcut(shortcut, grid.sheet, grid.selection.ranges))
 				}
 
@@ -350,140 +391,227 @@ export function SheetBody({
 				}
 
 				return true
+			// F6 and Shift+F6: the pane after the sheet (the chart editor when open) or before it, as Excel moves between
+			// the worksheet and its panes.
+			case "nextPane":
+			case "previousPane": {
+				const root = containerRef.current
+				const cells = root?.querySelector(".fo-sheet-scroller") ?? null
+				const target = root === null || cells === null ? null : paneAfter(root, cells, shortcut === "nextPane")
+
+				target?.focus()
+
+				return target !== null
+			}
+			// Shift+F10: the grid's menu, at the active cell.
+			case "contextMenu": {
+				const cells = containerRef.current?.querySelector(".fo-sheet-scroller")
+				const active = grid.selection.active
+
+				gridRef.current?.reveal(active)
+
+				const box = gridRef.current?.clientRect(active)
+
+				if (cells === null || cells === undefined || box === null || box === undefined) {
+					return false
+				}
+
+				cells.dispatchEvent(
+					new MouseEvent("contextmenu", {
+						bubbles: true,
+						cancelable: true,
+						clientX: box.left + Math.min(box.width / 2, 16),
+						clientY: box.top + Math.min(box.height / 2, 12)
+					})
+				)
+
+				return true
+			}
 			// Not taken here: the key goes on to the preview's own Save (preview.save, Mod+S), the one save path, which
 			// commits an open entry first and keeps the browser's Save Page As away whether or not there is a save.
 			case "save":
 				return false
 			// Hide and unhide rows and columns (Ctrl+9, Ctrl+0, Ctrl+Shift+9, Ctrl+Shift+0); a text file has none.
 			default:
-				return structureShortcut(grid, shortcut, canEdit && !text)
+				return structureShortcut(grid, shortcut, cellsWritable && !text)
 		}
 	}
+
+	// The toolbar's Insert menu asks for a link or a note as Ctrl/Cmd+K and Shift+F2 do.
+	useShortcutRequests(model, handleShortcut)
 
 	return (
 		<div
 			ref={containerRef}
 			data-preview-surface
 			className="flex size-full flex-col"
+			// F6 and Shift+F6 from anywhere in the view (the cells take theirs as shortcuts): the next or previous pane.
+			onKeyDown={event => {
+				if (event.key !== "F6" || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
+					return
+				}
+
+				const target = paneAfter(event.currentTarget, event.target as Element, !event.shiftKey)
+
+				if (target !== null) {
+					event.preventDefault()
+					target.focus()
+				}
+			}}
 		>
 			{toolbarShown ? (
-				<SheetToolbar
-					grid={grid}
-					disabled={!canEdit}
-					formats={!text}
-					onFormat={format}
-				/>
+				<div
+					data-sheet-pane="toolbar"
+					className="contents"
+				>
+					<SheetToolbar
+						grid={grid}
+						disabled={!canEdit}
+						formats={!text}
+						onFormat={format}
+					/>
+				</div>
 			) : null}
 			<SheetFindBar
 				grid={grid}
 				gridRef={gridRef}
 				canEdit={canEdit}
 			/>
-			<SheetFormulaBar
-				grid={grid}
-				gridRef={gridRef}
-				canEdit={canEdit}
-				formula={formula}
+			<div
+				data-sheet-pane="formula"
+				className="contents"
 			>
-				{grid.failed !== null ? (
-					<span
-						role="alert"
-						className="max-w-1/2 shrink truncate text-xs text-destructive"
-					>
-						{t("previewSheetFailed")}
-					</span>
-				) : grid.editing?.invalid === true ? (
-					<span
-						role="alert"
-						className="max-w-1/2 shrink truncate text-xs text-destructive"
-					>
-						{t("previewSpreadsheetFormulaInvalid")}
-					</span>
-				) : noteKey === null ? null : (
-					<span
-						role="status"
-						title={t(noteKey)}
-						className="max-w-1/2 shrink truncate text-xs text-muted-foreground"
-					>
-						{t(noteKey)}
-					</span>
-				)}
-				{editAnyway !== undefined && editable && !unnamed && !renamed && !neverEditable ? (
-					<Button
-						variant="outline"
-						size="xs"
-						className="shrink-0"
-						onClick={editAnyway}
-					>
-						{t("previewSheetEditAnyway")}
-					</Button>
-				) : null}
-				{modifyLocked !== undefined && editable && !unnamed && !renamed && !neverEditable ? (
-					<SheetModifyPassword
-						session={handle.session}
-						name={alt}
-						onUnlock={modifyLocked}
-					/>
-				) : null}
-				{handle.info.encrypted === undefined ? null : (
-					<PasswordBadge
-						integrity={handle.info.encrypted}
-						saving={canEdit}
-					/>
-				)}
-				{/* A legacy workbook is only ever edited as its .xlsx: the way there is in plain sight. */}
-				{onSaveAsXlsx === undefined || kind !== "xls" ? null : (
-					<Button
-						variant="outline"
-						size="xs"
-						className="shrink-0"
-						onClick={() => {
-							setXlsxAsked(true)
-						}}
-					>
-						{t("previewSpreadsheetSaveAsXlsx")}
-					</Button>
-				)}
-				<SheetFileMenu
-					text={text}
-					onDownloadCsv={downloadCsv}
-					onSaveAsXlsx={
-						onSaveAsXlsx === undefined
-							? undefined
-							: () => {
-									setXlsxAsked(true)
-								}
-					}
-					autosave={canEdit && onAutosave !== undefined}
-				/>
-			</SheetFormulaBar>
-			<SheetGridMenu
-				grid={grid}
-				canEdit={canEdit}
-				run={run}
-				text={text}
-				items={menuGroups(extensions)}
-				{...(text && { localPane: layerKey })}
-			>
-				<SheetGrid
-					ref={gridRef}
-					grid={model}
-					className="min-h-0 flex-1"
-					label={sheetName === "" ? alt : `${alt} – ${sheetName}`}
-					editorLabel={t("previewSheetCellEditor")}
-					sizes={sizes}
-					themeKey={resolveTheme(theme)}
-					resizeLabel={(axis, px) =>
-						t(axis === "cols" ? "previewSpreadsheetWidthPx" : "previewSpreadsheetHeightPx", { size: px })
-					}
-					onShortcut={handleShortcut}
-					extensions={gridExtensions(extensions)}
+				<SheetFormulaBar
+					grid={grid}
+					gridRef={gridRef}
+					canEdit={cellsWritable}
+					formula={formula}
 				>
-					{extensions.some(extension => extension.overlay !== undefined)
-						? extensions.map(extension => <Fragment key={extension.id}>{extension.overlay}</Fragment>)
-						: undefined}
-				</SheetGrid>
-			</SheetGridMenu>
+					{grid.failed !== null ? (
+						<span
+							role="alert"
+							className="max-w-1/2 shrink truncate text-xs text-destructive"
+						>
+							{t("previewSheetFailed")}
+						</span>
+					) : grid.editing?.invalid === true ? (
+						<span
+							role="alert"
+							className="max-w-1/2 shrink truncate text-xs text-destructive"
+						>
+							{t("previewSpreadsheetFormulaInvalid")}
+						</span>
+					) : noteKey === null ? null : (
+						<span
+							role="status"
+							title={t(noteKey)}
+							className="max-w-1/2 shrink truncate text-xs text-muted-foreground"
+						>
+							{t(noteKey)}
+						</span>
+					)}
+					{editAnyway !== undefined && editable && !unnamed && !renamed && !neverEditable ? (
+						<Button
+							variant="outline"
+							size="xs"
+							className="shrink-0"
+							onClick={editAnyway}
+						>
+							{t("previewSheetEditAnyway")}
+						</Button>
+					) : null}
+					{modifyLocked !== undefined && editable && !unnamed && !renamed && !neverEditable ? (
+						<SheetModifyPassword
+							session={handle.session}
+							name={alt}
+							onUnlock={modifyLocked}
+						/>
+					) : null}
+					{handle.info.encrypted === undefined ? null : (
+						<PasswordBadge
+							integrity={handle.info.encrypted}
+							saving={canEdit}
+						/>
+					)}
+					{/* A legacy workbook is only ever edited as its .xlsx: the way there is in plain sight. */}
+					{onSaveAsXlsx === undefined || !isLegacySheetKind(kind) ? null : (
+						<Button
+							variant="outline"
+							size="xs"
+							className="shrink-0"
+							onClick={() => {
+								setXlsxAsked(true)
+							}}
+						>
+							{t("previewSpreadsheetSaveAsXlsx")}
+						</Button>
+					)}
+					<SheetFileMenu
+						text={text}
+						onDownloadCsv={downloadCsv}
+						onPrint={print.open}
+						onSaveAsXlsx={
+							onSaveAsXlsx === undefined
+								? undefined
+								: () => {
+										setXlsxAsked(true)
+									}
+						}
+						autosave={canEdit && onAutosave !== undefined}
+					/>
+				</SheetFormulaBar>
+			</div>
+			{/* The chart editor's side panel takes a column at the right; on a narrow screen it covers the grid's lower part. */}
+			<div className="relative flex min-h-0 flex-1">
+				<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+					<SheetGridMenu
+						grid={grid}
+						canEdit={cellsWritable}
+						run={run}
+						text={text}
+						items={menuGroups(cellless ? extensions.filter(extension => CHARTSHEET_MENU_GROUPS.has(extension.id)) : extensions)}
+						onOpenChange={touch.onGridMenu}
+						{...(text && { localPane: layerKey })}
+					>
+						{/* A finger's long press is the grid's own touch menu, not this menu's. */}
+						<div
+							data-sheet-pane="grid"
+							className="flex min-h-0 flex-1 flex-col"
+							{...touch.wrapper}
+						>
+							<SheetGrid
+								ref={gridRef}
+								grid={model}
+								className="min-h-0 flex-1"
+								label={sheetName === "" ? alt : `${alt} – ${sheetName}`}
+								editorLabel={t("previewSheetCellEditor")}
+								sizes={sizes}
+								themeKey={resolveTheme(theme)}
+								resizeLabel={(axis, px) =>
+									t(axis === "cols" ? "previewSpreadsheetWidthPx" : "previewSpreadsheetHeightPx", { size: px })
+								}
+								describeCell={(cell, value) => (value === "" ? cell : t("previewSheetActiveCell", { cell, text: value }))}
+								describeSelection={range => t("previewSheetRangeSelected", { range })}
+								onTouchMenu={touch.onTouchMenu}
+								onShortcut={handleShortcut}
+								extensions={gridExtensions(extensions)}
+							>
+								{extensions.map(extension => (
+									<Fragment key={extension.id}>{extension.overlay}</Fragment>
+								))}
+							</SheetGrid>
+						</div>
+					</SheetGridMenu>
+				</div>
+				{charts.panel === null ? null : (
+					<div
+						data-sheet-pane="panel"
+						className="border-border max-sm:absolute max-sm:inset-x-0 max-sm:bottom-0 max-sm:z-20 max-sm:h-[55%] max-sm:border-t sm:w-80 sm:shrink-0 sm:border-l"
+					>
+						{charts.panel}
+					</div>
+				)}
+			</div>
 			{extensions.map(extension => (
 				<Fragment key={extension.id}>{extension.dialogs}</Fragment>
 			))}
@@ -497,18 +625,23 @@ export function SheetBody({
 				}}
 			/>
 			{text ? null : (
-				<SheetTabs
-					grid={grid}
-					canEdit={canEdit}
-					run={run}
-				/>
+				<div
+					data-sheet-pane="tabs"
+					className="contents"
+				>
+					<SheetTabs
+						grid={grid}
+						canEdit={canEdit}
+						run={run}
+					/>
+				</div>
 			)}
 			{onSaveAsXlsx === undefined ? null : (
 				<ConfirmDialog
 					open={xlsxAsked}
 					pending={xlsxSaving}
 					title={t("previewSpreadsheetSaveAsXlsxTitle")}
-					body={t(text ? "previewSheetSaveAsXlsxTextBody" : "previewSpreadsheetSaveAsXlsxBody")}
+					body={t(saveAsXlsxBodyKey(kind))}
 					confirmLabel={t("previewSpreadsheetSaveAsXlsx")}
 					cancelLabel={t("common:cancel")}
 					onOpenChange={setXlsxAsked}

@@ -43,11 +43,22 @@ import {
 	type SheetGridExtension
 } from "./layers"
 import { fillDownTo, fillHandleShown, fillLeft, fillTarget, sameRange } from "./fill"
-import { canEditSnapshot, type GridResizeDraft, type SheetGridModel, type SheetGridSizes } from "./model"
+import { canEditSnapshot, celllessSheet, type GridResizeDraft, type SheetGridModel, type SheetGridSizes } from "./model"
 import { keyMove, stepFrom } from "./navigation"
 import { GridRenderer, type GridHit } from "./renderer"
 import { addSelection, axisSelection, cellSelection, extendSelection, wholeAxis, type GridPoint, type GridSelection } from "./selection"
 import { entryInput, entryText } from "./tiles"
+import {
+	DOUBLE_TAP_MS,
+	LONG_PRESS_MS,
+	dragStartHandle,
+	isDoubleTap,
+	isSoleCell,
+	isTap,
+	stillPressed,
+	type TouchPress,
+	type TouchTap
+} from "./touch/gestures"
 
 // The grid: canvases drawn by GridRenderer under a scroller that holds only an empty extent, so no cell is a
 // React component or a DOM node. React renders what changes with the selection or the entry: the in-cell editor
@@ -70,6 +81,11 @@ export interface SheetGridHandle {
 	// Called after every frame drawn (a scroll, a zoom, a sheet switch): overlays re-place themselves from cellRect
 	// without a React render.
 	onFrame(listener: () => void): () => void
+	// Opens the active cell's entry from a control's press (a touch menu's Edit): the soft keyboard comes up, as the
+	// grid's hidden input takes focus within the press before the entry does. False when it cannot be edited.
+	editActive(): boolean
+	// What of a range is on screen, as cellRect gives a cell's (a menu's anchor); null when none of it is.
+	rangeRect(range: SheetRange): GridRect | null
 	// The renderer's frame costs while `measure` is on (perf harness).
 	readonly renderer: GridRenderer
 }
@@ -81,6 +97,12 @@ export interface SheetGridProps {
 	readonly className?: string
 	// What the live region says for the active cell; "<name> <text>" without it.
 	readonly describeCell?: (name: string, text: string) => string
+	// What it adds for a selection of more than one cell (its last range, as "A1:C3"); the range alone without it.
+	readonly describeSelection?: (range: string) => string
+	// The touch menu (Cut, Copy, Paste, Select all, Edit) is asked for (true: a long press, a tap on the cell that
+	// is the selection, a touch handle let go) or should go (false: a press or key elsewhere, an entry opening). It
+	// is about the selection at the time it is asked for; the app places it with rangeRect.
+	readonly onTouchMenu?: (shown: boolean) => void
 	// A resize's size tip; none without it.
 	readonly resizeLabel?: (axis: SheetAxis, px: number) => string
 	// Sees every grid key first: true takes it (clipboard, shortcuts the app owns).
@@ -134,18 +156,22 @@ interface FillDrag {
 	at: GridPoint
 }
 
-interface Tap {
+// A finger on the cells: its long press is timed while it stays put.
+interface Press extends TouchPress {
+	timer: ReturnType<typeof setTimeout> | null
+	// The long press fired: the release is no tap.
+	held: boolean
+}
+
+// A touch handle being dragged: the range it started from.
+interface HandleDrag {
 	readonly pointerId: number
-	readonly x: number
-	readonly y: number
-	readonly time: number
+	readonly range: SheetRange
+	at: GridPoint
 }
 
 // How near a header edge a pointer resizes, in pixels.
 const EDGE_SLOP = 4
-// A touch that moved less than this, quicker than TAP_MS, is a tap.
-const TAP_SLOP = 10
-const TAP_MS = 500
 // Selection drag past the edge scrolls this share of the overshoot per frame.
 const AUTOSCROLL_RATE = 0.4
 
@@ -165,6 +191,9 @@ const FORMAT_SHORTCUTS: ReadonlySet<SheetShortcut> = new Set<SheetShortcut>([
 	"formatNumber"
 ])
 
+// The shortcuts a chartsheet (no cells) keeps: the workbook's, not a cell's.
+const CELLLESS_SHORTCUTS: ReadonlySet<SheetShortcut> = new Set<SheetShortcut>(["save", "print", "newSheet", "nextSheet", "previousSheet"])
+
 // Cells a move on a protected sheet passes over looking for one it may select.
 const MAX_PROTECTED_STEPS = 1024
 
@@ -178,6 +207,18 @@ function defaultDescription(name: string, text: string): string {
 	return text === "" ? name : `${name} ${text}`
 }
 
+// What the live region says of a selection beyond its active cell: its last range, once it holds more than one cell.
+function selectionPhrase(selection: GridSelection, describeSelection: ((range: string) => string) | undefined): string | null {
+	const lastRange = selection.ranges[selection.ranges.length - 1]
+	const many =
+		lastRange !== undefined &&
+		(selection.ranges.length > 1 || lastRange.endRow > lastRange.startRow || lastRange.endCol > lastRange.startCol)
+
+	if (lastRange === undefined || !many) return null
+
+	return describeSelection === undefined ? rangeName(lastRange) : describeSelection(rangeName(lastRange))
+}
+
 interface CellEditorProps {
 	readonly id: string
 	readonly label: string
@@ -189,6 +230,14 @@ interface CellEditorProps {
 	readonly onText: (text: string) => void
 	readonly onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void
 	readonly onBlur: (event: FocusEvent<HTMLTextAreaElement>) => void
+}
+
+function inRange(range: SheetRange, row: number, col: number): boolean {
+	return row >= range.startRow && row <= range.endRow && col >= range.startCol && col <= range.endCol
+}
+
+function rangeName(range: SheetRange): string {
+	return `${cellName(range.startRow, range.startCol)}:${cellName(range.endRow, range.endCol)}`
 }
 
 // The in-cell editor. It exists only while an entry is typed, and takes focus as it appears (in the same task, so
@@ -271,6 +320,8 @@ export function SheetGrid({
 	editorLabel,
 	className,
 	describeCell,
+	describeSelection,
+	onTouchMenu,
 	resizeLabel,
 	onKey,
 	onEditorKey,
@@ -285,6 +336,8 @@ export function SheetGrid({
 }: SheetGridProps) {
 	const snapshot = useSyncExternalStore(grid.subscribe, grid.getSnapshot, grid.getSnapshot)
 	const [owned, setOwned] = useState(() => ({ grid, renderer: new GridRenderer(grid) }))
+	// The live region's selection phrase while a pointer drags the selection (undefined: no drag).
+	const [heldPhrase, setHeldPhrase] = useState<string | null | undefined>(undefined)
 	let current = owned
 
 	// A new model replaces the renderer during render; the old one detaches with its effect.
@@ -305,7 +358,16 @@ export function SheetGrid({
 	const fillRef = useRef<FillDrag | null>(null)
 	const dragRef = useRef<Drag | null>(null)
 	const resizeRef = useRef<Resize | null>(null)
-	const tapRef = useRef<Tap | null>(null)
+	const pressRef = useRef<Press | null>(null)
+	const lastTapRef = useRef<TouchTap | null>(null)
+	// A tap on the cell that is the selection asks for the menu once no second tap made it a double tap.
+	const menuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+	// The selection was last made by touch: it shows the start handle.
+	const touchModeRef = useRef(false)
+	const lastPointerRef = useRef<string>("")
+	const startHandleRef = useRef<HTMLDivElement>(null)
+	const handleDragRef = useRef<HandleDrag | null>(null)
+	const sinkRef = useRef<HTMLInputElement>(null)
 	const autoscrollRef = useRef<{ frame: number; x: number; y: number } | null>(null)
 	// A press an extension took, and the cell its pointer was last on.
 	const takenRef = useRef<{ pointerId: number; drag: SheetCellDrag; row: number; col: number } | null>(null)
@@ -320,7 +382,13 @@ export function SheetGrid({
 	// (before onChange reads it) would put back the text it held.
 	const backdrop = editing === null ? null : editorBackdrop(extensions, editing.text)
 	const describe = describeCell ?? defaultDescription
-	const liveText = describe(cellName(selection.active.row, selection.active.col), active.text)
+	const cellText = describe(cellName(selection.active.row, selection.active.col), active.text)
+	// While a pointer drags the selection wider, the range said is the one it started from: the range it settles on
+	// is said once, when the pointer lets go (a drag would say every range it passes through).
+	const phrase = heldPhrase === undefined ? selectionPhrase(selection, describeSelection) : heldPhrase
+	// A chartsheet has no active cell to say.
+	const cellless = celllessSheet(snapshot)
+	const liveText = cellless ? "" : phrase === null ? cellText : `${cellText}, ${phrase}`
 	const readOnly = !canEditSnapshot(snapshot)
 	const onMac = mac ?? isMacPlatform()
 
@@ -334,7 +402,9 @@ export function SheetGrid({
 		const fill = fillRef.current
 		const range = fill?.source ?? fillHandleShown(snapshot.selection.ranges)
 		const corner =
-			range === null || (fill === null && (snapshot.editing !== null || !canEditSnapshot(snapshot))) ? null : renderer.cornerOf(range)
+			range === null || (fill === null && (snapshot.editing !== null || !canEditSnapshot(snapshot) || grid.cellless()))
+				? null
+				: renderer.cornerOf(range)
 
 		if (corner === null) {
 			if (!element.hidden) element.hidden = true
@@ -344,6 +414,35 @@ export function SheetGrid({
 
 		element.hidden = false
 		element.style.transform = `translate(${String(corner.x)}px, ${String(corner.y)}px)`
+	}
+
+	// Shown at the start corner of a single selection a finger made while no entry is open; kept while dragged.
+	function placeStartHandle(): void {
+		const element = startHandleRef.current
+
+		if (element === null) return
+
+		const snapshot = grid.getSnapshot()
+		const drag = handleDragRef.current
+		const range = fillHandleShown(snapshot.selection.ranges)
+		const corner =
+			range === null || (drag === null && (!touchModeRef.current || snapshot.editing !== null || grid.cellless()))
+				? null
+				: renderer.startCornerOf(range)
+
+		if (corner === null) {
+			if (!element.hidden) element.hidden = true
+
+			return
+		}
+
+		element.hidden = false
+		element.style.transform = `translate(${String(corner.x)}px, ${String(corner.y)}px)`
+	}
+
+	function placeHandles(): void {
+		placeHandle()
+		placeStartHandle()
 	}
 
 	useLayoutEffect(() => {
@@ -361,8 +460,8 @@ export function SheetGrid({
 
 		// Rows fit the wrapped text an edit changes, measured as the renderer draws it (rowFit.ts).
 		const unmeasure = grid.measureWith({ measurer: () => renderer.measurerFor(), font: () => renderer.themeFont() })
-		// The fill handle follows the selection's corner on every frame.
-		const unframe = renderer.onFrame(placeHandle)
+		// The handles follow the selection's corners on every frame.
+		const unframe = renderer.onFrame(placeHandles)
 
 		return () => {
 			unframe()
@@ -375,10 +474,17 @@ export function SheetGrid({
 		if (themeKey !== undefined) renderer.refreshTheme()
 	}, [renderer, themeKey])
 
-	// An entry opening, or the grid turning read-only, hides the fill handle without a frame.
+	// An entry opening, or the grid turning read-only, hides the handles without a frame.
 	useLayoutEffect(() => {
-		placeHandle()
+		placeHandles()
 	})
+
+	// An entry opening puts the touch menu away.
+	const entryOpen = editing !== null
+
+	useEffect(() => {
+		if (entryOpen) onTouchMenu?.(false)
+	}, [entryOpen, onTouchMenu])
 
 	useLayoutEffect(() => {
 		renderer.setExtensions(parts)
@@ -395,36 +501,13 @@ export function SheetGrid({
 			const autoscroll = autoscrollRef.current
 
 			if (autoscroll !== null) cancelAnimationFrame(autoscroll.frame)
+
+			const press = pressRef.current
+
+			if (press?.timer !== null && press?.timer !== undefined) clearTimeout(press.timer)
+			if (menuTimerRef.current !== null) clearTimeout(menuTimerRef.current)
 		},
 		[]
-	)
-
-	useImperativeHandle(
-		ref,
-		() => ({
-			focus: () => scrollerRef.current?.focus({ preventScroll: true }),
-			reveal: point => renderer.reveal(point),
-			goTo: point => {
-				const current = grid.getSnapshot().layout
-
-				if (grid.choose(cellSelection(point, current === null ? [] : grid.merges(current)))) renderer.reveal(point)
-			},
-			hit: (clientX, clientY) => renderer.hit(clientX, clientY, EDGE_SLOP),
-			cellRect: point => renderer.cellRect(point),
-			clientRect: point => {
-				const box = renderer.cellRect(point)
-				const root = rootRef.current
-
-				if (box === null || root === null) return null
-
-				const origin = root.getBoundingClientRect()
-
-				return new DOMRect(origin.left + box.x, origin.top + box.y, box.width, box.height)
-			},
-			onFrame: listener => renderer.onFrame(listener),
-			renderer
-		}),
-		[grid, renderer]
 	)
 
 	function merges(): readonly SheetRange[] {
@@ -643,6 +726,14 @@ export function SheetGrid({
 		renderer.setFillPreview(sameRange(fill.target, fill.source) ? null : fill.target)
 	}
 
+	// A touch start handle dragged to `point` (touch/gestures.ts): the selection runs from its end corner to it.
+	function moveStartHandle(drag: HandleDrag, point: GridPoint): void {
+		if (point.row === drag.at.row && point.col === drag.at.col) return
+
+		drag.at = point
+		grid.choose(dragStartHandle(grid.getSnapshot().selection, drag.range, point, merges()))
+	}
+
 	// While a selection drag is past the grid's edge, scroll towards it and extend to the cell at the edge.
 	function autoscroll(x: number, y: number): void {
 		const view = renderer.currentView()
@@ -673,7 +764,9 @@ export function SheetGrid({
 			const fill = fillRef.current
 			const now = renderer.currentView()
 
-			if (state === null || (drag === null && fill === null) || now === null) return
+			const handleDrag = handleDragRef.current
+
+			if (state === null || (drag === null && fill === null && handleDrag === null) || now === null) return
 
 			const ddx = state.x < left ? state.x - left : state.x > now.width ? state.x - now.width : 0
 			const ddy = state.y < top ? state.y - top : state.y > now.height ? state.y - now.height : 0
@@ -688,6 +781,7 @@ export function SheetGrid({
 
 				if (drag !== null) extendDrag(drag, row, col)
 				else if (fill !== null) moveFill(fill, { row: row ?? fill.at.row, col: col ?? fill.at.col })
+				else if (handleDrag !== null) moveStartHandle(handleDrag, { row: row ?? handleDrag.at.row, col: col ?? handleDrag.at.col })
 			}
 
 			state.frame = requestAnimationFrame(tick)
@@ -754,27 +848,236 @@ export function SheetGrid({
 		askPointer({ kind: "leave" })
 	}
 
+	// --- Touch (touch/gestures.ts) ---
+
+	function cancelMenuTimer(): void {
+		if (menuTimerRef.current !== null) clearTimeout(menuTimerRef.current)
+
+		menuTimerRef.current = null
+	}
+
+	function endPress(): void {
+		const press = pressRef.current
+
+		if (press?.timer !== null && press?.timer !== undefined) clearTimeout(press.timer)
+
+		pressRef.current = null
+	}
+
+	// A press that is no finger's: the touch mode and its menu end.
+	function leaveTouch(): void {
+		cancelMenuTimer()
+		lastTapRef.current = null
+
+		if (touchModeRef.current) {
+			touchModeRef.current = false
+			placeStartHandle()
+		}
+
+		onTouchMenu?.(false)
+	}
+
+	// The selection a finger made or touched.
+	function touched(): void {
+		touchModeRef.current = true
+		placeStartHandle()
+	}
+
+	// Opens the active cell's entry for a finger. The hidden input takes focus first, inside the press, so the soft
+	// keyboard comes up however the entry's own field appears; the entry's field then takes focus from it, which
+	// keeps the keyboard up.
+	function editByTouch(): boolean {
+		if (!grid.canEdit()) return false
+
+		sinkRef.current?.focus({ preventScroll: true })
+
+		let started = false
+
+		flushSync(() => {
+			started = grid.startEditing(null, "edit")
+		})
+
+		if (!started) focusGrid()
+
+		return started
+	}
+
+	// A held finger: the cell (or header) under it is selected unless the selection holds it, and the menu comes.
+	function longPress(press: Press): void {
+		press.timer = null
+
+		if (pressRef.current !== press) return
+
+		const hit = renderer.hit(press.x, press.y, 0)
+
+		if (hit === null) return
+
+		press.held = true
+		lastTapRef.current = null
+
+		if (hit.kind !== "cell" || !grid.getSnapshot().selection.ranges.some(range => inRange(range, hit.row, hit.col)))
+			selectHit(hit, false, false)
+
+		focusGrid()
+		touched()
+		onTouchMenu?.(true)
+	}
+
+	function touchDown(event: PointerEvent<HTMLDivElement>): void {
+		endPress()
+		cancelMenuTimer()
+
+		// A chartsheet has no cells: a finger only pans (an extension still hears its tap).
+		if (grid.cellless()) {
+			pressRef.current = {
+				pointerId: event.pointerId,
+				x: event.clientX,
+				y: event.clientY,
+				time: event.timeStamp,
+				timer: null,
+				held: false
+			}
+
+			return
+		}
+
+		// Touch pans natively: what the press was is known when it ends (or, held, when it has been held long enough).
+		const press: Press = {
+			pointerId: event.pointerId,
+			x: event.clientX,
+			y: event.clientY,
+			time: event.timeStamp,
+			timer: null,
+			held: false
+		}
+
+		press.timer = setTimeout(() => longPress(press), LONG_PRESS_MS)
+		pressRef.current = press
+	}
+
+	// A tap (or a touch extension's press): a second tap on the cell edits it, a tap on the cell that is the selection
+	// asks for the menu, any other selects.
+	function touchTap(event: PointerEvent<HTMLDivElement>): void {
+		const hit = renderer.hit(event.clientX, event.clientY, 0)
+		// A tap is a touch's press: an extension may take it (a drag ends where it began).
+		const tapTaken = hit?.kind === "cell" ? cellDown(event, hit.row, hit.col) : undefined
+
+		if (tapTaken !== undefined && tapTaken !== false) {
+			if (tapTaken !== true) tapTaken.end(true)
+
+			return
+		}
+
+		if (hit === null || grid.cellless()) return
+
+		if (hit.kind !== "cell") {
+			lastTapRef.current = null
+			focusGrid()
+			selectHit(hit, false, false)
+			touched()
+			onTouchMenu?.(false)
+
+			return
+		}
+
+		const cell = { row: hit.row, col: hit.col }
+		const tap: TouchTap = { x: event.clientX, y: event.clientY, time: event.timeStamp, cell }
+
+		if (isDoubleTap(lastTapRef.current, tap)) {
+			lastTapRef.current = null
+			touched()
+
+			if (onCellActivate?.(cell) !== true) editByTouch()
+
+			return
+		}
+
+		lastTapRef.current = tap
+
+		if (isSoleCell(grid.getSnapshot().selection, cell, merges())) {
+			focusGrid()
+			touched()
+			// Once a second tap is no longer coming.
+			menuTimerRef.current = setTimeout(() => {
+				menuTimerRef.current = null
+				onTouchMenu?.(true)
+			}, DOUBLE_TAP_MS)
+
+			return
+		}
+
+		focusGrid()
+		selectHit(hit, false, false)
+		touched()
+		onTouchMenu?.(false)
+	}
+
+	// --- The touch start handle: dragged, the selection runs from its end corner to the finger ---
+
+	function handleStartDown(event: PointerEvent<HTMLDivElement>): void {
+		const range = fillHandleShown(grid.getSnapshot().selection.ranges)
+
+		if (event.button !== 0 || range === null) return
+
+		event.preventDefault()
+		event.stopPropagation()
+
+		if (event.nativeEvent.isTrusted) event.currentTarget.setPointerCapture(event.pointerId)
+
+		cancelMenuTimer()
+		onTouchMenu?.(false)
+		focusGrid()
+		handleDragRef.current = { pointerId: event.pointerId, range, at: { row: range.startRow, col: range.startCol } }
+		setHeldPhrase(selectionPhrase(grid.getSnapshot().selection, describeSelection))
+	}
+
+	function handleStartMove(event: PointerEvent<HTMLDivElement>): void {
+		const drag = handleDragRef.current
+
+		if (drag === null || drag.pointerId !== event.pointerId) return
+
+		const local = renderer.local(event.clientX, event.clientY)
+
+		if (local !== null) autoscroll(renderer.layoutX(local.x), local.y)
+
+		const hit = renderer.hit(event.clientX, event.clientY, 0)
+
+		if (hit?.kind === "cell") moveStartHandle(drag, { row: hit.row, col: hit.col })
+	}
+
+	function handleStartEnd(event: PointerEvent<HTMLDivElement>, commit: boolean): void {
+		if (handleDragRef.current?.pointerId !== event.pointerId) return
+
+		handleDragRef.current = null
+		setHeldPhrase(undefined)
+		stopAutoscroll()
+		placeStartHandle()
+
+		if (commit) onTouchMenu?.(true)
+	}
+
 	function handlePointerDown(event: PointerEvent<HTMLDivElement>): void {
 		if (event.button !== 0 && event.button !== 2) return
+
+		lastPointerRef.current = event.pointerType
 
 		const hit = renderer.hit(event.clientX, event.clientY, EDGE_SLOP)
 
 		if (hit === null) return
 
 		if (event.pointerType === "touch") {
-			// Touch pans natively: a tap selects on release.
-			tapRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, time: event.timeStamp }
+			touchDown(event)
 
 			return
 		}
 
+		leaveTouch()
+
 		// A right-click acts on the selection it lands in, or on the cell it lands on.
 		if (event.button === 2) {
-			if (hit.kind === "cell") {
+			if (hit.kind === "cell" && !grid.cellless()) {
 				const current = grid.getSnapshot().selection
-				const inside = current.ranges.some(
-					range => hit.row >= range.startRow && hit.row <= range.endRow && hit.col >= range.startCol && hit.col <= range.endCol
-				)
+				const inside = current.ranges.some(range => inRange(range, hit.row, hit.col))
 
 				if (!inside) selectHit(hit, false, false)
 			}
@@ -805,16 +1108,29 @@ export function SheetGrid({
 
 		focusGrid()
 
+		// A chartsheet has no cells to select.
+		if (grid.cellless()) return
+
 		const add = event.ctrlKey || event.metaKey
 		const kind = selectHit(hit, event.shiftKey, add)
 
 		if (kind !== null) {
 			dragRef.current = { pointerId: event.pointerId, kind, add }
+			setHeldPhrase(selectionPhrase(grid.getSnapshot().selection, describeSelection))
 			event.currentTarget.setPointerCapture(event.pointerId)
 		}
 	}
 
 	function handlePointerMove(event: PointerEvent<HTMLDivElement>): void {
+		const press = pressRef.current
+
+		// A finger that moves pans: no long press.
+		if (press !== null && press.pointerId === event.pointerId && !stillPressed(press, event.clientX, event.clientY)) {
+			if (press.timer !== null) clearTimeout(press.timer)
+
+			press.timer = null
+		}
+
 		const resize = resizeRef.current
 
 		if (resize !== null && resize.pointerId === event.pointerId) {
@@ -893,33 +1209,19 @@ export function SheetGrid({
 			return
 		}
 
-		const tap = tapRef.current
+		const press = pressRef.current
 
-		if (tap !== null && tap.pointerId === event.pointerId) {
-			tapRef.current = null
+		if (press !== null && press.pointerId === event.pointerId) {
+			endPress()
 
-			if (Math.hypot(event.clientX - tap.x, event.clientY - tap.y) < TAP_SLOP && event.timeStamp - tap.time < TAP_MS) {
-				const hit = renderer.hit(event.clientX, event.clientY, 0)
-				// A tap is a touch's press: an extension may take it (a drag ends where it began).
-				const tapTaken = hit?.kind === "cell" ? cellDown(event, hit.row, hit.col) : undefined
-
-				if (tapTaken !== undefined && tapTaken !== false) {
-					if (tapTaken !== true) tapTaken.end(true)
-
-					return
-				}
-
-				if (hit !== null) {
-					focusGrid()
-					selectHit(hit, false, false)
-				}
-			}
+			if (!press.held && isTap(press, event.clientX, event.clientY, event.timeStamp)) touchTap(event)
 
 			return
 		}
 
 		if (dragRef.current?.pointerId === event.pointerId) {
 			dragRef.current = null
+			setHeldPhrase(undefined)
 			stopAutoscroll()
 		}
 	}
@@ -933,14 +1235,18 @@ export function SheetGrid({
 		}
 
 		if (resizeRef.current?.pointerId === event.pointerId) endResize(null)
-		if (tapRef.current?.pointerId === event.pointerId) tapRef.current = null
+		if (pressRef.current?.pointerId === event.pointerId) endPress()
 		if (dragRef.current?.pointerId === event.pointerId) {
 			dragRef.current = null
+			setHeldPhrase(undefined)
 			stopAutoscroll()
 		}
 	}
 
 	function handleDoubleClick(event: MouseEvent<HTMLDivElement>): void {
+		// A finger's double tap is the touch code's (a browser may send a dblclick for it too).
+		if (lastPointerRef.current === "touch") return
+
 		const hit = renderer.hit(event.clientX, event.clientY, EDGE_SLOP)
 
 		if (hit === null) return
@@ -951,7 +1257,7 @@ export function SheetGrid({
 			return
 		}
 
-		if (hit.kind !== "cell") return
+		if (hit.kind !== "cell" || grid.cellless()) return
 
 		const point = { row: hit.row, col: hit.col }
 
@@ -1366,7 +1672,11 @@ export function SheetGrid({
 	}
 
 	function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
-		if (event.target !== event.currentTarget || onKey?.(event) === true) return
+		if (event.target !== event.currentTarget) return
+
+		// A key is no finger's: a selection it makes shows no touch handle, and the menu goes.
+		if (touchModeRef.current || menuTimerRef.current !== null) leaveTouch()
+		if (onKey?.(event) === true) return
 
 		if (resizeRef.current !== null || fillRef.current !== null) {
 			if (event.key === "Escape") {
@@ -1382,6 +1692,17 @@ export function SheetGrid({
 
 		const shortcut = shortcutOf(event, onMac)
 
+		// A chartsheet's keys move to nothing, enter nothing and select nothing; Ctrl+Y redoes, never repeats on cells.
+		if (cellless && shortcut === "redoOrRepeat") {
+			event.preventDefault()
+
+			if (grid.getSnapshot().state.canRedo) edit(() => grid.redo())
+
+			return
+		}
+
+		if (cellless && shortcut !== null && !CELLLESS_SHORTCUTS.has(shortcut)) return
+
 		if (shortcut !== null) {
 			if (onShortcut?.(shortcut) === true || (!APP_SHORTCUTS.has(shortcut) && runShortcut(shortcut))) {
 				event.preventDefault()
@@ -1393,7 +1714,7 @@ export function SheetGrid({
 			if (APP_SHORTCUTS.has(shortcut)) return
 		}
 
-		if (frozenHome(event)) {
+		if (!cellless && frozenHome(event)) {
 			event.preventDefault()
 
 			return
@@ -1411,6 +1732,8 @@ export function SheetGrid({
 
 			return
 		}
+
+		if (cellless) return
 
 		const { sheet, layout: current, selection: currentSelection } = grid.getSnapshot()
 		const axes = grid.axes(sheet)
@@ -1634,6 +1957,36 @@ export function SheetGrid({
 		renderer.setEditor(element)
 	}
 
+	useImperativeHandle(
+		ref,
+		() => ({
+			focus: () => scrollerRef.current?.focus({ preventScroll: true }),
+			reveal: point => renderer.reveal(point),
+			goTo: point => {
+				const current = grid.getSnapshot().layout
+
+				if (grid.choose(cellSelection(point, current === null ? [] : grid.merges(current)))) renderer.reveal(point)
+			},
+			hit: (clientX, clientY) => renderer.hit(clientX, clientY, EDGE_SLOP),
+			cellRect: point => renderer.cellRect(point),
+			clientRect: point => {
+				const box = renderer.cellRect(point)
+				const root = rootRef.current
+
+				if (box === null || root === null) return null
+
+				const origin = root.getBoundingClientRect()
+
+				return new DOMRect(origin.left + box.x, origin.top + box.y, box.width, box.height)
+			},
+			onFrame: listener => renderer.onFrame(listener),
+			editActive: () => editByTouch(),
+			rangeRect: range => renderer.rangeRect(range),
+			renderer
+		}),
+		[grid, renderer]
+	)
+
 	return (
 		<div
 			ref={rootRef}
@@ -1659,7 +2012,7 @@ export function SheetGrid({
 				aria-colcount={SHEET_MAX_COLS}
 				aria-multiselectable="true"
 				aria-readonly={readOnly}
-				aria-activedescendant={layout === null ? undefined : activeId}
+				aria-activedescendant={layout === null || cellless ? undefined : activeId}
 				tabIndex={0}
 				onPointerDown={handlePointerDown}
 				onPointerMove={handlePointerMove}
@@ -1688,6 +2041,19 @@ export function SheetGrid({
 						>
 							{active.text}
 						</div>
+						{/* Focused for a moment as a finger opens an entry (editByTouch): the soft keyboard comes up for it. */}
+						<input
+							ref={sinkRef}
+							className="fo-sheet-touch-sink"
+							aria-hidden="true"
+							tabIndex={-1}
+							autoComplete="off"
+							autoCapitalize="off"
+							spellCheck={false}
+							onBlur={event => {
+								event.currentTarget.value = ""
+							}}
+						/>
 					</div>
 				</div>
 			</div>
@@ -1730,6 +2096,17 @@ export function SheetGrid({
 				onPointerUp={handleFillUp}
 				onPointerCancel={handleFillCancel}
 				onDoubleClick={handleFillDoubleClick}
+			/>
+			{/* A touch selection's start handle: dragged, the selection follows the finger (touch/gestures.ts). */}
+			<div
+				ref={startHandleRef}
+				className="fo-sheet-touch-handle"
+				aria-hidden="true"
+				hidden
+				onPointerDown={handleStartDown}
+				onPointerMove={handleStartMove}
+				onPointerUp={event => handleStartEnd(event, true)}
+				onPointerCancel={event => handleStartEnd(event, false)}
 			/>
 		</div>
 	)

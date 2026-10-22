@@ -1,4 +1,4 @@
-import { TILE_COLS, TILE_ROWS, type SheetId, type SheetRange } from "../../core/sheet/protocol"
+import { SHEET_MAX_COLS, SHEET_MAX_ROWS, TILE_COLS, TILE_ROWS, type SheetId, type SheetRange } from "../../core/sheet/protocol"
 import {
 	decoratePane,
 	decoratorInset,
@@ -9,7 +9,7 @@ import {
 	type GridExtensionParts,
 	type GridRect
 } from "./layers"
-import type { SheetGridModel } from "./model"
+import { EXTRA_COLS, EXTRA_ROWS, type SheetGridModel } from "./model"
 import { BorderPainter } from "./paint/borders"
 import type { GridCanvas } from "./paint/canvas"
 import { paintCells, TEXT_PADDING } from "./paint/cells"
@@ -66,6 +66,33 @@ const MARGIN_ROWS = 16
 const MARGIN_COLS = 8
 // Rows (columns) left before the extent's end that make it grow.
 const GROW_SLACK = 8
+// The smallest font iOS focuses a field in without zooming the page (WebKit: text fields under 16 px zoom).
+const TOUCH_FONT_PX = 16
+// A scroll this long without another event has settled (a momentum's frames come 16 ms apart).
+const SCROLL_IDLE_MS = 150
+
+// The browser's scroll range for a scrolled part.
+function domRange(view: GridView["rows"]): number {
+	return Math.max(0, domExtent(bodyTotal(view)) - view.bodyView)
+}
+
+function withinScroll(dom: number, view: GridView["rows"]): number {
+	return Math.max(0, Math.min(domRange(view), dom))
+}
+
+// A scrolled part's offset moved by `delta` of the sheet's own pixels, kept within its range. The browser's offset at
+// the start of its range is the sheet's start, and at its end the sheet's last row (column) once the extent holds
+// them all (`cap`): a pan that ran out of scroller has reached it. scroll.ts maps both ends one to one, so this is no
+// jump unless the pan started deep in a scaled middle. Short of the cap the extent grows as the view nears its end,
+// and the settled pan's offsets leave the next one room.
+function panned(offset: number, dom: number, delta: number, view: GridView["rows"], cap: number): number {
+	const range = Math.max(0, bodyTotal(view) - view.bodyView)
+
+	if (dom <= 0) return 0
+	if (dom >= domRange(view) - 1 && view.axis.count >= cap) return range
+
+	return Math.max(0, Math.min(range, offset + delta))
+}
 
 export class GridRenderer {
 	private elements: GridElements | null = null
@@ -83,6 +110,16 @@ export class GridRenderer {
 	private height = 0
 	private pixelRatio = 1
 	private readonly scroll: Scroll = { top: 0, left: 0, domTop: 0, domLeft: 0 }
+	// Fingers on the scroller, and whether the scrolling since the last pause is theirs (a pan, then its momentum):
+	// such a scroll moves the sheet by the pixels it moves, not by the scaled mapping.
+	private touches = 0
+	private panning = false
+	// A mouse or pen button held on the scroller (its scrollbar's thumb, a selection dragged past the edge): the
+	// extent does not shrink under it.
+	private pressed = false
+	// Whether a finger may be what edits (any coarse pointer): the editor's font stays at 16 px or more there.
+	private coarse: MediaQueryList | null = null
+	private idle: ReturnType<typeof setTimeout> | undefined = undefined
 	private sheet: SheetId | null = null
 	// Each sheet's scroll position when the user left it.
 	private readonly scrolls = new Map<SheetId, { top: number; left: number }>()
@@ -127,19 +164,71 @@ export class GridRenderer {
 		const onScroll = (): void => {
 			this.readScroll()
 			this.schedule()
+			this.waitIdle()
 		}
+		// Touch events go on through the browser's own pan (pointer events end at its start with pointercancel). A
+		// move counts the fingers too: a browser may send no touchstart for a pan it started itself (Chromium's
+		// synthetic gestures), only its pointerdown.
+		const onTouchStart = (event: TouchEvent): void => {
+			this.touches = event.touches.length
+			this.panning = true
+		}
+		const onTouchEnd = (event: TouchEvent): void => {
+			this.touches = event.touches.length
+
+			if (this.touches === 0) this.waitIdle()
+		}
+		const onPress = (event: PointerEvent): void => {
+			if (event.pointerType !== "touch") {
+				this.pressed = true
+			} else {
+				this.touches = Math.max(1, this.touches)
+				this.panning = true
+			}
+		}
+		const onRelease = (): void => {
+			if (!this.pressed) return
+
+			this.pressed = false
+			this.waitIdle()
+		}
+		const view = elements.scroller.ownerDocument.defaultView
 		const resize = new ResizeObserver(() => {
 			this.readSize()
 			this.schedule()
 		})
 
+		// Past the browsers' scroll range a wheel step would move the sheet by the scaled distance: it moves it by its
+		// own instead (scroll.ts). Not passive, so it can take the step; a pinch (Ctrl+wheel) stays the page's.
+		const onWheel = (event: WheelEvent): void => {
+			if (!event.ctrlKey && this.wheel(event)) event.preventDefault()
+		}
+
 		elements.scroller.addEventListener("scroll", onScroll, { passive: true })
+		elements.scroller.addEventListener("wheel", onWheel, { passive: false })
+		elements.scroller.addEventListener("touchstart", onTouchStart, { passive: true })
+		elements.scroller.addEventListener("touchmove", onTouchStart, { passive: true })
+		elements.scroller.addEventListener("touchend", onTouchEnd, { passive: true })
+		elements.scroller.addEventListener("touchcancel", onTouchEnd, { passive: true })
+		elements.scroller.addEventListener("pointerdown", onPress, { passive: true })
+		view?.addEventListener("pointerup", onRelease, { passive: true, capture: true })
+		view?.addEventListener("pointercancel", onRelease, { passive: true, capture: true })
 		resize.observe(elements.scroller)
 		this.detach.push(
 			() => elements.scroller.removeEventListener("scroll", onScroll),
+			() => elements.scroller.removeEventListener("wheel", onWheel),
+			() => elements.scroller.removeEventListener("touchstart", onTouchStart),
+			() => elements.scroller.removeEventListener("touchmove", onTouchStart),
+			() => elements.scroller.removeEventListener("touchend", onTouchEnd),
+			() => elements.scroller.removeEventListener("touchcancel", onTouchEnd),
+			() => elements.scroller.removeEventListener("pointerdown", onPress),
+			() => view?.removeEventListener("pointerup", onRelease, { capture: true }),
+			() => view?.removeEventListener("pointercancel", onRelease, { capture: true }),
+			() => clearTimeout(this.idle),
 			() => resize.disconnect(),
 			this.model.onPaint(() => this.schedule())
 		)
+		this.coarse = typeof globalThis.matchMedia === "function" ? globalThis.matchMedia("(any-pointer: coarse)") : null
 		// A theme that follows the system's scheme changes the variables without the app saying so.
 		if (typeof globalThis.matchMedia === "function") {
 			const scheme = globalThis.matchMedia("(prefers-color-scheme: dark)")
@@ -240,24 +329,57 @@ export class GridRenderer {
 		return this.mirrored() ? Math.max(0, scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft) : scroller.scrollLeft
 	}
 
-	// Keeps the virtual offsets when the browser's are what we set them to (rounding would move them otherwise).
+	// Keeps the virtual offsets when the browser's are what we set them to (rounding would move them otherwise). A
+	// finger's pan moves the sheet one pixel per pixel, as on any other sheet; the scrollbar maps by position.
 	private readScroll(): void {
 		const scroller = this.elements?.scroller
 
 		if (scroller === undefined || this.view === null) return
 
-		const top = scroller.scrollTop
-		const left = this.laidOutLeft(scroller)
+		// iOS reports offsets past either end while it bounces (a rubber band): the sheet stays at the end meanwhile.
+		const top = withinScroll(scroller.scrollTop, this.view.rows)
+		const left = withinScroll(this.laidOutLeft(scroller), this.view.cols)
 
 		if (Math.abs(top - this.scroll.domTop) >= 1) {
-			this.scroll.top = toVirtual(top, bodyTotal(this.view.rows), this.view.rows.bodyView)
+			this.scroll.top = this.panning
+				? panned(this.scroll.top, top, top - this.scroll.domTop, this.view.rows, SHEET_MAX_ROWS)
+				: toVirtual(top, bodyTotal(this.view.rows), this.view.rows.bodyView)
 			this.scroll.domTop = top
 		}
 
 		if (Math.abs(left - this.scroll.domLeft) >= 1) {
-			this.scroll.left = toVirtual(left, bodyTotal(this.view.cols), this.view.cols.bodyView)
+			this.scroll.left = this.panning
+				? panned(this.scroll.left, left, left - this.scroll.domLeft, this.view.cols, SHEET_MAX_COLS)
+				: toVirtual(left, bodyTotal(this.view.cols), this.view.cols.bodyView)
 			this.scroll.domLeft = left
 		}
+	}
+
+	// Restarts the wait for the scroll to settle (no scroll event and no finger down for SCROLL_IDLE_MS).
+	private waitIdle(): void {
+		clearTimeout(this.idle)
+		this.idle = setTimeout(() => {
+			this.idle = undefined
+
+			if (this.touches === 0 && !this.pressed) this.settle()
+		}, SCROLL_IDLE_MS)
+	}
+
+	// A settled scroll: a pan's browser offsets are set again from the sheet's (they drifted from the scaled mapping
+	// while it moved one to one), and the extent gives back the blank rows and columns the view has left behind.
+	private settle(): void {
+		const sheet = this.model.getSnapshot().sheet
+		const view = this.view
+
+		if (view === null) return
+
+		if (this.panning) {
+			this.panning = false
+			this.writeScroll()
+		}
+
+		// No nearer than growIfAtEnd's slack to the end, so the extent does not grow straight back.
+		this.model.shrink(sheet, view.rows.last + GROW_SLACK - EXTRA_ROWS, view.cols.last + GROW_SLACK - EXTRA_COLS)
 	}
 
 	// A sheet opens where the user left it in this session, else where its file did: the scrolled pane's first cell
@@ -373,8 +495,10 @@ export class GridRenderer {
 
 		this.view = view
 
-		// A grown or shrunk extent changes what a scaled browser offset means: the browser's follows the sheet's.
-		if (this.sizeExtent(view)) this.writeScroll()
+		// A grown or shrunk extent changes what a scaled browser offset means: the browser's follows the sheet's. Not
+		// under a finger's pan, which moves by deltas and takes no offset written while the browser scrolls (Chromium
+		// goes on from its own): its offsets are set again once it settles.
+		if (this.sizeExtent(view) && !this.panning) this.writeScroll()
 
 		this.requestTiles(snapshot.sheet, view)
 
@@ -419,7 +543,7 @@ export class GridRenderer {
 				theme,
 				pixelRatio,
 				rightToLeft: layout.rightToLeft,
-				selection: snapshot.selection,
+				selection: this.model.cellless(snapshot.sheet) ? null : snapshot.selection,
 				merges: this.model.merges(layout),
 				guide:
 					this.guide === null
@@ -512,7 +636,8 @@ export class GridRenderer {
 
 		if (elements === null) return
 
-		const box = this.cellBox(view, active)
+		// A chartsheet has no cell to stand over.
+		const box = this.model.cellless() ? null : this.cellBox(view, active)
 		const a11y = elements.active
 		const mirrored = this.mirrored()
 		// Where a box laid out from x starts on screen.
@@ -545,20 +670,31 @@ export class GridRenderer {
 		const scale = layout === null ? 1 : this.model.scale(layout)
 
 		const editX = screenX(editBox.x, editBox.width)
+		const base = this.model.style(0)
+		const font = textFont(style, base, this.currentTheme().font, scale)
+		// iOS zooms the page to a focused field whose font is under 16 px. Where a finger may edit, the editor is laid
+		// out `grow` times larger (its font at least 16 px) and drawn scaled back down, so it looks the same.
+		const large =
+			font.px < TOUCH_FONT_PX && this.coarse?.matches === true
+				? textFont(style, base, this.currentTheme().font, scale * ((TOUCH_FONT_PX + 0.01) / font.px))
+				: null
+		const grow = large === null ? 1 : large.px / font.px
+		const shrink = grow === 1 ? "" : ` scale(${String(1 / grow)})`
 
 		// Mirrored, the editor keeps its cell's right edge and grows to the left.
+		editor.style.transformOrigin = mirrored ? "top right" : "top left"
 		editor.style.transform = mirrored
-			? `translate(calc(${String(editX + editBox.width)}px - 100%), ${String(editBox.y)}px)`
-			: `translate(${String(editX)}px, ${String(editBox.y)}px)`
+			? `translate(calc(${String(editX + editBox.width)}px - 100%), ${String(editBox.y)}px)${shrink}`
+			: `translate(${String(editX)}px, ${String(editBox.y)}px)${shrink}`
 		// The box's textarea takes the sizes and the padding (css/sheet.css); the font is inherited by it and its backdrop.
-		editor.style.setProperty("--fo-sheet-editor-min-width", `${String(editBox.width)}px`)
-		editor.style.setProperty("--fo-sheet-editor-min-height", `${String(editBox.height)}px`)
+		editor.style.setProperty("--fo-sheet-editor-min-width", `${String(editBox.width * grow)}px`)
+		editor.style.setProperty("--fo-sheet-editor-min-height", `${String(editBox.height * grow)}px`)
 		editor.style.setProperty(
 			"--fo-sheet-editor-max-width",
-			`${String(Math.max(editBox.width, mirrored ? editX + editBox.width : view.width - editX))}px`
+			`${String(Math.max(editBox.width, mirrored ? editX + editBox.width : view.width - editX) * grow)}px`
 		)
-		editor.style.setProperty("--fo-sheet-editor-padding", `${String(Math.max(1, Math.round(TEXT_PADDING * scale)))}px`)
-		editor.style.font = textFont(style, this.model.style(0), this.currentTheme().font, scale).css
+		editor.style.setProperty("--fo-sheet-editor-padding", `${String(Math.max(1, Math.round(TEXT_PADDING * scale)) * grow)}px`)
+		editor.style.font = (large ?? font).css
 	}
 
 	// A cell's (or its merge's) box as the grid's root shows it (mirrored for a right-to-left sheet), in CSS pixels
@@ -594,6 +730,65 @@ export class GridRenderer {
 		if (x === null || y === null) return null
 
 		return { x: this.mirrored() ? view.width - x : x, y }
+	}
+
+	// A range's top-left corner as the root shows it (top-right in a right-to-left sheet), or null when it is not on
+	// screen: where a touch selection's start handle sits.
+	startCornerOf(range: SheetRange): { x: number; y: number } | null {
+		const view = this.view
+
+		if (view === null) return null
+
+		const edge = (axis: GridView["rows"], index: number): number | null => {
+			const at = screenOf(axis, index)
+			const start = index < axis.frozenEnd ? axis.header : axis.header + axis.frozenSize
+
+			return at < start || at >= axis.view ? null : at
+		}
+		const x = edge(view.cols, range.startCol)
+		const y = edge(view.rows, range.startRow)
+
+		if (x === null || y === null) return null
+
+		return { x: this.mirrored() ? view.width - x : x, y }
+	}
+
+	// The part of a range on screen, as the root shows it, in CSS pixels from its top left: one box round what of it
+	// the panes show (null: none of it). Where a menu about the selection is anchored.
+	rangeRect(range: SheetRange): GridRect | null {
+		const view = this.view
+
+		if (view === null) return null
+
+		const span = (axis: GridView["rows"], start: number, end: number): { from: number; to: number } | null => {
+			let from = Number.POSITIVE_INFINITY
+			let to = Number.NEGATIVE_INFINITY
+			// The frozen part, then the scrolled part, each clipped to where it shows.
+			const parts: [number, number, number, number][] = [
+				[axis.frozenFirst, axis.frozenEnd - 1, axis.header, axis.header + axis.frozenSize],
+				[axis.first, axis.last, axis.header + axis.frozenSize, axis.view]
+			]
+
+			for (const [first, last, low, high] of parts) {
+				const a = Math.max(start, first)
+				const b = Math.min(end, last)
+
+				if (a > b) continue
+
+				from = Math.min(from, Math.max(low, screenOf(axis, a)))
+				to = Math.max(to, Math.min(high, screenOf(axis, b) + axis.axis.size(b)))
+			}
+
+			return to > from ? { from, to } : null
+		}
+		const cols = span(view.cols, range.startCol, range.endCol)
+		const rows = span(view.rows, range.startRow, range.endRow)
+
+		if (cols === null || rows === null) return null
+
+		const box = { x: cols.from, y: rows.from, width: cols.to - cols.from, height: rows.to - rows.from }
+
+		return this.mirrored() ? { ...box, x: view.width - box.x - box.width } : box
 	}
 
 	// A cell's (or its merge's) box on screen, or null when it is not on screen.
@@ -711,7 +906,37 @@ export class GridRenderer {
 		this.schedule()
 	}
 
-	// Scrolls by pixels (dragging a selection past the edge).
+	// A wheel step on a scaled axis (one whose scrolled part is larger than the browser's scroll range): taken and
+	// applied in the sheet's own pixels, so a step moves the rows it moves on any other sheet. False leaves it to the
+	// browser (no scaled axis, or the step is along one that is not).
+	wheel(event: Pick<WheelEvent, "deltaX" | "deltaY" | "deltaMode" | "shiftKey">): boolean {
+		const view = this.view
+
+		if (view === null) return false
+
+		const scaledRows = domExtent(bodyTotal(view.rows)) < bodyTotal(view.rows)
+		const scaledCols = domExtent(bodyTotal(view.cols)) < bodyTotal(view.cols)
+
+		if (!scaledRows && !scaledCols) return false
+
+		// Lines as a row (or column) at the default size, pages as the scrolled part's view.
+		const unit = (axis: GridView["rows"]): number =>
+			event.deltaMode === 1 ? axis.axis.defaultSize : event.deltaMode === 2 ? Math.max(1, axis.bodyView) : 1
+		// Shift turns a vertical wheel sideways, as the browsers do.
+		const sideways = event.shiftKey && event.deltaX === 0
+		const dy = sideways ? 0 : event.deltaY * unit(view.rows)
+		const rawX = sideways ? event.deltaY : event.deltaX
+		// Mirrored, the scrollbar runs from the right: a step right brings in the columns on the left.
+		const dx = rawX * unit(view.cols) * (this.mirrored() ? -1 : 1)
+
+		if ((dy === 0 || !scaledRows) && (dx === 0 || !scaledCols)) return false
+
+		this.scrollBy(dx, dy)
+
+		return true
+	}
+
+	// Scrolls by pixels (dragging a selection past the edge, a wheel step on a scaled axis).
 	scrollBy(dx: number, dy: number): void {
 		const view = this.view
 

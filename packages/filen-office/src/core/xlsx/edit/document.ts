@@ -11,7 +11,8 @@ import {
 	type EngineCell,
 	type EngineName,
 	type EngineSheet,
-	type RecalculatedCell
+	type RecalculatedCell,
+	type SpillSize
 } from "../../sheet/formula/index"
 import {
 	NUMFMT_EN_US,
@@ -23,7 +24,7 @@ import {
 	type NumFmt,
 	type NumFmtOptions
 } from "../../sheet/numfmt/index"
-import { dateSerial } from "../../sheet/numfmt/date"
+import { dateSerial, ISO_1900, type DateBase } from "../../sheet/numfmt/date"
 import {
 	AxisFlag,
 	CellFlag,
@@ -55,19 +56,24 @@ import {
 } from "../../sheet/protocol"
 import type { SheetChangeSink } from "../../sheet/registry"
 import type { AxisEdit } from "../../sheet/model/edits"
-import { colWidthToPx, defaultColPx, rowHeightToPx } from "../../sheet/sizes/sizes"
+import { DEFAULT_DIGIT_PX, colWidthToPx, defaultColPx, rowHeightToPx } from "../../sheet/sizes/sizes"
 import {
 	absoluteCell,
+	engineArrayFormula,
 	engineCellFormula,
 	engineFormula,
 	engineLacks,
+	engineSpillFormula,
 	formulaInputs,
 	holdsArrayConstant,
 	holdsBracket,
+	legacyIntersections,
 	sameSheet,
 	shownFormula
 } from "../../sheet/refs/formulaRefs"
 import { localizedInput } from "../../sheet/input/locale"
+import { sheetFunction } from "../../sheet/functions/catalogue"
+import { takesOneValue } from "../../sheet/functions/valueArguments"
 import { SheetStyles } from "../../sheet/style/index"
 import type { CellWrite, SheetStore } from "../model/store"
 import { readWorksheet } from "../read/worksheet"
@@ -94,6 +100,7 @@ import type { ChangeLog } from "../model/changes"
 import { RefRefused } from "../refs/catalogue"
 import { refState } from "../refs/state"
 import { ABSENT, cellKeyOf, cellState, type CellLog, type CellState, type ShownResult } from "./history"
+import { dynamicArrayCm, readDynamicArrays, type DynamicArrays, type MadeMetadata } from "./spill"
 
 // The xlsx session's document: the workbook model with what a session adds to it. It shows cells (their text
 // through their number format, their look through the render style table), lays sheets out, keeps the formula
@@ -125,6 +132,9 @@ const LEGACY_KINDS: ReadonlySet<SheetFileKind> = new Set(["xls", "xlt"])
 // What a formula the engine does not calculate shows when its file stored no result for it.
 const NAME_ERROR = "#NAME?"
 
+// A defined name's formula that is a LAMBDA ([MS-XLSX] 2.2.2: _xlfn.LAMBDA).
+const LAMBDA_NAME = /^\s*(?:_xlfn\.)?LAMBDA\s*\(/i
+
 // What a cell shows, filled in by `show` (one scratch object: tiles show thousands of cells).
 interface Shown {
 	text: string
@@ -142,10 +152,16 @@ function pad(value: number): string {
 // Cells one part of a sliced write takes: about a few milliseconds of work.
 const WRITE_SLICE = 2048
 
+// Shown legacy formulas kept by stored text (shownFormulaText).
+const LEGACY_SHOWN = 4096
+
+// The functions a file stores for operators (@, A1#, a LAMBDA called in place), known to every workbook.
+const KNOWN_OPERATORS = /^_xlfn\.(?:SINGLE|ANCHORARRAY|LAMBDA|LET)$/i
+
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?/
 
 // A t="d" cell's ISO 8601 text as a serial, NaN when it does not read.
-function isoSerial(text: string, date1904: boolean): number {
+function isoSerial(text: string, date1904: DateBase): number {
 	const match = ISO_DATE.exec(text)
 
 	if (match === null) return Number.NaN
@@ -162,7 +178,7 @@ const dateScratch: DateParts = { year: 0, month: 0, day: 0, weekday: 0 }
 
 // A serial under a date format as it is typed: the date, its time when it has one, the time alone on the epoch
 // day; to the second.
-export function typedSerial(serial: number, date1904: boolean): string {
+export function typedSerial(serial: number, date1904: DateBase): string {
 	if (!Number.isFinite(serial) || serial < 0 || serial >= 2_958_466) return String(serial)
 
 	let day = Math.floor(serial)
@@ -175,7 +191,7 @@ export function typedSerial(serial: number, date1904: boolean): string {
 
 	const time = `${pad(Math.floor(seconds / 3600))}:${pad(Math.floor(seconds / 60) % 60)}${seconds % 60 === 0 ? "" : `:${pad(seconds % 60)}`}`
 
-	if (day === 0 && !date1904) return time
+	if (day === 0 && date1904 === false) return time
 
 	const parts = serialDate(day, date1904, dateScratch)
 	const date = `${String(parts.year).padStart(4, "0")}-${pad(parts.month)}-${pad(parts.day)}`
@@ -418,6 +434,8 @@ export class XlsxDocument {
 	readonly workbook: XlsxWorkbook
 	readonly kind: SheetFileKind
 	readonly date1904: boolean
+	// The date base serials count from: date1904, or a Strict workbook's 1900 date base (numfmt/date.ts).
+	readonly dateBase: DateBase
 	readonly styles: SheetStyles
 	readonly encryption: SheetEncryption | undefined
 	readonly writeUnlocked: boolean
@@ -427,6 +445,8 @@ export class XlsxDocument {
 	// The formula engine, once built, and the sheet each of its sheet indices is.
 	engine: FormulaEngine | null = null
 	engineSheets: SheetId[] = []
+	// The default font's widest digit in pixels, the unit of column widths (digitWidth.ts): the app measures it.
+	digitPx = DEFAULT_DIGIT_PX
 	// Why a sheet could not be read (it stays unparsed), by sheet.
 	readonly failed = new Map<SheetId, XlsxReadError>()
 	private readonly interner: RenderStyleInterner
@@ -448,6 +468,7 @@ export class XlsxDocument {
 		this.workbook = workbook
 		this.kind = options.kind
 		this.date1904 = workbook.date1904
+		this.dateBase = workbook.strict && !workbook.date1904 ? ISO_1900 : workbook.date1904
 		this.encryption = options.encryption
 		this.writeUnlocked = options.writeUnlocked === true
 		this.ownSettings = options.settings ?? {}
@@ -479,7 +500,7 @@ export class XlsxDocument {
 		const locale = this.ownSettings.locale
 
 		return {
-			date1904: this.date1904,
+			date1904: this.dateBase,
 			palette: this.styles.palette,
 			...(locale !== undefined && { locale: { ...NUMFMT_EN_US, decimal: locale.decimal, group: locale.group } })
 		}
@@ -935,6 +956,50 @@ export class XlsxDocument {
 		return decodeXstring(kind === CellKind.SHARED_STRING ? this.workbook.sharedStrings.text(value) : model.store.strings.text(value))
 	}
 
+	// A cell's formula as the user reads and edits it (in the file's own syntax, without "="): one written before
+	// dynamic arrays (neither an array formula nor a data table) with the @ Excel shows where it reads one value from
+	// a range, so typed again it means the same.
+	shownFormulaText(model: XlsxSheetModel, id: number, row: number, col: number): string {
+		const text = this.formulaText(model, id, row, col)
+		const kind = model.store.formulas.kind(id)
+
+		if (kind === FormulaKind.ARRAY || kind === FormulaKind.DATA_TABLE) return shownFormula(text)
+
+		const kept = this.legacyShown.get(text)
+
+		if (kept !== undefined) return kept
+
+		this.namesRead = false
+
+		const shown = shownFormula(legacyIntersections(text, takesOneValue, this.knownFunction))
+
+		// One calling a defined name is read again each time: the names may change.
+		if (!this.namesRead) {
+			if (this.legacyShown.size >= LEGACY_SHOWN) this.legacyShown.clear()
+
+			this.legacyShown.set(text, shown)
+		}
+
+		return shown
+	}
+
+	// shownFormulaText's results by stored text (formulas repeat down a column), up to LEGACY_SHOWN of them.
+	private readonly legacyShown = new Map<string, string>()
+	// Whether knownFunction looked at the defined names.
+	private namesRead = false
+
+	// Whether a name called in a formula is a function the workbook or Excel knows (a defined name, a LAMBDA's
+	// parameter, a worksheet function) rather than an add-in's.
+	private readonly knownFunction = (name: string): boolean => {
+		if (/^_xlpm\./i.test(name) || sheetFunction(name) !== undefined || KNOWN_OPERATORS.test(name)) return true
+
+		const upper = name.toUpperCase()
+
+		this.namesRead = true
+
+		return this.workbook.definedNames.some(entry => entry.name.toUpperCase() === upper)
+	}
+
 	formulaText(model: XlsxSheetModel, id: number, row: number, col: number): string {
 		const formulas = model.store.formulas
 
@@ -952,7 +1017,7 @@ export class XlsxDocument {
 		shown.flags |= CellFlag.NUMBER
 
 		if (!formula)
-			shown.input = format.isDate ? typedSerial(value, this.date1904) : localizedInput(String(value), this.ownSettings.locale)
+			shown.input = format.isDate ? typedSerial(value, this.dateBase) : localizedInput(String(value), this.ownSettings.locale)
 	}
 
 	private showText(format: NumFmt, text: string, formula: boolean, quoted: boolean, rich = false): void {
@@ -997,9 +1062,14 @@ export class XlsxDocument {
 			const formulaKind = model.store.formulas.kind(formula)
 
 			shown.flags |= CellFlag.FORMULA
-			shown.input = localizedInput(`=${shownFormula(this.formulaText(model, formula, row, col))}`, this.ownSettings.locale)
+			shown.input = localizedInput(`=${this.shownFormulaText(model, formula, row, col)}`, this.ownSettings.locale)
 
-			if (formulaKind === FormulaKind.ARRAY || formulaKind === FormulaKind.DATA_TABLE) shown.flags |= CellFlag.CACHED
+			// A dynamic array calculates here; a legacy array formula or data table keeps its stored result.
+			if (
+				formulaKind === FormulaKind.DATA_TABLE ||
+				(formulaKind === FormulaKind.ARRAY && !this.isDynamicArray(model.store.formulas.formula(formula).cellMetadata))
+			)
+				shown.flags |= CellFlag.CACHED
 
 			if (kind === CellKind.EMPTY) {
 				const result = this.shownResults.get(model.id)?.get(cellKeyOf(row, col))
@@ -1035,7 +1105,7 @@ export class XlsxDocument {
 				break
 			case CellKind.DATE: {
 				const text = model.store.strings.text(value)
-				const serial = isoSerial(text, this.date1904)
+				const serial = isoSerial(text, this.dateBase)
 
 				if (Number.isNaN(serial)) shown.text = text
 				else this.showNumber(format, serial, hasFormula)
@@ -1233,14 +1303,14 @@ export class XlsxDocument {
 			}
 		}
 
-		const defaultCol = defaultColPx(format)
+		const defaultCol = defaultColPx(format, this.digitPx)
 		const colIndices: number[] = []
 		const colSizes: number[] = []
 		const colStyles: number[] = []
 		const colFlags: number[] = []
 
 		for (const range of model.cols) {
-			const size = Number.isNaN(range.width) ? defaultCol : colWidthToPx(range.width)
+			const size = Number.isNaN(range.width) ? defaultCol : colWidthToPx(range.width, this.digitPx)
 			let flags = 0
 
 			if ((range.flags & ColFlag.HIDDEN) !== 0) flags |= AxisFlag.HIDDEN
@@ -1512,7 +1582,7 @@ export class XlsxDocument {
 			case CellKind.FORMULA_STRING:
 				return `'${this.stringOf(model, kind, value)}`
 			case CellKind.DATE: {
-				const serial = isoSerial(model.store.strings.text(value), this.date1904)
+				const serial = isoSerial(model.store.strings.text(value), this.dateBase)
 
 				return Number.isNaN(serial) ? undefined : serial
 			}
@@ -1528,6 +1598,66 @@ export class XlsxDocument {
 	private readonly aloneInputs = new Map<SheetId, Map<number, readonly ReadArea[] | null>>()
 	// The workbook's tables: name (upper case), sheet, range and header rows.
 	private tables: readonly XlsxTableRange[] | null = null
+	// The workbook's dynamic-array cell metadata (spill.ts), read with the tables; null before.
+	private dynamicArrays: DynamicArrays | null = null
+
+	// Whether an array formula's cell metadata makes it a dynamic array.
+	isDynamicArray(cellMetadata: number): boolean {
+		return cellMetadata >= 0 && this.dynamicArrays?.dynamic.has(cellMetadata) === true
+	}
+
+	// Whether a formula typed on a sheet gives an array as the engine calculates it now (a function lifted over a
+	// range: LEN(A1:A3)); false without an engine to ask.
+	givesArray(sheet: SheetId, formula: string): boolean {
+		const engine = this.engine
+		const index = this.engineIndex(sheet)
+		const text =
+			engine === null || index < 0 || holdsBracket(formula) ? null : engineArrayFormula(formula, this.nameAliases, this.lambdaNames)
+
+		return text !== null && engine !== null && engine.givesArray(index, text)
+	}
+
+	// The cell metadata a new dynamic array is written with (the metadata part made for it first), or null when the
+	// workbook cannot take one here: it is written as an ordinary formula then.
+	newDynamicArrayCm(): number | null {
+		if (this.dynamicArrays === null) return null
+
+		const before = this.dynamicArrays
+		const made = dynamicArrayCm(this.workbook, before)
+
+		if (made === null) return null
+
+		this.dynamicArrays = made.arrays
+
+		if (made.made !== undefined) {
+			const part = made.made
+			const after = made.arrays
+
+			this.madeMetadata = {
+				remove: () => {
+					part.remove()
+					this.dynamicArrays = before
+				},
+				add: () => {
+					part.add()
+					this.dynamicArrays = after
+				}
+			}
+		}
+
+		return made.cm
+	}
+
+	// The metadata part newDynamicArrayCm made since last asked, for the edit that made it to take away on undo.
+	takeMadeMetadata(): MadeMetadata | null {
+		const made = this.madeMetadata
+
+		this.madeMetadata = null
+
+		return made
+	}
+
+	private madeMetadata: MadeMetadata | null = null
 
 	private markAlone(sheet: SheetId, row: number, col: number): void {
 		let cells = this.alone.get(sheet)
@@ -1544,10 +1674,39 @@ export class XlsxDocument {
 	}
 
 	// A formula cell the engine holds its result for, told stale here when what it reads changes.
-	private held(model: XlsxSheetModel, row: number, col: number, value: RawCellContent): EngineCell {
+	private held(model: XlsxSheetModel, row: number, col: number, value: RawCellContent, spill?: SpillSize): EngineCell {
 		this.markAlone(model.id, row, col)
 
-		return { row, col, content: new HeldResult(value) }
+		return { row, col, content: new HeldResult(value), ...(spill !== undefined && { spill }) }
+	}
+
+	// Whether a block of a sheet holds a merged cell or a table, which a dynamic array does not spill over
+	// (support.microsoft.com "How to correct a #SPILL! error": "Spill range has merged cells", "Spill range in
+	// table"). Tables as last read (loadTables, before an edit recalculates).
+	private spillBlocked(sheet: SheetId | undefined, range: SheetRange): boolean {
+		const model = sheet === undefined ? null : this.model(sheet)
+
+		if (sheet === undefined || model === null) return false
+
+		const merges = model.merges
+
+		for (let i = 0; i + 3 < merges.length; i += 4)
+			if (
+				(merges[i] ?? 0) <= range.endRow &&
+				(merges[i + 2] ?? 0) >= range.startRow &&
+				(merges[i + 1] ?? 0) <= range.endCol &&
+				(merges[i + 3] ?? 0) >= range.startCol
+			)
+				return true
+
+		return (this.tables ?? []).some(
+			table =>
+				table.sheet === sheet &&
+				table.range.startRow <= range.endRow &&
+				table.range.endRow >= range.startRow &&
+				table.range.startCol <= range.endCol &&
+				table.range.endCol >= range.startCol
+		)
 	}
 
 	// A structure edit moved, renamed or removed what held results read (tables, names, cells): the tables are read
@@ -1560,6 +1719,8 @@ export class XlsxDocument {
 	// Reads every table part once, as edits left it (what structured references in held formulas read). A table part
 	// another edit rewrites is left out: a formula naming it reads what is not known.
 	async loadTables(): Promise<void> {
+		this.dynamicArrays ??= await readDynamicArrays(this.workbook)
+
 		if (this.tables !== null) return
 
 		const tables: XlsxTableRange[] = []
@@ -1830,15 +1991,32 @@ export class XlsxDocument {
 		const stored = this.storedResult(model, kind, value, this.shownResults.get(model.id)?.get(cellKeyOf(row, col)))
 		const formulaKind = store.formulas.kind(formula)
 
+		// A dynamic array spills over what it calculates (or keeps its stored result where the engine cannot calculate it).
+		if (formulaKind === FormulaKind.ARRAY) {
+			const array = store.formulas.formula(formula)
+			const ref = array.ref
+
+			if (ref !== null && ref.startRow === row && ref.startCol === col && this.isDynamicArray(array.cellMetadata)) {
+				const spill = { rows: ref.endRow - ref.startRow + 1, cols: ref.endCol - ref.startCol + 1 }
+				const text = this.formulaText(model, formula, row, col)
+				const content = holdsBracket(text) ? null : engineSpillFormula(text, this.nameAliases, this.lambdaNames)
+
+				if (content === null || engineLacks(text, this.unknownNames.size === 0 ? undefined : this.unknownName, this.lambdaNames))
+					return this.held(model, row, col, stored ?? NAME_ERROR, spill)
+
+				return stored === undefined ? { row, col, content, spill } : { row, col, content, fallback: stored, spill }
+			}
+		}
+
 		// An array formula or data table keeps its stored result: its text is not read.
 		if ((formulaKind === FormulaKind.DATA_TABLE || formulaKind === FormulaKind.ARRAY) && stored !== undefined)
 			return this.held(model, row, col, stored)
 
 		const text = this.formulaText(model, formula, row, col)
 		// A structured or external reference is known not to parse there: not given to it, which spares a failed parse.
-		const content = holdsBracket(text) ? null : engineCellFormula(text, this.nameAliases)
+		const content = holdsBracket(text) ? null : engineCellFormula(text, this.nameAliases, this.lambdaNames)
 
-		const lacks = engineLacks(text, this.unknownNames.size === 0 ? undefined : this.unknownName)
+		const lacks = engineLacks(text, this.unknownNames.size === 0 ? undefined : this.unknownName, this.lambdaNames)
 
 		if (content === null) {
 			const shown = stored ?? (lacks ? NAME_ERROR : undefined)
@@ -1858,6 +2036,8 @@ export class XlsxDocument {
 	// Defined names the engine lacks, upper case: what reads them is not calculated here.
 	private unknownNames = new Set<string>()
 	private readonly unknownName = (name: string): boolean => this.unknownNames.has(name)
+	// Defined names holding a LAMBDA, upper case: a formula calls one as a function.
+	private lambdaNames: ReadonlySet<string> = new Set()
 	// Defined names the engine reads under an alias or as the reference they stand for, upper case.
 	private nameAliases: ReadonlyMap<string, string> = new Map()
 
@@ -1904,8 +2084,18 @@ export class XlsxDocument {
 			if (reference !== null) spelled.set(upper, reference)
 		}
 
+		// The names holding a LAMBDA, which formulas call as functions (MyFn(2)).
+		const lambdas = new Set(
+			named.filter(({ named: entry }) => LAMBDA_NAME.test(entry.formula)).map(({ named: entry }) => entry.name.toUpperCase())
+		)
+
+		this.lambdaNames = lambdas
+
 		const candidates = named.map(({ named: entry, scope }) => {
-			const name = { name: aliases.get(entry.name.toUpperCase()) ?? entry.name, expression: engineFormula(entry.formula, spelled) }
+			const name = {
+				name: aliases.get(entry.name.toUpperCase()) ?? entry.name,
+				expression: engineFormula(entry.formula, spelled, lambdas)
+			}
 
 			return { named: entry, name: scope === undefined ? name : { ...name, scope } }
 		})
@@ -1926,7 +2116,7 @@ export class XlsxDocument {
 			for (const { named: entry } of candidates) {
 				const upper = entry.name.toUpperCase()
 
-				if (!unknown.has(upper) && engineLacks(entry.formula, name => unknown.has(name))) {
+				if (!unknown.has(upper) && engineLacks(entry.formula, name => unknown.has(name), lambdas)) {
 					unknown.add(upper)
 					added = true
 				}
@@ -1971,7 +2161,8 @@ export class XlsxDocument {
 						values[col] = cell.content
 
 						if ((block.formulas?.[k] ?? -1) >= 0) {
-							if (cell.fallback !== undefined || cell.content instanceof HeldResult) formulas.push(cell)
+							if (cell.fallback !== undefined || cell.content instanceof HeldResult || cell.spill !== undefined)
+								formulas.push(cell)
 							if (block.kinds[k] === CellKind.EMPTY) missing.push({ sheet: index, row, col })
 						}
 					}
@@ -1989,14 +2180,15 @@ export class XlsxDocument {
 		const engine = new FormulaEngine(
 			sheets,
 			names,
-			this.date1904,
+			this.dateBase,
 			(index, row, col) => {
 				const sheet = sheetAt(index)
 
 				if (sheet !== undefined) this.markAlone(sheet, row, col)
 			},
 			(index, row) => this.rowState(sheetAt(index), row),
-			this.ownSettings.locale
+			this.ownSettings.locale,
+			(index, range) => this.spillBlocked(sheetAt(index), range)
 		)
 
 		this.engine = engine
@@ -2077,6 +2269,38 @@ export class XlsxDocument {
 			)
 	}
 
+	// The cells holding INDIRECT, by sheet, as the engine last calculated them (none without one).
+	indirectCells(): Map<SheetId, { row: number; col: number }[]> {
+		const bySheet = new Map<SheetId, { row: number; col: number }[]>()
+
+		for (const cell of this.engine?.indirectCells() ?? []) {
+			const sheet = this.engineSheets[cell.sheet]
+
+			if (sheet === undefined) continue
+
+			const list = bySheet.get(sheet)
+
+			if (list === undefined) bySheet.set(sheet, [{ row: cell.row, col: cell.col }])
+			else list.push({ row: cell.row, col: cell.col })
+		}
+
+		return bySheet
+	}
+
+	// Cells of a sheet merged or unmerged: its dynamic arrays calculated again (a merged cell is in the way of one),
+	// their results stored (logged).
+	spillsChanged(sheet: SheetId, log: CellLog | null, changes: SheetChangeSink): void {
+		const engine = this.engine
+		const index = this.engineIndex(sheet)
+
+		if (engine !== null && index >= 0)
+			this.apply(
+				this.guarded(() => engine.spillsChanged(index)),
+				log,
+				changes
+			)
+	}
+
 	// The rows of an edit hidden or shown again by its undo or redo: the engine calculates SUBTOTAL and AGGREGATE again
 	// (giving what it gave then), and the results the edit stored come back from its log. An edit made with no engine
 	// logged none: what the engine now gives is stored.
@@ -2131,6 +2355,62 @@ export class XlsxDocument {
 		this.apply([...results, ...this.staleAlone(sheet, cells, results)], log, changes)
 	}
 
+	// apply in parts of WRITE_SLICE results, yielding between them once the clock's slice is up.
+	async applySliced(
+		results: readonly RecalculatedCell[],
+		log: CellLog | null,
+		changes: SheetChangeSink,
+		clock: SliceClock | undefined
+	): Promise<void> {
+		if (clock === undefined || results.length <= WRITE_SLICE) {
+			this.apply(results, log, changes)
+
+			return
+		}
+
+		for (let start = 0; start < results.length; start += WRITE_SLICE) {
+			this.apply(results.slice(start, start + WRITE_SLICE), log, changes)
+
+			if (clock.due) await clock.pause()
+		}
+	}
+
+	// applyRecalculated in parts of WRITE_SLICE results, yielding between them once the clock's slice is up (a large
+	// spill). Each result names its own cell, so the parts may go in any order.
+	async applyRecalculatedSliced(
+		sheet: SheetId,
+		cells: readonly { row: number; col: number }[],
+		results: readonly RecalculatedCell[],
+		log: CellLog | null,
+		changes: SheetChangeSink,
+		clock: SliceClock | undefined
+	): Promise<void> {
+		const all = [...results, ...this.staleAlone(sheet, cells, results)]
+
+		if (clock === undefined || all.length <= WRITE_SLICE) {
+			this.apply(all, log, changes)
+
+			return
+		}
+
+		for (let start = 0; start < all.length; start += WRITE_SLICE) {
+			this.apply(all.slice(start, start + WRITE_SLICE), log, changes)
+
+			if (clock.due) await clock.pause()
+		}
+	}
+
+	// guarded for engine work in parts (a sliced structure edit).
+	async guardedSliced(work: () => Promise<RecalculatedCell[]>): Promise<RecalculatedCell[]> {
+		try {
+			return await work()
+		} catch {
+			this.dropEngine()
+
+			return []
+		}
+	}
+
 	// Runs engine work; should the engine fail part-way it is dropped (built again from the cells when next needed).
 	guarded(work: () => RecalculatedCell[]): RecalculatedCell[] {
 		try {
@@ -2145,6 +2425,10 @@ export class XlsxDocument {
 	// Stores recalculated results in their formula cells. A result the engine failed on itself keeps the file's
 	// stored one; with none stored, it is shown, the cell keeps no result and Excel is asked to recalculate.
 	apply(results: readonly RecalculatedCell[], log: CellLog | null, changes: SheetChangeSink): void {
+		// The values dynamic arrays spill, by sheet: written together (writeCells), as one write per cell rebuilds its
+		// row block each time.
+		const spilled = new Map<SheetId, { row: number; col: number; state: CellState }[]>()
+
 		for (const result of results) {
 			const sheet = this.engineSheets[result.sheet]
 			const model = sheet === undefined ? null : this.model(sheet)
@@ -2152,9 +2436,25 @@ export class XlsxDocument {
 			if (sheet === undefined || model === null) continue
 
 			const store = model.store as SheetStore
+
+			if (result.spilled === true) {
+				let writes = spilled.get(sheet)
+
+				if (writes === undefined) spilled.set(sheet, (writes = []))
+
+				this.spilledWrite(sheet, model, result, log, changes, writes)
+
+				continue
+			}
+
 			const slot = store.locate(result.row, result.col)
 
 			if (slot < 0 || store.formula(slot) < 0) continue
+
+			// A dynamic array's cell: its range follows what it spills over, and its #SPILL! is its result.
+			const spilling = result.spill !== undefined && this.spillsAt(store, slot, result.row, result.col)
+
+			if (spilling && result.spill !== undefined) this.resizeSpill(sheet, store, slot, result.row, result.col, result.spill, log)
 
 			// A held result is no longer what its formula gives, or an edit closed a circle through a cell holding a
 			// result: kept, as reading the saved file here shows it, and Excel recalculates on load (logged, so an undo
@@ -2177,14 +2477,14 @@ export class XlsxDocument {
 			if (this.holdsResult(sheet, result)) continue
 
 			const kind = store.kind(slot)
-			const unsupported = FormulaEngine.unsupported(result.value)
+			const unsupported = FormulaEngine.unsupported(result.value) && !(spilling && result.value === "#SPILL!")
 
 			if (unsupported && result.value !== CYCLE && kind !== CellKind.EMPTY) continue
 
 			log?.touch(sheet, result.row, result.col, () => this.state(sheet, result.row, result.col), false)
 
-			const style = store.style(slot)
-			const formula = store.formula(slot)
+			const style = store.style(store.locate(result.row, result.col))
+			const formula = store.formula(store.locate(result.row, result.col))
 			const value = result.value === CYCLE ? 0 : result.value
 			let next: CellState
 
@@ -2227,6 +2527,91 @@ export class XlsxDocument {
 			this.write(sheet, result.row, result.col, next)
 			changes.content(sheet, { startRow: result.row, startCol: result.col, endRow: result.row, endCol: result.col })
 		}
+
+		for (const [sheet, writes] of spilled) this.writeCells(sheet, writes)
+	}
+
+	// Whether the cell's formula is a dynamic array of its own cell.
+	private spillsAt(store: SheetStore, slot: number, row: number, col: number): boolean {
+		const id = store.formula(slot)
+
+		if (id < 0 || store.formulas.kind(id) !== FormulaKind.ARRAY) return false
+
+		const formula = store.formulas.formula(id)
+
+		return (
+			formula.ref !== null &&
+			formula.ref.startRow === row &&
+			formula.ref.startCol === col &&
+			this.isDynamicArray(formula.cellMetadata)
+		)
+	}
+
+	// A dynamic array's range made what it spills over now (logged): the formula written again with that ref.
+	private resizeSpill(
+		sheet: SheetId,
+		store: SheetStore,
+		slot: number,
+		row: number,
+		col: number,
+		size: SpillSize,
+		log: CellLog | null
+	): void {
+		const formula = store.formulas.formula(store.formula(slot))
+		const ref = formula.ref
+
+		if (ref !== null && ref.endRow - ref.startRow + 1 === size.rows && ref.endCol - ref.startCol + 1 === size.cols) return
+
+		const state = this.state(sheet, row, col)
+		const resized = store.formulas.add({
+			...formula,
+			ref: { startRow: row, startCol: col, endRow: row + size.rows - 1, endCol: col + size.cols - 1 }
+		})
+
+		log?.touch(sheet, row, col, () => state, false)
+		this.write(sheet, row, col, { ...state, formula: resized })
+	}
+
+	// A value a dynamic array spills into a cell of its own (or, null, takes back from it): a value, the cell's format
+	// kept (logged), added to `writes`.
+	private spilledWrite(
+		sheet: SheetId,
+		model: XlsxSheetModel,
+		result: RecalculatedCell,
+		log: CellLog | null,
+		changes: SheetChangeSink,
+		writes: { row: number; col: number; state: CellState }[]
+	): void {
+		const { row, col, value } = result
+		const state = this.state(sheet, row, col)
+
+		// A formula of the user's own is never written over (the engine reports none).
+		if (state.present && state.formula >= 0) return
+
+		const style = state.present ? state.style : 0
+		let next: CellState
+
+		if (value === null)
+			next = style === 0 ? ABSENT : { present: true, kind: CellKind.EMPTY, value: 0, style, formula: -1, shown: undefined }
+		else if (typeof value === "number") next = { present: true, kind: CellKind.NUMBER, value, style, formula: -1, shown: undefined }
+		else if (typeof value === "boolean")
+			next = { present: true, kind: CellKind.BOOLEAN, value: value ? 1 : 0, style, formula: -1, shown: undefined }
+		else if (result.error === true)
+			next = { present: true, kind: CellKind.ERROR, value: model.store.strings.intern(value), style, formula: -1, shown: undefined }
+		else {
+			const strings = this.workbook.sharedStrings
+			const encoded = encodeXstring(value)
+			const found = strings.find(encoded)
+			const index = found >= 0 ? found : strings.append(encoded)
+
+			if (found < 0) this.workbook.changes.sharedStringsAppended()
+
+			next = { present: true, kind: CellKind.SHARED_STRING, value: index, style, formula: -1, shown: undefined }
+		}
+
+		log?.touch(sheet, row, col, () => state, false)
+		writes.push({ row, col, state: next })
+		changes.content(sheet, { startRow: row, startCol: col, endRow: row, endCol: col })
 	}
 
 	// --- Saving ---

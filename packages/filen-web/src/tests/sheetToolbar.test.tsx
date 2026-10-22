@@ -25,6 +25,14 @@ vi.mock("@filen/office/react/sheet", async importOriginal => ({
 	roundedGeneral: () => rounded.text
 }))
 
+// What the Insert menu asks the features that insert for.
+const requests = vi.hoisted(() => ({ image: vi.fn(), shortcut: vi.fn() }))
+
+vi.mock("@/features/spreadsheet/next/objects/insertRequests", () => ({
+	requestImage: requests.image,
+	requestShortcut: requests.shortcut
+}))
+
 const { SheetToolbar } = await import("@/features/spreadsheet/next/toolbar/sheetToolbar")
 
 afterEach(() => {
@@ -119,7 +127,7 @@ async function mounted(): Promise<{
 }
 
 describe("spreadsheet toolbar", () => {
-	it("lays out Excel's groups in one row: history, font, toggles, colours, borders, alignment, merge, number, freeze, sort and filter, find", async () => {
+	it("lays out Excel's groups in one row: history, font, toggles, colours, borders, alignment, merge, number, freeze, sort and filter, insert, find", async () => {
 		await mounted()
 
 		const toolbar = screen.getByRole("toolbar", { name: "Formatting" })
@@ -147,6 +155,7 @@ describe("spreadsheet toolbar", () => {
 			"Percent style",
 			"Freeze",
 			"Sort and filter",
+			"Insert",
 			"Find and replace",
 			"More formatting"
 		])
@@ -341,5 +350,29 @@ describe("spreadsheet toolbar", () => {
 			expect((await style()).bold).toBeUndefined()
 		})
 		expect(await numFmt()).toBe("General")
+	})
+
+	it("asks for a picture from this device or the drive, a link and a note from the Insert menu", async () => {
+		const { model } = await mounted()
+		const pick = async (name: string): Promise<void> => {
+			fireEvent.click(screen.getByRole("button", { name: "Insert" }))
+			fireEvent.click(await screen.findByRole("menuitem", { name }))
+		}
+
+		await pick("Image from file…")
+		await pick("Image from drive…")
+		await pick("Link…")
+		await pick("Note")
+		expect(requests.image.mock.calls).toEqual([
+			[model, "file"],
+			[model, "drive"]
+		])
+		expect(requests.shortcut.mock.calls).toEqual([
+			[model, "hyperlink"],
+			[model, "note"]
+		])
+		// The chart types are a submenu of their own.
+		fireEvent.click(screen.getByRole("button", { name: "Insert" }))
+		expect(await screen.findByRole("menuitem", { name: "Chart" })).toBeDefined()
 	})
 })

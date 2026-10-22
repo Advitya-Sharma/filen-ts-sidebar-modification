@@ -22,6 +22,7 @@ import {
 	type SheetFileKind,
 	type SheetFileSharing,
 	type SheetId,
+	type SheetKind,
 	type SheetLayout,
 	type SheetLayoutPatch,
 	type SheetProtectedAction,
@@ -50,6 +51,7 @@ import {
 import {
 	defineSheetFeature,
 	type SheetChangeSink,
+	type SheetCommandInfo,
 	type SheetCommandContext,
 	type SheetEditStep,
 	type SheetFeature,
@@ -554,6 +556,13 @@ function later(slicing: Slicing | undefined): Promise<void> {
 	})
 }
 
+// Whether a command runs on a sheet of `kind`. A chartsheet or dialog sheet has no cells, and a macro sheet's are
+// not edited here: only sheet operations and commands that declare it (a chartsheet's chart) run on them, so no
+// edit lands on cells the save would never write.
+function runsOn(info: SheetCommandInfo, kind: SheetKind): boolean {
+	return kind === "worksheet" || info.structure === true || info.anySheet === true
+}
+
 function intersects(range: SheetRange, startRow: number, startCol: number, endRow: number, endCol: number): boolean {
 	return range.startRow <= endRow && range.endRow >= startRow && range.startCol <= endCol && range.endCol >= startCol
 }
@@ -877,6 +886,12 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 
 		this.dependents(collector)
 
+		if (this.registry.observe.length > 0 && (collector.ranges.size > 0 || collector.layouts.size > 0)) {
+			const context = this.readContext(undefined)
+
+			for (const observe of this.registry.observe) observe(context, { ranges: collector.ranges, layouts: collector.layouts })
+		}
+
 		const invalidated: SheetRegion[] = []
 
 		for (const move of collector.moves) {
@@ -921,7 +936,9 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 
 			const { sheet: _sheet, ...layout } = this.fullLayout(sheet)
 
-			layouts.push({ sheet, layout })
+			// The extensions go whole, empty too: one a feature no longer produces (its last object deleted) then leaves the
+			// client, which keeps any field a patch leaves out.
+			layouts.push({ sheet, layout: { ...layout, extensions: layout.extensions ?? {} } })
 		}
 
 		const styles = this.styles.take()
@@ -1082,9 +1099,12 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 
 		const sheet = (command as { readonly sheet?: unknown }).sheet
 
-		// A sheet an undo took away while the command was on its way.
-		if (typeof sheet === "number" && !this.document.sheets().some(summary => summary.id === sheet))
-			return { reason: "unsupported", detail: "sheet" }
+		if (typeof sheet === "number") {
+			const kind = this.document.sheets().find(summary => summary.id === sheet)?.kind
+
+			// A sheet an undo took away while the command was on its way, or one without cells to change.
+			if (kind === undefined || !runsOn(info, kind)) return { reason: "unsupported", detail: "sheet" }
+		}
 
 		if (info.protection !== undefined && typeof sheet === "number") return this.document.protects(sheet, info.protection)
 
@@ -1164,12 +1184,13 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 		const enabled: boolean[] = []
 		const reasons: (SheetRefusal["reason"] | null)[] = []
 		const context = this.readContext(undefined)
+		const kind = this.document.sheets().find(summary => summary.id === request.sheet)?.kind
 
 		for (const type of request.types) {
 			const handler = this.registry.command(type)
 			let reason: SheetRefusal["reason"] | null = null
 
-			if (handler === undefined) reason = "unsupported"
+			if (handler === undefined || (kind !== undefined && !runsOn(handler.info, kind))) reason = "unsupported"
 			else if (handler.info.write && (this.declined || this.writability.state === "viewOnly")) reason = "readOnly"
 			else if (handler.info.structure === true && this.document.workbookProtection()?.structure === true) reason = "protectedWorkbook"
 			else if (handler.info.protection !== undefined && this.document.protects(request.sheet, handler.info.protection) !== null)
@@ -1211,11 +1232,27 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 	save(options?: { readonly signal?: SheetAbortSignal }): Promise<SheetSaveResult> {
 		return this.enqueue(async (): Promise<SheetSaveResult> => {
 			const version = this.history.current
-			const saved = await this.document.save({
-				untouched: version === 0,
-				...(this.slicing !== undefined && { slicing: this.slicing }),
-				...(options?.signal !== undefined && { signal: options.signal })
-			})
+
+			const restores: (() => void)[] = []
+
+			const saved = await (async () => {
+				try {
+					if (version !== 0)
+						for (const save of this.registry.save) {
+							const restore = await save(this.readContext(options?.signal))
+
+							if (restore !== undefined) restores.push(restore)
+						}
+
+					return await this.document.save({
+						untouched: version === 0,
+						...(this.slicing !== undefined && { slicing: this.slicing }),
+						...(options?.signal !== undefined && { signal: options.signal })
+					})
+				} finally {
+					for (const restore of restores.reverse()) restore()
+				}
+			})()
 
 			if (!saved.ok) return saved
 

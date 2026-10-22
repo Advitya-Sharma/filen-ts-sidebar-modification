@@ -25,6 +25,11 @@ import { previewSheetNotes } from "@/locales/en/previewSheet/notes"
 import { previewSheetClipboard } from "@/locales/en/previewSheet/clipboard"
 import { previewSheetSortFilter } from "@/locales/en/previewSheet/sortFilter"
 import { previewSheetFormula } from "@/locales/en/previewSheet/formula"
+import { previewSheetTouch } from "@/locales/en/previewSheet/touch"
+import { previewSheetPrint } from "@/locales/en/previewSheet/print"
+import { previewSheetFormats } from "@/locales/en/previewSheet/formats"
+import { previewSheetObjects } from "@/locales/en/previewSheet/objects"
+import { previewSheetCharts } from "@/locales/en/previewSheet/charts"
 
 export const preview = {
 	// ── Header ───────────────────────────────────────────────────────────────
@@ -752,5 +757,10 @@ export const preview = {
 	...previewSheetNotes,
 	...previewSheetClipboard,
 	...previewSheetSortFilter,
-	...previewSheetFormula
+	...previewSheetFormula,
+	...previewSheetTouch,
+	...previewSheetPrint,
+	...previewSheetFormats,
+	...previewSheetObjects,
+	...previewSheetCharts
 } as const

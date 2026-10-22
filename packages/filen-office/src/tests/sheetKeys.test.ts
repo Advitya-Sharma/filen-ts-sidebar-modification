@@ -95,7 +95,11 @@ const TABLE: readonly (readonly [Press, Press | null, SheetShortcut])[] = [
 	[{ key: "=", code: "Digit0", alt: true, shift: true }, null, "autoSum"],
 	[{ key: "k", ctrl: true }, { key: "k", meta: true }, "hyperlink"],
 	[{ key: "F2", shift: true }, { key: "F2", shift: true }, "note"],
-	[{ key: "F11", shift: true }, { key: "F11", shift: true }, "newSheet"]
+	[{ key: "F11", shift: true }, { key: "F11", shift: true }, "newSheet"],
+	[{ key: "5", code: "Digit5", ctrl: true, alt: true }, { key: "∞", code: "Digit5", ctrl: true, alt: true }, "selectObject"],
+	[{ key: "F6" }, { key: "F6" }, "nextPane"],
+	[{ key: "F6", shift: true }, { key: "F6", shift: true }, "previousPane"],
+	[{ key: "F10", shift: true }, { key: "F10", shift: true }, "contextMenu"]
 ]
 
 describe("the sheet shortcut table", () => {
@@ -130,6 +134,14 @@ describe("the sheet shortcut table", () => {
 		// The German layout's ´ sits on the Equal position.
 		expect(press({ key: "´", code: "Equal", alt: true }, false)).toBeNull()
 		expect(press({ key: "=", code: "Equal", ctrl: true, alt: true }, false)).toBeNull()
+	})
+
+	it("reads Ctrl+Alt+5 as reaching the sheet's objects, Control+Option+5 on a Mac, and leaves AltGr's characters typed", () => {
+		expect(press({ key: "5", code: "Digit5", ctrl: true, alt: true }, false)).toBe("selectObject")
+		expect(press({ key: "∞", code: "Digit5", ctrl: true, alt: true }, true)).toBe("selectObject")
+		// AZERTY's AltGr+5 types "[" (Windows reports AltGr as Ctrl+Alt).
+		expect(press({ key: "[", code: "Digit5", ctrl: true, alt: true }, false)).toBeNull()
+		expect(press({ key: "5", code: "Digit5", ctrl: true }, false)).toBe("strikethrough")
 	})
 
 	it("keeps Ctrl and Command apart on a Mac", () => {

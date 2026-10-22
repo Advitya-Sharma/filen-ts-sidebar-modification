@@ -29,7 +29,9 @@ async function saved(session: Parameters<typeof savedBytes>[0]): Promise<{ sheet
 const XA = '<row r="2"><c r="A2"><v>9</v></c><c r="B2" t="inlineStr"><is><t>x</t></is></c></row>'
 
 describe("sheet session: a formula giving a range", () => {
-	it("stores the engine's own value for it, and leaves the formulas beside it as they are", async () => {
+	// Typed, it is a dynamic array (support.microsoft.com "Dynamic array formulas and spilled array behavior"): it spills
+	// down from its cell, and a cell there holding something makes it #SPILL!.
+	it("spills it as a dynamic array, #SPILL! while a cell is in the way, and leaves the formulas there as they are", async () => {
 		const { session, info } = await openFixture({
 			sheets: [
 				{
@@ -47,9 +49,9 @@ describe("sheet session: a formula giving a range", () => {
 		const tile = await firstTile(session, one)
 		const { sheet } = await saved(session)
 
-		expect([tileEntry(tile, 15, 10)?.text, tileEntry(tile, 14, 10)?.text]).toEqual(["10", "#VALUE!"])
+		expect([tileEntry(tile, 15, 10)?.text, tileEntry(tile, 14, 10)?.text]).toEqual(["10", "#SPILL!"])
 		expect(cellXml(sheet, "K16")).toContain("<v>10</v>")
-		expect(cellXml(sheet, "K15")).not.toContain("<v>1</v>")
+		expect(cellXml(sheet, "K15")).toContain('<f t="array" ref="K15">A1:A3</f><v>#SPILL!</v>')
 		session.close()
 	})
 })
@@ -90,9 +92,9 @@ describe("sheet session: an ordinary formula giving an array constant", () => {
 
 describe("sheet session: a function the engine lacks, under an error trap", () => {
 	it.each([
-		["IFERROR(_xlfn.PERCENTOF(A1:A2,B1:B2),A1)", "5", false],
-		["IF(ISERROR(_xlfn.VALUETOTEXT(A1)),A1,_xlfn.VALUETOTEXT(A1))", "1x", true],
-		["IFERROR(TRIMMEAN(A1:A2,0),A1)", "10", false]
+		["IFERROR(_xlfn.FORECAST.ETS.SEASONALITY(A1:A2,B1:B2),A1)", "5", false],
+		["IF(ISERROR(LEFTB(A1)),A1,LEFTB(A1))", "1x", true],
+		["IFERROR(GETPIVOTDATA(A1,A2),A1)", "10", false]
 	] as const)(
 		"%s keeps its stored result, never the trap's, and asks Excel to recalculate once a precedent changes",
 		async (formula, cached, isString) => {
@@ -127,7 +129,7 @@ describe("sheet session: a function the engine lacks, under an error trap", () =
 					name: "One",
 					body:
 						'<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" t="inlineStr"><is><t>x</t></is></c>' +
-						`<c r="C1"><f>IFERROR(_xlfn.PERCENTOF(A1:A2,B1:B2),0)</f><v>5</v></c></row>${XA}` +
+						`<c r="C1"><f>IFERROR(_xlfn.FORECAST.ETS.SEASONALITY(A1:A2,B1:B2),0)</f><v>5</v></c></row>${XA}` +
 						'<row r="9"><c r="F9"><v>1</v></c></row></sheetData>'
 				}
 			]
@@ -159,7 +161,13 @@ describe("sheet session: a function the engine lacks, under an error trap", () =
 		})
 		const one = info.sheets[0]?.id ?? 0
 
-		changeOf(await session.command({ type: "cells.set", sheet: one, cells: cells([[0, 2, "=IFERROR(PERCENTOF(A1:A2,B1:B2),0)"]]) }))
+		changeOf(
+			await session.command({
+				type: "cells.set",
+				sheet: one,
+				cells: cells([[0, 2, "=IFERROR(FORECAST.ETS.SEASONALITY(A1:A2,B1:B2),0)"]])
+			})
+		)
 
 		const { sheet, workbook } = await saved(session)
 
@@ -175,7 +183,13 @@ describe("sheet session: a function the engine lacks, under an error trap", () =
 		})
 		const one = info.sheets[0]?.id ?? 0
 
-		changeOf(await session.command({ type: "cells.set", sheet: one, cells: cells([[0, 2, "=PERCENTOF(Table1[A],Table1[B])"]]) }))
+		changeOf(
+			await session.command({
+				type: "cells.set",
+				sheet: one,
+				cells: cells([[0, 2, "=FORECAST.ETS.SEASONALITY(Table1[A],Table1[B])"]])
+			})
+		)
 
 		const reopened = await openFixture(await savedBytes(session))
 
@@ -212,7 +226,7 @@ describe("sheet session: a function the engine lacks, under an error trap", () =
 
 	it("holds a formula that reads a defined name the engine lacks", async () => {
 		const { session, info } = await openFixture({
-			workbookTail: '<definedNames><definedName name="avg">TRIMMEAN(One!$A$1:$A$2,0)</definedName></definedNames>',
+			workbookTail: '<definedNames><definedName name="avg">GETPIVOTDATA(One!$A$1,One!$A$2)</definedName></definedNames>',
 			sheets: [
 				{
 					name: "One",
@@ -241,7 +255,7 @@ describe("sheet session: results held from the file", () => {
 					name: "One",
 					body:
 						'<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" t="inlineStr"><is><t>x</t></is></c>' +
-						`<c r="C1"><f>_xlfn.PERCENTOF(A1:A2,B1:B2)</f><v>5</v></c><c r="D1"><f>C1*2</f><v>10</v></c><c r="E1"><f>C1+F1</f><v>5</v></c></row>${XA}</sheetData>`
+						`<c r="C1"><f>_xlfn.FORECAST.ETS.SEASONALITY(A1:A2,B1:B2)</f><v>5</v></c><c r="D1"><f>C1*2</f><v>10</v></c><c r="E1"><f>C1+F1</f><v>5</v></c></row>${XA}</sheetData>`
 				}
 			]
 		})
@@ -281,7 +295,7 @@ describe("sheet session: results held from the file", () => {
 			sheets: [
 				{
 					name: "One",
-					body: '<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="C1"><f>TRIMMEAN(A1:A3,0)</f><v>10</v></c></row><row r="2"><c r="A2"><v>9</v></c></row></sheetData>'
+					body: '<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="C1"><f>GETPIVOTDATA(A1,A3)</f><v>10</v></c></row><row r="2"><c r="A2"><v>9</v></c></row></sheetData>'
 				}
 			]
 		})

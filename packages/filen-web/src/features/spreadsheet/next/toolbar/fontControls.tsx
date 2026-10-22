@@ -60,6 +60,7 @@ export function FontPicker({
 			</SelectTrigger>
 			<SelectContent
 				data-preview-surface
+				aria-label={t("previewSheetFormatFont")}
 				className="max-h-80 min-w-48"
 			>
 				{groups.map(group => (
@@ -109,6 +110,7 @@ export function SizePicker({ size, disabled, onSize }: { size: number; disabled:
 				<SelectValue />
 			</SelectTrigger>
 			<SelectContent
+				aria-label={t("previewSheetFormatFontSize")}
 				data-preview-surface
 				className="max-h-80"
 			>

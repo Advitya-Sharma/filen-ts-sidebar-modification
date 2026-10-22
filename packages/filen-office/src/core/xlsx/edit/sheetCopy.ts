@@ -18,6 +18,7 @@ import {
 	type XlsxDefinedName,
 	type XlsxSection,
 	type XlsxSheetEntry,
+	type XlsxSheetModel,
 	type XlsxWorkbookModel
 } from "../model/types"
 import { XlsxSheet } from "../read/index"
@@ -631,6 +632,12 @@ export async function duplicateSheet(
 	copy.view = { ...model.view, tabSelected: false }
 	copy.protection = model.protection
 	copy.tabColor = model.tabColor
+
+	if (model.fitToPage !== undefined) {
+		const copied: XlsxSheetModel = copy
+
+		copied.fitToPage = model.fitToPage
+	}
 
 	for (const section of copied) {
 		const writer = section.own ? OWN_SHEET_SECTIONS.get(section.name) : undefined

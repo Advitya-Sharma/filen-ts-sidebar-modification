@@ -229,6 +229,7 @@ describe("sheet function catalogue", () => {
 
 		expect(wrong).toEqual([])
 		expect(storedFormula("single(A1:A3)")).toBe("_xlfn.SINGLE(A1:A3)")
-		expect(shownFormula("_xlfn.SINGLE(A1:A3)")).toBe("SINGLE(A1:A3)")
+		expect(shownFormula("_xlfn.SINGLE(A1:A3)")).toBe("@A1:A3")
+		expect(storedFormula("@A1:A3")).toBe("_xlfn.SINGLE(A1:A3)")
 	})
 })

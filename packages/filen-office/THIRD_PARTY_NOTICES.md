@@ -140,11 +140,12 @@ THE SOFTWARE.
 
 ## LibreOffice locale data
 
-- Source: LibreOffice 7.5.0.3 (`i18npool/source/localedata/data`, `svl` number format keywords), https://www.libreoffice.org
+- Source: LibreOffice 7.5.0.3 (`i18npool/source/localedata/data`, `svl` number format keywords, `scaddins/source/analysis`), https://www.libreoffice.org
 - Copyright: The Document Foundation and the LibreOffice contributors
 - Licence: Mozilla Public License 2.0 (notice below; full text at https://mozilla.org/MPL/2.0/); the source files also incorporate work under the Apache License 2.0 (notice below, text below)
 - Derived files, modified for `@filen/office`:
   - `src/core/sheet/clipboard/libreOffice.ts` (per-locale decimal and group separators, the name of General and the localised number format keyword letters)
+  - `src/core/sheet/formula/functions/bondMath.ts` (the bond and depreciation day-count arithmetic of the analysis add-in, where Microsoft's documentation gives no algorithm)
 
 ```
 This Source Code Form is subject to the terms of the Mozilla Public

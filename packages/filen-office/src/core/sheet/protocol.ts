@@ -426,15 +426,13 @@ export interface SheetLayoutPatch {
 
 // Why a session opened read-only, or became so. The app turns each into its message.
 //   legacyFormat   .xls / .xlt: only "save as .xlsx"
-//   strict         Strict OOXML the gate could not prove
 //   lossy          saving would lose part of the file (the gate's proof failed)
 //   tooLarge       too large to prove that saving loses nothing
 //   unsafe         a text file that would not save back as it was (encoding, line ends, quoting)
 //   signed         digitally signed: an edit would break the signature
 //   readOnlyRecommended  the author asked for read-only (fileSharing) and the user did not choose to edit
 //   modifyPassword the file's password to modify was not given
-export type SheetViewOnlyReason =
-	"legacyFormat" | "strict" | "lossy" | "tooLarge" | "unsafe" | "signed" | "readOnlyRecommended" | "modifyPassword"
+export type SheetViewOnlyReason = "legacyFormat" | "lossy" | "tooLarge" | "unsafe" | "signed" | "readOnlyRecommended" | "modifyPassword"
 
 // A workbook opens unproven: the gate runs once the app says the user set out to edit (SheetSessionApi.intent),
 // and an edit sent before the verdict waits for it.

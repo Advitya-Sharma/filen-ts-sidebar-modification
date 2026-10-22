@@ -58,10 +58,11 @@ function Mount({ model }: { model: SheetGridModel }) {
 	)
 }
 
-function mount(range: { startRow: number; startCol: number; endRow: number; endCol: number }): Harness {
+function mount(range: { startRow: number; startCol: number; endRow: number; endCol: number }, chartsheet = false): Harness {
 	const harness: Harness = { commands: [], queries: [] }
 	const model = {
 		getSnapshot: () => ({ sheet: 0, selection: { ranges: [range] } }),
+		cellless: () => chartsheet,
 		intent: () => Promise.resolve(),
 		command: (command: SheetCommand) => {
 			harness.commands.push(command)
@@ -154,5 +155,18 @@ describe("useSheetClipboard", () => {
 
 		expect(first?.type === "clipboard.pasteHtml" ? first.html : "").not.toContain("script")
 		expect(first).toMatchObject({ sheet: 0, at: { row: 2, col: 1 }, text: "x" })
+	})
+
+	it("copies and pastes nothing on a chartsheet, which has no cells", async () => {
+		vi.stubGlobal("navigator", { clipboard: { write: vi.fn(() => Promise.resolve()), writeText: vi.fn(() => Promise.resolve()) } })
+
+		const harness = mount({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 }, true)
+
+		document.dispatchEvent(clipboardEvent("copy", {}))
+		document.dispatchEvent(clipboardEvent("paste", { "text/plain": "x" }))
+		await Promise.resolve()
+
+		expect(harness.queries).toEqual([])
+		expect(harness.commands).toEqual([])
 	})
 })

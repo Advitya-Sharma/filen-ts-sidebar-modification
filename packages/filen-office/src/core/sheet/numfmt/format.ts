@@ -1,12 +1,12 @@
 import { DEFAULT_PALETTE } from "../style/palette"
-import { MAX_SERIAL_1900, MAX_SERIAL_1904, serialDate, type DateParts } from "./date"
+import { MAX_SERIAL_1900, MAX_SERIAL_1904, serialDate, type DateBase, type DateParts } from "./date"
 import { decompose, fractionDigits, integerDigits, roundDigits, type Digits } from "./decimal"
 import { NUMFMT_EN_US, type NumFmtLocale } from "./locale"
 import { LCID_SYSTEM_DATE, LCID_SYSTEM_TIME, SectionKind, Tok, parseNumFmt, type NumFmt, type NumFmtSection, type Token } from "./parse"
 
 export interface NumFmtOptions {
-	// The workbook's date system (workbookPr date1904).
-	readonly date1904?: boolean
+	// The workbook's date system (workbookPr date1904; ISO_1900 for a Strict workbook's 1900 date base).
+	readonly date1904?: DateBase
 	readonly locale?: NumFmtLocale
 	// The language data a [$-xxxx] tag names (its low 16 bits), when the app has it; else `locale`'s.
 	readonly localeFor?: (lcid: number) => NumFmtLocale | undefined
@@ -475,7 +475,7 @@ function localeOf(section: NumFmtSection, options: NumFmtOptions, locale: NumFmt
 
 // Writes a date section; false when the value is outside the dates the system can show.
 function writeDate(section: NumFmtSection, value: number, options: NumFmtOptions, locale: NumFmtLocale): boolean {
-	const date1904 = options.date1904 === true
+	const date1904 = options.date1904 ?? false
 
 	if (!(value >= 0)) return false
 
@@ -514,7 +514,7 @@ function writeDate(section: NumFmtSection, value: number, options: NumFmtOptions
 	const ticksPerDay = 86400 * unit
 	const day = Math.floor(ticks / ticksPerDay)
 
-	if (day > (date1904 ? MAX_SERIAL_1904 : MAX_SERIAL_1900)) return false
+	if (day > (date1904 === true ? MAX_SERIAL_1904 : MAX_SERIAL_1900)) return false
 
 	const ofDay = ticks - day * ticksPerDay
 	const seconds = Math.floor(ofDay / unit)

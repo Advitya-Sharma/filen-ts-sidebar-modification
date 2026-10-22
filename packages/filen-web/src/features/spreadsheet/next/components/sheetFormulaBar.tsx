@@ -3,19 +3,21 @@ import { flushSync } from "react-dom"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { rangeName } from "@filen/office/core/sheet"
-import type { SheetGridHandle, SheetGridState } from "@filen/office/react/sheet"
+import { cellsEditable, celllessSheet, type SheetGridHandle, type SheetGridState } from "@filen/office/react/sheet"
 import { Button } from "@/components/ui/button"
 import { cn } from "@filen/shared"
 import { isImeKeydown } from "@/lib/ime"
 import { parseNameBox } from "@/features/spreadsheet/next/lib/nameBox.logic"
 import type { SheetFormulaExtension } from "@/features/spreadsheet/next/formulaBar/useSheetFormula"
 
-// The name box: the selection's name, and where to go when one is typed (a cell, or a range to select).
+// The name box: the selection's name, and where to go when one is typed (a cell, or a range to select). A sheet
+// without cells (a chartsheet) has neither: the box is empty and disabled.
 function NameBox({ grid, gridRef }: { grid: SheetGridState; gridRef: RefObject<SheetGridHandle | null> }) {
 	const { t } = useTranslation("preview")
 	const { selection } = grid
 	const range = selection.ranges[selection.ranges.length - 1]
-	const shown = range === undefined ? "" : rangeName(range)
+	const cellless = celllessSheet(grid)
+	const shown = range === undefined || cellless ? "" : rangeName(range)
 	// What is typed while the box has focus; null shows the selection.
 	const [typed, setTyped] = useState<string | null>(null)
 
@@ -45,9 +47,10 @@ function NameBox({ grid, gridRef }: { grid: SheetGridState; gridRef: RefObject<S
 		<input
 			aria-label={t("previewSheetNameBox")}
 			value={typed ?? shown}
+			disabled={cellless}
 			spellCheck={false}
 			autoComplete="off"
-			className="h-7 w-24 shrink-0 truncate rounded-md bg-muted px-2 text-center font-mono text-xs tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring"
+			className="h-7 w-24 shrink-0 truncate rounded-md bg-muted px-2 text-center font-mono text-xs tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 pointer-coarse:text-base"
 			onFocus={event => {
 				setTyped(shown)
 				event.currentTarget.select()
@@ -84,7 +87,7 @@ function ReferenceBackdrop({ colored, scroll }: { colored: ReactNode; scroll: nu
 	return (
 		<div
 			aria-hidden="true"
-			className="pointer-events-none absolute inset-0 overflow-hidden px-2 font-mono text-xs leading-7 whitespace-pre"
+			className="pointer-events-none absolute inset-0 overflow-hidden px-2 font-mono text-xs leading-7 whitespace-pre pointer-coarse:text-base"
 		>
 			<div style={{ transform: `translateX(${String(-scroll)}px)` }}>{colored}</div>
 		</div>
@@ -109,6 +112,8 @@ export function SheetFormulaBar({
 }) {
 	const { t } = useTranslation("preview")
 	const { model, editing, active } = grid
+	// A chartsheet's, dialog sheet's or macro sheet's cells are not edited.
+	const editable = canEdit && cellsEditable(grid)
 	const [scroll, setScroll] = useState(0)
 	const coloredText = editing === null ? null : (formula?.coloredText ?? null)
 	const colored = coloredText !== null
@@ -149,7 +154,7 @@ export function SheetFormulaBar({
 				grid={grid}
 				gridRef={gridRef}
 			/>
-			{canEdit && formula !== undefined ? (
+			{editable && formula !== undefined ? (
 				<Button
 					variant="ghost"
 					size="icon-xs"
@@ -161,7 +166,7 @@ export function SheetFormulaBar({
 					Σ
 				</Button>
 			) : null}
-			{canEdit ? (
+			{editable ? (
 				<div className="relative flex h-7 min-w-0 flex-1 rounded-md focus-within:bg-muted/60">
 					{colored ? (
 						<ReferenceBackdrop
@@ -177,7 +182,7 @@ export function SheetFormulaBar({
 						spellCheck={false}
 						autoComplete="off"
 						className={cn(
-							"relative h-7 min-w-0 flex-1 bg-transparent px-2 font-mono text-xs leading-7 outline-none aria-invalid:text-destructive",
+							"relative h-7 min-w-0 flex-1 bg-transparent px-2 font-mono text-xs leading-7 outline-none aria-invalid:text-destructive pointer-coarse:text-base",
 							colored && "text-transparent caret-foreground selection:text-transparent"
 						)}
 						onScroll={event => {

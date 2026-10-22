@@ -59,6 +59,10 @@ export type SheetShortcut =
 	| "hideColumns"
 	| "unhideRows"
 	| "unhideColumns"
+	| "selectObject"
+	| "nextPane"
+	| "previousPane"
+	| "contextMenu"
 
 // The shortcuts the grid cannot perform itself: without an app that takes them, they do nothing (and the browser's
 // own use of the keys stays).
@@ -81,7 +85,11 @@ export const APP_SHORTCUTS: ReadonlySet<SheetShortcut> = new Set<SheetShortcut>(
 	"hideRows",
 	"hideColumns",
 	"unhideRows",
-	"unhideColumns"
+	"unhideColumns",
+	"selectObject",
+	"nextPane",
+	"previousPane",
+	"contextMenu"
 ])
 
 // A key with its modifiers. `primary` is Ctrl on Windows and Command on a Mac; `control` is the Control key itself
@@ -300,6 +308,15 @@ export const SHEET_SHORTCUTS: readonly ShortcutEntry[] = [
 		windows: [{ code: "Digit0", primary: true, shift: true }],
 		mac: [{ code: "Digit0", control: true, shift: true }]
 	},
+	// The sheet's floating objects: the first in view, then Tab cycles them ("Keyboard shortcuts in Excel": Ctrl+Alt+5,
+	// then Tab). By the "5" it types, not its position: where Ctrl+Alt is AltGr and types another character there
+	// (AZERTY's "["), the key stays that character's. Excel for Mac documents none; Control+Option+5 types nothing.
+	{ action: "selectObject", windows: [{ key: "5", primary: true, alt: true }], mac: [{ code: "Digit5", control: true, alt: true }] },
+	// The panes beside the sheet (F6: "switches between the worksheet, ribbon, task pane"; Shift+F6 the other way) and
+	// the context menu at the active cell (Shift+F10), on Windows and the Mac alike.
+	{ action: "nextPane", windows: [{ key: "F6" }], mac: [{ key: "F6" }] },
+	{ action: "previousPane", windows: [{ key: "F6", shift: true }], mac: [{ key: "F6", shift: true }] },
+	{ action: "contextMenu", windows: [{ key: "F10", shift: true }], mac: [{ key: "F10", shift: true }] },
 	// The app's.
 	// Shift+F3, Shift+F4 and Ctrl+Shift+F4 are Excel for the web's.
 	{

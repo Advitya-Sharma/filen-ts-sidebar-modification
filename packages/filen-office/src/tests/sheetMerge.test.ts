@@ -135,3 +135,41 @@ describe("sheet session: cells unmerged", () => {
 		session.close()
 	})
 })
+
+describe("sheet session: cells merged over a dynamic array", () => {
+	// support.microsoft.com "How to correct a #SPILL! error": "Spill range has merged cells".
+	it("hold it back as #SPILL!, and unmerged it spills again; undo and redo follow", async () => {
+		const { session, info } = await openFixture({
+			sheets: [{ name: "S", body: '<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>' }]
+		})
+		const sheet = info.sheets[0]!.id
+		const column = async (): Promise<string[]> => {
+			const tile = await firstTile(session, sheet)
+
+			return [0, 1, 2].map(row => tileEntry(tile, row, 5)?.text ?? "")
+		}
+
+		await session.intent()
+		changeOf(
+			await session.command({
+				type: "cells.set",
+				sheet,
+				cells: { rows: Uint32Array.of(0), cols: Uint16Array.of(5), inputs: ["=SEQUENCE(3)"] }
+			})
+		)
+		changeOf(await session.command({ type: "merge.cells", sheet, ranges: [range(1, 5, 1, 6)], mode: "merge", discard: true }))
+		expect(await column()).toEqual(["#SPILL!", "", ""])
+
+		changeOf(await session.command({ type: "merge.unmerge", sheet, ranges: [range(1, 5, 1, 6)] }))
+		expect(await column()).toEqual(["1", "2", "3"])
+
+		changeOf(await session.undo())
+		expect(await column()).toEqual(["#SPILL!", "", ""])
+		changeOf(await session.redo())
+		expect(await column()).toEqual(["1", "2", "3"])
+		changeOf(await session.undo())
+		changeOf(await session.undo())
+		expect(await column()).toEqual(["1", "2", "3"])
+		session.close()
+	})
+})

@@ -3,6 +3,7 @@ import { bytesSource } from "../../../core/opc/index"
 import type { FormulaEngine } from "../../../core/sheet/formula/formulaEngine"
 import { registerSheetFunctions } from "../../../core/sheet/formula/functions"
 import { sheetFunction } from "../../../core/sheet/functions/catalogue"
+import { engineSpelledName } from "../../../core/sheet/refs/formulaRefs"
 import type { SheetFileKind } from "../../../core/sheet/protocol"
 import { RenderStyleTable } from "../../../core/sheet/session"
 import { XlsxDocument } from "../../../core/xlsx/edit/document"
@@ -29,7 +30,9 @@ export type Support = "engine" | "cached" | "missing" | "unknown"
 // "cached"), missing from the engine (to be added), or not one of Excel's functions at all (a user's or an
 // add-in's name).
 export function functionSupport(name: string): Support {
-	if (REGISTERED.has(name)) return "engine"
+	const spelled = engineSpelledName(name)
+
+	if (REGISTERED.has(spelled ?? name)) return "engine"
 
 	const listed = sheetFunction(name)
 
@@ -243,6 +246,8 @@ export class RecalcTally {
 
 		try {
 			await document.readyAllSheets()
+			// What an edit reads before it builds the engine: the tables and the dynamic-array metadata.
+			await document.loadTables()
 
 			const engine = document.buildEngine()
 			const hf = hyperFormula(engine)

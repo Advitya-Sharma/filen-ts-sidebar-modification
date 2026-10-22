@@ -160,10 +160,51 @@ export function readTabColor(section: Uint8Array | null): XlsxColor | null {
 
 export function writeSheetPr(sheet: XlsxSheetModel, section: Uint8Array | null, prefix: string): Uint8Array | null {
 	const colored = writeTabColor(sheet, section, prefix)
+	const filtered =
+		sheet.filterMode === undefined || (colored === null && !sheet.filterMode)
+			? colored
+			: syncAttributes(colored, qualify(prefix, "sheetPr"), [booleanField("filterMode", sheet.filterMode, false)])
 
-	if (sheet.filterMode === undefined || (colored === null && !sheet.filterMode)) return colored
+	return writeFitToPage(sheet, filtered, prefix)
+}
 
-	return syncAttributes(colored, qualify(prefix, "sheetPr"), [booleanField("filterMode", sheet.filterMode, false)])
+// pageSetUpPr fitToPage (§18.3.1.65), the last child sheetPr's schema allows (CT_SheetPr).
+function writeFitToPage(sheet: XlsxSheetModel, section: Uint8Array | null, prefix: string): Uint8Array | null {
+	const fit = sheet.fitToPage
+
+	if (fit === undefined) return section
+
+	const field = [booleanField("fitToPage", fit, false)]
+
+	if (section === null) {
+		if (!fit) return null
+
+		return encodeUtf8(
+			`<${qualify(prefix, "sheetPr")}><${qualify(prefix, "pageSetUpPr")}${attr("fitToPage", "1")}/></${qualify(prefix, "sheetPr")}>`
+		)
+	}
+
+	const document = parseXml(section)
+	const root = document.documentElement()
+	const existing = childElement(document, root, "pageSetUpPr")
+
+	if (existing < 0) {
+		if (!fit) return section
+
+		const editor = new XmlEditor(document)
+
+		editor.append(root, syncAttributes(null, qualify(prefix, "pageSetUpPr"), field))
+
+		return editor.serialize()
+	}
+
+	if (readBoolean(document.attribute(existing, "fitToPage"), false) === fit) return section
+
+	const editor = new XmlEditor(document)
+
+	editor.replace(existing, syncAttributes(document.raw(existing), qualify(prefix, "pageSetUpPr"), field))
+
+	return editor.serialize()
 }
 
 function writeTabColor(sheet: XlsxSheetModel, section: Uint8Array | null, prefix: string): Uint8Array | null {

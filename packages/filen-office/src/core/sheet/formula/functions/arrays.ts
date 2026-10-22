@@ -1,5 +1,15 @@
 import { CellError, EmptyValue, FunctionArgumentType, SimpleRangeValue, type ImplementedFunctions } from "hyperformula"
-import { calcError, SheetFunctionPlugin, valueError, type PluginCall, type PluginScalar, type PluginState } from "./plugin"
+import {
+	calcError,
+	rawNumber,
+	SheetFunctionPlugin,
+	valueError,
+	type PluginAst,
+	type PluginCall,
+	type PluginScalar,
+	type PluginState,
+	type PluginValue
+} from "./plugin"
 
 // Array shaping functions as support.microsoft.com defines them, and TYPE.
 
@@ -53,7 +63,61 @@ export class ArrayFunctions extends SheetFunctionPlugin {
 		DROP: { method: "drop", ...SHAPE },
 		CHOOSECOLS: { method: "choosecols", ...CHOOSE },
 		CHOOSEROWS: { method: "chooserows", ...CHOOSE },
-		TYPE: { method: "type", parameters: [{ argumentType: FunctionArgumentType.ANY }] }
+		TYPE: { method: "type", parameters: [{ argumentType: FunctionArgumentType.ANY }] },
+		FILTER: { method: "filter", parameters: [{ argumentType: FunctionArgumentType.ANY }], repeatLastArgs: 1, ...ARRAY_ARGUMENTS }
+	}
+
+	// FILTER(array, include, [if_empty]) (support.microsoft.com "FILTER function"): the rows (include a column as tall as
+	// the array) or columns (a row as wide) where include is TRUE or a number other than 0; with none, if_empty, or
+	// #CALC! without it. An include of another shape is #VALUE!; an error in it is the result. (The engine's own read a
+	// third argument as another include, and refused a block.)
+	filter(ast: PluginCall, state: PluginState): unknown {
+		const [arrayAst, includeAst, emptyAst] = ast.args
+
+		if (arrayAst === undefined || includeAst === undefined || ast.args.length > 3) return valueError()
+
+		const array = this.evaluateAst(arrayAst, state)
+
+		if (array instanceof CellError) return array
+
+		const include = this.evaluateAst(includeAst, state)
+
+		if (include instanceof CellError) return include
+
+		const rows: PluginScalar[][] = array instanceof SimpleRangeValue ? array.data : [[array as PluginScalar]]
+		const height = rows.length
+		const width = rows[0]?.length ?? 0
+		const flags: PluginScalar[][] = include instanceof SimpleRangeValue ? include.data : [[include as PluginScalar]]
+		const flagHeight = flags.length
+		const flagWidth = flags[0]?.length ?? 0
+		const byRows = flagWidth === 1 && flagHeight === height
+		const byCols = !byRows && flagHeight === 1 && flagWidth === width
+
+		if (!byRows && !byCols) return valueError()
+
+		const kept: number[] = []
+		const count = byRows ? height : width
+
+		for (let index = 0; index < count; index++) {
+			const flag = byRows ? flags[index]?.[0] : flags[0]?.[index]
+
+			if (flag instanceof CellError) return flag
+			if (typeof flag === "string") return valueError()
+
+			const number = typeof flag === "boolean" ? Number(flag) : flag === undefined ? 0 : (rawNumber(flag) ?? 0)
+
+			if (number !== 0) kept.push(index)
+		}
+
+		if (kept.length === 0) {
+			if (emptyAst === undefined || emptyAst.type === ("EMPTY" as PluginAst["type"])) return calcError()
+
+			return this.evaluateAst(emptyAst, state) satisfies PluginValue
+		}
+
+		return SimpleRangeValue.onlyValues(
+			byRows ? kept.map(row => [...(rows[row] ?? [])]) : rows.map(line => kept.map(col => line[col] ?? EmptyValue))
+		)
 	}
 
 	// TAKE(array, rows, [columns]): rows and columns from the start (from the end when negative); 0 is #CALC!.

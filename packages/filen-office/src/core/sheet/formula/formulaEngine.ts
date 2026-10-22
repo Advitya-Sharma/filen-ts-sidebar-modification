@@ -1,6 +1,8 @@
+import { ISO_1900, type DateBase } from "../numfmt/date"
 import {
 	CellError,
 	DenseSparseChooseBasedOnThreshold,
+	EmptyValue,
 	DetailedCellError,
 	ErrorType,
 	FunctionArgumentType,
@@ -19,7 +21,17 @@ import { formulaInputs, quoteSheetNames, sameSheet, sheetNameNeedsQuotes } from 
 import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
 import type { SizeAxis } from "../sizes/sizes"
 import { registerSheetFunctions } from "./functions"
-import { CALC_ERROR, guardFunctionPlugins, UNMODELED, withRowState } from "./functions/plugin"
+import { installIndirect, withIndirect, type IndirectHost, type IndirectRead } from "./functions/indirect"
+import { spillError, withSpill, type SpillHost, type SpillSize } from "./functions/spill"
+import {
+	CALC_ERROR,
+	guardFunctionPlugins,
+	installLiftTracking,
+	trackLifts,
+	UNMODELED,
+	withRowState,
+	type PluginScalar
+} from "./functions/plugin"
 import { textDateParser } from "./textDates"
 import { installWholeRanges, WholeRanges, withWholeRanges } from "./wholeRanges"
 
@@ -41,6 +53,11 @@ export interface RecalculatedCell {
 	// A result held from the file (HeldResult) whose inputs changed: it is no longer what the formula gives. The
 	// value is the held one.
 	stale?: true
+	// A dynamic-array formula's cell: what it spills over now from its own cell (1 by 1 when it is #SPILL!).
+	spill?: SpillSize
+	// A cell a dynamic-array formula spills over, not a formula of its own: its value now (null where the spill no
+	// longer reaches).
+	spilled?: true
 }
 
 // A formula's stored result, held by the engine in its place: the formula is not calculated here (a function the
@@ -62,14 +79,24 @@ export interface EngineCell {
 	col: number
 	content: RawCellContent | HeldResult
 	fallback?: RawCellContent
+	// A dynamic-array formula (calculated through SPILL_FUNCTION, or held): what it spills over now.
+	spill?: SpillSize
 }
 
 export interface EngineSheet {
 	name: string
 	// A held cell (HeldResult) is listed in `formulas` too.
 	rows: (RawCellContent | HeldResult)[][]
-	// Its formula cells that carry a fallback or hold a result.
+	// Its formula cells that carry a fallback or hold a result, or spill (EngineCell.spill).
 	formulas: EngineCell[]
+}
+
+// A block of cells a dynamic array would spill over, 0-based and inclusive.
+export interface SpillRange {
+	readonly startRow: number
+	readonly startCol: number
+	readonly endRow: number
+	readonly endCol: number
 }
 
 export interface EngineName {
@@ -111,6 +138,52 @@ export class EngineLimitError extends Error {
 	}
 }
 
+// The rounds of INDIRECT calculated again for what they read (followIndirect): past them a chain of INDIRECT reading
+// INDIRECT keeps what it has.
+const INDIRECT_ROUNDS = 16
+
+// Changed cells times INDIRECT reads past which every INDIRECT is calculated again rather than each matched.
+const INDIRECT_MATCHES = 4_000_000
+
+// A cell a dynamic-array formula deleted with its own cell had spilled over (engine sheet id), and the value it spilled
+// there.
+interface Orphan {
+	readonly address: SimpleCellAddress
+	readonly value: PluginScalar
+}
+
+// A dynamic-array formula: what it spills over now from its cell, the values it spilled there (the file's before it
+// first calculated here), and what its latest calculation gave, until written (writeSpills).
+interface Spill {
+	readonly address: SimpleCellAddress
+	size: SpillSize
+	values: readonly (readonly PluginScalar[])[]
+	// removed: the formula is gone from its cell, and what it spilled is cleared.
+	next: { readonly values: readonly (readonly PluginScalar[])[]; readonly blocked: boolean; readonly removed?: true } | undefined
+}
+
+// Whether the value a cell holds is the one spilled there.
+function spilledValue(spilled: PluginScalar, held: PluginScalar): boolean {
+	if (spilled === held) return true
+
+	const a = typeof spilled === "object" && spilled !== null && "val" in spilled ? spilled.val : spilled
+	const b = typeof held === "object" && held !== null && "val" in held ? held.val : held
+
+	if (a instanceof CellError && b instanceof CellError) return a.type === b.type && a.message === b.message
+
+	return a === b
+}
+
+// A spilled value as content the engine takes: text stays text, an error its text.
+function spilledContent(value: PluginScalar): RawCellContent {
+	if (value instanceof CellError) return ERROR_TEXT[value.type] ?? "#VALUE!"
+	if (value === EmptyValue) return 0
+	if (typeof value === "string") return `'${value}`
+	if (typeof value === "object" && value !== null && "val" in value) return value.val
+
+	return value
+}
+
 // Failing formulas at build past which the engine is built again with them held.
 const REBUILD_FAILING = 256
 
@@ -122,6 +195,9 @@ export const UNPARSEABLE = `'${PARSE_ERROR}`
 
 // Changed cells read back between yields to a slice clock (releaseEvaluation).
 const READ_PART = 4_096
+
+// Cells a dynamic array spills written and evaluated between yields to a slice clock: a few milliseconds of work.
+const SPILL_PART = 4_096
 
 // Runs sliced steps to their end without yielding.
 function drain<T>(steps: Generator<void, T>): T {
@@ -202,6 +278,8 @@ function registerHeld(): void {
 	registerSheetFunctions()
 	guardFunctionPlugins()
 	installWholeRanges(LICENSE_KEY)
+	installIndirect(LICENSE_KEY)
+	installLiftTracking()
 	registered = true
 }
 
@@ -212,7 +290,7 @@ const ERROR_TYPES = new Map<string, ErrorType>(
 // What a formula naming a sheet the workbook does not have shows (Excel's reading of it).
 const REF_ERROR = "#REF!"
 
-function engineConfig(date1904: boolean, locale: SheetLocale | undefined): Partial<ConfigParams> {
+function engineConfig(date1904: DateBase, locale: SheetLocale | undefined): Partial<ConfigParams> {
 	return {
 		licenseKey: LICENSE_KEY,
 		// Ordinary formulas as Excel calculates them: a range where one value is expected meets the
@@ -223,10 +301,15 @@ function engineConfig(date1904: boolean, locale: SheetLocale | undefined): Parti
 		chooseAddressMappingPolicy: new DenseSparseChooseBasedOnThreshold(0.8),
 		maxRows: MAX_ROWS,
 		maxColumns: MAX_COLUMNS,
-		// Excel's serial dates (1900-02-29 included, or counted from 1904), whitespace and empty-cell
-		// arithmetic.
-		leapYear1900: !date1904,
-		nullDate: date1904 ? { year: 1904, month: 1, day: 1 } : { year: 1899, month: 12, day: 31 },
+		// Excel's serial dates (1900-02-29 included, counted from 1904, or a Strict workbook's plain count from
+		// 1899-12-30: numfmt/date.ts), whitespace and empty-cell arithmetic.
+		leapYear1900: date1904 === false,
+		nullDate:
+			date1904 === true
+				? { year: 1904, month: 1, day: 1 }
+				: date1904 === ISO_1900
+					? { year: 1899, month: 12, day: 30 }
+					: { year: 1899, month: 12, day: 31 },
 		ignoreWhiteSpace: "any",
 		evaluateNullToZero: true,
 		// Text dates and times as the session's locale reads them (textDates.ts), in place of the engine's formats.
@@ -445,6 +528,7 @@ export class FormulaEngine {
 	// Whether a row is shown, hidden or hidden by a filter (functions/plugin.ts ROW_*), by grid sheet index: what
 	// SUBTOTAL and AGGREGATE leave out.
 	private readonly rows: ((sheet: number, row: number) => number) | undefined
+	private readonly blocking: ((sheet: number, range: SpillRange) => boolean) | undefined
 	// The cells whose formula calls SUBTOTAL or AGGREGATE, by engine sheet id (row * MAX_COLUMNS + col): calculated
 	// again when rows are hidden or shown (rowsChanged).
 	private readonly totals = new Map<number, Set<number>>()
@@ -456,6 +540,77 @@ export class FormulaEngine {
 	private readonly definedNames = new Map<string, EngineName>()
 	// The workbook's sheet names in grid order, for the names' own references.
 	private sheetNames: readonly string[] = []
+	// The dynamic-array formulas by changeKey of their cell (writeSpills).
+	private readonly spills = new Map<string, Spill>()
+	// Whether what dynamic arrays calculate is written (not while the engine is built from the file).
+	private spilling = false
+	private readonly spillHost: SpillHost = {
+		owned: anchor => {
+			const entry = this.spills.get(changeKey(anchor))
+
+			// Before the build has its values, the cells it spills over are its whatever they hold.
+			return entry === undefined ? undefined : { size: entry.size, values: entry.values.length === 0 ? undefined : entry.values }
+		},
+		spilled: (anchor, values, blocked) => {
+			const key = changeKey(anchor)
+			let entry = this.spills.get(key)
+
+			if (entry === undefined) {
+				entry = { address: anchor, size: { rows: 1, cols: 1 }, values: [[0]], next: undefined }
+				this.spills.set(key, entry)
+			}
+
+			entry.next = { values, blocked }
+		},
+		blocks: (anchor, rows, cols) => {
+			const sheet = this.building === null ? this.sheetIndex(anchor.sheet) : (this.building[anchor.sheet] ?? -1)
+
+			return (
+				sheet >= 0 &&
+				this.blocking?.(sheet, {
+					startRow: anchor.row,
+					startCol: anchor.col,
+					endRow: anchor.row + rows - 1,
+					endCol: anchor.col + cols - 1
+				}) === true
+			)
+		}
+	}
+	// What each INDIRECT call read at its last calculation (by changeKey of its cell), and the run that was.
+	private readonly indirectReads = new Map<string, { address: SimpleCellAddress; vertex: unknown; reads: IndirectRead[]; run: number }>()
+	// Each top-level run of the engine's (run), counted.
+	private runs = 0
+	// While an engine is built (this.engine is not it yet).
+	private inBuild = false
+	// A sheet was added, renamed or removed: what INDIRECT names by sheet name may be another sheet's now, so every
+	// INDIRECT calculates again at the next recalculation.
+	private sheetsChanged = false
+	private depth = 0
+	private readonly indirect: IndirectHost = {
+		name: (name, own) => {
+			const sheet = this.building === null ? this.sheetIndex(own) : (this.building[own] ?? -1)
+			const upper = name.toUpperCase()
+			const named = this.definedNames.get(`${String(sheet)}|${upper}`) ?? this.definedNames.get(`-1|${upper}`)
+
+			if (named === undefined) return undefined
+
+			const scope =
+				named.scope === undefined ? own : this.building === null ? this.sheetIds[named.scope] : this.building.indexOf(named.scope)
+
+			return { text: named.expression, sheet: scope ?? own }
+		},
+		read: (address, read) => {
+			const key = changeKey(address)
+			const known = this.indirectReads.get(key)
+
+			if (known === undefined || known.run !== this.runs) {
+				// The cell's formula as calculated now: written over, it is another (followRound lets go of it).
+				const vertex = this.inBuild ? null : this.engine.dependencyGraph.addressMapping.getCell(address)
+
+				this.indirectReads.set(key, { address, vertex, reads: read === null ? [] : [read], run: this.runs })
+			} else if (read !== null) known.reads.push(read)
+		}
+	}
 	private readonly link: WholeLink = {
 		names: () => this.definedNames.size > 0,
 		add: (sheets, names, own) => {
@@ -496,17 +651,21 @@ export class FormulaEngine {
 	// index; with it, a formula in a circle the engine finds, or naming a sheet the workbook lacks, is held too (the
 	// caller tracks what held results read).
 	// `rows`: whether a row of a sheet (by grid sheet index) is shown (0), hidden (1) or hidden by a filter (2); every
-	// row shown without it. `locale`: how text dates in formulas read (en-US's month first without it).
+	// row shown without it. `locale`: how text dates in formulas read (en-US's month first without it). `blocking`:
+	// whether a range of a sheet (by grid sheet index) holds a merged cell or a table, which a dynamic array does not
+	// spill over.
 	constructor(
 		sheets: readonly EngineSheet[],
 		names: readonly EngineName[],
-		date1904 = false,
+		date1904: DateBase = false,
 		held?: (sheet: number, row: number, col: number) => void,
 		rows?: (sheet: number, row: number) => number,
-		locale?: SheetLocale
+		locale?: SheetLocale,
+		blocking?: (sheet: number, range: SpillRange) => boolean
 	) {
 		this.held = held
 		this.rows = rows
+		this.blocking = blocking
 		this.config = engineConfig(date1904, locale)
 		this.sheetNames = sheets.map(sheet => sheet.name)
 
@@ -566,7 +725,23 @@ export class FormulaEngine {
 				: [{ name: named.name, expression: `=${named.expression}`, ...(scope !== undefined && { scope }) }]
 		})
 
-		const build = (): HyperFormula => this.run(() => HyperFormula.buildFromSheets(contents, this.config, namedExpressions))
+		const build = (): HyperFormula => {
+			this.inBuild = true
+
+			try {
+				return this.run(() => HyperFormula.buildFromSheets(contents, this.config, namedExpressions))
+			} finally {
+				this.inBuild = false
+			}
+		}
+
+		// The dynamic arrays, each over what the file has it spill over.
+		sheets.forEach(sheet => {
+			const id = order.indexOf(sheet.name)
+
+			for (const cell of sheet.formulas)
+				if (cell.spill !== undefined) this.ownSpill({ sheet: id, row: cell.row, col: cell.col }, cell.spill)
+		})
 
 		// While the first build calculates, the engine's sheet ids are the record's key order.
 		this.building = order.map(name => sheets.findIndex(sheet => sheet.name === name))
@@ -623,6 +798,145 @@ export class FormulaEngine {
 		}
 
 		this.settle(pending, new Map())
+		this.followDynamic(new Map(), true)
+		this.snapshotSpills()
+		this.spilling = true
+	}
+
+	// A dynamic-array formula at `address` (engine sheet id) spilling over `size`: its values the cells' as they stand
+	// once the engine has them (snapshotSpills).
+	private ownSpill(address: SimpleCellAddress, size: SpillSize): void {
+		this.spills.set(changeKey(address), { address, size, values: [], next: undefined })
+	}
+
+	// The dynamic arrays of a sheet after rows or columns were inserted (count > 0) or deleted (count < 0) at `at`: a
+	// formula moves with its cell (one deleted is gone), and what it spills over grows or shrinks where the edit runs
+	// through it, its values with it.
+	// Returns the cells, where they are after the edit, that a formula deleted with its cell had spilled over: what
+	// it spilled there goes with it (orphanedSpills).
+	private moveSpills(id: number, axis: SizeAxis, at: number, count: number): Orphan[] {
+		const moved: Spill[] = []
+		const orphans: Orphan[] = []
+
+		for (const [key, entry] of this.spills) {
+			if (entry.address.sheet !== id) continue
+
+			this.spills.delete(key)
+
+			const start = axis === "rows" ? entry.address.row : entry.address.col
+			const length = axis === "rows" ? entry.size.rows : entry.size.cols
+
+			if (count < 0 && start >= at && start < at - count) {
+				// Past the deleted run, the rest of what it spilled over moves up (or left) by the run.
+				for (let offset = at - count - start; offset < length; offset++) {
+					const across = axis === "rows" ? entry.size.cols : entry.size.rows
+
+					for (let other = 0; other < across; other++) {
+						const value = axis === "rows" ? entry.values[offset]?.[other] : entry.values[other]?.[offset]
+
+						if (value === undefined) continue
+
+						orphans.push({
+							address:
+								axis === "rows"
+									? { sheet: id, row: start + offset + count, col: entry.address.col + other }
+									: { sheet: id, row: entry.address.row + other, col: start + offset + count },
+							value
+						})
+					}
+				}
+
+				continue
+			}
+
+			const shifted = start >= at ? Math.max(at, start + count) : start
+			// The part of what it spills over the edit runs through, from its own cell.
+			const from = Math.max(at - start, 1)
+			const span =
+				count > 0
+					? at > start && at < start + length
+						? count
+						: 0
+					: Math.max(0, Math.min(start + length, at - count) - Math.max(start + 1, at))
+			const next = count > 0 ? length + span : length - span
+			// Rows move whole lines (the lines themselves are not copied); columns change each line.
+			const values = axis === "rows" ? (entry.values.slice() as PluginScalar[][]) : entry.values.map(line => [...line])
+
+			if (axis === "rows") {
+				if (count > 0 && span > 0)
+					values.splice(from, 0, ...Array.from({ length: span }, () => new Array<PluginScalar>(entry.size.cols).fill(EmptyValue)))
+				else if (span > 0) values.splice(from, span)
+			} else {
+				for (const line of values) {
+					if (count > 0 && span > 0) line.splice(from, 0, ...new Array<PluginScalar>(span).fill(EmptyValue))
+					else if (span > 0) line.splice(from, span)
+				}
+			}
+
+			moved.push({
+				address: axis === "rows" ? { ...entry.address, row: shifted } : { ...entry.address, col: shifted },
+				size: axis === "rows" ? { rows: next, cols: entry.size.cols } : { rows: entry.size.rows, cols: next },
+				values,
+				next: undefined
+			})
+		}
+
+		for (const entry of moved) this.spills.set(changeKey(entry.address), entry)
+
+		return orphans
+	}
+
+	// Clears the cells orphans name that still hold what was spilled there (a value of the user's own stays), and
+	// adds what that changes to `changes`, the cleared cells as spilled.
+	private *orphanedSpills(orphans: readonly Orphan[], changes: Map<string, RecalculatedCell>): Generator<void, void> {
+		const graph = this.engine.dependencyGraph
+		const cleared = orphans.filter(orphan => {
+			const vertex = graph.addressMapping.getCell(orphan.address)
+
+			return (
+				vertex !== undefined &&
+				typeof (vertex as { getFormula?: unknown }).getFormula !== "function" &&
+				spilledValue(orphan.value, graph.getScalarValue(orphan.address))
+			)
+		})
+
+		if (cleared.length === 0) return
+
+		const written = yield* this.recordingSteps(
+			() =>
+				this.batched(() => {
+					for (const orphan of cleared) this.engine.setCellContents(orphan.address, null)
+				}),
+			null
+		)
+		const keys = new Set(cleared.map(orphan => changeKey(orphan.address)))
+
+		for (const [key, cell] of written) changes.set(key, keys.has(key) ? { ...cell, spilled: true } : cell)
+	}
+
+	// The values the dynamic arrays spill over, as the engine holds them: what each spilled.
+	private snapshotSpills(): void {
+		const graph = this.engine.dependencyGraph
+
+		for (const entry of this.spills.values()) {
+			if (entry.values.length > 0) continue
+
+			const values: PluginScalar[][] = []
+
+			for (let row = 0; row < entry.size.rows; row++) {
+				const line: PluginScalar[] = []
+
+				for (let col = 0; col < entry.size.cols; col++) {
+					const at = { sheet: entry.address.sheet, row: entry.address.row + row, col: entry.address.col + col }
+
+					line.push(graph.addressMapping.getCell(at) === undefined ? EmptyValue : graph.getScalarValue(at))
+				}
+
+				values.push(line)
+			}
+
+			entry.values = values
+		}
 	}
 
 	// The names the engine cannot give a defined name, by index (it reads CustomCost1 or R2D2 as a reference, which
@@ -681,11 +995,262 @@ export class FormulaEngine {
 
 		running = this.answer
 
+		if (this.depth++ === 0) this.runs++
+
 		try {
-			return withWholeRanges(this.whole, () => (this.rows === undefined ? work() : withRowState(this.rowState, work)))
+			return withSpill(this.spillHost, () =>
+				withIndirect(this.indirect, () =>
+					withWholeRanges(this.whole, () => (this.rows === undefined ? work() : withRowState(this.rowState, work)))
+				)
+			)
 		} finally {
 			running = previous
+			this.depth--
 		}
+	}
+
+	// After a calculation that changed `changes`: INDIRECT and spill references calculated again where a cell they read
+	// changed (every one of them with `all`), and what dynamic arrays spilled written beside them, round by round with
+	// what that changes in turn, all added to `changes`. An INDIRECT the run calculated read a changed value cell after
+	// it was written; a formula cell the run calculated may have come after it.
+	private followDynamic(changes: Map<string, RecalculatedCell>, all = false): void {
+		drain(this.following(changes, all))
+	}
+
+	// followDynamic in steps: a large spill is written and read back a part at a time.
+	private *following(changes: Map<string, RecalculatedCell>, all = false): Generator<void, void> {
+		let round: ReadonlyMap<string, RecalculatedCell> = changes
+		let every = all || this.sheetsChanged
+
+		this.sheetsChanged = false
+
+		for (let count = 0; count < INDIRECT_ROUNDS; count++) {
+			const next = new Map<string, RecalculatedCell>()
+
+			yield* this.followRound(round, every, next)
+			every = false
+			yield* this.writeSpills(next)
+
+			if (next.size === 0) return
+
+			let moved = 0
+
+			for (const [key, cell] of next) {
+				if (++moved % READ_PART === 0) yield
+
+				changes.set(key, cell)
+			}
+
+			round = next
+		}
+	}
+
+	private *followRound(
+		round: ReadonlyMap<string, RecalculatedCell>,
+		every: boolean,
+		next: Map<string, RecalculatedCell>
+	): Generator<void, void> {
+		if (this.indirectReads.size === 0) return
+
+		const run = this.runs
+		const due: SimpleCellAddress[] = []
+		let reads = 0
+
+		for (const entry of this.indirectReads.values()) reads += entry.reads.length
+
+		const all = every || round.size * reads > INDIRECT_MATCHES
+
+		const graph = this.engine.dependencyGraph
+
+		for (const [key, entry] of this.indirectReads) {
+			const vertex = graph.addressMapping.getCell(entry.address)
+
+			// Written over or moved: what is there now records its own reads when it calculates.
+			if (vertex === undefined || (entry.vertex !== null && vertex !== entry.vertex)) {
+				this.indirectReads.delete(key)
+
+				continue
+			}
+
+			entry.vertex = vertex
+
+			if (all || (yield* this.readsChanged(key, entry, round, entry.run === run))) due.push(entry.address)
+		}
+
+		if (due.length === 0) return
+
+		yield* this.collecting(
+			this.run(() =>
+				this.batched(() => {
+					const graph = this.engine.dependencyGraph
+
+					for (const address of due) {
+						const vertex = graph.addressMapping.getCell(address)
+
+						if (vertex !== undefined) graph.graph.markNodeAsDirty(vertex)
+					}
+				})
+			),
+			next
+		)
+	}
+
+	// Writes what the dynamic arrays calculated since spilled: their values over the cells beside and below them, the
+	// cells they no longer reach cleared (a cell of the user's own among them is kept: it is what blocks one). Reported in
+	// `next` as spilled, and each formula's cell with what it spills over now. While the engine is built, nothing: it
+	// holds the file's values, which the formula's next calculation writes over where they differ.
+	// The cells are visited, written and read back a part at a time.
+	private *writeSpills(next: Map<string, RecalculatedCell>): Generator<void, void> {
+		const pending: Spill[] = []
+
+		for (const entry of this.spills.values()) if (entry.next !== undefined) pending.push(entry)
+
+		if (pending.length === 0) return
+
+		if (this.building !== null || !this.spilling) {
+			for (const entry of pending) entry.next = undefined
+
+			return
+		}
+
+		const graph = this.engine.dependencyGraph
+		const writes: { address: SimpleCellAddress; content: RawCellContent }[] = []
+		const outputs = new Set<string>()
+		let visited = 0
+
+		for (const entry of pending) {
+			const calculated = entry.next
+
+			if (calculated === undefined) continue
+
+			entry.next = undefined
+
+			const { address } = entry
+			const values = calculated.values
+			const height = calculated.blocked ? 1 : values.length
+			const width = calculated.blocked ? 1 : (values[0]?.length ?? 1)
+
+			for (let row = 0; row < Math.max(height, entry.size.rows); row++) {
+				for (let col = 0; col < Math.max(width, entry.size.cols); col++) {
+					if (row === 0 && col === 0) continue
+					if (++visited % READ_PART === 0) yield
+
+					const at = { sheet: address.sheet, row: address.row + row, col: address.col + col }
+					const inside = row < height && col < width
+					const vertex = graph.addressMapping.getCell(at)
+					const held = vertex === undefined ? EmptyValue : graph.getScalarValue(at)
+
+					if (inside) {
+						const value = values[row]?.[col] ?? 0
+
+						if (vertex === undefined || !spilledValue(value, held)) writes.push({ address: at, content: spilledContent(value) })
+					} else if (row < entry.size.rows && col < entry.size.cols && vertex !== undefined && held !== EmptyValue) {
+						// A cell it spilled over, unless the user's own (a formula, or a value other than the one spilled).
+						const isFormula = typeof (vertex as { getFormula?: unknown }).getFormula === "function"
+						const last = entry.values[row]?.[col]
+
+						if (!isFormula && last !== undefined && spilledValue(last, held)) writes.push({ address: at, content: null })
+					} else continue
+
+					outputs.add(changeKey(at))
+				}
+			}
+
+			entry.size = { rows: height, cols: width }
+			entry.values = calculated.blocked ? [[spillError()]] : (values as PluginScalar[][])
+
+			if (calculated.removed === true) this.spills.delete(changeKey(address))
+		}
+
+		const written = new Map<string, RecalculatedCell>()
+
+		if (writes.length > 0) {
+			// As batched, in parts: nothing else reaches the engine between them (a session answers nothing else until
+			// an edit is done).
+			// A part at a time, each evaluated: the engine's evaluation walks every cell written, too long a task at once
+			// for a large spill. What reads the spill may calculate once per part; its last calculation is the one kept.
+			for (let start = 0; start < writes.length; start += SPILL_PART) {
+				if (start > 0) yield
+
+				yield* this.collecting(
+					this.run(() =>
+						this.batched(() => {
+							for (let i = start; i < Math.min(writes.length, start + SPILL_PART); i++) {
+								const write = writes[i] as { address: SimpleCellAddress; content: RawCellContent }
+
+								this.engine.setCellContents(write.address, write.content)
+							}
+						})
+					),
+					written
+				)
+			}
+		}
+
+		let reported = 0
+
+		for (const [key, cell] of written) {
+			if (++reported % READ_PART === 0) yield
+
+			next.set(key, outputs.has(key) ? { ...cell, spilled: true } : cell)
+		}
+
+		for (const entry of pending) {
+			const key = changeKey(entry.address)
+			const sheet = this.sheetIndex(entry.address.sheet)
+			const known = next.get(key)
+
+			if (sheet < 0 || this.spills.get(key) !== entry) continue
+
+			next.set(key, {
+				...(known ?? {
+					sheet,
+					row: entry.address.row,
+					col: entry.address.col,
+					...this.result(sheet, entry.address.row, entry.address.col)
+				}),
+				spill: entry.size
+			})
+
+			// What it spilled is no change it read.
+			const reads = this.indirectReads.get(key)
+
+			if (reads !== undefined) reads.run = this.runs
+		}
+	}
+
+	// Whether a cell an INDIRECT read is among `changes` (its own cell aside): a formula cell, or any cell when the run
+	// that made the changes did not calculate the INDIRECT (`calculated` false).
+	private *readsChanged(
+		key: string,
+		entry: { readonly reads: readonly IndirectRead[] },
+		changes: ReadonlyMap<string, RecalculatedCell>,
+		calculated: boolean
+	): Generator<void, boolean> {
+		let visited = 0
+
+		for (const [changed, cell] of changes) {
+			if (++visited % READ_PART === 0) yield
+			if (changed === key) continue
+
+			const sheet = this.sheetIds[cell.sheet]
+
+			if (sheet === undefined) continue
+
+			for (const read of entry.reads) {
+				if (
+					read.sheet === sheet &&
+					cell.row >= read.startRow &&
+					cell.row <= read.endRow &&
+					cell.col >= read.startCol &&
+					cell.col <= read.endCol &&
+					(!calculated || this.engine.doesCellHaveFormula({ sheet, row: cell.row, col: cell.col }))
+				)
+					return true
+			}
+		}
+
+		return false
 	}
 
 	private readonly rowState = (sheet: number, row: number): number =>
@@ -758,6 +1323,31 @@ export class FormulaEngine {
 		]
 	}
 
+	// What a sheet's dynamic arrays may spill over changed (cells merged or unmerged, a table): each is calculated
+	// again, and what that changes returned. `sheet`: grid sheet index.
+	spillsChanged(sheet: number): RecalculatedCell[] {
+		const id = this.sheetIds[sheet]
+		const anchors = [...this.spills.values()].filter(entry => entry.address.sheet === id).map(entry => entry.address)
+
+		if (anchors.length === 0) return []
+
+		return [
+			...this.recording(
+				() =>
+					this.batched(() => {
+						const graph = this.engine.dependencyGraph
+
+						for (const address of anchors) {
+							const vertex = graph.addressMapping.getCell(address)
+
+							if (vertex !== undefined) graph.graph.markNodeAsDirty(vertex)
+						}
+					}),
+				null
+			).values()
+		]
+	}
+
 	// A held result as the formula the engine is given.
 	private holding(held: HeldResult): string {
 		const id = this.heldValues.length
@@ -810,9 +1400,10 @@ export class FormulaEngine {
 		}
 
 		// A legacy array formula has no room to spill over the values the file keeps in its range (the
-		// formula's own spill has no origin address; one it inherits has its own).
+		// formula's own spill has no origin address; one it inherits has its own). A dynamic array's #SPILL! is its
+		// result.
 		if (value.type === ErrorType.SPILL) {
-			return value.address === undefined ? new HeldResult(fallback) : null
+			return value.address === undefined && !this.spills.has(changeKey(cell.address)) ? new HeldResult(fallback) : null
 		}
 
 		// An unknown function or name in this very formula, not one it inherits; or a circle it is part of, which the
@@ -948,18 +1539,57 @@ export class FormulaEngine {
 	// Runs an edit, reporting what it recalculates: the held results whose inputs changed among it (`own`, the
 	// edit's own cells, aside).
 	private recording(work: () => ReturnType<HyperFormula["batch"]>, own: ReadonlySet<string> | null): Map<string, RecalculatedCell> {
+		return drain(this.recordingSteps(work, own))
+	}
+
+	// recording in steps: what it changed read back, and the dynamic arrays and INDIRECT followed, a part at a time.
+	private *recordingSteps(
+		work: () => ReturnType<HyperFormula["batch"]>,
+		own: ReadonlySet<string> | null
+	): Generator<void, Map<string, RecalculatedCell>> {
+		return yield* this.recordedSteps(() => this.run(work), own)
+	}
+
+	// A move of rows or columns recorded in steps: the engine moves its cells with evaluation suspended, then, in a task
+	// of its own, calculates what the move changed (each its own engine call, neither of which can be cut).
+	private *movingSteps(move: () => void): Generator<void, Map<string, RecalculatedCell>> {
+		this.engine.suspendEvaluation()
+
+		try {
+			this.run(move)
+		} catch (error) {
+			this.whole.reset()
+			this.engine.resumeEvaluation()
+
+			throw error
+		}
+
+		this.whole.reset()
+
+		yield
+
+		return yield* this.recordedSteps(() => this.run(() => this.engine.resumeEvaluation()), null)
+	}
+
+	private *recordedSteps(
+		work: () => ReturnType<HyperFormula["batch"]>,
+		own: ReadonlySet<string> | null
+	): Generator<void, Map<string, RecalculatedCell>> {
 		const changes = new Map<string, RecalculatedCell>()
 		const recorded = new Map<string, SimpleCellAddress>()
+		let exportedChanges: ReturnType<HyperFormula["batch"]>
 
 		this.recorded = recorded
 
 		try {
-			this.collect(this.run(work), changes)
+			exportedChanges = work()
 		} finally {
 			this.recorded = null
 		}
 
+		yield* this.collecting(exportedChanges, changes)
 		this.staled(recorded, own, changes)
+		yield* this.following(changes)
 
 		return changes
 	}
@@ -1095,6 +1725,7 @@ export class FormulaEngine {
 		this.staled(recorded, deferred.own, changes)
 		yield* this.settling(deferred.pending, changes)
 		yield* this.reporting(changes, deferred.written)
+		yield* this.following(changes)
 
 		return [...deferred.results, ...changes.values()]
 	}
@@ -1112,6 +1743,13 @@ export class FormulaEngine {
 
 		for (const cell of cells) {
 			const address = { sheet: id, row: cell.row, col: cell.col }
+			const spill = this.spills.get(changeKey(address))
+
+			// A dynamic array written anew, or a cell that held one written over (what it spilled is cleared).
+			if (cell.spill !== undefined && spill === undefined) {
+				this.ownSpill(address, cell.spill)
+				this.snapshotSpills()
+			} else if (cell.spill === undefined && spill !== undefined) spill.next = { values: [], blocked: true, removed: true }
 
 			// Any cell written, a held one too, can move where whole columns and rows end.
 			if (cell.content !== null && cell.content !== undefined && cell.content !== "") this.whole.written(id, cell.row, cell.col)
@@ -1234,30 +1872,45 @@ export class FormulaEngine {
 	}
 
 	insert(sheet: number, axis: SizeAxis, at: number, count: number): RecalculatedCell[] {
+		return drain(this.inserting(sheet, axis, at, count))
+	}
+
+	// insert, a part at a time between yields to `clock` (what a dynamic array spills through the rows written again).
+	async insertSliced(sheet: number, axis: SizeAxis, at: number, count: number, clock?: SliceClock): Promise<RecalculatedCell[]> {
+		return await runSliced(this.inserting(sheet, axis, at, count), clock)
+	}
+
+	private *inserting(sheet: number, axis: SizeAxis, at: number, count: number): Generator<void, RecalculatedCell[]> {
 		const id = this.sheetIds[sheet]
 
 		if (id === undefined) return []
 
 		this.moveTotals(id, axis, at, count)
+		this.moveSpills(id, axis, at, count)
 
 		// In runs: the engine spreads the new rows into one call, which a large insert overflows.
-		return [
-			...this.recording(
-				() =>
-					this.batched(() => {
-						for (let done = 0; done < count; done += INSERT_RUN) {
-							const run = Math.min(INSERT_RUN, count - done)
+		const changes = yield* this.movingSteps(() => {
+			for (let done = 0; done < count; done += INSERT_RUN) {
+				const run = Math.min(INSERT_RUN, count - done)
 
-							if (axis === "rows") this.engine.addRows(id, [at, run])
-							else this.engine.addColumns(id, [at, run])
-						}
-					}, true),
-				null
-			).values()
-		]
+				if (axis === "rows") this.engine.addRows(id, [at, run])
+				else this.engine.addColumns(id, [at, run])
+			}
+		})
+
+		return [...changes.values()]
 	}
 
 	remove(sheet: number, axis: SizeAxis, at: number, count: number): RecalculatedCell[] {
+		return drain(this.removing(sheet, axis, at, count))
+	}
+
+	// remove, a part at a time between yields to `clock`.
+	async removeSliced(sheet: number, axis: SizeAxis, at: number, count: number, clock?: SliceClock): Promise<RecalculatedCell[]> {
+		return await runSliced(this.removing(sheet, axis, at, count), clock)
+	}
+
+	private *removing(sheet: number, axis: SizeAxis, at: number, count: number): Generator<void, RecalculatedCell[]> {
 		const id = this.sheetIds[sheet]
 
 		if (id === undefined) return []
@@ -1265,19 +1918,29 @@ export class FormulaEngine {
 		this.ensureCopies(this.removedCopies(id, axis, count))
 		this.moveTotals(id, axis, at, -count)
 
-		return [
-			...this.recording(
-				() =>
-					this.batched(() => {
-						if (axis === "rows") this.engine.removeRows(id, [at, count])
-						else this.engine.removeColumns(id, [at, count])
-					}, true),
-				null
-			).values()
-		]
+		const orphans = this.moveSpills(id, axis, at, -count)
+		const changes = yield* this.movingSteps(() => {
+			if (axis === "rows") this.engine.removeRows(id, [at, count])
+			else this.engine.removeColumns(id, [at, count])
+		})
+
+		yield* this.orphanedSpills(orphans, changes)
+
+		return [...changes.values()]
 	}
 
-	addSheet(name: string): void {
+	// Adds a sheet; what INDIRECT names by sheet name may be it now: every INDIRECT is calculated again, and what that
+	// changes returned.
+	addSheet(name: string): RecalculatedCell[] {
+		return drain(this.addingSheet(name))
+	}
+
+	// addSheet, a part at a time between yields to `clock`.
+	async addSheetSliced(name: string, clock?: SliceClock): Promise<RecalculatedCell[]> {
+		return await runSliced(this.addingSheet(name), clock)
+	}
+
+	private *addingSheet(name: string): Generator<void, RecalculatedCell[]> {
 		const added = this.run(() => this.engine.addSheet(name))
 		const id = this.engine.getSheetId(added)
 
@@ -1287,10 +1950,45 @@ export class FormulaEngine {
 
 		this.sheetIds.push(id)
 		this.sheetNames = [...this.sheetNames, added]
+		this.sheetsChanged = true
+
+		return yield* this.sheetNamesChanged()
+	}
+
+	// The cells holding INDIRECT as last calculated, by grid sheet index.
+	indirectCells(): { sheet: number; row: number; col: number }[] {
+		const cells: { sheet: number; row: number; col: number }[] = []
+
+		for (const { address } of this.indirectReads.values()) {
+			const sheet = this.sheetIndex(address.sheet)
+
+			if (sheet >= 0) cells.push({ sheet, row: address.row, col: address.col })
+		}
+
+		return cells
+	}
+
+	// The sheets' names changed: INDIRECT, volatile in Excel, calculated again at once (each one, those that named no
+	// sheet the workbook had too).
+	private *sheetNamesChanged(): Generator<void, RecalculatedCell[]> {
+		const changes = new Map<string, RecalculatedCell>()
+
+		yield* this.following(changes, true)
+
+		return [...changes.values()]
 	}
 
 	// Removes the last sheet (an added one being undone).
 	removeLastSheet(): RecalculatedCell[] {
+		return drain(this.removingLastSheet())
+	}
+
+	// removeLastSheet, a part at a time between yields to `clock`.
+	async removeLastSheetSliced(clock?: SliceClock): Promise<RecalculatedCell[]> {
+		return await runSliced(this.removingLastSheet(), clock)
+	}
+
+	private *removingLastSheet(): Generator<void, RecalculatedCell[]> {
 		const id = this.sheetIds.at(-1)
 
 		if (id === undefined) return []
@@ -1303,10 +2001,24 @@ export class FormulaEngine {
 		this.totals.delete(id)
 		this.whole.reset()
 
-		return [...this.recording(() => this.engine.removeSheet(id), null).values()]
+		for (const [key, entry] of this.spills) if (entry.address.sheet === id) this.spills.delete(key)
+
+		this.sheetsChanged = true
+
+		return [...(yield* this.recordingSteps(() => this.engine.removeSheet(id), null)).values()]
 	}
 
-	renameSheet(sheet: number, name: string): void {
+	// Renames a sheet: every INDIRECT is calculated again, and what that changes returned.
+	renameSheet(sheet: number, name: string): RecalculatedCell[] {
+		return drain(this.renamingSheet(sheet, name))
+	}
+
+	// renameSheet, a part at a time between yields to `clock`.
+	async renameSheetSliced(sheet: number, name: string, clock?: SliceClock): Promise<RecalculatedCell[]> {
+		return await runSliced(this.renamingSheet(sheet, name), clock)
+	}
+
+	private *renamingSheet(sheet: number, name: string): Generator<void, RecalculatedCell[]> {
 		const id = this.sheetIds[sheet]
 
 		if (id !== undefined) {
@@ -1318,12 +2030,17 @@ export class FormulaEngine {
 			})
 			this.whole.rename(before, name)
 			this.sheetNames = this.sheetNames.map((known, index) => (index === sheet ? name : known))
+			this.sheetsChanged = true
 
 			if (reach !== undefined) {
 				this.reaches.delete(before)
 				this.reaches.set(name.toUpperCase(), reach)
 			}
+
+			return yield* this.sheetNamesChanged()
 		}
+
+		return []
 	}
 
 	// Whether writing these cells makes the sheet reach so far that a formula reading it to its last row or column
@@ -1446,12 +2163,27 @@ export class FormulaEngine {
 		})
 
 		old.destroy()
+		// What INDIRECT read was the old engine's (its sheet ids); the build records it again.
+		this.indirectReads.clear()
+
+		// The new engine numbers the sheets in grid order: the dynamic arrays under their new ids before it calculates.
+		const spills = [...this.spills.values()]
+
+		this.spills.clear()
+
+		for (const entry of spills) {
+			const sheet = this.sheetIds.indexOf(entry.address.sheet)
+
+			if (sheet >= 0) this.spills.set(changeKey({ ...entry.address, sheet }), { ...entry, address: { ...entry.address, sheet } })
+		}
 		// While the new engine calculates, its sheet ids are the record's key order; sheetIds still names the old ones.
 		this.building = order.map(name => names.indexOf(name))
 
 		try {
+			this.inBuild = true
 			this.engine = this.run(() => HyperFormula.buildFromSheets(contents, this.config, named))
 		} finally {
+			this.inBuild = false
 			this.building = null
 		}
 
@@ -1495,10 +2227,29 @@ export class FormulaEngine {
 		for (const cell of cells)
 			this.noteTotal(ids[sheet] ?? 0, cell.row, cell.col, cell.content instanceof HeldResult ? null : cell.content)
 
+		this.followDynamic(new Map(), true)
+
 		for (const entry of previous) report(entry.address, entry.value, false)
 		for (const cell of cells) report({ sheet: ids[sheet] ?? 0, row: cell.row, col: cell.col }, undefined, true)
 
 		return changes
+	}
+
+	// Whether a formula (as the engine takes it, ARRAYFORMULA(...)) gives an array on a sheet: one of more than one
+	// value, or a function lifted over a range inside it (SUM(LEN(A1:A3))). What a typed formula's dynamic-array
+	// reading decides (support.microsoft.com "Dynamic array formulas and spilled array behavior").
+	givesArray(sheet: number, formula: string): boolean {
+		const id = this.sheetIds[sheet]
+
+		if (id === undefined || this.deferred !== null) return false
+
+		try {
+			const { value, lifted } = this.run(() => trackLifts(() => this.engine.calculateFormula(formula, id)))
+
+			return lifted || Array.isArray(value)
+		} catch {
+			return false
+		}
 	}
 
 	// A cell's value, and whether it is an error.

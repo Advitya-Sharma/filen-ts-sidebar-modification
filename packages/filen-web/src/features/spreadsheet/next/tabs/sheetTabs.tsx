@@ -404,7 +404,7 @@ export function SheetTabs({ grid, canEdit, run }: { grid: SheetGridState; canEdi
 										</button>
 									}
 								/>
-								<ContextMenuContent>{items(sheet, CONTEXT_PARTS)}</ContextMenuContent>
+								<ContextMenuContent aria-label={t("previewSheetTabMenu")}>{items(sheet, CONTEXT_PARTS)}</ContextMenuContent>
 							</ContextMenu>
 							{active ? (
 								<DropdownMenu>

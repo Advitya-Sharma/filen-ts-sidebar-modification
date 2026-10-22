@@ -379,12 +379,19 @@ function positions(run: Method, rows: boolean): Method {
 // sort). Those of numbers alone (blanks add nothing) and XLOOKUP's first match are read as they are.
 const ARRAYS_OF_NUMBERS = new Set(["FREQUENCY", "MODE.MULT", "XLOOKUP"])
 
+// TRIMRANGE trimming the trailing empty rows and columns (2 or 3, the default), which takes away those past the engine's
+// end whatever they would be: read as it is.
+function trimsTails(args: readonly Node[]): boolean {
+	return [args[1], args[2]].every(mode => mode === undefined || (mode.type === "NUMBER" && (mode["value"] === 2 || mode["value"] === 3)))
+}
+
 function refusingTails(run: Method, name: string): Method {
 	return function (ast, state) {
 		const args = ast.args as Node[]
 		const searchMode = name === "XLOOKUP" ? args[5] : undefined
 		const plain =
-			ARRAYS_OF_NUMBERS.has(name) && (searchMode === undefined || (searchMode.type === "NUMBER" && searchMode["value"] === 1))
+			(ARRAYS_OF_NUMBERS.has(name) && (searchMode === undefined || (searchMode.type === "NUMBER" && searchMode["value"] === 1))) ||
+			(name === "TRIMRANGE" && trimsTails(args))
 
 		if (!plain && args.some(arg => holdsWhole(arg) && tailIn(this, arg, state) > 0)) return unmodeledError()
 

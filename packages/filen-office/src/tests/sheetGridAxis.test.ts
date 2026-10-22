@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { AxisFlag, SHEET_MAX_ROWS, type SheetAxisLayout, type SheetLayout } from "../core/sheet/protocol"
 import { createGridAxis, shownIndex } from "../react/sheet/axis"
-import { MAX_SCROLL_PX, domExtent, toDom, toVirtual } from "../react/sheet/scroll"
+import { MAX_SCROLL_PX, SCROLL_MARGIN_PX, domExtent, toDom, toVirtual } from "../react/sheet/scroll"
 import { bodyTotal, edgeAt, gridView, hitAxis, revealOffset, screenOf } from "../react/sheet/view"
 
 // The grid's geometry: axes over sparse size exceptions, scaled scrolling past the browsers' element-size caps, and
@@ -137,6 +137,29 @@ describe("scaled scrolling", () => {
 
 			// One browser pixel moves at most the scale factor's pixels of sheet.
 			expect(Math.abs(back - offset)).toBeLessThanOrEqual(Math.ceil(virtual / MAX_SCROLL_PX))
+		}
+	})
+
+	it("maps one to one for a stretch at both ends, so a finger's pan there moves the sheet as far as the scroller", () => {
+		const virtual = SHEET_MAX_ROWS * 20
+		const view = 800
+		const domEnd = MAX_SCROLL_PX - view
+
+		for (const dom of [0, 1, 500, 400_000, SCROLL_MARGIN_PX]) {
+			expect(toVirtual(dom, virtual, view)).toBe(dom)
+			expect(toVirtual(domEnd - dom, virtual, view)).toBe(virtual - view - dom)
+			expect(toDom(dom, virtual, view)).toBe(dom)
+			expect(toDom(virtual - view - dom, virtual, view)).toBe(domEnd - dom)
+		}
+
+		// Monotone and continuous across the scaled middle.
+		let last = -1
+
+		for (let dom = 0; dom <= domEnd; dom += 4999) {
+			const offset = toVirtual(dom, virtual, view)
+
+			expect(offset).toBeGreaterThanOrEqual(last)
+			last = offset
 		}
 	})
 

@@ -1,6 +1,8 @@
+import { ISO_1900 } from "../../numfmt/date"
 import { CellError, EmptyValue, FunctionArgumentType, SimpleRangeValue, type ImplementedFunctions } from "hyperformula"
 import { formatValue, NUMFMT_EN_US, type NumFmtOptions } from "../../numfmt"
 import {
+	dateBaseOf,
 	naError,
 	rawNumber,
 	SheetFunctionPlugin,
@@ -108,6 +110,7 @@ function occurrences(text: string, delimiters: readonly string[], caseless: bool
 
 const OPTIONS_1900: NumFmtOptions = { locale: NUMFMT_EN_US }
 const OPTIONS_1904: NumFmtOptions = { locale: NUMFMT_EN_US, date1904: true }
+const OPTIONS_ISO_1900: NumFmtOptions = { locale: NUMFMT_EN_US, date1904: ISO_1900 }
 
 const PIECES = {
 	parameters: [
@@ -233,7 +236,9 @@ export class TextFunctions extends SheetFunctionPlugin {
 	}
 
 	private get formatOptions(): NumFmtOptions {
-		return this.config.nullDate.year === 1904 ? OPTIONS_1904 : OPTIONS_1900
+		const base = dateBaseOf(this.config)
+
+		return base === true ? OPTIONS_1904 : base === ISO_1900 ? OPTIONS_ISO_1900 : OPTIONS_1900
 	}
 
 	// TEXT(value, format_text): the value as the number format shows it (support.microsoft.com "TEXT function"),

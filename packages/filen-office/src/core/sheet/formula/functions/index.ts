@@ -1,14 +1,27 @@
 import { HyperFormula, type FunctionPluginDefinition } from "hyperformula"
 import { AggregateFunctions } from "./aggregate"
 import { ArrayFunctions } from "./arrays"
+import { BondFunctions } from "./bonds"
 import { ARRAY_RESULTS } from "../../refs/formulaRefs"
 import { installBlankTails } from "./blankTails"
+import { ConvertFunctions } from "./convert"
 import { CriteriaFunctions } from "./criteria"
 import { DateFunctions } from "./date"
+import { GroupFunctions } from "./groupby"
+import { IndirectFunctions } from "./indirect"
+import { LambdaFunctions } from "./lambda"
+import { LogicalFunctions } from "./logical"
 import { LookupFunctions } from "./lookup"
+import { MatrixFunctions } from "./matrix"
+import { MiscFunctions } from "./misc"
 import { ReferenceFunctions } from "./reference"
+import { SpillFunctions } from "./spill"
+import { RegexFunctions } from "./regex"
+import { ShapeFunctions } from "./shape"
 import { StatisticalFunctions } from "./statistical"
+import { Statistics2Functions } from "./statistics2"
 import { TextFunctions } from "./text"
+import { Text2Functions } from "./text2"
 
 // The app's own functions, registered with the engine once, before the first engine is built. A function the engine
 // has of its own is replaced where it calculates differently from Excel (TEXT, SUBTOTAL, COUNTBLANK); the others are
@@ -21,7 +34,20 @@ const PLUGINS: readonly FunctionPluginDefinition[] = [
 	ReferenceFunctions,
 	LookupFunctions,
 	StatisticalFunctions,
-	ArrayFunctions
+	ArrayFunctions,
+	LambdaFunctions,
+	GroupFunctions,
+	IndirectFunctions,
+	SpillFunctions,
+	LogicalFunctions,
+	BondFunctions,
+	Statistics2Functions,
+	MatrixFunctions,
+	ShapeFunctions,
+	Text2Functions,
+	ConvertFunctions,
+	MiscFunctions,
+	RegexFunctions
 ]
 
 let registered = false

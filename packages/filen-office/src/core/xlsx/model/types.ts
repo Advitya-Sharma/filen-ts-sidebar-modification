@@ -376,6 +376,9 @@ export interface XlsxSheetModel {
 	tabColor: XlsxColor | null
 	// sheetPr filterMode (§18.3.1.82): whether a filter hides rows. Undefined: as the source has it.
 	filterMode?: boolean
+	// sheetPr pageSetUpPr fitToPage (§18.3.1.65): print fitted to pageSetup's fitToWidth by fitToHeight pages.
+	// Undefined: as the source has it.
+	fitToPage?: boolean
 	// A sheet with no part in the source (a duplicated one): its root's start tag, when it takes another part's
 	// (namespaces, mc:Ignorable); without one the writer makes a plain root.
 	readonly freshRoot?: string | undefined

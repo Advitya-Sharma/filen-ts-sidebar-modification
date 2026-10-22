@@ -21,6 +21,10 @@ import { xlsxFillFeature } from "./fill/xlsx"
 import { xlsxFindFeature } from "./find/xlsx"
 import { xlsxAutoSumFeature } from "./functions/autoSumXlsx"
 import { xlsxNavigateFeature } from "./navigate/xlsx"
+import { xlsxPrintFeature } from "./print/xlsx"
+import { digitWidthFeature } from "../xlsx/edit/digitWidth"
+import { chartsFeature } from "../xlsx/charts/feature"
+import { drawingsFeature } from "../xlsx/drawings/feature"
 import { defineSheetFeature, sheetRegistry, type SheetFeature } from "./registry"
 import { RenderStyleTable, SheetSession, sessionFeature } from "./session"
 
@@ -87,11 +91,11 @@ export const sheetsFeature = defineSheetFeature<XlsxDocument>({
 	commands: {
 		"sheet.add": {
 			info: { write: true, structure: true },
-			run: (context, command) => addSheet(context.doc, command.name, command.index, context.changes)
+			run: (context, command) => addSheet(context.doc, command.name, command.index, context.changes, context.slicing)
 		},
 		"sheet.rename": {
 			info: { write: true, structure: true },
-			run: (context, command) => renameSheet(context.doc, command.sheet, command.name, context.changes)
+			run: (context, command) => renameSheet(context.doc, command.sheet, command.name, context.changes, context.slicing)
 		}
 	}
 })
@@ -121,6 +125,10 @@ export const XLSX_FEATURES: readonly SheetFeature<XlsxDocument>[] = [
 	xlsxFindFeature,
 	xlsxNavigateFeature,
 	xlsxAutoSumFeature,
+	xlsxPrintFeature,
+	digitWidthFeature,
+	drawingsFeature,
+	chartsFeature,
 	xlsxFillFeature,
 	xlsxClipboardHtmlFeature,
 	notesFeature,

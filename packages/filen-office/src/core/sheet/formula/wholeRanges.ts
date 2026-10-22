@@ -1,5 +1,7 @@
 import { EmptyValue, HyperFormula, SimpleRangeValue } from "hyperformula"
 import { MAX_COLUMNS, MAX_ROWS } from "../model/model"
+import { compareLookup, lookupValue, sameClass, type Lookup } from "./functions/values"
+import type { PluginScalar } from "./functions/plugin"
 
 // Whole-column (A:A) and whole-row (1:1) references, as far as the engine reads them. HyperFormula ends one at the
 // sheet's height (or width), so a single cell written in the grid's last row makes every whole-column reference of
@@ -399,7 +401,13 @@ interface SearchInternals {
 	readonly dependencyGraph: GraphInternals & { getScalarValue(address: Address & { readonly sheet: number }): unknown }
 }
 
-type BasicFind = (this: SearchInternals, key: unknown, range: SearchValues, coordinate: string, options: { ordering: string }) => number
+type BasicFind = (
+	this: SearchInternals,
+	key: unknown,
+	range: SearchValues,
+	coordinate: string,
+	options: { ordering: string; ifNoMatch?: string }
+) => number
 type AdvancedFind = (this: SearchInternals, matcher: (value: unknown) => boolean, range: SearchValues, options?: object) => number
 
 interface SearchPrototype {
@@ -444,6 +452,52 @@ function storedValues(graph: SearchInternals["dependencyGraph"], range: SearchRa
 	}
 }
 
+// An approximate search (VLOOKUP and HLOOKUP with range_lookup TRUE, MATCH with match_type 1 or -1): the last value at
+// most the key in an ascending vector (descending: at least it), by binary search over the values of the key's class
+// alone, as Excel compares (numbers, text without regard to case, logical values each among their own; empty cells and
+// errors left out). The engine compared across classes, numbers before text, so a number among the text of a sorted
+// row ended its search early. Reads O(log n) cells of a vector of one class. -1 when none.
+function approximate(count: number, at: (index: number) => unknown, key: Lookup, descending: boolean): number {
+	const read = (index: number): Lookup | null => {
+		const value = lookupValue(at(index) as PluginScalar)
+
+		return value !== null && sameClass(value, key) ? value : null
+	}
+	let low = 0
+	let high = count - 1
+	let best = -1
+	let exact = false
+
+	while (low <= high) {
+		const mid = (low + high) >> 1
+		let index = mid
+		let value = read(index)
+
+		// The first value of the key's class from mid on; none: what is left is below mid.
+		while (value === null && index < high) value = read(++index)
+
+		if (value === null) {
+			high = mid - 1
+
+			continue
+		}
+
+		const order = compareLookup(value, key)
+
+		if (order === 0) {
+			// The last of equal values, as a sorted search ends there.
+			best = index
+			exact = true
+			low = index + 1
+		} else if (descending ? order > 0 : order < 0) {
+			if (!exact) best = index
+			low = index + 1
+		} else high = mid - 1
+	}
+
+	return best
+}
+
 // Searches (VLOOKUP, HLOOKUP, MATCH, XLOOKUP) through a whole column or row that reaches far past its cells read the
 // cells stored there, not every address to the end: a match among them is where the full read finds it, empty cells
 // never match a key that is not empty, and an unordered search for the nearest value skips them.
@@ -453,6 +507,35 @@ function installSparseSearch(prototype: SearchPrototype): void {
 
 	prototype.basicFind = function (key, range, coordinate, options) {
 		const whole = range.range
+		const searched = key === EmptyValue ? null : lookupValue(key as PluginScalar)
+
+		const ascending = options.ordering === "asc" && options.ifNoMatch === "returnLowerBound"
+		const descending = options.ordering === "desc" && options.ifNoMatch === "returnUpperBound"
+
+		if (searched !== null && (ascending || descending)) {
+			if (whole === undefined) {
+				const values = range.valuesFromTopLeftCorner()
+
+				return approximate(values.length, index => values[index], searched, descending)
+			}
+
+			const graph = this.dependencyGraph
+			const columns = coordinate === "col"
+			const first = columns ? whole.start.col : whole.start.row
+			const last = columns ? whole.effectiveEndColumn(graph) : whole.effectiveEndRow(graph)
+
+			return approximate(
+				Math.max(0, last - first + 1),
+				index =>
+					graph.getScalarValue(
+						columns
+							? { sheet: whole.sheet, row: whole.start.row, col: first + index }
+							: { sheet: whole.sheet, row: first + index, col: whole.start.col }
+					),
+				searched,
+				descending
+			)
+		}
 
 		if (whole === undefined || whole.isFinite() || options.ordering !== "none" || key === EmptyValue)
 			return basic.call(this, key, range, coordinate, options)

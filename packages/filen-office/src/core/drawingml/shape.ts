@@ -30,6 +30,16 @@ export interface ShapeContext extends PaintContext {
 	readonly story?: (txbxContent: number) => number
 	// Run properties DrawingML text falls back to before the shape's font reference applies.
 	readonly text?: TextDefaults
+	// Draws a graphic frame inside a group (a chart) into `list`, placed by `matrix` (the frame's px to the list's), at
+	// `width` x `height` EMU; false when it drew nothing (the frame then counts as unsupported).
+	readonly frame?: (
+		reader: DrawingReader,
+		node: number,
+		list: DrawingList,
+		matrix: readonly number[],
+		width: number,
+		height: number
+	) => boolean
 }
 
 export interface ShapeConversion {
@@ -45,7 +55,8 @@ export const MAX_DEPTH = 128
 
 const SHAPES: ReadonlySet<string> = new Set(["wsp", "sp", "cxnSp"])
 const GROUPS: ReadonlySet<string> = new Set(["wgp", "grpSp", "lockedCanvas", "wpc"])
-const SHAPE_GROUPS: ReadonlySet<D> = new Set([D.Wps, D.Wpg, D.Wpc, D.Pic, D.Dsp, D.A, D.Lc])
+// xdr: a sheet's drawing part (§20.5), whose pictures, shapes and groups are its own elements.
+const SHAPE_GROUPS: ReadonlySet<D> = new Set([D.Wps, D.Wpg, D.Wpc, D.Pic, D.Dsp, D.A, D.Lc, D.Xdr])
 
 // Placement of child coordinates: a child at EMU (x, y) lands at (offsetX + x * scaleX, ...) EMU in the
 // parent's local frame; `matrix` maps that frame (in px) into the drawing.
@@ -368,8 +379,41 @@ class ShapeWalker {
 			if (depth > MAX_DEPTH) this.unsupported++
 			else this.group(reader, node, frame, depth)
 		} else if (local === "graphicFrame" || local === "contentPart") {
-			this.unsupported++
+			if (local !== "graphicFrame" || !this.graphicFrame(reader, node, frame)) this.unsupported++
 		}
+	}
+
+	// A graphic frame in a group, drawn by the host (ShapeContext.frame) in the box its own xfrm gives it.
+	private graphicFrame(reader: DrawingReader, node: number, frame: Frame): boolean {
+		const hook = this.context.frame
+
+		if (hook === undefined) return false
+
+		const document = reader.document
+		let xfrmNode = -1
+
+		for (let child = document.firstChildElement(node); child >= 0 && xfrmNode < 0; child = document.nextSiblingElement(child))
+			if (reader.local(child) === "xfrm") xfrmNode = child
+
+		const xfrm = readXfrm(reader, xfrmNode)
+		const box = this.box(xfrm, frame)
+
+		if (!(box.w > 0 && box.h > 0)) return false
+
+		const matrix = multiply(
+			frame.matrix,
+			boxMatrix(
+				box.x / EMU_PER_PX,
+				box.y / EMU_PER_PX,
+				box.w / EMU_PER_PX,
+				box.h / EMU_PER_PX,
+				xfrm?.rotation ?? 0,
+				xfrm?.flipH ?? false,
+				xfrm?.flipV ?? false
+			)
+		)
+
+		return hook(reader, node, this.list, matrix, box.w, box.h)
 	}
 
 	private alternate(reader: DrawingReader, node: number, frame: Frame, depth: number): void {

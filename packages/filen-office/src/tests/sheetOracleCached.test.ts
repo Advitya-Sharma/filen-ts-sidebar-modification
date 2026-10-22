@@ -41,10 +41,11 @@ describe("recalculation against Excel's cached results", () => {
 	it("names how each function is supported", () => {
 		expect(functionSupport("SUM")).toBe("engine")
 		expect(functionSupport("CUBEVALUE")).toBe("cached")
-		expect(functionSupport("LET")).toBe("missing")
+		expect(functionSupport("FORECAST.ETS")).toBe("missing")
+		expect(functionSupport("ANCHORARRAY")).toBe("engine")
 		expect(functionSupport("MYFUNC")).toBe("unknown")
 		expect(calculates(["SUM", "IF"])).toBe(true)
-		expect(calculates(["SUM", "LET"])).toBe(false)
+		expect(calculates(["SUM", "FORECAST.ETS"])).toBe(false)
 		expect(mismatchClass({ type: "n", value: 1 }, { type: "s", value: "" })).toBe("n→s")
 		expect(mismatchClass({ type: "e", value: "#DIV/0!" }, { type: "e", value: "#REF!" })).toBe("error #DIV/0!→#REF!")
 	})

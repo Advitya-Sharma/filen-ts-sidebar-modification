@@ -2,6 +2,12 @@
 // - 1900 system: 1 is 1900-01-01, 0 is shown as 1900-01-00, and 60 is 1900-02-29, a day the Gregorian calendar
 //   does not have (§18.17.4.1: kept for compatibility, so serials from 61 on are one day off a plain count).
 // - 1904 system: 0 is 1904-01-01.
+// - 1900 date base of a Strict workbook (MS-OI29500 2.1.585 j: "If workbook@conformance equals strict, the 1900 date
+//   system is used"; §18.17.4.1): a plain count from 1899-12-30, so 1 is 1899-12-31 and 61 is 1900-03-01 as above.
+
+// A workbook's date base: true the 1904 system, false the 1900 system, ISO_1900 a Strict workbook's 1900 date base.
+export const ISO_1900 = "iso1900"
+export type DateBase = boolean | typeof ISO_1900
 
 export interface DateParts {
 	year: number
@@ -48,18 +54,25 @@ function civilDays(year: number, month: number, day: number): number {
 
 // A date's serial in a date system, serialDate's inverse: the 1900 system counts the 1900-02-29 it does not have, so
 // dates before March 1900 are a day lower than a plain count.
-export function dateSerial(year: number, month: number, day: number, date1904: boolean): number {
+export function dateSerial(year: number, month: number, day: number, date1904: DateBase): number {
 	const days = civilDays(year, month, day)
 
-	if (date1904) return days - EPOCH_1904
+	if (date1904 === true) return days - EPOCH_1904
 
 	const serial = days - EPOCH_1900
 
-	return serial < 61 ? serial - 1 : serial
+	return serial < 61 && date1904 !== ISO_1900 ? serial - 1 : serial
 }
 
 // The date of a whole serial day (>= 0, at most the system's maximum).
-export function serialDate(day: number, date1904: boolean, out: DateParts): DateParts {
+export function serialDate(day: number, date1904: DateBase, out: DateParts): DateParts {
+	if (date1904 === ISO_1900) {
+		civil(day + EPOCH_1900, out)
+		out.weekday = (day + 6) % 7
+
+		return out
+	}
+
 	if (date1904) {
 		civil(day + EPOCH_1904, out)
 		out.weekday = (day + 5) % 7

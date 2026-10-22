@@ -86,6 +86,9 @@ export interface SheetCommandInfo {
 	readonly protection?: SheetProtectedAction
 	// Changes the workbook's structure: refused under workbookProtection lockStructure.
 	readonly structure?: boolean
+	// Runs on a sheet that is not a worksheet (a chartsheet's chart). Without it, and without `structure`, a command
+	// naming such a sheet is refused, as it has no cells to change.
+	readonly anySheet?: boolean
 }
 
 // Where a menu or toolbar would apply a command.
@@ -163,6 +166,22 @@ export interface SheetReadyResult {
 // then shows nothing on the sheet and refuses its commands there, and the session reports it (featureUnavailable).
 export type SheetReadyHook<D> = (context: SheetReadContext<D>, sheet: SheetId) => Promise<SheetReadyResult>
 
+// Told, after the dependents hooks, everything a change touched: every range whose content or look changed, and every
+// sheet whose layout changed (sizes, hidden rows and columns, merges). For what follows how cells look or which are
+// shown rather than their content (a chart's cached text, which reads the cells' number formats; a chart that plots
+// visible cells only). It adds nothing to the change; also called for undo, redo and recalculated results.
+export type SheetObserveHook<D> = (
+	context: SheetReadContext<D>,
+	change: { readonly ranges: ReadonlyMap<SheetId, readonly SheetRange[]>; readonly layouts: ReadonlySet<SheetId> }
+) => void
+
+// Brings what the file keeps beside the cells up to date before a save writes it (a chart's cached values read again
+// from the cells it shows). Runs in the session's queue, before the document saves; it records no history. What it
+// returns puts back what it wrote, called once the document has saved (or failed to): its writes are that save's only.
+export type SheetSaveHook<D> = (context: SheetReadContext<D>) => SheetSaveUndo | Promise<SheetSaveUndo>
+
+export type SheetSaveUndo = (() => void) | void
+
 export type SheetCellDetailProducers<D> = {
 	readonly [K in SheetCellDetailName]?: (context: SheetReadContext<D>, cell: SheetCell) => SheetCellDetailMap[K] | undefined
 }
@@ -183,6 +202,8 @@ export interface SheetFeature<D> {
 	readonly dependents?: SheetDependentsHook<D>
 	readonly layout?: SheetLayoutProducers<D>
 	readonly cell?: SheetCellDetailProducers<D>
+	readonly save?: SheetSaveHook<D>
+	readonly observe?: SheetObserveHook<D>
 }
 
 // Infers a feature's document from its handlers.
@@ -203,6 +224,10 @@ export interface SheetRegistry<D> {
 	readonly dependents: readonly (readonly [string, SheetDependentsHook<D>])[]
 	readonly layout: readonly (readonly [SheetLayoutExtensionName, (context: SheetReadContext<D>, sheet: SheetId) => unknown])[]
 	readonly cell: readonly (readonly [SheetCellDetailName, (context: SheetReadContext<D>, cell: SheetCell) => unknown])[]
+	// Each save hook, in feature order.
+	readonly save: readonly SheetSaveHook<D>[]
+	// Each observe hook, in feature order.
+	readonly observe: readonly SheetObserveHook<D>[]
 }
 
 function claim(owners: Map<string, string>, kind: string, name: string, feature: string): void {
@@ -226,6 +251,8 @@ export function sheetRegistry<D>(features: readonly SheetFeature<D>[]): SheetReg
 	const dependents: (readonly [string, SheetDependentsHook<D>])[] = []
 	const layout: (readonly [SheetLayoutExtensionName, (context: SheetReadContext<D>, sheet: SheetId) => unknown])[] = []
 	const cell: (readonly [SheetCellDetailName, (context: SheetReadContext<D>, cell: SheetCell) => unknown])[] = []
+	const save: SheetSaveHook<D>[] = []
+	const observe: SheetObserveHook<D>[] = []
 
 	for (const feature of features) {
 		if (ids.has(feature.id)) throw new Error(`Sheet feature "${feature.id}" is registered twice`)
@@ -249,6 +276,8 @@ export function sheetRegistry<D>(features: readonly SheetFeature<D>[]): SheetReg
 		if (feature.tiles !== undefined) tiles.push(feature.tiles)
 		if (feature.ready !== undefined) ready.push([feature.id, feature.ready])
 		if (feature.dependents !== undefined) dependents.push([feature.id, feature.dependents])
+		if (feature.save !== undefined) save.push(feature.save)
+		if (feature.observe !== undefined) observe.push(feature.observe)
 
 		for (const [name, produce] of Object.entries(feature.layout ?? {})) {
 			if (produce === undefined) continue
@@ -274,6 +303,8 @@ export function sheetRegistry<D>(features: readonly SheetFeature<D>[]): SheetReg
 		ready,
 		dependents,
 		layout,
-		cell
+		cell,
+		save,
+		observe
 	}
 }

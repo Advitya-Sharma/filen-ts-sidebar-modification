@@ -376,6 +376,55 @@ export function sniffImage(bytes: Uint8Array): DocxImageInfo | DocxImageRefusal 
 	return found
 }
 
+// The pixel size a PNG, JPEG or BMP declares in its header; undefined for other formats, headers this cannot read, and
+// a JPEG with EXIF data (an orientation turns its pixels, which a decoder's crop rectangle may or may not follow).
+export function rasterSize(bytes: Uint8Array): { readonly width: number; readonly height: number } | undefined {
+	let found: DocxImageInfo | undefined
+
+	if (starts(bytes, 0, "\x89PNG\r\n\x1a\n")) found = png(bytes)
+	else if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) found = hasExif(bytes) ? undefined : jpeg(bytes)
+	else if (starts(bytes, 0, "BM")) found = bmp(bytes)
+
+	return found === undefined || found.width < 1 || found.height < 1 ? undefined : { width: found.width, height: found.height }
+}
+
+function hasExif(b: Uint8Array): boolean {
+	for (let at = 2; at + 10 <= b.length && b[at] === 0xff;) {
+		const marker = b[at + 1] ?? 0
+		const length = u16be(b, at + 2)
+
+		if (marker === 0xe1 && starts(b, at + 4, "Exif\0\0")) return true
+		if (marker === 0xda || length < 2) return false
+
+		at += 2 + length
+	}
+
+	return false
+}
+
+// Whether a PNG, JPEG or BMP has no transparency: a PNG of grey or RGB samples without tRNS, any JPEG, a BMP of 24 bits
+// or fewer per pixel.
+export function rasterOpaque(bytes: Uint8Array): boolean {
+	if (starts(bytes, 0, "\x89PNG\r\n\x1a\n")) {
+		if (bytes.length < 26 || (bytes[25] !== 0 && bytes[25] !== 2)) return false
+
+		for (let at = 8; at + 8 <= bytes.length;) {
+			if (starts(bytes, at + 4, "tRNS")) return false
+			if (starts(bytes, at + 4, "IDAT") || starts(bytes, at + 4, "IEND")) return true
+
+			at += 12 + u32be(bytes, at)
+		}
+
+		return true
+	}
+
+	if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true
+
+	if (starts(bytes, 0, "BM") && bytes.length >= 30) return u32le(bytes, 14) === 12 ? u16le(bytes, 24) <= 24 : u16le(bytes, 28) <= 24
+
+	return false
+}
+
 // Pixels a raster picture decodes to, from its header alone; undefined for vector pictures and headers this
 // cannot read. A viewer checks it before handing the bytes to a decoder.
 export function rasterPixels(bytes: Uint8Array): number | undefined {

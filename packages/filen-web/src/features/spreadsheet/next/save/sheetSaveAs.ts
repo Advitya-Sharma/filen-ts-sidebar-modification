@@ -1,15 +1,27 @@
 import type { SheetFileKind, SheetRefusal } from "@filen/office/core/sheet"
+import type { PreviewKey } from "@/lib/i18n"
 import type { SheetHandle } from "@/features/spreadsheet/next/hooks/useSheetSession"
 import { isTextSheetKind, textToXlsx } from "@/features/spreadsheet/next/lib/sheetHosts"
+import { isLegacySheetKind } from "@/features/spreadsheet/next/lib/sheetKind"
 import { fileStem } from "@/features/spreadsheet/next/save/sheetSave.logic"
 
 export type SheetXlsxCopy =
 	{ readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly refusal: SheetRefusal | null }
 
 // Which open files Save as .xlsx: a text file (its cells as they now are, edits included) and a legacy workbook
-// (opened from its conversion, view-only).
+// (.xls or .xlt, opened from its conversion, view-only).
 export function savesAsXlsx(kind: SheetFileKind): boolean {
-	return kind === "xls" || isTextSheetKind(kind)
+	return isLegacySheetKind(kind) || isTextSheetKind(kind)
+}
+
+// What the confirm before a Save as .xlsx says the copy keeps: a text file's cells as typed, or a legacy workbook's
+// values, naming the format it is in.
+export function saveAsXlsxBodyKey(kind: SheetFileKind): PreviewKey {
+	if (isTextSheetKind(kind)) {
+		return "previewSheetSaveAsXlsxTextBody"
+	}
+
+	return kind === "xlt" ? "previewSheetSaveAsXlsxXltBody" : "previewSpreadsheetSaveAsXlsxBody"
 }
 
 // The .xlsx a Save as uploads. A text file's cells go from its worker to the workbook worker, which makes the

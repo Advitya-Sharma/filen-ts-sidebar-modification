@@ -7,8 +7,6 @@ export const previewSheetNext = {
 	previewSheetNameBoxInvalid: "Enter a cell like B4 or a range like A1:C3.",
 	/** Spreadsheet viewer — accessible label of the in-cell editor */
 	previewSheetCellEditor: "Edit cell",
-	/** Spreadsheet viewer — note beside the cell contents when a file is saved in the Strict Open XML format, which can't be saved back here */
-	previewSheetReadOnlyStrict: "Read-only here: this file uses the Strict Open XML format, which can't be saved here yet.",
 	/** Spreadsheet viewer — note beside the cell contents when a file carries a digital signature, which any edit would break */
 	previewSheetReadOnlySigned: "Read-only here: this file is digitally signed, and editing it would break the signature.",
 	/** Spreadsheet viewer — note beside the cell contents when the file's author recommends opening it read-only; the "Edit anyway" button beside it opens it for editing */

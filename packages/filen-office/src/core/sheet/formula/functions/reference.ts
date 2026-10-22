@@ -1,6 +1,8 @@
 import { CellError, EmptyValue, FunctionArgumentType, SimpleRangeValue, type ImplementedFunctions } from "hyperformula"
 import { INTERSECT_FUNCTION } from "../../functions/engineNames"
 import { MAX_COLUMNS, MAX_ROWS } from "../../model/model"
+import { columnName } from "../../refs/cellRef"
+import { sheetNameNeedsQuotes } from "../../refs/formulaRefs"
 import {
 	naError,
 	refError,
@@ -33,6 +35,16 @@ export class ReferenceFunctions extends SheetFunctionPlugin {
 				{ argumentType: FunctionArgumentType.NUMBER, optionalArg: true },
 				{ argumentType: FunctionArgumentType.NUMBER, optionalArg: true },
 				{ argumentType: FunctionArgumentType.NUMBER, optionalArg: true }
+			]
+		},
+		ADDRESS: {
+			method: "address",
+			parameters: [
+				{ argumentType: FunctionArgumentType.NUMBER },
+				{ argumentType: FunctionArgumentType.NUMBER },
+				{ argumentType: FunctionArgumentType.NUMBER, defaultValue: 1, emptyAsDefault: true },
+				{ argumentType: FunctionArgumentType.BOOLEAN, defaultValue: true, emptyAsDefault: true },
+				{ argumentType: FunctionArgumentType.STRING, optionalArg: true }
 			]
 		},
 		HYPERLINK: {
@@ -123,6 +135,34 @@ export class ReferenceFunctions extends SheetFunctionPlugin {
 				const data = array.data
 
 				return SimpleRangeValue.onlyValues(row === 0 ? data.map(line => [line[col - 1] ?? EmptyValue]) : [data[row - 1] ?? []])
+			}
+		)
+	}
+
+	// ADDRESS(row_num, column_num, [abs_num], [a1], [sheet_text]) (support.microsoft.com "ADDRESS function"): abs_num 1
+	// absolute (also when left empty), 2 absolute row, 3 absolute column, 4 relative; R1C1 style when a1 is FALSE (A1
+	// when left empty). A sheet name that needs them is quoted ('EXCEL SHEET'!R2C3), which the engine's own did not do.
+	address(ast: PluginCall, state: PluginState): unknown {
+		return this.runFunction(
+			ast.args,
+			state,
+			this.metadata("ADDRESS"),
+			(rowArg: number, colArg: number, absArg: number, a1: boolean, sheet: string | undefined) => {
+				const row = Math.trunc(rowArg)
+				const col = Math.trunc(colArg)
+				const abs = Math.trunc(absArg)
+
+				if (row < 1 || row > MAX_ROWS || col < 1 || col > MAX_COLUMNS || abs < 1 || abs > 4) return valueError()
+
+				const rowAbs = abs === 1 || abs === 2
+				const colAbs = abs === 1 || abs === 3
+				const cell = a1
+					? `${colAbs ? "$" : ""}${columnName(col - 1)}${rowAbs ? "$" : ""}${String(row)}`
+					: `R${rowAbs ? String(row) : `[${String(row)}]`}C${colAbs ? String(col) : `[${String(col)}]`}`
+
+				if (sheet === undefined) return cell
+
+				return `${sheet !== "" && sheetNameNeedsQuotes(sheet) ? `'${sheet.replaceAll("'", "''")}'` : sheet}!${cell}`
 			}
 		)
 	}

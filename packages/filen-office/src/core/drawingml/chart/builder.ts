@@ -70,10 +70,20 @@ export class ChartBuilder {
 	readonly date1904: boolean
 	// Run defaults of the whole chart (c:chartSpace/c:txPr over the built-in 10pt).
 	readonly text: TextDefaults
+	// Places every item: identity for a chart drawn alone, a group's transform for one inside a group.
+	readonly matrix: readonly number[]
 	private commandMark = 0
 	private coordMark = 0
 
-	constructor(context: PaintContext, reader: DrawingReader, style: number, date1904: boolean, text: TextDefaults) {
+	constructor(
+		context: PaintContext,
+		reader: DrawingReader,
+		style: number,
+		date1904: boolean,
+		text: TextDefaults,
+		matrix: readonly number[] = IDENTITY
+	) {
+		this.matrix = matrix
 		this.list = context.list
 		this.context = context
 		this.reader = reader
@@ -100,7 +110,7 @@ export class ChartBuilder {
 
 		list.addItem(
 			ItemKind.PATH,
-			IDENTITY,
+			this.matrix,
 			box.x,
 			box.y,
 			box.w,
@@ -262,6 +272,21 @@ export class ChartBuilder {
 		const list = this.list
 		const text = list.text({ kind: "body", body, paragraphs })
 
-		list.addItem(ItemKind.TEXT, IDENTITY, box.x, box.y, box.w, box.h, list.commandCount, list.coordCount, -1, -1, text, -1, 0, source)
+		list.addItem(
+			ItemKind.TEXT,
+			this.matrix,
+			box.x,
+			box.y,
+			box.w,
+			box.h,
+			list.commandCount,
+			list.coordCount,
+			-1,
+			-1,
+			text,
+			-1,
+			0,
+			source
+		)
 	}
 }

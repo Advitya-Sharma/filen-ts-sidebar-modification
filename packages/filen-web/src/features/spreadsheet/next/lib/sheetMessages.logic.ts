@@ -1,13 +1,16 @@
 import type { SheetFileKind, SheetRefusal, SheetViewOnlyReason, SheetWritability } from "@filen/office/core/sheet"
 import type { PreviewKey } from "@/lib/i18n"
 
+// A legacy workbook's note names the format the file is in: an .xls, or its template, an .xlt.
+function legacyKey(kind: SheetFileKind): PreviewKey {
+	return kind === "xlt" ? "previewSheetReadOnlyXlt" : "previewSpreadsheetReadOnlyXls"
+}
+
 // Why a session is view-only, in the words the viewer shows beside the cell contents.
 export function viewOnlyKey(reason: SheetViewOnlyReason, kind: SheetFileKind): PreviewKey {
 	switch (reason) {
 		case "legacyFormat":
-			return "previewSpreadsheetReadOnlyXls"
-		case "strict":
-			return "previewSheetReadOnlyStrict"
+			return legacyKey(kind)
 		case "lossy":
 			return "previewSpreadsheetReadOnlyLossy"
 		case "tooLarge":
@@ -45,7 +48,7 @@ export function readOnlyNoteKey({
 }): PreviewKey | null {
 	// A legacy workbook says so whoever may edit here.
 	if (writability.state === "viewOnly" && writability.reason === "legacyFormat") {
-		return "previewSpreadsheetReadOnlyXls"
+		return legacyKey(kind)
 	}
 
 	if (!editable) {
@@ -115,12 +118,17 @@ export function refusalKey(refusal: SheetRefusal, kind: SheetFileKind): PreviewK
 			return "previewSheetLinkTargetInvalid"
 		case "filterCriteria":
 			return "previewSheetFilterCriteria"
+		case "drawingUnavailable":
+			return "previewSheetDrawingUnavailable"
+		case "objectLocked":
+			return "previewSheetObjectLocked"
+		case "chartUnsupported":
+			return "previewSheetChartUnsupported"
 	}
 }
 
 const VIEW_ONLY_REASONS: ReadonlySet<string> = new Set<SheetViewOnlyReason>([
 	"legacyFormat",
-	"strict",
 	"lossy",
 	"tooLarge",
 	"unsafe",

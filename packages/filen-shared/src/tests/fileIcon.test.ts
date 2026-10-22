@@ -40,6 +40,11 @@ describe("fileIconKey", () => {
 		expect(fileIconKey("xlsx", stubSets)).toBe("xls")
 	})
 
+	// Every format a spreadsheet opens as: workbooks, templates, macro-enabled ones and tabular text.
+	it.each("xls xlsx xlsm xltx xltm xlt csv tsv tab".split(" "))("routes .%s to the spreadsheet glyph", ext => {
+		expect(fileIconKey(ext, stubSets)).toBe("xls")
+	})
+
 	it("routes archives, code, binaries and platform packages", () => {
 		expect(fileIconKey("zip", stubSets)).toBe("archive")
 		expect(fileIconKey("rs", stubSets)).toBe("code")

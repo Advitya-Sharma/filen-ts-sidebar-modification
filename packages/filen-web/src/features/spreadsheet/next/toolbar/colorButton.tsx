@@ -93,6 +93,7 @@ export function SheetColorButton({
 			</Tooltip>
 			<PopoverContent
 				data-preview-surface
+				aria-label={label}
 				className="w-auto gap-2 p-3"
 			>
 				<SheetColorGrid

@@ -67,7 +67,8 @@ function SelectTrigger({
 	)
 }
 
-function SelectContent({ className, children, ...props }: SelectPrimitive.Popup.Props) {
+// The list inside the popup is the listbox (the popup is presentational): a name given here is the list's.
+function SelectContent({ className, children, "aria-label": label, "aria-labelledby": labelledBy, ...props }: SelectPrimitive.Popup.Props) {
 	return (
 		<SelectPrimitive.Portal>
 			<SelectPrimitive.Positioner
@@ -84,7 +85,12 @@ function SelectContent({ className, children, ...props }: SelectPrimitive.Popup.
 					{...props}
 				>
 					<SelectScrollUpButton />
-					<SelectPrimitive.List>{children}</SelectPrimitive.List>
+					<SelectPrimitive.List
+						aria-label={label}
+						aria-labelledby={labelledBy}
+					>
+						{children}
+					</SelectPrimitive.List>
 					<SelectScrollDownButton />
 				</SelectPrimitive.Popup>
 			</SelectPrimitive.Positioner>

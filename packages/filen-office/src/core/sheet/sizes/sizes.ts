@@ -3,10 +3,65 @@ import { DEFAULT_ROW_HEIGHT, type CellRange } from "../model/model"
 // Column and row sizes: the grid's pixels, the xlsx's own units, the limits both share, and the edits
 // resizing makes to a sheet's size maps. Column widths are stored as characters of the default font's widest
 // digit with 5 px of padding counted in (ECMA-376 Part 1 §18.3.1.13), row heights in points.
-// Calibri 11's widest digit at 96 dpi.
-const DIGIT_PX = 7
+// The widest digit of the workbook's default font (its Normal style's) at 96 dpi, the unit of column widths: Calibri
+// 11's is 7 px (workbookDigitPx).
+export const DEFAULT_DIGIT_PX = 7
 const CHAR_PADDING = 5
 export const PX_PER_POINT = 4 / 3
+
+// The widest advance of the digits 0–9, in ems, of the bundled faces whose widths equal the fonts documents name
+// (core/fonts/substitutes.ts): Carlito for Calibri, Arimo for Arial and Helvetica, Tinos for Times New Roman, Cousine
+// for Courier New, Gelasio for Georgia. Read from the faces' hmtx (assets/fonts; a test reads them again).
+const DIGIT_EMS: ReadonlyMap<string, number> = new Map([
+	["calibri", 1038 / 2048],
+	["arial", 1139 / 2048],
+	["helvetica", 1139 / 2048],
+	["times new roman", 1024 / 2048],
+	["courier new", 1229 / 2048],
+	["georgia", 1257 / 2048]
+])
+const DEFAULT_DIGIT_EM = 1038 / 2048
+const DEFAULT_FONT_POINTS = 11
+
+// Font sizes go to 409 points (Excel's limit): the widest digit any font of a known width has there.
+export const MAX_DIGIT_PX = Math.ceil(409 * PX_PER_POINT * Math.max(DEFAULT_DIGIT_EM, ...DIGIT_EMS.values()))
+
+// The unit Excel itself used at 96 dpi, read back from the widths it wrote (§18.3.1.13: a width is
+// Truncate(px / digit × 256) / 256 for whole pixels px, so its fraction tells the digit). Per Normal font and size,
+// from the corpus's files whose docProps/app.xml names Microsoft Excel: accepted where at least two independent
+// sources agree on the smallest digit their widths allow, and that digit is within a pixel of the face-based estimate
+// below (files saved at 125% or 150% display scaling show larger digits: Calibri 11 as 9 and 11, Arial 11 only as 12,
+// left out).
+//   Calibri 11: 7 (49 of 76 files; the rest 9, 11, 15+)   Arial 10: 7 (53 of 69)   Arial 12: 9 (8 of 10)
+//   Aptos Narrow 11: 7 (2 of 10, both gov.uk; the rest 8+) Verdana 10: 8 (2 of 3; the third 11)
+//   Calibri 8: 6 (2 of 2, two Office templates; Excel's digits are hinted at whole pixels, a pixel wider here than
+//   the advances, and LibreOffice, give)
+// Left out for want of a second source: Calibri 9, 7 in four copies of one template (LibreOffice and the advances
+// give 6); Cambria 11, 8 in one file.
+const EXCEL_DIGITS: ReadonlyMap<string, number> = new Map([
+	["calibri 11", 7],
+	["calibri 8", 6],
+	["arial 10", 7],
+	["arial 12", 9],
+	["aptos narrow 11", 7],
+	["verdana 10", 8]
+])
+
+// The workbook's column-width unit from its default font, the same on every device whatever fonts it has: Excel's
+// own where its files show it (EXCEL_DIGITS), else the widest digit's advance at the font's size in CSS pixels
+// (points × 4/3, unrounded), to whole pixels, as LibreOffice 7.5 lays its columns out. A font with neither Excel's
+// evidence nor a face of equal widths here is counted in Calibri's digits at its own size: a Cambria or an Aptos
+// workbook's columns keep their character counts' proportions, unmeasured.
+export function workbookDigitPx(font: string | undefined, points: number | undefined): number {
+	const family = (font ?? "Calibri").trim().toLowerCase()
+	const em = DIGIT_EMS.get(family) ?? DEFAULT_DIGIT_EM
+	const size = points !== undefined && Number.isFinite(points) && points > 0 ? Math.min(points, 409) : DEFAULT_FONT_POINTS
+	const excel = EXCEL_DIGITS.get(`${family} ${String(size)}`)
+
+	if (excel !== undefined) return excel
+
+	return Math.max(1, Math.min(MAX_DIGIT_PX, Math.round(em * size * PX_PER_POINT)))
+}
 
 export type SizeAxis = "rows" | "cols"
 
@@ -35,13 +90,13 @@ export function clampSize(axis: SizeAxis, px: number): number {
 }
 
 // A stored width's pixels: Truncate(((256 * width + Truncate(128 / digit)) / 256) * digit) (§18.3.1.13).
-export function colWidthToPx(width: number): number {
-	return Math.trunc(((256 * width + Math.trunc(128 / DIGIT_PX)) * DIGIT_PX) / 256)
+export function colWidthToPx(width: number, digit = DEFAULT_DIGIT_PX): number {
+	return Math.trunc(((256 * width + Math.trunc(128 / digit)) * digit) / 256)
 }
 
 // The width stored for pixels, to 1/256 of a character (§18.3.1.13, with (px - 5) / digit characters).
-export function pxToColWidth(px: number): number {
-	return Math.trunc((px * 256) / DIGIT_PX) / 256
+export function pxToColWidth(px: number, digit = DEFAULT_DIGIT_PX): number {
+	return Math.trunc((px * 256) / digit) / 256
 }
 
 export interface ColWidthFormat {
@@ -53,15 +108,15 @@ export interface ColWidthFormat {
 
 // The default column's pixels: defaultColWidth's, else baseColWidth characters with their padding (§18.3.1.81),
 // which Excel rounds up to whole 8 px (MS-OI29500 2.1.598 f): 64 px for 8, the "8.43 characters" Excel shows.
-export function defaultColPx(format: ColWidthFormat): number {
-	if (!Number.isNaN(format.defaultColWidth)) return colWidthToPx(format.defaultColWidth)
+export function defaultColPx(format: ColWidthFormat, digit = DEFAULT_DIGIT_PX): number {
+	if (!Number.isNaN(format.defaultColWidth)) return colWidthToPx(format.defaultColWidth, digit)
 
-	return Math.ceil((format.baseColWidth * DIGIT_PX + CHAR_PADDING) / 8) * 8
+	return Math.ceil((format.baseColWidth * digit + CHAR_PADDING) / 8) * 8
 }
 
 // The width a <col> of the default column's size stores.
-export function defaultColWidth(format: ColWidthFormat): number {
-	return Number.isNaN(format.defaultColWidth) ? pxToColWidth(defaultColPx(format)) : format.defaultColWidth
+export function defaultColWidth(format: ColWidthFormat, digit = DEFAULT_DIGIT_PX): number {
+	return Number.isNaN(format.defaultColWidth) ? pxToColWidth(defaultColPx(format, digit), digit) : format.defaultColWidth
 }
 
 export function rowHeightToPx(points: number): number {

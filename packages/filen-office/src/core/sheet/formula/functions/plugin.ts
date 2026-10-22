@@ -1,3 +1,4 @@
+import { ISO_1900, type DateBase } from "../../numfmt/date"
 import { ArraySize, CellError, ErrorType, FunctionPlugin, HyperFormula, SimpleRangeValue, type SimpleCellAddress } from "hyperformula"
 import { MAX_COLUMNS, MAX_ROWS } from "../../model/model"
 
@@ -79,13 +80,19 @@ export abstract class SheetFunctionPlugin extends FunctionPlugin {
 	}
 }
 
+// Thrown to unwind a calculation part-way, to be calculated again (functions/lambda.ts): never a cell's error.
+export class EvaluationSuspended extends Error {}
+
 // The error a function's JavaScript failure gives its cell: a number out of what JavaScript can work with (a
-// RangeError: digits, lengths, a call stack too deep) is #NUM!, anything else #VALUE!. The engine would let it escape
-// the calculation and fail every later edit of the workbook.
+// RangeError: digits, lengths, a call stack too deep; SpiderMonkey's InternalError for "too much recursion") is #NUM!,
+// anything else #VALUE!. The engine would let it escape the calculation and fail every later edit of the workbook.
 function thrown(error: unknown): CellError {
 	if (error instanceof CellError) return error
+	if (error instanceof EvaluationSuspended) throw error
 
-	return new CellError(error instanceof RangeError ? ErrorType.NUM : ErrorType.VALUE)
+	const tooLarge = error instanceof RangeError || (error instanceof Error && error.name === "InternalError")
+
+	return new CellError(tooLarge ? ErrorType.NUM : ErrorType.VALUE)
 }
 
 const guarded = new WeakSet<object>()
@@ -101,7 +108,14 @@ export function guardFunctionPlugins(): void {
 		for (const definition of Object.values(plugin.implementedFunctions)) {
 			for (const [name, failed] of [
 				[definition.method, thrown],
-				[definition.sizeOfResultArrayMethod, () => ArraySize.scalar()]
+				[
+					definition.sizeOfResultArrayMethod,
+					(error: unknown) => {
+						if (error instanceof EvaluationSuspended) throw error
+
+						return ArraySize.scalar()
+					}
+				]
 			] as const) {
 				const method = name === undefined ? undefined : prototype[name]
 
@@ -120,6 +134,45 @@ export function guardFunctionPlugins(): void {
 				prototype[name] = wrapped
 			}
 		}
+	}
+}
+
+// Whether a function was lifted over an array while `work` calculated: a range or array where it takes one value,
+// so it gave an array of its results (Excel's dynamic arrays; the engine's vectorization).
+let lifting: { lifted: boolean } | null = null
+
+export function trackLifts<T>(work: () => T): { readonly value: T; readonly lifted: boolean } {
+	const previous = lifting
+	const tracked = { lifted: false }
+
+	lifting = tracked
+
+	try {
+		return { value: work(), lifted: tracked.lifted }
+	} finally {
+		lifting = previous
+	}
+}
+
+let liftsInstalled = false
+
+// The engine sizes every lifted call's result before calculating it: a size past one cell is a lift.
+export function installLiftTracking(): void {
+	if (liftsInstalled) return
+
+	liftsInstalled = true
+
+	const prototype = FunctionPlugin.prototype as unknown as {
+		calculateSizeOfVectorizedResultArray: (...args: unknown[]) => [number, number]
+	}
+	const size = prototype.calculateSizeOfVectorizedResultArray
+
+	prototype.calculateSizeOfVectorizedResultArray = function (this: unknown, ...args: unknown[]) {
+		const result = size.apply(this, args)
+
+		if (lifting !== null && (result[0] > 1 || result[1] > 1)) lifting.lifted = true
+
+		return result
 	}
 }
 
@@ -166,6 +219,12 @@ export const UNMODELED = "#FILEN.UNMODELED"
 
 export function unmodeledError(): CellError {
 	return new CellError(ErrorType.ERROR, UNMODELED)
+}
+
+// The workbook's date base as the engine's configuration gives it (formulaEngine.ts engineConfig): 1904, a Strict
+// workbook's 1900 date base counted from 1899-12-30, or the 1900 system.
+export function dateBaseOf(config: { readonly nullDate: { readonly year: number; readonly day: number } }): DateBase {
+	return config.nullDate.year === 1904 ? true : config.nullDate.day === 30 ? ISO_1900 : false
 }
 
 export function refError(): CellError {

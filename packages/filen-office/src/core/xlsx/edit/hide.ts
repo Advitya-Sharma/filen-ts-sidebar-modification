@@ -114,7 +114,7 @@ export async function hideAxis(
 	if (axis === "cols") {
 		const before = model.cols
 		const format = model.format
-		const width = defaultColWidth(format)
+		const width = defaultColWidth(format, document.digitPx)
 		let cols: readonly XlsxColRange[] = before
 
 		for (const span of spans) cols = withHidden(cols, span.start, span.end, hidden, width)

@@ -17,7 +17,8 @@ export interface ChromeScene {
 	readonly view: GridView
 	readonly theme: SheetGridTheme
 	readonly pixelRatio: number
-	readonly selection: GridSelection
+	// Null on a sheet with no cells (a chartsheet): nothing selected is drawn.
+	readonly selection: GridSelection | null
 	readonly merges: readonly SheetRange[]
 	// A resize being dragged: the edge's position on screen.
 	readonly guide: { readonly axis: "rows" | "cols"; readonly at: number } | null
@@ -82,7 +83,7 @@ function headers(canvas: GridCanvas, scene: ChromeScene, axis: "rows" | "cols"):
 			if (size === 0) continue
 
 			const start = screenOf(own, index)
-			const active = covers(selection.ranges, axis, index)
+			const active = selection !== null && covers(selection.ranges, axis, index)
 
 			if (active) {
 				canvas.fillStyle = theme.headerActiveBackground
@@ -113,11 +114,8 @@ function headers(canvas: GridCanvas, scene: ChromeScene, axis: "rows" | "cols"):
 	else canvas.fillRect(band - 1, 0, 1, view.height)
 }
 
-export function paintChrome(canvas: GridCanvas, scene: ChromeScene): void {
-	const { view, theme, selection } = scene
-
-	layOut(canvas, scene)
-	canvas.clearRect(0, 0, view.width, view.height)
+function drawSelection(canvas: GridCanvas, scene: ChromeScene, selection: GridSelection): void {
+	const { view, theme } = scene
 
 	// The selection: a tint over every range (the active cell left clear), then outlines: 2 px round the last range,
 	// 1 px round the others and round the active cell when more than it is selected. Each has a 1 px halo inside it,
@@ -154,6 +152,15 @@ export function paintChrome(canvas: GridCanvas, scene: ChromeScene): void {
 	canvas.fillStyle = theme.selectionLine
 
 	for (const { rect, width } of outlines) ring(canvas, rect, 0, width)
+}
+
+export function paintChrome(canvas: GridCanvas, scene: ChromeScene): void {
+	const { view, theme, selection } = scene
+
+	layOut(canvas, scene)
+	canvas.clearRect(0, 0, view.width, view.height)
+
+	if (selection !== null) drawSelection(canvas, scene, selection)
 
 	if (scene.fill !== undefined && scene.fill !== null) {
 		canvas.strokeStyle = theme.selectionLine

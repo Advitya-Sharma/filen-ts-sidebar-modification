@@ -10,16 +10,18 @@ import {
 } from "../../sheet/protocol"
 import type { SheetChangeSink, SheetEditStep, SheetHandled } from "../../sheet/registry"
 import { parseCellInput } from "../../sheet/input/cellInput"
-import { storedFormula, wellFormedFormula } from "../../sheet/refs/formulaRefs"
+import { holdsTrimReference, regexPatterns, storedFormula, wellFormedFormula } from "../../sheet/refs/formulaRefs"
+import { Regex } from "../../sheet/formula/regex/index"
 import type { SheetStore } from "../model/store"
 import { CellKind, FormulaKind, type XlsxSheetModel } from "../model/types"
 import { liveRelationships } from "../refs/state"
-import { dateSerial } from "../../sheet/numfmt/date"
+import { dateSerial, type DateBase } from "../../sheet/numfmt/date"
 import { encodeXstring, type XlsxDocument } from "./document"
 import type { RecalculatedCell } from "../../sheet/formula/index"
 import { ENGINE_SLICE, StyleLimitError, cellStep, clearFormats, reportLogged, typedXf } from "./format"
 import { sliceClock, type SliceClock, type Slicing } from "../../slicing"
 import { ABSENT, CellLog, type CellState } from "./history"
+import { typedSpills } from "./spill"
 
 // Cell entries (cells.set) and clearing (cells.clear): what is typed, read as Excel reads it in that cell, written
 // into the store with its formula and its implied format, then recalculated. Undo writes the cells back as they were.
@@ -53,7 +55,7 @@ function validDay(year: number, month: number, day: number): boolean {
 
 // A date with a time ("2024-03-05 14:30"), or a time alone ("14:30", on the epoch day), as editing a date-time or
 // time cell starts from. Null for anything else.
-function dateTimeEntry(input: string, date1904: boolean): Entry | null {
+function dateTimeEntry(input: string, date1904: DateBase): Entry | null {
 	const trimmed = input.trim()
 	const dateTime = DATE_TIME.exec(trimmed)
 	const time = dateTime === null ? TIME.exec(trimmed) : null
@@ -79,7 +81,7 @@ function dateTimeEntry(input: string, date1904: boolean): Entry | null {
 
 // What is typed into a cell, read as Excel reads it there: into a Text ("@") cell, as text, a formula too. With the
 // session's locale, as typed in it (cellInput.ts); without one, in the file's own (en-US) syntax.
-export function readEntry(input: string, textFormat: boolean, date1904: boolean, locale?: SheetLocale): Entry {
+export function readEntry(input: string, textFormat: boolean, date1904: DateBase, locale?: SheetLocale): Entry {
 	if (textFormat && input !== "" && !input.startsWith("'")) return { type: "text", text: input }
 
 	const dateTime = dateTimeEntry(input, date1904)
@@ -138,7 +140,11 @@ function arrayRanges(model: XlsxSheetModel): SheetRange[] {
 
 		if (kind !== FormulaKind.ARRAY && kind !== FormulaKind.DATA_TABLE) continue
 
-		const ref = formulas.formula(id).ref
+		const formula = formulas.formula(id)
+		const ref = formula.ref
+
+		// A dynamic array's range is what it spills over: a cell of it may be written (the array is then #SPILL!).
+		if (kind === FormulaKind.ARRAY && formula.cellMetadata >= 0) continue
 
 		// Still the formula of its range's first cell (an edit may have replaced the whole array).
 		if (ref !== null && (model.store as SheetStore).formula(model.store.locate(ref.startRow, ref.startCol)) === id) ranges.push(ref)
@@ -249,13 +255,30 @@ function entryState(
 
 	switch (entry.type) {
 		case "formula": {
+			// The cell's own formula typed again as shown (F2, Enter) stays as it is: one written before dynamic arrays
+			// is not made one.
+			if (existing.present && existing.formula >= 0) {
+				const kind = model.store.formulas.kind(existing.formula)
+
+				if (
+					kind !== FormulaKind.ARRAY &&
+					kind !== FormulaKind.DATA_TABLE &&
+					entry.text === document.shownFormulaText(model, existing.formula, row, col)
+				)
+					return { present: true, kind: CellKind.EMPTY, value: 0, style, formula: existing.formula, shown: undefined }
+			}
+
+			const stored = storedFormula(entry.text)
+			// One that may give an array is a dynamic array, as Excel stores it: spilling from its cell.
+			const cm =
+				typedSpills(stored) || (stored.includes(":") && document.givesArray(model.id, stored)) ? document.newDynamicArrayCm() : null
 			const formula = model.store.formulas.add({
-				kind: FormulaKind.NORMAL,
-				text: encodeXstring(storedFormula(entry.text)),
+				kind: cm === null ? FormulaKind.NORMAL : FormulaKind.ARRAY,
+				text: encodeXstring(stored),
 				sharedIndex: -1,
-				ref: null,
+				ref: cm === null ? null : { startRow: row, startCol: col, endRow: row, endCol: col },
 				flags: 0,
-				cellMetadata: -1
+				cellMetadata: cm ?? -1
 			})
 
 			return { present: true, kind: CellKind.EMPTY, value: 0, style, formula, shown: undefined }
@@ -332,11 +355,16 @@ export async function setCells(
 		const entry = readEntry(
 			cells.inputs[i] ?? "",
 			document.numFmt(xf).isText,
-			document.date1904,
+			document.dateBase,
 			cells.canonical?.[i] === 1 ? undefined : document.settings.locale
 		)
 
 		if (entry.type === "formula" && !wellFormedFormula(entry.text)) return { refused: { reason: "formula" } }
+		// A pattern written in the formula that the app's regular expressions do not run (a backreference, a pattern
+		// past what they hold): refused, rather than kept without a result.
+		if (entry.type === "formula" && regexPatterns(entry.text).some(pattern => !Regex.runs(pattern)))
+			return { refused: { reason: "formula", detail: "regex" } }
+		if (entry.type === "formula" && holdsTrimReference(entry.text)) return { refused: { reason: "formula", detail: "trimReference" } }
 
 		const tooLarge = entryTooLarge(entry)
 
@@ -390,6 +418,9 @@ export async function setCells(
 			if ((i & SLICE_MASK) === SLICE_MASK) await due(clock)
 		}
 	} catch (error) {
+		// Refused, the edit leaves no metadata part behind.
+		document.takeMadeMetadata()?.remove()
+
 		if (error instanceof StyleLimitError) return { refused: { reason: "styleLimit" } }
 
 		throw error
@@ -397,7 +428,23 @@ export async function setCells(
 
 	prepare?.(log)
 
-	return writeLogged(document, sheet, cells.rows, cells.cols, states, log, changes, slicing)
+	// The metadata part made for the workbook's first dynamic array goes with the edit's undo.
+	const made = document.takeMadeMetadata()
+	const step = await writeLogged(document, sheet, cells.rows, cells.cols, states, log, changes, slicing)
+
+	if (made === null) return step
+
+	return {
+		...step,
+		undo: async sink => {
+			await step.undo(sink)
+			made.remove()
+		},
+		redo: async sink => {
+			made.add()
+			await step.redo(sink)
+		}
+	}
 }
 
 // Cells between two looks at the slice clock in a sliced edit (a power of two, less one).
@@ -439,6 +486,10 @@ export async function writeLogged(
 	}
 
 	await document.writeCellsSliced(sheet, writes, false, clock)
+
+	// What a dynamic array may not spill over includes the tables, read again after a structure edit.
+	if (document.engine !== null) await document.loadTables()
+
 	await recalculateSliced(document, log, changes, clock)
 
 	const state = (s: SheetId, r: number, c: number): CellState => document.state(s, r, c)
@@ -467,7 +518,11 @@ export function recalculateLogged(document: XlsxDocument, log: CellLog, changes:
 }
 
 // recalculateLogged with the engine given the cells ENGINE_SLICE at a time, its evaluation held until all are in (what
-// reads them is recalculated once), yielding between parts once the clock's slice is up.
+// reads them is recalculated once), yielding between parts once the clock's slice is up. The engine then calculates
+// every cell the edit made dirty in one call, which cannot be cut between cells; it is not cut by releasing evaluation
+// part by part either, which would calculate what reads them once per part. The 50 ms rule binds the app's own work:
+// a recalculation the user's formulas make larger (many deep recursions in one paste) is one task in the worker, as it
+// is one in Excel.
 async function recalculateSliced(
 	document: XlsxDocument,
 	log: CellLog,
@@ -514,7 +569,7 @@ async function recalculateSliced(
 	let first = true
 
 	for (const [sheet, list] of bySheet) {
-		document.applyRecalculated(sheet, list, first ? results : [], log, changes)
+		await document.applyRecalculatedSliced(sheet, list, first ? results : [], log, changes, clock)
 		first = false
 	}
 }
