@@ -35,7 +35,7 @@ function surface() {
 
 function renderContextMenu(options: { disabled?: boolean; paste?: DrivePasteAction } = {}) {
 	const onOpen = vi.fn()
-	const actions = { newDirectory: vi.fn(), newTextFile: vi.fn(), pickFiles: vi.fn(), pickDirectory: vi.fn() }
+	const actions = { newDirectory: vi.fn(), newTextFile: vi.fn(), newOffice: vi.fn(), pickFiles: vi.fn(), pickDirectory: vi.fn() }
 
 	render(
 		createElement(UploadContextMenu, {
@@ -80,7 +80,7 @@ describe("UploadContextMenu", () => {
 		rightClick(screen.getByTestId("blank"))
 
 		// The toolbar has its own New directory button beside its Upload menu.
-		expect(toolbarEntries).toEqual(["New text file", "Upload files", "Upload directory"])
+		expect(toolbarEntries).toEqual(["New text file", "Office", "Upload files", "Upload directory"])
 		expect(menuLabels()).toEqual(["New directory", ...toolbarEntries])
 		expect(onOpen).toHaveBeenCalledOnce()
 	})
@@ -106,7 +106,7 @@ describe("UploadContextMenu", () => {
 
 		rightClick(screen.getByTestId("surface"))
 
-		expect(menuLabels()).toHaveLength(4)
+		expect(menuLabels()).toHaveLength(5)
 		expect(onOpen).toHaveBeenCalledOnce()
 	})
 
@@ -140,7 +140,14 @@ describe("UploadContextMenu", () => {
 
 		const toolbarPaste = screen.getByRole("menuitem", { name: /^Paste/ })
 
-		expect(menuLabels()).toEqual(["New text file", "Upload files", "Upload directory", "Paste drive.paste", "Clear clipboard"])
+		expect(menuLabels()).toEqual([
+			"New text file",
+			"Office",
+			"Upload files",
+			"Upload directory",
+			"Paste drive.paste",
+			"Clear clipboard"
+		])
 		expect(toolbarPaste.getAttribute("aria-disabled")).toBe("true")
 		expect(screen.getByRole("menuitem", { name: "Clear clipboard" }).getAttribute("aria-disabled")).toBe("true")
 

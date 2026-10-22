@@ -28,6 +28,7 @@
 		"./core/sheet/text": "./src/core/sheet/text.ts",
 		"./core/xlsx": "./src/core/xlsx/index.ts",
 		"./core/xlsx/edit": "./src/core/xlsx/edit/index.ts",
+		"./core/templates": "./src/core/templates/index.ts",
 		"./dom": "./src/dom/index.ts",
 		"./dom/encryption": "./src/dom/encryption/index.ts",
 		"./dom/encryption/seal": "./src/dom/encryption/seal.ts",

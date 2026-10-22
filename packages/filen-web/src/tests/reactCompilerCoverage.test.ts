@@ -498,6 +498,7 @@ describe("React Compiler coverage", () => {
 		["src/features/drive/components/newDirectory.tsx", "NewDirectory"],
 		["src/features/drive/components/moveTargetDialog.tsx", "MoveTargetDialog"],
 		["src/features/drive/hooks/useUploadMenuActions.tsx", "useUploadMenuActions"],
+		["src/features/drive/hooks/useNewOfficeFile.tsx", "useNewOfficeFile"],
 		["src/components/ui/alert-dialog.tsx", "AlertDialogContent"],
 		["src/components/ui/alert-dialog.tsx", "AlertDialogCancel"],
 		["src/components/ui/avatar.tsx", "Avatar"],

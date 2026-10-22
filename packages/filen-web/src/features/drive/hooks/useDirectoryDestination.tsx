@@ -45,6 +45,10 @@ export function useDirectoryDestination({
 				setTarget(uuid)
 				upload.newTextFile()
 			},
+			newOffice: kind => {
+				setTarget(uuid)
+				upload.newOffice(kind)
+			},
 			pickFiles: () => {
 				setTarget(uuid)
 				upload.pickFiles()

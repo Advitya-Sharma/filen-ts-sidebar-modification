@@ -107,9 +107,9 @@ const REPORT = narrowItem({
 } satisfies File)
 
 // The Cloud Drive root's menu: it is no item, so Open and what it offers as a destination, flat.
-const ROOT_ENTRIES = ["Open", "New directory", "New text file", "Upload files", "Upload directory", "Paste drive.paste"]
+const ROOT_ENTRIES = ["Open", "New directory", "New text file", "Office", "Upload files", "Upload directory", "Paste drive.paste"]
 // A node's New submenu.
-const NEW_ENTRIES = ["New directory", "New text file", "Upload files", "Upload directory"]
+const NEW_ENTRIES = ["New directory", "New text file", "Office", "Upload files", "Upload directory"]
 
 const LISTINGS = new Map<string | null, DriveItem[]>([
 	[null, [DOCS, REPORT]],
@@ -239,6 +239,7 @@ describe("sidebar tree menu", () => {
 				destinationActions: () => ({
 					newDirectory: () => undefined,
 					newTextFile: () => undefined,
+					newOffice: () => undefined,
 					pickFiles: () => undefined,
 					pickDirectory: () => undefined
 				}),
@@ -276,7 +277,7 @@ describe("sidebar tree menu", () => {
 		expect(isDisabled(screen.getByRole("menuitem", { name: "New" }))).toBe(true)
 
 		await openMenuOn(root)
-		expect(NEW_ENTRIES.map(label => isDisabled(entry(label)))).toEqual([true, true, true, true])
+		expect(NEW_ENTRIES.map(label => isDisabled(entry(label)))).toEqual([true, true, true, true, true])
 		onlineManager.setOnline(true)
 	})
 

@@ -19,6 +19,9 @@ interface InputDialogProps {
 	// the always-blank default; the field is also re-selected on open (see the Input's onFocus below)
 	// so typing immediately overwrites it. Omitted keeps the original always-blank behavior.
 	initialValue?: string | undefined
+	// The selection on open stops before the last extension ("Untitled document" of "Untitled
+	// document.docx"), so typing renames the file and keeps its type. Omitted selects the whole value.
+	selectBaseName?: boolean | undefined
 	// A secret that is not the user's Filen login (a PDF's password): masked, and never offered to or
 	// saved by a password manager (SecretInput). type/autoComplete do not apply to it.
 	secret?: boolean
@@ -58,6 +61,7 @@ function InputDialog({
 	label,
 	placeholder,
 	initialValue,
+	selectBaseName,
 	secret,
 	type,
 	inputMode,
@@ -101,7 +105,13 @@ function InputDialog({
 			// Base UI's Dialog re-focuses the popup's initial-focus target (this input, via
 			// FloatingFocusManager) on every open, not just first mount — so this reliably
 			// selects the pre-filled value each time, not only once.
-			e.target.select()
+			const dot = e.target.value.lastIndexOf(".")
+
+			if (selectBaseName === true && dot > 0) {
+				e.target.setSelectionRange(0, dot)
+			} else {
+				e.target.select()
+			}
 		}
 	}
 

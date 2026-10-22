@@ -64,6 +64,7 @@ function renderRow(item: DriveItem, variant: DriveVariant) {
 			destinationActions: () => ({
 				newDirectory: () => undefined,
 				newTextFile: () => undefined,
+				newOffice: () => undefined,
 				pickFiles: () => undefined,
 				pickDirectory: () => undefined
 			}),

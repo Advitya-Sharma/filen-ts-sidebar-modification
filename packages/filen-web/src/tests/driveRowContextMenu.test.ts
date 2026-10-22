@@ -98,6 +98,7 @@ function sharedProps(
 		destinationActions: () => ({
 			newDirectory: () => undefined,
 			newTextFile: () => undefined,
+			newOffice: () => undefined,
 			pickFiles: () => undefined,
 			pickDirectory: () => undefined
 		}),
@@ -187,7 +188,7 @@ describe("New submenu", () => {
 	}
 
 	it("sits under Open, beside Paste, on a directory row, and points each entry at that directory", async () => {
-		const actions = { newDirectory: vi.fn(), newTextFile: vi.fn(), pickFiles: vi.fn(), pickDirectory: vi.fn() }
+		const actions = { newDirectory: vi.fn(), newTextFile: vi.fn(), newOffice: vi.fn(), pickFiles: vi.fn(), pickDirectory: vi.fn() }
 		const destinationActions = vi.fn(() => actions)
 		const item = dirItem("target")
 		const { container } = renderWith(item, "drive", destinationActions)

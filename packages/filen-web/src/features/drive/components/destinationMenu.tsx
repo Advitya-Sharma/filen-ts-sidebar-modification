@@ -1,8 +1,20 @@
 import { useTranslation } from "react-i18next"
-import { ClipboardPasteIcon, ClipboardXIcon, FilePlusIcon, FolderPlusIcon, FolderUpIcon, PlusIcon, UploadIcon } from "lucide-react"
+import {
+	ClipboardPasteIcon,
+	ClipboardXIcon,
+	FilePlusIcon,
+	FileSpreadsheetIcon,
+	FileTextIcon,
+	FilesIcon,
+	FolderPlusIcon,
+	FolderUpIcon,
+	PlusIcon,
+	UploadIcon
+} from "lucide-react"
 import { type PasteDirectory } from "@/features/drive/lib/directoryPaste"
 import { useDirectoryPaste } from "@/features/drive/hooks/useDirectoryPaste"
 import { type DirectoryTreeMenuFamily } from "@/features/drive/components/directoryTreeSubmenu"
+import { type NewOfficeKind } from "@/features/drive/lib/createOfficeFile"
 import { useIsOnline } from "@/lib/useIsOnline"
 import { Kbd } from "@/lib/keymap/kbd"
 
@@ -11,6 +23,7 @@ import { Kbd } from "@/lib/keymap/kbd"
 export interface DestinationActions {
 	newDirectory?: (() => void) | undefined
 	newTextFile: () => void
+	newOffice: (kind: NewOfficeKind) => void
 	pickFiles: () => void
 	pickDirectory: () => void
 }
@@ -42,7 +55,7 @@ export function DestinationEntries({ family, actions, paste, clear, offline: off
 	// Not a destructuring default, which the React Compiler cannot lower.
 	const offline = offlineProp ?? false
 	const { t } = useTranslation(["drive", "common"])
-	const { Item, Separator } = family
+	const { Item, Separator, Sub, SubTrigger, SubContent } = family
 	const title = offline ? t("common:offlineActionDisabled") : undefined
 
 	return (
@@ -65,6 +78,33 @@ export function DestinationEntries({ family, actions, paste, clear, offline: off
 				<FilePlusIcon aria-hidden="true" />
 				{t("driveNewTextFile")}
 			</Item>
+			<Sub>
+				<SubTrigger
+					disabled={offline}
+					title={title}
+				>
+					<FilesIcon aria-hidden="true" />
+					{t("driveNewOffice")}
+				</SubTrigger>
+				<SubContent>
+					<Item
+						onClick={() => {
+							actions.newOffice("docx")
+						}}
+					>
+						<FileTextIcon aria-hidden="true" />
+						{t("driveNewOfficeDocx")}
+					</Item>
+					<Item
+						onClick={() => {
+							actions.newOffice("xlsx")
+						}}
+					>
+						<FileSpreadsheetIcon aria-hidden="true" />
+						{t("driveNewOfficeXlsx")}
+					</Item>
+				</SubContent>
+			</Sub>
 			<Separator />
 			<Item
 				disabled={offline}

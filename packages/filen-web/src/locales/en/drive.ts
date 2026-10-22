@@ -49,6 +49,12 @@ export const drive = {
 	driveUploadDirectory: "Upload directory",
 	/** Upload menu — entry opening the new-text-file name dialog */
 	driveNewTextFile: "New text file",
+	/** New menu — submenu holding the blank office documents a directory can be given */
+	driveNewOffice: "Office",
+	/** New menu ▸ Office — entry opening the name dialog for a blank Word document */
+	driveNewOfficeDocx: "Document (.docx)",
+	/** New menu ▸ Office — entry opening the name dialog for a blank Excel workbook */
+	driveNewOfficeXlsx: "Spreadsheet (.xlsx)",
 
 	// ── Upload ───────────────────────────────────────────────────────────────
 	/** Drive toolbar — trigger button opening the standalone upload menu (Upload files, later Upload directory) */
@@ -172,6 +178,26 @@ export const drive = {
 	driveNewTextFileSubmit: "Create",
 	/** New-file name dialogs — inline error under the name field when a file or directory of that name (any letter case) is already in the directory; creating it would replace that file's content */
 	driveNewFileNameTaken: "A file or directory with this name already exists here.",
+
+	// ── New-office-file dialog ───────────────────────────────────────────────
+	/** New-office-file dialog — title for a blank Word document */
+	driveNewDocxTitle: "New document",
+	/** New-office-file dialog — body under the title for a blank Word document */
+	driveNewDocxBody: "Enter a name for the new document.",
+	/** New-office-file dialog — the name the field starts with for a blank Word document; ".docx" is added */
+	driveNewDocxUntitled: "Untitled document",
+	/** New-office-file dialog — title for a blank Excel workbook */
+	driveNewXlsxTitle: "New spreadsheet",
+	/** New-office-file dialog — body under the title for a blank Excel workbook */
+	driveNewXlsxBody: "Enter a name for the new spreadsheet.",
+	/** New-office-file dialog — the name the field starts with for a blank Excel workbook; ".xlsx" is added */
+	driveNewXlsxUntitled: "Untitled spreadsheet",
+	/** The first sheet's name in a new blank workbook, as Excel names it in this language (at most 31 characters, none of \ / ? * [ ] :) */
+	driveNewXlsxSheetName: "Sheet1",
+	/** New-office-file dialog — name field label */
+	driveNewOfficeFileLabel: "Name",
+	/** New-office-file dialog — submit button label */
+	driveNewOfficeFileSubmit: "Create",
 
 	// ── Breadcrumb ───────────────────────────────────────────────────────────
 	/** Drive breadcrumb — accessible label on the breadcrumb navigation landmark */

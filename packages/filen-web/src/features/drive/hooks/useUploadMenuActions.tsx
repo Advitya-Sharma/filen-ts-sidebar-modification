@@ -5,6 +5,8 @@ import { startUploads } from "@/features/drive/lib/upload"
 import { startDirectoryUpload } from "@/features/drive/lib/uploadDirectory"
 import { normalizeTextFileName, runCreateTextFile } from "@/features/drive/lib/createTextFile"
 import { nameTakenInDirectory } from "@/features/drive/lib/nameTaken"
+import { type NewOfficeKind } from "@/features/drive/lib/createOfficeFile"
+import { useNewOfficeFile } from "@/features/drive/hooks/useNewOfficeFile"
 import { notifyIfNameIsHidden } from "@/features/drive/lib/hiddenNameNotice"
 import { driveListingQueryUpdate } from "@/features/drive/queries/drive"
 import { type DriveItem } from "@/features/drive/lib/item"
@@ -27,9 +29,10 @@ export interface UploadMenuActions {
 	pickFiles: () => void
 	pickDirectory: () => void
 	newTextFile: () => void
-	// A picker or the text-file dialog is in use, so the host has to stay mounted until it settles.
+	newOffice: (kind: NewOfficeKind) => void
+	// A picker or a name dialog is in use, so the host has to stay mounted until it settles.
 	busy: boolean
-	// The hidden pickers and the text-file name dialog. Mounted beside the menu, never inside its popup:
+	// The hidden pickers and the name dialogs. Mounted beside the menu, never inside its popup:
 	// the popup unmounts on close, before a picker's change or the dialog's submit arrives.
 	host: ReactNode
 }
@@ -57,6 +60,7 @@ export function useUploadMenuActions({
 	const [takenTextFileName, setTakenTextFileName] = useState<string | null>(null)
 	// From a picker's click until its change or cancel.
 	const [pickerOpen, setPickerOpen] = useState(false)
+	const office = useNewOfficeFile({ parentUuid, openPreview, hiddenNotice })
 
 	function settlePicker(): void {
 		setPickerOpen(false)
@@ -166,7 +170,8 @@ export function useUploadMenuActions({
 			setTakenTextFileName(null)
 			setTextFileDialogOpen(true)
 		},
-		busy: pickerOpen || textFileDialogOpen || textFilePending,
+		newOffice: office.open,
+		busy: pickerOpen || textFileDialogOpen || textFilePending || office.busy,
 		host: (
 			<>
 				<input
@@ -205,6 +210,7 @@ export function useUploadMenuActions({
 						void handleTextFileSubmit(value)
 					}}
 				/>
+				{office.host}
 			</>
 		)
 	}
