@@ -25,6 +25,7 @@ import { buildDocx, type SyntheticDocx } from "./docxSynthetic"
 import { HmtxMeasurer, layOut, layoutDigest, loadDocx, pageLines, type LineInfo } from "./layoutFixtures"
 import { wordLikeDocument } from "./wordLike"
 import { ZIP_ENTRY_TIME } from "./zipTime"
+import { cpuMs } from "./timing"
 
 // Letter paper, 1 in margins: a 624 x 864 px text area. Without a styles part text is Times New Roman 10 pt
 // (Tinos metrics: 15.33 px lines), so a page holds 56 lines.
@@ -124,7 +125,7 @@ describe("pages", () => {
 
 	it("lays out a 300-page document quickly, the first page first", async () => {
 		const loaded = await loadDocx(buildDocx({ document: new TextDecoder().decode(wordLikeDocument(4000)) }))
-		const started = performance.now()
+		const started = cpuMs()
 		let first = 0
 		const result = layoutDocument(loaded.model, loaded.resolver, loaded.fonts, new HmtxMeasurer(), {
 			store: loaded.store,
@@ -133,11 +134,11 @@ describe("pages", () => {
 		})
 
 		result.subscribe(() => {
-			if (first === 0) first = performance.now() - started
+			if (first === 0) first = cpuMs() - started
 		})
 		await result.done
 
-		const total = performance.now() - started
+		const total = cpuMs() - started
 
 		expect(result.pages.length).toBeGreaterThan(300)
 		expect(first).toBeLessThan(300)

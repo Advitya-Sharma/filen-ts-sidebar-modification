@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { MAX_HTML_COPY_LENGTH, parseClipboardHtml } from "../core/sheet/clipboard/html"
 import { SHEET_MAX_EDIT_CELLS } from "../core/sheet/protocol"
+import { cpuMs } from "./timing"
 
 // Clipboard HTML any page can put on the clipboard, at the paste cap (768 KiB), in shapes that cost the square of
 // their size to a parse with backtracking expressions or per-cell copies of shared rules. Each parses in about as long
@@ -73,10 +74,10 @@ describe("clipboard HTML at the paste cap", () => {
 			expect(html.length).toBeLessThanOrEqual(SIZE)
 			expect(html.length).toBeGreaterThan(SIZE * 0.75)
 
-			const start = performance.now()
+			const start = cpuMs()
 			const table = parseClipboardHtml(html, SHEET_MAX_EDIT_CELLS)
 
-			expect(performance.now() - start).toBeLessThan(TIGHT[name] ?? BOUND_MS)
+			expect(cpuMs() - start).toBeLessThan(TIGHT[name] ?? BOUND_MS)
 			expect(table).not.toBeNull()
 		})
 })

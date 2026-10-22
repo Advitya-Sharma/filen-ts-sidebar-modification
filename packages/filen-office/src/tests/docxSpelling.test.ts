@@ -11,6 +11,7 @@ import {
 } from "@filen/office/core/docx/spelling"
 import { ParagraphScanner, addressSpans } from "../core/docx/spelling/scan"
 import { STYLES_PART, sessionOf } from "./docxEditFixtures"
+import { cpuMs } from "./timing"
 import type { SyntheticDocx } from "./docxSynthetic"
 
 // A spellchecker over fixed word lists, answering checks asynchronously like a worker would.
@@ -239,15 +240,37 @@ describe("DocxSpelling", () => {
 			spans("see (https://x.example/a), www.filen.io, mailto:a@b, a@b.cd, C:\\dir\\f, \\\\srv\\s, /usr/bin, ~/x/y and/or /etc")
 		).toEqual(["(https://x.example/a),", "www.filen.io,", "mailto:a@b,", "a@b.cd,", "C:\\dir\\f,", "\\\\srv\\s,", "/usr/bin,", "~/x/y"])
 
-		let token = ""
+		const tokenOf = (length: number): string => {
+			let token = ""
 
-		for (let i = 0; token.length < 40_000; i++) token += ((i * 2654435761) >>> 0).toString(36) + (i % 3 === 0 ? "/" : "+")
+			for (let i = 0; token.length < length; i++) token += ((i * 2654435761) >>> 0).toString(36) + (i % 3 === 0 ? "/" : "+")
 
-		for (const text of [token, `x:${token}`, `a@${token}`, `www${token}`, `${"a".repeat(40_000)}://`]) {
-			const start = performance.now()
+			return token
+		}
+		const least = (text: string): number => {
+			let best = Infinity
 
-			addressSpans(text)
-			expect(performance.now() - start).toBeLessThan(5)
+			for (let k = 0; k < 6; k++) {
+				const start = cpuMs()
+
+				addressSpans(text)
+				best = Math.min(best, cpuMs() - start)
+			}
+
+			return best
+		}
+
+		// Linear work grows about 4 times from a quarter of the length to the whole; quadratic work, 16.
+		for (const make of [
+			(n: number) => tokenOf(n),
+			(n: number) => `x:${tokenOf(n)}`,
+			(n: number) => `a@${tokenOf(n)}`,
+			(n: number) => `www${tokenOf(n)}`,
+			(n: number) => `${"a".repeat(n)}://`
+		]) {
+			const quarter = least(make(10_000))
+
+			expect(least(make(40_000)) / Math.max(quarter, 0.2)).toBeLessThan(9)
 		}
 	})
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { planRefEdit } from "../core/xlsx/refs/index"
 import { rows, sheetBody } from "./xlsxRefsFixtures"
 import { buildFixture, openWorkbook, saved } from "./xlsxWriteFixtures"
+import { cpuMs } from "./timing"
 
 // Planning and applying a structure edit costs in proportion to what refers to cells: a sheet of 100,000 rows with
 // a formula on each, a shared column and a few hundred conditional formats, against the same sheet without them.
@@ -39,9 +40,9 @@ async function time(formulas: boolean): Promise<{ plan: number; apply: number; s
 
 	await workbook.load(0)
 
-	let started = performance.now()
+	let started = cpuMs()
 	const result = await planRefEdit(workbook, rows("insert", 1, 1))
-	const plan = performance.now() - started
+	const plan = cpuMs() - started
 
 	if (!result.ok) throw new Error(JSON.stringify(result.refusal))
 

@@ -10,6 +10,7 @@ import { CORPUS_DIR as CORPUS } from "./corpusDir"
 import { equationRunProperties } from "../core/docx/math/edit"
 import { diffTrees, firstRunProperties, ommlStringTree, ommlTree, treeXml, withRunProperties } from "../core/math/ommlTrack"
 import { rng } from "./fuzz/config"
+import { cpuMs } from "./timing"
 
 const M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 
@@ -244,16 +245,16 @@ describe("OMML to the LaTeX subset", () => {
 	})
 
 	it("takes time linear in the equation's length: a long run, many primes", () => {
-		// The least of four runs (the first warms up), at a quarter of the length and at the whole: linear grows about 4 times.
+		// The least CPU time of six runs (the first warms up), at a quarter of the length and at the whole: linear grows about 4 times.
 		const growth = (work: (n: number) => void): number => {
 			const least = (n: number): number => {
 				let best = Infinity
 
-				for (let k = 0; k < 4; k++) {
-					const started = performance.now()
+				for (let k = 0; k < 6; k++) {
+					const started = cpuMs()
 
 					work(n)
-					best = Math.min(best, performance.now() - started)
+					best = Math.min(best, cpuMs() - started)
 				}
 
 				return best
@@ -280,10 +281,10 @@ describe("OMML to the LaTeX subset", () => {
 		const before = tree(long)
 		const after = tree(`y${"x".repeat(4_999)}z${"x".repeat(4_998)}y`)
 		const buffers = process.memoryUsage().arrayBuffers
-		const started = performance.now()
+		const started = cpuMs()
 		const changed = treeXml(diffTrees(before, after, stamp, "1", "2"))
 
-		expect(performance.now() - started).toBeLessThan(250)
+		expect(cpuMs() - started).toBeLessThan(250)
 		expect(process.memoryUsage().arrayBuffers - buffers).toBeLessThan(32 * 1024 * 1024)
 		expect(changed).toContain("<w:ins")
 

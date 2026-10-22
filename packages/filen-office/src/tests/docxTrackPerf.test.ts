@@ -7,6 +7,7 @@ import { storyReviewIndex } from "../core/docx/review/accept"
 import { addComments, openEditor, percentile as share, typeBursts } from "../bench/editHarness"
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
+import { cpuMs } from "./timing"
 
 // Recording tracked changes adds no document scan to a keystroke: typing, Backspace and Enter with tracking on
 // cost what they cost with it off, on the 300-page fixture and on Tariff; select-all edits stay bounded.
@@ -42,7 +43,7 @@ function keystrokes(session: DocxEditorSession, count: number, key: "type" | "ba
 
 		while (!$pos.parent.inlineContent && target < state.doc.content.size) $pos = state.doc.resolve(++target)
 
-		const start = performance.now()
+		const start = cpuMs()
 		const tr = state.tr.setSelection(TextSelection.create(state.doc, target))
 
 		if (key === "type") tr.insertText("a")
@@ -52,7 +53,7 @@ function keystrokes(session: DocxEditorSession, count: number, key: "type" | "ba
 
 		session.dispatch(tr)
 		session.snapshot()
-		times.push(performance.now() - start)
+		times.push(cpuMs() - start)
 	}
 
 	return times.sort((a, b) => a - b)
@@ -84,7 +85,7 @@ describe("docx tracked changes performance", () => {
 	it("types into the 300-page fixture with tracking on as fast as with it off", { timeout: 120_000 }, async () => {
 		const { off, on } = await measure(FIXTURE, "300p")
 
-		// The target is 16 ms; the bounds leave room for loaded machines.
+		// The target is 16 ms of CPU time (wall time would count other processes); the bounds leave room for noise.
 		expect(on).toBeLessThan(48)
 		expect(on).toBeLessThan(Math.max(off * 3, off + 8))
 	})
@@ -110,14 +111,14 @@ describe("docx tracked changes performance", () => {
 
 			editor.resume()
 			console.log(
-				`Tariff under review: keystroke p50/p95 in page view ${share(paged.times, 0.5).toFixed(2)}/${share(paged.times, 0.95).toFixed(2)} ms, ` +
-					`suspended ${share(suspended.times, 0.5).toFixed(2)}/${share(suspended.times, 0.95).toFixed(2)} ms; changes ${storyReviewIndex(editor.session).revisionCount}`
+				`Tariff under review: keystroke p50/p95 in page view ${share(paged.cpu, 0.5).toFixed(2)}/${share(paged.cpu, 0.95).toFixed(2)} ms, ` +
+					`suspended ${share(suspended.cpu, 0.5).toFixed(2)}/${share(suspended.cpu, 0.95).toFixed(2)} ms; changes ${storyReviewIndex(editor.session).revisionCount}`
 			)
 			opened.close()
 			expect(paged.refused + suspended.refused).toBe(0)
 			// The target is 8 ms (src/bench/editBench.ts measures the gate); the bounds leave room for loaded machines.
-			expect(share(paged.times, 0.95)).toBeLessThan(48)
-			expect(share(suspended.times, 0.95)).toBeLessThan(24)
+			expect(share(paged.cpu, 0.95)).toBeLessThan(48)
+			expect(share(suspended.cpu, 0.95)).toBeLessThan(24)
 		}
 	)
 
@@ -133,18 +134,18 @@ describe("docx tracked changes performance", () => {
 		// Ctrl+A, Delete: everything stays, marked (section breaks included).
 		session.dispatch(session.state.tr.setSelection(new AllSelection(doc)))
 
-		let start = performance.now()
+		let start = cpuMs()
 		const applied = session.dispatch(session.state.tr.deleteSelection())
 
 		session.snapshot()
 
-		const deleteMs = performance.now() - start
+		const deleteMs = cpuMs() - start
 		const changes = storyReviewIndex(session).revisionCount
 
-		start = performance.now()
+		start = cpuMs()
 		session.execute({ type: "history.undo" })
 
-		const undoMs = performance.now() - start
+		const undoMs = cpuMs() - start
 
 		console.log(
 			`Tariff tracked select-all delete of ${size} positions: ${String(applied)} in ${deleteMs.toFixed(0)} ms, ${changes} changes; undo ${undoMs.toFixed(0)} ms`

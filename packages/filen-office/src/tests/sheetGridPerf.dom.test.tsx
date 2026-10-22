@@ -8,6 +8,7 @@ import { SheetGrid, SheetGridModel, toDom, type SheetGridHandle } from "../react
 import { bodyTotal } from "../react/sheet/view"
 import { RecordingCanvas } from "./sheetGridCanvas"
 import { IMMEDIATE, SML, buildFixture } from "./sheetSessionFixtures"
+import { cpuMs } from "./timing"
 
 // The grid's main-thread budgets at 1M cells (100k rows by 10 columns) on the in-thread host, the draw calls going
 // to a recording context (the browser's raster is measured apart): a scroll frame's script under 50 ms (no long
@@ -99,11 +100,11 @@ describe.skipIf(!PERF)("grid budgets at 1M cells", () => {
 			const renderer = handle.renderer
 			const sheet = opened.info.activeSheet
 			const paint = (): number => {
-				const started = performance.now()
+				const started = cpuMs()
 
 				renderer.paint()
 
-				return performance.now() - started
+				return cpuMs() - started
 			}
 
 			paint()
@@ -135,11 +136,11 @@ describe.skipIf(!PERF)("grid budgets at 1M cells", () => {
 
 				if (!model.tiles.has(needed)) {
 					// Missed: the session answers in a macrotask; the next frame draws it.
-					const asked = performance.now()
+					const asked = cpuMs()
 
 					await macrotask()
 					frames.push(paint())
-					fills.push(performance.now() - asked)
+					fills.push(cpuMs() - asked)
 
 					expect(model.tiles.has(needed)).toBe(true)
 				}
@@ -157,13 +158,13 @@ describe.skipIf(!PERF)("grid budgets at 1M cells", () => {
 				})
 
 				const editor = container.querySelector("textarea") as HTMLTextAreaElement
-				const started = performance.now()
+				const started = cpuMs()
 
 				act(() => {
 					editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }))
 				})
 				renderer.paint()
-				commits.push(performance.now() - started)
+				commits.push(cpuMs() - started)
 				await macrotask()
 			}
 

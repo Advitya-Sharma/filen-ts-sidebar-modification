@@ -9,9 +9,10 @@ import { EditSink } from "../react/docx/edit/sink"
 import { ReflowView } from "../react/docx/reflow/view"
 import { buildDocx, p } from "./docxSynthetic"
 import { pagedEditor } from "./pagedDomFixtures"
+import { cpuMs } from "./timing"
 
 // Mobile view over a long document: what opening it holds (DOM, blocks in the view) does not grow with the
-// document, and a keystroke stays under a frame.
+// document, and a keystroke stays under a frame (CPU time, which other processes' scheduling does not inflate).
 
 const SESSION: DocxSessionApi = {
 	objects: () => Promise.resolve([]),
@@ -60,7 +61,7 @@ async function opened(pages: number): Promise<{ elements: number; blocks: number
 
 	document.body.appendChild(scroller)
 
-	const start = performance.now()
+	const start = cpuMs()
 	const reflow = new ReflowView(editor, scroller, {
 		label: "Document",
 		readOnly: false,
@@ -70,17 +71,17 @@ async function opened(pages: number): Promise<{ elements: number; blocks: number
 		interactions: undefined,
 		document: DOCUMENT
 	})
-	const openMs = performance.now() - start
+	const openMs = cpuMs() - start
 	const view = reflow.main.view
 	const keystrokes: number[] = []
 
 	for (let k = 0; k < 300; k++) {
-		const before = performance.now()
+		const before = cpuMs()
 
 		if (k % 50 === 49) view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }))
 		else view.dispatch(view.state.tr.insertText("a"))
 
-		keystrokes.push(performance.now() - before)
+		keystrokes.push(cpuMs() - before)
 	}
 
 	const result = {
@@ -166,10 +167,10 @@ describe("Mobile view performance", () => {
 			const times: number[] = []
 
 			for (let k = 0; k < 100; k++) {
-				const before = performance.now()
+				const before = cpuMs()
 
 				view.dispatch(view.state.tr.insertText("a"))
-				times.push(performance.now() - before)
+				times.push(cpuMs() - before)
 			}
 
 			const elements = scroller.querySelectorAll("*").length

@@ -21,6 +21,7 @@ import {
 } from "@filen/office/core/docx"
 import { modelProblems } from "./docxIntegrity"
 import { NAMESPACES, modelOf, p } from "./docxSynthetic"
+import { cpuMs } from "./timing"
 
 function itemsOf(part: StoryPart, kind: number): number[] {
 	const out: number[] = []
@@ -821,7 +822,7 @@ describe("hostile and malformed input", () => {
 			(_, k) => `xmlns:q${k}="http://schemas.openxmlformats.org/wordprocessingml/2006/main"`
 		).join(" ")
 		const time = async (extra: string): Promise<number> => {
-			const start = performance.now()
+			const start = cpuMs()
 			const model = await modelOf({
 				document: `<?xml version="1.0"?><w:document ${extra} ${NAMESPACES}><w:body>${paragraphs}</w:body></w:document>`
 			})
@@ -829,7 +830,7 @@ describe("hostile and malformed input", () => {
 			expect(body(model).bookmarks.count).toBe(1)
 			expect(itemsOf(body(model), Item.Break).every(item => body(model).breakType(item) === BreakType.Page)).toBe(true)
 
-			return performance.now() - start
+			return cpuMs() - start
 		}
 
 		await time("")

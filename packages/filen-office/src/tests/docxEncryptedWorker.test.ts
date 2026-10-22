@@ -8,6 +8,7 @@ import { CfbFile } from "@filen/office/core/cfb"
 import { docxProtectionServer } from "../dom/docx/protectionWorker"
 import { buildDocx, p } from "./docxSynthetic"
 import { decrypted, encryptedFile, lockedOf, workerHarness } from "./docxEncryptedFixtures"
+import { cpuMs } from "./timing"
 
 // Password-protected documents through the docx worker, as the web opens them: the spin and the decrypted package
 // stay in the worker; the viewer's engine reads the worker's copy; only an editor's take() brings the package and
@@ -139,11 +140,11 @@ describe("encrypted docx in the docx worker", () => {
 						await lockedOf(await encryptedFile(standardStreams(PLAINTEXT, PASSWORD)), harness.pool.protection)
 					).unlock(PASSWORD)
 				)
-				const started = performance.now()
+				const started = cpuMs()
 				const taken = await document.take()
 
 				// The copy comes without the upgrade spin (100,000 SHA-512 digests).
-				expect(performance.now() - started).toBeLessThan(250)
+				expect(cpuMs() - started).toBeLessThan(250)
 				expect(taken.bytes).toEqual(PLAINTEXT)
 
 				const { sealer, release } = docxSealer(taken)

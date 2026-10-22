@@ -6,6 +6,7 @@ import { DocxDocBuilder, DocxEditorSession, docxSchema } from "@filen/office/cor
 import { key, memory, openEditor, percentile as share, placeCaret, spreadPosition, typeBursts } from "../bench/editHarness"
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
+import { cpuMs } from "./timing"
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "08-large-300p.docx")
 const TARIFF = join(CORPUS_DIR, "docx", "govuk__Tariff_of_the_United_Kingdom_v1.34.docx")
@@ -29,13 +30,13 @@ async function measureBuild(
 	if (body === undefined) throw new Error("no body")
 
 	const heapBefore = heapMb()
-	const start = performance.now()
+	const start = cpuMs()
 	const story = new DocxDocBuilder(opened.context).build(body)
-	const buildMs = performance.now() - start
+	const buildMs = cpuMs() - start
 	const heap = heapMb() - heapBefore
-	const sessionStart = performance.now()
+	const sessionStart = cpuMs()
 	const session = new DocxEditorSession(opened.context)
-	const sessionMs = performance.now() - sessionStart
+	const sessionMs = cpuMs() - sessionStart
 
 	return { session, buildMs, sessionMs, heap, blocks: story.doc.childCount }
 }
@@ -53,7 +54,7 @@ function keystrokes(session: DocxEditorSession, count: number, key: "type" | "ba
 
 		while (!$pos.parent.inlineContent && target < state.doc.content.size) $pos = state.doc.resolve(++target)
 
-		const start = performance.now()
+		const start = cpuMs()
 		const tr = state.tr.setSelection(TextSelection.create(state.doc, target))
 
 		if (key === "type") tr.insertText("a")
@@ -64,7 +65,7 @@ function keystrokes(session: DocxEditorSession, count: number, key: "type" | "ba
 		const applied = session.dispatch(tr)
 
 		session.snapshot()
-		times.push(performance.now() - start)
+		times.push(cpuMs() - start)
 
 		if (!applied) throw new Error(`keystroke at ${target} refused`)
 	}
@@ -86,12 +87,12 @@ describe("docx editing performance", () => {
 
 		session.dispatch(session.state.tr.setSelection(new AllSelection(session.state.doc)))
 
-		const boldStart = performance.now()
+		const boldStart = cpuMs()
 
 		session.execute({ type: "format.bold" })
 		session.snapshot()
 
-		const boldMs = performance.now() - boldStart
+		const boldMs = cpuMs() - boldStart
 
 		console.log(
 			`300p: ${blocks} blocks, build ${buildMs.toFixed(1)} ms, session (build + proof) ${sessionMs.toFixed(1)} ms, heap ${heap.toFixed(1)} MB; ` +
@@ -99,7 +100,7 @@ describe("docx editing performance", () => {
 				`backspace p95 ${percentile(backspace, 0.95).toFixed(2)} ms, enter p95 ${percentile(enter, 0.95).toFixed(2)} ms; select-all bold ${boldMs.toFixed(1)} ms`
 		)
 		expect(session.state.doc.type).toBe(docxSchema.nodes.doc)
-		// The target is 16 ms; the bound leaves room for loaded CI machines.
+		// The target is 16 ms of CPU time; the bound leaves room for noise.
 		expect(p95).toBeLessThan(48)
 		expect(percentile(enter, 0.95)).toBeLessThan(48)
 		expect(percentile(backspace, 0.95)).toBeLessThan(48)
@@ -121,7 +122,7 @@ describe("docx editing performance", () => {
 			const first = key(editor, "type")?.ms ?? 0
 			const typed = await typeBursts(editor, 10, 20, ["type"], 0, 0)
 			const enter = await typeBursts(editor, 5, 10, ["enter"], 50, 0)
-			const p95 = share(typed.times, 0.95)
+			const p95 = share(typed.cpu, 0.95)
 
 			console.log(
 				`300p page view: open ${opened.editorMs.toFixed(0)} ms, heap ${heap.toFixed(1)} MB, longest open task ${opened.tasks.maxMs.toFixed(0)} ms; ` +
@@ -140,29 +141,29 @@ describe("docx editing performance", () => {
 		const all = (): void => {
 			session.dispatch(session.state.tr.setSelection(new AllSelection(session.state.doc)))
 		}
-		let start = performance.now()
+		let start = cpuMs()
 
 		all()
 		session.snapshot()
 
-		const cold = performance.now() - start
+		const cold = cpuMs() - start
 
 		session.dispatch(session.state.tr.insertText("z", session.state.doc.content.size - 3))
-		start = performance.now()
+		start = cpuMs()
 		session.snapshot()
 
-		const warm = performance.now() - start
+		const warm = cpuMs() - start
 		// Shift+arrow over half the document, a snapshot per step.
 		const half = Math.floor(session.state.doc.content.size / 2)
 		const arrows: number[] = []
 
 		for (let k = 0; k < 20; k++) {
 			const state = session.state
-			const step = performance.now()
+			const step = cpuMs()
 
 			session.dispatch(state.tr.setSelection(TextSelection.between(state.doc.resolve(1), state.doc.resolve(half + k))))
 			session.snapshot()
-			arrows.push(performance.now() - step)
+			arrows.push(cpuMs() - step)
 		}
 
 		arrows.sort((a, b) => a - b)

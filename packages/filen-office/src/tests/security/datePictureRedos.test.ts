@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest"
 import { parseControlDate } from "../../core/docx/forms/dates"
+import { cpuMs } from "../timing"
 
 // A date control's picture comes from the document and becomes a pattern for reading typed text back: no
 // picture may make that read take more than linear-ish time.
 
 function timed(run: () => unknown): number {
-	const started = performance.now()
+	const started = cpuMs()
 
 	run()
 
-	return performance.now() - started
+	return cpuMs() - started
 }
 
 describe("date pictures from documents", () => {

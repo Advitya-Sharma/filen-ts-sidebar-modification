@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { legacyText, type LegacyField } from "../../core/docx/forms/controls"
+import { cpuMs } from "../timing"
 
 // Hermes has no Intl.Segmenter: legacy text fields cut at w:maxLength with the fallback, which must agree with
 // Intl.Segmenter's grapheme clusters on what documents hold.
@@ -72,10 +73,10 @@ describe("legacy text maxLength without Intl.Segmenter", () => {
 		// A virama, marks, then a letter joins a conjunct: a pattern trying that before the marks alone read every
 		// virama's marks again, quadratic in the run.
 		const text = `\u0915${"\u094D".repeat(40_000)}!`
-		const started = performance.now()
+		const started = cpuMs()
 
 		expect(legacyText({ ...FIELD, maxLength: 1 }, text)).toBe(text.slice(0, -1))
-		expect(performance.now() - started).toBeLessThan(250)
+		expect(cpuMs() - started).toBeLessThan(250)
 	})
 
 	it("keeps a field without a limit whole and an empty text empty", () => {

@@ -7,6 +7,7 @@ import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 import { runEditScript } from "./docxWriteFixtures"
 import { buildDocx } from "./docxSynthetic"
+import { cpuMs } from "./timing"
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "08-large-300p.docx")
 const TARIFF = join(CORPUS_DIR, "docx", "govuk__Tariff_of_the_United_Kingdom_v1.34.docx")
@@ -158,19 +159,19 @@ describe("docx writer performance: people", () => {
 		'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w15:people xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">' +
 		`<w15:person w15:author="${author}"/></w15:people>`
 
-	// The fastest of a few saves after an edit, the person named first thing in the body or by nothing.
+	// The least CPU time of a few saves after an edit (other processes' scheduling is not the writer's cost), the person named first thing in the body or by nothing.
 	async function fastest(people: string): Promise<number> {
 		const opened = await openBytes(buildDocx({ body: REVISION + PARAGRAPH.repeat(100_000), people }))
 		const session = new DocxEditorSession(opened.context)
 		let best = Infinity
 
-		for (let k = 0; k < 3; k++) {
+		for (let k = 0; k < 4; k++) {
 			session.dispatch(session.state.tr.insertText("x", 1))
 
-			const started = performance.now()
+			const started = cpuMs()
 
 			await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: [session] })
-			best = Math.min(best, performance.now() - started)
+			best = Math.min(best, cpuMs() - started)
 		}
 
 		return best

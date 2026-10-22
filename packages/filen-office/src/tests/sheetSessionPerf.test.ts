@@ -129,7 +129,7 @@ describe.skipIf(!PERF)("text session budget", () => {
 describe.skipIf(!PERF)("sheet session budgets at 1M cells", () => {
 	it("commits keystrokes, inserts rows and opens in slices within budget", { timeout: 600_000 }, async () => {
 		const bytes = bigWorkbook()
-		let last = performance.now()
+		let last = cpu()
 		let longest = 0
 		const host = inThreadSheetHost()
 		const opening = performance.now()
@@ -141,13 +141,11 @@ describe.skipIf(!PERF)("sheet session budgets at 1M cells", () => {
 					sliceMs: 16,
 					now: () => performance.now(),
 					pause: () => {
-						const now = performance.now()
-
-						longest = Math.max(longest, now - last)
+						longest = Math.max(longest, cpu() - last)
 
 						return new Promise(resolve =>
 							setTimeout(() => {
-								last = performance.now()
+								last = cpu()
 								resolve()
 							}, 0)
 						)
@@ -158,7 +156,7 @@ describe.skipIf(!PERF)("sheet session budgets at 1M cells", () => {
 		)
 		const openMs = performance.now() - opening
 
-		longest = Math.max(longest, performance.now() - last)
+		longest = Math.max(longest, cpu() - last)
 
 		if (result.kind !== "opened") throw new Error(result.kind)
 

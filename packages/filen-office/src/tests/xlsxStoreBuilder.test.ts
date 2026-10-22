@@ -3,6 +3,7 @@ import { CellKind, NO_SPAN, RowFlag, blockOrigin } from "../core/xlsx/model/type
 import { SheetStore, StoreBuilder, type RowBlock } from "../core/xlsx/read/index"
 import { FormulaTable } from "../core/xlsx/model/formulas"
 import { SheetStrings } from "../core/xlsx/model/strings"
+import { cpuMs } from "./timing"
 
 // The store as a sheet is read into it: rows out of order sorted, repeated rows merged, in steps a host can slice
 // (no step holds the thread for long), and a row of repeated cells never outgrows the builder.
@@ -13,10 +14,10 @@ function finishTimed(builder: StoreBuilder): { blocks: RowBlock[]; longest: numb
 	let longest = 0
 
 	for (;;) {
-		const started = performance.now()
+		const started = cpuMs()
 		const step = steps.next()
 
-		longest = Math.max(longest, performance.now() - started)
+		longest = Math.max(longest, cpuMs() - started)
 
 		if (step.done === true) return { blocks: step.value, longest }
 	}

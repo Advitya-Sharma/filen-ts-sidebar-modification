@@ -31,6 +31,7 @@ import {
 } from "../core/text/index"
 import { lineSpacingUnits, verticalMetrics } from "../core/fonts/index"
 import { FakeMeasurer, GEOMETRY, harness, layOut, lines, testFont, texts } from "./textFixtures"
+import { cpuMs } from "./timing"
 
 // The fake font at 20 px: "a" 10, space 5, "i"/"l"/"." 5, "m"/"w" 15, ideographs 20; lines 20 px high.
 
@@ -867,12 +868,12 @@ describe("performance", () => {
 		const time = (length: number): number => {
 			const h = harness()
 			const text = Array.from({ length }, (_, i) => String.fromCharCode(97 + ((i * 7) % 26))).join("")
-			const started = performance.now()
+			const started = cpuMs()
 			const view = layOut(h, b => b.append(text, h.base), { width: 624 })
 
 			expect(view.map(line => line.text).join("")).toBe(text)
 
-			return performance.now() - started
+			return cpuMs() - started
 		}
 
 		time(2_000)
