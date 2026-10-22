@@ -561,19 +561,6 @@ export async function sortRange(
 			return []
 		}
 	}
-	const moved = (logged: number): boolean => {
-		const row = results.rows[logged] ?? 0
-		const col = results.cols[logged] ?? 0
-
-		if (results.sheets[logged] !== sheet || row < area.startRow || row > area.endRow || col < area.startCol || col > area.endCol)
-			return false
-
-		return movedLines.has(rows ? row - firstLine : col - firstLine)
-	}
-	const movedLines = new Set<number>()
-
-	for (let k = 0; k < moves.length; k += 2) movedLines.add(moves[k] ?? 0)
-
 	// What the moves made the formula engine recalculate (dependents anywhere, moved formulas included): logged, so
 	// undo and redo put the results back as they were rather than working them out again.
 	const results = new CellLog()
@@ -624,12 +611,13 @@ export async function sortRange(
 				document.workbook.changes.sheetRows(sheet)
 			}
 
-			// The moved cells came back with the store; every other recalculated cell is put back as it was.
+			// The sheet's cells came back with the store (only moves log results), shared formulas the sort unshared
+			// outside the range too, which the log holds unshared; other sheets' recalculated cells are put back.
 			for (let i = results.size - 1; i >= 0; i--) {
 				const state = results.before[i]
+				const at = results.sheets[i] ?? 0
 
-				if (state !== undefined && !moved(i))
-					document.restoreCell(results.sheets[i] ?? 0, results.rows[i] ?? 0, results.cols[i] ?? 0, state)
+				if (state !== undefined && at !== sheet) document.restoreCell(at, results.rows[i] ?? 0, results.cols[i] ?? 0, state)
 			}
 
 			await syncEngine()

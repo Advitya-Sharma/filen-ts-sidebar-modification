@@ -1,10 +1,14 @@
+import { existsSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { unzipSync, zipSync } from "fflate"
 import { describe, expect, it } from "vitest"
 import { bytesSource } from "../core/opc/index"
 import { openXlsxSession } from "../core/sheet/commands"
 import type { SheetCommandResult, SheetTile } from "../core/sheet/protocol"
 import { encodeUtf8 } from "../core/xml/index"
+import { CORPUS_DIR } from "./corpusDir"
 import { fixtureBytes } from "./fuzz/sheet/fixtures"
+import { isFinding, runSequence, type FuzzMode } from "./fuzz/sheet/harness"
 import { R, SML, buildFixture, equalBytes } from "./xlsxWriteFixtures"
 import { ZIP_ENTRY_TIME } from "./zipTime"
 
@@ -269,4 +273,24 @@ describe("sheet fuzz regressions", () => {
 		expect(entry(tiles[0] as SheetTile, 0, 1)).toBe("2|=VLOOKUP(A1,$D:$E,2,0)")
 		session.close()
 	})
+})
+
+// Corpus sequences, run when the corpus is fetched: two URL links on a sheet whose root binds no relationships
+// prefix, then a save; a sort over a shared formula reaching outside its rows, then undoing everything.
+const CORPUS_SEQUENCES: readonly { readonly file: string; readonly seed: number; readonly mode: FuzzMode }[] = [
+	{ file: "xlsx/lo__tdf137734.xlsx", seed: 54, mode: "sync" },
+	{ file: "xlsx/poi__45544.xlsx", seed: 60, mode: "race" },
+	{ file: "xlsx/poi__45540_classic_Header.xlsx", seed: 60, mode: "race" }
+]
+
+describe("sheet fuzz corpus sequences", () => {
+	for (const { file, seed, mode } of CORPUS_SEQUENCES) {
+		const path = join(CORPUS_DIR, file)
+
+		it.skipIf(!existsSync(path))(`${file}, seed ${String(seed)}, ${mode}`, { timeout: 60_000 }, async () => {
+			const result = await runSequence(new Uint8Array(readFileSync(path)), "xlsx", file, seed, mode)
+
+			expect(isFinding(result) ? JSON.stringify(result).slice(0, 3000) : "").toBe("")
+		})
+	}
 })

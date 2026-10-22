@@ -265,6 +265,47 @@ describe("sort.apply", () => {
 		opened.session.close()
 	})
 
+	it("undoes to the source a shared formula reaching from outside the sorted rows into them", async () => {
+		// B1:B5 one shared formula reading the first sorted value; A3:B5 sorted, B1 and B2 left where they are.
+		const opened = await open({
+			sheets: [
+				{
+					name: "Data",
+					body:
+						'<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f t="shared" ref="B1:B5" si="0">A1+A$3</f><v>4</v></c></row>' +
+						'<row r="2"><c r="A2"><v>2</v></c><c r="B2"><f t="shared" si="0"/><v>5</v></c></row>' +
+						'<row r="3"><c r="A3"><v>3</v></c><c r="B3"><f t="shared" si="0"/><v>6</v></c></row>' +
+						'<row r="4"><c r="A4"><v>5</v></c><c r="B4"><f t="shared" si="0"/><v>8</v></c></row>' +
+						'<row r="5"><c r="A5"><v>4</v></c><c r="B5"><f t="shared" si="0"/><v>7</v></c></row></sheetData>'
+				}
+			]
+		})
+		const sheet = opened.info.sheets[0]!.id
+
+		ok(
+			await opened.session.command({
+				type: "sort.apply",
+				sheet,
+				range: { startRow: 2, startCol: 0, endRow: 4, endCol: 1 },
+				orientation: "rows",
+				header: false,
+				caseSensitive: false,
+				keys: [{ index: 0, descending: true }]
+			})
+		)
+		expect(column(await texts(opened), 1, 0, 1)).toEqual(["6", "7"])
+
+		ok(await opened.session.undo())
+		expect(parts(await savedBytes(opened.session))["xl/worksheets/sheet1.xml"]).toBe(parts(opened.bytes)["xl/worksheets/sheet1.xml"])
+		expect(column(await texts(opened), 1, 0, 4)).toEqual(["4", "5", "6", "8", "7"])
+
+		ok(await opened.session.redo())
+		expect(column(await texts(opened), 1, 0, 1)).toEqual(["6", "7"])
+		ok(await opened.session.undo())
+		expect(parts(await savedBytes(opened.session))["xl/worksheets/sheet1.xml"]).toBe(parts(opened.bytes)["xl/worksheets/sheet1.xml"])
+		opened.session.close()
+	})
+
 	it("undoes to the source after columns are inserted and cells edited past it", async () => {
 		const opened = await open(TABLE)
 		const sheet = opened.info.sheets[0]!.id

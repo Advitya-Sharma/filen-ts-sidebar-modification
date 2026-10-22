@@ -96,25 +96,31 @@ export function copyName(document: XlsxDocument, base: string): string {
 }
 
 // Relationship ids in markup remapped: every attribute in the relationships namespace (and VML's o:relid) whose
-// value is an old id.
+// value is an old id. `prefixes` are the root's; those the markup binds on its own elements (a link or drawing an
+// edit added to a root that binds none) count too.
 function remapIds(markup: string, ids: ReadonlyMap<string, string>, prefixes: readonly string[]): string {
 	if (ids.size === 0) return markup
 
-	const names = [...prefixes.map(prefix => `${prefix}:[A-Za-z]+`), "o:relid"].join("|")
+	const names = [...new Set([...prefixes, ...relationshipPrefixes(markup)])].map(prefix => `${prefix.replaceAll(".", "\\.")}:[A-Za-z]+`)
 
-	return markup.replace(new RegExp(`(\\s(?:${names})\\s*=\\s*")([^"]*)(")`, "g"), (whole, open: string, value: string, close: string) => {
-		const next = ids.get(value)
+	names.push("o:relid")
 
-		return next === undefined ? whole : `${open}${next}${close}`
-	})
+	return markup.replace(
+		new RegExp(`(\\s(?:${names.join("|")})\\s*=\\s*(["']))(.*?)(\\2)`, "g"),
+		(whole, open: string, _quote: string, value: string, close: string) => {
+			const next = ids.get(value)
+
+			return next === undefined ? whole : `${open}${next}${close}`
+		}
+	)
 }
 
-// The prefixes a root's start tag binds to the relationships namespace.
+// The prefixes a start tag (or markup) binds to the relationships namespace.
 function relationshipPrefixes(rootTag: string): string[] {
 	const out: string[] = []
 
-	for (const match of rootTag.matchAll(/\sxmlns:([A-Za-z_][\w.-]*)\s*=\s*"([^"]*)"/g))
-		if (RELATIONSHIPS_NS.includes(match[2] ?? "")) out.push(match[1] ?? "")
+	for (const match of rootTag.matchAll(/\sxmlns:([A-Za-z_][\w.-]*)\s*=\s*(["'])(.*?)\2/g))
+		if (RELATIONSHIPS_NS.includes(match[3] ?? "")) out.push(match[1] ?? "")
 
 	return out
 }

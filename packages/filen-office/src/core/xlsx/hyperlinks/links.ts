@@ -25,7 +25,8 @@ export interface LinksSection {
 	readonly open: string
 	readonly close: string
 	readonly prefix: string
-	// The prefix the links' relationship ids carry ("r" as Excel writes them), null when none does.
+	// The prefix the links' relationship ids carry ("r" as Excel writes them) where the section or the root declares
+	// it, null when no link's is (a link added then declares the prefix on itself).
 	readonly relationshipPrefix: string | null
 	readonly links: readonly LinkEntry[]
 }
@@ -80,7 +81,12 @@ export function readLinks(occurrences: readonly string[]): LinksSection | null {
 				const id = attribute(document, node, "id")
 				const range = parseRangeRef(document.attribute(node, "ref") ?? "")
 
-				if (id !== null) relationshipPrefix ??= id.name.slice(0, id.name.indexOf(":"))
+				// A prefix the link declares itself is not in scope for its siblings (Namespaces in XML 1.0 §6.1).
+				if (id !== null && relationshipPrefix === null) {
+					const own = id.name.slice(0, id.name.indexOf(":"))
+
+					if (document.attribute(node, `xmlns:${own}`) === undefined) relationshipPrefix = own
+				}
 
 				const text = (local: string): string | null => {
 					const value = document.attribute(node, local)

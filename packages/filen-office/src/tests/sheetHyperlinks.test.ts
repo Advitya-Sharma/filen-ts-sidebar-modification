@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { CellFlag } from "../core/sheet/protocol"
 import { hyperlinkArguments, stringLiteral } from "../core/xlsx/hyperlinks/location"
 import { subtract } from "../core/xlsx/hyperlinks/links"
-import { buildFixture, firstTile, savedBytes, tileEntry } from "./sheetSessionFixtures"
+import { SML, buildFixture, firstTile, savedBytes, tileEntry } from "./sheetSessionFixtures"
 import { changeOf, entries, openAnnotated, range, refusalOf } from "./sheetNotesFixtures"
 
 // Hyperlinks: their flag, where they go (external targets, places in the workbook, HYPERLINK formulas), and their
@@ -204,6 +204,49 @@ describe("hyperlinks", () => {
 		changeOf(await session.undo())
 		changeOf(await session.undo())
 		expect(await savedBytes(session)).toEqual(LINKS)
+		session.close()
+	})
+
+	it("declares the relationships prefix for every link it adds to a sheet whose root does not", async () => {
+		const bare = buildFixture({
+			sheets: [
+				{
+					name: "One",
+					xml: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="${SML}"><sheetData/></worksheet>`
+				}
+			]
+		})
+		const { session, sheets } = await openAnnotated(bare)
+		const sheet = sheets[0] ?? 0
+
+		for (const row of [0, 2, 4])
+			changeOf(
+				await session.command({
+					type: "link.set",
+					sheet,
+					ranges: [range(row, 2)],
+					target: { url: `https://filen.io/${String(row)}` }
+				})
+			)
+
+		const sheetXml = entries(await savedBytes(session))["xl/worksheets/sheet1.xml"] ?? ""
+		const links = [...sheetXml.matchAll(/<hyperlink [^>]*\/>/g)].map(match => match[0])
+
+		expect(links).toHaveLength(3)
+
+		for (const link of links) expect(link).toContain(`xmlns:r="${R}" r:id="`)
+
+		changeOf(await session.command({ type: "link.remove", sheet, ranges: [range(0, 2)] }))
+		changeOf(await session.command({ type: "sheet.duplicate", sheet }))
+
+		const files = entries(await savedBytes(session))
+		const copyIds = new Set([...(files["xl/worksheets/_rels/sheet2.xml.rels"] ?? "").matchAll(/Id="(rId\d+)"/g)].map(match => match[1]))
+		const copyLinks = [...(files["xl/worksheets/sheet2.xml"] ?? "").matchAll(/<hyperlink [^>]*r:id="(rId\d+)"/g)].map(match => match[1])
+
+		expect(copyLinks).toHaveLength(2)
+
+		for (const id of copyLinks) expect(copyIds.has(id)).toBe(true)
+
 		session.close()
 	})
 
